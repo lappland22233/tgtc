@@ -584,6 +584,17 @@
                 </div>
                 <button class="btn btn-success" onclick="unbanIP()">✅ 解封 IP</button>
 
+                <h2 style="margin-top: 30px;">🗑 按路径删除</h2>
+                <div class="form-group">
+                    <label>文件路径</label>
+                    <input type="text" id="deleteByPathInput" placeholder="输入要删除的文件路径">
+                </div>
+                <div class="form-group">
+                    <label>删除原因（必填）</label>
+                    <input type="text" id="deleteByPathReason" placeholder="删除原因，用户访问时会看到此说明">
+                </div>
+                <button class="btn btn-danger" onclick="deleteByPath()">🗑️ 按路径删除</button>
+
                 <h2 style="margin-top: 30px;">📋 已封禁列表</h2>
                 <div class="banned-list" id="bannedList">
                     <div class="loading">加载中</div>
@@ -690,6 +701,7 @@
                         <table class="file-table">
                             <thead>
                                 <tr>
+                                    <th>预览</th>
                                     <th>文件信息</th>
                                     <th>上传IP</th>
                                     <th>创建时间</th>
@@ -700,14 +712,19 @@
                             <tbody>
                                 ${data.files.map(file => `
                                     <tr>
-                                        <td>
-                                            <div class="file-path">${file.random_path}</div>
-                                            <div class="file-info">
-                                                ${file.file_name || '未知文件名'} |
-                                                ${(file.file_size / 1024).toFixed(2)} KB |
-                                                ${file.mime_type || '未知类型'}
-                                            </div>
-                                        </td>
+                                            <td style="width:100px;">
+                                                ${file.mime_type && file.mime_type.startsWith('image/') ? `
+                                                    <img src="/${file.random_path}" alt="thumb" style="max-width:90px;max-height:70px;border-radius:6px;object-fit:cover;">` : `
+                                                    <div style="width:90px;height:70px;display:flex;align-items:center;justify-content:center;background:#f5f5f5;border-radius:6px;color:#999;font-size:12px;">预览</div>`}
+                                            </td>
+                                            <td>
+                                                <div class="file-path">${file.random_path}</div>
+                                                <div class="file-info">
+                                                    ${file.file_name || '未知文件名'} |
+                                                    ${(file.file_size / 1024).toFixed(2)} KB |
+                                                    ${file.mime_type || '未知类型'}
+                                                </div>
+                                            </td>
                                         <td>
                                             <span class="ip-tag">${file.upload_ip || '-'}</span>
                                         </td>
@@ -939,6 +956,42 @@
                 }
             } catch (error) {
                 console.error('删除失败:', error);
+                showMessage('网络错误，请稍后重试', 'error');
+            }
+        }
+
+        // 按路径删除（侧栏输入）
+        async function deleteByPath() {
+            const path = document.getElementById('deleteByPathInput').value.trim();
+            const reason = document.getElementById('deleteByPathReason').value.trim();
+            if (!path) {
+                showMessage('请输入要删除的文件路径', 'error');
+                return;
+            }
+            if (!reason) {
+                showMessage('请输入删除原因', 'error');
+                return;
+            }
+            if (!confirm(`确定要删除文件 ${path} 吗？此操作不可撤销。`)) return;
+
+            try {
+                const response = await fetch('/api/delete', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ path, reason })
+                });
+                const data = await response.json();
+                if (data.success) {
+                    showMessage('文件删除成功', 'success');
+                    document.getElementById('deleteByPathInput').value = '';
+                    document.getElementById('deleteByPathReason').value = '';
+                    loadFiles();
+                    loadStats();
+                } else {
+                    showMessage(data.message || '删除失败', 'error');
+                }
+            } catch (e) {
+                console.error('按路径删除失败', e);
                 showMessage('网络错误，请稍后重试', 'error');
             }
         }

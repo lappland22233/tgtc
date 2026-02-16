@@ -285,7 +285,8 @@ func fetchHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var fileID, mimeType, fileName, status, deleteReason string
+	var fileID, mimeType, fileName, status string
+	var deleteReason sql.NullString
 	var expire time.Time
 
 	// 查询文件信息（FOR UPDATE 行锁）
@@ -310,14 +311,15 @@ func fetchHandler(w http.ResponseWriter, r *http.Request) {
 
 	if status == "deleted" {
 		_ = tx.Rollback()
-		if strings.TrimSpace(deleteReason) == "" {
-			deleteReason = "文件已被管理员删除"
+		reason := "文件已被管理员删除"
+		if deleteReason.Valid && strings.TrimSpace(deleteReason.String) != "" {
+			reason = deleteReason.String
 		}
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.WriteHeader(http.StatusGone)
 		_ = json.NewEncoder(w).Encode(map[string]string{
 			"error":  "deleted",
-			"reason": deleteReason,
+			"reason": reason,
 		})
 		return
 	}
