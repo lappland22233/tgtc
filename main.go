@@ -126,7 +126,8 @@ func adminAuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		username, password, ok := r.BasicAuth()
 		if !ok {
-			http.NotFound(w, r)
+			w.Header().Set("WWW-Authenticate", `Basic realm="Admin"`)
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
 
