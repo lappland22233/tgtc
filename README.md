@@ -81,28 +81,18 @@ init-db.bat
 ```
 
 4. **修改管理员密码**
-编辑 `admin/auth.go`:
-```go
-AdminUsername = "admin"
-AdminPassword = "your-strong-password"  // ⚠️ 务必修改
-```
+编辑 `main.go` 中的默认凭据（`adminUser` / `adminPass`），并重新编译。
 
-5. **编译程序**
+5. **编译并运行程序（推荐统一脚本）**
 ```bash
-# Linux/Mac
-./build-with-admin.sh
+# 启动（含编译）
+bash manage.sh start
 
-# Windows
-build-with-admin.bat
+# 停止
+bash manage.sh stop
 
-# 或手动编译
-go build -o tg-imagebed
-```
-
-6. **运行程序**
-```bash
-./tg-imagebed          # Linux/Mac
-tg-imagebed.exe        # Windows
+# 重启
+bash manage.sh restart
 ```
 
 ### 访问服务
@@ -167,9 +157,9 @@ Content-Type: application/json
 
 ## 🔐 安全建议
 
-1. ✅ **修改默认密码** - 编辑 `admin/auth.go`
-2. 🔒 **使用HTTPS** - 配置Nginx反向代理
-3. 🛡️ **启用IP白名单** - 限制管理后台访问
+1. ✅ **修改默认密码** - 编辑 `main.go` 中 `adminUser` / `adminPass`
+2. 🙈 **隐藏管理端** - 未登录访问会直接返回 404
+3. 🔒 **使用HTTPS** - 配置Nginx反向代理
 4. 💾 **定期备份** - 备份数据库和配置
 5. 📊 **监控日志** - 定期查看访问日志
 
@@ -180,7 +170,7 @@ tg-imagebed/
 ├── admin/                    # 后台管理模块
 │   ├── index.html           # 前端界面
 │   ├── api.go              # API接口
-│   ├── auth.go             # 认证中间件
+│   ├── auth.go             # 兼容占位（认证已并入 main.go）
 │   └── README.md           # 模块文档
 ├── bot/                     # Python Bot版本
 │   ├── bot.py
@@ -194,7 +184,10 @@ tg-imagebed/
 ├── go.mod                   # Go模块配置
 ├── data.json.example        # 配置文件模板
 ├── init-db.sh               # 数据库初始化脚本
-├── build-with-admin.sh      # 编译脚本
+├── manage.sh                # 统一管理脚本（启动/停止/重启等）
+├── start.sh                 # start 快捷入口
+├── stop.sh                  # stop 快捷入口
+├── restart.sh               # restart 快捷入口
 └── README.md                # 本文件
 ```
 
@@ -274,7 +267,7 @@ MIT License
 
 ### 后台管理快速使用
 
-1. 修改 `admin/auth.go` 中默认账号密码（务必修改）。
+1. 修改 `main.go` 中默认账号密码（`adminUser` / `adminPass`，务必修改）。
 2. 编译并启动服务：`go build -o tg-imagebed && ./tg-imagebed`。
 3. 访问后台：`http://localhost:8080/admin.html`。
 4. 常用接口：`/api/stats`、`/api/files`、`/api/ban`、`/api/unban`、`/api/delete`。

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -60,6 +61,8 @@ var (
 	db          *sql.DB
 	adminIDs    map[int64]bool
 	tgChannelID int64
+	adminUser   = "admin"
+	adminPass   = "changeme123"
 )
 
 // ======================================================
@@ -71,7 +74,7 @@ func main() {
 	}
 
 	// 初始化管理员认证
-	admin.InitAdminAuth()
+	initAdminAuth()
 
 	if err := os.MkdirAll(CacheDir, 0755); err != nil {
 		log.Fatalf("创建缓存目录失败: %v", err)
@@ -88,15 +91,15 @@ func main() {
 	mux.HandleFunc("/", fetchHandler)
 
 	// 管理后台 API 路由（使用 Basic Auth 认证）
-	mux.HandleFunc("/admin.html", admin.BasicAuthMiddleware(func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/admin.html", adminAuthMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFile(w, r, "admin/index.html")
 	}))
-	mux.HandleFunc("/api/stats", admin.BasicAuthMiddleware(admin.StatsHandler(db)))
-	mux.HandleFunc("/api/files", admin.BasicAuthMiddleware(admin.FilesHandler(db)))
-	mux.HandleFunc("/api/banned", admin.BasicAuthMiddleware(admin.BannedListHandler(db)))
-	mux.HandleFunc("/api/ban", admin.BasicAuthMiddleware(admin.BanHandler(db)))
-	mux.HandleFunc("/api/unban", admin.BasicAuthMiddleware(admin.UnbanHandler(db)))
-	mux.HandleFunc("/api/delete", admin.BasicAuthMiddleware(admin.DeleteHandler(db)))
+	mux.HandleFunc("/api/stats", adminAuthMiddleware(admin.StatsHandler(db)))
+	mux.HandleFunc("/api/files", adminAuthMiddleware(admin.FilesHandler(db)))
+	mux.HandleFunc("/api/banned", adminAuthMiddleware(admin.BannedListHandler(db)))
+	mux.HandleFunc("/api/ban", adminAuthMiddleware(admin.BanHandler(db)))
+	mux.HandleFunc("/api/unban", adminAuthMiddleware(admin.UnbanHandler(db)))
+	mux.HandleFunc("/api/delete", adminAuthMiddleware(admin.DeleteHandler(db)))
 
 	srv := &http.Server{
 		Addr:         ListenAddr,
@@ -111,6 +114,33 @@ func main() {
 	log.Printf("最大上传: %d MB", MaxUpload>>20)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
+	}
+}
+
+func initAdminAuth() {
+	log.Printf("[认证] 管理员认证已启用（用户名: %s）", adminUser)
+	log.Printf("[安全提示] 请确保修改默认后台密码")
+}
+
+func adminAuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		username, password, ok := r.BasicAuth()
+		if !ok {
+			w.Header().Set("WWW-Authenticate", `Basic realm="Admin"`)
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		usernameValid := subtle.ConstantTimeCompare([]byte(username), []byte(adminUser)) == 1
+		passwordValid := subtle.ConstantTimeCompare([]byte(password), []byte(adminPass)) == 1
+		if !usernameValid || !passwordValid {
+			log.Printf("[认证] 后台访问失败 from %s", r.RemoteAddr)
+			http.NotFound(w, r)
+			return
+		}
+
+		log.Printf("[认证] 后台访问成功: %s from %s", username, r.RemoteAddr)
+		next(w, r)
 	}
 }
 
