@@ -603,12 +603,12 @@
 
             <div class="content-panel">
                 <div class="tabs">
-                    <button class="tab active" onclick="switchTab('all')">全部文件</button>
-                    <button class="tab" onclick="switchTab('ip')">IP 搜索</button>
+                    <button class="tab active" onclick="switchTab('all', this)">全部文件</button>
+                    <button class="tab" onclick="switchTab('search', this)">搜索</button>
                 </div>
 
                 <div id="searchBox" class="search-box" style="display: none;">
-                    <input type="text" id="searchIP" placeholder="输入 IP 地址搜索上传历史">
+                    <input type="text" id="searchInput" placeholder="输入 IP / 文件名 / 路径关键词">
                     <button onclick="searchByIP()">🔍 搜索</button>
                 </div>
 
@@ -654,24 +654,47 @@
         });
 
         // 切换标签
-        function switchTab(tab) {
+        function switchTab(tab, tabEl) {
             currentTab = tab;
             currentPage = 1;
             searchQuery = '';
 
             document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-            event.target.classList.add('active');
+            if (tabEl) {
+                tabEl.classList.add('active');
+            }
 
-            document.getElementById('searchBox').style.display = tab === 'ip' ? 'flex' : 'none';
+            const searchInput = document.getElementById('searchInput');
+            if (searchInput) {
+                searchInput.value = '';
+            }
+
+            document.getElementById('searchBox').style.display = tab === 'search' ? 'flex' : 'none';
 
             loadFiles();
+        }
+
+        async function requestJSON(url, options = {}) {
+            const response = await fetch(url, options);
+            let data = {};
+            try {
+                data = await response.json();
+            } catch (_) {
+                // 忽略非 JSON 返回，使用通用错误信息
+            }
+
+            if (!response.ok) {
+                const message = data.message || data.error || `请求失败（${response.status}）`;
+                throw new Error(message);
+            }
+
+            return data;
         }
 
         // 加载统计信息
         async function loadStats() {
             try {
-                const response = await fetch('/api/stats');
-                const data = await response.json();
+                const data = await requestJSON('/api/stats');
 
                 document.getElementById('totalFiles').textContent = data.total_files || 0;
                 document.getElementById('todayUploads').textContent = data.today_uploads || 0;
@@ -689,12 +712,11 @@
 
             try {
                 let url = `/api/files?page=${currentPage}`;
-                if (currentTab === 'ip' && searchQuery) {
-                    url += `&ip=${encodeURIComponent(searchQuery)}`;
+                if (currentTab === 'search' && searchQuery) {
+                    url += `&q=${encodeURIComponent(searchQuery)}`;
                 }
 
-                const response = await fetch(url);
-                const data = await response.json();
+                const data = await requestJSON(url);
 
                 if (data.files && data.files.length > 0) {
                     fileList.innerHTML = `
@@ -781,10 +803,16 @@
 
         // 搜索IP
         function searchByIP() {
-            searchQuery = document.getElementById('searchIP').value.trim();
+            searchQuery = document.getElementById('searchInput').value.trim();
             currentPage = 1;
             loadFiles();
         }
+
+        document.getElementById('searchInput').addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                searchByIP();
+            }
+        });
 
         // 切换页面
         function changePage(delta) {
@@ -798,8 +826,7 @@
             bannedList.innerHTML = '<div class="loading">加载中</div>';
 
             try {
-                const response = await fetch('/api/banned');
-                const data = await response.json();
+                const data = await requestJSON('/api/banned');
 
                 if (data.banned_ips && data.banned_ips.length > 0) {
                     bannedList.innerHTML = data.banned_ips.map(item => `
@@ -838,13 +865,11 @@
             }
 
             try {
-                const response = await fetch('/api/ban', {
+                const data = await requestJSON('/api/ban', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ ip: ipValue, reason: reason })
                 });
-
-                const data = await response.json();
 
                 if (data.success) {
                     showMessage(data.message || '封禁成功', 'success');
@@ -886,13 +911,11 @@
             }
 
             try {
-                const response = await fetch('/api/unban', {
+                const data = await requestJSON('/api/unban', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ ip: ipValue })
                 });
-
-                const data = await response.json();
 
                 if (data.success) {
                     showMessage(data.message || '解封成功', 'success');
@@ -938,13 +961,11 @@
             }
 
             try {
-                const response = await fetch('/api/delete', {
+                const data = await requestJSON('/api/delete', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ path: pendingDeletePath, reason })
                 });
-
-                const data = await response.json();
 
                 if (data.success) {
                     showMessage('文件删除成功', 'success');
@@ -975,12 +996,11 @@
             if (!confirm(`确定要删除文件 ${path} 吗？此操作不可撤销。`)) return;
 
             try {
-                const response = await fetch('/api/delete', {
+                const data = await requestJSON('/api/delete', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ path, reason })
                 });
-                const data = await response.json();
                 if (data.success) {
                     showMessage('文件删除成功', 'success');
                     document.getElementById('deleteByPathInput').value = '';
