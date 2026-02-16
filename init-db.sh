@@ -1,24 +1,55 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-# TG 图床数据库初始化脚本
+# TG 图床数据库初始化与迁移脚本（保留历史数据）
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SQL_FILE="$SCRIPT_DIR/init_db.go.sql"
+CONFIG_FILE="$SCRIPT_DIR/data.json"
 
 echo "=========================================="
-echo "  TG 图床 - 数据库初始化"
+echo "  TG 图床 - 数据库初始化/迁移"
 echo "=========================================="
 echo ""
 
 # 检查配置文件
-if [ ! -f "data.json" ]; then
+if [ ! -f "$CONFIG_FILE" ]; then
     echo "[ERROR] 配置文件 data.json 不存在"
     exit 1
 fi
 
-# 读取配置
-DB_HOST=$(grep -oP '(?<= "host": ")[^"]*' data.json)
-DB_PORT=$(grep -oP '(?<= "port": )\d+' data.json)
-DB_USER=$(grep -oP '(?<= "username": ")[^"]*' data.json)
-DB_PASS=$(grep -oP '(?<= "password": ")[^"]*' data.json)
-DB_NAME=$(grep -oP '(?<= "database": ")[^"]*' data.json)
+# 检查 SQL 文件
+if [ ! -f "$SQL_FILE" ]; then
+    echo "[ERROR] 找不到 SQL 文件: $SQL_FILE"
+    exit 1
+fi
+
+# 读取配置（使用 Python 解析，避免 grep 解析 JSON 不稳定）
+readarray -t DB_CONF < <(python3 - "$CONFIG_FILE" <<'PY'
+import json, sys
+from pathlib import Path
+
+cfg = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
+mysql = cfg.get('mysql', {})
+print(mysql.get('host', 'localhost'))
+print(mysql.get('port', 3306))
+print(mysql.get('username', 'root'))
+print(mysql.get('password', ''))
+print(mysql.get('database', ''))
+PY
+)
+
+DB_HOST="${DB_CONF[0]}"
+DB_PORT="${DB_CONF[1]}"
+DB_USER="${DB_CONF[2]}"
+DB_PASS="${DB_CONF[3]}"
+DB_NAME="${DB_CONF[4]}"
+
+if [ -z "$DB_NAME" ]; then
+    echo "[ERROR] 配置缺失: mysql.database 不能为空"
+    exit 1
+fi
 
 echo "[INFO] 数据库配置:"
 echo "  主机: $DB_HOST"
@@ -27,62 +58,34 @@ echo "  用户: $DB_USER"
 echo "  数据库: $DB_NAME"
 echo ""
 
+MYSQL_CMD=(mysql -h"$DB_HOST" -P"$DB_PORT" -u"$DB_USER" -p"$DB_PASS")
+
 # 测试连接
-echo "[INFO] 测试数据库连接..."
-mysql -h"$DB_HOST" -P"$DB_PORT" -u"$DB_USER" -p"$DB_PASS" -e "SELECT 1;" 2>/dev/null
-if [ $? -ne 0 ]; then
+printf '[INFO] 测试数据库连接...\n'
+"${MYSQL_CMD[@]}" -e "SELECT 1;" >/dev/null 2>&1 || {
     echo "[ERROR] 数据库连接失败，请检查配置"
     exit 1
-fi
+}
 
 echo "[SUCCESS] 数据库连接成功"
 echo ""
 
-# 数据库已在外部创建，跳过创建步骤
-echo "[INFO] 数据库已存在，跳过创建"
+echo "[INFO] 执行表结构初始化与兼容迁移（幂等）..."
+"${MYSQL_CMD[@]}" "$DB_NAME" < "$SQL_FILE"
+
 echo ""
-
-# 检查表是否存在，如果不存在则创建
-echo "[INFO] 检查表结构..."
-TABLE_EXISTS=$(mysql -h"$DB_HOST" -P"$DB_PORT" -u"$DB_USER" -p"$DB_PASS" "$DB_NAME" -e "SHOW TABLES LIKE 'files';" 2>/dev/null | grep -c "files")
-
-if [ "$TABLE_EXISTS" -eq 0 ]; then
-    echo "[INFO] 表不存在，创建表结构..."
-    mysql -h"$DB_HOST" -P"$DB_PORT" -u"$DB_USER" -p"$DB_PASS" "$DB_NAME" < init_db.go.sql 2>&1 | grep -v "Using a password on the command line interface can be insecure"
-    if [ ${PIPESTATUS[0]} -eq 0 ]; then
-        echo "[SUCCESS] 表结构初始化完成"
-    else
-        echo "[ERROR] 表结构初始化失败"
+echo "[INFO] 验证关键字段..."
+for col in file_name delete_reason; do
+    EXISTS=$("${MYSQL_CMD[@]}" "$DB_NAME" -Nse "SHOW COLUMNS FROM files LIKE '$col';" | wc -l)
+    if [ "$EXISTS" -eq 0 ]; then
+        echo "[ERROR] 迁移后字段缺失: files.$col"
         exit 1
     fi
-else
-    echo "[INFO] 表已存在，检查字段..."
-
-    # 检查 file_name 字段是否存在
-    COLUMN_EXISTS=$(mysql -h"$DB_HOST" -P"$DB_PORT" -u"$DB_USER" -p"$DB_PASS" "$DB_NAME" -e "SHOW COLUMNS FROM files LIKE 'file_name';" 2>/dev/null | grep -c "file_name")
-
-    if [ "$COLUMN_EXISTS" -eq 0 ]; then
-        echo "[INFO] 添加 file_name 字段..."
-        mysql -h"$DB_HOST" -P"$DB_PORT" -u"$DB_USER" -p"$DB_PASS" "$DB_NAME" -e "ALTER TABLE files ADD COLUMN file_name VARCHAR(255) DEFAULT NULL AFTER file_size;" 2>/dev/null
-        echo "[SUCCESS] file_name 字段添加完成"
-    else
-        echo "[INFO] file_name 字段已存在"
-    fi
-
-    # 检查 delete_reason 字段是否存在
-    DELETE_REASON_EXISTS=$(mysql -h"$DB_HOST" -P"$DB_PORT" -u"$DB_USER" -p"$DB_PASS" "$DB_NAME" -e "SHOW COLUMNS FROM files LIKE 'delete_reason';" 2>/dev/null | grep -c "delete_reason")
-
-    if [ "$DELETE_REASON_EXISTS" -eq 0 ]; then
-        echo "[INFO] 添加 delete_reason 字段..."
-        mysql -h"$DB_HOST" -P"$DB_PORT" -u"$DB_USER" -p"$DB_PASS" "$DB_NAME" -e "ALTER TABLE files ADD COLUMN delete_reason VARCHAR(500) DEFAULT NULL AFTER status;" 2>/dev/null
-        echo "[SUCCESS] delete_reason 字段添加完成"
-    else
-        echo "[INFO] delete_reason 字段已存在"
-    fi
-fi
+    echo "[SUCCESS] 字段存在: files.$col"
+done
 
 echo ""
 echo "=========================================="
-echo "[SUCCESS] 数据库初始化完成"
+echo "[SUCCESS] 数据库初始化/迁移完成（数据保留）"
 echo "=========================================="
 echo ""
