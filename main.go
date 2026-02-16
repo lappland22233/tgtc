@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -20,8 +21,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"tg-imagebed/admin"
 
 	_ "github.com/go-sql-driver/mysql"
 )
@@ -56,10 +55,10 @@ type Config struct {
 }
 
 var (
-	config      *Config
-	db          *sql.DB
-	adminIDs    map[int64]bool
-	tgChannelID int64
+	config    *Config
+	db        *sql.DB
+	adminUser = "admin"
+	adminPass = "changeme123"
 )
 
 // ======================================================
@@ -70,8 +69,8 @@ func main() {
 		log.Fatalf("数据库初始化失败: %v", err)
 	}
 
-	// 初始化管理员认证
-	admin.InitAdminAuth()
+	log.Printf("[认证] 管理员认证已启用（用户名: %s）", adminUser)
+	log.Printf("[安全提示] 请尽快修改 main.go 中的默认管理密码")
 
 	if err := os.MkdirAll(CacheDir, 0755); err != nil {
 		log.Fatalf("创建缓存目录失败: %v", err)
@@ -88,15 +87,15 @@ func main() {
 	mux.HandleFunc("/", fetchHandler)
 
 	// 管理后台 API 路由（使用 Basic Auth 认证）
-	mux.HandleFunc("/admin.html", admin.BasicAuthMiddleware(func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/admin.html", adminAuthMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFile(w, r, "admin/index.html")
 	}))
-	mux.HandleFunc("/api/stats", admin.BasicAuthMiddleware(admin.StatsHandler(db)))
-	mux.HandleFunc("/api/files", admin.BasicAuthMiddleware(admin.FilesHandler(db)))
-	mux.HandleFunc("/api/banned", admin.BasicAuthMiddleware(admin.BannedListHandler(db)))
-	mux.HandleFunc("/api/ban", admin.BasicAuthMiddleware(admin.BanHandler(db)))
-	mux.HandleFunc("/api/unban", admin.BasicAuthMiddleware(admin.UnbanHandler(db)))
-	mux.HandleFunc("/api/delete", admin.BasicAuthMiddleware(admin.DeleteHandler(db)))
+	mux.HandleFunc("/api/stats", adminAuthMiddleware(statsHandler))
+	mux.HandleFunc("/api/files", adminAuthMiddleware(filesHandler))
+	mux.HandleFunc("/api/banned", adminAuthMiddleware(bannedListHandler))
+	mux.HandleFunc("/api/ban", adminAuthMiddleware(banHandler))
+	mux.HandleFunc("/api/unban", adminAuthMiddleware(unbanHandler))
+	mux.HandleFunc("/api/delete", adminAuthMiddleware(deleteHandler))
 
 	srv := &http.Server{
 		Addr:         ListenAddr,
@@ -378,6 +377,321 @@ func fetchHandler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("[访问] 成功: %s, 缓存: %s, 文件名: %s", path, cachePath, dispFilename)
 }
 
+// ================= 管理后台 =================
+
+type statsResponse struct {
+	TotalFiles   int     `json:"total_files"`
+	TodayUploads int     `json:"today_uploads"`
+	TodayAccess  int     `json:"today_access"`
+	CachedFiles  int     `json:"cached_files"`
+	BannedIPs    int     `json:"banned_ips"`
+	CacheHitRate float64 `json:"cache_hit_rate"`
+}
+
+type fileRecord struct {
+	ID             int    `json:"id"`
+	RandomPath     string `json:"random_path"`
+	FileID         string `json:"file_id"`
+	FileUniqueID   string `json:"file_unique_id"`
+	MimeType       string `json:"mime_type"`
+	FileSize       int    `json:"file_size"`
+	FileName       string `json:"file_name"`
+	UploadIP       string `json:"upload_ip"`
+	EdgeIP         string `json:"edge_ip"`
+	Status         string `json:"status"`
+	DeleteReason   string `json:"delete_reason"`
+	CreatedAt      string `json:"created_at"`
+	LastAccessedAt string `json:"last_accessed_at"`
+}
+
+type filesResponse struct {
+	Files       []fileRecord `json:"files"`
+	CurrentPage int          `json:"current_page"`
+	TotalPages  int          `json:"total_pages"`
+	TotalCount  int          `json:"total_count"`
+}
+
+type bannedIPRecord struct {
+	IP       string `json:"ip"`
+	BannedAt string `json:"banned_at"`
+	Reason   string `json:"reason"`
+}
+
+type apiResponse struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
+}
+
+type banRequest struct {
+	IP     string `json:"ip"`
+	Reason string `json:"reason"`
+}
+
+type deleteRequest struct {
+	Path   string `json:"path"`
+	Reason string `json:"reason"`
+}
+
+func adminAuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		username, password, ok := r.BasicAuth()
+		if !ok {
+			w.Header().Set("WWW-Authenticate", `Basic realm="TG图床后台管理"`)
+			http.Error(w, "需要认证", http.StatusUnauthorized)
+			return
+		}
+
+		usernameValid := subtle.ConstantTimeCompare([]byte(username), []byte(adminUser)) == 1
+		passwordValid := subtle.ConstantTimeCompare([]byte(password), []byte(adminPass)) == 1
+		if !usernameValid || !passwordValid {
+			log.Printf("[认证] 认证失败: %s from %s", username, r.RemoteAddr)
+			w.Header().Set("WWW-Authenticate", `Basic realm="TG图床后台管理"`)
+			http.Error(w, "认证失败", http.StatusUnauthorized)
+			return
+		}
+
+		next(w, r)
+	}
+}
+
+func statsHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	stats := statsResponse{}
+	_ = db.QueryRow(`SELECT COUNT(*) FROM files WHERE status = 'normal'`).Scan(&stats.TotalFiles)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM files WHERE DATE(created_at) = CURDATE() AND status = 'normal'`).Scan(&stats.TodayUploads)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM files WHERE DATE(last_accessed_at) = CURDATE() AND status = 'normal'`).Scan(&stats.TodayAccess)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM files WHERE cache_expires_at > NOW() AND status = 'normal'`).Scan(&stats.CachedFiles)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM banned_ips`).Scan(&stats.BannedIPs)
+
+	if stats.TotalFiles > 0 {
+		stats.CacheHitRate = float64(stats.CachedFiles) / float64(stats.TotalFiles) * 100
+		if stats.CacheHitRate > 100 {
+			stats.CacheHitRate = 100
+		}
+	}
+
+	_ = json.NewEncoder(w).Encode(stats)
+}
+
+func filesHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	if page < 1 {
+		page = 1
+	}
+	pageSize := 20
+	searchIP := strings.TrimSpace(r.URL.Query().Get("ip"))
+
+	resp := filesResponse{CurrentPage: page, Files: []fileRecord{}}
+	countQuery := "SELECT COUNT(*) FROM files WHERE 1=1"
+	countArgs := []interface{}{}
+	if searchIP != "" {
+		parsed := net.ParseIP(searchIP)
+		if parsed == nil {
+			http.Error(w, "invalid ip", http.StatusBadRequest)
+			return
+		}
+		countQuery += " AND upload_ip = ?"
+		countArgs = append(countArgs, ipToBin(parsed))
+	}
+
+	if err := db.QueryRow(countQuery, countArgs...).Scan(&resp.TotalCount); err != nil {
+		http.Error(w, "query failed", http.StatusInternalServerError)
+		return
+	}
+	if resp.TotalCount > 0 {
+		resp.TotalPages = (resp.TotalCount + pageSize - 1) / pageSize
+	}
+
+	query := `
+		SELECT id, random_path, file_id, file_unique_id, mime_type, file_size, file_name,
+		       upload_ip, edge_ip, status, delete_reason, created_at, last_accessed_at
+		FROM files
+		WHERE 1=1`
+	args := []interface{}{}
+	if searchIP != "" {
+		query += " AND upload_ip = ?"
+		args = append(args, ipToBin(net.ParseIP(searchIP)))
+	}
+	query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
+	args = append(args, pageSize, (page-1)*pageSize)
+
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		http.Error(w, "query failed", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var file fileRecord
+		var uploadIPBin, edgeIPBin []byte
+		err := rows.Scan(&file.ID, &file.RandomPath, &file.FileID, &file.FileUniqueID, &file.MimeType,
+			&file.FileSize, &file.FileName, &uploadIPBin, &edgeIPBin, &file.Status, &file.DeleteReason,
+			&file.CreatedAt, &file.LastAccessedAt)
+		if err != nil {
+			continue
+		}
+		if uploadIPBin != nil {
+			file.UploadIP = net.IP(uploadIPBin).String()
+		}
+		if edgeIPBin != nil {
+			file.EdgeIP = net.IP(edgeIPBin).String()
+		}
+		resp.Files = append(resp.Files, file)
+	}
+
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func bannedListHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	rows, err := db.Query(`SELECT ip, banned_at, reason FROM banned_ips ORDER BY banned_at DESC LIMIT 100`)
+	if err != nil {
+		http.Error(w, "query failed", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	out := struct {
+		BannedIPs []bannedIPRecord `json:"banned_ips"`
+	}{BannedIPs: []bannedIPRecord{}}
+
+	for rows.Next() {
+		var ipBin []byte
+		var bannedAt time.Time
+		var reason sql.NullString
+		if err := rows.Scan(&ipBin, &bannedAt, &reason); err != nil {
+			continue
+		}
+		record := bannedIPRecord{IP: net.IP(ipBin).String(), BannedAt: bannedAt.Format("2006-01-02 15:04:05")}
+		if reason.Valid {
+			record.Reason = reason.String
+		}
+		out.BannedIPs = append(out.BannedIPs, record)
+	}
+
+	_ = json.NewEncoder(w).Encode(out)
+}
+
+func banHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req banRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		_ = json.NewEncoder(w).Encode(apiResponse{Success: false, Message: "无效的请求格式"})
+		return
+	}
+	ip := net.ParseIP(req.IP)
+	if ip == nil {
+		_ = json.NewEncoder(w).Encode(apiResponse{Success: false, Message: "无效的IP地址格式"})
+		return
+	}
+
+	var exists bool
+	if err := db.QueryRow(`SELECT EXISTS(SELECT 1 FROM banned_ips WHERE ip = ?)`, ipToBin(ip)).Scan(&exists); err != nil {
+		_ = json.NewEncoder(w).Encode(apiResponse{Success: false, Message: "检查失败"})
+		return
+	}
+	if exists {
+		_ = json.NewEncoder(w).Encode(apiResponse{Success: false, Message: "该IP已被封禁"})
+		return
+	}
+
+	if _, err := db.Exec(`INSERT INTO banned_ips (ip, banned_at, reason) VALUES (?, NOW(), ?)`, ipToBin(ip), req.Reason); err != nil {
+		_ = json.NewEncoder(w).Encode(apiResponse{Success: false, Message: "封禁失败"})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(apiResponse{Success: true, Message: fmt.Sprintf("IP %s 已封禁", req.IP)})
+}
+
+func unbanHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		IP string `json:"ip"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		_ = json.NewEncoder(w).Encode(apiResponse{Success: false, Message: "无效的请求格式"})
+		return
+	}
+	ip := net.ParseIP(req.IP)
+	if ip == nil {
+		_ = json.NewEncoder(w).Encode(apiResponse{Success: false, Message: "无效的IP地址格式"})
+		return
+	}
+
+	result, err := db.Exec(`DELETE FROM banned_ips WHERE ip = ?`, ipToBin(ip))
+	if err != nil {
+		_ = json.NewEncoder(w).Encode(apiResponse{Success: false, Message: "解封失败"})
+		return
+	}
+	affected, _ := result.RowsAffected()
+	if affected == 0 {
+		_ = json.NewEncoder(w).Encode(apiResponse{Success: false, Message: "该IP不在封禁列表中"})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(apiResponse{Success: true, Message: fmt.Sprintf("IP %s 已解封", req.IP)})
+}
+
+func deleteHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req deleteRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		_ = json.NewEncoder(w).Encode(apiResponse{Success: false, Message: "无效的请求格式"})
+		return
+	}
+	if req.Path == "" {
+		_ = json.NewEncoder(w).Encode(apiResponse{Success: false, Message: "文件路径不能为空"})
+		return
+	}
+	req.Reason = strings.TrimSpace(req.Reason)
+	if req.Reason == "" {
+		_ = json.NewEncoder(w).Encode(apiResponse{Success: false, Message: "删除原因不能为空"})
+		return
+	}
+
+	result, err := db.Exec(`UPDATE files SET status = 'deleted', delete_reason = ? WHERE random_path = ? AND status = 'normal'`, req.Reason, req.Path)
+	if err != nil {
+		_ = json.NewEncoder(w).Encode(apiResponse{Success: false, Message: "删除失败"})
+		return
+	}
+	affected, _ := result.RowsAffected()
+	if affected == 0 {
+		_ = json.NewEncoder(w).Encode(apiResponse{Success: false, Message: "文件不存在或已被删除"})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(apiResponse{Success: true, Message: "文件已删除"})
+}
+
 // ================= 配置加载 =================
 
 func loadConfig() {
@@ -398,19 +712,11 @@ func loadConfig() {
 		log.Fatalf("配置文件格式错误: %v", err)
 	}
 
-	// 解析 Channel ID
-	tgChannelID, err = strconv.ParseInt(config.Telegram.ChannelID, 10, 64)
-	if err != nil {
+	if _, err := strconv.ParseInt(config.Telegram.ChannelID, 10, 64); err != nil {
 		log.Fatalf("无效的 Telegram Channel ID: %v", err)
 	}
 
-	// 初始化管理员ID集合
-	adminIDs = make(map[int64]bool)
-	for _, id := range config.Admin.UserIDs {
-		adminIDs[id] = true
-	}
-
-	log.Printf("配置加载成功, ChannelID: %d, 管理员数: %d", tgChannelID, len(adminIDs))
+	log.Printf("配置加载成功")
 }
 
 // ================= 数据库初始化 =================
