@@ -553,11 +553,26 @@ func filesHandler(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var file fileRecord
 		var uploadIPBin, edgeIPBin []byte
+		var fileName sql.NullString
+		var deleteReason sql.NullString
+		var createdAt time.Time
+		var lastAccessedAt sql.NullTime
+
 		err := rows.Scan(&file.ID, &file.RandomPath, &file.FileID, &file.FileUniqueID, &file.MimeType,
-			&file.FileSize, &file.FileName, &uploadIPBin, &edgeIPBin, &file.Status, &file.DeleteReason,
-			&file.CreatedAt, &file.LastAccessedAt)
+			&file.FileSize, &fileName, &uploadIPBin, &edgeIPBin, &file.Status, &deleteReason,
+			&createdAt, &lastAccessedAt)
 		if err != nil {
 			continue
+		}
+		if fileName.Valid {
+			file.FileName = fileName.String
+		}
+		if deleteReason.Valid {
+			file.DeleteReason = deleteReason.String
+		}
+		file.CreatedAt = createdAt.Format("2006-01-02 15:04:05")
+		if lastAccessedAt.Valid {
+			file.LastAccessedAt = lastAccessedAt.Time.Format("2006-01-02 15:04:05")
 		}
 		if uploadIPBin != nil {
 			file.UploadIP = net.IP(uploadIPBin).String()
