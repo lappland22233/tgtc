@@ -315,6 +315,30 @@ server {
 }
 ```
 
+
+### 统一管理脚本（推荐）
+
+已提供 `manage.sh` 统一管理以下操作：启动、停止、重启、依赖安装、数据库初始化/迁移、运行状态检查、数据包备份。
+
+```bash
+# 查看帮助
+bash manage.sh --help
+
+# 安装依赖
+bash manage.sh install-deps
+
+# 初始化/迁移数据库
+bash manage.sh init-db
+
+# 启动 / 停止 / 重启
+bash manage.sh start
+bash manage.sh stop
+bash manage.sh restart
+
+# 备份（配置 + 日志 + 可选数据库导出）
+bash manage.sh backup
+```
+
 ### 获取 Telegram 频道 ID
 
 1. 将机器人加入目标频道并授予发送消息权限。
@@ -330,6 +354,9 @@ server {
   - 优化：`init-db.sh` 改为使用 Python 解析 `data.json`，避免原正则解析 JSON 不稳定问题。
   - 优化：`init-db.sh` 增加 SQL 文件存在性检查、关键字段校验与幂等迁移执行。
   - 文档：将分散说明整合进主 README，并在此处持续记录新增功能与运维改动。
+  - 新增：`manage.sh` 统一管理脚本，整合启动/停止/重启/安装依赖/数据库初始化。
+  - 新增：`manage.sh backup` 数据包备份功能（配置、日志、可选数据库导出）。
+  - 修复：`init-db.sh` 始终读取脚本目录下的 `data.json`，避免跨目录执行误读配置。
 
 ## 🛡️ 保留数据迁移流程
 

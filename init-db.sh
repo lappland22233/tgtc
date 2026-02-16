@@ -26,11 +26,11 @@ if [ ! -f "$SQL_FILE" ]; then
 fi
 
 # 读取配置（使用 Python 解析，避免 grep 解析 JSON 不稳定）
-readarray -t DB_CONF < <(python3 - <<'PY'
-import json
+readarray -t DB_CONF < <(python3 - "$CONFIG_FILE" <<'PY'
+import json, sys
 from pathlib import Path
 
-cfg = json.loads(Path('data.json').read_text(encoding='utf-8'))
+cfg = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
 mysql = cfg.get('mysql', {})
 print(mysql.get('host', 'localhost'))
 print(mysql.get('port', 3306))
