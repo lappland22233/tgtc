@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS files (
     tg_user_id BIGINT DEFAULT NULL COMMENT 'Telegram 用户 ID',
     username VARCHAR(255) DEFAULT NULL COMMENT 'Telegram 用户名',
     status ENUM('normal', 'deleted') NOT NULL DEFAULT 'normal' COMMENT '状态',
+    delete_reason VARCHAR(500) DEFAULT NULL COMMENT '删除原因',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     last_accessed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '最后访问时间',
     cache_expires_at DATETIME NOT NULL DEFAULT (CURRENT_TIMESTAMP + INTERVAL 10 MINUTE) COMMENT '缓存过期时间',

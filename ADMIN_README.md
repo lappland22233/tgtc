@@ -16,6 +16,7 @@
    - 显示文件路径、大小、类型、上传IP等信息
    - 按IP搜索上传历史
    - 删除文件（软删除，标记为deleted状态）
+   - 删除时必须填写删除原因（用户访问被删文件会收到原因说明）
    - 在线预览文件
 
 3. **IP管理**
@@ -155,6 +156,7 @@ GET /api/files?page=1&ip=1.2.3.4
       "upload_ip": "1.2.3.4",
       "edge_ip": "5.6.7.8",
       "status": "normal",
+      "delete_reason": "",
       "created_at": "2024-01-01 12:00:00",
       "last_accessed_at": "2024-01-01 13:00:00"
     }
@@ -234,7 +236,8 @@ POST /api/delete
 Content-Type: application/json
 
 {
-  "path": "abc123xyz"
+  "path": "abc123xyz",
+  "reason": "违规内容"
 }
 ```
 
@@ -356,3 +359,15 @@ http://your-domain:8080/admin.html
 ## 许可证
 
 本管理系统是TG图床项目的一部分，遵循项目许可证。
+
+
+### 被删除文件访问响应
+
+当用户访问已删除文件链接时，主程序将返回 `410 Gone`：
+
+```json
+{
+  "error": "deleted",
+  "reason": "违规内容"
+}
+```
