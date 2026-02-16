@@ -23,14 +23,8 @@
 - 文件管理接口
 
 ### Python版本
-- Bot版本 - Telegram机器人
-- Server版本 - Web服务器
-
-### 部署相关
-- Docker支持
-- Nginx配置
-- Systemd服务
-- 部署文档
+- **bot/** - Telegram机器人版本
+- **bot2/** - Web服务器版本
 
 ## 🚀 快速开始
 
@@ -87,21 +81,19 @@ init-db.bat
 ```
 
 4. **修改管理员密码**
-```bash
-# 编辑 admin/auth.go
-nano admin/auth.go
-```
-修改：
+编辑 `admin/auth.go`:
 ```go
 AdminUsername = "admin"
-AdminPassword = "your-strong-password"
+AdminPassword = "your-strong-password"  // ⚠️ 务必修改
 ```
 
 5. **编译程序**
 ```bash
-# 使用提供的脚本
-./build-with-admin.sh    # Linux/Mac
-build-with-admin.bat     # Windows
+# Linux/Mac
+./build-with-admin.sh
+
+# Windows
+build-with-admin.bat
 
 # 或手动编译
 go build -o tg-imagebed
@@ -123,10 +115,10 @@ tg-imagebed.exe        # Windows
 
 | 文档 | 说明 |
 |------|------|
-| [ADMIN_README.md](ADMIN_README.md) | 后台管理系统完整文档 |
+| [admin/README.md](admin/README.md) | 后台管理模块文档 |
 | [ADMIN_QUICKSTART.md](ADMIN_QUICKSTART.md) | 快速入门指南 |
-| [ADMIN_CHANGELOG.md](ADMIN_CHANGELOG.md) | 更新日志 |
 | [DEBIAN12_DEPLOY.md](DEBIAN12_DEPLOY.md) | Debian 12部署指南 |
+| [GET_CHANNEL_ID.md](GET_CHANNEL_ID.md) | 获取频道ID指南 |
 | [REVERSE_PROXY.md](REVERSE_PROXY.md) | 反向代理配置 |
 
 ## 🌟 后台管理功能
@@ -177,7 +169,7 @@ Content-Type: application/json
 }
 ```
 
-详见 [ADMIN_README.md](ADMIN_README.md)
+详见 [admin/README.md](admin/README.md)
 
 ## 🔐 安全建议
 
@@ -197,13 +189,19 @@ tg-imagebed/
 │   ├── auth.go             # 认证中间件
 │   └── README.md           # 模块文档
 ├── bot/                     # Python Bot版本
+│   ├── bot.py
+│   ├── config.py
+│   └── requirements.txt
 ├── bot2/                    # Python Server版本
+│   ├── server.py
+│   ├── server2.go
+│   └── requirements.txt
 ├── main.go                  # Go主程序
 ├── go.mod                   # Go模块配置
 ├── data.json.example        # 配置文件模板
 ├── init-db.sh               # 数据库初始化脚本
 ├── build-with-admin.sh      # 编译脚本
-└── push-to-github.sh        # Git推送脚本
+└── README.md                # 本文件
 ```
 
 ## 🛠️ 开发
@@ -230,6 +228,31 @@ curl -u admin:password http://localhost:8080/api/stats
 # 测试上传
 curl -X POST -F "file=@test.jpg" http://localhost:8080/upload
 ```
+
+## 🚀 部署
+
+### 使用Systemd
+
+```bash
+# 复制服务文件
+sudo cp telegram-bot-api.service /etc/systemd/system/
+
+# 启动服务
+sudo systemctl start tg-imagebed
+sudo systemctl enable tg-imagebed
+```
+
+### 使用Docker
+
+```bash
+# 构建镜像
+docker build -t tg-imagebed .
+
+# 运行容器
+docker run -d -p 8080:8080 tg-imagebed
+```
+
+详见 [DEBIAN12_DEPLOY.md](DEBIAN12_DEPLOY.md)
 
 ## 📄 许可证
 
