@@ -8,7 +8,7 @@
 admin/
 ├── index.html   # 后台管理前端界面
 ├── api.go       # API 接口实现
-└── auth.go      # 认证中间件
+└── auth.go      # 兼容占位（认证已合并到 main.go）
 ```
 
 ## 功能模块
@@ -22,50 +22,28 @@ admin/
 - **UnbanHandler** - 解封IP
 - **DeleteHandler** - 删除文件
 
-### 认证中间件 (auth.go)
+### 认证与访问控制（main.go）
 
-- **BasicAuthMiddleware** - HTTP Basic Auth 认证（默认）
-- **TokenAuthMiddleware** - Bearer Token 认证
-- **IPWhitelistMiddleware** - IP 白名单认证
+- 管理端认证中间件已统一放到 `main.go` 的 `adminAuthMiddleware`。
+- 管理接口与用户上传接口共用同一个服务与端口。
+- 未携带或携带错误凭据访问管理路由时，直接返回 `404`（隐藏管理入口）。
 
 ## 配置
 
 ### 修改管理员密码
 
-编辑 `auth.go` 文件：
+编辑 `main.go` 中默认值：
 
 ```go
-var (
-    AdminUsername string
-    AdminPassword string
-)
-
-func InitAdminAuth() {
-    AdminUsername = "admin"      // 修改用户名
-    AdminPassword = "your-password"  // 修改密码
-}
-```
-
-### 切换认证方式
-
-在 `main.go` 中修改路由注册：
-
-```go
-// 使用 Basic Auth（默认）
-mux.HandleFunc("/admin.html", admin.BasicAuthMiddleware(handler))
-
-// 使用 Token Auth
-mux.HandleFunc("/admin.html", admin.TokenAuthMiddleware("your-token")(handler))
-
-// 使用 IP 白名单
-mux.HandleFunc("/admin.html", admin.IPWhitelistMiddleware([]string{"127.0.0.1"})(handler))
+adminUser = "admin"
+adminPass = "your-strong-password"
 ```
 
 ## 安全建议
 
-1. ⚠️ **务必修改默认密码**
-2. 🔒 生产环境使用 HTTPS
-3. 🛡️ 考虑启用 IP 白名单
+1. ⚠️ **务必修改 main.go 中默认密码**
+2. 🙈 匿名访问管理端会返回 404
+3. 🔒 生产环境使用 HTTPS
 4. 📝 定期查看访问日志
 5. 💾 定期备份数据库
 
