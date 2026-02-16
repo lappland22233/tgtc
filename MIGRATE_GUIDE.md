@@ -16,8 +16,6 @@
 
 ### 方法1：使用Python脚本（推荐）
 
-#### Linux/Mac
-
 ```bash
 # 1. 确保已安装依赖
 pip install pymysql
@@ -26,17 +24,7 @@ pip install pymysql
 python3 migrate.py
 ```
 
-#### Windows
-
-```cmd
-REM 1. 安装依赖
-pip install pymysql
-
-REM 2. 执行迁移脚本
-python migrate.py
-```
-
-### 方法2：使用Shell脚本（Linux/Mac）
+### 方法2：使用Shell脚本
 
 ```bash
 # 1. 确保已配置 data.json
@@ -48,18 +36,7 @@ chmod +x migrate-data.sh
 ./migrate-data.sh
 ```
 
-### 方法3：使用批处理脚本（Windows）
-
-```cmd
-REM 1. 确保已配置 data.json
-copy data.json.example data.json
-notepad data.json
-
-REM 2. 执行迁移脚本
-migrate-data.bat
-```
-
-### 方法4：手动执行SQL
+### 方法3：手动执行SQL
 
 ```sql
 -- 直接在数据库中执行
@@ -101,7 +78,7 @@ AFTER status;
 ### migrate.py (Python脚本）
 
 **优点**:
-- ✅ 跨平台支持（Windows/Linux/Mac）
+- ✅ 适合 Linux/macOS 服务器环境
 - ✅ 详细的错误处理
 - ✅ 自动备份数据库
 - ✅ 友好的输出信息
@@ -120,20 +97,7 @@ AFTER status;
 - ✅ 失败时自动恢复
 
 **缺点**:
-- 仅支持 Linux/Mac
 - 依赖 bash 和 mysqldump
-
-### migrate-data.bat (批处理脚本）
-
-**优点**:
-- ✅ 不需要额外依赖
-- ✅ 直接使用 MySQL 命令
-- ✅ 自动创建备份
-- ✅ 失败时自动恢复
-
-**缺点**:
-- 仅支持 Windows
-- 依赖 PowerShell
 
 ## 📁 备份文件
 
@@ -155,10 +119,7 @@ backup_20260216_183045.sql
 ### 方法1：使用备份文件
 
 ```bash
-# Linux/Mac
-mysql -h localhost -P 3306 -u username -p database_name < backup_20260216_183045.sql
-
-# Windows
+# Linux/macOS
 mysql -h localhost -P 3306 -u username -p database_name < backup_20260216_183045.sql
 ```
 
@@ -181,7 +142,7 @@ ALTER TABLE files DROP COLUMN delete_reason;
 
 需要更新的代码文件：
 
-1. **admin/api.go**
+1. **main.go**
    - `DeleteHandler` 需要接收 `delete_reason`
    - 数据库更新时写入删除原因
 
@@ -194,7 +155,7 @@ ALTER TABLE files DROP COLUMN delete_reason;
 ### 示例代码更新
 
 ```go
-// admin/api.go
+// main.go
 type DeleteRequest struct {
     Path        string `json:"path"`
     Reason      string `json:"reason"`  // 新增
@@ -308,6 +269,5 @@ nano data.json  # 编辑配置
 **迁移脚本文件**:
 - `migrate.py` - Python脚本（推荐）
 - `migrate-data.sh` - Shell脚本
-- `migrate-data.bat` - 批处理脚本
 
 **建议使用**: Python脚本 `migrate.py`
