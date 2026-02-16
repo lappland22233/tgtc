@@ -113,13 +113,7 @@ tg-imagebed.exe        # Windows
 
 ## 📚 文档
 
-| 文档 | 说明 |
-|------|------|
-| [admin/README.md](admin/README.md) | 后台管理模块文档 |
-| [ADMIN_QUICKSTART.md](ADMIN_QUICKSTART.md) | 快速入门指南 |
-| [DEBIAN12_DEPLOY.md](DEBIAN12_DEPLOY.md) | Debian 12部署指南 |
-| [GET_CHANNEL_ID.md](GET_CHANNEL_ID.md) | 获取频道ID指南 |
-| [REVERSE_PROXY.md](REVERSE_PROXY.md) | 反向代理配置 |
+项目说明已统一合并到本 `README.md`，请优先参考下文的「统一说明」「更新日志」「保留数据迁移流程」章节。
 
 ## 🌟 后台管理功能
 
@@ -252,7 +246,7 @@ docker build -t tg-imagebed .
 docker run -d -p 8080:8080 tg-imagebed
 ```
 
-详见 [DEBIAN12_DEPLOY.md](DEBIAN12_DEPLOY.md)
+部署说明已合并到本 README 的「统一说明（已合并）」章节
 
 ## 📄 许可证
 
@@ -273,3 +267,138 @@ MIT License
 ---
 
 **注意**: 本项目仅供学习和个人使用，请勿用于非法用途。
+
+## 📘 统一说明（已合并）
+
+> 已将原先分散的部署、后台、反向代理、频道 ID 获取等说明整合到本 README，后续以本文件为主进行维护。
+
+### 后台管理快速使用
+
+1. 修改 `admin/auth.go` 中默认账号密码（务必修改）。
+2. 编译并启动服务：`go build -o tg-imagebed && ./tg-imagebed`。
+3. 访问后台：`http://localhost:8080/admin.html`。
+4. 常用接口：`/api/stats`、`/api/files`、`/api/ban`、`/api/unban`、`/api/delete`。
+
+### Debian 12 部署精简步骤
+
+```bash
+# 1) 安装依赖
+sudo apt update
+sudo apt install -y golang-go mysql-server nginx
+
+# 2) 初始化数据库（会保留已有数据）
+cp data.json.example data.json
+bash init-db.sh
+
+# 3) 编译并运行
+go build -o tg-imagebed
+./tg-imagebed
+```
+
+### 反向代理（Nginx 最小配置）
+
+```nginx
+server {
+    listen 80;
+    server_name your-domain.com;
+
+    client_max_body_size 20M;
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header EO-Client-IP $remote_addr;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+
+### 统一管理脚本（推荐）
+
+已提供 `manage.sh` 统一管理以下操作：启动、停止、重启、依赖安装、数据库初始化/迁移、运行状态检查、数据包备份。
+
+```bash
+# 查看帮助
+bash manage.sh --help
+
+# 安装依赖
+bash manage.sh install-deps
+
+# 初始化/迁移数据库
+bash manage.sh init-db
+
+# 启动 / 停止 / 重启
+bash manage.sh start
+bash manage.sh stop
+bash manage.sh restart
+
+# 备份（配置 + 日志 + 可选数据库导出）
+bash manage.sh backup
+```
+
+### 获取 Telegram 频道 ID
+
+1. 将机器人加入目标频道并授予发送消息权限。
+2. 向频道发送一条测试消息。
+3. 使用 `https://api.telegram.org/bot<token>/getUpdates` 查看更新。
+4. 在返回 JSON 中找到 `chat.id`（一般为 `-100` 开头），填入 `data.json`。
+
+## 🧾 更新日志（主说明文件）
+
+- **2026-02-16**
+  - 新增：统一迁移 SQL `init_db.go.sql`，用于 Go 版本数据库初始化与兼容迁移。
+  - 新增：`init-db.ps1`，补齐 Windows 下数据库初始化入口。
+  - 优化：`init-db.sh` 改为使用 Python 解析 `data.json`，避免原正则解析 JSON 不稳定问题。
+  - 优化：`init-db.sh` 增加 SQL 文件存在性检查、关键字段校验与幂等迁移执行。
+  - 文档：将分散说明整合进主 README，并在此处持续记录新增功能与运维改动。
+  - 新增：`manage.sh` 统一管理脚本，整合启动/停止/重启/安装依赖/数据库初始化。
+  - 新增：`manage.sh backup` 数据包备份功能（配置、日志、可选数据库导出）。
+  - 修复：`init-db.sh` 始终读取脚本目录下的 `data.json`，避免跨目录执行误读配置。
+
+## 🛡️ 保留数据迁移流程
+
+> 目标：升级表结构时不丢失历史文件数据、访问统计和封禁记录。
+
+### 1) 迁移前检查
+
+```bash
+# 备份数据库（强烈建议）
+mysqldump -h<host> -P<port> -u<user> -p <database> > backup_before_migration.sql
+
+# 确认配置
+cp data.json.example data.json  # 如未创建
+nano data.json
+```
+
+### 2) 执行迁移（幂等）
+
+```bash
+# Linux / macOS
+bash init-db.sh
+
+# Windows
+init-db.bat
+```
+
+### 3) 迁移后验证
+
+```bash
+# 验证核心表是否存在
+mysql -h<host> -P<port> -u<user> -p <database> -e "SHOW TABLES LIKE 'files';"
+mysql -h<host> -P<port> -u<user> -p <database> -e "SHOW TABLES LIKE 'banned_ips';"
+
+# 验证新增字段
+mysql -h<host> -P<port> -u<user> -p <database> -e "SHOW COLUMNS FROM files LIKE 'file_name';"
+mysql -h<host> -P<port> -u<user> -p <database> -e "SHOW COLUMNS FROM files LIKE 'delete_reason';"
+```
+
+### 4) 回滚策略
+
+```bash
+# 若迁移后出现异常，可用备份恢复
+mysql -h<host> -P<port> -u<user> -p <database> < backup_before_migration.sql
+```
+
