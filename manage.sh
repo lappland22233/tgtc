@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # TG 图床统一管理脚本
 # 用法: ./manage.sh <command>

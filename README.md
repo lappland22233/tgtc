@@ -357,6 +357,9 @@ bash manage.sh backup
   - 新增：`manage.sh` 统一管理脚本，整合启动/停止/重启/安装依赖/数据库初始化。
   - 新增：`manage.sh backup` 数据包备份功能（配置、日志、可选数据库导出）。
   - 修复：`init-db.sh` 始终读取脚本目录下的 `data.json`，避免跨目录执行误读配置。
+  - 兼容：迁移 SQL 中移除 `DEFAULT (CURRENT_TIMESTAMP + INTERVAL ...)`，适配 MySQL 5.7。
+  - 规范：继续统一 `.sh` 脚本 shebang / LF 行尾 / 入口行为。
+  - 规范：新增 `.gitattributes` 固定行尾策略，避免 CRLF 引发脚本问题。
 
 ## 🛡️ 保留数据迁移流程
 

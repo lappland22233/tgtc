@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Bot2 数据库初始化脚本
 # 在已有数据库中创建表结构

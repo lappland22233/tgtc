@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # TG 图床数据库初始化与迁移脚本（保留历史数据）
 

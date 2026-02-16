@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS files (
     delete_reason VARCHAR(500) DEFAULT NULL COMMENT '删除原因',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     last_accessed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '最后访问时间',
-    cache_expires_at DATETIME NOT NULL DEFAULT (CURRENT_TIMESTAMP + INTERVAL 10 MINUTE) COMMENT '缓存过期时间',
+    cache_expires_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '缓存过期时间',
     INDEX idx_random_path (random_path),
     INDEX idx_file_unique_id (file_unique_id),
     INDEX idx_status (status),

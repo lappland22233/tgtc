@@ -1,0 +1,15 @@
+* text=auto
+
+# 统一脚本/源码行尾，避免 CRLF 导致脚本执行异常
+*.sh text eol=lf
+*.sql text eol=lf
+*.go text eol=lf
+*.py text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# Windows 脚本保持 CRLF
+*.bat text eol=crlf
+*.ps1 text eol=crlf

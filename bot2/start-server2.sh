@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # server2 构建和启动脚本（同时启动 bot）
 
