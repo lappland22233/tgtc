@@ -68,6 +68,17 @@ else
     else
         echo "[INFO] file_name 字段已存在"
     fi
+
+    # 检查 delete_reason 字段是否存在
+    DELETE_REASON_EXISTS=$(mysql -h"$DB_HOST" -P"$DB_PORT" -u"$DB_USER" -p"$DB_PASS" "$DB_NAME" -e "SHOW COLUMNS FROM files LIKE 'delete_reason';" 2>/dev/null | grep -c "delete_reason")
+
+    if [ "$DELETE_REASON_EXISTS" -eq 0 ]; then
+        echo "[INFO] 添加 delete_reason 字段..."
+        mysql -h"$DB_HOST" -P"$DB_PORT" -u"$DB_USER" -p"$DB_PASS" "$DB_NAME" -e "ALTER TABLE files ADD COLUMN delete_reason VARCHAR(500) DEFAULT NULL AFTER status;" 2>/dev/null
+        echo "[SUCCESS] delete_reason 字段添加完成"
+    else
+        echo "[INFO] delete_reason 字段已存在"
+    fi
 fi
 
 echo ""

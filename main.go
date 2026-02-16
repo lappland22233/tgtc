@@ -56,9 +56,9 @@ type Config struct {
 }
 
 var (
-	config     *Config
-	db         *sql.DB
-	adminIDs   map[int64]bool
+	config      *Config
+	db          *sql.DB
+	adminIDs    map[int64]bool
 	tgChannelID int64
 )
 
@@ -286,16 +286,16 @@ func fetchHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var fileID, mimeType, fileName string
+	var fileID, mimeType, fileName, status, deleteReason string
 	var expire time.Time
 
 	// 查询文件信息（FOR UPDATE 行锁）
 	err = tx.QueryRow(`
-		SELECT file_id, mime_type, file_name, cache_expires_at
+		SELECT file_id, mime_type, file_name, cache_expires_at, status, delete_reason
 		FROM files
-		WHERE random_path = ? AND status = 'normal'
+		WHERE random_path = ?
 		FOR UPDATE`, path).
-		Scan(&fileID, &mimeType, &fileName, &expire)
+		Scan(&fileID, &mimeType, &fileName, &expire, &status, &deleteReason)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			log.Printf("[访问] 文件不存在: %s", path)
@@ -306,6 +306,20 @@ func fetchHandler(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[访问] 查询失败: %v", err)
 		tx.Rollback()
 		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+
+	if status == "deleted" {
+		_ = tx.Rollback()
+		if strings.TrimSpace(deleteReason) == "" {
+			deleteReason = "文件已被管理员删除"
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusGone)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error":  "deleted",
+			"reason": deleteReason,
+		})
 		return
 	}
 
@@ -435,7 +449,7 @@ func initDB() error {
 type TGDocument struct {
 	FileID       string `json:"file_id"`
 	FileUniqueID string `json:"file_unique_id"`
-	FileSize    int64  `json:"file_size"`
+	FileSize     int64  `json:"file_size"`
 }
 
 // TGUploadResult Telegram上传结果
@@ -457,7 +471,7 @@ type TGFileResult struct {
 
 // TGFileResponse Telegram文件信息响应
 type TGFileResponse struct {
-	OK     bool        `json:"ok"`
+	OK     bool         `json:"ok"`
 	Result TGFileResult `json:"result"`
 }
 

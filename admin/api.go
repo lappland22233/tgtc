@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -15,12 +16,12 @@ import (
 
 // StatsResponse 统计信息响应
 type StatsResponse struct {
-	TotalFiles    int     `json:"total_files"`
-	TodayUploads  int     `json:"today_uploads"`
-	TodayAccess   int     `json:"today_access"`
-	CachedFiles   int     `json:"cached_files"`
-	BannedIPs     int     `json:"banned_ips"`
-	CacheHitRate  float64 `json:"cache_hit_rate"`
+	TotalFiles   int     `json:"total_files"`
+	TodayUploads int     `json:"today_uploads"`
+	TodayAccess  int     `json:"today_access"`
+	CachedFiles  int     `json:"cached_files"`
+	BannedIPs    int     `json:"banned_ips"`
+	CacheHitRate float64 `json:"cache_hit_rate"`
 }
 
 // FileRecord 文件记录
@@ -35,6 +36,7 @@ type FileRecord struct {
 	UploadIP       string `json:"upload_ip"`
 	EdgeIP         string `json:"edge_ip"`
 	Status         string `json:"status"`
+	DeleteReason   string `json:"delete_reason"`
 	CreatedAt      string `json:"created_at"`
 	LastAccessedAt string `json:"last_accessed_at"`
 }
@@ -73,7 +75,8 @@ type BanRequest struct {
 
 // DeleteRequest 删除请求
 type DeleteRequest struct {
-	Path string `json:"path"`
+	Path   string `json:"path"`
+	Reason string `json:"reason"`
 }
 
 // 获取统计信息
@@ -179,7 +182,7 @@ func FilesHandler(db *sql.DB) http.HandlerFunc {
 			SELECT 
 				id, random_path, file_id, file_unique_id, 
 				mime_type, file_size, file_name, 
-				upload_ip, edge_ip, status, 
+				upload_ip, edge_ip, status, delete_reason,
 				created_at, last_accessed_at
 			FROM files
 			WHERE 1=1
@@ -228,7 +231,7 @@ func FilesHandler(db *sql.DB) http.HandlerFunc {
 			err := rows.Scan(
 				&file.ID, &file.RandomPath, &file.FileID, &file.FileUniqueID,
 				&file.MimeType, &file.FileSize, &file.FileName,
-				&uploadIPBin, &edgeIPBin, &file.Status,
+				&uploadIPBin, &edgeIPBin, &file.Status, &file.DeleteReason,
 				&file.CreatedAt, &file.LastAccessedAt,
 			)
 			if err != nil {
@@ -472,12 +475,21 @@ func DeleteHandler(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
+		req.Reason = strings.TrimSpace(req.Reason)
+		if req.Reason == "" {
+			json.NewEncoder(w).Encode(APIResponse{
+				Success: false,
+				Message: "删除原因不能为空",
+			})
+			return
+		}
+
 		// 标记文件为已删除状态
 		result, err := db.Exec(`
 			UPDATE files
-			SET status = 'deleted'
+			SET status = 'deleted', delete_reason = ?
 			WHERE random_path = ? AND status = 'normal'
-		`, req.Path)
+		`, req.Reason, req.Path)
 		if err != nil {
 			log.Printf("[删除] 更新失败: %v", err)
 			json.NewEncoder(w).Encode(APIResponse{
