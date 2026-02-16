@@ -73,36 +73,22 @@ nano data.json
 
 3. **初始化数据库**
 ```bash
-# Linux/Mac
 bash init-db.sh
-
-# Windows
-init-db.bat
 ```
 
 4. **修改管理员密码**
-编辑 `admin/auth.go`:
-```go
-AdminUsername = "admin"
-AdminPassword = "your-strong-password"  // ⚠️ 务必修改
-```
+编辑 `main.go` 中的 `adminUser/adminPass` 默认值。
 
 5. **编译程序**
 ```bash
-# Linux/Mac
 ./build-with-admin.sh
-
-# Windows
-build-with-admin.bat
-
 # 或手动编译
 go build -o tg-imagebed
 ```
 
 6. **运行程序**
 ```bash
-./tg-imagebed          # Linux/Mac
-tg-imagebed.exe        # Windows
+./tg-imagebed
 ```
 
 ### 访问服务
@@ -167,7 +153,7 @@ Content-Type: application/json
 
 ## 🔐 安全建议
 
-1. ✅ **修改默认密码** - 编辑 `admin/auth.go`
+1. ✅ **修改默认密码** - 编辑 `main.go` 中的 `adminUser/adminPass`
 2. 🔒 **使用HTTPS** - 配置Nginx反向代理
 3. 🛡️ **启用IP白名单** - 限制管理后台访问
 4. 💾 **定期备份** - 备份数据库和配置
@@ -177,11 +163,9 @@ Content-Type: application/json
 
 ```
 tg-imagebed/
-├── admin/                    # 后台管理模块
+├── admin/                    # 后台管理前端
 │   ├── index.html           # 前端界面
-│   ├── api.go              # API接口
-│   ├── auth.go             # 认证中间件
-│   └── README.md           # 模块文档
+│   └── README.md            # 使用说明（后端逻辑已并入 main.go）
 ├── bot/                     # Python Bot版本
 │   ├── bot.py
 │   ├── config.py
@@ -274,7 +258,7 @@ MIT License
 
 ### 后台管理快速使用
 
-1. 修改 `admin/auth.go` 中默认账号密码（务必修改）。
+1. 修改 `main.go` 中默认账号密码（务必修改）。
 2. 编译并启动服务：`go build -o tg-imagebed && ./tg-imagebed`。
 3. 访问后台：`http://localhost:8080/admin.html`。
 4. 常用接口：`/api/stats`、`/api/files`、`/api/ban`、`/api/unban`、`/api/delete`。
@@ -318,7 +302,7 @@ server {
 
 ### 统一管理脚本（推荐）
 
-已提供 `manage.sh` 统一管理以下操作：启动、停止、重启、依赖安装、数据库初始化/迁移、运行状态检查、数据包备份。
+已提供 `manage.sh` 统一管理以下操作：编译、启动、停止、重启、依赖安装、数据库初始化/迁移、运行状态检查、日志查看、数据包备份。
 
 ```bash
 # 查看帮助
@@ -330,10 +314,17 @@ bash manage.sh install-deps
 # 初始化/迁移数据库
 bash manage.sh init-db
 
-# 启动 / 停止 / 重启
+# 编译
+bash manage.sh build
+
+# 启动 / 停止 / 重启 / 状态
 bash manage.sh start
 bash manage.sh stop
 bash manage.sh restart
+bash manage.sh status
+
+# 查看日志（tail -f）
+bash manage.sh logs
 
 # 备份（配置 + 日志 + 可选数据库导出）
 bash manage.sh backup
@@ -350,7 +341,6 @@ bash manage.sh backup
 
 - **2026-02-16**
   - 新增：统一迁移 SQL `init_db.go.sql`，用于 Go 版本数据库初始化与兼容迁移。
-  - 新增：`init-db.ps1`，补齐 Windows 下数据库初始化入口。
   - 优化：`init-db.sh` 改为使用 Python 解析 `data.json`，避免原正则解析 JSON 不稳定问题。
   - 优化：`init-db.sh` 增加 SQL 文件存在性检查、关键字段校验与幂等迁移执行。
   - 文档：将分散说明整合进主 README，并在此处持续记录新增功能与运维改动。
@@ -379,11 +369,7 @@ nano data.json
 ### 2) 执行迁移（幂等）
 
 ```bash
-# Linux / macOS
 bash init-db.sh
-
-# Windows
-init-db.bat
 ```
 
 ### 3) 迁移后验证
