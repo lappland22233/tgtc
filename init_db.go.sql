@@ -1,7 +1,7 @@
 -- TG 图床 Go 版本数据库初始化/兼容迁移脚本
 -- 说明：
 -- 1) 使用 IF NOT EXISTS 保留已有数据
--- 2) 使用 ADD COLUMN IF NOT EXISTS 进行增量字段迁移
+-- 2) 兼容 MySQL 5.7：通过 information_schema 检查后再执行 ADD COLUMN
 
 CREATE TABLE IF NOT EXISTS files (
     id INT AUTO_INCREMENT PRIMARY KEY,
@@ -35,6 +35,35 @@ CREATE TABLE IF NOT EXISTS banned_ips (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- 增量迁移：旧库补字段（不会删除既有数据）
-ALTER TABLE files
-    ADD COLUMN IF NOT EXISTS file_name VARCHAR(500) DEFAULT NULL AFTER file_size,
-    ADD COLUMN IF NOT EXISTS delete_reason VARCHAR(500) DEFAULT NULL AFTER status;
+-- MySQL 5.7 不支持 `ADD COLUMN IF NOT EXISTS`，因此使用条件 SQL
+SET @file_name_col_exists := (
+    SELECT COUNT(*)
+    FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'files'
+      AND COLUMN_NAME = 'file_name'
+);
+SET @file_name_col_sql := IF(
+    @file_name_col_exists = 0,
+    'ALTER TABLE files ADD COLUMN file_name VARCHAR(500) DEFAULT NULL AFTER file_size',
+    'SELECT 1'
+);
+PREPARE stmt FROM @file_name_col_sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+SET @delete_reason_col_exists := (
+    SELECT COUNT(*)
+    FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'files'
+      AND COLUMN_NAME = 'delete_reason'
+);
+SET @delete_reason_col_sql := IF(
+    @delete_reason_col_exists = 0,
+    'ALTER TABLE files ADD COLUMN delete_reason VARCHAR(500) DEFAULT NULL AFTER status',
+    'SELECT 1'
+);
+PREPARE stmt FROM @delete_reason_col_sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
