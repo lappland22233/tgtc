@@ -1,0 +1,16 @@
+[Unit]
+Description=Telegram Bot API Server
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/telegram-bot-api
+Environment="TELEGRAM_API_ID=你的_api_id"
+Environment="TELEGRAM_API_HASH=你的_api_hash"
+ExecStart=/usr/local/bin/telegram-bot-api --local --http-ip-address=127.0.0.1
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

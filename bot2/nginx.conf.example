@@ -1,0 +1,44 @@
+# Nginx 配置示例（与 server2.go 配合使用）
+# 适用于使用 X-Accel-Redirect 的高性能文件传输
+
+server {
+    listen 80;                  # 或 443 ssl
+    server_name your.domain;
+
+    # 所有请求先走 Go（鉴权、查数据库、记录访问）
+    location / {
+        proxy_pass http://127.0.0.1:8082;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header EO-Client-IP $remote_addr;
+
+        # 优化设置
+        proxy_buffering off;
+        proxy_request_buffering off;
+    }
+
+    # 只有 Go 内部跳转过来的路径才生效
+    location /internal-cache/ {
+        internal;                           # 外部请求返回 403
+        alias /data/cache/;                 # Go 的 CacheDir
+        sendfile on;
+        tcp_nopush on;
+        tcp_nodelay on;
+
+        # Range 支持（视频拖拽、断点续传）
+        add_header Accept-Ranges bytes always;
+
+        # 缓存过期时间
+        expires 30d;
+
+        # 可选：大文件优化 + 限速
+        # limit_rate_after 512k;           # 前 512KB 不限速
+        # limit_rate 2m;                  # 之后限制 2MB/s
+    }
+
+    # 健康检查端点
+    location /health {
+        return 200 "OK";
+    }
+}

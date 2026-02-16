@@ -1,0 +1,52 @@
+{
+  "telegram": {
+    "bot_token": "YOUR_BOT_TOKEN",
+    "bot_api_url": "http://127.0.0.1:8081"
+  },
+  "mysql": {
+    "host": "localhost",
+    "port": 3306,
+    "username": "bot2",
+    "password": "your_password",
+    "database": "bot2"
+  },
+  "admin": {
+    "user_ids": [123456789, 987654321]
+  },
+  "server": {
+    "listen_addr": ":8082",
+    "base_url": "https://your-domain.com"
+  }
+}
+
+/*
+配置说明：
+
+1. telegram.bot_token:
+   - 从 @BotFather 获取 Bot Token
+   - 示例: "123456789:ABCdefGHIjklMNOpqrsTUVwxyz"
+
+2. telegram.bot_api_url:
+   - 自建 Bot API 服务器地址
+   - 示例: "http://127.0.0.1:8081"
+
+3. mysql 配置:
+   - host: MySQL 服务器地址
+   - port: MySQL 端口（默认 3306）
+   - username: 数据库用户名
+   - password: 数据库密码
+   - database: 数据库名称（bot2 独立数据库）
+
+4. admin.user_ids:
+   - Telegram 用户 ID 列表（用于 Bot 管理）
+   - 获取方法: 使用 @userinfobot 获取您的 ID
+   - 多个 ID 用逗号分隔: [123456789, 987654321]
+
+5. server.listen_addr:
+   - HTTP 服务监听地址
+   - 示例: ":8082" 或 "0.0.0.0:8082"
+
+6. server.base_url:
+   - 访问域名（用于生成文件直链）
+   - 示例: "https://your-domain.com"
+*/

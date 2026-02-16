@@ -1,0 +1,927 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TG 图床 - 文件上传</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --bg-gradient: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            --card-bg: rgba(255, 255, 255, 0.95);
+            --text-primary: #333;
+            --text-secondary: #666;
+            --text-hint: #999;
+            --border-color: #667eea;
+            --border-hover: #764ba2;
+            --btn-primary: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            --btn-secondary: #f0f0f0;
+            --btn-danger: #ff4757;
+            --toast-success: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+            --toast-error: linear-gradient(135deg, #eb3349 0%, #f45c43 100%);
+            --shadow-color: rgba(0, 0, 0, 0.2);
+        }
+
+        .dark-mode {
+            --bg-gradient: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            --card-bg: rgba(30, 30, 46, 0.95);
+            --text-primary: #e4e4e7;
+            --text-secondary: #a0a0a0;
+            --text-hint: #6b7280;
+            --border-color: #818cf8;
+            --border-hover: #a78bfa;
+            --btn-primary: linear-gradient(135deg, #818cf8 0%, #a78bfa 100%);
+            --btn-secondary: #2d3748;
+            --shadow-color: rgba(0, 0, 0, 0.4);
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: var(--bg-gradient);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+            transition: all 0.3s ease;
+        }
+
+        .container {
+            background: var(--card-bg);
+            backdrop-filter: blur(20px);
+            border-radius: 24px;
+            box-shadow: 0 32px 64px var(--shadow-color);
+            width: 100%;
+            max-width: 640px;
+            padding: 35px;
+            animation: slideUp 0.6s ease-out;
+        }
+
+        @keyframes slideUp {
+            from {
+                opacity: 0;
+                transform: translateY(30px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+
+        .header 
+
+        .subtitle {
+            color: var(--text-secondary);
+            font-size: 14px;
+            margin-bottom: 15px;
+        }
+
+        .disclaimer {
+            color: var(--text-hint);
+            font-size: 11px;
+            margin-bottom: 20px;
+            line-height: 1.5;
+            padding: 10px 15px;
+            background: var(--btn-secondary);
+            border-radius: 8px;
+            border-left: 3px solid var(--border-color);
+        }
+
+        .dark-mode-toggle {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            margin-top: 15px;
+        }
+
+        .toggle-switch {
+            position: relative;
+            width: 60px;
+            height: 30px;
+            background: var(--btn-secondary);
+            border-radius: 15px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .toggle-switch::after {
+            content: '';
+            position: absolute;
+            top: 3px;
+            left: 3px;
+            width: 24px;
+            height: 24px;
+            background: white;
+            border-radius: 50%;
+            transition: all 0.3s ease;
+        }
+
+        .dark-mode .toggle-switch::after {
+            left: 33px;
+        }
+
+        .upload-area {
+            border: 3px dashed var(--border-color);
+            border-radius: 16px;
+            padding: 50px 20px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .upload-area:hover, .upload-area.dragover {
+            border-color: var(--border-hover);
+            background: rgba(102, 126, 234, 0.05);
+            transform: scale(1.01);
+        }
+
+        .dark-mode .upload-area:hover, 
+        .dark-mode .upload-area.dragover {
+            background: rgba(129, 140, 248, 0.1);
+        }
+
+        .upload-area.uploading {
+            border-color: var(--border-hover);
+            pointer-events: none;
+            opacity: 0.7;
+        }
+
+        .upload-icon {
+            font-size: 56px;
+            margin-bottom: 15px;
+            display: block;
+            transition: transform 0.3s ease;
+        }
+
+        .upload-area:hover .upload-icon {
+            transform: scale(1.1);
+        }
+
+        .upload-text {
+            color: var(--text-primary);
+            font-size: 17px;
+            font-weight: 500;
+            margin-bottom: 8px;
+        }
+
+        .upload-hint {
+            color: var(--text-hint);
+            font-size: 13px;
+        }
+
+        .upload-input {
+            display: none;
+        }
+
+        .progress-container {
+            margin-top: 25px;
+            display: none;
+        }
+
+        .progress-bar {
+            width: 100%;
+            height: 6px;
+            background: var(--btn-secondary);
+            border-radius: 3px;
+            overflow: hidden;
+            position: relative;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: var(--btn-primary);
+            border-radius: 3px;
+            width: 0%;
+            transition: width 0.2s ease;
+            position: relative;
+        }
+
+        .progress-fill::after {
+            content: '';
+            position: absolute;
+            right: 0;
+            top: 0;
+            bottom: 0;
+            width: 30px;
+            background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.4));
+            animation: shimmer 1.5s infinite;
+        }
+
+        @keyframes shimmer {
+            0% {
+                transform: translateX(-100%);
+            }
+            100% {
+                transform: translateX(100%);
+            }
+        }
+
+        .progress-info {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-top: 12px;
+        }
+
+        .progress-text {
+            color: var(--text-primary);
+            font-size: 14px;
+            font-weight: 500;
+        }
+
+        .progress-speed {
+            color: var(--text-hint);
+            font-size: 12px;
+        }
+
+        .result-container {
+            margin-top: 25px;
+            display: none;
+        }
+
+        .result-item {
+            background: var(--btn-secondary);
+            border-radius: 12px;
+            padding: 18px;
+            margin-bottom: 12px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            animation: slideIn 0.4s ease;
+        }
+
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateX(-20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateX(0);
+            }
+        }
+
+        .result-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .result-name {
+            flex: 1;
+            color: var(--text-primary);
+            font-size: 14px;
+            font-weight: 500;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .result-status {
+            font-size: 12px;
+            padding: 4px 10px;
+            border-radius: 20px;
+            font-weight: 600;
+        }
+
+        .result-status.success {
+            background: var(--toast-success);
+            color: white;
+        }
+
+        .result-status.error {
+            background: var(--toast-error);
+            color: white;
+        }
+
+        .result-url {
+            font-family: 'Monaco', 'Menlo', monospace;
+            font-size: 12px;
+            color: var(--text-hint);
+            word-break: break-all;
+            line-height: 1.4;
+            padding: 8px 0;
+        }
+
+        .result-actions {
+            display: flex;
+            gap: 8px;
+        }
+
+        .btn {
+            padding: 10px 18px;
+            border: none;
+            border-radius: 8px;
+            font-size: 13px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            flex: 1;
+            justify-content: center;
+        }
+
+        .btn-copy {
+            background: var(--btn-primary);
+            color: white;
+        }
+
+        .btn-copy:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 12px rgba(102, 126, 234, 0.3);
+        }
+
+        .btn-open {
+            background: var(--btn-secondary);
+            color: var(--text-primary);
+        }
+
+        .btn-open:hover {
+            background: var(--text-hint);
+        }
+
+        .toast {
+            color: white;
+            padding: 14px 22px;
+            border-radius: 10px;
+            font-size: 14px;
+            font-weight: 500;
+            animation: toastSlide 0.4s ease;
+            box-shadow: 0 10px 30px var(--shadow-color);
+            min-width: 200px;
+            max-width: 350px;
+        }
+
+        @keyframes toastSlide {
+            from {
+                opacity: 0;
+                transform: translateX(100px);
+            }
+            to {
+                opacity: 1;
+                transform: translateX(0);
+            }
+        }
+
+        .toast.success {
+            background: var(--toast-success);
+        }
+
+        .toast.error {
+            background: var(--toast-error);
+        }
+
+        .stats {
+            text-align: center;
+            margin-top: 25px;
+            color: var(--text-hint);
+            font-size: 13px;
+            padding: 15px;
+            background: var(--btn-secondary);
+            border-radius: 10px;
+        }
+
+        .particle {
+            position: absolute;
+            width: 6px;
+            height: 6px;
+            background: rgba(102, 126, 234, 0.5);
+            border-radius: 50%;
+            pointer-events: none;
+            animation: float 4s ease-in-out infinite;
+        }
+
+        .dark-mode .particle {
+            background: rgba(129, 140, 248, 0.5);
+        }
+
+        @keyframes float {
+            0%, 100% {
+                transform: translateY(0) rotate(0deg);
+                opacity: 0;
+            }
+            50% {
+                opacity: 1;
+            }
+        }
+
+        .clear-history {
+            text-align: center;
+            margin-top: 20px;
+        }
+
+        .btn-clear {
+            background: transparent;
+            color: var(--btn-danger);
+            border: 2px solid var(--btn-danger);
+            padding: 12px;
+        }
+
+        .btn-clear:hover {
+            background: var(--btn-danger);
+            color: white;
+        }
+
+        @media (max-width: 480px) {
+            .container {
+                padding: 20px;
+                border-radius: 16px;
+            }
+
+            h1 {
+                font-size: 26px;
+            }
+
+            .upload-area {
+                padding: 35px 15px;
+            }
+
+            .upload-icon {
+                font-size: 48px;
+            }
+
+            .upload-text {
+                font-size: 15px;
+            }
+
+            .result-actions {
+                flex-direction: column;
+            }
+
+            .btn {
+                width: 100%;
+            }
+
+            .toast-container {
+                left: 20px;
+                right: 20px;
+                top: 20px;
+            }
+
+            .toast {
+                font-size: 13px;
+                padding: 12px 18px;
+                min-width: auto;
+            }
+        }
+
+        /* 移除 @media (prefers-color-scheme: dark)，只保留 dark-mode 类的控制 */
+
+        /* Toast 容器样式 */
+        .toast-container {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            z-index: 1000;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📁 TG 图床</h1>
+            <p class="subtitle">拖拽或点击上传文件，最大 20MB</p>
+            <div class="disclaimer">
+                ⚠️ <strong>隐私声明：</strong>文件通过上传到Telegram群组保存，请勿上传敏感信息<br>
+                ⚠️ <strong>服务免责：</strong>不保证 100% 可用性，请勿存储重要数据
+            </div>
+            <div class="dark-mode-toggle">
+                <span style="color: var(--text-secondary); font-size: 14px;">🌙 暗黑模式</span>
+                <div class="toggle-switch" id="darkModeToggle" onclick="toggleDarkMode()"></div>
+            </div>
+        </div>
+
+        <div class="upload-area" id="uploadArea">
+            <div class="upload-icon">☁️</div>
+            <div class="upload-text">点击或拖拽文件到此处</div>
+            <div class="upload-hint">支持 JPG、PNG、GIF、PDF 等格式</div>
+            <input type="file" class="upload-input" id="fileInput" multiple accept="image/*,.pdf,.doc,.docx">
+        </div>
+
+        <div class="progress-container" id="progressContainer">
+            <div class="progress-bar">
+                <div class="progress-fill" id="progressFill"></div>
+            </div>
+            <div class="progress-info">
+                <span class="progress-text" id="progressText">准备上传...</span>
+                <span class="progress-speed" id="progressSpeed"></span>
+            </div>
+        </div>
+
+        <div class="result-container" id="resultContainer"></div>
+
+        <div class="clear-history">
+            <button class="btn btn-clear" id="clearBtn" style="display: none;">🗑️ 清空历史记录</button>
+        </div>
+
+        <div class="stats" id="stats">
+            已上传 <strong id="uploadCount">0</strong> 个文件
+        </div>
+    </div>
+
+    <script>
+        const uploadArea = document.getElementById('uploadArea');
+        const fileInput = document.getElementById('fileInput');
+        const progressContainer = document.getElementById('progressContainer');
+        const progressFill = document.getElementById('progressFill');
+        const progressText = document.getElementById('progressText');
+        const progressSpeed = document.getElementById('progressSpeed');
+        const resultContainer = document.getElementById('resultContainer');
+        const clearBtn = document.getElementById('clearBtn');
+        const uploadCountEl = document.getElementById('uploadCount');
+        const darkModeToggle = document.getElementById('darkModeToggle');
+
+        let uploadCount = 0;
+        let activeUploads = 0;
+        const maxConcurrentUploads = 3;
+
+        // 暗黑模式
+        function initDarkMode() {
+            const saved = localStorage.getItem('darkMode');
+            if (saved === 'true' || (saved === null && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+                document.body.classList.add('dark-mode');
+            }
+        }
+
+        function toggleDarkMode() {
+            document.body.classList.toggle('dark-mode');
+            const isDark = document.body.classList.contains('dark-mode');
+            localStorage.setItem('darkMode', isDark);
+            showToast(isDark ? '已切换到暗黑模式' : '已切换到明亮模式', 'success');
+        }
+
+        initDarkMode();
+
+        // 拖拽事件
+        ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+            uploadArea.addEventListener(eventName, (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+
+                if (eventName === 'dragenter' || eventName === 'dragover') {
+                    uploadArea.classList.add('dragover');
+                } else {
+                    uploadArea.classList.remove('dragover');
+                }
+            });
+        });
+
+        uploadArea.addEventListener('drop', (e) => {
+            const files = e.dataTransfer.files;
+            if (files.length > 0) {
+                handleFiles(files);
+            }
+        });
+
+        // 点击上传
+        uploadArea.addEventListener('click', () => {
+            fileInput.click();
+        });
+
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files.length > 0) {
+                handleFiles(e.target.files);
+            }
+        });
+
+        // 处理文件上传（并行）
+        async function handleFiles(files) {
+            if (activeUploads >= maxConcurrentUploads) {
+                showToast(`已达到最大并发数 (${maxConcurrentUploads})，请等待`, 'error');
+                return;
+            }
+
+            const filesArray = Array.from(files).slice(0, maxConcurrentUploads - activeUploads);
+            
+            if (activeUploads === 0) {
+                progressContainer.style.display = 'block';
+            }
+
+            await Promise.all(filesArray.map(file => uploadFile(file)));
+        }
+
+        // 上传单个文件
+        async function uploadFile(file) {
+            if (file.size > 20 * 1024 * 1024) {
+                addResult(file.name, null, 'error', `文件过大 (${(file.size / 1024 / 1024).toFixed(2)}MB)`);
+                showToast('文件过大（最大20MB）', 'error');
+                return;
+            }
+
+            activeUploads++;
+            updateProgress();
+            uploadArea.classList.add('uploading');
+
+            const formData = new FormData();
+            formData.append('file', file);
+
+            const startTime = Date.now();
+            let lastLoaded = 0;
+            let lastTime = startTime;
+
+            try {
+                const xhr = new XMLHttpRequest();
+
+                xhr.upload.onprogress = (e) => {
+                    if (e.lengthComputable) {
+                        const percent = Math.round((e.loaded / e.total) * 100);
+                        progressFill.style.width = percent + '%';
+                        
+                        // 计算上传速度
+                        const currentTime = Date.now();
+                        const timeElapsed = (currentTime - lastTime) / 1000;
+                        if (timeElapsed > 0.5) {
+                            const bytesPerSecond = (e.loaded - lastLoaded) / timeElapsed;
+                            const speed = formatSpeed(bytesPerSecond);
+                            progressSpeed.textContent = speed;
+                            lastLoaded = e.loaded;
+                            lastTime = currentTime;
+                        }
+
+                        const uploadedSize = formatSize(e.loaded);
+                        const totalSize = formatSize(e.total);
+                        progressText.textContent = `上传中 ${uploadedSize} / ${totalSize} (${percent}%)`;
+                    }
+                };
+
+                xhr.onload = () => {
+                    if (xhr.status === 200) {
+                        const url = xhr.responseText.trim();
+                        addResult(file.name, url, 'success');
+                        uploadCount++;
+                        uploadCountEl.textContent = uploadCount;
+                        clearBtn.style.display = 'block';
+                        saveHistory(file.name, url);
+                        showToast(`上传成功: ${file.name}`, 'success');
+                    } else if (xhr.status === 403) {
+                        // IP被封禁
+                        let errorMsg = 'IP被封禁';
+                        let banReason = '';
+                        let bannedIP = '';
+                        try {
+                            const errorData = JSON.parse(xhr.responseText);
+                            if (errorData.error === 'forbidden') {
+                                if (errorData.reason) {
+                                    banReason = errorData.reason;
+                                    errorMsg = `IP被封禁: ${errorData.reason}`;
+                                }
+                                if (errorData.ip) {
+                                    bannedIP = errorData.ip;
+                                }
+                            }
+                        } catch (e) {}
+
+                        // 显示详细的封禁信息
+                        let banMessage = '⚠️ 您的IP已被封禁';
+                        if (banReason) {
+                            banMessage += `\n原因: ${banReason}`;
+                        }
+                        if (bannedIP) {
+                            banMessage += `\nIP地址: ${bannedIP}`;
+                        }
+                        banMessage += '\n请联系管理员处理';
+
+                        addResult(file.name, null, 'error', errorMsg);
+                        alert(banMessage);
+                        showToast('⚠️ 您的IP已被封禁', 'error');
+                    } else if (xhr.status === 413) {
+                        // 文件过大
+                        addResult(file.name, null, 'error', '文件过大（最大20MB）');
+                        showToast('文件过大（最大20MB）', 'error');
+                    } else {
+                        // 其他错误（包括554等非标准状态码）
+                        let errorMsg = `HTTP ${xhr.status}`;
+                        try {
+                            const errorData = JSON.parse(xhr.responseText);
+                            if (errorData.error) {
+                                errorMsg = errorData.error;
+                                if (errorData.reason) {
+                                    errorMsg += `: ${errorData.reason}`;
+                                }
+                            }
+                        } catch (e) {
+                            // JSON解析失败，显示原始响应或通用错误
+                            const responseText = xhr.responseText.trim();
+                            if (responseText) {
+                                errorMsg += ` - ${responseText}`;
+                            } else {
+                                errorMsg += ' - 上传失败';
+                            }
+                        }
+                        addResult(file.name, null, 'error', errorMsg);
+                        showToast('上传失败', 'error');
+                    }
+                };
+
+                xhr.onerror = () => {
+                    addResult(file.name, null, 'error', '网络错误，请检查网络连接');
+                    showToast('网络错误', 'error');
+                };
+
+                // 处理超时等特殊情况
+                xhr.ontimeout = () => {
+                    addResult(file.name, null, 'error', '上传超时');
+                    showToast('上传超时', 'error');
+                };
+
+                xhr.onloadend = () => {
+                    activeUploads--;
+                    if (activeUploads === 0) {
+                        setTimeout(() => {
+                            progressContainer.style.display = 'none';
+                            progressFill.style.width = '0%';
+                            progressSpeed.textContent = '';
+                        }, 500);
+                    }
+                    // 清除上传区域的禁用状态
+                    uploadArea.classList.remove('uploading');
+                };
+
+                // 处理所有网络错误（包括超时、网络中断等）
+                xhr.addEventListener('loadend', () => {
+                    if (xhr.status === 0) {
+                        addResult(file.name, null, 'error', '连接失败，请检查网络');
+                        showToast('连接失败，请检查网络', 'error');
+                    }
+                });
+
+                xhr.open('POST', '/upload');
+                xhr.send(formData);
+            } catch (error) {
+                addResult(file.name, null, 'error', error.message);
+                activeUploads--;
+            }
+        }
+
+        // 更新进度显示
+        function updateProgress() {
+            if (activeUploads > 0) {
+                progressContainer.style.display = 'block';
+                progressText.textContent = `正在上传 ${activeUploads} 个文件...`;
+            }
+        }
+
+        // 格式化文件大小
+        function formatSize(bytes) {
+            if (bytes === 0) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+
+        // 格式化速度
+        function formatSpeed(bytesPerSecond) {
+            if (bytesPerSecond === 0) return '0 KB/s';
+            const k = 1024;
+            if (bytesPerSecond < k) return Math.round(bytesPerSecond) + ' B/s';
+            if (bytesPerSecond < k * k) return Math.round(bytesPerSecond / k) + ' KB/s';
+            return (bytesPerSecond / k / k).toFixed(2) + ' MB/s';
+        }
+
+        // 添加结果
+        function addResult(filename, url, status, message = '') {
+            const item = document.createElement('div');
+            item.className = 'result-item';
+            
+            const statusBadge = status === 'success' 
+                ? '<span class="result-status success">✓ 成功</span>'
+                : '<span class="result-status error">✗ 失败</span>';
+
+            const actions = url ? `
+                <div class="result-actions">
+                    <button class="btn btn-copy" onclick="copyUrl('${url}')">📋 复制</button>
+                    <button class="btn btn-open" onclick="window.open('${url}', '_blank')">🔗 打开</button>
+                </div>
+            ` : '';
+
+            item.innerHTML = `
+                <div class="result-header">
+                    <div class="result-name" title="${filename}">${filename}</div>
+                    ${statusBadge}
+                </div>
+                ${url ? `<div class="result-url">${url}</div>` : ''}
+                ${actions}
+            `;
+            
+            resultContainer.insertBefore(item, resultContainer.firstChild);
+            resultContainer.style.display = 'block';
+        }
+
+        // 复制 URL
+        function copyUrl(url) {
+            navigator.clipboard.writeText(url).then(() => {
+                showToast('URL 已复制到剪贴板', 'success');
+            }).catch(() => {
+                showToast('复制失败', 'error');
+            });
+        }
+
+        // 显示提示
+        function showToast(message, type = 'success') {
+            // 确保容器存在
+            let container = document.querySelector('.toast-container');
+            if (!container) {
+                container = document.createElement('div');
+                container.className = 'toast-container';
+                document.body.appendChild(container);
+            }
+
+            const toast = document.createElement('div');
+            toast.className = `toast ${type}`;
+            toast.textContent = message;
+            container.appendChild(toast);
+
+            setTimeout(() => {
+                toast.style.animation = 'toastSlide 0.4s ease reverse';
+                setTimeout(() => {
+                    toast.remove();
+                    // 如果容器为空，移除容器
+                    if (container.children.length === 0) {
+                        container.remove();
+                    }
+                }, 400);
+            }, 3000);
+        }
+
+        // 创建粒子效果
+        function createParticles() {
+            for (let i = 0; i < 15; i++) {
+                const particle = document.createElement('div');
+                particle.className = 'particle';
+                particle.style.left = Math.random() * 100 + '%';
+                particle.style.top = Math.random() * 100 + '%';
+                particle.style.animationDelay = Math.random() * 4 + 's';
+                particle.style.width = Math.random() * 6 + 3 + 'px';
+                particle.style.height = particle.style.width;
+                uploadArea.appendChild(particle);
+            }
+        }
+
+        createParticles();
+
+        // 本地历史记录
+        function saveHistory(filename, url) {
+            const history = getHistory();
+            history.unshift({ filename, url, time: Date.now() });
+            if (history.length > 50) history.pop(); // 最多保存50条
+            localStorage.setItem('uploadHistory', JSON.stringify(history));
+        }
+
+        function getHistory() {
+            try {
+                return JSON.parse(localStorage.getItem('uploadHistory') || '[]');
+            } catch (e) {
+                return [];
+            }
+        }
+
+        function loadHistory() {
+            const history = getHistory();
+            history.forEach(item => {
+                addResult(item.filename, item.url, 'success');
+            });
+            uploadCount = history.length;
+            uploadCountEl.textContent = uploadCount;
+            if (history.length > 0) {
+                clearBtn.style.display = 'block';
+                resultContainer.style.display = 'block';
+            }
+        }
+
+        // 清空历史
+        clearBtn.addEventListener('click', () => {
+            if (confirm('确定清空所有历史记录吗？')) {
+                localStorage.removeItem('uploadHistory');
+                resultContainer.innerHTML = '';
+                uploadCount = 0;
+                uploadCountEl.textContent = '0';
+                clearBtn.style.display = 'none';
+                showToast('已清空历史记录', 'success');
+            }
+        });
+
+        // 加载历史记录
+        loadHistory();
+    </script>
+</body>
+</html>

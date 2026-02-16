@@ -1,0 +1,47 @@
+{
+  "telegram": {
+    "bot_token": "YOUR_BOT_TOKEN",
+    "channel_id": "-1001234567890"
+  },
+  "mysql": {
+    "host": "localhost",
+    "port": 3306,
+    "username": "tg_imagebed",
+    "password": "your_password",
+    "database": "tg_imagebed"
+  },
+  "admin": {
+    "user_ids": [123456789, 987654321]
+  }
+}
+
+/*
+配置说明：
+
+1. telegram.bot_token:
+   - 从 @BotFather 获取 Bot Token
+   - 示例: "123456789:ABCdefGHIjklMNOpqrsTUVwxyz"
+
+2. telegram.channel_id (上传目标):
+   - 群组 ID: 必须是负数，如 -1001234567890
+   - 频道 ID: 必须是负数，如 -1001234567890
+   - 获取方法:
+     * 将 Bot 添加到群组/频道（需要管理员权限）
+     * 发送消息到该群组/频道
+     * 访问 https://api.telegram.org/bot{BOT_TOKEN}/getUpdates
+     * 找到消息中的 "chat":{"id":...}
+
+3. mysql 配置:
+   - host: MySQL 服务器地址
+   - port: MySQL 端口（默认 3306）
+   - username: 数据库用户名
+   - password: 数据库密码
+   - database: 数据库名称
+
+4. admin.user_ids:
+   - Telegram 用户 ID 列表（用于 Bot 管理）
+   - 获取方法: 使用 @userinfobot 获取您的 ID
+   - 多个 ID 用逗号分隔: [123456789, 987654321]
+
+注意: Bot 必须有权限在指定的群组/频道中发送消息
+*/

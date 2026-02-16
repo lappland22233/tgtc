@@ -1,0 +1,955 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TG图床 - 后台管理</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        .header {
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 16px;
+            padding: 30px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1);
+        }
+
+        .header h1 {
+            color: #333;
+            font-size: 28px;
+            margin-bottom: 10px;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-top: 20px;
+        }
+
+        .stat-card {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 20px;
+            border-radius: 12px;
+            text-align: center;
+        }
+
+        .stat-value {
+            font-size: 32px;
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+
+        .stat-label {
+            font-size: 14px;
+            opacity: 0.9;
+        }
+
+        .main-content {
+            display: grid;
+            grid-template-columns: 350px 1fr;
+            gap: 20px;
+        }
+
+        .sidebar {
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 16px;
+            padding: 20px;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1);
+            height: fit-content;
+        }
+
+        .sidebar h2 {
+            color: #333;
+            font-size: 20px;
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #667eea;
+        }
+
+        .form-group {
+            margin-bottom: 15px;
+        }
+
+        .form-group label {
+            display: block;
+            color: #555;
+            font-size: 14px;
+            margin-bottom: 5px;
+            font-weight: 500;
+        }
+
+        .form-group input,
+        .form-group textarea {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 14px;
+            transition: border-color 0.3s;
+        }
+
+        .form-group input:focus,
+        .form-group textarea:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .form-group textarea {
+            resize: vertical;
+            min-height: 80px;
+        }
+
+        .btn {
+            width: 100%;
+            padding: 12px;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+            margin-bottom: 10px;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
+        }
+
+        .btn-danger {
+            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+            color: white;
+        }
+
+        .btn-danger:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 15px rgba(245, 87, 108, 0.4);
+        }
+
+        .btn-success {
+            background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+            color: white;
+        }
+
+        .btn-success:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 15px rgba(79, 172, 254, 0.4);
+        }
+
+        .btn-secondary {
+            background: #f0f0f0;
+            color: #333;
+        }
+
+        .btn-secondary:hover {
+            background: #e0e0e0;
+        }
+
+        .banned-list {
+            margin-top: 20px;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+
+        .banned-item {
+            background: #fff5f5;
+            border-left: 4px solid #f5576c;
+            padding: 12px;
+            margin-bottom: 10px;
+            border-radius: 4px;
+        }
+
+        .banned-ip {
+            font-weight: 600;
+            color: #f5576c;
+            margin-bottom: 5px;
+        }
+
+        .banned-reason {
+            font-size: 12px;
+            color: #666;
+            margin-bottom: 5px;
+        }
+
+        .banned-time {
+            font-size: 11px;
+            color: #999;
+        }
+
+        .content-panel {
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 16px;
+            padding: 20px;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1);
+        }
+
+        .tabs {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            border-bottom: 2px solid #e0e0e0;
+            padding-bottom: 10px;
+        }
+
+        .tab {
+            padding: 10px 20px;
+            background: #f0f0f0;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 600;
+            color: #666;
+            transition: all 0.3s;
+        }
+
+        .tab.active {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+
+        .tab:hover:not(.active) {
+            background: #e0e0e0;
+        }
+
+        .search-box {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+
+        .search-box input {
+            flex: 1;
+            padding: 12px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 14px;
+        }
+
+        .search-box input:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .search-box button {
+            padding: 12px 24px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: all 0.3s;
+        }
+
+        .search-box button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
+        }
+
+        .file-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+        }
+
+        .file-table th,
+        .file-table td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid #e0e0e0;
+        }
+
+        .file-table th {
+            background: #f8f9fa;
+            color: #333;
+            font-weight: 600;
+            position: sticky;
+            top: 0;
+        }
+
+        .file-table tr:hover {
+            background: #f8f9fa;
+        }
+
+        .file-path {
+            font-family: monospace;
+            color: #667eea;
+            font-size: 13px;
+        }
+
+        .file-info {
+            font-size: 12px;
+            color: #666;
+        }
+
+        .ip-tag {
+            display: inline-block;
+            padding: 4px 8px;
+            background: #e3f2fd;
+            color: #1976d2;
+            border-radius: 4px;
+            font-size: 12px;
+            font-family: monospace;
+        }
+
+        .status-badge {
+            display: inline-block;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 600;
+        }
+
+        .status-normal {
+            background: #e8f5e9;
+            color: #2e7d32;
+        }
+
+        .status-deleted {
+            background: #ffebee;
+            color: #c62828;
+        }
+
+        .action-btn {
+            padding: 6px 12px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+            font-weight: 600;
+            transition: all 0.3s;
+            margin-right: 5px;
+        }
+
+        .btn-delete {
+            background: #ffebee;
+            color: #c62828;
+        }
+
+        .btn-delete:hover {
+            background: #c62828;
+            color: white;
+        }
+
+        .btn-view {
+            background: #e3f2fd;
+            color: #1976d2;
+        }
+
+        .btn-view:hover {
+            background: #1976d2;
+            color: white;
+        }
+
+        .btn-ban {
+            background: #fff3e0;
+            color: #e65100;
+        }
+
+        .btn-ban:hover {
+            background: #e65100;
+            color: white;
+        }
+
+        .btn-unban {
+            background: #e8f5e9;
+            color: #2e7d32;
+        }
+
+        .btn-unban:hover {
+            background: #2e7d32;
+            color: white;
+        }
+
+        .pagination {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 10px;
+            margin-top: 20px;
+        }
+
+        .pagination button {
+            padding: 8px 16px;
+            background: #f0f0f0;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+
+        .pagination button:hover:not(:disabled) {
+            background: #667eea;
+            color: white;
+        }
+
+        .pagination button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .pagination span {
+            color: #666;
+            font-size: 14px;
+        }
+
+        .message {
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            display: none;
+        }
+
+        .message.show {
+            display: block;
+        }
+
+        .message-success {
+            background: #e8f5e9;
+            color: #2e7d32;
+            border-left: 4px solid #2e7d32;
+        }
+
+        .message-error {
+            background: #ffebee;
+            color: #c62828;
+            border-left: 4px solid #c62828;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #999;
+        }
+
+        .loading::after {
+            content: '...';
+            animation: dots 1.5s steps(4, end) infinite;
+        }
+
+        @keyframes dots {
+            0%, 20% { content: '.'; }
+            40% { content: '..'; }
+            60%, 100% { content: '...'; }
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: #999;
+        }
+
+        .empty-state svg {
+            width: 80px;
+            height: 80px;
+            margin-bottom: 20px;
+            opacity: 0.3;
+        }
+
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.5);
+            z-index: 1000;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .modal.show {
+            display: flex;
+        }
+
+        .modal-content {
+            background: white;
+            border-radius: 16px;
+            padding: 30px;
+            max-width: 500px;
+            width: 90%;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+        }
+
+        .modal-header {
+            font-size: 20px;
+            font-weight: 600;
+            margin-bottom: 20px;
+            color: #333;
+        }
+
+        .modal-actions {
+            display: flex;
+            gap: 10px;
+            margin-top: 20px;
+        }
+
+        @media (max-width: 1024px) {
+            .main-content {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        @media (max-width: 768px) {
+            .stats-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+
+            .file-table {
+                font-size: 12px;
+            }
+
+            .file-table th,
+            .file-table td {
+                padding: 8px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🖼️ TG 图床后台管理</h1>
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="stat-value" id="totalFiles">0</div>
+                    <div class="stat-label">总文件数</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value" id="todayUploads">0</div>
+                    <div class="stat-label">今日上传</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value" id="todayAccess">0</div>
+                    <div class="stat-label">今日访问</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value" id="bannedIPs">0</div>
+                    <div class="stat-label">封禁IP</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="main-content">
+            <div class="sidebar">
+                <h2>🔒 IP 管理</h2>
+                <div id="message" class="message"></div>
+
+                <div class="form-group">
+                    <label>封禁 IP</label>
+                    <input type="text" id="banIP" placeholder="输入 IP 地址">
+                </div>
+                <div class="form-group">
+                    <label>封禁原因</label>
+                    <textarea id="banReason" placeholder="填写封禁原因（可选）"></textarea>
+                </div>
+                <button class="btn btn-danger" onclick="banIP()">🚫 封禁 IP</button>
+
+                <div class="form-group" style="margin-top: 20px;">
+                    <label>解封 IP</label>
+                    <input type="text" id="unbanIP" placeholder="输入要解封的 IP">
+                </div>
+                <button class="btn btn-success" onclick="unbanIP()">✅ 解封 IP</button>
+
+                <h2 style="margin-top: 30px;">📋 已封禁列表</h2>
+                <div class="banned-list" id="bannedList">
+                    <div class="loading">加载中</div>
+                </div>
+            </div>
+
+            <div class="content-panel">
+                <div class="tabs">
+                    <button class="tab active" onclick="switchTab('all')">全部文件</button>
+                    <button class="tab" onclick="switchTab('ip')">IP 搜索</button>
+                </div>
+
+                <div id="searchBox" class="search-box" style="display: none;">
+                    <input type="text" id="searchIP" placeholder="输入 IP 地址搜索上传历史">
+                    <button onclick="searchByIP()">🔍 搜索</button>
+                </div>
+
+                <div id="fileList">
+                    <div class="loading">加载中</div>
+                </div>
+
+                <div class="pagination" id="pagination" style="display: none;">
+                    <button id="prevBtn" onclick="changePage(-1)">上一页</button>
+                    <span id="pageInfo">第 1 页</span>
+                    <button id="nextBtn" onclick="changePage(1)">下一页</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal" id="deleteModal">
+        <div class="modal-content">
+            <div class="modal-header">⚠️ 确认删除</div>
+            <p id="deleteMessage">确定要删除此文件吗？此操作不可撤销。</p>
+            <div class="modal-actions">
+                <button class="btn btn-secondary" onclick="closeModal()">取消</button>
+                <button class="btn btn-danger" onclick="confirmDelete()">确认删除</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentPage = 1;
+        let currentTab = 'all';
+        let searchQuery = '';
+        let pendingDeletePath = '';
+
+        // 初始化
+        document.addEventListener('DOMContentLoaded', () => {
+            loadStats();
+            loadBannedList();
+            loadFiles();
+        });
+
+        // 切换标签
+        function switchTab(tab) {
+            currentTab = tab;
+            currentPage = 1;
+            searchQuery = '';
+
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            event.target.classList.add('active');
+
+            document.getElementById('searchBox').style.display = tab === 'ip' ? 'flex' : 'none';
+
+            loadFiles();
+        }
+
+        // 加载统计信息
+        async function loadStats() {
+            try {
+                const response = await fetch('/api/stats');
+                const data = await response.json();
+
+                document.getElementById('totalFiles').textContent = data.total_files || 0;
+                document.getElementById('todayUploads').textContent = data.today_uploads || 0;
+                document.getElementById('todayAccess').textContent = data.today_access || 0;
+                document.getElementById('bannedIPs').textContent = data.banned_ips || 0;
+            } catch (error) {
+                console.error('加载统计信息失败:', error);
+            }
+        }
+
+        // 加载文件列表
+        async function loadFiles() {
+            const fileList = document.getElementById('fileList');
+            fileList.innerHTML = '<div class="loading">加载中</div>';
+
+            try {
+                let url = `/api/files?page=${currentPage}`;
+                if (currentTab === 'ip' && searchQuery) {
+                    url += `&ip=${encodeURIComponent(searchQuery)}`;
+                }
+
+                const response = await fetch(url);
+                const data = await response.json();
+
+                if (data.files && data.files.length > 0) {
+                    fileList.innerHTML = `
+                        <table class="file-table">
+                            <thead>
+                                <tr>
+                                    <th>文件信息</th>
+                                    <th>上传IP</th>
+                                    <th>创建时间</th>
+                                    <th>状态</th>
+                                    <th>操作</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${data.files.map(file => `
+                                    <tr>
+                                        <td>
+                                            <div class="file-path">${file.random_path}</div>
+                                            <div class="file-info">
+                                                ${file.file_name || '未知文件名'} |
+                                                ${(file.file_size / 1024).toFixed(2)} KB |
+                                                ${file.mime_type || '未知类型'}
+                                            </div>
+                                        </td>
+                                        <td>
+                                            <span class="ip-tag">${file.upload_ip || '-'}</span>
+                                        </td>
+                                        <td>
+                                            <div class="file-info">${formatDate(file.created_at)}</div>
+                                        </td>
+                                        <td>
+                                            <span class="status-badge ${file.status === 'normal' ? 'status-normal' : 'status-deleted'}">
+                                                ${file.status === 'normal' ? '正常' : '已删除'}
+                                            </span>
+                                        </td>
+                                        <td>
+                                            ${file.status === 'normal' ? `
+                                                <button class="action-btn btn-view" onclick="viewFile('${file.random_path}')">查看</button>
+                                                <button class="action-btn btn-ban" onclick="banFromTable('${file.upload_ip}')">封禁</button>
+                                                <button class="action-btn btn-delete" onclick="showDeleteModal('${file.random_path}')">删除</button>
+                                            ` : '-'}
+                                        </td>
+                                    </tr>
+                                `).join('')}
+                            </tbody>
+                        </table>
+                    `;
+
+                    // 更新分页
+                    if (data.total_pages > 1) {
+                        document.getElementById('pagination').style.display = 'flex';
+                        document.getElementById('pageInfo').textContent = `第 ${currentPage} / ${data.total_pages} 页`;
+                        document.getElementById('prevBtn').disabled = currentPage <= 1;
+                        document.getElementById('nextBtn').disabled = currentPage >= data.total_pages;
+                    } else {
+                        document.getElementById('pagination').style.display = 'none';
+                    }
+                } else {
+                    fileList.innerHTML = `
+                        <div class="empty-state">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+                            </svg>
+                            <p>暂无文件记录</p>
+                        </div>
+                    `;
+                }
+            } catch (error) {
+                console.error('加载文件列表失败:', error);
+                fileList.innerHTML = `
+                    <div class="empty-state">
+                        <p>加载失败，请刷新页面重试</p>
+                    </div>
+                `;
+            }
+        }
+
+        // 搜索IP
+        function searchByIP() {
+            searchQuery = document.getElementById('searchIP').value.trim();
+            currentPage = 1;
+            loadFiles();
+        }
+
+        // 切换页面
+        function changePage(delta) {
+            currentPage += delta;
+            loadFiles();
+        }
+
+        // 加载封禁列表
+        async function loadBannedList() {
+            const bannedList = document.getElementById('bannedList');
+            bannedList.innerHTML = '<div class="loading">加载中</div>';
+
+            try {
+                const response = await fetch('/api/banned');
+                const data = await response.json();
+
+                if (data.banned_ips && data.banned_ips.length > 0) {
+                    bannedList.innerHTML = data.banned_ips.map(item => `
+                        <div class="banned-item">
+                            <div class="banned-ip">${item.ip}</div>
+                            ${item.reason ? `<div class="banned-reason">原因: ${item.reason}</div>` : ''}
+                            <div class="banned-time">封禁时间: ${item.banned_at}</div>
+                            <button class="action-btn btn-unban" style="margin-top: 8px;" onclick="unbanIP('${item.ip}')">解封</button>
+                        </div>
+                    `).join('');
+                } else {
+                    bannedList.innerHTML = `
+                        <div class="empty-state" style="padding: 30px;">
+                            <p>暂无封禁记录</p>
+                        </div>
+                    `;
+                }
+            } catch (error) {
+                console.error('加载封禁列表失败:', error);
+                bannedList.innerHTML = `
+                    <div class="empty-state">
+                        <p>加载失败</p>
+                    </div>
+                `;
+            }
+        }
+
+        // 封禁IP
+        async function banIP(ip) {
+            const ipValue = ip || document.getElementById('banIP').value.trim();
+            const reason = document.getElementById('banReason').value.trim();
+
+            if (!ipValue) {
+                showMessage('请输入 IP 地址', 'error');
+                return;
+            }
+
+            try {
+                const response = await fetch('/api/ban', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ ip: ipValue, reason: reason })
+                });
+
+                const data = await response.json();
+
+                if (data.success) {
+                    showMessage(data.message || '封禁成功', 'success');
+                    document.getElementById('banIP').value = '';
+                    document.getElementById('banReason').value = '';
+                    loadBannedList();
+                    loadStats();
+                } else {
+                    showMessage(data.message || '封禁失败', 'error');
+                }
+            } catch (error) {
+                console.error('封禁失败:', error);
+                showMessage('网络错误，请稍后重试', 'error');
+            }
+        }
+
+        // 从表格中封禁IP
+        function banFromTable(ip) {
+            if (!ip || ip === '-') {
+                showMessage('无效的 IP 地址', 'error');
+                return;
+            }
+            if (confirm(`确定要封禁 IP ${ip} 吗？`)) {
+                banIP(ip);
+            }
+        }
+
+        // 解封IP
+        async function unbanIP(ip) {
+            const ipValue = ip || document.getElementById('unbanIP').value.trim();
+
+            if (!ipValue) {
+                showMessage('请输入 IP 地址', 'error');
+                return;
+            }
+
+            if (!confirm(`确定要解封 IP ${ipValue} 吗？`)) {
+                return;
+            }
+
+            try {
+                const response = await fetch('/api/unban', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ ip: ipValue })
+                });
+
+                const data = await response.json();
+
+                if (data.success) {
+                    showMessage(data.message || '解封成功', 'success');
+                    if (ip) {
+                        document.getElementById('unbanIP').value = '';
+                    }
+                    loadBannedList();
+                    loadStats();
+                } else {
+                    showMessage(data.message || '解封失败', 'error');
+                }
+            } catch (error) {
+                console.error('解封失败:', error);
+                showMessage('网络错误，请稍后重试', 'error');
+            }
+        }
+
+        // 显示删除确认框
+        function showDeleteModal(path) {
+            pendingDeletePath = path;
+            document.getElementById('deleteMessage').textContent = `确定要删除文件 "${path}" 吗？此操作不可撤销。`;
+            document.getElementById('deleteModal').classList.add('show');
+        }
+
+        // 关闭模态框
+        function closeModal() {
+            pendingDeletePath = '';
+            document.getElementById('deleteModal').classList.remove('show');
+        }
+
+        // 确认删除
+        async function confirmDelete() {
+            if (!pendingDeletePath) {
+                closeModal();
+                return;
+            }
+
+            try {
+                const response = await fetch('/api/delete', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ path: pendingDeletePath })
+                });
+
+                const data = await response.json();
+
+                if (data.success) {
+                    showMessage('文件删除成功', 'success');
+                    closeModal();
+                    loadFiles();
+                    loadStats();
+                } else {
+                    showMessage(data.message || '删除失败', 'error');
+                }
+            } catch (error) {
+                console.error('删除失败:', error);
+                showMessage('网络错误，请稍后重试', 'error');
+            }
+        }
+
+        // 查看文件
+        function viewFile(path) {
+            window.open(`/${path}`, '_blank');
+        }
+
+        // 显示消息
+        function showMessage(message, type) {
+            const msgEl = document.getElementById('message');
+            msgEl.className = `message message-${type} show`;
+            msgEl.textContent = message;
+
+            setTimeout(() => {
+                msgEl.classList.remove('show');
+            }, 3000);
+        }
+
+        // 格式化日期
+        function formatDate(dateStr) {
+            const date = new Date(dateStr);
+            const year = date.getFullYear();
+            const month = String(date.getMonth() + 1).padStart(2, '0');
+            const day = String(date.getDate()).padStart(2, '0');
+            const hours = String(date.getHours()).padStart(2, '0');
+            const minutes = String(date.getMinutes()).padStart(2, '0');
+            return `${year}-${month}-${day} ${hours}:${minutes}`;
+        }
+    </script>
+</body>
+</html>

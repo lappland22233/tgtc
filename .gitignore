@@ -1,0 +1,63 @@
+# 压缩包文件
+*.zip
+*.tar
+*.tar.gz
+*.rar
+*.7z
+
+# 可执行文件
+tg-imagebed
+tg-imagebed.exe
+*.exe
+*.out
+
+# 配置文件（包含敏感信息）
+data.json
+*.db
+*.sqlite
+*.sqlite3
+
+# Go 相关
+go.sum
+vendor/
+
+# Python 相关
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# 临时文件
+*.tmp
+*.log
+*.bak
+
+# 编译输出
+*.o
+*.a
+*.dll
+
+# 系统文件
+Thumbs.db
+.DS_Store
+
+# 敏感信息
+*.key
+*.pem
+*.crt
+secrets/
+config/
