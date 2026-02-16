@@ -483,7 +483,8 @@ func statsHandler(w http.ResponseWriter, r *http.Request) {
 func filesHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"message": "method not allowed"})
 		return
 	}
 
@@ -493,6 +494,7 @@ func filesHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	pageSize := 20
 	searchIP := strings.TrimSpace(r.URL.Query().Get("ip"))
+	searchKeyword := strings.TrimSpace(r.URL.Query().Get("q"))
 
 	resp := filesResponse{CurrentPage: page, Files: []fileRecord{}}
 	countQuery := "SELECT COUNT(*) FROM files WHERE 1=1"
@@ -500,15 +502,22 @@ func filesHandler(w http.ResponseWriter, r *http.Request) {
 	if searchIP != "" {
 		parsed := net.ParseIP(searchIP)
 		if parsed == nil {
-			http.Error(w, "invalid ip", http.StatusBadRequest)
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"message": "invalid ip"})
 			return
 		}
 		countQuery += " AND upload_ip = ?"
 		countArgs = append(countArgs, ipToBin(parsed))
 	}
+	if searchKeyword != "" {
+		kw := "%" + searchKeyword + "%"
+		countQuery += " AND (INET6_NTOA(upload_ip) LIKE ? OR random_path LIKE ? OR file_name LIKE ?)"
+		countArgs = append(countArgs, kw, kw, kw)
+	}
 
 	if err := db.QueryRow(countQuery, countArgs...).Scan(&resp.TotalCount); err != nil {
-		http.Error(w, "query failed", http.StatusInternalServerError)
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"message": "query failed"})
 		return
 	}
 	if resp.TotalCount > 0 {
@@ -525,12 +534,18 @@ func filesHandler(w http.ResponseWriter, r *http.Request) {
 		query += " AND upload_ip = ?"
 		args = append(args, ipToBin(net.ParseIP(searchIP)))
 	}
+	if searchKeyword != "" {
+		kw := "%" + searchKeyword + "%"
+		query += " AND (INET6_NTOA(upload_ip) LIKE ? OR random_path LIKE ? OR file_name LIKE ?)"
+		args = append(args, kw, kw, kw)
+	}
 	query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
 	args = append(args, pageSize, (page-1)*pageSize)
 
 	rows, err := db.Query(query, args...)
 	if err != nil {
-		http.Error(w, "query failed", http.StatusInternalServerError)
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"message": "query failed"})
 		return
 	}
 	defer rows.Close()
