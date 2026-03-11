@@ -12,7 +12,10 @@
   },
   "admin": {
     "user_ids": [123456789, 987654321]
-  }
+  },
+  "api_keys": [
+    "your-secret-api-key-here-change-this-in-production"
+  ]
 }
 
 /*
@@ -40,8 +43,15 @@
 
 4. admin.user_ids:
    - Telegram 用户 ID 列表（用于 Bot 管理）
-   - 获取方法: 使用 @userinfobot 获取您的 ID
-   - 多个 ID 用逗号分隔: [123456789, 987654321]
+   - 获取方法：使用 @userinfobot 获取您的 ID
+   - 多个 ID 用逗号分隔：[123456789, 987654321]
 
-注意: Bot 必须有权限在指定的群组/频道中发送消息
+5. api_keys（重要）:
+   - 管理后台认证 API Key 列表
+   - 建议使用强随机字符串（至少 32 位）
+   - 生成示例：openssl rand -hex 32
+   - 可以配置多个 Key，用于不同管理员
+   - 生产环境务必修改默认值！
+
+注意：Bot 必须有权限在指定的群组/频道中发送消息
 */

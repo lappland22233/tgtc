@@ -18,6 +18,98 @@
             padding: 20px;
         }
 
+        /* 登录页面样式 */
+        .login-container {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            z-index: 2000;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .login-container.show {
+            display: flex;
+        }
+
+        .login-box {
+            background: white;
+            border-radius: 16px;
+            padding: 40px;
+            max-width: 400px;
+            width: 90%;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+        }
+
+        .login-title {
+            font-size: 28px;
+            font-weight: bold;
+            color: #333;
+            margin-bottom: 10px;
+            text-align: center;
+        }
+
+        .login-subtitle {
+            font-size: 14px;
+            color: #666;
+            margin-bottom: 30px;
+            text-align: center;
+        }
+
+        .login-form .form-group {
+            margin-bottom: 20px;
+        }
+
+        .login-form input {
+            width: 100%;
+            padding: 14px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 16px;
+            transition: border-color 0.3s;
+        }
+
+        .login-form input:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .login-btn {
+            width: 100%;
+            padding: 14px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+
+        .login-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
+        }
+
+        .login-error {
+            background: #ffebee;
+            color: #c62828;
+            padding: 12px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            display: none;
+            text-align: center;
+        }
+
+        .login-error.show {
+            display: block;
+        }
+
         .container {
             max-width: 1400px;
             margin: 0 auto;
@@ -35,6 +127,29 @@
             color: #333;
             font-size: 28px;
             margin-bottom: 10px;
+        }
+
+        .header-actions {
+            display: flex;
+            justify-content: flex-end;
+            margin-top: 15px;
+        }
+
+        .btn-logout {
+            padding: 10px 20px;
+            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+
+        .btn-logout:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 15px rgba(245, 87, 108, 0.4);
         }
 
         .stats-grid {
@@ -540,9 +655,30 @@
     </style>
 </head>
 <body>
-    <div class="container">
+    <!-- 登录页面 -->
+    <div class="login-container" id="loginContainer">
+        <div class="login-box">
+            <h1 class="login-title">🖼️ TG图床管理</h1>
+            <p class="login-subtitle">请输入 API Key 进行认证</p>
+            
+            <div class="login-error" id="loginError"></div>
+            
+            <form class="login-form" onsubmit="handleLogin(event)">
+                <div class="form-group">
+                    <input type="password" id="apiKeyInput" placeholder="输入 API Key" autocomplete="off" required>
+                </div>
+                <button type="submit" class="login-btn" id="loginBtn">🔐 登录</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- 主界面 -->
+    <div class="container" id="mainContainer" style="display: none;">
         <div class="header">
-            <h1>🖼️ TG 图床后台管理</h1>
+            <h1>🖼️ TG图床后台管理</h1>
+            <div class="header-actions">
+                <button class="btn-logout" onclick="logout()">🚪 退出登录</button>
+            </div>
             <div class="stats-grid">
                 <div class="stat-card">
                     <div class="stat-value" id="totalFiles">0</div>
@@ -646,12 +782,145 @@
         let searchQuery = '';
         let pendingDeletePath = '';
 
+        // ==================== Token 管理 ====================
+        
+        function getToken() {
+            return localStorage.getItem('tg_admin_token');
+        }
+
+        function saveToken(token) {
+            localStorage.setItem('tg_admin_token', token);
+        }
+
+        function removeToken() {
+            localStorage.removeItem('tg_admin_token');
+        }
+
+        function checkAuth() {
+            const token = getToken();
+            if (!token) {
+                showLogin();
+                return false;
+            }
+            return true;
+        }
+
+        function showLogin() {
+            document.getElementById('loginContainer').classList.add('show');
+            document.getElementById('mainContainer').style.display = 'none';
+        }
+
+        function showMain() {
+            document.getElementById('loginContainer').classList.remove('show');
+            document.getElementById('mainContainer').style.display = 'block';
+        }
+
+        // ==================== 登录处理 ====================
+
+        async function handleLogin(event) {
+            event.preventDefault();
+            
+            const apiKey = document.getElementById('apiKeyInput').value.trim();
+            const loginBtn = document.getElementById('loginBtn');
+            const loginError = document.getElementById('loginError');
+            
+            if (!apiKey) {
+                loginError.textContent = '请输入 API Key';
+                loginError.classList.add('show');
+                return;
+            }
+            
+            // 禁用按钮
+            loginBtn.disabled = true;
+            loginBtn.textContent = '登录中...';
+            loginError.classList.remove('show');
+            
+            try {
+                const response = await fetch('/api/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ api_key: apiKey })
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok && data.success) {
+                    // 保存 token
+                    saveToken(data.token);
+                    
+                    // 清空输入
+                    document.getElementById('apiKeyInput').value = '';
+                    
+                    // 显示主界面
+                    showMain();
+                    
+                    // 加载数据
+                    loadStats();
+                    loadBannedList();
+                    loadFiles();
+                } else {
+                    throw new Error(data.message || '登录失败');
+                }
+            } catch (error) {
+                console.error('登录失败:', error);
+                loginError.textContent = error.message || '登录失败，请检查 API Key 是否正确';
+                loginError.classList.add('show');
+            } finally {
+                loginBtn.disabled = false;
+                loginBtn.textContent = '🔐 登录';
+            }
+        }
+
+        // ==================== 登出 ====================
+
+        function logout() {
+            if (confirm('确定要退出登录吗？')) {
+                removeToken();
+                showLogin();
+            }
+        }
+
+        // ==================== 请求拦截器 ====================
+
         // 初始化
         document.addEventListener('DOMContentLoaded', () => {
-            loadStats();
-            loadBannedList();
-            loadFiles();
+            // 检查是否已登录
+            const token = getToken();
+            if (token) {
+                // 验证 token 是否有效
+                verifyToken(token).then(valid => {
+                    if (valid) {
+                        showMain();
+                        loadStats();
+                        loadBannedList();
+                        loadFiles();
+                    } else {
+                        showLogin();
+                    }
+                }).catch(() => {
+                    showLogin();
+                });
+            } else {
+                showLogin();
+            }
         });
+
+        // 验证 token 是否有效
+        async function verifyToken(token) {
+            try {
+                const response = await fetch('/api/verify', {
+                    method: 'GET',
+                    headers: {
+                        'Authorization': `Bearer ${token}`
+                    }
+                });
+                const data = await response.json();
+                return response.ok && data.valid;
+            } catch (error) {
+                console.error('Token 验证失败:', error);
+                return false;
+            }
+        }
 
         // 切换标签
         function switchTab(tab, tabEl) {
@@ -675,12 +944,29 @@
         }
 
         async function requestJSON(url, options = {}) {
+            // 自动附加 token
+            const token = getToken();
+            if (!options.headers) {
+                options.headers = {};
+            }
+            if (token) {
+                options.headers['Authorization'] = `Bearer ${token}`;
+            }
+            
             const response = await fetch(url, options);
             let data = {};
             try {
                 data = await response.json();
             } catch (_) {
                 // 忽略非 JSON 返回，使用通用错误信息
+            }
+
+            // 处理 401 未授权
+            if (response.status === 401) {
+                console.error('认证失败，请重新登录');
+                removeToken();
+                showLogin();
+                throw new Error('认证已过期，请重新登录');
             }
 
             if (!response.ok) {

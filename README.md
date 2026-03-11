@@ -1,16 +1,17 @@
 # TG图床
 
-基于Telegram的文件上传服务，支持完整的后台管理系统。
+基于Telegram 的文件上传服务，支持完整的后台管理系统。
 
 ## ✨ 特性
 
-- 📤 **文件上传** - 上传文件到Telegram频道/群组
-- 🎨 **美观界面** - 现代化的Web上传界面
+- 📤 **文件上传** - 上传文件到 Telegram 频道/群组
+- 🎨 **美观界面** - 现代化的 Web 上传界面
+- 🔐 **JWT 认证** - API Key + Token 双重认证机制（v2.0 新增）
 - 🔒 **后台管理** - 完整的管理后台系统
 - 📊 **数据统计** - 实时统计信息展示
-- 🚫 **IP管理** - IP封禁和解封功能
-- 💾 **数据库支持** - MySQL数据库存储
-- 🔄 **多语言** - 支持Go和Python两种实现
+- 🚫 **IP 管理** - IP 封禁和解封功能
+- 💾 **数据库支持** - MySQL 数据库存储
+- 🔄 **多语言** - 支持 Go 和 Python 两种实现
 - 🚀 **高性能** - 本地缓存，快速响应
 
 ## 📦 包含内容
@@ -76,17 +77,33 @@ nano data.json
 bash init-db.sh
 ```
 
-4. **修改管理员密码**
-编辑 `main.go` 中的 `adminUser/adminPass` 默认值。
-
-5. **编译程序**
+4. **生成 API Key**（v2.0 新增）
 ```bash
-./build-with-admin.sh
-# 或手动编译
+# Windows PowerShell
+.\generate-api-key.ps1
+
+# Linux/Mac
+./generate-api-key.sh
+```
+
+5. **配置 API Key**
+编辑 `data.json`，添加生成的 API Key：
+```json
+{
+  "telegram": {...},
+  "mysql": {...},
+  "admin": {...},
+  "api_keys": ["你的-API-Key-这里"]
+}
+```
+
+6. **编译程序**
+```bash
+go mod tidy
 go build -o tg-imagebed
 ```
 
-6. **运行程序**
+7. **运行程序**
 ```bash
 ./tg-imagebed
 ```
@@ -95,7 +112,17 @@ go build -o tg-imagebed
 
 - **上传界面**: http://localhost:8080/upload.html
 - **管理后台**: http://localhost:8080/admin.html
-- **默认凭据**: admin / changeme123 ⚠️ 请务必修改！
+- **认证方式**: API Key（从 data.json 配置）⚠️ v2.0 已升级，不再使用用户名密码
+
+### 📖 快速开始指南
+
+**5 分钟完成配置**: 查看 [QUICKSTART.md](./QUICKSTART.md)
+
+**详细配置指南**: 查看 [AUTH_GUIDE.md](./AUTH_GUIDE.md)
+
+**部署检查清单**: 查看 [DEPLOYMENT_CHECKLIST.md](./DEPLOYMENT_CHECKLIST.md)
+
+**升级说明**: 查看 [UPGRADE_README.md](./UPGRADE_README.md)
 
 ## 📚 文档
 
@@ -281,7 +308,7 @@ go build -o tg-imagebed
 
 ### 反向代理（Nginx 最小配置）
 
-```nginx
+``nginx
 server {
     listen 80;
     server_name your-domain.com;
