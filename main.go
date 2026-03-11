@@ -61,7 +61,7 @@ type Config struct {
 var (
 	config      *Config
 	db          *sql.DB
-	jwtSecret   = generateJWTSecret() // JWT 签名密钥
+	jwtSecret   []byte // JWT 签名密钥（从配置文件加载或生成后保存）
 	tokenExpiry = 2 * time.Hour       // Token 有效期 2 小时
 )
 
@@ -86,14 +86,19 @@ func main() {
 	// 初始化随机数生成器
 	rand.Seed(time.Now().UnixNano())
 
+	// 初始化或加载 JWT 密钥
+	initJWTSecret()
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/upload", uploadHandler)
 	mux.HandleFunc("/", fetchHandler)
 
-	// 管理后台 API 路由（使用 JWT 认证）
-	mux.HandleFunc("/admin.html", jwtAuthMiddleware(func(w http.ResponseWriter, r *http.Request) {
+	// 管理后台 API 路由
+	// /admin.html 不需要认证（登录页面）
+	mux.HandleFunc("/admin.html", func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFile(w, r, "admin/index.html")
-	}))
+	})
+	// 其他管理 API 需要 JWT 认证
 	mux.HandleFunc("/api/stats", jwtAuthMiddleware(statsHandler))
 	mux.HandleFunc("/api/files", jwtAuthMiddleware(filesHandler))
 	mux.HandleFunc("/api/banned", jwtAuthMiddleware(bannedListHandler))
@@ -136,6 +141,26 @@ func generateJWTSecret() []byte {
 	hasher := sha256.New()
 	hasher.Write([]byte(secret))
 	return hasher.Sum(nil)
+}
+
+// initJWTSecret 初始化 JWT 密钥（从配置文件加载或生成后保存）
+func initJWTSecret() {
+	jwtSecretFile := "jwt_secret.key"
+	
+	// 尝试读取已存在的密钥文件
+	if data, err := os.ReadFile(jwtSecretFile); err == nil {
+		jwtSecret = data
+		log.Printf("[认证] 已加载 JWT 密钥文件：%s", jwtSecretFile)
+		return
+	}
+	
+	// 生成新密钥并保存到文件
+	jwtSecret = generateJWTSecret()
+	if err := os.WriteFile(jwtSecretFile, jwtSecret, 0600); err != nil {
+		log.Printf("[警告] 保存 JWT 密钥文件失败：%v，重启后 Token 将失效", err)
+	} else {
+		log.Printf("[认证] 已生成并保存 JWT 密钥文件：%s", jwtSecretFile)
+	}
 }
 
 // hashAPIKey 对 API Key 进行 SHA-256 哈希
