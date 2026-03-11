@@ -3,8 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,6 +24,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	_ "github.com/go-sql-driver/mysql"
 )
 
@@ -40,7 +43,7 @@ var (
 type Config struct {
 	Telegram struct {
 		BotToken  string `json:"bot_token"`
-		ChannelID string `json:"channel_id"` // 群组ID或频道ID，群组为负数，如 -1001234567890
+		ChannelID string `json:"channel_id"` // 群组 ID 或频道 ID，群组为负数，如 -1001234567890
 	} `json:"telegram"`
 	MySQL struct {
 		Host     string `json:"host"`
@@ -52,13 +55,14 @@ type Config struct {
 	Admin struct {
 		UserIDs []int64 `json:"user_ids"`
 	} `json:"admin"`
+	APIKeys []string `json:"api_keys"` // API Key 列表，用于管理后台认证
 }
 
 var (
-	config    *Config
-	db        *sql.DB
-	adminUser = "admin"
-	adminPass = "changeme123"
+	config      *Config
+	db          *sql.DB
+	jwtSecret   = generateJWTSecret() // JWT 签名密钥
+	tokenExpiry = 2 * time.Hour       // Token 有效期 2 小时
 )
 
 // ======================================================
@@ -69,8 +73,8 @@ func main() {
 		log.Fatalf("数据库初始化失败: %v", err)
 	}
 
-	log.Printf("[认证] 管理员认证已启用（用户名: %s）", adminUser)
-	log.Printf("[安全提示] 请尽快修改 main.go 中的默认管理密码")
+	log.Printf("[认证] JWT Token 认证已启用（有效期：%v）", tokenExpiry)
+	log.Printf("[安全提示] 请在 data.json 中配置 api_keys，使用强随机密钥")
 
 	if err := os.MkdirAll(CacheDir, 0755); err != nil {
 		log.Fatalf("创建缓存目录失败: %v", err)
@@ -86,16 +90,20 @@ func main() {
 	mux.HandleFunc("/upload", uploadHandler)
 	mux.HandleFunc("/", fetchHandler)
 
-	// 管理后台 API 路由（使用 Basic Auth 认证）
-	mux.HandleFunc("/admin.html", adminAuthMiddleware(func(w http.ResponseWriter, r *http.Request) {
+	// 管理后台 API 路由（使用 JWT 认证）
+	mux.HandleFunc("/admin.html", jwtAuthMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFile(w, r, "admin/index.html")
 	}))
-	mux.HandleFunc("/api/stats", adminAuthMiddleware(statsHandler))
-	mux.HandleFunc("/api/files", adminAuthMiddleware(filesHandler))
-	mux.HandleFunc("/api/banned", adminAuthMiddleware(bannedListHandler))
-	mux.HandleFunc("/api/ban", adminAuthMiddleware(banHandler))
-	mux.HandleFunc("/api/unban", adminAuthMiddleware(unbanHandler))
-	mux.HandleFunc("/api/delete", adminAuthMiddleware(deleteHandler))
+	mux.HandleFunc("/api/stats", jwtAuthMiddleware(statsHandler))
+	mux.HandleFunc("/api/files", jwtAuthMiddleware(filesHandler))
+	mux.HandleFunc("/api/banned", jwtAuthMiddleware(bannedListHandler))
+	mux.HandleFunc("/api/ban", jwtAuthMiddleware(banHandler))
+	mux.HandleFunc("/api/unban", jwtAuthMiddleware(unbanHandler))
+	mux.HandleFunc("/api/delete", jwtAuthMiddleware(deleteHandler))
+	
+	// 认证相关 API
+	mux.HandleFunc("/api/login", loginHandler)
+	mux.HandleFunc("/api/verify", verifyHandler)
 
 	srv := &http.Server{
 		Addr:         ListenAddr,
@@ -111,6 +119,102 @@ func main() {
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
+}
+
+// ================= JWT 认证相关 =================
+
+// Claims JWT Claims 结构体
+type Claims struct {
+	APIKeyHash string `json:"api_key_hash"`
+	jwt.RegisteredClaims
+}
+
+// generateJWTSecret 生成 JWT 签名密钥（基于时间戳和随机数）
+func generateJWTSecret() []byte {
+	// 生产环境建议使用环境变量或配置文件
+	secret := fmt.Sprintf("tg-upload-secret-%d-%d", time.Now().UnixNano(), rand.Int63())
+	hasher := sha256.New()
+	hasher.Write([]byte(secret))
+	return hasher.Sum(nil)
+}
+
+// hashAPIKey 对 API Key 进行 SHA-256 哈希
+func hashAPIKey(key string) string {
+	hasher := sha256.New()
+	hasher.Write([]byte(key))
+	return hex.EncodeToString(hasher.Sum(nil))
+}
+
+// validateAPIKey 验证 API Key 是否有效
+func validateAPIKey(apiKey string) bool {
+	if apiKey == "" {
+		return false
+	}
+	hashedKey := hashAPIKey(apiKey)
+	for _, configuredKey := range config.APIKeys {
+		if hashAPIKey(configuredKey) == hashedKey {
+			return true
+		}
+	}
+	return false
+}
+
+// generateToken 生成 JWT token
+func generateToken(apiKey string) (string, error) {
+	if !validateAPIKey(apiKey) {
+		return "", errors.New("无效的 API Key")
+	}
+
+	claims := &Claims{
+		APIKeyHash: hashAPIKey(apiKey),
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(tokenExpiry)),
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+			NotBefore: jwt.NewNumericDate(time.Now()),
+		},
+	}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	tokenString, err := token.SignedString(jwtSecret)
+	if err != nil {
+		return "", fmt.Errorf("生成 token 失败：%w", err)
+	}
+
+	return tokenString, nil
+}
+
+// validateToken 验证 JWT token
+func validateToken(tokenString string) (*Claims, error) {
+	token, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(token *jwt.Token) (interface{}, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("不支持的签名算法：%v", token.Header["alg"])
+		}
+		return jwtSecret, nil
+	})
+
+	if err != nil {
+		return nil, fmt.Errorf("解析 token 失败：%w", err)
+	}
+
+	if claims, ok := token.Claims.(*Claims); ok && token.Valid {
+		// 验证 API Key Hash 是否匹配
+		if !validateAPIKeyHash(claims.APIKeyHash) {
+			return nil, errors.New("API Key 已失效")
+		}
+		return claims, nil
+	}
+
+	return nil, errors.New("无效的 token")
+}
+
+// validateAPIKeyHash 验证 API Key Hash 是否仍然有效
+func validateAPIKeyHash(hashedKey string) bool {
+	for _, configuredKey := range config.APIKeys {
+		if hashAPIKey(configuredKey) == hashedKey {
+			return true
+		}
+	}
+	return false
 }
 
 // ================= HTTP Handlers =================
@@ -434,27 +538,125 @@ type deleteRequest struct {
 	Reason string `json:"reason"`
 }
 
-func adminAuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
+type loginRequest struct {
+	APIKey string `json:"api_key"`
+}
+
+type loginResponse struct {
+	Success bool   `json:"success"`
+	Token   string `json:"token"`
+	Message string `json:"message"`
+}
+
+type verifyResponse struct {
+	Valid   bool   `json:"valid"`
+	Message string `json:"message"`
+}
+
+// 登录接口：验证 API Key 并返回 JWT token
+func loginHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_ = json.NewEncoder(w).Encode(loginResponse{Success: false, Message: "method not allowed"})
+		return
+	}
+
+	var req loginRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(loginResponse{Success: false, Message: "无效的请求格式"})
+		return
+	}
+
+	if req.APIKey == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(loginResponse{Success: false, Message: "API Key 不能为空"})
+		return
+	}
+
+	// 验证 API Key 并生成 token
+	token, err := generateToken(req.APIKey)
+	if err != nil {
+		log.Printf("[认证] 登录失败：%v", err)
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = json.NewEncoder(w).Encode(loginResponse{Success: false, Message: "API Key 无效"})
+		return
+	}
+
+	log.Printf("[认证] 登录成功")
+	_ = json.NewEncoder(w).Encode(loginResponse{Success: true, Token: token, Message: "登录成功"})
+}
+
+// 验证接口：检查 token 是否有效
+func verifyHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_ = json.NewEncoder(w).Encode(verifyResponse{Valid: false, Message: "method not allowed"})
+		return
+	}
+
+	// 从 Authorization 头获取 token
+	authHeader := r.Header.Get("Authorization")
+	if authHeader == "" {
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = json.NewEncoder(w).Encode(verifyResponse{Valid: false, Message: "未提供 token"})
+		return
+	}
+
+	tokenString := strings.TrimPrefix(authHeader, "Bearer ")
+	if tokenString == authHeader {
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = json.NewEncoder(w).Encode(verifyResponse{Valid: false, Message: "无效的 token 格式"})
+		return
+	}
+
+	_, err := validateToken(tokenString)
+	if err != nil {
+		log.Printf("[认证] 验证失败：%v", err)
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = json.NewEncoder(w).Encode(verifyResponse{Valid: false, Message: err.Error()})
+		return
+	}
+
+	_ = json.NewEncoder(w).Encode(verifyResponse{Valid: true, Message: "token 有效"})
+}
+
+// JWT 认证中间件
+func jwtAuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		username, password, ok := r.BasicAuth()
-		if !ok {
-			w.Header().Set("WWW-Authenticate", `Basic realm="TG图床后台管理"`)
+		// 从 Authorization 头获取 token
+		authHeader := r.Header.Get("Authorization")
+		if authHeader == "" {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="TG图床后台管理"`)
 			http.Error(w, "需要认证", http.StatusUnauthorized)
 			return
 		}
 
-		usernameValid := subtle.ConstantTimeCompare([]byte(username), []byte(adminUser)) == 1
-		passwordValid := subtle.ConstantTimeCompare([]byte(password), []byte(adminPass)) == 1
-		if !usernameValid || !passwordValid {
-			log.Printf("[认证] 认证失败: %s from %s", username, r.RemoteAddr)
-			w.Header().Set("WWW-Authenticate", `Basic realm="TG图床后台管理"`)
-			http.Error(w, "认证失败", http.StatusUnauthorized)
+		tokenString := strings.TrimPrefix(authHeader, "Bearer ")
+		if tokenString == authHeader {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="TG图床后台管理"`)
+			http.Error(w, "无效的 token 格式", http.StatusUnauthorized)
 			return
 		}
 
+		claims, err := validateToken(tokenString)
+		if err != nil {
+			log.Printf("[认证] Token 验证失败：%v, from %s", err, r.RemoteAddr)
+			w.Header().Set("WWW-Authenticate", `Bearer realm="TG图床后台管理"`)
+			http.Error(w, "认证失败："+err.Error(), http.StatusUnauthorized)
+			return
+		}
+
+		log.Printf("[认证] Token 验证通过：%s", claims.APIKeyHash[:16]+"...")
 		next(w, r)
 	}
 }
+
+
 
 func statsHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -746,6 +948,14 @@ func loadConfig() {
 
 	if _, err := strconv.ParseInt(config.Telegram.ChannelID, 10, 64); err != nil {
 		log.Fatalf("无效的 Telegram Channel ID: %v", err)
+	}
+
+	// 验证是否配置了 API Keys
+	if len(config.APIKeys) == 0 {
+		log.Printf("[警告] 未配置 API Keys，管理后台将无法访问")
+		log.Printf("[提示] 请在 data.json 中添加 \"api_keys\": [\"your-secret-key-here\"]")
+	} else {
+		log.Printf("[配置] 已加载 %d 个 API Key", len(config.APIKeys))
 	}
 
 	log.Printf("配置加载成功")
