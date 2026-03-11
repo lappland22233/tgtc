@@ -39,7 +39,7 @@
 
 1. **克隆仓库**
 ```bash
-git clone [https://github.com/lappland22233/tgtc.git](https://github.com/lappland22233/tgtc.git)
+git clone https://github.com/lappland22233/tgtc.git
 cd tgtc
 ```
 
