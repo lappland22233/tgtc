@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TG图床 - 管理员登录</title>
+    <link rel="stylesheet" href="css/login.css">
+</head>
+<body>
+    <div class="login-container">
+        <div class="login-box">
+            <div class="login-header">
+                <h1>🖼️ TG图床</h1>
+                <p>管理员登录</p>
+            </div>
+
+            <form id="loginForm" class="login-form">
+                <div class="form-group">
+                    <label for="username">用户名</label>
+                    <input type="text" id="username" name="username" placeholder="请输入用户名" required autocomplete="username">
+                </div>
+
+                <div class="form-group">
+                    <label for="password">密码</label>
+                    <input type="password" id="password" name="password" placeholder="请输入密码" required autocomplete="current-password">
+                </div>
+
+                <div class="form-group remember-me">
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="rememberMe" name="rememberMe">
+                        <span>记住登录状态</span>
+                    </label>
+                </div>
+
+                <div id="errorMessage" class="error-message" style="display: none;"></div>
+
+                <button type="submit" id="loginBtn" class="login-btn">
+                    <span class="btn-text">登 录</span>
+                    <span class="btn-loading" style="display: none;">登录中...</span>
+                </button>
+            </form>
+
+            <div class="login-footer">
+                <p>TG图床 v2.0 - 多用户版</p>
+            </div>
+        </div>
+    </div>
+
+    <script src="js/auth.js"></script>
+    <script>
+        // 页面加载时检查是否已登录
+        document.addEventListener('DOMContentLoaded', () => {
+            const token = localStorage.getItem('access_token');
+            if (token) {
+                // 验证token是否有效
+                verifyToken(token).then(valid => {
+                    if (valid) {
+                        window.location.href = 'index.html';
+                    }
+                });
+            }
+        });
+
+        // 登录表单提交
+        document.getElementById('loginForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            const username = document.getElementById('username').value.trim();
+            const password = document.getElementById('password').value;
+            const rememberMe = document.getElementById('rememberMe').checked;
+            const loginBtn = document.getElementById('loginBtn');
+            const errorMessage = document.getElementById('errorMessage');
+
+            // 验证输入
+            if (!username || !password) {
+                showError('请输入用户名和密码');
+                return;
+            }
+
+            // 显示加载状态
+            loginBtn.disabled = true;
+            loginBtn.querySelector('.btn-text').style.display = 'none';
+            loginBtn.querySelector('.btn-loading').style.display = 'inline';
+            errorMessage.style.display = 'none';
+
+            try {
+                const response = await fetch('/api/auth/login', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ username, password })
+                });
+
+                const data = await response.json();
+
+                if (response.ok && data.success) {
+                    // 保存token
+                    localStorage.setItem('access_token', data.data.access_token);
+                    localStorage.setItem('refresh_token', data.data.refresh_token);
+                    localStorage.setItem('user', JSON.stringify(data.data.user));
+
+                    if (rememberMe) {
+                        localStorage.setItem('remember_username', username);
+                    } else {
+                        localStorage.removeItem('remember_username');
+                    }
+
+                    // 跳转到主页
+                    window.location.href = 'index.html';
+                } else {
+                    showError(data.error || data.message || '登录失败，请检查用户名和密码');
+                }
+            } catch (error) {
+                console.error('登录错误:', error);
+                showError('网络错误，请稍后重试');
+            } finally {
+                loginBtn.disabled = false;
+                loginBtn.querySelector('.btn-text').style.display = 'inline';
+                loginBtn.querySelector('.btn-loading').style.display = 'none';
+            }
+        });
+
+        // 显示错误消息
+        function showError(message) {
+            const errorMessage = document.getElementById('errorMessage');
+            errorMessage.textContent = message;
+            errorMessage.style.display = 'block';
+        }
+
+        // 验证token
+        async function verifyToken(token) {
+            try {
+                const response = await fetch('/api/auth/me', {
+                    method: 'GET',
+                    headers: {
+                        'Authorization': `Bearer ${token}`
+                    }
+                });
+                return response.ok;
+            } catch {
+                return false;
+            }
+        }
+
+        // 自动填充记住的用户名
+        const rememberUsername = localStorage.getItem('remember_username');
+        if (rememberUsername) {
+            document.getElementById('username').value = rememberUsername;
+            document.getElementById('rememberMe').checked = true;
+        }
+    </script>
+</body>
+</html>

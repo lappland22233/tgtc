@@ -1,0 +1,40 @@
+{
+  "server": {
+    "host": "0.0.0.0",
+    "port": 8080,
+    "mode": "release"
+  },
+  "telegram": {
+    "bot_token": "YOUR_BOT_TOKEN",
+    "channel_id": "-1001234567890"
+  },
+  "database": {
+    "host": "localhost",
+    "port": 3306,
+    "username": "root",
+    "password": "your_password",
+    "database": "tg_imagebed",
+    "max_open_conns": 50,
+    "max_idle_conns": 10,
+    "conn_max_lifetime": 3600
+  },
+  "jwt": {
+    "secret": "your-super-secret-jwt-key-change-in-production",
+    "expiry_hours": 24,
+    "refresh_expiry_hours": 168
+  },
+  "cache": {
+    "dir": "/data/cache",
+    "ttl_minutes": 10,
+    "clean_interval_minutes": 5
+  },
+  "upload": {
+    "max_size_mb": 20,
+    "allowed_types": ["image/*", "video/*", "application/pdf", "application/zip"]
+  },
+  "log": {
+    "level": "info",
+    "format": "json",
+    "output": "stdout"
+  }
+}

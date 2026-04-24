@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TG图床 - 后台管理</title>
+    <link rel="stylesheet" href="css/admin.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+</head>
+<body>
+    <div class="admin-container">
+        <!-- 侧边栏 -->
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <h1>🖼️ TG图床</h1>
+                <p class="user-info">
+                    <span id="currentUsername">-</span>
+                    <span id="currentRole" class="role-badge">-</span>
+                </p>
+            </div>
+
+            <nav class="sidebar-nav">
+                <a href="#" class="nav-item active" data-tab="dashboard">
+                    <span class="nav-icon">📊</span>
+                    <span>仪表盘</span>
+                </a>
+                <a href="#" class="nav-item" data-tab="files">
+                    <span class="nav-icon">📁</span>
+                    <span>文件管理</span>
+                </a>
+                <a href="#" class="nav-item" data-tab="users" id="navUsers" style="display: none;">
+                    <span class="nav-icon">👥</span>
+                    <span>用户管理</span>
+                </a>
+                <a href="#" class="nav-item" data-tab="logs">
+                    <span class="nav-icon">📋</span>
+                    <span>操作日志</span>
+                </a>
+            </nav>
+
+            <div class="sidebar-footer">
+                <button id="logoutBtn" class="logout-btn">🚪 退出登录</button>
+            </div>
+        </aside>
+
+        <!-- 主内容区 -->
+        <main class="main-content">
+            <!-- 仪表盘页面 -->
+            <div id="tabDashboard" class="tab-content active">
+                <div class="page-header">
+                    <h2>仪表盘</h2>
+                </div>
+
+                <!-- 统计卡片 -->
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-icon">📁</div>
+                        <div class="stat-info">
+                            <div class="stat-value" id="totalFiles">0</div>
+                            <div class="stat-label">总文件数</div>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon">📤</div>
+                        <div class="stat-info">
+                            <div class="stat-value" id="todayUploads">0</div>
+                            <div class="stat-label">今日上传</div>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon">👁️</div>
+                        <div class="stat-info">
+                            <div class="stat-value" id="todayAccess">0</div>
+                            <div class="stat-label">今日访问</div>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon">🚫</div>
+                        <div class="stat-info">
+                            <div class="stat-value" id="bannedIPs">0</div>
+                            <div class="stat-label">封禁IP</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 图表区域 -->
+                <div class="charts-grid">
+                    <div class="chart-card">
+                        <h3>上传趋势</h3>
+                        <canvas id="uploadChart"></canvas>
+                    </div>
+                    <div class="chart-card">
+                        <h3>文件类型分布</h3>
+                        <canvas id="fileTypeChart"></canvas>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 文件管理页面 -->
+            <div id="tabFiles" class="tab-content">
+                <div class="page-header">
+                    <h2>文件管理</h2>
+                    <div class="page-actions">
+                        <input type="text" id="searchInput" placeholder="搜索文件名/IP/路径" class="search-input">
+                        <button id="searchBtn" class="btn btn-primary">🔍 搜索</button>
+                    </div>
+                </div>
+
+                <div class="table-container">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>预览</th>
+                                <th>文件信息</th>
+                                <th>上传IP</th>
+                                <th>创建时间</th>
+                                <th>状态</th>
+                                <th>操作</th>
+                            </tr>
+                        </thead>
+                        <tbody id="filesTableBody">
+                            <tr>
+                                <td colspan="6" class="loading-cell">加载中...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <div class="pagination" id="filesPagination">
+                    <button id="prevPageBtn" class="btn btn-secondary">上一页</button>
+                    <span id="pageInfo">第 1 / 1 页</span>
+                    <button id="nextPageBtn" class="btn btn-secondary">下一页</button>
+                </div>
+            </div>
+
+            <!-- 用户管理页面 -->
+            <div id="tabUsers" class="tab-content">
+                <div class="page-header">
+                    <h2>用户管理</h2>
+                    <button id="addUserBtn" class="btn btn-primary">➕ 添加用户</button>
+                </div>
+
+                <div class="table-container">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>ID</th>
+                                <th>用户名</th>
+                                <th>角色</th>
+                                <th>状态</th>
+                                <th>最后登录</th>
+                                <th>登录次数</th>
+                                <th>创建时间</th>
+                                <th>操作</th>
+                            </tr>
+                        </thead>
+                        <tbody id="usersTableBody">
+                            <tr>
+                                <td colspan="8" class="loading-cell">加载中...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- 操作日志页面 -->
+            <div id="tabLogs" class="tab-content">
+                <div class="page-header">
+                    <h2>操作日志</h2>
+                    <div class="page-actions">
+                        <select id="logActionFilter" class="filter-select">
+                            <option value="">全部操作</option>
+                            <option value="login">登录</option>
+                            <option value="logout">登出</option>
+                            <option value="create_user">创建用户</option>
+                            <option value="delete_user">删除用户</option>
+                            <option value="ban_ip">封禁IP</option>
+                            <option value="unban_ip">解封IP</option>
+                            <option value="delete_file">删除文件</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="table-container">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>时间</th>
+                                <th>用户</th>
+                                <th>操作</th>
+                                <th>目标</th>
+                                <th>IP</th>
+                                <th>详情</th>
+                            </tr>
+                        </thead>
+                        <tbody id="logsTableBody">
+                            <tr>
+                                <td colspan="6" class="loading-cell">加载中...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- 添加/编辑用户模态框 -->
+    <div id="userModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="userModalTitle">添加用户</h3>
+                <button class="modal-close" onclick="closeUserModal()">&times;</button>
+            </div>
+            <form id="userForm">
+                <input type="hidden" id="editUserId">
+                <div class="form-group">
+                    <label for="editUsername">用户名</label>
+                    <input type="text" id="editUsername" required minlength="3" maxlength="50">
+                </div>
+                <div class="form-group" id="passwordGroup">
+                    <label for="editPassword">密码</label>
+                    <input type="password" id="editPassword" minlength="6" maxlength="100">
+                    <small>留空则不修改密码</small>
+                </div>
+                <div class="form-group">
+                    <label for="editRole">角色</label>
+                    <select id="editRole" required>
+                        <option value="operator">操作员</option>
+                        <option value="admin">管理员</option>
+                        <option value="super_admin">超级管理员</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="editStatus">状态</label>
+                    <select id="editStatus" required>
+                        <option value="active">正常</option>
+                        <option value="disabled">禁用</option>
+                    </select>
+                </div>
+                <div class="modal-actions">
+                    <button type="button" class="btn btn-secondary" onclick="closeUserModal()">取消</button>
+                    <button type="submit" class="btn btn-primary">保存</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <script src="js/auth.js"></script>
+    <script src="js/user.js"></script>
+    <script src="js/dashboard.js"></script>
+    <script>
+        // 检查登录状态
+        if (!Auth.isLoggedIn()) {
+            window.location.href = 'login.html';
+        }
+
+        // 页面初始化
+        document.addEventListener('DOMContentLoaded', () => {
+            initPage();
+        });
+
+        // 初始化页面
+        async function initPage() {
+            try {
+                const user = Auth.getCurrentUser();
+                if (user) {
+                    document.getElementById('currentUsername').textContent = user.username;
+                    const roleBadge = document.getElementById('currentRole');
+                    roleBadge.textContent = UserManager.formatRole(user.role);
+                    roleBadge.style.backgroundColor = UserManager.getRoleColor(user.role);
+
+                    // 只有超级管理员能看到用户管理
+                    if (Auth.canManageUsers()) {
+                        document.getElementById('navUsers').style.display = 'flex';
+                    }
+                }
+
+                // 加载仪表盘数据
+                Dashboard.loadStats();
+                Dashboard.initCharts();
+
+                // 绑定事件
+                bindEvents();
+            } catch (error) {
+                console.error('初始化失败:', error);
+                alert('初始化失败，请重新登录');
+                Auth.clearAuth();
+                window.location.href = 'login.html';
+            }
+        }
+
+        // 绑定事件
+        function bindEvents() {
+            // 导航切换
+            document.querySelectorAll('.nav-item').forEach(item => {
+                item.addEventListener('click', (e) => {
+                    e.preventDefault();
+                    const tab = item.dataset.tab;
+                    switchTab(tab);
+                });
+            });
+
+            // 登出按钮
+            document.getElementById('logoutBtn').addEventListener('click', async () => {
+                if (confirm('确定要退出登录吗？')) {
+                    await Auth.logout();
+                    window.location.href = 'login.html';
+                }
+            });
+
+            // 添加用户按钮
+            document.getElementById('addUserBtn').addEventListener('click', () => {
+                openUserModal();
+            });
+
+            // 用户表单提交
+            document.getElementById('userForm').addEventListener('submit', handleUserSubmit);
+        }
+
+        // 切换标签页
+        function switchTab(tab) {
+            // 更新导航状态
+            document.querySelectorAll('.nav-item').forEach(item => {
+                item.classList.toggle('active', item.dataset.tab === tab);
+            });
+
+            // 更新内容显示
+            document.querySelectorAll('.tab-content').forEach(content => {
+                content.classList.toggle('active', content.id === 'tab' + capitalize(tab));
+            });
+
+            // 加载对应标签页数据
+            switch (tab) {
+                case 'dashboard':
+                    Dashboard.loadStats();
+                    break;
+                case 'files':
+                    Files.loadFiles();
+                    break;
+                case 'users':
+                    Users.loadUsers();
+                    break;
+                case 'logs':
+                    Logs.loadLogs();
+                    break;
+            }
+        }
+
+        // 首字母大写
+        function capitalize(str) {
+            return str.charAt(0).toUpperCase() + str.slice(1);
+        }
+
+        // 打开用户模态框
+        function openUserModal(user = null) {
+            const modal = document.getElementById('userModal');
+            const title = document.getElementById('userModalTitle');
+            const passwordGroup = document.getElementById('passwordGroup');
+
+            if (user) {
+                title.textContent = '编辑用户';
+                document.getElementById('editUserId').value = user.id;
+                document.getElementById('editUsername').value = user.username;
+                document.getElementById('editRole').value = user.role;
+                document.getElementById('editStatus').value = user.status;
+                document.getElementById('editPassword').value = '';
+                document.getElementById('editPassword').required = false;
+            } else {
+                title.textContent = '添加用户';
+                document.getElementById('editUserId').value = '';
+                document.getElementById('editUsername').value = '';
+                document.getElementById('editPassword').value = '';
+                document.getElementById('editPassword').required = true;
+                document.getElementById('editRole').value = 'operator';
+                document.getElementById('editStatus').value = 'active';
+            }
+
+            modal.classList.add('show');
+        }
+
+        // 关闭用户模态框
+        function closeUserModal() {
+            document.getElementById('userModal').classList.remove('show');
+        }
+
+        // 处理用户表单提交
+        async function handleUserSubmit(e) {
+            e.preventDefault();
+
+            const id = document.getElementById('editUserId').value;
+            const username = document.getElementById('editUsername').value.trim();
+            const password = document.getElementById('editPassword').value;
+            const role = document.getElementById('editRole').value;
+            const status = document.getElementById('editStatus').value;
+
+            try {
+                if (id) {
+                    // 更新用户
+                    await UserManager.updateUser(parseInt(id), username, role, status);
+                    alert('用户更新成功');
+                } else {
+                    // 创建用户
+                    await UserManager.createUser(username, password, role);
+                    alert('用户创建成功');
+                }
+                closeUserModal();
+                Users.loadUsers();
+            } catch (error) {
+                alert(error.message);
+            }
+        }
+    </script>
+</body>
+</html>
