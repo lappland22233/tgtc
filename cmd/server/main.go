@@ -9,7 +9,6 @@ import (
 	"syscall"
 
 	_ "github.com/go-sql-driver/mysql"
-	"github.com/jmoiron/sqlx"
 
 	"github.com/tg-imagebed-refactored/internal/config"
 	"github.com/tg-imagebed-refactored/internal/handler"
@@ -47,11 +46,13 @@ func main() {
 	authService := service.NewAuthService(userRepo, logRepo, &cfg.JWT)
 	userService := service.NewUserService(userRepo, logRepo)
 	statsService := service.NewStatsService(statsRepo)
+	adminService := service.NewAdminService(logRepo, banRepo)
 
 	// 初始化处理器
 	authHandler := handler.NewAuthHandler(authService)
 	userHandler := handler.NewUserHandler(userService)
 	statsHandler := handler.NewStatsHandler(statsService)
+	adminHandler := handler.NewAdminHandler(adminService)
 
 	// 初始化中间件
 	authMiddleware := middleware.NewAuthMiddleware(authService)
@@ -60,6 +61,7 @@ func main() {
 	mux := http.NewServeMux()
 
 	// 公开接口
+	mux.HandleFunc("/health", handler.Health)
 	mux.HandleFunc("/api/auth/login", authHandler.Login)
 	mux.HandleFunc("/api/auth/refresh", authHandler.RefreshToken)
 
@@ -86,6 +88,19 @@ func main() {
 
 	// 管理员接口（需要admin或更高权限）
 	mux.HandleFunc("/api/stats", authRequired(authMiddleware.RequireAdmin(statsHandler.GetStats)))
+	mux.HandleFunc("/api/admin/logs", authRequired(authMiddleware.RequireAdmin(adminHandler.ListLogs)))
+	mux.HandleFunc("/api/admin/bans", authRequired(authMiddleware.RequireAdmin(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			adminHandler.ListBans(w, r)
+		case http.MethodPost:
+			adminHandler.BanIP(w, r)
+		case http.MethodDelete:
+			adminHandler.UnbanIP(w, r)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})))
 
 	// 应用中间件
 	adminMux := applyMiddleware(mux)

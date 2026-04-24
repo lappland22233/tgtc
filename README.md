@@ -48,6 +48,7 @@ go run ./cmd/server
 
 - `POST /api/auth/login`：登录
 - `POST /api/auth/refresh`：刷新 token
+- `GET /health`：健康检查
 
 ### 需登录
 
@@ -64,7 +65,11 @@ go run ./cmd/server
 
 ### 需 admin 或 super_admin
 
-- `GET /api/stats`：统计（当前为 TODO 占位返回）
+- `GET /api/stats`：统计
+- `GET /api/admin/logs`：操作日志分页（支持 `user_id`、`action` 过滤）
+- `GET /api/admin/bans`：封禁 IP 列表分页
+- `POST /api/admin/bans`：封禁 IP（JSON: `ip`, `reason`）
+- `DELETE /api/admin/bans?ip=<ip>`：解封 IP
 
 ## 5. 代码审查结论（截至 2026-04-24）
 
@@ -86,10 +91,10 @@ go run ./cmd/server
 
 | # | 建议 | 当前状态 |
 |---|------|----------|
-| 1 | 完善日志与封禁功能 | ⚠️ `internal/repository/log.go` 和 `ban.go` 仅为骨架，无实际 handler/service 调用 |
+| 1 | 完善日志与封禁功能 | ✅ 已补齐 `AdminService`、`AdminHandler` 并开放日志/封禁管理 API |
 | 2 | 文件上传 API | ⚠️ `config.json.example` 定义了 `upload` 配置，但项目中无上传处理器 |
 | 3 | 缓存管理 API | ⚠️ `config.json.example` 定义了 `cache` 配置，但无缓存清理/查询接口 |
-| 4 | 健康检查接口 | ⚠️ 缺失 `/health` 端点，K8s/负载均衡场景必需 |
+| 4 | 健康检查接口 | ✅ 已新增 `/health` 端点，返回服务状态与 UTC 时间 |
 | 5 | 访问统计 | ⚠️ `TodayAccess` 硬编码为 0，需在 files 表增加访问计数或新建访问日志表 |
 
 #### 二、工程质量类
