@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/tg-imagebed-refactored/internal/middleware"
 	"github.com/tg-imagebed-refactored/internal/service"
 	"github.com/tg-imagebed-refactored/pkg/response"
 )
@@ -56,7 +57,7 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	response.SuccessWithMessage(w, "登录成功", map]interface{}{
+	response.SuccessWithMessage(w, "登录成功", map[string]interface{}{
 		"access_token":  result.AccessToken,
 		"refresh_token": result.RefreshToken,
 		"expires_at":    result.ExpiresAt,
@@ -88,7 +89,7 @@ func (h *AuthHandler) RefreshToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	response.Success(w, map]interface{}{
+	response.Success(w, map[string]interface{}{
 		"access_token":  result.AccessToken,
 		"refresh_token": result.RefreshToken,
 		"expires_at":    result.ExpiresAt,
@@ -97,8 +98,8 @@ func (h *AuthHandler) RefreshToken(w http.ResponseWriter, r *http.Request) {
 
 // GetMe 获取当前用户信息
 func (h *AuthHandler) GetMe(w http.ResponseWriter, r *http.Request) {
-	claims := getClaimsFromContext(r)
-	if claims == nil {
+	claims, ok := middleware.GetClaimsFromContext(r.Context())
+	if !ok || claims == nil {
 		response.Unauthorized(w, "未登录")
 		return
 	}

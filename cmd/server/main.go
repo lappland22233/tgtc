@@ -41,14 +41,17 @@ func main() {
 	userRepo := repository.NewUserRepository(db)
 	logRepo := repository.NewAdminLogRepository(db)
 	banRepo := repository.NewBanRepository(db)
+	statsRepo := repository.NewStatsRepository(db)
 
 	// 初始化服务
 	authService := service.NewAuthService(userRepo, logRepo, &cfg.JWT)
 	userService := service.NewUserService(userRepo, logRepo)
+	statsService := service.NewStatsService(statsRepo)
 
 	// 初始化处理器
 	authHandler := handler.NewAuthHandler(authService)
 	userHandler := handler.NewUserHandler(userService)
+	statsHandler := handler.NewStatsHandler(statsService)
 
 	// 初始化中间件
 	authMiddleware := middleware.NewAuthMiddleware(authService)
@@ -82,10 +85,7 @@ func main() {
 	mux.HandleFunc("/api/users/change-password", authRequired(userHandler.ChangePassword))
 
 	// 管理员接口（需要admin或更高权限）
-	mux.HandleFunc("/api/stats", authRequired(authMiddleware.RequireAdmin(func(w http.ResponseWriter, r *http.Request) {
-		// TODO: 实现统计接口
-		w.Write([]byte(`{"total_files":0,"today_uploads":0,"today_access":0,"cached_files":0,"banned_ips":0,"cache_hit_rate":0}`))
-	})))
+	mux.HandleFunc("/api/stats", authRequired(authMiddleware.RequireAdmin(statsHandler.GetStats)))
 
 	// 应用中间件
 	adminMux := applyMiddleware(mux)
@@ -134,11 +134,6 @@ func initDB(cfg config.DatabaseConfig) (*sql.DB, error) {
 
 	log.Println("数据库连接成功")
 	return db, nil
-}
-
-// sqlx.DB wrapper for sqlx
-type DB struct {
-	*sqlx.DB
 }
 
 // applyMiddleware 应用中间件

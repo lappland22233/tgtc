@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/tg-imagebed-refactored/internal/middleware"
+	"github.com/tg-imagebed-refactored/internal/model"
 	"github.com/tg-imagebed-refactored/internal/service"
 	"github.com/tg-imagebed-refactored/pkg/response"
 )
@@ -52,8 +54,8 @@ func (h *UserHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	claims := getClaimsFromContext(r)
-	if claims == nil || !canManageUsers(claims) {
+	claims, ok := middleware.GetClaimsFromContext(r.Context())
+	if !ok || claims == nil || !canManageUsers(claims) {
 		response.Forbidden(w, "权限不足")
 		return
 	}
@@ -87,8 +89,8 @@ func (h *UserHandler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	claims := getClaimsFromContext(r)
-	if claims == nil || !canManageUsers(claims) {
+	claims, ok := middleware.GetClaimsFromContext(r.Context())
+	if !ok || claims == nil || !canManageUsers(claims) {
 		response.Forbidden(w, "权限不足")
 		return
 	}
@@ -129,8 +131,8 @@ func (h *UserHandler) DeleteUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	claims := getClaimsFromContext(r)
-	if claims == nil || !canManageUsers(claims) {
+	claims, ok := middleware.GetClaimsFromContext(r.Context())
+	if !ok || claims == nil || !canManageUsers(claims) {
 		response.Forbidden(w, "权限不足")
 		return
 	}
@@ -158,8 +160,8 @@ func (h *UserHandler) DeleteUser(w http.ResponseWriter, r *http.Request) {
 
 // GetUser 获取单个用户
 func (h *UserHandler) GetUser(w http.ResponseWriter, r *http.Request) {
-	claims := getClaimsFromContext(r)
-	if claims == nil {
+	claims, ok := middleware.GetClaimsFromContext(r.Context())
+	if !ok || claims == nil {
 		response.Unauthorized(w, "未登录")
 		return
 	}
@@ -198,8 +200,8 @@ func (h *UserHandler) ChangePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	claims := getClaimsFromContext(r)
-	if claims == nil {
+	claims, ok := middleware.GetClaimsFromContext(r.Context())
+	if !ok || claims == nil {
 		response.Unauthorized(w, "未登录")
 		return
 	}

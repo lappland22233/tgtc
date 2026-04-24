@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 
 	"github.com/tg-imagebed-refactored/internal/model"
@@ -162,7 +163,7 @@ func (s *userService) DeleteUser(ctx context.Context, operatorID, targetID int64
 		UserID:   operatorID,
 		Username: username,
 		Action:   model.ActionDeleteUser,
-		Target:   &target.Username,
+		Target:   sql.NullString{String: target.Username, Valid: true},
 	})
 
 	return nil
@@ -225,7 +226,7 @@ func (s *userService) ChangePassword(ctx context.Context, userID int64, oldPassw
 		return err
 	}
 
-	// 记录日志
+	// 记录日志（ChangePassword 是用户自己操作，不需要 Target）
 	s.logRepo.Create(ctx, &model.AdminLog{
 		UserID:   userID,
 		Username: user.Username,
@@ -268,7 +269,7 @@ func (s *userService) ResetPassword(ctx context.Context, operatorID, targetID in
 		UserID:   operatorID,
 		Username: operatorUsername,
 		Action:   model.ActionChangePassword,
-		Target:   &target.Username,
+		Target:   sql.NullString{String: target.Username, Valid: true},
 	})
 
 	return nil

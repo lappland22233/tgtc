@@ -68,45 +68,22 @@ go run ./cmd/server
 
 ## 5. 代码审查结论（截至 2026-04-24）
 
-以下是针对当前 `work` 分支代码的快速审查结论：
+### 已修复的 P0 问题 ✅
 
-### P0：当前分支不可直接通过构建/测试
+1. ✅ `internal/handler/auth.go` 中 `map]interface{}` 语法错误 → 已修正为 `map[string]interface{}`
+2. ✅ `internal/handler/user.go` 缺少 `internal/model` 包导入 → 已添加
+3. ✅ `internal/handler/auth.go` 与 `internal/handler/user.go` 调用 `getClaimsFromContext` 未定义 → 已使用 `middleware.GetClaimsFromContext`
+4. ✅ `internal/service/auth.go` 和 `internal/service/user.go` 中 `*string` 到 `sql.NullString` 类型不匹配 → 已修正
 
-- `go test ./...` 失败，存在依赖校验问题（`go.sum` 缺失必要记录）。
-- 此外，从源码静态检查可见多个会导致编译失败的问题：
-  - `internal/handler/auth.go` 中 `map]interface{}` 语法错误（应为 `map[string]interface{}`）。
-  - `internal/handler/user.go` 使用 `model.UserResponse`/`model.RoleSuperAdmin` 但未导入 `internal/model`。
-  - `internal/handler/auth.go` 与 `internal/handler/user.go` 调用了 `getClaimsFromContext`，但当前目录下未定义该函数（middleware 中存在 `GetClaimsFromContext`）。
-  - `internal/service/auth.go` 和 `internal/service/user.go` 将 `*string` 直接赋值给 `sql.NullString` 字段（如 `IP` / `Target`），类型不匹配。
+### 已修复的 P1 问题 ✅
 
-### P1：功能完成度与一致性问题
+5. ✅ `/api/stats` 硬编码占位返回 → 已实现真实统计逻辑（`StatsRepository`、`StatsService`、`StatsHandler`）
+6. ✅ `main.go` 中未使用的 `DB` 结构体 → 已移除
 
-- `cmd/server/main.go` 中 `/api/stats` 仍为硬编码占位返回。
-- `main.go` 中定义了 `type DB struct { *sqlx.DB }`，当前未被使用。
-- 配置结构内 Telegram/Cache/Upload 等字段完整，但部分能力尚未在路由层体现。
+### 后续建议
 
-### 建议修复顺序
+1. 添加单元测试覆盖（鉴权、用户 CRUD、改密流程）
+2. 实现访问统计（需要在 files 表增加访问计数或新建访问日志表）
+3. 补充 Telegram/Cache/Upload 等配置的路由层支持
 
-1. 先修复所有编译错误与类型错误（保证 `go test ./...` 可运行）。
-2. 为 handler/service 增加单元测试覆盖（鉴权、用户 CRUD、改密流程）。
-3. 再补齐 `/api/stats` 的真实统计查询逻辑与权限测试。
 
-## 6. 与 `main` 分支差异说明
-
-当前仓库内 **不存在本地 `main` 分支**，也未配置远程仓库（`git remote -v` 为空），因此无法给出真实的 `work` vs `main` 代码差异。
-
-### 当前 Git 状态（审查时）
-
-- 当前分支：`work`
-- 历史提交：仅 1 条初始提交（`Initial commit to beta branch`）
-- 无 `main` 引用可供对比
-
-### 一旦存在 `main` 后的对比命令
-
-```bash
-git fetch origin
-git diff --stat main...work
-git log --oneline --left-right main...work
-```
-
-如果你希望，我可以在后续拿到 `main`（本地或远程）后，补一份逐文件差异报告（含接口级变更清单）。

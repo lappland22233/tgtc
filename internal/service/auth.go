@@ -102,7 +102,7 @@ func (s *authService) Login(ctx context.Context, username, password, ip string) 
 		UserID:   user.ID,
 		Username: user.Username,
 		Action:   model.ActionLogin,
-		IP:       &ip,
+		IP:       sql.NullString{String: ip, Valid: ip != ""},
 	})
 
 	return &AuthResult{
