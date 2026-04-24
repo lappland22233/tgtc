@@ -82,8 +82,60 @@ go run ./cmd/server
 
 ### 后续建议
 
-1. 添加单元测试覆盖（鉴权、用户 CRUD、改密流程）
-2. 实现访问统计（需要在 files 表增加访问计数或新建访问日志表）
-3. 补充 Telegram/Cache/Upload 等配置的路由层支持
+#### 一、功能完善类
+
+| # | 建议 | 当前状态 |
+|---|------|----------|
+| 1 | 完善日志与封禁功能 | ⚠️ `internal/repository/log.go` 和 `ban.go` 仅为骨架，无实际 handler/service 调用 |
+| 2 | 文件上传 API | ⚠️ `config.json.example` 定义了 `upload` 配置，但项目中无上传处理器 |
+| 3 | 缓存管理 API | ⚠️ `config.json.example` 定义了 `cache` 配置，但无缓存清理/查询接口 |
+| 4 | 健康检查接口 | ⚠️ 缺失 `/health` 端点，K8s/负载均衡场景必需 |
+| 5 | 访问统计 | ⚠️ `TodayAccess` 硬编码为 0，需在 files 表增加访问计数或新建访问日志表 |
+
+#### 二、工程质量类
+
+| # | 建议 | 说明 |
+|---|------|------|
+| 6 | 单元测试覆盖 | 缺失鉴权、用户 CRUD、改密流程的单元测试 |
+| 7 | 输入验证 | handler 层未发现系统化的参数校验逻辑 |
+| 8 | API 文档 | 缺失 Swagger/OpenAPI 文档 |
+| 9 | 数据库迁移 | 仅一个 migration 文件，建议引入 `golang-migrate` 工具 |
+| 10 | 错误码体系 | 当前 `pkg/response` 仅返回通用错误，建议定义业务错误码 |
+
+#### 三、生产环境类
+
+| # | 建议 | 说明 |
+|---|------|------|
+| 11 | Rate Limiting | 无请求限流，防 DDoS 必需 |
+| 12 | 配置热更新 | 修改配置需重启服务 |
+| 13 | 容器化部署 | 缺失 Dockerfile/docker-compose |
+| 14 | 环境变量配置 | 仅支持 `config.json`，生产环境常用环境变量覆盖 |
+| 15 | Structured Logging | 可增加 request_id tracing |
+
+#### 四、安全类
+
+| # | 建议 | 说明 |
+|---|------|------|
+| 16 | 敏感信息日志脱敏 | 日志中可能打印密码/JWT secret |
+| 17 | IP 白名单/黑名单 | 已有 `ban_repo` 骨架，可完善 |
+| 18 | 密码强度策略 | `ChangePassword` 未见复杂度校验 |
+| 19 | JWT 密钥轮换 | 当前无 refresh token 后的密钥更新机制 |
+
+#### 五、优先级建议
+
+**P0（生产必需）**：
+- 单元测试覆盖
+- 健康检查接口
+- 输入验证
+
+**P1（稳定运行）**：
+- 日志与封禁功能完善
+- 访问统计
+- Rate Limiting
+
+**P2（可延后）**：
+- Telegram/Cache/Upload API
+- 容器化
+- Swagger 文档
 
 
