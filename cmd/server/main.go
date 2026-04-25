@@ -60,14 +60,17 @@ func main() {
 
 	// 初始化中间件
 	authMiddleware := middleware.NewAuthMiddleware(authService)
+	banIPMiddleware := middleware.NewBanIPMiddleware(banRepo)
+	publicRateLimiter := middleware.NewRateLimiter(10)
+	adminRateLimiter := middleware.NewRateLimiter(100)
 
 	// 创建路由
 	mux := http.NewServeMux()
 
 	// 公开接口
-	mux.HandleFunc("/health", handler.Health)
-	mux.HandleFunc("/api/auth/login", authHandler.Login)
-	mux.HandleFunc("/api/auth/refresh", authHandler.RefreshToken)
+	mux.HandleFunc("/health", banIPMiddleware(handler.Health))
+	mux.HandleFunc("/api/auth/login", banIPMiddleware(publicRateLimiter.Middleware(authHandler.Login)))
+	mux.HandleFunc("/api/auth/refresh", banIPMiddleware(publicRateLimiter.Middleware(authHandler.RefreshToken)))
 
 	// 需要认证的接口
 	authRequired := authMiddleware.Authenticate
@@ -75,7 +78,7 @@ func main() {
 	mux.HandleFunc("/api/auth/logout", authRequired(authHandler.Logout))
 
 	// 用户管理接口（需要超级管理员权限）
-	mux.HandleFunc("/api/users", authRequired(authMiddleware.RequireSuperAdmin(func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/users", authRequired(middleware.RequireSuperAdmin(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
 			userHandler.ListUsers(w, r)
@@ -86,14 +89,14 @@ func main() {
 		}
 	})))
 
-	mux.HandleFunc("/api/users/update", authRequired(authMiddleware.RequireSuperAdmin(userHandler.UpdateUser)))
-	mux.HandleFunc("/api/users/delete", authRequired(authMiddleware.RequireSuperAdmin(userHandler.DeleteUser)))
+	mux.HandleFunc("/api/users/update", authRequired(middleware.RequireSuperAdmin(userHandler.UpdateUser)))
+	mux.HandleFunc("/api/users/delete", authRequired(middleware.RequireSuperAdmin(userHandler.DeleteUser)))
 	mux.HandleFunc("/api/users/change-password", authRequired(userHandler.ChangePassword))
 
 	// 管理员接口（需要admin或更高权限）
-	mux.HandleFunc("/api/stats", authRequired(authMiddleware.RequireAdmin(statsHandler.GetStats)))
-	mux.HandleFunc("/api/admin/logs", authRequired(authMiddleware.RequireAdmin(adminHandler.ListLogs)))
-	mux.HandleFunc("/api/admin/bans", authRequired(authMiddleware.RequireAdmin(func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/stats", adminRateLimiter.Middleware(authRequired(middleware.RequireAdmin(statsHandler.GetStats))))
+	mux.HandleFunc("/api/admin/logs", adminRateLimiter.Middleware(authRequired(middleware.RequireAdmin(adminHandler.ListLogs))))
+	mux.HandleFunc("/api/admin/bans", adminRateLimiter.Middleware(authRequired(middleware.RequireAdmin(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
 			adminHandler.ListBans(w, r)
@@ -104,14 +107,14 @@ func main() {
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
-	})))
+	}))))
 
-	mux.HandleFunc("/api/upload", authRequired(authMiddleware.RequireAdmin(uploadHandler.Upload)))
-	mux.HandleFunc("/api/cache", authRequired(authMiddleware.RequireAdmin(cacheHandler.GetStats)))
-	mux.HandleFunc("/api/cache/clean", authRequired(authMiddleware.RequireAdmin(cacheHandler.Clean)))
+	mux.HandleFunc("/api/upload", adminRateLimiter.Middleware(authRequired(middleware.RequireAdmin(uploadHandler.Upload))))
+	mux.HandleFunc("/api/cache", adminRateLimiter.Middleware(authRequired(middleware.RequireAdmin(cacheHandler.GetStats))))
+	mux.HandleFunc("/api/cache/clean", adminRateLimiter.Middleware(authRequired(middleware.RequireAdmin(cacheHandler.Clean))))
 
 	// 应用中间件
-	adminMux := applyMiddleware(mux)
+	adminMux := applyMiddleware(cfg.Server.Mode, mux)
 
 	// 创建服务器
 	srv := &http.Server{
@@ -160,8 +163,8 @@ func initDB(cfg config.DatabaseConfig) (*sql.DB, error) {
 }
 
 // applyMiddleware 应用中间件
-func applyMiddleware(h http.Handler) http.Handler {
-	return middleware.CORSMiddleware(func(w http.ResponseWriter, r *http.Request) {
+func applyMiddleware(mode string, h http.Handler) http.Handler {
+	return middleware.CORSMiddleware(mode, func(w http.ResponseWriter, r *http.Request) {
 		h.ServeHTTP(w, r)
 	})
 }
