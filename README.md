@@ -95,7 +95,7 @@ go run ./cmd/server
 | # | 建议 | 当前状态 |
 |---|------|----------|
 | 1 | 完善日志与封禁功能 | ✅ 已补齐 `AdminService`、`AdminHandler` 并开放日志/封禁管理 API |
-| 2 | 文件上传 API | ✅ 已新增 `/api/upload`，支持大小与 MIME 白名单校验，并落盘到 `cache.dir/uploads` |
+| 2 | 文件上传 API | ✅ 已新增 `/api/upload`，支持大小与 MIME 白名单校验，并落盘到与 `cache.dir` 同级的独立目录（默认 `cache_uploads`） |
 | 3 | 缓存管理 API | ✅ 已新增 `/api/cache`（统计）与 `/api/cache/clean`（清理，支持全量/过期） |
 | 4 | 健康检查接口 | ✅ 已新增 `/health` 端点，返回服务状态与 UTC 时间 |
 | 5 | 访问统计 | ✅ `TodayAccess` 已改为基于 `files.last_accessed_at` 的今日访问文件数统计（非硬编码） |

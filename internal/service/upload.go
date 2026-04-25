@@ -43,10 +43,23 @@ type uploadService struct {
 
 // NewUploadService 创建上传服务
 func NewUploadService(cfg config.UploadConfig, cacheDir string) UploadService {
+	uploadDir := deriveUploadDir(cacheDir)
 	return &uploadService{
 		cfg: cfg,
-		dir: filepath.Join(cacheDir, "uploads"),
+		dir: uploadDir,
 	}
+}
+
+func deriveUploadDir(cacheDir string) string {
+	cleanCacheDir := filepath.Clean(cacheDir)
+	cacheParentDir := filepath.Dir(cleanCacheDir)
+	cacheBaseName := filepath.Base(cleanCacheDir)
+
+	if cacheBaseName == "." || cacheBaseName == string(filepath.Separator) {
+		cacheBaseName = "cache"
+	}
+
+	return filepath.Join(cacheParentDir, cacheBaseName+"_uploads")
 }
 
 func (s *uploadService) Save(_ context.Context, file multipart.File, header *multipart.FileHeader) (*UploadResult, error) {
