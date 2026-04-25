@@ -39,6 +39,11 @@ func (s *statsService) GetStats(ctx context.Context) (*model.Stats, error) {
 		cachedFiles = 0
 	}
 
+	todayAccess, err := s.statsRepo.GetTodayAccess(ctx)
+	if err != nil {
+		todayAccess = 0
+	}
+
 	bannedIPs, err := s.statsRepo.GetBannedIPs(ctx)
 	if err != nil {
 		bannedIPs = 0
@@ -53,7 +58,7 @@ func (s *statsService) GetStats(ctx context.Context) (*model.Stats, error) {
 	return &model.Stats{
 		TotalFiles:   int(totalFiles),
 		TodayUploads: int(todayUploads),
-		TodayAccess:  0, // 访问统计需要单独的表或计数器
+		TodayAccess:  int(todayAccess),
 		CachedFiles:  int(cachedFiles),
 		BannedIPs:    int(bannedIPs),
 		CacheHitRate: cacheHitRate,

@@ -66,6 +66,9 @@ go run ./cmd/server
 ### 需 admin 或 super_admin
 
 - `GET /api/stats`：统计
+- `POST /api/upload`：上传文件（multipart/form-data，字段 `file`）
+- `GET /api/cache`：缓存统计
+- `POST /api/cache/clean`：缓存清理（JSON 可选：`{"all": true}` 全量清理）
 - `GET /api/admin/logs`：操作日志分页（支持 `user_id`、`action` 过滤）
 - `GET /api/admin/bans`：封禁 IP 列表分页
 - `POST /api/admin/bans`：封禁 IP（JSON: `ip`, `reason`）
@@ -92,10 +95,10 @@ go run ./cmd/server
 | # | 建议 | 当前状态 |
 |---|------|----------|
 | 1 | 完善日志与封禁功能 | ✅ 已补齐 `AdminService`、`AdminHandler` 并开放日志/封禁管理 API |
-| 2 | 文件上传 API | ⚠️ `config.json.example` 定义了 `upload` 配置，但项目中无上传处理器 |
-| 3 | 缓存管理 API | ⚠️ `config.json.example` 定义了 `cache` 配置，但无缓存清理/查询接口 |
+| 2 | 文件上传 API | ✅ 已新增 `/api/upload`，支持大小与 MIME 白名单校验，并落盘到与 `cache.dir` 同级的独立目录（默认 `cache_uploads`） |
+| 3 | 缓存管理 API | ✅ 已新增 `/api/cache`（统计）与 `/api/cache/clean`（清理，支持全量/过期） |
 | 4 | 健康检查接口 | ✅ 已新增 `/health` 端点，返回服务状态与 UTC 时间 |
-| 5 | 访问统计 | ⚠️ `TodayAccess` 硬编码为 0，需在 files 表增加访问计数或新建访问日志表 |
+| 5 | 访问统计 | ✅ `TodayAccess` 已改为基于 `files.last_accessed_at` 的今日访问文件数统计（非硬编码） |
 
 #### 二、工程质量类
 
