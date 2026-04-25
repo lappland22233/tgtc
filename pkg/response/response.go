@@ -44,6 +44,16 @@ func SuccessWithMessage(w http.ResponseWriter, message string, data interface{})
 	})
 }
 
+// SuccessMessage 返回成功响应（仅消息）
+func SuccessMessage(w http.ResponseWriter, message string) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(Response{
+		Success: true,
+		Message: message,
+	})
+}
+
 // Error 返回错误响应
 func Error(w http.ResponseWriter, statusCode int, message string) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")

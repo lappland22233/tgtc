@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"errors"
 	"time"
@@ -16,8 +17,8 @@ import (
 
 var (
 	ErrInvalidCredentials = errors.New("用户名或密码错误")
-	ErrUserDisabled      = errors.New("账号已被禁用")
-	ErrUserNotFound      = errors.New("用户不存在")
+	ErrUserDisabled       = errors.New("账号已被禁用")
+	ErrUserNotFound       = errors.New("用户不存在")
 )
 
 // AuthService 认证服务接口
@@ -30,10 +31,10 @@ type AuthService interface {
 
 // AuthResult 认证结果
 type AuthResult struct {
-	AccessToken  string       `json:"access_token"`
-	RefreshToken string       `json:"refresh_token"`
-	ExpiresAt    time.Time    `json:"expires_at"`
-	User         *model.User  `json:"user"`
+	AccessToken  string      `json:"access_token"`
+	RefreshToken string      `json:"refresh_token"`
+	ExpiresAt    time.Time   `json:"expires_at"`
+	User         *model.User `json:"user"`
 }
 
 // Claims JWT Claims
