@@ -11,6 +11,7 @@ type StatsRepository interface {
 	GetTotalFiles(ctx context.Context) (int64, error)
 	GetTodayUploads(ctx context.Context) (int64, error)
 	GetCachedFiles(ctx context.Context) (int64, error)
+	GetTodayAccess(ctx context.Context) (int64, error)
 	GetBannedIPs(ctx context.Context) (int64, error)
 }
 
@@ -52,6 +53,17 @@ func (r *statsRepository) GetCachedFiles(ctx context.Context) (int64, error) {
 	// 缓存文件是未过期的文件
 	now := time.Now()
 	err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM files WHERE status = 'normal' AND cache_expires_at > ?`, now).Scan(&count)
+	if err != nil && err != sql.ErrNoRows {
+		return 0, err
+	}
+	return count, nil
+}
+
+// GetTodayAccess 获取今日访问量（按今日有访问记录的文件数统计）
+func (r *statsRepository) GetTodayAccess(ctx context.Context) (int64, error) {
+	var count int64
+	today := time.Now().Format("2006-01-02")
+	err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM files WHERE status = 'normal' AND DATE(last_accessed_at) = ?`, today).Scan(&count)
 	if err != nil && err != sql.ErrNoRows {
 		return 0, err
 	}

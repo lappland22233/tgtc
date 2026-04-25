@@ -47,12 +47,16 @@ func main() {
 	userService := service.NewUserService(userRepo, logRepo)
 	statsService := service.NewStatsService(statsRepo)
 	adminService := service.NewAdminService(logRepo, banRepo)
+	uploadService := service.NewUploadService(cfg.Upload, cfg.Cache.Dir)
+	cacheService := service.NewCacheService(cfg.Cache)
 
 	// 初始化处理器
 	authHandler := handler.NewAuthHandler(authService)
 	userHandler := handler.NewUserHandler(userService)
 	statsHandler := handler.NewStatsHandler(statsService)
 	adminHandler := handler.NewAdminHandler(adminService)
+	uploadHandler := handler.NewUploadHandler(uploadService, cfg.Upload.MaxSizeMB)
+	cacheHandler := handler.NewCacheHandler(cacheService)
 
 	// 初始化中间件
 	authMiddleware := middleware.NewAuthMiddleware(authService)
@@ -101,6 +105,10 @@ func main() {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
 	})))
+
+	mux.HandleFunc("/api/upload", authRequired(authMiddleware.RequireAdmin(uploadHandler.Upload)))
+	mux.HandleFunc("/api/cache", authRequired(authMiddleware.RequireAdmin(cacheHandler.GetStats)))
+	mux.HandleFunc("/api/cache/clean", authRequired(authMiddleware.RequireAdmin(cacheHandler.Clean)))
 
 	// 应用中间件
 	adminMux := applyMiddleware(mux)
