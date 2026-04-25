@@ -9,7 +9,8 @@ import (
 // CORSMiddleware CORS中间件。
 func CORSMiddleware(mode string, next http.HandlerFunc) http.HandlerFunc {
 	allowedOrigins := parseAllowedOrigins(os.Getenv("CORS_ALLOWED_ORIGINS"))
-	allowAnyOrigin := mode != "production" && len(allowedOrigins) == 0
+	strictMode := isStrictCORSMode(mode)
+	allowAnyOrigin := !strictMode && len(allowedOrigins) == 0
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		origin := strings.TrimSpace(r.Header.Get("Origin"))
@@ -19,7 +20,7 @@ func CORSMiddleware(mode string, next http.HandlerFunc) http.HandlerFunc {
 			} else if isOriginAllowed(origin, allowedOrigins) {
 				w.Header().Set("Access-Control-Allow-Origin", origin)
 				w.Header().Set("Vary", "Origin")
-			} else if mode == "production" {
+			} else if strictMode {
 				http.Error(w, "origin not allowed", http.StatusForbidden)
 				return
 			}
@@ -36,6 +37,11 @@ func CORSMiddleware(mode string, next http.HandlerFunc) http.HandlerFunc {
 
 		next.ServeHTTP(w, r)
 	}
+}
+
+func isStrictCORSMode(mode string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(mode))
+	return normalized == "production" || normalized == "release"
 }
 
 func parseAllowedOrigins(raw string) map[string]struct{} {
