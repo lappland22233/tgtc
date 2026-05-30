@@ -75,40 +75,37 @@ export class AuthService {
         emailVerified: emailVerificationEnabled !== 'true',
       });
 
-      try {
-        const savedUser = await queryRunner.manager.save(User, user);
-        await queryRunner.commitTransaction();
+      const savedUser = await queryRunner.manager.save(User, user);
+      await queryRunner.commitTransaction();
 
-        // 邮箱验证开启时不返回 token，需用户验证邮箱后再登录
-        if (emailVerificationEnabled === 'true') {
-          return {
-            message: '注册成功，请验证邮箱',
-            needVerification: true,
-          };
-        }
-
-        const accessToken = this.generateToken(savedUser);
-
+      // 邮箱验证开启时不返回 token，需用户验证邮箱后再登录
+      if (emailVerificationEnabled === 'true') {
         return {
-          accessToken,
-          user: {
-            id: savedUser.id,
-            email: savedUser.email,
-            role: savedUser.role,
-            emailVerified: savedUser.emailVerified,
-          },
-          message: '注册成功',
+          message: '注册成功，请验证邮箱',
+          needVerification: true,
         };
-      } catch (error: unknown) {
-        await queryRunner.rollbackTransaction();
-        // 处理唯一约束冲突（含邮箱唯一和 super_admin 角色唯一索引）
-        if (error instanceof Error && error.message?.includes('duplicate key')) {
-          throw new BadRequestException('该邮箱已被注册');
-        }
-        throw error;
       }
-    } catch (error) {
-      await queryRunner.rollbackTransaction();
+
+      const accessToken = this.generateToken(savedUser);
+
+      return {
+        accessToken,
+        user: {
+          id: savedUser.id,
+          email: savedUser.email,
+          role: savedUser.role,
+          emailVerified: savedUser.emailVerified,
+        },
+        message: '注册成功',
+      };
+    } catch (error: unknown) {
+      if (queryRunner.isTransactionActive) {
+        await queryRunner.rollbackTransaction();
+      }
+      // 处理唯一约束冲突（含邮箱唯一和 super_admin 角色唯一索引）
+      if (error instanceof Error && error.message?.includes('duplicate key')) {
+        throw new BadRequestException('该邮箱已被注册');
+      }
       throw error;
     } finally {
       await queryRunner.release();

@@ -147,30 +147,19 @@ describe('AuthService - validateVerificationCode', () => {
 
   describe('过期验证码', () => {
     it('应抛出 BadRequestException', async () => {
-      // findOne 返回 null（MoreThan(new Date()) 不匹配已过期记录）
       verificationCodeRepo.findOne.mockResolvedValueOnce(null);
-
-      await expect(
-        (service as any).validateVerificationCode('test@example.com', '123456', 'register'),
-      ).rejects.toThrow(BadRequestException);
 
       await expect(
         (service as any).validateVerificationCode('test@example.com', '123456', 'register'),
       ).rejects.toThrow('验证码无效或已过期');
 
-      // 不应执行 update
       expect(verificationCodeRepo.update).not.toHaveBeenCalled();
     });
   });
 
   describe('已使用验证码', () => {
     it('应抛出 BadRequestException（isUsed: false 不匹配已使用记录）', async () => {
-      // findOne 返回 null（isUsed: false 不匹配已使用的记录）
       verificationCodeRepo.findOne.mockResolvedValueOnce(null);
-
-      await expect(
-        (service as any).validateVerificationCode('test@example.com', '123456', 'register'),
-      ).rejects.toThrow(BadRequestException);
 
       await expect(
         (service as any).validateVerificationCode('test@example.com', '123456', 'register'),

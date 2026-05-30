@@ -122,7 +122,7 @@ export class TelegramService {
     }, 'uploadPhoto');
   }
 
-  getFileUrl(file_path: string): string {
+  private getFileUrl(file_path: string): string {
     return `https://api.telegram.org/file/bot${this.botToken}/${file_path}`;
   }
 

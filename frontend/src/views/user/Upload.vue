@@ -2,7 +2,7 @@
   <div>
     <div class="page-header">
       <h1>上传文件</h1>
-      <p>支持拖拽上传，单文件最大 {{ maxFileSize }}MB</p>
+      <p>支持拖拽上传，单文件最大 {{ maxFileSizeMB }}MB</p>
     </div>
 
     <div class="card">
@@ -95,7 +95,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue';
+import { ref, onMounted } from 'vue';
 import { MessagePlugin } from 'tdesign-vue-next';
 import { useFileStore } from '../../stores/files';
 import { api } from '../../stores/auth';
@@ -104,7 +104,9 @@ import type { BatchUploadResult } from '../../types/file';
 
 type QueueStatus = 'pending' | 'success' | 'error';
 
-const MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024; // 20MB
+const maxFileSizeBytes = ref(20 * 1024 * 1024);
+const maxFileSizeMB = ref(20);
+const acceptTypes = ref('image/*,.pdf,.zip,.rar,.txt');
 
 const fileStore = useFileStore();
 const fileInput = ref<HTMLInputElement>();
@@ -115,13 +117,10 @@ const selectedFiles = ref<string[]>([]);
 const markdownResult = ref('');
 const batchResult = ref<BatchUploadResult | null>(null);
 
-const maxFileSize = 20; // MB（展示用）
-const acceptTypes = 'image/*,.pdf,.zip,.rar,.txt';
-
 function validateFiles(files: File[]): File[] {
   return files.filter((f) => {
-    if (f.size > MAX_FILE_SIZE_BYTES) {
-      MessagePlugin.warning(`文件 "${f.name}" 超过 ${maxFileSize}MB 限制，已跳过`);
+    if (f.size > maxFileSizeBytes.value) {
+      MessagePlugin.warning(`文件 "${f.name}" 超过 ${maxFileSizeMB.value}MB 限制，已跳过`);
       return false;
     }
     return true;
@@ -231,6 +230,24 @@ function copyMarkdown() {
   navigator.clipboard.writeText(markdownResult.value);
   MessagePlugin.success('已复制到剪贴板');
 }
+
+async function fetchUploadConfig() {
+  try {
+    const res = await api.get('/files/upload-config');
+    const data = res.data.data;
+    if (data.maxFileSize) {
+      maxFileSizeBytes.value = data.maxFileSize;
+      maxFileSizeMB.value = Math.round((data.maxFileSize / 1024 / 1024) * 100) / 100;
+    }
+    if (data.allowedTypes?.length) {
+      acceptTypes.value = data.allowedTypes.join(',');
+    }
+  } catch {
+    // 使用默认值
+  }
+}
+
+onMounted(fetchUploadConfig);
 
 function formatSize(bytes: number) {
   if (bytes === 0) return '0 B';

@@ -20,7 +20,9 @@ import {
 } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 import { FileInterceptor, FilesInterceptor } from '@nestjs/platform-express';
+import { ConfigService } from '@nestjs/config';
 import { FileService } from './file.service';
+import { GenerateShareLinkDto, BatchMarkdownDto } from './file.dto';
 import { Roles } from '../common/decorators/roles.decorator';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
@@ -29,7 +31,7 @@ import { FileAccessType } from '../common/entities/file.entity';
 
 @Controller('files')
 export class FileController {
-  constructor(private fileService: FileService) {}
+  constructor(private fileService: FileService, private configService: ConfigService) {}
 
   @Post('upload')
   @UseGuards(AuthGuard('jwt'))
@@ -51,6 +53,13 @@ export class FileController {
     return this.fileService.uploadMultiple(files, user);
   }
 
+  @Get('upload-config')
+  async getUploadConfig() {
+    const maxFileSize = await this.fileService.getMaxFileSize();
+    const allowedTypes = await this.fileService.getAllowedTypes();
+    return { maxFileSize, allowedTypes };
+  }
+
   @Get()
   @UseGuards(AuthGuard('jwt'))
   async findAll(
@@ -58,27 +67,44 @@ export class FileController {
     @Query('limit') limit = 20,
     @CurrentUser() user: User,
     @Query('userId') userId?: string,
+    @Query('keyword') keyword?: string,
   ) {
     // Non-admin users can only see their own files
     if (user.role === UserRole.USER) {
-      return this.fileService.findAll(Number(page), Number(limit), user.id);
+      return this.fileService.findAll(Number(page), Number(limit), user.id, keyword);
     }
-    return this.fileService.findAll(Number(page), Number(limit), userId);
+    return this.fileService.findAll(Number(page), Number(limit), userId, keyword);
   }
 
   @Get(':id')
   @UseGuards(AuthGuard('jwt'))
-  async findOne(@Param('id') id: string) {
-    return this.fileService.findOne(id);
+  async findOne(@Param('id') id: string, @CurrentUser() user: User) {
+    return this.fileService.findOne(id, user);
   }
 
   @Get(':id/download')
   @UseGuards(AuthGuard('jwt'))
   async download(
     @Param('id') id: string,
-    @Query('password') password?: string,
+    @CurrentUser() user: User,
+    @Res() res: Response,
   ) {
-    return this.fileService.getFileContent(id, password);
+    try {
+      const result = await this.fileService.getFileContent(id, user);
+
+      res.set({
+        'Content-Type': result.contentType,
+        'Content-Disposition': `attachment; filename="${encodeURIComponent(result.filename)}"`,
+        'Content-Length': result.size.toString(),
+        'Cache-Control': 'private, no-cache',
+      });
+
+      res.send(result.content);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '下载失败';
+      const status = (error as { status?: number }).status || 500;
+      res.status(status).json({ code: 1, message });
+    }
   }
 
   @Put(':id/access-type')
@@ -123,27 +149,81 @@ export class FileController {
 
   @Post('batch-markdown')
   @UseGuards(AuthGuard('jwt'))
-  async batchToMarkdown(@Body() data: { ids: string[] }) {
-    const markdown = await this.fileService.batchToMarkdown(data.ids);
+  async batchToMarkdown(
+    @Body() data: BatchMarkdownDto,
+    @CurrentUser() user: User,
+  ) {
+    const markdown = await this.fileService.batchToMarkdown(data.ids, user);
     return { markdown };
   }
 
-  // Public file access via share token (JWT signed) - 返回文件内容，图片视频直接预览，其他触发下载
+  // Public file access — 三种模式：
+  // 1. 无参数 → 无约束公开文件直接访问（CDN 缓存友好）
+  // 2. ?token= → 分享链接访问（受限文件 302 跳转一次性链接）
+  // 3. ?access= → 一次性链接直接返回内容（no-cache）
   @Get('public/:id')
   async getPublicFile(
     @Param('id') id: string,
     @Query('token') token: string,
+    @Query('access') access: string,
+    @Query('password') password: string,
     @Req() req: Request,
     @Res() res: Response,
   ) {
-    if (!token) {
-      throw new BadRequestException('请提供有效的分享链接 token');
-    }
     const ip = req.ip || req.socket?.remoteAddress || req.connection?.remoteAddress;
 
     try {
-      const result = await this.fileService.getPublicFileContent(id, token, ip);
+      // 模式 3：一次性访问链接（重定向目标）
+      if (access) {
+        this.fileService.validateAccessToken(access, id);
+        const result = await this.fileService.getPublicFileContentDirect(id);
+        res.set({
+          'Content-Type': result.contentType,
+          'Content-Disposition': result.isInline
+            ? `inline; filename="${encodeURIComponent(result.filename)}"`
+            : `attachment; filename="${encodeURIComponent(result.filename)}"`,
+          'Content-Length': result.size.toString(),
+          'Cache-Control': 'no-store, no-cache, must-revalidate',
+        });
+        res.send(result.content);
+        return;
+      }
 
+      // 模式 2：分享链接（带 token）
+      if (token) {
+        const { file, isConstrained } = await this.fileService.validateShareToken(id, token, ip, password);
+
+        if (isConstrained) {
+          // 受限文件 → 302 重定向到一次性链接，防止 CDN 缓存
+          const accessToken = this.fileService.generateAccessToken(id);
+          const proto = req.protocol || 'http';
+          const host = req.get('host') || 'localhost:3000';
+          res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
+          res.redirect(302, `${proto}://${host}/api/files/public/${id}?access=${accessToken}`);
+          return;
+        }
+
+        // 无约束分享链接（单次使用但无访问限制）→ 直接返回
+        const result = await this.fileService.getPublicFileContentDirect(id);
+        res.set({
+          'Content-Type': result.contentType,
+          'Content-Disposition': result.isInline
+            ? `inline; filename="${encodeURIComponent(result.filename)}"`
+            : `attachment; filename="${encodeURIComponent(result.filename)}"`,
+          'Content-Length': result.size.toString(),
+          'Cache-Control': 'public, max-age=3600',
+        });
+        res.send(result.content);
+        return;
+      }
+
+      // 模式 1：无任何参数 → 仅无约束公开文件可访问
+      const unrestricted = await this.fileService.isUnrestrictedPublic(id);
+      if (!unrestricted) {
+        throw new BadRequestException('此文件需要有效分享链接才能访问');
+      }
+
+      const result = await this.fileService.getPublicFileContentDirect(id);
       res.set({
         'Content-Type': result.contentType,
         'Content-Disposition': result.isInline
@@ -152,10 +232,8 @@ export class FileController {
         'Content-Length': result.size.toString(),
         'Cache-Control': 'public, max-age=3600',
       });
-
       res.send(result.content);
     } catch (error) {
-      // 用 JSON 格式返回错误
       const message = error instanceof Error ? error.message : '请求失败';
       const status = (error as { status?: number }).status || 500;
       res.status(status).json({ code: 1, message });
@@ -168,9 +246,9 @@ export class FileController {
   async generateShareLink(
     @Param('id') id: string,
     @CurrentUser() user: User,
-    @Query('expiresIn') expiresIn?: string, // hours
+    @Query() query: GenerateShareLinkDto,
   ) {
-    const link = await this.fileService.generateShareLink(id, user, expiresIn ? parseInt(expiresIn) : undefined);
+    const link = await this.fileService.generateShareLink(id, user, query.expiresIn);
     return { link };
   }
 

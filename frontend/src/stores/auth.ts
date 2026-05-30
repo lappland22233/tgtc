@@ -18,17 +18,18 @@ api.interceptors.response.use(
   (response) => response,
   (error) => {
     if (error.response?.status === 401 && !isRedirecting) {
-      isRedirecting = true;
-      // 从 pinia 实例获取当前 store
-      const store = useAuthStore();
-      // 仅清空状态，不发起额外请求
-      store.user = null;
-      // 防抖跳转，避免并发 401 多次触发
-      if (redirectTimer) clearTimeout(redirectTimer);
-      redirectTimer = setTimeout(() => {
-        window.location.href = '/login';
-        isRedirecting = false;
-      }, 300);
+      // 如果已经在登录/注册页，不触发跳转（fetchUser 的 catch 已处理 user=null）
+      const isAuthPage = window.location.pathname === '/login' || window.location.pathname === '/register';
+      if (!isAuthPage) {
+        isRedirecting = true;
+        const store = useAuthStore();
+        store.user = null;
+        if (redirectTimer) clearTimeout(redirectTimer);
+        redirectTimer = setTimeout(() => {
+          window.location.href = '/login';
+          isRedirecting = false;
+        }, 300);
+      }
     }
     return Promise.reject(error);
   },

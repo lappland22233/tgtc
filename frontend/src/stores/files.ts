@@ -8,10 +8,10 @@ export const useFileStore = defineStore('files', () => {
   const total = ref(0);
   const loading = ref(false);
 
-  async function fetchFiles(page = 1, limit = 20) {
+  async function fetchFiles(page = 1, limit = 20, keyword?: string) {
     loading.value = true;
     try {
-      const response = await api.get('/files', { params: { page, limit } });
+      const response = await api.get('/files', { params: { page, limit, keyword } });
       files.value = response.data.data.files;
       total.value = response.data.data.total;
     } finally {

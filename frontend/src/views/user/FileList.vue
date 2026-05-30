@@ -7,16 +7,20 @@
 
     <div class="card">
       <div style="display: flex; justify-content: space-between; margin-bottom: 16px;">
-        <t-input v-model="search" placeholder="搜索文件..." style="width: 300px;" />
+        <div style="display: flex; gap: 8px;">
+          <t-input v-model="search" placeholder="搜索文件名..." style="width: 300px;" @enter="handleSearch" />
+          <t-button theme="default" @click="handleSearch">搜索</t-button>
+          <t-button theme="default" variant="text" v-if="search" @click="handleClearSearch">清除</t-button>
+        </div>
         <t-button theme="primary" @click="$router.push('/upload')">+ 上传文件</t-button>
       </div>
 
       <t-loading v-if="fileStore.loading" />
-      <div v-else-if="filteredFiles.length === 0" style="text-align: center; padding: 48px; color: var(--text-secondary);">
+      <div v-else-if="fileStore.files.length === 0" style="text-align: center; padding: 48px; color: var(--text-secondary);">
         暂无文件，点击上方按钮上传
       </div>
       <div v-else>
-        <t-table :data="filteredFiles" :columns="columns" row-key="id" hover>
+        <t-table :data="fileStore.files" :columns="columns" row-key="id" hover>
           <template #filename="{ row }">
             <div style="display: flex; align-items: center; gap: 12px;">
               <span style="font-size: 20px;">{{ getFileEmoji(row.mimeType) }}</span>
@@ -56,7 +60,7 @@
             v-model="page"
             :total="fileStore.total"
             :page-size="20"
-            @change="() => { fileStore.fetchFiles(page); search = ''; }"
+            @change="() => fileStore.fetchFiles(page, 20, search)"
           />
         </div>
       </div>
@@ -65,7 +69,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue';
+import { ref, onMounted } from 'vue';
 import { MessagePlugin } from 'tdesign-vue-next';
 import { useFileStore } from '../../stores/files';
 import { api } from '../../stores/auth';
@@ -76,13 +80,16 @@ const fileStore = useFileStore();
 const page = ref(1);
 const search = ref('');
 
-const filteredFiles = computed(() => {
-  if (!search.value.trim()) return fileStore.files;
-  const keyword = search.value.trim().toLowerCase();
-  return fileStore.files.filter((f) =>
-    f.originalName.toLowerCase().includes(keyword),
-  );
-});
+function handleSearch() {
+  page.value = 1;
+  fileStore.fetchFiles(1, 20, search.value || undefined);
+}
+
+function handleClearSearch() {
+  search.value = '';
+  page.value = 1;
+  fileStore.fetchFiles(1, 20);
+}
 
 const columns = [
   { colKey: 'filename', title: '文件名', width: '250' },
@@ -144,12 +151,8 @@ async function copyLink(row: Pick<FileItem, 'id'>) {
 
 async function downloadFile(row: Pick<FileItem, 'id'>) {
   try {
-    const response = await api.get(`/files/${row.id}/download`);
-    if (response.data.data?.url) {
-      window.open(response.data.data.url, '_blank');
-    } else {
-      MessagePlugin.error('获取下载链接失败');
-    }
+    // 后端代理下载，直接在新窗口打开流式下载
+    window.open(`/api/files/${row.id}/download`, '_blank');
   } catch (error: unknown) {
     MessagePlugin.error(getErrorMessage(error));
   }
