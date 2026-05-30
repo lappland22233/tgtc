@@ -1,0 +1,42 @@
+import { IsEmail, IsString, MinLength, MaxLength, Matches, IsOptional } from 'class-validator';
+
+export class RegisterDto {
+  @IsEmail({}, { message: '请输入有效的邮箱地址' })
+  email: string;
+
+  @IsString()
+  @MinLength(6, { message: '密码至少6位' })
+  @MaxLength(20, { message: '密码最多20位' })
+  password: string;
+
+  @IsOptional()
+  @IsString()
+  @Matches(/^\d{6}$/, { message: '验证码必须是6位数字' })
+  code?: string;
+}
+
+export class LoginDto {
+  @IsEmail({}, { message: '请输入有效的邮箱地址' })
+  email: string;
+
+  @IsString()
+  password: string;
+}
+
+export class SendCodeDto {
+  @IsEmail({}, { message: '请输入有效的邮箱地址' })
+  email: string;
+
+  @IsString()
+  @Matches(/^(register|reset_password)$/, { message: '类型必须是 register 或 reset_password' })
+  type: string;
+}
+
+export class VerifyEmailDto {
+  @IsEmail({}, { message: '请输入有效的邮箱地址' })
+  email: string;
+
+  @IsString()
+  @Matches(/^\d{6}$/, { message: '验证码必须是6位数字' })
+  code: string;
+}

@@ -1,0 +1,58 @@
+# Dependencies
+backend/node_modules/
+frontend/node_modules/
+backend/dist/
+frontend/dist/
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+
+# Environment variables
+backend/.env
+frontend/.env
+backend/.env.local
+frontend/.env.local
+backend/.env.*.local
+frontend/.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Testing
+coverage/
+.nyc_output/
+
+# Build outputs
+build/
+dist/
+*.tsbuildinfo
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
+
+# Database
+*.sqlite
+*.sqlite3
+
+# Uploads
+backend/uploads/
+uploads/
+
+# PM2
+backend/ecosystem.config.js
+.ecosystem.config.js
