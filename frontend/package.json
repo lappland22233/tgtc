@@ -1,0 +1,25 @@
+{
+  "name": "file-distribution-system-frontend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "vue": "^3.4.0",
+    "vue-router": "^4.2.5",
+    "pinia": "^2.1.7",
+    "axios": "^1.6.2",
+    "tdesign-vue-next": "^1.6.0",
+    "tdesign-icons-vue-next": "^0.2.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^4.5.2",
+    "typescript": "~5.3.3",
+    "vite": "^5.0.10",
+    "vue-tsc": "^2.0.0"
+  }
+}
