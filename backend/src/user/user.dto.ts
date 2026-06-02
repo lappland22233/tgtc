@@ -9,6 +9,10 @@ export class CreateUserDto {
   @MinLength(6, { message: '密码至少6位' })
   @MaxLength(20, { message: '密码最多20位' })
   password: string;
+
+  @IsOptional()
+  @IsEnum([UserRole.ADMIN, UserRole.USER], { message: '角色无效' })
+  role?: UserRole;
 }
 
 export class UpdateRoleDto {

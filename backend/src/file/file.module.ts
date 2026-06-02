@@ -7,11 +7,12 @@ import { FileService } from './file.service';
 import { File } from '../common/entities/file.entity';
 import { FileAccessLog } from '../common/entities/file-access-log.entity';
 import { BannedIP } from '../common/entities/banned-ip.entity';
+import { ShareAudit } from '../common/entities/share-audit.entity';
 import { TelegramService } from '../telegram/telegram.service';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([File, FileAccessLog, BannedIP]),
+    TypeOrmModule.forFeature([File, FileAccessLog, BannedIP, ShareAudit]),
     JwtModule.registerAsync({
       imports: [ConfigModule],
       inject: [ConfigService],

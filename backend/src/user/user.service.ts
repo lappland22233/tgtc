@@ -93,8 +93,11 @@ export class UserService {
       throw new BadRequestException('无法删除超级管理员');
     }
 
-    // Delete all files uploaded by this user
-    await this.fileRepository.delete({ uploaderId: id });
+    // 软删除该用户上传的所有文件（保留外键完整性，不破坏 file_access_logs 等关联数据）
+    await this.fileRepository.update(
+      { uploaderId: id, isDeleted: false },
+      { isDeleted: true },
+    );
 
     await this.userRepository.delete(id);
   }
@@ -102,6 +105,10 @@ export class UserService {
   async updateRole(id: string, role: UserRole, requesterRole: UserRole): Promise<void> {
     if (requesterRole !== UserRole.SUPER_ADMIN) {
       throw new BadRequestException('只有超级管理员可以修改用户角色');
+    }
+
+    if (role === UserRole.SUPER_ADMIN) {
+      throw new BadRequestException('不能通过接口创建超级管理员');
     }
 
     const user = await this.userRepository.findOne({ where: { id } });

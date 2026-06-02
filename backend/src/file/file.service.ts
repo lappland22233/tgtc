@@ -11,6 +11,7 @@ import { TelegramService } from '../telegram/telegram.service';
 import { ConfigCacheService } from '../common/services/config-cache.service';
 import { User, UserRole } from '../common/entities/user.entity';
 import { BannedIP } from '../common/entities/banned-ip.entity';
+import { ShareAudit } from '../common/entities/share-audit.entity';
 import * as bcrypt from 'bcryptjs';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -36,6 +37,8 @@ export class FileService implements OnModuleInit {
     private accessLogRepository: Repository<FileAccessLog>,
     @InjectRepository(BannedIP)
     private bannedIPRepository: Repository<BannedIP>,
+    @InjectRepository(ShareAudit)
+    private shareAuditRepository: Repository<ShareAudit>,
     private telegramService: TelegramService,
     private configService: ConfigService,
     private jwtService: JwtService,
@@ -462,6 +465,9 @@ export class FileService implements OnModuleInit {
 
     await this.assertFileReadable(file, user);
 
+    // 先从 Telegram 拉取文件内容（成功后才扣次数，避免拉取失败浪费次数）
+    const content = await this.telegramService.getFile(file.telegramFileId || file.filename);
+
     const result = await this.fileRepository
       .createQueryBuilder()
       .update(File)
@@ -485,8 +491,6 @@ export class FileService implements OnModuleInit {
     } catch {
       // 日志记录失败不影响主流程
     }
-
-    const content = await this.telegramService.getFile(file.telegramFileId || file.filename);
 
     const mimeType = file.mimeType || 'application/octet-stream';
     let filename = file.originalName;
@@ -518,6 +522,10 @@ export class FileService implements OnModuleInit {
 
     await this.assertFileReadable(file, user);
 
+    // 先从 Telegram 拉取文件流（成功后才扣次数，避免拉取失败浪费次数）
+    const { stream } = await this.telegramService.getFileStream(file.telegramFileId || file.filename);
+
+    // 原子递增访问计数
     const result = await this.fileRepository
       .createQueryBuilder()
       .update(File)
@@ -541,8 +549,6 @@ export class FileService implements OnModuleInit {
     } catch {
       // 日志记录失败不影响主流程
     }
-
-    const { stream } = await this.telegramService.getFileStream(file.telegramFileId || file.filename);
 
     const mimeType = file.mimeType || 'application/octet-stream';
     let filename = file.originalName;
@@ -594,9 +600,6 @@ export class FileService implements OnModuleInit {
     return true;
   }
 
-  // 内存中已消费的访问 token jti 集合，确保每次访问都需重新获取 token
-  private consumedAccessTokens = new Set<string>();
-
   /**
    * 生成短效访问 token（30 秒有效期，jti 防重放攻击）
    */
@@ -617,22 +620,26 @@ export class FileService implements OnModuleInit {
       if (payload.sub !== fileId || payload.purpose !== 'stream') {
         throw new Error('token 用途不匹配');
       }
-      // 检查 jti 是否已被消费（防重放）
       if (payload.jti) {
-        if (this.consumedAccessTokens.has(payload.jti)) {
+        // 持久化消费状态：写入 share_audits 表，利用 jti 唯一约束防重放
+        try {
+          await this.shareAuditRepository.save({
+            jti: payload.jti,
+            fileId,
+            userId: '',
+            action: 'consume',
+            ip: '',
+          });
+        } catch (dbError) {
+          // 唯一约束冲突 = token 已被消费
           throw new Error('access token 已被使用过');
         }
-        this.consumedAccessTokens.add(payload.jti);
       }
     } catch (error) {
       if (error instanceof Error && error.message.includes('已被使用过')) {
         throw new ForbiddenException('访问链接已被使用，请重新获取');
       }
       throw new ForbiddenException('访问链接已失效，请重新获取');
-    }
-    // 定时清理过期 jti（每 5 分钟）
-    if (this.consumedAccessTokens.size > 1000) {
-      this.consumedAccessTokens.clear();
     }
   }
 

@@ -3,6 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, LessThan } from 'typeorm';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { BannedIP } from '../common/entities/banned-ip.entity';
+import { ShareAudit } from '../common/entities/share-audit.entity';
 
 @Injectable()
 export class TasksService {
@@ -11,7 +12,26 @@ export class TasksService {
   constructor(
     @InjectRepository(BannedIP)
     private bannedIPRepository: Repository<BannedIP>,
+    @InjectRepository(ShareAudit)
+    private shareAuditRepository: Repository<ShareAudit>,
   ) {}
+
+  @Cron(CronExpression.EVERY_30_MINUTES)
+  async cleanupExpiredAccessTokens() {
+    try {
+      // 清理超过 5 分钟的已消费 token 记录（正常 token 30s 过期，留足余量）
+      const cutoff = new Date(Date.now() - 5 * 60 * 1000);
+      const result = await this.shareAuditRepository.delete({
+        action: 'consume',
+        createdAt: LessThan(cutoff),
+      });
+      if ((result.affected ?? 0) > 0) {
+        this.logger.log(`已清理 ${result.affected} 条过期访问 token 记录`);
+      }
+    } catch (error: unknown) {
+      this.logger.error('清理过期 token 记录失败', error instanceof Error ? error.message : String(error));
+    }
+  }
 
   @Cron(CronExpression.EVERY_HOUR)
   async cleanupExpiredBans() {

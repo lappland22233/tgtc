@@ -5,26 +5,26 @@ import {
   CreateDateColumn,
 } from 'typeorm';
 
-export type ShareAuditAction = 'create' | 'revoke' | 'access';
+export type ShareAuditAction = 'create' | 'revoke' | 'access' | 'consume';
 
 @Entity('share_audits')
 export class ShareAudit {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
-  @Column()
+  @Column({ unique: true })
   jti: string;
 
   @Column()
   fileId: string;
 
-  @Column()
+  @Column({ default: '' })
   userId: string;
 
-  @Column({ type: 'varchar' })
+  @Column({ type: 'varchar', default: 'consume' })
   action: ShareAuditAction;
 
-  @Column({ nullable: true })
+  @Column({ nullable: true, default: '' })
   ip: string;
 
   @CreateDateColumn()
