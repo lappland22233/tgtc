@@ -113,7 +113,7 @@ const fileInput = ref<HTMLInputElement>();
 const isDragover = ref(false);
 const uploading = ref(false);
 const uploadQueue = ref<{ file: File; status: QueueStatus; errorReason?: string }[]>([]);
-const selectedFiles = ref<string[]>([]);
+const selectedFiles = ref<string[]>([]); // 存储成功上传的文件 ID
 const markdownResult = ref('');
 const batchResult = ref<BatchUploadResult | null>(null);
 
@@ -169,7 +169,7 @@ async function uploadFiles(files: File[]) {
     for (const item of result.success) {
       const entry = queueMap.get(item.originalName);
       if (entry) entry.status = 'success';
-      selectedFiles.value.push(item.originalName);
+      selectedFiles.value.push(item.id); // 使用文件 ID 关联
     }
 
     // 标记失败（按文件名匹配）
@@ -207,19 +207,19 @@ async function uploadFiles(files: File[]) {
 }
 
 async function convertToMarkdown() {
-  const images = fileStore.files.filter(f =>
-    f.mimeType.startsWith('image/') &&
-    selectedFiles.value.includes(f.originalName)
-  );
+  // 直接从上传成功的图片文件 ID 中筛选
+  const imageIds = selectedFiles.value.filter(id => {
+    const file = fileStore.files.find(f => f.id === id);
+    return file && file.mimeType.startsWith('image/');
+  });
 
-  if (images.length === 0) {
+  if (imageIds.length === 0) {
     MessagePlugin.warning('请先上传图片文件');
     return;
   }
 
   try {
-    const ids = images.map((i) => i.id);
-    const res = await api.post('/files/batch-markdown', { ids });
+    const res = await api.post('/files/batch-markdown', { ids: imageIds });
     markdownResult.value = res.data.data?.markdown?.join('\n') || '';
   } catch (error: unknown) {
     MessagePlugin.error(getErrorMessage(error));

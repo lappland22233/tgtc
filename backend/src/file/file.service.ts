@@ -12,6 +12,7 @@ import { ConfigCacheService } from '../common/services/config-cache.service';
 import { User, UserRole } from '../common/entities/user.entity';
 import { BannedIP } from '../common/entities/banned-ip.entity';
 import { ShareAudit } from '../common/entities/share-audit.entity';
+import { RateLimitService } from '../common/services/rate-limit.service';
 import * as bcrypt from 'bcryptjs';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -43,6 +44,7 @@ export class FileService implements OnModuleInit {
     private configService: ConfigService,
     private jwtService: JwtService,
     private configCacheService: ConfigCacheService,
+    private rateLimitService: RateLimitService,
   ) {
     this.maxFileSize = this.parseFileSize(this.configService.get<string>('MAX_FILE_SIZE'));
     this.allowedTypes = (this.configService.get<string>('ALLOWED_FILE_TYPES') || 'image/*,application/pdf,application/zip,text/*').split(',');
@@ -351,16 +353,12 @@ export class FileService implements OnModuleInit {
     return !!(file && file.accessType === FileAccessType.PRIVATE);
   }
 
-  // 内存中的密码错误计数器（key: IP, value: { count, firstAttempt }）
-  private passwordErrors = new Map<string, { count: number; firstAttempt: number }>();
-  // 内存中的被封禁次数计数器（1小时内被封禁的次数）
-  private banCount = new Map<string, { count: number; windowStart: number }>();
-
   private readonly ERROR_LIMIT = 5;        // 5次错误触发封禁
   private readonly BAN_5M = 5 * 60 * 1000;   // 错误5次封禁5分钟
   private readonly BAN_6H = 6 * 3600 * 1000; // 第5次封禁升级为6小时
   private readonly BAN_COUNT_LIMIT = 5;     // 1小时内被封禁5次触发升级
   private readonly BAN_WINDOW = 3600 * 1000; // 1小时窗口
+  private readonly PWD_WINDOW = 3600 * 1000; // 密码错误窗口
 
   async isIPBanned(ip: string): Promise<{ banned: boolean; message?: string }> {
     const now = new Date();
@@ -391,59 +389,59 @@ export class FileService implements OnModuleInit {
    * 1小时内被封禁5次 → 升级为封禁6小时
    */
   async recordFailedPasswordAttempt(ip: string): Promise<void> {
-    const now = Date.now();
-    const attempt = this.passwordErrors.get(ip);
+    const pwdLimitKey = `pwd:${ip}`;
+    const banLimitKey = `ban:${ip}`;
 
-    // 超时重置错误计数器
-    if (!attempt || (now - attempt.firstAttempt) > this.BAN_WINDOW) {
-      this.passwordErrors.set(ip, { count: 1, firstAttempt: now });
+    // 密码错误计数（仅计数，不锁定——5次错误后才触发封禁）
+    const pwdResult = await this.rateLimitService.checkAndIncrement(
+      pwdLimitKey, 'password_error',
+      this.ERROR_LIMIT, 0, this.PWD_WINDOW,
+    );
+
+    // 未达到阈值，仅记录
+    if (pwdResult.allowed) {
       return;
     }
 
-    attempt.count++;
+    // 达到 5 次错误，触发封禁
+    // banCount 也使用 RateLimitService 持久化
+    const banResult = await this.rateLimitService.checkAndIncrement(
+      banLimitKey, 'ban_count',
+      this.BAN_COUNT_LIMIT, 0, this.BAN_WINDOW,
+    );
 
-    // 达到5次错误，触发封禁
-    if (attempt.count >= this.ERROR_LIMIT) {
-      // 检查1小时内被封禁的次数
-      const banEntry = this.banCount.get(ip);
-      if (!banEntry || (now - banEntry.windowStart) > this.BAN_WINDOW) {
-        this.banCount.set(ip, { count: 1, windowStart: now });
+    // 获取当前错误计数和封禁计数
+    const now = Date.now();
+    const currentBanCount = await this.rateLimitService.getAttemptCount(banLimitKey);
+
+    if (currentBanCount >= this.BAN_COUNT_LIMIT) {
+      // 第5次封禁 → 升级为6小时
+      const expiresAt = new Date(now + this.BAN_6H);
+      const reason = `密码错误${this.ERROR_LIMIT}次，1小时内第${currentBanCount}次触发封禁，升级为6小时`;
+
+      const existingBan = await this.bannedIPRepository.findOne({ where: { ip } });
+      if (existingBan) {
+        await this.bannedIPRepository.update(existingBan.id, { expiresAt, reason });
       } else {
-        banEntry.count++;
+        await this.bannedIPRepository.save({ ip, reason, isPermanent: false, expiresAt } as BannedIP);
       }
 
-      const currentBanCount = this.banCount.get(ip)!.count;
+      await this.rateLimitService.reset(banLimitKey);
+    } else {
+      // 第1-4次封禁 → 5分钟
+      const expiresAt = new Date(now + this.BAN_5M);
+      const reason = `密码错误${this.ERROR_LIMIT}次，1小时内第${currentBanCount}次触发封禁`;
 
-      if (currentBanCount >= this.BAN_COUNT_LIMIT) {
-        // 第5次封禁 → 升级为6小时
-        const expiresAt = new Date(now + this.BAN_6H);
-        const reason = `密码错误${this.ERROR_LIMIT}次，1小时内第${currentBanCount}次触发封禁，升级为6小时`;
-
-        const existingBan = await this.bannedIPRepository.findOne({ where: { ip } });
-        if (existingBan) {
-          await this.bannedIPRepository.update(existingBan.id, { expiresAt, reason });
-        } else {
-          await this.bannedIPRepository.save({ ip, reason, isPermanent: false, expiresAt } as BannedIP);
-        }
-
-        // 重置计数器
-        this.banCount.delete(ip);
+      const existingBan = await this.bannedIPRepository.findOne({ where: { ip } });
+      if (existingBan) {
+        await this.bannedIPRepository.update(existingBan.id, { expiresAt, reason });
       } else {
-        // 第1-4次封禁 → 5分钟
-        const expiresAt = new Date(now + this.BAN_5M);
-        const reason = `密码错误${this.ERROR_LIMIT}次，1小时内第${currentBanCount}次触发封禁`;
-
-        const existingBan = await this.bannedIPRepository.findOne({ where: { ip } });
-        if (existingBan) {
-          await this.bannedIPRepository.update(existingBan.id, { expiresAt, reason });
-        } else {
-          await this.bannedIPRepository.save({ ip, reason, isPermanent: false, expiresAt } as BannedIP);
-        }
+        await this.bannedIPRepository.save({ ip, reason, isPermanent: false, expiresAt } as BannedIP);
       }
-
-      // 重置错误计数器
-      this.passwordErrors.delete(ip);
     }
+
+    // 重置错误计数器
+    await this.rateLimitService.reset(pwdLimitKey);
   }
 
   /**
@@ -659,10 +657,10 @@ export class FileService implements OnModuleInit {
   }
 
   /**
-   * 通过短效访问 token 获取文件内容（重新校验文件状态，防止 token 有效期内外界状态变更）
+   * 通过短效访问 token 流式获取文件内容（重新校验文件状态，防止 token 有效期内外界状态变更）
    */
-  async getPublicFileContentWithAccess(id: string): Promise<{
-    content: Buffer;
+  async getPublicFileContentStreamWithAccess(id: string): Promise<{
+    stream: Readable;
     contentType: string;
     filename: string;
     size: number;
@@ -689,7 +687,7 @@ export class FileService implements OnModuleInit {
       }
     }
 
-    const content = await this.telegramService.getFile(file.telegramFileId || file.filename);
+    const { stream } = await this.telegramService.getFileStream(file.telegramFileId || file.filename);
 
     try {
       await this.accessLogRepository.save({
@@ -710,14 +708,14 @@ export class FileService implements OnModuleInit {
       filename = `${filename}.${ext}`;
     }
 
-    return { content, contentType: mimeType, filename, size: content.length, isInline };
+    return { stream, contentType: mimeType, filename, size: Number(file.size), isInline };
   }
 
   /**
-   * 直接获取文件内容（用于一次性链接和无约束公开文件）
+   * 流式获取公开文件内容（用于无约束公开文件和一次性链接）
    */
-  async getPublicFileContentDirect(id: string): Promise<{
-    content: Buffer;
+  async getPublicFileContentStream(id: string): Promise<{
+    stream: Readable;
     contentType: string;
     filename: string;
     size: number;
@@ -731,7 +729,7 @@ export class FileService implements OnModuleInit {
       throw new NotFoundException('文件不存在');
     }
 
-    const content = await this.telegramService.getFile(file.telegramFileId || file.filename);
+    const { stream } = await this.telegramService.getFileStream(file.telegramFileId || file.filename);
 
     try {
       await this.accessLogRepository.save({
@@ -752,7 +750,7 @@ export class FileService implements OnModuleInit {
       filename = `${filename}.${ext}`;
     }
 
-    return { content, contentType: mimeType, filename, size: content.length, isInline };
+    return { stream, contentType: mimeType, filename, size: Number(file.size), isInline };
   }
 
   /**

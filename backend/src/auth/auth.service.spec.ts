@@ -11,6 +11,7 @@ import { BannedIP } from '../common/entities/banned-ip.entity';
 import { SystemConfig } from '../common/entities/system-config.entity';
 import { MailerService } from '../mailer/mailer.service';
 import { ConfigCacheService } from '../common/services/config-cache.service';
+import { RateLimitService } from '../common/services/rate-limit.service';
 
 describe('AuthService - validateVerificationCode', () => {
   let service: AuthService;
@@ -59,6 +60,12 @@ describe('AuthService - validateVerificationCode', () => {
     get: jest.fn().mockResolvedValue('false'),
   };
 
+  const mockRateLimitService = {
+    checkAndIncrement: jest.fn().mockResolvedValue({ allowed: true }),
+    reset: jest.fn().mockResolvedValue(undefined),
+    getAttemptCount: jest.fn().mockResolvedValue(0),
+  };
+
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -88,6 +95,7 @@ describe('AuthService - validateVerificationCode', () => {
         { provide: MailerService, useValue: mockMailerService },
         { provide: DataSource, useValue: mockDataSource },
         { provide: ConfigCacheService, useValue: mockConfigCacheService },
+        { provide: RateLimitService, useValue: mockRateLimitService },
       ],
     }).compile();
 

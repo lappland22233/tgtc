@@ -29,15 +29,19 @@ import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { User, UserRole } from '../common/entities/user.entity';
 import { FileAccessType } from '../common/entities/file.entity';
 
-// Multer 层文件大小限制（和环境变量 MAX_FILE_SIZE 保持一致，防止文件在内存中被读取后才被业务层拒绝）
-const multerFileSize = (() => {
-  const val = Number(process.env.MAX_FILE_SIZE);
-  return Number.isFinite(val) && val > 0 ? val : 20971520;
-})();
+// Multer 层硬上限（500MB，仅防止极端 DoS；精确的动态限制由 FileService.upload() 业务层负责）
+const multerFileSize = 500 * 1024 * 1024; // 500MB
 
 @Controller('files')
 export class FileController {
   constructor(private fileService: FileService, private configService: ConfigService) {}
+
+  /**
+   * 获取应用基础 URL（优先使用 APP_URL 环境变量，避免 Host Header 注入）
+   */
+  private get appUrl(): string {
+    return this.configService.get<string>('APP_URL') || 'http://localhost:3000';
+  }
 
   @Post('upload')
   @UseGuards(AuthGuard('jwt'))
@@ -201,7 +205,7 @@ export class FileController {
       // 模式 1：短效访问链接（30 秒有效，防重放）
       if (access) {
         await this.fileService.consumeAccessToken(access, id);
-        const result = await this.fileService.getPublicFileContentWithAccess(id);
+        const result = await this.fileService.getPublicFileContentStreamWithAccess(id);
         res.set({
           'Content-Type': result.contentType,
           'Content-Disposition': result.isInline
@@ -210,7 +214,8 @@ export class FileController {
           'Content-Length': result.size.toString(),
           'Cache-Control': 'no-store, no-cache, must-revalidate',
         });
-        res.send(result.content);
+        const pipe = promisify(pipeline);
+        await pipe(result.stream, res);
         return;
       }
 
@@ -234,9 +239,7 @@ export class FileController {
 
       // 需要密码但未提供 → 显示密码页面
       if (hasPwd && !ps) {
-        const proto = req.protocol || 'http';
-        const host = req.get('host') || 'localhost:3000';
-        const currentUrl = `${proto}://${host}/files/public/${id}`;
+        const currentUrl = `${this.appUrl}/files/public/${id}`;
         res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
         res.type('html').send(getPasswordPageHTML(currentUrl, id));
         return;
@@ -256,9 +259,7 @@ export class FileController {
               return;
             }
           }
-          const proto = req.protocol || 'http';
-          const host = req.get('host') || 'localhost:3000';
-          const currentUrl = `${proto}://${host}/files/public/${id}`;
+          const currentUrl = `${this.appUrl}/files/public/${id}`;
           res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
           res.type('html').send(getPasswordPageHTML(currentUrl, id, '密码错误，请重试'));
           return;
@@ -269,8 +270,8 @@ export class FileController {
       const unrestricted = await this.fileService.isUnrestrictedPublic(id);
 
       if (unrestricted) {
-        // 无约束公开文件 → 直接返回
-        const result = await this.fileService.getPublicFileContentDirect(id);
+        // 无约束公开文件 → 流式返回
+        const result = await this.fileService.getPublicFileContentStream(id);
         res.set({
           'Content-Type': result.contentType,
           'Content-Disposition': result.isInline
@@ -279,7 +280,8 @@ export class FileController {
           'Content-Length': result.size.toString(),
           'Cache-Control': 'public, max-age=3600',
         });
-        res.send(result.content);
+        const pipe = promisify(pipeline);
+        await pipe(result.stream, res);
         return;
       }
 
@@ -290,10 +292,8 @@ export class FileController {
           throw new BadRequestException(constrained.reason || '文件访问受限');
         }
         const accessToken = this.fileService.generateAccessToken(id);
-        const proto = req.protocol || 'http';
-        const host = req.get('host') || 'localhost:3000';
         res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
-        res.redirect(302, `${proto}://${host}/api/files/public/${id}?access=${accessToken}`);
+        res.redirect(302, `${this.appUrl}/api/files/public/${id}?access=${accessToken}`);
         return;
       }
 
@@ -318,10 +318,17 @@ export class FileController {
   }
 }
 
+function escapeHtml(str: string): string {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
 function getPasswordPageHTML(actionUrl: string, fileId: string, errorMsg?: string): string {
-  const error = errorMsg
-    ? `<div style="background:#F8514922;color:#F85149;padding:12px 16px;border-radius:8px;margin-bottom:20px;font-size:14px;border:1px solid rgba(248,81,73,0.3);">❌ ${errorMsg}</div>`
-    : '';
+  const escapedError = errorMsg ? `<div style="background:#F8514922;color:#F85149;padding:12px 16px;border-radius:8px;margin-bottom:20px;font-size:14px;border:1px solid rgba(248,81,73,0.3);">${escapeHtml(errorMsg)}</div>` : '';
   return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>文件密码验证</title></head>
@@ -332,8 +339,8 @@ function getPasswordPageHTML(actionUrl: string, fileId: string, errorMsg?: strin
 <h1 style="font-size:20px;color:#E6EDF3;margin:0;">加密文件</h1>
 <p style="color:#8B949E;font-size:14px;margin-top:8px;">此文件需要密码才能访问</p>
 </div>
-${error}
-<form method="GET" action="${actionUrl}">
+${escapedError}
+<form method="GET" action="${escapeHtml(actionUrl)}">
 <div style="margin-bottom:16px;">
 <input type="password" name="ps" placeholder="请输入访问密码" autofocus required style="width:100%;padding:12px;background:#0D1117;border:1px solid #30363D;border-radius:8px;color:#E6EDF3;font-size:16px;outline:none;box-sizing:border-box;" />
 </div>
@@ -352,7 +359,7 @@ function getBannedPageHTML(message: string): string {
 <div style="background:#21262D;padding:40px;border-radius:16px;width:100%;max-width:380px;border:1px solid #30363D;box-shadow:0 8px 32px rgba(0,0,0,0.4);text-align:center;">
 <div style="font-size:64px;margin-bottom:16px;">🚫</div>
 <h1 style="font-size:20px;color:#E6EDF3;margin:0;">访问受限</h1>
-<p style="color:#8B949E;font-size:14px;margin-top:16px;line-height:1.6;">${message}</p>
+<p style="color:#8B949E;font-size:14px;margin-top:16px;line-height:1.6;">${escapeHtml(message)}</p>
 <div style="margin-top:24px;padding:12px 16px;background:#F8514922;border-radius:8px;border:1px solid rgba(248,81,73,0.3);">
 <p style="color:#F85149;font-size:13px;margin:0;">密码错误次数过多，请稍后再试</p>
 </div>

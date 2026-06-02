@@ -18,4 +18,14 @@ export default defineConfig({
       },
     },
   },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          'vue-vendor': ['vue', 'vue-router', 'pinia'],
+          'tdesign': ['tdesign-vue-next'],
+        },
+      },
+    },
+  },
 });
