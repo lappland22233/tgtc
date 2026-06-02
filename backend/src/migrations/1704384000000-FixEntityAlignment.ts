@@ -39,21 +39,21 @@ export class FixEntityAlignment1704384000000 implements MigrationInterface {
 
     // 7. share_audits 添加组合索引
     await queryRunner.query(
-      `CREATE INDEX "idx_share_audits_jti_action" ON "share_audits"("jti", "action")`,
+      `CREATE INDEX IF NOT EXISTS "idx_share_audits_jti_action" ON "share_audits"("jti", "action")`,
     );
     await queryRunner.query(
-      `CREATE INDEX "idx_share_audits_fileId_action" ON "share_audits"("fileId", "action")`,
+      `CREATE INDEX IF NOT EXISTS "idx_share_audits_fileId_action" ON "share_audits"("fileId", "action")`,
     );
     await queryRunner.query(
-      `CREATE INDEX "idx_share_audits_createdAt" ON "share_audits"("createdAt")`,
+      `CREATE INDEX IF NOT EXISTS "idx_share_audits_createdAt" ON "share_audits"("createdAt")`,
     );
 
     // 8. files 添加常用查询索引
     await queryRunner.query(
-      `CREATE INDEX "idx_files_isDeleted_createdAt" ON "files"("isDeleted", "createdAt")`,
+      `CREATE INDEX IF NOT EXISTS "idx_files_isDeleted_createdAt" ON "files"("isDeleted", "createdAt")`,
     );
     await queryRunner.query(
-      `CREATE INDEX "idx_files_createdAt" ON "files"("createdAt")`,
+      `CREATE INDEX IF NOT EXISTS "idx_files_createdAt" ON "files"("createdAt")`,
     );
   }
 

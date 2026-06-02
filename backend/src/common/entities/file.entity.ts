@@ -45,11 +45,14 @@ export class File {
   @Column({ nullable: true, type: 'int' })
   expiresIn: number | null;
 
+  @Column({ nullable: true, type: 'timestamp' })
+  expiresStartAt: Date | null;
+
   @Column({ default: 0 })
   currentAccessCount: number;
 
-  @Column({ nullable: true })
-  password: string;
+  @Column({ nullable: true, type: 'varchar' })
+  password: string | null;
 
   @Column({ default: false })
   isDeleted: boolean;

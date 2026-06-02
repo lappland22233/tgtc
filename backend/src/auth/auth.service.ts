@@ -8,7 +8,7 @@ import { VerificationCode } from '../common/entities/verification-code.entity';
 import { BannedIP } from '../common/entities/banned-ip.entity';
 import { MailerService } from '../mailer/mailer.service';
 import { ConfigCacheService } from '../common/services/config-cache.service';
-import { RegisterDto, LoginDto, VerifyEmailDto, SendCodeDto } from './auth.dto';
+import { RegisterDto, LoginDto, VerifyEmailDto, SendCodeDto, ResetPasswordDto } from './auth.dto';
 
 @Injectable()
 export class AuthService {
@@ -226,6 +226,16 @@ export class AuthService {
     await this.userRepository.update(
       { email: verifyEmailDto.email },
       { emailVerified: true },
+    );
+  }
+
+  async resetPassword(dto: ResetPasswordDto): Promise<void> {
+    await this.validateVerificationCode(dto.email, dto.code, 'reset_password');
+
+    const hashedPassword = await bcrypt.hash(dto.newPassword, 10);
+    await this.userRepository.update(
+      { email: dto.email },
+      { password: hashedPassword },
     );
   }
 

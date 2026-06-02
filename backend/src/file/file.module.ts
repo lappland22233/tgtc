@@ -5,14 +5,13 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { FileController } from './file.controller';
 import { FileService } from './file.service';
 import { File } from '../common/entities/file.entity';
-import { ShareAudit } from '../common/entities/share-audit.entity';
 import { FileAccessLog } from '../common/entities/file-access-log.entity';
 import { BannedIP } from '../common/entities/banned-ip.entity';
 import { TelegramService } from '../telegram/telegram.service';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([File, ShareAudit, FileAccessLog, BannedIP]),
+    TypeOrmModule.forFeature([File, FileAccessLog, BannedIP]),
     JwtModule.registerAsync({
       imports: [ConfigModule],
       inject: [ConfigService],

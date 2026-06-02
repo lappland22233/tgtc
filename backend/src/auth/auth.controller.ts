@@ -2,7 +2,7 @@ import { Controller, Post, Body, Get, UseGuards, Req, Res, Ip } from '@nestjs/co
 import { AuthGuard } from '@nestjs/passport';
 import { Request, Response } from 'express';
 import { AuthService } from './auth.service';
-import { RegisterDto, LoginDto, VerifyEmailDto, SendCodeDto } from './auth.dto';
+import { RegisterDto, LoginDto, VerifyEmailDto, SendCodeDto, ResetPasswordDto } from './auth.dto';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { User } from '../common/entities/user.entity';
 
@@ -54,6 +54,12 @@ export class AuthController {
   async verifyEmail(@Body() verifyEmailDto: VerifyEmailDto) {
     await this.authService.verifyEmail(verifyEmailDto);
     return { message: '邮箱验证成功' };
+  }
+
+  @Post('reset-password')
+  async resetPassword(@Body() dto: ResetPasswordDto) {
+    await this.authService.resetPassword(dto);
+    return { message: '密码重置成功' };
   }
 
   @Get('me')

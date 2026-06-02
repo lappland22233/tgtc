@@ -22,9 +22,7 @@ import { AuthGuard } from '@nestjs/passport';
 import { FileInterceptor, FilesInterceptor } from '@nestjs/platform-express';
 import { ConfigService } from '@nestjs/config';
 import { FileService } from './file.service';
-import { GenerateShareLinkDto, BatchMarkdownDto } from './file.dto';
-import { Roles } from '../common/decorators/roles.decorator';
-import { RolesGuard } from '../common/guards/roles.guard';
+import { BatchMarkdownDto, UpdateAccessTypeDto, UpdateAccessCountDto, SetPasswordDto, UpdateExpiresDto } from './file.dto';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { User, UserRole } from '../common/entities/user.entity';
 import { FileAccessType } from '../common/entities/file.entity';
@@ -40,6 +38,9 @@ export class FileController {
     @UploadedFile() file: Express.Multer.File,
     @CurrentUser() user: User,
   ) {
+    if (!file) {
+      throw new BadRequestException('请选择要上传的文件');
+    }
     return this.fileService.upload(file, user);
   }
 
@@ -50,6 +51,9 @@ export class FileController {
     @UploadedFiles() files: Express.Multer.File[],
     @CurrentUser() user: User,
   ) {
+    if (!files || files.length === 0) {
+      throw new BadRequestException('请选择要上传的文件');
+    }
     return this.fileService.uploadMultiple(files, user);
   }
 
@@ -111,10 +115,10 @@ export class FileController {
   @UseGuards(AuthGuard('jwt'))
   async updateAccessType(
     @Param('id') id: string,
-    @Body() data: { accessType: FileAccessType },
+    @Body() data: UpdateAccessTypeDto,
     @CurrentUser() user: User,
   ) {
-    await this.fileService.updateAccessType(id, data.accessType, user);
+    await this.fileService.updateAccessType(id, data.accessType as FileAccessType, user);
     return { message: '访问权限已更新' };
   }
 
@@ -122,7 +126,7 @@ export class FileController {
   @UseGuards(AuthGuard('jwt'))
   async updateAccessCount(
     @Param('id') id: string,
-    @Body() data: { maxAccessCount: number },
+    @Body() data: UpdateAccessCountDto,
     @CurrentUser() user: User,
   ) {
     await this.fileService.updateAccessCount(id, data.maxAccessCount, user);
@@ -133,7 +137,7 @@ export class FileController {
   @UseGuards(AuthGuard('jwt'))
   async setPassword(
     @Param('id') id: string,
-    @Body() data: { password: string },
+    @Body() data: SetPasswordDto,
     @CurrentUser() user: User,
   ) {
     await this.fileService.setPassword(id, data.password, user);
@@ -144,7 +148,7 @@ export class FileController {
   @UseGuards(AuthGuard('jwt'))
   async updateExpires(
     @Param('id') id: string,
-    @Body() data: { expiresIn: number | null },
+    @Body() data: UpdateExpiresDto,
     @CurrentUser() user: User,
   ) {
     await this.fileService.updateExpires(id, data.expiresIn, user);
@@ -207,6 +211,12 @@ export class FileController {
           res.type('html').send(getBannedPageHTML(ipCheck.message || 'IP已被封禁'));
           return;
         }
+      }
+
+      // 私有文件不允许公开访问
+      const isPrivate = await this.fileService.isPrivateFile(id);
+      if (isPrivate) {
+        throw new BadRequestException('此文件为私有文件，不提供公开访问');
       }
 
       const hasPwd = await this.fileService.hasPassword(id);
@@ -294,17 +304,6 @@ export class FileController {
   ) {
     const link = await this.fileService.generateShareLink(id, user);
     return { link };
-  }
-
-  // Revoke all share links for a file
-  @Post(':id/share/revoke')
-  @UseGuards(AuthGuard('jwt'))
-  async revokeShareLink(
-    @Param('id') id: string,
-    @CurrentUser() user: User,
-  ) {
-    await this.fileService.revokeShareLink(id, user);
-    return { message: '分享链接已全部撤销' };
   }
 }
 

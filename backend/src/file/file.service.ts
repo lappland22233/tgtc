@@ -5,7 +5,6 @@ import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { EventEmitter2, OnEvent } from '@nestjs/event-emitter';
 import { File, FileAccessType } from '../common/entities/file.entity';
-import { ShareAudit } from '../common/entities/share-audit.entity';
 import { FileAccessLog } from '../common/entities/file-access-log.entity';
 import { TelegramService } from '../telegram/telegram.service';
 import { ConfigCacheService } from '../common/services/config-cache.service';
@@ -31,8 +30,6 @@ export class FileService implements OnModuleInit {
   constructor(
     @InjectRepository(File)
     private fileRepository: Repository<File>,
-    @InjectRepository(ShareAudit)
-    private shareAuditRepository: Repository<ShareAudit>,
     @InjectRepository(FileAccessLog)
     private accessLogRepository: Repository<FileAccessLog>,
     @InjectRepository(BannedIP)
@@ -85,6 +82,10 @@ export class FileService implements OnModuleInit {
     }
 
     const isAllowed = this.allowedTypes.some(type => {
+      if (type.startsWith('.')) {
+        // 扩展名匹配：.pdf, .zip 等
+        return file.originalname.toLowerCase().endsWith(type.toLowerCase());
+      }
       if (type.endsWith('/*')) {
         const category = type.split('/')[0];
         return file.mimetype.startsWith(category + '/');
@@ -151,7 +152,7 @@ export class FileService implements OnModuleInit {
       qb.andWhere('LOWER(file.originalName) LIKE :keyword', { keyword: `%${keyword.toLowerCase()}%` });
     }
 
-    qb.select(['file.id', 'file.filename', 'file.originalName', 'file.mimeType', 'file.size', 'file.accessType', 'file.maxAccessCount', 'file.currentAccessCount', 'file.expiresIn', 'file.createdAt', 'uploader'])
+    qb.select(['file.id', 'file.filename', 'file.originalName', 'file.mimeType', 'file.size', 'file.accessType', 'file.maxAccessCount', 'file.currentAccessCount', 'file.expiresIn', 'file.expiresStartAt', 'file.createdAt', 'uploader'])
       .addSelect('CASE WHEN file.password IS NOT NULL THEN true ELSE false END', 'file_hasPassword')
       .skip((page - 1) * limit)
       .take(limit)
@@ -260,7 +261,7 @@ export class FileService implements OnModuleInit {
     }
 
     const hashedPassword = password ? await bcrypt.hash(password, 10) : null;
-    await this.fileRepository.update(id, { password: hashedPassword || undefined });
+    await this.fileRepository.update(id, { password: hashedPassword });
   }
 
   async updateExpires(id: string, expiresIn: number | null, user: User): Promise<void> {
@@ -276,7 +277,7 @@ export class FileService implements OnModuleInit {
       throw new ForbiddenException('无权修改此文件');
     }
 
-    await this.fileRepository.update(id, { expiresIn });
+    await this.fileRepository.update(id, { expiresIn, expiresStartAt: expiresIn !== null ? new Date() : null });
   }
 
   async verifyPassword(id: string, password: string): Promise<boolean> {
@@ -297,25 +298,33 @@ export class FileService implements OnModuleInit {
   async checkAndIncrementAccess(id: string, ip?: string): Promise<{ allowed: boolean; reason?: string }> {
     const file = await this.fileRepository.findOne({
       where: { id, isDeleted: false },
-      select: ['maxAccessCount', 'currentAccessCount', 'expiresIn', 'createdAt'],
+      select: ['maxAccessCount', 'currentAccessCount', 'expiresIn', 'expiresStartAt'],
     });
 
     if (!file) return { allowed: false, reason: '文件不存在' };
 
-    // 检查时效限制
-    if (file.expiresIn !== null && file.expiresIn !== undefined) {
-      const expiresAt = new Date(file.createdAt.getTime() + file.expiresIn * 3600 * 1000);
+    // 检查时效限制（用设置时间 expiresStartAt 计算过期）
+    if (file.expiresIn !== null && file.expiresIn !== undefined && file.expiresStartAt) {
+      const expiresAt = new Date(file.expiresStartAt.getTime() + file.expiresIn * 3600 * 1000);
       if (new Date() > expiresAt) {
         return { allowed: false, reason: '文件分享已过期' };
       }
     }
 
-    // 检查访问次数
+    // 检查访问次数（原子 UPDATE，防止并发超发）
     if (file.maxAccessCount > 0) {
-      if (file.currentAccessCount >= file.maxAccessCount) {
+      const result = await this.fileRepository
+        .createQueryBuilder()
+        .update(File)
+        .set({ currentAccessCount: () => 'currentAccessCount + 1' })
+        .where('id = :id', { id })
+        .andWhere('"currentAccessCount" < "maxAccessCount"')
+        .andWhere('"isDeleted" = false')
+        .execute();
+
+      if (result.affected === 0) {
         return { allowed: false, reason: '文件访问次数已用尽' };
       }
-      await this.fileRepository.increment({ id }, 'currentAccessCount', 1);
     }
 
     return { allowed: true };
@@ -327,6 +336,14 @@ export class FileService implements OnModuleInit {
       select: ['password'],
     });
     return !!(file && file.password);
+  }
+
+  async isPrivateFile(id: string): Promise<boolean> {
+    const file = await this.fileRepository.findOne({
+      where: { id, isDeleted: false },
+      select: ['accessType'],
+    });
+    return !!(file && file.accessType === FileAccessType.PRIVATE);
   }
 
   // 内存中的密码错误计数器（key: IP, value: { count, firstAttempt }）
@@ -496,44 +513,6 @@ export class FileService implements OnModuleInit {
     return `${baseUrl}/files/public/${id}`;
   }
 
-  async revokeShareLink(id: string, user: User): Promise<void> {
-    const file = await this.fileRepository.findOne({
-      where: { id, isDeleted: false },
-    });
-
-    if (!file) {
-      throw new NotFoundException('文件不存在');
-    }
-
-    if (file.uploaderId !== user.id && user.role === UserRole.USER) {
-      throw new ForbiddenException('无权撤销此文件的分享');
-    }
-
-    const activeShares = await this.shareAuditRepository.find({
-      where: { fileId: id, action: 'create' },
-    });
-
-    if (activeShares.length === 0) return;
-
-    const jtis = activeShares.map((s) => s.jti);
-    const revokedRecords = await this.shareAuditRepository.find({
-      where: { jti: In(jtis), action: 'revoke' },
-    });
-    const revokedJtis = new Set(revokedRecords.map((r) => r.jti));
-
-    const toRevoke = jtis
-      .filter((jti) => !revokedJtis.has(jti))
-      .map((jti) => ({
-        jti,
-        fileId: id,
-        userId: user.id,
-        action: 'revoke' as const,
-      }));
-
-    if (toRevoke.length > 0) {
-      await this.shareAuditRepository.save(toRevoke);
-    }
-  }
 
   /**
    * 检查文件是否为无约束公开文件（无需任何凭证即可访问）

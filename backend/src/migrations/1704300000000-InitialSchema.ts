@@ -76,12 +76,41 @@ export class InitialSchema1704300000000 implements MigrationInterface {
       )
     `);
 
+    // share_audits 表
+    await queryRunner.query(`
+      CREATE TABLE "share_audits" (
+        "id" uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
+        "jti" varchar NOT NULL,
+        "fileId" uuid NOT NULL,
+        "userId" varchar NOT NULL DEFAULT '',
+        "action" varchar NOT NULL,
+        "ip" varchar NOT NULL DEFAULT '',
+        "createdAt" timestamp NOT NULL DEFAULT now(),
+        CONSTRAINT "fk_share_audits_file" FOREIGN KEY ("fileId") REFERENCES "files"("id")
+      )
+    `);
+
+    // file_access_logs 表
+    await queryRunner.query(`
+      CREATE TABLE "file_access_logs" (
+        "id" uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
+        "fileId" uuid NOT NULL,
+        "ip" varchar NOT NULL DEFAULT '',
+        "action" varchar NOT NULL,
+        "uploaderId" varchar NOT NULL DEFAULT '',
+        "createdAt" timestamp NOT NULL DEFAULT now(),
+        CONSTRAINT "fk_file_access_logs_file" FOREIGN KEY ("fileId") REFERENCES "files"("id")
+      )
+    `);
+
     // 索引
     await queryRunner.query(`CREATE INDEX "idx_files_uploaderId" ON "files"("uploaderId")`);
     await queryRunner.query(`CREATE INDEX "idx_verification_codes_email_type" ON "verification_codes"("email", "type")`);
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
+    await queryRunner.query(`DROP TABLE "file_access_logs"`);
+    await queryRunner.query(`DROP TABLE "share_audits"`);
     await queryRunner.query(`DROP TABLE "banned_ips"`);
     await queryRunner.query(`DROP TABLE "verification_codes"`);
     await queryRunner.query(`DROP TABLE "system_configs"`);

@@ -10,6 +10,7 @@ export interface FileItem {
   maxAccessCount: number;
   currentAccessCount: number;
   expiresIn: number | null;
+  expiresStartAt: string | null;
   hasPassword: boolean;
   createdAt: string;
   uploader: {
