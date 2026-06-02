@@ -4,6 +4,7 @@ import { Repository, In } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { EventEmitter2, OnEvent } from '@nestjs/event-emitter';
+import { Readable } from 'stream';
 import { File, FileAccessType } from '../common/entities/file.entity';
 import { FileAccessLog } from '../common/entities/file-access-log.entity';
 import { TelegramService } from '../telegram/telegram.service';
@@ -11,6 +12,7 @@ import { ConfigCacheService } from '../common/services/config-cache.service';
 import { User, UserRole } from '../common/entities/user.entity';
 import { BannedIP } from '../common/entities/banned-ip.entity';
 import * as bcrypt from 'bcryptjs';
+import { v4 as uuidv4 } from 'uuid';
 
 export interface BatchUploadFailedItem {
   name: string;
@@ -496,6 +498,62 @@ export class FileService implements OnModuleInit {
     return { content, contentType: mimeType, filename, size: content.length };
   }
 
+  /**
+   * 流式下载文件内容（后端代理，不暴露 Telegram URL）
+   * 用于避免大文件全部加载到内存
+   */
+  async getFileContentStream(id: string, user: User): Promise<{
+    stream: Readable;
+    contentType: string;
+    filename: string;
+    size: number;
+  }> {
+    const file = await this.fileRepository.findOne({
+      where: { id, isDeleted: false },
+    });
+
+    if (!file) {
+      throw new NotFoundException('文件不存在');
+    }
+
+    await this.assertFileReadable(file, user);
+
+    const result = await this.fileRepository
+      .createQueryBuilder()
+      .update(File)
+      .set({ currentAccessCount: () => 'currentAccessCount + 1' })
+      .where('id = :id', { id })
+      .andWhere('(maxAccessCount <= 0 OR currentAccessCount < maxAccessCount)')
+      .andWhere('isDeleted = false')
+      .execute();
+
+    if (result.affected === 0) {
+      throw new ForbiddenException('访问次数已用尽或文件不存在');
+    }
+
+    try {
+      await this.accessLogRepository.save({
+        fileId: id,
+        ip: '',
+        action: 'download',
+        uploaderId: file.uploaderId,
+      });
+    } catch {
+      // 日志记录失败不影响主流程
+    }
+
+    const { stream } = await this.telegramService.getFileStream(file.telegramFileId || file.filename);
+
+    const mimeType = file.mimeType || 'application/octet-stream';
+    let filename = file.originalName;
+    if (!filename.includes('.')) {
+      const ext = mimeType.split('/')[1] || 'bin';
+      filename = `${filename}.${ext}`;
+    }
+
+    return { stream, contentType: mimeType, filename, size: Number(file.size) };
+  }
+
   async generateShareLink(id: string, user: User): Promise<string> {
     const file = await this.fileRepository.findOne({
       where: { id, isDeleted: false },
@@ -516,28 +574,71 @@ export class FileService implements OnModuleInit {
 
   /**
    * 检查文件是否为无约束公开文件（无需任何凭证即可访问）
-   * PUBLIC + 无密码 + 无访问次数限制
+   * PUBLIC + 无密码 + 无访问次数限制 + 未过期
    */
   async isUnrestrictedPublic(id: string): Promise<boolean> {
     const file = await this.fileRepository.findOne({
       where: { id, isDeleted: false, accessType: FileAccessType.PUBLIC },
-      select: ['password', 'maxAccessCount'],
+      select: ['password', 'maxAccessCount', 'expiresIn', 'expiresStartAt'],
     });
-    return file !== null && !file.password && file.maxAccessCount <= 0;
+    if (!file || file.password || file.maxAccessCount > 0) {
+      return false;
+    }
+    // 检查是否设置了有效期且已过期
+    if (file.expiresIn !== null && file.expiresIn !== undefined && file.expiresStartAt) {
+      const expiresAt = new Date(file.expiresStartAt.getTime() + file.expiresIn * 3600 * 1000);
+      if (new Date() > expiresAt) {
+        return false;
+      }
+    }
+    return true;
   }
 
+  // 内存中已消费的访问 token jti 集合，确保每次访问都需重新获取 token
+  private consumedAccessTokens = new Set<string>();
+
   /**
-   * 生成一次性访问 token（30 秒短寿，用于重定向防 CDN 缓存）
+   * 生成短效访问 token（30 秒有效期，jti 防重放攻击）
    */
   generateAccessToken(fileId: string): string {
+    const jti = uuidv4();
     return this.jwtService.sign(
-      { sub: fileId, purpose: 'stream' },
+      { sub: fileId, purpose: 'stream', jti },
       { expiresIn: '30s' },
     );
   }
 
   /**
-   * 验证一次性访问 token
+   * 验证并消费短效访问 token（原子性消费 jti 防止重复使用）
+   */
+  async consumeAccessToken(token: string, fileId: string): Promise<void> {
+    try {
+      const payload = this.jwtService.verify(token);
+      if (payload.sub !== fileId || payload.purpose !== 'stream') {
+        throw new Error('token 用途不匹配');
+      }
+      // 检查 jti 是否已被消费（防重放）
+      if (payload.jti) {
+        if (this.consumedAccessTokens.has(payload.jti)) {
+          throw new Error('access token 已被使用过');
+        }
+        this.consumedAccessTokens.add(payload.jti);
+      }
+    } catch (error) {
+      if (error instanceof Error && error.message.includes('已被使用过')) {
+        throw new ForbiddenException('访问链接已被使用，请重新获取');
+      }
+      throw new ForbiddenException('访问链接已失效，请重新获取');
+    }
+    // 定时清理过期 jti（每 5 分钟）
+    if (this.consumedAccessTokens.size > 1000) {
+      this.consumedAccessTokens.clear();
+    }
+  }
+
+  /**
+   * 验证一次性访问 token（保留以兼容旧接口，仅用于快速校验）
+   * @deprecated 请使用 consumeAccessToken 进行原子性消费
    */
   validateAccessToken(token: string, fileId: string): void {
     try {
@@ -548,6 +649,61 @@ export class FileService implements OnModuleInit {
     } catch {
       throw new ForbiddenException('访问链接已失效，请重新获取');
     }
+  }
+
+  /**
+   * 通过短效访问 token 获取文件内容（重新校验文件状态，防止 token 有效期内外界状态变更）
+   */
+  async getPublicFileContentWithAccess(id: string): Promise<{
+    content: Buffer;
+    contentType: string;
+    filename: string;
+    size: number;
+    isInline: boolean;
+  }> {
+    const file = await this.fileRepository.findOne({
+      where: { id, isDeleted: false },
+    });
+
+    if (!file) {
+      throw new NotFoundException('文件不存在或已被删除');
+    }
+
+    // 重新校验文件是否仍为公开访问
+    if (file.accessType !== FileAccessType.PUBLIC) {
+      throw new ForbiddenException('文件已设为私有，不再提供公开访问');
+    }
+
+    // 校验有效期
+    if (file.expiresIn !== null && file.expiresIn !== undefined && file.expiresStartAt) {
+      const expiresAt = new Date(file.expiresStartAt.getTime() + file.expiresIn * 3600 * 1000);
+      if (new Date() > expiresAt) {
+        throw new BadRequestException('文件分享已过期');
+      }
+    }
+
+    const content = await this.telegramService.getFile(file.telegramFileId || file.filename);
+
+    try {
+      await this.accessLogRepository.save({
+        fileId: id,
+        ip: '',
+        action: 'public_direct',
+        uploaderId: file.uploaderId,
+      });
+    } catch {
+      // ignore
+    }
+
+    const mimeType = file.mimeType || 'application/octet-stream';
+    const isInline = /^(image|video|audio)\//.test(mimeType);
+    let filename = file.originalName;
+    if (!filename.includes('.')) {
+      const ext = mimeType.split('/')[1] || 'bin';
+      filename = `${filename}.${ext}`;
+    }
+
+    return { content, contentType: mimeType, filename, size: content.length, isInline };
   }
 
   /**

@@ -47,7 +47,7 @@ export class UserService {
     return user;
   }
 
-  async create(data: { email: string; password: string; role?: UserRole }): Promise<Partial<User>> {
+  async create(data: { email: string; password: string; role?: UserRole }, requester: User): Promise<Partial<User>> {
     const existingUser = await this.userRepository.findOne({
       where: { email: data.email },
     });
@@ -56,12 +56,20 @@ export class UserService {
       throw new BadRequestException('该邮箱已被注册');
     }
 
+    // 强制角色控制：admin 只能创建 USER，super_admin 可以创建 admin 但不能创建另一个 super_admin
+    let role: UserRole;
+    if (requester.role === UserRole.SUPER_ADMIN && data.role === UserRole.ADMIN) {
+      role = UserRole.ADMIN;
+    } else {
+      role = UserRole.USER;
+    }
+
     const hashedPassword = await bcrypt.hash(data.password, 10);
 
     const user = this.userRepository.create({
       email: data.email,
       password: hashedPassword,
-      role: data.role || UserRole.USER,
+      role,
       emailVerified: true,
     });
 

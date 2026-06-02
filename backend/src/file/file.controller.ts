@@ -21,11 +21,19 @@ import {
 import { AuthGuard } from '@nestjs/passport';
 import { FileInterceptor, FilesInterceptor } from '@nestjs/platform-express';
 import { ConfigService } from '@nestjs/config';
+import { pipeline } from 'stream';
+import { promisify } from 'util';
 import { FileService } from './file.service';
 import { BatchMarkdownDto, UpdateAccessTypeDto, UpdateAccessCountDto, SetPasswordDto, UpdateExpiresDto } from './file.dto';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { User, UserRole } from '../common/entities/user.entity';
 import { FileAccessType } from '../common/entities/file.entity';
+
+// Multer 层文件大小限制（和环境变量 MAX_FILE_SIZE 保持一致，防止文件在内存中被读取后才被业务层拒绝）
+const multerFileSize = (() => {
+  const val = Number(process.env.MAX_FILE_SIZE);
+  return Number.isFinite(val) && val > 0 ? val : 20971520;
+})();
 
 @Controller('files')
 export class FileController {
@@ -33,7 +41,7 @@ export class FileController {
 
   @Post('upload')
   @UseGuards(AuthGuard('jwt'))
-  @UseInterceptors(FileInterceptor('file'))
+  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: multerFileSize } }))
   async upload(
     @UploadedFile() file: Express.Multer.File,
     @CurrentUser() user: User,
@@ -46,7 +54,7 @@ export class FileController {
 
   @Post('upload-multiple')
   @UseGuards(AuthGuard('jwt'))
-  @UseInterceptors(FilesInterceptor('files', 10))
+  @UseInterceptors(FilesInterceptor('files', 10, { limits: { fileSize: multerFileSize } }))
   async uploadMultiple(
     @UploadedFiles() files: Express.Multer.File[],
     @CurrentUser() user: User,
@@ -94,7 +102,7 @@ export class FileController {
     @Res() res: Response,
   ) {
     try {
-      const result = await this.fileService.getFileContent(id, user);
+      const result = await this.fileService.getFileContentStream(id, user);
 
       res.set({
         'Content-Type': result.contentType,
@@ -103,11 +111,14 @@ export class FileController {
         'Cache-Control': 'private, no-cache',
       });
 
-      res.send(result.content);
+      const pipe = promisify(pipeline);
+      await pipe(result.stream, res);
     } catch (error) {
       const message = error instanceof Error ? error.message : '下载失败';
       const status = (error as { status?: number }).status || 500;
-      res.status(status).json({ code: 1, message });
+      if (!res.headersSent) {
+        res.status(status).json({ code: 1, message });
+      }
     }
   }
 
@@ -172,9 +183,9 @@ export class FileController {
     return { markdown };
   }
 
-  // Public file access — 简化后的三种模式：
-  // 1. ?access= → 一次性访问链接直接返回内容
-  // 2. 无参数 → 无约束公开直返 / 有密码显示密码页 / 受限直接跳转一次性链接
+  // Public file access — 三种模式：
+  // 1. ?access= → 短效访问链接直接返回内容
+  // 2. 无参数 → 无约束公开直返 / 有密码显示密码页 / 受限直接跳转短效访问链接
   // 3. ?ps=   → 密码验证后同上
   @Get('public/:id')
   async getPublicFile(
@@ -187,10 +198,10 @@ export class FileController {
     const ip = req.ip || req.socket?.remoteAddress || req.connection?.remoteAddress;
 
     try {
-      // 模式 1：一次性访问链接
+      // 模式 1：短效访问链接（30 秒有效，防重放）
       if (access) {
-        this.fileService.validateAccessToken(access, id);
-        const result = await this.fileService.getPublicFileContentDirect(id);
+        await this.fileService.consumeAccessToken(access, id);
+        const result = await this.fileService.getPublicFileContentWithAccess(id);
         res.set({
           'Content-Type': result.contentType,
           'Content-Disposition': result.isInline

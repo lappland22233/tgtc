@@ -3,6 +3,7 @@ import { JwtService } from '@nestjs/jwt';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
 import { Repository, MoreThan, DataSource } from 'typeorm';
 import * as bcrypt from 'bcryptjs';
+import * as crypto from 'crypto';
 import { User, UserRole } from '../common/entities/user.entity';
 import { VerificationCode } from '../common/entities/verification-code.entity';
 import { BannedIP } from '../common/entities/banned-ip.entity';
@@ -10,8 +11,29 @@ import { MailerService } from '../mailer/mailer.service';
 import { ConfigCacheService } from '../common/services/config-cache.service';
 import { RegisterDto, LoginDto, VerifyEmailDto, SendCodeDto, ResetPasswordDto } from './auth.dto';
 
+// 登录失败计数器（key: ip:email, value: { count, lastAttempt }）
+interface LoginFailureEntry {
+  count: number;
+  lastAttempt: number;
+}
+
+// 验证码错误尝试计数器（key: email:type, value: { count, lockedUntil }）
+interface CodeErrorEntry {
+  count: number;
+  lockedUntil: number;
+}
+
 @Injectable()
 export class AuthService {
+  // 登录失败限流：IP + email 维度，5 次失败锁定 15 分钟
+  private readonly loginFailures = new Map<string, LoginFailureEntry>();
+  private readonly LOGIN_MAX_FAILURES = 5;
+  private readonly LOGIN_LOCK_DURATION = 15 * 60 * 1000; // 15 分钟
+
+  // 验证码错误尝试限流：email + type 维度，5 次错误锁定 5 分钟
+  private readonly codeErrors = new Map<string, CodeErrorEntry>();
+  private readonly CODE_MAX_ERRORS = 5;
+  private readonly CODE_LOCK_DURATION = 5 * 60 * 1000; // 5 分钟
   constructor(
     @InjectRepository(User)
     private userRepository: Repository<User>,
@@ -114,6 +136,9 @@ export class AuthService {
 
   async login(loginDto: LoginDto, ip: string): Promise<{ accessToken: string; user: Partial<User> }> {
     const now = new Date();
+    const nowMs = Date.now();
+
+    // 检查 IP 维度的封禁
     const bannedIP = await this.bannedIPRepository
       .createQueryBuilder('bannedIP')
       .where('bannedIP.ip = :ip', { ip })
@@ -129,11 +154,25 @@ export class AuthService {
       );
     }
 
+    // 登录失败限流检查（IP + email 维度）
+    const failureKey = `${ip}:${loginDto.email}`;
+    const failureEntry = this.loginFailures.get(failureKey);
+    if (failureEntry && failureEntry.count >= this.LOGIN_MAX_FAILURES) {
+      const lockRemaining = this.LOGIN_LOCK_DURATION - (nowMs - failureEntry.lastAttempt);
+      if (lockRemaining > 0) {
+        const waitMinutes = Math.ceil(lockRemaining / 60000);
+        throw new UnauthorizedException(`登录失败次数过多，请 ${waitMinutes} 分钟后重试`);
+      }
+      // 锁定时间已过，清除计数
+      this.loginFailures.delete(failureKey);
+    }
+
     const user = await this.userRepository.findOne({
       where: { email: loginDto.email },
     });
 
     if (!user) {
+      this.recordLoginFailure(failureKey, nowMs);
       throw new UnauthorizedException('邮箱或密码错误');
     }
 
@@ -152,8 +191,12 @@ export class AuthService {
     const isPasswordValid = await bcrypt.compare(loginDto.password, user.password);
 
     if (!isPasswordValid) {
+      this.recordLoginFailure(failureKey, nowMs);
       throw new UnauthorizedException('邮箱或密码错误');
     }
+
+    // 登录成功，清除失败计数
+    this.loginFailures.delete(failureKey);
 
     user.lastLoginIP = ip;
     user.lastLoginAt = new Date();
@@ -170,6 +213,19 @@ export class AuthService {
         emailVerified: user.emailVerified,
       },
     };
+  }
+
+  /**
+   * 记录登录失败，递增计数。失败 5 次后锁定 15 分钟。
+   */
+  private recordLoginFailure(key: string, nowMs: number): void {
+    const entry = this.loginFailures.get(key);
+    if (!entry) {
+      this.loginFailures.set(key, { count: 1, lastAttempt: nowMs });
+      return;
+    }
+    entry.count++;
+    entry.lastAttempt = nowMs;
   }
 
   async sendVerificationCode(sendCodeDto: SendCodeDto): Promise<void> {
@@ -198,7 +254,8 @@ export class AuthService {
       throw new BadRequestException('验证码发送过于频繁，请 60 秒后重试');
     }
 
-    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    const code = crypto.randomInt(100000, 1000000).toString();
+    const codeHash = this.hashCode(code);
     const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
 
     await this.verificationCodeRepository.update(
@@ -208,7 +265,7 @@ export class AuthService {
 
     const verificationCode = this.verificationCodeRepository.create({
       email,
-      code,
+      code: codeHash,
       type,
       expiresAt,
     });
@@ -239,12 +296,30 @@ export class AuthService {
     );
   }
 
+  private hashCode(code: string): string {
+    return crypto.createHash('sha256').update(code).digest('hex');
+  }
+
   protected async validateVerificationCode(email: string, code: string, type: string): Promise<void> {
     const now = new Date();
+    const codeHash = this.hashCode(code);
+
+    // 验证码错误尝试限流
+    const errorKey = `${email}:${type}`;
+    const errorEntry = this.codeErrors.get(errorKey);
+    if (errorEntry && errorEntry.count >= this.CODE_MAX_ERRORS) {
+      const nowMs = Date.now();
+      if (nowMs < errorEntry.lockedUntil) {
+        const waitMinutes = Math.ceil((errorEntry.lockedUntil - nowMs) / 60000);
+        throw new BadRequestException(`验证码错误次数过多，请 ${waitMinutes} 分钟后重试`);
+      }
+      this.codeErrors.delete(errorKey);
+    }
+
     const verificationCode = await this.verificationCodeRepository.findOne({
       where: {
         email,
-        code,
+        code: codeHash,
         type,
         isUsed: false,
         expiresAt: MoreThan(now),
@@ -252,8 +327,18 @@ export class AuthService {
     });
 
     if (!verificationCode) {
+      // 记录错误尝试
+      const entry = this.codeErrors.get(errorKey) || { count: 0, lockedUntil: 0 };
+      entry.count++;
+      if (entry.count >= this.CODE_MAX_ERRORS) {
+        entry.lockedUntil = Date.now() + this.CODE_LOCK_DURATION;
+      }
+      this.codeErrors.set(errorKey, entry);
       throw new BadRequestException('验证码无效或已过期');
     }
+
+    // 验证成功，清除错误计数
+    this.codeErrors.delete(errorKey);
 
     await this.verificationCodeRepository.update(
       { id: verificationCode.id },

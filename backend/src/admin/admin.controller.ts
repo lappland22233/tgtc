@@ -5,6 +5,7 @@ import { Roles } from '../common/decorators/roles.decorator';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { User, UserRole } from '../common/entities/user.entity';
+import { BanIPDto, BatchDeleteFilesDto, ConfigDto, BatchConfigDto, SmtpConfigDto, UploadConfigDto, AuthConfigDto } from './admin.dto';
 
 @Controller('admin')
 @UseGuards(AuthGuard('jwt'), RolesGuard)
@@ -29,18 +30,20 @@ export class AdminController {
   }
 
   @Put('config')
+  @Roles(UserRole.SUPER_ADMIN)
   async updateConfig(
-    @Body() data: { key: string; value: string; description?: string },
+    @Body() dto: ConfigDto,
   ) {
-    await this.adminService.updateConfig(data.key, data.value, data.description);
+    await this.adminService.updateConfig(dto.key, dto.value, dto.description);
     return { message: '配置已更新' };
   }
 
   @Put('config/batch')
+  @Roles(UserRole.SUPER_ADMIN)
   async updateConfigs(
-    @Body() data: { configs: { key: string; value: string; description?: string }[] },
+    @Body() dto: BatchConfigDto,
   ) {
-    await this.adminService.updateConfigs(data.configs);
+    await this.adminService.updateConfigs(dto.configs);
     return { message: '配置已批量更新' };
   }
 
@@ -52,13 +55,13 @@ export class AdminController {
 
   @Post('banned-ips')
   async banIP(
-    @Body() data: { ip: string; reason?: string; permanent?: boolean; expiresAt?: string },
+    @Body() dto: BanIPDto,
   ) {
     await this.adminService.banIP(
-      data.ip,
-      data.reason,
-      data.permanent !== false,
-      data.expiresAt ? new Date(data.expiresAt) : undefined,
+      dto.ip,
+      dto.reason,
+      dto.permanent !== false,
+      dto.expiresAt ? new Date(dto.expiresAt) : undefined,
     );
     return { message: 'IP已封禁' };
   }
@@ -87,8 +90,8 @@ export class AdminController {
 
   @Post('files/batch-delete')
   @Roles(UserRole.SUPER_ADMIN)
-  async batchDeleteFiles(@Body() data: { ids: string[] }) {
-    await this.adminService.batchDeleteFiles(data.ids);
+  async batchDeleteFiles(@Body() dto: BatchDeleteFilesDto) {
+    await this.adminService.batchDeleteFiles(dto.ids);
     return { message: '文件已批量删除' };
   }
 
@@ -100,15 +103,8 @@ export class AdminController {
 
   @Put('smtp')
   @Roles(UserRole.SUPER_ADMIN)
-  async updateSMTPConfig(@Body() data: {
-    host: string;
-    port: number;
-    secure: boolean;
-    user: string;
-    password: string;
-    from: string;
-  }) {
-    await this.adminService.updateSMTPConfig(data);
+  async updateSMTPConfig(@Body() dto: SmtpConfigDto) {
+    await this.adminService.updateSMTPConfig(dto);
     return { message: 'SMTP配置已更新' };
   }
 
@@ -119,11 +115,9 @@ export class AdminController {
   }
 
   @Put('upload-config')
-  async updateUploadConfig(@Body() data: {
-    maxFileSize?: number;
-    allowedFileTypes?: string;
-  }) {
-    await this.adminService.updateUploadConfig(data);
+  @Roles(UserRole.SUPER_ADMIN)
+  async updateUploadConfig(@Body() dto: UploadConfigDto) {
+    await this.adminService.updateUploadConfig(dto);
     return { message: '上传配置已更新' };
   }
 
@@ -135,11 +129,8 @@ export class AdminController {
 
   @Put('auth-config')
   @Roles(UserRole.SUPER_ADMIN)
-  async updateAuthConfig(@Body() data: {
-    registrationEnabled?: boolean;
-    emailVerificationEnabled?: boolean;
-  }) {
-    await this.adminService.updateAuthConfig(data);
+  async updateAuthConfig(@Body() dto: AuthConfigDto) {
+    await this.adminService.updateAuthConfig(dto);
     return { message: '认证配置已更新' };
   }
 }

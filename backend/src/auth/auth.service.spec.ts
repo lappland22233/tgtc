@@ -3,6 +3,7 @@ import { BadRequestException } from '@nestjs/common';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { JwtService } from '@nestjs/jwt';
 import { Repository, DataSource } from 'typeorm';
+import * as crypto from 'crypto';
 import { AuthService } from './auth.service';
 import { User } from '../common/entities/user.entity';
 import { VerificationCode } from '../common/entities/verification-code.entity';
@@ -101,10 +102,11 @@ describe('AuthService - validateVerificationCode', () => {
   describe('有效验证码', () => {
     it('应验证通过并标记为已使用', async () => {
       const futureDate = new Date(Date.now() + 5 * 60 * 1000);
+      const codeHash = crypto.createHash('sha256').update('123456').digest('hex');
       const mockCode = {
         id: 'uuid-1',
         email: 'test@example.com',
-        code: '123456',
+        code: codeHash,
         type: 'register' as const,
         isUsed: false,
         expiresAt: futureDate,
@@ -124,7 +126,7 @@ describe('AuthService - validateVerificationCode', () => {
       expect(verificationCodeRepo.findOne).toHaveBeenCalledWith({
         where: {
           email: 'test@example.com',
-          code: '123456',
+          code: codeHash,
           type: 'register',
           isUsed: false,
           expiresAt: expect.anything(),

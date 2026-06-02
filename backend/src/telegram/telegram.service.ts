@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
+import { Readable } from 'stream';
 import FormData from 'form-data';
 
 @Injectable()
@@ -135,6 +136,20 @@ export class TelegramService {
     });
 
     return Buffer.from(fileResponse.data);
+  }
+
+  /**
+   * 流式获取文件（避免大文件全部加载到内存）
+   */
+  async getFileStream(file_id: string): Promise<{ stream: Readable; info: { file_id: string; file_path: string; file_size: number } }> {
+    const fileInfo = await this.getFileInfo(file_id);
+    const fileUrl = this.getFileUrl(fileInfo.file_path);
+
+    const fileResponse = await axios.get<Readable>(fileUrl, {
+      responseType: 'stream',
+    });
+
+    return { stream: fileResponse.data as Readable, info: fileInfo };
   }
 
   async deleteFile(file_id: string): Promise<boolean> {

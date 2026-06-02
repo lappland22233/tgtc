@@ -37,8 +37,9 @@ export class UserController {
   @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
   async create(
     @Body() dto: CreateUserDto,
+    @CurrentUser() requester: User,
   ) {
-    return this.userService.create(dto);
+    return this.userService.create(dto, requester);
   }
 
   @Put(':id/role')
