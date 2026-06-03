@@ -17,6 +17,7 @@ import {
   HttpCode,
   HttpStatus,
   BadRequestException,
+  ForbiddenException,
 } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 import { FileInterceptor, FilesInterceptor } from '@nestjs/platform-express';
@@ -24,6 +25,7 @@ import { ConfigService } from '@nestjs/config';
 import { pipeline } from 'stream';
 import { promisify } from 'util';
 import { FileService } from './file.service';
+import { ThumbnailCryptoService } from './thumbnail-crypto.service';
 import { BatchMarkdownDto, UpdateAccessTypeDto, UpdateAccessCountDto, SetPasswordDto, UpdateExpiresDto } from './file.dto';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { User, UserRole } from '../common/entities/user.entity';
@@ -34,7 +36,11 @@ const multerFileSize = 500 * 1024 * 1024; // 500MB
 
 @Controller('files')
 export class FileController {
-  constructor(private fileService: FileService, private configService: ConfigService) {}
+  constructor(
+    private fileService: FileService,
+    private configService: ConfigService,
+    private cryptoService: ThumbnailCryptoService,
+  ) {}
 
   /**
    * 获取应用基础 URL（优先使用 APP_URL 环境变量，避免 Host Header 注入）
@@ -72,8 +78,8 @@ export class FileController {
   @Get('upload-config')
   async getUploadConfig() {
     const maxFileSize = await this.fileService.getMaxFileSize();
-    const allowedTypes = await this.fileService.getAllowedTypes();
-    return { maxFileSize, allowedTypes };
+    const typeConfig = await this.fileService.getFileTypeConfig();
+    return { maxFileSize, ...typeConfig };
   }
 
   @Get()
@@ -89,13 +95,81 @@ export class FileController {
     if (user.role === UserRole.USER) {
       return this.fileService.findAll(Number(page), Number(limit), user.id, keyword);
     }
-    return this.fileService.findAll(Number(page), Number(limit), userId, keyword);
+    // Admin: only show all files when userId filter is explicitly provided;
+    // default to own files for the "我的文件" page
+    return this.fileService.findAll(Number(page), Number(limit), userId || user.id, keyword);
+  }
+
+  /**
+   * 获取缩略图加密公钥（每次服务重启自动生成新密钥对）
+   */
+  @Get('public-key')
+  getPublicKey() {
+    return { publicKey: this.cryptoService.getPublicKey() };
   }
 
   @Get(':id')
   @UseGuards(AuthGuard('jwt'))
   async findOne(@Param('id') id: string, @CurrentUser() user: User) {
     return this.fileService.findOne(id, user);
+  }
+
+  /**
+
+  /**
+   * 缩略图预览端点
+   * - 需要登录认证 + 加密时间戳（?t=）
+   * - 时间戳需用公钥 RSA-OAEP 加密，误差 ±2 秒内有效
+   * - 只能访问自己上传的文件（管理员除外）
+   * - 不受私有/加密/次数/过期限制
+   */
+  @Get(':id/thumbnail')
+  @UseGuards(AuthGuard('jwt'))
+  async thumbnail(
+    @Param('id') id: string,
+    @CurrentUser() user: User,
+    @Query('t') encryptedToken: string,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    try {
+      // 必须提供加密时间戳
+      if (!encryptedToken) {
+        throw new ForbiddenException('缺少访问令牌');
+      }
+
+      // 解密并验证时间戳（±2 秒误差）
+      let timestamp: number;
+      try {
+        timestamp = this.cryptoService.decrypt(encryptedToken);
+      } catch {
+        throw new ForbiddenException('无效的访问令牌');
+      }
+
+      const now = Date.now();
+      if (Math.abs(now - timestamp) > 2000) {
+        throw new ForbiddenException('访问令牌已过期');
+      }
+
+      const result = await this.fileService.getThumbnailStream(id, user);
+
+      res.set({
+        'Content-Type': result.contentType,
+        'Cache-Control': 'private, max-age=300',
+      });
+
+      const pipe = promisify(pipeline);
+      result.stream.on('error', () => {
+        if (!res.writableEnded) res.end();
+      });
+      await pipe(result.stream, res);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '预览失败';
+      const status = (error as { status?: number }).status || 500;
+      if (!res.headersSent) {
+        res.status(status).json({ code: 1, message });
+      }
+    }
   }
 
   @Get(':id/download')

@@ -9,10 +9,15 @@ import { FileAccessLog } from '../common/entities/file-access-log.entity';
 import { BannedIP } from '../common/entities/banned-ip.entity';
 import { ShareAudit } from '../common/entities/share-audit.entity';
 import { TelegramService } from '../telegram/telegram.service';
+import { ThumbnailCryptoService } from './thumbnail-crypto.service';
+import { ConfigCacheModule } from '../common/services/config-cache.module';
+import { RateLimitModule } from '../common/services/rate-limit.module';
 
 @Module({
   imports: [
     TypeOrmModule.forFeature([File, FileAccessLog, BannedIP, ShareAudit]),
+    ConfigCacheModule,
+    RateLimitModule,
     JwtModule.registerAsync({
       imports: [ConfigModule],
       inject: [ConfigService],
@@ -28,7 +33,7 @@ import { TelegramService } from '../telegram/telegram.service';
     }),
   ],
   controllers: [FileController],
-  providers: [FileService, TelegramService],
+  providers: [FileService, TelegramService, ThumbnailCryptoService],
   exports: [FileService],
 })
 export class FileModule {}

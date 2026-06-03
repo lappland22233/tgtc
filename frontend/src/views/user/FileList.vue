@@ -76,7 +76,7 @@
         >
           <template #filename="{ row }">
             <div style="display: flex; align-items: center; gap: 12px;">
-              <span style="font-size: 20px;">{{ getFileEmoji(row.mimeType) }}</span>
+              <ThumbnailImg :file-id="row.id" :mime-type="row.mimeType" :size="36" :emoji="getFileEmoji(row.mimeType)" />
               <span>{{ row.originalName }}</span>
             </div>
           </template>
@@ -162,6 +162,7 @@ import { useFileStore } from '../../stores/files';
 import { api } from '../../stores/auth';
 import { getErrorMessage } from '../../utils/error';
 import UploadModal from '../../components/UploadModal.vue';
+import ThumbnailImg from '../../components/ThumbnailImg.vue';
 import type { FileItem } from '../../types/file';
 
 const fileStore = useFileStore();

@@ -6,6 +6,10 @@
     </div>
 
     <div class="card">
+      <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
+        <span style="font-size: 14px; color: var(--text-secondary);">同时上传文件数：</span>
+        <t-select v-model="concurrency" :options="concurrencyOptions" style="width: 80px;" size="small" />
+      </div>
       <div
         class="upload-zone"
         :class="{ dragover: isDragover }"
@@ -56,15 +60,24 @@
         <h3 style="margin-bottom: 16px;">上传队列</h3>
         <div v-for="(item, index) in uploadQueue" :key="index" class="file-item">
           <div class="file-icon" :class="getFileIcon(item.file.type)">
-            {{ getFileEmoji(item.file.type) }}
+            <img v-if="item.file.type.startsWith('image/')" :src="getPreviewUrl(item.file)" style="width: 48px; height: 48px; object-fit: cover; border-radius: 6px;" />
+            <span v-else style="font-size: 24px;">{{ getFileEmoji(item.file.type) }}</span>
           </div>
-          <div class="file-info">
+          <div class="file-info" style="flex: 1;">
             <div class="file-name">{{ item.file.name }}</div>
             <div class="file-meta">
               {{ formatSize(item.file.size) }}
               <t-tag v-if="item.status === 'success'" theme="success" size="small">上传成功</t-tag>
               <t-tag v-else-if="item.status === 'error'" theme="danger" size="small">上传失败</t-tag>
+              <t-tag v-else-if="item.progress > 0" theme="primary" size="small">{{ item.progress }}%</t-tag>
               <t-tag v-else theme="primary" size="small">等待上传...</t-tag>
+            </div>
+            <div v-if="item.progress > 0 && item.status !== 'success' && item.status !== 'error'" style="margin-top: 8px;">
+              <t-progress :percentage="item.progress" size="small" />
+              <div style="display: flex; gap: 16px; margin-top: 4px; font-size: 12px; color: var(--text-secondary);">
+                <span>{{ item.speed }}</span>
+                <span>剩余 {{ item.eta }}</span>
+              </div>
             </div>
           </div>
         </div>
@@ -104,18 +117,79 @@ import type { BatchUploadResult } from '../../types/file';
 
 type QueueStatus = 'pending' | 'success' | 'error';
 
+interface QueueEntry {
+  file: File;
+  status: QueueStatus;
+  errorReason?: string;
+  progress: number;
+  totalBytes: number;
+  loadedBytes: number;
+  speed: string;
+  eta: string;
+  checkpointTime: number;
+  checkpointBytes: number;
+}
+
 const maxFileSizeBytes = ref(20 * 1024 * 1024);
 const maxFileSizeMB = ref(20);
-const acceptTypes = ref('image/*,.pdf,.zip,.rar,.txt');
+const acceptTypes = ref('');
 
 const fileStore = useFileStore();
 const fileInput = ref<HTMLInputElement>();
 const isDragover = ref(false);
 const uploading = ref(false);
-const uploadQueue = ref<{ file: File; status: QueueStatus; errorReason?: string }[]>([]);
+const uploadQueue = ref<QueueEntry[]>([]);
 const selectedFiles = ref<string[]>([]); // 存储成功上传的文件 ID
 const markdownResult = ref('');
 const batchResult = ref<BatchUploadResult | null>(null);
+const concurrency = ref(3);
+const concurrencyOptions = Array.from({ length: 10 }, (_, i) => ({ label: `${i + 1}`, value: i + 1 }));
+
+// 速度/ETA 计算定时器
+let speedTimer: ReturnType<typeof setInterval> | null = null;
+
+function formatSpeed(bytesPerSec: number): string {
+  if (bytesPerSec <= 0) return '计算中...';
+  if (bytesPerSec >= 1048576) return (bytesPerSec / 1048576).toFixed(1) + ' MB/s';
+  if (bytesPerSec >= 1024) return (bytesPerSec / 1024).toFixed(0) + ' KB/s';
+  return bytesPerSec.toFixed(0) + ' B/s';
+}
+
+function formatETA(seconds: number): string {
+  if (seconds <= 0 || !isFinite(seconds)) return '计算中...';
+  if (seconds >= 3600) return Math.ceil(seconds / 3600) + ' 小时';
+  if (seconds >= 60) return Math.ceil(seconds / 60) + ' 分钟';
+  return Math.ceil(seconds) + ' 秒';
+}
+
+function updateSpeeds() {
+  const now = Date.now();
+  for (const entry of uploadQueue.value) {
+    if (entry.status === 'pending' || entry.status === 'success' || entry.status === 'error') continue;
+    const timeDiff = (now - entry.checkpointTime) / 1000;
+    if (timeDiff <= 0) continue;
+    const bytesDiff = entry.loadedBytes - entry.checkpointBytes;
+    const speed = bytesDiff / timeDiff;
+    entry.speed = formatSpeed(speed);
+    const remaining = entry.totalBytes - entry.loadedBytes;
+    entry.eta = formatETA(speed > 0 ? remaining / speed : 0);
+    // 更新检查点
+    entry.checkpointTime = now;
+    entry.checkpointBytes = entry.loadedBytes;
+  }
+}
+
+function startSpeedTimer() {
+  stopSpeedTimer();
+  speedTimer = setInterval(updateSpeeds, 3000);
+}
+
+function stopSpeedTimer() {
+  if (speedTimer) {
+    clearInterval(speedTimer);
+    speedTimer = null;
+  }
+}
 
 function validateFiles(files: File[]): File[] {
   return files.filter((f) => {
@@ -151,59 +225,82 @@ async function uploadFiles(files: File[]) {
   uploading.value = true;
   batchResult.value = null;
 
-  // 构建初始队列（全部标记为 pending）
-  const queueMap = new Map<string, { file: File; status: QueueStatus; errorReason?: string }>(
-    files.map((f) => [f.name, { file: f, status: 'pending', errorReason: undefined }])
+  // 构建初始队列
+  const now = Date.now();
+  const queueEntries: QueueEntry[] = files.map((f) => ({
+    file: f,
+    status: 'pending' as QueueStatus,
+    errorReason: undefined,
+    progress: 0,
+    totalBytes: f.size,
+    loadedBytes: 0,
+    speed: '-',
+    eta: '-',
+    checkpointTime: now,
+    checkpointBytes: 0,
+  }));
+
+  // 先赋值给 ref 触发 Vue 响应式包装，再从响应式数组中建 Map
+  uploadQueue.value = queueEntries;
+  const queueMap = new Map<string, QueueEntry>(
+    uploadQueue.value.map((e) => [e.file.name, e])
   );
-  uploadQueue.value = Array.from(queueMap.values());
 
   // 新批次前清理 selectedFiles 数据
   selectedFiles.value = [];
 
-  try {
-    // 批量上传，一次请求
-    const result = await fileStore.uploadMultiple(files);
-    batchResult.value = result;
+  const successList: { id: string; originalName: string }[] = [];
+  const failedList: { name: string; reason: string }[] = [];
 
-    // 标记成功
-    for (const item of result.success) {
-      const entry = queueMap.get(item.originalName);
-      if (entry) entry.status = 'success';
-      selectedFiles.value.push(item.id); // 使用文件 ID 关联
-    }
+  // 启动速度计算定时器
+  startSpeedTimer();
 
-    // 标记失败（按文件名匹配）
-    for (const fail of result.failed) {
-      const entry = queueMap.get(fail.name);
-      if (entry) {
-        entry.status = 'error';
-        entry.errorReason = fail.reason;
-      }
-    }
-
-    // 刷新列表
-    if (result.success.length > 0) {
-      await fileStore.fetchFiles();
-    }
-
-    // 全成功提示
-    if (result.failed.length === 0) {
-      MessagePlugin.success('全部文件上传成功');
-    } else {
-      MessagePlugin.warning(`${result.failed.length} 个文件上传失败，请查看详情`);
-    }
-  } catch (error: unknown) {
-    const msg = getErrorMessage(error);
-    // 网络层错误：所有文件标记为失败
-    for (const entry of queueMap.values()) {
-      entry.status = 'error';
-      entry.errorReason = msg;
-    }
-    batchResult.value = { success: [], failed: files.map((f) => ({ name: f.name, reason: '网络错误，请重试' })) };
-    MessagePlugin.error('批量上传失败');
-  } finally {
-    uploading.value = false;
+  // 逐文件上传，每批 concurrency 个文件并发执行
+  for (let i = 0; i < files.length; i += concurrency.value) {
+    const batch = files.slice(i, i + concurrency.value);
+    await Promise.allSettled(
+      batch.map(async (file) => {
+        const entry = queueMap.get(file.name);
+        try {
+          const result = await fileStore.uploadFile(file, (loaded, total) => {
+            if (entry) {
+              entry.progress = total > 0 ? Math.round((loaded / total) * 100) : 0;
+              entry.loadedBytes = loaded;
+            }
+          });
+          if (entry) entry.status = 'success';
+          successList.push({ id: result.id, originalName: result.originalName });
+          selectedFiles.value.push(result.id);
+        } catch (error: unknown) {
+          if (entry) {
+            entry.status = 'error';
+            entry.errorReason = getErrorMessage(error);
+          }
+          failedList.push({ name: file.name, reason: getErrorMessage(error) });
+        }
+      })
+    );
   }
+
+  // 最后一次更新速度
+  updateSpeeds();
+  stopSpeedTimer();
+
+  batchResult.value = { success: successList as any, failed: failedList };
+
+  // 刷新列表
+  if (successList.length > 0) {
+    await fileStore.fetchFiles();
+  }
+
+  // 全成功提示
+  if (failedList.length === 0) {
+    MessagePlugin.success('全部文件上传成功');
+  } else {
+    MessagePlugin.warning(`${failedList.length} 个文件上传失败，请查看详情`);
+  }
+
+  uploading.value = false;
 }
 
 async function convertToMarkdown() {
@@ -239,8 +336,10 @@ async function fetchUploadConfig() {
       maxFileSizeBytes.value = data.maxFileSize;
       maxFileSizeMB.value = Math.round((data.maxFileSize / 1024 / 1024) * 100) / 100;
     }
-    if (data.allowedTypes?.length) {
-      acceptTypes.value = data.allowedTypes.join(',');
+    if (data.fileTypeMode === 'whitelist' && data.fileTypeFilter?.length > 0) {
+      acceptTypes.value = data.fileTypeFilter.join(',');
+    } else {
+      acceptTypes.value = '';
     }
   } catch {
     // 使用默认值
@@ -248,6 +347,15 @@ async function fetchUploadConfig() {
 }
 
 onMounted(fetchUploadConfig);
+
+// 本地文件预览 URL 缓存
+const previewUrls = new Map<File, string>();
+function getPreviewUrl(file: File): string {
+  if (!previewUrls.has(file)) {
+    previewUrls.set(file, URL.createObjectURL(file));
+  }
+  return previewUrls.get(file)!;
+}
 
 function formatSize(bytes: number) {
   if (bytes === 0) return '0 B';

@@ -256,29 +256,37 @@ export class AdminService {
 
   async getUploadConfig(): Promise<{
     maxFileSize: number;
-    allowedFileTypes: string;
+    fileTypeMode: string;
+    fileTypeFilter: string;
   }> {
-    const [maxFileSize, allowedFileTypes] = await Promise.all([
+    const [maxFileSize, fileTypeMode, fileTypeFilter] = await Promise.all([
       this.getConfigByKey('MAX_FILE_SIZE'),
-      this.getConfigByKey('ALLOWED_FILE_TYPES'),
+      this.getConfigByKey('FILE_TYPE_MODE'),
+      this.getConfigByKey('FILE_TYPE_FILTER'),
     ]);
 
     return {
       maxFileSize: parseInt(maxFileSize || '20971520'),
-      allowedFileTypes: allowedFileTypes || 'image/*,application/pdf,application/zip,text/*',
+      fileTypeMode: fileTypeMode || 'blacklist',
+      fileTypeFilter: fileTypeFilter || '',
     };
   }
 
   async updateUploadConfig(config: {
     maxFileSize?: number;
-    allowedFileTypes?: string;
+    fileTypeMode?: string;
+    fileTypeFilter?: string;
   }): Promise<void> {
     if (config.maxFileSize !== undefined) {
       await this.updateConfig('MAX_FILE_SIZE', config.maxFileSize.toString(), '最大文件大小（字节）');
     }
-    
-    if (config.allowedFileTypes !== undefined) {
-      await this.updateConfig('ALLOWED_FILE_TYPES', config.allowedFileTypes, '允许的文件类型');
+
+    if (config.fileTypeMode !== undefined) {
+      await this.updateConfig('FILE_TYPE_MODE', config.fileTypeMode, '文件类型过滤模式（blacklist/whitelist）');
+    }
+
+    if (config.fileTypeFilter !== undefined) {
+      await this.updateConfig('FILE_TYPE_FILTER', config.fileTypeFilter, '文件类型过滤列表（逗号分隔）');
     }
   }
 }

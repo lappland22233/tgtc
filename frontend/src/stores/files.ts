@@ -19,11 +19,19 @@ export const useFileStore = defineStore('files', () => {
     }
   }
 
-  async function uploadFile(file: File) {
+  async function uploadFile(
+    file: File,
+    onProgress?: (loaded: number, total: number) => void,
+  ) {
     const formData = new FormData();
     formData.append('file', file);
     const response = await api.post('/files/upload', formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
+      onUploadProgress: (progressEvent) => {
+        if (progressEvent.total && onProgress) {
+          onProgress(progressEvent.loaded, progressEvent.total);
+        }
+      },
     });
     return response.data.data;
   }

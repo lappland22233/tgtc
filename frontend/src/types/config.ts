@@ -13,7 +13,8 @@ export interface SMTPConfig {
 
 export interface UploadConfig {
   maxFileSize: number;
-  allowedFileTypes: string;
+  fileTypeMode: 'blacklist' | 'whitelist';
+  fileTypeFilter: string;
 }
 
 export interface AuthStatus {

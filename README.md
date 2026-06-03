@@ -102,7 +102,8 @@ CORS_ORIGINS=http://localhost:5173
 
 # 上传
 MAX_FILE_SIZE=20971520
-ALLOWED_FILE_TYPES=image/*,.pdf,.zip,.rar,.txt
+FILE_TYPE_MODE=blacklist      # blacklist 或 whitelist
+FILE_TYPE_FILTER=              # 逗号分隔的扩展名，如 .zip,.exe,.sh，空值不限制
 ```
 
 第一个注册的账号自动成为超级管理员。

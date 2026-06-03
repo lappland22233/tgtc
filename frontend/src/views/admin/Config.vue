@@ -60,13 +60,64 @@
     <!-- 文件上传配置 -->
     <div class="card" style="margin-top: 20px;">
       <h3 style="margin-bottom: 16px;">📁 文件上传配置</h3>
-      <t-form layout="vertical" style="max-width: 500px;">
+      <t-form layout="vertical">
+
+        <!-- 模式切换 -->
+        <t-form-item label="过滤模式">
+          <t-radio-group v-model="uploadConfig.fileTypeMode">
+            <t-radio value="blacklist">黑名单模式（默认允许所有，禁止选中的类型）</t-radio>
+            <t-radio value="whitelist">白名单模式（默认拒绝所有，仅允许选中的类型）</t-radio>
+          </t-radio-group>
+        </t-form-item>
+
+        <!-- 预设扩展名勾选 -->
+        <t-form-item :label="uploadConfig.fileTypeMode === 'blacklist' ? '禁止上传的文件类型' : '允许上传的文件类型'">
+          <div style="display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px;">
+            <t-checkbox
+              v-for="ext in presetExtensions"
+              :key="ext"
+              :checked="selectedExtensions.includes(ext)"
+              @change="(val: boolean) => toggleExtension(ext, val)"
+            >
+              {{ ext }}
+            </t-checkbox>
+          </div>
+        </t-form-item>
+
+        <!-- 自定义后缀输入 -->
+        <t-form-item label="自定义后缀">
+          <div style="display: flex; gap: 8px; margin-bottom: 8px;">
+            <t-input
+              v-model="customExtension"
+              placeholder="如 .apk" style="max-width: 160px;"
+              @keyup.enter="addCustomExtension"
+            />
+            <t-button variant="outline" :disabled="!customExtension.trim()" @click="addCustomExtension">
+              添加
+            </t-button>
+          </div>
+        </t-form-item>
+
+        <!-- 已选列表 -->
+        <t-form-item v-if="selectedExtensions.length > 0" label="已选后缀">
+          <div style="display: flex; flex-wrap: wrap; gap: 6px;">
+            <t-tag
+              v-for="ext in selectedExtensions"
+              :key="ext"
+              :theme="uploadConfig.fileTypeMode === 'blacklist' ? 'danger' : 'success'"
+              closable
+              @close="removeExtension(ext)"
+            >
+              {{ ext }}
+            </t-tag>
+          </div>
+        </t-form-item>
+
+        <!-- 最大文件大小 -->
         <t-form-item label="最大文件大小 (MB)">
           <t-input-number v-model="uploadConfig.maxFileSizeMB" :min="1" :max="1024" />
         </t-form-item>
-        <t-form-item label="允许的文件类型">
-          <t-input v-model="uploadConfig.allowedFileTypes" placeholder="image/*,application/pdf,application/zip" />
-        </t-form-item>
+
         <t-form-item>
           <t-button theme="primary" @click="saveUploadConfig">保存上传配置</t-button>
         </t-form-item>
@@ -135,8 +186,20 @@ const smtpConfig = ref({
 
 const uploadConfig = ref({
   maxFileSizeMB: 20,
-  allowedFileTypes: 'image/*,application/pdf,application/zip,text/*',
+  fileTypeMode: 'blacklist' as 'blacklist' | 'whitelist',
+  fileTypeFilter: '',
 });
+
+// 预设常用扩展名
+const presetExtensions = [
+  '.zip', '.rar', '.7z', '.tar.gz',
+  '.png', '.jpeg', '.jpg', '.webp', '.gif',
+  '.mp3', '.mp4', '.flac',
+  '.exe', '.sh', '.js', '.css',
+];
+
+const selectedExtensions = ref<string[]>([]);
+const customExtension = ref('');
 
 const bannedIPs = ref<{ id: string; ip: string; reason: string | null; isPermanent: boolean; expiresAt: string | null; createdAt: string }[]>([]);
 const showBanDialog = ref(false);
@@ -183,18 +246,51 @@ async function saveSMTPConfig() {
   }
 }
 
+function toggleExtension(ext: string, checked: boolean) {
+  if (checked) {
+    if (!selectedExtensions.value.includes(ext)) {
+      selectedExtensions.value.push(ext);
+    }
+  } else {
+    removeExtension(ext);
+  }
+}
+
+function removeExtension(ext: string) {
+  selectedExtensions.value = selectedExtensions.value.filter(e => e !== ext);
+}
+
+function addCustomExtension() {
+  let ext = customExtension.value.trim().toLowerCase();
+  if (!ext) return;
+  if (!ext.startsWith('.')) {
+    ext = '.' + ext;
+  }
+  if (!selectedExtensions.value.includes(ext)) {
+    selectedExtensions.value.push(ext);
+  }
+  customExtension.value = '';
+}
+
 async function fetchUploadConfig() {
   const res = await api.get('/admin/upload-config');
-  uploadConfig.value.maxFileSizeMB = Math.floor(res.data.data.maxFileSize / (1024 * 1024));
-  uploadConfig.value.allowedFileTypes = res.data.data.allowedFileTypes;
+  const data = res.data.data;
+  uploadConfig.value.maxFileSizeMB = Math.floor(data.maxFileSize / (1024 * 1024));
+  uploadConfig.value.fileTypeMode = data.fileTypeMode || 'blacklist';
+  uploadConfig.value.fileTypeFilter = data.fileTypeFilter || '';
+  selectedExtensions.value = data.fileTypeFilter
+    ? data.fileTypeFilter.split(',').map((s: string) => s.trim()).filter(Boolean)
+    : [];
 }
 
 async function saveUploadConfig() {
   try {
     await api.put('/admin/upload-config', {
       maxFileSize: uploadConfig.value.maxFileSizeMB * 1024 * 1024,
-      allowedFileTypes: uploadConfig.value.allowedFileTypes,
+      fileTypeMode: uploadConfig.value.fileTypeMode,
+      fileTypeFilter: selectedExtensions.value.join(','),
     });
+    uploadConfig.value.fileTypeFilter = selectedExtensions.value.join(',');
     MessagePlugin.success('上传配置已保存');
   } catch (error: unknown) {
     MessagePlugin.error(getErrorMessage(error));

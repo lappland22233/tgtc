@@ -1,4 +1,4 @@
-import { IsEmail, IsString, MinLength, MaxLength, Matches, IsOptional } from 'class-validator';
+import { IsEmail, IsString, MinLength, MaxLength, Matches, IsOptional, ValidateIf } from 'class-validator';
 
 export class RegisterDto {
   @IsEmail({}, { message: '请输入有效的邮箱地址' })
@@ -9,7 +9,7 @@ export class RegisterDto {
   @MaxLength(20, { message: '密码最多20位' })
   password: string;
 
-  @IsOptional()
+  @ValidateIf((o) => o.code !== undefined && o.code !== null && o.code !== '')
   @IsString()
   @Matches(/^\d{6}$/, { message: '验证码必须是6位数字' })
   code?: string;

@@ -29,7 +29,8 @@ export interface BatchUploadResult {
 @Injectable()
 export class FileService implements OnModuleInit {
   private maxFileSize: number;
-  private allowedTypes: string[];
+  private fileTypeMode: 'blacklist' | 'whitelist' = 'blacklist';
+  private fileTypeFilter: string[] = [];
 
   constructor(
     @InjectRepository(File)
@@ -47,7 +48,6 @@ export class FileService implements OnModuleInit {
     private rateLimitService: RateLimitService,
   ) {
     this.maxFileSize = this.parseFileSize(this.configService.get<string>('MAX_FILE_SIZE'));
-    this.allowedTypes = (this.configService.get<string>('ALLOWED_FILE_TYPES') || 'image/*,application/pdf,application/zip,text/*').split(',');
   }
 
   async onModuleInit() {
@@ -56,18 +56,22 @@ export class FileService implements OnModuleInit {
 
   @OnEvent('config.changed')
   async handleConfigChanged(payload: { key: string; value: string }) {
-    if (payload.key === 'MAX_FILE_SIZE' || payload.key === 'ALLOWED_FILE_TYPES') {
+    if (payload.key === 'MAX_FILE_SIZE' || payload.key === 'FILE_TYPE_MODE' || payload.key === 'FILE_TYPE_FILTER') {
       await this.reloadUploadConfig();
     }
   }
 
   private async reloadUploadConfig() {
-    const [maxFileSize, allowedFileTypes] = await Promise.all([
+    const [maxFileSize, fileTypeMode, fileTypeFilter] = await Promise.all([
       this.configCacheService.get('MAX_FILE_SIZE', '20971520'),
-      this.configCacheService.get('ALLOWED_FILE_TYPES', 'image/*,application/pdf,application/zip,text/*'),
+      this.configCacheService.get('FILE_TYPE_MODE', 'blacklist'),
+      this.configCacheService.get('FILE_TYPE_FILTER', ''),
     ]);
     this.maxFileSize = this.parseFileSize(maxFileSize);
-    this.allowedTypes = allowedFileTypes.split(',');
+    this.fileTypeMode = (fileTypeMode === 'whitelist' ? 'whitelist' : 'blacklist');
+    this.fileTypeFilter = fileTypeFilter
+      ? fileTypeFilter.split(',').map(s => s.trim().toLowerCase()).filter(Boolean)
+      : [];
   }
 
   private parseFileSize(val: string | undefined): number {
@@ -79,8 +83,49 @@ export class FileService implements OnModuleInit {
     return this.maxFileSize;
   }
 
-  async getAllowedTypes(): Promise<string[]> {
-    return [...this.allowedTypes];
+  async getFileTypeConfig(): Promise<{
+    fileTypeMode: 'blacklist' | 'whitelist';
+    fileTypeFilter: string[];
+  }> {
+    return {
+      fileTypeMode: this.fileTypeMode,
+      fileTypeFilter: [...this.fileTypeFilter],
+    };
+  }
+
+  /**
+   * 从文件名提取扩展名（小写，含点号）
+   * 支持复合后缀如 .tar.gz
+   */
+  private extractExtension(filename: string): string {
+    const name = filename.toLowerCase();
+    return '.' + name.split('.').slice(1).join('.');
+  }
+
+  /**
+   * 检查文件类型是否被允许
+   * - 黑名单 + 空过滤 = 允许所有
+   * - 黑名单 + 有过滤 = 拒绝匹配的
+   * - 白名单 + 空过滤 = 拒绝所有
+   * - 白名单 + 有过滤 = 允许匹配的
+   */
+  private isFileTypeAllowed(filename: string): boolean {
+    if (this.fileTypeMode === 'blacklist' && this.fileTypeFilter.length === 0) {
+      return true;
+    }
+
+    if (this.fileTypeMode === 'whitelist' && this.fileTypeFilter.length === 0) {
+      return false;
+    }
+
+    const lowerName = filename.toLowerCase();
+    const matched = this.fileTypeFilter.some(f => lowerName.endsWith(f));
+
+    if (this.fileTypeMode === 'blacklist') {
+      return !matched;
+    } else {
+      return matched;
+    }
   }
 
   async upload(file: Express.Multer.File, user: User): Promise<File> {
@@ -88,17 +133,7 @@ export class FileService implements OnModuleInit {
       throw new BadRequestException(`文件大小不能超过 ${this.maxFileSize / 1024 / 1024}MB`);
     }
 
-    const isAllowed = this.allowedTypes.some(type => {
-      if (type.startsWith('.')) {
-        // 扩展名匹配：.pdf, .zip 等
-        return file.originalname.toLowerCase().endsWith(type.toLowerCase());
-      }
-      if (type.endsWith('/*')) {
-        const category = type.split('/')[0];
-        return file.mimetype.startsWith(category + '/');
-      }
-      return file.mimetype === type;
-    });
+    const isAllowed = this.isFileTypeAllowed(file.originalname);
 
     if (!isAllowed) {
       throw new BadRequestException('不允许上传此类型的文件');
@@ -498,6 +533,44 @@ export class FileService implements OnModuleInit {
     }
 
     return { content, contentType: mimeType, filename, size: content.length };
+  }
+
+  /**
+   * 获取缩略图流（仅权限校验，不受类型/密码/次数/过期限制）
+   */
+  async getThumbnailStream(id: string, user: User): Promise<{
+    stream: Readable;
+    contentType: string;
+  }> {
+    const file = await this.fileRepository.findOne({
+      where: { id, isDeleted: false },
+    });
+
+    if (!file) {
+      throw new NotFoundException('文件不存在');
+    }
+
+    await this.assertFileReadable(file, user);
+
+    const { stream } = await this.telegramService.getFileStream(file.telegramFileId || file.filename);
+
+    return {
+      stream,
+      contentType: file.mimeType || 'application/octet-stream',
+    };
+  }
+
+  /**
+   * 获取文件预览流（不计数，用于缩略图展示）
+   * @deprecated 请使用 getThumbnailStream
+   */
+  async getFilePreviewStream(id: string, user: User): Promise<{
+    stream: Readable;
+    contentType: string;
+    size: number;
+  }> {
+    const result = await this.getThumbnailStream(id, user);
+    return { ...result, size: 0 };
   }
 
   /**

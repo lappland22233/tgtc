@@ -12,6 +12,7 @@ import {
   ValidateNested,
   IsNotEmpty,
   IsDateString,
+  IsIn,
 } from 'class-validator';
 import { Type } from 'class-transformer';
 
@@ -95,8 +96,12 @@ export class UploadConfigDto {
 
   @IsOptional()
   @IsString()
-  @IsNotEmpty()
-  allowedFileTypes?: string;
+  @IsIn(['blacklist', 'whitelist'])
+  fileTypeMode?: string;
+
+  @IsOptional()
+  @IsString()
+  fileTypeFilter?: string;
 }
 
 export class AuthConfigDto {

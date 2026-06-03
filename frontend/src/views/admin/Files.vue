@@ -28,7 +28,7 @@
       >
         <template #filename="{ row }">
           <div style="display: flex; align-items: center; gap: 12px;">
-            <span style="font-size: 20px;">{{ getFileEmoji(row.mimeType) }}</span>
+            <ThumbnailImg :file-id="row.id" :mime-type="row.mimeType" :size="36" :emoji="getFileEmoji(row.mimeType)" />
             <div>
               <div>{{ row.originalName }}</div>
               <div style="font-size: 12px; color: var(--text-secondary);">
@@ -68,6 +68,7 @@ import { ref, onMounted } from 'vue';
 import { MessagePlugin } from 'tdesign-vue-next';
 import { api } from '../../stores/auth';
 import { getErrorMessage } from '../../utils/error';
+import ThumbnailImg from '../../components/ThumbnailImg.vue';
 
 const files = ref<{ id: string; originalName: string; mimeType: string; size: number; accessType: string; createdAt: string; uploader: { id: string; email: string } | null }[]>([]);
 const uploaders = ref<{ id: string; email: string }[]>([]);
