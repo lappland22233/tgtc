@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
+import { Repository, DataSource } from 'typeorm';
 import * as bcrypt from 'bcryptjs';
 import { User, UserRole } from '../common/entities/user.entity';
 import { File } from '../common/entities/file.entity';
@@ -15,9 +15,15 @@ export class UserService {
     private fileRepository: Repository<File>,
     @InjectRepository(FileAccessLog)
     private accessLogRepository: Repository<FileAccessLog>,
+    @InjectDataSource()
+    private dataSource: DataSource,
   ) {}
 
   async findAll(page = 1, limit = 20, search?: string): Promise<{ users: Partial<User>[]; total: number }> {
+    // B-1: 边界校验，防止 DoS
+    page = Math.max(1, Math.min(page, 100000));
+    limit = Math.max(1, Math.min(limit, 100));
+
     const queryBuilder = this.userRepository
       .createQueryBuilder('user')
       .select(['user.id', 'user.email', 'user.role', 'user.isBanned', 'user.emailVerified', 'user.lastLoginIP', 'user.lastLoginAt', 'user.createdAt'])
@@ -82,24 +88,44 @@ export class UserService {
     };
   }
 
-  async delete(id: string): Promise<void> {
-    const user = await this.userRepository.findOne({ where: { id } });
-
-    if (!user) {
-      throw new NotFoundException('用户不存在');
+  async delete(id: string, requester: User): Promise<void> {
+    // B-3: 防止管理员删除自己
+    if (requester.id === id) {
+      throw new BadRequestException('无法删除自己的账户');
     }
 
-    if (user.role === UserRole.SUPER_ADMIN) {
-      throw new BadRequestException('无法删除超级管理员');
+    const queryRunner = this.dataSource.createQueryRunner();
+    await queryRunner.connect();
+    await queryRunner.startTransaction();
+
+    try {
+      const user = await queryRunner.manager.findOne(User, { where: { id } });
+
+      if (!user) {
+        throw new NotFoundException('用户不存在');
+      }
+
+      if (user.role === UserRole.SUPER_ADMIN) {
+        throw new BadRequestException('无法删除超级管理员');
+      }
+
+      // 事务内：软删除用户的所有文件
+      await queryRunner.manager.update(
+        File,
+        { uploaderId: id, isDeleted: false },
+        { isDeleted: true },
+      );
+
+      // 事务内：硬删除用户
+      await queryRunner.manager.delete(User, { id });
+
+      await queryRunner.commitTransaction();
+    } catch (error) {
+      await queryRunner.rollbackTransaction();
+      throw error;
+    } finally {
+      await queryRunner.release();
     }
-
-    // 软删除该用户上传的所有文件（保留外键完整性，不破坏 file_access_logs 等关联数据）
-    await this.fileRepository.update(
-      { uploaderId: id, isDeleted: false },
-      { isDeleted: true },
-    );
-
-    await this.userRepository.delete(id);
   }
 
   async updateRole(id: string, role: UserRole, requesterRole: UserRole): Promise<void> {
@@ -139,6 +165,11 @@ export class UserService {
   }
 
   async changePassword(id: string, oldPassword: string, newPassword: string): Promise<void> {
+    // B-2: 新密码不能与旧密码相同
+    if (newPassword === oldPassword) {
+      throw new BadRequestException('新密码不能与旧密码相同');
+    }
+
     const user = await this.userRepository.findOne({ where: { id } });
 
     if (!user) {

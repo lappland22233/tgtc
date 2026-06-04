@@ -124,12 +124,19 @@ function updateTime() {
 }
 
 onMounted(async () => {
-  const [statsRes, myFilesRes] = await Promise.all([
-    api.get('/admin/stats'),
-    api.get('/admin/my-files-stats'),
-  ]);
-  stats.value = statsRes.data.data;
-  myFiles.value = myFilesRes.data.data;
+  // 独立 try-catch 确保单个请求失败不影响其他数据
+  try {
+    const statsRes = await api.get('/admin/stats');
+    stats.value = statsRes.data.data;
+  } catch {
+    // 保留默认值
+  }
+  try {
+    const myFilesRes = await api.get('/admin/my-files-stats');
+    myFiles.value = myFilesRes.data.data;
+  } catch {
+    // 保留默认值
+  }
   updateTime();
   timer = window.setInterval(updateTime, 1000);
 });

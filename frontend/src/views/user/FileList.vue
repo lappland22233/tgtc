@@ -1,6 +1,7 @@
 <template>
   <div
     @dragover.prevent="isDraggedOver = true"
+    @dragenter="handleDragEnter"
     @dragleave="handleDragLeave"
     @drop.prevent="handleDrop"
     style="position: relative;"
@@ -228,15 +229,23 @@ async function handleExpiresChange(id: string, expiresIn: number | null) {
 }
 
 let dragLeaveTimeout: ReturnType<typeof setTimeout> | null = null;
+let dragCounter = 0;
+
+function handleDragEnter(_e: DragEvent) {
+  dragCounter++;
+  isDraggedOver.value = true;
+}
 
 function handleDragLeave(_e: DragEvent) {
-  if (dragLeaveTimeout) clearTimeout(dragLeaveTimeout);
-  dragLeaveTimeout = setTimeout(() => {
+  dragCounter--;
+  if (dragCounter <= 0) {
+    dragCounter = 0;
     isDraggedOver.value = false;
-  }, 100);
+  }
 }
 
 function handleDrop(e: DragEvent) {
+  dragCounter = 0;
   isDraggedOver.value = false;
   if (dragLeaveTimeout) clearTimeout(dragLeaveTimeout);
   const files = Array.from(e.dataTransfer?.files || []);

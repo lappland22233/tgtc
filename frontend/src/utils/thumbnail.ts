@@ -1,4 +1,4 @@
-import { api } from '../stores/auth';
+import api from '../api/client';
 
 let publicKey: CryptoKey | null = null;
 
@@ -59,18 +59,28 @@ async function encryptTimestamp(): Promise<string> {
   return arrayBufferToBase64Url(encrypted);
 }
 
-let cachedToken = '';
-let tokenExpiry = 0;
+// ---- Token 缓存（带 TTL）----
 
-/** 获取缩略图访问令牌（自动刷新，1.5 秒内复用） */
+interface CachedToken {
+  token: string;
+  expiresAt: number;
+}
+
+/** Token 复用窗口（毫秒），短于服务端 ±2s 容差以确保安全 */
+const TOKEN_TTL = 1500;
+
+let cachedToken: CachedToken | null = null;
+
+/** 获取缩略图访问令牌（自动刷新，带 TTL 过期） */
 export async function getThumbToken(): Promise<string> {
   const now = Date.now();
-  if (cachedToken && now < tokenExpiry) {
-    return cachedToken;
+  if (cachedToken && now < cachedToken.expiresAt) {
+    return cachedToken.token;
   }
-  cachedToken = await encryptTimestamp();
-  tokenExpiry = now + 1500; // 1.5 秒后重新加密
-  return cachedToken;
+  // 超过 TTL 自动刷新
+  const token = await encryptTimestamp();
+  cachedToken = { token, expiresAt: now + TOKEN_TTL };
+  return token;
 }
 
 /** 构建缩略图 URL */
@@ -79,8 +89,7 @@ export async function buildThumbUrl(fileId: string): Promise<string> {
   return `/api/files/${fileId}/thumbnail?t=${token}`;
 }
 
-/** 清除缓存（页面切换时调用） */
+/** 清除缓存（路由切换时调用，防止 Token 跨页面复用） */
 export function clearThumbToken() {
-  cachedToken = '';
-  tokenExpiry = 0;
+  cachedToken = null;
 }

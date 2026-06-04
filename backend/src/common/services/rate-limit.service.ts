@@ -35,62 +35,28 @@ export class RateLimitService {
     windowMs: number,
   ): Promise<RateLimitResult> {
     const now = new Date();
+    const windowStart = new Date(now.getTime() - windowMs);
 
-    // 先查询是否已有记录且处于锁定状态
-    const existing = await this.rateLimitRepo.findOne({ where: { key } });
-
-    // 窗口已过期 → 重置
-    if (existing && existing.firstAttemptAt) {
-      const windowExpiry = new Date(existing.firstAttemptAt.getTime() + windowMs);
-      if (now > windowExpiry) {
-        // 窗口过期但可能锁定未过期（锁定时间可能长于窗口）→ 仍需检查锁
-        if (existing.lockedUntil && now < existing.lockedUntil) {
-          const waitMinutes = Math.ceil((existing.lockedUntil.getTime() - now.getTime()) / 60000);
-          return { allowed: false, waitMinutes };
-        }
-        // 窗口和锁都已过期，重置
-        await this.rateLimitRepo.delete({ key });
-      } else {
-        // 窗口内，检查是否锁定
-        if (existing.lockedUntil && now < existing.lockedUntil) {
-          const waitMinutes = Math.ceil((existing.lockedUntil.getTime() - now.getTime()) / 60000);
-          return { allowed: false, waitMinutes };
-        }
-      }
-    }
-
-    // 原子 upsert: 插入或更新
-    try {
-      await this.rateLimitRepo
-        .createQueryBuilder()
-        .insert()
-        .into(RateLimit)
-        .values({
-          key,
-          type,
-          attemptCount: 1,
-          firstAttemptAt: now,
-          lockedUntil: null,
-        })
-        .orUpdate(['attempt_count', 'updated_at'], ['key'], {
-          skipUpdateIfNoValuesChanged: true,
-        })
-        .execute();
-    } catch {
-      // 如果 upsert 失败（并发冲突），使用原始 SQL 做原子 UPDATE
-    }
-
-    // 使用原始 SQL 进行原子递增（ON CONFLICT 处理并发）
+    // 使用单一原子化 SQL 操作处理并发，避免竞态条件
+    // 如果窗口已过期 → 重置计数为 1；否则递增计数
+    // 如果已锁定 → 不更新（WHERE 条件过滤）
     const result = await this.rateLimitRepo.manager.query(
       `INSERT INTO rate_limits ("key", "type", "attemptCount", "firstAttemptAt", "lockedUntil", "updatedAt")
        VALUES ($1, $2, 1, $3, NULL, NOW())
        ON CONFLICT ("key") DO UPDATE SET
-         "attemptCount" = rate_limits."attemptCount" + 1,
+         "attemptCount" = CASE
+           WHEN rate_limits."firstAttemptAt" < $4::timestamp THEN 1
+           ELSE rate_limits."attemptCount" + 1
+         END,
+         "firstAttemptAt" = CASE
+           WHEN rate_limits."firstAttemptAt" < $4::timestamp THEN $3::timestamp
+           ELSE rate_limits."firstAttemptAt"
+         END,
          "updatedAt" = NOW()
-       WHERE rate_limits."lockedUntil" IS NULL 
+       WHERE rate_limits."lockedUntil" IS NULL
           OR rate_limits."lockedUntil" < NOW()
        RETURNING "attemptCount", "firstAttemptAt", "lockedUntil"`,
-      [key, type, now],
+      [key, type, now, windowStart],
     );
 
     // 如果无返回行，说明记录处于锁定状态（WHERE 条件不满足）
@@ -107,14 +73,13 @@ export class RateLimitService {
     const row = result[0];
     const count = row.attemptCount;
 
-    // 检查窗口是否过期（原子递增用的是 INSERT 时的 firstAttemptAt）
-    const firstAttemptAt = new Date(row.firstAttemptAt);
-    const windowExpiry = new Date(firstAttemptAt.getTime() + windowMs);
-    if (now > windowExpiry) {
-      // 窗口已过期但计数被递增了（并发场景），重置并允许
-      // 直接 reset 并返回允许
-      await this.rateLimitRepo.delete({ key });
-      return { allowed: true };
+    // 窗口内的首次尝试，但已被 CASE 重置为 1（窗口过期场景）
+    if (count === 1 && row.firstAttemptAt) {
+      const firstAttemptAt = new Date(row.firstAttemptAt);
+      if (now.getTime() - firstAttemptAt.getTime() < 1000) {
+        // 刚刚重置，视为窗口内第一次
+        return { allowed: true };
+      }
     }
 
     // 达到阈值 → 锁定

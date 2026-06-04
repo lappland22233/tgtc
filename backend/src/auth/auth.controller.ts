@@ -8,7 +8,8 @@ import { User } from '../common/entities/user.entity';
 
 const COOKIE_OPTIONS = {
   httpOnly: true,
-  secure: process.env.NODE_ENV === 'production',
+  // secure 仅在 HTTPS 环境下启用，检测 X-Forwarded-Proto 或 APP_URL 协议
+  secure: process.env.NODE_ENV === 'production' && (process.env.APP_URL || '').startsWith('https'),
   sameSite: 'strict' as const,
   maxAge: 7 * 24 * 3600 * 1000, // 7 days
   path: '/',
@@ -45,8 +46,9 @@ export class AuthController {
   }
 
   @Post('send-code')
-  async sendCode(@Body() sendCodeDto: SendCodeDto) {
-    await this.authService.sendVerificationCode(sendCodeDto);
+  async sendCode(@Body() sendCodeDto: SendCodeDto, @Req() req: Request) {
+    const ip = req.ip || req.socket?.remoteAddress || 'unknown';
+    await this.authService.sendVerificationCode(sendCodeDto, ip);
     return { message: '验证码已发送' };
   }
 

@@ -94,7 +94,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue';
+import { ref, computed, watch, onUnmounted } from 'vue';
 import { MessagePlugin } from 'tdesign-vue-next';
 import { useFileStore } from '../stores/files';
 import { api } from '../stores/auth';
@@ -212,6 +212,7 @@ function resetQueue() {
 }
 
 function handleClose() {
+  stopSpeedTimer();
   resetQueue();
   emit('close');
 }
@@ -264,7 +265,7 @@ async function handleFileSelect(e: Event) {
 }
 
 async function uploadFiles(files: File[]) {
-  if (files.length === 0) return;
+  if (files.length === 0 || uploading.value) return;
 
   uploading.value = true;
   batchResult.value = null;
@@ -346,5 +347,9 @@ watch(() => props.visible, async (isVisible) => {
   if (isVisible && props.initialFiles && props.initialFiles.length > 0) {
     await uploadFiles(validateFiles(Array.from(props.initialFiles)));
   }
+});
+
+onUnmounted(() => {
+  stopSpeedTimer();
 });
 </script>

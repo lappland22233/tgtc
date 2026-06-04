@@ -22,13 +22,13 @@ export class TasksService {
   @Cron(CronExpression.EVERY_30_MINUTES)
   async cleanupExpiredRateLimits() {
     try {
-      // 清理已锁定且锁定已过期 + 超过 1 小时未更新的限流记录
+      // 只清理已过期且未锁定的记录，避免误删仍在生效的限流记录
       const result = await this.rateLimitRepository
         .createQueryBuilder()
         .delete()
         .from(RateLimit)
-        .where('"lockedUntil" IS NOT NULL AND "lockedUntil" < :now', { now: new Date() })
-        .orWhere('"updatedAt" < :cutoff', { cutoff: new Date(Date.now() - 60 * 60 * 1000) })
+        .where('("lockedUntil" IS NOT NULL AND "lockedUntil" < :now)', { now: new Date() })
+        .orWhere('("lockedUntil" IS NULL AND "updatedAt" < :cutoff)', { cutoff: new Date(Date.now() - 60 * 60 * 1000) })
         .execute();
       if ((result.affected ?? 0) > 0) {
         this.logger.log(`已清理 ${result.affected} 条过期限流记录`);

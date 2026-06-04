@@ -1,39 +1,10 @@
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
-import axios from 'axios';
+import api from '../api/client';
+import { clearRedirectState } from '../api/client';
 import type { User } from '../types/user';
 
 export type SendCodeType = 'register' | 'reset_password';
-
-let isRedirecting = false;
-let redirectTimer: ReturnType<typeof setTimeout> | null = null;
-
-const api = axios.create({
-  baseURL: '/api',
-  withCredentials: true,
-});
-
-// 401 响应拦截器：清空状态并跳转登录页（防抖处理）
-api.interceptors.response.use(
-  (response) => response,
-  (error) => {
-    if (error.response?.status === 401 && !isRedirecting) {
-      // 如果已经在登录/注册页，不触发跳转（fetchUser 的 catch 已处理 user=null）
-      const isAuthPage = window.location.pathname === '/login' || window.location.pathname === '/register';
-      if (!isAuthPage) {
-        isRedirecting = true;
-        const store = useAuthStore();
-        store.user = null;
-        if (redirectTimer) clearTimeout(redirectTimer);
-        redirectTimer = setTimeout(() => {
-          window.location.href = '/login';
-          isRedirecting = false;
-        }, 300);
-      }
-    }
-    return Promise.reject(error);
-  },
-);
 
 export const useAuthStore = defineStore('auth', () => {
   const user = ref<User | null>(null);
@@ -41,9 +12,21 @@ export const useAuthStore = defineStore('auth', () => {
 
   const isAuthenticated = computed(() => !!user.value);
 
+  // 跨标签页登出同步
+  if (typeof BroadcastChannel !== 'undefined') {
+    const authChannel = new BroadcastChannel('auth-sync');
+    authChannel.onmessage = (event) => {
+      if (event.data === 'logout') {
+        user.value = null;
+        initialized.value = true;
+      }
+    };
+  }
+
   async function login(email: string, password: string) {
     const response = await api.post('/auth/login', { email, password });
     user.value = response.data.data.user as User;
+    clearRedirectState(); // 登录成功后重置重定向状态
     return response.data;
   }
 
@@ -80,6 +63,10 @@ export const useAuthStore = defineStore('auth', () => {
       // 即使请求失败也清除本地状态
     }
     user.value = null;
+    // 广播登出事件到其他标签页
+    if (typeof BroadcastChannel !== 'undefined') {
+      new BroadcastChannel('auth-sync').postMessage('logout');
+    }
   }
 
   return {

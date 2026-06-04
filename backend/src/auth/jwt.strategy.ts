@@ -32,6 +32,22 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
   }
 
   async validate(payload: { sub: string; email: string; role: string }) {
+    if (!payload || typeof payload !== 'object') {
+      throw new UnauthorizedException('无效的 token 载荷');
+    }
+
+    if (!payload.sub || typeof payload.sub !== 'string') {
+      throw new UnauthorizedException('Token 缺少有效的用户标识');
+    }
+
+    if (!payload.email || typeof payload.email !== 'string') {
+      throw new UnauthorizedException('Token 缺少有效的邮箱');
+    }
+
+    if (!payload.role || typeof payload.role !== 'string') {
+      throw new UnauthorizedException('Token 缺少有效的角色信息');
+    }
+
     const user = await this.authService.validateUser(payload.sub);
     if (!user) {
       throw new UnauthorizedException('用户不存在');

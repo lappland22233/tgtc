@@ -15,4 +15,11 @@ const pinia = createPinia();
 app.use(pinia);
 app.use(router);
 app.use(TDesign);
+
+// 全局错误边界：捕获未处理的组件错误，防止整个页面白屏
+app.config.errorHandler = (err, _instance, info) => {
+  console.error('[Vue Error]', err);
+  console.error('Info:', info);
+};
+
 app.mount('#app');

@@ -95,11 +95,12 @@ export class FileService implements OnModuleInit {
 
   /**
    * 从文件名提取扩展名（小写，含点号）
-   * 支持复合后缀如 .tar.gz
+   * 只取最后一个点之后的部分，防止 .php.jpg 等复合扩展名绕过检查
    */
   private extractExtension(filename: string): string {
     const name = filename.toLowerCase();
-    return '.' + name.split('.').slice(1).join('.');
+    const lastDot = name.lastIndexOf('.');
+    return lastDot > 0 ? '.' + name.slice(lastDot + 1) : '';
   }
 
   /**
@@ -221,7 +222,8 @@ export class FileService implements OnModuleInit {
    * 统一权限校验：登录用户只能读取自己的文件，管理员可读取所有文件
    */
   private async assertFileReadable(file: File, user: User): Promise<void> {
-    if (file.uploaderId !== user.id && user.role === UserRole.USER) {
+    const adminRoles: UserRole[] = [UserRole.ADMIN, UserRole.SUPER_ADMIN];
+    if (file.uploaderId !== user.id && !adminRoles.includes(user.role)) {
       throw new ForbiddenException('无权访问此文件');
     }
   }

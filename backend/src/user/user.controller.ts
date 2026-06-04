@@ -74,8 +74,8 @@ export class UserController {
 
   @Delete(':id')
   @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
-  async delete(@Param('id') id: string) {
-    await this.userService.delete(id);
+  async delete(@Param('id') id: string, @CurrentUser() requester: User) {
+    await this.userService.delete(id, requester);
     return { message: '用户已删除' };
   }
 }

@@ -19,4 +19,5 @@ export const AppDataSource = new DataSource({
   migrations: ['src/migrations/*.ts'],
   synchronize: false,
   logging: process.env.NODE_ENV === 'development',
+  maxQueryExecutionTime: 5000, // D-4: 慢查询检测阈值（毫秒）
 });

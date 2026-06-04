@@ -9,6 +9,7 @@ export const useFileStore = defineStore('files', () => {
   const loading = ref(false);
 
   async function fetchFiles(page = 1, limit = 20, keyword?: string) {
+    if (loading.value) return; // 防止并发重复请求
     loading.value = true;
     try {
       const response = await api.get('/files', { params: { page, limit, keyword } });
@@ -38,7 +39,9 @@ export const useFileStore = defineStore('files', () => {
 
   async function deleteFile(id: string) {
     await api.delete(`/files/${id}`);
+    // 仅服务器确认删除后再从本地列表移除
     files.value = files.value.filter((f) => f.id !== id);
+    total.value = Math.max(0, total.value - 1);
   }
 
   async function uploadMultiple(files: File[]): Promise<BatchUploadResult> {

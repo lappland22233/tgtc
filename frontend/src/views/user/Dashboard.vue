@@ -108,15 +108,17 @@ function getFileEmoji(mimeType: string) {
 }
 
 onMounted(async () => {
-  try {
-    const [statsRes, filesRes] = await Promise.all([
-      api.get('/users/me/stats'),
-      api.get('/files?limit=5'),
-    ]);
-    stats.value = statsRes.data.data;
-    recentFiles.value = filesRes.data.data.files;
-  } finally {
-    loading.value = false;
+  // 使用 Promise.allSettled 确保单个请求失败不影响整体页面
+  const [statsResult, filesResult] = await Promise.allSettled([
+    api.get('/users/me/stats'),
+    api.get('/files?limit=5'),
+  ]);
+  if (statsResult.status === 'fulfilled') {
+    stats.value = statsResult.value.data.data;
   }
+  if (filesResult.status === 'fulfilled') {
+    recentFiles.value = filesResult.value.data.data.files;
+  }
+  loading.value = false;
 });
 </script>

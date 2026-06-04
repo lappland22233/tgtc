@@ -35,33 +35,32 @@ export class AdminService {
     totalAccessCount: number;
     monthlyAccess: { month: string; count: number }[];
   }> {
-    const [userStats] = await this.userRepository
-      .createQueryBuilder('user')
-      .select([
-        'COUNT(*) as "totalUsers"',
-        'SUM(CASE WHEN user.isBanned = true THEN 1 ELSE 0 END) as "bannedUsers"',
-      ])
-      .getRawMany();
-
-    const [fileStats] = await this.fileRepository
-      .createQueryBuilder('file')
-      .select([
-        'COUNT(*) as "totalFiles"',
-        'COALESCE(SUM(file.size), 0) as "totalStorage"',
-      ])
-      .where('file.isDeleted = false')
-      .getRawMany();
-
-    const [accessStats] = await this.accessLogRepository
-      .createQueryBuilder('log')
-      .select('COUNT(*) as "count"')
-      .getRawMany();
+    // D-1: 合并查询为并行执行，减少数据库往返
+    const [[userStats], [fileStats], [accessStats], monthlyAccess] = await Promise.all([
+      this.userRepository
+        .createQueryBuilder('user')
+        .select([
+          'COUNT(*) as "totalUsers"',
+          'SUM(CASE WHEN user.isBanned = true THEN 1 ELSE 0 END) as "bannedUsers"',
+        ])
+        .getRawMany(),
+      this.fileRepository
+        .createQueryBuilder('file')
+        .select([
+          'COUNT(*) as "totalFiles"',
+          'COALESCE(SUM(file.size), 0) as "totalStorage"',
+        ])
+        .where('file.isDeleted = false')
+        .getRawMany(),
+      this.accessLogRepository
+        .createQueryBuilder('log')
+        .select('COUNT(*) as "count"')
+        .getRawMany(),
+      this.getMonthlyAccessStats(),
+    ]);
 
     const totalUsers = Number(userStats?.totalUsers || 0);
     const bannedUsers = Number(userStats?.bannedUsers || 0);
-
-    // 最近12个月的月度访问统计
-    const monthlyAccess = await this.getMonthlyAccessStats();
 
     return {
       totalUsers,

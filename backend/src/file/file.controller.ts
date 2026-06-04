@@ -119,7 +119,7 @@ export class FileController {
   /**
    * 缩略图预览端点
    * - 需要登录认证 + 加密时间戳（?t=）
-   * - 时间戳需用公钥 RSA-OAEP 加密，误差 ±2 秒内有效
+   * - 时间戳需用公钥 RSA-OAEP 加密，误差 ±10 秒内有效
    * - 只能访问自己上传的文件（管理员除外）
    * - 不受私有/加密/次数/过期限制
    */
@@ -133,12 +133,10 @@ export class FileController {
     @Res() res: Response,
   ) {
     try {
-      // 必须提供加密时间戳
       if (!encryptedToken) {
         throw new ForbiddenException('缺少访问令牌');
       }
 
-      // 解密并验证时间戳（±2 秒误差）
       let timestamp: number;
       try {
         timestamp = this.cryptoService.decrypt(encryptedToken);
@@ -146,8 +144,7 @@ export class FileController {
         throw new ForbiddenException('无效的访问令牌');
       }
 
-      const now = Date.now();
-      if (Math.abs(now - timestamp) > 2000) {
+      if (Math.abs(Date.now() - timestamp) > 10000) {
         throw new ForbiddenException('访问令牌已过期');
       }
 

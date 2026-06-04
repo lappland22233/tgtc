@@ -205,13 +205,28 @@ export class AuthService {
     };
   }
 
-  async sendVerificationCode(sendCodeDto: SendCodeDto): Promise<void> {
+  async sendVerificationCode(sendCodeDto: SendCodeDto, ip: string): Promise<void> {
     const { email, type } = sendCodeDto;
 
     // 检查是否开启邮箱验证码
     const emailVerificationEnabled = await this.getConfigValue('EMAIL_VERIFICATION_ENABLED', 'false');
     if (emailVerificationEnabled !== 'true') {
       throw new BadRequestException('邮箱验证码功能未开启');
+    }
+
+    // B-5: IP 维度全局限流（3次/60秒）
+    const ipLimitKey = `send-code:ip:${ip}`;
+    const ipCheck = await this.rateLimitService.checkAndIncrement(
+      ipLimitKey,
+      'send_code_ip',
+      3,
+      60 * 1000,
+      60 * 1000,
+    );
+    if (!ipCheck.allowed) {
+      throw new BadRequestException(
+        `验证码发送过于频繁，请 ${ipCheck.waitMinutes} 分钟后重试`,
+      );
     }
 
     const user = await this.userRepository.findOne({ where: { email } });

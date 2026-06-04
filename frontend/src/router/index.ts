@@ -1,6 +1,7 @@
 import { createRouter, createWebHistory } from 'vue-router';
 import type { RouteRecordRaw } from 'vue-router';
 import { useAuthStore } from '../stores/auth';
+import { clearThumbToken } from '../utils/thumbnail';
 
 const routes: RouteRecordRaw[] = [
   {
@@ -76,22 +77,47 @@ const router = createRouter({
 router.beforeEach(async (to, _from, next) => {
   const authStore = useAuthStore();
 
-  // 首次加载时尝试从 cookie 恢复登录状态
+  // 步骤 1：首次加载时从 cookie 恢复登录状态（await 确保完成）
   if (!authStore.initialized) {
     await authStore.fetchUser();
   }
 
   const isAuthenticated = authStore.isAuthenticated;
+  const userRole = authStore.user?.role;
 
+  // 步骤 2：需要认证但未登录 → 跳转登录页（携带 redirect 参数）
   if (to.meta.requiresAuth && !isAuthenticated) {
-    next('/login');
-  } else if (to.meta.guest && isAuthenticated) {
-    next('/');
-  } else if (to.meta.admin && !['admin', 'super_admin'].includes(authStore.user?.role || '')) {
-    next('/');
-  } else {
-    next();
+    next({ path: '/login', query: { redirect: to.fullPath } });
+    return;
   }
+
+  // 步骤 3：已登录用户访问游客页 → 跳转首页
+  if (to.meta.guest && isAuthenticated) {
+    next('/');
+    return;
+  }
+
+  // 步骤 4：需要管理员权限（此时已确认 isAuthenticated 为 true）
+  if (to.meta.admin) {
+    if (!isAuthenticated) {
+      next('/login');
+      return;
+    }
+
+    const adminRoles = ['admin', 'super_admin'] as const;
+    if (!userRole || !adminRoles.includes(userRole as typeof adminRoles[number])) {
+      // 跳转首页并显示提示（避免直接 /login 造成循环）
+      next('/');
+      return;
+    }
+  }
+
+  next();
+});
+
+// 路由切换时清除缩略图 token 缓存
+router.afterEach(() => {
+  clearThumbToken();
 });
 
 export default router;
