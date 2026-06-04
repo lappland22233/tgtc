@@ -69,11 +69,19 @@ async function bootstrap() {
 
   const port = process.env.APP_PORT || 8080;
   const host = process.env.APP_HOST || '127.0.0.1';
-  await app.listen(port, host);
+  const httpServer = await app.listen(port, host);
+
+  // 大文件上传超时配置：600MB 文件上传 + Telegram 转发需要较长时间
+  // 默认 Node HTTP server timeout 为 120s，这里设为 10 分钟
+  httpServer.timeout = 10 * 60 * 1000;        // 请求超时 10 分钟
+  httpServer.keepAliveTimeout = 10 * 60 * 1000; // Keep-Alive 连接超时
+  httpServer.headersTimeout = 10 * 60 * 1000 + 1000; // 请求头超时（需大于 keepAliveTimeout）
+
   logger.log(`Application is running on: http://${host}:${port}`);
   logger.log(`Frontend served from: ${frontendDist}`);
   logger.log(`CORS origins: ${allowedOrigins.join(', ')}`);
   logger.log(`Global prefix: /api`);
+  logger.log(`HTTP server timeout: ${httpServer.timeout / 1000}s (for large file uploads)`);
 }
 
 bootstrap();

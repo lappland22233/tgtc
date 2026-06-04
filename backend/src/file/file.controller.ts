@@ -31,8 +31,8 @@ import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { User, UserRole } from '../common/entities/user.entity';
 import { FileAccessType } from '../common/entities/file.entity';
 
-// Multer 层硬上限（500MB，仅防止极端 DoS；精确的动态限制由 FileService.upload() 业务层负责）
-const multerFileSize = 500 * 1024 * 1024; // 500MB
+// Multer 层硬上限（600MB，仅防止极端 DoS；精确的动态限制由 FileService.upload() 业务层负责）
+const multerFileSize = 600 * 1024 * 1024; // 600MB
 
 @Controller('files')
 export class FileController {
@@ -55,7 +55,12 @@ export class FileController {
   async upload(
     @UploadedFile() file: Express.Multer.File,
     @CurrentUser() user: User,
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
   ) {
+    // 大文件上传：禁用请求和响应超时，防止上传/转发过程中连接被断开
+    req.setTimeout(0);
+    res.setTimeout(0);
     if (!file) {
       throw new BadRequestException('请选择要上传的文件');
     }
@@ -68,11 +73,77 @@ export class FileController {
   async uploadMultiple(
     @UploadedFiles() files: Express.Multer.File[],
     @CurrentUser() user: User,
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
   ) {
+    // 大文件上传：禁用请求和响应超时
+    req.setTimeout(0);
+    res.setTimeout(0);
     if (!files || files.length === 0) {
       throw new BadRequestException('请选择要上传的文件');
     }
     return this.fileService.uploadMultiple(files, user);
+  }
+
+  /**
+   * 异步上传（推荐用于大文件，防止 Cloudflare 代理超时）
+   * 文件接收后立即返回 jobId，后台处理 Telegram 上传。
+   * 前端通过 GET /api/files/upload-status/:jobId 轮询结果。
+   */
+  @Post('upload-async')
+  @UseGuards(AuthGuard('jwt'))
+  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: multerFileSize } }))
+  async uploadAsync(
+    @UploadedFile() file: Express.Multer.File,
+    @CurrentUser() user: User,
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    req.setTimeout(0);
+    res.setTimeout(0);
+    if (!file) {
+      throw new BadRequestException('请选择要上传的文件');
+    }
+    return this.fileService.uploadAsync(file, user);
+  }
+
+  /**
+   * 异步批量上传
+   */
+  @Post('upload-multiple-async')
+  @UseGuards(AuthGuard('jwt'))
+  @UseInterceptors(FilesInterceptor('files', 10, { limits: { fileSize: multerFileSize } }))
+  async uploadMultipleAsync(
+    @UploadedFiles() files: Express.Multer.File[],
+    @CurrentUser() user: User,
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    req.setTimeout(0);
+    res.setTimeout(0);
+    if (!files || files.length === 0) {
+      throw new BadRequestException('请选择要上传的文件');
+    }
+    return this.fileService.uploadMultipleAsync(files, user);
+  }
+
+  /**
+   * 查询异步上传任务状态
+   */
+  @Get('upload-status/:jobId')
+  @UseGuards(AuthGuard('jwt'))
+  async getUploadStatus(@Param('jobId') jobId: string, @CurrentUser() user: User) {
+    const job = this.fileService.getUploadJob(jobId);
+    if (!job) {
+      throw new BadRequestException('任务不存在或已过期');
+    }
+    // 仅允许任务创建者查询
+    if (job.userId !== user.id && user.role !== UserRole.ADMIN && user.role !== UserRole.SUPER_ADMIN) {
+      throw new BadRequestException('无权访问此任务');
+    }
+    // 只返回必要字段
+    const { userId: _, ...jobInfo } = job;
+    return jobInfo;
   }
 
   @Get('upload-config')

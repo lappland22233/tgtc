@@ -49,6 +49,7 @@
               {{ formatModalSize(item.file.size) }}
               <t-tag v-if="item.status === 'success'" theme="success" size="small" variant="light">成功</t-tag>
               <t-tag v-else-if="item.status === 'error'" theme="danger" size="small" variant="light">失败</t-tag>
+              <t-tag v-else-if="item.status === 'processing'" theme="warning" size="small" variant="light">处理中</t-tag>
               <t-tag v-else-if="item.progress > 0" theme="primary" size="small" variant="light">{{ item.progress }}%</t-tag>
               <t-tag v-else theme="primary" size="small" variant="light">等待</t-tag>
             </div>
@@ -115,7 +116,7 @@ const visible = computed({
   set: (val) => { if (!val) emit('close'); },
 });
 
-type QueueStatus = 'pending' | 'success' | 'error';
+type QueueStatus = 'pending' | 'processing' | 'success' | 'error';
 
 interface QueueEntry {
   file: File;
@@ -296,31 +297,59 @@ async function uploadFiles(files: File[]) {
   // 启动速度计算定时器
   startSpeedTimer();
 
-  // 逐文件上传，每批 concurrency 个文件并发执行
-  for (let i = 0; i < files.length; i += concurrency.value) {
-    const batch = files.slice(i, i + concurrency.value);
-    await Promise.allSettled(
-      batch.map(async (file) => {
-        const entry = queueMap.get(file.name);
-        try {
-          const result = await fileStore.uploadFile(file, (loaded, total) => {
-            if (entry) {
-              entry.progress = total > 0 ? Math.round((loaded / total) * 100) : 0;
-              entry.loadedBytes = loaded;
-            }
-          });
-          if (entry) entry.status = 'success';
-          successList.push({ id: result.id, originalName: result.originalName });
-        } catch (error: unknown) {
+  // 滑动窗口并发：始终保持 concurrency 个文件在上传中，
+  // 每完成一个立即启动下一个，而非等待整批全部完成
+  let nextFileIndex = 0;
+  let staggerCounter = 0;
+
+  const uploadSingle = async (file: File, stagger: number): Promise<void> => {
+    // 分级延迟启动，将请求分散到 300ms 窗口内，避免 Telegram 429 限流
+    await new Promise(resolve => setTimeout(resolve, stagger * 300));
+
+    const entry = queueMap.get(file.name);
+    try {
+      // 异步上传：文件传输完成后立即断开请求连接（避免 Cloudflare 代理超时），
+      // 后端在后台处理 Telegram 上传，前端轮询获取状态
+      const result = await fileStore.uploadFileAsync(
+        file,
+        (loaded, total) => {
+          // 文件传输进度（浏览器 → 服务器）
           if (entry) {
-            entry.status = 'error';
-            entry.errorReason = getErrorMessage(error);
+            entry.progress = total > 0 ? Math.round((loaded / total) * 100) : 0;
+            entry.loadedBytes = loaded;
           }
-          failedList.push({ name: file.name, reason: getErrorMessage(error) });
-        }
-      })
-    );
-  }
+        },
+        (status) => {
+          // 后端处理状态更新
+          if (entry && status === 'uploading') {
+            entry.status = 'processing';
+          }
+        },
+      );
+      if (entry) entry.status = 'success';
+      successList.push({ id: result.id, originalName: result.originalName });
+    } catch (error: unknown) {
+      if (entry) {
+        entry.status = 'error';
+        entry.errorReason = getErrorMessage(error);
+      }
+      failedList.push({ name: file.name, reason: getErrorMessage(error) });
+    }
+  };
+
+  const runNext = async (): Promise<void> => {
+    const idx = nextFileIndex++;
+    if (idx >= files.length) return; // 队列耗尽
+    const myStagger = staggerCounter++;
+    await uploadSingle(files[idx], myStagger);
+    // 当前文件完成 → 立即启动下一个，保持窗口满载
+    await runNext();
+  };
+
+  // 启动初始 concurrency 个协程
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency.value, files.length) }, () => runNext())
+  );
 
   // 最后一次更新速度
   updateSpeeds();

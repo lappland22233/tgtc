@@ -37,6 +37,52 @@ export const useFileStore = defineStore('files', () => {
     return response.data.data;
   }
 
+  /**
+   * 异步上传（大文件专用）：文件传输完成后立即返回 jobId，
+   * 通过轮询 upload-status 获取最终结果，防止 CDN/代理超时断开连接。
+   */
+  async function uploadFileAsync(
+    file: File,
+    onProgress?: (loaded: number, total: number) => void,
+    onStatusChange?: (status: string) => void,
+  ) {
+    const formData = new FormData();
+    formData.append('file', file);
+    // Step 1: 上传文件（Multer 缓冲阶段，有上传进度）
+    const response = await api.post('/files/upload-async', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      onUploadProgress: (progressEvent) => {
+        if (progressEvent.total && onProgress) {
+          onProgress(progressEvent.loaded, progressEvent.total);
+        }
+      },
+    });
+    const { jobId } = response.data.data;
+
+    // Step 2: 轮询上传状态（Telegram 转发阶段）
+    const pollInterval = 1000; // 1 秒轮询
+    const maxWait = 10 * 60 * 1000; // 最多等 10 分钟
+    const startTime = Date.now();
+
+    while (Date.now() - startTime < maxWait) {
+      await new Promise(resolve => setTimeout(resolve, pollInterval));
+      const statusRes = await api.get(`/files/upload-status/${jobId}`);
+      const job = statusRes.data.data;
+
+      if (onStatusChange) {
+        onStatusChange(job.status);
+      }
+
+      if (job.status === 'completed') {
+        return job.result;
+      }
+      if (job.status === 'failed') {
+        throw new Error(job.error || '上传处理失败');
+      }
+    }
+    throw new Error('上传处理超时');
+  }
+
   async function deleteFile(id: string) {
     await api.delete(`/files/${id}`);
     // 仅服务器确认删除后再从本地列表移除
@@ -75,6 +121,7 @@ export const useFileStore = defineStore('files', () => {
     loading,
     fetchFiles,
     uploadFile,
+    uploadFileAsync,
     uploadMultiple,
     deleteFile,
     updateAccessType,

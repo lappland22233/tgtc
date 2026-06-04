@@ -13,6 +13,7 @@ import { User, UserRole } from '../common/entities/user.entity';
 import { BannedIP } from '../common/entities/banned-ip.entity';
 import { ShareAudit } from '../common/entities/share-audit.entity';
 import { RateLimitService } from '../common/services/rate-limit.service';
+import { UploadJobService, UploadJob } from './upload-job.service';
 import * as bcrypt from 'bcryptjs';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -46,6 +47,7 @@ export class FileService implements OnModuleInit {
     private jwtService: JwtService,
     private configCacheService: ConfigCacheService,
     private rateLimitService: RateLimitService,
+    private uploadJobService: UploadJobService,
   ) {
     this.maxFileSize = this.parseFileSize(this.configService.get<string>('MAX_FILE_SIZE'));
   }
@@ -129,12 +131,37 @@ export class FileService implements OnModuleInit {
     }
   }
 
+  /**
+   * 修复 Multer 中文文件名乱码：浏览器发送文件名时若未使用 RFC 5987 编码，
+   * Multer/busboy 会将 UTF-8 字节误解析为 latin1，导致乱码。
+   * 检测并修复：若文件名不含中文字符但含 latin1 高位字节，尝试 latin1→utf8 恢复。
+   */
+  private fixFilenameEncoding(originalName: string): string {
+    // 已含中文字符 = 没有被误解析，直接返回
+    if (/[\u4e00-\u9fff]/u.test(originalName)) {
+      return originalName;
+    }
+    // 不含高位字节 = ASCII 文件名，无需修复
+    if (!/[\x80-\xFF]/.test(originalName)) {
+      return originalName;
+    }
+    // 尝试 latin1→utf8 恢复原始 UTF-8 编码
+    const decoded = Buffer.from(originalName, 'latin1').toString('utf8');
+    // 若恢复后包含 CJK 字符，说明原先被误解析了
+    if (/[\u4e00-\u9fff]/u.test(decoded)) {
+      return decoded;
+    }
+    return originalName;
+  }
+
   async upload(file: Express.Multer.File, user: User): Promise<File> {
     if (file.size > this.maxFileSize) {
       throw new BadRequestException(`文件大小不能超过 ${this.maxFileSize / 1024 / 1024}MB`);
     }
 
-    const isAllowed = this.isFileTypeAllowed(file.originalname);
+    const originalName = this.fixFilenameEncoding(file.originalname);
+
+    const isAllowed = this.isFileTypeAllowed(originalName);
 
     if (!isAllowed) {
       throw new BadRequestException('不允许上传此类型的文件');
@@ -142,18 +169,18 @@ export class FileService implements OnModuleInit {
 
     let telegramFile;
     if (file.mimetype.startsWith('image/')) {
-      telegramFile = await this.telegramService.uploadPhoto(file.buffer, file.originalname);
+      telegramFile = await this.telegramService.uploadPhoto(file.buffer, originalName);
     } else {
-      telegramFile = await this.telegramService.uploadFile(file.buffer, file.originalname);
+      telegramFile = await this.telegramService.uploadFile(file.buffer, originalName);
     }
 
     const newFile = this.fileRepository.create({
       filename: telegramFile.file_id,
-      originalName: file.originalname,
+      originalName: originalName,
       mimeType: file.mimetype,
       size: file.size,
       telegramFileId: telegramFile.file_id,
-      telegramFilePath: telegramFile.file_path,
+      telegramFilePath: telegramFile.file_path || '',
       uploaderId: user.id,
       accessType: FileAccessType.PUBLIC,
       maxAccessCount: -1,
@@ -596,7 +623,7 @@ export class FileService implements OnModuleInit {
     await this.assertFileReadable(file, user);
 
     // 先从 Telegram 拉取文件流（成功后才扣次数，避免拉取失败浪费次数）
-    const { stream } = await this.telegramService.getFileStream(file.telegramFileId || file.filename);
+    const { stream, info } = await this.telegramService.getFileStream(file.telegramFileId || file.filename);
 
     // 原子递增访问计数
     const result = await this.fileRepository
@@ -630,7 +657,8 @@ export class FileService implements OnModuleInit {
       filename = `${filename}.${ext}`;
     }
 
-    return { stream, contentType: mimeType, filename, size: Number(file.size) };
+    const actualSize = info.file_size > 0 ? info.file_size : Number(file.size);
+    return { stream, contentType: mimeType, filename, size: actualSize };
   }
 
   async generateShareLink(id: string, user: User): Promise<string> {
@@ -762,7 +790,7 @@ export class FileService implements OnModuleInit {
       }
     }
 
-    const { stream } = await this.telegramService.getFileStream(file.telegramFileId || file.filename);
+    const { stream, info } = await this.telegramService.getFileStream(file.telegramFileId || file.filename);
 
     try {
       await this.accessLogRepository.save({
@@ -783,7 +811,8 @@ export class FileService implements OnModuleInit {
       filename = `${filename}.${ext}`;
     }
 
-    return { stream, contentType: mimeType, filename, size: Number(file.size), isInline };
+    const actualSize = info.file_size > 0 ? info.file_size : Number(file.size);
+    return { stream, contentType: mimeType, filename, size: actualSize, isInline };
   }
 
   /**
@@ -804,7 +833,7 @@ export class FileService implements OnModuleInit {
       throw new NotFoundException('文件不存在');
     }
 
-    const { stream } = await this.telegramService.getFileStream(file.telegramFileId || file.filename);
+    const { stream, info } = await this.telegramService.getFileStream(file.telegramFileId || file.filename);
 
     try {
       await this.accessLogRepository.save({
@@ -825,7 +854,9 @@ export class FileService implements OnModuleInit {
       filename = `${filename}.${ext}`;
     }
 
-    return { stream, contentType: mimeType, filename, size: Number(file.size), isInline };
+    // 使用 Telegram API 返回的真实文件大小，避免 Content-Length 不匹配导致下载卡死
+    const actualSize = info.file_size > 0 ? info.file_size : Number(file.size);
+    return { stream, contentType: mimeType, filename, size: actualSize, isInline };
   }
 
   /**
@@ -846,5 +877,124 @@ export class FileService implements OnModuleInit {
     }
 
     return results;
+  }
+
+  /**
+   * 异步上传（用于大文件，避免 Cloudflare/CDN 代理超时）
+   * 文件接收后立即返回 jobId，Telegram 上传在后台异步执行。
+   * 前端通过 GET /api/files/upload-status/:jobId 轮询结果。
+   */
+  async uploadAsync(file: Express.Multer.File, user: User): Promise<{ jobId: string }> {
+    if (file.size > this.maxFileSize) {
+      throw new BadRequestException(`文件大小不能超过 ${this.maxFileSize / 1024 / 1024}MB`);
+    }
+
+    const originalName = this.fixFilenameEncoding(file.originalname);
+
+    if (!this.isFileTypeAllowed(originalName)) {
+      throw new BadRequestException('不允许上传此类型的文件');
+    }
+
+    const job = this.uploadJobService.createJob(user, originalName);
+    // 后台处理：不阻塞响应
+    this.processAsyncUpload(job.jobId, file, user, originalName);
+    return { jobId: job.jobId };
+  }
+
+  /**
+   * 异步批量上传
+   */
+  async uploadMultipleAsync(files: Express.Multer.File[], user: User) {
+    const job = this.uploadJobService.createJob(user, `${files.length} 个文件`, files.length);
+
+    setImmediate(async () => {
+      const success: File[] = [];
+      const failed: BatchUploadFailedItem[] = [];
+
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        try {
+          const originalName = this.fixFilenameEncoding(file.originalname);
+          if (!this.isFileTypeAllowed(originalName)) {
+            failed.push({ name: originalName, reason: '不允许上传此类型的文件' });
+            continue;
+          }
+          if (file.size > this.maxFileSize) {
+            failed.push({ name: originalName, reason: `文件大小超过 ${this.maxFileSize / 1024 / 1024}MB` });
+            continue;
+          }
+          const uploadedFile = await this.uploadToTelegram(file, user, originalName);
+          success.push(uploadedFile);
+        } catch (error: unknown) {
+          failed.push({
+            name: file.originalname,
+            reason: error instanceof Error ? error.message : '上传失败',
+          });
+        }
+        this.uploadJobService.updateJob(job.jobId, {
+          progress: Math.round(((i + 1) / files.length) * 100),
+        });
+      }
+
+      this.uploadJobService.updateJob(job.jobId, {
+        status: 'completed',
+        progress: 100,
+        result: { success, failed },
+      });
+    });
+
+    return { jobId: job.jobId, total: files.length };
+  }
+
+  getUploadJob(jobId: string): UploadJob | undefined {
+    return this.uploadJobService.getJob(jobId);
+  }
+
+  /**
+   * 后台处理单个文件上传到 Telegram
+   */
+  private async processAsyncUpload(jobId: string, file: Express.Multer.File, user: User, originalName: string) {
+    try {
+      this.uploadJobService.updateJob(jobId, { status: 'uploading' });
+
+      const savedFile = await this.uploadToTelegram(file, user, originalName);
+
+      this.uploadJobService.updateJob(jobId, {
+        status: 'completed',
+        progress: 100,
+        result: savedFile,
+      });
+    } catch (error: unknown) {
+      this.uploadJobService.updateJob(jobId, {
+        status: 'failed',
+        error: error instanceof Error ? error.message : '上传失败',
+      });
+    }
+  }
+
+  /**
+   * 上传文件到 Telegram 并保存数据库记录
+   */
+  private async uploadToTelegram(file: Express.Multer.File, user: User, originalName: string): Promise<File> {
+    let telegramFile;
+    if (file.mimetype.startsWith('image/')) {
+      telegramFile = await this.telegramService.uploadPhoto(file.buffer, originalName);
+    } else {
+      telegramFile = await this.telegramService.uploadFile(file.buffer, originalName);
+    }
+
+    const newFile = this.fileRepository.create({
+      filename: telegramFile.file_id,
+      originalName: originalName,
+      mimeType: file.mimetype,
+      size: file.size,
+      telegramFileId: telegramFile.file_id,
+      telegramFilePath: telegramFile.file_path || '',
+      uploaderId: user.id,
+      accessType: FileAccessType.PUBLIC,
+      maxAccessCount: -1,
+    });
+
+    return this.fileRepository.save(newFile);
   }
 }

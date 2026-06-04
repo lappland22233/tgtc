@@ -34,7 +34,7 @@ export class File {
   @Column()
   telegramFileId: string;
 
-  @Column()
+  @Column({ nullable: true })
   telegramFilePath: string;
 
   @Column({ type: 'enum', enum: FileAccessType, default: FileAccessType.PUBLIC })
