@@ -1,5 +1,5 @@
 <template>
-  <div class="layout-container" @dragover.prevent @drop.prevent="handleGlobalDrop">
+  <div class="layout-container">
     <aside class="sidebar">
       <div class="sidebar-logo">
         <h2>📦 文件分发系统</h2>
@@ -11,9 +11,6 @@
         <router-link to="/files" class="nav-item" :class="{ active: $route.path === '/files' }">
           <span>📁</span> 我的文件
         </router-link>
-        <a class="nav-item" :class="{ active: $route.path === '/upload' }" @click="showUploadModal = true">
-          <span>⬆️</span> 上传文件
-        </a>
         <router-link to="/settings" class="nav-item" :class="{ active: $route.path === '/settings' }">
           <span>⚙️</span> 个人设置
         </router-link>
@@ -49,31 +46,19 @@
     <main class="main-content">
       <router-view />
     </main>
-
-    <!-- 全局上传弹窗 -->
-    <UploadModal
-      :visible="showUploadModal"
-      :initial-files="globalDropFiles"
-      @close="handleUploadModalClose"
-      @uploaded="onUploaded"
-    />
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue';
+import { computed, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import { useAuthStore } from '../../stores/auth';
 import { storeToRefs } from 'pinia';
-import UploadModal from '../../components/UploadModal.vue';
 import type { UserRole } from '../../types/user';
 
 const router = useRouter();
 const authStore = useAuthStore();
 const { user } = storeToRefs(authStore);
-
-const showUploadModal = ref(false);
-const globalDropFiles = ref<File[]>([]);
 
 const isAdmin = computed(() => ['admin', 'super_admin'].includes(user.value?.role ?? ''));
 const roleText = computed(() => {
@@ -84,28 +69,6 @@ const roleText = computed(() => {
   };
   return map[user.value?.role ?? 'user'] || '普通用户';
 });
-
-function handleGlobalDrop(e: DragEvent) {
-  const files = Array.from(e.dataTransfer?.files || []);
-  if (files.length > 0) {
-    globalDropFiles.value = files;
-    showUploadModal.value = true;
-  }
-}
-
-function handleUploadModalClose() {
-  showUploadModal.value = false;
-  globalDropFiles.value = [];
-}
-
-function onUploaded() {
-  // 上传完成后，如果当前在 /files 页面，触发文件列表刷新
-  // 其他页面可能需要刷新数据
-  if (router.currentRoute.value.path === '/files') {
-    // 在 files 页面中时，FileList 自己的 uploaded 事件会处理刷新
-    // 这里只做全局级的收尾处理
-  }
-}
 
 async function handleLogout() {
   await authStore.logout();

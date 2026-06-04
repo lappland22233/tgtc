@@ -119,6 +119,7 @@ describe('AuthService - validateVerificationCode', () => {
         isUsed: false,
         expiresAt: futureDate,
         createdAt: new Date(),
+        attempts: 0,
       };
 
       // 配置 getConfigValue: 开启邮箱验证
@@ -129,7 +130,7 @@ describe('AuthService - validateVerificationCode', () => {
       verificationCodeRepo.update.mockResolvedValueOnce({ affected: 1, raw: [], generatedMaps: [] });
 
       // 直接调用 protected 方法
-      await (service as any).validateVerificationCode('test@example.com', '123456', 'register');
+      (service as any).validateVerificationCode('test@example.com', '123456', 'register');
 
       expect(verificationCodeRepo.findOne).toHaveBeenCalledWith({
         where: {
@@ -160,7 +161,7 @@ describe('AuthService - validateVerificationCode', () => {
       verificationCodeRepo.findOne.mockResolvedValueOnce(null);
 
       await expect(
-        (service as any).validateVerificationCode('test@example.com', '123456', 'register'),
+      (service as any).validateVerificationCode('test@example.com', '123456', 'register'),
       ).rejects.toThrow('验证码无效或已过期');
 
       expect(verificationCodeRepo.update).not.toHaveBeenCalled();
@@ -172,7 +173,7 @@ describe('AuthService - validateVerificationCode', () => {
       verificationCodeRepo.findOne.mockResolvedValueOnce(null);
 
       await expect(
-        (service as any).validateVerificationCode('test@example.com', '123456', 'register'),
+      (service as any).validateVerificationCode('test@example.com', '123456', 'register'),
       ).rejects.toThrow('验证码无效或已过期');
 
       expect(verificationCodeRepo.update).not.toHaveBeenCalled();
@@ -184,7 +185,7 @@ describe('AuthService - validateVerificationCode', () => {
       verificationCodeRepo.findOne.mockResolvedValueOnce(null);
 
       await expect(
-        (service as any).validateVerificationCode('test@example.com', '999999', 'register'),
+      (service as any).validateVerificationCode('test@example.com', '999999', 'register'),
       ).rejects.toThrow(BadRequestException);
 
       expect(verificationCodeRepo.update).not.toHaveBeenCalled();

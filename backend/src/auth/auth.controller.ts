@@ -1,4 +1,4 @@
-import { Controller, Post, Body, Get, UseGuards, Req, Res, Ip } from '@nestjs/common';
+import { Controller, Post, Body, Get, UseGuards, Req, Res } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 import { Request, Response } from 'express';
 import { AuthService } from './auth.service';
@@ -6,14 +6,14 @@ import { RegisterDto, LoginDto, VerifyEmailDto, SendCodeDto, ResetPasswordDto } 
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { User } from '../common/entities/user.entity';
 
-const COOKIE_OPTIONS = {
+const getCookieOptions = (req: Request) => ({
   httpOnly: true,
-  // secure 仅在 HTTPS 环境下启用，检测 X-Forwarded-Proto 或 APP_URL 协议
-  secure: process.env.NODE_ENV === 'production' && (process.env.APP_URL || '').startsWith('https'),
+  // 请求级动态判断 HTTPS，兼容反向代理（X-Forwarded-Proto）
+  secure: req.secure || req.headers['x-forwarded-proto'] === 'https',
   sameSite: 'strict' as const,
   maxAge: 7 * 24 * 3600 * 1000, // 7 days
   path: '/',
-};
+});
 
 @Controller('auth')
 export class AuthController {
@@ -25,7 +25,7 @@ export class AuthController {
     const result = await this.authService.register(registerDto, ip);
 
     if (result.accessToken) {
-      res.cookie('access_token', result.accessToken, COOKIE_OPTIONS);
+      res.cookie('access_token', result.accessToken, getCookieOptions(req));
     }
 
     return result;
@@ -35,7 +35,7 @@ export class AuthController {
   async login(@Body() loginDto: LoginDto, @Req() req: Request, @Res({ passthrough: true }) res: Response) {
     const ip = req.ip || req.socket?.remoteAddress || 'unknown';
     const result = await this.authService.login(loginDto, ip);
-    res.cookie('access_token', result.accessToken, COOKIE_OPTIONS);
+    res.cookie('access_token', result.accessToken, getCookieOptions(req));
     return result;
   }
 

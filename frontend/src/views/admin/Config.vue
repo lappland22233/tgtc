@@ -73,14 +73,28 @@
         <!-- 预设扩展名勾选 -->
         <t-form-item :label="uploadConfig.fileTypeMode === 'blacklist' ? '禁止上传的文件类型' : '允许上传的文件类型'">
           <div style="display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px;">
-            <t-checkbox
-              v-for="ext in presetExtensions"
-              :key="ext"
-              :checked="selectedExtensions.includes(ext)"
-              @change="(val: boolean) => toggleExtension(ext, val)"
+            <span
+              v-for="item in presetExtensions"
+              :key="typeof item === 'string' ? item : item.ext"
+              :style="{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '4px',
+                color: typeof item !== 'string' && item.danger && uploadConfig.fileTypeMode === 'blacklist' ? 'var(--error-color)' : undefined,
+              }"
             >
-              {{ ext }}
-            </t-checkbox>
+              <t-checkbox
+                :checked="selectedExtensions.includes(typeof item === 'string' ? item : item.ext)"
+                @change="(val: boolean) => toggleExtension(typeof item === 'string' ? item : item.ext, val)"
+              >
+                {{ typeof item === 'string' ? item : item.ext }}
+              </t-checkbox>
+              <span
+                v-if="typeof item !== 'string' && item.danger"
+                style="font-size: 10px; color: var(--error-color); cursor: help;"
+                title="黑名单模式下建议默认勾选禁止此类型"
+              >&#9888;</span>
+            </span>
           </div>
         </t-form-item>
 
@@ -190,12 +204,15 @@ const uploadConfig = ref({
   fileTypeFilter: '',
 });
 
-// 预设常用扩展名
+// 预设常用扩展名（危险类型已标注）
 const presetExtensions = [
   '.zip', '.rar', '.7z', '.tar.gz',
   '.png', '.jpeg', '.jpg', '.webp', '.gif',
   '.mp3', '.mp4', '.flac',
-  '.exe', '.sh', '.js', '.css',
+  { ext: '.exe', danger: true },
+  { ext: '.sh', danger: true },
+  { ext: '.js', danger: true },
+  { ext: '.css', danger: false },
 ];
 
 const selectedExtensions = ref<string[]>([]);
@@ -219,8 +236,12 @@ function formatDate(date: string) {
 }
 
 async function fetchAuthConfig() {
-  const res = await api.get('/admin/auth-config');
-  authConfig.value = res.data.data;
+  try {
+    const res = await api.get('/admin/auth-config');
+    authConfig.value = res.data.data;
+  } catch (err) {
+    console.error('获取认证配置失败', err);
+  }
 }
 
 async function saveAuthConfig() {
@@ -233,8 +254,12 @@ async function saveAuthConfig() {
 }
 
 async function fetchSMTPConfig() {
-  const res = await api.get('/admin/smtp');
-  smtpConfig.value = res.data.data;
+  try {
+    const res = await api.get('/admin/smtp');
+    smtpConfig.value = res.data.data;
+  } catch (err) {
+    console.error('获取SMTP配置失败', err);
+  }
 }
 
 async function saveSMTPConfig() {
@@ -273,14 +298,18 @@ function addCustomExtension() {
 }
 
 async function fetchUploadConfig() {
-  const res = await api.get('/admin/upload-config');
-  const data = res.data.data;
-  uploadConfig.value.maxFileSizeMB = Math.floor(data.maxFileSize / (1024 * 1024));
-  uploadConfig.value.fileTypeMode = data.fileTypeMode || 'blacklist';
-  uploadConfig.value.fileTypeFilter = data.fileTypeFilter || '';
-  selectedExtensions.value = data.fileTypeFilter
-    ? data.fileTypeFilter.split(',').map((s: string) => s.trim()).filter(Boolean)
-    : [];
+  try {
+    const res = await api.get('/admin/upload-config');
+    const data = res.data.data;
+    uploadConfig.value.maxFileSizeMB = Math.floor(data.maxFileSize / (1024 * 1024));
+    uploadConfig.value.fileTypeMode = data.fileTypeMode || 'blacklist';
+    uploadConfig.value.fileTypeFilter = data.fileTypeFilter || '';
+    selectedExtensions.value = data.fileTypeFilter
+      ? data.fileTypeFilter.split(',').map((s: string) => s.trim()).filter(Boolean)
+      : [];
+  } catch (err) {
+    console.error('获取上传配置失败', err);
+  }
 }
 
 async function saveUploadConfig() {
@@ -298,8 +327,12 @@ async function saveUploadConfig() {
 }
 
 async function fetchBannedIPs() {
-  const res = await api.get('/admin/banned-ips');
-  bannedIPs.value = res.data.data;
+  try {
+    const res = await api.get('/admin/banned-ips');
+    bannedIPs.value = res.data.data;
+  } catch (err) {
+    console.error('获取封禁IP列表失败', err);
+  }
 }
 
 async function banIP() {
@@ -327,9 +360,11 @@ async function unbanIP(ip: string) {
 }
 
 onMounted(() => {
-  fetchAuthConfig();
-  fetchSMTPConfig();
-  fetchUploadConfig();
-  fetchBannedIPs();
+  Promise.allSettled([
+    fetchAuthConfig(),
+    fetchSMTPConfig(),
+    fetchUploadConfig(),
+    fetchBannedIPs(),
+  ]);
 });
 </script>

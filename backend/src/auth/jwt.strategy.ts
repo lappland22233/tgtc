@@ -55,6 +55,9 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     if (user.isBanned) {
       throw new UnauthorizedException('账号已被封禁');
     }
+    if (!user.emailVerified) {
+      throw new UnauthorizedException('请先验证邮箱');
+    }
     return user;
   }
 }

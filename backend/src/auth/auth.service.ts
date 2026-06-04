@@ -37,7 +37,7 @@ export class AuthService {
     private rateLimitService: RateLimitService,
   ) {}
 
-  async register(registerDto: RegisterDto, ip: string): Promise<{ accessToken?: string; user?: Partial<User>; needVerification?: boolean; message: string }> {
+  async register(registerDto: RegisterDto, _ip: string): Promise<{ accessToken?: string; user?: Partial<User>; needVerification?: boolean; message: string }> {
     const existingUser = await this.userRepository.findOne({
       where: { email: registerDto.email },
     });
@@ -73,9 +73,10 @@ export class AuthService {
 
     try {
       // 锁定 users 表防止并发注册竞态，确保首个注册用户获得 super_admin
+      // 使用 FOR UPDATE 确保在 REPEATABLE READ 下也能读到最新数据
       await queryRunner.query('LOCK TABLE "users" IN EXCLUSIVE MODE');
       const [{ count }] = await queryRunner.query(
-        'SELECT COUNT(*) as count FROM "users"',
+        'SELECT COUNT(*) as count FROM "users" FOR UPDATE',
       );
       const role = Number(count) === 0 ? UserRole.SUPER_ADMIN : UserRole.USER;
 
@@ -83,6 +84,7 @@ export class AuthService {
         email: registerDto.email,
         password: hashedPassword,
         role,
+        // 邮箱验证关闭时直接标记为已验证，未来启用验证时存量用户可正常使用
         emailVerified: emailVerificationEnabled !== 'true',
       });
 
@@ -296,14 +298,7 @@ export class AuthService {
     const now = new Date();
     const codeHash = this.hashCode(code);
 
-    // 验证码错误尝试限流（数据库持久化）
-    const codeLimitKey = `code:${email}:${type}`;
-    const limitResult = await this.rateLimitService.checkAndIncrement(
-      codeLimitKey, 'code_error',
-      this.CODE_MAX_ERRORS, this.CODE_LOCK_DURATION, this.CODE_WINDOW,
-    );
-    // 不在此处拒绝——先验证验证码，若无效再根据限流结果判断是否因锁定而被拒绝
-
+    // 先查询验证码，再根据结果决定是否需要限流检查
     const verificationCode = await this.verificationCodeRepository.findOne({
       where: {
         email,
@@ -315,6 +310,12 @@ export class AuthService {
     });
 
     if (!verificationCode) {
+      // 验证码无效时才进行限流检查（避免攻击者耗尽正常用户配额）
+      const codeLimitKey = `code:${email}:${type}`;
+      const limitResult = await this.rateLimitService.checkAndIncrement(
+        codeLimitKey, 'code_error',
+        this.CODE_MAX_ERRORS, this.CODE_LOCK_DURATION, this.CODE_WINDOW,
+      );
       if (!limitResult.allowed) {
         throw new BadRequestException(`验证码错误次数过多，请 ${limitResult.waitMinutes} 分钟后重试`);
       }
@@ -322,6 +323,7 @@ export class AuthService {
     }
 
     // 验证成功，清除错误计数
+    const codeLimitKey = `code:${email}:${type}`;
     await this.rateLimitService.reset(codeLimitKey);
 
     await this.verificationCodeRepository.update(

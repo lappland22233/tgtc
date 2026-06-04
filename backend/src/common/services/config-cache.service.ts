@@ -26,14 +26,11 @@ export class ConfigCacheService {
   }
 
   async set(key: string, value: string, description?: string): Promise<void> {
-    const existing = await this.systemConfigRepository.findOne({ where: { key } });
-
-    if (existing) {
-      await this.systemConfigRepository.update(existing.id, { value, description });
-    } else {
-      const config = this.systemConfigRepository.create({ key, value, description });
-      await this.systemConfigRepository.save(config);
-    }
+    // 使用 upsert 原子化操作，避免并发下的竞态条件
+    await this.systemConfigRepository.upsert(
+      { key, value, description: description ?? undefined, updatedAt: new Date() },
+      ['key'],
+    );
 
     this.cache.set(key, value);
     this.eventEmitter.emit('config.changed', { key, value });

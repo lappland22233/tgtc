@@ -1,4 +1,9 @@
-import { IsEmail, IsString, MinLength, MaxLength, Matches, IsOptional, ValidateIf } from 'class-validator';
+import { IsEmail, IsString, MinLength, MaxLength, Matches, ValidateIf } from 'class-validator';
+
+export enum VerificationType {
+  REGISTER = 'register',
+  RESET_PASSWORD = 'reset_password',
+}
 
 export class RegisterDto {
   @IsEmail({}, { message: '请输入有效的邮箱地址' })

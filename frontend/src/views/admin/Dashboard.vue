@@ -100,6 +100,23 @@ const myFiles = ref({
 
 const currentTime = ref('');
 let timer: number;
+let refreshTimer: number;
+
+async function fetchData() {
+  // 独立 try-catch 确保单个请求失败不影响其他数据
+  try {
+    const statsRes = await api.get('/admin/stats');
+    stats.value = statsRes.data.data;
+  } catch {
+    // 保留默认值
+  }
+  try {
+    const myFilesRes = await api.get('/admin/my-files-stats');
+    myFiles.value = myFilesRes.data.data;
+  } catch {
+    // 保留默认值
+  }
+}
 
 function formatSize(bytes: number) {
   if (bytes === 0) return '0 B';
@@ -124,24 +141,15 @@ function updateTime() {
 }
 
 onMounted(async () => {
-  // 独立 try-catch 确保单个请求失败不影响其他数据
-  try {
-    const statsRes = await api.get('/admin/stats');
-    stats.value = statsRes.data.data;
-  } catch {
-    // 保留默认值
-  }
-  try {
-    const myFilesRes = await api.get('/admin/my-files-stats');
-    myFiles.value = myFilesRes.data.data;
-  } catch {
-    // 保留默认值
-  }
+  await fetchData();
   updateTime();
   timer = window.setInterval(updateTime, 1000);
+  // 每 30 秒自动刷新统计数据
+  refreshTimer = window.setInterval(fetchData, 30_000);
 });
 
 onUnmounted(() => {
   clearInterval(timer);
+  if (refreshTimer) clearInterval(refreshTimer);
 });
 </script>

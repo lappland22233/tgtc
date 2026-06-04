@@ -3,7 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, In } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
-import { EventEmitter2, OnEvent } from '@nestjs/event-emitter';
+import { OnEvent } from '@nestjs/event-emitter';
 import { Readable } from 'stream';
 import { File, FileAccessType } from '../common/entities/file.entity';
 import { FileAccessLog } from '../common/entities/file-access-log.entity';
@@ -96,14 +96,17 @@ export class FileService implements OnModuleInit {
   }
 
   /**
+   * @deprecated 保留供未来使用，当前文件类型检查使用内联逻辑。
+   *            如需重新启用，恢复此方法并更新 isFileTypeAllowed。
+   *
    * 从文件名提取扩展名（小写，含点号）
    * 只取最后一个点之后的部分，防止 .php.jpg 等复合扩展名绕过检查
    */
-  private extractExtension(filename: string): string {
-    const name = filename.toLowerCase();
-    const lastDot = name.lastIndexOf('.');
-    return lastDot > 0 ? '.' + name.slice(lastDot + 1) : '';
-  }
+  // private _extractExtension(filename: string): string {
+  //   const name = filename.toLowerCase();
+  //   const lastDot = name.lastIndexOf('.');
+  //   return lastDot > 0 ? '.' + name.slice(lastDot + 1) : '';
+  // }
 
   /**
    * 检查文件类型是否被允许
@@ -366,7 +369,7 @@ export class FileService implements OnModuleInit {
   /**
    * 检查文件访问约束并递增计数器，返回是否允许访问
    */
-  async checkAndIncrementAccess(id: string, ip?: string): Promise<{ allowed: boolean; reason?: string }> {
+  async checkAndIncrementAccess(id: string, _ip?: string): Promise<{ allowed: boolean; reason?: string }> {
     const file = await this.fileRepository.findOne({
       where: { id, isDeleted: false },
       select: ['maxAccessCount', 'currentAccessCount', 'expiresIn', 'expiresStartAt'],
@@ -469,7 +472,7 @@ export class FileService implements OnModuleInit {
 
     // 达到 5 次错误，触发封禁
     // banCount 也使用 RateLimitService 持久化
-    const banResult = await this.rateLimitService.checkAndIncrement(
+    await this.rateLimitService.checkAndIncrement(
       banLimitKey, 'ban_count',
       this.BAN_COUNT_LIMIT, 0, this.BAN_WINDOW,
     );

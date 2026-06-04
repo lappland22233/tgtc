@@ -30,6 +30,13 @@ export class TelegramService {
   }
 
   /**
+   * 从字符串中移除 Bot Token，防止泄露到错误日志
+   */
+  private redactToken(str: string): string {
+    return str.replace(/\/bot[^/]+\//g, '/bot[REDACTED]/');
+  }
+
+  /**
    * 包装 axios 请求，统一处理 Telegram API 错误，提供更友好的错误消息。
    * 429 限流时自动重试（最多 3 次，指数退避）。
    */
@@ -39,7 +46,7 @@ export class TelegramService {
         return await fn();
       } catch (error: unknown) {
         if (error && typeof error === 'object' && 'response' in error) {
-          const axiosError = error as { response?: { status?: number; data?: { description?: string; parameters?: { retry_after?: number } } } };
+          const axiosError = error as { response?: { status?: number; data?: { description?: string; parameters?: { retry_after?: number } } }; message?: string; config?: { url?: string } };
           const status = axiosError.response?.status;
           const description = axiosError.response?.data?.description || '';
 
@@ -65,6 +72,13 @@ export class TelegramService {
           }
           if (status === 404) {
             throw new Error('Telegram Bot 未找到，请检查 Bot Token 是否正确');
+          }
+          // 移除错误对象中可能包含 bot token 的 URL 信息，防止泄露到日志
+          if (axiosError.message) {
+            axiosError.message = this.redactToken(axiosError.message);
+          }
+          if (axiosError.config?.url) {
+            axiosError.config.url = this.redactToken(axiosError.config.url);
           }
         }
         throw error;
@@ -211,7 +225,7 @@ export class TelegramService {
     };
   }
 
-  async deleteFile(file_id: string): Promise<boolean> {
+  async deleteFile(_file_id: string): Promise<boolean> {
     return true;
   }
 }

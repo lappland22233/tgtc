@@ -29,7 +29,7 @@ export function clearRedirectState() {
 // ---- 创建 axios 实例 ----
 const client: AxiosInstance = axios.create({
   baseURL: '/api',
-  timeout: 10000,
+  timeout: 30000,
   withCredentials: true,
   headers: {
     'Content-Type': 'application/json',

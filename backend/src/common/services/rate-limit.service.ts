@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, LessThan } from 'typeorm';
+import { Repository } from 'typeorm';
 import { RateLimit } from '../entities/rate-limit.entity';
 
 export interface RateLimitResult {
@@ -76,7 +76,9 @@ export class RateLimitService {
     // 窗口内的首次尝试，但已被 CASE 重置为 1（窗口过期场景）
     if (count === 1 && row.firstAttemptAt) {
       const firstAttemptAt = new Date(row.firstAttemptAt);
-      if (now.getTime() - firstAttemptAt.getTime() < 1000) {
+      // 使用窗口时长的 1% 作为"刚刚重置"的阈值，至少 100ms，最多 1000ms
+      const justResetThreshold = Math.min(1000, Math.max(100, windowMs / 100));
+      if (now.getTime() - firstAttemptAt.getTime() < justResetThreshold) {
         // 刚刚重置，视为窗口内第一次
         return { allowed: true };
       }

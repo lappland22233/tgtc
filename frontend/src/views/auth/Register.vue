@@ -55,7 +55,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted, onUnmounted, computed } from 'vue';
+import { ref, reactive, onMounted, onUnmounted, onScopeDispose, computed } from 'vue';
 import { useRouter } from 'vue-router';
 import { MessagePlugin } from 'tdesign-vue-next';
 import { useAuthStore } from '../../stores/auth';
@@ -125,13 +125,18 @@ async function sendCode() {
     await authStore.sendCode(form.email, 'register');
     MessagePlugin.success('验证码已发送');
     countdown.value = 60;
-    countdownTimer = setInterval(() => {
+    const timer = setInterval(() => {
       countdown.value--;
-      if (countdown.value <= 0 && countdownTimer) {
-        clearInterval(countdownTimer);
+      if (countdown.value <= 0) {
+        clearInterval(timer);
         countdownTimer = null;
       }
     }, 1000);
+    countdownTimer = timer;
+    // 组件卸载时自动清理
+    onScopeDispose(() => {
+      if (timer) clearInterval(timer);
+    });
   } catch (error: unknown) {
     MessagePlugin.error(getErrorMessage(error));
   }

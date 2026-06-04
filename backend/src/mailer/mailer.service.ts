@@ -45,10 +45,13 @@ export class MailerService {
   }
 
   @OnEvent('config.changed')
-  rebuildTransporter(config: SmtpConfig) {
+  rebuildTransporter(payload: { key: string; value: unknown }) {
+    if (payload.key !== 'smtp_config') return;
+    const config = payload.value as SmtpConfig;
     this.transporter = null;
     this.createTransporter(config);
     this.logger.log('SMTP transporter 已根据配置更新重建');
+    // 注意：不要在此处记录 config 对象，其中包含 SMTP 密码
   }
 
   async sendVerificationCode(email: string, code: string): Promise<void> {

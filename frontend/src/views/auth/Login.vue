@@ -27,12 +27,14 @@
 
 <script setup lang="ts">
 import { ref } from 'vue';
-import { useRouter } from 'vue-router';
+import { useRouter, useRoute } from 'vue-router';
 import { MessagePlugin } from 'tdesign-vue-next';
 import { useAuthStore } from '../../stores/auth';
 import { getErrorMessage } from '../../utils/error';
+import { isValidRedirect } from '../../router';
 
 const router = useRouter();
+const route = useRoute();
 const authStore = useAuthStore();
 
 const form = ref({
@@ -56,7 +58,12 @@ async function handleSubmit() {
   try {
     await authStore.login(form.value.email, form.value.password);
     MessagePlugin.success('登录成功');
-    router.push('/');
+    const redirect = route.query.redirect as string | undefined;
+    if (redirect && isValidRedirect(redirect)) {
+      router.push(redirect);
+    } else {
+      router.push('/');
+    }
   } catch (error: unknown) {
     MessagePlugin.error(getErrorMessage(error));
   } finally {

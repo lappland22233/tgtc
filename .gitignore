@@ -13,15 +13,14 @@ yarn-error.log*
 lerna-debug.log*
 
 # Environment variables
-backend/.env
-frontend/.env
-backend/.env.local
-frontend/.env.local
-backend/.env.*.local
-frontend/.env.*.local
+**/.env*
+!.env.example
 
 # IDE
 .vscode/
+!.vscode/extensions.json
+!.vscode/launch.json
+!.vscode/settings.json
 .idea/
 *.swp
 *.swo
@@ -39,11 +38,14 @@ coverage/
 build/
 dist/
 *.tsbuildinfo
+*.js.map
+*.map
 
 # Temporary files
 *.tmp
 *.temp
 .cache/
+.codebuddy/
 
 # Database
 *.sqlite
@@ -56,3 +58,13 @@ uploads/
 # PM2
 backend/ecosystem.config.js
 .ecosystem.config.js
+
+# Secrets & Certificates
+*.pem
+*.key
+*.crt
+*.cert
+*.p12
+*.pfx
+*credentials*.json
+secrets/

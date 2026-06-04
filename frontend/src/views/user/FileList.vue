@@ -157,7 +157,8 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, computed, reactive } from 'vue';
+import { ref, onMounted, computed, reactive, watch } from 'vue';
+import { useRouter, useRoute } from 'vue-router';
 import { MessagePlugin } from 'tdesign-vue-next';
 import { useFileStore } from '../../stores/files';
 import { api } from '../../stores/auth';
@@ -167,8 +168,10 @@ import ThumbnailImg from '../../components/ThumbnailImg.vue';
 import type { FileItem } from '../../types/file';
 
 const fileStore = useFileStore();
-const page = ref(1);
-const search = ref('');
+const router = useRouter();
+const route = useRoute();
+const page = ref(Number(route.query.page) || 1);
+const search = ref((route.query.search as string) || '');
 const showUploadModal = ref(false);
 const isDraggedOver = ref(false);
 const markdownResult = ref('');
@@ -343,7 +346,28 @@ async function copyLink(row: FileItem) {
 }
 
 async function downloadFile(row: Pick<FileItem, 'id'>) {
-  window.open(`/api/files/${row.id}/download`, '_blank');
+  try {
+    const response = await api.get(`/files/${row.id}/download`, { responseType: 'blob' });
+    const url = window.URL.createObjectURL(new Blob([response.data]));
+    const link = document.createElement('a');
+    link.href = url;
+    // 从 Content-Disposition 头部提取文件名
+    const disposition = response.headers['content-disposition'];
+    let filename = `file-${row.id}`;
+    if (disposition) {
+      const match = disposition.match(/filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/);
+      if (match?.[1]) {
+        filename = decodeURIComponent(match[1].replace(/['"]/g, ''));
+      }
+    }
+    link.setAttribute('download', filename);
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.URL.revokeObjectURL(url);
+  } catch (error: unknown) {
+    MessagePlugin.error('下载失败：' + getErrorMessage(error));
+  }
 }
 
 async function handleDelete(id: string) {
@@ -370,6 +394,14 @@ function copyMarkdown() {
   navigator.clipboard.writeText(markdownResult.value);
   MessagePlugin.success('已复制到剪贴板');
 }
+
+// 同步分页和搜索到 URL 查询参数
+watch([page, search], ([newPage, newSearch]) => {
+  const query: Record<string, string> = {};
+  if (newPage > 1) query.page = String(newPage);
+  if (newSearch) query.search = newSearch;
+  router.replace({ query });
+});
 
 onMounted(() => {
   fileStore.fetchFiles();

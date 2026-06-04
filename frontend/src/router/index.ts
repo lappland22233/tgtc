@@ -3,6 +3,13 @@ import type { RouteRecordRaw } from 'vue-router';
 import { useAuthStore } from '../stores/auth';
 import { clearThumbToken } from '../utils/thumbnail';
 
+/**
+ * 校验 redirect 参数是否安全，防止任意 URL 跳转（Open Redirect）
+ */
+export function isValidRedirect(path: string): boolean {
+  return !!path && path.startsWith('/') && !path.startsWith('//') && !path.includes('\\');
+}
+
 const routes: RouteRecordRaw[] = [
   {
     path: '/login',

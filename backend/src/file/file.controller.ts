@@ -14,8 +14,6 @@ import {
   UploadedFiles,
   Req,
   Res,
-  HttpCode,
-  HttpStatus,
   BadRequestException,
   ForbiddenException,
 } from '@nestjs/common';
@@ -200,7 +198,7 @@ export class FileController {
     @Param('id') id: string,
     @CurrentUser() user: User,
     @Query('t') encryptedToken: string,
-    @Req() req: Request,
+    @Req() _req: Request,
     @Res() res: Response,
   ) {
     try {
@@ -215,7 +213,7 @@ export class FileController {
         throw new ForbiddenException('无效的访问令牌');
       }
 
-      if (Math.abs(Date.now() - timestamp) > 10000) {
+      if (Math.abs(Date.now() - timestamp) > 30_000) {
         throw new ForbiddenException('访问令牌已过期');
       }
 
@@ -469,7 +467,7 @@ function escapeHtml(str: string): string {
     .replace(/'/g, '&#039;');
 }
 
-function getPasswordPageHTML(actionUrl: string, fileId: string, errorMsg?: string): string {
+function getPasswordPageHTML(actionUrl: string, _fileId: string, errorMsg?: string): string {
   const escapedError = errorMsg ? `<div style="background:#F8514922;color:#F85149;padding:12px 16px;border-radius:8px;margin-bottom:20px;font-size:14px;border:1px solid rgba(248,81,73,0.3);">${escapeHtml(errorMsg)}</div>` : '';
   return `<!DOCTYPE html>
 <html lang="zh-CN">

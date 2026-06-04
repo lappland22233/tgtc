@@ -22,7 +22,7 @@ export class User {
   @Column({ unique: true })
   email: string;
 
-  @Column()
+  @Column({ length: 255, comment: 'bcrypt hashed password, never store plaintext' })
   password: string;
 
   @Column({ type: 'enum', enum: UserRole, default: UserRole.USER })
