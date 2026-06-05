@@ -53,7 +53,6 @@ dist/
 # Uploads
 backend/uploads/
 uploads/
-
 # PM2
 backend/ecosystem.config.js
 .ecosystem.config.js
