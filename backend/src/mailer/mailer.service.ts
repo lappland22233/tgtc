@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as nodemailer from 'nodemailer';
 import { OnEvent } from '@nestjs/event-emitter';
+import { decryptPassword } from '../common/utils/crypto.util';
 
 export interface SmtpConfig {
   host: string;
@@ -27,7 +28,7 @@ export class MailerService {
       port: this.configService.get<number>('SMTP_PORT') || 587,
       secure: this.configService.get<boolean>('SMTP_SECURE') || false,
       user: this.configService.get<string>('SMTP_USER') || '',
-      pass: this.configService.get<string>('SMTP_PASSWORD') || '',
+      pass: decryptPassword(this.configService.get<string>('SMTP_PASSWORD') || ''),
     });
   }
 
@@ -48,10 +49,12 @@ export class MailerService {
   rebuildTransporter(payload: { key: string; value: unknown }) {
     if (payload.key !== 'smtp_config') return;
     const config = payload.value as SmtpConfig;
+    if (config.pass) {
+      config.pass = decryptPassword(config.pass);
+    }
     this.transporter = null;
     this.createTransporter(config);
     this.logger.log('SMTP transporter 已根据配置更新重建');
-    // 注意：不要在此处记录 config 对象，其中包含 SMTP 密码
   }
 
   async sendVerificationCode(email: string, code: string): Promise<void> {

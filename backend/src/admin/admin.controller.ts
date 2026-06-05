@@ -5,7 +5,7 @@ import { Roles } from '../common/decorators/roles.decorator';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { User, UserRole } from '../common/entities/user.entity';
-import { BanIPDto, BatchDeleteFilesDto, ConfigDto, BatchConfigDto, SmtpConfigDto, UploadConfigDto, AuthConfigDto } from './admin.dto';
+import { BanIPDto, UnbanIPDto, BatchDeleteFilesDto, ConfigDto, BatchConfigDto, SmtpConfigDto, UploadConfigDto, AuthConfigDto } from './admin.dto';
 
 @Controller('admin')
 @UseGuards(AuthGuard('jwt'), RolesGuard)
@@ -69,6 +69,13 @@ export class AdminController {
   @Delete('banned-ips/:ip')
   async unbanIP(@Param('ip') ip: string) {
     await this.adminService.unbanIP(ip);
+    return { message: 'IP已解封' };
+  }
+
+  // 推荐方式：通过请求体传递 IP，避免 IPv6 冒号导致 URL 解析问题
+  @Post('banned-ips/unban')
+  async unbanIPByBody(@Body() dto: UnbanIPDto) {
+    await this.adminService.unbanIP(dto.ip);
     return { message: 'IP已解封' };
   }
 

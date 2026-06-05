@@ -80,6 +80,7 @@
 
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue';
+import { formatSize } from '@/utils/format';
 import { api } from '../../stores/auth';
 
 const stats = ref({
@@ -99,8 +100,8 @@ const myFiles = ref({
 });
 
 const currentTime = ref('');
-let timer: number;
-let refreshTimer: number;
+let timer: ReturnType<typeof setInterval>;
+let refreshTimer: ReturnType<typeof setInterval>;
 
 async function fetchData() {
   // 独立 try-catch 确保单个请求失败不影响其他数据
@@ -116,14 +117,6 @@ async function fetchData() {
   } catch {
     // 保留默认值
   }
-}
-
-function formatSize(bytes: number) {
-  if (bytes === 0) return '0 B';
-  const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 }
 
 function formatMonth(month: string) {

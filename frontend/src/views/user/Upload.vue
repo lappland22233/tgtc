@@ -108,10 +108,11 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue';
+import { ref, onMounted, onUnmounted } from 'vue';
 import { MessagePlugin } from 'tdesign-vue-next';
 import { useFileStore } from '../../stores/files';
 import { api } from '../../stores/auth';
+import { formatSize, getFileEmoji } from '@/utils/format';
 import { getErrorMessage } from '../../utils/error';
 import type { BatchUploadResult } from '../../types/file';
 
@@ -348,6 +349,14 @@ async function fetchUploadConfig() {
 
 onMounted(fetchUploadConfig);
 
+onUnmounted(() => {
+  stopSpeedTimer();
+  for (const url of previewUrls.values()) {
+    URL.revokeObjectURL(url);
+  }
+  previewUrls.clear();
+});
+
 // 本地文件预览 URL 缓存
 const previewUrls = new Map<File, string>();
 function getPreviewUrl(file: File): string {
@@ -357,24 +366,9 @@ function getPreviewUrl(file: File): string {
   return previewUrls.get(file)!;
 }
 
-function formatSize(bytes: number) {
-  if (bytes === 0) return '0 B';
-  const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-}
-
 function getFileIcon(mimeType: string) {
   if (mimeType.startsWith('image/')) return 'image';
   if (mimeType.includes('pdf')) return 'pdf';
   return 'default';
-}
-
-function getFileEmoji(mimeType: string) {
-  if (mimeType.startsWith('image/')) return '🖼️';
-  if (mimeType.includes('pdf')) return '📄';
-  if (mimeType.includes('zip') || mimeType.includes('rar')) return '📦';
-  return '📎';
 }
 </script>

@@ -163,6 +163,7 @@ import { MessagePlugin } from 'tdesign-vue-next';
 import { useFileStore } from '../../stores/files';
 import { api } from '../../stores/auth';
 import { getErrorMessage } from '../../utils/error';
+import { formatSize, formatDate, getFileEmoji } from '@/utils/format';
 import UploadModal from '../../components/UploadModal.vue';
 import ThumbnailImg from '../../components/ThumbnailImg.vue';
 import type { FileItem } from '../../types/file';
@@ -296,26 +297,6 @@ const columns = [
   { colKey: 'createdAt', title: '上传时间', width: '130' },
   { colKey: 'operations', title: '操作', width: '180' },
 ];
-
-function formatSize(bytes: number) {
-  if (bytes === 0) return '0 B';
-  const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-}
-
-function formatDate(date: string) {
-  return new Date(date).toLocaleDateString('zh-CN');
-}
-
-function getFileEmoji(mimeType: string) {
-  if (mimeType.startsWith('image/')) return '🖼️';
-  if (mimeType.includes('pdf')) return '📄';
-  if (mimeType.includes('zip') || mimeType.includes('rar')) return '📦';
-  if (mimeType.includes('text')) return '📝';
-  return '📎';
-}
 
 async function handleAccessTypeChange(id: string, accessType: string) {
   try {

@@ -27,7 +27,6 @@ export const useFileStore = defineStore('files', () => {
     const formData = new FormData();
     formData.append('file', file);
     const response = await api.post('/files/upload', formData, {
-      headers: { 'Content-Type': 'multipart/form-data' },
       onUploadProgress: (progressEvent) => {
         if (progressEvent.total && onProgress) {
           onProgress(progressEvent.loaded, progressEvent.total);
@@ -50,7 +49,6 @@ export const useFileStore = defineStore('files', () => {
     formData.append('file', file);
     // Step 1: 上传文件（Multer 缓冲阶段，有上传进度）
     const response = await api.post('/files/upload-async', formData, {
-      headers: { 'Content-Type': 'multipart/form-data' },
       onUploadProgress: (progressEvent) => {
         if (progressEvent.total && onProgress) {
           onProgress(progressEvent.loaded, progressEvent.total);
@@ -93,9 +91,7 @@ export const useFileStore = defineStore('files', () => {
   async function uploadMultiple(files: File[]): Promise<BatchUploadResult> {
     const formData = new FormData();
     files.forEach((file) => formData.append('files', file));
-    const response = await api.post('/files/upload-multiple', formData, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-    });
+    const response = await api.post('/files/upload-multiple', formData);
     return response.data.data;
   }
 

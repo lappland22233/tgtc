@@ -33,6 +33,11 @@ export class BanIPDto {
   expiresAt?: string;
 }
 
+export class UnbanIPDto {
+  @IsIP()
+  ip: string;
+}
+
 export class BatchDeleteFilesDto {
   @IsArray()
   @ArrayMinSize(1)

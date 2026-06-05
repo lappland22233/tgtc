@@ -61,6 +61,7 @@ import { ref, computed, onMounted } from 'vue';
 import { api } from '../../stores/auth';
 import { storeToRefs } from 'pinia';
 import { useAuthStore } from '../../stores/auth';
+import { formatSize, formatDate, getFileEmoji } from '@/utils/format';
 import type { UserRole } from '../../types/user';
 import type { FileItem } from '../../types/file';
 
@@ -81,30 +82,10 @@ const todayUploads = computed(() => {
   return recentFiles.value.filter(f => new Date(f.createdAt).toDateString() === today).length;
 });
 
-function formatSize(bytes: number) {
-  if (bytes === 0) return '0 B';
-  const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-}
-
-function formatDate(date: string) {
-  return new Date(date).toLocaleDateString('zh-CN');
-}
-
 function getFileIcon(mimeType: string) {
   if (mimeType.startsWith('image/')) return 'image';
   if (mimeType.includes('pdf')) return 'pdf';
   return 'default';
-}
-
-function getFileEmoji(mimeType: string) {
-  if (mimeType.startsWith('image/')) return '🖼️';
-  if (mimeType.includes('pdf')) return '📄';
-  if (mimeType.includes('zip') || mimeType.includes('rar')) return '📦';
-  if (mimeType.includes('text')) return '📝';
-  return '📎';
 }
 
 onMounted(async () => {

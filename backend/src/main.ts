@@ -20,8 +20,15 @@ async function bootstrap() {
   app.useGlobalInterceptors(new TransformInterceptor());
 
   const allowedOrigins = process.env.CORS_ORIGINS
-    ? process.env.CORS_ORIGINS.split(',')
-    : [process.env.FRONTEND_URL || 'http://localhost:8080'];
+    ? process.env.CORS_ORIGINS.split(',').map(s => s.trim())
+    : process.env.FRONTEND_URL
+      ? [process.env.FRONTEND_URL]
+      : (() => {
+          if (process.env.NODE_ENV === 'production') {
+            throw new Error('CORS_ORIGINS 或 FRONTEND_URL 环境变量未配置，生产环境禁止使用默认值');
+          }
+          return ['http://localhost:8080'];
+        })();
 
   app.enableCors({
     origin: allowedOrigins,

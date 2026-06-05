@@ -157,6 +157,15 @@ export class FileService implements OnModuleInit {
     return originalName;
   }
 
+  /**
+   * 确保文件名有扩展名，若无则从 MIME 类型提取
+   */
+  private ensureFileExtension(filename: string, mimeType: string): string {
+    if (filename.includes('.')) return filename;
+    const ext = mimeType.split('/')[1] || 'bin';
+    return `${filename}.${ext}`;
+  }
+
   async upload(file: Express.Multer.File, user: User): Promise<File> {
     if (file.size > this.maxFileSize) {
       throw new BadRequestException(`文件大小不能超过 ${this.maxFileSize / 1024 / 1024}MB`);
@@ -558,11 +567,7 @@ export class FileService implements OnModuleInit {
     }
 
     const mimeType = file.mimeType || 'application/octet-stream';
-    let filename = file.originalName;
-    if (!filename.includes('.')) {
-      const ext = mimeType.split('/')[1] || 'bin';
-      filename = `${filename}.${ext}`;
-    }
+    const filename = this.ensureFileExtension(file.originalName, mimeType);
 
     return { content, contentType: mimeType, filename, size: content.length };
   }
@@ -654,11 +659,7 @@ export class FileService implements OnModuleInit {
     }
 
     const mimeType = file.mimeType || 'application/octet-stream';
-    let filename = file.originalName;
-    if (!filename.includes('.')) {
-      const ext = mimeType.split('/')[1] || 'bin';
-      filename = `${filename}.${ext}`;
-    }
+    const filename = this.ensureFileExtension(file.originalName, mimeType);
 
     const actualSize = info.file_size > 0 ? info.file_size : Number(file.size);
     return { stream, contentType: mimeType, filename, size: actualSize };
@@ -808,11 +809,7 @@ export class FileService implements OnModuleInit {
 
     const mimeType = file.mimeType || 'application/octet-stream';
     const isInline = /^(image|video|audio)\//.test(mimeType);
-    let filename = file.originalName;
-    if (!filename.includes('.')) {
-      const ext = mimeType.split('/')[1] || 'bin';
-      filename = `${filename}.${ext}`;
-    }
+    const filename = this.ensureFileExtension(file.originalName, mimeType);
 
     const actualSize = info.file_size > 0 ? info.file_size : Number(file.size);
     return { stream, contentType: mimeType, filename, size: actualSize, isInline };
@@ -836,6 +833,11 @@ export class FileService implements OnModuleInit {
       throw new NotFoundException('文件不存在');
     }
 
+    // 校验文件是否为公开访问类型
+    if (file.accessType !== FileAccessType.PUBLIC) {
+      throw new ForbiddenException('此文件为私有文件，不提供公开访问');
+    }
+
     const { stream, info } = await this.telegramService.getFileStream(file.telegramFileId || file.filename);
 
     try {
@@ -851,11 +853,7 @@ export class FileService implements OnModuleInit {
 
     const mimeType = file.mimeType || 'application/octet-stream';
     const isInline = /^(image|video|audio)\//.test(mimeType);
-    let filename = file.originalName;
-    if (!filename.includes('.')) {
-      const ext = mimeType.split('/')[1] || 'bin';
-      filename = `${filename}.${ext}`;
-    }
+    const filename = this.ensureFileExtension(file.originalName, mimeType);
 
     // 使用 Telegram API 返回的真实文件大小，避免 Content-Length 不匹配导致下载卡死
     const actualSize = info.file_size > 0 ? info.file_size : Number(file.size);

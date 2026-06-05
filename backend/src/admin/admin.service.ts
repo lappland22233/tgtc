@@ -8,6 +8,7 @@ import { User } from '../common/entities/user.entity';
 import { FileAccessLog } from '../common/entities/file-access-log.entity';
 import { FileService } from '../file/file.service';
 import { ConfigCacheService } from '../common/services/config-cache.service';
+import { encryptPassword } from '../common/utils/crypto.util';
 
 @Injectable()
 export class AdminService {
@@ -248,7 +249,7 @@ export class AdminService {
       { key: 'SMTP_PORT', value: config.port.toString(), description: 'SMTP服务器端口' },
       { key: 'SMTP_SECURE', value: config.secure.toString(), description: '是否使用SSL' },
       { key: 'SMTP_USER', value: config.user, description: 'SMTP用户名' },
-      { key: 'SMTP_PASSWORD', value: config.password, description: 'SMTP密码' },
+      { key: 'SMTP_PASSWORD', value: encryptPassword(config.password), description: 'SMTP密码（已加密）' },
       { key: 'SMTP_FROM', value: config.from, description: '发件人邮箱' },
     ]);
   }
