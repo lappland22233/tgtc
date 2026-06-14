@@ -28,6 +28,7 @@ import { BatchMarkdownDto, UpdateAccessTypeDto, UpdateAccessCountDto, SetPasswor
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { User, UserRole } from '../common/entities/user.entity';
 import { FileAccessType } from '../common/entities/file.entity';
+import { getClientIp } from '../common/utils/client-ip';
 
 // Multer 层硬上限（600MB，仅防止极端 DoS；精确的动态限制由 FileService.upload() 业务层负责）
 const multerFileSize = 600 * 1024 * 1024; // 600MB
@@ -339,7 +340,7 @@ export class FileController {
     @Req() req: Request,
     @Res() res: Response,
   ) {
-    const ip = req.ip || req.socket?.remoteAddress || req.connection?.remoteAddress;
+    const ip = getClientIp(req);
 
     try {
       // 模式 1：短效访问链接（30 秒有效，防重放）

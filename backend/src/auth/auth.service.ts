@@ -1,7 +1,7 @@
 import { Injectable, UnauthorizedException, BadRequestException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
-import { Repository, MoreThan, DataSource } from 'typeorm';
+import { Repository, DataSource } from 'typeorm';
 import * as bcrypt from 'bcryptjs';
 import * as crypto from 'crypto';
 import { User, UserRole } from '../common/entities/user.entity';
@@ -9,6 +9,8 @@ import { VerificationCode } from '../common/entities/verification-code.entity';
 import { BannedIP } from '../common/entities/banned-ip.entity';
 import { MailerService } from '../mailer/mailer.service';
 import { ConfigCacheService } from '../common/services/config-cache.service';
+import { AuditService } from '../common/services/audit.service';
+import { AuditStatus } from '../common/entities/audit-log.entity';
 import { RegisterDto, LoginDto, VerifyEmailDto, SendCodeDto, ResetPasswordDto } from './auth.dto';
 import { RateLimitService } from '../common/services/rate-limit.service';
 
@@ -35,6 +37,7 @@ export class AuthService {
     private jwtService: JwtService,
     private mailerService: MailerService,
     private rateLimitService: RateLimitService,
+    private auditService: AuditService,
   ) {}
 
   async register(registerDto: RegisterDto, _ip: string): Promise<{ accessToken?: string; user?: Partial<User>; needVerification?: boolean; message: string }> {
@@ -90,6 +93,16 @@ export class AuthService {
 
       const savedUser = await queryRunner.manager.save(User, user);
       await queryRunner.commitTransaction();
+
+      // 审计日志：注册
+      this.auditService.log({
+        action: 'register',
+        userId: savedUser.id,
+        ip: _ip,
+        resourceType: 'user',
+        resourceId: savedUser.id,
+        metadata: { email: savedUser.email, role: role },
+      });
 
       // 邮箱验证开启时不返回 token，需用户验证邮箱后再登录
       if (emailVerificationEnabled === 'true') {
@@ -156,6 +169,14 @@ export class AuthService {
         loginLimitKey, 'login_failure',
         this.LOGIN_MAX_FAILURES, this.LOGIN_LOCK_DURATION, this.LOGIN_WINDOW,
       );
+      // 审计日志：登录失败（用户不存在）
+      this.auditService.log({
+        action: 'login_failed',
+        userId: null,
+        ip,
+        metadata: { email: loginDto.email, reason: '用户不存在' },
+        status: AuditStatus.FAILURE,
+      });
       if (!result.allowed) {
         throw new UnauthorizedException(`登录失败次数过多，请 ${result.waitMinutes} 分钟后重试`);
       }
@@ -181,6 +202,14 @@ export class AuthService {
         loginLimitKey, 'login_failure',
         this.LOGIN_MAX_FAILURES, this.LOGIN_LOCK_DURATION, this.LOGIN_WINDOW,
       );
+      // 审计日志：登录失败（密码错误）
+      this.auditService.log({
+        action: 'login_failed',
+        userId: user.id,
+        ip,
+        metadata: { reason: '密码错误', attempts: this.LOGIN_MAX_FAILURES },
+        status: AuditStatus.FAILURE,
+      });
       if (!result.allowed) {
         throw new UnauthorizedException(`登录失败次数过多，请 ${result.waitMinutes} 分钟后重试`);
       }
@@ -195,6 +224,13 @@ export class AuthService {
     await this.userRepository.save(user);
 
     const accessToken = this.generateToken(user);
+
+    // 审计日志：登录成功
+    this.auditService.log({
+      action: 'login',
+      userId: user.id,
+      ip,
+    });
 
     return {
       accessToken,
@@ -288,6 +324,18 @@ export class AuthService {
       { email: dto.email },
       { password: hashedPassword },
     );
+
+    // 审计日志：密码重置
+    const user = await this.userRepository.findOne({ where: { email: dto.email }, select: ['id'] });
+    if (user) {
+      this.auditService.log({
+        action: 'password_reset',
+        userId: user.id,
+        ip: null,
+        resourceType: 'user',
+        resourceId: user.id,
+      });
+    }
   }
 
   private hashCode(code: string): string {
@@ -298,18 +346,19 @@ export class AuthService {
     const now = new Date();
     const codeHash = this.hashCode(code);
 
-    // 先查询验证码，再根据结果决定是否需要限流检查
-    const verificationCode = await this.verificationCodeRepository.findOne({
-      where: {
-        email,
-        code: codeHash,
-        type,
-        isUsed: false,
-        expiresAt: MoreThan(now),
-      },
-    });
+    // 使用原子 UPDATE 查询 + 标记，防止并发的竞态条件
+    const result = await this.verificationCodeRepository
+      .createQueryBuilder()
+      .update(VerificationCode)
+      .set({ isUsed: true })
+      .where('email = :email', { email })
+      .andWhere('code = :code', { code: codeHash })
+      .andWhere('type = :type', { type })
+      .andWhere('isUsed = false')
+      .andWhere('expiresAt > :now', { now })
+      .execute();
 
-    if (!verificationCode) {
+    if (!result.affected || result.affected === 0) {
       // 验证码无效时才进行限流检查（避免攻击者耗尽正常用户配额）
       const codeLimitKey = `code:${email}:${type}`;
       const limitResult = await this.rateLimitService.checkAndIncrement(
@@ -325,11 +374,6 @@ export class AuthService {
     // 验证成功，清除错误计数
     const codeLimitKey = `code:${email}:${type}`;
     await this.rateLimitService.reset(codeLimitKey);
-
-    await this.verificationCodeRepository.update(
-      { id: verificationCode.id },
-      { isUsed: true },
-    );
   }
 
   private generateToken(user: User): string {

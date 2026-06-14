@@ -6,8 +6,11 @@ import { BannedIP } from '../common/entities/banned-ip.entity';
 import { File } from '../common/entities/file.entity';
 import { User } from '../common/entities/user.entity';
 import { FileAccessLog } from '../common/entities/file-access-log.entity';
+import { AccessLog } from '../common/entities/access-log.entity';
+import { AuditLog } from '../common/entities/audit-log.entity';
 import { FileService } from '../file/file.service';
 import { ConfigCacheService } from '../common/services/config-cache.service';
+import { AuditService } from '../common/services/audit.service';
 import { encryptPassword } from '../common/utils/crypto.util';
 
 @Injectable()
@@ -23,8 +26,13 @@ export class AdminService {
     private userRepository: Repository<User>,
     @InjectRepository(FileAccessLog)
     private accessLogRepository: Repository<FileAccessLog>,
+    @InjectRepository(AccessLog)
+    private accessLogRepo: Repository<AccessLog>,
+    @InjectRepository(AuditLog)
+    private auditLogRepo: Repository<AuditLog>,
     private fileService: FileService,
     private configCacheService: ConfigCacheService,
+    private auditService: AuditService,
   ) {}
 
   async getStats(): Promise<{
@@ -121,6 +129,14 @@ export class AdminService {
 
   async updateConfig(key: string, value: string, description?: string): Promise<void> {
     await this.configCacheService.set(key, value, description);
+
+    // 审计日志：配置变更
+    this.auditService.log({
+      action: 'config_change',
+      resourceType: 'config',
+      resourceId: key,
+      metadata: { value: value.substring(0, 100), description },
+    });
   }
 
   async updateConfigs(configs: { key: string; value: string; description?: string }[]): Promise<void> {
@@ -147,6 +163,14 @@ export class AdminService {
     bannedIP.expiresAt = permanent ? null : (expiresAt ?? null);
 
     await this.bannedIPRepository.save(bannedIP);
+
+    // 审计日志：IP 封禁
+    this.auditService.log({
+      action: 'ip_ban',
+      resourceType: 'ip',
+      resourceId: ip,
+      metadata: { reason, permanent },
+    });
   }
 
   async unbanIP(ip: string): Promise<void> {
@@ -157,6 +181,13 @@ export class AdminService {
     }
 
     await this.bannedIPRepository.delete(bannedIP.id);
+
+    // 审计日志：IP 解封
+    this.auditService.log({
+      action: 'ip_unban',
+      resourceType: 'ip',
+      resourceId: ip,
+    });
   }
 
   async cleanupExpiredBans(): Promise<void> {
@@ -179,10 +210,25 @@ export class AdminService {
 
     file.isDeleted = true;
     await this.fileRepository.save(file);
+
+    // 审计日志：管理员删除文件
+    this.auditService.log({
+      action: 'file_delete',
+      resourceType: 'file',
+      resourceId: id,
+      metadata: { filename: file.originalName },
+    });
   }
 
   async batchDeleteFiles(ids: string[]): Promise<void> {
     await this.fileRepository.update(ids, { isDeleted: true });
+
+    // 审计日志：批量删除文件
+    this.auditService.log({
+      action: 'batch_delete_files',
+      resourceType: 'file',
+      metadata: { count: ids.length, ids },
+    });
   }
 
   async getAuthConfig(): Promise<{
@@ -210,6 +256,14 @@ export class AdminService {
     if (config.emailVerificationEnabled !== undefined) {
       await this.updateConfig('EMAIL_VERIFICATION_ENABLED', config.emailVerificationEnabled.toString(), '是否开启邮箱验证码');
     }
+
+    // 审计日志：认证配置变更
+    this.auditService.log({
+      action: 'auth_config_change',
+      resourceType: 'config',
+      resourceId: 'auth',
+      metadata: config,
+    });
   }
 
   async getSMTPConfig(): Promise<{
@@ -252,6 +306,13 @@ export class AdminService {
       { key: 'SMTP_PASSWORD', value: encryptPassword(config.password), description: 'SMTP密码（已加密）' },
       { key: 'SMTP_FROM', value: config.from, description: '发件人邮箱' },
     ]);
+
+    // 审计日志：SMTP 配置变更
+    this.auditService.log({
+      action: 'smtp_config_change',
+      resourceType: 'config',
+      resourceId: 'smtp',
+    });
   }
 
   async getUploadConfig(): Promise<{
@@ -288,5 +349,206 @@ export class AdminService {
     if (config.fileTypeFilter !== undefined) {
       await this.updateConfig('FILE_TYPE_FILTER', config.fileTypeFilter, '文件类型过滤列表（逗号分隔）');
     }
+
+    // 审计日志：上传配置变更
+    this.auditService.log({
+      action: 'upload_config_change',
+      resourceType: 'config',
+      resourceId: 'upload',
+      metadata: config,
+    });
+  }
+
+  // ==================== 访问日志统计 ====================
+
+  private parseTimeRange(timeRange: string): Date {
+    const now = new Date();
+    switch (timeRange) {
+      case '1h': return new Date(now.getTime() - 60 * 60 * 1000);
+      case '24h': return new Date(now.getTime() - 24 * 60 * 60 * 1000);
+      case '7d': return new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+      case '30d': return new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+      default: return new Date(now.getTime() - 24 * 60 * 60 * 1000);
+    }
+  }
+
+  async getAccessLogs(query: {
+    page?: number;
+    limit?: number;
+    path?: string;
+    statusCode?: number;
+    timeRange?: string;
+    startDate?: string;
+    endDate?: string;
+  }): Promise<{ items: AccessLog[]; total: number }> {
+    const page = Math.max(1, query.page || 1);
+    const limit = Math.min(100, Math.max(1, query.limit || 20));
+
+    let since: Date;
+    if (query.startDate) {
+      since = new Date(query.startDate);
+    } else {
+      since = this.parseTimeRange(query.timeRange || '24h');
+    }
+
+    const qb = this.accessLogRepo
+      .createQueryBuilder('log')
+      .where('log.createdAt >= :since', { since });
+
+    if (query.endDate) {
+      qb.andWhere('log.createdAt <= :until', { until: new Date(query.endDate) });
+    }
+
+    if (query.path) {
+      qb.andWhere('log.path ILIKE :path', { path: `%${query.path.replace(/[%_]/g, '\\$&')}%` });
+    }
+
+    if (query.statusCode) {
+      qb.andWhere('log.statusCode = :statusCode', { statusCode: query.statusCode });
+    }
+
+    const total = await qb.getCount();
+
+    const items = await qb
+      .orderBy('log.createdAt', 'DESC')
+      .skip((page - 1) * limit)
+      .take(limit)
+      .getMany();
+
+    return { items, total };
+  }
+
+  async getAccessLogStats(timeRange?: string): Promise<{
+    totalRequests: number;
+    totalBandwidth: number;
+    uniqueVisitors: number;
+    peakQPS: number;
+    statusDistribution: { statusCode: number; count: number }[];
+    errorRate: number;
+  }> {
+    const since = this.parseTimeRange(timeRange || '24h');
+
+    // 基本统计
+    const [raw] = await this.accessLogRepo
+      .createQueryBuilder('log')
+      .select([
+        'COUNT(*) as "totalRequests"',
+        'COALESCE(SUM(log.responseSize), 0) as "totalBandwidth"',
+        'COUNT(DISTINCT log.ip) as "uniqueVisitors"',
+      ])
+      .where('log.createdAt >= :since', { since })
+      .getRawMany();
+
+    // 状态码分布
+    const statusDistribution = await this.accessLogRepo
+      .createQueryBuilder('log')
+      .select('log.statusCode', 'statusCode')
+      .addSelect('COUNT(*)', 'count')
+      .where('log.createdAt >= :since', { since })
+      .groupBy('log.statusCode')
+      .orderBy('count', 'DESC')
+      .getRawMany<{ statusCode: string; count: string }>();
+
+    // 高峰期 QPS（按 1 分钟窗口统计的最大值）
+    let peakQPS = 0;
+    try {
+      const peak = await this.accessLogRepo
+        .createQueryBuilder('log')
+        .select("DATE_TRUNC('minute', log.createdAt)", 'bucket')
+        .addSelect('COUNT(*)', 'count')
+        .where('log.createdAt >= :since', { since })
+        .groupBy('bucket')
+        .orderBy('count', 'DESC')
+        .limit(1)
+        .getRawOne<{ count: string }>();
+      if (peak) {
+        peakQPS = Math.ceil(Number(peak.count) / 60);
+      }
+    } catch {
+      // DATE_TRUNC 在部分 PostgreSQL 版本不兼容时忽略
+    }
+
+    const totalRequests = Number(raw?.totalRequests || 0);
+    const errorCount = statusDistribution
+      .filter((s) => Number(s.statusCode) >= 400)
+      .reduce((sum, s) => sum + Number(s.count), 0);
+    const errorRate = totalRequests > 0 ? parseFloat(((errorCount / totalRequests) * 100).toFixed(2)) : 0;
+
+    return {
+      totalRequests,
+      totalBandwidth: Number(raw?.totalBandwidth || 0),
+      uniqueVisitors: Number(raw?.uniqueVisitors || 0),
+      peakQPS,
+      statusDistribution: statusDistribution.map((s) => ({
+        statusCode: Number(s.statusCode),
+        count: Number(s.count),
+      })),
+      errorRate,
+    };
+  }
+
+  async getAccessLogTrend(timeRange?: string): Promise<{ time: string; requests: number; bandwidth: number }[]> {
+    const since = this.parseTimeRange(timeRange || '24h');
+
+    // 根据时间范围选择聚合粒度
+    let trunc: string;
+    switch (timeRange) {
+      case '1h': trunc = 'minute'; break;
+      case '24h': trunc = 'hour'; break;
+      case '7d': trunc = 'hour'; break;
+      default: trunc = 'day';
+    }
+
+    const raw = await this.accessLogRepo
+      .createQueryBuilder('log')
+      .select(`DATE_TRUNC('${trunc}', log.createdAt)`, 'time')
+      .addSelect('COUNT(*)', 'requests')
+      .addSelect('COALESCE(SUM(log.responseSize), 0)', 'bandwidth')
+      .where('log.createdAt >= :since', { since })
+      .groupBy('time')
+      .orderBy('time', 'ASC')
+      .getRawMany<{ time: string; requests: string; bandwidth: string }>();
+
+    return raw.map((r) => ({
+      time: r.time,
+      requests: Number(r.requests),
+      bandwidth: Number(r.bandwidth),
+    }));
+  }
+
+  // ==================== 审计日志查询 ====================
+
+  async getAuditLogs(query: {
+    page?: number;
+    limit?: number;
+    action?: string;
+    userId?: string;
+    timeRange?: string;
+  }): Promise<{ items: AuditLog[]; total: number }> {
+    const page = Math.max(1, query.page || 1);
+    const limit = Math.min(100, Math.max(1, query.limit || 20));
+    const since = this.parseTimeRange(query.timeRange || '24h');
+
+    const qb = this.auditLogRepo
+      .createQueryBuilder('log')
+      .where('log.createdAt >= :since', { since });
+
+    if (query.action) {
+      qb.andWhere('log.action = :action', { action: query.action });
+    }
+
+    if (query.userId) {
+      qb.andWhere('log.userId = :userId', { userId: query.userId });
+    }
+
+    const total = await qb.getCount();
+
+    const items = await qb
+      .orderBy('log.createdAt', 'DESC')
+      .skip((page - 1) * limit)
+      .take(limit)
+      .getMany();
+
+    return { items, total };
   }
 }

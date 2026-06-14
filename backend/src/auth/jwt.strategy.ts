@@ -4,6 +4,7 @@ import { ExtractJwt, Strategy } from 'passport-jwt';
 import { ConfigService } from '@nestjs/config';
 import { Request } from 'express';
 import { AuthService } from './auth.service';
+import { UserRole } from '../common/entities/user.entity';
 
 const cookieExtractor = (req: Request) => {
   return req?.cookies?.access_token || null;
@@ -31,7 +32,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     });
   }
 
-  async validate(payload: { sub: string; email: string; role: string }) {
+  async validate(payload: any) {
     if (!payload || typeof payload !== 'object') {
       throw new UnauthorizedException('无效的 token 载荷');
     }
@@ -48,9 +49,15 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       throw new UnauthorizedException('Token 缺少有效的角色信息');
     }
 
+    // 验证角色是否为有效的枚举值，防止伪造角色
+    const validRoles = Object.values(UserRole) as string[];
+    if (!validRoles.includes(payload.role)) {
+      throw new UnauthorizedException('Token 包含无效的角色信息');
+    }
+
     const user = await this.authService.validateUser(payload.sub);
     if (!user) {
-      throw new UnauthorizedException('用户不存在');
+      throw new UnauthorizedException('用户不存在或已被删除');
     }
     if (user.isBanned) {
       throw new UnauthorizedException('账号已被封禁');
@@ -58,6 +65,12 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     if (!user.emailVerified) {
       throw new UnauthorizedException('请先验证邮箱');
     }
+
+    // 二次验证：确保 token 中的信息与数据库一致
+    if (user.email !== payload.email || user.role !== payload.role) {
+      throw new UnauthorizedException('Token 已失效');
+    }
+
     return user;
   }
 }

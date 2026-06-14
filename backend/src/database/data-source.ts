@@ -8,6 +8,8 @@ import { BannedIP } from '../common/entities/banned-ip.entity';
 import { ShareAudit } from '../common/entities/share-audit.entity';
 import { FileAccessLog } from '../common/entities/file-access-log.entity';
 import { RateLimit } from '../common/entities/rate-limit.entity';
+import { AuditLog } from '../common/entities/audit-log.entity';
+import { AccessLog } from '../common/entities/access-log.entity';
 
 export const AppDataSource = new DataSource({
   type: 'postgres',
@@ -16,7 +18,7 @@ export const AppDataSource = new DataSource({
   username: process.env.DB_USERNAME || 'postgres',
   password: process.env.DB_PASSWORD || 'postgres',
   database: process.env.DB_DATABASE || 'file_distribution',
-  entities: [User, File, SystemConfig, VerificationCode, BannedIP, ShareAudit, FileAccessLog, RateLimit],
+  entities: [User, File, SystemConfig, VerificationCode, BannedIP, ShareAudit, FileAccessLog, RateLimit, AuditLog, AccessLog],
   migrations: ['src/migrations/*.ts'],
   synchronize: false,
   logging: process.env.NODE_ENV === 'development',

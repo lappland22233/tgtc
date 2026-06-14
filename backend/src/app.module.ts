@@ -10,6 +10,7 @@ import { AppConfigModule } from './config/config.module';
 import { TasksModule } from './tasks/tasks.module';
 import { ConfigCacheModule } from './common/services/config-cache.module';
 import { RateLimitModule } from './common/services/rate-limit.module';
+import { AuditModule } from './common/services/audit.module';
 import { User } from './common/entities/user.entity';
 import { File } from './common/entities/file.entity';
 import { SystemConfig } from './common/entities/system-config.entity';
@@ -18,6 +19,9 @@ import { BannedIP } from './common/entities/banned-ip.entity';
 import { ShareAudit } from './common/entities/share-audit.entity';
 import { FileAccessLog } from './common/entities/file-access-log.entity';
 import { RateLimit } from './common/entities/rate-limit.entity';
+import { AuditLog } from './common/entities/audit-log.entity';
+import { AccessLog } from './common/entities/access-log.entity';
+import { AccessLogModule } from './common/access-log.module';
 
 @Module({
   imports: [
@@ -33,7 +37,7 @@ import { RateLimit } from './common/entities/rate-limit.entity';
       username: process.env.DB_USERNAME || 'postgres',
       password: process.env.DB_PASSWORD || 'postgres',
       database: process.env.DB_DATABASE || 'file_distribution',
-      entities: [User, File, SystemConfig, VerificationCode, BannedIP, ShareAudit, FileAccessLog, RateLimit],
+      entities: [User, File, SystemConfig, VerificationCode, BannedIP, ShareAudit, FileAccessLog, RateLimit, AuditLog, AccessLog],
       synchronize: process.env.DB_SYNCHRONIZE === 'true',
       migrations: [__dirname + '/migrations/*{.ts,.js}'],
       migrationsRun: process.env.DB_MIGRATIONS_RUN === 'true',
@@ -47,6 +51,8 @@ import { RateLimit } from './common/entities/rate-limit.entity';
     TasksModule,
     ConfigCacheModule,
     RateLimitModule,
+    AuditModule,
+    AccessLogModule,
   ],
 })
 export class AppModule {}

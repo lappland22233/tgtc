@@ -11,12 +11,13 @@
     "lint": "vue-tsc --noEmit"
   },
   "dependencies": {
-    "vue": "^3.4.0",
-    "vue-router": "^4.2.5",
-    "pinia": "^2.1.7",
     "axios": "^1.6.2",
+    "echarts": "^6.1.0",
+    "pinia": "^2.1.7",
+    "tdesign-icons-vue-next": "^0.2.0",
     "tdesign-vue-next": "^1.6.0",
-    "tdesign-icons-vue-next": "^0.2.0"
+    "vue": "^3.4.0",
+    "vue-router": "^4.2.5"
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^4.5.2",

@@ -34,6 +34,8 @@
 - 文件管理、IP 封禁管理
 - 系统配置（SMTP、上传限制、认证开关），敏感配置仅限 SUPER_ADMIN
 - 文件类型过滤（黑名单/白名单双模式，危险类型带警告标识）
+- **访问统计**：请求量、带宽、独立访客、峰值 QPS 实时监控，趋势折线图 + 状态码分布饼图（ECharts），按时间范围筛选
+- **操作审计**：登录、配置变更、文件操作、权限修改等安全事件全量记录，支持按操作类型/用户/时间范围筛选
 
 ### 安全
 - Telegram Bot Token 错误日志自动脱敏
@@ -42,6 +44,8 @@
 - 配置缓存使用 upsert 原子操作
 - Source map 生产关闭、.gitignore 覆盖密钥文件
 - 前端全局错误边界防白屏
+- **操作审计系统**：异步记录所有关键安全事件（登录/登录失败/权限变更/文件操作/配置修改/IP 封禁），不影响主业务性能
+- **HTTP 访问日志**：全局中间件记录所有请求（IP/路径/状态码/耗时/带宽），数据持久化存储
 
 ## 技术栈
 
@@ -49,7 +53,7 @@
 |------|------|
 | 后端 | NestJS 10 + TypeScript (CommonJS, strict mode) + TypeORM 0.3 |
 | 数据库 | PostgreSQL ≥ 14 |
-| 前端 | Vue 3 + TypeScript + Vite 5 + TDesign |
+| 前端 | Vue 3 + TypeScript + Vite 5 + TDesign + ECharts 5 |
 | 存储 | Telegram Bot API（支持本地代理绕过限流） |
 | 邮件 | Nodemailer + SMTP |
 | 认证 | Passport JWT + bcryptjs |
@@ -140,19 +144,20 @@ FILE_TYPE_FILTER=              # 逗号分隔的扩展名，如 .zip,.exe,.sh，
 │   ├── config/               # 动态配置缓存
 │   ├── tasks/                # 定时清理（过期限流/Token/封禁）
 │   ├── common/
-│   │   ├── entities/         # 8 个数据实体
-│   │   ├── services/         # ConfigCacheService (upsert 原子操作) + RateLimitService
+│   │   ├── entities/         # 10 个数据实体（含 AuditLog, AccessLog）
+│   │   ├── services/         # ConfigCacheService + RateLimitService + AuditService
 │   │   ├── guards/           # JWT 认证 + 角色权限守卫
 │   │   ├── decorators/       # @CurrentUser @Roles
-│   │   └── interceptors/     # 统一响应 { code, message, data }
+│   │   ├── interceptors/     # 统一响应 { code, message, data }
+│   │   └── middleware/       # AccessLogMiddleware（全局 HTTP 请求日志）
 │   ├── database/             # TypeORM CLI DataSource（含 dotenv/config 加载）
-│   └── migrations/           # 8 个数据库迁移文件
+│   └── migrations/           # 9 个数据库迁移文件
 │
 ├── frontend/src/
 │   ├── views/
 │   │   ├── auth/             # Login.vue Register.vue（redirect 安全校验）
 │   │   ├── user/             # Dashboard FileList Settings
-│   │   ├── admin/            # Dashboard Users Files Config
+│   │   ├── admin/            # Dashboard Users Files Config AccessLogs AuditLogs
 │   │   └── layout/           # 侧边栏布局
 │   ├── components/           # UploadModal ThumbnailImg
 │   ├── stores/               # auth files (Pinia)
@@ -230,6 +235,10 @@ npm run typecheck            # TypeScript 类型检查
 | POST | `/api/admin/banned-ips` | 封禁 IP |
 | DELETE | `/api/admin/banned-ips/:ip` | 解封 IP |
 | PUT | `/api/admin/config` | 系统配置（仅 SUPER_ADMIN） |
+| GET | `/api/admin/access-logs` | HTTP 访问日志（分页/筛选） |
+| GET | `/api/admin/access-logs/stats` | 访问统计（请求量/带宽/UV/QPS） |
+| GET | `/api/admin/access-logs/trend` | 流量趋势时序数据 |
+| GET | `/api/admin/audit-logs` | 操作审计日志（分页/筛选） |
 
 ## 许可证
 

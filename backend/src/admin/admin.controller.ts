@@ -5,7 +5,7 @@ import { Roles } from '../common/decorators/roles.decorator';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { User, UserRole } from '../common/entities/user.entity';
-import { BanIPDto, UnbanIPDto, BatchDeleteFilesDto, ConfigDto, BatchConfigDto, SmtpConfigDto, UploadConfigDto, AuthConfigDto } from './admin.dto';
+import { BanIPDto, UnbanIPDto, BatchDeleteFilesDto, ConfigDto, BatchConfigDto, SmtpConfigDto, UploadConfigDto, AuthConfigDto, AccessLogQueryDto } from './admin.dto';
 
 @Controller('admin')
 @UseGuards(AuthGuard('jwt'), RolesGuard)
@@ -139,5 +139,39 @@ export class AdminController {
   async updateAuthConfig(@Body() dto: AuthConfigDto) {
     await this.adminService.updateAuthConfig(dto);
     return { message: '认证配置已更新' };
+  }
+
+  // ==================== 访问日志统计 ====================
+
+  @Get('access-logs')
+  async getAccessLogs(@Query() query: AccessLogQueryDto) {
+    return this.adminService.getAccessLogs(query);
+  }
+
+  @Get('access-logs/stats')
+  async getAccessLogStats(@Query('timeRange') timeRange?: string) {
+    return this.adminService.getAccessLogStats(timeRange);
+  }
+
+  @Get('access-logs/trend')
+  async getAccessLogTrend(@Query('timeRange') timeRange?: string) {
+    return this.adminService.getAccessLogTrend(timeRange);
+  }
+
+  @Get('audit-logs')
+  async getAuditLogs(
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+    @Query('action') action?: string,
+    @Query('userId') userId?: string,
+    @Query('timeRange') timeRange?: string,
+  ) {
+    return this.adminService.getAuditLogs({
+      page: page ? parseInt(page) : undefined,
+      limit: limit ? parseInt(limit) : undefined,
+      action,
+      userId,
+      timeRange,
+    });
   }
 }

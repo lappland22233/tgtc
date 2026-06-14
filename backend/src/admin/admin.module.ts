@@ -7,13 +7,15 @@ import { BannedIP } from '../common/entities/banned-ip.entity';
 import { File } from '../common/entities/file.entity';
 import { User } from '../common/entities/user.entity';
 import { FileAccessLog } from '../common/entities/file-access-log.entity';
+import { AccessLog } from '../common/entities/access-log.entity';
+import { AuditLog } from '../common/entities/audit-log.entity';
 import { FileModule } from '../file/file.module';
 import { TelegramService } from '../telegram/telegram.service';
 import { MailerService } from '../mailer/mailer.service';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([SystemConfig, BannedIP, File, User, FileAccessLog]),
+    TypeOrmModule.forFeature([SystemConfig, BannedIP, File, User, FileAccessLog, AccessLog, AuditLog]),
     FileModule,
   ],
   controllers: [AdminController],

@@ -30,6 +30,12 @@
           <router-link to="/admin/config" class="nav-item" :class="{ active: $route.path === '/admin/config' }">
             <span>🔧</span> 系统配置
           </router-link>
+          <router-link to="/admin/access-logs" class="nav-item" :class="{ active: $route.path === '/admin/access-logs' }">
+            <span>📋</span> 访问统计
+          </router-link>
+          <router-link to="/admin/audit-logs" class="nav-item" :class="{ active: $route.path === '/admin/audit-logs' }">
+            <span>🛡️</span> 操作审计
+          </router-link>
         </template>
       </nav>
       <div style="padding: 16px 24px; border-top: 1px solid var(--border-color);">

@@ -5,6 +5,7 @@ import * as bcrypt from 'bcryptjs';
 import { User, UserRole } from '../common/entities/user.entity';
 import { File } from '../common/entities/file.entity';
 import { FileAccessLog } from '../common/entities/file-access-log.entity';
+import { AuditService } from '../common/services/audit.service';
 
 @Injectable()
 export class UserService {
@@ -17,6 +18,7 @@ export class UserService {
     private accessLogRepository: Repository<FileAccessLog>,
     @InjectDataSource()
     private dataSource: DataSource,
+    private auditService: AuditService,
   ) {}
 
   async findAll(page = 1, limit = 20, search?: string): Promise<{ users: Partial<User>[]; total: number }> {
@@ -32,7 +34,9 @@ export class UserService {
       .orderBy('user.createdAt', 'DESC');
 
     if (search) {
-      queryBuilder.where('user.email ILIKE :search', { search: `%${search}%` });
+      // 转义 SQL 通配符防止 LIKE 注入 (% 和 _)
+      const escapedSearch = search.replace(/[%_]/g, '\\$&');
+      queryBuilder.andWhere('user.email ILIKE :search ESCAPE \'\\\'', { search: `%${escapedSearch}%` });
     }
 
     const [users, total] = await queryBuilder.getManyAndCount();
@@ -81,6 +85,15 @@ export class UserService {
 
     await this.userRepository.save(user);
 
+    // 审计日志：管理员创建用户
+    this.auditService.log({
+      action: 'user_create',
+      userId: requester.id,
+      resourceType: 'user',
+      resourceId: user.id,
+      metadata: { email: user.email, role: user.role },
+    });
+
     return {
       id: user.id,
       email: user.email,
@@ -120,6 +133,15 @@ export class UserService {
       await queryRunner.manager.delete(User, { id });
 
       await queryRunner.commitTransaction();
+
+      // 审计日志：删除用户
+      this.auditService.log({
+        action: 'user_delete',
+        userId: requester.id,
+        resourceType: 'user',
+        resourceId: id,
+        metadata: { email: user.email },
+      });
     } catch (error) {
       await queryRunner.rollbackTransaction();
       throw error;
@@ -148,6 +170,14 @@ export class UserService {
     }
 
     await this.userRepository.update(id, { role });
+
+    // 审计日志：角色变更
+    this.auditService.log({
+      action: 'role_change',
+      resourceType: 'user',
+      resourceId: id,
+      metadata: { previousRole: user.role, newRole: role },
+    });
   }
 
   async banUser(id: string, isBanned: boolean): Promise<void> {
@@ -162,6 +192,13 @@ export class UserService {
     }
 
     await this.userRepository.update(id, { isBanned });
+
+    // 审计日志：用户封禁/解封
+    this.auditService.log({
+      action: isBanned ? 'user_ban' : 'user_unban',
+      resourceType: 'user',
+      resourceId: id,
+    });
   }
 
   async changePassword(id: string, oldPassword: string, newPassword: string): Promise<void> {
@@ -183,6 +220,14 @@ export class UserService {
 
     const hashedPassword = await bcrypt.hash(newPassword, 10);
     await this.userRepository.update(id, { password: hashedPassword });
+
+    // 审计日志：密码变更
+    this.auditService.log({
+      action: 'password_reset',
+      userId: id,
+      resourceType: 'user',
+      resourceId: id,
+    });
   }
 
   async getUserStats(userId: string): Promise<{ fileCount: number; totalSize: number; totalAccessCount: number }> {

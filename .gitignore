@@ -25,7 +25,7 @@ lerna-debug.log*
 *.swp
 *.swo
 *~
-.codebuddy/
+
 # OS
 .DS_Store
 Thumbs.db
@@ -53,6 +53,7 @@ dist/
 # Uploads
 backend/uploads/
 uploads/
+
 # PM2
 backend/ecosystem.config.js
 .ecosystem.config.js

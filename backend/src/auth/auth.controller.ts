@@ -5,6 +5,7 @@ import { AuthService } from './auth.service';
 import { RegisterDto, LoginDto, VerifyEmailDto, SendCodeDto, ResetPasswordDto } from './auth.dto';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { User } from '../common/entities/user.entity';
+import { getClientIp } from '../common/utils/client-ip';
 
 const getCookieOptions = (req: Request) => ({
   httpOnly: true,
@@ -21,7 +22,7 @@ export class AuthController {
 
   @Post('register')
   async register(@Body() registerDto: RegisterDto, @Req() req: Request, @Res({ passthrough: true }) res: Response) {
-    const ip = req.ip || req.socket?.remoteAddress || 'unknown';
+    const ip = getClientIp(req);
     const result = await this.authService.register(registerDto, ip);
 
     if (result.accessToken) {
@@ -33,7 +34,7 @@ export class AuthController {
 
   @Post('login')
   async login(@Body() loginDto: LoginDto, @Req() req: Request, @Res({ passthrough: true }) res: Response) {
-    const ip = req.ip || req.socket?.remoteAddress || 'unknown';
+    const ip = getClientIp(req);
     const result = await this.authService.login(loginDto, ip);
     res.cookie('access_token', result.accessToken, getCookieOptions(req));
     return result;
@@ -47,7 +48,7 @@ export class AuthController {
 
   @Post('send-code')
   async sendCode(@Body() sendCodeDto: SendCodeDto, @Req() req: Request) {
-    const ip = req.ip || req.socket?.remoteAddress || 'unknown';
+    const ip = getClientIp(req);
     await this.authService.sendVerificationCode(sendCodeDto, ip);
     return { message: '验证码已发送' };
   }
