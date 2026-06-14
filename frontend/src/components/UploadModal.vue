@@ -99,6 +99,7 @@ import { ref, computed, watch, onUnmounted } from 'vue';
 import { MessagePlugin } from 'tdesign-vue-next';
 import { useFileStore } from '../stores/files';
 import { api } from '../stores/auth';
+import { formatSize as formatModalSize } from '../utils/format';
 import { getErrorMessage } from '../utils/error';
 import type { BatchUploadResult } from '../types/file';
 
@@ -188,14 +189,6 @@ function stopSpeedTimer() {
     clearInterval(speedTimer);
     speedTimer = null;
   }
-}
-
-function formatModalSize(bytes: number) {
-  if (bytes === 0) return '0 B';
-  const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 }
 
 // 本地文件预览 URL 缓存
@@ -380,5 +373,9 @@ watch(() => props.visible, async (isVisible) => {
 
 onUnmounted(() => {
   stopSpeedTimer();
+  for (const url of previewUrls.values()) {
+    URL.revokeObjectURL(url);
+  }
+  previewUrls.clear();
 });
 </script>

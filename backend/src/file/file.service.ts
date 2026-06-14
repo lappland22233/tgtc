@@ -13,6 +13,7 @@ import { User, UserRole } from '../common/entities/user.entity';
 import { BannedIP } from '../common/entities/banned-ip.entity';
 import { ShareAudit } from '../common/entities/share-audit.entity';
 import { RateLimitService } from '../common/services/rate-limit.service';
+import { AuditService } from '../common/services/audit.service';
 import { UploadJobService, UploadJob } from './upload-job.service';
 import * as bcrypt from 'bcryptjs';
 import { v4 as uuidv4 } from 'uuid';
@@ -26,6 +27,48 @@ export interface BatchUploadResult {
   success: File[];
   failed: BatchUploadFailedItem[];
 }
+
+/** MIME 类型与扩展名映射，用于验证上传文件的 MIME 类型与扩展名是否一致 */
+const MIME_EXTENSION_MAP: Record<string, string[]> = {
+  '.jpg': ['image/jpeg'],
+  '.jpeg': ['image/jpeg'],
+  '.png': ['image/png'],
+  '.gif': ['image/gif'],
+  '.webp': ['image/webp'],
+  '.svg': ['image/svg+xml'],
+  '.bmp': ['image/bmp'],
+  '.ico': ['image/x-icon', 'image/vnd.microsoft.icon'],
+  '.pdf': ['application/pdf'],
+  '.txt': ['text/plain'],
+  '.md': ['text/markdown', 'text/plain'],
+  '.csv': ['text/csv'],
+  '.json': ['application/json'],
+  '.xml': ['application/xml', 'text/xml'],
+  '.html': ['text/html'],
+  '.css': ['text/css'],
+  '.js': ['text/javascript', 'application/javascript'],
+  '.ts': ['text/typescript', 'application/typescript'],
+  '.zip': ['application/zip', 'application/x-zip-compressed'],
+  '.rar': ['application/vnd.rar', 'application/x-rar-compressed'],
+  '.7z': ['application/x-7z-compressed'],
+  '.tar': ['application/x-tar'],
+  '.gz': ['application/gzip', 'application/x-gzip'],
+  '.doc': ['application/msword'],
+  '.docx': ['application/vnd.openxmlformats-officedocument.wordprocessingml.document'],
+  '.xls': ['application/vnd.ms-excel'],
+  '.xlsx': ['application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'],
+  '.ppt': ['application/vnd.ms-powerpoint'],
+  '.pptx': ['application/vnd.openxmlformats-officedocument.presentationml.presentation'],
+  '.mp3': ['audio/mpeg', 'audio/mp3'],
+  '.mp4': ['video/mp4'],
+  '.avi': ['video/x-msvideo'],
+  '.mov': ['video/quicktime'],
+  '.webm': ['video/webm'],
+  '.m4a': ['audio/mp4', 'audio/x-m4a'],
+  '.ogg': ['audio/ogg', 'video/ogg'],
+  '.wav': ['audio/wav', 'audio/x-wav'],
+  '.flac': ['audio/flac'],
+};
 
 @Injectable()
 export class FileService implements OnModuleInit {
@@ -48,6 +91,7 @@ export class FileService implements OnModuleInit {
     private configCacheService: ConfigCacheService,
     private rateLimitService: RateLimitService,
     private uploadJobService: UploadJobService,
+    private auditService: AuditService,
   ) {
     this.maxFileSize = this.parseFileSize(this.configService.get<string>('MAX_FILE_SIZE'));
   }
@@ -114,8 +158,9 @@ export class FileService implements OnModuleInit {
    * - 黑名单 + 有过滤 = 拒绝匹配的
    * - 白名单 + 空过滤 = 拒绝所有
    * - 白名单 + 有过滤 = 允许匹配的
+   * 同时验证 MIME 类型与扩展名的一致性
    */
-  private isFileTypeAllowed(filename: string): boolean {
+  private isFileTypeAllowed(filename: string, mimeType?: string): boolean {
     if (this.fileTypeMode === 'blacklist' && this.fileTypeFilter.length === 0) {
       return true;
     }
@@ -127,11 +172,26 @@ export class FileService implements OnModuleInit {
     const lowerName = filename.toLowerCase();
     const matched = this.fileTypeFilter.some(f => lowerName.endsWith(f));
 
+    let allowed: boolean;
     if (this.fileTypeMode === 'blacklist') {
-      return !matched;
+      allowed = !matched;
     } else {
-      return matched;
+      allowed = matched;
     }
+
+    // 额外检查：如果提供了 MIME 类型，验证其与扩展名的一致性
+    if (allowed && mimeType) {
+      const lastDot = lowerName.lastIndexOf('.');
+      if (lastDot > 0) {
+        const ext = lowerName.substring(lastDot);
+        const expectedTypes = MIME_EXTENSION_MAP[ext];
+        if (expectedTypes && !expectedTypes.includes(mimeType)) {
+          return false;
+        }
+      }
+    }
+
+    return allowed;
   }
 
   /**
@@ -157,6 +217,15 @@ export class FileService implements OnModuleInit {
     return originalName;
   }
 
+  /**
+   * 确保文件名有扩展名，若无则从 MIME 类型提取
+   */
+  private ensureFileExtension(filename: string, mimeType: string): string {
+    if (filename.includes('.')) return filename;
+    const ext = mimeType.split('/')[1] || 'bin';
+    return `${filename}.${ext}`;
+  }
+
   async upload(file: Express.Multer.File, user: User): Promise<File> {
     if (file.size > this.maxFileSize) {
       throw new BadRequestException(`文件大小不能超过 ${this.maxFileSize / 1024 / 1024}MB`);
@@ -164,7 +233,7 @@ export class FileService implements OnModuleInit {
 
     const originalName = this.fixFilenameEncoding(file.originalname);
 
-    const isAllowed = this.isFileTypeAllowed(originalName);
+    const isAllowed = this.isFileTypeAllowed(originalName, file.mimetype);
 
     if (!isAllowed) {
       throw new BadRequestException('不允许上传此类型的文件');
@@ -189,7 +258,18 @@ export class FileService implements OnModuleInit {
       maxAccessCount: -1,
     });
 
-    return this.fileRepository.save(newFile);
+    const savedFile = await this.fileRepository.save(newFile);
+
+    // 审计日志：文件上传
+    this.auditService.log({
+      action: 'file_upload',
+      userId: user.id,
+      resourceType: 'file',
+      resourceId: savedFile.id,
+      metadata: { filename: originalName, size: file.size, mimeType: file.mimetype },
+    });
+
+    return savedFile;
   }
 
   async uploadMultiple(files: Express.Multer.File[], user: User): Promise<BatchUploadResult> {
@@ -287,6 +367,15 @@ export class FileService implements OnModuleInit {
 
     file.isDeleted = true;
     await this.fileRepository.save(file);
+
+    // 审计日志：文件删除
+    this.auditService.log({
+      action: 'file_delete',
+      userId: user.id,
+      resourceType: 'file',
+      resourceId: id,
+      metadata: { filename: file.originalName },
+    });
   }
 
   async updateAccessType(id: string, accessType: FileAccessType, user: User): Promise<void> {
@@ -303,6 +392,15 @@ export class FileService implements OnModuleInit {
     }
 
     await this.fileRepository.update(id, { accessType });
+
+    // 审计日志：文件访问类型变更
+    this.auditService.log({
+      action: 'file_access_change',
+      userId: user.id,
+      resourceType: 'file',
+      resourceId: id,
+      metadata: { accessType },
+    });
   }
 
   async updateAccessCount(id: string, maxAccessCount: number, user: User): Promise<void> {
@@ -319,6 +417,15 @@ export class FileService implements OnModuleInit {
     }
 
     await this.fileRepository.update(id, { maxAccessCount });
+
+    // 审计日志：访问次数限制变更
+    this.auditService.log({
+      action: 'file_access_change',
+      userId: user.id,
+      resourceType: 'file',
+      resourceId: id,
+      metadata: { maxAccessCount },
+    });
   }
 
   async setPassword(id: string, password: string, user: User): Promise<void> {
@@ -336,6 +443,14 @@ export class FileService implements OnModuleInit {
 
     const hashedPassword = password ? await bcrypt.hash(password, 10) : null;
     await this.fileRepository.update(id, { password: hashedPassword });
+
+    // 审计日志：文件密码设置/移除
+    this.auditService.log({
+      action: password ? 'file_password_set' : 'file_password_remove',
+      userId: user.id,
+      resourceType: 'file',
+      resourceId: id,
+    });
   }
 
   async updateExpires(id: string, expiresIn: number | null, user: User): Promise<void> {
@@ -352,6 +467,15 @@ export class FileService implements OnModuleInit {
     }
 
     await this.fileRepository.update(id, { expiresIn, expiresStartAt: expiresIn !== null ? new Date() : null });
+
+    // 审计日志：文件有效期设置
+    this.auditService.log({
+      action: 'file_expiry_set',
+      userId: user.id,
+      resourceType: 'file',
+      resourceId: id,
+      metadata: { expiresIn },
+    });
   }
 
   async verifyPassword(id: string, password: string): Promise<boolean> {
@@ -390,7 +514,7 @@ export class FileService implements OnModuleInit {
       const result = await this.fileRepository
         .createQueryBuilder()
         .update(File)
-        .set({ currentAccessCount: () => 'currentAccessCount + 1' })
+        .set({ currentAccessCount: () => '"currentAccessCount" + 1' })
         .where('id = :id', { id })
         .andWhere('"currentAccessCount" < "maxAccessCount"')
         .andWhere('"isDeleted" = false')
@@ -558,11 +682,7 @@ export class FileService implements OnModuleInit {
     }
 
     const mimeType = file.mimeType || 'application/octet-stream';
-    let filename = file.originalName;
-    if (!filename.includes('.')) {
-      const ext = mimeType.split('/')[1] || 'bin';
-      filename = `${filename}.${ext}`;
-    }
+    const filename = this.ensureFileExtension(file.originalName, mimeType);
 
     return { content, contentType: mimeType, filename, size: content.length };
   }
@@ -654,11 +774,7 @@ export class FileService implements OnModuleInit {
     }
 
     const mimeType = file.mimeType || 'application/octet-stream';
-    let filename = file.originalName;
-    if (!filename.includes('.')) {
-      const ext = mimeType.split('/')[1] || 'bin';
-      filename = `${filename}.${ext}`;
-    }
+    const filename = this.ensureFileExtension(file.originalName, mimeType);
 
     const actualSize = info.file_size > 0 ? info.file_size : Number(file.size);
     return { stream, contentType: mimeType, filename, size: actualSize };
@@ -678,7 +794,17 @@ export class FileService implements OnModuleInit {
     }
 
     const baseUrl = this.configService.get<string>('APP_URL') || 'http://localhost:3000';
-    return `${baseUrl}/files/public/${id}`;
+    const shareLink = `${baseUrl}/files/public/${id}`;
+
+    // 审计日志：生成分享链接
+    this.auditService.log({
+      action: 'file_share',
+      userId: user.id,
+      resourceType: 'file',
+      resourceId: id,
+    });
+
+    return shareLink;
   }
 
 
@@ -808,11 +934,7 @@ export class FileService implements OnModuleInit {
 
     const mimeType = file.mimeType || 'application/octet-stream';
     const isInline = /^(image|video|audio)\//.test(mimeType);
-    let filename = file.originalName;
-    if (!filename.includes('.')) {
-      const ext = mimeType.split('/')[1] || 'bin';
-      filename = `${filename}.${ext}`;
-    }
+    const filename = this.ensureFileExtension(file.originalName, mimeType);
 
     const actualSize = info.file_size > 0 ? info.file_size : Number(file.size);
     return { stream, contentType: mimeType, filename, size: actualSize, isInline };
@@ -836,6 +958,11 @@ export class FileService implements OnModuleInit {
       throw new NotFoundException('文件不存在');
     }
 
+    // 校验文件是否为公开访问类型
+    if (file.accessType !== FileAccessType.PUBLIC) {
+      throw new ForbiddenException('此文件为私有文件，不提供公开访问');
+    }
+
     const { stream, info } = await this.telegramService.getFileStream(file.telegramFileId || file.filename);
 
     try {
@@ -851,11 +978,7 @@ export class FileService implements OnModuleInit {
 
     const mimeType = file.mimeType || 'application/octet-stream';
     const isInline = /^(image|video|audio)\//.test(mimeType);
-    let filename = file.originalName;
-    if (!filename.includes('.')) {
-      const ext = mimeType.split('/')[1] || 'bin';
-      filename = `${filename}.${ext}`;
-    }
+    const filename = this.ensureFileExtension(file.originalName, mimeType);
 
     // 使用 Telegram API 返回的真实文件大小，避免 Content-Length 不匹配导致下载卡死
     const actualSize = info.file_size > 0 ? info.file_size : Number(file.size);
@@ -894,7 +1017,7 @@ export class FileService implements OnModuleInit {
 
     const originalName = this.fixFilenameEncoding(file.originalname);
 
-    if (!this.isFileTypeAllowed(originalName)) {
+    if (!this.isFileTypeAllowed(originalName, file.mimetype)) {
       throw new BadRequestException('不允许上传此类型的文件');
     }
 
@@ -918,7 +1041,7 @@ export class FileService implements OnModuleInit {
         const file = files[i];
         try {
           const originalName = this.fixFilenameEncoding(file.originalname);
-          if (!this.isFileTypeAllowed(originalName)) {
+          if (!this.isFileTypeAllowed(originalName, file.mimetype)) {
             failed.push({ name: originalName, reason: '不允许上传此类型的文件' });
             continue;
           }

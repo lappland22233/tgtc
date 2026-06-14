@@ -2,8 +2,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { BadRequestException } from '@nestjs/common';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { JwtService } from '@nestjs/jwt';
-import { Repository, DataSource } from 'typeorm';
-import * as crypto from 'crypto';
+import { DataSource } from 'typeorm';
 import { AuthService } from './auth.service';
 import { User } from '../common/entities/user.entity';
 import { VerificationCode } from '../common/entities/verification-code.entity';
@@ -15,7 +14,7 @@ import { RateLimitService } from '../common/services/rate-limit.service';
 
 describe('AuthService - validateVerificationCode', () => {
   let service: AuthService;
-  let verificationCodeRepo: jest.Mocked<Repository<VerificationCode>>;
+  let verificationCodeRepo: jest.Mocked<{ createQueryBuilder: jest.Mock; update: jest.Mock; save: jest.Mock }>; 
 
   const mockUserRepo = {
     findOne: jest.fn(),
@@ -77,10 +76,9 @@ describe('AuthService - validateVerificationCode', () => {
         {
           provide: getRepositoryToken(VerificationCode),
           useValue: {
-            findOne: jest.fn(),
-            create: jest.fn(),
-            save: jest.fn(),
             update: jest.fn(),
+            save: jest.fn(),
+            createQueryBuilder: jest.fn(),
           },
         },
         {
@@ -109,86 +107,58 @@ describe('AuthService - validateVerificationCode', () => {
 
   describe('有效验证码', () => {
     it('应验证通过并标记为已使用', async () => {
-      const futureDate = new Date(Date.now() + 5 * 60 * 1000);
-      const codeHash = crypto.createHash('sha256').update('123456').digest('hex');
-      const mockCode = {
-        id: 'uuid-1',
-        email: 'test@example.com',
-        code: codeHash,
-        type: 'register' as const,
-        isUsed: false,
-        expiresAt: futureDate,
-        createdAt: new Date(),
-        attempts: 0,
+      // Mock createQueryBuilder chain for atomic UPDATE
+      const mockUpdateQuery = {
+        set: jest.fn().mockReturnThis(),
+        where: jest.fn().mockReturnThis(),
+        andWhere: jest.fn().mockReturnThis(),
+        execute: jest.fn().mockResolvedValue({ affected: 1 }),
       };
-
-      // 配置 getConfigValue: 开启邮箱验证
-      mockConfigCacheService.get.mockResolvedValueOnce('true').mockResolvedValueOnce('true');
-      mockUserRepo.findOne.mockResolvedValueOnce(null); // 邮箱未注册
-      mockUserRepo.count.mockResolvedValueOnce(1);
-      verificationCodeRepo.findOne.mockResolvedValueOnce(mockCode);
-      verificationCodeRepo.update.mockResolvedValueOnce({ affected: 1, raw: [], generatedMaps: [] });
-
-      // 直接调用 protected 方法
-      (service as any).validateVerificationCode('test@example.com', '123456', 'register');
-
-      expect(verificationCodeRepo.findOne).toHaveBeenCalledWith({
-        where: {
-          email: 'test@example.com',
-          code: codeHash,
-          type: 'register',
-          isUsed: false,
-          expiresAt: expect.anything(),
-        },
+      verificationCodeRepo.createQueryBuilder.mockReturnValue({
+        update: jest.fn().mockReturnValue(mockUpdateQuery),
       });
 
-      // 验证 MoreThan 查询条件：expiresAt 应大于当前时间
-      const callArgs = verificationCodeRepo.findOne.mock.calls[0][0] as { where: { expiresAt: { constructor: { name: string }; type: string }; email: string; code: string; type: string; isUsed: boolean } };
-      const expiresAtArg = callArgs.where.expiresAt;
-      // MoreThan 返回的 instanceof Raw → 验证其构造
-      expect(expiresAtArg.constructor.name).toBe('FindOperator');
-      expect(expiresAtArg.type).toBe('moreThan');
+      await expect(
+        (service as any).validateVerificationCode('test@example.com', '123456', 'register'),
+      ).resolves.toBeUndefined();
 
-      expect(verificationCodeRepo.update).toHaveBeenCalledWith(
-        { id: 'uuid-1' },
-        { isUsed: true },
-      );
+      // 验证 where 条件包含 email
+      const whereCalls = mockUpdateQuery.where.mock.calls;
+      expect(whereCalls.some((call: any[]) => call[0] === 'email = :email')).toBe(true);
     });
   });
 
-  describe('过期验证码', () => {
-    it('应抛出 BadRequestException', async () => {
-      verificationCodeRepo.findOne.mockResolvedValueOnce(null);
+  describe('无效/过期/已使用验证码', () => {
+    it('应抛出 BadRequestException（验证码无效或已过期）', async () => {
+      const mockUpdateQuery = {
+        set: jest.fn().mockReturnThis(),
+        where: jest.fn().mockReturnThis(),
+        andWhere: jest.fn().mockReturnThis(),
+        execute: jest.fn().mockResolvedValue({ affected: 0 }),
+      };
+      verificationCodeRepo.createQueryBuilder.mockReturnValue({
+        update: jest.fn().mockReturnValue(mockUpdateQuery),
+      });
 
       await expect(
-      (service as any).validateVerificationCode('test@example.com', '123456', 'register'),
+        (service as any).validateVerificationCode('test@example.com', '123456', 'register'),
       ).rejects.toThrow('验证码无效或已过期');
-
-      expect(verificationCodeRepo.update).not.toHaveBeenCalled();
     });
-  });
 
-  describe('已使用验证码', () => {
-    it('应抛出 BadRequestException（isUsed: false 不匹配已使用记录）', async () => {
-      verificationCodeRepo.findOne.mockResolvedValueOnce(null);
+    it('应抛出 BadRequestException（错误验证码）', async () => {
+      const mockUpdateQuery = {
+        set: jest.fn().mockReturnThis(),
+        where: jest.fn().mockReturnThis(),
+        andWhere: jest.fn().mockReturnThis(),
+        execute: jest.fn().mockResolvedValue({ affected: 0 }),
+      };
+      verificationCodeRepo.createQueryBuilder.mockReturnValue({
+        update: jest.fn().mockReturnValue(mockUpdateQuery),
+      });
 
       await expect(
-      (service as any).validateVerificationCode('test@example.com', '123456', 'register'),
-      ).rejects.toThrow('验证码无效或已过期');
-
-      expect(verificationCodeRepo.update).not.toHaveBeenCalled();
-    });
-  });
-
-  describe('验证码错误（code 不匹配）', () => {
-    it('应抛出 BadRequestException', async () => {
-      verificationCodeRepo.findOne.mockResolvedValueOnce(null);
-
-      await expect(
-      (service as any).validateVerificationCode('test@example.com', '999999', 'register'),
+        (service as any).validateVerificationCode('test@example.com', '999999', 'register'),
       ).rejects.toThrow(BadRequestException);
-
-      expect(verificationCodeRepo.update).not.toHaveBeenCalled();
     });
   });
 });

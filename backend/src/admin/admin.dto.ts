@@ -33,6 +33,11 @@ export class BanIPDto {
   expiresAt?: string;
 }
 
+export class UnbanIPDto {
+  @IsIP()
+  ip: string;
+}
+
 export class BatchDeleteFilesDto {
   @IsArray()
   @ArrayMinSize(1)
@@ -112,4 +117,41 @@ export class AuthConfigDto {
   @IsOptional()
   @IsBoolean()
   emailVerificationEnabled?: boolean;
+}
+
+export class AccessLogQueryDto {
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  page?: number = 1;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(100)
+  limit?: number = 20;
+
+  @IsOptional()
+  @IsString()
+  path?: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  statusCode?: number;
+
+  @IsOptional()
+  @IsString()
+  @IsIn(['1h', '24h', '7d', '30d'])
+  timeRange?: string;
+
+  @IsOptional()
+  @IsDateString()
+  startDate?: string;
+
+  @IsOptional()
+  @IsDateString()
+  endDate?: string;
 }

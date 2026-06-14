@@ -12,15 +12,24 @@ export const useAuthStore = defineStore('auth', () => {
 
   const isAuthenticated = computed(() => !!user.value);
 
-  // 跨标签页登出同步
+  // 跨标签页登出同步 — 保存引用以便清理
+  let authChannel: BroadcastChannel | null = null;
   if (typeof BroadcastChannel !== 'undefined') {
-    const authChannel = new BroadcastChannel('auth-sync');
+    authChannel = new BroadcastChannel('auth-sync');
     authChannel.onmessage = (event) => {
       if (event.data === 'logout') {
         user.value = null;
         initialized.value = true;
       }
     };
+  }
+
+  /**
+   * 关闭 BroadcastChannel，应在应用销毁时调用（如路由/App 组件中）
+   */
+  function closeAuthChannel() {
+    authChannel?.close();
+    authChannel = null;
   }
 
   async function login(email: string, password: string) {
@@ -64,8 +73,8 @@ export const useAuthStore = defineStore('auth', () => {
     }
     user.value = null;
     // 广播登出事件到其他标签页
-    if (typeof BroadcastChannel !== 'undefined') {
-      new BroadcastChannel('auth-sync').postMessage('logout');
+    if (authChannel) {
+      authChannel.postMessage('logout');
     }
   }
 
@@ -78,6 +87,7 @@ export const useAuthStore = defineStore('auth', () => {
     sendCode,
     fetchUser,
     logout,
+    closeAuthChannel,
   };
 });
 

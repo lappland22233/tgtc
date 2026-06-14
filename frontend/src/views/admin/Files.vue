@@ -67,6 +67,7 @@
 import { ref, onMounted } from 'vue';
 import { MessagePlugin } from 'tdesign-vue-next';
 import { api } from '../../stores/auth';
+import { formatSize, formatDate, getFileEmoji } from '@/utils/format';
 import { getErrorMessage } from '../../utils/error';
 import ThumbnailImg from '../../components/ThumbnailImg.vue';
 
@@ -86,25 +87,6 @@ const columns = [
   { colKey: 'createdAt', title: '上传时间', width: '150' },
   { colKey: 'operations', title: '操作', width: '100' },
 ];
-
-function formatSize(bytes: number) {
-  if (bytes === 0) return '0 B';
-  const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-}
-
-function formatDate(date: string) {
-  return new Date(date).toLocaleDateString('zh-CN');
-}
-
-function getFileEmoji(mimeType: string) {
-  if (mimeType.startsWith('image/')) return '🖼️';
-  if (mimeType.includes('pdf')) return '📄';
-  if (mimeType.includes('zip') || mimeType.includes('rar')) return '📦';
-  return '📎';
-}
 
 async function fetchFiles() {
   const res = await api.get('/admin/files', { params: { page: page.value } });

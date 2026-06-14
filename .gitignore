@@ -45,7 +45,6 @@ dist/
 *.tmp
 *.temp
 .cache/
-.codebuddy/
 
 # Database
 *.sqlite

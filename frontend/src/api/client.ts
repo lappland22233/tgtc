@@ -13,12 +13,26 @@ function resetRedirectState() {
 }
 
 function startRedirect() {
-  resetRedirectState();
+  // 防止多次触发
+  if (isRedirecting) {
+    return;
+  }
   isRedirecting = true;
   redirectTimer = setTimeout(() => {
-    window.location.href = '/login';
-    // 页面即将跳转，状态将在恢复时重置
+    const isAuthPage =
+      window.location.pathname === '/login' ||
+      window.location.pathname === '/register' ||
+      window.location.pathname === '/reset-password';
+    if (!isAuthPage) {
+      window.location.href = '/login';
+    }
+    resetRedirectState();
   }, 300);
+}
+
+// 查询是否正在重定向
+export function isRedirectInProgress(): boolean {
+  return isRedirecting;
 }
 
 // 恢复 redirect 状态（登录成功后调用）

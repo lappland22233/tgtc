@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { v4 as uuidv4 } from 'uuid';
 import { User } from '../common/entities/user.entity';
 
@@ -15,9 +15,14 @@ export interface UploadJob {
 }
 
 @Injectable()
-export class UploadJobService {
+export class UploadJobService implements OnModuleInit {
   private readonly logger = new Logger(UploadJobService.name);
   private jobs = new Map<string, UploadJob>();
+
+  onModuleInit() {
+    // 每 5 分钟清理一次已完成/失败的过期任务
+    setInterval(() => this.cleanup(), 5 * 60 * 1000);
+  }
 
   createJob(user: User, filename: string, fileCount: number = 1): UploadJob {
     const job: UploadJob = {
