@@ -16,6 +16,8 @@ import {
   Res,
   BadRequestException,
   ForbiddenException,
+  HttpException,
+  HttpStatus,
 } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 import { FileInterceptor, FilesInterceptor } from '@nestjs/platform-express';
@@ -29,6 +31,7 @@ import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { User, UserRole } from '../common/entities/user.entity';
 import { FileAccessType } from '../common/entities/file.entity';
 import { getClientIp } from '../common/utils/client-ip';
+import { RateLimitService } from '../common/services/rate-limit.service';
 
 // Multer 层硬上限（600MB，仅防止极端 DoS；精确的动态限制由 FileService.upload() 业务层负责）
 const multerFileSize = 600 * 1024 * 1024; // 600MB
@@ -39,6 +42,7 @@ export class FileController {
     private fileService: FileService,
     private configService: ConfigService,
     private cryptoService: ThumbnailCryptoService,
+    private rateLimitService: RateLimitService,
   ) {}
 
   /**
@@ -244,9 +248,27 @@ export class FileController {
   async download(
     @Param('id') id: string,
     @CurrentUser() user: User,
+    @Req() req: Request,
     @Res() res: Response,
   ) {
     try {
+      // 下载限流：同一IP每分钟最多10次
+      const clientIp = getClientIp(req);
+      const rateLimitResult = await this.rateLimitService.checkAndIncrement(
+        `download:${clientIp}`,
+        'download',
+        10,                // maxAttempts: 10次/分钟
+        1 * 60 * 1000,     // lockDurationMs: 1分钟
+        60 * 1000,         // windowMs: 60秒
+      );
+
+      if (!rateLimitResult.allowed) {
+        throw new HttpException(
+          `下载过于频繁，请在 ${rateLimitResult.waitMinutes || 1} 分钟后重试`,
+          HttpStatus.TOO_MANY_REQUESTS,
+        );
+      }
+
       const result = await this.fileService.getFileContentStream(id, user);
 
       res.set({

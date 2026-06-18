@@ -76,13 +76,13 @@ const routes: RouteRecordRaw[] = [
         path: 'admin/access-logs',
         name: 'AdminAccessLogs',
         component: () => import('../views/admin/AccessLogs.vue'),
-        meta: { admin: true },
+        meta: { superAdmin: true },
       },
       {
         path: 'admin/audit-logs',
         name: 'AdminAuditLogs',
         component: () => import('../views/admin/AuditLogs.vue'),
-        meta: { admin: true },
+        meta: { superAdmin: true },
       },
     ],
   },
@@ -126,6 +126,19 @@ router.beforeEach(async (to, _from, next) => {
     const adminRoles = ['admin', 'super_admin'] as const;
     if (!userRole || !adminRoles.includes(userRole as typeof adminRoles[number])) {
       // 跳转首页并显示提示（避免直接 /login 造成循环）
+      next('/');
+      return;
+    }
+  }
+
+  // 步骤 5：需要超级管理员权限（访问统计/审计页）
+  if (to.meta.superAdmin) {
+    if (!isAuthenticated) {
+      next('/login');
+      return;
+    }
+
+    if (userRole !== 'super_admin') {
       next('/');
       return;
     }

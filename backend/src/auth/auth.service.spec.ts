@@ -11,6 +11,7 @@ import { SystemConfig } from '../common/entities/system-config.entity';
 import { MailerService } from '../mailer/mailer.service';
 import { ConfigCacheService } from '../common/services/config-cache.service';
 import { RateLimitService } from '../common/services/rate-limit.service';
+import { AuditService } from '../common/services/audit.service';
 
 describe('AuthService - validateVerificationCode', () => {
   let service: AuthService;
@@ -65,6 +66,10 @@ describe('AuthService - validateVerificationCode', () => {
     getAttemptCount: jest.fn().mockResolvedValue(0),
   };
 
+  const mockAuditService = {
+    log: jest.fn(),
+  };
+
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -94,6 +99,7 @@ describe('AuthService - validateVerificationCode', () => {
         { provide: DataSource, useValue: mockDataSource },
         { provide: ConfigCacheService, useValue: mockConfigCacheService },
         { provide: RateLimitService, useValue: mockRateLimitService },
+        { provide: AuditService, useValue: mockAuditService },
       ],
     }).compile();
 

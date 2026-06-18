@@ -169,21 +169,25 @@ export class AdminController {
   // ==================== 访问日志统计 ====================
 
   @Get('access-logs')
+  @Roles(UserRole.SUPER_ADMIN)
   async getAccessLogs(@Query() query: AccessLogQueryDto) {
     return this.adminService.getAccessLogs(query);
   }
 
   @Get('access-logs/stats')
+  @Roles(UserRole.SUPER_ADMIN)
   async getAccessLogStats(@Query('timeRange') timeRange?: string) {
     return this.adminService.getAccessLogStats(timeRange);
   }
 
   @Get('access-logs/trend')
+  @Roles(UserRole.SUPER_ADMIN)
   async getAccessLogTrend(@Query('timeRange') timeRange?: string) {
     return this.adminService.getAccessLogTrend(timeRange);
   }
 
   @Get('audit-logs')
+  @Roles(UserRole.SUPER_ADMIN)
   async getAuditLogs(
     @Query('page') page?: string,
     @Query('limit') limit?: string,

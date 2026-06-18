@@ -5,8 +5,13 @@ import { Repository } from 'typeorm';
 import { AccessLog } from '../entities/access-log.entity';
 import { getClientIp } from '../utils/client-ip';
 
-/** 不记录日志的路径前缀 */
-const SKIP_PATHS = ['/api/admin/access-logs', '/api/admin/access-logs/stats'];
+/** 不记录日志的路径（使用 baseUrl+path 精确匹配，不含查询参数） */
+const SKIP_PATHS = [
+  '/api/admin/access-logs',
+  '/api/admin/access-logs/stats',
+  '/api/admin/access-logs/trend',
+  '/api/admin/audit-logs',
+];
 
 @Injectable()
 export class AccessLogMiddleware implements NestMiddleware {
@@ -17,10 +22,11 @@ export class AccessLogMiddleware implements NestMiddleware {
 
   use(req: Request, res: Response, next: NextFunction): void {
     const start = Date.now();
-    const path = req.originalUrl || req.url;
+    // 使用 baseUrl + path 精确匹配路径（不含查询参数），防止查询参数绕过
+    const path = req.baseUrl + req.path;
 
     // 跳过自身 API 请求
-    if (SKIP_PATHS.some((p) => path.startsWith(p))) {
+    if (SKIP_PATHS.includes(path)) {
       next();
       return;
     }
