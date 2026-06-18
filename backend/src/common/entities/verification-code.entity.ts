@@ -3,9 +3,11 @@ import {
   PrimaryColumn,
   Column,
   CreateDateColumn,
+  Index,
 } from 'typeorm';
 
 @Entity('verification_codes')
+@Index(['email', 'type', 'isUsed'])
 export class VerificationCode {
   @PrimaryColumn({ type: 'uuid', default: () => 'gen_random_uuid()' })
   id: string;

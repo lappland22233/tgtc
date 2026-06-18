@@ -7,6 +7,9 @@ import {
 } from 'typeorm';
 
 @Entity('access_logs')
+@Index(['createdAt'])
+@Index(['path'])
+@Index(['statusCode'])
 export class AccessLog {
   @PrimaryColumn({ type: 'uuid', default: () => 'gen_random_uuid()' })
   id: string;

@@ -325,8 +325,15 @@ async function convertToMarkdown() {
 }
 
 function copyMarkdown() {
-  navigator.clipboard.writeText(markdownResult.value);
-  MessagePlugin.success('已复制到剪贴板');
+  if (!navigator.clipboard) {
+    MessagePlugin.warning('当前浏览器不支持剪贴板操作，请手动复制');
+    return;
+  }
+  navigator.clipboard.writeText(markdownResult.value).then(() => {
+    MessagePlugin.success('已复制到剪贴板');
+  }).catch(() => {
+    MessagePlugin.warning('复制失败，请手动选择文本复制');
+  });
 }
 
 async function fetchUploadConfig() {

@@ -2,25 +2,20 @@ import { Request } from 'express';
 
 /**
  * 安全地提取真实客户端 IP 地址
- * 优先使用可信代理头（X-Forwarded-For），回退到直接连接 IP
+ * 优先使用 Express trust proxy 解析的 req.ips（需 app.set('trust proxy', ...) 配置），
+ * 回退到可信代理头，最后使用直接连接 IP
  */
 export function getClientIp(req: Request): string {
-  // 1. X-Forwarded-For（取第一个非信任代理 IP）
-  const forwardedFor = req.headers['x-forwarded-for'];
-  if (forwardedFor) {
-    const forwardedStr = typeof forwardedFor === 'string'
-      ? forwardedFor
-      : forwardedFor[0];
-    if (forwardedStr) {
-      const ips = forwardedStr.split(',').map((ip) => ip.trim());
-      const clientIp = ips[0]; // 最左侧为原始客户端 IP
-      if (isValidIp(clientIp)) {
-        return clientIp;
-      }
+  // 1. Express trust proxy 解析的 req.ips（信任链由 trust proxy 配置控制）
+  //    最后一个元素为最接近代理的 IP，防止客户端伪造 X-Forwarded-For
+  if (req.ips && req.ips.length > 0) {
+    const trustedClientIp = req.ips[0];
+    if (isValidIp(trustedClientIp)) {
+      return trustedClientIp;
     }
   }
 
-  // 2. X-Real-IP（部分代理设置）
+  // 2. X-Real-IP（部分代理设置，较难伪造）
   const realIp = req.headers['x-real-ip'];
   if (realIp) {
     const realIpStr = typeof realIp === 'string' ? realIp : realIp[0];
@@ -29,7 +24,7 @@ export function getClientIp(req: Request): string {
     }
   }
 
-  // 3. CF-Connecting-IP（Cloudflare）
+  // 3. CF-Connecting-IP（Cloudflare，由 Cloudflare 边缘设置）
   const cfIp = req.headers['cf-connecting-ip'];
   if (cfIp) {
     const cfIpStr = typeof cfIp === 'string' ? cfIp : cfIp[0];

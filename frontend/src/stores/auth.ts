@@ -36,6 +36,12 @@ export const useAuthStore = defineStore('auth', () => {
     const response = await api.post('/auth/login', { email, password });
     user.value = response.data.data.user as User;
     clearRedirectState(); // 登录成功后重置重定向状态
+    // 二次验证：通过 fetchUser 获取服务端权威用户状态，防止响应篡改
+    try {
+      await fetchUser();
+    } catch {
+      // fetchUser 失败不影响登录流程（auth/me 主要用于验证状态）
+    }
     return response.data;
   }
 
@@ -58,8 +64,13 @@ export const useAuthStore = defineStore('auth', () => {
     try {
       const response = await api.get('/auth/me');
       user.value = response.data.data as User;
-    } catch {
-      user.value = null;
+    } catch (err: unknown) {
+      // 区分 401（token 过期/无效）和网络错误（临时网络问题）
+      // 仅 401 时清除用户状态，网络错误保留当前状态防止无故登出
+      const axiosErr = err as { response?: { status?: number } };
+      if (axiosErr?.response?.status === 401 || axiosErr?.response?.status === 403) {
+        user.value = null;
+      }
     } finally {
       initialized.value = true;
     }

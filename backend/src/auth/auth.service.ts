@@ -67,7 +67,7 @@ export class AuthService {
       await this.validateVerificationCode(registerDto.email, registerDto.code, 'register');
     }
 
-    const hashedPassword = await bcrypt.hash(registerDto.password, 10);
+    const hashedPassword = await bcrypt.hash(registerDto.password, 12);
 
     // 使用事务 + 行锁确保超管角色的唯一性
     const queryRunner = this.dataSource.createQueryRunner();
@@ -76,9 +76,9 @@ export class AuthService {
 
     try {
       // 锁定 users 表防止并发注册竞态，确保首个注册用户获得 super_admin
-      // 使用 FOR UPDATE 确保在 REPEATABLE READ 下也能读到最新数据
+      // （LOCK TABLE 提供最高级别的隔离，防止多个事务同时读取空表而竞争首位）
       await queryRunner.query('LOCK TABLE "users" IN EXCLUSIVE MODE');
-      // 表已通过 LOCK TABLE 锁定，无需 FOR UPDATE（PostgreSQL 不允许对聚合函数使用 FOR UPDATE）
+      // PostgreSQL 对 SELECT COUNT(*) 不允许 FOR UPDATE，LOCK TABLE 已提供隔离保证
       const [{ count }] = await queryRunner.query(
         'SELECT COUNT(*) as count FROM "users"',
       );
@@ -193,11 +193,9 @@ export class AuthService {
     }
 
     // 邮箱验证开启时，未验证用户不允许登录
-    if (!user.emailVerified) {
-      const emailVerificationEnabled = await this.getConfigValue('EMAIL_VERIFICATION_ENABLED', 'false');
-      if (emailVerificationEnabled === 'true') {
-        throw new UnauthorizedException('请先验证邮箱');
-      }
+    const emailVerificationEnabled = await this.getConfigValue('EMAIL_VERIFICATION_ENABLED', 'false');
+    if (!user.emailVerified && emailVerificationEnabled === 'true') {
+      throw new UnauthorizedException('请先验证邮箱');
     }
 
     const isPasswordValid = await bcrypt.compare(loginDto.password, user.password);
@@ -293,19 +291,18 @@ export class AuthService {
     const codeHash = this.hashCode(code);
     const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
 
-    await this.verificationCodeRepository.update(
-      { email, type, isUsed: false },
-      { isUsed: true },
-    );
-
-    const verificationCode = this.verificationCodeRepository.create({
-      email,
-      code: codeHash,
-      type,
-      expiresAt,
+    // T2-5: 使用事务确保旧码标记失效和新码插入的原子性，
+    // 防止并发请求在 update 和 save 之间产生两个有效验证码
+    await this.dataSource.transaction(async (manager) => {
+      await manager.update(VerificationCode, { email, type, isUsed: false }, { isUsed: true });
+      const verificationCode = manager.create(VerificationCode, {
+        email,
+        code: codeHash,
+        type,
+        expiresAt,
+      });
+      await manager.save(verificationCode);
     });
-
-    await this.verificationCodeRepository.save(verificationCode);
 
     if (type === 'register' || type === 'reset_password') {
       await this.mailerService.sendVerificationCode(email, code);
@@ -324,7 +321,7 @@ export class AuthService {
   async resetPassword(dto: ResetPasswordDto): Promise<void> {
     await this.validateVerificationCode(dto.email, dto.code, 'reset_password');
 
-    const hashedPassword = await bcrypt.hash(dto.newPassword, 10);
+    const hashedPassword = await bcrypt.hash(dto.newPassword, 12);
     await this.userRepository.update(
       { email: dto.email },
       { password: hashedPassword },

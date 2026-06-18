@@ -3,6 +3,7 @@ import {
   PrimaryColumn,
   Column,
   CreateDateColumn,
+  Index,
 } from 'typeorm';
 
 /** 审计日志操作类型 */
@@ -42,6 +43,9 @@ export enum AuditStatus {
 }
 
 @Entity('audit_logs')
+@Index(['userId'])
+@Index(['action'])
+@Index(['createdAt'])
 export class AuditLog {
   @PrimaryColumn({ type: 'uuid', default: () => 'gen_random_uuid()' })
   id: string;
