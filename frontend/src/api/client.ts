@@ -43,6 +43,8 @@ export function clearRedirectState() {
 // ---- 创建 axios 实例 ----
 const client: AxiosInstance = axios.create({
   baseURL: '/api',
+  // 默认 30 秒超时。文件上传请求应在调用处覆盖 timeout: 0
+  // （使用后端 HTTP 服务器 10 分钟超时），避免大文件上传被中断
   timeout: 30000,
   withCredentials: true,
   // 不设置 Content-Type，由 axios 根据请求数据类型自动推断：
@@ -88,13 +90,13 @@ client.interceptors.response.use(
 
     // 网络错误（无响应）
     if (!error.response) {
-      console.error('[API] 网络错误:', error.message);
+      console.warn('[API] 网络错误，请检查网络连接:', error.message || '未知错误');
       return Promise.reject(error);
     }
 
     // 服务器错误 (5xx)
     if (status && status >= 500) {
-      console.error('[API] 服务器错误:', status, error.config?.url);
+      console.warn('[API] 服务器错误，请稍后重试:', status, error.config?.url);
       return Promise.reject(error);
     }
 

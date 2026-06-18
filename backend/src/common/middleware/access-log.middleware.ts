@@ -5,13 +5,13 @@ import { Repository } from 'typeorm';
 import { AccessLog } from '../entities/access-log.entity';
 import { getClientIp } from '../utils/client-ip';
 
-/** 不记录日志的路径（使用 baseUrl+path 精确匹配，不含查询参数） */
-const SKIP_PATHS = [
+/** 不记录日志的路径集合（使用 originalUrl 路径部分匹配，去除查询参数和尾部斜杠） */
+const SKIP_PATH_SET = new Set([
   '/api/admin/access-logs',
   '/api/admin/access-logs/stats',
   '/api/admin/access-logs/trend',
   '/api/admin/audit-logs',
-];
+]);
 
 @Injectable()
 export class AccessLogMiddleware implements NestMiddleware {
@@ -22,16 +22,18 @@ export class AccessLogMiddleware implements NestMiddleware {
 
   use(req: Request, res: Response, next: NextFunction): void {
     const start = Date.now();
-    // 使用 baseUrl + path 精确匹配路径（不含查询参数），防止查询参数绕过
-    const path = req.baseUrl + req.path;
+    // T1-1/T1-2/T1-3: 使用 originalUrl 获取含全局 /api 前缀的原始路径
+    // 去除查询参数和尾部斜杠，确保路径匹配一致性和统计聚合准确性
+    const rawPath = (req.originalUrl || req.url || '/').split('?')[0].replace(/\/+$/, '') || '/';
 
-    // 跳过自身 API 请求
-    if (SKIP_PATHS.includes(path)) {
+    // T1-5: 使用 Set.has() O(1) 查找替代 Array.includes() O(n)
+    if (SKIP_PATH_SET.has(rawPath)) {
       next();
       return;
     }
 
-    // 通过拦截 write/end 追踪实际发送的字节数（兼容流式响应和 gzip 压缩）
+    // T1-4: 通过拦截 write/end 追踪实际发送的字节数
+    // 注意：统计的是业务层写入字节（压缩前），gzip 压缩后实际网络传输量可能更低
     let bytesSent = 0;
     const originalWrite = res.write.bind(res) as typeof res.write;
     const originalEnd = res.end.bind(res) as typeof res.end;
@@ -55,7 +57,7 @@ export class AccessLogMiddleware implements NestMiddleware {
 
     // 在响应完成时记录日志
     res.on('finish', () => {
-      self.logAsync(req, res, Date.now() - start, path, bytesSent).catch(() => {
+      self.logAsync(req, res, Date.now() - start, rawPath, bytesSent).catch(() => {
         // 日志写入失败不影响业务
       });
     });

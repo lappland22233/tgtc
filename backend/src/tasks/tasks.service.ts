@@ -79,20 +79,32 @@ export class TasksService {
   /**
    * 清理过期的访问日志（每天凌晨 2 点执行）
    * 保留策略：默认保留最近 30 天，可通过 ACCESS_LOG_RETENTION_DAYS 配置
+   * 使用分批删除防止大表一次性 DELETE 导致长事务和大量 WAL
    */
   @Cron('0 2 * * *')
   async cleanupExpiredAccessLogs() {
     try {
       const retentionDays = parseInt(process.env.ACCESS_LOG_RETENTION_DAYS || '30', 10);
       const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000);
+      const BATCH_SIZE = 1000;
 
-      const result = await this.accessLogRepository.delete({
-        createdAt: LessThan(cutoff),
-      });
+      let totalDeleted = 0;
+      let batchDeleted: number;
+      do {
+        const result = await this.accessLogRepository
+          .createQueryBuilder()
+          .delete()
+          .where('id IN (SELECT id FROM access_logs WHERE "createdAt" < :cutoff LIMIT :limit)')
+          .setParameter('cutoff', cutoff)
+          .setParameter('limit', BATCH_SIZE)
+          .execute();
+        batchDeleted = result.affected ?? 0;
+        totalDeleted += batchDeleted;
+      } while (batchDeleted === BATCH_SIZE);
 
-      if ((result.affected ?? 0) > 0) {
+      if (totalDeleted > 0) {
         this.logger.log(
-          `已清理 ${result.affected} 条过期访问日志（保留期限：${retentionDays} 天）`,
+          `已清理 ${totalDeleted} 条过期访问日志（保留期限：${retentionDays} 天）`,
         );
       }
     } catch (error: unknown) {
@@ -106,20 +118,32 @@ export class TasksService {
   /**
    * 清理过期的审计日志（每天凌晨 3 点执行）
    * 保留策略：默认保留最近 90 天，可通过 AUDIT_LOG_RETENTION_DAYS 配置
+   * 使用分批删除防止大表一次性 DELETE 导致长事务和大量 WAL
    */
   @Cron('0 3 * * *')
   async cleanupExpiredAuditLogs() {
     try {
       const retentionDays = parseInt(process.env.AUDIT_LOG_RETENTION_DAYS || '90', 10);
       const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000);
+      const BATCH_SIZE = 1000;
 
-      const result = await this.auditLogRepository.delete({
-        createdAt: LessThan(cutoff),
-      });
+      let totalDeleted = 0;
+      let batchDeleted: number;
+      do {
+        const result = await this.auditLogRepository
+          .createQueryBuilder()
+          .delete()
+          .where('id IN (SELECT id FROM audit_logs WHERE "createdAt" < :cutoff LIMIT :limit)')
+          .setParameter('cutoff', cutoff)
+          .setParameter('limit', BATCH_SIZE)
+          .execute();
+        batchDeleted = result.affected ?? 0;
+        totalDeleted += batchDeleted;
+      } while (batchDeleted === BATCH_SIZE);
 
-      if ((result.affected ?? 0) > 0) {
+      if (totalDeleted > 0) {
         this.logger.log(
-          `已清理 ${result.affected} 条过期审计日志（保留期限：${retentionDays} 天）`,
+          `已清理 ${totalDeleted} 条过期审计日志（保留期限：${retentionDays} 天）`,
         );
       }
     } catch (error: unknown) {

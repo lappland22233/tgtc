@@ -603,34 +603,28 @@ export class FileService implements OnModuleInit {
       this.BAN_COUNT_LIMIT, 0, this.BAN_WINDOW,
     );
 
-    // 获取当前错误计数和封禁计数
+    // 获取当前错误计数和封禁计数（RateLimitService 已原子化）
     const now = Date.now();
     const currentBanCount = await this.rateLimitService.getAttemptCount(banLimitKey);
 
+    // T3-5: 使用 UPSERT 原子化封禁记录的创建/更新，消除 findOne→save 的 TOCTOU 窗口
     if (currentBanCount >= this.BAN_COUNT_LIMIT) {
       // 第5次封禁 → 升级为6小时
       const expiresAt = new Date(now + this.BAN_6H);
       const reason = `密码错误${this.ERROR_LIMIT}次，1小时内第${currentBanCount}次触发封禁，升级为6小时`;
-
-      const existingBan = await this.bannedIPRepository.findOne({ where: { ip } });
-      if (existingBan) {
-        await this.bannedIPRepository.update(existingBan.id, { expiresAt, reason });
-      } else {
-        await this.bannedIPRepository.save({ ip, reason, isPermanent: false, expiresAt } as BannedIP);
-      }
-
+      await this.bannedIPRepository.upsert(
+        { ip, reason, isPermanent: false, expiresAt } as BannedIP,
+        ['ip'],
+      );
       await this.rateLimitService.reset(banLimitKey);
     } else {
       // 第1-4次封禁 → 5分钟
       const expiresAt = new Date(now + this.BAN_5M);
       const reason = `密码错误${this.ERROR_LIMIT}次，1小时内第${currentBanCount}次触发封禁`;
-
-      const existingBan = await this.bannedIPRepository.findOne({ where: { ip } });
-      if (existingBan) {
-        await this.bannedIPRepository.update(existingBan.id, { expiresAt, reason });
-      } else {
-        await this.bannedIPRepository.save({ ip, reason, isPermanent: false, expiresAt } as BannedIP);
-      }
+      await this.bannedIPRepository.upsert(
+        { ip, reason, isPermanent: false, expiresAt } as BannedIP,
+        ['ip'],
+      );
     }
 
     // 重置错误计数器
@@ -859,15 +853,19 @@ export class FileService implements OnModuleInit {
             userId: '',
             action: 'consume',
             ip: '',
-          });
-        } catch (dbError) {
-          // 唯一约束冲突 = token 已被消费
-          throw new Error('access token 已被使用过');
+          } as ShareAudit);
+        } catch (dbError: unknown) {
+          // PostgreSQL unique_violation (23505) = token 已被消费
+          const code = (dbError as { code?: string }).code;
+          if (code === '23505') {
+            throw new ForbiddenException('访问链接已被使用，请重新获取');
+          }
+          throw dbError;
         }
       }
     } catch (error) {
-      if (error instanceof Error && error.message.includes('已被使用过')) {
-        throw new ForbiddenException('访问链接已被使用，请重新获取');
+      if (error instanceof ForbiddenException) {
+        throw error;
       }
       throw new ForbiddenException('访问链接已失效，请重新获取');
     }

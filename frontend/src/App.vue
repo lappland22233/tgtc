@@ -10,7 +10,10 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onErrorCaptured } from 'vue';
+import { ref, onErrorCaptured, onUnmounted } from 'vue';
+import { useAuthStore } from './stores/auth';
+
+const authStore = useAuthStore();
 
 const globalConfig = ref({
   theme: 'dark',
@@ -24,6 +27,10 @@ onErrorCaptured((err) => {
   errorMessage.value = err instanceof Error ? err.message : String(err);
   console.error('[App Error Boundary]', err);
   return false; // 阻止错误继续向上传播
+});
+
+onUnmounted(() => {
+  authStore.closeAuthChannel();
 });
 
 function reload() {

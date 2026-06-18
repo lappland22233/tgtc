@@ -12,10 +12,17 @@ export class RolesGuard implements CanActivate {
       ROLES_KEY,
       [context.getHandler(), context.getClass()],
     );
+    const { user } = context.switchToHttp().getRequest();
+
     if (!requiredRoles) {
+      // 无 @Roles 装饰器时，至少要求用户已认证（白名单策略）
+      // 防止开发者遗漏装饰器导致端点无角色保护
+      if (!user) {
+        throw new UnauthorizedException('用户未认证');
+      }
       return true;
     }
-    const { user } = context.switchToHttp().getRequest();
+
     if (!user) {
       throw new UnauthorizedException('用户未认证');
     }

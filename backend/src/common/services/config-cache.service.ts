@@ -39,9 +39,24 @@ export class ConfigCacheService {
   async setBatch(
     configs: { key: string; value: string; description?: string }[],
   ): Promise<void> {
-    for (const config of configs) {
-      await this.set(config.key, config.value, config.description);
+    if (configs.length === 0) return;
+
+    // 批量 upsert：一次数据库操作完成所有写入
+    const entities = configs.map((c) => ({
+      key: c.key,
+      value: c.value,
+      description: c.description ?? undefined,
+      updatedAt: new Date(),
+    }));
+    await this.systemConfigRepository.upsert(entities, ['key']);
+
+    // 批量更新缓存
+    for (const c of configs) {
+      this.cache.set(c.key, c.value);
     }
+
+    // 单次事件通知批量变更
+    this.eventEmitter.emit('config.batch-changed', configs);
   }
 
   invalidate(key: string): void {

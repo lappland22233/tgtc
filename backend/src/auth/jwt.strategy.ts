@@ -16,11 +16,16 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     configService: ConfigService,
     private authService: AuthService,
   ) {
+    // TOKEN_EXTRACTION_MODE 控制 Token 提取方式：
+    // - 'cookie_only'：仅从 Cookie 提取（推荐生产环境，缩小攻击面）
+    // - 默认（both）：同时支持 Cookie 和 Authorization Header
+    const extractionMode = configService.get<string>('TOKEN_EXTRACTION_MODE', 'both');
+    const extractors = extractionMode === 'cookie_only'
+      ? [cookieExtractor]
+      : [cookieExtractor, ExtractJwt.fromAuthHeaderAsBearerToken()];
+
     super({
-      jwtFromRequest: ExtractJwt.fromExtractors([
-        cookieExtractor,
-        ExtractJwt.fromAuthHeaderAsBearerToken(),
-      ]),
+      jwtFromRequest: ExtractJwt.fromExtractors(extractors),
       ignoreExpiration: false,
       secretOrKey: (() => {
         const secret = configService.get<string>('JWT_SECRET');
