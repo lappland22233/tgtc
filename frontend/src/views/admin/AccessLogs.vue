@@ -5,14 +5,33 @@
       <p>网站请求量、带宽消耗、独立访客与流量峰值监控</p>
     </div>
 
-    <!-- 时间范围选择器 -->
+    <!-- 时间范围选择器和自动刷新 -->
     <div class="toolbar">
-      <t-radio-group v-model="timeRange" variant="default-filled" @change="onTimeRangeChange">
-        <t-radio-button value="1h">1小时</t-radio-button>
-        <t-radio-button value="24h">24小时</t-radio-button>
-        <t-radio-button value="7d">7天</t-radio-button>
-        <t-radio-button value="30d">30天</t-radio-button>
-      </t-radio-group>
+      <div style="display: flex; gap: 12px; align-items: center; flex-wrap: wrap;">
+        <t-radio-group v-model="timeRange" variant="default-filled" @change="onTimeRangeChange">
+          <t-radio-button value="1h">1小时</t-radio-button>
+          <t-radio-button value="24h">24小时</t-radio-button>
+          <t-radio-button value="7d">7天</t-radio-button>
+          <t-radio-button value="30d">30天</t-radio-button>
+        </t-radio-group>
+        <div style="display: flex; gap: 8px; align-items: center; margin-left: auto;">
+          <label style="font-size: 12px; color: var(--text-secondary); white-space: nowrap;">自动刷新：</label>
+          <t-select
+            v-model="autoRefreshInterval"
+            style="width: 100px;"
+            :popup-props="{ overlayStyle: { minWidth: '100px' } }"
+            @change="updateAutoRefresh"
+          >
+            <t-option :value="0" label="关闭" />
+            <t-option :value="30000" label="30秒" />
+            <t-option :value="60000" label="1分钟" />
+            <t-option :value="300000" label="5分钟" />
+          </t-select>
+          <span v-if="lastRefreshTime" style="font-size: 12px; color: var(--text-secondary); white-space: nowrap;">
+            最后更新：{{ lastRefreshTime }}
+          </span>
+        </div>
+      </div>
     </div>
 
     <!-- 核心指标卡片 -->
@@ -96,9 +115,20 @@
         :loading="loading"
         :pagination="pagination"
         row-key="id"
-        table-layout="auto"
+        table-layout="fixed"
         @page-change="onPageChange"
       >
+        <template #path="{ row }">
+          <div class="path-cell" :title="row.path">
+            <span class="path-text">{{ truncatePath(row.path, 60) }}</span>
+            <t-tooltip v-if="row.path.length > 60" theme="light" placement="top">
+              <template #content>
+                <div style="max-width: 400px; word-break: break-all;">{{ row.path }}</div>
+              </template>
+              <span class="path-info-icon">&#9432;</span>
+            </t-tooltip>
+          </div>
+        </template>
         <template #statusCode="{ row }">
           <t-tag :theme="statusTheme(row.statusCode)" variant="light" size="small">
             {{ row.statusCode }}
@@ -189,11 +219,45 @@ const pieChartRef = ref<HTMLDivElement | null>(null);
 let trendChart: echarts.ECharts | null = null;
 let pieChart: echarts.ECharts | null = null;
 
-// Table columns (mobile-friendly responsive)
+// Auto-refresh
+const autoRefreshInterval = ref(0);
+let autoRefreshTimer: ReturnType<typeof setInterval> | null = null;
+const lastRefreshTime = ref('');
+
+function updateAutoRefresh() {
+  if (autoRefreshTimer) {
+    clearInterval(autoRefreshTimer);
+    autoRefreshTimer = null;
+  }
+  if (autoRefreshInterval.value > 0) {
+    autoRefreshTimer = setInterval(() => {
+      refreshAll();
+    }, autoRefreshInterval.value);
+  }
+}
+
+// Smart path truncation
+function truncatePath(path: string, maxLength: number = 60): string {
+  if (path.length <= maxLength) return path;
+  const [pathname, query] = path.split('?');
+  if (pathname.length > maxLength) {
+    return pathname.substring(0, maxLength - 3) + '...';
+  }
+  if (query) {
+    const available = maxLength - pathname.length - 1;
+    if (available > 5) {
+      return pathname + '?' + query.substring(0, available - 3) + '...';
+    }
+    return pathname + '?...';
+  }
+  return path;
+}
+
+// Table columns (fixed layout with controlled widths)
 const columns = [
   { colKey: 'ip', title: 'IP 地址', width: 140 },
   { colKey: 'method', title: '方法', width: 70 },
-  { colKey: 'path', title: '请求路径', ellipsis: true, minWidth: 160 },
+  { colKey: 'path', title: '请求路径', ellipsis: false, width: 300 },
   { colKey: 'statusCode', title: '状态码', width: 90 },
   { colKey: 'duration', title: '耗时', width: 80 },
   { colKey: 'responseSize', title: '流量', width: 90 },
@@ -426,6 +490,7 @@ function refreshAll() {
   fetchStats();
   fetchTrend();
   fetchLogs();
+  lastRefreshTime.value = new Date().toLocaleTimeString('zh-CN');
 }
 
 // Lifecycle
@@ -434,6 +499,9 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
+  if (autoRefreshTimer) {
+    clearInterval(autoRefreshTimer);
+  }
   trendChart?.dispose();
   pieChart?.dispose();
 });
@@ -537,6 +605,36 @@ onUnmounted(() => {
   gap: 12px;
   margin-bottom: 16px;
   flex-wrap: wrap;
+}
+
+/* Path cell styles */
+.path-cell {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.path-text {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: 'Courier New', monospace;
+  font-size: 12px;
+  color: var(--text-primary);
+}
+
+.path-info-icon {
+  flex-shrink: 0;
+  cursor: help;
+  font-size: 13px;
+  opacity: 0.6;
+  transition: opacity 0.2s;
+}
+
+.path-info-icon:hover {
+  opacity: 1;
 }
 
 /* Responsive */

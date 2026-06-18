@@ -45,9 +45,9 @@ const client: AxiosInstance = axios.create({
   baseURL: '/api',
   timeout: 30000,
   withCredentials: true,
-  headers: {
-    'Content-Type': 'application/json',
-  },
+  // 不设置 Content-Type，由 axios 根据请求数据类型自动推断：
+  // - 普通对象 → application/json
+  // - FormData → multipart/form-data（浏览器自动设置 boundary）
 });
 
 // ---- 请求拦截器 ----

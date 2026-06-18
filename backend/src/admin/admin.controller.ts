@@ -32,18 +32,20 @@ export class AdminController {
   @Put('config')
   @Roles(UserRole.SUPER_ADMIN)
   async updateConfig(
+    @CurrentUser() user: User,
     @Body() dto: ConfigDto,
   ) {
-    await this.adminService.updateConfig(dto.key, dto.value, dto.description);
+    await this.adminService.updateConfig(user, dto.key, dto.value, dto.description);
     return { message: '配置已更新' };
   }
 
   @Put('config/batch')
   @Roles(UserRole.SUPER_ADMIN)
   async updateConfigs(
+    @CurrentUser() user: User,
     @Body() dto: BatchConfigDto,
   ) {
-    await this.adminService.updateConfigs(dto.configs);
+    await this.adminService.updateConfigs(user, dto.configs);
     return { message: '配置已批量更新' };
   }
 
@@ -55,9 +57,11 @@ export class AdminController {
 
   @Post('banned-ips')
   async banIP(
+    @CurrentUser() user: User,
     @Body() dto: BanIPDto,
   ) {
     await this.adminService.banIP(
+      user,
       dto.ip,
       dto.reason,
       dto.permanent !== false,
@@ -67,15 +71,21 @@ export class AdminController {
   }
 
   @Delete('banned-ips/:ip')
-  async unbanIP(@Param('ip') ip: string) {
-    await this.adminService.unbanIP(ip);
+  async unbanIP(
+    @CurrentUser() user: User,
+    @Param('ip') ip: string,
+  ) {
+    await this.adminService.unbanIP(user, ip);
     return { message: 'IP已解封' };
   }
 
   // 推荐方式：通过请求体传递 IP，避免 IPv6 冒号导致 URL 解析问题
   @Post('banned-ips/unban')
-  async unbanIPByBody(@Body() dto: UnbanIPDto) {
-    await this.adminService.unbanIP(dto.ip);
+  async unbanIPByBody(
+    @CurrentUser() user: User,
+    @Body() dto: UnbanIPDto,
+  ) {
+    await this.adminService.unbanIP(user, dto.ip);
     return { message: 'IP已解封' };
   }
 
@@ -90,15 +100,21 @@ export class AdminController {
 
   @Delete('files/:id')
   @Roles(UserRole.SUPER_ADMIN)
-  async deleteFile(@Param('id') id: string) {
-    await this.adminService.deleteFile(id);
+  async deleteFile(
+    @CurrentUser() user: User,
+    @Param('id') id: string,
+  ) {
+    await this.adminService.deleteFile(user, id);
     return { message: '文件已删除' };
   }
 
   @Post('files/batch-delete')
   @Roles(UserRole.SUPER_ADMIN)
-  async batchDeleteFiles(@Body() dto: BatchDeleteFilesDto) {
-    await this.adminService.batchDeleteFiles(dto.ids);
+  async batchDeleteFiles(
+    @CurrentUser() user: User,
+    @Body() dto: BatchDeleteFilesDto,
+  ) {
+    await this.adminService.batchDeleteFiles(user, dto.ids);
     return { message: '文件已批量删除' };
   }
 
@@ -110,8 +126,11 @@ export class AdminController {
 
   @Put('smtp')
   @Roles(UserRole.SUPER_ADMIN)
-  async updateSMTPConfig(@Body() dto: SmtpConfigDto) {
-    await this.adminService.updateSMTPConfig(dto);
+  async updateSMTPConfig(
+    @CurrentUser() user: User,
+    @Body() dto: SmtpConfigDto,
+  ) {
+    await this.adminService.updateSMTPConfig(user, dto);
     return { message: 'SMTP配置已更新' };
   }
 
@@ -123,8 +142,11 @@ export class AdminController {
 
   @Put('upload-config')
   @Roles(UserRole.SUPER_ADMIN)
-  async updateUploadConfig(@Body() dto: UploadConfigDto) {
-    await this.adminService.updateUploadConfig(dto);
+  async updateUploadConfig(
+    @CurrentUser() user: User,
+    @Body() dto: UploadConfigDto,
+  ) {
+    await this.adminService.updateUploadConfig(user, dto);
     return { message: '上传配置已更新' };
   }
 
@@ -136,8 +158,11 @@ export class AdminController {
 
   @Put('auth-config')
   @Roles(UserRole.SUPER_ADMIN)
-  async updateAuthConfig(@Body() dto: AuthConfigDto) {
-    await this.adminService.updateAuthConfig(dto);
+  async updateAuthConfig(
+    @CurrentUser() user: User,
+    @Body() dto: AuthConfigDto,
+  ) {
+    await this.adminService.updateAuthConfig(user, dto);
     return { message: '认证配置已更新' };
   }
 

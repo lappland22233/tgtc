@@ -1,13 +1,13 @@
 import {
   Entity,
-  PrimaryGeneratedColumn,
+  PrimaryColumn,
   Column,
   UpdateDateColumn,
 } from 'typeorm';
 
 @Entity('system_configs')
 export class SystemConfig {
-  @PrimaryGeneratedColumn('uuid')
+  @PrimaryColumn({ type: 'uuid', default: () => 'gen_random_uuid()' })
   id: string;
 
   @Column({ unique: true })

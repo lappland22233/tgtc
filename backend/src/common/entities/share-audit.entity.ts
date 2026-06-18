@@ -1,6 +1,6 @@
 import {
   Entity,
-  PrimaryGeneratedColumn,
+  PrimaryColumn,
   Column,
   CreateDateColumn,
 } from 'typeorm';
@@ -9,7 +9,7 @@ export type ShareAuditAction = 'create' | 'revoke' | 'access' | 'consume';
 
 @Entity('share_audits')
 export class ShareAudit {
-  @PrimaryGeneratedColumn('uuid')
+  @PrimaryColumn({ type: 'uuid', default: () => 'gen_random_uuid()' })
   id: string;
 
   @Column({ unique: true })

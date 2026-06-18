@@ -5,6 +5,8 @@ import { Cron, CronExpression } from '@nestjs/schedule';
 import { BannedIP } from '../common/entities/banned-ip.entity';
 import { ShareAudit } from '../common/entities/share-audit.entity';
 import { RateLimit } from '../common/entities/rate-limit.entity';
+import { AccessLog } from '../common/entities/access-log.entity';
+import { AuditLog } from '../common/entities/audit-log.entity';
 
 @Injectable()
 export class TasksService {
@@ -17,6 +19,10 @@ export class TasksService {
     private shareAuditRepository: Repository<ShareAudit>,
     @InjectRepository(RateLimit)
     private rateLimitRepository: Repository<RateLimit>,
+    @InjectRepository(AccessLog)
+    private accessLogRepository: Repository<AccessLog>,
+    @InjectRepository(AuditLog)
+    private auditLogRepository: Repository<AuditLog>,
   ) {}
 
   @Cron(CronExpression.EVERY_30_MINUTES)
@@ -67,6 +73,60 @@ export class TasksService {
       }
     } catch (error: unknown) {
       this.logger.error('清理过期封禁记录失败', error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  /**
+   * 清理过期的访问日志（每天凌晨 2 点执行）
+   * 保留策略：默认保留最近 30 天，可通过 ACCESS_LOG_RETENTION_DAYS 配置
+   */
+  @Cron('0 2 * * *')
+  async cleanupExpiredAccessLogs() {
+    try {
+      const retentionDays = parseInt(process.env.ACCESS_LOG_RETENTION_DAYS || '30', 10);
+      const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000);
+
+      const result = await this.accessLogRepository.delete({
+        createdAt: LessThan(cutoff),
+      });
+
+      if ((result.affected ?? 0) > 0) {
+        this.logger.log(
+          `已清理 ${result.affected} 条过期访问日志（保留期限：${retentionDays} 天）`,
+        );
+      }
+    } catch (error: unknown) {
+      this.logger.error(
+        '清理过期访问日志失败',
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  }
+
+  /**
+   * 清理过期的审计日志（每天凌晨 3 点执行）
+   * 保留策略：默认保留最近 90 天，可通过 AUDIT_LOG_RETENTION_DAYS 配置
+   */
+  @Cron('0 3 * * *')
+  async cleanupExpiredAuditLogs() {
+    try {
+      const retentionDays = parseInt(process.env.AUDIT_LOG_RETENTION_DAYS || '90', 10);
+      const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000);
+
+      const result = await this.auditLogRepository.delete({
+        createdAt: LessThan(cutoff),
+      });
+
+      if ((result.affected ?? 0) > 0) {
+        this.logger.log(
+          `已清理 ${result.affected} 条过期审计日志（保留期限：${retentionDays} 天）`,
+        );
+      }
+    } catch (error: unknown) {
+      this.logger.error(
+        '清理过期审计日志失败',
+        error instanceof Error ? error.message : String(error),
+      );
     }
   }
 }

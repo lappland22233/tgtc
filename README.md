@@ -19,7 +19,7 @@
 - 设置公开/私有、访问次数限制、分享有效期（含过期检查）
 - 批量勾选图片一键生成 Markdown 链接
 - 后端代理下载（不暴露 Telegram 原始 URL），使用流式传输
-- 缩略图 RSA-OAEP 加密防外链，时间窗口 ±30 秒
+- 缩略图 RSA-OAEP 加密防外链，时间窗口 ±10 秒
 
 ### 分享访问
 - **公开无约束**：直接流式返回文件内容，CDN 友好
@@ -34,8 +34,8 @@
 - 文件管理、IP 封禁管理
 - 系统配置（SMTP、上传限制、认证开关），敏感配置仅限 SUPER_ADMIN
 - 文件类型过滤（黑名单/白名单双模式，危险类型带警告标识）
-- **访问统计**：请求量、带宽、独立访客、峰值 QPS 实时监控，趋势折线图 + 状态码分布饼图（ECharts），按时间范围筛选
-- **操作审计**：登录、配置变更、文件操作、权限修改等安全事件全量记录，支持按操作类型/用户/时间范围筛选
+- **访问统计**：请求量、带宽、独立访客、峰值 QPS 实时监控，趋势折线图 + 状态码分布饼图（ECharts 6），按时间范围筛选，支持 30s/1min/5min 自动刷新
+- **操作审计**：登录、配置变更、文件操作（含批量删除）、权限修改等安全事件全量记录，操作者自动关联用户名，支持按操作类型/用户/时间范围筛选，90 天自动清理
 
 ### 安全
 - Telegram Bot Token 错误日志自动脱敏
@@ -44,8 +44,9 @@
 - 配置缓存使用 upsert 原子操作
 - Source map 生产关闭、.gitignore 覆盖密钥文件
 - 前端全局错误边界防白屏
-- **操作审计系统**：异步记录所有关键安全事件（登录/登录失败/权限变更/文件操作/配置修改/IP 封禁），不影响主业务性能
-- **HTTP 访问日志**：全局中间件记录所有请求（IP/路径/状态码/耗时/带宽），数据持久化存储
+- **操作审计系统**：异步记录所有关键安全事件（登录/登录失败/权限变更/文件操作/配置修改/IP 封禁/批量删除），记录操作用户 ID，前端展示用户名
+- **HTTP 访问日志**：全局中间件记录所有请求（IP/路径/状态码/耗时/带宽），数据持久化存储，30 天自动清理
+- **审计日志**：90 天自动清理，防止数据库无限增长
 
 ## 技术栈
 
@@ -53,7 +54,7 @@
 |------|------|
 | 后端 | NestJS 10 + TypeScript (CommonJS, strict mode) + TypeORM 0.3 |
 | 数据库 | PostgreSQL ≥ 14 |
-| 前端 | Vue 3 + TypeScript + Vite 5 + TDesign + ECharts 5 |
+| 前端 | Vue 3 + TypeScript + Vite 5 + TDesign + ECharts 6 |
 | 存储 | Telegram Bot API（支持本地代理绕过限流） |
 | 邮件 | Nodemailer + SMTP |
 | 认证 | Passport JWT + bcryptjs |
@@ -125,6 +126,10 @@ CORS_ORIGINS=http://localhost:5173
 MAX_FILE_SIZE=20971520
 FILE_TYPE_MODE=blacklist      # blacklist 或 whitelist
 FILE_TYPE_FILTER=              # 逗号分隔的扩展名，如 .zip,.exe,.sh，空值不限制
+
+# 日志保留策略（定时自动清理）
+ACCESS_LOG_RETENTION_DAYS=30   # 访问日志保留天数
+AUDIT_LOG_RETENTION_DAYS=90    # 审计日志保留天数
 ```
 
 第一个注册的账号自动成为超级管理员。
@@ -137,19 +142,20 @@ FILE_TYPE_FILTER=              # 逗号分隔的扩展名，如 .zip,.exe,.sh，
 │   ├── app.module.ts         # 根模块（TypeORM、Schedule、事件发射器）
 │   ├── auth/                 # 登录/注册/邮箱验证/密码重置/状态查询
 │   ├── user/                 # 个人信息/密码修改/统计
-│   ├── file/                 # 上传/下载/分享/公开访问/缩略图加密
-│   ├── admin/                # 用户/文件/IP封禁/系统配置管理
+│   ├── file/                 # 上传/下载/分享/公开访问/缩略图加密/批量上传
+│   ├── admin/                # 用户/文件/IP封禁/系统配置管理（含批量删除审计）
 │   ├── telegram/             # Telegram Bot API 上传下载（流式传输，Token 脱敏）
 │   ├── mailer/               # SMTP 邮件（事件驱动配置热更新）
 │   ├── config/               # 动态配置缓存
-│   ├── tasks/                # 定时清理（过期限流/Token/封禁）
+│   ├── tasks/                # 定时清理（限流/Token/封禁/访问日志/审计日志）
 │   ├── common/
 │   │   ├── entities/         # 10 个数据实体（含 AuditLog, AccessLog）
 │   │   ├── services/         # ConfigCacheService + RateLimitService + AuditService
 │   │   ├── guards/           # JWT 认证 + 角色权限守卫
 │   │   ├── decorators/       # @CurrentUser @Roles
 │   │   ├── interceptors/     # 统一响应 { code, message, data }
-│   │   └── middleware/       # AccessLogMiddleware（全局 HTTP 请求日志）
+│   │   ├── middleware/       # AccessLogMiddleware（全局 HTTP 请求日志，追踪实际发送字节数）
+│   │   ├── utils/            # client-ip.ts crypto.util.ts
 │   ├── database/             # TypeORM CLI DataSource（含 dotenv/config 加载）
 │   └── migrations/           # 9 个数据库迁移文件
 │
@@ -162,9 +168,9 @@ FILE_TYPE_FILTER=              # 逗号分隔的扩展名，如 .zip,.exe,.sh，
 │   ├── components/           # UploadModal ThumbnailImg
 │   ├── stores/               # auth files (Pinia)
 │   ├── router/               # 四级路由守卫链 + redirect 安全校验
-│   ├── api/                  # axios 客户端（30s 超时，401 防抖）
+│   ├── api/                  # axios 客户端（10s 超时，401 防抖）
 │   ├── types/                # TS 类型定义
-│   └── utils/                # error.ts thumbnail.ts
+│   └── utils/                # error.ts format.ts thumbnail.ts
 │
 ├── .gitignore
 ├── LICENSE
@@ -238,7 +244,7 @@ npm run typecheck            # TypeScript 类型检查
 | GET | `/api/admin/access-logs` | HTTP 访问日志（分页/筛选） |
 | GET | `/api/admin/access-logs/stats` | 访问统计（请求量/带宽/UV/QPS） |
 | GET | `/api/admin/access-logs/trend` | 流量趋势时序数据 |
-| GET | `/api/admin/audit-logs` | 操作审计日志（分页/筛选） |
+| GET | `/api/admin/audit-logs` | 操作审计日志（分页/筛选，含关联用户名） |
 
 ## 许可证
 
