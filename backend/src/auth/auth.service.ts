@@ -82,6 +82,10 @@ export class AuthService {
       const [{ count }] = await queryRunner.query(
         'SELECT COUNT(*) as count FROM "users"',
       );
+      // TOCTOU 修复：锁表后再检查注册开关，防止并发请求绕过"首位用户"限制
+      if (registrationEnabled !== 'true' && Number(count) > 0) {
+        throw new BadRequestException('注册功能已关闭，请联系管理员');
+      }
       const role = Number(count) === 0 ? UserRole.SUPER_ADMIN : UserRole.USER;
 
       const user = queryRunner.manager.create(User, {

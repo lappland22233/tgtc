@@ -338,6 +338,18 @@ export class FileService implements OnModuleInit {
     }
   }
 
+  /**
+   * 统一权限校验：仅文件所有者和管理员可修改文件
+   * @param file 文件对象
+   * @param user 当前用户
+   * @throws ForbiddenException 如果无权修改
+   */
+  private assertFileWritable(file: File, user: User): void {
+    if (file.uploaderId !== user.id && user.role === UserRole.USER) {
+      throw new ForbiddenException('无权修改此文件');
+    }
+  }
+
   async findOne(id: string, user: User): Promise<File> {
     const file = await this.fileRepository.findOne({
       where: { id, isDeleted: false },
@@ -361,9 +373,7 @@ export class FileService implements OnModuleInit {
       throw new NotFoundException('文件不存在');
     }
 
-    if (file.uploaderId !== user.id && user.role === UserRole.USER) {
-      throw new ForbiddenException('无权删除此文件');
-    }
+    this.assertFileWritable(file, user);
 
     file.isDeleted = true;
     await this.fileRepository.save(file);
@@ -387,9 +397,7 @@ export class FileService implements OnModuleInit {
       throw new NotFoundException('文件不存在');
     }
 
-    if (file.uploaderId !== user.id && user.role === UserRole.USER) {
-      throw new ForbiddenException('无权修改此文件');
-    }
+    this.assertFileWritable(file, user);
 
     await this.fileRepository.update(id, { accessType });
 
@@ -412,9 +420,7 @@ export class FileService implements OnModuleInit {
       throw new NotFoundException('文件不存在');
     }
 
-    if (file.uploaderId !== user.id && user.role === UserRole.USER) {
-      throw new ForbiddenException('无权修改此文件');
-    }
+    this.assertFileWritable(file, user);
 
     await this.fileRepository.update(id, { maxAccessCount });
 
@@ -437,9 +443,7 @@ export class FileService implements OnModuleInit {
       throw new NotFoundException('文件不存在');
     }
 
-    if (file.uploaderId !== user.id && user.role === UserRole.USER) {
-      throw new ForbiddenException('无权修改此文件');
-    }
+    this.assertFileWritable(file, user);
 
     const hashedPassword = password ? await bcrypt.hash(password, 10) : null;
     await this.fileRepository.update(id, { password: hashedPassword });
@@ -462,9 +466,7 @@ export class FileService implements OnModuleInit {
       throw new NotFoundException('文件不存在');
     }
 
-    if (file.uploaderId !== user.id && user.role === UserRole.USER) {
-      throw new ForbiddenException('无权修改此文件');
-    }
+    this.assertFileWritable(file, user);
 
     await this.fileRepository.update(id, { expiresIn, expiresStartAt: expiresIn !== null ? new Date() : null });
 
@@ -789,9 +791,7 @@ export class FileService implements OnModuleInit {
       throw new NotFoundException('文件不存在');
     }
 
-    if (file.uploaderId !== user.id && user.role === UserRole.USER) {
-      throw new ForbiddenException('无权分享此文件');
-    }
+    this.assertFileWritable(file, user);
 
     const baseUrl = this.configService.get<string>('APP_URL') || 'http://localhost:3000';
     const shareLink = `${baseUrl}/files/public/${id}`;

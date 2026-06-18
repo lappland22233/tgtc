@@ -127,16 +127,29 @@ export class AdminService {
     return this.configCacheService.get(key, '');
   }
 
+  /** 审计日志中需脱敏的敏感配置键 */
+  private readonly SENSITIVE_KEYS = new Set([
+    'SMTP_PASSWORD',
+    'TELEGRAM_BOT_TOKEN',
+    'JWT_SECRET',
+    'COOKIE_SECRET',
+    'DB_PASSWORD',
+  ]);
+
   async updateConfig(user: User, key: string, value: string, description?: string): Promise<void> {
     await this.setConfigValue(key, value, description);
 
-    // 审计日志：配置变更
+    // 审计日志：配置变更（敏感键脱敏）
+    const sanitizedValue = this.SENSITIVE_KEYS.has(key)
+      ? '***'
+      : value.substring(0, 100);
+
     this.auditService.log({
       action: 'config_change',
       userId: user.id,
       resourceType: 'config',
       resourceId: key,
-      metadata: { value: value.substring(0, 100), description },
+      metadata: { value: sanitizedValue, description },
     });
   }
 
