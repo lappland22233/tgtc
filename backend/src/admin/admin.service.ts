@@ -127,20 +127,35 @@ export class AdminService {
     return this.configCacheService.get(key, '');
   }
 
-  async updateConfig(key: string, value: string, description?: string): Promise<void> {
-    await this.configCacheService.set(key, value, description);
+  async updateConfig(user: User, key: string, value: string, description?: string): Promise<void> {
+    await this.setConfigValue(key, value, description);
 
     // 审计日志：配置变更
     this.auditService.log({
       action: 'config_change',
+      userId: user.id,
       resourceType: 'config',
       resourceId: key,
       metadata: { value: value.substring(0, 100), description },
     });
   }
 
-  async updateConfigs(configs: { key: string; value: string; description?: string }[]): Promise<void> {
+  /** 仅写入配置不记录审计（供批量操作内部调用，避免重复记录） */
+  private async setConfigValue(key: string, value: string, description?: string): Promise<void> {
+    await this.configCacheService.set(key, value, description);
+  }
+
+  async updateConfigs(user: User, configs: { key: string; value: string; description?: string }[]): Promise<void> {
     await this.configCacheService.setBatch(configs);
+
+    // 审计日志：批量配置变更
+    this.auditService.log({
+      action: 'config_change',
+      userId: user.id,
+      resourceType: 'config',
+      resourceId: 'batch',
+      metadata: { keys: configs.map(c => c.key) },
+    });
   }
 
   async getBannedIPs(): Promise<BannedIP[]> {
@@ -149,9 +164,9 @@ export class AdminService {
     });
   }
 
-  async banIP(ip: string, reason?: string, permanent = true, expiresAt?: Date): Promise<void> {
+  async banIP(user: User, ip: string, reason?: string, permanent = true, expiresAt?: Date): Promise<void> {
     const existing = await this.bannedIPRepository.findOne({ where: { ip } });
-    
+
     if (existing) {
       throw new BadRequestException('该IP已被封禁');
     }
@@ -167,15 +182,16 @@ export class AdminService {
     // 审计日志：IP 封禁
     this.auditService.log({
       action: 'ip_ban',
+      userId: user.id,
       resourceType: 'ip',
       resourceId: ip,
       metadata: { reason, permanent },
     });
   }
 
-  async unbanIP(ip: string): Promise<void> {
+  async unbanIP(user: User, ip: string): Promise<void> {
     const bannedIP = await this.bannedIPRepository.findOne({ where: { ip } });
-    
+
     if (!bannedIP) {
       throw new NotFoundException('该IP未被封禁');
     }
@@ -185,6 +201,7 @@ export class AdminService {
     // 审计日志：IP 解封
     this.auditService.log({
       action: 'ip_unban',
+      userId: user.id,
       resourceType: 'ip',
       resourceId: ip,
     });
@@ -201,9 +218,9 @@ export class AdminService {
     return this.fileService.findAll(page, limit);
   }
 
-  async deleteFile(id: string): Promise<void> {
+  async deleteFile(user: User, id: string): Promise<void> {
     const file = await this.fileRepository.findOne({ where: { id } });
-    
+
     if (!file) {
       throw new NotFoundException('文件不存在');
     }
@@ -214,18 +231,20 @@ export class AdminService {
     // 审计日志：管理员删除文件
     this.auditService.log({
       action: 'file_delete',
+      userId: user.id,
       resourceType: 'file',
       resourceId: id,
       metadata: { filename: file.originalName },
     });
   }
 
-  async batchDeleteFiles(ids: string[]): Promise<void> {
+  async batchDeleteFiles(user: User, ids: string[]): Promise<void> {
     await this.fileRepository.update(ids, { isDeleted: true });
 
     // 审计日志：批量删除文件
     this.auditService.log({
       action: 'batch_delete_files',
+      userId: user.id,
       resourceType: 'file',
       metadata: { count: ids.length, ids },
     });
@@ -246,20 +265,21 @@ export class AdminService {
     };
   }
 
-  async updateAuthConfig(config: {
+  async updateAuthConfig(user: User, config: {
     registrationEnabled?: boolean;
     emailVerificationEnabled?: boolean;
   }): Promise<void> {
     if (config.registrationEnabled !== undefined) {
-      await this.updateConfig('REGISTRATION_ENABLED', config.registrationEnabled.toString(), '是否允许新用户注册');
+      await this.setConfigValue('REGISTRATION_ENABLED', config.registrationEnabled.toString(), '是否允许新用户注册');
     }
     if (config.emailVerificationEnabled !== undefined) {
-      await this.updateConfig('EMAIL_VERIFICATION_ENABLED', config.emailVerificationEnabled.toString(), '是否开启邮箱验证码');
+      await this.setConfigValue('EMAIL_VERIFICATION_ENABLED', config.emailVerificationEnabled.toString(), '是否开启邮箱验证码');
     }
 
     // 审计日志：认证配置变更
     this.auditService.log({
       action: 'auth_config_change',
+      userId: user.id,
       resourceType: 'config',
       resourceId: 'auth',
       metadata: config,
@@ -290,7 +310,7 @@ export class AdminService {
     };
   }
 
-  async updateSMTPConfig(config: {
+  async updateSMTPConfig(user: User, config: {
     host: string;
     port: number;
     secure: boolean;
@@ -298,7 +318,7 @@ export class AdminService {
     password: string;
     from: string;
   }): Promise<void> {
-    await this.updateConfigs([
+    await this.configCacheService.setBatch([
       { key: 'SMTP_HOST', value: config.host, description: 'SMTP服务器地址' },
       { key: 'SMTP_PORT', value: config.port.toString(), description: 'SMTP服务器端口' },
       { key: 'SMTP_SECURE', value: config.secure.toString(), description: '是否使用SSL' },
@@ -310,6 +330,7 @@ export class AdminService {
     // 审计日志：SMTP 配置变更
     this.auditService.log({
       action: 'smtp_config_change',
+      userId: user.id,
       resourceType: 'config',
       resourceId: 'smtp',
     });
@@ -333,26 +354,27 @@ export class AdminService {
     };
   }
 
-  async updateUploadConfig(config: {
+  async updateUploadConfig(user: User, config: {
     maxFileSize?: number;
     fileTypeMode?: string;
     fileTypeFilter?: string;
   }): Promise<void> {
     if (config.maxFileSize !== undefined) {
-      await this.updateConfig('MAX_FILE_SIZE', config.maxFileSize.toString(), '最大文件大小（字节）');
+      await this.setConfigValue('MAX_FILE_SIZE', config.maxFileSize.toString(), '最大文件大小（字节）');
     }
 
     if (config.fileTypeMode !== undefined) {
-      await this.updateConfig('FILE_TYPE_MODE', config.fileTypeMode, '文件类型过滤模式（blacklist/whitelist）');
+      await this.setConfigValue('FILE_TYPE_MODE', config.fileTypeMode, '文件类型过滤模式（blacklist/whitelist）');
     }
 
     if (config.fileTypeFilter !== undefined) {
-      await this.updateConfig('FILE_TYPE_FILTER', config.fileTypeFilter, '文件类型过滤列表（逗号分隔）');
+      await this.setConfigValue('FILE_TYPE_FILTER', config.fileTypeFilter, '文件类型过滤列表（逗号分隔）');
     }
 
     // 审计日志：上传配置变更
     this.auditService.log({
       action: 'upload_config_change',
+      userId: user.id,
       resourceType: 'config',
       resourceId: 'upload',
       metadata: config,
@@ -524,31 +546,54 @@ export class AdminService {
     action?: string;
     userId?: string;
     timeRange?: string;
-  }): Promise<{ items: AuditLog[]; total: number }> {
+  }): Promise<{ items: (AuditLog & { username?: string })[]; total: number }> {
     const page = Math.max(1, query.page || 1);
     const limit = Math.min(100, Math.max(1, query.limit || 20));
     const since = this.parseTimeRange(query.timeRange || '24h');
 
-    const qb = this.auditLogRepo
+    // 基础条件查询（供 count 和 items 共用）
+    const baseQb = this.auditLogRepo
       .createQueryBuilder('log')
       .where('log.createdAt >= :since', { since });
 
     if (query.action) {
-      qb.andWhere('log.action = :action', { action: query.action });
+      baseQb.andWhere('log.action = :action', { action: query.action });
     }
 
     if (query.userId) {
-      qb.andWhere('log.userId = :userId', { userId: query.userId });
+      baseQb.andWhere('log.userId = :userId', { userId: query.userId });
     }
 
-    const total = await qb.getCount();
+    const total = await baseQb.getCount();
 
-    const items = await qb
+    // 带用户名联查的数据查询
+    const items = await baseQb
+      .leftJoin(User, 'u', 'CAST(u.id AS varchar) = log.userId')
+      .select([
+        'log.id', 'log.userId', 'log.action', 'log.ip',
+        'log.resourceType', 'log.resourceId', 'log.metadata',
+        'log.status', 'log.createdAt',
+      ])
+      .addSelect('u.email', 'username')
       .orderBy('log.createdAt', 'DESC')
       .skip((page - 1) * limit)
       .take(limit)
-      .getMany();
+      .getRawMany();
 
-    return { items, total };
+    return {
+      items: items.map(item => ({
+        id: item.log_id,
+        userId: item.log_userId,
+        username: item.username || null,
+        action: item.log_action,
+        ip: item.log_ip,
+        resourceType: item.log_resourceType,
+        resourceId: item.log_resourceId,
+        metadata: item.log_metadata,
+        status: item.log_status,
+        createdAt: item.log_createdAt,
+      })),
+      total,
+    };
   }
 }

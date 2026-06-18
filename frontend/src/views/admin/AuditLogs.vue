@@ -46,6 +46,7 @@
         <t-option value="auth_config_change" label="认证配置" />
         <t-option value="ip_ban" label="IP封禁" />
         <t-option value="ip_unban" label="IP解封" />
+        <t-option value="batch_delete_files" label="批量删除" />
       </t-select>
       <t-button variant="outline" @click="onRefresh">刷新</t-button>
     </div>
@@ -81,6 +82,11 @@
           </span>
           <span v-else>-</span>
         </template>
+        <template #username="{ row }">
+          <span v-if="row.username" style="color: var(--text-primary);">{{ row.username }}</span>
+          <span v-else-if="row.userId" :title="row.userId" style="font-size: 11px; color: var(--text-secondary); font-family: monospace;">{{ truncateId(row.userId) }}</span>
+          <span v-else style="color: var(--text-secondary)">匿名</span>
+        </template>
         <template #createdAt="{ row }">
           {{ formatTime(row.createdAt) }}
         </template>
@@ -98,6 +104,7 @@ interface AuditLogItem {
   id: string;
   action: string;
   userId: string | null;
+  username: string | null;
   ip: string | null;
   resourceType: string | null;
   resourceId: string | null;
@@ -124,7 +131,7 @@ const pagination = reactive({
 const columns = [
   { colKey: 'action', title: '操作', width: 110 },
   { colKey: 'status', title: '状态', width: 70 },
-  { colKey: 'userId', title: '用户ID', ellipsis: true, width: 160 },
+  { colKey: 'username', title: '操作用户', ellipsis: true, width: 140 },
   { colKey: 'ip', title: 'IP', width: 130 },
   { colKey: 'resourceType', title: '资源类型', width: 90 },
   { colKey: 'resourceId', title: '资源ID', ellipsis: true, width: 140 },
@@ -187,6 +194,12 @@ function formatTime(dateStr: string): string {
     month: '2-digit', day: '2-digit',
     hour: '2-digit', minute: '2-digit', second: '2-digit',
   });
+}
+
+/** UUID 截断显示（前 8 位 + ...），用于无用户名的降级展示 */
+function truncateId(id: string): string {
+  if (id.length <= 12) return id;
+  return id.substring(0, 8) + '...';
 }
 
 async function fetchLogs() {

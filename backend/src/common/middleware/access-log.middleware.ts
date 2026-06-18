@@ -25,9 +25,31 @@ export class AccessLogMiddleware implements NestMiddleware {
       return;
     }
 
+    // 通过拦截 write/end 追踪实际发送的字节数（兼容流式响应和 gzip 压缩）
+    let bytesSent = 0;
+    const originalWrite = res.write.bind(res) as typeof res.write;
+    const originalEnd = res.end.bind(res) as typeof res.end;
+    const self = this;
+
+    res.write = function (chunk: unknown, ...rest: any[]): boolean {
+      if (typeof chunk === 'string' || Buffer.isBuffer(chunk)) {
+        const data = chunk as string | Buffer;
+        bytesSent += Buffer.isBuffer(data) ? data.length : Buffer.byteLength(data);
+      }
+      return (originalWrite as any)(chunk, ...rest);
+    };
+
+    res.end = function (chunk: unknown, ...rest: any[]): any {
+      if (typeof chunk === 'string' || Buffer.isBuffer(chunk)) {
+        const data = chunk as string | Buffer;
+        bytesSent += Buffer.isBuffer(data) ? data.length : Buffer.byteLength(data);
+      }
+      return (originalEnd as any)(chunk, ...rest);
+    };
+
     // 在响应完成时记录日志
     res.on('finish', () => {
-      this.logAsync(req, res, Date.now() - start, path).catch(() => {
+      self.logAsync(req, res, Date.now() - start, path, bytesSent).catch(() => {
         // 日志写入失败不影响业务
       });
     });
@@ -40,10 +62,16 @@ export class AccessLogMiddleware implements NestMiddleware {
     res: Response,
     duration: number,
     path: string,
+    bytesSent: number,
   ): Promise<void> {
     try {
       const ip = getClientIp(req);
-      const responseSize = parseInt(res.getHeader('content-length') as string) || 0;
+
+      // 优先使用实际发送的字节数，其次使用 content-length 头
+      const responseSize =
+        bytesSent ||
+        parseInt(res.getHeader('content-length') as string) ||
+        0;
 
       const entry = this.accessLogRepository.create({
         ip,

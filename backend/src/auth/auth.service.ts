@@ -78,8 +78,9 @@ export class AuthService {
       // 锁定 users 表防止并发注册竞态，确保首个注册用户获得 super_admin
       // 使用 FOR UPDATE 确保在 REPEATABLE READ 下也能读到最新数据
       await queryRunner.query('LOCK TABLE "users" IN EXCLUSIVE MODE');
+      // 表已通过 LOCK TABLE 锁定，无需 FOR UPDATE（PostgreSQL 不允许对聚合函数使用 FOR UPDATE）
       const [{ count }] = await queryRunner.query(
-        'SELECT COUNT(*) as count FROM "users" FOR UPDATE',
+        'SELECT COUNT(*) as count FROM "users"',
       );
       const role = Number(count) === 0 ? UserRole.SUPER_ADMIN : UserRole.USER;
 
