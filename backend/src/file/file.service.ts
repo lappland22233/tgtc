@@ -160,38 +160,49 @@ export class FileService implements OnModuleInit {
    * - 白名单 + 有过滤 = 允许匹配的
    * 同时验证 MIME 类型与扩展名的一致性
    */
-  private isFileTypeAllowed(filename: string, mimeType?: string): boolean {
+  private isFileTypeAllowed(filename: string, mimeType?: string): { allowed: boolean; reason?: string } {
     if (this.fileTypeMode === 'blacklist' && this.fileTypeFilter.length === 0) {
-      return true;
-    }
-
-    if (this.fileTypeMode === 'whitelist' && this.fileTypeFilter.length === 0) {
-      return false;
+      return { allowed: true };
     }
 
     const lowerName = filename.toLowerCase();
+    const lastDot = lowerName.lastIndexOf('.');
+    const ext = lastDot > 0 ? lowerName.substring(lastDot) : '(无扩展名)';
+
+    if (this.fileTypeMode === 'whitelist' && this.fileTypeFilter.length === 0) {
+      return { allowed: false, reason: `文件类型 ${ext} 被拒绝：白名单模式未配置允许类型` };
+    }
+
     const matched = this.fileTypeFilter.some(f => lowerName.endsWith(f));
 
     let allowed: boolean;
+    let reason: string | undefined;
     if (this.fileTypeMode === 'blacklist') {
       allowed = !matched;
+      if (!allowed) {
+        reason = `文件类型 ${ext} 被拒绝：该类型在禁止列表中`;
+      }
     } else {
       allowed = matched;
+      if (!allowed) {
+        reason = `文件类型 ${ext} 被拒绝：该类型不在允许列表中`;
+      }
     }
 
     // 额外检查：如果提供了 MIME 类型，验证其与扩展名的一致性
     if (allowed && mimeType) {
-      const lastDot = lowerName.lastIndexOf('.');
       if (lastDot > 0) {
-        const ext = lowerName.substring(lastDot);
         const expectedTypes = MIME_EXTENSION_MAP[ext];
         if (expectedTypes && !expectedTypes.includes(mimeType)) {
-          return false;
+          return {
+            allowed: false,
+            reason: `文件扩展名 ${ext} 与 MIME 类型 ${mimeType} 不匹配`,
+          };
         }
       }
     }
 
-    return allowed;
+    return { allowed, reason };
   }
 
   /**
@@ -233,10 +244,10 @@ export class FileService implements OnModuleInit {
 
     const originalName = this.fixFilenameEncoding(file.originalname);
 
-    const isAllowed = this.isFileTypeAllowed(originalName, file.mimetype);
+    const typeCheck = this.isFileTypeAllowed(originalName, file.mimetype);
 
-    if (!isAllowed) {
-      throw new BadRequestException('不允许上传此类型的文件');
+    if (!typeCheck.allowed) {
+      throw new BadRequestException(typeCheck.reason || '不允许上传此类型的文件');
     }
 
     let telegramFile;
@@ -1015,8 +1026,9 @@ export class FileService implements OnModuleInit {
 
     const originalName = this.fixFilenameEncoding(file.originalname);
 
-    if (!this.isFileTypeAllowed(originalName, file.mimetype)) {
-      throw new BadRequestException('不允许上传此类型的文件');
+    const typeCheck2 = this.isFileTypeAllowed(originalName, file.mimetype);
+    if (!typeCheck2.allowed) {
+      throw new BadRequestException(typeCheck2.reason || '不允许上传此类型的文件');
     }
 
     const job = this.uploadJobService.createJob(user, originalName);
@@ -1039,8 +1051,9 @@ export class FileService implements OnModuleInit {
         const file = files[i];
         try {
           const originalName = this.fixFilenameEncoding(file.originalname);
-          if (!this.isFileTypeAllowed(originalName, file.mimetype)) {
-            failed.push({ name: originalName, reason: '不允许上传此类型的文件' });
+          const typeCheck3 = this.isFileTypeAllowed(originalName, file.mimetype);
+          if (!typeCheck3.allowed) {
+            failed.push({ name: originalName, reason: typeCheck3.reason || '不允许上传此类型的文件' });
             continue;
           }
           if (file.size > this.maxFileSize) {

@@ -62,6 +62,11 @@
       <h3 style="margin-bottom: 16px;">📁 文件上传配置</h3>
       <t-form layout="vertical">
 
+        <!-- 最大文件大小 -->
+        <t-form-item label="最大文件大小 (MB)">
+          <t-input-number v-model="uploadConfig.maxFileSizeMB" :min="1" :max="1024" />
+        </t-form-item>
+
         <!-- 模式切换 -->
         <t-form-item label="过滤模式">
           <t-radio-group v-model="uploadConfig.fileTypeMode">
@@ -104,7 +109,7 @@
             <t-input
               v-model="customExtension"
               placeholder="如 .apk" style="max-width: 160px;"
-              @keyup.enter="addCustomExtension"
+              @enter="addCustomExtension"
             />
             <t-button variant="outline" :disabled="!customExtension.trim()" @click="addCustomExtension">
               添加
@@ -114,7 +119,7 @@
 
         <!-- 已选列表 -->
         <t-form-item v-if="selectedExtensions.length > 0" label="已选后缀">
-          <div style="display: flex; flex-wrap: wrap; gap: 6px;">
+          <div style="display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px;">
             <t-tag
               v-for="ext in selectedExtensions"
               :key="ext"
@@ -125,11 +130,6 @@
               {{ ext }}
             </t-tag>
           </div>
-        </t-form-item>
-
-        <!-- 最大文件大小 -->
-        <t-form-item label="最大文件大小 (MB)">
-          <t-input-number v-model="uploadConfig.maxFileSizeMB" :min="1" :max="1024" />
         </t-form-item>
 
         <t-form-item>
