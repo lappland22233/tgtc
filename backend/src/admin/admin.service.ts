@@ -1,6 +1,7 @@
 import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import { UAParser } from 'ua-parser-js';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, LessThan } from 'typeorm';
+import { Repository, LessThan, SelectQueryBuilder } from 'typeorm';
 import { SystemConfig } from '../common/entities/system-config.entity';
 import { BannedIP } from '../common/entities/banned-ip.entity';
 import { File } from '../common/entities/file.entity';
@@ -12,6 +13,18 @@ import { FileService } from '../file/file.service';
 import { ConfigCacheService } from '../common/services/config-cache.service';
 import { AuditService } from '../common/services/audit.service';
 import { encryptPassword } from '../common/utils/crypto.util';
+import { ExportService, ExportOptions } from './export.service';
+import {
+  TopFilesQueryDto,
+  TopPathsQueryDto,
+  DateRangeQueryDto,
+  StatusByPathQueryDto,
+  AbnormalIpsQueryDto,
+  RefererAnalysisQueryDto,
+  UserAgentAnalysisQueryDto,
+  BandwidthQueryDto,
+  FileTypeQueryDto,
+} from './admin-stats.dto';
 
 @Injectable()
 export class AdminService {
@@ -33,6 +46,7 @@ export class AdminService {
     private fileService: FileService,
     private configCacheService: ConfigCacheService,
     private auditService: AuditService,
+    private exportService: ExportService,
   ) {}
 
   async getStats(): Promise<{
@@ -607,6 +621,821 @@ export class AdminService {
         createdAt: item.log_createdAt,
       })),
       total,
+    };
+  }
+
+  // ==================== 高级统计 API ====================
+
+  async getTopFiles(query: TopFilesQueryDto) {
+    let since: Date;
+    if (query.startDate) {
+      since = new Date(query.startDate);
+    } else {
+      since = this.parseTimeRange(query.timeRange || '24h');
+    }
+
+    const limit = query.limit || 10;
+    const sortBy = query.sortBy || 'accessCount';
+
+    const qb = this.accessLogRepository
+      .createQueryBuilder('fal')
+      .leftJoin(File, 'f', 'f.id = fal.fileId')
+      .select('f.id', 'fileId')
+      .addSelect('f."originalName"', 'fileName')
+      .addSelect('f."mimeType"', 'mimeType')
+      .addSelect('f.size', 'fileSize')
+      .addSelect('COUNT(*)::int', 'accessCount')
+      .addSelect('SUM(f.size)::bigint', 'totalBandwidth')
+      .where('fal.createdAt >= :since', { since })
+      .andWhere('f."isDeleted" = false');
+
+    if (query.endDate) {
+      qb.andWhere('fal.createdAt <= :until', { until: new Date(query.endDate) });
+    }
+
+    if (query.action) {
+      qb.andWhere('fal.action = :action', { action: query.action });
+    }
+
+    qb.groupBy('f.id, f."originalName", f."mimeType", f.size');
+
+    if (sortBy === 'bandwidth') {
+      qb.orderBy('"totalBandwidth"', 'DESC');
+    } else {
+      qb.orderBy('"accessCount"', 'DESC');
+    }
+
+    qb.limit(limit);
+
+    const raw = await qb.getRawMany<{
+      fileId: string;
+      fileName: string;
+      mimeType: string;
+      fileSize: string;
+      accessCount: string;
+      totalBandwidth: string;
+    }>();
+
+    return raw.map((r) => ({
+      fileId: r.fileId,
+      fileName: r.fileName,
+      mimeType: r.mimeType,
+      fileSize: Number(r.fileSize),
+      accessCount: Number(r.accessCount),
+      totalBandwidth: r.totalBandwidth,
+    }));
+  }
+
+  async getTopPaths(query: TopPathsQueryDto) {
+    const since = this.parseTimeRange(query.timeRange || '24h');
+    const limit = query.limit || 20;
+
+    const qb = this.accessLogRepo
+      .createQueryBuilder('log')
+      .select('log.path', 'path')
+      .addSelect('COUNT(*)::int', 'requestCount')
+      .addSelect('SUM(log."responseSize")::bigint', 'totalBandwidth')
+      .addSelect('AVG(log.duration)::numeric(10,2)', 'avgDuration')
+      .where('log.createdAt >= :since', { since });
+
+    if (query.excludePaths) {
+      const patterns = query.excludePaths.split(',').map((p) => p.trim());
+      patterns.forEach((pattern, i) => {
+        qb.andWhere(`log.path NOT LIKE :exclude${i}`, { [`exclude${i}`]: `%${pattern.replace(/[%_]/g, '\\$&')}%` });
+      });
+    }
+
+    qb.groupBy('log.path')
+      .orderBy('"requestCount"', 'DESC')
+      .limit(limit);
+
+    const raw = await qb.getRawMany<{
+      path: string;
+      requestCount: string;
+      totalBandwidth: string;
+      avgDuration: string;
+    }>();
+
+    return raw.map((r) => ({
+      path: r.path,
+      requestCount: Number(r.requestCount),
+      totalBandwidth: r.totalBandwidth,
+      avgDuration: Number(r.avgDuration),
+    }));
+  }
+
+  async getLatencyStats(query: DateRangeQueryDto) {
+    let since: Date;
+    if (query.startDate) {
+      since = new Date(query.startDate);
+    } else {
+      since = this.parseTimeRange(query.timeRange || '24h');
+    }
+
+    // 先获取总数，判断是否需要采样
+    const totalCount = await this.accessLogRepo
+      .createQueryBuilder('log')
+      .where('log.createdAt >= :since', { since })
+      .getCount();
+
+    const samplingThreshold = 1_000_000;
+    const sampled = totalCount > samplingThreshold;
+
+    let baseQb: SelectQueryBuilder<AccessLog>;
+    if (sampled) {
+      // TABLESAMPLE 在 TypeORM 中难以直用，使用 MOD 哈希采样替代
+      baseQb = this.accessLogRepo
+        .createQueryBuilder('log')
+        .where('log.createdAt >= :since', { since })
+        .andWhere("(MOD(hashtext(log.id::text), 100)) < 10");
+    } else {
+      baseQb = this.accessLogRepo
+        .createQueryBuilder('log')
+        .where('log.createdAt >= :since', { since });
+    }
+
+    if (query.endDate) {
+      baseQb.andWhere('log.createdAt <= :until', { until: new Date(query.endDate) });
+    }
+
+    const stats = await baseQb
+      .select([
+        'AVG(log.duration)::numeric(10,2) as "avgDuration"',
+        'PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY log.duration)::numeric(10,2) as "p50Duration"',
+        'PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY log.duration)::numeric(10,2) as "p95Duration"',
+        'PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY log.duration)::numeric(10,2) as "p99Duration"',
+      ])
+      .getRawOne<{
+        avgDuration: string;
+        p50Duration: string;
+        p95Duration: string;
+        p99Duration: string;
+      }>();
+
+    return {
+      avgDuration: Number(stats?.avgDuration || 0),
+      p50Duration: Number(stats?.p50Duration || 0),
+      p95Duration: Number(stats?.p95Duration || 0),
+      p99Duration: Number(stats?.p99Duration || 0),
+      totalRequests: totalCount,
+      ...(sampled ? { sampled: true } : {}),
+    };
+  }
+
+  async getStatusByPath(query: StatusByPathQueryDto) {
+    const since = this.parseTimeRange(query.timeRange || '24h');
+    const limit = query.limit || 50;
+    const minCount = query.minCount || 5;
+
+    const qb = this.accessLogRepo
+      .createQueryBuilder('log')
+      .select('log.path', 'path')
+      .addSelect(
+        'SUM(CASE WHEN log."statusCode" >= 200 AND log."statusCode" < 300 THEN 1 ELSE 0 END)::int',
+        'count2xx',
+      )
+      .addSelect(
+        'SUM(CASE WHEN log."statusCode" >= 300 AND log."statusCode" < 400 THEN 1 ELSE 0 END)::int',
+        'count3xx',
+      )
+      .addSelect(
+        'SUM(CASE WHEN log."statusCode" >= 400 AND log."statusCode" < 500 THEN 1 ELSE 0 END)::int',
+        'count4xx',
+      )
+      .addSelect(
+        'SUM(CASE WHEN log."statusCode" >= 500 AND log."statusCode" < 600 THEN 1 ELSE 0 END)::int',
+        'count5xx',
+      )
+      .addSelect('COUNT(*)::int', 'totalCount')
+      .where('log.createdAt >= :since', { since });
+
+    if (query.statusCode !== undefined) {
+      qb.andWhere('log."statusCode" = :statusCode', { statusCode: query.statusCode });
+    }
+
+    qb.groupBy('log.path')
+      .having('COUNT(*) >= :minCount', { minCount })
+      .orderBy('"totalCount"', 'DESC')
+      .limit(limit);
+
+    const raw = await qb.getRawMany<{
+      path: string;
+      count2xx: string;
+      count3xx: string;
+      count4xx: string;
+      count5xx: string;
+      totalCount: string;
+    }>();
+
+    return raw.map((r) => {
+      const total = Number(r.totalCount);
+      const errorCount = Number(r.count4xx || 0) + Number(r.count5xx || 0);
+      return {
+        path: r.path,
+        count2xx: Number(r.count2xx),
+        count3xx: Number(r.count3xx),
+        count4xx: Number(r.count4xx),
+        count5xx: Number(r.count5xx),
+        totalCount: total,
+        errorRate: total > 0 ? parseFloat(((errorCount / total) * 100).toFixed(2)) : 0,
+      };
+    });
+  }
+
+  async getDownloadStats(query: DateRangeQueryDto) {
+    let since: Date;
+    if (query.startDate) {
+      since = new Date(query.startDate);
+    } else {
+      since = this.parseTimeRange(query.timeRange || '24h');
+    }
+
+    // 下载总量
+    const [downloadStats] = await this.accessLogRepository
+      .createQueryBuilder('fal')
+      .select([
+        'COUNT(*)::int as "totalDownloads"',
+        'SUM(fal."responseSize")::bigint as "totalBandwidth"',
+      ])
+      .where('fal.action = :action', { action: 'download' })
+      .andWhere('fal.createdAt >= :since', { since })
+      .getRawMany<{ totalDownloads: string; totalBandwidth: string }>();
+
+    // 下载趋势（按小时聚合）
+    const trendRaw = await this.accessLogRepository
+      .createQueryBuilder('fal')
+      .select("DATE_TRUNC('hour', fal.createdAt)", 'time')
+      .addSelect('COUNT(*)::int', 'count')
+      .where('fal.action = :action', { action: 'download' })
+      .andWhere('fal.createdAt >= :since', { since })
+      .groupBy('time')
+      .orderBy('time', 'ASC')
+      .getRawMany<{ time: string; count: string }>();
+
+    // Top 下载者（按 IP）
+    const topDownloadersRaw = await this.accessLogRepository
+      .createQueryBuilder('fal')
+      .select('fal.ip', 'ip')
+      .addSelect('COUNT(*)::int', 'count')
+      .addSelect('SUM(fal."responseSize")::bigint', 'bandwidth')
+      .where('fal.action = :action', { action: 'download' })
+      .andWhere('fal.createdAt >= :since', { since })
+      .groupBy('fal.ip')
+      .orderBy('count', 'DESC')
+      .limit(20)
+      .getRawMany<{ ip: string; count: string; bandwidth: string }>();
+
+    return {
+      totalDownloads: Number(downloadStats?.totalDownloads || 0),
+      totalBandwidth: downloadStats?.totalBandwidth || '0',
+      trend: trendRaw.map((r) => ({
+        time: r.time,
+        count: Number(r.count),
+      })),
+      topDownloaders: topDownloadersRaw.map((r) => ({
+        ip: r.ip,
+        count: Number(r.count),
+        bandwidth: r.bandwidth,
+      })),
+    };
+  }
+
+  async getAbnormalIps(query: AbnormalIpsQueryDto) {
+    const since = this.parseTimeRange(query.timeRange || '24h');
+    const limit = query.limit || 20;
+    const minRequests = query.minRequests || 100;
+    const sortBy = query.sortBy || 'requestCount';
+
+    const raw = await this.accessLogRepo
+      .createQueryBuilder('log')
+      .select('log.ip', 'ip')
+      .addSelect('COUNT(*)::int', 'requestCount')
+      .addSelect(
+        'SUM(CASE WHEN log."statusCode" >= 400 THEN 1 ELSE 0 END)::int',
+        'errorCount',
+      )
+      .addSelect('SUM(log."responseSize")::bigint', 'bandwidth')
+      .addSelect('COUNT(DISTINCT log.path)::int', 'uniquePaths')
+      .where('log.createdAt >= :since', { since })
+      .groupBy('log.ip')
+      .having('COUNT(*) >= :minCount', { minCount: minRequests })
+      .orderBy(sortBy === 'errorRate'
+        ? 'SUM(CASE WHEN log."statusCode" >= 400 THEN 1 ELSE 0 END) * 1.0 / COUNT(*)'
+        : sortBy === 'bandwidth' ? '"bandwidth"' : '"requestCount"',
+        'DESC')
+      .limit(limit)
+      .getRawMany<{
+        ip: string;
+        requestCount: string;
+        errorCount: string;
+        bandwidth: string;
+        uniquePaths: string;
+      }>();
+
+    return raw.map((r) => {
+      const requestCount = Number(r.requestCount);
+      const errorCount = Number(r.errorCount);
+      const errorRate = requestCount > 0
+        ? parseFloat(((errorCount / requestCount) * 100).toFixed(2))
+        : 0;
+      const uniquePaths = Number(r.uniquePaths);
+
+      let riskLevel: string;
+      if (errorRate >= 50 || requestCount >= 10000) {
+        riskLevel = 'critical';
+      } else if (errorRate >= 30 || requestCount >= 5000) {
+        riskLevel = 'high';
+      } else if (errorRate >= 10 || requestCount >= 1000) {
+        riskLevel = 'medium';
+      } else {
+        riskLevel = 'low';
+      }
+
+      return {
+        ip: r.ip,
+        requestCount,
+        errorRate,
+        bandwidth: r.bandwidth,
+        uniquePaths,
+        riskLevel,
+      };
+    });
+  }
+
+  async getBanStats() {
+    const [
+      [banCounts],
+      recentBans,
+      unbanAuditCount,
+    ] = await Promise.all([
+      this.bannedIPRepository
+        .createQueryBuilder('b')
+        .select([
+          'COUNT(*)::int as "totalBanned"',
+          'SUM(CASE WHEN b."isPermanent" = false AND (b."expiresAt" IS NULL OR b."expiresAt" > NOW()) THEN 1 ELSE 0 END)::int as "activeTemporary"',
+          'SUM(CASE WHEN b."isPermanent" = true THEN 1 ELSE 0 END)::int as "permanentBans"',
+        ])
+        .getRawMany<{ totalBanned: string; activeTemporary: string; permanentBans: string }>(),
+      this.bannedIPRepository
+        .createQueryBuilder('b')
+        .select(['b.ip', 'b.reason', 'b."isPermanent"', 'b."createdAt"'])
+        .orderBy('b."createdAt"', 'DESC')
+        .limit(10)
+        .getRawMany<{ b_ip: string; b_reason: string | null; b_isPermanent: boolean; b_createdAt: Date }>(),
+      this.auditLogRepo
+        .createQueryBuilder('a')
+        .where('a.action = :action', { action: 'ip_unban' })
+        .getCount(),
+    ]);
+
+    const permanentBans = Number(banCounts?.permanentBans || 0);
+    const activeTemporary = Number(banCounts?.activeTemporary || 0);
+    const totalBanned = Number(banCounts?.totalBanned || 0);
+    const temporaryBans = totalBanned - permanentBans;
+    const unbanCount = unbanAuditCount;
+    const totalActions = totalBanned + unbanCount;
+    const unbanRatio = totalActions > 0
+      ? parseFloat(((unbanCount / totalActions) * 100).toFixed(2))
+      : 0;
+
+    return {
+      totalBanned,
+      activeBans: permanentBans + activeTemporary,
+      permanentBans,
+      temporaryBans,
+      recentBans: recentBans.map((r) => ({
+        ip: r.b_ip,
+        reason: r.b_reason || null,
+        createdAt: r.b_createdAt,
+      })),
+      unbanRatio,
+    };
+  }
+
+  // ==================== Phase 2: 来源分析 ====================
+
+  async getRefererAnalysis(query: RefererAnalysisQueryDto) {
+    const since = this.parseTimeRange(query.timeRange || '7d');
+
+    const raw = await this.accessLogRepo.manager.query(
+      `SELECT referer, COUNT(*)::int as count
+       FROM access_logs
+       WHERE "createdAt" >= $1 AND referer IS NOT NULL AND referer != ''
+       GROUP BY referer
+       ORDER BY count DESC
+       LIMIT 200`,
+      [since],
+    ) as { referer: string; count: number }[];
+
+    const total = raw.reduce((sum, r) => sum + r.count, 0);
+
+    // 分类规则
+    const searchDomains = ['google.com', 'bing.com', 'baidu.com', 'sogou.com', 'yandex.com', 'duckduckgo.com'];
+    const socialDomains = ['facebook.com', 'twitter.com', 'x.com', 'linkedin.com', 't.me', 'reddit.com', 'weibo.com', 'zhihu.com'];
+    const siteDomain = process.env.APP_URL ? new URL(process.env.APP_URL).hostname : '';
+
+    const categories = new Map<string, number>();
+    categories.set('搜索引擎', 0);
+    categories.set('社交媒体', 0);
+    categories.set('直接访问', 0);
+    categories.set('本站内链', 0);
+    categories.set('外部网站', 0);
+
+    // Add direct access count
+    const directResult = await this.accessLogRepo.manager.query(
+      `SELECT COUNT(*)::int as count FROM access_logs
+       WHERE "createdAt" >= $1 AND (referer IS NULL OR referer = '')`,
+      [since],
+    );
+    const directCount = directResult[0]?.count || 0;
+    categories.set('直接访问', directCount);
+
+    const totalWithDirect = total + directCount;
+
+    // Categorize referers
+    for (const r of raw) {
+      let hostname = '';
+      try { hostname = new URL(r.referer).hostname.replace(/^www\./, '').toLowerCase(); } catch { continue; }
+
+      if (searchDomains.some((d) => hostname.includes(d))) {
+        categories.set('搜索引擎', (categories.get('搜索引擎') || 0) + r.count);
+      } else if (socialDomains.some((d) => hostname.includes(d))) {
+        categories.set('社交媒体', (categories.get('社交媒体') || 0) + r.count);
+      } else if (siteDomain && hostname.includes(siteDomain)) {
+        categories.set('本站内链', (categories.get('本站内链') || 0) + r.count);
+      } else {
+        categories.set('外部网站', (categories.get('外部网站') || 0) + r.count);
+      }
+    }
+
+    // Extract search keywords
+    const keywords = new Map<string, number>();
+    for (const r of raw) {
+      try {
+        const url = new URL(r.referer);
+        let keyword = '';
+        const host = url.hostname.replace(/^www\./, '').toLowerCase();
+        if (host.includes('google.com')) {
+          keyword = url.searchParams.get('q') || '';
+        } else if (host.includes('baidu.com')) {
+          keyword = url.searchParams.get('wd') || '';
+        } else if (host.includes('bing.com')) {
+          keyword = url.searchParams.get('q') || '';
+        }
+        if (keyword) {
+          keywords.set(keyword, (keywords.get(keyword) || 0) + r.count);
+        }
+      } catch { /* ignore parse errors */ }
+    }
+
+    const topKeywords = Array.from(keywords.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 20)
+      .map(([keyword, count]) => ({ keyword, count }));
+
+    return {
+      categories: Array.from(categories.entries()).map(([name, count]) => ({
+        name,
+        count,
+        percentage: totalWithDirect > 0
+          ? parseFloat(((count / totalWithDirect) * 100).toFixed(2))
+          : 0,
+      })),
+      topReferers: raw.slice(0, 20).map((r) => ({
+        referer: r.referer,
+        count: r.count,
+      })),
+      topKeywords: topKeywords.length > 0 ? topKeywords : undefined,
+    };
+  }
+
+  async getUserAgentAnalysis(query: UserAgentAnalysisQueryDto) {
+    const since = this.parseTimeRange(query.timeRange || '7d');
+    const topN = query.topN || 500;
+
+    const raw = await this.accessLogRepo.manager.query(
+      `SELECT "userAgent", COUNT(*)::int as count
+       FROM access_logs
+       WHERE "createdAt" >= $1 AND "userAgent" IS NOT NULL AND "userAgent" != ''
+       GROUP BY "userAgent"
+       ORDER BY count DESC
+       LIMIT $2`,
+      [since, topN],
+    ) as { userAgent: string; count: number }[];
+
+    const parser = new UAParser();
+    const total = raw.reduce((sum, r) => sum + r.count, 0);
+
+    // Aggregate browsers
+    const browserMap = new Map<string, { count: number; versions: Map<string, number> }>();
+    const osMap = new Map<string, { count: number; versions: Map<string, number> }>();
+    const deviceMap = new Map<string, number>();
+
+    for (const r of raw) {
+      try {
+        parser.setUA(r.userAgent);
+        const ua = parser.getResult();
+
+        // Browser
+        const browserName = ua.browser.name || 'Other';
+        const browserVersion = ua.browser.version || 'Unknown';
+        const browserKey = `${browserName}|${browserVersion}`;
+        if (!browserMap.has(browserKey)) {
+          browserMap.set(browserKey, { count: 0, versions: new Map() });
+        }
+        const b = browserMap.get(browserKey)!;
+        b.count += r.count;
+        b.versions.set(browserVersion, (b.versions.get(browserVersion) || 0) + r.count);
+
+        // OS
+        const osName = ua.os.name || 'Other';
+        const osVersion = ua.os.version || 'Unknown';
+        const osKey = `${osName}|${osVersion}`;
+        if (!osMap.has(osKey)) {
+          osMap.set(osKey, { count: 0, versions: new Map() });
+        }
+        const o = osMap.get(osKey)!;
+        o.count += r.count;
+        o.versions.set(osVersion, (o.versions.get(osVersion) || 0) + r.count);
+
+        // Device
+        const deviceType = ua.device.type || (r.userAgent.toLowerCase().includes('bot') ? 'bot' : 'desktop');
+        deviceMap.set(deviceType, (deviceMap.get(deviceType) || 0) + r.count);
+      } catch { /* ignore parse errors */ }
+    }
+
+    const browsers = Array.from(browserMap.entries())
+      .map(([key, v]) => {
+        const [name, version] = key.split('|');
+        return { name, version, count: v.count, percentage: parseFloat(((v.count / total) * 100).toFixed(2)) };
+      })
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 20);
+
+    const os = Array.from(osMap.entries())
+      .map(([key, v]) => {
+        const [name, version] = key.split('|');
+        return { name, version, count: v.count, percentage: parseFloat(((v.count / total) * 100).toFixed(2)) };
+      })
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 20);
+
+    const devices = Array.from(deviceMap.entries())
+      .map(([type, count]) => ({ type, count, percentage: parseFloat(((count / total) * 100).toFixed(2)) }))
+      .sort((a, b) => b.count - a.count);
+
+    return {
+      browsers,
+      os,
+      devices,
+      topUserAgents: raw.slice(0, 30).map((r) => ({
+        userAgent: r.userAgent.substring(0, 200),
+        count: r.count,
+      })),
+    };
+  }
+
+  // ==================== Phase 3: 活动与消耗分析 ====================
+
+  async getBandwidthAnalysis(query: BandwidthQueryDto) {
+    const since = this.parseTimeRange(query.timeRange || '24h');
+
+    const [topFilesRaw, topIpsRaw, trendRaw] = await Promise.all([
+      // Top files by bandwidth
+      this.accessLogRepository
+        .createQueryBuilder('fal')
+        .leftJoin(File, 'f', 'f.id = fal.fileId')
+        .select('f.id', 'fileId')
+        .addSelect('f."originalName"', 'fileName')
+        .addSelect('f."mimeType"', 'mimeType')
+        .addSelect('SUM(fal."responseSize")::bigint', 'totalBandwidth')
+        .addSelect('COUNT(*)::int', 'accessCount')
+        .where('fal.createdAt >= :since', { since })
+        .andWhere('f."isDeleted" = false')
+        .groupBy('f.id, f."originalName", f."mimeType"')
+        .orderBy('"totalBandwidth"', 'DESC')
+        .limit(20)
+        .getRawMany<{
+          fileId: string;
+          fileName: string;
+          mimeType: string;
+          totalBandwidth: string;
+          accessCount: string;
+        }>(),
+      // Top IPs by bandwidth
+      this.accessLogRepository
+        .createQueryBuilder('fal')
+        .select('fal.ip', 'ip')
+        .addSelect('SUM(fal."responseSize")::bigint', 'bandwidth')
+        .addSelect('COUNT(*)::int', 'requestCount')
+        .where('fal.createdAt >= :since', { since })
+        .groupBy('fal.ip')
+        .orderBy('"bandwidth"', 'DESC')
+        .limit(20)
+        .getRawMany<{ ip: string; bandwidth: string; requestCount: string }>(),
+      // Bandwidth trend (hourly)
+      this.accessLogRepository
+        .createQueryBuilder('fal')
+        .select("DATE_TRUNC('hour', fal.createdAt)", 'time')
+        .addSelect('SUM(fal."responseSize")::bigint', 'bandwidth')
+        .where('fal.createdAt >= :since', { since })
+        .groupBy('time')
+        .orderBy('time', 'ASC')
+        .getRawMany<{ time: string; bandwidth: string }>(),
+    ]);
+
+    return {
+      topFiles: topFilesRaw.map((r) => ({
+        fileId: r.fileId,
+        fileName: r.fileName,
+        mimeType: r.mimeType,
+        totalBandwidth: r.totalBandwidth,
+        accessCount: Number(r.accessCount),
+      })),
+      topIps: topIpsRaw.map((r) => ({
+        ip: r.ip,
+        bandwidth: r.bandwidth,
+        requestCount: Number(r.requestCount),
+      })),
+      trend: trendRaw.map((r) => ({
+        time: r.time,
+        bandwidth: r.bandwidth,
+      })),
+    };
+  }
+
+  async getFileTypeStats(_query: FileTypeQueryDto) {
+    const files = await this.fileRepository
+      .createQueryBuilder('f')
+      .select(['f."mimeType"', 'f.size', 'f."accessType"'])
+      .where('f."isDeleted" = false')
+      .getRawMany<{ f_mimeType: string; f_size: string; f_accessType: string }>();
+
+    const mimeCategories: { name: string; fileCount: number; totalSize: bigint }[] = [
+      { name: '图片', fileCount: 0, totalSize: BigInt(0) },
+      { name: '视频', fileCount: 0, totalSize: BigInt(0) },
+      { name: '音频', fileCount: 0, totalSize: BigInt(0) },
+      { name: '文档', fileCount: 0, totalSize: BigInt(0) },
+      { name: '压缩包', fileCount: 0, totalSize: BigInt(0) },
+      { name: '其他', fileCount: 0, totalSize: BigInt(0) },
+    ];
+
+    let totalSize = BigInt(0);
+
+    for (const f of files) {
+      const mime = (f.f_mimeType || '').toLowerCase();
+      const size = BigInt(f.f_size || '0');
+      totalSize += size;
+
+      let category: string;
+      if (mime.startsWith('image/')) {
+        category = '图片';
+      } else if (mime.startsWith('video/')) {
+        category = '视频';
+      } else if (mime.startsWith('audio/')) {
+        category = '音频';
+      } else if (/pdf|document|spreadsheet|presentation|text|msword|officedocument|opendocument/.test(mime)) {
+        category = '文档';
+      } else if (/zip|rar|7z|tar|gz|compress|archive/.test(mime)) {
+        category = '压缩包';
+      } else {
+        category = '其他';
+      }
+
+      const cat = mimeCategories.find((c) => c.name === category)!;
+      cat.fileCount++;
+      cat.totalSize += size;
+    }
+
+    const categories = mimeCategories.map((c) => ({
+      name: c.name,
+      fileCount: c.fileCount,
+      totalSize: c.totalSize.toString(),
+      percentage: totalSize > BigInt(0)
+        ? parseFloat(((Number(c.totalSize) / Number(totalSize)) * 100).toFixed(2))
+        : 0,
+    }));
+
+    return { categories };
+  }
+
+  async getUserActivityStats(query: DateRangeQueryDto) {
+    let since: Date;
+    if (query.startDate) {
+      since = new Date(query.startDate);
+    } else {
+      since = this.parseTimeRange(query.timeRange || '24h');
+    }
+
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+
+    const weekAgo = new Date(Date.now() - 7 * 24 * 3600 * 1000);
+    const monthAgo = new Date(Date.now() - 30 * 24 * 3600 * 1000);
+
+    const [dauResult, wauResult, mauResult, newUsersResult, topUsersRaw] = await Promise.all([
+      this.accessLogRepo
+        .createQueryBuilder('log')
+        .select('COUNT(DISTINCT log.ip)', 'count')
+        .where('log.createdAt >= :today', { today: todayStart })
+        .getRawOne<{ count: string }>(),
+      this.accessLogRepo
+        .createQueryBuilder('log')
+        .select('COUNT(DISTINCT log.ip)', 'count')
+        .where('log.createdAt >= :weekAgo', { weekAgo })
+        .getRawOne<{ count: string }>(),
+      this.accessLogRepo
+        .createQueryBuilder('log')
+        .select('COUNT(DISTINCT log.ip)', 'count')
+        .where('log.createdAt >= :monthAgo', { monthAgo })
+        .getRawOne<{ count: string }>(),
+      this.userRepository
+        .createQueryBuilder('u')
+        .select('COUNT(*)', 'count')
+        .where('u.createdAt >= :since', { since })
+        .getRawOne<{ count: string }>(),
+      this.accessLogRepo
+        .createQueryBuilder('log')
+        .select('log.userId', 'userId')
+        .addSelect('log.ip', 'ip')
+        .addSelect('COUNT(*)::int', 'requestCount')
+        .addSelect('MAX(log.createdAt)', 'lastSeen')
+        .where('log.createdAt >= :since', { since })
+        .andWhere('log.userId IS NOT NULL')
+        .groupBy('log.userId, log.ip')
+        .orderBy('"requestCount"', 'DESC')
+        .limit(20)
+        .getRawMany<{ userId: string; ip: string; requestCount: string; lastSeen: string }>(),
+    ]);
+
+    return {
+      dau: Number(dauResult?.count || 0),
+      wau: Number(wauResult?.count || 0),
+      mau: Number(mauResult?.count || 0),
+      newUsers: Number(newUsersResult?.count || 0),
+      topActiveUsers: topUsersRaw.map((r) => ({
+        userId: r.userId,
+        ip: r.ip,
+        requestCount: Number(r.requestCount),
+        lastSeen: r.lastSeen,
+      })),
+    };
+  }
+
+  // ==================== Phase 7: 导出 & 对比 ====================
+
+  async exportData(options: ExportOptions) {
+    return this.exportService.export(options);
+  }
+
+  async getComparison(timeRange: string) {
+    const hours = { '1h': 1, '24h': 24, '7d': 168, '30d': 720 }[timeRange] || 168;
+    const now = new Date();
+    const periodMs = hours * 3600 * 1000;
+    const currentSince = new Date(now.getTime() - periodMs);
+    const previousSince = new Date(now.getTime() - 2 * periodMs);
+    const previousUntil = new Date(now.getTime() - periodMs);
+
+    // 当前周期统计
+    const [currentStats] = await this.accessLogRepo.manager.query(
+      `SELECT COUNT(*)::int as requests,
+              SUM("responseSize")::bigint as bandwidth,
+              COUNT(DISTINCT ip)::int as uv
+       FROM access_logs WHERE "createdAt" >= $1`,
+      [currentSince],
+    );
+
+    // 上一周期统计
+    const [previousStats] = await this.accessLogRepo.manager.query(
+      `SELECT COUNT(*)::int as requests,
+              SUM("responseSize")::bigint as bandwidth,
+              COUNT(DISTINCT ip)::int as uv
+       FROM access_logs WHERE "createdAt" >= $1 AND "createdAt" < $2`,
+      [previousSince, previousUntil],
+    );
+
+    const calcChange = (current: number, previous: number) => {
+      if (previous === 0) return current > 0 ? 100 : 0;
+      return parseFloat((((current - previous) / previous) * 100).toFixed(2));
+    };
+
+    return {
+      period: timeRange,
+      current: {
+        requests: Number(currentStats?.requests || 0),
+        bandwidth: currentStats?.bandwidth || '0',
+        uv: Number(currentStats?.uv || 0),
+      },
+      previous: {
+        requests: Number(previousStats?.requests || 0),
+        bandwidth: previousStats?.bandwidth || '0',
+        uv: Number(previousStats?.uv || 0),
+      },
+      changes: {
+        requests: calcChange(Number(currentStats?.requests || 0), Number(previousStats?.requests || 0)),
+        bandwidth: calcChange(Number(currentStats?.bandwidth || 0), Number(previousStats?.bandwidth || 0)),
+        uv: calcChange(Number(currentStats?.uv || 0), Number(previousStats?.uv || 0)),
+      },
     };
   }
 }

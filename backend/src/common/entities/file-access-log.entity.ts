@@ -35,6 +35,9 @@ export class FileAccessLog {
   @Column({ nullable: true })
   uploaderId: string;
 
+  @Column({ type: 'bigint', default: 0, comment: '实际传输字节数（带宽精确统计）' })
+  responseSize: number;
+
   @CreateDateColumn()
   createdAt: Date;
 }

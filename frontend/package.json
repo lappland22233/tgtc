@@ -17,6 +17,7 @@
     "tdesign-icons-vue-next": "^0.2.0",
     "tdesign-vue-next": "^1.6.0",
     "vue": "^3.4.0",
+    "vue-grid-layout": "^2.4.0",
     "vue-router": "^4.2.5"
   },
   "devDependencies": {

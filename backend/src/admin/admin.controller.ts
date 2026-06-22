@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Put, Delete, Body, Param, Query, UseGuards } from '@nestjs/common';
+import { Controller, Get, Post, Put, Delete, Body, Param, Query, UseGuards, Res } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 import { AdminService } from './admin.service';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -6,6 +6,7 @@ import { RolesGuard } from '../common/guards/roles.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { User, UserRole } from '../common/entities/user.entity';
 import { BanIPDto, UnbanIPDto, BatchDeleteFilesDto, ConfigDto, BatchConfigDto, SmtpConfigDto, UploadConfigDto, AuthConfigDto, AccessLogQueryDto } from './admin.dto';
+import { TopFilesQueryDto, TopPathsQueryDto, StatusByPathQueryDto, AbnormalIpsQueryDto, DateRangeQueryDto, RefererAnalysisQueryDto, UserAgentAnalysisQueryDto, BandwidthQueryDto, FileTypeQueryDto } from './admin-stats.dto';
 
 @Controller('admin')
 @UseGuards(AuthGuard('jwt'), RolesGuard)
@@ -166,7 +167,110 @@ export class AdminController {
     return { message: '认证配置已更新' };
   }
 
+  // ==================== Phase 2: 来源分析 ====================
+
+  @Get('source-analysis/referer')
+  @Roles(UserRole.SUPER_ADMIN)
+  async getRefererAnalysis(@Query() query: RefererAnalysisQueryDto) {
+    return this.adminService.getRefererAnalysis(query);
+  }
+
+  @Get('source-analysis/user-agent')
+  @Roles(UserRole.SUPER_ADMIN)
+  async getUserAgentAnalysis(@Query() query: UserAgentAnalysisQueryDto) {
+    return this.adminService.getUserAgentAnalysis(query);
+  }
+
+  // ==================== Phase 3: 活动与消耗分析 ====================
+
+  @Get('user-activity/stats')
+  @Roles(UserRole.SUPER_ADMIN)
+  async getUserActivityStats(@Query() query: DateRangeQueryDto) {
+    return this.adminService.getUserActivityStats(query);
+  }
+
+  @Get('bandwidth/top-files')
+  @Roles(UserRole.SUPER_ADMIN)
+  async getBandwidthAnalysis(@Query() query: BandwidthQueryDto) {
+    return this.adminService.getBandwidthAnalysis(query);
+  }
+
+  @Get('file-type-stats')
+  @Roles(UserRole.SUPER_ADMIN)
+  async getFileTypeStats(@Query() query: FileTypeQueryDto) {
+    return this.adminService.getFileTypeStats(query);
+  }
+
+  // ==================== Phase 7: 数据导出 ====================
+  @Get('export')
+  @Roles(UserRole.SUPER_ADMIN)
+  async exportData(
+    @Query('format') format: string,
+    @Query('timeRange') timeRange: string,
+    @Query('type') type: string,
+    @Res() res: any,
+  ) {
+    const result = await this.adminService.exportData({
+      format: (format as 'csv' | 'json') || 'csv',
+      timeRange: timeRange || '7d',
+      type: (type as 'access-logs' | 'top-files' | 'bans' | 'alerts') || 'access-logs',
+    });
+    res.setHeader('Content-Type', result.contentType);
+    res.setHeader('Content-Disposition', `attachment; filename="${result.filename}"`);
+    res.send(Buffer.from(result.data, 'utf-8'));
+  }
+
+  // ==================== Phase 7: 同比环比分析 ====================
+  @Get('comparison')
+  @Roles(UserRole.SUPER_ADMIN)
+  async getComparison(@Query('timeRange') timeRange?: string) {
+    return this.adminService.getComparison(timeRange || '7d');
+  }
+
   // ==================== 访问日志统计 ====================
+
+  // 注意：更具体的路由必须在 GET access-logs 之前定义，避免路由冲突
+  @Get('access-logs/top-files')
+  @Roles(UserRole.SUPER_ADMIN)
+  async getTopFiles(@Query() query: TopFilesQueryDto) {
+    return this.adminService.getTopFiles(query);
+  }
+
+  @Get('access-logs/top-paths')
+  @Roles(UserRole.SUPER_ADMIN)
+  async getTopPaths(@Query() query: TopPathsQueryDto) {
+    return this.adminService.getTopPaths(query);
+  }
+
+  @Get('access-logs/latency')
+  @Roles(UserRole.SUPER_ADMIN)
+  async getLatencyStats(@Query() query: DateRangeQueryDto) {
+    return this.adminService.getLatencyStats(query);
+  }
+
+  @Get('access-logs/status-by-path')
+  @Roles(UserRole.SUPER_ADMIN)
+  async getStatusByPath(@Query() query: StatusByPathQueryDto) {
+    return this.adminService.getStatusByPath(query);
+  }
+
+  @Get('access-logs/download-stats')
+  @Roles(UserRole.SUPER_ADMIN)
+  async getDownloadStats(@Query() query: DateRangeQueryDto) {
+    return this.adminService.getDownloadStats(query);
+  }
+
+  @Get('access-logs/abnormal-ips')
+  @Roles(UserRole.SUPER_ADMIN)
+  async getAbnormalIps(@Query() query: AbnormalIpsQueryDto) {
+    return this.adminService.getAbnormalIps(query);
+  }
+
+  @Get('ban-stats')
+  @Roles(UserRole.SUPER_ADMIN)
+  async getBanStats() {
+    return this.adminService.getBanStats();
+  }
 
   @Get('access-logs')
   @Roles(UserRole.SUPER_ADMIN)

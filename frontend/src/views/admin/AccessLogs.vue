@@ -43,7 +43,7 @@
       </div>
       <div class="metric-card">
         <div class="metric-label">带宽消耗</div>
-        <div class="metric-value">{{ formatSize(stats.totalBandwidth) }}</div>
+        <div class="metric-value">{{ formatSizeUtil(stats.totalBandwidth) }}</div>
         <div class="metric-sub">累计数据传输</div>
       </div>
       <div class="metric-card">
@@ -73,6 +73,123 @@
         <h3>状态码分布</h3>
         <div ref="pieChartRef" class="chart-container"></div>
       </div>
+    </div>
+
+    <!-- 文件访问排行 -->
+    <div class="card section-card">
+      <div class="section-header">
+        <h3>文件访问排行</h3>
+        <t-radio-group v-model="topFilesSortBy" variant="default-filled" size="small" @change="fetchTopFiles">
+          <t-radio-button value="accessCount">按访问次数</t-radio-button>
+          <t-radio-button value="totalBandwidth">按带宽</t-radio-button>
+        </t-radio-group>
+      </div>
+      <t-loading :loading="topFilesLoading" size="small">
+        <t-table
+          :data="topFilesWithRank"
+          :columns="topFilesColumns"
+          row-key="fileName"
+          table-layout="fixed"
+          :pagination="false"
+          size="small"
+        >
+          <template #rank="{ rowIndex }">
+            <span class="rank-badge" :class="'rank-' + (rowIndex + 1)">{{ rowIndex + 1 }}</span>
+          </template>
+          <template #fileName="{ row }">
+            <span class="file-name-cell">
+              <span class="file-emoji">{{ getFileEmoji(row.mimeType) }}</span>
+              <span>{{ row.fileName }}</span>
+            </span>
+          </template>
+          <template #accessCount="{ row }">
+            {{ formatNumber(row.accessCount) }}
+          </template>
+          <template #totalBandwidth="{ row }">
+            {{ formatSizeUtil(row.totalBandwidth) }}
+          </template>
+        </t-table>
+        <div v-if="!topFilesLoading && topFiles.length === 0" class="empty-hint">暂无数据</div>
+      </t-loading>
+    </div>
+
+    <!-- 路径访问排行 -->
+    <div class="card section-card">
+      <h3 style="margin: 0 0 16px 0;">路径访问排行</h3>
+      <t-loading :loading="topPathsLoading" size="small">
+        <t-table
+          :data="topPaths"
+          :columns="topPathsColumns"
+          row-key="path"
+          table-layout="fixed"
+          :pagination="false"
+          size="small"
+          max-height="500"
+        >
+          <template #path="{ row }">
+            <t-tooltip placement="top" :content="row.path">
+              <span class="path-truncate">{{ truncatePath(row.path, 50) }}</span>
+            </t-tooltip>
+          </template>
+          <template #requestCount="{ row }">
+            {{ formatNumber(row.requestCount) }}
+          </template>
+          <template #totalBandwidth="{ row }">
+            {{ formatSizeUtil(row.totalBandwidth) }}
+          </template>
+          <template #avgDuration="{ row }">
+            {{ row.avgDuration.toFixed(1) }}ms
+          </template>
+        </t-table>
+        <div v-if="!topPathsLoading && topPaths.length === 0" class="empty-hint">暂无数据</div>
+      </t-loading>
+    </div>
+
+    <!-- 异常 IP 监控 -->
+    <div class="card section-card">
+      <h3 style="margin: 0 0 16px 0;">异常 IP 监控</h3>
+      <t-loading :loading="abnormalIpsLoading" size="small">
+        <t-table
+          :data="abnormalIps"
+          :columns="abnormalIpsColumns"
+          row-key="ip"
+          table-layout="fixed"
+          :pagination="false"
+          size="small"
+        >
+          <template #ip="{ row }">
+            <code class="ip-code">{{ row.ip }}</code>
+          </template>
+          <template #requestCount="{ row }">
+            {{ formatNumber(row.requestCount) }}
+          </template>
+          <template #errorRate="{ row }">
+            <span :class="'error-rate-' + errorRateLevel(row.errorRate)">
+              {{ row.errorRate.toFixed(1) }}%
+            </span>
+          </template>
+          <template #bandwidth="{ row }">
+            {{ formatSizeUtil(row.bandwidth) }}
+          </template>
+          <template #riskLevel="{ row }">
+            <t-tag :theme="riskTheme(row.riskLevel)" variant="light" size="small">
+              {{ riskLabel(row.riskLevel) }}
+            </t-tag>
+          </template>
+          <template #action="{ row }">
+            <t-button
+              variant="outline"
+              size="small"
+              theme="danger"
+              :loading="banningIp === row.ip"
+              @click="handleBanIp(row.ip)"
+            >
+              封禁
+            </t-button>
+          </template>
+        </t-table>
+        <div v-if="!abnormalIpsLoading && abnormalIps.length === 0" class="empty-hint">暂无异常 IP</div>
+      </t-loading>
     </div>
 
     <!-- 访问记录表格 -->
@@ -143,7 +260,7 @@
           {{ row.duration }}ms
         </template>
         <template #responseSize="{ row }">
-          {{ formatSize(row.responseSize) }}
+          {{ formatSizeUtil(row.responseSize) }}
         </template>
         <template #createdAt="{ row }">
           {{ formatTime(row.createdAt) }}
@@ -154,10 +271,11 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted, onUnmounted } from 'vue';
+import { ref, reactive, computed, onMounted, onUnmounted } from 'vue';
 import { MessagePlugin } from 'tdesign-vue-next';
 import * as echarts from 'echarts';
 import client from '../../api/client';
+import { formatSize as formatSizeUtil, getFileEmoji } from '@/utils/format';
 
 // Types
 interface AccessLogItem {
@@ -187,6 +305,28 @@ interface TrendItem {
   bandwidth: number;
 }
 
+interface TopFileItem {
+  fileName: string;
+  mimeType: string;
+  accessCount: number;
+  totalBandwidth: number;
+}
+
+interface TopPathItem {
+  path: string;
+  requestCount: number;
+  totalBandwidth: number;
+  avgDuration: number;
+}
+
+interface AbnormalIpItem {
+  ip: string;
+  requestCount: number;
+  errorRate: number;
+  bandwidth: number;
+  riskLevel: 'low' | 'medium' | 'high' | 'critical';
+}
+
 // State
 const timeRange = ref('24h');
 const filterPath = ref('');
@@ -212,6 +352,48 @@ const pagination = reactive({
   showJumper: true,
   pageSizeOptions: [10, 20, 50],
 });
+
+// New section state
+const topFiles = ref<TopFileItem[]>([]);
+const topFilesSortBy = ref<'accessCount' | 'totalBandwidth'>('accessCount');
+const topFilesLoading = ref(false);
+const topPaths = ref<TopPathItem[]>([]);
+const topPathsLoading = ref(false);
+const abnormalIps = ref<AbnormalIpItem[]>([]);
+const abnormalIpsLoading = ref(false);
+const banningIp = ref<string | null>(null);
+
+// Top files with computed rank
+const topFilesWithRank = computed(() =>
+  topFiles.value.map((item, index) => ({ ...item, _rank: index + 1 })),
+);
+
+// Top files table columns
+const topFilesColumns = [
+  { colKey: 'rank', title: '#', width: 50 },
+  { colKey: 'fileName', title: '文件名', width: 200 },
+  { colKey: 'mimeType', title: '类型', width: 100 },
+  { colKey: 'accessCount', title: '访问次数', width: 110 },
+  { colKey: 'totalBandwidth', title: '带宽消耗', width: 110 },
+];
+
+// Top paths table columns
+const topPathsColumns = [
+  { colKey: 'path', title: '请求路径', ellipsis: false, width: 300 },
+  { colKey: 'requestCount', title: '请求数', width: 100 },
+  { colKey: 'totalBandwidth', title: '带宽', width: 100 },
+  { colKey: 'avgDuration', title: '平均耗时', width: 100 },
+];
+
+// Abnormal IPs table columns
+const abnormalIpsColumns = [
+  { colKey: 'ip', title: 'IP 地址', width: 150 },
+  { colKey: 'requestCount', title: '请求数', width: 90 },
+  { colKey: 'errorRate', title: '错误率', width: 90 },
+  { colKey: 'bandwidth', title: '带宽', width: 90 },
+  { colKey: 'riskLevel', title: '风险等级', width: 90 },
+  { colKey: 'action', title: '操作', width: 80 },
+];
 
 // Charts
 const trendChartRef = ref<HTMLDivElement | null>(null);
@@ -284,18 +466,39 @@ function formatNumber(n: number): string {
   return n.toString();
 }
 
-// Format size
-function formatSize(bytes: number): string {
-  if (bytes >= 1_073_741_824) return (bytes / 1_073_741_824).toFixed(2) + ' GB';
-  if (bytes >= 1_048_576) return (bytes / 1_048_576).toFixed(1) + ' MB';
-  if (bytes >= 1_024) return (bytes / 1_024).toFixed(1) + ' KB';
-  return bytes + ' B';
-}
-
 // Format time
 function formatTime(dateStr: string): string {
   const d = new Date(dateStr);
   return d.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+// Error rate level for color coding
+function errorRateLevel(rate: number): string {
+  if (rate >= 50) return 'critical';
+  if (rate >= 10) return 'warning';
+  return 'normal';
+}
+
+// Risk level theme mapping
+function riskTheme(level: string): string {
+  const map: Record<string, string> = {
+    low: 'success',
+    medium: 'warning',
+    high: 'danger',
+    critical: 'danger',
+  };
+  return map[level] || 'default';
+}
+
+// Risk level Chinese label
+function riskLabel(level: string): string {
+  const map: Record<string, string> = {
+    low: '低',
+    medium: '中',
+    high: '高',
+    critical: '严重',
+  };
+  return map[level] || level;
 }
 
 // Fetch stats
@@ -347,6 +550,76 @@ async function fetchLogs() {
   }
 }
 
+// Fetch top files
+async function fetchTopFiles() {
+  topFilesLoading.value = true;
+  try {
+    const { data } = await client.get('/admin/access-logs/top-files', {
+      params: {
+        timeRange: timeRange.value,
+        sortBy: topFilesSortBy.value,
+        limit: 10,
+      },
+    });
+    topFiles.value = (data.data || data) as TopFileItem[];
+  } catch {
+    topFiles.value = [];
+  } finally {
+    topFilesLoading.value = false;
+  }
+}
+
+// Fetch top paths
+async function fetchTopPaths() {
+  topPathsLoading.value = true;
+  try {
+    const { data } = await client.get('/admin/access-logs/top-paths', {
+      params: {
+        timeRange: timeRange.value,
+        limit: 20,
+      },
+    });
+    topPaths.value = (data.data || data) as TopPathItem[];
+  } catch {
+    topPaths.value = [];
+  } finally {
+    topPathsLoading.value = false;
+  }
+}
+
+// Fetch abnormal IPs
+async function fetchAbnormalIps() {
+  abnormalIpsLoading.value = true;
+  try {
+    const { data } = await client.get('/admin/access-logs/abnormal-ips', {
+      params: {
+        timeRange: timeRange.value,
+        limit: 20,
+        minRequests: 50,
+      },
+    });
+    abnormalIps.value = (data.data || data) as AbnormalIpItem[];
+  } catch {
+    abnormalIps.value = [];
+  } finally {
+    abnormalIpsLoading.value = false;
+  }
+}
+
+// Ban an IP
+async function handleBanIp(ip: string) {
+  banningIp.value = ip;
+  try {
+    await client.post('/admin/banned-ips', { ip });
+    MessagePlugin.success(`IP ${ip} 已封禁`);
+    abnormalIps.value = abnormalIps.value.filter((item) => item.ip !== ip);
+  } catch {
+    MessagePlugin.error(`封禁 IP ${ip} 失败`);
+  } finally {
+    banningIp.value = null;
+  }
+}
+
 // Trend chart
 function updateTrendChart(trendData: TrendItem[]) {
   if (!trendChartRef.value) return;
@@ -391,7 +664,7 @@ function updateTrendChart(trendData: TrendItem[]) {
         type: 'value',
         name: '带宽',
         nameTextStyle: { color: '#888' },
-        axisLabel: { color: '#888', formatter: (v: number) => formatSize(v) },
+        axisLabel: { color: '#888', formatter: (v: number) => formatSizeUtil(v) },
         splitLine: { show: false },
       },
     ],
@@ -490,6 +763,9 @@ function refreshAll() {
   fetchStats();
   fetchTrend();
   fetchLogs();
+  fetchTopFiles();
+  fetchTopPaths();
+  fetchAbnormalIps();
   lastRefreshTime.value = new Date().toLocaleTimeString('zh-CN');
 }
 
@@ -599,6 +875,22 @@ onUnmounted(() => {
   font-weight: 500;
 }
 
+/* Section card (new sections) */
+.section-card {
+  margin-bottom: 20px;
+}
+
+.section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.section-header h3 {
+  margin: 0;
+}
+
 /* Table filters */
 .table-filters {
   display: flex;
@@ -637,6 +929,87 @@ onUnmounted(() => {
   opacity: 1;
 }
 
+/* Path truncation for new sections */
+.path-truncate {
+  font-family: 'Courier New', monospace;
+  font-size: 12px;
+  color: var(--text-primary);
+  cursor: default;
+}
+
+/* Rank badge */
+.rank-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.rank-badge.rank-1 {
+  color: #ffd700;
+  background: rgba(255, 215, 0, 0.15);
+}
+
+.rank-badge.rank-2 {
+  color: #c0c0c0;
+  background: rgba(192, 192, 192, 0.15);
+}
+
+.rank-badge.rank-3 {
+  color: #cd7f32;
+  background: rgba(205, 127, 50, 0.15);
+}
+
+/* File name cell */
+.file-name-cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.file-emoji {
+  font-size: 14px;
+  flex-shrink: 0;
+}
+
+/* IP code style */
+.ip-code {
+  font-family: 'Courier New', monospace;
+  font-size: 12px;
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.04);
+  padding: 2px 6px;
+  border-radius: 3px;
+}
+
+/* Error rate color coding */
+.error-rate-normal {
+  color: #2ba471;
+}
+
+.error-rate-warning {
+  color: #e37318;
+}
+
+.error-rate-critical {
+  color: #e34d59;
+  font-weight: 600;
+}
+
+/* Empty hint */
+.empty-hint {
+  text-align: center;
+  padding: 24px 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
 /* Responsive */
 @media (max-width: 768px) {
   .charts-grid {
@@ -662,6 +1035,12 @@ onUnmounted(() => {
 
   .table-filters > * {
     width: 100% !important;
+  }
+
+  .section-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 12px;
   }
 }
 

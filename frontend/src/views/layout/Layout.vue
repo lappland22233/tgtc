@@ -18,8 +18,8 @@
           <div style="margin: 16px 0; padding: 0 24px; color: var(--text-secondary); font-size: 12px;">
             ─── 管理后台 ───
           </div>
-          <router-link to="/admin" class="nav-item" :class="{ active: $route.path === '/admin' }">
-            <span>📈</span> 统计概览
+          <router-link to="/admin/dashboard-customizer" class="nav-item" :class="{ active: $route.path === '/admin/dashboard-customizer' }">
+            <span>📈</span> 仪表盘
           </router-link>
           <router-link to="/admin/users" class="nav-item" :class="{ active: $route.path === '/admin/users' }">
             <span>👥</span> 用户管理
@@ -33,8 +33,26 @@
           <router-link to="/admin/access-logs" class="nav-item" :class="{ active: $route.path === '/admin/access-logs' }">
             <span>📋</span> 访问统计
           </router-link>
+          <router-link to="/admin/security" class="nav-item" :class="{ active: $route.path === '/admin/security' }">
+            <span>🛡️</span> 安全监控
+          </router-link>
+          <router-link to="/admin/alerts" class="nav-item" :class="{ active: $route.path === '/admin/alerts' }">
+            <span>🔔</span> 告警管理
+          </router-link>
+          <router-link to="/admin/source-analysis" class="nav-item" :class="{ active: $route.path === '/admin/source-analysis' }">
+            <span>🔗</span> 来源分析
+          </router-link>
+          <router-link to="/admin/user-activity" class="nav-item" :class="{ active: $route.path === '/admin/user-activity' }">
+            <span>👤</span> 用户活跃
+          </router-link>
+          <router-link to="/admin/bandwidth" class="nav-item" :class="{ active: $route.path === '/admin/bandwidth' }">
+            <span>📶</span> 带宽分析
+          </router-link>
+          <router-link to="/admin/file-types" class="nav-item" :class="{ active: $route.path === '/admin/file-types' }">
+            <span>📂</span> 文件类型
+          </router-link>
           <router-link to="/admin/audit-logs" class="nav-item" :class="{ active: $route.path === '/admin/audit-logs' }">
-            <span>🛡️</span> 操作审计
+            <span>🔍</span> 操作审计
           </router-link>
         </template>
       </nav>
@@ -50,6 +68,7 @@
       </div>
     </aside>
     <main class="main-content">
+      <AlertBanner />
       <router-view />
     </main>
   </div>
@@ -61,6 +80,7 @@ import { useRouter } from 'vue-router';
 import { useAuthStore } from '../../stores/auth';
 import { storeToRefs } from 'pinia';
 import type { UserRole } from '../../types/user';
+import AlertBanner from '../../components/AlertBanner.vue';
 
 const router = useRouter();
 const authStore = useAuthStore();

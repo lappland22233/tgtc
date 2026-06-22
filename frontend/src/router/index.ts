@@ -73,6 +73,48 @@ const routes: RouteRecordRaw[] = [
         meta: { admin: true },
       },
       {
+        path: 'admin/security',
+        name: 'AdminSecurity',
+        component: () => import('../views/admin/SecurityMonitor.vue'),
+        meta: { admin: true },
+      },
+      {
+        path: 'admin/source-analysis',
+        name: 'AdminSourceAnalysis',
+        component: () => import('../views/admin/SourceAnalysis.vue'),
+        meta: { admin: true },
+      },
+      {
+        path: 'admin/user-activity',
+        name: 'AdminUserActivity',
+        component: () => import('../views/admin/UserActivity.vue'),
+        meta: { admin: true },
+      },
+      {
+        path: 'admin/bandwidth',
+        name: 'AdminBandwidth',
+        component: () => import('../views/admin/BandwidthAnalysis.vue'),
+        meta: { admin: true },
+      },
+      {
+        path: 'admin/file-types',
+        name: 'AdminFileTypes',
+        component: () => import('../views/admin/FileTypeAnalysis.vue'),
+        meta: { admin: true },
+      },
+      {
+        path: 'admin/dashboard-customizer',
+        name: 'AdminDashboardCustomizer',
+        component: () => import('../views/admin/DashboardCustomizer.vue'),
+        meta: { admin: true },
+      },
+      {
+        path: 'admin/alerts',
+        name: 'AdminAlerts',
+        component: () => import('../views/admin/AlertManagement.vue'),
+        meta: { admin: true },
+      },
+      {
         path: 'admin/access-logs',
         name: 'AdminAccessLogs',
         component: () => import('../views/admin/AccessLogs.vue'),
