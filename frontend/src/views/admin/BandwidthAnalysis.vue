@@ -113,9 +113,8 @@ const ipColumns = [
 
 function renderChart() {
   if (!chartRef.value) return;
-  if (!chart) {
-    chart = echarts.init(chartRef.value, 'dark');
-  }
+  chart?.dispose();
+  chart = echarts.init(chartRef.value, 'dark');
 
   const trend = data.value?.trend || [];
   const times = trend.map((t) => t.time);
@@ -210,6 +209,12 @@ onUnmounted(() => {
   chart?.dispose();
   chart = null;
 });
+
+function refreshChart() {
+  nextTick(() => renderChart());
+}
+
+defineExpose({ refreshChart });
 </script>
 
 <style scoped>

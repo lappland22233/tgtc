@@ -9,6 +9,7 @@
       <t-tab-panel value="detection" label="攻击检测" />
       <t-tab-panel value="bans" label="封禁统计" />
       <t-tab-panel value="abnormal" label="异常 IP 监控" />
+      <t-tab-panel value="alerts" label="告警管理" />
     </t-tabs>
 
     <!-- Tab 1: 攻击检测 -->
@@ -183,6 +184,11 @@
         </t-loading>
       </div>
     </div>
+
+    <!-- Tab 4: 告警管理 -->
+    <div v-if="activeTab === 'alerts'" class="tab-content">
+      <AlertManagement />
+    </div>
   </div>
 </template>
 
@@ -191,6 +197,7 @@ import { ref, reactive, onMounted } from 'vue';
 import { MessagePlugin } from 'tdesign-vue-next';
 import { api } from '@/stores/auth';
 import { formatDate, formatSize } from '@/utils/format';
+import AlertManagement from './AlertManagement.vue';
 
 // Types
 interface BannedIp {

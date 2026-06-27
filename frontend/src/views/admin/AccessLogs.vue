@@ -2,8 +2,13 @@
   <div class="access-logs-page">
     <div class="page-header">
       <h1>访问统计</h1>
-      <p>网站请求量、带宽消耗、独立访客与流量峰值监控</p>
+      <p>网站请求量、带宽消耗、独立访客、流量峰值、来源分析与文件类型统计</p>
     </div>
+
+    <!-- Top-level Tabs -->
+    <t-tabs v-model="accessTab">
+      <t-tab-panel value="overview" label="概览">
+    <!-- Template content continues... -->
 
     <!-- 时间范围选择器和自动刷新 -->
     <div class="toolbar">
@@ -267,15 +272,35 @@
         </template>
       </t-table>
     </div>
+      </t-tab-panel>
+
+      <t-tab-panel value="source" label="来源分析">
+        <SourceAnalysis ref="sourceAnalysisRef" />
+      </t-tab-panel>
+
+      <t-tab-panel value="bandwidth" label="带宽分析">
+        <BandwidthAnalysis ref="bandwidthRef" />
+      </t-tab-panel>
+
+      <t-tab-panel value="filetypes" label="文件类型">
+        <FileTypeAnalysis ref="fileTypeRef" />
+      </t-tab-panel>
+    </t-tabs>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, onUnmounted } from 'vue';
+import { ref, reactive, computed, onMounted, onUnmounted, watch, nextTick } from 'vue';
 import { MessagePlugin } from 'tdesign-vue-next';
 import * as echarts from 'echarts';
 import client from '../../api/client';
 import { formatSize as formatSizeUtil, getFileEmoji } from '@/utils/format';
+import SourceAnalysis from './SourceAnalysis.vue';
+import BandwidthAnalysis from './BandwidthAnalysis.vue';
+import FileTypeAnalysis from './FileTypeAnalysis.vue';
+
+// Top-level tab state
+const accessTab = ref('overview');
 
 // Types
 interface AccessLogItem {
@@ -403,6 +428,7 @@ let pieChart: echarts.ECharts | null = null;
 
 // Auto-refresh
 const autoRefreshInterval = ref(0);
+const trendData = ref<TrendItem[]>([]);
 let autoRefreshTimer: ReturnType<typeof setInterval> | null = null;
 const lastRefreshTime = ref('');
 
@@ -517,8 +543,9 @@ async function fetchStats() {
 async function fetchTrend() {
   try {
     const { data } = await client.get('/admin/access-logs/trend', { params: { timeRange: timeRange.value } });
-    const trendData = (data.data || data) as TrendItem[];
-    updateTrendChart(trendData);
+    const td = (data.data || data) as TrendItem[];
+    trendData.value = td;
+    updateTrendChart(td);
   } catch {
     // Trend error handled silently
   }
@@ -624,9 +651,8 @@ async function handleBanIp(ip: string) {
 function updateTrendChart(trendData: TrendItem[]) {
   if (!trendChartRef.value) return;
 
-  if (!trendChart) {
-    trendChart = echarts.init(trendChartRef.value, 'dark');
-  }
+  trendChart?.dispose();
+  trendChart = echarts.init(trendChartRef.value, 'dark');
 
   const times = trendData.map((t) => {
     const d = new Date(t.time);
@@ -698,9 +724,8 @@ function updateTrendChart(trendData: TrendItem[]) {
 function updatePieChart() {
   if (!pieChartRef.value) return;
 
-  if (!pieChart) {
-    pieChart = echarts.init(pieChartRef.value, 'dark');
-  }
+  pieChart?.dispose();
+  pieChart = echarts.init(pieChartRef.value, 'dark');
 
   const dist = stats.statusDistribution || [];
   const pieData = dist.map((s) => ({
@@ -768,6 +793,28 @@ function refreshAll() {
   fetchAbnormalIps();
   lastRefreshTime.value = new Date().toLocaleTimeString('zh-CN');
 }
+
+// 切换到任意 tab 时触发对应子组件的图表 resize
+const sourceAnalysisRef = ref<InstanceType<typeof SourceAnalysis> | null>(null);
+const bandwidthRef = ref<InstanceType<typeof BandwidthAnalysis> | null>(null);
+const fileTypeRef = ref<InstanceType<typeof FileTypeAnalysis> | null>(null);
+
+watch(accessTab, (tab) => {
+  nextTick(() => {
+    setTimeout(() => {
+      if (tab === 'source') {
+        sourceAnalysisRef.value?.resizeAllCharts();
+      } else if (tab === 'bandwidth') {
+        bandwidthRef.value?.refreshChart();
+      } else if (tab === 'filetypes') {
+        fileTypeRef.value?.refreshChart();
+      } else if (tab === 'overview') {
+        if (trendData.value) updateTrendChart(trendData.value);
+        updatePieChart();
+      }
+    }, 100);
+  });
+});
 
 // Lifecycle
 onMounted(() => {

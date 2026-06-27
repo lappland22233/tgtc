@@ -150,13 +150,13 @@ export class UserAgentAnalysisQueryDto {
 export class BandwidthQueryDto {
   @IsOptional()
   @IsString()
-  @IsIn(['24h', '7d', '30d'])
+  @IsIn(['1h', '24h', '7d', '30d'])
   timeRange?: string = '24h';
 }
 
 export class FileTypeQueryDto {
   @IsOptional()
   @IsString()
-  @IsIn(['24h', '7d', '30d'])
+  @IsIn(['1h', '24h', '7d', '30d'])
   timeRange?: string = '24h';
 }

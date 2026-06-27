@@ -28,7 +28,7 @@ export class AlertService {
     if (query.acknowledged === true) {
       where.acknowledgedAt = MoreThan(new Date(0));
     } else if (query.acknowledged === false) {
-      where.acknowledgedAt = null;
+      where.acknowledgedAt = IsNull();
     }
 
     const [items, total] = await this.alertRepo.findAndCount({

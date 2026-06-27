@@ -36,20 +36,8 @@
           <router-link to="/admin/security" class="nav-item" :class="{ active: $route.path === '/admin/security' }">
             <span>🛡️</span> 安全监控
           </router-link>
-          <router-link to="/admin/alerts" class="nav-item" :class="{ active: $route.path === '/admin/alerts' }">
-            <span>🔔</span> 告警管理
-          </router-link>
-          <router-link to="/admin/source-analysis" class="nav-item" :class="{ active: $route.path === '/admin/source-analysis' }">
-            <span>🔗</span> 来源分析
-          </router-link>
           <router-link to="/admin/user-activity" class="nav-item" :class="{ active: $route.path === '/admin/user-activity' }">
             <span>👤</span> 用户活跃
-          </router-link>
-          <router-link to="/admin/bandwidth" class="nav-item" :class="{ active: $route.path === '/admin/bandwidth' }">
-            <span>📶</span> 带宽分析
-          </router-link>
-          <router-link to="/admin/file-types" class="nav-item" :class="{ active: $route.path === '/admin/file-types' }">
-            <span>📂</span> 文件类型
           </router-link>
           <router-link to="/admin/audit-logs" class="nav-item" :class="{ active: $route.path === '/admin/audit-logs' }">
             <span>🔍</span> 操作审计

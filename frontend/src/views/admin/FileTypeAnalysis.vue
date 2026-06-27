@@ -111,9 +111,8 @@ const typeColumns = [
 
 function renderChart() {
   if (!chartRef.value) return;
-  if (!chart) {
-    chart = echarts.init(chartRef.value, 'dark');
-  }
+  chart?.dispose();
+  chart = echarts.init(chartRef.value, 'dark');
 
   const categories = data.value?.categories || [];
   const pieData = categories.length > 0
@@ -178,6 +177,12 @@ onUnmounted(() => {
   chart?.dispose();
   chart = null;
 });
+
+function refreshChart() {
+  nextTick(() => renderChart());
+}
+
+defineExpose({ refreshChart });
 </script>
 
 <style scoped>

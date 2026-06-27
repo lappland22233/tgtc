@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, MoreThanOrEqual } from 'typeorm';
 import { AccessLog } from '../common/entities/access-log.entity';
 import { FileAccessLog } from '../common/entities/file-access-log.entity';
 import { BannedIP } from '../common/entities/banned-ip.entity';
@@ -51,7 +51,7 @@ export class ExportService {
     switch (type) {
       case 'access-logs': {
         const logs = await this.accessLogRepo.find({
-          where: { createdAt: { $gte: since } as any },
+          where: { createdAt: MoreThanOrEqual(since) },
           order: { createdAt: 'DESC' },
           take: limit,
         });

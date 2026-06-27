@@ -119,14 +119,16 @@ function uid() { return Date.now().toString(36) + Math.random().toString(36).sub
 async function fetchDashboards() {
   try {
     const res = await api.get('/admin/dashboards');
-    dashboards.value = Array.isArray(res.data) ? res.data : (Array.isArray(res) ? res : []);
+    const body = res.data;
+    dashboards.value = Array.isArray(body?.data) ? body.data : [];
   } catch {}
 }
 
 async function fetchPresets() {
   try {
     const res = await api.get('/admin/dashboards/presets');
-    presets.value = Array.isArray(res.data) ? res.data : (Array.isArray(res) ? res : []);
+    const body = res.data;
+    presets.value = Array.isArray(body?.data) ? body.data : [];
   } catch {}
 }
 
@@ -134,8 +136,8 @@ async function loadDashboard() {
   if (!currentDashboardId.value) { widgets.value = []; return; }
   try {
     const res = await api.get(`/admin/dashboards/${currentDashboardId.value}`);
-    const dash = res.data || res;
-    widgets.value = (dash.config || []).map((w: any) => ({
+    const dash = res.data?.data || null;
+    widgets.value = (dash?.config || []).map((w: any) => ({
       i: w.i || uid(),
       type: w.type || 'metric-card',
       w: w.w || 3,
@@ -160,7 +162,8 @@ async function createDashboard() {
   if (!newDashboardName.value) return;
   try {
     const res = await api.post('/admin/dashboards', { name: newDashboardName.value });
-    const dash = res.data || res;
+    const dash = res.data?.data || null;
+    if (!dash || !dash.id) { MessagePlugin.error('创建失败：无效响应'); return; }
     dashboards.value.push(dash);
     currentDashboardId.value = dash.id;
     widgets.value = [];
@@ -174,7 +177,8 @@ async function createPreset() {
   if (!presetName.value) return;
   try {
     const res = await api.post(`/admin/dashboards/presets/${presetName.value}`);
-    const dash = res.data || res;
+    const dash = res.data?.data || null;
+    if (!dash || !dash.id) { MessagePlugin.error('创建失败：无效响应'); return; }
     if (!dashboards.value.find(d => d.id === dash.id)) {
       dashboards.value.push(dash);
     }
