@@ -1,10 +1,11 @@
-import { Injectable, NotFoundException, ForbiddenException, BadRequestException, OnModuleInit } from '@nestjs/common';
+import { Injectable, NotFoundException, ForbiddenException, BadRequestException, OnModuleInit, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, In } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { OnEvent } from '@nestjs/event-emitter';
 import { Readable } from 'stream';
+import { Request } from 'express';
 import { File, FileAccessType } from '../common/entities/file.entity';
 import { FileAccessLog } from '../common/entities/file-access-log.entity';
 import { TelegramService } from '../telegram/telegram.service';
@@ -17,6 +18,7 @@ import { AuditService } from '../common/services/audit.service';
 import { UploadJobService, UploadJob } from './upload-job.service';
 import * as bcrypt from 'bcryptjs';
 import { v4 as uuidv4 } from 'uuid';
+import { BCRYPT_ROUNDS } from '../common/constants/bcrypt';
 
 export interface BatchUploadFailedItem {
   name: string;
@@ -72,6 +74,7 @@ const MIME_EXTENSION_MAP: Record<string, string[]> = {
 
 @Injectable()
 export class FileService implements OnModuleInit {
+  private readonly logger = new Logger(FileService.name);
   private maxFileSize: number;
   private fileTypeMode: 'blacklist' | 'whitelist' = 'blacklist';
   private fileTypeFilter: string[] = [];
@@ -456,7 +459,7 @@ export class FileService implements OnModuleInit {
 
     this.assertFileWritable(file, user);
 
-    const hashedPassword = password ? await bcrypt.hash(password, 10) : null;
+    const hashedPassword = password ? await bcrypt.hash(password, BCRYPT_ROUNDS) : null;
     await this.fileRepository.update(id, { password: hashedPassword });
 
     // 审计日志：文件密码设置/移除
@@ -506,7 +509,7 @@ export class FileService implements OnModuleInit {
   /**
    * 检查文件访问约束并递增计数器，返回是否允许访问
    */
-  async checkAndIncrementAccess(id: string, _ip?: string): Promise<{ allowed: boolean; reason?: string }> {
+  async checkAndIncrementAccess(id: string): Promise<{ allowed: boolean; reason?: string }> {
     const file = await this.fileRepository.findOne({
       where: { id, isDeleted: false },
       select: ['maxAccessCount', 'currentAccessCount', 'expiresIn', 'expiresStartAt'],
@@ -643,59 +646,6 @@ export class FileService implements OnModuleInit {
   }
 
   /**
-   * 下载文件内容（后端代理，不暴露 Telegram URL）
-   */
-  async getFileContent(id: string, user: User): Promise<{
-    content: Buffer;
-    contentType: string;
-    filename: string;
-    size: number;
-  }> {
-    const file = await this.fileRepository.findOne({
-      where: { id, isDeleted: false },
-    });
-
-    if (!file) {
-      throw new NotFoundException('文件不存在');
-    }
-
-    await this.assertFileReadable(file, user);
-
-    // 先从 Telegram 拉取文件内容（成功后才扣次数，避免拉取失败浪费次数）
-    const content = await this.telegramService.getFile(file.telegramFileId || file.filename);
-
-    const result = await this.fileRepository
-      .createQueryBuilder()
-      .update(File)
-      .set({ currentAccessCount: () => 'currentAccessCount + 1' })
-      .where('id = :id', { id })
-      .andWhere('(maxAccessCount <= 0 OR currentAccessCount < maxAccessCount)')
-      .andWhere('isDeleted = false')
-      .execute();
-
-    if (result.affected === 0) {
-      throw new ForbiddenException('访问次数已用尽或文件不存在');
-    }
-
-    try {
-      await this.accessLogRepository.save({
-        fileId: id,
-        ip: '',
-        action: 'download',
-        uploaderId: file.uploaderId,
-        responseSize: file.size,
-      });
-    } catch {
-      // 日志记录失败不影响主流程
-    }
-
-    const mimeType = file.mimeType || 'application/octet-stream';
-    const filename = this.ensureFileExtension(file.originalName, mimeType);
-
-    return { content, contentType: mimeType, filename, size: content.length };
-  }
-
-  /**
    * 获取缩略图流（仅权限校验，不受类型/密码/次数/过期限制）
    */
   async getThumbnailStream(id: string, user: User): Promise<{
@@ -721,23 +671,10 @@ export class FileService implements OnModuleInit {
   }
 
   /**
-   * 获取文件预览流（不计数，用于缩略图展示）
-   * @deprecated 请使用 getThumbnailStream
-   */
-  async getFilePreviewStream(id: string, user: User): Promise<{
-    stream: Readable;
-    contentType: string;
-    size: number;
-  }> {
-    const result = await this.getThumbnailStream(id, user);
-    return { ...result, size: 0 };
-  }
-
-  /**
    * 流式下载文件内容（后端代理，不暴露 Telegram URL）
    * 用于避免大文件全部加载到内存
    */
-  async getFileContentStream(id: string, user: User): Promise<{
+  async getFileContentStream(id: string, user: User, ip?: string): Promise<{
     stream: Readable;
     contentType: string;
     filename: string;
@@ -773,7 +710,7 @@ export class FileService implements OnModuleInit {
     try {
       await this.accessLogRepository.save({
         fileId: id,
-        ip: '',
+        ip: ip || '',
         action: 'download',
         uploaderId: file.uploaderId,
         responseSize: file.size,
@@ -885,24 +822,9 @@ export class FileService implements OnModuleInit {
   }
 
   /**
-   * 验证一次性访问 token（保留以兼容旧接口，仅用于快速校验）
-   * @deprecated 请使用 consumeAccessToken 进行原子性消费
-   */
-  validateAccessToken(token: string, fileId: string): void {
-    try {
-      const payload = this.jwtService.verify(token);
-      if (payload.sub !== fileId || payload.purpose !== 'stream') {
-        throw new Error();
-      }
-    } catch {
-      throw new ForbiddenException('访问链接已失效，请重新获取');
-    }
-  }
-
-  /**
    * 通过短效访问 token 流式获取文件内容（重新校验文件状态，防止 token 有效期内外界状态变更）
    */
-  async getPublicFileContentStreamWithAccess(id: string): Promise<{
+  async getPublicFileContentStreamWithAccess(id: string, ip?: string): Promise<{
     stream: Readable;
     contentType: string;
     filename: string;
@@ -935,7 +857,7 @@ export class FileService implements OnModuleInit {
     try {
       await this.accessLogRepository.save({
         fileId: id,
-        ip: '',
+        ip: ip || '',
         action: 'public_direct',
         uploaderId: file.uploaderId,
         responseSize: file.size,
@@ -955,7 +877,7 @@ export class FileService implements OnModuleInit {
   /**
    * 流式获取公开文件内容（用于无约束公开文件和一次性链接）
    */
-  async getPublicFileContentStream(id: string): Promise<{
+  async getPublicFileContentStream(id: string, ip?: string): Promise<{
     stream: Readable;
     contentType: string;
     filename: string;
@@ -980,7 +902,7 @@ export class FileService implements OnModuleInit {
     try {
       await this.accessLogRepository.save({
         fileId: id,
-        ip: '',
+        ip: ip || '',
         action: 'public_direct',
         uploaderId: file.uploaderId,
         responseSize: file.size,
@@ -1022,30 +944,59 @@ export class FileService implements OnModuleInit {
    * 异步上传（用于大文件，避免 Cloudflare/CDN 代理超时）
    * 文件接收后立即返回 jobId，Telegram 上传在后台异步执行。
    * 前端通过 GET /api/files/upload-status/:jobId 轮询结果。
+   *
+   * @warning 任务存于内存（UploadJobService Map），进程崩溃或重启会丢失进行中的任务。
+   *          如需持久化请迁移至 Bull 队列（项目已集成 @nestjs/bull）。
+   *
+   * @param req Express Request，用于监听客户端连接关闭事件，
+   *            客户端断开后 30 秒未恢复则放弃 Telegram 上传任务
    */
-  async uploadAsync(file: Express.Multer.File, user: User): Promise<{ jobId: string }> {
+  async uploadAsync(
+    file: Express.Multer.File,
+    user: User,
+    req?: Request,
+  ): Promise<{ jobId: string; warning: string }> {
     if (file.size > this.maxFileSize) {
       throw new BadRequestException(`文件大小不能超过 ${this.maxFileSize / 1024 / 1024}MB`);
     }
 
     const originalName = this.fixFilenameEncoding(file.originalname);
 
-    const typeCheck2 = this.isFileTypeAllowed(originalName, file.mimetype);
-    if (!typeCheck2.allowed) {
-      throw new BadRequestException(typeCheck2.reason || '不允许上传此类型的文件');
+    const typeCheck = this.isFileTypeAllowed(originalName, file.mimetype);
+    if (!typeCheck.allowed) {
+      throw new BadRequestException(typeCheck.reason || '不允许上传此类型的文件');
     }
 
     const job = this.uploadJobService.createJob(user, originalName);
+
+    // 创建 AbortController：客户端连接断开 30 秒后中止后台上传
+    const abortController = new AbortController();
+    const cleanup = this.setupAbortOnDisconnect(req, abortController, job.jobId);
+
     // 后台处理：不阻塞响应
-    this.processAsyncUpload(job.jobId, file, user, originalName);
-    return { jobId: job.jobId };
+    this.processAsyncUpload(job.jobId, file, user, originalName, abortController.signal, cleanup);
+    return { jobId: job.jobId, warning: '任务在内存中处理，进程重启会丢失' };
   }
 
   /**
    * 异步批量上传
+   *
+   * @warning 任务存于内存（UploadJobService Map），进程崩溃或重启会丢失进行中的任务。
+   *          如需持久化请迁移至 Bull 队列（项目已集成 @nestjs/bull）。
+   *
+   * @param req Express Request，用于监听客户端连接关闭事件，
+   *            客户端断开后 30 秒未恢复则放弃 Telegram 上传任务
    */
-  async uploadMultipleAsync(files: Express.Multer.File[], user: User) {
+  async uploadMultipleAsync(
+    files: Express.Multer.File[],
+    user: User,
+    req?: Request,
+  ): Promise<{ jobId: string; total: number; warning: string }> {
     const job = this.uploadJobService.createJob(user, `${files.length} 个文件`, files.length);
+
+    // 创建 AbortController：客户端连接断开 30 秒后中止后台上传
+    const abortController = new AbortController();
+    const cleanup = this.setupAbortOnDisconnect(req, abortController, job.jobId);
 
     setImmediate(async () => {
       const success: File[] = [];
@@ -1054,19 +1005,28 @@ export class FileService implements OnModuleInit {
       for (let i = 0; i < files.length; i++) {
         const file = files[i];
         try {
+          // 每个文件上传前检查是否已被放弃
+          if (abortController.signal.aborted) {
+            throw new Error('任务已被放弃（客户端连接断开）');
+          }
           const originalName = this.fixFilenameEncoding(file.originalname);
-          const typeCheck3 = this.isFileTypeAllowed(originalName, file.mimetype);
-          if (!typeCheck3.allowed) {
-            failed.push({ name: originalName, reason: typeCheck3.reason || '不允许上传此类型的文件' });
+          const typeCheck = this.isFileTypeAllowed(originalName, file.mimetype);
+          if (!typeCheck.allowed) {
+            failed.push({ name: originalName, reason: typeCheck.reason || '不允许上传此类型的文件' });
             continue;
           }
           if (file.size > this.maxFileSize) {
             failed.push({ name: originalName, reason: `文件大小超过 ${this.maxFileSize / 1024 / 1024}MB` });
             continue;
           }
-          const uploadedFile = await this.uploadToTelegram(file, user, originalName);
+          const uploadedFile = await this.uploadToTelegram(file, user, originalName, abortController.signal);
           success.push(uploadedFile);
         } catch (error: unknown) {
+          // 任务被放弃时直接退出循环
+          if (abortController.signal.aborted) {
+            this.logger.warn(`批量上传任务 ${job.jobId} 已被放弃，剩余 ${files.length - i} 个文件未处理`);
+            break;
+          }
           failed.push({
             name: file.originalname,
             reason: error instanceof Error ? error.message : '上传失败',
@@ -1077,14 +1037,61 @@ export class FileService implements OnModuleInit {
         });
       }
 
-      this.uploadJobService.updateJob(job.jobId, {
-        status: 'completed',
-        progress: 100,
-        result: { success, failed },
-      });
+      // 若任务已被放弃，processAsyncUpload 的清理逻辑会标记 failed，此处不覆盖
+      if (!abortController.signal.aborted) {
+        this.uploadJobService.updateJob(job.jobId, {
+          status: 'completed',
+          progress: 100,
+          result: { success, failed },
+        });
+      }
+      cleanup();
     });
 
-    return { jobId: job.jobId, total: files.length };
+    return { jobId: job.jobId, total: files.length, warning: '任务在内存中处理，进程重启会丢失' };
+  }
+
+  /**
+   * 设置 AbortController：监听 req close 事件，客户端断开 30 秒后触发 abort
+   * 并将任务标记为 failed。返回 cleanup 函数用于清理监听器。
+   */
+  private setupAbortOnDisconnect(
+    req: Request | undefined,
+    abortController: AbortController,
+    jobId: string,
+  ): () => void {
+    if (!req) {
+      // 无 req 时不启用 abort 机制（向后兼容）
+      return () => {};
+    }
+
+    let disconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const onConnectionClose = (): void => {
+      if (disconnectTimer || abortController.signal.aborted) return;
+      this.logger.warn(`上传任务 ${jobId} 客户端连接已断开，30 秒后放弃任务`);
+      disconnectTimer = setTimeout(() => {
+        if (!abortController.signal.aborted) {
+          abortController.abort();
+          this.uploadJobService.updateJob(jobId, {
+            status: 'failed',
+            error: '客户端连接断开超过 30 秒，任务已放弃',
+          });
+        }
+      }, 30 * 1000);
+    };
+
+    req.on('close', onConnectionClose);
+    req.socket?.on('close', onConnectionClose);
+
+    return (): void => {
+      req.off('close', onConnectionClose);
+      req.socket?.off('close', onConnectionClose);
+      if (disconnectTimer) {
+        clearTimeout(disconnectTimer);
+        disconnectTimer = null;
+      }
+    };
   }
 
   getUploadJob(jobId: string): UploadJob | undefined {
@@ -1093,12 +1100,32 @@ export class FileService implements OnModuleInit {
 
   /**
    * 后台处理单个文件上传到 Telegram
+   *
+   * @param abortSignal 客户端连接断开 30 秒后触发 abort，中止上传
+   * @param cleanup 任务完成/失败时调用，清理 req 监听器和 timer
    */
-  private async processAsyncUpload(jobId: string, file: Express.Multer.File, user: User, originalName: string) {
+  private async processAsyncUpload(
+    jobId: string,
+    file: Express.Multer.File,
+    user: User,
+    originalName: string,
+    abortSignal?: AbortSignal,
+    cleanup: () => void = () => {},
+  ): Promise<void> {
     try {
       this.uploadJobService.updateJob(jobId, { status: 'uploading' });
 
-      const savedFile = await this.uploadToTelegram(file, user, originalName);
+      // 任务开始前检查是否已被放弃
+      if (abortSignal?.aborted) {
+        throw new Error('任务已被放弃');
+      }
+
+      const savedFile = await this.uploadToTelegram(file, user, originalName, abortSignal);
+
+      // 完成前再次检查，避免连接断开后仍写入成功结果
+      if (abortSignal?.aborted) {
+        throw new Error('任务已被放弃');
+      }
 
       this.uploadJobService.updateJob(jobId, {
         status: 'completed',
@@ -1106,22 +1133,35 @@ export class FileService implements OnModuleInit {
         result: savedFile,
       });
     } catch (error: unknown) {
-      this.uploadJobService.updateJob(jobId, {
-        status: 'failed',
-        error: error instanceof Error ? error.message : '上传失败',
-      });
+      // 若任务已被放弃，setupAbortOnDisconnect 已标记 failed，此处不覆盖
+      const job = this.uploadJobService.getJob(jobId);
+      if (job && job.status !== 'failed') {
+        this.uploadJobService.updateJob(jobId, {
+          status: 'failed',
+          error: error instanceof Error ? error.message : '上传失败',
+        });
+      }
+    } finally {
+      cleanup();
     }
   }
 
   /**
    * 上传文件到 Telegram 并保存数据库记录
+   *
+   * @param abortSignal 透传到 Telegram axios 请求，支持中途取消
    */
-  private async uploadToTelegram(file: Express.Multer.File, user: User, originalName: string): Promise<File> {
+  private async uploadToTelegram(
+    file: Express.Multer.File,
+    user: User,
+    originalName: string,
+    abortSignal?: AbortSignal,
+  ): Promise<File> {
     let telegramFile;
     if (file.mimetype.startsWith('image/')) {
-      telegramFile = await this.telegramService.uploadPhoto(file.buffer, originalName);
+      telegramFile = await this.telegramService.uploadPhoto(file.buffer, originalName, abortSignal);
     } else {
-      telegramFile = await this.telegramService.uploadFile(file.buffer, originalName);
+      telegramFile = await this.telegramService.uploadFile(file.buffer, originalName, abortSignal);
     }
 
     const newFile = this.fileRepository.create({

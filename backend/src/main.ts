@@ -61,6 +61,7 @@ async function bootstrap() {
   });
 
   // SPA 路由回退：非 /api 和非静态文件的请求返回 index.html
+  // 仅对浏览器导航请求（Accept: text/html）回退，避免爬虫/监控工具因 200+HTML 误判所有路径都存在
   expressApp.get('*', (req, res, next) => {
     // 跳过 API 路由
     if (req.path.startsWith('/api/') || req.path === '/api') {
@@ -70,16 +71,23 @@ async function bootstrap() {
     if (req.path.includes('.')) {
       return next();
     }
-    // 返回 index.html（SPA 路由）
-    res.sendFile(join(frontendDist, 'index.html'));
+    // 仅对浏览器导航请求回退 SPA
+    const accept = req.headers.accept || '';
+    if (accept.includes('text/html')) {
+      return res.sendFile(join(frontendDist, 'index.html'));
+    }
+    return next();
   });
 
-  const port = process.env.APP_PORT || 8080;
+  // 默认端口与 .env.example / README 保持一致（3000）
+  const port = process.env.APP_PORT || 3000;
   const host = process.env.APP_HOST || '127.0.0.1';
   const httpServer = await app.listen(port, host);
 
-  // 大文件上传超时配置：600MB 文件上传 + Telegram 转发需要较长时间
-  // 默认 Node HTTP server timeout 为 120s，这里设为 10 分钟
+  // HTTP 服务器超时配置：
+  // - 上传端点（file.controller.ts）已通过 req.setTimeout(0) 禁用单请求超时，
+  //   并通过 AbortController 在客户端连接断开 30 秒后放弃后台上传任务
+  // - 此处全局 10 分钟超时作为安全兜底，防止 req.setTimeout(0) 万一失效
   httpServer.timeout = 10 * 60 * 1000;        // 请求超时 10 分钟
   httpServer.keepAliveTimeout = 10 * 60 * 1000; // Keep-Alive 连接超时
   httpServer.headersTimeout = 10 * 60 * 1000 + 1000; // 请求头超时（需大于 keepAliveTimeout）

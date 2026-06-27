@@ -1,6 +1,15 @@
 import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { v4 as uuidv4 } from 'uuid';
 import { User } from '../common/entities/user.entity';
+import { File } from '../common/entities/file.entity';
+
+/** 单文件上传成功结果 */
+export type SingleUploadResult = File;
+/** 批量上传结果 */
+export interface BatchUploadResult {
+  success: File[];
+  failed: { name: string; reason: string }[];
+}
 
 export interface UploadJob {
   jobId: string;
@@ -8,7 +17,8 @@ export interface UploadJob {
   filename: string;
   status: 'pending' | 'uploading' | 'completed' | 'failed';
   progress: number; // 0-100
-  result?: any;     // 成功后返回的 File 实体
+  // 单文件上传返回 File，批量上传返回 BatchUploadResult
+  result?: SingleUploadResult | BatchUploadResult;
   error?: string;
   createdAt: Date;
   updatedAt: Date;
@@ -64,7 +74,7 @@ export class UploadJobService implements OnModuleInit, OnModuleDestroy {
    * - 超过 30 分钟的已完成/失败任务
    * - 超过 60 分钟的 pending/uploading 任务（进程异常退出卡住的任务）
    */
-  cleanup() {
+  cleanup(): void {
     const completedCutoff = Date.now() - 30 * 60 * 1000;
     const stuckCutoff = Date.now() - 60 * 60 * 1000;
     for (const [id, job] of this.jobs) {

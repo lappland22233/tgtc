@@ -7,7 +7,7 @@ import { Request } from 'express';
  */
 export function getClientIp(req: Request): string {
   // 1. Express trust proxy 解析的 req.ips（信任链由 trust proxy 配置控制）
-  //    最后一个元素为最接近代理的 IP，防止客户端伪造 X-Forwarded-For
+  //    trust proxy=1 时，req.ips[0] 为最远端客户端 IP（已过滤不可信代理）
   if (req.ips && req.ips.length > 0) {
     const trustedClientIp = req.ips[0];
     if (isValidIp(trustedClientIp)) {

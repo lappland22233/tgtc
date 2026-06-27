@@ -31,7 +31,7 @@ export class Alert {
   message: string | null;
 
   @Column({ type: 'jsonb', nullable: true })
-  context: Record<string, any> | null;
+  context: Record<string, unknown> | null;
 
   @Column({ nullable: true, type: 'timestamptz' })
   acknowledgedAt: Date | null;

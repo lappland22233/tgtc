@@ -12,9 +12,9 @@ const getCookieOptions = (req: Request) => ({
   // 生产环境建议设置 SECURE_COOKIE=true 强制 secure 标志，
   // 避免因反向代理未正确设置 X-Forwarded-Proto 导致 Cookie 降级为非 secure
   secure: process.env.SECURE_COOKIE === 'true' || req.secure || req.headers['x-forwarded-proto'] === 'https',
-  // strict: 浏览器完全不发送跨站请求中的 Cookie，安全性最高
-  // 若需兼容邮件验证链接等跨站场景，可考虑使用 lax
-  sameSite: 'strict' as const,
+  // lax: 兼容邮件验证链接等顶级导航跨站场景，安全性仍高于 none
+  // （strict 会阻止邮件链接跨站跳转时携带 Cookie，导致用户需重新登录）
+  sameSite: 'lax' as const,
   maxAge: 7 * 24 * 3600 * 1000, // 7 days
   path: '/',
 });

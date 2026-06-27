@@ -1,12 +1,14 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
 import { Readable } from 'stream';
-import { createReadStream, readFileSync, existsSync } from 'fs';
+import { createReadStream } from 'fs';
+import { promises as fs } from 'fs';
 import FormData from 'form-data';
 
 @Injectable()
 export class TelegramService {
+  private readonly logger = new Logger(TelegramService.name);
   private readonly botToken: string;
   private readonly chatId: string;
   private readonly apiBase: string;
@@ -22,10 +24,10 @@ export class TelegramService {
     this.fileBase = `${base}/file/bot`;
 
     if (!this.botToken || this.botToken.startsWith('0000000000') || this.botToken === 'your-telegram-bot-token') {
-      console.warn('[Telegram] TELEGRAM_BOT_TOKEN 未配置或为占位符，文件上传将不可用。请在 .env 中设置有效的 Bot Token。');
+      this.logger.warn('TELEGRAM_BOT_TOKEN 未配置或为占位符，文件上传将不可用。请在 .env 中设置有效的 Bot Token。');
     }
     if (!this.chatId) {
-      console.warn('[Telegram] TELEGRAM_CHAT_ID 未配置，文件上传将不可用。请在 .env 中设置 TELEGRAM_CHAT_ID。');
+      this.logger.warn('TELEGRAM_CHAT_ID 未配置，文件上传将不可用。请在 .env 中设置 TELEGRAM_CHAT_ID。');
     }
   }
 
@@ -54,7 +56,7 @@ export class TelegramService {
           if (status === 429 && attempt < retries) {
             const retryAfter = axiosError.response?.data?.parameters?.retry_after || 3;
             const delay = Math.max(retryAfter * 1000, 1000);
-            console.warn(`[Telegram] ${label} 触发限流 (429)，${attempt}/${retries} 次重试，等待 ${delay}ms...`);
+            this.logger.warn(`${label} 触发限流 (429)，${attempt}/${retries} 次重试，等待 ${delay}ms...`);
             await new Promise(resolve => setTimeout(resolve, delay));
             continue;
           }
@@ -100,74 +102,84 @@ export class TelegramService {
     file_size: number;
   }> {
     return this.telegramRequest(async () => {
-    const response = await axios.get(`${this.getBaseUrl()}/getFile`, {
-      params: { file_id },
-      timeout: 30 * 1000, // getFile 超时 30 秒（轻量 API）
-    });
-    const result = response.data.result;
-    return {
-      file_id: result.file_id,
-      file_path: result.file_path,
-      file_size: result.file_size || 0,
-    };
+      const response = await axios.get(`${this.getBaseUrl()}/getFile`, {
+        params: { file_id },
+        timeout: 30 * 1000, // getFile 超时 30 秒（轻量 API）
+      });
+      const result = response.data.result;
+      return {
+        file_id: result.file_id,
+        file_path: result.file_path,
+        file_size: result.file_size || 0,
+      };
     }, 'getFileInfo');
   }
 
-  async uploadFile(file: Buffer, filename: string): Promise<{
+  async uploadFile(
+    file: Buffer,
+    filename: string,
+    signal?: AbortSignal,
+  ): Promise<{
     file_id: string;
     file_path: string;
     file_size: number;
   }> {
     return this.telegramRequest(async () => {
-    const form = new FormData();
-    form.append('chat_id', this.chatId);
-    form.append('document', file, filename);
+      const form = new FormData();
+      form.append('chat_id', this.chatId);
+      form.append('document', file, filename);
 
-    const response = await axios.post(`${this.getBaseUrl()}/sendDocument`, form, {
-      headers: form.getHeaders(),
-      timeout: 5 * 60 * 1000,          // Telegram API 请求超时 5 分钟
-      maxContentLength: 700 * 1024 * 1024, // 最大请求体 700MB
-      maxBodyLength: 700 * 1024 * 1024,
-    });
+      const response = await axios.post(`${this.getBaseUrl()}/sendDocument`, form, {
+        headers: form.getHeaders(),
+        timeout: 5 * 60 * 1000,          // Telegram API 请求超时 5 分钟
+        maxContentLength: 700 * 1024 * 1024, // 最大请求体 700MB
+        maxBodyLength: 700 * 1024 * 1024,
+        signal, // 客户端连接断开 30s 后由 FileService 触发 abort，取消此请求
+      });
 
-    const result = response.data.result;
-    const file_id = result.document?.file_id;
-    if (!file_id) {
-      throw new Error('Telegram sendDocument 响应缺少 document.file_id，可能文件格式不被支持');
-    }
+      const result = response.data.result;
+      const file_id = result.document?.file_id;
+      if (!file_id) {
+        throw new Error('Telegram sendDocument 响应缺少 document.file_id，可能文件格式不被支持');
+      }
 
-    // sendDocument 返回的 file_path 不可靠，需二次调用 getFile 获取真实路径
-    return this.getFileInfo(file_id);
+      // sendDocument 返回的 file_path 不可靠，需二次调用 getFile 获取真实路径
+      return this.getFileInfo(file_id);
     }, 'uploadFile');
   }
 
-  async uploadPhoto(file: Buffer, filename: string): Promise<{
+  async uploadPhoto(
+    file: Buffer,
+    filename: string,
+    signal?: AbortSignal,
+  ): Promise<{
     file_id: string;
     file_path: string;
     file_size: number;
   }> {
     return this.telegramRequest(async () => {
-    const form = new FormData();
-    form.append('chat_id', this.chatId);
-    form.append('photo', file, filename);
+      const form = new FormData();
+      form.append('chat_id', this.chatId);
+      form.append('photo', file, filename);
 
-    const response = await axios.post(`${this.getBaseUrl()}/sendPhoto`, form, {
-      headers: form.getHeaders(),
-      timeout: 5 * 60 * 1000,          // Telegram API 请求超时 5 分钟
-      maxContentLength: 700 * 1024 * 1024, // 最大请求体 700MB
-      maxBodyLength: 700 * 1024 * 1024,
-    });
+      const response = await axios.post(`${this.getBaseUrl()}/sendPhoto`, form, {
+        headers: form.getHeaders(),
+        timeout: 5 * 60 * 1000,          // Telegram API 请求超时 5 分钟
+        maxContentLength: 700 * 1024 * 1024, // 最大请求体 700MB
+        maxBodyLength: 700 * 1024 * 1024,
+        signal,
+      });
 
-    const result = response.data.result;
-    // sendPhoto 消息中可能包含多个尺寸，取最后一个（最大分辨率）的 file_id
-    const photos = result.photo;
-    if (!photos || photos.length === 0) {
-      throw new Error('Telegram sendPhoto 响应缺少 photo 信息，可能文件格式不被支持');
-    }
-    const file_id = photos[photos.length - 1].file_id;
+      const result = response.data.result;
+      // sendPhoto 消息中可能包含多个尺寸，取最后一个（最大分辨率）的 file_id
+      const photos = result.photo;
+      if (!photos || photos.length === 0) {
+        throw new Error('Telegram sendPhoto 响应缺少 photo 信息，可能文件格式不被支持');
+      }
+      const file_id = photos[photos.length - 1].file_id;
 
-    // sendPhoto 返回的 file_path 不可靠，需二次调用 getFile 获取真实路径
-    return this.getFileInfo(file_id);
+      // sendPhoto 返回的 file_path 不可靠，需二次调用 getFile 获取真实路径
+      return this.getFileInfo(file_id);
     }, 'uploadPhoto');
   }
 
@@ -190,12 +202,14 @@ export class TelegramService {
     const fileInfo = await this.getFileInfo(file_id);
     const filePath = fileInfo.file_path;
 
-    // 本地绝对路径：直接从文件系统读取
+    // 本地绝对路径：直接从文件系统异步读取（避免阻塞事件循环）
     if (this.isLocalPath(filePath)) {
-      if (!existsSync(filePath)) {
+      try {
+        await fs.access(filePath);
+      } catch {
         throw new Error(`文件不存在: ${filePath}`);
       }
-      return readFileSync(filePath);
+      return fs.readFile(filePath);
     }
 
     const fileUrl = this.getFileUrl(filePath);

@@ -5,6 +5,7 @@ import { ConfigService } from '@nestjs/config';
 import { Request } from 'express';
 import { AuthService } from './auth.service';
 import { UserRole } from '../common/entities/user.entity';
+import { ConfigCacheService } from '../common/services/config-cache.service';
 
 const cookieExtractor = (req: Request) => {
   return req?.cookies?.access_token || null;
@@ -15,6 +16,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
   constructor(
     configService: ConfigService,
     private authService: AuthService,
+    private configCacheService: ConfigCacheService,
   ) {
     // TOKEN_EXTRACTION_MODE 控制 Token 提取方式：
     // - 'cookie_only'：仅从 Cookie 提取（推荐生产环境，缩小攻击面）
@@ -67,7 +69,9 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     if (user.isBanned) {
       throw new UnauthorizedException('账号已被封禁');
     }
-    if (!user.emailVerified) {
+    // 仅在邮箱验证功能开启时才检查 emailVerified，避免功能开关变更后已注册用户被锁定
+    const emailVerificationEnabled = await this.configCacheService.get('EMAIL_VERIFICATION_ENABLED', 'false');
+    if (emailVerificationEnabled === 'true' && !user.emailVerified) {
       throw new UnauthorizedException('请先验证邮箱');
     }
 

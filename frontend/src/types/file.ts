@@ -24,7 +24,10 @@ export interface BatchUploadFailedItem {
   reason: string;
 }
 
+/** 批量上传成功项（仅需 id 和 originalName 用于前端展示） */
+export type BatchUploadSuccessItem = Pick<FileItem, 'id' | 'originalName'>;
+
 export interface BatchUploadResult {
-  success: FileItem[];
+  success: BatchUploadSuccessItem[];
   failed: BatchUploadFailedItem[];
 }

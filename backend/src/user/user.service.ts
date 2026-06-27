@@ -6,6 +6,7 @@ import { User, UserRole } from '../common/entities/user.entity';
 import { File } from '../common/entities/file.entity';
 import { FileAccessLog } from '../common/entities/file-access-log.entity';
 import { AuditService } from '../common/services/audit.service';
+import { BCRYPT_ROUNDS } from '../common/constants/bcrypt';
 
 @Injectable()
 export class UserService {
@@ -74,7 +75,7 @@ export class UserService {
       role = UserRole.USER;
     }
 
-    const hashedPassword = await bcrypt.hash(data.password, 10);
+    const hashedPassword = await bcrypt.hash(data.password, BCRYPT_ROUNDS);
 
     const user = this.userRepository.create({
       email: data.email,
@@ -218,7 +219,7 @@ export class UserService {
       throw new BadRequestException('原密码错误');
     }
 
-    const hashedPassword = await bcrypt.hash(newPassword, 10);
+    const hashedPassword = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
     await this.userRepository.update(id, { password: hashedPassword });
 
     // 审计日志：密码变更

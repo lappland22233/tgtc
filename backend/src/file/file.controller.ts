@@ -107,7 +107,7 @@ export class FileController {
     if (!file) {
       throw new BadRequestException('请选择要上传的文件');
     }
-    return this.fileService.uploadAsync(file, user);
+    return this.fileService.uploadAsync(file, user, req);
   }
 
   /**
@@ -127,7 +127,7 @@ export class FileController {
     if (!files || files.length === 0) {
       throw new BadRequestException('请选择要上传的文件');
     }
-    return this.fileService.uploadMultipleAsync(files, user);
+    return this.fileService.uploadMultipleAsync(files, user, req);
   }
 
   /**
@@ -187,8 +187,6 @@ export class FileController {
   async findOne(@Param('id') id: string, @CurrentUser() user: User) {
     return this.fileService.findOne(id, user);
   }
-
-  /**
 
   /**
    * 缩略图预览端点
@@ -269,7 +267,7 @@ export class FileController {
         );
       }
 
-      const result = await this.fileService.getFileContentStream(id, user);
+      const result = await this.fileService.getFileContentStream(id, user, clientIp);
 
       res.set({
         'Content-Type': result.contentType,
@@ -368,7 +366,7 @@ export class FileController {
       // 模式 1：短效访问链接（30 秒有效，防重放）
       if (access) {
         await this.fileService.consumeAccessToken(access, id);
-        const result = await this.fileService.getPublicFileContentStreamWithAccess(id);
+        const result = await this.fileService.getPublicFileContentStreamWithAccess(id, ip);
         res.set({
           'Content-Type': result.contentType,
           'Content-Disposition': result.isInline
@@ -434,7 +432,7 @@ export class FileController {
 
       if (unrestricted) {
         // 无约束公开文件 → 流式返回
-        const result = await this.fileService.getPublicFileContentStream(id);
+        const result = await this.fileService.getPublicFileContentStream(id, ip);
         res.set({
           'Content-Type': result.contentType,
           'Content-Disposition': result.isInline
@@ -450,7 +448,7 @@ export class FileController {
 
       // 受限文件（时间/次数限制）→ 跳转一次性链接
       if (!hasPwd || (hasPwd && ps)) {
-        const constrained = await this.fileService.checkAndIncrementAccess(id, ip);
+        const constrained = await this.fileService.checkAndIncrementAccess(id);
         if (!constrained.allowed) {
           throw new BadRequestException(constrained.reason || '文件访问受限');
         }

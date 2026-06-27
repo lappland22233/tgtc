@@ -1,8 +1,9 @@
-import { Injectable, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { generateKeyPairSync, privateDecrypt, constants } from 'crypto';
 
 @Injectable()
 export class ThumbnailCryptoService implements OnModuleInit {
+  private readonly logger = new Logger(ThumbnailCryptoService.name);
   private publicKeyPem: string;
   private privateKeyPem: string;
 
@@ -14,7 +15,7 @@ export class ThumbnailCryptoService implements OnModuleInit {
     });
     this.publicKeyPem = publicKey;
     this.privateKeyPem = privateKey;
-    console.log('[ThumbnailCrypto] RSA 密钥对已生成');
+    this.logger.log('RSA 密钥对已生成');
   }
 
   getPublicKey(): string {
