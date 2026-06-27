@@ -10,8 +10,46 @@ const SKIP_PATH_SET = new Set([
   '/api/admin/access-logs',
   '/api/admin/access-logs/stats',
   '/api/admin/access-logs/trend',
+  '/api/admin/access-logs/top-files',
+  '/api/admin/access-logs/top-paths',
+  '/api/admin/access-logs/status-by-path',
+  '/api/admin/access-logs/download-stats',
+  '/api/admin/access-logs/abnormal-ips',
   '/api/admin/audit-logs',
+  '/api/admin/alerts',
+  '/api/admin/alerts/unacknowledged',
+  '/api/admin/alerts/rules',
+  '/api/admin/ban-stats',
+  '/api/admin/source-analysis/referer',
+  '/api/admin/source-analysis/user-agent',
+  '/api/admin/source-analysis',
+  '/api/admin/user-activity',
+  '/api/admin/user-activity/stats',
+  '/api/admin/bandwidth/top-files',
+  '/api/admin/file-type-stats',
+  '/api/admin/bandwidth',
+  '/api/admin/dashboards',
+  '/api/admin/dashboards/presets',
 ]);
+
+/** 从 JWT Cookie 中安全提取 userId（不解密，仅 base64url 解码 payload） */
+function extractUserIdFromCookie(req: Request): string | null {
+  try {
+    const token = req.cookies?.access_token;
+    if (!token || typeof token !== 'string') return null;
+
+    // JWT = base64url(header).base64url(payload).base64url(signature)
+    const parts = token.split('.');
+    if (parts.length !== 3) return null;
+
+    const payloadJson = Buffer.from(parts[1], 'base64url').toString('utf-8');
+    const payload = JSON.parse(payloadJson);
+
+    return (payload?.sub && typeof payload.sub === 'string') ? payload.sub : null;
+  } catch {
+    return null;
+  }
+}
 
 @Injectable()
 export class AccessLogMiddleware implements NestMiddleware {
@@ -22,18 +60,21 @@ export class AccessLogMiddleware implements NestMiddleware {
 
   use(req: Request, res: Response, next: NextFunction): void {
     const start = Date.now();
-    // T1-1/T1-2/T1-3: 使用 originalUrl 获取含全局 /api 前缀的原始路径
-    // 去除查询参数和尾部斜杠，确保路径匹配一致性和统计聚合准确性
-    const rawPath = (req.originalUrl || req.url || '/').split('?')[0].replace(/\/+$/, '') || '/';
+    // Phase 0.2: 保留完整 originalUrl（含 queryString），仅去除 fragment
+    // 用于搜索关键词、分享参数等精确分析
+    const rawPath = (req.originalUrl || req.url || '/').split('#')[0] || '/';
 
-    // T1-5: 使用 Set.has() O(1) 查找替代 Array.includes() O(n)
-    if (SKIP_PATH_SET.has(rawPath)) {
+    // 匹配跳过路径时，去除查询参数和尾部斜杠
+    const pathForMatching = rawPath.split('?')[0].replace(/\/+$/, '') || '/';
+    if (SKIP_PATH_SET.has(pathForMatching)) {
       next();
       return;
     }
 
-    // T1-4: 通过拦截 write/end 追踪实际发送的字节数
-    // 注意：统计的是业务层写入字节（压缩前），gzip 压缩后实际网络传输量可能更低
+    // Phase 0.2: 从 JWT Cookie 提取 userId（用于用户维度访问分析）
+    const userId = extractUserIdFromCookie(req);
+
+    // 通过拦截 write/end 追踪实际发送的字节数
     let bytesSent = 0;
     const originalWrite = res.write.bind(res) as typeof res.write;
     const originalEnd = res.end.bind(res) as typeof res.end;
@@ -57,7 +98,7 @@ export class AccessLogMiddleware implements NestMiddleware {
 
     // 在响应完成时记录日志
     res.on('finish', () => {
-      self.logAsync(req, res, Date.now() - start, rawPath, bytesSent).catch(() => {
+      self.logAsync(req, res, Date.now() - start, rawPath, bytesSent, userId).catch(() => {
         // 日志写入失败不影响业务
       });
     });
@@ -71,11 +112,11 @@ export class AccessLogMiddleware implements NestMiddleware {
     duration: number,
     path: string,
     bytesSent: number,
+    userId: string | null,
   ): Promise<void> {
     try {
       const ip = getClientIp(req);
 
-      // 优先使用实际发送的字节数，其次使用 content-length 头
       const responseSize =
         bytesSent ||
         parseInt(res.getHeader('content-length') as string) ||
@@ -90,6 +131,7 @@ export class AccessLogMiddleware implements NestMiddleware {
         duration,
         userAgent: (req.headers['user-agent'] as string)?.substring(0, 500) || null,
         referer: (req.headers['referer'] as string)?.substring(0, 300) || null,
+        userId,  // Phase 0.2: 记录已认证用户
       });
 
       await this.accessLogRepository.save(entry);

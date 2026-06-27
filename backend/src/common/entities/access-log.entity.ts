@@ -39,6 +39,10 @@ export class AccessLog {
   @Column({ nullable: true, type: 'varchar', length: 300, comment: 'Referer' })
   referer: string | null;
 
+  @Index()
+  @Column({ nullable: true, type: 'uuid', comment: '关联用户 ID（已登录请求）' })
+  userId: string | null;
+
   @CreateDateColumn({ comment: '请求时间' })
   createdAt: Date;
 }

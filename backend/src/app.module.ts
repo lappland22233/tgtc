@@ -21,7 +21,12 @@ import { FileAccessLog } from './common/entities/file-access-log.entity';
 import { RateLimit } from './common/entities/rate-limit.entity';
 import { AuditLog } from './common/entities/audit-log.entity';
 import { AccessLog } from './common/entities/access-log.entity';
+import { Alert } from './common/entities/alert.entity';
+import { DashboardConfig } from './common/entities/dashboard-config.entity';
 import { AccessLogModule } from './common/access-log.module';
+import { JobsModule } from './jobs/jobs.module';
+import { AlertModule } from './alert/alert.module';
+import { SecurityModule } from './security/security.module';
 
 @Module({
   imports: [
@@ -37,7 +42,7 @@ import { AccessLogModule } from './common/access-log.module';
       username: process.env.DB_USERNAME || 'postgres',
       password: process.env.DB_PASSWORD || 'postgres',
       database: process.env.DB_DATABASE || 'file_distribution',
-      entities: [User, File, SystemConfig, VerificationCode, BannedIP, ShareAudit, FileAccessLog, RateLimit, AuditLog, AccessLog],
+      entities: [User, File, SystemConfig, VerificationCode, BannedIP, ShareAudit, FileAccessLog, RateLimit, AuditLog, AccessLog, Alert, DashboardConfig],
       synchronize: process.env.DB_SYNCHRONIZE === 'true',
       migrations: [__dirname + '/migrations/*{.ts,.js}'],
       migrationsRun: process.env.DB_MIGRATIONS_RUN === 'true',
@@ -53,6 +58,9 @@ import { AccessLogModule } from './common/access-log.module';
     RateLimitModule,
     AuditModule,
     AccessLogModule,
+    JobsModule,
+    AlertModule,
+    SecurityModule,
   ],
 })
 export class AppModule {}
