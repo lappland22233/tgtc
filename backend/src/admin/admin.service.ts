@@ -1208,7 +1208,7 @@ export class AdminService {
         .select('f.id', 'fileId')
         .addSelect('f."originalName"', 'fileName')
         .addSelect('f."mimeType"', 'mimeType')
-        .addSelect('SUM(fal."responseSize")::bigint', 'totalBandwidth')
+        .addSelect('SUM(COALESCE(NULLIF(fal."responseSize", 0), f."size"))::bigint', 'totalBandwidth')
         .addSelect('COUNT(*)::int', 'accessCount')
         .where('fal.createdAt >= :since', { since })
         .andWhere('f."isDeleted" = false')
@@ -1225,8 +1225,9 @@ export class AdminService {
       // Top IPs by bandwidth
       this.accessLogRepository
         .createQueryBuilder('fal')
+        .leftJoin(File, 'f', 'f.id = fal.fileId')
         .select('fal.ip', 'ip')
-        .addSelect('SUM(fal."responseSize")::bigint', 'bandwidth')
+        .addSelect('SUM(COALESCE(NULLIF(fal."responseSize", 0), f.size))::bigint', 'bandwidth')
         .addSelect('COUNT(*)::int', 'requestCount')
         .where('fal.createdAt >= :since', { since })
         .groupBy('fal.ip')
@@ -1236,8 +1237,9 @@ export class AdminService {
       // Bandwidth trend (hourly)
       this.accessLogRepository
         .createQueryBuilder('fal')
+        .leftJoin(File, 'f', 'f.id = fal.fileId')
         .select("DATE_TRUNC('hour', fal.createdAt)", 'time')
-        .addSelect('SUM(fal."responseSize")::bigint', 'bandwidth')
+        .addSelect('SUM(COALESCE(NULLIF(fal."responseSize", 0), f.size))::bigint', 'bandwidth')
         .where('fal.createdAt >= :since', { since })
         .groupBy('time')
         .orderBy('time', 'ASC')

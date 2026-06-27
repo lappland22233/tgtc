@@ -92,9 +92,6 @@
             <!-- Section A: 浏览器分布 -->
             <div class="section-card">
               <div class="section-title">浏览器分布</div>
-              <div class="charts-row">
-                <div ref="browserChartRef" class="chart-container chart-pie"></div>
-              </div>
               <t-table
                 :data="uaData.browsers"
                 :columns="browserColumns"
@@ -114,9 +111,6 @@
             <!-- Section B: 操作系统 -->
             <div class="section-card">
               <div class="section-title">操作系统</div>
-              <div class="charts-row">
-                <div ref="osChartRef" class="chart-container chart-pie"></div>
-              </div>
               <t-table
                 :data="uaData.os"
                 :columns="osColumns"
@@ -265,13 +259,9 @@ const osColumns = [
 // --- Charts ---
 
 const refererCategoryChartRef = ref<HTMLDivElement | null>(null);
-const browserChartRef = ref<HTMLDivElement | null>(null);
-const osChartRef = ref<HTMLDivElement | null>(null);
 const deviceChartRef = ref<HTMLDivElement | null>(null);
 
 let refererCategoryChart: echarts.ECharts | null = null;
-let browserChart: echarts.ECharts | null = null;
-let osChart: echarts.ECharts | null = null;
 let deviceChart: echarts.ECharts | null = null;
 
 // --- Colors ---
@@ -283,10 +273,6 @@ const CATEGORY_COLORS: Record<string, string> = {
   '本站内链': '#ee6666',
   '外部网站': '#73c0de',
 };
-
-const BROWSER_PALETTE = ['#5470c6', '#91cc75', '#fac858', '#ee6666', '#73c0de', '#3ba272', '#fc8452', '#9a60b4'];
-
-const OS_PALETTE = ['#5470c6', '#91cc75', '#fac858', '#ee6666', '#73c0de', '#3ba272', '#fc8452', '#9a60b4'];
 
 const DEVICE_COLORS: Record<string, string> = {
   desktop: '#2ba471',
@@ -321,10 +307,9 @@ function updatePieChart(
   pieData: { name: string; value: number; color: string }[],
 ): echarts.ECharts | null {
   if (!el) return chart;
-  let c = chart;
-  if (!c) {
-    c = echarts.init(el, 'dark');
-  }
+  // 始终销毁重建，避免 display:none 导致的实例状态错乱
+  chart?.dispose();
+  const c = echarts.init(el, 'dark');
   c.setOption({
     tooltip: {
       trigger: 'item',
@@ -361,10 +346,12 @@ function updatePieChart(
 }
 
 function renderCategoryChart() {
+  const el = refererCategoryChartRef.value;
+  if (!el) return;
   const cats = refererData.value?.categories || [];
   refererCategoryChart = updatePieChart(
     refererCategoryChart,
-    refererCategoryChartRef.value,
+    el,
     cats.map((c) => ({
       name: c.name,
       value: c.count,
@@ -373,37 +360,13 @@ function renderCategoryChart() {
   );
 }
 
-function renderBrowserChart() {
-  const browsers = uaData.value?.browsers || [];
-  browserChart = updatePieChart(
-    browserChart,
-    browserChartRef.value,
-    browsers.map((b, i) => ({
-      name: b.name,
-      value: b.count,
-      color: BROWSER_PALETTE[i % BROWSER_PALETTE.length],
-    })),
-  );
-}
-
-function renderOSChart() {
-  const os = uaData.value?.os || [];
-  osChart = updatePieChart(
-    osChart,
-    osChartRef.value,
-    os.map((o, i) => ({
-      name: o.name,
-      value: o.count,
-      color: OS_PALETTE[i % OS_PALETTE.length],
-    })),
-  );
-}
-
 function renderDeviceChart() {
+  const el = deviceChartRef.value;
+  if (!el) return;
   const devices = uaData.value?.devices || [];
   deviceChart = updatePieChart(
     deviceChart,
-    deviceChartRef.value,
+    el,
     devices.map((d) => ({
       name: getDeviceLabel(d.type),
       value: d.count,
@@ -414,8 +377,6 @@ function renderDeviceChart() {
 
 function resizeAllCharts() {
   refererCategoryChart?.resize();
-  browserChart?.resize();
-  osChart?.resize();
   deviceChart?.resize();
 }
 
@@ -428,9 +389,7 @@ async function fetchRefererData() {
       params: { timeRange: timeRange.value },
     });
     refererData.value = (data.data || data) as RefererAnalysisResponse;
-    nextTick(() => {
-      renderCategoryChart();
-    });
+    setTimeout(() => renderCategoryChart(), 50);
   } catch {
     refererData.value = null;
   } finally {
@@ -445,11 +404,7 @@ async function fetchUAData() {
       params: { timeRange: timeRange.value, topN: 500 },
     });
     uaData.value = (data.data || data) as UserAgentAnalysisResponse;
-    nextTick(() => {
-      renderBrowserChart();
-      renderOSChart();
-      renderDeviceChart();
-    });
+    setTimeout(() => renderDeviceChart(), 50);
   } catch {
     uaData.value = null;
   } finally {
@@ -467,6 +422,11 @@ function onTimeRangeChange() {
 function onTabChange() {
   nextTick(() => {
     resizeAllCharts();
+    if (activeTab.value === 'ua') {
+      renderDeviceChart();
+    } else if (activeTab.value === 'referer') {
+      renderCategoryChart();
+    }
   });
 }
 
@@ -491,10 +451,10 @@ onMounted(() => {
 
 onUnmounted(() => {
   refererCategoryChart?.dispose();
-  browserChart?.dispose();
-  osChart?.dispose();
   deviceChart?.dispose();
 });
+
+defineExpose({ resizeAllCharts });
 </script>
 
 <style scoped>

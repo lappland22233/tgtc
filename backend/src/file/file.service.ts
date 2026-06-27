@@ -683,6 +683,7 @@ export class FileService implements OnModuleInit {
         ip: '',
         action: 'download',
         uploaderId: file.uploaderId,
+        responseSize: file.size,
       });
     } catch {
       // 日志记录失败不影响主流程
@@ -775,6 +776,7 @@ export class FileService implements OnModuleInit {
         ip: '',
         action: 'download',
         uploaderId: file.uploaderId,
+        responseSize: file.size,
       });
     } catch {
       // 日志记录失败不影响主流程
@@ -936,6 +938,7 @@ export class FileService implements OnModuleInit {
         ip: '',
         action: 'public_direct',
         uploaderId: file.uploaderId,
+        responseSize: file.size,
       });
     } catch {
       // ignore
@@ -980,6 +983,7 @@ export class FileService implements OnModuleInit {
         ip: '',
         action: 'public_direct',
         uploaderId: file.uploaderId,
+        responseSize: file.size,
       });
     } catch {
       // ignore
