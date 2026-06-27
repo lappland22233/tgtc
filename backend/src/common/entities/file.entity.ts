@@ -28,6 +28,12 @@ export class File {
   @Column()
   mimeType: string;
 
+  /**
+   * 文件大小（字节）。
+   * PostgreSQL 列类型为 bigint，TypeScript 类型为 number。
+   * 项目支持的最大文件为 600MB，远小于 Number.MAX_SAFE_INTEGER (2^53 ≈ 9PB)，
+   * 不会发生精度丢失。如未来支持超大文件需改为 string/BigInt。
+   */
   @Column('bigint')
   size: number;
 

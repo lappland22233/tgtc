@@ -20,7 +20,7 @@ export class DashboardConfig {
   name: string;
 
   @Column({ type: 'jsonb', default: {} })
-  config: Record<string, any>;
+  config: Record<string, unknown>;
 
   @Column({ default: false })
   isDefault: boolean;

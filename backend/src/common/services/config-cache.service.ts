@@ -4,9 +4,16 @@ import { Repository } from 'typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { SystemConfig } from '../entities/system-config.entity';
 
+interface CacheEntry {
+  value: string;
+  expiresAt: number;
+}
+
 @Injectable()
 export class ConfigCacheService {
-  private cache = new Map<string, string>();
+  // 进程内缓存。多实例部署时缓存不共享，TTL 限制保证最终一致性（最多滞后 TTL 毫秒）
+  private cache = new Map<string, CacheEntry>();
+  private readonly CACHE_TTL = 30_000; // 30 秒
 
   constructor(
     @InjectRepository(SystemConfig)
@@ -15,13 +22,14 @@ export class ConfigCacheService {
   ) {}
 
   async get(key: string, defaultValue: string): Promise<string> {
-    if (this.cache.has(key)) {
-      return this.cache.get(key)!;
+    const cached = this.cache.get(key);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.value;
     }
 
     const config = await this.systemConfigRepository.findOne({ where: { key } });
     const value = config?.value ?? defaultValue;
-    this.cache.set(key, value);
+    this.cache.set(key, { value, expiresAt: Date.now() + this.CACHE_TTL });
     return value;
   }
 
@@ -32,7 +40,7 @@ export class ConfigCacheService {
       ['key'],
     );
 
-    this.cache.set(key, value);
+    this.cache.set(key, { value, expiresAt: Date.now() + this.CACHE_TTL });
     this.eventEmitter.emit('config.changed', { key, value });
   }
 
@@ -51,8 +59,9 @@ export class ConfigCacheService {
     await this.systemConfigRepository.upsert(entities, ['key']);
 
     // 批量更新缓存
+    const expiresAt = Date.now() + this.CACHE_TTL;
     for (const c of configs) {
-      this.cache.set(c.key, c.value);
+      this.cache.set(c.key, { value: c.value, expiresAt });
     }
 
     // 单次事件通知批量变更

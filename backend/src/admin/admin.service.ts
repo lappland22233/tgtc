@@ -1,7 +1,7 @@
-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, Logger } from '@nestjs/common';
 import { UAParser } from 'ua-parser-js';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, LessThan, SelectQueryBuilder } from 'typeorm';
+import { Repository, LessThan, SelectQueryBuilder, In } from 'typeorm';
 import { SystemConfig } from '../common/entities/system-config.entity';
 import { BannedIP } from '../common/entities/banned-ip.entity';
 import { File } from '../common/entities/file.entity';
@@ -28,6 +28,8 @@ import {
 
 @Injectable()
 export class AdminService {
+  private readonly logger = new Logger(AdminService.name);
+
   constructor(
     @InjectRepository(SystemConfig)
     private systemConfigRepository: Repository<SystemConfig>,
@@ -266,14 +268,30 @@ export class AdminService {
   }
 
   async batchDeleteFiles(user: User, ids: string[]): Promise<void> {
-    await this.fileRepository.update(ids, { isDeleted: true });
+    // 先查询存在的、未删除的文件
+    const existingFiles = await this.fileRepository.find({
+      where: { id: In(ids), isDeleted: false },
+      select: ['id', 'originalName'],
+    });
 
-    // 审计日志：批量删除文件
+    if (existingFiles.length === 0) {
+      throw new NotFoundException('未找到可删除的文件');
+    }
+
+    const existingIds = existingFiles.map(f => f.id);
+    await this.fileRepository.update(existingIds, { isDeleted: true });
+
+    // 审计日志：批量删除文件，记录实际删除数量
     this.auditService.log({
       action: 'batch_delete_files',
       userId: user.id,
       resourceType: 'file',
-      metadata: { count: ids.length, ids },
+      metadata: {
+        count: existingIds.length,
+        requestedCount: ids.length,
+        ids: existingIds,
+        files: existingFiles.map(f => f.originalName),
+      },
     });
   }
 
@@ -513,8 +531,9 @@ export class AdminService {
       if (peak) {
         peakQPS = Math.ceil(Number(peak.count) / 60);
       }
-    } catch {
-      // DATE_TRUNC 在部分 PostgreSQL 版本不兼容时忽略
+    } catch (error) {
+      // DATE_TRUNC 在部分 PostgreSQL 版本不兼容时记录警告，peakQPS 保持为 0
+      this.logger.warn(`peakQPS 计算失败: ${error instanceof Error ? error.message : String(error)}`);
     }
 
     const totalRequests = Number(raw?.totalRequests || 0);
@@ -550,10 +569,11 @@ export class AdminService {
 
     const raw = await this.accessLogRepo
       .createQueryBuilder('log')
-      .select(`DATE_TRUNC('${trunc}', log.createdAt)`, 'time')
+      .select('DATE_TRUNC(:trunc, log.createdAt)', 'time')
       .addSelect('COUNT(*)', 'requests')
       .addSelect('COALESCE(SUM(log.responseSize), 0)', 'bandwidth')
       .where('log.createdAt >= :since', { since })
+      .setParameter('trunc', trunc)
       .groupBy('time')
       .orderBy('time', 'ASC')
       .getRawMany<{ time: string; requests: string; bandwidth: string }>();
@@ -1390,8 +1410,9 @@ export class AdminService {
     return this.exportService.export(options);
   }
 
-  async getComparison(timeRange: string) {
-    const hours = { '1h': 1, '24h': 24, '7d': 168, '30d': 720 }[timeRange] || 168;
+  async getComparison(timeRange: string = '7d') {
+    const hoursMap: Record<string, number> = { '1h': 1, '24h': 24, '7d': 168, '30d': 720 };
+    const hours = hoursMap[timeRange] ?? 168;
     const now = new Date();
     const periodMs = hours * 3600 * 1000;
     const currentSince = new Date(now.getTime() - periodMs);

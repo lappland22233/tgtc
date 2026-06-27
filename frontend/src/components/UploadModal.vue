@@ -348,7 +348,7 @@ async function uploadFiles(files: File[]) {
   updateSpeeds();
   stopSpeedTimer();
 
-  batchResult.value = { success: successList as any, failed: failedList };
+  batchResult.value = { success: successList, failed: failedList };
 
   emit('uploaded');
 

@@ -6,7 +6,7 @@ export interface AnomalyDetectionResult {
   severity: 'low' | 'medium' | 'high' | 'critical';
   title: string;
   message: string;
-  details: Record<string, any>;
+  details: Record<string, string | number | undefined>;
 }
 
 @Injectable()
@@ -103,7 +103,7 @@ export class BehaviorAnalyzer {
       [cutoff],
     );
 
-    return rows.map((r: any) => ({
+    return rows.map((r: { ip: string; unique_files: number; total_downloads: number }) => ({
       type: 'abnormal_download',
       severity: 'high' as const,
       title: '异常下载行为',

@@ -10,9 +10,8 @@ export class RegisterDto {
   email: string;
 
   @IsString()
-  @MinLength(8, { message: '密码至少8位' })
-  @MaxLength(128, { message: '密码最多128位' })
-  @Matches(/[a-zA-Z]/, { message: '密码必须包含至少一个字母' })
+  @MinLength(6, { message: '密码至少6位' })
+  @MaxLength(20, { message: '密码最多20位' })
   password: string;
 
   @ValidateIf((o) => o.code !== undefined && o.code !== null && o.code !== '')
@@ -57,8 +56,7 @@ export class ResetPasswordDto {
   code: string;
 
   @IsString()
-  @MinLength(8, { message: '密码至少8位' })
-  @MaxLength(128, { message: '密码最多128位' })
-  @Matches(/[a-zA-Z]/, { message: '密码必须包含至少一个字母' })
+  @MinLength(6, { message: '新密码至少6位' })
+  @MaxLength(20, { message: '新密码最多20位' })
   newPassword: string;
 }

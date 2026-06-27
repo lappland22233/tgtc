@@ -7,16 +7,33 @@ export const useFileStore = defineStore('files', () => {
   const files = ref<FileItem[]>([]);
   const total = ref(0);
   const loading = ref(false);
+  // 取消上一次 fetchFiles 请求，避免并发；用户快速刷新时新请求优先
+  let fetchAbortController: AbortController | null = null;
 
   async function fetchFiles(page = 1, limit = 20, keyword?: string) {
-    if (loading.value) return; // 防止并发重复请求
+    // 取消上一次请求（如有）
+    if (fetchAbortController) {
+      fetchAbortController.abort();
+    }
+    fetchAbortController = new AbortController();
     loading.value = true;
     try {
-      const response = await api.get('/files', { params: { page, limit, keyword } });
+      const response = await api.get('/files', {
+        params: { page, limit, keyword },
+        signal: fetchAbortController.signal,
+      });
       files.value = response.data.data.files;
       total.value = response.data.data.total;
+    } catch (err) {
+      // 忽略 AbortError（被新请求取消的旧请求）
+      const axiosErr = err as { name?: string; code?: string };
+      if (axiosErr.name === 'AbortError' || axiosErr.code === 'ERR_CANCELED') {
+        return;
+      }
+      throw err;
     } finally {
       loading.value = false;
+      fetchAbortController = null;
     }
   }
 

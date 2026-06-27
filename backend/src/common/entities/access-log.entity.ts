@@ -27,6 +27,10 @@ export class AccessLog {
   @Column({ type: 'int', comment: 'HTTP 状态码' })
   statusCode: number;
 
+  /**
+   * 响应体大小（字节），用于带宽统计。
+   * PostgreSQL bigint，TypeScript number。单请求最大 600MB 远小于 MAX_SAFE_INTEGER。
+   */
   @Column({ type: 'bigint', default: 0, comment: '响应体大小（字节），用于带宽统计' })
   responseSize: number;
 

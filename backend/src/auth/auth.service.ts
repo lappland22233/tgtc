@@ -13,6 +13,7 @@ import { AuditService } from '../common/services/audit.service';
 import { AuditStatus } from '../common/entities/audit-log.entity';
 import { RegisterDto, LoginDto, VerifyEmailDto, SendCodeDto, ResetPasswordDto } from './auth.dto';
 import { RateLimitService } from '../common/services/rate-limit.service';
+import { BCRYPT_ROUNDS } from '../common/constants/bcrypt';
 
 @Injectable()
 export class AuthService {
@@ -67,7 +68,7 @@ export class AuthService {
       await this.validateVerificationCode(registerDto.email, registerDto.code, 'register');
     }
 
-    const hashedPassword = await bcrypt.hash(registerDto.password, 12);
+    const hashedPassword = await bcrypt.hash(registerDto.password, BCRYPT_ROUNDS);
 
     // 使用事务 + 行锁确保超管角色的唯一性
     const queryRunner = this.dataSource.createQueryRunner();
@@ -321,7 +322,7 @@ export class AuthService {
   async resetPassword(dto: ResetPasswordDto): Promise<void> {
     await this.validateVerificationCode(dto.email, dto.code, 'reset_password');
 
-    const hashedPassword = await bcrypt.hash(dto.newPassword, 12);
+    const hashedPassword = await bcrypt.hash(dto.newPassword, BCRYPT_ROUNDS);
     await this.userRepository.update(
       { email: dto.email },
       { password: hashedPassword },

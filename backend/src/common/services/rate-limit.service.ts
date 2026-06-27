@@ -73,7 +73,6 @@ export class RateLimitService {
     }
 
     const row = result[0];
-    const count = row.attemptCount;
     const lockedUntil = row.lockedUntil ? new Date(row.lockedUntil) : null;
 
     // 检测本次操作是否已达到阈值并原子化设置了锁
@@ -82,16 +81,10 @@ export class RateLimitService {
       return { allowed: false, waitMinutes };
     }
 
-    // 窗口过期后重置为 1，判断是否为刚重置场景
-    if (count === 1 && row.firstAttemptAt) {
-      const firstAttemptAt = new Date(row.firstAttemptAt);
-      // 使用窗口时长的 1% 作为"刚刚重置"的阈值，至少 100ms，最多 1000ms
-      const justResetThreshold = Math.min(1000, Math.max(100, windowMs / 100));
-      if (now.getTime() - firstAttemptAt.getTime() < justResetThreshold) {
-        return { allowed: true };
-      }
-    }
-
+    // 重置后第一次请求（count === 1）按阈值正常判断即可：
+    // 1 < maxAttempts（如 5），allowed = true 已是正确结果，无需额外宽限期逻辑。
+    // 原宽限期代码会让窗口重置后短时间内无条件返回 allowed=true，
+    // 可被攻击者利用窗口边界绕过限流阈值，已移除。
     return { allowed: true };
   }
 

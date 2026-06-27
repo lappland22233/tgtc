@@ -80,21 +80,21 @@ export class AccessLogMiddleware implements NestMiddleware {
     const originalEnd = res.end.bind(res) as typeof res.end;
     const self = this;
 
-    res.write = function (chunk: unknown, ...rest: any[]): boolean {
+    res.write = function (chunk: unknown, ...rest: unknown[]): boolean {
       if (typeof chunk === 'string' || Buffer.isBuffer(chunk)) {
         const data = chunk as string | Buffer;
         bytesSent += Buffer.isBuffer(data) ? data.length : Buffer.byteLength(data);
       }
-      return (originalWrite as any)(chunk, ...rest);
-    };
+      return originalWrite(chunk as any, ...rest as any[]);
+    } as typeof res.write;
 
-    res.end = function (chunk: unknown, ...rest: any[]): any {
+    res.end = function (chunk?: unknown, ...rest: unknown[]): unknown {
       if (typeof chunk === 'string' || Buffer.isBuffer(chunk)) {
         const data = chunk as string | Buffer;
         bytesSent += Buffer.isBuffer(data) ? data.length : Buffer.byteLength(data);
       }
-      return (originalEnd as any)(chunk, ...rest);
-    };
+      return originalEnd(chunk as any, ...rest as any[]);
+    } as typeof res.end;
 
     // 在响应完成时记录日志
     res.on('finish', () => {

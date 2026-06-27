@@ -3,8 +3,13 @@ import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from 'crypt
 const ALGORITHM = 'aes-256-cbc';
 
 function getKey(): Buffer {
-  const secret = process.env.SMTP_ENCRYPTION_KEY || process.env.JWT_SECRET || 'smtp-encryption-key-change-me';
-  return scryptSync(secret, 'smtp-encryption-salt', 32);
+  const secret = process.env.SMTP_ENCRYPTION_KEY;
+  if (!secret) {
+    throw new Error('SMTP_ENCRYPTION_KEY 环境变量未配置，无法安全加密 SMTP 密码');
+  }
+  // 允许部署自定义 salt，否则使用默认值
+  const salt = process.env.SMTP_ENCRYPTION_SALT || 'smtp-encryption-salt';
+  return scryptSync(secret, salt, 32);
 }
 
 export function encryptPassword(plaintext: string): string {
