@@ -114,7 +114,7 @@ import { useFileStore } from '../../stores/files';
 import { api } from '../../stores/auth';
 import { formatSize, getFileEmoji } from '@/utils/format';
 import { getErrorMessage } from '../../utils/error';
-import type { BatchUploadResult } from '../../types/file';
+import type { BatchUploadResult, BatchUploadSuccessItem } from '../../types/file';
 
 type QueueStatus = 'pending' | 'success' | 'error';
 
@@ -244,13 +244,16 @@ async function uploadFiles(files: File[]) {
   // 先赋值给 ref 触发 Vue 响应式包装，再从响应式数组中建 Map
   uploadQueue.value = queueEntries;
   const queueMap = new Map<string, QueueEntry>(
-    uploadQueue.value.map((e) => [e.file.name, e])
+    uploadQueue.value.map((e) => [
+      `${e.file.name}-${e.file.size}-${e.file.lastModified}`,
+      e,
+    ])
   );
 
   // 新批次前清理 selectedFiles 数据
   selectedFiles.value = [];
 
-  const successList: { id: string; originalName: string }[] = [];
+  const successList: BatchUploadSuccessItem[] = [];
   const failedList: { name: string; reason: string }[] = [];
 
   // 启动速度计算定时器
@@ -261,7 +264,7 @@ async function uploadFiles(files: File[]) {
     const batch = files.slice(i, i + concurrency.value);
     await Promise.allSettled(
       batch.map(async (file) => {
-        const entry = queueMap.get(file.name);
+        const entry = queueMap.get(`${file.name}-${file.size}-${file.lastModified}`);
         try {
           const result = await fileStore.uploadFile(file, (loaded, total) => {
             if (entry) {
@@ -287,7 +290,7 @@ async function uploadFiles(files: File[]) {
   updateSpeeds();
   stopSpeedTimer();
 
-  batchResult.value = { success: successList as any, failed: failedList };
+  batchResult.value = { success: successList, failed: failedList };
 
   // 刷新列表
   if (successList.length > 0) {

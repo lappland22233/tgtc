@@ -70,20 +70,29 @@
         <t-table
           :data="fileStore.files"
           :columns="columns"
+          :row-class-name="getRowClassName"
           row-key="id"
           hover
+          table-layout="auto"
           :selected-row-keys="selectedImageIds"
           @select-change="handleSelectChange"
         >
           <template #filename="{ row }">
             <div style="display: flex; align-items: center; gap: 12px;">
               <ThumbnailImg :file-id="row.id" :mime-type="row.mimeType" :size="36" :emoji="getFileEmoji(row.mimeType)" />
-              <span>{{ row.originalName }}</span>
+              <div style="min-width: 0;">
+                <span :class="{ 'deleted-name filename-text': row.isDeleted, 'filename-text': !row.isDeleted }">{{ row.originalName }}</span>
+                <div style="margin-top: 2px;">
+                  <t-tag v-if="row.isDeleted && row.deletedByAdmin" theme="danger" size="small">被管理员删除</t-tag>
+                  <t-tag v-else-if="row.isDeleted" theme="warning" size="small">删除中</t-tag>
+                </div>
+              </div>
             </div>
           </template>
           <template #size="{ row }">{{ formatSize(row.size) }}</template>
           <template #accessType="{ row }">
             <t-select
+              v-if="!row.isDeleted"
               :value="row.accessType"
               @change="(val: string) => handleAccessTypeChange(row.id, val)"
               :options="[
@@ -92,12 +101,14 @@
               ]"
               style="width: 100px;"
             />
+            <span v-else class="deleted-label">删除中</span>
           </template>
           <template #password="{ row }">
             <t-button
               size="small"
               :theme="row.hasPassword ? 'warning' : 'default'"
               variant="outline"
+              :disabled="row.isDeleted"
               @click="openPasswordDialog(row)"
             >
               {{ row.hasPassword ? '🔒 已加密' : '🔓 未加密' }}
@@ -107,6 +118,7 @@
             <t-select
               :value="row.expiresIn"
               @change="(val: number | null) => handleExpiresChange(row.id, val)"
+              :disabled="row.isDeleted"
               :options="expiresOptions"
               style="width: 100px;"
             />
@@ -115,15 +127,47 @@
             <t-input-number
               :value="row.maxAccessCount"
               :min="-1"
+              :disabled="row.isDeleted"
               @change="(val: number) => handleAccessCountChange(row.id, val)"
               style="width: 120px;"
             />
           </template>
-          <template #createdAt="{ row }">{{ formatDate(row.createdAt) }}</template>
+          <template #createdAt="{ row }">
+            <div>
+              <div>{{ formatDate(row.createdAt) }}</div>
+              <div v-if="row.isDeleted && row.deleteRequestedAt" style="font-size: 11px; color: var(--color-warning); margin-top: 2px;">
+                删除于 {{ formatDate(row.deleteRequestedAt) }}
+              </div>
+            </div>
+          </template>
           <template #operations="{ row }">
-            <t-button size="small" theme="primary" variant="text" @click="copyLink(row)">复制链接</t-button>
-            <t-button size="small" theme="default" variant="text" @click="downloadFile(row)">下载</t-button>
-            <t-button size="small" theme="danger" variant="text" @click="handleDelete(row.id)">删除</t-button>
+            <!-- 已删除状态：显示恢复和强制删除 -->
+            <template v-if="row.isDeleted">
+              <t-button
+                size="small"
+                theme="success"
+                variant="text"
+                :disabled="row.deletedByAdmin && !isAdmin"
+                @click="handleRestore(row.id)"
+              >
+                恢复
+              </t-button>
+              <t-button
+                v-if="isAdmin"
+                size="small"
+                theme="danger"
+                variant="text"
+                @click="handleForceDelete(row.id)"
+              >
+                强制删除
+              </t-button>
+            </template>
+            <!-- 正常状态：显示正常操作 -->
+            <template v-else>
+              <t-button size="small" theme="primary" variant="text" @click="copyLink(row)">复制链接</t-button>
+              <t-button size="small" theme="default" variant="text" @click="downloadFile(row)">下载</t-button>
+              <t-button size="small" theme="danger" variant="text" @click="handleDelete(row)">删除</t-button>
+            </template>
           </template>
         </t-table>
 
@@ -153,6 +197,28 @@
         设置密码后，访问者需要输入密码才能查看该文件
       </div>
     </t-dialog>
+
+    <!-- 删除确认弹窗 -->
+    <t-dialog
+      v-model:visible="deleteDialog.visible"
+      header="确认删除文件"
+      width="420px"
+      @confirm="confirmDelete"
+      @close="deleteDialog.visible = false"
+    >
+      <div style="line-height: 1.8;">
+        <p>确定要删除文件 <strong>{{ deleteDialog.fileName }}</strong> 吗？</p>
+        <div style="margin-top: 12px; padding: 12px; background: var(--bg-secondary); border-radius: 6px; font-size: 13px; color: var(--text-secondary);">
+          <p style="margin-bottom: 8px;">⚙️ 删除说明：</p>
+          <ul style="margin: 0; padding-left: 20px;">
+            <li>文件将进入 <strong>7 天冷静期</strong>，期间可以恢复</li>
+            <li>冷静期内文件不可访问和下载</li>
+            <li>7 天后文件将被永久删除</li>
+            <li>删除后 10 分钟内不可重复请求</li>
+          </ul>
+        </div>
+      </div>
+    </t-dialog>
   </div>
 </template>
 
@@ -161,7 +227,7 @@ import { ref, onMounted, computed, reactive, watch } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
 import { MessagePlugin } from 'tdesign-vue-next';
 import { useFileStore } from '../../stores/files';
-import { api } from '../../stores/auth';
+import { useAuthStore, api } from '../../stores/auth';
 import { getErrorMessage } from '../../utils/error';
 import { formatSize, formatDate, getFileEmoji } from '@/utils/format';
 import UploadModal from '../../components/UploadModal.vue';
@@ -169,6 +235,7 @@ import ThumbnailImg from '../../components/ThumbnailImg.vue';
 import type { FileItem } from '../../types/file';
 
 const fileStore = useFileStore();
+const authStore = useAuthStore();
 const router = useRouter();
 const route = useRoute();
 const page = ref(Number(route.query.page) || 1);
@@ -179,12 +246,27 @@ const markdownResult = ref('');
 const selectedImageIds = ref<string[]>([]);
 const dropFiles = ref<File[]>([]);
 
+const isAdmin = computed(() => {
+  const role = authStore.user?.role || fileStore.currentUserRole;
+  return role === 'admin' || role === 'super_admin';
+});
+
+// 同步当前用户角色到 fileStore
+watch(() => authStore.user?.role, (role) => {
+  if (role) fileStore.setCurrentUserRole(role);
+}, { immediate: true });
+
 const selectedImages = computed(() =>
   fileStore.files.filter(f =>
     f.mimeType.startsWith('image/') &&
-    selectedImageIds.value.includes(f.id)
+    selectedImageIds.value.includes(f.id) &&
+    !f.isDeleted
   )
 );
+
+function getRowClassName({ row }: { row: FileItem }) {
+  return row.isDeleted ? 'row-deleted' : '';
+}
 
 // 密码弹窗状态
 const passwordDialog = reactive({
@@ -192,6 +274,19 @@ const passwordDialog = reactive({
   value: '',
   fileId: '',
 });
+
+// 删除确认弹窗
+const deleteDialog = reactive({
+  visible: false,
+  fileId: '',
+  fileName: '',
+});
+
+function openDeleteDialog(row: FileItem) {
+  deleteDialog.fileId = row.id;
+  deleteDialog.fileName = row.originalName;
+  deleteDialog.visible = true;
+}
 
 function openPasswordDialog(row: FileItem) {
   passwordDialog.fileId = row.id;
@@ -204,7 +299,6 @@ async function savePassword() {
     await fileStore.setPassword(passwordDialog.fileId, passwordDialog.value);
     MessagePlugin.success(passwordDialog.value ? '密码已设置' : '密码已移除');
     passwordDialog.visible = false;
-    // 刷新以更新 hasPassword 状态
     fileStore.fetchFiles(page.value, 20, search.value || undefined);
   } catch (error: unknown) {
     MessagePlugin.error(getErrorMessage(error));
@@ -271,7 +365,7 @@ function onUploaded() {
 
 function handleSelectChange(selectedRowKeys: (string | number)[]) {
   selectedImageIds.value = selectedRowKeys.filter(k =>
-    fileStore.files.find(f => f.id === k && f.mimeType.startsWith('image/'))
+    fileStore.files.find(f => f.id === k && f.mimeType.startsWith('image/') && !f.isDeleted)
   ) as string[];
 }
 
@@ -288,14 +382,14 @@ function handleClearSearch() {
 
 const columns = [
   { colKey: 'row-select', type: 'multiple' as const, width: '50' },
-  { colKey: 'filename', title: '文件名', width: '200' },
+  { colKey: 'filename', title: '文件名', width: '260', ellipsis: true },
   { colKey: 'size', title: '大小', width: '90' },
   { colKey: 'accessType', title: '访问权限', width: '110' },
-  { colKey: 'password', title: '加密访问', width: '120' },
-  { colKey: 'maxAccessCount', title: '访问次数', width: '120' },
+  { colKey: 'password', title: '加密', width: '110' },
+  { colKey: 'maxAccessCount', title: '访问次数', width: '110' },
   { colKey: 'expiresIn', title: '限时访问', width: '110' },
-  { colKey: 'createdAt', title: '上传时间', width: '130' },
-  { colKey: 'operations', title: '操作', width: '180' },
+  { colKey: 'createdAt', title: '上传时间', width: '160' },
+  { colKey: 'operations', title: '操作', width: '220' },
 ];
 
 async function handleAccessTypeChange(id: string, accessType: string) {
@@ -332,7 +426,6 @@ async function downloadFile(row: Pick<FileItem, 'id'>) {
     const url = window.URL.createObjectURL(new Blob([response.data]));
     const link = document.createElement('a');
     link.href = url;
-    // 从 Content-Disposition 头部提取文件名
     const disposition = response.headers['content-disposition'];
     let filename = `file-${row.id}`;
     if (disposition) {
@@ -351,9 +444,54 @@ async function downloadFile(row: Pick<FileItem, 'id'>) {
   }
 }
 
-async function handleDelete(id: string) {
-  await fileStore.deleteFile(id);
-  MessagePlugin.success('删除成功');
+/** 点击删除按钮 → 弹出确认对话框 */
+function handleDelete(row: FileItem) {
+  openDeleteDialog(row);
+}
+
+/** 确认删除 */
+async function confirmDelete() {
+  try {
+    const result = await fileStore.deleteFile(deleteDialog.fileId);
+    if (result.status === 'permanently_deleted') {
+      MessagePlugin.success('文件已永久删除');
+    } else if (result.status === 'already_deleted') {
+      const scheduledDate = result.scheduledAt
+        ? formatDate(result.scheduledAt)
+        : '7天后';
+      MessagePlugin.warning(`文件已处于待删除状态，将于 ${scheduledDate} 永久删除`);
+    } else {
+      const scheduledDate = result.scheduledAt
+        ? formatDate(result.scheduledAt)
+        : '7天后';
+      MessagePlugin.success(`文件已标记为待删除，将于 ${scheduledDate} 永久删除，期间可恢复`);
+    }
+    deleteDialog.visible = false;
+    await fileStore.fetchFiles(page.value, 20, search.value || undefined);
+  } catch (error: unknown) {
+    MessagePlugin.error(getErrorMessage(error));
+  }
+}
+
+/** 恢复已删除的文件 */
+async function handleRestore(id: string) {
+  try {
+    await fileStore.restoreFile(id);
+    MessagePlugin.success('文件已恢复');
+    await fileStore.fetchFiles(page.value, 20, search.value || undefined);
+  } catch (error: unknown) {
+    MessagePlugin.error(getErrorMessage(error));
+  }
+}
+
+/** 管理员强制永久删除 */
+async function handleForceDelete(id: string) {
+  try {
+    await fileStore.forceDeleteFile(id);
+    MessagePlugin.success('文件已永久删除');
+  } catch (error: unknown) {
+    MessagePlugin.error(getErrorMessage(error));
+  }
 }
 
 async function convertToMarkdown() {
@@ -411,5 +549,29 @@ onMounted(() => {
 .drop-overlay-content h2 {
   font-size: 24px;
   font-weight: 600;
+}
+
+.deleted-name {
+  text-decoration: line-through;
+  opacity: 0.6;
+}
+
+.deleted-label {
+  color: var(--text-disabled, #999);
+  font-size: 13px;
+  font-style: italic;
+}
+
+.filename-text {
+  display: block;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+:deep(.row-deleted) {
+  background: rgba(255, 255, 255, 0.02);
+  opacity: 0.85;
 }
 </style>

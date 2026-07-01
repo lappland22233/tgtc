@@ -164,14 +164,16 @@ export class FileController {
     @CurrentUser() user: User,
     @Query('userId') userId?: string,
     @Query('keyword') keyword?: string,
+    @Query('includeDeleted') includeDeleted?: string,
   ) {
+    const shouldIncludeDeleted = includeDeleted === 'true';
     // Non-admin users can only see their own files
     if (user.role === UserRole.USER) {
-      return this.fileService.findAll(Number(page), Number(limit), user.id, keyword);
+      return this.fileService.findAll(Number(page), Number(limit), user.id, keyword, shouldIncludeDeleted);
     }
     // Admin: only show all files when userId filter is explicitly provided;
     // default to own files for the "我的文件" page
-    return this.fileService.findAll(Number(page), Number(limit), userId || user.id, keyword);
+    return this.fileService.findAll(Number(page), Number(limit), userId || user.id, keyword, shouldIncludeDeleted);
   }
 
   /**
@@ -224,7 +226,7 @@ export class FileController {
 
       res.set({
         'Content-Type': result.contentType,
-        'Cache-Control': 'private, max-age=300',
+        'Cache-Control': 'private, no-cache',
       });
 
       const pipe = promisify(pipeline);
@@ -334,8 +336,29 @@ export class FileController {
   @Delete(':id')
   @UseGuards(AuthGuard('jwt'))
   async delete(@Param('id') id: string, @CurrentUser() user: User) {
-    await this.fileService.delete(id, user);
-    return { message: '文件已删除' };
+    const result = await this.fileService.delete(id, user);
+    if (result.status === 'permanently_deleted') {
+      return { message: '文件已永久删除', data: result };
+    }
+    if (result.status === 'already_deleted') {
+      return { message: '文件已处于待删除状态', data: result };
+    }
+    return { message: '文件已标记为待删除，7 天后永久删除', data: result };
+  }
+
+  @Post(':id/restore')
+  @UseGuards(AuthGuard('jwt'))
+  async restoreDelete(@Param('id') id: string, @CurrentUser() user: User) {
+    await this.fileService.restoreDelete(id, user);
+    return { message: '文件已恢复' };
+  }
+
+  /** 文件主强制永久删除自己的文件（跳过 7 天等待期） */
+  @Post(':id/force-delete')
+  @UseGuards(AuthGuard('jwt'))
+  async forceDelete(@Param('id') id: string, @CurrentUser() user: User) {
+    await this.fileService.forceDelete(id, user);
+    return { message: '文件已永久删除' };
   }
 
   @Post('batch-markdown')
@@ -439,7 +462,7 @@ export class FileController {
             ? `inline; filename="${encodeURIComponent(result.filename)}"`
             : `attachment; filename="${encodeURIComponent(result.filename)}"`,
           'Content-Length': result.size.toString(),
-          'Cache-Control': 'public, max-age=3600',
+          'Cache-Control': 'public, no-cache, must-revalidate, max-age=0',
         });
         const pipe = promisify(pipeline);
         await pipe(result.stream, res);

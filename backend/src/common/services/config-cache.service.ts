@@ -13,13 +13,18 @@ interface CacheEntry {
 export class ConfigCacheService {
   // 进程内缓存。多实例部署时缓存不共享，TTL 限制保证最终一致性（最多滞后 TTL 毫秒）
   private cache = new Map<string, CacheEntry>();
-  private readonly CACHE_TTL = 30_000; // 30 秒
+  private readonly CACHE_TTL: number;
 
   constructor(
     @InjectRepository(SystemConfig)
     private systemConfigRepository: Repository<SystemConfig>,
     private eventEmitter: EventEmitter2,
-  ) {}
+  ) {
+    this.CACHE_TTL = Number(process.env.CACHE_TTL_MS ?? 30000);
+    if (!Number.isFinite(this.CACHE_TTL) || this.CACHE_TTL < 1000) {
+      this.CACHE_TTL = 30000;
+    }
+  }
 
   async get(key: string, defaultValue: string): Promise<string> {
     const cached = this.cache.get(key);

@@ -12,6 +12,7 @@ import { AuditLog } from '../common/entities/audit-log.entity';
 import { AccessLog } from '../common/entities/access-log.entity';
 import { Alert } from '../common/entities/alert.entity';
 import { DashboardConfig } from '../common/entities/dashboard-config.entity';
+import { UploadTask } from '../common/entities/upload-task.entity';
 
 export const AppDataSource = new DataSource({
   type: 'postgres',
@@ -20,7 +21,7 @@ export const AppDataSource = new DataSource({
   username: process.env.DB_USERNAME || 'postgres',
   password: process.env.DB_PASSWORD || 'postgres',
   database: process.env.DB_DATABASE || 'file_distribution',
-  entities: [User, File, SystemConfig, VerificationCode, BannedIP, ShareAudit, FileAccessLog, RateLimit, AuditLog, AccessLog, Alert, DashboardConfig],
+  entities: [User, File, SystemConfig, VerificationCode, BannedIP, ShareAudit, FileAccessLog, RateLimit, AuditLog, AccessLog, Alert, DashboardConfig, UploadTask],
   migrations: ['src/migrations/*.ts'],
   synchronize: false,
   logging: process.env.NODE_ENV === 'development',

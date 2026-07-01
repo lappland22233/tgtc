@@ -244,27 +244,51 @@ export class AdminService {
   }
 
   async getAllFiles(page = 1, limit = 20): Promise<{ files: File[]; total: number }> {
-    return this.fileService.findAll(page, limit);
+    return this.fileService.findAll(page, limit, undefined, undefined, true);
   }
 
-  async deleteFile(user: User, id: string): Promise<void> {
+  /**
+   * 管理员删除用户文件（双重确认机制）：
+   * - 第一次请求：标记文件进入 7 天冷静期（deletedByAdmin=true，普通用户不可恢复）
+   * - 第二次请求：永久强制删除（从 Telegram + 数据库移除，无视冷静期）
+   * 管理员不受 10 分钟冷却窗口限制，可立即请求第二次确认删除
+   */
+  async deleteFile(user: User, id: string): Promise<{ message: string }> {
     const file = await this.fileRepository.findOne({ where: { id } });
 
     if (!file) {
       throw new NotFoundException('文件不存在');
     }
 
+    const now = new Date();
+
+    // 第二步：文件已标记删除 → 永久强制删除
+    if (file.isDeleted && file.deletedByAdmin) {
+      await this.fileService.forceDelete(id, user);
+      return { message: '文件已永久删除' };
+    }
+
+    // 第一步：标记为已删除（管理员无视冷却窗口，直接覆盖）
     file.isDeleted = true;
+    file.deletedByAdmin = true;
+    file.deleteRequestedAt = now;
+    file.deleteScheduledAt = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+    file.deleteCooldownUntil = new Date(now.getTime() + 10 * 60 * 1000);
     await this.fileRepository.save(file);
 
-    // 审计日志：管理员删除文件
+    // 审计日志：管理员标记删除
     this.auditService.log({
-      action: 'file_delete',
+      action: 'file_delete_by_admin',
       userId: user.id,
       resourceType: 'file',
       resourceId: id,
-      metadata: { filename: file.originalName },
+      metadata: {
+        filename: file.originalName,
+        scheduledAt: file.deleteScheduledAt.toISOString(),
+      },
     });
+
+    return { message: `文件已标记为待删除（7 天后永久删除），再次请求将立即强制删除` };
   }
 
   async batchDeleteFiles(user: User, ids: string[]): Promise<void> {
@@ -278,12 +302,22 @@ export class AdminService {
       throw new NotFoundException('未找到可删除的文件');
     }
 
+    const now = new Date();
+    const scheduledAt = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+    const cooldownUntil = new Date(now.getTime() + 10 * 60 * 1000);
+
     const existingIds = existingFiles.map(f => f.id);
-    await this.fileRepository.update(existingIds, { isDeleted: true });
+    await this.fileRepository.update(existingIds, {
+      isDeleted: true,
+      deletedByAdmin: true,
+      deleteRequestedAt: now,
+      deleteScheduledAt: scheduledAt,
+      deleteCooldownUntil: cooldownUntil,
+    });
 
     // 审计日志：批量删除文件，记录实际删除数量
     this.auditService.log({
-      action: 'batch_delete_files',
+      action: 'batch_delete_files_by_admin',
       userId: user.id,
       resourceType: 'file',
       metadata: {
@@ -291,6 +325,7 @@ export class AdminService {
         requestedCount: ids.length,
         ids: existingIds,
         files: existingFiles.map(f => f.originalName),
+        scheduledAt: scheduledAt.toISOString(),
       },
     });
   }

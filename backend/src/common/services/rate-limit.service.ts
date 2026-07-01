@@ -12,6 +12,15 @@ export interface RateLimitResult {
 export class RateLimitService {
   private readonly logger = new Logger(RateLimitService.name);
 
+  /** 默认锁定时长（毫秒）：15 分钟 */
+  static readonly DEFAULT_LOCK_DURATION_MS = 15 * 60 * 1000;
+  /** 每分钟毫秒数（用于显示等待分钟数） */
+  private static readonly MS_PER_MINUTE = 60_000;
+  /** 默认限流窗口时长（毫秒）：15 分钟 */
+  static readonly DEFAULT_WINDOW_MS = 15 * 60 * 1000;
+  /** 清理过期记录的截止时间：1 小时 */
+  private static readonly CLEANUP_CUTOFF_MS = 60 * 60 * 1000;
+
   constructor(
     @InjectRepository(RateLimit)
     private rateLimitRepo: Repository<RateLimit>,
@@ -68,7 +77,7 @@ export class RateLimitService {
     // 无返回行 → 记录已被其他请求锁定（WHERE 条件过滤了锁定记录）
     // 锁定时间使用 lockDurationMs 近似（已原子化设置，无 TOCTOU）
     if (!result || result.length === 0) {
-      const waitMinutes = Math.ceil((lockDurationMs || 15 * 60 * 1000) / 60000);
+      const waitMinutes = Math.ceil((lockDurationMs || RateLimitService.DEFAULT_LOCK_DURATION_MS) / RateLimitService.MS_PER_MINUTE);
       return { allowed: false, waitMinutes };
     }
 
@@ -77,7 +86,7 @@ export class RateLimitService {
 
     // 检测本次操作是否已达到阈值并原子化设置了锁
     if (lockedUntil && now < lockedUntil) {
-      const waitMinutes = Math.ceil((lockedUntil.getTime() - now.getTime()) / 60000);
+      const waitMinutes = Math.ceil((lockedUntil.getTime() - now.getTime()) / RateLimitService.MS_PER_MINUTE);
       return { allowed: false, waitMinutes };
     }
 
@@ -112,7 +121,7 @@ export class RateLimitService {
    */
   async cleanupExpired(): Promise<number> {
     // 清理锁定已过期 + 窗口已过期的记录
-    const cutoff = new Date(Date.now() - 60 * 60 * 1000); // 1 小时前
+    const cutoff = new Date(Date.now() - RateLimitService.CLEANUP_CUTOFF_MS)
     const result = await this.rateLimitRepo
       .createQueryBuilder()
       .delete()

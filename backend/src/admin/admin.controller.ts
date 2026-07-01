@@ -100,17 +100,17 @@ export class AdminController {
   }
 
   @Delete('files/:id')
-  @Roles(UserRole.SUPER_ADMIN)
+  @Roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)
   async deleteFile(
     @CurrentUser() user: User,
     @Param('id') id: string,
   ) {
-    await this.adminService.deleteFile(user, id);
-    return { message: '文件已删除' };
+    const result = await this.adminService.deleteFile(user, id);
+    return result;
   }
 
   @Post('files/batch-delete')
-  @Roles(UserRole.SUPER_ADMIN)
+  @Roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)
   async batchDeleteFiles(
     @CurrentUser() user: User,
     @Body() dto: BatchDeleteFilesDto,

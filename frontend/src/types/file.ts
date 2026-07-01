@@ -17,6 +17,14 @@ export interface FileItem {
     id: string;
     email: string;
   } | null;
+  /** 是否已标记为删除（延迟删除状态） */
+  isDeleted: boolean;
+  /** 是否由管理员删除（普通用户不可恢复） */
+  deletedByAdmin: boolean;
+  /** 计划永久删除时间 */
+  deleteScheduledAt: string | null;
+  /** 请求删除时间 */
+  deleteRequestedAt: string | null;
 }
 
 export interface BatchUploadFailedItem {

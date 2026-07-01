@@ -64,6 +64,22 @@ export class File {
   @Column({ default: false })
   isDeleted: boolean;
 
+  /** 请求删除的时间（延迟删除机制），null 表示未请求删除 */
+  @Column({ nullable: true, type: 'timestamp' })
+  deleteRequestedAt: Date | null;
+
+  /** 计划执行永久删除的时间（deleteRequestedAt + 7 天） */
+  @Column({ nullable: true, type: 'timestamp' })
+  deleteScheduledAt: Date | null;
+
+  /** 删除操作冷却窗口截止时间（10 分钟），防止短时间内重复请求 */
+  @Column({ nullable: true, type: 'timestamp' })
+  deleteCooldownUntil: Date | null;
+
+  /** 是否由管理员删除（管理员删除时普通用户不可恢复） */
+  @Column({ default: false })
+  deletedByAdmin: boolean;
+
   @ManyToOne(() => User, (user) => user.files)
   @JoinColumn({ name: 'uploaderId' })
   uploader: User;

@@ -239,7 +239,58 @@ export class TelegramService {
     };
   }
 
-  async deleteFile(_file_id: string): Promise<boolean> {
+  /**
+   * 从 Telegram 删除文件对应的消息
+   * 通过 deleteMessage API 删除包含该文件的消息来实现文件移除。
+   * 注意：此方法需要传入 message_id（即 telegramMessageId），
+   * 不支持以 file_id 直接删除文件（Telegram Bot API 无此类端点）。
+   *
+   * 错误处理策略：
+   * - 400 "message to delete not found" → 视为幂等成功
+   * - 400 "message can't be deleted" → Bot 权限不足，仅记录警告
+   * - 429 限流 → 自动等待 retry_after 后重试（最多 3 次）
+   */
+  async deleteFile(telegramMessageId: string): Promise<boolean> {
+    if (!telegramMessageId || telegramMessageId.trim().length === 0) {
+      this.logger.warn('deleteFile 收到空的 messageId，跳过删除操作');
+      return false;
+    }
+
+    try {
+      await this.telegramRequest(async () => {
+        const response = await axios.post(
+          `${this.getBaseUrl()}/deleteMessage`,
+          {
+            chat_id: this.chatId,
+            message_id: telegramMessageId,
+          },
+          { timeout: 30 * 1000 },
+        );
+
+        if (!response.data?.ok) {
+          throw new Error(`Telegram API 返回异常状态: ${JSON.stringify(response.data)}`);
+        }
+        this.logger.log(`已成功从 Telegram 删除消息，messageId: ${telegramMessageId}`);
+      }, 'deleteFile');
+    } catch (error: unknown) {
+      const errMsg = error instanceof Error ? error.message : '未知错误';
+
+      // 消息已被删除或不存在 → 幂等成功
+      if (errMsg.includes('message to delete not found') || errMsg.includes('MESSAGE_ID_INVALID')) {
+        this.logger.log(`Telegram 消息 ${telegramMessageId} 不存在，视为删除成功`);
+        return true;
+      }
+
+      // Bot 权限不足 → 记录警告，不中断流程
+      if (errMsg.includes("message can't be deleted")) {
+        this.logger.warn(`Bot 无权限删除消息 ${telegramMessageId}，请确认 Bot 为群组管理员`);
+        return false;
+      }
+
+      // 其他错误重新抛出
+      throw error;
+    }
+
     return true;
   }
 }
