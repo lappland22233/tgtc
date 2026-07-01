@@ -4,6 +4,7 @@ import { Repository, In } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { OnEvent } from '@nestjs/event-emitter';
+import { Cron, CronExpression } from '@nestjs/schedule';
 import { Readable } from 'stream';
 import { Request } from 'express';
 import { File, FileAccessType } from '../common/entities/file.entity';
@@ -176,7 +177,8 @@ export class FileService implements OnModuleInit {
       return { allowed: false, reason: `文件类型 ${ext} 被拒绝：白名单模式未配置允许类型` };
     }
 
-    const matched = this.fileTypeFilter.some(f => lowerName.endsWith(f));
+    // 使用已提取的 ext 做精确扩展名比较，避免 endsWith 对完整文件名的模糊匹配
+    const matched = this.fileTypeFilter.includes(ext);
 
     let allowed: boolean;
     let reason: string | undefined;
@@ -305,8 +307,17 @@ export class FileService implements OnModuleInit {
     return { success, failed };
   }
 
-  async findAll(page = 1, limit = 20, userId?: string, keyword?: string): Promise<{ files: File[]; total: number }> {
-    const where: Record<string, unknown> = { isDeleted: false };
+  async findAll(
+    page = 1,
+    limit = 20,
+    userId?: string,
+    keyword?: string,
+    includeDeleted = false,
+  ): Promise<{ files: File[]; total: number }> {
+    const where: Record<string, unknown> = {};
+    if (!includeDeleted) {
+      where.isDeleted = false;
+    }
     if (userId) {
       where.uploaderId = userId;
     }
@@ -319,7 +330,13 @@ export class FileService implements OnModuleInit {
       qb.andWhere('LOWER(file.originalName) LIKE :keyword', { keyword: `%${keyword.toLowerCase()}%` });
     }
 
-    qb.select(['file.id', 'file.filename', 'file.originalName', 'file.mimeType', 'file.size', 'file.accessType', 'file.maxAccessCount', 'file.currentAccessCount', 'file.expiresIn', 'file.expiresStartAt', 'file.createdAt', 'uploader'])
+    qb.select([
+      'file.id', 'file.filename', 'file.originalName', 'file.mimeType', 'file.size',
+      'file.accessType', 'file.maxAccessCount', 'file.currentAccessCount',
+      'file.expiresIn', 'file.expiresStartAt', 'file.createdAt',
+      'file.isDeleted', 'file.deletedByAdmin', 'file.deleteRequestedAt', 'file.deleteScheduledAt',
+      'uploader',
+    ])
       .addSelect('CASE WHEN file.password IS NOT NULL THEN true ELSE false END', 'file_hasPassword')
       .skip((page - 1) * limit)
       .take(limit)
@@ -378,9 +395,18 @@ export class FileService implements OnModuleInit {
     return file;
   }
 
-  async delete(id: string, user: User): Promise<void> {
+  /**
+   * 请求删除文件（延迟删除机制）：
+   * 1. 前端立即标记文件为"删除中"并停止访问
+   * 2. 后端将文件标记为已删除，进入 7 天等待期
+   * 3. 等待期内可调用 restoreDelete() 恢复
+   * 4. 请求后 10 分钟内不可重复请求删除（冷却窗口）
+   * 5. 7 天后定时任务执行永久删除
+   */
+  async delete(id: string, user: User): Promise<{ status: string; scheduledAt?: Date }> {
+    // 先查找文件（无论是否已删除）
     const file = await this.fileRepository.findOne({
-      where: { id, isDeleted: false },
+      where: { id },
     });
 
     if (!file) {
@@ -389,17 +415,192 @@ export class FileService implements OnModuleInit {
 
     this.assertFileWritable(file, user);
 
+    const now = new Date();
+
+    // 文件已被管理员删除 → 普通用户不可操作
+    if (file.isDeleted && file.deletedByAdmin) {
+      if (user.role !== UserRole.ADMIN && user.role !== UserRole.SUPER_ADMIN) {
+        throw new ForbiddenException('该文件由管理员删除，请联系管理员处理');
+      }
+      // 管理员可以直接强制删除
+      await this.forceDelete(id, user);
+      return { status: 'permanently_deleted' };
+    }
+
+    // 文件已处于待删除状态（自主删除）
+    if (file.isDeleted) {
+      return {
+        status: 'already_deleted',
+        scheduledAt: file.deleteScheduledAt || undefined,
+      };
+    }
+
+    // 检查冷却窗口：10 分钟内不可重复请求
+    if (file.deleteCooldownUntil && now < file.deleteCooldownUntil) {
+      const remainingSeconds = Math.ceil((file.deleteCooldownUntil.getTime() - now.getTime()) / 1000);
+      throw new BadRequestException(`删除请求过于频繁，请 ${remainingSeconds} 秒后再试`);
+    }
+
+    // 标记删除状态（用户自主删除，非管理员操作）
     file.isDeleted = true;
+    file.deletedByAdmin = false;
+    file.deleteRequestedAt = now;
+    file.deleteScheduledAt = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+    file.deleteCooldownUntil = new Date(now.getTime() + 10 * 60 * 1000);
     await this.fileRepository.save(file);
 
-    // 审计日志：文件删除
+    // 审计日志：文件请求删除
     this.auditService.log({
-      action: 'file_delete',
+      action: 'file_delete_request',
+      userId: user.id,
+      resourceType: 'file',
+      resourceId: id,
+      metadata: { filename: file.originalName, scheduledAt: file.deleteScheduledAt.toISOString() },
+    });
+
+    return { status: 'pending', scheduledAt: file.deleteScheduledAt };
+  }
+
+  /**
+   * 恢复已请求删除的文件（在 7 天等待期内）
+   */
+  async restoreDelete(id: string, user: User): Promise<void> {
+    const file = await this.fileRepository.findOne({
+      where: { id, isDeleted: true },
+    });
+
+    if (!file) {
+      throw new NotFoundException('文件不存在或未被标记为删除');
+    }
+
+    if (!file.deleteRequestedAt) {
+      throw new BadRequestException('该文件未处于待删除状态');
+    }
+
+    // 管理员删除的文件，普通用户不可恢复
+    if (file.deletedByAdmin && user.role !== UserRole.ADMIN && user.role !== UserRole.SUPER_ADMIN) {
+      throw new ForbiddenException('该文件由管理员删除，普通用户不可恢复。请联系管理员处理');
+    }
+
+    this.assertFileWritable(file, user);
+
+    const now = new Date();
+    // 如果已过 scheduledAt，文件已被永久删除
+    if (file.deleteScheduledAt && now >= file.deleteScheduledAt) {
+      throw new BadRequestException('删除等待期已过，文件已永久删除');
+    }
+
+    file.isDeleted = false;
+    file.deletedByAdmin = false;
+    file.deleteRequestedAt = null;
+    file.deleteScheduledAt = null;
+    file.deleteCooldownUntil = null;
+    await this.fileRepository.save(file);
+
+    // 审计日志：文件恢复
+    this.auditService.log({
+      action: 'file_restore',
       userId: user.id,
       resourceType: 'file',
       resourceId: id,
       metadata: { filename: file.originalName },
     });
+  }
+
+  /**
+   * 管理员强制永久删除文件（双重确认第二步）
+   * 直接从 Telegram 和数据库中永久移除，不等待 7 天冷静期
+   */
+  async forceDelete(id: string, user: User): Promise<void> {
+    const file = await this.fileRepository.findOne({
+      where: { id },
+    });
+
+    if (!file) {
+      throw new NotFoundException('文件不存在');
+    }
+
+    // 安全校验：只能强制删除自己上传的文件或管理员/超级管理员可删所有
+    this.assertFileWritable(file, user);
+
+    // 从 Telegram 删除（忽略错误，避免阻塞）
+    if (file.telegramFileId) {
+      try {
+        await this.telegramService.deleteFile(file.telegramFileId);
+      } catch (error: unknown) {
+        const errMsg = error instanceof Error ? error.message : '未知错误';
+        this.logger.warn(`强制删除文件时 Telegram 删除失败: ${file.originalName}, 错误: ${errMsg}`);
+      }
+    }
+
+    // 先清理关联的访问日志（外键约束）
+    await this.accessLogRepository.delete({ fileId: id });
+
+    // 硬删除文件记录
+    await this.fileRepository.remove(file);
+
+    // 审计日志：管理员强制删除
+    this.auditService.log({
+      action: 'file_delete_by_admin',
+      userId: user.id,
+      resourceType: 'file',
+      resourceId: id,
+      metadata: { filename: file.originalName, forced: true },
+    });
+  }
+
+  /**
+   * 永久删除到期文件（定时任务调用，每小时执行一次）
+   * 处理两种情况：
+   * 1. 用户延迟删除：deleteScheduledAt 已到期
+   * 2. 管理员即时删除：isDeleted=true 超过 7 天（留足恢复窗口）
+   */
+  @Cron(CronExpression.EVERY_HOUR)
+  async sweepPendingDeletions(): Promise<number> {
+    const now = new Date();
+    const adminRecoverWindow = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+
+    // 查询所有待删除文件
+    const deletedFiles = await this.fileRepository.find({
+      where: { isDeleted: true },
+    });
+
+    // 筛选需要永久删除的文件
+    const expiredFiles = deletedFiles.filter(
+      (f) =>
+        // 用户延迟删除到期
+        (f.deleteScheduledAt && now >= f.deleteScheduledAt) ||
+        // 管理员即时删除超过 7 天
+        (!f.deleteScheduledAt && f.updatedAt < adminRecoverWindow),
+    );
+
+    if (expiredFiles.length === 0) {
+      return 0;
+    }
+
+    let deletedCount = 0;
+    for (const file of expiredFiles) {
+      try {
+        await this.telegramService.deleteFile(file.telegramFileId);
+        await this.accessLogRepository.delete({ fileId: file.id });
+        await this.fileRepository.remove(file);
+        deletedCount++;
+        this.logger.log(`已永久删除文件: ${file.originalName} (${file.id})`);
+      } catch (error: unknown) {
+        const errMsg = error instanceof Error ? error.message : '未知错误';
+        this.logger.warn(`永久删除文件失败: ${file.originalName} (${file.id}), 错误: ${errMsg}`);
+        // 即使 Telegram 删除失败，也从数据库移除（避免数据库积压）
+        try {
+          await this.accessLogRepository.delete({ fileId: file.id });
+          await this.fileRepository.remove(file);
+        } catch (e: unknown) {
+          this.logger.error(`强制清理文件失败: ${file.id}`, e instanceof Error ? e.message : String(e));
+        }
+        deletedCount++;
+      }
+    }
+
+    return deletedCount;
   }
 
   async updateAccessType(id: string, accessType: FileAccessType, user: User): Promise<void> {

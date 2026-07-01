@@ -36,6 +36,9 @@
         <t-option value="user_unban" label="解封用户" />
         <t-option value="file_upload" label="文件上传" />
         <t-option value="file_delete" label="文件删除" />
+        <t-option value="file_delete_request" label="请求删除" />
+        <t-option value="file_delete_by_admin" label="管理员删除" />
+        <t-option value="file_restore" label="文件恢复" />
         <t-option value="file_share" label="生成分享" />
         <t-option value="file_password_set" label="设置密码" />
         <t-option value="file_access_change" label="访问变更" />
@@ -47,6 +50,7 @@
         <t-option value="ip_ban" label="IP封禁" />
         <t-option value="ip_unban" label="IP解封" />
         <t-option value="batch_delete_files" label="批量删除" />
+        <t-option value="batch_delete_files_by_admin" label="管理员批量删" />
       </t-select>
       <t-button variant="outline" @click="onRefresh">刷新</t-button>
     </div>
@@ -146,13 +150,16 @@ function actionLabel(action: string): string {
     user_create: '创建用户', user_delete: '删除用户',
     user_ban: '封禁用户', user_unban: '解封用户',
     file_upload: '文件上传', file_delete: '文件删除',
+    file_delete_request: '请求删除', file_delete_by_admin: '管理员删除',
+    file_restore: '文件恢复',
     file_share: '生成分享', file_password_set: '设置密码',
     file_password_remove: '移除密码', file_access_change: '访问变更',
     file_expiry_set: '有效期设置', file_download: '文件下载',
     config_change: '配置变更', smtp_config_change: 'SMTP变更',
     upload_config_change: '上传配置', auth_config_change: '认证配置',
     ip_ban: 'IP封禁', ip_unban: 'IP解封',
-    batch_delete_files: '批量删除', batch_markdown: '批量Markdown',
+    batch_delete_files: '批量删除', batch_delete_files_by_admin: '管理员批量删',
+    batch_markdown: '批量Markdown',
     logout: '登出', email_verify: '邮箱验证',
   };
   return map[action] || action;

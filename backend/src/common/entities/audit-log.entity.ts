@@ -22,6 +22,9 @@ export type AuditAction =
   | 'file_upload'
   | 'file_download'
   | 'file_delete'
+  | 'file_delete_request'
+  | 'file_delete_by_admin'
+  | 'file_restore'
   | 'file_share'
   | 'file_password_set'
   | 'file_password_remove'
@@ -34,6 +37,7 @@ export type AuditAction =
   | 'ip_ban'
   | 'ip_unban'
   | 'batch_delete_files'
+  | 'batch_delete_files_by_admin'
   | 'batch_markdown';
 
 /** 审计日志状态 */

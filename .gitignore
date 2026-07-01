@@ -21,6 +21,7 @@ lerna-debug.log*
 !.vscode/extensions.json
 !.vscode/launch.json
 !.vscode/settings.json
+.codebuddy/
 .idea/
 *.swp
 *.swo
