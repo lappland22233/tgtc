@@ -7,6 +7,9 @@ import { OnEvent } from '@nestjs/event-emitter';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { Readable } from 'stream';
 import { Request } from 'express';
+import * as fs from 'fs';
+import * as path from 'path';
+import sharp from 'sharp';
 import { File, FileAccessType } from '../common/entities/file.entity';
 import { FileAccessLog } from '../common/entities/file-access-log.entity';
 import { TelegramService } from '../telegram/telegram.service';
@@ -79,6 +82,7 @@ export class FileService implements OnModuleInit {
   private maxFileSize: number;
   private fileTypeMode: 'blacklist' | 'whitelist' = 'blacklist';
   private fileTypeFilter: string[] = [];
+  private readonly thumbnailDir: string;
 
   constructor(
     @InjectRepository(File)
@@ -98,10 +102,20 @@ export class FileService implements OnModuleInit {
     private auditService: AuditService,
   ) {
     this.maxFileSize = this.parseFileSize(this.configService.get<string>('MAX_FILE_SIZE'));
+    this.thumbnailDir = this.configService.get<string>('THUMBNAIL_DIR') || path.join(process.cwd(), 'tmp', 'thumbnails');
   }
 
   async onModuleInit() {
     await this.reloadUploadConfig();
+    // 确保缩略图目录存在
+    if (!fs.existsSync(this.thumbnailDir)) {
+      fs.mkdirSync(this.thumbnailDir, { recursive: true });
+      this.logger.log(`缩略图目录已创建: ${this.thumbnailDir}`);
+    }
+    // 异步扫描并补齐缺失的缩略图（不阻塞启动）
+    this.syncMissingThumbnails().catch(err => {
+      this.logger.warn(`缩略图同步失败: ${err.message}`);
+    });
   }
 
   @OnEvent('config.changed')
@@ -285,6 +299,13 @@ export class FileService implements OnModuleInit {
       metadata: { filename: originalName, size: file.size, mimeType: file.mimetype },
     });
 
+    // 异步生成缩略图（不阻塞上传响应）
+    if (file.mimetype.startsWith('image/')) {
+      this.generateAndSaveThumbnail(savedFile).catch(err =>
+        this.logger.warn(`上传后缩略图生成失败 id=${savedFile.id}: ${(err as Error).message}`),
+      );
+    }
+
     return savedFile;
   }
 
@@ -313,7 +334,10 @@ export class FileService implements OnModuleInit {
     userId?: string,
     keyword?: string,
     includeDeleted = false,
-  ): Promise<{ files: File[]; total: number }> {
+    sortBy?: string,
+    sortOrder?: string,
+    cursor?: string,
+  ): Promise<{ files: File[]; total: number; nextCursor?: string | null }> {
     const where: Record<string, unknown> = {};
     if (!includeDeleted) {
       where.isDeleted = false;
@@ -330,6 +354,15 @@ export class FileService implements OnModuleInit {
       qb.andWhere('LOWER(file.originalName) LIKE :keyword', { keyword: `%${keyword.toLowerCase()}%` });
     }
 
+    // 游标分页：解析游标并添加 WHERE 条件（使用元组比较，PostgreSQL 可高效利用索引）
+    if (cursor) {
+      const decoded = this.decodeCursor(cursor);
+      qb.andWhere(
+        '(file.createdAt, file.id) < (:cursorDate, :cursorId)',
+        { cursorDate: new Date(decoded.createdAt), cursorId: decoded.id },
+      );
+    }
+
     qb.select([
       'file.id', 'file.filename', 'file.originalName', 'file.mimeType', 'file.size',
       'file.accessType', 'file.maxAccessCount', 'file.currentAccessCount',
@@ -337,10 +370,18 @@ export class FileService implements OnModuleInit {
       'file.isDeleted', 'file.deletedByAdmin', 'file.deleteRequestedAt', 'file.deleteScheduledAt',
       'uploader',
     ])
-      .addSelect('CASE WHEN file.password IS NOT NULL THEN true ELSE false END', 'file_hasPassword')
-      .skip((page - 1) * limit)
-      .take(limit)
-      .orderBy('file.createdAt', 'DESC');
+      .addSelect('CASE WHEN file.password IS NOT NULL THEN true ELSE false END', 'file_hasPassword');
+
+    // 游标模式：固定按 createdAt DESC, id DESC 排序，只用 take
+    // 传统模式：动态排序 + skip/take
+    if (cursor) {
+      qb.orderBy('file.createdAt', 'DESC').addOrderBy('file.id', 'DESC').take(limit);
+    } else {
+      const allowedSortFields = ['originalName', 'createdAt', 'size', 'uploader.email'];
+      const safeSortBy = allowedSortFields.includes(sortBy || '') ? `file.${sortBy}` : 'file.createdAt';
+      const safeSortOrder = (sortOrder || '').toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
+      qb.orderBy(safeSortBy, safeSortOrder as 'ASC' | 'DESC').skip((page - 1) * limit).take(limit);
+    }
 
     const { entities, raw } = await qb.getRawAndEntities();
 
@@ -356,7 +397,24 @@ export class FileService implements OnModuleInit {
       hasPassword: raw[i]?.file_hasPassword === true,
     } as File & { hasPassword: boolean }));
 
-    return { files, total };
+    // 游标模式下计算 nextCursor（结果数达到 limit 表示可能还有更多）
+    let nextCursor: string | null = null;
+    if (files.length === limit) {
+      const lastFile = files[files.length - 1];
+      nextCursor = this.encodeCursor(lastFile.createdAt, lastFile.id);
+    }
+
+    return { files, total, nextCursor };
+  }
+
+  /** 编码游标：base64({ createdAt, id }) */
+  private encodeCursor(createdAt: Date, id: string): string {
+    return Buffer.from(JSON.stringify({ createdAt: createdAt.toISOString(), id })).toString('base64');
+  }
+
+  /** 解码游标 */
+  private decodeCursor(cursor: string): { createdAt: string; id: string } {
+    return JSON.parse(Buffer.from(cursor, 'base64').toString('utf8'));
   }
 
   /**
@@ -536,6 +594,9 @@ export class FileService implements OnModuleInit {
     // 先清理关联的访问日志（外键约束）
     await this.accessLogRepository.delete({ fileId: id });
 
+    // 清理本地缩略图
+    this.deleteLocalThumbnail(file);
+
     // 硬删除文件记录
     await this.fileRepository.remove(file);
 
@@ -582,6 +643,7 @@ export class FileService implements OnModuleInit {
     for (const file of expiredFiles) {
       try {
         await this.telegramService.deleteFile(file.telegramFileId);
+        this.deleteLocalThumbnail(file);
         await this.accessLogRepository.delete({ fileId: file.id });
         await this.fileRepository.remove(file);
         deletedCount++;
@@ -591,6 +653,7 @@ export class FileService implements OnModuleInit {
         this.logger.warn(`永久删除文件失败: ${file.originalName} (${file.id}), 错误: ${errMsg}`);
         // 即使 Telegram 删除失败，也从数据库移除（避免数据库积压）
         try {
+          this.deleteLocalThumbnail(file);
           await this.accessLogRepository.delete({ fileId: file.id });
           await this.fileRepository.remove(file);
         } catch (e: unknown) {
@@ -863,6 +926,17 @@ export class FileService implements OnModuleInit {
 
     await this.assertFileReadable(file, user);
 
+    // 优先读取本地缩略图
+    const localThumb = this.readLocalThumbnail(file);
+    if (localThumb) {
+      return {
+        stream: Readable.from(localThumb),
+        contentType: 'image/webp',
+      };
+    }
+
+    // 回退到 Telegram（同时触发异步生成缩略图）
+    this.generateAndSaveThumbnail(file).catch(() => {});
     const { stream } = await this.telegramService.getFileStream(file.telegramFileId || file.filename);
 
     return {
@@ -870,6 +944,121 @@ export class FileService implements OnModuleInit {
       contentType: file.mimeType || 'application/octet-stream',
     };
   }
+
+  /**
+   * 批量获取缩略图 base64（合并为一次 API 调用，消除浏览器连接池瓶颈）
+   * 返回 { [fileId]: 'data:image/...;base64,...' }
+   */
+  /**
+   * 从 Telegram 下载原图，用 sharp 生成十分之一分辨率缩略图，存到本地。
+   * 成功后将缩略图路径写入 File 实体。
+   */
+  async generateAndSaveThumbnail(file: File): Promise<void> {
+    if (!file.mimeType?.startsWith('image/')) return;
+    if (file.thumbnailPath) {
+      const fullPath = path.join(this.thumbnailDir, file.thumbnailPath);
+      if (fs.existsSync(fullPath)) return; // 已存在
+    }
+
+    try {
+      const { stream } = await this.telegramService.getFileStream(file.telegramFileId || file.filename);
+      const chunks: Buffer[] = [];
+      for await (const chunk of stream) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      }
+      const buffer = Buffer.concat(chunks);
+
+      // 获取原图尺寸
+      const metadata = await sharp(buffer).metadata();
+      const width = metadata.width || 0;
+      const height = metadata.height || 0;
+
+      // 小于 300×300 的图片不需要缩略图
+      if (width < 300 && height < 300) return;
+
+      const thumbWidth = Math.max(16, Math.round(width / 10));
+      const thumbHeight = Math.max(16, Math.round(height / 10));
+
+      // 生成 webp 缩略图（比 jpg/png 小得多）
+      const thumbBuffer = await sharp(buffer)
+        .resize(thumbWidth, thumbHeight, { fit: 'inside' })
+        .webp({ quality: 60 })
+        .toBuffer();
+
+      const thumbFilename = `${file.id}.webp`;
+      fs.writeFileSync(path.join(this.thumbnailDir, thumbFilename), thumbBuffer);
+
+      file.thumbnailPath = thumbFilename;
+      await this.fileRepository.save(file);
+    } catch (err) {
+      this.logger.warn(`缩略图生成失败 id=${file.id}: ${(err as Error).message}`);
+    }
+  }
+
+  /**
+   * 启动时扫描数据库，为所有缺少缩略图的图片创建缩略图。
+   * 使用 LIMIT 分页读取，避免一次性加载所有图片到内存。
+   */
+  async syncMissingThumbnails(): Promise<void> {
+    const batchSize = 50;
+    let offset = 0;
+    let totalProcessed = 0;
+
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      const files = await this.fileRepository.find({
+        where: { isDeleted: false },
+        select: ['id', 'mimeType', 'telegramFileId', 'filename', 'thumbnailPath'],
+        skip: offset,
+        take: batchSize,
+      });
+
+      if (files.length === 0) break;
+
+      const images = files.filter(f => f.mimeType?.startsWith('image/') && !f.thumbnailPath);
+      if (images.length > 0) {
+        this.logger.log(`同步缩略图: 处理 ${offset + 1}-${offset + files.length}，找到 ${images.length} 个缺失`);
+        for (const file of images) {
+          await this.generateAndSaveThumbnail(file);
+          totalProcessed++;
+        }
+      }
+
+      offset += batchSize;
+    }
+
+    if (totalProcessed > 0) {
+      this.logger.log(`缩略图同步完成: 创建了 ${totalProcessed} 个缩略图`);
+    }
+  }
+
+  /**
+   * 删除本地缩略图文件。
+   */
+  private deleteLocalThumbnail(file: File): void {
+    if (!file.thumbnailPath) return;
+    const fullPath = path.join(this.thumbnailDir, file.thumbnailPath);
+    try {
+      if (fs.existsSync(fullPath)) fs.unlinkSync(fullPath);
+    } catch (err) {
+      this.logger.warn(`删除缩略图文件失败: ${fullPath}, ${(err as Error).message}`);
+    }
+  }
+
+  /**
+   * 读取本地缩略图文件内容。
+   */
+  private readLocalThumbnail(file: File): Buffer | null {
+    if (!file.thumbnailPath) return null;
+    const fullPath = path.join(this.thumbnailDir, file.thumbnailPath);
+    try {
+      if (fs.existsSync(fullPath)) return fs.readFileSync(fullPath);
+    } catch {
+      // ignore
+    }
+    return null;
+  }
+
 
   /**
    * 流式下载文件内容（后端代理，不暴露 Telegram URL）

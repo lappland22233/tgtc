@@ -5,7 +5,7 @@ import { Roles } from '../common/decorators/roles.decorator';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { User, UserRole } from '../common/entities/user.entity';
-import { BanIPDto, UnbanIPDto, BatchDeleteFilesDto, ConfigDto, BatchConfigDto, SmtpConfigDto, UploadConfigDto, AuthConfigDto, AccessLogQueryDto } from './admin.dto';
+import { BanIPDto, UnbanIPDto, BatchDeleteFilesDto, ConfigDto, BatchConfigDto, SmtpConfigDto, UploadConfigDto, AuthConfigDto, AccessLogQueryDto, SecurityConfigBatchDto } from './admin.dto';
 import { TopFilesQueryDto, TopPathsQueryDto, StatusByPathQueryDto, AbnormalIpsQueryDto, DateRangeQueryDto, RefererAnalysisQueryDto, UserAgentAnalysisQueryDto, BandwidthQueryDto, FileTypeQueryDto } from './admin-stats.dto';
 
 @Controller('admin')
@@ -95,8 +95,13 @@ export class AdminController {
   async getAllFiles(
     @Query('page') page = 1,
     @Query('limit') limit = 20,
+    @Query('keyword') keyword?: string,
+    @Query('userId') userId?: string,
+    @Query('sortBy') sortBy?: string,
+    @Query('sortOrder') sortOrder?: string,
+    @Query('cursor') cursor?: string,
   ) {
-    return this.adminService.getAllFiles(Number(page), Number(limit));
+    return this.adminService.getAllFiles(Number(page), Number(limit), keyword, userId, sortBy, sortOrder, cursor);
   }
 
   @Delete('files/:id')
@@ -306,5 +311,23 @@ export class AdminController {
       userId,
       timeRange,
     });
+  }
+
+  // ==================== 安全规则配置 ====================
+
+  @Get('security-config')
+  @Roles(UserRole.SUPER_ADMIN)
+  async getSecurityConfig() {
+    return this.adminService.getSecurityConfig();
+  }
+
+  @Put('security-config')
+  @Roles(UserRole.SUPER_ADMIN)
+  async updateSecurityConfig(
+    @CurrentUser() user: User,
+    @Body() dto: SecurityConfigBatchDto,
+  ) {
+    await this.adminService.updateSecurityConfig(user, dto.configs);
+    return { message: '安全配置已更新' };
   }
 }

@@ -155,3 +155,23 @@ export class AccessLogQueryDto {
   @IsDateString()
   endDate?: string;
 }
+
+/** 安全规则配置项 */
+export class SecurityConfigItemDto {
+  @IsString()
+  @IsNotEmpty()
+  key: string;
+
+  @IsString()
+  @IsNotEmpty()
+  value: string;
+}
+
+/** 批量安全规则配置 */
+export class SecurityConfigBatchDto {
+  @IsArray()
+  @ArrayMinSize(1)
+  @ValidateNested({ each: true })
+  @Type(() => SecurityConfigItemDto)
+  configs: SecurityConfigItemDto[];
+}

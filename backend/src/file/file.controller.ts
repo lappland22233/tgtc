@@ -165,15 +165,18 @@ export class FileController {
     @Query('userId') userId?: string,
     @Query('keyword') keyword?: string,
     @Query('includeDeleted') includeDeleted?: string,
+    @Query('sortBy') sortBy?: string,
+    @Query('sortOrder') sortOrder?: string,
+    @Query('cursor') cursor?: string,
   ) {
     const shouldIncludeDeleted = includeDeleted === 'true';
     // Non-admin users can only see their own files
     if (user.role === UserRole.USER) {
-      return this.fileService.findAll(Number(page), Number(limit), user.id, keyword, shouldIncludeDeleted);
+      return this.fileService.findAll(Number(page), Number(limit), user.id, keyword, shouldIncludeDeleted, sortBy, sortOrder, cursor);
     }
     // Admin: only show all files when userId filter is explicitly provided;
     // default to own files for the "我的文件" page
-    return this.fileService.findAll(Number(page), Number(limit), userId || user.id, keyword, shouldIncludeDeleted);
+    return this.fileService.findAll(Number(page), Number(limit), userId || user.id, keyword, shouldIncludeDeleted, sortBy, sortOrder, cursor);
   }
 
   /**

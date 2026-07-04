@@ -27,7 +27,7 @@
 
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue';
-import { buildThumbUrl } from '../utils/thumbnail';
+import { getThumbnailUrl } from '../utils/thumbnailCache';
 
 const props = withDefaults(defineProps<{
   fileId: string;
@@ -45,16 +45,16 @@ const url = ref('');
 const signed = ref(false);
 
 let observer: IntersectionObserver | null = null;
-let signedOnce = false;
+let loaded = false;
 
 async function loadThumbnail() {
-  if (signedOnce) return;
-  signedOnce = true;
+  if (loaded) return;
+  loaded = true;
   try {
-    url.value = await buildThumbUrl(props.fileId);
+    url.value = await getThumbnailUrl(props.fileId, props.mimeType);
     signed.value = true;
   } catch {
-    // 签名失败，保持占位图
+    // 保持占位图
   }
 }
 
@@ -64,7 +64,6 @@ function onError() {
 }
 
 onMounted(() => {
-  // 仅处理图片类型
   if (!props.mimeType?.startsWith('image/')) return;
   if (!containerRef.value) return;
 
@@ -73,9 +72,10 @@ onMounted(() => {
       if (entries[0]?.isIntersecting) {
         loadThumbnail();
         observer?.disconnect();
+        observer = null;
       }
     },
-    { rootMargin: '200px' },
+    { rootMargin: '300px' },
   );
   observer.observe(containerRef.value);
 });

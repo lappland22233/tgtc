@@ -9,6 +9,8 @@ import { AuditLog } from '../common/entities/audit-log.entity';
 import { Alert, AlertLevel } from '../common/entities/alert.entity';
 import { AlertGateway } from '../alert/alert.gateway';
 import { AccessLog } from '../common/entities/access-log.entity';
+import { ConfigCacheService } from '../common/services/config-cache.service';
+import { SEC_CONFIG_DEFAULTS, SEC_CONFIG_KEYS } from '../admin/security-config.defaults';
 
 interface AttackDetectionResult {
   ip: string;
@@ -29,7 +31,14 @@ export class AttackDetectionProcessor {
     private auditLogRepo: Repository<AuditLog>,
     private dataSource: DataSource,
     private alertGateway: AlertGateway,
+    private configCacheService: ConfigCacheService,
   ) {}
+
+  /** 从动态配置读取数值，不存在时回退到默认值 */
+  private async getConfigNumber(key: string, fallback: string): Promise<number> {
+    const value = await this.configCacheService.get(key, fallback);
+    return Number(value) || Number(fallback);
+  }
 
   /** 每 5 分钟并行执行 4 条攻击检测规则，同步生成告警记录 */
   @Process('detect-attacks')
@@ -64,11 +73,29 @@ export class AttackDetectionProcessor {
 
   /** 批量处理攻击: 封禁、告警、审计、推送 */
   private async handleAttacks(attacks: AttackDetectionResult[]): Promise<void> {
+    // 动态读取封禁时长（小时）
+    const scanBanHours = await this.getConfigNumber(
+      SEC_CONFIG_KEYS.SCAN_BAN_DURATION_HOURS,
+      SEC_CONFIG_DEFAULTS[SEC_CONFIG_KEYS.SCAN_BAN_DURATION_HOURS],
+    );
+    const bruteBanHours = await this.getConfigNumber(
+      SEC_CONFIG_KEYS.BRUTE_FORCE_BAN_DURATION_HOURS,
+      SEC_CONFIG_DEFAULTS[SEC_CONFIG_KEYS.BRUTE_FORCE_BAN_DURATION_HOURS],
+    );
+    const crawlerBanHours = await this.getConfigNumber(
+      SEC_CONFIG_KEYS.CRAWLER_BAN_DURATION_HOURS,
+      SEC_CONFIG_DEFAULTS[SEC_CONFIG_KEYS.CRAWLER_BAN_DURATION_HOURS],
+    );
+    const downloadBanHours = await this.getConfigNumber(
+      SEC_CONFIG_KEYS.DOWNLOAD_BAN_DURATION_HOURS,
+      SEC_CONFIG_DEFAULTS[SEC_CONFIG_KEYS.DOWNLOAD_BAN_DURATION_HOURS],
+    );
+
     const attackTypeMap: Record<string, { reason: string; duration: string }> = {
-      high_frequency_scan: { reason: '高频扫描攻击', duration: '1h' },
-      brute_force: { reason: '登录爆破行为', duration: '2h' },
-      crawler: { reason: '爬虫行为', duration: '24h' },
-      abnormal_download: { reason: '异常下载行为', duration: '6h' },
+      high_frequency_scan: { reason: '高频扫描攻击', duration: `${scanBanHours}h` },
+      brute_force: { reason: '登录爆破行为', duration: `${bruteBanHours}h` },
+      crawler: { reason: '爬虫行为', duration: `${crawlerBanHours}h` },
+      abnormal_download: { reason: '异常下载行为', duration: `${downloadBanHours}h` },
     };
 
     for (const attack of attacks) {
@@ -158,7 +185,20 @@ export class AttackDetectionProcessor {
   }
 
   private async detectHighFrequencyScanners(): Promise<AttackDetectionResult[]> {
-    const cutoff = new Date(Date.now() - 5 * 60 * 1000);
+    const windowMin = await this.getConfigNumber(
+      SEC_CONFIG_KEYS.SCAN_WINDOW_MINUTES,
+      SEC_CONFIG_DEFAULTS[SEC_CONFIG_KEYS.SCAN_WINDOW_MINUTES],
+    );
+    const reqThreshold = await this.getConfigNumber(
+      SEC_CONFIG_KEYS.SCAN_REQUESTS_THRESHOLD,
+      SEC_CONFIG_DEFAULTS[SEC_CONFIG_KEYS.SCAN_REQUESTS_THRESHOLD],
+    );
+    const pathThreshold = await this.getConfigNumber(
+      SEC_CONFIG_KEYS.SCAN_PATHS_THRESHOLD,
+      SEC_CONFIG_DEFAULTS[SEC_CONFIG_KEYS.SCAN_PATHS_THRESHOLD],
+    );
+
+    const cutoff = new Date(Date.now() - windowMin * 60 * 1000);
     const rows = await this.accessLogRepo
       .createQueryBuilder('a')
       .select('a.ip', 'ip')
@@ -166,7 +206,7 @@ export class AttackDetectionProcessor {
       .addSelect('COUNT(DISTINCT a.path)', 'uniquePaths')
       .where('a.createdAt >= :cutoff', { cutoff })
       .groupBy('a.ip')
-      .having('COUNT(*) > 300 AND COUNT(DISTINCT a.path) > 50')
+      .having(`COUNT(*) > ${reqThreshold} AND COUNT(DISTINCT a.path) > ${pathThreshold}`)
       .getRawMany<{ ip: string; requestCount: string; uniquePaths: string }>();
 
     return rows.map((r) => ({
@@ -178,7 +218,16 @@ export class AttackDetectionProcessor {
   }
 
   private async detectBruteForce(): Promise<AttackDetectionResult[]> {
-    const cutoff = new Date(Date.now() - 5 * 60 * 1000);
+    const windowMin = await this.getConfigNumber(
+      SEC_CONFIG_KEYS.BRUTE_FORCE_WINDOW_MINUTES,
+      SEC_CONFIG_DEFAULTS[SEC_CONFIG_KEYS.BRUTE_FORCE_WINDOW_MINUTES],
+    );
+    const threshold = await this.getConfigNumber(
+      SEC_CONFIG_KEYS.BRUTE_FORCE_THRESHOLD,
+      SEC_CONFIG_DEFAULTS[SEC_CONFIG_KEYS.BRUTE_FORCE_THRESHOLD],
+    );
+
+    const cutoff = new Date(Date.now() - windowMin * 60 * 1000);
     const rows = await this.accessLogRepo
       .createQueryBuilder('a')
       .select('a.ip', 'ip')
@@ -187,7 +236,7 @@ export class AttackDetectionProcessor {
       .andWhere("a.path LIKE :loginPath", { loginPath: '/api/auth/login%' })
       .andWhere('a.statusCode = 401')
       .groupBy('a.ip')
-      .having('COUNT(*) >= 20')
+      .having(`COUNT(*) >= ${threshold}`)
       .getRawMany<{ ip: string; loginAttempts: string }>();
 
     return rows.map((r) => ({
@@ -199,7 +248,20 @@ export class AttackDetectionProcessor {
   }
 
   private async detectCrawlers(): Promise<AttackDetectionResult[]> {
-    const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const windowHours = await this.getConfigNumber(
+      SEC_CONFIG_KEYS.CRAWLER_WINDOW_HOURS,
+      SEC_CONFIG_DEFAULTS[SEC_CONFIG_KEYS.CRAWLER_WINDOW_HOURS],
+    );
+    const threshold = await this.getConfigNumber(
+      SEC_CONFIG_KEYS.CRAWLER_REQUESTS_THRESHOLD,
+      SEC_CONFIG_DEFAULTS[SEC_CONFIG_KEYS.CRAWLER_REQUESTS_THRESHOLD],
+    );
+    const getRatio = await this.getConfigNumber(
+      SEC_CONFIG_KEYS.CRAWLER_GET_RATIO,
+      SEC_CONFIG_DEFAULTS[SEC_CONFIG_KEYS.CRAWLER_GET_RATIO],
+    );
+
+    const cutoff = new Date(Date.now() - windowHours * 60 * 60 * 1000);
     const rows = await this.accessLogRepo
       .createQueryBuilder('a')
       .select('a.ip', 'ip')
@@ -210,14 +272,14 @@ export class AttackDetectionProcessor {
       )
       .where('a.createdAt >= :cutoff', { cutoff })
       .groupBy('a.ip')
-      .having('COUNT(*) > 50000')
+      .having(`COUNT(*) > ${threshold}`)
       .getRawMany<{ ip: string; totalRequests: string; getCount: string }>();
 
     return rows
       .filter(
         (r) =>
           Number(r.totalRequests) > 0 &&
-          Number(r.getCount) / Number(r.totalRequests) > 0.99,
+          Number(r.getCount) / Number(r.totalRequests) > getRatio,
       )
       .map((r) => ({
         ip: r.ip,
@@ -231,7 +293,16 @@ export class AttackDetectionProcessor {
   }
 
   private async detectAbnormalDownloads(): Promise<AttackDetectionResult[]> {
-    const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const windowHours = await this.getConfigNumber(
+      SEC_CONFIG_KEYS.DOWNLOAD_WINDOW_HOURS,
+      SEC_CONFIG_DEFAULTS[SEC_CONFIG_KEYS.DOWNLOAD_WINDOW_HOURS],
+    );
+    const threshold = await this.getConfigNumber(
+      SEC_CONFIG_KEYS.DOWNLOAD_THRESHOLD,
+      SEC_CONFIG_DEFAULTS[SEC_CONFIG_KEYS.DOWNLOAD_THRESHOLD],
+    );
+
+    const cutoff = new Date(Date.now() - windowHours * 60 * 60 * 1000);
     const rows = await this.accessLogRepo
       .createQueryBuilder('a')
       .select('a.ip', 'ip')
@@ -245,7 +316,7 @@ export class AttackDetectionProcessor {
         },
       )
       .groupBy('a.ip')
-      .having('COUNT(*) > 1000')
+      .having(`COUNT(*) > ${threshold}`)
       .getRawMany<{ ip: string; downloadCount: string }>();
 
     return rows.map((r) => ({

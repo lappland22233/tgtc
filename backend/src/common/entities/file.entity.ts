@@ -43,6 +43,10 @@ export class File {
   @Column({ nullable: true })
   telegramFilePath: string;
 
+  /** 本地缩略图路径（相对于 THUMBNAIL_DIR，如 {id}.webp） */
+  @Column({ type: 'varchar', length: 512, nullable: true, default: null })
+  thumbnailPath: string | null;
+
   @Column({ type: 'enum', enum: FileAccessType, default: FileAccessType.PUBLIC })
   accessType: FileAccessType;
 

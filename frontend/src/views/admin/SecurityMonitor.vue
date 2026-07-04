@@ -10,6 +10,7 @@
       <t-tab-panel value="bans" label="封禁统计" />
       <t-tab-panel value="abnormal" label="异常 IP 监控" />
       <t-tab-panel value="alerts" label="告警管理" />
+      <t-tab-panel v-if="isSuperAdmin" value="config" label="安全配置" />
     </t-tabs>
 
     <!-- Tab 1: 攻击检测 -->
@@ -96,7 +97,12 @@
       </div>
 
       <div class="card">
-        <h3 style="margin: 0 0 16px">近期封禁记录</h3>
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px">
+          <h3 style="margin: 0">近期封禁记录</h3>
+          <t-button theme="danger" size="small" @click="openBanDialog()">
+            手动封禁 IP
+          </t-button>
+        </div>
         <t-loading :loading="bansLoading" size="small">
           <t-table
             :data="recentBans"
@@ -173,11 +179,9 @@
               </t-tag>
             </template>
             <template #action="{ row }">
-              <t-popconfirm content="确定封禁该 IP？" @confirm="handleBanAbnormalIp(row.ip)">
-                <t-button variant="outline" size="small" theme="danger" :loading="banningIp === row.ip">
-                  封禁 IP
-                </t-button>
-              </t-popconfirm>
+              <t-button variant="outline" size="small" theme="danger" @click="openBanDialog(row.ip)">
+                封禁 IP
+              </t-button>
             </template>
           </t-table>
           <div v-if="!abnormalLoading && abnormalIps.length === 0" class="empty-hint">暂无异常 IP</div>
@@ -189,15 +193,109 @@
     <div v-if="activeTab === 'alerts'" class="tab-content">
       <AlertManagement />
     </div>
+
+    <!-- Tab 5: 安全配置（仅超级管理员） -->
+    <div v-if="activeTab === 'config'" class="tab-content">
+      <div class="card" style="margin-bottom: 16px">
+        <h3 style="margin: 0 0 4px">安全规则配置</h3>
+        <p style="margin: 0; color: var(--text-secondary); font-size: 13px">
+          调整攻击检测阈值和自动封禁时长。修改后立即生效，无需重启服务。
+        </p>
+      </div>
+
+      <t-loading :loading="configLoading" size="small">
+        <div v-for="category in configCategories" :key="category" style="margin-bottom: 24px">
+          <h4 style="margin: 0 0 12px; font-size: 15px; font-weight: 500; color: var(--text-primary)">
+            {{ category }}
+          </h4>
+          <div class="security-config-grid">
+            <div
+              v-for="item in configItemsByCategory(category)"
+              :key="item.key"
+              class="security-config-item"
+            >
+              <div class="config-item-header">
+                <span class="config-item-label">{{ item.label }}</span>
+                <span v-if="item.unit" class="config-item-unit">{{ item.unit }}</span>
+              </div>
+              <t-input-number
+                v-model="configForm[item.key]"
+                :min="item.min"
+                :max="item.max"
+                :step="item.step || 1"
+                :decimal-places="item.step && item.step < 1 ? 2 : 0"
+                style="width: 100%"
+                size="small"
+              />
+              <div class="config-item-hint" :title="item.description">
+                {{ item.description }}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div v-if="configItems.length > 0" style="margin-top: 24px; display: flex; gap: 12px">
+          <t-button theme="primary" :loading="configSaving" @click="saveSecurityConfig">
+            保存配置
+          </t-button>
+          <t-button theme="default" variant="outline" :loading="configLoading" @click="resetSecurityConfig">
+            重置为默认值
+          </t-button>
+        </div>
+        <div v-else class="placeholder-block">
+          <div class="placeholder-icon">⚙️</div>
+          <h3>暂无安全配置项</h3>
+          <p>请确保后端安全配置接口正常</p>
+        </div>
+      </t-loading>
+    </div>
   </div>
+
+  <!-- 封禁 IP 对话框 -->
+  <t-dialog
+    v-model:visible="banDialogVisible"
+    header="封禁 IP"
+    :confirm-btn="{ content: '确认封禁', theme: 'danger', loading: banDialogSaving }"
+    :on-confirm="handleBanSubmit"
+    width="460px"
+  >
+    <t-form label-width="80px">
+      <t-form-item label="IP 地址">
+        <t-input v-model="banForm.ip" placeholder="输入要封禁的 IP 地址" />
+      </t-form-item>
+      <t-form-item label="封禁原因">
+        <t-input v-model="banForm.reason" placeholder="封禁原因（选填）" />
+      </t-form-item>
+      <t-form-item label="封禁类型">
+        <t-radio-group v-model="banForm.isPermanent">
+          <t-radio :value="false">临时封禁</t-radio>
+          <t-radio :value="true">永久封禁</t-radio>
+        </t-radio-group>
+      </t-form-item>
+      <t-form-item v-if="!banForm.isPermanent" label="封禁时长">
+        <t-input-number
+          v-model="banForm.durationHours"
+          :min="1"
+          :max="720"
+          style="width: 120px"
+        />
+        <span style="margin-left: 8px; color: var(--text-secondary); font-size: 13px">小时</span>
+      </t-form-item>
+    </t-form>
+  </t-dialog>
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted } from 'vue';
+import { ref, reactive, onMounted, computed } from 'vue';
 import { MessagePlugin } from 'tdesign-vue-next';
-import { api } from '@/stores/auth';
+import { api, useAuthStore } from '@/stores/auth';
+import { storeToRefs } from 'pinia';
 import { formatDate, formatSize } from '@/utils/format';
 import AlertManagement from './AlertManagement.vue';
+
+const authStore = useAuthStore();
+const { user } = storeToRefs(authStore);
+const isSuperAdmin = computed(() => user.value?.role === 'super_admin');
 
 // Types
 interface BannedIp {
@@ -256,7 +354,6 @@ const unbanningIp = ref<string | null>(null);
 const abnormalIps = ref<AbnormalIp[]>([]);
 const abnormalLoading = ref(false);
 const abnormalSort = ref('requestCount');
-const banningIp = ref<string | null>(null);
 
 // Table columns
 const banColumns = [
@@ -347,7 +444,7 @@ async function fetchBanStats() {
 async function handleUnban(ip: string) {
   unbanningIp.value = ip;
   try {
-    await api.delete(`/admin/banned-ips/${ip}`, { data: { reason: 'manual_unban' } });
+    await api.post('/admin/banned-ips/unban', { ip });
     MessagePlugin.success(`IP ${ip} 已解封`);
     fetchBanStats();
   } catch {
@@ -377,22 +474,52 @@ async function fetchAbnormalIps() {
   }
 }
 
-// Ban abnormal IP
-async function handleBanAbnormalIp(ip: string) {
-  banningIp.value = ip;
+// Ban dialog
+const banDialogVisible = ref(false);
+const banDialogSaving = ref(false);
+const banForm = reactive({
+  ip: '',
+  reason: '',
+  isPermanent: false,
+  durationHours: 6,
+});
+
+function openBanDialog(ip?: string) {
+  banForm.ip = ip || '';
+  banForm.reason = ip ? 'abnormal_traffic' : '';
+  banForm.isPermanent = false;
+  banForm.durationHours = 6;
+  banDialogVisible.value = true;
+}
+
+async function handleBanSubmit() {
+  if (!banForm.ip.trim()) {
+    MessagePlugin.warning('请输入 IP 地址');
+    return;
+  }
+  banDialogSaving.value = true;
   try {
-    await api.post('/admin/banned-ips', {
-      ip,
-      reason: 'abnormal_traffic',
-      isPermanent: false,
-      durationMinutes: 360,
-    });
-    MessagePlugin.success(`IP ${ip} 已封禁 6 小时`);
-    abnormalIps.value = abnormalIps.value.filter((item) => item.ip !== ip);
+    const payload: Record<string, any> = {
+      ip: banForm.ip.trim(),
+      permanent: banForm.isPermanent,
+    };
+    if (banForm.reason.trim()) {
+      payload.reason = banForm.reason.trim();
+    }
+    if (!banForm.isPermanent) {
+      payload.expiresAt = new Date(Date.now() + banForm.durationHours * 60 * 60 * 1000).toISOString();
+    }
+    await api.post('/admin/banned-ips', payload);
+    const type = banForm.isPermanent ? '永久封禁' : `已封禁 ${banForm.durationHours} 小时`;
+    MessagePlugin.success(`IP ${banForm.ip.trim()} ${type}`);
+    banDialogVisible.value = false;
+    // 从异常列表移除
+    abnormalIps.value = abnormalIps.value.filter((item) => item.ip !== banForm.ip.trim());
+    fetchBanStats();
   } catch {
-    MessagePlugin.error(`封禁 IP ${ip} 失败`);
+    MessagePlugin.error(`封禁 IP ${banForm.ip.trim()} 失败`);
   } finally {
-    banningIp.value = null;
+    banDialogSaving.value = false;
   }
 }
 
@@ -414,10 +541,94 @@ async function fetchAttackAlerts() {
   }
 }
 
+// ==================== 安全规则配置 ====================
+
+interface SecurityConfigItem {
+  key: string;
+  label: string;
+  description: string;
+  type: 'number';
+  min?: number;
+  max?: number;
+  step?: number;
+  unit?: string;
+  category: string;
+  currentValue: string;
+  defaultValue: string;
+}
+
+const configItems = ref<SecurityConfigItem[]>([]);
+const configForm = ref<Record<string, number>>({});
+const configLoading = ref(false);
+const configSaving = ref(false);
+
+const configCategories = computed(() => {
+  const cats = new Set(configItems.value.map((item) => item.category));
+  return Array.from(cats);
+});
+
+function configItemsByCategory(cat: string) {
+  return configItems.value.filter((item) => item.category === cat);
+}
+
+async function fetchSecurityConfig() {
+  configLoading.value = true;
+  try {
+    const { data } = await api.get('/admin/security-config');
+    const items: SecurityConfigItem[] = data?.data || data || [];
+    configItems.value = items;
+    // 初始化表单值
+    const form: Record<string, number> = {};
+    for (const item of items) {
+      form[item.key] = Number(item.currentValue) || Number(item.defaultValue) || 0;
+    }
+    configForm.value = form;
+  } catch {
+    // 静默失败
+  } finally {
+    configLoading.value = false;
+  }
+}
+
+async function saveSecurityConfig() {
+  configSaving.value = true;
+  try {
+    const configs = Object.entries(configForm.value).map(([key, value]) => ({
+      key,
+      value: String(value),
+    }));
+    await api.put('/admin/security-config', { configs });
+    MessagePlugin.success('安全配置已保存');
+    await fetchSecurityConfig();
+  } catch {
+    MessagePlugin.error('保存安全配置失败');
+  } finally {
+    configSaving.value = false;
+  }
+}
+
+async function resetSecurityConfig() {
+  configLoading.value = true;
+  try {
+    // 恢复为默认值
+    const form: Record<string, number> = {};
+    for (const item of configItems.value) {
+      form[item.key] = Number(item.defaultValue) || 0;
+    }
+    configForm.value = form;
+    MessagePlugin.info('已重置为默认值（点击保存生效）');
+  } finally {
+    configLoading.value = false;
+  }
+}
+
 onMounted(() => {
   fetchAttackAlerts();
   fetchBanStats();
   fetchAbnormalIps();
+  if (isSuperAdmin.value) {
+    fetchSecurityConfig();
+  }
 });
 </script>
 
@@ -539,5 +750,50 @@ onMounted(() => {
   .metrics-grid {
     grid-template-columns: 1fr;
   }
+}
+
+/* Security config grid */
+.security-config-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 16px;
+}
+
+.security-config-item {
+  background: var(--bg-primary, #1a1a2e);
+  border: 1px solid var(--border-color, #333);
+  border-radius: 8px;
+  padding: 16px;
+}
+
+.config-item-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.config-item-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.config-item-unit {
+  font-size: 11px;
+  color: var(--text-secondary);
+  background: var(--bg-secondary, #2a2a3e);
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+
+.config-item-hint {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-top: 6px;
+  line-height: 1.4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 </style>

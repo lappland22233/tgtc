@@ -22,7 +22,7 @@
     <div class="card">
       <div style="display: flex; justify-content: space-between; margin-bottom: 16px; align-items: center; flex-wrap: wrap; gap: 12px;">
         <div style="display: flex; gap: 8px;">
-          <t-input v-model="search" placeholder="搜索文件名..." style="width: 300px;" @enter="handleSearch" />
+          <t-input v-model="search" placeholder="搜索文件名..." style="width: 300px;" @enter="handleSearch" autocomplete="off" />
           <t-button theme="default" @click="handleSearch">搜索</t-button>
           <t-button theme="default" variant="text" v-if="search" @click="handleClearSearch">清除</t-button>
         </div>
@@ -50,11 +50,11 @@
             <t-button size="small" theme="default" variant="text" @click="markdownResult = ''">关闭</t-button>
           </div>
         </div>
-        <t-input v-model="markdownResult" type="textarea" readonly :rows="6" />
+        <t-input v-model="markdownResult" type="textarea" readonly :rows="6" autocomplete="off" />
       </div>
 
       <!-- 拖拽提示（空状态） -->
-      <div v-if="fileStore.files.length === 0 && !fileStore.loading"
+      <div v-if="fileStore.files.length === 0 && !fileStore.loading && !cursorLoading"
         class="upload-zone"
         @click="showUploadModal = true"
       >
@@ -65,10 +65,10 @@
         </p>
       </div>
 
-      <t-loading v-if="fileStore.loading" />
-      <div v-else-if="fileStore.files.length > 0">
+      <t-loading v-if="fileStore.loading || cursorLoading" />
+      <div v-else-if="displayFiles.length > 0">
         <t-table
-          :data="fileStore.files"
+          :data="displayFiles"
           :columns="columns"
           :row-class-name="getRowClassName"
           row-key="id"
@@ -76,8 +76,9 @@
           table-layout="auto"
           :selected-row-keys="selectedImageIds"
           @select-change="handleSelectChange"
+          @sort-change="handleSortChange"
         >
-          <template #filename="{ row }">
+          <template #originalName="{ row }">
             <div style="display: flex; align-items: center; gap: 12px;">
               <ThumbnailImg :file-id="row.id" :mime-type="row.mimeType" :size="36" :emoji="getFileEmoji(row.mimeType)" />
               <div style="min-width: 0;">
@@ -171,13 +172,25 @@
           </template>
         </t-table>
 
-        <div style="margin-top: 16px; display: flex; justify-content: center;">
+        <div style="margin-top: 16px; display: flex; justify-content: center; align-items: center; gap: 16px;">
+          <!-- 页面大小 / 模式切换 -->
+          <t-select v-model="pageSize" :options="pageSizeOptions" style="width: 130px;" @change="handlePageSizeChange" />
+
+          <!-- 传统分页 -->
           <t-pagination
+            v-if="pageMode === 'paginated'"
             v-model="page"
             :total="fileStore.total"
-            :page-size="20"
-            @change="() => fileStore.fetchFiles(page, 20, search)"
+            :page-size="Math.abs(pageSize)"
+            :show-page-size="false"
+            @change="handlePageChange"
           />
+
+          <!-- 无限滚动加载指示器 -->
+          <div v-else ref="scrollSentinel" style="text-align: center; padding: 8px 0;">
+            <t-loading v-if="cursorLoading" size="small" text="加载中..." />
+            <span v-else-if="!hasMore" style="color: var(--text-secondary);">已加载全部 {{ fileStore.total }} 个文件</span>
+          </div>
         </div>
       </div>
     </div>
@@ -192,6 +205,7 @@
         type="password"
         placeholder="输入密码（留空则移除密码）"
         clearable
+        autocomplete="off"
       />
       <div style="margin-top: 8px; color: var(--text-secondary); font-size: 12px;">
         设置密码后，访问者需要输入密码才能查看该文件
@@ -223,13 +237,14 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, computed, reactive, watch } from 'vue';
+import { ref, onMounted, computed, reactive, watch, nextTick, onUnmounted } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
 import { MessagePlugin } from 'tdesign-vue-next';
 import { useFileStore } from '../../stores/files';
 import { useAuthStore, api } from '../../stores/auth';
 import { getErrorMessage } from '../../utils/error';
 import { formatSize, formatDate, getFileEmoji } from '@/utils/format';
+import { useCursorPagination } from '../../composables/useCursorPagination';
 import UploadModal from '../../components/UploadModal.vue';
 import ThumbnailImg from '../../components/ThumbnailImg.vue';
 import type { FileItem } from '../../types/file';
@@ -239,12 +254,45 @@ const authStore = useAuthStore();
 const router = useRouter();
 const route = useRoute();
 const page = ref(Number(route.query.page) || 1);
+const pageSize = ref(Number(route.query.pageSize) || 20);
 const search = ref((route.query.search as string) || '');
 const showUploadModal = ref(false);
 const isDraggedOver = ref(false);
 const markdownResult = ref('');
 const selectedImageIds = ref<string[]>([]);
 const dropFiles = ref<File[]>([]);
+const sortBy = ref<string>(route.query.sortBy as string || '');
+const sortOrder = ref<string>(route.query.sortOrder as string || '');
+
+// 分页模式：'paginated' | 'infinite'
+const pageMode = ref<'paginated' | 'infinite'>(
+  (route.query.mode as 'paginated' | 'infinite') || 'paginated'
+);
+
+// 游标无限滚动 composable
+const {
+  hasMore,
+  loading: cursorLoading,
+  loadMore,
+  reset: resetCursor,
+} = useCursorPagination<FileItem>();
+
+// 滚动哨兵 ref
+const scrollSentinel = ref<HTMLElement | null>(null);
+let scrollObserver: IntersectionObserver | null = null;
+
+// pageSize 选项（含无限）
+const pageSizeOptions = computed(() => [
+  { label: '10 条/页', value: 10 },
+  { label: '20 条/页', value: 20 },
+  { label: '50 条/页', value: 50 },
+  { label: '100 条/页', value: 100 },
+  { label: '无限滚动', value: -1 },
+]);
+
+// 用于表格渲染的 files 计算属性
+// 无限模式直接使用 fileStore.files（由 replaceFiles 设置），传统模式不变
+const displayFiles = computed(() => fileStore.files);
 
 const isAdmin = computed(() => {
   const role = authStore.user?.role || fileStore.currentUserRole;
@@ -257,7 +305,7 @@ watch(() => authStore.user?.role, (role) => {
 }, { immediate: true });
 
 const selectedImages = computed(() =>
-  fileStore.files.filter(f =>
+  displayFiles.value.filter(f =>
     f.mimeType.startsWith('image/') &&
     selectedImageIds.value.includes(f.id) &&
     !f.isDeleted
@@ -299,7 +347,13 @@ async function savePassword() {
     await fileStore.setPassword(passwordDialog.fileId, passwordDialog.value);
     MessagePlugin.success(passwordDialog.value ? '密码已设置' : '密码已移除');
     passwordDialog.visible = false;
-    fileStore.fetchFiles(page.value, 20, search.value || undefined);
+    if (pageMode.value === 'infinite') {
+      resetCursor();
+      fileStore.replaceFiles([]);
+      loadInitialFiles(true);
+    } else {
+      fileStore.fetchFiles(page.value, Math.abs(pageSize.value), search.value || undefined, sortBy.value || undefined, sortOrder.value || undefined);
+    }
   } catch (error: unknown) {
     MessagePlugin.error(getErrorMessage(error));
   }
@@ -359,36 +413,159 @@ function handleUploadModalClose() {
 }
 
 function onUploaded() {
-  fileStore.fetchFiles(page.value, 20, search.value || undefined);
+  if (pageMode.value === 'infinite') {
+    resetCursor();
+    fileStore.replaceFiles([]);
+    loadInitialFiles(true);
+  } else {
+    fileStore.fetchFiles(page.value, Math.abs(pageSize.value), search.value || undefined, sortBy.value || undefined, sortOrder.value || undefined);
+  }
   selectedImageIds.value = [];
 }
 
 function handleSelectChange(selectedRowKeys: (string | number)[]) {
   selectedImageIds.value = selectedRowKeys.filter(k =>
-    fileStore.files.find(f => f.id === k && f.mimeType.startsWith('image/') && !f.isDeleted)
+    displayFiles.value.find(f => f.id === k && f.mimeType.startsWith('image/') && !f.isDeleted)
   ) as string[];
 }
 
 function handleSearch() {
   page.value = 1;
-  fileStore.fetchFiles(1, 20, search.value || undefined);
+  if (pageMode.value === 'infinite') {
+    resetCursor();
+    fileStore.replaceFiles([]);
+    loadInitialFiles(true);
+  } else {
+    fileStore.fetchFiles(1, Math.abs(pageSize.value), search.value || undefined, sortBy.value || undefined, sortOrder.value || undefined);
+  }
 }
 
 function handleClearSearch() {
   search.value = '';
   page.value = 1;
-  fileStore.fetchFiles(1, 20);
+  if (pageMode.value === 'infinite') {
+    resetCursor();
+    fileStore.replaceFiles([]);
+    loadInitialFiles(true);
+  } else {
+    fileStore.fetchFiles(1, Math.abs(pageSize.value), undefined, sortBy.value || undefined, sortOrder.value || undefined);
+  }
+}
+
+function handleSortChange(sortInfo: { sortBy: string; descending: boolean } | { sortBy: string; descending: boolean }[]) {
+  const info = Array.isArray(sortInfo) ? sortInfo[0] : sortInfo;
+  if (!info) return;
+  sortBy.value = info.sortBy;
+  sortOrder.value = info.descending ? 'DESC' : 'ASC';
+  // 排序时切换到传统分页模式（游标分页固定按 createdAt DESC 排序）
+  if (pageMode.value === 'infinite') {
+    pageMode.value = 'paginated';
+    pageSize.value = 20;
+    resetCursor();
+  }
+  page.value = 1;
+  fileStore.fetchFiles(1, Math.abs(pageSize.value), search.value || undefined, sortBy.value, sortOrder.value);
+}
+
+// ==== 无限滚动加载逻辑 ====
+
+/** 初始化 / 搜索 / 排序变化时加载文件列表 */
+async function loadInitialFiles(resetCursorState = false) {
+  if (pageMode.value === 'paginated') {
+    await fileStore.fetchFiles(page.value, Math.abs(pageSize.value), search.value || undefined, sortBy.value || undefined, sortOrder.value || undefined);
+  } else {
+    // 无限模式：使用游标分页
+    if (resetCursorState) {
+      resetCursor();
+      fileStore.replaceFiles([]);
+    }
+    await loadMore(async (cursor) => {
+      const result = await fileStore.fetchFilesCursor(
+        20, // 每次固定 20 条
+        search.value || undefined,
+        cursor,
+      );
+      if (!result) return { data: [], nextCursor: null, hasMore: false };
+
+      // 将新文件追加到 store 的 files 数组
+      fileStore.replaceFiles([...fileStore.files, ...result.files]);
+      return {
+        data: result.files,
+        nextCursor: result.nextCursor,
+        hasMore: result.nextCursor !== null,
+      };
+    });
+  }
+}
+
+/** 加载更多（无限模式下 IntersectionObserver 触发） */
+async function loadMoreFiles() {
+  if (!hasMore.value || cursorLoading.value) return;
+  await loadMore(async (cursor) => {
+    const result = await fileStore.fetchFilesCursor(
+      20,
+      search.value || undefined,
+      cursor,
+    );
+    if (!result) return { data: [], nextCursor: null, hasMore: false };
+
+    fileStore.replaceFiles([...fileStore.files, ...result.files]);
+    return {
+      data: result.files,
+      nextCursor: result.nextCursor,
+      hasMore: result.nextCursor !== null,
+    };
+  });
+}
+
+/** 设置 IntersectionObserver 监听滚动 */
+function setupScrollObserver() {
+  if (scrollObserver) scrollObserver.disconnect();
+  if (!scrollSentinel.value) return;
+
+  scrollObserver = new IntersectionObserver(
+    (entries) => {
+      if (entries[0].isIntersecting) {
+        loadMoreFiles();
+      }
+    },
+    { rootMargin: '600px' },
+  );
+  scrollObserver.observe(scrollSentinel.value);
+}
+
+function handlePageChange(pageInfo: { current: number }) {
+  fileStore.fetchFiles(pageInfo.current, Math.abs(pageSize.value), search.value || undefined, sortBy.value || undefined, sortOrder.value || undefined);
+}
+
+function handlePageSizeChange(val: number) {
+  selectedImageIds.value = [];
+  if (val === -1) {
+    // 切换到无限模式
+    pageMode.value = 'infinite';
+    page.value = 1;
+    resetCursor();
+    fileStore.replaceFiles([]);
+    loadInitialFiles(true);
+    nextTick(setupScrollObserver);
+  } else {
+    // 切换到传统分页
+    pageMode.value = 'paginated';
+    page.value = 1;
+    pageSize.value = val;
+    fileStore.fetchFiles(1, val, search.value || undefined, sortBy.value || undefined, sortOrder.value || undefined);
+  }
 }
 
 const columns = [
   { colKey: 'row-select', type: 'multiple' as const, width: '50' },
-  { colKey: 'filename', title: '文件名', width: '260', ellipsis: true },
+  { colKey: 'originalName', title: '文件名', width: '260', ellipsis: true, sorter: true },
   { colKey: 'size', title: '大小', width: '90' },
   { colKey: 'accessType', title: '访问权限', width: '110' },
   { colKey: 'password', title: '加密', width: '110' },
   { colKey: 'maxAccessCount', title: '访问次数', width: '110' },
   { colKey: 'expiresIn', title: '限时访问', width: '110' },
-  { colKey: 'createdAt', title: '上传时间', width: '160' },
+  { colKey: 'createdAt', title: '上传时间', width: '160', sorter: true },
   { colKey: 'operations', title: '操作', width: '220' },
 ];
 
@@ -467,7 +644,13 @@ async function confirmDelete() {
       MessagePlugin.success(`文件已标记为待删除，将于 ${scheduledDate} 永久删除，期间可恢复`);
     }
     deleteDialog.visible = false;
-    await fileStore.fetchFiles(page.value, 20, search.value || undefined);
+    if (pageMode.value === 'infinite') {
+      resetCursor();
+      fileStore.replaceFiles([]);
+      loadInitialFiles(true);
+    } else {
+      await fileStore.fetchFiles(page.value, Math.abs(pageSize.value), search.value || undefined, sortBy.value || undefined, sortOrder.value || undefined);
+    }
   } catch (error: unknown) {
     MessagePlugin.error(getErrorMessage(error));
   }
@@ -478,7 +661,13 @@ async function handleRestore(id: string) {
   try {
     await fileStore.restoreFile(id);
     MessagePlugin.success('文件已恢复');
-    await fileStore.fetchFiles(page.value, 20, search.value || undefined);
+    if (pageMode.value === 'infinite') {
+      resetCursor();
+      fileStore.replaceFiles([]);
+      loadInitialFiles(true);
+    } else {
+      await fileStore.fetchFiles(page.value, Math.abs(pageSize.value), search.value || undefined, sortBy.value || undefined, sortOrder.value || undefined);
+    }
   } catch (error: unknown) {
     MessagePlugin.error(getErrorMessage(error));
   }
@@ -494,19 +683,16 @@ async function handleForceDelete(id: string) {
   }
 }
 
-async function convertToMarkdown() {
+function convertToMarkdown() {
   if (selectedImages.value.length === 0) {
     MessagePlugin.warning('请先选择图片文件');
     return;
   }
 
-  try {
-    const ids = selectedImages.value.map((i) => i.id);
-    const res = await api.post('/files/batch-markdown', { ids });
-    markdownResult.value = res.data.data?.markdown?.join('\n') || '';
-  } catch (error: unknown) {
-    MessagePlugin.error(getErrorMessage(error));
-  }
+  const baseUrl = window.location.origin;
+  markdownResult.value = selectedImages.value
+    .map((img) => `![${img.originalName}](${baseUrl}/files/public/${img.id})`)
+    .join('\n');
 }
 
 function copyMarkdown() {
@@ -514,16 +700,34 @@ function copyMarkdown() {
   MessagePlugin.success('已复制到剪贴板');
 }
 
-// 同步分页和搜索到 URL 查询参数
-watch([page, search], ([newPage, newSearch]) => {
+// 同步分页、搜索、排序到 URL 查询参数
+watch([page, pageSize, search, sortBy, sortOrder, pageMode], ([newPage, newPageSize, newSearch, newSortBy, newSortOrder, newMode]) => {
   const query: Record<string, string> = {};
-  if (newPage > 1) query.page = String(newPage);
+  if (newMode === 'paginated') {
+    if (newPage > 1) query.page = String(newPage);
+    if (newPageSize !== 20 && newPageSize > 0) query.pageSize = String(newPageSize);
+  } else {
+    query.mode = 'infinite';
+  }
   if (newSearch) query.search = newSearch;
+  if (newSortBy) query.sortBy = newSortBy;
+  if (newSortOrder) query.sortOrder = newSortOrder;
   router.replace({ query });
 });
 
 onMounted(() => {
-  fileStore.fetchFiles();
+  if (pageMode.value === 'infinite' || route.query.mode === 'infinite') {
+    pageMode.value = 'infinite';
+    pageSize.value = -1;
+    loadInitialFiles(true);
+    nextTick(setupScrollObserver);
+  } else {
+    fileStore.fetchFiles(page.value, Math.abs(pageSize.value), search.value || undefined, sortBy.value || undefined, sortOrder.value || undefined);
+  }
+});
+
+onUnmounted(() => {
+  if (scrollObserver) scrollObserver.disconnect();
 });
 </script>
 

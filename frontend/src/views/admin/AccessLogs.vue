@@ -209,6 +209,7 @@
           style="width: 260px;"
           @enter="onFilterChange"
           @clear="onFilterChange"
+          autocomplete="off"
         />
         <t-select
           v-model="filterStatus"
