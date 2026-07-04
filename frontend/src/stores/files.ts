@@ -17,17 +17,18 @@ export const useFileStore = defineStore('files', () => {
     currentUserRole.value = role;
   }
 
-  async function fetchFiles(page = 1, limit = 20, keyword?: string) {
+  async function fetchFiles(page = 1, limit = 20, keyword?: string, sortBy?: string, sortOrder?: string) {
     // 取消上一次请求（如有）
     if (fetchAbortController) {
       fetchAbortController.abort();
     }
-    fetchAbortController = new AbortController();
+    const controller = new AbortController();
+    fetchAbortController = controller;
     loading.value = true;
     try {
       const response = await api.get('/files', {
-        params: { page, limit, keyword, includeDeleted: 'true' },
-        signal: fetchAbortController.signal,
+        params: { page, limit, keyword, includeDeleted: 'true', sortBy, sortOrder },
+        signal: controller.signal,
       });
       files.value = response.data.data.files;
       total.value = response.data.data.total;
@@ -40,8 +41,54 @@ export const useFileStore = defineStore('files', () => {
       throw err;
     } finally {
       loading.value = false;
-      fetchAbortController = null;
+      // 仅当当前控制器未被替换时才清除引用（防止旧请求的 finally 覆盖新请求的控制器）
+      if (fetchAbortController === controller) {
+        fetchAbortController = null;
+      }
     }
+  }
+
+  /**
+   * 游标分页请求（无限滚动模式使用）
+   * 返回 { files, nextCursor, total } 供 useCursorPagination 使用
+   */
+  async function fetchFilesCursor(limit: number, keyword?: string, cursor?: string | null) {
+    if (fetchAbortController) {
+      fetchAbortController.abort();
+    }
+    const controller = new AbortController();
+    fetchAbortController = controller;
+    loading.value = true;
+    try {
+      const params: Record<string, unknown> = { limit, includeDeleted: 'true' };
+      if (keyword) params.keyword = keyword;
+      if (cursor) params.cursor = cursor;
+
+      const response = await api.get('/files', { params, signal: controller.signal });
+      const data = response.data.data;
+      total.value = data.total;
+      return {
+        files: data.files as FileItem[],
+        nextCursor: data.nextCursor as string | null,
+        total: data.total as number,
+      };
+    } catch (err) {
+      const axiosErr = err as { name?: string; code?: string };
+      if (axiosErr.name === 'AbortError' || axiosErr.code === 'ERR_CANCELED') {
+        return null;
+      }
+      throw err;
+    } finally {
+      loading.value = false;
+      if (fetchAbortController === controller) {
+        fetchAbortController = null;
+      }
+    }
+  }
+
+  /** 替换整个文件列表（无限模式从头加载时使用） */
+  function replaceFiles(newFiles: FileItem[]) {
+    files.value = newFiles;
   }
 
   async function uploadFile(
@@ -198,6 +245,8 @@ export const useFileStore = defineStore('files', () => {
     currentUserRole,
     setCurrentUserRole,
     fetchFiles,
+    fetchFilesCursor,
+    replaceFiles,
     uploadFile,
     uploadFileAsync,
     uploadMultiple,

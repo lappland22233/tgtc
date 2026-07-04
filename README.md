@@ -31,9 +31,11 @@
 ### 管理员
 - 全站仪表盘（30 秒自动刷新）
 - 用户管理（创建/删除/封禁/授权，super_admin 不可通过 API 创建）
-- 文件管理、IP 封禁管理
+- 文件管理、IP 封禁管理（永久封禁 / 临时封禁，自定义时长）
 - 系统配置（SMTP、上传限制、认证开关），敏感配置仅限 SUPER_ADMIN
+- **安全规则配置**：超级管理员可视化调整攻击检测阈值（高频扫描/登录爆破/爬虫/异常下载）和自动封禁时长，热更新无需重启
 - 文件类型过滤（黑名单/白名单双模式，危险类型带警告标识）
+- **安全监控**：攻击检测告警面板、封禁统计、异常 IP 监控、告警管理
 - **访问统计**：请求量、带宽、独立访客、峰值 QPS 实时监控，趋势折线图 + 状态码分布饼图（ECharts 6），按时间范围筛选，支持 30s/1min/5min 自动刷新
 - **操作审计**：登录、配置变更、文件操作（含批量删除）、权限修改等安全事件全量记录，操作者自动关联用户名，支持按操作类型/用户/时间范围筛选，90 天自动清理
 
@@ -44,6 +46,9 @@
 - 配置缓存使用 upsert 原子操作
 - Source map 生产关闭、.gitignore 覆盖密钥文件
 - 前端全局错误边界防白屏
+- **攻击检测系统**：自动检测高频扫描/登录爆破/爬虫/异常下载 4 种攻击行为，自动封禁 + 告警 + WebSocket 实时推送
+- **安全规则可配置化**：超级管理员可热调整检测阈值和自动封禁时长，无需重启服务
+- **IP 封禁**：支持永久封禁和临时封禁（自定义时长），自动封禁与手动封禁双模式
 - **操作审计系统**：异步记录所有关键安全事件（登录/登录失败/权限变更/文件操作/配置修改/IP 封禁/批量删除），记录操作用户 ID，前端展示用户名
 - **HTTP 访问日志**：全局中间件记录所有请求（IP/路径/状态码/耗时/带宽），数据持久化存储，30 天自动清理
 - **审计日志**：90 天自动清理，防止数据库无限增长
@@ -142,33 +147,37 @@ AUDIT_LOG_RETENTION_DAYS=90    # 审计日志保留天数
 │   ├── app.module.ts         # 根模块（TypeORM、Schedule、事件发射器）
 │   ├── auth/                 # 登录/注册/邮箱验证/密码重置/状态查询
 │   ├── user/                 # 个人信息/密码修改/统计
-│   ├── file/                 # 上传/下载/分享/公开访问/缩略图加密/批量上传
-│   ├── admin/                # 用户/文件/IP封禁/系统配置管理（含批量删除审计）
+│   ├── file/                 # 上传/下载/删除/分享/公开访问/缩略图加密/批量上传
+│   ├── admin/                # 用户/文件/IP封禁/系统配置管理/仪表盘/访问统计/审计日志
+│   ├── alert/                # 告警模块（规则评估 + WebSocket 推送）
+│   ├── jobs/                 # Bull 任务队列（指标聚合/攻击检测/告警评估/基线计算/数据归档）
+│   ├── security/             # 行为异常检测（6 种异常模式）
 │   ├── telegram/             # Telegram Bot API 上传下载（流式传输，Token 脱敏）
-│   ├── mailer/               # SMTP 邮件（事件驱动配置热更新）
+│   ├── mailer/               # SMTP 邮件
 │   ├── config/               # 动态配置缓存
 │   ├── tasks/                # 定时清理（限流/Token/封禁/访问日志/审计日志）
 │   ├── common/
-│   │   ├── entities/         # 10 个数据实体（含 AuditLog, AccessLog）
+│   │   ├── entities/         # 13 个数据实体
 │   │   ├── services/         # ConfigCacheService + RateLimitService + AuditService
 │   │   ├── guards/           # JWT 认证 + 角色权限守卫
 │   │   ├── decorators/       # @CurrentUser @Roles
 │   │   ├── interceptors/     # 统一响应 { code, message, data }
-│   │   ├── middleware/       # AccessLogMiddleware（全局 HTTP 请求日志，追踪实际发送字节数）
+│   │   ├── middleware/       # AccessLogMiddleware（全局 HTTP 请求日志）
 │   │   ├── utils/            # client-ip.ts crypto.util.ts
-│   ├── database/             # TypeORM CLI DataSource（含 dotenv/config 加载）
-│   └── migrations/           # 9 个数据库迁移文件
+│   ├── database/             # TypeORM CLI DataSource
+│   └── migrations/           # 16 个数据库迁移文件
 │
 ├── frontend/src/
 │   ├── views/
-│   │   ├── auth/             # Login.vue Register.vue（redirect 安全校验）
+│   │   ├── auth/             # Login.vue Register.vue
 │   │   ├── user/             # Dashboard FileList Settings
-│   │   ├── admin/            # Dashboard Users Files Config AccessLogs AuditLogs
+│   │   ├── admin/            # Dashboard Users Files Config AccessLogs AuditLogs SourceAnalysis UserActivity BandwidthAnalysis FileTypeAnalysis AlertManagement SecurityMonitor DashboardCustomizer
 │   │   └── layout/           # 侧边栏布局
-│   ├── components/           # UploadModal ThumbnailImg
+│   ├── components/           # UploadModal ThumbnailImg AlertBanner
+│   ├── composables/          # useAutoRefresh useCursorPagination useTimeRange
 │   ├── stores/               # auth files (Pinia)
 │   ├── router/               # 四级路由守卫链 + redirect 安全校验
-│   ├── api/                  # axios 客户端（10s 超时，401 防抖）
+│   ├── api/                  # axios 客户端（30s 超时，401 防抖）
 │   ├── types/                # TS 类型定义
 │   └── utils/                # error.ts format.ts thumbnail.ts
 │
@@ -223,12 +232,18 @@ npm run typecheck            # TypeScript 类型检查
 | GET | `/api/users/me/stats` | 个人统计 |
 | POST | `/api/files/upload-multiple` | 批量上传 |
 | GET | `/api/files` | 文件列表 |
-| GET | `/api/files/:id/download` | 下载 |
+| DELETE | `/api/files/:id` | 请求删除文件（7天冷静期） |
+| POST | `/api/files/:id/restore` | 恢复已删除文件 |
+| POST | `/api/files/:id/force-delete` | 强制永久删除 |
+| GET | `/api/files/:id/download` | 下载（后端代理流式转发） |
+| GET | `/api/files/:id/thumbnail?t=` | 缩略图预览 |
+| GET | `/api/files/:id/share` | 生成分享链接 |
 | PUT | `/api/files/:id/password` | 设置密码 |
 | PUT | `/api/files/:id/access-type` | 公开/私有 |
 | PUT | `/api/files/:id/access-count` | 访问限制 |
 | PUT | `/api/files/:id/expires` | 有效期 |
 | POST | `/api/files/batch-markdown` | 批量 Markdown |
+| GET | `/api/files/public-key` | RSA-OAEP 加密公钥 |
 
 ### Admin / Super Admin
 | 方法 | 路径 | 说明 |
@@ -236,15 +251,24 @@ npm run typecheck            # TypeScript 类型检查
 | GET | `/api/admin/stats` | 全站统计 |
 | GET | `/api/admin/users` | 用户列表 |
 | POST | `/api/admin/users` | 创建用户 |
+| PUT | `/api/admin/users/:id/role` | 修改用户角色 |
 | DELETE | `/api/admin/users/:id` | 删除用户 |
+| GET | `/api/admin/files` | 全站文件管理 |
+| DELETE | `/api/admin/files/:id` | 删除任意用户文件 |
 | GET | `/api/admin/banned-ips` | IP 封禁列表 |
 | POST | `/api/admin/banned-ips` | 封禁 IP |
 | DELETE | `/api/admin/banned-ips/:ip` | 解封 IP |
 | PUT | `/api/admin/config` | 系统配置（仅 SUPER_ADMIN） |
+| PUT | `/api/admin/config/batch` | 批量配置 |
+| PUT | `/api/admin/upload-config` | 上传配置 |
+| PUT | `/api/admin/auth-config` | 认证配置 |
+| PUT | `/api/admin/smtp-config` | SMTP 配置 |
+| GET | `/api/admin/security-config` | 安全规则配置（仅 SUPER_ADMIN） |
+| PUT | `/api/admin/security-config` | 更新安全规则配置 |
 | GET | `/api/admin/access-logs` | HTTP 访问日志（分页/筛选） |
-| GET | `/api/admin/access-logs/stats` | 访问统计（请求量/带宽/UV/QPS） |
-| GET | `/api/admin/access-logs/trend` | 流量趋势时序数据 |
-| GET | `/api/admin/audit-logs` | 操作审计日志（分页/筛选，含关联用户名） |
+| GET | `/api/admin/access-logs/stats` | 访问统计 |
+| GET | `/api/admin/access-logs/trend` | 流量趋势 |
+| GET | `/api/admin/audit-logs` | 操作审计日志 |
 
 ## 许可证
 

@@ -14,6 +14,7 @@ import { ConfigCacheService } from '../common/services/config-cache.service';
 import { AuditService } from '../common/services/audit.service';
 import { encryptPassword } from '../common/utils/crypto.util';
 import { ExportService, ExportOptions } from './export.service';
+import { SEC_CONFIG_META, SEC_CONFIG_DEFAULTS } from './security-config.defaults';
 import {
   TopFilesQueryDto,
   TopPathsQueryDto,
@@ -243,8 +244,8 @@ export class AdminService {
     });
   }
 
-  async getAllFiles(page = 1, limit = 20): Promise<{ files: File[]; total: number }> {
-    return this.fileService.findAll(page, limit, undefined, undefined, true);
+  async getAllFiles(page = 1, limit = 20, keyword?: string, userId?: string, sortBy?: string, sortOrder?: string, cursor?: string): Promise<{ files: File[]; total: number; nextCursor?: string | null }> {
+    return this.fileService.findAll(page, limit, userId, keyword, true, sortBy, sortOrder, cursor);
   }
 
   /**
@@ -1495,5 +1496,67 @@ export class AdminService {
         uv: calcChange(Number(currentStats?.uv || 0), Number(previousStats?.uv || 0)),
       },
     };
+  }
+
+  // ==================== 安全规则可配置化 ====================
+
+  /**
+   * 获取安全配置（含所有规则的当前值、默认值和元数据）
+   */
+  async getSecurityConfig() {
+    const items = await Promise.all(
+      SEC_CONFIG_META.map(async (meta) => {
+        const current = await this.configCacheService.get(meta.key, SEC_CONFIG_DEFAULTS[meta.key] || '');
+        return {
+          key: meta.key,
+          label: meta.label,
+          description: meta.description,
+          type: meta.type,
+          min: meta.min,
+          max: meta.max,
+          step: meta.step,
+          unit: meta.unit,
+          category: meta.category,
+          currentValue: current || SEC_CONFIG_DEFAULTS[meta.key] || '',
+          defaultValue: SEC_CONFIG_DEFAULTS[meta.key] || '',
+        };
+      }),
+    );
+
+    return items;
+  }
+
+  /**
+   * 批量更新安全配置
+   */
+  async updateSecurityConfig(
+    user: User,
+    configs: { key: string; value: string }[],
+  ): Promise<void> {
+    // 验证所有 key 合法
+    for (const c of configs) {
+      if (!SEC_CONFIG_META.some(m => m.key === c.key)) {
+        throw new BadRequestException(`无效的安全配置键: ${c.key}`);
+      }
+    }
+
+    const entries = configs.map((c) => ({
+      key: c.key,
+      value: c.value,
+      description: `安全规则 - ${SEC_CONFIG_META.find(m => m.key === c.key)?.label || c.key}`,
+    }));
+
+    await this.configCacheService.setBatch(entries);
+
+    // 审计日志
+    this.auditService.log({
+      action: 'config_change',
+      userId: user.id,
+      resourceType: 'security_config',
+      resourceId: 'batch',
+      metadata: { keys: configs.map(c => c.key), values: configs.map(c => c.value) },
+    });
+
+    this.logger.log(`安全配置已由用户 ${user.email} 更新: ${configs.map(c => `${c.key}=${c.value}`).join(', ')}`);
   }
 }

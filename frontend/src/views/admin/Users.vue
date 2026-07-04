@@ -7,7 +7,7 @@
 
     <div class="card">
       <div style="display: flex; justify-content: space-between; margin-bottom: 16px;">
-        <t-input v-model="searchEmail" placeholder="搜索用户邮箱..." style="width: 300px;" @enter="searchUsers" />
+        <t-input v-model="searchEmail" placeholder="搜索用户邮箱..." style="width: 300px;" @enter="searchUsers" autocomplete="off" />
         <t-button theme="primary" @click="showCreateDialog = true">+ 创建用户</t-button>
       </div>
 
@@ -69,10 +69,10 @@
     <t-dialog v-model:visible="showCreateDialog" header="创建用户" @confirm="createUser">
       <t-form :data="createForm" layout="vertical">
         <t-form-item label="邮箱" name="email">
-          <t-input v-model="createForm.email" placeholder="请输入邮箱" />
+          <t-input v-model="createForm.email" placeholder="请输入邮箱" autocomplete="off" />
         </t-form-item>
         <t-form-item label="密码" name="password">
-          <t-input v-model="createForm.password" type="password" placeholder="请输入密码" />
+          <t-input v-model="createForm.password" type="password" placeholder="请输入密码" autocomplete="new-password" />
         </t-form-item>
         <t-form-item label="角色" name="role">
           <t-select v-model="createForm.role" :options="roleOptions" />

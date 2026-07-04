@@ -1,6 +1,7 @@
 import api from '../api/client';
 
 let publicKey: CryptoKey | null = null;
+let publicKeyPromise: Promise<CryptoKey> | null = null;
 
 /** PEM 转 ArrayBuffer */
 function pemToArrayBuffer(pem: string): ArrayBuffer {
@@ -28,21 +29,24 @@ function arrayBufferToBase64Url(buffer: ArrayBuffer): string {
     .replace(/=/g, '');
 }
 
-/** 获取并缓存公钥 */
+/** 获取并缓存公钥（Promise 锁防止并发重复请求） */
 async function getPublicKey(): Promise<CryptoKey> {
   if (publicKey) return publicKey;
-
-  const res = await api.get('/files/public-key');
-  const pem: string = res.data.data?.publicKey || res.data.publicKey;
-  if (!pem) throw new Error('无法获取公钥');
-
-  publicKey = await crypto.subtle.importKey(
-    'spki',
-    pemToArrayBuffer(pem),
-    { name: 'RSA-OAEP', hash: 'SHA-256' },
-    false,
-    ['encrypt'],
-  );
+  if (!publicKeyPromise) {
+    publicKeyPromise = (async () => {
+      const res = await api.get('/files/public-key');
+      const pem: string = res.data.data?.publicKey || res.data.publicKey;
+      if (!pem) throw new Error('无法获取公钥');
+      return crypto.subtle.importKey(
+        'spki',
+        pemToArrayBuffer(pem),
+        { name: 'RSA-OAEP', hash: 'SHA-256' },
+        false,
+        ['encrypt'],
+      );
+    })();
+  }
+  publicKey = await publicKeyPromise;
   return publicKey;
 }
 
@@ -83,10 +87,42 @@ export async function getThumbToken(): Promise<string> {
   return token;
 }
 
-/** 构建缩略图 URL */
+// ---- 缩略图并发加载池 ----
+
+/** 最大并发缩略图加载数（留给文件列表 API 至少 2 个连接） */
+const MAX_CONCURRENT_THUMBNAILS = 3;
+
+let activeLoads = 0;
+const pendingQueue: Array<() => void> = [];
+
+function acquireSlot(): Promise<void> {
+  if (activeLoads < MAX_CONCURRENT_THUMBNAILS) {
+    activeLoads++;
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    pendingQueue.push(resolve);
+  });
+}
+
+function releaseSlot() {
+  activeLoads--;
+  const next = pendingQueue.shift();
+  if (next) {
+    activeLoads++;
+    next();
+  }
+}
+
+/** 构建缩略图 URL（受并发限制） */
 export async function buildThumbUrl(fileId: string): Promise<string> {
-  const token = await getThumbToken();
-  return `/api/files/${fileId}/thumbnail?t=${token}`;
+  await acquireSlot();
+  try {
+    const token = await getThumbToken();
+    return `/api/files/${fileId}/thumbnail?t=${token}`;
+  } finally {
+    releaseSlot();
+  }
 }
 
 /** 清除缓存（路由切换时调用，防止 Token 跨页面复用） */

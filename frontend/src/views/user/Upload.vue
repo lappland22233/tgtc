@@ -98,6 +98,7 @@
           type="textarea"
           readonly
           :rows="6"
+          autocomplete="off"
         />
         <t-button theme="primary" variant="outline" style="margin-top: 8px;" @click="copyMarkdown">
           复制结果
@@ -307,24 +308,23 @@ async function uploadFiles(files: File[]) {
   uploading.value = false;
 }
 
-async function convertToMarkdown() {
+function convertToMarkdown() {
   // 直接从上传成功的图片文件 ID 中筛选
-  const imageIds = selectedFiles.value.filter(id => {
-    const file = fileStore.files.find(f => f.id === id);
-    return file && file.mimeType.startsWith('image/');
-  });
+  const imageFiles = selectedFiles.value
+    .map(id => fileStore.files.find(f => f.id === id))
+    .filter((f): f is typeof f & { mimeType: string; originalName: string; id: string } =>
+      f != null && f.mimeType.startsWith('image/')
+    );
 
-  if (imageIds.length === 0) {
+  if (imageFiles.length === 0) {
     MessagePlugin.warning('请先上传图片文件');
     return;
   }
 
-  try {
-    const res = await api.post('/files/batch-markdown', { ids: imageIds });
-    markdownResult.value = res.data.data?.markdown?.join('\n') || '';
-  } catch (error: unknown) {
-    MessagePlugin.error(getErrorMessage(error));
-  }
+  const baseUrl = window.location.origin;
+  markdownResult.value = imageFiles
+    .map((img) => `![${img.originalName}](${baseUrl}/files/public/${img.id})`)
+    .join('\n');
 }
 
 function copyMarkdown() {

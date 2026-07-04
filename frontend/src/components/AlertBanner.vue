@@ -1,5 +1,5 @@
 <template>
-  <div v-if="unacknowledgedCount > 0" style="cursor: pointer" @click="router.push('/admin/alerts')">
+  <div v-if="unacknowledgedCount > 0" style="cursor: pointer" @click="router.push('/admin/security')">
     <t-alert :theme="unacknowledgedCount > 5 ? 'error' : 'warning'" :message="`⚠️ 有 ${unacknowledgedCount} 条未确认告警，点击查看`" />
   </div>
 </template>

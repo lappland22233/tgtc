@@ -2,6 +2,7 @@ import { createRouter, createWebHistory } from 'vue-router';
 import type { RouteRecordRaw } from 'vue-router';
 import { useAuthStore } from '../stores/auth';
 import { clearThumbToken } from '../utils/thumbnail';
+import { clearThumbnailCache } from '../utils/thumbnailCache';
 
 /**
  * 校验 redirect 参数是否安全，防止任意 URL 跳转（Open Redirect）
@@ -168,6 +169,7 @@ router.beforeEach(async (to, _from, next) => {
 // 路由切换时清除缩略图 token 缓存
 router.afterEach(() => {
   clearThumbToken();
+  clearThumbnailCache();
 });
 
 export default router;
