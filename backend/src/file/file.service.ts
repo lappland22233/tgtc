@@ -76,6 +76,9 @@ const MIME_EXTENSION_MAP: Record<string, string[]> = {
   '.flac': ['audio/flac'],
 };
 
+/** 已知复合扩展名列表（优先匹配，防止 .tar.gz 被错误识别为 .gz） */
+const COMPOUND_EXTENSIONS = ['.tar.gz', '.tar.bz2', '.tar.xz'] as const;
+
 @Injectable()
 export class FileService implements OnModuleInit {
   private readonly logger = new Logger(FileService.name);
@@ -184,8 +187,23 @@ export class FileService implements OnModuleInit {
     }
 
     const lowerName = filename.toLowerCase();
-    const lastDot = lowerName.lastIndexOf('.');
-    const ext = lastDot > 0 ? lowerName.substring(lastDot) : '(无扩展名)';
+
+    // 优先检查复合扩展名，防止 .tar.gz 被 lastIndexOf 错误识别为 .gz
+    let ext = '(无扩展名)';
+    let matchedCompound: string | null = null;
+    for (const ce of COMPOUND_EXTENSIONS) {
+      if (lowerName.endsWith(ce)) {
+        ext = ce;
+        matchedCompound = ce;
+        break;
+      }
+    }
+
+    // 无复合扩展名匹配 → 使用 lastIndexOf 取最后一个点之后的部分
+    if (!matchedCompound) {
+      const lastDot = lowerName.lastIndexOf('.');
+      ext = lastDot > 0 ? '.' + lowerName.slice(lastDot + 1) : '(无扩展名)';
+    }
 
     if (this.fileTypeMode === 'whitelist' && this.fileTypeFilter.length === 0) {
       return { allowed: false, reason: `文件类型 ${ext} 被拒绝：白名单模式未配置允许类型` };
@@ -209,7 +227,9 @@ export class FileService implements OnModuleInit {
     }
 
     // 额外检查：如果提供了 MIME 类型，验证其与扩展名的一致性
-    if (allowed && mimeType) {
+    // 复合扩展名跳过 MIME 一致性校验（.tar.gz 的 MIME 是 application/gzip）
+    if (allowed && mimeType && !matchedCompound) {
+      const lastDot = lowerName.lastIndexOf('.');
       if (lastDot > 0) {
         const expectedTypes = MIME_EXTENSION_MAP[ext];
         if (expectedTypes && !expectedTypes.includes(mimeType)) {
@@ -310,10 +330,40 @@ export class FileService implements OnModuleInit {
   }
 
   async uploadMultiple(files: Express.Multer.File[], user: User): Promise<BatchUploadResult> {
-    const success: File[] = [];
-    const failed: BatchUploadFailedItem[] = [];
+    // 预验证阶段：先检查所有文件的类型和大小，避免部分上传后因一个文件失败产生垃圾数据
+    const preCheckFailed: BatchUploadFailedItem[] = [];
+    const passPreCheck: Express.Multer.File[] = [];
 
     for (const file of files) {
+      if (file.size > this.maxFileSize) {
+        preCheckFailed.push({
+          name: file.originalname,
+          reason: `文件大小超过 ${this.maxFileSize / 1024 / 1024}MB 限制`,
+        });
+        continue;
+      }
+      const originalName = this.fixFilenameEncoding(file.originalname);
+      const typeCheck = this.isFileTypeAllowed(originalName, file.mimetype);
+      if (!typeCheck.allowed) {
+        preCheckFailed.push({
+          name: file.originalname,
+          reason: typeCheck.reason || '不允许上传此类型的文件',
+        });
+        continue;
+      }
+      passPreCheck.push(file);
+    }
+
+    // 全部预检失败 → 直接返回，不上传任何文件
+    if (passPreCheck.length === 0) {
+      return { success: [], failed: preCheckFailed };
+    }
+
+    // 上传阶段：逐文件上传到 Telegram
+    const success: File[] = [];
+    const failed = [...preCheckFailed];
+
+    for (const file of passPreCheck) {
       try {
         const uploadedFile = await this.upload(file, user);
         success.push(uploadedFile);
@@ -824,8 +874,10 @@ export class FileService implements OnModuleInit {
     return !!(file && file.accessType === FileAccessType.PRIVATE);
   }
 
-  private readonly ERROR_LIMIT = 5;        // 5次错误触发封禁
-  private readonly BAN_5M = 5 * 60 * 1000;   // 错误5次封禁5分钟
+  /** 从安全配置动态读取密码错误限流阈值（热更新） */
+  private async getPwdErrorLimit(): Promise<number> { return Number(await this.configCacheService.get('sec_pwd_error_limit', '5')) || 5; }
+  private async getPwdBanDuration(): Promise<number> { return (Number(await this.configCacheService.get('sec_pwd_ban_duration', '5')) || 5) * 60 * 1000; }
+
   private readonly BAN_6H = 6 * 3600 * 1000; // 第5次封禁升级为6小时
   private readonly BAN_COUNT_LIMIT = 5;     // 1小时内被封禁5次触发升级
   private readonly BAN_WINDOW = 3600 * 1000; // 1小时窗口
@@ -862,11 +914,13 @@ export class FileService implements OnModuleInit {
   async recordFailedPasswordAttempt(ip: string): Promise<void> {
     const pwdLimitKey = `pwd:${ip}`;
     const banLimitKey = `ban:${ip}`;
+    const pwdErrorLimit = await this.getPwdErrorLimit();
+    const pwdBanDuration = await this.getPwdBanDuration();
 
-    // 密码错误计数（仅计数，不锁定——5次错误后才触发封禁）
+    // 密码错误计数（仅计数，不锁定——达到阈值后才触发封禁）
     const pwdResult = await this.rateLimitService.checkAndIncrement(
       pwdLimitKey, 'password_error',
-      this.ERROR_LIMIT, 0, this.PWD_WINDOW,
+      pwdErrorLimit, 0, this.PWD_WINDOW,
     );
 
     // 未达到阈值，仅记录
@@ -887,18 +941,18 @@ export class FileService implements OnModuleInit {
 
     // T3-5: 使用 UPSERT 原子化封禁记录的创建/更新，消除 findOne→save 的 TOCTOU 窗口
     if (currentBanCount >= this.BAN_COUNT_LIMIT) {
-      // 第5次封禁 → 升级为6小时
+      // 连续封禁 → 升级为6小时
       const expiresAt = new Date(now + this.BAN_6H);
-      const reason = `密码错误${this.ERROR_LIMIT}次，1小时内第${currentBanCount}次触发封禁，升级为6小时`;
+      const reason = `密码错误${pwdErrorLimit}次，1小时内第${currentBanCount}次触发封禁，升级为6小时`;
       await this.bannedIPRepository.upsert(
         { ip, reason, isPermanent: false, expiresAt } as BannedIP,
         ['ip'],
       );
       await this.rateLimitService.reset(banLimitKey);
     } else {
-      // 第1-4次封禁 → 5分钟
-      const expiresAt = new Date(now + this.BAN_5M);
-      const reason = `密码错误${this.ERROR_LIMIT}次，1小时内第${currentBanCount}次触发封禁`;
+      // 首次封禁 → 动态时长
+      const expiresAt = new Date(now + pwdBanDuration);
+      const reason = `密码错误${pwdErrorLimit}次，1小时内第${currentBanCount}次触发封禁`;
       await this.bannedIPRepository.upsert(
         { ip, reason, isPermanent: false, expiresAt } as BannedIP,
         ['ip'],

@@ -38,7 +38,7 @@ export class MetricsAggregationProcessor {
         .createQueryBuilder('a')
         .select('COUNT(*)', 'totalRequests')
         .addSelect(
-          'ROUND(CAST(CAST(COUNT(*) AS FLOAT) / GREATEST(EXTRACT(EPOCH FROM (MAX("createdAt") - MIN("createdAt"))), 1) AS NUMERIC), 2)',
+          'ROUND(CAST(CAST(COUNT(*) AS NUMERIC) / GREATEST(EXTRACT(EPOCH FROM (MAX("createdAt") - MIN("createdAt"))), 1) AS NUMERIC), 2)',
           'qpsAvg',
         )
         .addSelect(

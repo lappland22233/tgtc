@@ -70,6 +70,18 @@ client.interceptors.response.use(
   (error: AxiosError) => {
     const status = error.response?.status;
 
+    // Cloudflare 代理层错误（413 请求体过大 / 502 代理超时）
+    // 检测非 JSON 响应（Cloudflare HTML 错误页）
+    if ((status === 413 || status === 502) && error.response?.data) {
+      const contentType = error.response.headers?.['content-type']?.toString() || '';
+      if (!contentType.includes('application/json')) {
+        const cloudflareMsg = status === 413
+          ? '文件过大（超过代理层 100MB 限制），请使用 80MB 以内的文件'
+          : '上传超时（代理层 100 秒限制），请使用异步上传或减小文件体积';
+        return Promise.reject(new Error(cloudflareMsg));
+      }
+    }
+
     // 401 处理：防抖跳转登录页
     if (status === 401) {
       const isAuthPage =

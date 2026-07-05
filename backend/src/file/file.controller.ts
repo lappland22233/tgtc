@@ -32,6 +32,7 @@ import { User, UserRole } from '../common/entities/user.entity';
 import { FileAccessType } from '../common/entities/file.entity';
 import { getClientIp } from '../common/utils/client-ip';
 import { RateLimitService } from '../common/services/rate-limit.service';
+import { ConfigCacheService } from '../common/services/config-cache.service';
 
 // Multer 层硬上限（600MB，仅防止极端 DoS；精确的动态限制由 FileService.upload() 业务层负责）
 const multerFileSize = 600 * 1024 * 1024; // 600MB
@@ -43,6 +44,7 @@ export class FileController {
     private configService: ConfigService,
     private cryptoService: ThumbnailCryptoService,
     private rateLimitService: RateLimitService,
+    private configCacheService: ConfigCacheService,
   ) {}
 
   /**
@@ -168,7 +170,27 @@ export class FileController {
     @Query('sortBy') sortBy?: string,
     @Query('sortOrder') sortOrder?: string,
     @Query('cursor') cursor?: string,
+    @Req() req?: Request,
   ) {
+    // 关键词长度限制：最大 100 字符，防止极端搜索词滥用
+    if (keyword && keyword.length > 100) {
+      throw new BadRequestException('搜索关键词不能超过 100 个字符');
+    }
+    // 搜索频率限流：IP 维度（使用安全配置中的阈值，不存在时默认 30 次/分钟）
+    if (keyword) {
+      const clientIp = getClientIp(req!);
+      const searchRateLimit = Number(await this.configCacheService.get('sec_search_rate_limit', '30')) || 30;
+      const rateResult = await this.rateLimitService.checkAndIncrement(
+        `search:${clientIp}`,
+        'file_search',
+        searchRateLimit,
+        1 * 60 * 1000,
+        60 * 1000,
+      );
+      if (!rateResult.allowed) {
+        throw new HttpException('搜索过于频繁，请稍后再试', HttpStatus.TOO_MANY_REQUESTS);
+      }
+    }
     const shouldIncludeDeleted = includeDeleted === 'true';
     // Non-admin users can only see their own files
     if (user.role === UserRole.USER) {
@@ -255,19 +277,22 @@ export class FileController {
     @Res() res: Response,
   ) {
     try {
-      // 下载限流：同一IP每分钟最多10次
+      // 下载限流：从安全配置动态读取阈值（热更新，无需重启）
       const clientIp = getClientIp(req);
+      const downloadRateLimit = Number(await this.configCacheService.get('sec_download_rate_limit', '10')) || 10;
+      const downloadRateWindow = Number(await this.configCacheService.get('sec_download_rate_window', '60')) || 60;
+      const downloadRateBan = Number(await this.configCacheService.get('sec_download_rate_ban', '1')) || 1;
       const rateLimitResult = await this.rateLimitService.checkAndIncrement(
         `download:${clientIp}`,
         'download',
-        10,                // maxAttempts: 10次/分钟
-        1 * 60 * 1000,     // lockDurationMs: 1分钟
-        60 * 1000,         // windowMs: 60秒
+        downloadRateLimit,                     // maxAttempts
+        downloadRateBan * 60 * 1000,           // lockDurationMs
+        downloadRateWindow * 1000,             // windowMs
       );
 
       if (!rateLimitResult.allowed) {
         throw new HttpException(
-          `下载过于频繁，请在 ${rateLimitResult.waitMinutes || 1} 分钟后重试`,
+          `下载过于频繁，请在 ${rateLimitResult.waitMinutes || downloadRateBan} 分钟后重试`,
           HttpStatus.TOO_MANY_REQUESTS,
         );
       }

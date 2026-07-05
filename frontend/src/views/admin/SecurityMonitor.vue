@@ -91,6 +91,10 @@
           <div class="metric-value">{{ banStats.permanentBans ?? '-' }}</div>
         </div>
         <div class="metric-card">
+          <div class="metric-label">历史封禁</div>
+          <div class="metric-value">{{ banStats.historicalBans ?? '-' }}</div>
+        </div>
+        <div class="metric-card">
           <div class="metric-label">解封率</div>
           <div class="metric-value">{{ banStats.unbanRatio != null ? banStats.unbanRatio + '%' : '-' }}</div>
         </div>
@@ -128,7 +132,35 @@
               </t-popconfirm>
             </template>
           </t-table>
-          <div v-if="!bansLoading && recentBans.length === 0" class="empty-hint">暂无封禁记录</div>
+          <div v-if="!bansLoading && recentBans.length === 0" class="empty-hint">暂无活跃封禁</div>
+        </t-loading>
+      </div>
+
+      <!-- 封禁历史 -->
+      <div class="card" style="margin-top: 16px">
+        <h3 style="margin: 0 0 16px">封禁历史（已解封/已过期）</h3>
+        <t-loading :loading="bansLoading" size="small">
+          <t-table
+            :data="banHistory"
+            :columns="banHistoryColumns"
+            row-key="ip"
+            table-layout="fixed"
+            :pagination="false"
+            size="small"
+          >
+            <template #createdAt="{ row }">
+              {{ formatDate(row.createdAt) }}
+            </template>
+            <template #unbannedAt="{ row }">
+              {{ formatDate(row.unbannedAt) }}
+            </template>
+            <template #isPermanent="{ row }">
+              <t-tag :theme="row.isPermanent ? 'danger' : 'success'" variant="light" size="small">
+                {{ row.isPermanent ? '永久' : '临时' }}
+              </t-tag>
+            </template>
+          </t-table>
+          <div v-if="!bansLoading && banHistory.length === 0" class="empty-hint">暂无封禁历史</div>
         </t-loading>
       </div>
     </div>
@@ -309,7 +341,16 @@ interface BanStats {
   totalBanned: number;
   activeBans: number;
   permanentBans: number;
+  historicalBans: number;
   unbanRatio: number;
+}
+
+interface BanHistoryEntry {
+  ip: string;
+  reason: string | null;
+  createdAt: string;
+  isPermanent: boolean;
+  unbannedAt: string;
 }
 
 interface AbnormalIp {
@@ -344,9 +385,11 @@ const banStats = reactive<BanStats>({
   totalBanned: 0,
   activeBans: 0,
   permanentBans: 0,
+  historicalBans: 0,
   unbanRatio: 0,
 });
 const recentBans = ref<BannedIp[]>([]);
+const banHistory = ref<BanHistoryEntry[]>([]);
 const bansLoading = ref(false);
 const unbanningIp = ref<string | null>(null);
 
@@ -360,8 +403,16 @@ const banColumns = [
   { colKey: 'ip', title: 'IP 地址', width: 160 },
   { colKey: 'reason', title: '封禁原因', ellipsis: true },
   { colKey: 'createdAt', title: '封禁时间', width: 180 },
-  { colKey: 'isPermanent', title: '永久封禁', width: 100 },
+  { colKey: 'isPermanent', title: '类型', width: 80 },
   { colKey: 'action', title: '操作', width: 80 },
+];
+
+const banHistoryColumns = [
+  { colKey: 'ip', title: 'IP 地址', width: 160 },
+  { colKey: 'reason', title: '封禁原因', ellipsis: true },
+  { colKey: 'createdAt', title: '封禁时间', width: 180 },
+  { colKey: 'unbannedAt', title: '解封时间', width: 180 },
+  { colKey: 'isPermanent', title: '类型', width: 80 },
 ];
 
 const abnormalColumns = [
@@ -433,6 +484,7 @@ async function fetchBanStats() {
     const d = data.data || data;
     Object.assign(banStats, d);
     recentBans.value = d.recentBans || [];
+    banHistory.value = d.banHistory || [];
   } catch {
     MessagePlugin.error('加载封禁统计失败');
   } finally {

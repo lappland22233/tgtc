@@ -5,9 +5,18 @@ import cookieParser from 'cookie-parser';
 import { join } from 'path';
 import { AppModule } from './app.module';
 import { TransformInterceptor } from './common/interceptors/transform.interceptor';
+import { validateEnv } from './config/env-validation';
 
 async function bootstrap() {
   const logger = new Logger('Bootstrap');
+
+  // 启动时校验关键环境变量，失败则阻止启动
+  try {
+    validateEnv();
+  } catch (err) {
+    logger.error((err as Error).message);
+    process.exit(1);
+  }
 
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
 

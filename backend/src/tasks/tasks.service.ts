@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, LessThan } from 'typeorm';
+import { Repository, LessThan, IsNull } from 'typeorm';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { BannedIP } from '../common/entities/banned-ip.entity';
 import { ShareAudit } from '../common/entities/share-audit.entity';
@@ -64,10 +64,10 @@ export class TasksService {
   @Cron(CronExpression.EVERY_HOUR)
   async cleanupExpiredBans() {
     try {
-      const result = await this.bannedIPRepository.delete({
-        isPermanent: false,
-        expiresAt: LessThan(new Date()),
-      });
+      const result = await this.bannedIPRepository.update(
+        { isPermanent: false, expiresAt: LessThan(new Date()), unbannedAt: IsNull() },
+        { unbannedAt: new Date() },
+      );
       if ((result.affected ?? 0) > 0) {
         this.logger.log(`已清理 ${result.affected} 条过期封禁记录`);
       }

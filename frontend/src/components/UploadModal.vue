@@ -167,6 +167,8 @@ function updateSpeeds() {
   const now = Date.now();
   for (const entry of uploadQueue.value) {
     if (entry.status === 'pending' || entry.status === 'success' || entry.status === 'error') continue;
+    // 尚未开始传输或 checkpointTime 未初始化 → 跳过
+    if (entry.checkpointTime === 0) continue;
     const timeDiff = (now - entry.checkpointTime) / 1000;
     if (timeDiff <= 0) continue;
     const bytesDiff = entry.loadedBytes - entry.checkpointBytes;
@@ -264,7 +266,6 @@ async function uploadFiles(files: File[]) {
   uploading.value = true;
   batchResult.value = null;
 
-  const now = Date.now();
   const queueEntries: QueueEntry[] = files.map((f) => ({
     file: f,
     status: 'pending' as QueueStatus,
@@ -274,7 +275,7 @@ async function uploadFiles(files: File[]) {
     loadedBytes: 0,
     speed: '-',
     eta: '-',
-    checkpointTime: now,
+    checkpointTime: 0,  // 延迟到首次 onUploadProgress 回调时记录，排除排队等待时间
     checkpointBytes: 0,
   }));
 
@@ -310,6 +311,10 @@ async function uploadFiles(files: File[]) {
           if (entry) {
             entry.progress = total > 0 ? Math.round((loaded / total) * 100) : 0;
             entry.loadedBytes = loaded;
+            // 首次收到进度数据时记录传输开始时间（排除排队等待时间）
+            if (entry.checkpointBytes === 0 && loaded > 0) {
+              entry.checkpointTime = Date.now();
+            }
           }
         },
         (status) => {

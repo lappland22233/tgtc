@@ -1,7 +1,7 @@
 import { Injectable, NotFoundException, BadRequestException, Logger } from '@nestjs/common';
 import { UAParser } from 'ua-parser-js';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, LessThan, SelectQueryBuilder, In } from 'typeorm';
+import { Repository, LessThan, IsNull, SelectQueryBuilder, In } from 'typeorm';
 import { SystemConfig } from '../common/entities/system-config.entity';
 import { BannedIP } from '../common/entities/banned-ip.entity';
 import { File } from '../common/entities/file.entity';
@@ -195,21 +195,42 @@ export class AdminService {
   }
 
   async banIP(user: User, ip: string, reason?: string, permanent = true, expiresAt?: Date): Promise<void> {
-    const existing = await this.bannedIPRepository.findOne({ where: { ip } });
+    // 检查是否已有活跃封禁记录（unbannedAt 为空）
+    const existing = await this.bannedIPRepository
+      .createQueryBuilder('b')
+      .where('b.ip = :ip', { ip })
+      .andWhere('b.unbannedAt IS NULL')
+      .getOne();
 
     if (existing) {
       throw new BadRequestException('该IP已被封禁');
     }
 
-    const bannedIP = new BannedIP();
-    bannedIP.ip = ip;
-    bannedIP.reason = reason ?? null;
-    bannedIP.isPermanent = permanent;
-    bannedIP.expiresAt = permanent ? null : (expiresAt ?? null);
+    // 检查是否有历史记录，若有则重新激活
+    const historical = await this.bannedIPRepository
+      .createQueryBuilder('b')
+      .where('b.ip = :ip', { ip })
+      .andWhere('b.unbannedAt IS NOT NULL')
+      .getOne();
 
-    await this.bannedIPRepository.save(bannedIP);
+    if (historical) {
+      await this.bannedIPRepository.update(historical.id, {
+        reason: reason ?? historical.reason,
+        isPermanent: permanent,
+        expiresAt: permanent ? null : (expiresAt ?? null),
+        createdAt: new Date(),
+        unbannedAt: null,
+      });
+    } else {
+      const bannedIP = this.bannedIPRepository.create({
+        ip,
+        reason: reason ?? null,
+        isPermanent: permanent,
+        expiresAt: permanent ? null : (expiresAt ?? null),
+      });
+      await this.bannedIPRepository.save(bannedIP);
+    }
 
-    // 审计日志：IP 封禁
     this.auditService.log({
       action: 'ip_ban',
       userId: user.id,
@@ -220,15 +241,18 @@ export class AdminService {
   }
 
   async unbanIP(user: User, ip: string): Promise<void> {
-    const bannedIP = await this.bannedIPRepository.findOne({ where: { ip } });
+    const bannedIP = await this.bannedIPRepository
+      .createQueryBuilder('b')
+      .where('b.ip = :ip', { ip })
+      .andWhere('b.unbannedAt IS NULL')
+      .getOne();
 
     if (!bannedIP) {
       throw new NotFoundException('该IP未被封禁');
     }
 
-    await this.bannedIPRepository.delete(bannedIP.id);
+    await this.bannedIPRepository.update(bannedIP.id, { unbannedAt: new Date() });
 
-    // 审计日志：IP 解封
     this.auditService.log({
       action: 'ip_unban',
       userId: user.id,
@@ -238,10 +262,10 @@ export class AdminService {
   }
 
   async cleanupExpiredBans(): Promise<void> {
-    await this.bannedIPRepository.delete({
-      isPermanent: false,
-      expiresAt: LessThan(new Date()),
-    });
+    await this.bannedIPRepository.update(
+      { isPermanent: false, expiresAt: LessThan(new Date()), unbannedAt: IsNull() },
+      { unbannedAt: new Date() },
+    );
   }
 
   async getAllFiles(page = 1, limit = 20, keyword?: string, userId?: string, sortBy?: string, sortOrder?: string, cursor?: string): Promise<{ files: File[]; total: number; nextCursor?: string | null }> {
@@ -1022,22 +1046,32 @@ export class AdminService {
     const [
       [banCounts],
       recentBans,
-      unbanAuditCount,
+      banHistory,
+      unbanCount,
     ] = await Promise.all([
       this.bannedIPRepository
         .createQueryBuilder('b')
         .select([
           'COUNT(*)::int as "totalBanned"',
-          'SUM(CASE WHEN b."isPermanent" = false AND (b."expiresAt" IS NULL OR b."expiresAt" > NOW()) THEN 1 ELSE 0 END)::int as "activeTemporary"',
-          'SUM(CASE WHEN b."isPermanent" = true THEN 1 ELSE 0 END)::int as "permanentBans"',
+          'SUM(CASE WHEN b.unbannedAt IS NOT NULL THEN 1 ELSE 0 END)::int as "historicalBans"',
+          'SUM(CASE WHEN b.unbannedAt IS NULL AND (b.isPermanent = true OR b.expiresAt > NOW()) THEN 1 ELSE 0 END)::int as "activeBans"',
+          'SUM(CASE WHEN b.unbannedAt IS NULL AND b.isPermanent = true THEN 1 ELSE 0 END)::int as "permanentBans"',
         ])
-        .getRawMany<{ totalBanned: string; activeTemporary: string; permanentBans: string }>(),
+        .getRawMany<{ totalBanned: string; historicalBans: string; activeBans: string; permanentBans: string }>(),
       this.bannedIPRepository
         .createQueryBuilder('b')
-        .select(['b.ip', 'b.reason', 'b."isPermanent"', 'b."createdAt"'])
-        .orderBy('b."createdAt"', 'DESC')
-        .limit(10)
-        .getRawMany<{ b_ip: string; b_reason: string | null; b_isPermanent: boolean; b_createdAt: Date }>(),
+        .select(['b.ip', 'b.reason', 'b.isPermanent', 'b.createdAt', 'b.expiresAt'])
+        .where('b.unbannedAt IS NULL')
+        .orderBy('b.createdAt', 'DESC')
+        .limit(20)
+        .getRawMany<{ b_ip: string; b_reason: string | null; b_isPermanent: boolean; b_createdAt: Date; b_expiresAt: Date | null }>(),
+      this.bannedIPRepository
+        .createQueryBuilder('b')
+        .select(['b.ip', 'b.reason', 'b.isPermanent', 'b.createdAt', 'b.unbannedAt'])
+        .where('b.unbannedAt IS NOT NULL')
+        .orderBy('b.unbannedAt', 'DESC')
+        .limit(20)
+        .getRawMany<{ b_ip: string; b_reason: string | null; b_isPermanent: boolean; b_createdAt: Date; b_unbannedAt: Date }>(),
       this.auditLogRepo
         .createQueryBuilder('a')
         .where('a.action = :action', { action: 'ip_unban' })
@@ -1045,24 +1079,33 @@ export class AdminService {
     ]);
 
     const permanentBans = Number(banCounts?.permanentBans || 0);
-    const activeTemporary = Number(banCounts?.activeTemporary || 0);
+    const activeBans = Number(banCounts?.activeBans || 0);
     const totalBanned = Number(banCounts?.totalBanned || 0);
-    const temporaryBans = totalBanned - permanentBans;
-    const unbanCount = unbanAuditCount;
-    const totalActions = totalBanned + unbanCount;
-    const unbanRatio = totalActions > 0
-      ? parseFloat(((unbanCount / totalActions) * 100).toFixed(2))
+    const historicalBans = Number(banCounts?.historicalBans || 0);
+    const unbanTotal = totalBanned + unbanCount;
+    const unbanRatio = unbanTotal > 0
+      ? parseFloat(((unbanCount / unbanTotal) * 100).toFixed(2))
       : 0;
 
     return {
       totalBanned,
-      activeBans: permanentBans + activeTemporary,
+      activeBans,
       permanentBans,
-      temporaryBans,
+      temporaryBans: activeBans - permanentBans,
+      historicalBans,
       recentBans: recentBans.map((r) => ({
         ip: r.b_ip,
         reason: r.b_reason || null,
+        isPermanent: r.b_isPermanent,
         createdAt: r.b_createdAt,
+        expiresAt: r.b_expiresAt,
+      })),
+      banHistory: banHistory.map((r) => ({
+        ip: r.b_ip,
+        reason: r.b_reason || null,
+        isPermanent: r.b_isPermanent,
+        createdAt: r.b_createdAt,
+        unbannedAt: r.b_unbannedAt,
       })),
       unbanRatio,
     };
