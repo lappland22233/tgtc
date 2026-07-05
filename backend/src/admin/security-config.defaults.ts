@@ -25,6 +25,17 @@ export const SEC_CONFIG_KEYS = {
   DOWNLOAD_THRESHOLD: 'sec_download_count',
   DOWNLOAD_WINDOW_HOURS: 'sec_download_window',
   DOWNLOAD_BAN_DURATION_HOURS: 'sec_download_ban_duration',
+
+  // --- 流量与限流 ---
+  DOWNLOAD_RATE_LIMIT: 'sec_download_rate_limit',
+  DOWNLOAD_RATE_WINDOW: 'sec_download_rate_window',
+  DOWNLOAD_RATE_BAN: 'sec_download_rate_ban',
+  LOGIN_MAX_FAILURES: 'sec_login_max_failures',
+  LOGIN_LOCK_DURATION: 'sec_login_lock_duration',
+  CODE_MAX_ERRORS: 'sec_code_max_errors',
+  PWD_ERROR_LIMIT: 'sec_pwd_error_limit',
+  PWD_BAN_DURATION: 'sec_pwd_ban_duration',
+  SEARCH_RATE_LIMIT: 'sec_search_rate_limit',
 } as const;
 
 /** 安全配置项的后端默认值（硬编码回退） */
@@ -46,6 +57,17 @@ export const SEC_CONFIG_DEFAULTS: Record<string, string> = {
   [SEC_CONFIG_KEYS.DOWNLOAD_THRESHOLD]: '1000',
   [SEC_CONFIG_KEYS.DOWNLOAD_WINDOW_HOURS]: '24',
   [SEC_CONFIG_KEYS.DOWNLOAD_BAN_DURATION_HOURS]: '6',
+
+  // --- 流量与限流默认值 ---
+  [SEC_CONFIG_KEYS.DOWNLOAD_RATE_LIMIT]: '10',
+  [SEC_CONFIG_KEYS.DOWNLOAD_RATE_WINDOW]: '60',
+  [SEC_CONFIG_KEYS.DOWNLOAD_RATE_BAN]: '1',
+  [SEC_CONFIG_KEYS.LOGIN_MAX_FAILURES]: '5',
+  [SEC_CONFIG_KEYS.LOGIN_LOCK_DURATION]: '15',
+  [SEC_CONFIG_KEYS.CODE_MAX_ERRORS]: '5',
+  [SEC_CONFIG_KEYS.PWD_ERROR_LIMIT]: '5',
+  [SEC_CONFIG_KEYS.PWD_BAN_DURATION]: '5',
+  [SEC_CONFIG_KEYS.SEARCH_RATE_LIMIT]: '30',
 };
 
 /** 安全配置前端展示元数据 */
@@ -172,5 +194,79 @@ export const SEC_CONFIG_META: SecurityConfigMeta[] = [
     type: 'number', min: 1, max: 168, step: 1,
     unit: '小时',
     category: '异常下载检测',
+  },
+
+  // --- 流量与限流 ---
+  {
+    key: SEC_CONFIG_KEYS.DOWNLOAD_RATE_LIMIT,
+    label: '下载频率上限',
+    description: '同一 IP 每分钟允许的最大下载次数',
+    type: 'number', min: 1, max: 200, step: 1,
+    unit: '次/分钟',
+    category: '流量与限流',
+  },
+  {
+    key: SEC_CONFIG_KEYS.DOWNLOAD_RATE_WINDOW,
+    label: '下载限流窗口',
+    description: '下载次数计数的滑动窗口',
+    type: 'number', min: 10, max: 600, step: 10,
+    unit: '秒',
+    category: '流量与限流',
+  },
+  {
+    key: SEC_CONFIG_KEYS.DOWNLOAD_RATE_BAN,
+    label: '下载超限封禁时长',
+    description: '超出下载频率上限后的自动封禁时长',
+    type: 'number', min: 1, max: 60, step: 1,
+    unit: '分钟',
+    category: '流量与限流',
+  },
+  {
+    key: SEC_CONFIG_KEYS.LOGIN_MAX_FAILURES,
+    label: '登录失败上限',
+    description: '窗口内登录失败超过此次数触发锁定',
+    type: 'number', min: 3, max: 20, step: 1,
+    unit: '次',
+    category: '流量与限流',
+  },
+  {
+    key: SEC_CONFIG_KEYS.LOGIN_LOCK_DURATION,
+    label: '登录锁定时长',
+    description: '登录失败超限后的锁定时间',
+    type: 'number', min: 5, max: 120, step: 5,
+    unit: '分钟',
+    category: '流量与限流',
+  },
+  {
+    key: SEC_CONFIG_KEYS.CODE_MAX_ERRORS,
+    label: '验证码错误上限',
+    description: '验证码连续错误超过此次数触发锁定',
+    type: 'number', min: 3, max: 10, step: 1,
+    unit: '次',
+    category: '流量与限流',
+  },
+  {
+    key: SEC_CONFIG_KEYS.PWD_ERROR_LIMIT,
+    label: '密码错误上限',
+    description: '文件密码连续错误超过此次数触发 IP 封禁',
+    type: 'number', min: 3, max: 20, step: 1,
+    unit: '次',
+    category: '流量与限流',
+  },
+  {
+    key: SEC_CONFIG_KEYS.PWD_BAN_DURATION,
+    label: '密码错误封禁时长',
+    description: '密码错误超限后的 IP 封禁时长',
+    type: 'number', min: 1, max: 60, step: 1,
+    unit: '分钟',
+    category: '流量与限流',
+  },
+  {
+    key: SEC_CONFIG_KEYS.SEARCH_RATE_LIMIT,
+    label: '搜索频率上限',
+    description: '同一 IP 每分钟允许的最大文件搜索次数',
+    type: 'number', min: 10, max: 200, step: 5,
+    unit: '次/分钟',
+    category: '流量与限流',
   },
 ];

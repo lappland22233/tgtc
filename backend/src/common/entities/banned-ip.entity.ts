@@ -22,6 +22,9 @@ export class BannedIP {
   @Column({ nullable: true, type: 'timestamp' })
   expiresAt: Date | null;
 
+  @Column({ nullable: true, type: 'timestamp', name: 'unbanned_at' })
+  unbannedAt: Date | null;
+
   @CreateDateColumn()
   createdAt: Date;
 }

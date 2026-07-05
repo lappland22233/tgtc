@@ -17,13 +17,10 @@ import { BCRYPT_ROUNDS } from '../common/constants/bcrypt';
 
 @Injectable()
 export class AuthService {
-  private readonly LOGIN_MAX_FAILURES = 5;
-  private readonly LOGIN_LOCK_DURATION = 15 * 60 * 1000; // 15 分钟
-  private readonly LOGIN_WINDOW = 15 * 60 * 1000; // 15 分钟窗口
-
-  private readonly CODE_MAX_ERRORS = 5;
-  private readonly CODE_LOCK_DURATION = 5 * 60 * 1000; // 5 分钟
-  private readonly CODE_WINDOW = 10 * 60 * 1000; // 10 分钟窗口
+  /** 从安全配置动态读取限流阈值（热更新），不存在时回退到硬编码默认值 */
+  private async getLoginMaxFailures(): Promise<number> { return Number(await this.configCacheService.get('sec_login_max_failures', '5')) || 5; }
+  private async getLoginLockDuration(): Promise<number> { return (Number(await this.configCacheService.get('sec_login_lock_duration', '15')) || 15) * 60 * 1000; }
+  private async getCodeMaxErrors(): Promise<number> { return Number(await this.configCacheService.get('sec_code_max_errors', '5')) || 5; }
 
   constructor(
     @InjectRepository(User)
@@ -171,9 +168,11 @@ export class AuthService {
     });
 
     if (!user) {
+      const loginMaxFailures = await this.getLoginMaxFailures();
+      const loginLockDuration = await this.getLoginLockDuration();
       const result = await this.rateLimitService.checkAndIncrement(
         loginLimitKey, 'login_failure',
-        this.LOGIN_MAX_FAILURES, this.LOGIN_LOCK_DURATION, this.LOGIN_WINDOW,
+        loginMaxFailures, loginLockDuration, loginLockDuration,
       );
       // 审计日志：登录失败（用户不存在）
       this.auditService.log({
@@ -202,16 +201,18 @@ export class AuthService {
     const isPasswordValid = await bcrypt.compare(loginDto.password, user.password);
 
     if (!isPasswordValid) {
+      const loginMaxFailures2 = await this.getLoginMaxFailures();
+      const loginLockDuration2 = await this.getLoginLockDuration();
       const result = await this.rateLimitService.checkAndIncrement(
         loginLimitKey, 'login_failure',
-        this.LOGIN_MAX_FAILURES, this.LOGIN_LOCK_DURATION, this.LOGIN_WINDOW,
+        loginMaxFailures2, loginLockDuration2, loginLockDuration2,
       );
       // 审计日志：登录失败（密码错误）
       this.auditService.log({
         action: 'login_failed',
         userId: user.id,
         ip,
-        metadata: { reason: '密码错误', attempts: this.LOGIN_MAX_FAILURES },
+        metadata: { reason: '密码错误', attempts: loginMaxFailures2 },
         status: AuditStatus.FAILURE,
       });
       if (!result.allowed) {
@@ -364,9 +365,10 @@ export class AuthService {
     if (!result.affected || result.affected === 0) {
       // 验证码无效时才进行限流检查（避免攻击者耗尽正常用户配额）
       const codeLimitKey = `code:${email}:${type}`;
+      const codeMaxErrors = await this.getCodeMaxErrors();
       const limitResult = await this.rateLimitService.checkAndIncrement(
         codeLimitKey, 'code_error',
-        this.CODE_MAX_ERRORS, this.CODE_LOCK_DURATION, this.CODE_WINDOW,
+        codeMaxErrors, 5 * 60 * 1000, 10 * 60 * 1000,
       );
       if (!limitResult.allowed) {
         throw new BadRequestException(`验证码错误次数过多，请 ${limitResult.waitMinutes} 分钟后重试`);
