@@ -16,6 +16,7 @@
 - 拖拽上传 / 弹窗批量上传
 - Multer 层 500MB 硬上限 + 业务层动态大小限制
 - 文件列表搜索、分页、类型筛选（分页/搜索参数持久化到 URL）
+- **标签管理**：创建/编辑/删除标签，支持多标签筛选（AND 逻辑），文件列表快捷编辑标签
 - 设置公开/私有、访问次数限制、分享有效期（含过期检查）
 - 批量勾选图片一键生成 Markdown 链接
 - 后端代理下载（不暴露 Telegram 原始 URL），使用流式传输
@@ -59,18 +60,23 @@
 |------|------|
 | 后端 | NestJS 10 + TypeScript (CommonJS, strict mode) + TypeORM 0.3 |
 | 数据库 | PostgreSQL ≥ 14 |
+| 消息队列 | Bull 4.x + Redis |
 | 前端 | Vue 3 + TypeScript + Vite 5 + TDesign + ECharts 6 |
 | 存储 | Telegram Bot API（支持本地代理绕过限流） |
 | 邮件 | Nodemailer + SMTP |
 | 认证 | Passport JWT + bcryptjs |
+| 实时推送 | Socket.IO 4.x（告警 WebSocket） |
 | 状态管理 | Pinia |
 | 路由 | Vue Router 4 |
+| 仪表盘布局 | vue-grid-layout 2.4+ |
 
 ## 快速开始
 
-**环境要求**：Node.js ≥ 18, PostgreSQL ≥ 14, Telegram Bot Token
+**环境要求**：Node.js ≥ 18, PostgreSQL ≥ 14, Redis, Telegram Bot Token
 
 ```bash
+# 确保 Redis 正在运行（Bull 消息队列依赖）
+
 # 后端
 cd backend
 cp .env.example .env   # 编辑数据库、JWT、Telegram、SMTP 配置
@@ -85,6 +91,7 @@ npm run dev            # 默认 http://localhost:5173
 
 **生产部署**：
 ```bash
+# 确保 Redis 正在运行
 cd frontend && npm run build
 cd ../backend && npm run build && npm run start:prod
 # 后端直接服务前端静态文件，单端口部署
@@ -107,6 +114,12 @@ DB_MIGRATIONS_RUN=false       # 启动时自动执行迁移
 JWT_SECRET=your-random-secret
 JWT_EXPIRES_IN=7d
 
+# Redis（Bull 消息队列）
+REDIS_HOST=localhost
+REDIS_PORT=6379
+# REDIS_PASSWORD=  # 可选：Redis 密码
+# REDIS_DB=0
+
 # Telegram Bot（支持本地 API 代理）
 TELEGRAM_BOT_TOKEN=your_bot_token
 TELEGRAM_CHAT_ID=your_chat_id
@@ -119,6 +132,8 @@ SMTP_SECURE=false
 SMTP_USER=your_email@example.com
 SMTP_PASSWORD=your_password
 SMTP_FROM=noreply@example.com
+# SMTP_ENCRYPTION_KEY=your-encryption-key  # 必需：SMTP 密码 AES-256-CBC 加密密钥，未配置时启动报错
+# SMTP_ENCRYPTION_SALT=smtp-encryption-salt  # 可选：加密盐
 
 # 应用
 APP_HOST=0.0.0.0
@@ -126,6 +141,8 @@ APP_PORT=3000
 APP_URL=http://localhost:3000
 FRONTEND_URL=http://localhost:5173
 CORS_ORIGINS=http://localhost:5173
+# SECURE_COOKIE=true  # 生产 HTTPS 环境启用 Cookie secure 标志
+# TOKEN_EXTRACTION_MODE=both  # both（Cookie + Bearer）或 cookie_only
 
 # 上传（启动后可从管理面板动态调整）
 MAX_FILE_SIZE=20971520
@@ -151,13 +168,15 @@ AUDIT_LOG_RETENTION_DAYS=90    # 审计日志保留天数
 │   ├── admin/                # 用户/文件/IP封禁/系统配置管理/仪表盘/访问统计/审计日志
 │   ├── alert/                # 告警模块（规则评估 + WebSocket 推送）
 │   ├── jobs/                 # Bull 任务队列（指标聚合/攻击检测/告警评估/基线计算/数据归档）
+│   ├── tag/                 # 标签模块（CRUD + 文件关联）
 │   ├── security/             # 行为异常检测（6 种异常模式）
 │   ├── telegram/             # Telegram Bot API 上传下载（流式传输，Token 脱敏）
 │   ├── mailer/               # SMTP 邮件
 │   ├── config/               # 动态配置缓存
 │   ├── tasks/                # 定时清理（限流/Token/封禁/访问日志/审计日志）
 │   ├── common/
-│   │   ├── entities/         # 13 个数据实体
+│   │   ├── entities/         # 14 个数据实体
+│   │   ├── services/         # ConfigCacheService + RateLimitService + AuditService
 │   │   ├── services/         # ConfigCacheService + RateLimitService + AuditService
 │   │   ├── guards/           # JWT 认证 + 角色权限守卫
 │   │   ├── decorators/       # @CurrentUser @Roles
@@ -165,7 +184,7 @@ AUDIT_LOG_RETENTION_DAYS=90    # 审计日志保留天数
 │   │   ├── middleware/       # AccessLogMiddleware（全局 HTTP 请求日志）
 │   │   ├── utils/            # client-ip.ts crypto.util.ts
 │   ├── database/             # TypeORM CLI DataSource
-│   └── migrations/           # 16 个数据库迁移文件
+│   └── migrations/           # 17 个数据库迁移文件
 │
 ├── frontend/src/
 │   ├── views/
@@ -173,9 +192,9 @@ AUDIT_LOG_RETENTION_DAYS=90    # 审计日志保留天数
 │   │   ├── user/             # Dashboard FileList Settings
 │   │   ├── admin/            # Dashboard Users Files Config AccessLogs AuditLogs SourceAnalysis UserActivity BandwidthAnalysis FileTypeAnalysis AlertManagement SecurityMonitor DashboardCustomizer
 │   │   └── layout/           # 侧边栏布局
-│   ├── components/           # UploadModal ThumbnailImg AlertBanner
-│   ├── composables/          # useAutoRefresh useCursorPagination useTimeRange
-│   ├── stores/               # auth files (Pinia)
+│   ├── components/           # UploadModal ThumbnailImg TagManager FileTagEditor
+│   ├── composables/          # useAutoRefresh useCursorPagination useTimeRange useMobile
+│   ├── stores/               # auth files tags (Pinia)
 │   ├── router/               # 四级路由守卫链 + redirect 安全校验
 │   ├── api/                  # axios 客户端（30s 超时，401 防抖）
 │   ├── types/                # TS 类型定义
@@ -244,6 +263,12 @@ npm run typecheck            # TypeScript 类型检查
 | PUT | `/api/files/:id/expires` | 有效期 |
 | POST | `/api/files/batch-markdown` | 批量 Markdown |
 | GET | `/api/files/public-key` | RSA-OAEP 加密公钥 |
+| GET | `/api/tags` | 用户标签列表（含文件计数） |
+| POST | `/api/tags` | 创建标签 |
+| PUT | `/api/tags/:id` | 更新标签 |
+| DELETE | `/api/tags/:id` | 删除标签 |
+| PUT | `/api/files/:id/tags` | 批量设置文件标签 |
+| DELETE | `/api/files/:id/tags/:tagId` | 移除文件标签 |
 
 ### Admin / Super Admin
 | 方法 | 路径 | 说明 |

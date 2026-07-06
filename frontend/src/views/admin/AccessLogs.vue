@@ -210,6 +210,7 @@
           @enter="onFilterChange"
           @clear="onFilterChange"
           autocomplete="off"
+          name="access-filter-path"
         />
         <t-select
           v-model="filterStatus"
@@ -232,7 +233,9 @@
         <t-button variant="outline" @click="onRefresh">刷新</t-button>
       </div>
 
+      <!-- Desktop table -->
       <t-table
+        v-if="!isMobile"
         :data="logs"
         :columns="columns"
         :loading="loading"
@@ -272,6 +275,37 @@
           {{ formatTime(row.createdAt) }}
         </template>
       </t-table>
+
+      <!-- Mobile cards -->
+      <div v-if="isMobile" class="mobile-card-list">
+        <t-loading :loading="loading" size="small">
+          <div v-if="logs.length === 0 && !loading" class="empty-hint">暂无数据</div>
+          <div v-for="item in logs" :key="item.id" class="mobile-access-card">
+            <div class="mobile-access-header">
+              <code class="mobile-access-ip">{{ item.ip }}</code>
+              <div style="display: flex; gap: 6px; align-items: center;">
+                <t-tag :theme="methodTheme(item.method)" variant="outline" size="small">{{ item.method }}</t-tag>
+                <t-tag :theme="statusTheme(item.statusCode)" variant="light" size="small">{{ item.statusCode }}</t-tag>
+              </div>
+            </div>
+            <div class="mobile-access-path">{{ truncatePath(item.path, 60) }}</div>
+            <div class="mobile-access-meta">
+              <span>{{ item.duration }}ms</span>
+              <span>{{ formatSizeUtil(item.responseSize) }}</span>
+              <span style="color: var(--text-secondary); font-size: 11px;">{{ formatTime(item.createdAt) }}</span>
+            </div>
+          </div>
+          <div v-if="logs.length > 0" style="margin-top: 12px; display: flex; justify-content: center;">
+            <t-pagination
+              :current="pagination.current"
+              :total="pagination.total"
+              :page-size="pagination.pageSize"
+              size="small"
+              @change="onPageChange"
+            />
+          </div>
+        </t-loading>
+      </div>
     </div>
       </t-tab-panel>
 
@@ -299,6 +333,7 @@ import { formatSize as formatSizeUtil, getFileEmoji } from '@/utils/format';
 import SourceAnalysis from './SourceAnalysis.vue';
 import BandwidthAnalysis from './BandwidthAnalysis.vue';
 import FileTypeAnalysis from './FileTypeAnalysis.vue';
+import { useMobile } from '../../composables/useMobile';
 
 // Top-level tab state
 const accessTab = ref('overview');
@@ -426,6 +461,15 @@ const trendChartRef = ref<HTMLDivElement | null>(null);
 const pieChartRef = ref<HTMLDivElement | null>(null);
 let trendChart: echarts.ECharts | null = null;
 let pieChart: echarts.ECharts | null = null;
+
+const isMobile = useMobile();
+
+// ECharts resize handling for mobile
+const handleResize = () => {
+  trendChart?.resize();
+  pieChart?.resize();
+};
+watch(isMobile, () => { nextTick(() => setTimeout(handleResize, 100)); });
 
 // Auto-refresh
 const autoRefreshInterval = ref(0);
@@ -829,6 +873,10 @@ onUnmounted(() => {
   trendChart?.dispose();
   pieChart?.dispose();
 });
+
+// Resize handler for ECharts on mobile
+onMounted(() => window.addEventListener('resize', handleResize));
+onUnmounted(() => window.removeEventListener('resize', handleResize));
 </script>
 
 <style scoped>
@@ -1096,5 +1144,50 @@ onUnmounted(() => {
   .metrics-grid {
     grid-template-columns: 1fr;
   }
+}
+
+/* Mobile access card */
+.mobile-card-list {
+  min-height: 100px;
+}
+
+.mobile-access-card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 10px;
+}
+
+.mobile-access-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.mobile-access-ip {
+  font-family: 'Courier New', monospace;
+  font-size: 13px;
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.04);
+  padding: 2px 6px;
+  border-radius: 3px;
+}
+
+.mobile-access-path {
+  font-family: 'Courier New', monospace;
+  font-size: 12px;
+  color: var(--text-secondary);
+  word-break: break-all;
+  margin-bottom: 8px;
+  line-height: 1.5;
+}
+
+.mobile-access-meta {
+  display: flex;
+  gap: 16px;
+  font-size: 12px;
+  color: var(--text-primary);
 }
 </style>

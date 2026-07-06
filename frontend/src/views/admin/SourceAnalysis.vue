@@ -42,21 +42,34 @@
             <!-- Section B: Top Referrers -->
             <div class="card section-card">
               <h3>Top Referrers</h3>
-              <t-table
-                :data="topReferersWithPct"
-                :columns="refererColumns"
-                row-key="referer"
-                table-layout="fixed"
-                :pagination="false"
-                size="small"
-                max-height="400"
-              >
-                <template #referer="{ row }">
-                  <t-tooltip placement="top" :content="row.referer">
-                    <span class="truncated-url">{{ row.referer }}</span>
-                  </t-tooltip>
-                </template>
-              </t-table>
+              <div v-if="!isMobile && topReferersWithPct.length > 0">
+                <t-table
+                  :data="topReferersWithPct"
+                  :columns="refererColumns"
+                  row-key="referer"
+                  table-layout="fixed"
+                  :pagination="false"
+                  size="small"
+                  max-height="400"
+                >
+                  <template #referer="{ row }">
+                    <t-tooltip placement="top" :content="row.referer">
+                      <span class="truncated-url">{{ row.referer }}</span>
+                    </t-tooltip>
+                  </template>
+                </t-table>
+              </div>
+              <div v-if="isMobile && topReferersWithPct.length > 0" class="mobile-card-list">
+                <div v-for="ref in topReferersWithPct" :key="ref.referer" class="mobile-card">
+                  <div class="mobile-card-row">
+                    <strong>{{ ref.referer.substring(0, 40) }}{{ ref.referer.length > 40 ? '...' : '' }}</strong>
+                  </div>
+                  <div class="mobile-card-meta">
+                    <span>{{ ref.count }} 次</span>
+                    <span>{{ ref.percentage }}</span>
+                  </div>
+                </div>
+              </div>
               <div v-if="!refererData.topReferers.length" class="empty-hint">暂无数据</div>
             </div>
 
@@ -66,19 +79,29 @@
               class="card section-card"
             >
               <h3>搜索关键词</h3>
-              <t-table
-                :data="refererData.topKeywords"
-                :columns="keywordColumns"
-                row-key="keyword"
-                table-layout="fixed"
-                :pagination="false"
-                size="small"
-                max-height="400"
-              >
-                <template #count="{ row }">
-                  {{ formatNumber(row.count) }}
-                </template>
-              </t-table>
+              <div v-if="!isMobile">
+                <t-table
+                  :data="refererData.topKeywords"
+                  :columns="keywordColumns"
+                  row-key="keyword"
+                  table-layout="fixed"
+                  :pagination="false"
+                  size="small"
+                  max-height="400"
+                >
+                  <template #count="{ row }">
+                    {{ formatNumber(row.count) }}
+                  </template>
+                </t-table>
+              </div>
+              <div v-if="isMobile" class="mobile-card-list">
+                <div v-for="kw in refererData.topKeywords" :key="kw.keyword" class="mobile-card">
+                  <div class="mobile-card-row">
+                    <strong>{{ kw.keyword }}</strong>
+                    <span>{{ formatNumber(kw.count) }} 次</span>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
           <div v-else-if="!refererLoading" class="empty-hint">暂无来源数据</div>
@@ -92,38 +115,66 @@
             <!-- Section A: 浏览器分布 -->
             <div class="section-card">
               <div class="section-title">浏览器分布</div>
-              <t-table
-                :data="uaData.browsers"
-                :columns="browserColumns"
-                row-key="name"
-                table-layout="fixed"
-                :pagination="false"
-                size="small"
-                max-height="300"
-              >
-                <template #percentage="{ row }">
-                  {{ row.percentage.toFixed(1) }}%
-                </template>
-              </t-table>
+              <div v-if="!isMobile && uaData.browsers.length > 0">
+                <t-table
+                  :data="uaData.browsers"
+                  :columns="browserColumns"
+                  row-key="name"
+                  table-layout="fixed"
+                  :pagination="false"
+                  size="small"
+                  max-height="300"
+                >
+                  <template #percentage="{ row }">
+                    {{ row.percentage.toFixed(1) }}%
+                  </template>
+                </t-table>
+              </div>
+              <div v-if="isMobile && uaData.browsers.length > 0" class="mobile-card-list">
+                <div v-for="b in uaData.browsers" :key="b.name + b.version" class="mobile-card">
+                  <div class="mobile-card-row">
+                    <strong>{{ b.name }}</strong>
+                    <span>{{ b.percentage.toFixed(1) }}%</span>
+                  </div>
+                  <div class="mobile-card-meta">
+                    <span>v{{ b.version }}</span>
+                    <span>{{ b.count }} 次</span>
+                  </div>
+                </div>
+              </div>
               <div v-if="!uaData.browsers.length" class="empty-hint">暂无浏览器数据</div>
             </div>
 
             <!-- Section B: 操作系统 -->
             <div class="section-card">
               <div class="section-title">操作系统</div>
-              <t-table
-                :data="uaData.os"
-                :columns="osColumns"
-                row-key="name"
-                table-layout="fixed"
-                :pagination="false"
-                size="small"
-                max-height="300"
-              >
-                <template #percentage="{ row }">
-                  {{ row.percentage.toFixed(1) }}%
-                </template>
-              </t-table>
+              <div v-if="!isMobile && uaData.os.length > 0">
+                <t-table
+                  :data="uaData.os"
+                  :columns="osColumns"
+                  row-key="name"
+                  table-layout="fixed"
+                  :pagination="false"
+                  size="small"
+                  max-height="300"
+                >
+                  <template #percentage="{ row }">
+                    {{ row.percentage.toFixed(1) }}%
+                  </template>
+                </t-table>
+              </div>
+              <div v-if="isMobile && uaData.os.length > 0" class="mobile-card-list">
+                <div v-for="o in uaData.os" :key="o.name + o.version" class="mobile-card">
+                  <div class="mobile-card-row">
+                    <strong>{{ o.name }}</strong>
+                    <span>{{ o.percentage.toFixed(1) }}%</span>
+                  </div>
+                  <div class="mobile-card-meta">
+                    <span>v{{ o.version }}</span>
+                    <span>{{ o.count }} 次</span>
+                  </div>
+                </div>
+              </div>
               <div v-if="!uaData.os.length" class="empty-hint">暂无操作系统数据</div>
             </div>
 
@@ -155,9 +206,10 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue';
+import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue';
 import * as echarts from 'echarts';
 import { api } from '@/stores/auth';
+import { useMobile } from '../../composables/useMobile';
 
 // --- Types ---
 
@@ -218,6 +270,7 @@ const refererLoading = ref(false);
 const uaLoading = ref(false);
 const refererData = ref<RefererAnalysisResponse | null>(null);
 const uaData = ref<UserAgentAnalysisResponse | null>(null);
+const isMobile = useMobile();
 
 // Top referers with computed percentage
 const topReferersWithPct = computed(() => {
@@ -445,13 +498,21 @@ function formatNumber(n: number): string {
 
 // --- Lifecycle ---
 
+const handleResize = () => { resizeAllCharts(); };
+
+watch(isMobile, () => {
+  nextTick(() => setTimeout(handleResize, 100));
+});
+
 onMounted(() => {
   fetchAll();
+  window.addEventListener('resize', handleResize);
 });
 
 onUnmounted(() => {
   refererCategoryChart?.dispose();
   deviceChart?.dispose();
+  window.removeEventListener('resize', handleResize);
 });
 
 defineExpose({ resizeAllCharts });
@@ -645,6 +706,40 @@ defineExpose({ resizeAllCharts });
 
   .chart-pie {
     max-width: 100%;
+  }
+
+  .mobile-card {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 12px;
+    margin-bottom: 10px;
+  }
+
+  .mobile-card-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 6px;
+  }
+
+  .mobile-card-body {
+    font-size: 13px;
+    color: var(--text-secondary);
+    margin-bottom: 8px;
+    line-height: 1.5;
+  }
+
+  .mobile-card-meta {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+
+  .mobile-single-col {
+    grid-template-columns: 1fr !important;
   }
 }
 </style>

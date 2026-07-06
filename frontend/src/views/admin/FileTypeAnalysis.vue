@@ -6,7 +6,7 @@
     </div>
 
     <!-- Time Range Selector -->
-    <div class="toolbar">
+    <div class="toolbar" :class="{ 'toolbar-row': isMobile }">
       <t-radio-group v-model="timeRange" variant="default-filled" @change="fetchData">
         <t-radio-button value="1h">1小时</t-radio-button>
         <t-radio-button value="24h">24小时</t-radio-button>
@@ -17,7 +17,7 @@
 
     <t-loading :loading="loading" size="small">
       <template v-if="data">
-        <div class="charts-row">
+        <div class="charts-row" :class="{ 'mobile-single-col': isMobile }">
           <!-- Pie Chart -->
           <div class="card" style="flex: 1; min-width: 340px;">
             <h3>文件类型分布</h3>
@@ -27,31 +27,52 @@
           <!-- File Type Table -->
           <div class="card" style="flex: 1; min-width: 340px;">
             <h3>类型详情</h3>
-            <t-table
-              :data="data.categories"
-              :columns="typeColumns"
-              row-key="name"
-              table-layout="fixed"
-              :pagination="false"
-              size="small"
-            >
-              <template #name="{ row }">
-                <t-tag
-                  :style="{ background: getColor(row.name), borderColor: getColor(row.name) }"
-                  variant="light"
-                  size="small"
-                >
-                  {{ getLabel(row.name) }}
-                </t-tag>
-              </template>
-              <template #totalSize="{ row }">
-                {{ formatSize(Number(row.totalSize)) }}
-              </template>
-              <template #percentage="{ row }">
-                {{ row.percentage.toFixed(1) }}%
-              </template>
-            </t-table>
-            <div v-if="!data.categories.length" class="empty-hint">暂无数据</div>
+            <div v-if="!isMobile">
+              <t-table
+                :data="data.categories"
+                :columns="typeColumns"
+                row-key="name"
+                table-layout="fixed"
+                :pagination="false"
+                size="small"
+              >
+                <template #name="{ row }">
+                  <t-tag
+                    :style="{ background: getColor(row.name), borderColor: getColor(row.name) }"
+                    variant="light"
+                    size="small"
+                  >
+                    {{ getLabel(row.name) }}
+                  </t-tag>
+                </template>
+                <template #totalSize="{ row }">
+                  {{ formatSize(Number(row.totalSize)) }}
+                </template>
+                <template #percentage="{ row }">
+                  {{ row.percentage.toFixed(1) }}%
+                </template>
+              </t-table>
+              <div v-if="!data.categories.length" class="empty-hint">暂无数据</div>
+            </div>
+            <div v-if="isMobile">
+              <div v-for="row in data.categories" :key="row.name" class="mobile-card">
+                <div class="mobile-card-header">
+                  <t-tag
+                    :style="{ background: getColor(row.name), borderColor: getColor(row.name) }"
+                    variant="light"
+                    size="small"
+                  >
+                    {{ getLabel(row.name) }}
+                  </t-tag>
+                  <span>{{ row.percentage.toFixed(1) }}%</span>
+                </div>
+                <div class="mobile-card-meta">
+                  <span>{{ row.fileCount }} 个文件</span>
+                  <span>{{ formatSize(Number(row.totalSize)) }}</span>
+                </div>
+              </div>
+              <div v-if="!data.categories.length" class="empty-hint">暂无数据</div>
+            </div>
           </div>
         </div>
       </template>
@@ -61,10 +82,11 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, nextTick } from 'vue';
+import { ref, watch, onMounted, onUnmounted, nextTick } from 'vue';
 import * as echarts from 'echarts';
 import { api } from '@/stores/auth';
 import { formatSize } from '@/utils/format';
+import { useMobile } from '../../composables/useMobile';
 
 interface FileTypeResponse {
   categories: { name: string; fileCount: number; totalSize: string; percentage: number }[];
@@ -101,6 +123,7 @@ const data = ref<FileTypeResponse | null>(null);
 
 const chartRef = ref<HTMLDivElement | null>(null);
 let chart: echarts.ECharts | null = null;
+const isMobile = useMobile();
 
 const typeColumns = [
   { colKey: 'name', title: '类型', width: 100 },
@@ -108,6 +131,14 @@ const typeColumns = [
   { colKey: 'totalSize', title: '总大小', width: 120 },
   { colKey: 'percentage', title: '占比', width: 80 },
 ];
+
+const handleResize = () => {
+  chart?.resize();
+};
+
+watch(isMobile, () => {
+  nextTick(() => setTimeout(handleResize, 100));
+});
 
 function renderChart() {
   if (!chartRef.value) return;
@@ -171,11 +202,13 @@ async function fetchData() {
 
 onMounted(() => {
   fetchData();
+  window.addEventListener('resize', handleResize);
 });
 
 onUnmounted(() => {
   chart?.dispose();
   chart = null;
+  window.removeEventListener('resize', handleResize);
 });
 
 function refreshChart() {
@@ -249,6 +282,41 @@ defineExpose({ refreshChart });
 @media (max-width: 768px) {
   .charts-row {
     flex-direction: column;
+  }
+
+  .toolbar-row {
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .mobile-single-col {
+    grid-template-columns: 1fr !important;
+    flex-direction: column !important;
+  }
+
+  .mobile-card {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color, #333);
+    border-radius: 8px;
+    padding: 12px;
+    margin-bottom: 10px;
+  }
+
+  .mobile-card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 8px;
+    font-size: 14px;
+  }
+
+  .mobile-card-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--text-secondary);
   }
 }
 </style>

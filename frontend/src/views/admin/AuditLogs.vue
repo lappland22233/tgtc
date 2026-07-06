@@ -55,9 +55,9 @@
       <t-button variant="outline" @click="onRefresh">刷新</t-button>
     </div>
 
-    <!-- 数据表格 -->
-    <div class="card">
+    <!-- Desktop table -->
       <t-table
+        v-if="!isMobile"
         :data="logs"
         :columns="columns"
         :loading="loading"
@@ -95,7 +95,37 @@
           {{ formatTime(row.createdAt) }}
         </template>
       </t-table>
-    </div>
+
+      <!-- Mobile cards -->
+      <div v-if="isMobile" class="mobile-card-list">
+        <t-loading :loading="loading" size="small">
+          <div v-if="logs.length === 0 && !loading" style="text-align: center; padding: 24px 0; color: var(--text-secondary);">暂无数据</div>
+          <div v-for="item in logs" :key="item.id" class="mobile-audit-card">
+            <div class="mobile-audit-header">
+              <t-tag :theme="actionTheme(item.action)" variant="light" size="small">{{ actionLabel(item.action) }}</t-tag>
+              <t-tag :theme="item.status === 'success' ? 'success' : 'danger'" variant="outline" size="small">{{ item.status === 'success' ? '成功' : '失败' }}</t-tag>
+            </div>
+            <div class="mobile-audit-body">
+              <span>
+                <span v-if="item.username" class="mobile-audit-user">{{ item.username }}</span>
+                <span v-else-if="item.userId" class="mobile-audit-user-id">{{ truncateId(item.userId) }}</span>
+                <span v-else style="color: var(--text-secondary);">匿名</span>
+              </span>
+              <span class="mobile-audit-ip">{{ item.ip || '-' }}</span>
+            </div>
+            <div class="mobile-audit-time">{{ formatTime(item.createdAt) }}</div>
+          </div>
+          <div v-if="logs.length > 0" style="margin-top: 12px; display: flex; justify-content: center;">
+            <t-pagination
+              :current="pagination.current"
+              :total="pagination.total"
+              :page-size="pagination.pageSize"
+              size="small"
+              @change="onPageChange"
+            />
+          </div>
+        </t-loading>
+      </div>
   </div>
 </template>
 
@@ -103,6 +133,7 @@
 import { ref, reactive, onMounted } from 'vue';
 import { MessagePlugin } from 'tdesign-vue-next';
 import client from '../../api/client';
+import { useMobile } from '../../composables/useMobile';
 
 interface AuditLogItem {
   id: string;
@@ -123,6 +154,7 @@ const loading = ref(false);
 const logs = ref<AuditLogItem[]>([]);
 const currentPage = ref(1);
 const pageSize = ref(20);
+const isMobile = useMobile();
 
 const pagination = reactive({
   current: 1,
@@ -298,5 +330,52 @@ onMounted(() => {
   .table-filters > * {
     width: 100% !important;
   }
+}
+
+/* Mobile audit card */
+.mobile-audit-card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 10px;
+}
+
+.mobile-audit-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.mobile-audit-body {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.mobile-audit-user {
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.mobile-audit-user-id {
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-family: monospace;
+}
+
+.mobile-audit-ip {
+  font-family: 'Courier New', monospace;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.mobile-audit-time {
+  font-size: 11px;
+  color: var(--text-secondary);
 }
 </style>

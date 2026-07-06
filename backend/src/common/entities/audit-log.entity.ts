@@ -38,7 +38,11 @@ export type AuditAction =
   | 'ip_unban'
   | 'batch_delete_files'
   | 'batch_delete_files_by_admin'
-  | 'batch_markdown';
+  | 'batch_markdown'
+  | 'tag_create'
+  | 'tag_update'
+  | 'tag_delete'
+  | 'tag_set_file';
 
 /** 审计日志状态 */
 export enum AuditStatus {

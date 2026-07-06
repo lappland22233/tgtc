@@ -5,7 +5,7 @@
       <p>配置SMTP邮箱、文件上传限制和IP封禁</p>
     </div>
 
-    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+    <div class="config-grid" :class="{ 'mobile-single-col': isMobile }">
       <!-- 认证配置 -->
       <div class="card">
         <h3 style="margin-bottom: 16px;">🔐 认证配置</h3>
@@ -33,7 +33,7 @@
         <h3 style="margin-bottom: 16px;">📧 SMTP邮箱配置</h3>
         <t-form layout="vertical">
           <t-form-item label="SMTP服务器">
-            <t-input v-model="smtpConfig.host" placeholder="smtp.example.com" autocomplete="off" />
+            <t-input v-model="smtpConfig.host" placeholder="smtp.example.com" autocomplete="off" name="smtp-host" />
           </t-form-item>
           <t-form-item label="端口">
             <t-input-number v-model="smtpConfig.port" :min="1" :max="65535" />
@@ -42,13 +42,13 @@
             <t-switch v-model="smtpConfig.secure" />
           </t-form-item>
           <t-form-item label="用户名">
-            <t-input v-model="smtpConfig.user" placeholder="邮箱地址" autocomplete="off" />
+            <t-input v-model="smtpConfig.user" placeholder="邮箱地址" autocomplete="off" name="smtp-user" />
           </t-form-item>
           <t-form-item label="密码">
-            <t-input v-model="smtpConfig.password" type="password" placeholder="邮箱密码或授权码" autocomplete="new-password" />
+            <t-input v-model="smtpConfig.password" type="password" placeholder="邮箱密码或授权码" autocomplete="new-password" name="smtp-pass" />
           </t-form-item>
           <t-form-item label="发件人">
-            <t-input v-model="smtpConfig.from" placeholder="显示名称" autocomplete="off" />
+            <t-input v-model="smtpConfig.from" placeholder="显示名称" autocomplete="off" name="smtp-from" />
           </t-form-item>
           <t-form-item>
             <t-button theme="primary" @click="saveSMTPConfig">保存SMTP配置</t-button>
@@ -111,6 +111,7 @@
               placeholder="如 .apk" style="max-width: 160px;"
               @enter="addCustomExtension"
               autocomplete="off"
+              name="custom-ext"
             />
             <t-button variant="outline" :disabled="!customExtension.trim()" @click="addCustomExtension">
               添加
@@ -166,10 +167,10 @@
     <t-dialog v-model:visible="showBanDialog" header="封禁IP" @confirm="banIP">
       <t-form layout="vertical">
         <t-form-item label="IP地址" name="ip">
-          <t-input v-model="banForm.ip" placeholder="请输入要封禁的IP地址" autocomplete="off" />
+          <t-input v-model="banForm.ip" placeholder="请输入要封禁的IP地址" autocomplete="off" name="config-ban-ip" />
         </t-form-item>
         <t-form-item label="封禁原因" name="reason">
-          <t-input v-model="banForm.reason" placeholder="可选" autocomplete="off" />
+          <t-input v-model="banForm.reason" placeholder="可选" autocomplete="off" name="config-ban-reason" />
         </t-form-item>
         <t-form-item label="永久封禁">
           <t-switch v-model="banForm.permanent" />
@@ -182,8 +183,11 @@
 <script setup lang="ts">
 import { ref, reactive, onMounted } from 'vue';
 import { MessagePlugin } from 'tdesign-vue-next';
+import { useMobile } from '../../composables/useMobile';
 import { api } from '../../stores/auth';
 import { getErrorMessage } from '../../utils/error';
+
+const isMobile = useMobile();
 
 const authConfig = ref({
   registrationEnabled: false,
@@ -369,3 +373,17 @@ onMounted(() => {
   ]);
 });
 </script>
+
+<style scoped>
+.config-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+}
+
+@media (max-width: 768px) {
+  .config-grid.mobile-single-col {
+    grid-template-columns: 1fr;
+  }
+}
+</style>
