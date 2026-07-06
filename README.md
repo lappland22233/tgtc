@@ -16,6 +16,7 @@
 - 拖拽上传 / 弹窗批量上传
 - Multer 层 500MB 硬上限 + 业务层动态大小限制
 - 文件列表搜索、分页、类型筛选（分页/搜索参数持久化到 URL）
+- **标签管理**：创建/编辑/删除标签，支持多标签筛选（AND 逻辑），文件列表快捷编辑标签
 - 设置公开/私有、访问次数限制、分享有效期（含过期检查）
 - 批量勾选图片一键生成 Markdown 链接
 - 后端代理下载（不暴露 Telegram 原始 URL），使用流式传输
@@ -167,13 +168,15 @@ AUDIT_LOG_RETENTION_DAYS=90    # 审计日志保留天数
 │   ├── admin/                # 用户/文件/IP封禁/系统配置管理/仪表盘/访问统计/审计日志
 │   ├── alert/                # 告警模块（规则评估 + WebSocket 推送）
 │   ├── jobs/                 # Bull 任务队列（指标聚合/攻击检测/告警评估/基线计算/数据归档）
+│   ├── tag/                 # 标签模块（CRUD + 文件关联）
 │   ├── security/             # 行为异常检测（6 种异常模式）
 │   ├── telegram/             # Telegram Bot API 上传下载（流式传输，Token 脱敏）
 │   ├── mailer/               # SMTP 邮件
 │   ├── config/               # 动态配置缓存
 │   ├── tasks/                # 定时清理（限流/Token/封禁/访问日志/审计日志）
 │   ├── common/
-│   │   ├── entities/         # 13 个数据实体
+│   │   ├── entities/         # 14 个数据实体
+│   │   ├── services/         # ConfigCacheService + RateLimitService + AuditService
 │   │   ├── services/         # ConfigCacheService + RateLimitService + AuditService
 │   │   ├── guards/           # JWT 认证 + 角色权限守卫
 │   │   ├── decorators/       # @CurrentUser @Roles
@@ -181,7 +184,7 @@ AUDIT_LOG_RETENTION_DAYS=90    # 审计日志保留天数
 │   │   ├── middleware/       # AccessLogMiddleware（全局 HTTP 请求日志）
 │   │   ├── utils/            # client-ip.ts crypto.util.ts
 │   ├── database/             # TypeORM CLI DataSource
-│   └── migrations/           # 16 个数据库迁移文件
+│   └── migrations/           # 17 个数据库迁移文件
 │
 ├── frontend/src/
 │   ├── views/
@@ -189,9 +192,9 @@ AUDIT_LOG_RETENTION_DAYS=90    # 审计日志保留天数
 │   │   ├── user/             # Dashboard FileList Settings
 │   │   ├── admin/            # Dashboard Users Files Config AccessLogs AuditLogs SourceAnalysis UserActivity BandwidthAnalysis FileTypeAnalysis AlertManagement SecurityMonitor DashboardCustomizer
 │   │   └── layout/           # 侧边栏布局
-│   ├── components/           # UploadModal ThumbnailImg AlertBanner
-│   ├── composables/          # useAutoRefresh useCursorPagination useTimeRange
-│   ├── stores/               # auth files (Pinia)
+│   ├── components/           # UploadModal ThumbnailImg TagManager FileTagEditor
+│   ├── composables/          # useAutoRefresh useCursorPagination useTimeRange useMobile
+│   ├── stores/               # auth files tags (Pinia)
 │   ├── router/               # 四级路由守卫链 + redirect 安全校验
 │   ├── api/                  # axios 客户端（30s 超时，401 防抖）
 │   ├── types/                # TS 类型定义
@@ -260,6 +263,12 @@ npm run typecheck            # TypeScript 类型检查
 | PUT | `/api/files/:id/expires` | 有效期 |
 | POST | `/api/files/batch-markdown` | 批量 Markdown |
 | GET | `/api/files/public-key` | RSA-OAEP 加密公钥 |
+| GET | `/api/tags` | 用户标签列表（含文件计数） |
+| POST | `/api/tags` | 创建标签 |
+| PUT | `/api/tags/:id` | 更新标签 |
+| DELETE | `/api/tags/:id` | 删除标签 |
+| PUT | `/api/files/:id/tags` | 批量设置文件标签 |
+| DELETE | `/api/files/:id/tags/:tagId` | 移除文件标签 |
 
 ### Admin / Super Admin
 | 方法 | 路径 | 说明 |
