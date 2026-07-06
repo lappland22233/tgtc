@@ -14,12 +14,14 @@ import { ThumbnailCryptoService } from './thumbnail-crypto.service';
 import { UploadJobService } from './upload-job.service';
 import { ConfigCacheModule } from '../common/services/config-cache.module';
 import { RateLimitModule } from '../common/services/rate-limit.module';
+import { TagModule } from '../tag/tag.module';
 
 @Module({
   imports: [
     TypeOrmModule.forFeature([File, FileAccessLog, BannedIP, ShareAudit, UploadTask]),
     ConfigCacheModule,
     RateLimitModule,
+    TagModule,
     JwtModule.registerAsync({
       imports: [ConfigModule],
       inject: [ConfigService],

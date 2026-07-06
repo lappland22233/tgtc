@@ -37,8 +37,9 @@
       <span style="font-size: 12px; color: var(--text-secondary);">共 {{ total }} 条</span>
     </div>
 
-    <!-- 数据表格 -->
+    <!-- Desktop table -->
     <t-table
+      v-if="!isMobile"
       :data="list"
       :columns="columns"
       row-key="id"
@@ -71,6 +72,44 @@
       </template>
     </t-table>
 
+    <!-- Mobile cards -->
+    <div v-if="isMobile" class="mobile-card-list">
+      <t-loading :loading="loading" size="small">
+        <div v-if="list.length === 0 && !loading" style="text-align: center; padding: 24px 0; color: var(--text-secondary);">暂无告警</div>
+        <div v-for="item in list" :key="item.id" class="mobile-alert-card">
+          <div class="mobile-alert-header">
+            <t-tag
+              :theme="item.level === 'critical' ? 'danger' : item.level === 'warning' ? 'warning' : 'primary'"
+              variant="light"
+              size="small"
+            >
+              {{ levelLabel(item.level) }}
+            </t-tag>
+            <span class="mobile-alert-rule">{{ ruleMap[item.ruleId] || item.ruleId || '-' }}</span>
+          </div>
+          <div class="mobile-alert-title">{{ item.title }}</div>
+          <div class="mobile-alert-message">{{ item.message }}</div>
+          <div class="mobile-alert-footer">
+            <span class="mobile-alert-time">{{ formatDate(item.createdAt) }}</span>
+            <t-popconfirm v-if="!item.acknowledgedAt" content="确认该告警？" @confirm="handleAcknowledge(item.id)">
+              <t-button size="small" variant="outline" theme="primary">确认</t-button>
+            </t-popconfirm>
+            <span v-else style="color: var(--text-secondary); font-size: 12px;">已确认</span>
+          </div>
+        </div>
+        <div v-if="list.length > 0" style="margin-top: 12px; display: flex; justify-content: center;">
+          <t-pagination
+            v-model="currentPage"
+            :total="total"
+            :page-size="pageSize"
+            size="small"
+            :show-jumper="false"
+            @change="fetchList"
+          />
+        </div>
+      </t-loading>
+    </div>
+
     <!-- 分页 -->
     <div style="margin-top: 16px; display: flex; justify-content: flex-end;">
       <t-pagination
@@ -88,6 +127,7 @@
 import { ref, onMounted } from 'vue';
 import { api } from '@/stores/auth';
 import { formatDate } from '@/utils/format';
+import { useMobile } from '../../composables/useMobile';
 
 const ruleMap: Record<string, string> = {
   TRAFFIC_QPS: 'QPS偏高',
@@ -126,6 +166,7 @@ const loading = ref(false);
 const unacknowledgedCount = ref(0);
 const filterLevel = ref('');
 const filterAcknowledged = ref<boolean | ''>(false);
+const isMobile = useMobile();
 
 function buildParams(page: number): Record<string, string> {
   const p: Record<string, string> = { page: String(page), limit: String(pageSize) };
@@ -181,3 +222,52 @@ onMounted(() => {
   fetchUnacknowledgedCount();
 });
 </script>
+
+<style scoped>
+@media (max-width: 768px) {
+  .mobile-alert-card {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 12px;
+    margin-bottom: 10px;
+  }
+}
+
+.mobile-alert-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.mobile-alert-rule {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.mobile-alert-title {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+}
+
+.mobile-alert-message {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+  line-height: 1.4;
+}
+
+.mobile-alert-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.mobile-alert-time {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+</style>

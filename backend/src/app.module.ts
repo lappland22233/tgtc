@@ -24,10 +24,12 @@ import { AccessLog } from './common/entities/access-log.entity';
 import { Alert } from './common/entities/alert.entity';
 import { DashboardConfig } from './common/entities/dashboard-config.entity';
 import { UploadTask } from './common/entities/upload-task.entity';
+import { Tag } from './common/entities/tag.entity';
 import { AccessLogModule } from './common/access-log.module';
 import { JobsModule } from './jobs/jobs.module';
 import { AlertModule } from './alert/alert.module';
 import { SecurityModule } from './security/security.module';
+import { TagModule } from './tag/tag.module';
 
 @Module({
   imports: [
@@ -43,7 +45,7 @@ import { SecurityModule } from './security/security.module';
       username: process.env.DB_USERNAME || 'postgres',
       password: process.env.DB_PASSWORD || 'postgres',
       database: process.env.DB_DATABASE || 'file_distribution',
-      entities: [User, File, SystemConfig, VerificationCode, BannedIP, ShareAudit, FileAccessLog, RateLimit, AuditLog, AccessLog, Alert, DashboardConfig, UploadTask],
+      entities: [User, File, SystemConfig, VerificationCode, BannedIP, ShareAudit, FileAccessLog, RateLimit, AuditLog, AccessLog, Alert, DashboardConfig, UploadTask, Tag],
       // 生产环境强制关闭 synchronize 防止误改 schema 丢数据；开发环境由 DB_SYNCHRONIZE 控制
       synchronize: process.env.NODE_ENV === 'production' ? false : process.env.DB_SYNCHRONIZE === 'true',
       migrations: [__dirname + '/migrations/*{.ts,.js}'],
@@ -63,6 +65,7 @@ import { SecurityModule } from './security/security.module';
     JobsModule,
     AlertModule,
     SecurityModule,
+    TagModule,
   ],
 })
 export class AppModule {}

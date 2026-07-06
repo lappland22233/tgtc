@@ -59,18 +59,23 @@
 |------|------|
 | 后端 | NestJS 10 + TypeScript (CommonJS, strict mode) + TypeORM 0.3 |
 | 数据库 | PostgreSQL ≥ 14 |
+| 消息队列 | Bull 4.x + Redis |
 | 前端 | Vue 3 + TypeScript + Vite 5 + TDesign + ECharts 6 |
 | 存储 | Telegram Bot API（支持本地代理绕过限流） |
 | 邮件 | Nodemailer + SMTP |
 | 认证 | Passport JWT + bcryptjs |
+| 实时推送 | Socket.IO 4.x（告警 WebSocket） |
 | 状态管理 | Pinia |
 | 路由 | Vue Router 4 |
+| 仪表盘布局 | vue-grid-layout 2.4+ |
 
 ## 快速开始
 
-**环境要求**：Node.js ≥ 18, PostgreSQL ≥ 14, Telegram Bot Token
+**环境要求**：Node.js ≥ 18, PostgreSQL ≥ 14, Redis, Telegram Bot Token
 
 ```bash
+# 确保 Redis 正在运行（Bull 消息队列依赖）
+
 # 后端
 cd backend
 cp .env.example .env   # 编辑数据库、JWT、Telegram、SMTP 配置
@@ -85,6 +90,7 @@ npm run dev            # 默认 http://localhost:5173
 
 **生产部署**：
 ```bash
+# 确保 Redis 正在运行
 cd frontend && npm run build
 cd ../backend && npm run build && npm run start:prod
 # 后端直接服务前端静态文件，单端口部署
@@ -107,6 +113,12 @@ DB_MIGRATIONS_RUN=false       # 启动时自动执行迁移
 JWT_SECRET=your-random-secret
 JWT_EXPIRES_IN=7d
 
+# Redis（Bull 消息队列）
+REDIS_HOST=localhost
+REDIS_PORT=6379
+# REDIS_PASSWORD=  # 可选：Redis 密码
+# REDIS_DB=0
+
 # Telegram Bot（支持本地 API 代理）
 TELEGRAM_BOT_TOKEN=your_bot_token
 TELEGRAM_CHAT_ID=your_chat_id
@@ -119,6 +131,8 @@ SMTP_SECURE=false
 SMTP_USER=your_email@example.com
 SMTP_PASSWORD=your_password
 SMTP_FROM=noreply@example.com
+# SMTP_ENCRYPTION_KEY=your-encryption-key  # 必需：SMTP 密码 AES-256-CBC 加密密钥，未配置时启动报错
+# SMTP_ENCRYPTION_SALT=smtp-encryption-salt  # 可选：加密盐
 
 # 应用
 APP_HOST=0.0.0.0
@@ -126,6 +140,8 @@ APP_PORT=3000
 APP_URL=http://localhost:3000
 FRONTEND_URL=http://localhost:5173
 CORS_ORIGINS=http://localhost:5173
+# SECURE_COOKIE=true  # 生产 HTTPS 环境启用 Cookie secure 标志
+# TOKEN_EXTRACTION_MODE=both  # both（Cookie + Bearer）或 cookie_only
 
 # 上传（启动后可从管理面板动态调整）
 MAX_FILE_SIZE=20971520

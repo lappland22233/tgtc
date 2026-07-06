@@ -1,5 +1,14 @@
 export type FileAccessType = 'public' | 'private';
 
+export interface Tag {
+  id: string;
+  name: string;
+  color: string;
+  userId: string;
+  createdAt: string;
+  fileCount?: number;
+}
+
 export interface FileItem {
   id: string;
   filename: string;
@@ -25,6 +34,8 @@ export interface FileItem {
   deleteScheduledAt: string | null;
   /** 请求删除时间 */
   deleteRequestedAt: string | null;
+  /** 关联标签 */
+  tags?: Tag[];
 }
 
 export interface BatchUploadFailedItem {

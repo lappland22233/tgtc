@@ -40,24 +40,38 @@
         <!-- Top Active Users -->
         <div class="card">
           <h3>Top 活跃用户</h3>
-          <t-table
-            :data="data.topActiveUsers"
-            :columns="userColumns"
-            row-key="userId"
-            table-layout="fixed"
-            :pagination="false"
-            size="small"
-            max-height="500"
-          >
-            <template #userId="{ row }">
-              <t-tooltip placement="top" :content="row.userId">
-                <span class="truncated-cell">{{ row.userId.substring(0, 8) }}</span>
-              </t-tooltip>
-            </template>
-            <template #lastSeen="{ row }">
-              {{ formatDate(row.lastSeen) }}
-            </template>
-          </t-table>
+          <div v-if="!isMobile && data.topActiveUsers.length > 0">
+            <t-table
+              :data="data.topActiveUsers"
+              :columns="userColumns"
+              row-key="userId"
+              table-layout="fixed"
+              :pagination="false"
+              size="small"
+              max-height="500"
+            >
+              <template #userId="{ row }">
+                <t-tooltip placement="top" :content="row.userId">
+                  <span class="truncated-cell">{{ row.userId.substring(0, 8) }}</span>
+                </t-tooltip>
+              </template>
+              <template #lastSeen="{ row }">
+                {{ formatDate(row.lastSeen) }}
+              </template>
+            </t-table>
+          </div>
+          <div v-if="isMobile && data.topActiveUsers.length > 0" class="mobile-card-list">
+            <div v-for="user in data.topActiveUsers" :key="user.userId" class="mobile-card">
+              <div class="mobile-card-row">
+                <strong>{{ user.userId.substring(0, 8) }}</strong>
+                <span>{{ user.requestCount }} 次请求</span>
+              </div>
+              <div class="mobile-card-meta">
+                <span>{{ user.ip }}</span>
+                <span>{{ formatDate(user.lastSeen) }}</span>
+              </div>
+            </div>
+          </div>
           <div v-if="!data.topActiveUsers.length" class="empty-hint">暂无活跃用户数据</div>
         </div>
       </template>
@@ -70,6 +84,7 @@
 import { ref, onMounted } from 'vue';
 import { api } from '@/stores/auth';
 import { formatDate } from '@/utils/format';
+import { useMobile } from '../../composables/useMobile';
 
 interface UserActivityResponse {
   dau: number;
@@ -82,6 +97,7 @@ interface UserActivityResponse {
 const timeRange = ref('30d');
 const loading = ref(false);
 const data = ref<UserActivityResponse | null>(null);
+const isMobile = useMobile();
 
 const userColumns = [
   { colKey: 'userId', title: '用户ID', width: 120 },
@@ -203,6 +219,38 @@ onMounted(() => {
 @media (max-width: 480px) {
   .metrics-grid {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 768px) {
+  .mobile-card {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 12px;
+    margin-bottom: 10px;
+  }
+
+  .mobile-card-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 6px;
+  }
+
+  .mobile-card-body {
+    font-size: 13px;
+    color: var(--text-secondary);
+    margin-bottom: 8px;
+    line-height: 1.5;
+  }
+
+  .mobile-card-meta {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 12px;
+    color: var(--text-secondary);
   }
 }
 </style>

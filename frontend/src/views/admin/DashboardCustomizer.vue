@@ -20,7 +20,7 @@
     </div>
 
     <!-- View Mode -->
-    <div v-if="!editMode && widgets.length > 0" class="dashboard-grid">
+    <div v-if="!editMode && widgets.length > 0" class="dashboard-grid" :class="{ 'mobile-single-col': isMobile }">
       <div
         v-for="w in widgets"
         :key="w.i"
@@ -43,10 +43,10 @@
         </template>
         <t-space direction="vertical" style="width:100%">
           <t-select v-model="w.type" :options="widgetTypeOptions" placeholder="组件类型" style="width:200px" />
-          <t-input v-if="w.type === 'metric-card'" v-model="w.config.label" placeholder="标签" style="width:200px" autocomplete="off" />
-          <t-input v-model="w.config.title" placeholder="标题" style="width:200px" autocomplete="off" />
-          <t-input v-model="w.config.endpoint" placeholder="数据端点 (如 /admin/access-logs/stats)" autocomplete="off" />
-          <t-input v-model="w.config.metric" v-if="w.type === 'metric-card'" placeholder="指标字段名" style="width:200px" autocomplete="off" />
+          <t-input v-if="w.type === 'metric-card'" v-model="w.config.label" placeholder="标签" style="width:200px" autocomplete="off" name="widget-label" />
+          <t-input v-model="w.config.title" placeholder="标题" style="width:200px" autocomplete="off" name="widget-title" />
+          <t-input v-model="w.config.endpoint" placeholder="数据端点 (如 /admin/access-logs/stats)" autocomplete="off" name="widget-endpoint" />
+          <t-input v-model="w.config.metric" v-if="w.type === 'metric-card'" placeholder="指标字段名" style="width:200px" autocomplete="off" name="widget-metric" />
           <t-select v-model="w.config.format" v-if="w.type === 'metric-card'" :options="formatOptions" placeholder="格式" style="width:150px" />
           <t-input-number v-model="w.w" :min="1" :max="12" label="宽度(列)" style="width:150px" />
         </t-space>
@@ -64,7 +64,7 @@
 
     <!-- Create dialog -->
     <t-dialog v-model:visible="showCreateDialog" header="新建仪表盘" @confirm="createDashboard">
-      <t-input v-model="newDashboardName" placeholder="仪表盘名称" autocomplete="off" />
+      <t-input v-model="newDashboardName" placeholder="仪表盘名称" autocomplete="off" name="dashboard-name" />
     </t-dialog>
   </div>
 </template>
@@ -72,6 +72,7 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue';
 import { MessagePlugin } from 'tdesign-vue-next';
+import { useMobile } from '@/composables/useMobile';
 import { api } from '@/stores/auth';
 
 interface DashboardItem {
@@ -98,6 +99,8 @@ const saving = ref(false);
 const showCreateDialog = ref(false);
 const newDashboardName = ref('');
 const presetName = ref('');
+
+const isMobile = useMobile();
 
 const widgetTypeOptions = [
   { label: '指标卡片', value: 'metric-card' },
@@ -242,5 +245,27 @@ onMounted(() => { fetchDashboards(); fetchPresets(); });
 }
 .empty-state {
   text-align: center; padding: 60px 0; color: var(--text-secondary);
+}
+
+@media (max-width: 768px) {
+  .page-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 12px;
+  }
+
+  .page-header > :deep(.t-space) {
+    flex-wrap: wrap;
+  }
+
+  .dashboard-grid.mobile-single-col {
+    grid-template-columns: 1fr;
+  }
+
+  .widget-card {
+    grid-column: span 1 !important;
+    min-height: 100px;
+    padding: 12px;
+  }
 }
 </style>

@@ -2,7 +2,7 @@
   <t-dialog
     v-model:visible="visible"
     header="上传文件"
-    width="560px"
+    :width="isMobile ? '100%' : '560px'"
     :footer="false"
     @close="handleClose"
     destroy-on-close
@@ -10,6 +10,46 @@
     <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
       <span style="font-size: 14px; color: var(--text-secondary);">同时上传文件数：</span>
       <t-select v-model="concurrency" :options="concurrencyOptions" style="width: 80px;" size="small" />
+    </div>
+
+    <!-- 标签选择 -->
+    <div style="margin-bottom: 12px;">
+      <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 4px;">
+        <span style="font-size: 12px; color: var(--text-secondary);">上传时添加标签：</span>
+        <t-button size="small" variant="text" @click="showTagSelector = !showTagSelector">
+          {{ selectedTagIds.length > 0 ? `已选 ${selectedTagIds.length} 个标签` : (tagStore.tags?.length ? '选择标签' : '新建标签') }}
+        </t-button>
+      </div>
+      <div v-if="showTagSelector" style="padding: 8px; background: var(--bg-secondary); border-radius: 6px; border: 1px solid var(--border-color);">
+        <!-- 已有标签选择 -->
+        <div v-if="tagStore.tags && tagStore.tags.length > 0" style="display: flex; gap: 6px; flex-wrap: wrap;">
+          <t-tag
+            v-for="tag in tagStore.tags"
+            :key="tag.id"
+            :theme="selectedTagIds.includes(tag.id) ? 'primary' : 'default'"
+            :variant="selectedTagIds.includes(tag.id) ? 'dark' : 'outline'"
+            style="cursor: pointer;"
+            @click="toggleTag(tag.id)"
+          >
+            <span :style="{ display: 'inline-block', width: '8px', height: '8px', borderRadius: '50%', background: tag.color, marginRight: '4px' }" />
+            {{ tag.name }}
+          </t-tag>
+        </div>
+        <!-- 在已有标签下方/独立区域：新建标签 -->
+        <div style="display: flex; gap: 6px; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border-color);">
+          <t-input
+            v-model="newTagName"
+            placeholder="新建标签名称"
+            size="small"
+            style="flex: 1; min-width: 0;"
+            autocomplete="off"
+            name="upload-tag-name"
+          />
+          <t-button size="small" theme="primary" :disabled="!newTagName.trim()" @click="handleCreateTag">
+            新建
+          </t-button>
+        </div>
+      </div>
     </div>
     <div
       class="upload-zone"
@@ -98,10 +138,14 @@
 import { ref, computed, watch, onUnmounted } from 'vue';
 import { MessagePlugin } from 'tdesign-vue-next';
 import { useFileStore } from '../stores/files';
+import { useTagStore } from '../stores/tags';
 import { api } from '../stores/auth';
+import { useMobile } from '../composables/useMobile';
 import { formatSize as formatModalSize } from '../utils/format';
 import { getErrorMessage } from '../utils/error';
 import type { BatchUploadResult } from '../types/file';
+
+const isMobile = useMobile();
 
 const props = defineProps<{
   visible: boolean;
@@ -138,11 +182,15 @@ const acceptTypes = ref('');
 const fileTypeMode = ref<'blacklist' | 'whitelist'>('blacklist');
 
 const fileStore = useFileStore();
+const tagStore = useTagStore();
 const fileInput = ref<HTMLInputElement>();
 const isDragover = ref(false);
 const uploading = ref(false);
 const uploadQueue = ref<QueueEntry[]>([]);
 const batchResult = ref<BatchUploadResult | null>(null);
+const selectedTagIds = ref<string[]>([]);
+const showTagSelector = ref(false);
+const newTagName = ref('');
 const concurrency = ref(3);
 const concurrencyOptions = Array.from({ length: 10 }, (_, i) => ({ label: `${i + 1}`, value: i + 1 }));
 
@@ -205,6 +253,28 @@ function getPreviewUrl(file: File): string {
 function resetQueue() {
   uploadQueue.value = [];
   batchResult.value = null;
+}
+
+function toggleTag(tagId: string) {
+  const idx = selectedTagIds.value.indexOf(tagId);
+  if (idx === -1) {
+    selectedTagIds.value.push(tagId);
+  } else {
+    selectedTagIds.value.splice(idx, 1);
+  }
+}
+
+async function handleCreateTag() {
+  const name = newTagName.value.trim();
+  if (!name) return;
+  try {
+    const tag = await tagStore.createTag(name);
+    selectedTagIds.value = [...selectedTagIds.value, tag.id];
+    newTagName.value = '';
+  } catch (err: any) {
+    const msg = err?.response?.data?.message || '创建标签失败';
+    MessagePlugin.error(msg);
+  }
 }
 
 function handleClose() {
@@ -355,6 +425,18 @@ async function uploadFiles(files: File[]) {
 
   batchResult.value = { success: successList, failed: failedList };
 
+  // 上传完成后关联标签
+  if (selectedTagIds.value.length > 0 && successList.length > 0) {
+    const tagIds = selectedTagIds.value;
+    for (const file of successList) {
+      try {
+        await api.put(`/files/${file.id}/tags`, { tagIds });
+      } catch {
+        // 标签关联失败不影响上传结果
+      }
+    }
+  }
+
   emit('uploaded');
 
   if (failedList.length === 0) {
@@ -371,8 +453,14 @@ fetchUploadConfig();
 
 // 当弹窗打开且有预置文件时，自动上传
 watch(() => props.visible, async (isVisible) => {
-  if (isVisible && props.initialFiles && props.initialFiles.length > 0) {
-    await uploadFiles(validateFiles(Array.from(props.initialFiles)));
+  if (isVisible) {
+    await tagStore.fetchTags();
+    selectedTagIds.value = [];
+    showTagSelector.value = false;
+    newTagName.value = '';
+    if (props.initialFiles && props.initialFiles.length > 0) {
+      await uploadFiles(validateFiles(Array.from(props.initialFiles)));
+    }
   }
 });
 
@@ -384,3 +472,14 @@ onUnmounted(() => {
   previewUrls.clear();
 });
 </script>
+
+<style scoped>
+@media (max-width: 768px) {
+  :deep(.t-dialog) {
+    margin: 16px;
+  }
+  :deep(.t-dialog__body) {
+    padding: 12px;
+  }
+}
+</style>

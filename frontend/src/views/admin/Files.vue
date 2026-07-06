@@ -8,7 +8,7 @@
     <div class="card">
       <div style="display: flex; justify-content: space-between; margin-bottom: 16px;">
         <div style="display: flex; gap: 12px;">
-          <t-input v-model="searchFile" placeholder="搜索文件名..." style="width: 250px;" @enter="fetchFiles" autocomplete="off" />
+          <t-input v-model="searchFile" placeholder="搜索文件名..." style="width: 250px;" @enter="fetchFiles" autocomplete="off" name="admin-search-file" />
           <t-select v-model="filterUploader" placeholder="筛选上传者" clearable style="width: 200px;" @change="fetchFiles">
             <t-option v-for="u in uploaders" :key="u.id" :value="u.id" :label="u.email" />
           </t-select>
@@ -19,6 +19,7 @@
       </div>
 
       <t-table
+        v-if="!isMobile"
         v-model:selected-row-keys="selectedRows"
         :data="files"
         :columns="columns"
@@ -77,6 +78,38 @@
         </template>
       </t-table>
 
+      <!-- 移动端：卡片列表 -->
+      <div v-if="isMobile" class="mobile-card-list">
+        <div v-for="file in files" :key="file.id" class="mobile-file-admin-card">
+          <div style="display: flex; align-items: flex-start; gap: 12px;">
+            <ThumbnailImg :file-id="file.id" :mime-type="file.mimeType" :size="40" :emoji="getFileEmoji(file.mimeType)" />
+            <div style="flex: 1; min-width: 0;">
+              <div :class="{ 'deleted-name': file.isDeleted }" style="font-weight: 500; word-break: break-all; font-size: 14px;">
+                {{ file.originalName }}
+              </div>
+              <div style="font-size: 12px; color: var(--text-secondary); margin-top: 2px;">
+                {{ formatSize(file.size) }} · 上传者: {{ file.uploader?.email || '未知' }}
+              </div>
+              <div style="display: flex; gap: 4px; margin-top: 4px; flex-wrap: wrap;">
+                <t-tag v-if="file.isDeleted && file.deletedByAdmin" theme="danger" size="small">管理员已删除</t-tag>
+                <t-tag v-else-if="file.isDeleted" theme="warning" size="small">用户删除中</t-tag>
+                <t-tag v-else-if="file.accessType === 'public'" theme="success" size="small">公开</t-tag>
+                <t-tag v-else theme="default" size="small">私有</t-tag>
+              </div>
+            </div>
+          </div>
+          <div style="display: flex; gap: 4px; margin-top: 8px; flex-wrap: wrap; border-top: 1px solid var(--border-color); padding-top: 8px;">
+            <template v-if="file.isDeleted">
+              <t-button size="small" theme="success" variant="outline" @click="restoreFile(file.id)">恢复</t-button>
+              <t-button size="small" theme="danger" variant="outline" @click="forceDeleteFile(file)">强制删除</t-button>
+            </template>
+            <template v-else>
+              <t-button size="small" theme="danger" variant="outline" @click="deleteFile(file)">删除</t-button>
+            </template>
+          </div>
+        </div>
+      </div>
+
       <div style="margin-top: 16px; display: flex; justify-content: center; align-items: center; gap: 16px;">
         <t-select v-model="pageSize" :options="pageSizeOptions" style="width: 130px;" @change="handlePageSizeChange" />
 
@@ -105,6 +138,7 @@ import { api } from '../../stores/auth';
 import { formatSize, formatDate, getFileEmoji } from '@/utils/format';
 import { getErrorMessage } from '../../utils/error';
 import { useCursorPagination } from '../../composables/useCursorPagination';
+import { useMobile } from '../../composables/useMobile';
 import ThumbnailImg from '../../components/ThumbnailImg.vue';
 
 interface AdminFileItem {
@@ -133,6 +167,8 @@ const sortOrder = ref<string>('');
 
 // 分页模式
 const pageMode = ref<'paginated' | 'infinite'>('paginated');
+
+const isMobile = useMobile();
 
 // 游标无限滚动
 const {
@@ -393,5 +429,15 @@ onUnmounted(() => {
 :deep(.row-deleted) {
   background: rgba(255, 255, 255, 0.02);
   opacity: 0.85;
+}
+
+@media (max-width: 768px) {
+  .mobile-file-admin-card {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 12px;
+    margin-bottom: 10px;
+  }
 }
 </style>

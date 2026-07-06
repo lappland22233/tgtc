@@ -6,7 +6,7 @@
     </div>
 
     <!-- Time Range Selector -->
-    <div class="toolbar">
+    <div class="toolbar" :class="{ 'toolbar-row': isMobile }">
       <t-radio-group v-model="timeRange" variant="default-filled" @change="fetchData">
         <t-radio-button value="1h">1小时</t-radio-button>
         <t-radio-button value="24h">24小时</t-radio-button>
@@ -26,51 +26,85 @@
         <!-- Top Files by Bandwidth -->
         <div class="card">
           <h3>Top 文件带宽消耗</h3>
-          <t-table
-            :data="data.topFiles"
-            :columns="fileColumns"
-            row-key="fileId"
-            table-layout="fixed"
-            :pagination="false"
-            size="small"
-            max-height="400"
-          >
-            <template #rank="{ rowIndex }">
-              <t-tag
-                :theme="rowIndex < 3 ? 'primary' : 'default'"
-                variant="light"
-                size="small"
-              >
-                #{{ rowIndex + 1 }}
-              </t-tag>
-            </template>
-            <template #fileName="{ row }">
-              <span>{{ getFileEmoji(row.mimeType) }} {{ row.fileName }}</span>
-            </template>
-            <template #totalBandwidth="{ row }">
-              {{ formatSize(Number(row.totalBandwidth)) }}
-            </template>
-          </t-table>
-          <div v-if="!data.topFiles.length" class="empty-hint">暂无数据</div>
+          <div v-if="!isMobile">
+            <t-table
+              :data="data.topFiles"
+              :columns="fileColumns"
+              row-key="fileId"
+              table-layout="fixed"
+              :pagination="false"
+              size="small"
+              max-height="400"
+            >
+              <template #rank="{ rowIndex }">
+                <t-tag
+                  :theme="rowIndex < 3 ? 'primary' : 'default'"
+                  variant="light"
+                  size="small"
+                >
+                  #{{ rowIndex + 1 }}
+                </t-tag>
+              </template>
+              <template #fileName="{ row }">
+                <span>{{ getFileEmoji(row.mimeType) }} {{ row.fileName }}</span>
+              </template>
+              <template #totalBandwidth="{ row }">
+                {{ formatSize(Number(row.totalBandwidth)) }}
+              </template>
+            </t-table>
+            <div v-if="!data.topFiles.length" class="empty-hint">暂无数据</div>
+          </div>
+          <div v-if="isMobile">
+            <div v-for="(row, idx) in data.topFiles" :key="row.fileId" class="mobile-card">
+              <div class="mobile-card-header">
+                <t-tag
+                  :theme="idx < 3 ? 'primary' : 'default'"
+                  variant="light"
+                  size="small"
+                >
+                  #{{ idx + 1 }}
+                </t-tag>
+                <span class="mobile-file-name">{{ getFileEmoji(row.mimeType) }} {{ row.fileName }}</span>
+              </div>
+              <div class="mobile-card-meta">
+                <span>{{ row.mimeType }}</span>
+                <span>{{ row.accessCount }}次</span>
+                <span>{{ formatSize(Number(row.totalBandwidth)) }}</span>
+              </div>
+            </div>
+            <div v-if="!data.topFiles.length" class="empty-hint">暂无数据</div>
+          </div>
         </div>
 
         <!-- Top IPs by Bandwidth -->
         <div class="card">
           <h3>Top IP 带宽消耗</h3>
-          <t-table
-            :data="data.topIps"
-            :columns="ipColumns"
-            row-key="ip"
-            table-layout="fixed"
-            :pagination="false"
-            size="small"
-            max-height="400"
-          >
-            <template #bandwidth="{ row }">
-              {{ formatSize(Number(row.bandwidth)) }}
-            </template>
-          </t-table>
-          <div v-if="!data.topIps.length" class="empty-hint">暂无数据</div>
+          <div v-if="!isMobile">
+            <t-table
+              :data="data.topIps"
+              :columns="ipColumns"
+              row-key="ip"
+              table-layout="fixed"
+              :pagination="false"
+              size="small"
+              max-height="400"
+            >
+              <template #bandwidth="{ row }">
+                {{ formatSize(Number(row.bandwidth)) }}
+              </template>
+            </t-table>
+            <div v-if="!data.topIps.length" class="empty-hint">暂无数据</div>
+          </div>
+          <div v-if="isMobile">
+            <div v-for="row in data.topIps" :key="row.ip" class="mobile-card">
+              <div class="mobile-card-header">{{ row.ip }}</div>
+              <div class="mobile-card-meta">
+                <span>带宽: {{ formatSize(Number(row.bandwidth)) }}</span>
+                <span>{{ row.requestCount }}次</span>
+              </div>
+            </div>
+            <div v-if="!data.topIps.length" class="empty-hint">暂无数据</div>
+          </div>
         </div>
       </template>
       <div v-else-if="!loading" class="empty-hint">暂无数据</div>
@@ -79,10 +113,11 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, nextTick } from 'vue';
+import { ref, watch, onMounted, onUnmounted, nextTick } from 'vue';
 import * as echarts from 'echarts';
 import { api } from '@/stores/auth';
 import { formatSize, getFileEmoji } from '@/utils/format';
+import { useMobile } from '../../composables/useMobile';
 
 interface BandwidthResponse {
   topFiles: { fileId: string; fileName: string; mimeType: string; totalBandwidth: string; accessCount: number }[];
@@ -96,6 +131,7 @@ const data = ref<BandwidthResponse | null>(null);
 
 const chartRef = ref<HTMLDivElement | null>(null);
 let chart: echarts.ECharts | null = null;
+const isMobile = useMobile();
 
 const fileColumns = [
   { colKey: 'rank', title: '排名', width: 70 },
@@ -110,6 +146,14 @@ const ipColumns = [
   { colKey: 'bandwidth', title: '带宽消耗', width: 140 },
   { colKey: 'requestCount', title: '请求数', width: 100 },
 ];
+
+const handleResize = () => {
+  chart?.resize();
+};
+
+watch(isMobile, () => {
+  nextTick(() => setTimeout(handleResize, 100));
+});
 
 function renderChart() {
   if (!chartRef.value) return;
@@ -203,11 +247,13 @@ async function fetchData() {
 
 onMounted(() => {
   fetchData();
+  window.addEventListener('resize', handleResize);
 });
 
 onUnmounted(() => {
   chart?.dispose();
   chart = null;
+  window.removeEventListener('resize', handleResize);
 });
 
 function refreshChart() {
@@ -269,5 +315,42 @@ defineExpose({ refreshChart });
   padding: 24px 0;
   color: var(--text-secondary);
   font-size: 13px;
+}
+
+@media (max-width: 768px) {
+  .toolbar-row {
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .mobile-card {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color, #333);
+    border-radius: 8px;
+    padding: 12px;
+    margin-bottom: 10px;
+  }
+
+  .mobile-card-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+    font-size: 14px;
+  }
+
+  .mobile-file-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .mobile-card-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
 }
 </style>

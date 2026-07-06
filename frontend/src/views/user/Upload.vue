@@ -31,6 +31,9 @@
         <p style="color: var(--text-secondary); margin-top: 8px;">
           支持图片、PDF、ZIP等格式
         </p>
+        <p class="mobile-only" style="color: var(--text-secondary); margin-top: 8px;">
+          移动设备上请点击选择文件
+        </p>
       </div>
 
       <t-loading v-if="uploading" />
@@ -382,3 +385,14 @@ function getFileIcon(mimeType: string) {
   return 'default';
 }
 </script>
+
+<style scoped>
+.mobile-only {
+  display: none;
+}
+@media (max-width: 768px) {
+  .mobile-only {
+    display: block;
+  }
+}
+</style>

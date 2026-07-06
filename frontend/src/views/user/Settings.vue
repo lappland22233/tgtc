@@ -9,13 +9,13 @@
       <h3 style="margin-bottom: 24px;">修改密码</h3>
       <t-form ref="passwordFormRef" :data="passwordForm" :rules="passwordRules" @submit="handlePasswordChange" layout="vertical">
         <t-form-item label="原密码" name="oldPassword">
-          <t-input v-model="passwordForm.oldPassword" type="password" placeholder="请输入原密码" autocomplete="new-password" />
+          <t-input v-model="passwordForm.oldPassword" type="password" placeholder="请输入原密码" autocomplete="new-password" name="settings-old-pass" />
         </t-form-item>
         <t-form-item label="新密码" name="newPassword">
-          <t-input v-model="passwordForm.newPassword" type="password" placeholder="请输入新密码（至少6位）" autocomplete="new-password" />
+          <t-input v-model="passwordForm.newPassword" type="password" placeholder="请输入新密码（至少6位）" autocomplete="new-password" name="settings-new-pass" />
         </t-form-item>
         <t-form-item label="确认新密码" name="confirmPassword">
-          <t-input v-model="passwordForm.confirmPassword" type="password" placeholder="请再次输入新密码" autocomplete="new-password" />
+          <t-input v-model="passwordForm.confirmPassword" type="password" placeholder="请再次输入新密码" autocomplete="new-password" name="settings-confirm-pass" />
         </t-form-item>
         <t-form-item>
           <t-button type="submit" theme="primary">保存修改</t-button>

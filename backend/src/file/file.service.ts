@@ -276,7 +276,7 @@ export class FileService implements OnModuleInit {
     return `${filename}.${ext}`;
   }
 
-  async upload(file: Express.Multer.File, user: User): Promise<File> {
+  async upload(file: Express.Multer.File, user: User, tagIds?: string[]): Promise<File> {
     if (file.size > this.maxFileSize) {
       throw new BadRequestException(`文件大小不能超过 ${this.maxFileSize / 1024 / 1024}MB`);
     }
@@ -310,6 +310,12 @@ export class FileService implements OnModuleInit {
 
     const savedFile = await this.fileRepository.save(newFile);
 
+    // 上传时关联标签
+    if (tagIds && tagIds.length > 0) {
+      const values = tagIds.map((tagId) => `('${savedFile.id}', '${tagId}')`).join(', ');
+      await this.fileRepository.manager.query(`INSERT INTO file_tags ("fileId", "tagId") VALUES ${values}`);
+    }
+
     // 审计日志：文件上传
     this.auditService.log({
       action: 'file_upload',
@@ -329,7 +335,7 @@ export class FileService implements OnModuleInit {
     return savedFile;
   }
 
-  async uploadMultiple(files: Express.Multer.File[], user: User): Promise<BatchUploadResult> {
+  async uploadMultiple(files: Express.Multer.File[], user: User, tagIds?: string[]): Promise<BatchUploadResult> {
     // 预验证阶段：先检查所有文件的类型和大小，避免部分上传后因一个文件失败产生垃圾数据
     const preCheckFailed: BatchUploadFailedItem[] = [];
     const passPreCheck: Express.Multer.File[] = [];
@@ -365,7 +371,7 @@ export class FileService implements OnModuleInit {
 
     for (const file of passPreCheck) {
       try {
-        const uploadedFile = await this.upload(file, user);
+        const uploadedFile = await this.upload(file, user, tagIds);
         success.push(uploadedFile);
       } catch (error: unknown) {
         failed.push({
@@ -387,6 +393,7 @@ export class FileService implements OnModuleInit {
     sortBy?: string,
     sortOrder?: string,
     cursor?: string,
+    tagIds?: string[],
   ): Promise<{ files: File[]; total: number; nextCursor?: string | null }> {
     const where: Record<string, unknown> = {};
     if (!includeDeleted) {
@@ -402,6 +409,18 @@ export class FileService implements OnModuleInit {
 
     if (keyword) {
       qb.andWhere('LOWER(file.originalName) LIKE :keyword', { keyword: `%${keyword.toLowerCase()}%` });
+    }
+
+    // 标签筛选：AND 逻辑 —— 文件必须同时拥有所有指定标签
+    if (tagIds && tagIds.length > 0) {
+      qb.innerJoin('file_tags', 'ft_filter', 'ft_filter."fileId" = file.id')
+        .andWhere('ft_filter."tagId" IN (:...tagIds)', { tagIds });
+      // 多标签时使用 GROUP BY + HAVING 确保文件拥有所有指定标签
+      if (tagIds.length > 1) {
+        qb.groupBy('file.id')
+          .addGroupBy('uploader.id')
+          .having('COUNT(DISTINCT ft_filter."tagId") = :tagCount', { tagCount: tagIds.length });
+      }
     }
 
     // 游标分页：解析游标并添加 WHERE 条件（使用元组比较，PostgreSQL 可高效利用索引）
@@ -440,12 +459,39 @@ export class FileService implements OnModuleInit {
     if (keyword) {
       countQb.andWhere('LOWER(file.originalName) LIKE :keyword', { keyword: `%${keyword.toLowerCase()}%` });
     }
-    const total = await countQb.getCount();
+    if (tagIds && tagIds.length > 0) {
+      countQb.innerJoin('file_tags', 'ftCount', 'ftCount."fileId" = file.id')
+        .andWhere('ftCount."tagId" IN (:...tagIds)', { tagIds });
+      if (tagIds.length > 1) {
+        countQb.groupBy('file.id').having('COUNT(DISTINCT ftCount."tagId") = :tagCount', { tagCount: tagIds.length });
+      }
+    }
+    const total = tagIds?.length ? (await countQb.getRawMany()).length : await countQb.getCount();
 
     const files = entities.map((entity, i) => ({
       ...entity,
       hasPassword: raw[i]?.file_hasPassword === true,
     } as File & { hasPassword: boolean }));
+
+    // 批量加载所有文件的标签
+    const fileIds = files.map(f => f.id);
+    if (fileIds.length > 0) {
+      const tagRows = await this.fileRepository.manager.query(
+        `SELECT ft."fileId", t.id, t.name, t.color, t."userId", t."createdAt"
+         FROM file_tags ft
+         INNER JOIN tags t ON t.id = ft."tagId"
+         WHERE ft."fileId" = ANY($1::uuid[])`,
+        [fileIds],
+      );
+      const tagsMap = new Map<string, { id: string; name: string; color: string }[]>();
+      for (const row of tagRows) {
+        if (!tagsMap.has(row.fileId)) tagsMap.set(row.fileId, []);
+        tagsMap.get(row.fileId)!.push({ id: row.id, name: row.name, color: row.color });
+      }
+      for (const file of files) {
+        (file as any).tags = tagsMap.get(file.id) || [];
+      }
+    }
 
     // 游标模式下计算 nextCursor（结果数达到 limit 表示可能还有更多）
     let nextCursor: string | null = null;
@@ -1398,6 +1444,7 @@ export class FileService implements OnModuleInit {
   async uploadAsync(
     file: Express.Multer.File,
     user: User,
+    tagIds?: string[],
     req?: Request,
   ): Promise<{ jobId: string; warning: string }> {
     if (file.size > this.maxFileSize) {
@@ -1418,7 +1465,7 @@ export class FileService implements OnModuleInit {
     const cleanup = this.setupAbortOnDisconnect(req, abortController, job.jobId);
 
     // 后台处理：不阻塞响应
-    this.processAsyncUpload(job.jobId, file, user, originalName, abortController.signal, cleanup);
+    this.processAsyncUpload(job.jobId, file, user, originalName, abortController.signal, cleanup, tagIds);
     return { jobId: job.jobId, warning: '任务在内存中处理，进程重启会丢失' };
   }
 
@@ -1434,6 +1481,7 @@ export class FileService implements OnModuleInit {
   async uploadMultipleAsync(
     files: Express.Multer.File[],
     user: User,
+    tagIds?: string[],
     req?: Request,
   ): Promise<{ jobId: string; total: number; warning: string }> {
     const job = this.uploadJobService.createJob(user, `${files.length} 个文件`, files.length);
@@ -1464,6 +1512,11 @@ export class FileService implements OnModuleInit {
             continue;
           }
           const uploadedFile = await this.uploadToTelegram(file, user, originalName, abortController.signal);
+          // 上传完成后关联标签
+          if (tagIds && tagIds.length > 0) {
+            const values = tagIds.map((tagId) => `('${uploadedFile.id}', '${tagId}')`).join(', ');
+            await this.fileRepository.manager.query(`INSERT INTO file_tags ("fileId", "tagId") VALUES ${values}`);
+          }
           success.push(uploadedFile);
         } catch (error: unknown) {
           // 任务被放弃时直接退出循环
@@ -1555,6 +1608,7 @@ export class FileService implements OnModuleInit {
     originalName: string,
     abortSignal?: AbortSignal,
     cleanup: () => void = () => {},
+    tagIds?: string[],
   ): Promise<void> {
     try {
       this.uploadJobService.updateJob(jobId, { status: 'uploading' });
@@ -1565,6 +1619,12 @@ export class FileService implements OnModuleInit {
       }
 
       const savedFile = await this.uploadToTelegram(file, user, originalName, abortSignal);
+
+      // 上传完成后关联标签
+      if (tagIds && tagIds.length > 0) {
+        const values = tagIds.map((tagId) => `('${savedFile.id}', '${tagId}')`).join(', ');
+        await this.fileRepository.manager.query(`INSERT INTO file_tags ("fileId", "tagId") VALUES ${values}`);
+      }
 
       // 完成前再次检查，避免连接断开后仍写入成功结果
       if (abortSignal?.aborted) {
@@ -1621,5 +1681,68 @@ export class FileService implements OnModuleInit {
     });
 
     return this.fileRepository.save(newFile);
+  }
+
+  /**
+   * 设置文件标签（全量替换模式，事务内执行）
+   */
+  async setFileTags(fileId: string, user: User, tagIds: string[]): Promise<void> {
+    const file = await this.fileRepository.findOne({ where: { id: fileId } });
+    if (!file) {
+      throw new NotFoundException('文件不存在');
+    }
+
+    // 权限校验：文件所有者或管理员
+    if (file.uploaderId !== user.id && user.role !== UserRole.ADMIN && user.role !== UserRole.SUPER_ADMIN) {
+      throw new ForbiddenException('无权操作此文件');
+    }
+
+    // 事务内原子执行：清除旧关联 + 插入新关联
+    await this.fileRepository.manager.transaction(async (manager) => {
+      await manager.query('DELETE FROM file_tags WHERE "fileId" = $1', [fileId]);
+      if (tagIds.length > 0) {
+        const values = tagIds.map((tagId) => `('${fileId}', '${tagId}')`).join(', ');
+        await manager.query(`INSERT INTO file_tags ("fileId", "tagId") VALUES ${values}`);
+      }
+    });
+
+    this.auditService.log({
+      action: 'tag_set_file',
+      userId: user.id,
+      resourceType: 'file',
+      resourceId: fileId,
+      metadata: { tagIds },
+    });
+  }
+
+  /**
+   * 移除文件单个标签
+   */
+  async removeFileTag(fileId: string, user: User, tagId: string): Promise<void> {
+    const file = await this.fileRepository.findOne({ where: { id: fileId } });
+    if (!file) {
+      throw new NotFoundException('文件不存在');
+    }
+
+    if (file.uploaderId !== user.id && user.role !== UserRole.ADMIN && user.role !== UserRole.SUPER_ADMIN) {
+      throw new ForbiddenException('无权操作此文件');
+    }
+
+    const result = await this.fileRepository.manager.query(
+      'DELETE FROM file_tags WHERE "fileId" = $1 AND "tagId" = $2',
+      [fileId, tagId],
+    );
+
+    if (result[1] === 0) { // affected rows = 0
+      throw new NotFoundException('标签关联不存在');
+    }
+
+    this.auditService.log({
+      action: 'tag_set_file',
+      userId: user.id,
+      resourceType: 'file',
+      resourceId: fileId,
+      metadata: { removedTagId: tagId },
+    });
   }
 }

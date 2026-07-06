@@ -33,6 +33,7 @@ import { FileAccessType } from '../common/entities/file.entity';
 import { getClientIp } from '../common/utils/client-ip';
 import { RateLimitService } from '../common/services/rate-limit.service';
 import { ConfigCacheService } from '../common/services/config-cache.service';
+import { TagService } from '../tag/tag.service';
 
 // Multer 层硬上限（600MB，仅防止极端 DoS；精确的动态限制由 FileService.upload() 业务层负责）
 const multerFileSize = 600 * 1024 * 1024; // 600MB
@@ -45,6 +46,7 @@ export class FileController {
     private cryptoService: ThumbnailCryptoService,
     private rateLimitService: RateLimitService,
     private configCacheService: ConfigCacheService,
+    private tagService: TagService,
   ) {}
 
   /**
@@ -62,6 +64,7 @@ export class FileController {
     @CurrentUser() user: User,
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
+    @Body('tagIds') tagIdsRaw?: any,
   ) {
     // 大文件上传：禁用请求和响应超时，防止上传/转发过程中连接被断开
     req.setTimeout(0);
@@ -69,7 +72,9 @@ export class FileController {
     if (!file) {
       throw new BadRequestException('请选择要上传的文件');
     }
-    return this.fileService.upload(file, user);
+    const tagIds = parseTagIdsBody(tagIdsRaw);
+    if (tagIds?.length) await this.tagService.assertOwner(user.id, tagIds);
+    return this.fileService.upload(file, user, tagIds);
   }
 
   @Post('upload-multiple')
@@ -80,6 +85,7 @@ export class FileController {
     @CurrentUser() user: User,
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
+    @Body('tagIds') tagIdsRaw?: any,
   ) {
     // 大文件上传：禁用请求和响应超时
     req.setTimeout(0);
@@ -87,7 +93,9 @@ export class FileController {
     if (!files || files.length === 0) {
       throw new BadRequestException('请选择要上传的文件');
     }
-    return this.fileService.uploadMultiple(files, user);
+    const tagIds = parseTagIdsBody(tagIdsRaw);
+    if (tagIds?.length) await this.tagService.assertOwner(user.id, tagIds);
+    return this.fileService.uploadMultiple(files, user, tagIds);
   }
 
   /**
@@ -103,13 +111,16 @@ export class FileController {
     @CurrentUser() user: User,
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
+    @Body('tagIds') tagIdsRaw?: any,
   ) {
     req.setTimeout(0);
     res.setTimeout(0);
     if (!file) {
       throw new BadRequestException('请选择要上传的文件');
     }
-    return this.fileService.uploadAsync(file, user, req);
+    const tagIds = parseTagIdsBody(tagIdsRaw);
+    if (tagIds?.length) await this.tagService.assertOwner(user.id, tagIds);
+    return this.fileService.uploadAsync(file, user, tagIds, req);
   }
 
   /**
@@ -123,13 +134,16 @@ export class FileController {
     @CurrentUser() user: User,
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
+    @Body('tagIds') tagIdsRaw?: any,
   ) {
     req.setTimeout(0);
     res.setTimeout(0);
     if (!files || files.length === 0) {
       throw new BadRequestException('请选择要上传的文件');
     }
-    return this.fileService.uploadMultipleAsync(files, user, req);
+    const tagIds = parseTagIdsBody(tagIdsRaw);
+    if (tagIds?.length) await this.tagService.assertOwner(user.id, tagIds);
+    return this.fileService.uploadMultipleAsync(files, user, tagIds, req);
   }
 
   /**
@@ -170,6 +184,7 @@ export class FileController {
     @Query('sortBy') sortBy?: string,
     @Query('sortOrder') sortOrder?: string,
     @Query('cursor') cursor?: string,
+    @Query('tagIds') tagIdsRaw?: string,
     @Req() req?: Request,
   ) {
     // 关键词长度限制：最大 100 字符，防止极端搜索词滥用
@@ -192,13 +207,20 @@ export class FileController {
       }
     }
     const shouldIncludeDeleted = includeDeleted === 'true';
+    const tagIds = tagIdsRaw ? tagIdsRaw.split(',').filter(Boolean) : undefined;
+
+    // 校验标签所有权
+    if (tagIds?.length) {
+      await this.tagService.assertOwner(user.id, tagIds);
+    }
+
     // Non-admin users can only see their own files
     if (user.role === UserRole.USER) {
-      return this.fileService.findAll(Number(page), Number(limit), user.id, keyword, shouldIncludeDeleted, sortBy, sortOrder, cursor);
+      return this.fileService.findAll(Number(page), Number(limit), user.id, keyword, shouldIncludeDeleted, sortBy, sortOrder, cursor, tagIds);
     }
     // Admin: only show all files when userId filter is explicitly provided;
     // default to own files for the "我的文件" page
-    return this.fileService.findAll(Number(page), Number(limit), userId || user.id, keyword, shouldIncludeDeleted, sortBy, sortOrder, cursor);
+    return this.fileService.findAll(Number(page), Number(limit), userId || user.id, keyword, shouldIncludeDeleted, sortBy, sortOrder, cursor, tagIds);
   }
 
   /**
@@ -399,6 +421,37 @@ export class FileController {
     return { markdown };
   }
 
+  /** 设置文件标签（全量替换） */
+  @Put(':id/tags')
+  @UseGuards(AuthGuard('jwt'))
+  async setFileTags(
+    @Param('id') id: string,
+    @CurrentUser() user: User,
+    @Body('tagIds') tagIds: string[],
+  ) {
+    if (!Array.isArray(tagIds)) {
+      throw new BadRequestException('tagIds 必须是数组');
+    }
+    // 校验标签所有权
+    if (tagIds.length > 0) {
+      await this.tagService.assertOwner(user.id, tagIds);
+    }
+    await this.fileService.setFileTags(id, user, tagIds);
+    return { message: '标签已更新' };
+  }
+
+  /** 移除文件单个标签 */
+  @Delete(':id/tags/:tagId')
+  @UseGuards(AuthGuard('jwt'))
+  async removeFileTag(
+    @Param('id') id: string,
+    @Param('tagId') tagId: string,
+    @CurrentUser() user: User,
+  ) {
+    await this.fileService.removeFileTag(id, user, tagId);
+    return { message: '标签已移除' };
+  }
+
   // Public file access — 三种模式：
   // 1. ?access= → 短效访问链接直接返回内容
   // 2. 无参数 → 无约束公开直返 / 有密码显示密码页 / 受限直接跳转短效访问链接
@@ -537,6 +590,14 @@ function escapeHtml(str: string): string {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#039;');
+}
+
+/** 解析请求体中的 tagIds 字段，支持字符串和数组格式 */
+function parseTagIdsBody(raw: unknown): string[] | undefined {
+  if (!raw) return undefined;
+  if (Array.isArray(raw)) return raw.filter(Boolean);
+  if (typeof raw === 'string') return raw.split(',').filter(Boolean);
+  return undefined;
 }
 
 function getPasswordPageHTML(actionUrl: string, _fileId: string, errorMsg?: string): string {

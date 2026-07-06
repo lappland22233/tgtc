@@ -298,3 +298,128 @@ body {
   margin-top: 6px;
   white-space: nowrap;
 }
+
+/* ===== 全局移动端响应式 ===== */
+@media (max-width: 768px) {
+  /* 侧边栏隐藏 - 由 Layout.vue 脚本控制 */
+  .sidebar {
+    display: none;
+  }
+
+  /* 汉堡菜单按钮 */
+  .mobile-menu-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 40px;
+    height: 40px;
+    background: transparent;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 20px;
+    color: var(--text-primary);
+    margin-bottom: 16px;
+  }
+
+  /* 主内容区 padding 缩小 */
+  .main-content {
+    padding: 12px;
+  }
+
+  /* 页面标题缩小 */
+  .page-header h1 {
+    font-size: 20px;
+  }
+
+  .page-header p {
+    font-size: 13px;
+  }
+
+  /* 卡片 padding 缩小 */
+  .card {
+    padding: 16px;
+  }
+
+  /* 统计网格 - 移动端 2 列 */
+  .stats-grid {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 10px;
+  }
+
+  /* 统计卡片值缩小 */
+  .stat-card .value {
+    font-size: 22px;
+  }
+
+  /* 认证卡片 */
+  .auth-card {
+    padding: 32px 24px;
+    margin: 0 16px;
+    max-width: 100%;
+  }
+
+  .auth-header h1 {
+    font-size: 24px;
+  }
+
+  /* 上传区域缩小 */
+  .upload-zone {
+    padding: 32px 16px;
+  }
+
+  .upload-zone h3 {
+    font-size: 16px;
+  }
+
+  /* 文件列表项堆叠 */
+  .file-item {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 12px;
+  }
+
+  .file-actions {
+    width: 100%;
+    justify-content: flex-end;
+  }
+
+  /* 表格在移动端隐藏（由组件级 v-if 控制，此处作为兜底） */
+  .desktop-table {
+    display: none;
+  }
+
+  /* 移动端卡片列表可见 */
+  .mobile-card-list {
+    display: block;
+  }
+}
+
+@media (min-width: 769px) {
+  .mobile-menu-btn {
+    display: none;
+  }
+
+  .mobile-card-list {
+    display: none;
+  }
+}
+
+/* 超小屏幕 (<480px) */
+@media (max-width: 480px) {
+  .stats-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .card {
+    padding: 12px;
+  }
+
+  .main-content {
+    padding: 8px;
+  }
+
+  .stat-card .value {
+    font-size: 20px;
+  }
+}

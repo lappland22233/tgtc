@@ -39,34 +39,51 @@
       <div class="card">
         <h3 style="margin: 0 0 16px;">攻击行为告警</h3>
         <t-loading :loading="attackLoading" size="small">
-          <t-table
-            v-if="attackAlerts.length > 0"
-            :data="attackAlerts"
-            :columns="attackColumns"
-            row-key="id"
-            hover
-            max-height="500"
-          >
-            <template #ruleId="{ row }">
-              <t-tag variant="light">{{ attackTypeLabel(row.ruleId) }}</t-tag>
-            </template>
-            <template #level="{ row }">
-              <t-tag :theme="row.level === 'critical' ? 'danger' : 'warning'" variant="light-outline">
-                {{ row.level === 'critical' ? '严重' : '警告' }}
-              </t-tag>
-            </template>
-            <template #message="{ row }">
-              <span style="font-size:13px">{{ row.message }}</span>
-            </template>
-            <template #createdAt="{ row }">
-              {{ new Date(row.createdAt).toLocaleString('zh-CN') }}
-            </template>
-            <template #acknowledgedAt="{ row }">
-              <span v-if="row.acknowledgedAt" style="color:var(--success-color)">已确认</span>
-              <span v-else style="color:var(--warning-color)">待处理</span>
-            </template>
-          </t-table>
-          <div v-else class="placeholder-block">
+          <div v-if="!isMobile && attackAlerts.length > 0">
+            <t-table
+              :data="attackAlerts"
+              :columns="attackColumns"
+              row-key="id"
+              hover
+              max-height="500"
+            >
+              <template #ruleId="{ row }">
+                <t-tag variant="light">{{ attackTypeLabel(row.ruleId) }}</t-tag>
+              </template>
+              <template #level="{ row }">
+                <t-tag :theme="row.level === 'critical' ? 'danger' : 'warning'" variant="light-outline">
+                  {{ row.level === 'critical' ? '严重' : '警告' }}
+                </t-tag>
+              </template>
+              <template #message="{ row }">
+                <span style="font-size:13px">{{ row.message }}</span>
+              </template>
+              <template #createdAt="{ row }">
+                {{ new Date(row.createdAt).toLocaleString('zh-CN') }}
+              </template>
+              <template #acknowledgedAt="{ row }">
+                <span v-if="row.acknowledgedAt" style="color:var(--success-color)">已确认</span>
+                <span v-else style="color:var(--warning-color)">待处理</span>
+              </template>
+            </t-table>
+          </div>
+          <div v-if="isMobile && attackAlerts.length > 0" class="mobile-card-list">
+            <div v-for="alert in attackAlerts" :key="alert.id" class="mobile-card">
+              <div class="mobile-card-row">
+                <t-tag variant="light" size="small">{{ attackTypeLabel(alert.ruleId) }}</t-tag>
+                <t-tag :theme="alert.level === 'critical' ? 'danger' : 'warning'" variant="light-outline" size="small">
+                  {{ alert.level === 'critical' ? '严重' : '警告' }}
+                </t-tag>
+              </div>
+              <div class="mobile-card-body">{{ alert.message }}</div>
+              <div class="mobile-card-meta">
+                <span>{{ new Date(alert.createdAt).toLocaleString('zh-CN') }}</span>
+                <span v-if="alert.acknowledgedAt" style="color:var(--success-color)">已确认</span>
+                <span v-else style="color:var(--warning-color)">待处理</span>
+              </div>
+            </div>
+          </div>
+          <div v-if="!attackAlerts.length" class="placeholder-block">
             <div class="placeholder-icon">✅</div>
             <h3>当前无攻击行为</h3>
             <p>系统每 5 分钟自动检测扫描、爆破、爬虫、异常下载等攻击行为</p>
@@ -108,30 +125,51 @@
           </t-button>
         </div>
         <t-loading :loading="bansLoading" size="small">
-          <t-table
-            :data="recentBans"
-            :columns="banColumns"
-            row-key="ip"
-            table-layout="fixed"
-            :pagination="false"
-            size="small"
-          >
-            <template #createdAt="{ row }">
-              {{ formatDate(row.createdAt) }}
-            </template>
-            <template #isPermanent="{ row }">
-              <t-tag :theme="row.isPermanent ? 'danger' : 'success'" variant="light" size="small">
-                {{ row.isPermanent ? '是' : '否' }}
-              </t-tag>
-            </template>
-            <template #action="{ row }">
-              <t-popconfirm content="确定解除该 IP 的封禁？" @confirm="handleUnban(row.ip)">
-                <t-button variant="outline" size="small" theme="default" :loading="unbanningIp === row.ip">
-                  解封
-                </t-button>
-              </t-popconfirm>
-            </template>
-          </t-table>
+          <div v-if="!isMobile && recentBans.length > 0">
+            <t-table
+              :data="recentBans"
+              :columns="banColumns"
+              row-key="ip"
+              table-layout="fixed"
+              :pagination="false"
+              size="small"
+            >
+              <template #createdAt="{ row }">
+                {{ formatDate(row.createdAt) }}
+              </template>
+              <template #isPermanent="{ row }">
+                <t-tag :theme="row.isPermanent ? 'danger' : 'success'" variant="light" size="small">
+                  {{ row.isPermanent ? '是' : '否' }}
+                </t-tag>
+              </template>
+              <template #action="{ row }">
+                <t-popconfirm content="确定解除该 IP 的封禁？" @confirm="handleUnban(row.ip)">
+                  <t-button variant="outline" size="small" theme="default" :loading="unbanningIp === row.ip">
+                    解封
+                  </t-button>
+                </t-popconfirm>
+              </template>
+            </t-table>
+          </div>
+          <div v-if="isMobile && recentBans.length > 0" class="mobile-card-list">
+            <div v-for="ban in recentBans" :key="ban.ip" class="mobile-card">
+              <div class="mobile-card-row">
+                <strong>{{ ban.ip }}</strong>
+                <t-tag :theme="ban.isPermanent ? 'danger' : 'success'" variant="light" size="small">
+                  {{ ban.isPermanent ? '永久' : '临时' }}
+                </t-tag>
+              </div>
+              <div v-if="ban.reason" class="mobile-card-body">{{ ban.reason }}</div>
+              <div class="mobile-card-meta">
+                <span>{{ formatDate(ban.createdAt) }}</span>
+                <t-popconfirm content="确定解除该 IP 的封禁？" @confirm="handleUnban(ban.ip)">
+                  <t-button variant="outline" size="small" theme="default" :loading="unbanningIp === ban.ip">
+                    解封
+                  </t-button>
+                </t-popconfirm>
+              </div>
+            </div>
+          </div>
           <div v-if="!bansLoading && recentBans.length === 0" class="empty-hint">暂无活跃封禁</div>
         </t-loading>
       </div>
@@ -140,26 +178,43 @@
       <div class="card" style="margin-top: 16px">
         <h3 style="margin: 0 0 16px">封禁历史（已解封/已过期）</h3>
         <t-loading :loading="bansLoading" size="small">
-          <t-table
-            :data="banHistory"
-            :columns="banHistoryColumns"
-            row-key="ip"
-            table-layout="fixed"
-            :pagination="false"
-            size="small"
-          >
-            <template #createdAt="{ row }">
-              {{ formatDate(row.createdAt) }}
-            </template>
-            <template #unbannedAt="{ row }">
-              {{ formatDate(row.unbannedAt) }}
-            </template>
-            <template #isPermanent="{ row }">
-              <t-tag :theme="row.isPermanent ? 'danger' : 'success'" variant="light" size="small">
-                {{ row.isPermanent ? '永久' : '临时' }}
-              </t-tag>
-            </template>
-          </t-table>
+          <div v-if="!isMobile && banHistory.length > 0">
+            <t-table
+              :data="banHistory"
+              :columns="banHistoryColumns"
+              row-key="ip"
+              table-layout="fixed"
+              :pagination="false"
+              size="small"
+            >
+              <template #createdAt="{ row }">
+                {{ formatDate(row.createdAt) }}
+              </template>
+              <template #unbannedAt="{ row }">
+                {{ formatDate(row.unbannedAt) }}
+              </template>
+              <template #isPermanent="{ row }">
+                <t-tag :theme="row.isPermanent ? 'danger' : 'success'" variant="light" size="small">
+                  {{ row.isPermanent ? '永久' : '临时' }}
+                </t-tag>
+              </template>
+            </t-table>
+          </div>
+          <div v-if="isMobile && banHistory.length > 0" class="mobile-card-list">
+            <div v-for="ban in banHistory" :key="ban.ip" class="mobile-card">
+              <div class="mobile-card-row">
+                <strong>{{ ban.ip }}</strong>
+                <t-tag :theme="ban.isPermanent ? 'danger' : 'success'" variant="light" size="small">
+                  {{ ban.isPermanent ? '永久' : '临时' }}
+                </t-tag>
+              </div>
+              <div v-if="ban.reason" class="mobile-card-body">{{ ban.reason }}</div>
+              <div class="mobile-card-meta">
+                <span>{{ formatDate(ban.createdAt) }}</span>
+                <span>解封: {{ formatDate(ban.unbannedAt) }}</span>
+              </div>
+            </div>
+          </div>
           <div v-if="!bansLoading && banHistory.length === 0" class="empty-hint">暂无封禁历史</div>
         </t-loading>
       </div>
@@ -182,40 +237,62 @@
 
       <div class="card">
         <t-loading :loading="abnormalLoading" size="small">
-          <t-table
-            :data="abnormalIps"
-            :columns="abnormalColumns"
-            row-key="ip"
-            table-layout="fixed"
-            :pagination="false"
-            size="small"
-          >
-            <template #requestCount="{ row }">
-              {{ row.requestCount }}
-            </template>
-            <template #errorRate="{ row }">
-              <t-tag
-                :theme="errorRateTheme(row.errorRate)"
-                variant="light"
-                size="small"
-              >
-                {{ row.errorRate.toFixed(1) }}%
-              </t-tag>
-            </template>
-            <template #bandwidth="{ row }">
-              {{ formatSize(row.bandwidth) }}
-            </template>
-            <template #riskLevel="{ row }">
-              <t-tag :theme="riskTheme(row.riskLevel)" variant="light" size="small">
-                {{ riskLabel(row.riskLevel) }}
-              </t-tag>
-            </template>
-            <template #action="{ row }">
-              <t-button variant="outline" size="small" theme="danger" @click="openBanDialog(row.ip)">
-                封禁 IP
-              </t-button>
-            </template>
-          </t-table>
+          <div v-if="!isMobile && abnormalIps.length > 0">
+            <t-table
+              :data="abnormalIps"
+              :columns="abnormalColumns"
+              row-key="ip"
+              table-layout="fixed"
+              :pagination="false"
+              size="small"
+            >
+              <template #requestCount="{ row }">
+                {{ row.requestCount }}
+              </template>
+              <template #errorRate="{ row }">
+                <t-tag
+                  :theme="errorRateTheme(row.errorRate)"
+                  variant="light"
+                  size="small"
+                >
+                  {{ row.errorRate.toFixed(1) }}%
+                </t-tag>
+              </template>
+              <template #bandwidth="{ row }">
+                {{ formatSize(row.bandwidth) }}
+              </template>
+              <template #riskLevel="{ row }">
+                <t-tag :theme="riskTheme(row.riskLevel)" variant="light" size="small">
+                  {{ riskLabel(row.riskLevel) }}
+                </t-tag>
+              </template>
+              <template #action="{ row }">
+                <t-button variant="outline" size="small" theme="danger" @click="openBanDialog(row.ip)">
+                  封禁 IP
+                </t-button>
+              </template>
+            </t-table>
+          </div>
+          <div v-if="isMobile && abnormalIps.length > 0" class="mobile-card-list">
+            <div v-for="ip in abnormalIps" :key="ip.ip" class="mobile-card">
+              <div class="mobile-card-row">
+                <strong>{{ ip.ip }}</strong>
+                <t-tag :theme="riskTheme(ip.riskLevel)" variant="light" size="small">
+                  {{ riskLabel(ip.riskLevel) }}
+                </t-tag>
+              </div>
+              <div class="mobile-card-body">
+                <span>请求: {{ ip.requestCount }}</span>
+                <span>错误率: {{ ip.errorRate.toFixed(1) }}%</span>
+                <span>带宽: {{ formatSize(ip.bandwidth) }}</span>
+              </div>
+              <div class="mobile-card-meta">
+                <t-button variant="outline" size="small" theme="danger" @click="openBanDialog(ip.ip)">
+                  封禁 IP
+                </t-button>
+              </div>
+            </div>
+          </div>
           <div v-if="!abnormalLoading && abnormalIps.length === 0" class="empty-hint">暂无异常 IP</div>
         </t-loading>
       </div>
@@ -240,7 +317,7 @@
           <h4 style="margin: 0 0 12px; font-size: 15px; font-weight: 500; color: var(--text-primary)">
             {{ category }}
           </h4>
-          <div class="security-config-grid">
+          <div class="security-config-grid" :class="{ 'mobile-single-col': isMobile }">
             <div
               v-for="item in configItemsByCategory(category)"
               :key="item.key"
@@ -293,10 +370,10 @@
   >
     <t-form label-width="80px">
       <t-form-item label="IP 地址">
-        <t-input v-model="banForm.ip" placeholder="输入要封禁的 IP 地址" />
+        <t-input v-model="banForm.ip" placeholder="输入要封禁的 IP 地址" autocomplete="off" name="ban-ip" />
       </t-form-item>
       <t-form-item label="封禁原因">
-        <t-input v-model="banForm.reason" placeholder="封禁原因（选填）" />
+        <t-input v-model="banForm.reason" placeholder="封禁原因（选填）" autocomplete="off" name="ban-reason" />
       </t-form-item>
       <t-form-item label="封禁类型">
         <t-radio-group v-model="banForm.isPermanent">
@@ -323,11 +400,13 @@ import { MessagePlugin } from 'tdesign-vue-next';
 import { api, useAuthStore } from '@/stores/auth';
 import { storeToRefs } from 'pinia';
 import { formatDate, formatSize } from '@/utils/format';
+import { useMobile } from '../../composables/useMobile';
 import AlertManagement from './AlertManagement.vue';
 
 const authStore = useAuthStore();
 const { user } = storeToRefs(authStore);
 const isSuperAdmin = computed(() => user.value?.role === 'super_admin');
+const isMobile = useMobile();
 
 // Types
 interface BannedIp {
@@ -847,5 +926,44 @@ onMounted(() => {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+@media (max-width: 768px) {
+  .mobile-card {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 12px;
+    margin-bottom: 10px;
+  }
+
+  .mobile-card-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 6px;
+  }
+
+  .mobile-card-body {
+    font-size: 13px;
+    color: var(--text-secondary);
+    margin-bottom: 8px;
+    line-height: 1.5;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .mobile-card-meta {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+
+  .mobile-single-col {
+    grid-template-columns: 1fr !important;
+  }
 }
 </style>
