@@ -18,13 +18,17 @@ import { User, UserRole } from '../common/entities/user.entity';
   cors: {
     origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
       // 与主应用 CORS 配置保持一致：读取 CORS_ORIGINS，未配置时回退到本地开发地址
-      const allowed = process.env.CORS_ORIGINS?.split(',').map(s => s.trim()).filter(Boolean)
+      const allowed = process.env.CORS_ORIGINS?.split(',')
+        .map(s => s.trim())
+        .filter(Boolean)
         || [process.env.FRONTEND_URL || 'http://localhost:5173'];
-      // 允许无 origin 的请求（如 curl、同源请求），或匹配白名单的请求
-      if (!origin || allowed.includes(origin)) {
+      // 开发环境允许无 origin 请求，生产环境拒绝
+      if (process.env.NODE_ENV !== 'production' && !origin) {
+        callback(null, true);
+      } else if (origin && allowed.includes(origin)) {
         callback(null, true);
       } else {
-        callback(new Error(`Origin ${origin} not allowed by CORS`), false);
+        callback(new Error(`Origin ${origin || '(none)'} not allowed by CORS`), false);
       }
     },
     credentials: true,

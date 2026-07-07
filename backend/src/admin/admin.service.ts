@@ -486,6 +486,58 @@ export class AdminService {
     });
   }
 
+  // ==================== 缓存配置 ====================
+
+  async getCacheConfig(): Promise<{
+    maxSizeGB: number;
+    minFreeDiskGB: number;
+    ttlDays: number;
+  }> {
+    const [maxSize, minFree, ttl] = await Promise.all([
+      this.getConfigByKey('FILE_CACHE_MAX_SIZE_GB'),
+      this.getConfigByKey('FILE_CACHE_MIN_FREE_DISK_GB'),
+      this.getConfigByKey('FILE_CACHE_TTL_DAYS'),
+    ]);
+    return {
+      maxSizeGB: parseFloat(maxSize || '10'),
+      minFreeDiskGB: parseFloat(minFree || '1'),
+      ttlDays: parseInt(ttl || '3'),
+    };
+  }
+
+  async updateCacheConfig(user: User, config: {
+    maxSizeGB?: number;
+    minFreeDiskGB?: number;
+    ttlDays?: number;
+  }): Promise<void> {
+    if (config.maxSizeGB !== undefined) {
+      if (config.maxSizeGB < 1 || config.maxSizeGB > 1000) {
+        throw new BadRequestException('缓存上限应在 1-1000 GB 之间');
+      }
+      await this.setConfigValue('FILE_CACHE_MAX_SIZE_GB', String(config.maxSizeGB), '文件缓存总大小上限 (GB)');
+    }
+    if (config.minFreeDiskGB !== undefined) {
+      if (config.minFreeDiskGB < 0.5 || config.minFreeDiskGB > 100) {
+        throw new BadRequestException('磁盘最低剩余空间应在 0.5-100 GB 之间');
+      }
+      await this.setConfigValue('FILE_CACHE_MIN_FREE_DISK_GB', String(config.minFreeDiskGB), '缓存磁盘最低剩余空间 (GB)');
+    }
+    if (config.ttlDays !== undefined) {
+      if (config.ttlDays < 1 || config.ttlDays > 365) {
+        throw new BadRequestException('缓存有效期应在 1-365 天之间');
+      }
+      await this.setConfigValue('FILE_CACHE_TTL_DAYS', String(config.ttlDays), '文件缓存有效期 (天)');
+    }
+
+    this.auditService.log({
+      action: 'cache_config_change',
+      userId: user.id,
+      resourceType: 'config',
+      resourceId: 'file_cache',
+      metadata: config,
+    });
+  }
+
   // ==================== 访问日志统计 ====================
 
   private parseTimeRange(timeRange: string): Date {
@@ -716,6 +768,10 @@ export class AdminService {
 
     const limit = query.limit || 10;
     const sortBy = query.sortBy || 'accessCount';
+    // 白名单校验
+    if (!['accessCount', 'bandwidth'].includes(sortBy)) {
+      throw new BadRequestException(`不支持的排序字段: ${sortBy}`);
+    }
 
     const qb = this.accessLogRepository
       .createQueryBuilder('fal')

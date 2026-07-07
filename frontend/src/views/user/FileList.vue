@@ -688,6 +688,7 @@ async function loadMoreFiles() {
       20,
       search.value || undefined,
       cursor,
+      selectedTagIds.value.length > 0 ? selectedTagIds.value : undefined,
     );
     if (!result) return { data: [], nextCursor: null, hasMore: false };
 

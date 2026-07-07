@@ -20,7 +20,11 @@ export function getErrorMessage(error: unknown): string {
 
   // 通用 Error（AxiosError 也是 Error 实例，需放在 response 检查之后）
   if (error instanceof Error) {
-    if (error.name === 'AbortError' || error.message?.includes('timeout')) {
+    // 主动取消（AbortError）不应显示为错误
+    if (error.name === 'AbortError') {
+      return '';
+    }
+    if (error.message?.includes('timeout')) {
       return '请求超时，请重试';
     }
     if (error.message?.includes('Network Error')) {

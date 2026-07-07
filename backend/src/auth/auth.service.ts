@@ -160,8 +160,8 @@ export class AuthService {
       );
     }
 
-    // 登录失败限流检查（IP + email 维度，数据库持久化）
-    const loginLimitKey = `login:${ip}:${loginDto.email}`;
+    // 登录失败限流检查（IP + email 维度，email 小写规范化防绕过）
+    const loginLimitKey = `login:${ip}:${loginDto.email.toLowerCase().trim()}`;
 
     const user = await this.userRepository.findOne({
       where: { email: loginDto.email },
@@ -326,7 +326,7 @@ export class AuthService {
     const hashedPassword = await bcrypt.hash(dto.newPassword, BCRYPT_ROUNDS);
     await this.userRepository.update(
       { email: dto.email },
-      { password: hashedPassword },
+      { password: hashedPassword, passwordUpdatedAt: new Date() },
     );
 
     // 审计日志：密码重置
@@ -342,8 +342,10 @@ export class AuthService {
     }
   }
 
+  /** HMAC-SHA256 计算验证码哈希，防彩虹表反查 */
   private hashCode(code: string): string {
-    return crypto.createHash('sha256').update(code).digest('hex');
+    const secret = process.env.CODE_HMAC_SECRET || process.env.JWT_SECRET || 'tgtc-code-hmac-default';
+    return crypto.createHmac('sha256', secret).update(code).digest('hex');
   }
 
   protected async validateVerificationCode(email: string, code: string, type: string): Promise<void> {
@@ -391,6 +393,10 @@ export class AuthService {
   }
 
   async validateUser(userId: string): Promise<User | null> {
+    // UUID 格式校验，防止非 UUID 输入导致异常查询
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(userId)) {
+      return null;
+    }
     return this.userRepository.findOne({ where: { id: userId } });
   }
 

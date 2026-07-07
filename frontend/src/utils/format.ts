@@ -10,7 +10,8 @@ export function formatDate(date: string): string {
   return date ? new Date(date).toLocaleDateString('zh-CN') : '-';
 }
 
-export function getFileEmoji(mimeType: string): string {
+export function getFileEmoji(mimeType?: string): string {
+  if (!mimeType) return '📎';
   if (mimeType.startsWith('image/')) return '🖼️';
   if (mimeType.includes('pdf')) return '📄';
   if (mimeType.includes('zip') || mimeType.includes('rar')) return '📦';

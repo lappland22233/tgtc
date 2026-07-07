@@ -12,6 +12,9 @@ import { UploadTask } from '../common/entities/upload-task.entity';
 import { TelegramService } from '../telegram/telegram.service';
 import { ThumbnailCryptoService } from './thumbnail-crypto.service';
 import { UploadJobService } from './upload-job.service';
+import { ChunkUploadService } from './chunk-upload.service';
+import { ChunkUploadController } from './chunk-upload.controller';
+import { FileCacheService } from './file-cache.service';
 import { ConfigCacheModule } from '../common/services/config-cache.module';
 import { RateLimitModule } from '../common/services/rate-limit.module';
 import { TagModule } from '../tag/tag.module';
@@ -36,8 +39,8 @@ import { TagModule } from '../tag/tag.module';
       }),
     }),
   ],
-  controllers: [FileController],
-  providers: [FileService, TelegramService, ThumbnailCryptoService, UploadJobService],
+  controllers: [FileController, ChunkUploadController],
+  providers: [FileService, TelegramService, ThumbnailCryptoService, UploadJobService, ChunkUploadService, FileCacheService],
   exports: [FileService],
 })
 export class FileModule {}

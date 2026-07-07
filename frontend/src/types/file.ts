@@ -9,6 +9,11 @@ export interface Tag {
   fileCount?: number;
 }
 
+export interface Uploader {
+  id: string;
+  email: string;
+}
+
 export interface FileItem {
   id: string;
   filename: string;
@@ -22,10 +27,7 @@ export interface FileItem {
   expiresStartAt: string | null;
   hasPassword: boolean;
   createdAt: string;
-  uploader: {
-    id: string;
-    email: string;
-  } | null;
+  uploader: Uploader | null;
   /** 是否已标记为删除（延迟删除状态） */
   isDeleted: boolean;
   /** 是否由管理员删除（普通用户不可恢复） */

@@ -56,7 +56,8 @@ export class AlertEngineService {
     return count > 0;
   }
 
-  /** 批量创建告警记录（带冷却过滤） */
+  /** 批量创建告警记录（带冷却过滤）
+   * 注：冷却检查与创建存在 TOCTOU 竞态，高并发下建议改用 upsert + unique index */
   async createAlerts(evaluations: AlertRuleEvaluation[]): Promise<Alert[]> {
     const alerts: Alert[] = [];
     for (const eval_ of evaluations) {

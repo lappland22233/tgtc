@@ -8,12 +8,16 @@ function pemToArrayBuffer(pem: string): ArrayBuffer {
   const b64 = pem
     .replace(/-----[^-]+-----/g, '')
     .replace(/\s/g, '');
-  const binary = atob(b64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i);
+  try {
+    const binary = atob(b64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return bytes.buffer;
+  } catch {
+    throw new Error('缩略图公钥格式无效');
   }
-  return bytes.buffer;
 }
 
 /** ArrayBuffer 转 base64url */

@@ -29,6 +29,12 @@ export class MailerService {
 
   constructor(private configService: ConfigService) {}
 
+  /** 统一处理 SMTP 密码解密，空密码返回空字符串 */
+  private resolveSmtpPassword(encryptedPass: string | undefined): string {
+    if (!encryptedPass) return '';
+    return decryptPassword(encryptedPass);
+  }
+
   private getOrCreateTransporter(): nodemailer.Transporter {
     if (this.transporter) {
       return this.transporter;
@@ -38,7 +44,7 @@ export class MailerService {
       port: this.configService.get<number>('SMTP_PORT') || 587,
       secure: this.configService.get<boolean>('SMTP_SECURE') || false,
       user: this.configService.get<string>('SMTP_USER') || '',
-      pass: decryptPassword(this.configService.get<string>('SMTP_PASSWORD') || ''),
+      pass: this.resolveSmtpPassword(this.configService.get<string>('SMTP_PASSWORD')),
     });
   }
 
@@ -59,9 +65,7 @@ export class MailerService {
   rebuildTransporter(payload: { key: string; value: unknown }) {
     if (payload.key !== 'smtp_config') return;
     const config = payload.value as SmtpConfig;
-    if (config.pass) {
-      config.pass = decryptPassword(config.pass);
-    }
+    config.pass = this.resolveSmtpPassword(config.pass);
     this.transporter = null;
     this.createTransporter(config);
     this.logger.log('SMTP transporter 已根据配置更新重建');

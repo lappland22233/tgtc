@@ -3,6 +3,7 @@ import { UserRole } from '../common/entities/user.entity';
 
 export class CreateUserDto {
   @IsEmail({}, { message: '请输入有效的邮箱地址' })
+  @MaxLength(255, { message: '邮箱地址过长' })
   email: string;
 
   @IsString()

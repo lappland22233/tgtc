@@ -18,15 +18,22 @@ export class TransformInterceptor<T>
   implements NestInterceptor<T, ApiResponse<T>>
 {
   intercept(
-    _context: ExecutionContext,
+    context: ExecutionContext,
     next: CallHandler,
   ): Observable<ApiResponse<T>> {
     return next.handle().pipe(
-      map((data) => ({
-        code: 0,
-        message: 'success',
-        data,
-      })),
+      map((data) => {
+        // 跳过已由 @Res() 手动处理的响应（如文件下载流）
+        const res = context.switchToHttp().getResponse();
+        if (res.headersSent) {
+          return data;
+        }
+        return {
+          code: 0,
+          message: 'success',
+          data,
+        };
+      }),
     );
   }
 }

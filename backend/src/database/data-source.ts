@@ -20,10 +20,10 @@ export const AppDataSource = new DataSource({
   host: process.env.DB_HOST || 'localhost',
   port: parseInt(process.env.DB_PORT || '5432'),
   username: process.env.DB_USERNAME || 'postgres',
-  password: process.env.DB_PASSWORD || 'postgres',
-  database: process.env.DB_DATABASE || 'file_distribution',
+  password: process.env.DB_PASSWORD || undefined,
+  database: process.env.DB_DATABASE || 'text',
   entities: [User, File, SystemConfig, VerificationCode, BannedIP, ShareAudit, FileAccessLog, RateLimit, AuditLog, AccessLog, Alert, DashboardConfig, UploadTask, Tag],
-  migrations: ['src/migrations/*.ts'],
+  migrations: ['src/migrations/*{.ts,.js}'],
   synchronize: false,
   logging: process.env.NODE_ENV === 'development',
   maxQueryExecutionTime: 5000, // D-4: 慢查询检测阈值（毫秒）

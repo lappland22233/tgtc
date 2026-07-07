@@ -117,7 +117,7 @@ const formatOptions = [
   { label: '毫秒', value: 'ms' },
 ];
 
-function uid() { return Date.now().toString(36) + Math.random().toString(36).substr(2); }
+function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2); }
 
 async function fetchDashboards() {
   try {

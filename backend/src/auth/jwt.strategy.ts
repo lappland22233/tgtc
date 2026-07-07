@@ -8,7 +8,12 @@ import { UserRole } from '../common/entities/user.entity';
 import { ConfigCacheService } from '../common/services/config-cache.service';
 
 const cookieExtractor = (req: Request) => {
-  return req?.cookies?.access_token || null;
+  const token = req?.cookies?.access_token;
+  // 类型校验：仅返回合法 JWT 格式的 token
+  if (!token || typeof token !== 'string' || token.split('.').length !== 3) {
+    return null;
+  }
+  return token;
 };
 
 @Injectable()
@@ -66,6 +71,15 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     if (!user) {
       throw new UnauthorizedException('用户不存在或已被删除');
     }
+
+    // Token 吊销检查：若密码在 token 签发之后被修改，则拒绝
+    if (user.passwordUpdatedAt && payload.iat) {
+      const tokenIssuedAt = new Date(payload.iat * 1000);
+      if (user.passwordUpdatedAt > tokenIssuedAt) {
+        throw new UnauthorizedException('密码已变更，请重新登录');
+      }
+    }
+
     if (user.isBanned) {
       throw new UnauthorizedException('账号已被封禁');
     }

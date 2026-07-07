@@ -136,20 +136,20 @@ export class DataArchivalProcessor {
       process.env.ACCESS_LOG_RETENTION_DAYS || '30',
       10,
     );
-    const cutoff = new Date();
-    cutoff.setDate(cutoff.getDate() - retentionDays);
+    const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000);
+    const BATCH_SIZE = 1000;
 
     try {
       let deleted = 0;
       // 分批删除（每批 1000 条），防止大表一次性删除导致长事务
       while (true) {
         const result = await this._dataSource.query(
-          `DELETE FROM "access_logs" WHERE "createdAt" < $1 AND "id" IN (SELECT "id" FROM "access_logs" WHERE "createdAt" < $1 LIMIT 1000)`,
-          [cutoff],
+          `DELETE FROM "access_logs" WHERE "createdAt" < $1 AND "id" IN (SELECT "id" FROM "access_logs" WHERE "createdAt" < $1 LIMIT $2)`,
+          [cutoff, BATCH_SIZE],
         );
-        const count = result[1] || 0;
+        const count = Array.isArray(result) ? result[0]?.rowCount ?? 0 : (result[1] ?? 0);
         deleted += count;
-        if (count < 1000) break;
+        if (count < BATCH_SIZE) break;
       }
 
       if (deleted > 0) {

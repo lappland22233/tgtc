@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException, ForbiddenException, BadRequestException, OnModuleInit, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, In } from 'typeorm';
+import { Repository, In, EntityManager } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { OnEvent } from '@nestjs/event-emitter';
@@ -20,6 +20,7 @@ import { ShareAudit } from '../common/entities/share-audit.entity';
 import { RateLimitService } from '../common/services/rate-limit.service';
 import { AuditService } from '../common/services/audit.service';
 import { UploadJobService, UploadJob } from './upload-job.service';
+import { FileCacheService } from './file-cache.service';
 import * as bcrypt from 'bcryptjs';
 import { v4 as uuidv4 } from 'uuid';
 import { BCRYPT_ROUNDS } from '../common/constants/bcrypt';
@@ -103,6 +104,7 @@ export class FileService implements OnModuleInit {
     private rateLimitService: RateLimitService,
     private uploadJobService: UploadJobService,
     private auditService: AuditService,
+    private fileCacheService: FileCacheService,
   ) {
     this.maxFileSize = this.parseFileSize(this.configService.get<string>('MAX_FILE_SIZE'));
     this.thumbnailDir = this.configService.get<string>('THUMBNAIL_DIR') || path.join(process.cwd(), 'tmp', 'thumbnails');
@@ -310,10 +312,9 @@ export class FileService implements OnModuleInit {
 
     const savedFile = await this.fileRepository.save(newFile);
 
-    // 上传时关联标签
+    // 上传时关联标签（参数化查询，防止 SQL 注入）
     if (tagIds && tagIds.length > 0) {
-      const values = tagIds.map((tagId) => `('${savedFile.id}', '${tagId}')`).join(', ');
-      await this.fileRepository.manager.query(`INSERT INTO file_tags ("fileId", "tagId") VALUES ${values}`);
+      await this.insertFileTags(this.fileRepository.manager, savedFile.id, tagIds);
     }
 
     // 审计日志：文件上传
@@ -692,6 +693,9 @@ export class FileService implements OnModuleInit {
 
     // 清理本地缩略图
     this.deleteLocalThumbnail(file);
+
+    // 清理本地文件缓存
+    this.fileCacheService.invalidate(file.id);
 
     // 硬删除文件记录
     await this.fileRepository.remove(file);
@@ -1180,11 +1184,8 @@ export class FileService implements OnModuleInit {
 
     await this.assertFileReadable(file, user);
 
-    // 先从 Telegram 拉取文件流（成功后才扣次数，避免拉取失败浪费次数）
-    const { stream, info } = await this.telegramService.getFileStream(file.telegramFileId || file.filename);
-
-    // 原子递增访问计数
-    const result = await this.fileRepository
+    // 原子递增访问计数（先扣次数，再拉取文件，避免拉取成功但计数失败）
+    const updateResult = await this.fileRepository
       .createQueryBuilder()
       .update(File)
       .set({ currentAccessCount: () => 'currentAccessCount + 1' })
@@ -1193,10 +1194,17 @@ export class FileService implements OnModuleInit {
       .andWhere('isDeleted = false')
       .execute();
 
-    if (result.affected === 0) {
+    if (updateResult.affected === 0) {
       throw new ForbiddenException('访问次数已用尽或文件不存在');
     }
 
+    // 尝试从本地缓存获取（二次访问加速，减少 Telegram API 调用）
+    const cachedStream = this.fileCacheService.getCachedReadStream(file.id, Number(file.size));
+    const { stream } = cachedStream
+      ? { stream: cachedStream }
+      : { stream: (await this.telegramService.getFileStream(file.telegramFileId || file.filename)).stream };
+
+    // 写访问日志
     try {
       await this.accessLogRepository.save({
         fileId: id,
@@ -1212,8 +1220,7 @@ export class FileService implements OnModuleInit {
     const mimeType = file.mimeType || 'application/octet-stream';
     const filename = this.ensureFileExtension(file.originalName, mimeType);
 
-    const actualSize = info.file_size > 0 ? info.file_size : Number(file.size);
-    return { stream, contentType: mimeType, filename, size: actualSize };
+    return { stream, contentType: mimeType, filename, size: Number(file.size) };
   }
 
   async generateShareLink(id: string, user: User): Promise<string> {
@@ -1512,10 +1519,9 @@ export class FileService implements OnModuleInit {
             continue;
           }
           const uploadedFile = await this.uploadToTelegram(file, user, originalName, abortController.signal);
-          // 上传完成后关联标签
+          // 上传完成后关联标签（参数化查询）
           if (tagIds && tagIds.length > 0) {
-            const values = tagIds.map((tagId) => `('${uploadedFile.id}', '${tagId}')`).join(', ');
-            await this.fileRepository.manager.query(`INSERT INTO file_tags ("fileId", "tagId") VALUES ${values}`);
+            await this.insertFileTags(this.fileRepository.manager, uploadedFile.id, tagIds);
           }
           success.push(uploadedFile);
         } catch (error: unknown) {
@@ -1620,10 +1626,9 @@ export class FileService implements OnModuleInit {
 
       const savedFile = await this.uploadToTelegram(file, user, originalName, abortSignal);
 
-      // 上传完成后关联标签
+      // 上传完成后关联标签（参数化查询）
       if (tagIds && tagIds.length > 0) {
-        const values = tagIds.map((tagId) => `('${savedFile.id}', '${tagId}')`).join(', ');
-        await this.fileRepository.manager.query(`INSERT INTO file_tags ("fileId", "tagId") VALUES ${values}`);
+        await this.insertFileTags(this.fileRepository.manager, savedFile.id, tagIds);
       }
 
       // 完成前再次检查，避免连接断开后仍写入成功结果
@@ -1697,12 +1702,11 @@ export class FileService implements OnModuleInit {
       throw new ForbiddenException('无权操作此文件');
     }
 
-    // 事务内原子执行：清除旧关联 + 插入新关联
+    // 事务内原子执行：清除旧关联 + 插入新关联（参数化查询）
     await this.fileRepository.manager.transaction(async (manager) => {
       await manager.query('DELETE FROM file_tags WHERE "fileId" = $1', [fileId]);
       if (tagIds.length > 0) {
-        const values = tagIds.map((tagId) => `('${fileId}', '${tagId}')`).join(', ');
-        await manager.query(`INSERT INTO file_tags ("fileId", "tagId") VALUES ${values}`);
+        await this.insertFileTags(manager, fileId, tagIds);
       }
     });
 
@@ -1744,5 +1748,32 @@ export class FileService implements OnModuleInit {
       resourceId: fileId,
       metadata: { removedTagId: tagId },
     });
+  }
+
+  /**
+   * 参数化插入 file_tags 关联，防止 SQL 注入
+   * tagIds 必须先通过 UUID 格式校验后才调用此方法
+   */
+  private async insertFileTags(
+    manager: EntityManager,
+    fileId: string,
+    tagIds: string[],
+  ): Promise<void> {
+    if (!tagIds || tagIds.length === 0) return;
+    // UUID 格式防御性校验
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    for (const tagId of tagIds) {
+      if (!uuidRegex.test(tagId)) {
+        throw new BadRequestException(`无效的 tagId 格式: ${tagId}`);
+      }
+    }
+    // 参数化批量 INSERT，避免 SQL 注入
+    const placeholders = tagIds.map((_, i) => `($${i * 2 + 1}, $${i * 2 + 2})`).join(', ');
+    const params: any[] = [];
+    tagIds.forEach((tagId) => { params.push(fileId, tagId); });
+    await manager.query(
+      `INSERT INTO file_tags ("fileId", "tagId") VALUES ${placeholders}`,
+      params,
+    );
   }
 }

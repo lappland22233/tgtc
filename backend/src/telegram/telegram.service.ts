@@ -4,6 +4,7 @@ import axios from 'axios';
 import { Readable } from 'stream';
 import { createReadStream } from 'fs';
 import { promises as fs } from 'fs';
+import * as path from 'path';
 import FormData from 'form-data';
 
 @Injectable()
@@ -15,6 +16,8 @@ export class TelegramService {
   private readonly fileBase: string;
 
   constructor(private configService: ConfigService) {
+    // 注意：botToken 在构造函数中一次性读取，不支持热更新
+    // 如需更换 Token 需重启服务
     this.botToken = this.configService.get<string>('TELEGRAM_BOT_TOKEN') || '';
     this.chatId = this.configService.get<string>('TELEGRAM_CHAT_ID') || '';
     // 支持自建 API 代理绕过官方限流: 设置 TELEGRAM_API_BASE 即可
@@ -184,6 +187,10 @@ export class TelegramService {
   }
 
   private getFileUrl(file_path: string): string {
+    // 远程路径校验：禁止路径穿越
+    if (file_path.includes('..') || file_path.includes('\\')) {
+      throw new Error(`非法的 file_path: ${file_path}`);
+    }
     // 本地 Bot API 返回绝对路径时，不拼接 HTTP URL
     if (file_path.startsWith('/')) {
       return file_path;
@@ -198,18 +205,35 @@ export class TelegramService {
     return file_path.startsWith('/');
   }
 
+  /** 安全解析本地文件路径，防止路径穿越攻击 */
+  private resolveLocalPath(filePath: string): string {
+    // 本地 Bot API 文件存储在允许的目录内，如 tmp/ 或 /var/lib/telegram-bot-api/
+    // 使用 path.normalize 消除 ../ 遍历并确保路径在合理范围内
+    const normalized = path.normalize(filePath);
+    if (normalized.includes('..')) {
+      throw new Error(`非法的本地文件路径: ${filePath}`);
+    }
+    return normalized;
+  }
+
   async getFile(file_id: string): Promise<Buffer> {
     const fileInfo = await this.getFileInfo(file_id);
     const filePath = fileInfo.file_path;
 
-    // 本地绝对路径：直接从文件系统异步读取（避免阻塞事件循环）
+    // 远程路径穿越校验
+    if (!this.isLocalPath(filePath) && (filePath.includes('..') || filePath.includes('\\'))) {
+      throw new Error(`非法的文件路径: ${filePath}`);
+    }
+
+    // 本地绝对路径：安全解析后从文件系统异步读取
     if (this.isLocalPath(filePath)) {
+      const safePath = this.resolveLocalPath(filePath);
       try {
-        await fs.access(filePath);
+        await fs.access(safePath);
       } catch {
         throw new Error(`文件不存在: ${filePath}`);
       }
-      return fs.readFile(filePath);
+      return fs.readFile(safePath);
     }
 
     const fileUrl = this.getFileUrl(filePath);
@@ -230,7 +254,7 @@ export class TelegramService {
 
     return {
       stream: this.isLocalPath(filePath)
-        ? createReadStream(filePath)
+        ? createReadStream(this.resolveLocalPath(filePath))
         : (await axios.get<Readable>(this.getFileUrl(filePath), {
             responseType: 'stream',
             timeout: 5 * 60 * 1000,

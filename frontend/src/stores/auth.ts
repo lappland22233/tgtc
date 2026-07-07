@@ -12,9 +12,11 @@ export const useAuthStore = defineStore('auth', () => {
 
   const isAuthenticated = computed(() => !!user.value);
 
-  // 跨标签页登出同步 — 保存引用以便清理
+  // 跨标签页登出同步 — 惰性初始化（HMR 安全）
   let authChannel: BroadcastChannel | null = null;
-  if (typeof BroadcastChannel !== 'undefined') {
+  function getAuthChannel(): BroadcastChannel | null {
+    if (authChannel) return authChannel;
+    if (typeof BroadcastChannel === 'undefined') return null;
     authChannel = new BroadcastChannel('auth-sync');
     authChannel.onmessage = (event) => {
       if (event.data === 'logout') {
@@ -22,6 +24,15 @@ export const useAuthStore = defineStore('auth', () => {
         initialized.value = true;
       }
     };
+    return authChannel;
+  }
+  // 首次加载时初始化
+  getAuthChannel();
+
+  // Vite HMR 安全：热更新时关闭旧 channel
+  const viteHot = (import.meta as any).hot;
+  if (viteHot) {
+    viteHot.dispose(() => { authChannel?.close(); authChannel = null; });
   }
 
   /**
@@ -68,9 +79,10 @@ export const useAuthStore = defineStore('auth', () => {
       // 区分 401（token 过期/无效）和网络错误（临时网络问题）
       // 仅 401 时清除用户状态，网络错误保留当前状态防止无故登出
       const axiosErr = err as { response?: { status?: number } };
-      if (axiosErr?.response?.status === 401 || axiosErr?.response?.status === 403) {
+      if (axiosErr?.response?.status === 401) {
         user.value = null;
       }
+      // 403 = 已认证但无权限，保留用户状态，由调用方处理权限提示
     } finally {
       initialized.value = true;
     }

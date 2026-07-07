@@ -166,7 +166,10 @@ async function handleLogout() {
 }
 
 onMounted(() => {
-  authStore.fetchUser();
+  // 仅在首次加载时获取用户信息，路由切换时不重复请求
+  if (!authStore.initialized) {
+    authStore.fetchUser();
+  }
 });
 </script>
 

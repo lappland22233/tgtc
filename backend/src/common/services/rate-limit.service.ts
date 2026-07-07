@@ -45,6 +45,10 @@ export class RateLimitService {
     lockDurationMs: number,
     windowMs: number,
   ): Promise<RateLimitResult> {
+    // 参数校验
+    if (!Number.isFinite(lockDurationMs) || lockDurationMs <= 0 || lockDurationMs > 86400000) {
+      throw new Error(`lockDurationMs 无效: ${lockDurationMs}`);
+    }
     const now = new Date();
     const windowStart = new Date(now.getTime() - windowMs);
 
@@ -77,7 +81,7 @@ export class RateLimitService {
     // 无返回行 → 记录已被其他请求锁定（WHERE 条件过滤了锁定记录）
     // 锁定时间使用 lockDurationMs 近似（已原子化设置，无 TOCTOU）
     if (!result || result.length === 0) {
-      const waitMinutes = Math.ceil((lockDurationMs || RateLimitService.DEFAULT_LOCK_DURATION_MS) / RateLimitService.MS_PER_MINUTE);
+      const waitMinutes = Math.ceil(lockDurationMs / RateLimitService.MS_PER_MINUTE);
       return { allowed: false, waitMinutes };
     }
 

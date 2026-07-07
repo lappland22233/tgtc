@@ -13,6 +13,8 @@ interface CacheEntry {
 export class ConfigCacheService {
   // 进程内缓存。多实例部署时缓存不共享，TTL 限制保证最终一致性（最多滞后 TTL 毫秒）
   private cache = new Map<string, CacheEntry>();
+  // Singleflight: 相同 key 的并发回源共享同一个 Promise
+  private pendingGets = new Map<string, Promise<string>>();
   private readonly CACHE_TTL: number;
 
   constructor(
@@ -32,10 +34,23 @@ export class ConfigCacheService {
       return cached.value;
     }
 
-    const config = await this.systemConfigRepository.findOne({ where: { key } });
-    const value = config?.value ?? defaultValue;
-    this.cache.set(key, { value, expiresAt: Date.now() + this.CACHE_TTL });
-    return value;
+    // Singleflight: 防止缓存击穿，并发请求共享同一个 DB 查询
+    const pending = this.pendingGets.get(key);
+    if (pending) return pending;
+
+    const promise = (async () => {
+      const config = await this.systemConfigRepository.findOne({ where: { key } });
+      const value = config?.value ?? defaultValue;
+      this.cache.set(key, { value, expiresAt: Date.now() + this.CACHE_TTL });
+      return value;
+    })();
+
+    this.pendingGets.set(key, promise);
+    try {
+      return await promise;
+    } finally {
+      this.pendingGets.delete(key);
+    }
   }
 
   async set(key: string, value: string, description?: string): Promise<void> {
@@ -78,10 +93,10 @@ export class ConfigCacheService {
   }
 
   invalidateByPrefix(prefix: string): void {
-    for (const key of this.cache.keys()) {
-      if (key.startsWith(prefix)) {
-        this.cache.delete(key);
-      }
+    // 先收集匹配的键，再统一删除，避免迭代中修改 Map
+    const keys = [...this.cache.keys()].filter((k) => k.startsWith(prefix));
+    for (const key of keys) {
+      this.cache.delete(key);
     }
   }
 }

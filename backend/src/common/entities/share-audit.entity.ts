@@ -18,7 +18,7 @@ export class ShareAudit {
   @Column()
   fileId: string;
 
-  @Column({ default: '' })
+  @Column({ nullable: true, comment: '访问者ID，匿名访问可为空' })
   userId: string;
 
   @Column({ type: 'varchar', default: 'consume' })

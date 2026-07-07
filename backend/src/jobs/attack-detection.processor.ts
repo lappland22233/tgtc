@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Process, Processor } from '@nestjs/bull';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, DataSource, MoreThan } from 'typeorm';
+import { Repository, DataSource, MoreThan, IsNull } from 'typeorm';
 import { Job } from 'bull';
 import { QUEUE_NAMES } from './bull-queue.module';
 import { BannedIP } from '../common/entities/banned-ip.entity';
@@ -37,7 +37,8 @@ export class AttackDetectionProcessor {
   /** 从动态配置读取数值，不存在时回退到默认值 */
   private async getConfigNumber(key: string, fallback: string): Promise<number> {
     const value = await this.configCacheService.get(key, fallback);
-    return Number(value) || Number(fallback);
+    const num = Number(value);
+    return Number.isFinite(num) ? num : Number(fallback);
   }
 
   /** 每 5 分钟并行执行 4 条攻击检测规则，同步生成告警记录 */
@@ -141,9 +142,24 @@ export class AttackDetectionProcessor {
         ['ip'],
       );
 
+      // 1.5 检查是否已有该攻击类型 + IP 的未处理告警（冷却窗口内防重复）
+      const ruleId = `ATTACK_${attack.attackType.toUpperCase()}`;
+      const existingAlert = await manager.findOne(Alert, {
+        where: {
+          ruleId,
+          acknowledgedAt: IsNull(),
+        },
+      });
+      if (existingAlert) {
+        this.logger.debug(
+          `IP ${attack.ip} 已有未处理的 ${ruleId} 告警 (id=${existingAlert.id})，跳过重复创建`,
+        );
+        return;
+      }
+
       // 2. 创建告警记录
       const alert = manager.create(Alert, {
-        ruleId: `ATTACK_${attack.attackType.toUpperCase()}`,
+        ruleId,
         level: attack.severity === 'critical' ? AlertLevel.CRITICAL : AlertLevel.WARNING,
         title: reason,
         message: `IP ${attack.ip} 触发 ${reason}: ${JSON.stringify(attack.details)}`,
@@ -206,7 +222,7 @@ export class AttackDetectionProcessor {
       .addSelect('COUNT(DISTINCT a.path)', 'uniquePaths')
       .where('a.createdAt >= :cutoff', { cutoff })
       .groupBy('a.ip')
-      .having(`COUNT(*) > ${reqThreshold} AND COUNT(DISTINCT a.path) > ${pathThreshold}`)
+      .having('COUNT(*) > :reqThreshold AND COUNT(DISTINCT a.path) > :pathThreshold', { reqThreshold, pathThreshold })
       .getRawMany<{ ip: string; requestCount: string; uniquePaths: string }>();
 
     return rows.map((r) => ({
@@ -236,7 +252,7 @@ export class AttackDetectionProcessor {
       .andWhere("a.path LIKE :loginPath", { loginPath: '/api/auth/login%' })
       .andWhere('a.statusCode = 401')
       .groupBy('a.ip')
-      .having(`COUNT(*) >= ${threshold}`)
+      .having('COUNT(*) >= :threshold', { threshold })
       .getRawMany<{ ip: string; loginAttempts: string }>();
 
     return rows.map((r) => ({
@@ -272,7 +288,7 @@ export class AttackDetectionProcessor {
       )
       .where('a.createdAt >= :cutoff', { cutoff })
       .groupBy('a.ip')
-      .having(`COUNT(*) > ${threshold}`)
+      .having('COUNT(*) > :threshold', { threshold })
       .getRawMany<{ ip: string; totalRequests: string; getCount: string }>();
 
     return rows
@@ -316,7 +332,7 @@ export class AttackDetectionProcessor {
         },
       )
       .groupBy('a.ip')
-      .having(`COUNT(*) > ${threshold}`)
+      .having('COUNT(*) > :threshold', { threshold })
       .getRawMany<{ ip: string; downloadCount: string }>();
 
     return rows.map((r) => ({
