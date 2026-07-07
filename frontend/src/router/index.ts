@@ -125,7 +125,9 @@ router.beforeEach(async (to, _from, next) => {
 
   // 步骤 2：需要认证但未登录 → 跳转登录页（携带 redirect 参数）
   if (to.meta.requiresAuth && !isAuthenticated) {
-    next({ path: '/login', query: { redirect: to.fullPath } });
+    // 仅对应用内路径做 redirect 校验，防止开放重定向
+    const redirect = (to.path !== '/login' && to.path !== '/register') ? to.fullPath : undefined;
+    next({ path: '/login', query: redirect ? { redirect: isValidRedirect(redirect) ? redirect : undefined } : undefined });
     return;
   }
 
@@ -167,9 +169,15 @@ router.beforeEach(async (to, _from, next) => {
 });
 
 // 路由切换时清除缩略图 token 缓存
+// 登录态变化时清理缩略图缓存（避免旧用户 token 残留）
+let lastAuthState = false;
 router.afterEach(() => {
-  clearThumbToken();
-  clearThumbnailCache();
+  const currentAuth = !!localStorage.getItem('auth_initialized');
+  if (currentAuth !== lastAuthState) {
+    clearThumbToken();
+    clearThumbnailCache();
+    lastAuthState = currentAuth;
+  }
 });
 
 export default router;

@@ -19,15 +19,17 @@ function startRedirect() {
   }
   isRedirecting = true;
   redirectTimer = setTimeout(() => {
-    const isAuthPage =
-      window.location.pathname === '/login' ||
-      window.location.pathname === '/register' ||
-      window.location.pathname === '/reset-password';
-    if (!isAuthPage) {
+    if (!isAuthPage()) {
       window.location.href = '/login';
     }
     resetRedirectState();
   }, 300);
+}
+
+/** 判断当前是否在认证页面（登录/注册/密码重置） */
+function isAuthPage(): boolean {
+  const path = window.location.pathname;
+  return path === '/login' || path === '/register' || path === '/reset-password';
 }
 
 // 查询是否正在重定向
@@ -84,11 +86,7 @@ client.interceptors.response.use(
 
     // 401 处理：防抖跳转登录页
     if (status === 401) {
-      const isAuthPage =
-        window.location.pathname === '/login' ||
-        window.location.pathname === '/register';
-
-      if (!isAuthPage && !isRedirecting) {
+      if (!isAuthPage() && !isRedirecting) {
         startRedirect();
       }
       return Promise.reject(error);

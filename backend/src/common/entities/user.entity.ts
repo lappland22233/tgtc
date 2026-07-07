@@ -48,4 +48,8 @@ export class User {
 
   @UpdateDateColumn()
   updatedAt: Date;
+
+  /** 密码或安全凭证最后变更时间，用于 JWT token 吊销检测 */
+  @Column({ type: 'timestamptz', nullable: true })
+  passwordUpdatedAt: Date | null;
 }

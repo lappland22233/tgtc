@@ -143,6 +143,7 @@ import { api } from '../stores/auth';
 import { useMobile } from '../composables/useMobile';
 import { formatSize as formatModalSize } from '../utils/format';
 import { getErrorMessage } from '../utils/error';
+import { useChunkedUpload } from '../composables/useChunkedUpload';
 import type { BatchUploadResult } from '../types/file';
 
 const isMobile = useMobile();
@@ -164,6 +165,7 @@ const visible = computed({
 type QueueStatus = 'pending' | 'processing' | 'success' | 'error';
 
 interface QueueEntry {
+  uid: string;           // 唯一标识，防止同名文件覆盖
   file: File;
   status: QueueStatus;
   errorReason?: string;
@@ -337,6 +339,7 @@ async function uploadFiles(files: File[]) {
   batchResult.value = null;
 
   const queueEntries: QueueEntry[] = files.map((f) => ({
+    uid: crypto.randomUUID(),  // 唯一标识
     file: f,
     status: 'pending' as QueueStatus,
     errorReason: undefined,
@@ -352,7 +355,7 @@ async function uploadFiles(files: File[]) {
   // 先赋值给 ref 触发 Vue 响应式包装，再从响应式数组中建 Map
   uploadQueue.value = queueEntries;
   const queueMap = new Map<string, QueueEntry>(
-    uploadQueue.value.map((e) => [e.file.name, e])
+    uploadQueue.value.map((e) => [e.uid, e])
   );
 
   const successList: { id: string; originalName: string }[] = [];
@@ -366,11 +369,48 @@ async function uploadFiles(files: File[]) {
   let nextFileIndex = 0;
   let staggerCounter = 0;
 
-  const uploadSingle = async (file: File, stagger: number): Promise<void> => {
+  // 分片上传实例（惰性创建，并发 2 避免 CDN 限流）
+  const chunkedUpload = useChunkedUpload(3);
+
+  /** 大文件分片上传逻辑 */
+  const uploadSingleChunked = async (file: File, entry: QueueEntry): Promise<void> => {
+    try {
+      const abortController = new AbortController();
+      const result = await chunkedUpload.uploadFile(
+        file,
+        (p) => {
+          entry.progress = p.totalChunks > 0 ? Math.round((p.uploadedChunks / p.totalChunks) * 100) : 0;
+          entry.loadedBytes = p.loadedBytes;
+          entry.speed = p.speed;
+          entry.eta = p.eta;
+          if (entry.checkpointTime === 0) {
+            entry.checkpointTime = Date.now();
+          }
+        },
+        abortController.signal,
+      );
+      entry.status = 'success';
+      successList.push({ id: result.id, originalName: result.originalName });
+    } catch (error: unknown) {
+      entry.status = 'error';
+      entry.errorReason = getErrorMessage(error);
+      failedList.push({ name: file.name, reason: getErrorMessage(error) });
+    }
+  };
+
+  const uploadSingle = async (file: File, uid: string, stagger: number): Promise<void> => {
     // 分级延迟启动，将请求分散到 300ms 窗口内，避免 Telegram 429 限流
     await new Promise(resolve => setTimeout(resolve, stagger * 300));
 
-    const entry = queueMap.get(file.name);
+    const entry = queueMap.get(uid);
+    if (!entry) return;
+
+    // 大文件（>20MB）走分片上传
+    const CHUNK_THRESHOLD = 5 * 1024 * 1024; // 5MB 以上走分片上传，避免 CDN 超时截断
+    if (file.size > CHUNK_THRESHOLD) {
+      return uploadSingleChunked(file, entry);
+    }
+
     try {
       // 异步上传：文件传输完成后立即断开请求连接（避免 Cloudflare 代理超时），
       // 后端在后台处理 Telegram 上传，前端轮询获取状态
@@ -409,7 +449,7 @@ async function uploadFiles(files: File[]) {
     const idx = nextFileIndex++;
     if (idx >= files.length) return; // 队列耗尽
     const myStagger = staggerCounter++;
-    await uploadSingle(files[idx], myStagger);
+    await uploadSingle(files[idx], queueEntries[idx].uid, myStagger);
     // 当前文件完成 → 立即启动下一个，保持窗口满载
     await runNext();
   };

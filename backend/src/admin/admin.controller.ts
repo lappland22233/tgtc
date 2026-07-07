@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Put, Delete, Body, Param, Query, UseGuards, Res } from '@nestjs/common';
+import { Controller, Get, Post, Put, Delete, Body, Param, Query, UseGuards, Res, BadRequestException } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 import { AdminService } from './admin.service';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -156,6 +156,23 @@ export class AdminController {
     return { message: '上传配置已更新' };
   }
 
+  // File Cache Config
+  @Get('cache-config')
+  @Roles(UserRole.SUPER_ADMIN)
+  async getCacheConfig() {
+    return this.adminService.getCacheConfig();
+  }
+
+  @Put('cache-config')
+  @Roles(UserRole.SUPER_ADMIN)
+  async updateCacheConfig(
+    @CurrentUser() user: User,
+    @Body() dto: { maxSizeGB?: number; minFreeDiskGB?: number; ttlDays?: number },
+  ) {
+    await this.adminService.updateCacheConfig(user, dto);
+    return { message: '缓存配置已更新' };
+  }
+
   // Auth Config
   @Get('auth-config')
   async getAuthConfig() {
@@ -215,6 +232,15 @@ export class AdminController {
     @Query('type') type: string,
     @Res() res: any,
   ) {
+    // 白名单校验，防止非法参数
+    const validFormats = ['csv', 'json'];
+    const validTypes = ['access-logs', 'top-files', 'bans', 'alerts'];
+    if (format && !validFormats.includes(format)) {
+      throw new BadRequestException(`不支持的导出格式: ${format}`);
+    }
+    if (type && !validTypes.includes(type)) {
+      throw new BadRequestException(`不支持的导出类型: ${type}`);
+    }
     const result = await this.adminService.exportData({
       format: (format as 'csv' | 'json') || 'csv',
       timeRange: timeRange || '7d',
@@ -277,6 +303,7 @@ export class AdminController {
     return this.adminService.getBanStats();
   }
 
+  /** 注意：此通配路由必须放置在 access-logs/* 下所有具体路由之后，否则会吞掉它们 */
   @Get('access-logs')
   @Roles(UserRole.SUPER_ADMIN)
   async getAccessLogs(@Query() query: AccessLogQueryDto) {

@@ -93,19 +93,19 @@ async function bootstrap() {
   const host = process.env.APP_HOST || '127.0.0.1';
   const httpServer = await app.listen(port, host);
 
-  // HTTP 服务器超时配置：
-  // - 上传端点（file.controller.ts）已通过 req.setTimeout(0) 禁用单请求超时，
-  //   并通过 AbortController 在客户端连接断开 30 秒后放弃后台上传任务
-  // - 此处全局 10 分钟超时作为安全兜底，防止 req.setTimeout(0) 万一失效
-  httpServer.timeout = 10 * 60 * 1000;        // 请求超时 10 分钟
-  httpServer.keepAliveTimeout = 10 * 60 * 1000; // Keep-Alive 连接超时
-  httpServer.headersTimeout = 10 * 60 * 1000 + 1000; // 请求头超时（需大于 keepAliveTimeout）
+  // HTTP 服务器超时配置（基于活动连接）：
+  // - server.timeout 在有数据传输时自动重置，空闲 30 秒后断开
+  // - 大文件上传时持续有数据流入，计时器不断重置，不会超时
+  // - 上传端点额外通过 req.setTimeout(0) 兜底
+  httpServer.timeout = 30 * 1000;                // 空闲 30 秒超时，数据传输中不超时
+  httpServer.keepAliveTimeout = 65 * 1000;       // Keep-Alive 连接空闲超时（略大于 LB 60s）
+  httpServer.headersTimeout = 66 * 1000;          // 请求头超时（需大于 keepAliveTimeout）
 
   logger.log(`Application is running on: http://${host}:${port}`);
   logger.log(`Frontend served from: ${frontendDist}`);
   logger.log(`CORS origins: ${allowedOrigins.join(', ')}`);
   logger.log(`Global prefix: /api`);
-  logger.log(`HTTP server timeout: ${httpServer.timeout / 1000}s (for large file uploads)`);
+  logger.log(`HTTP timeout: ${httpServer.timeout / 1000}s idle, auto-reset on activity`);
 }
 
 bootstrap();

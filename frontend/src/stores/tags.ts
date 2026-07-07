@@ -12,8 +12,9 @@ export const useTagStore = defineStore('tags', () => {
     try {
       const response = await api.get('/tags');
       tags.value = response.data.data.tags;
-    } catch {
+    } catch (err) {
       // 静默失败，标签非核心功能
+      console.error('获取标签列表失败:', err);
     } finally {
       loading.value = false;
     }

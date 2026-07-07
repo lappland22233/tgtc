@@ -140,6 +140,33 @@
       </t-form>
     </div>
 
+    <!-- 文件缓存配置 -->
+    <div class="card" style="margin-top: 20px;">
+      <h3>文件缓存</h3>
+      <t-form label-width="160px">
+        <t-form-item label="缓存总大小上限 (GB)">
+          <t-input-number v-model="cacheConfig.maxSizeGB" :min="1" :max="1000" :step="1" />
+          <span style="margin-left: 8px; font-size: 12px; color: var(--td-text-color-secondary);">超过此值停止写入新缓存</span>
+        </t-form-item>
+        <t-form-item label="磁盘最低剩余空间 (GB)">
+          <t-input-number
+            v-model="cacheConfig.minFreeDiskGB"
+            :min="0.5"
+            :max="100"
+            :step="0.5"
+          />
+          <span style="margin-left: 8px; font-size: 12px; color: var(--td-text-color-secondary);">低于此值停止缓存，防止磁盘爆满</span>
+        </t-form-item>
+        <t-form-item label="缓存有效期 (天)">
+          <t-input-number v-model="cacheConfig.ttlDays" :min="1" :max="365" :step="1" />
+          <span style="margin-left: 8px; font-size: 12px; color: var(--td-text-color-secondary);">超过此时间的缓存文件自动清理</span>
+        </t-form-item>
+        <t-form-item>
+          <t-button theme="primary" @click="saveCacheConfig">保存缓存配置</t-button>
+        </t-form-item>
+      </t-form>
+    </div>
+
     <!-- IP封禁管理 -->
     <div class="card" style="margin-top: 20px;">
       <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
@@ -207,6 +234,12 @@ const uploadConfig = ref({
   maxFileSizeMB: 20,
   fileTypeMode: 'blacklist' as 'blacklist' | 'whitelist',
   fileTypeFilter: '',
+});
+
+const cacheConfig = ref({
+  maxSizeGB: 10,
+  minFreeDiskGB: 1,
+  ttlDays: 3,
 });
 
 // 预设常用扩展名（危险类型已标注）
@@ -331,6 +364,24 @@ async function saveUploadConfig() {
   }
 }
 
+async function fetchCacheConfig() {
+  try {
+    const res = await api.get('/admin/cache-config');
+    cacheConfig.value = res.data.data;
+  } catch (err) {
+    console.error('获取缓存配置失败', err);
+  }
+}
+
+async function saveCacheConfig() {
+  try {
+    await api.put('/admin/cache-config', cacheConfig.value);
+    MessagePlugin.success('缓存配置已保存');
+  } catch (error: unknown) {
+    MessagePlugin.error(getErrorMessage(error));
+  }
+}
+
 async function fetchBannedIPs() {
   try {
     const res = await api.get('/admin/banned-ips');
@@ -369,6 +420,7 @@ onMounted(() => {
     fetchAuthConfig(),
     fetchSMTPConfig(),
     fetchUploadConfig(),
+    fetchCacheConfig(),
     fetchBannedIPs(),
   ]);
 });

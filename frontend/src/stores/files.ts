@@ -8,7 +8,9 @@ export const useFileStore = defineStore('files', () => {
   const total = ref(0);
   const loading = ref(false);
   // 取消上一次 fetchFiles 请求，避免并发；用户快速刷新时新请求优先
-  let fetchAbortController: AbortController | null = null;
+  // 不同操作使用独立 AbortController，防止互相干扰
+  let listAbortController: AbortController | null = null;
+  let cursorAbortController: AbortController | null = null;
 
   /** 当前用户是否为管理员（供 UI 判断恢复按钮是否可用） */
   const currentUserRole = ref<string>('user');
@@ -19,11 +21,11 @@ export const useFileStore = defineStore('files', () => {
 
   async function fetchFiles(page = 1, limit = 20, keyword?: string, sortBy?: string, sortOrder?: string, tagIds?: string[]) {
     // 取消上一次请求（如有）
-    if (fetchAbortController) {
-      fetchAbortController.abort();
+    if (listAbortController) {
+      listAbortController.abort();
     }
     const controller = new AbortController();
-    fetchAbortController = controller;
+    listAbortController = controller;
     loading.value = true;
     try {
       const response = await api.get('/files', {
@@ -42,8 +44,8 @@ export const useFileStore = defineStore('files', () => {
     } finally {
       loading.value = false;
       // 仅当当前控制器未被替换时才清除引用（防止旧请求的 finally 覆盖新请求的控制器）
-      if (fetchAbortController === controller) {
-        fetchAbortController = null;
+      if (listAbortController === controller) {
+        listAbortController = null;
       }
     }
   }
@@ -53,11 +55,11 @@ export const useFileStore = defineStore('files', () => {
    * 返回 { files, nextCursor, total } 供 useCursorPagination 使用
    */
   async function fetchFilesCursor(limit: number, keyword?: string, cursor?: string | null, tagIds?: string[]) {
-    if (fetchAbortController) {
-      fetchAbortController.abort();
+    if (cursorAbortController) {
+      cursorAbortController.abort();
     }
     const controller = new AbortController();
-    fetchAbortController = controller;
+    cursorAbortController = controller;
     loading.value = true;
     try {
       const params: Record<string, unknown> = { limit, includeDeleted: 'true' };
@@ -81,8 +83,8 @@ export const useFileStore = defineStore('files', () => {
       throw err;
     } finally {
       loading.value = false;
-      if (fetchAbortController === controller) {
-        fetchAbortController = null;
+      if (cursorAbortController === controller) {
+        cursorAbortController = null;
       }
     }
   }

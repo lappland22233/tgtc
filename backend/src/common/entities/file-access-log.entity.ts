@@ -3,6 +3,7 @@ import {
   PrimaryColumn,
   Column,
   CreateDateColumn,
+  Index,
   ManyToOne,
   JoinColumn,
 } from 'typeorm';
@@ -24,6 +25,7 @@ export class FileAccessLog {
   file: File;
 
   @Column()
+  @Index()
   fileId: string;
 
   @Column({ nullable: true })

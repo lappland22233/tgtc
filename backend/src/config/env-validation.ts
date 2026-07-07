@@ -14,11 +14,14 @@ export function validateEnv(): void {
     errors.push('DB_PORT 不是有效端口号 (1–65535)');
   }
   if (!process.env.DB_USERNAME) errors.push('DB_USERNAME 未设置');
+  if (!process.env.DB_PASSWORD) errors.push('DB_PASSWORD 未设置');
   if (!process.env.DB_DATABASE) errors.push('DB_DATABASE 未设置');
 
   // ---- JWT ----
   if (!process.env.JWT_SECRET) {
     errors.push('JWT_SECRET 未设置');
+  } else if (process.env.JWT_SECRET.length < 32) {
+    errors.push('JWT_SECRET 长度不足，至少需要 32 个字符');
   }
 
   // ---- Telegram 文件存储 ----

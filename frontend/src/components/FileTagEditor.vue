@@ -70,6 +70,8 @@ async function handleSave() {
     emit('saved');
     handleClose();
   } catch {
+    // 静默处理，saving 在 finally 复位
+  } finally {
     saving.value = false;
   }
 }

@@ -16,17 +16,18 @@ import { DashboardService } from './dashboard.service';
 import { ExportService } from './export.service';
 import { FileModule } from '../file/file.module';
 import { TelegramService } from '../telegram/telegram.service';
-import { MailerService } from '../mailer/mailer.service';
+import { MailerModule } from '../mailer/mailer.module';
 import { AlertModule } from '../alert/alert.module';
 
 @Module({
   imports: [
     TypeOrmModule.forFeature([SystemConfig, BannedIP, File, User, FileAccessLog, AccessLog, AuditLog, DashboardConfig, Alert]),
     FileModule,
+    MailerModule,
     forwardRef(() => AlertModule),
   ],
   controllers: [AdminController, DashboardController],
-  providers: [AdminService, DashboardService, ExportService, TelegramService, MailerService],
+  providers: [AdminService, DashboardService, ExportService, TelegramService],
   exports: [AdminService],
 })
 export class AdminModule {}

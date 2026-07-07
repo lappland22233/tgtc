@@ -100,8 +100,8 @@ const myFiles = ref({
 });
 
 const currentTime = ref('');
-let timer: ReturnType<typeof setInterval>;
-let refreshTimer: ReturnType<typeof setInterval>;
+let timer: number;
+let refreshTimer: number;
 
 async function fetchData() {
   // 独立 try-catch 确保单个请求失败不影响其他数据

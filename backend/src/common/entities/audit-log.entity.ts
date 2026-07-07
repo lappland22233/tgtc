@@ -34,6 +34,7 @@ export type AuditAction =
   | 'smtp_config_change'
   | 'upload_config_change'
   | 'auth_config_change'
+  | 'cache_config_change'
   | 'ip_ban'
   | 'ip_unban'
   | 'batch_delete_files'

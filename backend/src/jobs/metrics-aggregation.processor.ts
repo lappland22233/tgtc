@@ -22,15 +22,16 @@ export class MetricsAggregationProcessor {
     const now = job.data?.windowTime
       ? new Date(job.data.windowTime)
       : new Date();
-    const windowTime = new Date(
-      now.getFullYear(),
-      now.getMonth(),
-      now.getDate(),
-      now.getHours(),
-      now.getMinutes(),
+    // 使用 UTC 时间截断到分钟，避免跨时区聚合偏差
+    const windowTime = new Date(Date.UTC(
+      now.getUTCFullYear(),
+      now.getUTCMonth(),
+      now.getUTCDate(),
+      now.getUTCHours(),
+      now.getUTCMinutes(),
       0,
       0,
-    );
+    ));
     const windowStart = new Date(windowTime.getTime() - 60 * 1000);
 
     try {

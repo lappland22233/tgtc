@@ -232,26 +232,27 @@ export class UserService {
   }
 
   async getUserStats(userId: string): Promise<{ fileCount: number; totalSize: number; totalAccessCount: number }> {
-    const [fileStats] = await this.fileRepository
-      .createQueryBuilder('file')
-      .select([
-        'COUNT(*) as "fileCount"',
-        'COALESCE(SUM(file.size), 0) as "totalSize"',
-      ])
-      .where('file.uploaderId = :userId', { userId })
-      .andWhere('file.isDeleted = false')
-      .getRawMany();
-
-    const [accessStats] = await this.accessLogRepository
-      .createQueryBuilder('log')
-      .select('COUNT(*) as "count"')
-      .where('log.uploaderId = :userId', { userId })
-      .getRawMany();
+    const [fileStats, accessStats] = await Promise.all([
+      this.fileRepository
+        .createQueryBuilder('file')
+        .select([
+          'COUNT(*) as "fileCount"',
+          'COALESCE(SUM(file.size), 0) as "totalSize"',
+        ])
+        .where('file.uploaderId = :userId', { userId })
+        .andWhere('file.isDeleted = false')
+        .getRawMany(),
+      this.accessLogRepository
+        .createQueryBuilder('log')
+        .select('COUNT(*) as "count"')
+        .where('log.uploaderId = :userId', { userId })
+        .getRawMany(),
+    ]);
 
     return {
-      fileCount: Number(fileStats?.fileCount || 0),
-      totalSize: Number(fileStats?.totalSize || 0),
-      totalAccessCount: Number(accessStats?.count || 0),
+      fileCount: Number(fileStats[0]?.fileCount || 0),
+      totalSize: Number(fileStats[0]?.totalSize || 0),
+      totalAccessCount: Number(accessStats[0]?.count || 0),
     };
   }
 }

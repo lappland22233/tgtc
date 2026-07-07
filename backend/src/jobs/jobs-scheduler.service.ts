@@ -30,62 +30,103 @@ export class JobsSchedulerService implements OnModuleInit {
 
   private async scheduleJobs(): Promise<void> {
     try {
-      // 清空已有的定时任务（防止重复堆积）
-      await Promise.all([
-        this.metricsQueue.obliterate(),
-        this.attackDetectionQueue.obliterate(),
-        this.alertEvaluationQueue.obliterate(),
-        this.baselineCalculationQueue.obliterate(),
-        this.dataArchivalQueue.obliterate(),
-      ]);
+      // 精准清理已知的可重复任务（避免 obliterate 全清队列丢失活跃任务）
+      const repeatJobs: Array<{ queue: Queue; name: string; cron: string }> = [
+        { queue: this.metricsQueue, name: 'aggregate-1min', cron: '* * * * *' },
+        { queue: this.attackDetectionQueue, name: 'detect-attacks', cron: '*/5 * * * *' },
+        { queue: this.attackDetectionQueue, name: 'detect-anomalies', cron: '*/15 * * * *' },
+        { queue: this.alertEvaluationQueue, name: 'evaluate-alerts', cron: '* * * * *' },
+        { queue: this.baselineCalculationQueue, name: 'calculate-baseline', cron: '0 4 * * *' },
+        { queue: this.dataArchivalQueue, name: 'archive-data', cron: '0 2 * * *' },
+        { queue: this.dataArchivalQueue, name: 'weekly-report', cron: '0 9 * * 1' },
+      ];
+
+      for (const { queue, name, cron } of repeatJobs) {
+        await queue.removeRepeatable(name, { cron });
+      }
 
       // 每分钟聚合
       await this.metricsQueue.add(
         'aggregate-1min',
         {},
-        { repeat: { cron: '* * * * *' }, removeOnComplete: 100, removeOnFail: 50 },
+        {
+          jobId: 'repeat:metrics:aggregate-1min',
+          repeat: { cron: '* * * * *' },
+          removeOnComplete: 100,
+          removeOnFail: 50,
+        },
       );
 
       // 每 5 分钟攻击检测
       await this.attackDetectionQueue.add(
         'detect-attacks',
         {},
-        { repeat: { cron: '*/5 * * * *' }, removeOnComplete: 50, removeOnFail: 25 },
+        {
+          jobId: 'repeat:attack:detect-attacks',
+          repeat: { cron: '*/5 * * * *' },
+          removeOnComplete: 50,
+          removeOnFail: 25,
+        },
       );
 
       // 每 15 分钟异常行为检测
       await this.attackDetectionQueue.add(
         'detect-anomalies',
         {},
-        { repeat: { cron: '*/15 * * * *' }, removeOnComplete: 20, removeOnFail: 10 },
+        {
+          jobId: 'repeat:attack:detect-anomalies',
+          repeat: { cron: '*/15 * * * *' },
+          removeOnComplete: 20,
+          removeOnFail: 10,
+        },
       );
 
       // 每 1 分钟告警评估（Phase 4 激活）
       await this.alertEvaluationQueue.add(
         'evaluate-alerts',
         {},
-        { repeat: { cron: '* * * * *' }, removeOnComplete: 100, removeOnFail: 50 },
+        {
+          jobId: 'repeat:alert:evaluate-alerts',
+          repeat: { cron: '* * * * *' },
+          removeOnComplete: 100,
+          removeOnFail: 50,
+        },
       );
 
       // 每日 04:00 基线计算（Phase 5 激活）
       await this.baselineCalculationQueue.add(
         'calculate-baseline',
         {},
-        { repeat: { cron: '0 4 * * *' }, removeOnComplete: 10, removeOnFail: 5 },
+        {
+          jobId: 'repeat:baseline:calculate-baseline',
+          repeat: { cron: '0 4 * * *' },
+          removeOnComplete: 10,
+          removeOnFail: 5,
+        },
       );
 
       // 每日 02:00 数据归档
       await this.dataArchivalQueue.add(
         'archive-data',
         {},
-        { repeat: { cron: '0 2 * * *' }, removeOnComplete: 10, removeOnFail: 5 },
+        {
+          jobId: 'repeat:archival:archive-data',
+          repeat: { cron: '0 2 * * *' },
+          removeOnComplete: 10,
+          removeOnFail: 5,
+        },
       );
 
       // 每周一 09:00 周报
       await this.dataArchivalQueue.add(
         'weekly-report',
         {},
-        { repeat: { cron: '0 9 * * 1' }, removeOnComplete: 5, removeOnFail: 3 },
+        {
+          jobId: 'repeat:archival:weekly-report',
+          repeat: { cron: '0 9 * * 1' },
+          removeOnComplete: 5,
+          removeOnFail: 3,
+        },
       );
 
       this.logger.log('Bull 定时任务调度已启动');
