@@ -291,12 +291,9 @@ export class FileService implements OnModuleInit {
       throw new BadRequestException(typeCheck.reason || '不允许上传此类型的文件');
     }
 
-    let telegramFile;
-    if (file.mimetype.startsWith('image/')) {
-      telegramFile = await this.telegramService.uploadPhoto(file.buffer, originalName);
-    } else {
-      telegramFile = await this.telegramService.uploadFile(file.buffer, originalName);
-    }
+    // GIF 文件加 .bin 后缀防止 Telegram 转码为 MP4
+    const uploadName = file.mimetype === 'image/gif' ? originalName + '.bin' : originalName;
+    const telegramFile = await this.telegramService.uploadFile(file.buffer, uploadName);
 
     const newFile = this.fileRepository.create({
       filename: telegramFile.file_id,
@@ -1666,12 +1663,9 @@ export class FileService implements OnModuleInit {
     originalName: string,
     abortSignal?: AbortSignal,
   ): Promise<File> {
-    let telegramFile;
-    if (file.mimetype.startsWith('image/')) {
-      telegramFile = await this.telegramService.uploadPhoto(file.buffer, originalName, abortSignal);
-    } else {
-      telegramFile = await this.telegramService.uploadFile(file.buffer, originalName, abortSignal);
-    }
+    // GIF 文件加 .bin 后缀防止 Telegram 转码为 MP4
+    const uploadName = file.mimetype === 'image/gif' ? originalName + '.bin' : originalName;
+    const telegramFile = await this.telegramService.uploadFile(file.buffer, uploadName, abortSignal);
 
     const newFile = this.fileRepository.create({
       filename: telegramFile.file_id,
