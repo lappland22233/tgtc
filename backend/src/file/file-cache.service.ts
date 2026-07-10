@@ -222,6 +222,52 @@ export class FileCacheService {
   }
 
   /**
+   * 从磁盘路径缓存文件（流式拷贝，避免大文件 OOM）
+   * @param fileId 文件 UUID
+   * @param sourcePath 源文件路径
+   * @param expectedSize 期望的文件大小，用于拷贝后验证
+   */
+  async cacheFileFromPath(fileId: string, sourcePath: string, expectedSize: number): Promise<void> {
+    this.validateFileId(fileId);
+
+    // 磁盘空间检查
+    if (!this.hasEnoughDiskSpace()) {
+      this.logger.warn(`磁盘剩余空间不足，跳过缓存 ${fileId}`);
+      return;
+    }
+
+    // 缓存总大小检查
+    const totalSize = await this.getTotalCacheSize();
+    if (totalSize + expectedSize > this.maxCacheSizeBytes) {
+      this.logger.warn(`缓存总量超限 (${(totalSize / 1024 / 1024 / 1024).toFixed(1)}GB)，跳过缓存 ${fileId}`);
+      return;
+    }
+
+    const cachePath = this.getCachePath(fileId);
+    const tmpPath = cachePath + '.tmp';
+    const { createReadStream, createWriteStream } = await import('fs');
+    const { pipeline } = await import('stream/promises');
+
+    try {
+      await pipeline(
+        createReadStream(sourcePath),
+        createWriteStream(tmpPath),
+      );
+      const stat = await fsp.stat(tmpPath);
+      if (stat.size !== expectedSize) {
+        await fsp.unlink(tmpPath).catch(() => {});
+        this.logger.warn(`缓存文件大小不一致 ${fileId}: 期望 ${expectedSize}, 实际 ${stat.size}`);
+        return;
+      }
+      await fsp.rename(tmpPath, cachePath);
+      this.logger.log(`缓存预热完成: ${fileId} (${(stat.size / 1024 / 1024).toFixed(1)}MB)`);
+    } catch (err) {
+      await fsp.unlink(tmpPath).catch(() => {});
+      this.logger.warn(`缓存预热失败 ${fileId}: ${(err as Error).message}`);
+    }
+  }
+
+  /**
    * 使缓存失效（文件删除/更新时调用）
    */
   async invalidate(fileId: string): Promise<void> {

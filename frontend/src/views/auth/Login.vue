@@ -43,7 +43,10 @@ const form = ref({
 });
 
 const rules = {
-  email: [{ required: true, message: '请输入邮箱', type: 'error' }],
+  email: [
+    { required: true, message: '请输入邮箱', type: 'error' },
+    { email: true, message: '请输入有效的邮箱地址', type: 'error' },
+  ],
   password: [{ required: true, message: '请输入密码', type: 'error' }],
 };
 

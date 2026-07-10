@@ -10,18 +10,20 @@ import {
   AnomalyDetectionProcessor,
   WeeklyReportProcessor,
 } from './other.processors';
+import { FileUploadProcessor } from './file-upload.processor';
 import { SecurityModule } from '../security/security.module';
 import { JobsSchedulerService } from './jobs-scheduler.service';
 import { AccessLog } from '../common/entities/access-log.entity';
 import { BannedIP } from '../common/entities/banned-ip.entity';
 import { AuditLog } from '../common/entities/audit-log.entity';
 import { Alert } from '../common/entities/alert.entity';
+import { File } from '../common/entities/file.entity';
 import { AlertModule } from '../alert/alert.module';
 
 @Module({
   imports: [
     BullQueueModule,
-    TypeOrmModule.forFeature([AccessLog, BannedIP, AuditLog, Alert]),
+    TypeOrmModule.forFeature([AccessLog, BannedIP, AuditLog, Alert, File]),
     AlertModule,
     SecurityModule,
   ],
@@ -33,6 +35,7 @@ import { AlertModule } from '../alert/alert.module';
     DataArchivalProcessor,
     AnomalyDetectionProcessor,
     WeeklyReportProcessor,
+    FileUploadProcessor,
     JobsSchedulerService,
   ],
   exports: [JobsSchedulerService],

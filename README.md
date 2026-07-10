@@ -95,7 +95,7 @@ npm run dev            # 默认 http://localhost:5173
 cd frontend && npm run build
 cd ../backend && npm run build && npm run start:prod
 # 后端直接服务前端静态文件，单端口部署
-# HTTP 服务器超时 10 分钟，支持大文件上传
+# HTTP 服务器空闲超时 120 秒（有数据传输时自动重置），支持大文件上传
 ```
 
 ## 配置 (.env)
@@ -145,7 +145,7 @@ CORS_ORIGINS=http://localhost:5173
 # TOKEN_EXTRACTION_MODE=both  # both（Cookie + Bearer）或 cookie_only
 
 # 上传（启动后可从管理面板动态调整）
-MAX_FILE_SIZE=20971520
+MAX_FILE_SIZE=83886080
 FILE_TYPE_MODE=blacklist      # blacklist 或 whitelist
 FILE_TYPE_FILTER=              # 逗号分隔的扩展名，如 .zip,.exe,.sh，空值不限制
 

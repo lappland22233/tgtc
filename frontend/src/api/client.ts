@@ -12,15 +12,16 @@ function resetRedirectState() {
   }
 }
 
-function startRedirect() {
+async function startRedirect() {
   // 防止多次触发
   if (isRedirecting) {
     return;
   }
   isRedirecting = true;
-  redirectTimer = setTimeout(() => {
+  redirectTimer = setTimeout(async () => {
     if (!isAuthPage()) {
-      window.location.href = '/login';
+      const { default: router } = await import('../router');
+      router.push('/login');
     }
     resetRedirectState();
   }, 300);
@@ -72,14 +73,18 @@ client.interceptors.response.use(
   (error: AxiosError) => {
     const status = error.response?.status;
 
-    // Cloudflare 代理层错误（413 请求体过大 / 502 代理超时）
+    // Cloudflare 代理层错误（413 请求体过大 / 502 代理超时 / 5xx 源站错误）
     // 检测非 JSON 响应（Cloudflare HTML 错误页）
-    if ((status === 413 || status === 502) && error.response?.data) {
+    if (status && status >= 400 && error.response?.data) {
       const contentType = error.response.headers?.['content-type']?.toString() || '';
       if (!contentType.includes('application/json')) {
         const cloudflareMsg = status === 413
           ? '文件过大（超过代理层 100MB 限制），请使用 80MB 以内的文件'
-          : '上传超时（代理层 100 秒限制），请使用异步上传或减小文件体积';
+          : status === 502
+            ? '上传超时（CDN 代理层 100 秒限制），正在自动重试...'
+            : status === 520 || status === 521 || status === 522 || status === 523 || status === 524
+              ? '源站暂时不可用，正在自动恢复...'
+              : `CDN 代理层错误 (${status})，正在重试...`;
         return Promise.reject(new Error(cloudflareMsg));
       }
     }

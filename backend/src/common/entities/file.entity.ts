@@ -91,6 +91,9 @@ export class File {
   @Column()
   uploaderId: string;
 
+  @Column({ type: 'varchar', default: 'ready' })
+  status: 'processing' | 'ready' | 'error';
+
   @CreateDateColumn()
   createdAt: Date;
 

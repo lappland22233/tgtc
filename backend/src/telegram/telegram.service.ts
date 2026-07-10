@@ -107,7 +107,7 @@ export class TelegramService {
     return this.telegramRequest(async () => {
       const response = await axios.get(`${this.getBaseUrl()}/getFile`, {
         params: { file_id },
-        timeout: 30 * 1000, // getFile 超时 30 秒（轻量 API）
+        timeout: 5 * 60 * 1000, // getFile 超时 5 分钟（大文件上传后 Telegram 处理需较长时间）
       });
       const result = response.data.result;
       return {
@@ -119,9 +119,10 @@ export class TelegramService {
   }
 
   async uploadFile(
-    file: Buffer,
+    file: Buffer | Readable,
     filename: string,
     signal?: AbortSignal,
+    knownLength?: number,
   ): Promise<{
     file_id: string;
     file_path: string;
@@ -130,14 +131,22 @@ export class TelegramService {
     return this.telegramRequest(async () => {
       const form = new FormData();
       form.append('chat_id', this.chatId);
-      form.append('document', file, filename);
 
+      // 流式上传：form-data 支持 Readable stream，使用 knownLength 避免一次性读入内存
+      const isStream = file instanceof Readable;
+      if (isStream) {
+        form.append('document', file, { filename, knownLength });
+      } else {
+        form.append('document', file, filename);
+      }
+
+      const maxSize = Infinity; // 流式上传无大小限制，由 Telegram 2GB 上限兜底
       const response = await axios.post(`${this.getBaseUrl()}/sendDocument`, form, {
         headers: form.getHeaders(),
-        timeout: 5 * 60 * 1000,          // Telegram API 请求超时 5 分钟
-        maxContentLength: 700 * 1024 * 1024, // 最大请求体 700MB
-        maxBodyLength: 700 * 1024 * 1024,
-        signal, // 客户端连接断开 30s 后由 FileService 触发 abort，取消此请求
+        timeout: 15 * 60 * 1000,           // 大文件上传超时 15 分钟
+        maxContentLength: maxSize,
+        maxBodyLength: maxSize,
+        signal,
       });
 
       const result = response.data.result;

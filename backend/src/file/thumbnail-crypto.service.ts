@@ -9,7 +9,7 @@ export class ThumbnailCryptoService implements OnModuleInit {
 
   onModuleInit() {
     const { publicKey, privateKey } = generateKeyPairSync('rsa', {
-      modulusLength: 1024,
+      modulusLength: 2048,
       publicKeyEncoding: { type: 'spki', format: 'pem' },
       privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
     });

@@ -28,6 +28,7 @@ import { Tag } from './common/entities/tag.entity';
 import { AccessLogModule } from './common/access-log.module';
 import { JobsModule } from './jobs/jobs.module';
 import { AlertModule } from './alert/alert.module';
+import { TelegramModule } from './telegram/telegram.module';
 import { SecurityModule } from './security/security.module';
 import { TagModule } from './tag/tag.module';
 
@@ -66,6 +67,7 @@ import { TagModule } from './tag/tag.module';
     AlertModule,
     SecurityModule,
     TagModule,
+    TelegramModule,
   ],
 })
 export class AppModule {}

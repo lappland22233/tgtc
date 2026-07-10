@@ -392,8 +392,17 @@ async function fetchBannedIPs() {
 }
 
 async function banIP() {
+  const ip = banForm.ip.trim();
+  if (!ip) {
+    MessagePlugin.warning('请输入 IP 地址');
+    return;
+  }
+  if (!isValidIP(ip)) {
+    MessagePlugin.warning('IP 地址格式无效，请输入合法的 IPv4 或 IPv6 地址');
+    return;
+  }
   try {
-    await api.post('/admin/banned-ips', banForm);
+    await api.post('/admin/banned-ips', { ...banForm, ip });
     MessagePlugin.success('IP已封禁');
     showBanDialog.value = false;
     banForm.ip = '';
@@ -403,6 +412,19 @@ async function banIP() {
   } catch (error: unknown) {
     MessagePlugin.error(getErrorMessage(error));
   }
+}
+
+function isValidIP(ip: string): boolean {
+  const ipv4Re = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
+  const m = ip.match(ipv4Re);
+  if (m) {
+    return m.slice(1).every((o) => {
+      const n = parseInt(o, 10);
+      return n >= 0 && n <= 255 && String(n) === o;
+    });
+  }
+  const ipv6Re = /^([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}$/;
+  return ipv6Re.test(ip);
 }
 
 async function unbanIP(ip: string) {
