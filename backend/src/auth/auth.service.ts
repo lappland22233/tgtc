@@ -132,7 +132,8 @@ export class AuthService {
         await queryRunner.rollbackTransaction();
       }
       // 处理唯一约束冲突（含邮箱唯一和 super_admin 角色唯一索引）
-      if (error instanceof Error && error.message?.includes('duplicate key')) {
+      const code = (error as { code?: string }).code;
+      if (error instanceof Error && code === '23505') {
         throw new BadRequestException('该邮箱已被注册');
       }
       throw error;
@@ -164,7 +165,7 @@ export class AuthService {
     const loginLimitKey = `login:${ip}:${loginDto.email.toLowerCase().trim()}`;
 
     const user = await this.userRepository.findOne({
-      where: { email: loginDto.email },
+      where: { email: loginDto.email.toLowerCase().trim() },
     });
 
     if (!user) {

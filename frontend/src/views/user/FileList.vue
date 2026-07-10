@@ -112,7 +112,9 @@
               <div style="min-width: 0;">
                 <span :class="{ 'deleted-name filename-text': row.isDeleted, 'filename-text': !row.isDeleted }">{{ row.originalName }}</span>
                 <div style="margin-top: 2px;">
-                  <t-tag v-if="row.isDeleted && row.deletedByAdmin" theme="danger" size="small">被管理员删除</t-tag>
+                  <t-tag v-if="row.status === 'error'" theme="danger" size="small">上传失败</t-tag>
+                  <t-tag v-else-if="row.status === 'processing'" theme="primary" size="small">处理中</t-tag>
+                  <t-tag v-else-if="row.isDeleted && row.deletedByAdmin" theme="danger" size="small">被管理员删除</t-tag>
                   <t-tag v-else-if="row.isDeleted" theme="warning" size="small">删除中</t-tag>
                   <span v-if="row.tags?.length" style="display: inline-flex; gap: 4px; margin-left: 4px;">
                     <t-tag
@@ -133,7 +135,7 @@
           <template #size="{ row }">{{ formatSize(row.size) }}</template>
           <template #accessType="{ row }">
             <t-select
-              v-if="!row.isDeleted"
+              v-if="isFileActionable(row)"
               :value="row.accessType"
               @change="(val: string) => handleAccessTypeChange(row.id, val)"
               :options="[
@@ -142,6 +144,7 @@
               ]"
               style="width: 100px;"
             />
+            <span v-else-if="row.status === 'processing'" class="deleted-label">处理中</span>
             <span v-else class="deleted-label">删除中</span>
           </template>
           <template #password="{ row }">
@@ -149,7 +152,7 @@
               size="small"
               :theme="row.hasPassword ? 'warning' : 'default'"
               variant="outline"
-              :disabled="row.isDeleted"
+              :disabled="!isFileActionable(row)"
               @click="openPasswordDialog(row)"
             >
               {{ row.hasPassword ? '🔒 已加密' : '🔓 未加密' }}
@@ -159,7 +162,7 @@
             <t-select
               :value="row.expiresIn"
               @change="(val: number | null) => handleExpiresChange(row.id, val)"
-              :disabled="row.isDeleted"
+              :disabled="!isFileActionable(row)"
               :options="expiresOptions"
               style="width: 100px;"
             />
@@ -168,7 +171,7 @@
             <t-input-number
               :value="row.maxAccessCount"
               :min="-1"
-              :disabled="row.isDeleted"
+              :disabled="!isFileActionable(row)"
               @change="(val: number) => handleAccessCountChange(row.id, val)"
               style="width: 120px;"
             />
@@ -182,8 +185,12 @@
             </div>
           </template>
           <template #operations="{ row }">
+            <!-- 处理中状态：禁止所有操作 -->
+            <template v-if="row.status === 'processing'">
+              <span style="color: var(--text-placeholder); font-size: 12px;">处理中，请稍后...</span>
+            </template>
             <!-- 已删除状态：显示恢复和强制删除 -->
-            <template v-if="row.isDeleted">
+            <template v-else-if="row.isDeleted">
               <t-button
                 size="small"
                 theme="success"
@@ -444,7 +451,12 @@ const selectedImages = computed(() =>
 );
 
 function getRowClassName({ row }: { row: FileItem }) {
+  if (row.status === 'processing') return 'row-processing';
   return row.isDeleted ? 'row-deleted' : '';
+}
+
+function isFileActionable(row: FileItem): boolean {
+  return row.status !== 'processing' && !row.isDeleted;
 }
 
 // 密码弹窗状态
@@ -962,6 +974,11 @@ onUnmounted(() => {
 :deep(.row-deleted) {
   background: rgba(255, 255, 255, 0.02);
   opacity: 0.85;
+}
+
+:deep(.row-processing) {
+  background: rgba(0, 82, 217, 0.05);
+  opacity: 0.9;
 }
 
 @media (max-width: 768px) {

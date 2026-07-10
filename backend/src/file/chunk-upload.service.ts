@@ -1,9 +1,20 @@
 import { Injectable, BadRequestException, NotFoundException, ForbiddenException, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
+import { InjectQueue } from '@nestjs/bull';
+import { Queue } from 'bull';
 import * as fs from 'fs';
 import { promises as fsp } from 'fs';
 import * as path from 'path';
+import { createWriteStream, createReadStream, WriteStream } from 'fs';
+import { pipeline } from 'stream';
+import { promisify } from 'util';
 import { v4 as uuidv4 } from 'uuid';
+import { CHUNK_CLEANUP_DELAY_MS, CHUNK_SESSION_MAX_IDLE_MS } from '../common/constants/durations';
+import { QUEUE_NAMES } from '../jobs/bull-queue.module';
+import { FileService } from './file.service';
+import { User } from '../common/entities/user.entity';
+
+const pipelineAsync = promisify(pipeline);
 
 interface ChunkSession {
   uploadId: string;
@@ -14,6 +25,8 @@ interface ChunkSession {
   chunkSize: number;
   uploadedBy: string;
   createdAt: Date;
+  /** 最后一次活动时间（分片上传/状态查询/合并触发时更新） */
+  lastActivityAt: Date;
   /** 合并状态 */
   mergeStatus: 'pending' | 'merging' | 'uploading' | 'done' | 'error';
   /** 合并结果（成功后填充） */
@@ -30,10 +43,14 @@ export class ChunkUploadService {
 
   /** 每用户最大并发会话数 */
   private static readonly MAX_SESSIONS_PER_USER = 10;
-  /** 会话过期时间 (ms) */
-  private static readonly SESSION_TTL = 24 * 60 * 60 * 1000;
+  /** 会话最大空闲时间 (ms) — 超过此时间无活动则清理 */
+  private static readonly SESSION_MAX_IDLE = CHUNK_SESSION_MAX_IDLE_MS;
 
-  constructor() {
+  constructor(
+    private fileService: FileService,
+    @InjectQueue(QUEUE_NAMES.FILE_UPLOAD)
+    private fileUploadQueue: Queue,
+  ) {
     this.baseDir = path.resolve(process.cwd(), 'tmp', 'uploads');
     fs.mkdirSync(this.baseDir, { recursive: true });
   }
@@ -54,6 +71,7 @@ export class ChunkUploadService {
     }
 
     const uploadId = uuidv4();
+    const now = new Date();
     const session: ChunkSession = {
       uploadId,
       fileName,
@@ -62,7 +80,8 @@ export class ChunkUploadService {
       totalChunks,
       chunkSize,
       uploadedBy: userId,
-      createdAt: new Date(),
+      createdAt: now,
+      lastActivityAt: now,
       mergeStatus: 'pending',
     };
 
@@ -88,6 +107,8 @@ export class ChunkUploadService {
       throw new BadRequestException('分片数据为空');
     }
 
+    session.lastActivityAt = new Date();
+
     const dir = this.getChunkDir(uploadId);
     const filePath = path.join(dir, String(chunkIndex));
 
@@ -107,6 +128,7 @@ export class ChunkUploadService {
     mergeError: string | null;
   }> {
     const session = this.getSession(uploadId, userId);
+    session.lastActivityAt = new Date();
     const dir = this.getChunkDir(uploadId);
 
     const uploaded: number[] = [];
@@ -155,6 +177,7 @@ export class ChunkUploadService {
       return;
     }
 
+    session.lastActivityAt = new Date();
     session.mergeStatus = 'merging';
 
     // 异步执行合并（不 await，不阻塞 HTTP 响应）
@@ -170,34 +193,70 @@ export class ChunkUploadService {
         session.mergeStatus = 'error';
         session.mergeError = err.message;
         this.logger.error(`[分片上传] ${uploadId} 合并失败: ${err.message}`);
+        // 合并失败也清理临时文件和会话，防止磁盘残留
+        this.scheduleCleanup(uploadId);
       });
   }
 
   private async doMerge(
     session: ChunkSession,
-    uploadFn: (file: Express.Multer.File) => Promise<{ id: string; originalName: string }>,
+    _uploadFn: (file: Express.Multer.File) => Promise<{ id: string; originalName: string }>,
   ): Promise<{ id: string; originalName: string }> {
     const dir = this.getChunkDir(session.uploadId);
-    const chunks: Buffer[] = [];
+    const mergedPath = path.join(dir, 'merged');
+
+    // 日志：记录合并开始（用于排查 OOM/磁盘问题）
+    this.logger.log(`[分片上传] ${session.uploadId} 开始合并 ${session.totalChunks} 个分片 (${(session.fileSize / 1024 / 1024).toFixed(1)}MB)`);
+    
+    // 检查 baseDir 可访问性
+    try {
+      await fsp.access(this.baseDir, fsp.constants.W_OK);
+    } catch {
+      throw new Error(`上传目录不可写: ${this.baseDir}`);
+    }
+
+    // 流式合并分片到磁盘文件（避免 Buffer.concat 对大文件造成 OOM）
+    const writeStream: WriteStream = createWriteStream(mergedPath, { flags: 'w' });
+    let written = 0;
 
     for (let i = 0; i < session.totalChunks; i++) {
       const chunkPath = path.join(dir, String(i));
       try {
-        const data = await fsp.readFile(chunkPath);
-        if (data.length === 0) {
+        const stat = await fsp.stat(chunkPath);
+        if (stat.size === 0) {
           throw new Error(`分片 ${i} 为空`);
         }
-        chunks.push(data);
-      } catch {
-        throw new Error(`分片 ${i} 缺失，请重新上传`);
+        const readStream = createReadStream(chunkPath);
+        await pipelineAsync(readStream, writeStream, { end: false });
+        written += stat.size;
+      } catch (err) {
+        writeStream.destroy();
+        // 清理未完成的合并文件
+        await fsp.unlink(mergedPath).catch(() => {});
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+          throw new Error(`分片 ${i} 缺失，请重新上传`);
+        }
+        if ((err as NodeJS.ErrnoException).code === 'ENOSPC') {
+          throw new Error(`磁盘空间不足，无法合并 ${(session.fileSize / 1024 / 1024).toFixed(1)}MB 文件，请联系管理员清理空间后重试`);
+        }
+        throw err;
       }
     }
 
-    const merged = Buffer.concat(chunks);
+    // 关闭写入流
+    await new Promise<void>((resolve, reject) => {
+      writeStream.end((err?: Error | null) => {
+        if (err) reject(err);
+        else resolve();
+      });
+    });
 
-    if (merged.length !== session.fileSize) {
-      throw new Error(`文件大小校验失败: 期望 ${session.fileSize}, 实际 ${merged.length}`);
+    if (written !== session.fileSize) {
+      await fsp.unlink(mergedPath).catch(() => {});
+      throw new Error(`文件大小校验失败: 期望 ${session.fileSize}, 实际 ${written}`);
     }
+
+    this.logger.log(`[分片上传] ${session.uploadId} 合并完成: ${(written / 1024 / 1024).toFixed(1)}MB`);
 
     session.mergeStatus = 'uploading';
 
@@ -206,15 +265,41 @@ export class ChunkUploadService {
       originalname: session.fileName,
       encoding: '7bit',
       mimetype: session.mimeType,
-      buffer: merged,
-      size: merged.length,
+      buffer: null as any,
+      size: written,
       destination: '',
       filename: session.fileName,
-      path: '',
+      path: mergedPath, // 指向磁盘合并文件，供后续流式上传
       stream: null as any,
     };
 
-    return uploadFn(mockFile);
+    // 合并完成 → 创建处理中的文件记录 → 入队后台异步上传
+    const savedFile = await this.fileService.createProcessingFile(
+      mockFile,
+      session.fileName,
+      { id: session.uploadedBy } as User,
+    );
+
+    // 将合并文件复制到持久化目录（避免 scheduleCleanup 5分钟后删除）
+    const pendingDir = path.resolve(process.cwd(), 'tmp', 'uploads', 'pending');
+    fs.mkdirSync(pendingDir, { recursive: true });
+    const pendingPath = path.join(pendingDir, savedFile.id);
+    await fsp.copyFile(mergedPath, pendingPath);
+
+    await this.fileUploadQueue.add(
+      'upload',
+      { fileId: savedFile.id, filePath: pendingPath },
+      {
+        attempts: 3,
+        backoff: { type: 'exponential', delay: 10000 },
+        removeOnComplete: 100,
+        removeOnFail: 50,
+      },
+    );
+
+    this.logger.log(`[分片上传] ${session.uploadId} 已入队后台上传: ${savedFile.id}`);
+
+    return { id: savedFile.id, originalName: savedFile.originalName };
   }
 
   /** 延迟清理会话和临时文件 */
@@ -223,7 +308,7 @@ export class ChunkUploadService {
       this.sessions.delete(uploadId);
       const dir = this.getChunkDir(uploadId);
       fsp.rm(dir, { recursive: true, force: true }).catch(() => {});
-    }, 5 * 60 * 1000); // 5 分钟后清理，允许客户端查询结果
+    }, CHUNK_CLEANUP_DELAY_MS); // 允许客户端查询结果
   }
 
   /** 取消上传并清理 */
@@ -242,13 +327,13 @@ export class ChunkUploadService {
     this.logger.log(`[分片上传] 取消会话 ${uploadId}`);
   }
 
-  /** 定时清理过期会话 */
+  /** 定时清理空闲过久的会话（基于 lastActivityAt） */
   @Cron(CronExpression.EVERY_HOUR)
   async cleanupExpiredSessions(): Promise<void> {
     const now = Date.now();
     let cleaned = 0;
     for (const [uploadId, session] of this.sessions) {
-      if (now - session.createdAt.getTime() > ChunkUploadService.SESSION_TTL) {
+      if (now - session.lastActivityAt.getTime() > ChunkUploadService.SESSION_MAX_IDLE) {
         this.sessions.delete(uploadId);
         const dir = this.getChunkDir(uploadId);
         await fsp.rm(dir, { recursive: true, force: true }).catch(() => {});
@@ -256,7 +341,7 @@ export class ChunkUploadService {
       }
     }
     if (cleaned > 0) {
-      this.logger.log(`[分片上传] 清理 ${cleaned} 个过期会话`);
+      this.logger.log(`[分片上传] 清理 ${cleaned} 个空闲过期会话`);
     }
   }
 

@@ -8,8 +8,12 @@ import { Cron, CronExpression } from '@nestjs/schedule';
 import { Readable } from 'stream';
 import { Request } from 'express';
 import * as fs from 'fs';
+import { createReadStream, writeFileSync } from 'fs';
 import * as path from 'path';
 import sharp from 'sharp';
+import { InjectQueue } from '@nestjs/bull';
+import { Queue } from 'bull';
+import { QUEUE_NAMES } from '../jobs/bull-queue.module';
 import { File, FileAccessType } from '../common/entities/file.entity';
 import { FileAccessLog } from '../common/entities/file-access-log.entity';
 import { TelegramService } from '../telegram/telegram.service';
@@ -24,6 +28,7 @@ import { FileCacheService } from './file-cache.service';
 import * as bcrypt from 'bcryptjs';
 import { v4 as uuidv4 } from 'uuid';
 import { BCRYPT_ROUNDS } from '../common/constants/bcrypt';
+import { FILE_DELETE_GRACE_MS, FILE_DELETE_COOLDOWN_MS } from '../common/constants/durations';
 
 export interface BatchUploadFailedItem {
   name: string;
@@ -105,6 +110,8 @@ export class FileService implements OnModuleInit {
     private uploadJobService: UploadJobService,
     private auditService: AuditService,
     private fileCacheService: FileCacheService,
+    @InjectQueue(QUEUE_NAMES.FILE_UPLOAD)
+    private fileUploadQueue: Queue,
   ) {
     this.maxFileSize = this.parseFileSize(this.configService.get<string>('MAX_FILE_SIZE'));
     this.thumbnailDir = this.configService.get<string>('THUMBNAIL_DIR') || path.join(process.cwd(), 'tmp', 'thumbnails');
@@ -278,6 +285,70 @@ export class FileService implements OnModuleInit {
     return `${filename}.${ext}`;
   }
 
+  /**
+   * 创建处理中的文件记录（磁盘文件→DB record=processing）
+   * Telegram 上传由 FileUploadProcessor 后台异步执行
+   */
+  async createProcessingFile(
+    file: Express.Multer.File,
+    originalName: string,
+    user: User,
+    tagIds?: string[],
+  ): Promise<File> {
+    if (file.size > this.maxFileSize) {
+      throw new BadRequestException(`文件大小不能超过 ${this.maxFileSize / 1024 / 1024}MB`);
+    }
+
+    const fileName = this.fixFilenameEncoding(originalName);
+
+    const typeCheck = this.isFileTypeAllowed(fileName, file.mimetype);
+    if (!typeCheck.allowed) {
+      throw new BadRequestException(typeCheck.reason || '不允许上传此类型的文件');
+    }
+
+    const tempId = uuidv4();
+    const newFile = this.fileRepository.create({
+      filename: tempId,
+      originalName: fileName,
+      mimeType: file.mimetype || 'application/octet-stream',
+      size: file.size,
+      telegramFileId: tempId,
+      telegramFilePath: '',
+      uploaderId: user.id,
+      accessType: FileAccessType.PUBLIC,
+      maxAccessCount: -1,
+      status: 'processing',
+    });
+    const savedFile = await this.fileRepository.save(newFile);
+
+    if (tagIds?.length) {
+      await this.insertFileTags(this.fileRepository.manager, savedFile.id, tagIds);
+    }
+
+    this.auditService.log({
+      action: 'file_upload',
+      userId: user.id,
+      resourceType: 'file',
+      resourceId: savedFile.id,
+      metadata: { filename: fileName, size: file.size, status: 'processing' },
+    });
+
+    // 预热缓存：将文件直接放入缓存目录，首次下载无需等待 TG 回源
+    if (file.path && fs.existsSync(file.path)) {
+      this.fileCacheService.cacheFileFromPath(savedFile.id, file.path, file.size)
+        .then(() => {
+          // 缓存预热完成 → 文件立即可用，无需等待 TG 上传
+          this.fileRepository.update(savedFile.id, { status: 'ready' } as any).catch(() => {});
+          this.logger.log(`文件缓存就绪: ${savedFile.id}`);
+        })
+        .catch((err) => {
+          this.logger.warn(`缓存预热失败 (${savedFile.id}): ${err.message}`);
+        });
+    }
+
+    return savedFile;
+  }
+
   async upload(file: Express.Multer.File, user: User, tagIds?: string[]): Promise<File> {
     if (file.size > this.maxFileSize) {
       throw new BadRequestException(`文件大小不能超过 ${this.maxFileSize / 1024 / 1024}MB`);
@@ -293,7 +364,15 @@ export class FileService implements OnModuleInit {
 
     // GIF 文件加 .bin 后缀防止 Telegram 转码为 MP4
     const uploadName = file.mimetype === 'image/gif' ? originalName + '.bin' : originalName;
-    const telegramFile = await this.telegramService.uploadFile(file.buffer, uploadName);
+
+    const useStream = file.path && fs.existsSync(file.path);
+    const uploadSource = useStream ? createReadStream(file.path) : file.buffer;
+    const telegramFile = await this.telegramService.uploadFile(
+      uploadSource,
+      uploadName,
+      undefined,
+      useStream ? file.size : undefined,
+    );
 
     const newFile = this.fileRepository.create({
       filename: telegramFile.file_id,
@@ -309,12 +388,10 @@ export class FileService implements OnModuleInit {
 
     const savedFile = await this.fileRepository.save(newFile);
 
-    // 上传时关联标签（参数化查询，防止 SQL 注入）
     if (tagIds && tagIds.length > 0) {
       await this.insertFileTags(this.fileRepository.manager, savedFile.id, tagIds);
     }
 
-    // 审计日志：文件上传
     this.auditService.log({
       action: 'file_upload',
       userId: user.id,
@@ -323,7 +400,6 @@ export class FileService implements OnModuleInit {
       metadata: { filename: originalName, size: file.size, mimeType: file.mimetype },
     });
 
-    // 异步生成缩略图（不阻塞上传响应）
     if (file.mimetype.startsWith('image/')) {
       this.generateAndSaveThumbnail(savedFile).catch(err =>
         this.logger.warn(`上传后缩略图生成失败 id=${savedFile.id}: ${(err as Error).message}`),
@@ -363,14 +439,28 @@ export class FileService implements OnModuleInit {
       return { success: [], failed: preCheckFailed };
     }
 
-    // 上传阶段：逐文件上传到 Telegram
+    // 上传阶段：创建处理中记录 + 入队后台上传（不再同步等待 Telegram）
     const success: File[] = [];
     const failed = [...preCheckFailed];
 
     for (const file of passPreCheck) {
       try {
-        const uploadedFile = await this.upload(file, user, tagIds);
-        success.push(uploadedFile);
+        const originalName = this.fixFilenameEncoding(file.originalname);
+        const savedFile = await this.createProcessingFile(file, originalName, user, tagIds);
+        // 将文件写入持久化路径供后台 processor 读取
+        const pendingDir = path.join(process.cwd(), 'tmp', 'uploads', 'pending');
+        if (!fs.existsSync(pendingDir)) fs.mkdirSync(pendingDir, { recursive: true });
+        const pendingPath = path.join(pendingDir, `${savedFile.id}`);
+        if (file.path && fs.existsSync(file.path)) {
+          await fs.promises.rename(file.path, pendingPath);
+        } else if (file.buffer) {
+          writeFileSync(pendingPath, file.buffer);
+        }
+        await this.fileUploadQueue.add('upload', 
+          { fileId: savedFile.id, filePath: pendingPath },
+          { attempts: 3, backoff: { type: 'exponential', delay: 10000 }, removeOnComplete: 100, removeOnFail: 50 },
+        );
+        success.push(savedFile);
       } catch (error: unknown) {
         failed.push({
           name: file.originalname,
@@ -597,8 +687,8 @@ export class FileService implements OnModuleInit {
     file.isDeleted = true;
     file.deletedByAdmin = false;
     file.deleteRequestedAt = now;
-    file.deleteScheduledAt = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
-    file.deleteCooldownUntil = new Date(now.getTime() + 10 * 60 * 1000);
+    file.deleteScheduledAt = new Date(now.getTime() + FILE_DELETE_GRACE_MS);
+    file.deleteCooldownUntil = new Date(now.getTime() + FILE_DELETE_COOLDOWN_MS);
     await this.fileRepository.save(file);
 
     // 审计日志：文件请求删除
@@ -716,7 +806,7 @@ export class FileService implements OnModuleInit {
   @Cron(CronExpression.EVERY_HOUR)
   async sweepPendingDeletions(): Promise<number> {
     const now = new Date();
-    const adminRecoverWindow = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+    const adminRecoverWindow = new Date(now.getTime() - FILE_DELETE_GRACE_MS);
 
     // 查询所有待删除文件
     const deletedFiles = await this.fileRepository.find({
@@ -1197,6 +1287,12 @@ export class FileService implements OnModuleInit {
 
     // 尝试从本地缓存获取（二次访问加速，减少 Telegram API 调用）
     const cachedStream = this.fileCacheService.getCachedReadStream(file.id, Number(file.size));
+
+    // 缓存未命中且文件仍在处理中（TG 未同步）→ 拒绝下载，避免用临时 UUID 回源
+    if (!cachedStream && file.status === 'processing') {
+      throw new BadRequestException('文件正在处理中，请稍后刷新重试');
+    }
+
     const { stream } = cachedStream
       ? { stream: cachedStream }
       : { stream: (await this.telegramService.getFileStream(file.telegramFileId || file.filename)).stream };
@@ -1294,10 +1390,10 @@ export class FileService implements OnModuleInit {
           await this.shareAuditRepository.save({
             jti: payload.jti,
             fileId,
-            userId: '',
+            userId: null,
             action: 'consume',
-            ip: '',
-          } as ShareAudit);
+            ip: null,
+          } as unknown as ShareAudit);
         } catch (dbError: unknown) {
           // PostgreSQL unique_violation (23505) = token 已被消费
           const code = (dbError as { code?: string }).code;
@@ -1346,7 +1442,10 @@ export class FileService implements OnModuleInit {
       }
     }
 
-    const { stream, info } = await this.telegramService.getFileStream(file.telegramFileId || file.filename);
+    const cachedStream = this.fileCacheService.getCachedReadStream(file.id, Number(file.size));
+    const { stream, info } = cachedStream
+      ? { stream: cachedStream, info: { file_id: file.telegramFileId, file_path: '', file_size: Number(file.size) } }
+      : await this.telegramService.getFileStream(file.telegramFileId || file.filename);
 
     try {
       await this.accessLogRepository.save({
@@ -1391,7 +1490,10 @@ export class FileService implements OnModuleInit {
       throw new ForbiddenException('此文件为私有文件，不提供公开访问');
     }
 
-    const { stream, info } = await this.telegramService.getFileStream(file.telegramFileId || file.filename);
+    const cachedStream = this.fileCacheService.getCachedReadStream(file.id, Number(file.size));
+    const { stream, info } = cachedStream
+      ? { stream: cachedStream, info: { file_id: file.telegramFileId, file_path: '', file_size: Number(file.size) } }
+      : await this.telegramService.getFileStream(file.telegramFileId || file.filename);
 
     try {
       await this.accessLogRepository.save({
@@ -1665,7 +1767,14 @@ export class FileService implements OnModuleInit {
   ): Promise<File> {
     // GIF 文件加 .bin 后缀防止 Telegram 转码为 MP4
     const uploadName = file.mimetype === 'image/gif' ? originalName + '.bin' : originalName;
-    const telegramFile = await this.telegramService.uploadFile(file.buffer, uploadName, abortSignal);
+    const useStream = file.path && fs.existsSync(file.path);
+    const uploadSource = useStream ? createReadStream(file.path) : file.buffer;
+    const telegramFile = await this.telegramService.uploadFile(
+      uploadSource,
+      uploadName,
+      abortSignal,
+      useStream ? file.size : undefined,
+    );
 
     const newFile = this.fileRepository.create({
       filename: telegramFile.file_id,

@@ -523,6 +523,19 @@ function attackTypeLabel(ruleId: string): string {
   return attackTypeLabels[ruleId] || ruleId.replace('ATTACK_', '').replace(/_/g, ' ');
 }
 
+function isValidIP(ip: string): boolean {
+  const ipv4Re = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
+  const m = ip.match(ipv4Re);
+  if (m) {
+    return m.slice(1).every((o) => {
+      const n = parseInt(o, 10);
+      return n >= 0 && n <= 255 && String(n) === o;
+    });
+  }
+  const ipv6Re = /^([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}$/;
+  return ipv6Re.test(ip);
+}
+
 function attackTypeCount(type: string): number {
   return attackAlerts.value.filter(a => a.ruleId === `ATTACK_${type.toUpperCase()}`).length;
 }
@@ -626,6 +639,10 @@ function openBanDialog(ip?: string) {
 async function handleBanSubmit() {
   if (!banForm.ip.trim()) {
     MessagePlugin.warning('请输入 IP 地址');
+    return;
+  }
+  if (!isValidIP(banForm.ip.trim())) {
+    MessagePlugin.warning('IP 地址格式无效，请输入合法的 IPv4 或 IPv6 地址');
     return;
   }
   banDialogSaving.value = true;

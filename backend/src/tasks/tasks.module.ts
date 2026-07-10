@@ -10,5 +10,6 @@ import { AuditLog } from '../common/entities/audit-log.entity';
 @Module({
   imports: [TypeOrmModule.forFeature([BannedIP, ShareAudit, RateLimit, AccessLog, AuditLog])],
   providers: [TasksService],
+  // TasksService 仅为内部 @Cron 定时调度使用，无需 exports
 })
 export class TasksModule {}

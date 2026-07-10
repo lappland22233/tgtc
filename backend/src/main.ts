@@ -6,8 +6,10 @@ import { join } from 'path';
 import { AppModule } from './app.module';
 import { TransformInterceptor } from './common/interceptors/transform.interceptor';
 import { validateEnv } from './config/env-validation';
+import { FileLogger } from './common/file-logger';
 
 async function bootstrap() {
+  const fileLogger = new FileLogger();
   const logger = new Logger('Bootstrap');
 
   // 启动时校验关键环境变量，失败则阻止启动
@@ -18,7 +20,9 @@ async function bootstrap() {
     process.exit(1);
   }
 
-  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, {
+    logger: fileLogger,
+  });
 
   // 配置反向代理信任，确保 req.ip 获取真实客户端 IP
   app.getHttpAdapter().getInstance().set('trust proxy', 1);
@@ -94,10 +98,11 @@ async function bootstrap() {
   const httpServer = await app.listen(port, host);
 
   // HTTP 服务器超时配置（基于活动连接）：
-  // - server.timeout 在有数据传输时自动重置，空闲 30 秒后断开
-  // - 大文件上传时持续有数据流入，计时器不断重置，不会超时
+  // - server.timeout 在有数据传输时自动重置，空闲后断开
+  // - 大文件上传/分片上传时持续有数据流入，计时器不断重置，不会超时
+  // - 设为 120s 为慢速网络留足安全余量（略大于 Cloudflare 100s 代理超时）
   // - 上传端点额外通过 req.setTimeout(0) 兜底
-  httpServer.timeout = 30 * 1000;                // 空闲 30 秒超时，数据传输中不超时
+  httpServer.timeout = 120 * 1000;               // 空闲 120 秒超时，数据传输中不超时
   httpServer.keepAliveTimeout = 65 * 1000;       // Keep-Alive 连接空闲超时（略大于 LB 60s）
   httpServer.headersTimeout = 66 * 1000;          // 请求头超时（需大于 keepAliveTimeout）
 

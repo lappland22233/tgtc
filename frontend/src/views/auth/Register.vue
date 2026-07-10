@@ -85,7 +85,10 @@ const authStatus = ref({
 
 // 动态生成验证规则
 const rules = computed(() => ({
-  email: [{ required: true, message: '请输入邮箱', type: 'error' }],
+  email: [
+    { required: true, message: '请输入邮箱', type: 'error' },
+    { email: true, message: '请输入有效的邮箱地址', type: 'error' },
+  ],
   password: [
     { required: true, message: '请输入密码', type: 'error' },
     { min: 6, message: '密码至少6位', type: 'error' },

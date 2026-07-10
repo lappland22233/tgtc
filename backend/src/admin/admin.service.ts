@@ -13,6 +13,7 @@ import { FileService } from '../file/file.service';
 import { ConfigCacheService } from '../common/services/config-cache.service';
 import { AuditService } from '../common/services/audit.service';
 import { encryptPassword } from '../common/utils/crypto.util';
+import { FILE_DELETE_GRACE_MS, FILE_DELETE_COOLDOWN_MS } from '../common/constants/durations';
 import { ExportService, ExportOptions } from './export.service';
 import { SEC_CONFIG_META, SEC_CONFIG_DEFAULTS } from './security-config.defaults';
 import {
@@ -297,8 +298,8 @@ export class AdminService {
     file.isDeleted = true;
     file.deletedByAdmin = true;
     file.deleteRequestedAt = now;
-    file.deleteScheduledAt = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
-    file.deleteCooldownUntil = new Date(now.getTime() + 10 * 60 * 1000);
+    file.deleteScheduledAt = new Date(now.getTime() + FILE_DELETE_GRACE_MS);
+    file.deleteCooldownUntil = new Date(now.getTime() + FILE_DELETE_COOLDOWN_MS);
     await this.fileRepository.save(file);
 
     // 审计日志：管理员标记删除
@@ -328,8 +329,8 @@ export class AdminService {
     }
 
     const now = new Date();
-    const scheduledAt = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
-    const cooldownUntil = new Date(now.getTime() + 10 * 60 * 1000);
+    const scheduledAt = new Date(now.getTime() + FILE_DELETE_GRACE_MS);
+    const cooldownUntil = new Date(now.getTime() + FILE_DELETE_COOLDOWN_MS);
 
     const existingIds = existingFiles.map(f => f.id);
     await this.fileRepository.update(existingIds, {
@@ -545,7 +546,7 @@ export class AdminService {
     switch (timeRange) {
       case '1h': return new Date(now.getTime() - 60 * 60 * 1000);
       case '24h': return new Date(now.getTime() - 24 * 60 * 60 * 1000);
-      case '7d': return new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+      case '7d': return new Date(now.getTime() - FILE_DELETE_GRACE_MS);
       case '30d': return new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
       default: return new Date(now.getTime() - 24 * 60 * 60 * 1000);
     }

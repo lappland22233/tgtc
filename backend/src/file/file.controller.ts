@@ -19,7 +19,7 @@ import {
   HttpException,
   HttpStatus,
 } from '@nestjs/common';
-import { AuthGuard } from '@nestjs/passport';
+import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { FileInterceptor, FilesInterceptor } from '@nestjs/platform-express';
 import { ConfigService } from '@nestjs/config';
 import { pipeline } from 'stream';
@@ -57,7 +57,7 @@ export class FileController {
   }
 
   @Post('upload')
-  @UseGuards(AuthGuard('jwt'))
+  @UseGuards(JwtAuthGuard)
   @UseInterceptors(FileInterceptor('file', { limits: { fileSize: multerFileSize } }))
   async upload(
     @UploadedFile() file: Express.Multer.File,
@@ -78,7 +78,7 @@ export class FileController {
   }
 
   @Post('upload-multiple')
-  @UseGuards(AuthGuard('jwt'))
+  @UseGuards(JwtAuthGuard)
   @UseInterceptors(FilesInterceptor('files', 10, { limits: { fileSize: multerFileSize } }))
   async uploadMultiple(
     @UploadedFiles() files: Express.Multer.File[],
@@ -87,7 +87,7 @@ export class FileController {
     @Res({ passthrough: true }) res: Response,
     @Body('tagIds') tagIdsRaw?: any,
   ) {
-    // 大文件上传：禁用请求和响应超时
+    // 大文件上传：禁用超时（仅接收阶段）
     req.setTimeout(0);
     res.setTimeout(0);
     if (!files || files.length === 0) {
@@ -104,7 +104,7 @@ export class FileController {
    * 前端通过 GET /api/files/upload-status/:jobId 轮询结果。
    */
   @Post('upload-async')
-  @UseGuards(AuthGuard('jwt'))
+  @UseGuards(JwtAuthGuard)
   @UseInterceptors(FileInterceptor('file', { limits: { fileSize: multerFileSize } }))
   async uploadAsync(
     @UploadedFile() file: Express.Multer.File,
@@ -127,7 +127,7 @@ export class FileController {
    * 异步批量上传
    */
   @Post('upload-multiple-async')
-  @UseGuards(AuthGuard('jwt'))
+  @UseGuards(JwtAuthGuard)
   @UseInterceptors(FilesInterceptor('files', 10, { limits: { fileSize: multerFileSize } }))
   async uploadMultipleAsync(
     @UploadedFiles() files: Express.Multer.File[],
@@ -150,7 +150,7 @@ export class FileController {
    * 查询异步上传任务状态
    */
   @Get('upload-status/:jobId')
-  @UseGuards(AuthGuard('jwt'))
+  @UseGuards(JwtAuthGuard)
   async getUploadStatus(@Param('jobId') jobId: string, @CurrentUser() user: User) {
     const job = this.fileService.getUploadJob(jobId);
     if (!job) {
@@ -173,7 +173,7 @@ export class FileController {
   }
 
   @Get()
-  @UseGuards(AuthGuard('jwt'))
+  @UseGuards(JwtAuthGuard)
   async findAll(
     @Query('page') page = 1,
     @Query('limit') limit = 20,
@@ -232,7 +232,7 @@ export class FileController {
   }
 
   @Get(':id')
-  @UseGuards(AuthGuard('jwt'))
+  @UseGuards(JwtAuthGuard)
   async findOne(@Param('id') id: string, @CurrentUser() user: User) {
     return this.fileService.findOne(id, user);
   }
@@ -245,7 +245,7 @@ export class FileController {
    * - 不受私有/加密/次数/过期限制
    */
   @Get(':id/thumbnail')
-  @UseGuards(AuthGuard('jwt'))
+  @UseGuards(JwtAuthGuard)
   async thumbnail(
     @Param('id') id: string,
     @CurrentUser() user: User,
@@ -265,7 +265,7 @@ export class FileController {
         throw new ForbiddenException('无效的访问令牌');
       }
 
-      if (Math.abs(Date.now() - timestamp) > 30_000) {
+      if (Math.abs(Date.now() - timestamp) > 10_000) {
         throw new ForbiddenException('访问令牌已过期');
       }
 
@@ -291,7 +291,7 @@ export class FileController {
   }
 
   @Get(':id/download')
-  @UseGuards(AuthGuard('jwt'))
+  @UseGuards(JwtAuthGuard)
   async download(
     @Param('id') id: string,
     @CurrentUser() user: User,
@@ -340,7 +340,7 @@ export class FileController {
   }
 
   @Put(':id/access-type')
-  @UseGuards(AuthGuard('jwt'))
+  @UseGuards(JwtAuthGuard)
   async updateAccessType(
     @Param('id') id: string,
     @Body() data: UpdateAccessTypeDto,
@@ -351,7 +351,7 @@ export class FileController {
   }
 
   @Put(':id/access-count')
-  @UseGuards(AuthGuard('jwt'))
+  @UseGuards(JwtAuthGuard)
   async updateAccessCount(
     @Param('id') id: string,
     @Body() data: UpdateAccessCountDto,
@@ -362,7 +362,7 @@ export class FileController {
   }
 
   @Put(':id/password')
-  @UseGuards(AuthGuard('jwt'))
+  @UseGuards(JwtAuthGuard)
   async setPassword(
     @Param('id') id: string,
     @Body() data: SetPasswordDto,
@@ -373,7 +373,7 @@ export class FileController {
   }
 
   @Put(':id/expires')
-  @UseGuards(AuthGuard('jwt'))
+  @UseGuards(JwtAuthGuard)
   async updateExpires(
     @Param('id') id: string,
     @Body() data: UpdateExpiresDto,
@@ -384,7 +384,7 @@ export class FileController {
   }
 
   @Delete(':id')
-  @UseGuards(AuthGuard('jwt'))
+  @UseGuards(JwtAuthGuard)
   async delete(@Param('id') id: string, @CurrentUser() user: User) {
     const result = await this.fileService.delete(id, user);
     if (result.status === 'permanently_deleted') {
@@ -397,7 +397,7 @@ export class FileController {
   }
 
   @Post(':id/restore')
-  @UseGuards(AuthGuard('jwt'))
+  @UseGuards(JwtAuthGuard)
   async restoreDelete(@Param('id') id: string, @CurrentUser() user: User) {
     await this.fileService.restoreDelete(id, user);
     return { message: '文件已恢复' };
@@ -405,14 +405,14 @@ export class FileController {
 
   /** 文件主强制永久删除自己的文件（跳过 7 天等待期） */
   @Post(':id/force-delete')
-  @UseGuards(AuthGuard('jwt'))
+  @UseGuards(JwtAuthGuard)
   async forceDelete(@Param('id') id: string, @CurrentUser() user: User) {
     await this.fileService.forceDelete(id, user);
     return { message: '文件已永久删除' };
   }
 
   @Post('batch-markdown')
-  @UseGuards(AuthGuard('jwt'))
+  @UseGuards(JwtAuthGuard)
   async batchToMarkdown(
     @Body() data: BatchMarkdownDto,
     @CurrentUser() user: User,
@@ -423,7 +423,7 @@ export class FileController {
 
   /** 设置文件标签（全量替换） */
   @Put(':id/tags')
-  @UseGuards(AuthGuard('jwt'))
+  @UseGuards(JwtAuthGuard)
   async setFileTags(
     @Param('id') id: string,
     @CurrentUser() user: User,
@@ -442,7 +442,7 @@ export class FileController {
 
   /** 移除文件单个标签 */
   @Delete(':id/tags/:tagId')
-  @UseGuards(AuthGuard('jwt'))
+  @UseGuards(JwtAuthGuard)
   async removeFileTag(
     @Param('id') id: string,
     @Param('tagId') tagId: string,
@@ -573,7 +573,7 @@ export class FileController {
 
   // Generate share link
   @Get(':id/share')
-  @UseGuards(AuthGuard('jwt'))
+  @UseGuards(JwtAuthGuard)
   async generateShareLink(
     @Param('id') id: string,
     @CurrentUser() user: User,

@@ -65,7 +65,20 @@ export function useCursorPagination<T = unknown>(): UseCursorPaginationReturn<T>
 
     loading.value = true;
     try {
+      const cursorBefore = nextCursor.value;
       const result = await fetchFn(nextCursor.value);
+
+      // 防护 1: 空页停止 (防止后端返回 hasMore=true 但无数据)
+      if (!result.data || result.data.length === 0) {
+        hasMore.value = false;
+        return;
+      }
+      // 防护 2: 游标未推进停止 (防止 nextCursor 不变导致无限追加)
+      if (result.nextCursor !== null && result.nextCursor === cursorBefore) {
+        hasMore.value = false;
+        return;
+      }
+
       data.value = [...data.value, ...result.data];
       nextCursor.value = result.nextCursor;
       hasMore.value = result.hasMore;

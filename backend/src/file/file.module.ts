@@ -1,7 +1,9 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { JwtModule } from '@nestjs/jwt';
+import { BullModule } from '@nestjs/bull';
 import { ConfigModule, ConfigService } from '@nestjs/config';
+import { QUEUE_NAMES } from '../jobs/bull-queue.module';
 import { FileController } from './file.controller';
 import { FileService } from './file.service';
 import { File } from '../common/entities/file.entity';
@@ -9,7 +11,7 @@ import { FileAccessLog } from '../common/entities/file-access-log.entity';
 import { BannedIP } from '../common/entities/banned-ip.entity';
 import { ShareAudit } from '../common/entities/share-audit.entity';
 import { UploadTask } from '../common/entities/upload-task.entity';
-import { TelegramService } from '../telegram/telegram.service';
+import { TelegramModule } from '../telegram/telegram.module';
 import { ThumbnailCryptoService } from './thumbnail-crypto.service';
 import { UploadJobService } from './upload-job.service';
 import { ChunkUploadService } from './chunk-upload.service';
@@ -25,6 +27,8 @@ import { TagModule } from '../tag/tag.module';
     ConfigCacheModule,
     RateLimitModule,
     TagModule,
+    TelegramModule,
+    BullModule.registerQueue({ name: QUEUE_NAMES.FILE_UPLOAD }),
     JwtModule.registerAsync({
       imports: [ConfigModule],
       inject: [ConfigService],
@@ -40,7 +44,7 @@ import { TagModule } from '../tag/tag.module';
     }),
   ],
   controllers: [FileController, ChunkUploadController],
-  providers: [FileService, TelegramService, ThumbnailCryptoService, UploadJobService, ChunkUploadService, FileCacheService],
+  providers: [FileService, ThumbnailCryptoService, UploadJobService, ChunkUploadService, FileCacheService],
   exports: [FileService],
 })
 export class FileModule {}

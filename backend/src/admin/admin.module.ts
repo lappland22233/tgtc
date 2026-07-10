@@ -15,7 +15,6 @@ import { DashboardController } from './dashboard.controller';
 import { DashboardService } from './dashboard.service';
 import { ExportService } from './export.service';
 import { FileModule } from '../file/file.module';
-import { TelegramService } from '../telegram/telegram.service';
 import { MailerModule } from '../mailer/mailer.module';
 import { AlertModule } from '../alert/alert.module';
 
@@ -27,7 +26,7 @@ import { AlertModule } from '../alert/alert.module';
     forwardRef(() => AlertModule),
   ],
   controllers: [AdminController, DashboardController],
-  providers: [AdminService, DashboardService, ExportService, TelegramService],
+  providers: [AdminService, DashboardService, ExportService],
   exports: [AdminService],
 })
 export class AdminModule {}

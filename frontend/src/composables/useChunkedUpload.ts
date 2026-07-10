@@ -24,8 +24,13 @@ const CHUNK_SIZE_OPTIONS = [
   512 * 1024,        // 512KB — 极慢网络
 ];
 
-/** 单个分片超时时间 (ms)，超过此时间视为超时 */
-const CHUNK_TIMEOUT = 120 * 1000;
+/** 
+ * 单个分片超时时间 (ms)，超过此时间视为超时。
+ * Cloudflare 免费/Pro 套餐代理超时 100 秒，前端需在 100 秒内主动 abort，
+ * 否则 Cloudflare 先返回 502 导致错误信息不明确。
+ * 设为 90 秒留 10 秒安全余量。
+ */
+const CHUNK_TIMEOUT = 90 * 1000;
 
 /** 最大重试次数 */
 const MAX_RETRIES = 3;
@@ -140,11 +145,12 @@ export function useChunkedUpload(concurrency = 2) {
             if (signal?.aborted) return;
           }
 
-          // 可重试的错误：超时、网络错误、5xx
+          // 可重试的错误：超时、网络错误、5xx、Cloudflare 502
           const isRetryable =
             err?.code === 'ECONNABORTED' ||
             err?.code === 'ERR_NETWORK' ||
             err?.message?.includes('timeout') ||
+            err?.message?.includes('代理层') ||       // Cloudflare 代理层错误（413/502 非 JSON 响应）
             err?.response?.status >= 500;
 
           if (isRetryable && retryCount < MAX_RETRIES) {
@@ -158,8 +164,9 @@ export function useChunkedUpload(concurrency = 2) {
             progress.value.retrying = false;
             onProgress?.(progress.value);
 
-            // 连续超时 2 次后降级分片大小
-            if (err?.code === 'ECONNABORTED') {
+            // 连续超时或 CDN 502 后降级分片大小
+            const isTimeout = err?.code === 'ECONNABORTED' || err?.message?.includes('代理层');
+            if (isTimeout) {
               consecutiveTimeouts++;
               if (consecutiveTimeouts >= 2 && chunkSize > 512 * 1024) {
                 chunkSize = Math.max(512 * 1024, Math.floor(chunkSize / 2));
@@ -213,8 +220,27 @@ export function useChunkedUpload(concurrency = 2) {
         Array.from({ length: Math.min(concurrency, pendingChunks.length) }, () => runNext()),
       );
 
-      // 5. Trigger async merge (immediate return, non-blocking)
-      await api.post(`/files/chunk/${uploadId.value}/complete`, {}, { signal, timeout: 0 });
+      // 5. Trigger async merge (immediate return, non-blocking), with retry on CDN 502
+      let mergeTriggered = false;
+      for (let retry = 0; retry < MAX_RETRIES; retry++) {
+        try {
+          await api.post(`/files/chunk/${uploadId.value}/complete`, {}, { signal, timeout: 0 });
+          mergeTriggered = true;
+          break;
+        } catch (err: any) {
+          if (signal?.aborted) throw err;
+          const isRetryable =
+            err?.code === 'ERR_NETWORK' ||
+            err?.message?.includes('代理层') ||
+            err?.response?.status >= 500;
+          if (!isRetryable || retry >= MAX_RETRIES - 1) throw err;
+          console.warn(`[分片上传] 合并触发失败，${RETRY_BASE_DELAY / 1000}s 后重试 (${retry + 1}/${MAX_RETRIES})`);
+          await new Promise(resolve => setTimeout(resolve, RETRY_BASE_DELAY));
+        }
+      }
+      if (!mergeTriggered) {
+        throw new Error('无法启动合并任务，请重试');
+      }
 
       // 6. Poll for merge result (avoids Cloudflare 502 timeout on long-running uploads)
       if (!uploadId.value) throw new Error('上传会话 ID 丢失');
@@ -256,22 +282,54 @@ async function pollMergeResult(
   uploadId: string,
   signal?: AbortSignal,
 ): Promise<ChunkUploadResult> {
-  const maxAttempts = 60; // 最多轮询 5 分钟 (5s * 60)
+  const maxAttempts = 360; // 最多轮询 30 分钟 (5s * 360)，适配特大文件 Telegram 上传
+  let consecutiveFailures = 0;
+  const maxConsecutiveFailures = 3;
+
   for (let i = 0; i < maxAttempts; i++) {
     if (signal?.aborted) throw new Error('上传已取消');
     await new Promise(resolve => setTimeout(resolve, 5000));
 
-    const res = await api.get(`/files/chunk/${uploadId}/status`, { signal });
-    const { mergeStatus, mergeResult, mergeError } = res.data.data;
+    try {
+      const res = await api.get(`/files/chunk/${uploadId}/status`, { signal });
+      const { mergeStatus, mergeResult, mergeError } = res.data.data;
 
-    if (mergeStatus === 'done' && mergeResult) {
-      return mergeResult;
-    }
-    if (mergeStatus === 'error') {
-      throw new Error(mergeError || '合并失败');
+      // 成功获取状态，重置故障计数器
+      consecutiveFailures = 0;
+
+      if (mergeStatus === 'done' && mergeResult) {
+        return mergeResult;
+      }
+      if (mergeStatus === 'error') {
+        throw new Error(mergeError || '合并失败');
+      }
+    } catch (err: any) {
+      // Cancel/Abort — 直接抛出
+      if (err?.name === 'AbortError' || err?.code === 'ERR_CANCELED') {
+        throw err;
+      }
+
+      // 业务层错误（mergeError 等）— 直接抛出
+      if (err?.message && !err?.response && err?.code !== 'ERR_NETWORK') {
+        throw err;
+      }
+
+      // 网络/代理层错误（502, 520-524, 超时等）— 可重试
+      consecutiveFailures++;
+      console.warn(
+        `[分片上传] 状态轮询失败 (${consecutiveFailures}/${maxConsecutiveFailures}): ${err?.message || err?.code}`,
+      );
+
+      if (consecutiveFailures >= maxConsecutiveFailures) {
+        throw new Error('服务暂时不可用，合并仍在后台进行，请稍后刷新文件列表查看');
+      }
+
+      // 退避重试：2s, 4s, 8s
+      const delay = 2000 * Math.pow(2, consecutiveFailures - 1);
+      await new Promise(resolve => setTimeout(resolve, delay));
     }
   }
-  throw new Error('合并超时，请检查文件是否已上传成功');
+  throw new Error('合并处理中，请稍后刷新文件列表查看；如文件未出现，请重新上传');
 }
 
 function formatSpeed(bytesPerSec: number): string {

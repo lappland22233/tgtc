@@ -107,7 +107,7 @@
 
     <div v-if="batchResult && uploadQueue.length > 0" style="margin-top: 16px;">
       <t-tag v-if="batchResult.failed.length === 0" theme="success">
-        全部 {{ batchResult.success.length }} 个文件上传成功
+        全部 {{ batchResult.success.length }} 个文件已接收，正在后台处理中...
       </t-tag>
       <t-tag v-else theme="warning">
         {{ batchResult.success.length }} 个成功，{{ batchResult.failed.length }} 个失败
@@ -480,9 +480,10 @@ async function uploadFiles(files: File[]) {
   emit('uploaded');
 
   if (failedList.length === 0) {
-    MessagePlugin.success('全部文件上传成功');
+    MessagePlugin.success('文件接收完成，正在后台处理中，请稍后刷新查看');
+  } else if (successList.length > 0) {
+    MessagePlugin.success(`${successList.length} 个文件已接收，${failedList.length} 个失败。正在后台处理中`);
   } else {
-    MessagePlugin.warning(`${failedList.length} 个文件上传失败`);
   }
 
   uploading.value = false;

@@ -296,10 +296,7 @@ async function uploadFiles(files: File[]) {
 
   batchResult.value = { success: successList, failed: failedList };
 
-  // 刷新列表
-  if (successList.length > 0) {
-    await fileStore.fetchFiles();
-  }
+  // 上传完成后不再刷新文件列表，FileList 页面有 useAutoRefresh 自动刷新
 
   // 全成功提示
   if (failedList.length === 0) {

@@ -36,6 +36,8 @@ export interface FileItem {
   deleteScheduledAt: string | null;
   /** 请求删除时间 */
   deleteRequestedAt: string | null;
+  /** 处理状态: processing=后台上传中, ready=就绪, error=失败 */
+  status?: 'processing' | 'ready' | 'error';
   /** 关联标签 */
   tags?: Tag[];
 }

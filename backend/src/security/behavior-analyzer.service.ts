@@ -229,9 +229,20 @@ export class BehaviorAnalyzer {
     return results;
   }
 
-  /** 模式 6: 基线偏离 — 当前值偏离 7 天同时段基线 > 3σ */
+  /**
+   * 模式 6: 基线偏离 — 当前值偏离 7 天同时段基线 > 3σ
+   *
+   * 两级判断避免误报：
+   * 1. z-score 阈值：> 5 为 critical，> 3 为 high
+   * 2. 百分比偏差阈值：bandwidth/qps 至少偏离 20%，防止 stddev 极小
+   *    （如 7 天同一时段带宽稳定在 ~8.6M 时 stddev 仅 65K，8% 的波动也会产生 10σ+ 的 z-score）
+   *    但需要对均值的 20% 以上才发出告警。error_rate 指标使用纯 z-score
+   *    （因为小基数百分比变化也能反映真实异常）。
+   */
   private async detectBaselineDeviation(): Promise<AnomalyDetectionResult[]> {
     const results: AnomalyDetectionResult[] = [];
+
+    const MIN_DEVIATION_PCT = 0.2; // bandwidth/qps 至少偏离基线 20%
 
     try {
       // 获取当前时刻对应的 hour bucket 和 day of week
@@ -271,6 +282,16 @@ export class BehaviorAnalyzer {
           case 'error_rate': currentValue = currentMetrics.totalRequests > 0 ? Number(currentMetrics.error5xxCount) / Number(currentMetrics.totalRequests) : 0; break;
           case 'bandwidth': currentValue = Number(currentMetrics.totalBandwidth) || 0; break;
           default: continue;
+        }
+
+        // 百分比偏差门槛：bandwidth/qps 防 stddev 极小导致的误报
+        // error_rate 不适用百分比门槛（0→0.03 是 ∞% 但确实异常）
+        const isCountMetric = metricName === 'bandwidth' || metricName === 'qps';
+        if (isCountMetric && mean > 0) {
+          const deviationPct = Math.abs(currentValue - mean) / mean;
+          if (deviationPct < MIN_DEVIATION_PCT) {
+            continue; // 百分比偏差不足，跳过
+          }
         }
 
         const zScore = Math.abs((currentValue - mean) / stddev);
