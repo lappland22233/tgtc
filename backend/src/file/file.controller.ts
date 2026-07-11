@@ -38,6 +38,15 @@ import { TagService } from '../tag/tag.service';
 // Multer 层硬上限（600MB，仅防止极端 DoS；精确的动态限制由 FileService.upload() 业务层负责）
 const multerFileSize = 600 * 1024 * 1024; // 600MB
 
+/**
+ * 记录 pipeline 前的已发送字节数，返回一个用于 pipeline 完成后更新日志的闭包。
+ * 与 access-log.middleware.ts 使用相同的 socket.bytesWritten 差值原理。
+ */
+function trackBytesSent(res: Response): () => number {
+  const startBytes = res.socket?.bytesWritten ?? 0;
+  return () => (res.socket?.bytesWritten ?? 0) - startBytes;
+}
+
 @Controller('files')
 export class FileController {
   constructor(
@@ -328,8 +337,15 @@ export class FileController {
         'Cache-Control': 'private, no-cache',
       });
 
+      const getBytesSent = trackBytesSent(res);
       const pipe = promisify(pipeline);
-      await pipe(result.stream, res);
+      try {
+        await pipe(result.stream, res);
+      } finally {
+        if (result.accessLogId) {
+          await this.fileService.updateAccessLogResponseSize(result.accessLogId, getBytesSent());
+        }
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : '下载失败';
       const status = (error as { status?: number }).status || 500;
@@ -479,8 +495,15 @@ export class FileController {
           'Content-Length': result.size.toString(),
           'Cache-Control': 'no-store, no-cache, must-revalidate',
         });
+        const getBytesSent = trackBytesSent(res);
         const pipe = promisify(pipeline);
-        await pipe(result.stream, res);
+        try {
+          await pipe(result.stream, res);
+        } finally {
+          if (result.accessLogId) {
+            await this.fileService.updateAccessLogResponseSize(result.accessLogId, getBytesSent());
+          }
+        }
         return;
       }
 
@@ -545,8 +568,15 @@ export class FileController {
           'Content-Length': result.size.toString(),
           'Cache-Control': 'public, no-cache, must-revalidate, max-age=0',
         });
+        const getBytesSent = trackBytesSent(res);
         const pipe = promisify(pipeline);
-        await pipe(result.stream, res);
+        try {
+          await pipe(result.stream, res);
+        } finally {
+          if (result.accessLogId) {
+            await this.fileService.updateAccessLogResponseSize(result.accessLogId, getBytesSent());
+          }
+        }
         return;
       }
 

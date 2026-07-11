@@ -782,7 +782,7 @@ export class AdminService {
       .addSelect('f."mimeType"', 'mimeType')
       .addSelect('f.size', 'fileSize')
       .addSelect('COUNT(*)::int', 'accessCount')
-      .addSelect('SUM(f.size)::bigint', 'totalBandwidth')
+      .addSelect('SUM(COALESCE(NULLIF(fal."responseSize", 0), f.size))::bigint', 'totalBandwidth')
       .where('fal.createdAt >= :since', { since })
       .andWhere('f."isDeleted" = false');
 
@@ -1427,7 +1427,7 @@ export class AdminService {
       .createQueryBuilder('f')
       .select(['f."mimeType"', 'f.size', 'f."accessType"'])
       .where('f."isDeleted" = false')
-      .getRawMany<{ f_mimeType: string; f_size: string; f_accessType: string }>();
+      .getRawMany<{ mimeType: string; f_size: string; accessType: string }>();
 
     const mimeCategories: { name: string; fileCount: number; totalSize: bigint }[] = [
       { name: '图片', fileCount: 0, totalSize: BigInt(0) },
@@ -1441,7 +1441,7 @@ export class AdminService {
     let totalSize = BigInt(0);
 
     for (const f of files) {
-      const mime = (f.f_mimeType || '').toLowerCase();
+      const mime = (f.mimeType || '').toLowerCase();
       const size = BigInt(f.f_size || '0');
       totalSize += size;
 
