@@ -1260,6 +1260,7 @@ export class FileService implements OnModuleInit {
     contentType: string;
     filename: string;
     size: number;
+    accessLogId?: string;
   }> {
     const file = await this.fileRepository.findOne({
       where: { id, isDeleted: false },
@@ -1297,15 +1298,17 @@ export class FileService implements OnModuleInit {
       ? { stream: cachedStream }
       : { stream: (await this.telegramService.getFileStream(file.telegramFileId || file.filename)).stream };
 
-    // 写访问日志
+    // 写访问日志（responseSize 先占位为 0，流式传输完成后由 controller 更新为实际字节数）
+    let accessLogId: string | undefined;
     try {
-      await this.accessLogRepository.save({
+      const saved = await this.accessLogRepository.save({
         fileId: id,
         ip: ip || '',
         action: 'download',
         uploaderId: file.uploaderId,
-        responseSize: file.size,
+        responseSize: 0,
       });
+      accessLogId = saved.id;
     } catch {
       // 日志记录失败不影响主流程
     }
@@ -1313,7 +1316,7 @@ export class FileService implements OnModuleInit {
     const mimeType = file.mimeType || 'application/octet-stream';
     const filename = this.ensureFileExtension(file.originalName, mimeType);
 
-    return { stream, contentType: mimeType, filename, size: Number(file.size) };
+    return { stream, contentType: mimeType, filename, size: Number(file.size), accessLogId };
   }
 
   async generateShareLink(id: string, user: User): Promise<string> {
@@ -1420,6 +1423,7 @@ export class FileService implements OnModuleInit {
     filename: string;
     size: number;
     isInline: boolean;
+    accessLogId?: string;
   }> {
     const file = await this.fileRepository.findOne({
       where: { id, isDeleted: false },
@@ -1447,14 +1451,16 @@ export class FileService implements OnModuleInit {
       ? { stream: cachedStream, info: { file_id: file.telegramFileId, file_path: '', file_size: Number(file.size) } }
       : await this.telegramService.getFileStream(file.telegramFileId || file.filename);
 
+    let accessLogId: string | undefined;
     try {
-      await this.accessLogRepository.save({
+      const saved = await this.accessLogRepository.save({
         fileId: id,
         ip: ip || '',
         action: 'public_direct',
         uploaderId: file.uploaderId,
-        responseSize: file.size,
+        responseSize: 0,
       });
+      accessLogId = saved.id;
     } catch {
       // ignore
     }
@@ -1464,7 +1470,7 @@ export class FileService implements OnModuleInit {
     const filename = this.ensureFileExtension(file.originalName, mimeType);
 
     const actualSize = info.file_size > 0 ? info.file_size : Number(file.size);
-    return { stream, contentType: mimeType, filename, size: actualSize, isInline };
+    return { stream, contentType: mimeType, filename, size: actualSize, isInline, accessLogId };
   }
 
   /**
@@ -1476,6 +1482,7 @@ export class FileService implements OnModuleInit {
     filename: string;
     size: number;
     isInline: boolean;
+    accessLogId?: string;
   }> {
     const file = await this.fileRepository.findOne({
       where: { id, isDeleted: false },
@@ -1495,14 +1502,16 @@ export class FileService implements OnModuleInit {
       ? { stream: cachedStream, info: { file_id: file.telegramFileId, file_path: '', file_size: Number(file.size) } }
       : await this.telegramService.getFileStream(file.telegramFileId || file.filename);
 
+    let accessLogId: string | undefined;
     try {
-      await this.accessLogRepository.save({
+      const saved = await this.accessLogRepository.save({
         fileId: id,
         ip: ip || '',
         action: 'public_direct',
         uploaderId: file.uploaderId,
-        responseSize: file.size,
+        responseSize: 0,
       });
+      accessLogId = saved.id;
     } catch {
       // ignore
     }
@@ -1513,7 +1522,7 @@ export class FileService implements OnModuleInit {
 
     // 使用 Telegram API 返回的真实文件大小，避免 Content-Length 不匹配导致下载卡死
     const actualSize = info.file_size > 0 ? info.file_size : Number(file.size);
-    return { stream, contentType: mimeType, filename, size: actualSize, isInline };
+    return { stream, contentType: mimeType, filename, size: actualSize, isInline, accessLogId };
   }
 
   /**
@@ -1878,5 +1887,20 @@ export class FileService implements OnModuleInit {
       `INSERT INTO file_tags ("fileId", "tagId") VALUES ${placeholders}`,
       params,
     );
+  }
+
+  /**
+   * 流式传输完成后，更新 FileAccessLog.responseSize 为实际传输字节数。
+   * 由 FileController 在 pipeline 结束后调用。
+   */
+  async updateAccessLogResponseSize(logId: string, bytesTransferred: number): Promise<void> {
+    if (!logId || bytesTransferred < 0) return;
+    try {
+      await this.accessLogRepository.update(logId, {
+        responseSize: bytesTransferred,
+      });
+    } catch {
+      // 日志更新失败不影响业务
+    }
   }
 }

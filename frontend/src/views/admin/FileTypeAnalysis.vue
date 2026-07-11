@@ -93,12 +93,12 @@ interface FileTypeResponse {
 }
 
 const CATEGORY_COLORS: Record<string, string> = {
-  'image': '#4FC3F7',
-  'video': '#EF5350',
-  'audio': '#AB47BC',
-  'document': '#66BB6A',
-  'archive': '#FFA726',
-  'other': '#90A4AE',
+  '图片': '#4FC3F7',
+  '视频': '#EF5350',
+  '音频': '#AB47BC',
+  '文档': '#66BB6A',
+  '压缩包': '#FFA726',
+  '其他': '#90A4AE',
 };
 
 function getColor(name: string): string {
@@ -106,15 +106,7 @@ function getColor(name: string): string {
 }
 
 function getLabel(name: string): string {
-  const map: Record<string, string> = {
-    image: '图片',
-    video: '视频',
-    audio: '音频',
-    document: '文档',
-    archive: '压缩包',
-    other: '其他',
-  };
-  return map[name] || name;
+  return name;
 }
 
 const timeRange = ref('24h');
