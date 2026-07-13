@@ -2,7 +2,8 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, MoreThan } from 'typeorm';
 import { Alert } from '../common/entities/alert.entity';
-import { ALERT_RULES, AlertRuleEvaluation } from './alert.rules';
+import { ConfigCacheService } from '../common/services/config-cache.service';
+import { createAlertRules, AlertRuleEvaluation } from './alert.rules';
 
 @Injectable()
 export class AlertEngineService {
@@ -11,6 +12,7 @@ export class AlertEngineService {
   constructor(
     @InjectRepository(Alert)
     private alertRepo: Repository<Alert>,
+    private configCache: ConfigCacheService,
   ) {}
 
   /**
@@ -27,9 +29,10 @@ export class AlertEngineService {
     uniqueIps: number;
   }): Promise<AlertRuleEvaluation[]> {
     const evaluations: AlertRuleEvaluation[] = [];
+    const rules = await createAlertRules(this.configCache);
 
-    for (const rule of ALERT_RULES) {
-      const reason = rule.evaluate(metrics);
+    for (const rule of rules) {
+      const reason = await rule.evaluate(metrics);
       if (reason) {
         evaluations.push({
           ruleId: rule.id,
@@ -59,9 +62,10 @@ export class AlertEngineService {
   /** 批量创建告警记录（带冷却过滤）
    * 注：冷却检查与创建存在 TOCTOU 竞态，高并发下建议改用 upsert + unique index */
   async createAlerts(evaluations: AlertRuleEvaluation[]): Promise<Alert[]> {
+    const rules = await createAlertRules(this.configCache);
     const alerts: Alert[] = [];
     for (const eval_ of evaluations) {
-      const rule = ALERT_RULES.find((r) => r.id === eval_.ruleId);
+      const rule = rules.find((r) => r.id === eval_.ruleId);
       const cooldownMinutes = rule?.cooldownMinutes || 5;
 
       if (await this.isInCooldown(eval_.ruleId, cooldownMinutes)) {
