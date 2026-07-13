@@ -27,6 +27,7 @@ lerna-debug.log*
 *.swo
 *~
 .codebuddy
+CODEBUDDY.md
 # OS
 .DS_Store
 Thumbs.db

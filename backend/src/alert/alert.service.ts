@@ -2,7 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, MoreThan, IsNull } from 'typeorm';
 import { Alert, AlertLevel } from '../common/entities/alert.entity';
-import { ALERT_RULES } from './alert.rules';
+import { getAlertRuleMetadata } from './alert.rules';
 
 @Injectable()
 export class AlertService {
@@ -71,11 +71,6 @@ export class AlertService {
 
   /** 获取告警规则列表 */
   getRules() {
-    return ALERT_RULES.map((r) => ({
-      id: r.id,
-      name: r.name,
-      level: r.level,
-      cooldownMinutes: r.cooldownMinutes,
-    }));
+    return getAlertRuleMetadata();
   }
 }

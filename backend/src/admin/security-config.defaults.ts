@@ -36,6 +36,30 @@ export const SEC_CONFIG_KEYS = {
   PWD_ERROR_LIMIT: 'sec_pwd_error_limit',
   PWD_BAN_DURATION: 'sec_pwd_ban_duration',
   SEARCH_RATE_LIMIT: 'sec_search_rate_limit',
+
+  // --- 告警阈值配置 ---
+  // 流量告警
+  ALERT_QPS_WARNING: 'sec_alert_qps_warning',
+  ALERT_QPS_CRITICAL: 'sec_alert_qps_critical',
+  ALERT_BANDWIDTH_MBPS: 'sec_alert_bandwidth_mbps',
+
+  // 错误告警
+  ALERT_5XX_RATE: 'sec_alert_5xx_rate',
+  ALERT_5XX_SPIKE: 'sec_alert_5xx_spike',
+  ALERT_4XX_SPIKE: 'sec_alert_4xx_spike',
+
+  // 基线偏离
+  ALERT_BASELINE_ZSCORE_WARN: 'sec_alert_baseline_zscore_warn',
+  ALERT_BASELINE_ZSCORE_CRIT: 'sec_alert_baseline_zscore_crit',
+  ALERT_BASELINE_MIN_DEVIATION_PCT: 'sec_alert_baseline_min_deviation_pct',
+
+  // 告警冷却时间
+  ALERT_COOLDOWN_QPS_WARN: 'sec_alert_cooldown_qps_warn',
+  ALERT_COOLDOWN_QPS_CRIT: 'sec_alert_cooldown_qps_crit',
+  ALERT_COOLDOWN_BANDWIDTH: 'sec_alert_cooldown_bandwidth',
+  ALERT_COOLDOWN_5XX_RATE: 'sec_alert_cooldown_5xx_rate',
+  ALERT_COOLDOWN_5XX_SPIKE: 'sec_alert_cooldown_5xx_spike',
+  ALERT_COOLDOWN_4XX_SPIKE: 'sec_alert_cooldown_4xx_spike',
 } as const;
 
 /** 安全配置项的后端默认值（硬编码回退） */
@@ -68,6 +92,26 @@ export const SEC_CONFIG_DEFAULTS: Record<string, string> = {
   [SEC_CONFIG_KEYS.PWD_ERROR_LIMIT]: '5',
   [SEC_CONFIG_KEYS.PWD_BAN_DURATION]: '5',
   [SEC_CONFIG_KEYS.SEARCH_RATE_LIMIT]: '30',
+
+  // --- 告警阈值默认值 ---
+  [SEC_CONFIG_KEYS.ALERT_QPS_WARNING]: '100',
+  [SEC_CONFIG_KEYS.ALERT_QPS_CRITICAL]: '300',
+  [SEC_CONFIG_KEYS.ALERT_BANDWIDTH_MBPS]: '100',
+
+  [SEC_CONFIG_KEYS.ALERT_5XX_RATE]: '0.1',
+  [SEC_CONFIG_KEYS.ALERT_5XX_SPIKE]: '50',
+  [SEC_CONFIG_KEYS.ALERT_4XX_SPIKE]: '200',
+
+  [SEC_CONFIG_KEYS.ALERT_BASELINE_ZSCORE_WARN]: '3',
+  [SEC_CONFIG_KEYS.ALERT_BASELINE_ZSCORE_CRIT]: '5',
+  [SEC_CONFIG_KEYS.ALERT_BASELINE_MIN_DEVIATION_PCT]: '0.2',
+
+  [SEC_CONFIG_KEYS.ALERT_COOLDOWN_QPS_WARN]: '10',
+  [SEC_CONFIG_KEYS.ALERT_COOLDOWN_QPS_CRIT]: '5',
+  [SEC_CONFIG_KEYS.ALERT_COOLDOWN_BANDWIDTH]: '10',
+  [SEC_CONFIG_KEYS.ALERT_COOLDOWN_5XX_RATE]: '15',
+  [SEC_CONFIG_KEYS.ALERT_COOLDOWN_5XX_SPIKE]: '5',
+  [SEC_CONFIG_KEYS.ALERT_COOLDOWN_4XX_SPIKE]: '10',
 };
 
 /** 安全配置前端展示元数据 */
@@ -268,5 +312,123 @@ export const SEC_CONFIG_META: SecurityConfigMeta[] = [
     type: 'number', min: 10, max: 200, step: 5,
     unit: '次/分钟',
     category: '流量与限流',
+  },
+
+  // --- 告警阈值配置 ---
+  {
+    key: SEC_CONFIG_KEYS.ALERT_QPS_WARNING,
+    label: 'QPS 偏高阈值',
+    description: '每分钟平均 QPS 超过此值触发 QPS 偏高告警',
+    type: 'number', min: 1, max: 10000, step: 10,
+    unit: 'req/s',
+    category: '告警阈值配置',
+  },
+  {
+    key: SEC_CONFIG_KEYS.ALERT_QPS_CRITICAL,
+    label: 'QPS 严重偏高阈值',
+    description: '每分钟平均 QPS 超过此值触发 QPS 严重偏高告警',
+    type: 'number', min: 1, max: 10000, step: 10,
+    unit: 'req/s',
+    category: '告警阈值配置',
+  },
+  {
+    key: SEC_CONFIG_KEYS.ALERT_BANDWIDTH_MBPS,
+    label: '带宽偏高阈值',
+    description: '每分钟平均带宽超过此值触发带宽偏高告警',
+    type: 'number', min: 1, max: 10000, step: 10,
+    unit: 'Mbps',
+    category: '告警阈值配置',
+  },
+  {
+    key: SEC_CONFIG_KEYS.ALERT_5XX_RATE,
+    label: '5xx 错误率阈值',
+    description: '5xx 错误数占总请求比例超过此值触发告警',
+    type: 'number', min: 0.01, max: 1, step: 0.01,
+    category: '告警阈值配置',
+  },
+  {
+    key: SEC_CONFIG_KEYS.ALERT_5XX_SPIKE,
+    label: '5xx 激增阈值',
+    description: '每分钟 5xx 错误数超过此值触发 5xx 激增告警',
+    type: 'number', min: 1, max: 10000, step: 10,
+    unit: '次',
+    category: '告警阈值配置',
+  },
+  {
+    key: SEC_CONFIG_KEYS.ALERT_4XX_SPIKE,
+    label: '4xx 激增阈值',
+    description: '每分钟 4xx 错误数超过此值触发 4xx 激增告警',
+    type: 'number', min: 1, max: 10000, step: 10,
+    unit: '次',
+    category: '告警阈值配置',
+  },
+  {
+    key: SEC_CONFIG_KEYS.ALERT_BASELINE_ZSCORE_WARN,
+    label: '基线偏离 Warning 阈值',
+    description: '当前值偏离 7 天同时段基线的 z-score 超过此值触发 Warning 级「偏离基线」告警',
+    type: 'number', min: 1, max: 10, step: 0.5,
+    category: '告警阈值配置',
+  },
+  {
+    key: SEC_CONFIG_KEYS.ALERT_BASELINE_ZSCORE_CRIT,
+    label: '基线偏离 Critical 阈值',
+    description: '当前值偏离 7 天同时段基线的 z-score 超过此值触发 Critical 级「严重偏离基线」告警',
+    type: 'number', min: 1, max: 20, step: 0.5,
+    category: '告警阈值配置',
+  },
+  {
+    key: SEC_CONFIG_KEYS.ALERT_BASELINE_MIN_DEVIATION_PCT,
+    label: '基线偏离最小百分比',
+    description: 'bandwidth/qps 至少偏离此比例才触发告警，防止 stddev 极小导致误报',
+    type: 'number', min: 0.05, max: 1, step: 0.05,
+    category: '告警阈值配置',
+  },
+  {
+    key: SEC_CONFIG_KEYS.ALERT_COOLDOWN_QPS_WARN,
+    label: 'QPS 偏高冷却',
+    description: '同类型告警的最小间隔',
+    type: 'number', min: 1, max: 120, step: 1,
+    unit: '分钟',
+    category: '告警阈值配置',
+  },
+  {
+    key: SEC_CONFIG_KEYS.ALERT_COOLDOWN_QPS_CRIT,
+    label: 'QPS 严重偏高冷却',
+    description: '同类型告警的最小间隔',
+    type: 'number', min: 1, max: 120, step: 1,
+    unit: '分钟',
+    category: '告警阈值配置',
+  },
+  {
+    key: SEC_CONFIG_KEYS.ALERT_COOLDOWN_BANDWIDTH,
+    label: '带宽偏高冷却',
+    description: '同类型告警的最小间隔',
+    type: 'number', min: 1, max: 120, step: 1,
+    unit: '分钟',
+    category: '告警阈值配置',
+  },
+  {
+    key: SEC_CONFIG_KEYS.ALERT_COOLDOWN_5XX_RATE,
+    label: '5xx 错误率冷却',
+    description: '同类型告警的最小间隔',
+    type: 'number', min: 1, max: 120, step: 1,
+    unit: '分钟',
+    category: '告警阈值配置',
+  },
+  {
+    key: SEC_CONFIG_KEYS.ALERT_COOLDOWN_5XX_SPIKE,
+    label: '5xx 激增冷却',
+    description: '同类型告警的最小间隔',
+    type: 'number', min: 1, max: 120, step: 1,
+    unit: '分钟',
+    category: '告警阈值配置',
+  },
+  {
+    key: SEC_CONFIG_KEYS.ALERT_COOLDOWN_4XX_SPIKE,
+    label: '4xx 激增冷却',
+    description: '同类型告警的最小间隔',
+    type: 'number', min: 1, max: 120, step: 1,
+    unit: '分钟',
+    category: '告警阈值配置',
   },
 ];

@@ -543,18 +543,45 @@ export class FileService implements OnModuleInit {
     const { entities, raw } = await qb.getRawAndEntities();
 
     // 使用独立的 count 查询（不受 skip/take 影响）
-    const countQb = this.fileRepository.createQueryBuilder('file').where(where);
-    if (keyword) {
-      countQb.andWhere('LOWER(file.originalName) LIKE :keyword', { keyword: `%${keyword.toLowerCase()}%` });
-    }
+    let total: number;
     if (tagIds && tagIds.length > 0) {
-      countQb.innerJoin('file_tags', 'ftCount', 'ftCount."fileId" = file.id')
-        .andWhere('ftCount."tagId" IN (:...tagIds)', { tagIds });
+      // 标签筛选的计数使用原始 SQL，避免 TypeORM query builder 的 getRawMany + JOIN 兼容问题
+      const tagParams: any[] = [tagIds];
+      let tagIdx = 2;
+      const tagWheres: string[] = ['ft."tagId" = ANY($1::uuid[])'];
+      if (userId) { tagWheres.push(`file."uploaderId" = $${tagIdx++}`); tagParams.push(userId); }
+      if (!includeDeleted) { tagWheres.push('file."isDeleted" = false'); }
+      if (keyword) { tagWheres.push(`LOWER(file."originalName") LIKE $${tagIdx++}`); tagParams.push(`%${keyword.toLowerCase()}%`); }
+      const tagWhere = tagWheres.join(' AND ');
+
       if (tagIds.length > 1) {
-        countQb.groupBy('file.id').having('COUNT(DISTINCT ftCount."tagId") = :tagCount', { tagCount: tagIds.length });
+        tagParams.push(tagIds.length);
+        const res = await this.fileRepository.manager.query(
+          `SELECT COUNT(*)::int AS cnt FROM (
+            SELECT 1 FROM files file
+            INNER JOIN file_tags ft ON ft."fileId" = file.id
+            WHERE ${tagWhere}
+            GROUP BY file.id HAVING COUNT(DISTINCT ft."tagId") = $${tagIdx}
+          ) sub`,
+          tagParams,
+        );
+        total = parseInt(res[0]?.cnt || '0', 10);
+      } else {
+        const res = await this.fileRepository.manager.query(
+          `SELECT COUNT(*)::int AS cnt FROM files file
+          INNER JOIN file_tags ft ON ft."fileId" = file.id
+          WHERE ${tagWhere}`,
+          tagParams,
+        );
+        total = parseInt(res[0]?.cnt || '0', 10);
       }
+    } else {
+      const countQb = this.fileRepository.createQueryBuilder('file').where(where);
+      if (keyword) {
+        countQb.andWhere('LOWER(file.originalName) LIKE :keyword', { keyword: `%${keyword.toLowerCase()}%` });
+      }
+      total = await countQb.getCount();
     }
-    const total = tagIds?.length ? (await countQb.getRawMany()).length : await countQb.getCount();
 
     const files = entities.map((entity, i) => ({
       ...entity,

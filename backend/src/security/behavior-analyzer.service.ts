@@ -1,5 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { DataSource } from 'typeorm';
+import { ConfigCacheService } from '../common/services/config-cache.service';
+import { SEC_CONFIG_KEYS } from '../admin/security-config.defaults';
 
 export interface AnomalyDetectionResult {
   type: string;
@@ -13,7 +15,10 @@ export interface AnomalyDetectionResult {
 export class BehaviorAnalyzer {
   private readonly logger = new Logger(BehaviorAnalyzer.name);
 
-  constructor(private dataSource: DataSource) {}
+  constructor(
+    private dataSource: DataSource,
+    private configCache: ConfigCacheService,
+  ) {}
 
   /**
    * 计算 7 天基线数据并写入 baseline_stats 表
@@ -242,7 +247,15 @@ export class BehaviorAnalyzer {
   private async detectBaselineDeviation(): Promise<AnomalyDetectionResult[]> {
     const results: AnomalyDetectionResult[] = [];
 
-    const MIN_DEVIATION_PCT = 0.2; // bandwidth/qps 至少偏离基线 20%
+    const minDeviationPct = parseFloat(
+      await this.configCache.get(SEC_CONFIG_KEYS.ALERT_BASELINE_MIN_DEVIATION_PCT, '0.2'),
+    );
+    const zScoreCrit = parseFloat(
+      await this.configCache.get(SEC_CONFIG_KEYS.ALERT_BASELINE_ZSCORE_CRIT, '5'),
+    );
+    const zScoreWarn = parseFloat(
+      await this.configCache.get(SEC_CONFIG_KEYS.ALERT_BASELINE_ZSCORE_WARN, '3'),
+    );
 
     try {
       // 获取当前时刻对应的 hour bucket 和 day of week
@@ -289,13 +302,13 @@ export class BehaviorAnalyzer {
         const isCountMetric = metricName === 'bandwidth' || metricName === 'qps';
         if (isCountMetric && mean > 0) {
           const deviationPct = Math.abs(currentValue - mean) / mean;
-          if (deviationPct < MIN_DEVIATION_PCT) {
+          if (deviationPct < minDeviationPct) {
             continue; // 百分比偏差不足，跳过
           }
         }
 
         const zScore = Math.abs((currentValue - mean) / stddev);
-        if (zScore > 5) {
+        if (zScore > zScoreCrit) {
           results.push({
             type: 'baseline_deviation',
             severity: 'critical' as const,
@@ -303,7 +316,7 @@ export class BehaviorAnalyzer {
             message: `当前 ${metricName}=${currentValue.toFixed(2)}, 基线均值=${mean.toFixed(2)}, z-score=${zScore.toFixed(1)}`,
             details: { metricName, currentValue, mean, stddev, zScore },
           });
-        } else if (zScore > 3) {
+        } else if (zScore > zScoreWarn) {
           results.push({
             type: 'baseline_deviation',
             severity: 'high' as const,

@@ -30,12 +30,28 @@
         </div>
         <div style="display: flex; gap: 8px;">
           <t-button
-            v-if="selectedImages.length > 0"
+            v-if="selectedImages.length > 0 && selectedImages.length === selectedFileIds.length"
             theme="primary"
             variant="outline"
             @click="convertToMarkdown"
           >
-            📋 批量 MK（{{ selectedImages.length }}）
+            批量 MK（{{ selectedImages.length }}）
+          </t-button>
+          <t-button
+            v-if="selectedFileIds.length > 0 && !(selectedImages.length === selectedFileIds.length)"
+            theme="default"
+            variant="outline"
+            @click="copyDownloadLinks"
+          >
+            复制下载链接（{{ selectedFileIds.length }}）
+          </t-button>
+          <t-button
+            v-if="selectedFileIds.length > 0"
+            theme="default"
+            variant="outline"
+            @click="openBatchTagDialog"
+          >
+            批量标签（{{ selectedFileIds.length }}）
           </t-button>
           <t-button theme="primary" @click="showUploadModal = true">
             + 上传文件
@@ -102,7 +118,7 @@
           row-key="id"
           hover
           table-layout="auto"
-          :selected-row-keys="selectedImageIds"
+          :selected-row-keys="selectedFileIds"
           @select-change="handleSelectChange"
           @sort-change="handleSortChange"
         >
@@ -117,16 +133,20 @@
                   <t-tag v-else-if="row.isDeleted && row.deletedByAdmin" theme="danger" size="small">被管理员删除</t-tag>
                   <t-tag v-else-if="row.isDeleted" theme="warning" size="small">删除中</t-tag>
                   <span v-if="row.tags?.length" style="display: inline-flex; gap: 4px; margin-left: 4px;">
-                    <t-tag
+                    <span
                       v-for="tag in row.tags"
                       :key="tag.id"
-                      size="small"
-                      variant="light"
-                      :style="{ background: tag.color + '20', color: tag.color, borderColor: tag.color + '40', cursor: 'pointer' }"
+                      style="cursor: pointer;"
                       @click.stop="addTagFilter(tag.id)"
                     >
-                      {{ tag.name }}
-                    </t-tag>
+                      <t-tag
+                        size="small"
+                        variant="light"
+                        :style="{ background: tag.color + '20', color: tag.color, borderColor: tag.color + '40' }"
+                      >
+                        {{ tag.name }}
+                      </t-tag>
+                    </span>
                   </span>
                 </div>
               </div>
@@ -238,15 +258,20 @@
                   <t-tag v-else-if="file.accessType === 'public'" theme="success" size="small">公开</t-tag>
                   <t-tag v-else theme="default" size="small">私有</t-tag>
                   <t-tag v-if="file.hasPassword" theme="warning" size="small">已加密</t-tag>
-                  <t-tag
+                  <span
                     v-for="tag in file.tags?.slice(0, 2)"
                     :key="tag.id"
-                    size="small"
-                    variant="light"
-                    :style="{ background: tag.color + '18', color: tag.color, borderColor: tag.color + '33' }"
+                    style="cursor: pointer;"
+                    @click.stop="addTagFilter(tag.id)"
                   >
-                    {{ tag.name }}
-                  </t-tag>
+                    <t-tag
+                      size="small"
+                      variant="light"
+                      :style="{ background: tag.color + '18', color: tag.color, borderColor: tag.color + '33' }"
+                    >
+                      {{ tag.name }}
+                    </t-tag>
+                  </span>
                   <span v-if="file.tags && file.tags.length > 2" style="font-size: 11px; color: var(--text-secondary);">
                     +{{ file.tags.length - 2 }}
                   </span>
@@ -311,7 +336,7 @@
     <UploadModal :visible="showUploadModal" :initial-files="dropFiles" @close="handleUploadModalClose" @uploaded="onUploaded" />
 
     <!-- 标签管理弹窗 -->
-    <TagManager v-model:visible="showTagManager" />
+    <TagManager v-model:visible="showTagManager" :selected-tag-ids="selectedTagIds" @filter="handleTagManagerFilter" />
 
     <!-- 文件标签编辑器 -->
     <FileTagEditor
@@ -357,6 +382,29 @@
         </div>
       </div>
     </t-dialog>
+
+    <!-- 批量添加标签弹窗 -->
+    <t-dialog v-model:visible="batchTagDialog.visible" header="批量添加标签" width="420px" @confirm="confirmBatchTags" @close="batchTagDialog.visible = false">
+      <div style="line-height: 1.8;">
+        <p>为 <strong>{{ selectedFileIds.length }}</strong> 个文件添加标签：</p>
+        <div style="margin-top: 12px; display: flex; flex-wrap: wrap; gap: 6px;">
+          <t-tag
+            v-for="tag in tagStore.tags"
+            :key="tag.id"
+            size="small"
+            :theme="batchTagDialog.selectedTagIds.includes(tag.id) ? 'primary' : 'default'"
+            variant="light"
+            :style="{ cursor: 'pointer' }"
+            @click="toggleBatchTag(tag.id)"
+          >
+            {{ tag.name }}
+          </t-tag>
+          <span v-if="!tagStore.tags || tagStore.tags.length === 0" style="color: var(--text-secondary); font-size: 13px;">
+            暂无标签，请先在标签管理中创建
+          </span>
+        </div>
+      </div>
+    </t-dialog>
   </div>
 </template>
 
@@ -388,7 +436,7 @@ const search = ref((route.query.search as string) || '');
 const showUploadModal = ref(false);
 const isDraggedOver = ref(false);
 const markdownResult = ref('');
-const selectedImageIds = ref<string[]>([]);
+const selectedFileIds = ref<string[]>([]);
 const dropFiles = ref<File[]>([]);
 const sortBy = ref<string>(route.query.sortBy as string || '');
 const sortOrder = ref<string>(route.query.sortOrder as string || '');
@@ -397,6 +445,10 @@ const selectedTagIds = ref<string[]>(
 );
 const showTagManager = ref(false);
 const tagEditorVisible = ref(false);
+const batchTagDialog = reactive({
+  visible: false,
+  selectedTagIds: [] as string[],
+});
 const tagEditorFileId = ref('');
 const tagEditorFileTags = ref<{ id: string; name: string; color: string }[]>([]);
 
@@ -445,7 +497,7 @@ watch(() => authStore.user?.role, (role) => {
 const selectedImages = computed(() =>
   displayFiles.value.filter(f =>
     f.mimeType.startsWith('image/') &&
-    selectedImageIds.value.includes(f.id) &&
+    selectedFileIds.value.includes(f.id) &&
     !f.isDeleted
   )
 );
@@ -495,7 +547,7 @@ async function savePassword() {
       fileStore.replaceFiles([]);
       loadInitialFiles(true);
     } else {
-      fileStore.fetchFiles(page.value, Math.abs(pageSize.value), search.value || undefined, sortBy.value || undefined, sortOrder.value || undefined);
+      refetchFiles(page.value, Math.abs(pageSize.value));
     }
   } catch (error: unknown) {
     MessagePlugin.error(getErrorMessage(error));
@@ -561,6 +613,14 @@ function addTagFilter(tagId: string) {
   }
 }
 
+function handleTagManagerFilter(tagId: string) {
+  if (selectedTagIds.value.includes(tagId)) {
+    removeTagFilter(tagId);
+  } else {
+    addTagFilter(tagId);
+  }
+}
+
 function removeTagFilter(tagId: string) {
   selectedTagIds.value = selectedTagIds.value.filter(id => id !== tagId);
   applyFilters();
@@ -610,14 +670,14 @@ function onUploaded() {
     fileStore.replaceFiles([]);
     loadInitialFiles(true);
   } else {
-    fileStore.fetchFiles(page.value, Math.abs(pageSize.value), search.value || undefined, sortBy.value || undefined, sortOrder.value || undefined);
+    refetchFiles(page.value, Math.abs(pageSize.value));
   }
-  selectedImageIds.value = [];
+  selectedFileIds.value = [];
 }
 
 function handleSelectChange(selectedRowKeys: (string | number)[]) {
-  selectedImageIds.value = selectedRowKeys.filter(k =>
-    displayFiles.value.find(f => f.id === k && f.mimeType.startsWith('image/') && !f.isDeleted)
+  selectedFileIds.value = selectedRowKeys.filter(k =>
+    displayFiles.value.find(f => f.id === k && !f.isDeleted)
   ) as string[];
 }
 
@@ -628,7 +688,7 @@ function handleSearch() {
     fileStore.replaceFiles([]);
     loadInitialFiles(true);
   } else {
-    fileStore.fetchFiles(1, Math.abs(pageSize.value), search.value || undefined, sortBy.value || undefined, sortOrder.value || undefined);
+    refetchFiles(1);
   }
 }
 
@@ -640,7 +700,7 @@ function handleClearSearch() {
     fileStore.replaceFiles([]);
     loadInitialFiles(true);
   } else {
-    fileStore.fetchFiles(1, Math.abs(pageSize.value), undefined, sortBy.value || undefined, sortOrder.value || undefined);
+    refetchFiles(1);
   }
 }
 
@@ -656,7 +716,7 @@ function handleSortChange(sortInfo: { sortBy: string; descending: boolean } | { 
     resetCursor();
   }
   page.value = 1;
-  fileStore.fetchFiles(1, Math.abs(pageSize.value), search.value || undefined, sortBy.value, sortOrder.value);
+  refetchFiles(1);
 }
 
 // ==== 无限滚动加载逻辑 ====
@@ -730,11 +790,11 @@ function setupScrollObserver() {
 }
 
 function handlePageChange(pageInfo: { current: number }) {
-  fileStore.fetchFiles(pageInfo.current, Math.abs(pageSize.value), search.value || undefined, sortBy.value || undefined, sortOrder.value || undefined);
+  refetchFiles(pageInfo.current);
 }
 
 function handlePageSizeChange(val: number) {
-  selectedImageIds.value = [];
+  selectedFileIds.value = [];
   if (val === -1) {
     // 切换到无限模式
     pageMode.value = 'infinite';
@@ -748,7 +808,7 @@ function handlePageSizeChange(val: number) {
     pageMode.value = 'paginated';
     page.value = 1;
     pageSize.value = val;
-    fileStore.fetchFiles(1, val, search.value || undefined, sortBy.value || undefined, sortOrder.value || undefined);
+    refetchFiles(1, val);
   }
 }
 
@@ -844,7 +904,7 @@ async function confirmDelete() {
       fileStore.replaceFiles([]);
       loadInitialFiles(true);
     } else {
-      await fileStore.fetchFiles(page.value, Math.abs(pageSize.value), search.value || undefined, sortBy.value || undefined, sortOrder.value || undefined);
+      await refetchFiles(page.value, Math.abs(pageSize.value));
     }
   } catch (error: unknown) {
     MessagePlugin.error(getErrorMessage(error));
@@ -861,7 +921,7 @@ async function handleRestore(id: string) {
       fileStore.replaceFiles([]);
       loadInitialFiles(true);
     } else {
-      await fileStore.fetchFiles(page.value, Math.abs(pageSize.value), search.value || undefined, sortBy.value || undefined, sortOrder.value || undefined);
+      await refetchFiles(page.value, Math.abs(pageSize.value));
     }
   } catch (error: unknown) {
     MessagePlugin.error(getErrorMessage(error));
@@ -893,6 +953,59 @@ function convertToMarkdown() {
 function copyMarkdown() {
   navigator.clipboard.writeText(markdownResult.value);
   MessagePlugin.success('已复制到剪贴板');
+}
+
+function copyDownloadLinks() {
+  const files = displayFiles.value.filter(f => selectedFileIds.value.includes(f.id) && !f.isDeleted);
+  if (files.length === 0) {
+    MessagePlugin.warning('没有可复制的文件');
+    return;
+  }
+  const baseUrl = window.location.origin;
+  const links = files.map(f => `${baseUrl}/files/public/${f.id}`).join('\n');
+  navigator.clipboard.writeText(links);
+  MessagePlugin.success(`已复制 ${files.length} 个下载链接`);
+}
+
+function openBatchTagDialog() {
+  batchTagDialog.selectedTagIds = [];
+  batchTagDialog.visible = true;
+}
+
+function toggleBatchTag(tagId: string) {
+  const idx = batchTagDialog.selectedTagIds.indexOf(tagId);
+  if (idx >= 0) {
+    batchTagDialog.selectedTagIds.splice(idx, 1);
+  } else {
+    batchTagDialog.selectedTagIds.push(tagId);
+  }
+}
+
+async function confirmBatchTags() {
+  const fileIds = selectedFileIds.value.filter(id =>
+    displayFiles.value.find(f => f.id === id && !f.isDeleted)
+  );
+  if (fileIds.length === 0) {
+    MessagePlugin.warning('没有可添加标签的文件');
+    return;
+  }
+  let successCount = 0;
+  let failCount = 0;
+  for (const fileId of fileIds) {
+    try {
+      await api.put(`/files/${fileId}/tags`, { tagIds: batchTagDialog.selectedTagIds });
+      successCount++;
+    } catch (err) {
+      failCount++;
+    }
+  }
+  batchTagDialog.visible = false;
+  if (failCount === 0) {
+    MessagePlugin.success(`已为 ${successCount} 个文件添加标签`);
+  } else {
+    MessagePlugin.warning(`完成: ${successCount} 成功, ${failCount} 失败`);
+  }
+  applyFilters();
 }
 
 // 同步分页、搜索、排序、标签到 URL 查询参数

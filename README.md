@@ -184,7 +184,7 @@ AUDIT_LOG_RETENTION_DAYS=90    # 审计日志保留天数
 │   │   ├── middleware/       # AccessLogMiddleware（全局 HTTP 请求日志）
 │   │   ├── utils/            # client-ip.ts crypto.util.ts
 │   ├── database/             # TypeORM CLI DataSource
-│   └── migrations/           # 17 个数据库迁移文件
+│   └── migrations/           # 20 个数据库迁移文件
 │
 ├── frontend/src/
 │   ├── views/
