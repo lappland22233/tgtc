@@ -103,6 +103,12 @@ const routes: RouteRecordRaw[] = [
         component: () => import('../views/admin/AuditLogs.vue'),
         meta: { superAdmin: true },
       },
+      {
+        path: 'admin/telemetry',
+        name: 'AdminTelemetry',
+        component: () => import('../views/admin/TelemetryStats.vue'),
+        meta: { superAdmin: true },
+      },
     ],
   },
 ];

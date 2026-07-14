@@ -341,6 +341,60 @@ export class AdminController {
     });
   }
 
+  // ==================== 遥测监控 ====================
+
+  @Get('telemetry/stats')
+  @Roles(UserRole.SUPER_ADMIN)
+  async getTelemetryStats(@Query('timeRange') timeRange?: string) {
+    return this.adminService.getTelemetryStats(timeRange);
+  }
+
+  @Get('telemetry/records')
+  @Roles(UserRole.SUPER_ADMIN)
+  async getTelemetryRecords(
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+    @Query('type') type?: string,
+    @Query('timeRange') timeRange?: string,
+  ) {
+    return this.adminService.getTelemetryRecords({
+      page: page ? parseInt(page) : undefined,
+      limit: limit ? parseInt(limit) : undefined,
+      type,
+      timeRange,
+    });
+  }
+
+  @Get('telemetry/performance')
+  @Roles(UserRole.SUPER_ADMIN)
+  async getTelemetryPerformance(@Query('timeRange') timeRange?: string) {
+    return this.adminService.getTelemetryPerformance(timeRange);
+  }
+
+  @Get('telemetry/export')
+  @Roles(UserRole.SUPER_ADMIN)
+  async exportTelemetry(
+    @Query('startDate') startDate?: string,
+    @Query('endDate') endDate?: string,
+    @Query('type') type?: string,
+    @Res() res?: any,
+  ) {
+    const data = await this.adminService.exportTelemetry(startDate, endDate, type);
+    const json = JSON.stringify(data, null, 2);
+    res.set({
+      'Content-Type': 'application/json',
+      'Content-Disposition': `attachment; filename="telemetry-export-${new Date().toISOString().slice(0, 10)}.json"`,
+      'Content-Length': Buffer.byteLength(json).toString(),
+    });
+    res.send(json);
+  }
+
+  @Get('telemetry/errors')
+  @Roles(UserRole.SUPER_ADMIN)
+  async getTelemetryErrors(@Query('limit') limit?: string) {
+    return this.adminService.getTelemetryErrors(limit ? parseInt(limit) : undefined);
+  }
+
   // ==================== 安全规则配置 ====================
 
   @Get('security-config')

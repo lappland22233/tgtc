@@ -46,7 +46,7 @@ export class ChunkUploadController {
 
   /** 上传单个分片 (multipart: chunk + index) */
   @Post(':uploadId')
-  @UseInterceptors(FileInterceptor('chunk', { limits: { fileSize: 52428800 } }))
+  @UseInterceptors(FileInterceptor('chunk', { limits: { fileSize: 104857600 } }))
   async uploadChunk(
     @Param('uploadId') uploadId: string,
     @UploadedFile() chunk: Express.Multer.File,

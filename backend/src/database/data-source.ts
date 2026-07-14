@@ -14,6 +14,7 @@ import { Alert } from '../common/entities/alert.entity';
 import { DashboardConfig } from '../common/entities/dashboard-config.entity';
 import { UploadTask } from '../common/entities/upload-task.entity';
 import { Tag } from '../common/entities/tag.entity';
+import { TelemetryRecord } from '../common/entities/telemetry-record.entity';
 
 export const AppDataSource = new DataSource({
   type: 'postgres',
@@ -22,7 +23,7 @@ export const AppDataSource = new DataSource({
   username: process.env.DB_USERNAME || 'postgres',
   password: process.env.DB_PASSWORD || undefined,
   database: process.env.DB_DATABASE || 'text',
-  entities: [User, File, SystemConfig, VerificationCode, BannedIP, ShareAudit, FileAccessLog, RateLimit, AuditLog, AccessLog, Alert, DashboardConfig, UploadTask, Tag],
+  entities: [User, File, SystemConfig, VerificationCode, BannedIP, ShareAudit, FileAccessLog, RateLimit, AuditLog, AccessLog, Alert, DashboardConfig, UploadTask, Tag, TelemetryRecord],
   migrations: ['src/migrations/*{.ts,.js}'],
   synchronize: false,
   logging: process.env.NODE_ENV === 'development',

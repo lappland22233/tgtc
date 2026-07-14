@@ -13,12 +13,12 @@ export class InitChunkUploadDto {
 
   @IsInt()
   @Min(1)
-  @Max(10000)
+  @Max(20000)
   totalChunks: number;
 
   @IsInt()
   @Min(1)
-  @Max(52428800) // 50MB max chunk size
+  @Max(104857600) // 100MB max chunk size
   chunkSize: number;
 }
 

@@ -16,13 +16,15 @@ export interface ChunkUploadResult {
   originalName: string;
 }
 
-/** 分片大小选项：逐级缩小以适应慢速网络 */
-const CHUNK_SIZE_OPTIONS = [
-  5 * 1024 * 1024,   // 5MB  — 快速网络
-  2 * 1024 * 1024,   // 2MB  — 中等网络
-  1 * 1024 * 1024,   // 1MB  — 慢速网络
-  512 * 1024,        // 512KB — 极慢网络
-];
+/** 根据文件大小动态计算最优分片大小 */
+function getOptimalChunkSize(fileSize: number): number {
+  if (fileSize < 20 * 1024 * 1024) return 2 * 1024 * 1024;        // <20MB → 2MB
+  if (fileSize < 100 * 1024 * 1024) return 5 * 1024 * 1024;       // 20-100MB → 5MB
+  if (fileSize < 500 * 1024 * 1024) return 8 * 1024 * 1024;       // 100-500MB → 8MB
+  return 16 * 1024 * 1024;                                         // >=500MB → 16MB
+}
+
+const CHUNK_SIZE_MIN = 512 * 1024;   // 512KB — 最小分片（降级底线）
 
 /** 
  * 单个分片超时时间 (ms)，超过此时间视为超时。
@@ -64,15 +66,16 @@ export function useChunkedUpload(concurrency = 2) {
     file: File,
     onProgress?: (p: ChunkUploadProgress) => void,
     signal?: AbortSignal,
-    chunkSizeHint = CHUNK_SIZE_OPTIONS[0],
+    chunkSizeHint?: number,
   ): Promise<ChunkUploadResult> {
     uploading.value = true;
     uploadId.value = null;
 
-    // 自适应分片大小：根据文件大小选择合适的 chunk size
-    let chunkSize = chunkSizeHint;
+    // 自适应分片大小：根据文件大小动态计算，可被调用方传入的 hint 覆盖
+    let chunkSize = chunkSizeHint || getOptimalChunkSize(file.size);
+    // 小文件不要过度分片
     if (file.size < 10 * 1024 * 1024) {
-      chunkSize = Math.min(chunkSize, 1 * 1024 * 1024);
+      chunkSize = Math.min(chunkSize, 2 * 1024 * 1024);
     }
     const totalChunks = Math.ceil(file.size / chunkSize);
 
@@ -117,6 +120,33 @@ export function useChunkedUpload(concurrency = 2) {
       const activeChunkSize = chunkSize;
 
       /**
+       * 降级后重新切割尚未上传的待处理分片
+       * 更新 pendingChunks 中尚未发送的分片（包括当前失败的 chunk）
+       * 基于新的 chunkSize 重新切割文件，确保后续分片使用新的大小
+       */
+      function repartitionPending(
+        pendings: { index: number; blob: Blob }[],
+        src: File,
+        newSize: number,
+      ) {
+        // 保留已成功上传的索引，重新计算待上传分片列表
+        const uploaded = new Set<number>();
+        for (let i = 0; i < completed; i++) {
+          uploaded.add(i);
+        }
+        // 清除现有队列，重新构建
+        pendings.length = 0;
+        const newTotal = Math.ceil(src.size / newSize);
+        for (let i = 0; i < newTotal; i++) {
+          if (!uploaded.has(i)) {
+            const start = i * newSize;
+            const end = Math.min(start + newSize, src.size);
+            pendings.push({ index: i, blob: src.slice(start, end) });
+          }
+        }
+      }
+
+      /**
        * 上传单个分片（含自动重试和自适应分片降级）
        */
       const uploadChunk = async (chunk: { index: number; blob: Blob }, retryCount = 0): Promise<void> => {
@@ -145,6 +175,16 @@ export function useChunkedUpload(concurrency = 2) {
             if (signal?.aborted) return;
           }
 
+          // 不可重试的错误：客户端参数错误、认证失败、文件过大
+          const isNonRetryable =
+            err?.response?.status === 413 ||  // 文件过大
+            err?.response?.status === 400 ||  // 参数错误
+            err?.response?.status === 401;    // 认证失败
+
+          if (isNonRetryable) {
+            throw err;
+          }
+
           // 可重试的错误：超时、网络错误、5xx、Cloudflare 502
           const isRetryable =
             err?.code === 'ECONNABORTED' ||
@@ -154,11 +194,12 @@ export function useChunkedUpload(concurrency = 2) {
             err?.response?.status >= 500;
 
           if (isRetryable && retryCount < MAX_RETRIES) {
-            const delay = RETRY_BASE_DELAY * Math.pow(2, retryCount);
+            // 指数退避 + 随机抖动，避免雷群效应
+            const delay = RETRY_BASE_DELAY * Math.pow(2, retryCount) + Math.floor(Math.random() * 1000);
             progress.value.retrying = true;
             onProgress?.(progress.value);
 
-            console.warn(`分片 ${chunk.index} 上传失败，${delay / 1000}s 后重试 (${retryCount + 1}/${MAX_RETRIES})`);
+            console.warn(`分片 ${chunk.index} 上传失败，${(delay / 1000).toFixed(1)}s 后重试 (${retryCount + 1}/${MAX_RETRIES})`);
             await new Promise(resolve => setTimeout(resolve, delay));
 
             progress.value.retrying = false;
@@ -168,10 +209,12 @@ export function useChunkedUpload(concurrency = 2) {
             const isTimeout = err?.code === 'ECONNABORTED' || err?.message?.includes('代理层');
             if (isTimeout) {
               consecutiveTimeouts++;
-              if (consecutiveTimeouts >= 2 && chunkSize > 512 * 1024) {
-                chunkSize = Math.max(512 * 1024, Math.floor(chunkSize / 2));
-                console.warn(`CDN 超时频繁，分片大小降级至 ${chunkSize / 1024}KB`);
+              if (consecutiveTimeouts >= 2 && chunkSize > CHUNK_SIZE_MIN) {
+                chunkSize = Math.max(CHUNK_SIZE_MIN, Math.floor(chunkSize / 2));
+                console.warn(`CDN 超时频繁，分片大小降级至 ${chunkSize / 1024}KB，将重新切割剩余分片`);
                 consecutiveTimeouts = 0;
+                // 重新切割未上传的分片和尚未发送的待处理分片
+                repartitionPending(pendingChunks, file, chunkSize);
               }
             }
 

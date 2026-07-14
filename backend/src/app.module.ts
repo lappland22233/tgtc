@@ -25,9 +25,11 @@ import { Alert } from './common/entities/alert.entity';
 import { DashboardConfig } from './common/entities/dashboard-config.entity';
 import { UploadTask } from './common/entities/upload-task.entity';
 import { Tag } from './common/entities/tag.entity';
+import { TelemetryRecord } from './common/entities/telemetry-record.entity';
 import { AccessLogModule } from './common/access-log.module';
 import { JobsModule } from './jobs/jobs.module';
 import { AlertModule } from './alert/alert.module';
+import { TelemetryModule } from './telemetry/telemetry.module';
 import { TelegramModule } from './telegram/telegram.module';
 import { SecurityModule } from './security/security.module';
 import { TagModule } from './tag/tag.module';
@@ -46,7 +48,7 @@ import { TagModule } from './tag/tag.module';
       username: process.env.DB_USERNAME || 'postgres',
       password: process.env.DB_PASSWORD || undefined,
       database: process.env.DB_DATABASE || 'text',
-      entities: [User, File, SystemConfig, VerificationCode, BannedIP, ShareAudit, FileAccessLog, RateLimit, AuditLog, AccessLog, Alert, DashboardConfig, UploadTask, Tag],
+      entities: [User, File, SystemConfig, VerificationCode, BannedIP, ShareAudit, FileAccessLog, RateLimit, AuditLog, AccessLog, Alert, DashboardConfig, UploadTask, Tag, TelemetryRecord],
       // 生产环境强制关闭 synchronize 防止误改 schema 丢数据；开发环境由 DB_SYNCHRONIZE 控制
       synchronize: process.env.NODE_ENV === 'production' ? false : process.env.DB_SYNCHRONIZE === 'true',
       migrations: [__dirname + '/migrations/*{.ts,.js}'],
@@ -68,6 +70,7 @@ import { TagModule } from './tag/tag.module';
     SecurityModule,
     TagModule,
     TelegramModule,
+    TelemetryModule,
   ],
 })
 export class AppModule {}

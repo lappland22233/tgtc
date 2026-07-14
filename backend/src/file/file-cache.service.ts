@@ -29,6 +29,9 @@ export class FileCacheService {
   private minFreeDiskBytes = parseInt(CACHE_CONFIG_DEFAULTS[CACHE_CONFIG_KEYS.MIN_FREE_DISK_GB]) * 1024 * 1024 * 1024;
   private cacheTtlMs = parseInt(CACHE_CONFIG_DEFAULTS[CACHE_CONFIG_KEYS.TTL_DAYS]) * 24 * 60 * 60 * 1000;
 
+  /** 文件最近访问时间追踪 (fileId → lastAccessTimestamp)，用于 LRU 淘汰 */
+  private readonly fileAccessMap = new Map<string, number>();
+
   constructor(private readonly configCache: ConfigCacheService) {
     this.cacheDir = path.resolve(process.cwd(), 'tmp', 'Cache');
     fsp.mkdir(this.cacheDir, { recursive: true }).catch(() => {});
@@ -89,6 +92,8 @@ export class FileCacheService {
         return null;
       }
       this.logger.debug(`缓存命中: ${fileId} (${stat.size} bytes, ${Math.round(age / 3600000)}h)`);
+      // 记录最近访问时间（用于 LRU 淘汰）
+      this.fileAccessMap.set(fileId, Date.now());
       return createReadStream(cachePath);
     } catch {
       // 缓存不存在
@@ -135,6 +140,58 @@ export class FileCacheService {
       // 无法获取磁盘信息时保守允许缓存
       return true;
     }
+  }
+
+  /**
+   * LRU 淘汰：按最近访问时间从远到近逐个删除缓存文件，
+   * 直到释放足够的空间或没有更多可淘汰文件。
+   * @returns 被淘汰的文件数
+   */
+  private async evictLRU(targetFreeBytes: number): Promise<number> {
+    let evicted = 0;
+
+    try {
+      const files = await fsp.readdir(this.cacheDir);
+      // 收集所有缓存文件的访问时间和大小
+      const entries: { name: string; accessTime: number; size: number }[] = [];
+      for (const f of files) {
+        if (f.endsWith('.tmp')) continue; // 跳过临时文件
+        try {
+          const stat = await fsp.stat(path.join(this.cacheDir, f));
+          const accessTime = this.fileAccessMap.get(f) || stat.atimeMs;
+          entries.push({ name: f, accessTime, size: stat.size });
+        } catch {
+          continue;
+        }
+      }
+
+      // 按访问时间升序排列（最久未访问的排前面）
+      entries.sort((a, b) => a.accessTime - b.accessTime);
+
+      // 逐个淘汰直到空间充足（目标：释放 targetFreeBytes 字节）
+      let freedBytes = 0;
+      for (const entry of entries) {
+        if (freedBytes >= targetFreeBytes) break;
+        try {
+          await fsp.unlink(path.join(this.cacheDir, entry.name));
+          this.fileAccessMap.delete(entry.name);
+          freedBytes += entry.size;
+          evicted++;
+        } catch {
+          continue;
+        }
+      }
+
+      if (evicted > 0) {
+        this.logger.log(
+          `LRU 淘汰完成: 移除了 ${evicted} 个缓存文件，释放 ${(freedBytes / 1024 / 1024).toFixed(1)}MB`,
+        );
+      }
+    } catch {
+      // 淘汰过程失败不影响主流程
+    }
+
+    return evicted;
   }
 
   /** 获取缓存目录总大小 */
@@ -194,17 +251,28 @@ export class FileCacheService {
   async cacheFile(fileId: string, buffer: Buffer): Promise<void> {
     this.validateFileId(fileId);
 
-    // 磁盘空间检查
-    if (!this.hasEnoughDiskSpace()) {
-      this.logger.warn(`磁盘剩余空间不足，跳过缓存 ${fileId}`);
-      return;
-    }
-
-    // 缓存总大小检查
+    // 缓存总大小检查：超限时尝试 LRU 淘汰
     const totalSize = await this.getTotalCacheSize();
     if (totalSize + buffer.length > this.maxCacheSizeBytes) {
-      this.logger.warn(`缓存总量超限 (${totalSize / 1024 / 1024 / 1024}GB)，跳过缓存 ${fileId}`);
-      return;
+      const needFree = totalSize + buffer.length - this.maxCacheSizeBytes;
+      this.logger.warn(`缓存总量超限，尝试 LRU 淘汰 (需释放 ${(needFree / 1024 / 1024).toFixed(0)}MB)`);
+      await this.evictLRU(needFree);
+      // 淘汰后再次检查
+      const newTotal = await this.getTotalCacheSize();
+      if (newTotal + buffer.length > this.maxCacheSizeBytes) {
+        this.logger.warn(`LRU 淘汰后仍超限，跳过缓存 ${fileId}`);
+        return;
+      }
+    }
+
+    // 磁盘空间检查：不足时尝试 LRU 淘汰
+    if (!this.hasEnoughDiskSpace()) {
+      this.logger.warn(`磁盘空间不足，尝试 LRU 淘汰`);
+      await this.evictLRU(this.minFreeDiskBytes);
+      if (!this.hasEnoughDiskSpace()) {
+        this.logger.warn(`磁盘剩余空间仍不足，跳过缓存 ${fileId}`);
+        return;
+      }
     }
 
     const cachePath = this.getCachePath(fileId);
@@ -230,17 +298,27 @@ export class FileCacheService {
   async cacheFileFromPath(fileId: string, sourcePath: string, expectedSize: number): Promise<void> {
     this.validateFileId(fileId);
 
-    // 磁盘空间检查
-    if (!this.hasEnoughDiskSpace()) {
-      this.logger.warn(`磁盘剩余空间不足，跳过缓存 ${fileId}`);
-      return;
-    }
-
-    // 缓存总大小检查
+    // 缓存总大小检查：超限时尝试 LRU 淘汰
     const totalSize = await this.getTotalCacheSize();
     if (totalSize + expectedSize > this.maxCacheSizeBytes) {
-      this.logger.warn(`缓存总量超限 (${(totalSize / 1024 / 1024 / 1024).toFixed(1)}GB)，跳过缓存 ${fileId}`);
-      return;
+      const needFree = totalSize + expectedSize - this.maxCacheSizeBytes;
+      this.logger.warn(`缓存总量超限，尝试 LRU 淘汰 (需释放 ${(needFree / 1024 / 1024).toFixed(0)}MB)`);
+      await this.evictLRU(needFree);
+      const newTotal = await this.getTotalCacheSize();
+      if (newTotal + expectedSize > this.maxCacheSizeBytes) {
+        this.logger.warn(`LRU 淘汰后仍超限，跳过缓存 ${fileId}`);
+        return;
+      }
+    }
+
+    // 磁盘空间检查：不足时尝试 LRU 淘汰
+    if (!this.hasEnoughDiskSpace()) {
+      this.logger.warn(`磁盘空间不足，尝试 LRU 淘汰`);
+      await this.evictLRU(this.minFreeDiskBytes);
+      if (!this.hasEnoughDiskSpace()) {
+        this.logger.warn(`磁盘剩余空间仍不足，跳过缓存 ${fileId}`);
+        return;
+      }
     }
 
     const cachePath = this.getCachePath(fileId);
@@ -307,6 +385,25 @@ export class FileCacheService {
     const resolved = path.resolve(this.cacheDir, fileId);
     if (!resolved.startsWith(this.cacheDir)) {
       throw new Error(`路径穿越攻击: ${fileId}`);
+    }
+  }
+
+  /**
+   * 获取已缓存文件的磁盘路径
+   * 文件存在且未过期时返回路径，否则返回 null。
+   */
+  getCachedPath(fileId: string): string | null {
+    this.validateFileId(fileId);
+    const cachePath = this.getCachePath(fileId);
+    try {
+      const stat = require('fs').statSync(cachePath);
+      if (stat.size <= 0) return null;
+      // 检查 TTL 是否过期
+      if (Date.now() - stat.mtimeMs > this.cacheTtlMs) return null;
+      this.fileAccessMap.set(fileId, Date.now());
+      return cachePath;
+    } catch {
+      return null;
     }
   }
 

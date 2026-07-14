@@ -3,6 +3,7 @@ import { createPinia } from 'pinia';
 import TDesign from 'tdesign-vue-next';
 import App from './App.vue';
 import router from './router';
+import { initTelemetry, captureVueError, setupRouteTracking } from './utils/telemetry';
 import 'tdesign-vue-next/dist/tdesign.css';
 import './assets/styles.css';
 
@@ -16,10 +17,16 @@ app.use(pinia);
 app.use(router);
 app.use(TDesign);
 
-// 全局错误边界：捕获未处理的组件错误，防止整个页面白屏
+// 全局错误边界：捕获未处理的组件错误，同时上报遥测
 app.config.errorHandler = (err, _instance, info) => {
   console.error('[Vue Error]', err);
   console.error('Info:', info);
+  captureVueError(err, info);
 };
 
 app.mount('#app');
+
+// 应用挂载后初始化遥测（错误/性能/环境信息自动上报）
+initTelemetry();
+// 注册路由切换追踪（SPA 导航性能 + 后续行为追踪）
+setupRouteTracking(router);
