@@ -6,16 +6,18 @@
     </div>
 
     <div class="card">
-      <h3 style="margin-bottom: 24px;">修改密码</h3>
+      <h3 style="margin-bottom: 24px; font-family: var(--font-display); font-size: 16px; font-weight: 600;">
+        修改密码
+      </h3>
       <t-form ref="passwordFormRef" :data="passwordForm" :rules="passwordRules" @submit="handlePasswordChange" layout="vertical">
         <t-form-item label="原密码" name="oldPassword">
-          <t-input v-model="passwordForm.oldPassword" type="password" placeholder="请输入原密码" autocomplete="new-password" name="settings-old-pass" />
+          <t-input v-model="passwordForm.oldPassword" type="password" placeholder="请输入原密码..." autocomplete="current-password" name="settings-old-pass" />
         </t-form-item>
         <t-form-item label="新密码" name="newPassword">
-          <t-input v-model="passwordForm.newPassword" type="password" placeholder="请输入新密码（至少6位）" autocomplete="new-password" name="settings-new-pass" />
+          <t-input v-model="passwordForm.newPassword" type="password" placeholder="请输入新密码（至少 6 位）..." autocomplete="new-password" name="settings-new-pass" />
         </t-form-item>
         <t-form-item label="确认新密码" name="confirmPassword">
-          <t-input v-model="passwordForm.confirmPassword" type="password" placeholder="请再次输入新密码" autocomplete="new-password" name="settings-confirm-pass" />
+          <t-input v-model="passwordForm.confirmPassword" type="password" placeholder="请再次输入新密码..." autocomplete="new-password" name="settings-confirm-pass" />
         </t-form-item>
         <t-form-item>
           <t-button type="submit" theme="primary">保存修改</t-button>
@@ -24,14 +26,18 @@
     </div>
 
     <div class="card" style="margin-top: 20px;">
-      <h3 style="margin-bottom: 24px;">账号信息</h3>
+      <h3 style="margin-bottom: 24px; font-family: var(--font-display); font-size: 16px; font-weight: 600;">
+        账号信息
+      </h3>
       <t-descriptions :column="2" border>
         <t-descriptions-item label="邮箱">{{ authStore.user?.email }}</t-descriptions-item>
         <t-descriptions-item label="角色">
-          <t-tag :theme="roleTheme">{{ roleText }}</t-tag>
+          <t-tag :theme="roleTheme" variant="light">{{ roleText }}</t-tag>
         </t-descriptions-item>
         <t-descriptions-item label="邮箱验证">
-          {{ authStore.user?.emailVerified ? '已验证' : '未验证' }}
+          <span :class="authStore.user?.emailVerified ? 'status-verified' : 'status-unverified'">
+            {{ authStore.user?.emailVerified ? '已验证' : '未验证' }}
+          </span>
         </t-descriptions-item>
         <t-descriptions-item label="注册时间">
           {{ formatDate(authStore.user?.createdAt ?? '') }}
@@ -101,10 +107,20 @@ async function handlePasswordChange() {
       newPassword: passwordForm.newPassword,
     });
     MessagePlugin.success('密码修改成功');
-    // 清空表单并清除验证状态，避免显示"不能为空"提示
     passwordFormRef.value?.reset();
   } catch (error: unknown) {
     MessagePlugin.error(getErrorMessage(error));
   }
 }
 </script>
+
+<style scoped>
+.status-verified {
+  color: var(--color-success);
+  font-weight: 500;
+}
+
+.status-unverified {
+  color: var(--text-tertiary);
+}
+</style>

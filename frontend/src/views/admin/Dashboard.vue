@@ -12,11 +12,11 @@
       </div>
       <div class="stat-card">
         <h3>活跃用户</h3>
-        <div class="value" style="color: var(--success);">{{ stats.activeUsers }}</div>
+        <div class="value" style="color: var(--color-success);">{{ stats.activeUsers }}</div>
       </div>
       <div class="stat-card">
         <h3>已封禁用户</h3>
-        <div class="value" style="color: var(--error);">{{ stats.bannedUsers }}</div>
+        <div class="value" style="color: var(--color-danger);">{{ stats.bannedUsers }}</div>
       </div>
       <div class="stat-card">
         <h3>总文件数</h3>
@@ -28,14 +28,16 @@
       </div>
       <div class="stat-card">
         <h3>全站总访问</h3>
-        <div class="value">{{ stats.totalAccessCount }}</div>
+        <div class="value" style="color: var(--color-cyan);">{{ stats.totalAccessCount }}</div>
       </div>
     </div>
 
-    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+    <div class="dashboard-split-grid" style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
       <div class="card">
-        <h3 style="margin-bottom: 16px;">我的文件统计</h3>
-        <div class="stats-grid">
+        <h3 style="margin-bottom: 20px; font-family: var(--font-display); font-size: 16px; font-weight: 600;">
+          我的文件统计
+        </h3>
+        <div class="stats-grid" style="margin-bottom: 0; grid-template-columns: repeat(3, 1fr);">
           <div class="stat-card">
             <h3>我的文件</h3>
             <div class="value">{{ myFiles.fileCount }}</div>
@@ -46,15 +48,17 @@
           </div>
           <div class="stat-card">
             <h3>我的访问次数</h3>
-            <div class="value">{{ myFiles.totalAccessCount }}</div>
+            <div class="value" style="color: var(--color-cyan);">{{ myFiles.totalAccessCount }}</div>
           </div>
         </div>
       </div>
 
       <div class="card">
-        <h3 style="margin-bottom: 16px;">全站月度访问量</h3>
-        <div v-if="stats.monthlyAccess.length === 0" style="text-align: center; padding: 24px; color: var(--text-secondary);">
-          暂无访问数据
+        <h3 style="margin-bottom: 20px; font-family: var(--font-display); font-size: 16px; font-weight: 600;">
+          全站月度访问量
+        </h3>
+        <div v-if="stats.monthlyAccess.length === 0" class="empty-state">
+          <p>暂无访问数据</p>
         </div>
         <div v-else class="monthly-chart">
           <div class="chart-bars">
@@ -99,24 +103,17 @@ const myFiles = ref({
   totalAccessCount: 0,
 });
 
-const currentTime = ref('');
-let timer: number;
 let refreshTimer: number;
 
 async function fetchData() {
-  // 独立 try-catch 确保单个请求失败不影响其他数据
   try {
     const statsRes = await api.get('/admin/stats');
     stats.value = statsRes.data.data;
-  } catch {
-    // 保留默认值
-  }
+  } catch { /* 保留默认值 */ }
   try {
     const myFilesRes = await api.get('/admin/my-files-stats');
     myFiles.value = myFilesRes.data.data;
-  } catch {
-    // 保留默认值
-  }
+  } catch { /* 保留默认值 */ }
 }
 
 function formatMonth(month: string) {
@@ -129,20 +126,21 @@ function getBarHeight(count: number) {
   return Math.max(4, Math.round((count / max) * 120)) + 'px';
 }
 
-function updateTime() {
-  currentTime.value = new Date().toLocaleString('zh-CN');
-}
-
 onMounted(async () => {
   await fetchData();
-  updateTime();
-  timer = window.setInterval(updateTime, 1000);
-  // 每 30 秒自动刷新统计数据
   refreshTimer = window.setInterval(fetchData, 30_000);
 });
 
 onUnmounted(() => {
-  clearInterval(timer);
   if (refreshTimer) clearInterval(refreshTimer);
 });
 </script>
+
+<style scoped>
+.empty-state {
+  text-align: center;
+  padding: 32px 0;
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+</style>

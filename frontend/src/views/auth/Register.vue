@@ -5,32 +5,60 @@
         <h1>创建账号</h1>
         <p>注册文件分发系统账号</p>
       </div>
-      
+
       <!-- 注册已关闭提示 -->
-      <div v-if="!authStatus.registrationEnabled" class="card" style="text-align: center; padding: 40px;">
-        <div style="font-size: 48px; margin-bottom: 16px;">🔒</div>
+      <div v-if="!authStatus.registrationEnabled" class="reg-closed">
+        <div class="reg-closed-icon">🔒</div>
         <h3>注册功能已关闭</h3>
-        <p style="color: var(--text-secondary); margin-top: 8px;">
-          请联系管理员开启注册功能
-        </p>
+        <p>请联系管理员开启注册功能</p>
         <t-button theme="primary" style="margin-top: 16px;" @click="router.push('/login')">
           返回登录
         </t-button>
       </div>
 
-      <t-form v-else ref="formRef" :data="form" :rules="rules" @submit="handleSubmit">
+      <t-form v-else ref="formRef" :data="form" :rules="rules" @submit="handleSubmit" label-align="top">
         <t-form-item label="邮箱" name="email">
-          <t-input v-model="form.email" placeholder="请输入邮箱" size="large" />
+          <t-input
+            v-model="form.email"
+            placeholder="请输入邮箱地址..."
+            size="large"
+            type="email"
+            autocomplete="email"
+            name="email"
+            :spellcheck="false"
+          />
         </t-form-item>
         <t-form-item label="密码" name="password">
-          <t-input v-model="form.password" type="password" placeholder="请输入密码（至少6位）" size="large" />
+          <t-input
+            v-model="form.password"
+            type="password"
+            placeholder="请输入密码（至少 6 位）..."
+            size="large"
+            autocomplete="new-password"
+            name="new-password"
+          />
         </t-form-item>
         <t-form-item label="确认密码" name="confirmPassword">
-          <t-input v-model="form.confirmPassword" type="password" placeholder="请再次输入密码" size="large" />
+          <t-input
+            v-model="form.confirmPassword"
+            type="password"
+            placeholder="请再次输入密码..."
+            size="large"
+            autocomplete="new-password"
+            name="confirm-password"
+          />
         </t-form-item>
         <t-form-item v-if="authStatus.emailVerificationEnabled" label="验证码" name="code">
-          <div style="display: flex; gap: 12px;">
-            <t-input v-model="form.code" placeholder="请输入验证码" size="large" style="flex: 1;" />
+          <div class="code-row">
+            <t-input
+              v-model="form.code"
+              placeholder="请输入 6 位验证码..."
+              size="large"
+              class="code-input"
+              autocomplete="off"
+              name="verification-code"
+              :spellcheck="false"
+            />
             <t-button
               :disabled="countdown > 0"
               @click="sendCode"
@@ -43,12 +71,13 @@
         </t-form-item>
         <t-form-item>
           <t-button type="submit" theme="primary" size="large" block :loading="loading">
-            注册
+            {{ loading ? '注册中…' : '注册' }}
           </t-button>
         </t-form-item>
       </t-form>
-      <div v-if="authStatus.registrationEnabled" style="text-align: center; margin-top: 24px; color: var(--text-secondary);">
-        已有账号？ <router-link to="/login" style="color: var(--primary-color);">立即登录</router-link>
+      <div v-if="authStatus.registrationEnabled" class="auth-footer">
+        已有账号？
+        <router-link to="/login" class="auth-link">立即登录</router-link>
       </div>
     </div>
   </div>
@@ -83,7 +112,6 @@ const authStatus = ref({
   hasSuperAdmin: false,
 });
 
-// 动态生成验证规则
 const rules = computed(() => ({
   email: [
     { required: true, message: '请输入邮箱', type: 'error' },
@@ -113,8 +141,7 @@ async function fetchAuthStatus() {
   try {
     const res = await api.get('/auth/status');
     authStatus.value = res.data.data;
-  } catch (error: unknown) {
-    console.error('获取认证状态失败', error);
+  } catch {
     MessagePlugin.warning('无法获取注册状态，请稍后重试');
   }
 }
@@ -136,7 +163,6 @@ async function sendCode() {
       }
     }, 1000);
     countdownTimer = timer;
-    // 组件卸载时自动清理
     onScopeDispose(() => {
       if (timer) clearInterval(timer);
     });
@@ -150,7 +176,6 @@ async function handleSubmit() {
   if (valid !== true) return;
   loading.value = true;
   try {
-    // 如果验证码未开启，传空字符串
     const code = authStatus.value.emailVerificationEnabled ? form.code : '';
     const res = await authStore.register(form.email, form.password, code);
     const data = res.data;
@@ -179,3 +204,54 @@ onUnmounted(() => {
   }
 });
 </script>
+
+<style scoped>
+.auth-footer {
+  text-align: center;
+  margin-top: 28px;
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+.auth-link {
+  color: var(--color-accent);
+  text-decoration: none;
+  font-weight: 500;
+  transition: color var(--duration-fast);
+}
+
+.auth-link:hover {
+  color: var(--color-cyan);
+}
+
+.code-row {
+  display: flex;
+  gap: 12px;
+}
+
+.code-input {
+  flex: 1;
+}
+
+.reg-closed {
+  text-align: center;
+  padding: 40px 0;
+}
+
+.reg-closed-icon {
+  font-size: 48px;
+  margin-bottom: 16px;
+}
+
+.reg-closed h3 {
+  font-family: var(--font-display);
+  font-size: 18px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.reg-closed p {
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+</style>

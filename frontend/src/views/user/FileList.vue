@@ -1045,22 +1045,23 @@ onUnmounted(() => {
 .drop-overlay {
   position: absolute;
   inset: 0;
-  background: rgba(0, 82, 217, 0.15);
-  border: 3px dashed var(--primary-color);
-  border-radius: 12px;
+  background: rgba(77, 124, 254, 0.12);
+  border: 3px dashed var(--color-accent);
+  border-radius: var(--radius-lg);
   z-index: 100;
   display: flex;
   align-items: center;
   justify-content: center;
-  backdrop-filter: blur(4px);
+  backdrop-filter: blur(8px);
 }
 
 .drop-overlay-content {
   text-align: center;
-  color: var(--primary-color);
+  color: var(--color-accent);
 }
 
 .drop-overlay-content h2 {
+  font-family: var(--font-display);
   font-size: 24px;
   font-weight: 600;
 }
@@ -1071,7 +1072,7 @@ onUnmounted(() => {
 }
 
 .deleted-label {
-  color: var(--text-disabled, #999);
+  color: var(--text-tertiary);
   font-size: 13px;
   font-style: italic;
 }
@@ -1090,7 +1091,7 @@ onUnmounted(() => {
 }
 
 :deep(.row-processing) {
-  background: rgba(0, 82, 217, 0.05);
+  background: var(--color-accent-soft);
   opacity: 0.9;
 }
 
@@ -1100,18 +1101,23 @@ onUnmounted(() => {
   }
 
   .mobile-file-card {
-    background: var(--bg-secondary);
-    border: 1px solid var(--border-color);
-    border-radius: 8px;
-    padding: 12px;
+    background: var(--color-bg-surface);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+    padding: 14px;
     margin-bottom: 10px;
+    transition: border-color var(--duration-fast), box-shadow var(--duration-fast);
+  }
+
+  .mobile-file-card:hover {
+    border-color: var(--border-accent);
   }
 
   .mobile-file-card-header {
     display: flex;
     align-items: flex-start;
     gap: 12px;
-    margin-bottom: 8px;
+    margin-bottom: 10px;
   }
 
   .mobile-file-name {

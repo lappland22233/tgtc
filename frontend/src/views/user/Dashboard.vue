@@ -2,7 +2,7 @@
   <div>
     <div class="page-header">
       <h1>仪表盘</h1>
-      <p>欢迎使用文件分发系统</p>
+      <p>文件分发概览</p>
     </div>
 
     <div class="stats-grid">
@@ -16,25 +16,29 @@
       </div>
       <div class="stat-card">
         <h3>今日上传</h3>
-        <div class="value">{{ todayUploads }}</div>
+        <div class="value" style="color: var(--color-success);">{{ todayUploads }}</div>
       </div>
       <div class="stat-card">
         <h3>总访问次数</h3>
-        <div class="value">{{ stats.totalAccessCount }}</div>
+        <div class="value" style="color: var(--color-cyan);">{{ stats.totalAccessCount }}</div>
       </div>
       <div class="stat-card">
         <h3>账户类型</h3>
-        <div class="value" style="font-size: 18px;">{{ roleText }}</div>
+        <div class="value" style="font-size: 18px; font-family: var(--font-display);">{{ roleText }}</div>
       </div>
     </div>
 
     <div class="card">
-      <h3 style="margin-bottom: 16px;">最近上传</h3>
+      <h3 style="margin-bottom: 20px; font-family: var(--font-display); font-size: 16px; font-weight: 600;">
+        最近上传
+      </h3>
       <t-loading v-if="loading" />
-      <div v-else-if="recentFiles.length === 0" style="text-align: center; padding: 32px; color: var(--text-secondary);">
-        暂无文件上传记录
+      <div v-else-if="recentFiles.length === 0" class="empty-state">
+        <div class="empty-icon">⊟</div>
+        <p>暂无文件上传记录</p>
+        <span class="empty-hint">上传文件后，最近的文件将显示在这里</span>
       </div>
-      <div v-else class="file-list">
+      <div v-else class="file-list" style="margin-top: 0;">
         <div v-for="file in recentFiles" :key="file.id" class="file-item">
           <div class="file-icon" :class="getFileIcon(file.mimeType)">
             {{ getFileEmoji(file.mimeType) }}
@@ -42,11 +46,11 @@
           <div class="file-info">
             <div class="file-name">{{ file.originalName }}</div>
             <div class="file-meta">
-              {{ formatSize(file.size) }} · {{ formatDate(file.createdAt) }}
+              {{ formatSize(file.size) }} &middot; {{ formatDate(file.createdAt) }}
             </div>
           </div>
           <div class="file-actions">
-            <t-tag :theme="file.accessType === 'public' ? 'success' : 'warning'">
+            <t-tag :theme="file.accessType === 'public' ? 'success' : 'warning'" variant="light">
               {{ file.accessType === 'public' ? '公开' : '私有' }}
             </t-tag>
           </div>
@@ -89,7 +93,6 @@ function getFileIcon(mimeType: string) {
 }
 
 onMounted(async () => {
-  // 使用 Promise.allSettled 确保单个请求失败不影响整体页面
   const [statsResult, filesResult] = await Promise.allSettled([
     api.get('/users/me/stats'),
     api.get('/files?limit=5'),
@@ -103,3 +106,27 @@ onMounted(async () => {
   loading.value = false;
 });
 </script>
+
+<style scoped>
+.empty-state {
+  text-align: center;
+  padding: 40px 0;
+}
+
+.empty-icon {
+  font-size: 40px;
+  color: var(--text-tertiary);
+  margin-bottom: 12px;
+}
+
+.empty-state p {
+  color: var(--text-secondary);
+  font-size: 15px;
+  margin-bottom: 4px;
+}
+
+.empty-hint {
+  color: var(--text-tertiary);
+  font-size: 13px;
+}
+</style>
