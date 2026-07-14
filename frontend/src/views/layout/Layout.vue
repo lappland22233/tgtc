@@ -1,128 +1,151 @@
 <template>
   <div class="layout-container">
+    <!-- Desktop Sidebar -->
     <aside class="sidebar">
       <div class="sidebar-logo">
-        <h2>📦 文件分发系统</h2>
+        <h2>
+          <span class="logo-icon">⬡</span>
+          文件分发系统
+        </h2>
       </div>
+
       <nav class="sidebar-nav">
+        <div class="nav-section">工作区</div>
         <router-link to="/dashboard" class="nav-item" :class="{ active: $route.path === '/dashboard' }">
-          <span>📊</span> 仪表盘
+          <span class="nav-icon">⊡</span> 仪表盘
         </router-link>
         <router-link to="/files" class="nav-item" :class="{ active: $route.path === '/files' }">
-          <span>📁</span> 我的文件
+          <span class="nav-icon">⊟</span> 我的文件
         </router-link>
         <router-link to="/settings" class="nav-item" :class="{ active: $route.path === '/settings' }">
-          <span>⚙️</span> 个人设置
+          <span class="nav-icon">⚙</span> 个人设置
         </router-link>
+
         <template v-if="isAdmin">
-          <div style="margin: 16px 0; padding: 0 24px; color: var(--text-secondary); font-size: 12px;">
-            ─── 管理后台 ───
-          </div>
+          <div class="nav-section">管理后台</div>
           <router-link to="/admin/dashboard-customizer" class="nav-item" :class="{ active: $route.path === '/admin/dashboard-customizer' }">
-            <span>📈</span> 仪表盘
+            <span class="nav-icon">◫</span> 仪表盘
           </router-link>
           <router-link to="/admin/users" class="nav-item" :class="{ active: $route.path === '/admin/users' }">
-            <span>👥</span> 用户管理
+            <span class="nav-icon">👥</span> 用户管理
           </router-link>
           <router-link to="/admin/files" class="nav-item" :class="{ active: $route.path === '/admin/files' }">
-            <span>🗂️</span> 文件管理
+            <span class="nav-icon">⊞</span> 文件管理
           </router-link>
           <router-link to="/admin/config" class="nav-item" :class="{ active: $route.path === '/admin/config' }">
-            <span>🔧</span> 系统配置
+            <span class="nav-icon">⚙</span> 系统配置
           </router-link>
           <router-link to="/admin/access-logs" class="nav-item" :class="{ active: $route.path === '/admin/access-logs' }">
-            <span>📋</span> 访问统计
+            <span class="nav-icon">◷</span> 访问统计
           </router-link>
           <router-link to="/admin/security" class="nav-item" :class="{ active: $route.path === '/admin/security' }">
-            <span>🛡️</span> 安全监控
+            <span class="nav-icon">⬡</span> 安全监控
           </router-link>
           <router-link to="/admin/user-activity" class="nav-item" :class="{ active: $route.path === '/admin/user-activity' }">
-            <span>👤</span> 用户活跃
+            <span class="nav-icon">◎</span> 用户活跃
           </router-link>
           <router-link to="/admin/audit-logs" class="nav-item" :class="{ active: $route.path === '/admin/audit-logs' }">
-            <span>🔍</span> 操作审计
+            <span class="nav-icon">◉</span> 操作审计
           </router-link>
           <router-link to="/admin/telemetry" class="nav-item" :class="{ active: $route.path === '/admin/telemetry' }">
-            <span>📡</span> 遥测监控
+            <span class="nav-icon">⬒</span> 遥测监控
           </router-link>
         </template>
       </nav>
-      <div style="padding: 16px 24px; border-top: 1px solid var(--border-color);">
-        <div style="margin-bottom: 12px; font-size: 14px;">
-          <div style="color: var(--text-secondary);">当前用户</div>
-          <div style="font-weight: 500;">{{ authStore.user?.email }}</div>
-          <div style="font-size: 12px; color: var(--primary-color);">{{ roleText }}</div>
+
+      <div class="sidebar-footer">
+        <div class="sidebar-user">
+          <div class="sidebar-user-avatar">{{ avatarLetter }}</div>
+          <div class="sidebar-user-info">
+            <div class="sidebar-user-email" :title="authStore.user?.email">{{ authStore.user?.email }}</div>
+            <div class="sidebar-user-role">{{ roleText }}</div>
+          </div>
         </div>
-        <t-button variant="base" theme="danger" size="small" block @click="handleLogout">
+        <t-button variant="outline" theme="danger" size="small" block @click="handleLogout">
           退出登录
         </t-button>
       </div>
     </aside>
+
+    <!-- Main Content -->
     <main class="main-content">
-      <button class="mobile-menu-btn" @click="drawerVisible = true">☰</button>
+      <button class="mobile-menu-btn" @click="drawerVisible = true" aria-label="打开菜单">
+        ☰
+      </button>
       <AlertBanner />
-      <router-view />
+      <router-view v-slot="{ Component }">
+        <transition name="slide-up" mode="out-in">
+          <component :is="Component" />
+        </transition>
+      </router-view>
     </main>
+
+    <!-- Mobile Drawer -->
     <t-drawer
       v-model:visible="drawerVisible"
       placement="left"
-      :size="240"
+      :size="260"
       :header="false"
       :footer="false"
       :close-btn="true"
       destroy-on-close
     >
-      <div class="sidebar-drawer">
+      <div class="drawer-content">
         <div class="sidebar-logo">
-          <h2>📦 文件分发系统</h2>
+          <h2>
+            <span class="logo-icon">⬡</span>
+            文件分发系统
+          </h2>
         </div>
         <nav class="sidebar-nav">
+          <div class="nav-section">工作区</div>
           <router-link to="/dashboard" class="nav-item" :class="{ active: $route.path === '/dashboard' }" @click="drawerVisible = false">
-            <span>📊</span> 仪表盘
+            <span class="nav-icon">⊡</span> 仪表盘
           </router-link>
           <router-link to="/files" class="nav-item" :class="{ active: $route.path === '/files' }" @click="drawerVisible = false">
-            <span>📁</span> 我的文件
+            <span class="nav-icon">⊟</span> 我的文件
           </router-link>
           <router-link to="/settings" class="nav-item" :class="{ active: $route.path === '/settings' }" @click="drawerVisible = false">
-            <span>⚙️</span> 个人设置
+            <span class="nav-icon">⚙</span> 个人设置
           </router-link>
+
           <template v-if="isAdmin">
-            <div style="margin: 16px 0; padding: 0 24px; color: var(--text-secondary); font-size: 12px;">
-              ─── 管理后台 ───
-            </div>
+            <div class="nav-section">管理后台</div>
             <router-link to="/admin/dashboard-customizer" class="nav-item" :class="{ active: $route.path === '/admin/dashboard-customizer' }" @click="drawerVisible = false">
-              <span>📈</span> 仪表盘
+              <span class="nav-icon">◫</span> 仪表盘
             </router-link>
             <router-link to="/admin/users" class="nav-item" :class="{ active: $route.path === '/admin/users' }" @click="drawerVisible = false">
-              <span>👥</span> 用户管理
+              <span class="nav-icon">👥</span> 用户管理
             </router-link>
             <router-link to="/admin/files" class="nav-item" :class="{ active: $route.path === '/admin/files' }" @click="drawerVisible = false">
-              <span>🗂️</span> 文件管理
+              <span class="nav-icon">⊞</span> 文件管理
             </router-link>
             <router-link to="/admin/config" class="nav-item" :class="{ active: $route.path === '/admin/config' }" @click="drawerVisible = false">
-              <span>🔧</span> 系统配置
+              <span class="nav-icon">⚙</span> 系统配置
             </router-link>
             <router-link to="/admin/access-logs" class="nav-item" :class="{ active: $route.path === '/admin/access-logs' }" @click="drawerVisible = false">
-              <span>📋</span> 访问统计
+              <span class="nav-icon">◷</span> 访问统计
             </router-link>
             <router-link to="/admin/security" class="nav-item" :class="{ active: $route.path === '/admin/security' }" @click="drawerVisible = false">
-              <span>🛡️</span> 安全监控
+              <span class="nav-icon">⬡</span> 安全监控
             </router-link>
             <router-link to="/admin/user-activity" class="nav-item" :class="{ active: $route.path === '/admin/user-activity' }" @click="drawerVisible = false">
-              <span>👤</span> 用户活跃
+              <span class="nav-icon">◎</span> 用户活跃
             </router-link>
             <router-link to="/admin/audit-logs" class="nav-item" :class="{ active: $route.path === '/admin/audit-logs' }" @click="drawerVisible = false">
-              <span>🔍</span> 操作审计
+              <span class="nav-icon">◉</span> 操作审计
             </router-link>
           </template>
         </nav>
-        <div style="padding: 16px 24px; border-top: 1px solid var(--border-color); margin-top: auto;">
-          <div style="margin-bottom: 12px; font-size: 14px;">
-            <div style="color: var(--text-secondary);">当前用户</div>
-            <div style="font-weight: 500;">{{ authStore.user?.email }}</div>
-            <div style="font-size: 12px; color: var(--primary-color);">{{ roleText }}</div>
+        <div class="sidebar-footer">
+          <div class="sidebar-user">
+            <div class="sidebar-user-avatar">{{ avatarLetter }}</div>
+            <div class="sidebar-user-info">
+              <div class="sidebar-user-email" :title="authStore.user?.email">{{ authStore.user?.email }}</div>
+              <div class="sidebar-user-role">{{ roleText }}</div>
+            </div>
           </div>
-          <t-button variant="base" theme="danger" size="small" block @click="handleLogout">
+          <t-button variant="outline" theme="danger" size="small" block @click="handleLogout">
             退出登录
           </t-button>
         </div>
@@ -146,7 +169,6 @@ const { user } = storeToRefs(authStore);
 
 const drawerVisible = ref(false);
 
-// 移动端点击导航项后关闭抽屉
 watch(() => route.path, () => {
   if (drawerVisible.value) {
     drawerVisible.value = false;
@@ -154,6 +176,7 @@ watch(() => route.path, () => {
 });
 
 const isAdmin = computed(() => ['admin', 'super_admin'].includes(user.value?.role ?? ''));
+
 const roleText = computed(() => {
   const map: Record<UserRole, string> = {
     super_admin: '超级管理员',
@@ -163,13 +186,17 @@ const roleText = computed(() => {
   return map[user.value?.role ?? 'user'] || '普通用户';
 });
 
+const avatarLetter = computed(() => {
+  const email = user.value?.email || 'U';
+  return email.charAt(0).toUpperCase();
+});
+
 async function handleLogout() {
   await authStore.logout();
   router.push('/login');
 }
 
 onMounted(() => {
-  // 仅在首次加载时获取用户信息，路由切换时不重复请求
   if (!authStore.initialized) {
     authStore.fetchUser();
   }
@@ -177,10 +204,24 @@ onMounted(() => {
 </script>
 
 <style scoped>
-.sidebar-drawer {
+.drawer-content {
   display: flex;
   flex-direction: column;
   height: 100%;
   overflow-y: auto;
+  overscroll-behavior: contain;
+  background: var(--color-bg-elevated);
+}
+
+/* Drawer nav items — larger touch targets for mobile */
+.drawer-content .nav-item {
+  min-height: 48px;
+  padding: 14px 16px;
+  font-size: 15px;
+}
+
+.drawer-content .nav-section {
+  font-size: 11px;
+  padding-top: 20px;
 }
 </style>
