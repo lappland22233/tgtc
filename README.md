@@ -54,6 +54,17 @@
 - **HTTP 访问日志**：全局中间件记录所有请求（IP/路径/状态码/耗时/带宽），数据持久化存储，30 天自动清理
 - **审计日志**：90 天自动清理，防止数据库无限增长
 
+### 遥测系统
+- **前端遥测收集器**：自动采集 JS 错误、Vue 组件渲染失败、页面性能指标、设备环境信息
+- **网络状态追踪**：Axios/fetch 拦截，4xx/5xx/3xx 响应自动上报路径和耗时
+- **SPA 路由追踪**：Vue Router 路由切换性能自动记录，持续追踪后续行为
+- **点击事件追踪**：静默记录用户点击，错误发生时上报前后 2+1 分钟上下文
+- **白屏检测**：多维度判定（DOM 复杂度、交互元素、可见区域、采样点），准确识别白屏
+- **组件渲染失败检测**：1 秒内连续 3 次 render/setup/mount 错误主动告警
+- **控制台可视化**：生产环境实时打印遥测数据到浏览器 Console，按类型分色输出
+- **管理后台遥测监控**：统计卡片、趋势图表、类型分布、页面性能概览、错误列表
+- **数据导出**：超级管理员可按时间区间和类型导出遥测数据为 JSON 文件
+
 ## 技术栈
 
 | 层级 | 技术 |
@@ -169,13 +180,14 @@ AUDIT_LOG_RETENTION_DAYS=90    # 审计日志保留天数
 │   ├── alert/                # 告警模块（规则评估 + WebSocket 推送）
 │   ├── jobs/                 # Bull 任务队列（指标聚合/攻击检测/告警评估/基线计算/数据归档）
 │   ├── tag/                 # 标签模块（CRUD + 文件关联）
+│   ├── telemetry/            # 遥测模块（前端事件上报收集）
 │   ├── security/             # 行为异常检测（6 种异常模式）
 │   ├── telegram/             # Telegram Bot API 上传下载（流式传输，Token 脱敏）
 │   ├── mailer/               # SMTP 邮件
 │   ├── config/               # 动态配置缓存
 │   ├── tasks/                # 定时清理（限流/Token/封禁/访问日志/审计日志）
 │   ├── common/
-│   │   ├── entities/         # 14 个数据实体
+│   │   ├── entities/         # 15 个数据实体
 │   │   ├── services/         # ConfigCacheService + RateLimitService + AuditService
 │   │   ├── services/         # ConfigCacheService + RateLimitService + AuditService
 │   │   ├── guards/           # JWT 认证 + 角色权限守卫
@@ -198,7 +210,7 @@ AUDIT_LOG_RETENTION_DAYS=90    # 审计日志保留天数
 │   ├── router/               # 四级路由守卫链 + redirect 安全校验
 │   ├── api/                  # axios 客户端（30s 超时，401 防抖）
 │   ├── types/                # TS 类型定义
-│   └── utils/                # error.ts format.ts thumbnail.ts
+│   └── utils/                # error.ts format.ts thumbnail.ts telemetry.ts(遥测收集器)
 │
 ├── .gitignore
 ├── LICENSE
@@ -294,6 +306,16 @@ npm run typecheck            # TypeScript 类型检查
 | GET | `/api/admin/access-logs/stats` | 访问统计 |
 | GET | `/api/admin/access-logs/trend` | 流量趋势 |
 | GET | `/api/admin/audit-logs` | 操作审计日志 |
+
+### 遥测
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/api/telemetry/report` | 上报遥测事件（无需认证） |
+| GET | `/api/admin/telemetry/stats` | 遥测聚合统计（趋势+类型分布） |
+| GET | `/api/admin/telemetry/records` | 遥测记录列表（分页+类型筛选） |
+| GET | `/api/admin/telemetry/errors` | 最近错误摘要 |
+| GET | `/api/admin/telemetry/performance` | 页面性能概览（按 URL 聚合各阶段耗时） |
+| GET | `/api/admin/telemetry/export` | 导出遥测数据为 JSON 文件 |
 
 ## 许可证
 

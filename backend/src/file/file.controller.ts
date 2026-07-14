@@ -328,6 +328,36 @@ export class FileController {
         );
       }
 
+      // Range 请求支持（仅缓存命中时可用）
+      const rangeHeader = req.headers.range;
+      if (rangeHeader) {
+        const rangeResult = await this.fileService.getFileContentStreamWithRange(
+          id, user, rangeHeader,
+        );
+        if (rangeResult) {
+          res.status(206);
+          res.set({
+            'Content-Type': rangeResult.contentType,
+            'Content-Disposition': `attachment; filename="${encodeURIComponent(rangeResult.filename)}"`,
+            'Content-Length': rangeResult.size.toString(),
+            'Content-Range': `bytes ${rangeResult.start}-${rangeResult.end}/${rangeResult.total}`,
+            'Accept-Ranges': 'bytes',
+            'Cache-Control': 'private, no-cache',
+          });
+          const getBytesSent = trackBytesSent(res);
+          const pipe = promisify(pipeline);
+          try {
+            await pipe(rangeResult.stream, res);
+          } finally {
+            if (rangeResult.accessLogId) {
+              await this.fileService.updateAccessLogResponseSize(rangeResult.accessLogId, getBytesSent());
+            }
+          }
+          return;
+        }
+        // Range 不支持（未缓存）→ 回退完整下载
+      }
+
       const result = await this.fileService.getFileContentStream(id, user, clientIp);
 
       res.set({
@@ -335,6 +365,7 @@ export class FileController {
         'Content-Disposition': `attachment; filename="${encodeURIComponent(result.filename)}"`,
         'Content-Length': result.size.toString(),
         'Cache-Control': 'private, no-cache',
+        'Accept-Ranges': 'bytes',
       });
 
       const getBytesSent = trackBytesSent(res);
@@ -494,6 +525,7 @@ export class FileController {
             : `attachment; filename="${encodeURIComponent(result.filename)}"`,
           'Content-Length': result.size.toString(),
           'Cache-Control': 'no-store, no-cache, must-revalidate',
+          'Accept-Ranges': 'bytes',
         });
         const getBytesSent = trackBytesSent(res);
         const pipe = promisify(pipeline);
@@ -567,6 +599,7 @@ export class FileController {
             : `attachment; filename="${encodeURIComponent(result.filename)}"`,
           'Content-Length': result.size.toString(),
           'Cache-Control': 'public, no-cache, must-revalidate, max-age=0',
+          'Accept-Ranges': 'bytes',
         });
         const getBytesSent = trackBytesSent(res);
         const pipe = promisify(pipeline);

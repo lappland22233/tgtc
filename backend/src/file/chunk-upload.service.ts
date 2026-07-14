@@ -198,6 +198,46 @@ export class ChunkUploadService {
       });
   }
 
+  /**
+   * 小文件内存合并（< 10MB）：先 Buffer.concat 再一次性写入磁盘
+   * 避免逐个 stream pipe 的多次 I/O 开销
+   */
+  private async doMergeSmall(
+    session: ChunkSession,
+  ): Promise<{ id: string; originalName: string }> {
+    const dir = this.getChunkDir(session.uploadId);
+    const mergedPath = path.join(dir, 'merged');
+
+    // 顺序读取所有分片到内存拼接
+    const buffers: Buffer[] = [];
+    for (let i = 0; i < session.totalChunks; i++) {
+      const chunkPath = path.join(dir, String(i));
+      try {
+        const buf = await fsp.readFile(chunkPath);
+        if (buf.length === 0) {
+          throw new Error(`分片 ${i} 为空`);
+        }
+        buffers.push(buf);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+          throw new Error(`分片 ${i} 缺失，请重新上传`);
+        }
+        throw err;
+      }
+    }
+
+    const merged = Buffer.concat(buffers);
+    if (merged.length !== session.fileSize) {
+      throw new Error(`文件大小校验失败: 期望 ${session.fileSize}, 实际 ${merged.length}`);
+    }
+
+    // 一次性写入磁盘
+    await fsp.writeFile(mergedPath, merged);
+    this.logger.log(`[分片上传] ${session.uploadId} 内存合并完成: ${(merged.length / 1024 / 1024).toFixed(1)}MB`);
+
+    return this.finalizeMerge(session, mergedPath, merged.length);
+  }
+
   private async doMerge(
     session: ChunkSession,
     _uploadFn: (file: Express.Multer.File) => Promise<{ id: string; originalName: string }>,
@@ -207,7 +247,7 @@ export class ChunkUploadService {
 
     // 日志：记录合并开始（用于排查 OOM/磁盘问题）
     this.logger.log(`[分片上传] ${session.uploadId} 开始合并 ${session.totalChunks} 个分片 (${(session.fileSize / 1024 / 1024).toFixed(1)}MB)`);
-    
+
     // 检查 baseDir 可访问性
     try {
       await fsp.access(this.baseDir, fsp.constants.W_OK);
@@ -215,8 +255,17 @@ export class ChunkUploadService {
       throw new Error(`上传目录不可写: ${this.baseDir}`);
     }
 
-    // 流式合并分片到磁盘文件（避免 Buffer.concat 对大文件造成 OOM）
-    const writeStream: WriteStream = createWriteStream(mergedPath, { flags: 'w' });
+    // 小文件 (< 10MB)：使用 Buffer.concat 内存合并，减少磁盘 I/O
+    const SMALL_FILE_THRESHOLD = 10 * 1024 * 1024; // 10MB
+    if (session.fileSize < SMALL_FILE_THRESHOLD) {
+      return this.doMergeSmall(session);
+    }
+
+    // 大文件：流式合并分片到磁盘文件（避免 Buffer.concat 对大文件造成 OOM）
+    const writeStream: WriteStream = createWriteStream(mergedPath, {
+      flags: 'w',
+      highWaterMark: 64 * 1024, // 64KB 缓冲区，提升写入吞吐
+    });
     let written = 0;
 
     for (let i = 0; i < session.totalChunks; i++) {
@@ -258,6 +307,17 @@ export class ChunkUploadService {
 
     this.logger.log(`[分片上传] ${session.uploadId} 合并完成: ${(written / 1024 / 1024).toFixed(1)}MB`);
 
+    return this.finalizeMerge(session, mergedPath, written);
+  }
+
+  /**
+   * 合并后处理：创建文件记录 → 复制到持久化目录 → 入队后台上传
+   */
+  private async finalizeMerge(
+    session: ChunkSession,
+    mergedPath: string,
+    fileSize: number,
+  ): Promise<{ id: string; originalName: string }> {
     session.mergeStatus = 'uploading';
 
     const mockFile: Express.Multer.File = {
@@ -266,21 +326,19 @@ export class ChunkUploadService {
       encoding: '7bit',
       mimetype: session.mimeType,
       buffer: null as any,
-      size: written,
+      size: fileSize,
       destination: '',
       filename: session.fileName,
-      path: mergedPath, // 指向磁盘合并文件，供后续流式上传
+      path: mergedPath,
       stream: null as any,
     };
 
-    // 合并完成 → 创建处理中的文件记录 → 入队后台异步上传
     const savedFile = await this.fileService.createProcessingFile(
       mockFile,
       session.fileName,
       { id: session.uploadedBy } as User,
     );
 
-    // 将合并文件复制到持久化目录（避免 scheduleCleanup 5分钟后删除）
     const pendingDir = path.resolve(process.cwd(), 'tmp', 'uploads', 'pending');
     fs.mkdirSync(pendingDir, { recursive: true });
     const pendingPath = path.join(pendingDir, savedFile.id);

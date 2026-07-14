@@ -42,6 +42,9 @@
           <router-link to="/admin/audit-logs" class="nav-item" :class="{ active: $route.path === '/admin/audit-logs' }">
             <span>🔍</span> 操作审计
           </router-link>
+          <router-link to="/admin/telemetry" class="nav-item" :class="{ active: $route.path === '/admin/telemetry' }">
+            <span>📡</span> 遥测监控
+          </router-link>
         </template>
       </nav>
       <div style="padding: 16px 24px; border-top: 1px solid var(--border-color);">

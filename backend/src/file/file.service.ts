@@ -1346,6 +1346,79 @@ export class FileService implements OnModuleInit {
     return { stream, contentType: mimeType, filename, size: Number(file.size), accessLogId };
   }
 
+  /**
+   * 流式下载支持 Range 请求（仅缓存命中时可用）
+   * 返回 206 范围流或 null（表示不支持 Range，回退完整下载）
+   */
+  async getFileContentStreamWithRange(
+    id: string,
+    user: User,
+    rangeHeader: string,
+  ): Promise<{
+    stream: Readable;
+    contentType: string;
+    filename: string;
+    size: number;
+    start: number;
+    end: number;
+    total: number;
+    accessLogId?: string;
+  } | null> {
+    // 解析 Range: bytes=start-end
+    const match = rangeHeader.match(/bytes=(\d+)-(\d*)/);
+    if (!match) return null;
+
+    const start = parseInt(match[1], 10);
+    const end = match[2] ? parseInt(match[2], 10) : undefined;
+
+    const file = await this.fileRepository.findOne({
+      where: { id, isDeleted: false },
+    });
+    if (!file) throw new NotFoundException('文件不存在');
+
+    await this.assertFileReadable(file, user);
+
+    // 仅对本地缓存的文件支持 Range
+    const cachedPath = this.fileCacheService.getCachedPath(file.id);
+    if (!cachedPath) {
+      // 未缓存的文件回退到完整下载（Telegram API 不支持 Range）
+      return null;
+    }
+
+    const total = Number(file.size);
+    const actualEnd = end !== undefined ? Math.min(end, total - 1) : total - 1;
+
+    if (start >= total || start > actualEnd) {
+      throw new BadRequestException('Range 范围无效');
+    }
+
+    // 读取指定范围的文件片段
+    const chunkSize = actualEnd - start + 1;
+    const readStream = createReadStream(cachedPath, { start, end: actualEnd });
+
+    // 原子访问计数
+    await this.fileRepository
+      .createQueryBuilder()
+      .update(File)
+      .set({ currentAccessCount: () => 'currentAccessCount + 1' })
+      .where('id = :id', { id })
+      .andWhere('(maxAccessCount <= 0 OR currentAccessCount < maxAccessCount)')
+      .execute();
+
+    const mimeType = file.mimeType || 'application/octet-stream';
+    const filename = this.ensureFileExtension(file.originalName, mimeType);
+
+    return {
+      stream: readStream,
+      contentType: mimeType,
+      filename,
+      size: chunkSize,
+      start,
+      end: actualEnd,
+      total,
+    };
+  }
+
   async generateShareLink(id: string, user: User): Promise<string> {
     const file = await this.fileRepository.findOne({
       where: { id, isDeleted: false },

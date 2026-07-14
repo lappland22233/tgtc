@@ -9,6 +9,7 @@ import { User } from '../common/entities/user.entity';
 import { FileAccessLog } from '../common/entities/file-access-log.entity';
 import { AccessLog } from '../common/entities/access-log.entity';
 import { AuditLog } from '../common/entities/audit-log.entity';
+import { TelemetryRecord } from '../common/entities/telemetry-record.entity';
 import { FileService } from '../file/file.service';
 import { ConfigCacheService } from '../common/services/config-cache.service';
 import { AuditService } from '../common/services/audit.service';
@@ -47,6 +48,8 @@ export class AdminService {
     private accessLogRepo: Repository<AccessLog>,
     @InjectRepository(AuditLog)
     private auditLogRepo: Repository<AuditLog>,
+    @InjectRepository(TelemetryRecord)
+    private telemetryRepo: Repository<TelemetryRecord>,
     private fileService: FileService,
     private configCacheService: ConfigCacheService,
     private auditService: AuditService,
@@ -1658,5 +1661,186 @@ export class AdminService {
     });
 
     this.logger.log(`安全配置已由用户 ${user.email} 更新: ${configs.map(c => `${c.key}=${c.value}`).join(', ')}`);
+  }
+
+  // ==================== 遥测数据查询 ====================
+
+  /** 遥测聚合统计 */
+  async getTelemetryStats(timeRange?: string): Promise<{
+    totalRecords: number;
+    byType: { error: number; performance: number; environment: number };
+    uniqueIPs: number;
+    trend: { time: string; error: number; performance: number; environment: number }[];
+  }> {
+    const since = this.parseTimeRange(timeRange || '24h');
+
+    const [totalResult, typeResult, ipResult, trendResult] = await Promise.all([
+      this.telemetryRepo
+        .createQueryBuilder('t')
+        .select('COUNT(*)', 'total')
+        .where('t.createdAt >= :since', { since })
+        .getRawOne(),
+      this.telemetryRepo
+        .createQueryBuilder('t')
+        .select('t.type', 'type')
+        .addSelect('COUNT(*)', 'count')
+        .where('t.createdAt >= :since', { since })
+        .groupBy('t.type')
+        .getRawMany(),
+      this.telemetryRepo
+        .createQueryBuilder('t')
+        .select('COUNT(DISTINCT t.ip)', 'uniqueIPs')
+        .where('t.createdAt >= :since', { since })
+        .getRawOne(),
+      this.telemetryRepo
+        .createQueryBuilder('t')
+        .select("DATE_TRUNC('hour', t.createdAt)", 'time')
+        .addSelect('COUNT(CASE WHEN t.type = \'error\' THEN 1 END)', 'error')
+        .addSelect('COUNT(CASE WHEN t.type = \'performance\' THEN 1 END)', 'performance')
+        .addSelect('COUNT(CASE WHEN t.type = \'environment\' THEN 1 END)', 'environment')
+        .where('t.createdAt >= :since', { since })
+        .groupBy('time')
+        .orderBy('time', 'ASC')
+        .getRawMany(),
+    ]);
+
+    const byType = { error: 0, performance: 0, environment: 0 };
+    for (const row of typeResult) {
+      if (row.type in byType) {
+        (byType as any)[row.type] = parseInt(row.count, 10);
+      }
+    }
+
+    return {
+      totalRecords: parseInt(totalResult.total, 10) || 0,
+      byType,
+      uniqueIPs: parseInt(ipResult.uniqueIPs, 10) || 0,
+      trend: trendResult.map(row => ({
+        time: row.time,
+        error: parseInt(row.error, 10) || 0,
+        performance: parseInt(row.performance, 10) || 0,
+        environment: parseInt(row.environment, 10) || 0,
+      })),
+    };
+  }
+
+  /** 遥测记录分页列表 */
+  async getTelemetryRecords(query: {
+    page?: number;
+    limit?: number;
+    type?: string;
+    timeRange?: string;
+  }): Promise<{ items: TelemetryRecord[]; total: number }> {
+    const page = Math.max(1, Math.min(query.page || 1, 100));
+    const limit = Math.max(1, Math.min(query.limit || 20, 100));
+    const since = this.parseTimeRange(query.timeRange || '24h');
+
+    const qb = this.telemetryRepo
+      .createQueryBuilder('t')
+      .where('t.createdAt >= :since', { since });
+
+    if (query.type) {
+      qb.andWhere('t.type = :type', { type: query.type });
+    }
+
+    const total = await qb.getCount();
+    const items = await qb
+      .orderBy('t.createdAt', 'DESC')
+      .skip((page - 1) * limit)
+      .take(limit)
+      .getMany();
+
+    return { items, total };
+  }
+
+  /** 最近错误摘要 */
+  async getTelemetryErrors(limit: number = 20): Promise<TelemetryRecord[]> {
+    return this.telemetryRepo
+      .createQueryBuilder('t')
+      .where('t.type = :type', { type: 'error' })
+      .orderBy('t.createdAt', 'DESC')
+      .take(Math.min(limit, 100))
+      .getMany();
+  }
+
+  /** 性能概览：按页面 URL 聚合各阶段加载耗时，取最慢 10 个页面 */
+  async getTelemetryPerformance(timeRange?: string): Promise<{
+    pages: { url: string; count: number; dns: number; tcp: number; ttfb: number; domReady: number; pageLoad: number; fcp: number }[];
+    summary: { avgPageLoad: number; totalPages: number; totalSamples: number };
+  }> {
+    const since = this.parseTimeRange(timeRange || '24h');
+
+    const rows = await this.telemetryRepo.query(
+      `SELECT
+        t."data"->>'url' AS url,
+        COUNT(*)::int AS count,
+        AVG(COALESCE((t."data"->>'dns')::double precision, 0))::int AS dns,
+        AVG(COALESCE((t."data"->>'tcp')::double precision, 0))::int AS tcp,
+        AVG(COALESCE((t."data"->>'ttfb')::double precision, 0))::int AS ttfb,
+        AVG(COALESCE((t."data"->>'domReady')::double precision, 0))::int AS "domReady",
+        AVG(COALESCE((t."data"->>'pageLoad')::double precision, 0))::int AS "pageLoad",
+        AVG(COALESCE((t."data"->>'fcp')::double precision, 0))::int AS fcp
+      FROM telemetry_records t
+      WHERE t.type = 'performance'
+        AND t."createdAt" >= $1
+        AND t."data"->>'url' IS NOT NULL
+      GROUP BY t."data"->>'url'
+      ORDER BY "pageLoad" DESC
+      LIMIT 10`,
+      [since],
+    );
+
+    const pages = rows.map((r: any) => ({
+      url: r.url as string,
+      count: parseInt(r.count, 10),
+      dns: parseInt(r.dns, 10),
+      tcp: parseInt(r.tcp, 10),
+      ttfb: parseInt(r.ttfb, 10),
+      domReady: parseInt(r.domReady, 10),
+      pageLoad: parseInt(r.pageLoad, 10),
+      fcp: parseInt(r.fcp, 10),
+    }));
+
+    const totalSamples = pages.reduce((s: number, p: { count: number }) => s + p.count, 0);
+
+    return {
+      pages,
+      summary: {
+        avgPageLoad: pages.length > 0
+          ? Math.round(pages.reduce((s: number, p: { pageLoad: number; count: number }) => s + p.pageLoad * p.count, 0) / totalSamples)
+          : 0,
+        totalPages: pages.length,
+        totalSamples,
+      },
+    };
+  }
+
+  /** 导出指定时间区间的遥测数据 */
+  async exportTelemetry(startDate?: string, endDate?: string, type?: string): Promise<{
+    exportTime: string;
+    total: number;
+    filters: { startDate?: string; endDate?: string; type?: string };
+    records: TelemetryRecord[];
+  }> {
+    const qb = this.telemetryRepo.createQueryBuilder('t');
+
+    if (startDate) {
+      qb.andWhere('t.createdAt >= :start', { start: new Date(startDate) });
+    }
+    if (endDate) {
+      qb.andWhere('t.createdAt <= :end', { end: new Date(endDate) });
+    }
+    if (type) {
+      qb.andWhere('t.type = :type', { type });
+    }
+
+    const records = await qb.orderBy('t.createdAt', 'ASC').take(50000).getMany();
+
+    return {
+      exportTime: new Date().toISOString(),
+      total: records.length,
+      filters: { startDate, endDate, type: type || 'all' },
+      records,
+    };
   }
 }

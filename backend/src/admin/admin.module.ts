@@ -11,6 +11,7 @@ import { AccessLog } from '../common/entities/access-log.entity';
 import { AuditLog } from '../common/entities/audit-log.entity';
 import { DashboardConfig } from '../common/entities/dashboard-config.entity';
 import { Alert } from '../common/entities/alert.entity';
+import { TelemetryRecord } from '../common/entities/telemetry-record.entity';
 import { DashboardController } from './dashboard.controller';
 import { DashboardService } from './dashboard.service';
 import { ExportService } from './export.service';
@@ -20,7 +21,7 @@ import { AlertModule } from '../alert/alert.module';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([SystemConfig, BannedIP, File, User, FileAccessLog, AccessLog, AuditLog, DashboardConfig, Alert]),
+    TypeOrmModule.forFeature([SystemConfig, BannedIP, File, User, FileAccessLog, AccessLog, AuditLog, DashboardConfig, Alert, TelemetryRecord]),
     FileModule,
     MailerModule,
     forwardRef(() => AlertModule),
