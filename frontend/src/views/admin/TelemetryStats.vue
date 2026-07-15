@@ -129,6 +129,7 @@
 import { ref, reactive, computed, onMounted, onUnmounted, nextTick } from 'vue';
 import * as echarts from 'echarts';
 import client from '../../api/client';
+import { CHART_COLORS, tooltipBase, legendBase, areaGradient } from '../../utils/echarts-theme';
 
 // ---- 时间范围 ----
 const timeRange = ref('24h');
@@ -327,9 +328,9 @@ let perfChart: echarts.ECharts | null = null;
 let resizeObserver: ResizeObserver | null = null;
 
 function initCharts() {
-  if (trendChartRef.value) trendChart = echarts.init(trendChartRef.value, 'dark');
-  if (pieChartRef.value) pieChart = echarts.init(pieChartRef.value, 'dark');
-  if (perfChartRef.value) perfChart = echarts.init(perfChartRef.value, 'dark');
+  if (trendChartRef.value) trendChart = echarts.init(trendChartRef.value, 'cyber');
+  if (pieChartRef.value) pieChart = echarts.init(pieChartRef.value, 'cyber');
+  if (perfChartRef.value) perfChart = echarts.init(perfChartRef.value, 'cyber');
 }
 
 function updateTrendChart() {
@@ -340,15 +341,15 @@ function updateTrendChart() {
   });
 
   trendChart.setOption({
-    tooltip: { trigger: 'axis' },
-    legend: { data: ['错误', '性能', '环境'], textStyle: { color: '#999' } },
+    tooltip: { trigger: 'axis', ...tooltipBase },
+    legend: { data: ['错误', '性能', '环境'], ...legendBase },
     grid: { left: 50, right: 20, top: 30, bottom: 30 },
-    xAxis: { type: 'category', data: times, axisLabel: { color: '#888' } },
-    yAxis: { type: 'value', axisLabel: { color: '#888' } },
+    xAxis: { type: 'category', data: times, axisLabel: { color: '#8895A7', fontSize: 11 } },
+    yAxis: { type: 'value', axisLabel: { color: '#8895A7', fontSize: 11 } },
     series: [
-      { name: '错误', type: 'line', data: stats.trend.map(t => t.error), smooth: true, lineStyle: { color: '#ef5350' }, itemStyle: { color: '#ef5350' }, areaStyle: { color: 'rgba(239,83,80,0.1)' } },
-      { name: '性能', type: 'line', data: stats.trend.map(t => t.performance), smooth: true, lineStyle: { color: '#66bb6a' }, itemStyle: { color: '#66bb6a' }, areaStyle: { color: 'rgba(102,187,106,0.1)' } },
-      { name: '环境', type: 'line', data: stats.trend.map(t => t.environment), smooth: true, lineStyle: { color: '#42a5f5' }, itemStyle: { color: '#42a5f5' }, areaStyle: { color: 'rgba(66,165,245,0.1)' } },
+      { name: '错误', type: 'line', data: stats.trend.map(t => t.error), smooth: true, lineStyle: { color: CHART_COLORS.danger, width: 2 }, itemStyle: { color: CHART_COLORS.danger }, areaStyle: { color: areaGradient(CHART_COLORS.danger) }, symbol: 'none' },
+      { name: '性能', type: 'line', data: stats.trend.map(t => t.performance), smooth: true, lineStyle: { color: CHART_COLORS.success, width: 2 }, itemStyle: { color: CHART_COLORS.success }, areaStyle: { color: areaGradient(CHART_COLORS.success) }, symbol: 'none' },
+      { name: '环境', type: 'line', data: stats.trend.map(t => t.environment), smooth: true, lineStyle: { color: CHART_COLORS.info, width: 2 }, itemStyle: { color: CHART_COLORS.info }, areaStyle: { color: areaGradient(CHART_COLORS.info) }, symbol: 'none' },
     ],
   });
 }
@@ -356,17 +357,18 @@ function updateTrendChart() {
 function updatePieChart() {
   if (!pieChart) return;
   pieChart.setOption({
-    tooltip: { trigger: 'item' },
-    legend: { orient: 'vertical', left: 10, textStyle: { color: '#999' } },
+    tooltip: { trigger: 'item', ...tooltipBase },
+    legend: { orient: 'vertical', left: 10, ...legendBase },
     series: [{
       type: 'pie',
       radius: ['45%', '75%'],
       center: ['60%', '50%'],
-      label: { color: '#aaa' },
+      label: { color: '#8895A7' },
+      emphasis: { itemStyle: { shadowBlur: 20, shadowColor: 'rgba(0,0,0,0.4)' } },
       data: [
-        { name: '错误', value: stats.byType.error, itemStyle: { color: '#ef5350' } },
-        { name: '性能', value: stats.byType.performance, itemStyle: { color: '#66bb6a' } },
-        { name: '环境', value: stats.byType.environment, itemStyle: { color: '#42a5f5' } },
+        { name: '错误', value: stats.byType.error, itemStyle: { color: CHART_COLORS.danger } },
+        { name: '性能', value: stats.byType.performance, itemStyle: { color: CHART_COLORS.success } },
+        { name: '环境', value: stats.byType.environment, itemStyle: { color: CHART_COLORS.info } },
       ],
     }],
   });
@@ -379,20 +381,20 @@ function updatePerfChart() {
     try { const u = new URL(p.url, location.origin); return u.pathname || '/'; } catch { return p.url; }
   });
 
-  // 各阶段颜色：DNS=灰 TCP=蓝 TTFB=黄 domReady=橙 pageLoad=绿 fcp=紫
   const stages = [
-    { name: 'DNS', key: 'dns', color: '#78909c' },
-    { name: 'TCP', key: 'tcp', color: '#42a5f5' },
-    { name: 'TTFB', key: 'ttfb', color: '#ffa726' },
-    { name: 'DOM Ready', key: 'domReady', color: '#ff7043' },
-    { name: 'Page Load', key: 'pageLoad', color: '#66bb6a' },
-    { name: 'FCP', key: 'fcp', color: '#ab47bc' },
+    { name: 'DNS', key: 'dns', color: CHART_COLORS.slate },
+    { name: 'TCP', key: 'tcp', color: CHART_COLORS.indigo },
+    { name: 'TTFB', key: 'ttfb', color: CHART_COLORS.warning },
+    { name: 'DOM Ready', key: 'domReady', color: CHART_COLORS.amber },
+    { name: 'Page Load', key: 'pageLoad', color: CHART_COLORS.success },
+    { name: 'FCP', key: 'fcp', color: CHART_COLORS.violet },
   ];
 
   perfChart.setOption({
     tooltip: {
       trigger: 'axis',
       axisPointer: { type: 'shadow' },
+      ...tooltipBase,
       formatter: (params: any) => {
         const idx = params[0].dataIndex;
         const p = top10[idx];
@@ -401,10 +403,10 @@ function updatePerfChart() {
           `<br/>总计: ${p.pageLoad}ms · 样本: ${p.count}`;
       },
     },
-    legend: { data: stages.map(s => s.name), textStyle: { color: '#999' }, bottom: 0 },
+    legend: { data: stages.map(s => s.name), ...legendBase, bottom: 0 },
     grid: { left: 110, right: 40, top: 10, bottom: 40 },
-    xAxis: { type: 'value', name: 'ms', axisLabel: { color: '#888' } },
-    yAxis: { type: 'category', data: labels.reverse(), axisLabel: { color: '#888', width: 100, overflow: 'truncate' } },
+    xAxis: { type: 'value', name: 'ms', nameTextStyle: { color: '#8895A7', fontSize: 11 }, axisLabel: { color: '#8895A7', fontSize: 11 } },
+    yAxis: { type: 'category', data: labels.reverse(), axisLabel: { color: '#8895A7', fontSize: 11, width: 100, overflow: 'truncate' } },
     series: stages.map(stage => ({
       name: stage.name,
       type: 'bar',

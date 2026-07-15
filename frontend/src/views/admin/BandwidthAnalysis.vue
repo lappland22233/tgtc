@@ -118,6 +118,7 @@ import * as echarts from 'echarts';
 import { api } from '@/stores/auth';
 import { formatSize, getFileEmoji } from '@/utils/format';
 import { useMobile } from '../../composables/useMobile';
+import { CHART_COLORS, tooltipBase, areaGradient } from '../../utils/echarts-theme';
 
 interface BandwidthResponse {
   topFiles: { fileId: string; fileName: string; mimeType: string; totalBandwidth: string; accessCount: number }[];
@@ -158,7 +159,7 @@ watch(isMobile, () => {
 function renderChart() {
   if (!chartRef.value) return;
   chart?.dispose();
-  chart = echarts.init(chartRef.value, 'dark');
+  chart = echarts.init(chartRef.value, 'cyber');
 
   const trend = data.value?.trend || [];
   const times = trend.map((t) => t.time);
@@ -167,12 +168,10 @@ function renderChart() {
   chart.setOption({
     tooltip: {
       trigger: 'axis',
-      backgroundColor: 'rgba(30,30,30,0.9)',
-      borderColor: '#444',
-      textStyle: { color: '#eee' },
+      ...tooltipBase,
       formatter: (params: unknown) => {
         const p = (params as { name: string; value: number; seriesName: string }[])[0];
-        return `${p.name}<br/>${p.seriesName}: ${formatSize(p.value)}`;
+        return `<b>${p.name}</b><br/>${p.seriesName}: ${formatSize(p.value)}`;
       },
     },
     grid: {
@@ -186,26 +185,22 @@ function renderChart() {
       type: 'category',
       data: times,
       boundaryGap: false,
-      axisLine: { lineStyle: { color: '#555' } },
+      axisLine: { lineStyle: { color: 'rgba(255,255,255,0.06)' } },
       axisLabel: {
-        color: '#aaa',
+        color: '#8895A7',
         fontSize: 11,
-        formatter: (val: string) => {
-          // Shorten time label
-          if (val.length > 16) return val.substring(5);
-          return val;
-        },
+        formatter: (val: string) => val.length > 16 ? val.substring(5) : val,
       },
     },
     yAxis: {
       type: 'value',
-      axisLine: { lineStyle: { color: '#555' } },
+      axisLine: { lineStyle: { color: 'rgba(255,255,255,0.06)' } },
       axisLabel: {
-        color: '#aaa',
+        color: '#8895A7',
         fontSize: 11,
         formatter: (val: number) => formatSize(val),
       },
-      splitLine: { lineStyle: { color: '#333' } },
+      splitLine: { lineStyle: { color: 'rgba(255,255,255,0.04)', type: 'dashed' } },
     },
     series: [
       {
@@ -214,16 +209,8 @@ function renderChart() {
         data: values,
         smooth: true,
         symbol: 'none',
-        lineStyle: {
-          color: '#5470c6',
-          width: 2,
-        },
-        areaStyle: {
-          color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-            { offset: 0, color: 'rgba(84, 112, 198, 0.35)' },
-            { offset: 1, color: 'rgba(84, 112, 198, 0.02)' },
-          ]),
-        },
+        lineStyle: { color: CHART_COLORS.blue, width: 2 },
+        areaStyle: { color: areaGradient(CHART_COLORS.blue) },
       },
     ],
   });

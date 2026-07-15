@@ -614,3 +614,303 @@ select {
 
 /* TDesign Drawer mobile fix */
 .t-drawer { overscroll-behavior: contain; }
+
+/* ============================================================
+   Button System — TDesign Overrides
+   ============================================================ */
+
+/* --- Primary Button --- */
+.t-button--theme-primary {
+  --ripple-color: var(--color-accent);
+}
+.t-button--theme-primary.t-button--variant-base {
+  background: linear-gradient(135deg, var(--color-accent), #3B6BED) !important;
+  border: none !important;
+  border-radius: var(--radius-md) !important;
+  box-shadow: 0 2px 8px rgba(77, 124, 254, 0.25), inset 0 1px 0 rgba(255,255,255,0.1);
+  font-weight: 550;
+  letter-spacing: 0.01em;
+  transition: all var(--duration-fast) var(--ease-out-expo);
+}
+.t-button--theme-primary.t-button--variant-base:hover {
+  background: linear-gradient(135deg, #6B93FF, #4D7CFE) !important;
+  box-shadow: 0 4px 16px rgba(77, 124, 254, 0.40), inset 0 1px 0 rgba(255,255,255,0.15);
+  transform: translateY(-1px);
+}
+.t-button--theme-primary.t-button--variant-base:active {
+  background: linear-gradient(135deg, #3B6BED, #2A5AD5) !important;
+  box-shadow: 0 1px 4px rgba(77, 124, 254, 0.15);
+  transform: translateY(0);
+}
+
+/* Primary outline */
+.t-button--theme-primary.t-button--variant-outline {
+  border-color: var(--color-accent) !important;
+  color: var(--color-accent) !important;
+  border-radius: var(--radius-md) !important;
+  background: transparent !important;
+  transition: all var(--duration-fast);
+}
+.t-button--theme-primary.t-button--variant-outline:hover {
+  background: var(--color-accent-soft) !important;
+  border-color: #6B93FF !important;
+  box-shadow: 0 0 12px rgba(77, 124, 254, 0.20);
+}
+
+/* Primary text */
+.t-button--theme-primary.t-button--variant-text {
+  color: var(--color-accent) !important;
+  font-weight: 500;
+}
+.t-button--theme-primary.t-button--variant-text:hover {
+  background: var(--color-accent-soft) !important;
+}
+
+/* --- Default Button --- */
+.t-button--theme-default.t-button--variant-base {
+  background: var(--color-bg-elevated) !important;
+  border: 1px solid var(--border-default) !important;
+  border-radius: var(--radius-md) !important;
+  color: var(--text-primary) !important;
+  transition: all var(--duration-fast);
+}
+.t-button--theme-default.t-button--variant-base:hover {
+  border-color: var(--border-strong) !important;
+  background: var(--color-bg-overlay) !important;
+  box-shadow: var(--shadow-sm);
+}
+.t-button--theme-default.t-button--variant-outline {
+  border-color: var(--border-default) !important;
+  border-radius: var(--radius-md) !important;
+  color: var(--text-secondary) !important;
+}
+.t-button--theme-default.t-button--variant-outline:hover {
+  border-color: var(--border-strong) !important;
+  color: var(--text-primary) !important;
+}
+.t-button--theme-default.t-button--variant-text {
+  color: var(--text-secondary) !important;
+}
+.t-button--theme-default.t-button--variant-text:hover {
+  color: var(--text-primary) !important;
+  background: rgba(255,255,255,0.05) !important;
+}
+
+/* --- Danger Button --- */
+.t-button--theme-danger.t-button--variant-base {
+  background: linear-gradient(135deg, var(--color-danger), #DC2626) !important;
+  border: none !important;
+  border-radius: var(--radius-md) !important;
+  box-shadow: 0 2px 8px rgba(239, 68, 68, 0.25);
+  font-weight: 550;
+  transition: all var(--duration-fast);
+}
+.t-button--theme-danger.t-button--variant-base:hover {
+  background: linear-gradient(135deg, #F87171, #EF4444) !important;
+  box-shadow: 0 4px 16px rgba(239, 68, 68, 0.35);
+  transform: translateY(-1px);
+}
+.t-button--theme-danger.t-button--variant-base:active {
+  background: linear-gradient(135deg, #DC2626, #B91C1C) !important;
+  transform: translateY(0);
+}
+.t-button--theme-danger.t-button--variant-outline,
+.t-button--theme-danger.t-button--variant-text {
+  color: var(--color-danger) !important;
+}
+
+/* --- Success Button --- */
+.t-button--theme-success.t-button--variant-base {
+  background: linear-gradient(135deg, var(--color-success), #16A34A) !important;
+  border: none !important;
+  border-radius: var(--radius-md) !important;
+  box-shadow: 0 2px 8px rgba(34, 197, 94, 0.25);
+  font-weight: 550;
+}
+.t-button--theme-success.t-button--variant-base:hover {
+  box-shadow: 0 4px 16px rgba(34, 197, 94, 0.35);
+  transform: translateY(-1px);
+}
+
+/* --- Warning Button --- */
+.t-button--theme-warning.t-button--variant-base {
+  background: linear-gradient(135deg, var(--color-warning), #D97706) !important;
+  border: none !important;
+  border-radius: var(--radius-md) !important;
+  box-shadow: 0 2px 8px rgba(245, 158, 11, 0.25);
+  font-weight: 550;
+  color: #0A0E17 !important;
+}
+.t-button--theme-warning.t-button--variant-base:hover {
+  box-shadow: 0 4px 16px rgba(245, 158, 11, 0.35);
+  transform: translateY(-1px);
+}
+
+/* --- Size Refinements --- */
+.t-button--size-small {
+  border-radius: var(--radius-sm) !important;
+  font-size: 12px;
+}
+.t-button--size-large {
+  border-radius: var(--radius-md) !important;
+  font-size: 15px;
+  padding: 0 24px;
+}
+
+/* --- Disabled State --- */
+.t-button.t-is-disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  filter: grayscale(0.3);
+  pointer-events: none;
+}
+
+/* --- Loading State --- */
+.t-button.t-is-loading {
+  position: relative;
+}
+.t-button.t-is-loading .t-button__text {
+  opacity: 0.7;
+}
+
+/* --- Block Button --- */
+.t-button--block {
+  border-radius: var(--radius-md) !important;
+}
+
+/* ============================================================
+   List & Table — Visual Refinement
+   ============================================================ */
+
+/* TDesign Table */
+.t-table {
+  border-radius: var(--radius-lg) !important;
+  overflow: hidden;
+  border: 1px solid var(--border-default) !important;
+}
+
+.t-table thead th {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-tertiary) !important;
+  padding: 12px 16px !important;
+  border-bottom: 1px solid var(--border-strong) !important;
+  background-color: var(--color-bg-elevated) !important;
+}
+
+.t-table tbody td {
+  padding: 14px 16px !important;
+  border-bottom: 1px solid var(--border-default);
+  font-size: 14px;
+  vertical-align: middle;
+}
+
+.t-table tbody tr {
+  transition: background-color var(--duration-fast);
+}
+
+.t-table tbody tr:hover {
+  background-color: rgba(77, 124, 254, 0.04) !important;
+}
+
+.t-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+/* Pagination */
+.t-pagination {
+  margin-top: 16px;
+}
+.t-pagination .t-pagination__btn {
+  border-radius: var(--radius-sm) !important;
+}
+.t-pagination .t-is-current {
+  background: var(--color-accent) !important;
+  border-color: var(--color-accent) !important;
+  border-radius: var(--radius-sm) !important;
+}
+
+/* Tag Refinements */
+.t-tag {
+  border-radius: var(--radius-sm) !important;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+}
+
+/* Select / Dropdown — cleaner look */
+.t-select .t-input,
+.t-select-input .t-input {
+  border-radius: var(--radius-md) !important;
+  transition: border-color var(--duration-fast);
+}
+.t-select .t-input:hover,
+.t-select-input .t-input:hover {
+  border-color: var(--border-accent) !important;
+}
+
+/* Dialog — enhanced shadows */
+.t-dialog {
+  border-radius: var(--radius-xl) !important;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.6) !important;
+  border: 1px solid var(--border-default) !important;
+  overflow: hidden;
+}
+.t-dialog__header {
+  font-family: var(--font-display);
+  font-size: 16px;
+  font-weight: 600;
+  padding: 24px 24px 0 !important;
+  border-bottom: none !important;
+}
+.t-dialog__body {
+  padding: 16px 24px !important;
+}
+.t-dialog__footer {
+  padding: 0 24px 24px !important;
+  border-top: none !important;
+}
+
+/* Input — consistent styling */
+.t-input {
+  border-radius: var(--radius-md) !important;
+  transition: border-color var(--duration-fast), box-shadow var(--duration-fast);
+}
+.t-input:hover { border-color: var(--border-strong) !important; }
+.t-input.t-is-focused {
+  border-color: var(--color-accent) !important;
+  box-shadow: 0 0 0 3px var(--color-accent-soft) !important;
+}
+
+/* Card Lists (mobile) */
+.mobile-card-list .mobile-file-card {
+  background: var(--color-bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  padding: 14px;
+  margin-bottom: 10px;
+  transition: border-color var(--duration-fast), box-shadow var(--duration-fast);
+}
+.mobile-card-list .mobile-file-card:hover {
+  border-color: var(--border-accent);
+}
+
+/* Form — cleaner spacing */
+.t-form__item {
+  margin-bottom: 20px;
+}
+
+/* Description List (used in Settings) */
+.t-descriptions {
+  border-radius: var(--radius-lg) !important;
+  overflow: hidden;
+}
+.t-descriptions .t-descriptions__label {
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+.t-descriptions .t-descriptions__content {
+  font-weight: 450;
+}

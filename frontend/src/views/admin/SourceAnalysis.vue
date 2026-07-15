@@ -210,6 +210,7 @@ import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue';
 import * as echarts from 'echarts';
 import { api } from '@/stores/auth';
 import { useMobile } from '../../composables/useMobile';
+import { CHART_COLORS, tooltipBase, legendBase } from '../../utils/echarts-theme';
 
 // --- Types ---
 
@@ -320,26 +321,26 @@ let deviceChart: echarts.ECharts | null = null;
 // --- Colors ---
 
 const CATEGORY_COLORS: Record<string, string> = {
-  '引擎搜索': '#5470c6',
-  '社交媒体': '#91cc75',
-  '直接访问': '#fac858',
-  '本站内链': '#ee6666',
-  '外部网站': '#73c0de',
+  '引擎搜索': CHART_COLORS.blue,
+  '社交媒体': CHART_COLORS.success,
+  '直接访问': CHART_COLORS.warning,
+  '本站内链': CHART_COLORS.danger,
+  '外部网站': CHART_COLORS.cyan,
 };
 
-const DEVICE_COLORS: Record<string, string> = {
-  desktop: '#2ba471',
-  mobile: '#0052d9',
-  tablet: '#e37318',
-  bot: '#834ec2',
+const deviceColorMap: Record<string, string> = {
+  desktop: CHART_COLORS.teal,
+  mobile: CHART_COLORS.blue,
+  tablet: CHART_COLORS.amber,
+  bot: CHART_COLORS.violet,
 };
 
 function getCategoryColor(name: string): string {
-  return CATEGORY_COLORS[name] || '#888';
+  return CATEGORY_COLORS[name] || CHART_COLORS.slate;
 }
 
 function getDeviceColor(type: string): string {
-  return DEVICE_COLORS[type] || '#888';
+  return deviceColorMap[type] || CHART_COLORS.slate;
 }
 
 function getDeviceLabel(type: string): string {
@@ -362,20 +363,18 @@ function updatePieChart(
   if (!el) return chart;
   // 始终销毁重建，避免 display:none 导致的实例状态错乱
   chart?.dispose();
-  const c = echarts.init(el, 'dark');
+  const c = echarts.init(el, 'cyber');
   c.setOption({
     tooltip: {
       trigger: 'item',
-      backgroundColor: 'rgba(30,30,30,0.9)',
-      borderColor: '#444',
-      textStyle: { color: '#eee' },
-      formatter: '{b}: {c} ({d}%)',
+      ...tooltipBase,
+      formatter: (p: any) => `${p.name}: ${p.value} (${p.percent}%)`,
     },
     legend: {
       orient: 'vertical',
       right: 10,
       top: 'center',
-      textStyle: { color: '#aaa', fontSize: 11 },
+      ...legendBase,
     },
     series: [
       {
@@ -389,9 +388,9 @@ function updatePieChart(
                 value: d.value,
                 itemStyle: { color: d.color },
               }))
-            : [{ name: '无数据', value: 1, itemStyle: { color: '#444' } }],
+            : [{ name: '无数据', value: 1, itemStyle: { color: 'rgba(255,255,255,0.08)' } }],
         label: { show: false },
-        emphasis: { label: { show: true, fontSize: 14, fontWeight: 'bold' } },
+        emphasis: { label: { show: true, fontSize: 14, fontWeight: 'bold' }, itemStyle: { shadowBlur: 20, shadowColor: 'rgba(0,0,0,0.4)' } },
       },
     ],
   });
