@@ -87,22 +87,23 @@ import * as echarts from 'echarts';
 import { api } from '@/stores/auth';
 import { formatSize } from '@/utils/format';
 import { useMobile } from '../../composables/useMobile';
+import { CHART_COLORS, FILETYPE_COLORS, tooltipBase, legendBase } from '../../utils/echarts-theme';
 
 interface FileTypeResponse {
   categories: { name: string; fileCount: number; totalSize: string; percentage: number }[];
 }
 
 const CATEGORY_COLORS: Record<string, string> = {
-  '图片': '#4FC3F7',
-  '视频': '#EF5350',
-  '音频': '#AB47BC',
-  '文档': '#66BB6A',
-  '压缩包': '#FFA726',
-  '其他': '#90A4AE',
+  '图片':   FILETYPE_COLORS['图片']   || CHART_COLORS.blue,
+  '视频':   FILETYPE_COLORS['视频']   || CHART_COLORS.danger,
+  '音频':   FILETYPE_COLORS['音频']   || CHART_COLORS.violet,
+  '文档':   FILETYPE_COLORS['文档']   || CHART_COLORS.success,
+  '压缩包': FILETYPE_COLORS['压缩包'] || CHART_COLORS.amber,
+  '其他':   FILETYPE_COLORS['其他']   || CHART_COLORS.slate,
 };
 
 function getColor(name: string): string {
-  return CATEGORY_COLORS[name] || '#90A4AE';
+  return CATEGORY_COLORS[name] || CHART_COLORS.slate;
 }
 
 function getLabel(name: string): string {
@@ -135,7 +136,7 @@ watch(isMobile, () => {
 function renderChart() {
   if (!chartRef.value) return;
   chart?.dispose();
-  chart = echarts.init(chartRef.value, 'dark');
+  chart = echarts.init(chartRef.value, 'cyber');
 
   const categories = data.value?.categories || [];
   const pieData = categories.length > 0
@@ -144,14 +145,12 @@ function renderChart() {
         value: c.fileCount,
         itemStyle: { color: getColor(c.name) },
       }))
-    : [{ name: '无数据', value: 1, itemStyle: { color: '#444' } }];
+    : [{ name: '无数据', value: 1, itemStyle: { color: 'rgba(255,255,255,0.08)' } }];
 
   chart.setOption({
     tooltip: {
       trigger: 'item',
-      backgroundColor: 'rgba(30,30,30,0.9)',
-      borderColor: '#444',
-      textStyle: { color: '#eee' },
+      ...tooltipBase,
       formatter: (params: unknown) => {
         const p = params as { name: string; value: number; percent: string };
         return `${p.name}: ${p.value} 个文件 (${p.percent}%)`;
@@ -161,7 +160,7 @@ function renderChart() {
       orient: 'vertical',
       right: 10,
       top: 'center',
-      textStyle: { color: '#aaa', fontSize: 12 },
+      ...legendBase,
     },
     series: [
       {

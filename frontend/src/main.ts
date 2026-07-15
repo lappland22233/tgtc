@@ -4,8 +4,12 @@ import TDesign from 'tdesign-vue-next';
 import App from './App.vue';
 import router from './router';
 import { initTelemetry, captureVueError, setupRouteTracking } from './utils/telemetry';
+import { registerCyberTheme } from './utils/echarts-theme';
 import 'tdesign-vue-next/dist/tdesign.css';
 import './assets/styles.css';
+
+// 注册 ECharts 自定义主题（在所有图表 init 之前）
+registerCyberTheme();
 
 // 启用 TDesign 深色模式（设置 DOM 属性触发 CSS 变量）
 document.documentElement.setAttribute('theme-mode', 'dark');

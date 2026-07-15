@@ -334,6 +334,7 @@ import SourceAnalysis from './SourceAnalysis.vue';
 import BandwidthAnalysis from './BandwidthAnalysis.vue';
 import FileTypeAnalysis from './FileTypeAnalysis.vue';
 import { useMobile } from '../../composables/useMobile';
+import { CHART_COLORS, STATUS_COLORS, tooltipBase, legendBase, areaGradient } from '../../utils/echarts-theme';
 
 // Top-level tab state
 const accessTab = ref('overview');
@@ -697,7 +698,7 @@ function updateTrendChart(trendData: TrendItem[]) {
   if (!trendChartRef.value) return;
 
   trendChart?.dispose();
-  trendChart = echarts.init(trendChartRef.value, 'dark');
+  trendChart = echarts.init(trendChartRef.value, 'cyber');
 
   const times = trendData.map((t) => {
     const d = new Date(t.time);
@@ -707,35 +708,33 @@ function updateTrendChart(trendData: TrendItem[]) {
   trendChart.setOption({
     tooltip: {
       trigger: 'axis',
-      backgroundColor: 'rgba(30,30,30,0.9)',
-      borderColor: '#444',
-      textStyle: { color: '#eee', fontSize: 12 },
+      ...tooltipBase,
     },
     legend: {
       data: ['请求数', '带宽'],
-      textStyle: { color: '#aaa' },
+      ...legendBase,
       top: 0,
     },
     grid: { left: 50, right: 60, top: 30, bottom: 30 },
     xAxis: {
       type: 'category',
       data: times,
-      axisLabel: { color: '#888', fontSize: 10, rotate: trendData.length > 24 ? 45 : 0 },
-      axisLine: { lineStyle: { color: '#444' } },
+      axisLabel: { color: '#8895A7', fontSize: 11, rotate: trendData.length > 24 ? 45 : 0 },
+      axisLine: { lineStyle: { color: 'rgba(255,255,255,0.06)' } },
     },
     yAxis: [
       {
         type: 'value',
         name: '请求数',
-        nameTextStyle: { color: '#888' },
-        axisLabel: { color: '#888' },
-        splitLine: { lineStyle: { color: '#333' } },
+        nameTextStyle: { color: '#8895A7', fontSize: 11 },
+        axisLabel: { color: '#8895A7', fontSize: 11 },
+        splitLine: { lineStyle: { color: 'rgba(255,255,255,0.04)', type: 'dashed' } },
       },
       {
         type: 'value',
         name: '带宽',
-        nameTextStyle: { color: '#888' },
-        axisLabel: { color: '#888', formatter: (v: number) => formatSizeUtil(v) },
+        nameTextStyle: { color: '#8895A7', fontSize: 11 },
+        axisLabel: { color: '#8895A7', fontSize: 11, formatter: (v: number) => formatSizeUtil(v) },
         splitLine: { show: false },
       },
     ],
@@ -746,11 +745,8 @@ function updateTrendChart(trendData: TrendItem[]) {
         data: trendData.map((t) => t.requests),
         smooth: true,
         symbol: 'none',
-        lineStyle: { color: '#0052d9', width: 2 },
-        areaStyle: { color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-          { offset: 0, color: 'rgba(0,82,217,0.3)' },
-          { offset: 1, color: 'rgba(0,82,217,0.02)' },
-        ])},
+        lineStyle: { color: CHART_COLORS.blue, width: 2 },
+        areaStyle: { color: areaGradient(CHART_COLORS.blue) },
       },
       {
         name: '带宽',
@@ -759,7 +755,7 @@ function updateTrendChart(trendData: TrendItem[]) {
         data: trendData.map((t) => t.bandwidth),
         smooth: true,
         symbol: 'none',
-        lineStyle: { color: '#2ba471', width: 2 },
+        lineStyle: { color: CHART_COLORS.teal, width: 2 },
       },
     ],
   });
@@ -770,39 +766,37 @@ function updatePieChart() {
   if (!pieChartRef.value) return;
 
   pieChart?.dispose();
-  pieChart = echarts.init(pieChartRef.value, 'dark');
+  pieChart = echarts.init(pieChartRef.value, 'cyber');
 
   const dist = stats.statusDistribution || [];
   const pieData = dist.map((s) => ({
     name: s.statusCode.toString(),
     value: s.count,
     itemStyle: {
-      color: s.statusCode < 300 ? '#2ba471' : s.statusCode < 400 ? '#e37318' : s.statusCode < 500 ? '#e34d59' : '#8b0000',
+      color: s.statusCode < 300 ? STATUS_COLORS['2xx'] : s.statusCode < 400 ? STATUS_COLORS['3xx'] : s.statusCode < 500 ? STATUS_COLORS['4xx'] : STATUS_COLORS['5xx'],
     },
   }));
 
   pieChart.setOption({
     tooltip: {
       trigger: 'item',
-      backgroundColor: 'rgba(30,30,30,0.9)',
-      borderColor: '#444',
-      textStyle: { color: '#eee' },
-      formatter: '{b}: {c} ({d}%)',
+      ...tooltipBase,
+      formatter: (p: any) => `${p.name}: ${p.value} (${p.percent}%)`,
     },
     legend: {
       orient: 'vertical',
       right: 10,
       top: 'center',
-      textStyle: { color: '#aaa', fontSize: 11 },
+      ...legendBase,
     },
     series: [
       {
         type: 'pie',
         radius: ['45%', '75%'],
         center: ['40%', '50%'],
-        data: pieData.length > 0 ? pieData : [{ name: '无数据', value: 1, itemStyle: { color: '#444' } }],
+        data: pieData.length > 0 ? pieData : [{ name: '无数据', value: 1, itemStyle: { color: 'rgba(255,255,255,0.08)' } }],
         label: { show: false },
-        emphasis: { label: { show: true, fontSize: 14, fontWeight: 'bold' } },
+        emphasis: { label: { show: true, fontSize: 14, fontWeight: 'bold' }, itemStyle: { shadowBlur: 20, shadowColor: 'rgba(0,0,0,0.4)' } },
       },
     ],
   });
