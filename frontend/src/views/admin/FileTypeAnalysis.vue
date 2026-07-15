@@ -87,7 +87,7 @@ import * as echarts from 'echarts';
 import { api } from '@/stores/auth';
 import { formatSize } from '@/utils/format';
 import { useMobile } from '../../composables/useMobile';
-import { CHART_COLORS, FILETYPE_COLORS, tooltipBase, legendBase } from '../../utils/echarts-theme';
+import { CHART_COLORS, FILETYPE_COLORS, tooltipBase, legendBase, ensureCyberTheme } from '../../utils/echarts-theme';
 
 interface FileTypeResponse {
   categories: { name: string; fileCount: number; totalSize: string; percentage: number }[];
@@ -133,8 +133,9 @@ watch(isMobile, () => {
   nextTick(() => setTimeout(handleResize, 100));
 });
 
-function renderChart() {
+async function renderChart() {
   if (!chartRef.value) return;
+  await ensureCyberTheme();
   chart?.dispose();
   chart = echarts.init(chartRef.value, 'cyber');
 
@@ -183,7 +184,7 @@ async function fetchData() {
     });
     data.value = (res.data || res) as FileTypeResponse;
     await nextTick();
-    renderChart();
+    await renderChart();
   } catch {
     data.value = null;
   } finally {
@@ -203,7 +204,7 @@ onUnmounted(() => {
 });
 
 function refreshChart() {
-  nextTick(() => renderChart());
+  nextTick(async () => { await renderChart(); });
 }
 
 defineExpose({ refreshChart });

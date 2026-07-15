@@ -334,7 +334,7 @@ import SourceAnalysis from './SourceAnalysis.vue';
 import BandwidthAnalysis from './BandwidthAnalysis.vue';
 import FileTypeAnalysis from './FileTypeAnalysis.vue';
 import { useMobile } from '../../composables/useMobile';
-import { CHART_COLORS, STATUS_COLORS, tooltipBase, legendBase, areaGradient } from '../../utils/echarts-theme';
+import { CHART_COLORS, STATUS_COLORS, tooltipBase, legendBase, areaGradient, ensureCyberTheme } from '../../utils/echarts-theme';
 
 // Top-level tab state
 const accessTab = ref('overview');
@@ -579,7 +579,7 @@ async function fetchStats() {
     const { data } = await client.get('/admin/access-logs/stats', { params: { timeRange: timeRange.value } });
     const d = data.data || data;
     Object.assign(stats, d);
-    updatePieChart();
+    await updatePieChart();
   } catch {
     // Stats error handled silently
   }
@@ -591,7 +591,7 @@ async function fetchTrend() {
     const { data } = await client.get('/admin/access-logs/trend', { params: { timeRange: timeRange.value } });
     const td = (data.data || data) as TrendItem[];
     trendData.value = td;
-    updateTrendChart(td);
+    await updateTrendChart(td);
   } catch {
     // Trend error handled silently
   }
@@ -694,9 +694,10 @@ async function handleBanIp(ip: string) {
 }
 
 // Trend chart
-function updateTrendChart(trendData: TrendItem[]) {
+async function updateTrendChart(trendData: TrendItem[]) {
   if (!trendChartRef.value) return;
 
+  await ensureCyberTheme();
   trendChart?.dispose();
   trendChart = echarts.init(trendChartRef.value, 'cyber');
 
@@ -762,9 +763,10 @@ function updateTrendChart(trendData: TrendItem[]) {
 }
 
 // Pie chart
-function updatePieChart() {
+async function updatePieChart() {
   if (!pieChartRef.value) return;
 
+  await ensureCyberTheme();
   pieChart?.dispose();
   pieChart = echarts.init(pieChartRef.value, 'cyber');
 
@@ -840,7 +842,7 @@ const fileTypeRef = ref<InstanceType<typeof FileTypeAnalysis> | null>(null);
 
 watch(accessTab, (tab) => {
   nextTick(() => {
-    setTimeout(() => {
+    setTimeout(async () => {
       if (tab === 'source') {
         sourceAnalysisRef.value?.resizeAllCharts();
       } else if (tab === 'bandwidth') {
@@ -848,8 +850,8 @@ watch(accessTab, (tab) => {
       } else if (tab === 'filetypes') {
         fileTypeRef.value?.refreshChart();
       } else if (tab === 'overview') {
-        if (trendData.value) updateTrendChart(trendData.value);
-        updatePieChart();
+        if (trendData.value) await updateTrendChart(trendData.value);
+        await updatePieChart();
       }
     }, 100);
   });

@@ -3,16 +3,35 @@ import { createPinia } from 'pinia';
 import TDesign from 'tdesign-vue-next';
 import App from './App.vue';
 import router from './router';
-import { initTelemetry, captureVueError, setupRouteTracking } from './utils/telemetry';
-import { registerCyberTheme } from './utils/echarts-theme';
 import 'tdesign-vue-next/dist/tdesign.css';
 import './assets/styles.css';
 
-// 注册 ECharts 自定义主题（在所有图表 init 之前）
-registerCyberTheme();
-
 // 启用 TDesign 深色模式（设置 DOM 属性触发 CSS 变量）
 document.documentElement.setAttribute('theme-mode', 'dark');
+
+// 延迟加载非关键模块（echarts 主题注册、遥测初始化）
+let deferredInitDone = false;
+async function deferredInit() {
+  if (deferredInitDone) return;
+  deferredInitDone = true;
+
+  // echarts 主题 — 动态导入，避免 ~1MB 阻塞首屏
+  const { registerCyberTheme } = await import('./utils/echarts-theme');
+  registerCyberTheme();
+
+  // 遥测 — 延迟到页面可交互后初始化
+  const { initTelemetry, setupRouteTracking } = await import('./utils/telemetry');
+  initTelemetry();
+  setupRouteTracking(router);
+
+  // 全局错误处理
+  const { captureVueError } = await import('./utils/telemetry');
+  app.config.errorHandler = (err, _instance, info) => {
+    console.error('[Vue Error]', err);
+    console.error('Info:', info);
+    captureVueError(err, info);
+  };
+}
 
 const app = createApp(App);
 const pinia = createPinia();
@@ -21,16 +40,12 @@ app.use(pinia);
 app.use(router);
 app.use(TDesign);
 
-// 全局错误边界：捕获未处理的组件错误，同时上报遥测
-app.config.errorHandler = (err, _instance, info) => {
-  console.error('[Vue Error]', err);
-  console.error('Info:', info);
-  captureVueError(err, info);
-};
-
 app.mount('#app');
 
-// 应用挂载后初始化遥测（错误/性能/环境信息自动上报）
-initTelemetry();
-// 注册路由切换追踪（SPA 导航性能 + 后续行为追踪）
-setupRouteTracking(router);
+// 首屏渲染完成后，延迟加载非关键模块
+// 使用 requestIdleCallback 避免阻塞用户交互
+if (typeof requestIdleCallback !== 'undefined') {
+  requestIdleCallback(() => deferredInit(), { timeout: 3000 });
+} else {
+  setTimeout(() => deferredInit(), 200);
+}
