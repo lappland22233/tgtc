@@ -118,7 +118,7 @@ import * as echarts from 'echarts';
 import { api } from '@/stores/auth';
 import { formatSize, getFileEmoji } from '@/utils/format';
 import { useMobile } from '../../composables/useMobile';
-import { CHART_COLORS, tooltipBase, areaGradient } from '../../utils/echarts-theme';
+import { CHART_COLORS, tooltipBase, areaGradient, ensureCyberTheme } from '../../utils/echarts-theme';
 
 interface BandwidthResponse {
   topFiles: { fileId: string; fileName: string; mimeType: string; totalBandwidth: string; accessCount: number }[];
@@ -156,8 +156,9 @@ watch(isMobile, () => {
   nextTick(() => setTimeout(handleResize, 100));
 });
 
-function renderChart() {
+async function renderChart() {
   if (!chartRef.value) return;
+  await ensureCyberTheme();
   chart?.dispose();
   chart = echarts.init(chartRef.value, 'cyber');
 
@@ -224,7 +225,7 @@ async function fetchData() {
     });
     data.value = (res.data || res) as BandwidthResponse;
     await nextTick();
-    renderChart();
+    await renderChart();
   } catch {
     data.value = null;
   } finally {
@@ -244,7 +245,7 @@ onUnmounted(() => {
 });
 
 function refreshChart() {
-  nextTick(() => renderChart());
+  nextTick(async () => { await renderChart(); });
 }
 
 defineExpose({ refreshChart });

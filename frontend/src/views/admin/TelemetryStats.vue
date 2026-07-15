@@ -129,7 +129,7 @@
 import { ref, reactive, computed, onMounted, onUnmounted, nextTick } from 'vue';
 import * as echarts from 'echarts';
 import client from '../../api/client';
-import { CHART_COLORS, tooltipBase, legendBase, areaGradient } from '../../utils/echarts-theme';
+import { CHART_COLORS, tooltipBase, legendBase, areaGradient, ensureCyberTheme } from '../../utils/echarts-theme';
 
 // ---- 时间范围 ----
 const timeRange = ref('24h');
@@ -327,7 +327,8 @@ let pieChart: echarts.ECharts | null = null;
 let perfChart: echarts.ECharts | null = null;
 let resizeObserver: ResizeObserver | null = null;
 
-function initCharts() {
+async function initCharts() {
+  await ensureCyberTheme();
   if (trendChartRef.value) trendChart = echarts.init(trendChartRef.value, 'cyber');
   if (pieChartRef.value) pieChart = echarts.init(pieChartRef.value, 'cyber');
   if (perfChartRef.value) perfChart = echarts.init(perfChartRef.value, 'cyber');

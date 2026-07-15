@@ -395,13 +395,15 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted, computed } from 'vue';
+import { ref, reactive, onMounted, computed, defineAsyncComponent } from 'vue';
 import { MessagePlugin } from 'tdesign-vue-next';
 import { api, useAuthStore } from '@/stores/auth';
 import { storeToRefs } from 'pinia';
 import { formatDate, formatSize } from '@/utils/format';
 import { useMobile } from '../../composables/useMobile';
-import AlertManagement from './AlertManagement.vue';
+
+// 懒加载：AlertManagement 仅在切换到告警管理 tab 时才加载
+const AlertManagement = defineAsyncComponent(() => import('./AlertManagement.vue'));
 
 const authStore = useAuthStore();
 const { user } = storeToRefs(authStore);
@@ -771,6 +773,8 @@ async function resetSecurityConfig() {
 }
 
 onMounted(() => {
+  // 并发发起所有独立请求，失败的不影响其他数据区域渲染
+  // Promise.allSettled 确保每个数据块独立到达后各自渲染
   fetchAttackAlerts();
   fetchBanStats();
   fetchAbnormalIps();

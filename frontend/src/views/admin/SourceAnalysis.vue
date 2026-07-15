@@ -210,7 +210,7 @@ import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue';
 import * as echarts from 'echarts';
 import { api } from '@/stores/auth';
 import { useMobile } from '../../composables/useMobile';
-import { CHART_COLORS, tooltipBase, legendBase } from '../../utils/echarts-theme';
+import { CHART_COLORS, tooltipBase, legendBase, ensureCyberTheme } from '../../utils/echarts-theme';
 
 // --- Types ---
 
@@ -355,13 +355,14 @@ function getDeviceLabel(type: string): string {
 
 // --- Chart Helpers ---
 
-function updatePieChart(
+async function updatePieChart(
   chart: echarts.ECharts | null,
   el: HTMLDivElement | null,
   pieData: { name: string; value: number; color: string }[],
-): echarts.ECharts | null {
+): Promise<echarts.ECharts | null> {
   if (!el) return chart;
   // 始终销毁重建，避免 display:none 导致的实例状态错乱
+  await ensureCyberTheme();
   chart?.dispose();
   const c = echarts.init(el, 'cyber');
   c.setOption({
@@ -397,11 +398,11 @@ function updatePieChart(
   return c;
 }
 
-function renderCategoryChart() {
+async function renderCategoryChart() {
   const el = refererCategoryChartRef.value;
   if (!el) return;
   const cats = refererData.value?.categories || [];
-  refererCategoryChart = updatePieChart(
+  refererCategoryChart = await updatePieChart(
     refererCategoryChart,
     el,
     cats.map((c) => ({
@@ -412,11 +413,11 @@ function renderCategoryChart() {
   );
 }
 
-function renderDeviceChart() {
+async function renderDeviceChart() {
   const el = deviceChartRef.value;
   if (!el) return;
   const devices = uaData.value?.devices || [];
-  deviceChart = updatePieChart(
+  deviceChart = await updatePieChart(
     deviceChart,
     el,
     devices.map((d) => ({
@@ -441,7 +442,7 @@ async function fetchRefererData() {
       params: { timeRange: timeRange.value },
     });
     refererData.value = (data.data || data) as RefererAnalysisResponse;
-    setTimeout(() => renderCategoryChart(), 50);
+    setTimeout(async () => { await renderCategoryChart(); }, 50);
   } catch {
     refererData.value = null;
   } finally {
@@ -456,7 +457,7 @@ async function fetchUAData() {
       params: { timeRange: timeRange.value, topN: 500 },
     });
     uaData.value = (data.data || data) as UserAgentAnalysisResponse;
-    setTimeout(() => renderDeviceChart(), 50);
+    setTimeout(async () => { await renderDeviceChart(); }, 50);
   } catch {
     uaData.value = null;
   } finally {
@@ -472,12 +473,12 @@ function onTimeRangeChange() {
 }
 
 function onTabChange() {
-  nextTick(() => {
+  nextTick(async () => {
     resizeAllCharts();
     if (activeTab.value === 'ua') {
-      renderDeviceChart();
+      await renderDeviceChart();
     } else if (activeTab.value === 'referer') {
-      renderCategoryChart();
+      await renderCategoryChart();
     }
   });
 }
