@@ -6,7 +6,7 @@
     </div>
 
     <div class="card">
-      <div style="display: flex; justify-content: space-between; margin-bottom: 16px;">
+      <div style="display: flex; justify-content: space-between; margin-bottom: 16px; flex-wrap: wrap; gap: 12px;">
         <t-input v-model="searchEmail" placeholder="搜索用户邮箱..." style="width: 300px;" @enter="searchUsers" autocomplete="off" name="admin-search-email" />
         <t-button theme="primary" @click="showCreateDialog = true">+ 创建用户</t-button>
       </div>

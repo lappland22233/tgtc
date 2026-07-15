@@ -1,5 +1,8 @@
 <template>
   <div class="layout-container">
+    <!-- Skip to main content (accessibility) -->
+    <a href="#main-content" class="skip-link">跳转到主内容</a>
+
     <!-- Desktop Sidebar -->
     <aside class="sidebar">
       <div class="sidebar-logo">
@@ -68,7 +71,7 @@
     </aside>
 
     <!-- Main Content -->
-    <main class="main-content">
+    <main id="main-content" class="main-content">
       <button class="mobile-menu-btn" @click="drawerVisible = true" aria-label="打开菜单">
         ☰
       </button>
@@ -91,6 +94,7 @@
       destroy-on-close
     >
       <div class="drawer-content">
+        <a href="#main-content" class="skip-link" @click="drawerVisible = false">跳转到主内容</a>
         <div class="sidebar-logo">
           <h2>
             <span class="logo-icon">⬡</span>

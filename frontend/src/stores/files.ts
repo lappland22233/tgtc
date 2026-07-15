@@ -54,12 +54,21 @@ export const useFileStore = defineStore('files', () => {
    * 游标分页请求（无限滚动模式使用）
    * 返回 { files, nextCursor, total } 供 useCursorPagination 使用
    */
-  async function fetchFilesCursor(limit: number, keyword?: string, cursor?: string | null, tagIds?: string[]) {
+  async function fetchFilesCursor(limit: number, keyword?: string, cursor?: string | null, tagIds?: string[], externalSignal?: AbortSignal) {
     if (cursorAbortController) {
       cursorAbortController.abort();
     }
     const controller = new AbortController();
     cursorAbortController = controller;
+
+    // 监听外部 AbortSignal（来自 useCursorPagination 的 generation reset）
+    if (externalSignal) {
+      if (externalSignal.aborted) {
+        return { files: [] as FileItem[], nextCursor: cursor ?? null, total: total.value };
+      }
+      externalSignal.addEventListener('abort', () => controller.abort(), { once: true });
+    }
+
     loading.value = true;
     try {
       const params: Record<string, unknown> = { limit, includeDeleted: 'true' };
@@ -78,7 +87,9 @@ export const useFileStore = defineStore('files', () => {
     } catch (err) {
       const axiosErr = err as { name?: string; code?: string };
       if (axiosErr.name === 'AbortError' || axiosErr.code === 'ERR_CANCELED') {
-        return null;
+        // 返回空数据 + hasMore: true，避免 useCursorPagination 误判为"无更多数据"
+        // 上游的 generation 检查会丢弃此结果
+        return { files: [] as FileItem[], nextCursor: cursor ?? null, total: total.value };
       }
       throw err;
     } finally {

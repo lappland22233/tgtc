@@ -6,8 +6,8 @@
     </div>
 
     <div class="card">
-      <div style="display: flex; justify-content: space-between; margin-bottom: 16px;">
-        <div style="display: flex; gap: 12px;">
+      <div style="display: flex; justify-content: space-between; margin-bottom: 16px; flex-wrap: wrap; gap: 12px;">
+        <div style="display: flex; gap: 12px; flex-wrap: wrap;">
           <t-input v-model="searchFile" placeholder="搜索文件名..." style="width: 250px;" @enter="fetchFiles" autocomplete="off" name="admin-search-file" />
           <t-select v-model="filterUploader" placeholder="筛选上传者" clearable style="width: 200px;" @change="fetchFiles">
             <t-option v-for="u in uploaders" :key="u.id" :value="u.id" :label="u.email" />

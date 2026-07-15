@@ -118,71 +118,81 @@ const router = createRouter({
   routes,
 });
 
+/**
+ * 导航锁：防止快速连续切换时并发执行 beforeEach，
+ * 导致 fetchUser 竞态和多次 redirect。
+ * 使用串行队列而非防抖，确保每次导航都被正确处理。
+ */
+let navLock: Promise<void> = Promise.resolve();
+
 router.beforeEach(async (to, _from, next) => {
-  const authStore = useAuthStore();
+  // 串行化所有导航守卫：快速切换时排队执行
+  const prevLock = navLock;
+  let releaseLock: () => void;
+  navLock = new Promise<void>((resolve) => { releaseLock = resolve; });
 
-  // 步骤 1：首次加载时从 cookie 恢复登录状态（await 确保完成）
-  if (!authStore.initialized) {
-    await authStore.fetchUser();
-  }
+  try {
+    await prevLock;
 
-  const isAuthenticated = authStore.isAuthenticated;
-  const userRole = authStore.user?.role;
+    const authStore = useAuthStore();
 
-  // 步骤 2：需要认证但未登录 → 跳转登录页（携带 redirect 参数）
-  if (to.meta.requiresAuth && !isAuthenticated) {
-    // 仅对应用内路径做 redirect 校验，防止开放重定向
-    const redirect = (to.path !== '/login' && to.path !== '/register') ? to.fullPath : undefined;
-    next({ path: '/login', query: redirect ? { redirect: isValidRedirect(redirect) ? redirect : undefined } : undefined });
-    return;
-  }
+    // 步骤 1：首次加载时从 cookie 恢复登录状态
+    // fetchUser 内部有并发锁，多次快速调用安全
+    if (!authStore.initialized) {
+      await authStore.fetchUser();
+    }
 
-  // 步骤 3：已登录用户访问游客页 → 跳转首页
-  if (to.meta.guest && isAuthenticated) {
-    next('/');
-    return;
-  }
+    const isAuthenticated = authStore.isAuthenticated;
+    const userRole = authStore.user?.role;
 
-  // 步骤 4：需要管理员权限（此时已确认 isAuthenticated 为 true）
-  if (to.meta.admin) {
-    if (!isAuthenticated) {
-      next('/login');
+    // 步骤 2：需要认证但未登录 → 跳转登录页
+    if (to.meta.requiresAuth && !isAuthenticated) {
+      const redirect = (to.path !== '/login' && to.path !== '/register') ? to.fullPath : undefined;
+      next({ path: '/login', query: redirect ? { redirect: isValidRedirect(redirect) ? redirect : undefined } : undefined });
       return;
     }
 
-    const adminRoles = ['admin', 'super_admin'] as const;
-    if (!userRole || !adminRoles.includes(userRole as typeof adminRoles[number])) {
-      // 跳转首页并显示提示（避免直接 /login 造成循环）
+    // 步骤 3：已登录用户访问游客页 → 跳转首页
+    if (to.meta.guest && isAuthenticated) {
       next('/');
       return;
     }
-  }
 
-  // 步骤 5：需要超级管理员权限（访问统计/审计页）
-  if (to.meta.superAdmin) {
-    if (!isAuthenticated) {
-      next('/login');
-      return;
+    // 步骤 4：管理员权限校验
+    if (to.meta.admin) {
+      const adminRoles = ['admin', 'super_admin'] as const;
+      if (!userRole || !adminRoles.includes(userRole as typeof adminRoles[number])) {
+        next('/');
+        return;
+      }
     }
 
-    if (userRole !== 'super_admin') {
-      next('/');
-      return;
+    // 步骤 5：超级管理员权限校验
+    if (to.meta.superAdmin) {
+      if (userRole !== 'super_admin') {
+        next('/');
+        return;
+      }
     }
-  }
 
-  next();
+    next();
+  } finally {
+    releaseLock!();
+  }
 });
 
-// 路由切换时清除缩略图 token 缓存
-// 登录态变化时清理缩略图缓存（避免旧用户 token 残留）
-let lastAuthState = false;
+/**
+ * 路由切换时清除缩略图 token 缓存。
+ * 基于 authStore 实际状态而非 localStorage hack。
+ */
+let lastAuthUserId: string | null = null;
 router.afterEach(() => {
-  const currentAuth = !!localStorage.getItem('auth_initialized');
-  if (currentAuth !== lastAuthState) {
+  const authStore = useAuthStore();
+  const currentUserId = authStore.user?.id ?? null;
+  if (currentUserId !== lastAuthUserId) {
     clearThumbToken();
     clearThumbnailCache();
-    lastAuthState = currentAuth;
+    lastAuthUserId = currentUserId;
   }
 });
 

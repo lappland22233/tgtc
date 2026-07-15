@@ -21,14 +21,14 @@
 
     <div class="card">
       <div style="display: flex; justify-content: space-between; margin-bottom: 16px; align-items: center; flex-wrap: wrap; gap: 12px;">
-        <div style="display: flex; gap: 8px;">
-          <form autocomplete="off" @submit.prevent="handleSearch" style="display: flex; gap: 8px; margin: 0;">
+        <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+          <form autocomplete="off" @submit.prevent="handleSearch" style="display: flex; gap: 8px; margin: 0; flex-wrap: wrap;">
             <t-input v-model="search" placeholder="搜索文件名..." style="width: 300px;" class="search-input-field" autocomplete="off" name="q-file-search" @enter="handleSearch" />
             <t-button theme="default" @click="handleSearch">搜索</t-button>
           </form>
           <t-button theme="default" variant="text" v-if="search" @click="handleClearSearch">清除</t-button>
         </div>
-        <div style="display: flex; gap: 8px;">
+        <div style="display: flex; gap: 8px; flex-wrap: wrap;">
           <t-button
             v-if="selectedImages.length > 0 && selectedImages.length === selectedFileIds.length"
             theme="primary"
@@ -732,16 +732,16 @@ async function loadInitialFiles(resetCursorState = false) {
       resetCursor();
       fileStore.replaceFiles([]);
     }
-    await loadMore(async (cursor) => {
+    await loadMore(async (cursor, signal) => {
       const result = await fileStore.fetchFilesCursor(
-        20, // 每次固定 20 条
+        20,
         search.value || undefined,
         cursor,
         tagIds,
+        signal,
       );
       if (!result) return { data: [], nextCursor: null, hasMore: false };
 
-      // 将新文件追加到 store 的 files 数组
       fileStore.replaceFiles([...fileStore.files, ...result.files]);
       return {
         data: result.files,
@@ -755,12 +755,13 @@ async function loadInitialFiles(resetCursorState = false) {
 /** 加载更多（无限模式下 IntersectionObserver 触发） */
 async function loadMoreFiles() {
   if (!hasMore.value || cursorLoading.value) return;
-  await loadMore(async (cursor) => {
+  await loadMore(async (cursor, signal) => {
     const result = await fileStore.fetchFilesCursor(
       20,
       search.value || undefined,
       cursor,
       selectedTagIds.value.length > 0 ? selectedTagIds.value : undefined,
+      signal,
     );
     if (!result) return { data: [], nextCursor: null, hasMore: false };
 
@@ -1025,19 +1026,26 @@ watch([page, pageSize, search, sortBy, sortOrder, pageMode, selectedTagIds], ([n
 });
 
 onMounted(async () => {
-  await tagStore.fetchTags();
-  if (pageMode.value === 'infinite' || route.query.mode === 'infinite') {
-    pageMode.value = 'infinite';
-    pageSize.value = -1;
-    loadInitialFiles(true);
-    nextTick(setupScrollObserver);
-  } else {
-    refetchFiles(page.value, Math.abs(pageSize.value));
+  try { await tagStore.fetchTags(); } catch { /* 标签加载失败不阻塞页面 */ }
+
+  try {
+    if (pageMode.value === 'infinite' || route.query.mode === 'infinite') {
+      pageMode.value = 'infinite';
+      pageSize.value = -1;
+      await loadInitialFiles(true);
+      nextTick(setupScrollObserver);
+    } else {
+      await refetchFiles(page.value, Math.abs(pageSize.value));
+    }
+  } catch {
+    // 初始加载失败保留空列表，用户可手动刷新
   }
 });
 
 onUnmounted(() => {
-  if (scrollObserver) scrollObserver.disconnect();
+  if (scrollObserver) { scrollObserver.disconnect(); scrollObserver = null; }
+  if (dragLeaveTimeout) { clearTimeout(dragLeaveTimeout); dragLeaveTimeout = null; }
+  dragCounter = 0;
 });
 </script>
 

@@ -555,6 +555,22 @@ a:focus-visible,
 
   .desktop-table { display: none; }
   .mobile-card-list { display: block; }
+
+  /* 按钮移动端适配 */
+  .t-button {
+    font-size: 13px;
+    padding: 0 12px;
+  }
+  .t-button--size-small {
+    font-size: 12px;
+    padding: 0 8px;
+  }
+
+  /* 工具栏按钮容器自动换行 */
+  .toolbar-row {
+    flex-wrap: wrap !important;
+    gap: 8px !important;
+  }
 }
 
 /* ============================================================
@@ -570,6 +586,20 @@ a:focus-visible,
   .auth-header h1 { font-size: 22px; }
   .auth-card::before { left: 20px; right: 20px; }
   .upload-zone { padding: 24px 12px; }
+
+  /* 小屏按钮进一步缩小 */
+  .t-button {
+    font-size: 12px;
+    padding: 0 10px;
+  }
+  .t-button--size-small {
+    font-size: 11px;
+    padding: 0 6px;
+  }
+  .t-button--size-large {
+    font-size: 14px;
+    padding: 0 16px;
+  }
 }
 
 /* ============================================================
@@ -614,6 +644,40 @@ select {
 
 /* TDesign Drawer mobile fix */
 .t-drawer { overscroll-behavior: contain; }
+
+/* Skip link — keyboard-only visible */
+.skip-link {
+  position: absolute;
+  top: -100px;
+  left: 16px;
+  background: var(--color-accent);
+  color: #fff;
+  padding: 10px 20px;
+  border-radius: 0 0 var(--radius-md) var(--radius-md);
+  z-index: 9999;
+  font-weight: 600;
+  font-size: 14px;
+  text-decoration: none;
+  transition: top var(--duration-fast);
+}
+.skip-link:focus {
+  top: 0;
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+/* Balanced text wrapping for headings */
+.page-header h1,
+.auth-header h1,
+.card h3,
+.stat-card h3 {
+  text-wrap: balance;
+}
+
+/* Scroll margin for anchor targets */
+:target {
+  scroll-margin-top: 24px;
+}
 
 /* ============================================================
    Button System — TDesign Overrides
@@ -776,6 +840,15 @@ select {
 /* --- Block Button --- */
 .t-button--block {
   border-radius: var(--radius-md) !important;
+}
+
+/* --- Global Button Text Overflow Protection --- */
+.t-button {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex-shrink: 0;
+  max-width: 100%;
 }
 
 /* ============================================================
