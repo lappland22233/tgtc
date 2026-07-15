@@ -227,6 +227,15 @@ onUnmounted(() => {
 .code-row {
   display: flex;
   gap: 12px;
+  flex-wrap: wrap;
+}
+.code-row .code-input {
+  flex: 1;
+  min-width: 120px;
+}
+.code-row .t-button {
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .code-input {

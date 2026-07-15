@@ -169,7 +169,7 @@
 
     <!-- IP封禁管理 -->
     <div class="card" style="margin-top: 20px;">
-      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 12px;">
         <h3>🚫 IP封禁管理</h3>
         <t-button theme="danger" @click="showBanDialog = true">+ 封禁IP</t-button>
       </div>

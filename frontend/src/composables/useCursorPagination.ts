@@ -10,98 +10,118 @@ export interface CursorPageResult<T> {
 }
 
 export interface UseCursorPaginationReturn<T> {
-  /** 累积加载的全部数据 */
   data: Ref<T[]>;
-  /** 下一页游标，null 表示无更多页可加载 */
   nextCursor: Ref<string | null>;
-  /** 是否还有更多数据 */
   hasMore: Ref<boolean>;
-  /** 是否正在加载 */
   loading: Ref<boolean>;
-  /** 加载下一页（追加到 data 末尾） */
   loadMore: (
-    fetchFn: (cursor: string | null) => Promise<CursorPageResult<T>>,
+    fetchFn: (cursor: string | null, signal: AbortSignal) => Promise<CursorPageResult<T>>,
   ) => Promise<void>;
-  /** 重置到初始状态 */
   reset: () => void;
 }
 
 /**
  * 游标分页 composable（无限滚动模式）
  *
- * 适用于 Phase 1 游标分页 API。每次 loadMore 会将新数据追加到已有列表末尾，
- * 并通过 loading 守卫防止并发重复请求。
+ * 使用代际计数器 (generation) 解决 reset() 后旧 loadMore 数据污染新状态的竞态问题。
+ * 每次 reset() 递增 generation，loadMore 完成时检查 generation 是否匹配，不匹配则丢弃结果。
  *
  * @example
  * ```ts
  * const { data, hasMore, loading, loadMore, reset } = useCursorPagination<FileItem>();
  *
- * // 首次加载 / 加载更多
- * await loadMore((cursor) =>
- *   api.get('/admin/files', { params: { cursor, limit: 20 } })
+ * await loadMore((cursor, signal) =>
+ *   api.get('/admin/files', { params: { cursor, limit: 20 }, signal })
  *     .then(res => res.data.data)
  * );
  *
- * // 重置（切换筛选条件时）
+ * // 切换筛选条件时
  * reset();
  * ```
  */
 export function useCursorPagination<T = unknown>(): UseCursorPaginationReturn<T> {
-  const data = ref<T[]>([]) as Ref<T[]>;
-  const nextCursor = ref<string | null>(null);
-  const hasMore = ref<boolean>(true);
-  const loading = ref<boolean>(false);
+  const _data = ref<T[]>([]) as Ref<T[]>;
+  const _nextCursor = ref<string | null>(null);
+  const _hasMore = ref<boolean>(true);
+  const _loading = ref<boolean>(false);
+
+  // 代际计数器：每次 reset() 递增，loadMore 结束时比对
+  let generation = 0;
+  // 当前代际的 AbortController（仅 cancel 同代请求）
+  let currentAbortController: AbortController | null = null;
 
   /**
    * 加载下一页数据，追加到 data 末尾
    */
   async function loadMore(
-    fetchFn: (cursor: string | null) => Promise<CursorPageResult<T>>,
+    fetchFn: (cursor: string | null, signal: AbortSignal) => Promise<CursorPageResult<T>>,
   ): Promise<void> {
-    // 加载守卫：防止并发重复请求
-    if (loading.value) return;
-    // 无更多数据时跳过
-    if (!hasMore.value) return;
+    if (_loading.value) return;
+    if (!_hasMore.value) return;
 
-    loading.value = true;
+    const gen = generation;
+
+    // 取消同代前一个请求
+    if (currentAbortController) {
+      currentAbortController.abort();
+    }
+    const controller = new AbortController();
+    currentAbortController = controller;
+
+    _loading.value = true;
     try {
-      const cursorBefore = nextCursor.value;
-      const result = await fetchFn(nextCursor.value);
+      const cursorBefore = _nextCursor.value;
+      // 传入 AbortSignal，fetchFn 内部可检测取消
+      const result = await fetchFn(_nextCursor.value, controller.signal);
 
-      // 防护 1: 空页停止 (防止后端返回 hasMore=true 但无数据)
+      // 代际检查：如果在此请求期间发生了 reset()，丢弃结果
+      if (gen !== generation) return;
+
+      // 防护 1: 空页停止
       if (!result.data || result.data.length === 0) {
-        hasMore.value = false;
+        _hasMore.value = false;
         return;
       }
-      // 防护 2: 游标未推进停止 (防止 nextCursor 不变导致无限追加)
+      // 防护 2: 游标未推进停止
       if (result.nextCursor !== null && result.nextCursor === cursorBefore) {
-        hasMore.value = false;
+        _hasMore.value = false;
         return;
       }
 
-      data.value = [...data.value, ...result.data];
-      nextCursor.value = result.nextCursor;
-      hasMore.value = result.hasMore;
+      _data.value = [..._data.value, ...result.data];
+      _nextCursor.value = result.nextCursor;
+      _hasMore.value = result.hasMore;
     } finally {
-      loading.value = false;
+      // 仅当还是当前代际时更新 loading 状态
+      if (gen === generation) {
+        _loading.value = false;
+        if (currentAbortController === controller) {
+          currentAbortController = null;
+        }
+      }
     }
   }
 
   /**
-   * 重置分页状态（切换筛选条件或重新加载时使用）
+   * 重置分页状态，取消所有进行中的加载
    */
   function reset(): void {
-    data.value = [];
-    nextCursor.value = null;
-    hasMore.value = true;
-    loading.value = false;
+    generation++;
+    _data.value = [];
+    _nextCursor.value = null;
+    _hasMore.value = true;
+    _loading.value = false;
+    if (currentAbortController) {
+      currentAbortController.abort();
+      currentAbortController = null;
+    }
   }
 
   return {
-    data,
-    nextCursor,
-    hasMore,
-    loading,
+    data: _data,
+    nextCursor: _nextCursor,
+    hasMore: _hasMore,
+    loading: _loading,
     loadMore,
     reset,
   };

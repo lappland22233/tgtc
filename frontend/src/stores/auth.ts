@@ -12,6 +12,9 @@ export const useAuthStore = defineStore('auth', () => {
 
   const isAuthenticated = computed(() => !!user.value);
 
+  // fetchUser 并发锁：防止 router beforeEach 触发重复请求
+  let fetchUserPromise: Promise<void> | null = null;
+
   // 跨标签页登出同步 — 惰性初始化（HMR 安全）
   let authChannel: BroadcastChannel | null = null;
   function getAuthChannel(): BroadcastChannel | null {
@@ -72,20 +75,30 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   async function fetchUser() {
-    try {
-      const response = await api.get('/auth/me');
-      user.value = response.data.data as User;
-    } catch (err: unknown) {
-      // 区分 401（token 过期/无效）和网络错误（临时网络问题）
-      // 仅 401 时清除用户状态，网络错误保留当前状态防止无故登出
-      const axiosErr = err as { response?: { status?: number } };
-      if (axiosErr?.response?.status === 401) {
-        user.value = null;
-      }
-      // 403 = 已认证但无权限，保留用户状态，由调用方处理权限提示
-    } finally {
-      initialized.value = true;
+    // 并发锁：如果已有进行中的请求，复用其 Promise
+    if (fetchUserPromise) {
+      return fetchUserPromise;
     }
+
+    fetchUserPromise = (async () => {
+      try {
+        const response = await api.get('/auth/me');
+        user.value = response.data.data as User;
+      } catch (err: unknown) {
+        // 区分 401（token 过期/无效）和网络错误（临时网络问题）
+        // 仅 401 时清除用户状态，网络错误保留当前状态防止无故登出
+        const axiosErr = err as { response?: { status?: number } };
+        if (axiosErr?.response?.status === 401) {
+          user.value = null;
+        }
+        // 403 = 已认证但无权限，保留用户状态，由调用方处理权限提示
+      } finally {
+        initialized.value = true;
+        fetchUserPromise = null;
+      }
+    })();
+
+    return fetchUserPromise;
   }
 
   async function logout() {
