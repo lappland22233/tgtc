@@ -131,7 +131,7 @@
 
 <script setup lang="ts">
 import { ref, reactive, onMounted } from 'vue';
-import { MessagePlugin } from 'tdesign-vue-next';
+import MessagePlugin from '@/utils/message';
 import client from '../../api/client';
 import { useMobile } from '../../composables/useMobile';
 

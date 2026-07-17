@@ -209,6 +209,16 @@ onMounted(() => {
   if (!authStore.initialized) {
     authStore.fetchUser();
   }
+
+  // Admin 路由首次预载（用户路由已由 useRoutePrefetch composable 处理）
+  if (isAdmin.value) {
+    const idleCb = window.requestIdleCallback || ((cb: () => void) => setTimeout(cb, 500));
+    idleCb(() => {
+      import('../admin/Dashboard.vue').catch(() => {});
+      import('../admin/Users.vue').catch(() => {});
+      import('../admin/Files.vue').catch(() => {});
+    });
+  }
 });
 </script>
 

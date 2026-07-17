@@ -83,7 +83,7 @@
 
 <script setup lang="ts">
 import { ref, watch, onMounted, onUnmounted, nextTick } from 'vue';
-import * as echarts from 'echarts';
+import * as echarts from '@/utils/echarts';
 import { api } from '@/stores/auth';
 import { formatSize } from '@/utils/format';
 import { useMobile } from '../../composables/useMobile';

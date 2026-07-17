@@ -127,7 +127,7 @@
 
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted, onUnmounted, nextTick } from 'vue';
-import * as echarts from 'echarts';
+import * as echarts from '@/utils/echarts';
 import client from '../../api/client';
 import { CHART_COLORS, tooltipBase, legendBase, areaGradient, ensureCyberTheme } from '../../utils/echarts-theme';
 

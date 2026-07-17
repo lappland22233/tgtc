@@ -133,7 +133,7 @@
 
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, nextTick, computed } from 'vue';
-import { MessagePlugin } from 'tdesign-vue-next';
+import MessagePlugin from '@/utils/message';
 import { api } from '../../stores/auth';
 import { formatSize, formatDate, getFileEmoji } from '@/utils/format';
 import { getErrorMessage } from '../../utils/error';

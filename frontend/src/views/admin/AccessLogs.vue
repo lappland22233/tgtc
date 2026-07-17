@@ -326,8 +326,8 @@
 
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted, onUnmounted, watch, nextTick } from 'vue';
-import { MessagePlugin } from 'tdesign-vue-next';
-import * as echarts from 'echarts';
+import MessagePlugin from '@/utils/message';
+import * as echarts from '@/utils/echarts';
 import client from '../../api/client';
 import { formatSize as formatSizeUtil, getFileEmoji } from '@/utils/format';
 import SourceAnalysis from './SourceAnalysis.vue';

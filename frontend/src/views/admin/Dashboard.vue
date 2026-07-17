@@ -83,11 +83,11 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue';
+import { shallowRef, computed, onMounted, onUnmounted } from 'vue';
 import { formatSize } from '@/utils/format';
 import { api } from '../../stores/auth';
 
-const stats = ref({
+const stats = shallowRef({
   totalUsers: 0,
   activeUsers: 0,
   bannedUsers: 0,
@@ -97,7 +97,7 @@ const stats = ref({
   monthlyAccess: [] as { month: string; count: number }[],
 });
 
-const myFiles = ref({
+const myFiles = shallowRef({
   fileCount: 0,
   totalSize: 0,
   totalAccessCount: 0,
@@ -121,9 +121,13 @@ function formatMonth(month: string) {
   return `${parseInt(m)}月`;
 }
 
+// 缓存最大访问量，避免 getBarHeight 每次调用都重新 map+Math.max（O(n²)→O(n)）
+const maxAccessCount = computed(() =>
+  Math.max(...stats.value.monthlyAccess.map((i) => i.count), 1),
+);
+
 function getBarHeight(count: number) {
-  const max = Math.max(...stats.value.monthlyAccess.map((i) => i.count), 1);
-  return Math.max(4, Math.round((count / max) * 120)) + 'px';
+  return Math.max(4, Math.round((count / maxAccessCount.value) * 120)) + 'px';
 }
 
 onMounted(async () => {

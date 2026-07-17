@@ -86,7 +86,7 @@
 <script setup lang="ts">
 import { ref, reactive, onMounted, onUnmounted, onScopeDispose, computed } from 'vue';
 import { useRouter } from 'vue-router';
-import { MessagePlugin } from 'tdesign-vue-next';
+import MessagePlugin from '@/utils/message';
 import { useAuthStore } from '../../stores/auth';
 import { api } from '../../stores/auth';
 import { getErrorMessage } from '../../utils/error';

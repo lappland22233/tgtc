@@ -396,7 +396,7 @@
 
 <script setup lang="ts">
 import { ref, reactive, onMounted, computed, defineAsyncComponent } from 'vue';
-import { MessagePlugin } from 'tdesign-vue-next';
+import MessagePlugin from '@/utils/message';
 import { api, useAuthStore } from '@/stores/auth';
 import { storeToRefs } from 'pinia';
 import { formatDate, formatSize } from '@/utils/format';

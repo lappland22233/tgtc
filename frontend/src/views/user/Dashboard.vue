@@ -61,7 +61,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue';
+import { ref, shallowRef, computed, onMounted } from 'vue';
 import { api } from '../../stores/auth';
 import { storeToRefs } from 'pinia';
 import { useAuthStore } from '../../stores/auth';
@@ -72,8 +72,8 @@ import type { FileItem } from '../../types/file';
 const authStore = useAuthStore();
 const { user } = storeToRefs(authStore);
 
-const stats = ref({ fileCount: 0, totalSize: 0, totalAccessCount: 0 });
-const recentFiles = ref<FileItem[]>([]);
+const stats = shallowRef({ fileCount: 0, totalSize: 0, totalAccessCount: 0 });
+const recentFiles = shallowRef<FileItem[]>([]);
 const loading = ref(true);
 
 const roleText = computed(() => {

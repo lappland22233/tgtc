@@ -44,7 +44,7 @@
 <script setup lang="ts">
 import { ref } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
-import { MessagePlugin } from 'tdesign-vue-next';
+import MessagePlugin from '@/utils/message';
 import { useAuthStore } from '../../stores/auth';
 import { getErrorMessage } from '../../utils/error';
 import { isValidRedirect } from '../../router';

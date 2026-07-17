@@ -71,7 +71,7 @@
 
 <script setup lang="ts">
 import { ref, onMounted } from 'vue';
-import { MessagePlugin } from 'tdesign-vue-next';
+import MessagePlugin from '@/utils/message';
 import { useMobile } from '@/composables/useMobile';
 import { api } from '@/stores/auth';
 

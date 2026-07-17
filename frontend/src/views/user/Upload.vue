@@ -63,7 +63,7 @@
         <h3 style="margin-bottom: 16px;">上传队列</h3>
         <div v-for="(item, index) in uploadQueue" :key="index" class="file-item">
           <div class="file-icon" :class="getFileIcon(item.file.type)">
-            <img v-if="item.file.type.startsWith('image/')" :src="getPreviewUrl(item.file)" style="width: 48px; height: 48px; object-fit: cover; border-radius: 6px;" />
+            <img v-if="item.file.type.startsWith('image/')" :src="getPreviewUrl(item.file)" loading="lazy" style="width: 48px; height: 48px; object-fit: cover; border-radius: 6px;" />
             <span v-else style="font-size: 24px;">{{ getFileEmoji(item.file.type) }}</span>
           </div>
           <div class="file-info" style="flex: 1;">
@@ -113,7 +113,7 @@
 
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue';
-import { MessagePlugin } from 'tdesign-vue-next';
+import MessagePlugin from '@/utils/message';
 import { useFileStore } from '../../stores/files';
 import { api } from '../../stores/auth';
 import { formatSize, getFileEmoji } from '@/utils/format';
