@@ -76,11 +76,13 @@
         <svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="5" x2="17" y2="5"/><line x1="3" y1="10" x2="17" y2="10"/><line x1="3" y1="15" x2="17" y2="15"/></svg>
       </button>
       <AlertBanner />
-      <router-view v-slot="{ Component }">
-        <transition name="slide-up" mode="out-in">
-          <component :is="Component" />
-        </transition>
-      </router-view>
+      <div class="route-view-container">
+        <router-view v-slot="{ Component, route }">
+          <transition name="slide-up">
+            <component :is="Component" :key="route.path" />
+          </transition>
+        </router-view>
+      </div>
     </main>
 
     <!-- Mobile Drawer -->
