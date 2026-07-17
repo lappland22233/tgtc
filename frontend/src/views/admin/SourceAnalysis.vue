@@ -207,7 +207,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue';
-import * as echarts from 'echarts';
+import * as echarts from '@/utils/echarts';
 import { api } from '@/stores/auth';
 import { useMobile } from '../../composables/useMobile';
 import { CHART_COLORS, tooltipBase, legendBase, ensureCyberTheme } from '../../utils/echarts-theme';

@@ -112,6 +112,7 @@
         <!-- 桌面端：现有表格 -->
         <t-table
           v-if="!isMobile"
+          ref="tableRef"
           :data="displayFiles"
           :columns="columns"
           :row-class-name="getRowClassName"
@@ -119,6 +120,8 @@
           hover
           table-layout="auto"
           :selected-row-keys="selectedFileIds"
+          :scroll="pageMode === 'infinite' ? { type: 'virtual', rowHeight: 56, bufferSize: 10, isFixedRowHeight: true } : undefined"
+          :max-height="pageMode === 'infinite' ? 'calc(100vh - 280px)' : undefined"
           @select-change="handleSelectChange"
           @sort-change="handleSortChange"
         >
@@ -411,7 +414,7 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, reactive, watch, nextTick, onUnmounted } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
-import { MessagePlugin } from 'tdesign-vue-next';
+import MessagePlugin from '@/utils/message';
 import { useFileStore } from '../../stores/files';
 import { useAuthStore, api } from '../../stores/auth';
 import { getErrorMessage } from '../../utils/error';
@@ -467,6 +470,8 @@ const {
 
 // 滚动哨兵 ref
 const scrollSentinel = ref<HTMLElement | null>(null);
+const tableRef = ref();
+let tableScrollEl: HTMLElement | null = null;
 let scrollObserver: IntersectionObserver | null = null;
 
 // pageSize 选项（含无限）
@@ -494,10 +499,12 @@ watch(() => authStore.user?.role, (role) => {
   if (role) fileStore.setCurrentUserRole(role);
 }, { immediate: true });
 
+const selectedFileIdSet = computed(() => new Set(selectedFileIds.value));
+
 const selectedImages = computed(() =>
   displayFiles.value.filter(f =>
     f.mimeType.startsWith('image/') &&
-    selectedFileIds.value.includes(f.id) &&
+    selectedFileIdSet.value.has(f.id) &&
     !f.isDeleted
   )
 );
@@ -774,20 +781,48 @@ async function loadMoreFiles() {
   });
 }
 
-/** 设置 IntersectionObserver 监听滚动 */
+/** 表格内部滚动事件处理（虚拟滚动模式下触发加载更多） */
+function onTableScroll() {
+  if (!tableScrollEl) return;
+  const { scrollTop, scrollHeight, clientHeight } = tableScrollEl;
+  if (scrollHeight - scrollTop - clientHeight < 200) {
+    loadMoreFiles();
+  }
+}
+
+/** 设置滚动监听：优先使用表格内部滚动容器（虚拟滚动模式），降级为 IntersectionObserver */
 function setupScrollObserver() {
-  if (scrollObserver) scrollObserver.disconnect();
+  // 清理之前的监听
+  if (scrollObserver) { scrollObserver.disconnect(); scrollObserver = null; }
+  if (tableScrollEl) {
+    tableScrollEl.removeEventListener('scroll', onTableScroll);
+    tableScrollEl = null;
+  }
+
+  if (pageMode.value !== 'infinite') return;
   if (!scrollSentinel.value) return;
 
-  scrollObserver = new IntersectionObserver(
-    (entries) => {
-      if (entries[0].isIntersecting) {
-        loadMoreFiles();
-      }
-    },
-    { rootMargin: '600px' },
-  );
-  scrollObserver.observe(scrollSentinel.value);
+  // 尝试获取表格内部滚动容器（虚拟滚动模式下存在）
+  const tableEl = (tableRef.value as any)?.$el as HTMLElement | undefined;
+  if (tableEl) {
+    tableScrollEl = tableEl.querySelector('.t-table__content');
+  }
+
+  if (tableScrollEl) {
+    // 虚拟滚动模式：监听表格内部滚动
+    tableScrollEl.addEventListener('scroll', onTableScroll, { passive: true });
+  } else {
+    // 降级模式：IntersectionObserver 监听哨兵元素
+    scrollObserver = new IntersectionObserver(
+      (entries) => {
+        if (entries[0].isIntersecting) {
+          loadMoreFiles();
+        }
+      },
+      { rootMargin: '600px' },
+    );
+    scrollObserver.observe(scrollSentinel.value);
+  }
 }
 
 function handlePageChange(pageInfo: { current: number }) {
@@ -1044,6 +1079,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   if (scrollObserver) { scrollObserver.disconnect(); scrollObserver = null; }
+  if (tableScrollEl) { tableScrollEl.removeEventListener('scroll', onTableScroll); tableScrollEl = null; }
   if (dragLeaveTimeout) { clearTimeout(dragLeaveTimeout); dragLeaveTimeout = null; }
   dragCounter = 0;
 });

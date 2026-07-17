@@ -1,9 +1,9 @@
 // ============================================================
 // Cyber-Secure ECharts Theme — unified chart color system
-// Uses dynamic import to avoid bundling echarts into main chunk
+// Uses tree-shaken echarts core (./echarts) instead of full barrel
 // ============================================================
 
-import type * as echartsNS from 'echarts';
+import echarts from './echarts';
 
 /* ---- Color Palette (static, no echarts dependency) ---- */
 export const CHART_COLORS = {
@@ -78,16 +78,8 @@ export const legendBase = {
 };
 
 // ============================================================
-// Lazy echarts loading (dynamic import, NOT in main bundle)
+// Theme registration (echarts core already loaded via ./echarts)
 // ============================================================
-let echartsModule: typeof echartsNS | null = null;
-
-async function getEcharts(): Promise<typeof echartsNS> {
-  if (!echartsModule) {
-    echartsModule = await import('echarts');
-  }
-  return echartsModule;
-}
 
 let themeRegistered = false;
 
@@ -97,7 +89,6 @@ let themeRegistered = false;
  */
 export async function ensureCyberTheme(): Promise<void> {
   if (themeRegistered) return;
-  const echarts = await getEcharts();
   echarts.registerTheme('cyber', {
     color: [
       CHART_COLORS.blue, CHART_COLORS.cyan, CHART_COLORS.success,
@@ -148,8 +139,7 @@ export async function ensureCyberTheme(): Promise<void> {
  * Must be called AFTER ensureCyberTheme() to ensure echarts is loaded.
  */
 export function areaGradient(color: string, topAlpha = 0.25, bottomAlpha = 0.01) {
-  if (!echartsModule) throw new Error('areaGradient: call ensureCyberTheme() first');
-  return new echartsModule.graphic.LinearGradient(0, 0, 0, 1, [
+  return new echarts.graphic.LinearGradient(0, 0, 0, 1, [
     { offset: 0, color: color + hexAlpha(topAlpha) },
     { offset: 1, color: color + hexAlpha(bottomAlpha) },
   ]);

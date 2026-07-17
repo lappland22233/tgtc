@@ -81,7 +81,7 @@
       <div v-for="(item, index) in uploadQueue" :key="index"
         style="padding: 12px; background: var(--bg-secondary); border-radius: 8px; margin-bottom: 8px; border: 1px solid var(--border-color);">
         <div style="display: flex; align-items: center; gap: 12px;">
-          <img v-if="item.file.type.startsWith('image/')" :src="getPreviewUrl(item.file)" style="width: 32px; height: 32px; object-fit: cover; border-radius: 4px; flex-shrink: 0;" />
+          <img v-if="item.file.type.startsWith('image/')" :src="getPreviewUrl(item.file)" loading="lazy" style="width: 32px; height: 32px; object-fit: cover; border-radius: 4px; flex-shrink: 0;" />
           <span v-else style="font-size: 20px;">📎</span>
           <div style="flex: 1; min-width: 0;">
             <div style="font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{{ item.file.name }}</div>
@@ -136,7 +136,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, onUnmounted } from 'vue';
-import { MessagePlugin } from 'tdesign-vue-next';
+import MessagePlugin from '@/utils/message';
 import { useFileStore } from '../stores/files';
 import { useTagStore } from '../stores/tags';
 import { api } from '../stores/auth';

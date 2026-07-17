@@ -1,8 +1,8 @@
 import { createApp } from 'vue';
 import { createPinia } from 'pinia';
-import TDesign from 'tdesign-vue-next';
 import App from './App.vue';
 import router from './router';
+import { setupRoutePrefetch } from './composables/useRoutePrefetch';
 import 'tdesign-vue-next/dist/tdesign.css';
 import './assets/styles.css';
 
@@ -15,7 +15,7 @@ async function deferredInit() {
   if (deferredInitDone) return;
   deferredInitDone = true;
 
-  // echarts 主题 — 动态导入，避免 ~1MB 阻塞首屏
+  // echarts 主题 — 动态导入，tree-shaken 后 ~350KB，不阻塞首屏
   const { registerCyberTheme } = await import('./utils/echarts-theme');
   registerCyberTheme();
 
@@ -38,9 +38,11 @@ const pinia = createPinia();
 
 app.use(pinia);
 app.use(router);
-app.use(TDesign);
 
 app.mount('#app');
+
+// 路由级预载：根据当前路由在空闲时预加载相邻路由 chunk
+setupRoutePrefetch(router);
 
 // 首屏渲染完成后，延迟加载非关键模块
 // 使用 requestIdleCallback 避免阻塞用户交互

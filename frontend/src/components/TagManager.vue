@@ -64,7 +64,7 @@
 import { ref, computed, watch } from 'vue';
 import { useTagStore } from '../stores/tags';
 import { useAuthStore } from '../stores/auth';
-import { MessagePlugin } from 'tdesign-vue-next';
+import MessagePlugin from '@/utils/message';
 
 const props = defineProps<{
   visible: boolean;

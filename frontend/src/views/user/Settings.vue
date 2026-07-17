@@ -49,7 +49,7 @@
 
 <script setup lang="ts">
 import { computed, reactive, ref } from 'vue';
-import { MessagePlugin } from 'tdesign-vue-next';
+import MessagePlugin from '@/utils/message';
 import { useAuthStore } from '../../stores/auth';
 import { api } from '../../stores/auth';
 import { getErrorMessage } from '../../utils/error';
