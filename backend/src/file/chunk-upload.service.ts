@@ -320,6 +320,18 @@ export class ChunkUploadService {
   ): Promise<{ id: string; originalName: string }> {
     session.mergeStatus = 'uploading';
 
+    // magic bytes 类型检查
+    const fileSample = this.fileService.getFileSampleFromPath(mergedPath);
+    const typeCheck = await this.fileService.isFileTypeAllowed(
+      session.fileName,
+      fileSample,
+    );
+    if (!typeCheck.allowed) {
+      session.mergeStatus = 'error';
+      session.mergeError = typeCheck.reason || '不允许上传此类型的文件';
+      throw new BadRequestException(typeCheck.reason || '不允许上传此类型的文件');
+    }
+
     const mockFile: Express.Multer.File = {
       fieldname: 'file',
       originalname: session.fileName,
@@ -337,6 +349,8 @@ export class ChunkUploadService {
       mockFile,
       session.fileName,
       { id: session.uploadedBy } as User,
+      undefined,   // tagIds
+      true,        // skipTypeCheck
     );
 
     const pendingDir = path.resolve(process.cwd(), 'tmp', 'uploads', 'pending');
