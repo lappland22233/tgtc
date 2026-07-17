@@ -11,6 +11,7 @@ import * as fs from 'fs';
 import { createReadStream, writeFileSync } from 'fs';
 import * as path from 'path';
 import sharp from 'sharp';
+import { fileTypeFromBuffer } from 'file-type';
 import { InjectQueue } from '@nestjs/bull';
 import { Queue } from 'bull';
 import { QUEUE_NAMES } from '../jobs/bull-queue.module';
@@ -39,48 +40,6 @@ export interface BatchUploadResult {
   success: File[];
   failed: BatchUploadFailedItem[];
 }
-
-/** MIME 类型与扩展名映射，用于验证上传文件的 MIME 类型与扩展名是否一致 */
-const MIME_EXTENSION_MAP: Record<string, string[]> = {
-  '.jpg': ['image/jpeg'],
-  '.jpeg': ['image/jpeg'],
-  '.png': ['image/png'],
-  '.gif': ['image/gif'],
-  '.webp': ['image/webp'],
-  '.svg': ['image/svg+xml'],
-  '.bmp': ['image/bmp'],
-  '.ico': ['image/x-icon', 'image/vnd.microsoft.icon'],
-  '.pdf': ['application/pdf'],
-  '.txt': ['text/plain'],
-  '.md': ['text/markdown', 'text/plain'],
-  '.csv': ['text/csv'],
-  '.json': ['application/json'],
-  '.xml': ['application/xml', 'text/xml'],
-  '.html': ['text/html'],
-  '.css': ['text/css'],
-  '.js': ['text/javascript', 'application/javascript'],
-  '.ts': ['text/typescript', 'application/typescript'],
-  '.zip': ['application/zip', 'application/x-zip-compressed'],
-  '.rar': ['application/vnd.rar', 'application/x-rar-compressed'],
-  '.7z': ['application/x-7z-compressed'],
-  '.tar': ['application/x-tar'],
-  '.gz': ['application/gzip', 'application/x-gzip'],
-  '.doc': ['application/msword'],
-  '.docx': ['application/vnd.openxmlformats-officedocument.wordprocessingml.document'],
-  '.xls': ['application/vnd.ms-excel'],
-  '.xlsx': ['application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'],
-  '.ppt': ['application/vnd.ms-powerpoint'],
-  '.pptx': ['application/vnd.openxmlformats-officedocument.presentationml.presentation'],
-  '.mp3': ['audio/mpeg', 'audio/mp3'],
-  '.mp4': ['video/mp4'],
-  '.avi': ['video/x-msvideo'],
-  '.mov': ['video/quicktime'],
-  '.webm': ['video/webm'],
-  '.m4a': ['audio/mp4', 'audio/x-m4a'],
-  '.ogg': ['audio/ogg', 'video/ogg'],
-  '.wav': ['audio/wav', 'audio/x-wav'],
-  '.flac': ['audio/flac'],
-};
 
 /** 已知复合扩展名列表（优先匹配，防止 .tar.gz 被错误识别为 .gz） */
 const COMPOUND_EXTENSIONS = ['.tar.gz', '.tar.bz2', '.tar.xz'] as const;
@@ -170,87 +129,137 @@ export class FileService implements OnModuleInit {
   }
 
   /**
-   * @deprecated 保留供未来使用，当前文件类型检查使用内联逻辑。
-   *            如需重新启用，恢复此方法并更新 isFileTypeAllowed。
-   *
-   * 从文件名提取扩展名（小写，含点号）
-   * 只取最后一个点之后的部分，防止 .php.jpg 等复合扩展名绕过检查
+   * 从 Multer 文件对象中提取前 maxBytes 字节用于 magic bytes 检测。
+   * 同时支持内存存储 (buffer) 和磁盘存储 (path) 模式。
    */
-  // private _extractExtension(filename: string): string {
-  //   const name = filename.toLowerCase();
-  //   const lastDot = name.lastIndexOf('.');
-  //   return lastDot > 0 ? '.' + name.slice(lastDot + 1) : '';
-  // }
-
-  /**
-   * 检查文件类型是否被允许
-   * - 黑名单 + 空过滤 = 允许所有
-   * - 黑名单 + 有过滤 = 拒绝匹配的
-   * - 白名单 + 空过滤 = 拒绝所有
-   * - 白名单 + 有过滤 = 允许匹配的
-   * 同时验证 MIME 类型与扩展名的一致性
-   */
-  private isFileTypeAllowed(filename: string, mimeType?: string): { allowed: boolean; reason?: string } {
-    if (this.fileTypeMode === 'blacklist' && this.fileTypeFilter.length === 0) {
-      return { allowed: true };
+  private getFileSample(
+    file: Express.Multer.File,
+    maxBytes: number = 4100,
+  ): Buffer {
+    if (file.buffer && file.buffer.length > 0) {
+      const end = Math.min(file.buffer.length, maxBytes);
+      return file.buffer.subarray(0, end);
     }
 
-    const lowerName = filename.toLowerCase();
-
-    // 优先检查复合扩展名，防止 .tar.gz 被 lastIndexOf 错误识别为 .gz
-    let ext = '(无扩展名)';
-    let matchedCompound: string | null = null;
-    for (const ce of COMPOUND_EXTENSIONS) {
-      if (lowerName.endsWith(ce)) {
-        ext = ce;
-        matchedCompound = ce;
-        break;
-      }
-    }
-
-    // 无复合扩展名匹配 → 使用 lastIndexOf 取最后一个点之后的部分
-    if (!matchedCompound) {
-      const lastDot = lowerName.lastIndexOf('.');
-      ext = lastDot > 0 ? '.' + lowerName.slice(lastDot + 1) : '(无扩展名)';
-    }
-
-    if (this.fileTypeMode === 'whitelist' && this.fileTypeFilter.length === 0) {
-      return { allowed: false, reason: `文件类型 ${ext} 被拒绝：白名单模式未配置允许类型` };
-    }
-
-    // 使用已提取的 ext 做精确扩展名比较，避免 endsWith 对完整文件名的模糊匹配
-    const matched = this.fileTypeFilter.includes(ext);
-
-    let allowed: boolean;
-    let reason: string | undefined;
-    if (this.fileTypeMode === 'blacklist') {
-      allowed = !matched;
-      if (!allowed) {
-        reason = `文件类型 ${ext} 被拒绝：该类型在禁止列表中`;
-      }
-    } else {
-      allowed = matched;
-      if (!allowed) {
-        reason = `文件类型 ${ext} 被拒绝：该类型不在允许列表中`;
-      }
-    }
-
-    // 额外检查：如果提供了 MIME 类型，验证其与扩展名的一致性
-    // 复合扩展名跳过 MIME 一致性校验（.tar.gz 的 MIME 是 application/gzip）
-    if (allowed && mimeType && !matchedCompound) {
-      const lastDot = lowerName.lastIndexOf('.');
-      if (lastDot > 0) {
-        const expectedTypes = MIME_EXTENSION_MAP[ext];
-        if (expectedTypes && !expectedTypes.includes(mimeType)) {
-          return {
-            allowed: false,
-            reason: `文件扩展名 ${ext} 与 MIME 类型 ${mimeType} 不匹配`,
-          };
+    if (file.path && fs.existsSync(file.path)) {
+      let fd: number | undefined;
+      try {
+        fd = fs.openSync(file.path, 'r');
+        const buffer = Buffer.alloc(maxBytes);
+        const bytesRead = fs.readSync(fd, buffer, 0, maxBytes, 0);
+        return bytesRead === 0 ? Buffer.alloc(0) : buffer.subarray(0, bytesRead);
+      } finally {
+        if (fd !== undefined) {
+          fs.closeSync(fd);
         }
       }
     }
 
-    return { allowed, reason };
+    return Buffer.alloc(0);
+  }
+
+  /**
+   * 从文件路径读取前 maxBytes 字节（供分片上传合并后使用）
+   */
+  getFileSampleFromPath(
+    filePath: string,
+    maxBytes: number = 4100,
+  ): Buffer {
+    let fd: number | undefined;
+    try {
+      fd = fs.openSync(filePath, 'r');
+      const buffer = Buffer.alloc(maxBytes);
+      const bytesRead = fs.readSync(fd, buffer, 0, maxBytes, 0);
+      return bytesRead === 0 ? Buffer.alloc(0) : buffer.subarray(0, bytesRead);
+    } finally {
+      if (fd !== undefined) {
+        fs.closeSync(fd);
+      }
+    }
+  }
+
+  /**
+   * 检查文件类型是否被允许（含 magic bytes 检测）
+   *
+   * - 有 buffer → 使用 fileTypeFromBuffer() 检测 magic bytes
+   *   - 检测到类型 → 使用检测结果进行过滤
+   *   - 未检测到 → 白名单直接拒绝，黑名单回退到文件名后缀匹配
+   * - 无 buffer → 回退到后缀规则（向后兼容）
+   */
+  async isFileTypeAllowed(
+    filename: string,
+    buffer?: Buffer,
+  ): Promise<{ allowed: boolean; reason?: string }> {
+    // === 阶段 1: Magic bytes 检测 ===
+    let detectedExt: string | null = null;
+
+    if (buffer && buffer.length > 0) {
+      const result = await fileTypeFromBuffer(buffer);
+      if (result) {
+        detectedExt = result.ext;
+      }
+    }
+
+    // === 阶段 2: 确定用于过滤的扩展名 ===
+    let effectiveExt: string;
+
+    if (detectedExt) {
+      const dotExt = `.${detectedExt}`;
+      let matchedCompound: string | null = null;
+      for (const ce of COMPOUND_EXTENSIONS) {
+        if (filename.toLowerCase().endsWith(ce) && ce.endsWith(dotExt)) {
+          matchedCompound = ce;
+          break;
+        }
+      }
+      effectiveExt = matchedCompound || dotExt;
+    } else if (this.fileTypeMode === 'whitelist') {
+      return {
+        allowed: false,
+        reason: '无法识别文件类型，白名单模式下仅允许可明确识别的文件类型',
+      };
+    } else {
+      // 黑名单模式：回退到文件名后缀匹配
+      const lowerName = filename.toLowerCase();
+      let ext = '(无扩展名)';
+      for (const ce of COMPOUND_EXTENSIONS) {
+        if (lowerName.endsWith(ce)) {
+          ext = ce;
+          break;
+        }
+      }
+      if (ext === '(无扩展名)') {
+        const lastDot = lowerName.lastIndexOf('.');
+        ext = lastDot > 0 ? '.' + lowerName.slice(lastDot + 1) : '(无扩展名)';
+      }
+      effectiveExt = ext;
+    }
+
+    // === 阶段 3: 特殊规则 ===
+    if (this.fileTypeMode === 'blacklist' && this.fileTypeFilter.length === 0) {
+      return { allowed: true };
+    }
+    if (this.fileTypeMode === 'whitelist' && this.fileTypeFilter.length === 0) {
+      return {
+        allowed: false,
+        reason: `文件类型 ${effectiveExt} 被拒绝：白名单模式未配置允许类型`,
+      };
+    }
+
+    // === 阶段 4: 过滤器匹配 ===
+    const matched = this.fileTypeFilter.includes(effectiveExt);
+
+    if (this.fileTypeMode === 'blacklist') {
+      if (matched) {
+        return { allowed: false, reason: `文件类型 ${effectiveExt} 被拒绝：该类型在禁止列表中` };
+      }
+    } else {
+      if (!matched) {
+        return { allowed: false, reason: `文件类型 ${effectiveExt} 被拒绝：该类型不在允许列表中` };
+      }
+    }
+
+    return { allowed: true };
   }
 
   /**
@@ -294,6 +303,7 @@ export class FileService implements OnModuleInit {
     originalName: string,
     user: User,
     tagIds?: string[],
+    skipTypeCheck?: boolean,
   ): Promise<File> {
     if (file.size > this.maxFileSize) {
       throw new BadRequestException(`文件大小不能超过 ${this.maxFileSize / 1024 / 1024}MB`);
@@ -301,9 +311,12 @@ export class FileService implements OnModuleInit {
 
     const fileName = this.fixFilenameEncoding(originalName);
 
-    const typeCheck = this.isFileTypeAllowed(fileName, file.mimetype);
-    if (!typeCheck.allowed) {
-      throw new BadRequestException(typeCheck.reason || '不允许上传此类型的文件');
+    if (!skipTypeCheck) {
+      const fileSample = this.getFileSample(file);
+      const typeCheck = await this.isFileTypeAllowed(fileName, fileSample);
+      if (!typeCheck.allowed) {
+        throw new BadRequestException(typeCheck.reason || '不允许上传此类型的文件');
+      }
     }
 
     const tempId = uuidv4();
@@ -356,7 +369,8 @@ export class FileService implements OnModuleInit {
 
     const originalName = this.fixFilenameEncoding(file.originalname);
 
-    const typeCheck = this.isFileTypeAllowed(originalName, file.mimetype);
+    const fileSample = await this.getFileSample(file);
+    const typeCheck = await this.isFileTypeAllowed(originalName, fileSample);
 
     if (!typeCheck.allowed) {
       throw new BadRequestException(typeCheck.reason || '不允许上传此类型的文件');
@@ -423,7 +437,8 @@ export class FileService implements OnModuleInit {
         continue;
       }
       const originalName = this.fixFilenameEncoding(file.originalname);
-      const typeCheck = this.isFileTypeAllowed(originalName, file.mimetype);
+      const fileSample = this.getFileSample(file);
+      const typeCheck = await this.isFileTypeAllowed(originalName, fileSample);
       if (!typeCheck.allowed) {
         preCheckFailed.push({
           name: file.originalname,
@@ -446,7 +461,7 @@ export class FileService implements OnModuleInit {
     for (const file of passPreCheck) {
       try {
         const originalName = this.fixFilenameEncoding(file.originalname);
-        const savedFile = await this.createProcessingFile(file, originalName, user, tagIds);
+        const savedFile = await this.createProcessingFile(file, originalName, user, tagIds, true);
         // 将文件写入持久化路径供后台 processor 读取
         const pendingDir = path.join(process.cwd(), 'tmp', 'uploads', 'pending');
         if (!fs.existsSync(pendingDir)) fs.mkdirSync(pendingDir, { recursive: true });
@@ -1668,7 +1683,8 @@ export class FileService implements OnModuleInit {
 
     const originalName = this.fixFilenameEncoding(file.originalname);
 
-    const typeCheck = this.isFileTypeAllowed(originalName, file.mimetype);
+    const fileSample = await this.getFileSample(file);
+    const typeCheck = await this.isFileTypeAllowed(originalName, fileSample);
     if (!typeCheck.allowed) {
       throw new BadRequestException(typeCheck.reason || '不允许上传此类型的文件');
     }
@@ -1717,7 +1733,8 @@ export class FileService implements OnModuleInit {
             throw new Error('任务已被放弃（客户端连接断开）');
           }
           const originalName = this.fixFilenameEncoding(file.originalname);
-          const typeCheck = this.isFileTypeAllowed(originalName, file.mimetype);
+          const fileSample = this.getFileSample(file);
+          const typeCheck = await this.isFileTypeAllowed(originalName, fileSample);
           if (!typeCheck.allowed) {
             failed.push({ name: originalName, reason: typeCheck.reason || '不允许上传此类型的文件' });
             continue;

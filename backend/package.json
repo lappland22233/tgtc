@@ -38,6 +38,7 @@
     "class-transformer": "^0.5.1",
     "class-validator": "^0.14.0",
     "cookie-parser": "^1.4.7",
+    "file-type": "^20.5.0",
     "form-data": "^4.0.0",
     "multer": "^1.4.5-lts.1",
     "nodemailer": "^6.9.7",
