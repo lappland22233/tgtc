@@ -11,9 +11,9 @@
         </div>
       </div>
     </div>
-    <router-view v-else v-slot="{ Component }">
+    <router-view v-else v-slot="{ Component, route }">
       <transition name="fade" mode="out-in">
-        <component :is="Component" />
+        <component :is="Component" :key="route.path" />
       </transition>
     </router-view>
   </t-config-provider>
