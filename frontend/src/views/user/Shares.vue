@@ -212,32 +212,11 @@ onMounted(fetchShares);
 </script>
 
 <style scoped>
+/* .page-header / .card / .empty-state 使用全局定义，见 assets/styles.css */
+
 .shares-page {
   max-width: 960px;
   margin: 0 auto;
-}
-
-.page-header {
-  margin-bottom: 20px;
-}
-
-.page-header h1 {
-  font-size: 24px;
-  font-weight: 600;
-  margin: 0 0 4px;
-}
-
-.page-header p {
-  color: var(--td-text-color-secondary);
-  font-size: 14px;
-  margin: 0;
-}
-
-.card {
-  background: var(--td-bg-color-container);
-  border: 1px solid var(--td-border-level-2-color);
-  border-radius: 8px;
-  padding: 20px;
 }
 
 .filter-bar {
@@ -247,23 +226,6 @@ onMounted(fetchShares);
   margin-bottom: 16px;
   flex-wrap: wrap;
   gap: 12px;
-}
-
-.empty-state {
-  text-align: center;
-  padding: 48px 0;
-  color: var(--td-text-color-secondary);
-}
-
-.empty-icon {
-  font-size: 48px;
-  margin-bottom: 12px;
-}
-
-.empty-hint {
-  font-size: 13px;
-  color: var(--td-text-color-placeholder);
-  margin-top: 8px;
 }
 
 .share-list {
@@ -277,14 +239,14 @@ onMounted(fetchShares);
   align-items: flex-start;
   gap: 12px;
   padding: 16px;
-  background: var(--td-bg-color-secondarycontainer);
-  border: 1px solid var(--td-border-level-1-color);
-  border-radius: 8px;
-  transition: border-color 0.2s;
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  transition: border-color var(--duration-fast);
 }
 
 .share-item:hover {
-  border-color: var(--td-brand-color);
+  border-color: var(--border-accent);
 }
 
 .share-item.disabled {
@@ -321,31 +283,31 @@ onMounted(fetchShares);
 .meta-tag {
   font-size: 12px;
   padding: 2px 8px;
-  border-radius: 4px;
-  background: var(--td-bg-color-container);
-  color: var(--td-text-color-secondary);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-surface);
+  color: var(--text-secondary);
 }
 
-.meta-tag.file { color: var(--td-brand-color); }
-.meta-tag.folder { color: var(--td-warning-color); }
-.meta-tag.encrypted { color: var(--td-error-color); }
-.meta-tag.public { color: var(--td-success-color); }
+.meta-tag.file { color: var(--color-accent); }
+.meta-tag.folder { color: var(--color-warning); }
+.meta-tag.encrypted { color: var(--color-danger); }
+.meta-tag.public { color: var(--color-success); }
 
 .meta-date {
   font-size: 12px;
-  color: var(--td-text-color-placeholder);
+  color: var(--text-tertiary);
 }
 
 .share-url {
   font-size: 12px;
-  color: var(--td-text-color-secondary);
+  color: var(--text-secondary);
 }
 
 .share-url code {
-  font-family: 'SFMono-Regular', Consolas, monospace;
-  background: var(--td-bg-color-container);
+  font-family: var(--font-mono);
+  background: var(--color-bg-surface);
   padding: 2px 6px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   word-break: break-all;
 }
 
@@ -362,7 +324,7 @@ onMounted(fetchShares);
   justify-content: center;
 }
 
-@media (max-width: 640px) {
+@media (max-width: 768px) {
   .share-item {
     flex-direction: column;
     align-items: stretch;

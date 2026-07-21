@@ -602,7 +602,7 @@ onUnmounted(() => {
   transition: border-color 0.15s, transform 0.1s;
 }
 .metric-card:hover { transform: translateY(-2px); }
-.metric-card.active { border-color: var(--brand-color, #0052D9); }
+.metric-card.active { border-color: var(--color-accent); }
 .metric-label {
   font-size: 12px;
   color: var(--text-secondary);
@@ -715,14 +715,14 @@ onUnmounted(() => {
   color: var(--text-primary);
   word-break: break-all;
 }
-.d-value.mono { font-family: 'SFMono-Regular', Consolas, monospace; font-size: 12px; }
+.d-value.mono { font-family: var(--font-mono); font-size: 12px; }
 .d-value.wrap { white-space: pre-wrap; }
 .detail-data { display: flex; flex-direction: column; gap: 8px; }
 .json-block {
   background: var(--bg-color, rgba(0,0,0,0.25));
   border-radius: 8px;
   padding: 12px;
-  font-family: 'SFMono-Regular', Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.5;
   max-height: 420px;

@@ -4,7 +4,7 @@
     <div class="bg-gradient" />
 
     <!-- 状态分支 -->
-    <div class="share-container">
+    <div class="share-container" :class="{ 'share-container--wide': state.kind === 'folder' }">
       <!-- 加载中 -->
       <div v-if="state.kind === 'loading'" class="state-card">
         <t-loading size="large" text="加载中..." />
@@ -236,6 +236,15 @@ onMounted(fetchInfo);
   padding: 24px;
   position: relative;
   z-index: 1;
+}
+
+/* 文件夹分享：更宽的容器 + 顶部对齐（内容较高，避免居中裁切） */
+.share-container--wide {
+  max-width: 960px;
+}
+
+.share-view:has(.share-container--wide) {
+  align-items: flex-start;
 }
 
 .state-card {

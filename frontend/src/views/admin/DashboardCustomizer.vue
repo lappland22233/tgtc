@@ -1,7 +1,7 @@
 <template>
   <div class="dashboard-customizer">
-    <div class="page-header">
-      <h2>仪表盘定制</h2>
+    <div class="toolbar-header">
+      <h1>仪表盘定制</h1>
       <t-space>
         <t-select v-model="currentDashboardId" placeholder="选择仪表盘" style="width:220px" @change="loadDashboard">
           <t-option v-for="d in dashboards" :key="d.id" :value="d.id" :label="d.name" />
@@ -268,10 +268,12 @@ onMounted(() => { fetchDashboards(); fetchPresets(); });
 
 <style scoped>
 .dashboard-customizer { padding: 0; }
-.page-header {
+.toolbar-header {
   display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;
 }
-.page-header h2 { margin: 0; }
+.toolbar-header h1 {
+  margin: 0; font-family: var(--font-display); font-size: 22px; font-weight: 700; letter-spacing: -0.02em;
+}
 .dashboard-grid {
   display: grid;
   grid-template-columns: repeat(12, 1fr);
@@ -279,9 +281,9 @@ onMounted(() => { fetchDashboards(); fetchPresets(); });
   margin-bottom: 16px;
 }
 .widget-card {
-  background: var(--bg-color-container);
+  background: var(--color-bg-surface);
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   padding: 16px;
   min-height: 120px;
 }
@@ -290,13 +292,13 @@ onMounted(() => { fetchDashboards(); fetchPresets(); });
 }
 
 @media (max-width: 768px) {
-  .page-header {
+  .toolbar-header {
     flex-direction: column;
     align-items: flex-start;
     gap: 12px;
   }
 
-  .page-header > :deep(.t-space) {
+  .toolbar-header > :deep(.t-space) {
     flex-wrap: wrap;
   }
 

@@ -85,7 +85,7 @@
                 display: 'inline-flex',
                 alignItems: 'center',
                 gap: '4px',
-                color: typeof item !== 'string' && item.danger && uploadConfig.fileTypeMode === 'blacklist' ? 'var(--error-color)' : undefined,
+                color: typeof item !== 'string' && item.danger && uploadConfig.fileTypeMode === 'blacklist' ? 'var(--color-danger)' : undefined,
               }"
             >
               <t-checkbox
@@ -96,7 +96,7 @@
               </t-checkbox>
               <span
                 v-if="typeof item !== 'string' && item.danger"
-                style="font-size: 10px; color: var(--error-color); cursor: help;"
+                style="font-size: 10px; color: var(--color-danger); cursor: help;"
                 title="黑名单模式下建议默认勾选禁止此类型"
               >&#9888;</span>
             </span>

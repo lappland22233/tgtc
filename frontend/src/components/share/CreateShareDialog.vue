@@ -247,7 +247,7 @@ function handleClose() {
 }
 
 .result-url :deep(input) {
-  font-family: 'SFMono-Regular', Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 13px;
 }
 

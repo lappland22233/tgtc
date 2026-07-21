@@ -8,10 +8,12 @@
 
       <!-- 注册已关闭提示 -->
       <div v-if="!authStatus.registrationEnabled" class="reg-closed">
-        <div class="reg-closed-icon">🔒</div>
+        <div class="reg-closed-icon">
+          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 018 0v4"/></svg>
+        </div>
         <h3>注册功能已关闭</h3>
         <p>请联系管理员开启注册功能</p>
-        <t-button theme="primary" style="margin-top: 16px;" @click="router.push('/login')">
+        <t-button theme="primary" class="reg-closed-btn" @click="router.push('/login')">
           返回登录
         </t-button>
       </div>
@@ -64,6 +66,7 @@
               @click="sendCode"
               variant="outline"
               theme="primary"
+              size="large"
             >
               {{ countdown > 0 ? `${countdown}s` : '发送验证码' }}
             </t-button>
@@ -214,23 +217,7 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-.auth-footer {
-  text-align: center;
-  margin-top: 28px;
-  color: var(--text-secondary);
-  font-size: 14px;
-}
-
-.auth-link {
-  color: var(--color-accent);
-  text-decoration: none;
-  font-weight: 500;
-  transition: color var(--duration-fast);
-}
-
-.auth-link:hover {
-  color: var(--color-cyan);
-}
+/* .auth-footer / .auth-link 已提取为全局共享类，见 assets/styles.css */
 
 .code-row {
   display: flex;
@@ -246,17 +233,14 @@ onUnmounted(() => {
   white-space: nowrap;
 }
 
-.code-input {
-  flex: 1;
-}
-
 .reg-closed {
   text-align: center;
   padding: 40px 0;
 }
 
 .reg-closed-icon {
-  font-size: 48px;
+  display: inline-flex;
+  color: var(--text-tertiary);
   margin-bottom: 16px;
 }
 
@@ -270,5 +254,9 @@ onUnmounted(() => {
 .reg-closed p {
   color: var(--text-secondary);
   font-size: 14px;
+}
+
+.reg-closed-btn {
+  margin-top: 16px;
 }
 </style>

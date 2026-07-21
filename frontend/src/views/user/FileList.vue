@@ -1,411 +1,429 @@
 <template>
   <div
+    class="filelist-page"
     @dragover.prevent="isDraggedOver = true"
     @dragenter="handleDragEnter"
     @dragleave="handleDragLeave"
     @drop.prevent="handleDrop"
-    style="position: relative;"
   >
     <!-- 拖拽上传覆盖层 -->
     <div v-if="isDraggedOver" class="drop-overlay">
       <div class="drop-overlay-content">
-        <div style="font-size: 64px; margin-bottom: 16px;">📤</div>
+        <t-icon name="upload" class="drop-overlay-icon" />
         <h2>释放文件以上传</h2>
       </div>
     </div>
 
-    <div class="drive-layout">
-      <!-- 左侧文件夹树侧边栏（桌面端显示） -->
-      <aside class="folder-sidebar" v-if="!isMobile">
-        <FolderTree
-          @create="openCreateFolderDialog"
-          @navigate="onFolderNavigate"
-          @rename="openRenameFolderDialog"
-          @move="openMoveDialogForFolder"
-        />
-      </aside>
-
-      <!-- 主内容区 -->
-      <div class="drive-main">
-        <div class="page-header">
-          <h1>{{ folderStore.currentFolderName }}</h1>
-          <p>管理您上传的所有文件，支持拖拽上传</p>
-        </div>
-
-        <FolderBreadcrumb @navigate="onFolderNavigate" />
-
-        <div class="card">
-      <!-- 主工具栏：视图切换 + 搜索（左）／上传（右） -->
-      <div class="fl-toolbar">
-        <div class="fl-toolbar-left">
-          <t-radio-group
-            :value="viewMode"
-            variant="default-filled"
-            size="medium"
-            @change="onViewModeChange"
+    <!-- ① 地址栏：文件路径 + 新建文件夹 / 上传 -->
+    <div class="fl-addressbar">
+      <nav class="fl-path" aria-label="当前位置">
+        <span
+          class="fl-path-item"
+          :class="{ 'is-current': folderStore.currentFolderId === null }"
+          @click="onFolderNavigate(null)"
+        >
+          <t-icon name="home" class="fl-path-home" />
+          我的文件
+        </span>
+        <template v-for="(folder, idx) in folderStore.breadcrumb" :key="folder.id">
+          <t-icon name="chevron-right" class="fl-path-sep" />
+          <span
+            class="fl-path-item"
+            :class="{ 'is-current': idx === folderStore.breadcrumb.length - 1 }"
+            :title="folder.name"
+            @click="onFolderNavigate(folder.id)"
           >
-            <t-radio-button value="card">
-              <t-icon name="view-module" style="vertical-align: middle;" />
-              <span style="margin-left: 4px;">卡片</span>
-            </t-radio-button>
-            <t-radio-button value="list">
-              <t-icon name="view-list" style="vertical-align: middle;" />
-              <span style="margin-left: 4px;">列表</span>
-            </t-radio-button>
-          </t-radio-group>
-          <form autocomplete="off" class="fl-search-form" @submit.prevent="handleSearch">
-            <t-input v-model="search" placeholder="搜索文件名..." class="search-input-field fl-search-input" autocomplete="off" name="q-file-search" @enter="handleSearch" />
-            <t-button theme="default" @click="handleSearch">搜索</t-button>
-            <t-button theme="default" variant="text" v-if="search" @click="handleClearSearch">清除</t-button>
-          </form>
-        </div>
-        <div class="fl-toolbar-right">
-          <t-button theme="primary" @click="showUploadModal = true">
-            + 上传文件
-          </t-button>
-        </div>
-      </div>
-
-      <!-- 批量操作栏：仅在选中文件时出现 -->
-      <div v-if="selectedFileIds.length > 0" class="fl-batchbar">
-        <span class="fl-batchbar-count">已选 {{ selectedFileIds.length }} 项</span>
-        <t-button
-          v-if="selectedImages.length > 0 && selectedImages.length === selectedFileIds.length"
-          theme="primary"
-          variant="outline"
-          size="small"
-          @click="convertToMarkdown"
-        >
-          批量 MK（{{ selectedImages.length }}）
+            {{ folder.name }}
+          </span>
+        </template>
+      </nav>
+      <div class="fl-addressbar-actions">
+        <t-button theme="default" variant="outline" @click="openCreateFolderDialog">
+          <template #icon><t-icon name="folder-add" /></template>
+          新建文件夹
         </t-button>
-        <t-button
-          v-if="!(selectedImages.length === selectedFileIds.length)"
-          theme="default"
-          variant="outline"
-          size="small"
-          @click="copyDownloadLinks"
-        >
-          复制下载链接
-        </t-button>
-        <t-button theme="default" variant="outline" size="small" @click="openBatchTagDialog">
-          批量标签
-        </t-button>
-        <t-button theme="default" variant="outline" size="small" @click="openMoveDialogForFiles()">
-          移动到...
-        </t-button>
-        <t-button theme="default" variant="text" size="small" @click="clearSelection">
-          清除选择
+        <t-button theme="primary" @click="showUploadModal = true">
+          <template #icon><t-icon name="upload" /></template>
+          上传文件
         </t-button>
       </div>
+    </div>
 
-      <!-- 标签筛选栏 -->
-      <div
-        :style="isMobile
-          ? 'display: flex; gap: 4px; margin-bottom: 12px; flex-wrap: wrap; align-items: center; font-size: 12px;'
-          : 'display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; align-items: center;'">
-        <t-tag
-          v-for="tagId in selectedTagIds"
-          :key="tagId"
-          closable
-          size="small"
-          theme="primary"
-          variant="light"
-          @close="removeTagFilter(tagId)"
+    <!-- ② 工具栏：搜索 + 标签 -->
+    <div class="fl-toolbar">
+      <form autocomplete="off" class="fl-search-form" @submit.prevent="handleSearch">
+        <t-input
+          v-model="search"
+          placeholder="搜索当前文件夹..."
+          class="fl-search-input"
+          autocomplete="off"
+          name="q-file-search"
+          clearable
+          @enter="handleSearch"
+          @clear="handleClearSearch"
         >
-          {{ getTagName(tagId) }}
-        </t-tag>
-        <t-button v-if="selectedTagIds.length > 0" size="small" variant="text" @click="clearTagFilters">
-          清除
-        </t-button>
-        <t-button size="small" variant="outline" @click="showTagManager = true">
+          <template #prefix-icon><t-icon name="search" /></template>
+        </t-input>
+        <t-button theme="default" @click="handleSearch">搜索</t-button>
+      </form>
+      <div class="fl-toolbar-right">
+        <t-button size="medium" variant="outline" @click="showTagManager = true">
+          <template #icon><t-icon name="tag" /></template>
           {{ (tagStore.tags && tagStore.tags.length > 0) || selectedTagIds.length > 0 ? '标签筛选' : '管理标签' }}
         </t-button>
       </div>
+    </div>
 
-      <!-- Markdown 结果区域 -->
-      <div v-if="markdownResult" style="margin-bottom: 16px; padding: 16px; background: var(--bg-secondary); border-radius: 8px; border: 1px solid var(--border-color);">
-        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-          <span style="font-weight: 500;">Markdown 结果</span>
-          <div style="display: flex; gap: 8px;">
-            <t-button size="small" theme="primary" variant="outline" @click="copyMarkdown">复制</t-button>
-            <t-button size="small" theme="default" variant="text" @click="markdownResult = ''">关闭</t-button>
-          </div>
-        </div>
-        <t-input v-model="markdownResult" type="textarea" readonly :rows="6" autocomplete="off" />
-      </div>
-
-      <!-- 拖拽提示（空状态：当前文件夹下既无文件也无子文件夹） -->
-      <div v-if="fileStore.files.length === 0 && subfoldersInCurrentFolder.length === 0 && !fileStore.loading && !cursorLoading"
-        class="upload-zone"
-        @click="showUploadModal = true"
+    <!-- ③ 批量操作栏：仅在选中文件时出现 -->
+    <div v-if="selectedFileIds.length > 0" class="fl-batchbar">
+      <span class="fl-batchbar-count">已选 {{ selectedFileIds.length }} 项</span>
+      <t-button
+        v-if="selectedImages.length > 0 && selectedImages.length === selectedFileIds.length"
+        theme="primary"
+        variant="outline"
+        size="small"
+        @click="convertToMarkdown"
       >
-        <div style="font-size: 48px; margin-bottom: 16px;">📁</div>
-        <h3>拖拽文件到此处，或点击上传</h3>
-        <p style="color: var(--text-secondary); margin-top: 8px;">
-          支持图片、PDF、ZIP 等格式，单文件最大限制见系统配置
-        </p>
-      </div>
+        批量 MK（{{ selectedImages.length }}）
+      </t-button>
+      <t-button
+        v-if="!(selectedImages.length === selectedFileIds.length)"
+        theme="default"
+        variant="outline"
+        size="small"
+        @click="copyDownloadLinks"
+      >
+        复制下载链接
+      </t-button>
+      <t-button theme="default" variant="outline" size="small" @click="openBatchTagDialog">批量标签</t-button>
+      <t-button theme="default" variant="outline" size="small" @click="openMoveDialogForFiles()">移动到...</t-button>
+      <t-button theme="default" variant="text" size="small" @click="clearSelection">清除选择</t-button>
+    </div>
 
-      <t-loading v-if="fileStore.loading || cursorLoading" />
-      <div v-else-if="displayFiles.length > 0 || subfoldersInCurrentFolder.length > 0">
-        <!-- 卡片视图（默认）：响应式网格，桌面端 4-5 列，平板 3 列，手机 2 列 -->
-        <div v-if="viewMode === 'card'" class="card-grid-view">
-          <!-- 文件夹卡片 -->
-          <FolderCard
+    <!-- ④ 已选标签筛选 -->
+    <div v-if="selectedTagIds.length > 0" class="fl-tagfilters">
+      <t-tag
+        v-for="tagId in selectedTagIds"
+        :key="tagId"
+        closable
+        size="small"
+        theme="primary"
+        variant="light"
+        @close="removeTagFilter(tagId)"
+      >
+        {{ getTagName(tagId) }}
+      </t-tag>
+      <t-button size="small" variant="text" @click="clearTagFilters">清除全部</t-button>
+    </div>
+
+    <!-- ⑤ Markdown 结果区域 -->
+    <div v-if="markdownResult" class="fl-markdown">
+      <div class="fl-markdown-head">
+        <span class="fl-markdown-title">Markdown 结果</span>
+        <div class="fl-markdown-actions">
+          <t-button size="small" theme="primary" variant="outline" @click="copyMarkdown">复制</t-button>
+          <t-button size="small" theme="default" variant="text" @click="markdownResult = ''">关闭</t-button>
+        </div>
+      </div>
+      <t-input v-model="markdownResult" type="textarea" readonly :rows="6" autocomplete="off" />
+    </div>
+
+    <!-- ⑥ 空状态：当前文件夹下既无文件也无子文件夹 -->
+    <div
+      v-if="fileStore.files.length === 0 && subfoldersInCurrentFolder.length === 0 && !fileStore.loading && !cursorLoading"
+      class="upload-zone"
+      @click="showUploadModal = true"
+    >
+      <t-icon name="folder-add" class="empty-upload-icon" />
+      <h3>拖拽文件到此处，或点击上传</h3>
+      <p class="empty-upload-hint">支持图片、PDF、ZIP 等格式，单文件最大限制见系统配置</p>
+    </div>
+
+    <!-- ⑦ OS 风格统一列表：文件夹与文件混排（文件夹在前） -->
+    <t-loading v-if="fileStore.loading || cursorLoading" class="fl-loading" />
+    <div v-else-if="displayFiles.length > 0 || subfoldersInCurrentFolder.length > 0" class="os-list card">
+      <!-- 桌面端：表格式列表 -->
+      <div v-if="!isMobile" class="os-list-scroll">
+        <div class="os-list-inner">
+          <!-- 表头 -->
+          <div class="os-row os-head">
+            <div class="os-cell os-check">
+              <t-checkbox
+                :checked="isAllSelected"
+                :indeterminate="isIndeterminate"
+                @change="toggleSelectAll"
+              />
+            </div>
+            <div class="os-cell os-name os-sortable" @click="toggleSort('originalName')">
+              名称
+              <t-icon
+                :name="sortBy === 'originalName' ? (sortOrder === 'DESC' ? 'caret-down-small' : 'caret-up-small') : 'view-list'"
+                class="os-sort-icon"
+                :class="{ active: sortBy === 'originalName' }"
+              />
+            </div>
+            <div class="os-cell os-size">大小</div>
+            <div class="os-cell os-access">访问权限</div>
+            <div class="os-cell os-password">加密</div>
+            <div class="os-cell os-count">访问次数</div>
+            <div class="os-cell os-expires">限时访问</div>
+            <div class="os-cell os-date os-sortable" @click="toggleSort('createdAt')">
+              上传时间
+              <t-icon
+                :name="sortBy === 'createdAt' ? (sortOrder === 'DESC' ? 'caret-down-small' : 'caret-up-small') : 'view-list'"
+                class="os-sort-icon"
+                :class="{ active: sortBy === 'createdAt' }"
+              />
+            </div>
+            <div class="os-cell os-ops">操作</div>
+          </div>
+
+          <!-- 文件夹行（OS 风格，双击进入） -->
+          <div
             v-for="folder in subfoldersInCurrentFolder"
             :key="`folder-${folder.id}`"
-            :folder="folder"
-            :selectable="false"
-            @dblclick="onFolderCardOpen"
-            @open="onFolderCardOpen"
-            @rename="onFolderCardRename"
-            @move="onFolderCardMove"
-            @delete="onFolderCardDelete"
-          />
-          <!-- 文件卡片 -->
-          <FileCard
+            class="os-row os-folder"
+            @dblclick="onFolderOpen(folder)"
+          >
+            <div class="os-cell os-check"></div>
+            <div class="os-cell os-name" :title="folder.name">
+              <t-icon name="folder" class="os-folder-icon" />
+              <span class="os-name-text">{{ folder.name }}</span>
+              <t-tag size="small" theme="warning" variant="light" class="os-kind-tag">文件夹</t-tag>
+            </div>
+            <div class="os-cell os-size os-muted">{{ folder.children?.length ? `${folder.children.length} 项` : '—' }}</div>
+            <div class="os-cell os-access os-muted">—</div>
+            <div class="os-cell os-password os-muted">—</div>
+            <div class="os-cell os-count os-muted">—</div>
+            <div class="os-cell os-expires os-muted">—</div>
+            <div class="os-cell os-date os-muted">{{ formatDate(folder.createdAt) }}</div>
+            <div class="os-cell os-ops" @click.stop>
+              <t-button size="small" variant="text" @click="onFolderOpen(folder)">
+                <template #icon><t-icon name="folder-opened" /></template>打开
+              </t-button>
+              <t-button size="small" variant="text" @click="onFolderRename(folder)">重命名</t-button>
+              <t-button size="small" variant="text" @click="onFolderMove(folder)">移动</t-button>
+              <t-button size="small" variant="text" @click="onFolderShare(folder)">分享</t-button>
+              <t-button size="small" theme="danger" variant="text" @click="onFolderDelete(folder)">删除</t-button>
+            </div>
+          </div>
+
+          <!-- 文件行 -->
+          <div
             v-for="file in displayFiles"
             :key="file.id"
-            :file="file"
-            :selected="selectedFileIds.includes(file.id)"
-            :selectable="true"
-            @toggle-select="onCardToggleSelect"
-            @dblclick="onCardDownload"
-            @download="onCardDownload"
-            @share="onCardShare"
-            @move="onCardMove"
-            @tag="onCardTag"
-            @delete="onCardDelete"
-          />
-        </div>
-
-        <!-- 列表视图 -->
-        <template v-else>
-          <!-- 桌面端：现有表格 -->
-          <t-table
-            v-if="!isMobile"
-            ref="tableRef"
-            :data="displayFiles"
-            :columns="columns"
-            :row-class-name="getRowClassName"
-            row-key="id"
-            hover
-            table-layout="auto"
-          :selected-row-keys="selectedFileIds"
-          :scroll="pageMode === 'infinite' ? { type: 'virtual', rowHeight: 56, bufferSize: 10, isFixedRowHeight: true } : undefined"
-          :max-height="pageMode === 'infinite' ? 'calc(100vh - 280px)' : undefined"
-          @select-change="handleSelectChange"
-          @sort-change="handleSortChange"
-        >
-          <template #originalName="{ row }">
-            <div style="display: flex; align-items: center; gap: 12px;">
-              <ThumbnailImg :file-id="row.id" :mime-type="row.mimeType" :size="36" :emoji="getFileEmoji(row.mimeType)" />
-              <div style="min-width: 0;">
-                <span :class="{ 'deleted-name filename-text': row.isDeleted, 'filename-text': !row.isDeleted }">{{ row.originalName }}</span>
-                <div style="margin-top: 2px;">
-                  <t-tag v-if="row.status === 'error'" theme="danger" size="small">上传失败</t-tag>
-                  <t-tag v-else-if="row.status === 'processing'" theme="primary" size="small">处理中</t-tag>
-                  <t-tag v-else-if="row.isDeleted && row.deletedByAdmin" theme="danger" size="small">被管理员删除</t-tag>
-                  <t-tag v-else-if="row.isDeleted" theme="warning" size="small">删除中</t-tag>
-                  <span v-if="row.tags?.length" style="display: inline-flex; gap: 4px; margin-left: 4px;">
-                    <span
-                      v-for="tag in row.tags"
-                      :key="tag.id"
-                      style="cursor: pointer;"
-                      @click.stop="addTagFilter(tag.id)"
-                    >
-                      <t-tag
-                        size="small"
-                        variant="light"
-                        :style="{ background: tag.color + '20', color: tag.color, borderColor: tag.color + '40' }"
-                      >
-                        {{ tag.name }}
-                      </t-tag>
-                    </span>
-                  </span>
-                </div>
-              </div>
+            class="os-row os-file"
+            :class="getRowClassName({ row: file })"
+            @dblclick="isFileActionable(file) && downloadFile(file)"
+          >
+            <div class="os-cell os-check">
+              <t-checkbox
+                v-if="!file.isDeleted && file.status !== 'processing'"
+                :checked="selectedFileIds.includes(file.id)"
+                @change="toggleFileSelect(file)"
+              />
             </div>
-          </template>
-          <template #size="{ row }">{{ formatSize(row.size) }}</template>
-          <template #accessType="{ row }">
-            <t-select
-              v-if="isFileActionable(row)"
-              :value="row.accessType"
-              @change="(val: string) => handleAccessTypeChange(row.id, val)"
-              :options="[
-                { label: '公开', value: 'public' },
-                { label: '私有', value: 'private' }
-              ]"
-              style="width: 100px;"
-            />
-            <span v-else-if="row.status === 'processing'" class="deleted-label">处理中</span>
-            <span v-else class="deleted-label">删除中</span>
-          </template>
-          <template #password="{ row }">
-            <t-button
-              size="small"
-              :theme="row.hasPassword ? 'warning' : 'default'"
-              variant="outline"
-              :disabled="!isFileActionable(row)"
-              @click="openPasswordDialog(row)"
-            >
-              {{ row.hasPassword ? '🔒 已加密' : '🔓 未加密' }}
-            </t-button>
-          </template>
-          <template #expiresIn="{ row }">
-            <t-select
-              :value="row.expiresIn"
-              @change="(val: number | null) => handleExpiresChange(row.id, val)"
-              :disabled="!isFileActionable(row)"
-              :options="expiresOptions"
-              style="width: 100px;"
-            />
-          </template>
-          <template #maxAccessCount="{ row }">
-            <t-input-number
-              :value="row.maxAccessCount"
-              :min="-1"
-              :disabled="!isFileActionable(row)"
-              @change="(val: number) => handleAccessCountChange(row.id, val)"
-              style="width: 120px;"
-            />
-          </template>
-          <template #createdAt="{ row }">
-            <div>
-              <div>{{ formatDate(row.createdAt) }}</div>
-              <div v-if="row.isDeleted && row.deleteRequestedAt" style="font-size: 11px; color: var(--color-warning); margin-top: 2px;">
-                删除于 {{ formatDate(row.deleteRequestedAt) }}
-              </div>
-            </div>
-          </template>
-          <template #operations="{ row }">
-            <!-- 处理中状态：禁止所有操作 -->
-            <template v-if="row.status === 'processing'">
-              <span style="color: var(--text-placeholder); font-size: 12px;">处理中，请稍后...</span>
-            </template>
-            <!-- 已删除状态：显示恢复和强制删除 -->
-            <template v-else-if="row.isDeleted">
-              <t-button
-                size="small"
-                theme="success"
-                variant="text"
-                :disabled="row.deletedByAdmin && !isAdmin"
-                @click="handleRestore(row.id)"
-              >
-                恢复
-              </t-button>
-              <t-button
-                v-if="isAdmin"
-                size="small"
-                theme="danger"
-                variant="text"
-                @click="handleForceDelete(row.id)"
-              >
-                强制删除
-              </t-button>
-            </template>
-            <!-- 正常状态：显示正常操作 -->
-            <template v-else>
-              <t-button size="small" theme="primary" variant="text" @click="copyLink(row)">复制链接</t-button>
-              <t-button size="small" theme="default" variant="text" @click="downloadFile(row)">下载</t-button>
-              <t-button size="small" variant="text" @click="openTagEditor(row)">标签</t-button>
-              <t-button size="small" theme="danger" variant="text" @click="handleDelete(row)">删除</t-button>
-            </template>
-          </template>
-        </t-table>
-
-        <!-- 移动端：卡片列表 -->
-        <div v-if="isMobile" class="mobile-card-list">
-          <div v-for="file in displayFiles" :key="file.id" class="mobile-file-card">
-            <div class="mobile-file-card-header">
-              <ThumbnailImg :file-id="file.id" :mime-type="file.mimeType" :size="40" :emoji="getFileEmoji(file.mimeType)" />
-              <div style="flex: 1; min-width: 0;">
-                <div class="mobile-file-name" :class="{ 'deleted-name': file.isDeleted }">
+            <div class="os-cell os-name">
+              <ThumbnailImg :file-id="file.id" :mime-type="file.mimeType" :size="32" :emoji="getFileEmoji(file.mimeType)" />
+              <div class="os-name-block">
+                <span class="os-name-text" :class="{ 'deleted-name': file.isDeleted }" :title="file.originalName">
                   {{ file.originalName }}
-                </div>
-                <div style="font-size: 12px; color: var(--text-secondary); margin-top: 2px;">
-                  {{ formatSize(file.size) }} · {{ formatDate(file.createdAt) }}
-                </div>
-                <div style="display: flex; gap: 4px; margin-top: 4px; flex-wrap: wrap;">
-                  <t-tag v-if="file.isDeleted && file.deletedByAdmin" theme="danger" size="small">被管理员删除</t-tag>
+                </span>
+                <div class="os-name-sub">
+                  <t-tag v-if="file.status === 'error'" theme="danger" size="small">上传失败</t-tag>
+                  <t-tag v-else-if="file.status === 'processing'" theme="primary" size="small">处理中</t-tag>
+                  <t-tag v-else-if="file.isDeleted && file.deletedByAdmin" theme="danger" size="small">被管理员删除</t-tag>
                   <t-tag v-else-if="file.isDeleted" theme="warning" size="small">删除中</t-tag>
-                  <t-tag v-else-if="file.accessType === 'public'" theme="success" size="small">公开</t-tag>
-                  <t-tag v-else theme="default" size="small">私有</t-tag>
-                  <t-tag v-if="file.hasPassword" theme="warning" size="small">已加密</t-tag>
                   <span
-                    v-for="tag in file.tags?.slice(0, 2)"
+                    v-for="tag in file.tags"
                     :key="tag.id"
-                    style="cursor: pointer;"
+                    class="os-tag-click"
                     @click.stop="addTagFilter(tag.id)"
                   >
                     <t-tag
                       size="small"
                       variant="light"
-                      :style="{ background: tag.color + '18', color: tag.color, borderColor: tag.color + '33' }"
+                      :style="{ background: tag.color + '20', color: tag.color, borderColor: tag.color + '40' }"
                     >
                       {{ tag.name }}
                     </t-tag>
                   </span>
-                  <span v-if="file.tags && file.tags.length > 2" style="font-size: 11px; color: var(--text-secondary);">
-                    +{{ file.tags.length - 2 }}
-                  </span>
                 </div>
               </div>
             </div>
-            <!-- 正常状态操作 -->
-            <div v-if="!file.isDeleted" class="mobile-file-card-actions">
-              <t-button size="small" theme="primary" variant="text" @click="copyLink(file)">复制</t-button>
-              <t-button size="small" variant="text" @click="downloadFile(file)">下载</t-button>
-              <t-button size="small" variant="text" @click="openTagEditor(file)">标签</t-button>
-              <t-button size="small" theme="danger" variant="text" @click="handleDelete(file)">删除</t-button>
+            <div class="os-cell os-size os-mono">{{ formatSize(file.size) }}</div>
+            <div class="os-cell os-access">
+              <t-select
+                v-if="isFileActionable(file)"
+                :value="file.accessType"
+                size="small"
+                @change="(val: string) => handleAccessTypeChange(file.id, val)"
+                :options="[
+                  { label: '公开', value: 'public' },
+                  { label: '私有', value: 'private' }
+                ]"
+              />
+              <span v-else class="os-muted os-italic">{{ file.status === 'processing' ? '处理中' : '删除中' }}</span>
             </div>
-            <!-- 已删除状态操作 -->
-            <div v-else class="mobile-file-card-actions">
+            <div class="os-cell os-password">
               <t-button
                 size="small"
-                theme="success"
-                variant="text"
-                :disabled="file.deletedByAdmin && !isAdmin"
-                @click="handleRestore(file.id)"
+                :theme="file.hasPassword ? 'warning' : 'default'"
+                variant="outline"
+                :disabled="!isFileActionable(file)"
+                @click="openPasswordDialog(file)"
               >
-                恢复
+                <template #icon><t-icon :name="file.hasPassword ? 'lock-on' : 'lock-off'" /></template>
+                {{ file.hasPassword ? '已加密' : '未加密' }}
               </t-button>
-              <t-button
-                v-if="isAdmin"
+            </div>
+            <div class="os-cell os-count">
+              <t-input-number
+                :value="file.maxAccessCount"
+                :min="-1"
                 size="small"
-                theme="danger"
-                variant="text"
-                @click="handleForceDelete(file.id)"
-              >
-                强制删除
-              </t-button>
+                :disabled="!isFileActionable(file)"
+                @change="(val: number) => handleAccessCountChange(file.id, val)"
+              />
+            </div>
+            <div class="os-cell os-expires">
+              <t-select
+                :value="file.expiresIn"
+                size="small"
+                @change="(val: number | null) => handleExpiresChange(file.id, val)"
+                :disabled="!isFileActionable(file)"
+                :options="expiresOptions"
+              />
+            </div>
+            <div class="os-cell os-date">
+              <div>{{ formatDate(file.createdAt) }}</div>
+              <div v-if="file.isDeleted && file.deleteRequestedAt" class="os-deleted-date">
+                删除于 {{ formatDate(file.deleteRequestedAt) }}
+              </div>
+            </div>
+            <div class="os-cell os-ops" @click.stop>
+              <template v-if="file.status === 'processing'">
+                <span class="os-muted os-italic os-processing-hint">处理中...</span>
+              </template>
+              <template v-else-if="file.isDeleted">
+                <t-button
+                  size="small"
+                  theme="success"
+                  variant="text"
+                  :disabled="file.deletedByAdmin && !isAdmin"
+                  @click="handleRestore(file.id)"
+                >
+                  恢复
+                </t-button>
+                <t-button
+                  v-if="isAdmin"
+                  size="small"
+                  theme="danger"
+                  variant="text"
+                  @click="handleForceDelete(file.id)"
+                >
+                  强制删除
+                </t-button>
+              </template>
+              <template v-else>
+                <t-button size="small" theme="primary" variant="text" @click="copyLink(file)">复制链接</t-button>
+                <t-button size="small" variant="text" @click="downloadFile(file)">下载</t-button>
+                <t-button size="small" variant="text" @click="openTagEditor(file)">标签</t-button>
+                <t-button size="small" variant="text" @click="onFileShare(file)">分享</t-button>
+                <t-button size="small" theme="danger" variant="text" @click="handleDelete(file)">删除</t-button>
+              </template>
             </div>
           </div>
-        </div>
-        </template>
 
-        <div style="margin-top: 16px; display: flex; justify-content: center; align-items: center; gap: 16px;">
-          <!-- 页面大小 / 模式切换 -->
-          <t-select v-model="pageSize" :options="pageSizeOptions" style="width: 130px;" @change="handlePageSizeChange" />
-
-          <!-- 传统分页 -->
-          <t-pagination
-            v-if="pageMode === 'paginated'"
-            v-model="page"
-            :total="fileStore.total"
-            :page-size="Math.abs(pageSize)"
-            :show-page-size="false"
-            @change="handlePageChange"
-          />
-
-          <!-- 无限滚动加载指示器 -->
-          <div v-else ref="scrollSentinel" style="text-align: center; padding: 8px 0;">
+          <!-- 无限滚动哨兵 -->
+          <div v-if="pageMode === 'infinite'" ref="scrollSentinel" class="os-sentinel">
             <t-loading v-if="cursorLoading" size="small" text="加载中..." />
-            <span v-else-if="!hasMore" style="color: var(--text-secondary);">已加载全部 {{ fileStore.total }} 个文件</span>
+            <span v-else-if="!hasMore" class="os-muted">已加载全部 {{ fileStore.total }} 个文件</span>
           </div>
         </div>
       </div>
+
+      <!-- 移动端：文件夹行 + 文件卡片 -->
+      <div v-else class="os-mobile">
+        <div
+          v-for="folder in subfoldersInCurrentFolder"
+          :key="`m-folder-${folder.id}`"
+          class="mobile-folder-row"
+          @click="onFolderOpen(folder)"
+        >
+          <t-icon name="folder" class="os-folder-icon" />
+          <div class="mobile-folder-info">
+            <div class="mobile-folder-name">{{ folder.name }}</div>
+            <div class="mobile-folder-meta">文件夹 · {{ formatDate(folder.createdAt) }}</div>
+          </div>
+          <t-icon name="chevron-right" class="mobile-folder-arrow" />
+        </div>
+
+        <div v-for="file in displayFiles" :key="`m-file-${file.id}`" class="mobile-file-card">
+          <div class="mobile-file-card-header">
+            <ThumbnailImg :file-id="file.id" :mime-type="file.mimeType" :size="40" :emoji="getFileEmoji(file.mimeType)" />
+            <div class="mobile-file-main">
+              <div class="mobile-file-name" :class="{ 'deleted-name': file.isDeleted }">{{ file.originalName }}</div>
+              <div class="mobile-file-meta">{{ formatSize(file.size) }} · {{ formatDate(file.createdAt) }}</div>
+              <div class="mobile-file-tags">
+                <t-tag v-if="file.isDeleted && file.deletedByAdmin" theme="danger" size="small">被管理员删除</t-tag>
+                <t-tag v-else-if="file.isDeleted" theme="warning" size="small">删除中</t-tag>
+                <t-tag v-else-if="file.accessType === 'public'" theme="success" size="small">公开</t-tag>
+                <t-tag v-else theme="default" size="small">私有</t-tag>
+                <t-tag v-if="file.hasPassword" theme="warning" size="small">已加密</t-tag>
+                <span
+                  v-for="tag in file.tags?.slice(0, 2)"
+                  :key="tag.id"
+                  class="os-tag-click"
+                  @click.stop="addTagFilter(tag.id)"
+                >
+                  <t-tag
+                    size="small"
+                    variant="light"
+                    :style="{ background: tag.color + '18', color: tag.color, borderColor: tag.color + '33' }"
+                  >
+                    {{ tag.name }}
+                  </t-tag>
+                </span>
+                <span v-if="file.tags && file.tags.length > 2" class="mobile-tag-more">+{{ file.tags.length - 2 }}</span>
+              </div>
+            </div>
+          </div>
+          <div v-if="!file.isDeleted" class="mobile-file-card-actions">
+            <t-button size="small" theme="primary" variant="text" @click="copyLink(file)">复制</t-button>
+            <t-button size="small" variant="text" @click="downloadFile(file)">下载</t-button>
+            <t-button size="small" variant="text" @click="openTagEditor(file)">标签</t-button>
+            <t-button size="small" theme="danger" variant="text" @click="handleDelete(file)">删除</t-button>
+          </div>
+          <div v-else class="mobile-file-card-actions">
+            <t-button
+              size="small"
+              theme="success"
+              variant="text"
+              :disabled="file.deletedByAdmin && !isAdmin"
+              @click="handleRestore(file.id)"
+            >
+              恢复
+            </t-button>
+            <t-button v-if="isAdmin" size="small" theme="danger" variant="text" @click="handleForceDelete(file.id)">
+              强制删除
+            </t-button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ⑧ 分页 / 模式切换 -->
+    <div v-if="displayFiles.length > 0 || subfoldersInCurrentFolder.length > 0" class="fl-pagination">
+      <t-select v-model="pageSize" :options="pageSizeOptions" class="fl-pagesize" @change="handlePageSizeChange" />
+      <t-pagination
+        v-if="pageMode === 'paginated'"
+        v-model="page"
+        :total="fileStore.total"
+        :page-size="Math.abs(pageSize)"
+        :show-page-size="false"
+        @change="handlePageChange"
+      />
     </div>
 
     <!-- 上传弹窗 -->
@@ -432,9 +450,7 @@
         autocomplete="off"
         name="file-password"
       />
-      <div style="margin-top: 8px; color: var(--text-secondary); font-size: 12px;">
-        设置密码后，访问者需要输入密码才能查看该文件
-      </div>
+      <div class="fl-dialog-hint">设置密码后，访问者需要输入密码才能查看该文件</div>
     </t-dialog>
 
     <!-- 删除确认弹窗 -->
@@ -445,11 +461,11 @@
       @confirm="confirmDelete"
       @close="deleteDialog.visible = false"
     >
-      <div style="line-height: 1.8;">
+      <div class="fl-delete-body">
         <p>确定要删除文件 <strong>{{ deleteDialog.fileName }}</strong> 吗？</p>
-        <div style="margin-top: 12px; padding: 12px; background: var(--bg-secondary); border-radius: 6px; font-size: 13px; color: var(--text-secondary);">
-          <p style="margin-bottom: 8px;">⚙️ 删除说明：</p>
-          <ul style="margin: 0; padding-left: 20px;">
+        <div class="fl-delete-note">
+          <p class="fl-delete-note-title">删除说明：</p>
+          <ul>
             <li>文件将进入 <strong>7 天冷静期</strong>，期间可以恢复</li>
             <li>冷静期内文件不可访问和下载</li>
             <li>7 天后文件将被永久删除</li>
@@ -461,38 +477,28 @@
 
     <!-- 批量添加标签弹窗 -->
     <t-dialog v-model:visible="batchTagDialog.visible" header="批量添加标签" width="420px" @confirm="confirmBatchTags" @close="batchTagDialog.visible = false">
-      <div style="line-height: 1.8;">
+      <div class="fl-delete-body">
         <p>为 <strong>{{ selectedFileIds.length }}</strong> 个文件添加标签：</p>
-        <div style="margin-top: 12px; display: flex; flex-wrap: wrap; gap: 6px;">
+        <div class="fl-batch-tags">
           <t-tag
             v-for="tag in tagStore.tags"
             :key="tag.id"
             size="small"
             :theme="batchTagDialog.selectedTagIds.includes(tag.id) ? 'primary' : 'default'"
             variant="light"
-            :style="{ cursor: 'pointer' }"
+            class="fl-batch-tag"
             @click="toggleBatchTag(tag.id)"
           >
             {{ tag.name }}
           </t-tag>
-          <span v-if="!tagStore.tags || tagStore.tags.length === 0" style="color: var(--text-secondary); font-size: 13px;">
-            暂无标签，请先在标签管理中创建
-          </span>
+          <span v-if="!tagStore.tags || tagStore.tags.length === 0" class="os-muted">暂无标签，请先在标签管理中创建</span>
         </div>
       </div>
     </t-dialog>
 
     <!-- 文件夹相关弹窗 -->
-    <FolderCreateDialog
-      v-model:visible="showCreateFolderDialog"
-      :parent-id="folderStore.currentFolderId"
-    />
-
-    <FolderRenameDialog
-      v-model:visible="showRenameFolderDialog"
-      :folder="renameTargetFolder"
-    />
-
+    <FolderCreateDialog v-model:visible="showCreateFolderDialog" :parent-id="folderStore.currentFolderId" />
+    <FolderRenameDialog v-model:visible="showRenameFolderDialog" :folder="renameTargetFolder" />
     <FolderMoveDialog
       v-model:visible="showMoveDialog"
       :target-kind="moveTargetKind"
@@ -500,15 +506,12 @@
       :disabled-ids="moveDisabledIds"
       @moved="onFolderMoved"
     />
-
     <CreateShareDialog
       v-model:visible="showShareDialog"
       :target-type="shareTargetType"
       :target-id="shareTargetId"
       :target-name="shareTargetName"
     />
-      </div>
-    </div>
   </div>
 </template>
 
@@ -527,13 +530,9 @@ import UploadModal from '../../components/UploadModal.vue';
 import TagManager from '../../components/TagManager.vue';
 import FileTagEditor from '../../components/FileTagEditor.vue';
 import ThumbnailImg from '../../components/ThumbnailImg.vue';
-import FolderTree from '../../components/folder/FolderTree.vue';
-import FolderBreadcrumb from '../../components/folder/FolderBreadcrumb.vue';
 import FolderCreateDialog from '../../components/folder/FolderCreateDialog.vue';
 import FolderRenameDialog from '../../components/folder/FolderRenameDialog.vue';
 import FolderMoveDialog from '../../components/folder/FolderMoveDialog.vue';
-import FileCard from '../../components/file/FileCard.vue';
-import FolderCard from '../../components/file/FolderCard.vue';
 import CreateShareDialog from '../../components/share/CreateShareDialog.vue';
 import { useTagStore } from '../../stores/tags';
 import { useFolderStore, type Folder } from '../../stores/folders';
@@ -584,17 +583,14 @@ const shareTargetName = ref('');
 
 /** 把 folderStore.currentFolderId (null | uuid) 转换为 API 期望的字符串 */
 const currentFolderIdForApi = computed(() => {
-  return folderStore.currentFolderId === null
-    ? 'root'
-    : folderStore.currentFolderId;
+  return folderStore.currentFolderId === null ? 'root' : folderStore.currentFolderId;
 });
 
-/** 用户点击文件夹树节点或面包屑导航时触发 */
+/** 用户点击地址栏路径、文件夹行时触发 */
 async function onFolderNavigate(folderId: string | null) {
+  if (folderId === folderStore.currentFolderId) return;
   await folderStore.openFolder(folderId);
-  // 清空选中状态，避免移动到旧文件夹的文件残留
   selectedFileIds.value = [];
-  // 触发文件列表刷新
   if (pageMode.value === 'infinite') {
     resetCursor();
     fileStore.replaceFiles([]);
@@ -609,26 +605,36 @@ function openCreateFolderDialog() {
   showCreateFolderDialog.value = true;
 }
 
-function openRenameFolderDialog(folder: Folder) {
+function onFolderOpen(folder: Folder) {
+  onFolderNavigate(folder.id);
+}
+
+function onFolderRename(folder: Folder) {
   renameTargetFolder.value = folder;
   showRenameFolderDialog.value = true;
 }
 
-/**
- * 打开移动弹窗：移动单个文件夹（带循环检测的 disabledIds）
- */
-function openMoveDialogForFolder(folder: Folder) {
+function onFolderMove(folder: Folder) {
   moveTargetKind.value = 'folder';
   moveTargetIds.value = [folder.id];
-  // 禁止把文件夹移入自身或其子树：简单起见，disabledIds 包含 folder.id 和它的所有子级
-  // 但前端只标记自身 ID，后端会再做严格循环检测
   moveDisabledIds.value = [folder.id];
   showMoveDialog.value = true;
 }
 
-/**
- * 打开移动弹窗：批量移动选中的文件
- */
+function onFolderShare(folder: Folder) {
+  shareTargetType.value = 'folder';
+  shareTargetId.value = folder.id;
+  shareTargetName.value = folder.name;
+  showShareDialog.value = true;
+}
+
+function onFileShare(file: FileItem) {
+  shareTargetType.value = 'file';
+  shareTargetId.value = file.id;
+  shareTargetName.value = file.originalName;
+  showShareDialog.value = true;
+}
+
 function openMoveDialogForFiles(fileIds?: string[]) {
   const ids = fileIds && fileIds.length > 0 ? fileIds : selectedFileIds.value;
   if (ids.length === 0) {
@@ -642,7 +648,6 @@ function openMoveDialogForFiles(fileIds?: string[]) {
 }
 
 async function onFolderMoved() {
-  // 文件夹或文件移动后刷新文件列表（如果当前在某个文件夹，文件可能进出）
   if (pageMode.value === 'infinite') {
     resetCursor();
     fileStore.replaceFiles([]);
@@ -653,87 +658,7 @@ async function onFolderMoved() {
   selectedFileIds.value = [];
 }
 
-// ============ 视图模式：卡片 / 列表 ============
-type ViewMode = 'card' | 'list';
-const VIEW_MODE_STORAGE_KEY = 'drive_view_mode';
-const viewMode = ref<ViewMode>(
-  ((): ViewMode => {
-    try {
-      const stored = localStorage.getItem(VIEW_MODE_STORAGE_KEY);
-      return stored === 'list' ? 'list' : 'card'; // 默认卡片视图
-    } catch {
-      return 'card'; // localStorage 不可用（隐私模式/SSR）时降级为默认视图
-    }
-  })(),
-);
-
-function setViewMode(mode: ViewMode) {
-  viewMode.value = mode;
-  try { localStorage.setItem(VIEW_MODE_STORAGE_KEY, mode); } catch { /* localStorage 不可用时降级 */ }
-}
-
-// 视图模式切换处理器（显式类型，避免模板内联 any 参数）
-function onViewModeChange(val: string | number | boolean) {
-  setViewMode(val === 'list' ? 'list' : 'card');
-}
-
-// ============ 卡片视图派生子文件夹列表 ============
-/**
- * 当前文件夹下的直接子文件夹（基于 folderStore.tree 派生）。
- * 不走后端 listContents 接口，因为 tree 已经包含全部文件夹数据。
- * 卡片视图下与文件列表合并展示。
- */
-const subfoldersInCurrentFolder = computed<Folder[]>(() => {
-  const parentId = folderStore.currentFolderId;
-  if (parentId === null) {
-    // 根目录：返回所有顶层文件夹
-    return folderStore.tree;
-  }
-  // 在树中递归查找当前 folder，返回其 children
-  const find = (nodes: Folder[], id: string): Folder | null => {
-    for (const n of nodes) {
-      if (n.id === id) return n;
-      if (n.children?.length) {
-        const found = find(n.children, id);
-        if (found) return found;
-      }
-    }
-    return null;
-  };
-  const current = find(folderStore.tree, parentId);
-  return current?.children ?? [];
-});
-
-// ============ 卡片视图操作 handler（复用现有函数） ============
-function onCardDownload(file: FileItem) { downloadFile(file); }
-function onCardShare(file: FileItem) {
-  shareTargetType.value = 'file';
-  shareTargetId.value = file.id;
-  shareTargetName.value = file.originalName;
-  showShareDialog.value = true;
-}
-function onCardMove(file: FileItem) { openMoveDialogForFiles([file.id]); }
-function onCardTag(file: FileItem) { openTagEditor(file); }
-function onCardDelete(file: FileItem) { handleDelete(file); }
-function onCardToggleSelect(file: FileItem) {
-  const idx = selectedFileIds.value.indexOf(file.id);
-  if (idx >= 0) {
-    selectedFileIds.value.splice(idx, 1);
-  } else {
-    selectedFileIds.value.push(file.id);
-  }
-}
-
-/** 清空当前文件选择（批量操作栏「清除选择」按钮） */
-function clearSelection() {
-  selectedFileIds.value = [];
-}
-
-function onFolderCardOpen(folder: Folder) { onFolderNavigate(folder.id); }
-function onFolderCardRename(folder: Folder) { openRenameFolderDialog(folder); }
-function onFolderCardMove(folder: Folder) { openMoveDialogForFolder(folder); }
-
-async function onFolderCardDelete(folder: Folder) {
+function onFolderDelete(folder: Folder) {
   const confirmDialog = DialogPlugin.confirm({
     header: '删除文件夹',
     body: `确定删除「${folder.name}」及其所有子文件夹和文件吗？此操作可在 7 天内撤销。`,
@@ -756,6 +681,86 @@ async function onFolderCardDelete(folder: Folder) {
   });
 }
 
+// ============ 当前文件夹下的直接子文件夹（OS 列表文件夹行数据源） ============
+const subfoldersInCurrentFolder = computed<Folder[]>(() => {
+  const parentId = folderStore.currentFolderId;
+  if (parentId === null) {
+    return folderStore.tree.filter(f => !f.isDeleted);
+  }
+  const find = (nodes: Folder[], id: string): Folder | null => {
+    for (const n of nodes) {
+      if (n.id === id) return n;
+      if (n.children?.length) {
+        const found = find(n.children, id);
+        if (found) return found;
+      }
+    }
+    return null;
+  };
+  const current = find(folderStore.tree, parentId);
+  return (current?.children ?? []).filter(f => !f.isDeleted);
+});
+
+// ============ 选择（自定义列表） ============
+function toggleFileSelect(file: FileItem) {
+  const idx = selectedFileIds.value.indexOf(file.id);
+  if (idx >= 0) {
+    selectedFileIds.value.splice(idx, 1);
+  } else {
+    selectedFileIds.value.push(file.id);
+  }
+}
+
+/** 当前可被选中的文件（未删除、非处理中） */
+const selectableFiles = computed(() =>
+  displayFiles.value.filter(f => !f.isDeleted && f.status !== 'processing')
+);
+
+const isAllSelected = computed(() =>
+  selectableFiles.value.length > 0 &&
+  selectableFiles.value.every(f => selectedFileIds.value.includes(f.id))
+);
+
+const isIndeterminate = computed(() => {
+  const count = selectableFiles.value.filter(f => selectedFileIds.value.includes(f.id)).length;
+  return count > 0 && count < selectableFiles.value.length;
+});
+
+function toggleSelectAll() {
+  if (isAllSelected.value) {
+    const ids = new Set(selectableFiles.value.map(f => f.id));
+    selectedFileIds.value = selectedFileIds.value.filter(id => !ids.has(id));
+  } else {
+    const existing = new Set(selectedFileIds.value);
+    const all = [...selectedFileIds.value];
+    for (const f of selectableFiles.value) {
+      if (!existing.has(f.id)) all.push(f.id);
+    }
+    selectedFileIds.value = all;
+  }
+}
+
+function clearSelection() {
+  selectedFileIds.value = [];
+}
+
+// ============ 排序（自定义表头） ============
+function toggleSort(field: string) {
+  if (sortBy.value === field) {
+    sortOrder.value = sortOrder.value === 'DESC' ? 'ASC' : 'DESC';
+  } else {
+    sortBy.value = field;
+    sortOrder.value = field === 'createdAt' ? 'DESC' : 'ASC';
+  }
+  if (pageMode.value === 'infinite') {
+    pageMode.value = 'paginated';
+    pageSize.value = 20;
+    resetCursor();
+  }
+  page.value = 1;
+  refetchFiles(1);
+}
+
 // 分页模式：'paginated' | 'infinite'
 const pageMode = ref<'paginated' | 'infinite'>(
   (route.query.mode as 'paginated' | 'infinite') || 'paginated'
@@ -771,8 +776,6 @@ const {
 
 // 滚动哨兵 ref
 const scrollSentinel = ref<HTMLElement | null>(null);
-const tableRef = ref();
-let tableScrollEl: HTMLElement | null = null;
 let scrollObserver: IntersectionObserver | null = null;
 
 // pageSize 选项（含无限）
@@ -784,8 +787,6 @@ const pageSizeOptions = computed(() => [
   { label: '无限滚动', value: -1 },
 ]);
 
-// 用于表格渲染的 files 计算属性
-// 无限模式直接使用 fileStore.files（由 replaceFiles 设置），传统模式不变
 const displayFiles = computed(() => fileStore.files);
 
 const isAdmin = computed(() => {
@@ -795,7 +796,6 @@ const isAdmin = computed(() => {
 
 const isMobile = useMobile();
 
-// 同步当前用户角色到 fileStore
 watch(() => authStore.user?.role, (role) => {
   if (role) fileStore.setCurrentUserRole(role);
 }, { immediate: true });
@@ -983,12 +983,6 @@ function onUploaded() {
   selectedFileIds.value = [];
 }
 
-function handleSelectChange(selectedRowKeys: (string | number)[]) {
-  selectedFileIds.value = selectedRowKeys.filter(k =>
-    displayFiles.value.find(f => f.id === k && !f.isDeleted)
-  ) as string[];
-}
-
 function handleSearch() {
   page.value = 1;
   if (pageMode.value === 'infinite') {
@@ -1012,30 +1006,12 @@ function handleClearSearch() {
   }
 }
 
-function handleSortChange(sortInfo: { sortBy: string; descending: boolean } | { sortBy: string; descending: boolean }[]) {
-  const info = Array.isArray(sortInfo) ? sortInfo[0] : sortInfo;
-  if (!info) return;
-  sortBy.value = info.sortBy;
-  sortOrder.value = info.descending ? 'DESC' : 'ASC';
-  // 排序时切换到传统分页模式（游标分页固定按 createdAt DESC 排序）
-  if (pageMode.value === 'infinite') {
-    pageMode.value = 'paginated';
-    pageSize.value = 20;
-    resetCursor();
-  }
-  page.value = 1;
-  refetchFiles(1);
-}
-
 // ==== 无限滚动加载逻辑 ====
-
-/** 初始化 / 搜索 / 排序变化时加载文件列表 */
 async function loadInitialFiles(resetCursorState = false) {
   const tagIds = selectedTagIds.value.length > 0 ? selectedTagIds.value : undefined;
   if (pageMode.value === 'paginated') {
     await fileStore.fetchFiles(page.value, Math.abs(pageSize.value), search.value || undefined, sortBy.value || undefined, sortOrder.value || undefined, tagIds, currentFolderIdForApi.value);
   } else {
-    // 无限模式：使用游标分页
     if (resetCursorState) {
       resetCursor();
       fileStore.replaceFiles([]);
@@ -1050,7 +1026,6 @@ async function loadInitialFiles(resetCursorState = false) {
         currentFolderIdForApi.value,
       );
       if (!result) return { data: [], nextCursor: null, hasMore: false };
-
       fileStore.replaceFiles([...fileStore.files, ...result.files]);
       return {
         data: result.files,
@@ -1061,7 +1036,6 @@ async function loadInitialFiles(resetCursorState = false) {
   }
 }
 
-/** 加载更多（无限模式下 IntersectionObserver 触发） */
 async function loadMoreFiles() {
   if (!hasMore.value || cursorLoading.value) return;
   await loadMore(async (cursor, signal) => {
@@ -1074,7 +1048,6 @@ async function loadMoreFiles() {
       currentFolderIdForApi.value,
     );
     if (!result) return { data: [], nextCursor: null, hasMore: false };
-
     fileStore.replaceFiles([...fileStore.files, ...result.files]);
     return {
       data: result.files,
@@ -1084,48 +1057,19 @@ async function loadMoreFiles() {
   });
 }
 
-/** 表格内部滚动事件处理（虚拟滚动模式下触发加载更多） */
-function onTableScroll() {
-  if (!tableScrollEl) return;
-  const { scrollTop, scrollHeight, clientHeight } = tableScrollEl;
-  if (scrollHeight - scrollTop - clientHeight < 200) {
-    loadMoreFiles();
-  }
-}
-
-/** 设置滚动监听：优先使用表格内部滚动容器（虚拟滚动模式），降级为 IntersectionObserver */
 function setupScrollObserver() {
-  // 清理之前的监听
   if (scrollObserver) { scrollObserver.disconnect(); scrollObserver = null; }
-  if (tableScrollEl) {
-    tableScrollEl.removeEventListener('scroll', onTableScroll);
-    tableScrollEl = null;
-  }
-
   if (pageMode.value !== 'infinite') return;
   if (!scrollSentinel.value) return;
-
-  // 尝试获取表格内部滚动容器（虚拟滚动模式下存在）
-  const tableEl = (tableRef.value as any)?.$el as HTMLElement | undefined;
-  if (tableEl) {
-    tableScrollEl = tableEl.querySelector('.t-table__content');
-  }
-
-  if (tableScrollEl) {
-    // 虚拟滚动模式：监听表格内部滚动
-    tableScrollEl.addEventListener('scroll', onTableScroll, { passive: true });
-  } else {
-    // 降级模式：IntersectionObserver 监听哨兵元素
-    scrollObserver = new IntersectionObserver(
-      (entries) => {
-        if (entries[0].isIntersecting) {
-          loadMoreFiles();
-        }
-      },
-      { rootMargin: '600px' },
-    );
-    scrollObserver.observe(scrollSentinel.value);
-  }
+  scrollObserver = new IntersectionObserver(
+    (entries) => {
+      if (entries[0].isIntersecting) {
+        loadMoreFiles();
+      }
+    },
+    { rootMargin: '600px' },
+  );
+  scrollObserver.observe(scrollSentinel.value);
 }
 
 function handlePageChange(pageInfo: { current: number }) {
@@ -1135,7 +1079,6 @@ function handlePageChange(pageInfo: { current: number }) {
 function handlePageSizeChange(val: number) {
   selectedFileIds.value = [];
   if (val === -1) {
-    // 切换到无限模式
     pageMode.value = 'infinite';
     page.value = 1;
     resetCursor();
@@ -1143,25 +1086,12 @@ function handlePageSizeChange(val: number) {
     loadInitialFiles(true);
     nextTick(setupScrollObserver);
   } else {
-    // 切换到传统分页
     pageMode.value = 'paginated';
     page.value = 1;
     pageSize.value = val;
     refetchFiles(1, val);
   }
 }
-
-const columns = [
-  { colKey: 'row-select', type: 'multiple' as const, width: '50' },
-  { colKey: 'originalName', title: '文件名', width: '260', ellipsis: true, sorter: true },
-  { colKey: 'size', title: '大小', width: '90' },
-  { colKey: 'accessType', title: '访问权限', width: '110' },
-  { colKey: 'password', title: '加密', width: '110' },
-  { colKey: 'maxAccessCount', title: '访问次数', width: '110' },
-  { colKey: 'expiresIn', title: '限时访问', width: '110' },
-  { colKey: 'createdAt', title: '上传时间', width: '160', sorter: true },
-  { colKey: 'operations', title: '操作', width: '220' },
-];
 
 async function handleAccessTypeChange(id: string, accessType: string) {
   try {
@@ -1219,26 +1149,20 @@ async function downloadFile(row: Pick<FileItem, 'id'>) {
   }
 }
 
-/** 点击删除按钮 → 弹出确认对话框 */
 function handleDelete(row: FileItem) {
   openDeleteDialog(row);
 }
 
-/** 确认删除 */
 async function confirmDelete() {
   try {
     const result = await fileStore.deleteFile(deleteDialog.fileId);
     if (result.status === 'permanently_deleted') {
       MessagePlugin.success('文件已永久删除');
     } else if (result.status === 'already_deleted') {
-      const scheduledDate = result.scheduledAt
-        ? formatDate(result.scheduledAt)
-        : '7天后';
+      const scheduledDate = result.scheduledAt ? formatDate(result.scheduledAt) : '7天后';
       MessagePlugin.warning(`文件已处于待删除状态，将于 ${scheduledDate} 永久删除`);
     } else {
-      const scheduledDate = result.scheduledAt
-        ? formatDate(result.scheduledAt)
-        : '7天后';
+      const scheduledDate = result.scheduledAt ? formatDate(result.scheduledAt) : '7天后';
       MessagePlugin.success(`文件已标记为待删除，将于 ${scheduledDate} 永久删除，期间可恢复`);
     }
     deleteDialog.visible = false;
@@ -1254,7 +1178,6 @@ async function confirmDelete() {
   }
 }
 
-/** 恢复已删除的文件 */
 async function handleRestore(id: string) {
   try {
     await fileStore.restoreFile(id);
@@ -1271,7 +1194,6 @@ async function handleRestore(id: string) {
   }
 }
 
-/** 管理员强制永久删除 */
 async function handleForceDelete(id: string) {
   try {
     await fileStore.forceDeleteFile(id);
@@ -1286,7 +1208,6 @@ function convertToMarkdown() {
     MessagePlugin.warning('请先选择图片文件');
     return;
   }
-
   const baseUrl = window.location.origin;
   markdownResult.value = selectedImages.value
     .map((img) => `![${img.originalName}](${baseUrl}/files/public/${img.id})`)
@@ -1332,7 +1253,6 @@ async function confirmBatchTags() {
     MessagePlugin.warning('没有可添加标签的文件');
     return;
   }
-  // 并发发送标签更新请求（替代串行 for...of + await），大幅缩短批量操作耗时
   const results = await Promise.allSettled(
     fileIds.map(fileId => api.put(`/files/${fileId}/tags`, { tagIds: batchTagDialog.selectedTagIds })),
   );
@@ -1383,99 +1303,119 @@ onMounted(async () => {
 
 onUnmounted(() => {
   if (scrollObserver) { scrollObserver.disconnect(); scrollObserver = null; }
-  if (tableScrollEl) { tableScrollEl.removeEventListener('scroll', onTableScroll); tableScrollEl = null; }
   if (dragLeaveTimeout) { clearTimeout(dragLeaveTimeout); dragLeaveTimeout = null; }
   dragCounter = 0;
 });
 </script>
 
 <style scoped>
-/* 卡片网格视图（响应式自适应列数） */
-.card-grid-view {
-  display: grid;
-  /* 桌面端：minmax(180px, 1fr) → 宽屏 5+ 列，普通桌面 4 列
-     平板：minmax(160px, 1fr) → 3 列
-     手机：minmax(140px, 1fr) → 2 列
-     全部通过 auto-fill + minmax 自动适配，无需 media query */
-  grid-template-columns: repeat(auto-fill, minmax(min(180px, 100%), 1fr));
-  gap: 16px;
-  padding: 4px 0 16px;
+.filelist-page {
+  position: relative;
 }
 
-@media (max-width: 768px) {
-  .card-grid-view {
-    grid-template-columns: repeat(auto-fill, minmax(min(140px, 100%), 1fr));
-    gap: 12px;
-  }
-}
-
-@media (min-width: 1200px) {
-  .card-grid-view {
-    /* 宽屏上限制单卡最大宽度，避免过宽 */
-    grid-template-columns: repeat(auto-fill, minmax(180px, 220px));
-    justify-content: start;
-  }
-}
-
-/* 网盘布局：左侧文件夹树 + 右侧主内容区 */
-.drive-layout {
+/* ============ 地址栏（文件路径） ============ */
+.fl-addressbar {
   display: flex;
-  gap: 16px;
-  align-items: flex-start;
-  min-height: 0;
-}
-
-.folder-sidebar {
-  width: 220px;
-  flex-shrink: 0;
-  background: var(--bg-secondary, var(--td-bg-color-container));
-  border: 1px solid var(--border-color, var(--td-border-level-2-color));
-  border-radius: 8px;
-  position: sticky;
-  top: 16px;
-  max-height: calc(100vh - 32px);
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
-}
-
-.drive-main {
-  flex: 1;
-  min-width: 0;
-}
-
-/* 主工具栏 */
-.fl-toolbar {
-  display: flex;
-  justify-content: space-between;
   align-items: center;
+  justify-content: space-between;
+  gap: 16px;
   flex-wrap: wrap;
-  gap: 12px;
+  background: var(--color-bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  padding: 10px 14px;
   margin-bottom: 16px;
 }
-.fl-toolbar-left {
+
+.fl-path {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 2px;
+  min-width: 0;
+  font-size: 14px;
 }
+
+.fl-path-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: background var(--duration-fast), color var(--duration-fast);
+}
+
+.fl-path-item:hover {
+  background: var(--color-accent-soft);
+  color: var(--text-primary);
+}
+
+.fl-path-item.is-current {
+  color: var(--text-primary);
+  font-weight: 500;
+  cursor: default;
+}
+
+.fl-path-item.is-current:hover {
+  background: transparent;
+}
+
+.fl-path-home {
+  font-size: 15px;
+  color: var(--color-accent);
+}
+
+.fl-path-sep {
+  color: var(--text-tertiary);
+  font-size: 14px;
+  flex-shrink: 0;
+}
+
+.fl-addressbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+/* ============ 工具栏 ============ */
+.fl-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+
 .fl-search-form {
   display: flex;
   align-items: center;
   gap: 8px;
   margin: 0;
-  flex-wrap: wrap;
+  flex: 1;
+  min-width: 220px;
+  max-width: 420px;
 }
+
 .fl-search-input {
-  width: 280px;
+  flex: 1;
 }
+
 .fl-toolbar-right {
   display: flex;
   align-items: center;
   gap: 8px;
 }
 
-/* 批量操作栏（选中文件时出现） */
+/* ============ 批量操作栏 ============ */
 .fl-batchbar {
   display: flex;
   align-items: center;
@@ -1483,21 +1423,385 @@ onUnmounted(() => {
   gap: 8px;
   padding: 10px 12px;
   margin-bottom: 16px;
-  background: var(--color-accent-soft, rgba(77, 124, 254, 0.08));
-  border: 1px solid var(--color-accent, #4D7CFE);
-  border-radius: 8px;
+  background: var(--color-accent-soft);
+  border: 1px solid var(--border-accent);
+  border-radius: var(--radius-md);
 }
+
 .fl-batchbar-count {
   font-size: 13px;
   font-weight: 500;
-  color: var(--color-accent, #4D7CFE);
+  color: var(--color-accent);
   margin-right: 4px;
 }
 
+/* ============ 标签筛选 ============ */
+.fl-tagfilters {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+/* ============ Markdown 结果 ============ */
+.fl-markdown {
+  margin-bottom: 16px;
+  padding: 16px;
+  background: var(--color-bg-elevated);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-default);
+}
+
+.fl-markdown-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.fl-markdown-title {
+  font-weight: 500;
+}
+
+.fl-markdown-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* ============ 空状态 ============ */
+.empty-upload-icon {
+  font-size: 48px;
+  color: var(--text-tertiary);
+  margin-bottom: 16px;
+}
+
+.empty-upload-hint {
+  color: var(--text-secondary);
+  margin-top: 8px;
+}
+
+.fl-loading {
+  display: flex;
+  justify-content: center;
+  padding: 48px 0;
+}
+
+/* ============ OS 风格统一列表 ============ */
+.os-list {
+  padding: 0;
+  overflow: hidden;
+}
+
+.os-list-scroll {
+  overflow-x: auto;
+}
+
+.os-list-inner {
+  min-width: 1080px;
+}
+
+.os-row {
+  display: grid;
+  grid-template-columns:
+    44px
+    minmax(240px, 2fr)
+    88px
+    104px
+    100px
+    112px
+    108px
+    132px
+    minmax(220px, 1fr);
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+  min-height: 52px;
+  border-bottom: 1px solid var(--border-default);
+  transition: background var(--duration-fast);
+}
+
+.os-row:last-child {
+  border-bottom: none;
+}
+
+/* 表头 */
+.os-head {
+  min-height: 44px;
+  background: var(--color-bg-elevated);
+  border-bottom: 1px solid var(--border-strong);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-tertiary);
+}
+
+.os-sortable {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  user-select: none;
+  transition: color var(--duration-fast);
+}
+
+.os-sortable:hover {
+  color: var(--text-primary);
+}
+
+.os-sort-icon {
+  font-size: 14px;
+  opacity: 0.35;
+}
+
+.os-sort-icon.active {
+  opacity: 1;
+  color: var(--color-accent);
+}
+
+/* 行 hover */
+.os-folder,
+.os-file {
+  cursor: default;
+}
+
+.os-folder:hover,
+.os-file:hover {
+  background: rgba(77, 124, 254, 0.04);
+}
+
+.os-folder {
+  cursor: pointer;
+}
+
+/* 单元格 */
+.os-cell {
+  min-width: 0;
+}
+
+.os-name {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.os-folder-icon {
+  font-size: 22px;
+  color: var(--color-warning);
+  flex-shrink: 0;
+}
+
+.os-name-block {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.os-name-text {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 450;
+}
+
+.os-name-sub {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.os-kind-tag {
+  flex-shrink: 0;
+}
+
+.os-tag-click {
+  cursor: pointer;
+  display: inline-flex;
+}
+
+.os-muted {
+  color: var(--text-tertiary);
+}
+
+.os-italic {
+  font-style: italic;
+  font-size: 13px;
+}
+
+.os-mono {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.os-processing-hint {
+  font-size: 12px;
+}
+
+.os-deleted-date {
+  font-size: 11px;
+  color: var(--color-warning);
+  margin-top: 2px;
+}
+
+.os-ops {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-wrap: wrap;
+}
+
+/* 行状态 */
+.os-file.row-deleted {
+  background: var(--color-bg-elevated);
+  opacity: 0.85;
+}
+
+.os-file.row-processing {
+  background: var(--color-accent-soft);
+  opacity: 0.9;
+}
+
+.deleted-name {
+  text-decoration: line-through;
+  opacity: 0.6;
+}
+
+/* 无限滚动哨兵 */
+.os-sentinel {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 12px 0;
+  border-bottom: none;
+}
+
+/* ============ 移动端 ============ */
+.os-mobile {
+  padding: 12px;
+}
+
+.mobile-folder-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-default);
+  margin-bottom: 10px;
+  cursor: pointer;
+  transition: border-color var(--duration-fast);
+}
+
+.mobile-folder-row:hover {
+  border-color: var(--border-accent);
+}
+
+.mobile-folder-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.mobile-folder-name {
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mobile-folder-meta {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-top: 2px;
+}
+
+.mobile-folder-arrow {
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+}
+
+.mobile-file-card {
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  padding: 14px;
+  margin-bottom: 10px;
+  transition: border-color var(--duration-fast);
+}
+
+.mobile-file-card:hover {
+  border-color: var(--border-accent);
+}
+
+.mobile-file-card-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.mobile-file-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.mobile-file-name {
+  font-weight: 500;
+  word-break: break-all;
+  line-height: 1.4;
+  font-size: 14px;
+}
+
+.mobile-file-meta {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-top: 2px;
+}
+
+.mobile-file-tags {
+  display: flex;
+  gap: 4px;
+  margin-top: 4px;
+  flex-wrap: wrap;
+}
+
+.mobile-tag-more {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.mobile-file-card-actions {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  border-top: 1px solid var(--border-default);
+  padding-top: 8px;
+}
+
+/* ============ 分页 ============ */
+.fl-pagination {
+  margin-top: 16px;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 16px;
+}
+
+.fl-pagesize {
+  width: 130px;
+}
+
+/* ============ 拖拽覆盖层 ============ */
 .drop-overlay {
   position: absolute;
   inset: 0;
-  background: rgba(77, 124, 254, 0.12);
+  background: var(--color-accent-soft);
   border: 3px dashed var(--color-accent);
   border-radius: var(--radius-lg);
   z-index: 100;
@@ -1512,79 +1816,69 @@ onUnmounted(() => {
   color: var(--color-accent);
 }
 
+.drop-overlay-icon {
+  font-size: 64px;
+  margin-bottom: 16px;
+}
+
 .drop-overlay-content h2 {
   font-family: var(--font-display);
   font-size: 24px;
   font-weight: 600;
 }
 
-.deleted-name {
-  text-decoration: line-through;
-  opacity: 0.6;
+/* ============ 弹窗内辅助样式 ============ */
+.fl-dialog-hint {
+  margin-top: 8px;
+  color: var(--text-secondary);
+  font-size: 12px;
 }
 
-.deleted-label {
-  color: var(--text-tertiary);
+.fl-delete-body {
+  line-height: 1.8;
+}
+
+.fl-delete-note {
+  margin-top: 12px;
+  padding: 12px;
+  background: var(--color-bg-elevated);
+  border-radius: var(--radius-sm);
   font-size: 13px;
-  font-style: italic;
+  color: var(--text-secondary);
 }
 
-.filename-text {
-  display: block;
-  max-width: 180px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.fl-delete-note-title {
+  margin-bottom: 8px;
 }
 
-:deep(.row-deleted) {
-  background: rgba(255, 255, 255, 0.02);
-  opacity: 0.85;
+.fl-delete-note ul {
+  margin: 0;
+  padding-left: 20px;
 }
 
-:deep(.row-processing) {
-  background: var(--color-accent-soft);
-  opacity: 0.9;
+.fl-batch-tags {
+  margin-top: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
+.fl-batch-tag {
+  cursor: pointer;
+}
+
+/* ============ 响应式 ============ */
 @media (max-width: 768px) {
-  .search-input-field {
-    width: 100% !important;
+  .fl-addressbar {
+    padding: 8px 10px;
   }
 
-  .mobile-file-card {
-    background: var(--color-bg-surface);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-md);
-    padding: 14px;
-    margin-bottom: 10px;
-    transition: border-color var(--duration-fast), box-shadow var(--duration-fast);
+  .fl-search-form {
+    max-width: 100%;
   }
 
-  .mobile-file-card:hover {
-    border-color: var(--border-accent);
-  }
-
-  .mobile-file-card-header {
-    display: flex;
-    align-items: flex-start;
-    gap: 12px;
-    margin-bottom: 10px;
-  }
-
-  .mobile-file-name {
-    font-weight: 500;
-    word-break: break-all;
-    line-height: 1.4;
-    font-size: 14px;
-  }
-
-  .mobile-file-card-actions {
-    display: flex;
-    gap: 4px;
-    flex-wrap: wrap;
-    border-top: 1px solid var(--border-color);
-    padding-top: 8px;
+  .fl-path-item {
+    max-width: 140px;
   }
 }
 </style>
