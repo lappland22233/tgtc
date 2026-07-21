@@ -1,6 +1,6 @@
-# 文件分发系统
+# 文件分发系统（网盘版）
 
-基于 NestJS + Vue 3 + PostgreSQL 的文件分发系统，Telegram Bot API 作为存储后端，支持加密访问、限时分享和访问次数控制。
+基于 NestJS + Vue 3 + PostgreSQL 的文件分发系统，Telegram Bot API 作为存储后端。支持文件夹层级管理、卡片/列表双视图、SPA 分享页（百度网盘风格）、严格模式密码保护、限时分享和访问次数控制。
 
 ## 功能
 
@@ -13,9 +13,11 @@
 - 跨标签页登出同步（BroadcastChannel）
 
 ### 文件管理
+- **文件夹层级管理**：创建/重命名/移动/删除文件夹，闭包表（closure-table）支持任意深度层级，移动时循环检测，软删除联动子树+内含文件（7 天冷静期）
+- **卡片/列表双视图**：默认卡片网格视图（响应式自适应列数），支持切换到列表视图，偏好持久化到 localStorage
 - 拖拽上传 / 弹窗批量上传
 - 业务层动态大小限制
-- 文件列表搜索、分页、类型筛选（分页/搜索参数持久化到 URL）
+- 文件列表搜索、分页、类型筛选（分页/搜索参数持久化到 URL），支持按文件夹过滤
 - **标签管理**：创建/编辑/删除标签，支持多标签筛选（AND 逻辑），文件列表快捷编辑标签
 - 设置公开/私有、访问次数限制、分享有效期（含过期检查）
 - 批量勾选图片一键生成 Markdown 链接
@@ -23,11 +25,14 @@
 - 缩略图 RSA-OAEP 加密防外链，时间窗口 ±10 秒
 
 ### 分享访问
-- **公开无约束**：直接流式返回文件内容，CDN 友好
-- **加密文件**：访问时弹出密码验证页面，输入 `?ps=` 参数访问
-- **受限文件**（次数限制/时效限制）：自动 302 跳转短效访问链接（30s，jti 防重放）
-- 密码错误 5 次自动封禁 IP 5 分钟，1 小时内 5 次触发升级为 6 小时
-- 密码页面使用服务端 APP_URL 拼接，防止 Host Header 注入
+- **SPA 分享页**：打开分享链接 `/s/:token` 后先展示文件信息卡片（文件名、大小、类型、上传时间、有效期），提供显式下载按钮，而非直接下载/预览（百度网盘风格）
+- **严格模式密码保护**：加密分享需输入密码后才能查看任何文件元数据，未验证前后端不查询 target 表，杜绝信息泄露
+- **文件夹分享**：分享整个文件夹，支持子文件夹层级浏览、面包屑导航、单文件下载
+- **独立分享模型**：ShareLink 实体独立于文件，同一文件/文件夹可创建多条分享链接（不同密码、有效期、次数限制）
+- **老链接兼容**：`/files/public/:id` 自动 302 重定向到 `/s/:id`，迁移脚本为现有公开文件自动创建 ShareLink（token=文件 id），新文件懒创建
+- 密码错误 5 次自动封禁 IP 5 分钟，1 小时内 5 次触发升级为 6 小时（与文件密码共享封禁表）
+- 访问次数限制 + 有效期控制（从首次访问开始计时）
+- **我的分享管理**：列出所有创建的分享，支持按类型筛选、复制链接、取消分享
 
 ### 管理员
 - 全站仪表盘（30 秒自动刷新）
@@ -171,15 +176,17 @@ AUDIT_LOG_RETENTION_DAYS=90    # 审计日志保留天数
 
 ```
 ├── backend/src/
-│   ├── main.ts               # 入口：CORS、Cookie、全局管道/拦截器、静态文件、超时配置
+│   ├── main.ts               # 入口：CORS、Cookie、全局管道/拦截器、静态文件、超时配置、/files/public/ URL 重写
 │   ├── app.module.ts         # 根模块（TypeORM、Schedule、事件发射器）
 │   ├── auth/                 # 登录/注册/邮箱验证/密码重置/状态查询
 │   ├── user/                 # 个人信息/密码修改/统计
-│   ├── file/                 # 上传/下载/删除/分享/公开访问/缩略图加密/批量上传
+│   ├── file/                 # 上传/下载/删除/分享/公开访问/缩略图加密/批量上传；/files/public/:id 302 重定向到 /s/:id（懒创建 ShareLink）
+│   ├── folder/               # 文件夹模块（闭包表层级管理：创建/重命名/移动/软删除/恢复/列出内容/面包屑）
+│   ├── share/                # 分享链接模块（独立 ShareLink 实体：创建/列出/修改/取消；公开端点 /s/:token 元数据+密码验证+下载+文件夹浏览）
 │   ├── admin/                # 用户/文件/IP封禁/系统配置管理/仪表盘/访问统计/审计日志
 │   ├── alert/                # 告警模块（规则评估 + WebSocket 推送）
 │   ├── jobs/                 # Bull 任务队列（指标聚合/攻击检测/告警评估/基线计算/数据归档）
-│   ├── tag/                 # 标签模块（CRUD + 文件关联）
+│   ├── tag/                  # 标签模块（CRUD + 文件关联）
 │   ├── telemetry/            # 遥测模块（前端事件上报收集）
 │   ├── security/             # 行为异常检测（6 种异常模式）
 │   ├── telegram/             # Telegram Bot API 上传下载（流式传输，Token 脱敏）
@@ -187,28 +194,32 @@ AUDIT_LOG_RETENTION_DAYS=90    # 审计日志保留天数
 │   ├── config/               # 动态配置缓存
 │   ├── tasks/                # 定时清理（限流/Token/封禁/访问日志/审计日志）
 │   ├── common/
-│   │   ├── entities/         # 15 个数据实体
-│   │   ├── services/         # ConfigCacheService + RateLimitService + AuditService
+│   │   ├── entities/         # 17 个数据实体（含 Folder、ShareLink）
 │   │   ├── services/         # ConfigCacheService + RateLimitService + AuditService
 │   │   ├── guards/           # JWT 认证 + 角色权限守卫
 │   │   ├── decorators/       # @CurrentUser @Roles
 │   │   ├── interceptors/     # 统一响应 { code, message, data }
 │   │   ├── middleware/       # AccessLogMiddleware（全局 HTTP 请求日志）
-│   │   ├── utils/            # client-ip.ts crypto.util.ts
+│   │   └── utils/            # client-ip.ts crypto.util.ts
 │   ├── database/             # TypeORM CLI DataSource
-│   └── migrations/           # 20 个数据库迁移文件
+│   └── migrations/           # 22 个数据库迁移文件
 │
 ├── frontend/src/
 │   ├── views/
 │   │   ├── auth/             # Login.vue Register.vue
-│   │   ├── user/             # Dashboard FileList Settings
+│   │   ├── user/             # Dashboard FileList（网盘主页面，卡片/列表双视图） Shares（我的分享管理） Settings
+│   │   ├── share/            # ShareView（SPA 分享页状态机） PasswordPrompt（严格模式密码卡片） FileShareCard（文件信息卡+下载按钮） FolderShareBrowser（文件夹分享层级浏览）
 │   │   ├── admin/            # Dashboard Users Files Config AccessLogs AuditLogs SourceAnalysis UserActivity BandwidthAnalysis FileTypeAnalysis AlertManagement SecurityMonitor DashboardCustomizer
-│   │   └── layout/           # 侧边栏布局
-│   ├── components/           # UploadModal ThumbnailImg TagManager FileTagEditor
+│   │   └── layout/           # 侧边栏布局（含「我的分享」入口）
+│   ├── components/
+│   │   ├── folder/           # FolderTree（左侧文件夹树+右键菜单） FolderBreadcrumb FolderCreateDialog FolderRenameDialog FolderMoveDialog（支持批量文件移动）
+│   │   ├── file/             # FileCard（文件卡片，悬停显示操作按钮） FolderCard（文件夹卡片，区分样式）
+│   │   ├── share/            # CreateShareDialog（创建分享弹窗，支持密码/有效期/次数设置）
+│   │   └── ...               # UploadModal ThumbnailImg TagManager FileTagEditor
 │   ├── composables/          # useAutoRefresh useCursorPagination useTimeRange useMobile
-│   ├── stores/               # auth files tags (Pinia)
-│   ├── router/               # 四级路由守卫链 + redirect 安全校验
-│   ├── api/                  # axios 客户端（30s 超时，401 防抖）
+│   ├── stores/               # auth files tags folders（文件夹树/面包屑/CRUD） (Pinia)
+│   ├── router/               # 四级路由守卫链 + redirect 安全校验 + /s/:token 公开分享路由（meta.public 跳过登录）
+│   ├── api/                  # axios 客户端（30s 超时，401 防抖，410 Gone 分享失效处理）
 │   ├── types/                # TS 类型定义
 │   └── utils/                # error.ts format.ts thumbnail.ts telemetry.ts(遥测收集器)
 │
@@ -250,10 +261,13 @@ npm run typecheck            # TypeScript 类型检查
 | POST | `/api/auth/login` | 登录 |
 | POST | `/api/auth/send-code` | 发送验证码 |
 | GET | `/api/auth/status` | 认证状态查询 |
-| GET | `/files/public/:id` | 公开文件访问 |
-| GET | `/files/public/:id?ps=` | 密码验证访问 |
-| GET | `/files/public/:id?access=` | 短效访问链接 |
+| GET | `/files/public/:id` | 老分享链接入口 → 302 重定向到 `/s/:id`（懒创建 ShareLink，复制文件遗留约束） |
 | GET | `/api/files/upload-config` | 上传配置 |
+| GET | `/api/s/:token` | 分享公开入口：返回文件/文件夹元数据（**不返回字节**）；严格模式密码保护：未验证时只返回 `{ requiresPassword: true }` |
+| POST | `/api/s/:token/verify` | 提交密码验证，返回 5 分钟 access JWT |
+| GET | `/api/s/:token/download/:fileId` | 分享文件下载（需 access JWT 或无密码），流式返回 |
+| GET | `/api/s/:token/folder/:folderId/contents` | 浏览文件夹分享中的子文件夹内容（子文件夹 + 文件列表） |
+| GET | `/api/s/:token/folder/:folderId/breadcrumb` | 返回从分享根文件夹到当前 folder 的路径（面包屑） |
 
 ### User（需登录）
 | 方法 | 路径 | 说明 |
@@ -262,17 +276,18 @@ npm run typecheck            # TypeScript 类型检查
 | POST | `/api/auth/reset-password` | 重置密码 |
 | GET | `/api/users/me/stats` | 个人统计 |
 | POST | `/api/files/upload-multiple` | 批量上传 |
-| GET | `/api/files` | 文件列表 |
+| GET | `/api/files` | 文件列表（支持 `folderId` 过滤：`root`=根目录，UUID=指定文件夹） |
 | DELETE | `/api/files/:id` | 请求删除文件（7天冷静期） |
 | POST | `/api/files/:id/restore` | 恢复已删除文件 |
 | POST | `/api/files/:id/force-delete` | 强制永久删除 |
 | GET | `/api/files/:id/download` | 下载（后端代理流式转发） |
 | GET | `/api/files/:id/thumbnail?t=` | 缩略图预览 |
-| GET | `/api/files/:id/share` | 生成分享链接 |
-| PUT | `/api/files/:id/password` | 设置密码 |
+| PATCH | `/api/files/:id/move` | 移动文件到指定文件夹（`folderId: null`=根目录） |
+| GET | `/api/files/:id/share` | 生成分享链接（旧端点，建议用 POST /api/shares） |
+| PUT | `/api/files/:id/password` | 设置密码（遗留端点，新分享用 POST /api/shares） |
 | PUT | `/api/files/:id/access-type` | 公开/私有 |
-| PUT | `/api/files/:id/access-count` | 访问限制 |
-| PUT | `/api/files/:id/expires` | 有效期 |
+| PUT | `/api/files/:id/access-count` | 访问限制（遗留端点） |
+| PUT | `/api/files/:id/expires` | 有效期（遗留端点） |
 | POST | `/api/files/batch-markdown` | 批量 Markdown |
 | GET | `/api/files/public-key` | RSA-OAEP 加密公钥 |
 | GET | `/api/tags` | 用户标签列表（含文件计数） |
@@ -281,6 +296,27 @@ npm run typecheck            # TypeScript 类型检查
 | DELETE | `/api/tags/:id` | 删除标签 |
 | PUT | `/api/files/:id/tags` | 批量设置文件标签 |
 | DELETE | `/api/files/:id/tags/:tagId` | 移除文件标签 |
+
+### 文件夹（需登录）
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/api/folders` | 创建文件夹（`parentId: null`=根目录） |
+| GET | `/api/folders/tree` | 返回当前用户的完整文件夹树（左侧导航） |
+| GET | `/api/folders/breadcrumb?parentId=` | 返回从根到指定 folder 的路径 |
+| GET | `/api/folders/contents?parentId=` | 列出子文件夹 + 文件（主区域视图） |
+| PATCH | `/api/folders/:id` | 重命名文件夹 |
+| PATCH | `/api/folders/:id/move` | 移动文件夹到新父级（循环检测） |
+| DELETE | `/api/folders/:id` | 软删除文件夹（联动子树+内含文件，7天冷静期） |
+| POST | `/api/folders/:id/restore` | 恢复已删除文件夹（只恢复同时删除的文件） |
+
+### 分享链接（需登录）
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/api/shares` | 创建分享（`targetType: file\|folder`，可选密码/有效期/次数限制） |
+| GET | `/api/shares` | 列出我的分享（分页，可按 targetType 过滤） |
+| GET | `/api/shares/:id` | 查看分享详情（返回 `hasPassword` 布尔值，不暴露密码哈希） |
+| PATCH | `/api/shares/:id` | 更新分享设置（密码/有效期/次数） |
+| DELETE | `/api/shares/:id` | 取消分享（软删除） |
 
 ### Admin / Super Admin
 | 方法 | 路径 | 说明 |
