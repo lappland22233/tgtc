@@ -37,6 +37,10 @@ import { getClientIp } from '../common/utils/client-ip';
 import { RateLimitService } from '../common/services/rate-limit.service';
 import { ConfigCacheService } from '../common/services/config-cache.service';
 import { TagService } from '../tag/tag.service';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
+import { ShareLink, ShareLinkStatus, ShareTargetType } from '../common/entities/share-link.entity';
+import { File as FileEntity } from '../common/entities/file.entity';
 
 // Multer 层硬上限（600MB，仅防止极端 DoS；精确的动态限制由 FileService.upload() 业务层负责）
 const multerFileSize = 600 * 1024 * 1024; // 600MB
@@ -60,6 +64,10 @@ export class FileController {
     private configCacheService: ConfigCacheService,
     private tagService: TagService,
     private folderService: FolderService,
+    @InjectRepository(ShareLink)
+    private shareLinkRepository: Repository<ShareLink>,
+    @InjectRepository(FileEntity)
+    private fileRepository: Repository<FileEntity>,
   ) {}
 
   /**
@@ -529,14 +537,13 @@ export class FileController {
    *   2. 服务端渲染 HTML 密码页
    *   3. 302 跳转到短效 access token URL
    *
-   * Phase 2 起，所有分享逻辑统一由 ShareLink + SPA 路由 /s/:token 处理：
-   *   - 迁移脚本已把现有 accessType=public 的文件复制为 ShareLink（token=原 file.id）
-   *   - 前端 ShareView.vue 接管密码验证 UI
-   *   - 下载由 GET /api/s/:token/download/:fileId 统一处理
+   * Phase 2 起，所有分享逻辑统一由 ShareLink + SPA 路由 /s/:token 处理。
+   * 此端点改为「懒创建 + 重定向」：
+   *   - 查找文件，校验存在 + 公开
+   *   - 查找 ShareLink（token = file.id），不存在则自动创建（公开无密码）
+   *   - 302 重定向到 /s/{id}
    *
-   * 兼容性：老链接 `/files/public/{id}` 重定向到 `/s/{id}` 后仍可命中对应的 ShareLink。
-   * 私有文件（accessType=private）原本走 /files/public/:id 会被拒绝，
-   * 重定向后由 ShareView 展示「分享不存在」（ShareLink 表里也没有对应记录）。
+   * 这确保迁移后新上传的公开文件也能通过老 URL /files/public/{id} 访问。
    */
   @Get('public/:id')
   async getPublicFile(
@@ -544,6 +551,51 @@ export class FileController {
     @Res() res: Response,
   ) {
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
+
+    // 1. 查找文件，校验存在且未删除（select 包含遗留约束字段，用于懒创建 ShareLink）
+    const file = await this.fileRepository.findOne({
+      where: { id, isDeleted: false },
+      select: ['id', 'accessType', 'uploaderId', 'originalName', 'password', 'maxAccessCount', 'expiresIn', 'expiresStartAt'],
+    });
+    if (!file) {
+      res.status(404).json({ code: 1, message: '文件不存在' });
+      return;
+    }
+
+    // 2. 私有文件不允许公开访问
+    if (file.accessType !== FileAccessType.PUBLIC) {
+      res.status(403).json({ code: 1, message: '此文件为私有文件，不提供公开访问' });
+      return;
+    }
+
+    // 3. 懒创建 ShareLink（如果不存在）——复制文件的遗留约束字段
+    let shareLink = await this.shareLinkRepository.findOne({
+      where: { token: id, isDeleted: false },
+    });
+    if (!shareLink) {
+      shareLink = this.shareLinkRepository.create({
+        token: id, // 用文件 id 作为 token，确保老链接兼容
+        targetType: ShareTargetType.FILE,
+        targetId: id,
+        creatorId: file.uploaderId,
+        // 复制文件的遗留约束（Phase 2 之前通过 /files/:id/password 等端点设置的）
+        password: file.password ?? null,
+        maxAccessCount: file.maxAccessCount ?? -1,
+        expiresIn: file.expiresIn ?? null,
+        expiresStartAt: file.expiresStartAt ?? null,
+        status: ShareLinkStatus.ACTIVE,
+      });
+      try {
+        await this.shareLinkRepository.save(shareLink);
+      } catch {
+        // 并发创建时可能触发唯一约束冲突，忽略——另一个请求已创建
+        shareLink = await this.shareLinkRepository.findOne({
+          where: { token: id, isDeleted: false },
+        });
+      }
+    }
+
+    // 4. 重定向到 SPA 分享页
     res.redirect(302, `/s/${id}`);
   }
 

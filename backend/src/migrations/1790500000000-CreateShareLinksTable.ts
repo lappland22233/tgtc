@@ -16,7 +16,7 @@ export class CreateShareLinksTable1790500000000 implements MigrationInterface {
     await queryRunner.query(`
       CREATE TABLE IF NOT EXISTS "share_links" (
         "id"                  uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-        "token"               varchar(32) NOT NULL,
+        "token"               varchar(64) NOT NULL,
         "targetType"          varchar(10) NOT NULL,
         "targetId"            uuid NOT NULL,
         "creatorId"           uuid NOT NULL,

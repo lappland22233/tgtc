@@ -10,6 +10,7 @@ import { File } from '../common/entities/file.entity';
 import { FileAccessLog } from '../common/entities/file-access-log.entity';
 import { BannedIP } from '../common/entities/banned-ip.entity';
 import { ShareAudit } from '../common/entities/share-audit.entity';
+import { ShareLink } from '../common/entities/share-link.entity';
 import { UploadTask } from '../common/entities/upload-task.entity';
 import { TelegramModule } from '../telegram/telegram.module';
 import { FolderModule } from '../folder/folder.module';
@@ -24,7 +25,7 @@ import { TagModule } from '../tag/tag.module';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([File, FileAccessLog, BannedIP, ShareAudit, UploadTask]),
+    TypeOrmModule.forFeature([File, FileAccessLog, BannedIP, ShareAudit, ShareLink, UploadTask]),
     ConfigCacheModule,
     RateLimitModule,
     TagModule,

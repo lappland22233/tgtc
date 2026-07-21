@@ -55,9 +55,9 @@ export class ShareLink {
   @PrimaryColumn({ type: 'uuid', default: () => 'gen_random_uuid()' })
   id: string;
 
-  /** URL 段 token，全局唯一，12 字符 base64url */
+  /** URL 段 token，全局唯一。新生成的 token 是 12 字符 base64url（~72 bit 熵），但迁移脚本会把老文件的 UUID（36 字符）作为 token 以兼容老链接 */
   @Index({ unique: true })
-  @Column({ type: 'varchar', length: 32 })
+  @Column({ type: 'varchar', length: 64 })
   token: string;
 
   @Column({ type: 'enum', enum: ShareTargetType })
