@@ -125,7 +125,6 @@ export class FolderService {
     });
     return saved;
   }
-}
 
   async renameFolder(ownerId: string, id: string, dto: RenameFolderDto): Promise<Folder> {
     const folder = await this.assertFolderOwned(id, ownerId);
@@ -242,16 +241,19 @@ export class FolderService {
     if (!folder) {
       throw new NotFoundException('文件夹不存在或未被删除');
     }
-    // 还原子树所有 folder
+    // 还原子树中所有 folder——但只恢复与文件夹同时删除的（deleteRequestedAt 匹配），
+    // 避免恢复在文件夹删除之前已独立删除的子文件夹
     const descendants = await this.folderRepo.findDescendants(folder);
     const folderIds = descendants.map((f) => f.id);
+    const folderDeleteTime = folder.deleteRequestedAt;
     await this.folderRepo.update(
-      { id: In(folderIds) },
+      { id: In(folderIds), deleteRequestedAt: folderDeleteTime as any },
       { isDeleted: false, deleteRequestedAt: null, deleteScheduledAt: null },
     );
-    // 还原内含文件
+    // 还原内含文件——同样只恢复与文件夹同时删除的文件，
+    // 避免恢复用户独立删除或管理员独立删除的文件
     await this.fileRepo.update(
-      { folderId: In(folderIds) },
+      { folderId: In(folderIds), deleteRequestedAt: folderDeleteTime as any },
       { isDeleted: false, deleteRequestedAt: null, deleteScheduledAt: null, deletedByAdmin: false },
     );
     this.audit.log({

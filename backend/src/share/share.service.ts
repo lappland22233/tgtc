@@ -132,7 +132,7 @@ export class ShareService {
     if (!link) throw new NotFoundException('分享不存在或已被取消');
 
     // 状态校验：过期/次数耗尽/取消
-    this.assertShareUsable(link);
+    await this.assertShareUsable(link);
 
     // 严格模式：需要密码但未通过 → 不查询 target
     if (link.password && !accessJwt) {
@@ -230,7 +230,7 @@ export class ShareService {
     const link = await this.shareLinkRepo.findOne({ where: { token, isDeleted: false } });
     if (!link) throw new NotFoundException('分享不存在');
 
-    this.assertShareUsable(link);
+    await this.assertShareUsable(link);
 
     // 严格模式：密码校验
     if (link.password) {
@@ -274,10 +274,17 @@ export class ShareService {
       skip: (page - 1) * limit,
       take: limit,
     });
-    return { items, total, page, limit };
+    // 不暴露 bcrypt 密码哈希，只返回 hasPassword 布尔值
+    return { items: items.map((s) => this.sanitizeShareLink(s)), total, page, limit };
   }
 
-  async getShareById(id: string, creatorId: string): Promise<ShareLink> {
+  async getShareById(id: string, creatorId: string) {
+    const link = await this.getShareByIdRaw(id, creatorId);
+    return this.sanitizeShareLink(link);
+  }
+
+  /** 内部方法：返回原始 ShareLink 实体（含 password），供 update/cancel 使用 */
+  private async getShareByIdRaw(id: string, creatorId: string): Promise<ShareLink> {
     const link = await this.shareLinkRepo.findOne({
       where: { id, creatorId, isDeleted: false },
     });
@@ -285,8 +292,14 @@ export class ShareService {
     return link;
   }
 
-  async updateShare(id: string, creatorId: string, dto: UpdateShareDto): Promise<ShareLink> {
-    const link = await this.getShareById(id, creatorId);
+  /** 去除 password 字段，替换为 hasPassword 布尔值 */
+  private sanitizeShareLink(link: ShareLink) {
+    const { password, ...rest } = link;
+    return { ...rest, hasPassword: !!password };
+  }
+
+  async updateShare(id: string, creatorId: string, dto: UpdateShareDto) {
+    const link = await this.getShareByIdRaw(id, creatorId);
     if (dto.password !== undefined) {
       link.password = dto.password ? await bcrypt.hash(dto.password, 10) : null;
     }
@@ -308,7 +321,7 @@ export class ShareService {
   }
 
   async cancelShare(id: string, creatorId: string): Promise<void> {
-    const link = await this.getShareById(id, creatorId);
+    const link = await this.getShareByIdRaw(id, creatorId);
     link.isDeleted = true;
     link.status = ShareLinkStatus.DISABLED;
     await this.shareLinkRepo.save(link);
