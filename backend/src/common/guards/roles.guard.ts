@@ -1,10 +1,12 @@
-import { Injectable, CanActivate, ExecutionContext, ForbiddenException, UnauthorizedException } from '@nestjs/common';
+import { Injectable, CanActivate, ExecutionContext, ForbiddenException, UnauthorizedException, Logger } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { UserRole } from '../entities/user.entity';
 import { ROLES_KEY } from '../decorators/roles.decorator';
 
 @Injectable()
 export class RolesGuard implements CanActivate {
+  private readonly logger = new Logger(RolesGuard.name);
+
   constructor(private reflector: Reflector) {}
 
   canActivate(context: ExecutionContext): boolean {
@@ -27,9 +29,11 @@ export class RolesGuard implements CanActivate {
       throw new UnauthorizedException('用户未认证');
     }
     if (!requiredRoles.includes(user.role)) {
-      throw new ForbiddenException(
-        `角色 '${user.role}' 无权访问此资源，需要角色: ${requiredRoles.join(', ')}`,
+      // 详细角色信息仅记录到服务端日志，避免向客户端泄漏所需角色名
+      this.logger.warn(
+        `角色越权访问被拒绝 [userId:${user.id} role:${user.role} required:${requiredRoles.join(', ')}]`,
       );
+      throw new ForbiddenException('无权访问此资源');
     }
     return true;
   }

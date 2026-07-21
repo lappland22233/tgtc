@@ -17,11 +17,15 @@ import { User, UserRole } from '../common/entities/user.entity';
   namespace: '/alerts',
   cors: {
     origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
-      // 与主应用 CORS 配置保持一致：读取 CORS_ORIGINS，未配置时回退到本地开发地址
-      const allowed = process.env.CORS_ORIGINS?.split(',')
+      // 与主应用 CORS 配置保持一致：读取 CORS_ORIGINS，未配置（或为空）时回退到前端地址，
+      // 避免空字符串配置导致 allowed 为空数组、生产环境拒绝所有合法连接
+      const configured = (process.env.CORS_ORIGINS || '')
+        .split(',')
         .map(s => s.trim())
-        .filter(Boolean)
-        || [process.env.FRONTEND_URL || 'http://localhost:5173'];
+        .filter(Boolean);
+      const allowed = configured.length > 0
+        ? configured
+        : [process.env.FRONTEND_URL || 'http://localhost:5173'];
       // 开发环境允许无 origin 请求，生产环境拒绝
       if (process.env.NODE_ENV !== 'production' && !origin) {
         callback(null, true);
@@ -43,6 +47,15 @@ export class AlertGateway
   server: Server;
 
   private readonly logger = new Logger(AlertGateway.name);
+
+  /** 广播限流：1 秒滑动窗口内最多推送的告警条数 */
+  private static readonly BROADCAST_LIMIT_PER_SEC = 20;
+  /** 最近 1 秒内的广播时间戳 */
+  private broadcastTimestamps: number[] = [];
+  /** 因限流被丢弃的告警计数 */
+  private throttledCount = 0;
+  /** 上次发送限流通知的时间 */
+  private lastThrottleNoticeAt = 0;
 
   constructor(
     private readonly jwtService: JwtService,
@@ -102,7 +115,7 @@ export class AlertGateway
     this.logger.log(`客户端已断开: ${client.id}`);
   }
 
-  /** 广播新告警给所有连接的客户端 */
+  /** 广播新告警给所有连接的客户端（带频率限制，防止告警风暴） */
   broadcastAlert(alert: {
     id: string;
     ruleId: string;
@@ -111,6 +124,23 @@ export class AlertGateway
     message: string;
     createdAt: Date;
   }): void {
+    const now = Date.now();
+    // 滑动窗口限流：仅保留最近 1 秒的广播时间戳
+    this.broadcastTimestamps = this.broadcastTimestamps.filter((t) => now - t < 1000);
+
+    if (this.broadcastTimestamps.length >= AlertGateway.BROADCAST_LIMIT_PER_SEC) {
+      // 超过频率上限：丢弃本次广播并累计计数，避免 WebSocket 消息风暴
+      this.throttledCount++;
+      // 每秒最多发送一次限流通知，告知客户端有告警被抑制
+      if (now - this.lastThrottleNoticeAt >= 1000) {
+        this.server.emit('alerts-throttled', { dropped: this.throttledCount });
+        this.throttledCount = 0;
+        this.lastThrottleNoticeAt = now;
+      }
+      return;
+    }
+
+    this.broadcastTimestamps.push(now);
     this.server.emit('new-alert', alert);
   }
 

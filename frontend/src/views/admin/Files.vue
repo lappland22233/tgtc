@@ -14,7 +14,7 @@
           </t-select>
         </div>
         <div style="display: flex; gap: 12px;">
-          <t-button theme="primary" variant="outline" @click="batchDelete">批量删除（冷静期）</t-button>
+          <t-button v-if="!isMobile" theme="primary" variant="outline" @click="batchDelete">批量删除（冷静期）</t-button>
         </div>
       </div>
 
@@ -23,6 +23,7 @@
         v-model:selected-row-keys="selectedRows"
         :data="files"
         :columns="columns"
+        :loading="loading"
         :row-class-name="getRowClassName"
         row-key="id"
         hover
@@ -133,7 +134,8 @@
 
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, nextTick, computed } from 'vue';
-import { MessagePlugin } from 'tdesign-vue-next';
+import { DialogPlugin } from 'tdesign-vue-next';
+import MessagePlugin from '@/utils/message';
 import { api } from '../../stores/auth';
 import { formatSize, formatDate, getFileEmoji } from '@/utils/format';
 import { getErrorMessage } from '../../utils/error';
@@ -164,6 +166,7 @@ const filterUploader = ref('');
 const selectedRows = ref<string[]>([]);
 const sortBy = ref<string>('');
 const sortOrder = ref<string>('');
+const loading = ref(false);
 
 // 分页模式
 const pageMode = ref<'paginated' | 'infinite'>('paginated');
@@ -220,36 +223,59 @@ function extractUploaders(fileList: AdminFileItem[]) {
 /** 传统分页请求 */
 async function fetchFiles() {
   const sortField = sortBy.value === 'uploader' ? 'uploader.email' : sortBy.value;
-  const res = await api.get('/admin/files', {
-    params: {
-      page: page.value,
-      limit: Math.abs(pageSize.value),
-      keyword: searchFile.value || undefined,
-      userId: filterUploader.value || undefined,
-      sortBy: sortField || undefined,
-      sortOrder: sortOrder.value || undefined,
-    },
-  });
-  files.value = res.data.data.files;
-  total.value = res.data.data.total;
-  extractUploaders(files.value);
+  loading.value = true;
+  try {
+    const res = await api.get('/admin/files', {
+      params: {
+        page: page.value,
+        limit: Math.abs(pageSize.value),
+        keyword: searchFile.value || undefined,
+        userId: filterUploader.value || undefined,
+        sortBy: sortField || undefined,
+        sortOrder: sortOrder.value || undefined,
+      },
+    });
+    files.value = res.data.data.files;
+    total.value = res.data.data.total;
+    extractUploaders(files.value);
+  } catch (error: unknown) {
+    MessagePlugin.error(getErrorMessage(error) || '加载文件列表失败');
+  } finally {
+    loading.value = false;
+  }
 }
 
 /** 游标分页请求 */
 async function fetchFilesCursor(cursor?: string | null) {
-  const res = await api.get('/admin/files', {
-    params: {
-      limit: 20,
-      keyword: searchFile.value || undefined,
-      userId: filterUploader.value || undefined,
-      cursor: cursor || undefined,
-    },
-  });
-  return {
-    files: res.data.data.files as AdminFileItem[],
-    nextCursor: res.data.data.nextCursor as string | null,
-    total: res.data.data.total as number,
-  };
+  try {
+    const res = await api.get('/admin/files', {
+      params: {
+        limit: 20,
+        keyword: searchFile.value || undefined,
+        userId: filterUploader.value || undefined,
+        cursor: cursor || undefined,
+      },
+    });
+    return {
+      files: res.data.data.files as AdminFileItem[],
+      nextCursor: res.data.data.nextCursor as string | null,
+      total: res.data.data.total as number,
+    };
+  } catch (error: unknown) {
+    // 请求被取消（如切换筛选/重置）不提示错误
+    const canceled =
+      (error as { code?: string })?.code === 'ERR_CANCELED' ||
+      (error instanceof Error && error.name === 'AbortError');
+    if (!canceled) {
+      MessagePlugin.error(getErrorMessage(error) || '加载文件列表失败');
+    }
+    // 失败时返回空结果，避免破坏游标分页状态
+    return {
+      files: [] as AdminFileItem[],
+      nextCursor: null,
+      total: total.value,
+    };
+  }
 }
 
 /** 初始加载 / 重置加载 */
@@ -316,22 +342,31 @@ async function refreshList() {
 }
 
 /** 管理员删除文件（7天冷静期，再次点击强制删除） */
-async function deleteFile(row: AdminFileItem) {
+function deleteFile(row: AdminFileItem) {
   const isFirstDelete = !row.isDeleted;
   const message = isFirstDelete
     ? `确定要删除文件 "${row.originalName}" 吗？文件将进入 7 天冷静期。`
     : `文件 "${row.originalName}" 已处于待删除状态，再次确认将立即永久删除！`;
 
-  if (!confirm(message)) return;
-
-  try {
-    const result = await api.delete(`/admin/files/${row.id}`);
-    const msg = result.data?.message || '删除成功';
-    MessagePlugin.success(msg);
-    refreshList();
-  } catch (error: unknown) {
-    MessagePlugin.error(getErrorMessage(error));
-  }
+  const confirmDialog = DialogPlugin.confirm({
+    header: '删除文件',
+    body: message,
+    theme: 'warning',
+    confirmBtn: '确定',
+    cancelBtn: '取消',
+    onConfirm: async () => {
+      try {
+        const result = await api.delete(`/admin/files/${row.id}`);
+        const msg = result.data?.message || '删除成功';
+        MessagePlugin.success(msg);
+        refreshList();
+      } catch (error: unknown) {
+        MessagePlugin.error(getErrorMessage(error));
+      }
+      confirmDialog.destroy();
+    },
+    onClose: () => confirmDialog.destroy(),
+  });
 }
 
 /** 恢复已删除文件 */
@@ -346,32 +381,52 @@ async function restoreFile(id: string) {
 }
 
 /** 强制永久删除（管理员第二次确认） */
-async function forceDeleteFile(row: AdminFileItem) {
-  if (!confirm(`确定要永久删除文件 "${row.originalName}" 吗？此操作不可恢复！`)) return;
-
-  try {
-    await api.delete(`/admin/files/${row.id}`);
-    MessagePlugin.success('文件已永久删除');
-    refreshList();
-  } catch (error: unknown) {
-    MessagePlugin.error(getErrorMessage(error));
-  }
+function forceDeleteFile(row: AdminFileItem) {
+  const confirmDialog = DialogPlugin.confirm({
+    header: '永久删除文件',
+    body: `确定要永久删除文件 "${row.originalName}" 吗？此操作不可恢复！`,
+    theme: 'danger',
+    confirmBtn: '永久删除',
+    cancelBtn: '取消',
+    onConfirm: async () => {
+      try {
+        await api.delete(`/admin/files/${row.id}`);
+        MessagePlugin.success('文件已永久删除');
+        refreshList();
+      } catch (error: unknown) {
+        MessagePlugin.error(getErrorMessage(error));
+      }
+      confirmDialog.destroy();
+    },
+    onClose: () => confirmDialog.destroy(),
+  });
 }
 
-async function batchDelete() {
+function batchDelete() {
   if (selectedRows.value.length === 0) {
     MessagePlugin.warning('请先选择要删除的文件');
     return;
   }
-  if (!confirm(`确定要批量删除选中的 ${selectedRows.value.length} 个文件吗？文件将进入 7 天冷静期。`)) return;
-  try {
-    await api.post('/admin/files/batch-delete', { ids: selectedRows.value });
-    MessagePlugin.success('批量删除成功（已进入 7 天冷静期）');
-    selectedRows.value = [];
-    refreshList();
-  } catch (error: unknown) {
-    MessagePlugin.error(getErrorMessage(error));
-  }
+  const count = selectedRows.value.length;
+  const confirmDialog = DialogPlugin.confirm({
+    header: '批量删除文件',
+    body: `确定要批量删除选中的 ${count} 个文件吗？文件将进入 7 天冷静期。`,
+    theme: 'warning',
+    confirmBtn: '批量删除',
+    cancelBtn: '取消',
+    onConfirm: async () => {
+      try {
+        await api.post('/admin/files/batch-delete', { ids: selectedRows.value });
+        MessagePlugin.success('批量删除成功（已进入 7 天冷静期）');
+        selectedRows.value = [];
+        refreshList();
+      } catch (error: unknown) {
+        MessagePlugin.error(getErrorMessage(error));
+      }
+      confirmDialog.destroy();
+    },
+    onClose: () => confirmDialog.destroy(),
+  });
 }
 
 function handleSortChange(sortInfo: { sortBy: string; descending: boolean } | { sortBy: string; descending: boolean }[]) {
@@ -384,6 +439,7 @@ function handleSortChange(sortInfo: { sortBy: string; descending: boolean } | { 
     pageMode.value = 'paginated';
     pageSize.value = 20;
     resetCursor();
+    MessagePlugin.info('排序已切换为分页模式');
   }
   page.value = 1;
   fetchFiles();
@@ -427,7 +483,7 @@ onUnmounted(() => {
 }
 
 :deep(.row-deleted) {
-  background: rgba(255, 255, 255, 0.02);
+  background: var(--color-bg-elevated);
   opacity: 0.85;
 }
 

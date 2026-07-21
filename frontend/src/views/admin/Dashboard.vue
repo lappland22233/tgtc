@@ -32,12 +32,12 @@
       </div>
     </div>
 
-    <div class="dashboard-split-grid" style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+    <div class="dashboard-split-grid">
       <div class="card">
-        <h3 style="margin-bottom: 20px; font-family: var(--font-display); font-size: 16px; font-weight: 600;">
+        <h3 class="card-title">
           我的文件统计
         </h3>
-        <div class="stats-grid" style="margin-bottom: 0; grid-template-columns: repeat(3, 1fr);">
+        <div class="stats-grid nested-stats">
           <div class="stat-card">
             <h3>我的文件</h3>
             <div class="value">{{ myFiles.fileCount }}</div>
@@ -54,7 +54,7 @@
       </div>
 
       <div class="card">
-        <h3 style="margin-bottom: 20px; font-family: var(--font-display); font-size: 16px; font-weight: 600;">
+        <h3 class="card-title">
           全站月度访问量
         </h3>
         <div v-if="stats.monthlyAccess.length === 0" class="empty-state">
@@ -83,11 +83,11 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue';
+import { shallowRef, computed, onMounted, onUnmounted } from 'vue';
 import { formatSize } from '@/utils/format';
 import { api } from '../../stores/auth';
 
-const stats = ref({
+const stats = shallowRef({
   totalUsers: 0,
   activeUsers: 0,
   bannedUsers: 0,
@@ -97,7 +97,7 @@ const stats = ref({
   monthlyAccess: [] as { month: string; count: number }[],
 });
 
-const myFiles = ref({
+const myFiles = shallowRef({
   fileCount: 0,
   totalSize: 0,
   totalAccessCount: 0,
@@ -118,12 +118,18 @@ async function fetchData() {
 
 function formatMonth(month: string) {
   const m = month.split('-')[1];
-  return `${parseInt(m)}月`;
+  const n = parseInt(m, 10);
+  if (Number.isNaN(n)) return month;
+  return `${n}月`;
 }
 
+// 缓存最大访问量，避免 getBarHeight 每次调用都重新 map+Math.max（O(n²)→O(n)）
+const maxAccessCount = computed(() =>
+  Math.max(...stats.value.monthlyAccess.map((i) => i.count), 1),
+);
+
 function getBarHeight(count: number) {
-  const max = Math.max(...stats.value.monthlyAccess.map((i) => i.count), 1);
-  return Math.max(4, Math.round((count / max) * 120)) + 'px';
+  return Math.max(4, Math.round((count / maxAccessCount.value) * 120)) + 'px';
 }
 
 onMounted(async () => {
@@ -137,10 +143,24 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-.empty-state {
-  text-align: center;
-  padding: 32px 0;
-  color: var(--text-secondary);
-  font-size: 14px;
+.dashboard-split-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+}
+
+/* 嵌套统计网格：桌面 3 列，移动端塌缩为 1 列（替代原 inline style，解决小屏挤压） */
+.nested-stats {
+  margin-bottom: 0;
+  grid-template-columns: repeat(3, 1fr);
+}
+
+@media (max-width: 768px) {
+  .dashboard-split-grid {
+    grid-template-columns: 1fr;
+  }
+  .nested-stats {
+    grid-template-columns: 1fr;
+  }
 }
 </style>

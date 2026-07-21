@@ -1,9 +1,9 @@
 // ============================================================
 // Cyber-Secure ECharts Theme — unified chart color system
-// Uses dynamic import to avoid bundling echarts into main chunk
+// Uses tree-shaken echarts core (./echarts) instead of full barrel
 // ============================================================
 
-import type * as echartsNS from 'echarts';
+import echarts from './echarts';
 
 /* ---- Color Palette (static, no echarts dependency) ---- */
 export const CHART_COLORS = {
@@ -78,26 +78,18 @@ export const legendBase = {
 };
 
 // ============================================================
-// Lazy echarts loading (dynamic import, NOT in main bundle)
+// Theme registration (echarts core already loaded via ./echarts)
 // ============================================================
-let echartsModule: typeof echartsNS | null = null;
-
-async function getEcharts(): Promise<typeof echartsNS> {
-  if (!echartsModule) {
-    echartsModule = await import('echarts');
-  }
-  return echartsModule;
-}
 
 let themeRegistered = false;
 
 /**
  * Ensure the 'cyber' theme is registered (idempotent).
  * Call before echarts.init(el, 'cyber') in any chart component.
+ * 注意：内部全为同步操作，故为同步函数；调用方 `await ensureCyberTheme()` 仍合法。
  */
-export async function ensureCyberTheme(): Promise<void> {
+export function ensureCyberTheme(): void {
   if (themeRegistered) return;
-  const echarts = await getEcharts();
   echarts.registerTheme('cyber', {
     color: [
       CHART_COLORS.blue, CHART_COLORS.cyan, CHART_COLORS.success,
@@ -114,7 +106,8 @@ export async function ensureCyberTheme(): Promise<void> {
       smooth: true,
     },
     bar: {
-      itemStyle: { barBorderRadius: [4, 4, 0, 0], borderWidth: 0 },
+      // borderRadius 为 ECharts 5/6 属性名（旧名 barBorderRadius 在 v6 被忽略）
+      itemStyle: { borderRadius: [4, 4, 0, 0], borderWidth: 0 },
       barWidth: '60%',
     },
     pie: {
@@ -148,10 +141,14 @@ export async function ensureCyberTheme(): Promise<void> {
  * Must be called AFTER ensureCyberTheme() to ensure echarts is loaded.
  */
 export function areaGradient(color: string, topAlpha = 0.25, bottomAlpha = 0.01) {
-  if (!echartsModule) throw new Error('areaGradient: call ensureCyberTheme() first');
-  return new echartsModule.graphic.LinearGradient(0, 0, 0, 1, [
-    { offset: 0, color: color + hexAlpha(topAlpha) },
-    { offset: 1, color: color + hexAlpha(bottomAlpha) },
+  // 仅 6 位 hex（#rrggbb）可安全追加两位 alpha；
+  // rgb()/hsl()/命名色等追加后会变成非法颜色，退化为原色不透明渐变。
+  const isHex6 = /^#[0-9a-f]{6}$/i.test(color);
+  const top = isHex6 ? color + hexAlpha(topAlpha) : color;
+  const bottom = isHex6 ? color + hexAlpha(bottomAlpha) : color;
+  return new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+    { offset: 0, color: top },
+    { offset: 1, color: bottom },
   ]);
 }
 
@@ -161,6 +158,6 @@ function hexAlpha(a: number): string {
 }
 
 // Legacy export: registerCyberTheme() for backward compat (used in main.ts deferred init)
-export async function registerCyberTheme() {
-  await ensureCyberTheme();
+export function registerCyberTheme() {
+  ensureCyberTheme();
 }

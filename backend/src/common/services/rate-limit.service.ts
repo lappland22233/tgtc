@@ -79,8 +79,16 @@ export class RateLimitService {
     );
 
     // 无返回行 → 记录已被其他请求锁定（WHERE 条件过滤了锁定记录）
-    // 锁定时间使用 lockDurationMs 近似（已原子化设置，无 TOCTOU）
     if (!result || result.length === 0) {
+      // 查询实际 lockedUntil 返回精确剩余等待时间，替代 lockDurationMs 近似值
+      const locked = await this.rateLimitRepo.findOne({ where: { key } });
+      if (locked?.lockedUntil && locked.lockedUntil.getTime() > now.getTime()) {
+        const waitMinutes = Math.ceil(
+          (locked.lockedUntil.getTime() - now.getTime()) / RateLimitService.MS_PER_MINUTE,
+        );
+        return { allowed: false, waitMinutes };
+      }
+      // 兜底：记录恰好解锁或不存在时，用 lockDurationMs 近似
       const waitMinutes = Math.ceil(lockDurationMs / RateLimitService.MS_PER_MINUTE);
       return { allowed: false, waitMinutes };
     }

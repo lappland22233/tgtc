@@ -17,27 +17,27 @@
     <div v-if="activeTab === 'detection'" class="tab-content">
       <!-- 统计卡片 -->
       <div class="metrics-grid" style="margin-bottom: 16px">
-        <div class="metric-card" style="border-left: 3px solid #EF5350">
+        <div class="metric-card" style="border-left: 3px solid var(--color-danger)">
           <div class="metric-label">今日攻击事件</div>
-          <div class="metric-value" style="color: #EF5350">{{ attackAlerts.length }}</div>
+          <div class="metric-value" style="color: var(--color-danger)">{{ attackAlerts.length }}</div>
         </div>
-        <div class="metric-card" style="border-left: 3px solid #FF9800">
+        <div class="metric-card" style="border-left: 3px solid var(--color-warning)">
           <div class="metric-label">高频扫描</div>
-          <div class="metric-value" style="color: #FF9800">{{ attackTypeCount('high_frequency_scan') }}</div>
+          <div class="metric-value" style="color: var(--color-warning)">{{ attackTypeCount('high_frequency_scan') }}</div>
         </div>
-        <div class="metric-card" style="border-left: 3px solid #F44336">
+        <div class="metric-card" style="border-left: 3px solid var(--color-danger)">
           <div class="metric-label">登录爆破</div>
-          <div class="metric-value" style="color: #F44336">{{ attackTypeCount('brute_force') }}</div>
+          <div class="metric-value" style="color: var(--color-danger)">{{ attackTypeCount('brute_force') }}</div>
         </div>
-        <div class="metric-card" style="border-left: 3px solid #FFA726">
+        <div class="metric-card" style="border-left: 3px solid var(--color-warning)">
           <div class="metric-label">爬虫/异常下载</div>
-          <div class="metric-value" style="color: #FFA726">{{ attackTypeCount('crawler') + attackTypeCount('abnormal_download') }}</div>
+          <div class="metric-value" style="color: var(--color-warning)">{{ attackTypeCount('crawler') + attackTypeCount('abnormal_download') }}</div>
         </div>
       </div>
 
       <!-- 攻击告警表格 -->
       <div class="card">
-        <h3 style="margin: 0 0 16px;">攻击行为告警</h3>
+        <h3 class="card-title" style="margin: 0 0 16px;">攻击行为告警</h3>
         <t-loading :loading="attackLoading" size="small">
           <div v-if="!isMobile && attackAlerts.length > 0">
             <t-table
@@ -59,11 +59,11 @@
                 <span style="font-size:13px">{{ row.message }}</span>
               </template>
               <template #createdAt="{ row }">
-                {{ new Date(row.createdAt).toLocaleString('zh-CN') }}
+                {{ formatDateTime(row.createdAt) }}
               </template>
               <template #acknowledgedAt="{ row }">
-                <span v-if="row.acknowledgedAt" style="color:var(--success-color)">已确认</span>
-                <span v-else style="color:var(--warning-color)">待处理</span>
+                <span v-if="row.acknowledgedAt" style="color:var(--color-success)">已确认</span>
+                <span v-else style="color:var(--color-warning)">待处理</span>
               </template>
             </t-table>
           </div>
@@ -77,9 +77,9 @@
               </div>
               <div class="mobile-card-body">{{ alert.message }}</div>
               <div class="mobile-card-meta">
-                <span>{{ new Date(alert.createdAt).toLocaleString('zh-CN') }}</span>
-                <span v-if="alert.acknowledgedAt" style="color:var(--success-color)">已确认</span>
-                <span v-else style="color:var(--warning-color)">待处理</span>
+                <span>{{ formatDateTime(alert.createdAt) }}</span>
+                <span v-if="alert.acknowledgedAt" style="color:var(--color-success)">已确认</span>
+                <span v-else style="color:var(--color-warning)">待处理</span>
               </div>
             </div>
           </div>
@@ -119,7 +119,7 @@
 
       <div class="card">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px">
-          <h3 style="margin: 0">近期封禁记录</h3>
+          <h3 class="card-title" style="margin: 0">近期封禁记录</h3>
           <t-button theme="danger" size="small" @click="openBanDialog()">
             手动封禁 IP
           </t-button>
@@ -176,7 +176,7 @@
 
       <!-- 封禁历史 -->
       <div class="card" style="margin-top: 16px">
-        <h3 style="margin: 0 0 16px">封禁历史（已解封/已过期）</h3>
+        <h3 class="card-title" style="margin: 0 0 16px">封禁历史（已解封/已过期）</h3>
         <t-loading :loading="bansLoading" size="small">
           <div v-if="!isMobile && banHistory.length > 0">
             <t-table
@@ -306,7 +306,7 @@
     <!-- Tab 5: 安全配置（仅超级管理员） -->
     <div v-if="activeTab === 'config'" class="tab-content">
       <div class="card" style="margin-bottom: 16px">
-        <h3 style="margin: 0 0 4px">安全规则配置</h3>
+        <h3 class="card-title" style="margin: 0 0 4px">安全规则配置</h3>
         <p style="margin: 0; color: var(--text-secondary); font-size: 13px">
           调整攻击检测阈值和自动封禁时长。修改后立即生效，无需重启服务。
         </p>
@@ -395,8 +395,8 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted, computed, defineAsyncComponent } from 'vue';
-import { MessagePlugin } from 'tdesign-vue-next';
+import { ref, reactive, onMounted, computed, watch, defineAsyncComponent } from 'vue';
+import MessagePlugin from '@/utils/message';
 import { api, useAuthStore } from '@/stores/auth';
 import { storeToRefs } from 'pinia';
 import { formatDate, formatSize } from '@/utils/format';
@@ -568,6 +568,13 @@ function riskLabel(level: string): string {
     critical: '严重',
   };
   return map[level] || level;
+}
+
+// 非法日期降级为 '-'，避免直接 toLocaleString 输出 "Invalid Date"
+function formatDateTime(dateStr: string | null): string {
+  if (!dateStr) return '-';
+  const d = new Date(dateStr);
+  return isNaN(d.getTime()) ? '-' : d.toLocaleString('zh-CN');
 }
 
 // Fetch ban stats
@@ -772,6 +779,13 @@ async function resetSecurityConfig() {
   }
 }
 
+// 角色可能在挂载后异步更新为超级管理员，届时补加载安全配置，避免配置 tab 显示但数据缺失
+watch(isSuperAdmin, (val) => {
+  if (val && configItems.value.length === 0 && !configLoading.value) {
+    fetchSecurityConfig();
+  }
+});
+
 onMounted(() => {
   // 并发发起所有独立请求，失败的不影响其他数据区域渲染
   // Promise.allSettled 确保每个数据块独立到达后各自渲染
@@ -789,22 +803,6 @@ onMounted(() => {
   padding: 0;
 }
 
-.page-header {
-  margin-bottom: 24px;
-}
-
-.page-header h1 {
-  font-size: 24px;
-  font-weight: 600;
-  margin: 0 0 4px;
-}
-
-.page-header p {
-  color: var(--text-secondary);
-  font-size: 14px;
-  margin: 0;
-}
-
 .tab-content {
   padding-top: 20px;
 }
@@ -818,9 +816,9 @@ onMounted(() => {
 }
 
 .metric-card {
-  background: var(--bg-secondary, #1a1a2e);
-  border: 1px solid var(--border-color, #333);
-  border-radius: 8px;
+  background: var(--color-bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
   padding: 20px;
 }
 
@@ -831,23 +829,11 @@ onMounted(() => {
 }
 
 .metric-value {
+  font-family: var(--font-mono);
   font-size: 28px;
   font-weight: 700;
   color: var(--text-primary);
-}
-
-/* Card */
-.card {
-  background: var(--bg-secondary, #1a1a2e);
-  border: 1px solid var(--border-color, #333);
-  border-radius: 8px;
-  padding: 20px;
-  margin-bottom: 20px;
-}
-
-.card h3 {
-  font-size: 16px;
-  font-weight: 500;
+  font-variant-numeric: tabular-nums;
 }
 
 /* Toolbar */
@@ -912,9 +898,9 @@ onMounted(() => {
 }
 
 .security-config-item {
-  background: var(--bg-primary, #1a1a2e);
-  border: 1px solid var(--border-color, #333);
-  border-radius: 8px;
+  background: var(--color-bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
   padding: 16px;
 }
 
@@ -934,7 +920,7 @@ onMounted(() => {
 .config-item-unit {
   font-size: 11px;
   color: var(--text-secondary);
-  background: var(--bg-secondary, #2a2a3e);
+  background: var(--color-bg-elevated);
   padding: 2px 8px;
   border-radius: 4px;
 }

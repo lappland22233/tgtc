@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException, ForbiddenException, BadRequestException, OnModuleInit, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, In, EntityManager } from 'typeorm';
+import { Repository, In, IsNull, EntityManager } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { OnEvent } from '@nestjs/event-emitter';
@@ -11,6 +11,7 @@ import * as fs from 'fs';
 import { createReadStream, writeFileSync } from 'fs';
 import * as path from 'path';
 import sharp from 'sharp';
+import { fileTypeFromBuffer } from 'file-type';
 import { InjectQueue } from '@nestjs/bull';
 import { Queue } from 'bull';
 import { QUEUE_NAMES } from '../jobs/bull-queue.module';
@@ -39,48 +40,6 @@ export interface BatchUploadResult {
   success: File[];
   failed: BatchUploadFailedItem[];
 }
-
-/** MIME 类型与扩展名映射，用于验证上传文件的 MIME 类型与扩展名是否一致 */
-const MIME_EXTENSION_MAP: Record<string, string[]> = {
-  '.jpg': ['image/jpeg'],
-  '.jpeg': ['image/jpeg'],
-  '.png': ['image/png'],
-  '.gif': ['image/gif'],
-  '.webp': ['image/webp'],
-  '.svg': ['image/svg+xml'],
-  '.bmp': ['image/bmp'],
-  '.ico': ['image/x-icon', 'image/vnd.microsoft.icon'],
-  '.pdf': ['application/pdf'],
-  '.txt': ['text/plain'],
-  '.md': ['text/markdown', 'text/plain'],
-  '.csv': ['text/csv'],
-  '.json': ['application/json'],
-  '.xml': ['application/xml', 'text/xml'],
-  '.html': ['text/html'],
-  '.css': ['text/css'],
-  '.js': ['text/javascript', 'application/javascript'],
-  '.ts': ['text/typescript', 'application/typescript'],
-  '.zip': ['application/zip', 'application/x-zip-compressed'],
-  '.rar': ['application/vnd.rar', 'application/x-rar-compressed'],
-  '.7z': ['application/x-7z-compressed'],
-  '.tar': ['application/x-tar'],
-  '.gz': ['application/gzip', 'application/x-gzip'],
-  '.doc': ['application/msword'],
-  '.docx': ['application/vnd.openxmlformats-officedocument.wordprocessingml.document'],
-  '.xls': ['application/vnd.ms-excel'],
-  '.xlsx': ['application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'],
-  '.ppt': ['application/vnd.ms-powerpoint'],
-  '.pptx': ['application/vnd.openxmlformats-officedocument.presentationml.presentation'],
-  '.mp3': ['audio/mpeg', 'audio/mp3'],
-  '.mp4': ['video/mp4'],
-  '.avi': ['video/x-msvideo'],
-  '.mov': ['video/quicktime'],
-  '.webm': ['video/webm'],
-  '.m4a': ['audio/mp4', 'audio/x-m4a'],
-  '.ogg': ['audio/ogg', 'video/ogg'],
-  '.wav': ['audio/wav', 'audio/x-wav'],
-  '.flac': ['audio/flac'],
-};
 
 /** 已知复合扩展名列表（优先匹配，防止 .tar.gz 被错误识别为 .gz） */
 const COMPOUND_EXTENSIONS = ['.tar.gz', '.tar.bz2', '.tar.xz'] as const;
@@ -170,87 +129,137 @@ export class FileService implements OnModuleInit {
   }
 
   /**
-   * @deprecated 保留供未来使用，当前文件类型检查使用内联逻辑。
-   *            如需重新启用，恢复此方法并更新 isFileTypeAllowed。
-   *
-   * 从文件名提取扩展名（小写，含点号）
-   * 只取最后一个点之后的部分，防止 .php.jpg 等复合扩展名绕过检查
+   * 从 Multer 文件对象中提取前 maxBytes 字节用于 magic bytes 检测。
+   * 同时支持内存存储 (buffer) 和磁盘存储 (path) 模式。
    */
-  // private _extractExtension(filename: string): string {
-  //   const name = filename.toLowerCase();
-  //   const lastDot = name.lastIndexOf('.');
-  //   return lastDot > 0 ? '.' + name.slice(lastDot + 1) : '';
-  // }
-
-  /**
-   * 检查文件类型是否被允许
-   * - 黑名单 + 空过滤 = 允许所有
-   * - 黑名单 + 有过滤 = 拒绝匹配的
-   * - 白名单 + 空过滤 = 拒绝所有
-   * - 白名单 + 有过滤 = 允许匹配的
-   * 同时验证 MIME 类型与扩展名的一致性
-   */
-  private isFileTypeAllowed(filename: string, mimeType?: string): { allowed: boolean; reason?: string } {
-    if (this.fileTypeMode === 'blacklist' && this.fileTypeFilter.length === 0) {
-      return { allowed: true };
+  private getFileSample(
+    file: Express.Multer.File,
+    maxBytes: number = 4100,
+  ): Buffer {
+    if (file.buffer && file.buffer.length > 0) {
+      const end = Math.min(file.buffer.length, maxBytes);
+      return file.buffer.subarray(0, end);
     }
 
-    const lowerName = filename.toLowerCase();
-
-    // 优先检查复合扩展名，防止 .tar.gz 被 lastIndexOf 错误识别为 .gz
-    let ext = '(无扩展名)';
-    let matchedCompound: string | null = null;
-    for (const ce of COMPOUND_EXTENSIONS) {
-      if (lowerName.endsWith(ce)) {
-        ext = ce;
-        matchedCompound = ce;
-        break;
-      }
-    }
-
-    // 无复合扩展名匹配 → 使用 lastIndexOf 取最后一个点之后的部分
-    if (!matchedCompound) {
-      const lastDot = lowerName.lastIndexOf('.');
-      ext = lastDot > 0 ? '.' + lowerName.slice(lastDot + 1) : '(无扩展名)';
-    }
-
-    if (this.fileTypeMode === 'whitelist' && this.fileTypeFilter.length === 0) {
-      return { allowed: false, reason: `文件类型 ${ext} 被拒绝：白名单模式未配置允许类型` };
-    }
-
-    // 使用已提取的 ext 做精确扩展名比较，避免 endsWith 对完整文件名的模糊匹配
-    const matched = this.fileTypeFilter.includes(ext);
-
-    let allowed: boolean;
-    let reason: string | undefined;
-    if (this.fileTypeMode === 'blacklist') {
-      allowed = !matched;
-      if (!allowed) {
-        reason = `文件类型 ${ext} 被拒绝：该类型在禁止列表中`;
-      }
-    } else {
-      allowed = matched;
-      if (!allowed) {
-        reason = `文件类型 ${ext} 被拒绝：该类型不在允许列表中`;
-      }
-    }
-
-    // 额外检查：如果提供了 MIME 类型，验证其与扩展名的一致性
-    // 复合扩展名跳过 MIME 一致性校验（.tar.gz 的 MIME 是 application/gzip）
-    if (allowed && mimeType && !matchedCompound) {
-      const lastDot = lowerName.lastIndexOf('.');
-      if (lastDot > 0) {
-        const expectedTypes = MIME_EXTENSION_MAP[ext];
-        if (expectedTypes && !expectedTypes.includes(mimeType)) {
-          return {
-            allowed: false,
-            reason: `文件扩展名 ${ext} 与 MIME 类型 ${mimeType} 不匹配`,
-          };
+    if (file.path && fs.existsSync(file.path)) {
+      let fd: number | undefined;
+      try {
+        fd = fs.openSync(file.path, 'r');
+        const buffer = Buffer.alloc(maxBytes);
+        const bytesRead = fs.readSync(fd, buffer, 0, maxBytes, 0);
+        return bytesRead === 0 ? Buffer.alloc(0) : buffer.subarray(0, bytesRead);
+      } finally {
+        if (fd !== undefined) {
+          fs.closeSync(fd);
         }
       }
     }
 
-    return { allowed, reason };
+    return Buffer.alloc(0);
+  }
+
+  /**
+   * 从文件路径读取前 maxBytes 字节（供分片上传合并后使用）
+   */
+  getFileSampleFromPath(
+    filePath: string,
+    maxBytes: number = 4100,
+  ): Buffer {
+    let fd: number | undefined;
+    try {
+      fd = fs.openSync(filePath, 'r');
+      const buffer = Buffer.alloc(maxBytes);
+      const bytesRead = fs.readSync(fd, buffer, 0, maxBytes, 0);
+      return bytesRead === 0 ? Buffer.alloc(0) : buffer.subarray(0, bytesRead);
+    } finally {
+      if (fd !== undefined) {
+        fs.closeSync(fd);
+      }
+    }
+  }
+
+  /**
+   * 检查文件类型是否被允许（含 magic bytes 检测）
+   *
+   * - 有 buffer → 使用 fileTypeFromBuffer() 检测 magic bytes
+   *   - 检测到类型 → 使用检测结果进行过滤
+   *   - 未检测到 → 白名单直接拒绝，黑名单回退到文件名后缀匹配
+   * - 无 buffer → 回退到后缀规则（向后兼容）
+   */
+  async isFileTypeAllowed(
+    filename: string,
+    buffer?: Buffer,
+  ): Promise<{ allowed: boolean; reason?: string }> {
+    // === 阶段 1: Magic bytes 检测 ===
+    let detectedExt: string | null = null;
+
+    if (buffer && buffer.length > 0) {
+      const result = await fileTypeFromBuffer(buffer);
+      if (result) {
+        detectedExt = result.ext;
+      }
+    }
+
+    // === 阶段 2: 确定用于过滤的扩展名 ===
+    let effectiveExt: string;
+
+    if (detectedExt) {
+      const dotExt = `.${detectedExt}`;
+      let matchedCompound: string | null = null;
+      for (const ce of COMPOUND_EXTENSIONS) {
+        if (filename.toLowerCase().endsWith(ce) && ce.endsWith(dotExt)) {
+          matchedCompound = ce;
+          break;
+        }
+      }
+      effectiveExt = matchedCompound || dotExt;
+    } else if (this.fileTypeMode === 'whitelist') {
+      return {
+        allowed: false,
+        reason: '无法识别文件类型，白名单模式下仅允许可明确识别的文件类型',
+      };
+    } else {
+      // 黑名单模式：回退到文件名后缀匹配
+      const lowerName = filename.toLowerCase();
+      let ext = '(无扩展名)';
+      for (const ce of COMPOUND_EXTENSIONS) {
+        if (lowerName.endsWith(ce)) {
+          ext = ce;
+          break;
+        }
+      }
+      if (ext === '(无扩展名)') {
+        const lastDot = lowerName.lastIndexOf('.');
+        ext = lastDot > 0 ? '.' + lowerName.slice(lastDot + 1) : '(无扩展名)';
+      }
+      effectiveExt = ext;
+    }
+
+    // === 阶段 3: 特殊规则 ===
+    if (this.fileTypeMode === 'blacklist' && this.fileTypeFilter.length === 0) {
+      return { allowed: true };
+    }
+    if (this.fileTypeMode === 'whitelist' && this.fileTypeFilter.length === 0) {
+      return {
+        allowed: false,
+        reason: `文件类型 ${effectiveExt} 被拒绝：白名单模式未配置允许类型`,
+      };
+    }
+
+    // === 阶段 4: 过滤器匹配 ===
+    const matched = this.fileTypeFilter.includes(effectiveExt);
+
+    if (this.fileTypeMode === 'blacklist') {
+      if (matched) {
+        return { allowed: false, reason: `文件类型 ${effectiveExt} 被拒绝：该类型在禁止列表中` };
+      }
+    } else {
+      if (!matched) {
+        return { allowed: false, reason: `文件类型 ${effectiveExt} 被拒绝：该类型不在允许列表中` };
+      }
+    }
+
+    return { allowed: true };
   }
 
   /**
@@ -286,6 +295,18 @@ export class FileService implements OnModuleInit {
   }
 
   /**
+   * 清理 Multer 磁盘临时文件（上传到 Telegram 完成后调用，避免临时文件堆积）。
+   * 内存存储（无 path）或文件不存在时静默跳过；删除失败仅告警，不影响主流程。
+   */
+  private cleanupTempFile(file: Express.Multer.File): void {
+    if (file.path && fs.existsSync(file.path)) {
+      fs.promises.unlink(file.path).catch((err) => {
+        this.logger.warn(`清理临时文件失败 ${file.path}: ${(err as Error).message}`);
+      });
+    }
+  }
+
+  /**
    * 创建处理中的文件记录（磁盘文件→DB record=processing）
    * Telegram 上传由 FileUploadProcessor 后台异步执行
    */
@@ -294,6 +315,7 @@ export class FileService implements OnModuleInit {
     originalName: string,
     user: User,
     tagIds?: string[],
+    skipTypeCheck?: boolean,
   ): Promise<File> {
     if (file.size > this.maxFileSize) {
       throw new BadRequestException(`文件大小不能超过 ${this.maxFileSize / 1024 / 1024}MB`);
@@ -301,9 +323,12 @@ export class FileService implements OnModuleInit {
 
     const fileName = this.fixFilenameEncoding(originalName);
 
-    const typeCheck = this.isFileTypeAllowed(fileName, file.mimetype);
-    if (!typeCheck.allowed) {
-      throw new BadRequestException(typeCheck.reason || '不允许上传此类型的文件');
+    if (!skipTypeCheck) {
+      const fileSample = this.getFileSample(file);
+      const typeCheck = await this.isFileTypeAllowed(fileName, fileSample);
+      if (!typeCheck.allowed) {
+        throw new BadRequestException(typeCheck.reason || '不允许上传此类型的文件');
+      }
     }
 
     const tempId = uuidv4();
@@ -356,7 +381,8 @@ export class FileService implements OnModuleInit {
 
     const originalName = this.fixFilenameEncoding(file.originalname);
 
-    const typeCheck = this.isFileTypeAllowed(originalName, file.mimetype);
+    const fileSample = await this.getFileSample(file);
+    const typeCheck = await this.isFileTypeAllowed(originalName, fileSample);
 
     if (!typeCheck.allowed) {
       throw new BadRequestException(typeCheck.reason || '不允许上传此类型的文件');
@@ -373,6 +399,9 @@ export class FileService implements OnModuleInit {
       undefined,
       useStream ? file.size : undefined,
     );
+
+    // Telegram 上传完成，清理 Multer 临时文件
+    this.cleanupTempFile(file);
 
     const newFile = this.fileRepository.create({
       filename: telegramFile.file_id,
@@ -423,7 +452,8 @@ export class FileService implements OnModuleInit {
         continue;
       }
       const originalName = this.fixFilenameEncoding(file.originalname);
-      const typeCheck = this.isFileTypeAllowed(originalName, file.mimetype);
+      const fileSample = this.getFileSample(file);
+      const typeCheck = await this.isFileTypeAllowed(originalName, fileSample);
       if (!typeCheck.allowed) {
         preCheckFailed.push({
           name: file.originalname,
@@ -446,7 +476,7 @@ export class FileService implements OnModuleInit {
     for (const file of passPreCheck) {
       try {
         const originalName = this.fixFilenameEncoding(file.originalname);
-        const savedFile = await this.createProcessingFile(file, originalName, user, tagIds);
+        const savedFile = await this.createProcessingFile(file, originalName, user, tagIds, true);
         // 将文件写入持久化路径供后台 processor 读取
         const pendingDir = path.join(process.cwd(), 'tmp', 'uploads', 'pending');
         if (!fs.existsSync(pendingDir)) fs.mkdirSync(pendingDir, { recursive: true });
@@ -482,6 +512,7 @@ export class FileService implements OnModuleInit {
     sortOrder?: string,
     cursor?: string,
     tagIds?: string[],
+    folderId?: string,
   ): Promise<{ files: File[]; total: number; nextCursor?: string | null }> {
     const where: Record<string, unknown> = {};
     if (!includeDeleted) {
@@ -490,13 +521,23 @@ export class FileService implements OnModuleInit {
     if (userId) {
       where.uploaderId = userId;
     }
+    // 网盘文件夹作用域：
+    // - folderId 未传：不添加过滤（admin 视图与旧逻辑兼容）
+    // - folderId === 'root'：仅返回位于网盘根目录（folderId IS NULL）的文件
+    // - folderId 为 UUID：仅返回该 folder 下的文件
+    if (folderId === 'root') {
+      where.folderId = IsNull();
+    } else if (folderId && folderId.length === 36) {
+      // 简单 UUID 长度校验，避免 'root' 等非 UUID 误入
+      where.folderId = folderId;
+    }
 
     const qb = this.fileRepository.createQueryBuilder('file')
       .leftJoinAndSelect('file.uploader', 'uploader')
       .where(where);
 
     if (keyword) {
-      qb.andWhere('LOWER(file.originalName) LIKE :keyword', { keyword: `%${keyword.toLowerCase()}%` });
+      qb.andWhere('LOWER(file.originalName) LIKE :keyword', { keyword: `%${this.escapeLike(keyword.toLowerCase())}%` });
     }
 
     // 标签筛选：AND 逻辑 —— 文件必须同时拥有所有指定标签
@@ -535,7 +576,12 @@ export class FileService implements OnModuleInit {
       qb.orderBy('file.createdAt', 'DESC').addOrderBy('file.id', 'DESC').take(limit);
     } else {
       const allowedSortFields = ['originalName', 'createdAt', 'size', 'uploader.email'];
-      const safeSortBy = allowedSortFields.includes(sortBy || '') ? `file.${sortBy}` : 'file.createdAt';
+      // uploader.email 走 JOIN 的 uploader 别名，其余字段加 file. 前缀，避免拼出 file.uploader.email 非法列名
+      const safeSortBy = !allowedSortFields.includes(sortBy || '')
+        ? 'file.createdAt'
+        : sortBy === 'uploader.email'
+          ? 'uploader.email'
+          : `file.${sortBy}`;
       const safeSortOrder = (sortOrder || '').toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
       qb.orderBy(safeSortBy, safeSortOrder as 'ASC' | 'DESC').skip((page - 1) * limit).take(limit);
     }
@@ -551,7 +597,7 @@ export class FileService implements OnModuleInit {
       const tagWheres: string[] = ['ft."tagId" = ANY($1::uuid[])'];
       if (userId) { tagWheres.push(`file."uploaderId" = $${tagIdx++}`); tagParams.push(userId); }
       if (!includeDeleted) { tagWheres.push('file."isDeleted" = false'); }
-      if (keyword) { tagWheres.push(`LOWER(file."originalName") LIKE $${tagIdx++}`); tagParams.push(`%${keyword.toLowerCase()}%`); }
+      if (keyword) { tagWheres.push(`LOWER(file."originalName") LIKE $${tagIdx++}`); tagParams.push(`%${this.escapeLike(keyword.toLowerCase())}%`); }
       const tagWhere = tagWheres.join(' AND ');
 
       if (tagIds.length > 1) {
@@ -578,7 +624,7 @@ export class FileService implements OnModuleInit {
     } else {
       const countQb = this.fileRepository.createQueryBuilder('file').where(where);
       if (keyword) {
-        countQb.andWhere('LOWER(file.originalName) LIKE :keyword', { keyword: `%${keyword.toLowerCase()}%` });
+        countQb.andWhere('LOWER(file.originalName) LIKE :keyword', { keyword: `%${this.escapeLike(keyword.toLowerCase())}%` });
       }
       total = await countQb.getCount();
     }
@@ -623,9 +669,28 @@ export class FileService implements OnModuleInit {
     return Buffer.from(JSON.stringify({ createdAt: createdAt.toISOString(), id })).toString('base64');
   }
 
-  /** 解码游标 */
+  /** 解码游标（非法游标返回 400 而非 500） */
   private decodeCursor(cursor: string): { createdAt: string; id: string } {
-    return JSON.parse(Buffer.from(cursor, 'base64').toString('utf8'));
+    try {
+      const decoded = JSON.parse(Buffer.from(cursor, 'base64').toString('utf8'));
+      if (
+        !decoded ||
+        typeof decoded.createdAt !== 'string' ||
+        typeof decoded.id !== 'string' ||
+        isNaN(Date.parse(decoded.createdAt))
+      ) {
+        throw new Error('游标结构非法');
+      }
+      return { createdAt: decoded.createdAt, id: decoded.id };
+    } catch (err) {
+      if (err instanceof BadRequestException) throw err;
+      throw new BadRequestException('非法的分页游标');
+    }
+  }
+
+  /** 转义 LIKE 通配符（% _ \），让用户关键词按字面匹配而非通配 */
+  private escapeLike(value: string): string {
+    return value.replace(/[\\%_]/g, (ch) => `\\${ch}`);
   }
 
   /**
@@ -835,46 +900,55 @@ export class FileService implements OnModuleInit {
     const now = new Date();
     const adminRecoverWindow = new Date(now.getTime() - FILE_DELETE_GRACE_MS);
 
-    // 查询所有待删除文件
-    const deletedFiles = await this.fileRepository.find({
-      where: { isDeleted: true },
-    });
-
-    // 筛选需要永久删除的文件
-    const expiredFiles = deletedFiles.filter(
-      (f) =>
-        // 用户延迟删除到期
-        (f.deleteScheduledAt && now >= f.deleteScheduledAt) ||
-        // 管理员即时删除超过 7 天
-        (!f.deleteScheduledAt && f.updatedAt < adminRecoverWindow),
-    );
-
-    if (expiredFiles.length === 0) {
-      return 0;
-    }
-
+    const batchSize = 100;
     let deletedCount = 0;
-    for (const file of expiredFiles) {
-      try {
-        await this.telegramService.deleteFile(file.telegramFileId);
-        this.deleteLocalThumbnail(file);
-        await this.accessLogRepository.delete({ fileId: file.id });
-        await this.fileRepository.remove(file);
-        deletedCount++;
-        this.logger.log(`已永久删除文件: ${file.originalName} (${file.id})`);
-      } catch (error: unknown) {
-        const errMsg = error instanceof Error ? error.message : '未知错误';
-        this.logger.warn(`永久删除文件失败: ${file.originalName} (${file.id}), 错误: ${errMsg}`);
-        // 即使 Telegram 删除失败，也从数据库移除（避免数据库积压）
+    let lastId: string | null = null;
+    let iterations = 0;
+    const maxIterations = 10000; // 安全护栏，防止异常数据导致死循环
+
+    // 分页（按 id 游标推进）拉取待删除文件，避免一次性载入全部软删文件导致 OOM
+    while (iterations++ < maxIterations) {
+      const qb = this.fileRepository
+        .createQueryBuilder('file')
+        .where('file.isDeleted = true')
+        .andWhere(
+          // 用户延迟删除到期，或管理员即时删除超过恢复窗口
+          '(file.deleteScheduledAt IS NOT NULL AND file.deleteScheduledAt <= :now) OR ' +
+            '(file.deleteScheduledAt IS NULL AND file.updatedAt < :adminRecoverWindow)',
+          { now, adminRecoverWindow },
+        )
+        .orderBy('file.id', 'ASC')
+        .take(batchSize);
+      if (lastId) {
+        qb.andWhere('file.id > :lastId', { lastId });
+      }
+
+      const batch = await qb.getMany();
+      if (batch.length === 0) break;
+
+      for (const file of batch) {
+        // 无论成功失败都推进游标：失败的文件留待下次定时任务重试，不阻塞本批后续文件
+        lastId = file.id;
         try {
+          // 先从 Telegram 删除；失败则抛错进入 catch，保留 DB 记录待下次重试，
+          // 不再「Telegram 删除失败仍删库」，避免 Telegram 侧孤儿文件永久泄漏。
+          if (file.telegramFileId) {
+            await this.telegramService.deleteFile(file.telegramFileId);
+          }
           this.deleteLocalThumbnail(file);
           await this.accessLogRepository.delete({ fileId: file.id });
           await this.fileRepository.remove(file);
-        } catch (e: unknown) {
-          this.logger.error(`强制清理文件失败: ${file.id}`, e instanceof Error ? e.message : String(e));
+          deletedCount++;
+          this.logger.log(`已永久删除文件: ${file.originalName} (${file.id})`);
+        } catch (error: unknown) {
+          const errMsg = error instanceof Error ? error.message : '未知错误';
+          this.logger.warn(
+            `永久删除文件失败，保留记录待下次重试: ${file.originalName} (${file.id}), 错误: ${errMsg}`,
+          );
         }
-        deletedCount++;
       }
+
+      if (batch.length < batchSize) break; // 已是最后一批
     }
 
     return deletedCount;
@@ -1145,7 +1219,7 @@ export class FileService implements OnModuleInit {
     await this.assertFileReadable(file, user);
 
     // 优先读取本地缩略图
-    const localThumb = this.readLocalThumbnail(file);
+    const localThumb = await this.readLocalThumbnail(file);
     if (localThumb) {
       return {
         stream: Readable.from(localThumb),
@@ -1153,8 +1227,20 @@ export class FileService implements OnModuleInit {
       };
     }
 
-    // 回退到 Telegram（同时触发异步生成缩略图）
-    this.generateAndSaveThumbnail(file).catch(() => {});
+    // 缩略图文件缺失（如 tmp/thumbnails 重建后丢失）→ 同步重新生成
+    // 等待生成完成，避免返回源文件（既浪费带宽也违反缩略图设计意图）
+    if (file.mimeType?.startsWith('image/')) {
+      await this.generateAndSaveThumbnail(file);
+      const regenerated = await this.readLocalThumbnail(file);
+      if (regenerated) {
+        return {
+          stream: Readable.from(regenerated),
+          contentType: 'image/webp',
+        };
+      }
+    }
+
+    // 最终回退（非图片文件或生成失败）
     const { stream } = await this.telegramService.getFileStream(file.telegramFileId || file.filename);
 
     return {
@@ -1178,16 +1264,15 @@ export class FileService implements OnModuleInit {
       if (fs.existsSync(fullPath)) return; // 已存在
     }
 
+    // 先将原图流式落盘到临时文件，避免把整张原图读进内存导致 OOM
+    const tmpSource = path.join(this.thumbnailDir, `${file.id}.src.tmp`);
     try {
       const { stream } = await this.telegramService.getFileStream(file.telegramFileId || file.filename);
-      const chunks: Buffer[] = [];
-      for await (const chunk of stream) {
-        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-      }
-      const buffer = Buffer.concat(chunks);
+      const { pipeline } = await import('stream/promises');
+      await pipeline(stream, fs.createWriteStream(tmpSource));
 
-      // 获取原图尺寸
-      const metadata = await sharp(buffer).metadata();
+      // 获取原图尺寸（sharp 从文件读取，按需解码）
+      const metadata = await sharp(tmpSource).metadata();
       const width = metadata.width || 0;
       const height = metadata.height || 0;
 
@@ -1197,19 +1282,21 @@ export class FileService implements OnModuleInit {
       const thumbWidth = Math.max(16, Math.round(width / 10));
       const thumbHeight = Math.max(16, Math.round(height / 10));
 
-      // 生成 webp 缩略图（比 jpg/png 小得多）
-      const thumbBuffer = await sharp(buffer)
+      // 生成 webp 缩略图（比 jpg/png 小得多），直接写入目标文件
+      const thumbFilename = `${file.id}.webp`;
+      const thumbPath = path.join(this.thumbnailDir, thumbFilename);
+      await sharp(tmpSource)
         .resize(thumbWidth, thumbHeight, { fit: 'inside' })
         .webp({ quality: 60 })
-        .toBuffer();
-
-      const thumbFilename = `${file.id}.webp`;
-      fs.writeFileSync(path.join(this.thumbnailDir, thumbFilename), thumbBuffer);
+        .toFile(thumbPath);
 
       file.thumbnailPath = thumbFilename;
       await this.fileRepository.save(file);
     } catch (err) {
       this.logger.warn(`缩略图生成失败 id=${file.id}: ${(err as Error).message}`);
+    } finally {
+      // 清理临时源文件
+      await fs.promises.unlink(tmpSource).catch(() => {});
     }
   }
 
@@ -1264,17 +1351,17 @@ export class FileService implements OnModuleInit {
   }
 
   /**
-   * 读取本地缩略图文件内容。
+   * 读取本地缩略图文件内容（异步，避免 readFileSync 阻塞事件循环）。
    */
-  private readLocalThumbnail(file: File): Buffer | null {
+  private async readLocalThumbnail(file: File): Promise<Buffer | null> {
     if (!file.thumbnailPath) return null;
     const fullPath = path.join(this.thumbnailDir, file.thumbnailPath);
     try {
-      if (fs.existsSync(fullPath)) return fs.readFileSync(fullPath);
+      return await fs.promises.readFile(fullPath);
     } catch {
-      // ignore
+      // 文件不存在或读取失败
+      return null;
     }
-    return null;
   }
 
 
@@ -1385,6 +1472,11 @@ export class FileService implements OnModuleInit {
       return null;
     }
 
+    // 文件仍在处理中（TG 未同步）→ 拒绝范围下载，避免用临时 UUID 回源
+    if (file.status === 'processing') {
+      throw new BadRequestException('文件正在处理中，请稍后刷新重试');
+    }
+
     const total = Number(file.size);
     const actualEnd = end !== undefined ? Math.min(end, total - 1) : total - 1;
 
@@ -1396,14 +1488,21 @@ export class FileService implements OnModuleInit {
     const chunkSize = actualEnd - start + 1;
     const readStream = createReadStream(cachedPath, { start, end: actualEnd });
 
-    // 原子访问计数
-    await this.fileRepository
+    // 原子访问计数：与完整下载路径一致，强制 maxAccessCount 上限并校验 affected，
+    // 防止受限文件被无限次范围下载绕过。
+    const updateResult = await this.fileRepository
       .createQueryBuilder()
       .update(File)
       .set({ currentAccessCount: () => 'currentAccessCount + 1' })
       .where('id = :id', { id })
       .andWhere('(maxAccessCount <= 0 OR currentAccessCount < maxAccessCount)')
+      .andWhere('isDeleted = false')
       .execute();
+
+    if (updateResult.affected === 0) {
+      readStream.destroy();
+      throw new ForbiddenException('访问次数已用尽或文件不存在');
+    }
 
     const mimeType = file.mimeType || 'application/octet-stream';
     const filename = this.ensureFileExtension(file.originalName, mimeType);
@@ -1668,7 +1767,8 @@ export class FileService implements OnModuleInit {
 
     const originalName = this.fixFilenameEncoding(file.originalname);
 
-    const typeCheck = this.isFileTypeAllowed(originalName, file.mimetype);
+    const fileSample = await this.getFileSample(file);
+    const typeCheck = await this.isFileTypeAllowed(originalName, fileSample);
     if (!typeCheck.allowed) {
       throw new BadRequestException(typeCheck.reason || '不允许上传此类型的文件');
     }
@@ -1717,7 +1817,8 @@ export class FileService implements OnModuleInit {
             throw new Error('任务已被放弃（客户端连接断开）');
           }
           const originalName = this.fixFilenameEncoding(file.originalname);
-          const typeCheck = this.isFileTypeAllowed(originalName, file.mimetype);
+          const fileSample = this.getFileSample(file);
+          const typeCheck = await this.isFileTypeAllowed(originalName, fileSample);
           if (!typeCheck.allowed) {
             failed.push({ name: originalName, reason: typeCheck.reason || '不允许上传此类型的文件' });
             continue;
@@ -1885,6 +1986,9 @@ export class FileService implements OnModuleInit {
       useStream ? file.size : undefined,
     );
 
+    // Telegram 上传完成，清理 Multer 临时文件
+    this.cleanupTempFile(file);
+
     const newFile = this.fileRepository.create({
       filename: telegramFile.file_id,
       originalName: originalName,
@@ -2002,5 +2106,56 @@ export class FileService implements OnModuleInit {
     } catch {
       // 日志更新失败不影响业务
     }
+  }
+
+  /**
+   * 为分享链接下载流式返回文件内容（Phase 2 新增）。
+   *
+   * 与 getPublicFileContentStream 的区别：
+   * 1. 不检查 accessType —— ShareLink 本身就是访问凭证，private 文件也能通过分享链接下载。
+   * 2. 访问日志记录 action='share_download'，便于按渠道统计。
+   *
+   * 由 ShareService 在校验完 token + access JWT 后调用。
+   */
+  async getStreamForShareDownload(id: string, ip?: string): Promise<{
+    stream: Readable;
+    contentType: string;
+    filename: string;
+    size: number;
+    isInline: boolean;
+    accessLogId?: string;
+  }> {
+    const file = await this.fileRepository.findOne({
+      where: { id, isDeleted: false },
+    });
+    if (!file) {
+      throw new NotFoundException('文件不存在');
+    }
+
+    const cachedStream = this.fileCacheService.getCachedReadStream(file.id, Number(file.size));
+    const { stream, info } = cachedStream
+      ? { stream: cachedStream, info: { file_id: file.telegramFileId, file_path: '', file_size: Number(file.size) } }
+      : await this.telegramService.getFileStream(file.telegramFileId || file.filename);
+
+    let accessLogId: string | undefined;
+    try {
+      const saved = await this.accessLogRepository.save({
+        fileId: id,
+        ip: ip || '',
+        action: 'share_download',
+        uploaderId: file.uploaderId,
+        responseSize: 0,
+      });
+      accessLogId = saved.id;
+    } catch {
+      // 日志写入失败不影响下载
+    }
+
+    const mimeType = file.mimeType || 'application/octet-stream';
+    const isInline = /^(image|video|audio)\//.test(mimeType);
+    const filename = this.ensureFileExtension(file.originalName, mimeType);
+
+    const actualSize = info.file_size > 0 ? info.file_size : Number(file.size);
+    return { stream, contentType: mimeType, filename, size: actualSize, isInline, accessLogId };
   }
 }

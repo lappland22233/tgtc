@@ -85,7 +85,7 @@
                 display: 'inline-flex',
                 alignItems: 'center',
                 gap: '4px',
-                color: typeof item !== 'string' && item.danger && uploadConfig.fileTypeMode === 'blacklist' ? 'var(--error-color)' : undefined,
+                color: typeof item !== 'string' && item.danger && uploadConfig.fileTypeMode === 'blacklist' ? 'var(--color-danger)' : undefined,
               }"
             >
               <t-checkbox
@@ -96,7 +96,7 @@
               </t-checkbox>
               <span
                 v-if="typeof item !== 'string' && item.danger"
-                style="font-size: 10px; color: var(--error-color); cursor: help;"
+                style="font-size: 10px; color: var(--color-danger); cursor: help;"
                 title="黑名单模式下建议默认勾选禁止此类型"
               >&#9888;</span>
             </span>
@@ -209,7 +209,7 @@
 
 <script setup lang="ts">
 import { ref, reactive, onMounted } from 'vue';
-import { MessagePlugin } from 'tdesign-vue-next';
+import MessagePlugin from '@/utils/message';
 import { useMobile } from '../../composables/useMobile';
 import { api } from '../../stores/auth';
 import { getErrorMessage } from '../../utils/error';
@@ -273,12 +273,14 @@ function formatDate(date: string) {
   return new Date(date).toLocaleDateString('zh-CN');
 }
 
-async function fetchAuthConfig() {
+async function fetchAuthConfig(): Promise<boolean> {
   try {
     const res = await api.get('/admin/auth-config');
-    authConfig.value = res.data.data;
+    authConfig.value = res.data.data ?? authConfig.value;
+    return true;
   } catch (err) {
     console.error('获取认证配置失败', err);
+    return false;
   }
 }
 
@@ -291,12 +293,14 @@ async function saveAuthConfig() {
   }
 }
 
-async function fetchSMTPConfig() {
+async function fetchSMTPConfig(): Promise<boolean> {
   try {
     const res = await api.get('/admin/smtp');
-    smtpConfig.value = res.data.data;
+    smtpConfig.value = res.data.data ?? smtpConfig.value;
+    return true;
   } catch (err) {
     console.error('获取SMTP配置失败', err);
+    return false;
   }
 }
 
@@ -335,18 +339,21 @@ function addCustomExtension() {
   customExtension.value = '';
 }
 
-async function fetchUploadConfig() {
+async function fetchUploadConfig(): Promise<boolean> {
   try {
     const res = await api.get('/admin/upload-config');
     const data = res.data.data;
+    if (!data) return true; // 后端返回空数据时保留默认配置，避免访问 null 抛错
     uploadConfig.value.maxFileSizeMB = Math.floor(data.maxFileSize / (1024 * 1024));
     uploadConfig.value.fileTypeMode = data.fileTypeMode || 'blacklist';
     uploadConfig.value.fileTypeFilter = data.fileTypeFilter || '';
     selectedExtensions.value = data.fileTypeFilter
       ? data.fileTypeFilter.split(',').map((s: string) => s.trim()).filter(Boolean)
       : [];
+    return true;
   } catch (err) {
     console.error('获取上传配置失败', err);
+    return false;
   }
 }
 
@@ -364,12 +371,14 @@ async function saveUploadConfig() {
   }
 }
 
-async function fetchCacheConfig() {
+async function fetchCacheConfig(): Promise<boolean> {
   try {
     const res = await api.get('/admin/cache-config');
-    cacheConfig.value = res.data.data;
+    cacheConfig.value = res.data.data ?? cacheConfig.value;
+    return true;
   } catch (err) {
     console.error('获取缓存配置失败', err);
+    return false;
   }
 }
 
@@ -382,12 +391,14 @@ async function saveCacheConfig() {
   }
 }
 
-async function fetchBannedIPs() {
+async function fetchBannedIPs(): Promise<boolean> {
   try {
     const res = await api.get('/admin/banned-ips');
-    bannedIPs.value = res.data.data;
+    bannedIPs.value = res.data.data ?? [];
+    return true;
   } catch (err) {
     console.error('获取封禁IP列表失败', err);
+    return false;
   }
 }
 
@@ -423,7 +434,9 @@ function isValidIP(ip: string): boolean {
       return n >= 0 && n <= 255 && String(n) === o;
     });
   }
-  const ipv6Re = /^([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}$/;
+  // 完整 IPv6 校验：8 组完整形式 / :: 压缩形式 / link-local / IPv4 映射与嵌入，
+  // 避免宽松正则让 ":::" 等无效地址通过
+  const ipv6Re = /^(?:([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(?::[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(?::[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(?::[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(?::[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:(?::[0-9a-fA-F]{1,4}){1,6}|:(?:(?::[0-9a-fA-F]{1,4}){1,7}|:)|fe80:(?::[0-9a-fA-F]{0,4}){0,4}%[0-9a-zA-Z]+|::(?:ffff(?::0{1,4})?:)?(?:(?:25[0-5]|(?:2[0-4]|1?[0-9])?[0-9])\.){3}(?:25[0-5]|(?:2[0-4]|1?[0-9])?[0-9])|(?:[0-9a-fA-F]{1,4}:){1,4}:(?:(?:25[0-5]|(?:2[0-4]|1?[0-9])?[0-9])\.){3}(?:25[0-5]|(?:2[0-4]|1?[0-9])?[0-9]))$/;
   return ipv6Re.test(ip);
 }
 
@@ -444,7 +457,14 @@ onMounted(() => {
     fetchUploadConfig(),
     fetchCacheConfig(),
     fetchBannedIPs(),
-  ]);
+  ]).then((results) => {
+    const failed = results.filter(
+      (r) => r.status === 'fulfilled' && r.value === false,
+    ).length;
+    if (failed > 0) {
+      MessagePlugin.warning(`${failed} 项配置加载失败，当前显示默认值`);
+    }
+  });
 });
 </script>
 

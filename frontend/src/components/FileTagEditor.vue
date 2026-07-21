@@ -27,6 +27,8 @@
 import { ref, watch } from 'vue';
 import { useTagStore } from '../stores/tags';
 import { api } from '../stores/auth';
+import MessagePlugin from '@/utils/message';
+import { getErrorMessage } from '@/utils/error';
 
 const props = defineProps<{
   visible: boolean;
@@ -47,7 +49,11 @@ const tagStore = useTagStore();
 watch(() => props.visible, async (val) => {
   dialogVisible.value = val;
   if (val) {
-    await tagStore.fetchTags();
+    try {
+      await tagStore.fetchTags();
+    } catch (err) {
+      MessagePlugin.error(getErrorMessage(err) || '加载标签失败');
+    }
     selectedIds.value = new Set((props.fileTags || []).map(t => t.id));
   }
 });
@@ -66,11 +72,12 @@ function handleClose() {
 async function handleSave() {
   saving.value = true;
   try {
-    await api.put(`/files/${props.fileId}/tags`, { tagIds: [...selectedIds.value] });
+    await api.put(`/files/${encodeURIComponent(props.fileId)}/tags`, { tagIds: [...selectedIds.value] });
     emit('saved');
     handleClose();
-  } catch {
-    // 静默处理，saving 在 finally 复位
+  } catch (err) {
+    // 保存失败需明确反馈，避免用户误以为已保存
+    MessagePlugin.error(getErrorMessage(err) || '保存标签失败');
   } finally {
     saving.value = false;
   }

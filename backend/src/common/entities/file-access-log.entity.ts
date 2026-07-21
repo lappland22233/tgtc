@@ -16,6 +16,8 @@ export enum AccessAction {
 }
 
 @Entity('file_access_logs')
+@Index('idx_access_logs_uploader_created', ['uploaderId', 'createdAt'])
+@Index('idx_access_logs_file_created', ['fileId', 'createdAt'])
 export class FileAccessLog {
   @PrimaryColumn({ type: 'uuid', default: () => 'gen_random_uuid()' })
   id: string;

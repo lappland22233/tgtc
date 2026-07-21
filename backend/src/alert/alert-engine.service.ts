@@ -1,9 +1,9 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, MoreThan } from 'typeorm';
+import { Repository } from 'typeorm';
 import { Alert } from '../common/entities/alert.entity';
 import { ConfigCacheService } from '../common/services/config-cache.service';
-import { createAlertRules, AlertRuleEvaluation } from './alert.rules';
+import { createAlertRules, AlertRuleEvaluation, AlertRule, AggregatedMetrics } from './alert.rules';
 
 @Injectable()
 export class AlertEngineService {
@@ -19,18 +19,28 @@ export class AlertEngineService {
    * 评估所有规则的触发条件
    * @param metrics 预聚合指标（来自 access_log_metrics_1min）
    */
-  async evaluate(metrics: {
-    totalRequests: number;
-    qpsAvg: number;
-    error5xxCount: number;
-    error4xxCount: number;
-    totalBandwidth: number;
-    p95Duration: number;
-    uniqueIps: number;
-  }): Promise<AlertRuleEvaluation[]> {
-    const evaluations: AlertRuleEvaluation[] = [];
+  async evaluate(metrics: AggregatedMetrics): Promise<AlertRuleEvaluation[]> {
     const rules = await createAlertRules(this.configCache);
+    return this.evaluateWithRules(metrics, rules);
+  }
 
+  /**
+   * 评估并创建告警（一体化入口）
+   * 规则配置仅读取一次，随后评估 + 原子化创建，避免 evaluate()/createAlerts()
+   * 分别调用时重复读取配置（P2）。
+   */
+  async evaluateAndCreateAlerts(metrics: AggregatedMetrics): Promise<Alert[]> {
+    const rules = await createAlertRules(this.configCache);
+    const evaluations = await this.evaluateWithRules(metrics, rules);
+    if (evaluations.length === 0) return [];
+    return this.createAlerts(evaluations, rules);
+  }
+
+  private async evaluateWithRules(
+    metrics: AggregatedMetrics,
+    rules: AlertRule[],
+  ): Promise<AlertRuleEvaluation[]> {
+    const evaluations: AlertRuleEvaluation[] = [];
     for (const rule of rules) {
       const reason = await rule.evaluate(metrics);
       if (reason) {
@@ -43,44 +53,34 @@ export class AlertEngineService {
         });
       }
     }
-
     return evaluations;
   }
 
   /**
-   * 检查冷却期：同规则在冷却期内是否已有告警
-   * @returns true = 冷却中，不应再发
+   * 批量创建告警记录（带冷却过滤）
+   *
+   * 冷却去重使用单条原子 INSERT ... WHERE NOT EXISTS 完成（P1 修复 TOCTOU）：
+   * 原实现「先 COUNT 检查冷却 → 再 INSERT」在两步之间存在竞态，多实例/并发下
+   * 冷却期内会重复创建告警。改为单语句后，检查与写入原子化。
+   *
+   * @param evaluations 评估结果
+   * @param preloadedRules 可选，已加载的规则（避免重复读取配置）
    */
-  async isInCooldown(ruleId: string, cooldownMinutes: number): Promise<boolean> {
-    const since = new Date(Date.now() - cooldownMinutes * 60 * 1000);
-    const count = await this.alertRepo.count({
-      where: { ruleId, createdAt: MoreThan(since) },
-    });
-    return count > 0;
-  }
-
-  /** 批量创建告警记录（带冷却过滤）
-   * 注：冷却检查与创建存在 TOCTOU 竞态，高并发下建议改用 upsert + unique index */
-  async createAlerts(evaluations: AlertRuleEvaluation[]): Promise<Alert[]> {
-    const rules = await createAlertRules(this.configCache);
+  async createAlerts(
+    evaluations: AlertRuleEvaluation[],
+    preloadedRules?: AlertRule[],
+  ): Promise<Alert[]> {
+    const rules = preloadedRules ?? (await createAlertRules(this.configCache));
     const alerts: Alert[] = [];
+
     for (const eval_ of evaluations) {
       const rule = rules.find((r) => r.id === eval_.ruleId);
       const cooldownMinutes = rule?.cooldownMinutes || 5;
 
-      if (await this.isInCooldown(eval_.ruleId, cooldownMinutes)) {
-        continue;
+      const alert = await this.insertAlertIfNotCoolingDown(eval_, cooldownMinutes);
+      if (alert) {
+        alerts.push(alert);
       }
-
-      const alert = this.alertRepo.create({
-        ruleId: eval_.ruleId,
-        level: eval_.level,
-        title: eval_.title,
-        message: eval_.message,
-        context: eval_.context,
-      });
-      await this.alertRepo.save(alert);
-      alerts.push(alert);
     }
 
     if (alerts.length > 0) {
@@ -88,6 +88,41 @@ export class AlertEngineService {
     }
 
     return alerts;
+  }
+
+  /**
+   * 原子化创建告警：仅当冷却期内不存在同规则告警时才插入。
+   * 单条 SQL 完成「冷却检查 + 插入」，消除 read-then-write 竞态。
+   * @returns 新创建的告警；冷却中则返回 null
+   */
+  private async insertAlertIfNotCoolingDown(
+    eval_: AlertRuleEvaluation,
+    cooldownMinutes: number,
+  ): Promise<Alert | null> {
+    const cooldownSince = new Date(Date.now() - cooldownMinutes * 60 * 1000);
+    try {
+      const rows = await this.alertRepo.manager.query(
+        `INSERT INTO alerts (id, "ruleId", level, title, message, context, "createdAt")
+         SELECT gen_random_uuid(), $1, $2, $3, $4, $5, NOW()
+         WHERE NOT EXISTS (
+           SELECT 1 FROM alerts WHERE "ruleId" = $1 AND "createdAt" > $6
+         )
+         RETURNING id, "ruleId", level, title, message, context,
+                   "acknowledgedAt", "acknowledgedBy", "createdAt"`,
+        [
+          eval_.ruleId,
+          eval_.level,
+          eval_.title,
+          eval_.message,
+          JSON.stringify(eval_.context ?? {}),
+          cooldownSince,
+        ],
+      );
+      return rows && rows.length > 0 ? (rows[0] as Alert) : null;
+    } catch (error) {
+      this.logger.error(`创建告警失败 (${eval_.ruleId}): ${(error as Error).message}`);
+      throw error;
+    }
   }
 
   /** 获取未确认告警数量 */

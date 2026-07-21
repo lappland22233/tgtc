@@ -102,6 +102,14 @@ export class AdminController {
     @Query('sortOrder') sortOrder?: string,
     @Query('cursor') cursor?: string,
   ) {
+    // 白名单校验排序字段与方向，防止裸字符串拼入 ORDER BY 的注入风险
+    const allowedSortFields = ['originalName', 'createdAt', 'size', 'uploader.email'];
+    if (sortBy !== undefined && !allowedSortFields.includes(sortBy)) {
+      throw new BadRequestException(`不支持的排序字段: ${sortBy}`);
+    }
+    if (sortOrder !== undefined && !['asc', 'desc'].includes(sortOrder.toLowerCase())) {
+      throw new BadRequestException(`不支持的排序方向: ${sortOrder}`);
+    }
     return this.adminService.getAllFiles(Number(page), Number(limit), keyword, userId, sortBy, sortOrder, cursor);
   }
 
@@ -236,11 +244,15 @@ export class AdminController {
     // 白名单校验，防止非法参数
     const validFormats = ['csv', 'json'];
     const validTypes = ['access-logs', 'top-files', 'bans', 'alerts'];
+    const validTimeRanges = ['1h', '24h', '7d', '30d'];
     if (format && !validFormats.includes(format)) {
       throw new BadRequestException(`不支持的导出格式: ${format}`);
     }
     if (type && !validTypes.includes(type)) {
       throw new BadRequestException(`不支持的导出类型: ${type}`);
+    }
+    if (timeRange && !validTimeRanges.includes(timeRange)) {
+      throw new BadRequestException(`不支持的时间范围: ${timeRange}`);
     }
     const result = await this.adminService.exportData({
       format: (format as 'csv' | 'json') || 'csv',
@@ -304,13 +316,6 @@ export class AdminController {
     return this.adminService.getBanStats();
   }
 
-  /** 注意：此通配路由必须放置在 access-logs/* 下所有具体路由之后，否则会吞掉它们 */
-  @Get('access-logs')
-  @Roles(UserRole.SUPER_ADMIN)
-  async getAccessLogs(@Query() query: AccessLogQueryDto) {
-    return this.adminService.getAccessLogs(query);
-  }
-
   @Get('access-logs/stats')
   @Roles(UserRole.SUPER_ADMIN)
   async getAccessLogStats(@Query('timeRange') timeRange?: string) {
@@ -321,6 +326,16 @@ export class AdminController {
   @Roles(UserRole.SUPER_ADMIN)
   async getAccessLogTrend(@Query('timeRange') timeRange?: string) {
     return this.adminService.getAccessLogTrend(timeRange);
+  }
+
+  /**
+   * 注意：此路由必须放置在 access-logs/stats、access-logs/trend 等更具体的路由之后，
+   * 保证具体路由优先匹配（与上方注释保持一致）。
+   */
+  @Get('access-logs')
+  @Roles(UserRole.SUPER_ADMIN)
+  async getAccessLogs(@Query() query: AccessLogQueryDto) {
+    return this.adminService.getAccessLogs(query);
   }
 
   @Get('audit-logs')

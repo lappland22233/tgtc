@@ -44,7 +44,7 @@
 <script setup lang="ts">
 import { ref } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
-import { MessagePlugin } from 'tdesign-vue-next';
+import MessagePlugin from '@/utils/message';
 import { useAuthStore } from '../../stores/auth';
 import { getErrorMessage } from '../../utils/error';
 import { isValidRedirect } from '../../router';
@@ -70,7 +70,8 @@ const loading = ref(false);
 const formRef = ref();
 
 async function handleSubmit() {
-  const valid = await formRef.value?.validate();
+  if (!formRef.value) return;
+  const valid = await formRef.value.validate();
   if (valid !== true) return;
   loading.value = true;
   try {
@@ -91,21 +92,5 @@ async function handleSubmit() {
 </script>
 
 <style scoped>
-.auth-footer {
-  text-align: center;
-  margin-top: 28px;
-  color: var(--text-secondary);
-  font-size: 14px;
-}
-
-.auth-link {
-  color: var(--color-accent);
-  text-decoration: none;
-  font-weight: 500;
-  transition: color var(--duration-fast);
-}
-
-.auth-link:hover {
-  color: var(--color-cyan);
-}
+/* .auth-footer / .auth-link 已提取为全局共享类，见 assets/styles.css */
 </style>

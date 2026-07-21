@@ -14,6 +14,12 @@ export class TelegramService {
   private readonly chatId: string;
   private readonly apiBase: string;
   private readonly fileBase: string;
+  /**
+   * 本地 Bot API 文件存储的允许根目录（白名单）。
+   * 自建 telegram-bot-api 时 getFile 可能返回本地绝对路径，
+   * 仅允许读取此目录内的文件；未配置时本地读取将被拒绝（fail-closed）。
+   */
+  private readonly localFileBase: string;
 
   constructor(private configService: ConfigService) {
     // 注意：botToken 在构造函数中一次性读取，不支持热更新
@@ -25,6 +31,8 @@ export class TelegramService {
     const base = this.configService.get<string>('TELEGRAM_API_BASE') || 'https://api.telegram.org';
     this.apiBase = `${base}/bot`;
     this.fileBase = `${base}/file/bot`;
+    // 本地文件白名单根目录，如 /var/lib/telegram-bot-api 或容器内 tmp 目录
+    this.localFileBase = this.configService.get<string>('TELEGRAM_LOCAL_FILE_DIR') || '';
 
     if (!this.botToken || this.botToken.startsWith('0000000000') || this.botToken === 'your-telegram-bot-token') {
       this.logger.warn('TELEGRAM_BOT_TOKEN 未配置或为占位符，文件上传将不可用。请在 .env 中设置有效的 Bot Token。');
@@ -128,19 +136,24 @@ export class TelegramService {
     file_path: string;
     file_size: number;
   }> {
+    // 流式上传：form-data 支持 Readable stream，使用 knownLength 避免一次性读入内存
+    const isStream = file instanceof Readable;
+    // 流只能被消费一次：429 重试会复用已消费的流，导致重试必然失败或上传损坏。
+    // 因此流式上传禁用自动重试（retries=1）；Buffer 上传可安全重发，保留 3 次重试。
+    const retries = isStream ? 1 : 3;
+
     return this.telegramRequest(async () => {
       const form = new FormData();
       form.append('chat_id', this.chatId);
 
-      // 流式上传：form-data 支持 Readable stream，使用 knownLength 避免一次性读入内存
-      const isStream = file instanceof Readable;
       if (isStream) {
         form.append('document', file, { filename, knownLength });
       } else {
         form.append('document', file, filename);
       }
 
-      const maxSize = Infinity; // 流式上传无大小限制，由 Telegram 2GB 上限兜底
+      // 服务层上传体积上限（默认 2GB，对齐 Telegram 本地 Bot API 上限），可通过环境变量覆盖
+      const maxSize = Number(process.env.TELEGRAM_MAX_UPLOAD_SIZE) || 2 * 1024 * 1024 * 1024;
       const response = await axios.post(`${this.getBaseUrl()}/sendDocument`, form, {
         headers: form.getHeaders(),
         timeout: 15 * 60 * 1000,           // 大文件上传超时 15 分钟
@@ -157,7 +170,7 @@ export class TelegramService {
 
       // sendDocument 返回的 file_path 不可靠，需二次调用 getFile 获取真实路径
       return this.getFileInfo(file_id);
-    }, 'uploadFile');
+    }, 'uploadFile', retries);
   }
 
   async uploadPhoto(
@@ -216,13 +229,28 @@ export class TelegramService {
 
   /** 安全解析本地文件路径，防止路径穿越攻击 */
   private resolveLocalPath(filePath: string): string {
-    // 本地 Bot API 文件存储在允许的目录内，如 tmp/ 或 /var/lib/telegram-bot-api/
-    // 使用 path.normalize 消除 ../ 遍历并确保路径在合理范围内
-    const normalized = path.normalize(filePath);
-    if (normalized.includes('..')) {
-      throw new Error(`非法的本地文件路径: ${filePath}`);
+    // 1. 先在“原始”路径上检查 '..'。
+    //    注意：绝不能先 normalize 再检查——normalize 会消除 '..' 段使检查形同虚设。
+    if (filePath.includes('..')) {
+      throw new Error('非法的本地文件路径');
     }
-    return normalized;
+
+    // 2. 必须配置允许的本地文件根目录（白名单），否则拒绝（fail-closed）。
+    if (!this.localFileBase) {
+      this.logger.warn('收到本地文件路径请求，但未配置 TELEGRAM_LOCAL_FILE_DIR，已拒绝访问');
+      throw new Error('本地文件访问未启用');
+    }
+
+    // 3. 解析为绝对路径并校验位于白名单目录内。
+    //    对绝对 filePath，path.resolve(base, filePath) 返回 filePath 本身；
+    //    对相对路径则基于 base 解析。校验时附带分隔符，防止 /base-evil 这类兄弟目录绕过。
+    const allowlistedBase = path.resolve(this.localFileBase);
+    const resolved = path.resolve(allowlistedBase, filePath);
+    if (resolved !== allowlistedBase && !resolved.startsWith(allowlistedBase + path.sep)) {
+      throw new Error('非法的本地文件路径');
+    }
+
+    return resolved;
   }
 
   async getFile(file_id: string): Promise<Buffer> {
@@ -238,18 +266,23 @@ export class TelegramService {
     if (this.isLocalPath(filePath)) {
       const safePath = this.resolveLocalPath(filePath);
       try {
-        await fs.access(safePath);
+        // 直接读取并在失败时统一处理，避免 access→read 之间的 TOCTOU；
+        // 错误信息不回显内部文件系统路径。
+        return await fs.readFile(safePath);
       } catch {
-        throw new Error(`文件不存在: ${filePath}`);
+        throw new Error('本地文件读取失败');
       }
-      return fs.readFile(safePath);
     }
 
+    // 远程下载：经 telegramRequest 包装，统一脱敏 bot token 并处理 429 重试
     const fileUrl = this.getFileUrl(filePath);
-    const fileResponse = await axios.get(fileUrl, {
-      responseType: 'arraybuffer',
-      timeout: 5 * 60 * 1000,
-    });
+    const fileResponse = await this.telegramRequest(
+      () => axios.get(fileUrl, {
+        responseType: 'arraybuffer',
+        timeout: 5 * 60 * 1000,
+      }),
+      'getFile',
+    );
 
     return Buffer.from(fileResponse.data);
   }
@@ -261,15 +294,22 @@ export class TelegramService {
     const fileInfo = await this.getFileInfo(file_id);
     const filePath = fileInfo.file_path;
 
-    return {
-      stream: this.isLocalPath(filePath)
-        ? createReadStream(this.resolveLocalPath(filePath))
-        : (await axios.get<Readable>(this.getFileUrl(filePath), {
-            responseType: 'stream',
-            timeout: 5 * 60 * 1000,
-          })).data as Readable,
-      info: fileInfo,
-    };
+    let stream: Readable;
+    if (this.isLocalPath(filePath)) {
+      stream = createReadStream(this.resolveLocalPath(filePath));
+    } else {
+      // 远程下载经 telegramRequest 包装，统一脱敏 bot token 并处理 429 重试
+      const response = await this.telegramRequest(
+        () => axios.get<Readable>(this.getFileUrl(filePath), {
+          responseType: 'stream',
+          timeout: 5 * 60 * 1000,
+        }),
+        'getFileStream',
+      );
+      stream = response.data as Readable;
+    }
+
+    return { stream, info: fileInfo };
   }
 
   /**

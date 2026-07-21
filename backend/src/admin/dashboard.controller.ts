@@ -9,11 +9,47 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
+import {
+  IsArray,
+  IsBoolean,
+  IsObject,
+  IsOptional,
+  IsString,
+  ArrayMaxSize,
+  MaxLength,
+} from 'class-validator';
 import { Roles } from '../common/decorators/roles.decorator';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { User, UserRole } from '../common/entities/user.entity';
 import { DashboardService } from './dashboard.service';
+
+/** 单个仪表盘最多允许的 widget 数量 */
+const MAX_WIDGETS = 50;
+
+class CreateDashboardDto {
+  @IsOptional()
+  @IsString()
+  @MaxLength(100)
+  name?: string;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(MAX_WIDGETS)
+  @IsObject({ each: true })
+  config?: any[];
+
+  @IsOptional()
+  @IsBoolean()
+  isDefault?: boolean;
+}
+
+class UpdateDashboardDto {
+  @IsArray()
+  @ArrayMaxSize(MAX_WIDGETS)
+  @IsObject({ each: true })
+  config: any[];
+}
 
 @Controller('admin/dashboards')
 @UseGuards(AuthGuard('jwt'), RolesGuard)
@@ -47,13 +83,13 @@ export class DashboardController {
   @Post()
   async create(
     @CurrentUser() user: User,
-    @Body() body: { name?: string; config?: any[]; isDefault?: boolean },
+    @Body() dto: CreateDashboardDto,
   ) {
     return this.dashboardService.create(
       user.id,
-      body.name || '默认面板',
-      body.config || [],
-      body.isDefault || false,
+      dto.name || '默认面板',
+      dto.config || [],
+      dto.isDefault || false,
     );
   }
 
@@ -61,9 +97,9 @@ export class DashboardController {
   async update(
     @Param('id') id: string,
     @CurrentUser() user: User,
-    @Body() body: { config: any[] },
+    @Body() dto: UpdateDashboardDto,
   ) {
-    return this.dashboardService.update(id, user.id, body.config);
+    return this.dashboardService.update(id, user.id, dto.config);
   }
 
   @Delete(':id')

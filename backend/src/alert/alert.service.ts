@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, MoreThan, IsNull } from 'typeorm';
 import { Alert, AlertLevel } from '../common/entities/alert.entity';
@@ -52,21 +52,42 @@ export class AlertService {
 
   /** 确认单条告警 */
   async acknowledge(alertId: string, userId: string): Promise<void> {
-    await this.alertRepo.update(alertId, {
+    const result = await this.alertRepo.update(alertId, {
       acknowledgedAt: new Date(),
       acknowledgedBy: userId,
     });
+    // 无效 id 不再静默返回成功
+    if ((result.affected ?? 0) === 0) {
+      throw new NotFoundException('告警不存在');
+    }
     this.logger.log(`告警 ${alertId} 已确认 (用户: ${userId})`);
   }
 
-  /** 一键确认全部未确认告警 */
+  /** 一键确认全部未确认告警（分批更新，避免长事务锁表） */
   async acknowledgeAll(userId: string): Promise<number> {
-    const result = await this.alertRepo.update(
-      { acknowledgedAt: IsNull() },
-      { acknowledgedAt: new Date(), acknowledgedBy: userId },
-    );
-    this.logger.log(`确认了 ${result.affected || 0} 条告警 (用户: ${userId})`);
-    return result.affected || 0;
+    const BATCH_SIZE = 1000;
+    const MAX_BATCHES = 100;
+    let total = 0;
+    let batches = 0;
+
+    // 分批 UPDATE（每批 1000 条），避免无条件全表 UPDATE 造成长事务锁表
+    while (batches < MAX_BATCHES) {
+      const rows = await this.alertRepo.manager.query(
+        `UPDATE alerts SET "acknowledgedAt" = NOW(), "acknowledgedBy" = $1
+         WHERE id IN (
+           SELECT id FROM alerts WHERE "acknowledgedAt" IS NULL LIMIT ${BATCH_SIZE}
+         )
+         RETURNING id`,
+        [userId],
+      );
+      const affected = Array.isArray(rows) ? rows.length : 0;
+      total += affected;
+      batches++;
+      if (affected < BATCH_SIZE) break;
+    }
+
+    this.logger.log(`确认了 ${total} 条告警 (用户: ${userId})`);
+    return total;
   }
 
   /** 获取告警规则列表 */
