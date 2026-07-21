@@ -20,9 +20,9 @@ export function getErrorMessage(error: unknown): string {
 
   // 通用 Error（AxiosError 也是 Error 实例，需放在 response 检查之后）
   if (error instanceof Error) {
-    // 主动取消（AbortError）不应显示为错误
+    // 主动取消（AbortError）不应显示为错误，但返回可读文案避免调用方弹空 toast
     if (error.name === 'AbortError') {
-      return '';
+      return '操作已取消';
     }
     if (error.message?.includes('timeout')) {
       return '请求超时，请重试';
@@ -30,7 +30,12 @@ export function getErrorMessage(error: unknown): string {
     if (error.message?.includes('Network Error')) {
       return '网络连接失败，请检查网络';
     }
-    return error.message;
+    // 兜底：原始 message 可能含内部 URL/堆栈等细节，过滤后再展示，避免信息泄漏
+    const msg = error.message || '';
+    if (!msg || /https?:\/\//i.test(msg) || msg.includes('\n')) {
+      return '操作失败，请稍后重试';
+    }
+    return msg;
   }
 
   if (typeof error === 'string') {

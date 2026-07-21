@@ -55,7 +55,8 @@
       <t-button variant="outline" @click="onRefresh">刷新</t-button>
     </div>
 
-    <!-- Desktop table -->
+    <div class="card">
+      <!-- Desktop table -->
       <t-table
         v-if="!isMobile"
         :data="logs"
@@ -126,12 +127,13 @@
           </div>
         </t-loading>
       </div>
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, reactive, onMounted } from 'vue';
-import { MessagePlugin } from 'tdesign-vue-next';
+import MessagePlugin from '@/utils/message';
 import client from '../../api/client';
 import { useMobile } from '../../composables/useMobile';
 
@@ -214,6 +216,13 @@ function formatMetadata(meta: unknown): string {
   if (!meta) return '';
   if (typeof meta === 'string') return meta;
   try {
+    if (Array.isArray(meta)) {
+      return (
+        meta
+          .map((v) => (typeof v === 'object' && v !== null ? JSON.stringify(v) : String(v)))
+          .join(', ') || '-'
+      );
+    }
     const obj = meta as Record<string, unknown>;
     const parts: string[] = [];
     for (const [k, v] of Object.entries(obj)) {
@@ -289,22 +298,6 @@ onMounted(() => {
   padding: 0;
 }
 
-.page-header {
-  margin-bottom: 24px;
-}
-
-.page-header h1 {
-  font-size: 24px;
-  font-weight: 600;
-  margin: 0 0 4px;
-}
-
-.page-header p {
-  color: var(--text-secondary);
-  font-size: 14px;
-  margin: 0;
-}
-
 .toolbar {
   margin-bottom: 16px;
 }
@@ -316,12 +309,7 @@ onMounted(() => {
   flex-wrap: wrap;
 }
 
-.card {
-  background: var(--bg-secondary, #1a1a2e);
-  border: 1px solid var(--border-color, #333);
-  border-radius: 8px;
-  padding: 20px;
-}
+/* .card 容器使用全局定义，见 assets/styles.css */
 
 @media (max-width: 768px) {
   .table-filters {
@@ -369,7 +357,7 @@ onMounted(() => {
 }
 
 .mobile-audit-ip {
-  font-family: 'Courier New', monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   color: var(--text-secondary);
 }

@@ -19,7 +19,19 @@ export const QUEUE_NAMES = {
         password: process.env.REDIS_PASSWORD || undefined,
         db: parseInt(process.env.REDIS_DB || '0', 10),
         maxRetriesPerRequest: 3,
-        retryStrategy: (times: number) => Math.min(times * 200, 2000),
+        // 连接/保活超时，避免 Redis 不可用时无限挂起
+        connectTimeout: 10 * 1000,
+        keepAlive: 10 * 1000,
+        // 重连退避上限提高到 5s，减少 Redis 长时间不可用时的无效重连频率
+        retryStrategy: (times: number) => Math.min(times * 500, 5000),
+        // 可选 TLS：设置 REDIS_TLS=true 启用（托管 Redis 通常需要）
+        ...(process.env.REDIS_TLS === 'true'
+          ? {
+              tls: {
+                rejectUnauthorized: process.env.REDIS_TLS_REJECT_UNAUTHORIZED !== 'false',
+              },
+            }
+          : {}),
       },
     }),
     BullModule.registerQueue(

@@ -20,6 +20,41 @@ let buffer: TelemetryEvent[] = [];
 let flushTimer: ReturnType<typeof setTimeout> | null = null;
 let initialized = false;
 
+// ---- URL 脱敏（防止 token/分享密钥随遥测上传） ----
+
+/** query 中出现即视为敏感的参数名（小写比较） */
+const SENSITIVE_QUERY_PARAMS = new Set([
+  'token', 'access', 'accesstoken', 'access_token', 'accessjwt',
+  'key', 'apikey', 'api_key', 'sharekey',
+  'authorization', 'auth', 'secret', 'password', 'pwd',
+  'jwt', 'signature', 'sign', 'code',
+]);
+
+/**
+ * 上报前剥离 URL 中的敏感信息：
+ * - query 中的敏感参数值替换为 [redacted]
+ * - hash 整体移除（SPA 常把分享密钥/JWT 放在 hash 中）
+ * 相对路径（如路由 fullPath）仅保留 pathname + search。
+ */
+function sanitizeUrl(input: string): string {
+  if (!input) return '';
+  try {
+    const isAbsolute = /^(?:https?:)?\/\//i.test(input);
+    const u = new URL(input, window.location.origin);
+    for (const name of Array.from(u.searchParams.keys())) {
+      if (SENSITIVE_QUERY_PARAMS.has(name.toLowerCase())) {
+        u.searchParams.set(name, '[redacted]');
+      }
+    }
+    u.hash = '';
+    const safe = u.pathname + u.search;
+    return isAbsolute ? u.origin + safe : safe;
+  } catch {
+    // 解析失败时保守处理：丢弃 query 与 hash
+    return input.split(/[?#]/)[0];
+  }
+}
+
 // ---- 点击上下文追踪（仅在错误时上报） ----
 const CLICK_CONTEXT_PRE = 2 * 60 * 1000;  // 错误前 2 分钟
 const CLICK_CONTEXT_POST = 1 * 60 * 1000; // 错误后 1 分钟
@@ -36,18 +71,48 @@ let clickBuffer: ClickRecord[] = [];
 let errorOccurred = false;
 let postErrorCollector: ReturnType<typeof setTimeout> | null = null;
 
-/** 记录单次点击（静默） */
+/**
+ * 敏感元素黑名单：命中则完全跳过采集，避免记录密码、输入内容等 PII。
+ * - 密码输入框及其内部点击
+ * - 任何表单输入控件（其周边文本可能含用户数据）
+ * - 业务侧可通过 data-telemetry-sensitive 属性显式标记敏感容器
+ */
+const SENSITIVE_SELECTOR = [
+  'input[type="password"]',
+  'input[type="text"]',
+  'input[type="email"]',
+  'input[type="tel"]',
+  'input[type="number"]',
+  'input[type="search"]',
+  'textarea',
+  'select',
+  '[data-telemetry-sensitive]',
+].join(',');
+
+/** 文本脱敏：去除邮箱/手机号/URL/连续数字等 PII 模式，压缩空白并截断 */
+function sanitizeText(raw: string): string {
+  return raw
+    .replace(/https?:\/\/\S+/gi, '[url]')              // URL（可能含 token/分享密钥）
+    .replace(/[\w.+-]+@[\w-]+(?:\.[\w-]+)+/g, '[email]') // 邮箱
+    .replace(/(?<!\d)1[3-9]\d{9}(?!\d)/g, '[phone]')   // 国内手机号
+    .replace(/\d{4,}/g, '[num]')                       // 4 位以上连续数字（验证码/ID/卡号等）
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 50);
+}
+
+/** 记录单次点击（静默，已做 PII 脱敏） */
 function recordClick(e: MouseEvent) {
   const el = e.target as HTMLElement;
   if (!el) return;
-  // 截取前 50 个字符避免存储敏感数据
-  const text = (el.textContent || '').trim().slice(0, 50);
+  // 黑名单过滤：敏感元素（密码框/输入控件/敏感容器）直接不采集
+  if (typeof el.closest === 'function' && el.closest(SENSITIVE_SELECTOR)) return;
   clickBuffer.push({
     time: Date.now(),
     tag: el.tagName.toLowerCase(),
-    id: el.id || '',
-    class: (el.className && typeof el.className === 'string') ? el.className.slice(0, 100) : '',
-    text,
+    id: sanitizeText(el.id || ''),
+    class: (el.className && typeof el.className === 'string') ? sanitizeText(el.className).slice(0, 100) : '',
+    text: sanitizeText(el.textContent || ''),
   });
   if (clickBuffer.length > CLICK_BUFFER_MAX) {
     clickBuffer = clickBuffer.slice(-CLICK_BUFFER_MAX);
@@ -225,11 +290,11 @@ api.interceptors.response.use(
           type: 'network',
           clientTimestamp: Date.now(),
           data: {
-            url: response.config?.url || '',
+            url: sanitizeUrl(response.config?.url || ''),
             method: response.config?.method?.toUpperCase() || '',
             status: response.status,
             duration: Math.round(performance.now()),
-            redirect: response.headers?.location || '',
+            redirect: sanitizeUrl(response.headers?.location || ''),
           },
         });
       }
@@ -243,7 +308,7 @@ api.interceptors.response.use(
           type: 'network',
           clientTimestamp: Date.now(),
           data: {
-            url: error.config?.url || '',
+            url: sanitizeUrl(error.config?.url || ''),
             method: error.config?.method?.toUpperCase() || '',
             status,
             duration: Math.round(performance.now()),
@@ -258,43 +323,50 @@ api.interceptors.response.use(
   );
 
   // 拦截 fetch 请求（全局 fetch 覆写）
-  const origFetch = window.fetch;
-  window.fetch = async function (input: RequestInfo | URL, init?: RequestInit) {
-    const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
-    const start = performance.now();
-    try {
-      const res = await origFetch.call(window, input, init);
-      const elapsed = Math.round(performance.now() - start);
-      // 3xx/4xx/5xx 上报
-      if (res.status >= 300) {
+  // 防重复补丁：模块可能被动态 import 多次或与第三方 SDK 叠加，
+  // 重复覆写会形成调用链放大延迟并互相干扰，这里保证只补丁一次并保留原始引用。
+  let origFetch: typeof window.fetch | null = null;
+  function patchGlobalFetch() {
+    if (origFetch || typeof window === 'undefined' || typeof window.fetch !== 'function') return;
+    origFetch = window.fetch.bind(window);
+    window.fetch = async function (input: RequestInfo | URL, init?: RequestInit) {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      const start = performance.now();
+      try {
+        const res = await origFetch!(input, init);
+        const elapsed = Math.round(performance.now() - start);
+        // 3xx/4xx/5xx 上报
+        if (res.status >= 300) {
+          enqueue({
+            type: 'network',
+            clientTimestamp: Date.now(),
+            data: {
+              url: sanitizeUrl(url),
+              method: init?.method?.toUpperCase() || 'GET',
+              status: res.status,
+              duration: elapsed,
+            },
+          });
+        }
+        return res;
+      } catch (err: any) {
+        const elapsed = Math.round(performance.now() - start);
         enqueue({
           type: 'network',
           clientTimestamp: Date.now(),
           data: {
-            url,
+            url: sanitizeUrl(url),
             method: init?.method?.toUpperCase() || 'GET',
-            status: res.status,
+            status: 0,
             duration: elapsed,
+            error: err.message || 'fetch failed',
           },
         });
+        throw err;
       }
-      return res;
-    } catch (err: any) {
-      const elapsed = Math.round(performance.now() - start);
-      enqueue({
-        type: 'network',
-        clientTimestamp: Date.now(),
-        data: {
-          url,
-          method: init?.method?.toUpperCase() || 'GET',
-          status: 0,
-          duration: elapsed,
-          error: err.message || 'fetch failed',
-        },
-      });
-      throw err;
-    }
-  };
+    };
+  }
+  patchGlobalFetch();
 
 // ---- 错误采集 ----
 function captureErrors() {
@@ -336,18 +408,46 @@ function captureErrors() {
 
 // ---- 性能采集 ----
 function capturePerformance() {
-  if (typeof window === 'undefined' || !window.performance?.timing) return;
+  if (typeof window === 'undefined' || !window.performance) return;
 
   // 页面完全加载后延迟收集，确保所有指标就绪
   const collect = () => {
+    // 优先使用 Navigation Timing Level 2（performance.timing 已废弃）
+    const navEntry = performance.getEntriesByType('navigation')[0] as
+      | PerformanceNavigationTiming
+      | undefined;
+
+    if (navEntry) {
+      const navType = navEntry.type === 'reload' ? 1 : navEntry.type === 'back_forward' ? 2 : 0;
+      enqueue({
+        type: 'performance',
+        clientTimestamp: Math.round(navEntry.startTime || Date.now()),
+        data: {
+          url: sanitizeUrl(location.href),
+          dns: Math.round(navEntry.domainLookupEnd - navEntry.domainLookupStart),
+          tcp: Math.round(navEntry.connectEnd - navEntry.connectStart),
+          ttfb: Math.round(navEntry.responseStart - navEntry.requestStart),
+          domReady: Math.round(navEntry.domContentLoadedEventEnd),
+          pageLoad: Math.round(navEntry.loadEventEnd),
+          redirect: Math.round(navEntry.redirectEnd - navEntry.redirectStart),
+          domComplete: Math.round(navEntry.domComplete),
+          navType,
+          fcp: getPaintTime('first-contentful-paint'),
+        },
+      });
+      return;
+    }
+
+    // 回退：已废弃的 Level 1 API（旧浏览器）
     const timing = window.performance.timing;
     const nav = window.performance.navigation;
+    if (!timing) return;
 
     enqueue({
       type: 'performance',
       clientTimestamp: timing.navigationStart,
       data: {
-        url: location.href,
+        url: sanitizeUrl(location.href),
         // 关键性能指标（毫秒）
         dns: timing.domainLookupEnd - timing.domainLookupStart,
         tcp: timing.connectEnd - timing.connectStart,
@@ -360,7 +460,7 @@ function capturePerformance() {
         // 导航类型: 0=正常导航, 1=刷新, 2=前进/后退
         navType: nav?.type || 0,
 
-        // 如果支持 Navigation Timing 2 API，额外采集
+        // 首次内容绘制 (FCP)
         fcp: getPaintTime('first-contentful-paint'),
       },
     });
@@ -393,7 +493,8 @@ function captureEnvironment() {
       screen: `${window.screen.width}x${window.screen.height}`,
       viewport: `${window.innerWidth}x${window.innerHeight}`,
       devicePixelRatio: window.devicePixelRatio || 1,
-      platform: navigator.platform || '',
+      // navigator.platform 已废弃，优先使用 User-Agent Client Hints
+      platform: (navigator as any).userAgentData?.platform || navigator.platform || '',
       language: navigator.language || '',
       timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || '',
       browser: navigator.appName || '',
@@ -420,8 +521,8 @@ function captureAssetErrors() {
         type: 'error',
         clientTimestamp: Date.now(),
         data: {
-          message: `资源加载失败: ${tag} ${src}`,
-          source: src,
+          message: `资源加载失败: ${tag} ${sanitizeUrl(src)}`,
+          source: sanitizeUrl(src),
           lineno: 0,
           colno: 0,
           stack: '',
@@ -547,7 +648,7 @@ export function captureVueError(err: unknown, info: string) {
     clientTimestamp: Date.now(),
     data: {
       message: error.message,
-      source: location.href,
+      source: sanitizeUrl(location.href),
       lineno: 0,
       colno: 0,
       stack: error.stack || '',
@@ -558,6 +659,9 @@ export function captureVueError(err: unknown, info: string) {
 }
 
 // ---- 页面离开时刷新 ----
+/** 遥测上报端点（与 flush 中 api.post('/telemetry/report') + baseURL '/api' 保持一致） */
+const REPORT_ENDPOINT = '/api/telemetry/report';
+
 function onUnload() {
   if (buffer.length === 0) return;
 
@@ -568,7 +672,7 @@ function onUnload() {
   if (navigator.sendBeacon) {
     try {
       const blob = new Blob([payload], { type: 'application/json' });
-      navigator.sendBeacon('/api/telemetry/report', blob);
+      navigator.sendBeacon(REPORT_ENDPOINT, blob);
     } catch {
       // 静默失败
     }
@@ -656,7 +760,7 @@ export function setupRouteTracking(router: any) {
       type: 'performance',
       clientTimestamp: Date.now(),
       data: {
-        url: to.fullPath,
+        url: sanitizeUrl(to.fullPath || ''),
         pageLoad: duration,
         navType: 4, // SPA 路由切换
         tag: 'spa_navigation',

@@ -63,7 +63,7 @@
         <h3 style="margin-bottom: 16px;">上传队列</h3>
         <div v-for="(item, index) in uploadQueue" :key="index" class="file-item">
           <div class="file-icon" :class="getFileIcon(item.file.type)">
-            <img v-if="item.file.type.startsWith('image/')" :src="getPreviewUrl(item.file)" style="width: 48px; height: 48px; object-fit: cover; border-radius: 6px;" />
+            <img v-if="item.file.type.startsWith('image/')" :src="getPreviewUrl(item.file)" loading="lazy" style="width: 48px; height: 48px; object-fit: cover; border-radius: 6px;" />
             <span v-else style="font-size: 24px;">{{ getFileEmoji(item.file.type) }}</span>
           </div>
           <div class="file-info" style="flex: 1;">
@@ -113,7 +113,7 @@
 
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue';
-import { MessagePlugin } from 'tdesign-vue-next';
+import MessagePlugin from '@/utils/message';
 import { useFileStore } from '../../stores/files';
 import { api } from '../../stores/auth';
 import { formatSize, getFileEmoji } from '@/utils/format';
@@ -230,6 +230,13 @@ async function uploadFiles(files: File[]) {
   uploading.value = true;
   batchResult.value = null;
 
+  // 旧队列即将被整体替换、不再渲染，及时释放其预览 ObjectURL，
+  // 避免 URL 强引用旧 File 的 blob 数据阻止 GC（反复选择文件累积泄漏）
+  for (const url of previewUrls.values()) {
+    URL.revokeObjectURL(url);
+  }
+  previewUrls.clear();
+
   // 构建初始队列
   const now = Date.now();
   const queueEntries: QueueEntry[] = files.map((f) => ({
@@ -245,13 +252,12 @@ async function uploadFiles(files: File[]) {
     checkpointBytes: 0,
   }));
 
-  // 先赋值给 ref 触发 Vue 响应式包装，再从响应式数组中建 Map
+  // 先赋值给 ref 触发 Vue 响应式包装，再从响应式数组中建 Map。
+  // 用 File 引用本身作键：name-size-lastModified 组合在同名同大小文件间会冲突致进度丢失。
+  // （Vue reactive 对 File 这类非普通内置对象不做代理，e.file 与 files 中的 File 是同一引用）
   uploadQueue.value = queueEntries;
-  const queueMap = new Map<string, QueueEntry>(
-    uploadQueue.value.map((e) => [
-      `${e.file.name}-${e.file.size}-${e.file.lastModified}`,
-      e,
-    ])
+  const queueMap = new Map<File, QueueEntry>(
+    uploadQueue.value.map((e) => [e.file, e])
   );
 
   // 新批次前清理 selectedFiles 数据
@@ -268,7 +274,7 @@ async function uploadFiles(files: File[]) {
     const batch = files.slice(i, i + concurrency.value);
     await Promise.allSettled(
       batch.map(async (file) => {
-        const entry = queueMap.get(`${file.name}-${file.size}-${file.lastModified}`);
+        const entry = queueMap.get(file);
         try {
           const result = await fileStore.uploadFile(file, (loaded, total) => {
             if (entry) {

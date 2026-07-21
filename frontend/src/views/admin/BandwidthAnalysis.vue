@@ -114,7 +114,7 @@
 
 <script setup lang="ts">
 import { ref, watch, onMounted, onUnmounted, nextTick } from 'vue';
-import * as echarts from 'echarts';
+import * as echarts from '@/utils/echarts';
 import { api } from '@/stores/auth';
 import { formatSize, getFileEmoji } from '@/utils/format';
 import { useMobile } from '../../composables/useMobile';
@@ -171,7 +171,8 @@ async function renderChart() {
       trigger: 'axis',
       ...tooltipBase,
       formatter: (params: unknown) => {
-        const p = (params as { name: string; value: number; seriesName: string }[])[0];
+        const p = (params as { name: string; value: number; seriesName: string }[])?.[0];
+        if (!p) return '';
         return `<b>${p.name}</b><br/>${p.seriesName}: ${formatSize(p.value)}`;
       },
     },
@@ -256,38 +257,23 @@ defineExpose({ refreshChart });
   padding: 0;
 }
 
-.page-header {
-  margin-bottom: 24px;
-}
-
-.page-header h1 {
-  font-size: 24px;
-  font-weight: 600;
-  margin: 0 0 4px;
-}
-
-.page-header p {
-  color: var(--text-secondary);
-  font-size: 14px;
-  margin: 0;
-}
-
 .toolbar {
   margin-bottom: 20px;
 }
 
 /* Card */
 .card {
-  background: var(--bg-secondary, #1a1a2e);
-  border: 1px solid var(--border-color, #333);
-  border-radius: 8px;
-  padding: 20px;
+  background: var(--color-bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  padding: 24px;
   margin-bottom: 20px;
 }
 
 .card h3 {
   font-size: 16px;
-  font-weight: 500;
+  font-weight: 600;
+  font-family: var(--font-display);
   margin: 0 0 16px;
 }
 
@@ -312,9 +298,9 @@ defineExpose({ refreshChart });
   }
 
   .mobile-card {
-    background: var(--bg-secondary);
-    border: 1px solid var(--border-color, #333);
-    border-radius: 8px;
+    background: var(--color-bg-surface);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
     padding: 12px;
     margin-bottom: 10px;
   }

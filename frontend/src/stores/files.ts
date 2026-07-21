@@ -12,6 +12,18 @@ export const useFileStore = defineStore('files', () => {
   let listAbortController: AbortController | null = null;
   let cursorAbortController: AbortController | null = null;
 
+  // 列表请求计数器：fetchFiles 与 fetchFilesCursor 共享同一个 loading 状态，
+  // 仅当所有进行中的列表请求都结束时才清除 loading，避免并发时互相提前复位加载态。
+  let activeListRequests = 0;
+  function beginListRequest() {
+    activeListRequests++;
+    loading.value = true;
+  }
+  function endListRequest() {
+    activeListRequests = Math.max(0, activeListRequests - 1);
+    if (activeListRequests === 0) loading.value = false;
+  }
+
   /** 当前用户是否为管理员（供 UI 判断恢复按钮是否可用） */
   const currentUserRole = ref<string>('user');
 
@@ -19,17 +31,17 @@ export const useFileStore = defineStore('files', () => {
     currentUserRole.value = role;
   }
 
-  async function fetchFiles(page = 1, limit = 20, keyword?: string, sortBy?: string, sortOrder?: string, tagIds?: string[]) {
+  async function fetchFiles(page = 1, limit = 20, keyword?: string, sortBy?: string, sortOrder?: string, tagIds?: string[], folderId?: string) {
     // 取消上一次请求（如有）
     if (listAbortController) {
       listAbortController.abort();
     }
     const controller = new AbortController();
     listAbortController = controller;
-    loading.value = true;
+    beginListRequest();
     try {
       const response = await api.get('/files', {
-        params: { page, limit, keyword, includeDeleted: 'true', sortBy, sortOrder, tagIds: tagIds?.join(',') },
+        params: { page, limit, keyword, includeDeleted: 'true', sortBy, sortOrder, tagIds: tagIds?.join(','), folderId },
         signal: controller.signal,
       });
       files.value = response.data.data.files;
@@ -42,7 +54,7 @@ export const useFileStore = defineStore('files', () => {
       }
       throw err;
     } finally {
-      loading.value = false;
+      endListRequest();
       // 仅当当前控制器未被替换时才清除引用（防止旧请求的 finally 覆盖新请求的控制器）
       if (listAbortController === controller) {
         listAbortController = null;
@@ -54,7 +66,7 @@ export const useFileStore = defineStore('files', () => {
    * 游标分页请求（无限滚动模式使用）
    * 返回 { files, nextCursor, total } 供 useCursorPagination 使用
    */
-  async function fetchFilesCursor(limit: number, keyword?: string, cursor?: string | null, tagIds?: string[], externalSignal?: AbortSignal) {
+  async function fetchFilesCursor(limit: number, keyword?: string, cursor?: string | null, tagIds?: string[], externalSignal?: AbortSignal, folderId?: string) {
     if (cursorAbortController) {
       cursorAbortController.abort();
     }
@@ -69,12 +81,13 @@ export const useFileStore = defineStore('files', () => {
       externalSignal.addEventListener('abort', () => controller.abort(), { once: true });
     }
 
-    loading.value = true;
+    beginListRequest();
     try {
       const params: Record<string, unknown> = { limit, includeDeleted: 'true' };
       if (keyword) params.keyword = keyword;
       if (cursor) params.cursor = cursor;
       if (tagIds?.length) params.tagIds = tagIds.join(',');
+      if (folderId) params.folderId = folderId;
 
       const response = await api.get('/files', { params, signal: controller.signal });
       const data = response.data.data;
@@ -93,7 +106,7 @@ export const useFileStore = defineStore('files', () => {
       }
       throw err;
     } finally {
-      loading.value = false;
+      endListRequest();
       if (cursorAbortController === controller) {
         cursorAbortController = null;
       }
@@ -112,6 +125,8 @@ export const useFileStore = defineStore('files', () => {
     const formData = new FormData();
     formData.append('file', file);
     const response = await api.post('/files/upload', formData, {
+      // 覆盖默认 30s 超时：大文件在慢网络下上传耗时可能远超 30s，避免被中断
+      timeout: 0,
       onUploadProgress: (progressEvent) => {
         if (progressEvent.total && onProgress) {
           onProgress(progressEvent.loaded, progressEvent.total);
@@ -124,16 +139,21 @@ export const useFileStore = defineStore('files', () => {
   /**
    * 异步上传（大文件专用）：文件传输完成后立即返回 jobId，
    * 通过轮询 upload-status 获取最终结果，防止 CDN/代理超时断开连接。
+   *
+   * @param signal 可选的取消信号。传入后，上传请求与状态轮询都会响应 abort，
+   *               组件卸载或路由切换时可中止，避免轮询最长跑 10 分钟造成内存泄漏与无效流量。
    */
   async function uploadFileAsync(
     file: File,
     onProgress?: (loaded: number, total: number) => void,
     onStatusChange?: (status: string) => void,
+    signal?: AbortSignal,
   ) {
     const formData = new FormData();
     formData.append('file', file);
-    // Step 1: 上传文件（Multer 缓冲阶段，有上传进度）
+    // Step 1: 上传文件（Multer 缓冲阶段，有上传进度）— 同样响应外部取消
     const response = await api.post('/files/upload-async', formData, {
+      signal,
       onUploadProgress: (progressEvent) => {
         if (progressEvent.total && onProgress) {
           onProgress(progressEvent.loaded, progressEvent.total);
@@ -143,20 +163,33 @@ export const useFileStore = defineStore('files', () => {
     const { jobId } = response.data.data;
 
     // Step 2: 轮询上传状态（Telegram 转发阶段）
-    // 使用 AbortController 支持取消轮询（组件卸载或路由切换时）
-    const abortController = new AbortController();
     const pollInterval = 1000; // 1 秒轮询
     const maxWait = 10 * 60 * 1000; // 最多等 10 分钟
     const startTime = Date.now();
 
+    // 可中断的 sleep：到时 resolve；signal abort 时立即 reject 并清理定时器/监听器
+    const abortableSleep = (ms: number) => new Promise<void>((resolve, reject) => {
+      if (signal?.aborted) {
+        reject(new Error('上传已取消'));
+        return;
+      }
+      const timer = setTimeout(() => { cleanup(); resolve(); }, ms);
+      const onAbort = () => { cleanup(); reject(new Error('上传已取消')); };
+      const cleanup = () => {
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
+      };
+      signal?.addEventListener('abort', onAbort, { once: true });
+    });
+
     try {
-      while (!abortController.signal.aborted && Date.now() - startTime < maxWait) {
-        await new Promise(resolve => setTimeout(resolve, pollInterval));
-        if (abortController.signal.aborted) {
-          throw new Error('上传已被取消');
+      while (!signal?.aborted && Date.now() - startTime < maxWait) {
+        await abortableSleep(pollInterval);
+        if (signal?.aborted) {
+          throw new Error('上传已取消');
         }
         const statusRes = await api.get(`/files/upload-status/${jobId}`, {
-          signal: abortController.signal,
+          signal,
         });
         const job = statusRes.data.data;
 
@@ -172,9 +205,12 @@ export const useFileStore = defineStore('files', () => {
         }
       }
       throw new Error('上传处理超时');
-    } finally {
-      // 确保组件卸载或任务完成后清理轮询
-      abortController.abort();
+    } catch (err) {
+      // 由 abort 触发的取消（axios CanceledError / 中断的 sleep）统一归一化为业务取消信息
+      if (signal?.aborted) {
+        throw new Error('上传已取消');
+      }
+      throw err;
     }
   }
 

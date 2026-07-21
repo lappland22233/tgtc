@@ -5,10 +5,12 @@ import {
   IsIP,
   IsArray,
   ArrayMinSize,
+  ArrayMaxSize,
   IsUUID,
   IsInt,
   Min,
   Max,
+  MaxLength,
   ValidateNested,
   IsNotEmpty,
   IsDateString,
@@ -22,6 +24,7 @@ export class BanIPDto {
 
   @IsOptional()
   @IsString()
+  @MaxLength(500)
   reason?: string;
 
   @IsOptional()
@@ -41,6 +44,7 @@ export class UnbanIPDto {
 export class BatchDeleteFilesDto {
   @IsArray()
   @ArrayMinSize(1)
+  @ArrayMaxSize(500)
   @IsUUID('4', { each: true })
   ids: string[];
 }
@@ -48,20 +52,24 @@ export class BatchDeleteFilesDto {
 export class ConfigDto {
   @IsString()
   @IsNotEmpty()
+  @MaxLength(200)
   key: string;
 
   @IsString()
   @IsNotEmpty()
+  @MaxLength(10000)
   value: string;
 
   @IsOptional()
   @IsString()
+  @MaxLength(500)
   description?: string;
 }
 
 export class BatchConfigDto {
   @IsArray()
   @ArrayMinSize(1)
+  @ArrayMaxSize(100)
   @ValidateNested({ each: true })
   @Type(() => ConfigDto)
   configs: ConfigDto[];
@@ -160,10 +168,12 @@ export class AccessLogQueryDto {
 export class SecurityConfigItemDto {
   @IsString()
   @IsNotEmpty()
+  @MaxLength(200)
   key: string;
 
   @IsString()
   @IsNotEmpty()
+  @MaxLength(10000)
   value: string;
 }
 
@@ -171,6 +181,7 @@ export class SecurityConfigItemDto {
 export class SecurityConfigBatchDto {
   @IsArray()
   @ArrayMinSize(1)
+  @ArrayMaxSize(100)
   @ValidateNested({ each: true })
   @Type(() => SecurityConfigItemDto)
   configs: SecurityConfigItemDto[];

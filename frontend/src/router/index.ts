@@ -6,12 +6,30 @@ import { clearThumbnailCache } from '../utils/thumbnailCache';
 
 /**
  * 校验 redirect 参数是否安全，防止任意 URL 跳转（Open Redirect）
+ *
+ * 使用 new URL(path, location.origin) 解析后再校验来源，避免仅靠字符串包含 `\` 拦截
+ * 被浏览器归一化（如 `/\evil.com` → `/\/evil.com`、协议相对 URL 等）绕过。
+ * 解析结果的 origin 必须与当前页面同源才视为安全。
  */
 export function isValidRedirect(path: string): boolean {
-  return !!path && path.startsWith('/') && !path.startsWith('//') && !path.includes('\\');
+  if (!path || !path.startsWith('/')) return false;
+  try {
+    const url = new URL(path, window.location.origin);
+    return url.origin === window.location.origin;
+  } catch {
+    // 解析失败一律视为不安全
+    return false;
+  }
 }
 
 const routes: RouteRecordRaw[] = [
+  // 公开分享页（无需登录，独立于 Layout）
+  {
+    path: '/s/:token',
+    name: 'ShareView',
+    component: () => import('../views/share/ShareView.vue'),
+    meta: { public: true },
+  },
   {
     path: '/login',
     name: 'Login',
@@ -42,6 +60,11 @@ const routes: RouteRecordRaw[] = [
         path: 'files',
         name: 'UserFiles',
         component: () => import('../views/user/FileList.vue'),
+      },
+      {
+        path: 'shares',
+        name: 'UserShares',
+        component: () => import('../views/user/Shares.vue'),
       },
       {
         path: 'settings',
@@ -125,6 +148,26 @@ const router = createRouter({
  */
 let navLock: Promise<void> = Promise.resolve();
 
+/**
+ * fetchUser 独立超时（ms）。
+ * /auth/me 若挂起（默认 axios 30s 超时），会阻塞串行导航锁导致全站路由跳转卡死。
+ * 这里设置更短的独立超时，超时后按“未认证”兜底继续导航，绝不阻塞。
+ */
+const FETCH_USER_TIMEOUT = 8000;
+
+/** 为 Promise 包裹独立超时：超时则 reject，避免无限期等待 */
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`fetchUser 超时（>${ms}ms）`));
+    }, ms);
+    promise.then(
+      (val) => { clearTimeout(timer); resolve(val); },
+      (err) => { clearTimeout(timer); reject(err); },
+    );
+  });
+}
+
 router.beforeEach(async (to, _from, next) => {
   // 串行化所有导航守卫：快速切换时排队执行
   const prevLock = navLock;
@@ -134,12 +177,25 @@ router.beforeEach(async (to, _from, next) => {
   try {
     await prevLock;
 
+    // 步骤 0：公开路由（分享页 /s/:token）直接放行，不触发 fetchUser
+    // 这是匿名访问场景，不应被重定向到登录页
+    if (to.meta.public) {
+      next();
+      return;
+    }
+
     const authStore = useAuthStore();
 
     // 步骤 1：首次加载时从 cookie 恢复登录状态
-    // fetchUser 内部有并发锁，多次快速调用安全
+    // fetchUser 内部有并发锁，多次快速调用安全。
+    // 额外包裹独立超时 + catch 兜底：/auth/me 挂起或失败时按“未认证”继续导航，
+    // 避免阻塞串行导航锁导致全站路由跳转死锁。
     if (!authStore.initialized) {
-      await authStore.fetchUser();
+      try {
+        await withTimeout(authStore.fetchUser(), FETCH_USER_TIMEOUT);
+      } catch (err) {
+        console.warn('[Router] fetchUser 失败或超时，按未认证状态继续导航:', err);
+      }
     }
 
     const isAuthenticated = authStore.isAuthenticated;
@@ -186,9 +242,11 @@ router.beforeEach(async (to, _from, next) => {
  * 基于 authStore 实际状态而非 localStorage hack。
  */
 let lastAuthUserId: string | null = null;
+// 缓存 authStore 单例（Pinia store 为单例），避免每次路由切换都调用 useAuthStore()
+let cachedAuthStore: ReturnType<typeof useAuthStore> | null = null;
 router.afterEach(() => {
-  const authStore = useAuthStore();
-  const currentUserId = authStore.user?.id ?? null;
+  if (!cachedAuthStore) cachedAuthStore = useAuthStore();
+  const currentUserId = cachedAuthStore.user?.id ?? null;
   if (currentUserId !== lastAuthUserId) {
     clearThumbToken();
     clearThumbnailCache();

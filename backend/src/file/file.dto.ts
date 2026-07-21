@@ -1,4 +1,4 @@
-import { IsArray, ArrayMinSize, IsUUID, IsString, IsOptional, IsInt, Min, Max, IsIn, ValidateIf, IsNotEmpty } from 'class-validator';
+import { IsArray, ArrayMinSize, IsUUID, IsString, IsOptional, IsInt, Min, Max, IsIn, ValidateIf, IsNotEmpty, MaxLength } from 'class-validator';
 import { Type } from 'class-transformer';
 
 export class BatchMarkdownDto {
@@ -24,6 +24,7 @@ export class UpdateAccessCountDto {
 export class SetPasswordDto {
   @IsString()
   @IsNotEmpty({ message: '密码不能为空' })
+  @MaxLength(128, { message: '密码不能超过 128 个字符' })
   password: string;
 }
 

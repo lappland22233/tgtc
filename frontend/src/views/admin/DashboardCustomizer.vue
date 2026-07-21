@@ -1,7 +1,7 @@
 <template>
   <div class="dashboard-customizer">
-    <div class="page-header">
-      <h2>仪表盘定制</h2>
+    <div class="toolbar-header">
+      <h1>仪表盘定制</h1>
       <t-space>
         <t-select v-model="currentDashboardId" placeholder="选择仪表盘" style="width:220px" @change="loadDashboard">
           <t-option v-for="d in dashboards" :key="d.id" :value="d.id" :label="d.name" />
@@ -71,15 +71,16 @@
 
 <script setup lang="ts">
 import { ref, onMounted } from 'vue';
-import { MessagePlugin } from 'tdesign-vue-next';
+import MessagePlugin from '@/utils/message';
 import { useMobile } from '@/composables/useMobile';
 import { api } from '@/stores/auth';
 
-interface DashboardItem {
-  id: string;
-  name: string;
-  config: any[];
-  isDefault: boolean;
+interface WidgetInnerConfig {
+  label?: string;
+  title?: string;
+  endpoint?: string;
+  metric?: string;
+  format?: 'number' | 'size' | 'percent' | 'ms';
 }
 
 interface WidgetConfig {
@@ -87,7 +88,14 @@ interface WidgetConfig {
   type: string;
   w: number;
   h: number;
-  config: Record<string, any>;
+  config: WidgetInnerConfig;
+}
+
+interface DashboardItem {
+  id: string;
+  name: string;
+  config: WidgetConfig[];
+  isDefault: boolean;
 }
 
 const dashboards = ref<DashboardItem[]>([]);
@@ -117,6 +125,30 @@ const formatOptions = [
   { label: '毫秒', value: 'ms' },
 ];
 
+// 组件数据端点白名单：仅允许只读的管理统计接口，防止把 widget 端点
+// 指向任意内部 API（前端 SSRF 入口）。新增合法端点时在此登记。
+const ALLOWED_ENDPOINT_PREFIXES = [
+  '/admin/access-logs',
+  '/admin/telemetry',
+  '/admin/stats',
+  '/admin/dashboard',
+  '/admin/file-type-stats',
+  '/admin/bandwidth',
+  '/admin/source-analysis',
+  '/admin/user-activity',
+  '/admin/alerts',
+  '/admin/security-monitor',
+];
+
+function isValidWidgetEndpoint(endpoint: unknown): endpoint is string {
+  if (typeof endpoint !== 'string' || endpoint.length === 0) return false;
+  // 必须是站内相对路径，拒绝协议相对（//evil.com）与绝对 URL
+  if (!endpoint.startsWith('/') || endpoint.startsWith('//')) return false;
+  return ALLOWED_ENDPOINT_PREFIXES.some(
+    p => endpoint === p || endpoint.startsWith(p + '/'),
+  );
+}
+
 function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2); }
 
 async function fetchDashboards() {
@@ -124,7 +156,9 @@ async function fetchDashboards() {
     const res = await api.get('/admin/dashboards');
     const body = res.data;
     dashboards.value = Array.isArray(body?.data) ? body.data : [];
-  } catch {}
+  } catch (err) {
+    console.error('加载仪表盘列表失败', err);
+  }
 }
 
 async function fetchPresets() {
@@ -132,7 +166,9 @@ async function fetchPresets() {
     const res = await api.get('/admin/dashboards/presets');
     const body = res.data;
     presets.value = Array.isArray(body?.data) ? body.data : [];
-  } catch {}
+  } catch (err) {
+    console.error('加载预设模板失败', err);
+  }
 }
 
 async function loadDashboard() {
@@ -152,6 +188,12 @@ async function loadDashboard() {
 
 async function saveDashboard() {
   if (!currentDashboardId.value) { MessagePlugin.warning('请先选择或创建仪表盘'); return; }
+  // 保存前校验所有组件端点，防止把非法/任意内部 API 端点持久化（SSRF 防护）
+  const invalid = widgets.value.find(w => !isValidWidgetEndpoint(w.config?.endpoint));
+  if (invalid) {
+    MessagePlugin.warning('组件「' + (invalid.config?.title || invalid.i) + '」的数据端点不在允许范围内，请修改后重试');
+    return;
+  }
   saving.value = true;
   try {
     await api.put(`/admin/dashboards/${currentDashboardId.value}`, { config: widgets.value });
@@ -226,10 +268,12 @@ onMounted(() => { fetchDashboards(); fetchPresets(); });
 
 <style scoped>
 .dashboard-customizer { padding: 0; }
-.page-header {
+.toolbar-header {
   display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;
 }
-.page-header h2 { margin: 0; }
+.toolbar-header h1 {
+  margin: 0; font-family: var(--font-display); font-size: 22px; font-weight: 700; letter-spacing: -0.02em;
+}
 .dashboard-grid {
   display: grid;
   grid-template-columns: repeat(12, 1fr);
@@ -237,9 +281,9 @@ onMounted(() => { fetchDashboards(); fetchPresets(); });
   margin-bottom: 16px;
 }
 .widget-card {
-  background: var(--bg-color-container);
+  background: var(--color-bg-surface);
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   padding: 16px;
   min-height: 120px;
 }
@@ -248,13 +292,13 @@ onMounted(() => { fetchDashboards(); fetchPresets(); });
 }
 
 @media (max-width: 768px) {
-  .page-header {
+  .toolbar-header {
     flex-direction: column;
     align-items: flex-start;
     gap: 12px;
   }
 
-  .page-header > :deep(.t-space) {
+  .toolbar-header > :deep(.t-space) {
     flex-wrap: wrap;
   }
 

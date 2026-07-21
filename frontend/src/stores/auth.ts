@@ -22,6 +22,9 @@ export const useAuthStore = defineStore('auth', () => {
     if (typeof BroadcastChannel === 'undefined') return null;
     authChannel = new BroadcastChannel('auth-sync');
     authChannel.onmessage = (event) => {
+      // 同源校验（纵深防御）：BroadcastChannel 本身为同源通信，这里再次校验 origin，
+      // 并严格限定消息内容必须为字符串 'logout'，避免被伪造/误发消息触发登出。
+      if (event.origin && event.origin !== window.location.origin) return;
       if (event.data === 'logout') {
         user.value = null;
         initialized.value = true;
@@ -50,11 +53,13 @@ export const useAuthStore = defineStore('auth', () => {
     const response = await api.post('/auth/login', { email, password });
     user.value = response.data.data.user as User;
     clearRedirectState(); // 登录成功后重置重定向状态
-    // 二次验证：通过 fetchUser 获取服务端权威用户状态，防止响应篡改
+    // 二次验证：通过 fetchUser 获取服务端权威用户状态，防止响应篡改。
+    // fetchUser 成功时会以 /auth/me 的权威数据覆盖上面来自响应体的 user；
+    // 失败时不再静默吞错，至少记录告警便于排查（保留响应数据以不阻断登录流程）。
     try {
       await fetchUser();
-    } catch {
-      // fetchUser 失败不影响登录流程（auth/me 主要用于验证状态）
+    } catch (err) {
+      console.warn('[Auth] 登录后获取权威用户信息失败，已保留登录响应数据:', err);
     }
     return response.data;
   }
@@ -83,7 +88,15 @@ export const useAuthStore = defineStore('auth', () => {
     fetchUserPromise = (async () => {
       try {
         const response = await api.get('/auth/me');
-        user.value = response.data.data as User;
+        const data = response.data?.data;
+        // 空值/结构校验：仅接受包含 id 的用户对象，结构异常时按未认证处理并记录日志，
+        // 避免静默写入无效用户状态导致后续逻辑异常。
+        if (data && typeof data === 'object' && (data as User).id) {
+          user.value = data as User;
+        } else {
+          console.warn('[Auth] /auth/me 返回的用户数据结构异常，按未认证处理');
+          user.value = null;
+        }
       } catch (err: unknown) {
         // 区分 401（token 过期/无效）和网络错误（临时网络问题）
         // 仅 401 时清除用户状态，网络错误保留当前状态防止无故登出
@@ -108,6 +121,8 @@ export const useAuthStore = defineStore('auth', () => {
       // 即使请求失败也清除本地状态
     }
     user.value = null;
+    // 与跨标签页接收端语义保持一致：登出后标记初始化已完成（已确认为登出状态）
+    initialized.value = true;
     // 广播登出事件到其他标签页
     if (authChannel) {
       authChannel.postMessage('logout');

@@ -1,4 +1,4 @@
-import { ref, type Ref } from 'vue';
+import { ref, getCurrentScope, onScopeDispose, type Ref } from 'vue';
 
 /**
  * fetchFn 的返回结构 — 与后端游标分页 API 对齐
@@ -49,6 +49,20 @@ export function useCursorPagination<T = unknown>(): UseCursorPaginationReturn<T>
   let generation = 0;
   // 当前代际的 AbortController（仅 cancel 同代请求）
   let currentAbortController: AbortController | null = null;
+  // 合并并发加载请求：加载中再次触发 loadMore 时记录最新 fetchFn，
+  // 待当前加载完成后自动补发一次，避免无限滚动在滚动停止后“不再加载”
+  let pendingFetchFn: ((cursor: string | null, signal: AbortSignal) => Promise<CursorPageResult<T>>) | null = null;
+
+  // 作用域销毁时清理：中止进行中的请求并清空合并请求，避免卸载后仍写入状态
+  if (getCurrentScope()) {
+    onScopeDispose(() => {
+      pendingFetchFn = null;
+      if (currentAbortController) {
+        currentAbortController.abort();
+        currentAbortController = null;
+      }
+    });
+  }
 
   /**
    * 加载下一页数据，追加到 data 末尾
@@ -56,8 +70,13 @@ export function useCursorPagination<T = unknown>(): UseCursorPaginationReturn<T>
   async function loadMore(
     fetchFn: (cursor: string | null, signal: AbortSignal) => Promise<CursorPageResult<T>>,
   ): Promise<void> {
-    if (_loading.value) return;
     if (!_hasMore.value) return;
+    if (_loading.value) {
+      // 加载中：合并并发请求（仅保留最新 fetchFn），待当前加载完成后自动补发，
+      // 避免请求被静默丢弃导致无限滚动在滚动停止后不再加载
+      pendingFetchFn = fetchFn;
+      return;
+    }
 
     const gen = generation;
 
@@ -98,6 +117,12 @@ export function useCursorPagination<T = unknown>(): UseCursorPaginationReturn<T>
         if (currentAbortController === controller) {
           currentAbortController = null;
         }
+        // 若加载期间有被合并的请求且仍有更多数据，自动补发一次
+        const queued = pendingFetchFn;
+        pendingFetchFn = null;
+        if (queued && _hasMore.value) {
+          void loadMore(queued);
+        }
       }
     }
   }
@@ -107,6 +132,7 @@ export function useCursorPagination<T = unknown>(): UseCursorPaginationReturn<T>
    */
   function reset(): void {
     generation++;
+    pendingFetchFn = null; // 重置时清空合并请求，避免旧请求污染新状态
     _data.value = [];
     _nextCursor.value = null;
     _hasMore.value = true;

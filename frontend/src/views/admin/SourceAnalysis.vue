@@ -62,7 +62,7 @@
               <div v-if="isMobile && topReferersWithPct.length > 0" class="mobile-card-list">
                 <div v-for="ref in topReferersWithPct" :key="ref.referer" class="mobile-card">
                   <div class="mobile-card-row">
-                    <strong>{{ ref.referer.substring(0, 40) }}{{ ref.referer.length > 40 ? '...' : '' }}</strong>
+                    <strong class="truncated-url">{{ ref.referer }}</strong>
                   </div>
                   <div class="mobile-card-meta">
                     <span>{{ ref.count }} 次</span>
@@ -207,7 +207,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue';
-import * as echarts from 'echarts';
+import * as echarts from '@/utils/echarts';
 import { api } from '@/stores/auth';
 import { useMobile } from '../../composables/useMobile';
 import { CHART_COLORS, tooltipBase, legendBase, ensureCyberTheme } from '../../utils/echarts-theme';
@@ -442,7 +442,8 @@ async function fetchRefererData() {
       params: { timeRange: timeRange.value },
     });
     refererData.value = (data.data || data) as RefererAnalysisResponse;
-    setTimeout(async () => { await renderCategoryChart(); }, 50);
+    await nextTick();
+    await renderCategoryChart();
   } catch {
     refererData.value = null;
   } finally {
@@ -457,7 +458,8 @@ async function fetchUAData() {
       params: { timeRange: timeRange.value, topN: 500 },
     });
     uaData.value = (data.data || data) as UserAgentAnalysisResponse;
-    setTimeout(async () => { await renderDeviceChart(); }, 50);
+    await nextTick();
+    await renderDeviceChart();
   } catch {
     uaData.value = null;
   } finally {
@@ -523,22 +525,6 @@ defineExpose({ resizeAllCharts });
   padding: 0;
 }
 
-.page-header {
-  margin-bottom: 24px;
-}
-
-.page-header h1 {
-  font-size: 24px;
-  font-weight: 600;
-  margin: 0 0 4px;
-}
-
-.page-header p {
-  color: var(--text-secondary);
-  font-size: 14px;
-  margin: 0;
-}
-
 .toolbar {
   margin-bottom: 20px;
 }
@@ -549,15 +535,16 @@ defineExpose({ resizeAllCharts });
 
 /* Card */
 .card {
-  background: var(--bg-secondary, #1a1a2e);
-  border: 1px solid var(--border-color, #333);
-  border-radius: 8px;
-  padding: 20px;
+  background: var(--color-bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  padding: 24px;
 }
 
 .card h3 {
   font-size: 16px;
-  font-weight: 500;
+  font-weight: 600;
+  font-family: var(--font-display);
   margin: 0 0 16px;
 }
 

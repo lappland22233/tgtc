@@ -3,11 +3,13 @@ import {
   PrimaryColumn,
   Column,
   CreateDateColumn,
+  Index,
 } from 'typeorm';
 
 export type ShareAuditAction = 'create' | 'revoke' | 'access' | 'consume';
 
 @Entity('share_audits')
+@Index('idx_share_audits_createdAt', ['createdAt'])
 export class ShareAudit {
   @PrimaryColumn({ type: 'uuid', default: () => 'gen_random_uuid()' })
   id: string;

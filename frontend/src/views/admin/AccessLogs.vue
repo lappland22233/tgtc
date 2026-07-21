@@ -143,7 +143,7 @@
             {{ formatSizeUtil(row.totalBandwidth) }}
           </template>
           <template #avgDuration="{ row }">
-            {{ row.avgDuration.toFixed(1) }}ms
+            {{ Number(row.avgDuration ?? 0).toFixed(1) }}ms
           </template>
         </t-table>
         <div v-if="!topPathsLoading && topPaths.length === 0" class="empty-hint">暂无数据</div>
@@ -170,7 +170,7 @@
           </template>
           <template #errorRate="{ row }">
             <span :class="'error-rate-' + errorRateLevel(row.errorRate)">
-              {{ row.errorRate.toFixed(1) }}%
+              {{ Number(row.errorRate ?? 0).toFixed(1) }}%
             </span>
           </template>
           <template #bandwidth="{ row }">
@@ -326,8 +326,8 @@
 
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted, onUnmounted, watch, nextTick } from 'vue';
-import { MessagePlugin } from 'tdesign-vue-next';
-import * as echarts from 'echarts';
+import MessagePlugin from '@/utils/message';
+import * as echarts from '@/utils/echarts';
 import client from '../../api/client';
 import { formatSize as formatSizeUtil, getFileEmoji } from '@/utils/format';
 import SourceAnalysis from './SourceAnalysis.vue';
@@ -477,6 +477,9 @@ const autoRefreshInterval = ref(0);
 const trendData = ref<TrendItem[]>([]);
 let autoRefreshTimer: ReturnType<typeof setInterval> | null = null;
 const lastRefreshTime = ref('');
+// 每次 refreshAll 自增；各 fetch 捕获当前代际，响应回来时若代际已变（有更新的刷新）则丢弃，
+// 避免自动刷新竞态下旧响应覆盖新数据
+let refreshGeneration = 0;
 
 function updateAutoRefresh() {
   if (autoRefreshTimer) {
@@ -574,31 +577,48 @@ function riskLabel(level: string): string {
 }
 
 // Fetch stats
+const statsErrorShown = ref(false);
 async function fetchStats() {
+  const gen = refreshGeneration;
   try {
     const { data } = await client.get('/admin/access-logs/stats', { params: { timeRange: timeRange.value } });
+    if (gen !== refreshGeneration) return;
     const d = data.data || data;
     Object.assign(stats, d);
+    statsErrorShown.value = false;
     await updatePieChart();
   } catch {
-    // Stats error handled silently
+    if (gen !== refreshGeneration) return;
+    if (!statsErrorShown.value) {
+      statsErrorShown.value = true;
+      MessagePlugin.error('加载访问统计数据失败');
+    }
   }
 }
 
 // Fetch trend
+const trendErrorShown = ref(false);
 async function fetchTrend() {
+  const gen = refreshGeneration;
   try {
     const { data } = await client.get('/admin/access-logs/trend', { params: { timeRange: timeRange.value } });
+    if (gen !== refreshGeneration) return;
     const td = (data.data || data) as TrendItem[];
     trendData.value = td;
+    trendErrorShown.value = false;
     await updateTrendChart(td);
   } catch {
-    // Trend error handled silently
+    if (gen !== refreshGeneration) return;
+    if (!trendErrorShown.value) {
+      trendErrorShown.value = true;
+      MessagePlugin.error('加载流量趋势失败');
+    }
   }
 }
 
 // Fetch logs
 async function fetchLogs() {
+  const gen = refreshGeneration;
   loading.value = true;
   try {
     const params: Record<string, unknown> = {
@@ -610,6 +630,7 @@ async function fetchLogs() {
     if (filterStatus.value) params.statusCode = filterStatus.value;
 
     const { data } = await client.get('/admin/access-logs', { params });
+    if (gen !== refreshGeneration) return;
     const d = data.data || data;
     logs.value = d.items || [];
     total.value = d.total || 0;
@@ -617,14 +638,18 @@ async function fetchLogs() {
     pagination.current = currentPage.value;
     pagination.pageSize = pageSize.value;
   } catch {
+    if (gen !== refreshGeneration) return;
     MessagePlugin.error('加载访问记录失败');
   } finally {
-    loading.value = false;
+    if (gen === refreshGeneration) {
+      loading.value = false;
+    }
   }
 }
 
 // Fetch top files
 async function fetchTopFiles() {
+  const gen = refreshGeneration;
   topFilesLoading.value = true;
   try {
     const { data } = await client.get('/admin/access-logs/top-files', {
@@ -634,16 +659,21 @@ async function fetchTopFiles() {
         limit: 10,
       },
     });
+    if (gen !== refreshGeneration) return;
     topFiles.value = (data.data || data) as TopFileItem[];
   } catch {
+    if (gen !== refreshGeneration) return;
     topFiles.value = [];
   } finally {
-    topFilesLoading.value = false;
+    if (gen === refreshGeneration) {
+      topFilesLoading.value = false;
+    }
   }
 }
 
 // Fetch top paths
 async function fetchTopPaths() {
+  const gen = refreshGeneration;
   topPathsLoading.value = true;
   try {
     const { data } = await client.get('/admin/access-logs/top-paths', {
@@ -652,16 +682,21 @@ async function fetchTopPaths() {
         limit: 20,
       },
     });
+    if (gen !== refreshGeneration) return;
     topPaths.value = (data.data || data) as TopPathItem[];
   } catch {
+    if (gen !== refreshGeneration) return;
     topPaths.value = [];
   } finally {
-    topPathsLoading.value = false;
+    if (gen === refreshGeneration) {
+      topPathsLoading.value = false;
+    }
   }
 }
 
 // Fetch abnormal IPs
 async function fetchAbnormalIps() {
+  const gen = refreshGeneration;
   abnormalIpsLoading.value = true;
   try {
     const { data } = await client.get('/admin/access-logs/abnormal-ips', {
@@ -671,11 +706,15 @@ async function fetchAbnormalIps() {
         minRequests: 50,
       },
     });
+    if (gen !== refreshGeneration) return;
     abnormalIps.value = (data.data || data) as AbnormalIpItem[];
   } catch {
+    if (gen !== refreshGeneration) return;
     abnormalIps.value = [];
   } finally {
-    abnormalIpsLoading.value = false;
+    if (gen === refreshGeneration) {
+      abnormalIpsLoading.value = false;
+    }
   }
 }
 
@@ -698,8 +737,9 @@ async function updateTrendChart(trendData: TrendItem[]) {
   if (!trendChartRef.value) return;
 
   await ensureCyberTheme();
-  trendChart?.dispose();
-  trendChart = echarts.init(trendChartRef.value, 'cyber');
+  if (!trendChart || trendChart.isDisposed()) {
+    trendChart = echarts.init(trendChartRef.value, 'cyber');
+  }
 
   const times = trendData.map((t) => {
     const d = new Date(t.time);
@@ -759,7 +799,8 @@ async function updateTrendChart(trendData: TrendItem[]) {
         lineStyle: { color: CHART_COLORS.teal, width: 2 },
       },
     ],
-  });
+  }, true);
+  trendChart.resize();
 }
 
 // Pie chart
@@ -767,8 +808,9 @@ async function updatePieChart() {
   if (!pieChartRef.value) return;
 
   await ensureCyberTheme();
-  pieChart?.dispose();
-  pieChart = echarts.init(pieChartRef.value, 'cyber');
+  if (!pieChart || pieChart.isDisposed()) {
+    pieChart = echarts.init(pieChartRef.value, 'cyber');
+  }
 
   const dist = stats.statusDistribution || [];
   const pieData = dist.map((s) => ({
@@ -801,7 +843,8 @@ async function updatePieChart() {
         emphasis: { label: { show: true, fontSize: 14, fontWeight: 'bold' }, itemStyle: { shadowBlur: 20, shadowColor: 'rgba(0,0,0,0.4)' } },
       },
     ],
-  });
+  }, true);
+  pieChart.resize();
 }
 
 // Event handlers
@@ -826,6 +869,7 @@ function onRefresh() {
 }
 
 function refreshAll() {
+  refreshGeneration++;
   fetchStats();
   fetchTrend();
   fetchLogs();
@@ -850,7 +894,7 @@ watch(accessTab, (tab) => {
       } else if (tab === 'filetypes') {
         fileTypeRef.value?.refreshChart();
       } else if (tab === 'overview') {
-        if (trendData.value) await updateTrendChart(trendData.value);
+        if (trendData.value.length) await updateTrendChart(trendData.value);
         await updatePieChart();
       }
     }, 100);
@@ -880,22 +924,6 @@ onUnmounted(() => window.removeEventListener('resize', handleResize));
   padding: 0;
 }
 
-.page-header {
-  margin-bottom: 24px;
-}
-
-.page-header h1 {
-  font-size: 24px;
-  font-weight: 600;
-  margin: 0 0 4px;
-}
-
-.page-header p {
-  color: var(--text-secondary);
-  font-size: 14px;
-  margin: 0;
-}
-
 .toolbar {
   margin-bottom: 20px;
 }
@@ -909,9 +937,9 @@ onUnmounted(() => window.removeEventListener('resize', handleResize));
 }
 
 .metric-card {
-  background: var(--bg-secondary, #1a1a2e);
-  border: 1px solid var(--border-color, #333);
-  border-radius: 8px;
+  background: var(--color-bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
   padding: 20px;
 }
 
@@ -922,9 +950,11 @@ onUnmounted(() => window.removeEventListener('resize', handleResize));
 }
 
 .metric-value {
+  font-family: var(--font-mono);
   font-size: 28px;
   font-weight: 700;
   color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
 }
 
 .metric-sub {
@@ -954,17 +984,11 @@ onUnmounted(() => window.removeEventListener('resize', handleResize));
   height: 320px;
 }
 
-/* Card */
-.card {
-  background: var(--bg-secondary, #1a1a2e);
-  border: 1px solid var(--border-color, #333);
-  border-radius: 8px;
-  padding: 20px;
-}
-
+/* 卡片标题（.card 容器使用全局定义） */
 .card h3 {
+  font-family: var(--font-display);
   font-size: 16px;
-  font-weight: 500;
+  font-weight: 600;
 }
 
 /* Section card (new sections) */
@@ -1004,7 +1028,7 @@ onUnmounted(() => window.removeEventListener('resize', handleResize));
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-family: 'Courier New', monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   color: var(--text-primary);
 }
@@ -1023,7 +1047,7 @@ onUnmounted(() => window.removeEventListener('resize', handleResize));
 
 /* Path truncation for new sections */
 .path-truncate {
-  font-family: 'Courier New', monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   color: var(--text-primary);
   cursor: default;
@@ -1072,7 +1096,7 @@ onUnmounted(() => window.removeEventListener('resize', handleResize));
 
 /* IP code style */
 .ip-code {
-  font-family: 'Courier New', monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   color: var(--text-primary);
   background: rgba(255, 255, 255, 0.04);
@@ -1082,15 +1106,15 @@ onUnmounted(() => window.removeEventListener('resize', handleResize));
 
 /* Error rate color coding */
 .error-rate-normal {
-  color: #2ba471;
+  color: var(--color-success);
 }
 
 .error-rate-warning {
-  color: #e37318;
+  color: var(--color-warning);
 }
 
 .error-rate-critical {
-  color: #e34d59;
+  color: var(--color-danger);
   font-weight: 600;
 }
 
@@ -1163,7 +1187,7 @@ onUnmounted(() => window.removeEventListener('resize', handleResize));
 }
 
 .mobile-access-ip {
-  font-family: 'Courier New', monospace;
+  font-family: var(--font-mono);
   font-size: 13px;
   color: var(--text-primary);
   background: rgba(255, 255, 255, 0.04);
@@ -1172,7 +1196,7 @@ onUnmounted(() => window.removeEventListener('resize', handleResize));
 }
 
 .mobile-access-path {
-  font-family: 'Courier New', monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   color: var(--text-secondary);
   word-break: break-all;

@@ -61,7 +61,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue';
+import { ref, shallowRef, computed, onMounted, onUnmounted } from 'vue';
 import { api } from '../../stores/auth';
 import { storeToRefs } from 'pinia';
 import { useAuthStore } from '../../stores/auth';
@@ -72,8 +72,8 @@ import type { FileItem } from '../../types/file';
 const authStore = useAuthStore();
 const { user } = storeToRefs(authStore);
 
-const stats = ref({ fileCount: 0, totalSize: 0, totalAccessCount: 0 });
-const recentFiles = ref<FileItem[]>([]);
+const stats = shallowRef({ fileCount: 0, totalSize: 0, totalAccessCount: 0 });
+const recentFiles = shallowRef<FileItem[]>([]);
 const loading = ref(true);
 
 const roleText = computed(() => {
@@ -81,9 +81,13 @@ const roleText = computed(() => {
   return map[user.value?.role ?? 'user'] || '普通用户';
 });
 
+// new Date() 非响应式，直接在 computed 中使用时仅随 recentFiles 变化重算，跨午夜不会更新。
+// 改为依赖响应式日期 ref，并由定时器在跨天后刷新。
+const todayStr = ref(new Date().toDateString());
+let dayRefreshTimer: ReturnType<typeof setInterval> | null = null;
+
 const todayUploads = computed(() => {
-  const today = new Date().toDateString();
-  return recentFiles.value.filter(f => new Date(f.createdAt).toDateString() === today).length;
+  return recentFiles.value.filter(f => new Date(f.createdAt).toDateString() === todayStr.value).length;
 });
 
 function getFileIcon(mimeType: string) {
@@ -104,6 +108,23 @@ onMounted(async () => {
     recentFiles.value = filesResult.value.data.data.files;
   }
   loading.value = false;
+});
+
+onMounted(() => {
+  // 每分钟检查是否跨天，仅在日期真正变化时更新，避免多余渲染
+  dayRefreshTimer = setInterval(() => {
+    const d = new Date().toDateString();
+    if (d !== todayStr.value) {
+      todayStr.value = d;
+    }
+  }, 60_000);
+});
+
+onUnmounted(() => {
+  if (dayRefreshTimer) {
+    clearInterval(dayRefreshTimer);
+    dayRefreshTimer = null;
+  }
 });
 </script>
 

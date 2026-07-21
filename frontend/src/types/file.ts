@@ -36,7 +36,11 @@ export interface FileItem {
   deleteScheduledAt: string | null;
   /** 请求删除时间 */
   deleteRequestedAt: string | null;
-  /** 处理状态: processing=后台上传中, ready=就绪, error=失败 */
+  /**
+   * 处理状态: processing=后台上传中, ready=就绪, error=失败。
+   * 可选字段：部分列表接口可能不返回。消费方必须处理 undefined，
+   * 应使用 `status === 'processing'` 等精确比较，不要假设默认值。
+   */
   status?: 'processing' | 'ready' | 'error';
   /** 关联标签 */
   tags?: Tag[];

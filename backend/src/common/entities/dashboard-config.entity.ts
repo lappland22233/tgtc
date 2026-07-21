@@ -19,8 +19,8 @@ export class DashboardConfig {
   @Column({ type: 'varchar', length: 100, default: '默认面板' })
   name: string;
 
-  @Column({ type: 'jsonb', default: {} })
-  config: Record<string, unknown>;
+  @Column({ type: 'jsonb', default: [] })
+  config: any[];
 
   @Column({ default: false })
   isDefault: boolean;

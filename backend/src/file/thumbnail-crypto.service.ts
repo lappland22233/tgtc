@@ -36,6 +36,11 @@ export class ThumbnailCryptoService implements OnModuleInit {
       },
       buffer,
     );
-    return parseInt(decrypted.toString('utf8'), 10);
+    const timestamp = parseInt(decrypted.toString('utf8'), 10);
+    // 非法明文会解析为 NaN；若不拦截，调用方的过期校验（NaN 比较恒为 false）会被绕过
+    if (!Number.isFinite(timestamp)) {
+      throw new Error('解密出的时间戳非法');
+    }
+    return timestamp;
   }
 }

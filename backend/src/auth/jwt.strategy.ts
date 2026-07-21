@@ -7,6 +7,17 @@ import { AuthService } from './auth.service';
 import { UserRole } from '../common/entities/user.entity';
 import { ConfigCacheService } from '../common/services/config-cache.service';
 
+/** JWT 载荷类型定义，替代 any 以保留类型安全（运行时仍做防御性校验） */
+interface JwtPayload {
+  sub: string;
+  email: string;
+  role: string;
+  iat?: number;
+  exp?: number;
+  /** 令牌唯一标识，用于后续单独吊销 */
+  jti?: string;
+}
+
 const cookieExtractor = (req: Request) => {
   const token = req?.cookies?.access_token;
   // 类型校验：仅返回合法 JWT 格式的 token
@@ -34,6 +45,8 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     super({
       jwtFromRequest: ExtractJwt.fromExtractors(extractors),
       ignoreExpiration: false,
+      // 仅接受 HS256，与签发算法一致，防止 alg=none / 算法混淆攻击
+      algorithms: ['HS256'],
       secretOrKey: (() => {
         const secret = configService.get<string>('JWT_SECRET');
         if (!secret) {
@@ -44,7 +57,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     });
   }
 
-  async validate(payload: any) {
+  async validate(payload: JwtPayload) {
     if (!payload || typeof payload !== 'object') {
       throw new UnauthorizedException('无效的 token 载荷');
     }

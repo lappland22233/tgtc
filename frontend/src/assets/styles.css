@@ -31,6 +31,8 @@
   --text-secondary:      #8895A7;
   --text-tertiary:       #5A6778;
   --text-accent:         #7B9FFF;
+  --text-disabled:       #45505F;
+  --text-placeholder:    #45505F;
 
   /* Borders */
   --border-default:      rgba(255, 255, 255, 0.06);
@@ -281,7 +283,7 @@ a:focus-visible,
   padding: 10px 12px; margin-bottom: 2px;
   border-radius: var(--radius-md);
   color: var(--text-secondary); text-decoration: none;
-  font-size: 14px; font-weight: 450;
+  font-size: 14px; font-weight: 500;
   transition: all var(--duration-fast) var(--ease-out-expo);
   cursor: pointer; position: relative; user-select: none;
   min-height: 44px; /* touch target */
@@ -289,7 +291,7 @@ a:focus-visible,
 
 .nav-item:hover { background: var(--color-accent-soft); color: var(--text-primary); }
 
-.nav-item.active { background: var(--color-accent-soft); color: var(--color-accent); font-weight: 550; }
+.nav-item.active { background: var(--color-accent-soft); color: var(--color-accent); font-weight: 600; }
 
 .nav-item.active::before {
   content: ''; position: absolute; left: 0; top: 50%;
@@ -472,8 +474,17 @@ a:focus-visible,
 }
 .fade-enter-from, .fade-leave-to { opacity: 0; }
 
-.slide-up-enter-active { transition: all var(--duration-normal) var(--ease-out-back); }
-.slide-up-leave-active { transition: all var(--duration-fast) var(--ease-out-expo); }
+/* route-view 容器：为离场元素的绝对定位提供参照 */
+.route-view-container { position: relative; }
+
+.slide-up-enter-active { transition: opacity var(--duration-normal) var(--ease-out-back), transform var(--duration-normal) var(--ease-out-back); }
+.slide-up-leave-active {
+  transition: opacity var(--duration-fast) var(--ease-out-expo), transform var(--duration-fast) var(--ease-out-expo);
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+}
 .slide-up-enter-from { opacity: 0; transform: translateY(12px); }
 .slide-up-leave-to { opacity: 0; transform: translateY(-8px); }
 
@@ -692,7 +703,7 @@ select {
   border: none !important;
   border-radius: var(--radius-md) !important;
   box-shadow: 0 2px 8px rgba(77, 124, 254, 0.25), inset 0 1px 0 rgba(255,255,255,0.1);
-  font-weight: 550;
+  font-weight: 600;
   letter-spacing: 0.01em;
   transition: all var(--duration-fast) var(--ease-out-expo);
 }
@@ -766,7 +777,7 @@ select {
   border: none !important;
   border-radius: var(--radius-md) !important;
   box-shadow: 0 2px 8px rgba(239, 68, 68, 0.25);
-  font-weight: 550;
+  font-weight: 600;
   transition: all var(--duration-fast);
 }
 .t-button--theme-danger.t-button--variant-base:hover {
@@ -789,7 +800,7 @@ select {
   border: none !important;
   border-radius: var(--radius-md) !important;
   box-shadow: 0 2px 8px rgba(34, 197, 94, 0.25);
-  font-weight: 550;
+  font-weight: 600;
 }
 .t-button--theme-success.t-button--variant-base:hover {
   box-shadow: 0 4px 16px rgba(34, 197, 94, 0.35);
@@ -802,7 +813,7 @@ select {
   border: none !important;
   border-radius: var(--radius-md) !important;
   box-shadow: 0 2px 8px rgba(245, 158, 11, 0.25);
-  font-weight: 550;
+  font-weight: 600;
   color: #0A0E17 !important;
 }
 .t-button--theme-warning.t-button--variant-base:hover {
@@ -985,5 +996,70 @@ select {
   color: var(--text-secondary);
 }
 .t-descriptions .t-descriptions__content {
-  font-weight: 450;
+  font-weight: 400;
+}
+
+/* ============================================================
+   Shared Utilities — 全站复用，避免各页重复定义
+   ============================================================ */
+
+/* 卡片内区块标题（原多页内联重复的 h3: display/16px/600） */
+.card-title {
+  font-family: var(--font-display);
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 20px;
+  text-wrap: balance;
+}
+
+/* 统一空状态（原 Dashboard/Shares/分析页各自实现，padding 不一） */
+.empty-state {
+  text-align: center;
+  padding: 44px 0;
+}
+.empty-state .empty-icon {
+  font-size: 40px;
+  color: var(--text-tertiary);
+  margin-bottom: 12px;
+  display: inline-flex;
+}
+.empty-state p {
+  color: var(--text-secondary);
+  font-size: 15px;
+  margin-bottom: 4px;
+}
+.empty-state .empty-hint {
+  color: var(--text-tertiary);
+  font-size: 13px;
+}
+
+/* 移动端列表卡片（原 Users/Files/分析页重复的 mobile-card 规格） */
+.mobile-list-card {
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  padding: 12px;
+  margin-bottom: 10px;
+  transition: border-color var(--duration-fast), box-shadow var(--duration-fast);
+}
+.mobile-list-card:hover {
+  border-color: var(--border-accent);
+}
+
+/* 认证页脚（原 Login/Register scoped 逐字重复） */
+.auth-footer {
+  margin-top: 28px;
+  text-align: center;
+  font-size: 14px;
+  color: var(--text-secondary);
+}
+.auth-link {
+  color: var(--color-accent);
+  font-weight: 500;
+  text-decoration: none;
+  transition: color var(--duration-fast);
+}
+.auth-link:hover {
+  color: var(--color-cyan);
 }

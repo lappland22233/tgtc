@@ -1,6 +1,6 @@
 <template>
   <t-dialog
-    v-model:visible="visible"
+    v-model:visible="dialogVisible"
     header="上传文件"
     :width="isMobile ? '100%' : '560px'"
     :footer="false"
@@ -81,7 +81,7 @@
       <div v-for="(item, index) in uploadQueue" :key="index"
         style="padding: 12px; background: var(--bg-secondary); border-radius: 8px; margin-bottom: 8px; border: 1px solid var(--border-color);">
         <div style="display: flex; align-items: center; gap: 12px;">
-          <img v-if="item.file.type.startsWith('image/')" :src="getPreviewUrl(item.file)" style="width: 32px; height: 32px; object-fit: cover; border-radius: 4px; flex-shrink: 0;" />
+          <img v-if="item.file.type.startsWith('image/')" :src="getPreviewUrl(item.file)" loading="lazy" style="width: 32px; height: 32px; object-fit: cover; border-radius: 4px; flex-shrink: 0;" />
           <span v-else style="font-size: 20px;">📎</span>
           <div style="flex: 1; min-width: 0;">
             <div style="font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{{ item.file.name }}</div>
@@ -136,7 +136,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, onUnmounted } from 'vue';
-import { MessagePlugin } from 'tdesign-vue-next';
+import MessagePlugin from '@/utils/message';
 import { useFileStore } from '../stores/files';
 import { useTagStore } from '../stores/tags';
 import { api } from '../stores/auth';
@@ -157,7 +157,8 @@ const emit = defineEmits<{
   uploaded: [];
 }>();
 
-const visible = computed({
+// 弹窗双向绑定代理（重命名避免与 props.visible 遮蔽混淆）
+const dialogVisible = computed({
   get: () => props.visible,
   set: (val) => { if (!val) emit('close'); },
 });
@@ -255,6 +256,11 @@ function getPreviewUrl(file: File): string {
 function resetQueue() {
   uploadQueue.value = [];
   batchResult.value = null;
+  // 释放本地预览 ObjectURL，避免反复选择文件时累积内存泄漏
+  for (const url of previewUrls.values()) {
+    URL.revokeObjectURL(url);
+  }
+  previewUrls.clear();
 }
 
 function toggleTag(tagId: string) {
@@ -273,22 +279,56 @@ async function handleCreateTag() {
     const tag = await tagStore.createTag(name);
     selectedTagIds.value = [...selectedTagIds.value, tag.id];
     newTagName.value = '';
-  } catch (err: any) {
-    const msg = err?.response?.data?.message || '创建标签失败';
-    MessagePlugin.error(msg);
+  } catch (err) {
+    MessagePlugin.error(getErrorMessage(err) || '创建标签失败');
   }
+}
+
+// 进行中的分片上传 AbortController 集合：关闭弹窗时统一中止，避免孤儿请求
+const activeControllers = new Set<AbortController>();
+
+function abortAllUploads() {
+  for (const controller of activeControllers) {
+    try {
+      controller.abort();
+    } catch {
+      // 忽略个别 abort 异常
+    }
+  }
+  activeControllers.clear();
 }
 
 function handleClose() {
   stopSpeedTimer();
+  abortAllUploads();
   resetQueue();
   emit('close');
+}
+
+/** 校验单个文件是否匹配 acceptTypes 规则（MIME 精确 / image/* 前缀 / .ext 后缀） */
+function matchesAcceptTypes(file: File): boolean {
+  const accept = acceptTypes.value;
+  if (!accept) return true; // 黑名单或未配置模式：前端不限制类型，交由后端校验
+  const fileName = file.name.toLowerCase();
+  const mime = file.type.toLowerCase();
+  return accept.split(',').some((rule) => {
+    const r = rule.trim().toLowerCase();
+    if (!r) return true;
+    if (r.endsWith('/*')) return mime.startsWith(r.slice(0, -1)); // 'image/*' → 'image/'
+    if (r.startsWith('.')) return fileName.endsWith(r);           // '.pdf'
+    return mime === r;                                            // 'application/pdf'
+  });
 }
 
 function validateFiles(files: File[]): File[] {
   return files.filter((f) => {
     if (f.size > maxFileSizeBytes.value) {
       MessagePlugin.warning(`文件 "${f.name}" 超过 ${maxFileSizeMB.value}MB 限制，已跳过`);
+      return false;
+    }
+    // 白名单模式下前端同步校验类型，避免 accept 属性被绕过
+    if (fileTypeMode.value === 'whitelist' && !matchesAcceptTypes(f)) {
+      MessagePlugin.warning(`文件 "${f.name}" 类型不受支持，已跳过`);
       return false;
     }
     return true;
@@ -332,6 +372,28 @@ async function handleFileSelect(e: Event) {
   target.value = '';
 }
 
+/**
+ * 生成唯一 ID。
+ * crypto.randomUUID() 需要安全上下文且属 ES2022 运行时 API，
+ * 构建 target 为 es2020 或 HTTP 部署时可能缺失，这里做逐级降级避免运行时崩溃。
+ */
+function genUid(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  const bytes = new Uint8Array(16);
+  if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
+    crypto.getRandomValues(bytes);
+  } else {
+    for (let i = 0; i < 16; i++) bytes[i] = Math.floor(Math.random() * 256);
+  }
+  // 设置 v4 UUID 的版本位与变体位
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 async function uploadFiles(files: File[]) {
   if (files.length === 0 || uploading.value) return;
 
@@ -339,7 +401,7 @@ async function uploadFiles(files: File[]) {
   batchResult.value = null;
 
   const queueEntries: QueueEntry[] = files.map((f) => ({
-    uid: crypto.randomUUID(),  // 唯一标识
+    uid: genUid(),  // 唯一标识
     file: f,
     status: 'pending' as QueueStatus,
     errorReason: undefined,
@@ -374,8 +436,9 @@ async function uploadFiles(files: File[]) {
 
   /** 大文件分片上传逻辑 */
   const uploadSingleChunked = async (file: File, entry: QueueEntry): Promise<void> => {
+    const abortController = new AbortController();
+    activeControllers.add(abortController);
     try {
-      const abortController = new AbortController();
       const result = await chunkedUpload.uploadFile(
         file,
         (p) => {
@@ -395,6 +458,8 @@ async function uploadFiles(files: File[]) {
       entry.status = 'error';
       entry.errorReason = getErrorMessage(error);
       failedList.push({ name: file.name, reason: getErrorMessage(error) });
+    } finally {
+      activeControllers.delete(abortController);
     }
   };
 
@@ -445,18 +510,20 @@ async function uploadFiles(files: File[]) {
     }
   };
 
-  const runNext = async (): Promise<void> => {
-    const idx = nextFileIndex++;
-    if (idx >= files.length) return; // 队列耗尽
-    const myStagger = staggerCounter++;
-    await uploadSingle(files[idx], queueEntries[idx].uid, myStagger);
-    // 当前文件完成 → 立即启动下一个，保持窗口满载
-    await runNext();
+  // 每个协程通过 while 循环迭代消费队列（替代尾递归，避免超大批量栈溢出且便于中止）
+  const runWorker = async (): Promise<void> => {
+    while (true) {
+      const idx = nextFileIndex++;
+      if (idx >= files.length) return; // 队列耗尽
+      const myStagger = staggerCounter++;
+      await uploadSingle(files[idx], queueEntries[idx].uid, myStagger);
+      // 当前文件完成 → 继续取下一个，保持窗口满载
+    }
   };
 
   // 启动初始 concurrency 个协程
   await Promise.all(
-    Array.from({ length: Math.min(concurrency.value, files.length) }, () => runNext())
+    Array.from({ length: Math.min(concurrency.value, files.length) }, () => runWorker())
   );
 
   // 最后一次更新速度
@@ -465,16 +532,12 @@ async function uploadFiles(files: File[]) {
 
   batchResult.value = { success: successList, failed: failedList };
 
-  // 上传完成后关联标签
+  // 上传完成后关联标签（并发关联，单个失败不影响其他文件）
   if (selectedTagIds.value.length > 0 && successList.length > 0) {
     const tagIds = selectedTagIds.value;
-    for (const file of successList) {
-      try {
-        await api.put(`/files/${file.id}/tags`, { tagIds });
-      } catch {
-        // 标签关联失败不影响上传结果
-      }
-    }
+    await Promise.allSettled(
+      successList.map((file) => api.put(`/files/${file.id}/tags`, { tagIds }))
+    );
   }
 
   emit('uploaded');
@@ -489,12 +552,13 @@ async function uploadFiles(files: File[]) {
   uploading.value = false;
 }
 
-// 初始化获取上传配置
-fetchUploadConfig();
+// 上传配置改为弹窗打开时惰性获取（见下方 visible 监听），避免未打开弹窗也发请求
 
 // 当弹窗打开且有预置文件时，自动上传
 watch(() => props.visible, async (isVisible) => {
   if (isVisible) {
+    // 打开时获取上传配置（大小上限/类型白名单），确保校验使用最新服务端配置
+    await fetchUploadConfig();
     await tagStore.fetchTags();
     selectedTagIds.value = [];
     showTagSelector.value = false;
@@ -507,6 +571,7 @@ watch(() => props.visible, async (isVisible) => {
 
 onUnmounted(() => {
   stopSpeedTimer();
+  abortAllUploads();
   for (const url of previewUrls.values()) {
     URL.revokeObjectURL(url);
   }
