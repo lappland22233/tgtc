@@ -132,6 +132,7 @@
 
 <script setup lang="ts">
 import { ref, onMounted } from 'vue';
+import { DialogPlugin } from 'tdesign-vue-next';
 import MessagePlugin from '@/utils/message';
 import { useMobile } from '../../composables/useMobile';
 import { api } from '../../stores/auth';
@@ -175,19 +176,29 @@ function formatDate(date: string) {
 }
 
 async function fetchUsers() {
-  const res = await api.get('/users', { params: { page: page.value } });
-  users.value = res.data.data.users;
-  total.value = res.data.data.total;
+  try {
+    const res = await api.get('/users', { params: { page: page.value } });
+    users.value = res.data.data.users;
+    total.value = res.data.data.total;
+  } catch (error: unknown) {
+    MessagePlugin.error(getErrorMessage(error) || '加载用户列表失败');
+  }
 }
 
 async function searchUsers() {
   if (!searchEmail.value) {
+    page.value = 1;
     fetchUsers();
     return;
   }
-  const res = await api.get('/users', { params: { page: 1, search: searchEmail.value } });
-  users.value = res.data.data.users;
-  total.value = res.data.data.total;
+  try {
+    page.value = 1;
+    const res = await api.get('/users', { params: { page: 1, search: searchEmail.value } });
+    users.value = res.data.data.users;
+    total.value = res.data.data.total;
+  } catch (error: unknown) {
+    MessagePlugin.error(getErrorMessage(error) || '搜索用户失败');
+  }
 }
 
 async function toggleBan(row: { id: string; isBanned: boolean }) {
@@ -210,15 +221,25 @@ async function grantAdmin(id: string) {
   }
 }
 
-async function deleteUser(id: string) {
-  if (!confirm('确定要删除此用户吗？此操作不可恢复。')) return;
-  try {
-    await api.delete(`/users/${id}`);
-    MessagePlugin.success('删除成功');
-    fetchUsers();
-  } catch (error: unknown) {
-    MessagePlugin.error(getErrorMessage(error));
-  }
+function deleteUser(id: string) {
+  const confirmDialog = DialogPlugin.confirm({
+    header: '删除用户',
+    body: '确定要删除此用户吗？此操作不可恢复。',
+    theme: 'danger',
+    confirmBtn: '删除',
+    cancelBtn: '取消',
+    onConfirm: async () => {
+      try {
+        await api.delete(`/users/${id}`);
+        MessagePlugin.success('删除成功');
+        fetchUsers();
+      } catch (error: unknown) {
+        MessagePlugin.error(getErrorMessage(error));
+      }
+      confirmDialog.destroy();
+    },
+    onClose: () => confirmDialog.destroy(),
+  });
 }
 
 async function createUser() {

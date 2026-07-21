@@ -24,8 +24,6 @@ function getOptimalChunkSize(fileSize: number): number {
   return 16 * 1024 * 1024;                                         // >=500MB → 16MB
 }
 
-const CHUNK_SIZE_MIN = 512 * 1024;   // 512KB — 最小分片（降级底线）
-
 /** 
  * 单个分片超时时间 (ms)，超过此时间视为超时。
  * Cloudflare 免费/Pro 套餐代理超时 100 秒，前端需在 100 秒内主动 abort，
@@ -71,12 +69,14 @@ export function useChunkedUpload(concurrency = 2) {
     uploading.value = true;
     uploadId.value = null;
 
-    // 自适应分片大小：根据文件大小动态计算，可被调用方传入的 hint 覆盖
-    let chunkSize = chunkSizeHint || getOptimalChunkSize(file.size);
+    // 自适应分片大小：根据文件大小动态计算，可被调用方传入的 hint 覆盖。
+    // 【重要】分片大小在 init 时即固定，整个上传过程中绝不改变。
+    // 若上传中途动态调整分片大小并重新切割，会破坏分片字节边界，导致合并出错误文件。
+    const optimalChunkSize = chunkSizeHint || getOptimalChunkSize(file.size);
     // 小文件不要过度分片
-    if (file.size < 10 * 1024 * 1024) {
-      chunkSize = Math.min(chunkSize, 2 * 1024 * 1024);
-    }
+    const chunkSize = file.size < 10 * 1024 * 1024
+      ? Math.min(optimalChunkSize, 2 * 1024 * 1024)
+      : optimalChunkSize;
     const totalChunks = Math.ceil(file.size / chunkSize);
 
     try {
@@ -92,83 +92,63 @@ export function useChunkedUpload(concurrency = 2) {
 
       // 2. Get uploaded status
       const statusRes = await api.get(`/files/chunk/${uploadId.value}/status`, { signal });
-      const uploadedSet = new Set<number>(statusRes.data.data.uploaded);
+      // 以“已成功索引集合”作为续传/进度判定的唯一依据（并发下完成顺序非连续，不能用计数假定前 N 个已完成）
+      const uploadedIndices = new Set<number>(statusRes.data.data.uploaded);
 
       // 3. Prepare pending chunks
       const pendingChunks: { index: number; blob: Blob }[] = [];
       for (let i = 0; i < totalChunks; i++) {
-        if (!uploadedSet.has(i)) {
+        if (!uploadedIndices.has(i)) {
           const start = i * chunkSize;
           const end = Math.min(start + chunkSize, file.size);
           pendingChunks.push({ index: i, blob: file.slice(start, end) });
         }
       }
 
+      // 初始已加载字节：按已成功分片的实际字节累计（末片可能小于 chunkSize），避免进度失真
+      let loadedBytes = 0;
+      for (const i of uploadedIndices) {
+        const start = i * chunkSize;
+        const end = Math.min(start + chunkSize, file.size);
+        loadedBytes += Math.max(0, end - start);
+      }
+
       progress.value = {
         totalChunks,
-        uploadedChunks: uploadedSet.size,
+        uploadedChunks: uploadedIndices.size,
         totalBytes: file.size,
-        loadedBytes: uploadedSet.size * chunkSize,
+        loadedBytes,
         speed: '-',
         eta: '-',
       };
 
-      let completed = uploadedSet.size;
       let consecutiveTimeouts = 0;
       checkpointTime = Date.now();
       checkpointBytes = 0;
-      const activeChunkSize = chunkSize;
 
       /**
-       * 降级后重新切割尚未上传的待处理分片
-       * 更新 pendingChunks 中尚未发送的分片（包括当前失败的 chunk）
-       * 基于新的 chunkSize 重新切割文件，确保后续分片使用新的大小
-       */
-      function repartitionPending(
-        pendings: { index: number; blob: Blob }[],
-        src: File,
-        newSize: number,
-      ) {
-        // 保留已成功上传的索引，重新计算待上传分片列表
-        const uploaded = new Set<number>();
-        for (let i = 0; i < completed; i++) {
-          uploaded.add(i);
-        }
-        // 清除现有队列，重新构建
-        pendings.length = 0;
-        const newTotal = Math.ceil(src.size / newSize);
-        for (let i = 0; i < newTotal; i++) {
-          if (!uploaded.has(i)) {
-            const start = i * newSize;
-            const end = Math.min(start + newSize, src.size);
-            pendings.push({ index: i, blob: src.slice(start, end) });
-          }
-        }
-      }
-
-      /**
-       * 上传单个分片（含自动重试和自适应分片降级）
+       * 上传单个分片（含自动重试）
        */
       const uploadChunk = async (chunk: { index: number; blob: Blob }, retryCount = 0): Promise<void> => {
         if (signal?.aborted) return;
+
+        // 单个分片请求超时控制。定时器与 signal 监听器必须在 finally 中清理，
+        // 否则异常路径会遗留定时器，且父 signal 上的监听器会随分片数量累积导致内存泄漏。
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), CHUNK_TIMEOUT);
+        const merged = signal
+          ? combineSignals(signal, controller.signal)
+          : { signal: controller.signal, dispose: () => {} };
 
         try {
           const form = new FormData();
           form.append('chunk', chunk.blob, String(chunk.index));
           form.append('index', String(chunk.index));
 
-          // 单个分片请求超时控制
-          const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), CHUNK_TIMEOUT);
-          const mergedSignal = signal
-            ? combineSignals(signal, controller.signal)
-            : controller.signal;
-
           await api.post(`/files/chunk/${uploadId.value}`, form, {
-            signal: mergedSignal,
+            signal: merged.signal,
             timeout: 0, // 禁用 axios 默认 30s 超时，使用 AbortController 控制
           });
-          clearTimeout(timeoutId);
         } catch (err: any) {
           // 取消不重试
           if (err?.name === 'AbortError' || err?.code === 'ERR_CANCELED') {
@@ -205,16 +185,14 @@ export function useChunkedUpload(concurrency = 2) {
             progress.value.retrying = false;
             onProgress?.(progress.value);
 
-            // 连续超时或 CDN 502 后降级分片大小
+            // 连续超时或 CDN 502 仅记录日志，不再降级分片大小：
+            // 分片大小在 init 时已固定，中途改变会破坏字节边界导致合并出错误文件。
             const isTimeout = err?.code === 'ECONNABORTED' || err?.message?.includes('代理层');
             if (isTimeout) {
               consecutiveTimeouts++;
-              if (consecutiveTimeouts >= 2 && chunkSize > CHUNK_SIZE_MIN) {
-                chunkSize = Math.max(CHUNK_SIZE_MIN, Math.floor(chunkSize / 2));
-                console.warn(`CDN 超时频繁，分片大小降级至 ${chunkSize / 1024}KB，将重新切割剩余分片`);
+              if (consecutiveTimeouts >= 2) {
+                console.warn(`CDN 超时频繁，保持分片大小 ${chunkSize / 1024}KB 继续重试`);
                 consecutiveTimeouts = 0;
-                // 重新切割未上传的分片和尚未发送的待处理分片
-                repartitionPending(pendingChunks, file, chunkSize);
               }
             }
 
@@ -222,24 +200,28 @@ export function useChunkedUpload(concurrency = 2) {
           }
 
           throw err;
+        } finally {
+          // 无论成功/失败/重试，都清理超时定时器与父 signal 上的监听器
+          clearTimeout(timeoutId);
+          merged.dispose();
         }
 
-        // 成功：更新进度
-        completed++;
+        // 成功：按索引集合登记，并按实际字节累计进度（末片可能不足一个分片）
+        uploadedIndices.add(chunk.index);
+        loadedBytes += chunk.blob.size;
         checkpointBytes += chunk.blob.size;
         const now = Date.now();
         const elapsed = now - checkpointTime;
-        if (elapsed >= 500 || completed === totalChunks) {
-          const loadedBytes = Math.min(completed * activeChunkSize, file.size);
+        if (elapsed >= 500 || uploadedIndices.size === totalChunks) {
           const speed = elapsed > 0 ? Math.round(checkpointBytes / (elapsed / 1000)) : 0;
-          const remaining = totalChunks - completed;
-          const eta = speed > 0 ? Math.ceil(remaining * activeChunkSize / speed) : 0;
+          const remainingBytes = Math.max(0, file.size - loadedBytes);
+          const eta = speed > 0 ? Math.ceil(remainingBytes / speed) : 0;
 
           progress.value = {
             totalChunks,
-            uploadedChunks: completed,
+            uploadedChunks: uploadedIndices.size,
             totalBytes: file.size,
-            loadedBytes,
+            loadedBytes: Math.min(loadedBytes, file.size),
             speed: speed > 0 ? formatSpeed(speed) : '-',
             eta: eta > 0 ? formatETA(eta) : '-',
           };
@@ -292,7 +274,10 @@ export function useChunkedUpload(concurrency = 2) {
       return result;
     } catch (err) {
       uploading.value = false;
-      if (uploadId.value && !signal?.aborted) {
+      // 无论失败还是用户主动取消，都尽力调用服务端 /abort 清理分片会话，避免会话孤儿。
+      // 使用独立、不带 signal 的请求（父 signal 可能已 abort，带 signal 会导致清理请求被立即取消）；
+      // 清理失败静默忽略，不影响原始错误的抛出。
+      if (uploadId.value) {
         await api.post(`/files/chunk/${uploadId.value}/abort`).catch(() => {});
       }
       throw err;
@@ -310,14 +295,26 @@ export function useChunkedUpload(concurrency = 2) {
   return { uploadFile, cancel, uploadId, progress, uploading };
 }
 
-/** 合并两个 AbortSignal */
-function combineSignals(a: AbortSignal, b: AbortSignal): AbortSignal {
+/**
+ * 合并两个 AbortSignal。
+ * 返回合并后的 signal 以及 dispose 函数：调用方必须在请求结束后调用 dispose()
+ * 移除挂在父 signal 上的监听器，否则数千分片会在长生命周期的父 signal 上累积监听器导致内存泄漏。
+ */
+function combineSignals(a: AbortSignal, b: AbortSignal): { signal: AbortSignal; dispose: () => void } {
   const controller = new AbortController();
+  // 任一输入已 abort：直接中止，无需挂监听器
+  if (a.aborted || b.aborted) {
+    controller.abort();
+    return { signal: controller.signal, dispose: () => {} };
+  }
   const onAbort = () => controller.abort();
-  a.addEventListener('abort', onAbort, { once: true });
-  b.addEventListener('abort', onAbort, { once: true });
-  if (a.aborted || b.aborted) controller.abort();
-  return controller.signal;
+  a.addEventListener('abort', onAbort);
+  b.addEventListener('abort', onAbort);
+  const dispose = () => {
+    a.removeEventListener('abort', onAbort);
+    b.removeEventListener('abort', onAbort);
+  };
+  return { signal: controller.signal, dispose };
 }
 
 /** 轮询合并状态，避免长时间同步等待触发 CDN 502 */

@@ -13,6 +13,9 @@ export interface ExportOptions {
   limit?: number;
 }
 
+/** 单次导出的最大行数，防止全量加载进内存 */
+const MAX_EXPORT_LIMIT = 10000;
+
 @Injectable()
 export class ExportService {
   constructor(
@@ -28,7 +31,8 @@ export class ExportService {
 
   async export(options: ExportOptions): Promise<{ data: string; filename: string; contentType: string }> {
     const since = this.parseTimeRange(options.timeRange);
-    const rows = await this.fetchData(options.type, since, options.limit || 10000);
+    const limit = Math.min(Math.max(options.limit || MAX_EXPORT_LIMIT, 1), MAX_EXPORT_LIMIT);
+    const rows = await this.fetchData(options.type, since, limit);
 
     if (options.format === 'json') {
       return {
@@ -76,14 +80,22 @@ export class ExportService {
         return logs.map(l => ({ ...l, totalBandwidth: String(l.totalBandwidth) }));
       }
       case 'bans': {
-        const bans = await this.bannedIPRepo.find({ order: { createdAt: 'DESC' }, take: limit });
+        const bans = await this.bannedIPRepo.find({
+          where: { createdAt: MoreThanOrEqual(since) },
+          order: { createdAt: 'DESC' },
+          take: limit,
+        });
         return bans.map(b => ({
           ip: b.ip, reason: b.reason, isPermanent: b.isPermanent,
           expiresAt: b.expiresAt?.toISOString(), createdAt: b.createdAt?.toISOString(),
         }));
       }
       case 'alerts': {
-        const alerts = await this.alertRepo.find({ order: { createdAt: 'DESC' }, take: limit });
+        const alerts = await this.alertRepo.find({
+          where: { createdAt: MoreThanOrEqual(since) },
+          order: { createdAt: 'DESC' },
+          take: limit,
+        });
         return alerts.map(a => ({
           id: a.id, ruleId: a.ruleId, level: a.level, title: a.title,
           message: a.message, acknowledgedAt: a.acknowledgedAt?.toISOString(),
@@ -99,7 +111,12 @@ export class ExportService {
     if (rows.length === 0) return '';
     const headers = Object.keys(rows[0]);
     const escape = (v: any) => {
-      const s = String(v ?? '');
+      let s = String(v ?? '');
+      // 防 CSV 公式注入：以 = + - @ 或制表符/回车开头的值前缀单引号，
+      // 避免被 Excel/WPS 等解析为公式执行
+      if (/^[=+\-@\t\r]/.test(s)) {
+        s = `'${s}`;
+      }
       return s.includes(',') || s.includes('"') || s.includes('\n') ? `"${s.replace(/"/g, '""')}"` : s;
     };
     return [

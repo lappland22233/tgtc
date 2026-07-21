@@ -84,7 +84,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted, onUnmounted, onScopeDispose, computed } from 'vue';
+import { ref, reactive, onMounted, onUnmounted, computed } from 'vue';
 import { useRouter } from 'vue-router';
 import MessagePlugin from '@/utils/message';
 import { useAuthStore } from '../../stores/auth';
@@ -151,10 +151,21 @@ async function sendCode() {
     MessagePlugin.warning('请先输入邮箱');
     return;
   }
+  // 发送前前端预检邮箱格式，避免无效邮箱直达后端
+  const emailRe = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (!emailRe.test(form.email)) {
+    MessagePlugin.warning('请输入有效的邮箱地址');
+    return;
+  }
   try {
     await authStore.sendCode(form.email, 'register');
     MessagePlugin.success('验证码已发送');
     countdown.value = 60;
+    // 新建 timer 前先清除旧 timer，防止叠加泄漏；
+    // 不再使用 onScopeDispose（在事件处理函数中调用无效），统一由 onUnmounted 清理
+    if (countdownTimer) {
+      clearInterval(countdownTimer);
+    }
     const timer = setInterval(() => {
       countdown.value--;
       if (countdown.value <= 0) {
@@ -163,9 +174,6 @@ async function sendCode() {
       }
     }, 1000);
     countdownTimer = timer;
-    onScopeDispose(() => {
-      if (timer) clearInterval(timer);
-    });
   } catch (error: unknown) {
     MessagePlugin.error(getErrorMessage(error));
   }

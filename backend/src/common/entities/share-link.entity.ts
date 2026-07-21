@@ -43,7 +43,7 @@ export enum ShareLinkStatus {
  * 1. 同一个文件/文件夹可以有多条 ShareLink（不同密码、不同有效期）。
  * 2. token 是 URL 段，用 crypto.randomBytes(9).toString('base64url')，12 字符熵 ~72 bit。
  * 3. password 字段存 bcrypt hash，null 表示公开分享。
- * 4. expiresIn 是秒数，expiresStartAt 是首次访问时间（首次访问触发计时）。
+ * 4. expiresIn 是小时数，expiresStartAt 是首次访问时间（首次访问触发计时）。
  * 5. maxAccessCount = -1 表示不限。
  *
  * 严格模式密码保护关键设计：
@@ -51,6 +51,7 @@ export enum ShareLinkStatus {
  *   { requiresPassword: true }，**不查询 target 表**，杜绝元数据泄露。
  */
 @Entity('share_links')
+@Index('idx_share_links_creatorId', ['creatorId'])
 export class ShareLink {
   @PrimaryColumn({ type: 'uuid', default: () => 'gen_random_uuid()' })
   id: string;
@@ -87,7 +88,7 @@ export class ShareLink {
   @Column({ default: 0 })
   currentAccessCount: number;
 
-  /** 有效期（秒）；null 表示永久有效 */
+  /** 有效期（小时）；null 表示永久有效。过期时间 = expiresStartAt + expiresIn 小时 */
   @Column({ nullable: true, type: 'int' })
   expiresIn: number | null;
 

@@ -27,7 +27,8 @@
 
 <script setup lang="ts">
 import { ref, reactive, watch, computed } from 'vue';
-import { MessagePlugin } from 'tdesign-vue-next';
+import MessagePlugin from '@/utils/message';
+import { getErrorMessage } from '@/utils/error';
 import { useFolderStore } from '../../stores/folders';
 import type { Folder } from '../../stores/folders';
 
@@ -76,9 +77,8 @@ async function handleConfirm() {
     MessagePlugin.success('文件夹创建成功');
     emit('update:visible', false);
     emit('created', folder);
-  } catch (err: any) {
-    const msg = err?.response?.data?.message || err?.message || '创建失败';
-    MessagePlugin.error(msg);
+  } catch (err) {
+    MessagePlugin.error(getErrorMessage(err) || '创建失败');
   } finally {
     loading.value = false;
   }

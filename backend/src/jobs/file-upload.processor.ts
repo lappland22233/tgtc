@@ -9,6 +9,9 @@ import { TelegramService } from '../telegram/telegram.service';
 import { createReadStream, existsSync } from 'fs';
 import { unlink } from 'fs/promises';
 
+/** 单次上传的超时时间（毫秒）：Telegram 无响应时避免无限占用并发槽位 */
+const UPLOAD_TIMEOUT_MS = 5 * 60 * 1000;
+
 @Injectable()
 @Processor(QUEUE_NAMES.FILE_UPLOAD)
 export class FileUploadProcessor {
@@ -19,6 +22,22 @@ export class FileUploadProcessor {
     private fileRepository: Repository<File>,
     private telegramService: TelegramService,
   ) {}
+
+  /** 为 Promise 包装超时，防止 Telegram 无响应导致任务无限挂起 */
+  private withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+    let timer: NodeJS.Timeout | undefined;
+    const timeout = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error(`${label} 超时 (${ms}ms)`)), ms);
+    });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+  }
+
+  /** 删除临时文件，失败时记录告警（避免静默堆积） */
+  private async removeTempFile(filePath: string): Promise<void> {
+    await unlink(filePath).catch((err: Error) => {
+      this.logger.warn(`临时文件删除失败 ${filePath}: ${err.message}`);
+    });
+  }
 
   /**
    * 后台异步上传文件到 Telegram
@@ -40,6 +59,14 @@ export class FileUploadProcessor {
     }
 
     if (!existsSync(filePath)) {
+      // 临时文件缺失可能是暂时不可用（磁盘/网络文件系统抖动），
+      // 还有重试机会时抛错触发 Bull 重试，仅在最后一次尝试时才标记失败
+      if (job.attemptsMade < 2) {
+        this.logger.warn(
+          `文件 ${fileId} 的临时文件暂不可用，将重试 (第 ${attempt}/3 次): ${filePath}`,
+        );
+        throw new Error(`临时文件暂不可用: ${filePath}`);
+      }
       this.logger.error(`文件 ${fileId} 的临时文件不存在: ${filePath}`);
       await this.fileRepository.update(fileId, { status: 'error' as any });
       return;
@@ -47,11 +74,16 @@ export class FileUploadProcessor {
 
     try {
       const stream = createReadStream(filePath);
-      const result = await this.telegramService.uploadFile(
-        stream,
-        file.originalName,
-        undefined,
-        file.size,
+      // 带超时的上传，防止 Telegram 无响应时无限等待阻塞并发槽位
+      const result = await this.withTimeout(
+        this.telegramService.uploadFile(
+          stream,
+          file.originalName,
+          undefined,
+          file.size,
+        ),
+        UPLOAD_TIMEOUT_MS,
+        'Telegram 上传',
       );
 
       // TG 上传成功：更新 ID + 兜底写 status ready（正常情况缓存预热已先设为 ready）
@@ -66,7 +98,7 @@ export class FileUploadProcessor {
         ['ready', fileId, 'processing'],
       );
 
-      await unlink(filePath).catch(() => {});
+      await this.removeTempFile(filePath);
       this.logger.log(`文件上传完成: ${fileId}`);
     } catch (error) {
       const msg = (error as Error).message;
@@ -78,7 +110,7 @@ export class FileUploadProcessor {
           'UPDATE files SET status = $1 WHERE id = $2 AND status = $3',
           ['error', fileId, 'processing'],
         );
-        await unlink(filePath).catch(() => {});
+        await this.removeTempFile(filePath);
         this.logger.error(`文件 ${fileId} 上传最终失败(3次重试后): ${msg}`);
       }
 

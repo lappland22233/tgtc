@@ -204,8 +204,13 @@ const avatarLetter = computed(() => {
 });
 
 async function handleLogout() {
-  await authStore.logout();
-  router.push('/login');
+  try {
+    await authStore.logout();
+  } catch {
+    // 登出接口失败也应继续跳转，避免用户卡在失效会话
+  } finally {
+    router.push('/login');
+  }
 }
 
 onMounted(() => {

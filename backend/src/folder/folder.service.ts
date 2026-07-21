@@ -9,6 +9,9 @@ import { CreateFolderDto, RenameFolderDto, MoveFolderDto, MoveFileDto } from './
 
 const SOFT_DELETE_GRACE_DAYS = 7;
 
+/** 文件夹最大嵌套深度（根目录子级为 0）。限制层级避免闭包表平方级膨胀与递归栈溢出 */
+const MAX_FOLDER_DEPTH = 20;
+
 /**
  * 文件夹服务：网盘层级管理。
  *
@@ -102,6 +105,11 @@ export class FolderService {
   async createFolder(ownerId: string, dto: CreateFolderDto): Promise<Folder> {
     if (dto.parentId) {
       await this.assertFolderOwned(dto.parentId, ownerId);
+      // 嵌套深度上限校验，避免闭包表平方级膨胀与递归栈溢出
+      const parentDepth = await this.getFolderDepth(dto.parentId);
+      if (parentDepth + 1 > MAX_FOLDER_DEPTH) {
+        throw new BadRequestException(`文件夹嵌套层级不能超过 ${MAX_FOLDER_DEPTH} 层`);
+      }
     }
     const existing = await this.folderRepo.findOne({
       where: { ownerId, parentId: dto.parentId ?? IsNull(), name: dto.name, isDeleted: false },
@@ -156,6 +164,8 @@ export class FolderService {
   async moveFolder(ownerId: string, id: string, dto: MoveFolderDto): Promise<Folder> {
     const folder = await this.assertFolderOwned(id, ownerId);
     const newParentId = dto.parentId ?? null;
+    // 先记录原父级，避免修改 parentId 后审计 from/to 恒为新值
+    const oldParentId = folder.parentId;
 
     if (newParentId === id) {
       throw new BadRequestException('不能把文件夹移入自身');
@@ -166,6 +176,12 @@ export class FolderService {
       // 循环检测：新父级不能是当前文件夹的后代
       if (await this.isDescendantOf(newParentId, id)) {
         throw new BadRequestException('不能把文件夹移入其自身子树');
+      }
+      // 嵌套深度上限校验：新父级深度 + 1 + 被移动子树高度 不得超过上限
+      const newParentDepth = await this.getFolderDepth(newParentId);
+      const subtreeHeight = await this.getSubtreeHeight(id);
+      if (newParentDepth + 1 + subtreeHeight > MAX_FOLDER_DEPTH) {
+        throw new BadRequestException(`移动后文件夹嵌套层级不能超过 ${MAX_FOLDER_DEPTH} 层`);
       }
       folder.parent = newParent;
       folder.parentId = newParentId;
@@ -188,7 +204,6 @@ export class FolderService {
       throw new BadRequestException('目标层级下已存在同名文件夹');
     }
 
-    const oldParentId = folder.parentId;
     const saved = await this.folderRepo.save(folder);
     this.audit.log({
       action: 'folder_move' as AuditAction,
@@ -214,16 +229,19 @@ export class FolderService {
     const folderIds = descendants.map((f) => f.id).filter((fid) => fid !== id);
     folderIds.push(id);
 
-    // 软删所有子文件夹
-    await this.folderRepo.update(
-      { id: In(folderIds), isDeleted: false },
-      { isDeleted: true, deleteRequestedAt: now, deleteScheduledAt: scheduledAt },
-    );
-    // 软删所有内含文件（保持 isDeleted + deleteRequestedAt + deleteScheduledAt 一致）
-    await this.fileRepo.update(
-      { folderId: In(folderIds), isDeleted: false },
-      { isDeleted: true, deleteRequestedAt: now, deleteScheduledAt: scheduledAt, deletedByAdmin: byAdmin },
-    );
+    // 事务内原子执行：软删子文件夹 + 软删内含文件，避免中途失败导致部分删除不一致
+    await this.folderRepo.manager.transaction(async (manager) => {
+      await manager.update(
+        Folder,
+        { id: In(folderIds), isDeleted: false },
+        { isDeleted: true, deleteRequestedAt: now, deleteScheduledAt: scheduledAt },
+      );
+      await manager.update(
+        File,
+        { folderId: In(folderIds), isDeleted: false },
+        { isDeleted: true, deleteRequestedAt: now, deleteScheduledAt: scheduledAt, deletedByAdmin: byAdmin },
+      );
+    });
 
     this.audit.log({
       action: (byAdmin ? 'folder_delete_by_admin' : 'folder_delete') as AuditAction,
@@ -241,21 +259,33 @@ export class FolderService {
     if (!folder) {
       throw new NotFoundException('文件夹不存在或未被删除');
     }
-    // 还原子树中所有 folder——但只恢复与文件夹同时删除的（deleteRequestedAt 匹配），
-    // 避免恢复在文件夹删除之前已独立删除的子文件夹
+    // 还原子树中所有 folder——但只恢复与本文件夹同批删除的，
+    // 避免恢复在文件夹删除之前已独立删除的子文件夹。
     const descendants = await this.folderRepo.findDescendants(folder);
     const folderIds = descendants.map((f) => f.id);
-    const folderDeleteTime = folder.deleteRequestedAt;
-    await this.folderRepo.update(
-      { id: In(folderIds), deleteRequestedAt: folderDeleteTime as any },
-      { isDeleted: false, deleteRequestedAt: null, deleteScheduledAt: null },
-    );
-    // 还原内含文件——同样只恢复与文件夹同时删除的文件，
-    // 避免恢复用户独立删除或管理员独立删除的文件
-    await this.fileRepo.update(
-      { folderId: In(folderIds), deleteRequestedAt: folderDeleteTime as any },
-      { isDeleted: false, deleteRequestedAt: null, deleteScheduledAt: null, deletedByAdmin: false },
-    );
+
+    // 以本批次的计划删除时间作为同批标记（softDeleteFolder 对整批写入同一 deleteScheduledAt），
+    // 比精确 deleteRequestedAt 更稳定；deleteScheduledAt 为空时回退到 deleteRequestedAt。
+    const batchScheduledAt = folder.deleteScheduledAt;
+    const batchRequestedAt = folder.deleteRequestedAt;
+    const batchCriteria: Record<string, unknown> = batchScheduledAt
+      ? { deleteScheduledAt: batchScheduledAt }
+      : { deleteRequestedAt: batchRequestedAt };
+
+    // 事务内原子还原子文件夹与内含文件
+    await this.folderRepo.manager.transaction(async (manager) => {
+      await manager.update(
+        Folder,
+        { id: In(folderIds), ...batchCriteria } as any,
+        { isDeleted: false, deleteRequestedAt: null, deleteScheduledAt: null },
+      );
+      await manager.update(
+        File,
+        { folderId: In(folderIds), ...batchCriteria } as any,
+        { isDeleted: false, deleteRequestedAt: null, deleteScheduledAt: null, deletedByAdmin: false },
+      );
+    });
+
     this.audit.log({
       action: 'folder_restore' as AuditAction,
       userId: ownerId,
@@ -268,7 +298,7 @@ export class FolderService {
 
   async moveFile(ownerId: string, fileId: string, dto: MoveFileDto): Promise<File> {
     const file = await this.fileRepo.findOne({
-      where: { id: fileId, uploaderId: ownerId },
+      where: { id: fileId, uploaderId: ownerId, isDeleted: false },
     });
     if (!file) {
       throw new NotFoundException('文件不存在');
@@ -319,6 +349,35 @@ export class FolderService {
   private searchInTree(node: Folder, targetId: string): boolean {
     if (node.id === targetId) return true;
     return (node.children || []).some((c) => this.searchInTree(c, targetId));
+  }
+
+  /**
+   * 返回文件夹深度（根目录直接子级为 0）。
+   * 闭包表含自身行，故祖先数 = 深度 + 1。
+   */
+  private async getFolderDepth(folderId: string): Promise<number> {
+    const rows = await this.folderRepo.manager.query(
+      `SELECT COUNT(*)::int AS cnt FROM folder_closure WHERE id_descendant = $1`,
+      [folderId],
+    );
+    return Math.max(0, (rows[0]?.cnt ?? 1) - 1);
+  }
+
+  /**
+   * 返回以 folderId 为根的子树高度（自身为 0 层，叶子子树高度为 0）。
+   * 统计子树内最深节点相对于根的层级，用于移动文件夹时校验移动后总深度。
+   */
+  private async getSubtreeHeight(folderId: string): Promise<number> {
+    const rows = await this.folderRepo.manager.query(
+      `SELECT COALESCE(MAX(cnt), 1)::int AS h FROM (
+         SELECT COUNT(*) AS cnt FROM folder_closure fc1
+         WHERE fc1.id_descendant IN (SELECT id_descendant FROM folder_closure WHERE id_ancestor = $1)
+           AND fc1.id_ancestor IN (SELECT id_descendant FROM folder_closure WHERE id_ancestor = $1)
+         GROUP BY fc1.id_descendant
+       ) sub`,
+      [folderId],
+    );
+    return Math.max(0, (rows[0]?.h ?? 1) - 1);
   }
 
   /**

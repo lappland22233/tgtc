@@ -42,7 +42,7 @@
             </div>
             <div class="share-meta">
               <span class="meta-tag" :class="share.targetType">{{ share.targetType === 'folder' ? '文件夹' : '文件' }}</span>
-              <span v-if="share.password" class="meta-tag encrypted">🔒 加密</span>
+              <span v-if="isEncrypted(share)" class="meta-tag encrypted">🔒 加密</span>
               <span v-else class="meta-tag public">🌐 公开</span>
               <span v-if="share.maxAccessCount >= 0" class="meta-tag">
                 {{ share.currentAccessCount }}/{{ share.maxAccessCount }} 次
@@ -102,7 +102,10 @@ interface ShareItem {
   token: string;
   targetType: 'file' | 'folder';
   targetId: string;
-  password: string | null;
+  /** 是否设置了密码。后端列表应仅返回此布尔值，不返回密码原文 */
+  hasPassword?: boolean;
+  /** @deprecated 兼容旧接口返回的密码字段；后端改造后不再下发 */
+  password?: string | null;
   maxAccessCount: number;
   currentAccessCount: number;
   expiresIn: number | null;
@@ -143,6 +146,11 @@ function getTargetName(share: ShareItem): string {
   // 后端目前只返回 targetId，不返回 target 名称
   // Phase 4 简化：显示 targetId 的前 8 位 + 类型
   return `${share.targetType === 'folder' ? '文件夹' : '文件'} ${share.targetId.slice(0, 8)}...`;
+}
+
+// 优先读取 hasPassword；后端未改造时降级为检查 password 是否存在（不展示密码原文）
+function isEncrypted(share: ShareItem): boolean {
+  return share.hasPassword ?? Boolean(share.password);
 }
 
 function getShareUrl(share: ShareItem): string {
@@ -352,5 +360,17 @@ onMounted(fetchShares);
   margin-top: 20px;
   display: flex;
   justify-content: center;
+}
+
+@media (max-width: 640px) {
+  .share-item {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .share-actions {
+    flex-direction: row;
+    justify-content: flex-end;
+  }
 }
 </style>

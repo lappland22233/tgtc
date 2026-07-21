@@ -10,6 +10,9 @@ import {
 @Index(['createdAt'])
 @Index(['path'])
 @Index(['statusCode'])
+// 组合查询（时间范围 + IP / 时间范围 + 状态码）的复合索引，优于独立单列索引（P2）
+@Index('IDX_access_logs_createdAt_ip', ['createdAt', 'ip'])
+@Index('IDX_access_logs_createdAt_statusCode', ['createdAt', 'statusCode'])
 export class AccessLog {
   @PrimaryColumn({ type: 'uuid', default: () => 'gen_random_uuid()' })
   id: string;
@@ -30,6 +33,8 @@ export class AccessLog {
   /**
    * 响应体大小（字节），用于带宽统计。
    * PostgreSQL bigint，TypeScript number。单请求最大 600MB 远小于 MAX_SAFE_INTEGER。
+   * 注意：跨行 SUM 聚合可能超过 2^53，必须在 SQL 侧以 ::bigint 计算并以字符串返回
+   * （统计查询已如此处理），不要在前端/JS 侧直接累加 number。
    */
   @Column({ type: 'bigint', default: 0, comment: '响应体大小（字节），用于带宽统计' })
   responseSize: number;

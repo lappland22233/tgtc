@@ -104,20 +104,20 @@
             :page-size="pageSize"
             size="small"
             :show-jumper="false"
-            @change="fetchList"
+            @change="onPageChange"
           />
         </div>
       </t-loading>
     </div>
 
     <!-- 分页 -->
-    <div style="margin-top: 16px; display: flex; justify-content: flex-end;">
+    <div v-if="!isMobile" style="margin-top: 16px; display: flex; justify-content: flex-end;">
       <t-pagination
         v-model="currentPage"
         :total="total"
         :page-size="pageSize"
         :show-jumper="true"
-        @change="fetchList"
+        @change="onPageChange"
       />
     </div>
   </div>
@@ -127,7 +127,19 @@
 import { ref, onMounted } from 'vue';
 import { api } from '@/stores/auth';
 import { formatDate } from '@/utils/format';
+import MessagePlugin from '@/utils/message';
+import { getErrorMessage } from '@/utils/error';
 import { useMobile } from '../../composables/useMobile';
+
+interface AlertItem {
+  id: string;
+  ruleId: string;
+  level: 'info' | 'warning' | 'critical' | string;
+  title: string;
+  message: string;
+  createdAt: string;
+  acknowledgedAt?: string | null;
+}
 
 const ruleMap: Record<string, string> = {
   TRAFFIC_QPS: 'QPS偏高',
@@ -158,7 +170,7 @@ const columns = [
   { colKey: 'action', title: '操作', width: 100 },
 ];
 
-const list = ref<any[]>([]);
+const list = ref<AlertItem[]>([]);
 const total = ref(0);
 const currentPage = ref(1);
 const pageSize = 20;
@@ -183,19 +195,25 @@ async function fetchList(page: number) {
     list.value = data.items || [];
     total.value = data.total || 0;
     currentPage.value = page;
-  } catch {
-    /* ignore */
+  } catch (error: unknown) {
+    MessagePlugin.error(getErrorMessage(error) || '加载告警列表失败');
   } finally {
     loading.value = false;
   }
+}
+
+// TDesign 分页 @change 回调参数为 { current, pageSize } 对象而非页码，
+// 在 script 中解包（模板内联 TS 类型标注不合法）。
+function onPageChange(info: { current: number; pageSize: number }) {
+  fetchList(info.current);
 }
 
 async function fetchUnacknowledgedCount() {
   try {
     const res = await api.get('/admin/alerts/unacknowledged');
     unacknowledgedCount.value = Array.isArray(res.data?.data) ? res.data.data.length : 0;
-  } catch {
-    /* ignore */
+  } catch (error: unknown) {
+    MessagePlugin.error(getErrorMessage(error) || '加载未确认告警数失败');
   }
 }
 
@@ -203,8 +221,8 @@ async function handleAcknowledge(id: string) {
   try {
     await api.post(`/admin/alerts/${id}/acknowledge`);
     await Promise.all([fetchList(currentPage.value), fetchUnacknowledgedCount()]);
-  } catch {
-    /* ignore */
+  } catch (error: unknown) {
+    MessagePlugin.error(getErrorMessage(error) || '确认告警失败');
   }
 }
 
@@ -212,8 +230,8 @@ async function handleAcknowledgeAll() {
   try {
     await api.post('/admin/alerts/acknowledge-all');
     await Promise.all([fetchList(1), fetchUnacknowledgedCount()]);
-  } catch {
-    /* ignore */
+  } catch (error: unknown) {
+    MessagePlugin.error(getErrorMessage(error) || '批量确认告警失败');
   }
 }
 

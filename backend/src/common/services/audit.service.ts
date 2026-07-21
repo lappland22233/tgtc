@@ -29,6 +29,10 @@ export class AuditService implements OnApplicationShutdown {
    * 适用于非关键操作的审计记录。
    */
   log(entry: AuditEntry): void {
+    // 背压告警：DB 慢响应时未完成写入会堆积，超过高水位线时提示运维
+    if (this.pendingWrites.size > 10000 && this.pendingWrites.size % 1000 === 0) {
+      this.logger.warn(`审计日志待写入堆积已达 ${this.pendingWrites.size} 条，数据库写入可能过慢`);
+    }
     const promise = this.writeLogAsync(entry).catch((error: Error) => {
       this.logger.warn(`审计日志写入失败: ${error.message}`, error.stack);
     });
@@ -40,15 +44,24 @@ export class AuditService implements OnApplicationShutdown {
    * 同步等待审计日志写入完成。
    * 适用于高敏感操作（role_change、config_change、delete 等），
    * 确保审计记录在操作响应前已持久化。
+   * 写入失败会短暂重试（默认 3 次）以提升持久性；重试耗尽后仍不抛出，
+   * 避免影响主业务返回，但会以 error 级别记录（破坏不可否认性时需告警）。
    */
-  async logAwait(entry: AuditEntry): Promise<void> {
-    try {
-      await this.writeLogAsync(entry);
-    } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.logger.error(`审计日志写入失败（await）: ${message}`);
-      // 不抛出，避免影响主业务返回
+  async logAwait(entry: AuditEntry, retries = 3): Promise<void> {
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= retries; attempt++) {
+      try {
+        await this.writeLogAsync(entry);
+        return;
+      } catch (error: unknown) {
+        lastError = error;
+        if (attempt < retries) {
+          await new Promise((resolve) => setTimeout(resolve, 100 * attempt));
+        }
+      }
     }
+    const message = lastError instanceof Error ? lastError.message : String(lastError);
+    this.logger.error(`审计日志写入失败（await，已重试 ${retries} 次）: ${message}`);
   }
 
   async onApplicationShutdown(_signal?: string): Promise<void> {

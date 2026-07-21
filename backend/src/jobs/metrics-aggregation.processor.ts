@@ -38,8 +38,11 @@ export class MetricsAggregationProcessor {
       const result = await this.accessLogRepo
         .createQueryBuilder('a')
         .select('COUNT(*)', 'totalRequests')
+        // 平均 QPS = 本 1 分钟窗口请求数 / 60s。
+        // 原实现按 MAX-MIN 时间跨度做分母（GREATEST 兜底为 1s），仅 1 条记录时跨度为 0，
+        // 会把 qpsAvg 错算成原始计数；固定窗口长度作分母语义更准确且稳定。
         .addSelect(
-          'ROUND(CAST(CAST(COUNT(*) AS NUMERIC) / GREATEST(EXTRACT(EPOCH FROM (MAX("createdAt") - MIN("createdAt"))), 1) AS NUMERIC), 2)',
+          'ROUND(CAST(CAST(COUNT(*) AS NUMERIC) / 60 AS NUMERIC), 2)',
           'qpsAvg',
         )
         .addSelect(

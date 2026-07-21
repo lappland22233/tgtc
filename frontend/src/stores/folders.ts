@@ -43,23 +43,60 @@ export const useFolderStore = defineStore('folders', () => {
     return breadcrumb.value[breadcrumb.value.length - 1]?.name || '文件夹';
   });
 
+  // 竞态保护：快速切换文件夹时取消上一次未完成的树/面包屑请求，避免旧响应覆盖新状态
+  let treeAbortController: AbortController | null = null;
+  let breadcrumbAbortController: AbortController | null = null;
+
   /** 拉取当前用户的完整文件夹树 */
   async function fetchTree() {
+    if (treeAbortController) treeAbortController.abort();
+    const controller = new AbortController();
+    treeAbortController = controller;
     loading.value = true;
     try {
-      const res = await api.get('/folders/tree');
+      const res = await api.get('/folders/tree', { signal: controller.signal });
+      if (controller.signal.aborted) return;
       tree.value = res.data.data.tree;
+    } catch (err) {
+      const e = err as { name?: string; code?: string };
+      // 被新请求取消的旧请求：静默忽略
+      if (e.name === 'AbortError' || e.code === 'ERR_CANCELED') return;
+      throw err;
     } finally {
-      loading.value = false;
+      // 仅当仍是当前控制器时才复位，避免旧请求提前清除新请求的加载态
+      if (treeAbortController === controller) {
+        treeAbortController = null;
+        loading.value = false;
+      }
     }
   }
 
   /** 切换当前文件夹，并同步拉取面包屑 */
   async function openFolder(folderId: string | null) {
+    if (breadcrumbAbortController) breadcrumbAbortController.abort();
+    const controller = new AbortController();
+    breadcrumbAbortController = controller;
+
     currentFolderId.value = folderId;
     if (folderId) {
-      const res = await api.get('/folders/breadcrumb', { params: { parentId: folderId } });
-      breadcrumb.value = res.data.data.breadcrumb;
+      try {
+        const res = await api.get('/folders/breadcrumb', {
+          params: { parentId: folderId },
+          signal: controller.signal,
+        });
+        if (controller.signal.aborted) return;
+        breadcrumb.value = res.data.data.breadcrumb;
+      } catch (err) {
+        const e = err as { name?: string; code?: string };
+        if (e.name === 'AbortError' || e.code === 'ERR_CANCELED') return;
+        // 失败时清空面包屑，避免 currentFolderId 已切换但面包屑仍是旧路径的不一致状态
+        breadcrumb.value = [];
+        throw err;
+      } finally {
+        if (breadcrumbAbortController === controller) {
+          breadcrumbAbortController = null;
+        }
+      }
     } else {
       breadcrumb.value = [];
     }
@@ -117,11 +154,13 @@ export const useFolderStore = defineStore('folders', () => {
    * 返回该节点 + 其在父级 children 数组中的位置，方便就地更新。
    */
   function findInTree(nodes: Folder[], id: string): Folder | null {
-    for (const n of nodes) {
-      if (n.id === id) return n;
-      if (n.children?.length) {
-        const found = findInTree(n.children, id);
-        if (found) return found;
+    // 迭代遍历（显式栈）替代递归，避免极端深层文件夹树导致调用栈溢出
+    const stack: Folder[] = [...nodes];
+    while (stack.length > 0) {
+      const node = stack.pop()!;
+      if (node.id === id) return node;
+      if (node.children?.length) {
+        stack.push(...node.children);
       }
     }
     return null;

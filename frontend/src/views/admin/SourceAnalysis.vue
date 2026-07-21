@@ -62,7 +62,7 @@
               <div v-if="isMobile && topReferersWithPct.length > 0" class="mobile-card-list">
                 <div v-for="ref in topReferersWithPct" :key="ref.referer" class="mobile-card">
                   <div class="mobile-card-row">
-                    <strong>{{ ref.referer.substring(0, 40) }}{{ ref.referer.length > 40 ? '...' : '' }}</strong>
+                    <strong class="truncated-url">{{ ref.referer }}</strong>
                   </div>
                   <div class="mobile-card-meta">
                     <span>{{ ref.count }} 次</span>
@@ -442,7 +442,8 @@ async function fetchRefererData() {
       params: { timeRange: timeRange.value },
     });
     refererData.value = (data.data || data) as RefererAnalysisResponse;
-    setTimeout(async () => { await renderCategoryChart(); }, 50);
+    await nextTick();
+    await renderCategoryChart();
   } catch {
     refererData.value = null;
   } finally {
@@ -457,7 +458,8 @@ async function fetchUAData() {
       params: { timeRange: timeRange.value, topN: 500 },
     });
     uaData.value = (data.data || data) as UserAgentAnalysisResponse;
-    setTimeout(async () => { await renderDeviceChart(); }, 50);
+    await nextTick();
+    await renderDeviceChart();
   } catch {
     uaData.value = null;
   } finally {

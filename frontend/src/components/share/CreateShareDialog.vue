@@ -56,7 +56,8 @@
 
 <script setup lang="ts">
 import { ref, reactive, watch } from 'vue';
-import { MessagePlugin } from 'tdesign-vue-next';
+import MessagePlugin from '@/utils/message';
+import { getErrorMessage } from '@/utils/error';
 import { api } from '../../stores/auth';
 
 const props = defineProps<{
@@ -140,8 +141,8 @@ async function handleConfirm() {
     shareResult.value = { token: data.token, url: data.url, id: data.id };
     MessagePlugin.success('分享链接已创建');
     emit('created', shareResult.value);
-  } catch (err: any) {
-    MessagePlugin.error(err?.response?.data?.message || '创建分享失败');
+  } catch (err) {
+    MessagePlugin.error(getErrorMessage(err) || '创建分享失败');
   } finally {
     loading.value = false;
   }
@@ -149,9 +150,38 @@ async function handleConfirm() {
 
 async function copyLink() {
   if (!shareResult.value) return;
+  const link = shareResult.value.url;
+
+  // 优先使用 Clipboard API（仅安全上下文可用）
+  if (navigator.clipboard && window.isSecureContext) {
+    try {
+      await navigator.clipboard.writeText(link);
+      MessagePlugin.success('链接已复制到剪贴板');
+      return;
+    } catch {
+      // 继续尝试降级方案
+    }
+  }
+
+  // 降级方案：HTTP 内网部署时 Clipboard API 不可用，
+  // 使用临时 textarea + execCommand('copy') 完成复制
   try {
-    await navigator.clipboard.writeText(shareResult.value.url);
-    MessagePlugin.success('链接已复制到剪贴板');
+    const textarea = document.createElement('textarea');
+    textarea.value = link;
+    textarea.setAttribute('readonly', '');
+    textarea.style.position = 'fixed';
+    textarea.style.top = '-9999px';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.select();
+    textarea.setSelectionRange(0, textarea.value.length);
+    const ok = document.execCommand('copy');
+    document.body.removeChild(textarea);
+    if (ok) {
+      MessagePlugin.success('链接已复制到剪贴板');
+    } else {
+      MessagePlugin.error('复制失败，请手动复制');
+    }
   } catch {
     MessagePlugin.error('复制失败，请手动复制');
   }

@@ -23,6 +23,7 @@ import { User } from './user.entity';
  */
 @Entity('folders')
 @Tree('closure-table')
+@Index('idx_folders_owner_parent_deleted', ['ownerId', 'parentId', 'isDeleted'])
 export class Folder {
   @PrimaryColumn({ type: 'uuid', default: () => 'gen_random_uuid()' })
   id: string;

@@ -43,7 +43,6 @@
             :key="sub.id"
             class="subfolder-card"
             @click="openSubfolder(sub)"
-            @dblclick="openSubfolder(sub)"
           >
             <div class="subfolder-icon">📁</div>
             <div class="subfolder-name" :title="sub.name">{{ sub.name }}</div>
@@ -72,14 +71,14 @@
                 <span>{{ formatRelativeDate(file.createdAt) }}</span>
               </div>
             </div>
-            <a
-              :href="buildDownloadUrl(file)"
-              :download="file.name"
+            <button
+              type="button"
               class="file-download-btn"
-              @click.stop
+              :disabled="downloadingId === file.id"
+              @click.stop="downloadFile(file)"
             >
-              <span>下载</span>
-            </a>
+              <span>{{ downloadingId === file.id ? '下载中...' : '下载' }}</span>
+            </button>
           </div>
         </div>
       </div>
@@ -96,6 +95,7 @@
 
 <script setup lang="ts">
 import { ref, reactive } from 'vue';
+import MessagePlugin from '@/utils/message';
 
 interface FolderSummary {
   id: string;
@@ -124,6 +124,7 @@ const props = defineProps<{
 }>();
 
 const loading = ref(false);
+const downloadingId = ref<string | null>(null);
 const currentFolderId = ref<string>(props.rootFolder.id);
 const currentContents = reactive<FolderContents>({
   subfolders: [...props.initialContents.subfolders],
@@ -131,8 +132,44 @@ const currentContents = reactive<FolderContents>({
 });
 const breadcrumb = ref<FolderSummary[]>([...props.initialBreadcrumb]);
 
-function buildDownloadUrl(file: FileSummary): string {
-  return file.downloadUrl + (props.accessJwt ? `?access=${encodeURIComponent(props.accessJwt)}` : '');
+/**
+ * 【P1 安全】通过 JS fetch + Blob 下载，避免把 accessJwt 渲染进 <a href>：
+ * token 不再出现在 DOM / 浏览器历史 / 地址栏 / Referer 中。
+ * 后端 ShareController 目前仅从 query 参数 ?access= 读取 access JWT（不读请求头），
+ * 故 token 仍随请求 URL 发送，但只存在于瞬时的 JS 请求中，不落入页面。
+ */
+async function downloadFile(file: FileSummary) {
+  if (downloadingId.value) return;
+  downloadingId.value = file.id;
+  try {
+    const url = props.accessJwt
+      ? file.downloadUrl + (file.downloadUrl.includes('?') ? '&' : '?') + `access=${encodeURIComponent(props.accessJwt)}`
+      : file.downloadUrl;
+    const res = await fetch(url);
+    if (!res.ok) {
+      let msg = `下载失败（${res.status}）`;
+      try {
+        const data = await res.json();
+        if (data?.message) msg = data.message;
+      } catch {
+        // 非 JSON 错误体，使用默认提示
+      }
+      throw new Error(msg);
+    }
+    const blob = await res.blob();
+    const objectUrl = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = objectUrl;
+    a.download = file.name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(objectUrl);
+  } catch (err) {
+    MessagePlugin.error(err instanceof Error ? err.message : '下载失败，请稍后重试');
+  } finally {
+    downloadingId.value = null;
+  }
 }
 
 async function openSubfolder(folder: FolderSummary) {
@@ -178,7 +215,7 @@ async function loadFolderContents(folderId: string) {
     }
   } catch (err) {
     console.error('文件夹加载失败:', err);
-    alert(err instanceof Error ? err.message : '网络错误');
+    MessagePlugin.error(err instanceof Error ? err.message : '网络错误');
   } finally {
     loading.value = false;
   }
@@ -398,12 +435,15 @@ function getFileEmoji(mimeType: string): string {
   border: none;
   border-radius: 6px;
   font-size: 13px;
+  font-family: inherit;
   text-align: center;
   text-decoration: none;
+  cursor: pointer;
   transition: background 0.2s;
 }
 
 .file-download-btn:hover { background: #0969DA; }
+.file-download-btn:disabled { opacity: 0.6; cursor: not-allowed; }
 
 .back-to-parent {
   margin-top: 16px;

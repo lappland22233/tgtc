@@ -11,6 +11,19 @@ export interface AnomalyDetectionResult {
   details: Record<string, string | number | undefined>;
 }
 
+/**
+ * 指标名 → SQL 列表达式白名单。
+ * 基线计算仅允许从此 Map 取列表达式，杜绝字符串拼接列名带来的脆弱性/潜在注入面。
+ * 注意：值为受信任的固定 SQL 片段（非用户输入），不可参数化。
+ */
+const METRIC_COLUMN_MAP: Record<string, string> = {
+  qps: '"qpsAvg"',
+  error_rate: '(CASE WHEN "totalRequests" > 0 THEN CAST("error5xxCount" AS FLOAT) / "totalRequests" ELSE 0 END)',
+  bandwidth: '"totalBandwidth"',
+  unique_ips: '"uniqueIps"',
+  p95_duration: '"p95Duration"',
+};
+
 @Injectable()
 export class BehaviorAnalyzer {
   private readonly logger = new Logger(BehaviorAnalyzer.name);
@@ -27,16 +40,17 @@ export class BehaviorAnalyzer {
   async calculateBaselines(): Promise<void> {
     this.logger.log('开始计算 7 天基线...');
 
-    const metrics = ['qps', 'error_rate', 'bandwidth', 'unique_ips', 'p95_duration'];
+    const metrics = Object.keys(METRIC_COLUMN_MAP);
     const counts: Record<string, number> = {};
 
     for (const metric of metrics) {
       try {
-        const column = metric === 'qps' ? '"qpsAvg"' :
-                       metric === 'error_rate' ? '(CASE WHEN "totalRequests" > 0 THEN CAST("error5xxCount" AS FLOAT) / "totalRequests" ELSE 0 END)' :
-                       metric === 'bandwidth' ? '"totalBandwidth"' :
-                       metric === 'unique_ips' ? '"uniqueIps"' :
-                       '"p95Duration"';
+        // 仅从白名单 Map 取列表达式，未知指标直接跳过（防御性，正常不会发生）
+        const column = METRIC_COLUMN_MAP[metric];
+        if (!column) {
+          this.logger.warn(`未知指标 "${metric}"，跳过基线计算`);
+          continue;
+        }
 
         await this.dataSource.query(
           `INSERT INTO "baseline_stats" ("metricName", "hourBucket", "dayOfWeek", "mean", "stddev", "sampleCount", "updatedAt")
@@ -162,11 +176,13 @@ export class BehaviorAnalyzer {
   /** 模式 4: 时间异常 — 深夜 (2-5点) 请求量 > 全天均值 × 2 */
   private async detectTimeAnomaly(): Promise<AnomalyDetectionResult[]> {
     // 获取过去 24 小时内深夜时段 (2-5点) 和全天每小时平均请求数
+    // 使用条件聚合（COUNT FILTER）单次扫描完成，替代原双子查询的全表重复扫描
     const rows = await this.dataSource.query(
       `SELECT
-         (SELECT COUNT(*)::float / 3 FROM "access_logs" WHERE "createdAt" >= NOW() - INTERVAL '24 hours'
-          AND EXTRACT(HOUR FROM "createdAt") BETWEEN 2 AND 5) as night_avg,
-         (SELECT COUNT(*)::float / 24 FROM "access_logs" WHERE "createdAt" >= NOW() - INTERVAL '24 hours') as all_avg`,
+         COUNT(*) FILTER (WHERE EXTRACT(HOUR FROM "createdAt") BETWEEN 2 AND 5)::float / 3 as night_avg,
+         COUNT(*)::float / 24 as all_avg
+       FROM "access_logs"
+       WHERE "createdAt" >= NOW() - INTERVAL '24 hours'`,
     );
 
     if (rows.length === 0) return [];
@@ -198,23 +214,37 @@ export class BehaviorAnalyzer {
       [cutoff],
     );
 
-    // 对于每个候选 IP，检查请求间隔
+    // 批量获取所有候选 IP 的时间戳（每 IP 最多 200 条），消除原逐 IP 的 N+1 查询
     const results: AnomalyDetectionResult[] = [];
-    for (const row of rows) {
-      const timestamps = await this.dataSource.query(
-        `SELECT "createdAt" FROM "access_logs"
-         WHERE ip = $1 AND "createdAt" >= $2 AND ("userAgent" IS NULL OR "userAgent" = '')
-         ORDER BY "createdAt" ASC LIMIT 200`,
-        [row.ip, cutoff],
-      );
+    if (rows.length === 0) return results;
 
+    const candidateIps = rows.map((r: { ip: string }) => r.ip);
+    const timestampRows = await this.dataSource.query(
+      `SELECT ip, "createdAt" FROM (
+         SELECT ip, "createdAt",
+           ROW_NUMBER() OVER (PARTITION BY ip ORDER BY "createdAt" ASC) as rn
+         FROM "access_logs"
+         WHERE "createdAt" >= $1 AND ip = ANY($2) AND ("userAgent" IS NULL OR "userAgent" = '')
+       ) t WHERE rn <= 200 ORDER BY ip, "createdAt" ASC`,
+      [cutoff, candidateIps],
+    );
+
+    // 按 IP 分组时间戳（查询已按 ip, createdAt 排序，分组后保持时间升序）
+    const timestampsByIp = new Map<string, Date[]>();
+    for (const tr of timestampRows) {
+      const arr = timestampsByIp.get(tr.ip) ?? [];
+      arr.push(new Date(tr.createdAt));
+      timestampsByIp.set(tr.ip, arr);
+    }
+
+    // 对每个候选 IP 计算请求间隔的标准差
+    for (const row of rows) {
+      const timestamps = timestampsByIp.get(row.ip) ?? [];
       if (timestamps.length < 10) continue;
 
-      // 计算请求间隔的标准差
       const intervals: number[] = [];
       for (let i = 1; i < timestamps.length; i++) {
-        const diff = new Date(timestamps[i].createdAt).getTime() - new Date(timestamps[i-1].createdAt).getTime();
-        intervals.push(diff);
+        intervals.push(timestamps[i].getTime() - timestamps[i - 1].getTime());
       }
 
       const mean = intervals.reduce((a, b) => a + b, 0) / intervals.length;
@@ -259,9 +289,10 @@ export class BehaviorAnalyzer {
 
     try {
       // 获取当前时刻对应的 hour bucket 和 day of week
+      // 统一使用 UTC，与指标聚合（UTC）保持一致，避免非 UTC 部署时时区错位导致查不到基线
       const now = new Date();
-      const hourBucket = now.getHours();
-      const dayOfWeek = now.getDay();
+      const hourBucket = now.getUTCHours();
+      const dayOfWeek = now.getUTCDay();
 
       // 获取过去 5 分钟的实际指标
       const [currentMetrics] = await this.dataSource.query(

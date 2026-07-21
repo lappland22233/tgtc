@@ -28,14 +28,17 @@ export interface ApiErrorResponse {
 /** 联合类型：成功或错误响应 */
 export type ApiResponse<T> = ApiSuccessResponse<T> | ApiErrorResponse;
 
-/** 分页数据 */
+/** 分页数据（与后端列表接口对齐） */
 export interface PaginatedData<T> {
-  items: T[];
+  /** 列表项 — 文件列表接口以 files 字段返回 */
+  files: T[];
   total: number;
-  /** 当前页码（预留字段，部分接口未返回） */
+  /** 下一页游标（游标分页）；为 null 表示没有更多数据 */
+  nextCursor?: string | null;
+  /** 当前页码（偏移分页，部分接口未返回） */
   page?: number;
-  /** 每页条数（预留字段，部分接口未返回） */
+  /** 每页条数（偏移分页，部分接口未返回） */
   limit?: number;
-  /** 是否有更多数据（预留字段） */
+  /** 是否有更多数据 */
   hasMore?: boolean;
 }

@@ -56,7 +56,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted } from 'vue';
+import { ref, onMounted } from 'vue';
 import { useRoute } from 'vue-router';
 import PasswordPrompt from './PasswordPrompt.vue';
 import FileShareCard from './FileShareCard.vue';
@@ -116,6 +116,12 @@ const verifying = ref(false);
  * 此时前端无法从响应里推断文件/文件夹的任何信息。
  */
 async function fetchInfo() {
+  // 【P3】token 缺失时直接展示"分享不存在"，避免 encodeURIComponent(undefined)
+  // 产生字面量 "undefined" 并发出无效请求
+  if (!token) {
+    state.value = { kind: 'notFound', message: '分享链接无效' };
+    return;
+  }
   try {
     // 后端 ShareController 从 query 参数 ?access=... 读取 accessJwt，
     // 不使用 Authorization header（避免与认证 JWT 混淆）

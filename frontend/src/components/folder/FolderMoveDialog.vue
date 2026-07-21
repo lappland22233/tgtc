@@ -43,7 +43,8 @@
 
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue';
-import { MessagePlugin } from 'tdesign-vue-next';
+import MessagePlugin from '@/utils/message';
+import { getErrorMessage } from '@/utils/error';
 import { useFolderStore, type Folder } from '../../stores/folders';
 
 const props = defineProps<{
@@ -91,8 +92,10 @@ watch(() => props.visible, (v) => {
   }
 });
 
-function onSelect(value: string) {
-  selectedId.value = value === '' || value === 'root' ? null : value;
+function onSelect(value: string | string[]) {
+  // t-tree 单选返回字符串，多选返回数组，这里统一兼容
+  const v = Array.isArray(value) ? value[0] : value;
+  selectedId.value = v === '' || v === 'root' ? null : v;
 }
 
 async function handleConfirm() {
@@ -104,24 +107,24 @@ async function handleConfirm() {
       // 单个文件夹移动
       await folderStore.moveFolder(props.targetIds[0], selectedId.value);
     } else {
-      // 批量文件移动
-      let failed = 0;
-      for (const fid of props.targetIds) {
-        try {
-          await folderStore.moveFile(fid, selectedId.value);
-        } catch {
-          failed++;
-        }
-      }
+      // 批量文件移动（并发执行，单个失败不影响其他）
+      const results = await Promise.allSettled(
+        props.targetIds.map((fid) => folderStore.moveFile(fid, selectedId.value))
+      );
+      const failed = results.filter((r) => r.status === 'rejected').length;
       if (failed > 0) {
+        // 部分失败：仅提示实际结果，不再执行成功分支（避免"部分失败"同时弹"移动成功"）
         MessagePlugin.warning(`${props.targetIds.length - failed} 个成功，${failed} 个失败`);
+        // 已成功的部分仍需通知父组件刷新列表，但保持弹窗打开便于重试
+        emit('moved');
+        return;
       }
     }
     MessagePlugin.success('移动成功');
     emit('update:visible', false);
     emit('moved');
-  } catch (err: any) {
-    errorMessage.value = err?.response?.data?.message || err?.message || '移动失败';
+  } catch (err) {
+    errorMessage.value = getErrorMessage(err) || '移动失败';
   } finally {
     loading.value = false;
   }

@@ -109,23 +109,46 @@ export class FileCacheService {
       const files = await fsp.readdir(this.cacheDir);
       const now = Date.now();
       let cleaned = 0;
+      const surviving = new Set<string>();
       for (const f of files) {
         const fullPath = path.join(this.cacheDir, f);
         try {
           const stat = await fsp.stat(fullPath);
           if (now - stat.mtimeMs > this.cacheTtlMs) {
             await fsp.unlink(fullPath);
+            this.fileAccessMap.delete(f); // 同步清理 LRU 记录，防止 Map 泄漏
             cleaned++;
+          } else {
+            surviving.add(f);
           }
         } catch {
           // 文件可能已被删除
         }
       }
+      // 清理 fileAccessMap 中已不存在于磁盘的条目（被外部删除/淘汰的文件）
+      for (const id of this.fileAccessMap.keys()) {
+        if (!surviving.has(id)) this.fileAccessMap.delete(id);
+      }
+      this.pruneAccessMap();
       if (cleaned > 0) {
         this.logger.log(`清理 ${cleaned} 个过期缓存文件`);
       }
     } catch (err) {
       this.logger.warn(`缓存清理失败: ${(err as Error).message}`);
+    }
+  }
+
+  /** fileAccessMap 容量上限，超过则淘汰最久未访问的条目，杜绝无界增长 */
+  private static readonly ACCESS_MAP_MAX = 100000;
+
+  /** 约束 fileAccessMap 规模：超限时从最久未访问的条目开始删除 */
+  private pruneAccessMap(): void {
+    if (this.fileAccessMap.size <= FileCacheService.ACCESS_MAP_MAX) return;
+    // Map 按插入序迭代；先按访问时间升序排列再删除最旧的若干条
+    const entries = [...this.fileAccessMap.entries()].sort((a, b) => a[1] - b[1]);
+    const removeCount = this.fileAccessMap.size - FileCacheService.ACCESS_MAP_MAX;
+    for (let i = 0; i < removeCount; i++) {
+      this.fileAccessMap.delete(entries[i][0]);
     }
   }
 
@@ -352,6 +375,7 @@ export class FileCacheService {
     this.validateFileId(fileId);
     const cachePath = this.getCachePath(fileId);
     await fsp.unlink(cachePath).catch(() => {});
+    this.fileAccessMap.delete(fileId);
     this.logger.debug(`缓存失效: ${fileId}`);
   }
 
@@ -383,7 +407,8 @@ export class FileCacheService {
       throw new Error(`非法的 fileId: ${fileId}`);
     }
     const resolved = path.resolve(this.cacheDir, fileId);
-    if (!resolved.startsWith(this.cacheDir)) {
+    // 含分隔符前缀校验，防止兄弟目录绕过 startsWith
+    if (resolved !== this.cacheDir && !resolved.startsWith(this.cacheDir + path.sep)) {
       throw new Error(`路径穿越攻击: ${fileId}`);
     }
   }

@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, ConflictException, ForbiddenException } from '@nestjs/common';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
 import { Repository, DataSource } from 'typeorm';
 import * as bcrypt from 'bcryptjs';
@@ -35,8 +35,9 @@ export class UserService {
       .orderBy('user.createdAt', 'DESC');
 
     if (search) {
-      // 转义 SQL 通配符防止 LIKE 注入 (% 和 _)
-      const escapedSearch = search.replace(/[%_]/g, '\\$&');
+      // 转义 SQL 通配符防止 LIKE 注入。必须先转义反斜杠本身，再转义 % 和 _，
+      // 否则输入中的反斜杠仍会充当转义字符。
+      const escapedSearch = search.replace(/\\/g, '\\\\').replace(/[%_]/g, '\\$&');
       queryBuilder.andWhere('user.email ILIKE :search ESCAPE \'\\\'', { search: `%${escapedSearch}%` });
     }
 
@@ -59,12 +60,15 @@ export class UserService {
   }
 
   async create(data: { email: string; password: string; role?: UserRole }, requester: User): Promise<Partial<User>> {
+    // 邮箱归一化：trim + 小写，减少大小写/空白导致的重复账户
+    const email = data.email.trim().toLowerCase();
+
     const existingUser = await this.userRepository.findOne({
-      where: { email: data.email },
+      where: { email },
     });
 
     if (existingUser) {
-      throw new BadRequestException('该邮箱已被注册');
+      throw new ConflictException('该邮箱已被注册');
     }
 
     // 强制角色控制：admin 只能创建 USER，super_admin 可以创建 admin 但不能创建另一个 super_admin
@@ -78,13 +82,22 @@ export class UserService {
     const hashedPassword = await bcrypt.hash(data.password, BCRYPT_ROUNDS);
 
     const user = this.userRepository.create({
-      email: data.email,
+      email,
       password: hashedPassword,
       role,
       emailVerified: true,
     });
 
-    await this.userRepository.save(user);
+    try {
+      await this.userRepository.save(user);
+    } catch (error) {
+      // TOCTOU：并发下同邮箱可能在 findOne 之后、save 之前被插入，
+      // 命中唯一约束（23505）时转为 409，避免未捕获 500。
+      if ((error as { code?: string })?.code === '23505') {
+        throw new ConflictException('该邮箱已被注册');
+      }
+      throw error;
+    }
 
     // 审计日志：管理员创建用户
     this.auditService.log({
@@ -123,6 +136,11 @@ export class UserService {
         throw new BadRequestException('无法删除超级管理员');
       }
 
+      // 权限提升防护：普通 ADMIN 不能删除其他 ADMIN，仅 SUPER_ADMIN 可以
+      if (user.role === UserRole.ADMIN && requester.role !== UserRole.SUPER_ADMIN) {
+        throw new ForbiddenException('无权删除其他管理员');
+      }
+
       // 事务内：软删除用户的所有文件
       await queryRunner.manager.update(
         File,
@@ -130,13 +148,16 @@ export class UserService {
         { isDeleted: true },
       );
 
-      // 事务内：硬删除用户
-      await queryRunner.manager.delete(User, { id });
+      // 事务内：软删除用户（保留用户行）。
+      // 不能硬删除：files.uploaderId → users.id 外键无 ON DELETE 策略，
+      // 硬删除有文件的用户会因外键约束恒失败（500）。软删除设置 deletedAt，
+      // TypeORM 常规查询会自动排除已软删除用户，从而禁止其登录与被检索。
+      await queryRunner.manager.softDelete(User, { id });
 
       await queryRunner.commitTransaction();
 
-      // 审计日志：删除用户
-      this.auditService.log({
+      // 审计日志：删除用户（高敏感操作，等待写入完成）
+      await this.auditService.logAwait({
         action: 'user_delete',
         userId: requester.id,
         resourceType: 'user',
@@ -151,8 +172,8 @@ export class UserService {
     }
   }
 
-  async updateRole(id: string, role: UserRole, requesterRole: UserRole): Promise<void> {
-    if (requesterRole !== UserRole.SUPER_ADMIN) {
+  async updateRole(id: string, role: UserRole, requester: User): Promise<void> {
+    if (requester.role !== UserRole.SUPER_ADMIN) {
       throw new BadRequestException('只有超级管理员可以修改用户角色');
     }
 
@@ -172,16 +193,17 @@ export class UserService {
 
     await this.userRepository.update(id, { role });
 
-    // 审计日志：角色变更
-    this.auditService.log({
+    // 审计日志：角色变更（高敏感操作，记录操作者并等待写入完成）
+    await this.auditService.logAwait({
       action: 'role_change',
+      userId: requester.id,
       resourceType: 'user',
       resourceId: id,
       metadata: { previousRole: user.role, newRole: role },
     });
   }
 
-  async banUser(id: string, isBanned: boolean): Promise<void> {
+  async banUser(id: string, isBanned: boolean, requester: User): Promise<void> {
     const user = await this.userRepository.findOne({ where: { id } });
 
     if (!user) {
@@ -192,11 +214,17 @@ export class UserService {
       throw new BadRequestException('无法封禁超级管理员');
     }
 
+    // 权限提升防护：普通 ADMIN 不能封禁其他 ADMIN，仅 SUPER_ADMIN 可以
+    if (user.role === UserRole.ADMIN && requester.role !== UserRole.SUPER_ADMIN) {
+      throw new ForbiddenException('无权封禁其他管理员');
+    }
+
     await this.userRepository.update(id, { isBanned });
 
-    // 审计日志：用户封禁/解封
-    this.auditService.log({
+    // 审计日志：用户封禁/解封（高敏感操作，记录操作者并等待写入完成）
+    await this.auditService.logAwait({
       action: isBanned ? 'user_ban' : 'user_unban',
+      userId: requester.id,
       resourceType: 'user',
       resourceId: id,
     });
@@ -220,7 +248,12 @@ export class UserService {
     }
 
     const hashedPassword = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
-    await this.userRepository.update(id, { password: hashedPassword });
+    // 同步更新 passwordUpdatedAt：该字段用于 JWT 吊销检测，
+    // 改密后使旧 token 失效（如账号被盗后改密可立即踢下旧会话）。
+    await this.userRepository.update(id, {
+      password: hashedPassword,
+      passwordUpdatedAt: new Date(),
+    });
 
     // 审计日志：密码变更
     this.auditService.log({

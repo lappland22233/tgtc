@@ -27,10 +27,17 @@ async function startRedirect() {
   }, 300);
 }
 
-/** 判断当前是否在认证页面（登录/注册/密码重置） */
+/** 判断当前是否在无需 401 重定向的页面（登录/注册/密码重置/公开分享页） */
 function isAuthPage(): boolean {
   const path = window.location.pathname;
-  return path === '/login' || path === '/register' || path === '/reset-password';
+  // 公开分享页 /s/:token 为匿名访问场景：分享接口返回 401（如密码错误/链接受限）时，
+  // 不应把匿名访客强制跳转到登录页，故一并排除。
+  return (
+    path === '/login' ||
+    path === '/register' ||
+    path === '/reset-password' ||
+    path.startsWith('/s/')
+  );
 }
 
 // 查询是否正在重定向
@@ -50,16 +57,44 @@ const client: AxiosInstance = axios.create({
   // （使用后端 HTTP 服务器 10 分钟超时），避免大文件上传被中断
   timeout: 30000,
   withCredentials: true,
+  // CSRF 双重提交 Cookie（Double-Submit Cookie）配置：
+  // axios 会在发起请求时读取名为 XSRF-TOKEN 的 cookie，并自动写入 X-XSRF-TOKEN 请求头。
+  // ⚠️ 需后端配合：在登录/会话建立时下发一个名为 XSRF-TOKEN（非 httpOnly）的随机令牌 cookie，
+  //    并在所有状态变更接口校验请求头 X-XSRF-TOKEN 与该 cookie 一致。
+  // 若后端尚未下发该 cookie，前端读取为空时不会注入请求头、也不会报错（见下方请求拦截器，容错处理）。
+  xsrfCookieName: 'XSRF-TOKEN',
+  xsrfHeaderName: 'X-XSRF-TOKEN',
   // 不设置 Content-Type，由 axios 根据请求数据类型自动推断：
   // - 普通对象 → application/json
   // - FormData → multipart/form-data（浏览器自动设置 boundary）
 });
 
+/**
+ * 读取指定名称的 cookie 值；不存在时返回空字符串（容错，不抛错）。
+ * 用于 CSRF 双重提交 Cookie 方案。
+ */
+function readCookie(name: string): string {
+  if (typeof document === 'undefined') return '';
+  // 转义 cookie 名中的正则特殊字符，避免构造非法正则
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = document.cookie.match(new RegExp('(?:^|;\\s*)' + escaped + '=([^;]*)'));
+  return match && match[1] ? decodeURIComponent(match[1]) : '';
+}
+
 // ---- 请求拦截器 ----
 client.interceptors.request.use(
   (config: InternalAxiosRequestConfig) => {
-    // Cookie 由 axios withCredentials 自动携带，无需手动添加 Authorization header
-    // 延迟加载 authStore 以避免循环依赖
+    // Cookie 由 axios withCredentials 自动携带，无需手动添加 Authorization header。
+    // CSRF 防护（双重提交 Cookie）：读取后端下发的 XSRF-TOKEN cookie 并注入 X-XSRF-TOKEN 请求头。
+    // ⚠️ 需后端配合下发该 cookie；此处做了容错——cookie 不存在时不注入请求头、也不报错，
+    //    因此在后端尚未启用该机制前不会影响现有请求。
+    const headers = config.headers;
+    if (headers && !headers.has('X-XSRF-TOKEN')) {
+      const xsrfToken = readCookie('XSRF-TOKEN');
+      if (xsrfToken) {
+        headers.set('X-XSRF-TOKEN', xsrfToken);
+      }
+    }
     return config;
   },
   (error: AxiosError) => {
@@ -78,13 +113,15 @@ client.interceptors.response.use(
     if (status && status >= 400 && error.response?.data) {
       const contentType = error.response.headers?.['content-type']?.toString() || '';
       if (!contentType.includes('application/json')) {
+        // 注意：此处仅识别 Cloudflare 非 JSON 错误页并给出友好提示，并未实现自动重试，
+        // 文案如实表述为“请稍后重试”，避免误导用户以为正在自动恢复。
         const cloudflareMsg = status === 413
           ? '文件过大（超过代理层 100MB 限制），请使用 80MB 以内的文件'
           : status === 502
-            ? '上传超时（CDN 代理层 100 秒限制），正在自动重试...'
+            ? '上传超时（CDN 代理层 100 秒限制），请稍后重试'
             : status === 520 || status === 521 || status === 522 || status === 523 || status === 524
-              ? '源站暂时不可用，正在自动恢复...'
-              : `CDN 代理层错误 (${status})，正在重试...`;
+              ? '源站暂时不可用，请稍后重试'
+              : `CDN 代理层错误 (${status})，请稍后重试`;
         return Promise.reject(new Error(cloudflareMsg));
       }
     }

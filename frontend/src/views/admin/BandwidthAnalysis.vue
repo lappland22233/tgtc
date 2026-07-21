@@ -171,7 +171,8 @@ async function renderChart() {
       trigger: 'axis',
       ...tooltipBase,
       formatter: (params: unknown) => {
-        const p = (params as { name: string; value: number; seriesName: string }[])[0];
+        const p = (params as { name: string; value: number; seriesName: string }[])?.[0];
+        if (!p) return '';
         return `<b>${p.name}</b><br/>${p.seriesName}: ${formatSize(p.value)}`;
       },
     },

@@ -11,6 +11,8 @@ import {
   Res,
   UseGuards,
   BadRequestException,
+  HttpException,
+  HttpStatus,
 } from '@nestjs/common';
 import { Request, Response } from 'express';
 import { pipeline } from 'stream';
@@ -19,6 +21,8 @@ import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { User } from '../common/entities/user.entity';
 import { getClientIp } from '../common/utils/client-ip';
+import { RateLimitService } from '../common/services/rate-limit.service';
+import { ConfigCacheService } from '../common/services/config-cache.service';
 import { ShareService } from './share.service';
 import { CreateShareDto, UpdateShareDto, VerifyPasswordDto } from './share.dto';
 import { ShareTargetType } from '../common/entities/share-link.entity';
@@ -44,7 +48,33 @@ import { ShareTargetType } from '../common/entities/share-link.entity';
  */
 @Controller()
 export class ShareController {
-  constructor(private readonly shareService: ShareService) {}
+  constructor(
+    private readonly shareService: ShareService,
+    private readonly rateLimitService: RateLimitService,
+    private readonly configCacheService: ConfigCacheService,
+  ) {}
+
+  /**
+   * 公开分享端点的 IP+token 维度限流。
+   * 防止攻击者高频访问 /s/:token 系列接口，快速耗尽 maxAccessCount（DoS）。
+   * 阈值从安全配置动态读取（热更新），默认 60 次/分钟。
+   */
+  private async assertShareRateLimit(token: string, req: Request): Promise<void> {
+    const ip = getClientIp(req);
+    const limit = Number(await this.configCacheService.get('sec_share_rate_limit', '60')) || 60;
+    const windowMs = (Number(await this.configCacheService.get('sec_share_rate_window', '60')) || 60) * 1000;
+    const lockMs = (Number(await this.configCacheService.get('sec_share_rate_ban', '60')) || 60) * 1000;
+    const result = await this.rateLimitService.checkAndIncrement(
+      `share:${ip}:${token}`,
+      'share_access',
+      limit,
+      lockMs,
+      windowMs,
+    );
+    if (!result.allowed) {
+      throw new HttpException('访问过于频繁，请稍后再试', HttpStatus.TOO_MANY_REQUESTS);
+    }
+  }
 
   // ==================== 需登录的接口 ====================
 
@@ -103,7 +133,9 @@ export class ShareController {
   async getSharePublicInfo(
     @Param('token') token: string,
     @Query('access') accessJwt: string,
+    @Req() req: Request,
   ) {
+    await this.assertShareRateLimit(token, req);
     return this.shareService.getSharePublicInfo(token, accessJwt || undefined);
   }
 
@@ -136,6 +168,7 @@ export class ShareController {
     @Req() req: Request,
     @Res() res: Response,
   ) {
+    await this.assertShareRateLimit(token, req);
     const ip = getClientIp(req);
     const result = await this.shareService.getShareDownloadStream(
       token,
@@ -157,10 +190,13 @@ export class ShareController {
     try {
       await pipe(result.stream, res);
     } catch (err) {
-      // 客户端断开连接等错误，记录但不影响响应（响应已开始）
+      // 头部未发送：还能返回标准错误响应
       if (!res.headersSent) {
         throw new BadRequestException('下载失败：' + (err as Error).message);
       }
+      // 头部已发送：无法再改状态码，记录日志并中断响应，
+      // 让客户端感知到截断（Content-Length 与实际字节不符），而非静默吞错。
+      res.destroy(err as Error);
     }
   }
 
@@ -174,7 +210,9 @@ export class ShareController {
     @Param('token') token: string,
     @Param('folderId') folderId: string,
     @Query('access') accessJwt: string,
+    @Req() req: Request,
   ) {
+    await this.assertShareRateLimit(token, req);
     const link = await this.shareService.getShareLinkByToken(token);
     await this.shareService.assertShareUsablePublic(link);
     // 严格模式：密码校验
@@ -197,7 +235,9 @@ export class ShareController {
     @Param('token') token: string,
     @Param('folderId') folderId: string,
     @Query('access') accessJwt: string,
+    @Req() req: Request,
   ) {
+    await this.assertShareRateLimit(token, req);
     const link = await this.shareService.getShareLinkByToken(token);
     await this.shareService.assertShareUsablePublic(link);
     if (link.password) {

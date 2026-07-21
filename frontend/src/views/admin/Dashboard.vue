@@ -32,7 +32,7 @@
       </div>
     </div>
 
-    <div class="dashboard-split-grid" style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+    <div class="dashboard-split-grid">
       <div class="card">
         <h3 style="margin-bottom: 20px; font-family: var(--font-display); font-size: 16px; font-weight: 600;">
           我的文件统计
@@ -118,7 +118,9 @@ async function fetchData() {
 
 function formatMonth(month: string) {
   const m = month.split('-')[1];
-  return `${parseInt(m)}月`;
+  const n = parseInt(m, 10);
+  if (Number.isNaN(n)) return month;
+  return `${n}月`;
 }
 
 // 缓存最大访问量，避免 getBarHeight 每次调用都重新 map+Math.max（O(n²)→O(n)）
@@ -141,6 +143,18 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
+.dashboard-split-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+}
+
+@media (max-width: 768px) {
+  .dashboard-split-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 .empty-state {
   text-align: center;
   padding: 32px 0;

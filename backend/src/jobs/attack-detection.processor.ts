@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Process, Processor } from '@nestjs/bull';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, DataSource, MoreThan, IsNull } from 'typeorm';
+import { Repository, DataSource, MoreThan } from 'typeorm';
 import { Job } from 'bull';
 import { QUEUE_NAMES } from './bull-queue.module';
 import { BannedIP } from '../common/entities/banned-ip.entity';
@@ -24,6 +24,9 @@ interface AttackDetectionResult {
 export class AttackDetectionProcessor {
   private readonly logger = new Logger(AttackDetectionProcessor.name);
 
+  /** 单条检测规则最多处理的 IP 数量，防止 DDoS 时数千 IP 导致任务耗时不可控 */
+  private readonly detectionResultLimit = 1000;
+
   constructor(
     @InjectRepository(AccessLog)
     private accessLogRepo: Repository<AccessLog>,
@@ -44,23 +47,20 @@ export class AttackDetectionProcessor {
   /** 每 5 分钟并行执行 4 条攻击检测规则，同步生成告警记录 */
   @Process('detect-attacks')
   async detectAttacks(_job: Job): Promise<void> {
-    const attacks: AttackDetectionResult[] = [];
+    // 4 条检测规则相互独立，并行执行以缩短整体耗时（原为串行）
+    const [scanners, bruteForce, crawlers, abnormalDownloads] = await Promise.all([
+      this.detectHighFrequencyScanners(),
+      this.detectBruteForce(),
+      this.detectCrawlers(),
+      this.detectAbnormalDownloads(),
+    ]);
 
-    // Rule 1: 高频扫描 — IP 每分钟 >300 次 + uniquePaths >50
-    const scanners = await this.detectHighFrequencyScanners();
-    attacks.push(...scanners);
-
-    // Rule 2: 爆破行为 — /api/auth/login 401 >=20次/5min
-    const bruteForce = await this.detectBruteForce();
-    attacks.push(...bruteForce);
-
-    // Rule 3: 爬虫行为 — IP 24h >50000 且 GET >99%
-    const crawlers = await this.detectCrawlers();
-    attacks.push(...crawlers);
-
-    // Rule 4: 异常下载 — IP 下载 >1000/24h
-    const abnormalDownloads = await this.detectAbnormalDownloads();
-    attacks.push(...abnormalDownloads);
+    const attacks: AttackDetectionResult[] = [
+      ...scanners,
+      ...bruteForce,
+      ...crawlers,
+      ...abnormalDownloads,
+    ];
 
     if (attacks.length === 0) return;
 
@@ -143,13 +143,15 @@ export class AttackDetectionProcessor {
       );
 
       // 1.5 检查是否已有该攻击类型 + IP 的未处理告警（冷却窗口内防重复）
+      // 去重必须按 IP 维度隔离（context->>'ip'），否则一个 IP 的未确认告警
+      // 会抑制所有其他 IP 的同类型攻击告警。
       const ruleId = `ATTACK_${attack.attackType.toUpperCase()}`;
-      const existingAlert = await manager.findOne(Alert, {
-        where: {
-          ruleId,
-          acknowledgedAt: IsNull(),
-        },
-      });
+      const existingAlert = await manager
+        .createQueryBuilder(Alert, 'alert')
+        .where('alert.ruleId = :ruleId', { ruleId })
+        .andWhere('alert.acknowledgedAt IS NULL')
+        .andWhere(`alert.context ->> 'ip' = :ip`, { ip: attack.ip })
+        .getOne();
       if (existingAlert) {
         this.logger.debug(
           `IP ${attack.ip} 已有未处理的 ${ruleId} 告警 (id=${existingAlert.id})，跳过重复创建`,
@@ -223,6 +225,7 @@ export class AttackDetectionProcessor {
       .where('a.createdAt >= :cutoff', { cutoff })
       .groupBy('a.ip')
       .having('COUNT(*) > :reqThreshold AND COUNT(DISTINCT a.path) > :pathThreshold', { reqThreshold, pathThreshold })
+      .limit(this.detectionResultLimit)
       .getRawMany<{ ip: string; requestCount: string; uniquePaths: string }>();
 
     return rows.map((r) => ({
@@ -253,6 +256,7 @@ export class AttackDetectionProcessor {
       .andWhere('a.statusCode = 401')
       .groupBy('a.ip')
       .having('COUNT(*) >= :threshold', { threshold })
+      .limit(this.detectionResultLimit)
       .getRawMany<{ ip: string; loginAttempts: string }>();
 
     return rows.map((r) => ({
@@ -289,6 +293,7 @@ export class AttackDetectionProcessor {
       .where('a.createdAt >= :cutoff', { cutoff })
       .groupBy('a.ip')
       .having('COUNT(*) > :threshold', { threshold })
+      .limit(this.detectionResultLimit)
       .getRawMany<{ ip: string; totalRequests: string; getCount: string }>();
 
     return rows
@@ -333,6 +338,7 @@ export class AttackDetectionProcessor {
       )
       .groupBy('a.ip')
       .having('COUNT(*) > :threshold', { threshold })
+      .limit(this.detectionResultLimit)
       .getRawMany<{ ip: string; downloadCount: string }>();
 
     return rows.map((r) => ({

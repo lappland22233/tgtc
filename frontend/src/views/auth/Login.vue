@@ -70,7 +70,8 @@ const loading = ref(false);
 const formRef = ref();
 
 async function handleSubmit() {
-  const valid = await formRef.value?.validate();
+  if (!formRef.value) return;
+  const valid = await formRef.value.validate();
   if (valid !== true) return;
   loading.value = true;
   try {

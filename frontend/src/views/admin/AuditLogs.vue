@@ -214,6 +214,13 @@ function formatMetadata(meta: unknown): string {
   if (!meta) return '';
   if (typeof meta === 'string') return meta;
   try {
+    if (Array.isArray(meta)) {
+      return (
+        meta
+          .map((v) => (typeof v === 'object' && v !== null ? JSON.stringify(v) : String(v)))
+          .join(', ') || '-'
+      );
+    }
     const obj = meta as Record<string, unknown>;
     const parts: string[] = [];
     for (const [k, v] of Object.entries(obj)) {

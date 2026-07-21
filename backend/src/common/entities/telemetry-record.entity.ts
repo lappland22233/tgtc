@@ -15,12 +15,14 @@ export enum TelemetryType {
 
 @Entity('telemetry_records')
 @Index(['createdAt'])
-@Index(['type'])
+// 核心查询为 type + createdAt 组合条件，复合索引优于两个单列索引（P2）；
+// ip 索引服务 COUNT(DISTINCT ip) 统计（P3）。
+@Index('IDX_telemetry_records_type_createdAt', ['type', 'createdAt'])
+@Index('IDX_telemetry_records_ip', ['ip'])
 export class TelemetryRecord {
   @PrimaryColumn({ type: 'uuid', default: () => 'gen_random_uuid()' })
   id: string;
 
-  @Index()
   @Column({ type: 'varchar', length: 20, comment: '遥测类型：error/performance/environment' })
   type: string;
 
