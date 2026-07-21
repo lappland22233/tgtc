@@ -1125,28 +1125,14 @@ async function copyLink(row: FileItem) {
   }
 }
 
-async function downloadFile(row: Pick<FileItem, 'id'>) {
-  try {
-    const response = await api.get(`/files/${row.id}/download`, { responseType: 'blob' });
-    const url = window.URL.createObjectURL(new Blob([response.data]));
-    const link = document.createElement('a');
-    link.href = url;
-    const disposition = response.headers['content-disposition'];
-    let filename = `file-${row.id}`;
-    if (disposition) {
-      const match = disposition.match(/filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/);
-      if (match?.[1]) {
-        filename = decodeURIComponent(match[1].replace(/['"]/g, ''));
-      }
-    }
-    link.setAttribute('download', filename);
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    window.URL.revokeObjectURL(url);
-  } catch (error: unknown) {
-    MessagePlugin.error('下载失败：' + getErrorMessage(error));
-  }
+function downloadFile(row: FileItem) {
+  const a = document.createElement('a');
+  a.href = `/api/files/${row.id}/download`;
+  // download 属性仅作为 Content-Disposition 的 fallback
+  if (row.originalName) a.download = row.originalName;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
 }
 
 function handleDelete(row: FileItem) {

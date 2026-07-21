@@ -1227,8 +1227,20 @@ export class FileService implements OnModuleInit {
       };
     }
 
-    // 回退到 Telegram（同时触发异步生成缩略图）
-    this.generateAndSaveThumbnail(file).catch(() => {});
+    // 缩略图文件缺失（如 tmp/thumbnails 重建后丢失）→ 同步重新生成
+    // 等待生成完成，避免返回源文件（既浪费带宽也违反缩略图设计意图）
+    if (file.mimeType?.startsWith('image/')) {
+      await this.generateAndSaveThumbnail(file);
+      const regenerated = await this.readLocalThumbnail(file);
+      if (regenerated) {
+        return {
+          stream: Readable.from(regenerated),
+          contentType: 'image/webp',
+        };
+      }
+    }
+
+    // 最终回退（非图片文件或生成失败）
     const { stream } = await this.telegramService.getFileStream(file.telegramFileId || file.filename);
 
     return {
