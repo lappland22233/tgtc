@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException, ForbiddenException, BadRequestException, OnModuleInit, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, In, EntityManager } from 'typeorm';
+import { Repository, In, IsNull, EntityManager } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { OnEvent } from '@nestjs/event-emitter';
@@ -497,6 +497,7 @@ export class FileService implements OnModuleInit {
     sortOrder?: string,
     cursor?: string,
     tagIds?: string[],
+    folderId?: string,
   ): Promise<{ files: File[]; total: number; nextCursor?: string | null }> {
     const where: Record<string, unknown> = {};
     if (!includeDeleted) {
@@ -504,6 +505,16 @@ export class FileService implements OnModuleInit {
     }
     if (userId) {
       where.uploaderId = userId;
+    }
+    // 网盘文件夹作用域：
+    // - folderId 未传：不添加过滤（admin 视图与旧逻辑兼容）
+    // - folderId === 'root'：仅返回位于网盘根目录（folderId IS NULL）的文件
+    // - folderId 为 UUID：仅返回该 folder 下的文件
+    if (folderId === 'root') {
+      where.folderId = IsNull();
+    } else if (folderId && folderId.length === 36) {
+      // 简单 UUID 长度校验，避免 'root' 等非 UUID 误入
+      where.folderId = folderId;
     }
 
     const qb = this.fileRepository.createQueryBuilder('file')
@@ -2019,5 +2030,56 @@ export class FileService implements OnModuleInit {
     } catch {
       // 日志更新失败不影响业务
     }
+  }
+
+  /**
+   * 为分享链接下载流式返回文件内容（Phase 2 新增）。
+   *
+   * 与 getPublicFileContentStream 的区别：
+   * 1. 不检查 accessType —— ShareLink 本身就是访问凭证，private 文件也能通过分享链接下载。
+   * 2. 访问日志记录 action='share_download'，便于按渠道统计。
+   *
+   * 由 ShareService 在校验完 token + access JWT 后调用。
+   */
+  async getStreamForShareDownload(id: string, ip?: string): Promise<{
+    stream: Readable;
+    contentType: string;
+    filename: string;
+    size: number;
+    isInline: boolean;
+    accessLogId?: string;
+  }> {
+    const file = await this.fileRepository.findOne({
+      where: { id, isDeleted: false },
+    });
+    if (!file) {
+      throw new NotFoundException('文件不存在');
+    }
+
+    const cachedStream = this.fileCacheService.getCachedReadStream(file.id, Number(file.size));
+    const { stream, info } = cachedStream
+      ? { stream: cachedStream, info: { file_id: file.telegramFileId, file_path: '', file_size: Number(file.size) } }
+      : await this.telegramService.getFileStream(file.telegramFileId || file.filename);
+
+    let accessLogId: string | undefined;
+    try {
+      const saved = await this.accessLogRepository.save({
+        fileId: id,
+        ip: ip || '',
+        action: 'share_download',
+        uploaderId: file.uploaderId,
+        responseSize: 0,
+      });
+      accessLogId = saved.id;
+    } catch {
+      // 日志写入失败不影响下载
+    }
+
+    const mimeType = file.mimeType || 'application/octet-stream';
+    const isInline = /^(image|video|audio)\//.test(mimeType);
+    const filename = this.ensureFileExtension(file.originalName, mimeType);
+
+    const actualSize = info.file_size > 0 ? info.file_size : Number(file.size);
+    return { stream, contentType: mimeType, filename, size: actualSize, isInline, accessLogId };
   }
 }

@@ -14,14 +14,44 @@
       </div>
     </div>
 
-    <div class="page-header">
-      <h1>我的文件</h1>
-      <p>管理您上传的所有文件，支持拖拽上传</p>
-    </div>
+    <div class="drive-layout">
+      <!-- 左侧文件夹树侧边栏（桌面端显示） -->
+      <aside class="folder-sidebar" v-if="!isMobile">
+        <FolderTree
+          @create="openCreateFolderDialog"
+          @navigate="onFolderNavigate"
+          @rename="openRenameFolderDialog"
+          @move="openMoveDialogForFolder"
+        />
+      </aside>
 
-    <div class="card">
+      <!-- 主内容区 -->
+      <div class="drive-main">
+        <div class="page-header">
+          <h1>{{ folderStore.currentFolderName }}</h1>
+          <p>管理您上传的所有文件，支持拖拽上传</p>
+        </div>
+
+        <FolderBreadcrumb @navigate="onFolderNavigate" />
+
+        <div class="card">
       <div style="display: flex; justify-content: space-between; margin-bottom: 16px; align-items: center; flex-wrap: wrap; gap: 12px;">
-        <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+        <div style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
+          <t-radio-group
+            :value="viewMode"
+            variant="default-filled"
+            size="medium"
+            @change="(val) => setViewMode(val as 'card' | 'list')"
+          >
+            <t-radio-button value="card">
+              <t-icon name="view-module" style="vertical-align: middle;" />
+              <span style="margin-left: 4px;">卡片</span>
+            </t-radio-button>
+            <t-radio-button value="list">
+              <t-icon name="view-list" style="vertical-align: middle;" />
+              <span style="margin-left: 4px;">列表</span>
+            </t-radio-button>
+          </t-radio-group>
           <form autocomplete="off" @submit.prevent="handleSearch" style="display: flex; gap: 8px; margin: 0; flex-wrap: wrap;">
             <t-input v-model="search" placeholder="搜索文件名..." style="width: 300px;" class="search-input-field" autocomplete="off" name="q-file-search" @enter="handleSearch" />
             <t-button theme="default" @click="handleSearch">搜索</t-button>
@@ -52,6 +82,14 @@
             @click="openBatchTagDialog"
           >
             批量标签（{{ selectedFileIds.length }}）
+          </t-button>
+          <t-button
+            v-if="selectedFileIds.length > 0"
+            theme="default"
+            variant="outline"
+            @click="openMoveDialogForFiles()"
+          >
+            移动到...（{{ selectedFileIds.length }}）
           </t-button>
           <t-button theme="primary" @click="showUploadModal = true">
             + 上传文件
@@ -95,8 +133,8 @@
         <t-input v-model="markdownResult" type="textarea" readonly :rows="6" autocomplete="off" />
       </div>
 
-      <!-- 拖拽提示（空状态） -->
-      <div v-if="fileStore.files.length === 0 && !fileStore.loading && !cursorLoading"
+      <!-- 拖拽提示（空状态：当前文件夹下既无文件也无子文件夹） -->
+      <div v-if="fileStore.files.length === 0 && subfoldersInCurrentFolder.length === 0 && !fileStore.loading && !cursorLoading"
         class="upload-zone"
         @click="showUploadModal = true"
       >
@@ -108,17 +146,50 @@
       </div>
 
       <t-loading v-if="fileStore.loading || cursorLoading" />
-      <div v-else-if="displayFiles.length > 0">
-        <!-- 桌面端：现有表格 -->
-        <t-table
-          v-if="!isMobile"
-          ref="tableRef"
-          :data="displayFiles"
-          :columns="columns"
-          :row-class-name="getRowClassName"
-          row-key="id"
-          hover
-          table-layout="auto"
+      <div v-else-if="displayFiles.length > 0 || subfoldersInCurrentFolder.length > 0">
+        <!-- 卡片视图（默认）：响应式网格，桌面端 4-5 列，平板 3 列，手机 2 列 -->
+        <div v-if="viewMode === 'card'" class="card-grid-view">
+          <!-- 文件夹卡片 -->
+          <FolderCard
+            v-for="folder in subfoldersInCurrentFolder"
+            :key="`folder-${folder.id}`"
+            :folder="folder"
+            :selectable="false"
+            @dblclick="onFolderCardOpen"
+            @open="onFolderCardOpen"
+            @rename="onFolderCardRename"
+            @move="onFolderCardMove"
+            @delete="onFolderCardDelete"
+          />
+          <!-- 文件卡片 -->
+          <FileCard
+            v-for="file in displayFiles"
+            :key="file.id"
+            :file="file"
+            :selected="selectedFileIds.includes(file.id)"
+            :selectable="true"
+            @toggle-select="onCardToggleSelect"
+            @dblclick="onCardDownload"
+            @download="onCardDownload"
+            @share="onCardShare"
+            @move="onCardMove"
+            @tag="onCardTag"
+            @delete="onCardDelete"
+          />
+        </div>
+
+        <!-- 列表视图 -->
+        <template v-else>
+          <!-- 桌面端：现有表格 -->
+          <t-table
+            v-if="!isMobile"
+            ref="tableRef"
+            :data="displayFiles"
+            :columns="columns"
+            :row-class-name="getRowClassName"
+            row-key="id"
+            hover
+            table-layout="auto"
           :selected-row-keys="selectedFileIds"
           :scroll="pageMode === 'infinite' ? { type: 'virtual', rowHeight: 56, bufferSize: 10, isFixedRowHeight: true } : undefined"
           :max-height="pageMode === 'infinite' ? 'calc(100vh - 280px)' : undefined"
@@ -311,6 +382,7 @@
             </div>
           </div>
         </div>
+        </template>
 
         <div style="margin-top: 16px; display: flex; justify-content: center; align-items: center; gap: 16px;">
           <!-- 页面大小 / 模式切换 -->
@@ -408,6 +480,34 @@
         </div>
       </div>
     </t-dialog>
+
+    <!-- 文件夹相关弹窗 -->
+    <FolderCreateDialog
+      v-model:visible="showCreateFolderDialog"
+      :parent-id="folderStore.currentFolderId"
+    />
+
+    <FolderRenameDialog
+      v-model:visible="showRenameFolderDialog"
+      :folder="renameTargetFolder"
+    />
+
+    <FolderMoveDialog
+      v-model:visible="showMoveDialog"
+      :target-kind="moveTargetKind"
+      :target-ids="moveTargetIds"
+      :disabled-ids="moveDisabledIds"
+      @moved="onFolderMoved"
+    />
+
+    <CreateShareDialog
+      v-model:visible="showShareDialog"
+      :target-type="shareTargetType"
+      :target-id="shareTargetId"
+      :target-name="shareTargetName"
+    />
+      </div>
+    </div>
   </div>
 </template>
 
@@ -415,6 +515,7 @@
 import { ref, onMounted, computed, reactive, watch, nextTick, onUnmounted } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
 import MessagePlugin from '@/utils/message';
+import { DialogPlugin } from 'tdesign-vue-next';
 import { useFileStore } from '../../stores/files';
 import { useAuthStore, api } from '../../stores/auth';
 import { getErrorMessage } from '../../utils/error';
@@ -425,12 +526,22 @@ import UploadModal from '../../components/UploadModal.vue';
 import TagManager from '../../components/TagManager.vue';
 import FileTagEditor from '../../components/FileTagEditor.vue';
 import ThumbnailImg from '../../components/ThumbnailImg.vue';
+import FolderTree from '../../components/folder/FolderTree.vue';
+import FolderBreadcrumb from '../../components/folder/FolderBreadcrumb.vue';
+import FolderCreateDialog from '../../components/folder/FolderCreateDialog.vue';
+import FolderRenameDialog from '../../components/folder/FolderRenameDialog.vue';
+import FolderMoveDialog from '../../components/folder/FolderMoveDialog.vue';
+import FileCard from '../../components/file/FileCard.vue';
+import FolderCard from '../../components/file/FolderCard.vue';
+import CreateShareDialog from '../../components/share/CreateShareDialog.vue';
 import { useTagStore } from '../../stores/tags';
+import { useFolderStore, type Folder } from '../../stores/folders';
 import type { FileItem } from '../../types/file';
 
 const fileStore = useFileStore();
 const authStore = useAuthStore();
 const tagStore = useTagStore();
+const folderStore = useFolderStore();
 const router = useRouter();
 const route = useRoute();
 const page = ref(Number(route.query.page) || 1);
@@ -454,6 +565,181 @@ const batchTagDialog = reactive({
 });
 const tagEditorFileId = ref('');
 const tagEditorFileTags = ref<{ id: string; name: string; color: string }[]>([]);
+
+// ============ 文件夹相关状态 ============
+const showCreateFolderDialog = ref(false);
+const showRenameFolderDialog = ref(false);
+const renameTargetFolder = ref<Folder | null>(null);
+const showMoveDialog = ref(false);
+const moveTargetKind = ref<'folder' | 'file'>('file');
+const moveTargetIds = ref<string[]>([]);
+const moveDisabledIds = ref<string[]>([]);
+
+// ============ 分享弹窗状态 ============
+const showShareDialog = ref(false);
+const shareTargetType = ref<'file' | 'folder'>('file');
+const shareTargetId = ref('');
+const shareTargetName = ref('');
+
+/** 把 folderStore.currentFolderId (null | uuid) 转换为 API 期望的字符串 */
+const currentFolderIdForApi = computed(() => {
+  return folderStore.currentFolderId === null
+    ? 'root'
+    : folderStore.currentFolderId;
+});
+
+/** 用户点击文件夹树节点或面包屑导航时触发 */
+async function onFolderNavigate(folderId: string | null) {
+  await folderStore.openFolder(folderId);
+  // 清空选中状态，避免移动到旧文件夹的文件残留
+  selectedFileIds.value = [];
+  // 触发文件列表刷新
+  if (pageMode.value === 'infinite') {
+    resetCursor();
+    fileStore.replaceFiles([]);
+    loadInitialFiles(true);
+  } else {
+    page.value = 1;
+    refetchFiles(1);
+  }
+}
+
+function openCreateFolderDialog() {
+  showCreateFolderDialog.value = true;
+}
+
+function openRenameFolderDialog(folder: Folder) {
+  renameTargetFolder.value = folder;
+  showRenameFolderDialog.value = true;
+}
+
+/**
+ * 打开移动弹窗：移动单个文件夹（带循环检测的 disabledIds）
+ */
+function openMoveDialogForFolder(folder: Folder) {
+  moveTargetKind.value = 'folder';
+  moveTargetIds.value = [folder.id];
+  // 禁止把文件夹移入自身或其子树：简单起见，disabledIds 包含 folder.id 和它的所有子级
+  // 但前端只标记自身 ID，后端会再做严格循环检测
+  moveDisabledIds.value = [folder.id];
+  showMoveDialog.value = true;
+}
+
+/**
+ * 打开移动弹窗：批量移动选中的文件
+ */
+function openMoveDialogForFiles(fileIds?: string[]) {
+  const ids = fileIds && fileIds.length > 0 ? fileIds : selectedFileIds.value;
+  if (ids.length === 0) {
+    MessagePlugin.warning('请先选择要移动的文件');
+    return;
+  }
+  moveTargetKind.value = 'file';
+  moveTargetIds.value = ids;
+  moveDisabledIds.value = [];
+  showMoveDialog.value = true;
+}
+
+async function onFolderMoved() {
+  // 文件夹或文件移动后刷新文件列表（如果当前在某个文件夹，文件可能进出）
+  if (pageMode.value === 'infinite') {
+    resetCursor();
+    fileStore.replaceFiles([]);
+    loadInitialFiles(true);
+  } else {
+    refetchFiles();
+  }
+  selectedFileIds.value = [];
+}
+
+// ============ 视图模式：卡片 / 列表 ============
+type ViewMode = 'card' | 'list';
+const VIEW_MODE_STORAGE_KEY = 'drive_view_mode';
+const viewMode = ref<ViewMode>(
+  ((): ViewMode => {
+    const stored = localStorage.getItem(VIEW_MODE_STORAGE_KEY);
+    return stored === 'list' ? 'list' : 'card'; // 默认卡片视图
+  })(),
+);
+
+function setViewMode(mode: ViewMode) {
+  viewMode.value = mode;
+  try { localStorage.setItem(VIEW_MODE_STORAGE_KEY, mode); } catch { /* localStorage 不可用时降级 */ }
+}
+
+// ============ 卡片视图派生子文件夹列表 ============
+/**
+ * 当前文件夹下的直接子文件夹（基于 folderStore.tree 派生）。
+ * 不走后端 listContents 接口，因为 tree 已经包含全部文件夹数据。
+ * 卡片视图下与文件列表合并展示。
+ */
+const subfoldersInCurrentFolder = computed<Folder[]>(() => {
+  const parentId = folderStore.currentFolderId;
+  if (parentId === null) {
+    // 根目录：返回所有顶层文件夹
+    return folderStore.tree;
+  }
+  // 在树中递归查找当前 folder，返回其 children
+  const find = (nodes: Folder[], id: string): Folder | null => {
+    for (const n of nodes) {
+      if (n.id === id) return n;
+      if (n.children?.length) {
+        const found = find(n.children, id);
+        if (found) return found;
+      }
+    }
+    return null;
+  };
+  const current = find(folderStore.tree, parentId);
+  return current?.children ?? [];
+});
+
+// ============ 卡片视图操作 handler（复用现有函数） ============
+function onCardDownload(file: FileItem) { downloadFile(file); }
+function onCardShare(file: FileItem) {
+  shareTargetType.value = 'file';
+  shareTargetId.value = file.id;
+  shareTargetName.value = file.originalName;
+  showShareDialog.value = true;
+}
+function onCardMove(file: FileItem) { openMoveDialogForFiles([file.id]); }
+function onCardTag(file: FileItem) { openTagEditor(file); }
+function onCardDelete(file: FileItem) { handleDelete(file); }
+function onCardToggleSelect(file: FileItem) {
+  const idx = selectedFileIds.value.indexOf(file.id);
+  if (idx >= 0) {
+    selectedFileIds.value.splice(idx, 1);
+  } else {
+    selectedFileIds.value.push(file.id);
+  }
+}
+
+function onFolderCardOpen(folder: Folder) { onFolderNavigate(folder.id); }
+function onFolderCardRename(folder: Folder) { openRenameFolderDialog(folder); }
+function onFolderCardMove(folder: Folder) { openMoveDialogForFolder(folder); }
+
+async function onFolderCardDelete(folder: Folder) {
+  const confirmDialog = DialogPlugin.confirm({
+    header: '删除文件夹',
+    body: `确定删除「${folder.name}」及其所有子文件夹和文件吗？此操作可在 7 天内撤销。`,
+    theme: 'warning',
+    confirmBtn: '删除',
+    cancelBtn: '取消',
+    onConfirm: async () => {
+      try {
+        await folderStore.deleteFolder(folder.id);
+        MessagePlugin.success('文件夹已放入回收站，7 天后永久删除');
+        if (folderStore.currentFolderId === folder.id) {
+          onFolderNavigate(null);
+        }
+      } catch (err: any) {
+        MessagePlugin.error(err?.response?.data?.message || '删除失败');
+      }
+      confirmDialog.destroy();
+    },
+    onClose: () => confirmDialog.destroy(),
+  });
+}
 
 // 分页模式：'paginated' | 'infinite'
 const pageMode = ref<'paginated' | 'infinite'>(
@@ -643,7 +929,7 @@ async function refetchFiles(pageNum?: number, pageSz?: number) {
   const p = pageNum ?? page.value;
   const ps = pageSz ?? Math.abs(pageSize.value);
   const tagIds = selectedTagIds.value.length > 0 ? selectedTagIds.value : undefined;
-  await fileStore.fetchFiles(p, ps, search.value || undefined, sortBy.value || undefined, sortOrder.value || undefined, tagIds);
+  await fileStore.fetchFiles(p, ps, search.value || undefined, sortBy.value || undefined, sortOrder.value || undefined, tagIds, currentFolderIdForApi.value);
 }
 
 function applyFilters() {
@@ -732,7 +1018,7 @@ function handleSortChange(sortInfo: { sortBy: string; descending: boolean } | { 
 async function loadInitialFiles(resetCursorState = false) {
   const tagIds = selectedTagIds.value.length > 0 ? selectedTagIds.value : undefined;
   if (pageMode.value === 'paginated') {
-    await fileStore.fetchFiles(page.value, Math.abs(pageSize.value), search.value || undefined, sortBy.value || undefined, sortOrder.value || undefined, tagIds);
+    await fileStore.fetchFiles(page.value, Math.abs(pageSize.value), search.value || undefined, sortBy.value || undefined, sortOrder.value || undefined, tagIds, currentFolderIdForApi.value);
   } else {
     // 无限模式：使用游标分页
     if (resetCursorState) {
@@ -746,6 +1032,7 @@ async function loadInitialFiles(resetCursorState = false) {
         cursor,
         tagIds,
         signal,
+        currentFolderIdForApi.value,
       );
       if (!result) return { data: [], nextCursor: null, hasMore: false };
 
@@ -769,6 +1056,7 @@ async function loadMoreFiles() {
       cursor,
       selectedTagIds.value.length > 0 ? selectedTagIds.value : undefined,
       signal,
+      currentFolderIdForApi.value,
     );
     if (!result) return { data: [], nextCursor: null, hasMore: false };
 
@@ -1062,6 +1350,7 @@ watch([page, pageSize, search, sortBy, sortOrder, pageMode, selectedTagIds], ([n
 
 onMounted(async () => {
   try { await tagStore.fetchTags(); } catch { /* 标签加载失败不阻塞页面 */ }
+  try { await folderStore.fetchTree(); } catch { /* 文件夹树加载失败不阻塞页面 */ }
 
   try {
     if (pageMode.value === 'infinite' || route.query.mode === 'infinite') {
@@ -1086,6 +1375,60 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
+/* 卡片网格视图（响应式自适应列数） */
+.card-grid-view {
+  display: grid;
+  /* 桌面端：minmax(180px, 1fr) → 宽屏 5+ 列，普通桌面 4 列
+     平板：minmax(160px, 1fr) → 3 列
+     手机：minmax(140px, 1fr) → 2 列
+     全部通过 auto-fill + minmax 自动适配，无需 media query */
+  grid-template-columns: repeat(auto-fill, minmax(min(180px, 100%), 1fr));
+  gap: 16px;
+  padding: 4px 0 16px;
+}
+
+@media (max-width: 768px) {
+  .card-grid-view {
+    grid-template-columns: repeat(auto-fill, minmax(min(140px, 100%), 1fr));
+    gap: 12px;
+  }
+}
+
+@media (min-width: 1200px) {
+  .card-grid-view {
+    /* 宽屏上限制单卡最大宽度，避免过宽 */
+    grid-template-columns: repeat(auto-fill, minmax(180px, 220px));
+    justify-content: start;
+  }
+}
+
+/* 网盘布局：左侧文件夹树 + 右侧主内容区 */
+.drive-layout {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+  min-height: 0;
+}
+
+.folder-sidebar {
+  width: 220px;
+  flex-shrink: 0;
+  background: var(--bg-secondary, var(--td-bg-color-container));
+  border: 1px solid var(--border-color, var(--td-border-level-2-color));
+  border-radius: 8px;
+  position: sticky;
+  top: 16px;
+  max-height: calc(100vh - 32px);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.drive-main {
+  flex: 1;
+  min-width: 0;
+}
+
 .drop-overlay {
   position: absolute;
   inset: 0;

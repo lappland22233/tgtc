@@ -103,6 +103,16 @@ client.interceptors.response.use(
       return Promise.reject(error);
     }
 
+    // 410 Gone：分享链接已失效/过期/取消（Phase 2 新增）
+    // 业务码由 ShareService 在分享不可用时抛 NotFoundException 返回，
+    // 这里仅做友好的错误消息提取，具体 UI 由调用方展示
+    if (status === 410) {
+      const data = error.response?.data as { message?: string; code?: number } | undefined;
+      const msg = data?.message || '此分享链接已失效';
+      console.warn('[API] 分享链接已失效:', msg, error.config?.url);
+      return Promise.reject(new Error(msg));
+    }
+
     // 网络错误（无响应）
     if (!error.response) {
       console.warn('[API] 网络错误，请检查网络连接:', error.message || '未知错误');

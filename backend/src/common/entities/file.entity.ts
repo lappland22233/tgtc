@@ -8,6 +8,7 @@ import {
   JoinColumn,
 } from 'typeorm';
 import { User } from './user.entity';
+import { Folder } from './folder.entity';
 
 export enum FileAccessType {
   PUBLIC = 'public',
@@ -47,21 +48,45 @@ export class File {
   @Column({ type: 'varchar', length: 512, nullable: true, default: null })
   thumbnailPath: string | null;
 
+  /** 所属文件夹 ID（null 表示位于用户网盘根目录） */
+  @Index()
+  @Column({ nullable: true })
+  folderId: string | null;
+
+  @ManyToOne(() => Folder, { nullable: true, onDelete: 'SET NULL' })
+  @JoinColumn({ name: 'folderId' })
+  folder: Folder | null;
+
   @Column({ type: 'enum', enum: FileAccessType, default: FileAccessType.PUBLIC })
   accessType: FileAccessType;
 
+  /**
+   * @deprecated Phase 2 起由 ShareLink.maxAccessCount 管理。此字段保留用于数据迁移兼容，将在下一个 major 版本删除。
+   */
   @Column({ default: -1 })
   maxAccessCount: number;
 
+  /**
+   * @deprecated Phase 2 起由 ShareLink.expiresIn 管理。此字段保留用于数据迁移兼容，将在下一个 major 版本删除。
+   */
   @Column({ nullable: true, type: 'int' })
   expiresIn: number | null;
 
+  /**
+   * @deprecated Phase 2 起由 ShareLink.expiresStartAt 管理。此字段保留用于数据迁移兼容，将在下一个 major 版本删除。
+   */
   @Column({ nullable: true, type: 'timestamp' })
   expiresStartAt: Date | null;
 
+  /**
+   * @deprecated Phase 2 起由 ShareLink.currentAccessCount 管理。此字段保留用于数据迁移兼容，将在下一个 major 版本删除。
+   */
   @Column({ default: 0 })
   currentAccessCount: number;
 
+  /**
+   * @deprecated Phase 2 起由 ShareLink.password 管理。此字段保留用于数据迁移兼容，将在下一个 major 版本删除。
+   */
   @Column({ nullable: true, type: 'varchar' })
   password: string | null;
 

@@ -4,6 +4,7 @@ import {
   Get,
   Post,
   Put,
+  Patch,
   Delete,
   Body,
   Param,
@@ -27,6 +28,8 @@ import { promisify } from 'util';
 import { FileService } from './file.service';
 import { ThumbnailCryptoService } from './thumbnail-crypto.service';
 import { BatchMarkdownDto, UpdateAccessTypeDto, UpdateAccessCountDto, SetPasswordDto, UpdateExpiresDto } from './file.dto';
+import { FolderService } from '../folder/folder.service';
+import { MoveFileDto } from '../folder/folder.dto';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { User, UserRole } from '../common/entities/user.entity';
 import { FileAccessType } from '../common/entities/file.entity';
@@ -56,6 +59,7 @@ export class FileController {
     private rateLimitService: RateLimitService,
     private configCacheService: ConfigCacheService,
     private tagService: TagService,
+    private folderService: FolderService,
   ) {}
 
   /**
@@ -194,6 +198,7 @@ export class FileController {
     @Query('sortOrder') sortOrder?: string,
     @Query('cursor') cursor?: string,
     @Query('tagIds') tagIdsRaw?: string,
+    @Query('folderId') folderId?: string,
     @Req() req?: Request,
   ) {
     // 关键词长度限制：最大 100 字符，防止极端搜索词滥用
@@ -225,11 +230,11 @@ export class FileController {
 
     // Non-admin users can only see their own files
     if (user.role === UserRole.USER) {
-      return this.fileService.findAll(Number(page), Number(limit), user.id, keyword, shouldIncludeDeleted, sortBy, sortOrder, cursor, tagIds);
+      return this.fileService.findAll(Number(page), Number(limit), user.id, keyword, shouldIncludeDeleted, sortBy, sortOrder, cursor, tagIds, folderId);
     }
     // Admin: only show all files when userId filter is explicitly provided;
     // default to own files for the "我的文件" page
-    return this.fileService.findAll(Number(page), Number(limit), userId || user.id, keyword, shouldIncludeDeleted, sortBy, sortOrder, cursor, tagIds);
+    return this.fileService.findAll(Number(page), Number(limit), userId || user.id, keyword, shouldIncludeDeleted, sortBy, sortOrder, cursor, tagIds, folderId);
   }
 
   /**
@@ -430,6 +435,23 @@ export class FileController {
     return { message: '有效期已更新' };
   }
 
+  /**
+   * 移动文件到指定文件夹（网盘功能）。
+   * Body: { folderId: string | null }
+   *   - folderId = null：移动到网盘根目录
+   *   - folderId = <uuid>：移动到指定文件夹（必须是当前用户拥有的文件夹）
+   */
+  @Patch(':id/move')
+  @UseGuards(JwtAuthGuard)
+  async moveFile(
+    @Param('id') id: string,
+    @Body() dto: MoveFileDto,
+    @CurrentUser() user: User,
+  ) {
+    const file = await this.folderService.moveFile(user.id, id, dto);
+    return { message: '文件已移动', data: { id: file.id, folderId: file.folderId } };
+  }
+
   @Delete(':id')
   @UseGuards(JwtAuthGuard)
   async delete(@Param('id') id: string, @CurrentUser() user: User) {
@@ -499,139 +521,30 @@ export class FileController {
     return { message: '标签已移除' };
   }
 
-  // Public file access — 三种模式：
-  // 1. ?access= → 短效访问链接直接返回内容
-  // 2. 无参数 → 无约束公开直返 / 有密码显示密码页 / 受限直接跳转短效访问链接
-  // 3. ?ps=   → 密码验证后同上
+  /**
+   * 老分享链接入口 /files/public/:id —— Phase 2 重构为 302 重定向到 /s/:id。
+   *
+   * Phase 2 之前此端点负责：
+   *   1. 流式返回无约束公开文件
+   *   2. 服务端渲染 HTML 密码页
+   *   3. 302 跳转到短效 access token URL
+   *
+   * Phase 2 起，所有分享逻辑统一由 ShareLink + SPA 路由 /s/:token 处理：
+   *   - 迁移脚本已把现有 accessType=public 的文件复制为 ShareLink（token=原 file.id）
+   *   - 前端 ShareView.vue 接管密码验证 UI
+   *   - 下载由 GET /api/s/:token/download/:fileId 统一处理
+   *
+   * 兼容性：老链接 `/files/public/{id}` 重定向到 `/s/{id}` 后仍可命中对应的 ShareLink。
+   * 私有文件（accessType=private）原本走 /files/public/:id 会被拒绝，
+   * 重定向后由 ShareView 展示「分享不存在」（ShareLink 表里也没有对应记录）。
+   */
   @Get('public/:id')
   async getPublicFile(
     @Param('id') id: string,
-    @Query('access') access: string,
-    @Query('ps') ps: string,
-    @Req() req: Request,
     @Res() res: Response,
   ) {
-    const ip = getClientIp(req);
-
-    try {
-      // 模式 1：短效访问链接（30 秒有效，防重放）
-      if (access) {
-        await this.fileService.consumeAccessToken(access, id);
-        const result = await this.fileService.getPublicFileContentStreamWithAccess(id, ip);
-        res.set({
-          'Content-Type': result.contentType,
-          'Content-Disposition': result.isInline
-            ? `inline; filename="${encodeURIComponent(result.filename)}"`
-            : `attachment; filename="${encodeURIComponent(result.filename)}"`,
-          'Content-Length': result.size.toString(),
-          'Cache-Control': 'no-store, no-cache, must-revalidate',
-          'Accept-Ranges': 'bytes',
-        });
-        const getBytesSent = trackBytesSent(res);
-        const pipe = promisify(pipeline);
-        try {
-          await pipe(result.stream, res);
-        } finally {
-          if (result.accessLogId) {
-            await this.fileService.updateAccessLogResponseSize(result.accessLogId, getBytesSent());
-          }
-        }
-        return;
-      }
-
-      // IP 封禁检查
-      if (ip) {
-        const ipCheck = await this.fileService.isIPBanned(ip);
-        if (ipCheck.banned) {
-          res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
-          res.type('html').send(getBannedPageHTML(ipCheck.message || 'IP已被封禁'));
-          return;
-        }
-      }
-
-      // 私有文件不允许公开访问
-      const isPrivate = await this.fileService.isPrivateFile(id);
-      if (isPrivate) {
-        throw new BadRequestException('此文件为私有文件，不提供公开访问');
-      }
-
-      const hasPwd = await this.fileService.hasPassword(id);
-
-      // 需要密码但未提供 → 显示密码页面
-      if (hasPwd && !ps) {
-        const currentUrl = `${this.appUrl}/files/public/${id}`;
-        res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
-        res.type('html').send(getPasswordPageHTML(currentUrl, id));
-        return;
-      }
-
-      // 提供了密码 → 验证
-      if (hasPwd && ps) {
-        const isPasswordValid = await this.fileService.verifyPassword(id, ps);
-        if (!isPasswordValid) {
-          // 记录失败尝试并检查封禁
-          if (ip) {
-            await this.fileService.recordFailedPasswordAttempt(ip);
-            const ipCheck = await this.fileService.isIPBanned(ip);
-            if (ipCheck.banned) {
-              res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
-              res.type('html').send(getBannedPageHTML(ipCheck.message || 'IP已被封禁'));
-              return;
-            }
-          }
-          const currentUrl = `${this.appUrl}/files/public/${id}`;
-          res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
-          res.type('html').send(getPasswordPageHTML(currentUrl, id, '密码错误，请重试'));
-          return;
-        }
-      }
-
-      // 检查文件是否为无约束公开文件
-      const unrestricted = await this.fileService.isUnrestrictedPublic(id);
-
-      if (unrestricted) {
-        // 无约束公开文件 → 流式返回
-        const result = await this.fileService.getPublicFileContentStream(id, ip);
-        res.set({
-          'Content-Type': result.contentType,
-          'Content-Disposition': result.isInline
-            ? `inline; filename="${encodeURIComponent(result.filename)}"`
-            : `attachment; filename="${encodeURIComponent(result.filename)}"`,
-          'Content-Length': result.size.toString(),
-          'Cache-Control': 'public, no-cache, must-revalidate, max-age=0',
-          'Accept-Ranges': 'bytes',
-        });
-        const getBytesSent = trackBytesSent(res);
-        const pipe = promisify(pipeline);
-        try {
-          await pipe(result.stream, res);
-        } finally {
-          if (result.accessLogId) {
-            await this.fileService.updateAccessLogResponseSize(result.accessLogId, getBytesSent());
-          }
-        }
-        return;
-      }
-
-      // 受限文件（时间/次数限制）→ 跳转一次性链接
-      if (!hasPwd || (hasPwd && ps)) {
-        const constrained = await this.fileService.checkAndIncrementAccess(id);
-        if (!constrained.allowed) {
-          throw new BadRequestException(constrained.reason || '文件访问受限');
-        }
-        const accessToken = this.fileService.generateAccessToken(id);
-        res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
-        res.redirect(302, `${this.appUrl}/api/files/public/${id}?access=${accessToken}`);
-        return;
-      }
-
-      // 不应到达此处
-      throw new BadRequestException('无法访问此文件');
-    } catch (error) {
-      const message = error instanceof Error ? error.message : '请求失败';
-      const status = (error as { status?: number }).status || 500;
-      res.status(status).json({ code: 1, message });
-    }
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
+    res.redirect(302, `/s/${id}`);
   }
 
   // Generate share link
@@ -646,14 +559,6 @@ export class FileController {
   }
 }
 
-function escapeHtml(str: string): string {
-  return str
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#039;');
-}
 
 /** 解析请求体中的 tagIds 字段，支持字符串和数组格式 */
 function parseTagIdsBody(raw: unknown): string[] | undefined {
@@ -663,44 +568,4 @@ function parseTagIdsBody(raw: unknown): string[] | undefined {
   return undefined;
 }
 
-function getPasswordPageHTML(actionUrl: string, _fileId: string, errorMsg?: string): string {
-  const escapedError = errorMsg ? `<div style="background:#F8514922;color:#F85149;padding:12px 16px;border-radius:8px;margin-bottom:20px;font-size:14px;border:1px solid rgba(248,81,73,0.3);">${escapeHtml(errorMsg)}</div>` : '';
-  return `<!DOCTYPE html>
-<html lang="zh-CN">
-<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>文件密码验证</title></head>
-<body style="margin:0;display:flex;align-items:center;justify-content:center;min-height:100vh;background:#0D1117;font-family:'PingFang SC','Microsoft YaHei',sans-serif;">
-<div style="background:#21262D;padding:40px;border-radius:16px;width:100%;max-width:380px;border:1px solid #30363D;box-shadow:0 8px 32px rgba(0,0,0,0.4);">
-<div style="text-align:center;margin-bottom:24px;">
-<div style="font-size:48px;margin-bottom:8px;">🔒</div>
-<h1 style="font-size:20px;color:#E6EDF3;margin:0;">加密文件</h1>
-<p style="color:#8B949E;font-size:14px;margin-top:8px;">此文件需要密码才能访问</p>
-</div>
-${escapedError}
-<form method="GET" action="${escapeHtml(actionUrl)}">
-<div style="margin-bottom:16px;">
-<input type="password" name="ps" placeholder="请输入访问密码" autofocus required style="width:100%;padding:12px;background:#0D1117;border:1px solid #30363D;border-radius:8px;color:#E6EDF3;font-size:16px;outline:none;box-sizing:border-box;" />
-</div>
-<button type="submit" style="width:100%;padding:12px;background:#0052D9;color:#fff;border:none;border-radius:8px;font-size:16px;cursor:pointer;font-weight:500;">验证</button>
-</form>
-</div>
-</body>
-</html>`;
-}
-
-function getBannedPageHTML(message: string): string {
-  return `<!DOCTYPE html>
-<html lang="zh-CN">
-<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>访问受限</title></head>
-<body style="margin:0;display:flex;align-items:center;justify-content:center;min-height:100vh;background:#0D1117;font-family:'PingFang SC','Microsoft YaHei',sans-serif;">
-<div style="background:#21262D;padding:40px;border-radius:16px;width:100%;max-width:380px;border:1px solid #30363D;box-shadow:0 8px 32px rgba(0,0,0,0.4);text-align:center;">
-<div style="font-size:64px;margin-bottom:16px;">🚫</div>
-<h1 style="font-size:20px;color:#E6EDF3;margin:0;">访问受限</h1>
-<p style="color:#8B949E;font-size:14px;margin-top:16px;line-height:1.6;">${escapeHtml(message)}</p>
-<div style="margin-top:24px;padding:12px 16px;background:#F8514922;border-radius:8px;border:1px solid rgba(248,81,73,0.3);">
-<p style="color:#F85149;font-size:13px;margin:0;">密码错误次数过多，请稍后再试</p>
-</div>
-</div>
-</body>
-</html>`;
-}
 

@@ -43,7 +43,20 @@ export type AuditAction =
   | 'tag_create'
   | 'tag_update'
   | 'tag_delete'
-  | 'tag_set_file';
+  | 'tag_set_file'
+  | 'folder_create'
+  | 'folder_rename'
+  | 'folder_move'
+  | 'folder_delete'
+  | 'folder_delete_by_admin'
+  | 'folder_restore'
+  | 'file_move'
+  | 'share_link_create'
+  | 'share_link_update'
+  | 'share_link_delete'
+  | 'share_link_access'
+  | 'share_link_password_failed'
+  | 'share_link_download';
 
 /** 审计日志状态 */
 export enum AuditStatus {
