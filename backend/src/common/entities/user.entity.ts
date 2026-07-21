@@ -7,6 +7,7 @@ import {
   OneToMany,
 } from 'typeorm';
 import { File } from './file.entity';
+import { Folder } from './folder.entity';
 
 export enum UserRole {
   USER = 'user',
@@ -42,6 +43,9 @@ export class User {
 
   @OneToMany(() => File, (file) => file.uploader)
   files: File[];
+
+  @OneToMany(() => Folder, (folder) => folder.owner)
+  folders: Folder[];
 
   @CreateDateColumn()
   createdAt: Date;

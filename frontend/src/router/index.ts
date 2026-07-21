@@ -12,6 +12,13 @@ export function isValidRedirect(path: string): boolean {
 }
 
 const routes: RouteRecordRaw[] = [
+  // 公开分享页（无需登录，独立于 Layout）
+  {
+    path: '/s/:token',
+    name: 'ShareView',
+    component: () => import('../views/share/ShareView.vue'),
+    meta: { public: true },
+  },
   {
     path: '/login',
     name: 'Login',
@@ -42,6 +49,11 @@ const routes: RouteRecordRaw[] = [
         path: 'files',
         name: 'UserFiles',
         component: () => import('../views/user/FileList.vue'),
+      },
+      {
+        path: 'shares',
+        name: 'UserShares',
+        component: () => import('../views/user/Shares.vue'),
       },
       {
         path: 'settings',
@@ -133,6 +145,13 @@ router.beforeEach(async (to, _from, next) => {
 
   try {
     await prevLock;
+
+    // 步骤 0：公开路由（分享页 /s/:token）直接放行，不触发 fetchUser
+    // 这是匿名访问场景，不应被重定向到登录页
+    if (to.meta.public) {
+      next();
+      return;
+    }
 
     const authStore = useAuthStore();
 

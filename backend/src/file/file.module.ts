@@ -12,6 +12,7 @@ import { BannedIP } from '../common/entities/banned-ip.entity';
 import { ShareAudit } from '../common/entities/share-audit.entity';
 import { UploadTask } from '../common/entities/upload-task.entity';
 import { TelegramModule } from '../telegram/telegram.module';
+import { FolderModule } from '../folder/folder.module';
 import { ThumbnailCryptoService } from './thumbnail-crypto.service';
 import { UploadJobService } from './upload-job.service';
 import { ChunkUploadService } from './chunk-upload.service';
@@ -27,6 +28,7 @@ import { TagModule } from '../tag/tag.module';
     ConfigCacheModule,
     RateLimitModule,
     TagModule,
+    FolderModule,
     TelegramModule,
     BullModule.registerQueue({ name: QUEUE_NAMES.FILE_UPLOAD }),
     JwtModule.registerAsync({

@@ -20,6 +20,9 @@
         <router-link to="/files" class="nav-item" :class="{ active: $route.path === '/files' }">
           <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 5.5A1.5 1.5 0 013.5 4H8l2 2h6.5A1.5 1.5 0 0118 7.5v8a1.5 1.5 0 01-1.5 1.5h-13A1.5 1.5 0 012 15.5v-10z"/></svg></span> 我的文件
         </router-link>
+        <router-link to="/shares" class="nav-item" :class="{ active: $route.path === '/shares' }">
+          <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="14" cy="5" r="2.5"/><circle cx="5" cy="10" r="2.5"/><circle cx="14" cy="15" r="2.5"/><path d="M7.2 8.8l4.6-2.6M7.2 11.2l4.6 2.6"/></svg></span> 我的分享
+        </router-link>
         <router-link to="/settings" class="nav-item" :class="{ active: $route.path === '/settings' }">
           <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="10" cy="10" r="3"/><path d="M10 2v2m0 12v2M2 10h2m12 0h2M4.2 4.2l1.4 1.4m8.8 8.8l1.4 1.4M15.8 4.2l-1.4 1.4M5.6 14.4l-1.4 1.4"/></svg></span> 个人设置
         </router-link>

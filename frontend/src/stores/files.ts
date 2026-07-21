@@ -19,7 +19,7 @@ export const useFileStore = defineStore('files', () => {
     currentUserRole.value = role;
   }
 
-  async function fetchFiles(page = 1, limit = 20, keyword?: string, sortBy?: string, sortOrder?: string, tagIds?: string[]) {
+  async function fetchFiles(page = 1, limit = 20, keyword?: string, sortBy?: string, sortOrder?: string, tagIds?: string[], folderId?: string) {
     // 取消上一次请求（如有）
     if (listAbortController) {
       listAbortController.abort();
@@ -29,7 +29,7 @@ export const useFileStore = defineStore('files', () => {
     loading.value = true;
     try {
       const response = await api.get('/files', {
-        params: { page, limit, keyword, includeDeleted: 'true', sortBy, sortOrder, tagIds: tagIds?.join(',') },
+        params: { page, limit, keyword, includeDeleted: 'true', sortBy, sortOrder, tagIds: tagIds?.join(','), folderId },
         signal: controller.signal,
       });
       files.value = response.data.data.files;
@@ -54,7 +54,7 @@ export const useFileStore = defineStore('files', () => {
    * 游标分页请求（无限滚动模式使用）
    * 返回 { files, nextCursor, total } 供 useCursorPagination 使用
    */
-  async function fetchFilesCursor(limit: number, keyword?: string, cursor?: string | null, tagIds?: string[], externalSignal?: AbortSignal) {
+  async function fetchFilesCursor(limit: number, keyword?: string, cursor?: string | null, tagIds?: string[], externalSignal?: AbortSignal, folderId?: string) {
     if (cursorAbortController) {
       cursorAbortController.abort();
     }
@@ -75,6 +75,7 @@ export const useFileStore = defineStore('files', () => {
       if (keyword) params.keyword = keyword;
       if (cursor) params.cursor = cursor;
       if (tagIds?.length) params.tagIds = tagIds.join(',');
+      if (folderId) params.folderId = folderId;
 
       const response = await api.get('/files', { params, signal: controller.signal });
       const data = response.data.data;
