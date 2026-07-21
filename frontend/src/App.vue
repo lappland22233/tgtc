@@ -26,16 +26,17 @@ import { useAuthStore } from './stores/auth';
 
 const authStore = useAuthStore();
 
-const globalConfig = ref({
+const globalConfig = {
   theme: 'dark',
-});
+};
 
 const hasError = ref(false);
 const errorMessage = ref('');
 
 const router = useRouter();
 
-watch(() => router.currentRoute.value, () => {
+// 仅监听路径变化复位错误边界：避免 query/hash 变化也触发复位导致闪烁
+watch(() => router.currentRoute.value.path, () => {
   hasError.value = false;
 });
 

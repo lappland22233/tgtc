@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, LessThan, IsNull } from 'typeorm';
+import { Repository, LessThan, IsNull, Brackets } from 'typeorm';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { BannedIP } from '../common/entities/banned-ip.entity';
 import { ShareAudit } from '../common/entities/share-audit.entity';
@@ -26,12 +26,19 @@ export class TasksService {
   async cleanupExpiredRateLimits() {
     try {
       // 只清理已过期且未锁定的记录，避免误删仍在生效的限流记录
+      // 使用 Brackets 显式分组 OR 条件，避免 orWhere 优先级脆弱导致误删
+      const now = new Date();
+      const cutoff = new Date(Date.now() - 60 * 60 * 1000);
       const result = await this.rateLimitRepository
         .createQueryBuilder()
         .delete()
         .from(RateLimit)
-        .where('("lockedUntil" IS NOT NULL AND "lockedUntil" < :now)', { now: new Date() })
-        .orWhere('("lockedUntil" IS NULL AND "updatedAt" < :cutoff)', { cutoff: new Date(Date.now() - 60 * 60 * 1000) })
+        .where(
+          new Brackets((qb) => {
+            qb.where('("lockedUntil" IS NOT NULL AND "lockedUntil" < :now)', { now })
+              .orWhere('("lockedUntil" IS NULL AND "updatedAt" < :cutoff)', { cutoff });
+          }),
+        )
         .execute();
       if ((result.affected ?? 0) > 0) {
         this.logger.log(`已清理 ${result.affected} 条过期限流记录`);
@@ -81,11 +88,19 @@ export class TasksService {
   @Cron('0 3 * * *')
   async cleanupExpiredAuditLogs() {
     try {
-      const retentionDays = parseInt(process.env.AUDIT_LOG_RETENTION_DAYS || '90', 10);
+      // 校验保留期：Math.max(7, ...) 确保最少保留 7 天，
+      // parseInt(...) || 90 防止 NaN/0/负数误删全部审计日志
+      const retentionDays = Math.max(
+        7,
+        parseInt(process.env.AUDIT_LOG_RETENTION_DAYS || '90', 10) || 90,
+      );
       const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000);
       const BATCH_SIZE = 1000;
+      // 单次任务最大分批次数（1000 批 = 100 万条），防止千万级记录耗时超 1 小时
+      const MAX_BATCHES = 1000;
 
       let totalDeleted = 0;
+      let batches = 0;
       let batchDeleted: number;
       do {
         const result = await this.auditLogRepository
@@ -97,7 +112,14 @@ export class TasksService {
           .execute();
         batchDeleted = result.affected ?? 0;
         totalDeleted += batchDeleted;
-      } while (batchDeleted === BATCH_SIZE);
+        batches++;
+      } while (batchDeleted === BATCH_SIZE && batches < MAX_BATCHES);
+
+      if (batches >= MAX_BATCHES && batchDeleted === BATCH_SIZE) {
+        this.logger.warn(
+          `审计日志清理达到单次任务批次上限 (${MAX_BATCHES})，剩余记录将在下次任务继续清理`,
+        );
+      }
 
       if (totalDeleted > 0) {
         this.logger.log(

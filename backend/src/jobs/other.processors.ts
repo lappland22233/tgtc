@@ -23,8 +23,18 @@ export class AlertEvaluationProcessor {
   async evaluateAlerts(_job: Job): Promise<void> {
     try {
       // 从预聚合表读取最近 1 分钟的指标
-      const windowTime = new Date();
-      windowTime.setSeconds(0, 0);
+      // 使用 UTC 时间截断到分钟，与 metrics-aggregation 处理器写入窗口保持一致；
+      // 若用本地时间截断，非 UTC 部署时永远查不到预聚合窗口，告警系统会静默失效。
+      const now = new Date();
+      const windowTime = new Date(Date.UTC(
+        now.getUTCFullYear(),
+        now.getUTCMonth(),
+        now.getUTCDate(),
+        now.getUTCHours(),
+        now.getUTCMinutes(),
+        0,
+        0,
+      ));
 
       const [metrics] = await this.dataSource.query(
         `SELECT "totalRequests", "qpsAvg", "error5xxCount", "error4xxCount",
@@ -38,22 +48,22 @@ export class AlertEvaluationProcessor {
         return;
       }
 
-      const evaluations = await this.alertEngine.evaluate(metrics);
-      if (evaluations.length > 0) {
-        const alerts = await this.alertEngine.createAlerts(evaluations);
-        for (const alert of alerts) {
-          this.alertGateway.broadcastAlert({
-            id: alert.id,
-            ruleId: alert.ruleId,
-            level: alert.level,
-            title: alert.title,
-            message: alert.message || '',
-            createdAt: alert.createdAt,
-          });
-        }
+      // 评估 + 创建告警（规则配置仅读取一次，冷却期原子去重）
+      const alerts = await this.alertEngine.evaluateAndCreateAlerts(metrics);
+      for (const alert of alerts) {
+        this.alertGateway.broadcastAlert({
+          id: alert.id,
+          ruleId: alert.ruleId,
+          level: alert.level,
+          title: alert.title,
+          message: alert.message || '',
+          createdAt: alert.createdAt,
+        });
       }
     } catch (error) {
       this.logger.warn(`告警评估失败: ${(error as Error).message}`);
+      // 抛出以触发 Bull 重试，避免 DB 暂时不可用导致本次评估永久丢失
+      throw error;
     }
   }
 }
@@ -118,6 +128,8 @@ export class AnomalyDetectionProcessor {
       }
     } catch (error) {
       this.logger.warn(`异常检测失败: ${(error as Error).message}`);
+      // 抛出以触发 Bull 重试，避免 DB 暂时不可用导致本次检测永久丢失
+      throw error;
     }
   }
 }
@@ -132,24 +144,33 @@ export class DataArchivalProcessor {
   /** 每日 02:00 归档超过保留期的日志 */
   @Process('archive-data')
   async archiveData(_job: Job): Promise<void> {
-    const retentionDays = parseInt(
-      process.env.ACCESS_LOG_RETENTION_DAYS || '30',
-      10,
+    // 校验保留期：防止误设为 0/负数/NaN 导致删除全部日志
+    const retentionDays = Math.max(
+      1,
+      parseInt(process.env.ACCESS_LOG_RETENTION_DAYS || '30', 10) || 30,
     );
     const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000);
     const BATCH_SIZE = 1000;
+    // 单次任务最大分批次数上限（1000 批 = 100 万条），防止无限循环
+    const MAX_BATCHES = 1000;
 
     try {
       let deleted = 0;
+      let batches = 0;
       // 分批删除（每批 1000 条），防止大表一次性删除导致长事务
-      while (true) {
+      while (batches < MAX_BATCHES) {
         const result = await this._dataSource.query(
           `DELETE FROM "access_logs" WHERE "createdAt" < $1 AND "id" IN (SELECT "id" FROM "access_logs" WHERE "createdAt" < $1 LIMIT $2)`,
           [cutoff, BATCH_SIZE],
         );
         const count = Array.isArray(result) ? result[0]?.rowCount ?? 0 : (result[1] ?? 0);
         deleted += count;
+        batches++;
         if (count < BATCH_SIZE) break;
+      }
+
+      if (batches >= MAX_BATCHES) {
+        this.logger.warn(`数据归档达到单次任务批次上限 (${MAX_BATCHES})，剩余记录将在下次任务继续归档`);
       }
 
       if (deleted > 0) {
@@ -205,6 +226,8 @@ export class WeeklyReportProcessor {
       );
     } catch (error) {
       this.logger.warn(`周报生成失败: ${(error as Error).message}`);
+      // 抛出以触发 Bull 重试，避免暂时性故障导致周报永久缺失
+      throw error;
     }
   }
 }

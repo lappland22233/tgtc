@@ -7,7 +7,7 @@ import {
 } from 'typeorm';
 
 @Entity('verification_codes')
-@Index(['email', 'type', 'isUsed'])
+@Index('IDX_verification_codes_email_type_isUsed_expiresAt', ['email', 'type', 'isUsed', 'expiresAt'])
 export class VerificationCode {
   @PrimaryColumn({ type: 'uuid', default: () => 'gen_random_uuid()' })
   id: string;
@@ -23,9 +23,6 @@ export class VerificationCode {
 
   @Column({ default: false })
   isUsed: boolean;
-
-  @Column({ default: 0 })
-  attempts: number;
 
   @Column()
   expiresAt: Date;

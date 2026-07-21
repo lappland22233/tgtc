@@ -59,7 +59,7 @@
                 <span style="font-size:13px">{{ row.message }}</span>
               </template>
               <template #createdAt="{ row }">
-                {{ new Date(row.createdAt).toLocaleString('zh-CN') }}
+                {{ formatDateTime(row.createdAt) }}
               </template>
               <template #acknowledgedAt="{ row }">
                 <span v-if="row.acknowledgedAt" style="color:var(--success-color)">已确认</span>
@@ -77,7 +77,7 @@
               </div>
               <div class="mobile-card-body">{{ alert.message }}</div>
               <div class="mobile-card-meta">
-                <span>{{ new Date(alert.createdAt).toLocaleString('zh-CN') }}</span>
+                <span>{{ formatDateTime(alert.createdAt) }}</span>
                 <span v-if="alert.acknowledgedAt" style="color:var(--success-color)">已确认</span>
                 <span v-else style="color:var(--warning-color)">待处理</span>
               </div>
@@ -395,7 +395,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted, computed, defineAsyncComponent } from 'vue';
+import { ref, reactive, onMounted, computed, watch, defineAsyncComponent } from 'vue';
 import MessagePlugin from '@/utils/message';
 import { api, useAuthStore } from '@/stores/auth';
 import { storeToRefs } from 'pinia';
@@ -568,6 +568,13 @@ function riskLabel(level: string): string {
     critical: '严重',
   };
   return map[level] || level;
+}
+
+// 非法日期降级为 '-'，避免直接 toLocaleString 输出 "Invalid Date"
+function formatDateTime(dateStr: string | null): string {
+  if (!dateStr) return '-';
+  const d = new Date(dateStr);
+  return isNaN(d.getTime()) ? '-' : d.toLocaleString('zh-CN');
 }
 
 // Fetch ban stats
@@ -771,6 +778,13 @@ async function resetSecurityConfig() {
     configLoading.value = false;
   }
 }
+
+// 角色可能在挂载后异步更新为超级管理员，届时补加载安全配置，避免配置 tab 显示但数据缺失
+watch(isSuperAdmin, (val) => {
+  if (val && configItems.value.length === 0 && !configLoading.value) {
+    fetchSecurityConfig();
+  }
+});
 
 onMounted(() => {
   // 并发发起所有独立请求，失败的不影响其他数据区域渲染

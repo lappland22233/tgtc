@@ -6,6 +6,7 @@ import {
   UpdateDateColumn,
   ManyToOne,
   JoinColumn,
+  Index,
 } from 'typeorm';
 import { User } from './user.entity';
 import { Folder } from './folder.entity';
@@ -16,6 +17,7 @@ export enum FileAccessType {
 }
 
 @Entity('files')
+@Index('idx_files_uploader_folder_deleted', ['uploaderId', 'folderId', 'isDeleted'])
 export class File {
   @PrimaryColumn({ type: 'uuid', default: () => 'gen_random_uuid()' })
   id: string;

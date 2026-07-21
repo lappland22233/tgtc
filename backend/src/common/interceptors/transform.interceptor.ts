@@ -13,6 +13,12 @@ export interface ApiResponse<T> {
   data: T;
 }
 
+/**
+ * 成功响应统一包装为 { code: 0, message: 'success', data }。
+ * 注意：本拦截器仅处理成功响应；异常响应由全局 GlobalExceptionFilter
+ * （在 main.ts 注册）统一为 { code, message, data: null } 结构，
+ * 以保证成功/错误响应契约一致。
+ */
 @Injectable()
 export class TransformInterceptor<T>
   implements NestInterceptor<T, ApiResponse<T>>

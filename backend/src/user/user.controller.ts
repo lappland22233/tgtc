@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Put, Delete, Body, Param, Query, UseGuards } from '@nestjs/common';
+import { Controller, Get, Post, Put, Delete, Body, Param, Query, UseGuards, ParseUUIDPipe } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 import { UserService } from './user.service';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -15,22 +15,29 @@ export class UserController {
   @Get()
   @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
   async findAll(
-    @Query('page') page = 1,
-    @Query('limit') limit = 20,
+    @Query('page') page = '1',
+    @Query('limit') limit = '20',
     @Query('search') search?: string,
   ) {
-    return this.userService.findAll(Number(page), Number(limit), search);
-  }
-
-  @Get(':id')
-  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
-  async findOne(@Param('id') id: string) {
-    return this.userService.findOne(id);
+    // 防御非数字分页参数：Number('abc')=NaN 会传入 .skip(NaN) 致非法 SQL（500）
+    const parsedPage = parseInt(String(page), 10);
+    const parsedLimit = parseInt(String(limit), 10);
+    return this.userService.findAll(
+      Number.isFinite(parsedPage) && parsedPage > 0 ? parsedPage : 1,
+      Number.isFinite(parsedLimit) && parsedLimit > 0 ? parsedLimit : 20,
+      search,
+    );
   }
 
   @Get('me/stats')
   async getMyStats(@CurrentUser() user: User) {
     return this.userService.getUserStats(user.id);
+  }
+
+  @Get(':id')
+  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
+  async findOne(@Param('id', ParseUUIDPipe) id: string) {
+    return this.userService.findOne(id);
   }
 
   @Post()
@@ -45,21 +52,22 @@ export class UserController {
   @Put(':id/role')
   @Roles(UserRole.SUPER_ADMIN)
   async updateRole(
-    @Param('id') id: string,
+    @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: UpdateRoleDto,
     @CurrentUser() user: User,
   ) {
-    await this.userService.updateRole(id, dto.role, user.role);
+    await this.userService.updateRole(id, dto.role, user);
     return { message: '角色更新成功' };
   }
 
   @Put(':id/ban')
   @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
   async banUser(
-    @Param('id') id: string,
+    @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: BanUserDto,
+    @CurrentUser() requester: User,
   ) {
-    await this.userService.banUser(id, dto.isBanned);
+    await this.userService.banUser(id, dto.isBanned, requester);
     return { message: dto.isBanned ? '用户已封禁' : '用户已解封' };
   }
 
@@ -74,7 +82,7 @@ export class UserController {
 
   @Delete(':id')
   @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
-  async delete(@Param('id') id: string, @CurrentUser() requester: User) {
+  async delete(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() requester: User) {
     await this.userService.delete(id, requester);
     return { message: '用户已删除' };
   }

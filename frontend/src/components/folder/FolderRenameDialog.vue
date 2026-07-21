@@ -24,7 +24,8 @@
 
 <script setup lang="ts">
 import { ref, reactive, watch } from 'vue';
-import { MessagePlugin } from 'tdesign-vue-next';
+import MessagePlugin from '@/utils/message';
+import { getErrorMessage } from '@/utils/error';
 import { useFolderStore, type Folder } from '../../stores/folders';
 
 const props = defineProps<{
@@ -65,8 +66,8 @@ async function handleConfirm() {
     await folderStore.renameFolder(props.folder.id, form.name.trim());
     MessagePlugin.success('已重命名');
     emit('update:visible', false);
-  } catch (err: any) {
-    MessagePlugin.error(err?.response?.data?.message || '重命名失败');
+  } catch (err) {
+    MessagePlugin.error(getErrorMessage(err) || '重命名失败');
   } finally {
     loading.value = false;
   }

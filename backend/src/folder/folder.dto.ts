@@ -1,7 +1,10 @@
-import { IsString, MaxLength, IsOptional, IsUUID, IsBoolean } from 'class-validator';
+import { IsString, MaxLength, IsOptional, IsUUID, IsBoolean, IsNotEmpty } from 'class-validator';
+import { Transform as ClassTransform } from 'class-transformer';
 
 export class CreateFolderDto {
   @IsString()
+  @IsNotEmpty({ message: '文件夹名称不能为空' })
+  @ClassTransform(({ value }) => (typeof value === 'string' ? value.trim() : value))
   @MaxLength(255)
   name: string;
 
@@ -13,6 +16,8 @@ export class CreateFolderDto {
 
 export class RenameFolderDto {
   @IsString()
+  @IsNotEmpty({ message: '文件夹名称不能为空' })
+  @ClassTransform(({ value }) => (typeof value === 'string' ? value.trim() : value))
   @MaxLength(255)
   name: string;
 }
@@ -38,6 +43,7 @@ export class ListContentsQueryDto {
   parentId?: string | null;
 
   @IsOptional()
+  @ClassTransform(({ value }) => value === true || value === 'true')
   @IsBoolean()
   includeDeleted?: boolean;
 }

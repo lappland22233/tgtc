@@ -8,7 +8,7 @@ export class CreateUserDto {
 
   @IsString()
   @MinLength(6, { message: '密码至少6位' })
-  @MaxLength(20, { message: '密码最多20位' })
+  @MaxLength(128, { message: '密码最多128位' })
   password: string;
 
   @IsOptional()
@@ -28,10 +28,11 @@ export class BanUserDto {
 
 export class ChangePasswordDto {
   @IsString()
+  @MaxLength(128, { message: '原密码过长' })
   oldPassword: string;
 
   @IsString()
   @MinLength(6, { message: '新密码至少6位' })
-  @MaxLength(20, { message: '新密码最多20位' })
+  @MaxLength(128, { message: '新密码最多128位' })
   newPassword: string;
 }

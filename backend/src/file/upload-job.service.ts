@@ -32,6 +32,8 @@ export class UploadJobService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(UploadJobService.name);
   /** 内存缓存：热路径查询，避免每次状态轮询都查库 */
   private jobs = new Map<string, UploadJob>();
+  /** 每个 job 的串行持久化链，保证同一 job 的写入按调用顺序落库，避免并发乱序导致状态回退 */
+  private writeChains = new Map<string, Promise<void>>();
   private cleanupTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(
@@ -144,6 +146,7 @@ export class UploadJobService implements OnModuleInit, OnModuleDestroy {
 
     for (const id of idsToDelete) {
       this.jobs.delete(id);
+      this.writeChains.delete(id);
     }
 
     if (idsToDelete.length > 0) {
@@ -152,21 +155,37 @@ export class UploadJobService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * 将内存中的任务状态持久化到数据库
+   * 将内存中的任务状态持久化到数据库。
+   * 通过 per-job 写入链串行化，保证同一任务的多次更新按顺序落库，
+   * 避免高频 fire-and-forget upsert 并发乱序导致状态回退。
    */
-  private async saveToDatabase(job: UploadJob): Promise<void> {
-    await this.uploadTaskRepo.upsert(
-      {
-        jobId: job.jobId,
-        userId: job.userId,
-        filename: job.filename,
-        status: job.status,
-        progress: job.progress,
-        result: job.result ? JSON.stringify(job.result) : null,
-        error: job.error || null,
-      },
-      ['jobId'],
-    );
+  private saveToDatabase(job: UploadJob): Promise<void> {
+    const prev = this.writeChains.get(job.jobId) || Promise.resolve();
+    const next = prev
+      .catch(() => {})
+      .then(() =>
+        this.uploadTaskRepo.upsert(
+          {
+            jobId: job.jobId,
+            userId: job.userId,
+            filename: job.filename,
+            status: job.status,
+            progress: job.progress,
+            result: job.result ? JSON.stringify(job.result) : null,
+            error: job.error || null,
+          },
+          ['jobId'],
+        ),
+      )
+      .then(() => undefined);
+    // 链空闲时清理引用，避免 Map 泄漏
+    void next.finally(() => {
+      if (this.writeChains.get(job.jobId) === next) {
+        this.writeChains.delete(job.jobId);
+      }
+    });
+    this.writeChains.set(job.jobId, next);
+    return next;
   }
 
   /**

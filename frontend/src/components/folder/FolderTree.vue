@@ -51,7 +51,9 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue';
-import { MessagePlugin, DialogPlugin } from 'tdesign-vue-next';
+import MessagePlugin from '@/utils/message';
+import { DialogPlugin } from 'tdesign-vue-next/es/dialog';
+import { getErrorMessage } from '@/utils/error';
 import { useFolderStore, type Folder } from '../../stores/folders';
 
 const folderStore = useFolderStore();
@@ -111,6 +113,8 @@ async function onCtxAction(action: 'rename' | 'move' | 'delete') {
   } else if (action === 'delete') {
     const confirmDialog = DialogPlugin.confirm({
       header: '删除文件夹',
+      // 注意：body 为字符串时 TDesign 按纯文本渲染（自动转义），folder.name 不会被解析为 HTML。
+      // 切勿改为 innerHTML/VNode 拼接用户输入，否则会引入 XSS。
       body: `确定删除「${folder.name}」及其所有子文件夹和文件吗？此操作可在 7 天内撤销。`,
       theme: 'warning',
       confirmBtn: '删除',
@@ -123,8 +127,8 @@ async function onCtxAction(action: 'rename' | 'move' | 'delete') {
           if (folderStore.currentFolderId === folder.id) {
             emit('navigate', null);
           }
-        } catch (err: any) {
-          MessagePlugin.error(err?.response?.data?.message || '删除失败');
+        } catch (err) {
+          MessagePlugin.error(getErrorMessage(err) || '删除失败');
         }
         confirmDialog.destroy();
       },

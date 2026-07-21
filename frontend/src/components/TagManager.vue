@@ -2,7 +2,7 @@
   <t-dialog v-model:visible="dialogVisible" header="标签管理" width="480px" @close="handleClose">
     <!-- 创建标签 -->
     <div style="margin-bottom: 16px;">
-      <t-input v-model="newTagName" placeholder="输入标签名称（最多50字）" style="margin-bottom: 8px;" autocomplete="off" name="tag-name" @enter="handleCreate" />
+      <t-input v-model="newTagName" placeholder="输入标签名称（最多50字）" :maxlength="50" style="margin-bottom: 8px;" autocomplete="off" name="tag-name" @enter="handleCreate" />
       <div style="display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px;">
         <div
           v-for="c in presetColors"
@@ -65,6 +65,7 @@ import { ref, computed, watch } from 'vue';
 import { useTagStore } from '../stores/tags';
 import { useAuthStore } from '../stores/auth';
 import MessagePlugin from '@/utils/message';
+import { getErrorMessage } from '@/utils/error';
 
 const props = defineProps<{
   visible: boolean;
@@ -122,18 +123,23 @@ async function handleCreate() {
     await tagStore.createTag(name, newTagColor.value);
     newTagName.value = '';
     newTagColor.value = '#0052d9';
-  } catch (err: any) {
-    const msg = err?.response?.data?.message || '创建标签失败';
-    MessagePlugin.error(msg);
+  } catch (err) {
+    MessagePlugin.error(getErrorMessage(err) || '创建标签失败');
   }
 }
 
+// 删除进行中标记：防止快速双击对同一标签触发两次删除请求
+const deletingIds = ref(new Set<string>());
+
 async function handleDelete(id: string) {
+  if (deletingIds.value.has(id)) return;
+  deletingIds.value.add(id);
   try {
     await tagStore.deleteTag(id);
-  } catch (err: any) {
-    const msg = err?.response?.data?.message || '删除标签失败';
-    MessagePlugin.error(msg);
+  } catch (err) {
+    MessagePlugin.error(getErrorMessage(err) || '删除标签失败');
+  } finally {
+    deletingIds.value.delete(id);
   }
 }
 </script>

@@ -6,6 +6,8 @@ import {
   Param,
   Query,
   UseGuards,
+  HttpCode,
+  HttpStatus,
 } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -64,8 +66,10 @@ export class AlertController {
   }
 
   @Put('rules')
+  @HttpCode(HttpStatus.NOT_IMPLEMENTED)
   async updateRules() {
-    // Phase 4: 规则阈值修改留待后续版本
+    // Phase 4: 规则阈值修改留待后续版本。
+    // 返回 501 明确表示未实现，避免误以为修改已生效。
     return { message: '规则修改功能将在后续版本中实现' };
   }
 }

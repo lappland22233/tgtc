@@ -30,6 +30,10 @@ export function validateEnv(): void {
   } else if (!/^\d+:[\w-]+$/.test(process.env.TELEGRAM_BOT_TOKEN)) {
     errors.push('TELEGRAM_BOT_TOKEN 格式错误（应为 <bot_id>:<token>）');
   }
+  // TELEGRAM_CHAT_ID 为上传必需项，缺失时上传会在运行期才失败，故列为启动必检
+  if (!process.env.TELEGRAM_CHAT_ID) {
+    errors.push('TELEGRAM_CHAT_ID 未设置');
+  }
 
   // ---- SMTP 邮件（仅当存在 SMTP_HOST 时校验） ----
   if (process.env.SMTP_HOST) {
@@ -39,12 +43,32 @@ export function validateEnv(): void {
     }
     if (!process.env.SMTP_USER) errors.push('SMTP_USER 未设置（SMTP_HOST 已配置）');
     if (!process.env.SMTP_PASSWORD) errors.push('SMTP_PASSWORD 未设置（SMTP_HOST 已配置）');
+    // SMTP 密码以加密形式存储，解密依赖 SMTP_ENCRYPTION_KEY/SALT。
+    // 缺失时首次发送邮件才会 500，故在启动期强制校验。
+    if (!process.env.SMTP_ENCRYPTION_KEY) {
+      errors.push('SMTP_ENCRYPTION_KEY 未设置（SMTP_HOST 已配置，用于解密 SMTP 密码）');
+    }
+    if (!process.env.SMTP_ENCRYPTION_SALT) {
+      errors.push('SMTP_ENCRYPTION_SALT 未设置（SMTP_HOST 已配置，用于解密 SMTP 密码）');
+    }
+    // SMTP_SECURE 若配置必须为可识别的布尔字符串，避免 'false' 被误判为 true
+    if (process.env.SMTP_SECURE && !/^(true|false)$/i.test(process.env.SMTP_SECURE)) {
+      errors.push('SMTP_SECURE 必须为 true 或 false');
+    }
   }
 
   // ---- 应用地址 ----
   if (!process.env.APP_URL) {
     // APP_URL 不存在时仅警告（生产环境建议设置）
     console.warn('[env-validation] APP_URL 未设置，分享链接和密码页将使用默认值 http://localhost:3000');
+  }
+
+  // ---- 运行环境与缓存（仅在显式配置但格式错误时报错） ----
+  if (process.env.NODE_ENV && !['development', 'test', 'staging', 'production'].includes(process.env.NODE_ENV)) {
+    errors.push(`NODE_ENV 取值非法: ${process.env.NODE_ENV}（应为 development/test/staging/production）`);
+  }
+  if (process.env.CACHE_TTL_MS && (isNaN(Number(process.env.CACHE_TTL_MS)) || Number(process.env.CACHE_TTL_MS) <= 0)) {
+    errors.push('CACHE_TTL_MS 必须为正数（毫秒）');
   }
 
   if (errors.length > 0) {

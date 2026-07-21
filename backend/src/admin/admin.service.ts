@@ -14,7 +14,7 @@ import { FileService } from '../file/file.service';
 import { ConfigCacheService } from '../common/services/config-cache.service';
 import { AuditService } from '../common/services/audit.service';
 import { encryptPassword } from '../common/utils/crypto.util';
-import { FILE_DELETE_GRACE_MS, FILE_DELETE_COOLDOWN_MS } from '../common/constants/durations';
+import { FILE_DELETE_GRACE_MS, FILE_DELETE_COOLDOWN_MS, MS_PER_DAY } from '../common/constants/durations';
 import { ExportService, ExportOptions } from './export.service';
 import { SEC_CONFIG_META, SEC_CONFIG_DEFAULTS } from './security-config.defaults';
 import {
@@ -549,7 +549,7 @@ export class AdminService {
     switch (timeRange) {
       case '1h': return new Date(now.getTime() - 60 * 60 * 1000);
       case '24h': return new Date(now.getTime() - 24 * 60 * 60 * 1000);
-      case '7d': return new Date(now.getTime() - FILE_DELETE_GRACE_MS);
+      case '7d': return new Date(now.getTime() - 7 * MS_PER_DAY);
       case '30d': return new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
       default: return new Date(now.getTime() - 24 * 60 * 60 * 1000);
     }
@@ -730,8 +730,19 @@ export class AdminService {
     const total = await baseQb.getCount();
 
     // 带用户名联查的数据查询
+    // 将 log.userId（存 UUID 的 varchar）转换为 uuid 与 users 主键关联，
+    // 避免对 u.id 做 CAST 导致 users 主键索引失效全表扫描；
+    // 用 UUID 正则保护转换，非法/历史脏值安全地返回 NULL 而不抛错。
     const items = await baseQb
-      .leftJoin(User, 'u', 'CAST(u.id AS varchar) = log.userId')
+      .leftJoin(
+        User,
+        'u',
+        `u.id = CASE
+           WHEN log.userId ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+           THEN CAST(log.userId AS uuid)
+           ELSE NULL
+         END`,
+      )
       .select([
         'log.id', 'log.userId', 'log.action', 'log.ip',
         'log.resourceType', 'log.resourceId', 'log.metadata',
@@ -1426,56 +1437,52 @@ export class AdminService {
   }
 
   async getFileTypeStats(_query: FileTypeQueryDto) {
-    const files = await this.fileRepository
+    // 使用 SQL GROUP BY 在数据库侧完成分类与聚合，避免将全部文件加载进内存
+    // （原实现 getRawMany 全量加载后逐条分类，数十万文件易 OOM）
+    const rows = await this.fileRepository
       .createQueryBuilder('f')
-      .select(['f."mimeType"', 'f.size', 'f."accessType"'])
+      .select(
+        `CASE
+           WHEN LOWER(COALESCE(f."mimeType", '')) LIKE 'image/%' THEN '图片'
+           WHEN LOWER(COALESCE(f."mimeType", '')) LIKE 'video/%' THEN '视频'
+           WHEN LOWER(COALESCE(f."mimeType", '')) LIKE 'audio/%' THEN '音频'
+           WHEN LOWER(COALESCE(f."mimeType", '')) ~ '(pdf|document|spreadsheet|presentation|text|msword|officedocument|opendocument)' THEN '文档'
+           WHEN LOWER(COALESCE(f."mimeType", '')) ~ '(zip|rar|7z|tar|gz|compress|archive)' THEN '压缩包'
+           ELSE '其他'
+         END`,
+        'category',
+      )
+      .addSelect('COUNT(*)', 'fileCount')
+      .addSelect('COALESCE(SUM(f.size), 0)', 'totalSize')
       .where('f."isDeleted" = false')
-      .getRawMany<{ mimeType: string; f_size: string; accessType: string }>();
+      .groupBy('category')
+      .getRawMany<{ category: string; fileCount: string; totalSize: string }>();
 
-    const mimeCategories: { name: string; fileCount: number; totalSize: bigint }[] = [
-      { name: '图片', fileCount: 0, totalSize: BigInt(0) },
-      { name: '视频', fileCount: 0, totalSize: BigInt(0) },
-      { name: '音频', fileCount: 0, totalSize: BigInt(0) },
-      { name: '文档', fileCount: 0, totalSize: BigInt(0) },
-      { name: '压缩包', fileCount: 0, totalSize: BigInt(0) },
-      { name: '其他', fileCount: 0, totalSize: BigInt(0) },
-    ];
-
+    // 固定分类顺序（含零计数分类），与原实现的输出结构保持一致
+    const categoryOrder = ['图片', '视频', '音频', '文档', '压缩包', '其他'];
+    const byCategory = new Map<string, { fileCount: number; totalSize: bigint }>();
     let totalSize = BigInt(0);
 
-    for (const f of files) {
-      const mime = (f.mimeType || '').toLowerCase();
-      const size = BigInt(f.f_size || '0');
+    for (const r of rows) {
+      const size = BigInt(r.totalSize || '0');
+      byCategory.set(r.category, {
+        fileCount: Number(r.fileCount) || 0,
+        totalSize: size,
+      });
       totalSize += size;
-
-      let category: string;
-      if (mime.startsWith('image/')) {
-        category = '图片';
-      } else if (mime.startsWith('video/')) {
-        category = '视频';
-      } else if (mime.startsWith('audio/')) {
-        category = '音频';
-      } else if (/pdf|document|spreadsheet|presentation|text|msword|officedocument|opendocument/.test(mime)) {
-        category = '文档';
-      } else if (/zip|rar|7z|tar|gz|compress|archive/.test(mime)) {
-        category = '压缩包';
-      } else {
-        category = '其他';
-      }
-
-      const cat = mimeCategories.find((c) => c.name === category)!;
-      cat.fileCount++;
-      cat.totalSize += size;
     }
 
-    const categories = mimeCategories.map((c) => ({
-      name: c.name,
-      fileCount: c.fileCount,
-      totalSize: c.totalSize.toString(),
-      percentage: totalSize > BigInt(0)
-        ? parseFloat(((Number(c.totalSize) / Number(totalSize)) * 100).toFixed(2))
-        : 0,
-    }));
+    const categories = categoryOrder.map((name) => {
+      const c = byCategory.get(name) || { fileCount: 0, totalSize: BigInt(0) };
+      return {
+        name,
+        fileCount: c.fileCount,
+        totalSize: c.totalSize.toString(),
+        percentage: totalSize > BigInt(0)
+          ? parseFloat(((Number(c.totalSize) / Number(totalSize)) * 100).toFixed(2))
+          : 0,
+      };
+    });
 
     return { categories };
   }
@@ -1651,13 +1658,13 @@ export class AdminService {
 
     await this.configCacheService.setBatch(entries);
 
-    // 审计日志
+    // 审计日志：仅记录变更的配置键与数量，避免把配置明文值写入审计存储
     this.auditService.log({
       action: 'config_change',
       userId: user.id,
       resourceType: 'security_config',
       resourceId: 'batch',
-      metadata: { keys: configs.map(c => c.key), values: configs.map(c => c.value) },
+      metadata: { keys: configs.map(c => c.key), count: configs.length },
     });
 
     this.logger.log(`安全配置已由用户 ${user.email} 更新: ${configs.map(c => `${c.key}=${c.value}`).join(', ')}`);
@@ -1712,9 +1719,9 @@ export class AdminService {
     }
 
     return {
-      totalRecords: parseInt(totalResult.total, 10) || 0,
+      totalRecords: parseInt(totalResult?.total ?? '0', 10) || 0,
       byType,
-      uniqueIPs: parseInt(ipResult.uniqueIPs, 10) || 0,
+      uniqueIPs: parseInt(ipResult?.uniqueIPs ?? '0', 10) || 0,
       trend: trendResult.map(row => ({
         time: row.time,
         error: parseInt(row.error, 10) || 0,
@@ -1834,7 +1841,22 @@ export class AdminService {
       qb.andWhere('t.type = :type', { type });
     }
 
-    const records = await qb.orderBy('t.createdAt', 'ASC').take(50000).getMany();
+    // 分批拉取（每批 5000 条，最多 50000 条），避免单次查询一次性
+    // 加载/序列化 5 万行导致内存峰值过高（OOM）
+    const CHUNK_SIZE = 5000;
+    const MAX_RECORDS = 50000;
+    const records: TelemetryRecord[] = [];
+    qb.orderBy('t.createdAt', 'ASC');
+
+    while (records.length < MAX_RECORDS) {
+      const batch = await qb
+        .skip(records.length)
+        .take(CHUNK_SIZE)
+        .getMany();
+      if (batch.length === 0) break;
+      records.push(...batch);
+      if (batch.length < CHUNK_SIZE) break;
+    }
 
     return {
       exportTime: new Date().toISOString(),

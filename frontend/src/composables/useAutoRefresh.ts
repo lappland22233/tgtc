@@ -72,7 +72,12 @@ export function useAutoRefresh(
 
     if (seconds > 0) {
       timer = setInterval(() => {
-        refresh();
+        // 页面处于后台时跳过刷新，避免后台标签页持续发起无效请求
+        if (typeof document !== 'undefined' && document.hidden) return;
+        // 捕获错误，避免定时器回调中 fire-and-forget 调用产生未捕获的 rejection
+        refresh().catch((err) => {
+          console.warn('[useAutoRefresh] 自动刷新失败:', err instanceof Error ? err.message : err);
+        });
       }, seconds * 1000);
     }
   }

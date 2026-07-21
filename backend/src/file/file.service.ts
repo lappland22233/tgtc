@@ -295,6 +295,18 @@ export class FileService implements OnModuleInit {
   }
 
   /**
+   * 清理 Multer 磁盘临时文件（上传到 Telegram 完成后调用，避免临时文件堆积）。
+   * 内存存储（无 path）或文件不存在时静默跳过；删除失败仅告警，不影响主流程。
+   */
+  private cleanupTempFile(file: Express.Multer.File): void {
+    if (file.path && fs.existsSync(file.path)) {
+      fs.promises.unlink(file.path).catch((err) => {
+        this.logger.warn(`清理临时文件失败 ${file.path}: ${(err as Error).message}`);
+      });
+    }
+  }
+
+  /**
    * 创建处理中的文件记录（磁盘文件→DB record=processing）
    * Telegram 上传由 FileUploadProcessor 后台异步执行
    */
@@ -387,6 +399,9 @@ export class FileService implements OnModuleInit {
       undefined,
       useStream ? file.size : undefined,
     );
+
+    // Telegram 上传完成，清理 Multer 临时文件
+    this.cleanupTempFile(file);
 
     const newFile = this.fileRepository.create({
       filename: telegramFile.file_id,
@@ -522,7 +537,7 @@ export class FileService implements OnModuleInit {
       .where(where);
 
     if (keyword) {
-      qb.andWhere('LOWER(file.originalName) LIKE :keyword', { keyword: `%${keyword.toLowerCase()}%` });
+      qb.andWhere('LOWER(file.originalName) LIKE :keyword', { keyword: `%${this.escapeLike(keyword.toLowerCase())}%` });
     }
 
     // 标签筛选：AND 逻辑 —— 文件必须同时拥有所有指定标签
@@ -561,7 +576,12 @@ export class FileService implements OnModuleInit {
       qb.orderBy('file.createdAt', 'DESC').addOrderBy('file.id', 'DESC').take(limit);
     } else {
       const allowedSortFields = ['originalName', 'createdAt', 'size', 'uploader.email'];
-      const safeSortBy = allowedSortFields.includes(sortBy || '') ? `file.${sortBy}` : 'file.createdAt';
+      // uploader.email 走 JOIN 的 uploader 别名，其余字段加 file. 前缀，避免拼出 file.uploader.email 非法列名
+      const safeSortBy = !allowedSortFields.includes(sortBy || '')
+        ? 'file.createdAt'
+        : sortBy === 'uploader.email'
+          ? 'uploader.email'
+          : `file.${sortBy}`;
       const safeSortOrder = (sortOrder || '').toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
       qb.orderBy(safeSortBy, safeSortOrder as 'ASC' | 'DESC').skip((page - 1) * limit).take(limit);
     }
@@ -577,7 +597,7 @@ export class FileService implements OnModuleInit {
       const tagWheres: string[] = ['ft."tagId" = ANY($1::uuid[])'];
       if (userId) { tagWheres.push(`file."uploaderId" = $${tagIdx++}`); tagParams.push(userId); }
       if (!includeDeleted) { tagWheres.push('file."isDeleted" = false'); }
-      if (keyword) { tagWheres.push(`LOWER(file."originalName") LIKE $${tagIdx++}`); tagParams.push(`%${keyword.toLowerCase()}%`); }
+      if (keyword) { tagWheres.push(`LOWER(file."originalName") LIKE $${tagIdx++}`); tagParams.push(`%${this.escapeLike(keyword.toLowerCase())}%`); }
       const tagWhere = tagWheres.join(' AND ');
 
       if (tagIds.length > 1) {
@@ -604,7 +624,7 @@ export class FileService implements OnModuleInit {
     } else {
       const countQb = this.fileRepository.createQueryBuilder('file').where(where);
       if (keyword) {
-        countQb.andWhere('LOWER(file.originalName) LIKE :keyword', { keyword: `%${keyword.toLowerCase()}%` });
+        countQb.andWhere('LOWER(file.originalName) LIKE :keyword', { keyword: `%${this.escapeLike(keyword.toLowerCase())}%` });
       }
       total = await countQb.getCount();
     }
@@ -649,9 +669,28 @@ export class FileService implements OnModuleInit {
     return Buffer.from(JSON.stringify({ createdAt: createdAt.toISOString(), id })).toString('base64');
   }
 
-  /** 解码游标 */
+  /** 解码游标（非法游标返回 400 而非 500） */
   private decodeCursor(cursor: string): { createdAt: string; id: string } {
-    return JSON.parse(Buffer.from(cursor, 'base64').toString('utf8'));
+    try {
+      const decoded = JSON.parse(Buffer.from(cursor, 'base64').toString('utf8'));
+      if (
+        !decoded ||
+        typeof decoded.createdAt !== 'string' ||
+        typeof decoded.id !== 'string' ||
+        isNaN(Date.parse(decoded.createdAt))
+      ) {
+        throw new Error('游标结构非法');
+      }
+      return { createdAt: decoded.createdAt, id: decoded.id };
+    } catch (err) {
+      if (err instanceof BadRequestException) throw err;
+      throw new BadRequestException('非法的分页游标');
+    }
+  }
+
+  /** 转义 LIKE 通配符（% _ \），让用户关键词按字面匹配而非通配 */
+  private escapeLike(value: string): string {
+    return value.replace(/[\\%_]/g, (ch) => `\\${ch}`);
   }
 
   /**
@@ -861,46 +900,55 @@ export class FileService implements OnModuleInit {
     const now = new Date();
     const adminRecoverWindow = new Date(now.getTime() - FILE_DELETE_GRACE_MS);
 
-    // 查询所有待删除文件
-    const deletedFiles = await this.fileRepository.find({
-      where: { isDeleted: true },
-    });
-
-    // 筛选需要永久删除的文件
-    const expiredFiles = deletedFiles.filter(
-      (f) =>
-        // 用户延迟删除到期
-        (f.deleteScheduledAt && now >= f.deleteScheduledAt) ||
-        // 管理员即时删除超过 7 天
-        (!f.deleteScheduledAt && f.updatedAt < adminRecoverWindow),
-    );
-
-    if (expiredFiles.length === 0) {
-      return 0;
-    }
-
+    const batchSize = 100;
     let deletedCount = 0;
-    for (const file of expiredFiles) {
-      try {
-        await this.telegramService.deleteFile(file.telegramFileId);
-        this.deleteLocalThumbnail(file);
-        await this.accessLogRepository.delete({ fileId: file.id });
-        await this.fileRepository.remove(file);
-        deletedCount++;
-        this.logger.log(`已永久删除文件: ${file.originalName} (${file.id})`);
-      } catch (error: unknown) {
-        const errMsg = error instanceof Error ? error.message : '未知错误';
-        this.logger.warn(`永久删除文件失败: ${file.originalName} (${file.id}), 错误: ${errMsg}`);
-        // 即使 Telegram 删除失败，也从数据库移除（避免数据库积压）
+    let lastId: string | null = null;
+    let iterations = 0;
+    const maxIterations = 10000; // 安全护栏，防止异常数据导致死循环
+
+    // 分页（按 id 游标推进）拉取待删除文件，避免一次性载入全部软删文件导致 OOM
+    while (iterations++ < maxIterations) {
+      const qb = this.fileRepository
+        .createQueryBuilder('file')
+        .where('file.isDeleted = true')
+        .andWhere(
+          // 用户延迟删除到期，或管理员即时删除超过恢复窗口
+          '(file.deleteScheduledAt IS NOT NULL AND file.deleteScheduledAt <= :now) OR ' +
+            '(file.deleteScheduledAt IS NULL AND file.updatedAt < :adminRecoverWindow)',
+          { now, adminRecoverWindow },
+        )
+        .orderBy('file.id', 'ASC')
+        .take(batchSize);
+      if (lastId) {
+        qb.andWhere('file.id > :lastId', { lastId });
+      }
+
+      const batch = await qb.getMany();
+      if (batch.length === 0) break;
+
+      for (const file of batch) {
+        // 无论成功失败都推进游标：失败的文件留待下次定时任务重试，不阻塞本批后续文件
+        lastId = file.id;
         try {
+          // 先从 Telegram 删除；失败则抛错进入 catch，保留 DB 记录待下次重试，
+          // 不再「Telegram 删除失败仍删库」，避免 Telegram 侧孤儿文件永久泄漏。
+          if (file.telegramFileId) {
+            await this.telegramService.deleteFile(file.telegramFileId);
+          }
           this.deleteLocalThumbnail(file);
           await this.accessLogRepository.delete({ fileId: file.id });
           await this.fileRepository.remove(file);
-        } catch (e: unknown) {
-          this.logger.error(`强制清理文件失败: ${file.id}`, e instanceof Error ? e.message : String(e));
+          deletedCount++;
+          this.logger.log(`已永久删除文件: ${file.originalName} (${file.id})`);
+        } catch (error: unknown) {
+          const errMsg = error instanceof Error ? error.message : '未知错误';
+          this.logger.warn(
+            `永久删除文件失败，保留记录待下次重试: ${file.originalName} (${file.id}), 错误: ${errMsg}`,
+          );
         }
-        deletedCount++;
       }
+
+      if (batch.length < batchSize) break; // 已是最后一批
     }
 
     return deletedCount;
@@ -1171,7 +1219,7 @@ export class FileService implements OnModuleInit {
     await this.assertFileReadable(file, user);
 
     // 优先读取本地缩略图
-    const localThumb = this.readLocalThumbnail(file);
+    const localThumb = await this.readLocalThumbnail(file);
     if (localThumb) {
       return {
         stream: Readable.from(localThumb),
@@ -1204,16 +1252,15 @@ export class FileService implements OnModuleInit {
       if (fs.existsSync(fullPath)) return; // 已存在
     }
 
+    // 先将原图流式落盘到临时文件，避免把整张原图读进内存导致 OOM
+    const tmpSource = path.join(this.thumbnailDir, `${file.id}.src.tmp`);
     try {
       const { stream } = await this.telegramService.getFileStream(file.telegramFileId || file.filename);
-      const chunks: Buffer[] = [];
-      for await (const chunk of stream) {
-        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-      }
-      const buffer = Buffer.concat(chunks);
+      const { pipeline } = await import('stream/promises');
+      await pipeline(stream, fs.createWriteStream(tmpSource));
 
-      // 获取原图尺寸
-      const metadata = await sharp(buffer).metadata();
+      // 获取原图尺寸（sharp 从文件读取，按需解码）
+      const metadata = await sharp(tmpSource).metadata();
       const width = metadata.width || 0;
       const height = metadata.height || 0;
 
@@ -1223,19 +1270,21 @@ export class FileService implements OnModuleInit {
       const thumbWidth = Math.max(16, Math.round(width / 10));
       const thumbHeight = Math.max(16, Math.round(height / 10));
 
-      // 生成 webp 缩略图（比 jpg/png 小得多）
-      const thumbBuffer = await sharp(buffer)
+      // 生成 webp 缩略图（比 jpg/png 小得多），直接写入目标文件
+      const thumbFilename = `${file.id}.webp`;
+      const thumbPath = path.join(this.thumbnailDir, thumbFilename);
+      await sharp(tmpSource)
         .resize(thumbWidth, thumbHeight, { fit: 'inside' })
         .webp({ quality: 60 })
-        .toBuffer();
-
-      const thumbFilename = `${file.id}.webp`;
-      fs.writeFileSync(path.join(this.thumbnailDir, thumbFilename), thumbBuffer);
+        .toFile(thumbPath);
 
       file.thumbnailPath = thumbFilename;
       await this.fileRepository.save(file);
     } catch (err) {
       this.logger.warn(`缩略图生成失败 id=${file.id}: ${(err as Error).message}`);
+    } finally {
+      // 清理临时源文件
+      await fs.promises.unlink(tmpSource).catch(() => {});
     }
   }
 
@@ -1290,17 +1339,17 @@ export class FileService implements OnModuleInit {
   }
 
   /**
-   * 读取本地缩略图文件内容。
+   * 读取本地缩略图文件内容（异步，避免 readFileSync 阻塞事件循环）。
    */
-  private readLocalThumbnail(file: File): Buffer | null {
+  private async readLocalThumbnail(file: File): Promise<Buffer | null> {
     if (!file.thumbnailPath) return null;
     const fullPath = path.join(this.thumbnailDir, file.thumbnailPath);
     try {
-      if (fs.existsSync(fullPath)) return fs.readFileSync(fullPath);
+      return await fs.promises.readFile(fullPath);
     } catch {
-      // ignore
+      // 文件不存在或读取失败
+      return null;
     }
-    return null;
   }
 
 
@@ -1411,6 +1460,11 @@ export class FileService implements OnModuleInit {
       return null;
     }
 
+    // 文件仍在处理中（TG 未同步）→ 拒绝范围下载，避免用临时 UUID 回源
+    if (file.status === 'processing') {
+      throw new BadRequestException('文件正在处理中，请稍后刷新重试');
+    }
+
     const total = Number(file.size);
     const actualEnd = end !== undefined ? Math.min(end, total - 1) : total - 1;
 
@@ -1422,14 +1476,21 @@ export class FileService implements OnModuleInit {
     const chunkSize = actualEnd - start + 1;
     const readStream = createReadStream(cachedPath, { start, end: actualEnd });
 
-    // 原子访问计数
-    await this.fileRepository
+    // 原子访问计数：与完整下载路径一致，强制 maxAccessCount 上限并校验 affected，
+    // 防止受限文件被无限次范围下载绕过。
+    const updateResult = await this.fileRepository
       .createQueryBuilder()
       .update(File)
       .set({ currentAccessCount: () => 'currentAccessCount + 1' })
       .where('id = :id', { id })
       .andWhere('(maxAccessCount <= 0 OR currentAccessCount < maxAccessCount)')
+      .andWhere('isDeleted = false')
       .execute();
+
+    if (updateResult.affected === 0) {
+      readStream.destroy();
+      throw new ForbiddenException('访问次数已用尽或文件不存在');
+    }
 
     const mimeType = file.mimeType || 'application/octet-stream';
     const filename = this.ensureFileExtension(file.originalName, mimeType);
@@ -1912,6 +1973,9 @@ export class FileService implements OnModuleInit {
       abortSignal,
       useStream ? file.size : undefined,
     );
+
+    // Telegram 上传完成，清理 Multer 临时文件
+    this.cleanupTempFile(file);
 
     const newFile = this.fileRepository.create({
       filename: telegramFile.file_id,

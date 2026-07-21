@@ -35,13 +35,14 @@
         <FolderBreadcrumb @navigate="onFolderNavigate" />
 
         <div class="card">
-      <div style="display: flex; justify-content: space-between; margin-bottom: 16px; align-items: center; flex-wrap: wrap; gap: 12px;">
-        <div style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
+      <!-- 主工具栏：视图切换 + 搜索（左）／上传（右） -->
+      <div class="fl-toolbar">
+        <div class="fl-toolbar-left">
           <t-radio-group
             :value="viewMode"
             variant="default-filled"
             size="medium"
-            @change="(val) => setViewMode(val as 'card' | 'list')"
+            @change="onViewModeChange"
           >
             <t-radio-button value="card">
               <t-icon name="view-module" style="vertical-align: middle;" />
@@ -52,49 +53,49 @@
               <span style="margin-left: 4px;">列表</span>
             </t-radio-button>
           </t-radio-group>
-          <form autocomplete="off" @submit.prevent="handleSearch" style="display: flex; gap: 8px; margin: 0; flex-wrap: wrap;">
-            <t-input v-model="search" placeholder="搜索文件名..." style="width: 300px;" class="search-input-field" autocomplete="off" name="q-file-search" @enter="handleSearch" />
+          <form autocomplete="off" class="fl-search-form" @submit.prevent="handleSearch">
+            <t-input v-model="search" placeholder="搜索文件名..." class="search-input-field fl-search-input" autocomplete="off" name="q-file-search" @enter="handleSearch" />
             <t-button theme="default" @click="handleSearch">搜索</t-button>
+            <t-button theme="default" variant="text" v-if="search" @click="handleClearSearch">清除</t-button>
           </form>
-          <t-button theme="default" variant="text" v-if="search" @click="handleClearSearch">清除</t-button>
         </div>
-        <div style="display: flex; gap: 8px; flex-wrap: wrap;">
-          <t-button
-            v-if="selectedImages.length > 0 && selectedImages.length === selectedFileIds.length"
-            theme="primary"
-            variant="outline"
-            @click="convertToMarkdown"
-          >
-            批量 MK（{{ selectedImages.length }}）
-          </t-button>
-          <t-button
-            v-if="selectedFileIds.length > 0 && !(selectedImages.length === selectedFileIds.length)"
-            theme="default"
-            variant="outline"
-            @click="copyDownloadLinks"
-          >
-            复制下载链接（{{ selectedFileIds.length }}）
-          </t-button>
-          <t-button
-            v-if="selectedFileIds.length > 0"
-            theme="default"
-            variant="outline"
-            @click="openBatchTagDialog"
-          >
-            批量标签（{{ selectedFileIds.length }}）
-          </t-button>
-          <t-button
-            v-if="selectedFileIds.length > 0"
-            theme="default"
-            variant="outline"
-            @click="openMoveDialogForFiles()"
-          >
-            移动到...（{{ selectedFileIds.length }}）
-          </t-button>
+        <div class="fl-toolbar-right">
           <t-button theme="primary" @click="showUploadModal = true">
             + 上传文件
           </t-button>
         </div>
+      </div>
+
+      <!-- 批量操作栏：仅在选中文件时出现 -->
+      <div v-if="selectedFileIds.length > 0" class="fl-batchbar">
+        <span class="fl-batchbar-count">已选 {{ selectedFileIds.length }} 项</span>
+        <t-button
+          v-if="selectedImages.length > 0 && selectedImages.length === selectedFileIds.length"
+          theme="primary"
+          variant="outline"
+          size="small"
+          @click="convertToMarkdown"
+        >
+          批量 MK（{{ selectedImages.length }}）
+        </t-button>
+        <t-button
+          v-if="!(selectedImages.length === selectedFileIds.length)"
+          theme="default"
+          variant="outline"
+          size="small"
+          @click="copyDownloadLinks"
+        >
+          复制下载链接
+        </t-button>
+        <t-button theme="default" variant="outline" size="small" @click="openBatchTagDialog">
+          批量标签
+        </t-button>
+        <t-button theme="default" variant="outline" size="small" @click="openMoveDialogForFiles()">
+          移动到...
+        </t-button>
+        <t-button theme="default" variant="text" size="small" @click="clearSelection">
+          清除选择
+        </t-button>
       </div>
 
       <!-- 标签筛选栏 -->
@@ -657,14 +658,23 @@ type ViewMode = 'card' | 'list';
 const VIEW_MODE_STORAGE_KEY = 'drive_view_mode';
 const viewMode = ref<ViewMode>(
   ((): ViewMode => {
-    const stored = localStorage.getItem(VIEW_MODE_STORAGE_KEY);
-    return stored === 'list' ? 'list' : 'card'; // 默认卡片视图
+    try {
+      const stored = localStorage.getItem(VIEW_MODE_STORAGE_KEY);
+      return stored === 'list' ? 'list' : 'card'; // 默认卡片视图
+    } catch {
+      return 'card'; // localStorage 不可用（隐私模式/SSR）时降级为默认视图
+    }
   })(),
 );
 
 function setViewMode(mode: ViewMode) {
   viewMode.value = mode;
   try { localStorage.setItem(VIEW_MODE_STORAGE_KEY, mode); } catch { /* localStorage 不可用时降级 */ }
+}
+
+// 视图模式切换处理器（显式类型，避免模板内联 any 参数）
+function onViewModeChange(val: string | number | boolean) {
+  setViewMode(val === 'list' ? 'list' : 'card');
 }
 
 // ============ 卡片视图派生子文件夹列表 ============
@@ -712,6 +722,11 @@ function onCardToggleSelect(file: FileItem) {
   } else {
     selectedFileIds.value.push(file.id);
   }
+}
+
+/** 清空当前文件选择（批量操作栏「清除选择」按钮） */
+function clearSelection() {
+  selectedFileIds.value = [];
 }
 
 function onFolderCardOpen(folder: Folder) { onFolderNavigate(folder.id); }
@@ -1170,7 +1185,11 @@ async function copyLink(row: FileItem) {
   try {
     const link = `${window.location.origin}/files/public/${row.id}`;
     await navigator.clipboard.writeText(link);
-    MessagePlugin.success('分享链接已复制');
+    if (row.accessType === 'private') {
+      MessagePlugin.warning('链接已复制，但该文件为私有，仅你自己可访问；如需分享给他人请使用「分享」功能');
+    } else {
+      MessagePlugin.success('分享链接已复制');
+    }
   } catch (error: unknown) {
     MessagePlugin.error(getErrorMessage(error));
   }
@@ -1313,16 +1332,12 @@ async function confirmBatchTags() {
     MessagePlugin.warning('没有可添加标签的文件');
     return;
   }
-  let successCount = 0;
-  let failCount = 0;
-  for (const fileId of fileIds) {
-    try {
-      await api.put(`/files/${fileId}/tags`, { tagIds: batchTagDialog.selectedTagIds });
-      successCount++;
-    } catch (err) {
-      failCount++;
-    }
-  }
+  // 并发发送标签更新请求（替代串行 for...of + await），大幅缩短批量操作耗时
+  const results = await Promise.allSettled(
+    fileIds.map(fileId => api.put(`/files/${fileId}/tags`, { tagIds: batchTagDialog.selectedTagIds })),
+  );
+  const successCount = results.filter(r => r.status === 'fulfilled').length;
+  const failCount = results.length - successCount;
   batchTagDialog.visible = false;
   if (failCount === 0) {
     MessagePlugin.success(`已为 ${successCount} 个文件添加标签`);
@@ -1346,7 +1361,7 @@ watch([page, pageSize, search, sortBy, sortOrder, pageMode, selectedTagIds], ([n
   if (newSortOrder) query.sortOrder = newSortOrder;
   if (newTagIds && newTagIds.length > 0) query.tagIds = newTagIds.join(',');
   router.replace({ query });
-});
+}, { flush: 'post' });
 
 onMounted(async () => {
   try { await tagStore.fetchTags(); } catch { /* 标签加载失败不阻塞页面 */ }
@@ -1427,6 +1442,56 @@ onUnmounted(() => {
 .drive-main {
   flex: 1;
   min-width: 0;
+}
+
+/* 主工具栏 */
+.fl-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.fl-toolbar-left {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.fl-search-form {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  flex-wrap: wrap;
+}
+.fl-search-input {
+  width: 280px;
+}
+.fl-toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 批量操作栏（选中文件时出现） */
+.fl-batchbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 12px;
+  margin-bottom: 16px;
+  background: var(--color-accent-soft, rgba(77, 124, 254, 0.08));
+  border: 1px solid var(--color-accent, #4D7CFE);
+  border-radius: 8px;
+}
+.fl-batchbar-count {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--color-accent, #4D7CFE);
+  margin-right: 4px;
 }
 
 .drop-overlay {

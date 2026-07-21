@@ -7,6 +7,7 @@ import {
   Param,
   Body,
   UseGuards,
+  ParseUUIDPipe,
 } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 import { TagService } from './tag.service';
@@ -36,7 +37,7 @@ export class TagController {
   @Put(':id')
   async update(
     @CurrentUser() user: User,
-    @Param('id') id: string,
+    @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: UpdateTagDto,
   ) {
     return this.tagService.update(user.id, id, dto);
@@ -45,7 +46,7 @@ export class TagController {
   @Delete(':id')
   async delete(
     @CurrentUser() user: User,
-    @Param('id') id: string,
+    @Param('id', ParseUUIDPipe) id: string,
   ) {
     await this.tagService.delete(user.id, id);
     return { message: '标签删除成功' };

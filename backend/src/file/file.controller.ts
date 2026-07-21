@@ -22,7 +22,6 @@ import {
 } from '@nestjs/common';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { FileInterceptor, FilesInterceptor } from '@nestjs/platform-express';
-import { ConfigService } from '@nestjs/config';
 import { pipeline } from 'stream';
 import { promisify } from 'util';
 import { FileService } from './file.service';
@@ -58,7 +57,6 @@ function trackBytesSent(res: Response): () => number {
 export class FileController {
   constructor(
     private fileService: FileService,
-    private configService: ConfigService,
     private cryptoService: ThumbnailCryptoService,
     private rateLimitService: RateLimitService,
     private configCacheService: ConfigCacheService,
@@ -69,13 +67,6 @@ export class FileController {
     @InjectRepository(FileEntity)
     private fileRepository: Repository<FileEntity>,
   ) {}
-
-  /**
-   * 获取应用基础 URL（优先使用 APP_URL 环境变量，避免 Host Header 注入）
-   */
-  private get appUrl(): string {
-    return this.configService.get<string>('APP_URL') || 'http://localhost:3000';
-  }
 
   @Post('upload')
   @UseGuards(JwtAuthGuard)
@@ -322,12 +313,13 @@ export class FileController {
   ) {
     try {
       // 下载限流：从安全配置动态读取阈值（热更新，无需重启）
+      // 键用 user+ip 组合，避免共享出口 IP 下其他用户被牵连限流
       const clientIp = getClientIp(req);
       const downloadRateLimit = Number(await this.configCacheService.get('sec_download_rate_limit', '10')) || 10;
       const downloadRateWindow = Number(await this.configCacheService.get('sec_download_rate_window', '60')) || 60;
       const downloadRateBan = Number(await this.configCacheService.get('sec_download_rate_ban', '1')) || 1;
       const rateLimitResult = await this.rateLimitService.checkAndIncrement(
-        `download:${clientIp}`,
+        `download:${user.id}:${clientIp}`,
         'download',
         downloadRateLimit,                     // maxAttempts
         downloadRateBan * 60 * 1000,           // lockDurationMs
@@ -593,6 +585,12 @@ export class FileController {
           where: { token: id, isDeleted: false },
         });
       }
+    }
+
+    // 重校：并发创建/即时取消等边界下 shareLink 仍可能为空，避免带着空链接重定向
+    if (!shareLink) {
+      res.status(404).json({ code: 1, message: '分享不存在或已被取消' });
+      return;
     }
 
     // 4. 重定向到 SPA 分享页

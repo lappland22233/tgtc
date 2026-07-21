@@ -51,13 +51,19 @@ import { TagModule } from './tag/tag.module';
       port: parseInt(process.env.DB_PORT || '5432'),
       username: process.env.DB_USERNAME || 'postgres',
       password: process.env.DB_PASSWORD || undefined,
-      database: process.env.DB_DATABASE || 'text',
+      database: process.env.DB_DATABASE || 'test',
       entities: [User, File, Folder, ShareLink, SystemConfig, VerificationCode, BannedIP, ShareAudit, FileAccessLog, RateLimit, AuditLog, AccessLog, Alert, DashboardConfig, UploadTask, Tag, TelemetryRecord],
       // 生产环境强制关闭 synchronize 防止误改 schema 丢数据；开发环境由 DB_SYNCHRONIZE 控制
       synchronize: process.env.NODE_ENV === 'production' ? false : process.env.DB_SYNCHRONIZE === 'true',
       migrations: [__dirname + '/migrations/*{.ts,.js}'],
       migrationsRun: process.env.DB_MIGRATIONS_RUN === 'true',
       logging: process.env.NODE_ENV === 'development',
+      // 连接池：pg 默认仅 10 连接，高并发易耗尽；可通过 DB_POOL_SIZE 调整
+      extra: {
+        max: parseInt(process.env.DB_POOL_SIZE || '20', 10),
+        // 可选 TLS：DB_SSL=true 时启用（托管 PG 常见需求）
+        ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : undefined,
+      },
     }),
     AuthModule,
     UserModule,

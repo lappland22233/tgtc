@@ -87,7 +87,7 @@ export class AuditLog {
   @Column({ nullable: true, comment: '资源ID' })
   resourceId: string;
 
-  @Column({ type: 'json', nullable: true, comment: '元数据JSON（如变更前后值、失败原因等）' })
+  @Column({ type: 'jsonb', nullable: true, comment: '元数据JSON（如变更前后值、失败原因等）' })
   metadata: Record<string, unknown> | null;
 
   @Column({ type: 'varchar', length: 20, default: AuditStatus.SUCCESS, comment: '操作状态：success / failure' })

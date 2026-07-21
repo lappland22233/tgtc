@@ -15,12 +15,28 @@ import { RegisterDto, LoginDto, VerifyEmailDto, SendCodeDto, ResetPasswordDto } 
 import { RateLimitService } from '../common/services/rate-limit.service';
 import { BCRYPT_ROUNDS } from '../common/constants/bcrypt';
 
+/**
+ * 占位 bcrypt 哈希：用户不存在时执行一次 dummy compare，
+ * 使"用户不存在"与"用户存在"路径耗时一致，消除时序侧信道（防邮箱枚举）。
+ * 模块加载时用固定密码按 BCRYPT_ROUNDS 生成一次，保证哈希结构有效且轮数与真实校验一致。
+ */
+const DUMMY_PASSWORD_HASH = bcrypt.hashSync('timing-equalization-dummy', BCRYPT_ROUNDS);
+
+/**
+ * 注册"首位用户=超管"临界区使用的事务级咨询锁 key（固定值）。
+ * 项目中未使用其他咨询锁，此 key 不会冲突；锁随事务结束（commit/rollback）自动释放。
+ */
+const REGISTRATION_ADVISORY_LOCK_KEY = 906033001;
+
 @Injectable()
 export class AuthService {
   /** 从安全配置动态读取限流阈值（热更新），不存在时回退到硬编码默认值 */
   private async getLoginMaxFailures(): Promise<number> { return Number(await this.configCacheService.get('sec_login_max_failures', '5')) || 5; }
   private async getLoginLockDuration(): Promise<number> { return (Number(await this.configCacheService.get('sec_login_lock_duration', '15')) || 15) * 60 * 1000; }
   private async getCodeMaxErrors(): Promise<number> { return Number(await this.configCacheService.get('sec_code_max_errors', '5')) || 5; }
+
+  /** 验证码 HMAC 密钥（启动时解析并校验，见构造函数） */
+  private readonly codeHmacSecret: string;
 
   constructor(
     @InjectRepository(User)
@@ -36,11 +52,25 @@ export class AuthService {
     private mailerService: MailerService,
     private rateLimitService: RateLimitService,
     private auditService: AuditService,
-  ) {}
+  ) {
+    // 验证码 HMAC 密钥：启动时强制校验，缺失则拒绝启动。
+    // 杜绝硬编码回退密钥（旧实现回退到 'tgtc-code-hmac-default'，
+    // 在两个环境变量均缺失时可被攻击者离线伪造任意验证码哈希）。
+    const hmacSecret = process.env.CODE_HMAC_SECRET || process.env.JWT_SECRET;
+    if (!hmacSecret) {
+      throw new Error(
+        'CODE_HMAC_SECRET 或 JWT_SECRET 环境变量未配置，无法安全计算验证码哈希，服务拒绝启动',
+      );
+    }
+    this.codeHmacSecret = hmacSecret;
+  }
 
   async register(registerDto: RegisterDto, _ip: string): Promise<{ accessToken?: string; user?: Partial<User>; needVerification?: boolean; message: string }> {
+    // 邮箱规范化（小写 + 去空白），与登录查找约定保持一致，避免大小写差异导致重复账户/验证码错配
+    const email = registerDto.email.toLowerCase().trim();
+
     const existingUser = await this.userRepository.findOne({
-      where: { email: registerDto.email },
+      where: { email },
     });
 
     if (existingUser) {
@@ -62,7 +92,7 @@ export class AuthService {
       if (!registerDto.code) {
         throw new BadRequestException('请输入邮箱验证码');
       }
-      await this.validateVerificationCode(registerDto.email, registerDto.code, 'register');
+      await this.validateVerificationCode(email, registerDto.code, 'register');
     }
 
     const hashedPassword = await bcrypt.hash(registerDto.password, BCRYPT_ROUNDS);
@@ -73,10 +103,11 @@ export class AuthService {
     await queryRunner.startTransaction();
 
     try {
-      // 锁定 users 表防止并发注册竞态，确保首个注册用户获得 super_admin
-      // （LOCK TABLE 提供最高级别的隔离，防止多个事务同时读取空表而竞争首位）
-      await queryRunner.query('LOCK TABLE "users" IN EXCLUSIVE MODE');
-      // PostgreSQL 对 SELECT COUNT(*) 不允许 FOR UPDATE，LOCK TABLE 已提供隔离保证
+      // 使用事务级咨询锁串行化"首位用户=超管"竞态临界区，确保首个注册用户获得 super_admin。
+      // 替代旧的 LOCK TABLE "users" IN EXCLUSIVE MODE 全表排他锁，避免阻塞 users 表的其他并发读写；
+      // 咨询锁仅锁定本临界区逻辑，随事务结束（commit/rollback）自动释放。
+      await queryRunner.query('SELECT pg_advisory_xact_lock($1)', [REGISTRATION_ADVISORY_LOCK_KEY]);
+      // 取得咨询锁后再统计用户数，保证"空表→首位超管"判定的串行化
       const [{ count }] = await queryRunner.query(
         'SELECT COUNT(*) as count FROM "users"',
       );
@@ -87,7 +118,7 @@ export class AuthService {
       const role = Number(count) === 0 ? UserRole.SUPER_ADMIN : UserRole.USER;
 
       const user = queryRunner.manager.create(User, {
-        email: registerDto.email,
+        email,
         password: hashedPassword,
         role,
         // 邮箱验证关闭时直接标记为已验证，未来启用验证时存量用户可正常使用
@@ -169,6 +200,10 @@ export class AuthService {
     });
 
     if (!user) {
+      // 用户不存在时执行一次 dummy bcrypt.compare，使本路径耗时与"用户存在"路径一致，
+      // 消除时序侧信道（不存在 ~1ms vs 存在执行 bcrypt ~250ms），防止邮箱枚举
+      await bcrypt.compare(loginDto.password, DUMMY_PASSWORD_HASH);
+
       const loginMaxFailures = await this.getLoginMaxFailures();
       const loginLockDuration = await this.getLoginLockDuration();
       const result = await this.rateLimitService.checkAndIncrement(
@@ -225,9 +260,11 @@ export class AuthService {
     // 登录成功，清除失败计数
     await this.rateLimitService.reset(loginLimitKey);
 
+    // 仅更新登录相关字段，避免整实体 save() 在并发下覆盖其他字段的更新
+    const lastLoginAt = new Date();
+    await this.userRepository.update(user.id, { lastLoginIP: ip, lastLoginAt });
     user.lastLoginIP = ip;
-    user.lastLoginAt = new Date();
-    await this.userRepository.save(user);
+    user.lastLoginAt = lastLoginAt;
 
     const accessToken = this.generateToken(user);
 
@@ -250,7 +287,9 @@ export class AuthService {
   }
 
   async sendVerificationCode(sendCodeDto: SendCodeDto, ip: string): Promise<void> {
-    const { email, type } = sendCodeDto;
+    const { type } = sendCodeDto;
+    // 邮箱规范化，与注册/登录/验证保持一致，确保验证码存取命中同一邮箱键
+    const email = sendCodeDto.email.toLowerCase().trim();
 
     // 检查是否开启邮箱验证码
     const emailVerificationEnabled = await this.getConfigValue('EMAIL_VERIFICATION_ENABLED', 'false');
@@ -274,11 +313,10 @@ export class AuthService {
     }
 
     const user = await this.userRepository.findOne({ where: { email } });
-    if (type === 'register' && user) {
-      throw new BadRequestException('该邮箱已被注册');
-    }
-    if (type === 'reset_password' && !user) {
-      throw new BadRequestException('该邮箱未注册');
+    // 统一模糊化错误响应：无论邮箱是否已注册，均返回相同文案，
+    // 避免攻击者通过差异化错误消息枚举有效邮箱（保留 400 行为以维持原有限流/流程）
+    if ((type === 'register' && user) || (type === 'reset_password' && !user)) {
+      throw new BadRequestException('当前邮箱暂无法发送验证码，请核对邮箱后重试');
     }
 
     // 限流检查：同一邮箱 60 秒内只能发送一次
@@ -313,40 +351,41 @@ export class AuthService {
   }
 
   async verifyEmail(verifyEmailDto: VerifyEmailDto): Promise<void> {
-    await this.validateVerificationCode(verifyEmailDto.email, verifyEmailDto.code, 'register');
+    const email = verifyEmailDto.email.toLowerCase().trim();
+    await this.validateVerificationCode(email, verifyEmailDto.code, 'register');
 
     await this.userRepository.update(
-      { email: verifyEmailDto.email },
+      { email },
       { emailVerified: true },
     );
   }
 
-  async resetPassword(dto: ResetPasswordDto): Promise<void> {
-    await this.validateVerificationCode(dto.email, dto.code, 'reset_password');
+  async resetPassword(dto: ResetPasswordDto, ip: string): Promise<void> {
+    const email = dto.email.toLowerCase().trim();
+    await this.validateVerificationCode(email, dto.code, 'reset_password');
 
     const hashedPassword = await bcrypt.hash(dto.newPassword, BCRYPT_ROUNDS);
     await this.userRepository.update(
-      { email: dto.email },
+      { email },
       { password: hashedPassword, passwordUpdatedAt: new Date() },
     );
 
     // 审计日志：密码重置
-    const user = await this.userRepository.findOne({ where: { email: dto.email }, select: ['id'] });
+    const user = await this.userRepository.findOne({ where: { email }, select: ['id'] });
     if (user) {
       this.auditService.log({
         action: 'password_reset',
         userId: user.id,
-        ip: null,
+        ip,
         resourceType: 'user',
         resourceId: user.id,
       });
     }
   }
 
-  /** HMAC-SHA256 计算验证码哈希，防彩虹表反查 */
+  /** HMAC-SHA256 计算验证码哈希，防彩虹表反查（密钥启动时校验，见构造函数） */
   private hashCode(code: string): string {
-    const secret = process.env.CODE_HMAC_SECRET || process.env.JWT_SECRET || 'tgtc-code-hmac-default';
-    return crypto.createHmac('sha256', secret).update(code).digest('hex');
+    return crypto.createHmac('sha256', this.codeHmacSecret).update(code).digest('hex');
   }
 
   protected async validateVerificationCode(email: string, code: string, type: string): Promise<void> {
@@ -389,6 +428,8 @@ export class AuthService {
       sub: user.id,
       email: user.email,
       role: user.role,
+      // jti：令牌唯一标识，为后续基于黑名单的单独吊销提供基础
+      jti: crypto.randomBytes(16).toString('hex'),
     };
     return this.jwtService.sign(payload);
   }

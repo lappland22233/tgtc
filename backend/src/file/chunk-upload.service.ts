@@ -1,4 +1,4 @@
-import { Injectable, BadRequestException, NotFoundException, ForbiddenException, Logger } from '@nestjs/common';
+import { Injectable, BadRequestException, NotFoundException, ForbiddenException, Logger, OnModuleInit } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { InjectQueue } from '@nestjs/bull';
 import { Queue } from 'bull';
@@ -36,7 +36,7 @@ interface ChunkSession {
 }
 
 @Injectable()
-export class ChunkUploadService {
+export class ChunkUploadService implements OnModuleInit {
   private readonly logger = new Logger(ChunkUploadService.name);
   private readonly sessions = new Map<string, ChunkSession>();
   private readonly baseDir: string;
@@ -55,6 +55,47 @@ export class ChunkUploadService {
     fs.mkdirSync(this.baseDir, { recursive: true });
   }
 
+  /**
+   * 启动时扫描清理孤儿分片目录。
+   * 会话仅存内存，进程崩溃/重启后磁盘上的分片目录失去对应会话，成为永久残留。
+   * 启动时 baseDir 下凡 UUID 命名、非活跃会话、非 'pending' 子目录的目录均视为孤儿并删除。
+   * 异步执行，不阻塞启动。
+   */
+  async onModuleInit(): Promise<void> {
+    this.cleanupOrphanChunkDirs().catch((err) => {
+      this.logger.warn(`[分片上传] 启动清理孤儿分片目录失败: ${(err as Error).message}`);
+    });
+  }
+
+  private async cleanupOrphanChunkDirs(): Promise<void> {
+    const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    let entries: string[];
+    try {
+      entries = await fsp.readdir(this.baseDir);
+    } catch {
+      return; // 目录不存在或不可读，忽略
+    }
+
+    let cleaned = 0;
+    for (const name of entries) {
+      // 仅处理 UUID 命名的目录（分片会话目录），保留 'pending' 等其他子目录
+      if (!uuidRe.test(name)) continue;
+      if (this.sessions.has(name)) continue; // 活跃会话（启动时通常为空）
+      const full = path.join(this.baseDir, name);
+      try {
+        const stat = await fsp.stat(full);
+        if (!stat.isDirectory()) continue;
+        await fsp.rm(full, { recursive: true, force: true });
+        cleaned++;
+      } catch {
+        // 单个目录清理失败不影响其余
+      }
+    }
+    if (cleaned > 0) {
+      this.logger.log(`[分片上传] 启动清理 ${cleaned} 个孤儿分片目录`);
+    }
+  }
+
   /** 初始化上传会话，返回 uploadId */
   async init(
     fileName: string,
@@ -64,6 +105,21 @@ export class ChunkUploadService {
     chunkSize: number,
     userId: string,
   ): Promise<{ uploadId: string }> {
+    // 文件大小上限校验：结合动态 MAX_FILE_SIZE，防止绕过限制写满磁盘（DoS）
+    const maxFileSize = await this.fileService.getMaxFileSize();
+    if (!Number.isFinite(fileSize) || fileSize <= 0) {
+      throw new BadRequestException('非法的 fileSize');
+    }
+    if (fileSize > maxFileSize) {
+      throw new BadRequestException(`文件大小不能超过 ${maxFileSize / 1024 / 1024}MB`);
+    }
+
+    // 交叉校验：totalChunks * chunkSize 必须能容纳声明的 fileSize，且不为溢出值
+    const declaredCapacity = totalChunks * chunkSize;
+    if (!Number.isSafeInteger(declaredCapacity) || declaredCapacity < fileSize) {
+      throw new BadRequestException('totalChunks 与 chunkSize 不足以容纳声明的 fileSize');
+    }
+
     // 并发会话数限制
     const userSessions = [...this.sessions.values()].filter((s) => s.uploadedBy === userId);
     if (userSessions.length >= ChunkUploadService.MAX_SESSIONS_PER_USER) {
@@ -105,6 +161,12 @@ export class ChunkUploadService {
 
     if (buffer.length === 0) {
       throw new BadRequestException('分片数据为空');
+    }
+
+    // 校验分片实际大小不超过声明的 chunkSize（最后一片可更小，但任何分片都不应更大），
+    // 防止超写字节绕过 fileSize 上限写满磁盘。
+    if (buffer.length > session.chunkSize) {
+      throw new BadRequestException(`分片大小 ${buffer.length} 超过声明的 chunkSize ${session.chunkSize}`);
     }
 
     session.lastActivityAt = new Date();
@@ -438,9 +500,9 @@ export class ChunkUploadService {
 
   /** 获取分片目录并确保安全 */
   private getChunkDir(uploadId: string): string {
-    // 双重校验防止路径穿越
+    // 双重校验防止路径穿越：要求解析结果必须位于 baseDir 之内（含分隔符前缀，防兄弟目录绕过）
     const resolved = path.resolve(this.baseDir, uploadId);
-    if (!resolved.startsWith(this.baseDir)) {
+    if (resolved !== this.baseDir && !resolved.startsWith(this.baseDir + path.sep)) {
       throw new Error('非法的分片目录路径');
     }
     return resolved;

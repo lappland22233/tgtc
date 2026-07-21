@@ -2,9 +2,12 @@ import { NestFactory } from '@nestjs/core';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { ValidationPipe, Logger } from '@nestjs/common';
 import cookieParser from 'cookie-parser';
+import helmet from 'helmet';
 import { join } from 'path';
+import { existsSync } from 'fs';
 import { AppModule } from './app.module';
 import { TransformInterceptor } from './common/interceptors/transform.interceptor';
+import { GlobalExceptionFilter } from './common/filters/http-exception.filter';
 import { validateEnv } from './config/env-validation';
 import { FileLogger } from './common/file-logger';
 
@@ -24,13 +27,29 @@ async function bootstrap() {
     logger: fileLogger,
   });
 
-  // 配置反向代理信任，确保 req.ip 获取真实客户端 IP
-  app.getHttpAdapter().getInstance().set('trust proxy', 1);
+  // 配置反向代理信任，确保 req.ip 获取真实客户端 IP。
+  // 多级代理时固定为 1 会取到最近代理而非客户端，故 hops 可经 TRUST_PROXY_HOPS 配置。
+  const trustProxy = process.env.TRUST_PROXY_HOPS
+    ? Number(process.env.TRUST_PROXY_HOPS) || process.env.TRUST_PROXY_HOPS
+    : 1;
+  app.getHttpAdapter().getInstance().set('trust proxy', trustProxy);
 
   app.setGlobalPrefix('api');
 
   // 全局响应结构统一包装为 { code, message, data }
   app.useGlobalInterceptors(new TransformInterceptor());
+
+  // 全局异常过滤器：统一错误响应结构，生产环境不回显堆栈
+  app.useGlobalFilters(new GlobalExceptionFilter());
+
+  // 安全响应头（X-Content-Type-Options / X-Frame-Options / Referrer-Policy 等）。
+  // CSP 交由前端 index.html 控制以避免误伤 SPA；放宽 crossOriginResourcePolicy 以允许跨域加载静态资源。
+  app.use(
+    helmet({
+      contentSecurityPolicy: false,
+      crossOriginResourcePolicy: { policy: 'cross-origin' },
+    }),
+  );
 
   const allowedOrigins = process.env.CORS_ORIGINS
     ? process.env.CORS_ORIGINS.split(',').map(s => s.trim())
@@ -42,6 +61,11 @@ async function bootstrap() {
           }
           return ['http://localhost:8080'];
         })();
+
+  // 安全防护：credentials:true 与通配符 origin 组合会泄露凭据，禁止该配置
+  if (allowedOrigins.includes('*')) {
+    throw new Error('CORS 配置错误：启用 credentials 时 origin 不能为通配符 *，请显式列出允许的来源');
+  }
 
   app.enableCors({
     origin: allowedOrigins,
@@ -87,7 +111,11 @@ async function bootstrap() {
     // 仅对浏览器导航请求回退 SPA
     const accept = req.headers.accept || '';
     if (accept.includes('text/html')) {
-      return res.sendFile(join(frontendDist, 'index.html'));
+      const indexFile = join(frontendDist, 'index.html');
+      // dist 缺失时直接 sendFile 会 ENOENT 致所有 HTML 导航 500，此处降级为 404
+      if (existsSync(indexFile)) {
+        return res.sendFile(indexFile);
+      }
     }
     return next();
   });
@@ -113,4 +141,9 @@ async function bootstrap() {
   logger.log(`HTTP timeout: ${httpServer.timeout / 1000}s idle, auto-reset on activity`);
 }
 
-bootstrap();
+bootstrap().catch((err) => {
+  // 启动失败时显式记录并以非零码退出，避免 unhandled rejection
+  // eslint-disable-next-line no-console
+  console.error('[启动失败]', err);
+  process.exit(1);
+});

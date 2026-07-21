@@ -25,6 +25,8 @@ const ROUTE_IMPORTERS: Record<string, () => Promise<unknown>> = {
 };
 
 const prefetched = new Set<string>();
+// 正在加载中的路由：避免对同一路由并发重复 import
+const inFlight = new Set<string>();
 const idleCb: (cb: () => void, opts?: { timeout: number }) => void =
   typeof requestIdleCallback !== 'undefined'
     ? requestIdleCallback
@@ -41,12 +43,28 @@ export function setupRoutePrefetch(router: Router) {
       const adjacent = ROUTE_PREFETCH_MAP[newPath];
       if (!adjacent) return;
 
+      // 省流模式下不预载，减少用户流量消耗
+      const connection = (navigator as { connection?: { saveData?: boolean } }).connection;
+      if (connection?.saveData) return;
+
       idleCb(
         () => {
           for (const route of adjacent) {
-            if (prefetched.has(route)) continue;
-            prefetched.add(route);
-            ROUTE_IMPORTERS[route]?.().catch(() => {});
+            if (prefetched.has(route) || inFlight.has(route)) continue;
+            const importer = ROUTE_IMPORTERS[route];
+            if (!importer) continue;
+            inFlight.add(route);
+            importer()
+              .then(() => {
+                // 仅在加载成功后标记为已预载；失败则不标记，允许下次重试
+                prefetched.add(route);
+              })
+              .catch(() => {
+                // chunk 加载失败：静默忽略，下次仍可重试
+              })
+              .finally(() => {
+                inFlight.delete(route);
+              });
           }
         },
         { timeout: 3000 },

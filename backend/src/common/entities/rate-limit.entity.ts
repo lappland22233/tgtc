@@ -4,9 +4,12 @@ import {
   Column,
   CreateDateColumn,
   UpdateDateColumn,
+  Index,
 } from 'typeorm';
 
 @Entity('rate_limits')
+@Index('IDX_rate_limits_lockedUntil', ['lockedUntil'])
+@Index('IDX_rate_limits_updatedAt', ['updatedAt'])
 export class RateLimit {
   @PrimaryColumn({ type: 'uuid', default: () => 'gen_random_uuid()' })
   id: string;

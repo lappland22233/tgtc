@@ -14,6 +14,11 @@ export enum AlertLevel {
 
 @Entity('alerts')
 @Index(['ruleId', 'createdAt'])
+// 未确认告警查询（acknowledgedAt IS NULL）的部分索引：
+// IDX_alerts_acknowledged 已由迁移 1785000000000 创建，此处声明使实体与库 schema 一致；
+// IDX_alerts_unacknowledged_createdAt 直接服务「未确认 + 按时间倒序」的常见查询。
+@Index('IDX_alerts_acknowledged', ['acknowledgedAt'], { where: '"acknowledgedAt" IS NULL' })
+@Index('IDX_alerts_unacknowledged_createdAt', ['createdAt'], { where: '"acknowledgedAt" IS NULL' })
 export class Alert {
   @PrimaryColumn({ type: 'uuid', default: () => 'gen_random_uuid()' })
   id: string;

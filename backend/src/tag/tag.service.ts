@@ -3,6 +3,7 @@ import {
   NotFoundException,
   ConflictException,
   ForbiddenException,
+  BadRequestException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
@@ -23,12 +24,14 @@ export class TagService {
     const tags = await this.tagRepository
       .createQueryBuilder('tag')
       .leftJoin('file_tags', 'ft', 'ft."tagId" = tag.id')
+      // 仅统计未软删除的文件，避免计数偏大
+      .leftJoin('files', 'f', 'f."id" = ft."fileId" AND f."isDeleted" = false')
       .select('tag.id', 'id')
       .addSelect('tag.name', 'name')
       .addSelect('tag.color', 'color')
       .addSelect('tag.userId', 'userId')
       .addSelect('tag.createdAt', 'createdAt')
-      .addSelect('CAST(COUNT(ft."fileId") AS INTEGER)', 'fileCount')
+      .addSelect('CAST(COUNT(f."id") AS INTEGER)', 'fileCount')
       .where('tag.userId = :userId', { userId })
       .groupBy('tag.id')
       .orderBy('tag.createdAt', 'ASC')
@@ -47,6 +50,13 @@ export class TagService {
   }
 
   async create(userId: string, dto: CreateTagDto): Promise<Tag> {
+    // 每用户标签数量上限，防止无限制创建
+    const MAX_TAGS_PER_USER = 200;
+    const currentCount = await this.tagRepository.count({ where: { userId } });
+    if (currentCount >= MAX_TAGS_PER_USER) {
+      throw new ConflictException(`标签数量已达上限（${MAX_TAGS_PER_USER}）`);
+    }
+
     // 检查同一用户下标签名是否重复
     const existing = await this.tagRepository.findOne({
       where: { name: dto.name, userId },
@@ -61,7 +71,16 @@ export class TagService {
       userId,
     });
 
-    const saved = await this.tagRepository.save(tag);
+    let saved: Tag;
+    try {
+      saved = await this.tagRepository.save(tag);
+    } catch (error) {
+      // TOCTOU：并发重名可能在 findOne 之后命中唯一约束（23505），转为 409
+      if ((error as { code?: string })?.code === '23505') {
+        throw new ConflictException('标签名称已存在');
+      }
+      throw error;
+    }
 
     this.auditService.log({
       action: 'tag_create',
@@ -75,6 +94,11 @@ export class TagService {
   }
 
   async update(userId: string, id: string, dto: UpdateTagDto): Promise<Tag> {
+    // 空更新防护：两个字段均可选，传 {} 时不执行更新
+    if (dto.name === undefined && dto.color === undefined) {
+      throw new BadRequestException('没有可更新的字段');
+    }
+
     const tag = await this.tagRepository.findOne({ where: { id } });
     if (!tag) {
       throw new NotFoundException('标签不存在');
@@ -93,7 +117,15 @@ export class TagService {
       }
     }
 
-    await this.tagRepository.update(id, dto);
+    try {
+      await this.tagRepository.update(id, dto);
+    } catch (error) {
+      // TOCTOU：并发重命名可能命中唯一约束（23505），转为 409
+      if ((error as { code?: string })?.code === '23505') {
+        throw new ConflictException('标签名称已存在');
+      }
+      throw error;
+    }
 
     this.auditService.log({
       action: 'tag_update',
@@ -130,13 +162,16 @@ export class TagService {
   async assertOwner(userId: string, tagIds: string[]): Promise<void> {
     if (tagIds.length === 0) return;
 
+    // 去重：含重复 id 时 count !== tagIds.length 会误判越权
+    const uniqueIds = [...new Set(tagIds)];
+
     const count = await this.tagRepository
       .createQueryBuilder('tag')
-      .where('tag.id IN (:...ids)', { ids: tagIds })
+      .where('tag.id IN (:...ids)', { ids: uniqueIds })
       .andWhere('tag.userId = :userId', { userId })
       .getCount();
 
-    if (count !== tagIds.length) {
+    if (count !== uniqueIds.length) {
       throw new ForbiddenException('包含不属于您的标签');
     }
   }

@@ -89,6 +89,8 @@ export class StatusByPathQueryDto {
   @IsOptional()
   @Type(() => Number)
   @IsInt()
+  @Min(1)
+  @Max(500)
   limit?: number = 50;
 
   @IsOptional()
@@ -117,6 +119,8 @@ export class AbnormalIpsQueryDto {
   @IsOptional()
   @Type(() => Number)
   @IsInt()
+  @Min(1)
+  @Max(500)
   limit?: number = 20;
 
   @IsOptional()

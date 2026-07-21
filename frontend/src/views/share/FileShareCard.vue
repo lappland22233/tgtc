@@ -10,16 +10,18 @@
       <div class="meta-row"><dt>上传时间</dt><dd>{{ formatDateTime(info.createdAt) }}</dd></div>
       <div v-if="info.expiresAt" class="meta-row"><dt>有效期至</dt><dd class="expiry">{{ formatDateTime(info.expiresAt) }}</dd></div>
     </dl>
-    <a :href="downloadUrl" :download="info.name" class="download-btn" @click="onDownloadClick">
+    <button type="button" class="download-btn" :disabled="downloading" @click="handleDownload">
       <span class="download-icon">⬇</span>
-      <span>下载文件</span>
-    </a>
-    <p class="security-hint">🔒 此文件通过加密分享链接提供，请勿传播</p>
+      <span>{{ downloading ? '下载中...' : '下载文件' }}</span>
+    </button>
+    <p v-if="isEncrypted" class="security-hint encrypted">🔒 此文件通过加密分享链接提供，请勿传播</p>
+    <p v-else class="security-hint">🔗 公开分享链接，任何持有链接的人都可访问</p>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue';
+import { computed, ref } from 'vue';
+import MessagePlugin from '@/utils/message';
 
 interface FileInfo {
   id: string;
@@ -35,6 +37,10 @@ const props = defineProps<{
   token: string;
   accessJwt?: string;
 }>();
+
+// accessJwt 仅在用户通过分享密码校验后由后端签发（见 ShareView.vue onPasswordSubmit），
+// 因此它的存在即可靠地表示这是一个加密（有密码）分享。
+const isEncrypted = computed(() => !!props.accessJwt);
 
 type IconType = 'image' | 'video' | 'audio' | 'pdf' | 'archive' | 'word' | 'excel' | 'ppt' | 'file';
 
@@ -85,9 +91,46 @@ function formatDateTime(dateStr: string): string {
   } catch { return dateStr; }
 }
 
-function onDownloadClick() {
-  // 浏览器原生 <a download> 触发，无需额外处理。
-  // access JWT 通过 query 传递，由后端 ShareController 校验。
+const downloading = ref(false);
+
+/**
+ * 【P1 安全】通过 JS fetch + Blob 下载，避免把 accessJwt 渲染进 <a href>：
+ * token 不再出现在 DOM / 浏览器历史 / 地址栏 / Referer 中，
+ * 也不会被"复制链接"带走（修复 accessJwt 经 URL 泄露的问题）。
+ *
+ * 注意：后端 ShareController 目前仅从 query 参数 ?access= 读取 access JWT
+ * （不读取请求头），故 token 仍随请求 URL 发送，但只存在于瞬时的 JS 请求中，
+ * 不落入页面。彻底改为请求头传递需后端配合。
+ */
+async function handleDownload() {
+  if (downloading.value) return;
+  downloading.value = true;
+  try {
+    const res = await fetch(downloadUrl.value);
+    if (!res.ok) {
+      let msg = `下载失败（${res.status}）`;
+      try {
+        const data = await res.json();
+        if (data?.message) msg = data.message;
+      } catch {
+        // 非 JSON 错误体，使用默认提示
+      }
+      throw new Error(msg);
+    }
+    const blob = await res.blob();
+    const objectUrl = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = objectUrl;
+    a.download = props.info.name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(objectUrl);
+  } catch (err) {
+    MessagePlugin.error(err instanceof Error ? err.message : '下载失败，请稍后重试');
+  } finally {
+    downloading.value = false;
+  }
 }
 </script>
 
@@ -181,6 +224,7 @@ function onDownloadClick() {
 
 .download-btn:hover { background: #0969DA; }
 .download-btn:active { transform: scale(0.98); }
+.download-btn:disabled { opacity: 0.6; cursor: not-allowed; transform: none; }
 
 .download-icon {
   font-size: 18px;
@@ -191,5 +235,9 @@ function onDownloadClick() {
   color: #6E7681;
   font-size: 12px;
   margin: 0;
+}
+
+.security-hint.encrypted {
+  color: #F0883E;
 }
 </style>

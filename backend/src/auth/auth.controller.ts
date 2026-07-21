@@ -63,8 +63,9 @@ export class AuthController {
   }
 
   @Post('reset-password')
-  async resetPassword(@Body() dto: ResetPasswordDto) {
-    await this.authService.resetPassword(dto);
+  async resetPassword(@Body() dto: ResetPasswordDto, @Req() req: Request) {
+    const ip = getClientIp(req);
+    await this.authService.resetPassword(dto, ip);
     return { message: '密码重置成功' };
   }
 

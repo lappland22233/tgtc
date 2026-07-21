@@ -38,16 +38,27 @@ async function getPublicKey(): Promise<CryptoKey> {
   if (publicKey) return publicKey;
   if (!publicKeyPromise) {
     publicKeyPromise = (async () => {
-      const res = await api.get('/files/public-key');
-      const pem: string = res.data.data?.publicKey || res.data.publicKey;
-      if (!pem) throw new Error('无法获取公钥');
-      return crypto.subtle.importKey(
-        'spki',
-        pemToArrayBuffer(pem),
-        { name: 'RSA-OAEP', hash: 'SHA-256' },
-        false,
-        ['encrypt'],
-      );
+      try {
+        // crypto.subtle 仅安全上下文（HTTPS/localhost）可用，HTTP 部署时给出可读错误
+        if (typeof crypto === 'undefined' || !crypto.subtle) {
+          throw new Error('当前环境不支持 Web Crypto，缩略图加密需要 HTTPS 或 localhost');
+        }
+        const res = await api.get('/files/public-key');
+        const pem: string = res.data.data?.publicKey || res.data.publicKey;
+        if (!pem) throw new Error('无法获取公钥');
+        return await crypto.subtle.importKey(
+          'spki',
+          pemToArrayBuffer(pem),
+          { name: 'RSA-OAEP', hash: 'SHA-256' },
+          false,
+          ['encrypt'],
+        );
+      } catch (err) {
+        // 失败时重置 Promise 锁，允许后续调用重试自愈，
+        // 避免首次失败后永久缓存 rejected Promise 导致整个会话缩略图全挂
+        publicKeyPromise = null;
+        throw err;
+      }
     })();
   }
   publicKey = await publicKeyPromise;
@@ -123,7 +134,8 @@ export async function buildThumbUrl(fileId: string): Promise<string> {
   await acquireSlot();
   try {
     const token = await getThumbToken();
-    return `/api/files/${fileId}/thumbnail?t=${token}`;
+    // fileId 必须编码，防止路径穿越/query 注入（如 ../ 或 ? 注入）
+    return `/api/files/${encodeURIComponent(fileId)}/thumbnail?t=${token}`;
   } finally {
     releaseSlot();
   }

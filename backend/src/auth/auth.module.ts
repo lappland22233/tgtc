@@ -29,6 +29,8 @@ import { UserModule } from '../user/user.module';
           secret,
           signOptions: {
             expiresIn: configService.get<string>('JWT_EXPIRES_IN') || '7d',
+            // 显式声明签名算法，避免依赖库默认值并防止算法混淆
+            algorithm: 'HS256',
           },
         };
       },

@@ -32,32 +32,59 @@ export interface AlertRuleEvaluation {
 }
 
 /**
+ * 预聚合指标的时间窗口（秒）。access_log_metrics_1min 按 1 分钟窗口聚合，
+ * 带宽 Mbps 换算依赖该窗口，集中定义为常量避免硬编码假设（P2）。
+ */
+const AGGREGATION_WINDOW_SECONDS = 60;
+
+/**
  * 根据 ConfigCacheService 动态创建告警规则
  * 所有流量/错误阈值和冷却时间均可通过管理面板「安全配置→告警阈值配置」热更新
+ *
+ * 性能：所有配置项在创建时通过单次 Promise.all 并行读取（P3），
+ * 规则闭包捕获解析后的数值；配置非法（NaN）时回退到默认值。
  */
 export async function createAlertRules(configCache: ConfigCacheService): Promise<AlertRule[]> {
-  const getNum = async (key: string, defaultVal: string) =>
-    parseFloat(await configCache.get(key, defaultVal));
-  const getInt = async (key: string, defaultVal: string) =>
-    parseInt(await configCache.get(key, defaultVal), 10);
+  const getNum = async (key: string, defaultVal: string): Promise<number> => {
+    const parsed = parseFloat(await configCache.get(key, defaultVal));
+    return Number.isFinite(parsed) ? parsed : parseFloat(defaultVal);
+  };
+  const getInt = async (key: string, defaultVal: string): Promise<number> => {
+    const parsed = parseInt(await configCache.get(key, defaultVal), 10);
+    return Number.isFinite(parsed) ? parsed : parseInt(defaultVal, 10);
+  };
 
-  // 流量告警阈值
-  const qpsWarning = () => getNum(SEC_CONFIG_KEYS.ALERT_QPS_WARNING, '100');
-  const qpsCritical = () => getNum(SEC_CONFIG_KEYS.ALERT_QPS_CRITICAL, '300');
-  const bandwidthMbps = () => getNum(SEC_CONFIG_KEYS.ALERT_BANDWIDTH_MBPS, '100');
-
-  // 错误告警阈值
-  const err5xxRate = () => getNum(SEC_CONFIG_KEYS.ALERT_5XX_RATE, '0.1');
-  const err5xxSpike = () => getNum(SEC_CONFIG_KEYS.ALERT_5XX_SPIKE, '50');
-  const err4xxSpike = () => getNum(SEC_CONFIG_KEYS.ALERT_4XX_SPIKE, '200');
-
-  // 冷却时间
-  const cooldownQpsWarn = () => getInt(SEC_CONFIG_KEYS.ALERT_COOLDOWN_QPS_WARN, '10');
-  const cooldownQpsCrit = () => getInt(SEC_CONFIG_KEYS.ALERT_COOLDOWN_QPS_CRIT, '5');
-  const cooldownBandwidth = () => getInt(SEC_CONFIG_KEYS.ALERT_COOLDOWN_BANDWIDTH, '10');
-  const cooldown5xxRate = () => getInt(SEC_CONFIG_KEYS.ALERT_COOLDOWN_5XX_RATE, '15');
-  const cooldown5xxSpike = () => getInt(SEC_CONFIG_KEYS.ALERT_COOLDOWN_5XX_SPIKE, '5');
-  const cooldown4xxSpike = () => getInt(SEC_CONFIG_KEYS.ALERT_COOLDOWN_4XX_SPIKE, '10');
+  // 并行读取全部阈值与冷却配置（原实现为 12 次串行 await）
+  const [
+    qpsWarning,
+    qpsCritical,
+    bandwidthMbps,
+    err5xxRate,
+    err5xxSpike,
+    err4xxSpike,
+    cooldownQpsWarn,
+    cooldownQpsCrit,
+    cooldownBandwidth,
+    cooldown5xxRate,
+    cooldown5xxSpike,
+    cooldown4xxSpike,
+  ] = await Promise.all([
+    // 流量告警阈值
+    getNum(SEC_CONFIG_KEYS.ALERT_QPS_WARNING, '100'),
+    getNum(SEC_CONFIG_KEYS.ALERT_QPS_CRITICAL, '300'),
+    getNum(SEC_CONFIG_KEYS.ALERT_BANDWIDTH_MBPS, '100'),
+    // 错误告警阈值
+    getNum(SEC_CONFIG_KEYS.ALERT_5XX_RATE, '0.1'),
+    getNum(SEC_CONFIG_KEYS.ALERT_5XX_SPIKE, '50'),
+    getNum(SEC_CONFIG_KEYS.ALERT_4XX_SPIKE, '200'),
+    // 冷却时间
+    getInt(SEC_CONFIG_KEYS.ALERT_COOLDOWN_QPS_WARN, '10'),
+    getInt(SEC_CONFIG_KEYS.ALERT_COOLDOWN_QPS_CRIT, '5'),
+    getInt(SEC_CONFIG_KEYS.ALERT_COOLDOWN_BANDWIDTH, '10'),
+    getInt(SEC_CONFIG_KEYS.ALERT_COOLDOWN_5XX_RATE, '15'),
+    getInt(SEC_CONFIG_KEYS.ALERT_COOLDOWN_5XX_SPIKE, '5'),
+    getInt(SEC_CONFIG_KEYS.ALERT_COOLDOWN_4XX_SPIKE, '10'),
+  ]);
 
   return [
     // ===== 流量告警 =====
@@ -65,11 +92,10 @@ export async function createAlertRules(configCache: ConfigCacheService): Promise
       id: 'TRAFFIC_QPS',
       name: 'QPS 偏高',
       level: AlertLevel.WARNING,
-      cooldownMinutes: await cooldownQpsWarn(),
+      cooldownMinutes: cooldownQpsWarn,
       evaluate: async (m) => {
-        const threshold = await qpsWarning();
-        return m.qpsAvg > threshold
-          ? `当前 QPS: ${m.qpsAvg.toFixed(1)}，阈值: ${threshold}，请求数: ${m.totalRequests}/min`
+        return m.qpsAvg > qpsWarning
+          ? `当前 QPS: ${m.qpsAvg.toFixed(1)}，阈值: ${qpsWarning}，请求数: ${m.totalRequests}/min`
           : null;
       },
     },
@@ -77,11 +103,10 @@ export async function createAlertRules(configCache: ConfigCacheService): Promise
       id: 'TRAFFIC_QPS_CRIT',
       name: 'QPS 严重偏高',
       level: AlertLevel.CRITICAL,
-      cooldownMinutes: await cooldownQpsCrit(),
+      cooldownMinutes: cooldownQpsCrit,
       evaluate: async (m) => {
-        const threshold = await qpsCritical();
-        return m.qpsAvg > threshold
-          ? `当前 QPS: ${m.qpsAvg.toFixed(1)}，阈值: ${threshold}，请求数: ${m.totalRequests}/min`
+        return m.qpsAvg > qpsCritical
+          ? `当前 QPS: ${m.qpsAvg.toFixed(1)}，阈值: ${qpsCritical}，请求数: ${m.totalRequests}/min`
           : null;
       },
     },
@@ -89,11 +114,10 @@ export async function createAlertRules(configCache: ConfigCacheService): Promise
       id: 'TRAFFIC_BANDWIDTH',
       name: '带宽偏高',
       level: AlertLevel.WARNING,
-      cooldownMinutes: await cooldownBandwidth(),
+      cooldownMinutes: cooldownBandwidth,
       evaluate: async (m) => {
-        const mbps = Number(m.totalBandwidth) / (60 * 1024 * 1024);
-        const threshold = await bandwidthMbps();
-        return mbps > threshold ? `带宽: ${mbps.toFixed(1)} Mbps，阈值: ${threshold} Mbps` : null;
+        const mbps = Number(m.totalBandwidth) / (AGGREGATION_WINDOW_SECONDS * 1024 * 1024);
+        return mbps > bandwidthMbps ? `带宽: ${mbps.toFixed(1)} Mbps，阈值: ${bandwidthMbps} Mbps` : null;
       },
     },
 
@@ -102,13 +126,12 @@ export async function createAlertRules(configCache: ConfigCacheService): Promise
       id: 'ERROR_5XX_RATE',
       name: '5xx 错误率偏高',
       level: AlertLevel.CRITICAL,
-      cooldownMinutes: await cooldown5xxRate(),
+      cooldownMinutes: cooldown5xxRate,
       evaluate: async (m) => {
         if (m.totalRequests === 0) return null;
         const rate = m.error5xxCount / m.totalRequests;
-        const threshold = await err5xxRate();
-        return rate > threshold
-          ? `5xx: ${m.error5xxCount}/${m.totalRequests} (${(rate * 100).toFixed(1)}%)，阈值: ${(threshold * 100).toFixed(1)}%`
+        return rate > err5xxRate
+          ? `5xx: ${m.error5xxCount}/${m.totalRequests} (${(rate * 100).toFixed(1)}%)，阈值: ${(err5xxRate * 100).toFixed(1)}%`
           : null;
       },
     },
@@ -116,11 +139,10 @@ export async function createAlertRules(configCache: ConfigCacheService): Promise
       id: 'ERROR_5XX_SPIKE',
       name: '5xx 错误激增',
       level: AlertLevel.WARNING,
-      cooldownMinutes: await cooldown5xxSpike(),
+      cooldownMinutes: cooldown5xxSpike,
       evaluate: async (m) => {
-        const threshold = await err5xxSpike();
-        return m.error5xxCount > threshold
-          ? `5xx 错误: ${m.error5xxCount} 次，阈值: ${threshold} 次`
+        return m.error5xxCount > err5xxSpike
+          ? `5xx 错误: ${m.error5xxCount} 次，阈值: ${err5xxSpike} 次`
           : null;
       },
     },
@@ -128,11 +150,10 @@ export async function createAlertRules(configCache: ConfigCacheService): Promise
       id: 'ERROR_404_SPIKE',
       name: '404 错误激增',
       level: AlertLevel.WARNING,
-      cooldownMinutes: await cooldown4xxSpike(),
+      cooldownMinutes: cooldown4xxSpike,
       evaluate: async (m) => {
-        const threshold = await err4xxSpike();
-        return m.error4xxCount > threshold
-          ? `4xx 错误: ${m.error4xxCount} 次，阈值: ${threshold} 次`
+        return m.error4xxCount > err4xxSpike
+          ? `4xx 错误: ${m.error4xxCount} 次，阈值: ${err4xxSpike} 次`
           : null;
       },
     },
