@@ -924,22 +924,6 @@ onUnmounted(() => window.removeEventListener('resize', handleResize));
   padding: 0;
 }
 
-.page-header {
-  margin-bottom: 24px;
-}
-
-.page-header h1 {
-  font-size: 24px;
-  font-weight: 600;
-  margin: 0 0 4px;
-}
-
-.page-header p {
-  color: var(--text-secondary);
-  font-size: 14px;
-  margin: 0;
-}
-
 .toolbar {
   margin-bottom: 20px;
 }
@@ -953,9 +937,9 @@ onUnmounted(() => window.removeEventListener('resize', handleResize));
 }
 
 .metric-card {
-  background: var(--bg-secondary, #1a1a2e);
-  border: 1px solid var(--border-color, #333);
-  border-radius: 8px;
+  background: var(--color-bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
   padding: 20px;
 }
 
@@ -966,9 +950,11 @@ onUnmounted(() => window.removeEventListener('resize', handleResize));
 }
 
 .metric-value {
+  font-family: var(--font-mono);
   font-size: 28px;
   font-weight: 700;
   color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
 }
 
 .metric-sub {
@@ -998,17 +984,11 @@ onUnmounted(() => window.removeEventListener('resize', handleResize));
   height: 320px;
 }
 
-/* Card */
-.card {
-  background: var(--bg-secondary, #1a1a2e);
-  border: 1px solid var(--border-color, #333);
-  border-radius: 8px;
-  padding: 20px;
-}
-
+/* 卡片标题（.card 容器使用全局定义） */
 .card h3 {
+  font-family: var(--font-display);
   font-size: 16px;
-  font-weight: 500;
+  font-weight: 600;
 }
 
 /* Section card (new sections) */
@@ -1048,7 +1028,7 @@ onUnmounted(() => window.removeEventListener('resize', handleResize));
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-family: 'Courier New', monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   color: var(--text-primary);
 }
@@ -1067,7 +1047,7 @@ onUnmounted(() => window.removeEventListener('resize', handleResize));
 
 /* Path truncation for new sections */
 .path-truncate {
-  font-family: 'Courier New', monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   color: var(--text-primary);
   cursor: default;
@@ -1116,7 +1096,7 @@ onUnmounted(() => window.removeEventListener('resize', handleResize));
 
 /* IP code style */
 .ip-code {
-  font-family: 'Courier New', monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   color: var(--text-primary);
   background: rgba(255, 255, 255, 0.04);
@@ -1126,15 +1106,15 @@ onUnmounted(() => window.removeEventListener('resize', handleResize));
 
 /* Error rate color coding */
 .error-rate-normal {
-  color: #2ba471;
+  color: var(--color-success);
 }
 
 .error-rate-warning {
-  color: #e37318;
+  color: var(--color-warning);
 }
 
 .error-rate-critical {
-  color: #e34d59;
+  color: var(--color-danger);
   font-weight: 600;
 }
 
@@ -1207,7 +1187,7 @@ onUnmounted(() => window.removeEventListener('resize', handleResize));
 }
 
 .mobile-access-ip {
-  font-family: 'Courier New', monospace;
+  font-family: var(--font-mono);
   font-size: 13px;
   color: var(--text-primary);
   background: rgba(255, 255, 255, 0.04);
@@ -1216,7 +1196,7 @@ onUnmounted(() => window.removeEventListener('resize', handleResize));
 }
 
 .mobile-access-path {
-  font-family: 'Courier New', monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   color: var(--text-secondary);
   word-break: break-all;

@@ -92,21 +92,5 @@ async function handleSubmit() {
 </script>
 
 <style scoped>
-.auth-footer {
-  text-align: center;
-  margin-top: 28px;
-  color: var(--text-secondary);
-  font-size: 14px;
-}
-
-.auth-link {
-  color: var(--color-accent);
-  text-decoration: none;
-  font-weight: 500;
-  transition: color var(--duration-fast);
-}
-
-.auth-link:hover {
-  color: var(--color-cyan);
-}
+/* .auth-footer / .auth-link 已提取为全局共享类，见 assets/styles.css */
 </style>

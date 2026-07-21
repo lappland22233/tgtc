@@ -34,10 +34,10 @@
 
     <div class="dashboard-split-grid">
       <div class="card">
-        <h3 style="margin-bottom: 20px; font-family: var(--font-display); font-size: 16px; font-weight: 600;">
+        <h3 class="card-title">
           我的文件统计
         </h3>
-        <div class="stats-grid" style="margin-bottom: 0; grid-template-columns: repeat(3, 1fr);">
+        <div class="stats-grid nested-stats">
           <div class="stat-card">
             <h3>我的文件</h3>
             <div class="value">{{ myFiles.fileCount }}</div>
@@ -54,7 +54,7 @@
       </div>
 
       <div class="card">
-        <h3 style="margin-bottom: 20px; font-family: var(--font-display); font-size: 16px; font-weight: 600;">
+        <h3 class="card-title">
           全站月度访问量
         </h3>
         <div v-if="stats.monthlyAccess.length === 0" class="empty-state">
@@ -149,16 +149,18 @@ onUnmounted(() => {
   gap: 20px;
 }
 
+/* 嵌套统计网格：桌面 3 列，移动端塌缩为 1 列（替代原 inline style，解决小屏挤压） */
+.nested-stats {
+  margin-bottom: 0;
+  grid-template-columns: repeat(3, 1fr);
+}
+
 @media (max-width: 768px) {
   .dashboard-split-grid {
     grid-template-columns: 1fr;
   }
-}
-
-.empty-state {
-  text-align: center;
-  padding: 32px 0;
-  color: var(--text-secondary);
-  font-size: 14px;
+  .nested-stats {
+    grid-template-columns: 1fr;
+  }
 }
 </style>

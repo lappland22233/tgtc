@@ -525,22 +525,6 @@ defineExpose({ resizeAllCharts });
   padding: 0;
 }
 
-.page-header {
-  margin-bottom: 24px;
-}
-
-.page-header h1 {
-  font-size: 24px;
-  font-weight: 600;
-  margin: 0 0 4px;
-}
-
-.page-header p {
-  color: var(--text-secondary);
-  font-size: 14px;
-  margin: 0;
-}
-
 .toolbar {
   margin-bottom: 20px;
 }
@@ -551,15 +535,16 @@ defineExpose({ resizeAllCharts });
 
 /* Card */
 .card {
-  background: var(--bg-secondary, #1a1a2e);
-  border: 1px solid var(--border-color, #333);
-  border-radius: 8px;
-  padding: 20px;
+  background: var(--color-bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  padding: 24px;
 }
 
 .card h3 {
   font-size: 16px;
-  font-weight: 500;
+  font-weight: 600;
+  font-family: var(--font-display);
   margin: 0 0 16px;
 }
 

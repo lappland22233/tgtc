@@ -14,7 +14,7 @@
           </t-select>
         </div>
         <div style="display: flex; gap: 12px;">
-          <t-button theme="primary" variant="outline" @click="batchDelete">批量删除（冷静期）</t-button>
+          <t-button v-if="!isMobile" theme="primary" variant="outline" @click="batchDelete">批量删除（冷静期）</t-button>
         </div>
       </div>
 
@@ -483,7 +483,7 @@ onUnmounted(() => {
 }
 
 :deep(.row-deleted) {
-  background: rgba(255, 255, 255, 0.02);
+  background: var(--color-bg-elevated);
   opacity: 0.85;
 }
 

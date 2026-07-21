@@ -199,7 +199,7 @@ async function handleDownload() {
 .meta-row dt { color: #8B949E; font-weight: normal; min-width: 80px; }
 .meta-row dd { color: #E6EDF3; margin: 0; text-align: right; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-.mime-type { font-family: 'SFMono-Regular', Consolas, monospace; font-size: 12px; }
+.mime-type { font-family: var(--font-mono); font-size: 12px; }
 .expiry { color: #F0883E; }
 
 .download-btn {
