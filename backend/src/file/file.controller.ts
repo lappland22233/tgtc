@@ -552,10 +552,10 @@ export class FileController {
   ) {
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
 
-    // 1. 查找文件，校验存在且未删除
+    // 1. 查找文件，校验存在且未删除（select 包含遗留约束字段，用于懒创建 ShareLink）
     const file = await this.fileRepository.findOne({
       where: { id, isDeleted: false },
-      select: ['id', 'accessType', 'uploaderId', 'originalName'],
+      select: ['id', 'accessType', 'uploaderId', 'originalName', 'password', 'maxAccessCount', 'expiresIn', 'expiresStartAt'],
     });
     if (!file) {
       res.status(404).json({ code: 1, message: '文件不存在' });
@@ -568,7 +568,7 @@ export class FileController {
       return;
     }
 
-    // 3. 懒创建 ShareLink（如果不存在）
+    // 3. 懒创建 ShareLink（如果不存在）——复制文件的遗留约束字段
     let shareLink = await this.shareLinkRepository.findOne({
       where: { token: id, isDeleted: false },
     });
@@ -578,10 +578,11 @@ export class FileController {
         targetType: ShareTargetType.FILE,
         targetId: id,
         creatorId: file.uploaderId,
-        password: null,
-        maxAccessCount: -1,
-        expiresIn: null,
-        expiresStartAt: null,
+        // 复制文件的遗留约束（Phase 2 之前通过 /files/:id/password 等端点设置的）
+        password: file.password ?? null,
+        maxAccessCount: file.maxAccessCount ?? -1,
+        expiresIn: file.expiresIn ?? null,
+        expiresStartAt: file.expiresStartAt ?? null,
         status: ShareLinkStatus.ACTIVE,
       });
       try {
