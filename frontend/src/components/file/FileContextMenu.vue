@@ -13,32 +13,72 @@
         <!-- 文件目标菜单 -->
         <template v-if="target?.kind === 'file'">
           <div class="ctx-header" :title="target.file.originalName">{{ target.file.originalName }}</div>
-          <div class="ctx-item" role="menuitem" @click="emitAction('copy-link')">
-            <t-icon name="link" class="ctx-icon" />复制链接
-          </div>
-          <div class="ctx-item" role="menuitem" @click="emitAction('download')">
-            <t-icon name="download" class="ctx-icon" />下载
-          </div>
-          <div class="ctx-divider" />
-          <div class="ctx-item" role="menuitem" @click="emitAction('rename')">
-            <t-icon name="edit" class="ctx-icon" />重命名
-          </div>
-          <div class="ctx-item" role="menuitem" @click="emitAction('copy')">
-            <t-icon name="copy" class="ctx-icon" />复制
-          </div>
-          <div class="ctx-item" role="menuitem" @click="emitAction('move')">
-            <t-icon name="folder-move" class="ctx-icon" />移动到...
-          </div>
-          <div class="ctx-item" role="menuitem" @click="emitAction('tag')">
-            <t-icon name="tag" class="ctx-icon" />标签
-          </div>
-          <div class="ctx-item" role="menuitem" @click="emitAction('share')">
-            <t-icon name="share" class="ctx-icon" />分享
-          </div>
-          <div class="ctx-divider" />
-          <div class="ctx-item danger" role="menuitem" @click="emitAction('delete')">
-            <t-icon name="delete" class="ctx-icon" />删除
-          </div>
+
+          <!-- 处理中：仅提示 -->
+          <template v-if="target.file.status === 'processing'">
+            <div class="ctx-item disabled"><t-icon name="refresh" class="ctx-icon spin" />文件处理中…</div>
+          </template>
+
+          <!-- 已删除：恢复 / 强制删除 -->
+          <template v-else-if="target.file.isDeleted">
+            <div
+              class="ctx-item"
+              :class="{ disabled: target.file.deletedByAdmin && !isAdmin }"
+              role="menuitem"
+              @click="!(target.file.deletedByAdmin && !isAdmin) && emitAction('restore')"
+            >
+              <t-icon name="rollback" class="ctx-icon" />恢复
+            </div>
+            <div v-if="isAdmin" class="ctx-item danger" role="menuitem" @click="emitAction('force-delete')">
+              <t-icon name="delete" class="ctx-icon" />强制删除
+            </div>
+          </template>
+
+          <!-- 正常文件：完整操作 -->
+          <template v-else>
+            <div class="ctx-item" role="menuitem" @click="emitAction('copy-link')">
+              <t-icon name="link" class="ctx-icon" />复制链接
+            </div>
+            <div class="ctx-item" role="menuitem" @click="emitAction('download')">
+              <t-icon name="download" class="ctx-icon" />下载
+            </div>
+            <div class="ctx-divider" />
+            <div class="ctx-item" role="menuitem" @click="emitAction('rename')">
+              <t-icon name="edit" class="ctx-icon" />重命名
+            </div>
+            <div class="ctx-item" role="menuitem" @click="emitAction('copy')">
+              <t-icon name="copy" class="ctx-icon" />复制
+            </div>
+            <div class="ctx-item" role="menuitem" @click="emitAction('move')">
+              <t-icon name="folder-move" class="ctx-icon" />移动到...
+            </div>
+            <div class="ctx-item" role="menuitem" @click="emitAction('tag')">
+              <t-icon name="tag" class="ctx-icon" />标签
+            </div>
+            <div class="ctx-item" role="menuitem" @click="emitAction('share')">
+              <t-icon name="share" class="ctx-icon" />分享
+            </div>
+            <div class="ctx-divider" />
+            <!-- 访问控制（原表格内联列，现收纳进菜单） -->
+            <div class="ctx-item" role="menuitem" @click="emitAction('toggle-access')">
+              <t-icon :name="target.file.accessType === 'public' ? 'lock-off' : 'lock-on'" class="ctx-icon" />
+              {{ target.file.accessType === 'public' ? '设为私有' : '设为公开' }}
+            </div>
+            <div class="ctx-item" role="menuitem" @click="emitAction('password')">
+              <t-icon name="lock-on" class="ctx-icon" />
+              {{ target.file.hasPassword ? '修改/移除密码' : '设置访问密码' }}
+            </div>
+            <div class="ctx-item" role="menuitem" @click="emitAction('access-count')">
+              <t-icon name="view-list" class="ctx-icon" />访问次数限制…
+            </div>
+            <div class="ctx-item" role="menuitem" @click="emitAction('expires')">
+              <t-icon name="time" class="ctx-icon" />限时访问…
+            </div>
+            <div class="ctx-divider" />
+            <div class="ctx-item danger" role="menuitem" @click="emitAction('delete')">
+              <t-icon name="delete" class="ctx-icon" />删除
+            </div>
+          </template>
         </template>
 
         <!-- 文件夹目标菜单 -->
@@ -102,6 +142,8 @@ const props = defineProps<{
   target: CtxTarget | null;
   /** 剪贴板中已复制的文件数量（>0 时空白处菜单显示「粘贴」) */
   clipboardCount: number;
+  /** 当前用户是否为管理员（用于显示「强制删除」） */
+  isAdmin: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -214,10 +256,22 @@ onUnmounted(() => {
   background: var(--color-danger-soft);
   color: var(--color-danger);
 }
+.ctx-item.disabled {
+  color: var(--text-disabled);
+  cursor: not-allowed;
+  pointer-events: none;
+}
 
 .ctx-icon {
   font-size: 16px;
   flex-shrink: 0;
+}
+.ctx-icon.spin {
+  animation: ctx-spin 1s linear infinite;
+}
+@keyframes ctx-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
 }
 
 .ctx-divider {

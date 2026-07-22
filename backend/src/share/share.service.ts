@@ -462,7 +462,7 @@ export class ShareService {
    * 校验 fileId 是否属于此分享的 target 子树。
    * - targetType=FILE：fileId 必须等于 targetId。
    * - targetType=FOLDER：file 所在的 folderId 必须是 target 的后代（或就是 target 自身），
-   *   通过闭包表 folder_closure 一次查询得到完整子树 id 列表后判断。
+   *   通过闭包表 folders_closure 一次查询得到完整子树 id 列表后判断。
    */
   private async assertFileInShare(link: ShareLink, fileId: string): Promise<void> {
     if (link.targetType === ShareTargetType.FILE) {
@@ -490,7 +490,7 @@ export class ShareService {
    */
   private async isFolderInSubtree(targetFolderId: string, folderId: string): Promise<boolean> {
     const rows = await this.folderRepo.manager.query(
-      `SELECT 1 FROM folder_closure WHERE id_ancestor = $1 AND id_descendant = $2 LIMIT 1`,
+      `SELECT 1 FROM folders_closure WHERE id_ancestor = $1 AND id_descendant = $2 LIMIT 1`,
       [targetFolderId, folderId],
     );
     return rows.length > 0;

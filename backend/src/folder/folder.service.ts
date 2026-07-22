@@ -357,7 +357,7 @@ export class FolderService {
    */
   private async getFolderDepth(folderId: string): Promise<number> {
     const rows = await this.folderRepo.manager.query(
-      `SELECT COUNT(*)::int AS cnt FROM folder_closure WHERE id_descendant = $1`,
+      `SELECT COUNT(*)::int AS cnt FROM folders_closure WHERE id_descendant = $1`,
       [folderId],
     );
     return Math.max(0, (rows[0]?.cnt ?? 1) - 1);
@@ -370,9 +370,9 @@ export class FolderService {
   private async getSubtreeHeight(folderId: string): Promise<number> {
     const rows = await this.folderRepo.manager.query(
       `SELECT COALESCE(MAX(cnt), 1)::int AS h FROM (
-         SELECT COUNT(*) AS cnt FROM folder_closure fc1
-         WHERE fc1.id_descendant IN (SELECT id_descendant FROM folder_closure WHERE id_ancestor = $1)
-           AND fc1.id_ancestor IN (SELECT id_descendant FROM folder_closure WHERE id_ancestor = $1)
+         SELECT COUNT(*) AS cnt FROM folders_closure fc1
+         WHERE fc1.id_descendant IN (SELECT id_descendant FROM folders_closure WHERE id_ancestor = $1)
+           AND fc1.id_ancestor IN (SELECT id_descendant FROM folders_closure WHERE id_ancestor = $1)
          GROUP BY fc1.id_descendant
        ) sub`,
       [folderId],

@@ -175,10 +175,6 @@
               />
             </div>
             <div class="os-cell os-size">大小</div>
-            <div class="os-cell os-access">访问权限</div>
-            <div class="os-cell os-password">加密</div>
-            <div class="os-cell os-count">访问次数</div>
-            <div class="os-cell os-expires">限时访问</div>
             <div class="os-cell os-date os-sortable" @click="toggleSort('createdAt')">
               上传时间
               <t-icon
@@ -187,7 +183,6 @@
                 :class="{ active: sortBy === 'createdAt' }"
               />
             </div>
-            <div class="os-cell os-ops">操作</div>
           </div>
 
           <!-- 文件夹行（OS 风格，双击进入） -->
@@ -213,20 +208,7 @@
               <t-tag size="small" theme="warning" variant="light" class="os-kind-tag">文件夹</t-tag>
             </div>
             <div class="os-cell os-size os-muted">{{ folder.children?.length ? `${folder.children.length} 项` : '—' }}</div>
-            <div class="os-cell os-access os-muted">—</div>
-            <div class="os-cell os-password os-muted">—</div>
-            <div class="os-cell os-count os-muted">—</div>
-            <div class="os-cell os-expires os-muted">—</div>
             <div class="os-cell os-date os-muted">{{ formatDate(folder.createdAt) }}</div>
-            <div class="os-cell os-ops" @click.stop>
-              <t-button size="small" variant="text" @click="onFolderOpen(folder)">
-                <template #icon><t-icon name="folder-opened" /></template>打开
-              </t-button>
-              <t-button size="small" variant="text" @click="onFolderRename(folder)">重命名</t-button>
-              <t-button size="small" variant="text" @click="onFolderMove(folder)">移动</t-button>
-              <t-button size="small" variant="text" @click="onFolderShare(folder)">分享</t-button>
-              <t-button size="small" theme="danger" variant="text" @click="onFolderDelete(folder)">删除</t-button>
-            </div>
           </div>
 
           <!-- 文件行 -->
@@ -280,86 +262,11 @@
               </div>
             </div>
             <div class="os-cell os-size os-mono">{{ formatSize(file.size) }}</div>
-            <div class="os-cell os-access">
-              <t-select
-                v-if="isFileActionable(file)"
-                :value="file.accessType"
-                size="small"
-                @change="(val: string) => handleAccessTypeChange(file.id, val)"
-                :options="[
-                  { label: '公开', value: 'public' },
-                  { label: '私有', value: 'private' }
-                ]"
-              />
-              <span v-else class="os-muted os-italic">{{ file.status === 'processing' ? '处理中' : '删除中' }}</span>
-            </div>
-            <div class="os-cell os-password">
-              <t-button
-                size="small"
-                :theme="file.hasPassword ? 'warning' : 'default'"
-                variant="outline"
-                :disabled="!isFileActionable(file)"
-                @click="openPasswordDialog(file)"
-              >
-                <template #icon><t-icon :name="file.hasPassword ? 'lock-on' : 'lock-off'" /></template>
-                {{ file.hasPassword ? '已加密' : '未加密' }}
-              </t-button>
-            </div>
-            <div class="os-cell os-count">
-              <t-input-number
-                :value="file.maxAccessCount"
-                :min="-1"
-                size="small"
-                :disabled="!isFileActionable(file)"
-                @change="(val: number) => handleAccessCountChange(file.id, val)"
-              />
-            </div>
-            <div class="os-cell os-expires">
-              <t-select
-                :value="file.expiresIn"
-                size="small"
-                @change="(val: number | null) => handleExpiresChange(file.id, val)"
-                :disabled="!isFileActionable(file)"
-                :options="expiresOptions"
-              />
-            </div>
             <div class="os-cell os-date">
               <div>{{ formatDate(file.createdAt) }}</div>
               <div v-if="file.isDeleted && file.deleteRequestedAt" class="os-deleted-date">
                 删除于 {{ formatDate(file.deleteRequestedAt) }}
               </div>
-            </div>
-            <div class="os-cell os-ops" @click.stop>
-              <template v-if="file.status === 'processing'">
-                <span class="os-muted os-italic os-processing-hint">处理中...</span>
-              </template>
-              <template v-else-if="file.isDeleted">
-                <t-button
-                  size="small"
-                  theme="success"
-                  variant="text"
-                  :disabled="file.deletedByAdmin && !isAdmin"
-                  @click="handleRestore(file.id)"
-                >
-                  恢复
-                </t-button>
-                <t-button
-                  v-if="isAdmin"
-                  size="small"
-                  theme="danger"
-                  variant="text"
-                  @click="handleForceDelete(file.id)"
-                >
-                  强制删除
-                </t-button>
-              </template>
-              <template v-else>
-                <t-button size="small" theme="primary" variant="text" @click="copyLink(file)">复制链接</t-button>
-                <t-button size="small" variant="text" @click="downloadFile(file)">下载</t-button>
-                <t-button size="small" variant="text" @click="openTagEditor(file)">标签</t-button>
-                <t-button size="small" variant="text" @click="onFileShare(file)">分享</t-button>
-                <t-button size="small" theme="danger" variant="text" @click="handleDelete(file)">删除</t-button>
-              </template>
             </div>
           </div>
 
@@ -493,6 +400,18 @@
       <div class="fl-dialog-hint">设置密码后，访问者需要输入密码才能查看该文件</div>
     </t-dialog>
 
+    <!-- 访问次数限制弹窗 -->
+    <t-dialog v-model:visible="accessCountDialog.visible" header="设置访问次数限制" width="400px" @confirm="saveAccessCount" @close="accessCountDialog.visible = false">
+      <t-input-number v-model="accessCountDialog.value" :min="-1" theme="normal" style="width: 100%" />
+      <div class="fl-dialog-hint">-1 表示不限制访问次数；超过上限后文件将无法再被访问</div>
+    </t-dialog>
+
+    <!-- 限时访问弹窗 -->
+    <t-dialog v-model:visible="expiresDialog.visible" header="设置限时访问" width="400px" @confirm="saveExpires" @close="expiresDialog.visible = false">
+      <t-select v-model="expiresDialog.value" :options="expiresOptions" style="width: 100%" />
+      <div class="fl-dialog-hint">选择「永久」表示不限时；限时到期后文件将无法再被访问</div>
+    </t-dialog>
+
     <!-- 删除确认弹窗 -->
     <t-dialog
       v-model:visible="deleteDialog.visible"
@@ -563,6 +482,7 @@
       :y="ctxMenu.y"
       :target="ctxMenu.target"
       :clipboard-count="fileClipboard.length"
+      :is-admin="isAdmin"
       @action="onCtxAction"
     />
   </div>
@@ -831,6 +751,16 @@ async function onCtxAction(action: string, target: CtxTarget | null) {
       case 'tag': openTagEditor(file); break;
       case 'share': onFileShare(file); break;
       case 'delete': handleDelete(file); break;
+      // 访问控制（原表格内联列）
+      case 'toggle-access':
+        handleAccessTypeChange(file.id, file.accessType === 'public' ? 'private' : 'public');
+        break;
+      case 'password': openPasswordDialog(file); break;
+      case 'access-count': openAccessCountDialog(file); break;
+      case 'expires': openExpiresDialog(file); break;
+      // 已删除文件的恢复操作
+      case 'restore': handleRestore(file.id); break;
+      case 'force-delete': handleForceDelete(file.id); break;
     }
     return;
   }
@@ -1024,6 +954,20 @@ const passwordDialog = reactive({
   fileId: '',
 });
 
+// 访问次数限制弹窗状态
+const accessCountDialog = reactive({
+  visible: false,
+  value: -1,
+  fileId: '',
+});
+
+// 限时访问弹窗状态
+const expiresDialog = reactive({
+  visible: false,
+  value: null as number | null,
+  fileId: '',
+});
+
 // 删除确认弹窗
 const deleteDialog = reactive({
   visible: false,
@@ -1060,6 +1004,51 @@ async function savePassword() {
   }
 }
 
+function openAccessCountDialog(row: FileItem) {
+  accessCountDialog.fileId = row.id;
+  accessCountDialog.value = row.maxAccessCount ?? -1;
+  accessCountDialog.visible = true;
+}
+
+async function saveAccessCount() {
+  try {
+    await fileStore.updateAccessCount(accessCountDialog.fileId, accessCountDialog.value);
+    MessagePlugin.success('访问次数限制已更新');
+    accessCountDialog.visible = false;
+    refreshCurrentList();
+  } catch (error: unknown) {
+    MessagePlugin.error(getErrorMessage(error));
+  }
+}
+
+function openExpiresDialog(row: FileItem) {
+  expiresDialog.fileId = row.id;
+  expiresDialog.value = row.expiresIn ?? null;
+  expiresDialog.visible = true;
+}
+
+async function saveExpires() {
+  try {
+    await fileStore.updateExpires(expiresDialog.fileId, expiresDialog.value);
+    MessagePlugin.success('限时访问已更新');
+    expiresDialog.visible = false;
+    refreshCurrentList();
+  } catch (error: unknown) {
+    MessagePlugin.error(getErrorMessage(error));
+  }
+}
+
+/** 按当前分页模式刷新文件列表（供访问控制类弹窗保存后复用） */
+function refreshCurrentList() {
+  if (pageMode.value === 'infinite') {
+    resetCursor();
+    fileStore.replaceFiles([]);
+    loadInitialFiles(true);
+  } else {
+    refetchFiles(page.value, Math.abs(pageSize.value));
+  }
+}
+
 // 限时访问选项
 const expiresOptions = [
   { label: '永久', value: null },
@@ -1071,15 +1060,6 @@ const expiresOptions = [
   { label: '7 天', value: 168 },
   { label: '30 天', value: 720 },
 ];
-
-async function handleExpiresChange(id: string, expiresIn: number | null) {
-  try {
-    await fileStore.updateExpires(id, expiresIn);
-    MessagePlugin.success('有效期已更新');
-  } catch (error: unknown) {
-    MessagePlugin.error(getErrorMessage(error));
-  }
-}
 
 let dragLeaveTimeout: ReturnType<typeof setTimeout> | null = null;
 let dragCounter = 0;
@@ -1385,15 +1365,6 @@ function handlePageSizeChange(val: number) {
 async function handleAccessTypeChange(id: string, accessType: string) {
   try {
     await fileStore.updateAccessType(id, accessType);
-    MessagePlugin.success('更新成功');
-  } catch (error: unknown) {
-    MessagePlugin.error(getErrorMessage(error));
-  }
-}
-
-async function handleAccessCountChange(id: string, maxAccessCount: number) {
-  try {
-    await fileStore.updateAccessCount(id, maxAccessCount);
     MessagePlugin.success('更新成功');
   } catch (error: unknown) {
     MessagePlugin.error(getErrorMessage(error));
@@ -1769,21 +1740,16 @@ onUnmounted(() => {
 }
 
 .os-list-inner {
-  min-width: 1080px;
+  min-width: 0;
 }
 
 .os-row {
   display: grid;
   grid-template-columns:
     44px
-    minmax(240px, 2fr)
-    88px
-    104px
-    100px
-    112px
-    108px
-    132px
-    minmax(220px, 1fr);
+    minmax(240px, 1fr)
+    96px
+    150px;
   align-items: center;
   gap: 8px;
   padding: 0 12px;

@@ -34,9 +34,11 @@ import {
   LockOffIcon,
   LockOnIcon,
   RefreshIcon,
+  RollbackIcon,
   SearchIcon,
   ShareIcon,
   TagIcon,
+  TimeIcon,
   UploadIcon,
   ViewListIcon,
 } from 'tdesign-icons-vue-next';
@@ -65,9 +67,11 @@ const iconMap: Record<string, Component> = {
   'lock-on': LockOnIcon,
   'paste': FilePasteIcon,
   'refresh': RefreshIcon,
+  'rollback': RollbackIcon,
   'search': SearchIcon,
   'share': ShareIcon,
   'tag': TagIcon,
+  'time': TimeIcon,
   'upload': UploadIcon,
   'view-list': ViewListIcon,
 };
