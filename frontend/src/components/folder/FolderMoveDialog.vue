@@ -17,15 +17,15 @@
           :class="{ active: selectedId === null }"
           @click="selectedId = null"
         >
-          <t-icon name="folder-opened" class="folder-icon" />
+          <t-icon name="folder-open" class="folder-icon" />
           <span>我的文件（根目录）</span>
         </div>
         <div class="tree-scroll">
           <t-tree
             :data="treeData"
             :keys="{ value: 'id', label: 'name', children: 'children' }"
-            :value="selectedId || ''"
-            @change="onSelect"
+            :actived="selectedId ? [selectedId] : []"
+            @active="onActive"
             :expanded="expandedKeys"
             @expand="expandedKeys = $event"
             hover
@@ -92,10 +92,10 @@ watch(() => props.visible, (v) => {
   }
 });
 
-function onSelect(value: string | string[]) {
-  // t-tree 单选返回字符串，多选返回数组，这里统一兼容
-  const v = Array.isArray(value) ? value[0] : value;
-  selectedId.value = v === '' || v === 'root' ? null : v;
+function onActive(value: Array<string | number>) {
+  // activable 模式下 active 事件返回激活节点的值数组；为空表示取消激活（回到根目录）
+  const v = value && value.length > 0 ? value[0] : null;
+  selectedId.value = v === '' || v === 'root' ? null : (v as string | null);
 }
 
 async function handleConfirm() {

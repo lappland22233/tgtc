@@ -28,7 +28,7 @@ import { FileService } from './file.service';
 import { ThumbnailCryptoService } from './thumbnail-crypto.service';
 import { BatchMarkdownDto, UpdateAccessTypeDto, UpdateAccessCountDto, SetPasswordDto, UpdateExpiresDto } from './file.dto';
 import { FolderService } from '../folder/folder.service';
-import { MoveFileDto } from '../folder/folder.dto';
+import { MoveFileDto, RenameFileDto, CopyFileDto } from '../folder/folder.dto';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { User, UserRole } from '../common/entities/user.entity';
 import { FileAccessType } from '../common/entities/file.entity';
@@ -450,6 +450,36 @@ export class FileController {
   ) {
     const file = await this.folderService.moveFile(user.id, id, dto);
     return { message: '文件已移动', data: { id: file.id, folderId: file.folderId } };
+  }
+
+  /**
+   * 重命名文件显示名。
+   * Body: { newOriginalName: string }
+   */
+  @Patch(':id/rename')
+  @UseGuards(JwtAuthGuard)
+  async renameFile(
+    @Param('id') id: string,
+    @Body() dto: RenameFileDto,
+    @CurrentUser() user: User,
+  ) {
+    const file = await this.folderService.renameFile(user.id, id, dto);
+    return { message: '文件已重命名', data: { id: file.id, originalName: file.originalName } };
+  }
+
+  /**
+   * 复制文件（在目标文件夹生成独立副本）。
+   * Body: { folderId: string | null }（null 表示复制到根目录）
+   */
+  @Post(':id/copy')
+  @UseGuards(JwtAuthGuard)
+  async copyFile(
+    @Param('id') id: string,
+    @Body() dto: CopyFileDto,
+    @CurrentUser() user: User,
+  ) {
+    const file = await this.folderService.copyFile(user.id, id, dto);
+    return { message: '文件已复制', data: file };
   }
 
   @Delete(':id')

@@ -51,6 +51,8 @@ export type AuditAction =
   | 'folder_delete_by_admin'
   | 'folder_restore'
   | 'file_move'
+  | 'file_rename'
+  | 'file_copy'
   | 'share_link_create'
   | 'share_link_update'
   | 'share_link_delete'

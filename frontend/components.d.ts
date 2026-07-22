@@ -14,6 +14,8 @@ declare module 'vue' {
     AlertBanner: typeof import('./src/components/AlertBanner.vue')['default']
     CreateShareDialog: typeof import('./src/components/share/CreateShareDialog.vue')['default']
     FileCard: typeof import('./src/components/file/FileCard.vue')['default']
+    FileContextMenu: typeof import('./src/components/file/FileContextMenu.vue')['default']
+    FileRenameDialog: typeof import('./src/components/file/FileRenameDialog.vue')['default']
     FileTagEditor: typeof import('./src/components/FileTagEditor.vue')['default']
     FolderBreadcrumb: typeof import('./src/components/folder/FolderBreadcrumb.vue')['default']
     FolderCard: typeof import('./src/components/file/FolderCard.vue')['default']

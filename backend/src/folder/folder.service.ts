@@ -5,7 +5,7 @@ import { Folder } from '../common/entities/folder.entity';
 import { File } from '../common/entities/file.entity';
 import { AuditService } from '../common/services/audit.service';
 import { AuditAction } from '../common/entities/audit-log.entity';
-import { CreateFolderDto, RenameFolderDto, MoveFolderDto, MoveFileDto } from './folder.dto';
+import { CreateFolderDto, RenameFolderDto, MoveFolderDto, MoveFileDto, RenameFileDto, CopyFileDto } from './folder.dto';
 
 const SOFT_DELETE_GRACE_DAYS = 7;
 
@@ -317,6 +317,97 @@ export class FolderService {
       metadata: { from: oldFolderId, to: dto.folderId ?? null },
     });
     return saved;
+  }
+
+  // ---------- 文件重命名 ----------
+
+  /**
+   * 重命名文件显示名（originalName）。
+   * 仅更新展示用名称，不改动底层存储的 filename / Telegram 引用。
+   */
+  async renameFile(ownerId: string, fileId: string, dto: RenameFileDto): Promise<File> {
+    const file = await this.fileRepo.findOne({
+      where: { id: fileId, uploaderId: ownerId, isDeleted: false },
+    });
+    if (!file) {
+      throw new NotFoundException('文件不存在');
+    }
+    const oldName = file.originalName;
+    file.originalName = dto.newOriginalName;
+    const saved = await this.fileRepo.save(file);
+    this.audit.log({
+      action: 'file_rename' as AuditAction,
+      userId: ownerId,
+      resourceType: 'file',
+      resourceId: fileId,
+      metadata: { from: oldName, to: dto.newOriginalName },
+    });
+    return saved;
+  }
+
+  // ---------- 文件复制 ----------
+
+  /**
+   * 复制文件（生成独立副本）。
+   *
+   * 副本复用源文件的 Telegram 存储引用（telegramFileId / telegramFilePath /
+   * thumbnailPath / mimeType / size / filename），不重新上传字节，属于轻量级
+   * 引用复制。副本是独立的 File 记录，可单独重命名、移动、删除。
+   * originalName 追加 " - 副本" 后缀；若已存在同名副本则累加计数。
+   */
+  async copyFile(ownerId: string, fileId: string, dto: CopyFileDto): Promise<File> {
+    const source = await this.fileRepo.findOne({
+      where: { id: fileId, uploaderId: ownerId, isDeleted: false },
+    });
+    if (!source) {
+      throw new NotFoundException('文件不存在');
+    }
+    if (dto.folderId) {
+      await this.assertFolderOwned(dto.folderId, ownerId);
+    }
+
+    const copy = this.fileRepo.create({
+      filename: source.filename,
+      originalName: await this.buildCopyName(source.originalName, ownerId, dto.folderId ?? null),
+      mimeType: source.mimeType,
+      size: source.size,
+      telegramFileId: source.telegramFileId,
+      telegramFilePath: source.telegramFilePath,
+      thumbnailPath: source.thumbnailPath,
+      folderId: dto.folderId ?? null,
+      accessType: source.accessType,
+      uploaderId: ownerId,
+      status: 'ready',
+    });
+    const saved = await this.fileRepo.save(copy);
+    this.audit.log({
+      action: 'file_copy' as AuditAction,
+      userId: ownerId,
+      resourceType: 'file',
+      resourceId: saved.id,
+      metadata: { sourceId: fileId, to: dto.folderId ?? null },
+    });
+    return saved;
+  }
+
+  /**
+   * 生成不与目标文件夹内现有文件重名的副本名称。
+   * 形如 "photo.png - 副本"、"photo.png - 副本 2"……
+   */
+  private async buildCopyName(originalName: string, ownerId: string, folderId: string | null): Promise<string> {
+    const base = `${originalName} - 副本`;
+    let candidate = base;
+    let counter = 1;
+    // 逐个探测重名（副本操作低频，O(k) 查询可接受；k 为同名副本数量）
+    for (;;) {
+      const exists = await this.fileRepo.findOne({
+        where: { uploaderId: ownerId, folderId: folderId ?? IsNull(), originalName: candidate, isDeleted: false },
+        select: ['id'],
+      });
+      if (!exists) return candidate;
+      counter += 1;
+      candidate = `${base} ${counter}`;
+    }
   }
 
   // ---------- 内部工具 ----------

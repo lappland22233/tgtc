@@ -935,11 +935,12 @@ select {
   border-color: var(--border-accent) !important;
 }
 
-/* Dialog — enhanced shadows */
+/* Dialog — enhanced shadows + 与应用设计系统对齐的背景 */
 .t-dialog {
   border-radius: var(--radius-xl) !important;
   box-shadow: 0 16px 48px rgba(0, 0, 0, 0.6) !important;
   border: 1px solid var(--border-default) !important;
+  background: var(--color-bg-overlay) !important;
   overflow: hidden;
 }
 .t-dialog__header {
@@ -948,13 +949,18 @@ select {
   font-weight: 600;
   padding: 24px 24px 0 !important;
   border-bottom: none !important;
+  background: var(--color-bg-overlay);
+  color: var(--text-primary);
 }
 .t-dialog__body {
   padding: 16px 24px !important;
+  background: var(--color-bg-overlay);
+  color: var(--text-primary);
 }
 .t-dialog__footer {
   padding: 0 24px 24px !important;
   border-top: none !important;
+  background: var(--color-bg-overlay);
 }
 
 /* Input — consistent styling */
@@ -1062,4 +1068,12 @@ select {
 }
 .auth-link:hover {
   color: var(--color-cyan);
+}
+
+/* ============ 文件拖拽移动全局状态 ============ */
+/* 长按拖拽期间禁用文本选中并提示抓取光标 */
+body.is-file-dragging {
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: grabbing;
 }

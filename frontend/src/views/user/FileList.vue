@@ -5,6 +5,7 @@
     @dragenter="handleDragEnter"
     @dragleave="handleDragLeave"
     @drop.prevent="handleDrop"
+    @contextmenu.prevent="onBlankContextMenu"
   >
     <!-- 拖拽上传覆盖层 -->
     <div v-if="isDraggedOver" class="drop-overlay">
@@ -19,7 +20,11 @@
       <nav class="fl-path" aria-label="当前位置">
         <span
           class="fl-path-item"
-          :class="{ 'is-current': folderStore.currentFolderId === null }"
+          :class="{
+            'is-current': folderStore.currentFolderId === null,
+            'is-drop-target': dragMove.state.overFolderId === 'root',
+          }"
+          data-drop-folder="root"
           @click="onFolderNavigate(null)"
         >
           <t-icon name="home" class="fl-path-home" />
@@ -183,7 +188,10 @@
             v-for="folder in subfoldersInCurrentFolder"
             :key="`folder-${folder.id}`"
             class="os-row os-folder"
+            :class="{ 'is-drop-target': dragMove.state.overFolderId === folder.id }"
+            :data-drop-folder="folder.id"
             @dblclick="onFolderOpen(folder)"
+            @contextmenu.prevent.stop="onFolderContextMenu($event, folder)"
           >
             <div class="os-cell os-check"></div>
             <div class="os-cell os-name" :title="folder.name">
@@ -199,7 +207,7 @@
             <div class="os-cell os-date os-muted">{{ formatDate(folder.createdAt) }}</div>
             <div class="os-cell os-ops" @click.stop>
               <t-button size="small" variant="text" @click="onFolderOpen(folder)">
-                <template #icon><t-icon name="folder-opened" /></template>打开
+                <template #icon><t-icon name="folder-open" /></template>打开
               </t-button>
               <t-button size="small" variant="text" @click="onFolderRename(folder)">重命名</t-button>
               <t-button size="small" variant="text" @click="onFolderMove(folder)">移动</t-button>
@@ -215,6 +223,8 @@
             class="os-row os-file"
             :class="getRowClassName({ row: file })"
             @dblclick="isFileActionable(file) && downloadFile(file)"
+            @mousedown="onFileRowMouseDown($event, file)"
+            @contextmenu.prevent.stop="onFileContextMenu($event, file)"
           >
             <div class="os-cell os-check">
               <t-checkbox
@@ -349,7 +359,11 @@
           v-for="folder in subfoldersInCurrentFolder"
           :key="`m-folder-${folder.id}`"
           class="mobile-folder-row"
-          @click="onFolderOpen(folder)"
+          @click="!suppressClickAfterLongPress() && onFolderOpen(folder)"
+          @contextmenu.prevent
+          @touchstart="onTouchStart($event, { kind: 'folder', folder })"
+          @touchmove="onTouchMove"
+          @touchend="onTouchEnd"
         >
           <t-icon name="folder" class="os-folder-icon" />
           <div class="mobile-folder-info">
@@ -359,7 +373,15 @@
           <t-icon name="chevron-right" class="mobile-folder-arrow" />
         </div>
 
-        <div v-for="file in displayFiles" :key="`m-file-${file.id}`" class="mobile-file-card">
+        <div
+          v-for="file in displayFiles"
+          :key="`m-file-${file.id}`"
+          class="mobile-file-card"
+          @contextmenu.prevent
+          @touchstart="onTouchStart($event, { kind: 'file', file })"
+          @touchmove="onTouchMove"
+          @touchend="onTouchEnd"
+        >
           <div class="mobile-file-card-header">
             <ThumbnailImg :file-id="file.id" :mime-type="file.mimeType" :size="40" :emoji="getFileEmoji(file.mimeType)" />
             <div class="mobile-file-main">
@@ -512,6 +534,39 @@
       :target-id="shareTargetId"
       :target-name="shareTargetName"
     />
+
+    <!-- 自定义右键菜单（桌面右键 / 移动端长按） -->
+    <FileContextMenu
+      :visible="ctxMenu.visible"
+      :x="ctxMenu.x"
+      :y="ctxMenu.y"
+      :mobile="ctxMenu.mobile"
+      :title="ctxTitle"
+      :items="ctxItems"
+      @close="closeCtxMenu"
+      @select="onCtxSelect"
+    />
+
+    <!-- 文件重命名弹窗 -->
+    <FileRenameDialog
+      v-model:visible="renameFileDialog.visible"
+      :file="renameFileDialog.file"
+      @renamed="onFileRenamed"
+    />
+
+    <!-- 拖拽移动幽灵指示器 -->
+    <Teleport to="body">
+      <div
+        v-if="dragMove.state.dragging"
+        class="drag-ghost"
+        :style="{ left: dragMove.state.ghostX + 'px', top: dragMove.state.ghostY + 'px' }"
+      >
+        <t-icon name="file-copy" class="drag-ghost-icon" />
+        <span class="drag-ghost-text">
+          {{ dragMove.state.count > 1 ? `${dragMove.state.count} 个文件` : dragMove.state.firstName }}
+        </span>
+      </div>
+    </Teleport>
   </div>
 </template>
 
@@ -534,6 +589,10 @@ import FolderCreateDialog from '../../components/folder/FolderCreateDialog.vue';
 import FolderRenameDialog from '../../components/folder/FolderRenameDialog.vue';
 import FolderMoveDialog from '../../components/folder/FolderMoveDialog.vue';
 import CreateShareDialog from '../../components/share/CreateShareDialog.vue';
+import FileContextMenu, { type ContextMenuItem } from '../../components/file/FileContextMenu.vue';
+import FileRenameDialog from '../../components/file/FileRenameDialog.vue';
+import { useFileClipboard } from '../../composables/useFileClipboard';
+import { useDragMove } from '../../composables/useDragMove';
 import { useTagStore } from '../../stores/tags';
 import { useFolderStore, type Folder } from '../../stores/folders';
 import type { FileItem } from '../../types/file';
@@ -580,6 +639,32 @@ const showShareDialog = ref(false);
 const shareTargetType = ref<'file' | 'folder'>('file');
 const shareTargetId = ref('');
 const shareTargetName = ref('');
+
+// ============ 右键菜单（桌面右键 / 移动端长按） ============
+type CtxTarget =
+  | { kind: 'file'; file: FileItem }
+  | { kind: 'folder'; folder: Folder }
+  | { kind: 'blank' };
+
+const ctxMenu = reactive({
+  visible: false,
+  x: 0,
+  y: 0,
+  mobile: false,
+  target: null as CtxTarget | null,
+});
+
+/** 记录最近一次长按触发菜单的时间戳，用于抑制紧随其后的误触 click */
+let lastLongPressAt = 0;
+
+// ============ 文件重命名弹窗 ============
+const renameFileDialog = reactive({
+  visible: false,
+  file: null as { id: string; originalName: string } | null,
+});
+
+// ============ 文件剪贴板（复制 / 粘贴） ============
+const { copiedFileIds, hasCopiedFiles, copyFiles, clearClipboard } = useFileClipboard();
 
 /** 把 folderStore.currentFolderId (null | uuid) 转换为 API 期望的字符串 */
 const currentFolderIdForApi = computed(() => {
@@ -679,6 +764,252 @@ function onFolderDelete(folder: Folder) {
     },
     onClose: () => confirmDialog.destroy(),
   });
+}
+
+// ============ 右键菜单：打开 / 关闭 / 构建菜单项 ============
+
+function openCtxMenu(x: number, y: number, target: CtxTarget, mobile = false) {
+  ctxMenu.x = x;
+  ctxMenu.y = y;
+  ctxMenu.target = target;
+  ctxMenu.mobile = mobile;
+  ctxMenu.visible = true;
+}
+
+function closeCtxMenu() {
+  ctxMenu.visible = false;
+}
+
+/** 根据右键目标构建菜单项 */
+const ctxItems = computed<ContextMenuItem[]>(() => {
+  const t = ctxMenu.target;
+  if (!t) return [];
+
+  if (t.kind === 'file') {
+    const f = t.file;
+    if (f.isDeleted) {
+      const items: ContextMenuItem[] = [
+        { key: 'restore', label: '恢复', icon: 'file-restore' },
+      ];
+      if (isAdmin.value) {
+        items.push({ key: 'forceDelete', label: '强制删除', icon: 'delete', danger: true });
+      }
+      return items;
+    }
+    if (f.status === 'processing') {
+      return [{ key: 'noop', label: '文件处理中…', icon: 'time', disabled: true }];
+    }
+    return [
+      { key: 'download', label: '下载', icon: 'download' },
+      { key: 'copyLink', label: '复制链接', icon: 'link' },
+      { key: 'copy', label: '复制', icon: 'file-copy', hint: '生成副本' },
+      { key: 'rename', label: '重命名', icon: 'edit' },
+      { key: 'move', label: '移动到…', icon: 'folder-move' },
+      { key: 'tag', label: '标签', icon: 'tag' },
+      { key: 'share', label: '分享', icon: 'share' },
+      { divider: true },
+      { key: 'delete', label: '删除', icon: 'delete', danger: true },
+    ];
+  }
+
+  if (t.kind === 'folder') {
+    return [
+      { key: 'open', label: '打开', icon: 'folder-open' },
+      { key: 'renameFolder', label: '重命名', icon: 'edit' },
+      { key: 'moveFolder', label: '移动到…', icon: 'folder-move' },
+      { key: 'pasteInto', label: '粘贴到此文件夹', icon: 'file-paste', disabled: !hasCopiedFiles.value },
+      { key: 'shareFolder', label: '分享', icon: 'share' },
+      { divider: true },
+      { key: 'deleteFolder', label: '删除', icon: 'delete', danger: true },
+    ];
+  }
+
+  // 空白处
+  return [
+    { key: 'upload', label: '上传文件', icon: 'upload' },
+    { key: 'newFolder', label: '新建文件夹', icon: 'folder-add' },
+    {
+      key: 'paste',
+      label: hasCopiedFiles.value ? `粘贴（${copiedFileIds.value.length} 个文件）` : '粘贴',
+      icon: 'file-paste',
+      disabled: !hasCopiedFiles.value,
+    },
+    { divider: true },
+    { key: 'refresh', label: '刷新', icon: 'refresh' },
+  ];
+});
+
+/** 菜单标题（移动端面板顶部展示） */
+const ctxTitle = computed(() => {
+  const t = ctxMenu.target;
+  if (!t) return '';
+  if (t.kind === 'file') return t.file.originalName;
+  if (t.kind === 'folder') return t.folder.name;
+  return '我的文件';
+});
+
+/** 菜单项点击分发 */
+function onCtxSelect(key: string) {
+  const t = ctxMenu.target;
+  closeCtxMenu();
+  if (!t) return;
+
+  const file = t.kind === 'file' ? t.file : null;
+  const folder = t.kind === 'folder' ? t.folder : null;
+
+  switch (key) {
+    // ---- 文件操作 ----
+    case 'download': if (file) downloadFile(file); break;
+    case 'copyLink': if (file) copyLink(file); break;
+    case 'copy': if (file) {
+      const ids = selectedFileIds.value.includes(file.id) ? [...selectedFileIds.value] : [file.id];
+      handleCopyFiles(ids);
+    } break;
+    case 'rename': if (file) openRenameFileDialog(file); break;
+    case 'move': if (file) {
+      const ids = selectedFileIds.value.includes(file.id) ? [...selectedFileIds.value] : [file.id];
+      openMoveDialogForFiles(ids);
+    } break;
+    case 'tag': if (file) openTagEditor(file); break;
+    case 'share': if (file) onFileShare(file); break;
+    case 'delete': if (file) handleDelete(file); break;
+    case 'restore': if (file) handleRestore(file.id); break;
+    case 'forceDelete': if (file) handleForceDelete(file.id); break;
+    // ---- 文件夹操作 ----
+    case 'open': if (folder) onFolderOpen(folder); break;
+    case 'renameFolder': if (folder) onFolderRename(folder); break;
+    case 'moveFolder': if (folder) onFolderMove(folder); break;
+    case 'pasteInto': if (folder) pasteIntoFolder(folder.id); break;
+    case 'shareFolder': if (folder) onFolderShare(folder); break;
+    case 'deleteFolder': if (folder) onFolderDelete(folder); break;
+    // ---- 空白处操作 ----
+    case 'upload': showUploadModal.value = true; break;
+    case 'newFolder': openCreateFolderDialog(); break;
+    case 'paste': pasteIntoFolder(folderStore.currentFolderId); break;
+    case 'refresh': applyFilters(); break;
+  }
+}
+
+// ---- 桌面端：右键触发 ----
+
+function onFileContextMenu(e: MouseEvent, file: FileItem) {
+  // 右键未选中的文件时先将其选中，保证菜单操作对象与用户预期一致
+  if (!selectedFileIds.value.includes(file.id) && isFileActionable(file)) {
+    selectedFileIds.value = [file.id];
+  }
+  openCtxMenu(e.clientX, e.clientY, { kind: 'file', file });
+}
+
+function onFolderContextMenu(e: MouseEvent, folder: Folder) {
+  openCtxMenu(e.clientX, e.clientY, { kind: 'folder', folder });
+}
+
+function onBlankContextMenu(e: MouseEvent) {
+  openCtxMenu(e.clientX, e.clientY, { kind: 'blank' });
+}
+
+// ---- 移动端：长按触发 ----
+
+let touchTimer: ReturnType<typeof setTimeout> | null = null;
+let touchMoved = false;
+
+function onTouchStart(e: TouchEvent, target: CtxTarget) {
+  touchMoved = false;
+  const touch = e.touches[0];
+  if (!touch) return;
+  const x = touch.clientX;
+  const y = touch.clientY;
+  if (touchTimer) clearTimeout(touchTimer);
+  touchTimer = setTimeout(() => {
+    if (touchMoved) return;
+    lastLongPressAt = Date.now();
+    if (navigator.vibrate) navigator.vibrate(10);
+    openCtxMenu(x, y, target, true);
+  }, 500);
+}
+
+function onTouchMove() {
+  touchMoved = true;
+  if (touchTimer) { clearTimeout(touchTimer); touchTimer = null; }
+}
+
+function onTouchEnd() {
+  if (touchTimer) { clearTimeout(touchTimer); touchTimer = null; }
+}
+
+/** 长按触发后抑制紧随其后的误触 click（如文件夹行的打开） */
+function suppressClickAfterLongPress(): boolean {
+  if (Date.now() - lastLongPressAt < 600) {
+    return true;
+  }
+  return false;
+}
+
+// ============ 文件重命名 ============
+
+function openRenameFileDialog(file: FileItem) {
+  renameFileDialog.file = { id: file.id, originalName: file.originalName };
+  renameFileDialog.visible = true;
+}
+
+/** 重命名成功后就地更新列表中对应文件名，避免整表闪烁 */
+function onFileRenamed(fileId: string, newName: string) {
+  const f = fileStore.files.find((it) => it.id === fileId);
+  if (f) f.originalName = newName;
+}
+
+// ============ 复制 / 粘贴（生成文件副本） ============
+
+function handleCopyFiles(fileIds: string[]) {
+  copyFiles(fileIds);
+  MessagePlugin.success(`已复制 ${fileIds.length} 个文件，可在目标文件夹右键「粘贴」`);
+}
+
+async function pasteIntoFolder(folderId: string | null) {
+  const ids = [...copiedFileIds.value];
+  if (ids.length === 0) {
+    MessagePlugin.warning('剪贴板为空，请先复制文件');
+    return;
+  }
+  const results = await Promise.allSettled(ids.map((id) => folderStore.copyFile(id, folderId)));
+  const ok = results.filter((r) => r.status === 'fulfilled').length;
+  const fail = results.length - ok;
+  clearClipboard();
+  if (fail === 0) {
+    MessagePlugin.success(`已粘贴 ${ok} 个文件副本`);
+  } else {
+    MessagePlugin.warning(`粘贴完成：${ok} 成功，${fail} 失败`);
+  }
+  // 粘贴到当前文件夹时刷新列表以展示副本
+  if (folderId === folderStore.currentFolderId) {
+    applyFilters();
+  }
+}
+
+// ============ 拖拽移动 ============
+
+/** 文件行 mousedown：若该行已勾选则拖全部勾选项，否则仅拖该行 */
+function onFileRowMouseDown(e: MouseEvent, file: FileItem) {
+  if (!isFileActionable(file)) return;
+  const ids = selectedFileIds.value.includes(file.id)
+    ? [...selectedFileIds.value]
+    : [file.id];
+  dragMove.startPotentialDrag(e, ids, file.originalName);
+}
+
+/** 拖拽投放：批量移动文件到目标文件夹 */
+async function handleDragMoveFiles(fileIds: string[], folderId: string | null) {
+  // 原地投放（目标即当前文件夹）视为无操作
+  if (folderId === folderStore.currentFolderId) return;
+  const results = await Promise.allSettled(fileIds.map((id) => folderStore.moveFile(id, folderId)));
+  const ok = results.filter((r) => r.status === 'fulfilled').length;
+  const fail = results.length - ok;
+  if (fail === 0) {
+    MessagePlugin.success(`已移动 ${ok} 个文件`);
+  } else {
+    MessagePlugin.warning(`移动完成：${ok} 成功，${fail} 失败`);
+  }
+  onFolderMoved();
 }
 
 // ============ 当前文件夹下的直接子文件夹（OS 列表文件夹行数据源） ============
@@ -795,6 +1126,12 @@ const isAdmin = computed(() => {
 });
 
 const isMobile = useMobile();
+
+// ============ 拖拽移动（桌面端长按拖动） ============
+const dragMove = useDragMove({
+  isMobile,
+  onMove: handleDragMoveFiles,
+});
 
 watch(() => authStore.user?.role, (role) => {
   if (role) fileStore.setCurrentUserRole(role);
@@ -1696,6 +2033,8 @@ onUnmounted(() => {
   border: 1px solid var(--border-default);
   margin-bottom: 10px;
   cursor: pointer;
+  -webkit-touch-callout: none;
+  user-select: none;
   transition: border-color var(--duration-fast);
 }
 
@@ -1732,6 +2071,8 @@ onUnmounted(() => {
   border-radius: var(--radius-md);
   padding: 14px;
   margin-bottom: 10px;
+  -webkit-touch-callout: none;
+  user-select: none;
   transition: border-color var(--duration-fast);
 }
 
@@ -1865,6 +2206,52 @@ onUnmounted(() => {
 
 .fl-batch-tag {
   cursor: pointer;
+}
+
+/* ============ 拖拽移动 ============ */
+/* 拖拽悬停到文件夹行 / 面包屑根节点时的高亮 */
+.os-folder.is-drop-target,
+.fl-path-item.is-drop-target {
+  background: var(--color-accent-soft) !important;
+  outline: 2px dashed var(--color-accent);
+  outline-offset: -2px;
+  border-radius: var(--radius-sm);
+}
+
+.os-folder.is-drop-target .os-folder-icon {
+  color: var(--color-accent);
+  transform: scale(1.15);
+}
+
+/* 拖拽幽灵指示器（跟随光标） */
+.drag-ghost {
+  position: fixed;
+  z-index: 4000;
+  transform: translate(12px, 12px);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 280px;
+  padding: 8px 14px;
+  background: color-mix(in srgb, var(--color-accent) 90%, transparent);
+  color: #fff;
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  font-size: 13px;
+  font-weight: 500;
+  pointer-events: none;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.drag-ghost-icon {
+  font-size: 16px;
+  flex-shrink: 0;
+}
+
+.drag-ghost-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* ============ 响应式 ============ */

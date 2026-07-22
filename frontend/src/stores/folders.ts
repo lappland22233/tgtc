@@ -149,6 +149,18 @@ export const useFolderStore = defineStore('folders', () => {
     await api.patch(`/files/${fileId}/move`, { folderId });
   }
 
+  /** 重命名文件显示名，返回新的 originalName */
+  async function renameFile(fileId: string, newOriginalName: string): Promise<string> {
+    const res = await api.patch(`/files/${fileId}/rename`, { newOriginalName });
+    return res.data.data.originalName as string;
+  }
+
+  /** 复制文件到目标文件夹（null = 根目录），返回后端生成的副本文件对象 */
+  async function copyFile(fileId: string, folderId: string | null): Promise<FileItem> {
+    const res = await api.post(`/files/${fileId}/copy`, { folderId });
+    return res.data.data as FileItem;
+  }
+
   /**
    * 在 tree 中递归查找某个 folder 的引用（用于 UI 高亮/展开等）。
    * 返回该节点 + 其在父级 children 数组中的位置，方便就地更新。
@@ -181,6 +193,8 @@ export const useFolderStore = defineStore('folders', () => {
     restoreFolder,
     listContents,
     moveFile,
+    renameFile,
+    copyFile,
     findInTree,
   };
 });

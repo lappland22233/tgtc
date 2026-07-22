@@ -36,6 +36,22 @@ export class MoveFileDto {
   folderId?: string | null;
 }
 
+export class RenameFileDto {
+  /** 新的文件显示名（originalName） */
+  @IsString()
+  @IsNotEmpty({ message: '文件名不能为空' })
+  @ClassTransform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @MaxLength(255)
+  newOriginalName: string;
+}
+
+export class CopyFileDto {
+  /** 目标文件夹 ID；null 表示复制到网盘根目录 */
+  @IsOptional()
+  @IsUUID('4')
+  folderId?: string | null;
+}
+
 export class ListContentsQueryDto {
   /** 父文件夹 ID；省略表示根目录 */
   @IsOptional()

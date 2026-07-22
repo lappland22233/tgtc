@@ -31,7 +31,7 @@
 
     <div class="folder-actions-overlay">
       <t-button size="small" theme="default" variant="outline" shape="circle" title="进入" @click.stop="emit('open', folder)">
-        <template #icon><t-icon name="folder-opened" /></template>
+        <template #icon><t-icon name="folder-open" /></template>
       </t-button>
       <t-button size="small" theme="default" variant="outline" shape="circle" title="重命名" @click.stop="emit('rename', folder)">
         <template #icon><t-icon name="edit" /></template>
