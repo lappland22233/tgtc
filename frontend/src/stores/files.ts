@@ -288,6 +288,21 @@ export const useFileStore = defineStore('files', () => {
     await api.put(`/files/${id}/password`, { password });
   }
 
+  /** 重命名文件（仅修改显示名） */
+  async function renameFile(id: string, name: string) {
+    const res = await api.patch(`/files/${id}/rename`, { name });
+    // 同步更新本地列表中对应文件的显示名
+    const file = files.value.find((f) => f.id === id);
+    if (file) file.originalName = res.data.data.originalName;
+    return res.data.data;
+  }
+
+  /** 复制文件（生成副本，复用同一底层存储）；folderId 为 null 表示复制到根目录 */
+  async function copyFile(id: string, folderId: string | null = null) {
+    const res = await api.post(`/files/${id}/copy`, { folderId });
+    return res.data.data;
+  }
+
   return {
     files,
     total,
@@ -307,5 +322,7 @@ export const useFileStore = defineStore('files', () => {
     updateAccessCount,
     updateExpires,
     setPassword,
+    renameFile,
+    copyFile,
   };
 });

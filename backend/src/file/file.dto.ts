@@ -1,5 +1,5 @@
 import { IsArray, ArrayMinSize, IsUUID, IsString, IsOptional, IsInt, Min, Max, IsIn, ValidateIf, IsNotEmpty, MaxLength } from 'class-validator';
-import { Type } from 'class-transformer';
+import { Type, Transform as ClassTransform } from 'class-transformer';
 
 export class BatchMarkdownDto {
   @IsArray({ message: 'ids 必须是数组' })
@@ -36,4 +36,19 @@ export class UpdateExpiresDto {
   @Min(1, { message: '有效期最小为 1 小时' })
   @Max(720, { message: '有效期最大为 720 小时（30 天）' })
   expiresIn: number | null;
+}
+
+export class RenameFileDto {
+  @IsString()
+  @IsNotEmpty({ message: '文件名不能为空' })
+  @ClassTransform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @MaxLength(255, { message: '文件名不能超过 255 个字符' })
+  name: string;
+}
+
+export class CopyFileDto {
+  /** 目标文件夹 ID；省略或 null 表示复制到当前用户网盘根目录 */
+  @IsOptional()
+  @IsUUID('4', { message: 'folderId 必须是合法的 UUID v4' })
+  folderId?: string | null;
 }

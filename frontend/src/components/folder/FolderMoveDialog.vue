@@ -24,8 +24,9 @@
           <t-tree
             :data="treeData"
             :keys="{ value: 'id', label: 'name', children: 'children' }"
-            :value="selectedId || ''"
-            @change="onSelect"
+            :value="selectedId ? [selectedId] : []"
+            :actived="selectedId ? [selectedId] : []"
+            @active="onSelect"
             :expanded="expandedKeys"
             @expand="expandedKeys = $event"
             hover
@@ -93,9 +94,9 @@ watch(() => props.visible, (v) => {
 });
 
 function onSelect(value: string | string[]) {
-  // t-tree 单选返回字符串，多选返回数组，这里统一兼容
+  // active 事件始终返回数组；再次点击已激活节点会取消激活（空数组），此时回到根目录
   const v = Array.isArray(value) ? value[0] : value;
-  selectedId.value = v === '' || v === 'root' ? null : v;
+  selectedId.value = !v || v === 'root' ? null : v;
 }
 
 async function handleConfirm() {

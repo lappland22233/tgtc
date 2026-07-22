@@ -26,7 +26,7 @@ import { pipeline } from 'stream';
 import { promisify } from 'util';
 import { FileService } from './file.service';
 import { ThumbnailCryptoService } from './thumbnail-crypto.service';
-import { BatchMarkdownDto, UpdateAccessTypeDto, UpdateAccessCountDto, SetPasswordDto, UpdateExpiresDto } from './file.dto';
+import { BatchMarkdownDto, UpdateAccessTypeDto, UpdateAccessCountDto, SetPasswordDto, UpdateExpiresDto, RenameFileDto, CopyFileDto } from './file.dto';
 import { FolderService } from '../folder/folder.service';
 import { MoveFileDto } from '../folder/folder.dto';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
@@ -452,6 +452,38 @@ export class FileController {
     return { message: '文件已移动', data: { id: file.id, folderId: file.folderId } };
   }
 
+  /**
+   * 重命名文件（仅修改显示名）。
+   * Body: { name: string }
+   */
+  @Patch(':id/rename')
+  @UseGuards(JwtAuthGuard)
+  async renameFile(
+    @Param('id') id: string,
+    @Body() dto: RenameFileDto,
+    @CurrentUser() user: User,
+  ) {
+    const file = await this.fileService.renameFile(id, dto.name, user);
+    return { message: '文件已重命名', data: { id: file.id, originalName: file.originalName } };
+  }
+
+  /**
+   * 复制文件（生成副本，复用同一底层存储，不重复上传）。
+   * Body: { folderId?: string | null }
+   *   - folderId = null / 省略：复制到网盘根目录
+   *   - folderId = <uuid>：复制到指定文件夹（必须是当前用户拥有的文件夹）
+   */
+  @Post(':id/copy')
+  @UseGuards(JwtAuthGuard)
+  async copyFile(
+    @Param('id') id: string,
+    @Body() dto: CopyFileDto,
+    @CurrentUser() user: User,
+  ) {
+    const file = await this.fileService.copyFile(id, dto.folderId ?? null, user);
+    return { message: '文件已复制', data: { id: file.id, originalName: file.originalName, folderId: file.folderId } };
+  }
+
   @Delete(':id')
   @UseGuards(JwtAuthGuard)
   async delete(@Param('id') id: string, @CurrentUser() user: User) {
@@ -540,6 +572,7 @@ export class FileController {
   @Get('public/:id')
   async getPublicFile(
     @Param('id') id: string,
+    @Req() req: Request,
     @Res() res: Response,
   ) {
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
@@ -558,6 +591,49 @@ export class FileController {
     if (file.accessType !== FileAccessType.PUBLIC) {
       res.status(403).json({ code: 1, message: '此文件为私有文件，不提供公开访问' });
       return;
+    }
+
+    // 2.5 图床 / 视频床直链：公开的图片 / 视频 / 音频文件被外站引用（<img>/<video> 等）时
+    //     直接内联返回文件内容，保留图床能力；仅浏览器地址栏导航才重定向到 SPA 分享页。
+    if (!isBrowserNavigation(req)) {
+      try {
+        const media = await this.fileService.getPublicMediaStream(id, getClientIp(req), req.headers.range);
+        if (media) {
+          const commonHeaders = {
+            'Content-Type': media.contentType,
+            'Content-Disposition': `inline; filename="${encodeURIComponent(media.filename)}"`,
+            'Content-Length': media.size.toString(),
+            'Accept-Ranges': 'bytes',
+            // 直链媒体允许浏览器 / CDN 缓存，降低回源压力（图床场景）
+            'Cache-Control': 'public, max-age=86400',
+          };
+          const getBytesSent = trackBytesSent(res);
+          const pipe = promisify(pipeline);
+          if (media.isRange) {
+            res.status(206);
+            res.set({
+              ...commonHeaders,
+              'Content-Range': `bytes ${media.start}-${media.end}/${media.total}`,
+            });
+          } else {
+            res.set(commonHeaders);
+          }
+          try {
+            await pipe(media.stream, res);
+          } finally {
+            if (media.accessLogId) {
+              await this.fileService.updateAccessLogResponseSize(media.accessLogId, getBytesSent());
+            }
+          }
+          return;
+        }
+      } catch (error) {
+        // 直链流失败（如 Telegram 回源异常）：头部未发送则回退到分享页重定向，保证可用
+        if (res.headersSent) {
+          res.destroy(error as Error);
+          return;
+        }
+      }
     }
 
     // 3. 懒创建 ShareLink（如果不存在）——复制文件的遗留约束字段
@@ -616,6 +692,25 @@ function parseTagIdsBody(raw: unknown): string[] | undefined {
   if (Array.isArray(raw)) return raw.filter(Boolean);
   if (typeof raw === 'string') return raw.split(',').filter(Boolean);
   return undefined;
+}
+
+/**
+ * 判断请求是否为「浏览器地址栏导航」。
+ *
+ * 用于公开媒体直链的分流：
+ *   - 明确的媒体嵌入（Sec-Fetch-Dest: image/video/audio）→ 直链返回文件
+ *   - 浏览器地址栏导航（Sec-Fetch-Dest: document）→ 重定向到 SPA 分享页
+ *   - 无 Sec-Fetch-Dest 的请求（图片代理、curl、旧客户端、论坛抓取等）→ 视为直链引用，
+ *     返回文件内容，最大化图床兼容性
+ */
+function isBrowserNavigation(req: Request): boolean {
+  const dest = (req.headers['sec-fetch-dest'] as string | undefined) || '';
+  if (dest) {
+    return dest === 'document';
+  }
+  // 无 Sec-Fetch-Dest 时回退到 Accept 头判断：明确请求 HTML 的视为导航
+  const accept = (req.headers.accept as string | undefined) || '';
+  return accept.includes('text/html');
 }
 
 

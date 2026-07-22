@@ -18,6 +18,9 @@ export default defineConfig(({ mode }) => {
             // 样式已在 main.ts 全量引入（tdesign-vue-next/dist/tdesign.css），
             // 显式关闭按需样式注入，避免重复加载与 less/css 解析差异
             importStyle: false,
+            // <t-icon> 不走 TDesign 自动解析（其导出的 Icon 不接受 name 属性），
+            // 改由 main.ts 全局注册的 TIcon 包装组件按名称映射真实图标
+            exclude: [/^TIcon$/],
           }),
         ],
       }),

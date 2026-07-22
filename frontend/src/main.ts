@@ -3,6 +3,7 @@ import { createPinia } from 'pinia';
 import App from './App.vue';
 import router from './router';
 import { setupRoutePrefetch } from './composables/useRoutePrefetch';
+import TIcon from './components/TIcon.vue';
 import 'tdesign-vue-next/dist/tdesign.css';
 import './assets/styles.css';
 
@@ -43,6 +44,9 @@ const pinia = createPinia();
 
 app.use(pinia);
 app.use(router);
+
+// 全局注册图标组件：<t-icon name="..."> 统一由此组件按名称映射到 TDesign 图标
+app.component('TIcon', TIcon);
 
 // 在 mount 之前同步安装全局错误处理器，确保首屏渲染错误也能被捕获
 app.config.errorHandler = (err, _instance, info) => {

@@ -48,7 +48,7 @@
 ### 安全
 - Telegram Bot Token 错误日志自动脱敏
 - SMTP 密码不在事件日志中记录
-- 注册流程防 TOCTOU 竞态（表锁 + FOR UPDATE）
+- 注册流程防 TOCTOU 竞态（事务级 `pg_advisory_xact_lock` 咨询锁串行化「首位用户=超管」临界区；PostgreSQL 不支持 `SELECT ... FOR UPDATE`，已移除该写法）
 - 配置缓存使用 upsert 原子操作
 - Source map 生产关闭、.gitignore 覆盖密钥文件
 - 前端全局错误边界防白屏
@@ -84,7 +84,7 @@
 | 实时推送 | Socket.IO 4.x（告警 WebSocket） |
 | 状态管理 | Pinia |
 | 路由 | Vue Router 4 |
-| 仪表盘布局 | vue-grid-layout 2.4+ |
+| 仪表盘布局 | grid-layout-plus ^1.1.1（Vue 3 版 vue-grid-layout；注意仪表盘当前用原生 CSS `grid-column`，并未直接 import 该库） |
 
 ## 快速开始
 
@@ -202,7 +202,7 @@ AUDIT_LOG_RETENTION_DAYS=90    # 审计日志保留天数
 │   │   ├── middleware/       # AccessLogMiddleware（全局 HTTP 请求日志）
 │   │   └── utils/            # client-ip.ts crypto.util.ts
 │   ├── database/             # TypeORM CLI DataSource
-│   └── migrations/           # 22 个数据库迁移文件
+│   └── migrations/           # 28 个数据库迁移文件
 │
 ├── frontend/src/
 │   ├── views/
@@ -335,7 +335,7 @@ npm run typecheck            # TypeScript 类型检查
 | PUT | `/api/admin/config/batch` | 批量配置 |
 | PUT | `/api/admin/upload-config` | 上传配置 |
 | PUT | `/api/admin/auth-config` | 认证配置 |
-| PUT | `/api/admin/smtp-config` | SMTP 配置 |
+| PUT | `/api/admin/smtp` | SMTP 配置 |
 | GET | `/api/admin/security-config` | 安全规则配置（仅 SUPER_ADMIN） |
 | PUT | `/api/admin/security-config` | 更新安全规则配置 |
 | GET | `/api/admin/access-logs` | HTTP 访问日志（分页/筛选） |

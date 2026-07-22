@@ -941,6 +941,16 @@ select {
   box-shadow: 0 16px 48px rgba(0, 0, 0, 0.6) !important;
   border: 1px solid var(--border-default) !important;
   overflow: hidden;
+  /* 弹窗背景强制使用设计系统表面色。
+     原因：:root 里对 --td-bg-color-container 的覆盖特异性低于 TDesign 自身的
+     :root[theme-mode='dark']，会被其默认深灰(#242424)覆盖而显得突兀，故在此显式指定。 */
+  background-color: var(--color-bg-surface) !important;
+}
+/* 弹窗内的输入控件使用稍亮的叠加色，保证在弹窗背景上清晰可辨 */
+.t-dialog .t-input,
+.t-dialog .t-select-input,
+.t-dialog .t-textarea__inner {
+  background-color: var(--color-bg-overlay) !important;
 }
 .t-dialog__header {
   font-family: var(--font-display);

@@ -1,10 +1,10 @@
 <template>
   <div
     class="filelist-page"
-    @dragover.prevent="isDraggedOver = true"
-    @dragenter="handleDragEnter"
-    @dragleave="handleDragLeave"
-    @drop.prevent="handleDrop"
+    @dragenter="handlePageDragEnter"
+    @dragover="handlePageDragOver"
+    @dragleave="handlePageDragLeave"
+    @drop="handlePageDrop"
   >
     <!-- 拖拽上传覆盖层 -->
     <div v-if="isDraggedOver" class="drop-overlay">
@@ -19,8 +19,12 @@
       <nav class="fl-path" aria-label="当前位置">
         <span
           class="fl-path-item"
-          :class="{ 'is-current': folderStore.currentFolderId === null }"
+          :class="{ 'is-current': folderStore.currentFolderId === null, 'drag-over': dragOverFolderId === ROOT_DROP_TARGET }"
           @click="onFolderNavigate(null)"
+          @dragover.prevent="onFolderDragOver($event, ROOT_DROP_TARGET)"
+          @dragenter.prevent="onFolderDragOver($event, ROOT_DROP_TARGET)"
+          @dragleave="onFolderDragLeave($event, ROOT_DROP_TARGET)"
+          @drop.prevent.stop="onDropOnFolder($event, ROOT_DROP_TARGET)"
         >
           <t-icon name="home" class="fl-path-home" />
           我的文件
@@ -132,7 +136,11 @@
     <div
       v-if="fileStore.files.length === 0 && subfoldersInCurrentFolder.length === 0 && !fileStore.loading && !cursorLoading"
       class="upload-zone"
-      @click="showUploadModal = true"
+      @click="!consumeLongPressClick() && (showUploadModal = true)"
+      @contextmenu.prevent="openBlankCtxMenu"
+      @touchstart="handleTouchStart($event, 'blank')"
+      @touchmove="handleTouchMove"
+      @touchend="handleTouchEnd"
     >
       <t-icon name="folder-add" class="empty-upload-icon" />
       <h3>拖拽文件到此处，或点击上传</h3>
@@ -141,7 +149,11 @@
 
     <!-- ⑦ OS 风格统一列表：文件夹与文件混排（文件夹在前） -->
     <t-loading v-if="fileStore.loading || cursorLoading" class="fl-loading" />
-    <div v-else-if="displayFiles.length > 0 || subfoldersInCurrentFolder.length > 0" class="os-list card">
+    <div
+      v-else-if="displayFiles.length > 0 || subfoldersInCurrentFolder.length > 0"
+      class="os-list card"
+      @contextmenu.prevent="openBlankCtxMenu"
+    >
       <!-- 桌面端：表格式列表 -->
       <div v-if="!isMobile" class="os-list-scroll">
         <div class="os-list-inner">
@@ -183,7 +195,16 @@
             v-for="folder in subfoldersInCurrentFolder"
             :key="`folder-${folder.id}`"
             class="os-row os-folder"
+            :class="{ 'drag-over': dragOverFolderId === folder.id }"
             @dblclick="onFolderOpen(folder)"
+            @contextmenu.prevent.stop="openFolderCtxMenu($event, folder)"
+            @touchstart="handleTouchStart($event, 'folder', folder)"
+            @touchmove="handleTouchMove"
+            @touchend="handleTouchEnd"
+            @dragover.prevent="onFolderDragOver($event, folder.id)"
+            @dragenter.prevent="onFolderDragOver($event, folder.id)"
+            @dragleave="onFolderDragLeave($event, folder.id)"
+            @drop.prevent.stop="onDropOnFolder($event, folder.id)"
           >
             <div class="os-cell os-check"></div>
             <div class="os-cell os-name" :title="folder.name">
@@ -213,7 +234,14 @@
             v-for="file in displayFiles"
             :key="file.id"
             class="os-row os-file"
-            :class="getRowClassName({ row: file })"
+            :class="[getRowClassName({ row: file }), { dragging: draggingFileIds.includes(file.id) }]"
+            :draggable="!isMobile && isFileActionable(file)"
+            @dragstart="onFileDragStart($event, file)"
+            @dragend="onFileDragEnd"
+            @contextmenu.prevent.stop="openFileCtxMenu($event, file)"
+            @touchstart="handleTouchStart($event, 'file', file)"
+            @touchmove="handleTouchMove"
+            @touchend="handleTouchEnd"
             @dblclick="isFileActionable(file) && downloadFile(file)"
           >
             <div class="os-cell os-check">
@@ -349,7 +377,11 @@
           v-for="folder in subfoldersInCurrentFolder"
           :key="`m-folder-${folder.id}`"
           class="mobile-folder-row"
-          @click="onFolderOpen(folder)"
+          @click="!consumeLongPressClick() && onFolderOpen(folder)"
+          @contextmenu.prevent.stop="openFolderCtxMenu($event, folder)"
+          @touchstart="handleTouchStart($event, 'folder', folder)"
+          @touchmove="handleTouchMove"
+          @touchend="handleTouchEnd"
         >
           <t-icon name="folder" class="os-folder-icon" />
           <div class="mobile-folder-info">
@@ -359,7 +391,15 @@
           <t-icon name="chevron-right" class="mobile-folder-arrow" />
         </div>
 
-        <div v-for="file in displayFiles" :key="`m-file-${file.id}`" class="mobile-file-card">
+        <div
+          v-for="file in displayFiles"
+          :key="`m-file-${file.id}`"
+          class="mobile-file-card"
+          @contextmenu.prevent.stop="openFileCtxMenu($event, file)"
+          @touchstart="handleTouchStart($event, 'file', file)"
+          @touchmove="handleTouchMove"
+          @touchend="handleTouchEnd"
+        >
           <div class="mobile-file-card-header">
             <ThumbnailImg :file-id="file.id" :mime-type="file.mimeType" :size="40" :emoji="getFileEmoji(file.mimeType)" />
             <div class="mobile-file-main">
@@ -512,6 +552,19 @@
       :target-id="shareTargetId"
       :target-name="shareTargetName"
     />
+
+    <!-- 文件重命名弹窗 -->
+    <FileRenameDialog v-model:visible="showRenameFileDialog" :file="renameTargetFile" />
+
+    <!-- 自定义右键菜单（桌面右键 / 移动端长按） -->
+    <FileContextMenu
+      v-model:visible="ctxMenu.visible"
+      :x="ctxMenu.x"
+      :y="ctxMenu.y"
+      :target="ctxMenu.target"
+      :clipboard-count="fileClipboard.length"
+      @action="onCtxAction"
+    />
   </div>
 </template>
 
@@ -524,6 +577,7 @@ import { useFileStore } from '../../stores/files';
 import { useAuthStore, api } from '../../stores/auth';
 import { getErrorMessage } from '../../utils/error';
 import { formatSize, formatDate, getFileEmoji } from '@/utils/format';
+import { triggerBrowserDownload } from '@/utils/download';
 import { useCursorPagination } from '../../composables/useCursorPagination';
 import { useMobile } from '../../composables/useMobile';
 import UploadModal from '../../components/UploadModal.vue';
@@ -534,6 +588,8 @@ import FolderCreateDialog from '../../components/folder/FolderCreateDialog.vue';
 import FolderRenameDialog from '../../components/folder/FolderRenameDialog.vue';
 import FolderMoveDialog from '../../components/folder/FolderMoveDialog.vue';
 import CreateShareDialog from '../../components/share/CreateShareDialog.vue';
+import FileContextMenu, { type CtxTarget } from '../../components/file/FileContextMenu.vue';
+import FileRenameDialog from '../../components/file/FileRenameDialog.vue';
 import { useTagStore } from '../../stores/tags';
 import { useFolderStore, type Folder } from '../../stores/folders';
 import type { FileItem } from '../../types/file';
@@ -580,6 +636,19 @@ const showShareDialog = ref(false);
 const shareTargetType = ref<'file' | 'folder'>('file');
 const shareTargetId = ref('');
 const shareTargetName = ref('');
+
+// ============ 自定义右键菜单状态 ============
+const ctxMenu = reactive({
+  visible: false,
+  x: 0,
+  y: 0,
+  target: null as CtxTarget | null,
+});
+/** 文件剪贴板：复制（copy）后暂存，粘贴（paste）时生成副本到当前文件夹 */
+const fileClipboard = ref<FileItem[]>([]);
+// ============ 文件重命名弹窗状态 ============
+const showRenameFileDialog = ref(false);
+const renameTargetFile = ref<FileItem | null>(null);
 
 /** 把 folderStore.currentFolderId (null | uuid) 转换为 API 期望的字符串 */
 const currentFolderIdForApi = computed(() => {
@@ -679,6 +748,135 @@ function onFolderDelete(folder: Folder) {
     },
     onClose: () => confirmDialog.destroy(),
   });
+}
+
+// ============ 自定义右键菜单（桌面右键 / 移动端长按） ============
+function openCtxMenuAt(x: number, y: number, target: CtxTarget) {
+  ctxMenu.target = target;
+  ctxMenu.x = x;
+  ctxMenu.y = y;
+  ctxMenu.visible = true;
+}
+function openFileCtxMenu(e: MouseEvent, file: FileItem) {
+  openCtxMenuAt(e.clientX, e.clientY, { kind: 'file', file });
+}
+function openFolderCtxMenu(e: MouseEvent, folder: Folder) {
+  openCtxMenuAt(e.clientX, e.clientY, { kind: 'folder', folder });
+}
+function openBlankCtxMenu(e: MouseEvent) {
+  openCtxMenuAt(e.clientX, e.clientY, { kind: 'blank' });
+}
+
+// ---- 移动端长按弹出（替代右键） ----
+let longPressTimer: ReturnType<typeof setTimeout> | null = null;
+let longPressFired = false;
+const touchStartPos = { x: 0, y: 0 };
+
+function handleTouchStart(e: TouchEvent, kind: 'file' | 'folder' | 'blank', item?: FileItem | Folder) {
+  if (e.touches.length !== 1) return;
+  const t = e.touches[0];
+  touchStartPos.x = t.clientX;
+  touchStartPos.y = t.clientY;
+  longPressFired = false;
+  if (longPressTimer) clearTimeout(longPressTimer);
+  longPressTimer = setTimeout(() => {
+    longPressFired = true;
+    try { navigator.vibrate?.(10); } catch { /* 部分浏览器不支持震动 */ }
+    if (kind === 'file') openCtxMenuAt(touchStartPos.x, touchStartPos.y, { kind: 'file', file: item as FileItem });
+    else if (kind === 'folder') openCtxMenuAt(touchStartPos.x, touchStartPos.y, { kind: 'folder', folder: item as Folder });
+    else openCtxMenuAt(touchStartPos.x, touchStartPos.y, { kind: 'blank' });
+  }, 550);
+}
+function handleTouchMove(e: TouchEvent) {
+  if (!longPressTimer) return;
+  const t = e.touches[0];
+  if (Math.abs(t.clientX - touchStartPos.x) > 10 || Math.abs(t.clientY - touchStartPos.y) > 10) {
+    clearTimeout(longPressTimer);
+    longPressTimer = null;
+  }
+}
+function handleTouchEnd() {
+  if (longPressTimer) {
+    clearTimeout(longPressTimer);
+    longPressTimer = null;
+  }
+}
+/** 长按触发后抑制随后的 click（避免长按打开菜单的同时又触发导航/下载） */
+function consumeLongPressClick(): boolean {
+  if (longPressFired) {
+    longPressFired = false;
+    return true;
+  }
+  return false;
+}
+
+/** 菜单动作统一分发 */
+async function onCtxAction(action: string, target: CtxTarget | null) {
+  if (!target) return;
+
+  if (target.kind === 'file') {
+    const file = target.file;
+    switch (action) {
+      case 'copy-link': copyLink(file); break;
+      case 'download': downloadFile(file); break;
+      case 'rename':
+        renameTargetFile.value = file;
+        showRenameFileDialog.value = true;
+        break;
+      case 'copy':
+        fileClipboard.value = [file];
+        MessagePlugin.success(`已复制「${file.originalName}」，在空白处右键/长按可粘贴`);
+        break;
+      case 'move': openMoveDialogForFiles([file.id]); break;
+      case 'tag': openTagEditor(file); break;
+      case 'share': onFileShare(file); break;
+      case 'delete': handleDelete(file); break;
+    }
+    return;
+  }
+
+  if (target.kind === 'folder') {
+    const folder = target.folder;
+    switch (action) {
+      case 'open': onFolderOpen(folder); break;
+      case 'rename': onFolderRename(folder); break;
+      case 'move': onFolderMove(folder); break;
+      case 'share': onFolderShare(folder); break;
+      case 'delete': onFolderDelete(folder); break;
+    }
+    return;
+  }
+
+  // 空白处
+  if (action === 'new-folder') {
+    openCreateFolderDialog();
+  } else if (action === 'upload') {
+    showUploadModal.value = true;
+  } else if (action === 'paste') {
+    await pasteFiles();
+  }
+}
+
+/** 粘贴：把剪贴板中的文件逐个复制（生成副本）到当前文件夹 */
+async function pasteFiles() {
+  const items = fileClipboard.value;
+  if (items.length === 0) {
+    MessagePlugin.warning('剪贴板为空，请先复制文件');
+    return;
+  }
+  const targetFolderId = folderStore.currentFolderId; // null = 根目录
+  const results = await Promise.allSettled(
+    items.map((f) => fileStore.copyFile(f.id, targetFolderId)),
+  );
+  const failed = results.filter((r) => r.status === 'rejected').length;
+  if (failed === 0) {
+    MessagePlugin.success(`已粘贴 ${items.length} 个文件（生成副本）`);
+  } else {
+    MessagePlugin.warning(`${items.length - failed} 个成功，${failed} 个失败`);
+  }
+  // 粘贴完成后清空剪贴板并刷新列表
+  fileClipboard.value = [];
+  onFolderMoved();
 }
 
 // ============ 当前文件夹下的直接子文件夹（OS 列表文件夹行数据源） ============
@@ -886,20 +1084,45 @@ async function handleExpiresChange(id: string, expiresIn: number | null) {
 let dragLeaveTimeout: ReturnType<typeof setTimeout> | null = null;
 let dragCounter = 0;
 
-function handleDragEnter(_e: DragEvent) {
+// ============ 拖拽（上传 + 文件移动） ============
+// 内部文件移动拖拽使用的自定义 MIME 类型（区别于外部文件拖入的 'Files'）
+const INTERNAL_DRAG_MIME = 'application/x-tgtc-file-ids';
+// 拖到地址栏「我的文件」表示移动到根目录，用特殊标记区分真实文件夹 ID
+const ROOT_DROP_TARGET = '__root__';
+
+/** 正在被拖动的文件 ID 列表（用于拖动中的视觉反馈） */
+const draggingFileIds = ref<string[]>([]);
+/** 当前悬停的放置目标文件夹 ID（ROOT_DROP_TARGET 表示根目录），用于高亮 */
+const dragOverFolderId = ref<string | null>(null);
+
+function hasExternalFiles(e: DragEvent): boolean {
+  return Array.from(e.dataTransfer?.types || []).includes('Files');
+}
+function isInternalFileDrag(e: DragEvent): boolean {
+  return Array.from(e.dataTransfer?.types || []).includes(INTERNAL_DRAG_MIME);
+}
+
+// ---- 页面级：仅响应外部文件拖入（上传），内部移动拖拽由文件夹行自行处理 ----
+function handlePageDragEnter(e: DragEvent) {
+  if (!hasExternalFiles(e)) return;
   dragCounter++;
   isDraggedOver.value = true;
 }
-
-function handleDragLeave(_e: DragEvent) {
+function handlePageDragOver(e: DragEvent) {
+  if (!hasExternalFiles(e)) return;
+  e.preventDefault(); // 允许放置外部文件
+}
+function handlePageDragLeave(e: DragEvent) {
+  if (!hasExternalFiles(e)) return;
   dragCounter--;
   if (dragCounter <= 0) {
     dragCounter = 0;
     isDraggedOver.value = false;
   }
 }
-
-function handleDrop(e: DragEvent) {
+function handlePageDrop(e: DragEvent) {
+  if (!hasExternalFiles(e)) return;
+  e.preventDefault();
   dragCounter = 0;
   isDraggedOver.value = false;
   if (dragLeaveTimeout) clearTimeout(dragLeaveTimeout);
@@ -908,6 +1131,72 @@ function handleDrop(e: DragEvent) {
     dropFiles.value = files;
     showUploadModal.value = true;
   }
+}
+
+// ---- 文件行：拖动开始 / 结束 ----
+function onFileDragStart(e: DragEvent, file: FileItem) {
+  if (!isFileActionable(file)) {
+    e.preventDefault();
+    return;
+  }
+  // 若被拖文件已在选中集合中，则一并拖动所有已选文件；否则仅拖动该文件
+  const ids = selectedFileIds.value.includes(file.id)
+    ? [...selectedFileIds.value]
+    : [file.id];
+  e.dataTransfer?.setData(INTERNAL_DRAG_MIME, JSON.stringify(ids));
+  if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
+  draggingFileIds.value = ids;
+}
+function onFileDragEnd() {
+  draggingFileIds.value = [];
+  dragOverFolderId.value = null;
+}
+
+// ---- 文件夹行 / 根目录：放置目标 ----
+function onFolderDragOver(e: DragEvent, target: string) {
+  if (!isInternalFileDrag(e)) return;
+  e.preventDefault(); // 允许放置
+  if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+  dragOverFolderId.value = target;
+}
+function onFolderDragLeave(e: DragEvent, target: string) {
+  if (!isInternalFileDrag(e)) return;
+  // 仍在本行内部移动（进入子元素）时不清除高亮
+  const current = e.currentTarget as Node | null;
+  const related = e.relatedTarget as Node | null;
+  if (current && related && current.contains(related)) return;
+  if (dragOverFolderId.value === target) dragOverFolderId.value = null;
+}
+function onDropOnFolder(e: DragEvent, target: string) {
+  e.preventDefault();
+  e.stopPropagation();
+  dragOverFolderId.value = null;
+  const raw = e.dataTransfer?.getData(INTERNAL_DRAG_MIME);
+  if (!raw) return;
+  let ids: string[] = [];
+  try {
+    ids = JSON.parse(raw);
+  } catch {
+    return;
+  }
+  if (ids.length === 0) return;
+  const folderId = target === ROOT_DROP_TARGET ? null : target;
+  moveFilesToFolder(ids, folderId);
+}
+
+/** 执行文件移动（并发，单个失败不影响其他），完成后刷新列表 */
+async function moveFilesToFolder(ids: string[], folderId: string | null) {
+  const results = await Promise.allSettled(
+    ids.map((fid) => folderStore.moveFile(fid, folderId)),
+  );
+  const failed = results.filter((r) => r.status === 'rejected').length;
+  if (failed === 0) {
+    MessagePlugin.success(`已移动 ${ids.length} 个文件`);
+  } else {
+    MessagePlugin.warning(`${ids.length - failed} 个成功，${failed} 个失败`);
+  }
+  draggingFileIds.value = [];
+  onFolderMoved(); // 复用既有刷新逻辑（重新拉取列表 + 清空选择）
 }
 
 function getTagName(tagId: string): string {
@@ -1126,13 +1415,8 @@ async function copyLink(row: FileItem) {
 }
 
 function downloadFile(row: FileItem) {
-  const a = document.createElement('a');
-  a.href = `/api/files/${row.id}/download`;
-  // download 属性仅作为 Content-Disposition 的 fallback
-  if (row.originalName) a.download = row.originalName;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
+  // 直接调用浏览器原生下载（后端返回 attachment，浏览器下载器接管进度/保存）
+  triggerBrowserDownload(`/api/files/${row.id}/download`, row.originalName);
 }
 
 function handleDelete(row: FileItem) {
@@ -1290,6 +1574,7 @@ onMounted(async () => {
 onUnmounted(() => {
   if (scrollObserver) { scrollObserver.disconnect(); scrollObserver = null; }
   if (dragLeaveTimeout) { clearTimeout(dragLeaveTimeout); dragLeaveTimeout = null; }
+  if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; }
   dragCounter = 0;
 });
 </script>
@@ -1560,6 +1845,44 @@ onUnmounted(() => {
 
 .os-folder {
   cursor: pointer;
+}
+
+/* ============ 拖拽移动视觉反馈 ============ */
+/* 正在被拖动的文件行：半透明 + 虚线轮廓 */
+.os-file.dragging {
+  opacity: 0.4;
+  outline: 1px dashed var(--color-accent);
+  outline-offset: -1px;
+}
+/* 拖拽悬停的文件夹行：高亮提示可放置 */
+.os-folder.drag-over {
+  background: var(--color-accent-soft) !important;
+  outline: 2px dashed var(--color-accent);
+  outline-offset: -2px;
+}
+/* 拖拽悬停的根目录（我的文件）路径项 */
+.fl-path-item.drag-over {
+  background: var(--color-accent-soft);
+  color: var(--color-accent);
+  outline: 1px dashed var(--color-accent);
+}
+/* 可拖动的文件行使用抓取光标提示 */
+.os-file[draggable='true'] {
+  cursor: grab;
+}
+.os-file[draggable='true']:active {
+  cursor: grabbing;
+}
+
+/* 移动端长按弹出菜单：抑制文本选中与系统预览浮层 */
+.os-file,
+.os-folder,
+.mobile-file-card,
+.mobile-folder-row,
+.upload-zone {
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 /* 单元格 */

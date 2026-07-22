@@ -22,6 +22,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
 import MessagePlugin from '@/utils/message';
+import { triggerBrowserDownload } from '@/utils/download';
 
 interface FileInfo {
   id: string;
@@ -94,46 +95,18 @@ function formatDateTime(dateStr: string): string {
 const downloading = ref(false);
 
 /**
- * 先校验后端可访问性（fetch 仅读取响应头，不消耗 body），
- * 确认 200 后通过 <a> 点击触发浏览器原生下载。
- * 浏览器原生下载自带进度条、暂停/恢复、保存对话框，
- * 不会像 fetch + res.blob() 那样因等待完整文件而"挂起"。
- *
- * 安全说明：accessJwt 随请求 URL 传递（与改之前相同），
- * 短暂出现在浏览器的下载管理器 URL 中（不写入地址栏/历史）。
+ * 直接调用浏览器原生下载。
+ * 后端返回 Content-Disposition: attachment，浏览器下载器自带进度条、暂停/恢复、
+ * 保存对话框，无需前端 fetch 预校验（旧实现的 GET 兜底会把整个文件先读进内存，
+ * 相当于下载两次，已移除）。
  */
-async function handleDownload() {
+function handleDownload() {
   if (downloading.value) return;
   downloading.value = true;
-  try {
-    // 先验证（仅读头，不读 body）
-    const check = await fetch(downloadUrl.value, { method: 'HEAD' }).catch(() => ({ ok: false, status: 0 } as Response));
-
-    if (!check.ok) {
-      // HEAD 可能不被后端支持（返回 404/405），回退到 GET 验证
-      const getRes = await fetch(downloadUrl.value);
-      if (!getRes.ok) {
-        let msg = `下载失败（${getRes.status}）`;
-        try {
-          const data = await getRes.json();
-          if (data?.message) msg = data.message;
-        } catch { /* 非 JSON 错误体 */ }
-        throw new Error(msg);
-      }
-    }
-
-    // 触发浏览器原生下载
-    const a = document.createElement('a');
-    a.href = downloadUrl.value;
-    a.download = props.info.name;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-  } catch (err) {
-    MessagePlugin.error(err instanceof Error ? err.message : '下载失败，请稍后重试');
-  } finally {
-    downloading.value = false;
-  }
+  triggerBrowserDownload(downloadUrl.value, props.info.name);
+  MessagePlugin.success('已开始下载，请查看浏览器下载进度');
+  // 短暂禁用避免重复点击；浏览器接管后无需等待前端异步完成
+  window.setTimeout(() => { downloading.value = false; }, 1000);
 }
 </script>
 

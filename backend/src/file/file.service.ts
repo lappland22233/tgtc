@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException, ForbiddenException, BadRequestException, OnModuleInit, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, In, IsNull, EntityManager } from 'typeorm';
+import { Repository, In, IsNull, Not, EntityManager } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { OnEvent } from '@nestjs/event-emitter';
@@ -16,6 +16,7 @@ import { InjectQueue } from '@nestjs/bull';
 import { Queue } from 'bull';
 import { QUEUE_NAMES } from '../jobs/bull-queue.module';
 import { File, FileAccessType } from '../common/entities/file.entity';
+import { Folder } from '../common/entities/folder.entity';
 import { FileAccessLog } from '../common/entities/file-access-log.entity';
 import { TelegramService } from '../telegram/telegram.service';
 import { ConfigCacheService } from '../common/services/config-cache.service';
@@ -55,6 +56,8 @@ export class FileService implements OnModuleInit {
   constructor(
     @InjectRepository(File)
     private fileRepository: Repository<File>,
+    @InjectRepository(Folder)
+    private folderRepository: Repository<Folder>,
     @InjectRepository(FileAccessLog)
     private accessLogRepository: Repository<FileAccessLog>,
     @InjectRepository(BannedIP)
@@ -845,6 +848,22 @@ export class FileService implements OnModuleInit {
    * 管理员强制永久删除文件（双重确认第二步）
    * 直接从 Telegram 和数据库中永久移除，不等待 7 天冷静期
    */
+  /**
+   * 仅当没有其他文件记录引用同一 Telegram 文件时，才真正删除 Telegram 侧文件。
+   * 用于「复制副本」场景：副本与原件共享同一 telegramFileId，删除其一时不能连带
+   * 删除 Telegram 文件，否则另一条记录会失效。删除失败时向上抛错，由调用方决定重试。
+   */
+  private async deleteTelegramFileIfUnreferenced(telegramFileId: string, excludeFileId: string): Promise<void> {
+    const otherRefs = await this.fileRepository.count({
+      where: { telegramFileId, id: Not(excludeFileId) },
+    });
+    if (otherRefs > 0) {
+      this.logger.log(`Telegram 文件仍被 ${otherRefs} 条记录引用，跳过删除: ${telegramFileId}`);
+      return;
+    }
+    await this.telegramService.deleteFile(telegramFileId);
+  }
+
   async forceDelete(id: string, user: User): Promise<void> {
     const file = await this.fileRepository.findOne({
       where: { id },
@@ -857,10 +876,10 @@ export class FileService implements OnModuleInit {
     // 安全校验：只能强制删除自己上传的文件或管理员/超级管理员可删所有
     this.assertFileWritable(file, user);
 
-    // 从 Telegram 删除（忽略错误，避免阻塞）
+    // 从 Telegram 删除（忽略错误，避免阻塞）；若该文件被副本引用则跳过
     if (file.telegramFileId) {
       try {
-        await this.telegramService.deleteFile(file.telegramFileId);
+        await this.deleteTelegramFileIfUnreferenced(file.telegramFileId, file.id);
       } catch (error: unknown) {
         const errMsg = error instanceof Error ? error.message : '未知错误';
         this.logger.warn(`强制删除文件时 Telegram 删除失败: ${file.originalName}, 错误: ${errMsg}`);
@@ -932,8 +951,9 @@ export class FileService implements OnModuleInit {
         try {
           // 先从 Telegram 删除；失败则抛错进入 catch，保留 DB 记录待下次重试，
           // 不再「Telegram 删除失败仍删库」，避免 Telegram 侧孤儿文件永久泄漏。
+          // 若该文件被副本引用则跳过 Telegram 删除（仅删本条记录）。
           if (file.telegramFileId) {
-            await this.telegramService.deleteFile(file.telegramFileId);
+            await this.deleteTelegramFileIfUnreferenced(file.telegramFileId, file.id);
           }
           this.deleteLocalThumbnail(file);
           await this.accessLogRepository.delete({ fileId: file.id });
@@ -1044,6 +1064,100 @@ export class FileService implements OnModuleInit {
       resourceId: id,
       metadata: { expiresIn },
     });
+  }
+
+  /**
+   * 重命名文件（仅修改显示名 originalName，不影响存储文件名）。
+   */
+  async renameFile(id: string, name: string, user: User): Promise<File> {
+    const file = await this.fileRepository.findOne({
+      where: { id, isDeleted: false },
+    });
+
+    if (!file) {
+      throw new NotFoundException('文件不存在');
+    }
+
+    this.assertFileWritable(file, user);
+
+    const oldName = file.originalName;
+    file.originalName = name;
+    const saved = await this.fileRepository.save(file);
+
+    // 审计日志：文件重命名
+    this.auditService.log({
+      action: 'file_rename',
+      userId: user.id,
+      resourceType: 'file',
+      resourceId: id,
+      metadata: { from: oldName, to: name },
+    });
+
+    return saved;
+  }
+
+  /**
+   * 复制文件（生成副本）。
+   * 副本与原件共享同一底层 Telegram 文件（telegramFileId），不重复上传、不额外占用
+   * 存储，仅新建一条数据库记录。删除其一时由 deleteTelegramFileIfUnreferenced 的
+   * 引用计数保证另一条记录不受影响。
+   * @param folderId 目标文件夹 ID；null 表示复制到网盘根目录
+   */
+  async copyFile(id: string, folderId: string | null, user: User): Promise<File> {
+    const source = await this.fileRepository.findOne({
+      where: { id, isDeleted: false },
+    });
+
+    if (!source) {
+      throw new NotFoundException('文件不存在');
+    }
+
+    this.assertFileWritable(source, user);
+
+    // 校验目标文件夹归属（folderId 为 null 时表示根目录，无需校验）
+    if (folderId) {
+      const folder = await this.folderRepository.findOne({
+        where: { id: folderId, ownerId: user.id, isDeleted: false },
+      });
+      if (!folder) {
+        throw new NotFoundException('目标文件夹不存在或无权访问');
+      }
+    }
+
+    // 生成副本显示名：在扩展名前插入「 副本」，无扩展名则追加到末尾
+    const dotIdx = source.originalName.lastIndexOf('.');
+    const copyName = dotIdx > 0
+      ? `${source.originalName.slice(0, dotIdx)} 副本${source.originalName.slice(dotIdx)}`
+      : `${source.originalName} 副本`;
+
+    // 副本复用原件的底层存储（telegramFileId / filename / mimeType / size），
+    // 缩略图按文件 id 命名，副本 id 不同，故置空由后续缩略图同步任务补齐。
+    const copy = this.fileRepository.create({
+      filename: source.filename,
+      originalName: copyName,
+      mimeType: source.mimeType,
+      size: source.size,
+      telegramFileId: source.telegramFileId,
+      telegramFilePath: source.telegramFilePath,
+      thumbnailPath: null,
+      folderId: folderId ?? null,
+      accessType: source.accessType,
+      status: 'ready',
+      uploaderId: user.id,
+      isDeleted: false,
+    });
+    const saved = await this.fileRepository.save(copy);
+
+    // 审计日志：文件复制
+    this.auditService.log({
+      action: 'file_copy',
+      userId: user.id,
+      resourceType: 'file',
+      resourceId: saved.id,
+      metadata: { sourceId: id, folderId: folderId ?? null },
+    });
+
+    return saved;
   }
 
   async verifyPassword(id: string, password: string): Promise<boolean> {
@@ -2157,5 +2271,102 @@ export class FileService implements OnModuleInit {
 
     const actualSize = info.file_size > 0 ? info.file_size : Number(file.size);
     return { stream, contentType: mimeType, filename, size: actualSize, isInline, accessLogId };
+  }
+
+  /**
+   * 公开媒体直链流（图床 / 视频床）。
+   *
+   * 用于「外站引用文件链接」场景：当公开的图片 / 视频 / 音频文件被 <img> / <video>
+   * 等标签直接引用时，直接内联返回文件内容（而非 302 到 SPA 分享页），保留图床能力。
+   *
+   * 返回 null 表示不适用直链（文件非公开，或非图片/视频/音频类型），调用方应回退到
+   * 原有的重定向逻辑。
+   *
+   * Range 支持：文件已本地缓存时返回 206 片段（视频拖动进度条）；未缓存时回退完整流
+   * （Telegram API 不支持 Range）。
+   */
+  async getPublicMediaStream(
+    id: string,
+    ip?: string,
+    rangeHeader?: string,
+  ): Promise<{
+    stream: Readable;
+    contentType: string;
+    filename: string;
+    size: number;
+    start?: number;
+    end?: number;
+    total?: number;
+    isRange: boolean;
+    accessLogId?: string;
+  } | null> {
+    const file = await this.fileRepository.findOne({
+      where: { id, isDeleted: false },
+    });
+    if (!file) {
+      throw new NotFoundException('文件不存在');
+    }
+
+    // 仅公开文件支持直链
+    if (file.accessType !== FileAccessType.PUBLIC) {
+      return null;
+    }
+
+    const mimeType = file.mimeType || 'application/octet-stream';
+    // 仅图片 / 视频 / 音频支持内联直链（图床 / 视频床）
+    if (!/^(image|video|audio)\//.test(mimeType)) {
+      return null;
+    }
+
+    const filename = this.ensureFileExtension(file.originalName, mimeType);
+    const total = Number(file.size);
+
+    // Range 请求 + 本地已缓存 → 返回 206 片段
+    if (rangeHeader) {
+      const match = rangeHeader.match(/bytes=(\d+)-(\d*)/);
+      if (match) {
+        const start = parseInt(match[1], 10);
+        const end = match[2] ? Math.min(parseInt(match[2], 10), total - 1) : total - 1;
+        const cachedPath = this.fileCacheService.getCachedPath(file.id);
+        if (cachedPath && file.status !== 'processing' && start < total && start <= end) {
+          const stream = createReadStream(cachedPath, { start, end });
+          let accessLogId: string | undefined;
+          try {
+            const saved = await this.accessLogRepository.save({
+              fileId: id,
+              ip: ip || '',
+              action: 'share_download',
+              uploaderId: file.uploaderId,
+              responseSize: 0,
+            });
+            accessLogId = saved.id;
+          } catch {
+            // 日志写入失败不影响直链访问
+          }
+          return {
+            stream,
+            contentType: mimeType,
+            filename,
+            size: end - start + 1,
+            start,
+            end,
+            total,
+            isRange: true,
+            accessLogId,
+          };
+        }
+      }
+    }
+
+    // 完整流：复用分享下载流逻辑（含访问日志）
+    const full = await this.getStreamForShareDownload(id, ip);
+    return {
+      stream: full.stream,
+      contentType: full.contentType,
+      filename: full.filename,
+      size: full.size,
+      isRange: false,
+      accessLogId: full.accessLogId,
+    };
   }
 }
