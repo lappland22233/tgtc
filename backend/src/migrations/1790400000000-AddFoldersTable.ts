@@ -1,10 +1,10 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
 
 /**
- * Phase 1: 创建 folders 表（闭包表）+ folder_closure 关系表 + files.folderId 列。
+ * Phase 1: 创建 folders 表（闭包表）+ folders_closure 关系表 + files.folderId 列。
  *
- * 注意：TypeORM 的 closure-table 自动管理 folder_closure 表结构，
- * 但迁移里需要显式建表，因为 synchronize=false（生产环境）。
+ * 注意：TypeORM @Tree('closure-table') 默认闭包表名为 {entityTable}_closure，
+ * 即 folders_closure。迁移里需要显式建表，因为 synchronize=false（生产环境）。
  *
  * ShareLink 实体在 Phase 2 单独迁移。
  */
@@ -39,9 +39,9 @@ export class AddFoldersTable1790400000000 implements MigrationInterface {
     `);
     await queryRunner.query(`CREATE INDEX IF NOT EXISTS "IDX_folders_parentId" ON "folders" ("parentId")`);
 
-    // 3. 闭包表（TypeORM @Tree('closure-table') 自动使用）
+    // 3. 闭包表（TypeORM @Tree('closure-table') 默认表名 folders_closure）
     await queryRunner.query(`
-      CREATE TABLE IF NOT EXISTS "folder_closure" (
+      CREATE TABLE IF NOT EXISTS "folders_closure" (
         "id_ancestor"   uuid NOT NULL,
         "id_descendant" uuid NOT NULL,
         PRIMARY KEY ("id_ancestor", "id_descendant"),
@@ -51,7 +51,7 @@ export class AddFoldersTable1790400000000 implements MigrationInterface {
           REFERENCES "folders"("id") ON DELETE CASCADE
       )
     `);
-    await queryRunner.query(`CREATE INDEX IF NOT EXISTS "IDX_closure_descendant" ON "folder_closure" ("id_descendant")`);
+    await queryRunner.query(`CREATE INDEX IF NOT EXISTS "IDX_closure_descendant" ON "folders_closure" ("id_descendant")`);
 
     // 4. files 表加 folderId 列 + 外键 + 索引
     await queryRunner.query(`
@@ -76,7 +76,7 @@ export class AddFoldersTable1790400000000 implements MigrationInterface {
     await queryRunner.query(`ALTER TABLE "files" DROP COLUMN IF EXISTS "folderId"`);
 
     await queryRunner.query(`DROP INDEX IF EXISTS "IDX_closure_descendant"`);
-    await queryRunner.query(`DROP TABLE IF EXISTS "folder_closure"`);
+    await queryRunner.query(`DROP TABLE IF EXISTS "folders_closure"`);
 
     await queryRunner.query(`DROP INDEX IF EXISTS "IDX_folders_parentId"`);
     await queryRunner.query(`DROP INDEX IF EXISTS "IDX_folders_owner_parent"`);

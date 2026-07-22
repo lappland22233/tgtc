@@ -1,10 +1,11 @@
-export function formatSize(bytes: number): string {
-  // 防御 NaN/Infinity/负数，避免输出 "NaN undefined"
-  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+export function formatSize(bytes: number | string): string {
+  // 防御：字符串 → 数字（后端 bigint 序列化可能返回字符串）
+  const num = Number(bytes);
+  if (!Number.isFinite(num) || num <= 0) return '0 B';
   const k = 1024;
   const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(k)), sizes.length - 1);
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+  const i = Math.min(Math.floor(Math.log(num) / Math.log(k)), sizes.length - 1);
+  return parseFloat((num / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 }
 
 export function formatDate(date: string): string {
