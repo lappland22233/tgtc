@@ -115,6 +115,18 @@ export class UploadConfigDto {
   @IsOptional()
   @IsString()
   fileTypeFilter?: string;
+
+  // 新上传文件的默认访问次数限制（-1 无限制；>0 限制为 N 次）
+  @IsOptional()
+  @IsInt()
+  @Min(-1)
+  accessCountDefault?: number;
+
+  // 用户可设置的最大访问次数上限（-1 无限制；>0 上限为 N 次）
+  @IsOptional()
+  @IsInt()
+  @Min(-1)
+  accessCountMax?: number;
 }
 
 export class AuthConfigDto {

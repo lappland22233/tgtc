@@ -138,7 +138,12 @@ async function handleConfirm() {
       expiresIn: form.expiresIn,
     });
     const data = res.data.data;
-    shareResult.value = { token: data.token, url: data.url, id: data.id };
+    // 分享页 /s/:token 由前端 SPA 提供服务，实际访问域名即当前站点 origin。
+    // 后端返回的 url 基于 APP_URL 环境变量（常指向 API 服务，与前端域名/端口不一致），
+    // 直接展示会导致「显示链接 ≠ 实际可访问链接」。统一用 window.location.origin 构建，
+    // 与「我的分享」列表（Shares.vue.getShareUrl）保持一致。
+    const shareUrl = `${window.location.origin}/s/${data.token}`;
+    shareResult.value = { token: data.token, url: shareUrl, id: data.id };
     MessagePlugin.success('分享链接已创建');
     emit('created', shareResult.value);
   } catch (err) {

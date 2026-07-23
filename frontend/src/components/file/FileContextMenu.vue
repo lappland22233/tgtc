@@ -179,6 +179,8 @@ watch(() => props.visible, (v) => {
   if (v) {
     pos.x = props.x;
     pos.y = props.y;
+    // 记录打开时的滚动基准（惰性，在首个滚动事件确定实际滚动容器）
+    scrollAnchor = null;
     // 渲染后按实际尺寸修正一次，避免首次估算偏差
     nextTick(adjustPosition);
   }
@@ -191,7 +193,35 @@ function onDocClick() {
 function onKeydown(e: KeyboardEvent) {
   if (e.key === 'Escape' && props.visible) emit('update:visible', false);
 }
-function onScroll() {
+
+/** 菜单打开后的滚动基准位置；null 表示尚未在本次打开中记录 */
+let scrollAnchor: number | null = null;
+
+/** 读取滚动位置：优先事件目标容器的 scrollTop，回退到窗口滚动 */
+function readScrollTop(e?: Event): number {
+  const t = e?.target as HTMLElement | Document | null;
+  if (t && t !== document && typeof (t as HTMLElement).scrollTop === 'number') {
+    return (t as HTMLElement).scrollTop;
+  }
+  return window.scrollY || document.documentElement.scrollTop || 0;
+}
+
+// 滚动关闭：仅当滚动距离超过视口高度的 3% 时才隐藏，
+// 避免轻微/误触滚动导致菜单刚弹出就闪退（需求：滚动超过 3% 屏高才隐藏）。
+function onScroll(e: Event) {
+  if (!props.visible) return;
+  const cur = readScrollTop(e);
+  if (scrollAnchor === null) {
+    scrollAnchor = cur;
+    return;
+  }
+  if (Math.abs(cur - scrollAnchor) > window.innerHeight * 0.03) {
+    emit('update:visible', false);
+  }
+}
+
+// 视口尺寸变化会使菜单定位失效，直接关闭
+function onResize() {
   if (props.visible) emit('update:visible', false);
 }
 
@@ -199,13 +229,13 @@ onMounted(() => {
   document.addEventListener('click', onDocClick);
   document.addEventListener('keydown', onKeydown);
   window.addEventListener('scroll', onScroll, true);
-  window.addEventListener('resize', onScroll);
+  window.addEventListener('resize', onResize);
 });
 onUnmounted(() => {
   document.removeEventListener('click', onDocClick);
   document.removeEventListener('keydown', onKeydown);
   window.removeEventListener('scroll', onScroll, true);
-  window.removeEventListener('resize', onScroll);
+  window.removeEventListener('resize', onResize);
 });
 </script>
 

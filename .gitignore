@@ -28,6 +28,7 @@ lerna-debug.log*
 *~
 .codebuddy
 CODEBUDDY.md
+.qoder/
 # OS
 .DS_Store
 Thumbs.db

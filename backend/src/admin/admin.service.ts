@@ -449,17 +449,23 @@ export class AdminService {
     maxFileSize: number;
     fileTypeMode: string;
     fileTypeFilter: string;
+    accessCountDefault: number;
+    accessCountMax: number;
   }> {
-    const [maxFileSize, fileTypeMode, fileTypeFilter] = await Promise.all([
+    const [maxFileSize, fileTypeMode, fileTypeFilter, accessCountDefault, accessCountMax] = await Promise.all([
       this.getConfigByKey('MAX_FILE_SIZE'),
       this.getConfigByKey('FILE_TYPE_MODE'),
       this.getConfigByKey('FILE_TYPE_FILTER'),
+      this.getConfigByKey('FILE_ACCESS_COUNT_DEFAULT'),
+      this.getConfigByKey('FILE_ACCESS_COUNT_MAX'),
     ]);
 
     return {
       maxFileSize: parseInt(maxFileSize || '20971520'),
       fileTypeMode: fileTypeMode || 'blacklist',
       fileTypeFilter: fileTypeFilter || '',
+      accessCountDefault: parseInt(accessCountDefault || '-1', 10),
+      accessCountMax: parseInt(accessCountMax || '-1', 10),
     };
   }
 
@@ -467,7 +473,20 @@ export class AdminService {
     maxFileSize?: number;
     fileTypeMode?: string;
     fileTypeFilter?: string;
+    accessCountDefault?: number;
+    accessCountMax?: number;
   }): Promise<void> {
+    // 访问次数配置一致性校验：存在有限上限(max>0)时，默认值必须为 1..max（不可为无限制）。
+    // partial 更新时读取现有值补全后再校验。
+    if (config.accessCountDefault !== undefined || config.accessCountMax !== undefined) {
+      const current = await this.getUploadConfig();
+      const def = config.accessCountDefault ?? current.accessCountDefault;
+      const max = config.accessCountMax ?? current.accessCountMax;
+      if (max > 0 && (def <= 0 || def > max)) {
+        throw new BadRequestException('存在最大访问次数限制时，默认访问次数必须为 1 到最大值之间');
+      }
+    }
+
     if (config.maxFileSize !== undefined) {
       await this.setConfigValue('MAX_FILE_SIZE', config.maxFileSize.toString(), '最大文件大小（字节）');
     }
@@ -478,6 +497,14 @@ export class AdminService {
 
     if (config.fileTypeFilter !== undefined) {
       await this.setConfigValue('FILE_TYPE_FILTER', config.fileTypeFilter, '文件类型过滤列表（逗号分隔）');
+    }
+
+    if (config.accessCountDefault !== undefined) {
+      await this.setConfigValue('FILE_ACCESS_COUNT_DEFAULT', config.accessCountDefault.toString(), '新上传文件的默认访问次数限制（-1 无限制）');
+    }
+
+    if (config.accessCountMax !== undefined) {
+      await this.setConfigValue('FILE_ACCESS_COUNT_MAX', config.accessCountMax.toString(), '用户可设置的最大访问次数上限（-1 无限制）');
     }
 
     // 审计日志：上传配置变更

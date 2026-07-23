@@ -51,6 +51,10 @@ export class FileService implements OnModuleInit {
   private maxFileSize: number;
   private fileTypeMode: 'blacklist' | 'whitelist' = 'blacklist';
   private fileTypeFilter: string[] = [];
+  // 访问次数系统配置（热更新）。语义：<=0 表示无限制；>0 表示限制为 N 次。
+  // accessCountDefault 应用于新上传文件；accessCountMax 用于校验用户设置的上限。
+  private accessCountDefault = -1;
+  private accessCountMax = -1;
   private readonly thumbnailDir: string;
 
   constructor(
@@ -94,27 +98,43 @@ export class FileService implements OnModuleInit {
 
   @OnEvent('config.changed')
   async handleConfigChanged(payload: { key: string; value: string }) {
-    if (payload.key === 'MAX_FILE_SIZE' || payload.key === 'FILE_TYPE_MODE' || payload.key === 'FILE_TYPE_FILTER') {
+    if (
+      payload.key === 'MAX_FILE_SIZE' ||
+      payload.key === 'FILE_TYPE_MODE' ||
+      payload.key === 'FILE_TYPE_FILTER' ||
+      payload.key === 'FILE_ACCESS_COUNT_DEFAULT' ||
+      payload.key === 'FILE_ACCESS_COUNT_MAX'
+    ) {
       await this.reloadUploadConfig();
     }
   }
 
   private async reloadUploadConfig() {
-    const [maxFileSize, fileTypeMode, fileTypeFilter] = await Promise.all([
+    const [maxFileSize, fileTypeMode, fileTypeFilter, accessCountDefault, accessCountMax] = await Promise.all([
       this.configCacheService.get('MAX_FILE_SIZE', '20971520'),
       this.configCacheService.get('FILE_TYPE_MODE', 'blacklist'),
       this.configCacheService.get('FILE_TYPE_FILTER', ''),
+      this.configCacheService.get('FILE_ACCESS_COUNT_DEFAULT', '-1'),
+      this.configCacheService.get('FILE_ACCESS_COUNT_MAX', '-1'),
     ]);
     this.maxFileSize = this.parseFileSize(maxFileSize);
     this.fileTypeMode = (fileTypeMode === 'whitelist' ? 'whitelist' : 'blacklist');
     this.fileTypeFilter = fileTypeFilter
       ? fileTypeFilter.split(',').map(s => s.trim().toLowerCase()).filter(Boolean)
       : [];
+    this.accessCountDefault = this.parseAccessCount(accessCountDefault);
+    this.accessCountMax = this.parseAccessCount(accessCountMax);
   }
 
   private parseFileSize(val: string | undefined): number {
     const parsed = Number(val);
     return Number.isFinite(parsed) ? parsed : 20971520;
+  }
+
+  /** 解析访问次数配置：非整数回退为 -1（无限制） */
+  private parseAccessCount(val: string | undefined): number {
+    const n = Number(val);
+    return Number.isInteger(n) ? n : -1;
   }
 
   async getMaxFileSize(): Promise<number> {
@@ -344,7 +364,7 @@ export class FileService implements OnModuleInit {
       telegramFilePath: '',
       uploaderId: user.id,
       accessType: FileAccessType.PUBLIC,
-      maxAccessCount: -1,
+      maxAccessCount: this.accessCountDefault,
       status: 'processing',
     });
     const savedFile = await this.fileRepository.save(newFile);
@@ -415,7 +435,7 @@ export class FileService implements OnModuleInit {
       telegramFilePath: telegramFile.file_path || '',
       uploaderId: user.id,
       accessType: FileAccessType.PUBLIC,
-      maxAccessCount: -1,
+      maxAccessCount: this.accessCountDefault,
     });
 
     const savedFile = await this.fileRepository.save(newFile);
@@ -1007,6 +1027,12 @@ export class FileService implements OnModuleInit {
     }
 
     this.assertFileWritable(file, user);
+
+    // 校验系统「最大访问次数」上限：accessCountMax>0 表示存在有限上限，
+    // 此时用户不能设为无限制（<=0），且不得超过上限。
+    if (this.accessCountMax > 0 && (maxAccessCount <= 0 || maxAccessCount > this.accessCountMax)) {
+      throw new BadRequestException(`访问次数需在 1 到 ${this.accessCountMax} 之间`);
+    }
 
     await this.fileRepository.update(id, { maxAccessCount });
 
@@ -2112,7 +2138,7 @@ export class FileService implements OnModuleInit {
       telegramFilePath: telegramFile.file_path || '',
       uploaderId: user.id,
       accessType: FileAccessType.PUBLIC,
-      maxAccessCount: -1,
+      maxAccessCount: this.accessCountDefault,
     });
 
     return this.fileRepository.save(newFile);

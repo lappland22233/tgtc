@@ -271,7 +271,7 @@
           </div>
 
           <!-- 无限滚动哨兵 -->
-          <div v-if="pageMode === 'infinite'" ref="scrollSentinel" class="os-sentinel">
+          <div ref="scrollSentinel" class="os-sentinel">
             <t-loading v-if="cursorLoading" size="small" text="加载中..." />
             <span v-else-if="!hasMore" class="os-muted">已加载全部 {{ fileStore.total }} 个文件</span>
           </div>
@@ -358,19 +358,6 @@
           </div>
         </div>
       </div>
-    </div>
-
-    <!-- ⑧ 分页 / 模式切换 -->
-    <div v-if="displayFiles.length > 0 || subfoldersInCurrentFolder.length > 0" class="fl-pagination">
-      <t-select v-model="pageSize" :options="pageSizeOptions" class="fl-pagesize" @change="handlePageSizeChange" />
-      <t-pagination
-        v-if="pageMode === 'paginated'"
-        v-model="page"
-        :total="fileStore.total"
-        :page-size="Math.abs(pageSize)"
-        :show-page-size="false"
-        @change="handlePageChange"
-      />
     </div>
 
     <!-- 上传弹窗 -->
@@ -489,7 +476,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, computed, reactive, watch, nextTick, onUnmounted } from 'vue';
+import { ref, onMounted, computed, reactive, watch, onUnmounted } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
 import MessagePlugin from '@/utils/message';
 import { DialogPlugin } from 'tdesign-vue-next';
@@ -520,8 +507,6 @@ const tagStore = useTagStore();
 const folderStore = useFolderStore();
 const router = useRouter();
 const route = useRoute();
-const page = ref(Number(route.query.page) || 1);
-const pageSize = ref(Number(route.query.pageSize) || 20);
 const search = ref((route.query.search as string) || '');
 const showUploadModal = ref(false);
 const isDraggedOver = ref(false);
@@ -580,14 +565,7 @@ async function onFolderNavigate(folderId: string | null) {
   if (folderId === folderStore.currentFolderId) return;
   await folderStore.openFolder(folderId);
   selectedFileIds.value = [];
-  if (pageMode.value === 'infinite') {
-    resetCursor();
-    fileStore.replaceFiles([]);
-    loadInitialFiles(true);
-  } else {
-    page.value = 1;
-    refetchFiles(1);
-  }
+  refetchFiles();
 }
 
 function openCreateFolderDialog() {
@@ -637,13 +615,7 @@ function openMoveDialogForFiles(fileIds?: string[]) {
 }
 
 async function onFolderMoved() {
-  if (pageMode.value === 'infinite') {
-    resetCursor();
-    fileStore.replaceFiles([]);
-    loadInitialFiles(true);
-  } else {
-    refetchFiles();
-  }
+  refetchFiles();
   selectedFileIds.value = [];
 }
 
@@ -880,19 +852,11 @@ function toggleSort(field: string) {
     sortBy.value = field;
     sortOrder.value = field === 'createdAt' ? 'DESC' : 'ASC';
   }
-  if (pageMode.value === 'infinite') {
-    pageMode.value = 'paginated';
-    pageSize.value = 20;
-    resetCursor();
-  }
-  page.value = 1;
-  refetchFiles(1);
+  refetchFiles();
 }
 
-// 分页模式：'paginated' | 'infinite'
-const pageMode = ref<'paginated' | 'infinite'>(
-  (route.query.mode as 'paginated' | 'infinite') || 'paginated'
-);
+// 无限滚动每批加载条数（不再提供分页，固定批次）
+const BATCH_SIZE = 20;
 
 // 游标无限滚动 composable
 const {
@@ -905,15 +869,6 @@ const {
 // 滚动哨兵 ref
 const scrollSentinel = ref<HTMLElement | null>(null);
 let scrollObserver: IntersectionObserver | null = null;
-
-// pageSize 选项（含无限）
-const pageSizeOptions = computed(() => [
-  { label: '10 条/页', value: 10 },
-  { label: '20 条/页', value: 20 },
-  { label: '50 条/页', value: 50 },
-  { label: '100 条/页', value: 100 },
-  { label: '无限滚动', value: -1 },
-]);
 
 const displayFiles = computed(() => fileStore.files);
 
@@ -992,13 +947,7 @@ async function savePassword() {
     await fileStore.setPassword(passwordDialog.fileId, passwordDialog.value);
     MessagePlugin.success(passwordDialog.value ? '密码已设置' : '密码已移除');
     passwordDialog.visible = false;
-    if (pageMode.value === 'infinite') {
-      resetCursor();
-      fileStore.replaceFiles([]);
-      loadInitialFiles(true);
-    } else {
-      refetchFiles(page.value, Math.abs(pageSize.value));
-    }
+    refetchFiles();
   } catch (error: unknown) {
     MessagePlugin.error(getErrorMessage(error));
   }
@@ -1038,15 +987,9 @@ async function saveExpires() {
   }
 }
 
-/** 按当前分页模式刷新文件列表（供访问控制类弹窗保存后复用） */
+/** 刷新文件列表（供访问控制类弹窗保存后复用） */
 function refreshCurrentList() {
-  if (pageMode.value === 'infinite') {
-    resetCursor();
-    fileStore.replaceFiles([]);
-    loadInitialFiles(true);
-  } else {
-    refetchFiles(page.value, Math.abs(pageSize.value));
-  }
+  refetchFiles();
 }
 
 // 限时访问选项
@@ -1208,22 +1151,13 @@ function clearTagFilters() {
   applyFilters();
 }
 
-/** 统一的重新获取文件列表 */
-async function refetchFiles(pageNum?: number, pageSz?: number) {
-  const p = pageNum ?? page.value;
-  const ps = pageSz ?? Math.abs(pageSize.value);
-  const tagIds = selectedTagIds.value.length > 0 ? selectedTagIds.value : undefined;
-  await fileStore.fetchFiles(p, ps, search.value || undefined, sortBy.value || undefined, sortOrder.value || undefined, tagIds, currentFolderIdForApi.value);
+/** 统一的重新获取文件列表（无限滚动：从头加载） */
+async function refetchFiles() {
+  await loadInitialFiles();
 }
 
 function applyFilters() {
-  if (pageMode.value === 'infinite') {
-    resetCursor();
-    loadInitialFiles(true);
-  } else {
-    page.value = 1;
-    refetchFiles(1);
-  }
+  refetchFiles();
 }
 
 function openTagEditor(file: { id: string; tags?: { id: string; name: string; color: string }[] }) {
@@ -1242,94 +1176,71 @@ function handleUploadModalClose() {
 }
 
 function onUploaded() {
-  if (pageMode.value === 'infinite') {
-    resetCursor();
-    fileStore.replaceFiles([]);
-    loadInitialFiles(true);
-  } else {
-    refetchFiles(page.value, Math.abs(pageSize.value));
-  }
+  refetchFiles();
   selectedFileIds.value = [];
 }
 
 function handleSearch() {
-  page.value = 1;
-  if (pageMode.value === 'infinite') {
-    resetCursor();
-    fileStore.replaceFiles([]);
-    loadInitialFiles(true);
-  } else {
-    refetchFiles(1);
-  }
+  refetchFiles();
 }
 
 function handleClearSearch() {
   search.value = '';
-  page.value = 1;
-  if (pageMode.value === 'infinite') {
-    resetCursor();
-    fileStore.replaceFiles([]);
-    loadInitialFiles(true);
-  } else {
-    refetchFiles(1);
-  }
+  refetchFiles();
 }
 
-// ==== 无限滚动加载逻辑 ====
-async function loadInitialFiles(resetCursorState = false) {
-  const tagIds = selectedTagIds.value.length > 0 ? selectedTagIds.value : undefined;
-  if (pageMode.value === 'paginated') {
-    await fileStore.fetchFiles(page.value, Math.abs(pageSize.value), search.value || undefined, sortBy.value || undefined, sortOrder.value || undefined, tagIds, currentFolderIdForApi.value);
-  } else {
-    if (resetCursorState) {
-      resetCursor();
-      fileStore.replaceFiles([]);
-    }
-    await loadMore(async (cursor, signal) => {
-      const result = await fileStore.fetchFilesCursor(
-        20,
-        search.value || undefined,
-        cursor,
-        tagIds,
-        signal,
-        currentFolderIdForApi.value,
-      );
-      if (!result) return { data: [], nextCursor: null, hasMore: false };
-      fileStore.replaceFiles([...fileStore.files, ...result.files]);
-      return {
-        data: result.files,
-        nextCursor: result.nextCursor,
-        hasMore: result.nextCursor !== null,
-      };
-    });
-  }
+// ==== 无限滚动加载逻辑（唯一加载方式，不再分页） ====
+// 用「页码」作为游标驱动 loadMore：偏移分页支持自定义排序，
+// 既保留排序/搜索/标签能力，又提供无限滚动体验。
+async function loadInitialFiles() {
+  resetCursor();
+  fileStore.replaceFiles([]);
+  await loadMoreFiles(1);
 }
 
-async function loadMoreFiles() {
+async function loadMoreFiles(pageNum?: number) {
   if (!hasMore.value || cursorLoading.value) return;
   await loadMore(async (cursor, signal) => {
-    const result = await fileStore.fetchFilesCursor(
-      20,
-      search.value || undefined,
-      cursor,
-      selectedTagIds.value.length > 0 ? selectedTagIds.value : undefined,
-      signal,
-      currentFolderIdForApi.value,
-    );
-    if (!result) return { data: [], nextCursor: null, hasMore: false };
-    fileStore.replaceFiles([...fileStore.files, ...result.files]);
-    return {
-      data: result.files,
-      nextCursor: result.nextCursor,
-      hasMore: result.nextCursor !== null,
-    };
+    const page = pageNum ?? (cursor ? parseInt(cursor, 10) : 1);
+    const tagIds = selectedTagIds.value.length > 0 ? selectedTagIds.value : undefined;
+    try {
+      const result = await fileStore.fetchFilesPage(
+        page,
+        BATCH_SIZE,
+        search.value || undefined,
+        sortBy.value || undefined,
+        sortOrder.value || undefined,
+        tagIds,
+        currentFolderIdForApi.value,
+        signal,
+      );
+      fileStore.replaceFiles([...fileStore.files, ...result.files]);
+      fileStore.total = result.total;
+      const loadedAll = fileStore.files.length >= result.total || result.files.length === 0;
+      return {
+        data: result.files,
+        nextCursor: loadedAll ? null : String(page + 1),
+        hasMore: !loadedAll,
+      };
+    } catch (err) {
+      const e = err as { name?: string; code?: string };
+      if (e.name === 'AbortError' || e.code === 'ERR_CANCELED') {
+        return { data: [], nextCursor: cursor, hasMore: true };
+      }
+      throw err;
+    }
   });
 }
 
-function setupScrollObserver() {
+/**
+ * 哨兵元素变化时重新挂载 IntersectionObserver。
+ * 修复无限滚动失效 Bug：切换文件夹 / 筛选时列表会先清空再重载，os-list 及其内部
+ * 哨兵元素随之卸载并重建，旧 observer 仍指向已脱离 DOM 的元素而永不触发。
+ * 用 watch 监听哨兵 ref，元素一变化即重新 observe，保证任何重挂载后都能继续加载。
+ */
+watch(scrollSentinel, (el) => {
   if (scrollObserver) { scrollObserver.disconnect(); scrollObserver = null; }
-  if (pageMode.value !== 'infinite') return;
-  if (!scrollSentinel.value) return;
+  if (!el) return;
   scrollObserver = new IntersectionObserver(
     (entries) => {
       if (entries[0].isIntersecting) {
@@ -1338,29 +1249,8 @@ function setupScrollObserver() {
     },
     { rootMargin: '600px' },
   );
-  scrollObserver.observe(scrollSentinel.value);
-}
-
-function handlePageChange(pageInfo: { current: number }) {
-  refetchFiles(pageInfo.current);
-}
-
-function handlePageSizeChange(val: number) {
-  selectedFileIds.value = [];
-  if (val === -1) {
-    pageMode.value = 'infinite';
-    page.value = 1;
-    resetCursor();
-    fileStore.replaceFiles([]);
-    loadInitialFiles(true);
-    nextTick(setupScrollObserver);
-  } else {
-    pageMode.value = 'paginated';
-    page.value = 1;
-    pageSize.value = val;
-    refetchFiles(1, val);
-  }
-}
+  scrollObserver.observe(el);
+});
 
 async function handleAccessTypeChange(id: string, accessType: string) {
   try {
@@ -1407,13 +1297,7 @@ async function confirmDelete() {
       MessagePlugin.success(`文件已标记为待删除，将于 ${scheduledDate} 永久删除，期间可恢复`);
     }
     deleteDialog.visible = false;
-    if (pageMode.value === 'infinite') {
-      resetCursor();
-      fileStore.replaceFiles([]);
-      loadInitialFiles(true);
-    } else {
-      await refetchFiles(page.value, Math.abs(pageSize.value));
-    }
+    await refetchFiles();
   } catch (error: unknown) {
     MessagePlugin.error(getErrorMessage(error));
   }
@@ -1423,13 +1307,7 @@ async function handleRestore(id: string) {
   try {
     await fileStore.restoreFile(id);
     MessagePlugin.success('文件已恢复');
-    if (pageMode.value === 'infinite') {
-      resetCursor();
-      fileStore.replaceFiles([]);
-      loadInitialFiles(true);
-    } else {
-      await refetchFiles(page.value, Math.abs(pageSize.value));
-    }
+    await refetchFiles();
   } catch (error: unknown) {
     MessagePlugin.error(getErrorMessage(error));
   }
@@ -1508,15 +1386,9 @@ async function confirmBatchTags() {
   applyFilters();
 }
 
-// 同步分页、搜索、排序、标签到 URL 查询参数
-watch([page, pageSize, search, sortBy, sortOrder, pageMode, selectedTagIds], ([newPage, newPageSize, newSearch, newSortBy, newSortOrder, newMode, newTagIds]) => {
+// 同步搜索、排序、标签到 URL 查询参数（无限滚动，不再同步分页参数）
+watch([search, sortBy, sortOrder, selectedTagIds], ([newSearch, newSortBy, newSortOrder, newTagIds]) => {
   const query: Record<string, string> = {};
-  if (newMode === 'paginated') {
-    if (newPage > 1) query.page = String(newPage);
-    if (newPageSize !== 20 && newPageSize > 0) query.pageSize = String(newPageSize);
-  } else {
-    query.mode = 'infinite';
-  }
   if (newSearch) query.search = newSearch;
   if (newSortBy) query.sortBy = newSortBy;
   if (newSortOrder) query.sortOrder = newSortOrder;
@@ -1529,14 +1401,7 @@ onMounted(async () => {
   try { await folderStore.fetchTree(); } catch { /* 文件夹树加载失败不阻塞页面 */ }
 
   try {
-    if (pageMode.value === 'infinite' || route.query.mode === 'infinite') {
-      pageMode.value = 'infinite';
-      pageSize.value = -1;
-      await loadInitialFiles(true);
-      nextTick(setupScrollObserver);
-    } else {
-      await refetchFiles(page.value, Math.abs(pageSize.value));
-    }
+    await loadInitialFiles();
   } catch {
     // 初始加载失败保留空列表，用户可手动刷新
   }

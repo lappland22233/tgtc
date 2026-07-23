@@ -118,6 +118,31 @@ export const useFileStore = defineStore('files', () => {
     files.value = newFiles;
   }
 
+  /**
+   * 按页获取文件（不修改 files 列表），供无限滚动逐页累加使用。
+   * 相比游标分页，偏移分页支持自定义排序（sortBy/sortOrder），
+   * 因此无限滚动这里用「页码」作为游标驱动，兼顾排序与滚动加载。
+   */
+  async function fetchFilesPage(
+    page: number,
+    limit: number,
+    keyword?: string,
+    sortBy?: string,
+    sortOrder?: string,
+    tagIds?: string[],
+    folderId?: string,
+    signal?: AbortSignal,
+  ): Promise<{ files: FileItem[]; total: number }> {
+    const response = await api.get('/files', {
+      params: { page, limit, keyword, includeDeleted: 'true', sortBy, sortOrder, tagIds: tagIds?.join(','), folderId },
+      signal,
+    });
+    return {
+      files: response.data.data.files as FileItem[],
+      total: response.data.data.total as number,
+    };
+  }
+
   async function uploadFile(
     file: File,
     onProgress?: (loaded: number, total: number) => void,
@@ -311,6 +336,7 @@ export const useFileStore = defineStore('files', () => {
     setCurrentUserRole,
     fetchFiles,
     fetchFilesCursor,
+    fetchFilesPage,
     replaceFiles,
     uploadFile,
     uploadFileAsync,

@@ -90,7 +90,7 @@
       <div v-if="errors.length === 0" class="empty">暂无错误记录 🎉</div>
       <t-table
         v-else
-        :data="errors.slice(0, 10)"
+        :data="errorsTop"
         :columns="errorColumns"
         row-key="id"
         size="small"
@@ -159,7 +159,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, onUnmounted, nextTick } from 'vue';
+import { ref, reactive, computed, onMounted, onUnmounted, nextTick, h } from 'vue';
 import * as echarts from '@/utils/echarts';
 import client from '../../api/client';
 import { CHART_COLORS, tooltipBase, legendBase, areaGradient, ensureCyberTheme } from '../../utils/echarts-theme';
@@ -215,6 +215,9 @@ const pagination = reactive({ current: 1, pageSize: 20, total: 0, showJumper: tr
 
 // ---- 错误列表 ----
 const errors = ref<RecordItem[]>([]);
+// 稳定的前 10 条引用：避免在模板里 errors.slice(0,10) 每次渲染都产生新数组，
+// 导致 t-table 频繁全量重渲染（放大 TDesign 单元格生命周期竞态、影响性能）。
+const errorsTop = computed(() => errors.value.slice(0, 10));
 
 // ---- 详情抽屉 ----
 const detailVisible = ref(false);
@@ -233,10 +236,18 @@ let statsGen = 0;
 let recordsGen = 0;
 let recordsAbort: AbortController | null = null;
 
+// 自定义省略号单元格：规避 TDesign TEllipsis 组件在 onMounted/onUpdated 中
+// 调用 isTextEllipsis(root.value) 未判空触发的崩溃
+//（"Cannot read properties of null (reading 'clientWidth')"）。
+// 用原生 title 提供完整内容悬浮提示 + CSS 截断，行为等价且稳定。
+function ellipsisCell(text: string) {
+  return h('div', { class: 'cell-ellipsis', title: text }, text);
+}
+
 // ---- 表格列 ----
 const errorColumns = [
   { colKey: 'createdAt', title: '时间', width: 150, cell: (_h: unknown, ctx: { row: RecordItem }) => formatTime(ctx.row.createdAt) },
-  { colKey: 'data.message', title: '消息', ellipsis: true, cell: (_h: unknown, ctx: { row: RecordItem }) => ctx.row.data?.message || '-' },
+  { colKey: 'data.message', title: '消息', cell: (_h: unknown, ctx: { row: RecordItem }) => ellipsisCell(ctx.row.data?.message || '-') },
   { colKey: 'data.tag', title: '标签', width: 120, cell: (_h: unknown, ctx: { row: RecordItem }) => ctx.row.data?.tag || '-' },
   { colKey: 'ip', title: 'IP', width: 130 },
 ];
@@ -244,8 +255,8 @@ const recordColumns = [
   { colKey: 'createdAt', title: '时间', width: 150, cell: (_h: unknown, ctx: { row: RecordItem }) => formatTime(ctx.row.createdAt) },
   { colKey: 'type', title: '类型', width: 90, cell: (_h: unknown, ctx: { row: RecordItem }) => typeBadge(ctx.row.type) },
   { colKey: 'ip', title: 'IP', width: 130 },
-  { colKey: 'userAgent', title: 'User-Agent', ellipsis: true, width: 200 },
-  { colKey: 'data', title: '数据摘要', ellipsis: true, cell: (_h: unknown, ctx: { row: RecordItem }) => formatDataSummary(ctx.row.type, ctx.row.data) },
+  { colKey: 'userAgent', title: 'User-Agent', width: 200, cell: (_h: unknown, ctx: { row: RecordItem }) => ellipsisCell(ctx.row.userAgent || '-') },
+  { colKey: 'data', title: '数据摘要', cell: (_h: unknown, ctx: { row: RecordItem }) => ellipsisCell(formatDataSummary(ctx.row.type, ctx.row.data)) },
 ];
 
 function typeBadge(type: string): string {
@@ -681,6 +692,14 @@ onUnmounted(() => {
   display: flex;
   gap: 10px;
   align-items: center;
+}
+
+/* 自定义省略号单元格：CSS 截断 + 原生 title 悬浮提示（替代 TDesign ellipsis 组件） */
+.cell-ellipsis {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
 }
 
 .empty {
