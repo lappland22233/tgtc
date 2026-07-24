@@ -29,6 +29,10 @@ export class InitChunkUploadDto {
   @Min(1)
   @Max(104857600) // 100MB max chunk size
   chunkSize: number;
+
+  @IsOptional()
+  @IsUUID('4', { message: 'folderId 必须是合法的 UUID v4' })
+  folderId?: string;
 }
 
 export class CompleteChunkUploadDto {

@@ -4,8 +4,8 @@ import {
   BadRequestException,
   ForbiddenException,
 } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, TreeRepository } from 'typeorm';
+import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
+import { Repository, TreeRepository, DataSource } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import * as bcrypt from 'bcryptjs';
 import { randomBytes } from 'crypto';
@@ -38,18 +38,21 @@ const SHARE_TOKEN_BYTES = 9; // 12 字符 base64url，熵 ~72 bit
  */
 @Injectable()
 export class ShareService {
+  private readonly folderRepo: TreeRepository<Folder>;
+
   constructor(
     @InjectRepository(ShareLink)
     private readonly shareLinkRepo: Repository<ShareLink>,
     @InjectRepository(File)
     private readonly fileRepo: Repository<File>,
-    @InjectRepository(Folder)
-    private readonly folderRepo: TreeRepository<Folder>,
+    @InjectDataSource() dataSource: DataSource,
     private readonly audit: AuditService,
     private readonly passwordService: SharePasswordService,
     private readonly fileService: FileService,
     private readonly configService: ConfigService,
-  ) {}
+  ) {
+    this.folderRepo = dataSource.getTreeRepository(Folder);
+  }
 
   private get appUrl(): string {
     return this.configService.get<string>('APP_URL') || 'http://localhost:3000';
@@ -200,7 +203,7 @@ export class ShareService {
 
   // ---------- 文件下载 ----------
 
-  /** 校验分享下载凭证与文件归属，供完整流和 Range 流统一复用。 */
+  /** 只校验分享凭证与文件归属；访问额度必须在确认响应流可用后单独消费。 */
   private async assertDownloadAllowed(
     token: string,
     fileId: string,
@@ -215,7 +218,6 @@ export class ShareService {
       if (!ok) throw new ForbiddenException('访问凭证已失效，请重新输入密码');
     }
     await this.assertFileInShare(link, fileId);
-    await this.consumeShareDownload(link);
     return link;
   }
 
@@ -249,6 +251,12 @@ export class ShareService {
     const link = await this.assertDownloadAllowed(token, fileId, accessJwt);
     const result = await this.fileService.getRangeStreamForShareDownload(fileId, rangeHeader, ip || undefined);
     if (result.kind === 'range') {
+      try {
+        await this.consumeShareDownload(link);
+      } catch (error) {
+        result.stream.destroy();
+        throw error;
+      }
       this.audit.log({
         action: 'share_link_download' as AuditAction,
         resourceType: 'share_link',
@@ -277,8 +285,15 @@ export class ShareService {
     accessLogId?: string;
   }> {
     const link = await this.assertDownloadAllowed(token, fileId, accessJwt);
+    const result = await this.fileService.getStreamForShareDownload(fileId, ip || undefined);
+    try {
+      await this.consumeShareDownload(link);
+    } catch (error) {
+      result.stream.destroy();
+      throw error;
+    }
 
-    // 增加下载审计（独立于访问计数，避免一次访问多次 Range 快速耗尽）
+    // 增加下载审计（独立于访问计数）
     this.audit.log({
       action: 'share_link_download' as AuditAction,
       resourceType: 'share_link',
@@ -286,7 +301,7 @@ export class ShareService {
       metadata: { token, fileId, ip: ip || null },
     });
 
-    return this.fileService.getStreamForShareDownload(fileId, ip || undefined);
+    return result;
   }
 
   // ---------- 列出/更新/取消分享 ----------
@@ -334,30 +349,32 @@ export class ShareService {
 
   async updateShare(id: string, creatorId: string, dto: UpdateShareDto) {
     const link = await this.getShareByIdRaw(id, creatorId);
+    const updates: Partial<ShareLink> = {};
     if (dto.password !== undefined) {
-      link.password = dto.password ? await bcrypt.hash(dto.password, BCRYPT_ROUNDS) : null;
+      updates.password = dto.password ? await bcrypt.hash(dto.password, BCRYPT_ROUNDS) : null;
     }
-    if (dto.maxAccessCount !== undefined) link.maxAccessCount = dto.maxAccessCount;
+    if (dto.maxAccessCount !== undefined) updates.maxAccessCount = dto.maxAccessCount;
     if (dto.expiresIn !== undefined) {
-      link.expiresIn = dto.expiresIn;
-      // 改变有效期时重置起始时间，让新有效期立即生效
-      link.expiresStartAt = dto.expiresIn ? new Date() : null;
+      updates.expiresIn = dto.expiresIn;
+      updates.expiresStartAt = dto.expiresIn ? new Date() : null;
     }
 
-    // 调大上限/延长有效期后，将 EXPIRED/EXHAUSTED 状态复位为 ACTIVE，
-    // 避免残留状态导致分享逻辑混乱（DISABLED 由用户显式取消，不复位）。
+    const effectiveMax = updates.maxAccessCount ?? link.maxAccessCount;
+    const effectiveExpiresIn = updates.expiresIn !== undefined ? updates.expiresIn : link.expiresIn;
+    const effectiveStart = updates.expiresStartAt !== undefined ? updates.expiresStartAt : link.expiresStartAt;
     if (link.status === ShareLinkStatus.EXPIRED || link.status === ShareLinkStatus.EXHAUSTED) {
-      const stillExhausted = link.maxAccessCount >= 0 && link.currentAccessCount >= link.maxAccessCount;
-      let stillExpired = false;
-      if (link.expiresIn && link.expiresStartAt) {
-        stillExpired = new Date() > new Date(link.expiresStartAt.getTime() + link.expiresIn * 3600 * 1000);
-      }
-      if (!stillExhausted && !stillExpired) {
-        link.status = ShareLinkStatus.ACTIVE;
-      }
+      const stillExhausted = effectiveMax >= 0 && link.currentAccessCount >= effectiveMax;
+      const stillExpired = Boolean(
+        effectiveExpiresIn
+        && effectiveStart
+        && Date.now() > effectiveStart.getTime() + effectiveExpiresIn * 3600 * 1000,
+      );
+      if (!stillExhausted && !stillExpired) updates.status = ShareLinkStatus.ACTIVE;
     }
 
-    const saved = await this.shareLinkRepo.save(link);
+    // 字段级更新不会把旧快照中的 currentAccessCount 覆盖回数据库。
+    if (Object.keys(updates).length > 0) await this.shareLinkRepo.update(id, updates);
+    const saved = await this.getShareByIdRaw(id, creatorId);
 
     // 审计 metadata 剔除明文密码，仅记录是否设置密码
     const auditMeta: Partial<UpdateShareDto> = { ...dto };
@@ -433,8 +450,10 @@ export class ShareService {
       const expiresAt = new Date(link.expiresStartAt.getTime() + link.expiresIn * 3600 * 1000);
       if (new Date() > expiresAt) {
         if (link.status !== ShareLinkStatus.EXPIRED) {
-          link.status = ShareLinkStatus.EXPIRED;
-          await this.shareLinkRepo.save(link).catch(() => {});
+          await this.shareLinkRepo.update(
+            { id: link.id, status: link.status },
+            { status: ShareLinkStatus.EXPIRED },
+          ).catch(() => {});
         }
         throw new NotFoundException('分享已过期');
       }
@@ -445,8 +464,10 @@ export class ShareService {
     // 即便并发下偶发漏判，也会由递增路径的原子 UPDATE 兜底，不构成超发。
     if (link.maxAccessCount >= 0 && link.currentAccessCount >= link.maxAccessCount) {
       if (link.status !== ShareLinkStatus.EXHAUSTED) {
-        link.status = ShareLinkStatus.EXHAUSTED;
-        await this.shareLinkRepo.save(link).catch(() => {});
+        await this.shareLinkRepo.update(
+          { id: link.id, status: link.status },
+          { status: ShareLinkStatus.EXHAUSTED },
+        ).catch(() => {});
       }
       throw new NotFoundException('分享访问次数已耗尽');
     }
@@ -622,11 +643,14 @@ export class ShareService {
 
     // findAncestors 返回从自身到根的顺序，需要反转为从根到自身
     const ancestors = await this.folderRepo.findAncestors(folder);
-    const filtered = ancestors
-      .filter((f) => !f.isDeleted)
-      .reverse()
+    const visibleAncestors = ancestors.filter((f) => !f.isDeleted).reverse();
+    const sharedRootIndex = visibleAncestors.findIndex((f) => f.id === link.targetId);
+    if (sharedRootIndex < 0) {
+      throw new ForbiddenException('文件夹不在此分享的子树内');
+    }
+    return visibleAncestors
+      .slice(sharedRootIndex)
       .map((f) => ({ id: f.id, name: f.name }));
-    return filtered;
   }
 
   /** 计算过期时间；null 表示永久 */

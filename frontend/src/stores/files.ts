@@ -173,12 +173,15 @@ export const useFileStore = defineStore('files', () => {
     onProgress?: (loaded: number, total: number) => void,
     onStatusChange?: (status: string) => void,
     signal?: AbortSignal,
+    folderId?: string | null,
   ) {
     const formData = new FormData();
     formData.append('file', file);
+    if (folderId) formData.append('folderId', folderId);
     // Step 1: 上传文件（Multer 缓冲阶段，有上传进度）— 同样响应外部取消
     const response = await api.post('/files/upload-async', formData, {
       signal,
+      timeout: 0,
       onUploadProgress: (progressEvent) => {
         if (progressEvent.total && onProgress) {
           onProgress(progressEvent.loaded, progressEvent.total);

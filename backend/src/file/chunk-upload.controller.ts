@@ -39,6 +39,7 @@ export class ChunkUploadController {
       dto.totalChunks,
       dto.chunkSize,
       user.id,
+      dto.folderId,
     );
   }
 
@@ -72,19 +73,15 @@ export class ChunkUploadController {
     if (!chunk) {
       throw new BadRequestException('缺少分片数据 (chunk)');
     }
-    if (!index) {
-      throw new BadRequestException('缺少分片索引 (index)');
-    }
-    const chunkIndex = Number(index);
-    if (!Number.isInteger(chunkIndex)) {
-      throw new BadRequestException('分片索引必须为整数');
-    }
-    if (!chunk.path) throw new BadRequestException('分片临时文件不可用');
     try {
+      if (!index) throw new BadRequestException('缺少分片索引 (index)');
+      const chunkIndex = Number(index);
+      if (!Number.isInteger(chunkIndex)) throw new BadRequestException('分片索引必须为整数');
+      if (!chunk.path) throw new BadRequestException('分片临时文件不可用');
       await this.chunkUploadService.saveChunkFromPath(uploadId, chunkIndex, chunk.path, chunk.size, user.id);
       return { index: chunkIndex, received: true };
     } finally {
-      await fs.promises.unlink(chunk.path).catch(() => {});
+      if (chunk.path) await fs.promises.unlink(chunk.path).catch(() => {});
     }
   }
 

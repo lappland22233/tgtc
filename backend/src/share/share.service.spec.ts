@@ -1,5 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { getRepositoryToken } from '@nestjs/typeorm';
+import { getRepositoryToken, getDataSourceToken } from '@nestjs/typeorm';
 import {
   NotFoundException,
   BadRequestException,
@@ -12,7 +12,6 @@ import { Readable } from 'stream';
 import { ShareService } from './share.service';
 import { ShareLink, ShareTargetType, ShareLinkStatus } from '../common/entities/share-link.entity';
 import { File } from '../common/entities/file.entity';
-import { Folder } from '../common/entities/folder.entity';
 import { AuditService } from '../common/services/audit.service';
 import { SharePasswordService } from './share-password.service';
 import { FileService } from '../file/file.service';
@@ -77,6 +76,7 @@ const mockRepo = () => ({
   find: jest.fn(),
   findAndCount: jest.fn(),
   save: jest.fn().mockResolvedValue(undefined),
+  update: jest.fn().mockResolvedValue({ affected: 1 }),
   create: jest.fn((entity: any) => entity),
   createQueryBuilder: jest.fn(() => ({
     update: jest.fn().mockReturnThis(),
@@ -138,7 +138,7 @@ describe('ShareService', () => {
         ShareService,
         { provide: getRepositoryToken(ShareLink), useValue: shareLinkRepo },
         { provide: getRepositoryToken(File), useValue: fileRepo },
-        { provide: getRepositoryToken(Folder), useValue: folderRepo },
+        { provide: getDataSourceToken(), useValue: { getTreeRepository: jest.fn().mockReturnValue(folderRepo) } },
         { provide: AuditService, useValue: auditService },
         { provide: SharePasswordService, useValue: passwordService },
         { provide: FileService, useValue: fileService },
@@ -471,8 +471,9 @@ describe('ShareService', () => {
   describe('updateShare', () => {
     it('应成功更新密码', async () => {
       const link = makeShareLink({ password: null });
-      shareLinkRepo.findOne.mockResolvedValue(link);
-      shareLinkRepo.save.mockImplementation((l: ShareLink) => Promise.resolve(l));
+      shareLinkRepo.findOne
+        .mockResolvedValueOnce(link)
+        .mockImplementation(async () => ({ ...link, password: 'new-hash' }));
 
       const result = await service.updateShare('share-uuid-1', 'user-uuid-1', {
         password: 'newpassword',
@@ -484,8 +485,9 @@ describe('ShareService', () => {
 
     it('应成功清除密码（设为空字符串）', async () => {
       const link = makeShareLink({ password: 'old-hash' });
-      shareLinkRepo.findOne.mockResolvedValue(link);
-      shareLinkRepo.save.mockImplementation((l: ShareLink) => Promise.resolve(l));
+      shareLinkRepo.findOne
+        .mockResolvedValueOnce(link)
+        .mockImplementation(async () => ({ ...link, password: null }));
 
       const result = await service.updateShare('share-uuid-1', 'user-uuid-1', {
         password: '',
@@ -500,8 +502,9 @@ describe('ShareService', () => {
         currentAccessCount: 5,
         status: ShareLinkStatus.EXHAUSTED,
       });
-      shareLinkRepo.findOne.mockResolvedValue(link);
-      shareLinkRepo.save.mockImplementation((l: ShareLink) => Promise.resolve(l));
+      shareLinkRepo.findOne
+        .mockResolvedValueOnce(link)
+        .mockImplementation(async () => ({ ...link, maxAccessCount: 100, status: ShareLinkStatus.ACTIVE }));
 
       const result = await service.updateShare('share-uuid-1', 'user-uuid-1', {
         maxAccessCount: 100,
@@ -589,18 +592,21 @@ describe('ShareService', () => {
     it('已过期链接应抛出 NotFoundException 并更新状态', async () => {
       const past = new Date(Date.now() - 2 * 3600 * 1000);
       const link = makeShareLink({ expiresIn: 1, expiresStartAt: past });
-      shareLinkRepo.save.mockResolvedValue(undefined);
-
       await expect(service.assertShareUsablePublic(link)).rejects.toThrow('分享已过期');
-      expect(link.status).toBe(ShareLinkStatus.EXPIRED);
+      expect(shareLinkRepo.update).toHaveBeenCalledWith(
+        { id: link.id, status: ShareLinkStatus.ACTIVE },
+        { status: ShareLinkStatus.EXPIRED },
+      );
     });
 
     it('访问次数耗尽应抛出 NotFoundException 并更新状态', async () => {
       const link = makeShareLink({ maxAccessCount: 5, currentAccessCount: 5 });
-      shareLinkRepo.save.mockResolvedValue(undefined);
 
       await expect(service.assertShareUsablePublic(link)).rejects.toThrow('分享访问次数已耗尽');
-      expect(link.status).toBe(ShareLinkStatus.EXHAUSTED);
+      expect(shareLinkRepo.update).toHaveBeenCalledWith(
+        { id: link.id, status: ShareLinkStatus.ACTIVE },
+        { status: ShareLinkStatus.EXHAUSTED },
+      );
     });
   });
 

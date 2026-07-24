@@ -483,7 +483,11 @@ export class FileCacheService {
    * @param sourcePath 源文件路径
    * @param expectedSize 期望的文件大小，用于拷贝后验证
    */
-  async cacheFileFromPath(fileId: string, sourcePath: string, expectedSize: number): Promise<void> {
+  async cacheFileFromPath(
+    fileId: string,
+    sourcePath: string,
+    expectedSize: number,
+  ): Promise<{ cached: boolean; reason?: string }> {
     this.validateFileId(fileId);
 
     // 缓存总大小检查：超限时尝试 LRU 淘汰
@@ -494,8 +498,9 @@ export class FileCacheService {
       await this.evictLRU(needFree);
       const newTotal = await this.getTotalCacheSize();
       if (newTotal + expectedSize > this.maxCacheSizeBytes) {
-        this.logger.warn(`LRU 淘汰后仍超限，跳过缓存 ${fileId}`);
-        return;
+        const reason = 'LRU 淘汰后缓存空间仍不足';
+        this.logger.warn(`${reason}，跳过缓存 ${fileId}`);
+        return { cached: false, reason };
       }
     }
 
@@ -504,8 +509,9 @@ export class FileCacheService {
       this.logger.warn(`磁盘空间不足，尝试 LRU 淘汰`);
       await this.evictLRU(this.minFreeDiskBytes);
       if (!this.hasEnoughDiskSpace()) {
-        this.logger.warn(`磁盘剩余空间仍不足，跳过缓存 ${fileId}`);
-        return;
+        const reason = '磁盘剩余空间不足';
+        this.logger.warn(`${reason}，跳过缓存 ${fileId}`);
+        return { cached: false, reason };
       }
     }
 
@@ -522,14 +528,18 @@ export class FileCacheService {
       const stat = await fsp.stat(tmpPath);
       if (stat.size !== expectedSize) {
         await fsp.unlink(tmpPath).catch(() => {});
-        this.logger.warn(`缓存文件大小不一致 ${fileId}: 期望 ${expectedSize}, 实际 ${stat.size}`);
-        return;
+        const reason = `缓存文件大小不一致: 期望 ${expectedSize}, 实际 ${stat.size}`;
+        this.logger.warn(`${fileId}: ${reason}`);
+        return { cached: false, reason };
       }
       await fsp.rename(tmpPath, cachePath);
       this.logger.log(`缓存预热完成: ${fileId} (${(stat.size / 1024 / 1024).toFixed(1)}MB)`);
+      return { cached: true };
     } catch (err) {
       await fsp.unlink(tmpPath).catch(() => {});
-      this.logger.warn(`缓存预热失败 ${fileId}: ${(err as Error).message}`);
+      const reason = (err as Error).message;
+      this.logger.warn(`缓存预热失败 ${fileId}: ${reason}`);
+      return { cached: false, reason };
     }
   }
 

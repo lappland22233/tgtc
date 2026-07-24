@@ -56,14 +56,14 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue';
+import { ref, computed, onMounted, watch } from 'vue';
 import { useRoute } from 'vue-router';
 import PasswordPrompt from './PasswordPrompt.vue';
 import FileShareCard from './FileShareCard.vue';
 import FolderShareBrowser from './FolderShareBrowser.vue';
 
 const route = useRoute();
-const token = route.params.token as string;
+const token = computed(() => String(route.params.token || ''));
 
 interface FileInfo {
   id: string;
@@ -125,7 +125,7 @@ async function fetchInfo() {
   try {
     // 后端 ShareController 从 query 参数 ?access=... 读取 accessJwt，
     // 不使用 Authorization header（避免与认证 JWT 混淆）
-    const url = `/api/s/${encodeURIComponent(token)}` +
+    const url = `/api/s/${encodeURIComponent(token.value)}` +
       (accessJwt.value ? `?access=${encodeURIComponent(accessJwt.value)}` : '');
     const res = await fetch(url);
     const data = await res.json();
@@ -177,7 +177,7 @@ async function onPasswordSubmit(pwd: string) {
   passwordError.value = '';
   verifying.value = true;
   try {
-    const res = await fetch(`/api/s/${encodeURIComponent(token)}/verify`, {
+    const res = await fetch(`/api/s/${encodeURIComponent(token.value)}/verify`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ password: pwd }),
@@ -198,6 +198,13 @@ async function onPasswordSubmit(pwd: string) {
 }
 
 onMounted(fetchInfo);
+watch(token, async () => {
+  accessJwt.value = null;
+  passwordError.value = '';
+  verifying.value = false;
+  state.value = { kind: 'loading' };
+  await fetchInfo();
+});
 </script>
 
 <style scoped>

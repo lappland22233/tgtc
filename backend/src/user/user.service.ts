@@ -5,6 +5,8 @@ import * as bcrypt from 'bcryptjs';
 import { User, UserRole } from '../common/entities/user.entity';
 import { File } from '../common/entities/file.entity';
 import { FileAccessLog } from '../common/entities/file-access-log.entity';
+import { Folder } from '../common/entities/folder.entity';
+import { ShareLink, ShareLinkStatus } from '../common/entities/share-link.entity';
 import { AuditService } from '../common/services/audit.service';
 import { BCRYPT_ROUNDS } from '../common/constants/bcrypt';
 
@@ -141,11 +143,22 @@ export class UserService {
         throw new ForbiddenException('无权删除其他管理员');
       }
 
-      // 事务内：软删除用户的所有文件
+      const now = new Date();
+      // 用户删除后所有公开入口必须立即失效，关联数据保留以便审计和恢复。
+      await queryRunner.manager.update(
+        ShareLink,
+        { creatorId: id, isDeleted: false },
+        { isDeleted: true, status: ShareLinkStatus.DISABLED },
+      );
+      await queryRunner.manager.update(
+        Folder,
+        { ownerId: id, isDeleted: false },
+        { isDeleted: true, deleteRequestedAt: now, deleteScheduledAt: now },
+      );
       await queryRunner.manager.update(
         File,
         { uploaderId: id, isDeleted: false },
-        { isDeleted: true },
+        { isDeleted: true, deleteRequestedAt: now, deleteScheduledAt: now },
       );
 
       // 事务内：软删除用户（保留用户行）。

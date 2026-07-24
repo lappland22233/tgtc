@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, TreeRepository, Not, IsNull, In } from 'typeorm';
+import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
+import { Repository, TreeRepository, DataSource, Not, IsNull, In } from 'typeorm';
 import { Folder } from '../common/entities/folder.entity';
 import { File } from '../common/entities/file.entity';
 import { AuditService } from '../common/services/audit.service';
@@ -21,19 +21,19 @@ const MAX_FOLDER_DEPTH = 20;
  * 3. 软删除联动子树 + 内含文件，沿用 files 表的 7 天延迟机制。
  * 4. 文件移动到 null folderId = 网盘根目录。
  *
- * 注意：注入 TreeRepository 的方式 —— NestJS @nestjs/typeorm v10 不再导出
- * InjectTreeRepository 装饰器；使用 @InjectRepository + 类型断言，
- * TypeORM 会根据 entity 的 @Tree 装饰器自动返回 TreeRepository 实例。
  */
 @Injectable()
 export class FolderService {
+  private readonly folderRepo: TreeRepository<Folder>;
+
   constructor(
-    @InjectRepository(Folder)
-    private readonly folderRepo: TreeRepository<Folder>,
+    @InjectDataSource() dataSource: DataSource,
     @InjectRepository(File)
     private readonly fileRepo: Repository<File>,
     private readonly audit: AuditService,
-  ) {}
+  ) {
+    this.folderRepo = dataSource.getTreeRepository(Folder);
+  }
 
   // ---------- 查询方法 ----------
 

@@ -300,7 +300,7 @@ describe('AdminService', () => {
       );
     });
 
-    it('临时封禁未提供 expiresAt 时应为 null', async () => {
+    it('临时封禁未提供 expiresAt 时应拒绝', async () => {
       const user = makeUser();
       const mockQB1 = {
         where: jest.fn().mockReturnThis(),
@@ -316,11 +316,9 @@ describe('AdminService', () => {
         .mockReturnValueOnce(mockQB1)
         .mockReturnValueOnce(mockQB2);
 
-      await service.banIP(user, '1.2.3.4', undefined, false);
-
-      expect(bannedIPRepo.create).toHaveBeenCalledWith(
-        expect.objectContaining({ ip: '1.2.3.4', isPermanent: false, expiresAt: null }),
-      );
+      await expect(service.banIP(user, '1.2.3.4', undefined, false))
+        .rejects.toThrow('临时封禁必须提供未来的 expiresAt');
+      expect(bannedIPRepo.create).not.toHaveBeenCalled();
     });
   });
 

@@ -180,6 +180,7 @@ export class AuthService {
     const bannedIP = await this.bannedIPRepository
       .createQueryBuilder('bannedIP')
       .where('bannedIP.ip = :ip', { ip })
+      .andWhere('bannedIP.unbannedAt IS NULL')
       .andWhere(
         '(bannedIP.isPermanent = true OR (bannedIP.isPermanent = false AND bannedIP.expiresAt > :now))',
         { now },

@@ -9,8 +9,8 @@ import { TelegramService } from '../telegram/telegram.service';
 import { createReadStream, existsSync } from 'fs';
 import { unlink } from 'fs/promises';
 
-/** 单次上传的超时时间（毫秒）：Telegram 无响应时避免无限占用并发槽位 */
-const UPLOAD_TIMEOUT_MS = 5 * 60 * 1000;
+/** 与 TelegramService 的大型文件上传窗口保持一致，避免 Processor 提前中止有效上传。 */
+const UPLOAD_TIMEOUT_MS = 15 * 60 * 1000;
 
 @Injectable()
 @Processor(QUEUE_NAMES.FILE_UPLOAD)

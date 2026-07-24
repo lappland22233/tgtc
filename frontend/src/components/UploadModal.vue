@@ -151,6 +151,7 @@ const isMobile = useMobile();
 const props = defineProps<{
   visible: boolean;
   initialFiles?: File[];
+  folderId?: string | null;
 }>();
 const emit = defineEmits<{
   close: [];
@@ -450,6 +451,8 @@ async function uploadFiles(files: File[]) {
           }
         },
         abortController.signal,
+        undefined,
+        props.folderId,
       );
       entry.status = 'success';
       successList.push({ id: result.id, originalName: result.originalName });
@@ -500,6 +503,7 @@ async function uploadFiles(files: File[]) {
           }
         },
         abortController.signal,
+        props.folderId,
       );
       if (entry) entry.status = 'success';
       successList.push({ id: result.id, originalName: result.originalName });

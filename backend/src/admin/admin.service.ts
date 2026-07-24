@@ -199,6 +199,9 @@ export class AdminService {
   }
 
   async banIP(user: User, ip: string, reason?: string, permanent = true, expiresAt?: Date): Promise<void> {
+    if (!permanent && (!expiresAt || !Number.isFinite(expiresAt.getTime()) || expiresAt <= new Date())) {
+      throw new BadRequestException('临时封禁必须提供未来的 expiresAt');
+    }
     // 检查是否已有活跃封禁记录（unbannedAt 为空）
     const existing = await this.bannedIPRepository
       .createQueryBuilder('b')

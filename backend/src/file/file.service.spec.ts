@@ -130,7 +130,7 @@ describe('FileService', () => {
     telegramService = {
       uploadFile: jest.fn(),
       getFileStream: jest.fn(),
-      deleteFile: jest.fn(),
+      deleteFile: jest.fn().mockResolvedValue(true),
     };
 
     fileCacheService = {
@@ -391,7 +391,7 @@ describe('FileService', () => {
       });
       fileRepo.findOne.mockResolvedValue(file);
       fileRepo.count.mockResolvedValue(0);
-      telegramService.deleteFile.mockResolvedValue(undefined);
+      telegramService.deleteFile.mockResolvedValue(true);
       accessLogRepo.delete.mockResolvedValue(undefined);
       fileRepo.remove.mockResolvedValue(file);
 
@@ -410,7 +410,7 @@ describe('FileService', () => {
       const file = makeFile({ uploaderId: user.id });
       fileRepo.findOne.mockResolvedValue(file);
       fileRepo.count.mockResolvedValue(0);
-      telegramService.deleteFile.mockResolvedValue(undefined);
+      telegramService.deleteFile.mockResolvedValue(true);
       accessLogRepo.delete.mockResolvedValue(undefined);
       fileRepo.remove.mockResolvedValue(file);
 

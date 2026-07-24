@@ -361,7 +361,7 @@
     </div>
 
     <!-- 上传弹窗 -->
-    <UploadModal :visible="showUploadModal" :initial-files="dropFiles" @close="handleUploadModalClose" @uploaded="onUploaded" />
+    <UploadModal :visible="showUploadModal" :initial-files="dropFiles" :folder-id="folderStore.currentFolderId" @close="handleUploadModalClose" @uploaded="onUploaded" />
 
     <!-- 标签管理弹窗 -->
     <TagManager v-model:visible="showTagManager" :selected-tag-ids="selectedTagIds" @filter="handleTagManagerFilter" />

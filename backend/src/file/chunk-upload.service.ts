@@ -24,6 +24,7 @@ interface ChunkSession {
   totalChunks: number;
   chunkSize: number;
   uploadedBy: string;
+  folderId: string | null;
   createdAt: Date;
   /** 最后一次活动时间（分片上传/状态查询/合并触发时更新） */
   lastActivityAt: Date;
@@ -104,6 +105,7 @@ export class ChunkUploadService implements OnModuleInit {
     totalChunks: number,
     chunkSize: number,
     userId: string,
+    folderId?: string | null,
   ): Promise<{ uploadId: string }> {
     // 文件大小上限校验：结合动态 MAX_FILE_SIZE，防止绕过限制写满磁盘（DoS）
     const maxFileSize = await this.fileService.getMaxFileSize();
@@ -136,6 +138,7 @@ export class ChunkUploadService implements OnModuleInit {
       totalChunks,
       chunkSize,
       uploadedBy: userId,
+      folderId: folderId ?? null,
       createdAt: now,
       lastActivityAt: now,
       mergeStatus: 'pending',
@@ -440,23 +443,30 @@ export class ChunkUploadService implements OnModuleInit {
       { id: session.uploadedBy } as User,
       undefined,   // tagIds
       true,        // skipTypeCheck
+      session.folderId,
     );
 
     const pendingDir = path.resolve(process.cwd(), 'tmp', 'uploads', 'pending');
     fs.mkdirSync(pendingDir, { recursive: true });
     const pendingPath = path.join(pendingDir, savedFile.id);
-    await fsp.copyFile(mergedPath, pendingPath);
-
-    await this.fileUploadQueue.add(
-      'upload',
-      { fileId: savedFile.id, filePath: pendingPath },
-      {
-        attempts: 3,
-        backoff: { type: 'exponential', delay: 10000 },
-        removeOnComplete: 100,
-        removeOnFail: 50,
-      },
-    );
+    try {
+      await fsp.copyFile(mergedPath, pendingPath);
+      await this.fileService.warmProcessingFileCache(savedFile.id, pendingPath, fileSize);
+      await this.fileUploadQueue.add(
+        'upload',
+        { fileId: savedFile.id, filePath: pendingPath },
+        {
+          attempts: 3,
+          backoff: { type: 'exponential', delay: 10000 },
+          removeOnComplete: 100,
+          removeOnFail: 50,
+        },
+      );
+    } catch (error) {
+      await fsp.unlink(pendingPath).catch(() => {});
+      await this.fileService.rollbackProcessingFile(savedFile.id);
+      throw error;
+    }
 
     this.logger.log(`[分片上传] ${session.uploadId} 已入队后台上传: ${savedFile.id}`);
 
@@ -472,13 +482,16 @@ export class ChunkUploadService implements OnModuleInit {
     }, CHUNK_CLEANUP_DELAY_MS); // 允许客户端查询结果
   }
 
-  /** 取消上传并清理 */
+  /** 取消尚未开始合并的上传；活动合并由后台任务独占工作目录。 */
   async abort(uploadId: string, userId: string): Promise<void> {
     const session = this.sessions.get(uploadId);
     if (!session) return; // 已清理，幂等
 
     if (session.uploadedBy !== userId) {
       throw new ForbiddenException('无权操作此上传会话');
+    }
+    if (session.mergeStatus === 'merging' || session.mergeStatus === 'uploading') {
+      throw new BadRequestException('文件已进入后台合并，不能直接取消；请稍后查看文件列表');
     }
 
     this.sessions.delete(uploadId);

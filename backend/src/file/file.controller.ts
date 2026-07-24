@@ -124,6 +124,7 @@ export class FileController {
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
     @Body('tagIds') tagIdsRaw?: any,
+    @Body('folderId') folderId?: string,
   ) {
     req.setTimeout(0);
     res.setTimeout(0);
@@ -132,7 +133,7 @@ export class FileController {
     }
     const tagIds = parseTagIdsBody(tagIdsRaw);
     if (tagIds?.length) await this.tagService.assertOwner(user.id, tagIds);
-    return this.fileService.uploadAsync(file, user, tagIds);
+    return this.fileService.uploadAsync(file, user, tagIds, folderId || null);
   }
 
   /**
