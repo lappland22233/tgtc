@@ -6,6 +6,7 @@ import { Request } from 'express';
 import { AuthService } from './auth.service';
 import { UserRole } from '../common/entities/user.entity';
 import { ConfigCacheService } from '../common/services/config-cache.service';
+import { JwtRevocationService } from './jwt-revocation.service';
 
 /** JWT 载荷类型定义，替代 any 以保留类型安全（运行时仍做防御性校验） */
 interface JwtPayload {
@@ -33,6 +34,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     configService: ConfigService,
     private authService: AuthService,
     private configCacheService: ConfigCacheService,
+    private jwtRevocationService: JwtRevocationService,
   ) {
     // TOKEN_EXTRACTION_MODE 控制 Token 提取方式：
     // - 'cookie_only'：仅从 Cookie 提取（推荐生产环境，缩小攻击面）
@@ -64,6 +66,9 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
 
     if (!payload.sub || typeof payload.sub !== 'string') {
       throw new UnauthorizedException('Token 缺少有效的用户标识');
+    }
+    if (!payload.jti || await this.jwtRevocationService.isRevoked(payload.jti)) {
+      throw new UnauthorizedException('Token 已吊销或缺少唯一标识');
     }
 
     if (!payload.email || typeof payload.email !== 'string') {

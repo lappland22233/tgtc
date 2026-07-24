@@ -155,7 +155,7 @@ export class ChunkUploadService implements OnModuleInit {
   async saveChunk(uploadId: string, chunkIndex: number, buffer: Buffer, userId: string): Promise<void> {
     const session = this.getSession(uploadId, userId);
 
-    if (chunkIndex < 0 || chunkIndex >= session.totalChunks) {
+    if (!Number.isInteger(chunkIndex) || chunkIndex < 0 || chunkIndex >= session.totalChunks) {
       throw new BadRequestException(`分片索引 ${chunkIndex} 超出范围 [0, ${session.totalChunks - 1}]`);
     }
 
@@ -177,6 +177,33 @@ export class ChunkUploadService implements OnModuleInit {
     // 原子写入：先写临时文件，再 rename
     const tmpPath = filePath + '.tmp';
     await fsp.writeFile(tmpPath, buffer);
+    await fsp.rename(tmpPath, filePath);
+  }
+
+  /** 从 Multer 磁盘临时文件流式保存分片，避免大 Buffer 常驻内存。 */
+  async saveChunkFromPath(
+    uploadId: string,
+    chunkIndex: number,
+    sourcePath: string,
+    size: number,
+    userId: string,
+  ): Promise<void> {
+    const session = this.getSession(uploadId, userId);
+    if (!Number.isInteger(chunkIndex) || chunkIndex < 0 || chunkIndex >= session.totalChunks) {
+      throw new BadRequestException(`分片索引 ${chunkIndex} 超出范围 [0, ${session.totalChunks - 1}]`);
+    }
+    if (!Number.isSafeInteger(size) || size <= 0 || size > session.chunkSize) {
+      throw new BadRequestException(`分片大小 ${size} 非法或超过声明的 chunkSize ${session.chunkSize}`);
+    }
+    session.lastActivityAt = new Date();
+    const filePath = path.join(this.getChunkDir(uploadId), String(chunkIndex));
+    const tmpPath = filePath + '.tmp';
+    await pipelineAsync(createReadStream(sourcePath), createWriteStream(tmpPath));
+    const stat = await fsp.stat(tmpPath);
+    if (stat.size !== size) {
+      await fsp.unlink(tmpPath).catch(() => {});
+      throw new BadRequestException('分片写入大小校验失败');
+    }
     await fsp.rename(tmpPath, filePath);
   }
 

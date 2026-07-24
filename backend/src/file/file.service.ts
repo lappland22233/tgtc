@@ -433,6 +433,7 @@ export class FileService implements OnModuleInit {
       size: file.size,
       telegramFileId: telegramFile.file_id,
       telegramFilePath: telegramFile.file_path || '',
+      telegramMessageId: telegramFile.message_id,
       uploaderId: user.id,
       accessType: FileAccessType.PUBLIC,
       maxAccessCount: this.accessCountDefault,
@@ -873,15 +874,18 @@ export class FileService implements OnModuleInit {
    * 用于「复制副本」场景：副本与原件共享同一 telegramFileId，删除其一时不能连带
    * 删除 Telegram 文件，否则另一条记录会失效。删除失败时向上抛错，由调用方决定重试。
    */
-  private async deleteTelegramFileIfUnreferenced(telegramFileId: string, excludeFileId: string): Promise<void> {
+  private async deleteTelegramFileIfUnreferenced(file: File): Promise<void> {
     const otherRefs = await this.fileRepository.count({
-      where: { telegramFileId, id: Not(excludeFileId) },
+      where: { telegramFileId: file.telegramFileId, id: Not(file.id) },
     });
     if (otherRefs > 0) {
-      this.logger.log(`Telegram 文件仍被 ${otherRefs} 条记录引用，跳过删除: ${telegramFileId}`);
+      this.logger.log(`Telegram 文件仍被 ${otherRefs} 条记录引用，跳过删除: ${file.telegramFileId}`);
       return;
     }
-    await this.telegramService.deleteFile(telegramFileId);
+    if (!file.telegramMessageId) {
+      throw new Error('缺少 Telegram message_id，无法安全删除远端消息');
+    }
+    await this.telegramService.deleteFile(file.telegramMessageId);
   }
 
   async forceDelete(id: string, user: User): Promise<void> {
@@ -896,14 +900,9 @@ export class FileService implements OnModuleInit {
     // 安全校验：只能强制删除自己上传的文件或管理员/超级管理员可删所有
     this.assertFileWritable(file, user);
 
-    // 从 Telegram 删除（忽略错误，避免阻塞）；若该文件被副本引用则跳过
+    // 远端删除失败时保留数据库记录，避免生成无法追踪的 Telegram 孤儿文件。
     if (file.telegramFileId) {
-      try {
-        await this.deleteTelegramFileIfUnreferenced(file.telegramFileId, file.id);
-      } catch (error: unknown) {
-        const errMsg = error instanceof Error ? error.message : '未知错误';
-        this.logger.warn(`强制删除文件时 Telegram 删除失败: ${file.originalName}, 错误: ${errMsg}`);
-      }
+      await this.deleteTelegramFileIfUnreferenced(file);
     }
 
     // 先清理关联的访问日志（外键约束）
@@ -913,7 +912,7 @@ export class FileService implements OnModuleInit {
     this.deleteLocalThumbnail(file);
 
     // 清理本地文件缓存
-    this.fileCacheService.invalidate(file.id);
+    await this.fileCacheService.invalidate(file.id);
 
     // 硬删除文件记录
     await this.fileRepository.remove(file);
@@ -973,7 +972,7 @@ export class FileService implements OnModuleInit {
           // 不再「Telegram 删除失败仍删库」，避免 Telegram 侧孤儿文件永久泄漏。
           // 若该文件被副本引用则跳过 Telegram 删除（仅删本条记录）。
           if (file.telegramFileId) {
-            await this.deleteTelegramFileIfUnreferenced(file.telegramFileId, file.id);
+            await this.deleteTelegramFileIfUnreferenced(file);
           }
           this.deleteLocalThumbnail(file);
           await this.accessLogRepository.delete({ fileId: file.id });
@@ -1165,6 +1164,7 @@ export class FileService implements OnModuleInit {
       size: source.size,
       telegramFileId: source.telegramFileId,
       telegramFilePath: source.telegramFilePath,
+      telegramMessageId: source.telegramMessageId,
       thumbnailPath: null,
       folderId: folderId ?? null,
       accessType: source.accessType,
@@ -1540,17 +1540,19 @@ export class FileService implements OnModuleInit {
       throw new ForbiddenException('访问次数已用尽或文件不存在');
     }
 
-    // 尝试从本地缓存获取（二次访问加速，减少 Telegram API 调用）
-    const cachedStream = this.fileCacheService.getCachedReadStream(file.id, Number(file.size));
-
     // 缓存未命中且文件仍在处理中（TG 未同步）→ 拒绝下载，避免用临时 UUID 回源
+    const cachedStream = this.fileCacheService.getCachedReadStream(file.id, Number(file.size));
     if (!cachedStream && file.status === 'processing') {
       throw new BadRequestException('文件正在处理中，请稍后刷新重试');
     }
 
     const { stream } = cachedStream
       ? { stream: cachedStream }
-      : { stream: (await this.telegramService.getFileStream(file.telegramFileId || file.filename)).stream };
+      : await this.fileCacheService.getOrCacheStream(
+        file.id,
+        Number(file.size),
+        () => this.telegramService.getFileStream(file.telegramFileId || file.filename),
+      );
 
     // 写访问日志（responseSize 先占位为 0，流式传输完成后由 controller 更新为实际字节数）
     let accessLogId: string | undefined;
@@ -2136,6 +2138,7 @@ export class FileService implements OnModuleInit {
       size: file.size,
       telegramFileId: telegramFile.file_id,
       telegramFilePath: telegramFile.file_path || '',
+      telegramMessageId: telegramFile.message_id,
       uploaderId: user.id,
       accessType: FileAccessType.PUBLIC,
       maxAccessCount: this.accessCountDefault,
@@ -2248,6 +2251,49 @@ export class FileService implements OnModuleInit {
     }
   }
 
+  async getRangeStreamForShareDownload(id: string, rangeHeader: string, ip?: string): Promise<
+    | { kind: 'unavailable'; total: number }
+    | { kind: 'invalid'; total: number }
+    | {
+      kind: 'range'; stream: Readable; contentType: string; filename: string;
+      size: number; start: number; end: number; total: number; accessLogId?: string;
+    }
+  > {
+    const file = await this.fileRepository.findOne({ where: { id, isDeleted: false } });
+    if (!file) throw new NotFoundException('文件不存在');
+    const total = Number(file.size);
+    const match = rangeHeader.match(/^bytes=(\d+)-(\d*)$/);
+    if (!match) return { kind: 'invalid', total };
+    const start = Number(match[1]);
+    const requestedEnd = match[2] ? Number(match[2]) : total - 1;
+    const end = Math.min(requestedEnd, total - 1);
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(requestedEnd) || start >= total || start > end) {
+      return { kind: 'invalid', total };
+    }
+    const cachedPath = this.fileCacheService.getCachedPath(file.id);
+    if (!cachedPath || file.status === 'processing') return { kind: 'unavailable', total };
+
+    let accessLogId: string | undefined;
+    try {
+      const saved = await this.accessLogRepository.save({
+        fileId: id, ip: ip || '', action: 'share_download', uploaderId: file.uploaderId, responseSize: 0,
+      });
+      accessLogId = saved.id;
+    } catch { /* 日志失败不影响下载 */ }
+    const contentType = file.mimeType || 'application/octet-stream';
+    return {
+      kind: 'range',
+      stream: createReadStream(cachedPath, { start, end }),
+      contentType,
+      filename: this.ensureFileExtension(file.originalName, contentType),
+      size: end - start + 1,
+      start,
+      end,
+      total,
+      accessLogId,
+    };
+  }
+
   /**
    * 为分享链接下载流式返回文件内容（Phase 2 新增）。
    *
@@ -2272,10 +2318,11 @@ export class FileService implements OnModuleInit {
       throw new NotFoundException('文件不存在');
     }
 
-    const cachedStream = this.fileCacheService.getCachedReadStream(file.id, Number(file.size));
-    const { stream, info } = cachedStream
-      ? { stream: cachedStream, info: { file_id: file.telegramFileId, file_path: '', file_size: Number(file.size) } }
-      : await this.telegramService.getFileStream(file.telegramFileId || file.filename);
+    const { stream } = await this.fileCacheService.getOrCacheStream(
+      file.id,
+      Number(file.size),
+      () => this.telegramService.getFileStream(file.telegramFileId || file.filename),
+    );
 
     let accessLogId: string | undefined;
     try {
@@ -2295,8 +2342,7 @@ export class FileService implements OnModuleInit {
     const isInline = /^(image|video|audio)\//.test(mimeType);
     const filename = this.ensureFileExtension(file.originalName, mimeType);
 
-    const actualSize = info.file_size > 0 ? info.file_size : Number(file.size);
-    return { stream, contentType: mimeType, filename, size: actualSize, isInline, accessLogId };
+    return { stream, contentType: mimeType, filename, size: Number(file.size), isInline, accessLogId };
   }
 
   /**
@@ -2333,9 +2379,13 @@ export class FileService implements OnModuleInit {
       throw new NotFoundException('文件不存在');
     }
 
-    // 仅公开文件支持直链
-    if (file.accessType !== FileAccessType.PUBLIC) {
+    // 直链仅允许无密码、无次数限制且未过期的公开文件；受限文件必须走 ShareLink 授权流程。
+    if (file.accessType !== FileAccessType.PUBLIC || file.password || file.maxAccessCount > 0) {
       return null;
+    }
+    if (file.expiresIn !== null && file.expiresIn !== undefined && file.expiresStartAt) {
+      const expiresAt = new Date(file.expiresStartAt.getTime() + file.expiresIn * 3600 * 1000);
+      if (new Date() > expiresAt) return null;
     }
 
     const mimeType = file.mimeType || 'application/octet-stream';

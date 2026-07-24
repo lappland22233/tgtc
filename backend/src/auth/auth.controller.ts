@@ -2,6 +2,8 @@ import { Controller, Post, Body, Get, UseGuards, Req, Res } from '@nestjs/common
 import { AuthGuard } from '@nestjs/passport';
 import { Request, Response } from 'express';
 import { AuthService } from './auth.service';
+import { JwtService } from '@nestjs/jwt';
+import { JwtRevocationService } from './jwt-revocation.service';
 import { RegisterDto, LoginDto, VerifyEmailDto, SendCodeDto, ResetPasswordDto } from './auth.dto';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { User } from '../common/entities/user.entity';
@@ -21,7 +23,11 @@ const getCookieOptions = (req: Request) => ({
 
 @Controller('auth')
 export class AuthController {
-  constructor(private authService: AuthService) {}
+  constructor(
+    private authService: AuthService,
+    private jwtService: JwtService,
+    private jwtRevocationService: JwtRevocationService,
+  ) {}
 
   @Post('register')
   async register(@Body() registerDto: RegisterDto, @Req() req: Request, @Res({ passthrough: true }) res: Response) {
@@ -45,6 +51,15 @@ export class AuthController {
 
   @Post('logout')
   async logout(@Req() req: Request, @Res({ passthrough: true }) res: Response) {
+    const authorization = req.headers.authorization;
+    const token = req.cookies?.access_token
+      || (authorization?.startsWith('Bearer ') ? authorization.slice(7) : undefined);
+    if (typeof token === 'string') {
+      const payload = this.jwtService.decode(token) as { jti?: string; exp?: number } | null;
+      if (payload?.jti && payload.exp) {
+        await this.jwtRevocationService.revoke(payload.jti, new Date(payload.exp * 1000));
+      }
+    }
     res.clearCookie('access_token', getCookieOptions(req));
     return { message: '登出成功' };
   }

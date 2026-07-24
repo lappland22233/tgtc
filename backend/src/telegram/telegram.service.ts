@@ -135,6 +135,7 @@ export class TelegramService {
     file_id: string;
     file_path: string;
     file_size: number;
+    message_id: string;
   }> {
     // 流式上传：form-data 支持 Readable stream，使用 knownLength 避免一次性读入内存
     const isStream = file instanceof Readable;
@@ -168,8 +169,9 @@ export class TelegramService {
         throw new Error('Telegram sendDocument 响应缺少 document.file_id，可能文件格式不被支持');
       }
 
-      // sendDocument 返回的 file_path 不可靠，需二次调用 getFile 获取真实路径
-      return this.getFileInfo(file_id);
+      // sendDocument 返回的 file_path 不可靠，需二次调用 getFile 获取真实路径；保留 message_id 用于删除消息。
+      const info = await this.getFileInfo(file_id);
+      return { ...info, message_id: String(result.message_id) };
     }, 'uploadFile', retries);
   }
 

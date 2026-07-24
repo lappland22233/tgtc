@@ -1,8 +1,8 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { OnEvent } from '@nestjs/event-emitter';
-import { Readable } from 'stream';
-import { createReadStream } from 'fs';
+import { PassThrough, Readable } from 'stream';
+import { createReadStream, createWriteStream } from 'fs';
 import { promises as fsp } from 'fs';
 import * as path from 'path';
 import { ConfigCacheService } from '../common/services/config-cache.service';
@@ -31,6 +31,11 @@ export class FileCacheService {
 
   /** 文件最近访问时间追踪 (fileId → lastAccessTimestamp)，用于 LRU 淘汰 */
   private readonly fileAccessMap = new Map<string, number>();
+
+  /** 同一文件的回源请求去重，避免并发写入同一缓存文件。 */
+  private readonly inflight = new Map<string, Promise<void>>();
+  /** 串行化容量检查与原子发布，避免跨文件并发突破缓存上限。 */
+  private capacityChain: Promise<void> = Promise.resolve();
 
   constructor(private readonly configCache: ConfigCacheService) {
     this.cacheDir = path.resolve(process.cwd(), 'tmp', 'Cache');
@@ -267,6 +272,130 @@ export class FileCacheService {
   }
 
   /**
+   * 获取缓存流；未命中时回源并将数据同时写入客户端和本地缓存。
+   * 首次回源保持真流式，成功后才通过原子 rename 发布缓存。
+   */
+  async getOrCacheStream(
+    fileId: string,
+    expectedSize: number,
+    fetchFn: () => Promise<{ stream: Readable; info: { file_id: string; file_path: string; file_size: number } }>,
+  ): Promise<{ stream: Readable; fromCache: boolean }> {
+    this.validateFileId(fileId);
+
+    const cachedStream = this.getCachedReadStream(fileId, expectedSize);
+    if (cachedStream) return { stream: cachedStream, fromCache: true };
+
+    const existing = this.inflight.get(fileId);
+    if (existing) {
+      await existing;
+      const stream = this.getCachedReadStream(fileId, expectedSize);
+      if (!stream) throw new Error(`文件缓存建立失败: ${fileId}`);
+      return { stream, fromCache: true };
+    }
+
+    const pass = new PassThrough();
+    const completion = (async () => {
+      try {
+        const fetched = await fetchFn();
+        await this.populateCache(fileId, expectedSize, fetched.stream, pass);
+      } catch (err) {
+        pass.destroy(err as Error);
+        throw err;
+      }
+    })();
+    this.inflight.set(fileId, completion);
+    completion.finally(() => this.inflight.delete(fileId)).catch(() => {});
+    return { stream: pass, fromCache: false };
+  }
+
+  private async populateCache(
+    fileId: string,
+    expectedSize: number,
+    source: Readable,
+    clientStream: PassThrough,
+  ): Promise<void> {
+    const cachePath = this.getCachePath(fileId);
+    const tmpPath = cachePath + '.tmp';
+    const output = createWriteStream(tmpPath);
+    let bytes = 0;
+    const onData = (chunk: Buffer | string) => {
+      bytes += Buffer.byteLength(chunk);
+    };
+    source.on('data', onData);
+    try {
+      await new Promise<void>((resolve, reject) => {
+        let settled = false;
+        const resolveOnce = () => {
+          if (!settled) {
+            settled = true;
+            resolve();
+          }
+        };
+        const rejectOnce = (err: Error) => {
+          if (!settled) {
+            settled = true;
+            reject(err);
+          }
+        };
+        source.once('error', rejectOnce);
+        output.once('error', rejectOnce);
+        output.once('finish', resolveOnce);
+        // 客户端断开只停止该输出分支，缓存构建继续完成，供后续请求复用。
+        clientStream.once('close', () => source.unpipe(clientStream));
+        source.pipe(clientStream);
+        source.pipe(output);
+      });
+      const stat = await fsp.stat(tmpPath);
+      if (bytes !== expectedSize || stat.size !== expectedSize) {
+        throw new Error(`回源文件大小不一致: 期望 ${expectedSize}, 实际 ${stat.size}`);
+      }
+      await this.withCapacityLock(async () => {
+        await this.ensureCacheCapacity(expectedSize, tmpPath);
+        await fsp.rename(tmpPath, cachePath);
+      });
+    } catch (err) {
+      source.destroy();
+      output.destroy();
+      clientStream.destroy(err as Error);
+      await fsp.unlink(tmpPath).catch(() => {});
+      await fsp.unlink(cachePath).catch(() => {});
+      throw err;
+    } finally {
+      source.off('data', onData);
+    }
+  }
+
+  private async withCapacityLock<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = this.capacityChain;
+    let release!: () => void;
+    this.capacityChain = new Promise<void>((resolve) => { release = resolve; });
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
+  }
+
+  /** 确保回源缓存写入不会突破配置的空间护栏。tmp 已计入目录总量，不重复加 expectedSize。 */
+  private async ensureCacheCapacity(expectedSize: number, tmpPath?: string): Promise<void> {
+    const totalSize = await this.getTotalCacheSize();
+    const tmpSize = tmpPath ? (await fsp.stat(tmpPath).catch(() => ({ size: 0 }))).size : 0;
+    const projected = totalSize + Math.max(0, expectedSize - tmpSize);
+    if (projected > this.maxCacheSizeBytes) {
+      await this.evictLRU(projected - this.maxCacheSizeBytes);
+      const newTotal = await this.getTotalCacheSize();
+      if (newTotal + Math.max(0, expectedSize - tmpSize) > this.maxCacheSizeBytes) {
+        throw new Error('缓存空间不足');
+      }
+    }
+    if (!this.hasEnoughDiskSpace()) {
+      await this.evictLRU(this.minFreeDiskBytes);
+      if (!this.hasEnoughDiskSpace()) throw new Error('磁盘空间不足');
+    }
+  }
+
+  /**
    * 缓存文件到本地
    * @param fileId 文件 UUID
    * @param buffer 文件内容
@@ -373,8 +502,13 @@ export class FileCacheService {
    */
   async invalidate(fileId: string): Promise<void> {
     this.validateFileId(fileId);
+    const pending = this.inflight.get(fileId);
+    if (pending) await pending.catch(() => {});
     const cachePath = this.getCachePath(fileId);
-    await fsp.unlink(cachePath).catch(() => {});
+    await Promise.all([
+      fsp.unlink(cachePath).catch(() => {}),
+      fsp.unlink(cachePath + '.tmp').catch(() => {}),
+    ]);
     this.fileAccessMap.delete(fileId);
     this.logger.debug(`缓存失效: ${fileId}`);
   }

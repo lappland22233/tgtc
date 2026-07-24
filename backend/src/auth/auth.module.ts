@@ -10,12 +10,14 @@ import { User } from '../common/entities/user.entity';
 import { VerificationCode } from '../common/entities/verification-code.entity';
 import { BannedIP } from '../common/entities/banned-ip.entity';
 import { SystemConfig } from '../common/entities/system-config.entity';
+import { JwtRevokedToken } from '../common/entities/jwt-revoked-token.entity';
+import { JwtRevocationService } from './jwt-revocation.service';
 import { MailerModule } from '../mailer/mailer.module';
 import { UserModule } from '../user/user.module';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([User, VerificationCode, BannedIP, SystemConfig]),
+    TypeOrmModule.forFeature([User, VerificationCode, BannedIP, SystemConfig, JwtRevokedToken]),
     PassportModule.register({ defaultStrategy: 'jwt' }),
     JwtModule.registerAsync({
       imports: [ConfigModule],
@@ -39,7 +41,7 @@ import { UserModule } from '../user/user.module';
     MailerModule,
   ],
   controllers: [AuthController],
-  providers: [AuthService, JwtStrategy],
-  exports: [AuthService, JwtModule],
+  providers: [AuthService, JwtStrategy, JwtRevocationService],
+  exports: [AuthService, JwtModule, JwtRevocationService],
 })
 export class AuthModule {}

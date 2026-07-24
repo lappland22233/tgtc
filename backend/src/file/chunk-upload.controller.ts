@@ -11,6 +11,10 @@ import {
   BadRequestException,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
+import { diskStorage } from 'multer';
+import * as path from 'path';
+import * as fs from 'fs';
+import { randomUUID } from 'crypto';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { User } from '../common/entities/user.entity';
@@ -46,7 +50,17 @@ export class ChunkUploadController {
 
   /** 上传单个分片 (multipart: chunk + index) */
   @Post(':uploadId')
-  @UseInterceptors(FileInterceptor('chunk', { limits: { fileSize: 104857600 } }))
+  @UseInterceptors(FileInterceptor('chunk', {
+    storage: diskStorage({
+      destination: (_req, _file, cb) => {
+        const dir = path.resolve(process.cwd(), 'tmp', 'chunk-incoming');
+        fs.mkdirSync(dir, { recursive: true });
+        cb(null, dir);
+      },
+      filename: (_req, _file, cb) => cb(null, randomUUID()),
+    }),
+    limits: { fileSize: 104857600 },
+  }))
   async uploadChunk(
     @Param('uploadId') uploadId: string,
     @UploadedFile() chunk: Express.Multer.File,
@@ -61,9 +75,17 @@ export class ChunkUploadController {
     if (!index) {
       throw new BadRequestException('缺少分片索引 (index)');
     }
-    const chunkIndex = parseInt(index, 10);
-    await this.chunkUploadService.saveChunk(uploadId, chunkIndex, chunk.buffer, user.id);
-    return { index: chunkIndex, received: true };
+    const chunkIndex = Number(index);
+    if (!Number.isInteger(chunkIndex)) {
+      throw new BadRequestException('分片索引必须为整数');
+    }
+    if (!chunk.path) throw new BadRequestException('分片临时文件不可用');
+    try {
+      await this.chunkUploadService.saveChunkFromPath(uploadId, chunkIndex, chunk.path, chunk.size, user.id);
+      return { index: chunkIndex, received: true };
+    } finally {
+      await fs.promises.unlink(chunk.path).catch(() => {});
+    }
   }
 
   /** 启动异步合并（立即返回，后台执行合并 → 入队 Telgram 上传） */

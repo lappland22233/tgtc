@@ -215,6 +215,44 @@ export class ShareService {
 
   // ---------- 文件下载 ----------
 
+  /** 校验分享下载凭证与文件归属，供完整流和 Range 流统一复用。 */
+  private async assertDownloadAllowed(
+    token: string,
+    fileId: string,
+    accessJwt: string | undefined,
+  ): Promise<ShareLink> {
+    const link = await this.shareLinkRepo.findOne({ where: { token, isDeleted: false } });
+    if (!link) throw new NotFoundException('分享不存在');
+    await this.assertShareUsable(link);
+    if (link.password) {
+      if (!accessJwt) throw new ForbiddenException('此分享需要密码');
+      const ok = await this.passwordService.verifyAccessJwt(accessJwt, link.id);
+      if (!ok) throw new ForbiddenException('访问凭证已失效，请重新输入密码');
+    }
+    await this.assertFileInShare(link, fileId);
+    return link;
+  }
+
+  async getShareRangeDownloadStream(
+    token: string,
+    fileId: string,
+    accessJwt: string | undefined,
+    ip: string | null,
+    rangeHeader: string,
+  ) {
+    const link = await this.assertDownloadAllowed(token, fileId, accessJwt);
+    const result = await this.fileService.getRangeStreamForShareDownload(fileId, rangeHeader, ip || undefined);
+    if (result.kind === 'range') {
+      this.audit.log({
+        action: 'share_link_download' as AuditAction,
+        resourceType: 'share_link',
+        resourceId: link.id,
+        metadata: { token, fileId, ip: ip || null, range: rangeHeader },
+      });
+    }
+    return result;
+  }
+
   /**
    * 获取分享下载流：校验 token + accessJwt（若有密码）+ 文件存在性，
    * 调用 FileService.getStreamForShareDownload 返回 Telegram 缓存流。
@@ -232,24 +270,9 @@ export class ShareService {
     isInline: boolean;
     accessLogId?: string;
   }> {
-    const link = await this.shareLinkRepo.findOne({ where: { token, isDeleted: false } });
-    if (!link) throw new NotFoundException('分享不存在');
+    const link = await this.assertDownloadAllowed(token, fileId, accessJwt);
 
-    await this.assertShareUsable(link);
-
-    // 严格模式：密码校验
-    if (link.password) {
-      if (!accessJwt) {
-        throw new ForbiddenException('此分享需要密码');
-      }
-      const ok = await this.passwordService.verifyAccessJwt(accessJwt, link.id);
-      if (!ok) throw new ForbiddenException('访问凭证已失效，请重新输入密码');
-    }
-
-    // 校验 fileId 是否属于此分享的 target 子树
-    await this.assertFileInShare(link, fileId);
-
-    // 增加下载计数（独立于访问计数，避免一次访问多次下载快速耗尽）
+    // 增加下载审计（独立于访问计数，避免一次访问多次 Range 快速耗尽）
     this.audit.log({
       action: 'share_link_download' as AuditAction,
       resourceType: 'share_link',

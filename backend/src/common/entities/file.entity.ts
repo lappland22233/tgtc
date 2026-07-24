@@ -44,7 +44,11 @@ export class File {
   telegramFileId: string;
 
   @Column({ nullable: true })
-  telegramFilePath: string;
+  telegramFilePath: string | null;
+
+  /** Telegram sendDocument 返回的消息 ID，用于 deleteMessage；旧数据可能为空。 */
+  @Column({ type: 'bigint', nullable: true })
+  telegramMessageId: string | null;
 
   /** 本地缩略图路径（相对于 THUMBNAIL_DIR，如 {id}.webp） */
   @Column({ type: 'varchar', length: 512, nullable: true, default: null })

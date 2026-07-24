@@ -23,15 +23,6 @@ export class FileUploadProcessor {
     private telegramService: TelegramService,
   ) {}
 
-  /** 为 Promise 包装超时，防止 Telegram 无响应导致任务无限挂起 */
-  private withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
-    let timer: NodeJS.Timeout | undefined;
-    const timeout = new Promise<never>((_resolve, reject) => {
-      timer = setTimeout(() => reject(new Error(`${label} 超时 (${ms}ms)`)), ms);
-    });
-    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
-  }
-
   /** 删除临时文件，失败时记录告警（避免静默堆积） */
   private async removeTempFile(filePath: string): Promise<void> {
     await unlink(filePath).catch((err: Error) => {
@@ -72,18 +63,16 @@ export class FileUploadProcessor {
       return;
     }
 
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), UPLOAD_TIMEOUT_MS);
+    const stream = createReadStream(filePath);
     try {
-      const stream = createReadStream(filePath);
-      // 带超时的上传，防止 Telegram 无响应时无限等待阻塞并发槽位
-      const result = await this.withTimeout(
-        this.telegramService.uploadFile(
-          stream,
-          file.originalName,
-          undefined,
-          file.size,
-        ),
-        UPLOAD_TIMEOUT_MS,
-        'Telegram 上传',
+      // AbortController 会同时终止 Axios 请求和输入流，避免任务重试时旧上传仍占用并发槽位。
+      const result = await this.telegramService.uploadFile(
+        stream,
+        file.originalName,
+        controller.signal,
+        file.size,
       );
 
       // TG 上传成功：更新 ID + 兜底写 status ready（正常情况缓存预热已先设为 ready）
@@ -91,7 +80,8 @@ export class FileUploadProcessor {
         filename: result.file_id,
         telegramFileId: result.file_id,
         telegramFilePath: result.file_path || '',
-      } as any);
+        telegramMessageId: result.message_id,
+      });
       // 若缓存预热失败导致 status 仍为 processing，则补齐 ready
       await this.fileRepository.query(
         'UPDATE files SET status = $1 WHERE id = $2 AND status = $3',
@@ -115,6 +105,9 @@ export class FileUploadProcessor {
       }
 
       throw error;
+    } finally {
+      clearTimeout(timeout);
+      if (!stream.destroyed) stream.destroy();
     }
   }
 }

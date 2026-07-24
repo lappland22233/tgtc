@@ -149,6 +149,7 @@ export class ShareController {
     @Body() dto: VerifyPasswordDto,
     @Req() req: Request,
   ) {
+    await this.assertShareRateLimit(token, req);
     const ip = getClientIp(req);
     return this.shareService.verifyPassword(token, dto.password, ip);
   }
@@ -170,6 +171,36 @@ export class ShareController {
   ) {
     await this.assertShareRateLimit(token, req);
     const ip = getClientIp(req);
+    const rangeHeader = req.headers.range;
+    if (rangeHeader) {
+      const rangeResult = await this.shareService.getShareRangeDownloadStream(
+        token,
+        fileId,
+        accessJwt || undefined,
+        ip,
+        rangeHeader,
+      );
+      if (rangeResult.kind === 'invalid') {
+        res.status(HttpStatus.REQUESTED_RANGE_NOT_SATISFIABLE).set({
+          'Content-Range': `bytes */${rangeResult.total}`,
+          'Accept-Ranges': 'bytes',
+        }).end();
+        return;
+      }
+      if (rangeResult.kind === 'range') {
+        res.status(HttpStatus.PARTIAL_CONTENT).set({
+          'Content-Type': rangeResult.contentType,
+          'Content-Disposition': `attachment; filename="${encodeURIComponent(rangeResult.filename)}"`,
+          'Content-Length': rangeResult.size.toString(),
+          'Content-Range': `bytes ${rangeResult.start}-${rangeResult.end}/${rangeResult.total}`,
+          'Cache-Control': 'no-store, no-cache, must-revalidate',
+          'Accept-Ranges': 'bytes',
+        });
+        await promisify(pipeline)(rangeResult.stream, res);
+        return;
+      }
+    }
+
     const result = await this.shareService.getShareDownloadStream(
       token,
       fileId,

@@ -47,6 +47,7 @@ function makeFile(overrides: Partial<File> = {}): File {
     size: 1024,
     telegramFileId: 'telegram-file-id',
     telegramFilePath: '',
+    telegramMessageId: '12345',
     thumbnailPath: null,
     folderId: null,
     folder: null,
@@ -117,7 +118,7 @@ describe('FileService', () => {
   let folderRepo: ReturnType<typeof mockRepo>;
   let accessLogRepo: ReturnType<typeof mockRepo>;
   let telegramService: { uploadFile: jest.Mock; getFileStream: jest.Mock; deleteFile: jest.Mock };
-  let fileCacheService: { getCachedReadStream: jest.Mock; getCachedPath: jest.Mock; invalidate: jest.Mock };
+  let fileCacheService: { getCachedReadStream: jest.Mock; getCachedPath: jest.Mock; getOrCacheStream: jest.Mock; invalidate: jest.Mock };
   let auditService: { log: jest.Mock };
   let configCacheService: { get: jest.Mock; set: jest.Mock };
 
@@ -135,6 +136,7 @@ describe('FileService', () => {
     fileCacheService = {
       getCachedReadStream: jest.fn().mockReturnValue(null),
       getCachedPath: jest.fn().mockReturnValue(null),
+      getOrCacheStream: jest.fn(),
       invalidate: jest.fn().mockResolvedValue(undefined),
     };
 
@@ -414,7 +416,7 @@ describe('FileService', () => {
 
       await service.forceDelete('file-uuid-1', user);
 
-      expect(telegramService.deleteFile).toHaveBeenCalledWith('telegram-file-id');
+      expect(telegramService.deleteFile).toHaveBeenCalledWith('12345');
       expect(accessLogRepo.delete).toHaveBeenCalledWith({ fileId: 'file-uuid-1' });
       expect(fileRepo.remove).toHaveBeenCalledWith(file);
       expect(fileCacheService.invalidate).toHaveBeenCalledWith('file-uuid-1');
@@ -436,17 +438,15 @@ describe('FileService', () => {
       ).rejects.toThrow(ForbiddenException);
     });
 
-    it('Telegram 删除失败不应阻塞流程', async () => {
+    it('Telegram 删除失败时应保留数据库记录供重试', async () => {
       const user = makeUser();
       const file = makeFile({ uploaderId: user.id });
       fileRepo.findOne.mockResolvedValue(file);
       fileRepo.count.mockResolvedValue(0);
       telegramService.deleteFile.mockRejectedValue(new Error('Telegram error'));
-      accessLogRepo.delete.mockResolvedValue(undefined);
-      fileRepo.remove.mockResolvedValue(file);
 
-      await service.forceDelete('file-uuid-1', user);
-      expect(fileRepo.remove).toHaveBeenCalled();
+      await expect(service.forceDelete('file-uuid-1', user)).rejects.toThrow('Telegram error');
+      expect(fileRepo.remove).not.toHaveBeenCalled();
     });
   });
 
@@ -525,15 +525,17 @@ describe('FileService', () => {
       fileCacheService.getCachedReadStream.mockReturnValue(null);
 
       const mockStream = Readable.from('image data');
-      telegramService.getFileStream.mockResolvedValue({
-        stream: mockStream,
-        info: { file_id: 'tg-id', file_path: '', file_size: 500 },
-      });
+      fileCacheService.getOrCacheStream.mockResolvedValue({ stream: mockStream, fromCache: false });
       accessLogRepo.save.mockResolvedValue({ id: 'log-id' });
 
       const result = await service.getStreamForShareDownload('file-uuid-1', '127.0.0.1');
 
       expect(result.stream).toBe(mockStream);
+      expect(fileCacheService.getOrCacheStream).toHaveBeenCalledWith(
+        'file-uuid-1',
+        500,
+        expect.any(Function),
+      );
       expect(result.contentType).toBe('image/png');
       expect(result.isInline).toBe(true);
       expect(result.size).toBe(500);
@@ -541,6 +543,13 @@ describe('FileService', () => {
       expect(accessLogRepo.save).toHaveBeenCalledWith(
         expect.objectContaining({ fileId: 'file-uuid-1', action: 'share_download' }),
       );
+    });
+
+    it('缓存回源失败时应向上抛错', async () => {
+      const file = makeFile({ size: 3 });
+      fileRepo.findOne.mockResolvedValue(file);
+      fileCacheService.getOrCacheStream.mockRejectedValue(new Error('upstream failed'));
+      await expect(service.getStreamForShareDownload(file.id)).rejects.toThrow('upstream failed');
     });
 
     it('文件不存在时应抛出 NotFoundException', async () => {
