@@ -21,10 +21,10 @@
         {{ item.label }}
       </router-link>
 
-      <template v-if="isAdmin">
+      <template v-if="visibleAdminNav.length > 0">
         <div class="nav-section">管理后台</div>
         <router-link
-          v-for="item in adminNav"
+          v-for="item in visibleAdminNav"
           :key="item.to"
           :to="item.to"
           class="nav-item"
@@ -53,10 +53,13 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue';
 import { useRoute } from 'vue-router';
+import type { UserRole } from '../types/user';
+import { PAGE_ROLES, hasAnyRole } from '../utils/permissions';
 
-defineProps<{
-  isAdmin: boolean;
+const props = defineProps<{
+  role: UserRole;
   email: string;
   roleText: string;
   avatarLetter: string;
@@ -98,24 +101,35 @@ const icons = {
   telemetry: svg('<rect x="3" y="3" width="14" height="14" rx="2"/><polyline points="7 13 7 9"/><polyline points="10 13 10 7"/><polyline points="13 13 13 5"/>'),
 };
 
-const workspaceNav = [
-  { to: '/dashboard', label: '仪表盘', icon: icons.dashboard },
-  { to: '/files', label: '我的文件', icon: icons.files },
-  { to: '/shares', label: '我的分享', icon: icons.shares },
-  { to: '/settings', label: '个人设置', icon: icons.settings },
+interface NavItem {
+  to: string;
+  label: string;
+  icon: string;
+  roles: readonly UserRole[];
+}
+
+const workspaceNav: NavItem[] = [
+  { to: '/dashboard', label: '仪表盘', icon: icons.dashboard, roles: PAGE_ROLES['/dashboard'] },
+  { to: '/files', label: '我的文件', icon: icons.files, roles: PAGE_ROLES['/files'] },
+  { to: '/shares', label: '我的分享', icon: icons.shares, roles: PAGE_ROLES['/shares'] },
+  { to: '/settings', label: '个人设置', icon: icons.settings, roles: PAGE_ROLES['/settings'] },
 ];
 
-const adminNav = [
-  { to: '/admin/dashboard-customizer', label: '仪表盘', icon: icons.customizer },
-  { to: '/admin/users', label: '用户管理', icon: icons.users },
-  { to: '/admin/files', label: '文件管理', icon: icons.adminFiles },
-  { to: '/admin/config', label: '系统配置', icon: icons.config },
-  { to: '/admin/access-logs', label: '访问统计', icon: icons.accessLogs },
-  { to: '/admin/security', label: '安全监控', icon: icons.security },
-  { to: '/admin/user-activity', label: '用户活跃', icon: icons.userActivity },
-  { to: '/admin/audit-logs', label: '操作审计', icon: icons.auditLogs },
-  { to: '/admin/telemetry', label: '遥测监控', icon: icons.telemetry },
+const adminNav: NavItem[] = [
+  { to: '/admin/dashboard-customizer', label: '仪表盘', icon: icons.customizer, roles: PAGE_ROLES['/admin/dashboard-customizer'] },
+  { to: '/admin/users', label: '用户管理', icon: icons.users, roles: PAGE_ROLES['/admin/users'] },
+  { to: '/admin/files', label: '文件管理', icon: icons.adminFiles, roles: PAGE_ROLES['/admin/files'] },
+  { to: '/admin/access-logs', label: '访问统计', icon: icons.accessLogs, roles: PAGE_ROLES['/admin/access-logs'] },
+  { to: '/admin/security', label: '安全监控', icon: icons.security, roles: PAGE_ROLES['/admin/security'] },
+  { to: '/admin/user-activity', label: '用户活跃', icon: icons.userActivity, roles: PAGE_ROLES['/admin/user-activity'] },
+  { to: '/admin/audit-logs', label: '操作审计', icon: icons.auditLogs, roles: PAGE_ROLES['/admin/audit-logs'] },
+  { to: '/admin/telemetry', label: '遥测监控', icon: icons.telemetry, roles: PAGE_ROLES['/admin/telemetry'] },
+  // 系统配置包含仅超级管理员可读取的缓存配置和仅超级管理员可保存的全局配置，
+  // 因此按“拥有完整页面权限”原则只向超级管理员展示。
+  { to: '/admin/config', label: '系统配置', icon: icons.config, roles: PAGE_ROLES['/admin/config'] },
 ];
+
+const visibleAdminNav = computed(() => adminNav.filter((item) => hasAnyRole(props.role, item.roles)));
 </script>
 
 <style scoped>

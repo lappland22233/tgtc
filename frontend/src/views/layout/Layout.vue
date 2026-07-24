@@ -6,7 +6,7 @@
     <!-- 桌面端侧边栏（双栏布局左栏） -->
     <aside class="sidebar">
       <SideNav
-        :is-admin="isAdmin"
+        :role="authStore.user?.role || 'user'"
         :email="authStore.user?.email || ''"
         :role-text="roleText"
         :avatar-letter="avatarLetter"
@@ -41,7 +41,7 @@
     >
       <div class="drawer-content">
         <SideNav
-          :is-admin="isAdmin"
+          :role="authStore.user?.role || 'user'"
           :email="authStore.user?.email || ''"
           :role-text="roleText"
           :avatar-letter="avatarLetter"

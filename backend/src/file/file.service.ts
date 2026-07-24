@@ -1599,15 +1599,7 @@ export class FileService implements OnModuleInit {
       throw new BadRequestException('文件正在处理中，请稍后刷新重试');
     }
 
-    const { stream } = cachedStream
-      ? { stream: cachedStream }
-      : await this.fileCacheService.getOrCacheStream(
-        file.id,
-        Number(file.size),
-        () => this.getTelegramFileStream(file),
-      );
-
-    // 写访问日志（responseSize 先占位为 0，流式传输完成后由 controller 更新为实际字节数）
+    // 在启动回源前写访问日志，避免源流开始后仍等待数据库操作，导致首块滞留在 PassThrough 中。
     let accessLogId: string | undefined;
     try {
       const saved = await this.accessLogRepository.save({
@@ -1621,6 +1613,15 @@ export class FileService implements OnModuleInit {
     } catch {
       // 日志记录失败不影响主流程
     }
+
+    // getOrCacheStream 返回后不再执行任何异步操作，Controller 可立即订阅并向客户端发送首块。
+    const { stream } = cachedStream
+      ? { stream: cachedStream }
+      : await this.fileCacheService.getOrCacheStream(
+        file.id,
+        Number(file.size),
+        () => this.getTelegramFileStream(file),
+      );
 
     const mimeType = file.mimeType || 'application/octet-stream';
     const filename = this.ensureFileExtension(file.originalName, mimeType);

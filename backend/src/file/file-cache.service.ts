@@ -4,8 +4,23 @@ import { OnEvent } from '@nestjs/event-emitter';
 import { PassThrough, Readable } from 'stream';
 import { createReadStream, createWriteStream } from 'fs';
 import { promises as fsp } from 'fs';
+import { EventEmitter } from 'events';
 import * as path from 'path';
 import { ConfigCacheService } from '../common/services/config-cache.service';
+
+interface CacheFillSession {
+  fileId: string;
+  expectedSize: number;
+  tmpPath: string;
+  cachePath: string;
+  completion: Promise<void>;
+  resolve: () => void;
+  reject: (error: unknown) => void;
+  completed: boolean;
+  error?: Error;
+  progressVersion: number;
+  progress: EventEmitter;
+}
 
 export const CACHE_CONFIG_KEYS = {
   MAX_SIZE_GB: 'FILE_CACHE_MAX_SIZE_GB',
@@ -32,8 +47,8 @@ export class FileCacheService {
   /** 文件最近访问时间追踪 (fileId → lastAccessTimestamp)，用于 LRU 淘汰 */
   private readonly fileAccessMap = new Map<string, number>();
 
-  /** 同一文件的回源请求去重，避免并发写入同一缓存文件。 */
-  private readonly inflight = new Map<string, Promise<void>>();
+  /** 同一文件的缓存构建会话；并发请求跟随临时文件增长，避免重复回源或等待完整发布。 */
+  private readonly inflight = new Map<string, CacheFillSession>();
   /** 串行化容量检查与原子发布，避免跨文件并发突破缓存上限。 */
   private capacityChain: Promise<void> = Promise.resolve();
 
@@ -145,6 +160,14 @@ export class FileCacheService {
       let cleaned = 0;
       const surviving = new Set<string>();
       for (const f of files) {
+        // 活动缓存会话的临时文件由会话负责发布或清理，定时任务不得干扰。
+        if (f.endsWith('.tmp')) {
+          const fileId = f.slice(0, -4);
+          if (this.inflight.has(fileId)) {
+            surviving.add(f);
+            continue;
+          }
+        }
         const fullPath = path.join(this.cacheDir, f);
         try {
           const stat = await fsp.stat(fullPath);
@@ -302,7 +325,7 @@ export class FileCacheService {
 
   /**
    * 获取缓存流；未命中时回源并将数据同时写入客户端和本地缓存。
-   * 首次回源保持真流式，成功后才通过原子 rename 发布缓存。
+   * 同文件后续请求直接跟随正在增长的临时文件，无需等待完整缓存发布。
    */
   async getOrCacheStream(
     fileId: string,
@@ -316,46 +339,139 @@ export class FileCacheService {
 
     const existing = this.inflight.get(fileId);
     if (existing) {
-      await existing;
-      const stream = await this.openCachedReadStream(fileId, expectedSize);
-      if (!stream) throw new Error(`文件缓存建立失败: ${fileId}`);
-      return { stream, fromCache: true };
+      if (existing.expectedSize !== expectedSize) {
+        throw new Error(`进行中的缓存文件大小不一致: ${fileId}`);
+      }
+      return { stream: this.createGrowingCacheStream(existing), fromCache: false };
     }
 
-    // 在等待上游首字节前先登记 inflight，避免多个并发请求同时启动 Bot API 回源。
-    let resolveInflight!: () => void;
-    let rejectInflight!: (error: unknown) => void;
-    const inflight = new Promise<void>((resolve, reject) => {
-      resolveInflight = resolve;
-      rejectInflight = reject;
+    // 在等待上游连接前登记会话，保证并发请求只触发一次 Bot API 回源。
+    let resolveSession!: () => void;
+    let rejectSession!: (error: unknown) => void;
+    const completion = new Promise<void>((resolve, reject) => {
+      resolveSession = resolve;
+      rejectSession = reject;
     });
-    this.inflight.set(fileId, inflight);
-    inflight.finally(() => this.inflight.delete(fileId)).catch(() => {});
+    const cachePath = this.getCachePath(fileId);
+    const session: CacheFillSession = {
+      fileId,
+      expectedSize,
+      cachePath,
+      tmpPath: `${cachePath}.tmp`,
+      completion,
+      resolve: resolveSession,
+      reject: rejectSession,
+      completed: false,
+      progressVersion: 0,
+      progress: new EventEmitter(),
+    };
+    session.progress.setMaxListeners(0);
+    this.inflight.set(fileId, session);
+    completion.finally(() => {
+      if (this.inflight.get(fileId) === session) this.inflight.delete(fileId);
+    }).catch(() => {});
 
     try {
       // 先完成上游连接和首字节探测，再把流返回给 Controller，确保路径刷新发生在响应头发送前。
       const fetched = await fetchFn();
       const pass = new PassThrough();
-      this.populateCache(fileId, expectedSize, fetched.stream, pass).then(resolveInflight, rejectInflight);
+      this.populateCache(session, fetched.stream, pass).then(
+        () => {
+          session.completed = true;
+          session.progressVersion++;
+          session.progress.emit('progress');
+          session.resolve();
+        },
+        (error: unknown) => {
+          session.error = error instanceof Error ? error : new Error(String(error));
+          session.progressVersion++;
+          session.progress.emit('progress');
+          session.reject(session.error);
+        },
+      );
       return { stream: pass, fromCache: false };
     } catch (error) {
-      rejectInflight(error);
+      session.error = error instanceof Error ? error : new Error(String(error));
+      session.progressVersion++;
+      session.progress.emit('progress');
+      session.reject(session.error);
       throw error;
     }
   }
 
+  /** 从已落盘的临时缓存开始读取，并在文件增长时继续输出。 */
+  private createGrowingCacheStream(session: CacheFillSession): Readable {
+    const chunkSize = 256 * 1024;
+    const iterator = async function* (): AsyncGenerator<Buffer> {
+      let offset = 0;
+      while (offset < session.expectedSize) {
+        if (session.error) throw session.error;
+
+        const observedVersion = session.progressVersion;
+        const readPath = session.completed ? session.cachePath : session.tmpPath;
+        let handle: Awaited<ReturnType<typeof fsp.open>> | undefined;
+        try {
+          handle = await fsp.open(readPath, 'r');
+          const stat = await handle.stat();
+          const available = Math.min(stat.size, session.expectedSize) - offset;
+          if (available > 0) {
+            const length = Math.min(available, chunkSize);
+            const buffer = Buffer.allocUnsafe(length);
+            const { bytesRead } = await handle.read(buffer, 0, length, offset);
+            if (bytesRead > 0) {
+              offset += bytesRead;
+              yield bytesRead === length ? buffer : buffer.subarray(0, bytesRead);
+              continue;
+            }
+          }
+        } catch (error) {
+          const code = (error as NodeJS.ErrnoException).code;
+          // tmp 创建前或原子 rename 窗口内暂时不可见，等待下一次进度后重试。
+          if (code !== 'ENOENT' && code !== 'ESTALE') throw error;
+        } finally {
+          await handle?.close().catch(() => {});
+        }
+
+        if (session.error) throw session.error;
+        if (session.completed) {
+          throw new Error(`缓存文件提前结束: ${session.fileId}, 已读取 ${offset}/${session.expectedSize}`);
+        }
+        await new Promise<void>((resolve) => {
+          if (session.progressVersion !== observedVersion) {
+            resolve();
+            return;
+          }
+          const onProgress = () => {
+            clearTimeout(timer);
+            resolve();
+          };
+          const timer = setTimeout(() => {
+            session.progress.off('progress', onProgress);
+            resolve();
+          }, 50);
+          session.progress.once('progress', onProgress);
+        });
+      }
+    };
+    return Readable.from(iterator());
+  }
+
   private async populateCache(
-    fileId: string,
-    expectedSize: number,
+    session: CacheFillSession,
     source: Readable,
     clientStream: PassThrough,
   ): Promise<void> {
-    const cachePath = this.getCachePath(fileId);
-    const tmpPath = cachePath + '.tmp';
+    const { expectedSize, cachePath, tmpPath } = session;
     const output = createWriteStream(tmpPath);
     let bytes = 0;
     const onData = (chunk: Buffer | string) => {
       bytes += Buffer.byteLength(chunk);
+      session.progressVersion++;
+      session.progress.emit('progress');
+    };
+    const onCommitted = () => {
+      session.progressVersion++;
+      session.progress.emit('progress');
     };
     source.on('data', onData);
     try {
@@ -375,6 +491,8 @@ export class FileCacheService {
         };
         source.once('error', rejectOnce);
         output.once('error', rejectOnce);
+        output.on('drain', onCommitted);
+        output.on('finish', onCommitted);
         output.once('finish', resolveOnce);
         // 客户端断开只停止该输出分支，缓存构建继续完成，供后续请求复用。
         clientStream.once('close', () => source.unpipe(clientStream));
@@ -391,13 +509,23 @@ export class FileCacheService {
       });
     } catch (err) {
       source.destroy();
-      output.destroy();
       clientStream.destroy(err as Error);
+      // 等待 WriteStream 的底层句柄关闭后再删除，避免 open 尚未完成时 unlink 后又创建 0 字节 .tmp。
+      await new Promise<void>((resolve) => {
+        if (output.closed) {
+          resolve();
+          return;
+        }
+        output.once('close', resolve);
+        output.destroy();
+      });
       await fsp.unlink(tmpPath).catch(() => {});
       await fsp.unlink(cachePath).catch(() => {});
       throw err;
     } finally {
       source.off('data', onData);
+      output.off('drain', onCommitted);
+      output.off('finish', onCommitted);
     }
   }
 
@@ -549,7 +677,7 @@ export class FileCacheService {
   async invalidate(fileId: string): Promise<void> {
     this.validateFileId(fileId);
     const pending = this.inflight.get(fileId);
-    if (pending) await pending.catch(() => {});
+    if (pending) await pending.completion.catch(() => {});
     const cachePath = this.getCachePath(fileId);
     await Promise.all([
       fsp.unlink(cachePath).catch(() => {}),

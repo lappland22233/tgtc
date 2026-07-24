@@ -148,7 +148,10 @@
     </div>
 
     <!-- ⑦ OS 风格统一列表：文件夹与文件混排（文件夹在前） -->
-    <t-loading v-if="fileStore.loading || cursorLoading" class="fl-loading" />
+    <t-loading
+      v-if="(fileStore.loading || cursorLoading) && displayFiles.length === 0 && subfoldersInCurrentFolder.length === 0"
+      class="fl-loading"
+    />
     <div
       v-else-if="displayFiles.length > 0 || subfoldersInCurrentFolder.length > 0"
       class="os-list card"
@@ -1192,16 +1195,20 @@ function handleClearSearch() {
 // ==== 无限滚动加载逻辑（唯一加载方式，不再分页） ====
 // 用「页码」作为游标驱动 loadMore：偏移分页支持自定义排序，
 // 既保留排序/搜索/标签能力，又提供无限滚动体验。
+let fileListGeneration = 0;
+
 async function loadInitialFiles() {
+  fileListGeneration++;
   resetCursor();
   fileStore.replaceFiles([]);
-  await loadMoreFiles(1);
+  await loadMoreFiles();
 }
 
-async function loadMoreFiles(pageNum?: number) {
-  if (!hasMore.value || cursorLoading.value) return;
+async function loadMoreFiles() {
+  if (!hasMore.value) return;
+  const generation = fileListGeneration;
   await loadMore(async (cursor, signal) => {
-    const page = pageNum ?? (cursor ? parseInt(cursor, 10) : 1);
+    const page = cursor ? parseInt(cursor, 10) : 1;
     const tagIds = selectedTagIds.value.length > 0 ? selectedTagIds.value : undefined;
     try {
       const result = await fileStore.fetchFilesPage(
@@ -1214,7 +1221,11 @@ async function loadMoreFiles(pageNum?: number) {
         currentFolderIdForApi.value,
         signal,
       );
-      fileStore.replaceFiles([...fileStore.files, ...result.files]);
+      // 即使底层请求未遵守 AbortSignal，也禁止旧筛选/目录请求污染当前列表。
+      if (generation !== fileListGeneration) {
+        return { data: [], nextCursor: cursor, hasMore: true };
+      }
+      fileStore.appendFiles(result.files);
       fileStore.total = result.total;
       const loadedAll = fileStore.files.length >= result.total || result.files.length === 0;
       return {

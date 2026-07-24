@@ -118,6 +118,18 @@ export const useFileStore = defineStore('files', () => {
     files.value = newFiles;
   }
 
+  /** 追加一批文件并按 ID 去重，保留已有对象引用以避免列表节点无关更新。 */
+  function appendFiles(newFiles: FileItem[]) {
+    if (newFiles.length === 0) return;
+    const existingIds = new Set(files.value.map((file) => file.id));
+    const uniqueFiles = newFiles.filter((file) => {
+      if (existingIds.has(file.id)) return false;
+      existingIds.add(file.id);
+      return true;
+    });
+    if (uniqueFiles.length > 0) files.value.push(...uniqueFiles);
+  }
+
   /**
    * 按页获取文件（不修改 files 列表），供无限滚动逐页累加使用。
    * 相比游标分页，偏移分页支持自定义排序（sortBy/sortOrder），
@@ -341,6 +353,7 @@ export const useFileStore = defineStore('files', () => {
     fetchFilesCursor,
     fetchFilesPage,
     replaceFiles,
+    appendFiles,
     uploadFile,
     uploadFileAsync,
     uploadMultiple,

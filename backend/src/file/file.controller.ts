@@ -470,7 +470,7 @@ export class FileController {
     @CurrentUser() user: User,
   ) {
     const file = await this.fileService.renameFile(id, dto.name, user);
-    return { message: '文件已重命名', data: { id: file.id, originalName: file.originalName } };
+    return { id: file.id, originalName: file.originalName };
   }
 
   /**

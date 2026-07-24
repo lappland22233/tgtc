@@ -1,27 +1,30 @@
 # 文件分发系统（网盘版）
 
-基于 NestJS + Vue 3 + PostgreSQL 的文件分发系统，Telegram Bot API 作为存储后端。支持文件夹层级管理、卡片/列表双视图、SPA 分享页（百度网盘风格）、严格模式密码保护、限时分享和访问次数控制。
+基于 NestJS + Vue 3 + PostgreSQL 的文件分发系统，以 Telegram Bot API 作为持久存储后端，并使用 Redis/Bull 处理后台任务。支持文件夹层级、普通与分片上传、本地下载缓存、桌面列表与移动端卡片布局、SPA 文件/文件夹分享、严格模式密码保护、限时分享和访问次数控制。
 
 ## 功能
 
 ### 认证
 - 邮箱注册与登录，邮件验证码（可配置开关）
 - JWT 身份认证（HttpOnly Cookie），三级角色权限（super_admin / admin / user）
-- 登录失败限流（IP + email 维度，5 次失败锁定 15 分钟）
+- 登录失败按规范化 `IP + email` 组合键限流，阈值和锁定时间可通过安全配置热更新
 - 验证码使用 crypto 随机数 + SHA256 哈希存储，5 次错误锁定 5 分钟
 - 请求级 Cookie secure 动态判断（兼容反向代理 X-Forwarded-Proto）
 - 跨标签页登出同步（BroadcastChannel）
 
 ### 文件管理
 - **文件夹层级管理**：创建/重命名/移动/删除文件夹，闭包表（closure-table）支持任意深度层级，移动时循环检测，软删除联动子树+内含文件（7 天冷静期）
-- **卡片/列表双视图**：默认卡片网格视图（响应式自适应列数），支持切换到列表视图，偏好持久化到 localStorage
-- 拖拽上传 / 弹窗批量上传
-- 业务层动态大小限制
+- **响应式文件视图**：桌面端使用文件夹与文件混排的表格式列表，移动端使用文件卡片布局
+- 拖拽上传 / 弹窗批量上传；小文件采用异步接收，大文件采用分片上传与断点续传
+- 单文件异步与分片上传携带目标目录，服务端验证文件夹归属；批量上传接口当前不接收 `folderId`，会落到根目录
+- 业务层动态大小限制（数据库动态配置 > 环境变量 > 安全默认值）
+- Telegram 上传完成且元数据落库后才进入 `ready`；失败任务保留 pending 源文件以便诊断和恢复
+- 本地文件缓存默认 10GB、最低保留 1GB 磁盘空间、TTL 3 天，缓存失败不改变文件持久状态
 - 文件列表搜索、分页、类型筛选（分页/搜索参数持久化到 URL），支持按文件夹过滤
 - **标签管理**：创建/编辑/删除标签，支持多标签筛选（AND 逻辑），文件列表快捷编辑标签
 - 设置公开/私有、访问次数限制、分享有效期（含过期检查）
 - 批量勾选图片一键生成 Markdown 链接
-- 后端代理下载（不暴露 Telegram 原始 URL），使用流式传输
+- 后端代理下载（不暴露 Telegram 原始 URL），缓存未命中时流式回源并以临时文件原子发布缓存；缓存命中时支持 Range 下载
 - 缩略图 RSA-OAEP 加密防外链，时间窗口 ±10 秒
 
 ### 分享访问
@@ -29,7 +32,7 @@
 - **严格模式密码保护**：加密分享需输入密码后才能查看任何文件元数据，未验证前后端不查询 target 表，杜绝信息泄露
 - **文件夹分享**：分享整个文件夹，支持子文件夹层级浏览、面包屑导航、单文件下载
 - **独立分享模型**：ShareLink 实体独立于文件，同一文件/文件夹可创建多条分享链接（不同密码、有效期、次数限制）
-- **老链接兼容**：`/files/public/:id` 自动 302 重定向到 `/s/:id`，迁移脚本为现有公开文件自动创建 ShareLink（token=文件 id），新文件懒创建
+- **老链接兼容**：浏览器导航到 `/files/public/:id` 时懒创建 ShareLink 并 302 到 `/s/:id`；公开图片/视频/音频被外站引用时可直接流式返回
 - 密码错误 5 次自动封禁 IP 5 分钟，1 小时内 5 次触发升级为 6 小时（与文件密码共享封禁表）
 - 访问次数限制 + 有效期控制（从首次访问开始计时）
 - **我的分享管理**：列出所有创建的分享，支持按类型筛选、复制链接、取消分享
@@ -54,7 +57,7 @@
 - 前端全局错误边界防白屏
 - **攻击检测系统**：自动检测高频扫描/登录爆破/爬虫/异常下载 4 种攻击行为，自动封禁 + 告警 + WebSocket 实时推送
 - **安全规则可配置化**：超级管理员可热调整检测阈值和自动封禁时长，无需重启服务
-- **IP 封禁**：支持永久封禁和临时封禁（自定义时长），自动封禁与手动封禁双模式
+- **IP 封禁**：支持永久封禁和临时封禁（临时封禁必须提供未来到期时间），手动解封记录不会继续参与活跃封禁判断
 - **操作审计系统**：异步记录所有关键安全事件（登录/登录失败/权限变更/文件操作/配置修改/IP 封禁/批量删除），记录操作用户 ID，前端展示用户名
 - **HTTP 访问日志**：全局中间件记录所有请求（IP/路径/状态码/耗时/带宽），数据持久化存储，30 天自动清理
 - **审计日志**：90 天自动清理，防止数据库无限增长
@@ -65,7 +68,7 @@
 - **SPA 路由追踪**：Vue Router 路由切换性能自动记录，持续追踪后续行为
 - **点击事件追踪**：静默记录用户点击，错误发生时上报前后 2+1 分钟上下文
 - **白屏检测**：多维度判定（DOM 复杂度、交互元素、可见区域、采样点），准确识别白屏
-- **组件渲染失败检测**：1 秒内连续 3 次 render/setup/mount 错误主动告警
+- **组件渲染失败检测**：累计 render/setup/mount 错误达到阈值时主动告警
 - **控制台可视化**：生产环境实时打印遥测数据到浏览器 Console，按类型分色输出
 - **管理后台遥测监控**：统计卡片、趋势图表、类型分布、页面性能概览、错误列表
 - **数据导出**：超级管理员可按时间区间和类型导出遥测数据为 JSON 文件
@@ -78,7 +81,7 @@
 | 数据库 | PostgreSQL ≥ 14 |
 | 消息队列 | Bull 4.x + Redis |
 | 前端 | Vue 3 + TypeScript + Vite 5 + TDesign + ECharts 6 |
-| 存储 | Telegram Bot API（支持本地代理绕过限流） |
+| 存储 | Telegram Bot API（支持自建 `telegram-bot-api` 与白名单目录直读） |
 | 邮件 | Nodemailer + SMTP |
 | 认证 | Passport JWT + bcryptjs |
 | 实时推送 | Socket.IO 4.x（告警 WebSocket） |
@@ -88,89 +91,133 @@
 
 ## 快速开始
 
-**环境要求**：Node.js ≥ 18, PostgreSQL ≥ 14, Redis, Telegram Bot Token
+**环境要求**：Node.js ≥ 18、npm、PostgreSQL ≥ 14、Redis、Telegram Bot Token。
+
+### 1. 初始化 PostgreSQL
+
+创建目标数据库，并以具备扩展权限的账号在该数据库中执行：
+
+```sql
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+```
+
+项目已永久关闭 TypeORM `synchronize`，所有环境都必须通过迁移管理表结构。
+
+### 2. 启动后端
 
 ```bash
-# 确保 Redis 正在运行（Bull 消息队列依赖）
-
-# 后端
+# 先确保 Redis 正在运行（Bull 队列依赖）
 cd backend
-cp .env.example .env   # 编辑数据库、JWT、Telegram、SMTP 配置
+cp .env.example .env
+# 编辑 .env，至少配置数据库、JWT、Telegram、CORS；启用 SMTP 时还需配置加密参数
 npm install
-npm run start:dev      # 默认 http://127.0.0.1:3000
+npm run migration:run
+npm run start:dev      # 按 .env.example 监听 http://0.0.0.0:3000
+```
 
-# 前端
+### 3. 启动前端
+
+另开终端：
+
+```bash
 cd frontend
 npm install
-npm run dev            # 默认 http://localhost:5173
+npm run dev            # http://localhost:5173，/api 默认代理到 http://localhost:3000
 ```
 
-**生产部署**：
+第一个注册成功的账号自动成为 `super_admin`。
+
+### 生产部署
+
 ```bash
-# 确保 Redis 正在运行
-cd frontend && npm run build
-cd ../backend && npm run build && npm run start:prod
-# 后端直接服务前端静态文件，单端口部署
-# HTTP 服务器空闲超时 120 秒（有数据传输时自动重置），支持大文件上传
+# 确保 PostgreSQL、Redis 与 Telegram Bot API 可用
+cd backend
+npm install
+npm run migration:run
+npm run build
+
+cd ../frontend
+npm install
+npm run build
+
+cd ../backend
+npm run start:prod
 ```
 
-## 配置 (.env)
+后端从 `frontend/dist` 直接服务 SPA，默认单端口部署。HTTP 空闲超时为 120 秒；上传端点会额外禁用请求超时。生产环境必须显式配置 `CORS_ORIGINS` 或 `FRONTEND_URL`，并按实际反向代理层数配置 `TRUST_PROXY_HOPS`。
+
+## 配置（`.env`）
+
+以 `backend/.env.example` 为模板。核心配置如下：
 
 ```env
-# 数据库
+# PostgreSQL：所有环境均使用迁移，DB_SYNCHRONIZE 仅保留兼容说明
 DB_HOST=localhost
 DB_PORT=5432
 DB_USERNAME=postgres
 DB_PASSWORD=your_password
 DB_DATABASE=file_distribution
-DB_SYNCHRONIZE=true          # 开发 true，生产 false
-DB_MIGRATIONS_RUN=false       # 启动时自动执行迁移
+DB_SYNCHRONIZE=false
+DB_MIGRATIONS_RUN=false       # true 时启动自动执行待处理迁移
+# DB_POOL_SIZE=20
+# DB_SSL=false
 
-# JWT
-JWT_SECRET=your-random-secret
+# JWT：启动校验要求至少 32 个字符
+JWT_SECRET=replace-with-at-least-32-random-characters
 JWT_EXPIRES_IN=7d
 
-# Redis（Bull 消息队列）
+# Redis / Bull
 REDIS_HOST=localhost
 REDIS_PORT=6379
-# REDIS_PASSWORD=  # 可选：Redis 密码
+# REDIS_PASSWORD=
 # REDIS_DB=0
 
-# Telegram Bot（支持本地 API 代理）
-TELEGRAM_BOT_TOKEN=your_bot_token
-TELEGRAM_CHAT_ID=your_chat_id
-# TELEGRAM_API_BASE=https://api.telegram.org  # 可选：自建代理地址
+# Telegram 持久存储
+TELEGRAM_BOT_TOKEN=123456:replace-with-real-token
+TELEGRAM_CHAT_ID=replace-with-chat-id
+# TELEGRAM_API_BASE=https://api.telegram.org
+TELEGRAM_FIRST_BYTE_TIMEOUT_MS=15000
+TELEGRAM_DOWNLOAD_TIMEOUT_MS=300000
+# TELEGRAM_LOCAL_FILE_DIR=/var/lib/telegram-bot-api
 
-# SMTP 邮件
+# SMTP 可选；不使用邮件时不要配置 SMTP_HOST
+# 一旦配置 SMTP_HOST，下列 SMTP 账号及两个加密参数都必须配置，否则启动失败
 SMTP_HOST=smtp.example.com
 SMTP_PORT=587
 SMTP_SECURE=false
 SMTP_USER=your_email@example.com
 SMTP_PASSWORD=your_password
 SMTP_FROM=noreply@example.com
-# SMTP_ENCRYPTION_KEY=your-encryption-key  # 必需：SMTP 密码 AES-256-CBC 加密密钥，未配置时启动报错
-# SMTP_ENCRYPTION_SALT=smtp-encryption-salt  # 可选：加密盐
+SMTP_ENCRYPTION_KEY=replace-with-a-strong-random-secret
+SMTP_ENCRYPTION_SALT=replace-with-a-random-salt
 
-# 应用
+# 应用与跨域
+NODE_ENV=development
 APP_HOST=0.0.0.0
 APP_PORT=3000
 APP_URL=http://localhost:3000
 FRONTEND_URL=http://localhost:5173
 CORS_ORIGINS=http://localhost:5173
-# SECURE_COOKIE=true  # 生产 HTTPS 环境启用 Cookie secure 标志
-# TOKEN_EXTRACTION_MODE=both  # both（Cookie + Bearer）或 cookie_only
+# TRUST_PROXY_HOPS=1
+# SECURE_COOKIE=true
+# TOKEN_EXTRACTION_MODE=both
 
-# 上传（启动后可从管理面板动态调整）
+# 上传：数据库动态配置 > 环境变量 > 20MB 安全默认值
 MAX_FILE_SIZE=83886080
-FILE_TYPE_MODE=blacklist      # blacklist 或 whitelist
-FILE_TYPE_FILTER=              # 逗号分隔的扩展名，如 .zip,.exe,.sh，空值不限制
+# FILE_TYPE_MODE=blacklist
+# FILE_TYPE_FILTER=
 
-# 日志保留策略（定时自动清理）
-ACCESS_LOG_RETENTION_DAYS=30   # 访问日志保留天数
-AUDIT_LOG_RETENTION_DAYS=90    # 审计日志保留天数
+# 日志保留
+ACCESS_LOG_RETENTION_DAYS=30
+AUDIT_LOG_RETENTION_DAYS=90
 ```
 
-第一个注册的账号自动成为超级管理员。
+配置说明：
+
+- `TELEGRAM_API_BASE` 可指向自建 `telegram-bot-api`。当 `getFile` 返回绝对路径时，只有路径位于 `TELEGRAM_LOCAL_FILE_DIR` 白名单内才会直读；该工作目录必须永久保留，不可清空或重命名。
+- Telegram 旧本地路径失效时只会通过同一 `TELEGRAM_API_BASE` 刷新一次，不存在独立 relay 配置。
+- SMTP 新密文使用 AES-256-GCM，并兼容读取旧 AES-256-CBC 密文。
+- 生产环境不得将凭据型 CORS 配置设为 `*`；`TRUST_PROXY_HOPS` 必须与实际可信代理层数一致。
 
 ## 项目结构
 
@@ -185,7 +232,7 @@ AUDIT_LOG_RETENTION_DAYS=90    # 审计日志保留天数
 │   ├── share/                # 分享链接模块（独立 ShareLink 实体：创建/列出/修改/取消；公开端点 /s/:token 元数据+密码验证+下载+文件夹浏览）
 │   ├── admin/                # 用户/文件/IP封禁/系统配置管理/仪表盘/访问统计/审计日志
 │   ├── alert/                # 告警模块（规则评估 + WebSocket 推送）
-│   ├── jobs/                 # Bull 任务队列（指标聚合/攻击检测/告警评估/基线计算/数据归档）
+│   ├── jobs/                 # Bull 任务队列（指标聚合/攻击检测/告警评估/基线计算/数据归档/文件上传）
 │   ├── tag/                  # 标签模块（CRUD + 文件关联）
 │   ├── telemetry/            # 遥测模块（前端事件上报收集）
 │   ├── security/             # 行为异常检测（6 种异常模式）
@@ -194,7 +241,7 @@ AUDIT_LOG_RETENTION_DAYS=90    # 审计日志保留天数
 │   ├── config/               # 动态配置缓存
 │   ├── tasks/                # 定时清理（限流/Token/封禁/访问日志/审计日志）
 │   ├── common/
-│   │   ├── entities/         # 17 个数据实体（含 Folder、ShareLink）
+│   │   ├── entities/         # TypeORM 实体（以 app.module.ts 与 database/data-source.ts 注册列表为准）
 │   │   ├── services/         # ConfigCacheService + RateLimitService + AuditService
 │   │   ├── guards/           # JWT 认证 + 角色权限守卫
 │   │   ├── decorators/       # @CurrentUser @Roles
@@ -202,12 +249,12 @@ AUDIT_LOG_RETENTION_DAYS=90    # 审计日志保留天数
 │   │   ├── middleware/       # AccessLogMiddleware（全局 HTTP 请求日志）
 │   │   └── utils/            # client-ip.ts crypto.util.ts
 │   ├── database/             # TypeORM CLI DataSource
-│   └── migrations/           # 28 个数据库迁移文件
+│   └── migrations/           # TypeORM 迁移文件；所有环境均通过迁移管理表结构
 │
 ├── frontend/src/
 │   ├── views/
 │   │   ├── auth/             # Login.vue Register.vue
-│   │   ├── user/             # Dashboard FileList（网盘主页面，卡片/列表双视图） Shares（我的分享管理） Settings
+│   │   ├── user/             # Dashboard FileList（桌面列表/移动端卡片） Shares（我的分享管理） Settings
 │   │   ├── share/            # ShareView（SPA 分享页状态机） PasswordPrompt（严格模式密码卡片） FileShareCard（文件信息卡+下载按钮） FolderShareBrowser（文件夹分享层级浏览）
 │   │   ├── admin/            # Dashboard Users Files Config AccessLogs AuditLogs SourceAnalysis UserActivity BandwidthAnalysis FileTypeAnalysis AlertManagement SecurityMonitor DashboardCustomizer
 │   │   └── layout/           # 侧边栏布局（含「我的分享」入口）
@@ -216,10 +263,10 @@ AUDIT_LOG_RETENTION_DAYS=90    # 审计日志保留天数
 │   │   ├── file/             # FileCard（文件卡片，悬停显示操作按钮） FolderCard（文件夹卡片，区分样式）
 │   │   ├── share/            # CreateShareDialog（创建分享弹窗，支持密码/有效期/次数设置）
 │   │   └── ...               # UploadModal ThumbnailImg TagManager FileTagEditor
-│   ├── composables/          # useAutoRefresh useCursorPagination useTimeRange useMobile
+│   ├── composables/          # useAutoRefresh useCursorPagination useTimeRange useMobile useChunkedUpload
 │   ├── stores/               # auth files tags folders（文件夹树/面包屑/CRUD） (Pinia)
 │   ├── router/               # 四级路由守卫链 + redirect 安全校验 + /s/:token 公开分享路由（meta.public 跳过登录）
-│   ├── api/                  # axios 客户端（30s 超时，401 防抖，410 Gone 分享失效处理）
+│   ├── api/                  # axios 客户端（普通请求默认 30s；上传链路单独禁用超时；401 防抖；410 分享失效处理）
 │   ├── types/                # TS 类型定义
 │   └── utils/                # error.ts format.ts thumbnail.ts telemetry.ts(遥测收集器)
 │
@@ -239,8 +286,9 @@ npm run start:prod           # 生产启动
 npm run test                 # 跑测试（Jest，覆盖率阈值 30%）
 npm run test:cov             # 测试 + 覆盖率报告
 npm run typecheck            # TypeScript 类型检查（strict 模式）
-npx jest --testPathPattern=auth/auth.service  # 单测
-npm run migration:generate   # 生成迁移
+npm run check:typeorm-columns # 检查实体联合类型列是否显式声明数据库类型
+npm exec -- jest src/auth/auth.service.spec.ts --runInBand  # 单测
+npm run migration:generate   # 生成迁移（生成后按用途重命名文件）
 npm run migration:run        # 执行迁移
 npm run migration:revert     # 回滚迁移
 
@@ -275,7 +323,17 @@ npm run typecheck            # TypeScript 类型检查
 | POST | `/api/auth/verify-email` | 邮箱验证 |
 | POST | `/api/auth/reset-password` | 重置密码 |
 | GET | `/api/users/me/stats` | 个人统计 |
-| POST | `/api/files/upload-multiple` | 批量上传 |
+| PUT | `/api/users/me/password` | 修改当前用户密码 |
+| POST | `/api/files/upload` | 同步单文件上传（等待 Telegram 上传完成） |
+| POST | `/api/files/upload-multiple` | 批量接收并加入 Bull 后台上传队列，最多 10 个文件 |
+| POST | `/api/files/upload-async` | 异步单文件上传，支持 `folderId`；返回任务 ID，由状态接口轮询 |
+| POST | `/api/files/upload-multiple-async` | 异步批量上传，返回批量任务 ID |
+| GET | `/api/files/upload-status/:jobId` | 查询当前用户的异步上传任务状态 |
+| POST | `/api/files/chunk/init` | 初始化分片上传，可携带 `folderId` |
+| POST | `/api/files/chunk/:uploadId` | 上传单个分片（`chunk` + `index`） |
+| GET | `/api/files/chunk/:uploadId/status` | 查询会话及已上传分片，用于断点续传 |
+| POST | `/api/files/chunk/:uploadId/complete` | 启动后台合并并加入 Telegram 上传队列 |
+| POST | `/api/files/chunk/:uploadId/abort` | 取消尚未进入合并/上传阶段的会话 |
 | GET | `/api/files` | 文件列表（支持 `folderId` 过滤：`root`=根目录，UUID=指定文件夹） |
 | DELETE | `/api/files/:id` | 请求删除文件（7天冷静期） |
 | POST | `/api/files/:id/restore` | 恢复已删除文件 |
@@ -283,6 +341,8 @@ npm run typecheck            # TypeScript 类型检查
 | GET | `/api/files/:id/download` | 下载（后端代理流式转发） |
 | GET | `/api/files/:id/thumbnail?t=` | 缩略图预览 |
 | PATCH | `/api/files/:id/move` | 移动文件到指定文件夹（`folderId: null`=根目录） |
+| PATCH | `/api/files/:id/rename` | 重命名文件 |
+| POST | `/api/files/:id/copy` | 复制文件 |
 | GET | `/api/files/:id/share` | 生成分享链接（旧端点，建议用 POST /api/shares） |
 | PUT | `/api/files/:id/password` | 设置密码（遗留端点，新分享用 POST /api/shares） |
 | PUT | `/api/files/:id/access-type` | 公开/私有 |
@@ -322,10 +382,11 @@ npm run typecheck            # TypeScript 类型检查
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/api/admin/stats` | 全站统计 |
-| GET | `/api/admin/users` | 用户列表 |
-| POST | `/api/admin/users` | 创建用户 |
-| PUT | `/api/admin/users/:id/role` | 修改用户角色 |
-| DELETE | `/api/admin/users/:id` | 删除用户 |
+| GET | `/api/users` | 用户列表（Admin / Super Admin） |
+| POST | `/api/users` | 创建用户（Admin / Super Admin） |
+| PUT | `/api/users/:id/role` | 修改用户角色（仅 Super Admin） |
+| PUT | `/api/users/:id/ban` | 封禁或解封用户 |
+| DELETE | `/api/users/:id` | 删除用户 |
 | GET | `/api/admin/files` | 全站文件管理 |
 | DELETE | `/api/admin/files/:id` | 删除任意用户文件 |
 | GET | `/api/admin/banned-ips` | IP 封禁列表 |
@@ -334,6 +395,8 @@ npm run typecheck            # TypeScript 类型检查
 | PUT | `/api/admin/config` | 系统配置（仅 SUPER_ADMIN） |
 | PUT | `/api/admin/config/batch` | 批量配置 |
 | PUT | `/api/admin/upload-config` | 上传配置 |
+| GET | `/api/admin/cache-config` | 查询文件缓存容量、最低磁盘空间与 TTL（仅 SUPER_ADMIN） |
+| PUT | `/api/admin/cache-config` | 更新文件缓存配置（仅 SUPER_ADMIN） |
 | PUT | `/api/admin/auth-config` | 认证配置 |
 | PUT | `/api/admin/smtp` | SMTP 配置 |
 | GET | `/api/admin/security-config` | 安全规则配置（仅 SUPER_ADMIN） |
