@@ -59,7 +59,12 @@
 
     <!-- 文件上传配置 -->
     <div class="card" style="margin-top: 20px;">
-      <h3 style="margin-bottom: 16px;">📁 文件上传配置</h3>
+      <h3 style="margin-bottom: 16px; display: flex; align-items: center; gap: 8px;">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M3 6a2 2 0 012-2h4l2 2h8a2 2 0 012 2v10a2 2 0 01-2 2H5a2 2 0 01-2-2V6z" />
+        </svg>
+        文件上传配置
+      </h3>
       <t-form layout="vertical">
 
         <!-- 最大文件大小 -->

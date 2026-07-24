@@ -20,7 +20,12 @@
 
       <!-- IP 被封禁 -->
       <div v-else-if="state.kind === 'banned'" class="state-card banned-card">
-        <div class="state-icon">🚫</div>
+        <div class="state-icon">
+          <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"/>
+            <path d="m4.9 4.9 14.2 14.2"/>
+          </svg>
+        </div>
         <h1>访问受限</h1>
         <p>{{ state.message }}</p>
         <p class="hint">密码错误次数过多，请稍后再试</p>
@@ -28,7 +33,12 @@
 
       <!-- 分享不存在 / 已取消 / 已过期 -->
       <div v-else-if="state.kind === 'notFound'" class="state-card not-found-card">
-        <div class="state-icon">🔍</div>
+        <div class="state-icon">
+          <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="11" cy="11" r="8"/>
+            <path d="m21 21-4.35-4.35"/>
+          </svg>
+        </div>
         <h1>分享不存在</h1>
         <p>{{ state.message || '此分享链接已失效或已被取消' }}</p>
         <p class="hint">请向分享者确认链接是否正确</p>
@@ -217,11 +227,11 @@ watch(token, async () => {
   overflow: hidden;
 }
 
-/* 暗色背景 + 顶部微光（百度网盘风） */
+/* 背景 + 顶部微光 */
 .bg-gradient {
   position: fixed;
   inset: 0;
-  background: linear-gradient(135deg, #0D1117 0%, #161B22 50%, #0D1117 100%);
+  background: linear-gradient(135deg, var(--color-bg) 0%, var(--color-bg-surface) 50%, var(--color-bg) 100%);
   z-index: -1;
 }
 
@@ -233,7 +243,7 @@ watch(token, async () => {
   transform: translateX(-50%);
   width: 800px;
   height: 400px;
-  background: radial-gradient(ellipse, rgba(0, 82, 217, 0.15) 0%, transparent 70%);
+  background: radial-gradient(ellipse, var(--color-accent-soft) 0%, transparent 70%);
   pointer-events: none;
 }
 
@@ -255,18 +265,20 @@ watch(token, async () => {
 }
 
 .state-card {
-  background: #21262D;
-  border: 1px solid #30363D;
-  border-radius: 16px;
+  background: var(--color-bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
   padding: 48px 40px;
   text-align: center;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
-  color: #E6EDF3;
-  font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  box-shadow: var(--shadow-lg);
+  color: var(--text-primary);
+  font-family: var(--font-body);
 }
 
 .state-icon {
-  font-size: 64px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   margin-bottom: 16px;
 }
 
@@ -276,27 +288,27 @@ watch(token, async () => {
 }
 
 .state-card p {
-  color: #8B949E;
+  color: var(--text-secondary);
   font-size: 14px;
   margin: 8px 0;
   line-height: 1.6;
 }
 
 .state-card .hint {
-  color: #6E7681;
+  color: var(--text-tertiary);
   font-size: 13px;
   margin-top: 16px;
 }
 
 .banned-card {
-  border-color: rgba(248, 81, 73, 0.3);
+  border-color: color-mix(in srgb, var(--color-danger) 30%, transparent);
 }
 
 .banned-card .state-icon {
-  color: #F85149;
+  color: var(--color-danger);
 }
 
 .not-found-card .state-icon {
-  color: #6E7681;
+  color: var(--text-tertiary);
 }
 </style>

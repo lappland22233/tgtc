@@ -237,7 +237,7 @@
               />
             </div>
             <div class="os-cell os-name">
-              <ThumbnailImg :file-id="file.id" :mime-type="file.mimeType" :size="32" :emoji="getFileEmoji(file.mimeType)" />
+              <ThumbnailImg :file-id="file.id" :mime-type="file.mimeType" :size="32" :file-name="file.originalName" />
               <div class="os-name-block">
                 <span class="os-name-text" :class="{ 'deleted-name': file.isDeleted }" :title="file.originalName">
                   {{ file.originalName }}
@@ -311,7 +311,7 @@
           @touchend="handleTouchEnd"
         >
           <div class="mobile-file-card-header">
-            <ThumbnailImg :file-id="file.id" :mime-type="file.mimeType" :size="40" :emoji="getFileEmoji(file.mimeType)" />
+            <ThumbnailImg :file-id="file.id" :mime-type="file.mimeType" :size="40" :file-name="file.originalName" />
             <div class="mobile-file-main">
               <div class="mobile-file-name" :class="{ 'deleted-name': file.isDeleted }">{{ file.originalName }}</div>
               <div class="mobile-file-meta">{{ formatSize(file.size) }} · {{ formatDate(file.createdAt) }}</div>
@@ -486,7 +486,7 @@ import { DialogPlugin } from 'tdesign-vue-next';
 import { useFileStore } from '../../stores/files';
 import { useAuthStore, api } from '../../stores/auth';
 import { getErrorMessage } from '../../utils/error';
-import { formatSize, formatDate, getFileEmoji } from '@/utils/format';
+import { formatSize, formatDate } from '@/utils/format';
 import { triggerBrowserDownload } from '@/utils/download';
 import { useCursorPagination } from '../../composables/useCursorPagination';
 import { useMobile } from '../../composables/useMobile';
@@ -1682,7 +1682,7 @@ onUnmounted(() => {
 
 .os-folder:hover,
 .os-file:hover {
-  background: rgba(77, 124, 254, 0.04);
+  background: var(--color-bg-hover);
 }
 
 .os-folder {

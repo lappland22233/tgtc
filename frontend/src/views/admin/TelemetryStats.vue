@@ -164,6 +164,10 @@ import * as echarts from '@/utils/echarts';
 import client from '../../api/client';
 import { CHART_COLORS, tooltipBase, legendBase, areaGradient, ensureCyberTheme } from '../../utils/echarts-theme';
 
+// Theme-aware chart colors
+const isDark = () => document.documentElement.getAttribute('data-theme') === 'dark';
+const axisLabelColor = () => isDark() ? '#8895A7' : '#5F6B7A';
+
 // ---- 时间范围 ----
 const timeRange = ref('24h');
 const lastRefreshTime = ref('');
@@ -456,8 +460,8 @@ function updateTrendChart() {
     tooltip: { trigger: 'axis', ...tooltipBase },
     legend: { data: ['错误', '性能', '环境'], ...legendBase },
     grid: { left: 50, right: 20, top: 36, bottom: 30 },
-    xAxis: { type: 'category', data: times, boundaryGap: false, axisLabel: { color: '#8895A7', fontSize: 11 } },
-    yAxis: { type: 'value', axisLabel: { color: '#8895A7', fontSize: 11 } },
+    xAxis: { type: 'category', data: times, boundaryGap: false, axisLabel: { color: axisLabelColor(), fontSize: 11 } },
+    yAxis: { type: 'value', axisLabel: { color: axisLabelColor(), fontSize: 11 } },
     series: [
       { name: '错误', type: 'line', data: stats.trend.map(t => t.error), smooth: true, lineStyle: { color: CHART_COLORS.danger, width: 2 }, itemStyle: { color: CHART_COLORS.danger }, areaStyle: { color: areaGradient(CHART_COLORS.danger) }, symbol: 'none' },
       { name: '性能', type: 'line', data: stats.trend.map(t => t.performance), smooth: true, lineStyle: { color: CHART_COLORS.success, width: 2 }, itemStyle: { color: CHART_COLORS.success }, areaStyle: { color: areaGradient(CHART_COLORS.success) }, symbol: 'none' },
@@ -475,8 +479,8 @@ function updatePieChart() {
       type: 'pie',
       radius: ['45%', '75%'],
       center: ['62%', '50%'],
-      label: { color: '#8895A7' },
-      emphasis: { itemStyle: { shadowBlur: 20, shadowColor: 'rgba(0,0,0,0.4)' } },
+      label: { color: axisLabelColor() },
+      emphasis: { itemStyle: { shadowBlur: 20, shadowColor: isDark() ? 'rgba(0,0,0,0.4)' : 'rgba(0,0,0,0.15)' } },
       data: [
         { name: '错误', value: stats.byType.error, itemStyle: { color: CHART_COLORS.danger } },
         { name: '性能', value: stats.byType.performance, itemStyle: { color: CHART_COLORS.success } },
@@ -519,8 +523,8 @@ function updatePerfChart() {
     },
     legend: { data: stages.map(s => s.name), ...legendBase, bottom: 0 },
     grid: { left: 110, right: 40, top: 10, bottom: 40 },
-    xAxis: { type: 'value', name: 'ms', nameTextStyle: { color: '#8895A7', fontSize: 11 }, axisLabel: { color: '#8895A7', fontSize: 11 } },
-    yAxis: { type: 'category', data: labels, axisLabel: { color: '#8895A7', fontSize: 11, width: 100, overflow: 'truncate' } },
+    xAxis: { type: 'value', name: 'ms', nameTextStyle: { color: axisLabelColor(), fontSize: 11 }, axisLabel: { color: axisLabelColor(), fontSize: 11 } },
+    yAxis: { type: 'category', data: labels, axisLabel: { color: axisLabelColor(), fontSize: 11, width: 100, overflow: 'truncate' } },
     series: stages.map(stage => ({
       name: stage.name,
       type: 'bar',
@@ -624,8 +628,8 @@ onUnmounted(() => {
   font-weight: 700;
   line-height: 1.1;
 }
-.metric-danger .metric-value.has-value { color: var(--error, #EF4444); }
-.metric-success .metric-value { color: var(--success, #22C55E); }
+.metric-danger .metric-value.has-value { color: var(--color-danger); }
+.metric-success .metric-value { color: var(--color-success); }
 .metric-sub {
   font-size: 12px;
   color: var(--text-secondary);
@@ -674,7 +678,7 @@ onUnmounted(() => {
 .chip {
   font-size: 12px;
   color: var(--text-secondary);
-  background: var(--bg-color, rgba(255,255,255,0.04));
+  background: var(--color-bg-hover);
   border-radius: 6px;
   padding: 3px 10px;
 }
@@ -682,7 +686,7 @@ onUnmounted(() => {
 
 .count-badge {
   font-size: 12px;
-  background: var(--error, #EF4444);
+  background: var(--color-danger);
   color: #fff;
   border-radius: 10px;
   padding: 1px 8px;

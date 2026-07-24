@@ -103,7 +103,7 @@
           </template>
           <template #fileName="{ row }">
             <span class="file-name-cell">
-              <span class="file-emoji">{{ getFileEmoji(row.mimeType) }}</span>
+              <FileTypeIcon :mimeType="row.mimeType" :fileName="row.fileName" :size="16" />
               <span>{{ row.fileName }}</span>
             </span>
           </template>
@@ -329,12 +329,19 @@ import { ref, reactive, computed, onMounted, onUnmounted, watch, nextTick } from
 import MessagePlugin from '@/utils/message';
 import * as echarts from '@/utils/echarts';
 import client from '../../api/client';
-import { formatSize as formatSizeUtil, getFileEmoji } from '@/utils/format';
+import { formatSize as formatSizeUtil } from '@/utils/format';
+import FileTypeIcon from '@/components/FileTypeIcon.vue';
 import SourceAnalysis from './SourceAnalysis.vue';
 import BandwidthAnalysis from './BandwidthAnalysis.vue';
 import FileTypeAnalysis from './FileTypeAnalysis.vue';
 import { useMobile } from '../../composables/useMobile';
 import { CHART_COLORS, STATUS_COLORS, tooltipBase, legendBase, areaGradient, ensureCyberTheme } from '../../utils/echarts-theme';
+
+// Theme-aware chart colors
+const isDark = () => document.documentElement.getAttribute('data-theme') === 'dark';
+const axisLabelColor = () => isDark() ? '#8895A7' : '#5F6B7A';
+const axisLineColor = () => isDark() ? 'rgba(232,237,245,0.12)' : 'rgba(22,25,31,0.12)';
+const splitLineColor = () => isDark() ? 'rgba(232,237,245,0.06)' : 'rgba(22,25,31,0.06)';
 
 // Top-level tab state
 const accessTab = ref('overview');
@@ -760,22 +767,22 @@ async function updateTrendChart(trendData: TrendItem[]) {
     xAxis: {
       type: 'category',
       data: times,
-      axisLabel: { color: '#8895A7', fontSize: 11, rotate: trendData.length > 24 ? 45 : 0 },
-      axisLine: { lineStyle: { color: 'rgba(255,255,255,0.06)' } },
+      axisLabel: { color: axisLabelColor(), fontSize: 11, rotate: trendData.length > 24 ? 45 : 0 },
+      axisLine: { lineStyle: { color: axisLineColor() } },
     },
     yAxis: [
       {
         type: 'value',
         name: '请求数',
-        nameTextStyle: { color: '#8895A7', fontSize: 11 },
-        axisLabel: { color: '#8895A7', fontSize: 11 },
-        splitLine: { lineStyle: { color: 'rgba(255,255,255,0.04)', type: 'dashed' } },
+        nameTextStyle: { color: axisLabelColor(), fontSize: 11 },
+        axisLabel: { color: axisLabelColor(), fontSize: 11 },
+        splitLine: { lineStyle: { color: splitLineColor(), type: 'dashed' } },
       },
       {
         type: 'value',
         name: '带宽',
-        nameTextStyle: { color: '#8895A7', fontSize: 11 },
-        axisLabel: { color: '#8895A7', fontSize: 11, formatter: (v: number) => formatSizeUtil(v) },
+        nameTextStyle: { color: axisLabelColor(), fontSize: 11 },
+        axisLabel: { color: axisLabelColor(), fontSize: 11, formatter: (v: number) => formatSizeUtil(v) },
         splitLine: { show: false },
       },
     ],
@@ -838,9 +845,9 @@ async function updatePieChart() {
         type: 'pie',
         radius: ['45%', '75%'],
         center: ['40%', '50%'],
-        data: pieData.length > 0 ? pieData : [{ name: '无数据', value: 1, itemStyle: { color: 'rgba(255,255,255,0.08)' } }],
+        data: pieData.length > 0 ? pieData : [{ name: '无数据', value: 1, itemStyle: { color: isDark() ? 'rgba(255,255,255,0.08)' : 'rgba(22,25,31,0.08)' } }],
         label: { show: false },
-        emphasis: { label: { show: true, fontSize: 14, fontWeight: 'bold' }, itemStyle: { shadowBlur: 20, shadowColor: 'rgba(0,0,0,0.4)' } },
+        emphasis: { label: { show: true, fontSize: 14, fontWeight: 'bold' }, itemStyle: { shadowBlur: 20, shadowColor: isDark() ? 'rgba(0,0,0,0.4)' : 'rgba(0,0,0,0.15)' } },
       },
     ],
   }, true);
@@ -1064,7 +1071,7 @@ onUnmounted(() => window.removeEventListener('resize', handleResize));
   font-size: 12px;
   font-weight: 600;
   color: var(--text-secondary);
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--color-bg-hover);
 }
 
 .rank-badge.rank-1 {
@@ -1099,7 +1106,7 @@ onUnmounted(() => window.removeEventListener('resize', handleResize));
   font-family: var(--font-mono);
   font-size: 12px;
   color: var(--text-primary);
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--color-bg-hover);
   padding: 2px 6px;
   border-radius: 3px;
 }
@@ -1190,7 +1197,7 @@ onUnmounted(() => window.removeEventListener('resize', handleResize));
   font-family: var(--font-mono);
   font-size: 13px;
   color: var(--text-primary);
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--color-bg-hover);
   padding: 2px 6px;
   border-radius: 3px;
 }

@@ -39,11 +39,14 @@ export function formatRelativeDate(dateStr: string): string {
   return formatDate(dateStr);
 }
 
-export function getFileEmoji(mimeType?: string): string {
-  if (!mimeType) return '📎';
-  if (mimeType.startsWith('image/')) return '🖼️';
-  if (mimeType.includes('pdf')) return '📄';
-  if (mimeType.includes('zip') || mimeType.includes('rar')) return '📦';
-  if (mimeType.includes('text')) return '📝';
-  return '📎';
+/**
+ * @deprecated Use FileTypeIcon component or getFileIconType() instead.
+ * Kept for backward compatibility — returns empty string so callers
+ * that still pass the result to ThumbnailImg's emoji prop won't render emoji.
+ */
+export function getFileEmoji(_mimeType?: string): string {
+  return '';
 }
+
+// Re-export for convenience: import { getFileIconType } from '@/utils/format'
+export { getFileIconType } from './file-icon-type';

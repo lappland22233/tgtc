@@ -2,7 +2,12 @@
   <t-config-provider :global-config="globalConfig">
     <div v-if="hasError" class="error-boundary">
       <div class="error-boundary-card">
-        <div class="error-icon">⚠</div>
+        <div class="error-icon">
+          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--color-danger, #D13212)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
+            <path d="M12 9v4M12 17h.01"/>
+          </svg>
+        </div>
         <h2>页面发生错误</h2>
         <p class="error-message">{{ errorMessage }}</p>
         <div class="error-actions">
@@ -20,15 +25,23 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onErrorCaptured, onUnmounted, watch } from 'vue';
+import { ref, computed, onErrorCaptured, onUnmounted, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { useAuthStore } from './stores/auth';
 
 const authStore = useAuthStore();
 
-const globalConfig = {
-  theme: 'dark',
-};
+// TDesign globalConfig theme follows the app theme (set by main.ts initTheme)
+const isDark = ref(document.documentElement.getAttribute('data-theme') === 'dark');
+const globalConfig = computed(() => ({
+  theme: isDark.value ? 'dark' : undefined,
+}));
+
+// Observe theme changes to keep TDesign in sync
+const themeObserver = new MutationObserver(() => {
+  isDark.value = document.documentElement.getAttribute('data-theme') === 'dark';
+});
+themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
 
 const hasError = ref(false);
 const errorMessage = ref('');
@@ -49,6 +62,7 @@ onErrorCaptured((err) => {
 
 onUnmounted(() => {
   authStore.closeAuthChannel();
+  themeObserver.disconnect();
 });
 
 function reload() {

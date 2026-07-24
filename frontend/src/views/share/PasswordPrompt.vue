@@ -1,7 +1,12 @@
 <template>
   <div class="pwd-card">
     <div class="lock-icon-wrapper">
-      <div class="lock-icon">🔒</div>
+      <div class="lock-icon">
+        <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+          <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+        </svg>
+      </div>
     </div>
     <h1 class="pwd-title">加密分享</h1>
     <p class="pwd-subtitle">此分享需要密码才能访问</p>
@@ -25,7 +30,12 @@
     </form>
 
     <p class="security-hint">
-      💡 严格模式密码保护：未通过验证前不会显示任何文件信息
+      <svg class="hint-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="10"/>
+        <path d="M12 16v-4"/>
+        <path d="M12 8h.01"/>
+      </svg>
+      严格模式密码保护：未通过验证前不会显示任何文件信息
     </p>
   </div>
 </template>
@@ -64,16 +74,16 @@ watch(() => props.errorMessage, (v) => {
 
 <style scoped>
 .pwd-card {
-  background: #21262D;
-  border: 1px solid #30363D;
-  border-radius: 16px;
+  background: var(--color-bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
   padding: 48px 40px;
   width: 100%;
   max-width: 420px;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  box-shadow: var(--shadow-lg);
   text-align: center;
-  font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif;
-  color: #E6EDF3;
+  font-family: var(--font-body);
+  color: var(--text-primary);
 }
 
 .lock-icon-wrapper {
@@ -81,8 +91,10 @@ watch(() => props.errorMessage, (v) => {
 }
 
 .lock-icon {
-  font-size: 56px;
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--seed-primary);
   animation: pulse 2s ease-in-out infinite;
 }
 
@@ -95,23 +107,23 @@ watch(() => props.errorMessage, (v) => {
   font-size: 22px;
   font-weight: 600;
   margin: 0 0 8px;
-  color: #E6EDF3;
+  color: var(--text-primary);
 }
 
 .pwd-subtitle {
-  color: #8B949E;
+  color: var(--text-secondary);
   font-size: 14px;
   margin: 0 0 28px;
 }
 
 .error-msg {
-  background: rgba(248, 81, 73, 0.13);
-  color: #F85149;
+  background: var(--color-danger-soft);
+  color: var(--color-danger);
   padding: 10px 14px;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   font-size: 13px;
   margin-bottom: 16px;
-  border: 1px solid rgba(248, 81, 73, 0.3);
+  border: 1px solid color-mix(in srgb, var(--color-danger) 30%, transparent);
 }
 
 .pwd-form {
@@ -124,10 +136,10 @@ watch(() => props.errorMessage, (v) => {
 .pwd-input {
   width: 100%;
   padding: 14px 16px;
-  background: #0D1117;
-  border: 1px solid #30363D;
-  border-radius: 8px;
-  color: #E6EDF3;
+  background: var(--color-bg);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
   font-size: 16px;
   outline: none;
   box-sizing: border-box;
@@ -136,8 +148,8 @@ watch(() => props.errorMessage, (v) => {
 }
 
 .pwd-input:focus {
-  border-color: #0052D9;
-  box-shadow: 0 0 0 3px rgba(0, 82, 217, 0.2);
+  border-color: var(--seed-primary);
+  box-shadow: 0 0 0 3px var(--color-accent-soft);
 }
 
 .pwd-input:disabled {
@@ -148,10 +160,10 @@ watch(() => props.errorMessage, (v) => {
 .pwd-submit-btn {
   width: 100%;
   padding: 14px;
-  background: #0052D9;
+  background: var(--seed-primary);
   color: #fff;
   border: none;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   font-size: 16px;
   font-weight: 500;
   cursor: pointer;
@@ -164,7 +176,7 @@ watch(() => props.errorMessage, (v) => {
 }
 
 .pwd-submit-btn:hover:not(:disabled) {
-  background: #0969DA;
+  background: color-mix(in srgb, var(--seed-primary) 85%, #fff);
 }
 
 .pwd-submit-btn:active:not(:disabled) {
@@ -172,8 +184,8 @@ watch(() => props.errorMessage, (v) => {
 }
 
 .pwd-submit-btn:disabled {
-  background: #30363D;
-  color: #8B949E;
+  background: var(--border-default);
+  color: var(--text-secondary);
   cursor: not-allowed;
 }
 
@@ -191,9 +203,17 @@ watch(() => props.errorMessage, (v) => {
 }
 
 .security-hint {
-  color: #6E7681;
+  color: var(--text-tertiary);
   font-size: 12px;
   margin: 0;
   line-height: 1.5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+.hint-icon {
+  flex-shrink: 0;
 }
 </style>

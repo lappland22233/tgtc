@@ -17,6 +17,7 @@ declare module 'vue' {
     FileContextMenu: typeof import('./src/components/file/FileContextMenu.vue')['default']
     FileRenameDialog: typeof import('./src/components/file/FileRenameDialog.vue')['default']
     FileTagEditor: typeof import('./src/components/FileTagEditor.vue')['default']
+    FileTypeIcon: typeof import('./src/components/FileTypeIcon.vue')['default']
     FolderBreadcrumb: typeof import('./src/components/folder/FolderBreadcrumb.vue')['default']
     FolderCard: typeof import('./src/components/file/FolderCard.vue')['default']
     FolderCreateDialog: typeof import('./src/components/folder/FolderCreateDialog.vue')['default']

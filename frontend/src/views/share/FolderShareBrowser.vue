@@ -3,7 +3,11 @@
     <!-- 顶部：文件夹标题 + 面包屑 -->
     <div class="browser-header">
       <div class="folder-title-row">
-        <span class="folder-icon-large">📁</span>
+        <span class="folder-icon-large">
+          <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+          </svg>
+        </span>
         <h1 class="folder-title">{{ rootFolder.name }}</h1>
       </div>
 
@@ -30,7 +34,11 @@
     <div v-else class="browser-content">
       <!-- 空状态 -->
       <div v-if="currentContents.subfolders.length === 0 && currentContents.files.length === 0" class="empty-state">
-        <div class="empty-icon">📂</div>
+        <div class="empty-icon">
+          <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M6 14l1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2"/>
+          </svg>
+        </div>
         <p>此文件夹为空</p>
       </div>
 
@@ -44,7 +52,11 @@
             class="subfolder-card"
             @click="openSubfolder(sub)"
           >
-            <div class="subfolder-icon">📁</div>
+            <div class="subfolder-icon">
+              <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+              </svg>
+            </div>
             <div class="subfolder-name" :title="sub.name">{{ sub.name }}</div>
           </div>
         </div>
@@ -61,7 +73,7 @@
             :title="file.name"
           >
             <div class="file-card-preview">
-              <span class="file-emoji">{{ getFileEmoji(file.mimeType) }}</span>
+              <FileTypeIcon :mimeType="file.mimeType" :fileName="file.name" :size="48" />
             </div>
             <div class="file-card-info">
               <div class="file-card-name" :title="file.name">{{ file.name }}</div>
@@ -97,6 +109,7 @@
 import { ref, reactive } from 'vue';
 import MessagePlugin from '@/utils/message';
 import { triggerBrowserDownload } from '@/utils/download';
+import FileTypeIcon from '@/components/FileTypeIcon.vue';
 
 interface FolderSummary {
   id: string;
@@ -229,36 +242,23 @@ function formatRelativeDate(dateStr: string): string {
     return '';
   }
 }
-
-function getFileEmoji(mimeType: string): string {
-  const m = (mimeType || '').toLowerCase();
-  if (m.startsWith('image/')) return '🖼️';
-  if (m.startsWith('video/')) return '🎬';
-  if (m.startsWith('audio/')) return '🎵';
-  if (m === 'application/pdf') return '📄';
-  if (m.includes('zip') || m.includes('rar') || m.includes('7z')) return '🗜️';
-  if (m.includes('word')) return '📝';
-  if (m.includes('excel') || m.includes('sheet')) return '📊';
-  if (m.includes('powerpoint') || m.includes('presentation')) return '📽️';
-  return '📄';
-}
 </script>
 
 <style scoped>
 .folder-share-browser {
   width: 100%;
   max-width: 960px;
-  background: #21262D;
-  border: 1px solid #30363D;
-  border-radius: 16px;
+  background: var(--color-bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
   padding: 24px 32px 32px;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
-  font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif;
-  color: #E6EDF3;
+  box-shadow: var(--shadow-lg);
+  font-family: var(--font-body);
+  color: var(--text-primary);
 }
 
 .browser-header {
-  border-bottom: 1px solid #30363D;
+  border-bottom: 1px solid var(--border-default);
   padding-bottom: 16px;
   margin-bottom: 20px;
 }
@@ -270,13 +270,17 @@ function getFileEmoji(mimeType: string): string {
   margin-bottom: 12px;
 }
 
-.folder-icon-large { font-size: 36px; }
+.folder-icon-large {
+  display: inline-flex;
+  align-items: center;
+  color: var(--seed-primary);
+}
 
 .folder-title {
   font-size: 22px;
   font-weight: 600;
   margin: 0;
-  color: #E6EDF3;
+  color: var(--text-primary);
 }
 
 .breadcrumb {
@@ -291,22 +295,28 @@ function getFileEmoji(mimeType: string): string {
   display: inline-flex;
   align-items: center;
   cursor: pointer;
-  color: #8B949E;
+  color: var(--text-secondary);
 }
 
-.breadcrumb-item:hover { color: #58A6FF; }
-.breadcrumb-item.active { color: #E6EDF3; font-weight: 500; cursor: default; }
-.breadcrumb-separator { color: #6E7681; margin: 0 4px; }
+.breadcrumb-item:hover { color: var(--seed-primary); }
+.breadcrumb-item.active { color: var(--text-primary); font-weight: 500; cursor: default; }
+.breadcrumb-separator { color: var(--text-tertiary); margin: 0 4px; }
 
 .loading-state { padding: 48px 0; text-align: center; }
 
 .empty-state {
   padding: 48px 0;
   text-align: center;
-  color: #6E7681;
+  color: var(--text-tertiary);
 }
 
-.empty-icon { font-size: 56px; margin-bottom: 8px; }
+.empty-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 8px;
+  color: var(--text-tertiary);
+}
 
 .browser-content {
   display: flex;
@@ -317,7 +327,7 @@ function getFileEmoji(mimeType: string): string {
 .section-title {
   font-size: 14px;
   font-weight: 500;
-  color: #8B949E;
+  color: var(--text-secondary);
   margin: 0 0 12px;
 }
 
@@ -328,9 +338,9 @@ function getFileEmoji(mimeType: string): string {
 }
 
 .subfolder-card {
-  background: rgba(13, 17, 23, 0.5);
-  border: 1px solid #30363D;
-  border-radius: 8px;
+  background: var(--color-bg);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
   padding: 16px 12px;
   cursor: pointer;
   text-align: center;
@@ -338,12 +348,18 @@ function getFileEmoji(mimeType: string): string {
 }
 
 .subfolder-card:hover {
-  border-color: #58A6FF;
-  background: rgba(0, 82, 217, 0.08);
+  border-color: var(--seed-primary);
+  background: var(--color-accent-soft);
   transform: translateY(-2px);
 }
 
-.subfolder-icon { font-size: 40px; margin-bottom: 6px; }
+.subfolder-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 6px;
+  color: var(--seed-primary);
+}
 
 .subfolder-name {
   font-size: 13px;
@@ -351,13 +367,13 @@ function getFileEmoji(mimeType: string): string {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  color: #E6EDF3;
+  color: var(--text-primary);
 }
 
 .share-file-card {
-  background: rgba(13, 17, 23, 0.5);
-  border: 1px solid #30363D;
-  border-radius: 8px;
+  background: var(--color-bg);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
   overflow: hidden;
   cursor: pointer;
   transition: all 0.2s;
@@ -366,9 +382,9 @@ function getFileEmoji(mimeType: string): string {
 }
 
 .share-file-card:hover {
-  border-color: #58A6FF;
+  border-color: var(--seed-primary);
   transform: translateY(-2px);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  box-shadow: var(--shadow-md);
 }
 
 .file-card-preview {
@@ -377,8 +393,7 @@ function getFileEmoji(mimeType: string): string {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: linear-gradient(135deg, rgba(110, 118, 129, 0.15), rgba(13, 17, 23, 0.4));
-  font-size: 48px;
+  background: var(--color-bg-hover);
 }
 
 .file-card-info {
@@ -391,7 +406,7 @@ function getFileEmoji(mimeType: string): string {
 .file-card-name {
   font-size: 13px;
   font-weight: 500;
-  color: #E6EDF3;
+  color: var(--text-primary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -399,22 +414,22 @@ function getFileEmoji(mimeType: string): string {
 
 .file-card-meta {
   font-size: 11px;
-  color: #6E7681;
+  color: var(--text-tertiary);
   display: flex;
   align-items: center;
   gap: 4px;
 }
 
-.meta-dot { color: #484F58; }
+.meta-dot { color: var(--text-tertiary); }
 
 .file-download-btn {
   display: block;
   margin: 0 10px 10px;
   padding: 6px 12px;
-  background: #0052D9;
+  background: var(--seed-primary);
   color: #fff;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   font-size: 13px;
   font-family: inherit;
   text-align: center;
@@ -423,7 +438,7 @@ function getFileEmoji(mimeType: string): string {
   transition: background 0.2s;
 }
 
-.file-download-btn:hover { background: #0969DA; }
+.file-download-btn:hover { background: color-mix(in srgb, var(--seed-primary) 85%, #fff); }
 .file-download-btn:disabled { opacity: 0.6; cursor: not-allowed; }
 
 .back-to-parent {
@@ -431,8 +446,8 @@ function getFileEmoji(mimeType: string): string {
   text-align: left;
 }
 
-.back-to-parent :deep(.t-button) { color: #8B949E; }
-.back-to-parent :deep(.t-button:hover) { color: #58A6FF; }
+.back-to-parent :deep(.t-button) { color: var(--text-secondary); }
+.back-to-parent :deep(.t-button:hover) { color: var(--seed-primary); }
 
 @media (min-width: 1200px) {
   .card-grid {

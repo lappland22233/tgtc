@@ -35,7 +35,7 @@
         </template>
         <template #filename="{ row }">
           <div style="display: flex; align-items: center; gap: 12px;">
-            <ThumbnailImg :file-id="row.id" :mime-type="row.mimeType" :size="36" :emoji="getFileEmoji(row.mimeType)" />
+            <ThumbnailImg :file-id="row.id" :mime-type="row.mimeType" :size="36" :file-name="row.originalName" />
             <div>
               <div :class="{ 'deleted-name': row.isDeleted }">{{ row.originalName }}</div>
               <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
@@ -83,7 +83,7 @@
       <div v-if="isMobile" class="mobile-card-list">
         <div v-for="file in files" :key="file.id" class="mobile-file-admin-card">
           <div style="display: flex; align-items: flex-start; gap: 12px;">
-            <ThumbnailImg :file-id="file.id" :mime-type="file.mimeType" :size="40" :emoji="getFileEmoji(file.mimeType)" />
+            <ThumbnailImg :file-id="file.id" :mime-type="file.mimeType" :size="40" :file-name="file.originalName" />
             <div style="flex: 1; min-width: 0;">
               <div :class="{ 'deleted-name': file.isDeleted }" style="font-weight: 500; word-break: break-all; font-size: 14px;">
                 {{ file.originalName }}
@@ -124,7 +124,7 @@ import { ref, onMounted, onUnmounted, watch } from 'vue';
 import { DialogPlugin } from 'tdesign-vue-next';
 import MessagePlugin from '@/utils/message';
 import { api } from '../../stores/auth';
-import { formatSize, formatDate, getFileEmoji } from '@/utils/format';
+import { formatSize, formatDate } from '@/utils/format';
 import { getErrorMessage } from '../../utils/error';
 import { useCursorPagination } from '../../composables/useCursorPagination';
 import { useMobile } from '../../composables/useMobile';

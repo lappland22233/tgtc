@@ -7,8 +7,45 @@ import TIcon from './components/TIcon.vue';
 import 'tdesign-vue-next/dist/tdesign.css';
 import './assets/styles.css';
 
-// 启用 TDesign 深色模式（设置 DOM 属性触发 CSS 变量）
-document.documentElement.setAttribute('theme-mode', 'dark');
+// ---- Theme initialization (Light/Dark dual theme) ----
+// Priority: localStorage > system preference > default light
+function initTheme(): string {
+  const stored = localStorage.getItem('filecloud-theme');
+  if (stored === 'dark' || stored === 'light') return stored;
+  if (window.matchMedia('(prefers-color-scheme: dark)').matches) return 'dark';
+  return 'light';
+}
+
+function applyTheme(theme: string) {
+  const el = document.documentElement;
+  el.setAttribute('data-theme', theme);
+  // TDesign dark mode compat
+  if (theme === 'dark') {
+    el.setAttribute('theme-mode', 'dark');
+  } else {
+    el.removeAttribute('theme-mode');
+  }
+}
+
+const currentTheme = initTheme();
+applyTheme(currentTheme);
+
+// Listen for system theme changes (only when user hasn't explicitly chosen)
+if (!localStorage.getItem('filecloud-theme')) {
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', (e) => {
+    const next = e.matches ? 'dark' : 'light';
+    applyTheme(next);
+    // Refresh echarts theme on switch
+    import('./utils/echarts-theme').then(({ refreshChartTheme }) => refreshChartTheme());
+  });
+}
+
+// Expose theme setter for use in settings page / theme toggle components
+(window as any).__setFileCloudTheme = (theme: 'light' | 'dark') => {
+  localStorage.setItem('filecloud-theme', theme);
+  applyTheme(theme);
+  import('./utils/echarts-theme').then(({ refreshChartTheme }) => refreshChartTheme());
+};
 
 // 延迟加载非关键模块（echarts 主题注册、遥测初始化）
 let deferredInitDone = false;

@@ -212,6 +212,9 @@ import { api } from '@/stores/auth';
 import { useMobile } from '../../composables/useMobile';
 import { CHART_COLORS, tooltipBase, legendBase, ensureCyberTheme } from '../../utils/echarts-theme';
 
+// Theme-aware chart colors
+const isDark = () => document.documentElement.getAttribute('data-theme') === 'dark';
+
 // --- Types ---
 
 interface RefererCategory {
@@ -389,9 +392,9 @@ async function updatePieChart(
                 value: d.value,
                 itemStyle: { color: d.color },
               }))
-            : [{ name: '无数据', value: 1, itemStyle: { color: 'rgba(255,255,255,0.08)' } }],
+            : [{ name: '无数据', value: 1, itemStyle: { color: isDark() ? 'rgba(255,255,255,0.08)' : 'rgba(22,25,31,0.08)' } }],
         label: { show: false },
-        emphasis: { label: { show: true, fontSize: 14, fontWeight: 'bold' }, itemStyle: { shadowBlur: 20, shadowColor: 'rgba(0,0,0,0.4)' } },
+        emphasis: { label: { show: true, fontSize: 14, fontWeight: 'bold' }, itemStyle: { shadowBlur: 20, shadowColor: isDark() ? 'rgba(0,0,0,0.4)' : 'rgba(0,0,0,0.15)' } },
       },
     ],
   });
@@ -575,7 +578,7 @@ defineExpose({ resizeAllCharts });
 }
 
 .category-card-item {
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--color-bg-hover);
   border-left: 4px solid;
   border-radius: 4px;
   padding: 12px 16px;
@@ -620,7 +623,7 @@ defineExpose({ resizeAllCharts });
 }
 
 .device-card-item {
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--color-bg-hover);
   border-left: 4px solid;
   border-radius: 4px;
   padding: 12px 16px;

@@ -10,7 +10,15 @@
     <t-form :data="form" :rules="rules" ref="formRef" label-width="100px">
       <t-form-item label="分享目标">
         <div class="target-info">
-          <span class="target-icon">{{ targetType === 'folder' ? '📁' : '📄' }}</span>
+          <span class="target-icon">
+            <svg v-if="targetType === 'folder'" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M3 6a2 2 0 012-2h4l2 2h8a2 2 0 012 2v10a2 2 0 01-2 2H5a2 2 0 01-2-2V6z" />
+            </svg>
+            <svg v-else width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
+              <path d="M14 2v6h6" />
+            </svg>
+          </span>
           <span class="target-name" :title="targetName">{{ targetName }}</span>
         </div>
       </t-form-item>
@@ -45,8 +53,21 @@
         <t-button theme="primary" @click="copyLink">复制链接</t-button>
       </div>
       <div class="result-hint">
-        <span v-if="form.password">🔒 加密分享</span>
-        <span v-else>🌐 公开分享</span>
+        <span v-if="form.password" style="display: inline-flex; align-items: center; gap: 3px;">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="3" y="11" width="18" height="11" rx="2" />
+            <path d="M7 11V7a5 5 0 0110 0v4" />
+          </svg>
+          加密分享
+        </span>
+        <span v-else style="display: inline-flex; align-items: center; gap: 3px;">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="10" />
+            <path d="M2 12h20" />
+            <path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z" />
+          </svg>
+          公开分享
+        </span>
         <span v-if="form.maxAccessCount > 0"> · 限 {{ form.maxAccessCount }} 次访问</span>
         <span v-if="form.expiresIn"> · {{ form.expiresIn }} 小时有效</span>
       </div>
