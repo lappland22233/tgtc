@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { PassThrough } from 'stream';
+import { PassThrough, Readable } from 'stream';
 import { ConfigService } from '@nestjs/config';
 import { promises as fs } from 'fs';
 import { TelegramService } from './telegram.service';
@@ -12,11 +12,8 @@ function createService(overrides: Record<string, string> = {}) {
   const config: Record<string, string> = {
     TELEGRAM_BOT_TOKEN: '123456:test-token',
     TELEGRAM_CHAT_ID: '-100123',
-    TELEGRAM_API_BASE: 'https://api.telegram.org',
-    TELEGRAM_RELAY_BASE: 'https://relay.example.com',
-    TELEGRAM_RELAY_MIN_FILE_SIZE: '100',
-    TELEGRAM_DIRECT_FIRST_BYTE_TIMEOUT_MS: '20',
-    TELEGRAM_RELAY_FIRST_BYTE_TIMEOUT_MS: '50',
+    TELEGRAM_API_BASE: 'http://localhost:8081',
+    TELEGRAM_FIRST_BYTE_TIMEOUT_MS: '20',
     TELEGRAM_DOWNLOAD_TIMEOUT_MS: '1000',
     TELEGRAM_LOCAL_FILE_DIR: '/data/api/telegram-bot-api/workdir',
     ...overrides,
@@ -25,106 +22,148 @@ function createService(overrides: Record<string, string> = {}) {
   return new TelegramService(configService);
 }
 
-describe('TelegramService getFileStream relay fallback', () => {
+describe('TelegramService getFileStream with self-hosted Bot API', () => {
   beforeEach(() => jest.clearAllMocks());
 
-  it('大型文件直连首字节超时后应切换中转', async () => {
-    const direct = new PassThrough();
-    const relay = new PassThrough();
-    mockedAxios.get
-      .mockResolvedValueOnce({ data: direct } as never)
-      .mockResolvedValueOnce({ data: relay } as never);
+  afterEach(() => jest.restoreAllMocks());
+
+  it('相对 file_path 应通过当前 Bot API 文件端点下载', async () => {
+    const remote = new PassThrough();
+    mockedAxios.get.mockResolvedValueOnce({ data: remote } as never);
 
     const pending = createService().getFileStream(
       'tg-file',
       { file_path: 'documents/large.bin', file_size: 1024 },
     );
-    setTimeout(() => relay.write(Buffer.from('relay-data')), 30);
+    setTimeout(() => remote.write(Buffer.from('data')), 5);
 
     const result = await pending;
-    expect(result.stream).toBe(relay);
-    expect(direct.destroyed).toBe(true);
-    expect(mockedAxios.get).toHaveBeenNthCalledWith(
-      2,
-      'https://relay.example.com/file/bot123456:test-token/documents/large.bin',
+    expect(result.stream).toBe(remote);
+    expect(mockedAxios.get).toHaveBeenCalledWith(
+      'http://localhost:8081/file/bot123456:test-token/documents/large.bin',
       expect.objectContaining({ responseType: 'stream', timeout: 1000 }),
     );
-    relay.end();
+    remote.end();
   });
 
-  it('小文件直连失败时不应触发中转', async () => {
-    const direct = new PassThrough();
-    mockedAxios.get.mockResolvedValueOnce({ data: direct } as never);
+  it('Bot API 返回绝对路径时应直接读取本地文件，不拼接文件 URL', async () => {
+    const local = Readable.from(Buffer.from('local-data'));
+    const handle = { createReadStream: jest.fn(() => local), close: jest.fn() };
+    jest.spyOn(fs, 'open').mockResolvedValueOnce(handle as never);
+    mockedAxios.get.mockResolvedValueOnce({
+      data: {
+        result: {
+          file_id: 'tg-file',
+          file_path: '/data/api/telegram-bot-api/workdir/documents/file_1496',
+          file_size: 10,
+        },
+      },
+    } as never);
 
-    await expect(createService().getFileStream(
-      'tg-file',
-      { file_path: 'documents/small.bin', file_size: 50 },
-    )).rejects.toThrow('首字节超时');
-    expect(mockedAxios.get).toHaveBeenCalledTimes(1);
-  });
+    const result = await createService().getFileStream('tg-file');
 
-  it('直连及时返回首字节时应保持直连', async () => {
-    const direct = new PassThrough();
-    mockedAxios.get.mockResolvedValueOnce({ data: direct } as never);
-
-    const pending = createService().getFileStream(
-      'tg-file',
-      { file_path: 'documents/large.bin', file_size: 1024 },
+    expect(result.stream).toBe(local);
+    expect(fs.open).toHaveBeenCalledWith(
+      expect.stringMatching(/[\\/]data[\\/]api[\\/]telegram-bot-api[\\/]workdir[\\/]documents[\\/]file_1496$/),
+      'r',
     );
-    setTimeout(() => direct.write(Buffer.from('direct-data')), 5);
-
-    const result = await pending;
-    expect(result.stream).toBe(direct);
     expect(mockedAxios.get).toHaveBeenCalledTimes(1);
-    direct.end();
+    expect(mockedAxios.get).toHaveBeenCalledWith(
+      'http://localhost:8081/bot123456:test-token/getFile',
+      expect.objectContaining({ params: { file_id: 'tg-file' } }),
+    );
   });
 
-  it('旧本地副本 ENOENT 时应通过中转刷新路径并下载', async () => {
-    const openSpy = jest.spyOn(fs, 'open').mockRejectedValueOnce(
-      Object.assign(new Error('missing'), { code: 'ENOENT' }),
-    );
-    const relay = new PassThrough();
-    mockedAxios.get
-      .mockResolvedValueOnce({
-        data: { result: { file_id: 'tg-file', file_path: 'documents/refreshed.bin', file_size: 1024 } },
-      } as never)
-      .mockResolvedValueOnce({ data: relay } as never);
+  it('数据库旧路径缺失时应通过当前 Bot API 刷新为新的绝对路径', async () => {
+    const local = Readable.from(Buffer.from('refreshed-data'));
+    const handle = { createReadStream: jest.fn(() => local), close: jest.fn() };
+    jest.spyOn(fs, 'open')
+      .mockRejectedValueOnce(Object.assign(new Error('missing'), { code: 'ENOENT' }))
+      .mockResolvedValueOnce(handle as never);
+    mockedAxios.get.mockResolvedValueOnce({
+      data: {
+        result: {
+          file_id: 'tg-file',
+          file_path: '/data/api/telegram-bot-api/workdir/documents/file_1496',
+          file_size: 1024,
+        },
+      },
+    } as never);
 
-    const pending = createService().getFileStream(
+    const result = await createService().getFileStream(
       'tg-file',
       { file_path: '/data/api/telegram-bot-api/workdir/documents/file_1226.002', file_size: 1024 },
     );
-    setTimeout(() => relay.write(Buffer.from('relay-data')), 5);
 
-    const result = await pending;
-    expect(result.stream).toBe(relay);
-    expect(mockedAxios.get).toHaveBeenNthCalledWith(
-      1,
-      'https://relay.example.com/bot123456:test-token/getFile',
+    expect(result.stream).toBe(local);
+    expect(result.info.file_path).toBe('/data/api/telegram-bot-api/workdir/documents/file_1496');
+    expect(mockedAxios.get).toHaveBeenCalledWith(
+      'http://localhost:8081/bot123456:test-token/getFile',
       expect.objectContaining({ params: { file_id: 'tg-file' } }),
     );
-    expect(mockedAxios.get).toHaveBeenNthCalledWith(
-      2,
-      'https://relay.example.com/file/bot123456:test-token/documents/refreshed.bin',
-      expect.objectContaining({ responseType: 'stream' }),
-    );
-    relay.end();
-    openSpy.mockRestore();
   });
 
-  it('旧本地副本缺失且未配置中转时应受控失败', async () => {
-    const openSpy = jest.spyOn(fs, 'open').mockRejectedValueOnce(
+  it('数据库旧路径缺失时应支持刷新为相对路径后下载', async () => {
+    const remote = new PassThrough();
+    jest.spyOn(fs, 'open').mockRejectedValueOnce(
       Object.assign(new Error('missing'), { code: 'ENOENT' }),
     );
-    await expect(createService({ TELEGRAM_RELAY_BASE: '' }).getFileStream(
+    mockedAxios.get
+      .mockResolvedValueOnce({
+        data: { result: { file_id: 'tg-file', file_path: 'photos/file_169.jpg', file_size: 1024 } },
+      } as never)
+      .mockResolvedValueOnce({ data: remote } as never);
+
+    const pending = createService().getFileStream(
       'tg-file',
-      { file_path: '/data/api/telegram-bot-api/workdir/documents/file_711.004', file_size: 1024 },
-    )).rejects.toThrow('未配置下载中转');
-    expect(mockedAxios.get).not.toHaveBeenCalled();
-    openSpy.mockRestore();
+      { file_path: '/data/api/telegram-bot-api/workdir/photos/file_247.jpg', file_size: 1024 },
+    );
+    setTimeout(() => remote.write(Buffer.from('remote-data')), 5);
+
+    const result = await pending;
+    expect(result.stream).toBe(remote);
+    expect(mockedAxios.get).toHaveBeenNthCalledWith(
+      2,
+      'http://localhost:8081/file/bot123456:test-token/photos/file_169.jpg',
+      expect.objectContaining({ responseType: 'stream' }),
+    );
+    remote.end();
   });
 
-  it('本地路径越过白名单时不得回退中转', async () => {
+  it('刷新后的绝对路径仍缺失时应受控失败且不重复刷新', async () => {
+    jest.spyOn(fs, 'open')
+      .mockRejectedValueOnce(Object.assign(new Error('old missing'), { code: 'ENOENT' }))
+      .mockRejectedValueOnce(Object.assign(new Error('new missing'), { code: 'ENOENT' }));
+    mockedAxios.get.mockResolvedValueOnce({
+      data: {
+        result: {
+          file_id: 'tg-file',
+          file_path: '/data/api/telegram-bot-api/workdir/documents/file_1496',
+          file_size: 1024,
+        },
+      },
+    } as never);
+
+    await expect(createService().getFileStream(
+      'tg-file',
+      { file_path: '/data/api/telegram-bot-api/workdir/documents/file_711.004', file_size: 1024 },
+    )).rejects.toThrow('本地文件路径已失效');
+    expect(mockedAxios.get).toHaveBeenCalledTimes(1);
+  });
+
+  it('file_id 无法解析时应报告文件失效并要求重新上传', async () => {
+    mockedAxios.get.mockRejectedValueOnce({
+      response: { status: 404, data: { description: 'Not Found' } },
+      config: { url: 'http://localhost:8081/bot123456:test-token/getFile' },
+      message: 'Request failed with status code 404',
+    });
+
+    await expect(createService().getFileStream('expired-file-id')).rejects.toThrow(
+      'Telegram 文件已失效或 Bot API 无法解析该 file_id，请重新上传文件',
+    );
+  });
+
+  it('本地路径越过白名单时不得刷新或下载', async () => {
     await expect(createService().getFileStream(
       'tg-file',
       { file_path: '/etc/passwd', file_size: 1024 },

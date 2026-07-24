@@ -1504,6 +1504,19 @@ export class FileService implements OnModuleInit {
   }
 
 
+  private async getTelegramFileStream(file: File) {
+    const result = await this.telegramService.getFileStream(
+      file.telegramFileId || file.filename,
+      { file_path: file.telegramFilePath, file_size: Number(file.size) },
+    );
+    if (result.info.file_path && result.info.file_path !== file.telegramFilePath) {
+      await this.fileRepository.update(file.id, { telegramFilePath: result.info.file_path });
+      file.telegramFilePath = result.info.file_path;
+      this.logger.log(`已刷新 Telegram 文件路径: fileId=${file.id}`);
+    }
+    return result;
+  }
+
   /**
    * 流式下载文件内容（后端代理，不暴露 Telegram URL）
    * 用于避免大文件全部加载到内存
@@ -1550,10 +1563,7 @@ export class FileService implements OnModuleInit {
       : await this.fileCacheService.getOrCacheStream(
         file.id,
         Number(file.size),
-        () => this.telegramService.getFileStream(
-          file.telegramFileId || file.filename,
-          { file_path: file.telegramFilePath, file_size: Number(file.size) },
-        ),
+        () => this.getTelegramFileStream(file),
       );
 
     // 写访问日志（responseSize 先占位为 0，流式传输完成后由 controller 更新为实际字节数）
@@ -1790,10 +1800,7 @@ export class FileService implements OnModuleInit {
     const cachedStream = await this.fileCacheService.openCachedReadStream(file.id, Number(file.size));
     const { stream, info } = cachedStream
       ? { stream: cachedStream, info: { file_id: file.telegramFileId, file_path: '', file_size: Number(file.size) } }
-      : await this.telegramService.getFileStream(
-        file.telegramFileId || file.filename,
-        { file_path: file.telegramFilePath, file_size: Number(file.size) },
-      );
+      : await this.getTelegramFileStream(file);
 
     let accessLogId: string | undefined;
     try {
@@ -1844,10 +1851,7 @@ export class FileService implements OnModuleInit {
     const cachedStream = await this.fileCacheService.openCachedReadStream(file.id, Number(file.size));
     const { stream, info } = cachedStream
       ? { stream: cachedStream, info: { file_id: file.telegramFileId, file_path: '', file_size: Number(file.size) } }
-      : await this.telegramService.getFileStream(
-        file.telegramFileId || file.filename,
-        { file_path: file.telegramFilePath, file_size: Number(file.size) },
-      );
+      : await this.getTelegramFileStream(file);
 
     let accessLogId: string | undefined;
     try {

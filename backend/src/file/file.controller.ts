@@ -363,7 +363,7 @@ export class FileController {
         // Telegram 回源不支持 Range；未缓存时以 200 完整响应重新下载。
       }
 
-      // 下载端点允许等待直连首字节探测和中转切换，避免被 Node 默认空闲超时提前终止。
+      // 下载端点允许等待 Bot API 路径刷新和首字节探测，避免被 Node 默认空闲超时提前终止。
       req.setTimeout(0);
       res.setTimeout(0);
       const result = await this.fileService.getFileContentStream(id, user, clientIp);

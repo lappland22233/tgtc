@@ -13,11 +13,7 @@ export class TelegramService {
   private readonly chatId: string;
   private readonly apiBase: string;
   private readonly fileBase: string;
-  /** 可选中转 Bot API 基址；仅在大型文件直连启动失败或首字节超时时启用。 */
-  private readonly relayBase: string;
-  private readonly relayMinFileSize: number;
-  private readonly directFirstByteTimeoutMs: number;
-  private readonly relayFirstByteTimeoutMs: number;
+  private readonly firstByteTimeoutMs: number;
   private readonly downloadRequestTimeoutMs: number;
   /**
    * 本地 Bot API 文件存储的允许根目录（白名单）。
@@ -36,10 +32,7 @@ export class TelegramService {
     const base = this.configService.get<string>('TELEGRAM_API_BASE') || 'https://api.telegram.org';
     this.apiBase = `${base.replace(/\/$/, '')}/bot`;
     this.fileBase = `${base.replace(/\/$/, '')}/file/bot`;
-    this.relayBase = (this.configService.get<string>('TELEGRAM_RELAY_BASE') || '').replace(/\/$/, '');
-    this.relayMinFileSize = this.getPositiveNumberConfig('TELEGRAM_RELAY_MIN_FILE_SIZE', 50 * 1024 * 1024);
-    this.directFirstByteTimeoutMs = this.getPositiveNumberConfig('TELEGRAM_DIRECT_FIRST_BYTE_TIMEOUT_MS', 15 * 1000);
-    this.relayFirstByteTimeoutMs = this.getPositiveNumberConfig('TELEGRAM_RELAY_FIRST_BYTE_TIMEOUT_MS', 30 * 1000);
+    this.firstByteTimeoutMs = this.getPositiveNumberConfig('TELEGRAM_FIRST_BYTE_TIMEOUT_MS', 15 * 1000);
     this.downloadRequestTimeoutMs = this.getPositiveNumberConfig('TELEGRAM_DOWNLOAD_TIMEOUT_MS', 5 * 60 * 1000);
     // 本地文件白名单根目录，如 /var/lib/telegram-bot-api 或容器内 tmp 目录
     this.localFileBase = this.configService.get<string>('TELEGRAM_LOCAL_FILE_DIR') || '';
@@ -122,32 +115,31 @@ export class TelegramService {
   /**
    * 上传文件后立即调用 getFile 获取真实的 file_path
    */
-  private async getFileInfo(file_id: string): Promise<{
+  private async getFileInfo(fileId: string): Promise<{
     file_id: string;
     file_path: string;
     file_size: number;
   }> {
-    return this.getFileInfoFromApi(file_id, this.apiBase, 'getFileInfo');
-  }
-
-  private async getFileInfoFromApi(
-    fileId: string,
-    apiBase: string,
-    label: string,
-  ): Promise<{ file_id: string; file_path: string; file_size: number }> {
-    return this.telegramRequest(async () => {
-      const response = await axios.get(`${apiBase}${this.botToken}/getFile`, {
-        params: { file_id: fileId },
-        timeout: this.downloadRequestTimeoutMs,
-      });
-      const result = response.data.result;
-      if (!result?.file_path) throw new Error(`${label} 响应缺少 file_path`);
-      return {
-        file_id: result.file_id || fileId,
-        file_path: result.file_path,
-        file_size: result.file_size || 0,
-      };
-    }, label);
+    try {
+      return await this.telegramRequest(async () => {
+        const response = await axios.get(`${this.getBaseUrl()}/getFile`, {
+          params: { file_id: fileId },
+          timeout: this.downloadRequestTimeoutMs,
+        });
+        const result = response.data.result;
+        if (!result?.file_path) throw new Error('getFile 响应缺少 file_path');
+        return {
+          file_id: result.file_id || fileId,
+          file_path: result.file_path,
+          file_size: result.file_size || 0,
+        };
+      }, 'getFileInfo');
+    } catch (error) {
+      if (error instanceof Error && error.message === 'Telegram Bot 未找到，请检查 Bot Token 是否正确') {
+        throw new Error('Telegram 文件已失效或 Bot API 无法解析该 file_id，请重新上传文件');
+      }
+      throw error;
+    }
   }
 
   async uploadFile(
@@ -246,10 +238,6 @@ export class TelegramService {
     return `${base}${this.botToken}/${file_path}`;
   }
 
-  private getRelayFileBase(): string | null {
-    return this.relayBase ? `${this.relayBase}/file/bot` : null;
-  }
-
   private waitForFirstChunk(stream: Readable, timeoutMs: number, label: string): Promise<void> {
     return new Promise((resolve, reject) => {
       let timer: NodeJS.Timeout;
@@ -326,28 +314,32 @@ export class TelegramService {
     return ['ENOENT', 'ESTALE', 'EIO', 'ENXIO'].includes(code);
   }
 
-  private async openRelayStreamByFileId(
+  private async openRefreshedFileById(
     fileId: string,
     fallbackSize: number,
   ): Promise<{ stream: Readable; info: { file_id: string; file_path: string; file_size: number } }> {
-    if (!this.relayBase) throw new Error('本地文件副本不可用且未配置下载中转');
-    const relayApiBase = `${this.relayBase}/bot`;
-    const relayFileBase = this.getRelayFileBase();
-    if (!relayFileBase) throw new Error('下载中转配置无效');
-    const refreshed = await this.getFileInfoFromApi(fileId, relayApiBase, '中转 getFile');
+    const refreshed = await this.getFileInfo(fileId);
+    const info = { ...refreshed, file_size: refreshed.file_size || fallbackSize };
+
     if (this.isLocalPath(refreshed.file_path)) {
-      throw new Error('中转 getFile 返回了不可远程读取的本地路径');
+      try {
+        const stream = await this.openLocalFileStream(refreshed.file_path);
+        return { stream, info };
+      } catch (error) {
+        if (this.isRecoverableLocalFileError(error)) {
+          throw new Error('Telegram Bot API 返回的本地文件路径已失效，请恢复存储目录或重新上传文件');
+        }
+        throw error;
+      }
     }
+
     const stream = await this.openRemoteFileStream(
       refreshed.file_path,
-      relayFileBase,
-      this.relayFirstByteTimeoutMs,
-      'Telegram 中转下载',
+      this.fileBase,
+      this.firstByteTimeoutMs,
+      'Telegram Bot API 文件下载',
     );
-    return {
-      stream,
-      info: { ...refreshed, file_size: refreshed.file_size || fallbackSize },
-    };
+    return { stream, info };
   }
 
   /**
@@ -424,53 +416,31 @@ export class TelegramService {
     file_id: string,
     knownInfo?: { file_path?: string | null; file_size?: number },
   ): Promise<{ stream: Readable; info: { file_id: string; file_path: string; file_size: number } }> {
-    // 下载路径优先使用数据库已持久化的 file_path，避免每次先调用 getFile；
-    // 否则 getFile 自身卡住时，中转文件下载分支永远没有机会触发。
+    // 优先使用数据库中的路径；旧本地路径失效时仅通过当前 TELEGRAM_API_BASE 刷新一次。
     const fileInfo = knownInfo?.file_path
       ? { file_id, file_path: knownInfo.file_path, file_size: knownInfo.file_size || 0 }
       : await this.getFileInfo(file_id);
     const filePath = fileInfo.file_path;
 
-    let stream: Readable;
     if (this.isLocalPath(filePath)) {
       try {
-        stream = await this.openLocalFileStream(filePath);
+        const stream = await this.openLocalFileStream(filePath);
+        return { stream, info: fileInfo };
       } catch (localError) {
         if (!this.isRecoverableLocalFileError(localError)) throw localError;
         const code = (localError as NodeJS.ErrnoException).code || 'UNKNOWN';
-        this.logger.warn(`Telegram 本地副本不可用，切换中转: fileId=${file_id}, code=${code}`);
-        return this.openRelayStreamByFileId(file_id, fileInfo.file_size);
-      }
-    } else {
-      const relayFileBase = this.getRelayFileBase();
-      const shouldUseRelayFallback = Boolean(
-        relayFileBase
-        && fileInfo.file_size >= this.relayMinFileSize
-        && relayFileBase !== this.fileBase,
-      );
-      try {
-        // 在把流交给缓存层和 Controller 前等待首字节，避免先发送响应头后空挂至外层代理超时。
-        stream = await this.openRemoteFileStream(
-          filePath,
-          this.fileBase,
-          this.directFirstByteTimeoutMs,
-          'Telegram 直连下载',
-        );
-      } catch (directError) {
-        if (!shouldUseRelayFallback || !relayFileBase) throw directError;
-        const message = directError instanceof Error ? directError.message : '未知错误';
-        this.logger.warn(
-          `大型文件直连启动失败，切换中转下载: fileId=${file_id}, size=${fileInfo.file_size}, reason=${this.redactToken(message)}`,
-        );
-        stream = await this.openRemoteFileStream(
-          filePath,
-          relayFileBase,
-          this.relayFirstByteTimeoutMs,
-          'Telegram 中转下载',
-        );
+        this.logger.warn(`Telegram 本地副本不可用，通过当前 Bot API 刷新路径: fileId=${file_id}, code=${code}`);
+        return this.openRefreshedFileById(file_id, fileInfo.file_size);
       }
     }
 
+    // 相对 file_path 才能拼接 /file/bot<TOKEN>/；绝对路径永远不会进入 HTTP 下载分支。
+    const stream = await this.openRemoteFileStream(
+      filePath,
+      this.fileBase,
+      this.firstByteTimeoutMs,
+      'Telegram Bot API 文件下载',
+    );
     return { stream, info: fileInfo };
   }
 

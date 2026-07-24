@@ -322,7 +322,7 @@ export class FileCacheService {
       return { stream, fromCache: true };
     }
 
-    // 在等待上游首字节前先登记 inflight，避免多个并发请求同时启动直连/中转回源。
+    // 在等待上游首字节前先登记 inflight，避免多个并发请求同时启动 Bot API 回源。
     let resolveInflight!: () => void;
     let rejectInflight!: (error: unknown) => void;
     const inflight = new Promise<void>((resolve, reject) => {
@@ -333,7 +333,7 @@ export class FileCacheService {
     inflight.finally(() => this.inflight.delete(fileId)).catch(() => {});
 
     try {
-      // 先完成上游连接和首字节探测，再把流返回给 Controller，确保中转切换发生在响应头发送前。
+      // 先完成上游连接和首字节探测，再把流返回给 Controller，确保路径刷新发生在响应头发送前。
       const fetched = await fetchFn();
       const pass = new PassThrough();
       this.populateCache(fileId, expectedSize, fetched.stream, pass).then(resolveInflight, rejectInflight);
