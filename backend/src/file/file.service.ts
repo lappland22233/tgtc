@@ -1540,7 +1540,7 @@ export class FileService implements OnModuleInit {
     }
 
     // 缓存未命中且文件仍在处理中（TG 未同步）→ 拒绝下载，避免用临时 UUID 回源
-    const cachedStream = this.fileCacheService.getCachedReadStream(file.id, Number(file.size));
+    const cachedStream = await this.fileCacheService.openCachedReadStream(file.id, Number(file.size));
     if (!cachedStream && file.status === 'processing') {
       throw new BadRequestException('文件正在处理中，请稍后刷新重试');
     }
@@ -1609,13 +1609,6 @@ export class FileService implements OnModuleInit {
 
     await this.assertFileReadable(file, user);
 
-    // 仅对本地缓存的文件支持 Range
-    const cachedPath = this.fileCacheService.getCachedPath(file.id);
-    if (!cachedPath) {
-      // 未缓存的文件回退到完整下载（Telegram API 不支持 Range）
-      return null;
-    }
-
     // 文件仍在处理中（TG 未同步）→ 拒绝范围下载，避免用临时 UUID 回源
     if (file.status === 'processing') {
       throw new BadRequestException('文件正在处理中，请稍后刷新重试');
@@ -1628,9 +1621,14 @@ export class FileService implements OnModuleInit {
       throw new BadRequestException('Range 范围无效');
     }
 
-    // 读取指定范围的文件片段
+    // 仅对已安全打开的本地缓存支持 Range；打开失败按未缓存处理。
+    const readStream = await this.fileCacheService.openCachedReadStream(
+      file.id,
+      total,
+      { start, end: actualEnd },
+    );
+    if (!readStream) return null;
     const chunkSize = actualEnd - start + 1;
-    const readStream = createReadStream(cachedPath, { start, end: actualEnd });
 
     // 原子访问计数：与完整下载路径一致，强制 maxAccessCount 上限并校验 affected，
     // 防止受限文件被无限次范围下载绕过。
@@ -1789,7 +1787,7 @@ export class FileService implements OnModuleInit {
       }
     }
 
-    const cachedStream = this.fileCacheService.getCachedReadStream(file.id, Number(file.size));
+    const cachedStream = await this.fileCacheService.openCachedReadStream(file.id, Number(file.size));
     const { stream, info } = cachedStream
       ? { stream: cachedStream, info: { file_id: file.telegramFileId, file_path: '', file_size: Number(file.size) } }
       : await this.telegramService.getFileStream(
@@ -1843,7 +1841,7 @@ export class FileService implements OnModuleInit {
       throw new ForbiddenException('此文件为私有文件，不提供公开访问');
     }
 
-    const cachedStream = this.fileCacheService.getCachedReadStream(file.id, Number(file.size));
+    const cachedStream = await this.fileCacheService.openCachedReadStream(file.id, Number(file.size));
     const { stream, info } = cachedStream
       ? { stream: cachedStream, info: { file_id: file.telegramFileId, file_path: '', file_size: Number(file.size) } }
       : await this.telegramService.getFileStream(
@@ -2231,8 +2229,9 @@ export class FileService implements OnModuleInit {
     if (!Number.isSafeInteger(start) || !Number.isSafeInteger(requestedEnd) || start >= total || start > end) {
       return { kind: 'invalid', total };
     }
-    const cachedPath = this.fileCacheService.getCachedPath(file.id);
-    if (!cachedPath || file.status === 'processing') return { kind: 'unavailable', total };
+    if (file.status === 'processing') return { kind: 'unavailable', total };
+    const rangeStream = await this.fileCacheService.openCachedReadStream(file.id, total, { start, end });
+    if (!rangeStream) return { kind: 'unavailable', total };
 
     let accessLogId: string | undefined;
     try {
@@ -2244,7 +2243,7 @@ export class FileService implements OnModuleInit {
     const contentType = file.mimeType || 'application/octet-stream';
     return {
       kind: 'range',
-      stream: createReadStream(cachedPath, { start, end }),
+      stream: rangeStream,
       contentType,
       filename: this.ensureFileExtension(file.originalName, contentType),
       size: end - start + 1,
@@ -2367,33 +2366,34 @@ export class FileService implements OnModuleInit {
       if (match) {
         const start = parseInt(match[1], 10);
         const end = match[2] ? Math.min(parseInt(match[2], 10), total - 1) : total - 1;
-        const cachedPath = this.fileCacheService.getCachedPath(file.id);
-        if (cachedPath && file.status !== 'processing' && start < total && start <= end) {
-          const stream = createReadStream(cachedPath, { start, end });
-          let accessLogId: string | undefined;
-          try {
-            const saved = await this.accessLogRepository.save({
-              fileId: id,
-              ip: ip || '',
-              action: 'share_download',
-              uploaderId: file.uploaderId,
-              responseSize: 0,
-            });
-            accessLogId = saved.id;
-          } catch {
-            // 日志写入失败不影响直链访问
+        if (file.status !== 'processing' && start < total && start <= end) {
+          const stream = await this.fileCacheService.openCachedReadStream(file.id, total, { start, end });
+          if (stream) {
+            let accessLogId: string | undefined;
+            try {
+              const saved = await this.accessLogRepository.save({
+                fileId: id,
+                ip: ip || '',
+                action: 'share_download',
+                uploaderId: file.uploaderId,
+                responseSize: 0,
+              });
+              accessLogId = saved.id;
+            } catch {
+              // 日志写入失败不影响直链访问
+            }
+            return {
+              stream,
+              contentType: mimeType,
+              filename,
+              size: end - start + 1,
+              start,
+              end,
+              total,
+              isRange: true,
+              accessLogId,
+            };
           }
-          return {
-            stream,
-            contentType: mimeType,
-            filename,
-            size: end - start + 1,
-            start,
-            end,
-            total,
-            isRange: true,
-            accessLogId,
-          };
         }
       }
     }

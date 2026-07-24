@@ -2,7 +2,6 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
 import { Readable } from 'stream';
-import { createReadStream } from 'fs';
 import { promises as fs } from 'fs';
 import * as path from 'path';
 import FormData from 'form-data';
@@ -128,18 +127,27 @@ export class TelegramService {
     file_path: string;
     file_size: number;
   }> {
+    return this.getFileInfoFromApi(file_id, this.apiBase, 'getFileInfo');
+  }
+
+  private async getFileInfoFromApi(
+    fileId: string,
+    apiBase: string,
+    label: string,
+  ): Promise<{ file_id: string; file_path: string; file_size: number }> {
     return this.telegramRequest(async () => {
-      const response = await axios.get(`${this.getBaseUrl()}/getFile`, {
-        params: { file_id },
-        timeout: 5 * 60 * 1000, // getFile 超时 5 分钟（大文件上传后 Telegram 处理需较长时间）
+      const response = await axios.get(`${apiBase}${this.botToken}/getFile`, {
+        params: { file_id: fileId },
+        timeout: this.downloadRequestTimeoutMs,
       });
       const result = response.data.result;
+      if (!result?.file_path) throw new Error(`${label} 响应缺少 file_path`);
       return {
-        file_id: result.file_id,
+        file_id: result.file_id || fileId,
         file_path: result.file_path,
         file_size: result.file_size || 0,
       };
-    }, 'getFileInfo');
+    }, label);
   }
 
   async uploadFile(
@@ -295,6 +303,53 @@ export class TelegramService {
     }
   }
 
+  private async openLocalFileStream(filePath: string): Promise<Readable> {
+    const safePath = this.resolveLocalPath(filePath);
+    let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
+    try {
+      // 先取得文件句柄再创建流，ENOENT/ESTALE/EIO 会作为 Promise rejection 被捕获，
+      // 不会形成无人监听的 ReadStream error 事件。
+      handle = await fs.open(safePath, 'r');
+      const stream = handle.createReadStream({ autoClose: true });
+      handle = undefined;
+      return stream;
+    } catch (error) {
+      await handle?.close().catch(() => {});
+      throw error;
+    }
+  }
+
+  private isRecoverableLocalFileError(error: unknown): boolean {
+    const code = error && typeof error === 'object' && 'code' in error
+      ? String((error as NodeJS.ErrnoException).code || '')
+      : '';
+    return ['ENOENT', 'ESTALE', 'EIO', 'ENXIO'].includes(code);
+  }
+
+  private async openRelayStreamByFileId(
+    fileId: string,
+    fallbackSize: number,
+  ): Promise<{ stream: Readable; info: { file_id: string; file_path: string; file_size: number } }> {
+    if (!this.relayBase) throw new Error('本地文件副本不可用且未配置下载中转');
+    const relayApiBase = `${this.relayBase}/bot`;
+    const relayFileBase = this.getRelayFileBase();
+    if (!relayFileBase) throw new Error('下载中转配置无效');
+    const refreshed = await this.getFileInfoFromApi(fileId, relayApiBase, '中转 getFile');
+    if (this.isLocalPath(refreshed.file_path)) {
+      throw new Error('中转 getFile 返回了不可远程读取的本地路径');
+    }
+    const stream = await this.openRemoteFileStream(
+      refreshed.file_path,
+      relayFileBase,
+      this.relayFirstByteTimeoutMs,
+      'Telegram 中转下载',
+    );
+    return {
+      stream,
+      info: { ...refreshed, file_size: refreshed.file_size || fallbackSize },
+    };
+  }
+
   /**
    * 判断 file_path 是否为本地绝对路径（非 HTTP URL）
    */
@@ -378,7 +433,14 @@ export class TelegramService {
 
     let stream: Readable;
     if (this.isLocalPath(filePath)) {
-      stream = createReadStream(this.resolveLocalPath(filePath));
+      try {
+        stream = await this.openLocalFileStream(filePath);
+      } catch (localError) {
+        if (!this.isRecoverableLocalFileError(localError)) throw localError;
+        const code = (localError as NodeJS.ErrnoException).code || 'UNKNOWN';
+        this.logger.warn(`Telegram 本地副本不可用，切换中转: fileId=${file_id}, code=${code}`);
+        return this.openRelayStreamByFileId(file_id, fileInfo.file_size);
+      }
     } else {
       const relayFileBase = this.getRelayFileBase();
       const shouldUseRelayFallback = Boolean(

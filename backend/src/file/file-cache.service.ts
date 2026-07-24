@@ -78,33 +78,62 @@ export class FileCacheService {
    * 获取缓存的读取流。命中返回 Readable，未命中返回 null。
    * 检查文件大小一致性和 TTL 过期。
    */
+  async openCachedReadStream(
+    fileId: string,
+    expectedSize: number,
+    range?: { start: number; end: number },
+  ): Promise<Readable | null> {
+    this.validateFileId(fileId);
+    const cachePath = this.getCachePath(fileId);
+    let handle: Awaited<ReturnType<typeof fsp.open>> | undefined;
+    try {
+      // 以实际打开的句柄做 fstat，消除 stat 与 createReadStream 之间文件被淘汰的竞态。
+      handle = await fsp.open(cachePath, 'r');
+      const stat = await handle.stat();
+      const age = Date.now() - stat.mtimeMs;
+      if (stat.size !== expectedSize || stat.size <= 0 || age > this.cacheTtlMs) {
+        await handle.close();
+        handle = undefined;
+        await fsp.unlink(cachePath).catch(() => {});
+        return null;
+      }
+      if (range && (range.start < 0 || range.end < range.start || range.end >= stat.size)) {
+        await handle.close();
+        handle = undefined;
+        return null;
+      }
+      this.fileAccessMap.set(fileId, Date.now());
+      const stream = handle.createReadStream({
+        autoClose: true,
+        ...(range ? { start: range.start, end: range.end } : {}),
+      });
+      handle = undefined;
+      return stream;
+    } catch (error) {
+      await handle?.close().catch(() => {});
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT' && code !== 'ESTALE') {
+        this.logger.warn(`缓存文件打开失败: ${fileId}, code=${code || 'UNKNOWN'}`);
+      }
+      return null;
+    }
+  }
+
+  /** @deprecated 新下载流程应使用 openCachedReadStream，避免异步 open 错误。 */
   getCachedReadStream(fileId: string, expectedSize: number): Readable | null {
     this.validateFileId(fileId);
     const cachePath = this.getCachePath(fileId);
-
     try {
       const stat = require('fs').statSync(cachePath);
-      if (stat.size !== expectedSize || stat.size <= 0) {
-        this.logger.debug(`缓存大小不匹配: ${fileId} (期望 ${expectedSize}, 实际 ${stat.size})`);
-        fsp.unlink(cachePath).catch(() => {});
-        return null;
-      }
-      // TTL 过期检查
-      const age = Date.now() - stat.mtimeMs;
-      if (age > this.cacheTtlMs) {
-        this.logger.debug(`缓存过期: ${fileId} (${Math.round(age / 3600000)}h)`);
-        fsp.unlink(cachePath).catch(() => {});
-        return null;
-      }
-      this.logger.debug(`缓存命中: ${fileId} (${stat.size} bytes, ${Math.round(age / 3600000)}h)`);
-      // 记录最近访问时间（用于 LRU 淘汰）
+      if (stat.size !== expectedSize || stat.size <= 0 || Date.now() - stat.mtimeMs > this.cacheTtlMs) return null;
       this.fileAccessMap.set(fileId, Date.now());
-      return createReadStream(cachePath);
+      const stream = createReadStream(cachePath);
+      // 兼容遗留同步调用：至少保证 open 失败不会成为未处理 error。
+      stream.once('error', () => {});
+      return stream;
     } catch {
-      // 缓存不存在
+      return null;
     }
-
-    return null;
   }
 
   /** 定时清理过期缓存（每 6 小时执行一次） */
@@ -282,13 +311,13 @@ export class FileCacheService {
   ): Promise<{ stream: Readable; fromCache: boolean }> {
     this.validateFileId(fileId);
 
-    const cachedStream = this.getCachedReadStream(fileId, expectedSize);
+    const cachedStream = await this.openCachedReadStream(fileId, expectedSize);
     if (cachedStream) return { stream: cachedStream, fromCache: true };
 
     const existing = this.inflight.get(fileId);
     if (existing) {
       await existing;
-      const stream = this.getCachedReadStream(fileId, expectedSize);
+      const stream = await this.openCachedReadStream(fileId, expectedSize);
       if (!stream) throw new Error(`文件缓存建立失败: ${fileId}`);
       return { stream, fromCache: true };
     }
