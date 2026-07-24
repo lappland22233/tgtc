@@ -10,6 +10,7 @@
     "start:prod": "node dist/main",
     "typecheck": "tsc --noEmit",
     "lint": "tsc --noEmit",
+    "check:typeorm-columns": "node scripts/check-typeorm-union-columns.js src",
     "test": "jest",
     "test:watch": "jest --watch",
     "test:cov": "jest --coverage",

@@ -6,7 +6,6 @@ import { JwtService } from '@nestjs/jwt';
 import { OnEvent } from '@nestjs/event-emitter';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { Readable } from 'stream';
-import { Request } from 'express';
 import * as fs from 'fs';
 import { createReadStream, writeFileSync } from 'fs';
 import * as path from 'path';
@@ -1551,7 +1550,10 @@ export class FileService implements OnModuleInit {
       : await this.fileCacheService.getOrCacheStream(
         file.id,
         Number(file.size),
-        () => this.telegramService.getFileStream(file.telegramFileId || file.filename),
+        () => this.telegramService.getFileStream(
+          file.telegramFileId || file.filename,
+          { file_path: file.telegramFilePath, file_size: Number(file.size) },
+        ),
       );
 
     // 写访问日志（responseSize 先占位为 0，流式传输完成后由 controller 更新为实际字节数）
@@ -1790,7 +1792,10 @@ export class FileService implements OnModuleInit {
     const cachedStream = this.fileCacheService.getCachedReadStream(file.id, Number(file.size));
     const { stream, info } = cachedStream
       ? { stream: cachedStream, info: { file_id: file.telegramFileId, file_path: '', file_size: Number(file.size) } }
-      : await this.telegramService.getFileStream(file.telegramFileId || file.filename);
+      : await this.telegramService.getFileStream(
+        file.telegramFileId || file.filename,
+        { file_path: file.telegramFilePath, file_size: Number(file.size) },
+      );
 
     let accessLogId: string | undefined;
     try {
@@ -1841,7 +1846,10 @@ export class FileService implements OnModuleInit {
     const cachedStream = this.fileCacheService.getCachedReadStream(file.id, Number(file.size));
     const { stream, info } = cachedStream
       ? { stream: cachedStream, info: { file_id: file.telegramFileId, file_path: '', file_size: Number(file.size) } }
-      : await this.telegramService.getFileStream(file.telegramFileId || file.filename);
+      : await this.telegramService.getFileStream(
+        file.telegramFileId || file.filename,
+        { file_path: file.telegramFilePath, file_size: Number(file.size) },
+      );
 
     let accessLogId: string | undefined;
     try {
@@ -1894,14 +1902,12 @@ export class FileService implements OnModuleInit {
    * @warning 任务存于内存（UploadJobService Map），进程崩溃或重启会丢失进行中的任务。
    *          如需持久化请迁移至 Bull 队列（项目已集成 @nestjs/bull）。
    *
-   * @param req Express Request，用于监听客户端连接关闭事件，
-   *            客户端断开后 30 秒未恢复则放弃 Telegram 上传任务
+   * 文件由 Multer 完整接收后，后台任务与 HTTP 响应生命周期解耦。
    */
   async uploadAsync(
     file: Express.Multer.File,
     user: User,
     tagIds?: string[],
-    req?: Request,
   ): Promise<{ jobId: string; warning: string }> {
     if (file.size > this.maxFileSize) {
       throw new BadRequestException(`文件大小不能超过 ${this.maxFileSize / 1024 / 1024}MB`);
@@ -1917,9 +1923,9 @@ export class FileService implements OnModuleInit {
 
     const job = this.uploadJobService.createJob(user, originalName);
 
-    // 创建 AbortController：客户端连接断开 30 秒后中止后台上传
+    // 文件已由 Multer 完整接收后，后台任务必须脱离 HTTP 响应生命周期继续执行。
     const abortController = new AbortController();
-    const cleanup = this.setupAbortOnDisconnect(req, abortController, job.jobId);
+    const cleanup = () => {};
 
     // 后台处理：不阻塞响应
     this.processAsyncUpload(job.jobId, file, user, originalName, abortController.signal, cleanup, tagIds);
@@ -1932,20 +1938,18 @@ export class FileService implements OnModuleInit {
    * @warning 任务存于内存（UploadJobService Map），进程崩溃或重启会丢失进行中的任务。
    *          如需持久化请迁移至 Bull 队列（项目已集成 @nestjs/bull）。
    *
-   * @param req Express Request，用于监听客户端连接关闭事件，
-   *            客户端断开后 30 秒未恢复则放弃 Telegram 上传任务
+   * 文件由 Multer 完整接收后，后台任务与 HTTP 响应生命周期解耦。
    */
   async uploadMultipleAsync(
     files: Express.Multer.File[],
     user: User,
     tagIds?: string[],
-    req?: Request,
   ): Promise<{ jobId: string; total: number; warning: string }> {
     const job = this.uploadJobService.createJob(user, `${files.length} 个文件`, files.length);
 
-    // 创建 AbortController：客户端连接断开 30 秒后中止后台上传
+    // 文件已由 Multer 完整接收后，后台任务必须脱离 HTTP 响应生命周期继续执行。
     const abortController = new AbortController();
-    const cleanup = this.setupAbortOnDisconnect(req, abortController, job.jobId);
+    const cleanup = () => {};
 
     setImmediate(async () => {
       const success: File[] = [];
@@ -2005,49 +2009,6 @@ export class FileService implements OnModuleInit {
     return { jobId: job.jobId, total: files.length, warning: '任务在内存中处理，进程重启会丢失' };
   }
 
-  /**
-   * 设置 AbortController：监听 req close 事件，客户端断开 30 秒后触发 abort
-   * 并将任务标记为 failed。返回 cleanup 函数用于清理监听器。
-   */
-  private setupAbortOnDisconnect(
-    req: Request | undefined,
-    abortController: AbortController,
-    jobId: string,
-  ): () => void {
-    if (!req) {
-      // 无 req 时不启用 abort 机制（向后兼容）
-      return () => {};
-    }
-
-    let disconnectTimer: ReturnType<typeof setTimeout> | null = null;
-
-    const onConnectionClose = (): void => {
-      if (disconnectTimer || abortController.signal.aborted) return;
-      this.logger.warn(`上传任务 ${jobId} 客户端连接已断开，30 秒后放弃任务`);
-      disconnectTimer = setTimeout(() => {
-        if (!abortController.signal.aborted) {
-          abortController.abort();
-          this.uploadJobService.updateJob(jobId, {
-            status: 'failed',
-            error: '客户端连接断开超过 30 秒，任务已放弃',
-          });
-        }
-      }, 30 * 1000);
-    };
-
-    req.on('close', onConnectionClose);
-    req.socket?.on('close', onConnectionClose);
-
-    return (): void => {
-      req.off('close', onConnectionClose);
-      req.socket?.off('close', onConnectionClose);
-      if (disconnectTimer) {
-        clearTimeout(disconnectTimer);
-        disconnectTimer = null;
-      }
-    };
-  }
-
   getUploadJob(jobId: string): UploadJob | undefined {
     return this.uploadJobService.getJob(jobId);
   }
@@ -2055,8 +2016,8 @@ export class FileService implements OnModuleInit {
   /**
    * 后台处理单个文件上传到 Telegram
    *
-   * @param abortSignal 客户端连接断开 30 秒后触发 abort，中止上传
-   * @param cleanup 任务完成/失败时调用，清理 req 监听器和 timer
+   * @param abortSignal 预留的显式任务取消信号
+   * @param cleanup 任务完成或失败后的清理回调
    */
   private async processAsyncUpload(
     jobId: string,
@@ -2321,7 +2282,10 @@ export class FileService implements OnModuleInit {
     const { stream } = await this.fileCacheService.getOrCacheStream(
       file.id,
       Number(file.size),
-      () => this.telegramService.getFileStream(file.telegramFileId || file.filename),
+      () => this.telegramService.getFileStream(
+          file.telegramFileId || file.filename,
+          { file_path: file.telegramFilePath, file_size: Number(file.size) },
+        ),
     );
 
     let accessLogId: string | undefined;

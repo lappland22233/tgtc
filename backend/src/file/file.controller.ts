@@ -132,7 +132,7 @@ export class FileController {
     }
     const tagIds = parseTagIdsBody(tagIdsRaw);
     if (tagIds?.length) await this.tagService.assertOwner(user.id, tagIds);
-    return this.fileService.uploadAsync(file, user, tagIds, req);
+    return this.fileService.uploadAsync(file, user, tagIds);
   }
 
   /**
@@ -155,7 +155,7 @@ export class FileController {
     }
     const tagIds = parseTagIdsBody(tagIdsRaw);
     if (tagIds?.length) await this.tagService.assertOwner(user.id, tagIds);
-    return this.fileService.uploadMultipleAsync(files, user, tagIds, req);
+    return this.fileService.uploadMultipleAsync(files, user, tagIds);
   }
 
   /**
@@ -360,9 +360,12 @@ export class FileController {
           }
           return;
         }
-        // Range 不支持（未缓存）→ 回退完整下载
+        // Telegram 回源不支持 Range；未缓存时以 200 完整响应重新下载。
       }
 
+      // 下载端点允许等待直连首字节探测和中转切换，避免被 Node 默认空闲超时提前终止。
+      req.setTimeout(0);
+      res.setTimeout(0);
       const result = await this.fileService.getFileContentStream(id, user, clientIp);
 
       res.set({
@@ -387,6 +390,8 @@ export class FileController {
       const status = (error as { status?: number }).status || 500;
       if (!res.headersSent) {
         res.status(status).json({ code: 1, message });
+      } else if (!res.destroyed) {
+        res.destroy(error instanceof Error ? error : new Error(message));
       }
     }
   }

@@ -431,11 +431,10 @@ async function uploadFiles(files: File[]) {
   let nextFileIndex = 0;
   let staggerCounter = 0;
 
-  // 分片上传实例（惰性创建，并发 2 避免 CDN 限流）
-  const chunkedUpload = useChunkedUpload(3);
-
   /** 大文件分片上传逻辑 */
   const uploadSingleChunked = async (file: File, entry: QueueEntry): Promise<void> => {
+    // 每个文件使用独立实例，避免并发文件共享 uploadId、进度和速度检查点。
+    const chunkedUpload = useChunkedUpload(3);
     const abortController = new AbortController();
     activeControllers.add(abortController);
     try {
@@ -476,6 +475,8 @@ async function uploadFiles(files: File[]) {
       return uploadSingleChunked(file, entry);
     }
 
+    const abortController = new AbortController();
+    activeControllers.add(abortController);
     try {
       // 异步上传：文件传输完成后立即断开请求连接（避免 Cloudflare 代理超时），
       // 后端在后台处理 Telegram 上传，前端轮询获取状态
@@ -498,6 +499,7 @@ async function uploadFiles(files: File[]) {
             entry.status = 'processing';
           }
         },
+        abortController.signal,
       );
       if (entry) entry.status = 'success';
       successList.push({ id: result.id, originalName: result.originalName });
@@ -507,6 +509,8 @@ async function uploadFiles(files: File[]) {
         entry.errorReason = getErrorMessage(error);
       }
       failedList.push({ name: file.name, reason: getErrorMessage(error) });
+    } finally {
+      activeControllers.delete(abortController);
     }
   };
 

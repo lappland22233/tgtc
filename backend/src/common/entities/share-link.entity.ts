@@ -61,7 +61,7 @@ export class ShareLink {
   @Column({ type: 'varchar', length: 64 })
   token: string;
 
-  @Column({ type: 'enum', enum: ShareTargetType })
+  @Column({ type: 'varchar' })
   targetType: ShareTargetType;
 
   /** 关联的 file.id 或 folder.id，按 targetType 解释 */
@@ -97,8 +97,7 @@ export class ShareLink {
   expiresStartAt: Date | null;
 
   @Column({
-    type: 'enum',
-    enum: ShareLinkStatus,
+    type: 'varchar',
     default: ShareLinkStatus.ACTIVE,
   })
   status: ShareLinkStatus;

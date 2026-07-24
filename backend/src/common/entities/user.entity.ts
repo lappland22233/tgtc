@@ -34,7 +34,7 @@ export class User {
   @Column({ length: 255, comment: 'bcrypt hashed password, never store plaintext' })
   password: string;
 
-  @Column({ type: 'enum', enum: UserRole, default: UserRole.USER })
+  @Column({ type: 'varchar', default: UserRole.USER })
   role: UserRole;
 
   @Column({ default: false })

@@ -46,7 +46,7 @@ export class RateLimitService {
     windowMs: number,
   ): Promise<RateLimitResult> {
     // 参数校验
-    if (!Number.isFinite(lockDurationMs) || lockDurationMs <= 0 || lockDurationMs > 86400000) {
+    if (!Number.isFinite(lockDurationMs) || lockDurationMs < 0 || lockDurationMs > 86400000) {
       throw new Error(`lockDurationMs 无效: ${lockDurationMs}`);
     }
     const now = new Date();
@@ -68,7 +68,8 @@ export class RateLimitService {
          END,
          "lockedUntil" = CASE
            WHEN rate_limits."firstAttemptAt" < $4::timestamp THEN NULL
-           WHEN rate_limits."attemptCount" + 1 >= $5 THEN NOW() + ($6 || ' milliseconds')::interval
+           WHEN $6::bigint > 0 AND rate_limits."attemptCount" + 1 >= $5
+             THEN NOW() + ($6 || ' milliseconds')::interval
            ELSE rate_limits."lockedUntil"
          END,
          "updatedAt" = NOW()
@@ -100,6 +101,10 @@ export class RateLimitService {
     if (lockedUntil && now < lockedUntil) {
       const waitMinutes = Math.ceil((lockedUntil.getTime() - now.getTime()) / RateLimitService.MS_PER_MINUTE);
       return { allowed: false, waitMinutes };
+    }
+    // lockDurationMs=0 表示只计数、不写锁；达到阈值仍需通知调用方执行封禁等业务动作。
+    if (lockDurationMs === 0 && Number(row.attemptCount) >= maxAttempts) {
+      return { allowed: false };
     }
 
     // 重置后第一次请求（count === 1）按阈值正常判断即可：

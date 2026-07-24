@@ -141,22 +141,7 @@ export class ShareService {
       if (!ok) return { requiresPassword: true };
     }
 
-    // 通过校验 → 首次访问设置 expiresStartAt
-    if (link.expiresIn && !link.expiresStartAt) {
-      link.expiresStartAt = new Date();
-      await this.shareLinkRepo.save(link);
-    }
-
-    // 原子递增访问计数并强制 maxAccessCount 上限（消除 read-modify-write 竞态与丢失更新）
-    const access = await this.tryIncrementAccessCount(link);
-    if (!access.allowed) {
-      if (link.status !== ShareLinkStatus.EXHAUSTED) {
-        link.status = ShareLinkStatus.EXHAUSTED;
-        await this.shareLinkRepo.save(link).catch(() => {});
-      }
-      throw new NotFoundException('分享访问次数已耗尽');
-    }
-
+    // 元数据读取不消耗下载次数；有效期和访问次数在真正下载时统一原子消费。
     this.audit.log({
       action: 'share_link_access' as AuditAction,
       resourceType: 'share_link',
@@ -230,7 +215,28 @@ export class ShareService {
       if (!ok) throw new ForbiddenException('访问凭证已失效，请重新输入密码');
     }
     await this.assertFileInShare(link, fileId);
+    await this.consumeShareDownload(link);
     return link;
+  }
+
+  /** 在真实下载入口原子启动有效期并消费一次访问额度。 */
+  private async consumeShareDownload(link: ShareLink): Promise<void> {
+    const result = await this.shareLinkRepo
+      .createQueryBuilder()
+      .update(ShareLink)
+      .set({
+        expiresStartAt: () => 'CASE WHEN "expiresIn" IS NOT NULL THEN COALESCE("expiresStartAt", NOW()) ELSE "expiresStartAt" END',
+        currentAccessCount: () => '"currentAccessCount" + 1',
+      })
+      .where('id = :id', { id: link.id })
+      .andWhere('"isDeleted" = false')
+      .andWhere('"status" = :status', { status: ShareLinkStatus.ACTIVE })
+      .andWhere('("maxAccessCount" < 0 OR "currentAccessCount" < "maxAccessCount")')
+      .andWhere('("expiresIn" IS NULL OR "expiresStartAt" IS NULL OR "expiresStartAt" + ("expiresIn" || \' hours\')::interval > NOW())')
+      .execute();
+    if ((result.affected ?? 0) === 0) {
+      throw new NotFoundException('分享已过期或访问次数已耗尽');
+    }
   }
 
   async getShareRangeDownloadStream(
@@ -444,41 +450,6 @@ export class ShareService {
       }
       throw new NotFoundException('分享访问次数已耗尽');
     }
-  }
-
-  /**
-   * 原子地递增访问计数并强制 maxAccessCount 上限。
-   *
-   * 用单条带条件的 UPDATE 取代「先读后写」：
-   * - maxAccessCount < 0（不限次数）：无条件 +1（仍要求行存在且未软删）。
-   * - maxAccessCount >= 0：仅当 currentAccessCount < maxAccessCount 时才 +1。
-   *
-   * 据 affected 判定是否放行：affected === 0 表示已达上限（或行不存在/已软删），
-   * 从而在并发下杜绝超发与丢失更新。写法参考 FileService.checkAndIncrementAccess。
-   */
-  private async tryIncrementAccessCount(link: ShareLink): Promise<{ allowed: boolean }> {
-    if (link.maxAccessCount < 0) {
-      // 不限次数：原子 +1，仅用于统计
-      await this.shareLinkRepo
-        .createQueryBuilder()
-        .update(ShareLink)
-        .set({ currentAccessCount: () => '"currentAccessCount" + 1' })
-        .where('id = :id', { id: link.id })
-        .andWhere('"isDeleted" = false')
-        .execute();
-      return { allowed: true };
-    }
-
-    const result = await this.shareLinkRepo
-      .createQueryBuilder()
-      .update(ShareLink)
-      .set({ currentAccessCount: () => '"currentAccessCount" + 1' })
-      .where('id = :id', { id: link.id })
-      .andWhere('"isDeleted" = false')
-      .andWhere('"currentAccessCount" < "maxAccessCount"')
-      .execute();
-
-    return { allowed: (result.affected ?? 0) > 0 };
   }
 
   /**

@@ -43,7 +43,7 @@ export class File {
   @Column()
   telegramFileId: string;
 
-  @Column({ nullable: true })
+  @Column({ type: 'varchar', nullable: true })
   telegramFilePath: string | null;
 
   /** Telegram sendDocument 返回的消息 ID，用于 deleteMessage；旧数据可能为空。 */
@@ -56,14 +56,14 @@ export class File {
 
   /** 所属文件夹 ID（null 表示位于用户网盘根目录） */
   @Index()
-  @Column({ nullable: true })
+  @Column({ type: 'uuid', nullable: true })
   folderId: string | null;
 
   @ManyToOne(() => Folder, { nullable: true, onDelete: 'SET NULL' })
   @JoinColumn({ name: 'folderId' })
   folder: Folder | null;
 
-  @Column({ type: 'enum', enum: FileAccessType, default: FileAccessType.PUBLIC })
+  @Column({ type: 'varchar', default: FileAccessType.PUBLIC })
   accessType: FileAccessType;
 
   /**

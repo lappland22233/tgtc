@@ -24,7 +24,7 @@ export class UploadTask {
   @Column()
   filename: string;
 
-  @Column({ default: 'pending' })
+  @Column({ type: 'varchar', default: 'pending' })
   status: 'pending' | 'uploading' | 'completed' | 'failed';
 
   @Column({ default: 0 })

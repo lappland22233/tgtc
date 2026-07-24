@@ -14,6 +14,12 @@ export class TelegramService {
   private readonly chatId: string;
   private readonly apiBase: string;
   private readonly fileBase: string;
+  /** 可选中转 Bot API 基址；仅在大型文件直连启动失败或首字节超时时启用。 */
+  private readonly relayBase: string;
+  private readonly relayMinFileSize: number;
+  private readonly directFirstByteTimeoutMs: number;
+  private readonly relayFirstByteTimeoutMs: number;
+  private readonly downloadRequestTimeoutMs: number;
   /**
    * 本地 Bot API 文件存储的允许根目录（白名单）。
    * 自建 telegram-bot-api 时 getFile 可能返回本地绝对路径，
@@ -29,8 +35,13 @@ export class TelegramService {
     // 支持自建 API 代理绕过官方限流: 设置 TELEGRAM_API_BASE 即可
     // 默认 https://api.telegram.org，自建代理如 http://localhost:8081
     const base = this.configService.get<string>('TELEGRAM_API_BASE') || 'https://api.telegram.org';
-    this.apiBase = `${base}/bot`;
-    this.fileBase = `${base}/file/bot`;
+    this.apiBase = `${base.replace(/\/$/, '')}/bot`;
+    this.fileBase = `${base.replace(/\/$/, '')}/file/bot`;
+    this.relayBase = (this.configService.get<string>('TELEGRAM_RELAY_BASE') || '').replace(/\/$/, '');
+    this.relayMinFileSize = this.getPositiveNumberConfig('TELEGRAM_RELAY_MIN_FILE_SIZE', 50 * 1024 * 1024);
+    this.directFirstByteTimeoutMs = this.getPositiveNumberConfig('TELEGRAM_DIRECT_FIRST_BYTE_TIMEOUT_MS', 15 * 1000);
+    this.relayFirstByteTimeoutMs = this.getPositiveNumberConfig('TELEGRAM_RELAY_FIRST_BYTE_TIMEOUT_MS', 30 * 1000);
+    this.downloadRequestTimeoutMs = this.getPositiveNumberConfig('TELEGRAM_DOWNLOAD_TIMEOUT_MS', 5 * 60 * 1000);
     // 本地文件白名单根目录，如 /var/lib/telegram-bot-api 或容器内 tmp 目录
     this.localFileBase = this.configService.get<string>('TELEGRAM_LOCAL_FILE_DIR') || '';
 
@@ -40,6 +51,11 @@ export class TelegramService {
     if (!this.chatId) {
       this.logger.warn('TELEGRAM_CHAT_ID 未配置，文件上传将不可用。请在 .env 中设置 TELEGRAM_CHAT_ID。');
     }
+  }
+
+  private getPositiveNumberConfig(key: string, fallback: number): number {
+    const value = Number(this.configService.get<string>(key));
+    return Number.isFinite(value) && value > 0 ? value : fallback;
   }
 
   /**
@@ -210,7 +226,7 @@ export class TelegramService {
     }, 'uploadPhoto');
   }
 
-  private getFileUrl(file_path: string): string {
+  private getFileUrl(file_path: string, base = this.fileBase): string {
     // 远程路径校验：禁止路径穿越
     if (file_path.includes('..') || file_path.includes('\\')) {
       throw new Error(`非法的 file_path: ${file_path}`);
@@ -219,7 +235,64 @@ export class TelegramService {
     if (file_path.startsWith('/')) {
       return file_path;
     }
-    return `${this.fileBase}${this.botToken}/${file_path}`;
+    return `${base}${this.botToken}/${file_path}`;
+  }
+
+  private getRelayFileBase(): string | null {
+    return this.relayBase ? `${this.relayBase}/file/bot` : null;
+  }
+
+  private waitForFirstChunk(stream: Readable, timeoutMs: number, label: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+      let timer: NodeJS.Timeout;
+      const cleanup = () => {
+        clearTimeout(timer);
+        stream.off('readable', onReadable);
+        stream.off('end', onEnd);
+        stream.off('error', onError);
+      };
+      const onReadable = () => {
+        cleanup();
+        resolve();
+      };
+      const onEnd = () => {
+        cleanup();
+        reject(new Error(`${label} 在返回首字节前结束`));
+      };
+      const onError = (error: Error) => {
+        cleanup();
+        reject(error);
+      };
+      timer = setTimeout(() => {
+        cleanup();
+        reject(new Error(`${label} 首字节超时 (${timeoutMs}ms)`));
+      }, timeoutMs);
+      stream.once('readable', onReadable);
+      stream.once('end', onEnd);
+      stream.once('error', onError);
+      // Axios 流可能在监听前已经进入 readable 状态。
+      if (stream.readableLength > 0) onReadable();
+    });
+  }
+
+  private async openRemoteFileStream(
+    filePath: string,
+    fileBase: string,
+    firstByteTimeoutMs: number,
+    label: string,
+  ): Promise<Readable> {
+    const response = await axios.get<Readable>(this.getFileUrl(filePath, fileBase), {
+      responseType: 'stream',
+      timeout: this.downloadRequestTimeoutMs,
+    });
+    const stream = response.data as Readable;
+    try {
+      await this.waitForFirstChunk(stream, firstByteTimeoutMs, label);
+      return stream;
+    } catch (error) {
+      stream.destroy();
+      throw error;
+    }
   }
 
   /**
@@ -292,23 +365,48 @@ export class TelegramService {
   /**
    * 流式获取文件（避免大文件全部加载到内存）
    */
-  async getFileStream(file_id: string): Promise<{ stream: Readable; info: { file_id: string; file_path: string; file_size: number } }> {
-    const fileInfo = await this.getFileInfo(file_id);
+  async getFileStream(
+    file_id: string,
+    knownInfo?: { file_path?: string | null; file_size?: number },
+  ): Promise<{ stream: Readable; info: { file_id: string; file_path: string; file_size: number } }> {
+    // 下载路径优先使用数据库已持久化的 file_path，避免每次先调用 getFile；
+    // 否则 getFile 自身卡住时，中转文件下载分支永远没有机会触发。
+    const fileInfo = knownInfo?.file_path
+      ? { file_id, file_path: knownInfo.file_path, file_size: knownInfo.file_size || 0 }
+      : await this.getFileInfo(file_id);
     const filePath = fileInfo.file_path;
 
     let stream: Readable;
     if (this.isLocalPath(filePath)) {
       stream = createReadStream(this.resolveLocalPath(filePath));
     } else {
-      // 远程下载经 telegramRequest 包装，统一脱敏 bot token 并处理 429 重试
-      const response = await this.telegramRequest(
-        () => axios.get<Readable>(this.getFileUrl(filePath), {
-          responseType: 'stream',
-          timeout: 5 * 60 * 1000,
-        }),
-        'getFileStream',
+      const relayFileBase = this.getRelayFileBase();
+      const shouldUseRelayFallback = Boolean(
+        relayFileBase
+        && fileInfo.file_size >= this.relayMinFileSize
+        && relayFileBase !== this.fileBase,
       );
-      stream = response.data as Readable;
+      try {
+        // 在把流交给缓存层和 Controller 前等待首字节，避免先发送响应头后空挂至外层代理超时。
+        stream = await this.openRemoteFileStream(
+          filePath,
+          this.fileBase,
+          this.directFirstByteTimeoutMs,
+          'Telegram 直连下载',
+        );
+      } catch (directError) {
+        if (!shouldUseRelayFallback || !relayFileBase) throw directError;
+        const message = directError instanceof Error ? directError.message : '未知错误';
+        this.logger.warn(
+          `大型文件直连启动失败，切换中转下载: fileId=${file_id}, size=${fileInfo.file_size}, reason=${this.redactToken(message)}`,
+        );
+        stream = await this.openRemoteFileStream(
+          filePath,
+          relayFileBase,
+          this.relayFirstByteTimeoutMs,
+          'Telegram 中转下载',
+        );
+      }
     }
 
     return { stream, info: fileInfo };

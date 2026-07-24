@@ -54,8 +54,8 @@ import { TagModule } from './tag/tag.module';
       password: process.env.DB_PASSWORD || undefined,
       database: process.env.DB_DATABASE || 'test',
       entities: [User, File, Folder, ShareLink, SystemConfig, VerificationCode, BannedIP, ShareAudit, FileAccessLog, RateLimit, AuditLog, AccessLog, Alert, DashboardConfig, UploadTask, Tag, TelemetryRecord, JwtRevokedToken],
-      // 生产环境强制关闭 synchronize 防止误改 schema 丢数据；开发环境由 DB_SYNCHRONIZE 控制
-      synchronize: process.env.NODE_ENV === 'production' ? false : process.env.DB_SYNCHRONIZE === 'true',
+      // 所有环境统一通过迁移管理 schema，禁止 synchronize 根据实体差异自动改表。
+      synchronize: false,
       migrations: [__dirname + '/migrations/*{.ts,.js}'],
       migrationsRun: process.env.DB_MIGRATIONS_RUN === 'true',
       logging: process.env.NODE_ENV === 'development',

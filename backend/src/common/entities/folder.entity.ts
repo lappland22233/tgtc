@@ -42,7 +42,7 @@ export class Folder {
   parent: Folder | null;
 
   @Index()
-  @Column({ nullable: true })
+  @Column({ type: 'uuid', nullable: true })
   parentId: string | null;
 
   @TreeChildren()

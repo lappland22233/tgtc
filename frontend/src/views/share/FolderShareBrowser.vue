@@ -142,9 +142,11 @@ const breadcrumb = ref<FolderSummary[]>([...props.initialBreadcrumb]);
 function downloadFile(file: FileSummary) {
   if (downloadingId.value) return;
   downloadingId.value = file.id;
+  // 固定构造同源下载路径，禁止把访问 JWT 附加到后端返回的任意跨域 URL。
+  const baseUrl = `/api/s/${encodeURIComponent(props.token)}/download/${encodeURIComponent(file.id)}`;
   const url = props.accessJwt
-    ? file.downloadUrl + (file.downloadUrl.includes('?') ? '&' : '?') + `access=${encodeURIComponent(props.accessJwt)}`
-    : file.downloadUrl;
+    ? `${baseUrl}?access=${encodeURIComponent(props.accessJwt)}`
+    : baseUrl;
   triggerBrowserDownload(url, file.name);
   MessagePlugin.success('已开始下载，请查看浏览器下载进度');
   // 短暂禁用避免重复点击；浏览器接管后无需等待前端异步完成
