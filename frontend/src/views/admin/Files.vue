@@ -124,24 +124,12 @@ import { ref, onMounted, onUnmounted, watch } from 'vue';
 import { DialogPlugin } from 'tdesign-vue-next';
 import MessagePlugin from '@/utils/message';
 import { api } from '../../stores/auth';
+import { fetchAllAdminFiles, type AdminFileItem } from '../../api/admin-files';
 import { formatSize, formatDate } from '@/utils/format';
 import { getErrorMessage } from '../../utils/error';
 import { useCursorPagination } from '../../composables/useCursorPagination';
 import { useMobile } from '../../composables/useMobile';
 import ThumbnailImg from '../../components/ThumbnailImg.vue';
-
-interface AdminFileItem {
-  id: string;
-  originalName: string;
-  mimeType: string;
-  size: number;
-  accessType: string;
-  createdAt: string;
-  isDeleted?: boolean;
-  deletedByAdmin?: boolean;
-  deleteRequestedAt?: string | null;
-  uploader: { id: string; email: string } | null;
-}
 
 const files = ref<AdminFileItem[]>([]);
 const uploaders = ref<{ id: string; email: string }[]>([]);
@@ -196,24 +184,18 @@ function extractUploaders(fileList: AdminFileItem[]) {
 /** 无限滚动每批加载条数 */
 const BATCH_SIZE = 20;
 
-/** 按页获取文件（不修改 files 列表，供无限滚动累加）。偏移分页支持自定义排序。 */
+/** 按页获取系统全部文件（不修改 files 列表，供无限滚动累加）。 */
 async function fetchAdminPage(pageNum: number, signal?: AbortSignal): Promise<{ files: AdminFileItem[]; total: number }> {
   const sortField = sortBy.value === 'uploader' ? 'uploader.email' : sortBy.value;
-  const res = await api.get('/admin/files', {
-    params: {
-      page: pageNum,
-      limit: BATCH_SIZE,
-      keyword: searchFile.value || undefined,
-      userId: filterUploader.value || undefined,
-      sortBy: sortField || undefined,
-      sortOrder: sortOrder.value || undefined,
-    },
+  return fetchAllAdminFiles({
+    page: pageNum,
+    limit: BATCH_SIZE,
+    keyword: searchFile.value || undefined,
+    userId: filterUploader.value || undefined,
+    sortBy: sortField || undefined,
+    sortOrder: sortOrder.value || undefined,
     signal,
   });
-  return {
-    files: res.data.data.files as AdminFileItem[],
-    total: res.data.data.total as number,
-  };
 }
 
 /** 初始加载 / 重置加载（无限滚动：从头加载） */
