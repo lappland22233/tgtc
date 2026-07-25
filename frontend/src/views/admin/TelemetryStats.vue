@@ -146,7 +146,7 @@
           <div class="detail-item"><span class="d-label">类型</span><span class="d-value">{{ typeBadge(detailRecord.type) }}</span></div>
           <div class="detail-item"><span class="d-label">时间</span><span class="d-value">{{ formatFullTime(detailRecord.createdAt) }}</span></div>
           <div class="detail-item"><span class="d-label">IP</span><span class="d-value">{{ detailRecord.ip || '-' }}</span></div>
-          <div class="detail-item"><span class="d-label">客户端时间</span><span class="d-value">{{ detailRecord.clientTimestamp ? formatFullTime(new Date(detailRecord.clientTimestamp).toISOString()) : '-' }}</span></div>
+          <div class="detail-item"><span class="d-label">客户端时间</span><span class="d-value">{{ formatClientTimestamp(detailRecord.clientTimestamp) }}</span></div>
           <div class="detail-item full"><span class="d-label">User-Agent</span><span class="d-value mono wrap">{{ detailRecord.userAgent || '-' }}</span></div>
         </div>
         <div class="detail-data">
@@ -209,7 +209,7 @@ interface RecordItem {
   data: Record<string, any>;
   ip: string;
   userAgent: string | null;
-  clientTimestamp: number | null;
+  clientTimestamp: number | string | null;
   createdAt: string;
 }
 const records = ref<RecordItem[]>([]);
@@ -295,6 +295,15 @@ function formatTime(t: string): string {
 function formatFullTime(t: string): string {
   if (!t) return '-';
   const d = new Date(t);
+  if (isNaN(d.getTime())) return '-';
+  return d.toLocaleString('zh-CN', { hour12: false });
+}
+
+function formatClientTimestamp(timestamp: number | string | null): string {
+  if (timestamp == null || timestamp === '') return '-';
+  const value = typeof timestamp === 'number' ? timestamp : Number(timestamp);
+  if (!Number.isFinite(value)) return '-';
+  const d = new Date(value);
   if (isNaN(d.getTime())) return '-';
   return d.toLocaleString('zh-CN', { hour12: false });
 }
