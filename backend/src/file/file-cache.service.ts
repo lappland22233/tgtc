@@ -2,8 +2,10 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { OnEvent } from '@nestjs/event-emitter';
 import { Readable } from 'stream';
-import { createReadStream } from 'fs';
+import { createReadStream, createWriteStream } from 'fs';
 import { promises as fsp } from 'fs';
+import { FileHandle } from 'fs/promises';
+import { EventEmitter } from 'events';
 import * as path from 'path';
 import { ConfigCacheService } from '../common/services/config-cache.service';
 
@@ -19,6 +21,17 @@ export const CACHE_CONFIG_DEFAULTS: Record<string, string> = {
   [CACHE_CONFIG_KEYS.TTL_DAYS]: '3',
 };
 
+interface CacheBuildSession {
+  fileId: string;
+  expectedSize: number;
+  tmpPath: string;
+  bytesWritten: number;
+  completed: boolean;
+  error?: Error;
+  events: EventEmitter;
+  completion: Promise<void>;
+}
+
 @Injectable()
 export class FileCacheService {
   private readonly logger = new Logger(FileCacheService.name);
@@ -31,6 +44,8 @@ export class FileCacheService {
 
   /** 文件最近访问时间追踪 (fileId → lastAccessTimestamp)，用于 LRU 淘汰 */
   private readonly fileAccessMap = new Map<string, number>();
+  /** 同一业务文件只允许一个上游回源；消费者从临时文件独立跟随读取。 */
+  private readonly buildSessions = new Map<string, CacheBuildSession>();
 
   constructor(private readonly configCache: ConfigCacheService) {
     this.cacheDir = path.resolve(process.cwd(), 'tmp', 'Cache');
@@ -102,6 +117,182 @@ export class FileCacheService {
     return null;
   }
 
+  /**
+   * 获取正式缓存，或创建/加入实时缓存构建会话。
+   * 每个消费者从临时文件 offset 0 独立读取，客户端断开不会取消上游构建。
+   */
+  async getOrCacheStream(
+    fileId: string,
+    expectedSize: number,
+    fetchFn: () => Promise<{ stream: Readable; info: { file_size: number } }>,
+  ): Promise<{ stream: Readable; fromCache: boolean }> {
+    this.validateFileId(fileId);
+    if (!Number.isSafeInteger(expectedSize) || expectedSize <= 0) {
+      throw new Error(`非法的文件大小: ${expectedSize}`);
+    }
+
+    const cached = this.getCachedReadStream(fileId, expectedSize);
+    if (cached) return { stream: cached, fromCache: true };
+
+    if (!(await this.prepareCacheCapacity(expectedSize))) {
+      const upstream = await fetchFn();
+      if (upstream.info.file_size !== expectedSize) {
+        upstream.stream.destroy();
+        throw new Error(`上游文件大小不一致: 期望 ${expectedSize}, 实际 ${upstream.info.file_size}`);
+      }
+      this.logger.warn(`缓存容量或磁盘余量不足，文件 ${fileId} 仅实时转发`);
+      return { stream: upstream.stream, fromCache: false };
+    }
+
+    let session = this.buildSessions.get(fileId);
+    if (!session) {
+      const events = new EventEmitter();
+      events.setMaxListeners(0);
+      session = {
+        fileId,
+        expectedSize,
+        tmpPath: this.getCachePath(fileId) + '.tmp',
+        bytesWritten: 0,
+        completed: false,
+        events,
+        completion: Promise.resolve(),
+      };
+      this.buildSessions.set(fileId, session);
+      session.completion = this.runBuildSession(session, fetchFn);
+      session.completion.catch(() => {});
+    } else if (session.expectedSize !== expectedSize) {
+      throw new Error('活动缓存会话的文件大小不一致');
+    }
+
+    await this.waitForSessionReadable(session);
+    return { stream: this.createFollowerStream(session), fromCache: false };
+  }
+
+  private async runBuildSession(
+    session: CacheBuildSession,
+    fetchFn: () => Promise<{ stream: Readable; info: { file_size: number } }>,
+  ): Promise<void> {
+    const cachePath = this.getCachePath(session.fileId);
+    try {
+      await fsp.unlink(session.tmpPath).catch(() => {});
+      // 在请求上游前先创建临时文件，保证首个进度事件到达时跟随者可安全打开。
+      await fsp.writeFile(session.tmpPath, Buffer.alloc(0), { flag: 'wx' });
+      const { stream, info } = await fetchFn();
+      if (!Number.isSafeInteger(info.file_size) || info.file_size !== session.expectedSize) {
+        stream.destroy();
+        throw new Error(`上游文件大小不一致: 期望 ${session.expectedSize}, 实际 ${info.file_size}`);
+      }
+
+      const output = createWriteStream(session.tmpPath, { flags: 'r+' });
+      try {
+        for await (const rawChunk of stream) {
+          const chunk = Buffer.isBuffer(rawChunk) ? rawChunk : Buffer.from(rawChunk);
+          if (session.bytesWritten + chunk.length > session.expectedSize) {
+            throw new Error('上游流超过预期文件大小');
+          }
+          await new Promise<void>((resolve, reject) => {
+            output.write(chunk, error => error ? reject(error) : resolve());
+          });
+          session.bytesWritten += chunk.length;
+          session.events.emit('progress');
+        }
+        await new Promise<void>((resolve, reject) => {
+          output.once('error', reject);
+          output.end(resolve);
+        });
+      } catch (error) {
+        stream.destroy();
+        output.destroy();
+        throw error;
+      }
+
+      if (session.error) throw session.error;
+      const stat = await fsp.stat(session.tmpPath);
+      if (session.bytesWritten !== session.expectedSize || stat.size !== session.expectedSize) {
+        throw new Error(`缓存文件大小不一致: 期望 ${session.expectedSize}, 实际 ${stat.size}`);
+      }
+      await fsp.rename(session.tmpPath, cachePath);
+      this.fileAccessMap.set(session.fileId, Date.now());
+      session.completed = true;
+      session.events.emit('progress');
+      session.events.emit('complete');
+      this.logger.log(`实时缓存构建完成: ${session.fileId} (${session.expectedSize} bytes)`);
+    } catch (error) {
+      session.error = error instanceof Error ? error : new Error('缓存构建失败');
+      await fsp.unlink(session.tmpPath).catch(() => {});
+      session.events.emit('failed', session.error);
+      throw session.error;
+    } finally {
+      setImmediate(() => {
+        if (this.buildSessions.get(session.fileId) === session) {
+          this.buildSessions.delete(session.fileId);
+        }
+        session.events.removeAllListeners();
+      });
+    }
+  }
+
+  private waitForSessionChange(session: CacheBuildSession): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const cleanup = () => {
+        session.events.off('progress', onProgress);
+        session.events.off('failed', onFailed);
+      };
+      const onProgress = () => {
+        cleanup();
+        resolve();
+      };
+      const onFailed = (error: Error) => {
+        cleanup();
+        reject(error);
+      };
+      session.events.once('progress', onProgress);
+      session.events.once('failed', onFailed);
+    });
+  }
+
+  private async waitForSessionReadable(session: CacheBuildSession): Promise<void> {
+    while (session.bytesWritten === 0 && !session.completed && !session.error) {
+      await this.waitForSessionChange(session);
+    }
+    if (session.error) throw session.error;
+  }
+
+  private createFollowerStream(session: CacheBuildSession): Readable {
+    const service = this;
+    async function* follow(): AsyncGenerator<Buffer> {
+      let offset = 0;
+      const buffer = Buffer.allocUnsafe(256 * 1024);
+      try {
+        while (true) {
+          while (offset < session.bytesWritten) {
+            const available = Math.min(buffer.length, session.bytesWritten - offset);
+            let handle: FileHandle | undefined;
+            try {
+              // 每轮短暂持有句柄，兼容 Windows 上活动读句柄会阻止 rename 的行为。
+              // 缓存发布后临时路径消失，自动切换到正式缓存文件。
+              handle = await fsp.open(session.completed ? service.getCachePath(session.fileId) : session.tmpPath, 'r');
+            } catch (error) {
+              if (!session.completed) throw error;
+              handle = await fsp.open(service.getCachePath(session.fileId), 'r');
+            }
+            const { bytesRead } = await handle.read(buffer, 0, available, offset);
+            await handle.close();
+            if (bytesRead <= 0) break;
+            offset += bytesRead;
+            yield Buffer.from(buffer.subarray(0, bytesRead));
+          }
+          if (session.error) throw session.error;
+          if (session.completed && offset >= session.expectedSize) break;
+          await service.waitForSessionChange(session);
+        }
+      } finally {
+        service.fileAccessMap.set(session.fileId, Date.now());
+      }
+    }
+    return Readable.from(follow());
+  }
+
   /** 定时清理过期缓存（每 6 小时执行一次） */
   @Cron('0 */6 * * *')
   async cleanupExpiredCache(): Promise<void> {
@@ -114,7 +305,9 @@ export class FileCacheService {
         const fullPath = path.join(this.cacheDir, f);
         try {
           const stat = await fsp.stat(fullPath);
-          if (now - stat.mtimeMs > this.cacheTtlMs) {
+          if (f.endsWith('.tmp') && this.buildSessions.has(f.slice(0, -4))) {
+            surviving.add(f);
+          } else if (now - stat.mtimeMs > this.cacheTtlMs) {
             await fsp.unlink(fullPath);
             this.fileAccessMap.delete(f); // 同步清理 LRU 记录，防止 Map 泄漏
             cleaned++;
@@ -150,6 +343,19 @@ export class FileCacheService {
     for (let i = 0; i < removeCount; i++) {
       this.fileAccessMap.delete(entries[i][0]);
     }
+  }
+
+  private async prepareCacheCapacity(expectedSize: number): Promise<boolean> {
+    const totalSize = await this.getTotalCacheSize();
+    if (totalSize + expectedSize > this.maxCacheSizeBytes) {
+      await this.evictLRU(totalSize + expectedSize - this.maxCacheSizeBytes);
+      if ((await this.getTotalCacheSize()) + expectedSize > this.maxCacheSizeBytes) return false;
+    }
+    if (!this.hasEnoughDiskSpace()) {
+      await this.evictLRU(Math.max(expectedSize, this.minFreeDiskBytes));
+      if (!this.hasEnoughDiskSpace()) return false;
+    }
+    return true;
   }
 
   /** 检查磁盘空间是否充足 */
@@ -373,8 +579,17 @@ export class FileCacheService {
    */
   async invalidate(fileId: string): Promise<void> {
     this.validateFileId(fileId);
+    const session = this.buildSessions.get(fileId);
+    if (session) {
+      session.error = new Error('缓存构建已失效');
+      session.events.emit('failed', session.error);
+      await session.completion.catch(() => {});
+    }
     const cachePath = this.getCachePath(fileId);
-    await fsp.unlink(cachePath).catch(() => {});
+    await Promise.all([
+      fsp.unlink(cachePath).catch(() => {}),
+      fsp.unlink(cachePath + '.tmp').catch(() => {}),
+    ]);
     this.fileAccessMap.delete(fileId);
     this.logger.debug(`缓存失效: ${fileId}`);
   }

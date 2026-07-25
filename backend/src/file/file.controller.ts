@@ -370,7 +370,6 @@ export class FileController {
         'Content-Disposition': `attachment; filename="${encodeURIComponent(result.filename)}"`,
         'Content-Length': result.size.toString(),
         'Cache-Control': 'private, no-cache',
-        'Accept-Ranges': 'bytes',
       });
 
       const getBytesSent = trackBytesSent(res);
@@ -387,6 +386,8 @@ export class FileController {
       const status = (error as { status?: number }).status || 500;
       if (!res.headersSent) {
         res.status(status).json({ code: 1, message });
+      } else if (!res.destroyed) {
+        res.destroy(error instanceof Error ? error : new Error(message));
       }
     }
   }

@@ -102,8 +102,10 @@ export class AlertGateway
         return;
       }
 
-      // 将用户信息附加到 client.data，便于后续 SubscribeMessage 处理器使用
+      // 认证成功后才加入专用房间；所有敏感广播仅发送到该房间，
+      // 即使 namespace 连接建立到鉴权完成之间存在窗口，也不会收到告警数据。
       (client.data as { user?: User }).user = user;
+      await client.join('super-admins');
       this.logger.log(`管理员已连接: ${client.id} (user: ${user.email})`);
     } catch (error: unknown) {
       this.logger.error(`handleConnection 异常: ${error instanceof Error ? error.message : String(error)}`);
@@ -133,7 +135,7 @@ export class AlertGateway
       this.throttledCount++;
       // 每秒最多发送一次限流通知，告知客户端有告警被抑制
       if (now - this.lastThrottleNoticeAt >= 1000) {
-        this.server.emit('alerts-throttled', { dropped: this.throttledCount });
+        this.server.to('super-admins').emit('alerts-throttled', { dropped: this.throttledCount });
         this.throttledCount = 0;
         this.lastThrottleNoticeAt = now;
       }
@@ -141,12 +143,12 @@ export class AlertGateway
     }
 
     this.broadcastTimestamps.push(now);
-    this.server.emit('new-alert', alert);
+    this.server.to('super-admins').emit('new-alert', alert);
   }
 
   /** 广播未确认告警计数 */
   broadcastUnacknowledgedCount(count: number): void {
-    this.server.emit('unacknowledged-count', { count });
+    this.server.to('super-admins').emit('unacknowledged-count', { count });
   }
 
   @SubscribeMessage('ping')

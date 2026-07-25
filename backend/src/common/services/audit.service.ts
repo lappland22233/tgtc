@@ -18,6 +18,8 @@ export class AuditService implements OnApplicationShutdown {
   private readonly logger = new Logger(AuditService.name);
   /** 追踪未完成的审计写入 Promise，确保优雅关闭时不丢失数据 */
   private pendingWrites: Set<Promise<void>> = new Set();
+  private static readonly MAX_PENDING_WRITES = 10000;
+  private droppedWrites = 0;
 
   constructor(
     @InjectRepository(AuditLog)
@@ -29,9 +31,12 @@ export class AuditService implements OnApplicationShutdown {
    * 适用于非关键操作的审计记录。
    */
   log(entry: AuditEntry): void {
-    // 背压告警：DB 慢响应时未完成写入会堆积，超过高水位线时提示运维
-    if (this.pendingWrites.size > 10000 && this.pendingWrites.size % 1000 === 0) {
-      this.logger.warn(`审计日志待写入堆积已达 ${this.pendingWrites.size} 条，数据库写入可能过慢`);
+    if (this.pendingWrites.size >= AuditService.MAX_PENDING_WRITES) {
+      this.droppedWrites++;
+      if (this.droppedWrites === 1 || this.droppedWrites % 1000 === 0) {
+        this.logger.error(`审计写入队列已满，已丢弃 ${this.droppedWrites} 条非关键审计日志`);
+      }
+      return;
     }
     const promise = this.writeLogAsync(entry).catch((error: Error) => {
       this.logger.warn(`审计日志写入失败: ${error.message}`, error.stack);
@@ -94,6 +99,11 @@ export class AuditService implements OnApplicationShutdown {
    */
   logBatch(entries: AuditEntry[]): void {
     if (entries.length === 0) return;
+    if (this.pendingWrites.size >= AuditService.MAX_PENDING_WRITES) {
+      this.droppedWrites += entries.length;
+      this.logger.error(`审计写入队列已满，累计丢弃 ${this.droppedWrites} 条非关键审计日志`);
+      return;
+    }
 
     const promise = this.writeBatchAsync(entries).catch((error: Error) => {
       this.logger.warn(`批量审计日志写入失败: ${error.message}`, error.stack);

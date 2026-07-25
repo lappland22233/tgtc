@@ -35,6 +35,6 @@ export const AppDataSource = new DataSource({
   // 连接池大小，与应用配置保持一致
   extra: {
     max: parseInt(process.env.DB_POOL_SIZE || '20', 10),
-    ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : undefined,
+    ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: true } : undefined,
   },
 });

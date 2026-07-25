@@ -284,10 +284,12 @@ async function handleCreateTag() {
   }
 }
 
-// 进行中的分片上传 AbortController 集合：关闭弹窗时统一中止，避免孤儿请求
+// 进行中的全部上传 AbortController 集合：关闭弹窗时统一中止，避免孤儿请求
 const activeControllers = new Set<AbortController>();
+let uploadBatchGeneration = 0;
 
 function abortAllUploads() {
+  uploadBatchGeneration++;
   for (const controller of activeControllers) {
     try {
       controller.abort();
@@ -303,6 +305,28 @@ function handleClose() {
   abortAllUploads();
   resetQueue();
   emit('close');
+}
+
+function abortableDelay(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new Error('上传已取消'));
+      return;
+    }
+    const timer = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      cleanup();
+      reject(new Error('上传已取消'));
+    };
+    const cleanup = () => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort);
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 /** 校验单个文件是否匹配 acceptTypes 规则（MIME 精确 / image/* 前缀 / .ext 后缀） */
@@ -399,6 +423,8 @@ async function uploadFiles(files: File[]) {
 
   uploading.value = true;
   batchResult.value = null;
+  const batchGeneration = ++uploadBatchGeneration;
+  const isCurrentBatch = () => batchGeneration === uploadBatchGeneration;
 
   const queueEntries: QueueEntry[] = files.map((f) => ({
     uid: genUid(),  // 唯一标识
@@ -431,82 +457,85 @@ async function uploadFiles(files: File[]) {
   let nextFileIndex = 0;
   let staggerCounter = 0;
 
-  // 分片上传实例（惰性创建，并发 2 避免 CDN 限流）
-  const chunkedUpload = useChunkedUpload(3);
-
   /** 大文件分片上传逻辑 */
-  const uploadSingleChunked = async (file: File, entry: QueueEntry): Promise<void> => {
-    const abortController = new AbortController();
-    activeControllers.add(abortController);
+  const uploadSingleChunked = async (
+    file: File,
+    entry: QueueEntry,
+    abortController: AbortController,
+  ): Promise<void> => {
+    // 每个文件使用独立 composable 状态，避免并发文件共享 uploadId/progress。
+    const chunkedUpload = useChunkedUpload(3);
     try {
       const result = await chunkedUpload.uploadFile(
         file,
         (p) => {
+          if (!isCurrentBatch() || abortController.signal.aborted) return;
           entry.progress = p.totalChunks > 0 ? Math.round((p.uploadedChunks / p.totalChunks) * 100) : 0;
           entry.loadedBytes = p.loadedBytes;
           entry.speed = p.speed;
           entry.eta = p.eta;
-          if (entry.checkpointTime === 0) {
-            entry.checkpointTime = Date.now();
-          }
+          if (entry.checkpointTime === 0) entry.checkpointTime = Date.now();
         },
         abortController.signal,
       );
+      if (!isCurrentBatch() || abortController.signal.aborted) return;
       entry.status = 'success';
       successList.push({ id: result.id, originalName: result.originalName });
     } catch (error: unknown) {
+      if (!isCurrentBatch() || abortController.signal.aborted) return;
       entry.status = 'error';
       entry.errorReason = getErrorMessage(error);
       failedList.push({ name: file.name, reason: getErrorMessage(error) });
-    } finally {
-      activeControllers.delete(abortController);
     }
   };
 
   const uploadSingle = async (file: File, uid: string, stagger: number): Promise<void> => {
-    // 分级延迟启动，将请求分散到 300ms 窗口内，避免 Telegram 429 限流
-    await new Promise(resolve => setTimeout(resolve, stagger * 300));
-
-    const entry = queueMap.get(uid);
-    if (!entry) return;
-
-    // 大文件（>20MB）走分片上传
-    const CHUNK_THRESHOLD = 5 * 1024 * 1024; // 5MB 以上走分片上传，避免 CDN 超时截断
-    if (file.size > CHUNK_THRESHOLD) {
-      return uploadSingleChunked(file, entry);
-    }
-
+    const abortController = new AbortController();
+    activeControllers.add(abortController);
     try {
-      // 异步上传：文件传输完成后立即断开请求连接（避免 Cloudflare 代理超时），
-      // 后端在后台处理 Telegram 上传，前端轮询获取状态
+      // 分级延迟启动，将请求分散到 300ms 窗口内；延时同样响应取消。
+      await abortableDelay(stagger * 300, abortController.signal);
+      if (!isCurrentBatch()) return;
+
+      const entry = queueMap.get(uid);
+      if (!entry) return;
+
+      const CHUNK_THRESHOLD = 5 * 1024 * 1024;
+      if (file.size > CHUNK_THRESHOLD) {
+        await uploadSingleChunked(file, entry, abortController);
+        return;
+      }
+
       const result = await fileStore.uploadFileAsync(
         file,
         (loaded, total) => {
-          // 文件传输进度（浏览器 → 服务器）
-          if (entry) {
-            entry.progress = total > 0 ? Math.round((loaded / total) * 100) : 0;
-            entry.loadedBytes = loaded;
-            // 首次收到进度数据时记录传输开始时间（排除排队等待时间）
-            if (entry.checkpointBytes === 0 && loaded > 0) {
-              entry.checkpointTime = Date.now();
-            }
+          if (!isCurrentBatch() || abortController.signal.aborted) return;
+          entry.progress = total > 0 ? Math.round((loaded / total) * 100) : 0;
+          entry.loadedBytes = loaded;
+          if (entry.checkpointBytes === 0 && loaded > 0) {
+            entry.checkpointTime = Date.now();
           }
         },
         (status) => {
-          // 后端处理状态更新
-          if (entry && status === 'uploading') {
+          if (isCurrentBatch() && !abortController.signal.aborted && status === 'uploading') {
             entry.status = 'processing';
           }
         },
+        abortController.signal,
       );
-      if (entry) entry.status = 'success';
+      if (!isCurrentBatch() || abortController.signal.aborted) return;
+      entry.status = 'success';
       successList.push({ id: result.id, originalName: result.originalName });
     } catch (error: unknown) {
+      if (!isCurrentBatch() || abortController.signal.aborted) return;
+      const entry = queueMap.get(uid);
       if (entry) {
         entry.status = 'error';
         entry.errorReason = getErrorMessage(error);
       }
       failedList.push({ name: file.name, reason: getErrorMessage(error) });
+    } finally {
+      activeControllers.delete(abortController);
     }
   };
 
@@ -525,6 +554,8 @@ async function uploadFiles(files: File[]) {
   await Promise.all(
     Array.from({ length: Math.min(concurrency.value, files.length) }, () => runWorker())
   );
+
+  if (!isCurrentBatch()) return;
 
   // 最后一次更新速度
   updateSpeeds();

@@ -137,26 +137,12 @@ export class ShareService {
       return { requiresPassword: true };
     }
     if (link.password && accessJwt) {
-      const ok = await this.passwordService.verifyAccessJwt(accessJwt, link.id);
+      const ok = await this.passwordService.verifyAccessJwt(accessJwt, link.id, link.password);
       if (!ok) return { requiresPassword: true };
     }
 
-    // 通过校验 → 首次访问设置 expiresStartAt
-    if (link.expiresIn && !link.expiresStartAt) {
-      link.expiresStartAt = new Date();
-      await this.shareLinkRepo.save(link);
-    }
-
-    // 原子递增访问计数并强制 maxAccessCount 上限（消除 read-modify-write 竞态与丢失更新）
-    const access = await this.tryIncrementAccessCount(link);
-    if (!access.allowed) {
-      if (link.status !== ShareLinkStatus.EXHAUSTED) {
-        link.status = ShareLinkStatus.EXHAUSTED;
-        await this.shareLinkRepo.save(link).catch(() => {});
-      }
-      throw new NotFoundException('分享访问次数已耗尽');
-    }
-
+    // 元数据探测不消费访问次数，避免 maxAccessCount=1 时页面信息请求先耗尽额度、
+    // 随后的首次下载立即失败。实际下载/文件夹浏览入口会原子消费额度。
     this.audit.log({
       action: 'share_link_access' as AuditAction,
       resourceType: 'share_link',
@@ -209,7 +195,7 @@ export class ShareService {
       throw new BadRequestException('密码错误');
     }
 
-    const accessJwt = await this.passwordService.issueAccessJwt(link.id);
+    const accessJwt = await this.passwordService.issueAccessJwt(link.id, link.password);
     return { accessJwt };
   }
 
@@ -242,14 +228,15 @@ export class ShareService {
       if (!accessJwt) {
         throw new ForbiddenException('此分享需要密码');
       }
-      const ok = await this.passwordService.verifyAccessJwt(accessJwt, link.id);
+      const ok = await this.passwordService.verifyAccessJwt(accessJwt, link.id, link.password);
       if (!ok) throw new ForbiddenException('访问凭证已失效，请重新输入密码');
     }
 
     // 校验 fileId 是否属于此分享的 target 子树
     await this.assertFileInShare(link, fileId);
+    await this.consumeShareAccess(link);
 
-    // 增加下载计数（独立于访问计数，避免一次访问多次下载快速耗尽）
+    // 记录实际下载
     this.audit.log({
       action: 'share_link_download' as AuditAction,
       resourceType: 'share_link',
@@ -382,7 +369,8 @@ export class ShareService {
    * 严格模式：返回 false 而不抛异常，让调用方按需返回 { requiresPassword: true }。
    */
   async verifyAccessJwtForLink(link: ShareLink, accessJwt: string): Promise<boolean> {
-    return this.passwordService.verifyAccessJwt(accessJwt, link.id);
+    if (!link.password) return false;
+    return this.passwordService.verifyAccessJwt(accessJwt, link.id, link.password);
   }
 
   /**
@@ -419,6 +407,26 @@ export class ShareService {
         link.status = ShareLinkStatus.EXHAUSTED;
         await this.shareLinkRepo.save(link).catch(() => {});
       }
+      throw new NotFoundException('分享访问次数已耗尽');
+    }
+  }
+
+  /** 实际访问入口调用：原子启动有效期并消费一次访问额度。 */
+  async consumeShareAccess(link: ShareLink): Promise<void> {
+    if (link.expiresIn && !link.expiresStartAt) {
+      const started = await this.shareLinkRepo
+        .createQueryBuilder()
+        .update(ShareLink)
+        .set({ expiresStartAt: () => 'COALESCE("expiresStartAt", NOW())' })
+        .where('id = :id', { id: link.id })
+        .andWhere('"isDeleted" = false')
+        .execute();
+      if (!started.affected) throw new NotFoundException('分享不存在或已被取消');
+      link.expiresStartAt = new Date();
+    }
+    const access = await this.tryIncrementAccessCount(link);
+    if (!access.allowed) {
+      await this.shareLinkRepo.update(link.id, { status: ShareLinkStatus.EXHAUSTED }).catch(() => {});
       throw new NotFoundException('分享访问次数已耗尽');
     }
   }

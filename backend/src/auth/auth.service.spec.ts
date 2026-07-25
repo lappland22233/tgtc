@@ -71,6 +71,7 @@ describe('AuthService - validateVerificationCode', () => {
   };
 
   beforeEach(async () => {
+    process.env.CODE_HMAC_SECRET = 'test-code-hmac-secret';
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         AuthService,

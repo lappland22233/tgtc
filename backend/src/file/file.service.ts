@@ -930,20 +930,28 @@ export class FileService implements OnModuleInit {
         // 无论成功失败都推进游标：失败的文件留待下次定时任务重试，不阻塞本批后续文件
         lastId = file.id;
         try {
-          // 先从 Telegram 删除；失败则抛错进入 catch，保留 DB 记录待下次重试，
-          // 不再「Telegram 删除失败仍删库」，避免 Telegram 侧孤儿文件永久泄漏。
+          // Telegram 远端删除是尽力而为；无论远端结果如何都继续清除数据库记录，
+          // 确保文件立即失去所有网页访问入口，避免因远端故障造成公开泄露。
           if (file.telegramFileId) {
-            await this.telegramService.deleteFile(file.telegramFileId);
+            try {
+              await this.telegramService.deleteFile(file.telegramFileId);
+            } catch (error: unknown) {
+              const errMsg = error instanceof Error ? error.message : '未知错误';
+              this.logger.warn(
+                `Telegram 远端删除失败，仍继续清除数据库记录: ${file.originalName} (${file.id}), 错误: ${errMsg}`,
+              );
+            }
           }
           this.deleteLocalThumbnail(file);
+          this.fileCacheService.invalidate(file.id);
           await this.accessLogRepository.delete({ fileId: file.id });
           await this.fileRepository.remove(file);
           deletedCount++;
-          this.logger.log(`已永久删除文件: ${file.originalName} (${file.id})`);
+          this.logger.log(`已永久删除文件数据库记录: ${file.originalName} (${file.id})`);
         } catch (error: unknown) {
           const errMsg = error instanceof Error ? error.message : '未知错误';
           this.logger.warn(
-            `永久删除文件失败，保留记录待下次重试: ${file.originalName} (${file.id}), 错误: ${errMsg}`,
+            `清除文件数据库记录失败，保留记录待下次重试: ${file.originalName} (${file.id}), 错误: ${errMsg}`,
           );
         }
       }
@@ -1365,6 +1373,26 @@ export class FileService implements OnModuleInit {
   }
 
 
+  /** 统一选择正式缓存或二次开发 Bot API 的实时冷回源。 */
+  private async getDownloadStream(file: File): Promise<{
+    stream: Readable;
+    actualSize: number;
+  }> {
+    const expectedSize = Number(file.size);
+    if (!Number.isSafeInteger(expectedSize) || expectedSize <= 0) {
+      throw new BadRequestException('文件大小无效');
+    }
+    if (file.status === 'processing' && !this.fileCacheService.getCachedPath(file.id)) {
+      throw new BadRequestException('文件正在处理中，请稍后刷新重试');
+    }
+    const result = await this.fileCacheService.getOrCacheStream(
+      file.id,
+      expectedSize,
+      () => this.telegramService.getRealtimeFileStream(file.telegramFileId || file.filename),
+    );
+    return { stream: result.stream, actualSize: expectedSize };
+  }
+
   /**
    * 流式下载文件内容（后端代理，不暴露 Telegram URL）
    * 用于避免大文件全部加载到内存
@@ -1400,17 +1428,7 @@ export class FileService implements OnModuleInit {
       throw new ForbiddenException('访问次数已用尽或文件不存在');
     }
 
-    // 尝试从本地缓存获取（二次访问加速，减少 Telegram API 调用）
-    const cachedStream = this.fileCacheService.getCachedReadStream(file.id, Number(file.size));
-
-    // 缓存未命中且文件仍在处理中（TG 未同步）→ 拒绝下载，避免用临时 UUID 回源
-    if (!cachedStream && file.status === 'processing') {
-      throw new BadRequestException('文件正在处理中，请稍后刷新重试');
-    }
-
-    const { stream } = cachedStream
-      ? { stream: cachedStream }
-      : { stream: (await this.telegramService.getFileStream(file.telegramFileId || file.filename)).stream };
+    const { stream } = await this.getDownloadStream(file);
 
     // 写访问日志（responseSize 先占位为 0，流式传输完成后由 controller 更新为实际字节数）
     let accessLogId: string | undefined;
@@ -1645,10 +1663,7 @@ export class FileService implements OnModuleInit {
       }
     }
 
-    const cachedStream = this.fileCacheService.getCachedReadStream(file.id, Number(file.size));
-    const { stream, info } = cachedStream
-      ? { stream: cachedStream, info: { file_id: file.telegramFileId, file_path: '', file_size: Number(file.size) } }
-      : await this.telegramService.getFileStream(file.telegramFileId || file.filename);
+    const { stream, actualSize } = await this.getDownloadStream(file);
 
     let accessLogId: string | undefined;
     try {
@@ -1668,7 +1683,6 @@ export class FileService implements OnModuleInit {
     const isInline = /^(image|video|audio)\//.test(mimeType);
     const filename = this.ensureFileExtension(file.originalName, mimeType);
 
-    const actualSize = info.file_size > 0 ? info.file_size : Number(file.size);
     return { stream, contentType: mimeType, filename, size: actualSize, isInline, accessLogId };
   }
 
@@ -1696,10 +1710,7 @@ export class FileService implements OnModuleInit {
       throw new ForbiddenException('此文件为私有文件，不提供公开访问');
     }
 
-    const cachedStream = this.fileCacheService.getCachedReadStream(file.id, Number(file.size));
-    const { stream, info } = cachedStream
-      ? { stream: cachedStream, info: { file_id: file.telegramFileId, file_path: '', file_size: Number(file.size) } }
-      : await this.telegramService.getFileStream(file.telegramFileId || file.filename);
+    const { stream, actualSize } = await this.getDownloadStream(file);
 
     let accessLogId: string | undefined;
     try {
@@ -1720,7 +1731,6 @@ export class FileService implements OnModuleInit {
     const filename = this.ensureFileExtension(file.originalName, mimeType);
 
     // 使用 Telegram API 返回的真实文件大小，避免 Content-Length 不匹配导致下载卡死
-    const actualSize = info.file_size > 0 ? info.file_size : Number(file.size);
     return { stream, contentType: mimeType, filename, size: actualSize, isInline, accessLogId };
   }
 
@@ -1759,7 +1769,7 @@ export class FileService implements OnModuleInit {
     file: Express.Multer.File,
     user: User,
     tagIds?: string[],
-    req?: Request,
+    _req?: Request,
   ): Promise<{ jobId: string; warning: string }> {
     if (file.size > this.maxFileSize) {
       throw new BadRequestException(`文件大小不能超过 ${this.maxFileSize / 1024 / 1024}MB`);
@@ -1775,9 +1785,10 @@ export class FileService implements OnModuleInit {
 
     const job = this.uploadJobService.createJob(user, originalName);
 
-    // 创建 AbortController：客户端连接断开 30 秒后中止后台上传
+    // 文件已由 Multer 完整接收后，后台任务与原 HTTP 连接解耦；
+    // 正常响应结束也会触发 request close，不能据此取消仍在进行的 Telegram 上传。
     const abortController = new AbortController();
-    const cleanup = this.setupAbortOnDisconnect(req, abortController, job.jobId);
+    const cleanup = () => {};
 
     // 后台处理：不阻塞响应
     this.processAsyncUpload(job.jobId, file, user, originalName, abortController.signal, cleanup, tagIds);
@@ -1797,13 +1808,14 @@ export class FileService implements OnModuleInit {
     files: Express.Multer.File[],
     user: User,
     tagIds?: string[],
-    req?: Request,
+    _req?: Request,
   ): Promise<{ jobId: string; total: number; warning: string }> {
     const job = this.uploadJobService.createJob(user, `${files.length} 个文件`, files.length);
 
-    // 创建 AbortController：客户端连接断开 30 秒后中止后台上传
+    // 文件已由 Multer 完整接收后，后台任务与原 HTTP 连接解耦；
+    // 正常响应结束也会触发 request close，不能据此取消仍在进行的 Telegram 上传。
     const abortController = new AbortController();
-    const cleanup = this.setupAbortOnDisconnect(req, abortController, job.jobId);
+    const cleanup = () => {};
 
     setImmediate(async () => {
       const success: File[] = [];
@@ -1861,49 +1873,6 @@ export class FileService implements OnModuleInit {
     });
 
     return { jobId: job.jobId, total: files.length, warning: '任务在内存中处理，进程重启会丢失' };
-  }
-
-  /**
-   * 设置 AbortController：监听 req close 事件，客户端断开 30 秒后触发 abort
-   * 并将任务标记为 failed。返回 cleanup 函数用于清理监听器。
-   */
-  private setupAbortOnDisconnect(
-    req: Request | undefined,
-    abortController: AbortController,
-    jobId: string,
-  ): () => void {
-    if (!req) {
-      // 无 req 时不启用 abort 机制（向后兼容）
-      return () => {};
-    }
-
-    let disconnectTimer: ReturnType<typeof setTimeout> | null = null;
-
-    const onConnectionClose = (): void => {
-      if (disconnectTimer || abortController.signal.aborted) return;
-      this.logger.warn(`上传任务 ${jobId} 客户端连接已断开，30 秒后放弃任务`);
-      disconnectTimer = setTimeout(() => {
-        if (!abortController.signal.aborted) {
-          abortController.abort();
-          this.uploadJobService.updateJob(jobId, {
-            status: 'failed',
-            error: '客户端连接断开超过 30 秒，任务已放弃',
-          });
-        }
-      }, 30 * 1000);
-    };
-
-    req.on('close', onConnectionClose);
-    req.socket?.on('close', onConnectionClose);
-
-    return (): void => {
-      req.off('close', onConnectionClose);
-      req.socket?.off('close', onConnectionClose);
-      if (disconnectTimer) {
-        clearTimeout(disconnectTimer);
-        disconnectTimer = null;
-      }
-    };
   }
 
   getUploadJob(jobId: string): UploadJob | undefined {
@@ -2132,10 +2101,7 @@ export class FileService implements OnModuleInit {
       throw new NotFoundException('文件不存在');
     }
 
-    const cachedStream = this.fileCacheService.getCachedReadStream(file.id, Number(file.size));
-    const { stream, info } = cachedStream
-      ? { stream: cachedStream, info: { file_id: file.telegramFileId, file_path: '', file_size: Number(file.size) } }
-      : await this.telegramService.getFileStream(file.telegramFileId || file.filename);
+    const { stream, actualSize } = await this.getDownloadStream(file);
 
     let accessLogId: string | undefined;
     try {
@@ -2155,7 +2121,6 @@ export class FileService implements OnModuleInit {
     const isInline = /^(image|video|audio)\//.test(mimeType);
     const filename = this.ensureFileExtension(file.originalName, mimeType);
 
-    const actualSize = info.file_size > 0 ? info.file_size : Number(file.size);
     return { stream, contentType: mimeType, filename, size: actualSize, isInline, accessLogId };
   }
 }

@@ -62,7 +62,7 @@ import { TagModule } from './tag/tag.module';
       extra: {
         max: parseInt(process.env.DB_POOL_SIZE || '20', 10),
         // 可选 TLS：DB_SSL=true 时启用（托管 PG 常见需求）
-        ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : undefined,
+        ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: true } : undefined,
       },
     }),
     AuthModule,

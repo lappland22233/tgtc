@@ -66,13 +66,11 @@ export const useAuthStore = defineStore('auth', () => {
 
   async function register(email: string, password: string, code: string) {
     const response = await api.post('/auth/register', { email, password, code });
-    const data = response.data.data;
-    // 邮箱验证开启时，后端不返回 token，需用户验证邮箱后再登录
-    if (data.needVerification) {
-      return response;
+    const data = response.data.data as { user?: User; needVerification?: boolean; message?: string };
+    if (data.user) {
+      user.value = data.user;
     }
-    user.value = data.user as User;
-    return response;
+    return data;
   }
 
   async function sendCode(email: string, type: SendCodeType) {

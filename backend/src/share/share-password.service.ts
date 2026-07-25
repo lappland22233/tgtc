@@ -4,6 +4,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { JwtService } from '@nestjs/jwt';
 import * as jwt from 'jsonwebtoken';
+import * as crypto from 'crypto';
 import { BannedIP } from '../common/entities/banned-ip.entity';
 import { RateLimitService } from '../common/services/rate-limit.service';
 import { ConfigCacheService } from '../common/services/config-cache.service';
@@ -111,9 +112,9 @@ export class SharePasswordService {
    * 为验证通过的分享签发 access JWT，5 分钟有效。
    * payload 包含 shareId 防止跨链接重放。
    */
-  async issueAccessJwt(shareId: string): Promise<string> {
+  async issueAccessJwt(shareId: string, passwordHash: string): Promise<string> {
     return this.jwtService.sign(
-      { sid: shareId, typ: 'share-access' },
+      { sid: shareId, typ: 'share-access', pv: this.passwordVersion(passwordHash) },
       { expiresIn: '5m' },
     );
   }
@@ -122,13 +123,19 @@ export class SharePasswordService {
    * 校验 access JWT 是否有效且属于指定 shareId。
    * 失败返回 false（不抛异常，调用方按需处理）。
    */
-  async verifyAccessJwt(token: string, expectedShareId: string): Promise<boolean> {
+  async verifyAccessJwt(token: string, expectedShareId: string, passwordHash: string): Promise<boolean> {
     try {
-      const payload = jwt.verify(token, this.getJwtSecret()) as { sid?: string; typ?: string };
-      return payload.typ === 'share-access' && payload.sid === expectedShareId;
+      const payload = jwt.verify(token, this.getJwtSecret()) as { sid?: string; typ?: string; pv?: string };
+      return payload.typ === 'share-access'
+        && payload.sid === expectedShareId
+        && payload.pv === this.passwordVersion(passwordHash);
     } catch {
       return false;
     }
+  }
+
+  private passwordVersion(passwordHash: string): string {
+    return crypto.createHmac('sha256', this.getJwtSecret()).update(passwordHash).digest('base64url');
   }
 
   private getJwtSecret(): string {

@@ -101,23 +101,27 @@ export class AlertEngineService {
   ): Promise<Alert | null> {
     const cooldownSince = new Date(Date.now() - cooldownMinutes * 60 * 1000);
     try {
-      const rows = await this.alertRepo.manager.query(
-        `INSERT INTO alerts (id, "ruleId", level, title, message, context, "createdAt")
-         SELECT gen_random_uuid(), $1, $2, $3, $4, $5, NOW()
-         WHERE NOT EXISTS (
-           SELECT 1 FROM alerts WHERE "ruleId" = $1 AND "createdAt" > $6
-         )
-         RETURNING id, "ruleId", level, title, message, context,
-                   "acknowledgedAt", "acknowledgedBy", "createdAt"`,
-        [
-          eval_.ruleId,
-          eval_.level,
-          eval_.title,
-          eval_.message,
-          JSON.stringify(eval_.context ?? {}),
-          cooldownSince,
-        ],
-      );
+      const rows = await this.alertRepo.manager.transaction(async (manager) => {
+        // 同一规则使用事务级 advisory lock 串行化冷却检查，跨进程/队列重试同样有效。
+        await manager.query('SELECT pg_advisory_xact_lock(hashtext($1))', [eval_.ruleId]);
+        return manager.query(
+          `INSERT INTO alerts (id, "ruleId", level, title, message, context, "createdAt")
+           SELECT gen_random_uuid(), $1, $2, $3, $4, $5, NOW()
+           WHERE NOT EXISTS (
+             SELECT 1 FROM alerts WHERE "ruleId" = $1 AND "createdAt" > $6
+           )
+           RETURNING id, "ruleId", level, title, message, context,
+                     "acknowledgedAt", "acknowledgedBy", "createdAt"`,
+          [
+            eval_.ruleId,
+            eval_.level,
+            eval_.title,
+            eval_.message,
+            JSON.stringify(eval_.context ?? {}),
+            cooldownSince,
+          ],
+        );
+      });
       return rows && rows.length > 0 ? (rows[0] as Alert) : null;
     } catch (error) {
       this.logger.error(`创建告警失败 (${eval_.ruleId}): ${(error as Error).message}`);

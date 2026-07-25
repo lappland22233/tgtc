@@ -14,6 +14,9 @@ export class TelegramService {
   private readonly chatId: string;
   private readonly apiBase: string;
   private readonly fileBase: string;
+  private readonly fileStreamingEnabled: boolean;
+  private readonly fileStreamingBase: string;
+  private readonly fileStreamingTimeoutMs: number;
   /**
    * 本地 Bot API 文件存储的允许根目录（白名单）。
    * 自建 telegram-bot-api 时 getFile 可能返回本地绝对路径，
@@ -31,6 +34,13 @@ export class TelegramService {
     const base = this.configService.get<string>('TELEGRAM_API_BASE') || 'https://api.telegram.org';
     this.apiBase = `${base}/bot`;
     this.fileBase = `${base}/file/bot`;
+    this.fileStreamingEnabled = this.configService.get<string>('TELEGRAM_FILE_STREAMING_ENABLED') === 'true';
+    const streamingBase = this.configService.get<string>('TELEGRAM_FILE_STREAM_BASE') || base;
+    this.fileStreamingBase = streamingBase.replace(/\/$/, '');
+    const streamingTimeoutSeconds = Number(this.configService.get<string>('TELEGRAM_FILE_STREAM_TIMEOUT_SECONDS'));
+    this.fileStreamingTimeoutMs = Number.isFinite(streamingTimeoutSeconds) && streamingTimeoutSeconds > 0
+      ? streamingTimeoutSeconds * 1000
+      : 120000;
     // 本地文件白名单根目录，如 /var/lib/telegram-bot-api 或容器内 tmp 目录
     this.localFileBase = this.configService.get<string>('TELEGRAM_LOCAL_FILE_DIR') || '';
 
@@ -285,6 +295,44 @@ export class TelegramService {
     );
 
     return Buffer.from(fileResponse.data);
+  }
+
+  /**
+   * 通过二次开发 Bot API 的独立 file_id 端点实时获取完整文件。
+   * 该端点在 TDLib 完成整文件下载前即可返回连续字节，不支持 Range。
+   */
+  async getRealtimeFileStream(fileId: string): Promise<{
+    stream: Readable;
+    info: { file_id: string; file_path: string; file_size: number };
+  }> {
+    if (!this.fileStreamingEnabled) {
+      return this.getFileStream(fileId);
+    }
+    if (!fileId || fileId.length > 4096) {
+      throw new Error('非法的 Telegram file_id');
+    }
+
+    const url = `${this.fileStreamingBase}/stream/file/bot${this.botToken}/${encodeURIComponent(fileId)}`;
+    const response = await this.telegramRequest(
+      () => axios.get<Readable>(url, {
+        responseType: 'stream',
+        timeout: this.fileStreamingTimeoutMs,
+        maxRedirects: 0,
+      }),
+      'getRealtimeFileStream',
+      1,
+    );
+    const rawLength = response.headers['content-length'];
+    const fileSize = Number(Array.isArray(rawLength) ? rawLength[0] : rawLength);
+    if (!Number.isSafeInteger(fileSize) || fileSize <= 0) {
+      (response.data as Readable).destroy();
+      throw new Error('Telegram 实时流响应缺少有效的 Content-Length');
+    }
+
+    return {
+      stream: response.data as Readable,
+      info: { file_id: fileId, file_path: '', file_size: fileSize },
+    };
   }
 
   /**

@@ -183,7 +183,6 @@ export class ShareController {
       'Content-Disposition': `attachment; filename="${encodeURIComponent(result.filename)}"`,
       'Content-Length': result.size.toString(),
       'Cache-Control': 'no-store, no-cache, must-revalidate',
-      'Accept-Ranges': 'bytes',
     });
 
     const pipe = promisify(pipeline);
@@ -223,6 +222,7 @@ export class ShareController {
       const ok = await this.shareService.verifyAccessJwtForLink(link, accessJwt);
       if (!ok) return { requiresPassword: true };
     }
+    await this.shareService.consumeShareAccess(link);
     return this.shareService.listFolderContentsForShare(link, folderId);
   }
 

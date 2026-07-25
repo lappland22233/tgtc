@@ -88,10 +88,11 @@ export function useChunkedUpload(concurrency = 2) {
         totalChunks,
         chunkSize,
       }, { signal, timeout: 0 });
-      uploadId.value = initRes.data.data.uploadId;
+      const sessionUploadId = String(initRes.data.data.uploadId);
+      uploadId.value = sessionUploadId;
 
       // 2. Get uploaded status
-      const statusRes = await api.get(`/files/chunk/${uploadId.value}/status`, { signal });
+      const statusRes = await api.get(`/files/chunk/${sessionUploadId}/status`, { signal });
       // 以“已成功索引集合”作为续传/进度判定的唯一依据（并发下完成顺序非连续，不能用计数假定前 N 个已完成）
       const uploadedIndices = new Set<number>(statusRes.data.data.uploaded);
 
@@ -145,7 +146,7 @@ export function useChunkedUpload(concurrency = 2) {
           form.append('chunk', chunk.blob, String(chunk.index));
           form.append('index', String(chunk.index));
 
-          await api.post(`/files/chunk/${uploadId.value}`, form, {
+          await api.post(`/files/chunk/${sessionUploadId}`, form, {
             signal: merged.signal,
             timeout: 0, // 禁用 axios 默认 30s 超时，使用 AbortController 控制
           });
@@ -268,8 +269,7 @@ export function useChunkedUpload(concurrency = 2) {
       }
 
       // 6. Poll for merge result (avoids Cloudflare 502 timeout on long-running uploads)
-      if (!uploadId.value) throw new Error('上传会话 ID 丢失');
-      const result = await pollMergeResult(uploadId.value, signal);
+      const result = await pollMergeResult(sessionUploadId, signal);
       uploading.value = false;
       return result;
     } catch (err) {

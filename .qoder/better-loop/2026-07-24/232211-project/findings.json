@@ -1,0 +1,202 @@
+{
+  "summary": {
+    "projectName": "文件分发系统（网盘版）",
+    "locale": "zh-CN",
+    "modelId": "agent-work-loop-v4",
+    "reportContractVersion": 24,
+    "overview": "项目拥有详尽的架构文档和清晰的开发启动路径，但变更验证覆盖不足、缺少自动化交付管线和回滚机制，限制了编码代理可靠交付的能力。",
+    "aiAgentPractice": {
+      "inspectedSurfaces": [
+        "Plugins",
+        "Skills"
+      ],
+      "coverageRows": [
+        {
+          "surface": "Plugins",
+          "scopes": [
+            "Plugin"
+          ],
+          "count": 3,
+          "paths": [
+            "~/.qoder/plugins/cache/qoder-bundler/better-loop/.qoder-plugin/plugin.json",
+            "~/.qoder/plugins/cache/qoder-bundler/qoder-create-plugin",
+            "~/.qoder/plugins/cache/qoder-bundler/security-scan/.qoder-plugin/plugin.json"
+          ]
+        },
+        {
+          "surface": "Skills",
+          "scopes": [
+            "Project"
+          ],
+          "count": 0,
+          "paths": []
+        },
+        {
+          "surface": "Custom Agents",
+          "scopes": [
+            "Project"
+          ],
+          "count": 0,
+          "paths": []
+        }
+      ]
+    },
+    "suggestions": [
+      {
+        "id": "expand-backend-test-coverage",
+        "kind": "try-existing",
+        "title": "扩展后端测试覆盖至核心业务模块",
+        "reason": "folder、tag、alert、security、telemetry 等模块完全无测试，代理修改这些模块后无法验证行为正确性。",
+        "confidence": "High",
+        "owner": "后端开发者",
+        "nextStep": "为 folder.service.ts、tag.service.ts 和 alert-engine.service.ts 编写 *.spec.ts 测试，优先覆盖核心变更路径。",
+        "validation": "运行 npm test 确认新测试通过且覆盖率超过 30% 全局阈值。"
+      },
+      {
+        "id": "add-frontend-test-infrastructure",
+        "kind": "try-existing",
+        "title": "建立前端测试基础设施",
+        "reason": "前端 Vue 3 应用包含复杂的状态管理和路由守卫，但完全没有测试框架配置。",
+        "confidence": "High",
+        "owner": "前端开发者",
+        "nextStep": "引入 Vitest + @vue/test-utils，为 stores/auth.ts 和 router/index.ts 编写基础测试。",
+        "validation": "运行前端测试命令确认测试执行通过。"
+      },
+      {
+        "id": "add-ci-pipeline",
+        "kind": "try-existing",
+        "title": "添加 CI 管线作为自动化验收边界",
+        "reason": "当前没有自动化 CI/CD 管线，代码变更直接从本地推到生产，缺少系统化的质量门禁。",
+        "confidence": "High",
+        "owner": "项目维护者",
+        "nextStep": "配置 GitHub Actions 或类似 CI，至少包含 typecheck + test + build 三个步骤。",
+        "validation": "提交 PR 后 CI 自动运行并报告结果。"
+      }
+    ],
+    "assignmentSummaries": [],
+    "dimensions": [
+      {
+        "id": "task-understanding",
+        "label": "任务理解",
+        "score": 72,
+        "summary": "CODEBUDDY.md 提供了 957 行的详尽指导，涵盖架构、API 路由、设计模式和注意事项，代理可清晰理解项目边界和上下文。",
+        "findingRefs": []
+      },
+      {
+        "id": "controlled-execution",
+        "label": "可控执行",
+        "score": 68,
+        "summary": "npm 脚本覆盖了开发、构建、测试和迁移路径；环境校验在启动时执行。但权限边界和沙箱隔离未见显式强制。",
+        "findingRefs": []
+      },
+      {
+        "id": "change-validation",
+        "label": "改动验证",
+        "score": 55,
+        "summary": "后端仅有 6 个测试文件覆盖 15+ 模块，前端零测试；Jest 覆盖率阈值设为 30% 但大量模块被排除在覆盖率统计之外。类型检查是唯一的自动化代码检查。",
+        "findingRefs": [
+          "backend-test-coverage-sparse",
+          "no-ci-cd-pipeline",
+          "frontend-zero-test-coverage"
+        ]
+      },
+      {
+        "id": "reliable-delivery",
+        "label": "可靠交付",
+        "score": 45,
+        "summary": "无 CI/CD 管线，无 PR 审核保护，无自动化验收边界；本地测试是唯一的验证手段，生产部署依赖手动操作。",
+        "findingRefs": [
+          "no-ci-cd-pipeline",
+          "no-delivery-rollback-mechanism"
+        ]
+      },
+      {
+        "id": "learning-capture",
+        "label": "经验沉淀",
+        "score": 35,
+        "summary": "无项目级 Skill、无可复用学习循环、无纵向验证机制。重复的调试和修复模式未被捕获为可复用知识。",
+        "findingRefs": [
+          "no-reusable-learning-loop"
+        ]
+      }
+    ]
+  },
+  "findings": [
+    {
+      "id": "backend-test-coverage-sparse",
+      "title": "后端测试仅覆盖 6 个模块，核心业务路径缺少验证",
+      "severity": "High",
+      "reason": "15+ 后端模块中仅 6 个拥有 *.spec.ts 测试文件。folder、tag、alert、security、telemetry、user、jobs 等模块完全无测试。jest.config.ts 通过 collectCoverageFrom 排除了大量模块，使得覆盖率阈值 30% 仅反映已选模块的覆盖情况。代理修改未覆盖模块后无法通过自动化测试验证行为正确性，变更风险不可控。",
+      "expectedOutput": [
+        "folder.service.spec.ts 覆盖 folder 模块的核心 CRUD 和软删除路径",
+        "npm test 全部通过且覆盖率不低于现有阈值"
+      ],
+      "expectedArtifact": "backend/src/folder/folder.service.spec.ts",
+      "aiFixPrompt": "/better-loop fix this issue\n\n为 backend/src/folder/folder.service.ts 编写单元测试，覆盖创建、重命名、移动和软删除的核心路径。\n\n## Validation\n\n- 运行 npx jest --testPathPattern=folder 确认测试通过\n- 确认新测试覆盖了 folder.service 的主要方法",
+      "dimensionRefs": [
+        "change-validation"
+      ]
+    },
+    {
+      "id": "no-ci-cd-pipeline",
+      "title": "无 CI/CD 管线，变更缺少自动化验收边界",
+      "severity": "High",
+      "reason": "项目没有 GitHub Actions、GitLab CI 或其他 CI 配置。代码变更从本地直接推送到生产，缺少自动化的 typecheck、test、build 验证步骤。本地测试通过不代表生产构建成功，代理无法在提交前获得系统化的质量反馈。",
+      "expectedOutput": [
+        "CI 配置文件存在且包含 typecheck 和 test 步骤",
+        "push 后 CI 自动执行并报告结果"
+      ],
+      "expectedArtifact": ".github/workflows/ci.yml",
+      "aiFixPrompt": "/better-loop fix this issue\n\n创建一个最小化的 GitHub Actions CI 配置，在每次 push 和 PR 时自动运行 typecheck 和 test。\n\n## Validation\n\n- 确认 .github/workflows/ci.yml 存在\n- 确认 workflow 包含 typecheck 和 test 步骤",
+      "dimensionRefs": [
+        "reliable-delivery",
+        "change-validation"
+      ]
+    },
+    {
+      "id": "frontend-zero-test-coverage",
+      "title": "前端 Vue 3 应用零测试覆盖",
+      "severity": "Medium",
+      "reason": "前端包含复杂的状态管理（4 个 Pinia store）、路由守卫链（四级 beforeEach）、分片上传 composable 和分享页状态机，但没有测试框架配置，没有任何测试文件。代理修改前端逻辑后完全依赖手动验证。",
+      "expectedOutput": [
+        "前端测试框架配置完成",
+        "auth store 基础测试通过"
+      ],
+      "expectedArtifact": "frontend/src/stores/auth.spec.ts + vitest 配置",
+      "aiFixPrompt": "/better-loop fix this issue\n\n为前端项目引入 Vitest 测试框架，并为 stores/auth.ts 编写基础单元测试。\n\n## Validation\n\n- 运行前端测试命令确认测试执行通过\n- 确认 auth store 的登录/登出/用户恢复逻辑被测试覆盖",
+      "dimensionRefs": [
+        "change-validation"
+      ]
+    },
+    {
+      "id": "no-delivery-rollback-mechanism",
+      "title": "生产部署无回滚机制",
+      "severity": "Medium",
+      "reason": "生产部署通过 systemd 直接启动 Node 进程（systemctl start tgtc-backend），没有回滚策略。部署失败时需要手动排查和恢复。数据库迁移通过 DB_MIGRATIONS_RUN 控制但生产环境通常为 false，新迁移需要手动运行，失败后无自动回退。",
+      "expectedOutput": [
+        "回滚路径文档化且可执行",
+        "回滚后服务恢复正常"
+      ],
+      "expectedArtifact": "部署回滚脚本或文档",
+      "aiFixPrompt": "/better-loop fix this issue\n\n为生产部署添加基于目录符号链接的回滚机制，保留最近 3 个版本以便快速切换。\n\n## Validation\n\n- 确认部署脚本支持版本切换\n- 确认回滚操作可在 30 秒内完成",
+      "dimensionRefs": [
+        "reliable-delivery"
+      ]
+    },
+    {
+      "id": "no-reusable-learning-loop",
+      "title": "重复调试模式未被捕获为可复用知识",
+      "severity": "Low",
+      "reason": "项目没有配置任何 Skill 或 Custom Agent。CODEBUDDY.md 中记录了多个已知陷阱（如 TDesign 组件事件处理、TypeORM 联合类型字段、CORS 默认值不一致），但这些知识以散文形式存在，未被结构化为可检测、可验证的学习循环。代理在遇到类似问题时无法自动匹配和复用历史解决方案。",
+      "expectedOutput": [
+        "Skill 文件存在且描述了 TypeORM 实体修改时的检查步骤",
+        "Skill 可在后续实体修改时被自动匹配"
+      ],
+      "expectedArtifact": ".qoder/skills/typeorm-entity-check/SKILL.md",
+      "aiFixPrompt": "/better-loop fix this issue\n\n基于 CODEBUDDY.md 中的已知陷阱，创建一个项目级 Skill 用于在修改 TypeORM 实体时自动检查联合类型字段和 data-source.ts 同步。\n\n## Validation\n\n- 确认 Skill 文件存在于 .qoder/skills/ 目录\n- 确认 Skill 描述了触发条件和检查步骤",
+      "dimensionRefs": [
+        "learning-capture"
+      ]
+    }
+  ]
+}

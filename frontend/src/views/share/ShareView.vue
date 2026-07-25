@@ -56,14 +56,16 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue';
+import { ref, computed, watch, onUnmounted } from 'vue';
 import { useRoute } from 'vue-router';
 import PasswordPrompt from './PasswordPrompt.vue';
 import FileShareCard from './FileShareCard.vue';
 import FolderShareBrowser from './FolderShareBrowser.vue';
 
 const route = useRoute();
-const token = route.params.token as string;
+const token = computed(() => String(route.params.token || ''));
+let requestController: AbortController | null = null;
+let requestGeneration = 0;
 
 interface FileInfo {
   id: string;
@@ -116,19 +118,23 @@ const verifying = ref(false);
  * 此时前端无法从响应里推断文件/文件夹的任何信息。
  */
 async function fetchInfo() {
-  // 【P3】token 缺失时直接展示"分享不存在"，避免 encodeURIComponent(undefined)
-  // 产生字面量 "undefined" 并发出无效请求
-  if (!token) {
+  const currentToken = token.value;
+  if (!currentToken) {
     state.value = { kind: 'notFound', message: '分享链接无效' };
     return;
   }
+
+  requestController?.abort();
+  const controller = new AbortController();
+  requestController = controller;
+  const generation = ++requestGeneration;
+
   try {
-    // 后端 ShareController 从 query 参数 ?access=... 读取 accessJwt，
-    // 不使用 Authorization header（避免与认证 JWT 混淆）
-    const url = `/api/s/${encodeURIComponent(token)}` +
+    const url = `/api/s/${encodeURIComponent(currentToken)}` +
       (accessJwt.value ? `?access=${encodeURIComponent(accessJwt.value)}` : '');
-    const res = await fetch(url);
+    const res = await fetch(url, { signal: controller.signal });
     const data = await res.json();
+    if (generation !== requestGeneration) return;
 
     // 业务错误：分享不存在 / 过期 / 次数耗尽
     if (!res.ok || data.code !== 0) {
@@ -166,6 +172,7 @@ async function fetchInfo() {
     // 异常响应
     state.value = { kind: 'notFound', message: '分享响应格式异常' };
   } catch (err) {
+    if (controller.signal.aborted || generation !== requestGeneration) return;
     state.value = {
       kind: 'notFound',
       message: err instanceof Error ? err.message : '网络错误',
@@ -177,7 +184,7 @@ async function onPasswordSubmit(pwd: string) {
   passwordError.value = '';
   verifying.value = true;
   try {
-    const res = await fetch(`/api/s/${encodeURIComponent(token)}/verify`, {
+    const res = await fetch(`/api/s/${encodeURIComponent(token.value)}/verify`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ password: pwd }),
@@ -197,7 +204,20 @@ async function onPasswordSubmit(pwd: string) {
   }
 }
 
-onMounted(fetchInfo);
+watch(token, () => {
+  requestController?.abort();
+  requestGeneration++;
+  accessJwt.value = null;
+  passwordError.value = '';
+  verifying.value = false;
+  state.value = { kind: 'loading' };
+  void fetchInfo();
+}, { immediate: true });
+
+onUnmounted(() => {
+  requestController?.abort();
+  requestGeneration++;
+});
 </script>
 
 <style scoped>

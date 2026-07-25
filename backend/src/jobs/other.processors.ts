@@ -25,7 +25,8 @@ export class AlertEvaluationProcessor {
       // 从预聚合表读取最近 1 分钟的指标
       // 使用 UTC 时间截断到分钟，与 metrics-aggregation 处理器写入窗口保持一致；
       // 若用本地时间截断，非 UTC 部署时永远查不到预聚合窗口，告警系统会静默失效。
-      const now = new Date();
+      // 评估上一完整分钟，确保聚合任务已有机会写入对应窗口。
+      const now = new Date(Date.now() - 60 * 1000);
       const windowTime = new Date(Date.UTC(
         now.getUTCFullYear(),
         now.getUTCMonth(),

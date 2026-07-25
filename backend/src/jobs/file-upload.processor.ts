@@ -9,9 +9,6 @@ import { TelegramService } from '../telegram/telegram.service';
 import { createReadStream, existsSync } from 'fs';
 import { unlink } from 'fs/promises';
 
-/** 单次上传的超时时间（毫秒）：Telegram 无响应时避免无限占用并发槽位 */
-const UPLOAD_TIMEOUT_MS = 5 * 60 * 1000;
-
 @Injectable()
 @Processor(QUEUE_NAMES.FILE_UPLOAD)
 export class FileUploadProcessor {
@@ -23,14 +20,6 @@ export class FileUploadProcessor {
     private telegramService: TelegramService,
   ) {}
 
-  /** 为 Promise 包装超时，防止 Telegram 无响应导致任务无限挂起 */
-  private withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
-    let timer: NodeJS.Timeout | undefined;
-    const timeout = new Promise<never>((_resolve, reject) => {
-      timer = setTimeout(() => reject(new Error(`${label} 超时 (${ms}ms)`)), ms);
-    });
-    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
-  }
 
   /** 删除临时文件，失败时记录告警（避免静默堆积） */
   private async removeTempFile(filePath: string): Promise<void> {
@@ -74,16 +63,13 @@ export class FileUploadProcessor {
 
     try {
       const stream = createReadStream(filePath);
-      // 带超时的上传，防止 Telegram 无响应时无限等待阻塞并发槽位
-      const result = await this.withTimeout(
-        this.telegramService.uploadFile(
-          stream,
-          file.originalName,
-          undefined,
-          file.size,
-        ),
-        UPLOAD_TIMEOUT_MS,
-        'Telegram 上传',
+      // 不使用仅拒绝外层 Promise 的超时包装：它无法取消底层上传，
+      // 会导致 Bull 重试与旧上传并发重叠。网络超时由 TelegramService/Axios 自身负责。
+      const result = await this.telegramService.uploadFile(
+        stream,
+        file.originalName,
+        undefined,
+        file.size,
       );
 
       // TG 上传成功：更新 ID + 兜底写 status ready（正常情况缓存预热已先设为 ready）

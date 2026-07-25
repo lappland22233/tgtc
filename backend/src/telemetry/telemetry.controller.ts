@@ -138,6 +138,17 @@ export class TelemetryController {
     const userId = (req as Request & { user?: { id?: string } }).user?.id || undefined;
 
     const events = dto.events || [];
+    // 性能统计会在管理端转为浮点数；写入前拒绝非有限数值，防止持久化数据投毒。
+    const performanceFields = ['dns', 'tcp', 'ttfb', 'domReady', 'pageLoad', 'fcp'];
+    for (const event of events) {
+      if (event.type !== 'performance') continue;
+      for (const field of performanceFields) {
+        const value = event.data?.[field];
+        if (value !== undefined && (typeof value !== 'number' || !Number.isFinite(value) || value < 0)) {
+          throw new HttpException(`性能遥测字段 ${field} 必须为非负有限数值`, HttpStatus.BAD_REQUEST);
+        }
+      }
+    }
     await this.telemetryService.report(
       events,
       ip,

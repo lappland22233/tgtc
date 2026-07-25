@@ -4,6 +4,8 @@ import * as path from 'path';
 
 const LOG_DIR = path.resolve(process.cwd(), 'tmp', 'logs');
 const LOG_FILE = path.join(LOG_DIR, 'app.log');
+const MAX_LOG_SIZE = 20 * 1024 * 1024;
+const MAX_BUFFERED_LINES = 2000;
 
 /**
  * 异步文件日志器。
@@ -18,17 +20,36 @@ const LOG_FILE = path.join(LOG_DIR, 'app.log');
  */
 let stream: fs.WriteStream | null = null;
 let streamFailed = false;
+let backpressured = false;
+const pendingLines: string[] = [];
+let approximateSize = 0;
 
 function ensureStream(): fs.WriteStream | null {
   if (stream) return stream;
   if (streamFailed) return null;
   try {
     fs.mkdirSync(LOG_DIR, { recursive: true });
+    if (fs.existsSync(LOG_FILE) && fs.statSync(LOG_FILE).size >= MAX_LOG_SIZE) {
+      const rotated = path.join(LOG_DIR, 'app.log.1');
+      fs.rmSync(rotated, { force: true });
+      fs.renameSync(LOG_FILE, rotated);
+    }
+    approximateSize = fs.existsSync(LOG_FILE) ? fs.statSync(LOG_FILE).size : 0;
     stream = fs.createWriteStream(LOG_FILE, { flags: 'a', encoding: 'utf-8' });
+    stream.on('drain', () => {
+      backpressured = false;
+      const target = stream;
+      while (target && pendingLines.length > 0 && !backpressured) {
+        const buffered = pendingLines.shift()!;
+        approximateSize += Buffer.byteLength(buffered, 'utf8');
+        backpressured = !target.write(buffered);
+      }
+    });
     // 写入错误不能让进程崩溃，标记失败后停止文件写入（console 仍可用）
     stream.on('error', () => {
       streamFailed = true;
       stream = null;
+      pendingLines.length = 0;
     });
     return stream;
   } catch {
@@ -48,11 +69,31 @@ function formatLog(level: string, message: string, context?: string, trace?: str
 }
 
 function appendLine(line: string): void {
+  const serialized = line + '\n';
+  const bytes = Buffer.byteLength(serialized, 'utf8');
+  if (approximateSize + bytes >= MAX_LOG_SIZE && stream) {
+    stream.end();
+    stream = null;
+    backpressured = false;
+    try {
+      const rotated = path.join(LOG_DIR, 'app.log.1');
+      fs.rmSync(rotated, { force: true });
+      if (fs.existsSync(LOG_FILE)) fs.renameSync(LOG_FILE, rotated);
+      approximateSize = 0;
+    } catch {
+      streamFailed = true;
+      return;
+    }
+  }
   const s = ensureStream();
   if (!s) return;
-  // 异步写入；背压时 write 返回 false 但内部会缓冲，无需阻塞调用方
   try {
-    s.write(line + '\n');
+    if (backpressured) {
+      if (pendingLines.length < MAX_BUFFERED_LINES) pendingLines.push(serialized);
+      return;
+    }
+    approximateSize += bytes;
+    backpressured = !s.write(serialized);
   } catch {
     // 静默失败，避免日志写入影响应用
   }

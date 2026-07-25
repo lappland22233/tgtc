@@ -44,6 +44,7 @@ dist/
 *.map
 
 # Temporary files
+.tmp/
 *.tmp
 *.temp
 .cache/
@@ -69,3 +70,4 @@ backend/ecosystem.config.js
 *.pfx
 *credentials*.json
 secrets/
+STATIC_REVIEW_RETROSPECTIVE.md

@@ -121,8 +121,9 @@ export class AuthService {
         email,
         password: hashedPassword,
         role,
-        // 邮箱验证关闭时直接标记为已验证，未来启用验证时存量用户可正常使用
-        emailVerified: emailVerificationEnabled !== 'true',
+        // 注册验证码已在创建用户前校验并消费；启用邮箱验证时同样应直接标记为已验证，
+        // 避免用户注册后因验证码已消费且无法重新申请而被锁死。
+        emailVerified: true,
       });
 
       const savedUser = await queryRunner.manager.save(User, user);
@@ -137,14 +138,6 @@ export class AuthService {
         resourceId: savedUser.id,
         metadata: { email: savedUser.email, role: role },
       });
-
-      // 邮箱验证开启时不返回 token，需用户验证邮箱后再登录
-      if (emailVerificationEnabled === 'true') {
-        return {
-          message: '注册成功，请验证邮箱',
-          needVerification: true,
-        };
-      }
 
       const accessToken = this.generateToken(savedUser);
 

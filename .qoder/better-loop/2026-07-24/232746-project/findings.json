@@ -1,0 +1,165 @@
+{
+  "summary": {
+    "projectName": "文件分发系统",
+    "locale": "zh-CN",
+    "modelId": "agent-work-loop-v4",
+    "reportContractVersion": 24,
+    "overview": "文件分发系统（NestJS + Vue3 + PostgreSQL/TypeORM + Redis/Bull + Telegram 存储）拥有一份内容详尽的 Agent 指引和良好的密钥忽略规则（.gitignore 覆盖 .env、凭据与证书），是坚实起点。本次为会话受限评审：无可用会话证据，结论基于项目静态 Harness 证据。主要短板集中在可靠交付——无任何 CI 或合入门禁、改动直接进入 main——以及主指引与真实仓库结构/配置多处漂移、已内建的实体漂移检查未接入自动触发。",
+    "aiAgentPractice": {
+      "inspectedSurfaces": [
+        "Rules"
+      ],
+      "coverageRows": [
+        {
+          "surface": "Rules",
+          "scopes": [
+            "Project"
+          ],
+          "count": 1,
+          "paths": [
+            "CODEBUDDY.md"
+          ]
+        }
+      ]
+    },
+    "suggestions": [],
+    "assignmentSummaries": [],
+    "dimensions": [
+      {
+        "id": "task-understanding",
+        "label": "任务理解",
+        "score": 70,
+        "summary": "指引详尽（架构、全量 API、风险路由、实体与迁移流程），但作为首要入口存在结构与测试现状的过时漂移，会误导上下文。",
+        "findingRefs": [
+          "codebuddy-guidance-drift"
+        ]
+      },
+      {
+        "id": "controlled-execution",
+        "label": "可控执行",
+        "score": 60,
+        "summary": "命令面统一且有前后端区域化映射，但两套设置说明的数据库不一致，且缺运行时钉扎与 reset/doctor 一键路径。",
+        "findingRefs": [
+          "setup-database-config-mismatch",
+          "environment-reproducibility-gaps"
+        ]
+      },
+      {
+        "id": "change-validation",
+        "label": "改动验证",
+        "score": 62,
+        "summary": "严格 typecheck 与多个非平凡 Jest 套件在位，但内建实体漂移检查从不自动触发，也无自动门禁运行验证。",
+        "findingRefs": [
+          "entity-drift-check-unwired"
+        ]
+      },
+      {
+        "id": "reliable-delivery",
+        "label": "可靠交付",
+        "score": 40,
+        "summary": "改动直接进入 main，无 CI、必需评审或可复现部署产物，缺少机械化的验收边界与回滚证据。",
+        "findingRefs": [
+          "no-ci-acceptance-gate"
+        ]
+      },
+      {
+        "id": "learning-capture",
+        "label": "经验沉淀",
+        "score": 38,
+        "summary": "仓库沉淀了个别经验（实体漂移脚本、learnings 目录），但反复的指引/配置漂移无可运行的新鲜度检查，也无后续结果验证。",
+        "findingRefs": [
+          "guidance-drift-no-freshness-loop"
+        ]
+      }
+    ]
+  },
+  "findings": [
+    {
+      "id": "no-ci-acceptance-gate",
+      "title": "变更无 CI 或合入门禁，直接提交到 main",
+      "severity": "High",
+      "reason": "仓库不存在 .github/workflows、.gitlab-ci 等任何 CI，也无 git hook 或分支保护，git 历史显示改动直接提交到 main。代理产出的改动在到达验收边界前没有机械化的类型检查、测试或漂移检查执行、审批与回滚证据；对一个含认证、文件存储与管理端的系统而言，这是最基础交付防线的缺失。",
+      "expectedOutput": [
+        "新增最小 CI 流水线，对 PR 与推送运行后端 typecheck+test 与前端 typecheck+build，作为改动进入 main 前的机械验收门禁。",
+        "为 main 设定改动进入前必须通过上述检查的路径（如 PR 加必需状态），使交付具备可审计的验收边界。"
+      ],
+      "expectedArtifact": "CI workflow",
+      "aiFixPrompt": "/better-loop fix this issue\n\n为仓库新增最小可用的持续集成与合入门禁：对 Pull Request 与向 main 的推送，运行后端 typecheck+test 与前端 typecheck+build，作为改动进入 main 前的机械验收关卡。不要修改业务代码，只新增 CI 配置与必要说明。\n\n## Validation\n\n- 在一个改动分支上触发该 CI，确认 typecheck/test/build 均被执行并能因失败而阻断\n- 确认 main 的合入路径要求上述检查通过（PR + 必需状态或等价约束）",
+      "dimensionRefs": [
+        "reliable-delivery"
+      ]
+    },
+    {
+      "id": "codebuddy-guidance-drift",
+      "title": "主指引 CODEBUDDY.md 与真实仓库结构和测试现状不同步",
+      "severity": "Medium",
+      "reason": "CODEBUDDY.md 把 tgtc/ 描述为主开发目录、源代码存储/ 为备份、dump.rdb 为运行时文件，但真实工作区根目录直接是 backend/ 与 frontend/，不存在 tgtc/、源代码存储/ 或 dump.rdb；同时它声称“仅 1 个测试文件”，实际有 6 个 spec（admin/auth/file/file-cache/share/telegram）。作为 AI 代理的首要入口文件，这些过时描述会误导目录导航、备份与清理指令以及回归面判断。",
+      "expectedOutput": [
+        "更新 CODEBUDDY.md 的仓库结构与项目结构段，使其以 backend/、frontend/ 为根并移除 tgtc/、源代码存储/、dump.rdb 等不存在的对象，让目录导航与真实工作区一致。",
+        "修正 CODEBUDDY.md 中的测试规模描述，列出当前 6 个 spec 及其运行方式，避免代理低估回归面。"
+      ],
+      "expectedArtifact": "Documentation",
+      "aiFixPrompt": "/better-loop fix this issue\n\n更新 CODEBUDDY.md 使其与真实工作区一致：仓库结构与项目结构段以 backend/、frontend/ 为根，移除不存在的 tgtc/、源代码存储/、dump.rdb 等对象；并修正测试规模描述以反映当前实际的 spec 文件。只改文档，不改代码。\n\n## Validation\n\n- 对照真实根目录，确认 CODEBUDDY.md 结构段引用的每个目录/文件都真实存在\n- 确认测试段列出的 spec 数量与 backend/src 下实际 *.spec.ts 数量一致",
+      "dimensionRefs": [
+        "task-understanding"
+      ]
+    },
+    {
+      "id": "entity-drift-check-unwired",
+      "title": "内建实体结构漂移检查未接入任何自动触发",
+      "severity": "Medium",
+      "reason": "backend/package.json 定义了 check:typeorm-columns（检测联合类型列导致 PostgreSQL 启动失败的已知陷阱），但 build/test/start 均不调用，且无 CI 或 git hook 触发。代理修改实体后不会被机械拦截，文档反复强调的启动失败陷阱可再次复发。",
+      "expectedOutput": [
+        "把 check:typeorm-columns 接入自动触发点（如 prebuild/pretest 或提交前钩子/CI），使实体改动在验证阶段被机械检查而非依赖人工记忆。"
+      ],
+      "expectedArtifact": "Config",
+      "aiFixPrompt": "/better-loop fix this issue\n\n把已存在的 check:typeorm-columns 检查接入自动触发点（例如 prebuild/pretest 脚本或提交前钩子，或纳入上面的 CI），使实体改动在验证阶段被机械检查，而非依赖人工记忆运行。不要改动检查器逻辑本身。\n\n## Validation\n\n- 构造一个会触发联合类型陷阱的实体改动，确认该检查在触发点自动运行并报错\n- 确认正常改动不会被误报阻断",
+      "dimensionRefs": [
+        "change-validation"
+      ]
+    },
+    {
+      "id": "setup-database-config-mismatch",
+      "title": "两套权威部署说明对数据库名与账号不一致",
+      "severity": "Medium",
+      "reason": "backend/.env.example 使用 DB_USERNAME=postgres、DB_PASSWORD=postgres、DB_DATABASE=file_distribution，而 CODEBUDDY.md 的 Quick Start 要求 CREATE DATABASE text 且账号为 text/tgtc2026secure。首次部署的代理按 .env.example 生成 .env 时，会连到与建库指引不同的库与账号，导致迁移或启动连接失败。",
+      "expectedOutput": [
+        "对齐 backend/.env.example 与 CODEBUDDY.md Quick Start 的数据库名与账号（择一为准并两处一致），使按模板配置即可直接完成建库与迁移。"
+      ],
+      "expectedArtifact": "Config",
+      "aiFixPrompt": "/better-loop fix this issue\n\n对齐 backend/.env.example 与 CODEBUDDY.md Quick Start 之间的数据库名与账号：择一为准，并在两处保持一致，使代理按模板配置即可直接完成建库与迁移。只改配置与文档，不改业务代码。\n\n## Validation\n\n- 确认 .env.example 的 DB_DATABASE/DB_USERNAME 与 Quick Start 的建库/账号说明完全一致\n- 按对齐后的说明走一遍建库与 migration:run，确认可连通",
+      "dimensionRefs": [
+        "controlled-execution"
+      ]
+    },
+    {
+      "id": "guidance-drift-no-freshness-loop",
+      "title": "反复出现的指引与配置漂移缺少可复用的一致性校验",
+      "severity": "Medium",
+      "reason": "本次检查已发现至少三处指引/配置与真实仓库漂移：CODEBUDDY 的目录结构、CODEBUDDY 的测试计数、以及 .env.example 与 Quick Start 的数据库名。逐条修复后仍会复发，因为没有任何可运行的新鲜度/一致性检查或定期评审，在漂移发生时给出 clean/gap 判定。",
+      "expectedOutput": [
+        "新增一个最小可运行的指引一致性检查（校验结构段目录存在、测试计数一致、.env 与建库库名一致），输出明确的 clean/gap 结论，防止已修复的漂移再次复发。"
+      ],
+      "expectedArtifact": "Script",
+      "aiFixPrompt": "/better-loop fix this issue\n\n建立一个最小可运行的指引一致性检查，并给出明确的 clean/gap 结论，以防已修复的漂移再次复发。检查项建议覆盖：CODEBUDDY 结构段引用的目录是否真实存在、测试计数是否与实际 spec 数量一致、.env.example 与建库说明的库名是否一致。先落地检查脚本，触发/调度可另行授权。\n\n## Validation\n\n- 人为制造一处漂移，确认该检查能给出 gap 结论并指出具体不一致项\n- 在当前仓库运行，确认修复后的项返回 clean",
+      "dimensionRefs": [
+        "learning-capture"
+      ]
+    },
+    {
+      "id": "environment-reproducibility-gaps",
+      "title": "缺少运行时钉扎与一键 reset/doctor，冷启动依赖手工装配",
+      "severity": "Low",
+      "reason": "仓库无 .nvmrc/.tool-versions，package.json 无 engines 字段（仅散文写 Node≥18），也无 Dockerfile/compose 与 db:seed/reset/doctor 类脚本；PostgreSQL、Redis、Telegram Token、建库建扩展全靠按散文健康检查手工装配。代理无法一键复位状态或自诊断，跨任务隔离与部署一致性缺少可复现路径。",
+      "expectedOutput": [
+        "为前后端固定运行时版本（.nvmrc 或 package.json engines），使代理与部署环境使用一致的 Node 版本。",
+        "新增一条可执行的环境自检/复位命令（doctor 或 reset），聚合 DB/Redis/迁移状态检查，替代当前纯手工的健康检查清单。"
+      ],
+      "expectedArtifact": "Config",
+      "aiFixPrompt": "/better-loop fix this issue\n\n提升环境可复现性：为前后端固定运行时版本（.nvmrc 或 package.json engines），并新增一条可执行的环境自检/复位命令（doctor 或 reset），聚合 DB/Redis/迁移状态检查以替代纯手工的健康检查清单。不要改动业务逻辑。\n\n## Validation\n\n- 确认 .nvmrc 或 engines 指定了明确的 Node 版本，并与文档一致\n- 运行新增的 doctor/reset 命令，确认能返回各依赖组件的可用状态或完成状态复位",
+      "dimensionRefs": [
+        "controlled-execution"
+      ]
+    }
+  ]
+}

@@ -19,31 +19,6 @@ function shouldSkipPath(path: string): boolean {
   return SKIP_PATH_PREFIXES.some((prefix) => normalized.startsWith(prefix));
 }
 
-/**
- * 从 JWT Cookie 中提取 userId（仅 base64url 解码 payload，不校验签名）。
- *
- * 安全说明：此 userId 不可信。攻击者可自行构造 Cookie 中的 JWT payload，
- * 在未验签的情况下伪造任意 sub。这里仅用于访问统计的尽力归因，
- * 绝不能用于任何鉴权/授权决策。如需可信用户身份，必须经由 JwtAuthGuard 验签。
- */
-function extractUserIdFromCookie(req: Request): string | null {
-  try {
-    const token = req.cookies?.access_token;
-    if (!token || typeof token !== 'string') return null;
-
-    // JWT = base64url(header).base64url(payload).base64url(signature)
-    const parts = token.split('.');
-    if (parts.length !== 3) return null;
-
-    const payloadJson = Buffer.from(parts[1], 'base64url').toString('utf-8');
-    const payload = JSON.parse(payloadJson);
-
-    return (payload?.sub && typeof payload.sub === 'string') ? payload.sub : null;
-  } catch {
-    return null;
-  }
-}
-
 @Injectable()
 export class AccessLogMiddleware implements NestMiddleware, OnApplicationShutdown {
   private readonly logger = new Logger(AccessLogMiddleware.name);
@@ -66,7 +41,8 @@ export class AccessLogMiddleware implements NestMiddleware, OnApplicationShutdow
       return;
     }
 
-    const userId = extractUserIdFromCookie(req);
+    // 中间件阶段不解码未验签 Cookie；仅接受上游认证链路已写入的可信用户上下文。
+    const userId = (req as Request & { user?: { id?: string } }).user?.id || null;
 
     // 记录响应开始时的已发送字节数，finish 时计算差值。
     // 注意：bytesWritten 含 HTTP 响应头，并非精确的响应体大小，仅作带宽估算。
@@ -107,7 +83,7 @@ export class AccessLogMiddleware implements NestMiddleware, OnApplicationShutdow
         duration,
         userAgent: (req.headers['user-agent'] as string)?.substring(0, 500) || null,
         referer: (req.headers['referer'] as string)?.substring(0, 300) || null,
-        userId, // 记录已认证用户（尽力归因，未验签，不可信）
+        userId, // 仅记录认证链路提供的可信用户 ID
       };
 
       this.buffer.push(entry);

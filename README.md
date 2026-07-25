@@ -21,7 +21,7 @@
 - **标签管理**：创建/编辑/删除标签，支持多标签筛选（AND 逻辑），文件列表快捷编辑标签
 - 设置公开/私有、访问次数限制、分享有效期（含过期检查）
 - 批量勾选图片一键生成 Markdown 链接
-- 后端代理下载（不暴露 Telegram 原始 URL），使用流式传输
+- 后端代理下载（不暴露 Telegram 原始 URL）；冷文件通过二次开发 Bot API 实时传输并同步构建原子缓存，同文件并发只回源一次
 - 缩略图 RSA-OAEP 加密防外链，时间窗口 ±10 秒
 
 ### 分享访问
@@ -139,7 +139,10 @@ REDIS_PORT=6379
 # Telegram Bot（支持本地 API 代理）
 TELEGRAM_BOT_TOKEN=your_bot_token
 TELEGRAM_CHAT_ID=your_chat_id
-# TELEGRAM_API_BASE=https://api.telegram.org  # 可选：自建代理地址
+# TELEGRAM_API_BASE=http://localhost:8081  # 自建 Bot API 标准接口
+# TELEGRAM_FILE_STREAMING_ENABLED=true     # 启用冷文件实时流
+# TELEGRAM_FILE_STREAM_BASE=http://localhost:8081
+# TELEGRAM_FILE_STREAM_TIMEOUT_SECONDS=120
 
 # SMTP 邮件
 SMTP_HOST=smtp.example.com

@@ -51,11 +51,8 @@
       />
     </noscript>
 
-    <!-- Inline critical dark-theme background to prevent white flash（CSP style-src 'unsafe-inline' 已放行） -->
-    <style>
-      html { background-color: #0A0E17; color-scheme: dark; }
-      body { margin: 0; background-color: #0A0E17; }
-    </style>
+    <!-- Critical dark-theme background is loaded from a same-origin static file. -->
+    <link rel="stylesheet" href="/critical.css" />
 
     <!--
       本地 TDesign 图标 sprite：CSP script-src 仅允许 'self'，Icon 组件默认的

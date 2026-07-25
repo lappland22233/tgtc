@@ -1643,10 +1643,29 @@ export class AdminService {
     user: User,
     configs: { key: string; value: string }[],
   ): Promise<void> {
-    // 验证所有 key 合法
+    // 整批验证 key、数值类型与元数据范围；任一非法时不提交任何配置。
     for (const c of configs) {
-      if (!SEC_CONFIG_META.some(m => m.key === c.key)) {
+      const meta = SEC_CONFIG_META.find(m => m.key === c.key);
+      if (!meta) {
         throw new BadRequestException(`无效的安全配置键: ${c.key}`);
+      }
+      const value = Number(c.value);
+      if (!Number.isFinite(value)) {
+        throw new BadRequestException(`${meta.label} 必须为有效数值`);
+      }
+      if (meta.min !== undefined && value < meta.min) {
+        throw new BadRequestException(`${meta.label} 不能小于 ${meta.min}`);
+      }
+      if (meta.max !== undefined && value > meta.max) {
+        throw new BadRequestException(`${meta.label} 不能大于 ${meta.max}`);
+      }
+      if (meta.step !== undefined) {
+        const precision = String(meta.step).split('.')[1]?.length || 0;
+        const scale = 10 ** precision;
+        const base = meta.min ?? 0;
+        if (Math.abs(Math.round((value - base) * scale) % Math.round(meta.step * scale)) !== 0) {
+          throw new BadRequestException(`${meta.label} 必须按步长 ${meta.step} 设置`);
+        }
       }
     }
 
