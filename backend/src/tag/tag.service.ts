@@ -6,7 +6,7 @@ import {
   BadRequestException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { DataSource, Repository } from 'typeorm';
 import { Tag } from '../common/entities/tag.entity';
 import { AuditService } from '../common/services/audit.service';
 import { CreateTagDto } from './dto/create-tag.dto';
@@ -18,6 +18,7 @@ export class TagService {
     @InjectRepository(Tag)
     private readonly tagRepository: Repository<Tag>,
     private readonly auditService: AuditService,
+    private readonly dataSource: DataSource,
   ) {}
 
   async findAll(userId: string): Promise<{ tags: (Tag & { fileCount: number })[] }> {
@@ -147,7 +148,17 @@ export class TagService {
       throw new ForbiddenException('无权删除此标签');
     }
 
-    await this.tagRepository.delete(id);
+    await this.dataSource.transaction(async (manager) => {
+      // 与文件标签替换保持一致：先锁 tags 父行，再由级联删除 file_tags。
+      const lockedTags = await manager.query(
+        'SELECT id FROM tags WHERE id = $1 FOR UPDATE',
+        [id],
+      );
+      if (lockedTags.length === 0) {
+        throw new NotFoundException('标签不存在');
+      }
+      await manager.delete(Tag, id);
+    });
 
     this.auditService.log({
       action: 'tag_delete',

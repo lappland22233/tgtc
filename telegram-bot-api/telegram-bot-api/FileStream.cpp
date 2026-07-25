@@ -43,9 +43,8 @@ void FileStreamConnection::start_up() {
                route_.is_test_dc, std::move(route_.file_id), route_.expected_size, peer_address_.get_ip_str().str());
 }
 
-void FileStreamConnection::set_client(td::ActorId<Client> client, bool counted) {
+void FileStreamConnection::set_client(td::ActorId<Client> client) {
   client_ = client;
-  counted_ = counted;
 }
 
 void FileStreamConnection::on_file_ready(td::int32 file_id, td::int64 total_size, td::int64 download_offset,
@@ -253,9 +252,7 @@ void FileStreamConnection::timeout_expired() {
 }
 
 void FileStreamConnection::tear_down() {
-  if (counted_) {
-    send_closure(client_manager_, &ClientManager::release_file_stream);
-  }
+  send_closure(client_manager_, &ClientManager::release_file_stream, stream_id_);
   if (!client_.empty()) {
     send_closure(client_, &Client::remove_file_stream, stream_id_, file_id_);
   }

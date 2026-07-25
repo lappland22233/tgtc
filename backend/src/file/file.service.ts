@@ -1987,11 +1987,26 @@ export class FileService implements OnModuleInit {
       throw new ForbiddenException('无权操作此文件');
     }
 
-    // 事务内原子执行：清除旧关联 + 插入新关联（参数化查询）
+    const uniqueTagIds = [...new Set(tagIds)].sort();
+
+    // 固定锁顺序：files → 排序后的 tags → file_tags，避免与父表级联删除形成环形等待。
     await this.fileRepository.manager.transaction(async (manager) => {
+      const lockedFiles = await manager.query(
+        'SELECT id FROM files WHERE id = $1 FOR UPDATE',
+        [fileId],
+      );
+      if (lockedFiles.length === 0) {
+        throw new NotFoundException('文件不存在');
+      }
+      if (uniqueTagIds.length > 0) {
+        await manager.query(
+          'SELECT id FROM tags WHERE id = ANY($1::uuid[]) ORDER BY id FOR KEY SHARE',
+          [uniqueTagIds],
+        );
+      }
       await manager.query('DELETE FROM file_tags WHERE "fileId" = $1', [fileId]);
-      if (tagIds.length > 0) {
-        await this.insertFileTags(manager, fileId, tagIds);
+      if (uniqueTagIds.length > 0) {
+        await this.insertFileTags(manager, fileId, uniqueTagIds);
       }
     });
 

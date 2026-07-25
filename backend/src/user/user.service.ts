@@ -122,10 +122,10 @@ export class UserService {
     }
 
     const queryRunner = this.dataSource.createQueryRunner();
-    await queryRunner.connect();
-    await queryRunner.startTransaction();
 
     try {
+      await queryRunner.connect();
+      await queryRunner.startTransaction();
       const user = await queryRunner.manager.findOne(User, { where: { id } });
 
       if (!user) {

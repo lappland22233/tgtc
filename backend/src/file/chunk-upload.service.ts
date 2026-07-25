@@ -33,6 +33,8 @@ interface ChunkSession {
   mergeResult?: { id: string; originalName: string };
   /** 合并错误信息 */
   mergeError?: string;
+  mergeAbortController?: AbortController;
+  mergePromise?: Promise<void>;
 }
 
 @Injectable()
@@ -45,6 +47,8 @@ export class ChunkUploadService implements OnModuleInit {
   private static readonly MAX_SESSIONS_PER_USER = 10;
   /** 会话最大空闲时间 (ms) — 超过此时间无活动则清理 */
   private static readonly SESSION_MAX_IDLE = CHUNK_SESSION_MAX_IDLE_MS;
+  private static readonly MERGE_TIMEOUT_MS = 30 * 60 * 1000;
+  private static readonly MERGE_ABORT_GRACE_MS = 5000;
 
   constructor(
     private fileService: FileService,
@@ -241,23 +245,31 @@ export class ChunkUploadService implements OnModuleInit {
 
     session.lastActivityAt = new Date();
     session.mergeStatus = 'merging';
+    session.mergeAbortController = new AbortController();
 
-    // 异步执行合并（不 await，不阻塞 HTTP 响应）
-    this.doMerge(session, uploadFn)
+    const mergePromise = this.withDeadline(
+      this.doMerge(session, uploadFn, session.mergeAbortController.signal),
+      ChunkUploadService.MERGE_TIMEOUT_MS,
+      session.mergeAbortController,
+    )
       .then((result) => {
+        if (session.mergeAbortController?.signal.aborted) return;
         session.mergeResult = result;
         session.mergeStatus = 'done';
         this.logger.log(`[分片上传] ${uploadId} 合并完成: ${result.originalName}`);
-        // 延迟清理
         this.scheduleCleanup(uploadId);
       })
       .catch((err: Error) => {
         session.mergeStatus = 'error';
         session.mergeError = err.message;
         this.logger.error(`[分片上传] ${uploadId} 合并失败: ${err.message}`);
-        // 合并失败也清理临时文件和会话，防止磁盘残留
         this.scheduleCleanup(uploadId);
+      })
+      .finally(() => {
+        session.mergeAbortController = undefined;
+        session.mergePromise = undefined;
       });
+    session.mergePromise = mergePromise;
   }
 
   /**
@@ -266,6 +278,7 @@ export class ChunkUploadService implements OnModuleInit {
    */
   private async doMergeSmall(
     session: ChunkSession,
+    signal: AbortSignal,
   ): Promise<{ id: string; originalName: string }> {
     const dir = this.getChunkDir(session.uploadId);
     const mergedPath = path.join(dir, 'merged');
@@ -273,6 +286,7 @@ export class ChunkUploadService implements OnModuleInit {
     // 顺序读取所有分片到内存拼接
     const buffers: Buffer[] = [];
     for (let i = 0; i < session.totalChunks; i++) {
+      this.throwIfAborted(signal);
       const chunkPath = path.join(dir, String(i));
       try {
         const buf = await fsp.readFile(chunkPath);
@@ -294,15 +308,17 @@ export class ChunkUploadService implements OnModuleInit {
     }
 
     // 一次性写入磁盘
+    this.throwIfAborted(signal);
     await fsp.writeFile(mergedPath, merged);
     this.logger.log(`[分片上传] ${session.uploadId} 内存合并完成: ${(merged.length / 1024 / 1024).toFixed(1)}MB`);
 
-    return this.finalizeMerge(session, mergedPath, merged.length);
+    return this.finalizeMerge(session, mergedPath, merged.length, signal);
   }
 
   private async doMerge(
     session: ChunkSession,
     _uploadFn: (file: Express.Multer.File) => Promise<{ id: string; originalName: string }>,
+    signal: AbortSignal,
   ): Promise<{ id: string; originalName: string }> {
     const dir = this.getChunkDir(session.uploadId);
     const mergedPath = path.join(dir, 'merged');
@@ -320,7 +336,7 @@ export class ChunkUploadService implements OnModuleInit {
     // 小文件 (< 10MB)：使用 Buffer.concat 内存合并，减少磁盘 I/O
     const SMALL_FILE_THRESHOLD = 10 * 1024 * 1024; // 10MB
     if (session.fileSize < SMALL_FILE_THRESHOLD) {
-      return this.doMergeSmall(session);
+      return this.doMergeSmall(session, signal);
     }
 
     // 大文件：流式合并分片到磁盘文件（避免 Buffer.concat 对大文件造成 OOM）
@@ -328,9 +344,16 @@ export class ChunkUploadService implements OnModuleInit {
       flags: 'w',
       highWaterMark: 64 * 1024, // 64KB 缓冲区，提升写入吞吐
     });
+    let activeReadStream: ReturnType<typeof createReadStream> | undefined;
+    const abortError = new Error('分片合并已取消');
+    signal.addEventListener('abort', () => {
+      activeReadStream?.destroy(abortError);
+      writeStream.destroy();
+    }, { once: true });
     let written = 0;
 
     for (let i = 0; i < session.totalChunks; i++) {
+      this.throwIfAborted(signal);
       const chunkPath = path.join(dir, String(i));
       try {
         const stat = await fsp.stat(chunkPath);
@@ -338,7 +361,9 @@ export class ChunkUploadService implements OnModuleInit {
           throw new Error(`分片 ${i} 为空`);
         }
         const readStream = createReadStream(chunkPath);
+        activeReadStream = readStream;
         await pipelineAsync(readStream, writeStream, { end: false });
+        activeReadStream = undefined;
         written += stat.size;
       } catch (err) {
         writeStream.destroy();
@@ -369,7 +394,7 @@ export class ChunkUploadService implements OnModuleInit {
 
     this.logger.log(`[分片上传] ${session.uploadId} 合并完成: ${(written / 1024 / 1024).toFixed(1)}MB`);
 
-    return this.finalizeMerge(session, mergedPath, written);
+    return this.finalizeMerge(session, mergedPath, written, signal);
   }
 
   /**
@@ -379,7 +404,9 @@ export class ChunkUploadService implements OnModuleInit {
     session: ChunkSession,
     mergedPath: string,
     fileSize: number,
+    signal: AbortSignal,
   ): Promise<{ id: string; originalName: string }> {
+    this.throwIfAborted(signal);
     session.mergeStatus = 'uploading';
 
     // magic bytes 类型检查
@@ -407,6 +434,7 @@ export class ChunkUploadService implements OnModuleInit {
       stream: null as any,
     };
 
+    this.throwIfAborted(signal);
     const savedFile = await this.fileService.createProcessingFile(
       mockFile,
       session.fileName,
@@ -415,11 +443,13 @@ export class ChunkUploadService implements OnModuleInit {
       true,        // skipTypeCheck
     );
 
+    this.throwIfAborted(signal);
     const pendingDir = path.resolve(process.cwd(), 'tmp', 'uploads', 'pending');
     fs.mkdirSync(pendingDir, { recursive: true });
     const pendingPath = path.join(pendingDir, savedFile.id);
     await fsp.copyFile(mergedPath, pendingPath);
 
+    this.throwIfAborted(signal);
     await this.fileUploadQueue.add(
       'upload',
       { fileId: savedFile.id, filePath: pendingPath },
@@ -434,6 +464,40 @@ export class ChunkUploadService implements OnModuleInit {
     this.logger.log(`[分片上传] ${session.uploadId} 已入队后台上传: ${savedFile.id}`);
 
     return { id: savedFile.id, originalName: savedFile.originalName };
+  }
+
+  private throwIfAborted(signal: AbortSignal): void {
+    if (signal.aborted) throw new Error('分片合并已取消');
+  }
+
+  private async withDeadline<T>(
+    promise: Promise<T>,
+    timeoutMs: number,
+    controller: AbortController,
+  ): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        controller.abort();
+        reject(new Error(`分片合并超时（${timeoutMs}ms）`));
+      }, timeoutMs);
+      timer.unref?.();
+      promise.then(
+        value => { clearTimeout(timer); resolve(value); },
+        error => { clearTimeout(timer); reject(error); },
+      );
+    });
+  }
+
+  private async cancelMerge(session: ChunkSession): Promise<void> {
+    session.mergeAbortController?.abort();
+    if (!session.mergePromise) return;
+    await Promise.race([
+      session.mergePromise.catch(() => {}),
+      new Promise<void>(resolve => {
+        const timer = setTimeout(resolve, ChunkUploadService.MERGE_ABORT_GRACE_MS);
+        timer.unref?.();
+      }),
+    ]);
   }
 
   /** 延迟清理会话和临时文件 */
@@ -454,6 +518,7 @@ export class ChunkUploadService implements OnModuleInit {
       throw new ForbiddenException('无权操作此上传会话');
     }
 
+    await this.cancelMerge(session);
     this.sessions.delete(uploadId);
 
     const dir = this.getChunkDir(uploadId);
@@ -468,6 +533,7 @@ export class ChunkUploadService implements OnModuleInit {
     let cleaned = 0;
     for (const [uploadId, session] of this.sessions) {
       if (now - session.lastActivityAt.getTime() > ChunkUploadService.SESSION_MAX_IDLE) {
+        await this.cancelMerge(session);
         this.sessions.delete(uploadId);
         const dir = this.getChunkDir(uploadId);
         await fsp.rm(dir, { recursive: true, force: true }).catch(() => {});

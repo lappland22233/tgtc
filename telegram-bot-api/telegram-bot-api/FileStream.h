@@ -61,7 +61,7 @@ class FileStreamConnection final : public td::Actor {
   FileStreamConnection(td::ActorOwn<td::HttpInboundConnection> connection, td::ActorId<ClientManager> client_manager,
                        FileStreamRoute route, FileStreamConfig config, td::IPAddress peer_address);
 
-  void set_client(td::ActorId<Client> client, bool counted);
+  void set_client(td::ActorId<Client> client);
   void on_file_ready(td::int32 file_id, td::int64 total_size, td::int64 download_offset,
                      td::int64 downloaded_prefix_size, bool is_completed, bool is_downloading_active);
   void on_file_progress(td::int64 reported_total_size, td::int64 download_offset,
@@ -88,7 +88,6 @@ class FileStreamConnection final : public td::Actor {
   bool read_in_flight_ = false;
   bool write_in_flight_ = false;
   bool download_completed_ = false;
-  bool counted_ = false;
   bool first_byte_sent_ = false;
   td::int64 pending_write_offset_ = -1;
   td::int64 pending_write_size_ = 0;

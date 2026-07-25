@@ -71,9 +71,20 @@ export class AuditService implements OnApplicationShutdown {
 
   async onApplicationShutdown(_signal?: string): Promise<void> {
     if (this.pendingWrites.size > 0) {
-      this.logger.log(`等待 ${this.pendingWrites.size} 条审计日志写入完成...`);
-      await Promise.allSettled(this.pendingWrites);
-      this.logger.log('所有待处理审计日志已写入');
+      const pendingCount = this.pendingWrites.size;
+      this.logger.log(`等待 ${pendingCount} 条审计日志写入完成...`);
+      const completed = await Promise.race([
+        Promise.allSettled([...this.pendingWrites]).then(() => true),
+        new Promise<false>(resolve => {
+          const timer = setTimeout(() => resolve(false), 5000);
+          timer.unref?.();
+        }),
+      ]);
+      if (completed) {
+        this.logger.log('所有待处理审计日志已写入');
+      } else {
+        this.logger.error(`审计日志关闭刷新超时，仍有 ${this.pendingWrites.size} 条未完成`);
+      }
     }
   }
 

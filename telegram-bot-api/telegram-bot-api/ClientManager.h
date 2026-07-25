@@ -17,6 +17,7 @@
 #include "td/utils/common.h"
 #include "td/utils/Container.h"
 #include "td/utils/FlatHashMap.h"
+#include "td/utils/FlatHashSet.h"
 #include "td/utils/FloodControlFast.h"
 #include "td/utils/Promise.h"
 #include "td/utils/Slice.h"
@@ -48,7 +49,7 @@ class ClientManager final : public td::Actor {
   void send(PromisedQueryPtr query);
   void send_file_stream(td::ActorId<FileStreamConnection> stream, td::int64 stream_id, td::string token,
                         bool is_test_dc, td::string file_id, td::int64 expected_size, td::string peer_ip_address);
-  void release_file_stream();
+  void release_file_stream(td::int64 stream_id);
 
   void get_stats(td::Promise<td::BufferSlice> promise, td::vector<std::pair<td::string, td::string>> args);
 
@@ -75,7 +76,9 @@ class ClientManager final : public td::Actor {
   td::FlatHashMap<td::int64, td::uint64> active_client_count_;
 
   bool close_flag_ = false;
-  td::int32 active_file_stream_count_ = 0;
+  bool close_db_started_ = false;
+  bool close_finished_ = false;
+  td::FlatHashSet<td::int64> active_file_stream_ids_;
   td::vector<td::Promise<td::Unit>> close_promises_;
 
   td::ActorOwn<Watchdog> watchdog_id_;

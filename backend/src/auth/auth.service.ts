@@ -99,10 +99,10 @@ export class AuthService {
 
     // 使用事务 + 行锁确保超管角色的唯一性
     const queryRunner = this.dataSource.createQueryRunner();
-    await queryRunner.connect();
-    await queryRunner.startTransaction();
 
     try {
+      await queryRunner.connect();
+      await queryRunner.startTransaction();
       // 使用事务级咨询锁串行化"首位用户=超管"竞态临界区，确保首个注册用户获得 super_admin。
       // 替代旧的 LOCK TABLE "users" IN EXCLUSIVE MODE 全表排他锁，避免阻塞 users 表的其他并发读写；
       // 咨询锁仅锁定本临界区逻辑，随事务结束（commit/rollback）自动释放。
@@ -162,7 +162,9 @@ export class AuthService {
       }
       throw error;
     } finally {
-      await queryRunner.release();
+      if (!queryRunner.isReleased) {
+        await queryRunner.release();
+      }
     }
   }
 

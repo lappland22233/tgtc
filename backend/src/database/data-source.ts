@@ -35,6 +35,11 @@ export const AppDataSource = new DataSource({
   // 连接池大小，与应用配置保持一致
   extra: {
     max: parseInt(process.env.DB_POOL_SIZE || '20', 10),
+    connectionTimeoutMillis: parseInt(process.env.DB_CONNECTION_TIMEOUT_MS || '5000', 10),
+    statement_timeout: parseInt(process.env.DB_STATEMENT_TIMEOUT_MS || '30000', 10),
+    query_timeout: parseInt(process.env.DB_QUERY_TIMEOUT_MS || '35000', 10),
+    lock_timeout: parseInt(process.env.DB_LOCK_TIMEOUT_MS || '3000', 10),
+    idle_in_transaction_session_timeout: parseInt(process.env.DB_IDLE_TRANSACTION_TIMEOUT_MS || '30000', 10),
     ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: true } : undefined,
   },
 });

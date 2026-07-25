@@ -30,6 +30,9 @@ interface CacheBuildSession {
   error?: Error;
   events: EventEmitter;
   completion: Promise<void>;
+  abort: (error: Error) => void;
+  upstream?: Readable;
+  output?: ReturnType<typeof createWriteStream>;
 }
 
 @Injectable()
@@ -46,6 +49,8 @@ export class FileCacheService {
   private readonly fileAccessMap = new Map<string, number>();
   /** 同一业务文件只允许一个上游回源；消费者从临时文件独立跟随读取。 */
   private readonly buildSessions = new Map<string, CacheBuildSession>();
+  private readonly buildIdleTimeoutMs = this.readPositiveTimeout('FILE_CACHE_BUILD_IDLE_TIMEOUT_MS', 60_000);
+  private readonly buildTotalTimeoutMs = this.readPositiveTimeout('FILE_CACHE_BUILD_TOTAL_TIMEOUT_MS', 30 * 60_000);
 
   constructor(private readonly configCache: ConfigCacheService) {
     this.cacheDir = path.resolve(process.cwd(), 'tmp', 'Cache');
@@ -156,6 +161,13 @@ export class FileCacheService {
         completed: false,
         events,
         completion: Promise.resolve(),
+        abort: (error: Error) => {
+          if (session?.error || session?.completed) return;
+          session!.error = error;
+          session!.upstream?.destroy(error);
+          session!.output?.destroy();
+          session!.events.emit('failed', error);
+        },
       };
       this.buildSessions.set(fileId, session);
       session.completion = this.runBuildSession(session, fetchFn);
@@ -173,19 +185,42 @@ export class FileCacheService {
     fetchFn: () => Promise<{ stream: Readable; info: { file_size: number } }>,
   ): Promise<void> {
     const cachePath = this.getCachePath(session.fileId);
+    let idleTimer: NodeJS.Timeout | undefined;
+    let totalTimer: NodeJS.Timeout | undefined;
+    let rejectTotal: ((error: Error) => void) | undefined;
+    const totalDeadline = new Promise<never>((_, reject) => { rejectTotal = reject; });
+    const resetIdleDeadline = () => {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => {
+        session.abort(new Error(`缓存构建空闲超时（${this.buildIdleTimeoutMs}ms）`));
+      }, this.buildIdleTimeoutMs);
+      idleTimer.unref?.();
+    };
+    totalTimer = setTimeout(() => {
+      const error = new Error(`缓存构建总超时（${this.buildTotalTimeoutMs}ms）`);
+      session.abort(error);
+      rejectTotal?.(error);
+    }, this.buildTotalTimeoutMs);
+    totalTimer.unref?.();
+
     try {
       await fsp.unlink(session.tmpPath).catch(() => {});
       // 在请求上游前先创建临时文件，保证首个进度事件到达时跟随者可安全打开。
       await fsp.writeFile(session.tmpPath, Buffer.alloc(0), { flag: 'wx' });
-      const { stream, info } = await fetchFn();
+      const { stream, info } = await Promise.race([fetchFn(), totalDeadline]);
+      session.upstream = stream;
+      resetIdleDeadline();
       if (!Number.isSafeInteger(info.file_size) || info.file_size !== session.expectedSize) {
         stream.destroy();
         throw new Error(`上游文件大小不一致: 期望 ${session.expectedSize}, 实际 ${info.file_size}`);
       }
 
       const output = createWriteStream(session.tmpPath, { flags: 'r+' });
+      session.output = output;
       try {
         for await (const rawChunk of stream) {
+          resetIdleDeadline();
+          if (session.error) throw session.error;
           const chunk = Buffer.isBuffer(rawChunk) ? rawChunk : Buffer.from(rawChunk);
           if (session.bytesWritten + chunk.length > session.expectedSize) {
             throw new Error('上游流超过预期文件大小');
@@ -195,7 +230,9 @@ export class FileCacheService {
           });
           session.bytesWritten += chunk.length;
           session.events.emit('progress');
+          resetIdleDeadline();
         }
+        if (idleTimer) clearTimeout(idleTimer);
         await new Promise<void>((resolve, reject) => {
           output.once('error', reject);
           output.end(resolve);
@@ -219,10 +256,16 @@ export class FileCacheService {
       this.logger.log(`实时缓存构建完成: ${session.fileId} (${session.expectedSize} bytes)`);
     } catch (error) {
       session.error = error instanceof Error ? error : new Error('缓存构建失败');
+      session.upstream?.destroy();
+      session.output?.destroy();
       await fsp.unlink(session.tmpPath).catch(() => {});
       session.events.emit('failed', session.error);
       throw session.error;
     } finally {
+      if (idleTimer) clearTimeout(idleTimer);
+      if (totalTimer) clearTimeout(totalTimer);
+      session.upstream = undefined;
+      session.output = undefined;
       setImmediate(() => {
         if (this.buildSessions.get(session.fileId) === session) {
           this.buildSessions.delete(session.fileId);
@@ -335,6 +378,11 @@ export class FileCacheService {
   private static readonly ACCESS_MAP_MAX = 100000;
 
   /** 约束 fileAccessMap 规模：超限时从最久未访问的条目开始删除 */
+  private readPositiveTimeout(key: string, fallback: number): number {
+    const value = Number(process.env[key]);
+    return Number.isSafeInteger(value) && value > 0 ? value : fallback;
+  }
+
   private pruneAccessMap(): void {
     if (this.fileAccessMap.size <= FileCacheService.ACCESS_MAP_MAX) return;
     // Map 按插入序迭代；先按访问时间升序排列再删除最旧的若干条
@@ -581,9 +629,14 @@ export class FileCacheService {
     this.validateFileId(fileId);
     const session = this.buildSessions.get(fileId);
     if (session) {
-      session.error = new Error('缓存构建已失效');
-      session.events.emit('failed', session.error);
-      await session.completion.catch(() => {});
+      session.abort(new Error('缓存构建已失效'));
+      await Promise.race([
+        session.completion.catch(() => {}),
+        new Promise<void>(resolve => {
+          const timer = setTimeout(resolve, 5000);
+          timer.unref?.();
+        }),
+      ]);
     }
     const cachePath = this.getCachePath(fileId);
     await Promise.all([

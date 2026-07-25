@@ -26,6 +26,7 @@ async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
     logger: fileLogger,
   });
+  app.enableShutdownHooks();
 
   // 配置反向代理信任，确保 req.ip 获取真实客户端 IP。
   // 多级代理时固定为 1 会取到最近代理而非客户端，故 hops 可经 TRUST_PROXY_HOPS 配置。

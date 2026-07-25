@@ -61,6 +61,11 @@ import { TagModule } from './tag/tag.module';
       // 连接池：pg 默认仅 10 连接，高并发易耗尽；可通过 DB_POOL_SIZE 调整
       extra: {
         max: parseInt(process.env.DB_POOL_SIZE || '20', 10),
+        connectionTimeoutMillis: parseInt(process.env.DB_CONNECTION_TIMEOUT_MS || '5000', 10),
+        statement_timeout: parseInt(process.env.DB_STATEMENT_TIMEOUT_MS || '30000', 10),
+        query_timeout: parseInt(process.env.DB_QUERY_TIMEOUT_MS || '35000', 10),
+        lock_timeout: parseInt(process.env.DB_LOCK_TIMEOUT_MS || '3000', 10),
+        idle_in_transaction_session_timeout: parseInt(process.env.DB_IDLE_TRANSACTION_TIMEOUT_MS || '30000', 10),
         // 可选 TLS：DB_SSL=true 时启用（托管 PG 常见需求）
         ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: true } : undefined,
       },

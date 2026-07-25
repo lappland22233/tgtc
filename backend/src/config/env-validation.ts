@@ -17,6 +17,31 @@ export function validateEnv(): void {
   if (!process.env.DB_PASSWORD) errors.push('DB_PASSWORD 未设置');
   if (!process.env.DB_DATABASE) errors.push('DB_DATABASE 未设置');
 
+  const dbTimeoutDefaults: Record<string, number> = {
+    DB_POOL_SIZE: 20,
+    DB_CONNECTION_TIMEOUT_MS: 5000,
+    DB_STATEMENT_TIMEOUT_MS: 30000,
+    DB_QUERY_TIMEOUT_MS: 35000,
+    DB_LOCK_TIMEOUT_MS: 3000,
+    DB_IDLE_TRANSACTION_TIMEOUT_MS: 30000,
+  };
+  const dbValues: Record<string, number> = {};
+  for (const [key, fallback] of Object.entries(dbTimeoutDefaults)) {
+    const raw = process.env[key];
+    const value = raw === undefined ? fallback : Number(raw);
+    dbValues[key] = value;
+    if (!Number.isSafeInteger(value) || value <= 0) {
+      errors.push(`${key} 必须为正整数`);
+    }
+  }
+  if (dbValues.DB_POOL_SIZE > 200) errors.push('DB_POOL_SIZE 不得超过 200');
+  if (dbValues.DB_QUERY_TIMEOUT_MS < dbValues.DB_STATEMENT_TIMEOUT_MS) {
+    errors.push('DB_QUERY_TIMEOUT_MS 不得小于 DB_STATEMENT_TIMEOUT_MS');
+  }
+  if (dbValues.DB_LOCK_TIMEOUT_MS > dbValues.DB_STATEMENT_TIMEOUT_MS) {
+    errors.push('DB_LOCK_TIMEOUT_MS 不得大于 DB_STATEMENT_TIMEOUT_MS');
+  }
+
   // ---- JWT ----
   if (!process.env.JWT_SECRET) {
     errors.push('JWT_SECRET 未设置');

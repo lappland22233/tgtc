@@ -72,4 +72,41 @@ describe('FileCacheService realtime build session', () => {
     await new Promise(resolve => setImmediate(resolve));
     expect(service.getCachedPath(fileId)).toBeNull();
   });
+
+  it('aborts a half-open upstream after the idle deadline', async () => {
+    (service as any).buildIdleTimeoutMs = 20;
+    (service as any).buildTotalTimeoutMs = 1000;
+    const upstream = new PassThrough();
+    const resultPromise = service.getOrCacheStream(fileId, 6, async () => ({
+      stream: upstream,
+      info: { file_size: 6 },
+    }));
+
+    upstream.write(Buffer.from('abc'));
+    const { stream } = await resultPromise;
+    await expect(readStream(stream)).rejects.toThrow('缓存构建空闲超时');
+    const session = (service as any).buildSessions.get(fileId);
+    await session?.completion.catch(() => {});
+    await new Promise(resolve => setImmediate(resolve));
+    expect(upstream.destroyed).toBe(true);
+    expect(service.getCachedPath(fileId)).toBeNull();
+    expect((service as any).buildSessions.size).toBe(0);
+  });
+
+  it('actively aborts a build before invalidating its files', async () => {
+    const upstream = new PassThrough();
+    const resultPromise = service.getOrCacheStream(fileId, 6, async () => ({
+      stream: upstream,
+      info: { file_size: 6 },
+    }));
+    upstream.write(Buffer.from('abc'));
+    const { stream } = await resultPromise;
+    const contentPromise = readStream(stream);
+    const contentExpectation = expect(contentPromise).rejects.toThrow('缓存构建已失效');
+
+    await service.invalidate(fileId);
+    await contentExpectation;
+    expect(upstream.destroyed).toBe(true);
+    expect((service as any).buildSessions.size).toBe(0);
+  });
 });

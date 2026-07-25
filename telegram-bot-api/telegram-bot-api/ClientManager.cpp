@@ -53,6 +53,7 @@ void ClientManager::close(td::Promise<td::Unit> &&promise) {
 
   close_flag_ = true;
   watchdog_id_.reset();
+  set_timeout_in(30.0);
   dump_statistics();
   auto ids = clients_.ids();
   for (auto id : ids) {
@@ -77,7 +78,7 @@ void ClientManager::send_file_stream(td::ActorId<FileStreamConnection> stream, t
   if (!parameters_->file_streaming_enabled_) {
     return fail(404, "File streaming endpoint is disabled");
   }
-  if (active_file_stream_count_ >= parameters_->file_stream_max_connections_) {
+  if (active_file_stream_ids_.size() >= static_cast<std::size_t>(parameters_->file_stream_max_connections_)) {
     return fail(429, "Too many active file streams");
   }
   if (token.empty() || token[0] == '0' || token.size() > 80u || token.find('/') != td::string::npos ||
@@ -139,16 +140,14 @@ void ClientManager::send_file_stream(td::ActorId<FileStreamConnection> stream, t
     LOG(DEBUG) << "Create Client for a file stream from " << peer_ip_address;
   }
 
-  active_file_stream_count_++;
+  active_file_stream_ids_.insert(stream_id);
   auto client = clients_.get(id_it->second)->client_.get();
-  send_closure(stream, &FileStreamConnection::set_client, client, true);
+  send_closure(stream, &FileStreamConnection::set_client, client);
   send_closure(client, &Client::start_file_stream, stream, stream_id, std::move(file_id), expected_size);
 }
 
-void ClientManager::release_file_stream() {
-  if (active_file_stream_count_ > 0) {
-    active_file_stream_count_--;
-  }
+void ClientManager::release_file_stream(td::int64 stream_id) {
+  active_file_stream_ids_.erase(stream_id);
 }
 
 void ClientManager::send(PromisedQueryPtr query) {
@@ -629,6 +628,10 @@ void ClientManager::raw_event(const td::Event::Raw &event) {
 }
 
 void ClientManager::timeout_expired() {
+  if (close_flag_) {
+    LOG(ERROR) << (close_db_started_ ? "Database close deadline exceeded" : "Client close deadline exceeded");
+    return finish_close();
+  }
   send_closure(watchdog_id_, &Watchdog::kick);
   set_timeout_in(WATCHDOG_TIMEOUT / 10);
 
@@ -671,6 +674,11 @@ void ClientManager::hangup_shared() {
 }
 
 void ClientManager::close_db() {
+  if (close_db_started_ || close_finished_) {
+    return;
+  }
+  close_db_started_ = true;
+  set_timeout_in(10.0);
   LOG(WARNING) << "Closing databases";
   td::MultiPromiseActorSafe mpas("close binlogs");
   mpas.add_promise(td::PromiseCreator::lambda(
@@ -684,6 +692,11 @@ void ClientManager::close_db() {
 }
 
 void ClientManager::finish_close() {
+  if (close_finished_) {
+    return;
+  }
+  close_finished_ = true;
+  cancel_timeout();
   LOG(WARNING) << "Stop ClientManager";
   auto promises = std::move(close_promises_);
   for (auto &promise : promises) {

@@ -22,6 +22,8 @@ export class JobsSchedulerService implements OnModuleInit, OnModuleDestroy {
   private scheduled = false;
   /** 重试定时器 */
   private retryTimer: NodeJS.Timeout | null = null;
+  private schedulingPromise: Promise<void> | null = null;
+  private readonly commandDeadlineMs = 15_000;
 
   constructor(
     @InjectQueue(QUEUE_NAMES.METRICS_AGGREGATION)
@@ -44,10 +46,10 @@ export class JobsSchedulerService implements OnModuleInit, OnModuleDestroy {
     this.clearRetryTimer();
   }
 
-  /** 尝试调度；失败则启动周期性重试 */
+  /** 尝试调度；失败则降级启动并在后台周期性重试。 */
   private async ensureScheduled(): Promise<void> {
     try {
-      await this.scheduleJobs();
+      await this.runScheduleSingleFlight();
       this.scheduled = true;
       this.clearRetryTimer();
       this.logger.log('Bull 定时任务调度已启动');
@@ -55,10 +57,28 @@ export class JobsSchedulerService implements OnModuleInit, OnModuleDestroy {
       this.scheduled = false;
       this.logger.error(
         `Bull 任务调度初始化失败: ${(error as Error).message}，` +
-        `将在 ${JobsSchedulerService.RETRY_INTERVAL_MS / 1000}s 后自动重试`,
+        `应用将以降级状态启动并在 ${JobsSchedulerService.RETRY_INTERVAL_MS / 1000}s 后自动重试`,
       );
       this.scheduleRetry();
     }
+  }
+
+  private runScheduleSingleFlight(): Promise<void> {
+    if (this.schedulingPromise) return this.schedulingPromise;
+    this.schedulingPromise = this.withDeadline(this.scheduleJobs(), this.commandDeadlineMs, 'Bull 调度命令超时')
+      .finally(() => { this.schedulingPromise = null; });
+    return this.schedulingPromise;
+  }
+
+  private withDeadline<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`${message}（${timeoutMs}ms）`)), timeoutMs);
+      timer.unref?.();
+      promise.then(
+        value => { clearTimeout(timer); resolve(value); },
+        error => { clearTimeout(timer); reject(error); },
+      );
+    });
   }
 
   /** 启动周期性重试（每 30s 检查一次，未调度则重试） */
@@ -70,7 +90,7 @@ export class JobsSchedulerService implements OnModuleInit, OnModuleDestroy {
         return;
       }
       try {
-        await this.scheduleJobs();
+        await this.runScheduleSingleFlight();
         this.scheduled = true;
         this.clearRetryTimer();
         this.logger.log('Bull 定时任务调度已恢复（重试成功）');

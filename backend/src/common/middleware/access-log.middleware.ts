@@ -138,7 +138,16 @@ export class AccessLogMiddleware implements NestMiddleware, OnApplicationShutdow
       clearTimeout(this.flushTimer);
       this.flushTimer = null;
     }
-    // 优雅关闭前尽量落盘剩余缓冲
-    await this.flush();
+    const pendingCount = this.buffer.length;
+    const completed = await Promise.race([
+      this.flush().then(() => true),
+      new Promise<false>(resolve => {
+        const timer = setTimeout(() => resolve(false), 5000);
+        timer.unref?.();
+      }),
+    ]);
+    if (!completed) {
+      this.logger.error(`访问日志关闭刷新超时，最多 ${pendingCount} 条记录未写入`);
+    }
   }
 }
