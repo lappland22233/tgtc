@@ -43,6 +43,12 @@
         <t-option value="file_password_set" label="设置密码" />
         <t-option value="file_access_change" label="访问变更" />
         <t-option value="file_expiry_set" label="有效期设置" />
+        <t-option value="share_link_create" label="创建分享链接" />
+        <t-option value="share_link_update" label="更新分享链接" />
+        <t-option value="share_link_delete" label="取消分享链接" />
+        <t-option value="share_link_access" label="访问分享链接" />
+        <t-option value="share_link_password_failed" label="分享密码错误" />
+        <t-option value="share_link_download" label="分享链接下载" />
         <t-option value="config_change" label="配置变更" />
         <t-option value="smtp_config_change" label="SMTP变更" />
         <t-option value="upload_config_change" label="上传配置" />
@@ -194,6 +200,9 @@ function actionLabel(action: string): string {
     ip_ban: 'IP封禁', ip_unban: 'IP解封',
     batch_delete_files: '批量删除', batch_delete_files_by_admin: '管理员批量删',
     batch_markdown: '批量Markdown',
+    share_link_create: '创建分享链接', share_link_update: '更新分享链接',
+    share_link_delete: '取消分享链接', share_link_access: '访问分享链接',
+    share_link_password_failed: '分享密码错误', share_link_download: '分享链接下载',
     logout: '登出', email_verify: '邮箱验证',
   };
   return map[action] || action;
@@ -202,13 +211,13 @@ function actionLabel(action: string): string {
 function actionTheme(action: string): string {
   if (action.includes('login') || action === 'register') return 'primary';
   if (action.includes('delete') || action.includes('ban')) return 'danger';
-  if (action.includes('config') || action.includes('role')) return 'warning';
-  if (action.includes('upload') || action.includes('file')) return 'success';
+  if (action.includes('config') || action.includes('role') || action.includes('password_failed')) return 'warning';
+  if (action.includes('upload') || action.includes('file') || action.includes('share_link')) return 'success';
   return 'default';
 }
 
 function resourceTypeLabel(type: string): string {
-  const map: Record<string, string> = { user: '用户', file: '文件', config: '配置', ip: 'IP' };
+  const map: Record<string, string> = { user: '用户', file: '文件', share_link: '分享链接', config: '配置', ip: 'IP' };
   return map[type] || type;
 }
 
