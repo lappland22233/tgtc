@@ -3,6 +3,7 @@ import type { RouteRecordRaw } from 'vue-router';
 import { useAuthStore } from '../stores/auth';
 import { clearThumbToken } from '../utils/thumbnail';
 import { clearThumbnailCache } from '../utils/thumbnailCache';
+import { PAGE_ROLES, hasAnyRole } from '../utils/permissions';
 
 /**
  * 校验 redirect 参数是否安全，防止任意 URL 跳转（Open Redirect）
@@ -94,7 +95,7 @@ const routes: RouteRecordRaw[] = [
         path: 'admin/config',
         name: 'AdminConfig',
         component: () => import('../views/admin/Config.vue'),
-        meta: { admin: true },
+        meta: { superAdmin: true },
       },
       {
         path: 'admin/security',
@@ -214,21 +215,13 @@ router.beforeEach(async (to, _from, next) => {
       return;
     }
 
-    // 步骤 4：管理员权限校验
-    if (to.meta.admin) {
-      const adminRoles = ['admin', 'super_admin'] as const;
-      if (!userRole || !adminRoles.includes(userRole as typeof adminRoles[number])) {
-        next('/');
-        return;
-      }
-    }
-
-    // 步骤 5：超级管理员权限校验
-    if (to.meta.superAdmin) {
-      if (userRole !== 'super_admin') {
-        next('/');
-        return;
-      }
+    // 步骤 4：页面权限校验（与桌面侧栏、移动抽屉共用唯一权限表）
+    const requiredRoles = PAGE_ROLES[to.path]
+      ?? (to.meta.superAdmin ? PAGE_ROLES['/admin/config'] : undefined)
+      ?? (to.meta.admin ? PAGE_ROLES['/admin'] : undefined);
+    if (requiredRoles && !hasAnyRole(userRole, requiredRoles)) {
+      next('/');
+      return;
     }
 
     next();

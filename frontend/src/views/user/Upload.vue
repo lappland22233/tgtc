@@ -26,7 +26,12 @@
           @change="handleFileSelect"
           style="display: none;"
         />
-        <div style="font-size: 48px; margin-bottom: 16px;">⬆️</div>
+        <div style="margin-bottom: 16px;">
+          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 16V4M8 8l4-4 4 4" />
+            <path d="M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2" />
+          </svg>
+        </div>
         <h3>拖拽文件到此处，或点击选择文件</h3>
         <p style="color: var(--text-secondary); margin-top: 8px;">
           支持图片、PDF、ZIP等格式
@@ -52,7 +57,12 @@
         <!-- 失败文件列表 -->
         <div v-if="batchResult.failed.length > 0" class="failed-list">
           <div v-for="(item, index) in batchResult.failed" :key="'fail-' + index" class="failed-item">
-            <span style="color: var(--color-error);">❌</span>
+            <span style="color: var(--color-error); display: inline-flex;">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <circle cx="12" cy="12" r="10" />
+                <path d="M15 9l-6 6M9 9l6 6" />
+              </svg>
+            </span>
             <span style="margin-left: 8px; font-weight: 500;">{{ item.name }}</span>
             <span style="margin-left: 8px; color: var(--text-secondary);">{{ item.reason }}</span>
           </div>
@@ -64,7 +74,7 @@
         <div v-for="(item, index) in uploadQueue" :key="index" class="file-item">
           <div class="file-icon" :class="getFileIcon(item.file.type)">
             <img v-if="item.file.type.startsWith('image/')" :src="getPreviewUrl(item.file)" loading="lazy" style="width: 48px; height: 48px; object-fit: cover; border-radius: 6px;" />
-            <span v-else style="font-size: 24px;">{{ getFileEmoji(item.file.type) }}</span>
+            <FileTypeIcon v-else :mimeType="item.file.type" :fileName="item.file.name" :size="20" />
           </div>
           <div class="file-info" style="flex: 1;">
             <div class="file-name">{{ item.file.name }}</div>
@@ -116,7 +126,8 @@ import { ref, onMounted, onUnmounted } from 'vue';
 import MessagePlugin from '@/utils/message';
 import { useFileStore } from '../../stores/files';
 import { api } from '../../stores/auth';
-import { formatSize, getFileEmoji } from '@/utils/format';
+import { formatSize } from '@/utils/format';
+import FileTypeIcon from '@/components/FileTypeIcon.vue';
 import { getErrorMessage } from '../../utils/error';
 import type { BatchUploadResult, BatchUploadSuccessItem } from '../../types/file';
 

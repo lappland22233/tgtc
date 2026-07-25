@@ -41,7 +41,7 @@
       <div v-else class="file-list" style="margin-top: 0;">
         <div v-for="file in recentFiles" :key="file.id" class="file-item">
           <div class="file-icon" :class="getFileIcon(file.mimeType)">
-            {{ getFileEmoji(file.mimeType) }}
+            <FileTypeIcon :mimeType="file.mimeType" :fileName="file.originalName" :size="18" />
           </div>
           <div class="file-info">
             <div class="file-name">{{ file.originalName }}</div>
@@ -65,7 +65,8 @@ import { ref, shallowRef, computed, onMounted, onUnmounted } from 'vue';
 import { api } from '../../stores/auth';
 import { storeToRefs } from 'pinia';
 import { useAuthStore } from '../../stores/auth';
-import { formatSize, formatDate, getFileEmoji } from '@/utils/format';
+import { formatSize, formatDate } from '@/utils/format';
+import FileTypeIcon from '@/components/FileTypeIcon.vue';
 import type { UserRole } from '../../types/user';
 import type { FileItem } from '../../types/file';
 

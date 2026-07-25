@@ -1,10 +1,11 @@
-export function formatSize(bytes: number): string {
-  // 防御 NaN/Infinity/负数，避免输出 "NaN undefined"
-  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+export function formatSize(bytes: number | string): string {
+  // 防御：字符串 → 数字（后端 bigint 序列化可能返回字符串）
+  const num = Number(bytes);
+  if (!Number.isFinite(num) || num <= 0) return '0 B';
   const k = 1024;
   const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(k)), sizes.length - 1);
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+  const i = Math.min(Math.floor(Math.log(num) / Math.log(k)), sizes.length - 1);
+  return parseFloat((num / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 }
 
 export function formatDate(date: string): string {
@@ -38,11 +39,14 @@ export function formatRelativeDate(dateStr: string): string {
   return formatDate(dateStr);
 }
 
-export function getFileEmoji(mimeType?: string): string {
-  if (!mimeType) return '📎';
-  if (mimeType.startsWith('image/')) return '🖼️';
-  if (mimeType.includes('pdf')) return '📄';
-  if (mimeType.includes('zip') || mimeType.includes('rar')) return '📦';
-  if (mimeType.includes('text')) return '📝';
-  return '📎';
+/**
+ * @deprecated Use FileTypeIcon component or getFileIconType() instead.
+ * Kept for backward compatibility — returns empty string so callers
+ * that still pass the result to ThumbnailImg's emoji prop won't render emoji.
+ */
+export function getFileEmoji(_mimeType?: string): string {
+  return '';
 }
+
+// Re-export for convenience: import { getFileIconType } from '@/utils/format'
+export { getFileIconType } from './file-icon-type';

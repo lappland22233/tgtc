@@ -3,41 +3,36 @@
     <img
       v-if="signed && url"
       :src="url"
-      :style="{ width: size + 'px', height: size + 'px', objectFit: 'cover', borderRadius: '6px' }"
+      :style="{ width: size + 'px', height: size + 'px', objectFit: 'cover', borderRadius: 'var(--radius-sm, 4px)' }"
       @error="onError"
     />
-    <div
+    <FileTypeIcon
       v-else
-      :style="{
-        width: size + 'px',
-        height: size + 'px',
-        background: 'var(--bg-secondary)',
-        borderRadius: '6px',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        fontSize: Math.max(14, size * 0.45) + 'px',
-      }"
-    >
-      <span v-if="mimeType?.startsWith('image/')">🖼️</span>
-      <span v-else>{{ emoji }}</span>
-    </div>
+      :mimeType="mimeType"
+      :fileName="fileName"
+      :size="size"
+      with-bg
+    />
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, watch, onMounted, onUnmounted } from 'vue';
 import { getThumbnailUrl } from '../utils/thumbnailCache';
+import FileTypeIcon from './FileTypeIcon.vue';
 
 const props = withDefaults(defineProps<{
   fileId: string;
   mimeType?: string;
+  fileName?: string;
   size?: number;
+  /** @deprecated emoji prop is no longer used; kept for backward compat */
   emoji?: string;
 }>(), {
   mimeType: '',
+  fileName: '',
   size: 36,
-  emoji: '📎',
+  emoji: '',
 });
 
 const containerRef = ref<HTMLElement>();

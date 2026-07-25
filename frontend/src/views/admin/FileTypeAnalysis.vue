@@ -89,6 +89,9 @@ import { formatSize } from '@/utils/format';
 import { useMobile } from '../../composables/useMobile';
 import { CHART_COLORS, FILETYPE_COLORS, tooltipBase, legendBase, ensureCyberTheme } from '../../utils/echarts-theme';
 
+// Theme-aware chart colors
+const isDark = () => document.documentElement.getAttribute('data-theme') === 'dark';
+
 interface FileTypeResponse {
   categories: { name: string; fileCount: number; totalSize: string; percentage: number }[];
 }
@@ -146,7 +149,7 @@ async function renderChart() {
         value: c.fileCount,
         itemStyle: { color: getColor(c.name) },
       }))
-    : [{ name: '无数据', value: 1, itemStyle: { color: 'rgba(255,255,255,0.08)' } }];
+    : [{ name: '无数据', value: 1, itemStyle: { color: isDark() ? 'rgba(255,255,255,0.08)' : 'rgba(22,25,31,0.08)' } }];
 
   chart.setOption({
     tooltip: {

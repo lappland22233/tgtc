@@ -46,7 +46,7 @@
                 </t-tag>
               </template>
               <template #fileName="{ row }">
-                <span>{{ getFileEmoji(row.mimeType) }} {{ row.fileName }}</span>
+                <span style="display: inline-flex; align-items: center; gap: 6px;"><FileTypeIcon :mimeType="row.mimeType" :fileName="row.fileName" :size="16" /> {{ row.fileName }}</span>
               </template>
               <template #totalBandwidth="{ row }">
                 {{ formatSize(Number(row.totalBandwidth)) }}
@@ -64,7 +64,7 @@
                 >
                   #{{ idx + 1 }}
                 </t-tag>
-                <span class="mobile-file-name">{{ getFileEmoji(row.mimeType) }} {{ row.fileName }}</span>
+                <span class="mobile-file-name" style="display: inline-flex; align-items: center; gap: 6px;"><FileTypeIcon :mimeType="row.mimeType" :fileName="row.fileName" :size="16" /> {{ row.fileName }}</span>
               </div>
               <div class="mobile-card-meta">
                 <span>{{ row.mimeType }}</span>
@@ -116,9 +116,16 @@
 import { ref, watch, onMounted, onUnmounted, nextTick } from 'vue';
 import * as echarts from '@/utils/echarts';
 import { api } from '@/stores/auth';
-import { formatSize, getFileEmoji } from '@/utils/format';
+import { formatSize } from '@/utils/format';
+import FileTypeIcon from '@/components/FileTypeIcon.vue';
 import { useMobile } from '../../composables/useMobile';
 import { CHART_COLORS, tooltipBase, areaGradient, ensureCyberTheme } from '../../utils/echarts-theme';
+
+// Theme-aware chart colors
+const isDark = () => document.documentElement.getAttribute('data-theme') === 'dark';
+const axisLabelColor = () => isDark() ? '#8895A7' : '#5F6B7A';
+const axisLineColor = () => isDark() ? 'rgba(232,237,245,0.12)' : 'rgba(22,25,31,0.12)';
+const splitLineColor = () => isDark() ? 'rgba(232,237,245,0.06)' : 'rgba(22,25,31,0.06)';
 
 interface BandwidthResponse {
   topFiles: { fileId: string; fileName: string; mimeType: string; totalBandwidth: string; accessCount: number }[];
@@ -187,22 +194,22 @@ async function renderChart() {
       type: 'category',
       data: times,
       boundaryGap: false,
-      axisLine: { lineStyle: { color: 'rgba(255,255,255,0.06)' } },
+      axisLine: { lineStyle: { color: axisLineColor() } },
       axisLabel: {
-        color: '#8895A7',
+        color: axisLabelColor(),
         fontSize: 11,
         formatter: (val: string) => val.length > 16 ? val.substring(5) : val,
       },
     },
     yAxis: {
       type: 'value',
-      axisLine: { lineStyle: { color: 'rgba(255,255,255,0.06)' } },
+      axisLine: { lineStyle: { color: axisLineColor() } },
       axisLabel: {
-        color: '#8895A7',
+        color: axisLabelColor(),
         fontSize: 11,
         formatter: (val: number) => formatSize(val),
       },
-      splitLine: { lineStyle: { color: 'rgba(255,255,255,0.04)', type: 'dashed' } },
+      splitLine: { lineStyle: { color: splitLineColor(), type: 'dashed' } },
     },
     series: [
       {

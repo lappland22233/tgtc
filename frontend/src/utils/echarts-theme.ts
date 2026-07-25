@@ -1,76 +1,98 @@
 // ============================================================
-// Cyber-Secure ECharts Theme — unified chart color system
+// FileCloud ECharts Theme — Cloudscape dual-theme chart system
 // Uses tree-shaken echarts core (./echarts) instead of full barrel
 // ============================================================
 
 import echarts from './echarts';
 
-/* ---- Color Palette (static, no echarts dependency) ---- */
+/* ---- Color Palette (Cloudscape-aligned, high readability) ---- */
 export const CHART_COLORS = {
-  blue:       '#4D7CFE',
-  cyan:       '#00E5FF',
-  indigo:     '#7B6CF6',
-  violet:     '#A855F7',
-  success:    '#22C55E',
-  warning:    '#F59E0B',
-  danger:     '#EF4444',
-  info:       '#38BDF8',
-  amber:      '#F97316',
-  pink:       '#EC4899',
-  teal:       '#14B8A6',
-  lime:       '#84CC16',
-  slate:      '#64748B',
-  rose:       '#F43F5E',
-  sky:        '#0EA5E9',
-  emerald:    '#10B981',
+  primary:    '#0972D3',
+  success:    '#037F0C',
+  warning:    '#8C6A00',
+  danger:     '#D13212',
+  info:       '#0E7490',
+  purple:     '#7B2D8B',
+  violet:     '#7B2D8B',
+  orange:     '#D36609',
+  teal:       '#0D9488',
+  blue:       '#1D4ED8',
+  slate:      '#5F6B7A',
+  pink:       '#BE185D',
+  emerald:    '#059669',
+  amber:      '#B45309',
+  indigo:     '#4338CA',
+  cyan:       '#0891B2',
+  lime:       '#4D7C0F',
+} as const;
+
+/* ---- Dark theme palette (brighter variants for dark surfaces) ---- */
+export const CHART_COLORS_DARK = {
+  primary:    '#539FE5',
+  success:    '#53D769',
+  warning:    '#C7A830',
+  danger:     '#E8604C',
+  info:       '#22D3EE',
+  purple:     '#C084FC',
+  violet:     '#C084FC',
+  orange:     '#FB923C',
+  teal:       '#2DD4BF',
+  blue:       '#60A5FA',
+  slate:      '#8895A7',
+  pink:       '#F472B6',
+  emerald:    '#34D399',
+  amber:      '#FBBF24',
+  indigo:     '#818CF8',
+  cyan:       '#22D3EE',
+  lime:       '#A3E635',
 } as const;
 
 /* ---- Status-code colors ---- */
 export const STATUS_COLORS: Record<string, string> = {
   '2xx': CHART_COLORS.success,
-  '3xx': CHART_COLORS.warning,
-  '4xx': CHART_COLORS.danger,
-  '5xx': '#881337',
+  '3xx': CHART_COLORS.primary,
+  '4xx': CHART_COLORS.warning,
+  '5xx': CHART_COLORS.danger,
   default: CHART_COLORS.slate,
 };
 
 /* ---- File-type colors ---- */
 export const FILETYPE_COLORS: Record<string, string> = {
-  '图片':   CHART_COLORS.blue,
-  '视频':   CHART_COLORS.danger,
-  '音频':   CHART_COLORS.violet,
-  '文档':   CHART_COLORS.success,
+  '图片':   CHART_COLORS.purple,
+  '视频':   CHART_COLORS.orange,
+  '音频':   CHART_COLORS.info,
+  '文档':   CHART_COLORS.primary,
   '压缩包': CHART_COLORS.amber,
   '其他':   CHART_COLORS.slate,
 };
 
 /* ---- Device colors ---- */
 export const DEVICE_COLORS: Record<string, string> = {
-  desktop: CHART_COLORS.teal,
-  mobile:  CHART_COLORS.blue,
-  tablet:  CHART_COLORS.amber,
-  bot:     CHART_COLORS.violet,
+  desktop: CHART_COLORS.primary,
+  mobile:  CHART_COLORS.teal,
+  tablet:  CHART_COLORS.orange,
+  bot:     CHART_COLORS.slate,
 };
 
 export const PERF_COLORS: Record<string, string> = {
-  DNS:       CHART_COLORS.slate,
-  TCP:       CHART_COLORS.indigo,
-  TTFB:      CHART_COLORS.warning,
+  DNS:         CHART_COLORS.slate,
+  TCP:         CHART_COLORS.info,
+  TTFB:        CHART_COLORS.warning,
   'DOM Ready': CHART_COLORS.danger,
-  'Page Load': CHART_COLORS.success,
-  FCP:       CHART_COLORS.violet,
+  'Page Load': CHART_COLORS.primary,
+  FCP:         CHART_COLORS.success,
 };
 
-/* ---- Shared style presets (static) ---- */
+/* ---- Shared style presets ---- */
 export const tooltipBase = {
-  backgroundColor: 'rgba(17, 24, 39, 0.95)',
-  borderColor: 'rgba(77, 124, 254, 0.30)',
-  textStyle: { color: '#E8EDF5', fontSize: 12 },
-  extraCssText: 'border-radius: 10px; box-shadow: 0 8px 32px rgba(0,0,0,0.6);',
+  backgroundColor: 'var(--color-bg-surface, #FFFFFF)',
+  borderColor: 'var(--border-default, #D5DBDB)',
+  textStyle: { color: 'var(--text-primary, #16191F)', fontSize: 12 },
+  extraCssText: 'border-radius: 4px; box-shadow: 0 2px 8px rgba(0,0,0,0.12);',
 };
 
 export const legendBase = {
-  textStyle: { color: '#8895A7', fontSize: 11, fontFamily: "'Noto Sans SC', sans-serif" },
+  textStyle: { color: 'var(--text-secondary, #5F6B7A)', fontSize: 11 },
   icon: 'roundRect' as const,
   itemWidth: 10,
   itemHeight: 4,
@@ -78,71 +100,128 @@ export const legendBase = {
 };
 
 // ============================================================
-// Theme registration (echarts core already loaded via ./echarts)
+// Theme registration — dual theme (light + dark)
 // ============================================================
 
-let themeRegistered = false;
+let lightRegistered = false;
+let darkRegistered = false;
+
+/** Detect current theme from DOM */
+function isDarkMode(): boolean {
+  return document.documentElement.getAttribute('data-theme') === 'dark'
+    || document.documentElement.getAttribute('theme-mode') === 'dark';
+}
 
 /**
- * Ensure the 'cyber' theme is registered (idempotent).
- * Call before echarts.init(el, 'cyber') in any chart component.
- * 注意：内部全为同步操作，故为同步函数；调用方 `await ensureCyberTheme()` 仍合法。
+ * Ensure the 'cloudscape' theme is registered (idempotent).
+ * Call before echarts.init(el, 'cloudscape') in any chart component.
  */
 export function ensureCyberTheme(): void {
-  if (themeRegistered) return;
-  echarts.registerTheme('cyber', {
+  const dark = isDarkMode();
+  if (dark && darkRegistered) return;
+  if (!dark && lightRegistered) return;
+
+  const colors = dark ? CHART_COLORS_DARK : CHART_COLORS;
+  const themeName = 'cloudscape';
+
+  echarts.registerTheme(themeName, {
     color: [
-      CHART_COLORS.blue, CHART_COLORS.cyan, CHART_COLORS.success,
-      CHART_COLORS.warning, CHART_COLORS.danger, CHART_COLORS.violet,
-      CHART_COLORS.indigo, CHART_COLORS.amber, CHART_COLORS.teal,
-      CHART_COLORS.pink,
+      colors.primary, colors.success, colors.warning,
+      colors.danger, colors.info, colors.purple,
+      colors.orange, colors.teal, colors.blue,
+      colors.pink,
     ],
     backgroundColor: 'transparent',
     line: {
       itemStyle: { borderWidth: 2 },
       lineStyle: { width: 2 },
-      symbolSize: 6,
+      symbolSize: 5,
       symbol: 'circle',
-      smooth: true,
+      smooth: false,
     },
     bar: {
-      // borderRadius 为 ECharts 5/6 属性名（旧名 barBorderRadius 在 v6 被忽略）
-      itemStyle: { borderRadius: [4, 4, 0, 0], borderWidth: 0 },
-      barWidth: '60%',
+      itemStyle: { borderRadius: [2, 2, 0, 0], borderWidth: 0 },
+      barWidth: '55%',
     },
     pie: {
-      itemStyle: { borderWidth: 2, borderColor: '#0A0E17' },
+      itemStyle: { borderWidth: 2, borderColor: dark ? '#1F242B' : '#FFFFFF' },
     },
     categoryAxis: {
-      axisLine: { lineStyle: { color: 'rgba(255,255,255,0.06)' } },
+      axisLine: { lineStyle: { color: dark ? 'rgba(232,237,245,0.12)' : 'rgba(22,25,31,0.12)' } },
       axisTick: { show: false },
-      axisLabel: { color: '#8895A7', fontSize: 11 },
+      axisLabel: { color: dark ? '#8895A7' : '#5F6B7A', fontSize: 11 },
       splitLine: { show: false },
     },
     valueAxis: {
-      axisLine: { lineStyle: { color: 'rgba(255,255,255,0.06)' } },
+      axisLine: { lineStyle: { color: dark ? 'rgba(232,237,245,0.12)' : 'rgba(22,25,31,0.12)' } },
       axisTick: { show: false },
-      axisLabel: { color: '#8895A7', fontSize: 11 },
-      splitLine: { lineStyle: { color: 'rgba(255,255,255,0.04)', type: 'dashed' } },
+      axisLabel: { color: dark ? '#8895A7' : '#5F6B7A', fontSize: 11 },
+      splitLine: {
+        lineStyle: {
+          color: dark ? 'rgba(232,237,245,0.06)' : 'rgba(22,25,31,0.06)',
+          type: 'dashed',
+        },
+      },
     },
     tooltip: {
-      backgroundColor: 'rgba(17, 24, 39, 0.96)',
-      borderColor: 'rgba(77, 124, 254, 0.25)',
+      backgroundColor: dark ? 'rgba(31, 36, 43, 0.96)' : 'rgba(255, 255, 255, 0.98)',
+      borderColor: dark ? 'rgba(83, 159, 229, 0.25)' : 'rgba(9, 114, 211, 0.2)',
       borderWidth: 1,
-      textStyle: { color: '#E8EDF5', fontSize: 12 },
-      extraCssText: 'border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,0.6); backdrop-filter: blur(8px);',
+      textStyle: { color: dark ? '#E8EDF5' : '#16191F', fontSize: 12 },
+      extraCssText: 'border-radius: 4px; box-shadow: 0 4px 16px rgba(0,0,0,0.15);',
     },
   });
-  themeRegistered = true;
+
+  // Also register as 'cyber' for backward compat with existing init calls
+  echarts.registerTheme('cyber', {
+    color: [
+      colors.primary, colors.success, colors.warning,
+      colors.danger, colors.info, colors.purple,
+      colors.orange, colors.teal, colors.blue,
+      colors.pink,
+    ],
+    backgroundColor: 'transparent',
+    line: { itemStyle: { borderWidth: 2 }, lineStyle: { width: 2 }, symbolSize: 5, symbol: 'circle', smooth: false },
+    bar: { itemStyle: { borderRadius: [2, 2, 0, 0], borderWidth: 0 }, barWidth: '55%' },
+    pie: { itemStyle: { borderWidth: 2, borderColor: dark ? '#1F242B' : '#FFFFFF' } },
+    categoryAxis: {
+      axisLine: { lineStyle: { color: dark ? 'rgba(232,237,245,0.12)' : 'rgba(22,25,31,0.12)' } },
+      axisTick: { show: false },
+      axisLabel: { color: dark ? '#8895A7' : '#5F6B7A', fontSize: 11 },
+      splitLine: { show: false },
+    },
+    valueAxis: {
+      axisLine: { lineStyle: { color: dark ? 'rgba(232,237,245,0.12)' : 'rgba(22,25,31,0.12)' } },
+      axisTick: { show: false },
+      axisLabel: { color: dark ? '#8895A7' : '#5F6B7A', fontSize: 11 },
+      splitLine: { lineStyle: { color: dark ? 'rgba(232,237,245,0.06)' : 'rgba(22,25,31,0.06)', type: 'dashed' } },
+    },
+    tooltip: {
+      backgroundColor: dark ? 'rgba(31, 36, 43, 0.96)' : 'rgba(255, 255, 255, 0.98)',
+      borderColor: dark ? 'rgba(83, 159, 229, 0.25)' : 'rgba(9, 114, 211, 0.2)',
+      borderWidth: 1,
+      textStyle: { color: dark ? '#E8EDF5' : '#16191F', fontSize: 12 },
+      extraCssText: 'border-radius: 4px; box-shadow: 0 4px 16px rgba(0,0,0,0.15);',
+    },
+  });
+
+  if (dark) darkRegistered = true;
+  else lightRegistered = true;
+}
+
+/**
+ * Re-register theme after theme switch. Call when data-theme changes.
+ */
+export function refreshChartTheme(): void {
+  lightRegistered = false;
+  darkRegistered = false;
+  ensureCyberTheme();
 }
 
 /**
  * Create a vertical gradient for area charts.
- * Must be called AFTER ensureCyberTheme() to ensure echarts is loaded.
  */
-export function areaGradient(color: string, topAlpha = 0.25, bottomAlpha = 0.01) {
-  // 仅 6 位 hex（#rrggbb）可安全追加两位 alpha；
-  // rgb()/hsl()/命名色等追加后会变成非法颜色，退化为原色不透明渐变。
+export function areaGradient(color: string, topAlpha = 0.2, bottomAlpha = 0.01) {
   const isHex6 = /^#[0-9a-f]{6}$/i.test(color);
   const top = isHex6 ? color + hexAlpha(topAlpha) : color;
   const bottom = isHex6 ? color + hexAlpha(bottomAlpha) : color;
@@ -157,7 +236,7 @@ function hexAlpha(a: number): string {
   return v.toString(16).padStart(2, '0');
 }
 
-// Legacy export: registerCyberTheme() for backward compat (used in main.ts deferred init)
+// Legacy export for backward compat (used in main.ts deferred init)
 export function registerCyberTheme() {
   ensureCyberTheme();
 }

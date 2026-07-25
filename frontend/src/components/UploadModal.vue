@@ -67,7 +67,12 @@
         @change="handleFileSelect"
         style="display: none;"
       />
-      <div style="font-size: 48px; margin-bottom: 16px;">📤</div>
+      <div style="margin-bottom: 16px;">
+        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M12 16V4M8 8l4-4 4 4" />
+          <path d="M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2" />
+        </svg>
+      </div>
       <h3>拖拽文件到此处，或点击选择文件</h3>
       <p style="color: var(--text-secondary); margin-top: 8px;">
         单文件最大 {{ maxFileSizeMB }}MB，支持图片、PDF、ZIP 等格式
@@ -82,7 +87,7 @@
         style="padding: 12px; background: var(--bg-secondary); border-radius: 8px; margin-bottom: 8px; border: 1px solid var(--border-color);">
         <div style="display: flex; align-items: center; gap: 12px;">
           <img v-if="item.file.type.startsWith('image/')" :src="getPreviewUrl(item.file)" loading="lazy" style="width: 32px; height: 32px; object-fit: cover; border-radius: 4px; flex-shrink: 0;" />
-          <span v-else style="font-size: 20px;">📎</span>
+          <FileTypeIcon v-else :mimeType="item.file?.type" :fileName="item.file?.name" :size="20" />
           <div style="flex: 1; min-width: 0;">
             <div style="font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{{ item.file.name }}</div>
             <div style="font-size: 12px; color: var(--text-secondary); margin-top: 2px;">
@@ -116,7 +121,12 @@
       <div v-if="batchResult.failed.length > 0" style="margin-top: 12px;">
         <div v-for="(item, index) in batchResult.failed" :key="'fail-' + index"
           style="padding: 8px 12px; background: var(--bg-secondary); border-radius: 8px; margin-bottom: 8px; border: 1px solid var(--border-color);">
-          <span style="color: var(--error);">❌</span>
+          <span style="color: var(--error); display: inline-flex;">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="12" cy="12" r="10" />
+              <path d="M15 9l-6 6M9 9l6 6" />
+            </svg>
+          </span>
           <span style="margin-left: 8px; font-weight: 500;">{{ item.name }}</span>
           <span style="margin-left: 8px; color: var(--text-secondary);">{{ item.reason }}</span>
         </div>
@@ -144,6 +154,7 @@ import { useMobile } from '../composables/useMobile';
 import { formatSize as formatModalSize } from '../utils/format';
 import { getErrorMessage } from '../utils/error';
 import { useChunkedUpload } from '../composables/useChunkedUpload';
+import FileTypeIcon from '@/components/FileTypeIcon.vue';
 import type { BatchUploadResult } from '../types/file';
 
 const isMobile = useMobile();
@@ -151,6 +162,7 @@ const isMobile = useMobile();
 const props = defineProps<{
   visible: boolean;
   initialFiles?: File[];
+  folderId?: string | null;
 }>();
 const emit = defineEmits<{
   close: [];
@@ -284,12 +296,10 @@ async function handleCreateTag() {
   }
 }
 
-// 进行中的全部上传 AbortController 集合：关闭弹窗时统一中止，避免孤儿请求
+// 进行中的分片上传 AbortController 集合：关闭弹窗时统一中止，避免孤儿请求
 const activeControllers = new Set<AbortController>();
-let uploadBatchGeneration = 0;
 
 function abortAllUploads() {
-  uploadBatchGeneration++;
   for (const controller of activeControllers) {
     try {
       controller.abort();
@@ -305,28 +315,6 @@ function handleClose() {
   abortAllUploads();
   resetQueue();
   emit('close');
-}
-
-function abortableDelay(ms: number, signal: AbortSignal): Promise<void> {
-  return new Promise((resolve, reject) => {
-    if (signal.aborted) {
-      reject(new Error('上传已取消'));
-      return;
-    }
-    const timer = setTimeout(() => {
-      cleanup();
-      resolve();
-    }, ms);
-    const onAbort = () => {
-      cleanup();
-      reject(new Error('上传已取消'));
-    };
-    const cleanup = () => {
-      clearTimeout(timer);
-      signal.removeEventListener('abort', onAbort);
-    };
-    signal.addEventListener('abort', onAbort, { once: true });
-  });
 }
 
 /** 校验单个文件是否匹配 acceptTypes 规则（MIME 精确 / image/* 前缀 / .ext 后缀） */
@@ -423,8 +411,6 @@ async function uploadFiles(files: File[]) {
 
   uploading.value = true;
   batchResult.value = null;
-  const batchGeneration = ++uploadBatchGeneration;
-  const isCurrentBatch = () => batchGeneration === uploadBatchGeneration;
 
   const queueEntries: QueueEntry[] = files.map((f) => ({
     uid: genUid(),  // 唯一标识
@@ -458,77 +444,81 @@ async function uploadFiles(files: File[]) {
   let staggerCounter = 0;
 
   /** 大文件分片上传逻辑 */
-  const uploadSingleChunked = async (
-    file: File,
-    entry: QueueEntry,
-    abortController: AbortController,
-  ): Promise<void> => {
-    // 每个文件使用独立 composable 状态，避免并发文件共享 uploadId/progress。
+  const uploadSingleChunked = async (file: File, entry: QueueEntry): Promise<void> => {
+    // 每个文件使用独立实例，避免并发文件共享 uploadId、进度和速度检查点。
     const chunkedUpload = useChunkedUpload(3);
+    const abortController = new AbortController();
+    activeControllers.add(abortController);
     try {
       const result = await chunkedUpload.uploadFile(
         file,
         (p) => {
-          if (!isCurrentBatch() || abortController.signal.aborted) return;
           entry.progress = p.totalChunks > 0 ? Math.round((p.uploadedChunks / p.totalChunks) * 100) : 0;
           entry.loadedBytes = p.loadedBytes;
           entry.speed = p.speed;
           entry.eta = p.eta;
-          if (entry.checkpointTime === 0) entry.checkpointTime = Date.now();
+          if (entry.checkpointTime === 0) {
+            entry.checkpointTime = Date.now();
+          }
         },
         abortController.signal,
+        undefined,
+        props.folderId,
       );
-      if (!isCurrentBatch() || abortController.signal.aborted) return;
       entry.status = 'success';
       successList.push({ id: result.id, originalName: result.originalName });
     } catch (error: unknown) {
-      if (!isCurrentBatch() || abortController.signal.aborted) return;
       entry.status = 'error';
       entry.errorReason = getErrorMessage(error);
       failedList.push({ name: file.name, reason: getErrorMessage(error) });
+    } finally {
+      activeControllers.delete(abortController);
     }
   };
 
   const uploadSingle = async (file: File, uid: string, stagger: number): Promise<void> => {
+    // 分级延迟启动，将请求分散到 300ms 窗口内，避免 Telegram 429 限流
+    await new Promise(resolve => setTimeout(resolve, stagger * 300));
+
+    const entry = queueMap.get(uid);
+    if (!entry) return;
+
+    // 大文件（>20MB）走分片上传
+    const CHUNK_THRESHOLD = 5 * 1024 * 1024; // 5MB 以上走分片上传，避免 CDN 超时截断
+    if (file.size > CHUNK_THRESHOLD) {
+      return uploadSingleChunked(file, entry);
+    }
+
     const abortController = new AbortController();
     activeControllers.add(abortController);
     try {
-      // 分级延迟启动，将请求分散到 300ms 窗口内；延时同样响应取消。
-      await abortableDelay(stagger * 300, abortController.signal);
-      if (!isCurrentBatch()) return;
-
-      const entry = queueMap.get(uid);
-      if (!entry) return;
-
-      const CHUNK_THRESHOLD = 5 * 1024 * 1024;
-      if (file.size > CHUNK_THRESHOLD) {
-        await uploadSingleChunked(file, entry, abortController);
-        return;
-      }
-
+      // 异步上传：文件传输完成后立即断开请求连接（避免 Cloudflare 代理超时），
+      // 后端在后台处理 Telegram 上传，前端轮询获取状态
       const result = await fileStore.uploadFileAsync(
         file,
         (loaded, total) => {
-          if (!isCurrentBatch() || abortController.signal.aborted) return;
-          entry.progress = total > 0 ? Math.round((loaded / total) * 100) : 0;
-          entry.loadedBytes = loaded;
-          if (entry.checkpointBytes === 0 && loaded > 0) {
-            entry.checkpointTime = Date.now();
+          // 文件传输进度（浏览器 → 服务器）
+          if (entry) {
+            entry.progress = total > 0 ? Math.round((loaded / total) * 100) : 0;
+            entry.loadedBytes = loaded;
+            // 首次收到进度数据时记录传输开始时间（排除排队等待时间）
+            if (entry.checkpointBytes === 0 && loaded > 0) {
+              entry.checkpointTime = Date.now();
+            }
           }
         },
         (status) => {
-          if (isCurrentBatch() && !abortController.signal.aborted && status === 'uploading') {
+          // 后端处理状态更新
+          if (entry && status === 'uploading') {
             entry.status = 'processing';
           }
         },
         abortController.signal,
+        props.folderId,
       );
-      if (!isCurrentBatch() || abortController.signal.aborted) return;
-      entry.status = 'success';
+      if (entry) entry.status = 'success';
       successList.push({ id: result.id, originalName: result.originalName });
     } catch (error: unknown) {
-      if (!isCurrentBatch() || abortController.signal.aborted) return;
-      const entry = queueMap.get(uid);
       if (entry) {
         entry.status = 'error';
         entry.errorReason = getErrorMessage(error);
@@ -554,8 +544,6 @@ async function uploadFiles(files: File[]) {
   await Promise.all(
     Array.from({ length: Math.min(concurrency.value, files.length) }, () => runWorker())
   );
-
-  if (!isCurrentBatch()) return;
 
   // 最后一次更新速度
   updateSpeeds();

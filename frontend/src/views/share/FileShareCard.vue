@@ -1,7 +1,7 @@
 <template>
   <div class="file-share-card">
-    <div :class="['type-icon-wrapper', iconType]">
-      <div class="type-icon">{{ fileEmoji }}</div>
+    <div class="type-icon-wrapper">
+      <FileTypeIcon :mimeType="info.mimeType" :fileName="info.name" :size="64" with-bg />
     </div>
     <h1 class="file-name" :title="info.name">{{ info.name }}</h1>
     <dl class="meta-list">
@@ -11,17 +11,37 @@
       <div v-if="info.expiresAt" class="meta-row"><dt>有效期至</dt><dd class="expiry">{{ formatDateTime(info.expiresAt) }}</dd></div>
     </dl>
     <button type="button" class="download-btn" :disabled="downloading" @click="handleDownload">
-      <span class="download-icon">⬇</span>
+      <span class="download-icon">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 3v12"/>
+          <path d="m7 12 5 5 5-5"/>
+          <path d="M5 21h14"/>
+        </svg>
+      </span>
       <span>{{ downloading ? '下载中...' : '下载文件' }}</span>
     </button>
-    <p v-if="isEncrypted" class="security-hint encrypted">🔒 此文件通过加密分享链接提供，请勿传播</p>
-    <p v-else class="security-hint">🔗 公开分享链接，任何持有链接的人都可访问</p>
+    <p v-if="isEncrypted" class="security-hint encrypted">
+      <svg class="hint-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+        <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+      </svg>
+      此文件通过加密分享链接提供，请勿传播
+    </p>
+    <p v-else class="security-hint">
+      <svg class="hint-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+        <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+      </svg>
+      公开分享链接，任何持有链接的人都可访问
+    </p>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, ref } from 'vue';
 import MessagePlugin from '@/utils/message';
+import { triggerBrowserDownload } from '@/utils/download';
+import FileTypeIcon from '@/components/FileTypeIcon.vue';
 
 interface FileInfo {
   id: string;
@@ -42,28 +62,6 @@ const props = defineProps<{
 // 因此它的存在即可靠地表示这是一个加密（有密码）分享。
 const isEncrypted = computed(() => !!props.accessJwt);
 
-type IconType = 'image' | 'video' | 'audio' | 'pdf' | 'archive' | 'word' | 'excel' | 'ppt' | 'file';
-
-const iconType = computed<IconType>(() => {
-  const m = props.info.mimeType.toLowerCase();
-  if (m.startsWith('image/')) return 'image';
-  if (m.startsWith('video/')) return 'video';
-  if (m.startsWith('audio/')) return 'audio';
-  if (m === 'application/pdf') return 'pdf';
-  if (m.includes('zip') || m.includes('rar') || m.includes('7z') || m.includes('tar')) return 'archive';
-  if (m.includes('word') || m.includes('msword') || m.includes('wordprocessing')) return 'word';
-  if (m.includes('sheet') || m.includes('excel') || m.includes('spreadsheet')) return 'excel';
-  if (m.includes('presentation') || m.includes('powerpoint')) return 'ppt';
-  return 'file';
-});
-
-const fileEmoji = computed(() => {
-  const map: Record<IconType, string> = {
-    image: '🖼️', video: '🎬', audio: '🎵', pdf: '📄',
-    archive: '🗜️', word: '📝', excel: '📊', ppt: '📽️', file: '📄',
-  };
-  return map[iconType.value];
-});
 
 const downloadUrl = computed(() => {
   let url = `/api/s/${encodeURIComponent(props.token)}/download/${encodeURIComponent(props.info.id)}`;
@@ -94,52 +92,33 @@ function formatDateTime(dateStr: string): string {
 const downloading = ref(false);
 
 /**
- * 先校验后端可访问性（fetch 仅读取响应头，不消耗 body），
- * 确认 200 后通过 <a> 点击触发浏览器原生下载。
- * 浏览器原生下载自带进度条、暂停/恢复、保存对话框，
- * 不会像 fetch + res.blob() 那样因等待完整文件而"挂起"。
- *
- * 安全说明：accessJwt 随请求 URL 传递（与改之前相同），
- * 短暂出现在浏览器的下载管理器 URL 中（不写入地址栏/历史）。
+ * 直接调用浏览器原生下载。
+ * 后端返回 Content-Disposition: attachment，浏览器下载器自带进度条、暂停/恢复、
+ * 保存对话框，无需前端 fetch 预校验（旧实现的 GET 兜底会把整个文件先读进内存，
+ * 相当于下载两次，已移除）。
  */
-async function handleDownload() {
+function handleDownload() {
   if (downloading.value) return;
   downloading.value = true;
-  try {
-    // 先验证（仅读头，不读 body）
-    const check = await fetch(downloadUrl.value, { method: 'HEAD' }).catch(() => ({ ok: false, status: 0 } as Response));
-
-    if (!check.ok && check.status !== 0 && check.status !== 405 && check.status !== 501) {
-      throw new Error(`下载失败（${check.status}）`);
-    }
-
-    // 触发浏览器原生下载
-    const a = document.createElement('a');
-    a.href = downloadUrl.value;
-    a.download = props.info.name;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-  } catch (err) {
-    MessagePlugin.error(err instanceof Error ? err.message : '下载失败，请稍后重试');
-  } finally {
-    downloading.value = false;
-  }
+  triggerBrowserDownload(downloadUrl.value, props.info.name);
+  MessagePlugin.success('已开始下载，请查看浏览器下载进度');
+  // 短暂禁用避免重复点击；浏览器接管后无需等待前端异步完成
+  window.setTimeout(() => { downloading.value = false; }, 1000);
 }
 </script>
 
 <style scoped>
 .file-share-card {
-  background: #21262D;
-  border: 1px solid #30363D;
-  border-radius: 16px;
+  background: var(--color-bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
   padding: 48px 40px;
   width: 100%;
   max-width: 480px;
   text-align: center;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
-  font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif;
-  color: #E6EDF3;
+  box-shadow: var(--shadow-lg);
+  font-family: var(--font-body);
+  color: var(--text-primary);
 }
 
 .type-icon-wrapper {
@@ -150,16 +129,7 @@ async function handleDownload() {
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 72px;
-  background: linear-gradient(135deg, rgba(0, 82, 217, 0.15), rgba(110, 118, 129, 0.1));
-  border: 1px solid #30363D;
 }
-
-.type-icon-wrapper.image { background: linear-gradient(135deg, rgba(64, 192, 87, 0.2), rgba(110, 118, 129, 0.1)); }
-.type-icon-wrapper.video { background: linear-gradient(135deg, rgba(255, 159, 64, 0.2), rgba(110, 118, 129, 0.1)); }
-.type-icon-wrapper.audio { background: linear-gradient(135deg, rgba(255, 99, 132, 0.2), rgba(110, 118, 129, 0.1)); }
-.type-icon-wrapper.pdf { background: linear-gradient(135deg, rgba(248, 81, 73, 0.2), rgba(110, 118, 129, 0.1)); }
-.type-icon-wrapper.archive { background: linear-gradient(135deg, rgba(255, 205, 86, 0.2), rgba(110, 118, 129, 0.1)); }
 
 .file-name {
   font-size: 22px;
@@ -177,8 +147,8 @@ async function handleDownload() {
   gap: 8px;
   margin: 0 0 32px;
   padding: 16px 20px;
-  background: rgba(13, 17, 23, 0.5);
-  border-radius: 8px;
+  background: var(--color-bg);
+  border-radius: var(--radius-md);
   text-align: left;
 }
 
@@ -190,11 +160,11 @@ async function handleDownload() {
   padding: 4px 0;
 }
 
-.meta-row dt { color: #8B949E; font-weight: normal; min-width: 80px; }
-.meta-row dd { color: #E6EDF3; margin: 0; text-align: right; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.meta-row dt { color: var(--text-secondary); font-weight: normal; min-width: 80px; }
+.meta-row dd { color: var(--text-primary); margin: 0; text-align: right; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .mime-type { font-family: var(--font-mono); font-size: 12px; }
-.expiry { color: #F0883E; }
+.expiry { color: var(--color-warning); }
 
 .download-btn {
   display: inline-flex;
@@ -203,10 +173,10 @@ async function handleDownload() {
   gap: 8px;
   width: 100%;
   padding: 16px 24px;
-  background: #0052D9;
+  background: var(--seed-primary);
   color: #fff;
   border: none;
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   font-size: 16px;
   font-weight: 500;
   cursor: pointer;
@@ -216,22 +186,31 @@ async function handleDownload() {
   margin-bottom: 16px;
 }
 
-.download-btn:hover { background: #0969DA; }
+.download-btn:hover { background: color-mix(in srgb, var(--seed-primary) 85%, #fff); }
 .download-btn:active { transform: scale(0.98); }
 .download-btn:disabled { opacity: 0.6; cursor: not-allowed; transform: none; }
 
 .download-icon {
-  font-size: 18px;
+  display: inline-flex;
+  align-items: center;
   line-height: 1;
 }
 
 .security-hint {
-  color: #6E7681;
+  color: var(--text-tertiary);
   font-size: 12px;
   margin: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
 }
 
 .security-hint.encrypted {
-  color: #F0883E;
+  color: var(--color-warning);
+}
+
+.hint-icon {
+  flex-shrink: 0;
 }
 </style>

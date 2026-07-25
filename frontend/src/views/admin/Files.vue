@@ -8,8 +8,8 @@
     <div class="card">
       <div style="display: flex; justify-content: space-between; margin-bottom: 16px; flex-wrap: wrap; gap: 12px;">
         <div style="display: flex; gap: 12px; flex-wrap: wrap;">
-          <t-input v-model="searchFile" placeholder="搜索文件名..." style="width: 250px;" @enter="fetchFiles" autocomplete="off" name="admin-search-file" />
-          <t-select v-model="filterUploader" placeholder="筛选上传者" clearable style="width: 200px;" @change="fetchFiles">
+          <t-input v-model="searchFile" placeholder="搜索文件名..." style="width: 250px;" @enter="loadInitialFiles" autocomplete="off" name="admin-search-file" />
+          <t-select v-model="filterUploader" placeholder="筛选上传者" clearable style="width: 200px;" @change="loadInitialFiles">
             <t-option v-for="u in uploaders" :key="u.id" :value="u.id" :label="u.email" />
           </t-select>
         </div>
@@ -23,7 +23,7 @@
         v-model:selected-row-keys="selectedRows"
         :data="files"
         :columns="columns"
-        :loading="loading"
+        :loading="cursorLoading && files.length === 0"
         :row-class-name="getRowClassName"
         row-key="id"
         hover
@@ -35,7 +35,7 @@
         </template>
         <template #filename="{ row }">
           <div style="display: flex; align-items: center; gap: 12px;">
-            <ThumbnailImg :file-id="row.id" :mime-type="row.mimeType" :size="36" :emoji="getFileEmoji(row.mimeType)" />
+            <ThumbnailImg :file-id="row.id" :mime-type="row.mimeType" :size="36" :file-name="row.originalName" />
             <div>
               <div :class="{ 'deleted-name': row.isDeleted }">{{ row.originalName }}</div>
               <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
@@ -83,7 +83,7 @@
       <div v-if="isMobile" class="mobile-card-list">
         <div v-for="file in files" :key="file.id" class="mobile-file-admin-card">
           <div style="display: flex; align-items: flex-start; gap: 12px;">
-            <ThumbnailImg :file-id="file.id" :mime-type="file.mimeType" :size="40" :emoji="getFileEmoji(file.mimeType)" />
+            <ThumbnailImg :file-id="file.id" :mime-type="file.mimeType" :size="40" :file-name="file.originalName" />
             <div style="flex: 1; min-width: 0;">
               <div :class="{ 'deleted-name': file.isDeleted }" style="font-weight: 500; word-break: break-all; font-size: 14px;">
                 {{ file.originalName }}
@@ -111,33 +111,20 @@
         </div>
       </div>
 
-      <div style="margin-top: 16px; display: flex; justify-content: center; align-items: center; gap: 16px;">
-        <t-select v-model="pageSize" :options="pageSizeOptions" style="width: 130px;" @change="handlePageSizeChange" />
-
-        <t-pagination
-          v-if="pageMode === 'paginated'"
-          v-model="page"
-          :total="total"
-          :page-size="Math.abs(pageSize)"
-          :show-page-size="false"
-          @change="handlePageChange"
-        />
-
-        <div v-else ref="scrollSentinel" style="text-align: center; padding: 8px 0;">
-          <t-loading v-if="cursorLoading" size="small" text="加载中..." />
-          <span v-else-if="!hasMore" style="color: var(--text-secondary);">已加载全部 {{ total }} 个文件</span>
-        </div>
+      <div ref="scrollSentinel" style="margin-top: 16px; text-align: center; padding: 8px 0;">
+        <t-loading v-if="cursorLoading" size="small" text="加载中..." />
+        <span v-else-if="!hasMore && files.length > 0" style="color: var(--text-secondary);">已加载全部 {{ total }} 个文件</span>
       </div>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, nextTick, computed } from 'vue';
+import { ref, onMounted, onUnmounted, watch } from 'vue';
 import { DialogPlugin } from 'tdesign-vue-next';
 import MessagePlugin from '@/utils/message';
 import { api } from '../../stores/auth';
-import { formatSize, formatDate, getFileEmoji } from '@/utils/format';
+import { formatSize, formatDate } from '@/utils/format';
 import { getErrorMessage } from '../../utils/error';
 import { useCursorPagination } from '../../composables/useCursorPagination';
 import { useMobile } from '../../composables/useMobile';
@@ -159,21 +146,15 @@ interface AdminFileItem {
 const files = ref<AdminFileItem[]>([]);
 const uploaders = ref<{ id: string; email: string }[]>([]);
 const total = ref(0);
-const page = ref(1);
-const pageSize = ref(20);
 const searchFile = ref('');
 const filterUploader = ref('');
 const selectedRows = ref<string[]>([]);
 const sortBy = ref<string>('');
 const sortOrder = ref<string>('');
-const loading = ref(false);
-
-// 分页模式
-const pageMode = ref<'paginated' | 'infinite'>('paginated');
 
 const isMobile = useMobile();
 
-// 游标无限滚动
+// 无限滚动（以页码为游标，偏移分页保留排序能力）
 const {
   hasMore,
   loading: cursorLoading,
@@ -183,14 +164,6 @@ const {
 
 const scrollSentinel = ref<HTMLElement | null>(null);
 let scrollObserver: IntersectionObserver | null = null;
-
-const pageSizeOptions = computed(() => [
-  { label: '10 条/页', value: 10 },
-  { label: '20 条/页', value: 20 },
-  { label: '50 条/页', value: 50 },
-  { label: '100 条/页', value: 100 },
-  { label: '无限滚动', value: -1 },
-]);
 
 const columns = [
   { colKey: 'row-select', type: 'multiple' as const, width: '50' },
@@ -220,125 +193,84 @@ function extractUploaders(fileList: AdminFileItem[]) {
   uploaders.value = Array.from(existing.values());
 }
 
-/** 传统分页请求 */
-async function fetchFiles() {
+/** 无限滚动每批加载条数 */
+const BATCH_SIZE = 20;
+
+/** 按页获取文件（不修改 files 列表，供无限滚动累加）。偏移分页支持自定义排序。 */
+async function fetchAdminPage(pageNum: number, signal?: AbortSignal): Promise<{ files: AdminFileItem[]; total: number }> {
   const sortField = sortBy.value === 'uploader' ? 'uploader.email' : sortBy.value;
-  loading.value = true;
-  try {
-    const res = await api.get('/admin/files', {
-      params: {
-        page: page.value,
-        limit: Math.abs(pageSize.value),
-        keyword: searchFile.value || undefined,
-        userId: filterUploader.value || undefined,
-        sortBy: sortField || undefined,
-        sortOrder: sortOrder.value || undefined,
-      },
-    });
-    files.value = res.data.data.files;
-    total.value = res.data.data.total;
-    extractUploaders(files.value);
-  } catch (error: unknown) {
-    MessagePlugin.error(getErrorMessage(error) || '加载文件列表失败');
-  } finally {
-    loading.value = false;
-  }
+  const res = await api.get('/admin/files', {
+    params: {
+      page: pageNum,
+      limit: BATCH_SIZE,
+      keyword: searchFile.value || undefined,
+      userId: filterUploader.value || undefined,
+      sortBy: sortField || undefined,
+      sortOrder: sortOrder.value || undefined,
+    },
+    signal,
+  });
+  return {
+    files: res.data.data.files as AdminFileItem[],
+    total: res.data.data.total as number,
+  };
 }
 
-/** 游标分页请求 */
-async function fetchFilesCursor(cursor?: string | null) {
-  try {
-    const res = await api.get('/admin/files', {
-      params: {
-        limit: 20,
-        keyword: searchFile.value || undefined,
-        userId: filterUploader.value || undefined,
-        cursor: cursor || undefined,
-      },
-    });
-    return {
-      files: res.data.data.files as AdminFileItem[],
-      nextCursor: res.data.data.nextCursor as string | null,
-      total: res.data.data.total as number,
-    };
-  } catch (error: unknown) {
-    // 请求被取消（如切换筛选/重置）不提示错误
-    const canceled =
-      (error as { code?: string })?.code === 'ERR_CANCELED' ||
-      (error instanceof Error && error.name === 'AbortError');
-    if (!canceled) {
-      MessagePlugin.error(getErrorMessage(error) || '加载文件列表失败');
-    }
-    // 失败时返回空结果，避免破坏游标分页状态
-    return {
-      files: [] as AdminFileItem[],
-      nextCursor: null,
-      total: total.value,
-    };
-  }
+/** 初始加载 / 重置加载（无限滚动：从头加载） */
+async function loadInitialFiles() {
+  resetCursor();
+  files.value = [];
+  await loadMoreFiles(1);
 }
 
-/** 初始加载 / 重置加载 */
-async function loadInitialFiles(resetCursorState = false) {
-  if (pageMode.value === 'paginated') {
-    await fetchFiles();
-  } else {
-    if (resetCursorState) {
-      resetCursor();
-      files.value = [];
-    }
-    await loadMore(async (cursor) => {
-      const result = await fetchFilesCursor(cursor);
+/** 加载更多（以页码为游标驱动，偏移分页保留排序能力） */
+async function loadMoreFiles(pageNum?: number) {
+  if (!hasMore.value || cursorLoading.value) return;
+  await loadMore(async (cursor, signal) => {
+    const page = pageNum ?? (cursor ? parseInt(cursor, 10) : 1);
+    try {
+      const result = await fetchAdminPage(page, signal);
       files.value = [...files.value, ...result.files];
       total.value = result.total;
       extractUploaders(result.files);
+      const loadedAll = files.value.length >= result.total || result.files.length === 0;
       return {
         data: result.files,
-        nextCursor: result.nextCursor,
-        hasMore: result.nextCursor !== null,
+        nextCursor: loadedAll ? null : String(page + 1),
+        hasMore: !loadedAll,
       };
-    });
-  }
-}
-
-/** 加载更多（IntersectionObserver 触发） */
-async function loadMoreFiles() {
-  if (!hasMore.value || cursorLoading.value) return;
-  await loadMore(async (cursor) => {
-    const result = await fetchFilesCursor(cursor);
-    files.value = [...files.value, ...result.files];
-    total.value = result.total;
-    extractUploaders(result.files);
-    return {
-      data: result.files,
-      nextCursor: result.nextCursor,
-      hasMore: result.nextCursor !== null,
-    };
+    } catch (error) {
+      const canceled =
+        (error as { code?: string })?.code === 'ERR_CANCELED' ||
+        (error instanceof Error && error.name === 'AbortError');
+      if (!canceled) {
+        MessagePlugin.error(getErrorMessage(error) || '加载文件列表失败');
+      }
+      return { data: [], nextCursor: cursor, hasMore: true };
+    }
   });
 }
 
-/** 设置滚动监听 */
-function setupScrollObserver() {
-  if (scrollObserver) scrollObserver.disconnect();
-  if (!scrollSentinel.value) return;
+/**
+ * 哨兵元素变化时重新挂载 IntersectionObserver。
+ * 修复无限滚动失效：列表清空重载时哨兵元素会卸载重建，旧 observer 指向已脱离
+ * DOM 的元素而永不触发，这里监听哨兵 ref 变化即重新 observe。
+ */
+watch(scrollSentinel, (el) => {
+  if (scrollObserver) { scrollObserver.disconnect(); scrollObserver = null; }
+  if (!el) return;
   scrollObserver = new IntersectionObserver(
     (entries) => {
       if (entries[0].isIntersecting) loadMoreFiles();
     },
     { rootMargin: '600px' },
   );
-  scrollObserver.observe(scrollSentinel.value);
-}
+  scrollObserver.observe(el);
+});
 
 /** 刷新列表（操作后调用） */
 async function refreshList() {
-  if (pageMode.value === 'infinite') {
-    resetCursor();
-    files.value = [];
-    loadInitialFiles(true);
-  } else {
-    await fetchFiles();
-  }
+  await loadInitialFiles();
 }
 
 /** 管理员删除文件（7天冷静期，再次点击强制删除） */
@@ -434,41 +366,11 @@ function handleSortChange(sortInfo: { sortBy: string; descending: boolean } | { 
   if (!info) return;
   sortBy.value = info.sortBy;
   sortOrder.value = info.descending ? 'DESC' : 'ASC';
-  // 排序时切换到传统模式
-  if (pageMode.value === 'infinite') {
-    pageMode.value = 'paginated';
-    pageSize.value = 20;
-    resetCursor();
-    MessagePlugin.info('排序已切换为分页模式');
-  }
-  page.value = 1;
-  fetchFiles();
-}
-
-function handlePageChange(pageInfo: { current: number }) {
-  page.value = pageInfo.current;
-  fetchFiles();
-}
-
-function handlePageSizeChange(pageSizeVal: number) {
-  selectedRows.value = [];
-  if (pageSizeVal === -1) {
-    pageMode.value = 'infinite';
-    page.value = 1;
-    resetCursor();
-    files.value = [];
-    loadInitialFiles(true);
-    nextTick(setupScrollObserver);
-  } else {
-    pageMode.value = 'paginated';
-    page.value = 1;
-    pageSize.value = pageSizeVal;
-    fetchFiles();
-  }
+  loadInitialFiles();
 }
 
 onMounted(() => {
-  fetchFiles();
+  loadInitialFiles();
 });
 
 onUnmounted(() => {

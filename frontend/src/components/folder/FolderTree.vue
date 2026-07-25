@@ -14,10 +14,10 @@
       v-else
       :data="treeData"
       :keys="{ value: 'id', label: 'name', children: 'children' }"
-      :value="folderStore.currentFolderId || ''"
+      :actived="folderStore.currentFolderId ? [folderStore.currentFolderId] : []"
       :expanded="expandedKeys"
       @expand="handleExpand"
-      @change="handleSelect"
+      @active="handleSelect"
       hover
       transition
       activable
@@ -73,9 +73,10 @@ function handleExpand(value: string[]) {
   expandedKeys.value = value;
 }
 
-function handleSelect(value: string) {
-  // 选中 null 表示根目录
-  const folderId = value === '' ? null : value;
+function handleSelect(value: string | string[]) {
+  // active 事件返回数组；取消激活（空数组）或空值视为根目录
+  const v = Array.isArray(value) ? value[0] : value;
+  const folderId = !v ? null : v;
   emit('navigate', folderId);
 }
 

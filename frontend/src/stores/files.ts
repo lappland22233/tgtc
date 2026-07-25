@@ -118,6 +118,43 @@ export const useFileStore = defineStore('files', () => {
     files.value = newFiles;
   }
 
+  /** 追加一批文件并按 ID 去重，保留已有对象引用以避免列表节点无关更新。 */
+  function appendFiles(newFiles: FileItem[]) {
+    if (newFiles.length === 0) return;
+    const existingIds = new Set(files.value.map((file) => file.id));
+    const uniqueFiles = newFiles.filter((file) => {
+      if (existingIds.has(file.id)) return false;
+      existingIds.add(file.id);
+      return true;
+    });
+    if (uniqueFiles.length > 0) files.value.push(...uniqueFiles);
+  }
+
+  /**
+   * 按页获取文件（不修改 files 列表），供无限滚动逐页累加使用。
+   * 相比游标分页，偏移分页支持自定义排序（sortBy/sortOrder），
+   * 因此无限滚动这里用「页码」作为游标驱动，兼顾排序与滚动加载。
+   */
+  async function fetchFilesPage(
+    page: number,
+    limit: number,
+    keyword?: string,
+    sortBy?: string,
+    sortOrder?: string,
+    tagIds?: string[],
+    folderId?: string,
+    signal?: AbortSignal,
+  ): Promise<{ files: FileItem[]; total: number }> {
+    const response = await api.get('/files', {
+      params: { page, limit, keyword, includeDeleted: 'true', sortBy, sortOrder, tagIds: tagIds?.join(','), folderId },
+      signal,
+    });
+    return {
+      files: response.data.data.files as FileItem[],
+      total: response.data.data.total as number,
+    };
+  }
+
   async function uploadFile(
     file: File,
     onProgress?: (loaded: number, total: number) => void,
@@ -148,12 +185,15 @@ export const useFileStore = defineStore('files', () => {
     onProgress?: (loaded: number, total: number) => void,
     onStatusChange?: (status: string) => void,
     signal?: AbortSignal,
+    folderId?: string | null,
   ) {
     const formData = new FormData();
     formData.append('file', file);
+    if (folderId) formData.append('folderId', folderId);
     // Step 1: 上传文件（Multer 缓冲阶段，有上传进度）— 同样响应外部取消
     const response = await api.post('/files/upload-async', formData, {
       signal,
+      timeout: 0,
       onUploadProgress: (progressEvent) => {
         if (progressEvent.total && onProgress) {
           onProgress(progressEvent.loaded, progressEvent.total);
@@ -288,6 +328,21 @@ export const useFileStore = defineStore('files', () => {
     await api.put(`/files/${id}/password`, { password });
   }
 
+  /** 重命名文件（仅修改显示名） */
+  async function renameFile(id: string, name: string) {
+    const res = await api.patch(`/files/${id}/rename`, { name });
+    // 同步更新本地列表中对应文件的显示名
+    const file = files.value.find((f) => f.id === id);
+    if (file) file.originalName = res.data.data.originalName;
+    return res.data.data;
+  }
+
+  /** 复制文件（生成副本，复用同一底层存储）；folderId 为 null 表示复制到根目录 */
+  async function copyFile(id: string, folderId: string | null = null) {
+    const res = await api.post(`/files/${id}/copy`, { folderId });
+    return res.data.data;
+  }
+
   return {
     files,
     total,
@@ -296,7 +351,9 @@ export const useFileStore = defineStore('files', () => {
     setCurrentUserRole,
     fetchFiles,
     fetchFilesCursor,
+    fetchFilesPage,
     replaceFiles,
+    appendFiles,
     uploadFile,
     uploadFileAsync,
     uploadMultiple,
@@ -307,5 +364,7 @@ export const useFileStore = defineStore('files', () => {
     updateAccessCount,
     updateExpires,
     setPassword,
+    renameFile,
+    copyFile,
   };
 });

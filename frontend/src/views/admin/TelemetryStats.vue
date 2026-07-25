@@ -90,7 +90,7 @@
       <div v-if="errors.length === 0" class="empty">暂无错误记录 🎉</div>
       <t-table
         v-else
-        :data="errors.slice(0, 10)"
+        :data="errorsTop"
         :columns="errorColumns"
         row-key="id"
         size="small"
@@ -146,7 +146,7 @@
           <div class="detail-item"><span class="d-label">类型</span><span class="d-value">{{ typeBadge(detailRecord.type) }}</span></div>
           <div class="detail-item"><span class="d-label">时间</span><span class="d-value">{{ formatFullTime(detailRecord.createdAt) }}</span></div>
           <div class="detail-item"><span class="d-label">IP</span><span class="d-value">{{ detailRecord.ip || '-' }}</span></div>
-          <div class="detail-item"><span class="d-label">客户端时间</span><span class="d-value">{{ detailRecord.clientTimestamp ? formatFullTime(new Date(detailRecord.clientTimestamp).toISOString()) : '-' }}</span></div>
+          <div class="detail-item"><span class="d-label">客户端时间</span><span class="d-value">{{ formatClientTimestamp(detailRecord.clientTimestamp) }}</span></div>
           <div class="detail-item full"><span class="d-label">User-Agent</span><span class="d-value mono wrap">{{ detailRecord.userAgent || '-' }}</span></div>
         </div>
         <div class="detail-data">
@@ -159,10 +159,14 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, onUnmounted, nextTick } from 'vue';
+import { ref, reactive, computed, onMounted, onUnmounted, nextTick, h } from 'vue';
 import * as echarts from '@/utils/echarts';
 import client from '../../api/client';
 import { CHART_COLORS, tooltipBase, legendBase, areaGradient, ensureCyberTheme } from '../../utils/echarts-theme';
+
+// Theme-aware chart colors
+const isDark = () => document.documentElement.getAttribute('data-theme') === 'dark';
+const axisLabelColor = () => isDark() ? '#8895A7' : '#5F6B7A';
 
 // ---- 时间范围 ----
 const timeRange = ref('24h');
@@ -205,7 +209,7 @@ interface RecordItem {
   data: Record<string, any>;
   ip: string;
   userAgent: string | null;
-  clientTimestamp: number | null;
+  clientTimestamp: number | string | null;
   createdAt: string;
 }
 const records = ref<RecordItem[]>([]);
@@ -215,6 +219,9 @@ const pagination = reactive({ current: 1, pageSize: 20, total: 0, showJumper: tr
 
 // ---- 错误列表 ----
 const errors = ref<RecordItem[]>([]);
+// 稳定的前 10 条引用：避免在模板里 errors.slice(0,10) 每次渲染都产生新数组，
+// 导致 t-table 频繁全量重渲染（放大 TDesign 单元格生命周期竞态、影响性能）。
+const errorsTop = computed(() => errors.value.slice(0, 10));
 
 // ---- 详情抽屉 ----
 const detailVisible = ref(false);
@@ -233,10 +240,18 @@ let statsGen = 0;
 let recordsGen = 0;
 let recordsAbort: AbortController | null = null;
 
+// 自定义省略号单元格：规避 TDesign TEllipsis 组件在 onMounted/onUpdated 中
+// 调用 isTextEllipsis(root.value) 未判空触发的崩溃
+//（"Cannot read properties of null (reading 'clientWidth')"）。
+// 用原生 title 提供完整内容悬浮提示 + CSS 截断，行为等价且稳定。
+function ellipsisCell(text: string) {
+  return h('div', { class: 'cell-ellipsis', title: text }, text);
+}
+
 // ---- 表格列 ----
 const errorColumns = [
   { colKey: 'createdAt', title: '时间', width: 150, cell: (_h: unknown, ctx: { row: RecordItem }) => formatTime(ctx.row.createdAt) },
-  { colKey: 'data.message', title: '消息', ellipsis: true, cell: (_h: unknown, ctx: { row: RecordItem }) => ctx.row.data?.message || '-' },
+  { colKey: 'data.message', title: '消息', cell: (_h: unknown, ctx: { row: RecordItem }) => ellipsisCell(ctx.row.data?.message || '-') },
   { colKey: 'data.tag', title: '标签', width: 120, cell: (_h: unknown, ctx: { row: RecordItem }) => ctx.row.data?.tag || '-' },
   { colKey: 'ip', title: 'IP', width: 130 },
 ];
@@ -244,8 +259,8 @@ const recordColumns = [
   { colKey: 'createdAt', title: '时间', width: 150, cell: (_h: unknown, ctx: { row: RecordItem }) => formatTime(ctx.row.createdAt) },
   { colKey: 'type', title: '类型', width: 90, cell: (_h: unknown, ctx: { row: RecordItem }) => typeBadge(ctx.row.type) },
   { colKey: 'ip', title: 'IP', width: 130 },
-  { colKey: 'userAgent', title: 'User-Agent', ellipsis: true, width: 200 },
-  { colKey: 'data', title: '数据摘要', ellipsis: true, cell: (_h: unknown, ctx: { row: RecordItem }) => formatDataSummary(ctx.row.type, ctx.row.data) },
+  { colKey: 'userAgent', title: 'User-Agent', width: 200, cell: (_h: unknown, ctx: { row: RecordItem }) => ellipsisCell(ctx.row.userAgent || '-') },
+  { colKey: 'data', title: '数据摘要', cell: (_h: unknown, ctx: { row: RecordItem }) => ellipsisCell(formatDataSummary(ctx.row.type, ctx.row.data)) },
 ];
 
 function typeBadge(type: string): string {
@@ -280,6 +295,15 @@ function formatTime(t: string): string {
 function formatFullTime(t: string): string {
   if (!t) return '-';
   const d = new Date(t);
+  if (isNaN(d.getTime())) return '-';
+  return d.toLocaleString('zh-CN', { hour12: false });
+}
+
+function formatClientTimestamp(timestamp: number | string | null): string {
+  if (timestamp == null || timestamp === '') return '-';
+  const value = typeof timestamp === 'number' ? timestamp : Number(timestamp);
+  if (!Number.isFinite(value)) return '-';
+  const d = new Date(value);
   if (isNaN(d.getTime())) return '-';
   return d.toLocaleString('zh-CN', { hour12: false });
 }
@@ -445,8 +469,8 @@ function updateTrendChart() {
     tooltip: { trigger: 'axis', ...tooltipBase },
     legend: { data: ['错误', '性能', '环境'], ...legendBase },
     grid: { left: 50, right: 20, top: 36, bottom: 30 },
-    xAxis: { type: 'category', data: times, boundaryGap: false, axisLabel: { color: '#8895A7', fontSize: 11 } },
-    yAxis: { type: 'value', axisLabel: { color: '#8895A7', fontSize: 11 } },
+    xAxis: { type: 'category', data: times, boundaryGap: false, axisLabel: { color: axisLabelColor(), fontSize: 11 } },
+    yAxis: { type: 'value', axisLabel: { color: axisLabelColor(), fontSize: 11 } },
     series: [
       { name: '错误', type: 'line', data: stats.trend.map(t => t.error), smooth: true, lineStyle: { color: CHART_COLORS.danger, width: 2 }, itemStyle: { color: CHART_COLORS.danger }, areaStyle: { color: areaGradient(CHART_COLORS.danger) }, symbol: 'none' },
       { name: '性能', type: 'line', data: stats.trend.map(t => t.performance), smooth: true, lineStyle: { color: CHART_COLORS.success, width: 2 }, itemStyle: { color: CHART_COLORS.success }, areaStyle: { color: areaGradient(CHART_COLORS.success) }, symbol: 'none' },
@@ -464,8 +488,8 @@ function updatePieChart() {
       type: 'pie',
       radius: ['45%', '75%'],
       center: ['62%', '50%'],
-      label: { color: '#8895A7' },
-      emphasis: { itemStyle: { shadowBlur: 20, shadowColor: 'rgba(0,0,0,0.4)' } },
+      label: { color: axisLabelColor() },
+      emphasis: { itemStyle: { shadowBlur: 20, shadowColor: isDark() ? 'rgba(0,0,0,0.4)' : 'rgba(0,0,0,0.15)' } },
       data: [
         { name: '错误', value: stats.byType.error, itemStyle: { color: CHART_COLORS.danger } },
         { name: '性能', value: stats.byType.performance, itemStyle: { color: CHART_COLORS.success } },
@@ -508,8 +532,8 @@ function updatePerfChart() {
     },
     legend: { data: stages.map(s => s.name), ...legendBase, bottom: 0 },
     grid: { left: 110, right: 40, top: 10, bottom: 40 },
-    xAxis: { type: 'value', name: 'ms', nameTextStyle: { color: '#8895A7', fontSize: 11 }, axisLabel: { color: '#8895A7', fontSize: 11 } },
-    yAxis: { type: 'category', data: labels, axisLabel: { color: '#8895A7', fontSize: 11, width: 100, overflow: 'truncate' } },
+    xAxis: { type: 'value', name: 'ms', nameTextStyle: { color: axisLabelColor(), fontSize: 11 }, axisLabel: { color: axisLabelColor(), fontSize: 11 } },
+    yAxis: { type: 'category', data: labels, axisLabel: { color: axisLabelColor(), fontSize: 11, width: 100, overflow: 'truncate' } },
     series: stages.map(stage => ({
       name: stage.name,
       type: 'bar',
@@ -613,8 +637,8 @@ onUnmounted(() => {
   font-weight: 700;
   line-height: 1.1;
 }
-.metric-danger .metric-value.has-value { color: var(--error, #EF4444); }
-.metric-success .metric-value { color: var(--success, #22C55E); }
+.metric-danger .metric-value.has-value { color: var(--color-danger); }
+.metric-success .metric-value { color: var(--color-success); }
 .metric-sub {
   font-size: 12px;
   color: var(--text-secondary);
@@ -663,7 +687,7 @@ onUnmounted(() => {
 .chip {
   font-size: 12px;
   color: var(--text-secondary);
-  background: var(--bg-color, rgba(255,255,255,0.04));
+  background: var(--color-bg-hover);
   border-radius: 6px;
   padding: 3px 10px;
 }
@@ -671,7 +695,7 @@ onUnmounted(() => {
 
 .count-badge {
   font-size: 12px;
-  background: var(--error, #EF4444);
+  background: var(--color-danger);
   color: #fff;
   border-radius: 10px;
   padding: 1px 8px;
@@ -681,6 +705,14 @@ onUnmounted(() => {
   display: flex;
   gap: 10px;
   align-items: center;
+}
+
+/* 自定义省略号单元格：CSS 截断 + 原生 title 悬浮提示（替代 TDesign ellipsis 组件） */
+.cell-ellipsis {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
 }
 
 .empty {

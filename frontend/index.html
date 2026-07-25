@@ -51,15 +51,11 @@
       />
     </noscript>
 
-    <!-- Critical dark-theme background is loaded from a same-origin static file. -->
-    <link rel="stylesheet" href="/critical.css" />
-
-    <!--
-      本地 TDesign 图标 sprite：CSP script-src 仅允许 'self'，Icon 组件默认的
-      tdesign.gtimg.com 外链 sprite 会被拦截导致 t-icon 全部为空，故改为同源加载。
-      该脚本为自执行注入器，将全部 <symbol> 注入 DOM 供 <use href="#t-icon-*"> 引用。
-    -->
-    <script defer src="/fonts/tdesign-icons-sprite.js"></script>
+    <!-- Inline critical dark-theme background to prevent white flash（CSP style-src 'unsafe-inline' 已放行） -->
+    <style>
+      html { background-color: #0A0E17; color-scheme: dark; }
+      body { margin: 0; background-color: #0A0E17; }
+    </style>
   </head>
   <body>
     <div id="app"></div>

@@ -24,7 +24,12 @@
 
       <!-- 空状态 -->
       <div v-else-if="shares.length === 0" class="empty-state">
-        <div class="empty-icon">🔗</div>
+        <div class="empty-icon">
+          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71" />
+            <path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71" />
+          </svg>
+        </div>
         <p>暂无分享链接</p>
         <p class="empty-hint">在「我的文件」中选择文件，点击「分享」按钮创建分享链接</p>
       </div>
@@ -33,7 +38,13 @@
       <div v-else class="share-list">
         <div v-for="share in shares" :key="share.id" class="share-item" :class="{ disabled: share.isDeleted || share.status !== 'active' }">
           <div class="share-icon">
-            {{ share.targetType === 'folder' ? '📁' : '📄' }}
+            <svg v-if="share.targetType === 'folder'" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M3 6a2 2 0 012-2h4l2 2h8a2 2 0 012 2v10a2 2 0 01-2 2H5a2 2 0 01-2-2V6z" />
+            </svg>
+            <svg v-else width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
+              <path d="M14 2v6h6" />
+            </svg>
           </div>
 
           <div class="share-info">
@@ -42,8 +53,21 @@
             </div>
             <div class="share-meta">
               <span class="meta-tag" :class="share.targetType">{{ share.targetType === 'folder' ? '文件夹' : '文件' }}</span>
-              <span v-if="isEncrypted(share)" class="meta-tag encrypted">🔒 加密</span>
-              <span v-else class="meta-tag public">🌐 公开</span>
+              <span v-if="isEncrypted(share)" class="meta-tag encrypted" style="display: inline-flex; align-items: center; gap: 3px;">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <rect x="3" y="11" width="18" height="11" rx="2" />
+                  <path d="M7 11V7a5 5 0 0110 0v4" />
+                </svg>
+                加密
+              </span>
+              <span v-else class="meta-tag public" style="display: inline-flex; align-items: center; gap: 3px;">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <circle cx="12" cy="12" r="10" />
+                  <path d="M2 12h20" />
+                  <path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z" />
+                </svg>
+                公开
+              </span>
               <span v-if="share.maxAccessCount >= 0" class="meta-tag">
                 {{ share.currentAccessCount }}/{{ share.maxAccessCount }} 次
               </span>

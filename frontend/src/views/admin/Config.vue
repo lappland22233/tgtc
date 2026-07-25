@@ -59,12 +59,33 @@
 
     <!-- 文件上传配置 -->
     <div class="card" style="margin-top: 20px;">
-      <h3 style="margin-bottom: 16px;">📁 文件上传配置</h3>
+      <h3 style="margin-bottom: 16px; display: flex; align-items: center; gap: 8px;">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M3 6a2 2 0 012-2h4l2 2h8a2 2 0 012 2v10a2 2 0 01-2 2H5a2 2 0 01-2-2V6z" />
+        </svg>
+        文件上传配置
+      </h3>
       <t-form layout="vertical">
 
         <!-- 最大文件大小 -->
         <t-form-item label="最大文件大小 (MB)">
           <t-input-number v-model="uploadConfig.maxFileSizeMB" :min="1" :max="1024" />
+        </t-form-item>
+
+        <!-- 默认访问次数限制（应用于新上传文件） -->
+        <t-form-item label="默认访问次数限制">
+          <t-input-number v-model="uploadConfig.accessCountDefault" :min="-1" :max="1000000" :step="1" />
+          <div style="color: var(--text-secondary); font-size: 12px; margin-top: 4px;">
+            新上传文件的默认访问次数上限，-1 表示不限制
+          </div>
+        </t-form-item>
+
+        <!-- 最大可设访问次数（校验用户设置的上限） -->
+        <t-form-item label="最大可设访问次数">
+          <t-input-number v-model="uploadConfig.accessCountMax" :min="-1" :max="1000000" :step="1" />
+          <div style="color: var(--text-secondary); font-size: 12px; margin-top: 4px;">
+            用户为单个文件可设置的访问次数上限，-1 表示不限制；设为正数后，用户不可设为更大值或无限制，且默认值须在 1 到该值之间
+          </div>
         </t-form-item>
 
         <!-- 模式切换 -->
@@ -234,6 +255,8 @@ const uploadConfig = ref({
   maxFileSizeMB: 20,
   fileTypeMode: 'blacklist' as 'blacklist' | 'whitelist',
   fileTypeFilter: '',
+  accessCountDefault: -1,
+  accessCountMax: -1,
 });
 
 const cacheConfig = ref({
@@ -347,6 +370,8 @@ async function fetchUploadConfig(): Promise<boolean> {
     uploadConfig.value.maxFileSizeMB = Math.floor(data.maxFileSize / (1024 * 1024));
     uploadConfig.value.fileTypeMode = data.fileTypeMode || 'blacklist';
     uploadConfig.value.fileTypeFilter = data.fileTypeFilter || '';
+    uploadConfig.value.accessCountDefault = Number.isInteger(data.accessCountDefault) ? data.accessCountDefault : -1;
+    uploadConfig.value.accessCountMax = Number.isInteger(data.accessCountMax) ? data.accessCountMax : -1;
     selectedExtensions.value = data.fileTypeFilter
       ? data.fileTypeFilter.split(',').map((s: string) => s.trim()).filter(Boolean)
       : [];
@@ -358,11 +383,19 @@ async function fetchUploadConfig(): Promise<boolean> {
 }
 
 async function saveUploadConfig() {
+  // 前端一致性校验（后端亦会兜底）：存在最大值(>0)时，默认值须为 1..max
+  const { accessCountDefault: def, accessCountMax: max } = uploadConfig.value;
+  if (max > 0 && (def <= 0 || def > max)) {
+    MessagePlugin.warning('存在最大访问次数限制时，默认访问次数必须为 1 到最大值之间');
+    return;
+  }
   try {
     await api.put('/admin/upload-config', {
       maxFileSize: uploadConfig.value.maxFileSizeMB * 1024 * 1024,
       fileTypeMode: uploadConfig.value.fileTypeMode,
       fileTypeFilter: selectedExtensions.value.join(','),
+      accessCountDefault: def,
+      accessCountMax: max,
     });
     uploadConfig.value.fileTypeFilter = selectedExtensions.value.join(',');
     MessagePlugin.success('上传配置已保存');

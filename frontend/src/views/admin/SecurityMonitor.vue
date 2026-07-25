@@ -84,7 +84,12 @@
             </div>
           </div>
           <div v-if="!attackAlerts.length" class="placeholder-block">
-            <div class="placeholder-icon">✅</div>
+            <div class="placeholder-icon">
+              <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <circle cx="12" cy="12" r="10" />
+                <path d="M9 12l2 2 4-4" />
+              </svg>
+            </div>
             <h3>当前无攻击行为</h3>
             <p>系统每 5 分钟自动检测扫描、爆破、爬虫、异常下载等攻击行为</p>
           </div>
@@ -352,7 +357,12 @@
           </t-button>
         </div>
         <div v-else class="placeholder-block">
-          <div class="placeholder-icon">⚙️</div>
+          <div class="placeholder-icon">
+            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="12" cy="12" r="3" />
+              <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" />
+            </svg>
+          </div>
           <h3>暂无安全配置项</h3>
           <p>请确保后端安全配置接口正常</p>
         </div>

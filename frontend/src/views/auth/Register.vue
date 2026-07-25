@@ -188,8 +188,9 @@ async function handleSubmit() {
   loading.value = true;
   try {
     const code = authStatus.value.emailVerificationEnabled ? form.code : '';
-    const data = await authStore.register(form.email, form.password, code);
-    if (data.needVerification) {
+    const res = await authStore.register(form.email, form.password, code);
+    const data = res.data;
+    if (data?.needVerification) {
       MessagePlugin.success('注册成功，请前往邮箱查收验证码并完成验证');
       router.push('/login');
     } else {

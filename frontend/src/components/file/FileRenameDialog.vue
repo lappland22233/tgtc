@@ -26,28 +26,28 @@
 import { ref, reactive, watch } from 'vue';
 import MessagePlugin from '@/utils/message';
 import { getErrorMessage } from '@/utils/error';
-import { useFolderStore } from '../../stores/folders';
+import { useFileStore } from '../../stores/files';
+import type { FileItem } from '../../types/file';
 
 const props = defineProps<{
   visible: boolean;
-  /** 待重命名文件；null 表示未选择 */
-  file: { id: string; originalName: string } | null;
+  file: FileItem | null;
 }>();
 
 const emit = defineEmits<{
   'update:visible': [v: boolean];
-  renamed: [fileId: string, newName: string];
+  renamed: [];
 }>();
 
-const folderStore = useFolderStore();
+const fileStore = useFileStore();
 const loading = ref(false);
 const formRef = ref();
 
 const form = reactive({ name: '' });
 const rules = {
   name: [
-    { required: true, message: '请输入文件名', type: 'error' as const },
-    { max: 255, message: '文件名不能超过 255 个字符', type: 'error' as const },
+    { required: true, message: '请输入文件名称', type: 'error' as const },
+    { max: 255, message: '文件名称不能超过 255 个字符', type: 'error' as const },
   ],
 };
 
@@ -65,10 +65,10 @@ async function handleConfirm() {
 
   loading.value = true;
   try {
-    const newName = await folderStore.renameFile(props.file.id, form.name.trim());
+    await fileStore.renameFile(props.file.id, form.name.trim());
     MessagePlugin.success('已重命名');
-    emit('renamed', props.file.id, newName);
     emit('update:visible', false);
+    emit('renamed');
   } catch (err) {
     MessagePlugin.error(getErrorMessage(err) || '重命名失败');
   } finally {

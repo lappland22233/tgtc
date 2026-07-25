@@ -65,9 +65,11 @@ export function useChunkedUpload(concurrency = 2) {
     onProgress?: (p: ChunkUploadProgress) => void,
     signal?: AbortSignal,
     chunkSizeHint?: number,
+    folderId?: string | null,
   ): Promise<ChunkUploadResult> {
     uploading.value = true;
     uploadId.value = null;
+    let mergeTriggered = false;
 
     // 自适应分片大小：根据文件大小动态计算，可被调用方传入的 hint 覆盖。
     // 【重要】分片大小在 init 时即固定，整个上传过程中绝不改变。
@@ -87,12 +89,12 @@ export function useChunkedUpload(concurrency = 2) {
         mimeType: file.type || 'application/octet-stream',
         totalChunks,
         chunkSize,
+        folderId: folderId || undefined,
       }, { signal, timeout: 0 });
-      const sessionUploadId = String(initRes.data.data.uploadId);
-      uploadId.value = sessionUploadId;
+      uploadId.value = initRes.data.data.uploadId;
 
       // 2. Get uploaded status
-      const statusRes = await api.get(`/files/chunk/${sessionUploadId}/status`, { signal });
+      const statusRes = await api.get(`/files/chunk/${uploadId.value}/status`, { signal });
       // 以“已成功索引集合”作为续传/进度判定的唯一依据（并发下完成顺序非连续，不能用计数假定前 N 个已完成）
       const uploadedIndices = new Set<number>(statusRes.data.data.uploaded);
 
@@ -146,7 +148,7 @@ export function useChunkedUpload(concurrency = 2) {
           form.append('chunk', chunk.blob, String(chunk.index));
           form.append('index', String(chunk.index));
 
-          await api.post(`/files/chunk/${sessionUploadId}`, form, {
+          await api.post(`/files/chunk/${uploadId.value}`, form, {
             signal: merged.signal,
             timeout: 0, // 禁用 axios 默认 30s 超时，使用 AbortController 控制
           });
@@ -247,7 +249,6 @@ export function useChunkedUpload(concurrency = 2) {
       );
 
       // 5. Trigger async merge (immediate return, non-blocking), with retry on CDN 502
-      let mergeTriggered = false;
       for (let retry = 0; retry < MAX_RETRIES; retry++) {
         try {
           await api.post(`/files/chunk/${uploadId.value}/complete`, {}, { signal, timeout: 0 });
@@ -269,15 +270,14 @@ export function useChunkedUpload(concurrency = 2) {
       }
 
       // 6. Poll for merge result (avoids Cloudflare 502 timeout on long-running uploads)
-      const result = await pollMergeResult(sessionUploadId, signal);
+      if (!uploadId.value) throw new Error('上传会话 ID 丢失');
+      const result = await pollMergeResult(uploadId.value, signal);
       uploading.value = false;
       return result;
     } catch (err) {
       uploading.value = false;
-      // 无论失败还是用户主动取消，都尽力调用服务端 /abort 清理分片会话，避免会话孤儿。
-      // 使用独立、不带 signal 的请求（父 signal 可能已 abort，带 signal 会导致清理请求被立即取消）；
-      // 清理失败静默忽略，不影响原始错误的抛出。
-      if (uploadId.value) {
+      // complete 成功后服务端已接管合并；轮询失败或页面关闭只能停止观察，不能删除活动工作目录。
+      if (uploadId.value && !mergeTriggered) {
         await api.post(`/files/chunk/${uploadId.value}/abort`).catch(() => {});
       }
       throw err;
