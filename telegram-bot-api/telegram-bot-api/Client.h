@@ -54,8 +54,6 @@ class Client final : public WebhookActor::Callback {
   void send(PromisedQueryPtr query) final;
   void start_file_stream(td::ActorId<FileStreamConnection> stream, td::int64 stream_id, td::string file_id,
                          td::int64 expected_size);
-  void read_file_stream_part(td::ActorId<FileStreamConnection> stream, td::int32 file_id, td::int64 offset,
-                             td::int64 count);
   void remove_file_stream(td::int64 stream_id, td::int32 file_id);
 
   void close();
@@ -337,7 +335,6 @@ class Client final : public WebhookActor::Callback {
   class TdOnDownloadFileCallback;
   class TdOnFileStreamRemoteFileCallback;
   class TdOnFileStreamDownloadCallback;
-  class TdOnFileStreamReadCallback;
   class TdOnCancelDownloadFileCallback;
   class TdOnSendCustomRequestCallback;
 

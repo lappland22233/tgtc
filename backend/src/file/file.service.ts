@@ -16,6 +16,7 @@ import { InjectQueue } from '@nestjs/bull';
 import { Queue } from 'bull';
 import { QUEUE_NAMES } from '../jobs/bull-queue.module';
 import { File, FileAccessType } from '../common/entities/file.entity';
+import { Folder } from '../common/entities/folder.entity';
 import { FileAccessLog } from '../common/entities/file-access-log.entity';
 import { TelegramService } from '../telegram/telegram.service';
 import { ConfigCacheService } from '../common/services/config-cache.service';
@@ -55,6 +56,8 @@ export class FileService implements OnModuleInit {
   constructor(
     @InjectRepository(File)
     private fileRepository: Repository<File>,
+    @InjectRepository(Folder)
+    private folderRepository: Repository<Folder>,
     @InjectRepository(FileAccessLog)
     private accessLogRepository: Repository<FileAccessLog>,
     @InjectRepository(BannedIP)
@@ -112,6 +115,17 @@ export class FileService implements OnModuleInit {
   private parseFileSize(val: string | undefined): number {
     const parsed = Number(val);
     return Number.isFinite(parsed) ? parsed : 20971520;
+  }
+
+  private async assertUploadFolder(folderId: string | null | undefined, userId: string): Promise<void> {
+    if (!folderId) return;
+    const folder = await this.folderRepository.findOne({
+      where: { id: folderId, ownerId: userId, isDeleted: false },
+      select: ['id'],
+    });
+    if (!folder) {
+      throw new NotFoundException('目标文件夹不存在或无权访问');
+    }
   }
 
   async getMaxFileSize(): Promise<number> {
@@ -316,12 +330,15 @@ export class FileService implements OnModuleInit {
     user: User,
     tagIds?: string[],
     skipTypeCheck?: boolean,
+    folderId?: string | null,
   ): Promise<File> {
     if (file.size > this.maxFileSize) {
       throw new BadRequestException(`文件大小不能超过 ${this.maxFileSize / 1024 / 1024}MB`);
     }
 
     const fileName = this.fixFilenameEncoding(originalName);
+
+    await this.assertUploadFolder(folderId, user.id);
 
     if (!skipTypeCheck) {
       const fileSample = this.getFileSample(file);
@@ -340,6 +357,7 @@ export class FileService implements OnModuleInit {
       telegramFileId: tempId,
       telegramFilePath: '',
       uploaderId: user.id,
+      folderId: folderId ?? null,
       accessType: FileAccessType.PUBLIC,
       maxAccessCount: -1,
       status: 'processing',
@@ -1770,12 +1788,15 @@ export class FileService implements OnModuleInit {
     user: User,
     tagIds?: string[],
     _req?: Request,
+    folderId?: string | null,
   ): Promise<{ jobId: string; warning: string }> {
     if (file.size > this.maxFileSize) {
       throw new BadRequestException(`文件大小不能超过 ${this.maxFileSize / 1024 / 1024}MB`);
     }
 
     const originalName = this.fixFilenameEncoding(file.originalname);
+
+    await this.assertUploadFolder(folderId, user.id);
 
     const fileSample = await this.getFileSample(file);
     const typeCheck = await this.isFileTypeAllowed(originalName, fileSample);
@@ -1791,7 +1812,7 @@ export class FileService implements OnModuleInit {
     const cleanup = () => {};
 
     // 后台处理：不阻塞响应
-    this.processAsyncUpload(job.jobId, file, user, originalName, abortController.signal, cleanup, tagIds);
+    this.processAsyncUpload(job.jobId, file, user, originalName, abortController.signal, cleanup, tagIds, folderId);
     return { jobId: job.jobId, warning: '任务在内存中处理，进程重启会丢失' };
   }
 
@@ -1893,6 +1914,7 @@ export class FileService implements OnModuleInit {
     abortSignal?: AbortSignal,
     cleanup: () => void = () => {},
     tagIds?: string[],
+    folderId?: string | null,
   ): Promise<void> {
     try {
       this.uploadJobService.updateJob(jobId, { status: 'uploading' });
@@ -1902,7 +1924,7 @@ export class FileService implements OnModuleInit {
         throw new Error('任务已被放弃');
       }
 
-      const savedFile = await this.uploadToTelegram(file, user, originalName, abortSignal);
+      const savedFile = await this.uploadToTelegram(file, user, originalName, abortSignal, folderId);
 
       // 上传完成后关联标签（参数化查询）
       if (tagIds && tagIds.length > 0) {
@@ -1943,6 +1965,7 @@ export class FileService implements OnModuleInit {
     user: User,
     originalName: string,
     abortSignal?: AbortSignal,
+    folderId?: string | null,
   ): Promise<File> {
     // GIF 文件加 .bin 后缀防止 Telegram 转码为 MP4
     const uploadName = file.mimetype === 'image/gif' ? originalName + '.bin' : originalName;
@@ -1966,6 +1989,7 @@ export class FileService implements OnModuleInit {
       telegramFileId: telegramFile.file_id,
       telegramFilePath: telegramFile.file_path || '',
       uploaderId: user.id,
+      folderId: folderId ?? null,
       accessType: FileAccessType.PUBLIC,
       maxAccessCount: -1,
     });

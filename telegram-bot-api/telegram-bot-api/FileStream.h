@@ -12,6 +12,7 @@
 
 #include "td/utils/buffer.h"
 #include "td/utils/common.h"
+#include "td/utils/port/FileFd.h"
 #include "td/utils/port/IPAddress.h"
 #include "td/utils/Slice.h"
 #include "td/utils/Status.h"
@@ -62,10 +63,12 @@ class FileStreamConnection final : public td::Actor {
                        FileStreamRoute route, FileStreamConfig config, td::IPAddress peer_address);
 
   void set_client(td::ActorId<Client> client);
-  void on_file_ready(td::int32 file_id, td::int64 total_size, td::int64 download_offset,
-                     td::int64 downloaded_prefix_size, bool is_completed, bool is_downloading_active);
-  void on_file_progress(td::int64 reported_total_size, td::int64 download_offset,
-                        td::int64 downloaded_prefix_size, bool is_completed, bool is_downloading_active);
+  void on_file_ready(td::int32 file_id, td::int64 total_size, td::string local_path,
+                     td::int64 download_offset, td::int64 downloaded_prefix_size,
+                     bool is_completed, bool is_downloading_active);
+  void on_file_progress(td::int64 reported_total_size, td::string local_path,
+                        td::int64 download_offset, td::int64 downloaded_prefix_size,
+                        bool is_completed, bool is_downloading_active);
   void on_file_data(td::int64 offset, td::Result<td::BufferSlice> result);
   void on_file_error(td::Status error);
 
@@ -83,6 +86,8 @@ class FileStreamConnection final : public td::Actor {
   td::IPAddress peer_address_;
 
   td::int32 file_id_ = 0;
+  td::string local_path_;
+  td::FileFd local_file_;
   FileStreamCursor cursor_;
   bool headers_sent_ = false;
   bool read_in_flight_ = false;

@@ -47,9 +47,9 @@ void FileStreamConnection::set_client(td::ActorId<Client> client) {
   client_ = client;
 }
 
-void FileStreamConnection::on_file_ready(td::int32 file_id, td::int64 total_size, td::int64 download_offset,
-                                         td::int64 downloaded_prefix_size, bool is_completed,
-                                         bool is_downloading_active) {
+void FileStreamConnection::on_file_ready(td::int32 file_id, td::int64 total_size, td::string local_path,
+                                         td::int64 download_offset, td::int64 downloaded_prefix_size,
+                                         bool is_completed, bool is_downloading_active) {
   if (finished_) {
     return;
   }
@@ -57,6 +57,7 @@ void FileStreamConnection::on_file_ready(td::int32 file_id, td::int64 total_size
     return fail(500, "Invalid file metadata received from TDLib");
   }
   file_id_ = file_id;
+  local_path_ = std::move(local_path);
   if (static_cast<td::uint64>(total_size) > static_cast<td::uint64>(std::numeric_limits<std::size_t>::max())) {
     return fail(413, "File is too large for this build");
   }
@@ -74,14 +75,20 @@ void FileStreamConnection::on_file_ready(td::int32 file_id, td::int64 total_size
   try_read();
 }
 
-void FileStreamConnection::on_file_progress(td::int64 reported_total_size, td::int64 download_offset,
-                                            td::int64 downloaded_prefix_size, bool is_completed,
-                                            bool is_downloading_active) {
+void FileStreamConnection::on_file_progress(td::int64 reported_total_size, td::string local_path,
+                                            td::int64 download_offset, td::int64 downloaded_prefix_size,
+                                            bool is_completed, bool is_downloading_active) {
   if (finished_ || cursor_.total_size < 0) {
     return;
   }
   if (reported_total_size > 0 && reported_total_size != cursor_.total_size) {
     return abort(td::Status::Error(502, "File size metadata changed during download"));
+  }
+  if (!local_path.empty()) {
+    if (!local_path_.empty() && local_path_ != local_path) {
+      local_file_.close();
+    }
+    local_path_ = std::move(local_path);
   }
   auto status = cursor_.update_progress(download_offset, downloaded_prefix_size, is_completed);
   if (status.is_error()) {
@@ -112,8 +119,38 @@ void FileStreamConnection::try_read() {
   if (count < 0) {
     return abort(td::Status::Error(500, "Invalid stream read size"));
   }
+  if (local_path_.empty()) {
+    return;
+  }
+  if (local_file_.empty()) {
+    auto file = td::FileFd::open(local_path_, td::FileFd::Read);
+    if (file.is_error()) {
+      if (!download_completed_) {
+        return;
+      }
+      return abort(td::Status::Error(500, PSTRING() << "Failed to open TDLib local file: "
+                                                     << file.error().public_message()));
+    }
+    local_file_ = file.move_as_ok();
+  }
+
   read_in_flight_ = true;
-  send_closure(client_, &Client::read_file_stream_part, actor_id(this), file_id_, cursor_.next_offset, count);
+  td::BufferSlice data(static_cast<std::size_t>(count));
+  auto read_size = local_file_.pread(data.as_mutable_slice(), cursor_.next_offset);
+  if (read_size.is_error()) {
+    read_in_flight_ = false;
+    return abort(td::Status::Error(500, PSTRING() << "Failed to read TDLib local file: "
+                                                   << read_size.error().public_message()));
+  }
+  if (read_size.ok() != static_cast<std::size_t>(count)) {
+    read_in_flight_ = false;
+    if (!download_completed_) {
+      local_file_.close();
+      return;
+    }
+    return abort(td::Status::Error(500, "TDLib local file returned an incomplete part"));
+  }
+  on_file_data(cursor_.next_offset, std::move(data));
 }
 
 void FileStreamConnection::on_file_data(td::int64 offset, td::Result<td::BufferSlice> result) {
@@ -127,7 +164,7 @@ void FileStreamConnection::on_file_data(td::int64 offset, td::Result<td::BufferS
   auto data = result.move_as_ok();
   auto expected_size = cursor_.next_read_size(td::min(config_.chunk_size, config_.write_high_watermark));
   if (static_cast<td::int64>(data.size()) != expected_size || data.empty()) {
-    return abort(td::Status::Error(500, "TDLib returned an incomplete file part"));
+    return abort(td::Status::Error(500, "TDLib local file returned an incomplete part"));
   }
   write_in_flight_ = true;
   pending_write_offset_ = offset;
@@ -252,6 +289,7 @@ void FileStreamConnection::timeout_expired() {
 }
 
 void FileStreamConnection::tear_down() {
+  local_file_.close();
   send_closure(client_manager_, &ClientManager::release_file_stream, stream_id_);
   if (!client_.empty()) {
     send_closure(client_, &Client::remove_file_stream, stream_id_, file_id_);

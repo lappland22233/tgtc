@@ -7,6 +7,7 @@ import { QUEUE_NAMES } from '../jobs/bull-queue.module';
 import { FileController } from './file.controller';
 import { FileService } from './file.service';
 import { File } from '../common/entities/file.entity';
+import { Folder } from '../common/entities/folder.entity';
 import { FileAccessLog } from '../common/entities/file-access-log.entity';
 import { BannedIP } from '../common/entities/banned-ip.entity';
 import { ShareAudit } from '../common/entities/share-audit.entity';
@@ -25,7 +26,7 @@ import { TagModule } from '../tag/tag.module';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([File, FileAccessLog, BannedIP, ShareAudit, ShareLink, UploadTask]),
+    TypeOrmModule.forFeature([File, Folder, FileAccessLog, BannedIP, ShareAudit, ShareLink, UploadTask]),
     ConfigCacheModule,
     RateLimitModule,
     TagModule,

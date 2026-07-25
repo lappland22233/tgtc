@@ -330,7 +330,7 @@ export const useFileStore = defineStore('files', () => {
 
   /** 重命名文件（仅修改显示名） */
   async function renameFile(id: string, name: string) {
-    const res = await api.patch(`/files/${id}/rename`, { name });
+    const res = await api.patch(`/files/${id}/rename`, { newOriginalName: name });
     // 同步更新本地列表中对应文件的显示名
     const file = files.value.find((f) => f.id === id);
     if (file) file.originalName = res.data.data.originalName;

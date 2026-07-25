@@ -93,7 +93,7 @@ curl --fail --header "X-Telegram-File-Size: 10485760" --output file.bin \
 
 `X-Telegram-File-Size` is an optional positive decimal byte count. It is required when a fresh TDLib work directory has never seen an older `file_id` and TDLib therefore can't provide `file.size`. When TDLib knows the size, the server cross-checks the header and rejects mismatches; without the header, existing behavior remains unchanged. Only a trusted backend should supply this value from persisted upload metadata, and the streaming endpoint should remain private.
 
-The response uses `200 OK`, `application/octet-stream`, and an exact `Content-Length`. TDLib downloads the file once and the server forwards only the continuously readable prefix in order. A successful HTTP completion guarantees that the emitted byte count equals the exact file size. If an upstream error happens after response headers have been sent, the connection is aborted; clients must reject responses shorter than `Content-Length`.
+The response uses `200 OK`, `application/octet-stream`, and an exact `Content-Length`. TDLib issues exactly one normal whole-file `downloadFile(file_id, 1, 0, 0, false)` request per active file. The HTTP stream reads only the continuously available prefix from TDLib's local cache file with local `pread`; it never calls `readFilePart` and therefore never turns HTTP chunks into extra MTProto `upload.getFile` requests. Multiple HTTP consumers share the same TDLib download. A successful HTTP completion guarantees that the emitted byte count equals the exact file size. If an upstream error happens after response headers have been sent, the connection is aborted; clients must reject responses shorter than `Content-Length`.
 
 Configuration options:
 

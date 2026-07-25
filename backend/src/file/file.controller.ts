@@ -124,6 +124,7 @@ export class FileController {
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
     @Body('tagIds') tagIdsRaw?: any,
+    @Body('folderId') folderId?: string,
   ) {
     req.setTimeout(0);
     res.setTimeout(0);
@@ -132,7 +133,7 @@ export class FileController {
     }
     const tagIds = parseTagIdsBody(tagIdsRaw);
     if (tagIds?.length) await this.tagService.assertOwner(user.id, tagIds);
-    return this.fileService.uploadAsync(file, user, tagIds, req);
+    return this.fileService.uploadAsync(file, user, tagIds, req, folderId || null);
   }
 
   /**
@@ -450,7 +451,7 @@ export class FileController {
     @CurrentUser() user: User,
   ) {
     const file = await this.folderService.moveFile(user.id, id, dto);
-    return { message: '文件已移动', data: { id: file.id, folderId: file.folderId } };
+    return { id: file.id, folderId: file.folderId };
   }
 
   /**
@@ -465,7 +466,7 @@ export class FileController {
     @CurrentUser() user: User,
   ) {
     const file = await this.folderService.renameFile(user.id, id, dto);
-    return { message: '文件已重命名', data: { id: file.id, originalName: file.originalName } };
+    return { id: file.id, originalName: file.originalName };
   }
 
   /**
@@ -479,21 +480,13 @@ export class FileController {
     @Body() dto: CopyFileDto,
     @CurrentUser() user: User,
   ) {
-    const file = await this.folderService.copyFile(user.id, id, dto);
-    return { message: '文件已复制', data: file };
+    return this.folderService.copyFile(user.id, id, dto);
   }
 
   @Delete(':id')
   @UseGuards(JwtAuthGuard)
   async delete(@Param('id') id: string, @CurrentUser() user: User) {
-    const result = await this.fileService.delete(id, user);
-    if (result.status === 'permanently_deleted') {
-      return { message: '文件已永久删除', data: result };
-    }
-    if (result.status === 'already_deleted') {
-      return { message: '文件已处于待删除状态', data: result };
-    }
-    return { message: '文件已标记为待删除，7 天后永久删除', data: result };
+    return this.fileService.delete(id, user);
   }
 
   @Post(':id/restore')

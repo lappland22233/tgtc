@@ -24,6 +24,7 @@ interface ChunkSession {
   totalChunks: number;
   chunkSize: number;
   uploadedBy: string;
+  folderId: string | null;
   createdAt: Date;
   /** 最后一次活动时间（分片上传/状态查询/合并触发时更新） */
   lastActivityAt: Date;
@@ -108,6 +109,7 @@ export class ChunkUploadService implements OnModuleInit {
     totalChunks: number,
     chunkSize: number,
     userId: string,
+    folderId?: string | null,
   ): Promise<{ uploadId: string }> {
     // 文件大小上限校验：结合动态 MAX_FILE_SIZE，防止绕过限制写满磁盘（DoS）
     const maxFileSize = await this.fileService.getMaxFileSize();
@@ -140,6 +142,7 @@ export class ChunkUploadService implements OnModuleInit {
       totalChunks,
       chunkSize,
       uploadedBy: userId,
+      folderId: folderId ?? null,
       createdAt: now,
       lastActivityAt: now,
       mergeStatus: 'pending',
@@ -441,6 +444,7 @@ export class ChunkUploadService implements OnModuleInit {
       { id: session.uploadedBy } as User,
       undefined,   // tagIds
       true,        // skipTypeCheck
+      session.folderId,
     );
 
     this.throwIfAborted(signal);
