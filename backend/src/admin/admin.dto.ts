@@ -115,6 +115,18 @@ export class UploadConfigDto {
   @IsOptional()
   @IsString()
   fileTypeFilter?: string;
+
+  @IsOptional()
+  @IsInt()
+  @Min(-1)
+  @Max(1000000)
+  accessCountDefault?: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(-1)
+  @Max(1000000)
+  accessCountMax?: number;
 }
 
 export class AuthConfigDto {

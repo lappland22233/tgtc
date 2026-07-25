@@ -449,17 +449,23 @@ export class AdminService {
     maxFileSize: number;
     fileTypeMode: string;
     fileTypeFilter: string;
+    accessCountDefault: number;
+    accessCountMax: number;
   }> {
-    const [maxFileSize, fileTypeMode, fileTypeFilter] = await Promise.all([
+    const [maxFileSize, fileTypeMode, fileTypeFilter, accessCountDefault, accessCountMax] = await Promise.all([
       this.getConfigByKey('MAX_FILE_SIZE'),
       this.getConfigByKey('FILE_TYPE_MODE'),
       this.getConfigByKey('FILE_TYPE_FILTER'),
+      this.getConfigByKey('FILE_ACCESS_COUNT_DEFAULT'),
+      this.getConfigByKey('FILE_ACCESS_COUNT_MAX'),
     ]);
 
     return {
       maxFileSize: parseInt(maxFileSize || '20971520'),
       fileTypeMode: fileTypeMode || 'blacklist',
       fileTypeFilter: fileTypeFilter || '',
+      accessCountDefault: parseInt(accessCountDefault || '-1'),
+      accessCountMax: parseInt(accessCountMax || '-1'),
     };
   }
 
@@ -467,6 +473,8 @@ export class AdminService {
     maxFileSize?: number;
     fileTypeMode?: string;
     fileTypeFilter?: string;
+    accessCountDefault?: number;
+    accessCountMax?: number;
   }): Promise<void> {
     if (config.maxFileSize !== undefined) {
       await this.setConfigValue('MAX_FILE_SIZE', config.maxFileSize.toString(), '最大文件大小（字节）');
@@ -478,6 +486,20 @@ export class AdminService {
 
     if (config.fileTypeFilter !== undefined) {
       await this.setConfigValue('FILE_TYPE_FILTER', config.fileTypeFilter, '文件类型过滤列表（逗号分隔）');
+    }
+
+    if (config.accessCountMax !== undefined && config.accessCountMax > 0) {
+      if (config.accessCountDefault === undefined || config.accessCountDefault <= 0 || config.accessCountDefault > config.accessCountMax) {
+        throw new BadRequestException('存在最大访问次数限制时，默认访问次数必须为 1 到最大值之间');
+      }
+    }
+
+    if (config.accessCountDefault !== undefined) {
+      await this.setConfigValue('FILE_ACCESS_COUNT_DEFAULT', String(config.accessCountDefault), '新上传文件默认访问次数（-1 为不限）');
+    }
+
+    if (config.accessCountMax !== undefined) {
+      await this.setConfigValue('FILE_ACCESS_COUNT_MAX', String(config.accessCountMax), '用户可设置的最大访问次数（-1 为不限）');
     }
 
     // 审计日志：上传配置变更

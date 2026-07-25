@@ -51,6 +51,8 @@ export class FileService implements OnModuleInit {
   private maxFileSize: number;
   private fileTypeMode: 'blacklist' | 'whitelist' = 'blacklist';
   private fileTypeFilter: string[] = [];
+  private accessCountDefault = -1;
+  private accessCountMax = -1;
   private readonly thumbnailDir: string;
 
   constructor(
@@ -94,27 +96,42 @@ export class FileService implements OnModuleInit {
 
   @OnEvent('config.changed')
   async handleConfigChanged(payload: { key: string; value: string }) {
-    if (payload.key === 'MAX_FILE_SIZE' || payload.key === 'FILE_TYPE_MODE' || payload.key === 'FILE_TYPE_FILTER') {
+    if (
+      payload.key === 'MAX_FILE_SIZE'
+      || payload.key === 'FILE_TYPE_MODE'
+      || payload.key === 'FILE_TYPE_FILTER'
+      || payload.key === 'FILE_ACCESS_COUNT_DEFAULT'
+      || payload.key === 'FILE_ACCESS_COUNT_MAX'
+    ) {
       await this.reloadUploadConfig();
     }
   }
 
   private async reloadUploadConfig() {
-    const [maxFileSize, fileTypeMode, fileTypeFilter] = await Promise.all([
+    const [maxFileSize, fileTypeMode, fileTypeFilter, accessCountDefault, accessCountMax] = await Promise.all([
       this.configCacheService.get('MAX_FILE_SIZE', '20971520'),
       this.configCacheService.get('FILE_TYPE_MODE', 'blacklist'),
       this.configCacheService.get('FILE_TYPE_FILTER', ''),
+      this.configCacheService.get('FILE_ACCESS_COUNT_DEFAULT', '-1'),
+      this.configCacheService.get('FILE_ACCESS_COUNT_MAX', '-1'),
     ]);
     this.maxFileSize = this.parseFileSize(maxFileSize);
     this.fileTypeMode = (fileTypeMode === 'whitelist' ? 'whitelist' : 'blacklist');
     this.fileTypeFilter = fileTypeFilter
       ? fileTypeFilter.split(',').map(s => s.trim().toLowerCase()).filter(Boolean)
       : [];
+    this.accessCountDefault = this.parseAccessCount(accessCountDefault);
+    this.accessCountMax = this.parseAccessCount(accessCountMax);
   }
 
   private parseFileSize(val: string | undefined): number {
     const parsed = Number(val);
     return Number.isFinite(parsed) ? parsed : 20971520;
+  }
+
+  private parseAccessCount(val: string | undefined): number {
+    const parsed = Number(val);
+    return Number.isInteger(parsed) && parsed >= -1 ? parsed : -1;
   }
 
   private async assertUploadFolder(folderId: string | null | undefined, userId: string): Promise<void> {
@@ -208,9 +225,30 @@ export class FileService implements OnModuleInit {
     let detectedExt: string | null = null;
 
     if (buffer && buffer.length > 0) {
-      const result = await fileTypeFromBuffer(buffer);
-      if (result) {
-        detectedExt = result.ext;
+      const lowerName = filename.toLowerCase();
+      const hasZipSignature = buffer.length >= 4
+        && buffer[0] === 0x50
+        && buffer[1] === 0x4b
+        && (
+          (buffer[2] === 0x03 && buffer[3] === 0x04)
+          || (buffer[2] === 0x05 && buffer[3] === 0x06)
+          || (buffer[2] === 0x07 && buffer[3] === 0x08)
+        );
+
+      // file-type 会深入遍历 ZIP entry。对仅含文件前缀的样本，首个 entry
+      // 超出样本边界时会抛 EndOfStreamError；ZIP 文件只需验证容器签名即可。
+      if (lowerName.endsWith('.zip') && hasZipSignature) {
+        detectedExt = 'zip';
+      } else {
+        try {
+          const result = await fileTypeFromBuffer(buffer);
+          if (result) {
+            detectedExt = result.ext;
+          }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          this.logger.warn(`文件类型解析失败，按未识别类型处理: ${filename} (${message})`);
+        }
       }
     }
 
@@ -359,7 +397,7 @@ export class FileService implements OnModuleInit {
       uploaderId: user.id,
       folderId: folderId ?? null,
       accessType: FileAccessType.PUBLIC,
-      maxAccessCount: -1,
+      maxAccessCount: this.accessCountDefault,
       status: 'processing',
     });
     const savedFile = await this.fileRepository.save(newFile);
@@ -430,7 +468,7 @@ export class FileService implements OnModuleInit {
       telegramFilePath: telegramFile.file_path || '',
       uploaderId: user.id,
       accessType: FileAccessType.PUBLIC,
-      maxAccessCount: -1,
+      maxAccessCount: this.accessCountDefault,
     });
 
     const savedFile = await this.fileRepository.save(newFile);
@@ -1013,6 +1051,10 @@ export class FileService implements OnModuleInit {
     }
 
     this.assertFileWritable(file, user);
+
+    if (this.accessCountMax > 0 && (maxAccessCount < 1 || maxAccessCount > this.accessCountMax)) {
+      throw new BadRequestException(`访问次数必须为 1 到 ${this.accessCountMax} 之间`);
+    }
 
     await this.fileRepository.update(id, { maxAccessCount });
 
@@ -1991,7 +2033,7 @@ export class FileService implements OnModuleInit {
       uploaderId: user.id,
       folderId: folderId ?? null,
       accessType: FileAccessType.PUBLIC,
-      maxAccessCount: -1,
+      maxAccessCount: this.accessCountDefault,
     });
 
     return this.fileRepository.save(newFile);
