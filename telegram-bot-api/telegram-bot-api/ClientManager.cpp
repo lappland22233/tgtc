@@ -66,7 +66,8 @@ void ClientManager::close(td::Promise<td::Unit> &&promise) {
 }
 
 void ClientManager::send_file_stream(td::ActorId<FileStreamConnection> stream, td::int64 stream_id, td::string token,
-                                     bool is_test_dc, td::string file_id, td::string peer_ip_address) {
+                                     bool is_test_dc, td::string file_id, td::int64 expected_size,
+                                     td::string peer_ip_address) {
   auto fail = [stream](int code, td::Slice message) {
     send_closure(stream, &FileStreamConnection::on_file_error, td::Status::Error(code, message));
   };
@@ -141,7 +142,7 @@ void ClientManager::send_file_stream(td::ActorId<FileStreamConnection> stream, t
   active_file_stream_count_++;
   auto client = clients_.get(id_it->second)->client_.get();
   send_closure(stream, &FileStreamConnection::set_client, client, true);
-  send_closure(client, &Client::start_file_stream, stream, stream_id, std::move(file_id));
+  send_closure(client, &Client::start_file_stream, stream, stream_id, std::move(file_id), expected_size);
 }
 
 void ClientManager::release_file_stream() {

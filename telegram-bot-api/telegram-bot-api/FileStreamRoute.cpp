@@ -30,6 +30,35 @@ td::Status validate_url_encoding(td::Slice value) {
 
 }  // namespace
 
+td::Result<td::int64> parse_file_stream_size_hint(td::Slice value) {
+  if (value.empty()) {
+    return static_cast<td::int64>(-1);
+  }
+  for (auto c : value) {
+    if (c < '0' || c > '9') {
+      return td::Status::Error(400, "Invalid X-Telegram-File-Size header");
+    }
+  }
+  auto size = td::to_integer_safe<td::int64>(value);
+  if (size.is_error() || size.ok() <= 0) {
+    return td::Status::Error(400, "Invalid X-Telegram-File-Size header");
+  }
+  return size.move_as_ok();
+}
+
+td::Result<td::int64> resolve_file_stream_size(td::int64 tdlib_size, td::int64 expected_size) {
+  if (tdlib_size > 0 && expected_size > 0 && tdlib_size != expected_size) {
+    return td::Status::Error(502, "File size metadata mismatch");
+  }
+  if (tdlib_size > 0) {
+    return tdlib_size;
+  }
+  if (expected_size > 0) {
+    return expected_size;
+  }
+  return td::Status::Error(502, "Exact file size is unavailable");
+}
+
 td::Result<FileStreamRoute> parse_file_stream_route(td::Slice path) {
   td::ConstParser parser(path);
   if (!parser.try_skip("/stream/file/bot")) {

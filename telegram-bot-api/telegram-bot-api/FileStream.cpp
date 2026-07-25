@@ -40,7 +40,7 @@ FileStreamConnection::FileStreamConnection(td::ActorOwn<td::HttpInboundConnectio
 void FileStreamConnection::start_up() {
   set_timeout_in(config_.first_byte_timeout);
   send_closure(client_manager_, &ClientManager::send_file_stream, actor_id(this), stream_id_, std::move(route_.token),
-               route_.is_test_dc, std::move(route_.file_id), peer_address_.get_ip_str().str());
+               route_.is_test_dc, std::move(route_.file_id), route_.expected_size, peer_address_.get_ip_str().str());
 }
 
 void FileStreamConnection::set_client(td::ActorId<Client> client, bool counted) {
@@ -75,10 +75,14 @@ void FileStreamConnection::on_file_ready(td::int32 file_id, td::int64 total_size
   try_read();
 }
 
-void FileStreamConnection::on_file_progress(td::int64 download_offset, td::int64 downloaded_prefix_size,
-                                            bool is_completed, bool is_downloading_active) {
+void FileStreamConnection::on_file_progress(td::int64 reported_total_size, td::int64 download_offset,
+                                            td::int64 downloaded_prefix_size, bool is_completed,
+                                            bool is_downloading_active) {
   if (finished_ || cursor_.total_size < 0) {
     return;
+  }
+  if (reported_total_size > 0 && reported_total_size != cursor_.total_size) {
+    return abort(td::Status::Error(502, "File size metadata changed during download"));
   }
   auto status = cursor_.update_progress(download_offset, downloaded_prefix_size, is_completed);
   if (status.is_error()) {

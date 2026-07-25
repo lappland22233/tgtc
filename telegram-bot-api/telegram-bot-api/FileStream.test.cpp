@@ -31,6 +31,26 @@ TEST(FileStream, InvalidRoute) {
   ASSERT_TRUE(telegram_bot_api::parse_file_stream_route("/stream/file/bot123:token/%ZZ").is_error());
 }
 
+TEST(FileStream, SizeHint) {
+  ASSERT_EQ(-1, telegram_bot_api::parse_file_stream_size_hint("").move_as_ok());
+  ASSERT_EQ(1, telegram_bot_api::parse_file_stream_size_hint("1").move_as_ok());
+  ASSERT_EQ(9223372036854775807LL,
+            telegram_bot_api::parse_file_stream_size_hint("9223372036854775807").move_as_ok());
+  ASSERT_TRUE(telegram_bot_api::parse_file_stream_size_hint("0").is_error());
+  ASSERT_TRUE(telegram_bot_api::parse_file_stream_size_hint("-1").is_error());
+  ASSERT_TRUE(telegram_bot_api::parse_file_stream_size_hint("1.0").is_error());
+  ASSERT_TRUE(telegram_bot_api::parse_file_stream_size_hint(" 1").is_error());
+  ASSERT_TRUE(telegram_bot_api::parse_file_stream_size_hint("9223372036854775808").is_error());
+}
+
+TEST(FileStream, ResolvesExactSize) {
+  ASSERT_EQ(10, telegram_bot_api::resolve_file_stream_size(10, -1).move_as_ok());
+  ASSERT_EQ(10, telegram_bot_api::resolve_file_stream_size(0, 10).move_as_ok());
+  ASSERT_EQ(10, telegram_bot_api::resolve_file_stream_size(10, 10).move_as_ok());
+  ASSERT_TRUE(telegram_bot_api::resolve_file_stream_size(10, 11).is_error());
+  ASSERT_TRUE(telegram_bot_api::resolve_file_stream_size(0, -1).is_error());
+}
+
 TEST(FileStream, CursorCompleteFile) {
   telegram_bot_api::FileStreamCursor cursor;
   cursor.total_size = 10;

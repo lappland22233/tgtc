@@ -87,8 +87,11 @@ GET /stream/file/bot<TOKEN>/test/<URL_ENCODED_FILE_ID>
 Example:
 
 ```sh
-curl --fail --output file.bin "http://127.0.0.1:8081/stream/file/bot123456:ABCDEF/<URL_ENCODED_FILE_ID>"
+curl --fail --header "X-Telegram-File-Size: 10485760" --output file.bin \
+  "http://127.0.0.1:8081/stream/file/bot123456:ABCDEF/<URL_ENCODED_FILE_ID>"
 ```
+
+`X-Telegram-File-Size` is an optional positive decimal byte count. It is required when a fresh TDLib work directory has never seen an older `file_id` and TDLib therefore can't provide `file.size`. When TDLib knows the size, the server cross-checks the header and rejects mismatches; without the header, existing behavior remains unchanged. Only a trusted backend should supply this value from persisted upload metadata, and the streaming endpoint should remain private.
 
 The response uses `200 OK`, `application/octet-stream`, and an exact `Content-Length`. TDLib downloads the file once and the server forwards only the continuously readable prefix in order. A successful HTTP completion guarantees that the emitted byte count equals the exact file size. If an upstream error happens after response headers have been sent, the connection is aborted; clients must reject responses shorter than `Content-Length`.
 
@@ -103,7 +106,7 @@ Configuration options:
 | `--file-stream-idle-timeout` | 60 | Seconds allowed between flushed data blocks. |
 | `--file-stream-write-high-watermark` | 1048576 | Upper bound used for each queued streaming write. |
 
-HTTP errors returned before streaming starts use the Bot API JSON error shape. Common statuses are `400` for malformed paths or file IDs, `401` for invalid tokens, `404` for unavailable routes/files, `405` for non-GET methods, `413` for platform size limits, `429` for connection limits, `502` for TDLib/upstream errors, `503` during shutdown, and `504` for timeouts.
+HTTP errors returned before streaming starts use the Bot API JSON error shape. Common statuses are `400` for malformed paths, file IDs, or size hints; `401` for invalid tokens; `404` for unavailable routes/files; `405` for non-GET methods; `413` for platform size limits; `429` for connection limits; `502` for unavailable exact size, size metadata conflicts, or TDLib/upstream errors; `503` during shutdown; and `504` for timeouts.
 
 The first version intentionally supports only complete sequential `GET` responses. `Range`, resumable downloads, `HEAD`, CDN caching, and multi-range responses are not implemented. The `file_id` is always validated by TDLib and is never interpreted as a local path.
 

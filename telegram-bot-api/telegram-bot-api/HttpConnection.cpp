@@ -48,8 +48,14 @@ void HttpConnection::handle(td::unique_ptr<td::HttpQuery> http_query,
       auto code = route.error().code();
       return send_http_error(code >= 400 && code <= 599 ? code : 400, route.error().public_message());
     }
+    auto expected_size = parse_file_stream_size_hint(http_query->get_header("x-telegram-file-size"));
+    if (expected_size.is_error()) {
+      return send_http_error(400, expected_size.error().public_message());
+    }
+    auto parsed_route = route.move_as_ok();
+    parsed_route.expected_size = expected_size.move_as_ok();
     td::create_actor<FileStreamConnection>("FileStreamConnection", std::move(connection_), client_manager_,
-                                           route.move_as_ok(), file_stream_config_, http_query->peer_address_)
+                                           std::move(parsed_route), file_stream_config_, http_query->peer_address_)
         .release();
     return;
   }

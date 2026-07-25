@@ -1388,7 +1388,7 @@ export class FileService implements OnModuleInit {
     const result = await this.fileCacheService.getOrCacheStream(
       file.id,
       expectedSize,
-      () => this.telegramService.getRealtimeFileStream(file.telegramFileId || file.filename),
+      () => this.telegramService.getRealtimeFileStream(file.telegramFileId || file.filename, expectedSize),
     );
     return { stream: result.stream, actualSize: expectedSize };
   }

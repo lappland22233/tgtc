@@ -47,7 +47,7 @@ class ClientManager final : public td::Actor {
 
   void send(PromisedQueryPtr query);
   void send_file_stream(td::ActorId<FileStreamConnection> stream, td::int64 stream_id, td::string token,
-                        bool is_test_dc, td::string file_id, td::string peer_ip_address);
+                        bool is_test_dc, td::string file_id, td::int64 expected_size, td::string peer_ip_address);
   void release_file_stream();
 
   void get_stats(td::Promise<td::BufferSlice> promise, td::vector<std::pair<td::string, td::string>> args);

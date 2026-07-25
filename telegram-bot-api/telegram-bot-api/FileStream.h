@@ -49,9 +49,12 @@ struct FileStreamRoute {
   td::string token;
   td::string file_id;
   bool is_test_dc = false;
+  td::int64 expected_size = -1;
 };
 
 td::Result<FileStreamRoute> parse_file_stream_route(td::Slice path);
+td::Result<td::int64> parse_file_stream_size_hint(td::Slice value);
+td::Result<td::int64> resolve_file_stream_size(td::int64 tdlib_size, td::int64 expected_size);
 
 class FileStreamConnection final : public td::Actor {
  public:
@@ -61,8 +64,8 @@ class FileStreamConnection final : public td::Actor {
   void set_client(td::ActorId<Client> client, bool counted);
   void on_file_ready(td::int32 file_id, td::int64 total_size, td::int64 download_offset,
                      td::int64 downloaded_prefix_size, bool is_completed, bool is_downloading_active);
-  void on_file_progress(td::int64 download_offset, td::int64 downloaded_prefix_size, bool is_completed,
-                        bool is_downloading_active);
+  void on_file_progress(td::int64 reported_total_size, td::int64 download_offset,
+                        td::int64 downloaded_prefix_size, bool is_completed, bool is_downloading_active);
   void on_file_data(td::int64 offset, td::Result<td::BufferSlice> result);
   void on_file_error(td::Status error);
 

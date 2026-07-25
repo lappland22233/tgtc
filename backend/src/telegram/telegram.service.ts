@@ -301,7 +301,7 @@ export class TelegramService {
    * 通过二次开发 Bot API 的独立 file_id 端点实时获取完整文件。
    * 该端点在 TDLib 完成整文件下载前即可返回连续字节，不支持 Range。
    */
-  async getRealtimeFileStream(fileId: string): Promise<{
+  async getRealtimeFileStream(fileId: string, expectedSize?: number): Promise<{
     stream: Readable;
     info: { file_id: string; file_path: string; file_size: number };
   }> {
@@ -311,6 +311,9 @@ export class TelegramService {
     if (!fileId || fileId.length > 4096) {
       throw new Error('非法的 Telegram file_id');
     }
+    if (expectedSize !== undefined && (!Number.isSafeInteger(expectedSize) || expectedSize <= 0)) {
+      throw new Error('非法的预期文件大小');
+    }
 
     const url = `${this.fileStreamingBase}/stream/file/bot${this.botToken}/${encodeURIComponent(fileId)}`;
     const response = await this.telegramRequest(
@@ -318,6 +321,9 @@ export class TelegramService {
         responseType: 'stream',
         timeout: this.fileStreamingTimeoutMs,
         maxRedirects: 0,
+        headers: expectedSize === undefined
+          ? undefined
+          : { 'X-Telegram-File-Size': String(expectedSize) },
       }),
       'getRealtimeFileStream',
       1,
@@ -327,6 +333,10 @@ export class TelegramService {
     if (!Number.isSafeInteger(fileSize) || fileSize <= 0) {
       (response.data as Readable).destroy();
       throw new Error('Telegram 实时流响应缺少有效的 Content-Length');
+    }
+    if (expectedSize !== undefined && fileSize !== expectedSize) {
+      (response.data as Readable).destroy();
+      throw new Error(`Telegram 实时流文件大小不一致: 期望 ${expectedSize}, 实际 ${fileSize}`);
     }
 
     return {

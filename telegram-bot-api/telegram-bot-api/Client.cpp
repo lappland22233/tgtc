@@ -7576,8 +7576,9 @@ class Client::TdOnDownloadFileCallback final : public TdQueryCallback {
 
 class Client::TdOnFileStreamRemoteFileCallback final : public TdQueryCallback {
  public:
-  TdOnFileStreamRemoteFileCallback(Client *client, td::ActorId<FileStreamConnection> stream, int64 stream_id)
-      : client_(client), stream_(stream), stream_id_(stream_id) {
+  TdOnFileStreamRemoteFileCallback(Client *client, td::ActorId<FileStreamConnection> stream, int64 stream_id,
+                                   int64 expected_size)
+      : client_(client), stream_(stream), stream_id_(stream_id), expected_size_(expected_size) {
   }
 
   void on_result(object_ptr<td_api::Object> result) final;
@@ -7586,6 +7587,7 @@ class Client::TdOnFileStreamRemoteFileCallback final : public TdQueryCallback {
   Client *client_;
   td::ActorId<FileStreamConnection> stream_;
   int64 stream_id_;
+  int64 expected_size_;
 };
 
 class Client::TdOnFileStreamDownloadCallback final : public TdQueryCallback {
@@ -7626,15 +7628,15 @@ void Client::TdOnFileStreamRemoteFileCallback::on_result(object_ptr<td_api::Obje
   CHECK(result->get_id() == td_api::file::ID);
   auto file = move_object_as<td_api::file>(result);
   auto file_id = file->id_;
-  auto total_size = file->size_;
-  if (total_size <= 0 && !(file->local_->is_downloading_completed_ && file->local_->downloaded_size_ == 0)) {
-    return send_closure(stream_, &FileStreamConnection::on_file_error,
-                        td::Status::Error(502, "Exact file size is unavailable"));
+  auto total_size = resolve_file_stream_size(file->size_, expected_size_);
+  if (total_size.is_error()) {
+    return send_closure(stream_, &FileStreamConnection::on_file_error, total_size.move_as_error());
   }
+  auto resolved_size = total_size.move_as_ok();
   auto &listeners = client_->file_stream_listeners_[file_id];
   auto need_start_download = listeners.empty();
   listeners.push_back({stream_id_, stream_});
-  send_closure(stream_, &FileStreamConnection::on_file_ready, file_id, total_size, file->local_->download_offset_,
+  send_closure(stream_, &FileStreamConnection::on_file_ready, file_id, resolved_size, file->local_->download_offset_,
                file->local_->downloaded_prefix_size_, file->local_->is_downloading_completed_,
                file->local_->is_downloading_active_);
   if (need_start_download) {
@@ -8717,10 +8719,11 @@ void Client::start_up() {
       "TdClientActor", 0, td::make_unique<TdCallback>(actor_id(this)), std::move(options));
 }
 
-void Client::start_file_stream(td::ActorId<FileStreamConnection> stream, int64 stream_id, td::string file_id) {
+void Client::start_file_stream(td::ActorId<FileStreamConnection> stream, int64 stream_id, td::string file_id,
+                               int64 expected_size) {
   active_file_streams_[stream_id] = stream;
   if (!was_authorized_) {
-    pending_file_streams_.push_back({{stream_id, stream}, std::move(file_id)});
+    pending_file_streams_.push_back({{stream_id, stream}, std::move(file_id), expected_size});
     return;
   }
   if (closing_ || logging_out_) {
@@ -8733,7 +8736,7 @@ void Client::start_file_stream(td::ActorId<FileStreamConnection> stream, int64 s
                         td::Status::Error(400, "Invalid file_id specified"));
   }
   send_request(make_object<td_api::getRemoteFile>(std::move(file_id), nullptr),
-               td::make_unique<TdOnFileStreamRemoteFileCallback>(this, stream, stream_id));
+               td::make_unique<TdOnFileStreamRemoteFileCallback>(this, stream, stream_id, expected_size));
 }
 
 void Client::read_file_stream_part(td::ActorId<FileStreamConnection> stream, int32 file_id, int64 offset,
@@ -9514,9 +9517,9 @@ void Client::on_update_file(object_ptr<td_api::file> file) {
   auto stream_it = file_stream_listeners_.find(file_id);
   if (stream_it != file_stream_listeners_.end()) {
     for (auto stream : stream_it->second) {
-      send_closure(stream.actor, &FileStreamConnection::on_file_progress, file->local_->download_offset_,
-                   file->local_->downloaded_prefix_size_, file->local_->is_downloading_completed_,
-                   file->local_->is_downloading_active_);
+      send_closure(stream.actor, &FileStreamConnection::on_file_progress, file->size_,
+                   file->local_->download_offset_, file->local_->downloaded_prefix_size_,
+                   file->local_->is_downloading_completed_, file->local_->is_downloading_active_);
     }
   }
   if (!is_file_being_downloaded(file_id)) {
@@ -9588,7 +9591,7 @@ void Client::on_update_authorization_state() {
         auto pending_file_streams = std::move(pending_file_streams_);
         for (auto &pending_file_stream : pending_file_streams) {
           start_file_stream(pending_file_stream.stream.actor, pending_file_stream.stream.id,
-                            std::move(pending_file_stream.file_id));
+                            std::move(pending_file_stream.file_id), pending_file_stream.expected_size);
         }
         update_shared_unix_time_difference();
         if (!pending_updates_.empty()) {

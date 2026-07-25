@@ -4,6 +4,31 @@ Command failures and integration errors.
 
 ---
 
+## [ERR-20260725-004] telegram-service-truncated-tail
+
+**Logged**: 2026-07-25T17:10:00+08:00
+**Priority**: high
+**Status**: resolved
+**Area**: build
+
+### Summary
+后端构建发现 `telegram.service.ts` 文件尾部缺少 `deleteFile` 成功返回及方法/类闭合括号。
+
+### Error
+```text
+TS2366: Function lacks ending return statement
+TS1005: '}' expected
+```
+
+### Context
+实时流大小修复首次构建时暴露文件尾部截断，问题与新增大小契约无关，但会阻止验证。
+
+### Resolution
+- **Resolved**: 2026-07-25T17:10:00+08:00
+- **Notes**: 恢复 `return true;` 与方法、类闭合括号。
+
+---
+
 ## [ERR-20260725-003] backend-test-missing-hmac-secret
 
 **Logged**: 2026-07-25T16:09:00+08:00
