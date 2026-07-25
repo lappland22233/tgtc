@@ -245,6 +245,74 @@ export class FileController {
     return { publicKey: this.cryptoService.getPublicKey() };
   }
 
+  /**
+   * 公开媒体直链：直接返回图片、音频或视频本体，供图床、Markdown 和媒体标签引用。
+   * 仅允许无密码、无次数/时效限制的公开媒体文件。
+   */
+  @Get('media/:id')
+  async getPublicMedia(
+    @Param('id') id: string,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    try {
+      const clientIp = getClientIp(req);
+      const rangeHeader = req.headers.range;
+      if (rangeHeader) {
+        const rangeResult = await this.fileService.getPublicMediaStreamWithRange(id, rangeHeader, clientIp);
+        if (rangeResult) {
+          res.status(206);
+          res.set({
+            'Content-Type': rangeResult.contentType,
+            'Content-Disposition': `inline; filename="${encodeURIComponent(rangeResult.filename)}"`,
+            'Content-Length': rangeResult.size.toString(),
+            'Content-Range': `bytes ${rangeResult.start}-${rangeResult.end}/${rangeResult.total}`,
+            'Accept-Ranges': 'bytes',
+            'Cache-Control': 'public, max-age=3600, stale-while-revalidate=86400',
+            'X-Content-Type-Options': 'nosniff',
+          });
+          const getBytesSent = trackBytesSent(res);
+          const pipe = promisify(pipeline);
+          try {
+            await pipe(rangeResult.stream, res);
+          } finally {
+            if (rangeResult.accessLogId) {
+              await this.fileService.updateAccessLogResponseSize(rangeResult.accessLogId, getBytesSent());
+            }
+          }
+          return;
+        }
+      }
+
+      const result = await this.fileService.getPublicMediaStream(id, clientIp);
+      res.set({
+        'Content-Type': result.contentType,
+        'Content-Disposition': `inline; filename="${encodeURIComponent(result.filename)}"`,
+        'Content-Length': result.size.toString(),
+        'Accept-Ranges': 'bytes',
+        'Cache-Control': 'public, max-age=3600, stale-while-revalidate=86400',
+        'X-Content-Type-Options': 'nosniff',
+      });
+      const getBytesSent = trackBytesSent(res);
+      const pipe = promisify(pipeline);
+      try {
+        await pipe(result.stream, res);
+      } finally {
+        if (result.accessLogId) {
+          await this.fileService.updateAccessLogResponseSize(result.accessLogId, getBytesSent());
+        }
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '媒体文件访问失败';
+      const status = (error as { status?: number }).status || 500;
+      if (!res.headersSent) {
+        res.status(status).json({ code: 1, message });
+      } else if (!res.destroyed) {
+        res.destroy(error instanceof Error ? error : new Error(message));
+      }
+    }
+  }
+
   @Get(':id')
   @UseGuards(JwtAuthGuard)
   async findOne(@Param('id') id: string, @CurrentUser() user: User) {

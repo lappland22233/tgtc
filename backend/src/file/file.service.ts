@@ -1747,7 +1747,108 @@ export class FileService implements OnModuleInit {
   }
 
   /**
-   * 流式获取公开文件内容（用于无约束公开文件和一次性链接）
+   * 获取公开媒体直链的文件流。仅允许无密码、未过期、无次数限制的公开图片/音频/视频，
+   * 避免裸文件 ID 绕过分享约束，同时复用统一的 Telegram 冷回源与本地缓存链路。
+   */
+  async getPublicMediaStream(id: string, ip?: string): Promise<{
+    stream: Readable;
+    contentType: string;
+    filename: string;
+    size: number;
+    accessLogId?: string;
+  }> {
+    const file = await this.getPublicMediaFile(id);
+    const { stream, actualSize } = await this.getDownloadStream(file);
+    const accessLogId = await this.createPublicMediaAccessLog(file, ip);
+    return {
+      stream,
+      contentType: file.mimeType,
+      filename: this.ensureFileExtension(file.originalName, file.mimeType),
+      size: actualSize,
+      accessLogId,
+    };
+  }
+
+  /** 公开媒体 Range：仅正式缓存命中时返回范围流，冷文件由控制器回退完整响应。 */
+  async getPublicMediaStreamWithRange(id: string, rangeHeader: string, ip?: string): Promise<{
+    stream: Readable;
+    contentType: string;
+    filename: string;
+    size: number;
+    start: number;
+    end: number;
+    total: number;
+    accessLogId?: string;
+  } | null> {
+    const match = rangeHeader.match(/bytes=(\d+)-(\d*)/);
+    if (!match) return null;
+
+    const file = await this.getPublicMediaFile(id);
+    const cachedPath = this.fileCacheService.getCachedPath(file.id);
+    if (!cachedPath) return null;
+
+    const total = Number(file.size);
+    const start = Number.parseInt(match[1], 10);
+    const requestedEnd = match[2] ? Number.parseInt(match[2], 10) : total - 1;
+    const end = Math.min(requestedEnd, total - 1);
+    if (!Number.isSafeInteger(total) || total <= 0 || start >= total || start > end) {
+      throw new BadRequestException('Range 范围无效');
+    }
+
+    return {
+      stream: createReadStream(cachedPath, { start, end }),
+      contentType: file.mimeType,
+      filename: this.ensureFileExtension(file.originalName, file.mimeType),
+      size: end - start + 1,
+      start,
+      end,
+      total,
+      accessLogId: await this.createPublicMediaAccessLog(file, ip),
+    };
+  }
+
+  private async getPublicMediaFile(id: string): Promise<File> {
+    const file = await this.fileRepository.findOne({ where: { id, isDeleted: false } });
+    if (!file) throw new NotFoundException('媒体文件不存在');
+    if (file.accessType !== FileAccessType.PUBLIC) {
+      throw new ForbiddenException('此文件为私有文件，不提供媒体直链');
+    }
+    if (!/^(image|video|audio)\//i.test(file.mimeType || '')) {
+      throw new BadRequestException('仅图片、音频和视频文件支持媒体直链');
+    }
+    if (file.password || file.maxAccessCount > 0) {
+      throw new ForbiddenException('受密码或访问次数保护的文件不能使用媒体直链');
+    }
+    if (file.expiresIn !== null && file.expiresIn !== undefined) {
+      if (file.expiresStartAt) {
+        const expiresAt = new Date(file.expiresStartAt.getTime() + file.expiresIn * 3600 * 1000);
+        if (new Date() > expiresAt) throw new ForbiddenException('媒体文件已过期');
+      }
+      throw new ForbiddenException('限时文件不能使用永久媒体直链');
+    }
+    if (file.status === 'processing' && !this.fileCacheService.getCachedPath(file.id)) {
+      throw new BadRequestException('文件正在处理中，请稍后刷新重试');
+    }
+    return file;
+  }
+
+  private async createPublicMediaAccessLog(file: File, ip?: string): Promise<string | undefined> {
+    try {
+      const saved = await this.accessLogRepository.save({
+        fileId: file.id,
+        ip: ip || '',
+        action: 'public_media',
+        uploaderId: file.uploaderId,
+        responseSize: 0,
+      });
+      return saved.id;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * 流式获取公开文件内容（遗留公开访问能力）。
    */
   async getPublicFileContentStream(id: string, ip?: string): Promise<{
     stream: Readable;
@@ -1765,32 +1866,15 @@ export class FileService implements OnModuleInit {
       throw new NotFoundException('文件不存在');
     }
 
-    // 校验文件是否为公开访问类型
     if (file.accessType !== FileAccessType.PUBLIC) {
       throw new ForbiddenException('此文件为私有文件，不提供公开访问');
     }
 
     const { stream, actualSize } = await this.getDownloadStream(file);
-
-    let accessLogId: string | undefined;
-    try {
-      const saved = await this.accessLogRepository.save({
-        fileId: id,
-        ip: ip || '',
-        action: 'public_direct',
-        uploaderId: file.uploaderId,
-        responseSize: 0,
-      });
-      accessLogId = saved.id;
-    } catch {
-      // ignore
-    }
-
+    const accessLogId = await this.createPublicMediaAccessLog(file, ip);
     const mimeType = file.mimeType || 'application/octet-stream';
     const isInline = /^(image|video|audio)\//.test(mimeType);
     const filename = this.ensureFileExtension(file.originalName, mimeType);
-
-    // 使用 Telegram API 返回的真实文件大小，避免 Content-Length 不匹配导致下载卡死
     return { stream, contentType: mimeType, filename, size: actualSize, isInline, accessLogId };
   }
 
@@ -1807,7 +1891,7 @@ export class FileService implements OnModuleInit {
 
     for (const file of files) {
       if (!file.mimeType.startsWith('image/')) continue;
-      const appUrl = `${baseUrl}/files/public/${file.id}`;
+      const appUrl = `${baseUrl}/media/${file.id}`;
       results.push(`![${file.originalName}](${appUrl})`);
     }
 

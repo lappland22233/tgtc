@@ -89,11 +89,12 @@ async function bootstrap() {
 
   const expressApp = app.getHttpAdapter().getInstance();
 
-  // 分享链接 URL 重写：/files/public/ -> /api/files/public/
-  // 让公开文件链接无需 /api 前缀，保持分享 URL 简洁
+  // 公开文件与媒体直链 URL 重写，让外部引用无需 /api 前缀。
   expressApp.use((req, _res, next) => {
-    if (req.path.startsWith('/files/public/')) {
-      req.url = '/api' + req.url;
+    if (req.path.startsWith('/files/public/') || req.path.startsWith('/media/')) {
+      req.url = req.path.startsWith('/media/')
+        ? '/api/files' + req.url
+        : '/api' + req.url;
     }
     next();
   });

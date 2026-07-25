@@ -37,7 +37,16 @@
           <!-- 正常文件：完整操作 -->
           <template v-else>
             <div class="ctx-item" role="menuitem" @click="emitAction('copy-link')">
-              <t-icon name="link" class="ctx-icon" />复制链接
+              <t-icon name="link" class="ctx-icon" />复制分享链接
+            </div>
+            <div
+              v-if="/^(image|video|audio)\//.test(target.file.mimeType)"
+              class="ctx-item"
+              :class="{ disabled: target.file.accessType !== 'public' || target.file.hasPassword || target.file.maxAccessCount > 0 || target.file.expiresIn != null }"
+              role="menuitem"
+              @click="target.file.accessType === 'public' && !target.file.hasPassword && target.file.maxAccessCount <= 0 && target.file.expiresIn == null && emitAction('copy-media-link')"
+            >
+              <t-icon name="image" class="ctx-icon" />复制媒体直链
             </div>
             <div class="ctx-item" role="menuitem" @click="emitAction('download')">
               <t-icon name="download" class="ctx-icon" />下载

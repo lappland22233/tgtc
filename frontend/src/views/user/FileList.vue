@@ -713,6 +713,7 @@ async function onCtxAction(action: string, target: CtxTarget | null) {
     const file = target.file;
     switch (action) {
       case 'copy-link': copyLink(file); break;
+      case 'copy-media-link': copyMediaLink(file); break;
       case 'download': downloadFile(file); break;
       case 'rename':
         renameTargetFile.value = file;
@@ -1286,6 +1287,23 @@ async function copyLink(row: FileItem) {
   }
 }
 
+async function copyMediaLink(row: FileItem) {
+  if (!/^(image|video|audio)\//.test(row.mimeType)) {
+    MessagePlugin.warning('仅图片、音频和视频支持媒体直链');
+    return;
+  }
+  if (row.accessType !== 'public' || row.hasPassword || row.maxAccessCount > 0 || row.expiresIn != null) {
+    MessagePlugin.warning('媒体直链仅适用于公开且无密码、次数或时效限制的文件');
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(`${window.location.origin}/media/${row.id}`);
+    MessagePlugin.success('媒体直链已复制');
+  } catch (error: unknown) {
+    MessagePlugin.error(getErrorMessage(error));
+  }
+}
+
 function downloadFile(row: FileItem) {
   // 直接调用浏览器原生下载（后端返回 attachment，浏览器下载器接管进度/保存）
   triggerBrowserDownload(`/api/files/${row.id}/download`, row.originalName);
@@ -1338,9 +1356,16 @@ function convertToMarkdown() {
     MessagePlugin.warning('请先选择图片文件');
     return;
   }
+  const unavailable = selectedImages.value.filter(img =>
+    img.accessType !== 'public' || img.hasPassword || img.maxAccessCount > 0 || img.expiresIn != null
+  );
+  if (unavailable.length > 0) {
+    MessagePlugin.warning('媒体直链仅适用于公开且无密码、次数或时效限制的图片');
+    return;
+  }
   const baseUrl = window.location.origin;
   markdownResult.value = selectedImages.value
-    .map((img) => `![${img.originalName}](${baseUrl}/files/public/${img.id})`)
+    .map((img) => `![${img.originalName}](${baseUrl}/media/${img.id})`)
     .join('\n');
 }
 

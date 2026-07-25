@@ -355,6 +355,8 @@ npm run preview
 
 流式下载和导出端点直接返回文件内容，不使用 JSON 包装。
 
+媒体直链格式为 `https://your-domain.example/media/<file-id>`，可用于 Markdown、`<img>`、`<audio>` 和 `<video>`。直链仅对公开、未删除、无密码、无访问次数限制、无有效期限制的图片/音频/视频生效；响应使用原始 MIME、`Content-Disposition: inline` 和一小时公共缓存。视频/音频在本地缓存命中后支持 Range，冷文件首次请求回退为完整响应并建立缓存。
+
 ### 公开接口
 
 | 方法 | 路径 | 说明 |
@@ -373,6 +375,7 @@ npm run preview
 | `GET` | `/api/s/:token/folder/:folderId/contents` | 浏览分享文件夹 |
 | `GET` | `/api/s/:token/folder/:folderId/breadcrumb` | 分享面包屑 |
 | `POST` | `/api/telemetry/report` | 批量上报前端遥测 |
+| `GET` | `/media/:id` | 公开媒体直链，直接返回图片、音频或视频本体 |
 | `GET` | `/files/public/:id` | 旧分享入口兼容重定向 |
 
 ### 登录用户接口

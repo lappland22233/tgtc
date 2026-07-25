@@ -340,7 +340,7 @@ function convertToMarkdown() {
 
   const baseUrl = window.location.origin;
   markdownResult.value = imageFiles
-    .map((img) => `![${img.originalName}](${baseUrl}/files/public/${img.id})`)
+    .map((img) => `![${img.originalName}](${baseUrl}/media/${img.id})`)
     .join('\n');
 }
 
