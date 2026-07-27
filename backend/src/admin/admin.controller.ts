@@ -370,12 +370,20 @@ export class AdminController {
     @Query('page') page?: string,
     @Query('limit') limit?: string,
     @Query('type') type?: string,
+    @Query('ip') ip?: string,
+    @Query('userId') userId?: string,
+    @Query('errorType') errorType?: string,
+    @Query('keyword') keyword?: string,
     @Query('timeRange') timeRange?: string,
   ) {
     return this.adminService.getTelemetryRecords({
       page: page ? parseInt(page) : undefined,
       limit: limit ? parseInt(limit) : undefined,
       type,
+      ip,
+      userId,
+      errorType,
+      keyword,
       timeRange,
     });
   }

@@ -1716,9 +1716,9 @@ export class AdminService {
   /** 遥测聚合统计 */
   async getTelemetryStats(timeRange?: string): Promise<{
     totalRecords: number;
-    byType: { error: number; performance: number; environment: number };
+    byType: Record<string, number>;
     uniqueIPs: number;
-    trend: { time: string; error: number; performance: number; environment: number }[];
+    trend: { time: string; error: number; apiError: number; uploadError: number; performance: number; environment: number }[];
   }> {
     const since = this.parseTimeRange(timeRange || '24h');
 
@@ -1744,6 +1744,8 @@ export class AdminService {
         .createQueryBuilder('t')
         .select("DATE_TRUNC('hour', t.createdAt)", 'time')
         .addSelect('COUNT(CASE WHEN t.type = \'error\' THEN 1 END)', 'error')
+        .addSelect('COUNT(CASE WHEN t.type = \'api_error\' THEN 1 END)', 'apiError')
+        .addSelect('COUNT(CASE WHEN t.type = \'upload_error\' THEN 1 END)', 'uploadError')
         .addSelect('COUNT(CASE WHEN t.type = \'performance\' THEN 1 END)', 'performance')
         .addSelect('COUNT(CASE WHEN t.type = \'environment\' THEN 1 END)', 'environment')
         .where('t.createdAt >= :since', { since })
@@ -1752,11 +1754,16 @@ export class AdminService {
         .getRawMany(),
     ]);
 
-    const byType = { error: 0, performance: 0, environment: 0 };
+    const byType: Record<string, number> = {
+      error: 0,
+      api_error: 0,
+      upload_error: 0,
+      performance: 0,
+      environment: 0,
+      click_context: 0,
+    };
     for (const row of typeResult) {
-      if (row.type in byType) {
-        (byType as any)[row.type] = parseInt(row.count, 10);
-      }
+      byType[row.type] = parseInt(row.count, 10) || 0;
     }
 
     return {
@@ -1766,6 +1773,8 @@ export class AdminService {
       trend: trendResult.map(row => ({
         time: row.time,
         error: parseInt(row.error, 10) || 0,
+        apiError: parseInt(row.apiError, 10) || 0,
+        uploadError: parseInt(row.uploadError, 10) || 0,
         performance: parseInt(row.performance, 10) || 0,
         environment: parseInt(row.environment, 10) || 0,
       })),
@@ -1777,9 +1786,13 @@ export class AdminService {
     page?: number;
     limit?: number;
     type?: string;
+    ip?: string;
+    userId?: string;
+    errorType?: string;
+    keyword?: string;
     timeRange?: string;
   }): Promise<{ items: TelemetryRecord[]; total: number }> {
-    const page = Math.max(1, Math.min(query.page || 1, 100));
+    const page = Math.max(1, query.page || 1);
     const limit = Math.max(1, Math.min(query.limit || 20, 100));
     const since = this.parseTimeRange(query.timeRange || '24h');
 
@@ -1788,15 +1801,33 @@ export class AdminService {
       .where('t.createdAt >= :since', { since });
 
     if (query.type) {
-      qb.andWhere('t.type = :type', { type: query.type });
+      qb.andWhere('t.type = :type', { type: query.type.slice(0, 32) });
+    }
+    if (query.ip?.trim()) {
+      qb.andWhere('t.ip = :ip', { ip: query.ip.trim().slice(0, 64) });
+    }
+    if (query.userId?.trim()) {
+      qb.andWhere('t.userId = :userId', { userId: query.userId.trim() });
+    }
+    if (query.errorType?.trim()) {
+      qb.andWhere("t.data->>'tag' = :errorType", { errorType: query.errorType.trim().slice(0, 64) });
+    }
+    if (query.keyword?.trim()) {
+      const keyword = `%${query.keyword.trim().slice(0, 100).replace(/[\\%_]/g, '\\$&')}%`;
+      qb.andWhere(
+        `(COALESCE(t.data->>'message', '') ILIKE :keyword ESCAPE '\\'
+          OR COALESCE(t.data->>'url', '') ILIKE :keyword ESCAPE '\\'
+          OR COALESCE(t.data->>'fileName', '') ILIKE :keyword ESCAPE '\\'
+          OR COALESCE(t.data->>'errorCode', '') ILIKE :keyword ESCAPE '\\')`,
+        { keyword },
+      );
     }
 
-    const total = await qb.getCount();
-    const items = await qb
+    const [items, total] = await qb
       .orderBy('t.createdAt', 'DESC')
       .skip((page - 1) * limit)
       .take(limit)
-      .getMany();
+      .getManyAndCount();
 
     return { items, total };
   }
@@ -1805,7 +1836,7 @@ export class AdminService {
   async getTelemetryErrors(limit: number = 20): Promise<TelemetryRecord[]> {
     return this.telemetryRepo
       .createQueryBuilder('t')
-      .where('t.type = :type', { type: 'error' })
+      .where('t.type IN (:...types)', { types: ['error', 'api_error', 'upload_error'] })
       .orderBy('t.createdAt', 'DESC')
       .take(Math.min(limit, 100))
       .getMany();

@@ -1,59 +1,71 @@
 <template>
   <div class="telemetry-page">
     <!-- 页头：标题 + 全局控制 -->
-    <div class="page-head">
-      <div class="head-title">
+    <header class="page-header telemetry-header">
+      <div>
         <h1>遥测监控</h1>
         <p>前端错误、页面性能与设备环境的统计与诊断</p>
       </div>
       <div class="head-actions">
-        <t-radio-group v-model="timeRange" variant="default-filled" size="small" @change="onTimeRangeChange">
-          <t-radio-button value="1h">1小时</t-radio-button>
-          <t-radio-button value="24h">24小时</t-radio-button>
-          <t-radio-button value="7d">7天</t-radio-button>
-          <t-radio-button value="30d">30天</t-radio-button>
-        </t-radio-group>
+        <div class="header-control">
+          <span id="time-range-label" class="control-label">时间范围</span>
+          <t-radio-group v-model="timeRange" aria-labelledby="time-range-label" variant="default-filled" size="small" @change="onTimeRangeChange">
+            <t-radio-button value="1h">1小时</t-radio-button>
+            <t-radio-button value="24h">24小时</t-radio-button>
+            <t-radio-button value="7d">7天</t-radio-button>
+            <t-radio-button value="30d">30天</t-radio-button>
+          </t-radio-group>
+        </div>
 
-        <t-select
-          v-model="autoRefreshInterval"
-          size="small"
-          style="width: 132px;"
-          :options="autoRefreshOptions"
-          @change="onAutoRefreshChange"
-        />
+        <div class="header-control auto-refresh-control">
+          <label class="control-label" for="telemetry-auto-refresh">自动刷新</label>
+          <t-select
+            id="telemetry-auto-refresh"
+            v-model="autoRefreshInterval"
+            aria-label="自动刷新频率"
+            size="small"
+            :options="autoRefreshOptions"
+            @change="onAutoRefreshChange"
+          />
+        </div>
 
         <t-button size="small" :loading="refreshing" @click="refreshAll">
-          <template #icon><span class="btn-icon">⟳</span></template>
+          <template #icon>
+            <svg class="button-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M20 11a8 8 0 10-2.34 5.66" />
+              <path d="M20 4v7h-7" />
+            </svg>
+          </template>
           刷新
         </t-button>
       </div>
-    </div>
+    </header>
 
     <p v-if="lastRefreshTime" class="last-update">最后更新：{{ lastRefreshTime }}</p>
 
     <!-- 核心指标卡片（可点击筛选记录） -->
-    <div class="metrics">
-      <div class="metric-card" :class="{ active: typeFilter === '' }" @click="filterByType('')">
-        <div class="metric-label">总记录数</div>
-        <div class="metric-value">{{ formatNumber(stats.totalRecords) }}</div>
-        <div class="metric-sub">选定时间范围内 · 点击查看全部</div>
+    <section class="metrics" aria-label="遥测核心指标">
+      <button type="button" class="metric-card" :class="{ active: typeFilter === '' }" @click="filterByType('')">
+        <span class="metric-label">总记录数</span>
+        <span class="metric-value">{{ formatNumber(stats.totalRecords) }}</span>
+        <span class="metric-sub">选定时间范围内 · 点击查看全部</span>
+      </button>
+      <button type="button" class="metric-card metric-danger" :class="{ active: isErrorFilterActive }" @click="filterByType('error')">
+        <span class="metric-label">错误数</span>
+        <span class="metric-value" :class="{ 'has-value': errorCount > 0 }">{{ formatNumber(errorCount) }}</span>
+        <span class="metric-sub">{{ errorRate }}% 错误率</span>
+      </button>
+      <button type="button" class="metric-card metric-success" :class="{ active: typeFilter === 'performance' }" @click="filterByType('performance')">
+        <span class="metric-label">性能记录</span>
+        <span class="metric-value">{{ formatNumber(stats.byType.performance) }}</span>
+        <span class="metric-sub">页面加载指标</span>
+      </button>
+      <div class="metric-card metric-static">
+        <span class="metric-label">独立设备</span>
+        <span class="metric-value">{{ formatNumber(stats.uniqueIPs) }}</span>
+        <span class="metric-sub">去重 IP 统计</span>
       </div>
-      <div class="metric-card metric-danger" :class="{ active: typeFilter === 'error' }" @click="filterByType('error')">
-        <div class="metric-label">错误数</div>
-        <div class="metric-value" :class="{ 'has-value': stats.byType.error > 0 }">{{ formatNumber(stats.byType.error) }}</div>
-        <div class="metric-sub">{{ errorRate }}% 错误率</div>
-      </div>
-      <div class="metric-card metric-success" :class="{ active: typeFilter === 'performance' }" @click="filterByType('performance')">
-        <div class="metric-label">性能记录</div>
-        <div class="metric-value">{{ formatNumber(stats.byType.performance) }}</div>
-        <div class="metric-sub">页面加载指标</div>
-      </div>
-      <div class="metric-card">
-        <div class="metric-label">独立设备</div>
-        <div class="metric-value">{{ formatNumber(stats.uniqueIPs) }}</div>
-        <div class="metric-sub">去重 IP 统计</div>
-      </div>
-    </div>
+    </section>
 
     <!-- 图表区域 -->
     <div class="charts">
@@ -87,9 +99,14 @@
         <h3>最近错误</h3>
         <span class="count-badge" v-if="errors.length > 0">{{ errors.length }}</span>
       </div>
-      <div v-if="errors.length === 0" class="empty">暂无错误记录 🎉</div>
+      <div v-if="errors.length === 0" class="empty-state">
+        <svg class="empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M20 6L9 17l-5-5" />
+        </svg>
+        <span>暂无错误记录</span>
+      </div>
       <t-table
-        v-else
+        v-else-if="!isMobile"
         :data="errorsTop"
         :columns="errorColumns"
         row-key="id"
@@ -98,29 +115,74 @@
         hover
         @row-click="({ row }: any) => openDetail(row)"
       />
+      <div v-else class="mobile-card-list">
+        <button v-for="item in errorsTop" :key="item.id" type="button" class="mobile-record-card" @click="openDetail(item)">
+          <div class="mobile-record-head">
+            <span class="record-type">{{ typeBadge(item.type) }}</span>
+            <time>{{ formatTime(item.createdAt) }}</time>
+          </div>
+          <strong>{{ item.data?.message || '未知错误' }}</strong>
+          <div class="mobile-record-meta">
+            <span>{{ errorTypeLabel(item.data?.tag) }}</span>
+            <span>{{ item.ip || '-' }}</span>
+          </div>
+        </button>
+      </div>
     </div>
 
     <!-- 遥测记录列表 -->
     <div class="card section">
-      <div class="card-head">
-        <h3>遥测记录</h3>
-        <div class="record-tools">
-          <t-select
-            v-model="typeFilter"
-            placeholder="全部类型"
-            clearable
-            size="small"
-            style="width: 130px;"
-            @change="onTypeFilterChange"
-          >
-            <t-option value="" label="全部类型" />
-            <t-option value="error" label="错误" />
-            <t-option value="performance" label="性能" />
-            <t-option value="environment" label="环境" />
-          </t-select>
+      <div class="card-head record-head">
+        <div>
+          <h3>数据检索</h3>
+          <p class="section-desc">按 IP、用户 ID、事件类型与报错类型组合筛选，并保留本页最近查询记录。</p>
         </div>
       </div>
+      <form class="search-panel" @submit.prevent="applySearch">
+        <label class="search-field" for="telemetry-ip">
+          <span>IP 地址</span>
+          <t-input id="telemetry-ip" v-model="ipFilter" name="telemetry-ip" autocomplete="off" placeholder="例如 203.0.113.10…" clearable size="small" />
+        </label>
+        <label class="search-field" for="telemetry-user-id">
+          <span>用户 ID</span>
+          <t-input id="telemetry-user-id" v-model="userIdFilter" name="telemetry-user-id" autocomplete="off" spellcheck="false" placeholder="输入完整 UUID…" clearable size="small" />
+        </label>
+        <label class="search-field" for="telemetry-event-type">
+          <span>事件类型</span>
+          <t-select id="telemetry-event-type" v-model="typeFilter" aria-label="事件类型" placeholder="全部事件类型…" clearable size="small">
+            <t-option value="" label="全部事件类型" />
+            <t-option value="error" label="运行时错误" />
+            <t-option value="api_error" label="API 错误" />
+            <t-option value="upload_error" label="上传错误" />
+            <t-option value="performance" label="性能" />
+            <t-option value="environment" label="环境" />
+            <t-option value="click_context" label="点击上下文" />
+          </t-select>
+        </label>
+        <label class="search-field" for="telemetry-error-type">
+          <span>报错类型</span>
+          <t-select id="telemetry-error-type" v-model="errorTypeFilter" aria-label="报错类型" placeholder="全部报错类型…" clearable size="small">
+            <t-option v-for="option in errorTypeOptions" :key="option.value" :value="option.value" :label="option.label" />
+          </t-select>
+        </label>
+        <label class="search-field" for="telemetry-keyword">
+          <span>关键词</span>
+          <t-input id="telemetry-keyword" v-model="keywordFilter" name="telemetry-keyword" autocomplete="off" placeholder="消息、URL、文件名或错误码…" clearable size="small" />
+        </label>
+        <div class="search-actions">
+          <t-button theme="primary" size="small" type="submit">查询</t-button>
+          <t-button variant="outline" size="small" type="button" @click="resetSearch">重置</t-button>
+        </div>
+      </form>
+      <div v-if="searchHistory.length > 0" class="search-history">
+        <span class="history-label">最近查询</span>
+        <button v-for="item in searchHistory" :key="item.id" type="button" class="history-item" @click="restoreSearch(item)">
+          <span>{{ item.summary }}</span>
+          <time>{{ item.time }}</time>
+        </button>
+      </div>
       <t-table
+        v-if="!isMobile"
         :data="records"
         :columns="recordColumns"
         :pagination="pagination"
@@ -131,6 +193,39 @@
         @page-change="onPageChange"
         @row-click="({ row }: any) => openDetail(row)"
       />
+      <t-loading v-else :loading="recordsLoading" size="small">
+        <div v-if="records.length === 0 && !recordsLoading" class="empty-state">
+          <svg class="empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="11" cy="11" r="7" />
+            <path d="M20 20l-4-4" />
+          </svg>
+          <span>未找到符合条件的遥测记录</span>
+        </div>
+        <div v-else class="mobile-card-list">
+          <button v-for="item in records" :key="item.id" type="button" class="mobile-record-card" @click="openDetail(item)">
+            <div class="mobile-record-head">
+              <span class="record-type">{{ typeBadge(item.type) }}</span>
+              <time>{{ formatTime(item.createdAt) }}</time>
+            </div>
+            <strong>{{ formatDataSummary(item.type, item.data) }}</strong>
+            <div class="mobile-record-meta">
+              <span>{{ errorTypeLabel(item.data?.tag) }}</span>
+              <span>{{ item.userId || '匿名用户' }}</span>
+              <span>{{ item.ip || '-' }}</span>
+            </div>
+          </button>
+          <div v-if="records.length > 0" class="mobile-pagination">
+            <t-pagination
+              :current="pagination.current"
+              :total="pagination.total"
+              :page-size="pagination.pageSize"
+              size="small"
+              :show-jumper="false"
+              @change="onPageChange"
+            />
+          </div>
+        </div>
+      </t-loading>
     </div>
 
     <!-- 记录详情抽屉 -->
@@ -146,6 +241,8 @@
           <div class="detail-item"><span class="d-label">类型</span><span class="d-value">{{ typeBadge(detailRecord.type) }}</span></div>
           <div class="detail-item"><span class="d-label">时间</span><span class="d-value">{{ formatFullTime(detailRecord.createdAt) }}</span></div>
           <div class="detail-item"><span class="d-label">IP</span><span class="d-value">{{ detailRecord.ip || '-' }}</span></div>
+          <div class="detail-item"><span class="d-label">用户 ID</span><span class="d-value mono">{{ detailRecord.userId || '匿名用户' }}</span></div>
+          <div class="detail-item"><span class="d-label">报错类型</span><span class="d-value">{{ errorTypeLabel(detailRecord.data?.tag) }}</span></div>
           <div class="detail-item"><span class="d-label">客户端时间</span><span class="d-value">{{ formatClientTimestamp(detailRecord.clientTimestamp) }}</span></div>
           <div class="detail-item full"><span class="d-label">User-Agent</span><span class="d-value mono wrap">{{ detailRecord.userAgent || '-' }}</span></div>
         </div>
@@ -160,16 +257,29 @@
 
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted, onUnmounted, nextTick, h } from 'vue';
+import { useRoute, useRouter } from 'vue-router';
 import * as echarts from '@/utils/echarts';
 import client from '../../api/client';
+import { useMobile } from '../../composables/useMobile';
 import { CHART_COLORS, tooltipBase, legendBase, areaGradient, ensureCyberTheme } from '../../utils/echarts-theme';
 
 // Theme-aware chart colors
 const isDark = () => document.documentElement.getAttribute('data-theme') === 'dark';
 const axisLabelColor = () => isDark() ? '#8895A7' : '#5F6B7A';
 
+const route = useRoute();
+const router = useRouter();
+const isMobile = useMobile();
+const validTimeRanges = new Set(['1h', '24h', '7d', '30d']);
+const queryString = (value: unknown): string => typeof value === 'string' ? value : '';
+const queryPositiveInt = (value: unknown, fallback: number): number => {
+  const parsed = Number.parseInt(queryString(value), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+};
+
 // ---- 时间范围 ----
-const timeRange = ref('24h');
+const initialTimeRange = queryString(route.query.timeRange);
+const timeRange = ref(validTimeRanges.has(initialTimeRange) ? initialTimeRange : '24h');
 const lastRefreshTime = ref('');
 const refreshing = ref(false);
 
@@ -186,20 +296,23 @@ let autoRefreshTimer: ReturnType<typeof setInterval> | null = null;
 // ---- 统计 ----
 interface Stats {
   totalRecords: number;
-  byType: { error: number; performance: number; environment: number };
+  byType: Record<string, number>;
   uniqueIPs: number;
-  trend: { time: string; error: number; performance: number; environment: number }[];
+  trend: { time: string; error: number; apiError: number; uploadError: number; performance: number; environment: number }[];
 }
 const stats = reactive<Stats>({
   totalRecords: 0,
-  byType: { error: 0, performance: 0, environment: 0 },
+  byType: { error: 0, api_error: 0, upload_error: 0, performance: 0, environment: 0, click_context: 0 },
   uniqueIPs: 0,
   trend: [],
 });
 
+const errorCount = computed(() =>
+  (stats.byType.error || 0) + (stats.byType.api_error || 0) + (stats.byType.upload_error || 0),
+);
 const errorRate = computed(() => {
   if (stats.totalRecords === 0) return '0.0';
-  return ((stats.byType.error / stats.totalRecords) * 100).toFixed(1);
+  return ((errorCount.value / stats.totalRecords) * 100).toFixed(1);
 });
 
 // ---- 记录列表 ----
@@ -208,14 +321,49 @@ interface RecordItem {
   type: string;
   data: Record<string, any>;
   ip: string;
+  userId: string | null;
   userAgent: string | null;
   clientTimestamp: number | string | null;
   createdAt: string;
 }
 const records = ref<RecordItem[]>([]);
 const recordsLoading = ref(false);
-const typeFilter = ref('');
-const pagination = reactive({ current: 1, pageSize: 20, total: 0, showJumper: true });
+const typeFilter = ref(queryString(route.query.type));
+const ipFilter = ref(queryString(route.query.ip));
+const userIdFilter = ref(queryString(route.query.userId));
+const errorTypeFilter = ref(queryString(route.query.errorType));
+const keywordFilter = ref(queryString(route.query.keyword));
+const errorTypeOptions = [
+  { label: '未捕获异常', value: 'uncaught' },
+  { label: 'Promise 拒绝', value: 'unhandled_rejection' },
+  { label: 'Vue 组件错误', value: 'vue' },
+  { label: '组件渲染失败', value: 'render_failure' },
+  { label: '资源加载失败', value: 'asset_error' },
+  { label: '白屏', value: 'white_screen' },
+  { label: '后端错误响应', value: 'backend_response' },
+  { label: '服务端错误', value: 'server_response' },
+  { label: '网络失败', value: 'network_failure' },
+  { label: '上传大小校验', value: 'validation_size' },
+  { label: '上传类型校验', value: 'validation_type' },
+  { label: '异步上传', value: 'async_upload' },
+  { label: '分片初始化', value: 'chunk_init' },
+  { label: '分片上传', value: 'chunk_upload' },
+  { label: '分片合并轮询', value: 'chunk_merge_poll' },
+];
+interface SearchHistoryItem {
+  id: string;
+  summary: string;
+  time: string;
+  filters: { type: string; ip: string; userId: string; errorType: string; keyword: string };
+}
+const searchHistory = ref<SearchHistoryItem[]>([]);
+const pagination = reactive({
+  current: queryPositiveInt(route.query.page, 1),
+  pageSize: Math.min(queryPositiveInt(route.query.pageSize, 20), 100),
+  total: 0,
+  showJumper: true,
+});
+const isErrorFilterActive = computed(() => ['error', 'api_error', 'upload_error'].includes(typeFilter.value));
 
 // ---- 错误列表 ----
 const errors = ref<RecordItem[]>([]);
@@ -257,23 +405,39 @@ const errorColumns = [
 ];
 const recordColumns = [
   { colKey: 'createdAt', title: '时间', width: 150, cell: (_h: unknown, ctx: { row: RecordItem }) => formatTime(ctx.row.createdAt) },
-  { colKey: 'type', title: '类型', width: 90, cell: (_h: unknown, ctx: { row: RecordItem }) => typeBadge(ctx.row.type) },
+  { colKey: 'type', title: '类型', width: 100, cell: (_h: unknown, ctx: { row: RecordItem }) => typeBadge(ctx.row.type) },
+  { colKey: 'data.tag', title: '报错类型', width: 130, cell: (_h: unknown, ctx: { row: RecordItem }) => errorTypeLabel(ctx.row.data?.tag) },
   { colKey: 'ip', title: 'IP', width: 130 },
-  { colKey: 'userAgent', title: 'User-Agent', width: 200, cell: (_h: unknown, ctx: { row: RecordItem }) => ellipsisCell(ctx.row.userAgent || '-') },
+  { colKey: 'userId', title: '用户 ID', width: 170, cell: (_h: unknown, ctx: { row: RecordItem }) => ellipsisCell(ctx.row.userId || '匿名用户') },
   { colKey: 'data', title: '数据摘要', cell: (_h: unknown, ctx: { row: RecordItem }) => ellipsisCell(formatDataSummary(ctx.row.type, ctx.row.data)) },
 ];
 
 function typeBadge(type: string): string {
-  const map: Record<string, string> = { error: '错误', performance: '性能', environment: '环境' };
+  const map: Record<string, string> = {
+    error: '运行时错误',
+    api_error: 'API 错误',
+    upload_error: '上传错误',
+    performance: '性能',
+    environment: '环境',
+    click_context: '点击上下文',
+  };
   return map[type] || type;
+}
+
+function errorTypeLabel(tag?: string): string {
+  if (!tag) return '-';
+  return errorTypeOptions.find(option => option.value === tag)?.label || tag;
 }
 
 function formatDataSummary(type: string, data: Record<string, any>): string {
   if (!data) return '-';
-  if (type === 'error') return '消息: ' + (data.message || '-') + ' · 标签: ' + (data.tag || '-');
+  if (type === 'error') return '消息: ' + (data.message || '-') + ' · 标签: ' + errorTypeLabel(data.tag);
+  if (type === 'api_error') return `${data.method || 'GET'} ${data.url || '-'} · ${data.status || 0} · ${data.message || '-'}`;
+  if (type === 'upload_error') return `${data.fileName || '-'} · ${errorTypeLabel(data.tag)} · ${data.message || '-'}`;
   if (type === 'performance') return '页面加载: ' + (data.pageLoad ?? '-') + 'ms · URL: ' + (data.url || '-');
   if (type === 'environment') return '屏幕: ' + (data.screen || '-') + ' · 视口: ' + (data.viewport || '-') + ' · 平台: ' + (data.platform || '-');
-  return '-';
+  if (type === 'click_context') return `窗口: ${data.window || '-'} · 点击数: ${data.totalClicks || 0}`;
+  return JSON.stringify(data).slice(0, 160);
 }
 
 // ---- 格式化 ----
@@ -347,6 +511,10 @@ async function fetchRecords() {
         page: pagination.current,
         limit: pagination.pageSize,
         type: typeFilter.value || undefined,
+        ip: ipFilter.value.trim() || undefined,
+        userId: userIdFilter.value.trim() || undefined,
+        errorType: errorTypeFilter.value || undefined,
+        keyword: keywordFilter.value.trim() || undefined,
         timeRange: timeRange.value,
       },
       signal: recordsAbort.signal,
@@ -395,28 +563,91 @@ async function refreshAll(silent = false) {
   }
 }
 
+function syncQueryState() {
+  const query: Record<string, string> = {};
+  if (timeRange.value !== '24h') query.timeRange = timeRange.value;
+  if (typeFilter.value) query.type = typeFilter.value;
+  if (ipFilter.value.trim()) query.ip = ipFilter.value.trim();
+  if (userIdFilter.value.trim()) query.userId = userIdFilter.value.trim();
+  if (errorTypeFilter.value) query.errorType = errorTypeFilter.value;
+  if (keywordFilter.value.trim()) query.keyword = keywordFilter.value.trim();
+  if (pagination.current > 1) query.page = String(pagination.current);
+  if (pagination.pageSize !== 20) query.pageSize = String(pagination.pageSize);
+  void router.replace({ query });
+}
+
 function onTimeRangeChange() {
   pagination.current = 1;
+  syncQueryState();
   refreshAll();
 }
 
-function onTypeFilterChange() {
+function buildSearchSummary(): string {
+  const parts = [
+    typeFilter.value ? typeBadge(typeFilter.value) : '',
+    ipFilter.value.trim() ? `IP ${ipFilter.value.trim()}` : '',
+    userIdFilter.value.trim() ? `用户 ${userIdFilter.value.trim()}` : '',
+    errorTypeFilter.value ? errorTypeLabel(errorTypeFilter.value) : '',
+    keywordFilter.value.trim() ? `关键词 ${keywordFilter.value.trim()}` : '',
+  ].filter(Boolean);
+  return parts.join(' · ') || '全部记录';
+}
+
+function applySearch() {
   pagination.current = 1;
+  const filters = {
+    type: typeFilter.value,
+    ip: ipFilter.value.trim(),
+    userId: userIdFilter.value.trim(),
+    errorType: errorTypeFilter.value,
+    keyword: keywordFilter.value.trim(),
+  };
+  const signature = JSON.stringify(filters);
+  searchHistory.value = [
+    {
+      id: `${Date.now()}-${signature}`,
+      summary: buildSearchSummary(),
+      time: new Date().toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit' }),
+      filters,
+    },
+    ...searchHistory.value.filter(item => JSON.stringify(item.filters) !== signature),
+  ].slice(0, 5);
+  syncQueryState();
   fetchRecords();
 }
 
-// 点击指标卡筛选记录并滚动到记录区
+function resetSearch() {
+  typeFilter.value = '';
+  ipFilter.value = '';
+  userIdFilter.value = '';
+  errorTypeFilter.value = '';
+  keywordFilter.value = '';
+  applySearch();
+}
+
+function restoreSearch(item: SearchHistoryItem) {
+  typeFilter.value = item.filters.type;
+  ipFilter.value = item.filters.ip;
+  userIdFilter.value = item.filters.userId;
+  errorTypeFilter.value = item.filters.errorType;
+  keywordFilter.value = item.filters.keyword;
+  pagination.current = 1;
+  syncQueryState();
+  fetchRecords();
+}
+
+// 点击指标卡筛选记录并滚动到检索区
 function filterByType(type: string) {
   typeFilter.value = type;
-  pagination.current = 1;
-  fetchRecords();
-  const el = document.querySelector('.record-tools');
+  applySearch();
+  const el = document.querySelector('.search-panel');
   if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
 }
 
 function onPageChange(pageInfo: { current: number; pageSize: number }) {
   pagination.current = pageInfo.current;
   pagination.pageSize = pageInfo.pageSize;
+  syncQueryState();
   fetchRecords();
 }
 
@@ -472,7 +703,7 @@ function updateTrendChart() {
     xAxis: { type: 'category', data: times, boundaryGap: false, axisLabel: { color: axisLabelColor(), fontSize: 11 } },
     yAxis: { type: 'value', axisLabel: { color: axisLabelColor(), fontSize: 11 } },
     series: [
-      { name: '错误', type: 'line', data: stats.trend.map(t => t.error), smooth: true, lineStyle: { color: CHART_COLORS.danger, width: 2 }, itemStyle: { color: CHART_COLORS.danger }, areaStyle: { color: areaGradient(CHART_COLORS.danger) }, symbol: 'none' },
+      { name: '错误', type: 'line', data: stats.trend.map(t => t.error + t.apiError + t.uploadError), smooth: true, lineStyle: { color: CHART_COLORS.danger, width: 2 }, itemStyle: { color: CHART_COLORS.danger }, areaStyle: { color: areaGradient(CHART_COLORS.danger) }, symbol: 'none' },
       { name: '性能', type: 'line', data: stats.trend.map(t => t.performance), smooth: true, lineStyle: { color: CHART_COLORS.success, width: 2 }, itemStyle: { color: CHART_COLORS.success }, areaStyle: { color: areaGradient(CHART_COLORS.success) }, symbol: 'none' },
       { name: '环境', type: 'line', data: stats.trend.map(t => t.environment), smooth: true, lineStyle: { color: CHART_COLORS.info, width: 2 }, itemStyle: { color: CHART_COLORS.info }, areaStyle: { color: areaGradient(CHART_COLORS.info) }, symbol: 'none' },
     ],
@@ -491,7 +722,7 @@ function updatePieChart() {
       label: { color: axisLabelColor() },
       emphasis: { itemStyle: { shadowBlur: 20, shadowColor: isDark() ? 'rgba(0,0,0,0.4)' : 'rgba(0,0,0,0.15)' } },
       data: [
-        { name: '错误', value: stats.byType.error, itemStyle: { color: CHART_COLORS.danger } },
+        { name: '错误', value: errorCount.value, itemStyle: { color: CHART_COLORS.danger } },
         { name: '性能', value: stats.byType.performance, itemStyle: { color: CHART_COLORS.success } },
         { name: '环境', value: stats.byType.environment, itemStyle: { color: CHART_COLORS.info } },
       ],
@@ -574,95 +805,112 @@ onUnmounted(() => {
 
 <style scoped>
 .telemetry-page {
-  padding: 20px;
-  max-width: 1400px;
+  width: 100%;
+  max-width: 1200px;
   margin: 0 auto;
 }
 
-/* 页头 */
-.page-head {
+.telemetry-header {
   display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-  flex-wrap: wrap;
-  margin-bottom: 8px;
-}
-.head-title h1 {
-  font-size: 24px;
-  margin: 0 0 4px;
-}
-.head-title p {
-  color: var(--text-secondary);
-  margin: 0;
-  font-size: 14px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--space-4);
 }
 .head-actions {
   display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--space-3);
 }
-.btn-icon { font-size: 14px; line-height: 1; }
-.last-update {
-  font-size: 12px;
+.header-control,
+.search-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+.control-label,
+.search-field > span {
   color: var(--text-secondary);
-  margin: 0 0 16px;
+  font-size: 12px;
+  font-weight: 500;
+}
+.auto-refresh-control { min-width: 132px; }
+.button-icon,
+.empty-icon {
+  width: 18px;
+  height: 18px;
+}
+.last-update {
+  margin: 0 0 var(--space-4);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
 }
 
-/* 指标卡片：auto-fit 自适应列数，避免平板宽度拥挤 */
 .metrics {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-  gap: 12px;
-  margin-bottom: 16px;
+  grid-template-columns: 1fr;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
 }
 .metric-card {
-  background: var(--bg-secondary);
-  border: 1px solid transparent;
-  border-radius: 10px;
-  padding: 16px 18px;
-  cursor: pointer;
-  transition: border-color 0.15s, transform 0.1s;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  width: 100%;
+  min-height: 108px;
+  padding: var(--space-4);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-surface);
+  color: var(--text-primary);
+  text-align: left;
+  transition:
+    border-color var(--duration-normal) var(--ease-out-expo),
+    box-shadow var(--duration-normal) var(--ease-out-expo),
+    transform var(--duration-fast) var(--ease-out-expo);
 }
-.metric-card:hover { transform: translateY(-2px); }
-.metric-card.active { border-color: var(--color-accent); }
+button.metric-card { cursor: pointer; }
+button.metric-card:hover {
+  border-color: var(--border-strong);
+  box-shadow: var(--shadow-sm);
+  transform: translateY(-2px);
+}
+button.metric-card:active { transform: translateY(0); }
+.metric-card.active { border-color: var(--border-accent); }
+.metric-static { cursor: default; }
 .metric-label {
-  font-size: 12px;
+  margin-bottom: var(--space-2);
   color: var(--text-secondary);
-  margin-bottom: 6px;
+  font-size: 12px;
 }
 .metric-value {
-  font-size: 28px;
+  font-family: var(--font-mono);
+  font-size: 22px;
   font-weight: 700;
+  font-variant-numeric: tabular-nums;
   line-height: 1.1;
 }
 .metric-danger .metric-value.has-value { color: var(--color-danger); }
 .metric-success .metric-value { color: var(--color-success); }
 .metric-sub {
-  font-size: 12px;
+  margin-top: var(--space-2);
   color: var(--text-secondary);
-  margin-top: 6px;
+  font-size: 12px;
 }
 
-/* 图表区 */
 .charts {
   display: grid;
-  grid-template-columns: 2fr 1fr;
-  gap: 16px;
-  margin-bottom: 16px;
-}
-.card {
-  background: var(--bg-secondary);
-  border-radius: 10px;
-  padding: 16px;
+  grid-template-columns: 1fr;
+  gap: var(--space-4);
+  margin-bottom: var(--space-4);
 }
 .card-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 12px;
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
   flex-wrap: wrap;
 }
 .card-head h3 {
@@ -671,106 +919,222 @@ onUnmounted(() => {
   font-weight: 600;
 }
 .chart-box {
-  height: 300px;
   width: 100%;
+  height: 240px;
 }
-.chart-perf { height: 360px; }
+.chart-perf { height: 300px; }
+.section { margin-bottom: var(--space-4); }
 
-.section { margin-bottom: 16px; }
-
-/* 性能概览摘要 chips */
 .perf-summary {
   display: flex;
-  gap: 8px;
+  gap: var(--space-2);
   flex-wrap: wrap;
 }
 .chip {
-  font-size: 12px;
-  color: var(--text-secondary);
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
   background: var(--color-bg-hover);
-  border-radius: 6px;
-  padding: 3px 10px;
+  color: var(--text-secondary);
+  font-size: 12px;
 }
 .chip b { color: var(--text-primary); }
-
 .count-badge {
-  font-size: 12px;
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
   background: var(--color-danger);
-  color: #fff;
-  border-radius: 10px;
-  padding: 1px 8px;
+  color: var(--color-bg-surface);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.section-desc {
+  margin: var(--space-1) 0 0;
+  color: var(--text-secondary);
+  font-size: 12px;
 }
 
-.record-tools {
+.search-panel {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  margin-bottom: var(--space-3);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-hover);
+}
+.search-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-2);
+  align-items: end;
+}
+.search-history {
   display: flex;
-  gap: 10px;
   align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+  flex-wrap: wrap;
 }
+.history-label {
+  width: 100%;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.history-item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 44px;
+  max-width: 100%;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-surface);
+  color: var(--text-primary);
+  cursor: pointer;
+  font-size: 12px;
+  transition:
+    border-color var(--duration-fast) var(--ease-out-expo),
+    background-color var(--duration-fast) var(--ease-out-expo);
+}
+.history-item:hover { border-color: var(--border-strong); background: var(--color-bg-hover); }
+.history-item:active { background: var(--color-bg-selected); }
+.history-item span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.history-item time { flex: 0 0 auto; color: var(--text-secondary); font-family: var(--font-mono); }
 
-/* 自定义省略号单元格：CSS 截断 + 原生 title 悬浮提示（替代 TDesign ellipsis 组件） */
 .cell-ellipsis {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   max-width: 100%;
 }
-
-.empty {
-  text-align: center;
-  padding: 40px;
+.empty,
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  padding: var(--space-8);
   color: var(--text-secondary);
+  text-align: center;
+}
+.empty-icon { color: var(--color-success); }
+.mobile-card-list {
+  display: grid;
+  gap: var(--space-3);
+}
+.mobile-record-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  width: 100%;
+  min-height: 44px;
+  padding: var(--space-3);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-surface);
+  color: var(--text-primary);
+  text-align: left;
+  transition:
+    border-color var(--duration-fast) var(--ease-out-expo),
+    background-color var(--duration-fast) var(--ease-out-expo);
+}
+.mobile-record-card:hover { border-color: var(--border-strong); background: var(--color-bg-hover); }
+.mobile-record-card:active { background: var(--color-bg-selected); }
+.mobile-record-card strong {
+  overflow-wrap: anywhere;
+  font-size: 13px;
+  font-weight: 500;
+}
+.mobile-record-head,
+.mobile-record-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+.mobile-record-head time,
+.mobile-record-meta {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+.mobile-record-meta {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+}
+.record-type {
+  color: var(--text-accent);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+}
+.mobile-pagination {
+  display: flex;
+  justify-content: center;
+  padding-top: var(--space-2);
 }
 
-/* 详情抽屉 */
 .detail-body {
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: var(--space-5);
 }
 .detail-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 12px 16px;
+  grid-template-columns: 1fr;
+  gap: var(--space-3) var(--space-4);
 }
 .detail-item {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--space-1);
 }
 .detail-item.full { grid-column: 1 / -1; }
-.d-label {
-  font-size: 12px;
-  color: var(--text-secondary);
-}
-.d-value {
-  font-size: 13px;
-  color: var(--text-primary);
-  word-break: break-all;
-}
+.d-label { color: var(--text-secondary); font-size: 12px; }
+.d-value { color: var(--text-primary); font-size: 13px; word-break: break-all; }
 .d-value.mono { font-family: var(--font-mono); font-size: 12px; }
 .d-value.wrap { white-space: pre-wrap; }
-.detail-data { display: flex; flex-direction: column; gap: 8px; }
+.detail-data { display: flex; flex-direction: column; gap: var(--space-2); }
 .json-block {
-  background: var(--bg-color, rgba(0,0,0,0.25));
-  border-radius: 8px;
-  padding: 12px;
-  font-family: var(--font-mono);
-  font-size: 12px;
-  line-height: 1.5;
   max-height: 420px;
   overflow: auto;
   margin: 0;
+  padding: var(--space-3);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-overlay);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
   white-space: pre-wrap;
   word-break: break-all;
 }
 
-/* 响应式 */
-@media (max-width: 900px) {
-  .charts { grid-template-columns: 1fr; }
+@media (min-width: 481px) {
+  .metrics { grid-template-columns: repeat(2, 1fr); }
+  .search-panel { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .search-actions { grid-column: 1 / -1; justify-self: end; display: flex; }
+  .detail-grid { grid-template-columns: 1fr 1fr; }
 }
-@media (max-width: 500px) {
-  .metric-value { font-size: 22px; }
-  .chart-box { height: 240px; }
-  .detail-grid { grid-template-columns: 1fr; }
+@media (min-width: 769px) {
+  .telemetry-header { flex-direction: row; align-items: flex-start; justify-content: space-between; }
+  .head-actions { flex-direction: row; align-items: flex-end; flex-wrap: wrap; }
+  .metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .metric-value { font-size: 28px; }
+  .charts { grid-template-columns: 2fr 1fr; }
+  .chart-box { height: 300px; }
+  .chart-perf { height: 360px; }
+  .search-panel { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .search-actions { grid-column: auto; }
+  .history-label { width: auto; }
+}
+@media (min-width: 1025px) {
+  .search-panel { grid-template-columns: repeat(5, minmax(0, 1fr)) auto; }
+}
+@media (hover: none) and (pointer: coarse) {
+  button.metric-card:hover { transform: none; border-color: var(--border-default); box-shadow: none; }
+  .history-item,
+  .mobile-record-card { min-height: 44px; }
 }
 </style>

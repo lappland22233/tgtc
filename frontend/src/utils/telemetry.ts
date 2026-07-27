@@ -6,18 +6,30 @@
 
 import api from '../api/client';
 
+export type TelemetryEventType =
+  | 'error'
+  | 'api_error'
+  | 'upload_error'
+  | 'performance'
+  | 'environment'
+  | 'click_context';
+
 interface TelemetryEvent {
-  type: 'error' | 'performance' | 'environment' | 'click_context' | 'network';
+  type: TelemetryEventType;
   data: Record<string, any>;
   clientTimestamp: number;
 }
 
 // ---- 缓冲与上报配置 ----
 const MAX_BUFFER_SIZE = 20;
-const FLUSH_INTERVAL_MS = 30_000; // 30 秒自动刷新
+const MAX_BUFFER_CAPACITY = 200;
+const FLUSH_INTERVAL_MS = 30_000;
+const RETRY_BASE_DELAY_MS = 2_000;
+const MAX_FLUSH_RETRIES = 3;
 
 let buffer: TelemetryEvent[] = [];
 let flushTimer: ReturnType<typeof setTimeout> | null = null;
+let flushInFlight: Promise<void> | null = null;
 let initialized = false;
 
 // ---- URL 脱敏（防止 token/分享密钥随遥测上传） ----
@@ -174,7 +186,11 @@ function printToConsole(event: TelemetryEvent) {
   // if (import.meta.env.PROD) return;
 
   const time = new Date(event.clientTimestamp).toLocaleTimeString();
-  const icon = event.type === 'error' ? '❌' : event.type === 'performance' ? '⚡' : event.type === 'network' ? '🌐' : '🌐';
+  const icon = event.type === 'error' || event.type === 'api_error' || event.type === 'upload_error'
+    ? '❌'
+    : event.type === 'performance'
+      ? '⚡'
+      : '🌐';
   const title = `${icon} [Telemetry] ${event.type.toUpperCase()} · ${time}`;
 
   switch (event.type) {
@@ -221,15 +237,23 @@ function printToConsole(event: TelemetryEvent) {
       console.groupEnd();
       break;
     }
-    case 'network': {
+    case 'api_error': {
       const d = event.data;
-      const statusColor = d.status >= 500 ? 'color: #ef5350;' : d.status >= 400 ? 'color: #ff9800;' : d.status >= 300 ? 'color: #ffeb3b;' : 'color: #999;';
+      const statusColor = d.status >= 500 ? 'color: #ef5350;' : d.status >= 400 ? 'color: #ff9800;' : 'color: #999;';
       console.groupCollapsed(`%c${title}`, `font-weight: bold; ${statusColor}`);
       console.log(`${d.method || 'GET'} ${d.url}`);
-      console.log(`状态码: ${d.status} · 耗时: ${d.duration}ms`);
-      if (d.redirect) console.log('重定向:', d.redirect);
-      if (d.body) console.log('错误信息:', d.body);
-      if (d.error) console.log('网络错误:', d.error);
+      console.log(`状态码: ${d.status || 0} · 耗时: ${d.duration || 0}ms`);
+      if (d.message) console.log('错误信息:', d.message);
+      if (d.errorCode) console.log('错误码:', d.errorCode);
+      console.groupEnd();
+      break;
+    }
+    case 'upload_error': {
+      const d = event.data;
+      console.groupCollapsed(`%c${title}`, 'font-weight: bold; color: #ef5350;');
+      console.log(`阶段: ${d.stage || '-'} · 文件: ${d.fileName || '-'}`);
+      console.log('错误:', d.message || '-');
+      if (d.uploadId) console.log('上传会话:', d.uploadId);
       console.groupEnd();
       break;
     }
@@ -249,78 +273,101 @@ function printToConsole(event: TelemetryEvent) {
   }
 }
 
-/** 添加事件到缓冲，触发条件刷新 */
+/** 添加事件到有界缓冲，触发条件刷新 */
 function enqueue(event: TelemetryEvent) {
   buffer.push(event);
-  // 开发环境下实时打印到控制台
+  if (buffer.length > MAX_BUFFER_CAPACITY) {
+    buffer.splice(0, buffer.length - MAX_BUFFER_CAPACITY);
+  }
   printToConsole(event);
   if (buffer.length >= MAX_BUFFER_SIZE) {
-    flush();
+    void flush();
   }
 }
 
-/** 上报缓冲中的遥测数据 */
-async function flush() {
-  if (buffer.length === 0) return;
+function scheduleFlush(delay = FLUSH_INTERVAL_MS) {
+  if (!initialized) return;
+  if (flushTimer) clearTimeout(flushTimer);
+  flushTimer = setTimeout(() => void flush(), delay);
+}
 
-  const events = buffer.splice(0);
+/** 上报缓冲中的遥测数据；失败事件回队并指数退避，避免网络抖动直接丢日志 */
+async function flush(retryCount = 0): Promise<void> {
+  if (flushInFlight) return flushInFlight;
+  if (buffer.length === 0) {
+    scheduleFlush();
+    return;
+  }
+
+  const events = buffer.splice(0, MAX_BUFFER_SIZE);
   if (flushTimer) {
     clearTimeout(flushTimer);
     flushTimer = null;
   }
 
-  try {
-    await api.post('/telemetry/report', { events }, { timeout: 5000 });
-  } catch {
-    // 静默失败 — 不影响用户使用
-  }
+  flushInFlight = (async () => {
+    try {
+      await api.post('/telemetry/report', { events }, {
+        timeout: 5000,
+        headers: { 'X-Telemetry-Internal': '1' },
+      });
+      scheduleFlush(buffer.length > 0 ? 0 : FLUSH_INTERVAL_MS);
+    } catch {
+      buffer = [...events, ...buffer].slice(0, MAX_BUFFER_CAPACITY);
+      const nextRetry = Math.min(retryCount + 1, MAX_FLUSH_RETRIES);
+      const delay = nextRetry >= MAX_FLUSH_RETRIES
+        ? FLUSH_INTERVAL_MS
+        : RETRY_BASE_DELAY_MS * Math.pow(2, nextRetry - 1);
+      scheduleFlush(delay);
+    } finally {
+      flushInFlight = null;
+    }
+  })();
 
-  // 重新启动定时器
-  if (initialized) {
-    flushTimer = setTimeout(flush, FLUSH_INTERVAL_MS);
-  }
+  return flushInFlight;
 }
 
-// ---- 网络状态追踪（模块加载时立即注册，确保在首次 API 请求前生效） ----
+// ---- API 错误追踪（模块加载时立即注册，确保在首次 API 请求前生效） ----
+type TimedRequestConfig = { telemetryStartedAt?: number; headers?: { get?: (name: string) => unknown } };
+
+api.interceptors.request.use((config) => {
+  (config as TimedRequestConfig).telemetryStartedAt = performance.now();
+  return config;
+});
+
 api.interceptors.response.use(
-    (response) => {
-      // 3xx 重定向上报
-      if (response.status >= 300 && response.status < 400) {
-        enqueue({
-          type: 'network',
-          clientTimestamp: Date.now(),
-          data: {
-            url: sanitizeUrl(response.config?.url || ''),
-            method: response.config?.method?.toUpperCase() || '',
-            status: response.status,
-            duration: Math.round(performance.now()),
-            redirect: sanitizeUrl(response.headers?.location || ''),
-          },
-        });
-      }
-      return response;
-    },
-    (error) => {
-      const status = error.response?.status;
-      // 仅上报 4xx（客户端错误）和 5xx（服务端错误）
-      if (status && status >= 400) {
-        enqueue({
-          type: 'network',
-          clientTimestamp: Date.now(),
-          data: {
-            url: sanitizeUrl(error.config?.url || ''),
-            method: error.config?.method?.toUpperCase() || '',
-            status,
-            duration: Math.round(performance.now()),
-            body: status < 500
-              ? (error.response?.data?.message || error.message || '').slice(0, 200)
-              : '',
-          },
-        });
-      }
-      return Promise.reject(error);
-    },
-  );
+  (response) => response,
+  (error) => {
+    const config = error.config as (typeof error.config & TimedRequestConfig) | undefined;
+    const isInternalReport = config?.headers?.get?.('X-Telemetry-Internal') === '1';
+    if (!isInternalReport) {
+      const status = Number(error.response?.status || 0);
+      const responseData = error.response?.data as { message?: string | string[]; code?: string | number } | undefined;
+      const rawMessage = Array.isArray(responseData?.message)
+        ? responseData.message.join('; ')
+        : responseData?.message || error.message || '请求失败';
+      const duration = config?.telemetryStartedAt != null
+        ? Math.max(0, Math.round(performance.now() - config.telemetryStartedAt))
+        : 0;
+
+      enqueue({
+        type: 'api_error',
+        clientTimestamp: Date.now(),
+        data: {
+          message: sanitizeText(String(rawMessage)).slice(0, 200),
+          tag: status >= 500 ? 'server_response' : status > 0 ? 'backend_response' : 'network_failure',
+          url: sanitizeUrl(config?.url || ''),
+          method: config?.method?.toUpperCase() || '',
+          status,
+          duration,
+          errorCode: responseData?.code != null ? String(responseData.code).slice(0, 64) : '',
+        },
+      });
+      onErrorOccurred();
+    }
+    return Promise.reject(error);
+  },
+);
 
   // 拦截 fetch 请求（全局 fetch 覆写）
   // 防重复补丁：模块可能被动态 import 多次或与第三方 SDK 叠加，
@@ -335,33 +382,37 @@ api.interceptors.response.use(
       try {
         const res = await origFetch!(input, init);
         const elapsed = Math.round(performance.now() - start);
-        // 3xx/4xx/5xx 上报
-        if (res.status >= 300) {
+        if (res.status >= 400) {
           enqueue({
-            type: 'network',
+            type: 'api_error',
             clientTimestamp: Date.now(),
             data: {
+              message: `Fetch 请求失败 (${res.status})`,
+              tag: res.status >= 500 ? 'server_response' : 'backend_response',
               url: sanitizeUrl(url),
               method: init?.method?.toUpperCase() || 'GET',
               status: res.status,
               duration: elapsed,
             },
           });
+          onErrorOccurred();
         }
         return res;
       } catch (err: any) {
         const elapsed = Math.round(performance.now() - start);
         enqueue({
-          type: 'network',
+          type: 'api_error',
           clientTimestamp: Date.now(),
           data: {
+            message: sanitizeText(err.message || 'fetch failed'),
+            tag: 'network_failure',
             url: sanitizeUrl(url),
             method: init?.method?.toUpperCase() || 'GET',
             status: 0,
             duration: elapsed,
-            error: err.message || 'fetch failed',
           },
         });
+        onErrorOccurred();
         throw err;
       }
     };
@@ -724,7 +775,7 @@ export function initTelemetry() {
   });
 
   // 每 30 秒自动刷新
-  flushTimer = setTimeout(flush, FLUSH_INTERVAL_MS);
+  scheduleFlush();
 
   // 页面离开时发送残留数据
   window.addEventListener('beforeunload', onUnload);
@@ -732,7 +783,7 @@ export function initTelemetry() {
     if (document.visibilityState === 'hidden') {
       onUnload();
     } else if (document.visibilityState === 'visible' && initialized && !flushTimer) {
-      flushTimer = setTimeout(flush, FLUSH_INTERVAL_MS);
+      scheduleFlush();
       // 恢复标签页时重新采样环境
       captureEnvironment();
     }
@@ -772,6 +823,32 @@ export function setupRouteTracking(router: any) {
 }
 
 /** 手动上报自定义事件（供业务代码调用） */
-export function reportTelemetry(type: TelemetryEvent['type'], data: Record<string, any>) {
+export function reportTelemetry(type: TelemetryEventType, data: Record<string, any>) {
   enqueue({ type, data, clientTimestamp: Date.now() });
+}
+
+/** 结构化上报上传失败，不采集文件内容，仅保留诊断所需元数据 */
+export function reportUploadError(input: {
+  stage: string;
+  message: string;
+  fileName?: string;
+  fileSize?: number;
+  mimeType?: string;
+  uploadId?: string | null;
+  status?: number;
+  retryCount?: number;
+}) {
+  onErrorOccurred();
+  enqueue({
+    type: 'upload_error',
+    clientTimestamp: Date.now(),
+    data: {
+      ...input,
+      message: sanitizeText(input.message).slice(0, 200),
+      fileName: sanitizeText(input.fileName || '').slice(0, 120),
+      mimeType: (input.mimeType || '').slice(0, 100),
+      tag: input.stage,
+      url: sanitizeUrl(location.href),
+    },
+  });
 }

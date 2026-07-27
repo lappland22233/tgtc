@@ -1,5 +1,6 @@
 import { ref } from 'vue';
 import api from '../api/client';
+import { reportUploadError } from '../utils/telemetry';
 
 export interface ChunkUploadProgress {
   totalChunks: number;
@@ -274,8 +275,20 @@ export function useChunkedUpload(concurrency = 2) {
       const result = await pollMergeResult(uploadId.value, signal);
       uploading.value = false;
       return result;
-    } catch (err) {
+    } catch (err: any) {
       uploading.value = false;
+      const cancelled = signal?.aborted || err?.name === 'AbortError' || err?.code === 'ERR_CANCELED';
+      if (!cancelled) {
+        reportUploadError({
+          stage: mergeTriggered ? 'chunk_merge_poll' : uploadId.value ? 'chunk_upload' : 'chunk_init',
+          message: err?.response?.data?.message || err?.message || '分片上传失败',
+          fileName: file.name,
+          fileSize: file.size,
+          mimeType: file.type,
+          uploadId: uploadId.value,
+          status: err?.response?.status,
+        });
+      }
       // complete 成功后服务端已接管合并；轮询失败或页面关闭只能停止观察，不能删除活动工作目录。
       if (uploadId.value && !mergeTriggered) {
         await api.post(`/files/chunk/${uploadId.value}/abort`).catch(() => {});

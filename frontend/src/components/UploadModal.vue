@@ -153,6 +153,7 @@ import { api } from '../stores/auth';
 import { useMobile } from '../composables/useMobile';
 import { formatSize as formatModalSize } from '../utils/format';
 import { getErrorMessage } from '../utils/error';
+import { reportUploadError } from '../utils/telemetry';
 import { useChunkedUpload } from '../composables/useChunkedUpload';
 import FileTypeIcon from '@/components/FileTypeIcon.vue';
 import type { BatchUploadResult } from '../types/file';
@@ -336,11 +337,25 @@ function validateFiles(files: File[]): File[] {
   return files.filter((f) => {
     if (f.size > maxFileSizeBytes.value) {
       MessagePlugin.warning(`文件 "${f.name}" 超过 ${maxFileSizeMB.value}MB 限制，已跳过`);
+      reportUploadError({
+        stage: 'validation_size',
+        message: `文件超过 ${maxFileSizeMB.value}MB 限制`,
+        fileName: f.name,
+        fileSize: f.size,
+        mimeType: f.type,
+      });
       return false;
     }
     // 白名单模式下前端同步校验类型，避免 accept 属性被绕过
     if (fileTypeMode.value === 'whitelist' && !matchesAcceptTypes(f)) {
       MessagePlugin.warning(`文件 "${f.name}" 类型不受支持，已跳过`);
+      reportUploadError({
+        stage: 'validation_type',
+        message: '文件类型不受支持',
+        fileName: f.name,
+        fileSize: f.size,
+        mimeType: f.type,
+      });
       return false;
     }
     return true;
@@ -519,11 +534,23 @@ async function uploadFiles(files: File[]) {
       if (entry) entry.status = 'success';
       successList.push({ id: result.id, originalName: result.originalName });
     } catch (error: unknown) {
+      const reason = getErrorMessage(error);
       if (entry) {
         entry.status = 'error';
-        entry.errorReason = getErrorMessage(error);
+        entry.errorReason = reason;
       }
-      failedList.push({ name: file.name, reason: getErrorMessage(error) });
+      const axiosError = error as { response?: { status?: number }; code?: string };
+      if (!abortController.signal.aborted && axiosError.code !== 'ERR_CANCELED') {
+        reportUploadError({
+          stage: 'async_upload',
+          message: reason,
+          fileName: file.name,
+          fileSize: file.size,
+          mimeType: file.type,
+          status: axiosError.response?.status,
+        });
+      }
+      failedList.push({ name: file.name, reason });
     } finally {
       activeControllers.delete(abortController);
     }

@@ -15,8 +15,8 @@ const MAX_EVENTS_PER_REPORT = 50;
 /** 单个事件 data 载荷的最大字节数（服务层兜底，防止超大 JSON 入库） */
 const MAX_DATA_BYTES = 8 * 1024;
 
-/** type 列宽（varchar(20)），服务层兜底防止超长类型写入失败 */
-const MAX_TYPE_LENGTH = 20;
+/** type 列宽（varchar(32)），服务层兜底防止超长类型写入失败 */
+const MAX_TYPE_LENGTH = 32;
 
 @Injectable()
 export class TelemetryService {

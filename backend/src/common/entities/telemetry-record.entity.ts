@@ -9,26 +9,31 @@ import {
 /** 遥测数据类型 */
 export enum TelemetryType {
   ERROR = 'error',
+  API_ERROR = 'api_error',
+  UPLOAD_ERROR = 'upload_error',
   PERFORMANCE = 'performance',
   ENVIRONMENT = 'environment',
+  CLICK_CONTEXT = 'click_context',
 }
 
 @Entity('telemetry_records')
 @Index(['createdAt'])
-// 核心查询为 type + createdAt 组合条件，复合索引优于两个单列索引（P2）；
-// ip 索引服务 COUNT(DISTINCT ip) 统计（P3）。
+// 记录检索以时间倒序为主，并支持类型、IP、用户多维筛选。
 @Index('IDX_telemetry_records_type_createdAt', ['type', 'createdAt'])
-@Index('IDX_telemetry_records_ip', ['ip'])
+@Index('IDX_telemetry_records_ip_createdAt', ['ip', 'createdAt'])
+@Index('IDX_telemetry_records_userId_createdAt', ['userId', 'createdAt'])
 export class TelemetryRecord {
   @PrimaryColumn({ type: 'uuid', default: () => 'gen_random_uuid()' })
   id: string;
 
-  @Column({ type: 'varchar', length: 20, comment: '遥测类型：error/performance/environment' })
+  @Column({ type: 'varchar', length: 32, comment: '遥测类型：error/api_error/upload_error/performance/environment/click_context' })
   type: string;
 
   /**
    * 遥测数据，JSON 格式存储：
    * - error: { message, stack, source, lineno, colno, tag }
+   * - api_error: { message, url, method, status, duration, errorCode }
+   * - upload_error: { message, stage, fileName, fileSize, uploadId, status }
    * - performance: { pageLoad, domReady, firstPaint, url }
    * - environment: { screen, viewport, platform, language, timezone }
    */

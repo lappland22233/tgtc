@@ -23,6 +23,7 @@ import {
   ValidatorConstraintInterface,
 } from 'class-validator';
 import { Type } from 'class-transformer';
+import { JwtService } from '@nestjs/jwt';
 import { TelemetryService } from './telemetry.service';
 import { getClientIp } from '../common/utils/client-ip';
 import { RateLimitService } from '../common/services/rate-limit.service';
@@ -71,7 +72,7 @@ class TelemetryEventDto {
   // 仅约束为非空字符串且长度匹配 varchar(20) 列，避免整批 400 中断上报
   @IsString()
   @IsNotEmpty()
-  @MaxLength(20)
+  @MaxLength(32)
   type: string;
 
   @IsOptional()
@@ -99,6 +100,7 @@ export class TelemetryController {
   constructor(
     private readonly telemetryService: TelemetryService,
     private readonly rateLimitService: RateLimitService,
+    private readonly jwtService: JwtService,
   ) {}
 
   /**
@@ -134,8 +136,7 @@ export class TelemetryController {
     }
 
     const userAgent = req.headers['user-agent'] || '';
-    // req.user 由 JwtAuthGuard 注入（若存在则自动解析，不存在则为 undefined）
-    const userId = (req as Request & { user?: { id?: string } }).user?.id || undefined;
+    const userId = this.extractOptionalUserId(req);
 
     const events = dto.events || [];
     // 性能统计会在管理端转为浮点数；写入前拒绝非有限数值，防止持久化数据投毒。
@@ -157,5 +158,26 @@ export class TelemetryController {
     );
 
     return { code: 0, message: 'ok', count: events.length };
+  }
+
+  /**
+   * 遥测接口允许匿名访问，因此不能使用强制认证 Guard。
+   * 仅在 Cookie/Bearer 中存在且签名、有效期均合法时提取 sub；无效令牌按匿名处理。
+   */
+  private extractOptionalUserId(req: Request): string | undefined {
+    const cookieToken = req.cookies?.access_token;
+    const authorization = req.headers.authorization;
+    const bearerToken = typeof authorization === 'string' && authorization.startsWith('Bearer ')
+      ? authorization.slice(7)
+      : undefined;
+    const token = typeof cookieToken === 'string' ? cookieToken : bearerToken;
+    if (!token || token.split('.').length !== 3) return undefined;
+
+    try {
+      const payload = this.jwtService.verify<{ sub?: string }>(token, { algorithms: ['HS256'] });
+      return typeof payload?.sub === 'string' ? payload.sub : undefined;
+    } catch {
+      return undefined;
+    }
   }
 }
