@@ -100,12 +100,30 @@ describe('AdminService', () => {
   let bannedIPRepo: ReturnType<typeof mockRepo>;
   let fileRepo: ReturnType<typeof mockRepo>;
   let configCacheService: { get: jest.Mock; set: jest.Mock; setBatch: jest.Mock };
-  let auditService: { log: jest.Mock };
+  let auditService: { log: jest.Mock; logAwait: jest.Mock };
   let fileService: { forceDelete: jest.Mock; findAll: jest.Mock };
 
   beforeEach(async () => {
     bannedIPRepo = mockRepo();
     fileRepo = mockRepo();
+    const lockedQuery = {
+      setLock: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      andWhere: jest.fn().mockReturnThis(),
+      orderBy: jest.fn().mockReturnThis(),
+      getOne: jest.fn(() => fileRepo.findOne()),
+      getMany: jest.fn(() => fileRepo.find()),
+    };
+    const transactionalManager = {
+      getRepository: jest.fn(() => ({ createQueryBuilder: jest.fn(() => lockedQuery) })),
+      save: jest.fn((_entity: unknown, value: File | File[]) => {
+        if (Array.isArray(value)) return Promise.resolve(value);
+        return fileRepo.save(value).then(() => value);
+      }),
+    };
+    (fileRepo as any).manager = {
+      transaction: jest.fn((callback: (manager: typeof transactionalManager) => unknown) => callback(transactionalManager)),
+    };
 
     configCacheService = {
       get: jest.fn(),
@@ -113,7 +131,7 @@ describe('AdminService', () => {
       setBatch: jest.fn().mockResolvedValue(undefined),
     };
 
-    auditService = { log: jest.fn() };
+    auditService = { log: jest.fn(), logAwait: jest.fn().mockResolvedValue(undefined) };
 
     fileService = {
       forceDelete: jest.fn().mockResolvedValue(undefined),
@@ -370,20 +388,20 @@ describe('AdminService', () => {
       expect(result.message).toContain('标记为待删除');
       expect(file.isDeleted).toBe(true);
       expect(file.deletedByAdmin).toBe(true);
-      expect(auditService.log).toHaveBeenCalledWith(
+      expect(auditService.logAwait).toHaveBeenCalledWith(
         expect.objectContaining({ action: 'file_delete_by_admin' }),
       );
     });
 
-    it('第二步：已标记删除的文件应永久删除', async () => {
+    it('已由管理员标记的文件应保持待删除状态', async () => {
       const user = makeUser();
       const file = makeFile({ isDeleted: true, deletedByAdmin: true });
       fileRepo.findOne.mockResolvedValue(file);
 
       const result = await service.deleteFile(user, 'file-uuid-1');
 
-      expect(result.message).toBe('文件已永久删除');
-      expect(fileService.forceDelete).toHaveBeenCalledWith('file-uuid-1', user);
+      expect(result.message).toBe('文件已处于待删除状态');
+      expect(fileService.forceDelete).not.toHaveBeenCalled();
     });
 
     it('文件不存在时应抛出 NotFoundException', async () => {
@@ -405,11 +423,9 @@ describe('AdminService', () => {
 
       await service.batchDeleteFiles(user, ['file-1', 'file-2']);
 
-      expect(fileRepo.update).toHaveBeenCalledWith(
-        ['file-1', 'file-2'],
-        expect.objectContaining({ isDeleted: true, deletedByAdmin: true }),
-      );
-      expect(auditService.log).toHaveBeenCalledWith(
+      expect(fileRepo.update).not.toHaveBeenCalled();
+      expect((fileRepo as any).manager.transaction).toHaveBeenCalled();
+      expect(auditService.logAwait).toHaveBeenCalledWith(
         expect.objectContaining({
           action: 'batch_delete_files_by_admin',
           metadata: expect.objectContaining({ count: 2 }),

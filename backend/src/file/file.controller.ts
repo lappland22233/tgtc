@@ -510,7 +510,7 @@ export class FileController {
     return { message: '文件已恢复' };
   }
 
-  /** 文件主强制永久删除自己的文件（跳过 7 天等待期） */
+  /** 文件主永久删除已到期的待删除文件（仍需满足完整删除时间链） */
   @Post(':id/force-delete')
   @UseGuards(JwtAuthGuard)
   async forceDelete(@Param('id') id: string, @CurrentUser() user: User) {

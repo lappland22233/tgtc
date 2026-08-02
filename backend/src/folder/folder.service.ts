@@ -230,25 +230,34 @@ export class FolderService {
     folderIds.push(id);
 
     // 事务内原子执行：软删子文件夹 + 软删内含文件，避免中途失败导致部分删除不一致
-    await this.folderRepo.manager.transaction(async (manager) => {
-      await manager.update(
+    const affected = await this.folderRepo.manager.transaction(async (manager) => {
+      const folderResult = await manager.update(
         Folder,
         { id: In(folderIds), isDeleted: false },
         { isDeleted: true, deleteRequestedAt: now, deleteScheduledAt: scheduledAt },
       );
-      await manager.update(
+      const fileResult = await manager.update(
         File,
         { folderId: In(folderIds), isDeleted: false },
         { isDeleted: true, deleteRequestedAt: now, deleteScheduledAt: scheduledAt, deletedByAdmin: byAdmin },
       );
+      return {
+        folders: folderResult.affected ?? 0,
+        files: fileResult.affected ?? 0,
+      };
     });
 
-    this.audit.log({
+    await this.audit.logAwait({
       action: (byAdmin ? 'folder_delete_by_admin' : 'folder_delete') as AuditAction,
       userId: ownerId,
       resourceType: 'folder',
       resourceId: id,
-      metadata: { name: folder.name, affectedFolders: folderIds.length, scheduledAt },
+      metadata: {
+        name: folder.name,
+        affectedFolders: affected.folders,
+        affectedFiles: affected.files,
+        scheduledAt: scheduledAt.toISOString(),
+      },
     });
   }
 
@@ -258,6 +267,12 @@ export class FolderService {
     });
     if (!folder) {
       throw new NotFoundException('文件夹不存在或未被删除');
+    }
+    if (!folder.deleteRequestedAt || !folder.deleteScheduledAt) {
+      throw new BadRequestException('该文件夹未处于完整的待删除状态');
+    }
+    if (folder.deleteScheduledAt <= new Date()) {
+      throw new BadRequestException('删除等待期已过，文件夹不可恢复');
     }
     // 还原子树中所有 folder——但只恢复与本文件夹同批删除的，
     // 避免恢复在文件夹删除之前已独立删除的子文件夹。

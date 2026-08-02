@@ -119,7 +119,7 @@ describe('FileService', () => {
   let accessLogRepo: ReturnType<typeof mockRepo>;
   let telegramService: { uploadFile: jest.Mock; getFileStream: jest.Mock; deleteFile: jest.Mock };
   let fileCacheService: { getCachedReadStream: jest.Mock; getCachedPath: jest.Mock; getOrCacheStream: jest.Mock; invalidate: jest.Mock };
-  let auditService: { log: jest.Mock };
+  let auditService: { log: jest.Mock; logAwait: jest.Mock };
   let configCacheService: { get: jest.Mock; set: jest.Mock };
 
   beforeEach(async () => {
@@ -140,8 +140,33 @@ describe('FileService', () => {
       invalidate: jest.fn().mockResolvedValue(undefined),
     };
 
-    auditService = { log: jest.fn() };
+    auditService = { log: jest.fn(), logAwait: jest.fn().mockResolvedValue(undefined) };
     configCacheService = { get: jest.fn(), set: jest.fn() };
+
+    const transactionalManager = {
+      getRepository: jest.fn(() => ({
+        createQueryBuilder: jest.fn(() => ({
+          setLock: jest.fn().mockReturnThis(),
+          where: jest.fn().mockReturnThis(),
+          getOne: jest.fn(() => fileRepo.findOne()),
+        })),
+      })),
+      delete: jest.fn((_entity: unknown, criteria: unknown) => accessLogRepo.delete(criteria)),
+      update: jest.fn().mockResolvedValue({ affected: 1 }),
+      remove: jest.fn((_entity: unknown, value: File) => fileRepo.remove(value)),
+      save: jest.fn((_entity: unknown, value: File) => fileRepo.save(value)),
+    };
+    (fileRepo as any).manager = {
+      transaction: jest.fn((callback: (manager: typeof transactionalManager) => unknown) => callback(transactionalManager)),
+      query: jest.fn().mockResolvedValue([]),
+      createQueryBuilder: jest.fn(() => ({
+        insert: jest.fn().mockReturnThis(),
+        into: jest.fn().mockReturnThis(),
+        values: jest.fn().mockReturnThis(),
+        orIgnore: jest.fn().mockReturnThis(),
+        execute: jest.fn().mockResolvedValue(undefined),
+      })),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -324,7 +349,7 @@ describe('FileService', () => {
       expect(result.scheduledAt).toBeDefined();
       expect(file.isDeleted).toBe(true);
       expect(file.deletedByAdmin).toBe(false);
-      expect(auditService.log).toHaveBeenCalledWith(
+      expect(auditService.logAwait).toHaveBeenCalledWith(
         expect.objectContaining({ action: 'file_delete_request' }),
       );
     });
@@ -374,6 +399,8 @@ describe('FileService', () => {
         uploaderId: 'other-user',
         isDeleted: true,
         deletedByAdmin: true,
+        deleteRequestedAt: new Date(Date.now() - 8 * 24 * 3600 * 1000),
+        deleteScheduledAt: new Date(Date.now() - 1000),
       });
       fileRepo.findOne.mockResolvedValue(file);
 
@@ -388,6 +415,8 @@ describe('FileService', () => {
         uploaderId: 'other-user',
         isDeleted: true,
         deletedByAdmin: true,
+        deleteRequestedAt: new Date(Date.now() - 8 * 24 * 3600 * 1000),
+        deleteScheduledAt: new Date(Date.now() - 1000),
       });
       fileRepo.findOne.mockResolvedValue(file);
       fileRepo.count.mockResolvedValue(0);
@@ -396,8 +425,8 @@ describe('FileService', () => {
       fileRepo.remove.mockResolvedValue(file);
 
       const result = await service.delete('file-uuid-1', admin);
-      expect(result.status).toBe('permanently_deleted');
-      expect(fileRepo.remove).toHaveBeenCalledWith(file);
+      expect(result.status).toBe('already_deleted');
+      expect(fileRepo.remove).not.toHaveBeenCalled();
     });
   });
 
@@ -407,7 +436,12 @@ describe('FileService', () => {
   describe('forceDelete', () => {
     it('应成功永久删除文件', async () => {
       const user = makeUser();
-      const file = makeFile({ uploaderId: user.id });
+      const file = makeFile({
+        uploaderId: user.id,
+        isDeleted: true,
+        deleteRequestedAt: new Date(Date.now() - 8 * 24 * 3600 * 1000),
+        deleteScheduledAt: new Date(Date.now() - 1000),
+      });
       fileRepo.findOne.mockResolvedValue(file);
       fileRepo.count.mockResolvedValue(0);
       telegramService.deleteFile.mockResolvedValue(true);
@@ -416,11 +450,11 @@ describe('FileService', () => {
 
       await service.forceDelete('file-uuid-1', user);
 
-      expect(telegramService.deleteFile).toHaveBeenCalledWith('12345');
+      expect(telegramService.deleteFile).not.toHaveBeenCalled();
       expect(accessLogRepo.delete).toHaveBeenCalledWith({ fileId: 'file-uuid-1' });
       expect(fileRepo.remove).toHaveBeenCalledWith(file);
       expect(fileCacheService.invalidate).toHaveBeenCalledWith('file-uuid-1');
-      expect(auditService.log).toHaveBeenCalledWith(
+      expect(auditService.logAwait).toHaveBeenCalledWith(
         expect.objectContaining({ action: 'file_delete_by_admin', metadata: expect.objectContaining({ forced: true }) }),
       );
     });
@@ -428,6 +462,37 @@ describe('FileService', () => {
     it('文件不存在时应抛出 NotFoundException', async () => {
       fileRepo.findOne.mockResolvedValue(null);
       await expect(service.forceDelete('nonexistent', makeUser())).rejects.toThrow(NotFoundException);
+    });
+
+    it.each([
+      ['未标记删除', { isDeleted: false, deleteRequestedAt: null, deleteScheduledAt: null }],
+      ['缺少删除请求时间', { isDeleted: true, deleteRequestedAt: null, deleteScheduledAt: new Date(Date.now() - 1000) }],
+      ['缺少计划删除时间', { isDeleted: true, deleteRequestedAt: new Date(Date.now() - 1000), deleteScheduledAt: null }],
+      ['计划时间未到', { isDeleted: true, deleteRequestedAt: new Date(), deleteScheduledAt: new Date(Date.now() + 60_000) }],
+    ])('%s时应拒绝永久删除', async (_label, deletionState) => {
+      const user = makeUser();
+      fileRepo.findOne.mockResolvedValue(makeFile({ uploaderId: user.id, ...deletionState }));
+
+      await expect(service.forceDelete('file-uuid-1', user)).rejects.toThrow(BadRequestException);
+      expect(fileRepo.remove).not.toHaveBeenCalled();
+    });
+
+    it('缓存清理失败后仍应完成永久删除审计', async () => {
+      const user = makeUser();
+      const file = makeFile({
+        uploaderId: user.id,
+        isDeleted: true,
+        deleteRequestedAt: new Date(Date.now() - 2000),
+        deleteScheduledAt: new Date(Date.now() - 1000),
+      });
+      fileRepo.findOne.mockResolvedValue(file);
+      fileCacheService.invalidate.mockRejectedValueOnce(new Error('cache unavailable'));
+
+      await expect(service.forceDelete(file.id, user)).resolves.toBeUndefined();
+      expect(fileRepo.remove).toHaveBeenCalledWith(file);
+      expect(auditService.logAwait).toHaveBeenCalledWith(expect.objectContaining({
+        metadata: expect.objectContaining({ cleanupErrors: ['cache: cache unavailable'] }),
+      }));
     });
 
     it('非所有者普通用户应抛出 ForbiddenException', async () => {
@@ -438,15 +503,20 @@ describe('FileService', () => {
       ).rejects.toThrow(ForbiddenException);
     });
 
-    it('Telegram 删除失败时应保留数据库记录供重试', async () => {
+    it('不应调用 Telegram 删除远端对象', async () => {
       const user = makeUser();
-      const file = makeFile({ uploaderId: user.id });
+      const file = makeFile({
+        uploaderId: user.id,
+        isDeleted: true,
+        deleteRequestedAt: new Date(Date.now() - 8 * 24 * 3600 * 1000),
+        deleteScheduledAt: new Date(Date.now() - 1000),
+      });
       fileRepo.findOne.mockResolvedValue(file);
-      fileRepo.count.mockResolvedValue(0);
       telegramService.deleteFile.mockRejectedValue(new Error('Telegram error'));
 
-      await expect(service.forceDelete('file-uuid-1', user)).rejects.toThrow('Telegram error');
-      expect(fileRepo.remove).not.toHaveBeenCalled();
+      await expect(service.forceDelete('file-uuid-1', user)).resolves.toBeUndefined();
+      expect(telegramService.deleteFile).not.toHaveBeenCalled();
+      expect(fileRepo.remove).toHaveBeenCalledWith(file);
     });
   });
 

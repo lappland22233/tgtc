@@ -1,7 +1,7 @@
 import { Injectable, NotFoundException, BadRequestException, Logger } from '@nestjs/common';
 import { UAParser } from 'ua-parser-js';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, LessThan, IsNull, SelectQueryBuilder, In } from 'typeorm';
+import { Repository, LessThan, IsNull, SelectQueryBuilder } from 'typeorm';
 import { SystemConfig } from '../common/entities/system-config.entity';
 import { BannedIP } from '../common/entities/banned-ip.entity';
 import { File } from '../common/entities/file.entity';
@@ -279,85 +279,82 @@ export class AdminService {
     return this.fileService.findAll(page, limit, userId, keyword, true, sortBy, sortOrder, cursor);
   }
 
-  /**
-   * 管理员删除用户文件（双重确认机制）：
-   * - 第一次请求：标记文件进入 7 天冷静期（deletedByAdmin=true，普通用户不可恢复）
-   * - 第二次请求：永久强制删除（从 Telegram + 数据库移除，无视冷静期）
-   * 管理员不受 10 分钟冷却窗口限制，可立即请求第二次确认删除
-   */
+  /** 管理员标记文件进入 7 天删除计划；已标记记录不会绕过严格永久删除准入。 */
   async deleteFile(user: User, id: string): Promise<{ message: string }> {
-    const file = await this.fileRepository.findOne({ where: { id } });
+    const result = await this.fileRepository.manager.transaction(async (manager) => {
+      const file = await manager.getRepository(File)
+        .createQueryBuilder('file')
+        .setLock('pessimistic_write')
+        .where('file.id = :id', { id })
+        .getOne();
 
-    if (!file) {
-      throw new NotFoundException('文件不存在');
-    }
+      if (!file) throw new NotFoundException('文件不存在');
+      if (file.isDeleted && file.deletedByAdmin) {
+        return { file, changed: false };
+      }
 
-    const now = new Date();
-
-    // 第二步：文件已标记删除 → 永久强制删除
-    if (file.isDeleted && file.deletedByAdmin) {
-      await this.fileService.forceDelete(id, user);
-      return { message: '文件已永久删除' };
-    }
-
-    // 第一步：标记为已删除（管理员无视冷却窗口，直接覆盖）
-    file.isDeleted = true;
-    file.deletedByAdmin = true;
-    file.deleteRequestedAt = now;
-    file.deleteScheduledAt = new Date(now.getTime() + FILE_DELETE_GRACE_MS);
-    file.deleteCooldownUntil = new Date(now.getTime() + FILE_DELETE_COOLDOWN_MS);
-    await this.fileRepository.save(file);
-
-    // 审计日志：管理员标记删除
-    this.auditService.log({
-      action: 'file_delete_by_admin',
-      userId: user.id,
-      resourceType: 'file',
-      resourceId: id,
-      metadata: {
-        filename: file.originalName,
-        scheduledAt: file.deleteScheduledAt.toISOString(),
-      },
+      const now = new Date();
+      file.isDeleted = true;
+      file.deletedByAdmin = true;
+      file.deleteRequestedAt = now;
+      file.deleteScheduledAt = new Date(now.getTime() + FILE_DELETE_GRACE_MS);
+      file.deleteCooldownUntil = new Date(now.getTime() + FILE_DELETE_COOLDOWN_MS);
+      return { file: await manager.save(File, file), changed: true };
     });
 
-    return { message: `文件已标记为待删除（7 天后永久删除），再次请求将立即强制删除` };
+    if (result.changed) {
+      await this.auditService.logAwait({
+        action: 'file_delete_by_admin',
+        userId: user.id,
+        resourceType: 'file',
+        resourceId: id,
+        metadata: {
+          filename: result.file.originalName,
+          scheduledAt: result.file.deleteScheduledAt!.toISOString(),
+        },
+      });
+    }
+
+    return { message: result.changed ? '文件已标记为待删除（7 天后永久删除）' : '文件已处于待删除状态' };
   }
 
   async batchDeleteFiles(user: User, ids: string[]): Promise<void> {
-    // 先查询存在的、未删除的文件
-    const existingFiles = await this.fileRepository.find({
-      where: { id: In(ids), isDeleted: false },
-      select: ['id', 'originalName'],
+    const uniqueIds = [...new Set(ids)].sort();
+    const result = await this.fileRepository.manager.transaction(async (manager) => {
+      const files = await manager.getRepository(File)
+        .createQueryBuilder('file')
+        .setLock('pessimistic_write')
+        .where('file.id IN (:...ids)', { ids: uniqueIds })
+        .andWhere('file.isDeleted = false')
+        .orderBy('file.id', 'ASC')
+        .getMany();
+
+      if (files.length === 0) throw new NotFoundException('未找到可删除的文件');
+
+      const now = new Date();
+      const scheduledAt = new Date(now.getTime() + FILE_DELETE_GRACE_MS);
+      const cooldownUntil = new Date(now.getTime() + FILE_DELETE_COOLDOWN_MS);
+      for (const file of files) {
+        file.isDeleted = true;
+        file.deletedByAdmin = true;
+        file.deleteRequestedAt = now;
+        file.deleteScheduledAt = scheduledAt;
+        file.deleteCooldownUntil = cooldownUntil;
+      }
+      await manager.save(File, files);
+      return { files, scheduledAt };
     });
 
-    if (existingFiles.length === 0) {
-      throw new NotFoundException('未找到可删除的文件');
-    }
-
-    const now = new Date();
-    const scheduledAt = new Date(now.getTime() + FILE_DELETE_GRACE_MS);
-    const cooldownUntil = new Date(now.getTime() + FILE_DELETE_COOLDOWN_MS);
-
-    const existingIds = existingFiles.map(f => f.id);
-    await this.fileRepository.update(existingIds, {
-      isDeleted: true,
-      deletedByAdmin: true,
-      deleteRequestedAt: now,
-      deleteScheduledAt: scheduledAt,
-      deleteCooldownUntil: cooldownUntil,
-    });
-
-    // 审计日志：批量删除文件，记录实际删除数量
-    this.auditService.log({
+    await this.auditService.logAwait({
       action: 'batch_delete_files_by_admin',
       userId: user.id,
       resourceType: 'file',
       metadata: {
-        count: existingIds.length,
+        count: result.files.length,
         requestedCount: ids.length,
-        ids: existingIds,
-        files: existingFiles.map(f => f.originalName),
-        scheduledAt: scheduledAt.toISOString(),
+        ids: result.files.map((file) => file.id),
+        files: result.files.map((file) => file.originalName),
+        scheduledAt: result.scheduledAt.toISOString(),
       },
     });
   }
