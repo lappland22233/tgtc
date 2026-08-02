@@ -306,7 +306,7 @@ export class AdminService {
     await this.fileRepository.save(file);
 
     // 审计日志：管理员标记删除
-    this.auditService.log({
+    await this.auditService.logAwait({
       action: 'file_delete_by_admin',
       userId: user.id,
       resourceType: 'file',
@@ -345,7 +345,7 @@ export class AdminService {
     });
 
     // 审计日志：批量删除文件，记录实际删除数量
-    this.auditService.log({
+    await this.auditService.logAwait({
       action: 'batch_delete_files_by_admin',
       userId: user.id,
       resourceType: 'file',

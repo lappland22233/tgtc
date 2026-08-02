@@ -7,6 +7,7 @@ import { File } from '../common/entities/file.entity';
 import { FileAccessLog } from '../common/entities/file-access-log.entity';
 import { AuditService } from '../common/services/audit.service';
 import { BCRYPT_ROUNDS } from '../common/constants/bcrypt';
+import { FILE_DELETE_GRACE_MS } from '../common/constants/durations';
 
 @Injectable()
 export class UserService {
@@ -142,10 +143,18 @@ export class UserService {
       }
 
       // 事务内：软删除用户的所有文件
+      // 删除用户时隔离其文件，并统一设置明确的 7 天删除计划。
+      const now = new Date();
+      const scheduledAt = new Date(now.getTime() + FILE_DELETE_GRACE_MS);
       await queryRunner.manager.update(
         File,
         { uploaderId: id, isDeleted: false },
-        { isDeleted: true },
+        {
+          isDeleted: true,
+          deletedByAdmin: true,
+          deleteRequestedAt: now,
+          deleteScheduledAt: scheduledAt,
+        },
       );
 
       // 事务内：软删除用户（保留用户行）。

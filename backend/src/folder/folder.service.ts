@@ -243,12 +243,20 @@ export class FolderService {
       );
     });
 
-    this.audit.log({
+    await this.audit.logAwait({
       action: (byAdmin ? 'folder_delete_by_admin' : 'folder_delete') as AuditAction,
       userId: ownerId,
       resourceType: 'folder',
       resourceId: id,
-      metadata: { name: folder.name, affectedFolders: folderIds.length, scheduledAt },
+      metadata: {
+        name: folder.name,
+        affectedFolders: folderIds.length,
+        affectedFiles: await this.fileRepo.count({
+          where: { folderId: In(folderIds), deleteRequestedAt: now },
+        }),
+        scheduledAt,
+        byAdmin,
+      },
     });
   }
 
