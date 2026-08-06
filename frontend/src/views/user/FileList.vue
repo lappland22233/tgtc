@@ -364,7 +364,7 @@
     </div>
 
     <!-- 上传弹窗 -->
-    <UploadModal :visible="showUploadModal" :initial-files="dropFiles" :folder-id="folderStore.currentFolderId" @close="handleUploadModalClose" @uploaded="onUploaded" />
+    <UploadModal :visible="showUploadModal" :initial-files="dropFiles" :initial-drop-result="dropCollected" :folder-id="folderStore.currentFolderId" @close="handleUploadModalClose" @uploaded="onUploaded" />
 
     <!-- 标签管理弹窗 -->
     <TagManager v-model:visible="showTagManager" :selected-tag-ids="selectedTagIds" @filter="handleTagManagerFilter" />
@@ -491,6 +491,8 @@ import { triggerBrowserDownload } from '@/utils/download';
 import { useCursorPagination } from '../../composables/useCursorPagination';
 import { useMobile } from '../../composables/useMobile';
 import UploadModal from '../../components/UploadModal.vue';
+import { collectFromDrop } from '../../utils/folder-traverse';
+import type { DropCollectResult } from '../../utils/folder-traverse';
 import TagManager from '../../components/TagManager.vue';
 import FileTagEditor from '../../components/FileTagEditor.vue';
 import ThumbnailImg from '../../components/ThumbnailImg.vue';
@@ -516,6 +518,8 @@ const isDraggedOver = ref(false);
 const markdownResult = ref('');
 const selectedFileIds = ref<string[]>([]);
 const dropFiles = ref<File[]>([]);
+/** 页面级拖拽采集结果（含目录结构），转发给上传弹窗处理，避免双重入队 */
+const dropCollected = ref<DropCollectResult | null>(null);
 const sortBy = ref<string>(route.query.sortBy as string || '');
 const sortOrder = ref<string>(route.query.sortOrder as string || '');
 const selectedTagIds = ref<string[]>(
@@ -1097,14 +1101,30 @@ function handlePageDragLeave(e: DragEvent) {
     isDraggedOver.value = false;
   }
 }
-function handlePageDrop(e: DragEvent) {
+async function handlePageDrop(e: DragEvent) {
   if (!hasExternalFiles(e)) return;
   e.preventDefault();
   dragCounter = 0;
   isDraggedOver.value = false;
   if (dragLeaveTimeout) clearTimeout(dragLeaveTimeout);
+  const items = e.dataTransfer?.items;
+  if (items && items.length > 0) {
+    // 采集在 drop 事件内同步启动（保留目录结构），结果转发给弹窗统一处理
+    try {
+      const result = await collectFromDrop(items);
+      if (result.parsed.length > 0 || result.plainFiles.length > 0) {
+        dropFiles.value = [];
+        dropCollected.value = result;
+        showUploadModal.value = true;
+        return;
+      }
+    } catch {
+      // 采集异常：回退原有平铺转发
+    }
+  }
   const files = Array.from(e.dataTransfer?.files || []);
   if (files.length > 0) {
+    dropCollected.value = null;
     dropFiles.value = files;
     showUploadModal.value = true;
   }
@@ -1227,6 +1247,7 @@ function onTagSaved() {
 function handleUploadModalClose() {
   showUploadModal.value = false;
   dropFiles.value = [];
+  dropCollected.value = null;
 }
 
 // 消费全局上传指示器「查看详情」注入的 uploadDialog=1 query：打开上传弹窗后立即清除该参数
@@ -1248,6 +1269,8 @@ function onUploaded() {
   uploadedRefetchTimer = setTimeout(() => {
     uploadedRefetchTimer = null;
     refetchFiles();
+    // 文件夹上传会在目标目录下新建子目录：同步刷新目录树（失败静默）
+    folderStore.fetchTree().catch(() => {});
   }, 800);
 }
 

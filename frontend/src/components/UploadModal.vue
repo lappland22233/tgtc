@@ -73,16 +73,36 @@
         @change="handleFileSelect"
         style="display: none;"
       />
+      <!-- 隐藏文件夹选择器（webkitdirectory 为非标准属性，主流桌面浏览器均支持） -->
+      <input
+        ref="folderInput"
+        type="file"
+        multiple
+        webkitdirectory
+        @change="handleFolderSelect"
+        style="display: none;"
+      />
       <div style="margin-bottom: 16px;">
         <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <path d="M12 16V4M8 8l4-4 4 4" />
           <path d="M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2" />
         </svg>
       </div>
-      <h3>拖拽文件到此处，或点击选择文件</h3>
+      <h3>拖拽文件或文件夹到此处，或点击选择</h3>
       <p style="color: var(--text-secondary); margin-top: 8px;">
-        单文件最大 {{ maxFileSizeMB }}MB，支持图片、PDF、ZIP 等格式；上传进行中可继续追加文件
+        单文件最大 {{ maxFileSizeMB }}MB，支持图片、PDF、ZIP 等格式；上传进行中可继续追加文件或文件夹
       </p>
+      <div style="display: flex; gap: 8px; justify-content: center; margin-top: 12px;">
+        <t-button size="small" variant="outline" theme="primary" @click.stop="triggerInput">
+          选择文件
+        </t-button>
+        <t-button size="small" variant="outline" :disabled="preparing" @click.stop="triggerFolderInput">
+          选择文件夹
+        </t-button>
+      </div>
+      <div v-if="preparingMsg" style="margin-top: 8px; font-size: 12px; color: var(--text-secondary);">
+        {{ preparingMsg }}
+      </div>
     </div>
 
     <!-- 上传队列（读取全局 upload store，关闭弹窗后上传继续在后台进行） -->
@@ -107,6 +127,11 @@
           <FileTypeIcon v-else :mimeType="item.file?.type" :fileName="item.fileName" :size="20" />
           <div style="flex: 1; min-width: 0;">
             <div style="font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{{ item.fileName }}</div>
+            <!-- 文件夹上传：文件名下方展示所属目录（次要色小字） -->
+            <div v-if="item.relativePath"
+              style="font-size: 12px; color: var(--text-tertiary); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
+              {{ item.relativePath }}
+            </div>
             <div style="font-size: 12px; color: var(--text-secondary); margin-top: 2px;">
               {{ formatModalSize(item.totalBytes) }}
               <t-tag v-if="item.status === 'success'" theme="success" size="small" variant="light">成功</t-tag>
@@ -189,6 +214,10 @@ import { formatSize as formatModalSize } from '../utils/format';
 import { getErrorMessage } from '../utils/error';
 import { reportUploadError } from '../utils/telemetry';
 import FileTypeIcon from '@/components/FileTypeIcon.vue';
+// 文件夹上传工具链：采集 → 路径校验 → 目录预创建/复用
+import { collectFromInput, collectFromDrop, validateParsedFiles } from '../utils/folder-traverse';
+import type { ParsedFile, PathViolation, DropCollectResult } from '../utils/folder-traverse';
+import { prepareDirectories } from '../utils/folder-resolver';
 
 const isMobile = useMobile();
 
@@ -196,6 +225,8 @@ const props = defineProps<{
   visible: boolean;
   initialFiles?: File[];
   folderId?: string | null;
+  /** 页面级拖拽采集结果（由宿主页面 collectFromDrop 后转发，避免重复入队） */
+  initialDropResult?: DropCollectResult | null;
 }>();
 const emit = defineEmits<{
   close: [];
@@ -217,7 +248,12 @@ const acceptTypes = ref('');
 const fileTypeMode = ref<'blacklist' | 'whitelist'>('blacklist');
 
 const fileInput = ref<HTMLInputElement>();
+const folderInput = ref<HTMLInputElement>();
 const isDragover = ref(false);
+/** 目录预创建进行中（防重复触发 + 按钮禁用） */
+const preparing = ref(false);
+/** 目录准备进度文案（prepareDirectories onProgress 驱动） */
+const preparingMsg = ref('');
 const selectedTagIds = ref<string[]>([]);
 const showTagSelector = ref(false);
 const newTagName = ref('');
@@ -336,6 +372,90 @@ function enqueueFiles(files: File[]) {
   uploadStore.enqueue(validated, props.folderId ?? null, selectedTagIds.value);
 }
 
+// ---- 文件夹上传链路 ----
+
+/** 生成文件夹上传批次 ID（同一次选择/拖拽共享） */
+function genBatchId(): string {
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+/**
+ * 文件夹链路公共处理：路径校验（违规整批阻止）→ 大小/类型校验（复用现有逻辑）
+ * → prepareDirectories 预创建/复用目录 → 携带最终 folderId 入队。
+ * handleFolderSelect / handleDrop / 页面拖拽转发 三个入口共用。
+ */
+async function processParsedFiles(
+  parsed: ParsedFile[],
+  emptyDirs: string[],
+  violations?: PathViolation[],
+) {
+  // 准备中防重复触发
+  if (preparing.value) {
+    MessagePlugin.warning('正在准备目录，请稍候');
+    return;
+  }
+  if (parsed.length === 0) {
+    if (emptyDirs.length > 0) MessagePlugin.info('空文件夹不会被上传');
+    return;
+  }
+
+  // 1. 路径校验：存在非法段（如 '..'/保留名/非法字符）时整批阻止
+  const bad = violations ?? validateParsedFiles(parsed);
+  if (bad.length > 0) {
+    const v = bad[0];
+    MessagePlugin.error(`文件夹路径非法："${v.relativePath}" — ${v.reason}（共影响 ${bad.length} 个文件，已阻止本批上传）`);
+    return;
+  }
+
+  // 2. 复用现有大小/类型校验（逐文件提示并跳过）
+  const validFiles = validateFiles(parsed.map((p) => p.file));
+  if (validFiles.length === 0) return;
+  const validSet = new Set(validFiles);
+  const validParsed = parsed.filter((p) => validSet.has(p.file));
+
+  if (emptyDirs.length > 0) MessagePlugin.info('空文件夹不会被上传');
+
+  // 3. 预创建/复用目录（onProgress 驱动局部提示；不占上传令牌池）
+  const baseParentId = props.folderId ?? null;
+  preparing.value = true;
+  preparingMsg.value = '正在准备目录…';
+  try {
+    const { dirIdMap, reusedCount } = await prepareDirectories(
+      baseParentId,
+      validParsed,
+      (msg) => { preparingMsg.value = msg; },
+    );
+    if (reusedCount > 0) MessagePlugin.info(`${reusedCount} 个已存在目录将直接复用`);
+
+    // 4. 生成 {file, folderId, relativePath} 入队（根级文件映射回当前目录）
+    const items = validParsed.map((p) => ({
+      file: p.file,
+      folderId: p.relativePath ? (dirIdMap.get(p.relativePath) ?? baseParentId) : baseParentId,
+      relativePath: p.relativePath,
+    }));
+    uploadStore.enqueueFolderFiles(items, selectedTagIds.value, genBatchId());
+  } catch (err) {
+    MessagePlugin.error(getErrorMessage(err) || '目录准备失败，请重试');
+  } finally {
+    preparing.value = false;
+    preparingMsg.value = '';
+  }
+}
+
+/** 处理拖拽采集结果：parsed 走文件夹链路，plainFiles 走现有平铺入队，同批共存 */
+async function handleCollectResult(result: DropCollectResult) {
+  if (result.degraded) {
+    // Entry API 不可用：保持原行为（全部平铺）并提示已降级
+    if (result.plainFiles.length > 0) {
+      MessagePlugin.info('浏览器不支持文件夹拖拽解析，已按平铺方式上传');
+      enqueueFiles(result.plainFiles);
+    }
+    return;
+  }
+  if (result.plainFiles.length > 0) enqueueFiles(result.plainFiles);
+  await processParsedFiles(result.parsed, result.emptyDirs, result.violations);
+}
+
 async function fetchUploadConfig() {
   try {
     const res = await api.get('/files/upload-config');
@@ -356,14 +476,32 @@ async function fetchUploadConfig() {
   }
 }
 
-function handleDrop(e: DragEvent) {
+async function handleDrop(e: DragEvent) {
   isDragover.value = false;
-  const files = Array.from(e.dataTransfer?.files || []);
-  enqueueFiles(files);
+  const dt = e.dataTransfer;
+  if (!dt) return;
+  // Entry API 不可用时保持原有平铺行为
+  if (!dt.items || dt.items.length === 0) {
+    enqueueFiles(Array.from(dt.files || []));
+    return;
+  }
+  try {
+    const result = await collectFromDrop(dt.items);
+    await handleCollectResult(result);
+  } catch (err) {
+    // 采集异常兜底：回退原有平铺行为
+    console.warn('[上传弹窗] 拖拽采集异常，回退平铺上传:', err);
+    enqueueFiles(Array.from(dt.files || []));
+  }
 }
 
 function triggerInput() {
   fileInput.value?.click();
+}
+
+function triggerFolderInput() {
+  if (preparing.value) return;
+  folderInput.value?.click();
 }
 
 function handleFileSelect(e: Event) {
@@ -371,6 +509,16 @@ function handleFileSelect(e: Event) {
   const files = Array.from(target.files || []);
   enqueueFiles(files);
   target.value = '';
+}
+
+/** 文件夹选择器：采集 → 公共文件夹链路 */
+async function handleFolderSelect(e: Event) {
+  const target = e.target as HTMLInputElement;
+  const files = Array.from(target.files || []);
+  target.value = '';
+  if (files.length === 0) return;
+  const parsed = collectFromInput(files);
+  await processParsedFiles(parsed, []);
 }
 
 // 上传配置改为弹窗打开时惰性获取，避免未打开弹窗也发请求
@@ -384,6 +532,10 @@ watch(() => props.visible, async (isVisible) => {
     newTagName.value = '';
     if (props.initialFiles && props.initialFiles.length > 0) {
       enqueueFiles(Array.from(props.initialFiles));
+    }
+    // 页面级拖拽转发的采集结果：走与弹窗拖拽完全一致的链路
+    if (props.initialDropResult) {
+      await handleCollectResult(props.initialDropResult);
     }
   }
 });

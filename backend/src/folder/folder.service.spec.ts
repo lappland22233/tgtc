@@ -3,7 +3,10 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { BadRequestException } from '@nestjs/common';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { Repository, IsNull } from 'typeorm';
+import { plainToInstance } from 'class-transformer';
+import { validate } from 'class-validator';
 import { FolderService } from './folder.service';
+import { CreateFolderDto, RenameFolderDto } from './folder.dto';
 import { Folder } from '../common/entities/folder.entity';
 import { File } from '../common/entities/file.entity';
 import { AuditService } from '../common/services/audit.service';
@@ -124,6 +127,100 @@ describe('FolderService - createFolder', () => {
     await expect(service.createFolder(ownerId, { name: '文档' })).rejects.toThrow('同层级下已存在同名文件夹');
     expect(folderRepo.create).not.toHaveBeenCalled();
     expect(folderRepo.save).not.toHaveBeenCalled();
+  });
+});
+
+describe('FolderService - 特殊保留名称校验', () => {
+  const ownerId = '11111111-1111-4111-8111-111111111111';
+
+  let service: FolderService;
+  let folderRepo: {
+    findOne: jest.Mock;
+    create: jest.Mock;
+    save: jest.Mock;
+    manager: { query: jest.Mock };
+  };
+
+  beforeEach(async () => {
+    folderRepo = {
+      findOne: jest.fn().mockResolvedValue(null),
+      create: jest.fn((data: Partial<Folder>) => data as Folder),
+      save: jest.fn(async (entity: Folder) => ({ ...entity, id: entity.id ?? '22222222-2222-4222-8222-222222222222' })),
+      manager: { query: jest.fn().mockResolvedValue([{ cnt: 1 }]) },
+    };
+
+    const moduleRef: TestingModule = await Test.createTestingModule({
+      providers: [
+        FolderService,
+        { provide: getRepositoryToken(Folder), useValue: folderRepo },
+        { provide: getRepositoryToken(File), useValue: { findOne: jest.fn(), find: jest.fn() } as Partial<Repository<File>> },
+        { provide: AuditService, useValue: { log: jest.fn(), logAwait: jest.fn() } },
+      ],
+    }).compile();
+
+    service = moduleRef.get(FolderService);
+  });
+
+  it('createFolder 拒绝 ".."（防路径穿越）', async () => {
+    await expect(service.createFolder(ownerId, { name: '..' })).rejects.toThrow('文件夹名称不允许使用保留名称');
+    expect(folderRepo.findOne).not.toHaveBeenCalled();
+    expect(folderRepo.save).not.toHaveBeenCalled();
+  });
+
+  it('createFolder 拒绝 "."', async () => {
+    await expect(service.createFolder(ownerId, { name: '.' })).rejects.toThrow(BadRequestException);
+    expect(folderRepo.save).not.toHaveBeenCalled();
+  });
+
+  it('createFolder 拒绝 Windows 保留设备名（含扩展名，如 CON.txt）', async () => {
+    for (const name of ['CON.txt', 'con', 'Nul', 'COM1', 'lpt9.bak']) {
+      await expect(service.createFolder(ownerId, { name })).rejects.toThrow('文件夹名称不允许使用保留名称');
+    }
+    expect(folderRepo.save).not.toHaveBeenCalled();
+  });
+
+  it('renameFolder 同样拒绝保留名称', async () => {
+    await expect(
+      service.renameFolder(ownerId, '66666666-6666-4666-8666-666666666666', { name: '..' }),
+    ).rejects.toThrow('文件夹名称不允许使用保留名称');
+    expect(folderRepo.findOne).not.toHaveBeenCalled();
+  });
+
+  it('合法中文名称正常创建（含空格、点、连字符、下划线）', async () => {
+    const saved = await service.createFolder(ownerId, { name: '项目文档 2026.最终版-备份_v2' });
+    expect(saved.name).toBe('项目文档 2026.最终版-备份_v2');
+    expect(folderRepo.save).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('CreateFolderDto / RenameFolderDto - 名称字符集校验', () => {
+  it('拒绝包含路径分隔符等非法字符的名称（Create 与 Rename 规则一致）', async () => {
+    for (const name of ['../etc', 'a/b', 'a\\b', 'a:b', 'a*b', 'a"b', 'a<b', 'a|b', 'a?b']) {
+      const createDto = plainToInstance(CreateFolderDto, { name });
+      const createErrors = await validate(createDto, { whitelist: true, forbidNonWhitelisted: true });
+      expect(createErrors.map((e) => e.property)).toContain('name');
+
+      const renameDto = plainToInstance(RenameFolderDto, { name });
+      const renameErrors = await validate(renameDto, { whitelist: true, forbidNonWhitelisted: true });
+      expect(renameErrors.map((e) => e.property)).toContain('name');
+    }
+  });
+
+  it('接受中英文、数字、空格、点、连字符、下划线与全角空格/点', async () => {
+    for (const name of ['文档', 'My Files 2026', '备份-v2_final', '全角\u3000空格\uFF0E点', 'CON']) {
+      const dto = plainToInstance(CreateFolderDto, { name });
+      await expect(validate(dto, { whitelist: true, forbidNonWhitelisted: true })).resolves.toHaveLength(0);
+    }
+  });
+
+  it('Transform 先 trim 后再校验：首尾空格不误伤，纯空格拒绝', async () => {
+    const trimmed = plainToInstance(CreateFolderDto, { name: '  文档  ' });
+    expect(trimmed.name).toBe('文档');
+    await expect(validate(trimmed, { whitelist: true, forbidNonWhitelisted: true })).resolves.toHaveLength(0);
+
+    const blank = plainToInstance(CreateFolderDto, { name: '   ' });
+    const errors = await validate(blank, { whitelist: true, forbidNonWhitelisted: true });
+    expect(errors.map((e) => e.property)).toContain('name');
   });
 });
 

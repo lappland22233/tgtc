@@ -31,6 +31,7 @@ import MessagePlugin from '@/utils/message';
 import { getErrorMessage } from '@/utils/error';
 import { useFolderStore } from '../../stores/folders';
 import type { Folder } from '../../stores/folders';
+import { validateFolderSegment } from '../../utils/folder-name';
 
 const props = defineProps<{
   visible: boolean;
@@ -53,6 +54,14 @@ const rules = {
   name: [
     { required: true, message: '请输入文件夹名称', type: 'error' as const },
     { max: 255, message: '文件夹名称不能超过 255 个字符', type: 'error' as const },
+    {
+      // 接入文件夹段校验工具：覆盖保留名（'.'/'..'/Windows 设备名）与非法字符，
+      // 错误文案由工具函数给出具体提示
+      validator: (val: string) => {
+        const reason = validateFolderSegment(val);
+        return reason ? { result: false, message: reason } : { result: true, message: '' };
+      },
+    },
   ],
 };
 

@@ -12,6 +12,9 @@ const SOFT_DELETE_GRACE_DAYS = 7;
 /** 文件夹最大嵌套深度（根目录子级为 0）。限制层级避免闭包表平方级膨胀与递归栈溢出 */
 const MAX_FOLDER_DEPTH = 20;
 
+/** Windows 保留设备名：不区分大小写、忽略扩展名（如 con.txt 也命中） */
+const RESERVED_DEVICE_NAME_PATTERN = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i;
+
 /**
  * 文件夹服务：网盘层级管理。
  *
@@ -119,6 +122,8 @@ export class FolderService {
   // ---------- 写操作 ----------
 
   async createFolder(ownerId: string, dto: CreateFolderDto): Promise<Folder> {
+    // 特殊保留名称拦截（'.'/'..'/Windows 设备名），在任何持久化操作之前执行
+    this.assertFolderNameAllowed(dto.name);
     // 保留 assertFolderOwned 返回的完整父实体，供下方 parent 关联使用；
     // 仅传 { id } 部分对象会让 TypeORM 闭包表插入时缺少必要的实体信息
     let parentFolder: Folder | null = null;
@@ -154,6 +159,8 @@ export class FolderService {
   }
 
   async renameFolder(ownerId: string, id: string, dto: RenameFolderDto): Promise<Folder> {
+    // 特殊保留名称拦截，与 createFolder 规则一致
+    this.assertFolderNameAllowed(dto.name);
     const folder = await this.assertFolderOwned(id, ownerId);
     const sibling = await this.folderRepo.findOne({
       where: {
@@ -438,6 +445,19 @@ export class FolderService {
   }
 
   // ---------- 内部工具 ----------
+
+  /**
+   * 拒绝特殊保留名称：
+   * - '.' / '..' 一律拒绝（防路径穿越，用户明确要求）；
+   * - Windows 保留设备名 CON/PRN/AUX/NUL/COM1-9/LPT1-9（不区分大小写、忽略扩展名，
+   *   如 con.txt 也拒绝），避免下载/打包时在 Windows 上产生不可用文件。
+   * 字符集层面的非法字符由 DTO 层 @Matches 拦截（服务层内调兼容绕过管道的使用方）。
+   */
+  private assertFolderNameAllowed(name: string): void {
+    if (name === '.' || name === '..' || RESERVED_DEVICE_NAME_PATTERN.test(name)) {
+      throw new BadRequestException('文件夹名称不允许使用保留名称');
+    }
+  }
 
   /**
    * 校验 folder 存在、未删除、且属于当前用户。

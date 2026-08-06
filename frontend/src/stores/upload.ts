@@ -35,6 +35,10 @@ export interface QueueEntry {
   speedBps: number;
   folderId: string | null;
   tagIds: string[];
+  /** 文件夹上传：文件所属目录的相对路径（不含文件名）；平铺文件无此字段 */
+  relativePath?: string;
+  /** 文件夹上传批次 ID：同一次选择/拖拽产生的条目共享，便于后续按批操作 */
+  batchId?: string;
 }
 
 /** 5MB 以上走分片上传，避免 CDN 超时截断 */
@@ -349,6 +353,46 @@ export const useUploadStore = defineStore('upload', () => {
   }
 
   /**
+   * 文件夹上传入队：每条 item 已携带预创建/复用后的最终 folderId。
+   * 与 enqueue 相同的 File 引用去重策略；入队后立即 ensurePump()，
+   * worker / 取消 / 终态清理逻辑完全复用，零改动。
+   */
+  function enqueueFolderFiles(
+    items: Array<{ file: File; folderId: string | null; relativePath: string }>,
+    tagIds: string[],
+    batchId?: string,
+  ) {
+    const newEntries: QueueEntry[] = [];
+    for (const item of items) {
+      if (!item.file) continue;
+      // 同一 File 引用已在队列中（任意状态）则跳过
+      if (entries.value.some((e) => e.file === item.file)) continue;
+      newEntries.push({
+        uid: genUid(),
+        file: item.file,
+        fileName: item.file.name,
+        status: 'pending',
+        errorReason: undefined,
+        progress: 0,
+        totalBytes: item.file.size,
+        loadedBytes: 0,
+        speed: '-',
+        eta: '-',
+        checkpointTime: 0,
+        checkpointBytes: 0,
+        speedBps: 0,
+        folderId: item.folderId,
+        tagIds: [...tagIds],
+        relativePath: item.relativePath || undefined,
+        batchId,
+      });
+    }
+    if (newEntries.length === 0) return;
+    entries.value.push(...newEntries);
+    ensurePump();
+  }
+
+  /**
    * 取消单个条目：abort 对应 controller；若该文件已建立分片会话（有 uploadId）
    * 则同时 POST /files/chunk/:uploadId/abort 通知服务端清理。
    */
@@ -400,6 +444,7 @@ export const useUploadStore = defineStore('upload', () => {
     overallSpeed,
     // 操作
     enqueue,
+    enqueueFolderFiles,
     cancelOne,
     cancelAll,
     clearFinished,
