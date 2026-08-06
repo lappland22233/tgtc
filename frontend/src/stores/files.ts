@@ -203,7 +203,7 @@ export const useFileStore = defineStore('files', () => {
     const { jobId } = response.data.data;
 
     // Step 2: 轮询上传状态（Telegram 转发阶段）
-    const pollInterval = 1000; // 1 秒轮询
+    const pollInterval = 2000; // 2 秒轮询（降低轮询频率，为上传请求预留连接）
     const maxWait = 10 * 60 * 1000; // 最多等 10 分钟
     const startTime = Date.now();
 

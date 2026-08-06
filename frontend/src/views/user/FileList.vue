@@ -446,7 +446,7 @@
     </t-dialog>
 
     <!-- 文件夹相关弹窗 -->
-    <FolderCreateDialog v-model:visible="showCreateFolderDialog" :parent-id="folderStore.currentFolderId" />
+    <FolderCreateDialog v-model:visible="showCreateFolderDialog" :parent-id="folderStore.currentFolderId" @created="onFolderCreated" />
     <FolderRenameDialog v-model:visible="showRenameFolderDialog" :folder="renameTargetFolder" />
     <FolderMoveDialog
       v-model:visible="showMoveDialog"
@@ -620,6 +620,11 @@ function openMoveDialogForFiles(fileIds?: string[]) {
 async function onFolderMoved() {
   refetchFiles();
   selectedFileIds.value = [];
+}
+
+/** 新建文件夹成功：乐观插入内存树，避免树刷新失败/竞态时新文件夹不显示 */
+function onFolderCreated(folder: Folder) {
+  folderStore.insertIntoTree(folder, folder.parentId);
 }
 
 function onFolderDelete(folder: Folder) {
@@ -1179,9 +1184,26 @@ function handleUploadModalClose() {
   dropFiles.value = [];
 }
 
+// 消费全局上传指示器「查看详情」注入的 uploadDialog=1 query：打开上传弹窗后立即清除该参数
+watch(() => route.query.uploadDialog, (val) => {
+  if (val === '1') {
+    showUploadModal.value = true;
+    const query = { ...route.query };
+    delete query.uploadDialog;
+    router.replace({ query });
+  }
+}, { immediate: true });
+
+// 上传完成刷新防抖：store 每个文件成功即触发一次 uploaded，多文件并发完成时合并为一次全量重取
+let uploadedRefetchTimer: ReturnType<typeof setTimeout> | null = null;
+
 function onUploaded() {
-  refetchFiles();
   selectedFileIds.value = [];
+  if (uploadedRefetchTimer) clearTimeout(uploadedRefetchTimer);
+  uploadedRefetchTimer = setTimeout(() => {
+    uploadedRefetchTimer = null;
+    refetchFiles();
+  }, 800);
 }
 
 function handleSearch() {
@@ -1447,6 +1469,7 @@ onUnmounted(() => {
   if (scrollObserver) { scrollObserver.disconnect(); scrollObserver = null; }
   if (dragLeaveTimeout) { clearTimeout(dragLeaveTimeout); dragLeaveTimeout = null; }
   if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; }
+  if (uploadedRefetchTimer) { clearTimeout(uploadedRefetchTimer); uploadedRefetchTimer = null; }
   dragCounter = 0;
 });
 </script>

@@ -9,7 +9,13 @@
   >
     <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
       <span style="font-size: 14px; color: var(--text-secondary);">同时上传文件数：</span>
-      <t-select v-model="concurrency" :options="concurrencyOptions" style="width: 80px;" size="small" />
+      <t-select
+        :value="uploadStore.fileConcurrency"
+        :options="concurrencyOptions"
+        style="width: 80px;"
+        size="small"
+        @change="handleConcurrencyChange"
+      />
     </div>
 
     <!-- 标签选择 -->
@@ -75,51 +81,79 @@
       </div>
       <h3>拖拽文件到此处，或点击选择文件</h3>
       <p style="color: var(--text-secondary); margin-top: 8px;">
-        单文件最大 {{ maxFileSizeMB }}MB，支持图片、PDF、ZIP 等格式
+        单文件最大 {{ maxFileSizeMB }}MB，支持图片、PDF、ZIP 等格式；上传进行中可继续追加文件
       </p>
     </div>
 
-    <t-loading v-if="uploading" style="margin-top: 16px;" />
+    <!-- 上传队列（读取全局 upload store，关闭弹窗后上传继续在后台进行） -->
+    <div v-if="uploadStore.entries.length > 0" style="margin-top: 16px;">
+      <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
+        <div style="font-size: 12px; color: var(--text-secondary);">
+          总进度 {{ uploadStore.overallProgress }}%
+          <template v-if="hasActiveUploads"> · {{ uploadStore.overallSpeed }}</template>
+          <template v-if="uploadStore.activeCount > 0"> · 进行中 {{ uploadStore.activeCount }}</template>
+          <template v-if="uploadStore.queuedCount > 0"> · 排队 {{ uploadStore.queuedCount }}</template>
+        </div>
+        <t-button v-if="finishedCount > 0" size="small" variant="text" @click="uploadStore.clearFinished()">
+          清除已完成
+        </t-button>
+      </div>
+      <t-progress :percentage="uploadStore.overallProgress" size="small" style="margin-bottom: 12px;" />
 
-    <!-- 上传队列（含进度条） -->
-    <div v-if="uploadQueue.length > 0" style="margin-top: 16px;">
-      <div v-for="(item, index) in uploadQueue" :key="index"
+      <div v-for="item in uploadStore.entries" :key="item.uid"
         style="padding: 12px; background: var(--bg-secondary); border-radius: 8px; margin-bottom: 8px; border: 1px solid var(--border-color);">
         <div style="display: flex; align-items: center; gap: 12px;">
-          <img v-if="item.file.type.startsWith('image/')" :src="getPreviewUrl(item.file)" loading="lazy" style="width: 32px; height: 32px; object-fit: cover; border-radius: 4px; flex-shrink: 0;" />
-          <FileTypeIcon v-else :mimeType="item.file?.type" :fileName="item.file?.name" :size="20" />
+          <img v-if="item.file && item.file.type.startsWith('image/')" :src="uploadStore.getPreviewUrl(item.file)" loading="lazy" style="width: 32px; height: 32px; object-fit: cover; border-radius: 4px; flex-shrink: 0;" />
+          <FileTypeIcon v-else :mimeType="item.file?.type" :fileName="item.fileName" :size="20" />
           <div style="flex: 1; min-width: 0;">
-            <div style="font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{{ item.file.name }}</div>
+            <div style="font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{{ item.fileName }}</div>
             <div style="font-size: 12px; color: var(--text-secondary); margin-top: 2px;">
-              {{ formatModalSize(item.file.size) }}
+              {{ formatModalSize(item.totalBytes) }}
               <t-tag v-if="item.status === 'success'" theme="success" size="small" variant="light">成功</t-tag>
               <t-tag v-else-if="item.status === 'error'" theme="danger" size="small" variant="light">失败</t-tag>
+              <t-tag v-else-if="item.status === 'cancelled'" theme="default" size="small" variant="light">已取消</t-tag>
               <t-tag v-else-if="item.status === 'processing'" theme="warning" size="small" variant="light">处理中</t-tag>
               <t-tag v-else-if="item.progress > 0" theme="primary" size="small" variant="light">{{ item.progress }}%</t-tag>
               <t-tag v-else theme="primary" size="small" variant="light">等待</t-tag>
             </div>
           </div>
+          <t-button
+            v-if="item.status === 'pending' || item.status === 'processing'"
+            size="small"
+            variant="text"
+            shape="square"
+            :aria-label="`取消上传 ${item.fileName}`"
+            @click="uploadStore.cancelOne(item.uid)"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M18 6L6 18M6 6l12 12" />
+            </svg>
+          </t-button>
         </div>
-        <div v-if="item.progress > 0 && item.status !== 'success' && item.status !== 'error'" style="margin-top: 8px;">
+        <div v-if="item.progress > 0 && item.status !== 'success' && item.status !== 'error' && item.status !== 'cancelled'" style="margin-top: 8px;">
           <t-progress :percentage="item.progress" size="small" />
           <div style="display: flex; gap: 16px; margin-top: 4px; font-size: 12px; color: var(--text-secondary);">
             <span>{{ item.speed }}</span>
             <span>剩余 {{ item.eta }}</span>
           </div>
         </div>
+        <div v-if="item.status === 'error' && item.errorReason" style="margin-top: 8px; font-size: 12px; color: var(--error);">
+          {{ item.errorReason }}
+        </div>
       </div>
     </div>
 
-    <div v-if="batchResult && uploadQueue.length > 0" style="margin-top: 16px;">
-      <t-tag v-if="batchResult.failed.length === 0" theme="success">
-        全部 {{ batchResult.success.length }} 个文件已接收，正在后台处理中...
+    <!-- 全部终态后的汇总提示（等价于原 batchResult 展示） -->
+    <div v-if="allFinished" style="margin-top: 16px;">
+      <t-tag v-if="failedEntries.length === 0" theme="success">
+        全部 {{ successCount }} 个文件已接收，正在后台处理中...
       </t-tag>
       <t-tag v-else theme="warning">
-        {{ batchResult.success.length }} 个成功，{{ batchResult.failed.length }} 个失败
+        {{ successCount }} 个成功，{{ failedEntries.length }} 个失败<template v-if="cancelledCount > 0">，{{ cancelledCount }} 个已取消</template>
       </t-tag>
 
-      <div v-if="batchResult.failed.length > 0" style="margin-top: 12px;">
-        <div v-for="(item, index) in batchResult.failed" :key="'fail-' + index"
+      <div v-if="failedEntries.length > 0" style="margin-top: 12px;">
+        <div v-for="item in failedEntries" :key="'fail-' + item.uid"
           style="padding: 8px 12px; background: var(--bg-secondary); border-radius: 8px; margin-bottom: 8px; border: 1px solid var(--border-color);">
           <span style="color: var(--error); display: inline-flex;">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -127,17 +161,17 @@
               <path d="M15 9l-6 6M9 9l6 6" />
             </svg>
           </span>
-          <span style="margin-left: 8px; font-weight: 500;">{{ item.name }}</span>
-          <span style="margin-left: 8px; color: var(--text-secondary);">{{ item.reason }}</span>
+          <span style="margin-left: 8px; font-weight: 500;">{{ item.fileName }}</span>
+          <span style="margin-left: 8px; color: var(--text-secondary);">{{ item.errorReason }}</span>
         </div>
       </div>
 
-      <div style="margin-top: 16px; text-align: right;">
-        <t-button v-if="batchResult.failed.length === 0" theme="primary" @click="handleClose">
-          完成
+      <div style="margin-top: 16px; display: flex; gap: 8px; justify-content: flex-end;">
+        <t-button variant="outline" @click="uploadStore.clearFinished()">
+          清除已完成
         </t-button>
-        <t-button v-else theme="primary" variant="outline" @click="resetQueue">
-          重新选择
+        <t-button theme="primary" @click="handleClose">
+          完成
         </t-button>
       </div>
     </div>
@@ -145,18 +179,16 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onUnmounted } from 'vue';
+import { ref, computed, watch } from 'vue';
 import MessagePlugin from '@/utils/message';
-import { useFileStore } from '../stores/files';
 import { useTagStore } from '../stores/tags';
+import { useUploadStore } from '../stores/upload';
 import { api } from '../stores/auth';
 import { useMobile } from '../composables/useMobile';
 import { formatSize as formatModalSize } from '../utils/format';
 import { getErrorMessage } from '../utils/error';
 import { reportUploadError } from '../utils/telemetry';
-import { useChunkedUpload } from '../composables/useChunkedUpload';
 import FileTypeIcon from '@/components/FileTypeIcon.vue';
-import type { BatchUploadResult } from '../types/file';
 
 const isMobile = useMobile();
 
@@ -176,104 +208,48 @@ const dialogVisible = computed({
   set: (val) => { if (!val) emit('close'); },
 });
 
-type QueueStatus = 'pending' | 'processing' | 'success' | 'error';
-
-interface QueueEntry {
-  uid: string;           // 唯一标识，防止同名文件覆盖
-  file: File;
-  status: QueueStatus;
-  errorReason?: string;
-  progress: number;
-  totalBytes: number;
-  loadedBytes: number;
-  speed: string;
-  eta: string;
-  checkpointTime: number;
-  checkpointBytes: number;
-}
+const uploadStore = useUploadStore();
+const tagStore = useTagStore();
 
 const maxFileSizeBytes = ref(20 * 1024 * 1024);
 const maxFileSizeMB = ref(20);
 const acceptTypes = ref('');
 const fileTypeMode = ref<'blacklist' | 'whitelist'>('blacklist');
 
-const fileStore = useFileStore();
-const tagStore = useTagStore();
 const fileInput = ref<HTMLInputElement>();
 const isDragover = ref(false);
-const uploading = ref(false);
-const uploadQueue = ref<QueueEntry[]>([]);
-const batchResult = ref<BatchUploadResult | null>(null);
 const selectedTagIds = ref<string[]>([]);
 const showTagSelector = ref(false);
 const newTagName = ref('');
-const concurrency = ref(3);
-const concurrencyOptions = Array.from({ length: 10 }, (_, i) => ({ label: `${i + 1}`, value: i + 1 }));
+const concurrencyOptions = Array.from({ length: 4 }, (_, i) => ({ label: `${i + 1}`, value: i + 1 }));
 
-// 速度/ETA 计算定时器
-let speedTimer: ReturnType<typeof setInterval> | null = null;
+// ---- store 汇总派生状态（替代原 batchResult） ----
+const hasActiveUploads = computed(
+  () => uploadStore.isPumping || uploadStore.activeCount > 0 || uploadStore.queuedCount > 0,
+);
+const successCount = computed(() => uploadStore.entries.filter((e) => e.status === 'success').length);
+const failedEntries = computed(() => uploadStore.entries.filter((e) => e.status === 'error'));
+const cancelledCount = computed(() => uploadStore.entries.filter((e) => e.status === 'cancelled').length);
+const finishedCount = computed(() => successCount.value + failedEntries.value.length + cancelledCount.value);
+const allFinished = computed(() => uploadStore.entries.length > 0 && !hasActiveUploads.value);
 
-function formatSpeed(bytesPerSec: number): string {
-  if (bytesPerSec <= 0) return '计算中...';
-  if (bytesPerSec >= 1048576) return (bytesPerSec / 1048576).toFixed(1) + ' MB/s';
-  if (bytesPerSec >= 1024) return (bytesPerSec / 1024).toFixed(0) + ' KB/s';
-  return bytesPerSec.toFixed(0) + ' B/s';
-}
+// 每个文件上传成功即通知宿主刷新列表（store 后台异步完成，无法再用批量返回时机）
+watch(successCount, (cur, old) => {
+  if (cur > (old ?? 0)) emit('uploaded');
+});
 
-function formatETA(seconds: number): string {
-  if (seconds <= 0 || !isFinite(seconds)) return '计算中...';
-  if (seconds >= 3600) return Math.ceil(seconds / 3600) + ' 小时';
-  if (seconds >= 60) return Math.ceil(seconds / 60) + ' 分钟';
-  return Math.ceil(seconds) + ' 秒';
-}
-
-function updateSpeeds() {
-  const now = Date.now();
-  for (const entry of uploadQueue.value) {
-    if (entry.status === 'pending' || entry.status === 'success' || entry.status === 'error') continue;
-    // 尚未开始传输或 checkpointTime 未初始化 → 跳过
-    if (entry.checkpointTime === 0) continue;
-    const timeDiff = (now - entry.checkpointTime) / 1000;
-    if (timeDiff <= 0) continue;
-    const bytesDiff = entry.loadedBytes - entry.checkpointBytes;
-    const speed = bytesDiff / timeDiff;
-    entry.speed = formatSpeed(speed);
-    const remaining = entry.totalBytes - entry.loadedBytes;
-    entry.eta = formatETA(speed > 0 ? remaining / speed : 0);
-    entry.checkpointTime = now;
-    entry.checkpointBytes = entry.loadedBytes;
+// 全部终态时给出与原 batchResult 完成提示等价的消息（仅状态翻转时触发一次）
+watch(allFinished, (done, was) => {
+  if (!done || was) return;
+  if (failedEntries.value.length === 0) {
+    MessagePlugin.success('文件接收完成，正在后台处理中，请稍后刷新查看');
+  } else if (successCount.value > 0) {
+    MessagePlugin.success(`${successCount.value} 个文件已接收，${failedEntries.value.length} 个失败。正在后台处理中`);
   }
-}
+});
 
-function startSpeedTimer() {
-  stopSpeedTimer();
-  speedTimer = setInterval(updateSpeeds, 3000);
-}
-
-function stopSpeedTimer() {
-  if (speedTimer) {
-    clearInterval(speedTimer);
-    speedTimer = null;
-  }
-}
-
-// 本地文件预览 URL 缓存
-const previewUrls = new Map<File, string>();
-function getPreviewUrl(file: File): string {
-  if (!previewUrls.has(file)) {
-    previewUrls.set(file, URL.createObjectURL(file));
-  }
-  return previewUrls.get(file)!;
-}
-
-function resetQueue() {
-  uploadQueue.value = [];
-  batchResult.value = null;
-  // 释放本地预览 ObjectURL，避免反复选择文件时累积内存泄漏
-  for (const url of previewUrls.values()) {
-    URL.revokeObjectURL(url);
-  }
-  previewUrls.clear();
+function handleConcurrencyChange(value: unknown) {
+  uploadStore.setFileConcurrency(Number(value));
 }
 
 function toggleTag(tagId: string) {
@@ -297,24 +273,11 @@ async function handleCreateTag() {
   }
 }
 
-// 进行中的分片上传 AbortController 集合：关闭弹窗时统一中止，避免孤儿请求
-const activeControllers = new Set<AbortController>();
-
-function abortAllUploads() {
-  for (const controller of activeControllers) {
-    try {
-      controller.abort();
-    } catch {
-      // 忽略个别 abort 异常
-    }
-  }
-  activeControllers.clear();
-}
-
+/**
+ * 关闭弹窗仅收起 UI：上传调度已迁至模块级 upload store，
+ * 不再 abort / resetQueue，上传继续在后台进行（由全局指示器展示进度）。
+ */
 function handleClose() {
-  stopSpeedTimer();
-  abortAllUploads();
-  resetQueue();
   emit('close');
 }
 
@@ -362,6 +325,17 @@ function validateFiles(files: File[]): File[] {
   });
 }
 
+/**
+ * 追加式入队：校验通过后交给全局 upload store。
+ * 上传进行中可重复调用（无 uploading 守卫），store 按 File 引用去重。
+ * 标签在入队时快照到条目，后续修改选择不影响已入队文件。
+ */
+function enqueueFiles(files: File[]) {
+  const validated = validateFiles(files);
+  if (validated.length === 0) return;
+  uploadStore.enqueue(validated, props.folderId ?? null, selectedTagIds.value);
+}
+
 async function fetchUploadConfig() {
   try {
     const res = await api.get('/files/upload-config');
@@ -382,225 +356,24 @@ async function fetchUploadConfig() {
   }
 }
 
-async function handleDrop(e: DragEvent) {
+function handleDrop(e: DragEvent) {
   isDragover.value = false;
   const files = Array.from(e.dataTransfer?.files || []);
-  await uploadFiles(validateFiles(files));
+  enqueueFiles(files);
 }
 
 function triggerInput() {
   fileInput.value?.click();
 }
 
-async function handleFileSelect(e: Event) {
+function handleFileSelect(e: Event) {
   const target = e.target as HTMLInputElement;
   const files = Array.from(target.files || []);
-  await uploadFiles(validateFiles(files));
+  enqueueFiles(files);
   target.value = '';
 }
 
-/**
- * 生成唯一 ID。
- * crypto.randomUUID() 需要安全上下文且属 ES2022 运行时 API，
- * 构建 target 为 es2020 或 HTTP 部署时可能缺失，这里做逐级降级避免运行时崩溃。
- */
-function genUid(): string {
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-    return crypto.randomUUID();
-  }
-  const bytes = new Uint8Array(16);
-  if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
-    crypto.getRandomValues(bytes);
-  } else {
-    for (let i = 0; i < 16; i++) bytes[i] = Math.floor(Math.random() * 256);
-  }
-  // 设置 v4 UUID 的版本位与变体位
-  bytes[6] = (bytes[6] & 0x0f) | 0x40;
-  bytes[8] = (bytes[8] & 0x3f) | 0x80;
-  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
-}
-
-async function uploadFiles(files: File[]) {
-  if (files.length === 0 || uploading.value) return;
-
-  uploading.value = true;
-  batchResult.value = null;
-
-  const queueEntries: QueueEntry[] = files.map((f) => ({
-    uid: genUid(),  // 唯一标识
-    file: f,
-    status: 'pending' as QueueStatus,
-    errorReason: undefined,
-    progress: 0,
-    totalBytes: f.size,
-    loadedBytes: 0,
-    speed: '-',
-    eta: '-',
-    checkpointTime: 0,  // 延迟到首次 onUploadProgress 回调时记录，排除排队等待时间
-    checkpointBytes: 0,
-  }));
-
-  // 先赋值给 ref 触发 Vue 响应式包装，再从响应式数组中建 Map
-  uploadQueue.value = queueEntries;
-  const queueMap = new Map<string, QueueEntry>(
-    uploadQueue.value.map((e) => [e.uid, e])
-  );
-
-  const successList: { id: string; originalName: string }[] = [];
-  const failedList: { name: string; reason: string }[] = [];
-
-  // 启动速度计算定时器
-  startSpeedTimer();
-
-  // 滑动窗口并发：始终保持 concurrency 个文件在上传中，
-  // 每完成一个立即启动下一个，而非等待整批全部完成
-  let nextFileIndex = 0;
-  let staggerCounter = 0;
-
-  /** 大文件分片上传逻辑 */
-  const uploadSingleChunked = async (file: File, entry: QueueEntry): Promise<void> => {
-    // 每个文件使用独立实例，避免并发文件共享 uploadId、进度和速度检查点。
-    const chunkedUpload = useChunkedUpload(3);
-    const abortController = new AbortController();
-    activeControllers.add(abortController);
-    try {
-      const result = await chunkedUpload.uploadFile(
-        file,
-        (p) => {
-          entry.progress = p.totalChunks > 0 ? Math.round((p.uploadedChunks / p.totalChunks) * 100) : 0;
-          entry.loadedBytes = p.loadedBytes;
-          entry.speed = p.speed;
-          entry.eta = p.eta;
-          if (entry.checkpointTime === 0) {
-            entry.checkpointTime = Date.now();
-          }
-        },
-        abortController.signal,
-        undefined,
-        props.folderId,
-      );
-      entry.status = 'success';
-      successList.push({ id: result.id, originalName: result.originalName });
-    } catch (error: unknown) {
-      entry.status = 'error';
-      entry.errorReason = getErrorMessage(error);
-      failedList.push({ name: file.name, reason: getErrorMessage(error) });
-    } finally {
-      activeControllers.delete(abortController);
-    }
-  };
-
-  const uploadSingle = async (file: File, uid: string, stagger: number): Promise<void> => {
-    // 分级延迟启动，将请求分散到 300ms 窗口内，避免 Telegram 429 限流
-    await new Promise(resolve => setTimeout(resolve, stagger * 300));
-
-    const entry = queueMap.get(uid);
-    if (!entry) return;
-
-    // 大文件（>20MB）走分片上传
-    const CHUNK_THRESHOLD = 5 * 1024 * 1024; // 5MB 以上走分片上传，避免 CDN 超时截断
-    if (file.size > CHUNK_THRESHOLD) {
-      return uploadSingleChunked(file, entry);
-    }
-
-    const abortController = new AbortController();
-    activeControllers.add(abortController);
-    try {
-      // 异步上传：文件传输完成后立即断开请求连接（避免 Cloudflare 代理超时），
-      // 后端在后台处理 Telegram 上传，前端轮询获取状态
-      const result = await fileStore.uploadFileAsync(
-        file,
-        (loaded, total) => {
-          // 文件传输进度（浏览器 → 服务器）
-          if (entry) {
-            entry.progress = total > 0 ? Math.round((loaded / total) * 100) : 0;
-            entry.loadedBytes = loaded;
-            // 首次收到进度数据时记录传输开始时间（排除排队等待时间）
-            if (entry.checkpointBytes === 0 && loaded > 0) {
-              entry.checkpointTime = Date.now();
-            }
-          }
-        },
-        (status) => {
-          // 后端处理状态更新
-          if (entry && status === 'uploading') {
-            entry.status = 'processing';
-          }
-        },
-        abortController.signal,
-        props.folderId,
-      );
-      if (entry) entry.status = 'success';
-      successList.push({ id: result.id, originalName: result.originalName });
-    } catch (error: unknown) {
-      const reason = getErrorMessage(error);
-      if (entry) {
-        entry.status = 'error';
-        entry.errorReason = reason;
-      }
-      const axiosError = error as { response?: { status?: number }; code?: string };
-      if (!abortController.signal.aborted && axiosError.code !== 'ERR_CANCELED') {
-        reportUploadError({
-          stage: 'async_upload',
-          message: reason,
-          fileName: file.name,
-          fileSize: file.size,
-          mimeType: file.type,
-          status: axiosError.response?.status,
-        });
-      }
-      failedList.push({ name: file.name, reason });
-    } finally {
-      activeControllers.delete(abortController);
-    }
-  };
-
-  // 每个协程通过 while 循环迭代消费队列（替代尾递归，避免超大批量栈溢出且便于中止）
-  const runWorker = async (): Promise<void> => {
-    while (true) {
-      const idx = nextFileIndex++;
-      if (idx >= files.length) return; // 队列耗尽
-      const myStagger = staggerCounter++;
-      await uploadSingle(files[idx], queueEntries[idx].uid, myStagger);
-      // 当前文件完成 → 继续取下一个，保持窗口满载
-    }
-  };
-
-  // 启动初始 concurrency 个协程
-  await Promise.all(
-    Array.from({ length: Math.min(concurrency.value, files.length) }, () => runWorker())
-  );
-
-  // 最后一次更新速度
-  updateSpeeds();
-  stopSpeedTimer();
-
-  batchResult.value = { success: successList, failed: failedList };
-
-  // 上传完成后关联标签（并发关联，单个失败不影响其他文件）
-  if (selectedTagIds.value.length > 0 && successList.length > 0) {
-    const tagIds = selectedTagIds.value;
-    await Promise.allSettled(
-      successList.map((file) => api.put(`/files/${file.id}/tags`, { tagIds }))
-    );
-  }
-
-  emit('uploaded');
-
-  if (failedList.length === 0) {
-    MessagePlugin.success('文件接收完成，正在后台处理中，请稍后刷新查看');
-  } else if (successList.length > 0) {
-    MessagePlugin.success(`${successList.length} 个文件已接收，${failedList.length} 个失败。正在后台处理中`);
-  } else {
-  }
-
-  uploading.value = false;
-}
-
-// 上传配置改为弹窗打开时惰性获取（见下方 visible 监听），避免未打开弹窗也发请求
-
-// 当弹窗打开且有预置文件时，自动上传
+// 上传配置改为弹窗打开时惰性获取，避免未打开弹窗也发请求
 watch(() => props.visible, async (isVisible) => {
   if (isVisible) {
     // 打开时获取上传配置（大小上限/类型白名单），确保校验使用最新服务端配置
@@ -610,18 +383,9 @@ watch(() => props.visible, async (isVisible) => {
     showTagSelector.value = false;
     newTagName.value = '';
     if (props.initialFiles && props.initialFiles.length > 0) {
-      await uploadFiles(validateFiles(Array.from(props.initialFiles)));
+      enqueueFiles(Array.from(props.initialFiles));
     }
   }
-});
-
-onUnmounted(() => {
-  stopSpeedTimer();
-  abortAllUploads();
-  for (const url of previewUrls.values()) {
-    URL.revokeObjectURL(url);
-  }
-  previewUrls.clear();
 });
 </script>
 

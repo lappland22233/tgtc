@@ -22,7 +22,10 @@ import { User } from './user.entity';
  * 软删除策略与 files 表一致：标记 isDeleted=true，7 天延迟后由清理任务物理删除。
  */
 @Entity('folders')
-@Tree('closure-table')
+// closureTableName 必须显式指定：TypeORM 默认按实体表名解析闭包联结表（即 folders_closure），
+// 但迁移 1790400000000-AddFoldersTable 实际建的表是 folder_closure（synchronize=false，不会自动建表）。
+// 指定 closureTableName: 'folder' 后 TypeORM 拼 `_closure` 后缀解析为 folder_closure，与迁移及裸 SQL 对齐。
+@Tree('closure-table', { closureTableName: 'folder' })
 @Index('idx_folders_owner_parent_deleted', ['ownerId', 'parentId', 'isDeleted'])
 export class Folder {
   @PrimaryColumn({ type: 'uuid', default: () => 'gen_random_uuid()' })

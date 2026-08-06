@@ -105,8 +105,33 @@ export const useFolderStore = defineStore('folders', () => {
   /** 创建文件夹 */
   async function createFolder(name: string, parentId: string | null = currentFolderId.value) {
     const res = await api.post('/folders', { name, parentId });
-    await fetchTree();
-    return res.data.data.folder as Folder;
+    const folder = res.data.data.folder as Folder;
+    // 创建已成功，树刷新若因竞态/网络失败则降级处理，不向调用方抛出异常（避免误报“创建失败”）
+    try {
+      await fetchTree();
+    } catch (err) {
+      console.warn('[folders] 文件夹已创建成功，但刷新文件夹树失败，稍后重试可恢复：', err);
+    }
+    return folder;
+  }
+
+  /**
+   * 将新建文件夹乐观插入 tree 中对应父节点的 children（按同 id 去重）。
+   * 用于树刷新失败/竞态时的兜底展示；父节点为 null 时插入根级。
+   */
+  function insertIntoTree(folder: Folder, parentId: string | null) {
+    const insert = (list: Folder[]) => {
+      if (list.some((f) => f.id === folder.id)) return; // 同 id 去重
+      list.push({ ...folder, children: folder.children ?? [] });
+    };
+    if (!parentId) {
+      insert(tree.value);
+      return;
+    }
+    const parent = findInTree(tree.value, parentId);
+    if (!parent) return; // 树中找不到父节点则不插入，避免错误挂到根级
+    if (!parent.children) parent.children = [];
+    insert(parent.children);
   }
 
   /** 重命名文件夹 */
@@ -182,5 +207,6 @@ export const useFolderStore = defineStore('folders', () => {
     listContents,
     moveFile,
     findInTree,
+    insertIntoTree,
   };
 });

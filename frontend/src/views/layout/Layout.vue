@@ -50,6 +50,9 @@
         />
       </div>
     </t-drawer>
+
+    <!-- 全局后台上传指示器（跨路由常驻，上传由模块级 upload store 驱动） -->
+    <UploadProgressIndicator />
   </div>
 </template>
 
@@ -61,6 +64,7 @@ import { storeToRefs } from 'pinia';
 import type { UserRole } from '../../types/user';
 import AlertBanner from '../../components/AlertBanner.vue';
 import SideNav from '../../components/SideNav.vue';
+import UploadProgressIndicator from '../../components/UploadProgressIndicator.vue';
 
 const router = useRouter();
 const route = useRoute();

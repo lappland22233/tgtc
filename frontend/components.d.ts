@@ -61,5 +61,6 @@ declare module 'vue' {
     TTooltip: typeof import('tdesign-vue-next')['Tooltip']
     TTree: typeof import('tdesign-vue-next')['Tree']
     UploadModal: typeof import('./src/components/UploadModal.vue')['default']
+    UploadProgressIndicator: typeof import('./src/components/UploadProgressIndicator.vue')['default']
   }
 }

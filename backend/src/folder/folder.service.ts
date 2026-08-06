@@ -103,8 +103,11 @@ export class FolderService {
   // ---------- 写操作 ----------
 
   async createFolder(ownerId: string, dto: CreateFolderDto): Promise<Folder> {
+    // 保留 assertFolderOwned 返回的完整父实体，供下方 parent 关联使用；
+    // 仅传 { id } 部分对象会让 TypeORM 闭包表插入时缺少必要的实体信息
+    let parentFolder: Folder | null = null;
     if (dto.parentId) {
-      await this.assertFolderOwned(dto.parentId, ownerId);
+      parentFolder = await this.assertFolderOwned(dto.parentId, ownerId);
       // 嵌套深度上限校验，避免闭包表平方级膨胀与递归栈溢出
       const parentDepth = await this.getFolderDepth(dto.parentId);
       if (parentDepth + 1 > MAX_FOLDER_DEPTH) {
@@ -121,7 +124,7 @@ export class FolderService {
       name: dto.name,
       ownerId,
       parentId: dto.parentId ?? null,
-      parent: dto.parentId ? ({ id: dto.parentId } as Folder) : null,
+      parent: parentFolder,
     });
     const saved = await this.folderRepo.save(folder);
     this.audit.log({

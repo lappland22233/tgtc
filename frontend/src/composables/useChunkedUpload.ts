@@ -1,6 +1,8 @@
 import { ref } from 'vue';
+import type { AxiosResponse } from 'axios';
 import api from '../api/client';
 import { reportUploadError } from '../utils/telemetry';
+import { uploadScheduler } from '../utils/upload-scheduler';
 
 export interface ChunkUploadProgress {
   totalChunks: number;
@@ -32,6 +34,15 @@ function getOptimalChunkSize(fileSize: number): number {
  * 设为 90 秒留 10 秒安全余量。
  */
 const CHUNK_TIMEOUT = 90 * 1000;
+
+/** init 请求独立超时 (ms)：原实现 timeout: 0 可能无限挂起，现改为 30s 主动 abort */
+const INIT_TIMEOUT = 30 * 1000;
+
+/** 分片状态查询超时 (ms) */
+const STATUS_TIMEOUT = 15 * 1000;
+
+/** 合并触发请求超时 (ms) */
+const COMPLETE_TIMEOUT = 30 * 1000;
 
 /** 最大重试次数 */
 const MAX_RETRIES = 3;
@@ -83,19 +94,38 @@ export function useChunkedUpload(concurrency = 2) {
     const totalChunks = Math.ceil(file.size / chunkSize);
 
     try {
-      // 1. Init
-      const initRes = await api.post('/files/chunk/init', {
-        fileName: file.name,
-        fileSize: file.size,
-        mimeType: file.type || 'application/octet-stream',
-        totalChunks,
-        chunkSize,
-        folderId: folderId || undefined,
-      }, { signal, timeout: 0 });
+      // 1. Init（独立 30s 超时 + 与外部取消信号合并；失败按可重试处理，指数退避重试）
+      let initRes: AxiosResponse;
+      for (let attempt = 0; ; attempt++) {
+        try {
+          initRes = await withTimeoutSignal(INIT_TIMEOUT, signal, (s) =>
+            api.post('/files/chunk/init', {
+              fileName: file.name,
+              fileSize: file.size,
+              mimeType: file.type || 'application/octet-stream',
+              totalChunks,
+              chunkSize,
+              folderId: folderId || undefined,
+            }, { signal: s, timeout: 0 }),
+          );
+          break;
+        } catch (err: any) {
+          if (signal?.aborted) throw err;
+          // 不可重试：客户端参数错误、认证失败、文件过大
+          const status = err?.response?.status;
+          const isNonRetryable = status === 413 || status === 400 || status === 401;
+          if (isNonRetryable || attempt >= MAX_RETRIES) throw err;
+          const delay = RETRY_BASE_DELAY * Math.pow(2, attempt) + Math.floor(Math.random() * 1000);
+          console.warn(`[分片上传] init 失败，${(delay / 1000).toFixed(1)}s 后重试 (${attempt + 1}/${MAX_RETRIES})`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+        }
+      }
       uploadId.value = initRes.data.data.uploadId;
 
-      // 2. Get uploaded status
-      const statusRes = await api.get(`/files/chunk/${uploadId.value}/status`, { signal });
+      // 2. Get uploaded status（15s 独立超时）
+      const statusRes = await withTimeoutSignal(STATUS_TIMEOUT, signal, (s) =>
+        api.get(`/files/chunk/${uploadId.value}/status`, { signal: s, timeout: 0 }),
+      );
       // 以“已成功索引集合”作为续传/进度判定的唯一依据（并发下完成顺序非连续，不能用计数假定前 N 个已完成）
       const uploadedIndices = new Set<number>(statusRes.data.data.uploaded);
 
@@ -131,83 +161,103 @@ export function useChunkedUpload(concurrency = 2) {
       checkpointBytes = 0;
 
       /**
-       * 上传单个分片（含自动重试）
+       * 上传单个分片（含自动重试）。
+       * 每次尝试前先从全局调度器获取令牌（跨文件统一限制在途上传请求数），
+       * 90s 超时定时器在取得令牌后才开始计时，避免排队等待被计入超时；
+       * 重试前先归还令牌并在不持有令牌的情况下退避等待，然后重新获取令牌。
        */
-      const uploadChunk = async (chunk: { index: number; blob: Blob }, retryCount = 0): Promise<void> => {
-        if (signal?.aborted) return;
-
-        // 单个分片请求超时控制。定时器与 signal 监听器必须在 finally 中清理，
-        // 否则异常路径会遗留定时器，且父 signal 上的监听器会随分片数量累积导致内存泄漏。
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), CHUNK_TIMEOUT);
-        const merged = signal
-          ? combineSignals(signal, controller.signal)
-          : { signal: controller.signal, dispose: () => {} };
-
-        try {
-          const form = new FormData();
-          form.append('chunk', chunk.blob, String(chunk.index));
-          form.append('index', String(chunk.index));
-
-          await api.post(`/files/chunk/${uploadId.value}`, form, {
-            signal: merged.signal,
-            timeout: 0, // 禁用 axios 默认 30s 超时，使用 AbortController 控制
-          });
-        } catch (err: any) {
-          // 取消不重试
-          if (err?.name === 'AbortError' || err?.code === 'ERR_CANCELED') {
+      const uploadChunk = async (chunk: { index: number; blob: Blob }): Promise<void> => {
+        let retryCount = 0;
+        for (;;) {
+          if (signal?.aborted) return;
+      
+          // 获取全局上传令牌；等待超过 180s 会 reject（防止无限排队）
+          await uploadScheduler.acquire();
+          let retryDelay = 0;
+          try {
             if (signal?.aborted) return;
-          }
-
-          // 不可重试的错误：客户端参数错误、认证失败、文件过大
-          const isNonRetryable =
-            err?.response?.status === 413 ||  // 文件过大
-            err?.response?.status === 400 ||  // 参数错误
-            err?.response?.status === 401;    // 认证失败
-
-          if (isNonRetryable) {
-            throw err;
-          }
-
-          // 可重试的错误：超时、网络错误、5xx、Cloudflare 502
-          const isRetryable =
-            err?.code === 'ECONNABORTED' ||
-            err?.code === 'ERR_NETWORK' ||
-            err?.message?.includes('timeout') ||
-            err?.message?.includes('代理层') ||       // Cloudflare 代理层错误（413/502 非 JSON 响应）
-            err?.response?.status >= 500;
-
-          if (isRetryable && retryCount < MAX_RETRIES) {
-            // 指数退避 + 随机抖动，避免雷群效应
-            const delay = RETRY_BASE_DELAY * Math.pow(2, retryCount) + Math.floor(Math.random() * 1000);
-            progress.value.retrying = true;
-            onProgress?.(progress.value);
-
-            console.warn(`分片 ${chunk.index} 上传失败，${(delay / 1000).toFixed(1)}s 后重试 (${retryCount + 1}/${MAX_RETRIES})`);
-            await new Promise(resolve => setTimeout(resolve, delay));
-
-            progress.value.retrying = false;
-            onProgress?.(progress.value);
-
-            // 连续超时或 CDN 502 仅记录日志，不再降级分片大小：
-            // 分片大小在 init 时已固定，中途改变会破坏字节边界导致合并出错误文件。
-            const isTimeout = err?.code === 'ECONNABORTED' || err?.message?.includes('代理层');
-            if (isTimeout) {
-              consecutiveTimeouts++;
-              if (consecutiveTimeouts >= 2) {
-                console.warn(`CDN 超时频繁，保持分片大小 ${chunkSize / 1024}KB 继续重试`);
-                consecutiveTimeouts = 0;
+      
+            // 单个分片请求超时控制。定时器与 signal 监听器必须在 finally 中清理，
+            // 否则异常路径会遗留定时器，且父 signal 上的监听器会随分片数量累积导致内存泄漏。
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), CHUNK_TIMEOUT);
+            const merged = signal
+              ? combineSignals(signal, controller.signal)
+              : { signal: controller.signal, dispose: () => {} };
+      
+            try {
+              const form = new FormData();
+              form.append('chunk', chunk.blob, String(chunk.index));
+              form.append('index', String(chunk.index));
+      
+              await api.post(`/files/chunk/${uploadId.value}`, form, {
+                signal: merged.signal,
+                timeout: 0, // 禁用 axios 默认 30s 超时，使用 AbortController 来控制
+              });
+            } catch (err: any) {
+              // 取消不重试
+              if (err?.name === 'AbortError' || err?.code === 'ERR_CANCELED') {
+                if (signal?.aborted) return;
               }
+      
+              // 不可重试的错误：客户端参数错误、认证失败、文件过大
+              const isNonRetryable =
+                err?.response?.status === 413 ||  // 文件过大
+                err?.response?.status === 400 ||  // 参数错误
+                err?.response?.status === 401;    // 认证失败
+      
+              if (isNonRetryable) {
+                throw err;
+              }
+      
+              // 可重试的错误：超时、网络错误、5xx、Cloudflare 502
+              const isRetryable =
+                err?.code === 'ECONNABORTED' ||
+                err?.code === 'ERR_NETWORK' ||
+                err?.message?.includes('timeout') ||
+                err?.message?.includes('代理层') ||       // Cloudflare 代理层错误（413/502 非 JSON 响应）
+                err?.response?.status >= 500;
+      
+              if (isRetryable && retryCount < MAX_RETRIES) {
+                // 指数退避 + 随机抖动，避免雷群效应
+                retryDelay = RETRY_BASE_DELAY * Math.pow(2, retryCount) + Math.floor(Math.random() * 1000);
+                progress.value.retrying = true;
+                onProgress?.(progress.value);
+      
+                console.warn(`分片 ${chunk.index} 上传失败，${(retryDelay / 1000).toFixed(1)}s 后重试 (${retryCount + 1}/${MAX_RETRIES})`);
+      
+                // 连续超时或 CDN 502 仅记录日志，不再降级分片大小：
+                // 分片大小在 init 时已固定，中途改变会破坏字节边界导致合并出错误文件。
+                const isTimeout = err?.code === 'ECONNABORTED' || err?.message?.includes('代理层');
+                if (isTimeout) {
+                  consecutiveTimeouts++;
+                  if (consecutiveTimeouts >= 2) {
+                    console.warn(`CDN 超时频繁，保持分片大小 ${chunkSize / 1024}KB 继续重试`);
+                    consecutiveTimeouts = 0;
+                  }
+                }
+      
+                retryCount++;
+              } else {
+                throw err;
+              }
+            } finally {
+              // 无论成功/失败/重试，都清理超时定时器与父 signal 上的监听器
+              clearTimeout(timeoutId);
+              merged.dispose();
             }
-
-            return uploadChunk(chunk, retryCount + 1);
+          } finally {
+            // 无论成功/失败/重试，都归还全局令牌；退避等待与下一次 acquire 在释放后进行
+            uploadScheduler.release();
           }
-
-          throw err;
-        } finally {
-          // 无论成功/失败/重试，都清理超时定时器与父 signal 上的监听器
-          clearTimeout(timeoutId);
-          merged.dispose();
+      
+          if (retryDelay === 0) break; // 上传成功（取消路径已在上方 return）
+      
+          // 不持有令牌的情况下退避等待，避免长时间占用并发槽位
+          await new Promise(resolve => setTimeout(resolve, retryDelay));
+          progress.value.retrying = false;
+          onProgress?.(progress.value);
+          // 继续循环：重新获取令牌后重试
         }
 
         // 成功：按索引集合登记，并按实际字节累计进度（末片可能不足一个分片）
@@ -236,23 +286,26 @@ export function useChunkedUpload(concurrency = 2) {
         }
       };
 
-      // 并发上传（滑动窗口）
+      // 并发上传（滑动窗口，while 循环消费队列，替代尾递归避免超大批量栈溢出）
       let nextIdx = 0;
-      const runNext = async (): Promise<void> => {
-        const idx = nextIdx++;
-        if (idx >= pendingChunks.length) return;
-        await uploadChunk(pendingChunks[idx]);
-        await runNext();
+      const runWorker = async (): Promise<void> => {
+        while (true) {
+          const idx = nextIdx++;
+          if (idx >= pendingChunks.length) return;
+          await uploadChunk(pendingChunks[idx]);
+        }
       };
 
       await Promise.all(
-        Array.from({ length: Math.min(concurrency, pendingChunks.length) }, () => runNext()),
+        Array.from({ length: Math.min(concurrency, pendingChunks.length) }, () => runWorker()),
       );
 
       // 5. Trigger async merge (immediate return, non-blocking), with retry on CDN 502
       for (let retry = 0; retry < MAX_RETRIES; retry++) {
         try {
-          await api.post(`/files/chunk/${uploadId.value}/complete`, {}, { signal, timeout: 0 });
+          await withTimeoutSignal(COMPLETE_TIMEOUT, signal, (s) =>
+            api.post(`/files/chunk/${uploadId.value}/complete`, {}, { signal: s, timeout: 0 }),
+          );
           mergeTriggered = true;
           break;
         } catch (err: any) {
@@ -306,6 +359,28 @@ export function useChunkedUpload(concurrency = 2) {
   }
 
   return { uploadFile, cancel, uploadId, progress, uploading };
+}
+
+/**
+ * 为请求包装独立超时 AbortController，并与外部取消信号合并。
+ * 超时到达时 abort；调用方应使用 timeout: 0 禁用 axios 自身超时，交由 AbortController 控制。
+ */
+async function withTimeoutSignal<T>(
+  timeoutMs: number,
+  externalSignal: AbortSignal | undefined,
+  run: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  const merged = externalSignal
+    ? combineSignals(externalSignal, controller.signal)
+    : { signal: controller.signal, dispose: () => {} };
+  try {
+    return await run(merged.signal);
+  } finally {
+    clearTimeout(timeoutId);
+    merged.dispose();
+  }
 }
 
 /**
