@@ -7,9 +7,13 @@
 
 /**
  * 白名单：字母（含中日韩等 Unicode 字母）、数字、连接符标点（下划线等）、
- * 空格、点、连字符，以及全角空格 \u3000 与全角点 \uFF0E。
+ * 空格、点、连字符，以及全角空格 \u3000 与全角点 \uFF0E；
+ * 另允许半角括号 ( ) [ ] { } 与 @ # % $ &，及其对应全角形式
+ * \uFF08\uFF09 \uFF3B\uFF3D \uFF5B\uFF5D \uFF20 \uFF03 \uFF05 \uFF04 \uFF06。
+ * 注意：与后端 backend/src/folder/folder.dto.ts 的 FOLDER_NAME_PATTERN 逐字符保持一致。
  */
-export const FOLDER_NAME_WHITELIST = /^[\p{L}\p{N}\p{Pc} .\-\u3000\uFF0E]+$/u;
+export const FOLDER_NAME_WHITELIST =
+  /^[\p{L}\p{N}\p{Pc} .\-()\[\]{}@#%$&\u3000\uFF0E\uFF08\uFF09\uFF3B\uFF3D\uFF5B\uFF5D\uFF20\uFF03\uFF05\uFF04\uFF06]+$/u;
 
 /** 黑名单：Windows 文件名保留字符（<>:"/\|?*） */
 export const FOLDER_NAME_BLACKLIST_CHARS = /[<>:"/\\|?*]/;

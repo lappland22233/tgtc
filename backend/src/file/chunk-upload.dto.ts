@@ -33,6 +33,11 @@ export class InitChunkUploadDto {
   @IsOptional()
   @IsUUID('4', { message: 'folderId 必须是合法的 UUID v4' })
   folderId?: string;
+
+  /** 覆盖目标 File 记录 id（可选）：存在时 in-place 覆盖该文件，缺省为新建 */
+  @IsOptional()
+  @IsUUID('4', { message: 'overwriteFileId 必须是合法的 UUID v4' })
+  overwriteFileId?: string;
 }
 
 export class CompleteChunkUploadDto {

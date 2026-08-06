@@ -25,6 +25,8 @@ interface ChunkSession {
   chunkSize: number;
   uploadedBy: string;
   folderId: string | null;
+  /** 覆盖目标 File 记录 id（可选）：合并完成后 in-place 覆盖该记录 */
+  overwriteFileId?: string | null;
   createdAt: Date;
   /** 最后一次活动时间（分片上传/状态查询/合并触发时更新） */
   lastActivityAt: Date;
@@ -110,6 +112,7 @@ export class ChunkUploadService implements OnModuleInit {
     chunkSize: number,
     userId: string,
     folderId?: string | null,
+    overwriteFileId?: string | null,
   ): Promise<{ uploadId: string }> {
     // 文件大小上限校验：结合动态 MAX_FILE_SIZE，防止绕过限制写满磁盘（DoS）
     const maxFileSize = await this.fileService.getMaxFileSize();
@@ -132,6 +135,21 @@ export class ChunkUploadService implements OnModuleInit {
       throw new BadRequestException('上传会话过多，请完成或取消现有上传');
     }
 
+    // 覆盖目标预校验：存在 + 归属 + 目录一致，无效直接 400，避免大文件传完才发现目标不可覆盖。
+    // init 处只有 userId 字符串，与 finalizeMerge 一致构造 { id } 部分 User。
+    // finalizeMerge → createProcessingFile 内部会二次校验兜底。
+    if (overwriteFileId) {
+      try {
+        await this.fileService.assertOverwriteTarget(
+          overwriteFileId,
+          { id: userId } as User,
+          folderId ?? null,
+        );
+      } catch (err) {
+        throw new BadRequestException(`覆盖目标无效: ${(err as Error).message}`);
+      }
+    }
+
     const uploadId = uuidv4();
     const now = new Date();
     const session: ChunkSession = {
@@ -143,6 +161,7 @@ export class ChunkUploadService implements OnModuleInit {
       chunkSize,
       uploadedBy: userId,
       folderId: folderId ?? null,
+      overwriteFileId: overwriteFileId ?? null,
       createdAt: now,
       lastActivityAt: now,
       mergeStatus: 'pending',
@@ -445,6 +464,7 @@ export class ChunkUploadService implements OnModuleInit {
       undefined,   // tagIds
       true,        // skipTypeCheck
       session.folderId,
+      session.overwriteFileId ?? undefined,
     );
 
     this.throwIfAborted(signal);

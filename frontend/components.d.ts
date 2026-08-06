@@ -12,6 +12,7 @@ export {}
 declare module 'vue' {
   export interface GlobalComponents {
     AlertBanner: typeof import('./src/components/AlertBanner.vue')['default']
+    ConflictResolveDialog: typeof import('./src/components/ConflictResolveDialog.vue')['default']
     CreateShareDialog: typeof import('./src/components/share/CreateShareDialog.vue')['default']
     FileCard: typeof import('./src/components/file/FileCard.vue')['default']
     FileContextMenu: typeof import('./src/components/file/FileContextMenu.vue')['default']

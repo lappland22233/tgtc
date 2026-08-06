@@ -39,6 +39,8 @@ export interface QueueEntry {
   relativePath?: string;
   /** 文件夹上传批次 ID：同一次选择/拖拽产生的条目共享，便于后续按批操作 */
   batchId?: string;
+  /** 覆盖上传：用户决策覆盖的既有文件 ID，后端据此替换原文件 */
+  overwriteFileId?: string;
 }
 
 /** 5MB 以上走分片上传，避免 CDN 超时截断 */
@@ -199,6 +201,7 @@ export const useUploadStore = defineStore('upload', () => {
       controller.signal,
       undefined,
       entry.folderId,
+      entry.overwriteFileId,
     );
     entry.status = 'success';
     await attachTags(entry, result.id);
@@ -228,6 +231,7 @@ export const useUploadStore = defineStore('upload', () => {
         },
         controller.signal,
         entry.folderId,
+        entry.overwriteFileId,
       );
       entry.status = 'success';
       await attachTags(entry, result.id);
@@ -358,13 +362,18 @@ export const useUploadStore = defineStore('upload', () => {
    * worker / 取消 / 终态清理逻辑完全复用，零改动。
    */
   function enqueueFolderFiles(
-    items: Array<{ file: File; folderId: string | null; relativePath: string }>,
+    items: Array<{ file: File; folderId: string | null; relativePath?: string; overwriteFileId?: string }>,
     tagIds: string[],
     batchId?: string,
   ) {
     const newEntries: QueueEntry[] = [];
+    // 同批内按 (folderId, fileName) 去重，防止同批双写（保留第一个）
+    const seenInBatch = new Set<string>();
     for (const item of items) {
       if (!item.file) continue;
+      const batchKey = `${item.folderId ?? 'root'}:${item.file.name}`;
+      if (seenInBatch.has(batchKey)) continue;
+      seenInBatch.add(batchKey);
       // 同一 File 引用已在队列中（任意状态）则跳过
       if (entries.value.some((e) => e.file === item.file)) continue;
       newEntries.push({
@@ -385,6 +394,7 @@ export const useUploadStore = defineStore('upload', () => {
         tagIds: [...tagIds],
         relativePath: item.relativePath || undefined,
         batchId,
+        overwriteFileId: item.overwriteFileId,
       });
     }
     if (newEntries.length === 0) return;

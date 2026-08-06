@@ -78,6 +78,7 @@ export function useChunkedUpload(concurrency = 2) {
     signal?: AbortSignal,
     chunkSizeHint?: number,
     folderId?: string | null,
+    overwriteFileId?: string,
   ): Promise<ChunkUploadResult> {
     uploading.value = true;
     uploadId.value = null;
@@ -106,6 +107,7 @@ export function useChunkedUpload(concurrency = 2) {
               totalChunks,
               chunkSize,
               folderId: folderId || undefined,
+              overwriteFileId: overwriteFileId || undefined,
             }, { signal: s, timeout: 0 }),
           );
           break;

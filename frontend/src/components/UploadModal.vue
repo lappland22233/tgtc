@@ -201,10 +201,18 @@
       </div>
     </div>
   </t-dialog>
+
+  <!-- 文件夹上传重复文件覆盖/跳过决策弹窗 -->
+  <ConflictResolveDialog
+    :visible="showConflictDialog"
+    :conflicts="pendingConflict.conflicts"
+    @confirm="handleConflictConfirm"
+    @cancel="handleConflictCancel"
+  />
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue';
+import { ref, computed, watch, reactive } from 'vue';
 import MessagePlugin from '@/utils/message';
 import { useTagStore } from '../stores/tags';
 import { useUploadStore } from '../stores/upload';
@@ -214,10 +222,13 @@ import { formatSize as formatModalSize } from '../utils/format';
 import { getErrorMessage } from '../utils/error';
 import { reportUploadError } from '../utils/telemetry';
 import FileTypeIcon from '@/components/FileTypeIcon.vue';
-// 文件夹上传工具链：采集 → 路径校验 → 目录预创建/复用
+import ConflictResolveDialog from '@/components/ConflictResolveDialog.vue';
+// 文件夹上传工具链：采集 → 路径校验 → 目录预创建/复用 → 重复检测
 import { collectFromInput, collectFromDrop, validateParsedFiles } from '../utils/folder-traverse';
 import type { ParsedFile, PathViolation, DropCollectResult } from '../utils/folder-traverse';
 import { prepareDirectories } from '../utils/folder-resolver';
+import { detectConflicts } from '../utils/conflict-detector';
+import type { UploadCandidateItem, ConflictItem, ConflictDecisionEntry } from '../utils/conflict-detector';
 
 const isMobile = useMobile();
 
@@ -258,6 +269,16 @@ const selectedTagIds = ref<string[]>([]);
 const showTagSelector = ref(false);
 const newTagName = ref('');
 const concurrencyOptions = Array.from({ length: 4 }, (_, i) => ({ label: `${i + 1}`, value: i + 1 }));
+
+// ---- 重复文件决策弹窗状态（仅文件夹链路） ----
+const showConflictDialog = ref(false);
+/** 待决批次：无冲突项 + 决策前快照的 tagIds/batchId，确认后统一入队 */
+const pendingConflict = reactive({
+  items: [] as UploadCandidateItem[],
+  tagIds: [] as string[],
+  batchId: '',
+  conflicts: [] as ConflictItem[],
+});
 
 // ---- store 汇总派生状态（替代原 batchResult） ----
 const hasActiveUploads = computed(
@@ -427,19 +448,56 @@ async function processParsedFiles(
     );
     if (reusedCount > 0) MessagePlugin.info(`${reusedCount} 个已存在目录将直接复用`);
 
-    // 4. 生成 {file, folderId, relativePath} 入队（根级文件映射回当前目录）
+    // 4. 生成 {file, folderId, relativePath} 候选（根级文件映射回当前目录）
     const items = validParsed.map((p) => ({
       file: p.file,
       folderId: p.relativePath ? (dirIdMap.get(p.relativePath) ?? baseParentId) : baseParentId,
       relativePath: p.relativePath,
     }));
-    uploadStore.enqueueFolderFiles(items, selectedTagIds.value, genBatchId());
+
+    // 5. 重复检测（复用 folder contents 查询；独立限流，不占上传令牌池）
+    const { conflicts, clean, blockedCount } = await detectConflicts(items);
+    if (blockedCount > 0) {
+      MessagePlugin.info(`${blockedCount} 个既有文件处理中，将按新文件上传`);
+    }
+    if (conflicts.length === 0) {
+      uploadStore.enqueueFolderFiles(clean, selectedTagIds.value, genBatchId());
+    } else {
+      // 有冲突：暂存待决批次，交由决策弹窗；确认后再入队
+      pendingConflict.items = clean;
+      pendingConflict.tagIds = [...selectedTagIds.value];
+      pendingConflict.batchId = genBatchId();
+      pendingConflict.conflicts = conflicts;
+      showConflictDialog.value = true;
+    }
   } catch (err) {
     MessagePlugin.error(getErrorMessage(err) || '目录准备失败，请重试');
   } finally {
     preparing.value = false;
     preparingMsg.value = '';
   }
+}
+
+/** 决策确认：覆盖项携带 overwriteFileId 入队；跳过项不入队 */
+function handleConflictConfirm(decisions: ConflictDecisionEntry[]) {
+  showConflictDialog.value = false;
+  const overwriteItems = decisions
+    .filter((d) => d.decision === 'overwrite' && !d.conflict.overwriteBlocked)
+    .map((d) => ({ ...d.conflict.item, overwriteFileId: d.conflict.existingId }));
+  const skipCount = decisions.filter((d) => d.decision === 'skip' && !d.conflict.overwriteBlocked).length;
+  const allItems = [...pendingConflict.items, ...overwriteItems];
+  if (allItems.length === 0) {
+    MessagePlugin.info('未上传任何文件');
+    return;
+  }
+  uploadStore.enqueueFolderFiles(allItems, pendingConflict.tagIds, pendingConflict.batchId);
+  if (skipCount > 0) MessagePlugin.info(`已跳过 ${skipCount} 个重复文件`);
+}
+
+/** 决策取消：整批放弃 */
+function handleConflictCancel() {
+  showConflictDialog.value = false;
+  MessagePlugin.info('已取消本次上传');
 }
 
 /** 处理拖拽采集结果：parsed 走文件夹链路，plainFiles 走现有平铺入队，同批共存 */

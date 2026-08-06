@@ -186,10 +186,12 @@ export const useFileStore = defineStore('files', () => {
     onStatusChange?: (status: string) => void,
     signal?: AbortSignal,
     folderId?: string | null,
+    overwriteFileId?: string,
   ) {
     const formData = new FormData();
     formData.append('file', file);
     if (folderId) formData.append('folderId', folderId);
+    if (overwriteFileId) formData.append('overwriteFileId', overwriteFileId);
     // Step 1: 上传文件（Multer 缓冲阶段，有上传进度）— 同样响应外部取消
     const response = await api.post('/files/upload-async', formData, {
       signal,

@@ -125,6 +125,7 @@ export class FileController {
     @Res({ passthrough: true }) res: Response,
     @Body('tagIds') tagIdsRaw?: any,
     @Body('folderId') folderId?: string,
+    @Body('overwriteFileId') overwriteFileId?: string,
   ) {
     req.setTimeout(0);
     res.setTimeout(0);
@@ -133,7 +134,9 @@ export class FileController {
     }
     const tagIds = parseTagIdsBody(tagIdsRaw);
     if (tagIds?.length) await this.tagService.assertOwner(user.id, tagIds);
-    return this.fileService.uploadAsync(file, user, tagIds, req, folderId || null);
+    // overwriteFileId 仅接受 UUID v4 格式，其余非法值直接拒绝（避免透传垃圾值）
+    const normalizedOverwriteFileId = normalizeOptionalUuid(overwriteFileId);
+    return this.fileService.uploadAsync(file, user, tagIds, req, folderId || null, normalizedOverwriteFileId);
   }
 
   /**
@@ -708,6 +711,18 @@ function parseTagIdsBody(raw: unknown): string[] | undefined {
   if (Array.isArray(raw)) return raw.filter(Boolean);
   if (typeof raw === 'string') return raw.split(',').filter(Boolean);
   return undefined;
+}
+
+/**
+ * FormData 可选字段 overwriteFileId 归一化：缺省返回 undefined；
+ * 非 UUID v4 格式直接 400（与分片 init 的 DTO 校验语义一致）。
+ */
+function normalizeOptionalUuid(raw: unknown): string | undefined {
+  if (raw === undefined || raw === null || raw === '') return undefined;
+  if (typeof raw !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(raw)) {
+    throw new BadRequestException('overwriteFileId 必须是合法的 UUID v4');
+  }
+  return raw;
 }
 
 

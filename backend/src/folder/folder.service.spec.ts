@@ -213,6 +213,18 @@ describe('CreateFolderDto / RenameFolderDto - 名称字符集校验', () => {
     }
   });
 
+  it('接受新增白名单字符：半角与全角括号、@ # % $ &（前后端白名单同步）', async () => {
+    for (const name of [
+      '报告(2026)（最终版）#1&备份$5%',
+      'a[1]{b}@c',
+      '全角（）［］｛｝＠＃％＄＆', // （）［］｛｝＠＃％＄＆
+      '(paren)',
+    ]) {
+      const dto = plainToInstance(CreateFolderDto, { name });
+      await expect(validate(dto, { whitelist: true, forbidNonWhitelisted: true })).resolves.toHaveLength(0);
+    }
+  });
+
   it('Transform 先 trim 后再校验：首尾空格不误伤，纯空格拒绝', async () => {
     const trimmed = plainToInstance(CreateFolderDto, { name: '  文档  ' });
     expect(trimmed.name).toBe('文档');

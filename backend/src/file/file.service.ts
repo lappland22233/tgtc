@@ -145,6 +145,135 @@ export class FileService implements OnModuleInit {
     }
   }
 
+  /**
+   * 校验"上传覆盖"目标文件：必须存在且未删除、仅归属当前用户（不走 admin 放行）、
+   * 所在目录与上传目标目录一致（null 对 null）、非 processing（防与在途 Bull job 竞写）。
+   * 不存在/已删 → NotFoundException；归属/目录不符/processing → BadRequestException。
+   */
+  async assertOverwriteTarget(overwriteFileId: string, user: User, expectFolderId: string | null): Promise<File> {
+    const target = await this.fileRepository.findOne({
+      where: { id: overwriteFileId, isDeleted: false },
+    });
+    if (!target) {
+      throw new NotFoundException('覆盖目标文件不存在或已被删除');
+    }
+    if (target.uploaderId !== user.id) {
+      throw new BadRequestException('覆盖目标文件不属于当前用户');
+    }
+    if ((target.folderId ?? null) !== (expectFolderId ?? null)) {
+      throw new BadRequestException('覆盖目标文件与上传目标目录不一致');
+    }
+    if (target.status === 'processing') {
+      throw new BadRequestException('覆盖目标文件正在处理中，请稍后重试');
+    }
+    return target;
+  }
+
+  /**
+   * in-place 覆盖：保留原 File.id，仅替换内容引用（分享链接/标签/访问统计存活）。
+   * 事务内悲观行锁重新查询复核条件（防 TOCTOU）；旧 TG 对象绝不删除
+   * （telegramFileId 可能被多条记录共享）。
+   */
+  async applyOverwrite(
+    target: File,
+    params: {
+      telegramFileId: string;
+      telegramFilePath: string;
+      filename: string;
+      originalName: string;
+      size: number;
+      mimeType: string;
+      user: User;
+    },
+  ): Promise<File> {
+    const expectFolderId = target.folderId ?? null;
+    let oldTelegramFileId: string | null = null;
+
+    await this.fileRepository.manager.transaction(async (manager) => {
+      const locked = await manager.getRepository(File).findOne({
+        where: { id: target.id },
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (!locked || locked.isDeleted) {
+        throw new NotFoundException('覆盖目标文件不存在或已被删除');
+      }
+      if (locked.uploaderId !== params.user.id) {
+        throw new BadRequestException('覆盖目标文件不属于当前用户');
+      }
+      if ((locked.folderId ?? null) !== expectFolderId) {
+        throw new BadRequestException('覆盖目标文件与上传目标目录不一致');
+      }
+      if (locked.status === 'processing') {
+        throw new BadRequestException('覆盖目标文件正在处理中，请稍后重试');
+      }
+      oldTelegramFileId = locked.telegramFileId;
+      await manager.getRepository(File).update(target.id, {
+        filename: params.filename,
+        originalName: params.originalName,
+        size: params.size,
+        mimeType: params.mimeType,
+        telegramFileId: params.telegramFileId,
+        telegramFilePath: params.telegramFilePath,
+        thumbnailPath: null,
+      } as any);
+    });
+
+    // 事务外使本地缓存失效（旧字节不可再被命中）
+    this.fileCacheService.invalidate(target.id);
+
+    this.auditService.log({
+      action: 'file_overwrite',
+      userId: params.user.id,
+      resourceType: 'file',
+      resourceId: target.id,
+      metadata: {
+        filename: params.originalName,
+        size: params.size,
+        oldTelegramFileId,
+        newTelegramFileId: params.telegramFileId,
+      },
+    });
+
+    return Object.assign(target, {
+      filename: params.filename,
+      originalName: params.originalName,
+      size: params.size,
+      mimeType: params.mimeType,
+      telegramFileId: params.telegramFileId,
+      telegramFilePath: params.telegramFilePath,
+      thumbnailPath: null,
+    });
+  }
+
+  /**
+   * 覆盖写入前对已上传字节做兜底：目标失效（NotFound/BadRequest）时返回 null 由调用方降级为新建，
+   * 其余异常原样抛出，绝不丢弃已上传字节。
+   */
+  private async tryApplyOverwriteOrNull(
+    overwriteFileId: string,
+    user: User,
+    expectFolderId: string | null,
+    apply: (target: File) => Promise<File>,
+    context: string,
+  ): Promise<File | null> {
+    try {
+      const target = await this.assertOverwriteTarget(overwriteFileId, user, expectFolderId);
+      return await apply(target);
+    } catch (err) {
+      if (err instanceof NotFoundException || err instanceof BadRequestException) {
+        this.logger.warn(`覆盖目标失效，降级为新建 (${context}, overwriteFileId=${overwriteFileId}): ${err.message}`);
+        this.auditService.log({
+          action: 'file_overwrite_fallback',
+          userId: user.id,
+          resourceType: 'file',
+          metadata: { overwriteFileId, context, reason: err.message },
+        });
+        return null;
+      }
+      throw err;
+    }
+  }
+
   async getMaxFileSize(): Promise<number> {
     return this.maxFileSize;
   }
@@ -369,6 +498,7 @@ export class FileService implements OnModuleInit {
     tagIds?: string[],
     skipTypeCheck?: boolean,
     folderId?: string | null,
+    overwriteFileId?: string,
   ): Promise<File> {
     if (file.size > this.maxFileSize) {
       throw new BadRequestException(`文件大小不能超过 ${this.maxFileSize / 1024 / 1024}MB`);
@@ -387,47 +517,89 @@ export class FileService implements OnModuleInit {
     }
 
     const tempId = uuidv4();
-    const newFile = this.fileRepository.create({
-      filename: tempId,
-      originalName: fileName,
-      mimeType: file.mimetype || 'application/octet-stream',
-      size: file.size,
-      telegramFileId: tempId,
-      telegramFilePath: '',
-      uploaderId: user.id,
-      folderId: folderId ?? null,
-      accessType: FileAccessType.PUBLIC,
-      maxAccessCount: this.accessCountDefault,
-      status: 'processing',
-    });
-    const savedFile = await this.fileRepository.save(newFile);
+    const resolvedFolderId = folderId ?? null;
+    let savedFile: File | undefined;
 
-    if (tagIds?.length) {
-      await this.insertFileTags(this.fileRepository.manager, savedFile.id, tagIds);
+    if (overwriteFileId) {
+      // 覆盖分支：复用旧记录（id 不变），目标失效时降级为原新建逻辑（绝不丢已传字节）
+      const reused = await this.tryApplyOverwriteOrNull(
+        overwriteFileId,
+        user,
+        resolvedFolderId,
+        async (target) => {
+          const oldTelegramFileId = target.telegramFileId;
+          // tempId 占位语义与新记录一致，由 FileUploadProcessor 按 fileId 更新为真实 TG 引用
+          target.status = 'processing';
+          target.originalName = fileName;
+          target.size = file.size;
+          target.mimeType = file.mimetype || 'application/octet-stream';
+          target.filename = tempId;
+          target.telegramFileId = tempId;
+          target.telegramFilePath = '';
+          await this.fileRepository.save(target);
+          // 审计覆盖意图（status=processing，真实引用由 processor 落库后另有流程记录）
+          this.auditService.log({
+            action: 'file_overwrite',
+            userId: user.id,
+            resourceType: 'file',
+            resourceId: target.id,
+            metadata: { filename: fileName, size: file.size, status: 'processing', oldTelegramFileId },
+          });
+          return target;
+        },
+        'createProcessingFile',
+      );
+      if (reused) {
+        savedFile = reused;
+      }
     }
 
-    this.auditService.log({
-      action: 'file_upload',
-      userId: user.id,
-      resourceType: 'file',
-      resourceId: savedFile.id,
-      metadata: { filename: fileName, size: file.size, status: 'processing' },
-    });
+    if (!savedFile) {
+      const newFile = this.fileRepository.create({
+        filename: tempId,
+        originalName: fileName,
+        mimeType: file.mimetype || 'application/octet-stream',
+        size: file.size,
+        telegramFileId: tempId,
+        telegramFilePath: '',
+        uploaderId: user.id,
+        folderId: resolvedFolderId,
+        accessType: FileAccessType.PUBLIC,
+        maxAccessCount: this.accessCountDefault,
+        status: 'processing',
+      });
+      savedFile = await this.fileRepository.save(newFile);
 
-    // 预热缓存：将文件直接放入缓存目录，首次下载无需等待 TG 回源
+      if (tagIds?.length) {
+        await this.insertFileTags(this.fileRepository.manager, savedFile.id, tagIds);
+      }
+
+      this.auditService.log({
+        action: 'file_upload',
+        userId: user.id,
+        resourceType: 'file',
+        resourceId: savedFile.id,
+        metadata: { filename: fileName, size: file.size, status: 'processing' },
+      });
+    }
+    // 覆盖不新增标签：跳过 insertFileTags，保留旧记录既有标签（新建分支才关联 tagIds）
+
+    const finalFile = savedFile;
+
+    // 预热缓存：将文件直接放入缓存目录，首次下载无需等待 TG 回源（按同一 id 对覆盖记录天然生效）
     if (file.path && fs.existsSync(file.path)) {
-      this.fileCacheService.cacheFileFromPath(savedFile.id, file.path, file.size)
+      this.fileCacheService.cacheFileFromPath(finalFile.id, file.path, file.size)
         .then(() => {
           // 缓存预热完成 → 文件立即可用，无需等待 TG 上传
-          this.fileRepository.update(savedFile.id, { status: 'ready' } as any).catch(() => {});
-          this.logger.log(`文件缓存就绪: ${savedFile.id}`);
+          this.fileRepository.update(finalFile.id, { status: 'ready' } as any).catch(() => {});
+          this.logger.log(`文件缓存就绪: ${finalFile.id}`);
         })
         .catch((err) => {
-          this.logger.warn(`缓存预热失败 (${savedFile.id}): ${err.message}`);
+          this.logger.warn(`缓存预热失败 (${finalFile.id}): ${err.message}`);
         });
     }
 
-    return savedFile;
+    return finalFile;
   }
 
   async upload(file: Express.Multer.File, user: User, tagIds?: string[]): Promise<File> {
@@ -1948,6 +2120,7 @@ export class FileService implements OnModuleInit {
     tagIds?: string[],
     _req?: Request,
     folderId?: string | null,
+    overwriteFileId?: string,
   ): Promise<{ jobId: string; warning: string }> {
     if (file.size > this.maxFileSize) {
       throw new BadRequestException(`文件大小不能超过 ${this.maxFileSize / 1024 / 1024}MB`);
@@ -1971,7 +2144,7 @@ export class FileService implements OnModuleInit {
     const cleanup = () => {};
 
     // 后台处理：不阻塞响应
-    this.processAsyncUpload(job.jobId, file, user, originalName, abortController.signal, cleanup, tagIds, folderId);
+    this.processAsyncUpload(job.jobId, file, user, originalName, abortController.signal, cleanup, tagIds, folderId, overwriteFileId);
     return { jobId: job.jobId, warning: '任务在内存中处理，进程重启会丢失' };
   }
 
@@ -2074,6 +2247,7 @@ export class FileService implements OnModuleInit {
     cleanup: () => void = () => {},
     tagIds?: string[],
     folderId?: string | null,
+    overwriteFileId?: string,
   ): Promise<void> {
     try {
       this.uploadJobService.updateJob(jobId, { status: 'uploading' });
@@ -2083,7 +2257,7 @@ export class FileService implements OnModuleInit {
         throw new Error('任务已被放弃');
       }
 
-      const savedFile = await this.uploadToTelegram(file, user, originalName, abortSignal, folderId);
+      const savedFile = await this.uploadToTelegram(file, user, originalName, abortSignal, folderId, overwriteFileId);
 
       // 上传完成后关联标签（参数化查询）
       if (tagIds && tagIds.length > 0) {
@@ -2125,6 +2299,7 @@ export class FileService implements OnModuleInit {
     originalName: string,
     abortSignal?: AbortSignal,
     folderId?: string | null,
+    overwriteFileId?: string,
   ): Promise<File> {
     // GIF 文件加 .bin 后缀防止 Telegram 转码为 MP4
     const uploadName = file.mimetype === 'image/gif' ? originalName + '.bin' : originalName;
@@ -2139,6 +2314,26 @@ export class FileService implements OnModuleInit {
 
     // Telegram 上传完成，清理 Multer 临时文件
     this.cleanupTempFile(file);
+
+    // 覆盖分支：TG 上传成功后优先 in-place 覆盖目标记录（保留原 id），目标失效则降级新建
+    if (overwriteFileId) {
+      const overwritten = await this.tryApplyOverwriteOrNull(
+        overwriteFileId,
+        user,
+        folderId ?? null,
+        (target) => this.applyOverwrite(target, {
+          telegramFileId: telegramFile.file_id,
+          telegramFilePath: telegramFile.file_path || '',
+          filename: telegramFile.file_id,
+          originalName,
+          size: file.size,
+          mimeType: file.mimetype,
+          user,
+        }),
+        'uploadToTelegram',
+      );
+      if (overwritten) return overwritten;
+    }
 
     const newFile = this.fileRepository.create({
       filename: telegramFile.file_id,

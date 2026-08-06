@@ -36,6 +36,7 @@ export class ChunkUploadController {
       dto.chunkSize,
       user.id,
       dto.folderId,
+      dto.overwriteFileId,
     );
   }
 
