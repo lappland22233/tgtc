@@ -71,34 +71,44 @@ export const useFolderStore = defineStore('folders', () => {
     }
   }
 
-  /** 切换当前文件夹，并同步拉取面包屑 */
-  async function openFolder(folderId: string | null) {
+  /**
+   * 切换当前文件夹，并同步拉取面包屑。
+   *
+   * 返回文件夹是否有效（根目录恒为 true）。非根目录时以面包屑接口作为
+   * 存在性/权限校验：后端对不存在或无权限的 folderId 返回 4xx，此时返回 false，
+   * 由 URL 驱动的调用方负责回退根目录并提示。
+   * 注意：本函数只是状态执行单元，调用方应先更新 URL（URL 是目录状态的唯一事实来源）。
+   */
+  async function openFolder(folderId: string | null): Promise<boolean> {
     if (breadcrumbAbortController) breadcrumbAbortController.abort();
     const controller = new AbortController();
     breadcrumbAbortController = controller;
 
     currentFolderId.value = folderId;
-    if (folderId) {
-      try {
-        const res = await api.get('/folders/breadcrumb', {
-          params: { parentId: folderId },
-          signal: controller.signal,
-        });
-        if (controller.signal.aborted) return;
-        breadcrumb.value = res.data.data.breadcrumb;
-      } catch (err) {
-        const e = err as { name?: string; code?: string };
-        if (e.name === 'AbortError' || e.code === 'ERR_CANCELED') return;
-        // 失败时清空面包屑，避免 currentFolderId 已切换但面包屑仍是旧路径的不一致状态
-        breadcrumb.value = [];
-        throw err;
-      } finally {
-        if (breadcrumbAbortController === controller) {
-          breadcrumbAbortController = null;
-        }
-      }
-    } else {
+    if (!folderId) {
       breadcrumb.value = [];
+      return true;
+    }
+    try {
+      const res = await api.get('/folders/breadcrumb', {
+        params: { parentId: folderId },
+        signal: controller.signal,
+      });
+      if (controller.signal.aborted) return true; // 已被更新的导航取代，由新流程自行处理
+      breadcrumb.value = res.data.data.breadcrumb;
+      return true;
+    } catch (err) {
+      const e = err as { name?: string; code?: string };
+      // 被新请求取消：不视为无效，交给新导航流程判断
+      if (e.name === 'AbortError' || e.code === 'ERR_CANCELED') return true;
+      // 面包屑获取失败（404/403 等）：视为目录无效，由调用方回退根目录
+      breadcrumb.value = [];
+      console.warn('[folders] 面包屑获取失败，目录可能不存在或无权限：', err);
+      return false;
+    } finally {
+      if (breadcrumbAbortController === controller) {
+        breadcrumbAbortController = null;
+      }
     }
   }
 

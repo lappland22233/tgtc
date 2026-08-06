@@ -61,15 +61,31 @@ export class FolderService {
     return this.buildTreeFromFlat(allFolders);
   }
 
-  /** 返回从根到当前文件夹的路径（面包屑） */
+  /**
+   * 返回从根到当前文件夹的路径（面包屑）。
+   *
+   * 沿 parentId 链逐级上溯实现，不依赖闭包表行：历史上闭包联结表名曾配置错误
+   * （实体默认解析为 folders_closure，而迁移建的是 folder_closure），存量文件夹
+   * 的闭包行可能缺失或从未写入，若此处用 findAncestors（闭包表查询）会导致
+   * 面包屑返回空甚至 SQL 报错，进而阻断前端文件夹导航。
+   * folders."parentId" 有索引且深度 ≤ MAX_FOLDER_DEPTH，O(depth) 单行查询可接受。
+   */
   async getBreadcrumb(ownerId: string, folderId: string | null): Promise<Folder[]> {
     if (!folderId) return [];
-    await this.assertFolderOwned(folderId, ownerId);
-    const folder = await this.folderRepo.findOne({ where: { id: folderId } });
-    if (!folder) throw new NotFoundException('文件夹不存在');
-    // findAncestors 返回顺序是从自身到根，需要反转为从根到自身
-    const ancestors = await this.folderRepo.findAncestors(folder);
-    return ancestors.reverse().filter((f) => !f.isDeleted);
+    const path: Folder[] = [];
+    let current: Folder | null = await this.assertFolderOwned(folderId, ownerId);
+    const seen = new Set<string>();
+    while (current) {
+      if (seen.has(current.id)) break; // 脏数据防御：parentId 成环时终止
+      seen.add(current.id);
+      path.push(current);
+      if (!current.parentId) break;
+      current = await this.folderRepo.findOne({ where: { id: current.parentId } });
+      // 祖先必须属于同一用户（跨用户数据视为断链）
+      if (current && current.ownerId !== ownerId) break;
+    }
+    // path 收集顺序为自身→根，反转为根→自身；与旧实现一致过滤已删除节点
+    return path.reverse().filter((f) => !f.isDeleted);
   }
 
   /**

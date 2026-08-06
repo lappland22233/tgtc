@@ -7,6 +7,7 @@ import { FolderService } from './folder.service';
 import { Folder } from '../common/entities/folder.entity';
 import { File } from '../common/entities/file.entity';
 import { AuditService } from '../common/services/audit.service';
+import { NotFoundException } from '@nestjs/common';
 
 describe('FolderService - createFolder', () => {
   const ownerId = '11111111-1111-4111-8111-111111111111';
@@ -123,6 +124,112 @@ describe('FolderService - createFolder', () => {
     await expect(service.createFolder(ownerId, { name: '文档' })).rejects.toThrow('同层级下已存在同名文件夹');
     expect(folderRepo.create).not.toHaveBeenCalled();
     expect(folderRepo.save).not.toHaveBeenCalled();
+  });
+});
+
+describe('FolderService - getBreadcrumb', () => {
+  const ownerId = '11111111-1111-4111-8111-111111111111';
+
+  let service: FolderService;
+  let folderRepo: {
+    findOne: jest.Mock;
+    create: jest.Mock;
+    save: jest.Mock;
+    manager: { query: jest.Mock };
+  };
+
+  /** 构造一个 folder 实体 */
+  function makeFolder(id: string, parentId: string | null, extra: Partial<Folder> = {}): Folder {
+    return Object.assign(new Folder(), {
+      id,
+      name: `folder-${id}`,
+      ownerId,
+      parentId,
+      isDeleted: false,
+      ...extra,
+    });
+  }
+
+  beforeEach(async () => {
+    folderRepo = {
+      findOne: jest.fn(),
+      create: jest.fn((data: Partial<Folder>) => data as Folder),
+      save: jest.fn(),
+      manager: { query: jest.fn() },
+    };
+
+    const moduleRef: TestingModule = await Test.createTestingModule({
+      providers: [
+        FolderService,
+        { provide: getRepositoryToken(Folder), useValue: folderRepo },
+        { provide: getRepositoryToken(File), useValue: { findOne: jest.fn(), find: jest.fn() } as Partial<Repository<File>> },
+        { provide: AuditService, useValue: { log: jest.fn(), logAwait: jest.fn() } },
+      ],
+    }).compile();
+
+    service = moduleRef.get(FolderService);
+  });
+
+  it('folderId 为 null 时返回空数组，不查询数据库', async () => {
+    await expect(service.getBreadcrumb(ownerId, null)).resolves.toEqual([]);
+    expect(folderRepo.findOne).not.toHaveBeenCalled();
+  });
+
+  it('沿 parentId 链上溯，返回根→自身的完整路径（不依赖闭包表）', async () => {
+    const root = makeFolder('aaaaaaaa-0000-4000-8000-000000000001', null);
+    const mid = makeFolder('aaaaaaaa-0000-4000-8000-000000000002', root.id);
+    const leaf = makeFolder('aaaaaaaa-0000-4000-8000-000000000003', mid.id);
+    folderRepo.findOne
+      .mockResolvedValueOnce(leaf) // assertFolderOwned 目标
+      .mockResolvedValueOnce(mid) // 上溯一级
+      .mockResolvedValueOnce(root); // 上溯到根
+
+    const crumb = await service.getBreadcrumb(ownerId, leaf.id);
+
+    expect(crumb.map((f) => f.id)).toEqual([root.id, mid.id, leaf.id]);
+    // 不应调用任何闭包表查询（findAncestors / manager.query）
+    expect(folderRepo.manager.query).not.toHaveBeenCalled();
+  });
+
+  it('过滤路径中已删除的祖先节点', async () => {
+    const root = makeFolder('bbbbbbbb-0000-4000-8000-000000000001', null, { isDeleted: true });
+    const leaf = makeFolder('bbbbbbbb-0000-4000-8000-000000000002', root.id);
+    folderRepo.findOne
+      .mockResolvedValueOnce(leaf)
+      .mockResolvedValueOnce(root);
+
+    const crumb = await service.getBreadcrumb(ownerId, leaf.id);
+    expect(crumb.map((f) => f.id)).toEqual([leaf.id]);
+  });
+
+  it('目标文件夹不存在或不属于当前用户时抛 NotFoundException', async () => {
+    folderRepo.findOne.mockResolvedValueOnce(null);
+    await expect(service.getBreadcrumb(ownerId, 'cccccccc-0000-4000-8000-000000000001')).rejects.toThrow(NotFoundException);
+  });
+
+  it('parentId 成环的脏数据不会导致无限循环', async () => {
+    const a = makeFolder('dddddddd-0000-4000-8000-000000000001', 'dddddddd-0000-4000-8000-000000000002');
+    const b = makeFolder('dddddddd-0000-4000-8000-000000000002', 'dddddddd-0000-4000-8000-000000000001');
+    folderRepo.findOne
+      .mockResolvedValueOnce(a)
+      .mockResolvedValueOnce(b)
+      .mockResolvedValueOnce(a); // 成环
+
+    const crumb = await service.getBreadcrumb(ownerId, a.id);
+    // 环被截断，路径有限且不报错
+    expect(crumb.length).toBeLessThanOrEqual(2);
+    expect(folderRepo.findOne.mock.calls.length).toBeLessThanOrEqual(4);
+  });
+
+  it('祖先属于其他用户时断链终止，不越权暴露他人数据', async () => {
+    const foreign = makeFolder('eeeeeeee-0000-4000-8000-000000000001', null, { ownerId: '99999999-9999-4999-8999-999999999999' });
+    const leaf = makeFolder('eeeeeeee-0000-4000-8000-000000000002', foreign.id);
+    folderRepo.findOne
+      .mockResolvedValueOnce(leaf)
+      .mockResolvedValueOnce(foreign);
+
+    const crumb = await service.getBreadcrumb(ownerId, leaf.id);
+    expect(crumb.map((f) => f.id)).toEqual([leaf.id]);
   });
 });
 

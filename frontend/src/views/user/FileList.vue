@@ -563,13 +563,58 @@ const currentFolderIdForApi = computed(() => {
   return folderStore.currentFolderId === null ? 'root' : folderStore.currentFolderId;
 });
 
-/** 用户点击地址栏路径、文件夹行时触发 */
-async function onFolderNavigate(folderId: string | null) {
-  if (folderId === folderStore.currentFolderId) return;
-  await folderStore.openFolder(folderId);
-  selectedFileIds.value = [];
-  refetchFiles();
+/**
+ * 用户点击地址栏路径、双击/右键打开文件夹时触发。
+ * 只更新 URL（folder query 参数），状态同步统一由下方 route watch 驱动，
+ * 避免「直接改 store + 改 URL」双写竞态；URL 是当前目录的唯一事实来源。
+ * 保留 search/sortBy/sortOrder/tagIds 等既有 query 参数不丢失。
+ */
+function onFolderNavigate(folderId: string | null) {
+  if (folderId === folderStore.currentFolderId) return; // 已在目标目录，不产生多余历史记录
+  const query = { ...route.query };
+  if (folderId) query.folder = folderId;
+  else delete query.folder; // 根目录对应 /files（不带 folder 参数），保持既有链接兼容
+  router.push({ query });
 }
+
+/**
+ * URL → 目录状态（单向同步，天然支持浏览器前进/后退与 F5 刷新保持）。
+ * 进入/变更路由时读取 folder 参数 → openFolder → 刷新文件列表；
+ * 参数非法（文件夹不存在/无权限）时友好提示并 router.replace 清除参数回退根目录。
+ */
+let folderRouteSynced = false;
+watch(() => route.query.folder, async (raw) => {
+  // 非法参数形态（如 folder=a&folder=b）：直接清除并回退根目录
+  if (raw != null && typeof raw !== 'string') {
+    const query = { ...route.query };
+    delete query.folder;
+    router.replace({ query });
+    return;
+  }
+  const targetId = raw || null;
+  // 已同步则跳过（如 search/sort replace 未改变目录）；首次挂载必须执行初始加载
+  if (folderRouteSynced && targetId === folderStore.currentFolderId) return;
+  folderRouteSynced = true;
+
+  if (targetId) {
+    const valid = await folderStore.openFolder(targetId);
+    if (!valid) {
+      MessagePlugin.warning('目标文件夹不存在或无权访问，已回到我的文件');
+      const query = { ...route.query };
+      delete query.folder;
+      router.replace({ query }); // replace 后 watch 以 null 再次触发，完成重置与加载
+      return;
+    }
+  } else {
+    await folderStore.openFolder(null);
+  }
+  selectedFileIds.value = [];
+  try {
+    await refetchFiles();
+  } catch {
+    // 初始/切换加载失败保留空列表，用户可手动刷新
+  }
+}, { immediate: true });
 
 function openCreateFolderDialog() {
   showCreateFolderDialog.value = true;
@@ -1445,24 +1490,21 @@ async function confirmBatchTags() {
 }
 
 // 同步搜索、排序、标签到 URL 查询参数（无限滚动，不再同步分页参数）
+// 注意：replace 时必须保留 folder 参数，否则搜索/排序会丢失当前目录
 watch([search, sortBy, sortOrder, selectedTagIds], ([newSearch, newSortBy, newSortOrder, newTagIds]) => {
   const query: Record<string, string> = {};
   if (newSearch) query.search = newSearch;
   if (newSortBy) query.sortBy = newSortBy;
   if (newSortOrder) query.sortOrder = newSortOrder;
   if (newTagIds && newTagIds.length > 0) query.tagIds = newTagIds.join(',');
+  if (folderStore.currentFolderId) query.folder = folderStore.currentFolderId;
   router.replace({ query });
 }, { flush: 'post' });
 
 onMounted(async () => {
   try { await tagStore.fetchTags(); } catch { /* 标签加载失败不阻塞页面 */ }
   try { await folderStore.fetchTree(); } catch { /* 文件夹树加载失败不阻塞页面 */ }
-
-  try {
-    await loadInitialFiles();
-  } catch {
-    // 初始加载失败保留空列表，用户可手动刷新
-  }
+  // 文件列表初始加载由上方 route.query.folder watch（immediate）驱动，此处不重复加载
 });
 
 onUnmounted(() => {
