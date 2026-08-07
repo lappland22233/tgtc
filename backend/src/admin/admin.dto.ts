@@ -15,6 +15,7 @@ import {
   IsNotEmpty,
   IsDateString,
   IsIn,
+  IsEmail,
 } from 'class-validator';
 import { Type } from 'class-transformer';
 
@@ -92,13 +93,20 @@ export class SmtpConfigDto {
   @IsNotEmpty()
   user: string;
 
+  // 留空/未传时保留数据库中已有密码，避免 GET 不回显密码后无法二次保存
+  @IsOptional()
   @IsString()
-  @IsNotEmpty()
-  password: string;
+  @MaxLength(500)
+  password?: string;
 
   @IsString()
   @IsNotEmpty()
   from: string;
+}
+
+export class SmtpTestDto {
+  @IsEmail()
+  recipient: string;
 }
 
 export class UploadConfigDto {

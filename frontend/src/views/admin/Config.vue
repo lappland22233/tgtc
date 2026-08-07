@@ -45,7 +45,7 @@
             <t-input v-model="smtpConfig.user" placeholder="邮箱地址" autocomplete="off" name="smtp-user" />
           </t-form-item>
           <t-form-item label="密码">
-            <t-input v-model="smtpConfig.password" type="password" placeholder="邮箱密码或授权码" autocomplete="new-password" name="smtp-pass" />
+            <t-input v-model="smtpConfig.password" type="password" placeholder="邮箱密码或授权码，留空则保留原密码" autocomplete="new-password" name="smtp-pass" />
           </t-form-item>
           <t-form-item label="发件人">
             <t-input v-model="smtpConfig.from" placeholder="显示名称" autocomplete="off" name="smtp-from" />
@@ -54,6 +54,24 @@
             <t-button theme="primary" @click="saveSMTPConfig">保存SMTP配置</t-button>
           </t-form-item>
         </t-form>
+
+        <!-- 发送测试邮件 -->
+        <div class="smtp-test">
+          <div class="smtp-test__title">发送测试邮件</div>
+          <div class="smtp-test__row">
+            <t-input
+              v-model="testEmailRecipient"
+              placeholder="收件人邮箱，如 user@example.com"
+              autocomplete="off"
+              name="smtp-test-recipient"
+              @enter="sendTestEmail"
+            />
+            <t-button theme="primary" variant="outline" :loading="sendingTestEmail" @click="sendTestEmail">
+              发送
+            </t-button>
+          </div>
+          <div class="smtp-test__hint">使用服务器当前生效的邮箱配置发送，未保存的修改不会参与测试</div>
+        </div>
       </div>
     </div>
 
@@ -319,7 +337,11 @@ async function saveAuthConfig() {
 async function fetchSMTPConfig(): Promise<boolean> {
   try {
     const res = await api.get('/admin/smtp');
-    smtpConfig.value = res.data.data ?? smtpConfig.value;
+    const data = res.data.data;
+    if (data) {
+      // GET /admin/smtp 不返回 password，保留表单中已有的密码值，避免被响应覆盖为空导致无法二次保存
+      smtpConfig.value = { ...smtpConfig.value, ...data, password: smtpConfig.value.password };
+    }
     return true;
   } catch (err) {
     console.error('获取SMTP配置失败', err);
@@ -328,11 +350,43 @@ async function fetchSMTPConfig(): Promise<boolean> {
 }
 
 async function saveSMTPConfig() {
+  const { host, port, user, from } = smtpConfig.value;
+  if (!String(host).trim() || !port || !String(user).trim() || !String(from).trim()) {
+    MessagePlugin.warning('请填写SMTP服务器、端口、用户名和发件人');
+    return;
+  }
   try {
     await api.put('/admin/smtp', smtpConfig.value);
     MessagePlugin.success('SMTP配置已保存');
   } catch (error: unknown) {
     MessagePlugin.error(getErrorMessage(error));
+  }
+}
+
+// —— 发送测试邮件 ——
+const testEmailRecipient = ref('');
+const sendingTestEmail = ref(false);
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+async function sendTestEmail() {
+  if (sendingTestEmail.value) return;
+  const recipient = testEmailRecipient.value.trim();
+  if (!recipient) {
+    MessagePlugin.warning('请输入收件人邮箱');
+    return;
+  }
+  if (!EMAIL_RE.test(recipient)) {
+    MessagePlugin.warning('收件人邮箱格式不正确');
+    return;
+  }
+  sendingTestEmail.value = true;
+  try {
+    await api.post('/admin/smtp/test', { recipient });
+    MessagePlugin.success('测试邮件已发送');
+  } catch (error: unknown) {
+    MessagePlugin.error(getErrorMessage(error));
+  } finally {
+    sendingTestEmail.value = false;
   }
 }
 
@@ -506,6 +560,34 @@ onMounted(() => {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 20px;
+}
+
+.smtp-test {
+  margin-top: var(--space-4);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--border-default);
+}
+
+.smtp-test__title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: var(--space-2);
+}
+
+.smtp-test__row {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.smtp-test__row .t-button {
+  flex-shrink: 0;
+}
+
+.smtp-test__hint {
+  margin-top: var(--space-2);
+  font-size: 12px;
+  color: var(--text-secondary);
 }
 
 @media (max-width: 768px) {

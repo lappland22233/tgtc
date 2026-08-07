@@ -3,6 +3,7 @@ import type { AxiosResponse } from 'axios';
 import api from '../api/client';
 import { reportUploadError } from '../utils/telemetry';
 import { uploadScheduler } from '../utils/upload-scheduler';
+import { classifyUploadError } from '../utils/upload-retry';
 
 export interface ChunkUploadProgress {
   totalChunks: number;
@@ -113,10 +114,9 @@ export function useChunkedUpload(concurrency = 2) {
           break;
         } catch (err: any) {
           if (signal?.aborted) throw err;
-          // 不可重试：客户端参数错误、认证失败、文件过大
-          const status = err?.response?.status;
-          const isNonRetryable = status === 413 || status === 400 || status === 401;
-          if (isNonRetryable || attempt >= MAX_RETRIES) throw err;
+          // 统一由 classifyUploadError 判定：带 response 的 4xx/5xx、CDN 413 文案、
+          // job 业务失败均不可重试；仅无 response 的传输层/CDN 代理层错误可重试。
+          if (!classifyUploadError(err).retryable || attempt >= MAX_RETRIES) throw err;
           const delay = RETRY_BASE_DELAY * Math.pow(2, attempt) + Math.floor(Math.random() * 1000);
           console.warn(`[分片上传] init 失败，${(delay / 1000).toFixed(1)}s 后重试 (${attempt + 1}/${MAX_RETRIES})`);
           await new Promise(resolve => setTimeout(resolve, delay));
@@ -202,23 +202,10 @@ export function useChunkedUpload(concurrency = 2) {
                 if (signal?.aborted) return;
               }
       
-              // 不可重试的错误：客户端参数错误、认证失败、文件过大
-              const isNonRetryable =
-                err?.response?.status === 413 ||  // 文件过大
-                err?.response?.status === 400 ||  // 参数错误
-                err?.response?.status === 401;    // 认证失败
-      
-              if (isNonRetryable) {
-                throw err;
-              }
-      
-              // 可重试的错误：超时、网络错误、5xx、Cloudflare 502
-              const isRetryable =
-                err?.code === 'ECONNABORTED' ||
-                err?.code === 'ERR_NETWORK' ||
-                err?.message?.includes('timeout') ||
-                err?.message?.includes('代理层') ||       // Cloudflare 代理层错误（413/502 非 JSON 响应）
-                err?.response?.status >= 500;
+              // 统一由 classifyUploadError 判定可重试性（与队列层同一套语义）：
+              // 带 response 的 5xx 不再重试（服务器内部错误，重试可能产生重复文件），
+              // 413/400/401 等业务 4xx 不可重试，CDN“代理层”消息型裸 Error 保持可重试。
+              const isRetryable = classifyUploadError(err).retryable;
       
               if (isRetryable && retryCount < MAX_RETRIES) {
                 // 指数退避 + 随机抖动，避免雷群效应
@@ -312,10 +299,9 @@ export function useChunkedUpload(concurrency = 2) {
           break;
         } catch (err: any) {
           if (signal?.aborted) throw err;
-          const isRetryable =
-            err?.code === 'ERR_NETWORK' ||
-            err?.message?.includes('代理层') ||
-            err?.response?.status >= 500;
+          // 仅 transient 类（无 response 的传输层/CDN 代理层错误）触发重试；
+          // 带 response 的 5xx 不再重试（后端已受理，重试可能重复触发合并）。
+          const isRetryable = classifyUploadError(err).retryable;
           if (!isRetryable || retry >= MAX_RETRIES - 1) throw err;
           console.warn(`[分片上传] 合并触发失败，${RETRY_BASE_DELAY / 1000}s 后重试 (${retry + 1}/${MAX_RETRIES})`);
           await new Promise(resolve => setTimeout(resolve, RETRY_BASE_DELAY));

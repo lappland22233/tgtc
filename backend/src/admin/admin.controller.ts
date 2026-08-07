@@ -5,7 +5,7 @@ import { Roles } from '../common/decorators/roles.decorator';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { User, UserRole } from '../common/entities/user.entity';
-import { BanIPDto, UnbanIPDto, BatchDeleteFilesDto, ConfigDto, BatchConfigDto, SmtpConfigDto, UploadConfigDto, AuthConfigDto, AccessLogQueryDto, SecurityConfigBatchDto } from './admin.dto';
+import { BanIPDto, UnbanIPDto, BatchDeleteFilesDto, ConfigDto, BatchConfigDto, SmtpConfigDto, SmtpTestDto, UploadConfigDto, AuthConfigDto, AccessLogQueryDto, SecurityConfigBatchDto } from './admin.dto';
 import { TopFilesQueryDto, TopPathsQueryDto, StatusByPathQueryDto, AbnormalIpsQueryDto, DateRangeQueryDto, RefererAnalysisQueryDto, UserAgentAnalysisQueryDto, BandwidthQueryDto, FileTypeQueryDto } from './admin-stats.dto';
 import { CacheConfigDto } from './dto/cache-config.dto';
 
@@ -147,6 +147,17 @@ export class AdminController {
   ) {
     await this.adminService.updateSMTPConfig(user, dto);
     return { message: 'SMTP配置已更新' };
+  }
+
+  // 测试发送使用当前生效配置（含刚保存未重启的 DB 配置），先自检连通性再发送
+  @Post('smtp/test')
+  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
+  async sendTestSMTPMail(
+    @CurrentUser() user: User,
+    @Body() dto: SmtpTestDto,
+  ) {
+    await this.adminService.sendTestSMTPMail(user, dto.recipient);
+    return { message: '测试邮件发送成功，请检查收件箱' };
   }
 
   // Upload Config

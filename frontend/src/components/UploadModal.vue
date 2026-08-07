@@ -137,6 +137,7 @@
               <t-tag v-if="item.status === 'success'" theme="success" size="small" variant="light">成功</t-tag>
               <t-tag v-else-if="item.status === 'error'" theme="danger" size="small" variant="light">失败</t-tag>
               <t-tag v-else-if="item.status === 'cancelled'" theme="default" size="small" variant="light">已取消</t-tag>
+              <t-tag v-else-if="item.status === 'processing' && (item.retryCount ?? 0) > 0" theme="warning" size="small" variant="light">自动重试中 ({{ item.retryCount }}/2)</t-tag>
               <t-tag v-else-if="item.status === 'processing'" theme="warning" size="small" variant="light">处理中</t-tag>
               <t-tag v-else-if="item.progress > 0" theme="primary" size="small" variant="light">{{ item.progress }}%</t-tag>
               <t-tag v-else theme="primary" size="small" variant="light">等待</t-tag>

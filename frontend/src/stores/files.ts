@@ -2,6 +2,7 @@ import { defineStore } from 'pinia';
 import { ref } from 'vue';
 import { api } from './auth';
 import type { BatchUploadResult, FileItem } from '../types/file';
+import { classifyUploadError } from '../utils/upload-retry';
 
 export const useFileStore = defineStore('files', () => {
   const files = ref<FileItem[]>([]);
@@ -206,8 +207,10 @@ export const useFileStore = defineStore('files', () => {
 
     // Step 2: 轮询上传状态（Telegram 转发阶段）
     const pollInterval = 2000; // 2 秒轮询（降低轮询频率，为上传请求预留连接）
-    const maxWait = 10 * 60 * 1000; // 最多等 10 分钟
+    const maxWait = 10 * 60 * 1000; // 最多等 10 分钟（含容错等待时间）
     const startTime = Date.now();
+    // 状态查询请求的瞬时失败容忍：连续 transient 失败退避重试，上限 3 次（2s/4s/8s）
+    const maxPollFailures = 3;
 
     // 可中断的 sleep：到时 resolve；signal abort 时立即 reject 并清理定时器/监听器
     const abortableSleep = (ms: number) => new Promise<void>((resolve, reject) => {
@@ -225,22 +228,42 @@ export const useFileStore = defineStore('files', () => {
     });
 
     try {
+      let consecutivePollFailures = 0;
       while (!signal?.aborted && Date.now() - startTime < maxWait) {
         await abortableSleep(pollInterval);
         if (signal?.aborted) {
           throw new Error('上传已取消');
         }
-        const statusRes = await api.get(`/files/upload-status/${jobId}`, {
-          signal,
-        });
-        const job = statusRes.data.data;
+        let job: { status: string; error?: string; result?: { id: string } };
+        try {
+          const statusRes = await api.get(`/files/upload-status/${jobId}`, {
+            signal,
+          });
+          job = statusRes.data.data;
+          // 查询成功：清零容错计数，继续正常轮询
+          consecutivePollFailures = 0;
+        } catch (pollErr) {
+          if (signal?.aborted) {
+            throw new Error('上传已取消');
+          }
+          const classification = classifyUploadError(pollErr);
+          // 仅 transient 类（网络抖动/超时等）容忍退避重试；
+          // 业务 4xx 等不可重试错误直接抛出，交给队列层终态处理
+          if (!classification.retryable || consecutivePollFailures >= maxPollFailures) {
+            throw pollErr;
+          }
+          consecutivePollFailures++;
+          // 退避 2s/4s/8s（计入 maxWait，abort 立即退出）后继续轮询
+          await abortableSleep(2000 * Math.pow(2, consecutivePollFailures - 1));
+          continue;
+        }
 
         if (onStatusChange) {
           onStatusChange(job.status);
         }
 
         if (job.status === 'completed') {
-          return job.result;
+          return job.result as { id: string };
         }
         if (job.status === 'failed') {
           throw new Error(job.error || '上传处理失败');

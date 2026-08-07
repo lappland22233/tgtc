@@ -5,6 +5,7 @@ import { useFileStore } from './files';
 import { useChunkedUpload } from '../composables/useChunkedUpload';
 import { getErrorMessage } from '../utils/error';
 import { reportUploadError } from '../utils/telemetry';
+import { MAX_ENTRY_RETRIES, getRetryDelay, abortableBackoff, classifyUploadError } from '../utils/upload-retry';
 
 /**
  * 全局上传队列 store（模块级生命周期，组件卸载不销毁）。
@@ -41,6 +42,8 @@ export interface QueueEntry {
   batchId?: string;
   /** 覆盖上传：用户决策覆盖的既有文件 ID，后端据此替换原文件 */
   overwriteFileId?: string;
+  /** 条目级自动重试已执行次数（仅 transient 错误触发，上限 MAX_ENTRY_RETRIES） */
+  retryCount?: number;
 }
 
 /** 5MB 以上走分片上传，避免 CDN 超时截断 */
@@ -51,6 +54,25 @@ type ChunkedSession = ReturnType<typeof useChunkedUpload>;
 
 function isTerminal(status: QueueStatus): boolean {
   return status === 'success' || status === 'error' || status === 'cancelled';
+}
+
+// ---- 重试熔断器（模块级，跨 store 实例共享）----
+// 连续 6 个条目在首次尝试即遭 transient 失败则跳闸：网络大概率已整体不可用，
+// 继续逐条退避重试只会徒增等待时间；跳闸后失败直接置 error，任一条目上传成功即清零恢复。
+const BREAKER_TRIP_THRESHOLD = 6;
+let transientFirstAttemptStreak = 0;
+let retryBreakerTripped = false;
+
+function recordTransientFirstAttemptFailure() {
+  transientFirstAttemptStreak++;
+  if (transientFirstAttemptStreak >= BREAKER_TRIP_THRESHOLD) {
+    retryBreakerTripped = true;
+  }
+}
+
+function resetRetryBreaker() {
+  transientFirstAttemptStreak = 0;
+  retryBreakerTripped = false;
 }
 
 /**
@@ -261,17 +283,61 @@ export const useUploadStore = defineStore('upload', () => {
       return;
     }
     try {
-      if (file.size > CHUNK_THRESHOLD) {
-        await uploadChunked(entry, file, controller);
-      } else {
-        await uploadSmall(entry, file, controller);
-      }
-    } catch (error: unknown) {
-      if (controller.signal.aborted) {
-        entry.status = 'cancelled';
-      } else {
-        entry.status = 'error';
-        entry.errorReason = getErrorMessage(error);
+      // attempt 循环：transient 错误在同一条目内自动重试（复用同一 controller），
+      // 其余错误直接进入终态；退避等待期间用户取消立即退出。
+      for (;;) {
+        try {
+          if (file.size > CHUNK_THRESHOLD) {
+            await uploadChunked(entry, file, controller);
+          } else {
+            await uploadSmall(entry, file, controller);
+          }
+          // 上传成功：熔断器计数清零（网络恢复信号）
+          resetRetryBreaker();
+          return;
+        } catch (error: unknown) {
+          if (controller.signal.aborted) {
+            entry.status = 'cancelled';
+            return;
+          }
+          const classification = classifyUploadError(error);
+          const currentRetries = entry.retryCount ?? 0;
+          if (classification.retryable && currentRetries < MAX_ENTRY_RETRIES && !retryBreakerTripped) {
+            entry.retryCount = currentRetries + 1;
+            // 重置进度/速度检查点，避免重试退避时间被计入速率统计
+            entry.progress = 0;
+            entry.loadedBytes = 0;
+            entry.checkpointTime = 0;
+            entry.checkpointBytes = 0;
+            entry.speed = '-';
+            entry.eta = '-';
+            entry.errorReason = undefined;
+            try {
+              await abortableBackoff(getRetryDelay(entry.retryCount), controller.signal);
+            } catch {
+              // 退避期间被取消：置 cancelled 退出
+              entry.status = 'cancelled';
+              return;
+            }
+            continue;
+          }
+          if (classification.retryable && retryBreakerTripped) {
+            // 熔断已跳闸：不再重试，明确提示用户检查网络
+            recordTransientFirstAttemptFailure();
+            entry.status = 'error';
+            entry.errorReason = '网络异常，自动重试已暂停，请检查网络后重新上传';
+            return;
+          }
+          if (classification.retryable) {
+            // 重试次数耗尽：首次尝试即失败则累计熔断计数
+            if (currentRetries === 0) {
+              recordTransientFirstAttemptFailure();
+            }
+          }
+          entry.status = 'error';
+          entry.errorReason = getErrorMessage(error);
+          return;
+        }
       }
     } finally {
       controllers.delete(entry.uid);
@@ -349,6 +415,7 @@ export const useUploadStore = defineStore('upload', () => {
         speedBps: 0,
         folderId,
         tagIds: [...tagIds],
+        retryCount: 0,
       });
     }
     if (newEntries.length === 0) return;
@@ -395,6 +462,7 @@ export const useUploadStore = defineStore('upload', () => {
         relativePath: item.relativePath || undefined,
         batchId,
         overwriteFileId: item.overwriteFileId,
+        retryCount: 0,
       });
     }
     if (newEntries.length === 0) return;

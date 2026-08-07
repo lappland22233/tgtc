@@ -32,6 +32,7 @@ export type AuditAction =
   | 'file_expiry_set'
   | 'config_change'
   | 'smtp_config_change'
+  | 'smtp_test_mail'
   | 'upload_config_change'
   | 'auth_config_change'
   | 'cache_config_change'

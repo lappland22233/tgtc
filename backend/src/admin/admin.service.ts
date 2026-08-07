@@ -11,6 +11,7 @@ import { AccessLog } from '../common/entities/access-log.entity';
 import { AuditLog } from '../common/entities/audit-log.entity';
 import { TelemetryRecord } from '../common/entities/telemetry-record.entity';
 import { FileService } from '../file/file.service';
+import { MailerService } from '../mailer/mailer.service';
 import { ConfigCacheService } from '../common/services/config-cache.service';
 import { AuditService } from '../common/services/audit.service';
 import { encryptPassword } from '../common/utils/crypto.util';
@@ -54,6 +55,7 @@ export class AdminService {
     private configCacheService: ConfigCacheService,
     private auditService: AuditService,
     private exportService: ExportService,
+    private mailerService: MailerService,
   ) {}
 
   async getStats(): Promise<{
@@ -424,15 +426,23 @@ export class AdminService {
     port: number;
     secure: boolean;
     user: string;
-    password: string;
+    password?: string;
     from: string;
   }): Promise<void> {
+    // 密码留空/未传时保留数据库中已有密文（GET 接口不回显密码，前端二次保存不会重输）
+    let passwordValue: string;
+    if (config.password) {
+      passwordValue = encryptPassword(config.password);
+    } else {
+      passwordValue = await this.configCacheService.get('SMTP_PASSWORD', '');
+    }
+
     await this.configCacheService.setBatch([
       { key: 'SMTP_HOST', value: config.host, description: 'SMTP服务器地址' },
       { key: 'SMTP_PORT', value: config.port.toString(), description: 'SMTP服务器端口' },
       { key: 'SMTP_SECURE', value: config.secure.toString(), description: '是否使用SSL' },
       { key: 'SMTP_USER', value: config.user, description: 'SMTP用户名' },
-      { key: 'SMTP_PASSWORD', value: encryptPassword(config.password), description: 'SMTP密码（已加密）' },
+      { key: 'SMTP_PASSWORD', value: passwordValue, description: 'SMTP密码（已加密）' },
       { key: 'SMTP_FROM', value: config.from, description: '发件人邮箱' },
     ]);
 
@@ -442,6 +452,20 @@ export class AdminService {
       userId: user.id,
       resourceType: 'config',
       resourceId: 'smtp',
+    });
+  }
+
+  /** 发送 SMTP 测试邮件，使用当前生效配置（含刚保存未重启的 DB 配置） */
+  async sendTestSMTPMail(user: User, recipient: string): Promise<void> {
+    await this.mailerService.sendTestEmail(recipient);
+
+    // 审计日志：SMTP 测试发送
+    this.auditService.log({
+      action: 'smtp_test_mail',
+      userId: user.id,
+      resourceType: 'config',
+      resourceId: 'smtp',
+      metadata: { recipient },
     });
   }
 
