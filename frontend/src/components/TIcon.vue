@@ -16,6 +16,7 @@ import { computed } from 'vue';
 import type { Component } from 'vue';
 import {
   AddIcon,
+  BrowseIcon,
   CaretDownSmallIcon,
   CaretUpSmallIcon,
   ChevronLeftIcon,
@@ -46,7 +47,6 @@ import {
   TagIcon,
   TimeIcon,
   UploadIcon,
-  ViewIcon,
   ViewListIcon,
 } from 'tdesign-icons-vue-next';
 
@@ -86,7 +86,7 @@ const iconMap: Record<string, Component> = {
   'tag': TagIcon,
   'time': TimeIcon,
   'upload': UploadIcon,
-  'view': ViewIcon,
+  'view': BrowseIcon,
   'view-list': ViewListIcon,
 };
 

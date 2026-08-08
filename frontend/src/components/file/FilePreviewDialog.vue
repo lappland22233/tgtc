@@ -257,12 +257,6 @@ const activeIndex = computed(() => {
   return playlistIndexInternal.value;
 });
 
-const activeTrack = computed(() => {
-  const idx = activeIndex.value;
-  if (idx >= 0 && idx < props.playlist.length) return props.playlist[idx];
-  return null;
-});
-
 const hasPrev = computed(() => activeIndex.value > 0);
 const hasNext = computed(() => activeIndex.value < props.playlist.length - 1);
 
