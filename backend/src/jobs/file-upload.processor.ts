@@ -6,6 +6,7 @@ import { Job } from 'bull';
 import { QUEUE_NAMES } from './bull-queue.module';
 import { File } from '../common/entities/file.entity';
 import { TelegramService } from '../telegram/telegram.service';
+import { FileService } from '../file/file.service';
 import { createReadStream, existsSync } from 'fs';
 import { unlink } from 'fs/promises';
 
@@ -18,6 +19,7 @@ export class FileUploadProcessor {
     @InjectRepository(File)
     private fileRepository: Repository<File>,
     private telegramService: TelegramService,
+    private fileService: FileService,
   ) {}
 
 
@@ -83,6 +85,12 @@ export class FileUploadProcessor {
         'UPDATE files SET status = $1 WHERE id = $2 AND status = $3',
         ['ready', fileId, 'processing'],
       );
+
+      if (file.mimeType?.startsWith('video/')) {
+        await this.fileService.generateAndSaveVideoCover(file, { sourcePath: filePath });
+      } else if (file.mimeType?.startsWith('image/')) {
+        await this.fileService.generateAndSaveThumbnail(file);
+      }
 
       await this.removeTempFile(filePath);
       this.logger.log(`文件上传完成: ${fileId}`);

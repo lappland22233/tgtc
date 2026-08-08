@@ -228,8 +228,12 @@ export class FileService implements OnModuleInit {
       } as any);
     });
 
-    // 事务外使本地缓存失效（旧字节不可再被命中）
+    // 事务外使本地缓存和旧衍生图失效，固定文件 ID 覆盖后不得继续展示旧内容。
     this.fileCacheService.invalidate(target.id);
+    await Promise.all([
+      fs.promises.unlink(path.join(this.thumbnailDir, `${target.id}.webp`)).catch(() => {}),
+      fs.promises.unlink(path.join(this.thumbnailDir, `${target.id}.video.webp`)).catch(() => {}),
+    ]);
 
     this.auditService.log({
       action: 'file_overwrite',
@@ -546,6 +550,11 @@ export class FileService implements OnModuleInit {
           target.filename = tempId;
           target.telegramFileId = tempId;
           target.telegramFilePath = '';
+          target.thumbnailPath = null;
+          await Promise.all([
+            fs.promises.unlink(path.join(this.thumbnailDir, `${target.id}.webp`)).catch(() => {}),
+            fs.promises.unlink(path.join(this.thumbnailDir, `${target.id}.video.webp`)).catch(() => {}),
+          ]);
           await this.fileRepository.save(target);
           // 审计覆盖意图（status=processing，真实引用由 processor 落库后另有流程记录）
           this.auditService.log({
@@ -639,9 +648,6 @@ export class FileService implements OnModuleInit {
       useStream ? file.size : undefined,
     );
 
-    // Telegram 上传完成，清理 Multer 临时文件
-    this.cleanupTempFile(file);
-
     const newFile = this.fileRepository.create({
       filename: telegramFile.file_id,
       originalName: originalName,
@@ -668,11 +674,12 @@ export class FileService implements OnModuleInit {
       metadata: { filename: originalName, size: file.size, mimeType: file.mimetype },
     });
 
-    if (file.mimetype.startsWith('image/')) {
-      this.generateAndSaveThumbnail(savedFile).catch(err =>
-        this.logger.warn(`上传后缩略图生成失败 id=${savedFile.id}: ${(err as Error).message}`),
-      );
+    if (file.mimetype.startsWith('video/')) {
+      await this.generateAndSaveVideoCover(savedFile, { sourcePath: file.path, sourceBuffer: file.buffer });
+    } else if (file.mimetype.startsWith('image/')) {
+      await this.generateAndSaveThumbnail(savedFile);
     }
+    this.cleanupTempFile(file);
 
     return savedFile;
   }
@@ -1543,44 +1550,90 @@ export class FileService implements OnModuleInit {
       throw new NotFoundException('视频封面尚未生成');
     }
 
-    // 最终回退（非图片/视频文件或图片生成失败）
-    const { stream } = await this.telegramService.getFileStream(file.telegramFileId || file.filename);
+    if (file.mimeType?.startsWith('image/')) {
+      throw new NotFoundException('图片缩略图尚未生成');
+    }
+    throw new BadRequestException('该文件类型不支持缩略图');
+  }
 
-    return {
-      stream,
-      contentType: file.mimeType || 'application/octet-stream',
-    };
+  /** 读取已存在的媒体缩略图，不校验业务权限、不生成且不触发远端回源。 */
+  async getExistingMediaThumbnailStream(fileId: string): Promise<{
+    stream: Readable;
+    contentType: string;
+  }> {
+    const file = await this.fileRepository.findOne({ where: { id: fileId, isDeleted: false } });
+    if (!file) throw new NotFoundException('文件不存在');
+    const isImage = file.mimeType?.startsWith('image/');
+    const isVideo = file.mimeType?.startsWith('video/');
+    if (!isImage && !isVideo) throw new BadRequestException('仅图片和视频支持缩略图');
+
+    const expectedName = isVideo ? `${file.id}.video.webp` : `${file.id}.webp`;
+    const expectedPath = path.join(this.thumbnailDir, expectedName);
+    try {
+      const buffer = await fs.promises.readFile(expectedPath);
+      return { stream: Readable.from(buffer), contentType: 'image/webp' };
+    } catch {
+      throw new NotFoundException(isVideo ? '视频封面尚未生成' : '图片缩略图尚未生成');
+    }
   }
 
   /**
    * 批量获取缩略图 base64（合并为一次 API 调用，消除浏览器连接池瓶颈）
    * 返回 { [fileId]: 'data:image/...;base64,...' }
    */
-  private async generateAndSaveVideoCover(file: File): Promise<void> {
+  async generateAndSaveVideoCover(
+    file: File,
+    options: { sourcePath?: string; sourceBuffer?: Buffer; allowRemoteSource?: boolean } = {},
+  ): Promise<void> {
     if (!file.mimeType?.startsWith('video/')) return;
     const existing = this.videoCoverBuilds.get(file.id);
     if (existing) return existing;
 
-    const build = this.buildVideoCover(file).finally(() => {
+    const build = this.buildVideoCover(file, options).finally(() => {
       if (this.videoCoverBuilds.get(file.id) === build) this.videoCoverBuilds.delete(file.id);
     });
     this.videoCoverBuilds.set(file.id, build);
     return build;
   }
 
-  private async buildVideoCover(file: File): Promise<void> {
-    const cachedPath = this.fileCacheService.getCachedPath(file.id);
-    if (!cachedPath) return; // 不为封面额外触发整视频 Telegram 回源
-
-    const buildId = uuidv4();
-    const tmpCover = path.join(this.thumbnailDir, `${file.id}.${buildId}.cover.webp.tmp`);
+  private async buildVideoCover(
+    file: File,
+    options: { sourcePath?: string; sourceBuffer?: Buffer; allowRemoteSource?: boolean },
+  ): Promise<void> {
     const coverFilename = `${file.id}.video.webp`;
     const coverPath = path.join(this.thumbnailDir, coverFilename);
+    if (fs.existsSync(coverPath)) {
+      if (file.thumbnailPath !== coverFilename) {
+        file.thumbnailPath = coverFilename;
+        await this.fileRepository.save(file);
+      }
+      return;
+    }
+
+    const buildId = uuidv4();
+    const tmpSource = path.join(this.thumbnailDir, `${file.id}.${buildId}.video.tmp`);
+    const tmpCover = path.join(this.thumbnailDir, `${file.id}.${buildId}.cover.webp.tmp`);
+    let sourcePath = options.sourcePath && fs.existsSync(options.sourcePath)
+      ? options.sourcePath
+      : this.fileCacheService.getCachedPath(file.id);
     try {
+      if (!sourcePath && options.sourceBuffer?.length) {
+        await fs.promises.writeFile(tmpSource, options.sourceBuffer);
+        sourcePath = tmpSource;
+      }
+      if (!sourcePath && options.allowRemoteSource) {
+        const { stream } = await this.telegramService.getFileStream(file.telegramFileId || file.filename);
+        const { pipeline } = await import('stream/promises');
+        await pipeline(stream, fs.createWriteStream(tmpSource));
+        sourcePath = tmpSource;
+      }
+      if (!sourcePath) return; // 页面封面请求不得触发整视频回源
+      const resolvedSourcePath: string = sourcePath;
+
       await new Promise<void>((resolve, reject) => {
         const ffmpeg = spawn(process.env.FFMPEG_PATH || 'ffmpeg', [
           '-hide_banner', '-loglevel', 'error', '-y',
-          '-ss', '1', '-i', cachedPath,
+          '-ss', '1', '-i', resolvedSourcePath,
           '-frames:v', '1', '-vf', 'scale=480:-2:force_original_aspect_ratio=decrease',
           '-c:v', 'libwebp', '-quality', '65', tmpCover,
         ], { windowsHide: true });
@@ -1595,7 +1648,10 @@ export class FileService implements OnModuleInit {
     } catch (error) {
       this.logger.warn(`视频封面生成失败 id=${file.id}: ${(error as Error).message}`);
     } finally {
-      await fs.promises.unlink(tmpCover).catch(() => {});
+      await Promise.all([
+        fs.promises.unlink(tmpSource).catch(() => {}),
+        fs.promises.unlink(tmpCover).catch(() => {}),
+      ]);
     }
   }
 
@@ -1664,39 +1720,53 @@ export class FileService implements OnModuleInit {
   }
 
   /**
-   * 启动时扫描数据库，为所有缺少缩略图的图片创建缩略图。
-   * 使用 LIMIT 分页读取，避免一次性加载所有图片到内存。
+   * 启动时扫描数据库，为所有图片/视频补齐缩略图或封面。
+   * 视频允许在后台实时回源生成；串行处理避免启动瞬间占满 Telegram 与 FFmpeg。
    */
   async syncMissingThumbnails(): Promise<void> {
-    const batchSize = 50;
+    const batchSize = 25;
     let lastId: string | null = null;
     let totalProcessed = 0;
 
-    // 使用主键游标而非 offset；处理成功会改变筛选集合，offset 会跳过后续记录。
+    // 使用主键游标遍历全部媒体，而不是只查 thumbnailPath=NULL：
+    // 数据库路径存在但磁盘产物丢失时同样需要重新生成。
     // eslint-disable-next-line no-constant-condition
     while (true) {
       const query = this.fileRepository
         .createQueryBuilder('file')
         .select(['file.id', 'file.mimeType', 'file.telegramFileId', 'file.filename', 'file.thumbnailPath'])
         .where('file.isDeleted = false')
-        .andWhere('file.mimeType LIKE :imagePrefix', { imagePrefix: 'image/%' })
-        .andWhere('file.thumbnailPath IS NULL')
+        .andWhere('(file.mimeType LIKE :imagePrefix OR file.mimeType LIKE :videoPrefix)', {
+          imagePrefix: 'image/%',
+          videoPrefix: 'video/%',
+        })
         .orderBy('file.id', 'ASC')
         .take(batchSize);
       if (lastId) query.andWhere('file.id > :lastId', { lastId });
       const files = await query.getMany();
 
       if (files.length === 0) break;
-      this.logger.log(`同步缩略图: 本批找到 ${files.length} 个缺失`);
       for (const file of files) {
-        await this.generateAndSaveThumbnail(file);
-        totalProcessed++;
+        const expectedName = file.mimeType.startsWith('video/') ? `${file.id}.video.webp` : `${file.id}.webp`;
+        const expectedPath = path.join(this.thumbnailDir, expectedName);
+        if (!fs.existsSync(expectedPath)) {
+          if (file.mimeType.startsWith('video/')) {
+            await this.generateAndSaveVideoCover(file, { allowRemoteSource: true });
+          } else {
+            await this.generateAndSaveThumbnail(file);
+          }
+          totalProcessed++;
+        } else if (file.thumbnailPath !== expectedName) {
+          file.thumbnailPath = expectedName;
+          await this.fileRepository.save(file);
+        }
       }
       lastId = files[files.length - 1].id;
+      await new Promise<void>(resolve => setImmediate(resolve));
     }
 
     if (totalProcessed > 0) {
-      this.logger.log(`缩略图同步完成: 创建了 ${totalProcessed} 个缩略图`);
+      this.logger.log(`媒体缩略图同步完成: 处理了 ${totalProcessed} 个缺失产物`);
     }
   }
 
@@ -2418,9 +2488,6 @@ export class FileService implements OnModuleInit {
       useStream ? file.size : undefined,
     );
 
-    // Telegram 上传完成，清理 Multer 临时文件
-    this.cleanupTempFile(file);
-
     // 覆盖分支：TG 上传成功后优先 in-place 覆盖目标记录（保留原 id），目标失效则降级新建
     if (overwriteFileId) {
       const overwritten = await this.tryApplyOverwriteOrNull(
@@ -2438,7 +2505,11 @@ export class FileService implements OnModuleInit {
         }),
         'uploadToTelegram',
       );
-      if (overwritten) return overwritten;
+      if (overwritten) {
+        await this.generateUploadedMediaThumbnail(overwritten, file);
+        this.cleanupTempFile(file);
+        return overwritten;
+      }
     }
 
     const newFile = this.fileRepository.create({
@@ -2454,7 +2525,22 @@ export class FileService implements OnModuleInit {
       maxAccessCount: this.accessCountDefault,
     });
 
-    return this.fileRepository.save(newFile);
+    const savedFile = await this.fileRepository.save(newFile);
+    await this.generateUploadedMediaThumbnail(savedFile, file);
+    this.cleanupTempFile(file);
+    return savedFile;
+  }
+
+  private async generateUploadedMediaThumbnail(savedFile: File, source: Express.Multer.File): Promise<void> {
+    if (savedFile.mimeType?.startsWith('video/')) {
+      await this.generateAndSaveVideoCover(savedFile, {
+        sourcePath: source.path,
+        sourceBuffer: source.buffer,
+        allowRemoteSource: !source.path && !source.buffer,
+      });
+    } else if (savedFile.mimeType?.startsWith('image/')) {
+      await this.generateAndSaveThumbnail(savedFile);
+    }
   }
 
   /**

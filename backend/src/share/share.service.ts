@@ -307,6 +307,24 @@ export class ShareService {
     return this.fileService.getStreamForShareDownload(fileId, ip || undefined);
   }
 
+  /** 分享缩略图：完整校验分享状态、密码凭证和文件范围，但不消费访问次数。 */
+  async getShareThumbnailStream(
+    token: string,
+    fileId: string,
+    accessJwt?: string,
+  ): Promise<{ stream: Readable; contentType: string }> {
+    const link = await this.shareLinkRepo.findOne({ where: { token, isDeleted: false } });
+    if (!link) throw new NotFoundException('分享不存在');
+    await this.assertShareUsable(link);
+    if (link.password) {
+      if (!accessJwt) throw new ForbiddenException('此分享需要密码');
+      const ok = await this.passwordService.verifyAccessJwt(accessJwt, link.id, link.password);
+      if (!ok) throw new ForbiddenException('访问凭证已失效，请重新输入密码');
+    }
+    await this.assertFileInShare(link, fileId);
+    return this.fileService.getExistingMediaThumbnailStream(fileId);
+  }
+
   // ---------- 列出/更新/取消分享 ----------
 
   /** 列出当前用户的所有分享（分页 + 可按 targetType 过滤） */

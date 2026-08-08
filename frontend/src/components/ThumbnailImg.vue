@@ -28,6 +28,7 @@ const props = withDefaults(defineProps<{
   mimeType?: string;
   fileName?: string;
   size?: number;
+  src?: string;
   /** @deprecated emoji prop is no longer used; kept for backward compat */
   emoji?: string;
 }>(), {
@@ -35,6 +36,7 @@ const props = withDefaults(defineProps<{
   fileName: '',
   size: 36,
   emoji: '',
+  src: '',
 });
 
 const containerRef = ref<HTMLElement>();
@@ -59,7 +61,7 @@ async function loadThumbnail() {
   await acquireThumbnailSlot();
   slotHeld = true;
   try {
-    const result = await getThumbnailUrl(props.fileId, props.mimeType);
+    const result = await getThumbnailUrl(props.fileId, props.mimeType, props.src);
     if (unmounted) { releaseSlotIfHeld(); return; }
     url.value = result;
     signed.value = true;
@@ -93,7 +95,7 @@ function stopObserving() {
 
 function startObserving() {
   stopObserving();
-  if (!props.mimeType?.startsWith('image/')) return;
+  if (!props.mimeType?.startsWith('image/') && !props.mimeType?.startsWith('video/')) return;
   if (!containerRef.value) return;
 
   observer = new IntersectionObserver(
@@ -110,7 +112,7 @@ function startObserving() {
 
 // v-for 复用实例时 fileId 会变化：重置全部加载状态并重新观察，
 // 否则会显示上一个文件的旧缩略图
-watch(() => props.fileId, () => {
+watch(() => [props.fileId, props.src], () => {
   releaseSlotIfHeld();
   loaded = false;
   retried = false;

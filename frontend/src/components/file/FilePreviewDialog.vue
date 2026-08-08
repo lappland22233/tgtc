@@ -84,6 +84,7 @@
                 :end-behavior="videoEndBehavior"
                 @update:end-behavior="setVideoEndBehavior"
                 @video-ref="onCustomPlayerVideoRef"
+                @request-play="activateVideo"
                 @ended="onVideoEnded"
                 @error="onVideoError"
               />
@@ -329,7 +330,6 @@ function switchToTrack(idx: number) {
   snap.src = item.src;
   snap.downloadUrl = item.downloadUrl ?? null;
   mediaError.value = false;
-  if (item.kind === 'video') nextTick(() => setupVideo());
   if (item.kind === 'audio') nextTick(() => { void audioRef.value?.play().catch(() => {}); });
 }
 
@@ -497,7 +497,13 @@ function mseTypeSupported(mime: string): boolean {
   try { return MediaSource.isTypeSupported(mime); } catch { return false; }
 }
 
-/** 打开视频预览：MSE 优先，不支持时原生回退 */
+/** 用户首次明确播放后才激活真实媒体源。 */
+function activateVideo() {
+  if (videoSrc.value || !snap.src) return;
+  setupVideo();
+}
+
+/** 激活视频预览：MSE 优先，不支持时原生回退 */
 function setupVideo() {
   const url = snap.src;
   if (!url) return;
@@ -826,8 +832,6 @@ watch(() => props.visible, (v) => {
     snap.src = props.src;
     snap.downloadUrl = props.downloadUrl ?? null;
     if (props.kind === 'text') void loadText();
-    // 视频：等 DOM 挂载出 <video> 后启动 MSE / 原生播放管线
-    if (props.kind === 'video') nextTick(() => setupVideo());
   }
 }, { immediate: true });
 

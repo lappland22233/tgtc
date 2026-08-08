@@ -19,6 +19,7 @@ import { AuditLog } from '../common/entities/audit-log.entity';
 import { Alert } from '../common/entities/alert.entity';
 import { File } from '../common/entities/file.entity';
 import { AlertModule } from '../alert/alert.module';
+import { FileModule } from '../file/file.module';
 
 @Module({
   imports: [
@@ -26,6 +27,7 @@ import { AlertModule } from '../alert/alert.module';
     TypeOrmModule.forFeature([AccessLog, BannedIP, AuditLog, Alert, File]),
     AlertModule,
     SecurityModule,
+    FileModule,
   ],
   providers: [
     MetricsAggregationProcessor,

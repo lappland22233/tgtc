@@ -73,7 +73,13 @@
             :title="file.name"
           >
             <div class="file-card-preview">
-              <FileTypeIcon :mimeType="file.mimeType" :fileName="file.name" :size="48" />
+              <ThumbnailImg
+                :file-id="file.id"
+                :mime-type="file.mimeType"
+                :file-name="file.name"
+                :size="72"
+                :src="buildShareThumbnailUrl(props.token, file.id, props.accessJwt)"
+              />
             </div>
             <div class="file-card-info">
               <div class="file-card-name" :title="file.name">{{ file.name }}</div>
@@ -132,8 +138,8 @@
 import { ref, reactive, computed } from 'vue';
 import MessagePlugin from '@/utils/message';
 import { triggerBrowserDownload } from '@/utils/download';
-import { isPreviewable, getPreviewKind, buildSharePreviewUrl } from '@/utils/preview';
-import FileTypeIcon from '@/components/FileTypeIcon.vue';
+import { isPreviewable, getPreviewKind, buildSharePreviewUrl, buildShareThumbnailUrl } from '@/utils/preview';
+import ThumbnailImg from '@/components/ThumbnailImg.vue';
 import FilePreviewDialog, { type PlaylistItem } from '@/components/file/FilePreviewDialog.vue';
 
 interface FolderSummary {

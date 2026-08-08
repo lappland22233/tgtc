@@ -1,7 +1,13 @@
 <template>
   <div class="file-share-card">
     <div class="type-icon-wrapper">
-      <FileTypeIcon :mimeType="info.mimeType" :fileName="info.name" :size="64" with-bg />
+      <ThumbnailImg
+        :file-id="info.id"
+        :mime-type="info.mimeType"
+        :file-name="info.name"
+        :size="112"
+        :src="buildShareThumbnailUrl(props.token, props.info.id, props.accessJwt)"
+      />
     </div>
     <h1 class="file-name" :title="info.name">{{ info.name }}</h1>
     <dl class="meta-list">
@@ -62,8 +68,8 @@
 import { computed, ref } from 'vue';
 import MessagePlugin from '@/utils/message';
 import { triggerBrowserDownload } from '@/utils/download';
-import { getPreviewKind, buildSharePreviewUrl } from '@/utils/preview';
-import FileTypeIcon from '@/components/FileTypeIcon.vue';
+import { getPreviewKind, buildSharePreviewUrl, buildShareThumbnailUrl } from '@/utils/preview';
+import ThumbnailImg from '@/components/ThumbnailImg.vue';
 import FilePreviewDialog from '@/components/file/FilePreviewDialog.vue';
 
 interface FileInfo {

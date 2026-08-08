@@ -61,6 +61,11 @@ export function buildFilePreviewUrl(fileId: string): string {
  * 固定同源拼接，密码分享时把后端签发的访问 JWT 附在 access 查询参数中，
  * 禁止把 JWT 附加到外部传入的任意 URL。
  */
+export function buildShareThumbnailUrl(token: string, fileId: string, accessJwt?: string): string {
+  const base = `/api/s/${encodeURIComponent(token)}/thumbnail/${encodeURIComponent(fileId)}`;
+  return accessJwt ? `${base}?access=${encodeURIComponent(accessJwt)}` : base;
+}
+
 export function buildSharePreviewUrl(token: string, fileId: string, accessJwt?: string): string {
   const base = `/api/s/${encodeURIComponent(token)}/preview/${encodeURIComponent(fileId)}`;
   return accessJwt ? `${base}?access=${encodeURIComponent(accessJwt)}` : base;

@@ -25,8 +25,9 @@ const cache = new Map<string, CacheEntry>();
 const pending = new Map<string, Promise<string>>();
 
 /** 获取缩略图 URL（缓存命中返回已签名 URL，未命中返回单个 API URL） */
-export async function getThumbnailUrl(fileId: string, mimeType?: string): Promise<string> {
+export async function getThumbnailUrl(fileId: string, mimeType?: string, directUrl?: string): Promise<string> {
   if (!mimeType?.startsWith('image/') && !mimeType?.startsWith('video/')) return '';
+  if (directUrl) return directUrl;
 
   const cached = cache.get(fileId);
   if (cached) {

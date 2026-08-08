@@ -18,7 +18,7 @@
       ref="videoRef"
       class="cvp__video"
       :src="src || undefined"
-      preload="metadata"
+      preload="none"
       playsinline
       @play="onPlay"
       @pause="onPause"
@@ -229,6 +229,7 @@ const emit = defineEmits<{
   pause: [];
   ended: [];
   error: [];
+  'request-play': [];
   'update:end-behavior': [behavior: VideoEndBehavior];
   /** 暴露 video 元素引用给父组件（用于 MSE 等外部控制） */
   'video-ref': [el: HTMLVideoElement | null];
@@ -364,6 +365,12 @@ function onProgress() {
 function togglePlay() {
   const v = videoRef.value;
   if (!v) return;
+  if (!props.src) {
+    emit('request-play');
+    isBuffering.value = true;
+    showControls();
+    return;
+  }
   if (v.paused || v.ended) {
     v.play().catch(() => {});
   } else {
@@ -662,15 +669,21 @@ function formatTime(s: number): string {
 }
 
 // ─── 生命周期 ────────────────────────────
-watch(() => props.src, () => {
+watch(() => props.src, (src, previousSrc) => {
   const v = videoRef.value;
   if (!v) return;
-  // 重置状态
   currentTime.value = 0;
   playedPct.value = 0;
   bufferedPct.value = 0;
   isEnded.value = false;
   isPaused.value = true;
+  if (src && !previousSrc) {
+    requestAnimationFrame(() => {
+      if (props.src === src) void v.play().catch(() => { isBuffering.value = false; });
+    });
+  } else if (!src) {
+    isBuffering.value = false;
+  }
 });
 
 // 暴露 video 元素给父组件

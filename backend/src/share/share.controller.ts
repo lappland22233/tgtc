@@ -187,6 +187,22 @@ export class ShareController {
     return this.shareService.verifyPassword(token, dto.password, ip);
   }
 
+  /** 公开媒体缩略图：鉴权但不计入分享访问/下载次数。 */
+  @Get('s/:token/thumbnail/:fileId')
+  async getThumbnail(
+    @Param('token') token: string,
+    @Param('fileId') fileId: string,
+    @Query('access') accessJwt: string,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    await this.assertShareRateLimit(token, req);
+    const result = await this.shareService.getShareThumbnailStream(token, fileId, accessJwt || undefined);
+    res.setHeader('Content-Type', result.contentType);
+    res.setHeader('Cache-Control', accessJwt ? 'private, max-age=300' : 'public, max-age=300');
+    result.stream.pipe(res);
+  }
+
   /**
    * 公开下载入口：流式返回文件内容。
    * 需要校验：
