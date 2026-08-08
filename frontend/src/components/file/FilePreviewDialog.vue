@@ -1,8 +1,7 @@
 <template>
   <teleport to="body">
-    <transition name="fpv-fade">
       <div
-        v-if="visible"
+        v-show="visible"
         class="fpv-overlay"
         role="presentation"
         @click.self="close"
@@ -182,12 +181,11 @@
           </transition>
         </div>
       </div>
-    </transition>
   </teleport>
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, watch, nextTick, computed, onBeforeUnmount, onUnmounted } from 'vue';
+import { ref, reactive, watch, nextTick, computed, onUnmounted } from 'vue';
 import type { PreviewKind } from '../../utils/preview';
 import { triggerBrowserDownload } from '../../utils/download';
 
@@ -348,86 +346,8 @@ onUnmounted(() => {
   teardownVideo();
 });
 
-/**
- * ── TDesign 1.19.2 bug workaround ──────────────────────────────
- * Bug: tdesign-vue-next 1.19.2 的弹层/overlay 销毁逻辑内部会遍历
- * parentNode 祖先链，当遇到已被 Vue transition + teleport 卸载的
- * undefined/null 节点时抛出 TypeError。
- * 触发路径：文件列表「只读查看」→ 打开预览 → 关闭 → TDesign 弹层
- * 销毁报错。
- * 修复策略：
- *   1) 在 close/unmount 期间临时拦截 TDesign 抛出的特定 TypeError，
- *      防止冒泡到全局污染控制台。
- *   2) 为 teleported overlay 元素打上安全补丁，使其 parentNode 遍历
- *      遇到 detached 节点时返回 null 而非抛异常。
- * 版本标记：当 tdesign-vue-next 升级到 >= 1.20 或修复此 bug 后可移除。
- */
-const TD_ERR_PATTERN = /parentNode/i;
-
-function handleTDesignTypeError(e: ErrorEvent) {
-  if (e.error instanceof TypeError && TD_ERR_PATTERN.test(e.message || '')) {
-    e.preventDefault(); // 阻止冒泡到全局，避免控制台报错
-  }
-}
-
-let tdesignErrorGuardActive = false;
-
-function activateTDesignErrorGuard() {
-  if (tdesignErrorGuardActive) return;
-  tdesignErrorGuardActive = true;
-  window.addEventListener('error', handleTDesignTypeError);
-}
-
-function deactivateTDesignErrorGuard() {
-  if (!tdesignErrorGuardActive) return;
-  tdesignErrorGuardActive = false;
-  window.removeEventListener('error', handleTDesignTypeError);
-}
-
-/**
- * 给 overlay 元素打上安全补丁：覆写其 parentNode getter 的访问路径，
- * 使 TDesign 遍历祖先链时不会因为 detached 节点而崩溃。
- * 通过包装 remove() 方法，在元素被移除前先缓存 parentNode 引用。
- */
-function patchOverlayDomSafety() {
-  try {
-    const overlays = document.body.querySelectorAll('.fpv-overlay');
-    overlays.forEach((el) => {
-      const htmlEl = el as HTMLElement;
-      if ((htmlEl as any).__tdPatched) return;
-      (htmlEl as any).__tdPatched = true;
-
-      // 包装 remove()：在真正移除前缓存 parentNode，
-      // 移除后将 parentNode 替换为安全的 stub 对象
-      const origRemove = htmlEl.remove.bind(htmlEl);
-      htmlEl.remove = function () {
-        try {
-          // 先标记为 detaching，给 TDesign 的异步回调一个信号
-          htmlEl.dataset.detaching = 'true';
-          origRemove();
-        } catch (err) {
-          // 如果 remove 过程中 TDesign 抛出异常，静默处理
-          if (!(err instanceof TypeError && TD_ERR_PATTERN.test(String(err)))) {
-            throw err;
-          }
-        }
-      };
-    });
-  } catch {
-    // 安全兜底：DOM 操作异常不应阻断关闭流程
-  }
-}
-
-onBeforeUnmount(() => {
-  deactivateTDesignErrorGuard();
-  teardownVideo();
-});
-
+/** 请求父组件关闭；遮罩保持挂载，仅通过 v-show 切换显示状态。 */
 function close() {
-  activateTDesignErrorGuard();
-  patchOverlayDomSafety();
-  // 延迟取消 guard，等 TDesign 的异步销毁完成
-  setTimeout(deactivateTDesignErrorGuard, 2000);
   emit('update:visible', false);
 }
 
@@ -981,16 +901,6 @@ function formatSize(bytes: number): string {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-/* 进出场动画 */
-.fpv-fade-enter-active,
-.fpv-fade-leave-active {
-  transition: opacity var(--duration-fast, 0.15s);
-}
-.fpv-fade-enter-from,
-.fpv-fade-leave-to {
-  opacity: 0;
 }
 
 /* 头部右侧操作区 */
