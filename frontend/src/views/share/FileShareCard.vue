@@ -10,6 +10,16 @@
       <div class="meta-row"><dt>上传时间</dt><dd>{{ formatDateTime(info.createdAt) }}</dd></div>
       <div v-if="info.expiresAt" class="meta-row"><dt>有效期至</dt><dd class="expiry">{{ formatDateTime(info.expiresAt) }}</dd></div>
     </dl>
+    <!-- 在线预览（仅可预览类型显示） -->
+    <button v-if="previewKind" type="button" class="preview-btn" @click="previewVisible = true">
+      <span class="download-icon">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/>
+          <circle cx="12" cy="12" r="3"/>
+        </svg>
+      </span>
+      <span>在线预览</span>
+    </button>
     <button type="button" class="download-btn" :disabled="downloading" @click="handleDownload">
       <span class="download-icon">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
@@ -34,6 +44,17 @@
       </svg>
       公开分享链接，任何持有链接的人都可访问
     </p>
+
+    <!-- 在线预览弹窗 -->
+    <FilePreviewDialog
+      v-model:visible="previewVisible"
+      :name="info.name"
+      :mime-type="info.mimeType"
+      :size="info.size"
+      :kind="previewKind"
+      :src="buildSharePreviewUrl(props.token, props.info.id, props.accessJwt)"
+      :download-url="downloadUrl"
+    />
   </div>
 </template>
 
@@ -41,7 +62,9 @@
 import { computed, ref } from 'vue';
 import MessagePlugin from '@/utils/message';
 import { triggerBrowserDownload } from '@/utils/download';
+import { getPreviewKind, buildSharePreviewUrl } from '@/utils/preview';
 import FileTypeIcon from '@/components/FileTypeIcon.vue';
+import FilePreviewDialog from '@/components/file/FilePreviewDialog.vue';
 
 interface FileInfo {
   id: string;
@@ -61,6 +84,10 @@ const props = defineProps<{
 // accessJwt 仅在用户通过分享密码校验后由后端签发（见 ShareView.vue onPasswordSubmit），
 // 因此它的存在即可靠地表示这是一个加密（有密码）分享。
 const isEncrypted = computed(() => !!props.accessJwt);
+
+/** 预览类别；null 时不显示「在线预览」按钮 */
+const previewKind = computed(() => getPreviewKind(props.info.mimeType, props.info.name));
+const previewVisible = ref(false);
 
 
 const downloadUrl = computed(() => {
@@ -189,6 +216,29 @@ function handleDownload() {
 .download-btn:hover { background: color-mix(in srgb, var(--seed-primary) 85%, #fff); }
 .download-btn:active { transform: scale(0.98); }
 .download-btn:disabled { opacity: 0.6; cursor: not-allowed; transform: none; }
+
+/* 在线预览按钮：下载主按钮的弱化版（次级样式） */
+.preview-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  padding: 14px 24px;
+  margin-bottom: 12px;
+  background: transparent;
+  color: var(--seed-primary);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  font-size: 15px;
+  font-weight: 500;
+  cursor: pointer;
+  font-family: inherit;
+  transition: background 0.2s, border-color 0.2s, transform 0.1s;
+}
+
+.preview-btn:hover { background: var(--color-accent-soft); border-color: var(--seed-primary); }
+.preview-btn:active { transform: scale(0.98); }
 
 .download-icon {
   display: inline-flex;

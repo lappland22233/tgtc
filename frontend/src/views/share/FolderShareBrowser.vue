@@ -84,6 +84,14 @@
               </div>
             </div>
             <button
+              v-if="isPreviewable(file.mimeType, file.name)"
+              type="button"
+              class="file-preview-btn"
+              @click.stop="openPreview(file)"
+            >
+              <span>预览</span>
+            </button>
+            <button
               type="button"
               class="file-download-btn"
               :disabled="downloadingId === file.id"
@@ -102,6 +110,18 @@
         ← 返回上级
       </t-button>
     </div>
+
+    <!-- 文件在线预览弹窗 -->
+    <FilePreviewDialog
+      :visible="previewFile !== null"
+      :name="previewFile?.name"
+      :mime-type="previewFile?.mimeType"
+      :size="previewFile?.size"
+      :kind="previewFile ? getPreviewKind(previewFile.mimeType, previewFile.name) : null"
+      :src="previewFile ? buildSharePreviewUrl(props.token, previewFile.id, props.accessJwt) : null"
+      :download-url="previewFile ? buildShareDownloadUrl(previewFile.id) : undefined"
+      @update:visible="onPreviewVisibleChange"
+    />
   </div>
 </template>
 
@@ -109,7 +129,9 @@
 import { ref, reactive } from 'vue';
 import MessagePlugin from '@/utils/message';
 import { triggerBrowserDownload } from '@/utils/download';
+import { isPreviewable, getPreviewKind, buildSharePreviewUrl } from '@/utils/preview';
 import FileTypeIcon from '@/components/FileTypeIcon.vue';
+import FilePreviewDialog from '@/components/file/FilePreviewDialog.vue';
 
 interface FolderSummary {
   id: string;
@@ -146,6 +168,25 @@ const currentContents = reactive<FolderContents>({
 });
 const breadcrumb = ref<FolderSummary[]>([...props.initialBreadcrumb]);
 
+/** 当前预览目标文件；null 表示弹窗关闭 */
+const previewFile = ref<FileSummary | null>(null);
+
+function openPreview(file: FileSummary) {
+  previewFile.value = file;
+}
+
+function onPreviewVisibleChange(v: boolean) {
+  if (!v) previewFile.value = null;
+}
+
+/** 固定构造同源分享下载路径，禁止把访问 JWT 附加到后端返回的任意跨域 URL */
+function buildShareDownloadUrl(fileId: string): string {
+  const baseUrl = `/api/s/${encodeURIComponent(props.token)}/download/${encodeURIComponent(fileId)}`;
+  return props.accessJwt
+    ? `${baseUrl}?access=${encodeURIComponent(props.accessJwt)}`
+    : baseUrl;
+}
+
 /**
  * 直接调用浏览器原生下载。
  * 后端返回 Content-Disposition: attachment，浏览器下载器自带进度条、暂停/恢复、
@@ -155,12 +196,7 @@ const breadcrumb = ref<FolderSummary[]>([...props.initialBreadcrumb]);
 function downloadFile(file: FileSummary) {
   if (downloadingId.value) return;
   downloadingId.value = file.id;
-  // 固定构造同源下载路径，禁止把访问 JWT 附加到后端返回的任意跨域 URL。
-  const baseUrl = `/api/s/${encodeURIComponent(props.token)}/download/${encodeURIComponent(file.id)}`;
-  const url = props.accessJwt
-    ? `${baseUrl}?access=${encodeURIComponent(props.accessJwt)}`
-    : baseUrl;
-  triggerBrowserDownload(url, file.name);
+  triggerBrowserDownload(buildShareDownloadUrl(file.id), file.name);
   MessagePlugin.success('已开始下载，请查看浏览器下载进度');
   // 短暂禁用避免重复点击；浏览器接管后无需等待前端异步完成
   window.setTimeout(() => { downloadingId.value = null; }, 1000);
@@ -440,6 +476,24 @@ function formatRelativeDate(dateStr: string): string {
 
 .file-download-btn:hover { background: color-mix(in srgb, var(--seed-primary) 85%, #fff); }
 .file-download-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+
+/* 预览按钮：下载主按钮的弱化版（次级样式） */
+.file-preview-btn {
+  display: block;
+  margin: 0 10px 6px;
+  padding: 5px 12px;
+  background: transparent;
+  color: var(--seed-primary);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-family: inherit;
+  text-align: center;
+  cursor: pointer;
+  transition: background 0.2s, border-color 0.2s;
+}
+
+.file-preview-btn:hover { background: var(--color-accent-soft); border-color: var(--seed-primary); }
 
 .back-to-parent {
   margin-top: 16px;

@@ -237,7 +237,15 @@
               />
             </div>
             <div class="os-cell os-name">
-              <ThumbnailImg :file-id="file.id" :mime-type="file.mimeType" :size="32" :file-name="file.originalName" />
+              <span
+                v-if="canPreviewFile(file)"
+                class="os-thumb-click"
+                :title="'点击预览 ' + file.originalName"
+                @click.stop="openPreview(file)"
+              >
+                <ThumbnailImg :file-id="file.id" :mime-type="file.mimeType" :size="32" :file-name="file.originalName" />
+              </span>
+              <ThumbnailImg v-else :file-id="file.id" :mime-type="file.mimeType" :size="32" :file-name="file.originalName" />
               <div class="os-name-block">
                 <span class="os-name-text" :class="{ 'deleted-name': file.isDeleted }" :title="file.originalName">
                   {{ file.originalName }}
@@ -341,6 +349,7 @@
           </div>
           <div v-if="!file.isDeleted" class="mobile-file-card-actions">
             <t-button size="small" theme="primary" variant="text" @click="copyLink(file)">复制</t-button>
+            <t-button v-if="canPreviewFile(file)" size="small" variant="text" @click="openPreview(file)">预览</t-button>
             <t-button size="small" variant="text" @click="downloadFile(file)">下载</t-button>
             <t-button size="small" variant="text" @click="openTagEditor(file)">标签</t-button>
             <t-button size="small" theme="danger" variant="text" @click="handleDelete(file)">删除</t-button>
@@ -475,6 +484,18 @@
       :is-admin="isAdmin"
       @action="onCtxAction"
     />
+
+    <!-- 文件在线预览弹窗 -->
+    <FilePreviewDialog
+      :visible="previewTarget !== null"
+      :name="previewTarget?.originalName"
+      :mime-type="previewTarget?.mimeType"
+      :size="previewTarget?.size"
+      :kind="previewTarget ? getPreviewKind(previewTarget.mimeType, previewTarget.originalName) : null"
+      :src="previewTarget ? buildFilePreviewUrl(previewTarget.id) : null"
+      :download-url="previewTarget ? `/api/files/${previewTarget.id}/download` : undefined"
+      @update:visible="onPreviewVisibleChange"
+    />
   </div>
 </template>
 
@@ -502,6 +523,8 @@ import FolderMoveDialog from '../../components/folder/FolderMoveDialog.vue';
 import CreateShareDialog from '../../components/share/CreateShareDialog.vue';
 import FileContextMenu, { type CtxTarget } from '../../components/file/FileContextMenu.vue';
 import FileRenameDialog from '../../components/file/FileRenameDialog.vue';
+import FilePreviewDialog from '../../components/file/FilePreviewDialog.vue';
+import { isPreviewable, getPreviewKind, isMediaDirectLinkKind, buildFilePreviewUrl } from '../../utils/preview';
 import { useTagStore } from '../../stores/tags';
 import { useFolderStore, type Folder } from '../../stores/folders';
 import type { FileItem } from '../../types/file';
@@ -558,6 +581,27 @@ const ctxMenu = reactive({
 });
 /** 文件剪贴板：复制（copy）后暂存，粘贴（paste）时生成副本到当前文件夹 */
 const fileClipboard = ref<FileItem[]>([]);
+
+// ============ 文件预览状态 ============
+/** 当前预览目标；null 表示弹窗关闭 */
+const previewTarget = ref<FileItem | null>(null);
+
+/** 是否可点击预览：类型可预览且文件处于可用状态（非删除/处理中） */
+function canPreviewFile(file: FileItem): boolean {
+  return isPreviewable(file.mimeType, file.originalName)
+    && !file.isDeleted
+    && file.status !== 'processing';
+}
+
+/** 打开在线预览弹窗 */
+function openPreview(file: FileItem) {
+  if (!canPreviewFile(file)) return;
+  previewTarget.value = file;
+}
+
+function onPreviewVisibleChange(v: boolean) {
+  if (!v) previewTarget.value = null;
+}
 // ============ 文件重命名弹窗状态 ============
 const showRenameFileDialog = ref(false);
 const renameTargetFile = ref<FileItem | null>(null);
@@ -768,6 +812,7 @@ async function onCtxAction(action: string, target: CtxTarget | null) {
     switch (action) {
       case 'copy-link': copyLink(file); break;
       case 'copy-media-link': copyMediaLink(file); break;
+      case 'preview': openPreview(file); break;
       case 'download': downloadFile(file); break;
       case 'rename':
         renameTargetFile.value = file;
@@ -1378,7 +1423,7 @@ async function copyLink(row: FileItem) {
 }
 
 async function copyMediaLink(row: FileItem) {
-  if (!/^(image|video|audio)\//.test(row.mimeType)) {
+  if (!isMediaDirectLinkKind(getPreviewKind(row.mimeType, row.originalName))) {
     MessagePlugin.warning('仅图片、音频和视频支持媒体直链');
     return;
   }
@@ -2129,6 +2174,17 @@ onUnmounted(() => {
 
 .fl-batch-tag {
   cursor: pointer;
+}
+
+/* 桌面端缩略图可点击预览 */
+.os-thumb-click {
+  display: inline-flex;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  transition: opacity var(--duration-fast);
+}
+.os-thumb-click:hover {
+  opacity: 0.8;
 }
 
 /* ============ 响应式 ============ */

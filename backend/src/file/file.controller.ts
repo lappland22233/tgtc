@@ -33,6 +33,7 @@ import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { User, UserRole } from '../common/entities/user.entity';
 import { FileAccessType } from '../common/entities/file.entity';
 import { getClientIp } from '../common/utils/client-ip';
+import { sanitizePreviewContentType } from '../common/utils/preview-content-type';
 import { RateLimitService } from '../common/services/rate-limit.service';
 import { ConfigCacheService } from '../common/services/config-cache.service';
 import { TagService } from '../tag/tag.service';
@@ -307,6 +308,84 @@ export class FileController {
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : '媒体文件访问失败';
+      const status = (error as { status?: number }).status || 500;
+      if (!res.headersSent) {
+        res.status(status).json({ code: 1, message });
+      } else if (!res.destroyed) {
+        res.destroy(error instanceof Error ? error : new Error(message));
+      }
+    }
+  }
+
+  /**
+   * inline 预览端点：流式返回文件内容供页内预览。
+   * - 预览不消耗访问次数（不递增 currentAccessCount），access log action 为 'preview'
+   * - 不套用下载限流
+   * - 支持 Range：本地缓存命中返回 206，未命中回退 200 全量
+   * - 防 XSS：html/svg+xml/xml 类型强制降级为 text/plain（配合 nosniff）
+   */
+  @Get(':id/preview')
+  @UseGuards(JwtAuthGuard)
+  async preview(
+    @Param('id') id: string,
+    @CurrentUser() user: User,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    try {
+      const clientIp = getClientIp(req);
+
+      // Range 请求支持（仅缓存命中时可用）
+      const rangeHeader = req.headers.range;
+      if (rangeHeader) {
+        const rangeResult = await this.fileService.getPreviewStreamWithRange(id, user, rangeHeader, clientIp);
+        if (rangeResult) {
+          res.status(206);
+          res.set({
+            'Content-Type': sanitizePreviewContentType(rangeResult.contentType),
+            'Content-Disposition': `inline; filename="${encodeURIComponent(rangeResult.filename)}"`,
+            'Content-Length': rangeResult.size.toString(),
+            'Content-Range': `bytes ${rangeResult.start}-${rangeResult.end}/${rangeResult.total}`,
+            'Accept-Ranges': 'bytes',
+            'Cache-Control': 'private, no-cache',
+            'X-Content-Type-Options': 'nosniff',
+          });
+          const getBytesSent = trackBytesSent(res);
+          const pipe = promisify(pipeline);
+          try {
+            await pipe(rangeResult.stream, res);
+          } finally {
+            if (rangeResult.accessLogId) {
+              await this.fileService.updateAccessLogResponseSize(rangeResult.accessLogId, getBytesSent());
+            }
+          }
+          return;
+        }
+        // Range 不支持（未缓存）→ 回退全量预览
+      }
+
+      const result = await this.fileService.getPreviewStream(id, user, clientIp);
+
+      res.set({
+        'Content-Type': sanitizePreviewContentType(result.contentType),
+        'Content-Disposition': `inline; filename="${encodeURIComponent(result.filename)}"`,
+        'Content-Length': result.size.toString(),
+        'Accept-Ranges': 'bytes',
+        'Cache-Control': 'private, no-cache',
+        'X-Content-Type-Options': 'nosniff',
+      });
+
+      const getBytesSent = trackBytesSent(res);
+      const pipe = promisify(pipeline);
+      try {
+        await pipe(result.stream, res);
+      } finally {
+        if (result.accessLogId) {
+          await this.fileService.updateAccessLogResponseSize(result.accessLogId, getBytesSent());
+        }
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '预览失败';
       const status = (error as { status?: number }).status || 500;
       if (!res.headersSent) {
         res.status(status).json({ code: 1, message });

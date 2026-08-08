@@ -21,11 +21,22 @@ import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { User } from '../common/entities/user.entity';
 import { getClientIp } from '../common/utils/client-ip';
+import { sanitizePreviewContentType } from '../common/utils/preview-content-type';
 import { RateLimitService } from '../common/services/rate-limit.service';
 import { ConfigCacheService } from '../common/services/config-cache.service';
 import { ShareService } from './share.service';
+import { FileService } from '../file/file.service';
 import { CreateShareDto, UpdateShareDto, VerifyPasswordDto } from './share.dto';
 import { ShareTargetType } from '../common/entities/share-link.entity';
+
+/**
+ * 记录 pipeline 前的已发送字节数，返回一个用于 pipeline 完成后更新日志的闭包。
+ * 与 file.controller.ts 的 trackBytesSent 同原理（socket.bytesWritten 差值）。
+ */
+function trackBytesSent(res: Response): () => number {
+  const startBytes = res.socket?.bytesWritten ?? 0;
+  return () => (res.socket?.bytesWritten ?? 0) - startBytes;
+}
 
 /**
  * 分享链接控制器。
@@ -50,6 +61,7 @@ import { ShareTargetType } from '../common/entities/share-link.entity';
 export class ShareController {
   constructor(
     private readonly shareService: ShareService,
+    private readonly fileService: FileService,
     private readonly rateLimitService: RateLimitService,
     private readonly configCacheService: ConfigCacheService,
   ) {}
@@ -68,6 +80,28 @@ export class ShareController {
       `share:${ip}:${token}`,
       'share_access',
       limit,
+      lockMs,
+      windowMs,
+    );
+    if (!result.allowed) {
+      throw new HttpException('访问过于频繁，请稍后再试', HttpStatus.TOO_MANY_REQUESTS);
+    }
+  }
+
+  /**
+   * 分享预览端点的独立限流（与下载限流分离）。
+   * 视频 seek 会产生大量 Range 请求，阈值放宽为 sec_share_rate_limit 的 3 倍
+   * （默认 60×3=180 次），窗口与锁定时长沿用同一配置。
+   */
+  private async assertSharePreviewRateLimit(token: string, req: Request): Promise<void> {
+    const ip = getClientIp(req);
+    const baseLimit = Number(await this.configCacheService.get('sec_share_rate_limit', '60')) || 60;
+    const windowMs = (Number(await this.configCacheService.get('sec_share_rate_window', '60')) || 60) * 1000;
+    const lockMs = (Number(await this.configCacheService.get('sec_share_rate_ban', '60')) || 60) * 1000;
+    const result = await this.rateLimitService.checkAndIncrement(
+      `share_preview:${ip}:${token}`,
+      'share_access',
+      baseLimit * 3,
       lockMs,
       windowMs,
     );
@@ -196,6 +230,70 @@ export class ShareController {
       // 头部已发送：无法再改状态码，记录日志并中断响应，
       // 让客户端感知到截断（Content-Length 与实际字节不符），而非静默吞错。
       res.destroy(err as Error);
+    }
+  }
+
+  /**
+   * 公开预览端点：inline 返回文件内容供分享页内预览。
+   * 校验链与下载一致（Service 内部校验 token/密码/fileId 归属），差异：
+   * - Content-Disposition 为 inline，支持 Range（Range 不消费访问额度）
+   * - 独立限流（阈值为下载端点的 3 倍）
+   * - 防 XSS：html/svg+xml/xml 类型强制降级为 text/plain（配合 nosniff）
+   */
+  @Get('s/:token/preview/:fileId')
+  async previewFile(
+    @Param('token') token: string,
+    @Param('fileId') fileId: string,
+    @Query('access') accessJwt: string,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    try {
+      await this.assertSharePreviewRateLimit(token, req);
+      const ip = getClientIp(req);
+      const rangeHeader = req.headers.range;
+      const result = await this.shareService.getSharePreviewStream(
+        token,
+        fileId,
+        accessJwt || undefined,
+        ip,
+        rangeHeader || undefined,
+      );
+
+      // 命中 Range → 206 + Content-Range；否则 200 全量
+      const isRange = result.start !== undefined && result.end !== undefined && result.total !== undefined;
+      if (isRange) {
+        res.status(206);
+      }
+      res.set({
+        'Content-Type': sanitizePreviewContentType(result.contentType),
+        'Content-Disposition': `inline; filename="${encodeURIComponent(result.filename)}"`,
+        'Content-Length': result.size.toString(),
+        ...(isRange ? { 'Content-Range': `bytes ${result.start}-${result.end}/${result.total}` } : {}),
+        'Accept-Ranges': 'bytes',
+        'Cache-Control': 'no-store, no-cache, must-revalidate',
+        'X-Content-Type-Options': 'nosniff',
+      });
+
+      const getBytesSent = trackBytesSent(res);
+      const pipe = promisify(pipeline);
+      try {
+        await pipe(result.stream, res);
+      } finally {
+        // 回填实际传输字节数到访问日志（responseSize 先占位为 0）
+        if (result.accessLogId) {
+          await this.fileService.updateAccessLogResponseSize(result.accessLogId, getBytesSent());
+        }
+      }
+    } catch (error) {
+      // 头部未发送：返回标准 JSON 错误；头部已发送：中断响应让客户端感知截断
+      const message = error instanceof Error ? error.message : '预览失败';
+      const status = (error as { status?: number }).status || 500;
+      if (!res.headersSent) {
+        res.status(status).json({ code: 1, message });
+      } else if (!res.destroyed) {
+        res.destroy(error instanceof Error ? error : new Error(message));
+      }
     }
   }
 

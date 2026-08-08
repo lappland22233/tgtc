@@ -40,13 +40,21 @@
               <t-icon name="link" class="ctx-icon" />复制分享链接
             </div>
             <div
-              v-if="/^(image|video|audio)\//.test(target.file.mimeType)"
+              v-if="isMediaDirectLinkKind(getPreviewKind(target.file.mimeType, target.file.originalName))"
               class="ctx-item"
               :class="{ disabled: target.file.accessType !== 'public' || target.file.hasPassword || target.file.maxAccessCount > 0 || target.file.expiresIn != null }"
               role="menuitem"
               @click="target.file.accessType === 'public' && !target.file.hasPassword && target.file.maxAccessCount <= 0 && target.file.expiresIn == null && emitAction('copy-media-link')"
             >
               <t-icon name="image" class="ctx-icon" />复制媒体直链
+            </div>
+            <div
+              v-if="isPreviewable(target.file.mimeType, target.file.originalName)"
+              class="ctx-item"
+              role="menuitem"
+              @click="emitAction('preview')"
+            >
+              <t-icon name="view" class="ctx-icon" />预览
             </div>
             <div class="ctx-item" role="menuitem" @click="emitAction('download')">
               <t-icon name="download" class="ctx-icon" />下载
@@ -134,6 +142,7 @@
 
 <script setup lang="ts">
 import { ref, reactive, watch, nextTick, onMounted, onUnmounted } from 'vue';
+import { isPreviewable, getPreviewKind, isMediaDirectLinkKind } from '../../utils/preview';
 import type { FileItem } from '../../types/file';
 import type { Folder } from '../../stores/folders';
 

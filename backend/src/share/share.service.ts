@@ -247,6 +247,66 @@ export class ShareService {
     return this.fileService.getStreamForShareDownload(fileId, ip || undefined);
   }
 
+  /**
+   * 获取分享预览流：校验链与 getShareDownloadStream 完全一致
+   * （token + accessJwt（若有密码）+ fileId 归属），差异：
+   * - Range 命中时不消费访问额度（视频 seek 的大量 Range 不得耗尽 maxAccessCount）；
+   *   无效 Range 或缓存未命中回退全量流时照常消费，杜绝垃圾 Range 头绕过次数限制。
+   * - 审计 action 为 'share_link_preview'。
+   * 携带 rangeHeader 时优先走 FileService.getSharePreviewStreamWithRange，
+   * 缓存未命中（null）或未携带 rangeHeader 时回退全量流 getStreamForShareDownload。
+   */
+  async getSharePreviewStream(
+    token: string,
+    fileId: string,
+    accessJwt: string | undefined,
+    ip: string | null,
+    rangeHeader?: string,
+  ): Promise<{
+    stream: Readable;
+    contentType: string;
+    filename: string;
+    size: number;
+    isInline: boolean;
+    accessLogId?: string;
+    start?: number;
+    end?: number;
+    total?: number;
+  }> {
+    const link = await this.shareLinkRepo.findOne({ where: { token, isDeleted: false } });
+    if (!link) throw new NotFoundException('分享不存在');
+
+    await this.assertShareUsable(link);
+
+    // 严格模式：密码校验
+    if (link.password) {
+      if (!accessJwt) {
+        throw new ForbiddenException('此分享需要密码');
+      }
+      const ok = await this.passwordService.verifyAccessJwt(accessJwt, link.id, link.password);
+      if (!ok) throw new ForbiddenException('访问凭证已失效，请重新输入密码');
+    }
+
+    // 校验 fileId 是否属于此分享的 target 子树
+    await this.assertFileInShare(link, fileId);
+
+    // 记录实际预览访问
+    this.audit.log({
+      action: 'share_link_preview' as AuditAction,
+      resourceType: 'share_link',
+      resourceId: link.id,
+      metadata: { token, fileId, ip: ip || null, isRange: !!rangeHeader },
+    });
+
+    if (rangeHeader) {
+      const rangeResult = await this.fileService.getSharePreviewStreamWithRange(fileId, rangeHeader, ip || undefined);
+      if (rangeResult) return rangeResult;
+      // Range 无效或缓存未命中 → 回退全量流，同样消费额度
+    }
+    await this.consumeShareAccess(link);
+    return this.fileService.getStreamForShareDownload(fileId, ip || undefined);
+  }
+
   // ---------- 列出/更新/取消分享 ----------
 
   /** 列出当前用户的所有分享（分页 + 可按 targetType 过滤） */

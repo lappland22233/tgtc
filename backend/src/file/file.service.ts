@@ -2533,4 +2533,200 @@ export class FileService implements OnModuleInit {
 
     return { stream, contentType: mimeType, filename, size: actualSize, isInline, accessLogId };
   }
+
+  /**
+   * 为 inline 预览流式返回文件内容（镜像 getFileContentStream）。
+   * 与下载的差异：
+   * 1. 不递增 currentAccessCount —— 预览不消耗访问次数配额。
+   * 2. 访问日志 action 记为 'preview'。
+   */
+  async getPreviewStream(id: string, user: User, ip?: string): Promise<{
+    stream: Readable;
+    contentType: string;
+    filename: string;
+    size: number;
+    accessLogId?: string;
+  }> {
+    const file = await this.fileRepository.findOne({
+      where: { id, isDeleted: false },
+    });
+
+    if (!file) {
+      throw new NotFoundException('文件不存在');
+    }
+
+    await this.assertFileReadable(file, user);
+
+    const { stream } = await this.getDownloadStream(file);
+
+    // 写访问日志（action=preview，responseSize 先占位为 0，流式传输完成后由 controller 更新为实际字节数）
+    let accessLogId: string | undefined;
+    try {
+      const saved = await this.accessLogRepository.save({
+        fileId: id,
+        ip: ip || '',
+        action: 'preview',
+        uploaderId: file.uploaderId,
+        responseSize: 0,
+      });
+      accessLogId = saved.id;
+    } catch {
+      // 日志记录失败不影响主流程
+    }
+
+    const mimeType = file.mimeType || 'application/octet-stream';
+    const filename = this.ensureFileExtension(file.originalName, mimeType);
+
+    return { stream, contentType: mimeType, filename, size: Number(file.size), accessLogId };
+  }
+
+  /**
+   * 预览的 RANGE 版本（镜像 getFileContentStreamWithRange）。
+   * 仅本地缓存命中时返回 206 范围流，未命中返回 null 由 controller 回退全量预览。
+   * 与下载的差异：不递增 currentAccessCount，访问日志 action 记为 'preview'。
+   */
+  async getPreviewStreamWithRange(
+    id: string,
+    user: User,
+    rangeHeader: string,
+    ip?: string,
+  ): Promise<{
+    stream: Readable;
+    contentType: string;
+    filename: string;
+    size: number;
+    start: number;
+    end: number;
+    total: number;
+    accessLogId?: string;
+  } | null> {
+    // 解析 Range: bytes=start-end
+    const match = rangeHeader.match(/bytes=(\d+)-(\d*)/);
+    if (!match) return null;
+
+    const start = parseInt(match[1], 10);
+    const end = match[2] ? parseInt(match[2], 10) : undefined;
+
+    const file = await this.fileRepository.findOne({
+      where: { id, isDeleted: false },
+    });
+    if (!file) throw new NotFoundException('文件不存在');
+
+    await this.assertFileReadable(file, user);
+
+    // 仅对本地缓存的文件支持 Range
+    const cachedPath = this.fileCacheService.getCachedPath(file.id);
+    if (!cachedPath) {
+      // 未缓存的文件回退到全量预览（Telegram API 不支持 Range）
+      return null;
+    }
+
+    // 文件仍在处理中（TG 未同步）→ 拒绝范围预览，避免用临时 UUID 回源
+    if (file.status === 'processing') {
+      throw new BadRequestException('文件正在处理中，请稍后刷新重试');
+    }
+
+    const total = Number(file.size);
+    const actualEnd = end !== undefined ? Math.min(end, total - 1) : total - 1;
+
+    if (start >= total || start > actualEnd) {
+      throw new BadRequestException('Range 范围无效');
+    }
+
+    // 读取指定范围的文件片段
+    const chunkSize = actualEnd - start + 1;
+    const readStream = createReadStream(cachedPath, { start, end: actualEnd });
+
+    // 预览不递增 currentAccessCount，仅写访问日志（action=preview）
+    let accessLogId: string | undefined;
+    try {
+      const saved = await this.accessLogRepository.save({
+        fileId: id,
+        ip: ip || '',
+        action: 'preview',
+        uploaderId: file.uploaderId,
+        responseSize: 0,
+      });
+      accessLogId = saved.id;
+    } catch {
+      // 日志记录失败不影响主流程
+    }
+
+    const mimeType = file.mimeType || 'application/octet-stream';
+    const filename = this.ensureFileExtension(file.originalName, mimeType);
+
+    return {
+      stream: readStream,
+      contentType: mimeType,
+      filename,
+      size: chunkSize,
+      start,
+      end: actualEnd,
+      total,
+      accessLogId,
+    };
+  }
+
+  /**
+   * 分享预览的 RANGE 版本（与 getPublicMediaStreamWithRange 同构）。
+   * 不做 accessType 检查 —— 分享链接本身就是凭证，校验链由 ShareService 负责；
+   * 仅正式缓存命中时返回范围流，冷文件返回 null 由上层回退完整响应。
+   * 访问日志 action 记为 'share_preview'。
+   */
+  async getSharePreviewStreamWithRange(fileId: string, rangeHeader: string, ip?: string): Promise<{
+    stream: Readable;
+    contentType: string;
+    filename: string;
+    size: number;
+    isInline: boolean;
+    start: number;
+    end: number;
+    total: number;
+    accessLogId?: string;
+  } | null> {
+    const match = rangeHeader.match(/bytes=(\d+)-(\d*)/);
+    if (!match) return null;
+
+    const file = await this.fileRepository.findOne({ where: { id: fileId, isDeleted: false } });
+    if (!file) throw new NotFoundException('文件不存在');
+
+    const cachedPath = this.fileCacheService.getCachedPath(file.id);
+    if (!cachedPath) return null;
+
+    const total = Number(file.size);
+    const start = Number.parseInt(match[1], 10);
+    const requestedEnd = match[2] ? Number.parseInt(match[2], 10) : total - 1;
+    const end = Math.min(requestedEnd, total - 1);
+    if (!Number.isSafeInteger(total) || total <= 0 || start >= total || start > end) {
+      throw new BadRequestException('Range 范围无效');
+    }
+
+    const mimeType = file.mimeType || 'application/octet-stream';
+    return {
+      stream: createReadStream(cachedPath, { start, end }),
+      contentType: mimeType,
+      filename: this.ensureFileExtension(file.originalName, mimeType),
+      size: end - start + 1,
+      isInline: /^(image|video|audio)\//.test(mimeType),
+      start,
+      end,
+      total,
+      accessLogId: await this.createSharePreviewAccessLog(file, ip),
+    };
+  }
+
+  private async createSharePreviewAccessLog(file: File, ip?: string): Promise<string | undefined> {
+    try {
+      const saved = await this.accessLogRepository.save({
+        fileId: file.id,
+        ip: ip || '',
+        action: 'share_preview',
+        uploaderId: file.uploaderId,
+        responseSize: 0,
+      });
+      return saved.id;
+    } catch {
+      return undefined;
+    }
+  }
 }
