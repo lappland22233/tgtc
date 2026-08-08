@@ -27,15 +27,33 @@
               @error="onMediaError"
             />
 
-            <!-- 视频 -->
-            <video
+            <!-- 视频：MSE 优先（持续消费完整响应流），不支持时原生回退 -->
+            <div
               v-else-if="snap.kind === 'video' && snap.src && !mediaError"
-              class="fpv-video"
-              :src="snap.src"
-              controls
-              preload="metadata"
-              @error="onMediaError"
-            />
+              class="fpv-video-wrap"
+            >
+              <video
+                ref="videoRef"
+                class="fpv-video"
+                :src="videoSrc || undefined"
+                controls
+                preload="auto"
+                @seeking="onVideoSeeking"
+                @seeked="onVideoSeeked"
+                @waiting="videoBuffering = true"
+                @playing="videoBuffering = false"
+                @canplay="videoBuffering = false"
+                @progress="updateBufferedRatio"
+                @timeupdate="updateBufferedRatio"
+                @error="onVideoError"
+              />
+              <div v-if="videoBuffering" class="fpv-video-loading">
+                <t-loading
+                  size="medium"
+                  :text="videoBufferedRatio > 0 ? `正在缓冲…（已缓冲 ${videoBufferedRatio}%）` : '正在缓冲…'"
+                />
+              </div>
+            </div>
 
             <!-- 音频 -->
             <audio
@@ -100,7 +118,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, watch, onUnmounted } from 'vue';
+import { ref, reactive, watch, nextTick, onUnmounted } from 'vue';
 import type { PreviewKind } from '../../utils/preview';
 import { triggerBrowserDownload } from '../../utils/download';
 
@@ -148,6 +166,7 @@ let loadToken = 0;
 
 function resetState() {
   loadToken++;
+  teardownVideo();
   textLoading.value = false;
   textContent.value = '';
   textError.value = null;
@@ -165,6 +184,8 @@ watch(() => props.visible, (v) => {
     snap.src = props.src;
     snap.downloadUrl = props.downloadUrl ?? null;
     if (props.kind === 'text') void loadText();
+    // 视频：等 DOM 挂载出 <video> 后启动 MSE / 原生播放管线
+    if (props.kind === 'video') nextTick(() => setupVideo());
   }
 }, { immediate: true });
 
@@ -176,7 +197,10 @@ watch(() => props.visible, (v) => {
   if (v) window.addEventListener('keydown', onKeydown);
   else window.removeEventListener('keydown', onKeydown);
 });
-onUnmounted(() => window.removeEventListener('keydown', onKeydown));
+onUnmounted(() => {
+  window.removeEventListener('keydown', onKeydown);
+  teardownVideo();
+});
 
 function close() {
   emit('update:visible', false);
@@ -185,6 +209,274 @@ function close() {
 /** 媒体元素加载失败（含 401/403 无权访问） */
 function onMediaError() {
   mediaError.value = true;
+}
+
+// ============ 视频预览（MSE 优先 + 原生回退） ============
+const videoRef = ref<HTMLVideoElement | null>(null);
+/** 当前 <video> 实际 src：MSE 模式为 MediaSource 对象 URL，回退模式为原始地址 */
+const videoSrc = ref<string | null>(null);
+/** 是否处于 MSE 模式 */
+const videoUseMse = ref(false);
+/** 缓冲中提示 */
+const videoBuffering = ref(false);
+/** 已缓冲百分比（buffered 最大 end / duration 估算） */
+const videoBufferedRatio = ref(0);
+/** seek 钳制防循环标志 */
+let seekClamping = false;
+
+/** MSE 会话状态（非响应式，每次打开预览建立一个） */
+interface MseSession {
+  ms: MediaSource;
+  objectUrl: string;
+  sb: SourceBuffer | null;
+  abort: AbortController | null;
+  queue: Uint8Array[];
+  appending: boolean;
+  streamDone: boolean;
+  evictRetried: boolean;
+  onSourceOpen: (() => void) | null;
+  onUpdateEnd: (() => void) | null;
+  onSbError: (() => void) | null;
+}
+let mseSession: MseSession | null = null;
+
+/** MediaSource 能力检测（存在性 + 指定 MIME 是否可解码） */
+function mseTypeSupported(mime: string): boolean {
+  if (typeof MediaSource === 'undefined' || typeof MediaSource.isTypeSupported !== 'function') {
+    return false;
+  }
+  try { return MediaSource.isTypeSupported(mime); } catch { return false; }
+}
+
+/** 打开视频预览：MSE 优先，不支持时原生回退 */
+function setupVideo() {
+  const url = snap.src;
+  if (!url) return;
+  videoBuffering.value = true;
+  videoBufferedRatio.value = 0;
+  seekClamping = false;
+  // mimeType 缺失时按常见 video/mp4 尝试，不支持则自动走回退
+  const mime = snap.mimeType || 'video/mp4';
+  if (mseTypeSupported(mime)) {
+    startMseVideo(url, mime);
+  } else {
+    videoUseMse.value = false;
+    videoSrc.value = url;
+  }
+}
+
+function startMseVideo(url: string, mime: string) {
+  const ms = new MediaSource();
+  const s: MseSession = {
+    ms,
+    objectUrl: URL.createObjectURL(ms),
+    sb: null,
+    abort: null,
+    queue: [],
+    appending: false,
+    streamDone: false,
+    evictRetried: false,
+    onSourceOpen: null,
+    onUpdateEnd: null,
+    onSbError: null,
+  };
+  mseSession = s;
+  videoUseMse.value = true;
+  videoSrc.value = s.objectUrl;
+
+  s.onSourceOpen = () => {
+    ms.removeEventListener('sourceopen', s.onSourceOpen as EventListener);
+    if (mseSession !== s) return;
+    try {
+      const sb = ms.addSourceBuffer(mime);
+      s.sb = sb;
+      s.onUpdateEnd = () => {
+        if (mseSession !== s) return;
+        s.appending = false;
+        s.evictRetried = false;
+        pumpAppendQueue();
+        maybeEndOfStream();
+      };
+      s.onSbError = () => {
+        if (mseSession !== s) return;
+        fallbackToNative();
+      };
+      sb.addEventListener('updateend', s.onUpdateEnd);
+      sb.addEventListener('error', s.onSbError);
+      void pumpMseStream(url);
+    } catch {
+      // addSourceBuffer 失败（容器格式不被支持等）→ 原生回退
+      fallbackToNative();
+    }
+  };
+  ms.addEventListener('sourceopen', s.onSourceOpen);
+}
+
+/**
+ * 持续消费响应流直至读完——不随视频暂停而停止读取，
+ * 保证后端「边消费边构建缓存」不会因客户端停读而背压暂停。
+ */
+async function pumpMseStream(url: string) {
+  const s = mseSession;
+  if (!s) return;
+  const ctrl = new AbortController();
+  s.abort = ctrl;
+  try {
+    const res = await fetch(url, { credentials: 'same-origin', signal: ctrl.signal });
+    if (mseSession !== s) return;
+    if (!res.ok) {
+      // 无权 / 不存在：直接进错误态（原生回退同样会失败）
+      teardownVideo();
+      mediaError.value = true;
+      return;
+    }
+    const body = res.body;
+    if (!body) {
+      fallbackToNative();
+      return;
+    }
+    const reader = body.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (mseSession !== s) return; // 已关闭 / 已降级
+      if (done) break;
+      s.queue.push(value);
+      pumpAppendQueue();
+    }
+    s.streamDone = true;
+    maybeEndOfStream();
+  } catch {
+    if (ctrl.signal.aborted || mseSession !== s) return;
+    fallbackToNative();
+  }
+}
+
+/** appendBuffer 串行队列：同一时刻只允许一次 append，updateend 后继续 */
+function pumpAppendQueue() {
+  const s = mseSession;
+  if (!s || !s.sb || s.appending || s.queue.length === 0) return;
+  if (s.sb.updating) return;
+  const chunk = s.queue.shift()!;
+  s.appending = true;
+  try {
+    s.sb.appendBuffer(chunk);
+  } catch (e) {
+    s.appending = false;
+    onAppendError(e, chunk);
+  }
+}
+
+/** QuotaExceededError：移除最早的缓冲区间后重试；仍失败则整体降级原生 */
+function onAppendError(e: unknown, chunk: Uint8Array) {
+  const s = mseSession;
+  if (!s || !s.sb) return;
+  const isQuota = e instanceof DOMException && e.name === 'QuotaExceededError';
+  if (isQuota && !s.evictRetried && evictOldestBuffered(s.sb)) {
+    s.evictRetried = true;
+    s.queue.unshift(chunk); // remove 的 updateend 会驱动队列重试
+    return;
+  }
+  fallbackToNative();
+}
+
+/** 移除最早的缓冲区间（不越过当前播放位置，避免播放中断） */
+function evictOldestBuffered(sb: SourceBuffer): boolean {
+  const v = videoRef.value;
+  if (sb.updating || sb.buffered.length === 0) return false;
+  const start = sb.buffered.start(0);
+  let end = sb.buffered.end(0);
+  if (v && v.currentTime > start) end = Math.min(end, Math.max(start, v.currentTime - 1));
+  if (end <= start) return false;
+  try { sb.remove(start, end); return true; } catch { return false; }
+}
+
+/** 流读完且追加队列排空后结束 MediaSource 流 */
+function maybeEndOfStream() {
+  const s = mseSession;
+  if (!s || !s.streamDone || !s.sb) return;
+  if (s.sb.updating || s.queue.length > 0) return;
+  if (s.ms.readyState === 'open') {
+    try { s.ms.endOfStream(); } catch { /* 已关闭则忽略 */ }
+  }
+}
+
+/** MSE 失败/不支持时降级：<video> 直接吃原始地址（preload=auto） */
+function fallbackToNative() {
+  teardownMse();
+  videoUseMse.value = false;
+  videoSrc.value = snap.src;
+  videoBuffering.value = true;
+  nextTick(() => videoRef.value?.load());
+}
+
+/** 清理 MSE 会话：abort fetch、解绑事件、释放对象 URL */
+function teardownMse() {
+  const s = mseSession;
+  mseSession = null;
+  if (!s) return;
+  s.abort?.abort();
+  if (s.onSourceOpen) s.ms.removeEventListener('sourceopen', s.onSourceOpen as EventListener);
+  if (s.sb) {
+    if (s.onUpdateEnd) s.sb.removeEventListener('updateend', s.onUpdateEnd);
+    if (s.onSbError) s.sb.removeEventListener('error', s.onSbError);
+    if (s.ms.readyState === 'open' && !s.sb.updating) {
+      try { s.ms.endOfStream(); } catch { /* 忽略 */ }
+    }
+  }
+  s.queue.length = 0;
+  URL.revokeObjectURL(s.objectUrl);
+}
+
+/** 关闭/卸载：终止视频流并清理（保持“关闭即卸载终止流”语义） */
+function teardownVideo() {
+  teardownMse();
+  videoSrc.value = null;
+  videoUseMse.value = false;
+  videoBuffering.value = false;
+  videoBufferedRatio.value = 0;
+  seekClamping = false;
+}
+
+/** video error：MSE 模式先降级原生；原生模式再失败则进错误态 */
+function onVideoError() {
+  if (videoUseMse.value) {
+    fallbackToNative();
+    return;
+  }
+  mediaError.value = true;
+}
+
+/**
+ * seek 钳制（MSE 与原生共用）：超出已缓冲末尾的 seek 被拉回，
+ * 进度条因此只能在已缓冲范围内拖动。防循环标志避免 seeking 事件死循环。
+ */
+function onVideoSeeking() {
+  const v = videoRef.value;
+  if (!v || seekClamping) return;
+  let maxEnd = 0;
+  for (let i = 0; i < v.buffered.length; i++) {
+    if (v.buffered.end(i) > maxEnd) maxEnd = v.buffered.end(i);
+  }
+  if (maxEnd <= 0) return; // 尚无任何缓冲，不钳制
+  const limit = Math.max(0, maxEnd - 0.1);
+  if (v.currentTime > limit) {
+    seekClamping = true;
+    v.currentTime = limit;
+  }
+}
+function onVideoSeeked() {
+  seekClamping = false;
+}
+
+/** 已缓冲进度估算（buffered 最大 end / duration） */
+function updateBufferedRatio() {
+  const v = videoRef.value;
+  if (!v || !Number.isFinite(v.duration) || v.duration <= 0) return;
+  let maxEnd = 0;
+  for (let i = 0; i < v.buffered.length; i++) {
+    if (v.buffered.end(i) > maxEnd) maxEnd = v.buffered.end(i);
+  }
+  videoBufferedRatio.value = Math.min(100, Math.round((maxEnd / v.duration) * 100));
 }
 
 /**
@@ -357,6 +649,31 @@ function formatSize(bytes: number): string {
   max-height: 100%;
   border-radius: var(--radius-sm, 6px);
   outline: none;
+}
+
+.fpv-video-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+}
+
+/* 缓冲中提示（不拦截视频控件交互） */
+.fpv-video-loading {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 6px 14px;
+  background: color-mix(in srgb, var(--seed-bg, #0b0d12) 72%, transparent);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  pointer-events: none;
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
 }
 
 .fpv-audio {
