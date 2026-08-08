@@ -70,4 +70,28 @@ describe('TelegramService realtime stream', () => {
       expect.objectContaining({ headers: undefined }),
     );
   });
+
+  it('attaches X-Telegram-No-Cache header together with the size hint on no-cache passthrough', async () => {
+    const stream = Readable.from(Buffer.from('hello'));
+    mockedAxios.get.mockResolvedValue({ data: stream, headers: { 'content-length': '5' } } as any);
+
+    await createService().getRealtimeFileStream('file-id', 5, { noCache: true });
+    expect(mockedAxios.get).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        headers: { 'X-Telegram-File-Size': '5', 'X-Telegram-No-Cache': '1' },
+      }),
+    );
+  });
+
+  it('attaches X-Telegram-No-Cache header alone when no size hint is provided', async () => {
+    const stream = Readable.from(Buffer.from('hello'));
+    mockedAxios.get.mockResolvedValue({ data: stream, headers: { 'content-length': '5' } } as any);
+
+    await createService().getRealtimeFileStream('file-id', undefined, { noCache: true });
+    expect(mockedAxios.get).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ headers: { 'X-Telegram-No-Cache': '1' } }),
+    );
+  });
 });

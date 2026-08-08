@@ -13,12 +13,14 @@ export const CACHE_CONFIG_KEYS = {
   MAX_SIZE_GB: 'FILE_CACHE_MAX_SIZE_GB',
   MIN_FREE_DISK_GB: 'FILE_CACHE_MIN_FREE_DISK_GB',
   TTL_DAYS: 'FILE_CACHE_TTL_DAYS',
+  NO_CACHE_MODE: 'FILE_CACHE_NO_CACHE_MODE',
 } as const;
 
 export const CACHE_CONFIG_DEFAULTS: Record<string, string> = {
   [CACHE_CONFIG_KEYS.MAX_SIZE_GB]: '10',
   [CACHE_CONFIG_KEYS.MIN_FREE_DISK_GB]: '1',
   [CACHE_CONFIG_KEYS.TTL_DAYS]: '3',
+  [CACHE_CONFIG_KEYS.NO_CACHE_MODE]: 'false',
 };
 
 interface CacheBuildSession {
@@ -44,6 +46,13 @@ export class FileCacheService {
   private maxCacheSizeBytes = parseInt(CACHE_CONFIG_DEFAULTS[CACHE_CONFIG_KEYS.MAX_SIZE_GB]) * 1024 * 1024 * 1024;
   private minFreeDiskBytes = parseInt(CACHE_CONFIG_DEFAULTS[CACHE_CONFIG_KEYS.MIN_FREE_DISK_GB]) * 1024 * 1024 * 1024;
   private cacheTtlMs = parseInt(CACHE_CONFIG_DEFAULTS[CACHE_CONFIG_KEYS.TTL_DAYS]) * 24 * 60 * 60 * 1000;
+  /** 无缓存模式：文件下载实时回源直通，不读写本地缓存（可从管理后台动态调整） */
+  private noCacheMode = process.env.FILE_CACHE_NO_CACHE_MODE === 'true';
+
+  /** 当前是否处于无缓存模式 */
+  isNoCacheMode(): boolean {
+    return this.noCacheMode;
+  }
 
   /** 文件最近访问时间追踪 (fileId → lastAccessTimestamp)，用于 LRU 淘汰 */
   private readonly fileAccessMap = new Map<string, number>();
@@ -62,19 +71,28 @@ export class FileCacheService {
   /** 从配置缓存加载阈值 */
   private async reloadConfig(): Promise<void> {
     try {
-      const [maxSizeStr, minFreeStr, ttlStr] = await Promise.all([
+      const [maxSizeStr, minFreeStr, ttlStr, noCacheStr] = await Promise.all([
         this.configCache.get(CACHE_CONFIG_KEYS.MAX_SIZE_GB, CACHE_CONFIG_DEFAULTS[CACHE_CONFIG_KEYS.MAX_SIZE_GB]),
         this.configCache.get(CACHE_CONFIG_KEYS.MIN_FREE_DISK_GB, CACHE_CONFIG_DEFAULTS[CACHE_CONFIG_KEYS.MIN_FREE_DISK_GB]),
         this.configCache.get(CACHE_CONFIG_KEYS.TTL_DAYS, CACHE_CONFIG_DEFAULTS[CACHE_CONFIG_KEYS.TTL_DAYS]),
+        this.configCache.get(CACHE_CONFIG_KEYS.NO_CACHE_MODE, CACHE_CONFIG_DEFAULTS[CACHE_CONFIG_KEYS.NO_CACHE_MODE]),
       ]);
       this.maxCacheSizeBytes = Math.max(1, parseInt(maxSizeStr) || 10) * 1024 * 1024 * 1024;
       this.minFreeDiskBytes = Math.max(0.5, parseFloat(minFreeStr) || 1) * 1024 * 1024 * 1024;
       this.cacheTtlMs = Math.max(1, parseInt(ttlStr) || 3) * 24 * 60 * 60 * 1000;
+      // 无缓存模式翻转：false → true 时中止所有进行中的缓存构建
+      const prevNoCacheMode = this.noCacheMode;
+      this.noCacheMode = noCacheStr === 'true';
       this.logger.log(
         `缓存配置: 上限 ${this.maxCacheSizeBytes / 1024 / 1024 / 1024}GB, ` +
         `剩余 ${this.minFreeDiskBytes / 1024 / 1024 / 1024}GB, ` +
-        `TTL ${this.cacheTtlMs / 86400000}天`,
+        `TTL ${this.cacheTtlMs / 86400000}天, ` +
+        `无缓存模式 ${this.noCacheMode ? '开启' : '关闭'}`,
       );
+      if (!prevNoCacheMode && this.noCacheMode) {
+        this.logger.warn('无缓存模式已启用：中止所有进行中的缓存构建，后续下载实时回源直通');
+        this.abortAllBuildSessions();
+      }
     } catch (err) {
       this.logger.warn(`加载缓存配置失败，使用默认值: ${(err as Error).message}`);
     }
@@ -89,12 +107,22 @@ export class FileCacheService {
     }
   }
 
+  /** 批量配置变更热更新（ConfigCacheService.setBatch 只发此事件） */
+  @OnEvent('config.batch-changed')
+  async onBatchConfigChanged(payload: { key: string; value: string; description?: string }[]): Promise<void> {
+    const keys = Object.values(CACHE_CONFIG_KEYS) as string[];
+    if (Array.isArray(payload) && payload.some(item => keys.includes(item.key))) {
+      await this.reloadConfig();
+    }
+  }
+
   /**
    * 获取缓存的读取流。命中返回 Readable，未命中返回 null。
    * 检查文件大小一致性和 TTL 过期。
    */
   getCachedReadStream(fileId: string, expectedSize: number): Readable | null {
     this.validateFileId(fileId);
+    if (this.noCacheMode) return null;
     const cachePath = this.getCachePath(fileId);
 
     try {
@@ -136,6 +164,11 @@ export class FileCacheService {
       throw new Error(`非法的文件大小: ${expectedSize}`);
     }
 
+    // 无缓存模式：不读缓存、不写缓存、不计算容量，上游流实时直通
+    if (this.noCacheMode) {
+      return this.getNoCacheStream(fileId, expectedSize, fetchFn);
+    }
+
     const cached = this.getCachedReadStream(fileId, expectedSize);
     if (cached) return { stream: cached, fromCache: true };
 
@@ -147,6 +180,11 @@ export class FileCacheService {
       }
       this.logger.warn(`缓存容量或磁盘余量不足，文件 ${fileId} 仅实时转发`);
       return { stream: upstream.stream, fromCache: false };
+    }
+
+    // 容量准备期间模式可能已翻转，复查避免在无缓存模式下新建构建会话
+    if (this.noCacheMode) {
+      return this.getNoCacheStream(fileId, expectedSize, fetchFn);
     }
 
     let session = this.buildSessions.get(fileId);
@@ -178,6 +216,56 @@ export class FileCacheService {
 
     await this.waitForSessionReadable(session);
     return { stream: this.createFollowerStream(session), fromCache: false };
+  }
+
+  /**
+   * 无缓存直通：中止该文件的既有构建会话，实时回源并直通上游流。
+   * 不读缓存、不写缓存（无 .tmp/rename）、不计算容量、不触发 LRU。
+   */
+  async getNoCacheStream(
+    fileId: string,
+    expectedSize: number,
+    fetchFn: () => Promise<{ stream: Readable; info: { file_size: number } }>,
+  ): Promise<{ stream: Readable; fromCache: boolean }> {
+    await this.abortBuildSession(fileId);
+    const upstream = await fetchFn();
+    if (upstream.info.file_size !== expectedSize) {
+      upstream.stream.destroy();
+      throw new Error(`上游文件大小不一致: 期望 ${expectedSize}, 实际 ${upstream.info.file_size}`);
+    }
+    return { stream: upstream.stream, fromCache: false };
+  }
+
+  /**
+   * 中止指定文件的进行中缓存构建会话（不删除已发布的正式缓存文件、不清 fileAccessMap）。
+   * 参照 invalidate 的 5 秒赛跑，等待构建收尾（含 .tmp 清理），避免与后续直通流竞态。
+   */
+  async abortBuildSession(fileId: string): Promise<void> {
+    const session = this.buildSessions.get(fileId);
+    if (!session) return;
+    // 先挂 rejection 处理器再 abort：abort 同步 emit 'failed' 会使 completion reject，
+    // 若放到 Promise.race 内才挂载会晚一个微任务，产生 unhandled rejection
+    const completionSettled = session.completion.catch(() => {});
+    session.abort(new Error('无缓存模式已启用，缓存构建已中止'));
+    await Promise.race([
+      completionSettled,
+      new Promise<void>(resolve => {
+        const timer = setTimeout(resolve, 5000);
+        timer.unref?.();
+      }),
+    ]);
+  }
+
+  /** 中止所有进行中的缓存构建会话（无缓存模式开启时调用） */
+  private abortAllBuildSessions(): void {
+    const count = this.buildSessions.size;
+    if (count === 0) return;
+    for (const session of this.buildSessions.values()) {
+      session.abort(new Error('无缓存模式已启用，缓存构建已中止'));
+      // 防 unhandled rejection：构建收尾会 reject，这里显式吞掉
+      session.completion.catch(() => {});
+    }
+    this.logger.warn(`已中止 ${count} 个进行中的缓存构建会话`);
   }
 
   private async runBuildSession(
@@ -527,6 +615,7 @@ export class FileCacheService {
    */
   async cacheFile(fileId: string, buffer: Buffer): Promise<void> {
     this.validateFileId(fileId);
+    if (this.noCacheMode) return;
 
     // 缓存总大小检查：超限时尝试 LRU 淘汰
     const totalSize = await this.getTotalCacheSize();
@@ -574,6 +663,7 @@ export class FileCacheService {
    */
   async cacheFileFromPath(fileId: string, sourcePath: string, expectedSize: number): Promise<void> {
     this.validateFileId(fileId);
+    if (this.noCacheMode) return;
 
     // 缓存总大小检查：超限时尝试 LRU 淘汰
     const totalSize = await this.getTotalCacheSize();
@@ -687,6 +777,7 @@ export class FileCacheService {
    */
   getCachedPath(fileId: string): string | null {
     this.validateFileId(fileId);
+    if (this.noCacheMode) return null;
     const cachePath = this.getCachePath(fileId);
     try {
       const stat = require('fs').statSync(cachePath);

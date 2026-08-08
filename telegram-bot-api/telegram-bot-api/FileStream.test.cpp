@@ -43,6 +43,17 @@ TEST(FileStream, SizeHint) {
   ASSERT_TRUE(telegram_bot_api::parse_file_stream_size_hint("9223372036854775808").is_error());
 }
 
+TEST(FileStream, NoCacheHeader) {
+  ASSERT_TRUE(telegram_bot_api::parse_file_stream_no_cache("1"));
+  ASSERT_TRUE(telegram_bot_api::parse_file_stream_no_cache("true"));
+  ASSERT_TRUE(telegram_bot_api::parse_file_stream_no_cache("True"));
+  ASSERT_TRUE(telegram_bot_api::parse_file_stream_no_cache(" 1 "));
+  ASSERT_FALSE(telegram_bot_api::parse_file_stream_no_cache(""));
+  ASSERT_FALSE(telegram_bot_api::parse_file_stream_no_cache("0"));
+  ASSERT_FALSE(telegram_bot_api::parse_file_stream_no_cache("false"));
+  ASSERT_FALSE(telegram_bot_api::parse_file_stream_no_cache("yes"));
+}
+
 TEST(FileStream, ResolvesExactSize) {
   ASSERT_EQ(10, telegram_bot_api::resolve_file_stream_size(10, -1).move_as_ok());
   ASSERT_EQ(10, telegram_bot_api::resolve_file_stream_size(0, 10).move_as_ok());

@@ -222,6 +222,7 @@ void FileStreamConnection::finish() {
     return abort(td::Status::Error(500, "Attempted to finish an incomplete stream"));
   }
   finished_ = true;
+  completed_ok_ = true;
   cancel_timeout();
   if (!connection_.empty()) {
     send_closure(std::move(connection_), &td::HttpInboundConnection::write_ok);
@@ -292,7 +293,8 @@ void FileStreamConnection::tear_down() {
   local_file_.close();
   send_closure(client_manager_, &ClientManager::release_file_stream, stream_id_);
   if (!client_.empty()) {
-    send_closure(client_, &Client::remove_file_stream, stream_id_, file_id_);
+    // 仅当带 X-Telegram-No-Cache 标记的流正常完成传输时，才请求删除 TDLib 本地副本；中断路径仍只取消下载
+    send_closure(client_, &Client::remove_file_stream, stream_id_, file_id_, route_.no_cache && completed_ok_);
   }
   connection_.release();
 }

@@ -46,6 +46,11 @@ td::Result<td::int64> parse_file_stream_size_hint(td::Slice value) {
   return size.move_as_ok();
 }
 
+bool parse_file_stream_no_cache(td::Slice value) {
+  value = td::trim(value);
+  return value == "1" || td::to_lower(value) == "true";
+}
+
 td::Result<td::int64> resolve_file_stream_size(td::int64 tdlib_size, td::int64 expected_size) {
   if (tdlib_size > 0 && expected_size > 0 && tdlib_size != expected_size) {
     return td::Status::Error(502, "File size metadata mismatch");

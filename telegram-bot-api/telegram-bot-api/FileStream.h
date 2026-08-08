@@ -51,10 +51,12 @@ struct FileStreamRoute {
   td::string file_id;
   bool is_test_dc = false;
   td::int64 expected_size = -1;
+  bool no_cache = false;
 };
 
 td::Result<FileStreamRoute> parse_file_stream_route(td::Slice path);
 td::Result<td::int64> parse_file_stream_size_hint(td::Slice value);
+bool parse_file_stream_no_cache(td::Slice value);
 td::Result<td::int64> resolve_file_stream_size(td::int64 tdlib_size, td::int64 expected_size);
 
 class FileStreamConnection final : public td::Actor {
@@ -94,6 +96,7 @@ class FileStreamConnection final : public td::Actor {
   bool write_in_flight_ = false;
   bool download_completed_ = false;
   bool first_byte_sent_ = false;
+  bool completed_ok_ = false;
   td::int64 pending_write_offset_ = -1;
   td::int64 pending_write_size_ = 0;
   bool finished_ = false;

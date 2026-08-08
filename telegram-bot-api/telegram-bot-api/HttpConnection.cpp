@@ -54,6 +54,7 @@ void HttpConnection::handle(td::unique_ptr<td::HttpQuery> http_query,
     }
     auto parsed_route = route.move_as_ok();
     parsed_route.expected_size = expected_size.move_as_ok();
+    parsed_route.no_cache = parse_file_stream_no_cache(http_query->get_header("x-telegram-no-cache"));
     td::create_actor<FileStreamConnection>("FileStreamConnection", std::move(connection_), client_manager_,
                                            std::move(parsed_route), file_stream_config_, http_query->peer_address_)
         .release();

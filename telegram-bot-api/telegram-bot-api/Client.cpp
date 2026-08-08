@@ -7656,6 +7656,26 @@ class Client::TdOnCancelDownloadFileCallback final : public TdQueryCallback {
   }
 };
 
+class Client::TdOnDeleteFileCallback final : public TdQueryCallback {
+ public:
+  explicit TdOnDeleteFileCallback(int32 file_id) : file_id_(file_id) {
+  }
+
+  void on_result(object_ptr<td_api::Object> result) final {
+    // 删除仅清理本地缓存副本，失败不影响已完成的 HTTP 响应，静默记录日志即可
+    if (result->get_id() == td_api::error::ID) {
+      auto error = move_object_as<td_api::error>(result);
+      LOG(WARNING) << "Failed to delete cached file " << file_id_ << ": " << error->message_;
+      return;
+    }
+    CHECK(result->get_id() == td_api::ok::ID);
+    LOG(DEBUG) << "Deleted local copy of file " << file_id_ << " after a completed no-cache file stream";
+  }
+
+ private:
+  int32 file_id_;
+};
+
 class Client::TdOnGetReplyMessageCallback final : public TdQueryCallback {
  public:
   TdOnGetReplyMessageCallback(Client *client, int64 chat_id) : client_(client), chat_id_(chat_id) {
@@ -8716,7 +8736,7 @@ void Client::start_file_stream(td::ActorId<FileStreamConnection> stream, int64 s
                td::make_unique<TdOnFileStreamRemoteFileCallback>(this, stream, stream_id, expected_size));
 }
 
-void Client::remove_file_stream(int64 stream_id, int32 file_id) {
+void Client::remove_file_stream(int64 stream_id, int32 file_id, bool remove_local_file) {
   active_file_streams_.erase(stream_id);
   for (auto it = pending_file_streams_.begin(); it != pending_file_streams_.end();) {
     if (it->stream.id == stream_id) {
@@ -8738,8 +8758,13 @@ void Client::remove_file_stream(int64 stream_id, int32 file_id) {
   if (it->second.empty()) {
     file_stream_listeners_.erase(it);
     if (file_download_listeners_.count(file_id) == 0) {
-      send_request(make_object<td_api::cancelDownloadFile>(file_id, false),
-                   td::make_unique<TdOnCancelDownloadFileCallback>());
+      if (remove_local_file) {
+        // 带 X-Telegram-No-Cache 标记的流正常完成且已无其他监听者：删除 TDLib 本地副本，不影响 Telegram 云端文件
+        send_request(make_object<td_api::deleteFile>(file_id), td::make_unique<TdOnDeleteFileCallback>(file_id));
+      } else {
+        send_request(make_object<td_api::cancelDownloadFile>(file_id, false),
+                     td::make_unique<TdOnCancelDownloadFileCallback>());
+      }
     }
   }
 }

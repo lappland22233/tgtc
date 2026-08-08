@@ -200,6 +200,10 @@
           <t-input-number v-model="cacheConfig.ttlDays" :min="1" :max="365" :step="1" />
           <span style="margin-left: 8px; font-size: 12px; color: var(--td-text-color-secondary);">超过此时间的缓存文件自动清理</span>
         </t-form-item>
+        <t-form-item label="无缓存模式">
+          <t-switch v-model="cacheConfig.noCacheMode" />
+          <span style="margin-left: 8px; font-size: 12px; color: var(--td-text-color-secondary);">开启后所有文件下载实时回源直通，不读写本地缓存；Range 请求退化为完整下载，上游带宽压力增大</span>
+        </t-form-item>
         <t-form-item>
           <t-button theme="primary" @click="saveCacheConfig">保存缓存配置</t-button>
         </t-form-item>
@@ -281,6 +285,7 @@ const cacheConfig = ref({
   maxSizeGB: 10,
   minFreeDiskGB: 1,
   ttlDays: 3,
+  noCacheMode: false,
 });
 
 // 预设常用扩展名（危险类型已标注）

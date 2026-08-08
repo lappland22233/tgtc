@@ -587,7 +587,8 @@ export class FileService implements OnModuleInit {
     const finalFile = savedFile;
 
     // 预热缓存：将文件直接放入缓存目录，首次下载无需等待 TG 回源（按同一 id 对覆盖记录天然生效）
-    if (file.path && fs.existsSync(file.path)) {
+    // 无缓存模式下跳过整块预热：status 保持 processing，由 file-upload.processor 在 TG 上传完成后补齐 ready
+    if (!this.fileCacheService.isNoCacheMode() && file.path && fs.existsSync(file.path)) {
       this.fileCacheService.cacheFileFromPath(finalFile.id, file.path, file.size)
         .then(() => {
           // 缓存预热完成 → 文件立即可用，无需等待 TG 上传
@@ -1639,7 +1640,7 @@ export class FileService implements OnModuleInit {
 
 
   /** 统一选择正式缓存或二次开发 Bot API 的实时冷回源。 */
-  private async getDownloadStream(file: File): Promise<{
+  private async getDownloadStream(file: File, opts?: { noCache?: boolean }): Promise<{
     stream: Readable;
     actualSize: number;
   }> {
@@ -1650,10 +1651,22 @@ export class FileService implements OnModuleInit {
     if (file.status === 'processing' && !this.fileCacheService.getCachedPath(file.id)) {
       throw new BadRequestException('文件正在处理中，请稍后刷新重试');
     }
+    // 请求级强制无缓存优先，其次跟随全局配置
+    const noCache = opts?.noCache ?? this.fileCacheService.isNoCacheMode();
+    if (noCache) {
+      const result = await this.fileCacheService.getNoCacheStream(
+        file.id,
+        expectedSize,
+        // 无缓存直通：携带 X-Telegram-No-Cache 头，传输完成后由 Bot API 清理 workdir 本地副本
+        () => this.telegramService.getRealtimeFileStream(file.telegramFileId || file.filename, expectedSize, { noCache: true }),
+      );
+      return { stream: result.stream, actualSize: expectedSize };
+    }
     const result = await this.fileCacheService.getOrCacheStream(
       file.id,
       expectedSize,
-      () => this.telegramService.getRealtimeFileStream(file.telegramFileId || file.filename, expectedSize),
+      // 调用时动态评估：默认构建缓存路径不带头；若容量准备期间模式翻转进入无缓存早退分支则带头
+      () => this.telegramService.getRealtimeFileStream(file.telegramFileId || file.filename, expectedSize, { noCache: this.fileCacheService.isNoCacheMode() }),
     );
     return { stream: result.stream, actualSize: expectedSize };
   }
@@ -1662,7 +1675,7 @@ export class FileService implements OnModuleInit {
    * 流式下载文件内容（后端代理，不暴露 Telegram URL）
    * 用于避免大文件全部加载到内存
    */
-  async getFileContentStream(id: string, user: User, ip?: string): Promise<{
+  async getFileContentStream(id: string, user: User, ip?: string, opts?: { noCache?: boolean }): Promise<{
     stream: Readable;
     contentType: string;
     filename: string;
@@ -1693,7 +1706,7 @@ export class FileService implements OnModuleInit {
       throw new ForbiddenException('访问次数已用尽或文件不存在');
     }
 
-    const { stream } = await this.getDownloadStream(file);
+    const { stream } = await this.getDownloadStream(file, opts);
 
     // 写访问日志（responseSize 先占位为 0，流式传输完成后由 controller 更新为实际字节数）
     let accessLogId: string | undefined;
@@ -1724,6 +1737,7 @@ export class FileService implements OnModuleInit {
     id: string,
     user: User,
     rangeHeader: string,
+    opts?: { noCache?: boolean },
   ): Promise<{
     stream: Readable;
     contentType: string;
@@ -1737,6 +1751,9 @@ export class FileService implements OnModuleInit {
     // 解析 Range: bytes=start-end
     const match = rangeHeader.match(/bytes=(\d+)-(\d*)/);
     if (!match) return null;
+
+    // 请求级无缓存：Range 依赖本地缓存文件，无缓存时回退完整下载
+    if (opts?.noCache) return null;
 
     const start = parseInt(match[1], 10);
     const end = match[2] ? parseInt(match[2], 10) : undefined;

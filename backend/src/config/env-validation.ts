@@ -95,6 +95,10 @@ export function validateEnv(): void {
   if (process.env.CACHE_TTL_MS && (isNaN(Number(process.env.CACHE_TTL_MS)) || Number(process.env.CACHE_TTL_MS) <= 0)) {
     errors.push('CACHE_TTL_MS 必须为正数（毫秒）');
   }
+  // FILE_CACHE_NO_CACHE_MODE 若配置必须为可识别的布尔字符串，避免误值静默失效
+  if (process.env.FILE_CACHE_NO_CACHE_MODE && !/^(true|false)$/i.test(process.env.FILE_CACHE_NO_CACHE_MODE)) {
+    errors.push('FILE_CACHE_NO_CACHE_MODE 必须为 true 或 false');
+  }
 
   if (errors.length > 0) {
     const msg = '[启动失败] 环境变量校验不通过：\n  - ' + errors.join('\n  - ');

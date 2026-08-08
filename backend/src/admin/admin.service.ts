@@ -542,16 +542,19 @@ export class AdminService {
     maxSizeGB: number;
     minFreeDiskGB: number;
     ttlDays: number;
+    noCacheMode: boolean;
   }> {
-    const [maxSize, minFree, ttl] = await Promise.all([
+    const [maxSize, minFree, ttl, noCacheMode] = await Promise.all([
       this.getConfigByKey('FILE_CACHE_MAX_SIZE_GB'),
       this.getConfigByKey('FILE_CACHE_MIN_FREE_DISK_GB'),
       this.getConfigByKey('FILE_CACHE_TTL_DAYS'),
+      this.getConfigByKey('FILE_CACHE_NO_CACHE_MODE'),
     ]);
     return {
       maxSizeGB: parseFloat(maxSize || '10'),
       minFreeDiskGB: parseFloat(minFree || '1'),
       ttlDays: parseInt(ttl || '3'),
+      noCacheMode: noCacheMode === 'true',
     };
   }
 
@@ -559,6 +562,7 @@ export class AdminService {
     maxSizeGB?: number;
     minFreeDiskGB?: number;
     ttlDays?: number;
+    noCacheMode?: boolean;
   }): Promise<void> {
     if (config.maxSizeGB !== undefined) {
       if (config.maxSizeGB < 1 || config.maxSizeGB > 1000) {
@@ -577,6 +581,9 @@ export class AdminService {
         throw new BadRequestException('缓存有效期应在 1-365 天之间');
       }
       await this.setConfigValue('FILE_CACHE_TTL_DAYS', String(config.ttlDays), '文件缓存有效期 (天)');
+    }
+    if (config.noCacheMode !== undefined) {
+      await this.setConfigValue('FILE_CACHE_NO_CACHE_MODE', String(config.noCacheMode), '无缓存模式：文件下载实时回源直通，不读写本地缓存');
     }
 
     this.auditService.log({

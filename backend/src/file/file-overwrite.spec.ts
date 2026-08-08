@@ -74,7 +74,7 @@ describe('FileService - assertOverwriteTarget', () => {
   let service: FileService;
   let fileRepo: { findOne: jest.Mock; create: jest.Mock; save: jest.Mock; update: jest.Mock; manager: any };
   let audit: { log: jest.Mock; logAwait: jest.Mock };
-  let fileCache: { invalidate: jest.Mock; cacheFileFromPath: jest.Mock };
+  let fileCache: { invalidate: jest.Mock; cacheFileFromPath: jest.Mock; isNoCacheMode: jest.Mock };
 
   beforeEach(async () => {
     fileRepo = {
@@ -85,7 +85,7 @@ describe('FileService - assertOverwriteTarget', () => {
       manager: { transaction: jest.fn(), query: jest.fn() },
     };
     audit = { log: jest.fn(), logAwait: jest.fn() };
-    fileCache = { invalidate: jest.fn(), cacheFileFromPath: jest.fn().mockResolvedValue(undefined) };
+    fileCache = { invalidate: jest.fn(), cacheFileFromPath: jest.fn().mockResolvedValue(undefined), isNoCacheMode: jest.fn().mockReturnValue(false) };
 
     const moduleRef: TestingModule = await Test.createTestingModule({
       providers: [
@@ -157,7 +157,7 @@ describe('FileService - createProcessingFile 覆盖分支', () => {
   let service: FileService;
   let fileRepo: { findOne: jest.Mock; create: jest.Mock; save: jest.Mock; update: jest.Mock; manager: any };
   let audit: { log: jest.Mock; logAwait: jest.Mock };
-  let fileCache: { invalidate: jest.Mock; cacheFileFromPath: jest.Mock };
+  let fileCache: { invalidate: jest.Mock; cacheFileFromPath: jest.Mock; isNoCacheMode: jest.Mock };
 
   beforeEach(async () => {
     fileRepo = {
@@ -168,7 +168,7 @@ describe('FileService - createProcessingFile 覆盖分支', () => {
       manager: { transaction: jest.fn(), query: jest.fn() },
     };
     audit = { log: jest.fn(), logAwait: jest.fn() };
-    fileCache = { invalidate: jest.fn(), cacheFileFromPath: jest.fn().mockResolvedValue(undefined) };
+    fileCache = { invalidate: jest.fn(), cacheFileFromPath: jest.fn().mockResolvedValue(undefined), isNoCacheMode: jest.fn().mockReturnValue(false) };
 
     const moduleRef: TestingModule = await Test.createTestingModule({
       providers: [
@@ -281,7 +281,7 @@ describe('FileService - applyOverwrite', () => {
   let service: FileService;
   let fileRepo: { findOne: jest.Mock; create: jest.Mock; save: jest.Mock; update: jest.Mock; manager: any };
   let audit: { log: jest.Mock; logAwait: jest.Mock };
-  let fileCache: { invalidate: jest.Mock; cacheFileFromPath: jest.Mock };
+  let fileCache: { invalidate: jest.Mock; cacheFileFromPath: jest.Mock; isNoCacheMode: jest.Mock };
   let txFileRepo: { findOne: jest.Mock; update: jest.Mock };
 
   beforeEach(async () => {
@@ -298,7 +298,7 @@ describe('FileService - applyOverwrite', () => {
       },
     };
     audit = { log: jest.fn(), logAwait: jest.fn() };
-    fileCache = { invalidate: jest.fn(), cacheFileFromPath: jest.fn().mockResolvedValue(undefined) };
+    fileCache = { invalidate: jest.fn(), cacheFileFromPath: jest.fn().mockResolvedValue(undefined), isNoCacheMode: jest.fn().mockReturnValue(false) };
 
     const moduleRef: TestingModule = await Test.createTestingModule({
       providers: [

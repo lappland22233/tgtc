@@ -300,12 +300,15 @@ export class TelegramService {
   /**
    * 通过二次开发 Bot API 的独立 file_id 端点实时获取完整文件。
    * 该端点在 TDLib 完成整文件下载前即可返回连续字节，不支持 Range。
+   * opts.noCache：无缓存直通时携带 X-Telegram-No-Cache 头，
+   * Bot API 完整传输后会删除 TDLib workdir 中的本地副本（仅流式端点路径支持）。
    */
-  async getRealtimeFileStream(fileId: string, expectedSize?: number): Promise<{
+  async getRealtimeFileStream(fileId: string, expectedSize?: number, opts?: { noCache?: boolean }): Promise<{
     stream: Readable;
     info: { file_id: string; file_path: string; file_size: number };
   }> {
     if (!this.fileStreamingEnabled) {
+      // getFileStream 回退路径不支持 no-cache 清理，忽略 opts
       return this.getFileStream(fileId);
     }
     if (!fileId || fileId.length > 4096) {
@@ -315,15 +318,18 @@ export class TelegramService {
       throw new Error('非法的预期文件大小');
     }
 
+    // 请求头按需构造：大小提示与 no-cache 清理可独立/同时携带
+    const headers: Record<string, string> = {};
+    if (expectedSize !== undefined) headers['X-Telegram-File-Size'] = String(expectedSize);
+    if (opts?.noCache) headers['X-Telegram-No-Cache'] = '1';
+
     const url = `${this.fileStreamingBase}/stream/file/bot${this.botToken}/${encodeURIComponent(fileId)}`;
     const response = await this.telegramRequest(
       () => axios.get<Readable>(url, {
         responseType: 'stream',
         timeout: this.fileStreamingTimeoutMs,
         maxRedirects: 0,
-        headers: expectedSize === undefined
-          ? undefined
-          : { 'X-Telegram-File-Size': String(expectedSize) },
+        headers: Object.keys(headers).length > 0 ? headers : undefined,
       }),
       'getRealtimeFileStream',
       1,

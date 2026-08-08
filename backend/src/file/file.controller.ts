@@ -405,11 +405,16 @@ export class FileController {
         );
       }
 
+      // 请求级无缓存：仅管理员可通过 ?nocache=1|true 强制实时回源直通，普通用户传参忽略
+      const isAdmin = user.role === UserRole.ADMIN || user.role === UserRole.SUPER_ADMIN;
+      const noCacheRequested = isAdmin && (req.query.nocache === '1' || req.query.nocache === 'true');
+
       // Range 请求支持（仅缓存命中时可用）
       const rangeHeader = req.headers.range;
       if (rangeHeader) {
         const rangeResult = await this.fileService.getFileContentStreamWithRange(
           id, user, rangeHeader,
+          noCacheRequested ? { noCache: true } : undefined,
         );
         if (rangeResult) {
           res.status(206);
@@ -435,7 +440,10 @@ export class FileController {
         // Range 不支持（未缓存）→ 回退完整下载
       }
 
-      const result = await this.fileService.getFileContentStream(id, user, clientIp);
+      const result = await this.fileService.getFileContentStream(
+        id, user, clientIp,
+        noCacheRequested ? { noCache: true } : undefined,
+      );
 
       res.set({
         'Content-Type': result.contentType,
