@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, ForbiddenException, BadRequestException, OnModuleInit, Logger } from '@nestjs/common';
+import { Injectable, NotFoundException, ForbiddenException, BadRequestException, HttpException, OnModuleInit, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, In, IsNull, EntityManager } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
@@ -7,6 +7,7 @@ import { OnEvent } from '@nestjs/event-emitter';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { Readable } from 'stream';
 import { Request } from 'express';
+import { spawn } from 'child_process';
 import * as fs from 'fs';
 import { createReadStream, writeFileSync } from 'fs';
 import * as path from 'path';
@@ -32,6 +33,12 @@ import { v4 as uuidv4 } from 'uuid';
 import { BCRYPT_ROUNDS } from '../common/constants/bcrypt';
 import { FILE_DELETE_GRACE_MS, FILE_DELETE_COOLDOWN_MS } from '../common/constants/durations';
 
+export class RangeNotSatisfiableException extends HttpException {
+  constructor(public readonly total: number) {
+    super('Range 范围无效', 416);
+  }
+}
+
 export interface BatchUploadFailedItem {
   name: string;
   reason: string;
@@ -54,6 +61,9 @@ export class FileService implements OnModuleInit {
   private accessCountDefault = -1;
   private accessCountMax = -1;
   private readonly thumbnailDir: string;
+  /** 同一进程内按文件合并缩略图生成，避免在线请求、上传回调和启动扫描竞写。 */
+  private readonly thumbnailBuilds = new Map<string, Promise<void>>();
+  private readonly videoCoverBuilds = new Map<string, Promise<void>>();
 
   constructor(
     @InjectRepository(File)
@@ -1493,7 +1503,16 @@ export class FileService implements OnModuleInit {
     await this.assertFileReadable(file, user);
 
     // 优先读取本地缩略图
-    const localThumb = await this.readLocalThumbnail(file);
+    let localThumb = await this.readLocalThumbnail(file);
+    if (!localThumb && file.mimeType?.startsWith('video/')) {
+      const inferredCover = `${file.id}.video.webp`;
+      const inferredPath = path.join(this.thumbnailDir, inferredCover);
+      if (fs.existsSync(inferredPath)) {
+        file.thumbnailPath = inferredCover;
+        await this.fileRepository.save(file);
+        localThumb = await fs.promises.readFile(inferredPath);
+      }
+    }
     if (localThumb) {
       return {
         stream: Readable.from(localThumb),
@@ -1512,9 +1531,19 @@ export class FileService implements OnModuleInit {
           contentType: 'image/webp',
         };
       }
+    } else if (file.mimeType?.startsWith('video/')) {
+      await this.generateAndSaveVideoCover(file);
+      const regenerated = await this.readLocalThumbnail(file);
+      if (regenerated) {
+        return {
+          stream: Readable.from(regenerated),
+          contentType: 'image/webp',
+        };
+      }
+      throw new NotFoundException('视频封面尚未生成');
     }
 
-    // 最终回退（非图片文件或生成失败）
+    // 最终回退（非图片/视频文件或图片生成失败）
     const { stream } = await this.telegramService.getFileStream(file.telegramFileId || file.filename);
 
     return {
@@ -1527,50 +1556,110 @@ export class FileService implements OnModuleInit {
    * 批量获取缩略图 base64（合并为一次 API 调用，消除浏览器连接池瓶颈）
    * 返回 { [fileId]: 'data:image/...;base64,...' }
    */
+  private async generateAndSaveVideoCover(file: File): Promise<void> {
+    if (!file.mimeType?.startsWith('video/')) return;
+    const existing = this.videoCoverBuilds.get(file.id);
+    if (existing) return existing;
+
+    const build = this.buildVideoCover(file).finally(() => {
+      if (this.videoCoverBuilds.get(file.id) === build) this.videoCoverBuilds.delete(file.id);
+    });
+    this.videoCoverBuilds.set(file.id, build);
+    return build;
+  }
+
+  private async buildVideoCover(file: File): Promise<void> {
+    const cachedPath = this.fileCacheService.getCachedPath(file.id);
+    if (!cachedPath) return; // 不为封面额外触发整视频 Telegram 回源
+
+    const buildId = uuidv4();
+    const tmpCover = path.join(this.thumbnailDir, `${file.id}.${buildId}.cover.webp.tmp`);
+    const coverFilename = `${file.id}.video.webp`;
+    const coverPath = path.join(this.thumbnailDir, coverFilename);
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const ffmpeg = spawn(process.env.FFMPEG_PATH || 'ffmpeg', [
+          '-hide_banner', '-loglevel', 'error', '-y',
+          '-ss', '1', '-i', cachedPath,
+          '-frames:v', '1', '-vf', 'scale=480:-2:force_original_aspect_ratio=decrease',
+          '-c:v', 'libwebp', '-quality', '65', tmpCover,
+        ], { windowsHide: true });
+        let stderr = '';
+        ffmpeg.stderr.on('data', chunk => { stderr = (stderr + chunk.toString()).slice(-2048); });
+        ffmpeg.once('error', reject);
+        ffmpeg.once('close', code => code === 0 ? resolve() : reject(new Error(stderr || `FFmpeg 退出码 ${code}`)));
+      });
+      await fs.promises.rename(tmpCover, coverPath);
+      file.thumbnailPath = coverFilename;
+      await this.fileRepository.save(file);
+    } catch (error) {
+      this.logger.warn(`视频封面生成失败 id=${file.id}: ${(error as Error).message}`);
+    } finally {
+      await fs.promises.unlink(tmpCover).catch(() => {});
+    }
+  }
+
   /**
    * 从 Telegram 下载原图，用 sharp 生成十分之一分辨率缩略图，存到本地。
    * 成功后将缩略图路径写入 File 实体。
    */
   async generateAndSaveThumbnail(file: File): Promise<void> {
     if (!file.mimeType?.startsWith('image/')) return;
+
+    const activeBuild = this.thumbnailBuilds.get(file.id);
+    if (activeBuild) return activeBuild;
+
+    const build = this.buildAndSaveThumbnail(file).finally(() => {
+      if (this.thumbnailBuilds.get(file.id) === build) {
+        this.thumbnailBuilds.delete(file.id);
+      }
+    });
+    this.thumbnailBuilds.set(file.id, build);
+    return build;
+  }
+
+  private async buildAndSaveThumbnail(file: File): Promise<void> {
     if (file.thumbnailPath) {
       const fullPath = path.join(this.thumbnailDir, file.thumbnailPath);
-      if (fs.existsSync(fullPath)) return; // 已存在
+      if (fs.existsSync(fullPath)) return;
     }
 
-    // 先将原图流式落盘到临时文件，避免把整张原图读进内存导致 OOM
-    const tmpSource = path.join(this.thumbnailDir, `${file.id}.src.tmp`);
+    // 唯一临时文件 + 原子发布，避免并发任务或异常退出留下半成品。
+    const buildId = uuidv4();
+    const tmpSource = path.join(this.thumbnailDir, `${file.id}.${buildId}.src.tmp`);
+    const tmpThumbnail = path.join(this.thumbnailDir, `${file.id}.${buildId}.webp.tmp`);
+    const thumbFilename = `${file.id}.webp`;
+    const thumbPath = path.join(this.thumbnailDir, thumbFilename);
     try {
       const { stream } = await this.telegramService.getFileStream(file.telegramFileId || file.filename);
       const { pipeline } = await import('stream/promises');
       await pipeline(stream, fs.createWriteStream(tmpSource));
 
-      // 获取原图尺寸（sharp 从文件读取，按需解码）
       const metadata = await sharp(tmpSource).metadata();
       const width = metadata.width || 0;
       const height = metadata.height || 0;
+      if (width <= 0 || height <= 0) throw new Error('无法读取图片尺寸');
 
-      // 小于 300×300 的图片不需要缩略图
-      if (width < 300 && height < 300) return;
+      // 小图也统一生成 WebP，持久化完成状态，避免每次请求及每次启动重复回源探测。
+      const isSmallImage = width < 300 && height < 300;
+      const thumbWidth = isSmallImage ? width : Math.max(16, Math.round(width / 10));
+      const thumbHeight = isSmallImage ? height : Math.max(16, Math.round(height / 10));
 
-      const thumbWidth = Math.max(16, Math.round(width / 10));
-      const thumbHeight = Math.max(16, Math.round(height / 10));
-
-      // 生成 webp 缩略图（比 jpg/png 小得多），直接写入目标文件
-      const thumbFilename = `${file.id}.webp`;
-      const thumbPath = path.join(this.thumbnailDir, thumbFilename);
       await sharp(tmpSource)
-        .resize(thumbWidth, thumbHeight, { fit: 'inside' })
+        .resize(thumbWidth, thumbHeight, { fit: 'inside', withoutEnlargement: true })
         .webp({ quality: 60 })
-        .toFile(thumbPath);
+        .toFile(tmpThumbnail);
+      await fs.promises.rename(tmpThumbnail, thumbPath);
 
       file.thumbnailPath = thumbFilename;
       await this.fileRepository.save(file);
     } catch (err) {
       this.logger.warn(`缩略图生成失败 id=${file.id}: ${(err as Error).message}`);
     } finally {
-      // 清理临时源文件
-      await fs.promises.unlink(tmpSource).catch(() => {});
+      await Promise.all([
+        fs.promises.unlink(tmpSource).catch(() => {}),
+        fs.promises.unlink(tmpThumbnail).catch(() => {}),
+      ]);
     }
   }
 
@@ -1580,30 +1669,30 @@ export class FileService implements OnModuleInit {
    */
   async syncMissingThumbnails(): Promise<void> {
     const batchSize = 50;
-    let offset = 0;
+    let lastId: string | null = null;
     let totalProcessed = 0;
 
+    // 使用主键游标而非 offset；处理成功会改变筛选集合，offset 会跳过后续记录。
     // eslint-disable-next-line no-constant-condition
     while (true) {
-      const files = await this.fileRepository.find({
-        where: { isDeleted: false },
-        select: ['id', 'mimeType', 'telegramFileId', 'filename', 'thumbnailPath'],
-        skip: offset,
-        take: batchSize,
-      });
+      const query = this.fileRepository
+        .createQueryBuilder('file')
+        .select(['file.id', 'file.mimeType', 'file.telegramFileId', 'file.filename', 'file.thumbnailPath'])
+        .where('file.isDeleted = false')
+        .andWhere('file.mimeType LIKE :imagePrefix', { imagePrefix: 'image/%' })
+        .andWhere('file.thumbnailPath IS NULL')
+        .orderBy('file.id', 'ASC')
+        .take(batchSize);
+      if (lastId) query.andWhere('file.id > :lastId', { lastId });
+      const files = await query.getMany();
 
       if (files.length === 0) break;
-
-      const images = files.filter(f => f.mimeType?.startsWith('image/') && !f.thumbnailPath);
-      if (images.length > 0) {
-        this.logger.log(`同步缩略图: 处理 ${offset + 1}-${offset + files.length}，找到 ${images.length} 个缺失`);
-        for (const file of images) {
-          await this.generateAndSaveThumbnail(file);
-          totalProcessed++;
-        }
+      this.logger.log(`同步缩略图: 本批找到 ${files.length} 个缺失`);
+      for (const file of files) {
+        await this.generateAndSaveThumbnail(file);
+        totalProcessed++;
       }
-
-      offset += batchSize;
+      lastId = files[files.length - 1].id;
     }
 
     if (totalProcessed > 0) {
@@ -1781,7 +1870,7 @@ export class FileService implements OnModuleInit {
     const actualEnd = end !== undefined ? Math.min(end, total - 1) : total - 1;
 
     if (start >= total || start > actualEnd) {
-      throw new BadRequestException('Range 范围无效');
+      throw new RangeNotSatisfiableException(total);
     }
 
     // 读取指定范围的文件片段
@@ -2014,7 +2103,7 @@ export class FileService implements OnModuleInit {
     const requestedEnd = match[2] ? Number.parseInt(match[2], 10) : total - 1;
     const end = Math.min(requestedEnd, total - 1);
     if (!Number.isSafeInteger(total) || total <= 0 || start >= total || start > end) {
-      throw new BadRequestException('Range 范围无效');
+      throw new RangeNotSatisfiableException(total);
     }
 
     return {
@@ -2614,14 +2703,8 @@ export class FileService implements OnModuleInit {
 
     await this.assertFileReadable(file, user);
 
-    // 仅对本地缓存的文件支持 Range
-    const cachedPath = this.fileCacheService.getCachedPath(file.id);
-    if (!cachedPath) {
-      // 未缓存的文件回退到全量预览（Telegram API 不支持 Range）
-      return null;
-    }
-
     // 文件仍在处理中（TG 未同步）→ 拒绝范围预览，避免用临时 UUID 回源
+
     if (file.status === 'processing') {
       throw new BadRequestException('文件正在处理中，请稍后刷新重试');
     }
@@ -2630,14 +2713,24 @@ export class FileService implements OnModuleInit {
     const actualEnd = end !== undefined ? Math.min(end, total - 1) : total - 1;
 
     if (start >= total || start > actualEnd) {
-      throw new BadRequestException('Range 范围无效');
+      throw new RangeNotSatisfiableException(total);
     }
 
-    // 读取指定范围的文件片段
     const chunkSize = actualEnd - start + 1;
-    const readStream = createReadStream(cachedPath, { start, end: actualEnd });
+    const cachedPath = this.fileCacheService.getCachedPath(file.id);
+    const readStream = cachedPath
+      ? createReadStream(cachedPath, { start, end: actualEnd })
+      : await this.fileCacheService.getOrCacheRangeStream(
+          file.id,
+          total,
+          start,
+          actualEnd,
+          () => this.telegramService.getRealtimeFileStream(file.telegramFileId || file.filename, total),
+        );
+    if (!readStream) return null;
 
     // 预览不递增 currentAccessCount，仅写访问日志（action=preview）
+
     let accessLogId: string | undefined;
     try {
       const saved = await this.accessLogRepository.save({
@@ -2698,7 +2791,7 @@ export class FileService implements OnModuleInit {
     const requestedEnd = match[2] ? Number.parseInt(match[2], 10) : total - 1;
     const end = Math.min(requestedEnd, total - 1);
     if (!Number.isSafeInteger(total) || total <= 0 || start >= total || start > end) {
-      throw new BadRequestException('Range 范围无效');
+      throw new RangeNotSatisfiableException(total);
     }
 
     const mimeType = file.mimeType || 'application/octet-stream';

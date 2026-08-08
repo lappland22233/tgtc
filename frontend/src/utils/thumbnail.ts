@@ -105,12 +105,12 @@ export async function getThumbToken(): Promise<string> {
 // ---- 缩略图并发加载池 ----
 
 /** 最大并发缩略图加载数（留给文件列表 API 至少 2 个连接） */
-const MAX_CONCURRENT_THUMBNAILS = 3;
+const MAX_CONCURRENT_THUMBNAILS = 6;
 
 let activeLoads = 0;
 const pendingQueue: Array<() => void> = [];
 
-function acquireSlot(): Promise<void> {
+export function acquireThumbnailSlot(): Promise<void> {
   if (activeLoads < MAX_CONCURRENT_THUMBNAILS) {
     activeLoads++;
     return Promise.resolve();
@@ -120,7 +120,7 @@ function acquireSlot(): Promise<void> {
   });
 }
 
-function releaseSlot() {
+export function releaseThumbnailSlot() {
   activeLoads--;
   const next = pendingQueue.shift();
   if (next) {
@@ -131,14 +131,9 @@ function releaseSlot() {
 
 /** 构建缩略图 URL（受并发限制） */
 export async function buildThumbUrl(fileId: string): Promise<string> {
-  await acquireSlot();
-  try {
-    const token = await getThumbToken();
-    // fileId 必须编码，防止路径穿越/query 注入（如 ../ 或 ? 注入）
-    return `/api/files/${encodeURIComponent(fileId)}/thumbnail?t=${token}`;
-  } finally {
-    releaseSlot();
-  }
+  const token = await getThumbToken();
+  // fileId 必须编码，防止路径穿越/query 注入（如 ../ 或 ? 注入）
+  return `/api/files/${encodeURIComponent(fileId)}/thumbnail?t=${token}`;
 }
 
 /** 清除缓存（路由切换时调用，防止 Token 跨页面复用） */

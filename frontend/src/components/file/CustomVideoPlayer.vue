@@ -18,7 +18,7 @@
       ref="videoRef"
       class="cvp__video"
       :src="src || undefined"
-      preload="auto"
+      preload="metadata"
       playsinline
       @play="onPlay"
       @pause="onPause"
@@ -271,6 +271,7 @@ const volumeHover = ref(false);
 const playedPct = ref(0);
 const bufferedPct = ref(0);
 const isDragging = ref(false);
+const dragPct = ref<number | null>(null);
 const tooltipVisible = ref(false);
 const tooltipLeft = ref(0);
 const tooltipTime = ref('0:00');
@@ -435,13 +436,23 @@ function toggleFullscreen() {
 }
 
 // ─── 进度条交互 ────────────────────────────
-function seekToPct(pct: number) {
+function previewSeekPct(pct: number) {
+  if (!duration.value) return;
+  dragPct.value = pct;
+  currentTime.value = (pct / 100) * duration.value;
+  playedPct.value = pct;
+}
+
+function commitSeekPct(pct: number) {
   const v = videoRef.value;
   if (!v || !duration.value) return;
-  const t = (pct / 100) * duration.value;
-  v.currentTime = t;
-  currentTime.value = t;
+  const target = (pct / 100) * duration.value;
+  // fastSeek 允许浏览器选择邻近关键帧，普通赋值作为兼容回退。
+  if (typeof v.fastSeek === 'function') v.fastSeek(target);
+  else v.currentTime = target;
+  currentTime.value = target;
   playedPct.value = pct;
+  dragPct.value = null;
 }
 
 function seekBy(seconds: number) {
@@ -464,11 +475,13 @@ function getPctFromEvent(e: MouseEvent | Touch): number {
 
 function onProgressMouseDown(e: MouseEvent) {
   isDragging.value = true;
-  seekToPct(getPctFromEvent(e));
+  previewSeekPct(getPctFromEvent(e));
 
-  const onMove = (ev: MouseEvent) => seekToPct(getPctFromEvent(ev));
+  const onMove = (ev: MouseEvent) => previewSeekPct(getPctFromEvent(ev));
   const onUp = () => {
+    const targetPct = dragPct.value;
     isDragging.value = false;
+    if (targetPct != null) commitSeekPct(targetPct);
     document.removeEventListener('mousemove', onMove);
     document.removeEventListener('mouseup', onUp);
     resetHideTimer();
@@ -479,13 +492,15 @@ function onProgressMouseDown(e: MouseEvent) {
 
 function onProgressTouchStart(e: TouchEvent) {
   isDragging.value = true;
-  if (e.touches[0]) seekToPct(getPctFromEvent(e.touches[0]));
+  if (e.touches[0]) previewSeekPct(getPctFromEvent(e.touches[0]));
 
   const onMove = (ev: TouchEvent) => {
-    if (ev.touches[0]) seekToPct(getPctFromEvent(ev.touches[0]));
+    if (ev.touches[0]) previewSeekPct(getPctFromEvent(ev.touches[0]));
   };
   const onEnd = () => {
+    const targetPct = dragPct.value;
     isDragging.value = false;
+    if (targetPct != null) commitSeekPct(targetPct);
     document.removeEventListener('touchmove', onMove);
     document.removeEventListener('touchend', onEnd);
   };

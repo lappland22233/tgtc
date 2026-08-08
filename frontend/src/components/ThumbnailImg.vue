@@ -4,6 +4,7 @@
       v-if="signed && url"
       :src="url"
       :style="{ width: size + 'px', height: size + 'px', objectFit: 'cover', borderRadius: 'var(--radius-sm, 4px)' }"
+      @load="onLoad"
       @error="onError"
     />
     <FileTypeIcon
@@ -19,6 +20,7 @@
 <script setup lang="ts">
 import { ref, watch, onMounted, onUnmounted } from 'vue';
 import { getThumbnailUrl } from '../utils/thumbnailCache';
+import { acquireThumbnailSlot, releaseThumbnailSlot } from '../utils/thumbnail';
 import FileTypeIcon from './FileTypeIcon.vue';
 
 const props = withDefaults(defineProps<{
@@ -43,22 +45,37 @@ let observer: IntersectionObserver | null = null;
 let loaded = false;
 let retried = false;   // 仅重试一次，避免错误时死循环
 let unmounted = false; // 卸载后禁止再写响应式状态（异步竞态防护）
+let slotHeld = false;
+
+function releaseSlotIfHeld() {
+  if (!slotHeld) return;
+  slotHeld = false;
+  releaseThumbnailSlot();
+}
 
 async function loadThumbnail() {
   if (loaded) return;
   loaded = true;
+  await acquireThumbnailSlot();
+  slotHeld = true;
   try {
     const result = await getThumbnailUrl(props.fileId, props.mimeType);
-    if (unmounted) return; // 组件已卸载/复用给其他 fileId，丢弃过期结果
+    if (unmounted) { releaseSlotIfHeld(); return; }
     url.value = result;
     signed.value = true;
   } catch {
+    releaseSlotIfHeld();
     if (unmounted) return;
     loaded = false; // 允许进入视口时再次尝试
   }
 }
 
+function onLoad() {
+  releaseSlotIfHeld();
+}
+
 function onError() {
+  releaseSlotIfHeld();
   url.value = '';
   signed.value = false;
   // 一次性重试：签名 URL 可能已过期（缓存 TTL 很短），重新构建通常可恢复
@@ -94,6 +111,7 @@ function startObserving() {
 // v-for 复用实例时 fileId 会变化：重置全部加载状态并重新观察，
 // 否则会显示上一个文件的旧缩略图
 watch(() => props.fileId, () => {
+  releaseSlotIfHeld();
   loaded = false;
   retried = false;
   url.value = '';
@@ -107,6 +125,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   unmounted = true;
+  releaseSlotIfHeld();
   stopObserving();
 });
 </script>

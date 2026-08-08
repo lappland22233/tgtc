@@ -187,35 +187,69 @@ export class FileCacheService {
       return this.getNoCacheStream(fileId, expectedSize, fetchFn);
     }
 
-    let session = this.buildSessions.get(fileId);
-    if (!session) {
-      const events = new EventEmitter();
-      events.setMaxListeners(0);
-      session = {
-        fileId,
-        expectedSize,
-        tmpPath: this.getCachePath(fileId) + '.tmp',
-        bytesWritten: 0,
-        completed: false,
-        events,
-        completion: Promise.resolve(),
-        abort: (error: Error) => {
-          if (session?.error || session?.completed) return;
-          session!.error = error;
-          session!.upstream?.destroy(error);
-          session!.output?.destroy();
-          session!.events.emit('failed', error);
-        },
-      };
-      this.buildSessions.set(fileId, session);
-      session.completion = this.runBuildSession(session, fetchFn);
-      session.completion.catch(() => {});
-    } else if (session.expectedSize !== expectedSize) {
-      throw new Error('活动缓存会话的文件大小不一致');
-    }
-
+    const session = this.getOrCreateBuildSession(fileId, expectedSize, fetchFn);
     await this.waitForSessionReadable(session);
     return { stream: this.createFollowerStream(session), fromCache: false };
+  }
+
+  /**
+   * 冷缓存 Range：上游仍保持单路顺序构建完整缓存，客户端只读取所需字节区间。
+   * 这样首个媒体请求保持 206，不会退化成浏览器端整文件下载；已写入区间可立即 seek。
+   */
+  async getOrCacheRangeStream(
+    fileId: string,
+    expectedSize: number,
+    start: number,
+    end: number,
+    fetchFn: () => Promise<{ stream: Readable; info: { file_size: number } }>,
+  ): Promise<Readable | null> {
+    this.validateFileId(fileId);
+    if (this.noCacheMode || start < 0 || end < start || end >= expectedSize) return null;
+
+    const cachedPath = this.getCachedPath(fileId);
+    if (cachedPath) {
+      this.fileAccessMap.set(fileId, Date.now());
+      return createReadStream(cachedPath, { start, end });
+    }
+    if (!(await this.prepareCacheCapacity(expectedSize)) || this.noCacheMode) return null;
+
+    const session = this.getOrCreateBuildSession(fileId, expectedSize, fetchFn);
+    return this.createFollowerStream(session, start, end);
+  }
+
+  private getOrCreateBuildSession(
+    fileId: string,
+    expectedSize: number,
+    fetchFn: () => Promise<{ stream: Readable; info: { file_size: number } }>,
+  ): CacheBuildSession {
+    let session = this.buildSessions.get(fileId);
+    if (session) {
+      if (session.expectedSize !== expectedSize) throw new Error('活动缓存会话的文件大小不一致');
+      return session;
+    }
+
+    const events = new EventEmitter();
+    events.setMaxListeners(0);
+    session = {
+      fileId,
+      expectedSize,
+      tmpPath: this.getCachePath(fileId) + '.tmp',
+      bytesWritten: 0,
+      completed: false,
+      events,
+      completion: Promise.resolve(),
+      abort: (error: Error) => {
+        if (session?.error || session?.completed) return;
+        session!.error = error;
+        session!.upstream?.destroy(error);
+        session!.output?.destroy();
+        session!.events.emit('failed', error);
+      },
+    };
+    this.buildSessions.set(fileId, session);
+    session.completion = this.runBuildSession(session, fetchFn);
+    session.completion.catch(() => {});
+    return session;
   }
 
   /**
@@ -389,15 +423,15 @@ export class FileCacheService {
     if (session.error) throw session.error;
   }
 
-  private createFollowerStream(session: CacheBuildSession): Readable {
+  private createFollowerStream(session: CacheBuildSession, start = 0, end = session.expectedSize - 1): Readable {
     const service = this;
     async function* follow(): AsyncGenerator<Buffer> {
-      let offset = 0;
+      let offset = start;
       const buffer = Buffer.allocUnsafe(256 * 1024);
       try {
-        while (true) {
-          while (offset < session.bytesWritten) {
-            const available = Math.min(buffer.length, session.bytesWritten - offset);
+        while (offset <= end) {
+          while (offset < session.bytesWritten && offset <= end) {
+            const available = Math.min(buffer.length, session.bytesWritten - offset, end - offset + 1);
             let handle: FileHandle | undefined;
             try {
               // 每轮短暂持有句柄，兼容 Windows 上活动读句柄会阻止 rename 的行为。
@@ -414,7 +448,7 @@ export class FileCacheService {
             yield Buffer.from(buffer.subarray(0, bytesRead));
           }
           if (session.error) throw session.error;
-          if (session.completed && offset >= session.expectedSize) break;
+          if (offset > end || (session.completed && offset >= session.expectedSize)) break;
           await service.waitForSessionChange(session);
         }
       } finally {

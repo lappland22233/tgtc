@@ -494,8 +494,8 @@
       :kind="previewTarget ? getPreviewKind(previewTarget.mimeType, previewTarget.originalName) : null"
       :src="previewTarget ? buildFilePreviewUrl(previewTarget.id) : null"
       :download-url="previewTarget ? `/api/files/${previewTarget.id}/download` : undefined"
-      :playlist="videoPlaylist"
-      :playlist-index="videoPlaylistIndex"
+      :playlist="activeMediaPlaylist"
+      :playlist-index="activeMediaPlaylistIndex"
       @update:visible="onPreviewVisibleChange"
       @update:playlist-index="onPlaylistIndexChange"
     />
@@ -606,32 +606,45 @@ function onPreviewVisibleChange(v: boolean) {
   if (!v) previewTarget.value = null;
 }
 
-// ============ 视频播放列表 ============
-/** 当前文件夹中所有视频文件（从已加载的文件中筛选） */
-const videoPlaylist = computed<PlaylistItem[]>(() => {
+// ============ 媒体快速预览列表 ============
+/** 当前文件夹已加载且可用的媒体文件，按图片 / 视频 / 音乐分别组成列表。 */
+function buildMediaPlaylist(kind: 'image' | 'video' | 'audio'): PlaylistItem[] {
   return fileStore.files
-    .filter((f) => f.mimeType?.startsWith('video/') && !f.isDeleted && f.status !== 'processing')
-    .map((f) => ({
-      id: f.id,
-      name: f.originalName,
-      mimeType: f.mimeType,
-      size: f.size,
-      src: buildFilePreviewUrl(f.id),
-      downloadUrl: `/api/files/${f.id}/download`,
+    .filter((file) => getPreviewKind(file.mimeType, file.originalName) === kind && !file.isDeleted && file.status !== 'processing')
+    .map((file) => ({
+      id: file.id,
+      name: file.originalName,
+      mimeType: file.mimeType,
+      kind,
+      size: file.size,
+      src: buildFilePreviewUrl(file.id),
+      downloadUrl: `/api/files/${file.id}/download`,
     }));
+}
+
+const videoPlaylist = computed<PlaylistItem[]>(() => buildMediaPlaylist('video'));
+const audioPlaylist = computed<PlaylistItem[]>(() => buildMediaPlaylist('audio'));
+const imagePlaylist = computed<PlaylistItem[]>(() => buildMediaPlaylist('image'));
+
+const activeMediaPlaylist = computed<PlaylistItem[]>(() => {
+  if (!previewTarget.value) return [];
+  const kind = getPreviewKind(previewTarget.value.mimeType, previewTarget.value.originalName);
+  if (kind === 'video') return videoPlaylist.value;
+  if (kind === 'audio') return audioPlaylist.value;
+  if (kind === 'image') return imagePlaylist.value;
+  return [];
 });
 
-/** 当前预览视频在播放列表中的索引 */
-const videoPlaylistIndex = computed(() => {
+const activeMediaPlaylistIndex = computed(() => {
   if (!previewTarget.value) return -1;
-  return videoPlaylist.value.findIndex((p) => p.id === previewTarget.value!.id);
+  return activeMediaPlaylist.value.findIndex((item) => item.id === previewTarget.value!.id);
 });
 
-/** 播放列表切换时更新 previewTarget 到对应的 FileItem */
+/** 列表切换时更新 previewTarget，父组件继续作为当前文件的单一数据源。 */
 function onPlaylistIndexChange(idx: number) {
-  const item = videoPlaylist.value[idx];
+  const item = activeMediaPlaylist.value[idx];
   if (!item) return;
-  const file = fileStore.files.find((f) => f.id === item.id);
+  const file = fileStore.files.find((candidate) => candidate.id === item.id);
   if (file) previewTarget.value = file;
 }
 // ============ 文件重命名弹窗状态 ============
@@ -1811,6 +1824,8 @@ onUnmounted(() => {
 
 .os-row {
   display: grid;
+  content-visibility: auto;
+  contain-intrinsic-size: 48px;
   grid-template-columns:
     44px
     minmax(240px, 1fr)
@@ -2068,6 +2083,8 @@ onUnmounted(() => {
 }
 
 .mobile-file-card {
+  content-visibility: auto;
+  contain-intrinsic-size: 132px;
   background: var(--color-bg-elevated);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-md);

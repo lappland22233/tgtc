@@ -120,8 +120,8 @@
       :kind="previewFile ? getPreviewKind(previewFile.mimeType, previewFile.name) : null"
       :src="previewFile ? buildSharePreviewUrl(props.token, previewFile.id, props.accessJwt) : null"
       :download-url="previewFile ? buildShareDownloadUrl(previewFile.id) : undefined"
-      :playlist="videoPlaylist"
-      :playlist-index="videoPlaylistIndex"
+      :playlist="activeMediaPlaylist"
+      :playlist-index="activeMediaPlaylistIndex"
       @update:visible="onPreviewVisibleChange"
       @update:playlist-index="onPlaylistIndexChange"
     />
@@ -182,28 +182,39 @@ function onPreviewVisibleChange(v: boolean) {
   if (!v) previewFile.value = null;
 }
 
-// ============ 视频播放列表 ============
-/** 当前文件夹中所有视频文件 */
-const videoPlaylist = computed<PlaylistItem[]>(() => {
+// ============ 媒体快速预览列表 ============
+function buildMediaPlaylist(kind: 'image' | 'video' | 'audio'): PlaylistItem[] {
   return currentContents.files
-    .filter((f) => f.mimeType?.startsWith('video/'))
-    .map((f) => ({
-      id: f.id,
-      name: f.name,
-      mimeType: f.mimeType,
-      size: f.size,
-      src: buildSharePreviewUrl(props.token, f.id, props.accessJwt),
-      downloadUrl: buildShareDownloadUrl(f.id),
+    .filter((file) => getPreviewKind(file.mimeType, file.name) === kind)
+    .map((file) => ({
+      id: file.id,
+      name: file.name,
+      mimeType: file.mimeType,
+      kind,
+      size: file.size,
+      src: buildSharePreviewUrl(props.token, file.id, props.accessJwt),
+      downloadUrl: buildShareDownloadUrl(file.id),
     }));
-});
+}
 
-const videoPlaylistIndex = computed(() => {
+const videoPlaylist = computed<PlaylistItem[]>(() => buildMediaPlaylist('video'));
+const audioPlaylist = computed<PlaylistItem[]>(() => buildMediaPlaylist('audio'));
+const imagePlaylist = computed<PlaylistItem[]>(() => buildMediaPlaylist('image'));
+const activeMediaPlaylist = computed<PlaylistItem[]>(() => {
+  if (!previewFile.value) return [];
+  const kind = getPreviewKind(previewFile.value.mimeType, previewFile.value.name);
+  if (kind === 'video') return videoPlaylist.value;
+  if (kind === 'audio') return audioPlaylist.value;
+  if (kind === 'image') return imagePlaylist.value;
+  return [];
+});
+const activeMediaPlaylistIndex = computed(() => {
   if (!previewFile.value) return -1;
-  return videoPlaylist.value.findIndex((p) => p.id === previewFile.value!.id);
+  return activeMediaPlaylist.value.findIndex((item) => item.id === previewFile.value!.id);
 });
 
 function onPlaylistIndexChange(idx: number) {
-  const item = videoPlaylist.value[idx];
+  const item = activeMediaPlaylist.value[idx];
   if (!item) return;
   const file = currentContents.files.find((f) => f.id === item.id);
   if (file) previewFile.value = file;

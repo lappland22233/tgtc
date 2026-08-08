@@ -20,7 +20,7 @@
             <div class="fpv-name" :title="snap.name">{{ snap.name || '文件预览' }}</div>
             <div class="fpv-header-actions">
               <!-- 播放列表导航 -->
-              <template v-if="hasPlaylist && snap.kind === 'video'">
+              <template v-if="hasPlaylist && isMediaCollection">
                 <span class="fpv-playlist-indicator">
                   {{ activeIndex + 1 }} / {{ playlist.length }}
                 </span>
@@ -28,7 +28,7 @@
                   type="button"
                   class="fpv-nav-btn"
                   :disabled="!hasPrev"
-                  aria-label="上一个视频 (Shift+P)"
+                  :aria-label="`上一个${collectionItemLabel} (Shift+P)`"
                   title="上一个 (Shift+P)"
                   @click="playPrev"
                 >
@@ -38,7 +38,7 @@
                   type="button"
                   class="fpv-nav-btn"
                   :disabled="!hasNext"
-                  aria-label="下一个视频 (Shift+N)"
+                  :aria-label="`下一个${collectionItemLabel} (Shift+N)`"
                   title="下一个 (Shift+N)"
                   @click="playNext"
                 >
@@ -67,7 +67,7 @@
           <div class="fpv-body">
             <!-- 图片 -->
             <img
-              v-if="snap.kind === 'image' && snap.src && !mediaError"
+              v-if="visible && snap.kind === 'image' && snap.src && !mediaError"
               class="fpv-image"
               :src="snap.src"
               :alt="snap.name"
@@ -91,23 +91,26 @@
 
             <!-- 音频 -->
             <audio
-              v-else-if="snap.kind === 'audio' && snap.src && !mediaError"
+              v-else-if="visible && snap.kind === 'audio' && snap.src && !mediaError"
+              ref="audioRef"
               class="fpv-audio"
               :src="snap.src"
               controls
+              preload="metadata"
+              @ended="onAudioEnded"
               @error="onMediaError"
             />
 
             <!-- PDF（浏览器原生内联渲染） -->
             <iframe
-              v-else-if="snap.kind === 'pdf' && snap.src"
+              v-else-if="visible && snap.kind === 'pdf' && snap.src"
               class="fpv-pdf"
               :src="snap.src"
               :title="snap.name || 'PDF 预览'"
             />
 
             <!-- 文本：打开时 fetch 读取 -->
-            <template v-else-if="snap.kind === 'text'">
+            <template v-else-if="visible && snap.kind === 'text'">
               <div v-if="textLoading" class="fpv-state">
                 <t-loading size="medium" text="正在加载文本内容..." />
               </div>
@@ -154,11 +157,11 @@
               ref="playlistPanelRef"
               class="fpv-playlist-panel"
               role="region"
-              aria-label="视频播放列表"
+              :aria-label="collectionTitle"
             >
               <div class="fpv-playlist-header">
-                <span class="fpv-playlist-title">播放列表</span>
-                <span class="fpv-playlist-count">{{ playlist.length }} 个视频</span>
+                <span class="fpv-playlist-title">{{ collectionTitle }}</span>
+                <span class="fpv-playlist-count">{{ playlist.length }} 个{{ collectionItemLabel }}</span>
                 <button
                   type="button"
                   class="fpv-playlist-close"
@@ -174,10 +177,18 @@
                   v-for="(item, idx) in playlist"
                   :key="item.id"
                   class="fpv-playlist-item"
-                  :class="{ 'fpv-playing': idx === activeIndex }"
+                  :class="{ 'fpv-playing': idx === activeIndex, 'fpv-playlist-item--image': snap.kind === 'image' }"
                   @click="switchToTrack(idx)"
                 >
-                  <div class="fpv-playlist-index">{{ idx + 1 }}</div>
+                  <ThumbnailImg
+                    v-if="snap.kind === 'image'"
+                    class="fpv-playlist-thumb"
+                    :file-id="item.id"
+                    :mime-type="item.mimeType"
+                    :file-name="item.name"
+                    :size="48"
+                  />
+                  <div v-else class="fpv-playlist-index">{{ idx + 1 }}</div>
                   <div class="fpv-playlist-info">
                     <div class="fpv-playlist-name" :title="item.name">{{ item.name }}</div>
                     <div class="fpv-playlist-meta">
@@ -201,12 +212,14 @@ import { ref, reactive, watch, nextTick, computed, onUnmounted } from 'vue';
 import type { PreviewKind } from '../../utils/preview';
 import { triggerBrowserDownload } from '../../utils/download';
 import CustomVideoPlayer, { type VideoEndBehavior } from './CustomVideoPlayer.vue';
+import ThumbnailImg from '../ThumbnailImg.vue';
 
 /** 播放列表项（父组件传入，FilePreviewDialog 不依赖 FileItem 类型） */
 export interface PlaylistItem {
   id: string;
   name: string;
   mimeType: string;
+  kind: 'image' | 'video' | 'audio';
   size?: number;
   src: string;
   downloadUrl?: string;
@@ -261,6 +274,9 @@ const playlistPanelRef = ref<HTMLElement | null>(null);
 
 // ============ 播放列表状态 ============
 const hasPlaylist = computed(() => props.playlist.length > 1);
+const isMediaCollection = computed(() => snap.kind === 'video' || snap.kind === 'audio' || snap.kind === 'image');
+const collectionItemLabel = computed(() => snap.kind === 'audio' ? '音乐' : snap.kind === 'image' ? '图片' : '视频');
+const collectionTitle = computed(() => snap.kind === 'audio' ? '音乐播放列表' : snap.kind === 'image' ? '图片列表' : '视频播放列表');
 const playlistOpen = ref(false);
 const playlistIndexInternal = ref(-1);
 const VIDEO_END_BEHAVIOR_KEY = 'file-preview-video-end-behavior';
@@ -304,22 +320,24 @@ function switchToTrack(idx: number) {
   playlistOpen.value = false;
   playlistIndexInternal.value = idx;
   emit('update:playlist-index', idx);
-  // 更新快照并重新加载视频
+  // 更新快照并按媒体类型重新加载。
   resetState();
   snap.name = item.name;
   snap.mimeType = item.mimeType;
   snap.size = item.size ?? null;
-  snap.kind = 'video';
+  snap.kind = item.kind;
   snap.src = item.src;
   snap.downloadUrl = item.downloadUrl ?? null;
   mediaError.value = false;
-  nextTick(() => setupVideo());
+  if (item.kind === 'video') nextTick(() => setupVideo());
+  if (item.kind === 'audio') nextTick(() => { void audioRef.value?.play().catch(() => {}); });
 }
 
 function playPrev() { if (hasPrev.value) switchToTrack(activeIndex.value - 1); }
 function playNext() { if (hasNext.value) switchToTrack(activeIndex.value + 1); }
+function onAudioEnded() { if (hasNext.value) switchToTrack(activeIndex.value + 1); }
 
-/** 播放列表展开后，点击面板之外的弹窗区域立即收起，不遮挡视频。 */
+/** 播放列表展开后，点击面板之外的弹窗区域立即收起，不遮挡媒体。 */
 function onDialogPointerDown(event: PointerEvent) {
   if (!playlistOpen.value) return;
   const target = event.target as Node | null;
@@ -362,11 +380,21 @@ watch(() => [props.visible, props.src], ([vis, src]) => {
 const TEXT_PREVIEW_LIMIT = 2 * 1024 * 1024;
 /** 加载令牌：避免快速开关时旧请求结果覆盖新状态 */
 let loadToken = 0;
+let textAbort: AbortController | null = null;
+const audioRef = ref<HTMLAudioElement | null>(null);
 
 function resetState() {
   loadToken++;
+  textAbort?.abort();
+  textAbort = null;
   clearAutoNextTimer();
   teardownVideo();
+  const audio = audioRef.value;
+  if (audio) {
+    audio.pause();
+    audio.removeAttribute('src');
+    audio.load();
+  }
   textLoading.value = false;
   textContent.value = '';
   textError.value = null;
@@ -382,7 +410,7 @@ function onKeydown(e: KeyboardEvent) {
     else close();
     return;
   }
-  // Shift+N → 下一个视频，Shift+P → 上一个视频
+  // Shift+N / Shift+P → 当前媒体列表的下一项 / 上一项
   if (e.shiftKey && hasPlaylist.value) {
     if (e.key === 'N' || e.key === 'n') { e.preventDefault(); playNext(); }
     if (e.key === 'P' || e.key === 'p') { e.preventDefault(); playPrev(); }
@@ -394,6 +422,7 @@ watch(() => props.visible, (v) => {
 });
 onUnmounted(() => {
   window.removeEventListener('keydown', onKeydown);
+  textAbort?.abort();
   teardownVideo();
 });
 
@@ -477,12 +506,15 @@ function setupVideo() {
   seekClamping = false;
   // mimeType 缺失时按常见 video/mp4 尝试，不支持则自动走回退
   const mime = snap.mimeType || 'video/mp4';
-  if (mseTypeSupported(mime)) {
+  // 默认统一交给原生媒体元素按需发起 Range。保留旧 MSE 实现仅用于后续分段化改造，
+  // 当前显式禁用，因为它会持续读取至 EOF，且无法按时间点重新请求已驱逐片段。
+  const enableLegacyMse = false;
+  if (enableLegacyMse && mseTypeSupported(mime)) {
     startMseVideo(url, mime);
-  } else {
-    videoUseMse.value = false;
-    videoSrc.value = url;
+    return;
   }
+  videoUseMse.value = false;
+  videoSrc.value = url;
 }
 
 function startMseVideo(url: string, mime: string) {
@@ -722,9 +754,12 @@ async function loadText() {
     return;
   }
   const token = ++loadToken;
+  textAbort?.abort();
+  const ctrl = new AbortController();
+  textAbort = ctrl;
   textLoading.value = true;
   try {
-    const res = await fetch(url, { credentials: 'same-origin' });
+    const res = await fetch(url, { credentials: 'same-origin', signal: ctrl.signal });
     if (token !== loadToken) return;
     if (!res.ok) {
       textError.value = res.status === 401 || res.status === 403
@@ -768,9 +803,10 @@ async function loadText() {
     result += decoder.decode();
     textContent.value = result;
   } catch {
-    if (token !== loadToken) return;
+    if (ctrl.signal.aborted || token !== loadToken) return;
     textError.value = '网络错误，无法加载文件内容';
   } finally {
+    if (textAbort === ctrl) textAbort = null;
     if (token === loadToken) textLoading.value = false;
   }
 }
@@ -1173,6 +1209,20 @@ function formatSize(bytes: number): string {
   width: 3px;
   background: var(--seed-primary);
   border-radius: 0 2px 2px 0;
+}
+
+.fpv-playlist-thumb {
+  width: 48px;
+  height: 48px;
+  flex: 0 0 48px;
+  object-fit: cover;
+  border-radius: var(--radius-sm, 6px);
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--border-default);
+}
+
+.fpv-playlist-item--image {
+  min-height: 64px;
 }
 
 .fpv-playlist-index {

@@ -25,7 +25,7 @@ import { sanitizePreviewContentType } from '../common/utils/preview-content-type
 import { RateLimitService } from '../common/services/rate-limit.service';
 import { ConfigCacheService } from '../common/services/config-cache.service';
 import { ShareService } from './share.service';
-import { FileService } from '../file/file.service';
+import { FileService, RangeNotSatisfiableException } from '../file/file.service';
 import { CreateShareDto, UpdateShareDto, VerifyPasswordDto } from './share.dto';
 import { ShareTargetType } from '../common/entities/share-link.entity';
 
@@ -290,6 +290,9 @@ export class ShareController {
       const message = error instanceof Error ? error.message : '预览失败';
       const status = (error as { status?: number }).status || 500;
       if (!res.headersSent) {
+        if (error instanceof RangeNotSatisfiableException) {
+          res.set('Content-Range', `bytes */${error.total}`);
+        }
         res.status(status).json({ code: 1, message });
       } else if (!res.destroyed) {
         res.destroy(error instanceof Error ? error : new Error(message));

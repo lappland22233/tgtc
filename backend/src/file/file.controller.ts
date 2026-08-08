@@ -24,7 +24,7 @@ import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { FileInterceptor, FilesInterceptor } from '@nestjs/platform-express';
 import { pipeline } from 'stream';
 import { promisify } from 'util';
-import { FileService } from './file.service';
+import { FileService, RangeNotSatisfiableException } from './file.service';
 import { ThumbnailCryptoService } from './thumbnail-crypto.service';
 import { BatchMarkdownDto, UpdateAccessTypeDto, UpdateAccessCountDto, SetPasswordDto, UpdateExpiresDto } from './file.dto';
 import { FolderService } from '../folder/folder.service';
@@ -310,6 +310,9 @@ export class FileController {
       const message = error instanceof Error ? error.message : '媒体文件访问失败';
       const status = (error as { status?: number }).status || 500;
       if (!res.headersSent) {
+        if (error instanceof RangeNotSatisfiableException) {
+          res.set('Content-Range', `bytes */${error.total}`);
+        }
         res.status(status).json({ code: 1, message });
       } else if (!res.destroyed) {
         res.destroy(error instanceof Error ? error : new Error(message));
@@ -388,6 +391,9 @@ export class FileController {
       const message = error instanceof Error ? error.message : '预览失败';
       const status = (error as { status?: number }).status || 500;
       if (!res.headersSent) {
+        if (error instanceof RangeNotSatisfiableException) {
+          res.set('Content-Range', `bytes */${error.total}`);
+        }
         res.status(status).json({ code: 1, message });
       } else if (!res.destroyed) {
         res.destroy(error instanceof Error ? error : new Error(message));
@@ -544,6 +550,9 @@ export class FileController {
       const message = error instanceof Error ? error.message : '下载失败';
       const status = (error as { status?: number }).status || 500;
       if (!res.headersSent) {
+        if (error instanceof RangeNotSatisfiableException) {
+          res.set('Content-Range', `bytes */${error.total}`);
+        }
         res.status(status).json({ code: 1, message });
       } else if (!res.destroyed) {
         res.destroy(error instanceof Error ? error : new Error(message));
