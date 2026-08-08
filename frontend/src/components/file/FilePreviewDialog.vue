@@ -312,21 +312,6 @@ function resetState() {
   mediaError.value = false;
 }
 
-watch(() => props.visible, (v) => {
-  resetState();
-  if (v) {
-    snap.name = props.name || '';
-    snap.mimeType = props.mimeType || '';
-    snap.size = props.size ?? null;
-    snap.kind = props.kind;
-    snap.src = props.src;
-    snap.downloadUrl = props.downloadUrl ?? null;
-    if (props.kind === 'text') void loadText();
-    // 视频：等 DOM 挂载出 <video> 后启动 MSE / 原生播放管线
-    if (props.kind === 'video') nextTick(() => setupVideo());
-  }
-}, { immediate: true });
-
 /** Esc 键关闭 + 播放列表快捷键 */
 function onKeydown(e: KeyboardEvent) {
   if (!props.visible) return;
@@ -375,7 +360,8 @@ interface MseSession {
   objectUrl: string;
   sb: SourceBuffer | null;
   abort: AbortController | null;
-  queue: Uint8Array[];
+  /** SourceBuffer 仅接受基于 ArrayBuffer 的 BufferSource，避免 ArrayBufferLike 类型歧义 */
+  queue: ArrayBuffer[];
   appending: boolean;
   streamDone: boolean;
   evictRetried: boolean;
@@ -485,7 +471,9 @@ async function pumpMseStream(url: string) {
       const { done, value } = await reader.read();
       if (mseSession !== s) return; // 已关闭 / 已降级
       if (done) break;
-      s.queue.push(value);
+      // ReadableStream 的 value 类型为 Uint8Array<ArrayBufferLike>；复制后得到独立 ArrayBuffer，
+      // 满足 SourceBuffer.appendBuffer(BufferSource) 的严格 DOM 类型约束。
+      s.queue.push(new Uint8Array(value).buffer);
       pumpAppendQueue();
     }
     s.streamDone = true;
@@ -512,7 +500,7 @@ function pumpAppendQueue() {
 }
 
 /** QuotaExceededError：移除最早的缓冲区间后重试；仍失败则整体降级原生 */
-function onAppendError(e: unknown, chunk: Uint8Array) {
+function onAppendError(e: unknown, chunk: ArrayBuffer) {
   const s = mseSession;
   if (!s || !s.sb) return;
   const isQuota = e instanceof DOMException && e.name === 'QuotaExceededError';
@@ -688,6 +676,25 @@ async function loadText() {
     if (token === loadToken) textLoading.value = false;
   }
 }
+
+/**
+ * 必须在全部媒体状态变量初始化后注册。immediate watcher 会同步执行，
+ * 若提前注册，resetState() 会访问仍处于暂时性死区的 mseSession 等变量。
+ */
+watch(() => props.visible, (v) => {
+  resetState();
+  if (v) {
+    snap.name = props.name || '';
+    snap.mimeType = props.mimeType || '';
+    snap.size = props.size ?? null;
+    snap.kind = props.kind;
+    snap.src = props.src;
+    snap.downloadUrl = props.downloadUrl ?? null;
+    if (props.kind === 'text') void loadText();
+    // 视频：等 DOM 挂载出 <video> 后启动 MSE / 原生播放管线
+    if (props.kind === 'video') nextTick(() => setupVideo());
+  }
+}, { immediate: true });
 
 /** 底部下载：优先使用父组件传入的 downloadUrl，否则用预览地址兜底 */
 function handleDownload() {
