@@ -6,7 +6,15 @@
         role="presentation"
         @click.self="close"
       >
-        <div class="fpv-dialog" role="dialog" aria-modal="true" :aria-label="snap.name || '文件预览'">
+        <div
+          ref="dialogRef"
+          class="fpv-dialog"
+          :class="`fpv-dialog--${snap.kind || 'unknown'}`"
+          role="dialog"
+          aria-modal="true"
+          :aria-label="snap.name || '文件预览'"
+          @pointerdown="onDialogPointerDown"
+        >
           <!-- 头部：文件名 + 播放列表导航 + 关闭 -->
           <div class="fpv-header">
             <div class="fpv-name" :title="snap.name">{{ snap.name || '文件预览' }}</div>
@@ -42,7 +50,9 @@
                   :class="{ 'fpv-active': playlistOpen }"
                   aria-label="播放列表"
                   title="播放列表"
-                  @click="playlistOpen = !playlistOpen"
+                  :aria-expanded="playlistOpen"
+                  aria-controls="fpv-playlist-panel"
+                  @click.stop="playlistOpen = !playlistOpen"
                 >
                   <t-icon name="view-list" />
                 </button>
@@ -136,10 +146,26 @@
 
           <!-- 播放列表面板 -->
           <transition name="fpv-slide">
-            <div v-if="playlistOpen && hasPlaylist" class="fpv-playlist-panel">
+            <div
+              v-if="playlistOpen && hasPlaylist"
+              id="fpv-playlist-panel"
+              ref="playlistPanelRef"
+              class="fpv-playlist-panel"
+              role="region"
+              aria-label="视频播放列表"
+            >
               <div class="fpv-playlist-header">
                 <span class="fpv-playlist-title">播放列表</span>
                 <span class="fpv-playlist-count">{{ playlist.length }} 个视频</span>
+                <button
+                  type="button"
+                  class="fpv-playlist-close"
+                  aria-label="收起播放列表"
+                  title="收起播放列表"
+                  @click="playlistOpen = false"
+                >
+                  <t-icon name="close" />
+                </button>
               </div>
               <div class="fpv-playlist-list">
                 <div
@@ -228,6 +254,8 @@ const textContent = ref('');
 const textError = ref<string | null>(null);
 const textTooLarge = ref(false);
 const mediaError = ref(false);
+const dialogRef = ref<HTMLElement | null>(null);
+const playlistPanelRef = ref<HTMLElement | null>(null);
 
 // ============ 播放列表状态 ============
 const hasPlaylist = computed(() => props.playlist.length > 1);
@@ -247,6 +275,7 @@ const hasNext = computed(() => activeIndex.value < props.playlist.length - 1);
 function switchToTrack(idx: number) {
   if (idx < 0 || idx >= props.playlist.length) return;
   const item = props.playlist[idx];
+  playlistOpen.value = false;
   playlistIndexInternal.value = idx;
   emit('update:playlist-index', idx);
   // 更新快照并重新加载视频
@@ -263,6 +292,16 @@ function switchToTrack(idx: number) {
 
 function playPrev() { if (hasPrev.value) switchToTrack(activeIndex.value - 1); }
 function playNext() { if (hasNext.value) switchToTrack(activeIndex.value + 1); }
+
+/** 播放列表展开后，点击面板之外的弹窗区域立即收起，不遮挡视频。 */
+function onDialogPointerDown(event: PointerEvent) {
+  if (!playlistOpen.value) return;
+  const target = event.target as Node | null;
+  if (target && playlistPanelRef.value?.contains(target)) return;
+  const toggle = (target as Element | null)?.closest?.('.fpv-playlist-toggle');
+  if (toggle) return;
+  playlistOpen.value = false;
+}
 
 /** 视频播放结束后自动连播下一个 */
 function onVideoEnded() {
@@ -300,7 +339,11 @@ function resetState() {
 /** Esc 键关闭 + 播放列表快捷键 */
 function onKeydown(e: KeyboardEvent) {
   if (!props.visible) return;
-  if (e.key === 'Escape') { close(); return; }
+  if (e.key === 'Escape') {
+    if (playlistOpen.value) playlistOpen.value = false;
+    else close();
+    return;
+  }
   // Shift+N → 下一个视频，Shift+P → 上一个视频
   if (e.shiftKey && hasPlaylist.value) {
     if (e.key === 'N' || e.key === 'n') { e.preventDefault(); playNext(); }
@@ -316,8 +359,9 @@ onUnmounted(() => {
   teardownVideo();
 });
 
-/** 请求父组件关闭；遮罩保持挂载，仅通过 v-show 切换显示状态。 */
+/** 请求父组件关闭；同步收起播放列表，避免下次打开时保留遮挡状态。 */
 function close() {
+  playlistOpen.value = false;
   emit('update:visible', false);
 }
 
@@ -699,6 +743,7 @@ async function loadText() {
  */
 watch(() => props.visible, (v) => {
   resetState();
+  playlistOpen.value = false;
   if (v) {
     snap.name = props.name || '';
     snap.mimeType = props.mimeType || '';
@@ -747,14 +792,38 @@ function formatSize(bytes: number): string {
   position: relative;
   display: flex;
   flex-direction: column;
-  width: min(960px, 100%);
-  height: min(88vh, 100%);
+  width: min(960px, calc(100vw - 48px));
+  height: min(88dvh, 860px);
+  max-height: calc(100dvh - 48px);
   background: var(--color-bg-overlay);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-lg), var(--shadow-glow);
   backdrop-filter: blur(12px);
   overflow: hidden;
+}
+
+/* 不同媒体类型使用不同画布比例，减少小媒体留白并扩大文档可视区域 */
+.fpv-dialog--video {
+  width: min(1120px, calc(100vw - 48px));
+  height: min(86dvh, 760px);
+}
+
+.fpv-dialog--image {
+  width: min(1040px, calc(100vw - 48px));
+  height: min(88dvh, 900px);
+}
+
+.fpv-dialog--pdf,
+.fpv-dialog--text {
+  width: min(1180px, calc(100vw - 48px));
+  height: min(92dvh, 960px);
+}
+
+.fpv-dialog--audio {
+  width: min(640px, calc(100vw - 48px));
+  height: auto;
+  max-height: calc(100dvh - 48px);
 }
 
 .fpv-header {
@@ -807,6 +876,9 @@ function formatSize(bytes: number): string {
 }
 
 .fpv-image {
+  display: block;
+  width: auto;
+  height: auto;
   max-width: 100%;
   max-height: 100%;
   object-fit: contain;
@@ -817,15 +889,20 @@ function formatSize(bytes: number): string {
   position: relative;
   width: 100%;
   height: 100%;
+  min-height: 0;
   display: grid;
   place-items: center;
   overflow: hidden;
+  background: #000;
+  border-radius: var(--radius-sm, 6px);
 }
 
-/* CustomVideoPlayer 填满容器 */
+/* CustomVideoPlayer 填满可用画布，内部 object-fit: contain 保持任意视频比例 */
 .fpv-video-wrap > :deep(.cvp) {
   width: 100%;
   height: 100%;
+  min-height: 0;
+  aspect-ratio: auto;
 }
 
 /* 缓冲中提示（不拦截视频控件交互） */
@@ -1005,6 +1082,24 @@ function formatSize(bytes: number): string {
   color: var(--text-tertiary);
 }
 
+.fpv-playlist-close {
+  display: inline-grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  margin-left: auto;
+  border: 0;
+  border-radius: var(--radius-sm, 6px);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.fpv-playlist-close:hover {
+  background: var(--color-accent-soft);
+  color: var(--text-accent);
+}
+
 .fpv-playlist-list {
   flex: 1;
   overflow-y: auto;
@@ -1088,10 +1183,109 @@ function formatSize(bytes: number): string {
 /* 播放列表滑入动画 */
 .fpv-slide-enter-active,
 .fpv-slide-leave-active {
-  transition: transform var(--duration-fast, 0.2s) ease;
+  transition: transform var(--duration-fast, 0.15s) ease, opacity var(--duration-fast, 0.15s) ease;
 }
 .fpv-slide-enter-from,
 .fpv-slide-leave-to {
   transform: translateX(100%);
+  opacity: 0;
+}
+
+@media (max-width: 720px) {
+  .fpv-overlay {
+    align-items: stretch;
+    padding: max(8px, env(safe-area-inset-top)) max(8px, env(safe-area-inset-right)) max(8px, env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left));
+  }
+
+  .fpv-dialog,
+  .fpv-dialog--video,
+  .fpv-dialog--image,
+  .fpv-dialog--pdf,
+  .fpv-dialog--text,
+  .fpv-dialog--audio {
+    width: 100%;
+    height: 100%;
+    max-height: none;
+    border-radius: var(--radius-sm, 6px);
+  }
+
+  .fpv-header {
+    min-height: 48px;
+    padding: 8px 10px;
+  }
+
+  .fpv-name {
+    font-size: 13px;
+  }
+
+  .fpv-playlist-indicator {
+    display: none;
+  }
+
+  .fpv-nav-btn,
+  .fpv-close {
+    width: 36px;
+    height: 36px;
+  }
+
+  .fpv-body {
+    padding: 8px;
+  }
+
+  .fpv-dialog--audio .fpv-body {
+    min-height: 160px;
+  }
+
+  .fpv-footer {
+    padding: 8px 10px;
+  }
+
+  .fpv-playlist-panel {
+    top: auto;
+    width: 100%;
+    max-width: none;
+    max-height: min(62%, 520px);
+    border-top: 1px solid var(--border-default);
+    border-left: 0;
+    box-shadow: 0 -12px 32px rgba(0, 0, 0, 0.28);
+  }
+
+  .fpv-slide-enter-from,
+  .fpv-slide-leave-to {
+    transform: translateY(100%);
+  }
+}
+
+@media (max-height: 560px) and (orientation: landscape) {
+  .fpv-overlay {
+    padding: 8px;
+  }
+
+  .fpv-dialog,
+  .fpv-dialog--video,
+  .fpv-dialog--image,
+  .fpv-dialog--pdf,
+  .fpv-dialog--text,
+  .fpv-dialog--audio {
+    width: min(1100px, 100%);
+    height: 100%;
+    max-height: none;
+  }
+
+  .fpv-header,
+  .fpv-footer {
+    padding-block: 6px;
+  }
+
+  .fpv-body {
+    padding: 6px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fpv-slide-enter-active,
+  .fpv-slide-leave-active {
+    transition: none;
+  }
 }
 </style>
