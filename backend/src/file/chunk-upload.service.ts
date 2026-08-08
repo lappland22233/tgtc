@@ -129,12 +129,6 @@ export class ChunkUploadService implements OnModuleInit {
       throw new BadRequestException('totalChunks 与 chunkSize 不足以容纳声明的 fileSize');
     }
 
-    // 并发会话数限制
-    const userSessions = [...this.sessions.values()].filter((s) => s.uploadedBy === userId);
-    if (userSessions.length >= ChunkUploadService.MAX_SESSIONS_PER_USER) {
-      throw new BadRequestException('上传会话过多，请完成或取消现有上传');
-    }
-
     // 覆盖目标预校验：存在 + 归属 + 目录一致，无效直接 400，避免大文件传完才发现目标不可覆盖。
     // init 处只有 userId 字符串，与 finalizeMerge 一致构造 { id } 部分 User。
     // finalizeMerge → createProcessingFile 内部会二次校验兜底。
@@ -148,6 +142,15 @@ export class ChunkUploadService implements OnModuleInit {
       } catch (err) {
         throw new BadRequestException(`覆盖目标无效: ${(err as Error).message}`);
       }
+    }
+
+    // 仅活动状态占用配额。终态会话会短期保留供客户端查询，但不能阻塞后续批量上传。
+    // 从配额检查到 sessions.set 之间不执行 await，保证单进程事件循环内检查与注册原子化。
+    const activeUserSessions = [...this.sessions.values()].filter(
+      (s) => s.uploadedBy === userId && this.isActiveSession(s),
+    );
+    if (activeUserSessions.length >= ChunkUploadService.MAX_SESSIONS_PER_USER) {
+      throw new BadRequestException('上传会话过多，请完成或取消现有上传');
     }
 
     const uploadId = uuidv4();
@@ -169,9 +172,15 @@ export class ChunkUploadService implements OnModuleInit {
 
     this.sessions.set(uploadId, session);
 
-    // 创建分片存储目录
+    // 创建分片存储目录；失败时回滚刚注册的会话与可能生成的残留目录。
     const dir = this.getChunkDir(uploadId);
-    await fsp.mkdir(dir, { recursive: true });
+    try {
+      await fsp.mkdir(dir, { recursive: true });
+    } catch (error) {
+      this.sessions.delete(uploadId);
+      await fsp.rm(dir, { recursive: true, force: true }).catch(() => {});
+      throw error;
+    }
 
     this.logger.log(`[分片上传] 初始化会话 ${uploadId}: ${fileName} (${fileSize} bytes, ${totalChunks} chunks)`);
     return { uploadId };
@@ -522,6 +531,12 @@ export class ChunkUploadService implements OnModuleInit {
         timer.unref?.();
       }),
     ]);
+  }
+
+  private isActiveSession(session: ChunkSession): boolean {
+    return session.mergeStatus === 'pending'
+      || session.mergeStatus === 'merging'
+      || session.mergeStatus === 'uploading';
   }
 
   /** 延迟清理会话和临时文件 */

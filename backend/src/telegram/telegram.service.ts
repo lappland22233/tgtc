@@ -7,6 +7,16 @@ import { promises as fs } from 'fs';
 import * as path from 'path';
 import FormData from 'form-data';
 
+interface TelegramMediaResult {
+  document?: { file_id?: string };
+  animation?: { file_id?: string };
+}
+
+interface TelegramSendDocumentResponse {
+  ok?: boolean;
+  result?: TelegramMediaResult;
+}
+
 @Injectable()
 export class TelegramService {
   private readonly logger = new Logger(TelegramService.name);
@@ -164,7 +174,7 @@ export class TelegramService {
 
       // 服务层上传体积上限（默认 2GB，对齐 Telegram 本地 Bot API 上限），可通过环境变量覆盖
       const maxSize = Number(process.env.TELEGRAM_MAX_UPLOAD_SIZE) || 2 * 1024 * 1024 * 1024;
-      const response = await axios.post(`${this.getBaseUrl()}/sendDocument`, form, {
+      const response = await axios.post<TelegramSendDocumentResponse>(`${this.getBaseUrl()}/sendDocument`, form, {
         headers: form.getHeaders(),
         timeout: 15 * 60 * 1000,           // 大文件上传超时 15 分钟
         maxContentLength: maxSize,
@@ -172,10 +182,16 @@ export class TelegramService {
         signal,
       });
 
-      const result = response.data.result;
-      const file_id = result.document?.file_id;
+      const result = response.data?.result;
+      // 自托管 Bot API 可能将短视频/动画类 MP4 识别为 animation，即使调用的是 sendDocument。
+      // 普通 document 保持优先，避免改变现有文件行为。
+      const file_id = result?.document?.file_id || result?.animation?.file_id;
       if (!file_id) {
-        throw new Error('Telegram sendDocument 响应缺少 document.file_id，可能文件格式不被支持');
+        const mediaFields = result && typeof result === 'object'
+          ? Object.keys(result).filter((key) => key !== 'text').slice(0, 10).join(', ') || 'none'
+          : 'none';
+        this.logger.warn(`Telegram sendDocument 响应缺少可识别的媒体 file_id（字段: ${mediaFields}）`);
+        throw new Error('Telegram sendDocument 响应缺少可识别的媒体 file_id');
       }
 
       // sendDocument 返回的 file_path 不可靠，需二次调用 getFile 获取真实路径

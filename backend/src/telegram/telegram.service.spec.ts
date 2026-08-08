@@ -94,4 +94,67 @@ describe('TelegramService realtime stream', () => {
       expect.objectContaining({ headers: { 'X-Telegram-No-Cache': '1' } }),
     );
   });
+
+  describe('uploadFile media response compatibility', () => {
+    const mockFileInfo = (expectedFileId: string) => {
+      mockedAxios.get.mockResolvedValueOnce({
+        data: { result: { file_id: expectedFileId, file_path: 'documents/file.bin', file_size: 4 } },
+      } as any);
+    };
+
+    it('uses document.file_id for normal files', async () => {
+      mockedAxios.post.mockResolvedValueOnce({
+        data: { ok: true, result: { document: { file_id: 'document-id' } } },
+      } as any);
+      mockFileInfo('document-id');
+
+      const result = await createService().uploadFile(Buffer.from('test'), 'test.bin');
+
+      expect(result.file_id).toBe('document-id');
+      expect(mockedAxios.get).toHaveBeenCalledWith(
+        expect.stringContaining('/getFile'),
+        expect.objectContaining({ params: { file_id: 'document-id' } }),
+      );
+    });
+
+    it('falls back to animation.file_id for short MP4 responses', async () => {
+      mockedAxios.post.mockResolvedValueOnce({
+        data: { ok: true, result: { animation: { file_id: 'animation-id' } } },
+      } as any);
+      mockFileInfo('animation-id');
+
+      const result = await createService().uploadFile(Buffer.from('test'), 'short.mp4');
+
+      expect(result.file_id).toBe('animation-id');
+      expect(mockedAxios.get).toHaveBeenCalledWith(
+        expect.stringContaining('/getFile'),
+        expect.objectContaining({ params: { file_id: 'animation-id' } }),
+      );
+    });
+
+    it('prefers document.file_id when both media fields exist', async () => {
+      mockedAxios.post.mockResolvedValueOnce({
+        data: {
+          ok: true,
+          result: {
+            document: { file_id: 'document-id' },
+            animation: { file_id: 'animation-id' },
+          },
+        },
+      } as any);
+      mockFileInfo('document-id');
+
+      const result = await createService().uploadFile(Buffer.from('test'), 'mixed.mp4');
+
+      expect(result.file_id).toBe('document-id');
+    });
+
+    it('reports an invalid response without blaming the file format', async () => {
+      mockedAxios.post.mockResolvedValue({ data: { ok: true, result: {} } } as any);
+
+      await expect(createService().uploadFile(Buffer.from('test'), 'unknown.bin'))
+        .rejects.toThrow('响应缺少可识别的媒体 file_id');
+      expect(mockedAxios.get).not.toHaveBeenCalled();
+    });
+  });
 });
