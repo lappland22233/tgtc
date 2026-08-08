@@ -132,6 +132,42 @@
 
         <span class="cvp__spacer" />
 
+        <!-- 播放结束行为 -->
+        <div class="cvp__end-behavior-wrap">
+          <button
+            class="cvp__btn cvp__btn--end-behavior"
+            aria-haspopup="menu"
+            :aria-expanded="endBehaviorMenuOpen"
+            :aria-label="`播放结束行为：${currentEndBehaviorLabel}`"
+            :title="`播放结束：${currentEndBehaviorLabel}`"
+            @click.stop="toggleEndBehaviorMenu"
+          >
+            <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+              <path v-if="endBehavior === 'loop'" d="M17 2l4 4-4 4V7H7a3 3 0 0 0-3 3v1H2v-1a5 5 0 0 1 5-5h10V2zm0 15H7v3l-4-4 4-4v3h10a3 3 0 0 0 3-3v-1h2v1a5 5 0 0 1-5 5z" fill="currentColor"/>
+              <path v-else-if="endBehavior === 'next'" d="M6 5v14l9-7-9-7zm10 0h2v14h-2V5z" fill="currentColor"/>
+              <path v-else d="M7 7h10v10H7V7z" fill="currentColor"/>
+            </svg>
+            <span>{{ currentEndBehaviorLabel }}</span>
+          </button>
+          <transition name="cvp-fade">
+            <div v-if="endBehaviorMenuOpen" class="cvp__end-behavior-menu" role="menu" aria-label="播放结束行为">
+              <button
+                v-for="option in endBehaviorOptions"
+                :key="option.value"
+                type="button"
+                role="menuitemradio"
+                :aria-checked="option.value === endBehavior"
+                class="cvp__end-behavior-item"
+                :class="{ 'cvp__end-behavior-item--active': option.value === endBehavior }"
+                @click="setEndBehavior(option.value)"
+              >
+                <span>{{ option.label }}</span>
+                <svg v-if="option.value === endBehavior" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M9 16.2 4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4L9 16.2z" fill="currentColor"/></svg>
+              </button>
+            </div>
+          </transition>
+        </div>
+
         <!-- 播放速度 -->
         <div class="cvp__speed-wrap">
           <button
@@ -177,16 +213,23 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue';
 
-const props = defineProps<{
+export type VideoEndBehavior = 'loop' | 'next' | 'pause';
+
+const props = withDefaults(defineProps<{
   /** 视频 src（可以是普通 URL 或 MediaSource ObjectURL） */
   src: string | null;
-}>();
+  /** 播放结束后的行为，由预览弹窗统一执行 */
+  endBehavior?: VideoEndBehavior;
+}>(), {
+  endBehavior: 'next',
+});
 
 const emit = defineEmits<{
   play: [];
   pause: [];
   ended: [];
   error: [];
+  'update:end-behavior': [behavior: VideoEndBehavior];
   /** 暴露 video 元素引用给父组件（用于 MSE 等外部控制） */
   'video-ref': [el: HTMLVideoElement | null];
 }>();
@@ -196,16 +239,32 @@ const playerRef = ref<HTMLElement>();
 const videoRef = ref<HTMLVideoElement | null>(null);
 
 // ─── State ───────────────────────────
+const VIDEO_VOLUME_KEY = 'file-preview-video-volume';
+const DEFAULT_VIDEO_VOLUME = 0.5;
+
+function loadSavedVolume(): number {
+  try {
+    const saved = Number(localStorage.getItem(VIDEO_VOLUME_KEY));
+    if (Number.isFinite(saved) && saved >= 0 && saved <= 1) return saved;
+  } catch { /* 隐私模式或存储被禁用时使用默认音量 */ }
+  return DEFAULT_VIDEO_VOLUME;
+}
+
+function saveVolume(value: number) {
+  try { localStorage.setItem(VIDEO_VOLUME_KEY, String(value)); } catch { /* 不影响播放 */ }
+}
+
 const isPaused = ref(true);
 const isEnded = ref(false);
 const isBuffering = ref(false);
 const currentTime = ref(0);
 const duration = ref(0);
-const volume = ref(1);
+const volume = ref(loadSavedVolume());
 const isMuted = ref(false);
 const currentSpeed = ref(1);
 const controlsVisible = ref(true);
 const speedMenuOpen = ref(false);
+const endBehaviorMenuOpen = ref(false);
 const volumeHover = ref(false);
 
 // Progress bar
@@ -222,6 +281,15 @@ const speedIndicatorText = ref('');
 const seekIndicator = ref<{ dir: 'back' | 'fwd'; text: string } | null>(null);
 
 const speedOptions = [0.5, 1, 1.25, 1.5, 2, 3];
+const endBehaviorOptions: Array<{ value: VideoEndBehavior; label: string; shortLabel: string }> = [
+  { value: 'loop', label: '单集循环', shortLabel: '循环' },
+  { value: 'next', label: '自动下一个', shortLabel: '连播' },
+  { value: 'pause', label: '播完暂停', shortLabel: '暂停' },
+];
+
+const currentEndBehaviorLabel = computed(() => (
+  endBehaviorOptions.find((option) => option.value === props.endBehavior)?.shortLabel ?? '连播'
+));
 
 let hideTimer: ReturnType<typeof setTimeout> | null = null;
 let seekHideTimer: ReturnType<typeof setTimeout> | null = null;
@@ -309,8 +377,9 @@ function toggleMute() {
   v.muted = !v.muted;
   isMuted.value = v.muted;
   if (!v.muted && v.volume === 0) {
-    v.volume = 0.5;
-    volume.value = 0.5;
+    v.volume = DEFAULT_VIDEO_VOLUME;
+    volume.value = DEFAULT_VIDEO_VOLUME;
+    saveVolume(DEFAULT_VIDEO_VOLUME);
   }
 }
 
@@ -330,6 +399,17 @@ function setSpeed(s: number) {
   v.playbackRate = s;
   currentSpeed.value = s;
   speedMenuOpen.value = false;
+}
+
+function toggleEndBehaviorMenu() {
+  endBehaviorMenuOpen.value = !endBehaviorMenuOpen.value;
+  if (endBehaviorMenuOpen.value) speedMenuOpen.value = false;
+}
+
+function setEndBehavior(behavior: VideoEndBehavior) {
+  emit('update:end-behavior', behavior);
+  endBehaviorMenuOpen.value = false;
+  showControls();
 }
 
 async function togglePiP() {
@@ -434,7 +514,7 @@ function showControls() {
 function resetHideTimer() {
   if (hideTimer) clearTimeout(hideTimer);
   hideTimer = setTimeout(() => {
-    if (!isPaused.value && !speedMenuOpen.value && !isDragging.value) {
+    if (!isPaused.value && !speedMenuOpen.value && !endBehaviorMenuOpen.value && !isDragging.value) {
       controlsVisible.value = false;
     }
   }, 3000);
@@ -442,7 +522,7 @@ function resetHideTimer() {
 
 function onMouseMove() { showControls(); }
 function onMouseLeave() {
-  if (!isPaused.value && !speedMenuOpen.value) {
+  if (!isPaused.value && !speedMenuOpen.value && !endBehaviorMenuOpen.value) {
     if (hideTimer) clearTimeout(hideTimer);
     hideTimer = setTimeout(() => { controlsVisible.value = false; }, 1200);
   }
@@ -581,21 +661,27 @@ watch(() => props.src, () => {
 // 暴露 video 元素给父组件
 watch(videoRef, (el) => { emit('video-ref', el); }, { immediate: true });
 
-// 点击外部关闭速度菜单
-function onClickOutsideSpeedMenu(e: MouseEvent) {
-  if (speedMenuOpen.value) {
-    const target = e.target as HTMLElement;
-    if (!target.closest('.cvp__speed-wrap')) {
-      speedMenuOpen.value = false;
-    }
+// 点击菜单之外区域时收起播放器弹出菜单
+function onClickOutsideMenus(e: MouseEvent) {
+  const target = e.target as HTMLElement;
+  if (speedMenuOpen.value && !target.closest('.cvp__speed-wrap')) {
+    speedMenuOpen.value = false;
+  }
+  if (endBehaviorMenuOpen.value && !target.closest('.cvp__end-behavior-wrap')) {
+    endBehaviorMenuOpen.value = false;
   }
 }
 
 onMounted(() => {
+  const video = videoRef.value;
+  if (video) {
+    video.volume = volume.value;
+    video.muted = false;
+  }
   window.addEventListener('keydown', onKeydown);
   window.addEventListener('keyup', onKeyup);
   document.addEventListener('fullscreenchange', onFullscreenChange);
-  document.addEventListener('click', onClickOutsideSpeedMenu);
+  document.addEventListener('click', onClickOutsideMenus);
   // 初始显示控制栏，3s 后若播放中则隐藏
   showControls();
 });
@@ -604,7 +690,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeydown);
   window.removeEventListener('keyup', onKeyup);
   document.removeEventListener('fullscreenchange', onFullscreenChange);
-  document.removeEventListener('click', onClickOutsideSpeedMenu);
+  document.removeEventListener('click', onClickOutsideMenus);
   if (hideTimer) clearTimeout(hideTimer);
   if (seekHideTimer) clearTimeout(seekHideTimer);
 });
@@ -878,7 +964,8 @@ defineExpose({ videoRef, togglePlay, play: () => videoRef.value?.play(), pause: 
   width: 40px;
   height: 40px;
 }
-.cvp__btn--speed {
+.cvp__btn--speed,
+.cvp__btn--end-behavior {
   width: auto;
   padding: 0 8px;
   font-family: inherit;
@@ -887,7 +974,12 @@ defineExpose({ videoRef, togglePlay, play: () => videoRef.value?.play(), pause: 
   letter-spacing: 0.02em;
   color: rgba(255, 255, 255, 0.7);
 }
-.cvp__btn--speed:hover {
+.cvp__btn--end-behavior {
+  gap: 4px;
+  min-width: 62px;
+}
+.cvp__btn--speed:hover,
+.cvp__btn--end-behavior:hover {
   color: #fff;
 }
 
@@ -952,11 +1044,13 @@ defineExpose({ videoRef, togglePlay, play: () => videoRef.value?.play(), pause: 
   cursor: pointer;
 }
 
-/* ─── 速度菜单 ─── */
-.cvp__speed-wrap {
+/* ─── 播放行为 / 速度菜单 ─── */
+.cvp__speed-wrap,
+.cvp__end-behavior-wrap {
   position: relative;
 }
-.cvp__speed-menu {
+.cvp__speed-menu,
+.cvp__end-behavior-menu {
   position: absolute;
   bottom: calc(100% + 6px);
   right: 0;
@@ -971,8 +1065,14 @@ defineExpose({ videoRef, togglePlay, play: () => videoRef.value?.play(), pause: 
   z-index: 30;
   transform-origin: bottom right;
 }
-.cvp__speed-item {
-  display: block;
+.cvp__end-behavior-menu {
+  min-width: 148px;
+}
+.cvp__speed-item,
+.cvp__end-behavior-item {
+  display: flex;
+  align-items: center;
+  justify-content: center;
   width: 100%;
   padding: 6px 14px;
   border: 0;
@@ -985,11 +1085,18 @@ defineExpose({ videoRef, togglePlay, play: () => videoRef.value?.play(), pause: 
   transition: background 0.1s ease, color 0.1s ease;
   text-align: center;
 }
-.cvp__speed-item:hover {
+.cvp__end-behavior-item {
+  justify-content: space-between;
+  gap: 12px;
+  text-align: left;
+}
+.cvp__speed-item:hover,
+.cvp__end-behavior-item:hover {
   background: rgba(255, 255, 255, 0.08);
   color: rgba(255, 255, 255, 0.95);
 }
-.cvp__speed-item--active {
+.cvp__speed-item--active,
+.cvp__end-behavior-item--active {
   color: var(--seed-primary, #0972D3);
   font-weight: 600;
 }
@@ -997,6 +1104,8 @@ defineExpose({ videoRef, togglePlay, play: () => videoRef.value?.play(), pause: 
 /* ─── PiP 按钮在窄屏隐藏 ─── */
 @media (max-width: 480px) {
   .cvp__btn--pip { display: none; }
+  .cvp__btn--end-behavior { min-width: 36px; padding: 0; }
+  .cvp__btn--end-behavior span { display: none; }
   .cvp__time { min-width: 76px; font-size: 11px; }
   .cvp__btn { width: 32px; height: 32px; }
   .cvp__btn--play { width: 36px; height: 36px; }

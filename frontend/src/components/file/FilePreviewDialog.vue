@@ -81,6 +81,8 @@
             >
               <CustomVideoPlayer
                 :src="videoSrc"
+                :end-behavior="videoEndBehavior"
+                @update:end-behavior="setVideoEndBehavior"
                 @video-ref="onCustomPlayerVideoRef"
                 @ended="onVideoEnded"
                 @error="onVideoError"
@@ -198,7 +200,7 @@
 import { ref, reactive, watch, nextTick, computed, onUnmounted } from 'vue';
 import type { PreviewKind } from '../../utils/preview';
 import { triggerBrowserDownload } from '../../utils/download';
-import CustomVideoPlayer from './CustomVideoPlayer.vue';
+import CustomVideoPlayer, { type VideoEndBehavior } from './CustomVideoPlayer.vue';
 
 /** 播放列表项（父组件传入，FilePreviewDialog 不依赖 FileItem 类型） */
 export interface PlaylistItem {
@@ -261,6 +263,29 @@ const playlistPanelRef = ref<HTMLElement | null>(null);
 const hasPlaylist = computed(() => props.playlist.length > 1);
 const playlistOpen = ref(false);
 const playlistIndexInternal = ref(-1);
+const VIDEO_END_BEHAVIOR_KEY = 'file-preview-video-end-behavior';
+const VIDEO_END_BEHAVIORS: readonly VideoEndBehavior[] = ['loop', 'next', 'pause'];
+const videoEndBehavior = ref<VideoEndBehavior>(loadVideoEndBehavior());
+let autoNextTimer: ReturnType<typeof setTimeout> | null = null;
+
+function loadVideoEndBehavior(): VideoEndBehavior {
+  try {
+    const saved = localStorage.getItem(VIDEO_END_BEHAVIOR_KEY);
+    if (VIDEO_END_BEHAVIORS.includes(saved as VideoEndBehavior)) return saved as VideoEndBehavior;
+  } catch { /* 隐私模式或存储被禁用时使用默认值 */ }
+  return 'next';
+}
+
+function setVideoEndBehavior(behavior: VideoEndBehavior) {
+  videoEndBehavior.value = behavior;
+  try { localStorage.setItem(VIDEO_END_BEHAVIOR_KEY, behavior); } catch { /* 不影响播放 */ }
+}
+
+function clearAutoNextTimer() {
+  if (!autoNextTimer) return;
+  clearTimeout(autoNextTimer);
+  autoNextTimer = null;
+}
 
 /** 当前播放项在列表中的索引（优先用 props.playlistIndex，否则内部追踪） */
 const activeIndex = computed(() => {
@@ -274,6 +299,7 @@ const hasNext = computed(() => activeIndex.value < props.playlist.length - 1);
 /** 切换到列表中指定项 */
 function switchToTrack(idx: number) {
   if (idx < 0 || idx >= props.playlist.length) return;
+  clearAutoNextTimer();
   const item = props.playlist[idx];
   playlistOpen.value = false;
   playlistIndexInternal.value = idx;
@@ -303,10 +329,21 @@ function onDialogPointerDown(event: PointerEvent) {
   playlistOpen.value = false;
 }
 
-/** 视频播放结束后自动连播下一个 */
+/** 根据用户选择处理视频结束：单集循环、自动下一个或停在结尾。 */
 function onVideoEnded() {
-  if (hasNext.value) {
-    setTimeout(() => playNext(), 800);
+  clearAutoNextTimer();
+  if (videoEndBehavior.value === 'loop') {
+    const video = videoRef.value;
+    if (!video) return;
+    video.currentTime = 0;
+    void video.play().catch(() => {});
+    return;
+  }
+  if (videoEndBehavior.value === 'next' && hasNext.value) {
+    autoNextTimer = setTimeout(() => {
+      autoNextTimer = null;
+      playNext();
+    }, 800);
   }
 }
 
@@ -328,6 +365,7 @@ let loadToken = 0;
 
 function resetState() {
   loadToken++;
+  clearAutoNextTimer();
   teardownVideo();
   textLoading.value = false;
   textContent.value = '';
