@@ -120,18 +120,21 @@
       :kind="previewFile ? getPreviewKind(previewFile.mimeType, previewFile.name) : null"
       :src="previewFile ? buildSharePreviewUrl(props.token, previewFile.id, props.accessJwt) : null"
       :download-url="previewFile ? buildShareDownloadUrl(previewFile.id) : undefined"
+      :playlist="videoPlaylist"
+      :playlist-index="videoPlaylistIndex"
       @update:visible="onPreviewVisibleChange"
+      @update:playlist-index="onPlaylistIndexChange"
     />
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, reactive } from 'vue';
+import { ref, reactive, computed } from 'vue';
 import MessagePlugin from '@/utils/message';
 import { triggerBrowserDownload } from '@/utils/download';
 import { isPreviewable, getPreviewKind, buildSharePreviewUrl } from '@/utils/preview';
 import FileTypeIcon from '@/components/FileTypeIcon.vue';
-import FilePreviewDialog from '@/components/file/FilePreviewDialog.vue';
+import FilePreviewDialog, { type PlaylistItem } from '@/components/file/FilePreviewDialog.vue';
 
 interface FolderSummary {
   id: string;
@@ -177,6 +180,33 @@ function openPreview(file: FileSummary) {
 
 function onPreviewVisibleChange(v: boolean) {
   if (!v) previewFile.value = null;
+}
+
+// ============ 视频播放列表 ============
+/** 当前文件夹中所有视频文件 */
+const videoPlaylist = computed<PlaylistItem[]>(() => {
+  return currentContents.files
+    .filter((f) => f.mimeType?.startsWith('video/'))
+    .map((f) => ({
+      id: f.id,
+      name: f.name,
+      mimeType: f.mimeType,
+      size: f.size,
+      src: buildSharePreviewUrl(props.token, f.id, props.accessJwt),
+      downloadUrl: buildShareDownloadUrl(f.id),
+    }));
+});
+
+const videoPlaylistIndex = computed(() => {
+  if (!previewFile.value) return -1;
+  return videoPlaylist.value.findIndex((p) => p.id === previewFile.value!.id);
+});
+
+function onPlaylistIndexChange(idx: number) {
+  const item = videoPlaylist.value[idx];
+  if (!item) return;
+  const file = currentContents.files.find((f) => f.id === item.id);
+  if (file) previewFile.value = file;
 }
 
 /** 固定构造同源分享下载路径，禁止把访问 JWT 附加到后端返回的任意跨域 URL */

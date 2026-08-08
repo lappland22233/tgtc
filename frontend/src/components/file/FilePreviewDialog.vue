@@ -8,12 +8,50 @@
         @click.self="close"
       >
         <div class="fpv-dialog" role="dialog" aria-modal="true" :aria-label="snap.name || '文件预览'">
-          <!-- 头部：文件名 + 关闭 -->
+          <!-- 头部：文件名 + 播放列表导航 + 关闭 -->
           <div class="fpv-header">
             <div class="fpv-name" :title="snap.name">{{ snap.name || '文件预览' }}</div>
-            <button type="button" class="fpv-close" aria-label="关闭预览" @click="close">
-              <t-icon name="close" />
-            </button>
+            <div class="fpv-header-actions">
+              <!-- 播放列表导航 -->
+              <template v-if="hasPlaylist && snap.kind === 'video'">
+                <span class="fpv-playlist-indicator">
+                  {{ activeIndex + 1 }} / {{ playlist.length }}
+                </span>
+                <button
+                  type="button"
+                  class="fpv-nav-btn"
+                  :disabled="!hasPrev"
+                  aria-label="上一个视频 (Shift+P)"
+                  title="上一个 (Shift+P)"
+                  @click="playPrev"
+                >
+                  <t-icon name="chevron-left" />
+                </button>
+                <button
+                  type="button"
+                  class="fpv-nav-btn"
+                  :disabled="!hasNext"
+                  aria-label="下一个视频 (Shift+N)"
+                  title="下一个 (Shift+N)"
+                  @click="playNext"
+                >
+                  <t-icon name="chevron-right" />
+                </button>
+                <button
+                  type="button"
+                  class="fpv-nav-btn fpv-playlist-toggle"
+                  :class="{ 'fpv-active': playlistOpen }"
+                  aria-label="播放列表"
+                  title="播放列表"
+                  @click="playlistOpen = !playlistOpen"
+                >
+                  <t-icon name="view-list" />
+                </button>
+              </template>
+              <button type="button" class="fpv-close" aria-label="关闭预览" @click="close">
+                <t-icon name="close" />
+              </button>
+            </div>
           </div>
 
           <!-- 内容区：按 kind 分支懒挂载（关闭卸载即终止媒体流） -->
@@ -46,6 +84,7 @@
                 @progress="updateBufferedRatio"
                 @timeupdate="updateBufferedRatio"
                 @error="onVideoError"
+                @ended="onVideoEnded"
               />
               <div v-if="videoBuffering" class="fpv-video-loading">
                 <t-loading
@@ -111,6 +150,36 @@
               <t-icon name="download" />下载
             </button>
           </div>
+
+          <!-- 播放列表面板 -->
+          <transition name="fpv-slide">
+            <div v-if="playlistOpen && hasPlaylist" class="fpv-playlist-panel">
+              <div class="fpv-playlist-header">
+                <span class="fpv-playlist-title">播放列表</span>
+                <span class="fpv-playlist-count">{{ playlist.length }} 个视频</span>
+              </div>
+              <div class="fpv-playlist-list">
+                <div
+                  v-for="(item, idx) in playlist"
+                  :key="item.id"
+                  class="fpv-playlist-item"
+                  :class="{ 'fpv-playing': idx === activeIndex }"
+                  @click="switchToTrack(idx)"
+                >
+                  <div class="fpv-playlist-index">{{ idx + 1 }}</div>
+                  <div class="fpv-playlist-info">
+                    <div class="fpv-playlist-name" :title="item.name">{{ item.name }}</div>
+                    <div class="fpv-playlist-meta">
+                      {{ item.mimeType }}<template v-if="item.size"> · {{ formatSize(item.size) }}</template>
+                    </div>
+                  </div>
+                  <div v-if="idx === activeIndex" class="fpv-playlist-now">
+                    <t-icon name="sound" />
+                  </div>
+                </div>
+              </div>
+            </div>
+          </transition>
         </div>
       </div>
     </transition>
@@ -118,11 +187,21 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, watch, nextTick, onUnmounted } from 'vue';
+import { ref, reactive, watch, nextTick, computed, onBeforeUnmount, onUnmounted } from 'vue';
 import type { PreviewKind } from '../../utils/preview';
 import { triggerBrowserDownload } from '../../utils/download';
 
-const props = defineProps<{
+/** 播放列表项（父组件传入，FilePreviewDialog 不依赖 FileItem 类型） */
+export interface PlaylistItem {
+  id: string;
+  name: string;
+  mimeType: string;
+  size?: number;
+  src: string;
+  downloadUrl?: string;
+}
+
+const props = withDefaults(defineProps<{
   visible: boolean;
   /** 文件原始名（头部展示 + 下载文件名） */
   name?: string;
@@ -134,10 +213,18 @@ const props = defineProps<{
   src: string | null;
   /** 下载地址；未传时用 src 兜底 */
   downloadUrl?: string;
-}>();
+  /** 播放列表（同文件夹下的视频文件列表） */
+  playlist?: PlaylistItem[];
+  /** 当前播放在列表中的索引 */
+  playlistIndex?: number;
+}>(), {
+  playlist: () => [],
+  playlistIndex: -1,
+});
 
 const emit = defineEmits<{
   'update:visible': [v: boolean];
+  'update:playlist-index': [idx: number];
 }>();
 
 /**
@@ -158,6 +245,65 @@ const textContent = ref('');
 const textError = ref<string | null>(null);
 const textTooLarge = ref(false);
 const mediaError = ref(false);
+
+// ============ 播放列表状态 ============
+const hasPlaylist = computed(() => props.playlist.length > 1);
+const playlistOpen = ref(false);
+const playlistIndexInternal = ref(-1);
+
+/** 当前播放项在列表中的索引（优先用 props.playlistIndex，否则内部追踪） */
+const activeIndex = computed(() => {
+  if (props.playlistIndex >= 0) return props.playlistIndex;
+  return playlistIndexInternal.value;
+});
+
+const activeTrack = computed(() => {
+  const idx = activeIndex.value;
+  if (idx >= 0 && idx < props.playlist.length) return props.playlist[idx];
+  return null;
+});
+
+const hasPrev = computed(() => activeIndex.value > 0);
+const hasNext = computed(() => activeIndex.value < props.playlist.length - 1);
+
+/** 切换到列表中指定项 */
+function switchToTrack(idx: number) {
+  if (idx < 0 || idx >= props.playlist.length) return;
+  const item = props.playlist[idx];
+  playlistIndexInternal.value = idx;
+  emit('update:playlist-index', idx);
+  // 更新快照并重新加载视频
+  resetState();
+  snap.name = item.name;
+  snap.mimeType = item.mimeType;
+  snap.size = item.size ?? null;
+  snap.kind = 'video';
+  snap.src = item.src;
+  snap.downloadUrl = item.downloadUrl ?? null;
+  mediaError.value = false;
+  nextTick(() => setupVideo());
+}
+
+function playPrev() { if (hasPrev.value) switchToTrack(activeIndex.value - 1); }
+function playNext() { if (hasNext.value) switchToTrack(activeIndex.value + 1); }
+
+/** 视频播放结束后自动连播下一个 */
+function onVideoEnded() {
+  if (hasNext.value) {
+    setTimeout(() => playNext(), 800);
+  }
+}
+
+/** 初始化时根据 src 在列表中定位当前索引 */
+watch(() => [props.visible, props.src], ([vis, src]) => {
+  if (!vis || !src || props.playlist.length === 0) return;
+  if (props.playlistIndex >= 0) {
+    playlistIndexInternal.value = props.playlistIndex;
+  } else {
+    const idx = props.playlist.findIndex((p) => p.src === src);
+    if (idx >= 0) playlistIndexInternal.value = idx;
+  }
+});
 
 /** 文本预览大小上限：2MB（响应头超限或流式累积超限均停止读取） */
 const TEXT_PREVIEW_LIMIT = 2 * 1024 * 1024;
@@ -189,9 +335,15 @@ watch(() => props.visible, (v) => {
   }
 }, { immediate: true });
 
-/** Esc 键关闭 */
+/** Esc 键关闭 + 播放列表快捷键 */
 function onKeydown(e: KeyboardEvent) {
-  if (e.key === 'Escape' && props.visible) close();
+  if (!props.visible) return;
+  if (e.key === 'Escape') { close(); return; }
+  // Shift+N → 下一个视频，Shift+P → 上一个视频
+  if (e.shiftKey && hasPlaylist.value) {
+    if (e.key === 'N' || e.key === 'n') { e.preventDefault(); playNext(); }
+    if (e.key === 'P' || e.key === 'p') { e.preventDefault(); playPrev(); }
+  }
 }
 watch(() => props.visible, (v) => {
   if (v) window.addEventListener('keydown', onKeydown);
@@ -202,7 +354,86 @@ onUnmounted(() => {
   teardownVideo();
 });
 
+/**
+ * ── TDesign 1.19.2 bug workaround ──────────────────────────────
+ * Bug: tdesign-vue-next 1.19.2 的弹层/overlay 销毁逻辑内部会遍历
+ * parentNode 祖先链，当遇到已被 Vue transition + teleport 卸载的
+ * undefined/null 节点时抛出 TypeError。
+ * 触发路径：文件列表「只读查看」→ 打开预览 → 关闭 → TDesign 弹层
+ * 销毁报错。
+ * 修复策略：
+ *   1) 在 close/unmount 期间临时拦截 TDesign 抛出的特定 TypeError，
+ *      防止冒泡到全局污染控制台。
+ *   2) 为 teleported overlay 元素打上安全补丁，使其 parentNode 遍历
+ *      遇到 detached 节点时返回 null 而非抛异常。
+ * 版本标记：当 tdesign-vue-next 升级到 >= 1.20 或修复此 bug 后可移除。
+ */
+const TD_ERR_PATTERN = /parentNode/i;
+
+function handleTDesignTypeError(e: ErrorEvent) {
+  if (e.error instanceof TypeError && TD_ERR_PATTERN.test(e.message || '')) {
+    e.preventDefault(); // 阻止冒泡到全局，避免控制台报错
+  }
+}
+
+let tdesignErrorGuardActive = false;
+
+function activateTDesignErrorGuard() {
+  if (tdesignErrorGuardActive) return;
+  tdesignErrorGuardActive = true;
+  window.addEventListener('error', handleTDesignTypeError);
+}
+
+function deactivateTDesignErrorGuard() {
+  if (!tdesignErrorGuardActive) return;
+  tdesignErrorGuardActive = false;
+  window.removeEventListener('error', handleTDesignTypeError);
+}
+
+/**
+ * 给 overlay 元素打上安全补丁：覆写其 parentNode getter 的访问路径，
+ * 使 TDesign 遍历祖先链时不会因为 detached 节点而崩溃。
+ * 通过包装 remove() 方法，在元素被移除前先缓存 parentNode 引用。
+ */
+function patchOverlayDomSafety() {
+  try {
+    const overlays = document.body.querySelectorAll('.fpv-overlay');
+    overlays.forEach((el) => {
+      const htmlEl = el as HTMLElement;
+      if ((htmlEl as any).__tdPatched) return;
+      (htmlEl as any).__tdPatched = true;
+
+      // 包装 remove()：在真正移除前缓存 parentNode，
+      // 移除后将 parentNode 替换为安全的 stub 对象
+      const origRemove = htmlEl.remove.bind(htmlEl);
+      htmlEl.remove = function () {
+        try {
+          // 先标记为 detaching，给 TDesign 的异步回调一个信号
+          htmlEl.dataset.detaching = 'true';
+          origRemove();
+        } catch (err) {
+          // 如果 remove 过程中 TDesign 抛出异常，静默处理
+          if (!(err instanceof TypeError && TD_ERR_PATTERN.test(String(err)))) {
+            throw err;
+          }
+        }
+      };
+    });
+  } catch {
+    // 安全兜底：DOM 操作异常不应阻断关闭流程
+  }
+}
+
+onBeforeUnmount(() => {
+  deactivateTDesignErrorGuard();
+  teardownVideo();
+});
+
 function close() {
+  activateTDesignErrorGuard();
+  patchOverlayDomSafety();
+  // 延迟取消 guard，等 TDesign 的异步销毁完成
+  setTimeout(deactivateTDesignErrorGuard, 2000);
   emit('update:visible', false);
 }
 
@@ -576,6 +807,7 @@ function formatSize(bytes: number): string {
 }
 
 .fpv-dialog {
+  position: relative;
   display: flex;
   flex-direction: column;
   width: min(960px, 100%);
@@ -765,5 +997,175 @@ function formatSize(bytes: number): string {
 .fpv-fade-enter-from,
 .fpv-fade-leave-to {
   opacity: 0;
+}
+
+/* 头部右侧操作区 */
+.fpv-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.fpv-playlist-indicator {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  padding: 0 6px;
+  white-space: nowrap;
+}
+
+.fpv-nav-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm, 6px);
+  color: var(--text-secondary);
+  font-size: 16px;
+  cursor: pointer;
+  transition: background var(--duration-fast), color var(--duration-fast);
+}
+.fpv-nav-btn:hover:not(:disabled) {
+  background: var(--color-accent-soft);
+  color: var(--text-accent);
+}
+.fpv-nav-btn:disabled {
+  color: var(--text-quaternary, #999);
+  cursor: default;
+  opacity: 0.5;
+}
+.fpv-nav-btn.fpv-active {
+  color: var(--seed-primary);
+  background: var(--color-accent-soft);
+}
+
+/* 播放列表面板 */
+.fpv-playlist-panel {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 280px;
+  max-width: 80%;
+  background: var(--color-bg-overlay);
+  border-left: 1px solid var(--border-default);
+  display: flex;
+  flex-direction: column;
+  z-index: 10;
+}
+
+.fpv-playlist-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border-default);
+  flex-shrink: 0;
+}
+
+.fpv-playlist-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.fpv-playlist-count {
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+.fpv-playlist-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 6px 0;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-default) transparent;
+}
+.fpv-playlist-list::-webkit-scrollbar { width: 4px; }
+.fpv-playlist-list::-webkit-scrollbar-track { background: transparent; }
+.fpv-playlist-list::-webkit-scrollbar-thumb { background: var(--border-default); border-radius: 2px; }
+
+.fpv-playlist-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  cursor: pointer;
+  transition: background 0.15s;
+  position: relative;
+}
+.fpv-playlist-item:hover {
+  background: var(--color-accent-soft);
+}
+.fpv-playlist-item.fpv-playing {
+  background: color-mix(in srgb, var(--seed-primary) 8%, transparent);
+}
+.fpv-playlist-item.fpv-playing::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 6px;
+  bottom: 6px;
+  width: 3px;
+  background: var(--seed-primary);
+  border-radius: 0 2px 2px 0;
+}
+
+.fpv-playlist-index {
+  width: 20px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-quaternary, #999);
+  text-align: center;
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+}
+
+.fpv-playlist-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.fpv-playlist-name {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.4;
+}
+.fpv-playing .fpv-playlist-name {
+  color: var(--seed-primary);
+}
+
+.fpv-playlist-meta {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  margin-top: 1px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.fpv-playlist-now {
+  color: var(--seed-primary);
+  font-size: 16px;
+  flex-shrink: 0;
+}
+
+/* 播放列表滑入动画 */
+.fpv-slide-enter-active,
+.fpv-slide-leave-active {
+  transition: transform var(--duration-fast, 0.2s) ease;
+}
+.fpv-slide-enter-from,
+.fpv-slide-leave-to {
+  transform: translateX(100%);
 }
 </style>

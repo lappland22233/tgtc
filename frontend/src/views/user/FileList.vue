@@ -494,7 +494,10 @@
       :kind="previewTarget ? getPreviewKind(previewTarget.mimeType, previewTarget.originalName) : null"
       :src="previewTarget ? buildFilePreviewUrl(previewTarget.id) : null"
       :download-url="previewTarget ? `/api/files/${previewTarget.id}/download` : undefined"
+      :playlist="videoPlaylist"
+      :playlist-index="videoPlaylistIndex"
       @update:visible="onPreviewVisibleChange"
+      @update:playlist-index="onPlaylistIndexChange"
     />
   </div>
 </template>
@@ -523,7 +526,7 @@ import FolderMoveDialog from '../../components/folder/FolderMoveDialog.vue';
 import CreateShareDialog from '../../components/share/CreateShareDialog.vue';
 import FileContextMenu, { type CtxTarget } from '../../components/file/FileContextMenu.vue';
 import FileRenameDialog from '../../components/file/FileRenameDialog.vue';
-import FilePreviewDialog from '../../components/file/FilePreviewDialog.vue';
+import FilePreviewDialog, { type PlaylistItem } from '../../components/file/FilePreviewDialog.vue';
 import { isPreviewable, getPreviewKind, isMediaDirectLinkKind, buildFilePreviewUrl } from '../../utils/preview';
 import { useTagStore } from '../../stores/tags';
 import { useFolderStore, type Folder } from '../../stores/folders';
@@ -601,6 +604,35 @@ function openPreview(file: FileItem) {
 
 function onPreviewVisibleChange(v: boolean) {
   if (!v) previewTarget.value = null;
+}
+
+// ============ 视频播放列表 ============
+/** 当前文件夹中所有视频文件（从已加载的文件中筛选） */
+const videoPlaylist = computed<PlaylistItem[]>(() => {
+  return fileStore.files
+    .filter((f) => f.mimeType?.startsWith('video/') && !f.isDeleted && f.status !== 'processing')
+    .map((f) => ({
+      id: f.id,
+      name: f.originalName,
+      mimeType: f.mimeType,
+      size: f.size,
+      src: buildFilePreviewUrl(f.id),
+      downloadUrl: `/api/files/${f.id}/download`,
+    }));
+});
+
+/** 当前预览视频在播放列表中的索引 */
+const videoPlaylistIndex = computed(() => {
+  if (!previewTarget.value) return -1;
+  return videoPlaylist.value.findIndex((p) => p.id === previewTarget.value!.id);
+});
+
+/** 播放列表切换时更新 previewTarget 到对应的 FileItem */
+function onPlaylistIndexChange(idx: number) {
+  const item = videoPlaylist.value[idx];
+  if (!item) return;
+  const file = fileStore.files.find((f) => f.id === item.id);
+  if (file) previewTarget.value = file;
 }
 // ============ 文件重命名弹窗状态 ============
 const showRenameFileDialog = ref(false);
