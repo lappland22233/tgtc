@@ -64,33 +64,17 @@
               @error="onMediaError"
             />
 
-            <!-- 视频：MSE 优先（持续消费完整响应流），不支持时原生回退 -->
+            <!-- 视频：自定义播放器（MSE 优先，不支持时原生回退） -->
             <div
-              v-else-if="snap.kind === 'video' && snap.src && !mediaError"
+              v-else-if="visible && snap.kind === 'video' && snap.src && !mediaError"
               class="fpv-video-wrap"
             >
-              <video
-                ref="videoRef"
-                class="fpv-video"
-                :src="videoSrc || undefined"
-                controls
-                preload="auto"
-                @seeking="onVideoSeeking"
-                @seeked="onVideoSeeked"
-                @waiting="videoBuffering = true"
-                @playing="videoBuffering = false"
-                @canplay="videoBuffering = false"
-                @progress="updateBufferedRatio"
-                @timeupdate="updateBufferedRatio"
-                @error="onVideoError"
+              <CustomVideoPlayer
+                :src="videoSrc"
+                @video-ref="onCustomPlayerVideoRef"
                 @ended="onVideoEnded"
+                @error="onVideoError"
               />
-              <div v-if="videoBuffering" class="fpv-video-loading">
-                <t-loading
-                  size="medium"
-                  :text="videoBufferedRatio > 0 ? `正在缓冲…（已缓冲 ${videoBufferedRatio}%）` : '正在缓冲…'"
-                />
-              </div>
             </div>
 
             <!-- 音频 -->
@@ -188,6 +172,7 @@
 import { ref, reactive, watch, nextTick, computed, onUnmounted } from 'vue';
 import type { PreviewKind } from '../../utils/preview';
 import { triggerBrowserDownload } from '../../utils/download';
+import CustomVideoPlayer from './CustomVideoPlayer.vue';
 
 /** 播放列表项（父组件传入，FilePreviewDialog 不依赖 FileItem 类型） */
 export interface PlaylistItem {
@@ -343,6 +328,28 @@ function onMediaError() {
 
 // ============ 视频预览（MSE 优先 + 原生回退） ============
 const videoRef = ref<HTMLVideoElement | null>(null);
+
+/**
+ * 从 CustomVideoPlayer 获取内部 <video> 元素引用。
+ * 绑定 MSE 所需的事件监听（seek 钳制 + 缓冲追踪）。
+ */
+function onCustomPlayerVideoRef(el: HTMLVideoElement | null) {
+  // 清理旧监听
+  const old = videoRef.value;
+  if (old) {
+    old.removeEventListener('seeking', onVideoSeeking);
+    old.removeEventListener('seeked', onVideoSeeked);
+    old.removeEventListener('progress', updateBufferedRatio);
+    old.removeEventListener('timeupdate', updateBufferedRatio);
+  }
+  videoRef.value = el;
+  if (el) {
+    el.addEventListener('seeking', onVideoSeeking);
+    el.addEventListener('seeked', onVideoSeeked);
+    el.addEventListener('progress', updateBufferedRatio);
+    el.addEventListener('timeupdate', updateBufferedRatio);
+  }
+}
 /** 当前 <video> 实际 src：MSE 模式为 MediaSource 对象 URL，回退模式为原始地址 */
 const videoSrc = ref<string | null>(null);
 /** 是否处于 MSE 模式 */
@@ -560,9 +567,18 @@ function teardownMse() {
   URL.revokeObjectURL(s.objectUrl);
 }
 
-/** 关闭/卸载：终止视频流并清理（保持“关闭即卸载终止流”语义） */
+/** 关闭/卸载：终止视频流并清理（保持”关闭即卸载终止流”语义） */
 function teardownVideo() {
   teardownMse();
+  // 清理解码器侧绑定的事件监听
+  const v = videoRef.value;
+  if (v) {
+    v.removeEventListener('seeking', onVideoSeeking);
+    v.removeEventListener('seeked', onVideoSeeked);
+    v.removeEventListener('progress', updateBufferedRatio);
+    v.removeEventListener('timeupdate', updateBufferedRatio);
+  }
+  videoRef.value = null;
   videoSrc.value = null;
   videoUseMse.value = false;
   videoBuffering.value = false;
@@ -797,18 +813,17 @@ function formatSize(bytes: number): string {
   border-radius: var(--radius-sm, 6px);
 }
 
-.fpv-video {
-  max-width: 100%;
-  max-height: 100%;
-  border-radius: var(--radius-sm, 6px);
-  outline: none;
-}
-
 .fpv-video-wrap {
   position: relative;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  width: 100%;
+  height: 100%;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+}
+
+/* CustomVideoPlayer 填满容器 */
+.fpv-video-wrap > :deep(.cvp) {
   width: 100%;
   height: 100%;
 }
