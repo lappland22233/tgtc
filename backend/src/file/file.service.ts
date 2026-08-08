@@ -1612,7 +1612,7 @@ export class FileService implements OnModuleInit {
 
     const buildId = uuidv4();
     const tmpSource = path.join(this.thumbnailDir, `${file.id}.${buildId}.video.tmp`);
-    const tmpCover = path.join(this.thumbnailDir, `${file.id}.${buildId}.cover.webp.tmp`);
+    const tmpCover = path.join(this.thumbnailDir, `${file.id}.${buildId}.cover.tmp.webp`);
     let sourcePath = options.sourcePath && fs.existsSync(options.sourcePath)
       ? options.sourcePath
       : this.fileCacheService.getCachedPath(file.id);
@@ -1635,7 +1635,7 @@ export class FileService implements OnModuleInit {
           '-hide_banner', '-loglevel', 'error', '-y',
           '-ss', '1', '-i', resolvedSourcePath,
           '-frames:v', '1', '-vf', 'scale=480:-2:force_original_aspect_ratio=decrease',
-          '-c:v', 'libwebp', '-quality', '65', tmpCover,
+          '-c:v', 'libwebp', '-quality', '65', '-f', 'webp', tmpCover,
         ], { windowsHide: true });
         let stderr = '';
         ffmpeg.stderr.on('data', chunk => { stderr = (stderr + chunk.toString()).slice(-2048); });
