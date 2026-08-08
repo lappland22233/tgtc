@@ -10,6 +10,7 @@ import FormData from 'form-data';
 interface TelegramMediaResult {
   document?: { file_id?: string };
   animation?: { file_id?: string };
+  video?: { file_id?: string };
 }
 
 interface TelegramSendDocumentResponse {
@@ -183,9 +184,11 @@ export class TelegramService {
       });
 
       const result = response.data?.result;
-      // 自托管 Bot API 可能将短视频/动画类 MP4 识别为 animation，即使调用的是 sendDocument。
+      // 自托管 Bot API 即使接收 sendDocument，也可能将 MP4 识别为 animation 或 video。
       // 普通 document 保持优先，避免改变现有文件行为。
-      const file_id = result?.document?.file_id || result?.animation?.file_id;
+      const file_id = result?.document?.file_id
+        || result?.animation?.file_id
+        || result?.video?.file_id;
       if (!file_id) {
         const mediaFields = result && typeof result === 'object'
           ? Object.keys(result).filter((key) => key !== 'text').slice(0, 10).join(', ') || 'none'

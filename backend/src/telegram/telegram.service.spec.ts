@@ -132,7 +132,22 @@ describe('TelegramService realtime stream', () => {
       );
     });
 
-    it('prefers document.file_id when both media fields exist', async () => {
+    it('falls back to video.file_id for MP4 video responses', async () => {
+      mockedAxios.post.mockResolvedValueOnce({
+        data: { ok: true, result: { video: { file_id: 'video-id' } } },
+      } as any);
+      mockFileInfo('video-id');
+
+      const result = await createService().uploadFile(Buffer.from('test'), 'video.mp4');
+
+      expect(result.file_id).toBe('video-id');
+      expect(mockedAxios.get).toHaveBeenCalledWith(
+        expect.stringContaining('/getFile'),
+        expect.objectContaining({ params: { file_id: 'video-id' } }),
+      );
+    });
+
+    it('prefers document.file_id when multiple media fields exist', async () => {
       mockedAxios.post.mockResolvedValueOnce({
         data: {
           ok: true,
