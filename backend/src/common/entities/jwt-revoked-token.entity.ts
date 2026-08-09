@@ -6,8 +6,9 @@ export class JwtRevokedToken {
   @PrimaryColumn({ type: 'varchar', length: 64 })
   jti: string;
 
-  @Column({ type: 'uuid' })
-  userId: string;
+  // 兼容早期仅记录 jti/expiresAt/revokedAt 的吊销表数据；新吊销记录始终写入 userId。
+  @Column({ type: 'uuid', nullable: true })
+  userId: string | null;
 
   @Column({ type: 'timestamp' })
   expiresAt: Date;
