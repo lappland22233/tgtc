@@ -101,7 +101,7 @@ async function bootstrap() {
 
   // SPA 路由回退：非 /api 和非静态文件的请求返回 index.html
   // 仅对浏览器导航请求（Accept: text/html）回退，避免爬虫/监控工具因 200+HTML 误判所有路径都存在
-  expressApp.get('*', (req, res, next) => {
+  expressApp.get('/*splat', (req, res, next) => {
     // 跳过 API 路由
     if (req.path.startsWith('/api/') || req.path === '/api') {
       return next();
