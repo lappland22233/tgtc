@@ -16,8 +16,33 @@ import {
   IsDateString,
   IsIn,
   IsEmail,
+  ValidateIf,
+  registerDecorator,
+  ValidationArguments,
+  ValidationOptions,
 } from 'class-validator';
 import { Type } from 'class-transformer';
+
+function IsFutureDate(validationOptions?: ValidationOptions) {
+  return (object: object, propertyName: string) => {
+    registerDecorator({
+      name: 'isFutureDate',
+      target: object.constructor,
+      propertyName,
+      options: validationOptions,
+      validator: {
+        validate(value: unknown) {
+          return typeof value === 'string'
+            && Number.isFinite(Date.parse(value))
+            && Date.parse(value) > Date.now();
+        },
+        defaultMessage(args: ValidationArguments) {
+          return `${args.property} 必须晚于当前时间`;
+        },
+      },
+    });
+  };
+}
 
 export class BanIPDto {
   @IsIP()
@@ -32,8 +57,9 @@ export class BanIPDto {
   @IsBoolean()
   permanent?: boolean;
 
-  @IsOptional()
+  @ValidateIf((dto: BanIPDto) => dto.permanent === false)
   @IsDateString()
+  @IsFutureDate({ message: '临时封禁到期时间必须晚于当前时间' })
   expiresAt?: string;
 }
 

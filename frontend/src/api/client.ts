@@ -1,8 +1,25 @@
 import axios, { type AxiosInstance, type AxiosError, type InternalAxiosRequestConfig } from 'axios';
+import MessagePlugin from '../utils/message';
+import { classifyServiceAvailabilityError } from '../utils/error';
 
 // ---- 状态机：防止并发 401 重定向 ----
 let isRedirecting = false;
 let redirectTimer: ReturnType<typeof setTimeout> | null = null;
+let lastAvailabilityNotice = '';
+let lastAvailabilityNoticeAt = 0;
+
+const AVAILABILITY_NOTICE_DEDUPE_MS = 5000;
+
+/** 全局基础设施故障提示；短时间并发失败只显示一次，避免 toast 风暴。 */
+function showAvailabilityNotice(message: string) {
+  const now = Date.now();
+  if (message === lastAvailabilityNotice && now - lastAvailabilityNoticeAt < AVAILABILITY_NOTICE_DEDUPE_MS) {
+    return;
+  }
+  lastAvailabilityNotice = message;
+  lastAvailabilityNoticeAt = now;
+  MessagePlugin.error({ content: message, duration: 8000, closeBtn: true });
+}
 
 function resetRedirectState() {
   isRedirecting = false;
@@ -108,7 +125,16 @@ client.interceptors.response.use(
   (error: AxiosError) => {
     const status = error.response?.status;
 
-    // Cloudflare 代理层错误（413 请求体过大 / 502 代理超时 / 5xx 源站错误）
+    // 需要跨页面一致展示的基础设施故障：低磁盘统一使用 507；服务维护/退出使用 503。
+    // 将 AxiosError 映射为普通 Error，使所有调用 getErrorMessage 的页面得到同一文案。
+    const availabilityError = classifyServiceAvailabilityError(error);
+    if (availabilityError) {
+      console.warn(`[API] ${availabilityError.kind}:`, status, error.config?.url);
+      showAvailabilityNotice(availabilityError.message);
+      return Promise.reject(new Error(availabilityError.message));
+    }
+
+    // Cloudflare 代理层错误（413 请求体过大 / 502 网关不可用 / 5xx 源站错误）
     // 检测非 JSON 响应（Cloudflare HTML 错误页）
     if (status && status >= 400 && error.response?.data) {
       const contentType = error.response.headers?.['content-type']?.toString() || '';

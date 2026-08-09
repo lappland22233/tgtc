@@ -1,0 +1,10 @@
+import { ConfigCacheService } from './config-cache.service';
+
+describe('ConfigCacheService',()=>{
+ const repo:any={findOne:jest.fn(),upsert:jest.fn()}; const events:any={emit:jest.fn()}; let s:ConfigCacheService;
+ beforeEach(()=>{jest.clearAllMocks(); s=new ConfigCacheService(repo,events)});
+ it('uses DB, cache and default without negative caching',async()=>{repo.findOne.mockResolvedValueOnce({value:'v'}); await expect(s.get('k','d')).resolves.toBe('v'); await expect(s.get('k','d')).resolves.toBe('v'); expect(repo.findOne).toHaveBeenCalledTimes(1); repo.findOne.mockResolvedValue(null); await s.get('missing','d'); await s.get('missing','d'); expect(repo.findOne).toHaveBeenCalledTimes(3)});
+ it('singleflights concurrent reads and clears pending after failure',async()=>{let resolve:any; repo.findOne.mockReturnValue(new Promise(r=>resolve=r)); const a=s.get('k','d'),b=s.get('k','d'); expect(repo.findOne).toHaveBeenCalledTimes(1); resolve({value:'v'}); await expect(Promise.all([a,b])).resolves.toEqual(['v','v']); repo.findOne.mockRejectedValueOnce(new Error('db')); await expect(s.get('x','d')).rejects.toThrow('db'); repo.findOne.mockResolvedValueOnce(null); await expect(s.get('x','d')).resolves.toBe('d')});
+ it('sets atomically, caches and tolerates subscriber failures',async()=>{repo.upsert.mockResolvedValue({}); await s.set('k','v'); expect(await s.get('k','d')).toBe('v'); events.emit.mockImplementation(()=>{throw new Error('subscriber')}); await expect(s.set('k','x','desc')).resolves.toBeUndefined()});
+ it('batch sets, short-circuits empty and invalidates keys',async()=>{repo.upsert.mockResolvedValue({}); await s.setBatch([]); expect(repo.upsert).not.toHaveBeenCalled(); await s.setBatch([{key:'a.1',value:'1'},{key:'a.2',value:'2'},{key:'b',value:'3'}]); expect(await s.get('a.1','')).toBe('1'); s.invalidate('b'); repo.findOne.mockResolvedValue(null); expect(await s.get('b','d')).toBe('d'); s.invalidateByPrefix('a.'); expect(await s.get('a.1','d')).toBe('d')});
+});

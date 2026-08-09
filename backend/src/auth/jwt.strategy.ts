@@ -74,6 +74,14 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       throw new UnauthorizedException('Token 缺少有效的角色信息');
     }
 
+    if (!payload.jti || typeof payload.jti !== 'string') {
+      throw new UnauthorizedException('Token 缺少唯一标识');
+    }
+
+    if (await this.authService.isTokenRevoked(payload.jti)) {
+      throw new UnauthorizedException('Token 已吊销');
+    }
+
     // 验证角色是否为有效的枚举值，防止伪造角色
     const validRoles = Object.values(UserRole) as string[];
     if (!validRoles.includes(payload.role)) {

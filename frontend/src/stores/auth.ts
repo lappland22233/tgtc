@@ -6,6 +6,17 @@ import type { User } from '../types/user';
 
 export type SendCodeType = 'register' | 'reset_password';
 
+interface AuthResponseData {
+  user?: User;
+  needVerification?: boolean;
+  message?: string;
+}
+
+export function getAuthResponseData(response: { data?: { data?: AuthResponseData } }): AuthResponseData {
+  const data = response.data?.data;
+  return data && typeof data === 'object' ? data : {};
+}
+
 export const useAuthStore = defineStore('auth', () => {
   const user = ref<User | null>(null);
   const initialized = ref(false);
@@ -51,27 +62,30 @@ export const useAuthStore = defineStore('auth', () => {
 
   async function login(email: string, password: string) {
     const response = await api.post('/auth/login', { email, password });
-    user.value = response.data.data.user as User;
+    const data = getAuthResponseData(response);
+    // 会话只由 HttpOnly Cookie 建立；响应体中的 user 是可选的兼容快照，不依赖 accessToken。
+    if (data.user?.id) user.value = data.user;
     clearRedirectState(); // 登录成功后重置重定向状态
-    // 二次验证：通过 fetchUser 获取服务端权威用户状态，防止响应篡改。
-    // fetchUser 成功时会以 /auth/me 的权威数据覆盖上面来自响应体的 user；
-    // 失败时不再静默吞错，至少记录告警便于排查（保留响应数据以不阻断登录流程）。
-    try {
-      await fetchUser();
-    } catch (err) {
-      console.warn('[Auth] 登录后获取权威用户信息失败，已保留登录响应数据:', err);
+    // 通过 /auth/me 验证 Cookie 会话并获取服务端权威用户状态。
+    await fetchUser();
+    if (!user.value) {
+      throw new Error('登录会话建立失败，请重试');
     }
     return response.data;
   }
 
   async function register(email: string, password: string, code: string) {
     const response = await api.post('/auth/register', { email, password, code });
-    const data = response.data.data;
-    // 邮箱验证开启时，后端不返回 token，需用户验证邮箱后再登录
+    const data = getAuthResponseData(response);
     if (data.needVerification) {
       return response;
     }
-    user.value = data.user as User;
+    // 注册成功后的自动登录同样以 Cookie + /auth/me 为准，响应无需包含 accessToken。
+    if (data.user?.id) user.value = data.user;
+    await fetchUser();
+    if (!user.value) {
+      throw new Error('注册成功，但登录会话建立失败，请重新登录');
+    }
     return response;
   }
 

@@ -6,6 +6,7 @@
 //
 #include "telegram-bot-api/HttpConnection.h"
 
+#include "telegram-bot-api/ClientParameters.h"
 #include "telegram-bot-api/Query.h"
 
 #include "td/net/HttpHeaderCreator.h"
@@ -37,6 +38,9 @@ void HttpConnection::handle(td::unique_ptr<td::HttpQuery> http_query,
   }
 
   if (td::begins_with(http_query->url_path_, "/stream/file/bot")) {
+    if (shared_data_->workdir_disk_emergency_.load(std::memory_order_acquire)) {
+      return send_http_error(507, "Telegram workdir disk space exhausted; service is shutting down");
+    }
     if (!file_stream_config_.enabled) {
       return send_http_error(404, "Not Found");
     }
@@ -56,7 +60,8 @@ void HttpConnection::handle(td::unique_ptr<td::HttpQuery> http_query,
     parsed_route.expected_size = expected_size.move_as_ok();
     parsed_route.no_cache = parse_file_stream_no_cache(http_query->get_header("x-telegram-no-cache"));
     td::create_actor<FileStreamConnection>("FileStreamConnection", std::move(connection_), client_manager_,
-                                           std::move(parsed_route), file_stream_config_, http_query->peer_address_)
+                                           shared_data_->workdir_cleanup_manager_, std::move(parsed_route),
+                                           file_stream_config_, http_query->peer_address_)
         .release();
     return;
   }

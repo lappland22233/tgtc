@@ -4,7 +4,7 @@
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 //
-#include "telegram-bot-api/FileStream.h"
+#include "telegram-bot-api/FileStreamCore.h"
 
 #include "td/utils/tests.h"
 
@@ -56,9 +56,10 @@ TEST(FileStream, NoCacheHeader) {
 
 TEST(FileStream, ResolvesExactSize) {
   ASSERT_EQ(10, telegram_bot_api::resolve_file_stream_size(10, -1).move_as_ok());
-  ASSERT_EQ(10, telegram_bot_api::resolve_file_stream_size(0, 10).move_as_ok());
   ASSERT_EQ(10, telegram_bot_api::resolve_file_stream_size(10, 10).move_as_ok());
-  ASSERT_TRUE(telegram_bot_api::resolve_file_stream_size(10, 11).is_error());
+  ASSERT_EQ(10, telegram_bot_api::resolve_file_stream_size(10, 1).move_as_ok());
+  ASSERT_EQ(10, telegram_bot_api::resolve_file_stream_size(10, 1000).move_as_ok());
+  ASSERT_TRUE(telegram_bot_api::resolve_file_stream_size(0, 10).is_error());
   ASSERT_TRUE(telegram_bot_api::resolve_file_stream_size(0, -1).is_error());
 }
 

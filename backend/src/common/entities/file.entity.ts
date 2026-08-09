@@ -121,6 +121,14 @@ export class File {
   @Column({ type: 'varchar', default: 'ready' })
   status: 'processing' | 'ready' | 'error';
 
+  /** 每次创建或覆盖内容时递增，用于生成确定性 Bull jobId。 */
+  @Column({ type: 'int', default: 1 })
+  uploadVersion: number;
+
+  /** Telegram 原文件提交点与衍生媒体处理解耦的持久化状态机。 */
+  @Column({ type: 'varchar', length: 32, default: 'committed' })
+  uploadStage: 'pending' | 'uploading' | 'remote_committed' | 'committed' | 'failed';
+
   @CreateDateColumn()
   createdAt: Date;
 

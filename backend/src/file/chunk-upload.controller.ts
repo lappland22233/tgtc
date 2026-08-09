@@ -7,16 +7,20 @@ import {
   UploadedFile,
   UseInterceptors,
   UseGuards,
-  Req,
   BadRequestException,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
+import { diskStorage } from 'multer';
+import * as path from 'path';
+import { randomUUID } from 'crypto';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { User } from '../common/entities/user.entity';
-import { Request } from 'express';
 import { ChunkUploadService } from './chunk-upload.service';
-import { InitChunkUploadDto } from './chunk-upload.dto';
+import { InitChunkUploadDto, MAX_CHUNK_SIZE } from './chunk-upload.dto';
+import { ChunkUploadResourceInterceptor } from './chunk-upload-resource.interceptor';
+
+const incomingChunkDir = path.resolve(process.cwd(), 'tmp', 'uploads', 'incoming');
 
 @Controller('files/chunk')
 @UseGuards(JwtAuthGuard)
@@ -48,24 +52,39 @@ export class ChunkUploadController {
 
   /** 上传单个分片 (multipart: chunk + index) */
   @Post(':uploadId')
-  @UseInterceptors(FileInterceptor('chunk', { limits: { fileSize: 104857600 } }))
+  @UseInterceptors(
+    ChunkUploadResourceInterceptor,
+    FileInterceptor('chunk', {
+      storage: diskStorage({
+        destination: incomingChunkDir,
+        filename: (_req, _file, callback) => callback(null, `${randomUUID()}.part`),
+      }),
+      limits: { fileSize: MAX_CHUNK_SIZE, files: 1, fields: 1 },
+    }),
+  )
   async uploadChunk(
     @Param('uploadId') uploadId: string,
     @UploadedFile() chunk: Express.Multer.File,
     @Body('index') index: string,
-    @Req() req: Request,
     @CurrentUser() user: User,
   ) {
-    req.setTimeout(0);   // 禁用请求超时，防止慢速网络分片传输被 server.timeout 切断
     if (!chunk) {
       throw new BadRequestException('缺少分片数据 (chunk)');
     }
-    if (!index) {
-      throw new BadRequestException('缺少分片索引 (index)');
+    try {
+      if (!index) {
+        throw new BadRequestException('缺少分片索引 (index)');
+      }
+      if (!/^\d+$/.test(index)) {
+        throw new BadRequestException('非法的分片索引');
+      }
+      const chunkIndex = Number(index);
+      await this.chunkUploadService.saveChunkFromPath(uploadId, chunkIndex, chunk.path, chunk.size, user.id);
+      return { index: chunkIndex, received: true };
+    } catch (error) {
+      await this.chunkUploadService.removeIncomingChunk(chunk.path);
+      throw error;
     }
-    const chunkIndex = parseInt(index, 10);
-    await this.chunkUploadService.saveChunk(uploadId, chunkIndex, chunk.buffer, user.id);
-    return { index: chunkIndex, received: true };
   }
 
   /** 启动异步合并（立即返回，后台执行合并 → 入队 Telgram 上传） */

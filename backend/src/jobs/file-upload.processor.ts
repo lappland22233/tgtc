@@ -8,7 +8,13 @@ import { File } from '../common/entities/file.entity';
 import { TelegramService } from '../telegram/telegram.service';
 import { FileService } from '../file/file.service';
 import { createReadStream, existsSync } from 'fs';
-import { unlink } from 'fs/promises';
+import { readFile, rename, unlink, writeFile } from 'fs/promises';
+
+interface FileUploadJobData {
+  fileId: string;
+  filePath: string;
+  uploadVersion: number;
+}
 
 @Injectable()
 @Processor(QUEUE_NAMES.FILE_UPLOAD)
@@ -22,93 +28,137 @@ export class FileUploadProcessor {
     private fileService: FileService,
   ) {}
 
-
-  /** 删除临时文件，失败时记录告警（避免静默堆积） */
   private async removeTempFile(filePath: string): Promise<void> {
     await unlink(filePath).catch((err: Error) => {
       this.logger.warn(`临时文件删除失败 ${filePath}: ${err.message}`);
     });
   }
 
-  /**
-   * 后台异步上传文件到 Telegram
-   * Bull 自动重试最多 3 次（指数退避 10s/20s/40s）
-   */
-  @Process({
-    name: 'upload',
-    concurrency: 2,
-  })
-  async uploadToTelegram(job: Job<{ fileId: string; filePath: string }>): Promise<void> {
-    const { fileId, filePath } = job.data;
-    const attempt = job.attemptsMade + 1;
-    this.logger.log(`开始上传文件到 Telegram: ${fileId} (第 ${attempt}/3 次尝试)`);
+  private isCommitted(file: File): boolean {
+    return file.uploadStage === 'remote_committed' || file.uploadStage === 'committed';
+  }
 
-    const file = await this.fileRepository.findOne({ where: { id: fileId } });
+  private receiptPath(filePath: string): string {
+    return `${filePath}.telegram.json`;
+  }
+
+  private async persistReceipt(filePath: string, result: { file_id: string; file_path?: string }): Promise<void> {
+    const receiptPath = this.receiptPath(filePath);
+    const tmpPath = `${receiptPath}.tmp`;
+    await writeFile(tmpPath, JSON.stringify(result), { flag: 'w' });
+    await rename(tmpPath, receiptPath);
+  }
+
+  private async loadReceipt(filePath: string): Promise<{ file_id: string; file_path?: string } | null> {
+    try {
+      return JSON.parse(await readFile(this.receiptPath(filePath), 'utf8'));
+    } catch {
+      return null;
+    }
+  }
+
+  private async removeUploadArtifacts(filePath: string): Promise<void> {
+    await Promise.all([
+      this.removeTempFile(filePath),
+      unlink(this.receiptPath(filePath)).catch(() => {}),
+    ]);
+  }
+
+  @Process({ name: 'upload', concurrency: 2 })
+  async uploadToTelegram(job: Job<FileUploadJobData>): Promise<void> {
+    const { fileId, filePath, uploadVersion } = job.data;
+    const attempt = job.attemptsMade + 1;
+    let file = await this.fileRepository.findOne({ where: { id: fileId } });
     if (!file) {
       this.logger.warn(`文件 ${fileId} 不存在，跳过上传`);
+      await this.removeUploadArtifacts(filePath);
+      return;
+    }
+    if (file.uploadVersion !== uploadVersion) {
+      this.logger.warn(`忽略文件 ${fileId} 的陈旧上传任务 version=${uploadVersion}`);
       return;
     }
 
-    if (!existsSync(filePath)) {
-      // 临时文件缺失可能是暂时不可用（磁盘/网络文件系统抖动），
-      // 还有重试机会时抛错触发 Bull 重试，仅在最后一次尝试时才标记失败
-      if (job.attemptsMade < 2) {
-        this.logger.warn(
-          `文件 ${fileId} 的临时文件暂不可用，将重试 (第 ${attempt}/3 次): ${filePath}`,
+    if (!this.isCommitted(file)) {
+      if (!existsSync(filePath)) {
+        if (job.attemptsMade < 2) throw new Error(`临时文件暂不可用: ${filePath}`);
+        await this.fileRepository.update(
+          { id: fileId, uploadVersion },
+          { status: 'error', uploadStage: 'failed' } as Partial<File>,
         );
-        throw new Error(`临时文件暂不可用: ${filePath}`);
+        return;
       }
-      this.logger.error(`文件 ${fileId} 的临时文件不存在: ${filePath}`);
-      await this.fileRepository.update(fileId, { status: 'error' as any });
-      return;
+
+      await this.fileRepository.update(
+        { id: fileId, uploadVersion, uploadStage: file.uploadStage },
+        { uploadStage: 'uploading' } as Partial<File>,
+      );
+      file = await this.fileRepository.findOneOrFail({ where: { id: fileId } });
+
+      try {
+        let result = await this.loadReceipt(filePath);
+        if (!result) {
+          result = await this.telegramService.uploadFile(
+            createReadStream(filePath),
+            file.originalName,
+            undefined,
+            file.size,
+          );
+          // DB 提交失败前先原子保存回执，Bull 重试/进程重启可直接恢复提交。
+          await this.persistReceipt(filePath, result);
+        }
+        // 远端结果是幂等提交点：一次原子更新同时写入 TG 引用与 remote_committed。
+        await this.fileRepository.update(
+          { id: fileId, uploadVersion },
+          {
+            filename: result.file_id,
+            telegramFileId: result.file_id,
+            telegramFilePath: result.file_path || '',
+            uploadStage: 'remote_committed',
+          } as Partial<File>,
+        );
+      } catch (error) {
+        this.logger.warn(`文件远端上传或提交失败 (第 ${attempt} 次): ${(error as Error).message}`);
+        const remoteReceipt = await this.loadReceipt(filePath);
+        if (job.attemptsMade >= 2 && !remoteReceipt) {
+          await this.fileRepository.update(
+            { id: fileId, uploadVersion },
+            { status: 'error', uploadStage: 'failed' } as Partial<File>,
+          );
+          await this.removeUploadArtifacts(filePath);
+        }
+        // 已有远端回执时必须保留本地文件/回执，后续以相同确定性 jobId 恢复 DB 提交。
+        throw error;
+      }
     }
+
+    // 重新读取提交点，进程在 Telegram 成功后重启时会直接从这里恢复，绝不再次上传原文件。
+    file = await this.fileRepository.findOneOrFail({ where: { id: fileId } });
+    if (file.uploadVersion !== uploadVersion || !this.isCommitted(file)) return;
+
+    await this.fileRepository.query(
+      'UPDATE files SET status = $1 WHERE id = $2 AND status = $3',
+      ['ready', fileId, 'processing'],
+    );
 
     try {
-      const stream = createReadStream(filePath);
-      // 不使用仅拒绝外层 Promise 的超时包装：它无法取消底层上传，
-      // 会导致 Bull 重试与旧上传并发重叠。网络超时由 TelegramService/Axios 自身负责。
-      const result = await this.telegramService.uploadFile(
-        stream,
-        file.originalName,
-        undefined,
-        file.size,
-      );
-
-      // TG 上传成功：更新 ID + 兜底写 status ready（正常情况缓存预热已先设为 ready）
-      await this.fileRepository.update(fileId, {
-        filename: result.file_id,
-        telegramFileId: result.file_id,
-        telegramFilePath: result.file_path || '',
-      } as any);
-      // 若缓存预热失败导致 status 仍为 processing，则补齐 ready
-      await this.fileRepository.query(
-        'UPDATE files SET status = $1 WHERE id = $2 AND status = $3',
-        ['ready', fileId, 'processing'],
-      );
-
-      if (file.mimeType?.startsWith('video/')) {
-        await this.fileService.generateAndSaveVideoCover(file, { sourcePath: filePath });
-      } else if (file.mimeType?.startsWith('image/')) {
-        await this.fileService.generateAndSaveThumbnail(file);
-      }
-
-      await this.removeTempFile(filePath);
-      this.logger.log(`文件上传完成: ${fileId}`);
-    } catch (error) {
-      const msg = (error as Error).message;
-      this.logger.warn(`文件上传失败 (第 ${attempt}/3 次尝试): ${msg}`);
-
-      if (job.attemptsMade >= 2) {
-        // 最终失败：仅当文件仍为 processing（缓存预热也失败）时才标记 error
-        await this.fileRepository.query(
-          'UPDATE files SET status = $1 WHERE id = $2 AND status = $3',
-          ['error', fileId, 'processing'],
+      if (file.uploadStage !== 'committed') {
+        if (file.mimeType?.startsWith('video/')) {
+          await this.fileService.generateAndSaveVideoCover(file, { sourcePath: filePath });
+        } else if (file.mimeType?.startsWith('image/')) {
+          await this.fileService.generateAndSaveThumbnail(file);
+        }
+        await this.fileRepository.update(
+          { id: fileId, uploadVersion },
+          { uploadStage: 'committed' } as Partial<File>,
         );
-        await this.removeTempFile(filePath);
-        this.logger.error(`文件 ${fileId} 上传最终失败(3次重试后): ${msg}`);
       }
-
-      throw error;
+    } catch (error) {
+      // 衍生媒体失败不回滚远端提交点，也不触发 Bull 原文件重试。
+      this.logger.warn(`文件 ${fileId} 衍生媒体生成失败，原文件已提交: ${(error as Error).message}`);
     }
+
+    await this.removeUploadArtifacts(filePath);
+    this.logger.log(`文件上传完成: ${fileId}`);
   }
 }

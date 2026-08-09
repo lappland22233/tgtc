@@ -51,6 +51,115 @@ const baseConfig = {
   from: 'noreply@example.com',
 };
 
+describe('AdminService query condition branches', () => {
+  const chain = (raw: any[] = []) => {
+    const q: any = {};
+    for (const m of ['where','andWhere','select','addSelect','groupBy','orderBy','leftJoin','setParameter','having','limit','skip','take']) q[m] = jest.fn(() => q);
+    q.getCount = jest.fn().mockResolvedValue(raw.length);
+    q.getMany = jest.fn().mockResolvedValue(raw);
+    q.getRawMany = jest.fn().mockResolvedValue(raw);
+    q.getRawOne = jest.fn().mockResolvedValue(raw[0]);
+    q.getManyAndCount = jest.fn().mockResolvedValue([raw, raw.length]);
+    return q;
+  };
+  const build = (raw: any[] = []) => {
+    const { service } = buildAdminService();
+    const access = (service as any).accessLogRepo;
+    access.createQueryBuilder = jest.fn(() => chain(raw));
+    (service as any).accessLogRepository.createQueryBuilder = jest.fn(() => chain(raw));
+    (service as any).auditLogRepo.createQueryBuilder = jest.fn(() => chain(raw));
+    (service as any).telemetryRepo.createQueryBuilder = jest.fn(() => chain(raw));
+    return { service, access };
+  };
+
+  it('covers access log optional filters and pagination clamps', async () => {
+    const { service, access } = build([{ id: 'x' }]);
+    await service.getAccessLogs({ page: -1, limit: 500 });
+    await service.getAccessLogs({ page: 2, limit: 0, startDate: '2026-01-01', endDate: '2026-02-01', path: '%_', statusCode: 404 });
+    expect(access.createQueryBuilder).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['1h','24h','7d','30d','other'] as const)('covers time range and trend granularity %s', async (timeRange) => {
+    const { service } = build([{ time:'t',requests:'2',bandwidth:'3' }]);
+    await expect(service.getAccessLogTrend(timeRange)).resolves.toEqual([{time:'t',requests:2,bandwidth:3}]);
+  });
+
+  it('covers top file whitelist, filters and both sorting modes', async () => {
+    let built = build([{fileId:'f',fileName:'n',mimeType:'x',fileSize:'2',accessCount:'3',totalBandwidth:'4'}]);
+    await expect(built.service.getTopFiles({sortBy:'invalid'} as any)).rejects.toThrow();
+    await built.service.getTopFiles({sortBy:'bandwidth',startDate:'2026-01-01',endDate:'2026-02-01',action:'download',limit:1} as any);
+    built = build([]); await built.service.getTopFiles({} as any);
+  });
+
+  it('covers excluded paths, status filters and zero/error rates', async () => {
+    let built = build([{path:'/x',requestCount:'2',totalBandwidth:'3',avgDuration:'4'}]);
+    await built.service.getTopPaths({excludePaths:'admin, %_'} as any);
+    built = build([{path:'/x',count2xx:'1',count3xx:'0',count4xx:'1',count5xx:'1',totalCount:'2'}]);
+    const rows = await built.service.getStatusByPath({statusCode:0,minCount:0,limit:0} as any); expect(rows[0].errorRate).toBe(100);
+    built = build([{path:'/x',count2xx:'0',count3xx:'0',count4xx:null,count5xx:null,totalCount:'0'}]);
+    expect((await built.service.getStatusByPath({} as any))[0].errorRate).toBe(0);
+  });
+
+  it('covers latency sampled and unsampled query branches', async () => {
+    let built = build([{avgDuration:'1',p50Duration:'2',p95Duration:'3',p99Duration:'4'}]);
+    const access=(built.service as any).accessLogRepo; access.createQueryBuilder = jest.fn()
+      .mockReturnValueOnce(Object.assign(chain(),{getCount:jest.fn().mockResolvedValue(1000001)}))
+      .mockReturnValueOnce(Object.assign(chain(),{getRawOne:jest.fn().mockResolvedValue({avgDuration:'1'})}));
+    await expect(built.service.getLatencyStats({startDate:'2026-01-01',endDate:'2026-02-01'} as any)).resolves.toMatchObject({sampled:true,totalRequests:1000001});
+    built=build([]); await expect(built.service.getLatencyStats({} as any)).resolves.toMatchObject({avgDuration:0,totalRequests:0});
+  });
+
+  it('covers audit optional filters and username fallback', async () => {
+    const { service }=build([{log_id:'i',log_userId:'u',username:'x'},{log_id:'j',username:''}]);
+    const result=await service.getAuditLogs({page:0,limit:500,action:'a',userId:'u',timeRange:'7d'});
+    expect(result.items.map(x=>x.username)).toEqual(['x',null]);
+  });
+
+  it('covers comparison zero, growth, decline and absent rows', async () => {
+    let {service}=build();
+    (service as any).accessLogRepo.manager={query:jest.fn().mockResolvedValueOnce([{requests:1,bandwidth:'2',uv:3}]).mockResolvedValueOnce([{requests:0,bandwidth:'0',uv:0}])};
+    expect((await service.getComparison('1h')).changes).toEqual({requests:100,bandwidth:100,uv:100});
+    ({service}=build());
+    (service as any).accessLogRepo.manager={query:jest.fn().mockResolvedValueOnce([{requests:0,bandwidth:'0',uv:0}]).mockResolvedValueOnce([{requests:2,bandwidth:'4',uv:1}])};
+    expect((await service.getComparison('bad')).changes).toEqual({requests:-100,bandwidth:-100,uv:-100});
+    ({service}=build()); (service as any).accessLogRepo.manager={query:jest.fn().mockResolvedValue([])};
+    expect((await service.getComparison()).current.requests).toBe(0);
+    ({service}=build()); (service as any).accessLogRepo.manager={query:jest.fn().mockResolvedValueOnce([{requests:3,bandwidth:'6',uv:4}]).mockResolvedValueOnce([{requests:2,bandwidth:'4',uv:2}])};
+    expect((await service.getComparison('30d')).changes).toEqual({requests:50,bandwidth:50,uv:100});
+  });
+
+  it('validates security config constraints atomically and saves valid entries', async () => {
+    const {service,configCacheService,auditService}=buildAdminService();
+    const meta=require('./security-config.defaults').SEC_CONFIG_META;
+    await expect(service.updateSecurityConfig(mockUser,[{key:'invalid',value:'1'}])).rejects.toThrow('无效');
+    const bounded=meta.find((m:any)=>m.min!==undefined&&m.max!==undefined);
+    await expect(service.updateSecurityConfig(mockUser,[{key:bounded.key,value:'NaN'}])).rejects.toThrow('有效数值');
+    await expect(service.updateSecurityConfig(mockUser,[{key:bounded.key,value:String(bounded.min-1)}])).rejects.toThrow('不能小于');
+    await expect(service.updateSecurityConfig(mockUser,[{key:bounded.key,value:String(bounded.max+1)}])).rejects.toThrow('不能大于');
+    await service.updateSecurityConfig(mockUser,[{key:bounded.key,value:String(bounded.min)}]);
+    expect(configCacheService.setBatch).toHaveBeenCalled(); expect(auditService.log).toHaveBeenCalled();
+    configCacheService.get.mockResolvedValue(''); expect((await service.getSecurityConfig()).length).toBe(meta.length);
+  });
+
+  it('covers telemetry record filters and pagination clamps', async () => {
+    let {service}=build([{id:'1',type:'error'},{id:'2',type:'error'}]);
+    const result=await service.getTelemetryRecords({page:0,limit:500,type:'error',ip:'1',userId:'u',errorType:'Type',keyword:'q',timeRange:'24h'});
+    expect(result.items).toHaveLength(2);
+    ({service}=build([]));
+    await expect(service.getTelemetryRecords({type:'',ip:' ',userId:' ',errorType:' ',keyword:' '})).resolves.toEqual({items:[],total:0});
+  });
+
+  it('maps telemetry aggregates with missing and invalid numeric fields', async () => {
+    const {service}=build(); const telemetry=(service as any).telemetryRepo;
+    telemetry.createQueryBuilder=jest.fn()
+      .mockReturnValueOnce(Object.assign(chain(),{getRawOne:jest.fn().mockResolvedValue(undefined)}))
+      .mockReturnValueOnce(Object.assign(chain(),{getRawMany:jest.fn().mockResolvedValue([{type:'custom',count:'bad'}])}))
+      .mockReturnValueOnce(Object.assign(chain(),{getRawOne:jest.fn().mockResolvedValue({uniqueIPs:null})}))
+      .mockReturnValueOnce(Object.assign(chain(),{getRawMany:jest.fn().mockResolvedValue([{time:'t',error:null,apiError:'x',uploadError:'1',performance:'2',environment:'3'}])}));
+    await expect(service.getTelemetryStats('bad')).resolves.toMatchObject({totalRecords:0,uniqueIPs:0,byType:{custom:0},trend:[{error:0,apiError:0,uploadError:1,performance:2,environment:3}]});
+  });
+});
+
 describe('AdminService.updateSMTPConfig 密码处理', () => {
   it('提供新密码时加密后写入', async () => {
     const { service, configCacheService } = buildAdminService();

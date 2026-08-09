@@ -4,7 +4,7 @@
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 //
-#include "telegram-bot-api/FileStream.h"
+#include "telegram-bot-api/FileStreamCore.h"
 
 #include "td/utils/misc.h"
 #include "td/utils/Parser.h"
@@ -52,16 +52,11 @@ bool parse_file_stream_no_cache(td::Slice value) {
 }
 
 td::Result<td::int64> resolve_file_stream_size(td::int64 tdlib_size, td::int64 expected_size) {
-  if (tdlib_size > 0 && expected_size > 0 && tdlib_size != expected_size) {
-    return td::Status::Error(502, "File size metadata mismatch");
-  }
+  (void)expected_size;
   if (tdlib_size > 0) {
     return tdlib_size;
   }
-  if (expected_size > 0) {
-    return expected_size;
-  }
-  return td::Status::Error(502, "Exact file size is unavailable");
+  return td::Status::Error(502, "Exact file size is unavailable from Telegram");
 }
 
 td::Result<FileStreamRoute> parse_file_stream_route(td::Slice path) {

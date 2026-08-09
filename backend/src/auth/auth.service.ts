@@ -7,6 +7,7 @@ import * as crypto from 'crypto';
 import { User, UserRole } from '../common/entities/user.entity';
 import { VerificationCode } from '../common/entities/verification-code.entity';
 import { BannedIP } from '../common/entities/banned-ip.entity';
+import { JwtRevokedToken } from '../common/entities/jwt-revoked-token.entity';
 import { MailerService } from '../mailer/mailer.service';
 import { ConfigCacheService } from '../common/services/config-cache.service';
 import { AuditService } from '../common/services/audit.service';
@@ -45,6 +46,8 @@ export class AuthService {
     private verificationCodeRepository: Repository<VerificationCode>,
     @InjectRepository(BannedIP)
     private bannedIPRepository: Repository<BannedIP>,
+    @InjectRepository(JwtRevokedToken)
+    private revokedTokenRepository: Repository<JwtRevokedToken>,
     @InjectDataSource()
     private dataSource: DataSource,
     private configCacheService: ConfigCacheService,
@@ -427,6 +430,17 @@ export class AuthService {
       jti: crypto.randomBytes(16).toString('hex'),
     };
     return this.jwtService.sign(payload);
+  }
+
+  async revokeToken(jti: string, userId: string, expiresAt: Date): Promise<void> {
+    if (!jti || expiresAt.getTime() <= Date.now()) return;
+    await this.revokedTokenRepository.upsert({ jti, userId, expiresAt } as JwtRevokedToken, ['jti']);
+  }
+
+  async isTokenRevoked(jti: string): Promise<boolean> {
+    if (!jti) return true;
+    const token = await this.revokedTokenRepository.findOne({ where: { jti } });
+    return !!token && token.expiresAt.getTime() > Date.now();
   }
 
   async validateUser(userId: string): Promise<User | null> {

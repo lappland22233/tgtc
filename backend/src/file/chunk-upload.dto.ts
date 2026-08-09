@@ -5,6 +5,7 @@ import { IsString, IsInt, Min, Max, IsUUID, IsOptional, IsArray, MaxLength } fro
  * 精确的文件大小限制由服务端结合动态 MAX_FILE_SIZE 在 init 时校验。
  */
 export const MAX_CHUNKED_FILE_SIZE = 50 * 1024 * 1024 * 1024; // 50GB
+export const MAX_CHUNK_SIZE = 16 * 1024 * 1024; // 16MB，确保单请求磁盘缓冲与在途预算有界
 
 export class InitChunkUploadDto {
   @IsString()
@@ -27,7 +28,7 @@ export class InitChunkUploadDto {
 
   @IsInt()
   @Min(1)
-  @Max(104857600) // 100MB max chunk size
+  @Max(MAX_CHUNK_SIZE, { message: '单个分片不能超过 16MB' })
   chunkSize: number;
 
   @IsOptional()

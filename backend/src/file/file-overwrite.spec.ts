@@ -381,6 +381,109 @@ describe('FileService - applyOverwrite', () => {
   });
 });
 
+describe('FileService - access policy branches', () => {
+  let service: FileService;
+  let fileRepo: any;
+  let bannedRepo: any;
+  let rateLimit: any;
+  let audit: any;
+  const qb = (result: any) => {
+    const chain: any = {};
+    for (const method of ['createQueryBuilder', 'update', 'set', 'where', 'andWhere']) chain[method] = jest.fn(() => chain);
+    chain.execute = jest.fn().mockResolvedValue(result);
+    chain.getOne = jest.fn().mockResolvedValue(result);
+    return chain;
+  };
+
+  beforeEach(() => {
+    fileRepo = { findOne: jest.fn(), update: jest.fn(), createQueryBuilder: jest.fn(), manager: {} };
+    bannedRepo = { createQueryBuilder: jest.fn(), upsert: jest.fn() };
+    rateLimit = { incrementCounter: jest.fn(), reset: jest.fn() };
+    audit = { log: jest.fn() };
+    service = new FileService(
+      fileRepo, { findOne: jest.fn() } as any, {} as any, bannedRepo, {} as any,
+      {} as any, { get: jest.fn() } as any, {} as any,
+      { get: jest.fn(async (_key: string, fallback: string) => fallback) } as any,
+      rateLimit, {} as any, audit, {} as any, {} as any,
+    );
+  });
+
+  it('updates access policy only for existing writable owner files', async () => {
+    fileRepo.findOne.mockResolvedValue(null);
+    await expect(service.updateAccessType('f', 'public' as any, makeUser(ownerId))).rejects.toThrow(NotFoundException);
+    await expect(service.updateAccessCount('f', 1, makeUser(ownerId))).rejects.toThrow(NotFoundException);
+    await expect(service.setPassword('f', 'x', makeUser(ownerId))).rejects.toThrow(NotFoundException);
+    await expect(service.updateExpires('f', 1, makeUser(ownerId))).rejects.toThrow(NotFoundException);
+
+    fileRepo.findOne.mockResolvedValue(makeTargetFile());
+    await service.updateAccessType('f', 'public' as any, makeUser(ownerId));
+    await service.updateAccessCount('f', -1, makeUser(ownerId));
+    await service.setPassword('f', '', makeUser(ownerId));
+    await service.setPassword('f', 'secret', makeUser(ownerId));
+    await service.updateExpires('f', null, makeUser(ownerId));
+    await service.updateExpires('f', 2, makeUser(ownerId));
+    expect(fileRepo.update).toHaveBeenCalledTimes(6);
+
+    (service as any).accessCountMax = 5;
+    await expect(service.updateAccessCount('f', 0, makeUser(ownerId))).rejects.toThrow(BadRequestException);
+    await expect(service.updateAccessCount('f', 6, makeUser(ownerId))).rejects.toThrow(BadRequestException);
+    await service.updateAccessCount('f', 5, makeUser(ownerId));
+  });
+
+  it('checks passwords, privacy and access limits across all outcomes', async () => {
+    fileRepo.findOne.mockResolvedValueOnce(null).mockResolvedValueOnce({ password: null });
+    await expect(service.verifyPassword('f', 'x')).resolves.toBe(true);
+    await expect(service.verifyPassword('f', 'x')).resolves.toBe(true);
+    fileRepo.findOne.mockResolvedValueOnce({ password: await require('bcryptjs').hash('ok', 4) });
+    await expect(service.verifyPassword('f', 'ok')).resolves.toBe(true);
+
+    fileRepo.findOne.mockResolvedValueOnce(null).mockResolvedValueOnce({ password: 'x' });
+    await expect(service.hasPassword('f')).resolves.toBe(false);
+    await expect(service.hasPassword('f')).resolves.toBe(true);
+    fileRepo.findOne.mockResolvedValueOnce(null).mockResolvedValueOnce({ accessType: 'private' }).mockResolvedValueOnce({ accessType: 'public' });
+    await expect(service.isPrivateFile('f')).resolves.toBe(false);
+    await expect(service.isPrivateFile('f')).resolves.toBe(true);
+    await expect(service.isPrivateFile('f')).resolves.toBe(false);
+
+    fileRepo.findOne.mockResolvedValueOnce(null);
+    await expect(service.checkAndIncrementAccess('f')).resolves.toEqual({ allowed: false, reason: '文件不存在' });
+    fileRepo.findOne.mockResolvedValueOnce({ expiresIn: 1, expiresStartAt: new Date(Date.now() - 7200000), maxAccessCount: -1 });
+    await expect(service.checkAndIncrementAccess('f')).resolves.toEqual({ allowed: false, reason: '文件分享已过期' });
+    fileRepo.findOne.mockResolvedValueOnce({ expiresIn: null, expiresStartAt: null, maxAccessCount: -1 });
+    await expect(service.checkAndIncrementAccess('f')).resolves.toEqual({ allowed: true });
+    fileRepo.findOne.mockResolvedValueOnce({ expiresIn: 1, expiresStartAt: new Date(), maxAccessCount: 2 });
+    fileRepo.createQueryBuilder.mockReturnValue(qb({ affected: 0 }));
+    await expect(service.checkAndIncrementAccess('f')).resolves.toEqual({ allowed: false, reason: '文件访问次数已用尽' });
+    fileRepo.findOne.mockResolvedValueOnce({ maxAccessCount: 2 });
+    fileRepo.createQueryBuilder.mockReturnValue(qb({ affected: 1 }));
+    await expect(service.checkAndIncrementAccess('f')).resolves.toEqual({ allowed: true });
+  });
+
+  it('returns permanent, temporary and absent IP ban states', async () => {
+    bannedRepo.createQueryBuilder.mockReturnValue(qb(null));
+    await expect(service.isIPBanned('ip')).resolves.toEqual({ banned: false });
+    bannedRepo.createQueryBuilder.mockReturnValue(qb({ isPermanent: true }));
+    await expect(service.isIPBanned('ip')).resolves.toEqual(expect.objectContaining({ banned: true, message: expect.stringContaining('永久') }));
+    bannedRepo.createQueryBuilder.mockReturnValue(qb({ isPermanent: false, expiresAt: new Date(Date.now() + 60000) }));
+    await expect(service.isIPBanned('ip')).resolves.toEqual(expect.objectContaining({ banned: true, message: expect.stringContaining('分钟') }));
+  });
+
+  it('records password attempts below threshold, initial ban and escalated ban', async () => {
+    rateLimit.incrementCounter.mockResolvedValueOnce({ count: 1, thresholdReached: false });
+    await service.recordFailedPasswordAttempt('ip');
+    expect(bannedRepo.upsert).not.toHaveBeenCalled();
+
+    rateLimit.incrementCounter.mockResolvedValueOnce({ count: 5, thresholdReached: true }).mockResolvedValueOnce({ count: 1, thresholdReached: false });
+    await service.recordFailedPasswordAttempt('ip');
+    expect(bannedRepo.upsert).toHaveBeenLastCalledWith(expect.objectContaining({ reason: expect.stringContaining('第1次') }), ['ip']);
+
+    rateLimit.incrementCounter.mockResolvedValueOnce({ count: 5, thresholdReached: true }).mockResolvedValueOnce({ count: 5, thresholdReached: true });
+    await service.recordFailedPasswordAttempt('ip');
+    expect(bannedRepo.upsert).toHaveBeenLastCalledWith(expect.objectContaining({ reason: expect.stringContaining('升级为6小时') }), ['ip']);
+    expect(rateLimit.reset).toHaveBeenCalledWith('ban:ip');
+  });
+});
+
 describe('InitChunkUploadDto - overwriteFileId 校验', () => {
   const base = {
     fileName: 'big.zip',
@@ -425,6 +528,7 @@ describe('ChunkUploadService - init 覆盖目标预校验', () => {
         ChunkUploadService,
         { provide: FileService, useValue: fileServiceMock },
         { provide: getQueueToken(QUEUE_NAMES.FILE_UPLOAD), useValue: { add: jest.fn() } },
+        { provide: ConfigService, useValue: { get: jest.fn() } },
       ],
     }).compile();
 

@@ -12,6 +12,7 @@
 #include "telegram-bot-api/HttpStatConnection.h"
 #include "telegram-bot-api/Stats.h"
 #include "telegram-bot-api/Watchdog.h"
+#include "telegram-bot-api/WorkdirCleanupManager.h"
 
 #include "td/db/binlog/Binlog.h"
 
@@ -224,6 +225,18 @@ int main(int argc, char *argv[]) {
   options.add_checked_option('\0', "file-stream-write-high-watermark",
                              "maximum queued streaming response bytes per connection",
                              td::OptionParser::parse_integer(parameters->file_stream_write_high_watermark_));
+  options.add_checked_option('\0', "workdir-cleanup-threshold-bytes",
+                             "workdir usage warning threshold which triggers asynchronous cleanup",
+                             td::OptionParser::parse_integer(parameters->workdir_cleanup_threshold_bytes_));
+  options.add_checked_option('\0', "workdir-cleanup-target-bytes", "workdir target usage after threshold cleanup",
+                             td::OptionParser::parse_integer(parameters->workdir_cleanup_target_bytes_));
+  options.add_option('\0', "workdir-cleanup-interval", "periodic workdir cleanup interval in seconds",
+                     [&](td::Slice value) { parameters->workdir_cleanup_interval_ = td::to_double(value); });
+  options.add_checked_option('\0', "workdir-file-ttl", "inactive workdir file retention time in seconds",
+                             td::OptionParser::parse_integer(parameters->workdir_file_ttl_));
+  options.add_checked_option('\0', "workdir-min-free-bytes",
+                             "minimum free bytes before reporting HTTP 507 and shutting down (default 1 GiB)",
+                             td::OptionParser::parse_integer(parameters->workdir_min_free_bytes_));
   options.add_checked_option(
       '\0', "api-id",
       "application identifier for Telegram API access, which can be obtained at https://my.telegram.org (defaults to "
@@ -342,6 +355,14 @@ int main(int argc, char *argv[]) {
     }
     if (parameters->file_stream_write_high_watermark_ < parameters->file_stream_chunk_size_) {
       return td::Status::Error("File stream write high watermark must not be smaller than chunk size");
+    }
+    if (parameters->workdir_cleanup_threshold_bytes_ <= 0 || parameters->workdir_cleanup_target_bytes_ < 0 ||
+        parameters->workdir_cleanup_target_bytes_ >= parameters->workdir_cleanup_threshold_bytes_) {
+      return td::Status::Error("Workdir cleanup target must be non-negative and smaller than threshold");
+    }
+    if (parameters->workdir_cleanup_interval_ <= 0 || parameters->workdir_file_ttl_ < 0 ||
+        parameters->workdir_min_free_bytes_ <= 0) {
+      return td::Status::Error("Workdir cleanup interval and minimum free bytes must be positive; TTL must be non-negative");
     }
     return td::Status::OK();
   });
@@ -496,6 +517,19 @@ int main(int argc, char *argv[]) {
       sched.create_actor_unsafe<td::GetHostByNameActor>(0, "GetHostByName", std::move(get_host_by_name_options))
           .release();
 
+  WorkdirCleanupConfig cleanup_config;
+  cleanup_config.workdir = parameters->working_directory_;
+  cleanup_config.threshold_bytes = parameters->workdir_cleanup_threshold_bytes_;
+  cleanup_config.target_bytes = parameters->workdir_cleanup_target_bytes_;
+  cleanup_config.interval = parameters->workdir_cleanup_interval_;
+  cleanup_config.file_ttl = parameters->workdir_file_ttl_;
+  cleanup_config.min_free_bytes = parameters->workdir_min_free_bytes_;
+  parameters->shared_data_->workdir_cleanup_manager_ =
+      sched.create_actor_unsafe<WorkdirCleanupManager>(SharedData::get_file_gc_scheduler_id(),
+                                                       "WorkdirCleanupManager", cleanup_config,
+                                                       parameters->shared_data_)
+          .release();
+
   FileStreamConfig file_stream_config;
   file_stream_config.enabled = parameters->file_streaming_enabled_;
   file_stream_config.chunk_size = parameters->file_stream_chunk_size_;
@@ -547,6 +581,11 @@ int main(int argc, char *argv[]) {
 
     if (!need_reopen_log.test_and_set()) {
       td::log_interface->after_rotation();
+    }
+
+    if (shared_data->workdir_shutdown_requested_.exchange(false, std::memory_order_acq_rel)) {
+      LOG(ERROR) << "Stopping engine because Telegram workdir has insufficient free disk space";
+      need_quit.clear();
     }
 
     if (!need_quit.test_and_set()) {

@@ -6,6 +6,7 @@ import { BannedIP } from '../common/entities/banned-ip.entity';
 import { ShareAudit } from '../common/entities/share-audit.entity';
 import { RateLimit } from '../common/entities/rate-limit.entity';
 import { AuditLog } from '../common/entities/audit-log.entity';
+import { JwtRevokedToken } from '../common/entities/jwt-revoked-token.entity';
 
 @Injectable()
 export class TasksService {
@@ -20,6 +21,8 @@ export class TasksService {
     private rateLimitRepository: Repository<RateLimit>,
     @InjectRepository(AuditLog)
     private auditLogRepository: Repository<AuditLog>,
+    @InjectRepository(JwtRevokedToken)
+    private revokedTokenRepository: Repository<JwtRevokedToken>,
   ) {}
 
   @Cron(CronExpression.EVERY_30_MINUTES)
@@ -62,6 +65,18 @@ export class TasksService {
       }
     } catch (error: unknown) {
       this.logger.error('清理过期 token 记录失败', error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  @Cron(CronExpression.EVERY_HOUR)
+  async cleanupExpiredRevokedTokens() {
+    try {
+      const result = await this.revokedTokenRepository.delete({ expiresAt: LessThan(new Date()) });
+      if ((result.affected ?? 0) > 0) {
+        this.logger.log(`已清理 ${result.affected} 条过期 JWT 吊销记录`);
+      }
+    } catch (error: unknown) {
+      this.logger.error('清理过期 JWT 吊销记录失败', error instanceof Error ? error.message : String(error));
     }
   }
 

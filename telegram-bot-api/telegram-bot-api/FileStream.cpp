@@ -9,6 +9,7 @@
 #include "telegram-bot-api/Client.h"
 #include "telegram-bot-api/ClientManager.h"
 #include "telegram-bot-api/Query.h"
+#include "telegram-bot-api/WorkdirCleanupManager.h"
 
 #include "td/net/HttpHeaderCreator.h"
 
@@ -27,11 +28,13 @@ std::atomic<td::int64> next_file_stream_id{1};
 }  // namespace
 
 FileStreamConnection::FileStreamConnection(td::ActorOwn<td::HttpInboundConnection> connection,
-                                           td::ActorId<ClientManager> client_manager, FileStreamRoute route,
+                                           td::ActorId<ClientManager> client_manager,
+                                           td::ActorId<WorkdirCleanupManager> cleanup_manager, FileStreamRoute route,
                                            FileStreamConfig config, td::IPAddress peer_address)
     : stream_id_(next_file_stream_id.fetch_add(1, std::memory_order_relaxed))
     , connection_(std::move(connection))
     , client_manager_(client_manager)
+    , cleanup_manager_(cleanup_manager)
     , route_(std::move(route))
     , config_(config)
     , peer_address_(std::move(peer_address)) {
@@ -57,7 +60,15 @@ void FileStreamConnection::on_file_ready(td::int32 file_id, td::int64 total_size
     return fail(500, "Invalid file metadata received from TDLib");
   }
   file_id_ = file_id;
-  local_path_ = std::move(local_path);
+  if (!local_path.empty() && local_path_ != local_path) {
+    if (!local_path_.empty() && !cleanup_manager_.empty()) {
+      send_closure(cleanup_manager_, &WorkdirCleanupManager::release_file, local_path_);
+    }
+    local_path_ = std::move(local_path);
+    if (!cleanup_manager_.empty()) {
+      send_closure(cleanup_manager_, &WorkdirCleanupManager::retain_file, local_path_);
+    }
+  }
   if (static_cast<td::uint64>(total_size) > static_cast<td::uint64>(std::numeric_limits<std::size_t>::max())) {
     return fail(413, "File is too large for this build");
   }
@@ -84,11 +95,15 @@ void FileStreamConnection::on_file_progress(td::int64 reported_total_size, td::s
   if (reported_total_size > 0 && reported_total_size != cursor_.total_size) {
     return abort(td::Status::Error(502, "File size metadata changed during download"));
   }
-  if (!local_path.empty()) {
-    if (!local_path_.empty() && local_path_ != local_path) {
-      local_file_.close();
+  if (!local_path.empty() && local_path_ != local_path) {
+    local_file_.close();
+    if (!local_path_.empty() && !cleanup_manager_.empty()) {
+      send_closure(cleanup_manager_, &WorkdirCleanupManager::release_file, local_path_);
     }
     local_path_ = std::move(local_path);
+    if (!cleanup_manager_.empty()) {
+      send_closure(cleanup_manager_, &WorkdirCleanupManager::retain_file, local_path_);
+    }
   }
   auto status = cursor_.update_progress(download_offset, downloaded_prefix_size, is_completed);
   if (status.is_error()) {
@@ -291,6 +306,9 @@ void FileStreamConnection::timeout_expired() {
 
 void FileStreamConnection::tear_down() {
   local_file_.close();
+  if (!local_path_.empty() && !cleanup_manager_.empty()) {
+    send_closure(cleanup_manager_, &WorkdirCleanupManager::release_file, local_path_);
+  }
   send_closure(client_manager_, &ClientManager::release_file_stream, stream_id_);
   if (!client_.empty()) {
     // 仅当带 X-Telegram-No-Cache 标记的流正常完成传输时，才请求删除 TDLib 本地副本；中断路径仍只取消下载

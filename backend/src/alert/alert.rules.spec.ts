@@ -1,0 +1,8 @@
+import { createAlertRules, getAlertRuleMetadata } from './alert.rules';
+
+describe('alert rules',()=>{
+ const low:any={totalRequests:0,qpsAvg:0,error5xxCount:0,error4xxCount:0,totalBandwidth:0,p95Duration:0,uniqueIps:0};
+ it('loads all rules concurrently and evaluates both sides of every condition',async()=>{const cache:any={get:jest.fn((_k:string,d:string)=>Promise.resolve(d))}; const rules=await createAlertRules(cache); expect(rules).toHaveLength(9); expect(cache.get).toHaveBeenCalledTimes(12); const high:any={totalRequests:1000,qpsAvg:400,error5xxCount:200,error4xxCount:300,totalBandwidth:101*60*1024*1024,p95Duration:0,uniqueIps:0}; for(const r of rules){expect(await r.evaluate(low)).toBeNull(); if(!r.id.startsWith('SEC_')) expect(await r.evaluate(high)).toEqual(expect.any(String));} expect(getAlertRuleMetadata()).toHaveLength(9)});
+ it('uses configured thresholds and falls back for invalid numbers',async()=>{const cache:any={get:jest.fn((_k:string,d:string)=>Promise.resolve(d==='100'?'invalid':'1'))}; const rules=await createAlertRules(cache); const qps=rules.find(r=>r.id==='TRAFFIC_QPS')!; expect(qps.cooldownMinutes).toBe(1); expect(await qps.evaluate({...low,qpsAvg:101,totalRequests:1})).toContain('101.0')});
+ it('covers zero-request guard and security no-op evaluators',async()=>{const cache:any={get:jest.fn((_k:string,d:string)=>Promise.resolve(d))}; const rules=await createAlertRules(cache); const rate=rules.find(r=>r.id==='ERROR_5XX_RATE')!; expect(await rate.evaluate({...low,totalRequests:0,error5xxCount:999})).toBeNull(); for(const id of ['SEC_IP_FLOOD','SEC_BRUTE_FORCE','SEC_ABNORMAL_DOWNLOAD']) expect(await rules.find(r=>r.id===id)!.evaluate(low)).toBeNull()});
+});

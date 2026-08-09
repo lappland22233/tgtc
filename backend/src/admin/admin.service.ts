@@ -201,48 +201,36 @@ export class AdminService {
   }
 
   async banIP(user: User, ip: string, reason?: string, permanent = true, expiresAt?: Date): Promise<void> {
-    // 检查是否已有活跃封禁记录（unbannedAt 为空）
-    const existing = await this.bannedIPRepository
-      .createQueryBuilder('b')
-      .where('b.ip = :ip', { ip })
-      .andWhere('b.unbannedAt IS NULL')
-      .getOne();
+    const normalizedExpiry = permanent ? null : expiresAt;
+    if (!permanent && (!normalizedExpiry || !Number.isFinite(normalizedExpiry.getTime()) || normalizedExpiry <= new Date())) {
+      throw new BadRequestException('临时封禁必须提供晚于当前时间的到期时间');
+    }
 
-    if (existing) {
+    // 单条 UPSERT 同时覆盖首次封禁和历史记录重新激活；活跃记录不更新。
+    // 避免 findOne→insert/update 的 TOCTOU，并确保并发请求只有一个成功。
+    const rows = await this.bannedIPRepository.manager.query(
+      `INSERT INTO banned_ips (id, ip, reason, "isPermanent", "expiresAt", "unbanned_at", "createdAt")
+       VALUES (gen_random_uuid(), $1, $2, $3, $4, NULL, NOW())
+       ON CONFLICT (ip) DO UPDATE SET
+         reason = COALESCE(EXCLUDED.reason, banned_ips.reason),
+         "isPermanent" = EXCLUDED."isPermanent",
+         "expiresAt" = EXCLUDED."expiresAt",
+         "unbanned_at" = NULL,
+         "createdAt" = NOW()
+       WHERE banned_ips."unbanned_at" IS NOT NULL
+       RETURNING id`,
+      [ip, reason ?? null, permanent, normalizedExpiry ?? null],
+    );
+    if (!rows || rows.length === 0) {
       throw new BadRequestException('该IP已被封禁');
     }
 
-    // 检查是否有历史记录，若有则重新激活
-    const historical = await this.bannedIPRepository
-      .createQueryBuilder('b')
-      .where('b.ip = :ip', { ip })
-      .andWhere('b.unbannedAt IS NOT NULL')
-      .getOne();
-
-    if (historical) {
-      await this.bannedIPRepository.update(historical.id, {
-        reason: reason ?? historical.reason,
-        isPermanent: permanent,
-        expiresAt: permanent ? null : (expiresAt ?? null),
-        createdAt: new Date(),
-        unbannedAt: null,
-      });
-    } else {
-      const bannedIP = this.bannedIPRepository.create({
-        ip,
-        reason: reason ?? null,
-        isPermanent: permanent,
-        expiresAt: permanent ? null : (expiresAt ?? null),
-      });
-      await this.bannedIPRepository.save(bannedIP);
-    }
-
-    this.auditService.log({
+    await this.auditService.logAwait({
       action: 'ip_ban',
       userId: user.id,
       resourceType: 'ip',
       resourceId: ip,
-      metadata: { reason, permanent },
+      metadata: { reason, permanent, expiresAt: normalizedExpiry?.toISOString() ?? null },
     });
   }
 

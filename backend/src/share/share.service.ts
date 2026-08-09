@@ -166,14 +166,19 @@ export class ShareService {
    * - 成功后返回 accessJwt，前端保存到内存，后续调用 /s/:token/download 时附带
    */
   async verifyPassword(token: string, password: string, ip: string | null): Promise<{ accessJwt: string }> {
+    const precheckAllowed = await this.passwordService.checkPasswordAttemptAllowed(ip, token);
+    if (!precheckAllowed) {
+      throw new BadRequestException('无法验证分享密码，请稍后重试');
+    }
+
     const link = await this.shareLinkRepo.findOne({ where: { token, isDeleted: false } });
-    if (!link) throw new NotFoundException('分享不存在');
+    if (!link) throw new BadRequestException('无法验证分享密码');
 
     // IP 封禁检查
     if (ip) {
       const ipCheck = await this.passwordService.isIPBanned(ip);
       if (ipCheck.banned) {
-        throw new ForbiddenException(ipCheck.message || 'IP 已被封禁');
+        throw new BadRequestException('无法验证分享密码，请稍后重试');
       }
     }
 
@@ -192,7 +197,7 @@ export class ShareService {
         status: AuditStatus.FAILURE,
         metadata: { ip: ip || null },
       });
-      throw new BadRequestException('密码错误');
+      throw new BadRequestException('无法验证分享密码');
     }
 
     const accessJwt = await this.passwordService.issueAccessJwt(link.id, link.password);

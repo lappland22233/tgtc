@@ -8,6 +8,7 @@ import { AuthService } from './auth.service';
 import { User } from '../common/entities/user.entity';
 import { VerificationCode } from '../common/entities/verification-code.entity';
 import { BannedIP } from '../common/entities/banned-ip.entity';
+import { JwtRevokedToken } from '../common/entities/jwt-revoked-token.entity';
 import { SystemConfig } from '../common/entities/system-config.entity';
 import { MailerService } from '../mailer/mailer.service';
 import { ConfigCacheService } from '../common/services/config-cache.service';
@@ -91,6 +92,10 @@ describe('AuthService - validateVerificationCode', () => {
         {
           provide: getRepositoryToken(BannedIP),
           useValue: mockBannedIPRepo,
+        },
+        {
+          provide: getRepositoryToken(JwtRevokedToken),
+          useValue: { upsert: jest.fn(), findOne: jest.fn() },
         },
         {
           provide: getRepositoryToken(SystemConfig),
@@ -276,6 +281,7 @@ describe('AuthService - 邮箱验证开关与登录拦截', () => {
         { provide: getRepositoryToken(User), useValue: mockUserRepo },
         { provide: getRepositoryToken(VerificationCode), useValue: mockVerificationCodeRepo },
         { provide: getRepositoryToken(BannedIP), useValue: mockBannedIPRepo },
+        { provide: getRepositoryToken(JwtRevokedToken), useValue: { upsert: jest.fn(), findOne: jest.fn() } },
         { provide: JwtService, useValue: mockJwtService },
         { provide: MailerService, useValue: mockMailerService },
         { provide: DataSource, useValue: mockDataSource },

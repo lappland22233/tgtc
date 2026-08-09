@@ -14,11 +14,12 @@ describe('ChunkUploadService session quota', () => {
     assertOverwriteTarget: jest.fn().mockResolvedValue(undefined),
   };
   const fileUploadQueue = { add: jest.fn() };
+  const configService = { get: jest.fn() };
   let service: ChunkUploadService;
 
   beforeEach(() => {
     jest.clearAllMocks();
-    service = new ChunkUploadService(fileService as any, fileUploadQueue as any);
+    service = new ChunkUploadService(fileService as any, fileUploadQueue as any, configService as any);
   });
 
   afterEach(async () => {

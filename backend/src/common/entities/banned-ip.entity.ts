@@ -3,9 +3,11 @@ import {
   PrimaryColumn,
   Column,
   CreateDateColumn,
+  Check,
 } from 'typeorm';
 
 @Entity('banned_ips')
+@Check('CHK_banned_ips_permanence_expiry', '("isPermanent" = true AND "expiresAt" IS NULL) OR ("isPermanent" = false AND "expiresAt" IS NOT NULL)')
 export class BannedIP {
   @PrimaryColumn({ type: 'uuid', default: () => 'gen_random_uuid()' })
   id: string;

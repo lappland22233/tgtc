@@ -1,6 +1,7 @@
-import { Injectable, BadRequestException, NotFoundException, ForbiddenException, Logger, OnModuleInit } from '@nestjs/common';
+import { Injectable, BadRequestException, NotFoundException, ForbiddenException, HttpException, HttpStatus, Logger, OnModuleInit } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { InjectQueue } from '@nestjs/bull';
+import { ConfigService } from '@nestjs/config';
 import { Queue } from 'bull';
 import * as fs from 'fs';
 import { promises as fsp } from 'fs';
@@ -45,6 +46,14 @@ export class ChunkUploadService implements OnModuleInit {
   private readonly logger = new Logger(ChunkUploadService.name);
   private readonly sessions = new Map<string, ChunkSession>();
   private readonly baseDir: string;
+  private readonly incomingDir: string;
+  private readonly maxConcurrentRequestsPerUser: number;
+  private readonly maxInFlightRequests: number;
+  private readonly maxInFlightBytes: number;
+  private readonly minFreeDiskBytes: number;
+  private inFlightRequests = 0;
+  private inFlightBytes = 0;
+  private readonly inFlightRequestsByUser = new Map<string, number>();
 
   /** 每用户最大并发会话数 */
   private static readonly MAX_SESSIONS_PER_USER = 10;
@@ -57,9 +66,15 @@ export class ChunkUploadService implements OnModuleInit {
     private fileService: FileService,
     @InjectQueue(QUEUE_NAMES.FILE_UPLOAD)
     private fileUploadQueue: Queue,
+    private readonly configService: ConfigService,
   ) {
     this.baseDir = path.resolve(process.cwd(), 'tmp', 'uploads');
-    fs.mkdirSync(this.baseDir, { recursive: true });
+    this.incomingDir = path.join(this.baseDir, 'incoming');
+    fs.mkdirSync(this.incomingDir, { recursive: true });
+    this.maxConcurrentRequestsPerUser = this.readPositiveConfig('CHUNK_UPLOAD_USER_CONCURRENCY', 3);
+    this.maxInFlightRequests = this.readPositiveConfig('CHUNK_UPLOAD_GLOBAL_CONCURRENCY', 24);
+    this.maxInFlightBytes = this.readPositiveConfig('CHUNK_UPLOAD_INFLIGHT_BYTES', 256 * 1024 * 1024);
+    this.minFreeDiskBytes = this.readPositiveConfig('CHUNK_UPLOAD_MIN_FREE_DISK_BYTES', 1024 * 1024 * 1024);
   }
 
   /**
@@ -72,6 +87,19 @@ export class ChunkUploadService implements OnModuleInit {
     this.cleanupOrphanChunkDirs().catch((err) => {
       this.logger.warn(`[分片上传] 启动清理孤儿分片目录失败: ${(err as Error).message}`);
     });
+    this.cleanupIncomingChunks().catch((err) => {
+      this.logger.warn(`[分片上传] 启动清理未完成接收文件失败: ${(err as Error).message}`);
+    });
+  }
+
+  private readPositiveConfig(key: string, fallback: number): number {
+    const value = Number(this.configService.get<string>(key));
+    return Number.isSafeInteger(value) && value > 0 ? value : fallback;
+  }
+
+  private async cleanupIncomingChunks(): Promise<void> {
+    const entries = await fsp.readdir(this.incomingDir).catch(() => [] as string[]);
+    await Promise.all(entries.map((name) => this.removeIncomingChunk(path.join(this.incomingDir, name))));
   }
 
   private async cleanupOrphanChunkDirs(): Promise<void> {
@@ -127,6 +155,9 @@ export class ChunkUploadService implements OnModuleInit {
     const declaredCapacity = totalChunks * chunkSize;
     if (!Number.isSafeInteger(declaredCapacity) || declaredCapacity < fileSize) {
       throw new BadRequestException('totalChunks 与 chunkSize 不足以容纳声明的 fileSize');
+    }
+    if (totalChunks !== Math.ceil(fileSize / chunkSize)) {
+      throw new BadRequestException('totalChunks 必须与 fileSize/chunkSize 精确匹配');
     }
 
     // 覆盖目标预校验：存在 + 归属 + 目录一致，无效直接 400，避免大文件传完才发现目标不可覆盖。
@@ -186,33 +217,87 @@ export class ChunkUploadService implements OnModuleInit {
     return { uploadId };
   }
 
-  /** 保存单个分片 */
-  async saveChunk(uploadId: string, chunkIndex: number, buffer: Buffer, userId: string): Promise<void> {
+  async acquireChunkRequest(
+    uploadId: string,
+    userId: string,
+    contentLength: number,
+  ): Promise<() => void> {
     const session = this.getSession(uploadId, userId);
+    const reservedBytes = Number.isSafeInteger(contentLength) && contentLength > 0
+      ? contentLength
+      : session.chunkSize;
+    if (reservedBytes > session.chunkSize + 1024 * 1024) {
+      throw new BadRequestException('请求体超过声明的分片大小');
+    }
+    const userRequests = this.inFlightRequestsByUser.get(userId) || 0;
+    if (userRequests >= this.maxConcurrentRequestsPerUser
+      || this.inFlightRequests >= this.maxInFlightRequests
+      || this.inFlightBytes + reservedBytes > this.maxInFlightBytes) {
+      throw new HttpException('上传请求过多，请稍后重试', HttpStatus.TOO_MANY_REQUESTS);
+    }
+    await this.ensureDiskSpace(reservedBytes);
 
-    if (chunkIndex < 0 || chunkIndex >= session.totalChunks) {
+    this.inFlightRequests++;
+    this.inFlightBytes += reservedBytes;
+    this.inFlightRequestsByUser.set(userId, userRequests + 1);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.inFlightRequests = Math.max(0, this.inFlightRequests - 1);
+      this.inFlightBytes = Math.max(0, this.inFlightBytes - reservedBytes);
+      const remaining = (this.inFlightRequestsByUser.get(userId) || 1) - 1;
+      if (remaining > 0) this.inFlightRequestsByUser.set(userId, remaining);
+      else this.inFlightRequestsByUser.delete(userId);
+    };
+  }
+
+  private async ensureDiskSpace(requiredBytes: number): Promise<void> {
+    try {
+      const stats = await fsp.statfs(this.baseDir);
+      const freeBytes = Number(stats.bavail) * Number(stats.bsize);
+      if (freeBytes - requiredBytes < this.minFreeDiskBytes) {
+        throw new HttpException('上传临时磁盘空间不足，请稍后重试', HttpStatus.INSUFFICIENT_STORAGE);
+      }
+    } catch (error) {
+      if (error instanceof HttpException) throw error;
+      this.logger.error(`[分片上传] 无法检查临时分区空间: ${(error as Error).message}`);
+      throw new HttpException('无法确认上传临时磁盘空间', HttpStatus.SERVICE_UNAVAILABLE);
+    }
+  }
+
+  async removeIncomingChunk(filePath: string): Promise<void> {
+    const resolved = path.resolve(filePath);
+    if (!resolved.startsWith(this.incomingDir + path.sep)) return;
+    await fsp.unlink(resolved).catch(() => {});
+  }
+
+  /** 将 Multer 已流式落盘的分片原子提交到会话目录。 */
+  async saveChunkFromPath(
+    uploadId: string,
+    chunkIndex: number,
+    incomingPath: string,
+    actualSize: number,
+    userId: string,
+  ): Promise<void> {
+    const session = this.getSession(uploadId, userId);
+    if (!Number.isSafeInteger(chunkIndex) || chunkIndex < 0 || chunkIndex >= session.totalChunks) {
       throw new BadRequestException(`分片索引 ${chunkIndex} 超出范围 [0, ${session.totalChunks - 1}]`);
     }
-
-    if (buffer.length === 0) {
-      throw new BadRequestException('分片数据为空');
+    const expectedSize = chunkIndex === session.totalChunks - 1
+      ? session.fileSize - session.chunkSize * (session.totalChunks - 1)
+      : session.chunkSize;
+    if (expectedSize <= 0 || actualSize !== expectedSize) {
+      throw new BadRequestException(`分片大小校验失败: 期望 ${expectedSize}, 实际 ${actualSize}`);
     }
-
-    // 校验分片实际大小不超过声明的 chunkSize（最后一片可更小，但任何分片都不应更大），
-    // 防止超写字节绕过 fileSize 上限写满磁盘。
-    if (buffer.length > session.chunkSize) {
-      throw new BadRequestException(`分片大小 ${buffer.length} 超过声明的 chunkSize ${session.chunkSize}`);
+    const stat = await fsp.stat(incomingPath);
+    if (!stat.isFile() || stat.size !== actualSize) {
+      throw new BadRequestException('分片临时文件大小不一致');
     }
 
     session.lastActivityAt = new Date();
-
-    const dir = this.getChunkDir(uploadId);
-    const filePath = path.join(dir, String(chunkIndex));
-
-    // 原子写入：先写临时文件，再 rename
-    const tmpPath = filePath + '.tmp';
-    await fsp.writeFile(tmpPath, buffer);
-    await fsp.rename(tmpPath, filePath);
+    const filePath = path.join(this.getChunkDir(uploadId), String(chunkIndex));
+    await fsp.rename(incomingPath, filePath);
   }
 
   /** 查询已传分片状态（断点续传） */
@@ -485,8 +570,9 @@ export class ChunkUploadService implements OnModuleInit {
     this.throwIfAborted(signal);
     await this.fileUploadQueue.add(
       'upload',
-      { fileId: savedFile.id, filePath: pendingPath },
+      { fileId: savedFile.id, filePath: pendingPath, uploadVersion: savedFile.uploadVersion },
       {
+        jobId: `file-upload:${savedFile.id}:${savedFile.uploadVersion}`,
         attempts: 3,
         backoff: { type: 'exponential', delay: 10000 },
         removeOnComplete: 100,

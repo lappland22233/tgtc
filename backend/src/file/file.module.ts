@@ -19,6 +19,7 @@ import { ThumbnailCryptoService } from './thumbnail-crypto.service';
 import { UploadJobService } from './upload-job.service';
 import { ChunkUploadService } from './chunk-upload.service';
 import { ChunkUploadController } from './chunk-upload.controller';
+import { ChunkUploadResourceInterceptor } from './chunk-upload-resource.interceptor';
 import { FileCacheService } from './file-cache.service';
 import { ConfigCacheModule } from '../common/services/config-cache.module';
 import { RateLimitModule } from '../common/services/rate-limit.module';
@@ -48,7 +49,7 @@ import { TagModule } from '../tag/tag.module';
     }),
   ],
   controllers: [FileController, ChunkUploadController],
-  providers: [FileService, ThumbnailCryptoService, UploadJobService, ChunkUploadService, FileCacheService],
+  providers: [FileService, ThumbnailCryptoService, UploadJobService, ChunkUploadService, ChunkUploadResourceInterceptor, FileCacheService],
   exports: [FileService],
 })
 export class FileModule {}

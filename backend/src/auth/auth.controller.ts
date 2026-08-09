@@ -6,6 +6,7 @@ import { RegisterDto, LoginDto, VerifyEmailDto, SendCodeDto, ResetPasswordDto } 
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { User } from '../common/entities/user.entity';
 import { getClientIp } from '../common/utils/client-ip';
+import { JwtService } from '@nestjs/jwt';
 
 const getCookieOptions = (req: Request) => ({
   httpOnly: true,
@@ -21,7 +22,10 @@ const getCookieOptions = (req: Request) => ({
 
 @Controller('auth')
 export class AuthController {
-  constructor(private authService: AuthService) {}
+  constructor(
+    private readonly authService: AuthService,
+    private readonly jwtService: JwtService,
+  ) {}
 
   @Post('register')
   async register(@Body() registerDto: RegisterDto, @Req() req: Request, @Res({ passthrough: true }) res: Response) {
@@ -32,7 +36,8 @@ export class AuthController {
       res.cookie('access_token', result.accessToken, getCookieOptions(req));
     }
 
-    return result;
+    const { accessToken: _accessToken, ...browserResponse } = result;
+    return browserResponse;
   }
 
   @Post('login')
@@ -40,11 +45,21 @@ export class AuthController {
     const ip = getClientIp(req);
     const result = await this.authService.login(loginDto, ip);
     res.cookie('access_token', result.accessToken, getCookieOptions(req));
-    return result;
+    const { accessToken: _accessToken, ...browserResponse } = result;
+    return browserResponse;
   }
 
   @Post('logout')
   async logout(@Req() req: Request, @Res({ passthrough: true }) res: Response) {
+    const token = typeof req.cookies?.access_token === 'string'
+      ? req.cookies.access_token
+      : undefined;
+    if (token) {
+      const payload = this.jwtService.decode(token) as { jti?: string; sub?: string; exp?: number } | null;
+      if (payload?.jti && payload.sub && payload.exp) {
+        await this.authService.revokeToken(payload.jti, payload.sub, new Date(payload.exp * 1000));
+      }
+    }
     res.clearCookie('access_token', getCookieOptions(req));
     return { message: '登出成功' };
   }

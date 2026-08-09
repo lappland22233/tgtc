@@ -6,6 +6,8 @@
 //
 #pragma once
 
+#include "telegram-bot-api/FileStreamCore.h"
+
 #include "td/net/HttpInboundConnection.h"
 
 #include "td/actor/actor.h"
@@ -23,19 +25,7 @@ namespace telegram_bot_api {
 
 class Client;
 class ClientManager;
-
-struct FileStreamCursor {
-  td::int64 total_size = -1;
-  td::int64 next_offset = 0;
-  td::int64 contiguous_end = 0;
-
-  td::Status update_progress(td::int64 download_offset, td::int64 downloaded_prefix_size, bool is_completed);
-  td::int64 next_read_size(td::int64 chunk_size) const;
-  td::Status commit(td::int64 offset, td::int64 size);
-  bool is_complete() const {
-    return total_size >= 0 && next_offset == total_size;
-  }
-};
+class WorkdirCleanupManager;
 
 struct FileStreamConfig {
   bool enabled = false;
@@ -46,23 +36,11 @@ struct FileStreamConfig {
   td::int64 write_high_watermark = 1 << 20;
 };
 
-struct FileStreamRoute {
-  td::string token;
-  td::string file_id;
-  bool is_test_dc = false;
-  td::int64 expected_size = -1;
-  bool no_cache = false;
-};
-
-td::Result<FileStreamRoute> parse_file_stream_route(td::Slice path);
-td::Result<td::int64> parse_file_stream_size_hint(td::Slice value);
-bool parse_file_stream_no_cache(td::Slice value);
-td::Result<td::int64> resolve_file_stream_size(td::int64 tdlib_size, td::int64 expected_size);
-
 class FileStreamConnection final : public td::Actor {
  public:
   FileStreamConnection(td::ActorOwn<td::HttpInboundConnection> connection, td::ActorId<ClientManager> client_manager,
-                       FileStreamRoute route, FileStreamConfig config, td::IPAddress peer_address);
+                       td::ActorId<WorkdirCleanupManager> cleanup_manager, FileStreamRoute route,
+                       FileStreamConfig config, td::IPAddress peer_address);
 
   void set_client(td::ActorId<Client> client);
   void on_file_ready(td::int32 file_id, td::int64 total_size, td::string local_path,
@@ -82,6 +60,7 @@ class FileStreamConnection final : public td::Actor {
   td::int64 stream_id_ = 0;
   td::ActorOwn<td::HttpInboundConnection> connection_;
   td::ActorId<ClientManager> client_manager_;
+  td::ActorId<WorkdirCleanupManager> cleanup_manager_;
   td::ActorId<Client> client_;
   FileStreamRoute route_;
   FileStreamConfig config_;

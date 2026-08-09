@@ -544,6 +544,8 @@ export class FileService implements OnModuleInit {
           const oldTelegramFileId = target.telegramFileId;
           // tempId 占位语义与新记录一致，由 FileUploadProcessor 按 fileId 更新为真实 TG 引用
           target.status = 'processing';
+          target.uploadVersion = (target.uploadVersion || 1) + 1;
+          target.uploadStage = 'pending';
           target.originalName = fileName;
           target.size = file.size;
           target.mimeType = file.mimetype || 'application/octet-stream';
@@ -586,6 +588,8 @@ export class FileService implements OnModuleInit {
         accessType: FileAccessType.PUBLIC,
         maxAccessCount: this.accessCountDefault,
         status: 'processing',
+        uploadVersion: 1,
+        uploadStage: 'pending',
       });
       savedFile = await this.fileRepository.save(newFile);
 
@@ -732,9 +736,15 @@ export class FileService implements OnModuleInit {
         } else if (file.buffer) {
           writeFileSync(pendingPath, file.buffer);
         }
-        await this.fileUploadQueue.add('upload', 
-          { fileId: savedFile.id, filePath: pendingPath },
-          { attempts: 3, backoff: { type: 'exponential', delay: 10000 }, removeOnComplete: 100, removeOnFail: 50 },
+        await this.fileUploadQueue.add('upload',
+          { fileId: savedFile.id, filePath: pendingPath, uploadVersion: savedFile.uploadVersion },
+          {
+            jobId: `file-upload:${savedFile.id}:${savedFile.uploadVersion}`,
+            attempts: 3,
+            backoff: { type: 'exponential', delay: 10000 },
+            removeOnComplete: 100,
+            removeOnFail: 50,
+          },
         );
         success.push(savedFile);
       } catch (error: unknown) {
@@ -1447,26 +1457,22 @@ export class FileService implements OnModuleInit {
     const pwdBanDuration = await this.getPwdBanDuration();
 
     // 密码错误计数（仅计数，不锁定——达到阈值后才触发封禁）
-    const pwdResult = await this.rateLimitService.checkAndIncrement(
-      pwdLimitKey, 'password_error',
-      pwdErrorLimit, 0, this.PWD_WINDOW,
+    const pwdResult = await this.rateLimitService.incrementCounter(
+      pwdLimitKey, 'password_error', pwdErrorLimit, this.PWD_WINDOW,
     );
 
     // 未达到阈值，仅记录
-    if (pwdResult.allowed) {
+    if (!pwdResult.thresholdReached) {
       return;
     }
 
-    // 达到 5 次错误，触发封禁
-    // banCount 也使用 RateLimitService 持久化
-    await this.rateLimitService.checkAndIncrement(
-      banLimitKey, 'ban_count',
-      this.BAN_COUNT_LIMIT, 0, this.BAN_WINDOW,
+    // 达到阈值，原子递增 1 小时内封禁触发次数
+    const banResult = await this.rateLimitService.incrementCounter(
+      banLimitKey, 'ban_count', this.BAN_COUNT_LIMIT, this.BAN_WINDOW,
     );
 
-    // 获取当前错误计数和封禁计数（RateLimitService 已原子化）
     const now = Date.now();
-    const currentBanCount = await this.rateLimitService.getAttemptCount(banLimitKey);
+    const currentBanCount = banResult.count;
 
     // T3-5: 使用 UPSERT 原子化封禁记录的创建/更新，消除 findOne→save 的 TOCTOU 窗口
     if (currentBanCount >= this.BAN_COUNT_LIMIT) {

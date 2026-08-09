@@ -8,6 +8,11 @@ export interface RateLimitResult {
   waitMinutes?: number;
 }
 
+export interface RateLimitCounterResult {
+  count: number;
+  thresholdReached: boolean;
+}
+
 @Injectable()
 export class RateLimitService {
   private readonly logger = new Logger(RateLimitService.name);
@@ -107,6 +112,47 @@ export class RateLimitService {
     // 原宽限期代码会让窗口重置后短时间内无条件返回 allowed=true，
     // 可被攻击者利用窗口边界绕过限流阈值，已移除。
     return { allowed: true };
+  }
+
+  /**
+   * 原子递增短窗口计数，但不创建 lockedUntil。
+   * 用于“达到阈值后由业务层执行封禁”等场景，避免以 lockDurationMs=0
+   * 滥用 checkAndIncrement。返回递增后的准确计数，并发请求共享数据库状态。
+   */
+  async incrementCounter(
+    key: string,
+    type: string,
+    threshold: number,
+    windowMs: number,
+  ): Promise<RateLimitCounterResult> {
+    if (!Number.isInteger(threshold) || threshold <= 0) {
+      throw new Error(`threshold 无效: ${threshold}`);
+    }
+    if (!Number.isFinite(windowMs) || windowMs <= 0 || windowMs > 86400000) {
+      throw new Error(`windowMs 无效: ${windowMs}`);
+    }
+
+    const now = new Date();
+    const windowStart = new Date(now.getTime() - windowMs);
+    const result = await this.rateLimitRepo.manager.query(
+      `INSERT INTO rate_limits ("key", "type", "attemptCount", "firstAttemptAt", "lockedUntil", "updatedAt")
+       VALUES ($1, $2, 1, $3, NULL, NOW())
+       ON CONFLICT ("key") DO UPDATE SET
+         "attemptCount" = CASE
+           WHEN rate_limits."firstAttemptAt" < $4::timestamp THEN 1
+           ELSE rate_limits."attemptCount" + 1
+         END,
+         "firstAttemptAt" = CASE
+           WHEN rate_limits."firstAttemptAt" < $4::timestamp THEN $3::timestamp
+           ELSE rate_limits."firstAttemptAt"
+         END,
+         "lockedUntil" = NULL,
+         "updatedAt" = NOW()
+       RETURNING "attemptCount"`,
+      [key, type, now, windowStart],
+    );
+    const count = Number(result?.[0]?.attemptCount ?? 1);
+    return { count, thresholdReached: count >= threshold };
   }
 
   /**

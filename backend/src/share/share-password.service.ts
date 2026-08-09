@@ -32,6 +32,9 @@ export class SharePasswordService {
   private readonly BAN_COUNT_LIMIT = 5;
   private readonly BAN_WINDOW = 3600 * 1000;
   private readonly PWD_WINDOW = 3600 * 1000;
+  private readonly PRECHECK_WINDOW = 60 * 1000;
+  private readonly PRECHECK_MAX_ATTEMPTS = 10;
+  private readonly PRECHECK_LOCK_DURATION = 60 * 1000;
 
   constructor(
     @InjectRepository(BannedIP)
@@ -66,6 +69,24 @@ export class SharePasswordService {
     return { banned: false };
   }
 
+  /**
+   * 在昂贵的 bcrypt 前按 IP 与分享 token 双维度限流。
+   * 任一维度达到阈值即拒绝；数据库 UPSERT 保证多实例和并发下不能绕过。
+   */
+  async checkPasswordAttemptAllowed(ip: string | null, shareToken: string): Promise<boolean> {
+    const keys = [`share-password:token:${shareToken}`];
+    if (ip) keys.push(`share-password:ip:${ip}`);
+
+    const results = await Promise.all(keys.map((key) => this.rateLimitService.checkAndIncrement(
+      key,
+      'share_password_precheck',
+      this.PRECHECK_MAX_ATTEMPTS,
+      this.PRECHECK_LOCK_DURATION,
+      this.PRECHECK_WINDOW,
+    )));
+    return results.every((result) => result.allowed);
+  }
+
   /** 记录失败的密码尝试，达到阈值触发封禁 */
   async recordFailedAttempt(ip: string): Promise<void> {
     const pwdLimitKey = `pwd:${ip}`;
@@ -73,22 +94,20 @@ export class SharePasswordService {
     const pwdErrorLimit = await this.getPwdErrorLimit();
     const pwdBanDuration = await this.getPwdBanDuration();
 
-    const pwdResult = await this.rateLimitService.checkAndIncrement(
-      pwdLimitKey, 'password_error',
-      pwdErrorLimit, 0, this.PWD_WINDOW,
+    const pwdResult = await this.rateLimitService.incrementCounter(
+      pwdLimitKey, 'password_error', pwdErrorLimit, this.PWD_WINDOW,
     );
 
-    if (pwdResult.allowed) {
+    if (!pwdResult.thresholdReached) {
       return; // 未达阈值，仅记录
     }
 
-    await this.rateLimitService.checkAndIncrement(
-      banLimitKey, 'ban_count',
-      this.BAN_COUNT_LIMIT, 0, this.BAN_WINDOW,
+    const banResult = await this.rateLimitService.incrementCounter(
+      banLimitKey, 'ban_count', this.BAN_COUNT_LIMIT, this.BAN_WINDOW,
     );
 
     const now = Date.now();
-    const currentBanCount = await this.rateLimitService.getAttemptCount(banLimitKey);
+    const currentBanCount = banResult.count;
 
     if (currentBanCount >= this.BAN_COUNT_LIMIT) {
       const expiresAt = new Date(now + this.BAN_6H);
@@ -106,6 +125,7 @@ export class SharePasswordService {
         ['ip'],
       );
     }
+    await this.rateLimitService.reset(pwdLimitKey);
   }
 
   /**

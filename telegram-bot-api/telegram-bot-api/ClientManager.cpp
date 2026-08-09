@@ -9,6 +9,7 @@
 #include "telegram-bot-api/ClientParameters.h"
 #include "telegram-bot-api/FileStream.h"
 #include "telegram-bot-api/WebhookActor.h"
+#include "telegram-bot-api/WorkdirCleanupManager.h"
 
 #include "td/telegram/ClientActor.h"
 #include "td/telegram/td_api.h"
@@ -72,6 +73,9 @@ void ClientManager::send_file_stream(td::ActorId<FileStreamConnection> stream, t
   auto fail = [stream](int code, td::Slice message) {
     send_closure(stream, &FileStreamConnection::on_file_error, td::Status::Error(code, message));
   };
+  if (parameters_->shared_data_->workdir_disk_emergency_.load(std::memory_order_acquire)) {
+    return fail(507, "Telegram workdir disk space exhausted; service is shutting down");
+  }
   if (close_flag_) {
     return fail(503, "Bot API server is closing");
   }
@@ -338,6 +342,14 @@ void ClientManager::get_stats(td::Promise<td::BufferSlice> promise,
     sb << "active_webhook_connections\t" << WebhookActor::get_total_connection_count() << '\n';
     sb << "active_requests\t" << parameters_->shared_data_->query_count_.load(std::memory_order_relaxed) << '\n';
     sb << "active_network_queries\t" << td::get_pending_network_query_count(*parameters_->net_query_stats_) << '\n';
+    sb << "workdir_bytes\t" << parameters_->shared_data_->workdir_bytes_.load(std::memory_order_relaxed) << '\n';
+    sb << "workdir_files\t" << parameters_->shared_data_->workdir_files_.load(std::memory_order_relaxed) << '\n';
+    sb << "workdir_cleanup_runs\t"
+       << parameters_->shared_data_->workdir_cleanup_runs_.load(std::memory_order_relaxed) << '\n';
+    sb << "workdir_deleted_bytes\t"
+       << parameters_->shared_data_->workdir_deleted_bytes_.load(std::memory_order_relaxed) << '\n';
+    sb << "workdir_disk_emergency\t"
+       << parameters_->shared_data_->workdir_disk_emergency_.load(std::memory_order_acquire) << '\n';
     auto stats = stat_.as_vector(now);
     for (auto &stat : stats) {
       sb << stat.key_ << "\t" << stat.value_ << '\n';

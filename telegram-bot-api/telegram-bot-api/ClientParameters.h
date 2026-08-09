@@ -27,10 +27,19 @@ class NetQueryStats;
 
 namespace telegram_bot_api {
 
+class WorkdirCleanupManager;
+
 struct SharedData {
   std::atomic<td::uint64> query_count_{0};
   std::atomic<size_t> query_list_size_{0};
   std::atomic<int> next_verbosity_level_{-1};
+  std::atomic<td::int64> workdir_bytes_{0};
+  std::atomic<td::int64> workdir_files_{0};
+  std::atomic<td::int64> workdir_cleanup_runs_{0};
+  std::atomic<td::int64> workdir_deleted_bytes_{0};
+  std::atomic<bool> workdir_disk_emergency_{false};
+  std::atomic<bool> workdir_shutdown_requested_{false};
+  td::ActorId<WorkdirCleanupManager> workdir_cleanup_manager_;
 
   // not thread-safe, must be used from a single thread
   td::ListNode query_list_;
@@ -115,6 +124,12 @@ struct ClientParameters {
   double file_stream_first_byte_timeout_ = 30.0;
   double file_stream_idle_timeout_ = 60.0;
   td::int64 file_stream_write_high_watermark_ = 1 << 20;
+
+  td::int64 workdir_cleanup_threshold_bytes_ = 20LL << 30;
+  td::int64 workdir_cleanup_target_bytes_ = 15LL << 30;
+  double workdir_cleanup_interval_ = 3600.0;
+  td::int64 workdir_file_ttl_ = 86400;
+  td::int64 workdir_min_free_bytes_ = 1LL << 30;
 
   td::int32 api_id_ = 0;
   td::string api_hash_;
