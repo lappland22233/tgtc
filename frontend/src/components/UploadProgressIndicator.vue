@@ -60,8 +60,8 @@ const hasActive = computed(
 const allFinished = computed(
   () => uploadStore.entries.length > 0 && !hasActive.value,
 );
-const successCount = computed(() => uploadStore.entries.filter((e) => e.status === 'success').length);
-const failedCount = computed(() => uploadStore.entries.filter((e) => e.status === 'error').length);
+const successCount = computed(() => uploadStore.successCount);
+const failedCount = computed(() => uploadStore.errorCount);
 const visible = computed(() => !dismissed.value && uploadStore.entries.length > 0);
 
 function clearHideTimer() {

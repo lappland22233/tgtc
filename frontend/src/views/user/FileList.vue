@@ -373,7 +373,7 @@
     </div>
 
     <!-- 上传弹窗 -->
-    <UploadModal :visible="showUploadModal" :initial-files="dropFiles" :initial-drop-result="dropCollected" :folder-id="folderStore.currentFolderId" @close="handleUploadModalClose" @uploaded="onUploaded" />
+    <UploadModal :visible="showUploadModal" :initial-files="dropFiles" :initial-drop-result="dropCollected" :folder-id="folderStore.currentFolderId" @close="handleUploadModalClose" @uploaded="onUploaded" @drop-consumed="releaseDropPayload" />
 
     <!-- 标签管理弹窗 -->
     <TagManager v-model:visible="showTagManager" :selected-tag-ids="selectedTagIds" @filter="handleTagManagerFilter" />
@@ -504,6 +504,7 @@
 
 <script setup lang="ts">
 import { ref, onMounted, computed, reactive, watch, onUnmounted } from 'vue';
+import { usePageVisibility } from '@/composables/usePageVisibility';
 import { useRouter, useRoute } from 'vue-router';
 import MessagePlugin from '@/utils/message';
 import { DialogPlugin } from 'tdesign-vue-next';
@@ -538,6 +539,7 @@ const tagStore = useTagStore();
 const folderStore = useFolderStore();
 const router = useRouter();
 const route = useRoute();
+const { isPageVisible } = usePageVisibility();
 const search = ref((route.query.search as string) || '');
 const showUploadModal = ref(false);
 const isDraggedOver = ref(false);
@@ -1334,10 +1336,14 @@ function onTagSaved() {
   applyFilters();
 }
 
-function handleUploadModalClose() {
-  showUploadModal.value = false;
+function releaseDropPayload() {
   dropFiles.value = [];
   dropCollected.value = null;
+}
+
+function handleUploadModalClose() {
+  showUploadModal.value = false;
+  releaseDropPayload();
 }
 
 // 消费全局上传指示器「查看详情」注入的 uploadDialog=1 query：打开上传弹窗后立即清除该参数
@@ -1350,19 +1356,39 @@ watch(() => route.query.uploadDialog, (val) => {
   }
 }, { immediate: true });
 
-// 上传完成刷新防抖：store 每个文件成功即触发一次 uploaded，多文件并发完成时合并为一次全量重取
+// 上传刷新采用固定低频节流；后台完全延迟，恢复可见时最多补一次同步。
 let uploadedRefetchTimer: ReturnType<typeof setTimeout> | null = null;
+let needsUploadRefresh = false;
+let needsFolderTreeRefresh = false;
 
-function onUploaded() {
-  selectedFileIds.value = [];
-  if (uploadedRefetchTimer) clearTimeout(uploadedRefetchTimer);
-  uploadedRefetchTimer = setTimeout(() => {
-    uploadedRefetchTimer = null;
-    refetchFiles();
-    // 文件夹上传会在目标目录下新建子目录：同步刷新目录树（失败静默）
-    folderStore.fetchTree().catch(() => {});
-  }, 800);
+async function flushUploadRefresh() {
+  if (!isPageVisible.value || !needsUploadRefresh) return;
+  needsUploadRefresh = false;
+  const refreshTree = needsFolderTreeRefresh;
+  needsFolderTreeRefresh = false;
+  await refetchFiles();
+  if (refreshTree) await folderStore.fetchTree().catch(() => {});
 }
+
+function onUploaded(folderStructureChanged = false) {
+  selectedFileIds.value = [];
+  needsUploadRefresh = true;
+  needsFolderTreeRefresh ||= folderStructureChanged;
+  if (!isPageVisible.value || uploadedRefetchTimer) return;
+  uploadedRefetchTimer = setTimeout(async () => {
+    uploadedRefetchTimer = null;
+    await flushUploadRefresh();
+  }, 3000);
+}
+
+watch(isPageVisible, (visible) => {
+  if (!visible) {
+    if (uploadedRefetchTimer) clearTimeout(uploadedRefetchTimer);
+    uploadedRefetchTimer = null;
+    return;
+  }
+  flushUploadRefresh();
+});
 
 function handleSearch() {
   refetchFiles();

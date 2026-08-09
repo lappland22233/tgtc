@@ -65,5 +65,7 @@ declare module 'vue' {
     TTree: typeof import('tdesign-vue-next')['Tree']
     UploadModal: typeof import('./src/components/UploadModal.vue')['default']
     UploadProgressIndicator: typeof import('./src/components/UploadProgressIndicator.vue')['default']
+    UploadQueueList: typeof import('./src/components/upload/UploadQueueList.vue')['default']
+    UploadQueueRow: typeof import('./src/components/upload/UploadQueueRow.vue')['default']
   }
 }

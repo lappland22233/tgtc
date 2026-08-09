@@ -131,14 +131,10 @@ export function useChunkedUpload(concurrency = 2) {
       // 以“已成功索引集合”作为续传/进度判定的唯一依据（并发下完成顺序非连续，不能用计数假定前 N 个已完成）
       const uploadedIndices = new Set<number>(statusRes.data.data.uploaded);
 
-      // 3. Prepare pending chunks
-      const pendingChunks: { index: number; blob: Blob }[] = [];
+      // 3. 仅保存待上传分片索引；Blob 在 worker 取得槽位后即时切片，避免预创建全部 wrapper。
+      const pendingIndices: number[] = [];
       for (let i = 0; i < totalChunks; i++) {
-        if (!uploadedIndices.has(i)) {
-          const start = i * chunkSize;
-          const end = Math.min(start + chunkSize, file.size);
-          pendingChunks.push({ index: i, blob: file.slice(start, end) });
-        }
+        if (!uploadedIndices.has(i)) pendingIndices.push(i);
       }
 
       // 初始已加载字节：按已成功分片的实际字节累计（末片可能小于 chunkSize），避免进度失真
@@ -168,7 +164,10 @@ export function useChunkedUpload(concurrency = 2) {
        * 90s 超时定时器在取得令牌后才开始计时，避免排队等待被计入超时；
        * 重试前先归还令牌并在不持有令牌的情况下退避等待，然后重新获取令牌。
        */
-      const uploadChunk = async (chunk: { index: number; blob: Blob }): Promise<void> => {
+      const uploadChunk = async (index: number): Promise<void> => {
+        const start = index * chunkSize;
+        const end = Math.min(start + chunkSize, file.size);
+        const blob = file.slice(start, end);
         let retryCount = 0;
         for (;;) {
           if (signal?.aborted) return;
@@ -189,8 +188,8 @@ export function useChunkedUpload(concurrency = 2) {
       
             try {
               const form = new FormData();
-              form.append('chunk', chunk.blob, String(chunk.index));
-              form.append('index', String(chunk.index));
+              form.append('chunk', blob, String(index));
+              form.append('index', String(index));
       
               await api.post(`/files/chunk/${uploadId.value}`, form, {
                 signal: merged.signal,
@@ -213,7 +212,7 @@ export function useChunkedUpload(concurrency = 2) {
                 progress.value.retrying = true;
                 onProgress?.(progress.value);
       
-                console.warn(`分片 ${chunk.index} 上传失败，${(retryDelay / 1000).toFixed(1)}s 后重试 (${retryCount + 1}/${MAX_RETRIES})`);
+                console.warn(`分片 ${index} 上传失败，${(retryDelay / 1000).toFixed(1)}s 后重试 (${retryCount + 1}/${MAX_RETRIES})`);
       
                 // 连续超时或 CDN 502 仅记录日志，不再降级分片大小：
                 // 分片大小在 init 时已固定，中途改变会破坏字节边界导致合并出错误文件。
@@ -250,9 +249,9 @@ export function useChunkedUpload(concurrency = 2) {
         }
 
         // 成功：按索引集合登记，并按实际字节累计进度（末片可能不足一个分片）
-        uploadedIndices.add(chunk.index);
-        loadedBytes += chunk.blob.size;
-        checkpointBytes += chunk.blob.size;
+        uploadedIndices.add(index);
+        loadedBytes += blob.size;
+        checkpointBytes += blob.size;
         const now = Date.now();
         const elapsed = now - checkpointTime;
         if (elapsed >= 500 || uploadedIndices.size === totalChunks) {
@@ -280,13 +279,13 @@ export function useChunkedUpload(concurrency = 2) {
       const runWorker = async (): Promise<void> => {
         while (true) {
           const idx = nextIdx++;
-          if (idx >= pendingChunks.length) return;
-          await uploadChunk(pendingChunks[idx]);
+          if (idx >= pendingIndices.length) return;
+          await uploadChunk(pendingIndices[idx]);
         }
       };
 
       await Promise.all(
-        Array.from({ length: Math.min(concurrency, pendingChunks.length) }, () => runWorker()),
+        Array.from({ length: Math.min(concurrency, pendingIndices.length) }, () => runWorker()),
       );
 
       // 5. Trigger async merge (immediate return, non-blocking), with retry on CDN 502

@@ -120,52 +120,14 @@
       </div>
       <t-progress :percentage="uploadStore.overallProgress" size="small" style="margin-bottom: 12px;" />
 
-      <div v-for="item in uploadStore.entries" :key="item.uid"
-        style="padding: 12px; background: var(--bg-secondary); border-radius: 8px; margin-bottom: 8px; border: 1px solid var(--border-color);">
-        <div style="display: flex; align-items: center; gap: 12px;">
-          <img v-if="item.file && item.file.type.startsWith('image/')" :src="uploadStore.getPreviewUrl(item.file)" loading="lazy" style="width: 32px; height: 32px; object-fit: cover; border-radius: 4px; flex-shrink: 0;" />
-          <FileTypeIcon v-else :mimeType="item.file?.type" :fileName="item.fileName" :size="20" />
-          <div style="flex: 1; min-width: 0;">
-            <div style="font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{{ item.fileName }}</div>
-            <!-- 文件夹上传：文件名下方展示所属目录（次要色小字） -->
-            <div v-if="item.relativePath"
-              style="font-size: 12px; color: var(--text-tertiary); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
-              {{ item.relativePath }}
-            </div>
-            <div style="font-size: 12px; color: var(--text-secondary); margin-top: 2px;">
-              {{ formatModalSize(item.totalBytes) }}
-              <t-tag v-if="item.status === 'success'" theme="success" size="small" variant="light">成功</t-tag>
-              <t-tag v-else-if="item.status === 'error'" theme="danger" size="small" variant="light">失败</t-tag>
-              <t-tag v-else-if="item.status === 'cancelled'" theme="default" size="small" variant="light">已取消</t-tag>
-              <t-tag v-else-if="item.status === 'processing' && (item.retryCount ?? 0) > 0" theme="warning" size="small" variant="light">自动重试中 ({{ item.retryCount }}/2)</t-tag>
-              <t-tag v-else-if="item.status === 'processing'" theme="warning" size="small" variant="light">处理中</t-tag>
-              <t-tag v-else-if="item.progress > 0" theme="primary" size="small" variant="light">{{ item.progress }}%</t-tag>
-              <t-tag v-else theme="primary" size="small" variant="light">等待</t-tag>
-            </div>
-          </div>
-          <t-button
-            v-if="item.status === 'pending' || item.status === 'processing'"
-            size="small"
-            variant="text"
-            shape="square"
-            :aria-label="`取消上传 ${item.fileName}`"
-            @click="uploadStore.cancelOne(item.uid)"
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <path d="M18 6L6 18M6 6l12 12" />
-            </svg>
-          </t-button>
-        </div>
-        <div v-if="item.progress > 0 && item.status !== 'success' && item.status !== 'error' && item.status !== 'cancelled'" style="margin-top: 8px;">
-          <t-progress :percentage="item.progress" size="small" />
-          <div style="display: flex; gap: 16px; margin-top: 4px; font-size: 12px; color: var(--text-secondary);">
-            <span>{{ item.speed }}</span>
-            <span>剩余 {{ item.eta }}</span>
-          </div>
-        </div>
-        <div v-if="item.status === 'error' && item.errorReason" style="margin-top: 8px; font-size: 12px; color: var(--error);">
-          {{ item.errorReason }}
-        </div>
+      <UploadQueueList
+        v-if="isPageVisible"
+        :entries="uploadStore.entries"
+        :allow-preview="uploadStore.entries.length < 1000"
+        @cancel="uploadStore.cancelOne"
+      />
+      <div v-else class="background-upload-hint">
+        页面处于后台，已暂停上传详情渲染以降低内存占用；文件仍在继续上传。
       </div>
     </div>
 
@@ -214,16 +176,16 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, reactive } from 'vue';
+import { usePageVisibility } from '../composables/usePageVisibility';
 import MessagePlugin from '@/utils/message';
 import { useTagStore } from '../stores/tags';
 import { useUploadStore } from '../stores/upload';
 import { api } from '../stores/auth';
 import { useMobile } from '../composables/useMobile';
-import { formatSize as formatModalSize } from '../utils/format';
 import { getErrorMessage } from '../utils/error';
 import { reportUploadError } from '../utils/telemetry';
-import FileTypeIcon from '@/components/FileTypeIcon.vue';
 import ConflictResolveDialog from '@/components/ConflictResolveDialog.vue';
+import UploadQueueList from '@/components/upload/UploadQueueList.vue';
 // 文件夹上传工具链：采集 → 路径校验 → 目录预创建/复用 → 重复检测
 import { collectFromInput, collectFromDrop, validateParsedFiles } from '../utils/folder-traverse';
 import type { ParsedFile, PathViolation, DropCollectResult } from '../utils/folder-traverse';
@@ -232,6 +194,7 @@ import { detectConflicts } from '../utils/conflict-detector';
 import type { UploadCandidateItem, ConflictItem, ConflictDecisionEntry } from '../utils/conflict-detector';
 
 const isMobile = useMobile();
+const { isPageVisible } = usePageVisibility();
 
 const props = defineProps<{
   visible: boolean;
@@ -242,7 +205,8 @@ const props = defineProps<{
 }>();
 const emit = defineEmits<{
   close: [];
-  uploaded: [];
+  uploaded: [folderStructureChanged: boolean];
+  dropConsumed: [];
 }>();
 
 // 弹窗双向绑定代理（重命名避免与 props.visible 遮蔽混淆）
@@ -281,19 +245,26 @@ const pendingConflict = reactive({
   conflicts: [] as ConflictItem[],
 });
 
+function resetPendingConflict() {
+  pendingConflict.items = [];
+  pendingConflict.tagIds = [];
+  pendingConflict.batchId = '';
+  pendingConflict.conflicts = [];
+}
+
 // ---- store 汇总派生状态（替代原 batchResult） ----
 const hasActiveUploads = computed(
   () => uploadStore.isPumping || uploadStore.activeCount > 0 || uploadStore.queuedCount > 0,
 );
-const successCount = computed(() => uploadStore.entries.filter((e) => e.status === 'success').length);
+const successCount = computed(() => uploadStore.successCount);
 const failedEntries = computed(() => uploadStore.entries.filter((e) => e.status === 'error'));
-const cancelledCount = computed(() => uploadStore.entries.filter((e) => e.status === 'cancelled').length);
-const finishedCount = computed(() => successCount.value + failedEntries.value.length + cancelledCount.value);
+const cancelledCount = computed(() => uploadStore.cancelledCount);
+const finishedCount = computed(() => uploadStore.finishedCount);
 const allFinished = computed(() => uploadStore.entries.length > 0 && !hasActiveUploads.value);
 
 // 每个文件上传成功即通知宿主刷新列表（store 后台异步完成，无法再用批量返回时机）
 watch(successCount, (cur, old) => {
-  if (cur > (old ?? 0)) emit('uploaded');
+  if (cur > (old ?? 0)) emit('uploaded', false);
 });
 
 // 全部终态时给出与原 batchResult 完成提示等价的消息（仅状态翻转时触发一次）
@@ -336,6 +307,9 @@ async function handleCreateTag() {
  * 不再 abort / resetQueue，上传继续在后台进行（由全局指示器展示进度）。
  */
 function handleClose() {
+  showConflictDialog.value = false;
+  resetPendingConflict();
+  emit('dropConsumed');
   emit('close');
 }
 
@@ -463,8 +437,10 @@ async function processParsedFiles(
     }
     if (conflicts.length === 0) {
       uploadStore.enqueueFolderFiles(clean, selectedTagIds.value, genBatchId());
+      emit('uploaded', true);
     } else {
       // 有冲突：暂存待决批次，交由决策弹窗；确认后再入队
+      resetPendingConflict();
       pendingConflict.items = clean;
       pendingConflict.tagIds = [...selectedTagIds.value];
       pendingConflict.batchId = genBatchId();
@@ -487,17 +463,22 @@ function handleConflictConfirm(decisions: ConflictDecisionEntry[]) {
     .map((d) => ({ ...d.conflict.item, overwriteFileId: d.conflict.existingId }));
   const skipCount = decisions.filter((d) => d.decision === 'skip' && !d.conflict.overwriteBlocked).length;
   const allItems = [...pendingConflict.items, ...overwriteItems];
+  const tagIds = [...pendingConflict.tagIds];
+  const batchId = pendingConflict.batchId;
+  resetPendingConflict();
   if (allItems.length === 0) {
     MessagePlugin.info('未上传任何文件');
     return;
   }
-  uploadStore.enqueueFolderFiles(allItems, pendingConflict.tagIds, pendingConflict.batchId);
+  uploadStore.enqueueFolderFiles(allItems, tagIds, batchId);
+  emit('uploaded', true);
   if (skipCount > 0) MessagePlugin.info(`已跳过 ${skipCount} 个重复文件`);
 }
 
 /** 决策取消：整批放弃 */
 function handleConflictCancel() {
   showConflictDialog.value = false;
+  resetPendingConflict();
   MessagePlugin.info('已取消本次上传');
 }
 
@@ -594,13 +575,26 @@ watch(() => props.visible, async (isVisible) => {
     }
     // 页面级拖拽转发的采集结果：走与弹窗拖拽完全一致的链路
     if (props.initialDropResult) {
-      await handleCollectResult(props.initialDropResult);
+      try {
+        await handleCollectResult(props.initialDropResult);
+      } finally {
+        emit('dropConsumed');
+      }
     }
   }
 });
 </script>
 
 <style scoped>
+.background-upload-hint {
+  padding: 16px;
+  border: 1px dashed var(--border-color);
+  border-radius: 8px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  text-align: center;
+}
+
 @media (max-width: 768px) {
   :deep(.t-dialog) {
     margin: 16px;
