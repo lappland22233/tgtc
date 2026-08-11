@@ -269,8 +269,9 @@ sudo bash deploy.sh --yes   # 对确认问题自动回答“是”（配置项�
 
 其他说明：
 
-- 脚本幂等可重跑；已生成的配置与服务会询问是否覆盖，失败后可安全重跑。
-- 每次部署日志写入根目录 `deploy-<时间戳>.log`。
+- 脚本幂等可重跑；已生成的配置与服务会询问是否覆盖。重跑时会先执行 `dpkg --configure -a`、`apt-get -f install` 修复终端断开造成的未完成安装。
+- 本机 Redis 无法启动时，脚本先记录 `systemctl`/`journalctl` 诊断；确认 6379 没有可用实例后，将旧配置与数据隔离备份到 `/var/backups/tgtc-deploy/redis-<时间戳>/`，再使用 Debian/Ubuntu 默认配置干净重装。旧数据不会被删除或自动覆盖新实例。
+- 脚本忽略 SSH 断开产生的 `SIGHUP`，每次部署日志写入根目录 `deploy-<时间戳>.log`；长时间编译仍建议在 `tmux`/`screen` 会话内运行。
 - 选择编译本地 `telegram-bot-api` 时，脚本会同时生成 `tgtc-telegram-bot-api.service`，并以本地模式（`--local --enable-file-streaming`）运行，后端 `.env` 自动对接流式端点与本地文件目录；编译约需 20~60 分钟。
 - 部署完成后访问脚本输出的地址，**第一个注册的账号自动成为 `super_admin`**。
 

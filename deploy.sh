@@ -22,6 +22,8 @@
 
 set -euo pipefail
 export LC_ALL=C.UTF-8
+# SSH/终端断开时尽量继续执行已确认的部署阶段；完整过程始终写入部署日志。
+trap '' HUP
 
 # -----------------------------------------------------------------------------
 # 全局变量
@@ -377,6 +379,102 @@ collect_inputs() {
 }
 
 # -----------------------------------------------------------------------------
+# 中断恢复：修复 dpkg/apt 未完成状态
+# -----------------------------------------------------------------------------
+repair_package_manager() {
+  CURRENT_STAGE="修复软件包状态"
+  step "检查上次中断遗留的软件包状态"
+  export DEBIAN_FRONTEND=noninteractive
+
+  local deadline=$((SECONDS + 300))
+  while pgrep -x apt >/dev/null 2>&1 || pgrep -x apt-get >/dev/null 2>&1 || \
+        pgrep -x dpkg >/dev/null 2>&1 || pgrep -x unattended-upgrade >/dev/null 2>&1; do
+    (( SECONDS < deadline )) || die "等待其他 apt/dpkg 进程超过 5 分钟，请检查是否有残留安装进程"
+    info "检测到其他软件包进程仍在运行，等待其结束..."
+    sleep 5
+  done
+
+  info "执行 dpkg --configure -a，完成被中断的软件包配置..."
+  dpkg --configure -a || die "dpkg 修复失败；请检查是否有其他 apt/dpkg 进程或磁盘空间不足"
+  info "执行 apt-get -f install，修复缺失依赖..."
+  apt-get -f install -y || die "apt 依赖修复失败"
+
+  if dpkg --audit | grep -q .; then
+    dpkg --audit | tee -a "$LOG_FILE" >&2
+    die "仍存在未完整安装的软件包，请根据以上 dpkg 审计结果处理"
+  fi
+  info "软件包管理器状态正常"
+}
+
+# Redis 服务诊断写入部署日志，失败时同时显示最近日志。
+redis_diagnostics() {
+  {
+    echo "[诊断] systemctl status redis-server"
+    systemctl status redis-server --no-pager -l 2>&1 || true
+    echo "[诊断] journalctl -u redis-server"
+    journalctl -u redis-server -n 80 --no-pager 2>&1 || true
+    echo "[诊断] TCP 6379 监听情况"
+    ss -ltnp 'sport = :6379' 2>&1 || true
+  } | tee -a "$LOG_FILE" >&2
+}
+
+# Redis 首次启动失败时保留原配置和数据，再使用发行版默认配置重装。
+repair_local_redis() {
+  CURRENT_STAGE="修复 Redis"
+  warn "Redis 服务启动失败，开始自动恢复安装"
+  redis_diagnostics
+
+  # 已有实例必须保留：PONG 表示可直接使用；NOAUTH 表示受密码保护，不得自动覆盖。
+  local redis_probe
+  redis_probe="$(redis-cli -h 127.0.0.1 -p 6379 ping 2>&1 || true)"
+  if [[ "$redis_probe" == *PONG* ]]; then
+    warn "检测到 6379 端口已有可用 Redis 实例；保留现有实例并继续部署"
+    return 0
+  fi
+  if [[ "$redis_probe" == *NOAUTH* || "$redis_probe" == *WRONGPASS* ]]; then
+    die "检测到受密码/ACL 保护的现有 Redis，已停止自动修复以保护数据。请重跑并选择外部服务模式填写 Redis 密码"
+  fi
+  if ss -ltn 'sport = :6379' 2>/dev/null | grep -q ':6379'; then
+    die "6379 端口已被其他进程占用但未返回 Redis PONG，已停止自动修复以避免覆盖现有服务"
+  fi
+
+  local backup_root="/var/backups/tgtc-deploy/redis-${START_TS}"
+  mkdir -p "$backup_root" || die "无法创建 Redis 备份目录: $backup_root"
+  systemctl stop redis-server 2>/dev/null || true
+  systemctl reset-failed redis-server 2>/dev/null || true
+
+  if [[ -e /etc/redis ]]; then
+    mv /etc/redis "$backup_root/etc-redis" || die "备份 /etc/redis 失败，未执行重装"
+    [[ -e "$backup_root/etc-redis" && ! -e /etc/redis ]] || die "Redis 配置备份校验失败，未执行重装"
+  fi
+  if [[ -e /var/lib/redis ]]; then
+    mv /var/lib/redis "$backup_root/lib-redis" || die "备份 /var/lib/redis 失败，未执行重装"
+    [[ -e "$backup_root/lib-redis" && ! -e /var/lib/redis ]] || die "Redis 数据备份校验失败，未执行重装"
+  fi
+  info "原 Redis 配置和数据已隔离备份至 $backup_root（未删除）"
+
+  export DEBIAN_FRONTEND=noninteractive
+  # 二次确认源目录已经完成隔离；任何残留都禁止 purge。
+  [[ ! -e /etc/redis && ! -e /var/lib/redis ]] || die "Redis 备份源仍有残留，拒绝执行 purge"
+  apt-get purge -y redis-server redis-tools || die "清理损坏的 Redis 软件包失败"
+  dpkg --configure -a || die "Redis 清理后 dpkg 配置失败"
+  apt-get -f install -y || die "Redis 清理后依赖修复失败"
+  apt-get install -y redis-server redis-tools || die "Redis 重新安装失败"
+
+  systemctl daemon-reload
+  systemctl enable redis-server >/dev/null || die "无法启用 redis-server 服务"
+  systemctl restart redis-server || {
+    redis_diagnostics
+    die "Redis 使用干净配置重装后仍无法启动；备份位于 $backup_root"
+  }
+  redis-cli -h 127.0.0.1 -p 6379 ping 2>/dev/null | grep -q PONG || {
+    redis_diagnostics
+    die "Redis 重装后未返回 PONG；备份位于 $backup_root"
+  }
+  info "Redis 已使用发行版默认配置重新安装并启动；旧数据未自动恢复"
+}
+
+# -----------------------------------------------------------------------------
 # 阶段 2：安装依赖
 # -----------------------------------------------------------------------------
 install_deps() {
@@ -399,10 +497,22 @@ install_deps() {
   # ---- 本机安装 PostgreSQL 与 Redis ----
   if [[ "$DB_MODE" == "local" ]]; then
     info "安装 PostgreSQL 与 Redis..."
-    apt-get install -y postgresql redis-server
-    systemctl enable --now postgresql 2>/dev/null || warn "postgresql 服务启动失败，请稍后手动检查"
-    systemctl enable --now redis-server 2>/dev/null || warn "redis-server 服务启动失败，请稍后手动检查"
-    info "PostgreSQL 与 Redis 服务已启用并启动"
+    apt-get install -y postgresql redis-server redis-tools
+    systemctl enable postgresql >/dev/null || die "无法启用 PostgreSQL 服务"
+    systemctl restart postgresql || die "PostgreSQL 服务启动失败"
+    systemctl is-active --quiet postgresql || die "PostgreSQL 未处于 active 状态"
+
+    systemctl enable redis-server >/dev/null 2>&1 || true
+    if ! systemctl restart redis-server; then
+      repair_local_redis
+    fi
+    if ! systemctl is-active --quiet redis-server; then
+      repair_local_redis
+    fi
+    if ! redis-cli -h 127.0.0.1 -p 6379 ping 2>/dev/null | grep -q PONG; then
+      repair_local_redis
+    fi
+    info "PostgreSQL 与 Redis 服务均已验证可用"
   fi
 
   # ---- 编译工具链（仅编译本地 Bot API 时需要）----
@@ -950,6 +1060,7 @@ main() {
   preflight
   collect_inputs
   prepare_existing_env
+  repair_package_manager
   install_deps
   setup_database
   generate_secrets
