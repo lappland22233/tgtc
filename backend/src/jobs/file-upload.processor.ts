@@ -86,6 +86,9 @@ export class FileUploadProcessor {
           { id: fileId, uploadVersion },
           { status: 'error', uploadStage: 'failed' } as Partial<File>,
         );
+        this.logger.warn(
+          `文件上传最终失败并标记 error: fileId=${fileId} uploadVersion=${uploadVersion} 原因=临时文件缺失 (第 ${attempt} 次尝试后放弃)`,
+        );
         return;
       }
 
@@ -118,12 +121,15 @@ export class FileUploadProcessor {
           } as Partial<File>,
         );
       } catch (error) {
-        this.logger.warn(`文件远端上传或提交失败 (第 ${attempt} 次): ${(error as Error).message}`);
+        this.logger.warn(`文件远端上传或提交失败 (fileId=${fileId}, 第 ${attempt} 次): ${(error as Error).message}`);
         const remoteReceipt = await this.loadReceipt(filePath);
         if (job.attemptsMade >= 2 && !remoteReceipt) {
           await this.fileRepository.update(
             { id: fileId, uploadVersion },
             { status: 'error', uploadStage: 'failed' } as Partial<File>,
+          );
+          this.logger.warn(
+            `文件上传最终失败并标记 error: fileId=${fileId} uploadVersion=${uploadVersion} 原因=远端上传/提交重试耗尽，无远端回执`,
           );
           await this.removeUploadArtifacts(filePath);
         }

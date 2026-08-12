@@ -1813,6 +1813,9 @@ export class FileService implements OnModuleInit {
     if (!Number.isSafeInteger(expectedSize) || expectedSize <= 0) {
       throw new BadRequestException('文件大小无效');
     }
+    if (file.status === 'error') {
+      throw new BadRequestException('文件上传失败，无法下载或预览');
+    }
     if (file.status === 'processing' && !this.fileCacheService.getCachedPath(file.id)) {
       throw new BadRequestException('文件正在处理中，请稍后刷新重试');
     }
@@ -1937,6 +1940,9 @@ export class FileService implements OnModuleInit {
       return null;
     }
 
+    if (file.status === 'error') {
+      throw new BadRequestException('文件上传失败，无法下载或预览');
+    }
     // 文件仍在处理中（TG 未同步）→ 拒绝范围下载，避免用临时 UUID 回源
     if (file.status === 'processing') {
       throw new BadRequestException('文件正在处理中，请稍后刷新重试');
@@ -2212,6 +2218,9 @@ export class FileService implements OnModuleInit {
         if (new Date() > expiresAt) throw new ForbiddenException('媒体文件已过期');
       }
       throw new ForbiddenException('限时文件不能使用永久媒体直链');
+    }
+    if (file.status === 'error') {
+      throw new BadRequestException('文件上传失败，无法下载或预览');
     }
     if (file.status === 'processing' && !this.fileCacheService.getCachedPath(file.id)) {
       throw new BadRequestException('文件正在处理中，请稍后刷新重试');
@@ -2795,6 +2804,9 @@ export class FileService implements OnModuleInit {
 
     await this.assertFileReadable(file, user);
 
+    if (file.status === 'error') {
+      throw new BadRequestException('文件上传失败，无法下载或预览');
+    }
     // 文件仍在处理中（TG 未同步）→ 拒绝范围预览，避免用临时 UUID 回源
 
     if (file.status === 'processing') {
@@ -2874,6 +2886,10 @@ export class FileService implements OnModuleInit {
 
     const file = await this.fileRepository.findOne({ where: { id: fileId, isDeleted: false } });
     if (!file) throw new NotFoundException('文件不存在');
+
+    if (file.status === 'error') {
+      throw new BadRequestException('文件上传失败，无法下载或预览');
+    }
 
     const cachedPath = this.fileCacheService.getCachedPath(file.id);
     if (!cachedPath) return null;
