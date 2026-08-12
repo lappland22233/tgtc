@@ -81,6 +81,8 @@
             >
               <CustomVideoPlayer
                 :src="videoSrc"
+                :poster="snap.kind === 'video' ? posterUrl : null"
+                :cold="coldLoad"
                 :end-behavior="videoEndBehavior"
                 @update:end-behavior="setVideoEndBehavior"
                 @video-ref="onCustomPlayerVideoRef"
@@ -211,7 +213,14 @@
 <script setup lang="ts">
 import { ref, reactive, watch, nextTick, computed, onUnmounted } from 'vue';
 import type { PreviewKind } from '../../utils/preview';
+import {
+  buildShareThumbnailUrl,
+  buildShareHdThumbnailUrl,
+  fetchFileCacheStatus,
+  fetchShareCacheStatus,
+} from '../../utils/preview';
 import { triggerBrowserDownload } from '../../utils/download';
+import { getThumbnailUrl, getHdThumbnailUrl } from '../../utils/thumbnailCache';
 import CustomVideoPlayer, { type VideoEndBehavior } from './CustomVideoPlayer.vue';
 import ThumbnailImg from '../ThumbnailImg.vue';
 
@@ -242,9 +251,18 @@ const props = withDefaults(defineProps<{
   playlist?: PlaylistItem[];
   /** 当前播放在列表中的索引 */
   playlistIndex?: number;
+  /** 当前文件 ID（登录态或分享态封面加载共用） */
+  fileId?: string;
+  /** 分享 token；存在时按分享封面/缓存状态链路加载 */
+  shareToken?: string;
+  /** 分享密码访问 JWT */
+  shareAccessJwt?: string;
 }>(), {
   playlist: () => [],
   playlistIndex: -1,
+  fileId: '',
+  shareToken: '',
+  shareAccessJwt: '',
 });
 
 const emit = defineEmits<{
@@ -272,6 +290,22 @@ const textTooLarge = ref(false);
 const mediaError = ref(false);
 const dialogRef = ref<HTMLElement | null>(null);
 const playlistPanelRef = ref<HTMLElement | null>(null);
+
+// ============ 视频封面与冷资源加载状态 ============
+/** 普通封面清晰度下限：宽度或高度低于任一值则升级到高清封面接口 */
+const HD_COVER_MIN_WIDTH = 640;
+const HD_COVER_MIN_HEIGHT = 360;
+
+/** 视频封面 URL（普通封面，低清时一次性升级到高清封面） */
+const posterUrl = ref<string | null>(null);
+/** 当前封面所属文件 ID（播放列表切换时更新） */
+const currentPosterFileId = ref('');
+/** 是否已尝试过高清封面升级（避免普通/高清封面循环重试） */
+let hdCoverAttempted = false;
+/** 封面加载失败后的重试计数（冷资源缓存完成前只补一次） */
+let posterRetryCount = 0;
+/** 冷资源加载模式：文件尚未缓存时钳制 seek，避免动态分段请求 */
+const coldLoad = ref(false);
 
 // ============ 播放列表状态 ============
 const hasPlaylist = computed(() => props.playlist.length > 1);
@@ -330,6 +364,16 @@ function switchToTrack(idx: number) {
   snap.src = item.src;
   snap.downloadUrl = item.downloadUrl ?? null;
   mediaError.value = false;
+  if (item.kind === 'video') {
+    // 封面与冷资源状态跟随播放项切换
+    currentPosterFileId.value = item.id;
+    posterUrl.value = null;
+    hdCoverAttempted = false;
+    posterRetryCount = 0;
+    coldLoad.value = false;
+    void checkColdStatus();
+    void loadPoster();
+  }
   if (item.kind === 'audio') nextTick(() => { void audioRef.value?.play().catch(() => {}); });
 }
 
@@ -400,6 +444,12 @@ function resetState() {
   textError.value = null;
   textTooLarge.value = false;
   mediaError.value = false;
+  // 关闭/切换时清空封面与冷资源状态，避免下一文件残留
+  posterUrl.value = null;
+  currentPosterFileId.value = '';
+  coldLoad.value = false;
+  hdCoverAttempted = false;
+  posterRetryCount = 0;
 }
 
 /** Esc 键关闭 + 播放列表快捷键 */
@@ -746,6 +796,87 @@ function updateBufferedRatio() {
     if (v.buffered.end(i) > maxEnd) maxEnd = v.buffered.end(i);
   }
   videoBufferedRatio.value = Math.min(100, Math.round((maxEnd / v.duration) * 100));
+  // 冷资源全量下载完成（整段已缓冲）→ 退出冷模式并补一次封面重试
+  if (coldLoad.value && maxEnd >= v.duration - 0.5) {
+    coldLoad.value = false;
+    void retryPosterAfterCache();
+  }
+}
+
+// ============ 视频封面加载（复用封面接口 + 低清自动升级高清） ============
+/** 加载图片并返回自然尺寸；加载失败返回 null（用于封面清晰度检测） */
+function measureImageDimensions(url: string): Promise<{ width: number; height: number } | null> {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => resolve({ width: img.naturalWidth, height: img.naturalHeight });
+    img.onerror = () => resolve(null);
+    img.src = url;
+  });
+}
+
+/** 判断当前文件是否属于分享预览链路 */
+function isShareContext(): boolean {
+  return !!props.shareToken;
+}
+
+/** 查询当前视频是否为冷资源（尚无正式缓存），决定是否开启 seek 钳制 */
+async function checkColdStatus() {
+  const fid = currentPosterFileId.value;
+  if (!fid) return;
+  const cached = isShareContext()
+    ? await fetchShareCacheStatus(props.shareToken, fid, props.shareAccessJwt || undefined)
+    : await fetchFileCacheStatus(fid);
+  if (!props.visible) return;
+  coldLoad.value = !cached;
+}
+
+/** 加载视频封面：先复用普通封面接口，检测低分辨率后一次性升级高清封面 */
+async function loadPoster() {
+  const fid = currentPosterFileId.value;
+  if (!fid || snap.kind !== 'video' || !props.visible) return;
+
+  const standardUrl = isShareContext()
+    ? buildShareThumbnailUrl(props.shareToken, fid, props.shareAccessJwt || undefined)
+    : await getThumbnailUrl(fid, 'video/mp4');
+  if (!standardUrl || !props.visible) return;
+
+  const dims = await measureImageDimensions(standardUrl);
+  if (!props.visible) return;
+
+  if (!dims) {
+    // 封面暂不可用（典型为冷资源且未生成），留待缓存完成后重试
+    posterUrl.value = null;
+    return;
+  }
+
+  // 分辨率低于阈值 → 升级到高清封面接口（仅一次，避免循环重试）
+  if (dims.width < HD_COVER_MIN_WIDTH || dims.height < HD_COVER_MIN_HEIGHT) {
+    // 先立即展示标准封面，避免等待高清生成期间黑屏
+    posterUrl.value = standardUrl;
+    if (!hdCoverAttempted) {
+      hdCoverAttempted = true;
+      const hdUrl = isShareContext()
+        ? buildShareHdThumbnailUrl(props.shareToken, fid, props.shareAccessJwt || undefined)
+        : await getHdThumbnailUrl(fid, 'video/mp4');
+      if (!props.visible) return;
+      const hdDims = hdUrl ? await measureImageDimensions(hdUrl) : null;
+      if (!props.visible) return;
+      if (hdUrl && hdDims) posterUrl.value = hdUrl;
+    }
+    return;
+  }
+  posterUrl.value = standardUrl;
+}
+
+/** 冷资源缓存完成后补一次封面加载（此时普通/高清封面通常已可生成） */
+function retryPosterAfterCache() {
+  if (posterRetryCount >= 1) return;
+  posterRetryCount++;
+  hdCoverAttempted = false; // 缓存就绪后允许重新尝试高清封面
+  setTimeout(() => {
+    if (!props.visible) return;
+    void loadPoster();
+  }, 800);
 }
 
 /**
@@ -832,6 +963,16 @@ watch(() => props.visible, (v) => {
     snap.src = props.src;
     snap.downloadUrl = props.downloadUrl ?? null;
     if (props.kind === 'text') void loadText();
+    if (props.kind === 'video') {
+      // 封面与冷资源状态：打开时查询缓存并加载普通封面
+      currentPosterFileId.value = props.fileId || '';
+      posterUrl.value = null;
+      hdCoverAttempted = false;
+      posterRetryCount = 0;
+      coldLoad.value = false;
+      void checkColdStatus();
+      void loadPoster();
+    }
   }
 }, { immediate: true });
 

@@ -460,6 +460,68 @@ export class FileController {
     }
   }
 
+  /**
+   * 高清视频封面端点（与缩略图同一套加密时间戳 Token 机制）。
+   * - 需要登录认证 + 加密时间戳（?t=）
+   * - 只从本地正式缓存生成高清封面，不因封面请求触发整视频回源
+   * - 高清封面不可用时回退标准封面；完全不可用返回 404
+   */
+  @Get(':id/thumbnail-hd')
+  @UseGuards(JwtAuthGuard)
+  async thumbnailHd(
+    @Param('id') id: string,
+    @CurrentUser() user: User,
+    @Query('t') encryptedToken: string,
+    @Req() _req: Request,
+    @Res() res: Response,
+  ) {
+    try {
+      if (!encryptedToken) {
+        throw new ForbiddenException('缺少访问令牌');
+      }
+
+      let timestamp: number;
+      try {
+        timestamp = this.cryptoService.decrypt(encryptedToken);
+      } catch {
+        throw new ForbiddenException('无效的访问令牌');
+      }
+
+      if (Math.abs(Date.now() - timestamp) > 10_000) {
+        throw new ForbiddenException('访问令牌已过期');
+      }
+
+      const result = await this.fileService.getHdThumbnailStream(id, user);
+
+      res.set({
+        'Content-Type': result.contentType,
+        'Cache-Control': 'private, no-cache',
+      });
+
+      const pipe = promisify(pipeline);
+      result.stream.on('error', () => {
+        if (!res.writableEnded) res.end();
+      });
+      await pipe(result.stream, res);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '预览失败';
+      const status = (error as { status?: number }).status || 500;
+      if (!res.headersSent) {
+        res.status(status).json({ code: 1, message });
+      }
+    }
+  }
+
+  /**
+   * 查询文件缓存状态端点（登录态）。
+   * 供前端在视频预览前判断冷资源单连接策略。
+   */
+  @Get(':id/cache-status')
+  @UseGuards(JwtAuthGuard)
+  async cacheStatus(@Param('id') id: string, @CurrentUser() user: User) {
+    return this.fileService.getCacheStatus(id, user);
+  }
+
   @Get(':id/download')
   @UseGuards(JwtAuthGuard)
   async download(

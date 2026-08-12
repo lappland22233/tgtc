@@ -7,6 +7,7 @@
  */
 
 import { getFileIconType } from './file-icon-type';
+import api from '../api/client';
 
 /** 支持在线预览的内容类别 */
 export type PreviewKind = 'image' | 'video' | 'audio' | 'pdf' | 'text';
@@ -66,6 +67,12 @@ export function buildShareThumbnailUrl(token: string, fileId: string, accessJwt?
   return accessJwt ? `${base}?access=${encodeURIComponent(accessJwt)}` : base;
 }
 
+/** 构造分享高清封面 URL（密码分享时附 access JWT）。 */
+export function buildShareHdThumbnailUrl(token: string, fileId: string, accessJwt?: string): string {
+  const base = `/api/s/${encodeURIComponent(token)}/thumbnail-hd/${encodeURIComponent(fileId)}`;
+  return accessJwt ? `${base}?access=${encodeURIComponent(accessJwt)}` : base;
+}
+
 export function buildSharePreviewUrl(token: string, fileId: string, accessJwt?: string): string {
   const base = `/api/s/${encodeURIComponent(token)}/preview/${encodeURIComponent(fileId)}`;
   return accessJwt ? `${base}?access=${encodeURIComponent(accessJwt)}` : base;
@@ -76,4 +83,35 @@ export function buildSharePreviewUrl(token: string, fileId: string, accessJwt?: 
  */
 export function isMediaDirectLinkKind(kind: PreviewKind | null): kind is 'image' | 'video' | 'audio' {
   return kind === 'image' || kind === 'video' || kind === 'audio';
+}
+
+/**
+ * 登录态查询文件是否已有正式本地缓存。
+ * 供视频预览判断冷资源单连接策略：未缓存时钳制 seek，缓存完成后恢复 Range 跳转。
+ * 查询失败时按「已缓存」处理，避免误锁进度条。
+ */
+export async function fetchFileCacheStatus(fileId: string): Promise<boolean> {
+  try {
+    const res = await api.get(`/files/${encodeURIComponent(fileId)}/cache-status`);
+    return res.data?.data?.cached === true;
+  } catch {
+    return true;
+  }
+}
+
+/** 分享态查询文件是否已有正式本地缓存（与登录态同语义）。 */
+export async function fetchShareCacheStatus(
+  token: string,
+  fileId: string,
+  accessJwt?: string,
+): Promise<boolean> {
+  try {
+    const suffix = accessJwt ? `?access=${encodeURIComponent(accessJwt)}` : '';
+    const res = await api.get(
+      `/s/${encodeURIComponent(token)}/cache-status/${encodeURIComponent(fileId)}${suffix}`,
+    );
+    return res.data?.data?.cached === true;
+  } catch {
+    return true;
+  }
 }

@@ -203,6 +203,34 @@ export class ShareController {
     result.stream.pipe(res);
   }
 
+  /** 公开高清封面：鉴权但不计入分享访问/下载次数。 */
+  @Get('s/:token/thumbnail-hd/:fileId')
+  async getHdThumbnail(
+    @Param('token') token: string,
+    @Param('fileId') fileId: string,
+    @Query('access') accessJwt: string,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    await this.assertShareRateLimit(token, req);
+    const result = await this.shareService.getShareHdThumbnailStream(token, fileId, accessJwt || undefined);
+    res.setHeader('Content-Type', result.contentType);
+    res.setHeader('Cache-Control', accessJwt ? 'private, max-age=300' : 'public, max-age=300');
+    result.stream.pipe(res);
+  }
+
+  /** 分享文件缓存状态：供前端判断冷资源单连接策略，不消费访问次数。 */
+  @Get('s/:token/cache-status/:fileId')
+  async getCacheStatus(
+    @Param('token') token: string,
+    @Param('fileId') fileId: string,
+    @Query('access') accessJwt: string,
+    @Req() req: Request,
+  ) {
+    await this.assertShareRateLimit(token, req);
+    return this.shareService.getShareCacheStatus(token, fileId, accessJwt || undefined);
+  }
+
   /**
    * 公开下载入口：流式返回文件内容。
    * 需要校验：

@@ -52,6 +52,13 @@ export interface BatchUploadResult {
 /** 已知复合扩展名列表（优先匹配，防止 .tar.gz 被错误识别为 .gz） */
 const COMPOUND_EXTENSIONS = ['.tar.gz', '.tar.bz2', '.tar.xz'] as const;
 
+/** 视频标准封面最大宽度（FFmpeg scale 上限） */
+const VIDEO_COVER_MAX_WIDTH = 480;
+/** 高清视频封面最大宽度（前端检测到标准封面低于阈值时切换到高清接口） */
+const VIDEO_HD_COVER_MAX_WIDTH = 1280;
+/** 高清封面 WebP 质量 */
+const VIDEO_HD_COVER_QUALITY = 75;
+
 @Injectable()
 export class FileService implements OnModuleInit {
   private readonly logger = new Logger(FileService.name);
@@ -987,6 +994,29 @@ export class FileService implements OnModuleInit {
   }
 
   /**
+   * 查询文件是否已有正式本地缓存。
+   * 供前端在视频预览前判断冷资源单连接策略：未缓存时不走动态分片，
+   * 播放期间钳制 seek；缓存完成后恢复 Range 跳转。
+   */
+  async getCacheStatus(id: string, user: User): Promise<{ cached: boolean }> {
+    const file = await this.fileRepository.findOne({
+      where: { id, isDeleted: false },
+    });
+
+    if (!file) {
+      throw new NotFoundException('文件不存在');
+    }
+
+    await this.assertFileReadable(file, user);
+    return { cached: this.isFileCached(id) };
+  }
+
+  /** 仅查缓存路径，不做用户权限断言（分享链路复用）。 */
+  isFileCached(fileId: string): boolean {
+    return this.fileCacheService.getCachedPath(fileId) !== null;
+  }
+
+  /**
    * 请求删除文件（延迟删除机制）：
    * 1. 前端立即标记文件为"删除中"并停止访问
    * 2. 后端将文件标记为已删除，进入 7 天等待期
@@ -1585,6 +1615,63 @@ export class FileService implements OnModuleInit {
   }
 
   /**
+   * 获取高清视频封面流（登录态，带权限校验）。
+   * 优先读取已生成的高清封面；缺失时仅从本地正式缓存生成（不触发整视频回源）；
+   * 仍不可用时回退标准封面，保证前端至少有一张可展示的图。
+   */
+  async getHdThumbnailStream(id: string, user: User): Promise<{
+    stream: Readable;
+    contentType: string;
+  }> {
+    const file = await this.fileRepository.findOne({
+      where: { id, isDeleted: false },
+    });
+    if (!file) throw new NotFoundException('文件不存在');
+    await this.assertFileReadable(file, user);
+    if (!file.mimeType?.startsWith('video/')) {
+      throw new BadRequestException('仅视频支持高清封面');
+    }
+
+    let buffer = await this.readHdLocalThumbnail(file);
+    if (!buffer) {
+      await this.generateAndSaveHdVideoCover(file);
+      buffer = await this.readHdLocalThumbnail(file);
+    }
+    if (buffer) return { stream: Readable.from(buffer), contentType: 'image/webp' };
+
+    const standard = await this.readLocalThumbnail(file);
+    if (standard) return { stream: Readable.from(standard), contentType: 'image/webp' };
+    throw new NotFoundException('视频封面尚未生成');
+  }
+
+  /**
+   * 读取/生成高清封面，不校验业务权限、不触发远端回源（供分享链路复用）。
+   */
+  async getExistingHdMediaThumbnailStream(fileId: string): Promise<{
+    stream: Readable;
+    contentType: string;
+  }> {
+    const file = await this.fileRepository.findOne({
+      where: { id: fileId, isDeleted: false },
+    });
+    if (!file) throw new NotFoundException('文件不存在');
+    if (!file.mimeType?.startsWith('video/')) {
+      throw new BadRequestException('仅视频支持高清封面');
+    }
+
+    let buffer = await this.readHdLocalThumbnail(file);
+    if (!buffer) {
+      await this.generateAndSaveHdVideoCover(file);
+      buffer = await this.readHdLocalThumbnail(file);
+    }
+    if (buffer) return { stream: Readable.from(buffer), contentType: 'image/webp' };
+
+    const standard = await this.readLocalThumbnail(file);
+    if (standard) return { stream: Readable.from(standard), contentType: 'image/webp' };
+    throw new NotFoundException('视频封面尚未生成');
+  }
+
+  /**
    * 批量获取缩略图 base64（合并为一次 API 调用，消除浏览器连接池瓶颈）
    * 返回 { [fileId]: 'data:image/...;base64,...' }
    */
@@ -1637,18 +1724,7 @@ export class FileService implements OnModuleInit {
       if (!sourcePath) return; // 页面封面请求不得触发整视频回源
       const resolvedSourcePath: string = sourcePath;
 
-      await new Promise<void>((resolve, reject) => {
-        const ffmpeg = spawn(process.env.FFMPEG_PATH || 'ffmpeg', [
-          '-hide_banner', '-loglevel', 'error', '-y',
-          '-ss', '1', '-i', resolvedSourcePath,
-          '-frames:v', '1', '-vf', 'scale=480:-2:force_original_aspect_ratio=decrease',
-          '-c:v', 'libwebp', '-quality', '65', '-f', 'webp', tmpCover,
-        ], { windowsHide: true });
-        let stderr = '';
-        ffmpeg.stderr.on('data', chunk => { stderr = (stderr + chunk.toString()).slice(-2048); });
-        ffmpeg.once('error', reject);
-        ffmpeg.once('close', code => code === 0 ? resolve() : reject(new Error(stderr || `FFmpeg 退出码 ${code}`)));
-      });
+      await this.extractVideoFrame(resolvedSourcePath, tmpCover, VIDEO_COVER_MAX_WIDTH, 65);
       await fs.promises.rename(tmpCover, coverPath);
       file.thumbnailPath = coverFilename;
       await this.fileRepository.save(file);
@@ -1659,6 +1735,67 @@ export class FileService implements OnModuleInit {
         fs.promises.unlink(tmpSource).catch(() => {}),
         fs.promises.unlink(tmpCover).catch(() => {}),
       ]);
+    }
+  }
+
+  /**
+   * 抽取视频单帧为 WebP（标准/高清封面共用）。
+   * 输出目录须由调用方保证存在；失败时抛出 FFmpeg stderr 摘要。
+   */
+  private async extractVideoFrame(
+    sourcePath: string,
+    outputPath: string,
+    scaleWidth: number,
+    quality: number,
+  ): Promise<void> {
+    await new Promise<void>((resolve, reject) => {
+      const ffmpeg = spawn(process.env.FFMPEG_PATH || 'ffmpeg', [
+        '-hide_banner', '-loglevel', 'error', '-y',
+        '-ss', '1', '-i', sourcePath,
+        '-frames:v', '1', '-vf', `scale=${scaleWidth}:-2:force_original_aspect_ratio=decrease`,
+        '-c:v', 'libwebp', '-quality', String(quality), '-f', 'webp', outputPath,
+      ], { windowsHide: true });
+      let stderr = '';
+      ffmpeg.stderr.on('data', chunk => { stderr = (stderr + chunk.toString()).slice(-2048); });
+      ffmpeg.once('error', reject);
+      ffmpeg.once('close', code => code === 0 ? resolve() : reject(new Error(stderr || `FFmpeg 退出码 ${code}`)));
+    });
+  }
+
+  /**
+   * 生成高清视频封面（按文件合并去重）。
+   * 仅从本地正式缓存提取，绝不因封面请求触发整视频远端回源；冷资源直接跳过。
+   */
+  async generateAndSaveHdVideoCover(file: File): Promise<void> {
+    if (!file.mimeType?.startsWith('video/')) return;
+    const key = `hd:${file.id}`;
+    const existing = this.videoCoverBuilds.get(key);
+    if (existing) return existing;
+
+    const build = this.buildHdVideoCover(file).finally(() => {
+      if (this.videoCoverBuilds.get(key) === build) this.videoCoverBuilds.delete(key);
+    });
+    this.videoCoverBuilds.set(key, build);
+    return build;
+  }
+
+  private async buildHdVideoCover(file: File): Promise<void> {
+    const coverFilename = `${file.id}.video.hd.webp`;
+    const coverPath = path.join(this.thumbnailDir, coverFilename);
+    if (fs.existsSync(coverPath)) return;
+
+    const sourcePath = this.fileCacheService.getCachedPath(file.id);
+    if (!sourcePath) return; // 冷资源不生成高清封面（避免整视频回源）
+
+    const buildId = uuidv4();
+    const tmpCover = path.join(this.thumbnailDir, `${file.id}.${buildId}.hd-cover.tmp.webp`);
+    try {
+      await this.extractVideoFrame(sourcePath, tmpCover, VIDEO_HD_COVER_MAX_WIDTH, VIDEO_HD_COVER_QUALITY);
+      await fs.promises.rename(tmpCover, coverPath);
+    } catch (error) {
+      this.logger.warn(`高清封面生成失败 id=${file.id}: ${(error as Error).message}`);
+    } finally {
+      await fs.promises.unlink(tmpCover).catch(() => {});
     }
   }
 
@@ -1800,6 +1937,17 @@ export class FileService implements OnModuleInit {
       return await fs.promises.readFile(fullPath);
     } catch {
       // 文件不存在或读取失败
+      return null;
+    }
+  }
+
+  /** 读取已生成的高清视频封面文件内容，不存在返回 null。 */
+  private async readHdLocalThumbnail(file: File): Promise<Buffer | null> {
+    const coverName = `${file.id}.video.hd.webp`;
+    const fullPath = path.join(this.thumbnailDir, coverName);
+    try {
+      return await fs.promises.readFile(fullPath);
+    } catch {
       return null;
     }
   }
@@ -2822,17 +2970,12 @@ export class FileService implements OnModuleInit {
     }
 
     const chunkSize = actualEnd - start + 1;
+    // 冷资源（无正式缓存）不支持真实分片：返回 null 交由控制器回退全量预览，
+    // 由 getPreviewStream → getOrCacheStream 复用同一缓存构建会话，保证单连接加载；
+    // 前端在冷资源阶段钳制 seek，拖动进度条不再触发新的动态分段回源。
     const cachedPath = this.fileCacheService.getCachedPath(file.id);
-    const readStream = cachedPath
-      ? createReadStream(cachedPath, { start, end: actualEnd })
-      : await this.fileCacheService.getOrCacheRangeStream(
-          file.id,
-          total,
-          start,
-          actualEnd,
-          () => this.telegramService.getRealtimeFileStream(file.telegramFileId || file.filename, total),
-        );
-    if (!readStream) return null;
+    if (!cachedPath) return null;
+    const readStream = createReadStream(cachedPath, { start, end: actualEnd });
 
     // 预览不递增 currentAccessCount，仅写访问日志（action=preview）
 

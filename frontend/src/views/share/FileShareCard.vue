@@ -60,6 +60,9 @@
       :kind="previewKind"
       :src="buildSharePreviewUrl(props.token, props.info.id, props.accessJwt)"
       :download-url="downloadUrl"
+      :file-id="props.info.id"
+      :share-token="props.token"
+      :share-access-jwt="props.accessJwt"
     />
   </div>
 </template>

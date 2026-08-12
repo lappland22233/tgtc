@@ -330,6 +330,42 @@ export class ShareService {
     return this.fileService.getExistingMediaThumbnailStream(fileId);
   }
 
+  /** 分享高清封面：完整校验分享状态、密码凭证和文件范围，但不消费访问次数。 */
+  async getShareHdThumbnailStream(
+    token: string,
+    fileId: string,
+    accessJwt?: string,
+  ): Promise<{ stream: Readable; contentType: string }> {
+    const link = await this.shareLinkRepo.findOne({ where: { token, isDeleted: false } });
+    if (!link) throw new NotFoundException('分享不存在');
+    await this.assertShareUsable(link);
+    if (link.password) {
+      if (!accessJwt) throw new ForbiddenException('此分享需要密码');
+      const ok = await this.passwordService.verifyAccessJwt(accessJwt, link.id, link.password);
+      if (!ok) throw new ForbiddenException('访问凭证已失效，请重新输入密码');
+    }
+    await this.assertFileInShare(link, fileId);
+    return this.fileService.getExistingHdMediaThumbnailStream(fileId);
+  }
+
+  /** 分享文件缓存状态：校验后返回是否已有正式缓存（不消费访问次数）。 */
+  async getShareCacheStatus(
+    token: string,
+    fileId: string,
+    accessJwt?: string,
+  ): Promise<{ cached: boolean }> {
+    const link = await this.shareLinkRepo.findOne({ where: { token, isDeleted: false } });
+    if (!link) throw new NotFoundException('分享不存在');
+    await this.assertShareUsable(link);
+    if (link.password) {
+      if (!accessJwt) throw new ForbiddenException('此分享需要密码');
+      const ok = await this.passwordService.verifyAccessJwt(accessJwt, link.id, link.password);
+      if (!ok) throw new ForbiddenException('访问凭证已失效，请重新输入密码');
+    }
+    await this.assertFileInShare(link, fileId);
+    return { cached: this.fileService.isFileCached(fileId) };
+  }
+
   // ---------- 列出/更新/取消分享 ----------
 
   /** 列出当前用户的所有分享（分页 + 可按 targetType 过滤） */

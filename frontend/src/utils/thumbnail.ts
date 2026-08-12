@@ -136,6 +136,12 @@ export async function buildThumbUrl(fileId: string): Promise<string> {
   return `/api/files/${encodeURIComponent(fileId)}/thumbnail?t=${token}`;
 }
 
+/** 构建高清封面 URL（受并发限制，复用同一加密时间戳 Token 机制） */
+export async function buildHdThumbUrl(fileId: string): Promise<string> {
+  const token = await getThumbToken();
+  return `/api/files/${encodeURIComponent(fileId)}/thumbnail-hd?t=${token}`;
+}
+
 /** 清除缓存（路由切换时调用，防止 Token 跨页面复用） */
 export function clearThumbToken() {
   cachedToken = null;

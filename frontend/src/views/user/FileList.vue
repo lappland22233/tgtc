@@ -494,6 +494,7 @@
       :kind="previewTarget ? getPreviewKind(previewTarget.mimeType, previewTarget.originalName) : null"
       :src="previewTarget ? buildFilePreviewUrl(previewTarget.id) : null"
       :download-url="previewTarget ? `/api/files/${previewTarget.id}/download` : undefined"
+      :file-id="previewTarget ? previewTarget.id : undefined"
       :playlist="activeMediaPlaylist"
       :playlist-index="activeMediaPlaylistIndex"
       @update:visible="onPreviewVisibleChange"

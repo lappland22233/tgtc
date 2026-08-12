@@ -2,7 +2,7 @@
  * 缩略图内存缓存（仅用于同一次页面渲染去重，不跨页面）
  * 本地缩略图文件已足够快，不再需要批量预加载。
  */
-import { buildThumbUrl } from './thumbnail';
+import { buildThumbUrl, buildHdThumbUrl } from './thumbnail';
 
 /** 缓存容量上限，超出按 LRU 淘汰，防止浏览大量文件夹时无限增长 */
 const MAX_CACHE_SIZE = 500;
@@ -28,27 +28,42 @@ const pending = new Map<string, Promise<string>>();
 export async function getThumbnailUrl(fileId: string, mimeType?: string, directUrl?: string): Promise<string> {
   if (!mimeType?.startsWith('image/') && !mimeType?.startsWith('video/')) return '';
   if (directUrl) return directUrl;
+  return resolveThumbnailUrl(fileId, false);
+}
 
-  const cached = cache.get(fileId);
+/**
+ * 获取高清封面 URL。
+ * 使用独立的缓存命名空间（`hd:<fileId>`），避免与普通封面缓存键冲突，
+ * 防止普通/高清封面在短 TTL 窗口内互相覆盖导致重复升级。
+ */
+export async function getHdThumbnailUrl(fileId: string, mimeType?: string): Promise<string> {
+  if (!mimeType?.startsWith('video/')) return '';
+  return resolveThumbnailUrl(fileId, true);
+}
+
+async function resolveThumbnailUrl(fileId: string, hd: boolean): Promise<string> {
+  const key = hd ? `hd:${fileId}` : fileId;
+
+  const cached = cache.get(key);
   if (cached) {
     if (cached.expiresAt > Date.now()) {
       // 命中：删除后重新插入到末尾以刷新 LRU 访问序
-      cache.delete(fileId);
-      cache.set(fileId, cached);
+      cache.delete(key);
+      cache.set(key, cached);
       return cached.url;
     }
     // 过期项（签名 URL 已失效）清除后重新构建
-    cache.delete(fileId);
+    cache.delete(key);
   }
 
-  // 请求合并：并发同 fileId 时复用同一个 Promise
-  const inflight = pending.get(fileId);
+  // 请求合并：并发同 key 时复用同一个 Promise
+  const inflight = pending.get(key);
   if (inflight) return inflight;
 
   const promise = (async () => {
     try {
-      const url = await buildThumbUrl(fileId);
-      cache.set(fileId, { url, expiresAt: Date.now() + CACHE_TTL_MS });
+      const url = hd ? await buildHdThumbUrl(fileId) : await buildThumbUrl(fileId);
+      cache.set(key, { url, expiresAt: Date.now() + CACHE_TTL_MS });
       // LRU 淘汰：超出容量时删除最久未访问项（Map 首部）
       while (cache.size > MAX_CACHE_SIZE) {
         const oldest = cache.keys().next();
@@ -57,11 +72,11 @@ export async function getThumbnailUrl(fileId: string, mimeType?: string, directU
       }
       return url;
     } finally {
-      pending.delete(fileId);
+      pending.delete(key);
     }
   })();
 
-  pending.set(fileId, promise);
+  pending.set(key, promise);
   return promise;
 }
 

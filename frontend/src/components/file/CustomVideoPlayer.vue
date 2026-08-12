@@ -18,6 +18,7 @@
       ref="videoRef"
       class="cvp__video"
       :src="src || undefined"
+      :poster="poster || undefined"
       preload="none"
       playsinline
       @play="onPlay"
@@ -218,10 +219,20 @@ export type VideoEndBehavior = 'loop' | 'next' | 'pause';
 const props = withDefaults(defineProps<{
   /** 视频 src（可以是普通 URL 或 MediaSource ObjectURL） */
   src: string | null;
+  /** 视频封面（poster）URL，冷资源未生成时可为空 */
+  poster?: string | null;
+  /**
+   * 冷资源加载模式：文件尚未有正式本地缓存时开启。
+   * 开启后所有 seek（进度条/键盘/快捷键）都被钳制到已缓冲末尾，
+   * 避免浏览器为越界位置发起新的动态分段请求。
+   */
+  cold?: boolean;
   /** 播放结束后的行为，由预览弹窗统一执行 */
   endBehavior?: VideoEndBehavior;
 }>(), {
   endBehavior: 'next',
+  poster: null,
+  cold: false,
 });
 
 const emit = defineEmits<{
@@ -450,22 +461,50 @@ function previewSeekPct(pct: number) {
   playedPct.value = pct;
 }
 
+/** 当前最大已缓冲 end；无缓冲返回 0 */
+function getMaxBufferedEnd(): number {
+  const v = videoRef.value;
+  if (!v || !v.buffered.length) return 0;
+  let maxEnd = 0;
+  for (let i = 0; i < v.buffered.length; i++) {
+    if (v.buffered.end(i) > maxEnd) maxEnd = v.buffered.end(i);
+  }
+  return maxEnd;
+}
+
+/** 冷资源加载阶段把目标时间钳制到已缓冲末尾以内，防止浏览器发起越界 Range 请求 */
+function clampSeekTarget(target: number): number {
+  if (!props.cold) return target;
+  const maxEnd = getMaxBufferedEnd();
+  if (maxEnd <= 0) return 0;
+  // 留 0.1s 余量，避免 seek 恰好落在缓冲末尾边界触发新的分段请求
+  return Math.min(target, Math.max(0, maxEnd - 0.1));
+}
+
 function commitSeekPct(pct: number) {
   const v = videoRef.value;
   if (!v || !duration.value) return;
-  const target = (pct / 100) * duration.value;
+  const target = clampSeekTarget((pct / 100) * duration.value);
+  // 冷资源且尚无任何缓冲时不允许跳转（此时任何位置都不可读）
+  if (props.cold && target <= 0) {
+    dragPct.value = null;
+    return;
+  }
   // fastSeek 允许浏览器选择邻近关键帧，普通赋值作为兼容回退。
-  if (typeof v.fastSeek === 'function') v.fastSeek(target);
+  // 冷资源阶段直接用 currentTime 赋值，避免 fastSeek 跳到缓冲区间之外的关键帧。
+  if (!props.cold && typeof v.fastSeek === 'function') v.fastSeek(target);
   else v.currentTime = target;
   currentTime.value = target;
-  playedPct.value = pct;
+  playedPct.value = duration.value > 0 ? (target / duration.value) * 100 : 0;
   dragPct.value = null;
 }
 
 function seekBy(seconds: number) {
   const v = videoRef.value;
   if (!v || !duration.value) return;
-  const target = Math.max(0, Math.min(duration.value, v.currentTime + seconds));
+  const rawTarget = Math.max(0, Math.min(duration.value, v.currentTime + seconds));
+  const target = clampSeekTarget(rawTarget);
+  // 冷资源且目标被钳制到 0（尚无缓冲）时仅更新指示器，不真正 seek
   v.currentTime = target;
   currentTime.value = target;
   playedPct.value = (target / duration.value) * 100;
