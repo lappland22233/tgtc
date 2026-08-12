@@ -482,7 +482,7 @@ const audioRef = ref<HTMLAudioElement | null>(null);
 /** 音频是否正在播放（驱动波形装饰动画） */
 const audioPlaying = ref(false);
 const AUDIO_WAVE_BAR_COUNT = 28;
-const AUDIO_WAVE_REFRESH_INTERVAL = 1000 / 75;
+const AUDIO_WAVE_REFRESH_INTERVAL = 1000 / 45;
 const audioWaveBars = ref(Array.from({ length: AUDIO_WAVE_BAR_COUNT }, () => ({ height: 28 })));
 let audioContext: AudioContext | null = null;
 let audioAnalyser: AnalyserNode | null = null;
