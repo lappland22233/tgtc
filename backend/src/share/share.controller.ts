@@ -314,7 +314,7 @@ export class ShareController {
         'Content-Disposition': `inline; filename="${encodeURIComponent(result.filename)}"`,
         'Content-Length': result.size.toString(),
         ...(isRange ? { 'Content-Range': `bytes ${result.start}-${result.end}/${result.total}` } : {}),
-        'Accept-Ranges': 'bytes',
+        'Accept-Ranges': rangeHeader && !isRange ? 'none' : 'bytes',
         'Cache-Control': 'no-store, no-cache, must-revalidate',
         'X-Content-Type-Options': 'nosniff',
       });

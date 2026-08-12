@@ -306,6 +306,8 @@ const currentEndBehaviorLabel = computed(() => (
 
 let hideTimer: ReturnType<typeof setTimeout> | null = null;
 let seekHideTimer: ReturnType<typeof setTimeout> | null = null;
+let pendingPlayRequest = false;
+let playFrame: number | null = null;
 let longPressActive = false;
 let savedRate = 1;
 
@@ -377,7 +379,10 @@ function togglePlay() {
   const v = videoRef.value;
   if (!v) return;
   if (!props.src) {
-    emit('request-play');
+    if (!pendingPlayRequest) {
+      pendingPlayRequest = true;
+      emit('request-play');
+    }
     isBuffering.value = true;
     showControls();
     return;
@@ -708,7 +713,7 @@ function formatTime(s: number): string {
 }
 
 // ─── 生命周期 ────────────────────────────
-watch(() => props.src, (src, previousSrc) => {
+watch(() => props.src, (src) => {
   const v = videoRef.value;
   if (!v) return;
   currentTime.value = 0;
@@ -716,11 +721,21 @@ watch(() => props.src, (src, previousSrc) => {
   bufferedPct.value = 0;
   isEnded.value = false;
   isPaused.value = true;
-  if (src && !previousSrc) {
-    requestAnimationFrame(() => {
-      if (props.src === src) void v.play().catch(() => { isBuffering.value = false; });
+  if (playFrame !== null) {
+    cancelAnimationFrame(playFrame);
+    playFrame = null;
+  }
+  if (src && pendingPlayRequest) {
+    pendingPlayRequest = false;
+    const targetVideo = v;
+    playFrame = requestAnimationFrame(() => {
+      playFrame = null;
+      if (videoRef.value === targetVideo && props.src === src) {
+        void targetVideo.play().catch(() => { isBuffering.value = false; });
+      }
     });
   } else if (!src) {
+    pendingPlayRequest = false;
     isBuffering.value = false;
   }
 });

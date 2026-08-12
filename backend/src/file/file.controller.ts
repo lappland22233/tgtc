@@ -293,7 +293,7 @@ export class FileController {
         'Content-Type': result.contentType,
         'Content-Disposition': `inline; filename="${encodeURIComponent(result.filename)}"`,
         'Content-Length': result.size.toString(),
-        'Accept-Ranges': 'bytes',
+        'Accept-Ranges': rangeHeader ? 'none' : 'bytes',
         'Cache-Control': 'public, max-age=3600, stale-while-revalidate=86400',
         'X-Content-Type-Options': 'nosniff',
       });
@@ -373,7 +373,7 @@ export class FileController {
         'Content-Type': sanitizePreviewContentType(result.contentType),
         'Content-Disposition': `inline; filename="${encodeURIComponent(result.filename)}"`,
         'Content-Length': result.size.toString(),
-        'Accept-Ranges': 'bytes',
+        'Accept-Ranges': rangeHeader ? 'none' : 'bytes',
         'Cache-Control': 'private, no-cache',
         'X-Content-Type-Options': 'nosniff',
       });
