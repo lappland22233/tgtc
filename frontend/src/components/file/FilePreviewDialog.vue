@@ -113,7 +113,7 @@
                 <span
                   v-for="(bar, idx) in audioWaveBars"
                   :key="idx"
-                  :style="{ height: bar.height + '%', animationDelay: bar.delay }"
+                  :style="{ height: bar.height + '%' }"
                 />
               </div>
               <audio
@@ -432,7 +432,6 @@ function switchToTrack(idx: number) {
 
 function playPrev() { if (hasPrev.value) switchToTrack(activeIndex.value - 1); }
 function playNext() { if (hasNext.value) switchToTrack(activeIndex.value + 1); }
-function onAudioEnded() { if (hasNext.value) switchToTrack(activeIndex.value + 1); }
 
 /** 播放列表展开后，点击面板之外的弹窗区域立即收起，不遮挡媒体。 */
 function onDialogPointerDown(event: PointerEvent) {
@@ -482,16 +481,72 @@ const audioRef = ref<HTMLAudioElement | null>(null);
 
 /** 音频是否正在播放（驱动波形装饰动画） */
 const audioPlaying = ref(false);
-/** 波形动画的停顿阈值：与 CSS keyframes 阶段保持一致 */
 const AUDIO_WAVE_BAR_COUNT = 28;
-/** 静态伪频谱条：仅用于视觉装饰，不绑定真实音频数据 */
-const audioWaveBars = Array.from({ length: AUDIO_WAVE_BAR_COUNT }, (_, i) => ({
-  height: 28 + ((i * 53) % 68), // 28 ~ 95%
-  delay: `-${(i % 10) * 0.14}s`,
-}));
+const audioWaveBars = ref(Array.from({ length: AUDIO_WAVE_BAR_COUNT }, () => ({ height: 28 })));
+let audioContext: AudioContext | null = null;
+let audioAnalyser: AnalyserNode | null = null;
+let audioSource: MediaElementAudioSourceNode | null = null;
+let audioWaveFrame = 0;
+let audioWaveData: Uint8Array | null = null;
 
-function onAudioPlay() { audioPlaying.value = true; }
-function onAudioPause() { audioPlaying.value = false; }
+function stopAudioWaveform() {
+  if (audioWaveFrame) cancelAnimationFrame(audioWaveFrame);
+  audioWaveFrame = 0;
+  audioSource?.disconnect();
+  audioAnalyser?.disconnect();
+  audioSource = null;
+  audioAnalyser = null;
+  audioWaveData = null;
+  if (audioContext) void audioContext.close().catch(() => {});
+  audioContext = null;
+  audioWaveBars.value = Array.from({ length: AUDIO_WAVE_BAR_COUNT }, () => ({ height: 28 }));
+}
+
+function updateAudioWaveform() {
+  if (!audioPlaying.value || !audioAnalyser || !audioWaveData) return;
+  audioAnalyser.getByteTimeDomainData(audioWaveData as any);
+  const bucketSize = Math.max(1, Math.floor(audioWaveData.length / AUDIO_WAVE_BAR_COUNT));
+  audioWaveBars.value = Array.from({ length: AUDIO_WAVE_BAR_COUNT }, (_, index) => {
+    const start = index * bucketSize;
+    const end = Math.min(audioWaveData!.length, start + bucketSize);
+    let peak = 0;
+    for (let i = start; i < end; i++) peak = Math.max(peak, Math.abs(audioWaveData![i] - 128));
+    return { height: Math.min(100, Math.max(28, 28 + peak * 2.4)) };
+  });
+  audioWaveFrame = requestAnimationFrame(updateAudioWaveform);
+}
+
+function setupAudioWaveform() {
+  const audio = audioRef.value;
+  if (!audio || audioAnalyser) return;
+  try {
+    audioContext = new AudioContext();
+    audioAnalyser = audioContext.createAnalyser();
+    audioAnalyser.fftSize = 256;
+    audioWaveData = new Uint8Array(audioAnalyser.frequencyBinCount);
+    audioSource = audioContext.createMediaElementSource(audio);
+    audioSource.connect(audioAnalyser);
+    audioAnalyser.connect(audioContext.destination);
+  } catch {
+    stopAudioWaveform();
+  }
+}
+
+function onAudioPlay() {
+  audioPlaying.value = true;
+  setupAudioWaveform();
+  if (audioContext?.state === 'suspended') void audioContext.resume();
+  if (!audioWaveFrame) audioWaveFrame = requestAnimationFrame(updateAudioWaveform);
+}
+function onAudioPause() {
+  audioPlaying.value = false;
+  if (audioWaveFrame) cancelAnimationFrame(audioWaveFrame);
+  audioWaveFrame = 0;
+}
+function onAudioEnded() {
+  onAudioPause();
+  if (hasNext.value) switchToTrack(activeIndex.value + 1);
+}
 
 /** 文本内容字符数（工具栏信息展示） */
 const textCharCount = computed(() => textContent.value.length);
@@ -504,6 +559,7 @@ function resetState() {
   clearPosterRetryTimer();
   posterLoadToken++;
   teardownVideo();
+  stopAudioWaveform();
   const audio = audioRef.value;
   if (audio) {
     audio.pause();
@@ -1319,7 +1375,7 @@ function formatSize(bytes: number | string | null | undefined): string {
   white-space: nowrap;
 }
 
-/* 波形装饰：静态伪频谱，播放时交错跳动 */
+/* 波形装饰：由 Web Audio API 实时驱动 */
 .fpv-audio-wave {
   display: flex;
   align-items: center;
