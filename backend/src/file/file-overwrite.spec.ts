@@ -233,6 +233,27 @@ describe('FileService - createProcessingFile 覆盖分支', () => {
     expect(audit.log).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'file_upload' }));
   });
 
+  it('覆盖上传时清空历史 uploadFailureReason（旧失败不残留）', async () => {
+    const target = makeTargetFile();
+    target.uploadFailureReason = '旧失败原因，不应残留';
+    fileRepo.findOne.mockResolvedValue(target);
+
+    const result = await service.createProcessingFile(
+      makeMulterFile(),
+      '新文件.png',
+      makeUser(ownerId),
+      undefined,
+      true,
+      null,
+      targetFileId,
+    );
+
+    expect(result.uploadFailureReason).toBeNull();
+    expect(fileRepo.save).toHaveBeenCalledWith(
+      expect.objectContaining({ uploadFailureReason: null }),
+    );
+  });
+
   it('覆盖目标不存在时降级为原新建逻辑（不丢已传字节），审计 fallback', async () => {
     fileRepo.findOne.mockResolvedValue(null); // assertOverwriteTarget → NotFoundException
 

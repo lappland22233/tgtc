@@ -546,6 +546,7 @@ export class FileService implements OnModuleInit {
           target.status = 'processing';
           target.uploadVersion = (target.uploadVersion || 1) + 1;
           target.uploadStage = 'pending';
+          target.uploadFailureReason = null; // 覆盖上传即视为重新开始，清空历史失败原因
           target.originalName = fileName;
           target.size = file.size;
           target.mimeType = file.mimetype || 'application/octet-stream';
@@ -614,8 +615,8 @@ export class FileService implements OnModuleInit {
     if (!this.fileCacheService.isNoCacheMode() && file.path && fs.existsSync(file.path)) {
       this.fileCacheService.cacheFileFromPath(finalFile.id, file.path, file.size)
         .then(() => {
-          // 缓存预热完成 → 文件立即可用，无需等待 TG 上传
-          this.fileRepository.update(finalFile.id, { status: 'ready' } as any).catch(() => {});
+          // 缓存预热完成 → 文件立即可用，无需等待 TG 上传；同时清空历史失败原因
+          this.fileRepository.update(finalFile.id, { status: 'ready', uploadFailureReason: null } as any).catch(() => {});
           this.logger.log(`文件缓存就绪: ${finalFile.id}`);
         })
         .catch((err) => {

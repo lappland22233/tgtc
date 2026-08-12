@@ -64,6 +64,19 @@ export class FileUploadProcessor {
     ]);
   }
 
+  /**
+   * 将最终失败原因安全化为可持久化的诊断摘要：
+   * 不保存本地路径、控制字符、Token 或冗长堆栈，长度受限后写入 DB。
+   */
+  private safeFailureReason(message: string, filePath?: string): string {
+    const raw = filePath ? message.split(filePath).join('临时文件') : message;
+    return raw
+      .replace(/[\u0000-\u001F\u007F]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 1000);
+  }
+
   @Process({ name: 'upload', concurrency: 2 })
   async uploadToTelegram(job: Job<FileUploadJobData>): Promise<void> {
     const { fileId, filePath, uploadVersion } = job.data;
@@ -84,7 +97,12 @@ export class FileUploadProcessor {
         if (job.attemptsMade < 2) throw new Error(`临时文件暂不可用: ${filePath}`);
         await this.fileRepository.update(
           { id: fileId, uploadVersion },
-          { status: 'error', uploadStage: 'failed' } as Partial<File>,
+          {
+            status: 'error',
+            uploadStage: 'failed',
+            // 固定原因，不包含本地路径，避免泄露服务器目录结构
+            uploadFailureReason: '临时文件缺失，上传已放弃',
+          } as Partial<File>,
         );
         this.logger.warn(
           `文件上传最终失败并标记 error: fileId=${fileId} uploadVersion=${uploadVersion} 原因=临时文件缺失 (第 ${attempt} 次尝试后放弃)`,
@@ -110,7 +128,7 @@ export class FileUploadProcessor {
           // DB 提交失败前先原子保存回执，Bull 重试/进程重启可直接恢复提交。
           await this.persistReceipt(filePath, result);
         }
-        // 远端结果是幂等提交点：一次原子更新同时写入 TG 引用与 remote_committed。
+        // 远端结果是幂等提交点：一次原子更新同时写入 TG 引用、清空历史失败原因并置 remote_committed。
         await this.fileRepository.update(
           { id: fileId, uploadVersion },
           {
@@ -118,6 +136,7 @@ export class FileUploadProcessor {
             telegramFileId: result.file_id,
             telegramFilePath: result.file_path || '',
             uploadStage: 'remote_committed',
+            uploadFailureReason: null,
           } as Partial<File>,
         );
       } catch (error) {
@@ -126,7 +145,11 @@ export class FileUploadProcessor {
         if (job.attemptsMade >= 2 && !remoteReceipt) {
           await this.fileRepository.update(
             { id: fileId, uploadVersion },
-            { status: 'error', uploadStage: 'failed' } as Partial<File>,
+            {
+              status: 'error',
+              uploadStage: 'failed',
+              uploadFailureReason: this.safeFailureReason((error as Error).message || '远端上传/提交失败', filePath),
+            } as Partial<File>,
           );
           this.logger.warn(
             `文件上传最终失败并标记 error: fileId=${fileId} uploadVersion=${uploadVersion} 原因=远端上传/提交重试耗尽，无远端回执`,
@@ -143,7 +166,7 @@ export class FileUploadProcessor {
     if (file.uploadVersion !== uploadVersion || !this.isCommitted(file)) return;
 
     await this.fileRepository.query(
-      'UPDATE files SET status = $1 WHERE id = $2 AND status = $3',
+      'UPDATE files SET status = $1, "uploadFailureReason" = NULL WHERE id = $2 AND status = $3',
       ['ready', fileId, 'processing'],
     );
 

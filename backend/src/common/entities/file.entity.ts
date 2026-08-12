@@ -129,6 +129,13 @@ export class File {
   @Column({ type: 'varchar', length: 32, default: 'committed' })
   uploadStage: 'pending' | 'uploading' | 'remote_committed' | 'committed' | 'failed';
 
+  /**
+   * 最终上传失败的安全诊断原因（内部诊断用，默认查询不加载该字段）。
+   * 不保存堆栈、Token、本地路径或文件内容；成功提交与覆盖上传时会清空。
+   */
+  @Column({ type: 'varchar', length: 1000, nullable: true, select: false })
+  uploadFailureReason: string | null;
+
   @CreateDateColumn()
   createdAt: Date;
 

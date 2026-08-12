@@ -11,6 +11,8 @@ interface TelegramMediaResult {
   document?: { file_id?: string };
   animation?: { file_id?: string };
   video?: { file_id?: string };
+  audio?: { file_id?: string };
+  voice?: { file_id?: string };
 }
 
 interface TelegramSendDocumentResponse {
@@ -71,6 +73,19 @@ export class TelegramService {
   }
 
   /**
+   * 安全化 Telegram 400 错误描述：脱敏 Bot Token、清理控制字符、
+   * 规范化空白并限制长度，避免敏感信息或冗长响应进入日志与持久化字段。
+   */
+  private safeTelegramDescription(description: string): string {
+    const cleaned = this.redactToken(description)
+      .replace(/[\u0000-\u001F\u007F]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!cleaned) return 'Telegram API 请求参数错误，请检查相关配置';
+    return cleaned.slice(0, 500);
+  }
+
+  /**
    * 包装 axios 请求，统一处理 Telegram API 错误，提供更友好的错误消息。
    * 429 限流时自动重试（最多 3 次，指数退避）。
    */
@@ -102,7 +117,8 @@ export class TelegramService {
             if (description.includes('chat not found') || description.includes('PEER_ID_INVALID')) {
               throw new Error('Telegram 群组未找到，请检查 TELEGRAM_CHAT_ID 配置或确认 Bot 已加入群组');
             }
-            throw new Error('Telegram API 请求参数错误，请检查 TELEGRAM_CHAT_ID 配置是否正确');
+            // 保留 Telegram 原始 description（安全化后），不再统一归因为 chat_id 配置错误
+            throw new Error(this.safeTelegramDescription(description));
           }
           if (status === 404) {
             throw new Error('Telegram Bot 未找到，请检查 Bot Token 是否正确');
@@ -184,11 +200,14 @@ export class TelegramService {
       });
 
       const result = response.data?.result;
-      // 自托管 Bot API 即使接收 sendDocument，也可能将 MP4 识别为 animation 或 video。
-      // 普通 document 保持优先，避免改变现有文件行为。
+      // 自托管 Bot API 即使接收 sendDocument，也可能按内容重新识别媒体类型：
+      // MP4 可能被识别为 animation/video，MP3/OGG 等音频可能被识别为 audio/voice。
+      // 普通 document 保持优先，避免多媒体字段并存时改变现有文件行为。
       const file_id = result?.document?.file_id
         || result?.animation?.file_id
-        || result?.video?.file_id;
+        || result?.video?.file_id
+        || result?.audio?.file_id
+        || result?.voice?.file_id;
       if (!file_id) {
         const mediaFields = result && typeof result === 'object'
           ? Object.keys(result).filter((key) => key !== 'text').slice(0, 10).join(', ') || 'none'

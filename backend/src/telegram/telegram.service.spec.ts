@@ -147,6 +147,36 @@ describe('TelegramService realtime stream', () => {
       );
     });
 
+    it('falls back to audio.file_id for MP3/audio responses', async () => {
+      mockedAxios.post.mockResolvedValueOnce({
+        data: { ok: true, result: { audio: { file_id: 'audio-id' } } },
+      } as any);
+      mockFileInfo('audio-id');
+
+      const result = await createService().uploadFile(Buffer.from('test'), 'song.mp3');
+
+      expect(result.file_id).toBe('audio-id');
+      expect(mockedAxios.get).toHaveBeenCalledWith(
+        expect.stringContaining('/getFile'),
+        expect.objectContaining({ params: { file_id: 'audio-id' } }),
+      );
+    });
+
+    it('falls back to voice.file_id for voice responses', async () => {
+      mockedAxios.post.mockResolvedValueOnce({
+        data: { ok: true, result: { voice: { file_id: 'voice-id' } } },
+      } as any);
+      mockFileInfo('voice-id');
+
+      const result = await createService().uploadFile(Buffer.from('test'), 'memo.ogg');
+
+      expect(result.file_id).toBe('voice-id');
+      expect(mockedAxios.get).toHaveBeenCalledWith(
+        expect.stringContaining('/getFile'),
+        expect.objectContaining({ params: { file_id: 'voice-id' } }),
+      );
+    });
+
     it('prefers document.file_id when multiple media fields exist', async () => {
       mockedAxios.post.mockResolvedValueOnce({
         data: {
@@ -170,6 +200,50 @@ describe('TelegramService realtime stream', () => {
       await expect(createService().uploadFile(Buffer.from('test'), 'unknown.bin'))
         .rejects.toThrow('响应缺少可识别的媒体 file_id');
       expect(mockedAxios.get).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('telegramRequest 400 error fidelity', () => {
+    it('preserves the Telegram description for a generic 400 error', async () => {
+      mockedAxios.post.mockRejectedValueOnce({
+        response: { status: 400, data: { ok: false, description: 'bad request: something wrong' } },
+      } as any);
+
+      await expect(createService().uploadFile(Buffer.from('test'), 'test.bin'))
+        .rejects.toThrow('bad request: something wrong');
+    });
+
+    it('sanitizes control characters, collapses whitespace and caps the length', async () => {
+      const long = 'x'.repeat(2000);
+      mockedAxios.post.mockRejectedValueOnce({
+        response: { status: 400, data: { ok: false, description: `A\r\n\tB  ${long}` } },
+      } as any);
+
+      await expect(createService().uploadFile(Buffer.from('test'), 'test.bin'))
+        .rejects.toThrow('A B');
+    });
+
+    it('falls back to a stable message when the description is missing', async () => {
+      mockedAxios.post.mockRejectedValueOnce({
+        response: { status: 400, data: { ok: false } },
+      } as any);
+
+      await expect(createService().uploadFile(Buffer.from('test'), 'test.bin'))
+        .rejects.toThrow('请求参数错误');
+    });
+
+    it('keeps known 400 mappings for image and chat errors', async () => {
+      mockedAxios.post.mockRejectedValueOnce({
+        response: { status: 400, data: { ok: false, description: 'IMAGE_PROCESS_FAILED' } },
+      } as any);
+      await expect(createService().uploadFile(Buffer.from('test'), 'bad.png'))
+        .rejects.toThrow('图片处理失败');
+
+      mockedAxios.post.mockRejectedValueOnce({
+        response: { status: 400, data: { ok: false, description: 'chat not found' } },
+      } as any);
+      await expect(createService().uploadFile(Buffer.from('test'), 'test.bin'))
+        .rejects.toThrow('群组未找到');
     });
   });
 });
