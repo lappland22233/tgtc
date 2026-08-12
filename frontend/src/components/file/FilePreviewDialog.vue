@@ -92,17 +92,42 @@
               />
             </div>
 
-            <!-- 音频 -->
-            <audio
+            <!-- 音频：主题化播放器卡片（保留原生 audio 控件的可访问性） -->
+            <div
               v-else-if="visible && snap.kind === 'audio' && snap.src && !mediaError"
-              ref="audioRef"
-              class="fpv-audio"
-              :src="snap.src"
-              controls
-              preload="metadata"
-              @ended="onAudioEnded"
-              @error="onMediaError"
-            />
+              class="fpv-audio-player"
+            >
+              <div class="fpv-audio-visual">
+                <div class="fpv-audio-icon" aria-hidden="true">
+                  <t-icon name="music" />
+                </div>
+                <div class="fpv-audio-info">
+                  <div class="fpv-audio-name" :title="snap.name">{{ snap.name || '音频文件' }}</div>
+                  <div class="fpv-audio-meta">
+                    <template v-if="snap.mimeType">{{ snap.mimeType }}</template>
+                    <template v-if="snap.size != null"> · {{ formatSize(snap.size) }}</template>
+                  </div>
+                </div>
+              </div>
+              <div class="fpv-audio-wave" :class="{ 'fpv-audio-wave--playing': audioPlaying }" aria-hidden="true">
+                <span
+                  v-for="(bar, idx) in audioWaveBars"
+                  :key="idx"
+                  :style="{ height: bar.height + '%', animationDelay: bar.delay }"
+                />
+              </div>
+              <audio
+                ref="audioRef"
+                class="fpv-audio-controls"
+                :src="snap.src"
+                controls
+                preload="metadata"
+                @play="onAudioPlay"
+                @pause="onAudioPause"
+                @ended="onAudioEnded"
+                @error="onMediaError"
+              />
+            </div>
 
             <!-- PDF（浏览器原生内联渲染） -->
             <iframe
@@ -115,7 +140,7 @@
             <!-- 文本：打开时 fetch 读取 -->
             <template v-else-if="visible && snap.kind === 'text'">
               <div v-if="textLoading" class="fpv-state">
-                <t-loading size="medium" text="正在加载文本内容..." />
+                <t-loading size="medium" text="正在加载文本内容…" />
               </div>
               <div v-else-if="textTooLarge" class="fpv-state fpv-error">
                 <t-icon name="info-circle" class="fpv-state-icon" />
@@ -128,7 +153,20 @@
                   <t-icon name="download" />下载文件
                 </button>
               </div>
-              <pre v-else class="fpv-text">{{ textContent }}</pre>
+              <div v-else class="fpv-text-panel">
+                <div class="fpv-text-toolbar">
+                  <div class="fpv-text-toolbar-left">
+                    <t-icon name="file-code" class="fpv-text-type-icon" aria-hidden="true" />
+                    <span class="fpv-text-type-label">文本文件</span>
+                  </div>
+                  <div class="fpv-text-toolbar-meta">
+                    <template v-if="snap.mimeType"><span>{{ snap.mimeType }}</span></template>
+                    <template v-if="snap.size != null"><span> · {{ formatSize(snap.size) }}</span></template>
+                    <template v-if="textCharCount > 0"><span> · {{ textCharCount }} 字符</span></template>
+                  </div>
+                </div>
+                <pre class="fpv-text">{{ textContent }}</pre>
+              </div>
             </template>
 
             <!-- 无法预览 / 媒体加载失败 -->
@@ -442,6 +480,22 @@ let loadToken = 0;
 let textAbort: AbortController | null = null;
 const audioRef = ref<HTMLAudioElement | null>(null);
 
+/** 音频是否正在播放（驱动波形装饰动画） */
+const audioPlaying = ref(false);
+/** 波形动画的停顿阈值：与 CSS keyframes 阶段保持一致 */
+const AUDIO_WAVE_BAR_COUNT = 28;
+/** 静态伪频谱条：仅用于视觉装饰，不绑定真实音频数据 */
+const audioWaveBars = Array.from({ length: AUDIO_WAVE_BAR_COUNT }, (_, i) => ({
+  height: 28 + ((i * 53) % 68), // 28 ~ 95%
+  delay: `-${(i % 10) * 0.14}s`,
+}));
+
+function onAudioPlay() { audioPlaying.value = true; }
+function onAudioPause() { audioPlaying.value = false; }
+
+/** 文本内容字符数（工具栏信息展示） */
+const textCharCount = computed(() => textContent.value.length);
+
 function resetState() {
   loadToken++;
   textAbort?.abort();
@@ -456,6 +510,7 @@ function resetState() {
     audio.removeAttribute('src');
     audio.load();
   }
+  audioPlaying.value = false;
   textLoading.value = false;
   textContent.value = '';
   textError.value = null;
@@ -1028,11 +1083,17 @@ function handleDownload() {
   triggerBrowserDownload(url, snap.name || undefined);
 }
 
-function formatSize(bytes: number): string {
-  if (bytes <= 0) return '0 B';
+/**
+ * 安全的文件大小格式化。
+ * 后端/调用方可能传入字符串、空值或非法数值（如 `size` 以字符串形式返回时，
+ * 直接调用 `.toFixed` 会抛 `p.toFixed is not a function`），统一先做数值归一化。
+ */
+function formatSize(bytes: number | string | null | undefined): string {
+  const num = Number(bytes);
+  if (!Number.isFinite(num) || num <= 0) return '0 B';
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];
   let i = 0;
-  let size = bytes;
+  let size = num;
   while (size >= 1024 && i < units.length - 1) { size /= 1024; i++; }
   return `${size.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
 }
@@ -1136,6 +1197,7 @@ function formatSize(bytes: number): string {
   align-items: center;
   justify-content: center;
   overflow: auto;
+  overscroll-behavior: contain;
   padding: 16px;
 }
 
@@ -1185,31 +1247,206 @@ function formatSize(bytes: number): string {
   white-space: nowrap;
 }
 
-.fpv-audio {
+/* ═══════════════ 音频播放器卡片 ═══════════════ */
+.fpv-audio-player {
   width: min(560px, 100%);
+  padding: 24px 24px 20px;
+  background:
+    linear-gradient(160deg, color-mix(in srgb, var(--seed-primary) 7%, transparent), transparent 55%),
+    var(--color-bg-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
 }
 
-.fpv-pdf {
+.fpv-audio-visual {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-width: 0;
+}
+
+/* 左侧媒体图标：主色渐变底 + 波形装饰 */
+.fpv-audio-icon {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 64px;
+  height: 64px;
+  flex-shrink: 0;
+  border-radius: var(--radius-lg);
+  background:
+    radial-gradient(circle at 30% 22%, color-mix(in srgb, var(--seed-primary) 38%, transparent), transparent 58%),
+    linear-gradient(145deg, color-mix(in srgb, var(--seed-primary) 16%, var(--seed-surface)), color-mix(in srgb, var(--seed-accent) 12%, var(--seed-surface)));
+  border: 1px solid var(--border-accent);
+  color: var(--seed-primary);
+  font-size: 30px;
+  overflow: hidden;
+}
+
+.fpv-audio-info {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.fpv-audio-name {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.fpv-audio-meta {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 波形装饰：静态伪频谱，播放时交错跳动 */
+.fpv-audio-wave {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  height: 34px;
+  padding: 0 4px;
+  border-top: 1px dashed var(--border-default);
+  border-bottom: 1px dashed var(--border-default);
+  opacity: 0.9;
+}
+
+.fpv-audio-wave span {
+  width: 3px;
+  min-height: 4px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--seed-primary) 62%, transparent);
+  transform-origin: center;
+}
+
+.fpv-audio-wave--playing span {
+  animation: fpv-wave 1.1s ease-in-out infinite;
+}
+
+.fpv-audio-wave--playing span:nth-child(3n) { animation-duration: 1.35s; }
+.fpv-audio-wave--playing span:nth-child(4n) { animation-duration: 0.9s; }
+
+@keyframes fpv-wave {
+  0%, 100% { transform: scaleY(0.35); }
+  50% { transform: scaleY(1); }
+}
+
+/* 原生 audio 控件：占满播放器卡片宽度 */
+.fpv-audio-controls {
+  display: block;
+  width: 100%;
+  height: 44px;
+}
+.fpv-audio-controls:focus-visible {
+  outline: 2px solid var(--seed-primary);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* ═══════════════ 文本预览面板 ═══════════════ */
+.fpv-text-panel {
+  align-self: stretch;
   width: 100%;
   height: 100%;
-  border: none;
-  border-radius: var(--radius-sm, 6px);
-  background: #fff;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.fpv-text-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border-default);
+  background: color-mix(in srgb, var(--seed-primary) 4%, var(--color-bg-overlay));
+  flex-shrink: 0;
+}
+
+.fpv-text-toolbar-left {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.fpv-text-type-icon {
+  font-size: 16px;
+  color: var(--seed-primary);
+  flex-shrink: 0;
+}
+
+.fpv-text-type-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.fpv-text-toolbar-meta {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex-shrink: 1;
 }
 
 .fpv-text {
-  align-self: stretch;
-  width: 100%;
+  flex: 1;
+  min-height: 0;
   margin: 0;
   overflow: auto;
+  overscroll-behavior: contain;
+  padding: 14px 16px;
   font-family: var(--font-mono);
   font-size: 12.5px;
-  line-height: 1.6;
+  line-height: 1.7;
   color: var(--text-primary);
+  tab-size: 4;
   white-space: pre-wrap;
   word-break: break-word;
   user-select: text;
 }
+
+/* 文本阅读区滚动条 */
+.fpv-text::-webkit-scrollbar { width: 8px; height: 8px; }
+.fpv-text::-webkit-scrollbar-track { background: transparent; }
+.fpv-text::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 4px; }
+.fpv-text::-webkit-scrollbar-thumb:hover { background: var(--text-tertiary); }
 
 /* 加载 / 错误兜底态 */
 .fpv-state {
@@ -1514,6 +1751,43 @@ function formatSize(bytes: number): string {
     min-height: 160px;
   }
 
+  .fpv-audio-player {
+    padding: 18px 16px 16px;
+  }
+
+  .fpv-audio-icon {
+    width: 52px;
+    height: 52px;
+    font-size: 26px;
+  }
+
+  .fpv-audio-name {
+    font-size: 14px;
+  }
+
+  .fpv-audio-wave {
+    height: 28px;
+    gap: 2px;
+  }
+
+  .fpv-audio-wave span {
+    width: 2px;
+  }
+
+  .fpv-text {
+    padding: 12px;
+    font-size: 12px;
+  }
+
+  .fpv-text-toolbar {
+    padding: 6px 10px;
+    flex-wrap: wrap;
+  }
+
+  .fpv-text-toolbar-meta {
+    font-size: 10px;
+  }
+
   .fpv-footer {
     padding: 8px 10px;
   }
@@ -1564,6 +1838,10 @@ function formatSize(bytes: number): string {
   .fpv-slide-enter-active,
   .fpv-slide-leave-active {
     transition: none;
+  }
+
+  .fpv-audio-wave--playing span {
+    animation: none;
   }
 }
 </style>
