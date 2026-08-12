@@ -482,16 +482,19 @@ const audioRef = ref<HTMLAudioElement | null>(null);
 /** 音频是否正在播放（驱动波形装饰动画） */
 const audioPlaying = ref(false);
 const AUDIO_WAVE_BAR_COUNT = 28;
+const AUDIO_WAVE_REFRESH_INTERVAL = 1000 / 75;
 const audioWaveBars = ref(Array.from({ length: AUDIO_WAVE_BAR_COUNT }, () => ({ height: 28 })));
 let audioContext: AudioContext | null = null;
 let audioAnalyser: AnalyserNode | null = null;
 let audioSource: MediaElementAudioSourceNode | null = null;
 let audioWaveFrame = 0;
+let audioWaveLastUpdate = 0;
 let audioWaveData: Uint8Array | null = null;
 
 function stopAudioWaveform() {
   if (audioWaveFrame) cancelAnimationFrame(audioWaveFrame);
   audioWaveFrame = 0;
+  audioWaveLastUpdate = 0;
   audioSource?.disconnect();
   audioAnalyser?.disconnect();
   audioSource = null;
@@ -502,8 +505,13 @@ function stopAudioWaveform() {
   audioWaveBars.value = Array.from({ length: AUDIO_WAVE_BAR_COUNT }, () => ({ height: 28 }));
 }
 
-function updateAudioWaveform() {
+function updateAudioWaveform(timestamp: number) {
   if (!audioPlaying.value || !audioAnalyser || !audioWaveData) return;
+  if (timestamp - audioWaveLastUpdate < AUDIO_WAVE_REFRESH_INTERVAL) {
+    audioWaveFrame = requestAnimationFrame(updateAudioWaveform);
+    return;
+  }
+  audioWaveLastUpdate = timestamp;
   audioAnalyser.getByteTimeDomainData(audioWaveData as any);
   const bucketSize = Math.max(1, Math.floor(audioWaveData.length / AUDIO_WAVE_BAR_COUNT));
   audioWaveBars.value = Array.from({ length: AUDIO_WAVE_BAR_COUNT }, (_, index) => {
@@ -542,6 +550,7 @@ function onAudioPause() {
   audioPlaying.value = false;
   if (audioWaveFrame) cancelAnimationFrame(audioWaveFrame);
   audioWaveFrame = 0;
+  audioWaveLastUpdate = 0;
 }
 function onAudioEnded() {
   onAudioPause();
