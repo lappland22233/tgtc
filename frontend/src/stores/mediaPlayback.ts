@@ -7,7 +7,7 @@
  *   供 MiniMediaPlayer 等路由之外的 UI 复用同一 <audio>/<video>，切换导航不中断。
  * - 本地播放进度持久化（localStorage，按来源上下文 + 文件隔离），
  *   支持恢复点校验（无效 / 过期 / 接近结尾不恢复）。
- * - 记录画中画、播放状态与上传浮层可见性（迷你播放器据此左右避让）。
+ * - 记录播放状态与上传浮层可见性（迷你播放器据此左右避让）。
  *
  * 安全约定：
  * - 分享访问 JWT 仅保存在内存会话中，绝不写入 localStorage。
@@ -29,6 +29,11 @@ export interface MediaSessionItem {
   src: string;
   /** 下载地址；未传时用 src 兜底 */
   downloadUrl?: string;
+  /**
+   * 媒体内容版本指纹（映射后端 File.uploadVersion，覆盖上传时递增）。
+   * 进度记录会绑定该版本；文件被覆盖后旧记录自动失效，避免旧内容进度错误应用到新内容。
+   */
+  contentVersion?: string | number;
 }
 
 export type MediaSourceContext =
@@ -56,7 +61,6 @@ export interface MediaPlayerBridge {
   seekBy(seconds: number): void;
   next(): void;
   prev(): void;
-  togglePiP(): void;
   /** 真正停止：暂停、清空 src、释放资源并清空会话 */
   stop(): void;
 }
@@ -74,13 +78,32 @@ export function buildProgressKey(context: MediaSourceContext, fileId: string): s
   return `${PROGRESS_PREFIX}${ctxKey}:${fileId}`;
 }
 
-/** 纯函数：读取并校验本地保存的进度点；无效 / 过期 / 接近结尾返回 0（从头播放） */
-export function readResumePoint(context: MediaSourceContext, fileId: string): number {
+/** 持久化进度记录结构（v 为内容版本，缺失表示旧格式记录） */
+interface ResumeRecord {
+  t: number;
+  d: number;
+  ts: number;
+  v?: string | number;
+}
+
+/**
+ * 纯函数：读取并校验本地保存的进度点；无效 / 过期 / 接近结尾 / 版本不匹配返回 0（从头播放）。
+ *
+ * 版本语义（覆盖上传保留同一 fileId 时用于防止旧进度错配新内容）：
+ * - 记录带 v 且调用方提供 contentVersion：v 与 contentVersion 不一致 → 记录失效并清除。
+ * - 记录无 v（旧格式）且调用方提供 contentVersion：无法确认内容是否被覆盖 → 一次性失效并清除。
+ * - 调用方未提供 contentVersion：跳过版本校验（向后兼容旧调用路径）。
+ */
+export function readResumePoint(
+  context: MediaSourceContext,
+  fileId: string,
+  contentVersion?: string | number,
+): number {
   const key = buildProgressKey(context, fileId);
   try {
     const raw = localStorage.getItem(key);
     if (!raw) return 0;
-    let rec: { t?: number; d?: number; ts?: number } | null;
+    let rec: ResumeRecord | null;
     try {
       rec = JSON.parse(raw);
     } catch {
@@ -94,6 +117,13 @@ export function readResumePoint(context: MediaSourceContext, fileId: string): nu
     if (!Number.isFinite(rec.t) || !Number.isFinite(rec.d) || rec.t <= 0 || rec.d <= 0) {
       localStorage.removeItem(key);
       return 0;
+    }
+    // 内容版本校验：覆盖上传后旧进度必须失效
+    if (contentVersion !== undefined) {
+      if (rec.v === undefined || rec.v !== contentVersion) {
+        localStorage.removeItem(key);
+        return 0;
+      }
     }
     if (Date.now() - rec.ts > PROGRESS_TTL_MS) {
       localStorage.removeItem(key);
@@ -136,15 +166,13 @@ export const useMediaPlaybackStore = defineStore('mediaPlayback', () => {
   const expanded = ref(true);
   /** 上传浮层是否可见；可见时迷你播放器从右下避让到左下 */
   const uploadPanelVisible = ref(false);
-  /** 视频是否处于浏览器画中画 */
-  const pipActive = ref(false);
   const playState = ref<MediaPlayState>('paused');
   const currentTime = ref(0);
   const duration = ref(0);
   const volume = ref(0.5);
   const muted = ref(false);
   const playbackRate = ref(1);
-  /** 非打断式提示（如画中画不可用）；供 UI 以 aria-live 播报 */
+  /** 非打断式提示（如播放异常）；供 UI 以 aria-live 播报 */
   const errorMessage = ref<string | null>(null);
   /** 本次打开 / 切换媒体时待应用的恢复点（loadedmetadata 后消费） */
   const pendingResume = ref(0);
@@ -182,10 +210,6 @@ export const useMediaPlaybackStore = defineStore('mediaPlayback', () => {
     playbackRate.value = r;
   }
 
-  function setPipActive(v: boolean) {
-    pipActive.value = v;
-  }
-
   function setUploadPanelVisible(v: boolean) {
     uploadPanelVisible.value = v;
   }
@@ -217,6 +241,7 @@ export const useMediaPlaybackStore = defineStore('mediaPlayback', () => {
         t: currentTime.value,
         d: duration.value,
         ts: Date.now(),
+        v: s.item.contentVersion,
       }));
       // 周期性清理过期记录（约每 100 次写入），控制存储体积
       if (++persistCount >= 100) {
@@ -232,12 +257,11 @@ export const useMediaPlaybackStore = defineStore('mediaPlayback', () => {
   function open(payload: MediaSession) {
     session.value = payload;
     expanded.value = true;
-    pipActive.value = false;
     playState.value = 'buffering';
     currentTime.value = 0;
     duration.value = 0;
     errorMessage.value = null;
-    pendingResume.value = readResumePoint(payload.context, payload.item.id);
+    pendingResume.value = readResumePoint(payload.context, payload.item.id, payload.item.contentVersion);
   }
 
   /** 播放列表切换到指定项；返回新项（供宿主更新 UI），越界返回 null */
@@ -250,9 +274,8 @@ export const useMediaPlaybackStore = defineStore('mediaPlayback', () => {
     playState.value = 'buffering';
     currentTime.value = 0;
     duration.value = 0;
-    pipActive.value = false;
     errorMessage.value = null;
-    pendingResume.value = readResumePoint(s.context, item.id);
+    pendingResume.value = readResumePoint(s.context, item.id, item.contentVersion);
     return item;
   }
 
@@ -289,7 +312,6 @@ export const useMediaPlaybackStore = defineStore('mediaPlayback', () => {
     }
     session.value = null;
     expanded.value = true;
-    pipActive.value = false;
     playState.value = 'paused';
     currentTime.value = 0;
     duration.value = 0;
@@ -313,13 +335,11 @@ export const useMediaPlaybackStore = defineStore('mediaPlayback', () => {
   function seekBy(s: number) { bridge?.seekBy(s); }
   function next() { bridge?.next(); }
   function prev() { bridge?.prev(); }
-  function togglePiP() { bridge?.togglePiP(); }
 
   return {
     session,
     expanded,
     uploadPanelVisible,
-    pipActive,
     playState,
     currentTime,
     duration,
@@ -340,7 +360,6 @@ export const useMediaPlaybackStore = defineStore('mediaPlayback', () => {
     setVolume,
     setMuted,
     setPlaybackRate,
-    setPipActive,
     setUploadPanelVisible,
     setError,
     persistProgress,
@@ -353,6 +372,5 @@ export const useMediaPlaybackStore = defineStore('mediaPlayback', () => {
     seekBy,
     next,
     prev,
-    togglePiP,
   };
 });

@@ -44,6 +44,12 @@ export interface FileItem {
   status?: 'processing' | 'ready' | 'error';
   /** 关联标签 */
   tags?: Tag[];
+  /**
+   * 文件内容版本（覆盖上传时递增）。
+   * 媒体进度恢复据此判断记录是否仍适用于当前内容；
+   * 可选字段：部分接口可能不返回，缺省时视为无版本信息。
+   */
+  uploadVersion?: number;
 }
 
 export interface BatchUploadFailedItem {

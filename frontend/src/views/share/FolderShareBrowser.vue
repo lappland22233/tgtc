@@ -79,6 +79,8 @@
                 :file-name="file.name"
                 :size="72"
                 :src="buildShareThumbnailUrl(props.token, file.id, props.accessJwt)"
+                :context="`s:${props.token}`"
+                :version="file.uploadVersion"
               />
             </div>
             <div class="file-card-info">
@@ -139,6 +141,8 @@ interface FileSummary {
   mimeType: string;
   createdAt: string;
   downloadUrl: string;
+  /** 文件内容版本（覆盖上传时递增），用于进度记录版本校验 */
+  uploadVersion?: number;
 }
 interface FolderContents {
   subfolders: FolderSummary[];
@@ -180,6 +184,7 @@ function openPreview(file: FileSummary) {
       size: file.size,
       src: buildSharePreviewUrl(props.token, file.id, props.accessJwt),
       downloadUrl: buildShareDownloadUrl(file.id),
+      contentVersion: file.uploadVersion,
     },
     playlist: list,
     playlistIndex: index,
@@ -198,6 +203,7 @@ function buildMediaPlaylist(kind: MediaSessionItem['kind']): MediaSessionItem[] 
       size: file.size,
       src: buildSharePreviewUrl(props.token, file.id, props.accessJwt),
       downloadUrl: buildShareDownloadUrl(file.id),
+      contentVersion: file.uploadVersion,
     }));
 }
 

@@ -98,4 +98,30 @@ describe('readResumePoint', () => {
     expect(readResumePoint(userCtx, 'file-1')).toBe(60);
     expect(readResumePoint(shareCtx, 'file-1')).toBe(120);
   });
+
+  it('版本匹配的记录可恢复', () => {
+    const key = buildProgressKey(userCtx, 'file-1');
+    localStorage.setItem(key, JSON.stringify({ t: 60, d: 300, ts: Date.now(), v: 2 }));
+    expect(readResumePoint(userCtx, 'file-1', 2)).toBe(60);
+  });
+
+  it('覆盖上传后版本不匹配：旧进度失效并被清除', () => {
+    const key = buildProgressKey(userCtx, 'file-1');
+    localStorage.setItem(key, JSON.stringify({ t: 60, d: 300, ts: Date.now(), v: 1 }));
+    expect(readResumePoint(userCtx, 'file-1', 2)).toBe(0);
+    expect(localStorage.getItem(key)).toBeNull();
+  });
+
+  it('旧格式记录（无版本）遇到带版本的内容：一次性失效被清除', () => {
+    const key = buildProgressKey(userCtx, 'file-1');
+    localStorage.setItem(key, JSON.stringify({ t: 60, d: 300, ts: Date.now() }));
+    expect(readResumePoint(userCtx, 'file-1', 1)).toBe(0);
+    expect(localStorage.getItem(key)).toBeNull();
+  });
+
+  it('调用方未提供版本时旧格式记录仍按旧行为恢复（向后兼容）', () => {
+    const key = buildProgressKey(userCtx, 'file-1');
+    localStorage.setItem(key, JSON.stringify({ t: 60, d: 300, ts: Date.now() }));
+    expect(readResumePoint(userCtx, 'file-1')).toBe(60);
+  });
 });

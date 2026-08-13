@@ -19,7 +19,7 @@
 
 <script setup lang="ts">
 import { ref, watch, onMounted, onUnmounted } from 'vue';
-import { getThumbnailUrl } from '../utils/thumbnailCache';
+import { getThumbnailUrl, getThumbnailResource, buildThumbResourceKey, releaseThumbnailResource } from '../utils/thumbnailCache';
 import { acquireThumbnailSlot, releaseThumbnailSlot } from '../utils/thumbnail';
 import FileTypeIcon from './FileTypeIcon.vue';
 
@@ -29,6 +29,13 @@ const props = withDefaults(defineProps<{
   fileName?: string;
   size?: number;
   src?: string;
+  /**
+   * 访问上下文标识（登录 `u:<userId>` / 分享 `s:<token>`）。
+   * 用于与视频预览封面共享同一份 Blob 缓存；缺省按登录态默认上下文处理。
+   */
+  context?: string;
+  /** 内容版本（覆盖上传时递增），覆盖后使旧 Blob 缓存失效 */
+  version?: string | number;
   /** @deprecated emoji prop is no longer used; kept for backward compat */
   emoji?: string;
 }>(), {
@@ -37,6 +44,7 @@ const props = withDefaults(defineProps<{
   size: 36,
   emoji: '',
   src: '',
+  context: '',
 });
 
 const containerRef = ref<HTMLElement>();
@@ -48,11 +56,31 @@ let loaded = false;
 let retried = false;   // 仅重试一次，避免错误时死循环
 let unmounted = false; // 卸载后禁止再写响应式状态（异步竞态防护）
 let slotHeld = false;
+/** 当前持有的 Blob 缓存键（getThumbnailResource 已递增引用，需要配对 release） */
+let activeResourceKey: string | null = null;
 
 function releaseSlotIfHeld() {
   if (!slotHeld) return;
   slotHeld = false;
   releaseThumbnailSlot();
+}
+
+/** 释放当前持有的 Blob 资源引用 */
+function releaseActiveResource() {
+  if (activeResourceKey) {
+    releaseThumbnailResource(activeResourceKey);
+    activeResourceKey = null;
+  }
+}
+
+/** 当前资源的缓存键参数（不含 URL） */
+function resourceKeyParams() {
+  return {
+    context: props.context || 'u:default',
+    fileId: props.fileId,
+    version: props.version,
+    hd: false,
+  };
 }
 
 async function loadThumbnail() {
@@ -61,10 +89,27 @@ async function loadThumbnail() {
   await acquireThumbnailSlot();
   slotHeld = true;
   try {
-    const result = await getThumbnailUrl(props.fileId, props.mimeType, props.src);
+    const signedUrl = props.src || (await getThumbnailUrl(props.fileId, props.mimeType));
     if (unmounted) { releaseSlotIfHeld(); return; }
-    url.value = result;
-    signed.value = true;
+    if (!signedUrl) { releaseSlotIfHeld(); return; }
+    const keyParams = resourceKeyParams();
+    const resource = await getThumbnailResource({
+      ...keyParams,
+      url: signedUrl,
+    });
+    if (unmounted) {
+      // 卸载竞态：已下载的 Blob 引用释放给缓存统一管理
+      if (resource) releaseThumbnailResource(buildThumbResourceKey(keyParams));
+      releaseSlotIfHeld();
+      return;
+    }
+    if (resource) {
+      activeResourceKey = buildThumbResourceKey(keyParams);
+      url.value = resource.objectUrl;
+      signed.value = true;
+    } else {
+      signed.value = false;
+    }
   } catch {
     releaseSlotIfHeld();
     if (unmounted) return;
@@ -78,6 +123,7 @@ function onLoad() {
 
 function onError() {
   releaseSlotIfHeld();
+  releaseActiveResource();
   url.value = '';
   signed.value = false;
   // 一次性重试：签名 URL 可能已过期（缓存 TTL 很短），重新构建通常可恢复
@@ -112,8 +158,9 @@ function startObserving() {
 
 // v-for 复用实例时 fileId 会变化：重置全部加载状态并重新观察，
 // 否则会显示上一个文件的旧缩略图
-watch(() => [props.fileId, props.src], () => {
+watch(() => [props.fileId, props.src, props.context, props.version], () => {
   releaseSlotIfHeld();
+  releaseActiveResource();
   loaded = false;
   retried = false;
   url.value = '';
@@ -128,6 +175,7 @@ onMounted(() => {
 onUnmounted(() => {
   unmounted = true;
   releaseSlotIfHeld();
+  releaseActiveResource();
   stopObserving();
 });
 </script>

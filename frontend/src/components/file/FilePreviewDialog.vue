@@ -78,14 +78,92 @@
 
           <!-- 内容区：按 kind 分支渲染；弹窗收起（v-show）时媒体 DOM 保留不中断 -->
           <div class="fpv-body">
-            <!-- 图片 -->
-            <img
+            <!-- 图片：自定义查看器（缩放 / 旋转 / 适应窗口 / 拖拽） -->
+            <div
               v-if="snap.kind === 'image' && snap.src && !mediaError"
-              class="fpv-image"
-              :src="snap.src"
-              :alt="snap.name"
-              @error="onMediaError"
-            />
+              class="fpv-image-stage"
+              ref="imageStageRef"
+              @dblclick="toggleImageFit"
+              @wheel="onImageWheel"
+              @pointerdown="onImagePointerDown"
+              @pointermove="onImagePointerMove"
+              @pointerup="onImagePointerUp"
+              @pointercancel="onImagePointerUp"
+            >
+              <img
+                class="fpv-image"
+                :class="{ 'fpv-image--dragging': imageDragging }"
+                :src="snap.src"
+                :alt="snap.name"
+                :style="imageStyle"
+                @load="onImageLoad"
+                @error="onMediaError"
+                draggable="false"
+              />
+
+              <!-- 图片工具栏（缩放 / 适应 / 旋转 / 下载 / 更多） -->
+              <div class="fpv-image-toolbar" @click.stop @pointerdown.stop>
+                <button
+                  type="button"
+                  class="fpv-image-tool"
+                  :disabled="imageScale <= IMAGE_SCALE_MIN"
+                  aria-label="缩小"
+                  title="缩小 (-)"
+                  @click="zoomImageBy(-1)"
+                >
+                  <svg viewBox="0 0 24 24" width="18" height="18"><circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="m21 21-4.35-4.35M8 11h6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+                </button>
+                <span class="fpv-image-scale" :title="'点击切换：适应 / 100% / 200%'">{{ imageScaleText }}</span>
+                <button
+                  type="button"
+                  class="fpv-image-tool"
+                  :disabled="imageScale >= IMAGE_SCALE_MAX"
+                  aria-label="放大"
+                  title="放大 (+)"
+                  @click="zoomImageBy(1)"
+                >
+                  <svg viewBox="0 0 24 24" width="18" height="18"><circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="m21 21-4.35-4.35M8 11h6M11 8v6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+                </button>
+                <span class="fpv-image-toolbar-divider" />
+                <button
+                  type="button"
+                  class="fpv-image-tool"
+                  aria-label="适应窗口"
+                  :title="'适应窗口 / 实际尺寸 (1)'"
+                  @click="toggleImageFit"
+                >
+                  <svg viewBox="0 0 24 24" width="18" height="18"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+                </button>
+                <button
+                  type="button"
+                  class="fpv-image-tool"
+                  aria-label="旋转"
+                  title="顺时针旋转 90° (R)"
+                  @click="rotateImage"
+                >
+                  <svg viewBox="0 0 24 24" width="18" height="18"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M21 3v5h-5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+                </button>
+                <button
+                  type="button"
+                  class="fpv-image-tool"
+                  aria-label="重置视图"
+                  title="重置视图 (0)"
+                  @click="resetImageView"
+                >
+                  <svg viewBox="0 0 24 24" width="18" height="18"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M3 3v5h5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+                </button>
+                <span class="fpv-image-toolbar-divider" />
+                <button
+                  type="button"
+                  class="fpv-image-tool"
+                  aria-label="下载"
+                  title="下载"
+                  @click="handleDownload"
+                >
+                  <svg viewBox="0 0 24 24" width="18" height="18"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 21h16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+                </button>
+              </div>
+            </div>
 
             <!-- 视频：自定义播放器（MSE 优先，不支持时原生回退） -->
             <div
@@ -107,12 +185,10 @@
                 @pause="onVideoPaused"
                 @ended="onVideoEnded"
                 @error="onVideoError"
-                @pip-change="mediaStore.setPipActive"
-                @pip-error="onPipError"
               />
             </div>
 
-            <!-- 音频：主题化播放器卡片（保留原生 audio 控件的可访问性） -->
+            <!-- 音频：完全自定义播放器（隐藏原生 audio，仅作媒体内核；可见交互全部自绘） -->
             <div
               v-else-if="snap.kind === 'audio' && snap.src && !mediaError"
               class="fpv-audio-player"
@@ -129,6 +205,7 @@
                   </div>
                 </div>
               </div>
+
               <div class="fpv-audio-wave" :class="{ 'fpv-audio-wave--playing': audioPlaying }" aria-hidden="true">
                 <span
                   v-for="(bar, idx) in audioWaveBars"
@@ -136,18 +213,129 @@
                   :style="{ height: bar.height + '%' }"
                 />
               </div>
+
+              <!-- 自定义进度条（可点击 / 拖动跳转） -->
+              <div
+                class="fpv-audio-progress"
+                role="slider"
+                tabindex="0"
+                aria-label="音频进度"
+                :aria-valuemin="0"
+                :aria-valuemax="Math.max(0, Math.round(audioDuration))"
+                :aria-valuenow="Math.max(0, Math.round(audioCurrentTime))"
+                :aria-valuetext="`${formatAudioTime(audioCurrentTime)} / ${formatAudioTime(audioDuration)}`"
+                @keydown.left.prevent="seekAudioBy(-5)"
+                @keydown.right.prevent="seekAudioBy(5)"
+                @mousedown="onAudioProgressDown"
+                @click="onAudioProgressClick"
+              >
+                <div class="fpv-audio-progress-track">
+                  <div class="fpv-audio-progress-played" :style="{ width: audioProgressPct + '%' }" />
+                </div>
+                <div class="fpv-audio-progress-thumb" :style="{ left: audioProgressPct + '%' }" />
+              </div>
+
+              <!-- 时间行 -->
+              <div class="fpv-audio-time-row">
+                <span class="fpv-audio-time-current">{{ formatAudioTime(audioCurrentTime) }}</span>
+                <span class="fpv-audio-time-duration">{{ formatAudioTime(audioDuration) }}</span>
+              </div>
+
+              <!-- 主控制行 -->
+              <div class="fpv-audio-controls-row">
+                <button
+                  type="button"
+                  class="fpv-audio-btn"
+                  :disabled="!hasPrev"
+                  aria-label="上一首"
+                  title="上一首 (Shift+P)"
+                  @click="playPrev"
+                >
+                  <svg viewBox="0 0 24 24" width="20" height="20"><path d="m15 18-6-6 6-6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                </button>
+                <button
+                  type="button"
+                  class="fpv-audio-btn fpv-audio-btn--play"
+                  :aria-label="audioPlaying ? '暂停' : '播放'"
+                  :title="audioPlaying ? '暂停' : '播放'"
+                  @click="toggleAudioPlay"
+                >
+                  <svg v-if="audioPlaying" viewBox="0 0 24 24" width="22" height="22"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z" fill="currentColor"/></svg>
+                  <svg v-else viewBox="0 0 24 24" width="22" height="22"><path d="M8 5v14l11-7z" fill="currentColor"/></svg>
+                </button>
+                <button
+                  type="button"
+                  class="fpv-audio-btn"
+                  :disabled="!hasNext"
+                  aria-label="下一首"
+                  title="下一首 (Shift+N)"
+                  @click="playNext"
+                >
+                  <svg viewBox="0 0 24 24" width="20" height="20"><path d="m9 6 6 6-6 6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                </button>
+
+                <span class="fpv-audio-controls-spacer" />
+
+                <!-- 静音 -->
+                <button
+                  type="button"
+                  class="fpv-audio-btn"
+                  :aria-label="audioMuted ? '取消静音' : '静音'"
+                  :title="audioMuted ? '取消静音' : '静音'"
+                  @click="toggleAudioMute"
+                >
+                  <svg v-if="audioMuted || audioVolume === 0" viewBox="0 0 24 24" width="20" height="20"><path d="M16.5 12A4.5 4.5 0 0 0 14 8.5v2.09l2.41 2.41c.06-.31.09-.63.09-1zM19 12c0 .94-.2 1.82-.54 2.64l1.51 1.51A8.796 8.796 0 0 0 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3 3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06a8.99 8.99 0 0 0 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4 9.91 6.09 12 8.18V4z" fill="currentColor"/></svg>
+                  <svg v-else viewBox="0 0 24 24" width="20" height="20"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3A4.5 4.5 0 0 0 14 8.5v7a4.47 4.47 0 0 0 2.5-3.5z" fill="currentColor"/></svg>
+                </button>
+
+                <!-- 倍速 -->
+                <button
+                  type="button"
+                  class="fpv-audio-rate"
+                  :aria-label="`播放速度 ${audioRate}×`"
+                  title="播放速度"
+                  @click="cycleAudioRate"
+                >
+                  {{ audioRate }}×
+                </button>
+
+                <!-- 音量滑块（触控端点击静音为主，桌面端悬浮弹出） -->
+                <input
+                  v-model.number="audioVolumeInput"
+                  class="fpv-audio-volume"
+                  type="range"
+                  min="0"
+                  max="1"
+                  step="0.01"
+                  aria-label="音量"
+                  @input="onAudioVolumeInput"
+                />
+
+                <!-- 收起 -->
+                <button
+                  type="button"
+                  class="fpv-audio-btn"
+                  aria-label="收起为迷你播放器"
+                  title="收起为迷你播放器"
+                  @click="minimize"
+                >
+                  <svg viewBox="0 0 24 24" width="20" height="20"><path d="m6 9 6 6 6-6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                </button>
+              </div>
+
+              <!-- 隐藏的媒体内核：波形/桥接仍依赖它，所有可见交互由上方自定义控件接管 -->
               <audio
                 ref="audioRef"
                 :key="snap.src"
-                class="fpv-audio-controls"
+                class="fpv-audio-core"
                 :src="snap.src"
-                controls
                 preload="metadata"
                 @play="onAudioPlay"
                 @pause="onAudioPause"
                 @ended="onAudioEnded"
                 @timeupdate="onAudioTimeUpdate"
                 @loadedmetadata="onAudioLoadedMeta"
+                @volumechange="onAudioVolumeChange"
                 @error="onMediaError"
               />
             </div>
@@ -195,7 +383,7 @@
             <!-- 无法预览 / 媒体加载失败 -->
             <div v-else class="fpv-state fpv-error">
               <t-icon name="close-circle" class="fpv-state-icon" />
-              <p>{{ mediaError ? '文件加载失败，可能无权访问该文件' : '无法预览该文件' }}</p>
+              <p>{{ mediaError ? (mediaErrorText || '文件加载失败，可能无权访问该文件') : '无法预览该文件' }}</p>
               <button type="button" class="fpv-btn" @click="handleDownload">
                 <t-icon name="download" />下载文件
               </button>
@@ -251,6 +439,8 @@
                     :mime-type="item.mimeType"
                     :file-name="item.name"
                     :size="48"
+                    :context="currentMediaContext()"
+                    :version="item.contentVersion"
                   />
                   <div v-else class="fpv-playlist-index">{{ idx + 1 }}</div>
                   <div class="fpv-playlist-info">
@@ -281,7 +471,13 @@ import {
   fetchShareCacheStatus,
 } from '../../utils/preview';
 import { triggerBrowserDownload } from '../../utils/download';
-import { getThumbnailUrl, getHdThumbnailUrl } from '../../utils/thumbnailCache';
+import {
+  getThumbnailUrl,
+  getHdThumbnailUrl,
+  getThumbnailResource,
+  buildThumbResourceKey,
+  releaseThumbnailResource,
+} from '../../utils/thumbnailCache';
 import CustomVideoPlayer, { type VideoEndBehavior } from './CustomVideoPlayer.vue';
 import ThumbnailImg from '../ThumbnailImg.vue';
 import {
@@ -321,6 +517,8 @@ const textContent = ref('');
 const textError = ref<string | null>(null);
 const textTooLarge = ref(false);
 const mediaError = ref(false);
+/** 媒体加载失败的具体原因分类（优于笼统默认文案） */
+const mediaErrorText = ref<string | null>(null);
 const dialogRef = ref<HTMLElement | null>(null);
 const playlistPanelRef = ref<HTMLElement | null>(null);
 
@@ -332,6 +530,8 @@ const HD_COVER_MIN_HEIGHT = 360;
 const posterUrl = ref<string | null>(null);
 /** 当前封面所属文件 ID（播放列表切换时更新） */
 const currentPosterFileId = ref('');
+/** 当前封面在共享 Blob 缓存中的键（切换 / 关闭时 release 引用） */
+let posterResourceKey: string | null = null;
 /** 封面异步加载代次，防止切换文件后旧结果覆盖新状态 */
 let posterLoadToken = 0;
 /** 是否已尝试过高清封面升级（避免普通/高清封面循环重试） */
@@ -348,10 +548,23 @@ function clearPosterRetryTimer() {
   posterRetryTimer = null;
 }
 
+/** Object URL 由共享 Blob 缓存统一管理生命周期（淘汰时 revoke），这里只更新引用并配对 release。 */
 function setPosterObjectUrl(url: string | null) {
-  const previous = posterUrl.value;
   posterUrl.value = url;
-  if (previous?.startsWith('blob:') && previous !== url) URL.revokeObjectURL(previous);
+}
+
+/** 释放当前封面在共享缓存中的引用（不影响仍被其他组件使用的 Blob） */
+function releasePosterResource() {
+  if (posterResourceKey) {
+    releaseThumbnailResource(posterResourceKey);
+    posterResourceKey = null;
+  }
+}
+
+/** 当前媒体会话的访问上下文标识（与 ThumbnailImg 的 context prop 对齐） */
+function currentMediaContext(): string {
+  const ctx = mediaStore.session?.context;
+  return ctx?.type === 'share' ? `s:${ctx.token}` : `u:${ctx?.userId ?? ''}`;
 }
 
 // ============ 播放列表状态 ============
@@ -403,6 +616,7 @@ function applyItem(item: MediaSessionItem) {
   snap.downloadUrl = item.downloadUrl ?? null;
   mediaError.value = false;
   if (item.kind === 'text') void loadText();
+  if (item.kind === 'image') resetImageView();
   if (item.kind === 'video') {
     currentPosterFileId.value = item.id;
     setPosterObjectUrl(null);
@@ -460,6 +674,122 @@ const TEXT_PREVIEW_LIMIT = 2 * 1024 * 1024;
 let loadToken = 0;
 let textAbort: AbortController | null = null;
 const audioRef = ref<HTMLAudioElement | null>(null);
+
+// ============ 自定义音频控制 ============
+/** 音频当前播放位置（由 timeupdate 驱动，供自定义进度条渲染） */
+const audioCurrentTime = ref(0);
+/** 音频总时长（loadedmetadata 后可用） */
+const audioDuration = ref(0);
+/** 音量（0-1，跟随 audio.volume；静音时归零显示） */
+const audioVolume = ref(0.5);
+/** 静音状态（跟随 audio.muted） */
+const audioMuted = ref(false);
+/** 倍速档位（与 CustomVideoPlayer 档位保持一致） */
+const AUDIO_RATES = [0.5, 0.75, 1, 1.25, 1.5, 2, 3] as const;
+const audioRate = ref(1);
+/** 音量输入框 v-model 绑定的中间值（避免拖动时被事件回写干扰） */
+const audioVolumeInput = ref(0.5);
+/** 进度条拖动中：拖动时不回写 thumb 位置 */
+const audioSeeking = ref(false);
+
+/** 播放进度百分比（0-100） */
+const audioProgressPct = computed(() => {
+  if (audioDuration.value <= 0 || !Number.isFinite(audioCurrentTime.value)) return 0;
+  return Math.min(100, Math.max(0, (audioCurrentTime.value / audioDuration.value) * 100));
+});
+
+/** 时间格式化：mm:ss / h:mm:ss */
+function formatAudioTime(s: number): string {
+  if (!Number.isFinite(s) || s < 0) return '0:00';
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = Math.floor(s % 60);
+  if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
+  return `${m}:${String(sec).padStart(2, '0')}`;
+}
+
+/** 播放 / 暂停切换（与桥接语义一致） */
+function toggleAudioPlay() {
+  const a = audioRef.value;
+  if (!a) return;
+  if (a.paused) void a.play().catch(() => {});
+  else a.pause();
+}
+
+/** 相对跳转 */
+function seekAudioBy(seconds: number) {
+  const a = audioRef.value;
+  if (!a) return;
+  a.currentTime = Math.max(0, Math.min(a.duration || 0, a.currentTime + seconds));
+}
+
+/** 点击进度条跳转（直接点击不启用拖动状态） */
+function onAudioProgressClick(e: MouseEvent) {
+  const track = (e.currentTarget as HTMLElement).querySelector('.fpv-audio-progress-track');
+  if (!track) return;
+  const rect = track.getBoundingClientRect();
+  if (rect.width <= 0 || audioDuration.value <= 0) return;
+  const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+  const a = audioRef.value;
+  if (a) a.currentTime = ratio * audioDuration.value;
+}
+
+/** 按下进度条开始拖动 */
+function onAudioProgressDown(e: MouseEvent) {
+  const track = (e.currentTarget as HTMLElement).querySelector('.fpv-audio-progress-track');
+  if (!track || audioDuration.value <= 0) return;
+  audioSeeking.value = true;
+  const move = (ev: MouseEvent) => {
+    const rect = track.getBoundingClientRect();
+    if (rect.width <= 0) return;
+    const ratio = Math.max(0, Math.min(1, (ev.clientX - rect.left) / rect.width));
+    const a = audioRef.value;
+    if (a) a.currentTime = ratio * audioDuration.value;
+  };
+  const up = () => {
+    audioSeeking.value = false;
+    window.removeEventListener('mousemove', move);
+    window.removeEventListener('mouseup', up);
+  };
+  window.addEventListener('mousemove', move);
+  window.addEventListener('mouseup', up);
+  move(e);
+}
+
+/** 静音切换 */
+function toggleAudioMute() {
+  const a = audioRef.value;
+  if (!a) return;
+  a.muted = !a.muted;
+}
+
+/** 音量滑块输入（输入框值 → audio.volume） */
+function onAudioVolumeInput() {
+  const a = audioRef.value;
+  if (!a) return;
+  a.volume = audioVolumeInput.value;
+  if (a.volume > 0 && a.muted) a.muted = false;
+  audioVolume.value = a.volume;
+  audioMuted.value = a.muted;
+}
+
+/** audio.volumechange 同步状态（迷你播放器 / 外部修改时保持同步） */
+function onAudioVolumeChange() {
+  const a = audioRef.value;
+  if (!a) return;
+  audioVolume.value = a.volume;
+  audioMuted.value = a.muted;
+  audioVolumeInput.value = a.volume;
+}
+
+/** 循环切换倍速档位 */
+function cycleAudioRate() {
+  const idx = AUDIO_RATES.indexOf(audioRate.value as (typeof AUDIO_RATES)[number]);
+  audioRate.value = AUDIO_RATES[(idx + 1) % AUDIO_RATES.length];
+  const a = audioRef.value;
+  if (a) a.playbackRate = audioRate.value;
+  try { localStorage.setItem('file-preview-audio-rate', String(audioRate.value)); } catch { /* 不影响播放 */ }
+}
 
 // ============ 音频波形 ============
 /** 音频是否正在播放（驱动波形装饰动画） */
@@ -543,22 +873,43 @@ function onAudioEnded() {
   if (hasNext.value) switchToTrack(activeIndex.value + 1);
 }
 
-/** 音频进度同步 + 节流持久化 */
+/** 音频进度同步（驱动自定义进度条）+ 节流持久化 */
 function onAudioTimeUpdate() {
   const a = audioRef.value;
   if (!a) return;
+  audioCurrentTime.value = a.currentTime;
+  if (Number.isFinite(a.duration) && a.duration > 0) audioDuration.value = a.duration;
   mediaStore.setProgress(a.currentTime, a.duration);
   throttlePersist();
 }
 
-/** 音频元数据可用后应用恢复点 */
+/** 音频元数据可用后应用恢复点（恢复点已在 store 层完成版本校验） */
 function onAudioLoadedMeta() {
   const a = audioRef.value;
   const resume = mediaStore.pendingResume;
-  if (!a || !resume || resume <= 0) return;
-  if (Number.isFinite(a.duration) && a.duration > 0) {
-    a.currentTime = Math.min(resume, Math.max(0, a.duration - 1));
+  if (!a) return;
+  // 同步时长与音量/倍速偏好（倍速恢复与视频保持一致）
+  if (Number.isFinite(a.duration) && a.duration > 0) audioDuration.value = a.duration;
+  audioVolume.value = a.volume;
+  audioMuted.value = a.muted;
+  audioVolumeInput.value = a.volume;
+  try {
+    const saved = localStorage.getItem('file-preview-audio-rate');
+    if (saved && AUDIO_RATES.includes(Number(saved) as (typeof AUDIO_RATES)[number])) {
+      audioRate.value = Number(saved) as (typeof AUDIO_RATES)[number];
+    }
+  } catch { /* 存储不可用时使用默认 1× */ }
+  a.playbackRate = audioRate.value;
+  if (!resume || resume <= 0) return;
+  if (!Number.isFinite(a.duration) || a.duration <= 0) return;
+  const t = Math.min(resume, Math.max(0, a.duration - 1));
+  // 仅当目标位置可定位时才设置 currentTime，避免冷资源下在未缓冲位置触发重复请求
+  const seekable = a.seekable;
+  let canSeek = false;
+  for (let i = 0; i < seekable.length; i++) {
+    if (t >= seekable.start(i) && t <= seekable.end(i)) { canSeek = true; break; }
   }
+  if (canSeek || seekable.length === 0) a.currentTime = t;
 }
 
 /** 文本内容字符数（工具栏信息展示） */
@@ -580,12 +931,25 @@ function resetState() {
     audio.load();
   }
   audioPlaying.value = false;
+  audioCurrentTime.value = 0;
+  audioDuration.value = 0;
+  audioSeeking.value = false;
+  // 图片查看状态复位（切换文件时避免上一张的缩放/旋转残留）
+  imageLoaded.value = false;
+  imageNatural.value = { w: 0, h: 0 };
+  imageScale.value = 1;
+  imageRotation.value = 0;
+  imageFit.value = 'contain';
+  imageTranslate.value = { x: 0, y: 0 };
+  imageDragging.value = false;
   textLoading.value = false;
   textContent.value = '';
   textError.value = null;
   textTooLarge.value = false;
   mediaError.value = false;
+  mediaErrorText.value = null;
   // 切换时清空封面与冷资源状态，避免下一文件残留
+  releasePosterResource();
   setPosterObjectUrl(null);
   currentPosterFileId.value = '';
   coldLoad.value = false;
@@ -626,6 +990,32 @@ function onKeydown(e: KeyboardEvent) {
     if (e.key === 'N' || e.key === 'n') { e.preventDefault(); playNext(); }
     if (e.key === 'P' || e.key === 'p') { e.preventDefault(); playPrev(); }
   }
+  // 音频专用快捷键：J/L 前后 10s，M 静音，上/下音量 ±5%
+  if (snap.kind === 'audio') {
+    if (e.key === 'j' || e.key === 'J') { e.preventDefault(); seekAudioBy(-10); }
+    if (e.key === 'l' || e.key === 'L') { e.preventDefault(); seekAudioBy(10); }
+    if (e.key === 'm' || e.key === 'M') { e.preventDefault(); toggleAudioMute(); }
+    if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      const a = audioRef.value;
+      if (a) { a.volume = Math.min(1, a.volume + 0.05); }
+    }
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      const a = audioRef.value;
+      if (a) { a.volume = Math.max(0, a.volume - 0.05); }
+    }
+  }
+  // 图片专用快捷键：+/= 放大，- 缩小，0 重置，1 适应/100%，R 旋转，左右切图
+  if (snap.kind === 'image') {
+    if (e.key === '+' || e.key === '=') { e.preventDefault(); zoomImageBy(1); }
+    if (e.key === '-') { e.preventDefault(); zoomImageBy(-1); }
+    if (e.key === '0') { e.preventDefault(); resetImageView(); }
+    if (e.key === '1') { e.preventDefault(); toggleImageFit(); }
+    if (e.key === 'r' || e.key === 'R') { e.preventDefault(); rotateImage(); }
+    if (e.key === 'ArrowLeft') { e.preventDefault(); playPrev(); }
+    if (e.key === 'ArrowRight') { e.preventDefault(); playNext(); }
+  }
 }
 
 /** 页面隐藏时补写进度（避免后台期间丢失最后位置） */
@@ -633,9 +1023,168 @@ function onVisibility() {
   if (document.visibilityState === 'hidden') mediaStore.persistProgress();
 }
 
-/** 媒体元素加载失败（含 401/403 无权访问） */
+/** 媒体元素加载失败（图片/音频/PDF 共用；含 401/403 无权访问） */
 function onMediaError() {
   mediaError.value = true;
+  mediaErrorText.value = null; // 使用默认文案；视频错误走细分分类
+}
+
+/** 根据浏览器媒体错误码分类提示，避免笼统「无法播放」 */
+function classifyMediaErrorCode(code?: number): string {
+  switch (code) {
+    case 2: // MEDIA_ERR_NETWORK
+      return '网络错误，无法加载媒体，请检查网络后重试';
+    case 3: // MEDIA_ERR_DECODE
+      return '媒体解码失败，文件可能已损坏或编码格式不支持';
+    case 4: // MEDIA_ERR_SRC_NOT_SUPPORTED
+      return '无法加载媒体，文件可能已被删除、无权访问或格式不支持';
+    default:
+      return '文件加载失败，可能无权访问该文件';
+  }
+}
+
+// ============ 图片查看器（缩放 / 旋转 / 适应 / 拖拽） ============
+const IMAGE_SCALE_MIN = 0.1;
+const IMAGE_SCALE_MAX = 8;
+/** 缩放档位步进比例（相对当前值，指数步进更符合视觉感受） */
+const IMAGE_SCALE_STEP = 1.2;
+const imageStageRef = ref<HTMLElement | null>(null);
+const imageScale = ref(1);
+const imageRotation = ref(0);
+/** 视图模式：contain = 适应窗口；manual = 手动缩放（含 100% 实际尺寸） */
+const imageFit = ref<'contain' | 'manual'>('contain');
+const imageTranslate = ref({ x: 0, y: 0 });
+const imageDragging = ref(false);
+const imageNatural = ref({ w: 0, h: 0 });
+const imageLoaded = ref(false);
+/** 拖拽起始点与初始偏移 */
+let imageDragStart = { x: 0, y: 0, tx: 0, ty: 0 };
+
+/** 旋转后是否发生宽高交换（90/270 度） */
+const imageSwapped = computed(() => imageRotation.value % 180 !== 0);
+
+/** 图片适应窗口的缩放比例（依据舞台尺寸与自然尺寸，旋转后交换宽高） */
+const imageFitScale = computed(() => {
+  const stage = imageStageRef.value;
+  if (!stage || imageNatural.value.w <= 0 || imageNatural.value.h <= 0) return 1;
+  const sw = stage.clientWidth;
+  const sh = stage.clientHeight;
+  if (sw <= 0 || sh <= 0) return 1;
+  const iw = imageSwapped.value ? imageNatural.value.h : imageNatural.value.w;
+  const ih = imageSwapped.value ? imageNatural.value.w : imageNatural.value.h;
+  return Math.min(sw / iw, sh / ih, 1);
+});
+
+/** 当前实际缩放比例（手动模式直接用缩放值；适应模式用计算值） */
+const imageCurrentScale = computed(() => (
+  imageFit.value === 'contain' ? imageFitScale.value : imageScale.value
+));
+
+/** 图片元素 transform：先缩放后旋转，再平移 */
+const imageStyle = computed(() => ({
+  transform: `translate(${imageTranslate.value.x}px, ${imageTranslate.value.y}px) scale(${imageCurrentScale.value}) rotate(${imageRotation.value}deg)`,
+}));
+
+/** 工具栏缩放比例文案：适应模式显示「适应」，手动模式显示百分比 */
+const imageScaleText = computed(() => {
+  if (imageFit.value === 'contain') return '适应';
+  return `${Math.round(imageScale.value * 100)}%`;
+});
+
+function onImageLoad(e: Event) {
+  const img = e.target as HTMLImageElement;
+  imageNatural.value = { w: img.naturalWidth || 0, h: img.naturalHeight || 0 };
+  imageLoaded.value = true;
+  resetImageView();
+}
+
+/** 相对缩放：传入方向（-1 缩小 / +1 放大），保持中心点不漂移 */
+function zoomImageBy(dir: -1 | 1) {
+  const target = imageFit.value === 'contain'
+    ? imageFitScale.value * (dir > 0 ? IMAGE_SCALE_STEP : 1 / IMAGE_SCALE_STEP)
+    : imageScale.value * (dir > 0 ? IMAGE_SCALE_STEP : 1 / IMAGE_SCALE_STEP);
+  zoomImageTo(target);
+}
+
+function zoomImageTo(scale: number) {
+  imageFit.value = 'manual';
+  imageScale.value = Math.min(IMAGE_SCALE_MAX, Math.max(IMAGE_SCALE_MIN, scale));
+  clampImageTranslate();
+}
+
+/** 适应窗口 / 实际尺寸（100%）切换 */
+function toggleImageFit() {
+  if (imageFit.value === 'contain') {
+    // 进入实际尺寸：以 100% 为基准，保留已有平移
+    imageFit.value = 'manual';
+    imageScale.value = 1;
+  } else {
+    imageFit.value = 'contain';
+    imageTranslate.value = { x: 0, y: 0 };
+  }
+  clampImageTranslate();
+}
+
+/** 顺时针旋转 90°（旋转后平移量需重算，回到居中） */
+function rotateImage() {
+  imageRotation.value = (imageRotation.value + 90) % 360;
+  imageTranslate.value = { x: 0, y: 0 };
+  // 适应模式下重算适应比例；手动模式保持当前缩放
+  if (imageFit.value === 'contain') imageScale.value = imageFitScale.value;
+  clampImageTranslate();
+}
+
+/** 重置视图：适应窗口 + 归零旋转与平移 */
+function resetImageView() {
+  imageRotation.value = 0;
+  imageTranslate.value = { x: 0, y: 0 };
+  imageFit.value = 'contain';
+  imageScale.value = imageFitScale.value;
+}
+
+/** 平移边界钳制：放大后图片边缘不能完全离开视口 */
+function clampImageTranslate() {
+  const stage = imageStageRef.value;
+  if (!stage) return;
+  const scale = imageCurrentScale.value;
+  const iw = (imageSwapped.value ? imageNatural.value.h : imageNatural.value.w) * scale;
+  const ih = (imageSwapped.value ? imageNatural.value.w : imageNatural.value.h) * scale;
+  const sw = stage.clientWidth;
+  const sh = stage.clientHeight;
+  const maxX = Math.max(0, (iw - sw) / 2);
+  const maxY = Math.max(0, (ih - sh) / 2);
+  imageTranslate.value = {
+    x: Math.min(maxX, Math.max(-maxX, imageTranslate.value.x)),
+    y: Math.min(maxY, Math.max(-maxY, imageTranslate.value.y)),
+  };
+}
+
+/** Ctrl/⌘ + 滚轮缩放（不抢占普通滚动） */
+function onImageWheel(e: WheelEvent) {
+  if (!e.ctrlKey && !e.metaKey) return;
+  e.preventDefault();
+  zoomImageBy(e.deltaY < 0 ? 1 : -1);
+}
+
+/** 指针按下：放大状态下启动拖拽 */
+function onImagePointerDown(e: PointerEvent) {
+  if (imageFit.value === 'contain' && imageCurrentScale.value <= imageFitScale.value + 0.001) return;
+  imageDragging.value = true;
+  imageDragStart = { x: e.clientX, y: e.clientY, tx: imageTranslate.value.x, ty: imageTranslate.value.y };
+  (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
+}
+
+function onImagePointerMove(e: PointerEvent) {
+  if (!imageDragging.value) return;
+  imageTranslate.value = {
+    x: imageDragStart.tx + (e.clientX - imageDragStart.x),
+    y: imageDragStart.ty + (e.clientY - imageDragStart.y),
+  };
+}
+
+function onImagePointerUp() {
+  imageDragging.value = false;
+  clampImageTranslate();
 }
 
 // ============ 视频预览（MSE 优先 + 原生回退） ============
@@ -913,18 +1462,14 @@ function teardownVideo() {
   seekClamping = false;
 }
 
-/** video error：MSE 模式先降级原生；原生模式再失败则进错误态 */
+/** video error：MSE 模式先降级原生；原生模式再失败则进错误态并分类提示 */
 function onVideoError() {
   if (videoUseMse.value) {
     fallbackToNative();
     return;
   }
   mediaError.value = true;
-}
-
-/** 画中画请求失败：降级为站内迷你播放器并给出非打断提示 */
-function onPipError() {
-  mediaStore.setError('当前浏览器不支持画中画，已继续在播放器中播放');
+  mediaErrorText.value = classifyMediaErrorCode(videoRef.value?.error?.code);
 }
 
 /**
@@ -965,31 +1510,7 @@ function updateBufferedRatio() {
   }
 }
 
-// ============ 视频封面加载（复用封面接口 + 低清自动升级高清） ============
-async function fetchPosterResource(url: string): Promise<{
-  objectUrl: string;
-  width: number;
-  height: number;
-} | null> {
-  try {
-    const response = await fetch(url, { credentials: 'same-origin' });
-    if (!response.ok) return null;
-    const objectUrl = URL.createObjectURL(await response.blob());
-    const dimensions = await new Promise<{ width: number; height: number } | null>((resolve) => {
-      const img = new Image();
-      img.onload = () => resolve({ width: img.naturalWidth, height: img.naturalHeight });
-      img.onerror = () => resolve(null);
-      img.src = objectUrl;
-    });
-    if (!dimensions) {
-      URL.revokeObjectURL(objectUrl);
-      return null;
-    }
-    return { objectUrl, ...dimensions };
-  } catch {
-    return null;
-  }
-}
+// ============ 视频封面加载（共享 Blob 缓存 + 低清自动升级高清） ============
 
 /** 当前封面任务是否仍属于同一视频。 */
 function isCurrentPosterTask(fid: string, token: number): boolean {
@@ -1012,7 +1533,10 @@ async function checkColdStatus() {
   coldLoad.value = !cached;
 }
 
-/** 加载视频封面：每个候选封面只请求一次，检测低分辨率后一次性升级高清封面。 */
+/**
+ * 加载视频封面：标准封面优先复用共享 Blob 缓存（列表缩略图已下载的字节直接复用），
+ * 检测低分辨率后一次性升级高清封面；两者都走同一缓存层的 in-flight 合并。
+ */
 async function loadPoster() {
   const session = mediaStore.session;
   const fid = currentPosterFileId.value;
@@ -1020,22 +1544,36 @@ async function loadPoster() {
   if (!session || !fid || snap.kind !== 'video') return;
 
   const ctx = session.context;
+  const context = currentMediaContext();
+  const version = session.item.contentVersion;
+
+  // 标准封面：与列表 ThumbnailImg 共用缓存键（u/s 上下文 + fileId + 版本 + thumb 规格）
   const standardUrl = ctx.type === 'share'
     ? buildShareThumbnailUrl(ctx.token, fid, ctx.accessJwt || undefined)
     : await getThumbnailUrl(fid, 'video/mp4');
   if (!standardUrl || !isCurrentPosterTask(fid, token)) return;
 
-  const standard = await fetchPosterResource(standardUrl);
+  const standardKey = buildThumbResourceKey({ context, fileId: fid, version, hd: false });
+  const standard = await getThumbnailResource({
+    context,
+    fileId: fid,
+    version,
+    hd: false,
+    url: standardUrl,
+  });
   if (!isCurrentPosterTask(fid, token)) {
-    if (standard) URL.revokeObjectURL(standard.objectUrl);
+    if (standard) releaseThumbnailResource(standardKey);
     return;
   }
   if (!standard) {
+    releasePosterResource();
     setPosterObjectUrl(null);
     return;
   }
-
+  releasePosterResource();
   setPosterObjectUrl(standard.objectUrl);
+  posterResourceKey = standardKey;
+
   if (standard.width >= HD_COVER_MIN_WIDTH && standard.height >= HD_COVER_MIN_HEIGHT) return;
   if (hdCoverAttempted) return;
 
@@ -1045,12 +1583,23 @@ async function loadPoster() {
     : await getHdThumbnailUrl(fid, 'video/mp4');
   if (!hdUrl || !isCurrentPosterTask(fid, token)) return;
 
-  const hd = await fetchPosterResource(hdUrl);
+  const hdKey = buildThumbResourceKey({ context, fileId: fid, version, hd: true });
+  const hd = await getThumbnailResource({
+    context,
+    fileId: fid,
+    version,
+    hd: true,
+    url: hdUrl,
+  });
   if (!isCurrentPosterTask(fid, token)) {
-    if (hd) URL.revokeObjectURL(hd.objectUrl);
+    if (hd) releaseThumbnailResource(hdKey);
     return;
   }
-  if (hd) setPosterObjectUrl(hd.objectUrl);
+  if (hd) {
+    releasePosterResource();
+    setPosterObjectUrl(hd.objectUrl);
+    posterResourceKey = hdKey;
+  }
 }
 
 /** 冷资源缓存完成后补一次封面加载（此时普通/高清封面通常已可生成） */
@@ -1198,9 +1747,6 @@ const bridge: MediaPlayerBridge = {
   },
   next: playNext,
   prev: playPrev,
-  togglePiP() {
-    if (snap.kind === 'video') void videoPlayerRef.value?.togglePiP();
-  },
   stop: fullStop,
 };
 
@@ -1213,6 +1759,8 @@ onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeydown);
   document.removeEventListener('visibilitychange', onVisibility);
   textAbort?.abort();
+  clearPosterRetryTimer();
+  releasePosterResource();
   teardownVideo();
   stopAudioWaveform();
   audioPlaying.value = false;
@@ -1256,7 +1804,7 @@ function formatSize(bytes: number | string | null | undefined): string {
   transition: opacity var(--duration-normal) var(--ease-out-expo);
 }
 
-/* 收起为迷你播放器：隐藏遮罩但保留媒体渲染（display:none 会导致视频 PiP 被浏览器强制退出） */
+/* 收起为迷你播放器：隐藏遮罩但保留媒体渲染（避免媒体实例被卸载导致播放中断） */
 .fpv-overlay--minimized {
   opacity: 0;
   pointer-events: none;
@@ -1357,14 +1905,109 @@ function formatSize(bytes: number | string | null | undefined): string {
   padding: 16px;
 }
 
+/* ─── 图片查看器：舞台 + 变换 + 工具栏 ─── */
+.fpv-image-stage {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 50% 40%, color-mix(in srgb, var(--seed-surface) 18%, transparent), transparent 70%),
+    var(--seed-bg, #0b0d12);
+  border-radius: var(--radius-sm, 6px);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.fpv-image-stage:active {
+  cursor: grabbing;
+}
+
 .fpv-image {
   display: block;
-  width: auto;
-  height: auto;
-  max-width: 100%;
-  max-height: 100%;
+  max-width: none;
+  max-height: none;
   object-fit: contain;
   border-radius: var(--radius-sm, 6px);
+  box-shadow: var(--shadow-md);
+  will-change: transform;
+  pointer-events: none;
+  transform-origin: center center;
+}
+
+.fpv-image--dragging {
+  transition: none;
+}
+
+/* 图片工具栏：深色悬浮条（与视频控制栏同语言） */
+.fpv-image-toolbar {
+  position: absolute;
+  left: 50%;
+  bottom: 14px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 6px;
+  background: color-mix(in srgb, var(--seed-bg, #0b0d12) 82%, transparent);
+  backdrop-filter: blur(8px);
+  border: 1px solid var(--border-default);
+  border-radius: 999px;
+  box-shadow: var(--shadow-md);
+  z-index: 2;
+}
+
+.fpv-image-tool {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  touch-action: manipulation;
+  transition: background var(--duration-fast) ease, color var(--duration-fast) ease, transform 0.1s ease;
+}
+
+.fpv-image-tool:hover:not(:disabled) {
+  background: var(--color-accent-soft);
+  color: var(--text-accent);
+}
+
+.fpv-image-tool:active:not(:disabled) {
+  transform: scale(0.92);
+}
+
+.fpv-image-tool:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.fpv-image-scale {
+  min-width: 52px;
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+  cursor: default;
+  user-select: none;
+}
+
+.fpv-image-toolbar-divider {
+  width: 1px;
+  height: 18px;
+  margin: 0 4px;
+  background: var(--border-default);
 }
 
 .fpv-video-wrap {
@@ -1508,16 +2151,157 @@ function formatSize(bytes: number | string | null | undefined): string {
   50% { transform: scaleY(1); }
 }
 
-/* 原生 audio 控件：占满播放器卡片宽度 */
-.fpv-audio-controls {
-  display: block;
-  width: 100%;
-  height: 44px;
+/* 隐藏的媒体内核：不渲染可见控件，仅供波形与播放桥使用 */
+.fpv-audio-core {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
 }
-.fpv-audio-controls:focus-visible {
-  outline: 2px solid var(--seed-primary);
-  outline-offset: 2px;
-  border-radius: var(--radius-sm);
+
+/* ─── 自定义进度条 ─── */
+.fpv-audio-progress {
+  position: relative;
+  display: flex;
+  align-items: center;
+  width: 100%;
+  height: 20px;
+  cursor: pointer;
+  touch-action: none;
+}
+
+.fpv-audio-progress-track {
+  position: relative;
+  width: 100%;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--border-strong);
+  overflow: hidden;
+}
+
+.fpv-audio-progress-played {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 0;
+  background: var(--seed-primary);
+  border-radius: 999px;
+}
+
+.fpv-audio-progress-thumb {
+  position: absolute;
+  top: 50%;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--seed-surface);
+  border: 2px solid var(--seed-primary);
+  box-shadow: var(--shadow-sm);
+  transform: translate(-50%, -50%);
+  transition: opacity var(--duration-fast) ease;
+  opacity: 0;
+}
+
+.fpv-audio-progress:hover .fpv-audio-progress-thumb,
+.fpv-audio-progress:focus-visible .fpv-audio-progress-thumb {
+  opacity: 1;
+}
+
+/* ─── 时间行 ─── */
+.fpv-audio-time-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-tertiary);
+}
+
+/* ─── 主控制行 ─── */
+.fpv-audio-controls-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.fpv-audio-controls-spacer {
+  flex: 1;
+}
+
+.fpv-audio-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  touch-action: manipulation;
+  transition: background var(--duration-fast) ease, color var(--duration-fast) ease, transform 0.1s ease;
+}
+
+.fpv-audio-btn:hover:not(:disabled) {
+  background: var(--color-accent-soft);
+  color: var(--text-accent);
+}
+
+.fpv-audio-btn:active:not(:disabled) {
+  transform: scale(0.92);
+}
+
+.fpv-audio-btn:disabled {
+  color: var(--text-disabled);
+  cursor: default;
+  opacity: 0.45;
+}
+
+.fpv-audio-btn--play {
+  width: 48px;
+  height: 48px;
+  background: var(--seed-primary);
+  color: #fff;
+  box-shadow: var(--shadow-sm);
+}
+
+.fpv-audio-btn--play:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--seed-primary) 88%, #fff);
+  color: #fff;
+}
+
+/* 倍速胶囊 */
+.fpv-audio-rate {
+  min-width: 52px;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--border-default);
+  border-radius: 999px;
+  background: var(--color-bg-elevated);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color var(--duration-fast) ease, color var(--duration-fast) ease, background var(--duration-fast) ease;
+}
+
+.fpv-audio-rate:hover {
+  border-color: var(--seed-primary);
+  color: var(--text-accent);
+  background: var(--color-accent-soft);
+}
+
+/* 音量滑块（细窄轨道，桌面端可用） */
+.fpv-audio-volume {
+  width: 72px;
+  height: 20px;
+  accent-color: var(--seed-primary);
+  cursor: pointer;
+  flex-shrink: 0;
 }
 
 /* ═══════════════ 文本预览面板 ═══════════════ */
@@ -1928,6 +2712,21 @@ function formatSize(bytes: number | string | null | undefined): string {
 
   .fpv-audio-wave span {
     width: 2px;
+  }
+
+  /* 移动端：隐藏音量滑块，保留静音按钮（避免窄屏误触） */
+  .fpv-audio-volume {
+    display: none;
+  }
+
+  .fpv-audio-btn {
+    width: 40px;
+    height: 40px;
+  }
+
+  .fpv-audio-btn--play {
+    width: 46px;
+    height: 46px;
   }
 
   .fpv-text {

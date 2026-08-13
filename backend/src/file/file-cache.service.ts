@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { OnEvent } from '@nestjs/event-emitter';
-import { Readable } from 'stream';
+import { Readable, PassThrough } from 'stream';
 import { createReadStream, createWriteStream } from 'fs';
 import { promises as fsp } from 'fs';
 import { FileHandle } from 'fs/promises';
@@ -37,6 +37,24 @@ interface CacheBuildSession {
   output?: ReturnType<typeof createWriteStream>;
 }
 
+/**
+ * 无缓存直通流的「单上游多消费者」会话。
+ * 同一文件并发预览 / 下载只建立一个 Telegram 上游连接，
+ * 每个 HTTP 消费者独立 PassThrough 下游流；消费者全部离开后销毁上游。
+ */
+interface UpstreamTeeSession {
+  fileId: string;
+  expectedSize: number;
+  /** 上游源流；fetchFn 完成前为 null（消费者等待），完成后才 pipe 分发 */
+  source: Readable | null;
+  consumers: Map<number, PassThrough>;
+  nextId: number;
+  done: boolean;
+  failed?: Error;
+  /** 回源超时定时器（防止 Telegram 回源卡住导致会话永久滞留） */
+  timeout?: NodeJS.Timeout;
+}
+
 @Injectable()
 export class FileCacheService {
   private readonly logger = new Logger(FileCacheService.name);
@@ -58,6 +76,8 @@ export class FileCacheService {
   private readonly fileAccessMap = new Map<string, number>();
   /** 同一业务文件只允许一个上游回源；消费者从临时文件独立跟随读取。 */
   private readonly buildSessions = new Map<string, CacheBuildSession>();
+  /** 无缓存直通路径的单上游多消费者会话（文件级 in-flight 合并）。 */
+  private readonly teeSessions = new Map<string, UpstreamTeeSession>();
   private readonly buildIdleTimeoutMs = this.readPositiveTimeout('FILE_CACHE_BUILD_IDLE_TIMEOUT_MS', 60_000);
   private readonly buildTotalTimeoutMs = this.readPositiveTimeout('FILE_CACHE_BUILD_TOTAL_TIMEOUT_MS', 30 * 60_000);
 
@@ -173,13 +193,10 @@ export class FileCacheService {
     if (cached) return { stream: cached, fromCache: true };
 
     if (!(await this.prepareCacheCapacity(expectedSize))) {
-      const upstream = await fetchFn();
-      if (upstream.info.file_size !== expectedSize) {
-        upstream.stream.destroy();
-        throw new Error(`上游文件大小不一致: 期望 ${expectedSize}, 实际 ${upstream.info.file_size}`);
-      }
+      // 容量/磁盘不足：单上游多消费者直通，仍按 fileId 合并 Telegram 回源
+      const session = this.getOrCreateTeeSession(fileId, expectedSize, fetchFn);
       this.logger.warn(`缓存容量或磁盘余量不足，文件 ${fileId} 仅实时转发`);
-      return { stream: upstream.stream, fromCache: false };
+      return { stream: this.addTeeConsumer(session), fromCache: false };
     }
 
     // 容量准备期间模式可能已翻转，复查避免在无缓存模式下新建构建会话
@@ -254,6 +271,7 @@ export class FileCacheService {
 
   /**
    * 无缓存直通：中止该文件的既有构建会话，实时回源并直通上游流。
+   * 同一文件并发消费者共享一个 Telegram 上游连接（in-flight 合并）。
    * 不读缓存、不写缓存（无 .tmp/rename）、不计算容量、不触发 LRU。
    */
   async getNoCacheStream(
@@ -262,12 +280,117 @@ export class FileCacheService {
     fetchFn: () => Promise<{ stream: Readable; info: { file_size: number } }>,
   ): Promise<{ stream: Readable; fromCache: boolean }> {
     await this.abortBuildSession(fileId);
-    const upstream = await fetchFn();
-    if (upstream.info.file_size !== expectedSize) {
-      upstream.stream.destroy();
-      throw new Error(`上游文件大小不一致: 期望 ${expectedSize}, 实际 ${upstream.info.file_size}`);
+    const session = this.getOrCreateTeeSession(fileId, expectedSize, fetchFn);
+    return { stream: this.addTeeConsumer(session), fromCache: false };
+  }
+
+  // ---------- 无缓存直通：单上游多消费者 tee ----------
+
+  private getOrCreateTeeSession(
+    fileId: string,
+    expectedSize: number,
+    fetchFn: () => Promise<{ stream: Readable; info: { file_size: number } }>,
+  ): UpstreamTeeSession {
+    let session = this.teeSessions.get(fileId);
+    if (session) {
+      if (session.expectedSize === expectedSize) return session;
+      // 大小不一致（覆盖 / 数据异常）：销毁旧会话重新建立，避免旧大小消费者串流
+      this.teardownTeeSession(session);
     }
-    return { stream: upstream.stream, fromCache: false };
+    session = {
+      fileId,
+      expectedSize,
+      source: null,
+      consumers: new Map(),
+      nextId: 0,
+      done: false,
+    };
+    this.teeSessions.set(fileId, session);
+    // 回源超时保护：复用缓存构建的总超时配置，超时仍未就绪则判定失败并释放消费者
+    session.timeout = setTimeout(() => {
+      this.failTeeSession(session, new Error(`直通回源超时（${this.buildTotalTimeoutMs}ms）`));
+    }, this.buildTotalTimeoutMs);
+    session.timeout.unref?.();
+    void this.runTeeSession(session, fetchFn);
+    return session;
+  }
+
+  private async runTeeSession(
+    session: UpstreamTeeSession,
+    fetchFn: () => Promise<{ stream: Readable; info: { file_size: number } }>,
+  ): Promise<void> {
+    try {
+      const { stream, info } = await fetchFn();
+      if (!Number.isSafeInteger(info.file_size) || info.file_size !== session.expectedSize) {
+        stream.destroy();
+        throw new Error(`上游文件大小不一致: 期望 ${session.expectedSize}, 实际 ${info.file_size}`);
+      }
+      // 竞态防护：等待上游期间会话可能已随最后一个消费者离开而被销毁，
+      // 此时直接释放刚获取的上游，避免连接泄漏。
+      if (this.teeSessions.get(session.fileId) !== session) {
+        stream.destroy();
+        return;
+      }
+      if (session.timeout) {
+        clearTimeout(session.timeout);
+        session.timeout = undefined;
+      }
+      session.source = stream;
+      for (const pt of session.consumers.values()) stream.pipe(pt);
+      stream.on('error', (err) => this.failTeeSession(session, err));
+      stream.on('end', () => {
+        session.done = true;
+        for (const pt of session.consumers.values()) pt.end();
+      });
+      stream.on('close', () => this.teardownTeeSession(session));
+    } catch (err) {
+      this.failTeeSession(session, err instanceof Error ? err : new Error('上游获取失败'));
+    }
+  }
+
+  private failTeeSession(session: UpstreamTeeSession, err: Error) {
+    if (session.failed) return;
+    session.failed = err;
+    if (session.timeout) {
+      clearTimeout(session.timeout);
+      session.timeout = undefined;
+    }
+    for (const pt of session.consumers.values()) pt.destroy(err);
+    this.teardownTeeSession(session);
+  }
+
+  /** 新增一个消费者下游流；会话已结束/失败时立即对消费者收尾 */
+  private addTeeConsumer(session: UpstreamTeeSession): PassThrough {
+    const pt = new PassThrough();
+    pt.on('error', () => {
+      // 单个消费者出错（如客户端中断）不影响其他消费者；由 close 完成移除
+    });
+    const id = session.nextId++;
+    session.consumers.set(id, pt);
+    pt.on('close', () => {
+      session.consumers.delete(id);
+      // 最后一个消费者离开后销毁上游，避免泄漏连接
+      if (session.consumers.size === 0) this.teardownTeeSession(session);
+    });
+    if (session.failed) {
+      pt.destroy(session.failed);
+    } else if (session.done) {
+      pt.end();
+    } else if (session.source) {
+      session.source.pipe(pt);
+    }
+    return pt;
+  }
+
+  private teardownTeeSession(session: UpstreamTeeSession) {
+    if (this.teeSessions.get(session.fileId) === session) this.teeSessions.delete(session.fileId);
+    if (session.timeout) {
+      clearTimeout(session.timeout);
+      session.timeout = undefined;
+    }
+    // 只销毁上游；消费者由调用方（controller pipeline / 客户端断连）自然关闭。
+    // 不能在此销毁仍在传输中的 PassThrough，否则会中断已写入但未消费完的数据。
+    session.source?.destroy();
   }
 
   /**
@@ -762,6 +885,9 @@ export class FileCacheService {
         }),
       ]);
     }
+    // 直通 tee 会话一并销毁（文件删除 / 覆盖更新时终止在途上游）
+    const tee = this.teeSessions.get(fileId);
+    if (tee) this.teardownTeeSession(tee);
     const cachePath = this.getCachePath(fileId);
     await Promise.all([
       fsp.unlink(cachePath).catch(() => {}),

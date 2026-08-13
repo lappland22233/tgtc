@@ -255,8 +255,10 @@ export class ShareService {
   /**
    * 获取分享预览流：校验链与 getShareDownloadStream 完全一致
    * （token + accessJwt（若有密码）+ fileId 归属），差异：
-   * - Range 命中时不消费访问额度（视频 seek 的大量 Range 不得耗尽 maxAccessCount）；
-   *   无效 Range 或缓存未命中回退全量流时照常消费，杜绝垃圾 Range 头绕过次数限制。
+   * - Range 命中时不消费访问额度（视频 seek 的大量 Range 不得耗尽 maxAccessCount）。
+   * - 冷资源 Range 回退全量流 / 浏览器重试等内部子请求按「逻辑访问」短期会话去重：
+   *   同一分享 + 同一文件在窗口内只消费一次 maxAccessCount，避免有限次数分享
+   *   被 Range 重试、连接重建等浏览器内部行为提前耗尽。
    * - 审计 action 为 'share_link_preview'。
    * 携带 rangeHeader 时优先走 FileService.getSharePreviewStreamWithRange，
    * 缓存未命中（null）或未携带 rangeHeader 时回退全量流 getStreamForShareDownload。
@@ -306,9 +308,9 @@ export class ShareService {
     if (rangeHeader) {
       const rangeResult = await this.fileService.getSharePreviewStreamWithRange(fileId, rangeHeader, ip || undefined);
       if (rangeResult) return rangeResult;
-      // Range 无效或缓存未命中 → 回退全量流，同样消费额度
+      // Range 无效或缓存未命中 → 回退全量流；按「逻辑访问」会话只消费一次额度
     }
-    await this.consumeShareAccess(link);
+    await this.consumeSharePreviewAccess(link, fileId);
     return this.fileService.getStreamForShareDownload(fileId, ip || undefined);
   }
 
@@ -551,6 +553,36 @@ export class ShareService {
   }
 
   /**
+   * 分享预览「逻辑访问」短期会话窗口（毫秒）。
+   * 与 access JWT 5 分钟有效期对齐：窗口内同一分享 + 同一文件仅消费一次访问额度，
+   * 浏览器内部子请求（冷资源 Range 回退重试、连接重建、重复预览）不再重复耗尽 maxAccessCount。
+   */
+  private static readonly PREVIEW_SESSION_WINDOW_MS = 5 * 60 * 1000;
+  /** 预览会话去重表：`preview:<linkId>:<fileId>` → 过期时间戳 */
+  private readonly previewSessions = new Map<string, number>();
+
+  /** 分享预览访问：窗口内同一分享 + 文件只消费一次 maxAccessCount */
+  private async consumeSharePreviewAccess(link: ShareLink, fileId: string): Promise<void> {
+    const key = `preview:${link.id}:${fileId}`;
+    const now = Date.now();
+    const expiresAt = this.previewSessions.get(key);
+    if (expiresAt && expiresAt > now) return; // 窗口内已计过
+    await this.consumeShareAccess(link);
+    this.previewSessions.set(key, now + ShareService.PREVIEW_SESSION_WINDOW_MS);
+    this.prunePreviewSessions();
+  }
+
+  /** 有界清理：仅清除过期条目；极端增长时整体重置，防止无界内存占用 */
+  private prunePreviewSessions(): void {
+    if (this.previewSessions.size <= 512) return;
+    const now = Date.now();
+    for (const [k, exp] of this.previewSessions) {
+      if (exp <= now) this.previewSessions.delete(k);
+    }
+    if (this.previewSessions.size > 2048) this.previewSessions.clear();
+  }
+
+  /**
    * 原子地递增访问计数并强制 maxAccessCount 上限。
    *
    * 用单条带条件的 UPDATE 取代「先读后写」：
@@ -638,6 +670,8 @@ export class ShareService {
         mimeType: file.mimeType,
         createdAt: file.createdAt,
         expiresAt,
+        // 覆盖上传时递增，供前端做进度记录版本校验
+        uploadVersion: file.uploadVersion,
       },
       downloadUrl: `/api/s/${link.token}/download/${file.id}`,
     };
@@ -696,7 +730,7 @@ export class ShareService {
       this.fileRepo.find({
         where: { folderId, isDeleted: false },
         order: { originalName: 'ASC' },
-        select: ['id', 'originalName', 'mimeType', 'size', 'createdAt'],
+        select: ['id', 'originalName', 'mimeType', 'size', 'createdAt', 'uploadVersion', 'status'],
       }),
     ]);
 
@@ -723,6 +757,9 @@ export class ShareService {
         size: Number(f.size),
         mimeType: f.mimeType,
         createdAt: f.createdAt,
+        // 覆盖上传时递增，供前端做进度记录版本校验
+        uploadVersion: f.uploadVersion,
+        status: f.status,
         // 文件夹分享下载 URL：走 /api/s/:token/download/:fileId
         downloadUrl: `/api/s/${link.token}/download/${f.id}`,
       })),

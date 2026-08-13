@@ -76,3 +76,4 @@ STATIC_REVIEW_RETROSPECTIVE.md
 DEADLOCK_STATIC_REVIEW.md
 .qoder/*
 .github/workflows/quality-gates.yml
+.workbuddy/*

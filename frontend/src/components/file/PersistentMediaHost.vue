@@ -1,7 +1,7 @@
 <template>
   <FilePreviewDialog v-if="mediaStore.session" />
   <MiniMediaPlayer v-if="mediaStore.session && !mediaStore.expanded && mediaStore.isContinuous" />
-  <!-- 非打断式提示（画中画受限等），aria-live 播报，短时自动消失 -->
+  <!-- 非打断式提示（播放受限等），aria-live 播报，短时自动消失 -->
   <div v-if="mediaStore.errorMessage" class="mp-toast" role="status" aria-live="polite">
     <t-icon name="info-circle" class="mp-toast__icon" aria-hidden="true" />
     <span>{{ mediaStore.errorMessage }}</span>

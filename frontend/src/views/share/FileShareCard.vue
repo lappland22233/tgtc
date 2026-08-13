@@ -7,6 +7,8 @@
         :file-name="info.name"
         :size="112"
         :src="buildShareThumbnailUrl(props.token, props.info.id, props.accessJwt)"
+        :context="`s:${props.token}`"
+        :version="info.uploadVersion"
       />
     </div>
     <h1 class="file-name" :title="info.name">{{ info.name }}</h1>
@@ -68,6 +70,8 @@ interface FileInfo {
   mimeType: string;
   createdAt: string;
   expiresAt?: string | null;
+  /** 文件内容版本（覆盖上传时递增），用于进度记录版本校验 */
+  uploadVersion?: number;
 }
 
 const props = defineProps<{
@@ -98,6 +102,7 @@ function openPreview() {
       size: props.info.size,
       src: buildSharePreviewUrl(props.token, props.info.id, props.accessJwt),
       downloadUrl: downloadUrl.value,
+      contentVersion: props.info.uploadVersion,
     },
     playlist: [],
     playlistIndex: -1,

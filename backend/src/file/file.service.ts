@@ -830,6 +830,7 @@ export class FileService implements OnModuleInit {
       'file.accessType', 'file.maxAccessCount', 'file.currentAccessCount',
       'file.expiresIn', 'file.expiresStartAt', 'file.createdAt',
       'file.isDeleted', 'file.deletedByAdmin', 'file.deleteRequestedAt', 'file.deleteScheduledAt',
+      'file.uploadVersion', 'file.status',
       'uploader',
     ])
       .addSelect('CASE WHEN file.password IS NOT NULL THEN true ELSE false END', 'file_hasPassword');

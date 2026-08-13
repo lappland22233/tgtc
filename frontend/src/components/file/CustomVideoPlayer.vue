@@ -196,11 +196,6 @@
           </transition>
         </div>
 
-        <!-- 画中画 -->
-        <button v-if="pipSupported" class="cvp__btn cvp__btn--pip" aria-label="画中画" title="画中画" @click="togglePiP">
-          <svg viewBox="0 0 24 24" width="20" height="20"><path d="M19 11h-8v6h8v-6zm4 8V4.98C23 3.88 22.1 3 21 3H3c-1.1 0-2 .88-2 1.98V19c0 1.1.9 2 2 2h18c1.1 0 2-.9 2-2zm-2 .02H3V4.97h18v14.05z" fill="currentColor"/></svg>
-        </button>
-
         <!-- 全屏 -->
         <button class="cvp__btn" :aria-label="isFullscreen ? '退出全屏' : '全屏'" @click="toggleFullscreen">
           <svg v-if="!isFullscreen" viewBox="0 0 24 24" width="20" height="20"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z" fill="currentColor"/></svg>
@@ -256,10 +251,6 @@ const emit = defineEmits<{
   'update:end-behavior': [behavior: VideoEndBehavior];
   /** 暴露 video 元素引用给父组件（用于 MSE 等外部控制） */
   'video-ref': [el: HTMLVideoElement | null];
-  /** 画中画状态变化（进入 / 退出） */
-  'pip-change': [active: boolean];
-  /** 画中画请求失败（不支持 / 被拒绝 / 媒体未就绪） */
-  'pip-error': [];
 }>();
 
 // ─── Refs ────────────────────────────
@@ -345,12 +336,6 @@ const bufferText = computed(() => {
   return '正在缓冲…';
 });
 
-const pipSupported = computed(() => (
-  typeof document !== 'undefined'
-  && document.pictureInPictureEnabled
-  && typeof videoRef.value?.requestPictureInPicture === 'function'
-));
-
 // ─── 视频事件处理 ────────────────────────────
 function onPlay() {
   isPaused.value = false;
@@ -385,15 +370,87 @@ function onTimeUpdate() {
 
 /** 当前 src 的恢复点是否已应用（src 变化后重置，仅应用一次） */
 let initialTimeConsumed = false;
+/** 冷资源下待延迟恢复的位置（秒）；buffered 覆盖后执行一次 seek */
+let deferredResumeTarget = 0;
+/** 冷资源延迟恢复等待起始时间（用于超时放弃） */
+let deferredResumeStart = 0;
+/** 冷资源延迟恢复超时轮询定时器 */
+let resumePollTimer: ReturnType<typeof setInterval> | null = null;
+/** 冷资源延迟恢复等待超时（毫秒）：超时后放弃恢复，继续从头播放，不阻断体验 */
+const RESUME_WAIT_TIMEOUT_MS = 30000;
+
+function clearDeferredResumeTimer() {
+  if (resumePollTimer) {
+    clearInterval(resumePollTimer);
+    resumePollTimer = null;
+  }
+}
+
+function cancelDeferredResume() {
+  clearDeferredResumeTimer();
+  deferredResumeTarget = 0;
+  deferredResumeStart = 0;
+}
+
+/**
+ * 冷资源延迟恢复：仅当 buffered 已覆盖恢复点时才执行一次 seek，
+ * 避免在未缓冲位置设置 currentTime 触发浏览器发起不可满足的 Range/全量请求。
+ */
+function tryDeferredResume() {
+  if (deferredResumeTarget <= 0) return;
+  const v = videoRef.value;
+  if (!v) return;
+  if (getMaxBufferedEnd() < deferredResumeTarget) return;
+  const target = clampSeekTarget(deferredResumeTarget);
+  v.currentTime = target;
+  currentTime.value = target;
+  playedPct.value = duration.value > 0 ? (target / duration.value) * 100 : 0;
+  deferredResumeTarget = 0;
+  clearDeferredResumeTimer();
+}
+
+/** 冷资源恢复点等待：轮询超时后放弃（不阻断播放）；实际 seek 由缓冲覆盖后的 tryDeferredResume 触发 */
+function scheduleDeferredResume(target: number) {
+  deferredResumeTarget = target;
+  deferredResumeStart = Date.now();
+  clearDeferredResumeTimer();
+  resumePollTimer = setInterval(() => {
+    if (deferredResumeTarget <= 0) {
+      clearDeferredResumeTimer();
+      return;
+    }
+    if (Date.now() - deferredResumeStart > RESUME_WAIT_TIMEOUT_MS) {
+      // 等待超时：放弃恢复到该位置，继续从头播放
+      deferredResumeTarget = 0;
+      clearDeferredResumeTimer();
+    }
+  }, 1000);
+}
 
 function applyInitialTime(v: HTMLVideoElement) {
   if (initialTimeConsumed) return;
-  initialTimeConsumed = true;
   const target = props.initialTime;
   if (!target || target <= 0) return;
   if (!Number.isFinite(v.duration) || v.duration <= 0) return;
   const t = Math.min(target, Math.max(0, v.duration - 1));
-  if (t > 0) v.currentTime = t;
+  if (t <= 0) return;
+  // duration 校验通过后才标记已应用，避免元数据尚不可用时吞掉恢复点
+  initialTimeConsumed = true;
+  // 热缓存：可直接恢复（后端可提供真实 206 Range，seek 高效）
+  if (!props.cold) {
+    v.currentTime = t;
+    currentTime.value = t;
+    return;
+  }
+  // 冷资源：恢复点已在缓冲范围内则立即恢复；
+  // 否则记录待恢复位置从头播放，等缓冲覆盖后再 seek，避免制造第二个媒体请求。
+  const maxEnd = getMaxBufferedEnd();
+  if (maxEnd >= t) {
+    v.currentTime = clampSeekTarget(t);
+    currentTime.value = v.currentTime;
+  } else {
+    scheduleDeferredResume(t);
+  }
 }
 
 function onLoadedMeta() {
@@ -416,6 +473,8 @@ function onProgress() {
     if (v.buffered.end(i) > maxEnd) maxEnd = v.buffered.end(i);
   }
   bufferedPct.value = Math.min(100, (maxEnd / duration.value) * 100);
+  // 冷资源延迟恢复：buffered 覆盖恢复点后执行一次 seek
+  tryDeferredResume();
 }
 
 // ─── 播放控制 ────────────────────────────
@@ -479,30 +538,6 @@ function setEndBehavior(behavior: VideoEndBehavior) {
   emit('update:end-behavior', behavior);
   endBehaviorMenuOpen.value = false;
   showControls();
-}
-
-async function togglePiP() {
-  const v = videoRef.value;
-  if (!v) return;
-  try {
-    if (document.pictureInPictureElement) {
-      await document.exitPictureInPicture();
-      emit('pip-change', false);
-    } else if (v.readyState >= 2) {
-      await v.requestPictureInPicture();
-      emit('pip-change', true);
-    } else {
-      emit('pip-error');
-    }
-  } catch {
-    emit('pip-change', false);
-    emit('pip-error');
-  }
-}
-
-/** 浏览器级画中画事件（进入 / 退出）→ 上报父级 */
-function onPiPStateChange() {
-  emit('pip-change', !!document.pictureInPictureElement);
 }
 
 function toggleFullscreen() {
@@ -733,12 +768,6 @@ function onKeydown(e: KeyboardEvent) {
       e.preventDefault();
       toggleFullscreen();
       break;
-    case 'p':
-      if (!e.shiftKey) {
-        e.preventDefault();
-        togglePiP();
-      }
-      break;
   }
 }
 
@@ -774,6 +803,7 @@ watch(() => props.src, (src) => {
   const v = videoRef.value;
   if (!v) return;
   initialTimeConsumed = false; // 新 src 允许应用新的恢复点
+  cancelDeferredResume(); // 新 src 清除旧的待恢复位置
   currentTime.value = 0;
   playedPct.value = 0;
   bufferedPct.value = 0;
@@ -834,8 +864,6 @@ onMounted(() => {
   bindGlobalListeners(props.interactive);
   document.addEventListener('fullscreenchange', onFullscreenChange);
   document.addEventListener('click', onClickOutsideMenus);
-  document.addEventListener('enterpictureinpicture', onPiPStateChange);
-  document.addEventListener('leavepictureinpicture', onPiPStateChange);
   // 初始显示控制栏，3s 后若播放中则隐藏
   showControls();
 });
@@ -846,10 +874,9 @@ watch(() => props.interactive, (on) => {
 
 onBeforeUnmount(() => {
   bindGlobalListeners(false);
+  cancelDeferredResume();
   document.removeEventListener('fullscreenchange', onFullscreenChange);
   document.removeEventListener('click', onClickOutsideMenus);
-  document.removeEventListener('enterpictureinpicture', onPiPStateChange);
-  document.removeEventListener('leavepictureinpicture', onPiPStateChange);
   if (hideTimer) clearTimeout(hideTimer);
   if (seekHideTimer) clearTimeout(seekHideTimer);
 });
@@ -858,7 +885,6 @@ onBeforeUnmount(() => {
 defineExpose({
   videoRef,
   togglePlay,
-  togglePiP,
   play: () => videoRef.value?.play(),
   pause: () => videoRef.value?.pause(),
 });
@@ -1266,9 +1292,8 @@ defineExpose({
   font-weight: 600;
 }
 
-/* ─── PiP 按钮在窄屏隐藏 ─── */
+/* ─── 窄屏适配 ─── */
 @media (max-width: 480px) {
-  .cvp__btn--pip { display: none; }
   .cvp__btn--end-behavior { min-width: 36px; padding: 0; }
   .cvp__btn--end-behavior span { display: none; }
   .cvp__time { min-width: 76px; font-size: 11px; }

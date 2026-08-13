@@ -154,6 +154,23 @@ describe('FileCacheService no-cache mode', () => {
     expect(fetchFn).toHaveBeenCalledTimes(1);
   });
 
+  it('no-cache tee: 并发消费者共享一个上游连接（fetchFn 只调用一次）', async () => {
+    const upstream = new PassThrough();
+    const fetchFn = jest.fn(async () => ({ stream: upstream, info: { file_size: 6 } }));
+    const first = service.getOrCacheStream(fileId, 6, fetchFn);
+    const second = service.getOrCacheStream(fileId, 6, fetchFn);
+
+    upstream.write(Buffer.from('abc'));
+    const [a, b] = await Promise.all([first, second]);
+    const aRead = readStream(a.stream);
+    const bRead = readStream(b.stream);
+    upstream.end(Buffer.from('def'));
+
+    await expect(aRead).resolves.toEqual(Buffer.from('abcdef'));
+    await expect(bRead).resolves.toEqual(Buffer.from('abcdef'));
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+  });
+
   it('never writes to disk, never builds a session, never computes capacity or evicts', async () => {
     const evictSpy = jest.spyOn(service as any, 'evictLRU');
     const sizeSpy = jest.spyOn(service as any, 'getTotalCacheSize');

@@ -243,9 +243,9 @@
                 :title="'点击预览 ' + file.originalName"
                 @click.stop="openPreview(file)"
               >
-                <ThumbnailImg :file-id="file.id" :mime-type="file.mimeType" :size="32" :file-name="file.originalName" />
+                <ThumbnailImg :file-id="file.id" :mime-type="file.mimeType" :size="32" :file-name="file.originalName" :context="thumbnailContext" :version="file.uploadVersion" />
               </span>
-              <ThumbnailImg v-else :file-id="file.id" :mime-type="file.mimeType" :size="32" :file-name="file.originalName" />
+              <ThumbnailImg v-else :file-id="file.id" :mime-type="file.mimeType" :size="32" :file-name="file.originalName" :context="thumbnailContext" :version="file.uploadVersion" />
               <div class="os-name-block">
                 <span class="os-name-text" :class="{ 'deleted-name': file.isDeleted }" :title="file.originalName">
                   {{ file.originalName }}
@@ -319,7 +319,7 @@
           @touchend="handleTouchEnd"
         >
           <div class="mobile-file-card-header">
-            <ThumbnailImg :file-id="file.id" :mime-type="file.mimeType" :size="40" :file-name="file.originalName" />
+            <ThumbnailImg :file-id="file.id" :mime-type="file.mimeType" :size="40" :file-name="file.originalName" :context="thumbnailContext" :version="file.uploadVersion" />
             <div class="mobile-file-main">
               <div class="mobile-file-name" :class="{ 'deleted-name': file.isDeleted }">{{ file.originalName }}</div>
               <div class="mobile-file-meta">{{ formatSize(file.size) }} · {{ formatDate(file.createdAt) }}</div>
@@ -523,6 +523,9 @@ const fileStore = useFileStore();
 const authStore = useAuthStore();
 const tagStore = useTagStore();
 const folderStore = useFolderStore();
+
+/** 缩略图 / 封面共享缓存上下文（与视频预览封面共用同一 Blob 缓存） */
+const thumbnailContext = computed(() => `u:${authStore.user?.id ?? ''}`);
 const router = useRouter();
 const route = useRoute();
 const { isPageVisible } = usePageVisibility();
@@ -600,6 +603,7 @@ function openPreview(file: FileItem) {
       size: file.size,
       src: buildFilePreviewUrl(file.id),
       downloadUrl: `/api/files/${file.id}/download`,
+      contentVersion: file.uploadVersion,
     },
     playlist: list,
     playlistIndex: index,
@@ -619,6 +623,7 @@ function buildMediaPlaylist(kind: MediaSessionItem['kind']): MediaSessionItem[] 
       size: file.size,
       src: buildFilePreviewUrl(file.id),
       downloadUrl: `/api/files/${file.id}/download`,
+      contentVersion: file.uploadVersion,
     }));
 }
 // ============ 文件重命名弹窗状态 ============

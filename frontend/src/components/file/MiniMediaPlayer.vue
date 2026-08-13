@@ -7,6 +7,30 @@
       role="region"
       aria-label="迷你播放器"
     >
+      <!-- 视频小窗口：仅视频收起时显示；点击回到完整预览 -->
+      <button
+        v-if="session.item.kind === 'video'"
+        type="button"
+        class="mmp__video"
+        :aria-label="'展开视频预览 ' + session.item.name"
+        title="展开视频预览"
+        @click="mediaStore.expand()"
+      >
+        <ThumbnailImg
+          class="mmp__video-img"
+          :file-id="session.item.id"
+          :mime-type="session.item.mimeType"
+          :file-name="session.item.name"
+          :size="160"
+          :src="thumbnailSrc"
+          :context="mediaContextKey"
+          :version="session.item.contentVersion"
+        />
+        <span class="mmp__video-play" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="28" height="28"><path d="M8 5v14l11-7z" fill="currentColor"/></svg>
+        </span>
+      </button>
+
       <!-- 顶部：媒体识别 + 时间 + 展开/停止 -->
       <div class="mmp__top">
         <button type="button" class="mmp__identity" @click="mediaStore.expand()">
@@ -44,7 +68,7 @@
         </button>
       </div>
 
-      <!-- 中部：播放控制（prev / play / next） + 视频画中画 -->
+      <!-- 中部：播放控制（prev / play / next） -->
       <div class="mmp__controls">
         <button
           type="button"
@@ -75,20 +99,6 @@
           @click="mediaStore.next()"
         >
           <t-icon name="chevron-right" />
-        </button>
-        <span class="mmp__spacer" />
-        <button
-          v-if="session.item.kind === 'video'"
-          type="button"
-          class="mmp__btn mmp__btn--icon"
-          :aria-pressed="mediaStore.pipActive"
-          :aria-label="mediaStore.pipActive ? '退出画中画' : '进入画中画'"
-          :title="mediaStore.pipActive ? '退出画中画' : '画中画'"
-          @click="mediaStore.togglePiP()"
-        >
-          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
-            <path d="M19 11h-8v6h8v-6zm4 8V4.98C23 3.88 22.1 3 21 3H3c-1.1 0-2 .88-2 1.98V19c0 1.1.9 2 2 2h18c1.1 0 2-.9 2-2zm-2 .02H3V4.97h18v14.05z" fill="currentColor"/>
-          </svg>
         </button>
       </div>
 
@@ -121,7 +131,7 @@
  * - 只消费 store 状态并向同一媒体实例发送控制命令，不创建第二个音视频元素。
  * - 桌面端默认右下角；上传浮层可见时避让到左下角。
  * - 窄屏改为底部横向控制条，避开设备安全区，保留 44px+ 触控目标。
- * - 视频额外提供画中画入口；关闭（停止）操作与「最小化」严格区分。
+ * - 视频收起后内嵌 16:9 小窗口展示画面，点击回到完整预览；关闭（停止）操作与「最小化」严格区分。
  */
 import { computed } from 'vue';
 import { useMediaPlaybackStore } from '../../stores/mediaPlayback';
@@ -158,6 +168,13 @@ const thumbnailSrc = computed(() => {
     return buildShareThumbnailUrl(s.context.token, s.item.id, s.context.accessJwt || undefined);
   }
   return '';
+});
+
+/** 缩略图 Blob 缓存上下文键（与 FileList / 分享页保持一致） */
+const mediaContextKey = computed(() => {
+  const s = mediaStore.session;
+  if (!s) return '';
+  return s.context.type === 'share' ? `s:${s.context.token}` : `u:${s.context.userId ?? ''}`;
 });
 
 const progressPct = computed(() => {
@@ -210,6 +227,45 @@ function onProgressClick(e: MouseEvent) {
 .mmp--left {
   right: auto;
   left: var(--space-4);
+}
+
+/* ─── 视频小窗口：关闭完整预览后内嵌展示 ─── */
+.mmp__video {
+  position: relative;
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  background: #000;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.mmp__video :deep(> div),
+.mmp__video :deep(img) {
+  width: 100% !important;
+  height: 100% !important;
+  border-radius: 0 !important;
+  object-fit: cover;
+}
+
+.mmp__video-play {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.28);
+  transition: background var(--duration-fast) ease;
+}
+
+.mmp__video:hover .mmp__video-play,
+.mmp__video:focus-visible .mmp__video-play {
+  background: rgba(0, 0, 0, 0.45);
 }
 
 /* ─── 顶部：媒体识别 + 时间 + 展开/停止 ─── */
