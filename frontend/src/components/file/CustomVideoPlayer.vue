@@ -229,10 +229,22 @@ const props = withDefaults(defineProps<{
   cold?: boolean;
   /** 播放结束后的行为，由预览弹窗统一执行 */
   endBehavior?: VideoEndBehavior;
+  /**
+   * 打开 / 切换媒体时待恢复的播放进度（秒）。
+   * 仅在媒体元数据可用后应用一次；src 变化后重置，允许新媒体重新恢复。
+   */
+  initialTime?: number;
+  /**
+   * 是否处于可交互状态（如完整预览已展开）。
+   * 收起为迷你播放器后禁用全局键盘快捷键，避免影响用户对页面的正常操作。
+   */
+  interactive?: boolean;
 }>(), {
   endBehavior: 'next',
   poster: null,
   cold: false,
+  initialTime: 0,
+  interactive: true,
 });
 
 const emit = defineEmits<{
@@ -244,6 +256,10 @@ const emit = defineEmits<{
   'update:end-behavior': [behavior: VideoEndBehavior];
   /** 暴露 video 元素引用给父组件（用于 MSE 等外部控制） */
   'video-ref': [el: HTMLVideoElement | null];
+  /** 画中画状态变化（进入 / 退出） */
+  'pip-change': [active: boolean];
+  /** 画中画请求失败（不支持 / 被拒绝 / 媒体未就绪） */
+  'pip-error': [];
 }>();
 
 // ─── Refs ────────────────────────────
@@ -252,6 +268,7 @@ const videoRef = ref<HTMLVideoElement | null>(null);
 
 // ─── State ───────────────────────────
 const VIDEO_VOLUME_KEY = 'file-preview-video-volume';
+const VIDEO_RATE_KEY = 'file-preview-video-rate';
 const DEFAULT_VIDEO_VOLUME = 0.5;
 
 function loadSavedVolume(): number {
@@ -266,6 +283,18 @@ function saveVolume(value: number) {
   try { localStorage.setItem(VIDEO_VOLUME_KEY, String(value)); } catch { /* 不影响播放 */ }
 }
 
+function loadSavedRate(): number {
+  try {
+    const saved = Number(localStorage.getItem(VIDEO_RATE_KEY));
+    if (Number.isFinite(saved) && saved >= 0.5 && saved <= 3) return saved;
+  } catch { /* 存储不可用时使用默认倍速 */ }
+  return 1;
+}
+
+function saveRate(value: number) {
+  try { localStorage.setItem(VIDEO_RATE_KEY, String(value)); } catch { /* 不影响播放 */ }
+}
+
 const isPaused = ref(true);
 const isEnded = ref(false);
 const isBuffering = ref(false);
@@ -273,7 +302,7 @@ const currentTime = ref(0);
 const duration = ref(0);
 const volume = ref(loadSavedVolume());
 const isMuted = ref(false);
-const currentSpeed = ref(1);
+const currentSpeed = ref(loadSavedRate());
 const controlsVisible = ref(true);
 const speedMenuOpen = ref(false);
 const endBehaviorMenuOpen = ref(false);
@@ -354,9 +383,24 @@ function onTimeUpdate() {
   playedPct.value = duration.value > 0 ? (v.currentTime / duration.value) * 100 : 0;
 }
 
+/** 当前 src 的恢复点是否已应用（src 变化后重置，仅应用一次） */
+let initialTimeConsumed = false;
+
+function applyInitialTime(v: HTMLVideoElement) {
+  if (initialTimeConsumed) return;
+  initialTimeConsumed = true;
+  const target = props.initialTime;
+  if (!target || target <= 0) return;
+  if (!Number.isFinite(v.duration) || v.duration <= 0) return;
+  const t = Math.min(target, Math.max(0, v.duration - 1));
+  if (t > 0) v.currentTime = t;
+}
+
 function onLoadedMeta() {
   const v = videoRef.value;
-  if (v) duration.value = v.duration;
+  if (!v) return;
+  duration.value = v.duration;
+  applyInitialTime(v);
 }
 
 function onDurationChange() {
@@ -422,6 +466,7 @@ function setSpeed(s: number) {
   if (!v) return;
   v.playbackRate = s;
   currentSpeed.value = s;
+  saveRate(s);
   speedMenuOpen.value = false;
 }
 
@@ -442,10 +487,22 @@ async function togglePiP() {
   try {
     if (document.pictureInPictureElement) {
       await document.exitPictureInPicture();
+      emit('pip-change', false);
     } else if (v.readyState >= 2) {
       await v.requestPictureInPicture();
+      emit('pip-change', true);
+    } else {
+      emit('pip-error');
     }
-  } catch { /* PiP not supported */ }
+  } catch {
+    emit('pip-change', false);
+    emit('pip-error');
+  }
+}
+
+/** 浏览器级画中画事件（进入 / 退出）→ 上报父级 */
+function onPiPStateChange() {
+  emit('pip-change', !!document.pictureInPictureElement);
 }
 
 function toggleFullscreen() {
@@ -716,6 +773,7 @@ function formatTime(s: number): string {
 watch(() => props.src, (src) => {
   const v = videoRef.value;
   if (!v) return;
+  initialTimeConsumed = false; // 新 src 允许应用新的恢复点
   currentTime.value = 0;
   playedPct.value = 0;
   bufferedPct.value = 0;
@@ -754,31 +812,56 @@ function onClickOutsideMenus(e: MouseEvent) {
   }
 }
 
+/** 收起为迷你播放器（非交互态）时移除全局快捷键，避免干扰页面操作 */
+function bindGlobalListeners(on: boolean) {
+  if (on) {
+    window.addEventListener('keydown', onKeydown);
+    window.addEventListener('keyup', onKeyup);
+  } else {
+    window.removeEventListener('keydown', onKeydown);
+    window.removeEventListener('keyup', onKeyup);
+  }
+}
+
 onMounted(() => {
   const video = videoRef.value;
   if (video) {
     video.volume = volume.value;
     video.muted = false;
+    // 恢复上次倍速
+    video.playbackRate = currentSpeed.value;
   }
-  window.addEventListener('keydown', onKeydown);
-  window.addEventListener('keyup', onKeyup);
+  bindGlobalListeners(props.interactive);
   document.addEventListener('fullscreenchange', onFullscreenChange);
   document.addEventListener('click', onClickOutsideMenus);
+  document.addEventListener('enterpictureinpicture', onPiPStateChange);
+  document.addEventListener('leavepictureinpicture', onPiPStateChange);
   // 初始显示控制栏，3s 后若播放中则隐藏
   showControls();
 });
 
+watch(() => props.interactive, (on) => {
+  bindGlobalListeners(on);
+});
+
 onBeforeUnmount(() => {
-  window.removeEventListener('keydown', onKeydown);
-  window.removeEventListener('keyup', onKeyup);
+  bindGlobalListeners(false);
   document.removeEventListener('fullscreenchange', onFullscreenChange);
   document.removeEventListener('click', onClickOutsideMenus);
+  document.removeEventListener('enterpictureinpicture', onPiPStateChange);
+  document.removeEventListener('leavepictureinpicture', onPiPStateChange);
   if (hideTimer) clearTimeout(hideTimer);
   if (seekHideTimer) clearTimeout(seekHideTimer);
 });
 
 // 暴露方法供父组件调用
-defineExpose({ videoRef, togglePlay, play: () => videoRef.value?.play(), pause: () => videoRef.value?.pause() });
+defineExpose({
+  videoRef,
+  togglePlay,
+  togglePiP,
+  play: () => videoRef.value?.play(),
+  pause: () => videoRef.value?.pause(),
+});
 </script>
 
 <style scoped>

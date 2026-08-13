@@ -116,34 +116,16 @@
         ← 返回上级
       </t-button>
     </div>
-
-    <!-- 文件在线预览弹窗 -->
-    <FilePreviewDialog
-      :visible="previewFile !== null"
-      :name="previewFile?.name"
-      :mime-type="previewFile?.mimeType"
-      :size="previewFile?.size"
-      :kind="previewFile ? getPreviewKind(previewFile.mimeType, previewFile.name) : null"
-      :src="previewFile ? buildSharePreviewUrl(props.token, previewFile.id, props.accessJwt) : null"
-      :download-url="previewFile ? buildShareDownloadUrl(previewFile.id) : undefined"
-      :file-id="previewFile ? previewFile.id : undefined"
-      :share-token="props.token"
-      :share-access-jwt="props.accessJwt"
-      :playlist="activeMediaPlaylist"
-      :playlist-index="activeMediaPlaylistIndex"
-      @update:visible="onPreviewVisibleChange"
-      @update:playlist-index="onPlaylistIndexChange"
-    />
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed } from 'vue';
+import { ref, reactive } from 'vue';
 import MessagePlugin from '@/utils/message';
 import { triggerBrowserDownload } from '@/utils/download';
 import { isPreviewable, getPreviewKind, buildSharePreviewUrl, buildShareThumbnailUrl } from '@/utils/preview';
 import ThumbnailImg from '@/components/ThumbnailImg.vue';
-import FilePreviewDialog, { type PlaylistItem } from '@/components/file/FilePreviewDialog.vue';
+import { useMediaPlaybackStore, type MediaSessionItem } from '../../stores/mediaPlayback';
 
 interface FolderSummary {
   id: string;
@@ -180,19 +162,32 @@ const currentContents = reactive<FolderContents>({
 });
 const breadcrumb = ref<FolderSummary[]>([...props.initialBreadcrumb]);
 
-/** 当前预览目标文件；null 表示弹窗关闭 */
-const previewFile = ref<FileSummary | null>(null);
+const mediaPlaybackStore = useMediaPlaybackStore();
 
+/** 打开全局预览会话（分享上下文；跨路由/收起不中断播放） */
 function openPreview(file: FileSummary) {
-  previewFile.value = file;
-}
-
-function onPreviewVisibleChange(v: boolean) {
-  if (!v) previewFile.value = null;
+  const kind = getPreviewKind(file.mimeType, file.name);
+  if (!kind) return;
+  const list = buildMediaPlaylist(kind);
+  const index = Math.max(0, list.findIndex((i) => i.id === file.id));
+  mediaPlaybackStore.open({
+    context: { type: 'share', token: props.token, accessJwt: props.accessJwt },
+    item: list[index] ?? {
+      id: file.id,
+      name: file.name,
+      mimeType: file.mimeType,
+      kind,
+      size: file.size,
+      src: buildSharePreviewUrl(props.token, file.id, props.accessJwt),
+      downloadUrl: buildShareDownloadUrl(file.id),
+    },
+    playlist: list,
+    playlistIndex: index,
+  });
 }
 
 // ============ 媒体快速预览列表 ============
-function buildMediaPlaylist(kind: 'image' | 'video' | 'audio'): PlaylistItem[] {
+function buildMediaPlaylist(kind: MediaSessionItem['kind']): MediaSessionItem[] {
   return currentContents.files
     .filter((file) => getPreviewKind(file.mimeType, file.name) === kind)
     .map((file) => ({
@@ -204,29 +199,6 @@ function buildMediaPlaylist(kind: 'image' | 'video' | 'audio'): PlaylistItem[] {
       src: buildSharePreviewUrl(props.token, file.id, props.accessJwt),
       downloadUrl: buildShareDownloadUrl(file.id),
     }));
-}
-
-const videoPlaylist = computed<PlaylistItem[]>(() => buildMediaPlaylist('video'));
-const audioPlaylist = computed<PlaylistItem[]>(() => buildMediaPlaylist('audio'));
-const imagePlaylist = computed<PlaylistItem[]>(() => buildMediaPlaylist('image'));
-const activeMediaPlaylist = computed<PlaylistItem[]>(() => {
-  if (!previewFile.value) return [];
-  const kind = getPreviewKind(previewFile.value.mimeType, previewFile.value.name);
-  if (kind === 'video') return videoPlaylist.value;
-  if (kind === 'audio') return audioPlaylist.value;
-  if (kind === 'image') return imagePlaylist.value;
-  return [];
-});
-const activeMediaPlaylistIndex = computed(() => {
-  if (!previewFile.value) return -1;
-  return activeMediaPlaylist.value.findIndex((item) => item.id === previewFile.value!.id);
-});
-
-function onPlaylistIndexChange(idx: number) {
-  const item = activeMediaPlaylist.value[idx];
-  if (!item) return;
-  const file = currentContents.files.find((f) => f.id === item.id);
-  if (file) previewFile.value = file;
 }
 
 /** 固定构造同源分享下载路径，禁止把访问 JWT 附加到后端返回的任意跨域 URL */

@@ -1,13 +1,15 @@
 <template>
   <teleport to="body">
       <div
-        v-show="visible"
         class="fpv-overlay"
+        :class="{ 'fpv-overlay--minimized': !mediaStore.expanded }"
+        :inert="!mediaStore.expanded"
         role="presentation"
-        @click.self="close"
+        @click.self="minimize"
       >
         <div
           ref="dialogRef"
+          tabindex="-1"
           class="fpv-dialog"
           :class="`fpv-dialog--${snap.kind || 'unknown'}`"
           role="dialog"
@@ -15,7 +17,7 @@
           :aria-label="snap.name || '文件预览'"
           @pointerdown="onDialogPointerDown"
         >
-          <!-- 头部：文件名 + 播放列表导航 + 关闭 -->
+          <!-- 头部：文件名 + 播放列表导航 + 最小化/关闭 -->
           <div class="fpv-header">
             <div class="fpv-name" :title="snap.name">{{ snap.name || '文件预览' }}</div>
             <div class="fpv-header-actions">
@@ -57,17 +59,28 @@
                   <t-icon name="view-list" />
                 </button>
               </template>
-              <button type="button" class="fpv-close" aria-label="关闭预览" @click="close">
+              <!-- 最小化：仅音视频持续播放时可用（其余类型等价于关闭） -->
+              <button
+                v-if="isContinuousMedia"
+                type="button"
+                class="fpv-nav-btn"
+                aria-label="收起为迷你播放器（继续播放）"
+                title="收起为迷你播放器（继续播放）"
+                @click="minimize"
+              >
+                <t-icon name="chevron-down" />
+              </button>
+              <button type="button" class="fpv-close" aria-label="关闭预览" @click="minimize">
                 <t-icon name="close" />
               </button>
             </div>
           </div>
 
-          <!-- 内容区：按 kind 分支懒挂载（关闭卸载即终止媒体流） -->
+          <!-- 内容区：按 kind 分支渲染；弹窗收起（v-show）时媒体 DOM 保留不中断 -->
           <div class="fpv-body">
             <!-- 图片 -->
             <img
-              v-if="visible && snap.kind === 'image' && snap.src && !mediaError"
+              v-if="snap.kind === 'image' && snap.src && !mediaError"
               class="fpv-image"
               :src="snap.src"
               :alt="snap.name"
@@ -76,25 +89,32 @@
 
             <!-- 视频：自定义播放器（MSE 优先，不支持时原生回退） -->
             <div
-              v-else-if="visible && snap.kind === 'video' && snap.src && !mediaError"
+              v-else-if="snap.kind === 'video' && snap.src && !mediaError"
               class="fpv-video-wrap"
             >
               <CustomVideoPlayer
+                ref="videoPlayerRef"
                 :src="videoSrc"
                 :poster="snap.kind === 'video' ? posterUrl : null"
                 :cold="coldLoad"
                 :end-behavior="videoEndBehavior"
+                :initial-time="mediaStore.pendingResume"
+                :interactive="mediaStore.expanded"
                 @update:end-behavior="setVideoEndBehavior"
                 @video-ref="onCustomPlayerVideoRef"
                 @request-play="activateVideo"
+                @play="onVideoPlay"
+                @pause="onVideoPaused"
                 @ended="onVideoEnded"
                 @error="onVideoError"
+                @pip-change="mediaStore.setPipActive"
+                @pip-error="onPipError"
               />
             </div>
 
             <!-- 音频：主题化播放器卡片（保留原生 audio 控件的可访问性） -->
             <div
-              v-else-if="visible && snap.kind === 'audio' && snap.src && !mediaError"
+              v-else-if="snap.kind === 'audio' && snap.src && !mediaError"
               class="fpv-audio-player"
             >
               <div class="fpv-audio-visual">
@@ -118,6 +138,7 @@
               </div>
               <audio
                 ref="audioRef"
+                :key="snap.src"
                 class="fpv-audio-controls"
                 :src="snap.src"
                 controls
@@ -125,20 +146,22 @@
                 @play="onAudioPlay"
                 @pause="onAudioPause"
                 @ended="onAudioEnded"
+                @timeupdate="onAudioTimeUpdate"
+                @loadedmetadata="onAudioLoadedMeta"
                 @error="onMediaError"
               />
             </div>
 
             <!-- PDF（浏览器原生内联渲染） -->
             <iframe
-              v-else-if="visible && snap.kind === 'pdf' && snap.src"
+              v-else-if="snap.kind === 'pdf' && snap.src"
               class="fpv-pdf"
               :src="snap.src"
               :title="snap.name || 'PDF 预览'"
             />
 
             <!-- 文本：打开时 fetch 读取 -->
-            <template v-else-if="visible && snap.kind === 'text'">
+            <template v-else-if="snap.kind === 'text'">
               <div v-if="textLoading" class="fpv-state">
                 <t-loading size="medium" text="正在加载文本内容…" />
               </div>
@@ -249,7 +272,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, watch, nextTick, computed, onUnmounted } from 'vue';
+import { ref, reactive, watch, nextTick, computed, onMounted, onBeforeUnmount } from 'vue';
 import type { PreviewKind } from '../../utils/preview';
 import {
   buildShareThumbnailUrl,
@@ -261,57 +284,29 @@ import { triggerBrowserDownload } from '../../utils/download';
 import { getThumbnailUrl, getHdThumbnailUrl } from '../../utils/thumbnailCache';
 import CustomVideoPlayer, { type VideoEndBehavior } from './CustomVideoPlayer.vue';
 import ThumbnailImg from '../ThumbnailImg.vue';
+import {
+  useMediaPlaybackStore,
+  type MediaPlayerBridge,
+  type MediaSession,
+  type MediaSessionItem,
+} from '../../stores/mediaPlayback';
 
-/** 播放列表项（父组件传入，FilePreviewDialog 不依赖 FileItem 类型） */
-export interface PlaylistItem {
-  id: string;
-  name: string;
-  mimeType: string;
-  kind: 'image' | 'video' | 'audio';
-  size?: number;
-  src: string;
-  downloadUrl?: string;
-}
+const mediaStore = useMediaPlaybackStore();
 
-const props = withDefaults(defineProps<{
-  visible: boolean;
-  /** 文件原始名（头部展示 + 下载文件名） */
-  name?: string;
-  mimeType?: string;
-  size?: number;
-  /** 预览类别；null 时显示「无法预览」兜底态 */
-  kind: PreviewKind | null;
-  /** 预览内容地址（同源 inline 接口） */
-  src: string | null;
-  /** 下载地址；未传时用 src 兜底 */
-  downloadUrl?: string;
-  /** 播放列表（同文件夹下的视频文件列表） */
-  playlist?: PlaylistItem[];
-  /** 当前播放在列表中的索引 */
-  playlistIndex?: number;
-  /** 当前文件 ID（登录态或分享态封面加载共用） */
-  fileId?: string;
-  /** 分享 token；存在时按分享封面/缓存状态链路加载 */
-  shareToken?: string;
-  /** 分享密码访问 JWT */
-  shareAccessJwt?: string;
-}>(), {
-  playlist: () => [],
-  playlistIndex: -1,
-  fileId: '',
-  shareToken: '',
-  shareAccessJwt: '',
-});
+/** 会话中的播放列表（与当前媒体同类别） */
+const playlist = computed<MediaSessionItem[]>(() => mediaStore.session?.playlist ?? []);
+const hasPlaylist = computed(() => playlist.value.length > 1);
+const activeIndex = computed(() => mediaStore.session?.playlistIndex ?? -1);
+const hasPrev = computed(() => activeIndex.value > 0);
+const hasNext = computed(() => activeIndex.value < playlist.value.length - 1);
 
-const emit = defineEmits<{
-  'update:visible': [v: boolean];
-  'update:playlist-index': [idx: number];
-}>();
+const isMediaCollection = computed(() => snap.kind === 'video' || snap.kind === 'audio' || snap.kind === 'image');
+const isContinuousMedia = computed(() => snap.kind === 'video' || snap.kind === 'audio');
+const collectionItemLabel = computed(() => snap.kind === 'audio' ? '音乐' : snap.kind === 'image' ? '图片' : '视频');
+const collectionTitle = computed(() => snap.kind === 'audio' ? '音乐播放列表' : snap.kind === 'image' ? '图片列表' : '视频播放列表');
+const playlistOpen = ref(false);
 
-/**
- * 打开时快照：父组件关闭时可能立即清空 src/name 等 props，
- * 而遮罩的淡出过渡仍在进行，快照保证退场期间内容不闪变。
- */
+/** 打开时快照：收起/切换后遮罩淡出期间内容不闪变 */
 const snap = reactive({
   name: '',
   mimeType: '',
@@ -330,7 +325,6 @@ const dialogRef = ref<HTMLElement | null>(null);
 const playlistPanelRef = ref<HTMLElement | null>(null);
 
 // ============ 视频封面与冷资源加载状态 ============
-/** 普通封面清晰度下限：宽度或高度低于任一值则升级到高清封面接口 */
 const HD_COVER_MIN_WIDTH = 640;
 const HD_COVER_MIN_HEIGHT = 360;
 
@@ -361,12 +355,6 @@ function setPosterObjectUrl(url: string | null) {
 }
 
 // ============ 播放列表状态 ============
-const hasPlaylist = computed(() => props.playlist.length > 1);
-const isMediaCollection = computed(() => snap.kind === 'video' || snap.kind === 'audio' || snap.kind === 'image');
-const collectionItemLabel = computed(() => snap.kind === 'audio' ? '音乐' : snap.kind === 'image' ? '图片' : '视频');
-const collectionTitle = computed(() => snap.kind === 'audio' ? '音乐播放列表' : snap.kind === 'image' ? '图片列表' : '视频播放列表');
-const playlistOpen = ref(false);
-const playlistIndexInternal = ref(-1);
 const VIDEO_END_BEHAVIOR_KEY = 'file-preview-video-end-behavior';
 const VIDEO_END_BEHAVIORS: readonly VideoEndBehavior[] = ['loop', 'next', 'pause'];
 const videoEndBehavior = ref<VideoEndBehavior>(loadVideoEndBehavior());
@@ -391,24 +379,21 @@ function clearAutoNextTimer() {
   autoNextTimer = null;
 }
 
-/** 当前播放项在列表中的索引（优先用 props.playlistIndex，否则内部追踪） */
-const activeIndex = computed(() => {
-  if (props.playlistIndex >= 0) return props.playlistIndex;
-  return playlistIndexInternal.value;
-});
-
-const hasPrev = computed(() => activeIndex.value > 0);
-const hasNext = computed(() => activeIndex.value < props.playlist.length - 1);
-
-/** 切换到列表中指定项 */
+/** 切换到列表中指定项：先更新全局会话（迷你播放器同步），再同步本地渲染状态 */
 function switchToTrack(idx: number) {
-  if (idx < 0 || idx >= props.playlist.length) return;
+  const item = mediaStore.switchTo(idx);
+  if (!item) return;
   clearAutoNextTimer();
-  const item = props.playlist[idx];
   playlistOpen.value = false;
-  playlistIndexInternal.value = idx;
-  emit('update:playlist-index', idx);
-  // 更新快照并按媒体类型重新加载。
+  applyItem(item);
+  if (item.kind === 'audio') nextTick(() => { void audioRef.value?.play().catch(() => {}); });
+}
+
+function playPrev() { if (hasPrev.value) switchToTrack(activeIndex.value - 1); }
+function playNext() { if (hasNext.value) switchToTrack(activeIndex.value + 1); }
+
+/** 根据播放项同步快照并按媒体类型重新加载内容 */
+function applyItem(item: MediaSessionItem) {
   resetState();
   snap.name = item.name;
   snap.mimeType = item.mimeType;
@@ -417,8 +402,8 @@ function switchToTrack(idx: number) {
   snap.src = item.src;
   snap.downloadUrl = item.downloadUrl ?? null;
   mediaError.value = false;
+  if (item.kind === 'text') void loadText();
   if (item.kind === 'video') {
-    // 封面与冷资源状态跟随播放项切换
     currentPosterFileId.value = item.id;
     setPosterObjectUrl(null);
     hdCoverAttempted = false;
@@ -427,11 +412,7 @@ function switchToTrack(idx: number) {
     void checkColdStatus();
     void loadPoster();
   }
-  if (item.kind === 'audio') nextTick(() => { void audioRef.value?.play().catch(() => {}); });
 }
-
-function playPrev() { if (hasPrev.value) switchToTrack(activeIndex.value - 1); }
-function playNext() { if (hasNext.value) switchToTrack(activeIndex.value + 1); }
 
 /** 播放列表展开后，点击面板之外的弹窗区域立即收起，不遮挡媒体。 */
 function onDialogPointerDown(event: PointerEvent) {
@@ -443,9 +424,16 @@ function onDialogPointerDown(event: PointerEvent) {
   playlistOpen.value = false;
 }
 
+/** 视频开始播放 → 同步全局播放状态（迷你播放器据此切换播放/暂停图标） */
+function onVideoPlay() {
+  mediaStore.setPlayState('playing');
+}
+
 /** 根据用户选择处理视频结束：单集循环、自动下一个或停在结尾。 */
 function onVideoEnded() {
   clearAutoNextTimer();
+  mediaStore.setPlayState('ended');
+  mediaStore.persistProgress();
   if (videoEndBehavior.value === 'loop') {
     const video = videoRef.value;
     if (!video) return;
@@ -461,24 +449,19 @@ function onVideoEnded() {
   }
 }
 
-/** 初始化时根据 src 在列表中定位当前索引 */
-watch(() => [props.visible, props.src], ([vis, src]) => {
-  if (!vis || !src || props.playlist.length === 0) return;
-  if (props.playlistIndex >= 0) {
-    playlistIndexInternal.value = props.playlistIndex;
-  } else {
-    const idx = props.playlist.findIndex((p) => p.src === src);
-    if (idx >= 0) playlistIndexInternal.value = idx;
-  }
-});
+function onVideoPaused() {
+  mediaStore.setPlayState('paused');
+  mediaStore.persistProgress();
+}
 
-/** 文本预览大小上限：2MB（响应头超限或流式累积超限均停止读取） */
+// ============ 文本预览 ============
 const TEXT_PREVIEW_LIMIT = 2 * 1024 * 1024;
-/** 加载令牌：避免快速开关时旧请求结果覆盖新状态 */
+/** 加载令牌：避免快速切换时旧请求结果覆盖新状态 */
 let loadToken = 0;
 let textAbort: AbortController | null = null;
 const audioRef = ref<HTMLAudioElement | null>(null);
 
+// ============ 音频波形 ============
 /** 音频是否正在播放（驱动波形装饰动画） */
 const audioPlaying = ref(false);
 const AUDIO_WAVE_BAR_COUNT = 28;
@@ -542,19 +525,40 @@ function setupAudioWaveform() {
 
 function onAudioPlay() {
   audioPlaying.value = true;
+  mediaStore.setPlayState('playing');
   setupAudioWaveform();
   if (audioContext?.state === 'suspended') void audioContext.resume();
   if (!audioWaveFrame) audioWaveFrame = requestAnimationFrame(updateAudioWaveform);
 }
 function onAudioPause() {
   audioPlaying.value = false;
+  mediaStore.setPlayState('paused');
   if (audioWaveFrame) cancelAnimationFrame(audioWaveFrame);
   audioWaveFrame = 0;
   audioWaveLastUpdate = 0;
+  mediaStore.persistProgress();
 }
 function onAudioEnded() {
   onAudioPause();
   if (hasNext.value) switchToTrack(activeIndex.value + 1);
+}
+
+/** 音频进度同步 + 节流持久化 */
+function onAudioTimeUpdate() {
+  const a = audioRef.value;
+  if (!a) return;
+  mediaStore.setProgress(a.currentTime, a.duration);
+  throttlePersist();
+}
+
+/** 音频元数据可用后应用恢复点 */
+function onAudioLoadedMeta() {
+  const a = audioRef.value;
+  const resume = mediaStore.pendingResume;
+  if (!a || !resume || resume <= 0) return;
+  if (Number.isFinite(a.duration) && a.duration > 0) {
+    a.currentTime = Math.min(resume, Math.max(0, a.duration - 1));
+  }
 }
 
 /** 文本内容字符数（工具栏信息展示） */
@@ -581,7 +585,7 @@ function resetState() {
   textError.value = null;
   textTooLarge.value = false;
   mediaError.value = false;
-  // 关闭/切换时清空封面与冷资源状态，避免下一文件残留
+  // 切换时清空封面与冷资源状态，避免下一文件残留
   setPosterObjectUrl(null);
   currentPosterFileId.value = '';
   coldLoad.value = false;
@@ -589,12 +593,32 @@ function resetState() {
   posterRetryCount = 0;
 }
 
-/** Esc 键关闭 + 播放列表快捷键 */
+/** 收起为迷你播放器：音视频继续播放，其余类型直接停止 */
+function minimize() {
+  playlistOpen.value = false;
+  mediaStore.minimize();
+}
+
+/** 真正停止：释放媒体资源并清空全局会话 */
+function fullStop() {
+  teardownVideo();
+  stopAudioWaveform();
+  const audio = audioRef.value;
+  if (audio) {
+    audio.pause();
+    audio.removeAttribute('src');
+    audio.load();
+  }
+  audioPlaying.value = false;
+  mediaStore.clearSession();
+}
+
+/** Esc 键收起 + 播放列表快捷键 */
 function onKeydown(e: KeyboardEvent) {
-  if (!props.visible) return;
+  if (!mediaStore.expanded) return;
   if (e.key === 'Escape') {
     if (playlistOpen.value) playlistOpen.value = false;
-    else close();
+    else minimize();
     return;
   }
   // Shift+N / Shift+P → 当前媒体列表的下一项 / 上一项
@@ -603,20 +627,10 @@ function onKeydown(e: KeyboardEvent) {
     if (e.key === 'P' || e.key === 'p') { e.preventDefault(); playPrev(); }
   }
 }
-watch(() => props.visible, (v) => {
-  if (v) window.addEventListener('keydown', onKeydown);
-  else window.removeEventListener('keydown', onKeydown);
-});
-onUnmounted(() => {
-  window.removeEventListener('keydown', onKeydown);
-  textAbort?.abort();
-  teardownVideo();
-});
 
-/** 请求父组件关闭；同步收起播放列表，避免下次打开时保留遮挡状态。 */
-function close() {
-  playlistOpen.value = false;
-  emit('update:visible', false);
+/** 页面隐藏时补写进度（避免后台期间丢失最后位置） */
+function onVisibility() {
+  if (document.visibilityState === 'hidden') mediaStore.persistProgress();
 }
 
 /** 媒体元素加载失败（含 401/403 无权访问） */
@@ -626,10 +640,22 @@ function onMediaError() {
 
 // ============ 视频预览（MSE 优先 + 原生回退） ============
 const videoRef = ref<HTMLVideoElement | null>(null);
+const videoPlayerRef = ref<InstanceType<typeof CustomVideoPlayer> | null>(null);
+
+/** 进度节流持久化间隔 */
+const PROGRESS_PERSIST_INTERVAL = 5000;
+let lastPersist = 0;
+function throttlePersist() {
+  const now = Date.now();
+  if (now - lastPersist >= PROGRESS_PERSIST_INTERVAL) {
+    lastPersist = now;
+    mediaStore.persistProgress();
+  }
+}
 
 /**
  * 从 CustomVideoPlayer 获取内部 <video> 元素引用。
- * 绑定 MSE 所需的事件监听（seek 钳制 + 缓冲追踪）。
+ * 绑定 MSE 所需的事件监听（seek 钳制 + 缓冲追踪 + 进度同步）。
  */
 function onCustomPlayerVideoRef(el: HTMLVideoElement | null) {
   // 清理旧监听
@@ -638,16 +664,25 @@ function onCustomPlayerVideoRef(el: HTMLVideoElement | null) {
     old.removeEventListener('seeking', onVideoSeeking);
     old.removeEventListener('seeked', onVideoSeeked);
     old.removeEventListener('progress', updateBufferedRatio);
-    old.removeEventListener('timeupdate', updateBufferedRatio);
+    old.removeEventListener('timeupdate', onVideoTimeUpdate);
   }
   videoRef.value = el;
   if (el) {
     el.addEventListener('seeking', onVideoSeeking);
     el.addEventListener('seeked', onVideoSeeked);
     el.addEventListener('progress', updateBufferedRatio);
-    el.addEventListener('timeupdate', updateBufferedRatio);
+    el.addEventListener('timeupdate', onVideoTimeUpdate);
   }
 }
+
+/** 视频进度同步 + 节流持久化 */
+function onVideoTimeUpdate() {
+  const v = videoRef.value;
+  if (!v) return;
+  mediaStore.setProgress(v.currentTime, v.duration);
+  throttlePersist();
+}
+
 /** 当前 <video> 实际 src：MSE 模式为 MediaSource 对象 URL，回退模式为原始地址 */
 const videoSrc = ref<string | null>(null);
 /** 是否处于 MSE 模式 */
@@ -665,7 +700,6 @@ interface MseSession {
   objectUrl: string;
   sb: SourceBuffer | null;
   abort: AbortController | null;
-  /** SourceBuffer 仅接受基于 ArrayBuffer 的 BufferSource，避免 ArrayBufferLike 类型歧义 */
   queue: ArrayBuffer[];
   appending: boolean;
   streamDone: boolean;
@@ -697,10 +731,8 @@ function setupVideo() {
   videoBuffering.value = true;
   videoBufferedRatio.value = 0;
   seekClamping = false;
-  // mimeType 缺失时按常见 video/mp4 尝试，不支持则自动走回退
   const mime = snap.mimeType || 'video/mp4';
-  // 默认统一交给原生媒体元素按需发起 Range。保留旧 MSE 实现仅用于后续分段化改造，
-  // 当前显式禁用，因为它会持续读取至 EOF，且无法按时间点重新请求已驱逐片段。
+  // 默认统一交给原生媒体元素按需发起 Range。保留旧 MSE 实现仅用于后续分段化改造。
   const enableLegacyMse = false;
   if (enableLegacyMse && mseTypeSupported(mime)) {
     startMseVideo(url, mime);
@@ -750,17 +782,12 @@ function startMseVideo(url: string, mime: string) {
       sb.addEventListener('error', s.onSbError);
       void pumpMseStream(url);
     } catch {
-      // addSourceBuffer 失败（容器格式不被支持等）→ 原生回退
       fallbackToNative();
     }
   };
   ms.addEventListener('sourceopen', s.onSourceOpen);
 }
 
-/**
- * 持续消费响应流直至读完——不随视频暂停而停止读取，
- * 保证后端「边消费边构建缓存」不会因客户端停读而背压暂停。
- */
 async function pumpMseStream(url: string) {
   const s = mseSession;
   if (!s) return;
@@ -770,7 +797,6 @@ async function pumpMseStream(url: string) {
     const res = await fetch(url, { credentials: 'same-origin', signal: ctrl.signal });
     if (mseSession !== s) return;
     if (!res.ok) {
-      // 无权 / 不存在：直接进错误态（原生回退同样会失败）
       teardownVideo();
       mediaError.value = true;
       return;
@@ -783,10 +809,8 @@ async function pumpMseStream(url: string) {
     const reader = body.getReader();
     for (;;) {
       const { done, value } = await reader.read();
-      if (mseSession !== s) return; // 已关闭 / 已降级
+      if (mseSession !== s) return;
       if (done) break;
-      // ReadableStream 的 value 类型为 Uint8Array<ArrayBufferLike>；复制后得到独立 ArrayBuffer，
-      // 满足 SourceBuffer.appendBuffer(BufferSource) 的严格 DOM 类型约束。
       s.queue.push(new Uint8Array(value).buffer);
       pumpAppendQueue();
     }
@@ -813,20 +837,18 @@ function pumpAppendQueue() {
   }
 }
 
-/** QuotaExceededError：移除最早的缓冲区间后重试；仍失败则整体降级原生 */
 function onAppendError(e: unknown, chunk: ArrayBuffer) {
   const s = mseSession;
   if (!s || !s.sb) return;
   const isQuota = e instanceof DOMException && e.name === 'QuotaExceededError';
   if (isQuota && !s.evictRetried && evictOldestBuffered(s.sb)) {
     s.evictRetried = true;
-    s.queue.unshift(chunk); // remove 的 updateend 会驱动队列重试
+    s.queue.unshift(chunk);
     return;
   }
   fallbackToNative();
 }
 
-/** 移除最早的缓冲区间（不越过当前播放位置，避免播放中断） */
 function evictOldestBuffered(sb: SourceBuffer): boolean {
   const v = videoRef.value;
   if (sb.updating || sb.buffered.length === 0) return false;
@@ -837,7 +859,6 @@ function evictOldestBuffered(sb: SourceBuffer): boolean {
   try { sb.remove(start, end); return true; } catch { return false; }
 }
 
-/** 流读完且追加队列排空后结束 MediaSource 流 */
 function maybeEndOfStream() {
   const s = mseSession;
   if (!s || !s.streamDone || !s.sb) return;
@@ -874,16 +895,15 @@ function teardownMse() {
   URL.revokeObjectURL(s.objectUrl);
 }
 
-/** 关闭/卸载：终止视频流并清理（保持”关闭即卸载终止流”语义） */
+/** 切换媒体 / 真正停止 / 组件卸载：终止视频流并清理 */
 function teardownVideo() {
   teardownMse();
-  // 清理解码器侧绑定的事件监听
   const v = videoRef.value;
   if (v) {
     v.removeEventListener('seeking', onVideoSeeking);
     v.removeEventListener('seeked', onVideoSeeked);
     v.removeEventListener('progress', updateBufferedRatio);
-    v.removeEventListener('timeupdate', updateBufferedRatio);
+    v.removeEventListener('timeupdate', onVideoTimeUpdate);
   }
   videoRef.value = null;
   videoSrc.value = null;
@@ -902,6 +922,11 @@ function onVideoError() {
   mediaError.value = true;
 }
 
+/** 画中画请求失败：降级为站内迷你播放器并给出非打断提示 */
+function onPipError() {
+  mediaStore.setError('当前浏览器不支持画中画，已继续在播放器中播放');
+}
+
 /**
  * seek 钳制（MSE 与原生共用）：超出已缓冲末尾的 seek 被拉回，
  * 进度条因此只能在已缓冲范围内拖动。防循环标志避免 seeking 事件死循环。
@@ -913,7 +938,7 @@ function onVideoSeeking() {
   for (let i = 0; i < v.buffered.length; i++) {
     if (v.buffered.end(i) > maxEnd) maxEnd = v.buffered.end(i);
   }
-  if (maxEnd <= 0) return; // 尚无任何缓冲，不钳制
+  if (maxEnd <= 0) return;
   const limit = Math.max(0, maxEnd - 0.1);
   if (v.currentTime > limit) {
     seekClamping = true;
@@ -941,7 +966,6 @@ function updateBufferedRatio() {
 }
 
 // ============ 视频封面加载（复用封面接口 + 低清自动升级高清） ============
-/** 单次请求封面并转为本地 Object URL；尺寸检测和 video poster 共用该本地资源。 */
 async function fetchPosterResource(url: string): Promise<{
   objectUrl: string;
   width: number;
@@ -967,39 +991,37 @@ async function fetchPosterResource(url: string): Promise<{
   }
 }
 
-/** 判断当前文件是否属于分享预览链路 */
-function isShareContext(): boolean {
-  return !!props.shareToken;
-}
-
-/** 当前封面任务是否仍属于可见的同一视频。 */
+/** 当前封面任务是否仍属于同一视频。 */
 function isCurrentPosterTask(fid: string, token: number): boolean {
-  return props.visible
-    && snap.kind === 'video'
+  return snap.kind === 'video'
     && currentPosterFileId.value === fid
     && posterLoadToken === token;
 }
 
 /** 查询当前视频是否为冷资源（尚无正式缓存），决定是否开启 seek 钳制 */
 async function checkColdStatus() {
+  const session = mediaStore.session;
   const fid = currentPosterFileId.value;
   const stateToken = loadToken;
-  if (!fid) return;
-  const cached = isShareContext()
-    ? await fetchShareCacheStatus(props.shareToken, fid, props.shareAccessJwt || undefined)
+  if (!session || !fid) return;
+  const ctx = session.context;
+  const cached = ctx.type === 'share'
+    ? await fetchShareCacheStatus(ctx.token, fid, ctx.accessJwt || undefined)
     : await fetchFileCacheStatus(fid);
-  if (!props.visible || snap.kind !== 'video' || currentPosterFileId.value !== fid || loadToken !== stateToken) return;
+  if (snap.kind !== 'video' || currentPosterFileId.value !== fid || loadToken !== stateToken) return;
   coldLoad.value = !cached;
 }
 
 /** 加载视频封面：每个候选封面只请求一次，检测低分辨率后一次性升级高清封面。 */
 async function loadPoster() {
+  const session = mediaStore.session;
   const fid = currentPosterFileId.value;
   const token = ++posterLoadToken;
-  if (!fid || snap.kind !== 'video' || !props.visible) return;
+  if (!session || !fid || snap.kind !== 'video') return;
 
-  const standardUrl = isShareContext()
-    ? buildShareThumbnailUrl(props.shareToken, fid, props.shareAccessJwt || undefined)
+  const ctx = session.context;
+  const standardUrl = ctx.type === 'share'
+    ? buildShareThumbnailUrl(ctx.token, fid, ctx.accessJwt || undefined)
     : await getThumbnailUrl(fid, 'video/mp4');
   if (!standardUrl || !isCurrentPosterTask(fid, token)) return;
 
@@ -1018,8 +1040,8 @@ async function loadPoster() {
   if (hdCoverAttempted) return;
 
   hdCoverAttempted = true;
-  const hdUrl = isShareContext()
-    ? buildShareHdThumbnailUrl(props.shareToken, fid, props.shareAccessJwt || undefined)
+  const hdUrl = ctx.type === 'share'
+    ? buildShareHdThumbnailUrl(ctx.token, fid, ctx.accessJwt || undefined)
     : await getHdThumbnailUrl(fid, 'video/mp4');
   if (!hdUrl || !isCurrentPosterTask(fid, token)) return;
 
@@ -1039,7 +1061,7 @@ function retryPosterAfterCache() {
   clearPosterRetryTimer();
   posterRetryTimer = setTimeout(() => {
     posterRetryTimer = null;
-    if (!props.visible) return;
+    if (!mediaStore.session) return;
     void loadPoster();
   }, 800);
 }
@@ -1047,7 +1069,6 @@ function retryPosterAfterCache() {
 /**
  * 文本预览：同源 fetch（自动携带会话 Cookie）后流式读取。
  * Content-Length 超过 2MB 或流式累积超限时立即停止，提示下载查看。
- * 使用非 fatal 解码器，编码异常时以替换字符展示而非抛错。
  */
 async function loadText() {
   const url = snap.src;
@@ -1076,7 +1097,6 @@ async function loadText() {
     }
     const body = res.body;
     if (!body) {
-      // 极少数浏览器不支持流式读取：整体读取后再校验大小
       const buf = await res.arrayBuffer();
       if (token !== loadToken) return;
       if (buf.byteLength > TEXT_PREVIEW_LIMIT) {
@@ -1113,35 +1133,93 @@ async function loadText() {
   }
 }
 
-/**
- * 必须在全部媒体状态变量初始化后注册。immediate watcher 会同步执行，
- * 若提前注册，resetState() 会访问仍处于暂时性死区的 mseSession 等变量。
- */
-watch(() => props.visible, (v) => {
-  resetState();
-  playlistOpen.value = false;
+/** 会话打开 / 切换 / 清空 → 同步快照与媒体内容 */
+watch(() => mediaStore.session, (session: MediaSession | null) => {
+  if (!session) {
+    resetState();
+    snap.name = '';
+    snap.mimeType = '';
+    snap.size = null;
+    snap.kind = null;
+    snap.src = null;
+    snap.downloadUrl = null;
+    return;
+  }
+  applyItem(session.item);
+}, { immediate: true });
+
+/** 展开时绑定快捷键并聚焦弹窗；收起/停止后解除 */
+watch(() => mediaStore.expanded, (v) => {
   if (v) {
-    snap.name = props.name || '';
-    snap.mimeType = props.mimeType || '';
-    snap.size = props.size ?? null;
-    snap.kind = props.kind;
-    snap.src = props.src;
-    snap.downloadUrl = props.downloadUrl ?? null;
-    if (props.kind === 'text') void loadText();
-    if (props.kind === 'video') {
-      // 封面与冷资源状态：打开时查询缓存并加载普通封面
-      currentPosterFileId.value = props.fileId || '';
-      setPosterObjectUrl(null);
-      hdCoverAttempted = false;
-      posterRetryCount = 0;
-      coldLoad.value = false;
-      void checkColdStatus();
-      void loadPoster();
+    window.addEventListener('keydown', onKeydown);
+    nextTick(() => dialogRef.value?.focus({ preventScroll: true }));
+  } else {
+    window.removeEventListener('keydown', onKeydown);
+  }
+  // 收起为迷你播放器时暂停波形动画（音频仍在播放，避免隐藏状态空转 rAF）
+  if (v) {
+    if (audioPlaying.value && !audioWaveFrame) {
+      audioWaveFrame = requestAnimationFrame(updateAudioWaveform);
     }
+  } else if (audioWaveFrame) {
+    cancelAnimationFrame(audioWaveFrame);
+    audioWaveFrame = 0;
+    audioWaveLastUpdate = 0;
   }
 }, { immediate: true });
 
-/** 底部下载：优先使用父组件传入的 downloadUrl，否则用预览地址兜底 */
+/** 播放控制桥：迷你播放器等外部 UI 通过 store 转发到同一媒体实例 */
+const bridge: MediaPlayerBridge = {
+  play() {
+    if (snap.kind === 'video') void videoPlayerRef.value?.play();
+    else void audioRef.value?.play().catch(() => {});
+  },
+  pause() {
+    if (snap.kind === 'video') void videoPlayerRef.value?.pause();
+    else audioRef.value?.pause();
+  },
+  togglePlay() {
+    if (snap.kind === 'video') {
+      videoPlayerRef.value?.togglePlay();
+    } else {
+      const a = audioRef.value;
+      if (!a) return;
+      if (a.paused) void a.play().catch(() => {});
+      else a.pause();
+    }
+  },
+  seekTo(t) {
+    if (snap.kind === 'video' && videoRef.value) videoRef.value.currentTime = Math.max(0, t);
+    else if (snap.kind === 'audio' && audioRef.value) audioRef.value.currentTime = Math.max(0, t);
+  },
+  seekBy(seconds) {
+    const target = (snap.kind === 'video' ? videoRef.value?.currentTime : audioRef.value?.currentTime) ?? 0;
+    this.seekTo((target || 0) + seconds);
+  },
+  next: playNext,
+  prev: playPrev,
+  togglePiP() {
+    if (snap.kind === 'video') void videoPlayerRef.value?.togglePiP();
+  },
+  stop: fullStop,
+};
+
+onMounted(() => {
+  mediaStore.registerBridge(bridge);
+  document.addEventListener('visibilitychange', onVisibility);
+});
+
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onKeydown);
+  document.removeEventListener('visibilitychange', onVisibility);
+  textAbort?.abort();
+  teardownVideo();
+  stopAudioWaveform();
+  audioPlaying.value = false;
+  mediaStore.unregisterBridge();
+});
+
+/** 底部下载：优先使用会话中的 downloadUrl，否则用预览地址兜底 */
 function handleDownload() {
   const url = snap.downloadUrl || snap.src;
   if (!url) return;
@@ -1150,8 +1228,7 @@ function handleDownload() {
 
 /**
  * 安全的文件大小格式化。
- * 后端/调用方可能传入字符串、空值或非法数值（如 `size` 以字符串形式返回时，
- * 直接调用 `.toFixed` 会抛 `p.toFixed is not a function`），统一先做数值归一化。
+ * 后端/调用方可能传入字符串、空值或非法数值，统一先做数值归一化。
  */
 function formatSize(bytes: number | string | null | undefined): string {
   const num = Number(bytes);
@@ -1176,6 +1253,20 @@ function formatSize(bytes: number | string | null | undefined): string {
   padding: 24px;
   background: color-mix(in srgb, var(--seed-bg, #0b0d12) 72%, transparent);
   backdrop-filter: blur(8px);
+  transition: opacity var(--duration-normal) var(--ease-out-expo);
+}
+
+/* 收起为迷你播放器：隐藏遮罩但保留媒体渲染（display:none 会导致视频 PiP 被浏览器强制退出） */
+.fpv-overlay--minimized {
+  opacity: 0;
+  pointer-events: none;
+  backdrop-filter: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fpv-overlay {
+    transition: none;
+  }
 }
 
 .fpv-dialog {

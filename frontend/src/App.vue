@@ -21,6 +21,8 @@
         <component :is="Component" />
       </transition>
     </router-view>
+    <!-- 常驻媒体宿主：路由出口之外，保证跨导航/预览收起播放不中断 -->
+    <PersistentMediaHost />
   </t-config-provider>
 </template>
 
@@ -28,6 +30,7 @@
 import { ref, computed, onErrorCaptured, onUnmounted, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { useAuthStore } from './stores/auth';
+import PersistentMediaHost from './components/file/PersistentMediaHost.vue';
 
 const authStore = useAuthStore();
 

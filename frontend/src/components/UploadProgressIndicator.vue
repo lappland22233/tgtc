@@ -41,13 +41,16 @@ import { computed, onUnmounted, ref, watch } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
 import { DialogPlugin } from 'tdesign-vue-next';
 import { useUploadStore } from '../stores/upload';
+import { useMediaPlaybackStore } from '../stores/mediaPlayback';
 
 /**
  * 全局后台上传指示器：挂载在 Layout，跨路由常驻。
  * 上传调度位于模块级 upload store，关闭上传弹窗后此处继续展示进度。
  * 全部完成后短暂展示完成态，5 秒后自动收起（也可手动收起/清除）。
+ * 浮层可见性同步到媒体会话 store，迷你播放器据此左右避让，避免遮挡。
  */
 const uploadStore = useUploadStore();
+const mediaPlaybackStore = useMediaPlaybackStore();
 const router = useRouter();
 const route = useRoute();
 
@@ -83,7 +86,15 @@ watch(hasActive, (active) => {
   }
 }, { immediate: true });
 
-onUnmounted(clearHideTimer);
+onUnmounted(() => {
+  clearHideTimer();
+  mediaPlaybackStore.setUploadPanelVisible(false);
+});
+
+// 浮层可见性 → 媒体会话 store（迷你播放器避让依据）
+watch(visible, (v) => {
+  mediaPlaybackStore.setUploadPanelVisible(v);
+}, { immediate: true });
 
 function dismiss() {
   clearHideTimer();

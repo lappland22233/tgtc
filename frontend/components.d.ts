@@ -27,6 +27,8 @@ declare module 'vue' {
     FolderMoveDialog: typeof import('./src/components/folder/FolderMoveDialog.vue')['default']
     FolderRenameDialog: typeof import('./src/components/folder/FolderRenameDialog.vue')['default']
     FolderTree: typeof import('./src/components/folder/FolderTree.vue')['default']
+    MiniMediaPlayer: typeof import('./src/components/file/MiniMediaPlayer.vue')['default']
+    PersistentMediaHost: typeof import('./src/components/file/PersistentMediaHost.vue')['default']
     RouterLink: typeof import('vue-router')['RouterLink']
     RouterView: typeof import('vue-router')['RouterView']
     SideNav: typeof import('./src/components/SideNav.vue')['default']

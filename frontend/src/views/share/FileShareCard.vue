@@ -17,7 +17,7 @@
       <div v-if="info.expiresAt" class="meta-row"><dt>有效期至</dt><dd class="expiry">{{ formatDateTime(info.expiresAt) }}</dd></div>
     </dl>
     <!-- 在线预览（仅可预览类型显示） -->
-    <button v-if="previewKind" type="button" class="preview-btn" @click="previewVisible = true">
+    <button v-if="previewKind" type="button" class="preview-btn" @click="openPreview">
       <span class="download-icon">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
           <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/>
@@ -50,22 +50,8 @@
       </svg>
       公开分享链接，任何持有链接的人都可访问
     </p>
-
-    <!-- 在线预览弹窗 -->
-    <FilePreviewDialog
-      v-model:visible="previewVisible"
-      :name="info.name"
-      :mime-type="info.mimeType"
-      :size="info.size"
-      :kind="previewKind"
-      :src="buildSharePreviewUrl(props.token, props.info.id, props.accessJwt)"
-      :download-url="downloadUrl"
-      :file-id="props.info.id"
-      :share-token="props.token"
-      :share-access-jwt="props.accessJwt"
-    />
-  </div>
-</template>
+    </div>
+    </template>
 
 <script setup lang="ts">
 import { computed, ref } from 'vue';
@@ -73,7 +59,7 @@ import MessagePlugin from '@/utils/message';
 import { triggerBrowserDownload } from '@/utils/download';
 import { getPreviewKind, buildSharePreviewUrl, buildShareThumbnailUrl } from '@/utils/preview';
 import ThumbnailImg from '@/components/ThumbnailImg.vue';
-import FilePreviewDialog from '@/components/file/FilePreviewDialog.vue';
+import { useMediaPlaybackStore } from '../../stores/mediaPlayback';
 
 interface FileInfo {
   id: string;
@@ -96,8 +82,27 @@ const isEncrypted = computed(() => !!props.accessJwt);
 
 /** 预览类别；null 时不显示「在线预览」按钮 */
 const previewKind = computed(() => getPreviewKind(props.info.mimeType, props.info.name));
-const previewVisible = ref(false);
+const mediaPlaybackStore = useMediaPlaybackStore();
 
+/** 打开全局预览会话（分享上下文；跨路由/收起不中断播放） */
+function openPreview() {
+  const kind = previewKind.value;
+  if (!kind) return;
+  mediaPlaybackStore.open({
+    context: { type: 'share', token: props.token, accessJwt: props.accessJwt },
+    item: {
+      id: props.info.id,
+      name: props.info.name,
+      mimeType: props.info.mimeType,
+      kind,
+      size: props.info.size,
+      src: buildSharePreviewUrl(props.token, props.info.id, props.accessJwt),
+      downloadUrl: downloadUrl.value,
+    },
+    playlist: [],
+    playlistIndex: -1,
+  });
+}
 
 const downloadUrl = computed(() => {
   let url = `/api/s/${encodeURIComponent(props.token)}/download/${encodeURIComponent(props.info.id)}`;

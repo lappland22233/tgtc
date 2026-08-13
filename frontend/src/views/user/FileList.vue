@@ -485,21 +485,6 @@
       @action="onCtxAction"
     />
 
-    <!-- 文件在线预览弹窗 -->
-    <FilePreviewDialog
-      :visible="previewTarget !== null"
-      :name="previewTarget?.originalName"
-      :mime-type="previewTarget?.mimeType"
-      :size="previewTarget?.size"
-      :kind="previewTarget ? getPreviewKind(previewTarget.mimeType, previewTarget.originalName) : null"
-      :src="previewTarget ? buildFilePreviewUrl(previewTarget.id) : null"
-      :download-url="previewTarget ? `/api/files/${previewTarget.id}/download` : undefined"
-      :file-id="previewTarget ? previewTarget.id : undefined"
-      :playlist="activeMediaPlaylist"
-      :playlist-index="activeMediaPlaylistIndex"
-      @update:visible="onPreviewVisibleChange"
-      @update:playlist-index="onPlaylistIndexChange"
-    />
   </div>
 </template>
 
@@ -528,7 +513,7 @@ import FolderMoveDialog from '../../components/folder/FolderMoveDialog.vue';
 import CreateShareDialog from '../../components/share/CreateShareDialog.vue';
 import FileContextMenu, { type CtxTarget } from '../../components/file/FileContextMenu.vue';
 import FileRenameDialog from '../../components/file/FileRenameDialog.vue';
-import FilePreviewDialog, { type PlaylistItem } from '../../components/file/FilePreviewDialog.vue';
+import { useMediaPlaybackStore, type MediaSessionItem } from '../../stores/mediaPlayback';
 import { isPreviewable, getPreviewKind, isMediaDirectLinkKind, buildFilePreviewUrl } from '../../utils/preview';
 import { useTagStore } from '../../stores/tags';
 import { useFolderStore, type Folder } from '../../stores/folders';
@@ -589,8 +574,7 @@ const ctxMenu = reactive({
 const fileClipboard = ref<FileItem[]>([]);
 
 // ============ 文件预览状态 ============
-/** 当前预览目标；null 表示弹窗关闭 */
-const previewTarget = ref<FileItem | null>(null);
+const mediaPlaybackStore = useMediaPlaybackStore();
 
 /** 是否可点击预览：类型可预览且文件处于可用状态（非删除/处理中） */
 function canPreviewFile(file: FileItem): boolean {
@@ -599,19 +583,32 @@ function canPreviewFile(file: FileItem): boolean {
     && file.status !== 'processing';
 }
 
-/** 打开在线预览弹窗 */
+/** 打开全局预览会话（由常驻媒体宿主呈现，跨路由/收起不中断播放） */
 function openPreview(file: FileItem) {
   if (!canPreviewFile(file)) return;
-  previewTarget.value = file;
-}
-
-function onPreviewVisibleChange(v: boolean) {
-  if (!v) previewTarget.value = null;
+  const kind = getPreviewKind(file.mimeType, file.originalName);
+  if (!kind) return;
+  const list = buildMediaPlaylist(kind);
+  const index = Math.max(0, list.findIndex((i) => i.id === file.id));
+  mediaPlaybackStore.open({
+    context: { type: 'user', userId: authStore.user?.id },
+    item: list[index] ?? {
+      id: file.id,
+      name: file.originalName,
+      mimeType: file.mimeType,
+      kind,
+      size: file.size,
+      src: buildFilePreviewUrl(file.id),
+      downloadUrl: `/api/files/${file.id}/download`,
+    },
+    playlist: list,
+    playlistIndex: index,
+  });
 }
 
 // ============ 媒体快速预览列表 ============
 /** 当前文件夹已加载且可用的媒体文件，按图片 / 视频 / 音乐分别组成列表。 */
-function buildMediaPlaylist(kind: 'image' | 'video' | 'audio'): PlaylistItem[] {
+function buildMediaPlaylist(kind: MediaSessionItem['kind']): MediaSessionItem[] {
   return fileStore.files
     .filter((file) => getPreviewKind(file.mimeType, file.originalName) === kind && !file.isDeleted && file.status !== 'processing')
     .map((file) => ({
@@ -623,32 +620,6 @@ function buildMediaPlaylist(kind: 'image' | 'video' | 'audio'): PlaylistItem[] {
       src: buildFilePreviewUrl(file.id),
       downloadUrl: `/api/files/${file.id}/download`,
     }));
-}
-
-const videoPlaylist = computed<PlaylistItem[]>(() => buildMediaPlaylist('video'));
-const audioPlaylist = computed<PlaylistItem[]>(() => buildMediaPlaylist('audio'));
-const imagePlaylist = computed<PlaylistItem[]>(() => buildMediaPlaylist('image'));
-
-const activeMediaPlaylist = computed<PlaylistItem[]>(() => {
-  if (!previewTarget.value) return [];
-  const kind = getPreviewKind(previewTarget.value.mimeType, previewTarget.value.originalName);
-  if (kind === 'video') return videoPlaylist.value;
-  if (kind === 'audio') return audioPlaylist.value;
-  if (kind === 'image') return imagePlaylist.value;
-  return [];
-});
-
-const activeMediaPlaylistIndex = computed(() => {
-  if (!previewTarget.value) return -1;
-  return activeMediaPlaylist.value.findIndex((item) => item.id === previewTarget.value!.id);
-});
-
-/** 列表切换时更新 previewTarget，父组件继续作为当前文件的单一数据源。 */
-function onPlaylistIndexChange(idx: number) {
-  const item = activeMediaPlaylist.value[idx];
-  if (!item) return;
-  const file = fileStore.files.find((candidate) => candidate.id === item.id);
-  if (file) previewTarget.value = file;
 }
 // ============ 文件重命名弹窗状态 ============
 const showRenameFileDialog = ref(false);
