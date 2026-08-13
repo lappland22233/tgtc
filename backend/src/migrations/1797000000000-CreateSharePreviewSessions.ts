@@ -1,7 +1,7 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
 
 export class CreateSharePreviewSessions1797000000000 implements MigrationInterface {
-  name = 'CreateSharePreviewSessions1797000000';
+  name = 'CreateSharePreviewSessions1797000000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
     await queryRunner.query(`

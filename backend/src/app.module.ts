@@ -13,6 +13,7 @@ import { TasksModule } from './tasks/tasks.module';
 import { ConfigCacheModule } from './common/services/config-cache.module';
 import { RateLimitModule } from './common/services/rate-limit.module';
 import { AuditModule } from './common/services/audit.module';
+import { StreamResponderModule } from './common/services/stream-responder.module';
 import { User } from './common/entities/user.entity';
 import { File } from './common/entities/file.entity';
 import { Folder } from './common/entities/folder.entity';
@@ -83,6 +84,7 @@ import { TagModule } from './tag/tag.module';
     ConfigCacheModule,
     RateLimitModule,
     AuditModule,
+    StreamResponderModule,
     AccessLogModule,
     JobsModule,
     AlertModule,

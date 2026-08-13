@@ -55,6 +55,12 @@ function makeService() {
     },
     configService: { get: jest.fn() },
     previewSessionService: makePreviewSessionService(),
+    folderBrowse: {
+      assertFileInShare: jest.fn().mockResolvedValue(undefined),
+      listFolderContentsForShare: jest.fn(),
+      getFolderBreadcrumbForShare: jest.fn(),
+      getFolderInfoForShare: jest.fn(),
+    },
   });
   return service;
 }
@@ -75,7 +81,6 @@ describe('ShareService 预览访问计数（持久化预览会话）', () => {
     const service = makeService();
     (service as any).shareLinkRepo.findOne.mockResolvedValue(makeLink());
     (service as any).assertShareUsable = jest.fn().mockResolvedValue(undefined);
-    (service as any).assertFileInShare = jest.fn().mockResolvedValue(undefined);
     (service as any).fileService.getSharePreviewStreamWithRange.mockResolvedValue(null);
     stubFullStream(service);
 
@@ -102,7 +107,6 @@ describe('ShareService 预览访问计数（持久化预览会话）', () => {
     const service = makeService();
     (service as any).shareLinkRepo.findOne.mockResolvedValue(makeLink());
     (service as any).assertShareUsable = jest.fn().mockResolvedValue(undefined);
-    (service as any).assertFileInShare = jest.fn().mockResolvedValue(undefined);
     (service as any).fileService.getSharePreviewStreamWithRange.mockResolvedValue(null);
     stubFullStream(service);
 
@@ -125,7 +129,6 @@ describe('ShareService 预览访问计数（持久化预览会话）', () => {
     const service = makeService();
     (service as any).shareLinkRepo.findOne.mockResolvedValue(makeLink());
     (service as any).assertShareUsable = jest.fn().mockResolvedValue(undefined);
-    (service as any).assertFileInShare = jest.fn().mockResolvedValue(undefined);
     (service as any).fileService.getSharePreviewStreamWithRange.mockResolvedValue(null);
     stubFullStream(service);
 
@@ -144,7 +147,6 @@ describe('ShareService 预览访问计数（持久化预览会话）', () => {
     const service = makeService();
     (service as any).shareLinkRepo.findOne.mockResolvedValue(makeLink({ password: 'hash' }));
     (service as any).assertShareUsable = jest.fn().mockResolvedValue(undefined);
-    (service as any).assertFileInShare = jest.fn().mockResolvedValue(undefined);
 
     await expect(
       service.getSharePreviewStream('tok123', 'file-id-1', undefined, null, undefined, 'visitor-a'),
@@ -156,7 +158,6 @@ describe('ShareService 预览访问计数（持久化预览会话）', () => {
     const service = makeService();
     (service as any).shareLinkRepo.findOne.mockResolvedValue(makeLink({ password: 'hash' }));
     (service as any).assertShareUsable = jest.fn().mockResolvedValue(undefined);
-    (service as any).assertFileInShare = jest.fn().mockResolvedValue(undefined);
     (service as any).passwordService.verifyAccessJwt.mockResolvedValue(false);
 
     await expect(

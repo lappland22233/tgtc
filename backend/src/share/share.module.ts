@@ -10,6 +10,7 @@ import { ShareController } from './share.controller';
 import { ShareService } from './share.service';
 import { SharePasswordService } from './share-password.service';
 import { SharePreviewSessionService } from './share-preview-session.service';
+import { ShareFolderBrowseService } from './share-folder-browse.service';
 import { SharePreviewSession } from '../common/entities/share-preview-session.entity';
 import { FileModule } from '../file/file.module';
 import { ConfigCacheModule } from '../common/services/config-cache.module';
@@ -51,7 +52,7 @@ import { RateLimitModule } from '../common/services/rate-limit.module';
     }),
   ],
   controllers: [ShareController],
-  providers: [ShareService, SharePasswordService, SharePreviewSessionService],
+  providers: [ShareService, SharePasswordService, SharePreviewSessionService, ShareFolderBrowseService],
   exports: [ShareService, SharePasswordService],
 })
 export class ShareModule {}

@@ -56,8 +56,8 @@
 
 | 层级 | 技术 |
 |---|---|
-| 后端 | NestJS 10、TypeScript、TypeORM 0.3 |
-| 前端 | Vue 3、TypeScript、Vite 5、TDesign Vue Next |
+| 后端 | NestJS 11、TypeScript、TypeORM 0.3 |
+| 前端 | Vue 3.5、TypeScript、Vite 6、TDesign Vue Next |
 | 数据库 | PostgreSQL 14+ |
 | 队列 | Bull 4、Redis |
 | 文件存储 | Telegram Bot API / 二次开发本地 Bot API |
@@ -304,7 +304,7 @@ NODE_ENV=production npm run start:prod
 3. **大文件**：提高代理请求体限制和读写超时；下载链路应关闭不必要的代理缓冲并透传 Range 请求。
 4. **HTTPS**：设置 `SECURE_COOKIE=true`，配置明确的 `CORS_ORIGINS`，不要使用通配符。
 5. **迁移**：生产环境保持 `DB_SYNCHRONIZE=false`，部署前运行 `npm run migration:run`。
-6. **多实例**：当前分片会话与部分上传任务状态保存在单实例内存，本地临时文件和缓存也依赖实例磁盘。多实例部署需要会话粘性与共享存储，或先将相关状态外置。
+6. **多实例**：当前分片会话与部分上传任务状态保存在单实例内存，本地临时文件和缓存也依赖实例磁盘。多实例部署需要会话粘性与共享存储，或先将相关状态外置。文件缓存（`tmp/Cache`）、缩略图（`tmp/thumbnails`）与冷回源会话状态均为**实例本地**，`FILE_CACHE_NO_CACHE_MODE=true` 可跳过磁盘缓存，但各实例仍有独立的 spool 与会话并发预算。
 7. **优雅退出**：应用已启用 Nest shutdown hooks；进程管理器应发送可处理的终止信号并给予日志 flush 时间。
 
 HTTP 服务器参数：活动连接空闲超时 120 秒、Keep-Alive 65 秒、请求头超时 66 秒；上传端点另行禁用请求超时。
@@ -408,6 +408,10 @@ npm run preview
 | `GET` | `/api/s/:token` | 分享元数据或密码要求 |
 | `POST` | `/api/s/:token/verify` | 验证分享密码并签发短期访问令牌 |
 | `GET` | `/api/s/:token/download/:fileId` | 分享下载 |
+| `GET` | `/api/s/:token/preview/:fileId` | 分享页内预览（Range 命中 206，不消费访问额度） |
+| `GET` | `/api/s/:token/cache-status/:fileId` | 分享缓存状态（`cached`/`cold`） |
+| `GET` | `/api/s/:token/thumbnail/:fileId` | 分享缩略图（凭证 Cookie 鉴权） |
+| `GET` | `/api/s/:token/thumbnail-hd/:fileId` | 分享高清视频封面 |
 | `GET` | `/api/s/:token/folder/:folderId/contents` | 浏览分享文件夹 |
 | `GET` | `/api/s/:token/folder/:folderId/breadcrumb` | 分享面包屑 |
 | `POST` | `/api/telemetry/report` | 批量上报前端遥测 |
@@ -424,7 +428,11 @@ npm run preview
 | `GET` | `/api/files` | **当前用户文件列表**；管理员访问此端点默认仍查询自己的文件 |
 | `GET` | `/api/files/:id` | 文件详情 |
 | `GET` | `/api/files/:id/download` | 登录用户下载 |
+| `GET` | `/api/files/:id/preview` | 页内在线预览（Range 命中 206，冷文件回退全量） |
+| `GET` | `/api/files/:id/cache-status` | 缓存状态（`cached`/`cold`），前端据此决定单连接策略 |
 | `GET` | `/api/files/:id/thumbnail?t=` | 加密令牌缩略图 |
+| `GET` | `/api/files/:id/thumbnail-hd?t=` | 加密令牌高清视频封面 |
+| `GET` | `/api/files/media/:id` | 公开媒体直链（原 `/media/:id` 别名） |
 | `PATCH` | `/api/files/:id/rename` | 重命名显示名 |
 | `PATCH` | `/api/files/:id/move` | 移动文件 |
 | `POST` | `/api/files/:id/copy` | 轻量复制文件 |

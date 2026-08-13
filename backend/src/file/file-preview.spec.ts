@@ -8,6 +8,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { Readable } from 'stream';
 import { FileService, RangeNotSatisfiableException } from './file.service';
+import { ThumbnailService } from './thumbnail.service';
 import { FileAccessType } from '../common/entities/file.entity';
 import { UserRole } from '../common/entities/user.entity';
 
@@ -34,13 +35,19 @@ const ownerUser = { id: uploaderId, role: UserRole.USER };
 
 function createService(overrides: Record<string, unknown> = {}) {
   const service = Object.create(FileService.prototype) as FileService;
+  const fileCacheService = { getCachedPath: jest.fn().mockReturnValue(null) };
+  const thumbnailDir = (overrides.thumbnailDir as string) || path.join(os.tmpdir(), 'tgtc-preview-test');
+  const thumbnailService = new ThumbnailService(
+    (overrides.fileRepository as any) || { findOne: jest.fn() },
+    {} as any,
+    fileCacheService as any,
+    { get: jest.fn().mockReturnValue(thumbnailDir) } as any,
+  );
   Object.assign(service, {
-    fileRepository: { findOne: jest.fn() },
+    fileRepository: (overrides.fileRepository as any) || { findOne: jest.fn() },
     accessLogRepository: { save: jest.fn().mockResolvedValue({ id: 'log-1' }) },
-    fileCacheService: { getCachedPath: jest.fn().mockReturnValue(null) },
-    thumbnailDir: path.join(os.tmpdir(), 'tgtc-preview-test'),
-    thumbnailBuilds: new Map<string, Promise<void>>(),
-    videoCoverBuilds: new Map<string, Promise<void>>(),
+    fileCacheService,
+    thumbnailService,
     logger: { warn: jest.fn(), log: jest.fn(), debug: jest.fn() },
     ...overrides,
   });
@@ -212,7 +219,7 @@ describe('FileService 高清封面', () => {
 
   it('读取已生成的高清封面且不重复生成', async () => {
     fs.writeFileSync(path.join(thumbnailDir, `${fileId}.video.hd.webp`), Buffer.from('hd-cover'));
-    const buildSpy = jest.spyOn(service as any, 'buildHdVideoCover');
+    const buildSpy = jest.spyOn((service as any).thumbnailService, 'buildHdVideoCover');
     const result = await (service as any).getHdThumbnailStream(fileId, ownerUser);
     expect(result.contentType).toBe('image/webp');
     await expect(readAll(result.stream)).resolves.toEqual(Buffer.from('hd-cover'));
@@ -236,9 +243,9 @@ describe('FileService 高清封面', () => {
 
   it('高清缺失但有本地缓存时从缓存生成（仅一次 FFmpeg 抽取）', async () => {
     const extractSpy = jest.fn().mockResolvedValue(undefined);
-    (service as any).extractVideoFrame = extractSpy;
+    (service as any).thumbnailService.extractVideoFrame = extractSpy;
     (service as any).fileCacheService.getCachedPath = jest.fn().mockReturnValue('/tmp/cache/' + fileId);
-    await (service as any).buildHdVideoCover(readyVideo);
+    await (service as any).thumbnailService.buildHdVideoCover(readyVideo);
     expect(extractSpy).toHaveBeenCalledTimes(1);
     expect(extractSpy).toHaveBeenCalledWith(
       '/tmp/cache/' + fileId,
@@ -250,8 +257,8 @@ describe('FileService 高清封面', () => {
 
   it('冷资源（无缓存）不生成高清封面', async () => {
     const extractSpy = jest.fn().mockResolvedValue(undefined);
-    (service as any).extractVideoFrame = extractSpy;
-    await (service as any).buildHdVideoCover(readyVideo);
+    (service as any).thumbnailService.extractVideoFrame = extractSpy;
+    await (service as any).thumbnailService.buildHdVideoCover(readyVideo);
     expect(extractSpy).not.toHaveBeenCalled();
   });
 

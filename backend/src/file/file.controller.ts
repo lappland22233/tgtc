@@ -24,7 +24,7 @@ import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { FileInterceptor, FilesInterceptor } from '@nestjs/platform-express';
 import { pipeline } from 'stream';
 import { promisify } from 'util';
-import { FileService, RangeNotSatisfiableException } from './file.service';
+import { FileService } from './file.service';
 import { ThumbnailCryptoService } from './thumbnail-crypto.service';
 import { BatchMarkdownDto, UpdateAccessTypeDto, UpdateAccessCountDto, SetPasswordDto, UpdateExpiresDto } from './file.dto';
 import { FolderService } from '../folder/folder.service';
@@ -37,19 +37,11 @@ import { sanitizePreviewContentType } from '../common/utils/preview-content-type
 import { buildContentDisposition } from '../common/utils/content-disposition';
 import { RateLimitService } from '../common/services/rate-limit.service';
 import { ConfigCacheService } from '../common/services/config-cache.service';
+import { StreamResponderService } from '../common/services/stream-responder.service';
 import { TagService } from '../tag/tag.service';
 
 // Multer 层硬上限（600MB，仅防止极端 DoS；精确的动态限制由 FileService.upload() 业务层负责）
 const multerFileSize = 600 * 1024 * 1024; // 600MB
-
-/**
- * 记录 pipeline 前的已发送字节数，返回一个用于 pipeline 完成后更新日志的闭包。
- * 与 access-log.middleware.ts 使用相同的 socket.bytesWritten 差值原理。
- */
-function trackBytesSent(res: Response): () => number {
-  const startBytes = res.socket?.bytesWritten ?? 0;
-  return () => (res.socket?.bytesWritten ?? 0) - startBytes;
-}
 
 @Controller('files')
 export class FileController {
@@ -58,6 +50,7 @@ export class FileController {
     private cryptoService: ThumbnailCryptoService,
     private rateLimitService: RateLimitService,
     private configCacheService: ConfigCacheService,
+    private streamResponder: StreamResponderService,
     private tagService: TagService,
     private folderService: FolderService,
   ) {}
@@ -258,65 +251,50 @@ export class FileController {
       if (rangeHeader) {
         const rangeResult = await this.fileService.getPublicMediaStreamWithRange(id, rangeHeader, clientIp);
         if (rangeResult) {
-          res.status(206);
-          res.set({
-            'Content-Type': rangeResult.contentType,
-            'Content-Disposition': buildContentDisposition('inline', rangeResult.filename),
-            'Content-Length': rangeResult.size.toString(),
-            'Content-Range': `bytes ${rangeResult.start}-${rangeResult.end}/${rangeResult.total}`,
-            'Accept-Ranges': 'bytes',
-            // C-01/H-03 修复：公开媒体是权限可变资源（可删除/转私有/加约束），
-            // 不保留长 TTL 公开缓存；并强制 nosniff + no-referrer + 限制性 CSP 纵深防御。
-            'Cache-Control': 'no-store',
-            'X-Content-Type-Options': 'nosniff',
-            'Referrer-Policy': 'no-referrer',
-            'Content-Security-Policy': "default-src 'none'; sandbox",
+          await this.streamResponder.send({
+            res,
+            status: 206,
+            range: rangeResult,
+            headers: {
+              'Content-Type': rangeResult.contentType,
+              'Content-Disposition': buildContentDisposition('inline', rangeResult.filename),
+              'Content-Length': rangeResult.size.toString(),
+              'Accept-Ranges': 'bytes',
+              // C-01/H-03 修复：公开媒体是权限可变资源（可删除/转私有/加约束），
+              // 不保留长 TTL 公开缓存；并强制 nosniff + no-referrer + 限制性 CSP 纵深防御。
+              'Cache-Control': 'no-store',
+              'X-Content-Type-Options': 'nosniff',
+              'Referrer-Policy': 'no-referrer',
+              'Content-Security-Policy': "default-src 'none'; sandbox",
+            },
+            stream: rangeResult.stream,
+            accessLogId: rangeResult.accessLogId,
+            updateAccessLog: (id, bytes) => this.fileService.updateAccessLogResponseSize(id, bytes),
           });
-          const getBytesSent = trackBytesSent(res);
-          const pipe = promisify(pipeline);
-          try {
-            await pipe(rangeResult.stream, res);
-          } finally {
-            if (rangeResult.accessLogId) {
-              await this.fileService.updateAccessLogResponseSize(rangeResult.accessLogId, getBytesSent());
-            }
-          }
           return;
         }
       }
 
       const result = await this.fileService.getPublicMediaStream(id, clientIp);
-      res.set({
-        'Content-Type': result.contentType,
-        'Content-Disposition': buildContentDisposition('inline', result.filename),
-        'Content-Length': result.size.toString(),
-        'Accept-Ranges': rangeHeader ? 'none' : 'bytes',
-        // C-01/H-03 修复：同 206 分支，禁止长 TTL 缓存与凭据外泄。
-        'Cache-Control': 'no-store',
-        'X-Content-Type-Options': 'nosniff',
-        'Referrer-Policy': 'no-referrer',
-        'Content-Security-Policy': "default-src 'none'; sandbox",
+      await this.streamResponder.send({
+        res,
+        headers: {
+          'Content-Type': result.contentType,
+          'Content-Disposition': buildContentDisposition('inline', result.filename),
+          'Content-Length': result.size.toString(),
+          'Accept-Ranges': rangeHeader ? 'none' : 'bytes',
+          // C-01/H-03 修复：同 206 分支，禁止长 TTL 缓存与凭据外泄。
+          'Cache-Control': 'no-store',
+          'X-Content-Type-Options': 'nosniff',
+          'Referrer-Policy': 'no-referrer',
+          'Content-Security-Policy': "default-src 'none'; sandbox",
+        },
+        stream: result.stream,
+        accessLogId: result.accessLogId,
+        updateAccessLog: (id, bytes) => this.fileService.updateAccessLogResponseSize(id, bytes),
       });
-      const getBytesSent = trackBytesSent(res);
-      const pipe = promisify(pipeline);
-      try {
-        await pipe(result.stream, res);
-      } finally {
-        if (result.accessLogId) {
-          await this.fileService.updateAccessLogResponseSize(result.accessLogId, getBytesSent());
-        }
-      }
     } catch (error) {
-      const message = error instanceof Error ? error.message : '媒体文件访问失败';
-      const status = (error as { status?: number }).status || 500;
-      if (!res.headersSent) {
-        if (error instanceof RangeNotSatisfiableException) {
-          res.set('Content-Range', `bytes */${error.total}`);
-        }
-        res.status(status).json({ code: 1, message });
-      } else if (!res.destroyed) {
-        res.destroy(error instanceof Error ? error : new Error(message));
-      }
+      this.streamResponder.handleError(res, error, '媒体文件访问失败', req);
     }
   }
 
@@ -343,26 +321,23 @@ export class FileController {
       if (rangeHeader) {
         const rangeResult = await this.fileService.getPreviewStreamWithRange(id, user, rangeHeader, clientIp);
         if (rangeResult) {
-          res.status(206);
-          res.set({
-            'Content-Type': sanitizePreviewContentType(rangeResult.contentType),
-            'Content-Disposition': buildContentDisposition('inline', rangeResult.filename),
-            'Content-Length': rangeResult.size.toString(),
-            'Content-Range': `bytes ${rangeResult.start}-${rangeResult.end}/${rangeResult.total}`,
-            'Accept-Ranges': 'bytes',
-            'Cache-Control': 'private, no-cache',
-            'X-Content-Type-Options': 'nosniff',
-            'Referrer-Policy': 'no-referrer',
+          await this.streamResponder.send({
+            res,
+            status: 206,
+            range: rangeResult,
+            headers: {
+              'Content-Type': sanitizePreviewContentType(rangeResult.contentType),
+              'Content-Disposition': buildContentDisposition('inline', rangeResult.filename),
+              'Content-Length': rangeResult.size.toString(),
+              'Accept-Ranges': 'bytes',
+              'Cache-Control': 'private, no-cache',
+              'X-Content-Type-Options': 'nosniff',
+              'Referrer-Policy': 'no-referrer',
+            },
+            stream: rangeResult.stream,
+            accessLogId: rangeResult.accessLogId,
+            updateAccessLog: (id, bytes) => this.fileService.updateAccessLogResponseSize(id, bytes),
           });
-          const getBytesSent = trackBytesSent(res);
-          const pipe = promisify(pipeline);
-          try {
-            await pipe(rangeResult.stream, res);
-          } finally {
-            if (rangeResult.accessLogId) {
-              await this.fileService.updateAccessLogResponseSize(rangeResult.accessLogId, getBytesSent());
-            }
-          }
           return;
         }
         // Range 不支持（未缓存）→ 回退全量预览
@@ -370,36 +345,23 @@ export class FileController {
 
       const result = await this.fileService.getPreviewStream(id, user, clientIp);
 
-      res.set({
-        'Content-Type': sanitizePreviewContentType(result.contentType),
-        'Content-Disposition': buildContentDisposition('inline', result.filename),
-        'Content-Length': result.size.toString(),
-        'Accept-Ranges': rangeHeader ? 'none' : 'bytes',
-        'Cache-Control': 'private, no-cache',
-        'X-Content-Type-Options': 'nosniff',
-        'Referrer-Policy': 'no-referrer',
+      await this.streamResponder.send({
+        res,
+        headers: {
+          'Content-Type': sanitizePreviewContentType(result.contentType),
+          'Content-Disposition': buildContentDisposition('inline', result.filename),
+          'Content-Length': result.size.toString(),
+          'Accept-Ranges': rangeHeader ? 'none' : 'bytes',
+          'Cache-Control': 'private, no-cache',
+          'X-Content-Type-Options': 'nosniff',
+          'Referrer-Policy': 'no-referrer',
+        },
+        stream: result.stream,
+        accessLogId: result.accessLogId,
+        updateAccessLog: (id, bytes) => this.fileService.updateAccessLogResponseSize(id, bytes),
       });
-
-      const getBytesSent = trackBytesSent(res);
-      const pipe = promisify(pipeline);
-      try {
-        await pipe(result.stream, res);
-      } finally {
-        if (result.accessLogId) {
-          await this.fileService.updateAccessLogResponseSize(result.accessLogId, getBytesSent());
-        }
-      }
     } catch (error) {
-      const message = error instanceof Error ? error.message : '预览失败';
-      const status = (error as { status?: number }).status || 500;
-      if (!res.headersSent) {
-        if (error instanceof RangeNotSatisfiableException) {
-          res.set('Content-Range', `bytes */${error.total}`);
-        }
-        res.status(status).json({ code: 1, message });
-      } else if (!res.destroyed) {
-        res.destroy(error instanceof Error ? error : new Error(message));
-      }
+      this.streamResponder.handleError(res, error, '预览失败', req);
     }
   }
 
@@ -457,7 +419,7 @@ export class FileController {
       const message = error instanceof Error ? error.message : '预览失败';
       const status = (error as { status?: number }).status || 500;
       if (!res.headersSent) {
-        res.status(status).json({ code: 1, message });
+        res.status(status).json({ code: status, message, data: null });
       }
     }
   }
@@ -509,7 +471,7 @@ export class FileController {
       const message = error instanceof Error ? error.message : '预览失败';
       const status = (error as { status?: number }).status || 500;
       if (!res.headersSent) {
-        res.status(status).json({ code: 1, message });
+        res.status(status).json({ code: status, message, data: null });
       }
     }
   }
@@ -566,26 +528,23 @@ export class FileController {
           noCacheRequested ? { noCache: true } : undefined,
         );
         if (rangeResult) {
-          res.status(206);
-          res.set({
-            'Content-Type': rangeResult.contentType,
-            'Content-Disposition': buildContentDisposition('attachment', rangeResult.filename),
-            'Content-Length': rangeResult.size.toString(),
-            'Content-Range': `bytes ${rangeResult.start}-${rangeResult.end}/${rangeResult.total}`,
-            'Accept-Ranges': 'bytes',
-            'Cache-Control': 'private, no-cache',
-            'X-Content-Type-Options': 'nosniff',
-            'Referrer-Policy': 'no-referrer',
+          await this.streamResponder.send({
+            res,
+            status: 206,
+            range: rangeResult,
+            headers: {
+              'Content-Type': rangeResult.contentType,
+              'Content-Disposition': buildContentDisposition('attachment', rangeResult.filename),
+              'Content-Length': rangeResult.size.toString(),
+              'Accept-Ranges': 'bytes',
+              'Cache-Control': 'private, no-cache',
+              'X-Content-Type-Options': 'nosniff',
+              'Referrer-Policy': 'no-referrer',
+            },
+            stream: rangeResult.stream,
+            accessLogId: rangeResult.accessLogId,
+            updateAccessLog: (id, bytes) => this.fileService.updateAccessLogResponseSize(id, bytes),
           });
-          const getBytesSent = trackBytesSent(res);
-          const pipe = promisify(pipeline);
-          try {
-            await pipe(rangeResult.stream, res);
-          } finally {
-            if (rangeResult.accessLogId) {
-              await this.fileService.updateAccessLogResponseSize(rangeResult.accessLogId, getBytesSent());
-            }
-          }
           return;
         }
         // Range 不支持（未缓存）→ 回退完整下载
@@ -596,35 +555,22 @@ export class FileController {
         noCacheRequested ? { noCache: true } : undefined,
       );
 
-      res.set({
-        'Content-Type': result.contentType,
-        'Content-Disposition': buildContentDisposition('attachment', result.filename),
-        'Content-Length': result.size.toString(),
-        'Cache-Control': 'private, no-cache',
-        'X-Content-Type-Options': 'nosniff',
-        'Referrer-Policy': 'no-referrer',
+      await this.streamResponder.send({
+        res,
+        headers: {
+          'Content-Type': result.contentType,
+          'Content-Disposition': buildContentDisposition('attachment', result.filename),
+          'Content-Length': result.size.toString(),
+          'Cache-Control': 'private, no-cache',
+          'X-Content-Type-Options': 'nosniff',
+          'Referrer-Policy': 'no-referrer',
+        },
+        stream: result.stream,
+        accessLogId: result.accessLogId,
+        updateAccessLog: (id, bytes) => this.fileService.updateAccessLogResponseSize(id, bytes),
       });
-
-      const getBytesSent = trackBytesSent(res);
-      const pipe = promisify(pipeline);
-      try {
-        await pipe(result.stream, res);
-      } finally {
-        if (result.accessLogId) {
-          await this.fileService.updateAccessLogResponseSize(result.accessLogId, getBytesSent());
-        }
-      }
     } catch (error) {
-      const message = error instanceof Error ? error.message : '下载失败';
-      const status = (error as { status?: number }).status || 500;
-      if (!res.headersSent) {
-        if (error instanceof RangeNotSatisfiableException) {
-          res.set('Content-Range', `bytes */${error.total}`);
-        }
-        res.status(status).json({ code: 1, message });
-      } else if (!res.destroyed) {
-        res.destroy(error instanceof Error ? error : new Error(message));
-      }
+      this.streamResponder.handleError(res, error, '下载失败', req);
     }
   }
 
@@ -810,7 +756,7 @@ export class FileController {
       const status = (error as { status?: number }).status || 500;
       const message = (error as Error).message || '文件不存在';
       if (!res.headersSent) {
-        res.status(status).json({ code: 1, message });
+        res.status(status).json({ code: status, message, data: null });
       }
       return;
     }

@@ -10,14 +10,11 @@ import {
   Req,
   Res,
   UseGuards,
-  BadRequestException,
   HttpException,
   HttpStatus,
 } from '@nestjs/common';
 import { Request, Response, CookieOptions } from 'express';
 import { createHash, randomBytes } from 'crypto';
-import { pipeline } from 'stream';
-import { promisify } from 'util';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { User } from '../common/entities/user.entity';
@@ -26,19 +23,11 @@ import { sanitizePreviewContentType } from '../common/utils/preview-content-type
 import { buildContentDisposition } from '../common/utils/content-disposition';
 import { RateLimitService } from '../common/services/rate-limit.service';
 import { ConfigCacheService } from '../common/services/config-cache.service';
+import { StreamResponderService } from '../common/services/stream-responder.service';
 import { ShareService } from './share.service';
-import { FileService, RangeNotSatisfiableException } from '../file/file.service';
+import { FileService } from '../file/file.service';
 import { CreateShareDto, UpdateShareDto, VerifyPasswordDto } from './share.dto';
 import { ShareTargetType } from '../common/entities/share-link.entity';
-
-/**
- * 记录 pipeline 前的已发送字节数，返回一个用于 pipeline 完成后更新日志的闭包。
- * 与 file.controller.ts 的 trackBytesSent 同原理（socket.bytesWritten 差值）。
- */
-function trackBytesSent(res: Response): () => number {
-  const startBytes = res.socket?.bytesWritten ?? 0;
-  return () => (res.socket?.bytesWritten ?? 0) - startBytes;
-}
 
 /**
  * 分享访问凭据 HttpOnly Cookie 名。
@@ -101,6 +90,7 @@ export class ShareController {
     private readonly fileService: FileService,
     private readonly rateLimitService: RateLimitService,
     private readonly configCacheService: ConfigCacheService,
+    private readonly streamResponder: StreamResponderService,
   ) {}
 
   /**
@@ -332,28 +322,21 @@ export class ShareController {
       ip,
     );
 
-    res.set({
-      'Content-Type': result.contentType,
-      // 分享下载始终用 attachment 触发浏览器原生下载 UI，不内联预览
-      'Content-Disposition': buildContentDisposition('attachment', result.filename),
-      'Content-Length': result.size.toString(),
-      'Cache-Control': 'no-store, no-cache, must-revalidate',
-      'Referrer-Policy': 'no-referrer',
-      'X-Content-Type-Options': 'nosniff',
+    await this.streamResponder.send({
+      res,
+      headers: {
+        'Content-Type': result.contentType,
+        // 分享下载始终用 attachment 触发浏览器原生下载 UI，不内联预览
+        'Content-Disposition': buildContentDisposition('attachment', result.filename),
+        'Content-Length': result.size.toString(),
+        'Cache-Control': 'no-store, no-cache, must-revalidate',
+        'Referrer-Policy': 'no-referrer',
+        'X-Content-Type-Options': 'nosniff',
+      },
+      stream: result.stream,
+      accessLogId: result.accessLogId,
+      updateAccessLog: (id, bytes) => this.fileService.updateAccessLogResponseSize(id, bytes),
     });
-
-    const pipe = promisify(pipeline);
-    try {
-      await pipe(result.stream, res);
-    } catch (err) {
-      // 头部未发送：还能返回标准错误响应
-      if (!res.headersSent) {
-        throw new BadRequestException('下载失败：' + (err as Error).message);
-      }
-      // 头部已发送：无法再改状态码，记录日志并中断响应，
-      // 让客户端感知到截断（Content-Length 与实际字节不符），而非静默吞错。
-      res.destroy(err as Error);
-    }
   }
 
   /**
@@ -385,42 +368,27 @@ export class ShareController {
 
       // 命中 Range → 206 + Content-Range；否则 200 全量
       const isRange = result.start !== undefined && result.end !== undefined && result.total !== undefined;
-      if (isRange) {
-        res.status(206);
-      }
-      res.set({
-        'Content-Type': sanitizePreviewContentType(result.contentType),
-        'Content-Disposition': buildContentDisposition('inline', result.filename),
-        'Content-Length': result.size.toString(),
-        ...(isRange ? { 'Content-Range': `bytes ${result.start}-${result.end}/${result.total}` } : {}),
-        'Accept-Ranges': rangeHeader && !isRange ? 'none' : 'bytes',
-        'Cache-Control': 'no-store, no-cache, must-revalidate',
-        'X-Content-Type-Options': 'nosniff',
-        'Referrer-Policy': 'no-referrer',
+      await this.streamResponder.send({
+        res,
+        status: isRange ? 206 : undefined,
+        range: isRange
+          ? { start: result.start!, end: result.end!, total: result.total! }
+          : undefined,
+        headers: {
+          'Content-Type': sanitizePreviewContentType(result.contentType),
+          'Content-Disposition': buildContentDisposition('inline', result.filename),
+          'Content-Length': result.size.toString(),
+          'Accept-Ranges': rangeHeader && !isRange ? 'none' : 'bytes',
+          'Cache-Control': 'no-store, no-cache, must-revalidate',
+          'X-Content-Type-Options': 'nosniff',
+          'Referrer-Policy': 'no-referrer',
+        },
+        stream: result.stream,
+        accessLogId: result.accessLogId,
+        updateAccessLog: (id, bytes) => this.fileService.updateAccessLogResponseSize(id, bytes),
       });
-
-      const getBytesSent = trackBytesSent(res);
-      const pipe = promisify(pipeline);
-      try {
-        await pipe(result.stream, res);
-      } finally {
-        // 回填实际传输字节数到访问日志（responseSize 先占位为 0）
-        if (result.accessLogId) {
-          await this.fileService.updateAccessLogResponseSize(result.accessLogId, getBytesSent());
-        }
-      }
     } catch (error) {
-      // 头部未发送：返回标准 JSON 错误；头部已发送：中断响应让客户端感知截断
-      const message = error instanceof Error ? error.message : '预览失败';
-      const status = (error as { status?: number }).status || 500;
-      if (!res.headersSent) {
-        if (error instanceof RangeNotSatisfiableException) {
-          res.set('Content-Range', `bytes */${error.total}`);
-        }
-        res.status(status).json({ code: 1, message });
-      } else if (!res.destroyed) {
-        res.destroy(error instanceof Error ? error : new Error(message));
-      }
+      this.streamResponder.handleError(res, error, '预览失败', req);
     }
   }
 

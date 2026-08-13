@@ -24,6 +24,7 @@ import { RateLimitService } from '../common/services/rate-limit.service';
 import { AuditService } from '../common/services/audit.service';
 import { UploadJobService } from './upload-job.service';
 import { FileCacheService } from './file-cache.service';
+import { ThumbnailService } from './thumbnail.service';
 import { QUEUE_NAMES } from '../jobs/bull-queue.module';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
@@ -97,6 +98,7 @@ describe('FileService - assertOverwriteTarget', () => {
         FileService,
         { provide: getRepositoryToken(File), useValue: fileRepo },
         { provide: getRepositoryToken(Folder), useValue: { findOne: jest.fn() } },
+        { provide: ThumbnailService, useValue: { deleteThumbnailsForFileId: jest.fn().mockResolvedValue(undefined) } },
         { provide: getRepositoryToken(FileAccessLog), useValue: {} },
         { provide: getRepositoryToken(BannedIP), useValue: {} },
         { provide: getRepositoryToken(ShareAudit), useValue: {} },
@@ -185,6 +187,7 @@ describe('FileService - createProcessingFile 覆盖分支', () => {
         FileService,
         { provide: getRepositoryToken(File), useValue: fileRepo },
         { provide: getRepositoryToken(Folder), useValue: { findOne: jest.fn() } },
+        { provide: ThumbnailService, useValue: { deleteThumbnailsForFileId: jest.fn().mockResolvedValue(undefined) } },
         { provide: getRepositoryToken(FileAccessLog), useValue: {} },
         { provide: getRepositoryToken(BannedIP), useValue: {} },
         { provide: getRepositoryToken(ShareAudit), useValue: {} },
@@ -346,6 +349,7 @@ describe('FileService - applyOverwrite', () => {
         FileService,
         { provide: getRepositoryToken(File), useValue: fileRepo },
         { provide: getRepositoryToken(Folder), useValue: { findOne: jest.fn() } },
+        { provide: ThumbnailService, useValue: { deleteThumbnailsForFileId: jest.fn().mockResolvedValue(undefined) } },
         { provide: getRepositoryToken(FileAccessLog), useValue: {} },
         { provide: getRepositoryToken(BannedIP), useValue: {} },
         { provide: getRepositoryToken(ShareAudit), useValue: {} },
@@ -446,7 +450,7 @@ describe('FileService - access policy branches', () => {
       fileRepo, { findOne: jest.fn() } as any, {} as any, bannedRepo, {} as any, {} as any,
       {} as any, { get: jest.fn() } as any, {} as any,
       { get: jest.fn(async (_key: string, fallback: string) => fallback) } as any,
-      rateLimit, {} as any, audit, {} as any, {} as any,
+      rateLimit, {} as any, audit, {} as any, {} as any, {} as any,
     );
   });
 

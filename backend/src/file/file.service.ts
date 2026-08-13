@@ -7,11 +7,9 @@ import { OnEvent } from '@nestjs/event-emitter';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { Readable } from 'stream';
 import { Request } from 'express';
-import { spawn } from 'child_process';
 import * as fs from 'fs';
 import { createReadStream, writeFileSync } from 'fs';
 import * as path from 'path';
-import sharp from 'sharp';
 import { fileTypeFromBuffer } from 'file-type';
 import { InjectQueue } from '@nestjs/bull';
 import { Queue } from 'bull';
@@ -29,6 +27,7 @@ import { RateLimitService } from '../common/services/rate-limit.service';
 import { AuditService } from '../common/services/audit.service';
 import { UploadJobService, UploadJob } from './upload-job.service';
 import { FileCacheService } from './file-cache.service';
+import { ThumbnailService } from './thumbnail.service';
 import * as bcrypt from 'bcryptjs';
 import { v4 as uuidv4 } from 'uuid';
 import { BCRYPT_ROUNDS } from '../common/constants/bcrypt';
@@ -61,13 +60,6 @@ export interface BatchUploadResult {
 /** 已知复合扩展名列表（优先匹配，防止 .tar.gz 被错误识别为 .gz） */
 const COMPOUND_EXTENSIONS = ['.tar.gz', '.tar.bz2', '.tar.xz'] as const;
 
-/** 视频标准封面最大宽度（FFmpeg scale 上限） */
-const VIDEO_COVER_MAX_WIDTH = 480;
-/** 高清视频封面最大宽度（前端检测到标准封面低于阈值时切换到高清接口） */
-const VIDEO_HD_COVER_MAX_WIDTH = 1280;
-/** 高清封面 WebP 质量 */
-const VIDEO_HD_COVER_QUALITY = 75;
-
 @Injectable()
 export class FileService implements OnModuleInit {
   private readonly logger = new Logger(FileService.name);
@@ -76,10 +68,6 @@ export class FileService implements OnModuleInit {
   private fileTypeFilter: string[] = [];
   private accessCountDefault = -1;
   private accessCountMax = -1;
-  private readonly thumbnailDir: string;
-  /** 同一进程内按文件合并缩略图生成，避免在线请求、上传回调和启动扫描竞写。 */
-  private readonly thumbnailBuilds = new Map<string, Promise<void>>();
-  private readonly videoCoverBuilds = new Map<string, Promise<void>>();
 
   constructor(
     @InjectRepository(File)
@@ -102,22 +90,19 @@ export class FileService implements OnModuleInit {
     private uploadJobService: UploadJobService,
     private auditService: AuditService,
     private fileCacheService: FileCacheService,
+    private thumbnailService: ThumbnailService,
     @InjectQueue(QUEUE_NAMES.FILE_UPLOAD)
     private fileUploadQueue: Queue,
   ) {
     this.maxFileSize = parseFileSize(this.configService.get<string>('MAX_FILE_SIZE'));
-    this.thumbnailDir = this.configService.get<string>('THUMBNAIL_DIR') || path.join(process.cwd(), 'tmp', 'thumbnails');
   }
 
   async onModuleInit() {
     await this.reloadUploadConfig();
     // 确保缩略图目录存在
-    if (!fs.existsSync(this.thumbnailDir)) {
-      fs.mkdirSync(this.thumbnailDir, { recursive: true });
-      this.logger.log(`缩略图目录已创建: ${this.thumbnailDir}`);
-    }
+    this.thumbnailService.ensureThumbnailDir();
     // 异步扫描并补齐缺失的缩略图（不阻塞启动）
-    this.syncMissingThumbnails().catch(err => {
+    this.thumbnailService.syncMissingThumbnails().catch(err => {
       this.logger.warn(`缩略图同步失败: ${err.message}`);
     });
   }
@@ -240,10 +225,7 @@ export class FileService implements OnModuleInit {
     // C-05 修复：必须等待 invalidate 完成（含在途 build/spool 会话终结）后再返回，
     // 禁止 fire-and-forget——否则旧缓存可能在新元数据生效后仍被读取，造成「旧内容配新元数据」。
     await this.fileCacheService.invalidate(target.id);
-    await Promise.all([
-      fs.promises.unlink(path.join(this.thumbnailDir, `${target.id}.webp`)).catch(() => {}),
-      fs.promises.unlink(path.join(this.thumbnailDir, `${target.id}.video.webp`)).catch(() => {}),
-    ]);
+    await this.thumbnailService.deleteThumbnailsForFileId(target.id);
 
     this.auditService.log({
       action: 'file_overwrite',
@@ -535,10 +517,7 @@ export class FileService implements OnModuleInit {
           target.telegramFileId = tempId;
           target.telegramFilePath = '';
           target.thumbnailPath = null;
-          await Promise.all([
-            fs.promises.unlink(path.join(this.thumbnailDir, `${target.id}.webp`)).catch(() => {}),
-            fs.promises.unlink(path.join(this.thumbnailDir, `${target.id}.video.webp`)).catch(() => {}),
-          ]);
+          await this.thumbnailService.deleteThumbnailsForFileId(target.id);
           await this.fileRepository.save(target);
           // 审计覆盖意图（status=processing，真实引用由 processor 落库后另有流程记录）
           this.auditService.log({
@@ -944,7 +923,7 @@ export class FileService implements OnModuleInit {
    * 供前端在视频预览前判断冷资源单连接策略：未缓存时不走动态分片，
    * 播放期间钳制 seek；缓存完成后恢复 Range 跳转。
    */
-  async getCacheStatus(id: string, user: User): Promise<{ status: 'cached' | 'cold' | 'unknown'; cached: boolean }> {
+  async getCacheStatus(id: string, user: User): Promise<{ status: 'cached' | 'cold'; cached: boolean }> {
     const file = await this.fileRepository.findOne({
       where: { id, isDeleted: false },
     });
@@ -1494,10 +1473,10 @@ export class FileService implements OnModuleInit {
     await this.assertFileReadable(file, user);
 
     // 优先读取本地缩略图
-    let localThumb = await this.readLocalThumbnail(file);
+    let localThumb = await this.thumbnailService.readLocalThumbnail(file);
     if (!localThumb && file.mimeType?.startsWith('video/')) {
       const inferredCover = `${file.id}.video.webp`;
-      const inferredPath = path.join(this.thumbnailDir, inferredCover);
+      const inferredPath = this.thumbnailService.getInferredThumbnailPath(file.id, 'video');
       if (fs.existsSync(inferredPath)) {
         file.thumbnailPath = inferredCover;
         await this.fileRepository.save(file);
@@ -1514,8 +1493,8 @@ export class FileService implements OnModuleInit {
     // 缩略图文件缺失（如 tmp/thumbnails 重建后丢失）→ 同步重新生成
     // 等待生成完成，避免返回源文件（既浪费带宽也违反缩略图设计意图）
     if (file.mimeType?.startsWith('image/')) {
-      await this.generateAndSaveThumbnail(file);
-      const regenerated = await this.readLocalThumbnail(file);
+      await this.thumbnailService.generateAndSaveThumbnail(file);
+      const regenerated = await this.thumbnailService.readLocalThumbnail(file);
       if (regenerated) {
         return {
           stream: Readable.from(regenerated),
@@ -1523,8 +1502,8 @@ export class FileService implements OnModuleInit {
         };
       }
     } else if (file.mimeType?.startsWith('video/')) {
-      await this.generateAndSaveVideoCover(file);
-      const regenerated = await this.readLocalThumbnail(file);
+      await this.thumbnailService.generateAndSaveVideoCover(file);
+      const regenerated = await this.thumbnailService.readLocalThumbnail(file);
       if (regenerated) {
         return {
           stream: Readable.from(regenerated),
@@ -1551,8 +1530,7 @@ export class FileService implements OnModuleInit {
     const isVideo = file.mimeType?.startsWith('video/');
     if (!isImage && !isVideo) throw new BadRequestException('仅图片和视频支持缩略图');
 
-    const expectedName = isVideo ? `${file.id}.video.webp` : `${file.id}.webp`;
-    const expectedPath = path.join(this.thumbnailDir, expectedName);
+    const expectedPath = this.thumbnailService.getInferredThumbnailPath(file.id, isVideo ? 'video' : 'image');
     try {
       const buffer = await fs.promises.readFile(expectedPath);
       return { stream: Readable.from(buffer), contentType: 'image/webp' };
@@ -1579,14 +1557,14 @@ export class FileService implements OnModuleInit {
       throw new BadRequestException('仅视频支持高清封面');
     }
 
-    let buffer = await this.readHdLocalThumbnail(file);
+    let buffer = await this.thumbnailService.readHdLocalThumbnail(file);
     if (!buffer) {
-      await this.generateAndSaveHdVideoCover(file);
-      buffer = await this.readHdLocalThumbnail(file);
+      await this.thumbnailService.generateAndSaveHdVideoCover(file);
+      buffer = await this.thumbnailService.readHdLocalThumbnail(file);
     }
     if (buffer) return { stream: Readable.from(buffer), contentType: 'image/webp' };
 
-    const standard = await this.readLocalThumbnail(file);
+    const standard = await this.thumbnailService.readLocalThumbnail(file);
     if (standard) return { stream: Readable.from(standard), contentType: 'image/webp' };
     throw new NotFoundException('视频封面尚未生成');
   }
@@ -1606,297 +1584,54 @@ export class FileService implements OnModuleInit {
       throw new BadRequestException('仅视频支持高清封面');
     }
 
-    let buffer = await this.readHdLocalThumbnail(file);
+    let buffer = await this.thumbnailService.readHdLocalThumbnail(file);
     if (!buffer) {
-      await this.generateAndSaveHdVideoCover(file);
-      buffer = await this.readHdLocalThumbnail(file);
+      await this.thumbnailService.generateAndSaveHdVideoCover(file);
+      buffer = await this.thumbnailService.readHdLocalThumbnail(file);
     }
     if (buffer) return { stream: Readable.from(buffer), contentType: 'image/webp' };
 
-    const standard = await this.readLocalThumbnail(file);
+    const standard = await this.thumbnailService.readLocalThumbnail(file);
     if (standard) return { stream: Readable.from(standard), contentType: 'image/webp' };
     throw new NotFoundException('视频封面尚未生成');
   }
 
   /**
-   * 批量获取缩略图 base64（合并为一次 API 调用，消除浏览器连接池瓶颈）
-   * 返回 { [fileId]: 'data:image/...;base64,...' }
+   * 生成视频标准封面（委托 ThumbnailService，保持公开 API 不变）。
    */
   async generateAndSaveVideoCover(
     file: File,
     options: { sourcePath?: string; sourceBuffer?: Buffer; allowRemoteSource?: boolean } = {},
   ): Promise<void> {
-    if (!file.mimeType?.startsWith('video/')) return;
-    const existing = this.videoCoverBuilds.get(file.id);
-    if (existing) return existing;
-
-    const build = this.buildVideoCover(file, options).finally(() => {
-      if (this.videoCoverBuilds.get(file.id) === build) this.videoCoverBuilds.delete(file.id);
-    });
-    this.videoCoverBuilds.set(file.id, build);
-    return build;
-  }
-
-  private async buildVideoCover(
-    file: File,
-    options: { sourcePath?: string; sourceBuffer?: Buffer; allowRemoteSource?: boolean },
-  ): Promise<void> {
-    const coverFilename = `${file.id}.video.webp`;
-    const coverPath = path.join(this.thumbnailDir, coverFilename);
-    if (fs.existsSync(coverPath)) {
-      if (file.thumbnailPath !== coverFilename) {
-        file.thumbnailPath = coverFilename;
-        await this.fileRepository.save(file);
-      }
-      return;
-    }
-
-    const buildId = uuidv4();
-    const tmpSource = path.join(this.thumbnailDir, `${file.id}.${buildId}.video.tmp`);
-    const tmpCover = path.join(this.thumbnailDir, `${file.id}.${buildId}.cover.tmp.webp`);
-    let sourcePath = options.sourcePath && fs.existsSync(options.sourcePath)
-      ? options.sourcePath
-      : this.fileCacheService.getCachedPath(file.id);
-    try {
-      if (!sourcePath && options.sourceBuffer?.length) {
-        await fs.promises.writeFile(tmpSource, options.sourceBuffer);
-        sourcePath = tmpSource;
-      }
-      if (!sourcePath && options.allowRemoteSource) {
-        const { stream } = await this.telegramService.getFileStream(file.telegramFileId || file.filename);
-        const { pipeline } = await import('stream/promises');
-        await pipeline(stream, fs.createWriteStream(tmpSource));
-        sourcePath = tmpSource;
-      }
-      if (!sourcePath) return; // 页面封面请求不得触发整视频回源
-      const resolvedSourcePath: string = sourcePath;
-
-      await this.extractVideoFrame(resolvedSourcePath, tmpCover, VIDEO_COVER_MAX_WIDTH, 65);
-      await fs.promises.rename(tmpCover, coverPath);
-      file.thumbnailPath = coverFilename;
-      await this.fileRepository.save(file);
-    } catch (error) {
-      this.logger.warn(`视频封面生成失败 id=${file.id}: ${(error as Error).message}`);
-    } finally {
-      await Promise.all([
-        fs.promises.unlink(tmpSource).catch(() => {}),
-        fs.promises.unlink(tmpCover).catch(() => {}),
-      ]);
-    }
+    return this.thumbnailService.generateAndSaveVideoCover(file, options);
   }
 
   /**
-   * 抽取视频单帧为 WebP（标准/高清封面共用）。
-   * 输出目录须由调用方保证存在；失败时抛出 FFmpeg stderr 摘要。
-   */
-  private async extractVideoFrame(
-    sourcePath: string,
-    outputPath: string,
-    scaleWidth: number,
-    quality: number,
-  ): Promise<void> {
-    await new Promise<void>((resolve, reject) => {
-      const ffmpeg = spawn(process.env.FFMPEG_PATH || 'ffmpeg', [
-        '-hide_banner', '-loglevel', 'error', '-y',
-        '-ss', '1', '-i', sourcePath,
-        '-frames:v', '1', '-vf', `scale=${scaleWidth}:-2:force_original_aspect_ratio=decrease`,
-        '-c:v', 'libwebp', '-quality', String(quality), '-f', 'webp', outputPath,
-      ], { windowsHide: true });
-      let stderr = '';
-      ffmpeg.stderr.on('data', chunk => { stderr = (stderr + chunk.toString()).slice(-2048); });
-      ffmpeg.once('error', reject);
-      ffmpeg.once('close', code => code === 0 ? resolve() : reject(new Error(stderr || `FFmpeg 退出码 ${code}`)));
-    });
-  }
-
-  /**
-   * 生成高清视频封面（按文件合并去重）。
-   * 仅从本地正式缓存提取，绝不因封面请求触发整视频远端回源；冷资源直接跳过。
+   * 生成高清视频封面（委托 ThumbnailService，保持公开 API 不变）。
    */
   async generateAndSaveHdVideoCover(file: File): Promise<void> {
-    if (!file.mimeType?.startsWith('video/')) return;
-    const key = `hd:${file.id}`;
-    const existing = this.videoCoverBuilds.get(key);
-    if (existing) return existing;
-
-    const build = this.buildHdVideoCover(file).finally(() => {
-      if (this.videoCoverBuilds.get(key) === build) this.videoCoverBuilds.delete(key);
-    });
-    this.videoCoverBuilds.set(key, build);
-    return build;
-  }
-
-  private async buildHdVideoCover(file: File): Promise<void> {
-    const coverFilename = `${file.id}.video.hd.webp`;
-    const coverPath = path.join(this.thumbnailDir, coverFilename);
-    if (fs.existsSync(coverPath)) return;
-
-    const sourcePath = this.fileCacheService.getCachedPath(file.id);
-    if (!sourcePath) return; // 冷资源不生成高清封面（避免整视频回源）
-
-    const buildId = uuidv4();
-    const tmpCover = path.join(this.thumbnailDir, `${file.id}.${buildId}.hd-cover.tmp.webp`);
-    try {
-      await this.extractVideoFrame(sourcePath, tmpCover, VIDEO_HD_COVER_MAX_WIDTH, VIDEO_HD_COVER_QUALITY);
-      await fs.promises.rename(tmpCover, coverPath);
-    } catch (error) {
-      this.logger.warn(`高清封面生成失败 id=${file.id}: ${(error as Error).message}`);
-    } finally {
-      await fs.promises.unlink(tmpCover).catch(() => {});
-    }
+    return this.thumbnailService.generateAndSaveHdVideoCover(file);
   }
 
   /**
-   * 从 Telegram 下载原图，用 sharp 生成十分之一分辨率缩略图，存到本地。
-   * 成功后将缩略图路径写入 File 实体。
+   * 生成图片缩略图（委托 ThumbnailService，保持公开 API 不变）。
    */
   async generateAndSaveThumbnail(file: File): Promise<void> {
-    if (!file.mimeType?.startsWith('image/')) return;
-
-    const activeBuild = this.thumbnailBuilds.get(file.id);
-    if (activeBuild) return activeBuild;
-
-    const build = this.buildAndSaveThumbnail(file).finally(() => {
-      if (this.thumbnailBuilds.get(file.id) === build) {
-        this.thumbnailBuilds.delete(file.id);
-      }
-    });
-    this.thumbnailBuilds.set(file.id, build);
-    return build;
-  }
-
-  private async buildAndSaveThumbnail(file: File): Promise<void> {
-    if (file.thumbnailPath) {
-      const fullPath = path.join(this.thumbnailDir, file.thumbnailPath);
-      if (fs.existsSync(fullPath)) return;
-    }
-
-    // 唯一临时文件 + 原子发布，避免并发任务或异常退出留下半成品。
-    const buildId = uuidv4();
-    const tmpSource = path.join(this.thumbnailDir, `${file.id}.${buildId}.src.tmp`);
-    const tmpThumbnail = path.join(this.thumbnailDir, `${file.id}.${buildId}.webp.tmp`);
-    const thumbFilename = `${file.id}.webp`;
-    const thumbPath = path.join(this.thumbnailDir, thumbFilename);
-    try {
-      const { stream } = await this.telegramService.getFileStream(file.telegramFileId || file.filename);
-      const { pipeline } = await import('stream/promises');
-      await pipeline(stream, fs.createWriteStream(tmpSource));
-
-      const metadata = await sharp(tmpSource).metadata();
-      const width = metadata.width || 0;
-      const height = metadata.height || 0;
-      if (width <= 0 || height <= 0) throw new Error('无法读取图片尺寸');
-
-      // 小图也统一生成 WebP，持久化完成状态，避免每次请求及每次启动重复回源探测。
-      const isSmallImage = width < 300 && height < 300;
-      const thumbWidth = isSmallImage ? width : Math.max(16, Math.round(width / 10));
-      const thumbHeight = isSmallImage ? height : Math.max(16, Math.round(height / 10));
-
-      await sharp(tmpSource)
-        .resize(thumbWidth, thumbHeight, { fit: 'inside', withoutEnlargement: true })
-        .webp({ quality: 60 })
-        .toFile(tmpThumbnail);
-      await fs.promises.rename(tmpThumbnail, thumbPath);
-
-      file.thumbnailPath = thumbFilename;
-      await this.fileRepository.save(file);
-    } catch (err) {
-      this.logger.warn(`缩略图生成失败 id=${file.id}: ${(err as Error).message}`);
-    } finally {
-      await Promise.all([
-        fs.promises.unlink(tmpSource).catch(() => {}),
-        fs.promises.unlink(tmpThumbnail).catch(() => {}),
-      ]);
-    }
+    return this.thumbnailService.generateAndSaveThumbnail(file);
   }
 
   /**
-   * 启动时扫描数据库，为所有图片/视频补齐缩略图或封面。
-   * 视频允许在后台实时回源生成；串行处理避免启动瞬间占满 Telegram 与 FFmpeg。
+   * 启动扫描补齐缺失缩略图（委托 ThumbnailService，保持公开 API 不变）。
    */
   async syncMissingThumbnails(): Promise<void> {
-    const batchSize = 25;
-    let lastId: string | null = null;
-    let totalProcessed = 0;
-
-    // 使用主键游标遍历全部媒体，而不是只查 thumbnailPath=NULL：
-    // 数据库路径存在但磁盘产物丢失时同样需要重新生成。
-    // eslint-disable-next-line no-constant-condition
-    while (true) {
-      const query = this.fileRepository
-        .createQueryBuilder('file')
-        .select(['file.id', 'file.mimeType', 'file.telegramFileId', 'file.filename', 'file.thumbnailPath'])
-        .where('file.isDeleted = false')
-        .andWhere('(file.mimeType LIKE :imagePrefix OR file.mimeType LIKE :videoPrefix)', {
-          imagePrefix: 'image/%',
-          videoPrefix: 'video/%',
-        })
-        .orderBy('file.id', 'ASC')
-        .take(batchSize);
-      if (lastId) query.andWhere('file.id > :lastId', { lastId });
-      const files = await query.getMany();
-
-      if (files.length === 0) break;
-      for (const file of files) {
-        const expectedName = file.mimeType.startsWith('video/') ? `${file.id}.video.webp` : `${file.id}.webp`;
-        const expectedPath = path.join(this.thumbnailDir, expectedName);
-        if (!fs.existsSync(expectedPath)) {
-          if (file.mimeType.startsWith('video/')) {
-            await this.generateAndSaveVideoCover(file, { allowRemoteSource: true });
-          } else {
-            await this.generateAndSaveThumbnail(file);
-          }
-          totalProcessed++;
-        } else if (file.thumbnailPath !== expectedName) {
-          file.thumbnailPath = expectedName;
-          await this.fileRepository.save(file);
-        }
-      }
-      lastId = files[files.length - 1].id;
-      await new Promise<void>(resolve => setImmediate(resolve));
-    }
-
-    if (totalProcessed > 0) {
-      this.logger.log(`媒体缩略图同步完成: 处理了 ${totalProcessed} 个缺失产物`);
-    }
+    return this.thumbnailService.syncMissingThumbnails();
   }
 
   /**
-   * 删除本地缩略图文件。
+   * 删除本地缩略图文件（委托 ThumbnailService，保持公开 API 不变）。
    */
-  private deleteLocalThumbnail(file: File): void {
-    if (!file.thumbnailPath) return;
-    const fullPath = path.join(this.thumbnailDir, file.thumbnailPath);
-    try {
-      if (fs.existsSync(fullPath)) fs.unlinkSync(fullPath);
-    } catch (err) {
-      this.logger.warn(`删除缩略图文件失败: ${fullPath}, ${(err as Error).message}`);
-    }
-  }
-
-  /**
-   * 读取本地缩略图文件内容（异步，避免 readFileSync 阻塞事件循环）。
-   */
-  private async readLocalThumbnail(file: File): Promise<Buffer | null> {
-    if (!file.thumbnailPath) return null;
-    const fullPath = path.join(this.thumbnailDir, file.thumbnailPath);
-    try {
-      return await fs.promises.readFile(fullPath);
-    } catch {
-      // 文件不存在或读取失败
-      return null;
-    }
-  }
-
-  /** 读取已生成的高清视频封面文件内容，不存在返回 null。 */
-  private async readHdLocalThumbnail(file: File): Promise<Buffer | null> {
-    const coverName = `${file.id}.video.hd.webp`;
-    const fullPath = path.join(this.thumbnailDir, coverName);
-    try {
-      return await fs.promises.readFile(fullPath);
-    } catch {
-      return null;
-    }
+  deleteLocalThumbnail(file: File): void {
+    this.thumbnailService.deleteLocalThumbnail(file);
   }
 
 

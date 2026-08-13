@@ -499,7 +499,7 @@ import { useAuthStore, api } from '../../stores/auth';
 import { getErrorMessage } from '../../utils/error';
 import { formatSize, formatDate } from '@/utils/format';
 import { triggerBrowserDownload } from '@/utils/download';
-import { useCursorPagination } from '../../composables/useCursorPagination';
+import { useFileListQuery } from '../../composables/useFileListQuery';
 import { useMobile } from '../../composables/useMobile';
 import UploadModal from '../../components/UploadModal.vue';
 import { collectFromDrop } from '../../utils/folder-traverse';
@@ -529,7 +529,28 @@ const thumbnailContext = computed(() => `u:${authStore.user?.id ?? ''}`);
 const router = useRouter();
 const route = useRoute();
 const { isPageVisible } = usePageVisibility();
-const search = ref((route.query.search as string) || '');
+
+/** 查询域（搜索 / 排序 / 标签筛选 / 游标加载 / URL 同步） */
+const {
+  search,
+  sortBy,
+  sortOrder,
+  selectedTagIds,
+  displayFiles,
+  hasMore,
+  cursorLoading,
+  scrollSentinel,
+  toggleSort,
+  handleSearch,
+  handleClearSearch,
+  refetchFiles,
+  applyFilters,
+  addTagFilter,
+  removeTagFilter,
+  clearTagFilters,
+  handleTagManagerFilter,
+} = useFileListQuery({ fileStore, folderStore, route, router });
+
 const showUploadModal = ref(false);
 const isDraggedOver = ref(false);
 const markdownResult = ref('');
@@ -537,11 +558,6 @@ const selectedFileIds = ref<string[]>([]);
 const dropFiles = ref<File[]>([]);
 /** 页面级拖拽采集结果（含目录结构），转发给上传弹窗处理，避免双重入队 */
 const dropCollected = ref<DropCollectResult | null>(null);
-const sortBy = ref<string>(route.query.sortBy as string || '');
-const sortOrder = ref<string>(route.query.sortOrder as string || '');
-const selectedTagIds = ref<string[]>(
-  (route.query.tagIds as string || '').split(',').filter(Boolean)
-);
 const showTagManager = ref(false);
 const tagEditorVisible = ref(false);
 const batchTagDialog = reactive({
@@ -629,11 +645,6 @@ function buildMediaPlaylist(kind: MediaSessionItem['kind']): MediaSessionItem[] 
 // ============ 文件重命名弹窗状态 ============
 const showRenameFileDialog = ref(false);
 const renameTargetFile = ref<FileItem | null>(null);
-
-/** 把 folderStore.currentFolderId (null | uuid) 转换为 API 期望的字符串 */
-const currentFolderIdForApi = computed(() => {
-  return folderStore.currentFolderId === null ? 'root' : folderStore.currentFolderId;
-});
 
 /**
  * 用户点击地址栏路径、双击/右键打开文件夹时触发。
@@ -971,34 +982,6 @@ function clearSelection() {
   selectedFileIds.value = [];
 }
 
-// ============ 排序（自定义表头） ============
-function toggleSort(field: string) {
-  if (sortBy.value === field) {
-    sortOrder.value = sortOrder.value === 'DESC' ? 'ASC' : 'DESC';
-  } else {
-    sortBy.value = field;
-    sortOrder.value = field === 'createdAt' ? 'DESC' : 'ASC';
-  }
-  refetchFiles();
-}
-
-// 无限滚动每批加载条数（不再提供分页，固定批次）
-const BATCH_SIZE = 20;
-
-// 游标无限滚动 composable
-const {
-  hasMore,
-  loading: cursorLoading,
-  loadMore,
-  reset: resetCursor,
-} = useCursorPagination<FileItem>();
-
-// 滚动哨兵 ref
-const scrollSentinel = ref<HTMLElement | null>(null);
-let scrollObserver: IntersectionObserver | null = null;
-
-const displayFiles = computed(() => fileStore.files);
-
 const isAdmin = computed(() => {
   const role = authStore.user?.role || fileStore.currentUserRole;
   return role === 'admin' || role === 'super_admin';
@@ -1269,40 +1252,6 @@ function getTagName(tagId: string): string {
   return tagStore.tags.find(t => t.id === tagId)?.name || tagId;
 }
 
-function addTagFilter(tagId: string) {
-  if (!selectedTagIds.value.includes(tagId)) {
-    selectedTagIds.value = [...selectedTagIds.value, tagId];
-    applyFilters();
-  }
-}
-
-function handleTagManagerFilter(tagId: string) {
-  if (selectedTagIds.value.includes(tagId)) {
-    removeTagFilter(tagId);
-  } else {
-    addTagFilter(tagId);
-  }
-}
-
-function removeTagFilter(tagId: string) {
-  selectedTagIds.value = selectedTagIds.value.filter(id => id !== tagId);
-  applyFilters();
-}
-
-function clearTagFilters() {
-  selectedTagIds.value = [];
-  applyFilters();
-}
-
-/** 统一的重新获取文件列表（无限滚动：从头加载） */
-async function refetchFiles() {
-  await loadInitialFiles();
-}
-
-function applyFilters() {
-  refetchFiles();
-}
-
 function openTagEditor(file: { id: string; tags?: { id: string; name: string; color: string }[] }) {
   tagEditorFileId.value = file.id;
   tagEditorFileTags.value = file.tags || [];
@@ -1365,86 +1314,6 @@ watch(isPageVisible, (visible) => {
     return;
   }
   flushUploadRefresh();
-});
-
-function handleSearch() {
-  refetchFiles();
-}
-
-function handleClearSearch() {
-  search.value = '';
-  refetchFiles();
-}
-
-// ==== 无限滚动加载逻辑（唯一加载方式，不再分页） ====
-// 用「页码」作为游标驱动 loadMore：偏移分页支持自定义排序，
-// 既保留排序/搜索/标签能力，又提供无限滚动体验。
-let fileListGeneration = 0;
-
-async function loadInitialFiles() {
-  fileListGeneration++;
-  resetCursor();
-  fileStore.replaceFiles([]);
-  await loadMoreFiles();
-}
-
-async function loadMoreFiles() {
-  if (!hasMore.value) return;
-  const generation = fileListGeneration;
-  await loadMore(async (cursor, signal) => {
-    const page = cursor ? parseInt(cursor, 10) : 1;
-    const tagIds = selectedTagIds.value.length > 0 ? selectedTagIds.value : undefined;
-    try {
-      const result = await fileStore.fetchFilesPage(
-        page,
-        BATCH_SIZE,
-        search.value || undefined,
-        sortBy.value || undefined,
-        sortOrder.value || undefined,
-        tagIds,
-        currentFolderIdForApi.value,
-        signal,
-      );
-      // 即使底层请求未遵守 AbortSignal，也禁止旧筛选/目录请求污染当前列表。
-      if (generation !== fileListGeneration) {
-        return { data: [], nextCursor: cursor, hasMore: true };
-      }
-      fileStore.appendFiles(result.files);
-      fileStore.total = result.total;
-      const loadedAll = fileStore.files.length >= result.total || result.files.length === 0;
-      return {
-        data: result.files,
-        nextCursor: loadedAll ? null : String(page + 1),
-        hasMore: !loadedAll,
-      };
-    } catch (err) {
-      const e = err as { name?: string; code?: string };
-      if (e.name === 'AbortError' || e.code === 'ERR_CANCELED') {
-        return { data: [], nextCursor: cursor, hasMore: true };
-      }
-      throw err;
-    }
-  });
-}
-
-/**
- * 哨兵元素变化时重新挂载 IntersectionObserver。
- * 修复无限滚动失效 Bug：切换文件夹 / 筛选时列表会先清空再重载，os-list 及其内部
- * 哨兵元素随之卸载并重建，旧 observer 仍指向已脱离 DOM 的元素而永不触发。
- * 用 watch 监听哨兵 ref，元素一变化即重新 observe，保证任何重挂载后都能继续加载。
- */
-watch(scrollSentinel, (el) => {
-  if (scrollObserver) { scrollObserver.disconnect(); scrollObserver = null; }
-  if (!el) return;
-  scrollObserver = new IntersectionObserver(
-    (entries) => {
-      if (entries[0].isIntersecting) {
-        loadMoreFiles();
-      }
-    },
-    { rootMargin: '600px' },
-  );
-  scrollObserver.observe(el);
 });
 
 async function handleAccessTypeChange(id: string, accessType: string) {
@@ -1605,18 +1474,6 @@ async function confirmBatchTags() {
   applyFilters();
 }
 
-// 同步搜索、排序、标签到 URL 查询参数（无限滚动，不再同步分页参数）
-// 注意：replace 时必须保留 folder 参数，否则搜索/排序会丢失当前目录
-watch([search, sortBy, sortOrder, selectedTagIds], ([newSearch, newSortBy, newSortOrder, newTagIds]) => {
-  const query: Record<string, string> = {};
-  if (newSearch) query.search = newSearch;
-  if (newSortBy) query.sortBy = newSortBy;
-  if (newSortOrder) query.sortOrder = newSortOrder;
-  if (newTagIds && newTagIds.length > 0) query.tagIds = newTagIds.join(',');
-  if (folderStore.currentFolderId) query.folder = folderStore.currentFolderId;
-  router.replace({ query });
-}, { flush: 'post' });
-
 onMounted(async () => {
   try { await tagStore.fetchTags(); } catch { /* 标签加载失败不阻塞页面 */ }
   try { await folderStore.fetchTree(); } catch { /* 文件夹树加载失败不阻塞页面 */ }
@@ -1624,7 +1481,6 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
-  if (scrollObserver) { scrollObserver.disconnect(); scrollObserver = null; }
   if (dragLeaveTimeout) { clearTimeout(dragLeaveTimeout); dragLeaveTimeout = null; }
   if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; }
   if (uploadedRefetchTimer) { clearTimeout(uploadedRefetchTimer); uploadedRefetchTimer = null; }
