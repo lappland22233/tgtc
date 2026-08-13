@@ -17,6 +17,7 @@ import { Folder } from '../common/entities/folder.entity';
 import { FileAccessLog } from '../common/entities/file-access-log.entity';
 import { BannedIP } from '../common/entities/banned-ip.entity';
 import { ShareAudit } from '../common/entities/share-audit.entity';
+import { ShareLink } from '../common/entities/share-link.entity';
 import { TelegramService } from '../telegram/telegram.service';
 import { ConfigCacheService } from '../common/services/config-cache.service';
 import { RateLimitService } from '../common/services/rate-limit.service';
@@ -85,7 +86,11 @@ describe('FileService - assertOverwriteTarget', () => {
       manager: { transaction: jest.fn(), query: jest.fn() },
     };
     audit = { log: jest.fn(), logAwait: jest.fn() };
-    fileCache = { invalidate: jest.fn(), cacheFileFromPath: jest.fn().mockResolvedValue(undefined), isNoCacheMode: jest.fn().mockReturnValue(false) };
+    fileCache = {
+      invalidate: jest.fn().mockResolvedValue(undefined),
+      cacheFileFromPath: jest.fn().mockResolvedValue(undefined),
+      isNoCacheMode: jest.fn().mockReturnValue(false),
+    };
 
     const moduleRef: TestingModule = await Test.createTestingModule({
       providers: [
@@ -95,6 +100,7 @@ describe('FileService - assertOverwriteTarget', () => {
         { provide: getRepositoryToken(FileAccessLog), useValue: {} },
         { provide: getRepositoryToken(BannedIP), useValue: {} },
         { provide: getRepositoryToken(ShareAudit), useValue: {} },
+        { provide: getRepositoryToken(ShareLink), useValue: {} },
         { provide: TelegramService, useValue: {} },
         { provide: ConfigService, useValue: { get: jest.fn(() => undefined) } },
         { provide: JwtService, useValue: {} },
@@ -168,7 +174,11 @@ describe('FileService - createProcessingFile 覆盖分支', () => {
       manager: { transaction: jest.fn(), query: jest.fn() },
     };
     audit = { log: jest.fn(), logAwait: jest.fn() };
-    fileCache = { invalidate: jest.fn(), cacheFileFromPath: jest.fn().mockResolvedValue(undefined), isNoCacheMode: jest.fn().mockReturnValue(false) };
+    fileCache = {
+      invalidate: jest.fn().mockResolvedValue(undefined),
+      cacheFileFromPath: jest.fn().mockResolvedValue(undefined),
+      isNoCacheMode: jest.fn().mockReturnValue(false),
+    };
 
     const moduleRef: TestingModule = await Test.createTestingModule({
       providers: [
@@ -178,6 +188,7 @@ describe('FileService - createProcessingFile 覆盖分支', () => {
         { provide: getRepositoryToken(FileAccessLog), useValue: {} },
         { provide: getRepositoryToken(BannedIP), useValue: {} },
         { provide: getRepositoryToken(ShareAudit), useValue: {} },
+        { provide: getRepositoryToken(ShareLink), useValue: {} },
         { provide: TelegramService, useValue: {} },
         { provide: ConfigService, useValue: { get: jest.fn(() => undefined) } },
         { provide: JwtService, useValue: {} },
@@ -231,6 +242,11 @@ describe('FileService - createProcessingFile 覆盖分支', () => {
       }),
     );
     expect(audit.log).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'file_upload' }));
+    // C-05 修复：进入 processing 前必须等待旧缓存失效（不得 fire-and-forget）。
+    // invalidate 返回 pending Promise，断言其被 await（在 save 之前完成）。
+    expect(fileCache.invalidate).toHaveBeenCalledWith(targetFileId);
+    const invalidatePromise = fileCache.invalidate.mock.results[0].value;
+    expect(invalidatePromise).toBeInstanceOf(Promise);
   });
 
   it('覆盖上传时清空历史 uploadFailureReason（旧失败不残留）', async () => {
@@ -319,7 +335,11 @@ describe('FileService - applyOverwrite', () => {
       },
     };
     audit = { log: jest.fn(), logAwait: jest.fn() };
-    fileCache = { invalidate: jest.fn(), cacheFileFromPath: jest.fn().mockResolvedValue(undefined), isNoCacheMode: jest.fn().mockReturnValue(false) };
+    fileCache = {
+      invalidate: jest.fn().mockResolvedValue(undefined),
+      cacheFileFromPath: jest.fn().mockResolvedValue(undefined),
+      isNoCacheMode: jest.fn().mockReturnValue(false),
+    };
 
     const moduleRef: TestingModule = await Test.createTestingModule({
       providers: [
@@ -329,6 +349,7 @@ describe('FileService - applyOverwrite', () => {
         { provide: getRepositoryToken(FileAccessLog), useValue: {} },
         { provide: getRepositoryToken(BannedIP), useValue: {} },
         { provide: getRepositoryToken(ShareAudit), useValue: {} },
+        { provide: getRepositoryToken(ShareLink), useValue: {} },
         { provide: TelegramService, useValue: {} },
         { provide: ConfigService, useValue: { get: jest.fn(() => undefined) } },
         { provide: JwtService, useValue: {} },
@@ -422,7 +443,7 @@ describe('FileService - access policy branches', () => {
     rateLimit = { incrementCounter: jest.fn(), reset: jest.fn() };
     audit = { log: jest.fn() };
     service = new FileService(
-      fileRepo, { findOne: jest.fn() } as any, {} as any, bannedRepo, {} as any,
+      fileRepo, { findOne: jest.fn() } as any, {} as any, bannedRepo, {} as any, {} as any,
       {} as any, { get: jest.fn() } as any, {} as any,
       { get: jest.fn(async (_key: string, fallback: string) => fallback) } as any,
       rateLimit, {} as any, audit, {} as any, {} as any,

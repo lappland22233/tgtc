@@ -34,13 +34,10 @@ import { User, UserRole } from '../common/entities/user.entity';
 import { FileAccessType } from '../common/entities/file.entity';
 import { getClientIp } from '../common/utils/client-ip';
 import { sanitizePreviewContentType } from '../common/utils/preview-content-type';
+import { buildContentDisposition } from '../common/utils/content-disposition';
 import { RateLimitService } from '../common/services/rate-limit.service';
 import { ConfigCacheService } from '../common/services/config-cache.service';
 import { TagService } from '../tag/tag.service';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
-import { ShareLink, ShareLinkStatus, ShareTargetType } from '../common/entities/share-link.entity';
-import { File as FileEntity } from '../common/entities/file.entity';
 
 // Multer 层硬上限（600MB，仅防止极端 DoS；精确的动态限制由 FileService.upload() 业务层负责）
 const multerFileSize = 600 * 1024 * 1024; // 600MB
@@ -63,10 +60,6 @@ export class FileController {
     private configCacheService: ConfigCacheService,
     private tagService: TagService,
     private folderService: FolderService,
-    @InjectRepository(ShareLink)
-    private shareLinkRepository: Repository<ShareLink>,
-    @InjectRepository(FileEntity)
-    private fileRepository: Repository<FileEntity>,
   ) {}
 
   @Post('upload')
@@ -268,12 +261,16 @@ export class FileController {
           res.status(206);
           res.set({
             'Content-Type': rangeResult.contentType,
-            'Content-Disposition': `inline; filename="${encodeURIComponent(rangeResult.filename)}"`,
+            'Content-Disposition': buildContentDisposition('inline', rangeResult.filename),
             'Content-Length': rangeResult.size.toString(),
             'Content-Range': `bytes ${rangeResult.start}-${rangeResult.end}/${rangeResult.total}`,
             'Accept-Ranges': 'bytes',
-            'Cache-Control': 'public, max-age=3600, stale-while-revalidate=86400',
+            // C-01/H-03 修复：公开媒体是权限可变资源（可删除/转私有/加约束），
+            // 不保留长 TTL 公开缓存；并强制 nosniff + no-referrer + 限制性 CSP 纵深防御。
+            'Cache-Control': 'no-store',
             'X-Content-Type-Options': 'nosniff',
+            'Referrer-Policy': 'no-referrer',
+            'Content-Security-Policy': "default-src 'none'; sandbox",
           });
           const getBytesSent = trackBytesSent(res);
           const pipe = promisify(pipeline);
@@ -291,11 +288,14 @@ export class FileController {
       const result = await this.fileService.getPublicMediaStream(id, clientIp);
       res.set({
         'Content-Type': result.contentType,
-        'Content-Disposition': `inline; filename="${encodeURIComponent(result.filename)}"`,
+        'Content-Disposition': buildContentDisposition('inline', result.filename),
         'Content-Length': result.size.toString(),
         'Accept-Ranges': rangeHeader ? 'none' : 'bytes',
-        'Cache-Control': 'public, max-age=3600, stale-while-revalidate=86400',
+        // C-01/H-03 修复：同 206 分支，禁止长 TTL 缓存与凭据外泄。
+        'Cache-Control': 'no-store',
         'X-Content-Type-Options': 'nosniff',
+        'Referrer-Policy': 'no-referrer',
+        'Content-Security-Policy': "default-src 'none'; sandbox",
       });
       const getBytesSent = trackBytesSent(res);
       const pipe = promisify(pipeline);
@@ -346,12 +346,13 @@ export class FileController {
           res.status(206);
           res.set({
             'Content-Type': sanitizePreviewContentType(rangeResult.contentType),
-            'Content-Disposition': `inline; filename="${encodeURIComponent(rangeResult.filename)}"`,
+            'Content-Disposition': buildContentDisposition('inline', rangeResult.filename),
             'Content-Length': rangeResult.size.toString(),
             'Content-Range': `bytes ${rangeResult.start}-${rangeResult.end}/${rangeResult.total}`,
             'Accept-Ranges': 'bytes',
             'Cache-Control': 'private, no-cache',
             'X-Content-Type-Options': 'nosniff',
+            'Referrer-Policy': 'no-referrer',
           });
           const getBytesSent = trackBytesSent(res);
           const pipe = promisify(pipeline);
@@ -371,11 +372,12 @@ export class FileController {
 
       res.set({
         'Content-Type': sanitizePreviewContentType(result.contentType),
-        'Content-Disposition': `inline; filename="${encodeURIComponent(result.filename)}"`,
+        'Content-Disposition': buildContentDisposition('inline', result.filename),
         'Content-Length': result.size.toString(),
         'Accept-Ranges': rangeHeader ? 'none' : 'bytes',
         'Cache-Control': 'private, no-cache',
         'X-Content-Type-Options': 'nosniff',
+        'Referrer-Policy': 'no-referrer',
       });
 
       const getBytesSent = trackBytesSent(res);
@@ -567,11 +569,13 @@ export class FileController {
           res.status(206);
           res.set({
             'Content-Type': rangeResult.contentType,
-            'Content-Disposition': `attachment; filename="${encodeURIComponent(rangeResult.filename)}"`,
+            'Content-Disposition': buildContentDisposition('attachment', rangeResult.filename),
             'Content-Length': rangeResult.size.toString(),
             'Content-Range': `bytes ${rangeResult.start}-${rangeResult.end}/${rangeResult.total}`,
             'Accept-Ranges': 'bytes',
             'Cache-Control': 'private, no-cache',
+            'X-Content-Type-Options': 'nosniff',
+            'Referrer-Policy': 'no-referrer',
           });
           const getBytesSent = trackBytesSent(res);
           const pipe = promisify(pipeline);
@@ -594,9 +598,11 @@ export class FileController {
 
       res.set({
         'Content-Type': result.contentType,
-        'Content-Disposition': `attachment; filename="${encodeURIComponent(result.filename)}"`,
+        'Content-Disposition': buildContentDisposition('attachment', result.filename),
         'Content-Length': result.size.toString(),
         'Cache-Control': 'private, no-cache',
+        'X-Content-Type-Options': 'nosniff',
+        'Referrer-Policy': 'no-referrer',
       });
 
       const getBytesSent = trackBytesSent(res);
@@ -797,52 +803,15 @@ export class FileController {
   ) {
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
 
-    // 1. 查找文件，校验存在且未删除（select 包含遗留约束字段，用于懒创建 ShareLink）
-    const file = await this.fileRepository.findOne({
-      where: { id, isDeleted: false },
-      select: ['id', 'accessType', 'uploaderId', 'originalName', 'password', 'maxAccessCount', 'expiresIn', 'expiresStartAt'],
-    });
-    if (!file) {
-      res.status(404).json({ code: 1, message: '文件不存在' });
-      return;
-    }
-
-    // 2. 私有文件不允许公开访问
-    if (file.accessType !== FileAccessType.PUBLIC) {
-      res.status(403).json({ code: 1, message: '此文件为私有文件，不提供公开访问' });
-      return;
-    }
-
-    // 3. 懒创建 ShareLink（如果不存在）——复制文件的遗留约束字段
-    let shareLink = await this.shareLinkRepository.findOne({
-      where: { token: id, isDeleted: false },
-    });
-    if (!shareLink) {
-      shareLink = this.shareLinkRepository.create({
-        token: id, // 用文件 id 作为 token，确保老链接兼容
-        targetType: ShareTargetType.FILE,
-        targetId: id,
-        creatorId: file.uploaderId,
-        // 复制文件的遗留约束（Phase 2 之前通过 /files/:id/password 等端点设置的）
-        password: file.password ?? null,
-        maxAccessCount: file.maxAccessCount ?? -1,
-        expiresIn: file.expiresIn ?? null,
-        expiresStartAt: file.expiresStartAt ?? null,
-        status: ShareLinkStatus.ACTIVE,
-      });
-      try {
-        await this.shareLinkRepository.save(shareLink);
-      } catch {
-        // 并发创建时可能触发唯一约束冲突，忽略——另一个请求已创建
-        shareLink = await this.shareLinkRepository.findOne({
-          where: { token: id, isDeleted: false },
-        });
+    // 校验 + 懒创建 ShareLink 的逻辑已下沉到 FileService（Controller 不再直接访问 Repository）
+    try {
+      await this.fileService.ensureLegacyPublicShare(id);
+    } catch (error) {
+      const status = (error as { status?: number }).status || 500;
+      const message = (error as Error).message || '文件不存在';
+      if (!res.headersSent) {
+        res.status(status).json({ code: 1, message });
       }
-    }
-
-    // 重校：并发创建/即时取消等边界下 shareLink 仍可能为空，避免带着空链接重定向
-    if (!shareLink) {
-      res.status(404).json({ code: 1, message: '分享不存在或已被取消' });
       return;
     }
 

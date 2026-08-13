@@ -5,6 +5,7 @@ jest.mock('file-type', () => ({ fileTypeFromBuffer: jest.fn() }), { virtual: tru
 
 import { FileService } from './file.service';
 import { FileAccessType } from '../common/entities/file.entity';
+import { isSafePublicInlineContentType } from '../common/utils/preview-content-type';
 
 function createService(file: Record<string, unknown>) {
   const service = Object.create(FileService.prototype) as FileService;
@@ -39,6 +40,33 @@ describe('FileService public media validation', () => {
   it('rejects non-media files', async () => {
     const service = createService({ ...publicImage, mimeType: 'application/pdf' });
     await expect((service as any).getPublicMediaFile(publicImage.id)).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it.each([
+    'image/svg+xml',
+    'image/svg',
+    'text/html',
+    'application/xhtml+xml',
+    'application/xml',
+    'text/xml',
+    'application/x-javascript',
+    'text/javascript',
+  ])('rejects dangerous inline MIME: %s（C-01 持久型 XSS 阻断）', async (mime) => {
+    const service = createService({ ...publicImage, mimeType: mime });
+    await expect((service as any).getPublicMediaFile(publicImage.id)).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('rejects fake-MIME SVG（声明 image/png 但魔数为脚本型，通过扩展名一致性兜底）', () => {
+    // 模拟 magic bytes 探测结果为 svg，与声明 image/png 不一致 → 不允许 inline
+    expect(isSafePublicInlineContentType('image/png', 'svg')).toBe(false);
+  });
+
+  it('accepts consistent bitmap and audio/video MIME', () => {
+    expect(isSafePublicInlineContentType('image/png')).toBe(true);
+    expect(isSafePublicInlineContentType('image/jpeg', 'jpg')).toBe(true);
+    expect(isSafePublicInlineContentType('video/mp4', 'mp4')).toBe(true);
+    expect(isSafePublicInlineContentType('audio/mpeg', 'mp3')).toBe(true);
+    expect(isSafePublicInlineContentType('image/gif', 'svg')).toBe(false);
   });
 
   it('rejects private or constrained media files', async () => {

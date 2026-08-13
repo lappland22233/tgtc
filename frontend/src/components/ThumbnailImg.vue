@@ -56,6 +56,8 @@ let loaded = false;
 let retried = false;   // 仅重试一次，避免错误时死循环
 let unmounted = false; // 卸载后禁止再写响应式状态（异步竞态防护）
 let slotHeld = false;
+/** 代次计数：v-for 复用实例时 fileId 变化即自增，旧异步结果到达时据此丢弃（H-08 竞态防护） */
+let generation = 0;
 /** 当前持有的 Blob 缓存键（getThumbnailResource 已递增引用，需要配对 release） */
 let activeResourceKey: string | null = null;
 
@@ -86,19 +88,21 @@ function resourceKeyParams() {
 async function loadThumbnail() {
   if (loaded) return;
   loaded = true;
+  const myGen = generation;
   await acquireThumbnailSlot();
   slotHeld = true;
   try {
     const signedUrl = props.src || (await getThumbnailUrl(props.fileId, props.mimeType));
-    if (unmounted) { releaseSlotIfHeld(); return; }
+    if (unmounted || myGen !== generation) { releaseSlotIfHeld(); return; }
     if (!signedUrl) { releaseSlotIfHeld(); return; }
     const keyParams = resourceKeyParams();
     const resource = await getThumbnailResource({
       ...keyParams,
       url: signedUrl,
     });
-    if (unmounted) {
-      // 卸载竞态：已下载的 Blob 引用释放给缓存统一管理
+    // 卸载或代次变化（fileId/context/version 已切换）：丢弃本次结果，
+    // 已下载的 Blob 引用释放给缓存统一管理，避免旧缩略图污染新状态。
+    if (unmounted || myGen !== generation) {
       if (resource) releaseThumbnailResource(buildThumbResourceKey(keyParams));
       releaseSlotIfHeld();
       return;
@@ -108,11 +112,14 @@ async function loadThumbnail() {
       url.value = resource.objectUrl;
       signed.value = true;
     } else {
+      // 资源获取失败（下载/尺寸读取失败）：signed=false 走类型图标占位，
+      // <img> 不挂载故 onLoad 不会触发，必须在此显式释放并发槽位，防止泄漏耗尽并发上限。
       signed.value = false;
+      releaseSlotIfHeld();
     }
   } catch {
     releaseSlotIfHeld();
-    if (unmounted) return;
+    if (unmounted || myGen !== generation) return;
     loaded = false; // 允许进入视口时再次尝试
   }
 }
@@ -156,9 +163,10 @@ function startObserving() {
   observer.observe(containerRef.value);
 }
 
-// v-for 复用实例时 fileId 会变化：重置全部加载状态并重新观察，
-// 否则会显示上一个文件的旧缩略图
+// v-for 复用实例时 fileId 会变化：提升代次使在途异步结果失效，
+// 重置全部加载状态并重新观察，防止旧缩略图污染新状态（H-08 竞态防护）。
 watch(() => [props.fileId, props.src, props.context, props.version], () => {
+  generation++;
   releaseSlotIfHeld();
   releaseActiveResource();
   loaded = false;

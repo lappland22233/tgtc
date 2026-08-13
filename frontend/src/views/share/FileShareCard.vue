@@ -6,7 +6,7 @@
         :mime-type="info.mimeType"
         :file-name="info.name"
         :size="112"
-        :src="buildShareThumbnailUrl(props.token, props.info.id, props.accessJwt)"
+        :src="buildShareThumbnailUrl(props.token, props.info.id)"
         :context="`s:${props.token}`"
         :version="info.uploadVersion"
       />
@@ -77,12 +77,11 @@ interface FileInfo {
 const props = defineProps<{
   info: FileInfo;
   token: string;
-  accessJwt?: string;
+  /** 该分享是否设置过密码（由 ShareView 在验证通过后标记；凭据本身存于 HttpOnly Cookie） */
+  encrypted?: boolean;
 }>();
 
-// accessJwt 仅在用户通过分享密码校验后由后端签发（见 ShareView.vue onPasswordSubmit），
-// 因此它的存在即可靠地表示这是一个加密（有密码）分享。
-const isEncrypted = computed(() => !!props.accessJwt);
+const isEncrypted = computed(() => !!props.encrypted);
 
 /** 预览类别；null 时不显示「在线预览」按钮 */
 const previewKind = computed(() => getPreviewKind(props.info.mimeType, props.info.name));
@@ -93,14 +92,14 @@ function openPreview() {
   const kind = previewKind.value;
   if (!kind) return;
   mediaPlaybackStore.open({
-    context: { type: 'share', token: props.token, accessJwt: props.accessJwt },
+    context: { type: 'share', token: props.token, encrypted: props.encrypted },
     item: {
       id: props.info.id,
       name: props.info.name,
       mimeType: props.info.mimeType,
       kind,
       size: props.info.size,
-      src: buildSharePreviewUrl(props.token, props.info.id, props.accessJwt),
+      src: buildSharePreviewUrl(props.token, props.info.id),
       downloadUrl: downloadUrl.value,
       contentVersion: props.info.uploadVersion,
     },
@@ -109,13 +108,8 @@ function openPreview() {
   });
 }
 
-const downloadUrl = computed(() => {
-  let url = `/api/s/${encodeURIComponent(props.token)}/download/${encodeURIComponent(props.info.id)}`;
-  if (props.accessJwt) {
-    url += `?access=${encodeURIComponent(props.accessJwt)}`;
-  }
-  return url;
-});
+/** 固定构造同源分享下载路径；凭据由 HttpOnly Cookie 携带，URL 不含访问 JWT */
+const downloadUrl = computed(() => `/api/s/${encodeURIComponent(props.token)}/download/${encodeURIComponent(props.info.id)}`);
 
 function formatSize(bytes: number): string {
   if (bytes <= 0) return '0 B';

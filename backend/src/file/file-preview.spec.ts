@@ -83,12 +83,36 @@ describe('FileService 冷资源单连接预览策略', () => {
     expect((service as any).accessLogRepository.save).toHaveBeenCalled();
   });
 
-  it('非法 Range 头（后缀范围）直接返回 null 且不查库', async () => {
-    const findOne = jest.fn();
-    const service = createService({ fileRepository: { findOne } });
+  it('合法 suffix Range 支持（bytes=-500 取末尾 500 字节）', async () => {
+    const service = createService({
+      fileRepository: { findOne: jest.fn().mockResolvedValue(readyVideo) },
+    });
+    (service as any).fileCacheService.getCachedPath = jest.fn().mockReturnValue('/tmp/cache/' + fileId);
     const result = await (service as any).getPreviewStreamWithRange(fileId, ownerUser, 'bytes=-500');
-    expect(result).toBeNull();
-    expect(findOne).not.toHaveBeenCalled();
+    expect(result).not.toBeNull();
+    expect(result.start).toBe(500);
+    expect(result.end).toBe(999);
+    expect(result.size).toBe(500);
+    expect(result.total).toBe(1000);
+    result.stream.on('error', () => {});
+  });
+
+  it('非法 Range 头（错误单位）抛 416', async () => {
+    const service = createService({
+      fileRepository: { findOne: jest.fn().mockResolvedValue(readyVideo) },
+    });
+    await expect(
+      (service as any).getPreviewStreamWithRange(fileId, ownerUser, 'items=0-1'),
+    ).rejects.toBeInstanceOf(RangeNotSatisfiableException);
+  });
+
+  it('multi-range 抛 416（严格单 Range 语义）', async () => {
+    const service = createService({
+      fileRepository: { findOne: jest.fn().mockResolvedValue(readyVideo) },
+    });
+    await expect(
+      (service as any).getPreviewStreamWithRange(fileId, ownerUser, 'bytes=0-1,3-4'),
+    ).rejects.toBeInstanceOf(RangeNotSatisfiableException);
   });
 
   it('越界 start 抛 RangeNotSatisfiableException', async () => {
@@ -125,19 +149,19 @@ describe('FileService 冷资源单连接预览策略', () => {
 });
 
 describe('FileService 缓存状态查询', () => {
-  it('未缓存返回 { cached: false }', async () => {
+  it('未缓存返回三态 cold（兼容 cached:false）', async () => {
     const service = createService({
       fileRepository: { findOne: jest.fn().mockResolvedValue(readyVideo) },
     });
-    await expect((service as any).getCacheStatus(fileId, ownerUser)).resolves.toEqual({ cached: false });
+    await expect((service as any).getCacheStatus(fileId, ownerUser)).resolves.toEqual({ status: 'cold', cached: false });
   });
 
-  it('已缓存返回 { cached: true }', async () => {
+  it('已缓存返回三态 cached（兼容 cached:true）', async () => {
     const service = createService({
       fileRepository: { findOne: jest.fn().mockResolvedValue(readyVideo) },
     });
     (service as any).fileCacheService.getCachedPath = jest.fn().mockReturnValue('/tmp/cache/' + fileId);
-    await expect((service as any).getCacheStatus(fileId, ownerUser)).resolves.toEqual({ cached: true });
+    await expect((service as any).getCacheStatus(fileId, ownerUser)).resolves.toEqual({ status: 'cached', cached: true });
   });
 
   it('非所有者被拒绝', async () => {

@@ -17,6 +17,7 @@ import { AuditService } from '../common/services/audit.service';
 import { AuditAction, AuditStatus } from '../common/entities/audit-log.entity';
 import { FileService } from '../file/file.service';
 import { SharePasswordService } from './share-password.service';
+import { SharePreviewSessionService } from './share-preview-session.service';
 import { CreateShareDto, UpdateShareDto } from './share.dto';
 import { BCRYPT_ROUNDS } from '../common/constants/bcrypt';
 
@@ -49,6 +50,7 @@ export class ShareService {
     private readonly passwordService: SharePasswordService,
     private readonly fileService: FileService,
     private readonly configService: ConfigService,
+    private readonly previewSessionService: SharePreviewSessionService,
   ) {}
 
   private get appUrl(): string {
@@ -268,7 +270,8 @@ export class ShareService {
     fileId: string,
     accessJwt: string | undefined,
     ip: string | null,
-    rangeHeader?: string,
+    rangeHeader: string | undefined,
+    visitorHash: string,
   ): Promise<{
     stream: Readable;
     contentType: string;
@@ -305,12 +308,15 @@ export class ShareService {
       metadata: { token, fileId, ip: ip || null, isRange: !!rangeHeader },
     });
 
+    // C-03 修复：无论 Range 命中还是回退全量流，在输出任何文件字节前完成会话确认。
+    // 首次返回字节前原子扣次；同会话后续 Range/重连幂等免扣。
+    await this.consumeSharePreviewAccess(link, fileId, visitorHash);
+
     if (rangeHeader) {
       const rangeResult = await this.fileService.getSharePreviewStreamWithRange(fileId, rangeHeader, ip || undefined);
       if (rangeResult) return rangeResult;
-      // Range 无效或缓存未命中 → 回退全量流；按「逻辑访问」会话只消费一次额度
+      // Range 无效或缓存未命中 → 回退全量流；会话已确认，不再重复扣次
     }
-    await this.consumeSharePreviewAccess(link, fileId);
     return this.fileService.getStreamForShareDownload(fileId, ip || undefined);
   }
 
@@ -355,7 +361,7 @@ export class ShareService {
     token: string,
     fileId: string,
     accessJwt?: string,
-  ): Promise<{ cached: boolean }> {
+  ): Promise<{ status: 'cached' | 'cold' | 'unknown'; cached: boolean }> {
     const link = await this.shareLinkRepo.findOne({ where: { token, isDeleted: false } });
     if (!link) throw new NotFoundException('分享不存在');
     await this.assertShareUsable(link);
@@ -365,7 +371,8 @@ export class ShareService {
       if (!ok) throw new ForbiddenException('访问凭证已失效，请重新输入密码');
     }
     await this.assertFileInShare(link, fileId);
-    return { cached: this.fileService.isFileCached(fileId) };
+    const cached = this.fileService.isFileCached(fileId);
+    return { status: cached ? 'cached' : 'cold', cached };
   }
 
   // ---------- 列出/更新/取消分享 ----------
@@ -553,33 +560,20 @@ export class ShareService {
   }
 
   /**
-   * 分享预览「逻辑访问」短期会话窗口（毫秒）。
-   * 与 access JWT 5 分钟有效期对齐：窗口内同一分享 + 同一文件仅消费一次访问额度，
-   * 浏览器内部子请求（冷资源 Range 回退重试、连接重建、重复预览）不再重复耗尽 maxAccessCount。
+   * 分享预览「逻辑访问」短期会话：委托给持久化 SharePreviewSessionService（C-03 修复）。
+   * - 会话键 = 分享链接 + 文件 + 高熵访客标识摘要，唯一约束保证多实例原子扣次；
+   * - 首次返回文件字节前原子扣减一次 maxAccessCount；
+   * - 同会话后续 Range / 连接重建 / 缓存冷热切换幂等免扣；
+   * - 会话过期（与 access JWT 5 分钟对齐）后再次预览视为新会话。
+   *
+   * 由 ShareController 在调用预览流前派生 visitorHash 并传入。
    */
-  private static readonly PREVIEW_SESSION_WINDOW_MS = 5 * 60 * 1000;
-  /** 预览会话去重表：`preview:<linkId>:<fileId>` → 过期时间戳 */
-  private readonly previewSessions = new Map<string, number>();
-
-  /** 分享预览访问：窗口内同一分享 + 文件只消费一次 maxAccessCount */
-  private async consumeSharePreviewAccess(link: ShareLink, fileId: string): Promise<void> {
-    const key = `preview:${link.id}:${fileId}`;
-    const now = Date.now();
-    const expiresAt = this.previewSessions.get(key);
-    if (expiresAt && expiresAt > now) return; // 窗口内已计过
-    await this.consumeShareAccess(link);
-    this.previewSessions.set(key, now + ShareService.PREVIEW_SESSION_WINDOW_MS);
-    this.prunePreviewSessions();
-  }
-
-  /** 有界清理：仅清除过期条目；极端增长时整体重置，防止无界内存占用 */
-  private prunePreviewSessions(): void {
-    if (this.previewSessions.size <= 512) return;
-    const now = Date.now();
-    for (const [k, exp] of this.previewSessions) {
-      if (exp <= now) this.previewSessions.delete(k);
+  async consumeSharePreviewAccess(link: ShareLink, fileId: string, visitorHash: string): Promise<void> {
+    const result = await this.previewSessionService.consumePreviewAccess(link, fileId, visitorHash);
+    if (result === 'exhausted') {
+      await this.shareLinkRepo.update(link.id, { status: ShareLinkStatus.EXHAUSTED }).catch(() => {});
+      throw new NotFoundException('分享访问次数已耗尽');
     }
-    if (this.previewSessions.size > 2048) this.previewSessions.clear();
   }
 
   /**

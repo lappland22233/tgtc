@@ -5,7 +5,7 @@
         :class="{ 'fpv-overlay--minimized': !mediaStore.expanded }"
         :inert="!mediaStore.expanded"
         role="presentation"
-        @click.self="minimize"
+        @click.self="fullStop"
       >
         <div
           ref="dialogRef"
@@ -70,7 +70,7 @@
               >
                 <t-icon name="chevron-down" />
               </button>
-              <button type="button" class="fpv-close" aria-label="关闭预览" @click="minimize">
+              <button type="button" class="fpv-close" aria-label="关闭预览" @click="fullStop">
                 <t-icon name="close" />
               </button>
             </div>
@@ -982,7 +982,7 @@ function onKeydown(e: KeyboardEvent) {
   if (!mediaStore.expanded) return;
   if (e.key === 'Escape') {
     if (playlistOpen.value) playlistOpen.value = false;
-    else minimize();
+    else fullStop();
     return;
   }
   // Shift+N / Shift+P → 当前媒体列表的下一项 / 上一项
@@ -1526,11 +1526,12 @@ async function checkColdStatus() {
   const stateToken = loadToken;
   if (!session || !fid) return;
   const ctx = session.context;
-  const cached = ctx.type === 'share'
-    ? await fetchShareCacheStatus(ctx.token, fid, ctx.accessJwt || undefined)
+  const status = ctx.type === 'share'
+    ? await fetchShareCacheStatus(ctx.token, fid)
     : await fetchFileCacheStatus(fid);
   if (snap.kind !== 'video' || currentPosterFileId.value !== fid || loadToken !== stateToken) return;
-  coldLoad.value = !cached;
+  // cold/unknown 均钳制 seek；仅 cached 允许 Range 跳转
+  coldLoad.value = status !== 'cached';
 }
 
 /**
@@ -1549,7 +1550,7 @@ async function loadPoster() {
 
   // 标准封面：与列表 ThumbnailImg 共用缓存键（u/s 上下文 + fileId + 版本 + thumb 规格）
   const standardUrl = ctx.type === 'share'
-    ? buildShareThumbnailUrl(ctx.token, fid, ctx.accessJwt || undefined)
+    ? buildShareThumbnailUrl(ctx.token, fid)
     : await getThumbnailUrl(fid, 'video/mp4');
   if (!standardUrl || !isCurrentPosterTask(fid, token)) return;
 
@@ -1579,7 +1580,7 @@ async function loadPoster() {
 
   hdCoverAttempted = true;
   const hdUrl = ctx.type === 'share'
-    ? buildShareHdThumbnailUrl(ctx.token, fid, ctx.accessJwt || undefined)
+    ? buildShareHdThumbnailUrl(ctx.token, fid)
     : await getHdThumbnailUrl(fid, 'video/mp4');
   if (!hdUrl || !isCurrentPosterTask(fid, token)) return;
 

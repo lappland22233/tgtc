@@ -1,9 +1,24 @@
 import { createRouter, createWebHistory } from 'vue-router';
-import type { RouteRecordRaw } from 'vue-router';
+import type { RouteRecordRaw, RouteLocationNormalized } from 'vue-router';
 import { useAuthStore } from '../stores/auth';
+import { useMediaPlaybackStore } from '../stores/mediaPlayback';
 import { clearThumbToken } from '../utils/thumbnail';
 import { clearThumbnailCache } from '../utils/thumbnailCache';
 import { PAGE_ROLES, hasAnyRole } from '../utils/permissions';
+
+/** 是否处于分享授权域路由（/s/:token） */
+function isShareRoute(route: RouteLocationNormalized): boolean {
+  return typeof route.params.token === 'string';
+}
+
+/** 停止当前分享授权域内的媒体会话（仅当会话来自分享上下文） */
+function stopShareMediaIfPresent(): void {
+  const mediaStore = useMediaPlaybackStore();
+  const s = mediaStore.session;
+  if (s?.context.type === 'share') {
+    mediaStore.requestStop();
+  }
+}
 
 /**
  * 校验 redirect 参数是否安全，防止任意 URL 跳转（Open Redirect）
@@ -237,7 +252,13 @@ router.beforeEach(async (to, _from, next) => {
 let lastAuthUserId: string | null = null;
 // 缓存 authStore 单例（Pinia store 为单例），避免每次路由切换都调用 useAuthStore()
 let cachedAuthStore: ReturnType<typeof useAuthStore> | null = null;
-router.afterEach(() => {
+router.afterEach((to, from) => {
+  // H-02 修复：离开分享授权域（/s/:token → 其他路由）时，
+  // 销毁仍在播放的分享媒体会话，禁止分享媒体离开授权域后继续播放。
+  if (isShareRoute(from) && !isShareRoute(to)) {
+    stopShareMediaIfPresent();
+  }
+
   if (!cachedAuthStore) cachedAuthStore = useAuthStore();
   const currentUserId = cachedAuthStore.user?.id ?? null;
   if (currentUserId !== lastAuthUserId) {

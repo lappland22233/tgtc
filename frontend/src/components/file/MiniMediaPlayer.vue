@@ -160,12 +160,12 @@ const kindLabel = computed(() => {
   return '媒体';
 });
 
-/** 分享会话下直接使用分享缩略图地址（附访问 JWT）；登录态交给 ThumbnailImg 内部构建 */
+/** 分享会话下直接使用分享缩略图地址（凭据由 Cookie 携带）；登录态交给 ThumbnailImg 内部构建 */
 const thumbnailSrc = computed(() => {
   const s = mediaStore.session;
   if (!s) return '';
   if (s.context.type === 'share') {
-    return buildShareThumbnailUrl(s.context.token, s.item.id, s.context.accessJwt || undefined);
+    return buildShareThumbnailUrl(s.context.token, s.item.id);
   }
   return '';
 });

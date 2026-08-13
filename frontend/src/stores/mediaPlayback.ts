@@ -38,7 +38,15 @@ export interface MediaSessionItem {
 
 export type MediaSourceContext =
   | { type: 'user'; userId?: string }
-  | { type: 'share'; token: string; accessJwt?: string };
+  | {
+      type: 'share';
+      token: string;
+      /**
+       * 该分享是否设置过密码（仅用于提示/授权域标记）。
+       * 凭据本身存于后端 HttpOnly Cookie，前端不持有 access JWT。
+       */
+      encrypted?: boolean;
+    };
 
 export interface MediaSession {
   context: MediaSourceContext;

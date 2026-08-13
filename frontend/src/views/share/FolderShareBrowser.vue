@@ -78,7 +78,7 @@
                 :mime-type="file.mimeType"
                 :file-name="file.name"
                 :size="72"
-                :src="buildShareThumbnailUrl(props.token, file.id, props.accessJwt)"
+                :src="buildShareThumbnailUrl(props.token, file.id)"
                 :context="`s:${props.token}`"
                 :version="file.uploadVersion"
               />
@@ -143,6 +143,8 @@ interface FileSummary {
   downloadUrl: string;
   /** 文件内容版本（覆盖上传时递增），用于进度记录版本校验 */
   uploadVersion?: number;
+  /** 文件状态（ready/processing/error），用于过滤可预览文件 */
+  status?: string;
 }
 interface FolderContents {
   subfolders: FolderSummary[];
@@ -151,7 +153,8 @@ interface FolderContents {
 
 const props = defineProps<{
   token: string;
-  accessJwt?: string;
+  /** 该分享是否设置过密码（凭据本身存于 HttpOnly Cookie，前端不持有 access JWT） */
+  encrypted?: boolean;
   rootFolder: FolderSummary;
   initialContents: FolderContents;
   initialBreadcrumb: FolderSummary[];
@@ -168,21 +171,22 @@ const breadcrumb = ref<FolderSummary[]>([...props.initialBreadcrumb]);
 
 const mediaPlaybackStore = useMediaPlaybackStore();
 
-/** 打开全局预览会话（分享上下文；跨路由/收起不中断播放） */
+/** 打开全局预览会话（分享上下文；跨路由/收起不中断播放）。仅 ready 文件可预览（H-12）。 */
 function openPreview(file: FileSummary) {
   const kind = getPreviewKind(file.mimeType, file.name);
   if (!kind) return;
+  if (file.status && file.status !== 'ready') return;
   const list = buildMediaPlaylist(kind);
   const index = Math.max(0, list.findIndex((i) => i.id === file.id));
   mediaPlaybackStore.open({
-    context: { type: 'share', token: props.token, accessJwt: props.accessJwt },
+    context: { type: 'share', token: props.token, encrypted: props.encrypted },
     item: list[index] ?? {
       id: file.id,
       name: file.name,
       mimeType: file.mimeType,
       kind,
       size: file.size,
-      src: buildSharePreviewUrl(props.token, file.id, props.accessJwt),
+      src: buildSharePreviewUrl(props.token, file.id),
       downloadUrl: buildShareDownloadUrl(file.id),
       contentVersion: file.uploadVersion,
     },
@@ -194,25 +198,23 @@ function openPreview(file: FileSummary) {
 // ============ 媒体快速预览列表 ============
 function buildMediaPlaylist(kind: MediaSessionItem['kind']): MediaSessionItem[] {
   return currentContents.files
-    .filter((file) => getPreviewKind(file.mimeType, file.name) === kind)
+    // 仅 ready 文件进入播放列表（H-12）；错误/处理中文件展示失败状态，不发起预览
+    .filter((file) => getPreviewKind(file.mimeType, file.name) === kind && (!file.status || file.status === 'ready'))
     .map((file) => ({
       id: file.id,
       name: file.name,
       mimeType: file.mimeType,
       kind,
       size: file.size,
-      src: buildSharePreviewUrl(props.token, file.id, props.accessJwt),
+      src: buildSharePreviewUrl(props.token, file.id),
       downloadUrl: buildShareDownloadUrl(file.id),
       contentVersion: file.uploadVersion,
     }));
 }
 
-/** 固定构造同源分享下载路径，禁止把访问 JWT 附加到后端返回的任意跨域 URL */
+/** 固定构造同源分享下载路径；凭据由 HttpOnly Cookie 携带，URL 不含访问 JWT */
 function buildShareDownloadUrl(fileId: string): string {
-  const baseUrl = `/api/s/${encodeURIComponent(props.token)}/download/${encodeURIComponent(fileId)}`;
-  return props.accessJwt
-    ? `${baseUrl}?access=${encodeURIComponent(props.accessJwt)}`
-    : baseUrl;
+  return `/api/s/${encodeURIComponent(props.token)}/download/${encodeURIComponent(fileId)}`;
 }
 
 /**
@@ -250,10 +252,10 @@ async function goBack() {
 async function loadFolderContents(folderId: string) {
   loading.value = true;
   try {
-    const accessParam = props.accessJwt ? `?access=${encodeURIComponent(props.accessJwt)}` : '';
+    // 凭据由 HttpOnly Cookie 携带，URL 不附加 access JWT
     const [contentsRes, bcRes] = await Promise.all([
-      fetch(`/api/s/${encodeURIComponent(props.token)}/folder/${encodeURIComponent(folderId)}/contents${accessParam}`),
-      fetch(`/api/s/${encodeURIComponent(props.token)}/folder/${encodeURIComponent(folderId)}/breadcrumb${accessParam}`),
+      fetch(`/api/s/${encodeURIComponent(props.token)}/folder/${encodeURIComponent(folderId)}/contents`),
+      fetch(`/api/s/${encodeURIComponent(props.token)}/folder/${encodeURIComponent(folderId)}/breadcrumb`),
     ]);
     if (!contentsRes.ok) throw new Error('加载失败');
     const contentsData = await contentsRes.json();

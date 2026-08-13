@@ -49,14 +49,14 @@
         v-else-if="state.kind === 'file'"
         :info="state.data"
         :token="token"
-        :access-jwt="accessJwt ?? undefined"
+        :encrypted="isEncrypted"
       />
 
       <!-- 文件夹分享浏览（Phase 3：完整文件夹层级浏览） -->
       <FolderShareBrowser
         v-else-if="state.kind === 'folder'"
         :token="token"
-        :access-jwt="accessJwt ?? undefined"
+        :encrypted="isEncrypted"
         :root-folder="state.data"
         :initial-contents="state.initialContents"
         :initial-breadcrumb="state.initialBreadcrumb"
@@ -68,12 +68,14 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from 'vue';
 import { useRoute } from 'vue-router';
+import { useMediaPlaybackStore } from '../../stores/mediaPlayback';
 import PasswordPrompt from './PasswordPrompt.vue';
 import FileShareCard from './FileShareCard.vue';
 import FolderShareBrowser from './FolderShareBrowser.vue';
 
 const route = useRoute();
 const token = computed(() => String(route.params.token || ''));
+const mediaStore = useMediaPlaybackStore();
 
 interface FileInfo {
   id: string;
@@ -100,6 +102,8 @@ interface FileSummary {
   mimeType: string;
   createdAt: string;
   downloadUrl: string;
+  /** 文件状态（ready/processing/error），用于过滤可预览文件 */
+  status?: string;
 }
 interface FolderContents {
   subfolders: FolderSummary[];
@@ -115,15 +119,17 @@ type State =
   | { kind: 'folder'; data: FolderInfo; initialContents: FolderContents; initialBreadcrumb: FolderSummary[] };
 
 const state = ref<State>({ kind: 'loading' });
-const accessJwt = ref<string | null>(null);
+/** 该分享是否设置过密码（用于提示文案；凭据本身由后端 HttpOnly Cookie 保存） */
+const isEncrypted = ref(false);
 const passwordError = ref('');
 const verifying = ref(false);
 
 /**
  * 拉取分享元数据。严格模式关键路径：
- * 后端在 link.password != null && !accessJwt 时
+ * 后端在 link.password != null 且未携带有效凭据时
  * **不查询 target 表**，只返回 { requiresPassword: true }，
  * 此时前端无法从响应里推断文件/文件夹的任何信息。
+ * 密码验证通过后凭据由 HttpOnly Cookie 携带，请求同源自动附带。
  */
 async function fetchInfo() {
   // 【P3】token 缺失时直接展示"分享不存在"，避免 encodeURIComponent(undefined)
@@ -133,16 +139,15 @@ async function fetchInfo() {
     return;
   }
   try {
-    // 后端 ShareController 从 query 参数 ?access=... 读取 accessJwt，
-    // 不使用 Authorization header（避免与认证 JWT 混淆）
-    const url = `/api/s/${encodeURIComponent(token.value)}` +
-      (accessJwt.value ? `?access=${encodeURIComponent(accessJwt.value)}` : '');
-    const res = await fetch(url);
+    // 凭据由 Cookie 携带，URL 中不出现 access JWT（C-02 修复）
+    const res = await fetch(`/api/s/${encodeURIComponent(token.value)}`);
     const data = await res.json();
 
     // 业务错误：分享不存在 / 过期 / 次数耗尽
     if (!res.ok || data.code !== 0) {
       const msg = data.message || '分享访问失败';
+      // H-02 修复：凭据失效 / 分享不可用（403/410/业务错误）时销毁该分享的媒体会话
+      stopCurrentShareMedia();
       // 403 通常对应 IP 封禁
       if (res.status === 403) {
         state.value = { kind: 'banned', message: msg };
@@ -155,6 +160,9 @@ async function fetchInfo() {
     const payload = data.data;
     // 严格模式：需要密码 → 只切换状态，不泄露任何 target 信息
     if (payload.requiresPassword) {
+      // H-02 修复：Cookie 过期 / 凭据失效返回 requiresPassword 时销毁旧媒体会话，
+      // 避免残留的分享媒体在凭据失效后继续播放。
+      stopCurrentShareMedia();
       state.value = { kind: 'needPassword' };
       return;
     }
@@ -191,14 +199,17 @@ async function onPasswordSubmit(pwd: string) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ password: pwd }),
+      // 需要接收后端设置的 HttpOnly Cookie
+      credentials: 'same-origin',
     });
     const data = await res.json();
     if (!res.ok || data.code !== 0) {
       passwordError.value = data.message || '密码错误';
       return;
     }
-    accessJwt.value = data.data.accessJwt;
-    // 验证通过，重新拉取分享元数据
+    // 验证通过：凭据已由后端写入 HttpOnly Cookie，前端不再保存 accessJwt
+    isEncrypted.value = true;
+    // 重新拉取分享元数据（此时 Cookie 已就位）
     await fetchInfo();
   } catch (err) {
     passwordError.value = err instanceof Error ? err.message : '网络错误';
@@ -207,9 +218,22 @@ async function onPasswordSubmit(pwd: string) {
   }
 }
 
+/** H-02：停止当前分享上下文下的媒体会话（仅当会话来自分享且 token 匹配当前页面） */
+function stopCurrentShareMedia() {
+  const s = mediaStore.session;
+  if (s?.context.type === 'share' && s.context.token === token.value) {
+    mediaStore.requestStop();
+  }
+}
+
 onMounted(fetchInfo);
-watch(token, async () => {
-  accessJwt.value = null;
+watch(token, async (newToken, oldToken) => {
+  // H-02 修复：分享 token 改变 = 离开原分享授权域，
+  // 必须停止仍在播放的旧分享媒体会话并销毁授权状态，禁止跨分享继续播放。
+  if (oldToken && oldToken !== newToken) {
+    stopCurrentShareMedia();
+  }
+  isEncrypted.value = false;
   passwordError.value = '';
   verifying.value = false;
   state.value = { kind: 'loading' };

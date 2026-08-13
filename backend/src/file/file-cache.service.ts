@@ -1,7 +1,7 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnApplicationShutdown, ServiceUnavailableException } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { OnEvent } from '@nestjs/event-emitter';
-import { Readable, PassThrough } from 'stream';
+import { Readable } from 'stream';
 import { createReadStream, createWriteStream } from 'fs';
 import { promises as fsp } from 'fs';
 import { FileHandle } from 'fs/promises';
@@ -38,25 +38,33 @@ interface CacheBuildSession {
 }
 
 /**
- * 无缓存直通流的「单上游多消费者」会话。
- * 同一文件并发预览 / 下载只建立一个 Telegram 上游连接，
- * 每个 HTTP 消费者独立 PassThrough 下游流；消费者全部离开后销毁上游。
+ * 无缓存直通 / 容量不足场景的「可重放 spool」会话（C-04 修复）。
+ *
+ * 与 CacheBuildSession 的区别：
+ * - 写入独立 `.spool` 临时文件，**完成后不发布为正式缓存**（rename），
+ *   而是保留 spool 文件直到所有消费者关闭，保证迟到消费者可从 offset 0 完整重放；
+ * - 每个消费者通过 createSpoolFollowerStream 从 offset 0 独立跟随读取，
+ *   绝不把已前进的 live source 直接 pipe 给后加入的消费者；
+ * - 磁盘无法建立 spool 时，各消费者独立回源（不共享已前进的上游流）。
  */
-interface UpstreamTeeSession {
+interface SpoolSession {
   fileId: string;
   expectedSize: number;
-  /** 上游源流；fetchFn 完成前为 null（消费者等待），完成后才 pipe 分发 */
-  source: Readable | null;
-  consumers: Map<number, PassThrough>;
-  nextId: number;
-  done: boolean;
-  failed?: Error;
-  /** 回源超时定时器（防止 Telegram 回源卡住导致会话永久滞留） */
-  timeout?: NodeJS.Timeout;
+  spoolPath: string;
+  bytesWritten: number;
+  completed: boolean;
+  error?: Error;
+  events: EventEmitter;
+  completion: Promise<void>;
+  abort: (error: Error) => void;
+  upstream?: Readable;
+  output?: ReturnType<typeof createWriteStream>;
+  /** 活跃消费者数；完成后全部离开时清理 spool 文件 */
+  consumerCount: number;
 }
 
 @Injectable()
-export class FileCacheService {
+export class FileCacheService implements OnApplicationShutdown {
   private readonly logger = new Logger(FileCacheService.name);
   private readonly cacheDir: string;
 
@@ -76,8 +84,14 @@ export class FileCacheService {
   private readonly fileAccessMap = new Map<string, number>();
   /** 同一业务文件只允许一个上游回源；消费者从临时文件独立跟随读取。 */
   private readonly buildSessions = new Map<string, CacheBuildSession>();
-  /** 无缓存直通路径的单上游多消费者会话（文件级 in-flight 合并）。 */
-  private readonly teeSessions = new Map<string, UpstreamTeeSession>();
+  /** 可重放 spool 会话（无缓存直通 / 容量不足时使用）。 */
+  private readonly spoolSessions = new Map<string, SpoolSession>();
+  /** 关闭信号：置位后不再新建 build/spool 会话，正在进行的会话按策略收尾 */
+  private shuttingDown = false;
+  /** 当前活跃上游回源数（build + spool），用于冷回源全局并发预算 */
+  private activeUpstreams = 0;
+  /** 上游并发预算：同一时间允许的 Telegram 冷回源上限（可配置） */
+  private readonly maxConcurrentUpstreams = 8;
   private readonly buildIdleTimeoutMs = this.readPositiveTimeout('FILE_CACHE_BUILD_IDLE_TIMEOUT_MS', 60_000);
   private readonly buildTotalTimeoutMs = this.readPositiveTimeout('FILE_CACHE_BUILD_TOTAL_TIMEOUT_MS', 30 * 60_000);
 
@@ -193,10 +207,9 @@ export class FileCacheService {
     if (cached) return { stream: cached, fromCache: true };
 
     if (!(await this.prepareCacheCapacity(expectedSize))) {
-      // 容量/磁盘不足：单上游多消费者直通，仍按 fileId 合并 Telegram 回源
-      const session = this.getOrCreateTeeSession(fileId, expectedSize, fetchFn);
-      this.logger.warn(`缓存容量或磁盘余量不足，文件 ${fileId} 仅实时转发`);
-      return { stream: this.addTeeConsumer(session), fromCache: false };
+      // 容量/磁盘不足：改用可重放 spool（C-04 修复），迟到消费者从 offset 0 完整重放
+      this.logger.warn(`缓存容量或磁盘余量不足，文件 ${fileId} 走可重放 spool`);
+      return this.getSpooledStream(fileId, expectedSize, fetchFn);
     }
 
     // 容量准备期间模式可能已翻转，复查避免在无缓存模式下新建构建会话
@@ -244,6 +257,10 @@ export class FileCacheService {
       if (session.expectedSize !== expectedSize) throw new Error('活动缓存会话的文件大小不一致');
       return session;
     }
+    // 冷回源并发预算（H-06）：达到上限或正在关闭时拒绝新建，调用方回退 503
+    if (!this.canStartUpstream()) {
+      throw new ServiceUnavailableException('系统回源繁忙，请稍后重试');
+    }
 
     const events = new EventEmitter();
     events.setMaxListeners(0);
@@ -280,117 +297,225 @@ export class FileCacheService {
     fetchFn: () => Promise<{ stream: Readable; info: { file_size: number } }>,
   ): Promise<{ stream: Readable; fromCache: boolean }> {
     await this.abortBuildSession(fileId);
-    const session = this.getOrCreateTeeSession(fileId, expectedSize, fetchFn);
-    return { stream: this.addTeeConsumer(session), fromCache: false };
+    return this.getSpooledStream(fileId, expectedSize, fetchFn);
   }
 
-  // ---------- 无缓存直通：单上游多消费者 tee ----------
+  /** 是否允许开启新的冷回源（关闭中或达到并发预算则拒绝，调用方应回退 503） */
+  private canStartUpstream(): boolean {
+    return !this.shuttingDown && this.activeUpstreams < this.maxConcurrentUpstreams;
+  }
 
-  private getOrCreateTeeSession(
+  // ---------- 可重放 spool（C-04：迟到消费者完整重放，不接已前进的 live source） ----------
+
+  /** 获取/创建 spool 会话，返回从 offset 0 独立跟随读取的消费者流 */
+  private async getSpooledStream(
     fileId: string,
     expectedSize: number,
     fetchFn: () => Promise<{ stream: Readable; info: { file_size: number } }>,
-  ): UpstreamTeeSession {
-    let session = this.teeSessions.get(fileId);
+  ): Promise<{ stream: Readable; fromCache: boolean }> {
+    const session = await this.getOrCreateSpoolSession(fileId, expectedSize, fetchFn);
+    const stream = this.createSpoolFollowerStream(session);
+    return { stream, fromCache: false };
+  }
+
+  private async getOrCreateSpoolSession(
+    fileId: string,
+    expectedSize: number,
+    fetchFn: () => Promise<{ stream: Readable; info: { file_size: number } }>,
+  ): Promise<SpoolSession> {
+    let session = this.spoolSessions.get(fileId);
     if (session) {
       if (session.expectedSize === expectedSize) return session;
-      // 大小不一致（覆盖 / 数据异常）：销毁旧会话重新建立，避免旧大小消费者串流
-      this.teardownTeeSession(session);
+      // 大小不一致（覆盖 / 数据异常）：先清理旧 spool 再重建，避免旧大小消费者串流
+      await this.teardownSpoolSession(session);
     }
+    // 冷回源并发预算（H-06）：达到上限或正在关闭时拒绝新建，调用方回退 503
+    if (!this.canStartUpstream()) {
+      throw new ServiceUnavailableException('系统回源繁忙，请稍后重试');
+    }
+    const events = new EventEmitter();
+    events.setMaxListeners(0);
     session = {
       fileId,
       expectedSize,
-      source: null,
-      consumers: new Map(),
-      nextId: 0,
-      done: false,
+      spoolPath: this.getCachePath(fileId) + '.spool',
+      bytesWritten: 0,
+      completed: false,
+      events,
+      consumerCount: 0,
+      completion: Promise.resolve(),
+      abort: (error: Error) => {
+        if (session?.error || session?.completed) return;
+        session!.error = error;
+        session!.upstream?.destroy(error);
+        session!.output?.destroy();
+        session!.events.emit('failed', error);
+      },
     };
-    this.teeSessions.set(fileId, session);
-    // 回源超时保护：复用缓存构建的总超时配置，超时仍未就绪则判定失败并释放消费者
-    session.timeout = setTimeout(() => {
-      this.failTeeSession(session, new Error(`直通回源超时（${this.buildTotalTimeoutMs}ms）`));
-    }, this.buildTotalTimeoutMs);
-    session.timeout.unref?.();
-    void this.runTeeSession(session, fetchFn);
+    this.spoolSessions.set(fileId, session);
+    session.completion = this.runSpoolSession(session, fetchFn);
+    session.completion.catch(() => {});
     return session;
   }
 
-  private async runTeeSession(
-    session: UpstreamTeeSession,
+  private async runSpoolSession(
+    session: SpoolSession,
     fetchFn: () => Promise<{ stream: Readable; info: { file_size: number } }>,
   ): Promise<void> {
+    let idleTimer: NodeJS.Timeout | undefined;
+    let totalTimer: NodeJS.Timeout | undefined;
+    const resetIdleDeadline = () => {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => {
+        session.abort(new Error(`spool 写入空闲超时（${this.buildIdleTimeoutMs}ms）`));
+      }, this.buildIdleTimeoutMs);
+      idleTimer.unref?.();
+    };
+    let rejectTotal: ((error: Error) => void) | undefined;
+    const totalDeadline = new Promise<never>((_, reject) => { rejectTotal = reject; });
+    totalTimer = setTimeout(() => {
+      const error = new Error(`spool 写入总超时（${this.buildTotalTimeoutMs}ms）`);
+      session.abort(error);
+      rejectTotal?.(error);
+    }, this.buildTotalTimeoutMs);
+    totalTimer.unref?.();
+
+    let upstreamPromise: Promise<{ stream: Readable; info: { file_size: number } }> | undefined;
+    this.activeUpstreams++;
     try {
-      const { stream, info } = await fetchFn();
+      await fsp.unlink(session.spoolPath).catch(() => {});
+      // 在请求上游前先创建 spool 文件，保证首个进度事件到达时跟随者可安全打开。
+      await fsp.writeFile(session.spoolPath, Buffer.alloc(0), { flag: 'wx' });
+      // 与 build 路径一致的竞速保护：上游无响应时按总超时失败，
+      // 避免会话永久卡在 fetchFn 导致 activeUpstreams 永不归零。
+      const upstreamPromise = fetchFn();
+      const { stream, info } = await Promise.race([upstreamPromise, totalDeadline]);
+      // 竞态防护：等待上游期间会话可能已随最后一个消费者离开而被 teardown，
+      // 此时直接释放刚获取的上游，避免连接泄漏。
+      if (this.spoolSessions.get(session.fileId) !== session) {
+        stream.destroy();
+        return;
+      }
+      session.upstream = stream;
+      resetIdleDeadline();
       if (!Number.isSafeInteger(info.file_size) || info.file_size !== session.expectedSize) {
         stream.destroy();
         throw new Error(`上游文件大小不一致: 期望 ${session.expectedSize}, 实际 ${info.file_size}`);
       }
-      // 竞态防护：等待上游期间会话可能已随最后一个消费者离开而被销毁，
-      // 此时直接释放刚获取的上游，避免连接泄漏。
-      if (this.teeSessions.get(session.fileId) !== session) {
+
+      const output = createWriteStream(session.spoolPath, { flags: 'r+' });
+      session.output = output;
+      try {
+        for await (const rawChunk of stream) {
+          resetIdleDeadline();
+          if (session.error) throw session.error;
+          const chunk = Buffer.isBuffer(rawChunk) ? rawChunk : Buffer.from(rawChunk);
+          if (session.bytesWritten + chunk.length > session.expectedSize) {
+            throw new Error('上游流超过预期文件大小');
+          }
+          await new Promise<void>((resolve, reject) => {
+            output.write(chunk, error => error ? reject(error) : resolve());
+          });
+          session.bytesWritten += chunk.length;
+          session.events.emit('progress');
+          resetIdleDeadline();
+        }
+        if (idleTimer) clearTimeout(idleTimer);
+        await new Promise<void>((resolve, reject) => {
+          output.once('error', reject);
+          output.end(resolve);
+        });
+      } catch (error) {
         stream.destroy();
-        return;
+        output.destroy();
+        throw error;
       }
-      if (session.timeout) {
-        clearTimeout(session.timeout);
-        session.timeout = undefined;
+
+      if (session.error) throw session.error;
+      const stat = await fsp.stat(session.spoolPath);
+      if (session.bytesWritten !== session.expectedSize || stat.size !== session.expectedSize) {
+        throw new Error(`spool 文件大小不一致: 期望 ${session.expectedSize}, 实际 ${stat.size}`);
       }
-      session.source = stream;
-      for (const pt of session.consumers.values()) stream.pipe(pt);
-      stream.on('error', (err) => this.failTeeSession(session, err));
-      stream.on('end', () => {
-        session.done = true;
-        for (const pt of session.consumers.values()) pt.end();
-      });
-      stream.on('close', () => this.teardownTeeSession(session));
-    } catch (err) {
-      this.failTeeSession(session, err instanceof Error ? err : new Error('上游获取失败'));
+      session.completed = true;
+      session.events.emit('progress');
+      session.events.emit('complete');
+      this.logger.log(`spool 构建完成: ${session.fileId} (${session.expectedSize} bytes)`);
+    } catch (error) {
+      session.error = error instanceof Error ? error : new Error('spool 构建失败');
+      // 总超时竞态：fetchFn 可能仍在飞行，settle 后立即销毁其 stream 防连接泄漏
+      upstreamPromise?.then(({ stream: s }) => s.destroy()).catch(() => {});
+      session.upstream?.destroy();
+      session.output?.destroy();
+      // 完成后清理：若已完成由 teardown 管理；失败时立即清理
+      if (!session.completed) {
+        await fsp.unlink(session.spoolPath).catch(() => {});
+        if (this.spoolSessions.get(session.fileId) === session) {
+          this.spoolSessions.delete(session.fileId);
+        }
+      }
+      session.events.emit('failed', session.error);
+      throw session.error;
+    } finally {
+      if (idleTimer) clearTimeout(idleTimer);
+      if (totalTimer) clearTimeout(totalTimer);
+      session.upstream = undefined;
+      session.output = undefined;
+      this.activeUpstreams = Math.max(0, this.activeUpstreams - 1);
     }
   }
 
-  private failTeeSession(session: UpstreamTeeSession, err: Error) {
-    if (session.failed) return;
-    session.failed = err;
-    if (session.timeout) {
-      clearTimeout(session.timeout);
-      session.timeout = undefined;
-    }
-    for (const pt of session.consumers.values()) pt.destroy(err);
-    this.teardownTeeSession(session);
-  }
+  /** 新增一个从 offset 0 独立跟随读取的消费者流 */
+  private createSpoolFollowerStream(session: SpoolSession): Readable {
+    const service = this;
+    const stream = Readable.from((async function* follow(): AsyncGenerator<Buffer> {
+      let offset = 0;
+      const buffer = Buffer.allocUnsafe(256 * 1024);
+      try {
+        while (offset < session.expectedSize) {
+          while (offset < session.bytesWritten && offset < session.expectedSize) {
+            const available = Math.min(buffer.length, session.bytesWritten - offset, session.expectedSize - offset);
+            let handle: FileHandle | undefined;
+            try {
+              handle = await fsp.open(session.spoolPath, 'r');
+            } catch (error) {
+              if (!session.completed) throw error;
+              handle = await fsp.open(session.spoolPath, 'r');
+            }
+            const { bytesRead } = await handle.read(buffer, 0, available, offset);
+            await handle.close();
+            if (bytesRead <= 0) break;
+            offset += bytesRead;
+            yield Buffer.from(buffer.subarray(0, bytesRead));
+          }
+          if (session.error) throw session.error;
+          if (offset >= session.expectedSize || session.completed) break;
+          await service.waitForSessionChange(session);
+        }
+      } finally {
+        service.fileAccessMap.set(session.fileId, Date.now());
+      }
+    })());
 
-  /** 新增一个消费者下游流；会话已结束/失败时立即对消费者收尾 */
-  private addTeeConsumer(session: UpstreamTeeSession): PassThrough {
-    const pt = new PassThrough();
-    pt.on('error', () => {
-      // 单个消费者出错（如客户端中断）不影响其他消费者；由 close 完成移除
+    session.consumerCount++;
+    stream.once('close', () => {
+      session.consumerCount--;
+      // 完成后所有消费者离开 → 清理 spool 文件与会话
+      if (session.consumerCount <= 0) {
+        void service.teardownSpoolSession(session);
+      }
     });
-    const id = session.nextId++;
-    session.consumers.set(id, pt);
-    pt.on('close', () => {
-      session.consumers.delete(id);
-      // 最后一个消费者离开后销毁上游，避免泄漏连接
-      if (session.consumers.size === 0) this.teardownTeeSession(session);
-    });
-    if (session.failed) {
-      pt.destroy(session.failed);
-    } else if (session.done) {
-      pt.end();
-    } else if (session.source) {
-      session.source.pipe(pt);
-    }
-    return pt;
+    return stream;
   }
 
-  private teardownTeeSession(session: UpstreamTeeSession) {
-    if (this.teeSessions.get(session.fileId) === session) this.teeSessions.delete(session.fileId);
-    if (session.timeout) {
-      clearTimeout(session.timeout);
-      session.timeout = undefined;
+  /** 清理 spool 会话：删除 spool 文件并从 map 移除（幂等） */
+  private async teardownSpoolSession(session: SpoolSession): Promise<void> {
+    if (this.spoolSessions.get(session.fileId) === session) {
+      this.spoolSessions.delete(session.fileId);
     }
-    // 只销毁上游；消费者由调用方（controller pipeline / 客户端断连）自然关闭。
-    // 不能在此销毁仍在传输中的 PassThrough，否则会中断已写入但未消费完的数据。
-    session.source?.destroy();
+    session.upstream?.destroy();
+    session.output?.destroy();
+    await fsp.unlink(session.spoolPath).catch(() => {});
+    session.events.removeAllListeners();
   }
 
   /**
@@ -448,11 +573,15 @@ export class FileCacheService {
     }, this.buildTotalTimeoutMs);
     totalTimer.unref?.();
 
+    let upstreamPromise: Promise<{ stream: Readable; info: { file_size: number } }> | undefined;
+    this.activeUpstreams++;
     try {
       await fsp.unlink(session.tmpPath).catch(() => {});
       // 在请求上游前先创建临时文件，保证首个进度事件到达时跟随者可安全打开。
       await fsp.writeFile(session.tmpPath, Buffer.alloc(0), { flag: 'wx' });
-      const { stream, info } = await Promise.race([fetchFn(), totalDeadline]);
+      // 持有在途上游句柄：若 totalDeadline 先触发，catch 中销毁其 stream 防连接泄漏
+      const upstreamPromise = fetchFn();
+      const { stream, info } = await Promise.race([upstreamPromise, totalDeadline]);
       session.upstream = stream;
       resetIdleDeadline();
       if (!Number.isSafeInteger(info.file_size) || info.file_size !== session.expectedSize) {
@@ -501,6 +630,8 @@ export class FileCacheService {
       this.logger.log(`实时缓存构建完成: ${session.fileId} (${session.expectedSize} bytes)`);
     } catch (error) {
       session.error = error instanceof Error ? error : new Error('缓存构建失败');
+      // 总超时竞态：fetchFn 可能仍在飞行，settle 后立即销毁其 stream 防连接泄漏
+      upstreamPromise?.then(({ stream: s }) => s.destroy()).catch(() => {});
       session.upstream?.destroy();
       session.output?.destroy();
       await fsp.unlink(session.tmpPath).catch(() => {});
@@ -511,6 +642,7 @@ export class FileCacheService {
       if (totalTimer) clearTimeout(totalTimer);
       session.upstream = undefined;
       session.output = undefined;
+      this.activeUpstreams = Math.max(0, this.activeUpstreams - 1);
       setImmediate(() => {
         if (this.buildSessions.get(session.fileId) === session) {
           this.buildSessions.delete(session.fileId);
@@ -520,7 +652,7 @@ export class FileCacheService {
     }
   }
 
-  private waitForSessionChange(session: CacheBuildSession): Promise<void> {
+  private waitForSessionChange(session: Pick<CacheBuildSession, 'events'> | Pick<SpoolSession, 'events'>): Promise<void> {
     return new Promise((resolve, reject) => {
       const cleanup = () => {
         session.events.off('progress', onProgress);
@@ -677,7 +809,7 @@ export class FileCacheService {
       // 收集所有缓存文件的访问时间和大小
       const entries: { name: string; accessTime: number; size: number }[] = [];
       for (const f of files) {
-        if (f.endsWith('.tmp')) continue; // 跳过临时文件
+        if (f.endsWith('.tmp') || f.endsWith('.spool')) continue; // 跳过构建/重放临时文件
         try {
           const stat = await fsp.stat(path.join(this.cacheDir, f));
           const accessTime = this.fileAccessMap.get(f) || stat.atimeMs;
@@ -716,12 +848,42 @@ export class FileCacheService {
     return evicted;
   }
 
+  /**
+   * 应用关闭钩子（H-09/C-04 配套）：
+   * 1. 置位关闭信号，不再新建 build/spool 会话（canStartUpstream 返回 false）；
+   * 2. 中止全部进行中的缓存构建（abort → 清理 .tmp）；
+   * 3. 等待活跃上游回源收尾（最多 3s，超时强制 destroy）；
+   * 4. 清理 spool 临时文件并移除监听器。
+   */
+  async onApplicationShutdown(): Promise<void> {
+    this.shuttingDown = true;
+    this.logger.log(`缓存服务关闭：中止 ${this.buildSessions.size} 个构建会话、${this.spoolSessions.size} 个 spool 会话`);
+
+    for (const session of this.buildSessions.values()) {
+      session.abort(new Error('应用关闭，缓存构建已中止'));
+      session.completion.catch(() => {});
+    }
+    // 等待活跃上游收尾（spool 与 build 共用计数）
+    const deadline = Date.now() + 3000;
+    while (this.activeUpstreams > 0 && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    for (const session of this.spoolSessions.values()) {
+      session.upstream?.destroy();
+      session.output?.destroy();
+      await fsp.unlink(session.spoolPath).catch(() => {});
+    }
+    this.spoolSessions.clear();
+    this.logger.log('缓存服务关闭完成');
+  }
+
   /** 获取缓存目录总大小 */
   private async getTotalCacheSize(): Promise<number> {
     try {
       const files = await fsp.readdir(this.cacheDir);
       let total = 0;
       for (const f of files) {
+        if (f.endsWith('.tmp') || f.endsWith('.spool')) continue;
         try {
           const stat = await fsp.stat(path.join(this.cacheDir, f));
           total += stat.size;
@@ -885,13 +1047,14 @@ export class FileCacheService {
         }),
       ]);
     }
-    // 直通 tee 会话一并销毁（文件删除 / 覆盖更新时终止在途上游）
-    const tee = this.teeSessions.get(fileId);
-    if (tee) this.teardownTeeSession(tee);
+    // 可重放 spool 会话一并销毁（文件删除 / 覆盖更新时终止在途上游）
+    const spool = this.spoolSessions.get(fileId);
+    if (spool) await this.teardownSpoolSession(spool);
     const cachePath = this.getCachePath(fileId);
     await Promise.all([
       fsp.unlink(cachePath).catch(() => {}),
       fsp.unlink(cachePath + '.tmp').catch(() => {}),
+      fsp.unlink(cachePath + '.spool').catch(() => {}),
     ]);
     this.fileAccessMap.delete(fileId);
     this.logger.debug(`缓存失效: ${fileId}`);

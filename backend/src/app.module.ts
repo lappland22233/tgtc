@@ -31,6 +31,7 @@ import { UploadTask } from './common/entities/upload-task.entity';
 import { Tag } from './common/entities/tag.entity';
 import { TelemetryRecord } from './common/entities/telemetry-record.entity';
 import { JwtRevokedToken } from './common/entities/jwt-revoked-token.entity';
+import { SharePreviewSession } from './common/entities/share-preview-session.entity';
 import { AccessLogModule } from './common/access-log.module';
 import { JobsModule } from './jobs/jobs.module';
 import { AlertModule } from './alert/alert.module';
@@ -53,7 +54,7 @@ import { TagModule } from './tag/tag.module';
       username: process.env.DB_USERNAME || 'postgres',
       password: process.env.DB_PASSWORD || undefined,
       database: process.env.DB_DATABASE || 'test',
-      entities: [User, File, Folder, ShareLink, SystemConfig, VerificationCode, BannedIP, ShareAudit, FileAccessLog, RateLimit, AuditLog, AccessLog, Alert, DashboardConfig, UploadTask, Tag, TelemetryRecord, JwtRevokedToken],
+      entities: [User, File, Folder, ShareLink, SystemConfig, VerificationCode, BannedIP, ShareAudit, FileAccessLog, RateLimit, AuditLog, AccessLog, Alert, DashboardConfig, UploadTask, Tag, TelemetryRecord, JwtRevokedToken, SharePreviewSession],
       // 生产环境强制关闭 synchronize 防止误改 schema 丢数据；开发环境由 DB_SYNCHRONIZE 控制
       synchronize: process.env.NODE_ENV === 'production' ? false : process.env.DB_SYNCHRONIZE === 'true',
       migrations: [__dirname + '/migrations/*{.ts,.js}'],

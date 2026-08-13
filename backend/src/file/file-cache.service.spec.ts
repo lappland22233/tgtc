@@ -38,8 +38,19 @@ describe('FileCacheService realtime build session', () => {
     upstream.end(Buffer.from('def'));
 
     await expect(contentPromise).resolves.toEqual(Buffer.from('abcdef'));
-    await new Promise(resolve => setImmediate(resolve));
-    expect(await readFile(path.join(cwd, 'tmp', 'Cache', fileId))).toEqual(Buffer.from('abcdef'));
+    // rename 发布是异步的（Windows 下文件句柄释放存在时序），轮询等待正式缓存出现
+    const cachePath = path.join(cwd, 'tmp', 'Cache', fileId);
+    const deadline = Date.now() + 2000;
+    for (;;) {
+      try {
+        const data = await readFile(cachePath);
+        expect(data).toEqual(Buffer.from('abcdef'));
+        break;
+      } catch {
+        if (Date.now() > deadline) throw new Error(`缓存文件未在 2s 内发布: ${cachePath}`);
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+    }
   });
 
   it('shares one upstream build across concurrent consumers', async () => {
@@ -125,6 +136,17 @@ describe('FileCacheService no-cache mode', () => {
 
   const nextTick = () => new Promise(resolve => setImmediate(resolve));
   const listCacheDir = () => readdir(path.join(cwd, 'tmp', 'Cache')).catch(() => [] as string[]);
+  /** 轮询等待目录收敛到期望状态（spool 异步清理，避免时序抖动） */
+  const waitForDir = async (expectEmpty: boolean, timeoutMs = 2000) => {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const files = await listCacheDir();
+      const ok = expectEmpty ? files.length === 0 : files.length > 0;
+      if (ok) return;
+      if (Date.now() > deadline) throw new Error(`缓存目录未在 ${timeoutMs}ms 内收敛: ${JSON.stringify(await listCacheDir())}`);
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+  };
 
   beforeEach(async () => {
     cwd = await mkdtemp(path.join(tmpdir(), 'file-cache-nocache-test-'));
@@ -171,7 +193,7 @@ describe('FileCacheService no-cache mode', () => {
     expect(fetchFn).toHaveBeenCalledTimes(1);
   });
 
-  it('never writes to disk, never builds a session, never computes capacity or evicts', async () => {
+  it('spool mode: 不发布正式缓存、不建 build 会话、不触发 LRU/容量计算', async () => {
     const evictSpy = jest.spyOn(service as any, 'evictLRU');
     const sizeSpy = jest.spyOn(service as any, 'getTotalCacheSize');
 
@@ -185,8 +207,11 @@ describe('FileCacheService no-cache mode', () => {
     await expect(contentPromise).resolves.toEqual(Buffer.from('data'));
 
     await nextTick();
-    expect(await listCacheDir()).toEqual([]);
+    // C-04 修复：spool 允许有界临时文件，但绝不发布正式缓存、不触发 LRU/容量计算；
+    // 消费完成后 spool 异步清理，目录最终收敛为空。
+    await waitForDir(true);
     expect((service as any).buildSessions.size).toBe(0);
+    expect((service as any).spoolSessions.size).toBe(0);
     expect(service.getCachedPath(fileId)).toBeNull();
     expect(evictSpy).not.toHaveBeenCalled();
     expect(sizeSpy).not.toHaveBeenCalled();
@@ -230,7 +255,7 @@ describe('FileCacheService no-cache mode', () => {
 
     await nextTick();
     expect((defaultService as any).buildSessions.size).toBe(0);
-    expect(await listCacheDir()).toEqual([]);
+    await waitForDir(true);
   });
 
   it('flips to no-cache on config.changed and config.batch-changed, aborting active sessions', async () => {
@@ -292,6 +317,73 @@ describe('FileCacheService no-cache mode', () => {
     stream.destroy();
     await new Promise(resolve => setTimeout(resolve, 10));
     expect(upstream.destroyed).toBe(true);
+  });
+
+  it('C-04：迟到消费者从 offset 0 逐字节重放，不缺失已前进前缀', async () => {
+    const upstream = new PassThrough();
+    const fetchFn = jest.fn(async () => ({ stream: upstream, info: { file_size: 6 } }));
+
+    // 首个消费者先加入，上游写入前缀后创建迟到消费者
+    const firstPromise = service.getOrCacheStream(fileId, 6, fetchFn);
+    upstream.write(Buffer.from('abc'));
+    const first = await firstPromise;
+    const firstRead = readStream(first.stream);
+
+    const secondPromise = service.getOrCacheStream(fileId, 6, fetchFn);
+    const second = await secondPromise;
+    const secondRead = readStream(second.stream);
+
+    upstream.end(Buffer.from('def'));
+
+    await expect(firstRead).resolves.toEqual(Buffer.from('abcdef'));
+    await expect(secondRead).resolves.toEqual(Buffer.from('abcdef'));
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+  });
+
+  it('C-04：spool 完成后磁盘上不残留正式缓存（不发布），仅临时 spool 清理后空目录', async () => {
+    const upstream = new PassThrough();
+    const { stream } = await service.getOrCacheStream(fileId, 4, async () => ({
+      stream: upstream,
+      info: { file_size: 4 },
+    }));
+    const contentPromise = readStream(stream);
+    upstream.end(Buffer.from('data'));
+    await expect(contentPromise).resolves.toEqual(Buffer.from('data'));
+
+    // 消费者关闭后 teardown 异步清理 spool 文件
+    await new Promise(resolve => setTimeout(resolve, 30));
+    expect(await listCacheDir()).toEqual([]);
+    expect(service.getCachedPath(fileId)).toBeNull();
+  });
+
+  it('H-06：冷回源并发预算——达到上限时拒绝新建并抛 503', async () => {
+    // 将预算压到 1：第一个回源占满预算，第二个被拒绝
+    (service as any).maxConcurrentUpstreams = 1;
+    (service as any).activeUpstreams = 1;
+    await expect(
+      service.getNoCacheStream(fileId, 4, async () => ({
+        stream: new PassThrough(),
+        info: { file_size: 4 },
+      })),
+    ).rejects.toThrow(/繁忙|retry|稍后|重试/i);
+  });
+
+  it('H-09：onApplicationShutdown 中止构建会话并释放 spool', async () => {
+    const upstream = new PassThrough();
+    // 启动一个 build 会话（占用上游计数）
+    const fetchFn = jest.fn(async () => ({ stream: upstream, info: { file_size: 6 } }));
+    void service.getOrCacheStream(fileId, 6, fetchFn);
+    await new Promise(resolve => setTimeout(resolve, 10));
+
+    await service.onApplicationShutdown();
+    // 关闭后拒绝新建（canStartUpstream=false）
+    (service as any).activeUpstreams = 0;
+    await expect(
+      service.getOrCacheStream(fileId, 4, async () => ({
+        stream: new PassThrough(),
+        info: { file_size: 4 },
+      })),
+    ).rejects.toThrow(/繁忙|retry|稍后|重试/i);
   });
 
   it('skips cache warm-up: cacheFileFromPath resolves without creating any cache file', async () => {

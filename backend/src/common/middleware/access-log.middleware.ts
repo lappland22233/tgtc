@@ -4,6 +4,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { AccessLog } from '../entities/access-log.entity';
 import { getClientIp } from '../utils/client-ip';
+import { sanitizeUrlForLog, sanitizeRefererForLog } from '../utils/sensitive-data';
 
 /** 不记录日志的路径前缀（减少管理后台日志噪音） */
 const SKIP_PATH_PREFIXES = ['/api/admin/access-logs', '/api/admin/audit-logs', '/api/admin/alerts', '/api/admin/ban-stats', '/api/admin/source-analysis', '/api/admin/user-activity', '/api/admin/bandwidth', '/api/admin/file-type-stats', '/api/admin/dashboards'];
@@ -34,7 +35,9 @@ export class AccessLogMiddleware implements NestMiddleware, OnApplicationShutdow
 
   use(req: Request, res: Response, next: NextFunction): void {
     const start = Date.now();
-    const rawPath = (req.originalUrl || req.url || '/').split('#')[0] || '/';
+    // 集中脱敏：只记录规范化 pathname + 非敏感 query，绝不持久化
+    // access/token/code/password 等凭据型查询参数（C-02 修复）。
+    const rawPath = sanitizeUrlForLog((req.originalUrl || req.url || '/').split('#')[0]);
 
     if (shouldSkipPath(rawPath)) {
       next();
@@ -82,7 +85,7 @@ export class AccessLogMiddleware implements NestMiddleware, OnApplicationShutdow
         responseSize,
         duration,
         userAgent: (req.headers['user-agent'] as string)?.substring(0, 500) || null,
-        referer: (req.headers['referer'] as string)?.substring(0, 300) || null,
+        referer: sanitizeRefererForLog(req.headers['referer'] as string | undefined),
         userId, // 仅记录认证链路提供的可信用户 ID
       };
 

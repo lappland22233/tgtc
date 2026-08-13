@@ -9,6 +9,8 @@ import { BannedIP } from '../common/entities/banned-ip.entity';
 import { ShareController } from './share.controller';
 import { ShareService } from './share.service';
 import { SharePasswordService } from './share-password.service';
+import { SharePreviewSessionService } from './share-preview-session.service';
+import { SharePreviewSession } from '../common/entities/share-preview-session.entity';
 import { FileModule } from '../file/file.module';
 import { ConfigCacheModule } from '../common/services/config-cache.module';
 import { RateLimitModule } from '../common/services/rate-limit.module';
@@ -30,7 +32,7 @@ import { RateLimitModule } from '../common/services/rate-limit.module';
  */
 @Module({
   imports: [
-    TypeOrmModule.forFeature([ShareLink, File, Folder, BannedIP]),
+    TypeOrmModule.forFeature([ShareLink, File, Folder, BannedIP, SharePreviewSession]),
     FileModule,
     ConfigCacheModule,
     RateLimitModule,
@@ -49,7 +51,7 @@ import { RateLimitModule } from '../common/services/rate-limit.module';
     }),
   ],
   controllers: [ShareController],
-  providers: [ShareService, SharePasswordService],
+  providers: [ShareService, SharePasswordService, SharePreviewSessionService],
   exports: [ShareService, SharePasswordService],
 })
 export class ShareModule {}

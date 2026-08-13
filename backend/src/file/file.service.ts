@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, ForbiddenException, BadRequestException, HttpException, OnModuleInit, Logger } from '@nestjs/common';
+import { Injectable, NotFoundException, ForbiddenException, BadRequestException, OnModuleInit, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, In, IsNull, EntityManager } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
@@ -19,6 +19,7 @@ import { QUEUE_NAMES } from '../jobs/bull-queue.module';
 import { File, FileAccessType } from '../common/entities/file.entity';
 import { Folder } from '../common/entities/folder.entity';
 import { FileAccessLog } from '../common/entities/file-access-log.entity';
+import { ShareLink, ShareLinkStatus, ShareTargetType } from '../common/entities/share-link.entity';
 import { TelegramService } from '../telegram/telegram.service';
 import { ConfigCacheService } from '../common/services/config-cache.service';
 import { User, UserRole } from '../common/entities/user.entity';
@@ -32,12 +33,20 @@ import * as bcrypt from 'bcryptjs';
 import { v4 as uuidv4 } from 'uuid';
 import { BCRYPT_ROUNDS } from '../common/constants/bcrypt';
 import { FILE_DELETE_GRACE_MS, FILE_DELETE_COOLDOWN_MS } from '../common/constants/durations';
+import { isSafePublicInlineContentType } from '../common/utils/preview-content-type';
+import { parseByteRange } from '../common/utils/byte-range';
+import {
+  RangeNotSatisfiableException,
+  encodeCursor,
+  decodeCursor,
+  escapeLike,
+  fixFilenameEncoding,
+  ensureFileExtension,
+  parseFileSize,
+  parseAccessCount,
+} from './file-utils';
 
-export class RangeNotSatisfiableException extends HttpException {
-  constructor(public readonly total: number) {
-    super('Range 范围无效', 416);
-  }
-}
+export { RangeNotSatisfiableException };
 
 export interface BatchUploadFailedItem {
   name: string;
@@ -83,6 +92,8 @@ export class FileService implements OnModuleInit {
     private bannedIPRepository: Repository<BannedIP>,
     @InjectRepository(ShareAudit)
     private shareAuditRepository: Repository<ShareAudit>,
+    @InjectRepository(ShareLink)
+    private shareLinkRepository: Repository<ShareLink>,
     private telegramService: TelegramService,
     private configService: ConfigService,
     private jwtService: JwtService,
@@ -94,7 +105,7 @@ export class FileService implements OnModuleInit {
     @InjectQueue(QUEUE_NAMES.FILE_UPLOAD)
     private fileUploadQueue: Queue,
   ) {
-    this.maxFileSize = this.parseFileSize(this.configService.get<string>('MAX_FILE_SIZE'));
+    this.maxFileSize = parseFileSize(this.configService.get<string>('MAX_FILE_SIZE'));
     this.thumbnailDir = this.configService.get<string>('THUMBNAIL_DIR') || path.join(process.cwd(), 'tmp', 'thumbnails');
   }
 
@@ -132,23 +143,13 @@ export class FileService implements OnModuleInit {
       this.configCacheService.get('FILE_ACCESS_COUNT_DEFAULT', '-1'),
       this.configCacheService.get('FILE_ACCESS_COUNT_MAX', '-1'),
     ]);
-    this.maxFileSize = this.parseFileSize(maxFileSize);
+    this.maxFileSize = parseFileSize(maxFileSize);
     this.fileTypeMode = (fileTypeMode === 'whitelist' ? 'whitelist' : 'blacklist');
     this.fileTypeFilter = fileTypeFilter
       ? fileTypeFilter.split(',').map(s => s.trim().toLowerCase()).filter(Boolean)
       : [];
-    this.accessCountDefault = this.parseAccessCount(accessCountDefault);
-    this.accessCountMax = this.parseAccessCount(accessCountMax);
-  }
-
-  private parseFileSize(val: string | undefined): number {
-    const parsed = Number(val);
-    return Number.isFinite(parsed) ? parsed : 20971520;
-  }
-
-  private parseAccessCount(val: string | undefined): number {
-    const parsed = Number(val);
-    return Number.isInteger(parsed) && parsed >= -1 ? parsed : -1;
+    this.accessCountDefault = parseAccessCount(accessCountDefault);
+    this.accessCountMax = parseAccessCount(accessCountMax);
   }
 
   private async assertUploadFolder(folderId: string | null | undefined, userId: string): Promise<void> {
@@ -236,7 +237,9 @@ export class FileService implements OnModuleInit {
     });
 
     // 事务外使本地缓存和旧衍生图失效，固定文件 ID 覆盖后不得继续展示旧内容。
-    this.fileCacheService.invalidate(target.id);
+    // C-05 修复：必须等待 invalidate 完成（含在途 build/spool 会话终结）后再返回，
+    // 禁止 fire-and-forget——否则旧缓存可能在新元数据生效后仍被读取，造成「旧内容配新元数据」。
+    await this.fileCacheService.invalidate(target.id);
     await Promise.all([
       fs.promises.unlink(path.join(this.thumbnailDir, `${target.id}.webp`)).catch(() => {}),
       fs.promises.unlink(path.join(this.thumbnailDir, `${target.id}.video.webp`)).catch(() => {}),
@@ -465,38 +468,6 @@ export class FileService implements OnModuleInit {
   }
 
   /**
-   * 修复 Multer 中文文件名乱码：浏览器发送文件名时若未使用 RFC 5987 编码，
-   * Multer/busboy 会将 UTF-8 字节误解析为 latin1，导致乱码。
-   * 检测并修复：若文件名不含中文字符但含 latin1 高位字节，尝试 latin1→utf8 恢复。
-   */
-  private fixFilenameEncoding(originalName: string): string {
-    // 已含中文字符 = 没有被误解析，直接返回
-    if (/[\u4e00-\u9fff]/u.test(originalName)) {
-      return originalName;
-    }
-    // 不含高位字节 = ASCII 文件名，无需修复
-    if (!/[\x80-\xFF]/.test(originalName)) {
-      return originalName;
-    }
-    // 尝试 latin1→utf8 恢复原始 UTF-8 编码
-    const decoded = Buffer.from(originalName, 'latin1').toString('utf8');
-    // 若恢复后包含 CJK 字符，说明原先被误解析了
-    if (/[\u4e00-\u9fff]/u.test(decoded)) {
-      return decoded;
-    }
-    return originalName;
-  }
-
-  /**
-   * 确保文件名有扩展名，若无则从 MIME 类型提取
-   */
-  private ensureFileExtension(filename: string, mimeType: string): string {
-    if (filename.includes('.')) return filename;
-    const ext = mimeType.split('/')[1] || 'bin';
-    return `${filename}.${ext}`;
-  }
-
-  /**
    * 清理 Multer 磁盘临时文件（上传到 Telegram 完成后调用，避免临时文件堆积）。
    * 内存存储（无 path）或文件不存在时静默跳过；删除失败仅告警，不影响主流程。
    */
@@ -525,7 +496,7 @@ export class FileService implements OnModuleInit {
       throw new BadRequestException(`文件大小不能超过 ${this.maxFileSize / 1024 / 1024}MB`);
     }
 
-    const fileName = this.fixFilenameEncoding(originalName);
+    const fileName = fixFilenameEncoding(originalName);
 
     await this.assertUploadFolder(folderId, user.id);
 
@@ -549,6 +520,9 @@ export class FileService implements OnModuleInit {
         resolvedFolderId,
         async (target) => {
           const oldTelegramFileId = target.telegramFileId;
+          // C-05 修复：进入 processing/replacing 前必须等待旧缓存（正式缓存 + spool + 在途 build）
+          // 完全失效，避免覆盖上传期间旧缓存与新元数据错配。
+          await this.fileCacheService.invalidate(target.id);
           // tempId 占位语义与新记录一致，由 FileUploadProcessor 按 fileId 更新为真实 TG 引用
           target.status = 'processing';
           target.uploadVersion = (target.uploadVersion || 1) + 1;
@@ -639,7 +613,7 @@ export class FileService implements OnModuleInit {
       throw new BadRequestException(`文件大小不能超过 ${this.maxFileSize / 1024 / 1024}MB`);
     }
 
-    const originalName = this.fixFilenameEncoding(file.originalname);
+    const originalName = fixFilenameEncoding(file.originalname);
 
     const fileSample = await this.getFileSample(file);
     const typeCheck = await this.isFileTypeAllowed(originalName, fileSample);
@@ -709,7 +683,7 @@ export class FileService implements OnModuleInit {
         });
         continue;
       }
-      const originalName = this.fixFilenameEncoding(file.originalname);
+      const originalName = fixFilenameEncoding(file.originalname);
       const fileSample = this.getFileSample(file);
       const typeCheck = await this.isFileTypeAllowed(originalName, fileSample);
       if (!typeCheck.allowed) {
@@ -733,7 +707,7 @@ export class FileService implements OnModuleInit {
 
     for (const file of passPreCheck) {
       try {
-        const originalName = this.fixFilenameEncoding(file.originalname);
+        const originalName = fixFilenameEncoding(file.originalname);
         const savedFile = await this.createProcessingFile(file, originalName, user, tagIds, true);
         // 将文件写入持久化路径供后台 processor 读取
         const pendingDir = path.join(process.cwd(), 'tmp', 'uploads', 'pending');
@@ -801,7 +775,7 @@ export class FileService implements OnModuleInit {
       .where(where);
 
     if (keyword) {
-      qb.andWhere('LOWER(file.originalName) LIKE :keyword', { keyword: `%${this.escapeLike(keyword.toLowerCase())}%` });
+      qb.andWhere('LOWER(file.originalName) LIKE :keyword', { keyword: `%${escapeLike(keyword.toLowerCase())}%` });
     }
 
     // 标签筛选：AND 逻辑 —— 文件必须同时拥有所有指定标签
@@ -818,7 +792,7 @@ export class FileService implements OnModuleInit {
 
     // 游标分页：解析游标并添加 WHERE 条件（使用元组比较，PostgreSQL 可高效利用索引）
     if (cursor) {
-      const decoded = this.decodeCursor(cursor);
+      const decoded = decodeCursor(cursor);
       qb.andWhere(
         '(file.createdAt, file.id) < (:cursorDate, :cursorId)',
         { cursorDate: new Date(decoded.createdAt), cursorId: decoded.id },
@@ -862,7 +836,7 @@ export class FileService implements OnModuleInit {
       const tagWheres: string[] = ['ft."tagId" = ANY($1::uuid[])'];
       if (userId) { tagWheres.push(`file."uploaderId" = $${tagIdx++}`); tagParams.push(userId); }
       if (!includeDeleted) { tagWheres.push('file."isDeleted" = false'); }
-      if (keyword) { tagWheres.push(`LOWER(file."originalName") LIKE $${tagIdx++}`); tagParams.push(`%${this.escapeLike(keyword.toLowerCase())}%`); }
+      if (keyword) { tagWheres.push(`LOWER(file."originalName") LIKE $${tagIdx++}`); tagParams.push(`%${escapeLike(keyword.toLowerCase())}%`); }
       const tagWhere = tagWheres.join(' AND ');
 
       if (tagIds.length > 1) {
@@ -889,7 +863,7 @@ export class FileService implements OnModuleInit {
     } else {
       const countQb = this.fileRepository.createQueryBuilder('file').where(where);
       if (keyword) {
-        countQb.andWhere('LOWER(file.originalName) LIKE :keyword', { keyword: `%${this.escapeLike(keyword.toLowerCase())}%` });
+        countQb.andWhere('LOWER(file.originalName) LIKE :keyword', { keyword: `%${escapeLike(keyword.toLowerCase())}%` });
       }
       total = await countQb.getCount();
     }
@@ -923,39 +897,10 @@ export class FileService implements OnModuleInit {
     let nextCursor: string | null = null;
     if (files.length === limit) {
       const lastFile = files[files.length - 1];
-      nextCursor = this.encodeCursor(lastFile.createdAt, lastFile.id);
+      nextCursor = encodeCursor(lastFile.createdAt, lastFile.id);
     }
 
     return { files, total, nextCursor };
-  }
-
-  /** 编码游标：base64({ createdAt, id }) */
-  private encodeCursor(createdAt: Date, id: string): string {
-    return Buffer.from(JSON.stringify({ createdAt: createdAt.toISOString(), id })).toString('base64');
-  }
-
-  /** 解码游标（非法游标返回 400 而非 500） */
-  private decodeCursor(cursor: string): { createdAt: string; id: string } {
-    try {
-      const decoded = JSON.parse(Buffer.from(cursor, 'base64').toString('utf8'));
-      if (
-        !decoded ||
-        typeof decoded.createdAt !== 'string' ||
-        typeof decoded.id !== 'string' ||
-        isNaN(Date.parse(decoded.createdAt))
-      ) {
-        throw new Error('游标结构非法');
-      }
-      return { createdAt: decoded.createdAt, id: decoded.id };
-    } catch (err) {
-      if (err instanceof BadRequestException) throw err;
-      throw new BadRequestException('非法的分页游标');
-    }
-  }
-
-  /** 转义 LIKE 通配符（% _ \），让用户关键词按字面匹配而非通配 */
-  private escapeLike(value: string): string {
-    return value.replace(/[\\%_]/g, (ch) => `\\${ch}`);
   }
 
   /**
@@ -999,7 +944,7 @@ export class FileService implements OnModuleInit {
    * 供前端在视频预览前判断冷资源单连接策略：未缓存时不走动态分片，
    * 播放期间钳制 seek；缓存完成后恢复 Range 跳转。
    */
-  async getCacheStatus(id: string, user: User): Promise<{ cached: boolean }> {
+  async getCacheStatus(id: string, user: User): Promise<{ status: 'cached' | 'cold' | 'unknown'; cached: boolean }> {
     const file = await this.fileRepository.findOne({
       where: { id, isDeleted: false },
     });
@@ -1009,7 +954,8 @@ export class FileService implements OnModuleInit {
     }
 
     await this.assertFileReadable(file, user);
-    return { cached: this.isFileCached(id) };
+    const cached = this.isFileCached(id);
+    return { status: cached ? 'cached' : 'cold', cached };
   }
 
   /** 仅查缓存路径，不做用户权限断言（分享链路复用）。 */
@@ -2042,7 +1988,7 @@ export class FileService implements OnModuleInit {
     }
 
     const mimeType = file.mimeType || 'application/octet-stream';
-    const filename = this.ensureFileExtension(file.originalName, mimeType);
+    const filename = ensureFileExtension(file.originalName, mimeType);
 
     return { stream, contentType: mimeType, filename, size: Number(file.size), accessLogId };
   }
@@ -2066,15 +2012,8 @@ export class FileService implements OnModuleInit {
     total: number;
     accessLogId?: string;
   } | null> {
-    // 解析 Range: bytes=start-end
-    const match = rangeHeader.match(/bytes=(\d+)-(\d*)/);
-    if (!match) return null;
-
     // 请求级无缓存：Range 依赖本地缓存文件，无缓存时回退完整下载
     if (opts?.noCache) return null;
-
-    const start = parseInt(match[1], 10);
-    const end = match[2] ? parseInt(match[2], 10) : undefined;
 
     const file = await this.fileRepository.findOne({
       where: { id, isDeleted: false },
@@ -2099,11 +2038,14 @@ export class FileService implements OnModuleInit {
     }
 
     const total = Number(file.size);
-    const actualEnd = end !== undefined ? Math.min(end, total - 1) : total - 1;
-
-    if (start >= total || start > actualEnd) {
+    // 严格单 Range 解析：closed/open-ended/suffix；非法/越界统一 416，
+    // 不再静默回退 200，避免垃圾 Range 与错误 Content-Length 组合的解析问题。
+    const parsed = parseByteRange(rangeHeader, total);
+    if (!parsed.ok) {
       throw new RangeNotSatisfiableException(total);
     }
+    const start = parsed.range.start;
+    const actualEnd = parsed.range.end;
 
     // 读取指定范围的文件片段
     const chunkSize = actualEnd - start + 1;
@@ -2126,7 +2068,7 @@ export class FileService implements OnModuleInit {
     }
 
     const mimeType = file.mimeType || 'application/octet-stream';
-    const filename = this.ensureFileExtension(file.originalName, mimeType);
+    const filename = ensureFileExtension(file.originalName, mimeType);
 
     return {
       stream: readStream,
@@ -2284,9 +2226,68 @@ export class FileService implements OnModuleInit {
 
     const mimeType = file.mimeType || 'application/octet-stream';
     const isInline = /^(image|video|audio)\//.test(mimeType);
-    const filename = this.ensureFileExtension(file.originalName, mimeType);
+    const filename = ensureFileExtension(file.originalName, mimeType);
 
     return { stream, contentType: mimeType, filename, size: actualSize, isInline, accessLogId };
+  }
+
+  /**
+   * 兼容老 URL /files/public/:id 的「懒创建 + 重定向」：
+   * - 查找文件，校验存在且公开
+   * - 查找 ShareLink（token = file.id），不存在则自动创建（复制遗留约束字段）
+   * - 返回 { file, shareLink }，由 controller 完成 302 重定向
+   *
+   * 将原本散落在 controller 的 Repository 直接访问下沉到 Service，
+   * 满足「Controller 只做输入校验与响应装配」的架构治理要求。
+   */
+  async ensureLegacyPublicShare(id: string): Promise<{ file: File; shareLink: ShareLink | null }> {
+    // 1. 查找文件，校验存在且未删除（select 包含遗留约束字段，用于懒创建 ShareLink）
+    const file = await this.fileRepository.findOne({
+      where: { id, isDeleted: false },
+      select: ['id', 'accessType', 'uploaderId', 'originalName', 'password', 'maxAccessCount', 'expiresIn', 'expiresStartAt'],
+    });
+    if (!file) {
+      throw new NotFoundException('文件不存在');
+    }
+
+    // 2. 私有文件不允许公开访问
+    if (file.accessType !== FileAccessType.PUBLIC) {
+      throw new ForbiddenException('此文件为私有文件，不提供公开访问');
+    }
+
+    // 3. 懒创建 ShareLink（如果不存在）——复制文件的遗留约束字段
+    let shareLink = await this.shareLinkRepository.findOne({
+      where: { token: id, isDeleted: false },
+    });
+    if (!shareLink) {
+      shareLink = this.shareLinkRepository.create({
+        token: id, // 用文件 id 作为 token，确保老链接兼容
+        targetType: ShareTargetType.FILE,
+        targetId: id,
+        creatorId: file.uploaderId,
+        // 复制文件的遗留约束（Phase 2 之前通过 /files/:id/password 等端点设置的）
+        password: file.password ?? null,
+        maxAccessCount: file.maxAccessCount ?? -1,
+        expiresIn: file.expiresIn ?? null,
+        expiresStartAt: file.expiresStartAt ?? null,
+        status: ShareLinkStatus.ACTIVE,
+      });
+      try {
+        await this.shareLinkRepository.save(shareLink);
+      } catch {
+        // 并发创建时可能触发唯一约束冲突，忽略——另一个请求已创建
+        shareLink = await this.shareLinkRepository.findOne({
+          where: { token: id, isDeleted: false },
+        });
+      }
+    }
+
+    // 重校：并发创建/即时取消等边界下 shareLink 仍可能为空，避免带着空链接重定向
+    if (!shareLink) {
+      throw new NotFoundException('分享不存在或已被取消');
+    }
+
+    return { file, shareLink };
   }
 
   /**
@@ -2306,7 +2307,7 @@ export class FileService implements OnModuleInit {
     return {
       stream,
       contentType: file.mimeType,
-      filename: this.ensureFileExtension(file.originalName, file.mimeType),
+      filename: ensureFileExtension(file.originalName, file.mimeType),
       size: actualSize,
       accessLogId,
     };
@@ -2323,25 +2324,23 @@ export class FileService implements OnModuleInit {
     total: number;
     accessLogId?: string;
   } | null> {
-    const match = rangeHeader.match(/bytes=(\d+)-(\d*)/);
-    if (!match) return null;
-
     const file = await this.getPublicMediaFile(id);
-    const cachedPath = this.fileCacheService.getCachedPath(file.id);
-    if (!cachedPath) return null;
-
     const total = Number(file.size);
-    const start = Number.parseInt(match[1], 10);
-    const requestedEnd = match[2] ? Number.parseInt(match[2], 10) : total - 1;
-    const end = Math.min(requestedEnd, total - 1);
-    if (!Number.isSafeInteger(total) || total <= 0 || start >= total || start > end) {
+    const parsed = parseByteRange(rangeHeader, total);
+    // 非法/越界统一 416（含正确 Content-Range）；语法性错误同样按不可满足处理，
+    // 避免把垃圾 Range 悄悄回退为 200 造成客户端按完整长度解析出错。
+    if (!parsed.ok) {
       throw new RangeNotSatisfiableException(total);
     }
+    const { start, end } = parsed.range;
+
+    const cachedPath = this.fileCacheService.getCachedPath(file.id);
+    if (!cachedPath) return null;
 
     return {
       stream: createReadStream(cachedPath, { start, end }),
       contentType: file.mimeType,
-      filename: this.ensureFileExtension(file.originalName, file.mimeType),
+      filename: ensureFileExtension(file.originalName, file.mimeType),
       size: end - start + 1,
       start,
       end,
@@ -2356,8 +2355,11 @@ export class FileService implements OnModuleInit {
     if (file.accessType !== FileAccessType.PUBLIC) {
       throw new ForbiddenException('此文件为私有文件，不提供媒体直链');
     }
-    if (!/^(image|video|audio)\//i.test(file.mimeType || '')) {
-      throw new BadRequestException('仅图片、音频和视频文件支持媒体直链');
+    // C-01 修复：公开 /media 直链只允许白名单内的安全位图与受支持音视频。
+    // SVG、XML、HTML、脚本型内容及任何 MIME/魔数不一致的类型一律拒绝 inline，
+    // 杜绝同源持久型 XSS 面。此阻断不可通过功能开关关闭。
+    if (!isSafePublicInlineContentType(file.mimeType || '')) {
+      throw new BadRequestException('该类型不支持媒体直链');
     }
     if (file.password || file.maxAccessCount > 0) {
       throw new ForbiddenException('受密码或访问次数保护的文件不能使用媒体直链');
@@ -2420,7 +2422,7 @@ export class FileService implements OnModuleInit {
     const accessLogId = await this.createPublicMediaAccessLog(file, ip);
     const mimeType = file.mimeType || 'application/octet-stream';
     const isInline = /^(image|video|audio)\//.test(mimeType);
-    const filename = this.ensureFileExtension(file.originalName, mimeType);
+    const filename = ensureFileExtension(file.originalName, mimeType);
     return { stream, contentType: mimeType, filename, size: actualSize, isInline, accessLogId };
   }
 
@@ -2467,7 +2469,7 @@ export class FileService implements OnModuleInit {
       throw new BadRequestException(`文件大小不能超过 ${this.maxFileSize / 1024 / 1024}MB`);
     }
 
-    const originalName = this.fixFilenameEncoding(file.originalname);
+    const originalName = fixFilenameEncoding(file.originalname);
 
     await this.assertUploadFolder(folderId, user.id);
 
@@ -2522,7 +2524,7 @@ export class FileService implements OnModuleInit {
           if (abortController.signal.aborted) {
             throw new Error('任务已被放弃（客户端连接断开）');
           }
-          const originalName = this.fixFilenameEncoding(file.originalname);
+          const originalName = fixFilenameEncoding(file.originalname);
           const fileSample = this.getFileSample(file);
           const typeCheck = await this.isFileTypeAllowed(originalName, fileSample);
           if (!typeCheck.allowed) {
@@ -2869,7 +2871,7 @@ export class FileService implements OnModuleInit {
 
     const mimeType = file.mimeType || 'application/octet-stream';
     const isInline = /^(image|video|audio)\//.test(mimeType);
-    const filename = this.ensureFileExtension(file.originalName, mimeType);
+    const filename = ensureFileExtension(file.originalName, mimeType);
 
     return { stream, contentType: mimeType, filename, size: actualSize, isInline, accessLogId };
   }
@@ -2915,7 +2917,7 @@ export class FileService implements OnModuleInit {
     }
 
     const mimeType = file.mimeType || 'application/octet-stream';
-    const filename = this.ensureFileExtension(file.originalName, mimeType);
+    const filename = ensureFileExtension(file.originalName, mimeType);
 
     return { stream, contentType: mimeType, filename, size: Number(file.size), accessLogId };
   }
@@ -2940,13 +2942,6 @@ export class FileService implements OnModuleInit {
     total: number;
     accessLogId?: string;
   } | null> {
-    // 解析 Range: bytes=start-end
-    const match = rangeHeader.match(/bytes=(\d+)-(\d*)/);
-    if (!match) return null;
-
-    const start = parseInt(match[1], 10);
-    const end = match[2] ? parseInt(match[2], 10) : undefined;
-
     const file = await this.fileRepository.findOne({
       where: { id, isDeleted: false },
     });
@@ -2964,12 +2959,13 @@ export class FileService implements OnModuleInit {
     }
 
     const total = Number(file.size);
-    const actualEnd = end !== undefined ? Math.min(end, total - 1) : total - 1;
-
-    if (start >= total || start > actualEnd) {
+    // 严格单 Range 解析：支持 closed/open-ended/suffix；非法/越界统一 416
+    const parsed = parseByteRange(rangeHeader, total);
+    if (!parsed.ok) {
       throw new RangeNotSatisfiableException(total);
     }
-
+    const start = parsed.range.start;
+    const actualEnd = parsed.range.end;
     const chunkSize = actualEnd - start + 1;
     // 冷资源（无正式缓存）不支持真实分片：返回 null 交由控制器回退全量预览，
     // 由 getPreviewStream → getOrCacheStream 复用同一缓存构建会话，保证单连接加载；
@@ -2995,7 +2991,7 @@ export class FileService implements OnModuleInit {
     }
 
     const mimeType = file.mimeType || 'application/octet-stream';
-    const filename = this.ensureFileExtension(file.originalName, mimeType);
+    const filename = ensureFileExtension(file.originalName, mimeType);
 
     return {
       stream: readStream,
@@ -3026,9 +3022,6 @@ export class FileService implements OnModuleInit {
     total: number;
     accessLogId?: string;
   } | null> {
-    const match = rangeHeader.match(/bytes=(\d+)-(\d*)/);
-    if (!match) return null;
-
     const file = await this.fileRepository.findOne({ where: { id: fileId, isDeleted: false } });
     if (!file) throw new NotFoundException('文件不存在');
 
@@ -3036,22 +3029,23 @@ export class FileService implements OnModuleInit {
       throw new BadRequestException('文件上传失败，无法下载或预览');
     }
 
-    const cachedPath = this.fileCacheService.getCachedPath(file.id);
-    if (!cachedPath) return null;
-
     const total = Number(file.size);
-    const start = Number.parseInt(match[1], 10);
-    const requestedEnd = match[2] ? Number.parseInt(match[2], 10) : total - 1;
-    const end = Math.min(requestedEnd, total - 1);
-    if (!Number.isSafeInteger(total) || total <= 0 || start >= total || start > end) {
+    // 严格单 Range 解析：支持 closed/open-ended/suffix；非法/越界统一 416
+    const parsed = parseByteRange(rangeHeader, total);
+    if (!parsed.ok) {
       throw new RangeNotSatisfiableException(total);
     }
+    const start = parsed.range.start;
+    const end = parsed.range.end;
+
+    const cachedPath = this.fileCacheService.getCachedPath(file.id);
+    if (!cachedPath) return null;
 
     const mimeType = file.mimeType || 'application/octet-stream';
     return {
       stream: createReadStream(cachedPath, { start, end }),
       contentType: mimeType,
-      filename: this.ensureFileExtension(file.originalName, mimeType),
+      filename: ensureFileExtension(file.originalName, mimeType),
       size: end - start + 1,
       isInline: /^(image|video|audio)\//.test(mimeType),
       start,

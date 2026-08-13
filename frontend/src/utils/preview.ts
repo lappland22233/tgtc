@@ -3,7 +3,8 @@
  *
  * 预览接口（返回 inline 内容）：
  * - 登录态: GET /api/files/:fileId/preview（同源 Cookie 自动携带，支持 Range）
- * - 分享:   GET /api/s/:token/preview/:fileId（密码分享附 ?access=<JWT>）
+ * - 分享:   GET /api/s/:token/preview/:fileId（密码分享凭据通过 HttpOnly Cookie 携带，
+ *           前端不再持有或拼接 access JWT，防止凭据落入 URL、Referer、日志与导出）
  */
 
 import { getFileIconType } from './file-icon-type';
@@ -58,24 +59,21 @@ export function buildFilePreviewUrl(fileId: string): string {
 }
 
 /**
- * 构造分享预览 URL。
- * 固定同源拼接，密码分享时把后端签发的访问 JWT 附在 access 查询参数中，
- * 禁止把 JWT 附加到外部传入的任意 URL。
+ * 构造分享缩略图 URL。
+ * 凭据由 HttpOnly Cookie 携带，URL 中不包含任何访问 JWT（C-02 修复）。
  */
-export function buildShareThumbnailUrl(token: string, fileId: string, accessJwt?: string): string {
-  const base = `/api/s/${encodeURIComponent(token)}/thumbnail/${encodeURIComponent(fileId)}`;
-  return accessJwt ? `${base}?access=${encodeURIComponent(accessJwt)}` : base;
+export function buildShareThumbnailUrl(token: string, fileId: string): string {
+  return `/api/s/${encodeURIComponent(token)}/thumbnail/${encodeURIComponent(fileId)}`;
 }
 
-/** 构造分享高清封面 URL（密码分享时附 access JWT）。 */
-export function buildShareHdThumbnailUrl(token: string, fileId: string, accessJwt?: string): string {
-  const base = `/api/s/${encodeURIComponent(token)}/thumbnail-hd/${encodeURIComponent(fileId)}`;
-  return accessJwt ? `${base}?access=${encodeURIComponent(accessJwt)}` : base;
+/** 构造分享高清封面 URL（凭据同样由 Cookie 携带）。 */
+export function buildShareHdThumbnailUrl(token: string, fileId: string): string {
+  return `/api/s/${encodeURIComponent(token)}/thumbnail-hd/${encodeURIComponent(fileId)}`;
 }
 
-export function buildSharePreviewUrl(token: string, fileId: string, accessJwt?: string): string {
-  const base = `/api/s/${encodeURIComponent(token)}/preview/${encodeURIComponent(fileId)}`;
-  return accessJwt ? `${base}?access=${encodeURIComponent(accessJwt)}` : base;
+/** 构造分享预览 URL（凭据由 Cookie 携带）。 */
+export function buildSharePreviewUrl(token: string, fileId: string): string {
+  return `/api/s/${encodeURIComponent(token)}/preview/${encodeURIComponent(fileId)}`;
 }
 
 /**
@@ -85,33 +83,29 @@ export function isMediaDirectLinkKind(kind: PreviewKind | null): kind is 'image'
   return kind === 'image' || kind === 'video' || kind === 'audio';
 }
 
+/** 缓存状态三态：cached=已有正式缓存；cold=需冷回源；unknown=无法确定 */
+export type CacheStatus = 'cached' | 'cold' | 'unknown';
+
 /**
- * 登录态查询文件是否已有正式本地缓存。
- * 供视频预览判断冷资源单连接策略：未缓存时钳制 seek，缓存完成后恢复 Range 跳转。
- * 查询失败时按「已缓存」处理，避免误锁进度条。
+ * 登录态查询文件缓存状态。
+ * 供视频预览判断冷资源单连接策略：cold/unknown 时保守钳制 seek，cached 时恢复 Range 跳转。
+ * 查询失败返回 unknown（保守限制 seek，避免对未缓存文件发起动态分段回源）。
  */
-export async function fetchFileCacheStatus(fileId: string): Promise<boolean> {
+export async function fetchFileCacheStatus(fileId: string): Promise<CacheStatus> {
   try {
     const res = await api.get(`/files/${encodeURIComponent(fileId)}/cache-status`);
-    return res.data?.data?.cached === true;
+    return res.data?.data?.status === 'cached' ? 'cached' : 'cold';
   } catch {
-    return true;
+    return 'unknown';
   }
 }
 
-/** 分享态查询文件是否已有正式本地缓存（与登录态同语义）。 */
-export async function fetchShareCacheStatus(
-  token: string,
-  fileId: string,
-  accessJwt?: string,
-): Promise<boolean> {
+/** 分享态查询文件缓存状态（与登录态同语义，凭据由 Cookie 携带）。 */
+export async function fetchShareCacheStatus(token: string, fileId: string): Promise<CacheStatus> {
   try {
-    const suffix = accessJwt ? `?access=${encodeURIComponent(accessJwt)}` : '';
-    const res = await api.get(
-      `/s/${encodeURIComponent(token)}/cache-status/${encodeURIComponent(fileId)}${suffix}`,
-    );
-    return res.data?.data?.cached === true;
+    const res = await api.get(`/s/${encodeURIComponent(token)}/cache-status/${encodeURIComponent(fileId)}`);
+    return res.data?.data?.status === 'cached' ? 'cached' : 'cold';
   } catch {
-    return true;
+    return 'unknown';
   }
 }

@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { buildProgressKey, readResumePoint } from './mediaPlayback';
-import type { MediaSourceContext } from './mediaPlayback';
+import { setActivePinia, createPinia } from 'pinia';
+import { buildProgressKey, readResumePoint, useMediaPlaybackStore } from './mediaPlayback';
+import type { MediaSourceContext, MediaSession } from './mediaPlayback';
 
 /** 内存版 localStorage（node 测试环境无真实实现） */
 function createMemoryStorage() {
@@ -18,7 +19,8 @@ function createMemoryStorage() {
 
 const userCtx: MediaSourceContext = { type: 'user', userId: 'user-1' };
 const shareCtx: MediaSourceContext = { type: 'share', token: 'abc123' };
-const shareJwtCtx: MediaSourceContext = { type: 'share', token: 'abc123', accessJwt: 'secret-jwt' };
+// 加密分享仅标记 encrypted，凭据存于后端 HttpOnly Cookie，前端不持有 accessJwt
+const shareEncryptedCtx: MediaSourceContext = { type: 'share', token: 'abc123', encrypted: true };
 
 describe('buildProgressKey', () => {
   it('登录态与分享态使用不同前缀', () => {
@@ -32,7 +34,7 @@ describe('buildProgressKey', () => {
   });
 
   it('分享访问凭据不参与进度键（不进 localStorage）', () => {
-    expect(buildProgressKey(shareJwtCtx, 'file-1')).toBe(buildProgressKey(shareCtx, 'file-1'));
+    expect(buildProgressKey(shareEncryptedCtx, 'file-1')).toBe(buildProgressKey(shareCtx, 'file-1'));
   });
 });
 
@@ -123,5 +125,70 @@ describe('readResumePoint', () => {
     const key = buildProgressKey(userCtx, 'file-1');
     localStorage.setItem(key, JSON.stringify({ t: 60, d: 300, ts: Date.now() }));
     expect(readResumePoint(userCtx, 'file-1')).toBe(60);
+  });
+});
+
+describe('useMediaPlaybackStore - 关闭/最小化分离与授权域', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    vi.stubGlobal('localStorage', createMemoryStorage());
+  });
+
+  const makeSession = (overrides: Partial<MediaSession> = {}): MediaSession => ({
+    context: { type: 'share', token: 'tok-a' },
+    item: {
+      id: 'file-1',
+      name: 'demo.mp4',
+      mimeType: 'video/mp4',
+      kind: 'video',
+      src: '/api/s/tok-a/preview/file-1',
+      contentVersion: 1,
+    },
+    playlist: [],
+    playlistIndex: -1,
+    ...overrides,
+  });
+
+  it('最小化仅收起为迷你播放器，不停止媒体实例（H-01 保留）', () => {
+    const store = useMediaPlaybackStore();
+    const bridge = { stop: vi.fn(), play: vi.fn(), pause: vi.fn(), togglePlay: vi.fn(), seekTo: vi.fn(), seekBy: vi.fn(), next: vi.fn(), prev: vi.fn() };
+    store.registerBridge(bridge);
+    store.open(makeSession());
+
+    store.minimize();
+    expect(store.expanded).toBe(false);
+    expect(store.session).not.toBeNull();
+    expect(bridge.stop).not.toHaveBeenCalled();
+  });
+
+  it('关闭（requestStop）真正停止媒体并清空会话（H-01）', () => {
+    const store = useMediaPlaybackStore();
+    const bridge = { stop: vi.fn(), play: vi.fn(), pause: vi.fn(), togglePlay: vi.fn(), seekTo: vi.fn(), seekBy: vi.fn(), next: vi.fn(), prev: vi.fn() };
+    store.registerBridge(bridge);
+    store.open(makeSession());
+
+    store.requestStop();
+    expect(bridge.stop).toHaveBeenCalledTimes(1);
+  });
+
+  it('图片/PDF/文本类型最小化等价于停止（不进入迷你播放器）', () => {
+    const store = useMediaPlaybackStore();
+    const bridge = { stop: vi.fn(), play: vi.fn(), pause: vi.fn(), togglePlay: vi.fn(), seekTo: vi.fn(), seekBy: vi.fn(), next: vi.fn(), prev: vi.fn() };
+    store.registerBridge(bridge);
+    store.open(makeSession({
+      item: { id: 'img-1', name: 'a.png', mimeType: 'image/png', kind: 'image', src: '/x.png' },
+    }));
+
+    store.minimize();
+    expect(bridge.stop).toHaveBeenCalledTimes(1);
+  });
+
+  it('离开分享授权域（外部调用 requestStop）后会话清空', () => {
+    const store = useMediaPlaybackStore();
+    store.open(makeSession());
+    expect(store.session?.context.type).toBe('share');
+
+    store.requestStop();
+    expect(store.session).toBeNull();
   });
 });
