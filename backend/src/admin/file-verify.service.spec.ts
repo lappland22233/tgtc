@@ -176,6 +176,20 @@ describe('FileVerifyService.runVerification', () => {
     expect(completed).toMatchObject({ valid: 1, sizeMismatch: 1, backfilled: 0, invalid: 0 });
   });
 
+  it('metadata_only 无 file_path 时仍判定 valid，且不执行空路径回填', async () => {
+    const { service, fileRepository, telegramService, fileVerifyTaskRepository } = setupRun({ mode: 'apply' });
+    fileRepository.createQueryBuilder.mockReturnValueOnce(makeSelectChain([
+      { id: 'f1', originalName: 'a.bin', size: 10, telegramFileId: 'tg-1', telegramFilePath: null },
+    ]));
+    telegramService.verifyFileExists.mockResolvedValue({ file_id: 'tg-1', file_path: '', file_size: 10 });
+
+    await service.runVerification('task-1');
+
+    expect(fileRepository.createQueryBuilder).toHaveBeenCalledTimes(1);
+    const completed = taskSetPayloads(fileVerifyTaskRepository).find((s) => s.status === 'completed');
+    expect(completed).toMatchObject({ valid: 1, invalid: 0, backfilled: 0 });
+  });
+
   it('allReady=true 时不追加 telegramFilePath 为空的条件', async () => {
     const { service, fileRepository } = setupRun({ allReady: true });
     fileRepository.createQueryBuilder.mockReturnValueOnce(makeSelectChain([]));

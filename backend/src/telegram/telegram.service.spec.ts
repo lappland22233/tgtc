@@ -293,16 +293,20 @@ describe('TelegramService realtime stream', () => {
         .rejects.not.toBeInstanceOf(TelegramFileNotFoundError);
     });
 
-    it('exposes verifyFileExists metadata and rejects stale file_id', async () => {
+    it('exposes metadata without preloading file content and rejects stale file_id', async () => {
       mockedAxios.get.mockResolvedValueOnce({
-        data: { ok: true, result: { file_id: 'fresh-id', file_path: 'documents/a.bin', file_size: 42 } },
+        data: { ok: true, result: { file_id: 'fresh-id', file_size: 42 } },
       } as any);
       const meta = await createService().verifyFileExists('fresh-id');
-      expect(meta).toEqual({ file_id: 'fresh-id', file_path: 'documents/a.bin', file_size: 42 });
+      expect(meta).toEqual({ file_id: 'fresh-id', file_path: '', file_size: 42 });
       expect(mockedAxios.get).toHaveBeenCalledWith(
         expect.stringContaining('/getFile'),
-        expect.objectContaining({ params: { file_id: 'fresh-id' } }),
+        expect.objectContaining({
+          params: { file_id: 'fresh-id', metadata_only: true },
+          timeout: 15 * 1000,
+        }),
       );
+      expect(String(mockedAxios.get.mock.calls[0][0])).not.toContain('/file/bot');
 
       mockedAxios.get.mockRejectedValueOnce({
         response: { status: 400, data: { ok: false, description: 'Bad Request: invalid file_id' } },

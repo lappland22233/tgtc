@@ -17053,7 +17053,14 @@ td::Status Client::process_get_webhook_info_query(PromisedQueryPtr &query) {
 
 td::Status Client::process_get_file_query(PromisedQueryPtr &query) {
   td::string file_id = query->arg("file_id").str();
-  check_remote_file_id(file_id, std::move(query), [this](object_ptr<td_api::file> file, PromisedQueryPtr query) {
+  bool metadata_only = to_bool(query->arg("metadata_only"));
+  check_remote_file_id(file_id, std::move(query),
+                       [this, metadata_only](object_ptr<td_api::file> file, PromisedQueryPtr query) {
+    if (metadata_only) {
+      // Custom local Bot API extension: getRemoteFile has already validated file_id and returned metadata.
+      // Do not call downloadFile, otherwise TDLib preloads the complete file into local storage.
+      return answer_query(JsonFile(file.get(), this, false), std::move(query));
+    }
     do_get_file(std::move(file), std::move(query));
   });
   return td::Status::OK();

@@ -240,11 +240,14 @@ Redis 承载 `metrics-aggregation`、`attack-detection`、`alert-evaluation`、`
 行为约定：
 
 - **dry-run（默认）**：仅统计，不修改数据；
-- **apply**：校验 `ready` 文件在 Telegram 端是否存在——确认失效的标记为 `error`，路径缺失但校验有效的回填路径；
+- **apply**：校验 `ready` 文件在 Telegram 端是否存在——确认失效的标记为 `error`，路径缺失且校验返回本地路径时回填；
 - 仅明确的永久性错误（`invalid file_id` / `file not found`）会被标记；网络超时、429、5xx 只计入统计，不误标；
+- 体检通过 Telegram Bot API `getFile` **仅获取元数据，不下载文件内容**。使用本项目二次开发的本地 Bot API 时，请求携带 `metadata_only=true`：Bot API 只做 `file_id` 校验后直接返回，**不会调用 TDLib `downloadFile` 预载文件**（官方/未升级的 Bot API 会忽略该参数，默认仍只返回元数据）；
 - 体检分批有限并发执行，核心操作记录脱敏审计统计；
 - 任务状态（`queued/running/completed/failed`）、进度与统计持久化在 `file_verify_tasks` 表；失败时仅保留脱敏错误摘要；
 - 进程崩溃时由 Bull 对 stalled job 重新投递接管执行；应用启动时会清理"入库后未入队"的孤儿任务，释放活动槽位。
+
+> **部署提醒**：`metadata_only` 是本地二次开发 Bot API 的扩展。升级后**必须重新编译并重启 `telegram-bot-api`**，否则该参数会被旧二进制忽略，体检仍可能触发 `downloadFile` 预载。构建方法见"部署"章节（`cmake -DCMAKE_BUILD_TYPE=Release ..` + `cmake --build .`）。
 
 ### SMTP
 

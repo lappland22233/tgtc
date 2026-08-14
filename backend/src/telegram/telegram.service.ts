@@ -171,31 +171,37 @@ export class TelegramService {
   }
 
   /**
-   * 上传文件后立即调用 getFile 获取真实的 file_path
+   * 调用 Telegram /getFile 获取元数据，不请求 /file/bot... 下载地址，不传输文件内容。
+   * 上传提交后的路径解析允许较长等待；批量体检使用独立短超时，避免单项探测拖慢整批。
    */
-  private async getFileInfo(file_id: string): Promise<{
+  private async getFileInfo(
+    file_id: string,
+    timeoutMs = 5 * 60 * 1000,
+    label = 'getFileInfo',
+    metadataOnly = false,
+  ): Promise<{
     file_id: string;
     file_path: string;
     file_size: number;
   }> {
     return this.telegramRequest(async () => {
       const response = await axios.get(`${this.getBaseUrl()}/getFile`, {
-        params: { file_id },
-        timeout: 5 * 60 * 1000, // getFile 超时 5 分钟（大文件上传后 Telegram 处理需较长时间）
+        params: { file_id, ...(metadataOnly ? { metadata_only: true } : {}) },
+        timeout: timeoutMs,
       });
       const result = response.data.result;
       return {
         file_id: result.file_id,
-        file_path: result.file_path,
+        // metadata_only 不触发 downloadFile，因此不会返回本地 file_path；体检只需成功响应即可。
+        file_path: result.file_path || '',
         file_size: result.file_size || 0,
       };
-    }, 'getFileInfo');
+    }, label);
   }
 
   /**
-   * 校验 file_id 是否仍存在并返回元数据（不下载文件内容）。
-   * 仅调用 /getFile 获取 file_path/file_size，适合批量体检与下载降级前的确认；
-   * file_id 失效时抛出 TelegramFileNotFoundError，暂时性错误保持原类型抛出。
+   * 轻量校验 file_id：仅调用 /getFile 获取元数据，Telegram 成功返回即视为有效。
+   * 不下载文件内容；file_id 永久失效时抛 TelegramFileNotFoundError，超时等暂时性错误保持原类型。
    */
   async verifyFileExists(file_id: string): Promise<{
     file_id: string;
@@ -205,7 +211,7 @@ export class TelegramService {
     if (!file_id || file_id.length > 4096) {
       throw new TelegramFileNotFoundError('非法的 Telegram file_id');
     }
-    return this.getFileInfo(file_id);
+    return this.getFileInfo(file_id, 15 * 1000, 'verifyFileExists', true);
   }
 
   async uploadFile(

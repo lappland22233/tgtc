@@ -270,17 +270,18 @@ export class FileVerifyService implements OnModuleInit {
           }
 
           try {
+            // 轻量探测仅调用 Telegram /getFile；成功返回元数据即视为文件有效，不下载内容。
             const meta = await this.telegramService.verifyFileExists(remoteFileId);
             if (meta.file_size > 0 && file.size !== meta.file_size) {
-              // 大小不一致仅报告，不误标
+              // 大小差异仅保留观察统计，不影响 valid 判定，也不会触发内容下载复核。
               stats.sizeMismatch++;
             }
-            // 校验有效：path 缺失时回填（条件更新，防止覆盖上传竞态）
-            if (task.mode === 'apply' && (!file.telegramFilePath || !file.telegramFilePath.trim())) {
+            // 标准 getFile 可回填路径；metadata_only 响应不含本地路径时跳过，避免空值回填与误计数。
+            if (task.mode === 'apply' && (!file.telegramFilePath || !file.telegramFilePath.trim()) && meta.file_path) {
               await this.fileRepository
                 .createQueryBuilder()
                 .update(File)
-                .set({ telegramFilePath: meta.file_path || '' })
+                .set({ telegramFilePath: meta.file_path })
                 .where('id = :id', { id: file.id })
                 .andWhere("status = 'ready'")
                 .andWhere('uploadVersion = :version', { version: file.uploadVersion })
