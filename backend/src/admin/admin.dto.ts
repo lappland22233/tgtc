@@ -76,6 +76,38 @@ export class BatchDeleteFilesDto {
   ids: string[];
 }
 
+/** 文件体检请求（Telegram file_id 有效性校验） */
+export class FileVerifyDto {
+  /**
+   * dry-run：仅统计，不修改数据（默认）；
+   * apply：执行校验并按结果标记 error / 回填 telegramFilePath。
+   */
+  @IsOptional()
+  @IsIn(['dry-run', 'apply'])
+  mode?: 'dry-run' | 'apply' = 'dry-run';
+
+  /**
+   * true：校验全部 ready 文件；false（默认）：仅校验 telegramFilePath 为空 的候选文件。
+   */
+  @IsOptional()
+  @IsBoolean()
+  allReady?: boolean = false;
+
+  /** 单次最大检查数量，防止占满数据库连接池或触发 Bot API 限流 */
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(2000)
+  limit?: number = 500;
+
+  /** 并发校验数 */
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(8)
+  concurrency?: number = 4;
+}
+
 export class ConfigDto {
   @IsString()
   @IsNotEmpty()

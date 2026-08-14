@@ -201,6 +201,7 @@ Redis 承载 `metrics-aggregation`、`attack-detection`、`alert-evaluation`、`
 | `FILE_CACHE_BUILD_IDLE_TIMEOUT_MS` | `60000` | 缓存构建无进展超时 |
 | `FILE_CACHE_BUILD_TOTAL_TIMEOUT_MS` | `1800000` | 单次缓存构建总时限 |
 | `THUMBNAIL_DIR` | `tmp/thumbnails` | 缩略图目录 |
+| `FILE_PROCESSING_STALE_MINUTES` | `60` | 上传队列僵尸任务恢复阈值（分钟） |
 
 实时流要求二次开发 Bot API 使用 `--enable-file-streaming` 启动，后端访问：
 
@@ -209,6 +210,33 @@ Redis 承载 `metrics-aggregation`、`attack-detection`、`alert-evaluation`、`
 ```
 
 缓存容量、最低磁盘空间和 TTL 存放在系统配置中，默认分别为 10 GB、1 GB、3 天，可从超级管理员后台热更新。
+
+## Telegram 文件引用完整性
+
+### Bot API workdir 持久性（根因预防）
+
+文件存储的 Telegram `file_id` 与 Bot API 的 **session + 本地文件目录（`--dir` workdir）** 强绑定：
+
+- **一旦更换 `--dir`、清空或重命名 workdir，所有历史 `file_id` 将立即失效（404）**，对应文件全部不可下载；
+- 后端 `TELEGRAM_LOCAL_FILE_DIR` 必须与 systemd 服务 `ExecStart` 中的 `--dir` 参数**完全一致**；
+- 禁止使用 `/tmp` 等临时目录作为 workdir（会被系统清理）；
+- 禁止在同一 Bot Token 上使用多个不同的 `--dir` 交替启动；
+- 备份/迁移时必须整体保留 workdir（含 session 与 documents 等子目录），不可只复制数据库。
+
+`deploy.sh` 已在编译本地 Bot API 阶段加入 workdir 一致性检查（绝对路径、非 `/tmp`、已有数据时提示保留）。
+
+### 僵尸上传自动恢复
+
+上传通过 Bull 队列异步提交到 Telegram。若进程异常退出或队列任务丢失，文件会长期停留在 `processing`。后端定时任务（每 30 分钟）会自动将 `status=processing` 且超过 `FILE_PROCESSING_STALE_MINUTES`（默认 60 分钟）未更新的记录标记为 `error`，前端显示"上传失败"，用户可重新上传。
+
+### 管理后台文件体检
+
+超级管理员在 **文件管理** 页面可执行"文件体检"：
+
+- **dry-run（默认）**：仅统计，不修改数据；
+- **apply**：校验 `ready` 文件在 Telegram 端是否存在——确认失效的标记为 `error`，路径缺失但校验有效的回填路径；
+- 仅明确的永久性错误（`invalid file_id` / `file not found`）会被标记；网络超时、429、5xx 只计入统计，不误标；
+- 体检分批有限并发执行，核心操作记录脱敏审计统计。
 
 ### SMTP
 

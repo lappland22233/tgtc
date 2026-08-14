@@ -6,6 +6,7 @@ import { createReadStream } from 'fs';
 import { promises as fs } from 'fs';
 import * as path from 'path';
 import FormData from 'form-data';
+import { TelegramFileNotFoundError } from './telegram.errors';
 
 interface TelegramMediaResult {
   document?: { file_id?: string };
@@ -86,6 +87,22 @@ export class TelegramService {
   }
 
   /**
+   * 判断 Telegram 描述是否为“文件永久不存在”类错误。
+   * 本地 Bot API / 官方 API 对失效 file_id 的描述格式不统一，
+   * 常见变体：invalid file_id、file not found、FILE_ID_INVALID、file is too big 除外。
+   */
+  private isTelegramFileNotFoundError(description: string): boolean {
+    const lower = description.toLowerCase();
+    return (
+      lower.includes('invalid file_id')
+      || lower.includes('file not found')
+      || lower.includes('file_id_invalid')
+      || lower.includes('file does not exist')
+      || lower.includes('file is not exist')
+    );
+  }
+
+  /**
    * 包装 axios 请求，统一处理 Telegram API 错误，提供更友好的错误消息。
    * 429 限流时自动重试（最多 3 次，指数退避）。
    */
@@ -111,6 +128,13 @@ export class TelegramService {
             throw new Error('Telegram Bot Token 无效，请联系管理员检查 TELEGRAM_BOT_TOKEN 配置');
           }
           if (status === 400) {
+            if (this.isTelegramFileNotFoundError(description)) {
+              // file_id 失效属于“文件永久不存在”类错误，抛类型化异常供调用方精确降级，
+              // 不再让用户误以为 TELEGRAM_CHAT_ID 配置有误。
+              throw new TelegramFileNotFoundError(
+                `Telegram 文件不存在或已失效：${this.safeTelegramDescription(description)}`,
+              );
+            }
             if (description.includes('IMAGE_PROCESS_FAILED')) {
               throw new Error('图片处理失败，请确认文件为有效的图片格式');
             }
@@ -121,6 +145,11 @@ export class TelegramService {
             throw new Error(this.safeTelegramDescription(description));
           }
           if (status === 404) {
+            if (this.isTelegramFileNotFoundError(description)) {
+              throw new TelegramFileNotFoundError(
+                `Telegram 文件不存在或已失效：${this.safeTelegramDescription(description)}`,
+              );
+            }
             throw new Error('Telegram Bot 未找到，请检查 Bot Token 是否正确');
           }
           // 移除错误对象中可能包含 bot token 的 URL 信息，防止泄露到日志
@@ -161,6 +190,22 @@ export class TelegramService {
         file_size: result.file_size || 0,
       };
     }, 'getFileInfo');
+  }
+
+  /**
+   * 校验 file_id 是否仍存在并返回元数据（不下载文件内容）。
+   * 仅调用 /getFile 获取 file_path/file_size，适合批量体检与下载降级前的确认；
+   * file_id 失效时抛出 TelegramFileNotFoundError，暂时性错误保持原类型抛出。
+   */
+  async verifyFileExists(file_id: string): Promise<{
+    file_id: string;
+    file_path: string;
+    file_size: number;
+  }> {
+    if (!file_id || file_id.length > 4096) {
+      throw new TelegramFileNotFoundError('非法的 Telegram file_id');
+    }
+    return this.getFileInfo(file_id);
   }
 
   async uploadFile(

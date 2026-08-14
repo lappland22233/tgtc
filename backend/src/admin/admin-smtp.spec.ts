@@ -37,6 +37,7 @@ function buildAdminService() {
     auditService as any,
     {} as any, // exportService
     mailerService as any,
+    {} as any, // telegramService
   );
   return { service, configCacheService, auditService, mailerService };
 }

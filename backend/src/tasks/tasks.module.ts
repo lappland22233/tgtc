@@ -7,9 +7,10 @@ import { RateLimit } from '../common/entities/rate-limit.entity';
 import { AccessLog } from '../common/entities/access-log.entity';
 import { AuditLog } from '../common/entities/audit-log.entity';
 import { JwtRevokedToken } from '../common/entities/jwt-revoked-token.entity';
+import { File } from '../common/entities/file.entity';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([BannedIP, ShareAudit, RateLimit, AccessLog, AuditLog, JwtRevokedToken])],
+  imports: [TypeOrmModule.forFeature([BannedIP, ShareAudit, RateLimit, AccessLog, AuditLog, JwtRevokedToken, File])],
   providers: [TasksService],
   // TasksService 仅为内部 @Cron 定时调度使用，无需 exports
 })

@@ -61,7 +61,8 @@ export type AuditAction =
   | 'share_link_delete'
   | 'share_link_access'
   | 'share_link_password_failed'
-  | 'share_link_download';
+  | 'share_link_download'
+  | 'file_verify';
 
 /** 审计日志状态 */
 export enum AuditStatus {

@@ -7,6 +7,10 @@ import { ShareAudit } from '../common/entities/share-audit.entity';
 import { RateLimit } from '../common/entities/rate-limit.entity';
 import { AuditLog } from '../common/entities/audit-log.entity';
 import { JwtRevokedToken } from '../common/entities/jwt-revoked-token.entity';
+import { File } from '../common/entities/file.entity';
+
+/** 僵尸 processing 自动恢复的固定失败原因（不复用可能失效的旧 Telegram 引用） */
+export const STALE_PROCESSING_FAILURE_REASON = '上传任务超时，已自动标记失败，请重新上传';
 
 @Injectable()
 export class TasksService {
@@ -23,6 +27,8 @@ export class TasksService {
     private auditLogRepository: Repository<AuditLog>,
     @InjectRepository(JwtRevokedToken)
     private revokedTokenRepository: Repository<JwtRevokedToken>,
+    @InjectRepository(File)
+    private fileRepository: Repository<File>,
   ) {}
 
   @Cron(CronExpression.EVERY_30_MINUTES)
@@ -144,6 +150,86 @@ export class TasksService {
     } catch (error: unknown) {
       this.logger.error(
         '清理过期审计日志失败',
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  }
+
+  /**
+   * 自动恢复卡死的 processing 上传记录（每 30 分钟执行）。
+   *
+   * 背景：上传通过 Bull 队列异步提交到 Telegram，若进程异常退出 / 队列任务丢失，
+   * 文件会长期停留在 processing 状态既不下发也不报错，用户永远无法下载。
+   * 本任务按 updatedAt 超时阈值扫描并标记为 error（保留记录，前端显示"上传失败"）。
+   *
+   * 安全约束：
+   * - 超时阈值可配置（FILE_PROCESSING_STALE_MINUTES，默认 60 分钟）；
+   * - 仅处理 uploadStage 为 pending/uploading 的未提交记录，避免误伤已 remote_committed 的文件；
+   * - 分批（每批 200 条）+ 条件更新，避免长事务与覆盖刚恢复的上传；
+   * - 固定失败原因，不复用可能失效的旧 Telegram 引用。
+   */
+  @Cron(CronExpression.EVERY_30_MINUTES)
+  async recoverStaleProcessingFiles() {
+    const staleMinutes = Math.max(
+      5,
+      parseInt(process.env.FILE_PROCESSING_STALE_MINUTES || '60', 10) || 60,
+    );
+    const cutoff = new Date(Date.now() - staleMinutes * 60 * 1000);
+    const BATCH_SIZE = 200;
+    const MAX_BATCHES = 100;
+
+    try {
+      let totalMarked = 0;
+      let batches = 0;
+      let marked = 0;
+      do {
+        const batchIds = await this.fileRepository
+          .createQueryBuilder('file')
+          .select('file.id')
+          .where('file.status = :status', { status: 'processing' })
+          .andWhere('file.uploadStage IN (:...stages)', { stages: ['pending', 'uploading'] })
+          // 已回填 telegramFilePath 的文件不算僵尸（可能有有效引用）
+          .andWhere('(file."telegramFilePath" IS NULL OR file."telegramFilePath" = \'\')')
+          .andWhere('file.updatedAt < :cutoff', { cutoff })
+          .orderBy('file.updatedAt', 'ASC')
+          .limit(BATCH_SIZE)
+          .getMany();
+
+        if (batchIds.length === 0) break;
+
+        const result = await this.fileRepository
+          .createQueryBuilder()
+          .update(File)
+          .set({
+            status: 'error' as const,
+            uploadStage: 'failed' as const,
+            uploadFailureReason: STALE_PROCESSING_FAILURE_REASON,
+          })
+          .where('id IN (:...ids)', { ids: batchIds.map((f) => f.id) })
+          .andWhere('status = :status', { status: 'processing' })
+          .andWhere('uploadStage IN (:...stages)', { stages: ['pending', 'uploading'] })
+          .andWhere('updatedAt < :cutoff', { cutoff })
+          .execute();
+
+        marked = result.affected ?? 0;
+        totalMarked += marked;
+        batches++;
+      } while (marked === BATCH_SIZE && batches < MAX_BATCHES);
+
+      if (batches >= MAX_BATCHES && marked === BATCH_SIZE) {
+        this.logger.warn(
+          `僵尸 processing 恢复达到单次任务批次上限 (${MAX_BATCHES})，剩余记录将在下次任务继续`,
+        );
+      }
+
+      if (totalMarked > 0) {
+        this.logger.log(
+          `已自动恢复 ${totalMarked} 条僵尸 processing 记录（超时 ${staleMinutes} 分钟）`,
+        );
+      }
+    } catch (error: unknown) {
+      this.logger.error(
+        '僵尸 processing 恢复失败',
         error instanceof Error ? error.message : String(error),
       );
     }

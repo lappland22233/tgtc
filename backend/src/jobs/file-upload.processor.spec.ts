@@ -166,10 +166,12 @@ describe('FileUploadProcessor failure persistence', () => {
   it('clears the failure reason on remote commit and in the ready update', async () => {
     mockedExistsSync.mockReturnValue(true);
     const repo = makeRepo();
-    repo.findOne.mockResolvedValueOnce(makeFile()).mockResolvedValueOnce(makeFile({ uploadStage: 'remote_committed' }));
+    repo.findOne
+      .mockResolvedValueOnce(makeFile())
+      .mockResolvedValueOnce(makeFile({ uploadStage: 'remote_committed', telegramFileId: 'tg-id' }));
     repo.findOneOrFail
       .mockResolvedValueOnce(makeFile({ uploadStage: 'uploading' }))
-      .mockResolvedValueOnce(makeFile({ uploadStage: 'remote_committed' }));
+      .mockResolvedValueOnce(makeFile({ uploadStage: 'remote_committed', telegramFileId: 'tg-id' }));
     const telegram = { uploadFile: jest.fn().mockResolvedValue({ file_id: 'tg-id', file_path: 'documents/x', file_size: 5 }) };
     const processor = makeProcessor(repo, telegram);
 
@@ -180,10 +182,63 @@ describe('FileUploadProcessor failure persistence', () => {
       { id: fileId, uploadVersion },
       expect.objectContaining({ uploadStage: 'remote_committed', uploadFailureReason: null }),
     );
-    // ready 原生 SQL 再次清空，覆盖任务恢复/旧数据边界
+    // ready 原生 SQL 再次清空，覆盖任务恢复/旧数据边界；status IN 允许覆盖僵尸任务误标的 error
     expect(repo.query).toHaveBeenCalledWith(
-      'UPDATE files SET status = $1, "uploadFailureReason" = NULL WHERE id = $2 AND status = $3',
-      ['ready', fileId, 'processing'],
+      'UPDATE files SET status = $1, "uploadFailureReason" = NULL WHERE id = $2 AND status IN ($3, $4)',
+      ['ready', fileId, 'processing', 'error'],
     );
+  });
+
+  it('recovers ready when the committed record was mistakenly marked error by the stale-processing task', async () => {
+    mockedExistsSync.mockReturnValue(true);
+    const repo = makeRepo();
+    // 已提交但被僵尸任务误标 error → 上传成功恢复时仍可置 ready
+    repo.findOne.mockResolvedValue(makeFile({ uploadStage: 'remote_committed', telegramFileId: 'tg-id', status: 'error' }));
+    repo.findOneOrFail.mockResolvedValue(makeFile({ uploadStage: 'remote_committed', telegramFileId: 'tg-id', status: 'error' }));
+    const processor = makeProcessor(repo, { uploadFile: jest.fn() });
+
+    await processor.uploadToTelegram(makeJob(0));
+
+    expect(repo.query).toHaveBeenCalledWith(
+      'UPDATE files SET status = $1, "uploadFailureReason" = NULL WHERE id = $2 AND status IN ($3, $4)',
+      ['ready', fileId, 'processing', 'error'],
+    );
+  });
+
+  it('marks error instead of ready when the committed record lacks a telegramFileId', async () => {
+    mockedExistsSync.mockReturnValue(true);
+    const repo = makeRepo();
+    // 数据库已提交（remote_committed）但 telegramFileId 为空：不允许置 ready
+    repo.findOne.mockResolvedValue(makeFile({ uploadStage: 'remote_committed', telegramFileId: '' }));
+    repo.findOneOrFail.mockResolvedValue(makeFile({ uploadStage: 'remote_committed', telegramFileId: '' }));
+    const processor = makeProcessor(repo, { uploadFile: jest.fn() });
+
+    await processor.uploadToTelegram(makeJob(0));
+
+    // 不应执行置 ready 的 SQL
+    const readyQueries = repo.query.mock.calls.filter((c) => String(c[0]).includes("status = $1"));
+    expect(readyQueries).toHaveLength(0);
+    // 置 ready 前置校验：缺 file_id 时标记 error（条件更新，uploadVersion 对齐）
+    expect(repo.update).toHaveBeenCalledWith(
+      { id: fileId, uploadVersion },
+      expect.objectContaining({ status: 'error', uploadStage: 'failed' }),
+    );
+  });
+
+  it('marks error on commit when the remote receipt is empty even after retries are exhausted', async () => {
+    mockedExistsSync.mockReturnValue(true);
+    const repo = makeRepo();
+    repo.findOne.mockResolvedValue(makeFile());
+    repo.findOneOrFail
+      .mockResolvedValueOnce(makeFile({ uploadStage: 'uploading' }))
+      .mockResolvedValueOnce(makeFile({ uploadStage: 'remote_committed', telegramFileId: '   ' }));
+    // loadReceipt 返回空 file_id 的陈旧回执
+    mockedReadFile.mockResolvedValueOnce(JSON.stringify({ file_id: '', file_path: 'documents/x' }));
+    const processor = makeProcessor(repo, { uploadFile: jest.fn() });
+
+    await expect(processor.uploadToTelegram(makeJob(0))).rejects.toThrow('缺少有效 file_id');
+    // 不允许任何 ready 置位
+    const readyQueries = repo.query.mock.calls.filter((c) => String(c[0]).includes("status = $1"));
+    expect(readyQueries).toHaveLength(0);
   });
 });

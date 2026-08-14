@@ -5,6 +5,7 @@ jest.mock('file-type', () => ({ fileTypeFromBuffer: jest.fn() }), { virtual: tru
 
 import { FileService } from './file.service';
 import { FileAccessType } from '../common/entities/file.entity';
+import { TelegramFileNotFoundError } from '../telegram/telegram.errors';
 import { isSafePublicInlineContentType } from '../common/utils/preview-content-type';
 
 function createService(file: Record<string, unknown>) {
@@ -101,6 +102,7 @@ describe('FileService getDownloadStream error guard', () => {
         isNoCacheMode: jest.fn().mockReturnValue(false),
         getOrCacheStream: jest.fn(),
         getNoCacheStream: jest.fn(),
+        invalidate: jest.fn(),
       },
       telegramService: {
         getRealtimeFileStream: jest.fn(),
@@ -135,15 +137,94 @@ describe('FileService getDownloadStream error guard', () => {
 
   it('allows ready files into the cache/telegram pipeline', async () => {
     const service = createStreamService();
+    const stream = new (require('stream').Readable)();
     (service as any).fileCacheService.getOrCacheStream = jest
       .fn()
-      .mockResolvedValue({ stream: {}, actualSize: publicImage.size });
+      .mockResolvedValue({ stream, actualSize: publicImage.size });
     await expect((service as any).getDownloadStream(publicImage)).resolves.toEqual({
-      stream: {},
+      stream,
       actualSize: publicImage.size,
     });
     expect((service as any).fileCacheService.getOrCacheStream).toHaveBeenCalled();
     expect((service as any).telegramService.getRealtimeFileStream).not.toHaveBeenCalled();
+  });
+
+  it('marks a file as error when Telegram reports a permanent file-not-found', async () => {
+    const service = createStreamService();
+    Object.assign(service, {
+      fileRepository: {
+        update: jest.fn().mockResolvedValue({ affected: 1 }),
+      },
+      invalidMarkedAt: new Map(),
+      auditService: { log: jest.fn() },
+      logger: { warn: jest.fn() },
+    });
+    (service as any).fileCacheService.getOrCacheStream = jest
+      .fn()
+      .mockRejectedValue(new TelegramFileNotFoundError('invalid file_id'));
+
+    await expect((service as any).getDownloadStream(publicImage)).rejects.toBeInstanceOf(TelegramFileNotFoundError);
+
+    expect((service as any).fileRepository.update).toHaveBeenCalledWith(
+      { id: publicImage.id, status: 'ready' },
+      expect.objectContaining({ status: 'error', uploadStage: 'failed' }),
+    );
+    expect((service as any).auditService.log).toHaveBeenCalled();
+  });
+
+  it('does not mark error for transient failures (timeout/5xx)', async () => {
+    const service = createStreamService();
+    Object.assign(service, {
+      fileRepository: { update: jest.fn() },
+      invalidMarkedAt: new Map(),
+      auditService: { log: jest.fn() },
+      logger: { warn: jest.fn() },
+    });
+    (service as any).fileCacheService.getOrCacheStream = jest
+      .fn()
+      .mockRejectedValue(new Error('ETIMEDOUT'));
+
+    await expect((service as any).getDownloadStream(publicImage)).rejects.toThrow('ETIMEDOUT');
+    expect((service as any).fileRepository.update).not.toHaveBeenCalled();
+    expect((service as any).auditService.log).not.toHaveBeenCalled();
+  });
+
+  it('deduplicates error marking within 5 minutes to avoid audit storms', async () => {
+    const service = createStreamService();
+    const update = jest.fn().mockResolvedValue({ affected: 1 });
+    Object.assign(service, {
+      fileRepository: { update },
+      invalidMarkedAt: new Map([[publicImage.id, Date.now()]]),
+      auditService: { log: jest.fn() },
+      logger: { warn: jest.fn() },
+    });
+    (service as any).fileCacheService.getOrCacheStream = jest
+      .fn()
+      .mockRejectedValue(new TelegramFileNotFoundError('invalid file_id'));
+
+    await expect((service as any).getDownloadStream(publicImage)).rejects.toBeInstanceOf(TelegramFileNotFoundError);
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it('attaches an error handler to the stream for spool-path permanent failures', async () => {
+    const service = createStreamService();
+    Object.assign(service, {
+      fileRepository: { update: jest.fn().mockResolvedValue({ affected: 1 }) },
+      invalidMarkedAt: new Map(),
+      auditService: { log: jest.fn() },
+      logger: { warn: jest.fn() },
+    });
+    const stream = new (require('stream').Readable)();
+    (service as any).fileCacheService.getOrCacheStream = jest
+      .fn()
+      .mockResolvedValue({ stream, fromCache: false });
+
+    const result = await (service as any).getDownloadStream(publicImage);
+    // 触发上游构建失败 → stream error 事件携带 TelegramFileNotFoundError
+    result.stream.emit('error', new TelegramFileNotFoundError('file not found'));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect((service as any).fileRepository.update).toHaveBeenCalled();
   });
 });
 

@@ -128,6 +128,11 @@ export class FileUploadProcessor {
           // DB 提交失败前先原子保存回执，Bull 重试/进程重启可直接恢复提交。
           await this.persistReceipt(filePath, result);
         }
+        // 回执（含历史/陈旧回执）必须包含非空 file_id，否则视为提交失败，
+        // 避免把空引用写入 DB 造成“假成功”。
+        if (!result?.file_id || !String(result.file_id).trim()) {
+          throw new Error('Telegram 远端回执缺少有效 file_id，无法完成提交');
+        }
         // 远端结果是幂等提交点：一次原子更新同时写入 TG 引用、清空历史失败原因并置 remote_committed。
         await this.fileRepository.update(
           { id: fileId, uploadVersion },
@@ -165,9 +170,28 @@ export class FileUploadProcessor {
     file = await this.fileRepository.findOneOrFail({ where: { id: fileId } });
     if (file.uploadVersion !== uploadVersion || !this.isCommitted(file)) return;
 
+    // 收紧 ready 置位：必须有非空 telegramFileId，防止“假成功”死链进入 ready。
+    // 缺少有效远端引用时不得置 ready，而是条件更新标记 error（不覆盖并发新上传）。
+    const remoteFileId = file.telegramFileId?.trim?.();
+    if (!remoteFileId) {
+      await this.fileRepository.update(
+        { id: fileId, uploadVersion },
+        {
+          status: 'error',
+          uploadStage: 'failed',
+          uploadFailureReason: 'Telegram 远端提交缺少有效 file_id，已标记上传失败',
+        } as Partial<File>,
+      );
+      this.logger.warn(
+        `文件 ${fileId} 置 ready 前缺少 telegramFileId，已标记 error（禁止假成功）`,
+      );
+      await this.removeUploadArtifacts(filePath);
+      return;
+    }
+
     await this.fileRepository.query(
-      'UPDATE files SET status = $1, "uploadFailureReason" = NULL WHERE id = $2 AND status = $3',
-      ['ready', fileId, 'processing'],
+      'UPDATE files SET status = $1, "uploadFailureReason" = NULL WHERE id = $2 AND status IN ($3, $4)',
+      ['ready', fileId, 'processing', 'error'],
     );
 
     try {

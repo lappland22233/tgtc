@@ -19,6 +19,7 @@ import { Folder } from '../common/entities/folder.entity';
 import { FileAccessLog } from '../common/entities/file-access-log.entity';
 import { ShareLink, ShareLinkStatus, ShareTargetType } from '../common/entities/share-link.entity';
 import { TelegramService } from '../telegram/telegram.service';
+import { TelegramFileNotFoundError } from '../telegram/telegram.errors';
 import { ConfigCacheService } from '../common/services/config-cache.service';
 import { User, UserRole } from '../common/entities/user.entity';
 import { BannedIP } from '../common/entities/banned-ip.entity';
@@ -68,6 +69,8 @@ export class FileService implements OnModuleInit {
   private fileTypeFilter: string[] = [];
   private accessCountDefault = -1;
   private accessCountMax = -1;
+  /** 最近标记为 error 的文件 id → 时间戳，用于下载降级去重，避免并发下载造成审计/日志风暴 */
+  private readonly invalidMarkedAt = new Map<string, number>();
 
   constructor(
     @InjectRepository(File)
@@ -1652,22 +1655,93 @@ export class FileService implements OnModuleInit {
     }
     // 请求级强制无缓存优先，其次跟随全局配置
     const noCache = opts?.noCache ?? this.fileCacheService.isNoCacheMode();
-    if (noCache) {
-      const result = await this.fileCacheService.getNoCacheStream(
+    try {
+      if (noCache) {
+        const result = await this.fileCacheService.getNoCacheStream(
+          file.id,
+          expectedSize,
+          // 无缓存直通：携带 X-Telegram-No-Cache 头，传输完成后由 Bot API 清理 workdir 本地副本
+          () => this.telegramService.getRealtimeFileStream(file.telegramFileId || file.filename, expectedSize, { noCache: true }),
+        );
+        this.attachDownloadInvalidHandler(file, result.stream);
+        return { stream: result.stream, actualSize: expectedSize };
+      }
+      const result = await this.fileCacheService.getOrCacheStream(
         file.id,
         expectedSize,
-        // 无缓存直通：携带 X-Telegram-No-Cache 头，传输完成后由 Bot API 清理 workdir 本地副本
-        () => this.telegramService.getRealtimeFileStream(file.telegramFileId || file.filename, expectedSize, { noCache: true }),
+        // 调用时动态评估：默认构建缓存路径不带头；若容量准备期间模式翻转进入无缓存早退分支则带头
+        () => this.telegramService.getRealtimeFileStream(file.telegramFileId || file.filename, expectedSize, { noCache: this.fileCacheService.isNoCacheMode() }),
       );
+      this.attachDownloadInvalidHandler(file, result.stream);
       return { stream: result.stream, actualSize: expectedSize };
+    } catch (error) {
+      // 仅将明确的 Telegram 永久资源不存在错误降级为 error；
+      // 网络超时/429/5xx 等暂时性错误保持原状态（不误标数据损坏）。
+      if (error instanceof TelegramFileNotFoundError) {
+        await this.markFileInvalidOnDownload(file);
+      }
+      throw error;
     }
-    const result = await this.fileCacheService.getOrCacheStream(
-      file.id,
-      expectedSize,
-      // 调用时动态评估：默认构建缓存路径不带头；若容量准备期间模式翻转进入无缓存早退分支则带头
-      () => this.telegramService.getRealtimeFileStream(file.telegramFileId || file.filename, expectedSize, { noCache: this.fileCacheService.isNoCacheMode() }),
-    );
-    return { stream: result.stream, actualSize: expectedSize };
+  }
+
+  /**
+   * 下载链路确认 Telegram file_id 永久失效时，条件标记文件为 error 并失效缓存。
+   * 约束：
+   * - 仅处理 TelegramFileNotFoundError（invalid file_id / file not found）；
+   * - 条件更新 WHERE id=? AND status='ready'，避免覆盖并发上传；
+   * - 5 分钟内同一文件只处理一次，防止并发下载造成审计/日志风暴；
+   * - 状态更新失败不覆盖原始下载错误（本方法内部捕获）。
+   */
+  private async markFileInvalidOnDownload(file: File): Promise<void> {
+    const now = Date.now();
+    // 惰性清理过期 key，防止 Map 无限增长
+    if (this.invalidMarkedAt.size > 1000) {
+      for (const [id, ts] of this.invalidMarkedAt) {
+        if (now - ts > 5 * 60 * 1000) this.invalidMarkedAt.delete(id);
+      }
+    }
+    const last = this.invalidMarkedAt.get(file.id) ?? 0;
+    if (now - last < 5 * 60 * 1000) return;
+    this.invalidMarkedAt.set(file.id, now);
+    try {
+      // 条件更新带 uploadVersion：覆盖上传会使 uploadVersion 递增，
+      // 若期间文件已被重新上传（新的 file_id），旧失败不得误标新文件。
+      const criteria: Record<string, unknown> = { id: file.id, status: 'ready' };
+      if (file.uploadVersion) criteria.uploadVersion = file.uploadVersion;
+      await this.fileRepository.update(
+        criteria as any,
+        {
+          status: 'error',
+          uploadStage: 'failed',
+          uploadFailureReason: 'Telegram 文件不存在或已失效，下载已失败',
+        } as Partial<File>,
+      );
+      await this.fileCacheService.invalidate(file.id);
+      this.auditService.log({
+        action: 'file_verify',
+        userId: file.uploaderId,
+        resourceType: 'file',
+        resourceId: file.id,
+        metadata: { reason: 'download_telegram_file_not_found' },
+      });
+      this.logger.warn(`下载命中 Telegram 永久失效 file_id，已标记 error: ${file.id}`);
+    } catch (error) {
+      this.logger.warn(
+        `标记文件 ${file.id} 为 error 失败: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  /**
+   * 为 spool/follower 流挂载错误监听：Telegram 永久失效错误在上游构建失败时
+   * 以 stream error 事件形式到达，此处捕获并触发降级（不吞掉错误，其他监听器仍可处理）。
+   */
+  private attachDownloadInvalidHandler(file: File, stream: Readable): void {
+    stream.on('error', (error: Error) => {
+      if (error instanceof TelegramFileNotFoundError) {
+        void this.markFileInvalidOnDownload(file);
+      }
+    });
   }
 
   /**

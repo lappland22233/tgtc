@@ -5,7 +5,7 @@ import { Roles } from '../common/decorators/roles.decorator';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { User, UserRole } from '../common/entities/user.entity';
-import { BanIPDto, UnbanIPDto, BatchDeleteFilesDto, ConfigDto, BatchConfigDto, SmtpConfigDto, SmtpTestDto, UploadConfigDto, AuthConfigDto, AccessLogQueryDto, SecurityConfigBatchDto } from './admin.dto';
+import { BanIPDto, UnbanIPDto, BatchDeleteFilesDto, ConfigDto, BatchConfigDto, SmtpConfigDto, SmtpTestDto, UploadConfigDto, AuthConfigDto, AccessLogQueryDto, SecurityConfigBatchDto, FileVerifyDto } from './admin.dto';
 import { TopFilesQueryDto, TopPathsQueryDto, StatusByPathQueryDto, AbnormalIpsQueryDto, DateRangeQueryDto, RefererAnalysisQueryDto, UserAgentAnalysisQueryDto, BandwidthQueryDto, FileTypeQueryDto } from './admin-stats.dto';
 import { CacheConfigDto } from './dto/cache-config.dto';
 
@@ -131,6 +131,24 @@ export class AdminController {
   ) {
     await this.adminService.batchDeleteFiles(user, dto.ids);
     return { message: '文件已批量删除' };
+  }
+
+  /**
+   * 文件体检：校验 ready 文件 Telegram file_id 是否仍有效。
+   * 默认 dry-run 仅统计；显式 apply 才标记 error / 回填 telegramFilePath。
+   */
+  @Post('files/verify')
+  @Roles(UserRole.SUPER_ADMIN)
+  async verifyFiles(
+    @CurrentUser() user: User,
+    @Body() dto: FileVerifyDto,
+  ) {
+    return this.adminService.verifyFiles(user, {
+      mode: dto.mode,
+      allReady: dto.allReady,
+      limit: dto.limit,
+      concurrency: dto.concurrency,
+    });
   }
 
   // SMTP Config

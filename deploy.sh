@@ -756,6 +756,27 @@ build_bot_api() {
   info "源码目录: $src_dir"
   warn "TDLib 编译需要较长时间（20~60 分钟），请耐心等待，日志实时输出"
 
+  # ---- Bot API workdir 一致性检查（防止 file_id 失效根因复发）----
+  # 历史 file_id 依赖 Telegram session 与本地文件存储目录的连续性：
+  # 一旦更换 --dir 或清空 workdir，所有旧 file_id 将全部 404，历史文件立即不可下载。
+  # 因此：目录必须持久、不可静默切换、不可被本脚本清空。
+  if [[ -z "$BOT_API_DIR" || "$BOT_API_DIR" != /* ]]; then
+    die "BOT_API_DIR 必须为绝对路径: '$BOT_API_DIR'"
+  fi
+  if [[ "$BOT_API_DIR" == /tmp/* || "$BOT_API_DIR" == */tmp ]]; then
+    die "BOT_API_DIR 不允许指向临时目录 /tmp（临时目录会被系统清理，导致 file_id 全部失效）"
+  fi
+  if [[ -d "$BOT_API_DIR" && -n "$(ls -A "$BOT_API_DIR" 2>/dev/null)" ]]; then
+    warn "检测到已有 Bot API workdir: $BOT_API_DIR（含历史数据，必须保留，禁止清空）"
+    # 已存在 documents/ 等业务数据子目录时视为真实持久目录，给出强提示
+    if [[ -d "$BOT_API_DIR/documents" ]]; then
+      warn "workdir 已包含 documents/ 历史数据：请勿清空或改 --dir，否则全部历史 file_id 将失效"
+    fi
+    confirm "是否继续使用该目录作为 Bot API workdir？" "y" || die "已取消部署，请确认 workdir 选择"
+  else
+    info "workdir 不存在或为空，将创建: $BOT_API_DIR"
+  fi
+
   mkdir -p "$BOT_API_DIR"
   chown "$SERVICE_USER:$SERVICE_GROUP" "$BOT_API_DIR"
   chmod 750 "$BOT_API_DIR"

@@ -1,6 +1,7 @@
 import axios from 'axios';
 import { Readable } from 'stream';
 import { TelegramService } from './telegram.service';
+import { TelegramFileNotFoundError } from './telegram.errors';
 
 jest.mock('axios');
 const mockedAxios = axios as jest.Mocked<typeof axios>;
@@ -244,6 +245,77 @@ describe('TelegramService realtime stream', () => {
       } as any);
       await expect(createService().uploadFile(Buffer.from('test'), 'test.bin'))
         .rejects.toThrow('群组未找到');
+    });
+  });
+
+  describe('TelegramFileNotFoundError classification', () => {
+    it('maps 400 invalid file_id to TelegramFileNotFoundError', async () => {
+      mockedAxios.post.mockRejectedValueOnce({
+        response: { status: 400, data: { ok: false, description: 'Bad Request: invalid file_id' } },
+      } as any);
+
+      const err = await createService().uploadFile(Buffer.from('test'), 'test.bin').catch((e) => e);
+      expect(err).toBeInstanceOf(TelegramFileNotFoundError);
+      expect(String(err?.message)).toMatch(/invalid file_id/i);
+    });
+
+    it('maps 404 file not found to TelegramFileNotFoundError', async () => {
+      mockedAxios.post.mockRejectedValueOnce({
+        response: { status: 404, data: { ok: false, description: 'file not found' } },
+      } as any);
+
+      const err = await createService().uploadFile(Buffer.from('test'), 'test.bin').catch((e) => e);
+      expect(err).toBeInstanceOf(TelegramFileNotFoundError);
+    });
+
+    it('keeps 404 without resource description as a plain bot-not-found error', async () => {
+      mockedAxios.post.mockRejectedValueOnce({
+        response: { status: 404, data: { ok: false } },
+      } as any);
+
+      await expect(createService().uploadFile(Buffer.from('test'), 'test.bin'))
+        .rejects.toThrow('Telegram Bot 未找到');
+    });
+
+    it('does not classify transient errors as file-not-found', async () => {
+      // 429 限流：不识别为文件失效
+      mockedAxios.post.mockRejectedValueOnce({
+        response: { status: 429, data: { ok: false, parameters: { retry_after: 1 } } },
+      } as any);
+      await expect(createService().uploadFile(Buffer.from('test'), 'test.bin'))
+        .rejects.not.toBeInstanceOf(TelegramFileNotFoundError);
+
+      // 5xx 服务端错误：不识别为文件失效
+      mockedAxios.post.mockRejectedValueOnce({
+        response: { status: 500, data: { ok: false, description: 'internal error' } },
+      } as any);
+      await expect(createService().uploadFile(Buffer.from('test'), 'test.bin'))
+        .rejects.not.toBeInstanceOf(TelegramFileNotFoundError);
+    });
+
+    it('exposes verifyFileExists metadata and rejects stale file_id', async () => {
+      mockedAxios.get.mockResolvedValueOnce({
+        data: { ok: true, result: { file_id: 'fresh-id', file_path: 'documents/a.bin', file_size: 42 } },
+      } as any);
+      const meta = await createService().verifyFileExists('fresh-id');
+      expect(meta).toEqual({ file_id: 'fresh-id', file_path: 'documents/a.bin', file_size: 42 });
+      expect(mockedAxios.get).toHaveBeenCalledWith(
+        expect.stringContaining('/getFile'),
+        expect.objectContaining({ params: { file_id: 'fresh-id' } }),
+      );
+
+      mockedAxios.get.mockRejectedValueOnce({
+        response: { status: 400, data: { ok: false, description: 'Bad Request: invalid file_id' } },
+      } as any);
+      await expect(createService().verifyFileExists('stale-id'))
+        .rejects.toBeInstanceOf(TelegramFileNotFoundError);
+    });
+
+    it('rejects an empty or oversized file_id before hitting the network', async () => {
+      const service = createService();
+      await expect(service.verifyFileExists('')).rejects.toBeInstanceOf(TelegramFileNotFoundError);
+      await expect(service.verifyFileExists('x'.repeat(5000))).rejects.toBeInstanceOf(TelegramFileNotFoundError);
+      expect(mockedAxios.get).not.toHaveBeenCalled();
     });
   });
 });
