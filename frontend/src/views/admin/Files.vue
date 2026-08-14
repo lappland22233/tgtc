@@ -117,6 +117,40 @@
         <span v-else-if="!hasMore && files.length > 0" style="color: var(--text-secondary);">已加载全部 {{ total }} 个文件</span>
       </div>
     </div>
+
+    <!-- 文件体检确认弹窗 -->
+    <t-dialog
+      v-model:visible="verifyDialogVisible"
+      header="文件体检"
+      width="480px"
+      :confirm-btn="null"
+      cancel-btn="关闭"
+      @close="verifyDialogVisible = false"
+    >
+      <div style="display: flex; flex-direction: column; gap: 12px; color: var(--text-secondary); font-size: 14px;">
+        <div>体检将校验 ready 文件的 Telegram file_id 是否仍然有效（默认仅检查路径为空的历史文件）。</div>
+        <div style="color: var(--color-warning); font-weight: 500;">⚠ apply 模式会修改数据：确认失效的文件标记为"上传失败"，有效的文件回填路径。</div>
+        <div style="display: flex; gap: 8px; margin-top: 8px;">
+          <t-button theme="primary" variant="outline" style="flex: 1;" :loading="verifyRunning" @click="runVerify('dry-run')">仅预览统计（dry-run）</t-button>
+          <t-button theme="danger" variant="outline" style="flex: 1;" :loading="verifyRunning" @click="runVerify('apply')">执行修复（apply）</t-button>
+        </div>
+      </div>
+    </t-dialog>
+
+    <!-- 文件体检结果弹窗 -->
+    <t-dialog
+      v-model:visible="verifyResultVisible"
+      :header="verifyResultHeader"
+      width="460px"
+      confirm-btn="确定"
+      :cancel-btn="null"
+      @confirm="closeVerifyResult"
+      @close="verifyResultVisible = false"
+    >
+      <div style="display: flex; flex-direction: column; gap: 8px; font-size: 14px;">
+        <div v-for="line in verifyResultLines" :key="line">{{ line }}</div>
+      </div>
+    </t-dialog>
   </div>
 </template>
 
@@ -355,41 +389,18 @@ function handleSortChange(sortInfo: { sortBy: string; descending: boolean } | { 
 /** 是否已发起体检请求（防止重复点击） */
 const verifyRunning = ref(false);
 
-/**
- * 打开体检确认弹窗：dry-run 仅统计，apply 会修改状态。
- * 通过 DOM data-role 绑定两个操作按钮（TDesign 的 confirm 弹窗 body 支持 HTML）。
- */
+/** 体检确认弹窗可见性 */
+const verifyDialogVisible = ref(false);
+
+/** 体检结果弹窗状态 */
+const verifyResultVisible = ref(false);
+const verifyResultHeader = ref('');
+const verifyResultLines = ref<string[]>([]);
+const verifyResultApplied = ref(false);
+
+/** 打开体检确认弹窗 */
 function openVerifyDialog() {
-  const confirmDialog = DialogPlugin.confirm({
-    header: '文件体检',
-    body: `
-      <div style="display:flex;flex-direction:column;gap:8px;color:var(--text-secondary);font-size:14px;">
-        <div>体检将校验 ready 文件的 Telegram file_id 是否仍然有效（默认仅检查路径为空的历史文件）。</div>
-        <div style="color:var(--color-warning);font-weight:500;">⚠ apply 模式会修改数据：确认失效的文件标记为"上传失败"，有效的文件回填路径。</div>
-        <div style="display:flex;gap:8px;margin-top:4px;">
-          <button class="t-button t-size-m t-button--variant-outline t-button--theme-primary" data-role="verify-dry" style="flex:1;">仅预览统计（dry-run）</button>
-          <button class="t-button t-size-m t-button--variant-outline t-button--theme-danger" data-role="verify-apply" style="flex:1;">执行修复（apply）</button>
-        </div>
-      </div>
-    `,
-    confirmBtn: null,
-    cancelBtn: '关闭',
-    onClose: () => confirmDialog.destroy(),
-  });
-  // 弹窗挂载完成后绑定 DOM 事件；若渲染时序未就绪则重试（最多 10 次），避免静默失效
-  let attempts = 0;
-  const bindButtons = () => {
-    const dryBtn = document.body.querySelector('[data-role="verify-dry"]');
-    const applyBtn = document.body.querySelector('[data-role="verify-apply"]');
-    if (dryBtn && applyBtn) {
-      dryBtn.addEventListener('click', () => { confirmDialog.destroy(); void runVerify('dry-run'); });
-      applyBtn.addEventListener('click', () => { confirmDialog.destroy(); void runVerify('apply'); });
-      return;
-    }
-    attempts++;
-    if (attempts < 10) setTimeout(bindButtons, 100);
-  };
-  setTimeout(bindButtons, 0);
+  verifyDialogVisible.value = true;
 }
 
 /** 执行文件体检 */
@@ -398,6 +409,7 @@ async function runVerify(mode: 'dry-run' | 'apply') {
   verifyRunning.value = true;
   try {
     const result = await verifyAdminFiles({ mode, allReady: false });
+    verifyDialogVisible.value = false;
     showVerifyResult(mode, result);
   } catch (error) {
     MessagePlugin.error(getErrorMessage(error) || '体检请求失败');
@@ -423,17 +435,16 @@ function showVerifyResult(mode: 'dry-run' | 'apply', result: FileVerifyResult) {
     lines.push(`已标记 error：${result.markedError}`);
     lines.push(`已回填路径：${result.backfilled}`);
   }
-  const confirmDialog = DialogPlugin.confirm({
-    header: isApply ? '体检完成（已应用修复）' : '体检预览结果',
-    body: `<div style="display:flex;flex-direction:column;gap:6px;font-size:14px;">${lines.map((l) => `<div>${l}</div>`).join('')}</div>`,
-    confirmBtn: '确定',
-    cancelBtn: null,
-    onConfirm: () => {
-      confirmDialog.destroy();
-      if (isApply) refreshList();
-    },
-    onClose: () => confirmDialog.destroy(),
-  });
+  verifyResultHeader.value = isApply ? '体检完成（已应用修复）' : '体检预览结果';
+  verifyResultLines.value = lines;
+  verifyResultApplied.value = isApply;
+  verifyResultVisible.value = true;
+}
+
+/** 关闭结果弹窗，apply 后刷新列表 */
+function closeVerifyResult() {
+  verifyResultVisible.value = false;
+  if (verifyResultApplied.value) refreshList();
 }
 
 onMounted(() => {
