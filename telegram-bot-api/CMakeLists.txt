@@ -73,6 +73,7 @@ set(TELEGRAM_BOT_API_SOURCE
   telegram-bot-api/Stats.cpp
   telegram-bot-api/Watchdog.cpp
   telegram-bot-api/WebhookActor.cpp
+  telegram-bot-api/WorkdirCleanupManager.cpp
 
   telegram-bot-api/Client.h
   telegram-bot-api/ClientManager.h
