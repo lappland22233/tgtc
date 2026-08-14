@@ -8,6 +8,7 @@ export const QUEUE_NAMES = {
   BASELINE_CALCULATION: 'baseline-calculation',
   DATA_ARCHIVAL: 'data-archival',
   FILE_UPLOAD: 'file-upload',
+  FILE_VERIFY: 'file-verify',
 } as const;
 
 @Module({
@@ -41,6 +42,7 @@ export const QUEUE_NAMES = {
       { name: QUEUE_NAMES.BASELINE_CALCULATION },
       { name: QUEUE_NAMES.DATA_ARCHIVAL },
       { name: QUEUE_NAMES.FILE_UPLOAD },
+      { name: QUEUE_NAMES.FILE_VERIFY },
     ),
   ],
   exports: [BullModule],

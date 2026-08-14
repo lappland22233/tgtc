@@ -151,15 +151,56 @@
         <div v-for="line in verifyResultLines" :key="line">{{ line }}</div>
       </div>
     </t-dialog>
+
+    <!-- 文件体检进度弹窗 -->
+    <t-dialog
+      v-model:visible="verifyProgressVisible"
+      header="文件体检进度"
+      width="480px"
+      :confirm-btn="null"
+      :cancel-btn="null"
+      :footer="false"
+      :close-on-overlay-click="false"
+      :close-btn="false"
+    >
+      <div style="display: flex; flex-direction: column; gap: 16px; font-size: 14px;">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+          <span style="font-weight: 500;">状态：{{ verifyStatusText }}</span>
+          <span style="color: var(--text-secondary);">{{ verifyProgress }}%</span>
+        </div>
+        <t-progress :percentage="verifyProgress" :label="false" />
+        <div style="color: var(--text-secondary);">
+          已处理：{{ verifyProcessedText }}
+        </div>
+        <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; color: var(--text-secondary);">
+          <div>有效：{{ verifyTask?.valid ?? 0 }}</div>
+          <div>永久失效：{{ verifyTask?.invalid ?? 0 }}</div>
+          <div>缺少 file_id：{{ verifyTask?.emptyFileId ?? 0 }}</div>
+          <div>暂时性失败：{{ verifyTask?.temporaryFailure ?? 0 }}</div>
+          <div>大小不一致：{{ verifyTask?.sizeMismatch ?? 0 }}</div>
+          <template v-if="verifyTask?.mode === 'apply'">
+            <div>已回填路径：{{ verifyTask?.backfilled ?? 0 }}</div>
+            <div>已标记 error：{{ verifyTask?.markedError ?? 0 }}</div>
+          </template>
+        </div>
+      </div>
+    </t-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, watch } from 'vue';
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
 import { DialogPlugin } from 'tdesign-vue-next';
 import MessagePlugin from '@/utils/message';
 import { api } from '../../stores/auth';
-import { fetchAllAdminFiles, verifyAdminFiles, type AdminFileItem, type FileVerifyResult } from '../../api/admin-files';
+import {
+  fetchAllAdminFiles,
+  createFileVerifyTask,
+  fetchActiveFileVerifyTask,
+  fetchFileVerifyTask,
+  type AdminFileItem,
+  type FileVerifyTask,
+} from '../../api/admin-files';
 import { formatSize, formatDate } from '@/utils/format';
 import { getErrorMessage } from '../../utils/error';
 import { useCursorPagination } from '../../composables/useCursorPagination';
@@ -386,9 +427,6 @@ function handleSortChange(sortInfo: { sortBy: string; descending: boolean } | { 
   loadInitialFiles();
 }
 
-/** 是否已发起体检请求（防止重复点击） */
-const verifyRunning = ref(false);
-
 /** 体检确认弹窗可见性 */
 const verifyDialogVisible = ref(false);
 
@@ -398,19 +436,55 @@ const verifyResultHeader = ref('');
 const verifyResultLines = ref<string[]>([]);
 const verifyResultApplied = ref(false);
 
+/** 是否正在创建体检任务（按钮 loading，仅至创建请求完成） */
+const verifyRunning = ref(false);
+
+/** 体检进度弹窗状态 */
+const verifyProgressVisible = ref(false);
+const verifyTask = ref<FileVerifyTask | null>(null);
+
+/** 轮询定时器与在途请求控制器 */
+let verifyPollTimer: ReturnType<typeof setInterval> | null = null;
+let verifyPollAbortController: AbortController | null = null;
+let verifyPageHidden = false;
+
 /** 打开体检确认弹窗 */
 function openVerifyDialog() {
   verifyDialogVisible.value = true;
 }
 
-/** 执行文件体检 */
+/** 状态中文文案 */
+const verifyStatusText = computed(() => {
+  switch (verifyTask.value?.status) {
+    case 'queued': return '排队中';
+    case 'running': return '执行中';
+    case 'completed': return '已完成';
+    case 'failed': return '失败';
+    default: return '未知';
+  }
+});
+
+/** 已处理文本（totalCandidates 为 0 时显示等待开始） */
+const verifyProcessedText = computed(() => {
+  const t = verifyTask.value;
+  if (!t) return '等待开始…';
+  return t.totalCandidates > 0 ? `${t.processed} / ${t.totalCandidates}` : '等待开始…';
+});
+
+/** 进度百分比（0~100，后端已算好） */
+const verifyProgress = computed(() => verifyTask.value?.progress ?? 0);
+
+/** 执行文件体检：创建任务后立即返回，进入进度跟踪 */
 async function runVerify(mode: 'dry-run' | 'apply') {
   if (verifyRunning.value) return;
   verifyRunning.value = true;
   try {
-    const result = await verifyAdminFiles({ mode, allReady: false });
+    const { task, isNewTask } = await createFileVerifyTask({ mode });
     verifyDialogVisible.value = false;
-    showVerifyResult(mode, result);
+    if (!isNewTask) {
+      MessagePlugin.info('已有体检任务正在进行，将跟踪当前任务');
+    }
+    startVerifyTracking(task);
   } catch (error) {
     MessagePlugin.error(getErrorMessage(error) || '体检请求失败');
   } finally {
@@ -418,22 +492,92 @@ async function runVerify(mode: 'dry-run' | 'apply') {
   }
 }
 
+/** 进入进度跟踪状态（从创建结果或刷新恢复进入） */
+function startVerifyTracking(task: FileVerifyTask) {
+  stopVerifyPolling();
+  verifyTask.value = task;
+  verifyProgressVisible.value = true;
+  pollVerifyTask();
+}
+
+/** 停止轮询并 abort 在途请求 */
+function stopVerifyPolling() {
+  if (verifyPollTimer) {
+    clearInterval(verifyPollTimer);
+    verifyPollTimer = null;
+  }
+  if (verifyPollAbortController) {
+    verifyPollAbortController.abort();
+    verifyPollAbortController = null;
+  }
+}
+
+/** 轮询体检任务进度 */
+function pollVerifyTask() {
+  const taskId = verifyTask.value?.taskId;
+  if (!taskId) return;
+  void fetchVerifyOnce(taskId);
+  if (!verifyPollTimer) {
+    verifyPollTimer = setInterval(() => {
+      if (verifyPageHidden) return; // 页面隐藏时暂停轮询
+      void fetchVerifyOnce(taskId);
+    }, 1500);
+  }
+}
+
+/** 发起一次轮询请求并处理结果 */
+async function fetchVerifyOnce(taskId: string) {
+  if (verifyPollAbortController) {
+    verifyPollAbortController.abort();
+  }
+  const controller = new AbortController();
+  verifyPollAbortController = controller;
+  try {
+    const task = await fetchFileVerifyTask(taskId, controller.signal);
+    verifyPollAbortController = null;
+    // 竞态防护：若期间已停止跟踪，丢弃结果
+    if (verifyTask.value?.taskId !== taskId) return;
+    verifyTask.value = task;
+    if (task.status === 'completed' || task.status === 'failed') {
+      stopVerifyPolling();
+      handleVerifyTerminal(task);
+    }
+  } catch (error) {
+    const canceled =
+      (error as { code?: string })?.code === 'ERR_CANCELED' ||
+      (error instanceof Error && error.name === 'AbortError');
+    if (canceled) return;
+    // 轮询失败不打断用户，静默继续，终态由后续轮询补齐
+  }
+}
+
+/** 处理体检终态 */
+function handleVerifyTerminal(task: FileVerifyTask) {
+  verifyProgressVisible.value = false;
+  if (task.status === 'failed') {
+    MessagePlugin.error(task.errorSummary || '体检任务失败');
+    return;
+  }
+  // completed
+  showVerifyResult(task.mode, task);
+}
+
 /** 展示体检统计结果 */
-function showVerifyResult(mode: 'dry-run' | 'apply', result: FileVerifyResult) {
+function showVerifyResult(mode: 'dry-run' | 'apply', task: FileVerifyTask) {
   const isApply = mode === 'apply';
   const lines = [
     `模式：${isApply ? '执行修复（apply）' : '仅预览统计（dry-run）'}`,
-    `本次检查候选：${result.totalCandidates} 个`,
-    `已校验：${result.checked}`,
-    `有效：${result.valid}`,
-    `永久失效：${result.invalid}`,
-    `缺少 file_id：${result.emptyFileId}`,
-    `暂时性失败（未修改）：${result.temporaryFailure}`,
-    `大小不一致（仅报告）：${result.sizeMismatch}`,
+    `本次检查候选：${task.totalCandidates} 个`,
+    `已校验：${task.processed}`,
+    `有效：${task.valid}`,
+    `永久失效：${task.invalid}`,
+    `缺少 file_id：${task.emptyFileId}`,
+    `暂时性失败（未修改）：${task.temporaryFailure}`,
+    `大小不一致（仅报告）：${task.sizeMismatch}`,
   ];
   if (isApply) {
-    lines.push(`已标记 error：${result.markedError}`);
-    lines.push(`已回填路径：${result.backfilled}`);
+    lines.push(`已标记 error：${task.markedError}`);
+    lines.push(`已回填路径：${task.backfilled}`);
   }
   verifyResultHeader.value = isApply ? '体检完成（已应用修复）' : '体检预览结果';
   verifyResultLines.value = lines;
@@ -447,12 +591,30 @@ function closeVerifyResult() {
   if (verifyResultApplied.value) refreshList();
 }
 
+/** 页面可见性变化：隐藏时暂停轮询，恢复时继续 */
+function handleVisibilityChange() {
+  verifyPageHidden = document.hidden;
+}
+
 onMounted(() => {
   loadInitialFiles();
+  // 刷新恢复：存在进行中的活动任务时自动进入进度跟踪
+  fetchActiveFileVerifyTask()
+    .then((task) => {
+      if (task && (task.status === 'queued' || task.status === 'running')) {
+        startVerifyTracking(task);
+      }
+    })
+    .catch(() => {
+      // 刷新恢复失败不打扰用户
+    });
+  document.addEventListener('visibilitychange', handleVisibilityChange);
 });
 
 onUnmounted(() => {
   if (scrollObserver) scrollObserver.disconnect();
+  stopVerifyPolling();
+  document.removeEventListener('visibilitychange', handleVisibilityChange);
 });
 </script>
 

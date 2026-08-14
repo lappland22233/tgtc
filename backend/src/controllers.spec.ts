@@ -1,6 +1,6 @@
 jest.mock('file-type', () => ({ fileTypeFromBuffer: jest.fn() }), { virtual: true });
 
-import { BadRequestException } from '@nestjs/common';
+import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { AdminController } from './admin/admin.controller';
 import { UserController } from './user/user.controller';
 import { FolderController } from './folder/folder.controller';
@@ -16,7 +16,7 @@ const user: any = { id: 'u' };
 describe('thin controllers', () => {
   it('covers admin delegation, parsing, defaults and validation', async () => {
     const service = serviceProxy();
-    const c = new AdminController(service);
+    const c = new AdminController(service, service);
     for (const method of ['getStats','getConfig','getBannedIPs','getSMTPConfig','getUploadConfig','getCacheConfig','getAuthConfig','getBanStats','getSecurityConfig'] as const) await c[method]();
     await c.getMyFileStats(user); await c.updateConfig(user, { key: 'k', value: 'v' } as any);
     await c.updateConfigs(user, { configs: [] });
@@ -35,14 +35,25 @@ describe('thin controllers', () => {
     await c.getTelemetryRecords('2','3','error','ip','u','type','q','7d');
     await c.getTelemetryPerformance(); await c.getTelemetryErrors('5');
     await c.updateSecurityConfig(user, { configs: {} } as any);
+    await c.createFileVerifyTask(user, { mode: 'dry-run' } as any);
+    await c.getActiveFileVerifyTask();
+    await c.getFileVerifyTask('task-1');
     expect(service.getAllFiles).toHaveBeenCalledWith(2,10,'q','u','size','DESC','cursor');
+  });
+
+  it('returns 404 for unknown file verify task', async () => {
+    const service = serviceProxy();
+    service.getTask.mockResolvedValue(null);
+    const c = new AdminController(service, service);
+    await expect(c.getFileVerifyTask('missing')).rejects.toBeInstanceOf(NotFoundException);
+    expect(service.getTask).toHaveBeenCalledWith('missing');
   });
 
   it('streams admin exports and validates export parameters', async () => {
     const service = serviceProxy();
     service.exportData.mockResolvedValue({ contentType: 'text/csv', filename: 'x.csv', data: 'a,b' });
     service.exportTelemetry.mockResolvedValue([{ id: 1 }]);
-    const c = new AdminController(service);
+    const c = new AdminController(service, service);
     const res: any = { setHeader: jest.fn(), send: jest.fn(), set: jest.fn() };
     for (const args of [['xml','',''],['','1y',''],['','','users']]) await expect(c.exportData(args[0],args[1],args[2],res)).rejects.toBeInstanceOf(BadRequestException);
     await c.exportData('','','',res); await c.exportTelemetry(undefined,undefined,undefined,res);

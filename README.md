@@ -231,12 +231,20 @@ Redis 承载 `metrics-aggregation`、`attack-detection`、`alert-evaluation`、`
 
 ### 管理后台文件体检
 
-超级管理员在 **文件管理** 页面可执行"文件体检"：
+超级管理员在 **文件管理** 页面可执行"文件体检"。体检是**持久化后台任务**（Bull `file-verify` 队列），发起后立即返回任务 ID（HTTP 202），由后台分批校验，前端通过轮询查看实时进度，刷新页面可恢复，同一时间全局仅允许一个活动任务：
+
+- `POST /api/admin/files/verify`：创建体检任务，返回 `{ task, isNewTask }`；已有活动任务时返回现有任务（`isNewTask=false`）；
+- `GET /api/admin/files/verify/active`：查询当前活动任务，无任务返回 `null`；
+- `GET /api/admin/files/verify/:taskId`：查询任务状态、进度与最终统计。
+
+行为约定：
 
 - **dry-run（默认）**：仅统计，不修改数据；
 - **apply**：校验 `ready` 文件在 Telegram 端是否存在——确认失效的标记为 `error`，路径缺失但校验有效的回填路径；
 - 仅明确的永久性错误（`invalid file_id` / `file not found`）会被标记；网络超时、429、5xx 只计入统计，不误标；
-- 体检分批有限并发执行，核心操作记录脱敏审计统计。
+- 体检分批有限并发执行，核心操作记录脱敏审计统计；
+- 任务状态（`queued/running/completed/failed`）、进度与统计持久化在 `file_verify_tasks` 表；失败时仅保留脱敏错误摘要；
+- 进程崩溃时由 Bull 对 stalled job 重新投递接管执行；应用启动时会清理"入库后未入队"的孤儿任务，释放活动槽位。
 
 ### SMTP
 
@@ -489,6 +497,9 @@ npm run preview
 | `GET` | `/api/admin/files` | **全站文件列表**，支持上传者筛选 |
 | `DELETE` | `/api/admin/files/:id` | 删除任意用户文件 |
 | `POST` | `/api/admin/files/batch-delete` | 批量删除文件 |
+| `POST` | `/api/admin/files/verify` | 创建文件体检异步任务（202，仅 `super_admin`） |
+| `GET` | `/api/admin/files/verify/active` | 查询当前活动体检任务（仅 `super_admin`） |
+| `GET` | `/api/admin/files/verify/:taskId` | 查询体检任务进度与结果（仅 `super_admin`） |
 | `GET/POST` | `/api/admin/banned-ips` | 查询或新增 IP 封禁 |
 | `POST` | `/api/admin/banned-ips/unban` | 通过请求体解封 IP，推荐用于 IPv6 |
 | `GET/PUT` | `/api/admin/config` | 系统配置 |

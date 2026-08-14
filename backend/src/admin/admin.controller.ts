@@ -1,6 +1,7 @@
-import { Controller, Get, Post, Put, Delete, Body, Param, Query, UseGuards, Res, BadRequestException } from '@nestjs/common';
+import { Controller, Get, Post, Put, Delete, Body, Param, Query, UseGuards, Res, BadRequestException, HttpCode, NotFoundException } from '@nestjs/common';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { AdminService } from './admin.service';
+import { FileVerifyService } from './file-verify.service';
 import { Roles } from '../common/decorators/roles.decorator';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
@@ -13,7 +14,10 @@ import { CacheConfigDto } from './dto/cache-config.dto';
 @UseGuards(JwtAuthGuard, RolesGuard)
 @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
 export class AdminController {
-  constructor(private adminService: AdminService) {}
+  constructor(
+    private adminService: AdminService,
+    private fileVerifyService: FileVerifyService,
+  ) {}
 
   @Get('stats')
   async getStats() {
@@ -134,21 +138,37 @@ export class AdminController {
   }
 
   /**
-   * 文件体检：校验 ready 文件 Telegram file_id 是否仍有效。
+   * 创建文件体检异步任务：校验 ready 文件 Telegram file_id 是否仍有效。
    * 默认 dry-run 仅统计；显式 apply 才标记 error / 回填 telegramFilePath。
+   * 立即返回 taskId（HTTP 202），后台通过 Bull 队列异步执行，可查询任务进度。
    */
   @Post('files/verify')
+  @HttpCode(202)
   @Roles(UserRole.SUPER_ADMIN)
-  async verifyFiles(
-    @CurrentUser() user: User,
-    @Body() dto: FileVerifyDto,
-  ) {
-    return this.adminService.verifyFiles(user, {
+  async createFileVerifyTask(@CurrentUser() user: User, @Body() dto: FileVerifyDto) {
+    return this.fileVerifyService.createTask(user, {
       mode: dto.mode,
       allReady: dto.allReady,
       limit: dto.limit,
       concurrency: dto.concurrency,
     });
+  }
+
+  /** 获取当前活动体检任务（queued/running），无任务时返回 null。注意此路由必须先于 :taskId 定义。 */
+  @Get('files/verify/active')
+  @Roles(UserRole.SUPER_ADMIN)
+  async getActiveFileVerifyTask() {
+    const task = await this.fileVerifyService.getActiveTask();
+    return { task: task ? this.fileVerifyService.toView(task) : null };
+  }
+
+  /** 按 taskId 查询体检任务状态、进度与最终结果 */
+  @Get('files/verify/:taskId')
+  @Roles(UserRole.SUPER_ADMIN)
+  async getFileVerifyTask(@Param('taskId') taskId: string) {
+    const task = await this.fileVerifyService.getTask(taskId);
+    if (!task) throw new NotFoundException('体检任务不存在');
+    return { task: this.fileVerifyService.toView(task) };
   }
 
   // SMTP Config

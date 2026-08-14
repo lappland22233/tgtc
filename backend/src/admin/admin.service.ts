@@ -14,8 +14,6 @@ import { FileService } from '../file/file.service';
 import { MailerService } from '../mailer/mailer.service';
 import { ConfigCacheService } from '../common/services/config-cache.service';
 import { AuditService } from '../common/services/audit.service';
-import { TelegramService } from '../telegram/telegram.service';
-import { TelegramFileNotFoundError } from '../telegram/telegram.errors';
 import { encryptPassword } from '../common/utils/crypto.util';
 import { FILE_DELETE_GRACE_MS, FILE_DELETE_COOLDOWN_MS, MS_PER_DAY } from '../common/constants/durations';
 import { ExportService, ExportOptions } from './export.service';
@@ -35,8 +33,6 @@ import {
 @Injectable()
 export class AdminService {
   private readonly logger = new Logger(AdminService.name);
-  /** 体检互斥锁：同一时刻仅允许一个体检任务，避免并发叠加触发 Bot API 限流 */
-  private verifyInFlight = false;
 
   constructor(
     @InjectRepository(SystemConfig)
@@ -60,7 +56,6 @@ export class AdminService {
     private auditService: AuditService,
     private exportService: ExportService,
     private mailerService: MailerService,
-    private telegramService: TelegramService,
   ) {}
 
   async getStats(): Promise<{
@@ -352,201 +347,6 @@ export class AdminService {
         scheduledAt: scheduledAt.toISOString(),
       },
     });
-  }
-
-  /**
-   * 文件体检：校验 ready 文件的 Telegram file_id 是否仍有效。
-   *
-   * - dry-run（默认）：仅统计，不修改任何数据；
-   * - apply：确认失效的文件标记为 error（保留记录），path 缺失的校验有效则回填 telegramFilePath。
-   *
-   * 安全约束：
-   * - telegramFilePath 为空仅是候选信号，最终以 Telegram /getFile 返回为准；
-   * - 分批并发校验（默认并发 4），避免触发 Bot API 限流；
-   * - 所有更新使用条件更新 `WHERE id = ? AND status = 'ready'`，防止覆盖并发上传；
-   * - 仅永久性错误（TelegramFileNotFoundError）标记 error；超时/429/5xx 计入 temporaryFailure，不修改；
-   * - 文件大小不一致只报告（sizeMismatch），不因单一差异误标失效。
-   */
-  async verifyFiles(
-    user: User,
-    dto: { mode?: 'dry-run' | 'apply'; allReady?: boolean; limit?: number; concurrency?: number },
-  ): Promise<{
-    mode: 'dry-run' | 'apply';
-    totalCandidates: number;
-    checked: number;
-    valid: number;
-    invalid: number;
-    emptyFileId: number;
-    temporaryFailure: number;
-    sizeMismatch: number;
-    backfilled: number;
-    markedError: number;
-  }> {
-    const mode = dto.mode === 'apply' ? 'apply' : 'dry-run';
-    const limit = Math.max(1, Math.min(2000, dto.limit ?? 500));
-    const concurrency = Math.max(1, Math.min(8, dto.concurrency ?? 4));
-
-    // 全局互斥：同一时刻仅允许一个体检任务（单实例内存锁），
-    // 防止 super_admin 并发/连续发起请求叠加触发 Bot API 限流。
-    if (this.verifyInFlight) {
-      throw new BadRequestException('已有文件体检任务正在执行，请稍后再试');
-    }
-    this.verifyInFlight = true;
-    try {
-      return await this.runFileVerify(user, { mode, limit, concurrency, allReady: dto.allReady });
-    } finally {
-      this.verifyInFlight = false;
-    }
-  }
-
-  /** verifyFiles 的实际执行体（互斥锁保护下运行） */
-  private async runFileVerify(
-    user: User,
-    dto: { mode: 'dry-run' | 'apply'; allReady?: boolean; limit: number; concurrency: number },
-  ): Promise<{
-    mode: 'dry-run' | 'apply';
-    totalCandidates: number;
-    checked: number;
-    valid: number;
-    invalid: number;
-    emptyFileId: number;
-    temporaryFailure: number;
-    sizeMismatch: number;
-    backfilled: number;
-    markedError: number;
-  }> {
-    const mode = dto.mode === 'apply' ? 'apply' : 'dry-run';
-
-    const qb = this.fileRepository
-      .createQueryBuilder('file')
-      .select(['file.id', 'file.originalName', 'file.size', 'file.telegramFileId', 'file.telegramFilePath', 'file.uploadVersion'])
-      .where('file.isDeleted = false')
-      .andWhere("file.status = 'ready'");
-
-    if (dto.allReady !== true) {
-      qb.andWhere('(file."telegramFilePath" IS NULL OR file."telegramFilePath" = \'\')');
-    }
-    qb.orderBy('file."createdAt"', 'ASC').limit(dto.limit);
-
-    const candidates = await qb.getMany();
-    const totalCandidates = candidates.length;
-
-    const stats: {
-      mode: 'dry-run' | 'apply';
-      totalCandidates: number;
-      checked: number;
-      valid: number;
-      invalid: number;
-      emptyFileId: number;
-      temporaryFailure: number;
-      sizeMismatch: number;
-      backfilled: number;
-      markedError: number;
-    } = {
-      mode,
-      totalCandidates,
-      checked: 0,
-      valid: 0,
-      invalid: 0,
-      emptyFileId: 0,
-      temporaryFailure: 0,
-      sizeMismatch: 0,
-      backfilled: 0,
-      markedError: 0,
-    };
-
-    // 有限并发分批执行校验，单条临时错误不中止整批
-    let cursor = 0;
-    while (cursor < candidates.length) {
-      const batch = candidates.slice(cursor, cursor + dto.concurrency);
-      cursor += dto.concurrency;
-      await Promise.all(
-        batch.map(async (file) => {
-          stats.checked++;
-          const remoteFileId = file.telegramFileId?.trim?.();
-          if (!remoteFileId) {
-            // 无 file_id 必然不可下载，apply 时标记 error（条件更新）
-            if (mode === 'apply') {
-              await this.fileRepository
-                .createQueryBuilder()
-                .update(File)
-                .set({
-                  status: 'error' as const,
-                  uploadStage: 'failed' as const,
-                  uploadFailureReason: 'Telegram 文件引用缺失，已标记上传失败',
-                })
-                .where('id = :id', { id: file.id })
-                .andWhere("status = 'ready'")
-                .andWhere('uploadVersion = :version', { version: file.uploadVersion })
-                .execute();
-              stats.markedError++;
-            }
-            stats.emptyFileId++;
-            return;
-          }
-
-          try {
-            const meta = await this.telegramService.verifyFileExists(remoteFileId);
-            if (meta.file_size > 0 && file.size !== meta.file_size) {
-              // 大小不一致仅报告，不误标
-              stats.sizeMismatch++;
-            }
-            // 校验有效：path 缺失时回填（条件更新，防止覆盖上传竞态）
-            if (mode === 'apply' && (!file.telegramFilePath || !file.telegramFilePath.trim())) {
-              await this.fileRepository
-                .createQueryBuilder()
-                .update(File)
-                .set({ telegramFilePath: meta.file_path || '' })
-                .where('id = :id', { id: file.id })
-                .andWhere("status = 'ready'")
-                .andWhere('uploadVersion = :version', { version: file.uploadVersion })
-                .execute();
-              stats.backfilled++;
-            }
-            stats.valid++;
-          } catch (error) {
-            if (error instanceof TelegramFileNotFoundError) {
-              // 永久失效：apply 时条件标记 error
-              if (mode === 'apply') {
-                await this.fileRepository
-                  .createQueryBuilder()
-                  .update(File)
-                  .set({
-                    status: 'error' as const,
-                    uploadStage: 'failed' as const,
-                    uploadFailureReason: 'Telegram 文件不存在或已失效，已标记上传失败',
-                  })
-                  .where('id = :id', { id: file.id })
-                  .andWhere("status = 'ready'")
-                  .andWhere('uploadVersion = :version', { version: file.uploadVersion })
-                  .execute();
-                stats.markedError++;
-              }
-              stats.invalid++;
-            } else {
-              // 暂时性错误（超时/429/5xx/Bot 暂时不可用）：仅统计，不修改
-              stats.temporaryFailure++;
-            }
-          }
-        }),
-      );
-    }
-
-    // 脱敏审计：仅记录统计摘要，不记录完整 file_id / 文件名列表
-    this.auditService.log({
-      action: 'file_verify',
-      userId: user.id,
-      resourceType: 'file',
-      resourceId: 'batch',
-      metadata: { ...stats },
-    });
-
-    this.logger.log(
-      `文件体检完成 mode=${mode} checked=${stats.checked} valid=${stats.valid} invalid=${stats.invalid} ` +
-        `emptyFileId=${stats.emptyFileId} temporaryFailure=${stats.temporaryFailure} markedError=${stats.markedError} backfilled=${stats.backfilled}`,
-    );
-
-    return stats;
   }
 
   async getAuthConfig(): Promise<{

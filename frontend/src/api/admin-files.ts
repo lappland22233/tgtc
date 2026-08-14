@@ -32,11 +32,20 @@ export async function fetchAllAdminFiles(query: AdminFileQuery): Promise<{ files
   };
 }
 
-/** 文件体检结果统计 */
-export interface FileVerifyResult {
+/** 文件体检任务状态 */
+export type FileVerifyTaskStatus = 'queued' | 'running' | 'completed' | 'failed';
+
+/** 文件体检任务 */
+export interface FileVerifyTask {
+  taskId: string;
+  status: FileVerifyTaskStatus;
   mode: 'dry-run' | 'apply';
-  totalCandidates: number;
-  checked: number;
+  allReady: boolean;
+  limit: number;
+  concurrency: number;
+  totalCandidates: number; // 候选总数（开始执行后才有值）
+  processed: number; // 已处理数
+  progress: number; // 0~100，后端已算好
   valid: number;
   invalid: number;
   emptyFileId: number;
@@ -44,6 +53,10 @@ export interface FileVerifyResult {
   sizeMismatch: number;
   backfilled: number;
   markedError: number;
+  errorSummary: string | null; // 仅 failed 时可能有值
+  createdAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
 }
 
 export interface FileVerifyRequest {
@@ -57,9 +70,22 @@ export interface FileVerifyRequest {
   concurrency?: number;
 }
 
-export async function verifyAdminFiles(
-  req: FileVerifyRequest = {},
-): Promise<FileVerifyResult> {
+/** 创建文件体检任务（202）。isNewTask=false 表示已有活动任务，返回的是现有任务。 */
+export async function createFileVerifyTask(
+  req: FileVerifyRequest,
+): Promise<{ task: FileVerifyTask; isNewTask: boolean }> {
   const response = await api.post('/admin/files/verify', req);
-  return response.data.data as FileVerifyResult;
+  return response.data.data as { task: FileVerifyTask; isNewTask: boolean };
+}
+
+/** 获取当前活动体检任务；无活动任务时返回 null */
+export async function fetchActiveFileVerifyTask(signal?: AbortSignal): Promise<FileVerifyTask | null> {
+  const response = await api.get('/admin/files/verify/active', { signal });
+  return (response.data.data.task as FileVerifyTask | null) ?? null;
+}
+
+/** 按 taskId 获取体检任务 */
+export async function fetchFileVerifyTask(taskId: string, signal?: AbortSignal): Promise<FileVerifyTask> {
+  const response = await api.get(`/admin/files/verify/${taskId}`, { signal });
+  return response.data.data.task as FileVerifyTask;
 }

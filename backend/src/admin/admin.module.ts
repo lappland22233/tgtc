@@ -15,19 +15,23 @@ import { TelemetryRecord } from '../common/entities/telemetry-record.entity';
 import { DashboardController } from './dashboard.controller';
 import { DashboardService } from './dashboard.service';
 import { ExportService } from './export.service';
+import { FileVerifyService } from './file-verify.service';
+import { FileVerifyTask } from '../common/entities/file-verify-task.entity';
+import { BullQueueModule } from '../jobs/bull-queue.module';
 import { FileModule } from '../file/file.module';
 import { MailerModule } from '../mailer/mailer.module';
 import { AlertModule } from '../alert/alert.module';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([SystemConfig, BannedIP, File, User, FileAccessLog, AccessLog, AuditLog, DashboardConfig, Alert, TelemetryRecord]),
+    TypeOrmModule.forFeature([SystemConfig, BannedIP, File, User, FileAccessLog, AccessLog, AuditLog, DashboardConfig, Alert, TelemetryRecord, FileVerifyTask]),
+    BullQueueModule,
     FileModule,
     MailerModule,
     forwardRef(() => AlertModule),
   ],
   controllers: [AdminController, DashboardController],
-  providers: [AdminService, DashboardService, ExportService],
-  exports: [AdminService],
+  providers: [AdminService, DashboardService, ExportService, FileVerifyService],
+  exports: [AdminService, FileVerifyService],
 })
 export class AdminModule {}

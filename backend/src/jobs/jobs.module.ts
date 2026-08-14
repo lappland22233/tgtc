@@ -11,6 +11,8 @@ import {
   WeeklyReportProcessor,
 } from './other.processors';
 import { FileUploadProcessor } from './file-upload.processor';
+import { FileVerifyProcessor } from './file-verify.processor';
+import { AdminModule } from '../admin/admin.module';
 import { SecurityModule } from '../security/security.module';
 import { JobsSchedulerService } from './jobs-scheduler.service';
 import { AccessLog } from '../common/entities/access-log.entity';
@@ -28,6 +30,7 @@ import { FileModule } from '../file/file.module';
     AlertModule,
     SecurityModule,
     FileModule,
+    AdminModule,
   ],
   providers: [
     MetricsAggregationProcessor,
@@ -38,6 +41,7 @@ import { FileModule } from '../file/file.module';
     AnomalyDetectionProcessor,
     WeeklyReportProcessor,
     FileUploadProcessor,
+    FileVerifyProcessor,
     JobsSchedulerService,
   ],
   exports: [JobsSchedulerService],
