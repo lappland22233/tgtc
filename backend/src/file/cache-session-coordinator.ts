@@ -250,25 +250,36 @@ export class CacheSessionCoordinator {
 
       const output = createWriteStream(session.tmpPath, { flags: 'r+' });
       session.output = output;
+      let outputError: Error | undefined;
+      // 必须在首次 write 前监听；destroy() 期间的异步写回调可能晚于 error 事件。
+      output.on('error', error => {
+        outputError = error;
+      });
       try {
         for await (const rawChunk of stream) {
           resetIdleDeadline();
           if (session.error) throw session.error;
+          if (outputError) throw outputError;
           const chunk = Buffer.isBuffer(rawChunk) ? rawChunk : Buffer.from(rawChunk);
           if (session.bytesWritten + chunk.length > session.expectedSize) {
             throw new Error('上游流超过预期文件大小');
           }
           await new Promise<void>((resolve, reject) => {
-            output.write(chunk, error => error ? reject(error) : resolve());
+            output.write(chunk, error => {
+              if (error || outputError) reject(error ?? outputError);
+              else resolve();
+            });
           });
+          if (outputError) throw outputError;
           session.bytesWritten += chunk.length;
           session.events.emit('progress');
           resetIdleDeadline();
         }
         if (idleTimer) clearTimeout(idleTimer);
+        if (outputError) throw outputError;
         await new Promise<void>((resolve, reject) => {
           output.once('error', reject);
-          output.end(resolve);
+          output.end(() => outputError ? reject(outputError) : resolve());
         });
       } catch (error) {
         stream.destroy();
@@ -411,25 +422,36 @@ export class CacheSessionCoordinator {
 
       const output = createWriteStream(session.spoolPath, { flags: 'r+' });
       session.output = output;
+      let outputError: Error | undefined;
+      // 必须在首次 write 前监听；destroy() 期间的异步写回调可能晚于 error 事件。
+      output.on('error', error => {
+        outputError = error;
+      });
       try {
         for await (const rawChunk of stream) {
           resetIdleDeadline();
           if (session.error) throw session.error;
+          if (outputError) throw outputError;
           const chunk = Buffer.isBuffer(rawChunk) ? rawChunk : Buffer.from(rawChunk);
           if (session.bytesWritten + chunk.length > session.expectedSize) {
             throw new Error('上游流超过预期文件大小');
           }
           await new Promise<void>((resolve, reject) => {
-            output.write(chunk, error => error ? reject(error) : resolve());
+            output.write(chunk, error => {
+              if (error || outputError) reject(error ?? outputError);
+              else resolve();
+            });
           });
+          if (outputError) throw outputError;
           session.bytesWritten += chunk.length;
           session.events.emit('progress');
           resetIdleDeadline();
         }
         if (idleTimer) clearTimeout(idleTimer);
+        if (outputError) throw outputError;
         await new Promise<void>((resolve, reject) => {
           output.once('error', reject);
-          output.end(resolve);
+          output.end(() => outputError ? reject(outputError) : resolve());
         });
       } catch (error) {
         stream.destroy();

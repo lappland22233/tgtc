@@ -193,6 +193,23 @@ describe('FileCacheService no-cache mode', () => {
     expect(fetchFn).toHaveBeenCalledTimes(1);
   });
 
+  it('propagates a spool upstream failure without an unhandled output error', async () => {
+    const upstream = new PassThrough();
+    const { stream } = await service.getOrCacheStream(fileId, 6, async () => ({
+      stream: upstream,
+      info: { file_size: 6 },
+    }));
+    const contentPromise = readStream(stream);
+    upstream.write(Buffer.from('abc'));
+    upstream.once('error', () => {});
+    upstream.destroy(new Error('spool upstream failed'));
+
+    await expect(contentPromise).rejects.toThrow('spool upstream failed');
+    const session = (service as any).spoolSessions.get(fileId);
+    await session?.completion?.catch(() => {});
+    await waitForDir(true);
+  });
+
   it('spool mode: 不发布正式缓存、不建 build 会话、不触发 LRU/容量计算', async () => {
     const evictSpy = jest.spyOn(service as any, 'evictLRU');
     const sizeSpy = jest.spyOn(service as any, 'getTotalCacheSize');
