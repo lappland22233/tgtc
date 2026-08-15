@@ -6,7 +6,7 @@ import { Roles } from '../common/decorators/roles.decorator';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { User, UserRole } from '../common/entities/user.entity';
-import { BanIPDto, UnbanIPDto, BatchDeleteFilesDto, ConfigDto, BatchConfigDto, SmtpConfigDto, SmtpTestDto, UploadConfigDto, AuthConfigDto, AccessLogQueryDto, SecurityConfigBatchDto, FileVerifyDto } from './admin.dto';
+import { BanIPDto, UnbanIPDto, BatchDeleteFilesDto, ConfigDto, BatchConfigDto, SmtpConfigDto, SmtpTestDto, UploadConfigDto, AuthConfigDto, AccessLogQueryDto, SecurityConfigBatchDto, FileVerifyDto, StalePathCleanupDto } from './admin.dto';
 import { TopFilesQueryDto, TopPathsQueryDto, StatusByPathQueryDto, AbnormalIpsQueryDto, DateRangeQueryDto, RefererAnalysisQueryDto, UserAgentAnalysisQueryDto, BandwidthQueryDto, FileTypeQueryDto } from './admin-stats.dto';
 import { CacheConfigDto } from './dto/cache-config.dto';
 
@@ -169,6 +169,17 @@ export class AdminController {
     const task = await this.fileVerifyService.getTask(taskId);
     if (!task) throw new NotFoundException('体检任务不存在');
     return { task: this.fileVerifyService.toView(task) };
+  }
+
+  /**
+   * 存量旧路径清理：仅 SUPER_ADMIN。
+   * dry-run 统计命中旧 /data/cb/tgtc-beta/ 前缀的 telegramFilePath 数量（不修改）；
+   * apply 将匹配记录的 telegramFilePath 清空为 NULL（幂等），不改变文件 status。
+   */
+  @Post('files/stale-paths/cleanup')
+  @Roles(UserRole.SUPER_ADMIN)
+  async cleanupStalePaths(@CurrentUser() user: User, @Body() dto: StalePathCleanupDto) {
+    return this.adminService.cleanupStalePaths(user, dto.mode ?? 'dry-run');
   }
 
   // SMTP Config

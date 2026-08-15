@@ -16,6 +16,7 @@
         <div style="display: flex; gap: 12px; flex-wrap: wrap;">
           <t-button v-if="!isMobile" theme="primary" variant="outline" @click="batchDelete">批量删除（冷静期）</t-button>
           <t-button theme="warning" variant="outline" @click="openVerifyDialog">文件体检</t-button>
+          <t-button theme="warning" variant="outline" @click="openCleanupDialog">清理失效路径</t-button>
         </div>
       </div>
 
@@ -185,6 +186,40 @@
         </div>
       </div>
     </t-dialog>
+
+    <!-- 存量旧路径清理确认弹窗 -->
+    <t-dialog
+      v-model:visible="cleanupDialogVisible"
+      header="清理失效路径"
+      width="520px"
+      :confirm-btn="null"
+      cancel-btn="关闭"
+      @close="cleanupDialogVisible = false"
+    >
+      <div style="display: flex; flex-direction: column; gap: 12px; color: var(--text-secondary); font-size: 14px;">
+        <div>将清空数据库中以 <code style="background: var(--bg-secondary); padding: 1px 4px; border-radius: 4px;">/data/cb/tgtc-beta/</code> 开头的旧 telegramFilePath（仅清空路径，不下载、不删除文件、不影响 <code style="background: var(--bg-secondary); padding: 1px 4px; border-radius: 4px;">/root/cb</code> 路径）。</div>
+        <div style="color: var(--color-warning); font-weight: 500;">⚠ apply 模式会清空匹配记录的路径字段，操作前请先预览统计。</div>
+        <div style="display: flex; gap: 8px; margin-top: 8px;">
+          <t-button theme="primary" variant="outline" style="flex: 1;" :loading="cleanupRunning" @click="runCleanup('dry-run')">仅预览统计（dry-run）</t-button>
+          <t-button theme="danger" variant="outline" style="flex: 1;" :loading="cleanupRunning" @click="runCleanup('apply')">清空路径（apply）</t-button>
+        </div>
+      </div>
+    </t-dialog>
+
+    <!-- 存量旧路径清理结果弹窗 -->
+    <t-dialog
+      v-model:visible="cleanupResultVisible"
+      :header="cleanupResultHeader"
+      width="460px"
+      confirm-btn="确定"
+      :cancel-btn="null"
+      @confirm="closeCleanupResult"
+      @close="cleanupResultVisible = false"
+    >
+      <div style="display: flex; flex-direction: column; gap: 8px; font-size: 14px;">
+        <div v-for="line in cleanupResultLines" :key="line">{{ line }}</div>
+      </div>
+    </t-dialog>
   </div>
 </template>
 
@@ -198,8 +233,10 @@ import {
   createFileVerifyTask,
   fetchActiveFileVerifyTask,
   fetchFileVerifyTask,
+  cleanupStalePaths,
   type AdminFileItem,
   type FileVerifyTask,
+  type StalePathCleanupResult,
 } from '../../api/admin-files';
 import { formatSize, formatDate } from '@/utils/format';
 import { getErrorMessage } from '../../utils/error';
@@ -616,6 +653,80 @@ onUnmounted(() => {
   stopVerifyPolling();
   document.removeEventListener('visibilitychange', handleVisibilityChange);
 });
+
+// ==================== 存量旧路径清理 ====================
+
+/** 清理确认弹窗可见性 */
+const cleanupDialogVisible = ref(false);
+
+/** 清理结果弹窗状态 */
+const cleanupResultVisible = ref(false);
+const cleanupResultHeader = ref('');
+const cleanupResultLines = ref<string[]>([]);
+const cleanupResultApplied = ref(false);
+
+/** 是否正在执行清理请求（防重复提交） */
+const cleanupRunning = ref(false);
+
+/** 打开清理确认弹窗 */
+function openCleanupDialog() {
+  cleanupDialogVisible.value = true;
+}
+
+/** 执行存量旧路径清理：dry-run 统计 / apply 清空 */
+async function runCleanup(mode: 'dry-run' | 'apply') {
+  if (cleanupRunning.value) return;
+  // apply 为破坏性操作，二次确认
+  if (mode === 'apply') {
+    const confirmDialog = DialogPlugin.confirm({
+      header: '确认清空旧路径',
+      body: '确定要清空所有以 /data/cb/tgtc-beta/ 开头的旧 telegramFilePath 吗？此操作仅清空路径字段，不影响文件状态。',
+      theme: 'danger',
+      confirmBtn: '确认清空',
+      cancelBtn: '取消',
+      onConfirm: () => {
+        confirmDialog.destroy();
+        void doCleanup(mode);
+      },
+      onClose: () => confirmDialog.destroy(),
+    });
+    return;
+  }
+  await doCleanup(mode);
+}
+
+/** 实际发起清理请求 */
+async function doCleanup(mode: 'dry-run' | 'apply') {
+  if (cleanupRunning.value) return;
+  cleanupRunning.value = true;
+  try {
+    const result: StalePathCleanupResult = await cleanupStalePaths(mode);
+    cleanupDialogVisible.value = false;
+    showCleanupResult(result);
+  } catch (error) {
+    MessagePlugin.error(getErrorMessage(error) || '清理请求失败');
+  } finally {
+    cleanupRunning.value = false;
+  }
+}
+
+/** 展示清理统计结果 */
+function showCleanupResult(result: StalePathCleanupResult) {
+  const isApply = result.mode === 'apply';
+  const lines = isApply
+    ? [`apply：已清空 ${result.updated} 条旧路径。`, `本次命中 ${result.matched} 条旧路径（幂等，重复执行将命中 0 条）。`]
+    : [`dry-run：命中 ${result.matched} 条旧路径，将清空为 NULL（不修改状态）。`];
+  cleanupResultHeader.value = isApply ? '清理完成' : '预览统计';
+  cleanupResultLines.value = lines;
+  cleanupResultApplied.value = isApply;
+  cleanupResultVisible.value = true;
+}
+
+/** 关闭清理结果弹窗，apply 后刷新列表 */
+function closeCleanupResult() {
+  cleanupResultVisible.value = false;
+  if (cleanupResultApplied.value) refreshList();
+}
 </script>
 
 <style scoped>

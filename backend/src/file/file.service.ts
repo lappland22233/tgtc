@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, ForbiddenException, BadRequestException, OnModuleInit, Logger } from '@nestjs/common';
+import { Injectable, NotFoundException, ForbiddenException, BadRequestException, GoneException, OnModuleInit, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, In, IsNull, EntityManager } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
@@ -1475,6 +1475,8 @@ export class FileService implements OnModuleInit {
 
     await this.assertFileReadable(file, user);
 
+    this.assertFileUsable(file);
+
     // 优先读取本地缩略图
     let localThumb = await this.thumbnailService.readLocalThumbnail(file);
     if (!localThumb && file.mimeType?.startsWith('video/')) {
@@ -1529,6 +1531,7 @@ export class FileService implements OnModuleInit {
   }> {
     const file = await this.fileRepository.findOne({ where: { id: fileId, isDeleted: false } });
     if (!file) throw new NotFoundException('文件不存在');
+    this.assertFileUsable(file);
     const isImage = file.mimeType?.startsWith('image/');
     const isVideo = file.mimeType?.startsWith('video/');
     if (!isImage && !isVideo) throw new BadRequestException('仅图片和视频支持缩略图');
@@ -1556,6 +1559,7 @@ export class FileService implements OnModuleInit {
     });
     if (!file) throw new NotFoundException('文件不存在');
     await this.assertFileReadable(file, user);
+    this.assertFileUsable(file);
     if (!file.mimeType?.startsWith('video/')) {
       throw new BadRequestException('仅视频支持高清封面');
     }
@@ -1583,6 +1587,7 @@ export class FileService implements OnModuleInit {
       where: { id: fileId, isDeleted: false },
     });
     if (!file) throw new NotFoundException('文件不存在');
+    this.assertFileUsable(file);
     if (!file.mimeType?.startsWith('video/')) {
       throw new BadRequestException('仅视频支持高清封面');
     }
@@ -1638,6 +1643,40 @@ export class FileService implements OnModuleInit {
   }
 
 
+  /**
+   * R5：已 error 文件在所有读取入口统一抛 410，避免各自复制错误文本与状态判定。
+   * 判定点必须在提交响应头之前（各流式入口在组装响应前调用）。
+   */
+  private assertFileUsable(file: File): void {
+    if (file.status === 'error') {
+      throw new GoneException('文件已不可用');
+    }
+  }
+
+  /**
+   * R4：恢复成功且路径确实变化时，用并发守卫条件更新 telegramFilePath。
+   * - 仅在 info.file_path 非空且与当前值不同时触发数据库写入（普通读取不写库）；
+   * - 条件更新 WHERE id=? AND status='ready' AND uploadVersion=?，防止覆盖并发上传结果；
+   * - 回写失败仅记日志，绝不阻断主流程。
+   */
+  private async maybeWriteBackRecoveredPath(file: File, info?: { file_path?: string }): Promise<void> {
+    if (!info || !info.file_path) return;
+    if (file.telegramFilePath === info.file_path) return;
+    try {
+      const criteria: Record<string, unknown> = { id: file.id, status: 'ready' };
+      if (file.uploadVersion) criteria.uploadVersion = file.uploadVersion;
+      await this.fileRepository.update(
+        criteria as any,
+        { telegramFilePath: info.file_path } as Partial<File>,
+      );
+      this.logger.log(`Telegram 路径恢复成功并回写: ${file.id}`);
+    } catch (error) {
+      this.logger.warn(
+        `回写恢复路径失败 ${file.id}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
   /** 统一选择正式缓存或二次开发 Bot API 的实时冷回源。 */
   private async getDownloadStream(file: File, opts?: { noCache?: boolean }): Promise<{
     stream: Readable;
@@ -1647,32 +1686,37 @@ export class FileService implements OnModuleInit {
     if (!Number.isSafeInteger(expectedSize) || expectedSize <= 0) {
       throw new BadRequestException('文件大小无效');
     }
-    if (file.status === 'error') {
-      throw new BadRequestException('文件上传失败，无法下载或预览');
-    }
+    this.assertFileUsable(file);
     if (file.status === 'processing' && !this.fileCacheService.getCachedPath(file.id)) {
       throw new BadRequestException('文件正在处理中，请稍后刷新重试');
     }
     // 请求级强制无缓存优先，其次跟随全局配置
     const noCache = opts?.noCache ?? this.fileCacheService.isNoCacheMode();
     try {
-      if (noCache) {
-        const result = await this.fileCacheService.getNoCacheStream(
-          file.id,
+      // 捕获回源后的最新 info（仅当实际触发回源/恢复时才有值；缓存命中或 spool 重放时不回写）
+      let recoveredInfo: { file_path: string } | undefined;
+      // 请求级强制无缓存（管理员 ?nocache=1）时仍携带 X-Telegram-No-Cache 头；
+      // 否则动态跟随全局配置（默认构建缓存路径不带头，容量准备期间翻转进入无缓存早退分支则带头）。
+      const forceNoCache = noCache && !this.fileCacheService.isNoCacheMode();
+      const fetch = async () => {
+        const result = await this.telegramService.getRealtimeFileStream(
+          file.telegramFileId || file.filename,
           expectedSize,
-          // 无缓存直通：携带 X-Telegram-No-Cache 头，传输完成后由 Bot API 清理 workdir 本地副本
-          () => this.telegramService.getRealtimeFileStream(file.telegramFileId || file.filename, expectedSize, { noCache: true }),
+          { noCache: this.fileCacheService.isNoCacheMode() || forceNoCache },
         );
+        recoveredInfo = result.info;
+        return result;
+      };
+
+      if (noCache) {
+        const result = await this.fileCacheService.getNoCacheStream(file.id, expectedSize, fetch);
         this.attachDownloadInvalidHandler(file, result.stream);
+        await this.maybeWriteBackRecoveredPath(file, recoveredInfo);
         return { stream: result.stream, actualSize: expectedSize };
       }
-      const result = await this.fileCacheService.getOrCacheStream(
-        file.id,
-        expectedSize,
-        // 调用时动态评估：默认构建缓存路径不带头；若容量准备期间模式翻转进入无缓存早退分支则带头
-        () => this.telegramService.getRealtimeFileStream(file.telegramFileId || file.filename, expectedSize, { noCache: this.fileCacheService.isNoCacheMode() }),
-      );
+      const result = await this.fileCacheService.getOrCacheStream(file.id, expectedSize, fetch);
       this.attachDownloadInvalidHandler(file, result.stream);
+      await this.maybeWriteBackRecoveredPath(file, recoveredInfo);
       return { stream: result.stream, actualSize: expectedSize };
     } catch (error) {
       // 仅将明确的 Telegram 永久资源不存在错误降级为 error；
@@ -1838,9 +1882,7 @@ export class FileService implements OnModuleInit {
       return null;
     }
 
-    if (file.status === 'error') {
-      throw new BadRequestException('文件上传失败，无法下载或预览');
-    }
+    this.assertFileUsable(file);
     // 文件仍在处理中（TG 未同步）→ 拒绝范围下载，避免用临时 UUID 回源
     if (file.status === 'processing') {
       throw new BadRequestException('文件正在处理中，请稍后刷新重试');
@@ -2180,9 +2222,7 @@ export class FileService implements OnModuleInit {
       }
       throw new ForbiddenException('限时文件不能使用永久媒体直链');
     }
-    if (file.status === 'error') {
-      throw new BadRequestException('文件上传失败，无法下载或预览');
-    }
+    this.assertFileUsable(file);
     if (file.status === 'processing' && !this.fileCacheService.getCachedPath(file.id)) {
       throw new BadRequestException('文件正在处理中，请稍后刷新重试');
     }
@@ -2758,9 +2798,7 @@ export class FileService implements OnModuleInit {
 
     await this.assertFileReadable(file, user);
 
-    if (file.status === 'error') {
-      throw new BadRequestException('文件上传失败，无法下载或预览');
-    }
+    this.assertFileUsable(file);
     // 文件仍在处理中（TG 未同步）→ 拒绝范围预览，避免用临时 UUID 回源
 
     if (file.status === 'processing') {
@@ -2834,9 +2872,7 @@ export class FileService implements OnModuleInit {
     const file = await this.fileRepository.findOne({ where: { id: fileId, isDeleted: false } });
     if (!file) throw new NotFoundException('文件不存在');
 
-    if (file.status === 'error') {
-      throw new BadRequestException('文件上传失败，无法下载或预览');
-    }
+    this.assertFileUsable(file);
 
     const total = Number(file.size);
     // 严格单 Range 解析：支持 closed/open-ended/suffix；非法/越界统一 416

@@ -5,7 +5,7 @@ export interface ApiErrorDetails {
 }
 
 export interface ServiceAvailabilityError {
-  kind: 'storage_full' | 'service_unavailable';
+  kind: 'storage_full' | 'service_unavailable' | 'file_unavailable';
   message: string;
 }
 
@@ -56,6 +56,14 @@ export function classifyServiceAvailabilityError(error: unknown): ServiceAvailab
     return {
       kind: 'service_unavailable',
       message: '文件服务暂时不可用，请稍后重试。若问题持续，请联系管理员。',
+    };
+  }
+
+  // 410 Gone：文件已不可用（永久失效，非临时网关错误），独立于 502/503 处理
+  if (status === 410) {
+    return {
+      kind: 'file_unavailable',
+      message: '文件已不可用',
     };
   }
 

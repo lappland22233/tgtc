@@ -17,3 +17,24 @@ export class TelegramFileNotFoundError extends Error {
     this.name = 'TelegramFileNotFoundError';
   }
 }
+
+/**
+ * Telegram 本地路径失效 / 流式 size 不可用型可恢复错误。
+ *
+ * 仅当 Bot API 流式端点返回 HTTP 502 且描述命中确证的"路径失效"特征
+ * （如 "Exact file size is unavailable from Telegram"），或本地绝对路径
+ * 在安全打开时发现不存在（ENOENT）时抛出。
+ *
+ * 与 {@link TelegramFileNotFoundError}（永久不存在）不同，本类型标识的是
+ * **可能可恢复** 的路径失效：file_id 仍有效、Telegram 仍持有文件，
+ * 只是本地旧路径已失效。调用方（下载链路）可据此执行单次强制回源。
+ * 网络超时、429、普通 5xx 不会转换为本类型，避免误判。
+ */
+export class TelegramStreamPathError extends Error {
+  readonly code = 'TELEGRAM_STREAM_PATH_INVALID';
+
+  constructor(message?: string) {
+    super(message || 'Telegram 文件本地路径失效或流式 size 不可用');
+    this.name = 'TelegramStreamPathError';
+  }
+}

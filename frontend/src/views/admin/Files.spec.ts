@@ -16,6 +16,7 @@ vi.mock('../../api/admin-files', () => ({
   createFileVerifyTask: vi.fn(),
   fetchActiveFileVerifyTask: vi.fn(),
   fetchFileVerifyTask: vi.fn(),
+  cleanupStalePaths: vi.fn(),
 }));
 
 vi.mock('../../stores/auth', () => ({
@@ -368,5 +369,101 @@ describe('Files.vue 文件体检（异步任务）', () => {
     wrapper.unmount();
     await vi.advanceTimersByTimeAsync(3000);
     expect(vi.mocked(adminFilesApi.fetchFileVerifyTask).mock.calls.length).toBe(callsBefore);
+  });
+});
+
+describe('Files.vue 存量旧路径清理', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+    vi.stubGlobal('IntersectionObserver', IntersectionObserverStub);
+    vi.mocked(adminFilesApi.fetchAllAdminFiles).mockResolvedValue({ files: [], total: 0 });
+    vi.mocked(adminFilesApi.fetchActiveFileVerifyTask).mockResolvedValue(null);
+    vi.mocked(adminFilesApi.cleanupStalePaths).mockResolvedValue({ mode: 'dry-run', matched: 42, updated: 0 });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it('点击"清理失效路径"打开确认弹窗，展示说明文字', async () => {
+    const wrapper = mount(Files);
+    await flushMicrotasks();
+
+    await findButton(wrapper, '清理失效路径').trigger('click');
+    await flushMicrotasks();
+
+    expect(dialogHeaders(wrapper)).toContain('清理失效路径');
+    expect(wrapper.text()).toContain('/data/cb/tgtc-beta/');
+    expect(wrapper.text()).toContain('仅预览统计');
+    expect(wrapper.text()).toContain('清空路径');
+  });
+
+  it('dry-run：调用 cleanupStalePaths(mode dry-run)，展示命中统计，不刷新列表', async () => {
+    const wrapper = mount(Files);
+    await flushMicrotasks();
+
+    await findButton(wrapper, '清理失效路径').trigger('click');
+    await flushMicrotasks();
+    await findButton(wrapper, 'dry-run').trigger('click');
+    await flushMicrotasks();
+
+    expect(adminFilesApi.cleanupStalePaths).toHaveBeenCalledWith('dry-run');
+    expect(dialogHeaders(wrapper)).toContain('预览统计');
+    expect(wrapper.text()).toContain('dry-run：命中 42 条旧路径，将清空为 NULL（不修改状态）。');
+    // dry-run 不刷新列表
+    expect(vi.mocked(adminFilesApi.fetchAllAdminFiles).mock.calls.length).toBe(1);
+  });
+
+  it('apply：二次确认后调用 cleanupStalePaths(mode apply)，展示结果并刷新列表', async () => {
+    // 二次确认弹窗自动确认：延迟到 confirmDialog 初始化后再触发 onConfirm
+    const mockedDialog = await import('tdesign-vue-next');
+    vi.mocked(mockedDialog.DialogPlugin.confirm).mockImplementation(((options: any) => {
+      queueMicrotask(() => options.onConfirm?.());
+      return { destroy: vi.fn() };
+    }) as any);
+
+    vi.mocked(adminFilesApi.cleanupStalePaths).mockResolvedValue({ mode: 'apply', matched: 100, updated: 100 });
+
+    const wrapper = mount(Files);
+    await flushMicrotasks();
+
+    const fetchAllCallsBefore = vi.mocked(adminFilesApi.fetchAllAdminFiles).mock.calls.length;
+
+    await findButton(wrapper, '清理失效路径').trigger('click');
+    await flushMicrotasks();
+    await findButton(wrapper, 'apply').trigger('click');
+    await flushMicrotasks();
+
+    expect(adminFilesApi.cleanupStalePaths).toHaveBeenCalledWith('apply');
+    expect(dialogHeaders(wrapper)).toContain('清理完成');
+    expect(wrapper.text()).toContain('apply：已清空 100 条旧路径。');
+
+    // 关闭结果弹窗 → refreshList → 重新拉取文件列表
+    const confirmBtn = wrapper.find('.t-dialog-confirm');
+    expect(confirmBtn.exists()).toBe(true);
+    await confirmBtn.trigger('click');
+    await flushMicrotasks();
+    expect(vi.mocked(adminFilesApi.fetchAllAdminFiles).mock.calls.length).toBeGreaterThan(fetchAllCallsBefore);
+  });
+
+  it('防重复提交：cleanupRunning 期间重复点击不重复请求', async () => {
+    const wrapper = mount(Files);
+    await flushMicrotasks();
+
+    await findButton(wrapper, '清理失效路径').trigger('click');
+    await flushMicrotasks();
+    // 请求挂起（pending）期间再次点击
+    let resolveFn: (v: any) => void = () => {};
+    vi.mocked(adminFilesApi.cleanupStalePaths).mockReturnValueOnce(new Promise((resolve) => { resolveFn = resolve; }));
+    await findButton(wrapper, 'dry-run').trigger('click');
+    await flushMicrotasks();
+    await findButton(wrapper, 'dry-run').trigger('click');
+    await flushMicrotasks();
+    resolveFn({ mode: 'dry-run', matched: 42, updated: 0 });
+    await flushMicrotasks();
+
+    expect(adminFilesApi.cleanupStalePaths).toHaveBeenCalledTimes(1);
   });
 });

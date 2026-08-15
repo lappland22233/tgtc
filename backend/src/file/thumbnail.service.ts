@@ -21,9 +21,11 @@ import * as fs from 'fs';
 import * as path from 'path';
 import sharp from 'sharp';
 import { spawn } from 'child_process';
+import { Readable } from 'stream';
 import { v4 as uuidv4 } from 'uuid';
 import { File } from '../common/entities/file.entity';
 import { TelegramService } from '../telegram/telegram.service';
+import { TelegramStreamPathError } from '../telegram/telegram.errors';
 import { FileCacheService } from './file-cache.service';
 
 /** 视频标准封面最大宽度（FFmpeg scale 上限） */
@@ -120,6 +122,26 @@ export class ThumbnailService {
     }
   }
 
+  /**
+   * R6：从 Telegram 拉取原始媒体流用于缩略图/封面生成。
+   * getFileStream 已具备安全打开能力（ENOENT 转 TelegramStreamPathError）；
+   * 命中"路径失效可恢复"时单次重试回源（再次 getFileStream 会重新触发 getFile 刷新路径）。
+   * 仍失败则抛出，由调用方按原 catch 记日志即可——缩略图缺失不应把原文件标 error。
+   */
+  private async fetchRemoteSource(file: File): Promise<Readable> {
+    try {
+      const { stream } = await this.telegramService.getFileStream(file.telegramFileId || file.filename);
+      return stream;
+    } catch (error) {
+      if (error instanceof TelegramStreamPathError) {
+        this.logger.warn(`缩略图回源命中路径失效，单次重试回源 id=${file.id}`);
+        const { stream } = await this.telegramService.getFileStream(file.telegramFileId || file.filename);
+        return stream;
+      }
+      throw error;
+    }
+  }
+
   /** 生成视频标准封面（按文件合并去重） */
   async generateAndSaveVideoCover(
     file: File,
@@ -162,7 +184,7 @@ export class ThumbnailService {
         sourcePath = tmpSource;
       }
       if (!sourcePath && options.allowRemoteSource) {
-        const { stream } = await this.telegramService.getFileStream(file.telegramFileId || file.filename);
+        const stream = await this.fetchRemoteSource(file);
         const { pipeline } = await import('stream/promises');
         await pipeline(stream, fs.createWriteStream(tmpSource));
         sourcePath = tmpSource;
@@ -274,7 +296,7 @@ export class ThumbnailService {
     const thumbFilename = `${file.id}.webp`;
     const thumbPath = path.join(this.thumbnailDir, thumbFilename);
     try {
-      const { stream } = await this.telegramService.getFileStream(file.telegramFileId || file.filename);
+      const stream = await this.fetchRemoteSource(file);
       const { pipeline } = await import('stream/promises');
       await pipeline(stream, fs.createWriteStream(tmpSource));
 

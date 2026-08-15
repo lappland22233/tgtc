@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { BadRequestException, ForbiddenException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, GoneException, NotFoundException } from '@nestjs/common';
 
 jest.mock('file-type', () => ({ fileTypeFromBuffer: jest.fn() }), { virtual: true });
 
@@ -9,6 +9,7 @@ import * as path from 'path';
 import { Readable } from 'stream';
 import { FileService, RangeNotSatisfiableException } from './file.service';
 import { ThumbnailService } from './thumbnail.service';
+import { TelegramStreamPathError } from '../telegram/telegram.errors';
 import { FileAccessType } from '../common/entities/file.entity';
 import { UserRole } from '../common/entities/user.entity';
 
@@ -144,14 +145,14 @@ describe('FileService 冷资源单连接预览策略', () => {
     ).rejects.toBeInstanceOf(ForbiddenException);
   });
 
-  it('error 状态文件即使已缓存也拒绝', async () => {
+  it('error 状态文件即使已缓存也返回 410 Gone', async () => {
     const service = createService({
       fileRepository: { findOne: jest.fn().mockResolvedValue({ ...readyVideo, status: 'error' }) },
     });
     (service as any).fileCacheService.getCachedPath = jest.fn().mockReturnValue('/tmp/cache/' + fileId);
     await expect(
       (service as any).getPreviewStreamWithRange(fileId, ownerUser, 'bytes=0-99'),
-    ).rejects.toBeInstanceOf(BadRequestException);
+    ).rejects.toBeInstanceOf(GoneException);
   });
 });
 
@@ -267,5 +268,53 @@ describe('FileService 高清封面', () => {
     const result = await (service as any).getExistingHdMediaThumbnailStream(fileId);
     expect(result.contentType).toBe('image/webp');
     await expect(readAll(result.stream)).resolves.toEqual(Buffer.from('hd-share'));
+  });
+});
+
+describe('ThumbnailService R6 路径失效可恢复', () => {
+  function createThumbnailService(telegram: Record<string, unknown>) {
+    const service = Object.create(ThumbnailService.prototype) as ThumbnailService;
+    Object.assign(service, {
+      telegramService: telegram,
+      thumbnailDir: path.join(os.tmpdir(), 'tgtc-thumb-rec-test'),
+      fileRepository: { save: jest.fn() },
+      fileCacheService: { getCachedPath: jest.fn().mockReturnValue(null) },
+      logger: { warn: jest.fn(), log: jest.fn() },
+    });
+    return service;
+  }
+
+  const imageFile = { ...readyVideo, mimeType: 'image/png', telegramFileId: 'fileid-1' };
+
+  it('首次 getFileStream 抛 TelegramStreamPathError 时单次重试回源并成功', async () => {
+    const okStream = new Readable({ read() { this.push(null); } });
+    const getFileStream = jest
+      .fn()
+      .mockRejectedValueOnce(new TelegramStreamPathError('path invalid'))
+      .mockResolvedValueOnce({ stream: okStream, info: { file_path: '/root/cb/new.png' } });
+    const service = createThumbnailService({ getFileStream });
+
+    const result = await (service as any).fetchRemoteSource(imageFile);
+    expect(result).toBe(okStream);
+    expect(getFileStream).toHaveBeenCalledTimes(2);
+  });
+
+  it('重试仍失败时向上抛出（不标记 error），由调用方按原逻辑降级', async () => {
+    const getFileStream = jest
+      .fn()
+      .mockRejectedValueOnce(new TelegramStreamPathError('path invalid'))
+      .mockRejectedValueOnce(new TelegramStreamPathError('still invalid'));
+    const service = createThumbnailService({ getFileStream });
+
+    await expect((service as any).fetchRemoteSource(imageFile)).rejects.toBeInstanceOf(TelegramStreamPathError);
+    expect(getFileStream).toHaveBeenCalledTimes(2);
+  });
+
+  it('非路径失效错误不触发重试，原样抛出', async () => {
+    const getFileStream = jest.fn().mockRejectedValue(new Error('ETIMEDOUT'));
+    const service = createThumbnailService({ getFileStream });
+
+    await expect((service as any).fetchRemoteSource(imageFile)).rejects.toThrow('ETIMEDOUT');
+    expect(getFileStream).toHaveBeenCalledTimes(1);
   });
 });

@@ -108,6 +108,17 @@ export class FileVerifyDto {
   concurrency?: number = 4;
 }
 
+/** 存量旧路径清理请求 */
+export class StalePathCleanupDto {
+  /**
+   * dry-run：仅统计命中旧路径数量，不修改任何记录（默认）；
+   * apply：清空匹配旧路径的 telegramFilePath 为 NULL（幂等）。
+   */
+  @IsOptional()
+  @IsIn(['dry-run', 'apply'])
+  mode?: 'dry-run' | 'apply' = 'dry-run';
+}
+
 export class ConfigDto {
   @IsString()
   @IsNotEmpty()

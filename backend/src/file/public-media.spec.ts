@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { BadRequestException, ForbiddenException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, GoneException } from '@nestjs/common';
 
 jest.mock('file-type', () => ({ fileTypeFromBuffer: jest.fn() }), { virtual: true });
 
@@ -81,15 +81,15 @@ describe('FileService public media validation', () => {
     await expect((expiringService as any).getPublicMediaFile(publicImage.id)).rejects.toBeInstanceOf(ForbiddenException);
   });
 
-  it('rejects error-status media files', async () => {
+  it('rejects error-status media files with 410 Gone', async () => {
     const service = createService({ ...publicImage, status: 'error' });
-    await expect((service as any).getPublicMediaFile(publicImage.id)).rejects.toBeInstanceOf(BadRequestException);
+    await expect((service as any).getPublicMediaFile(publicImage.id)).rejects.toBeInstanceOf(GoneException);
   });
 
-  it('rejects error-status media files even when a local cache copy exists', async () => {
+  it('rejects error-status media files with 410 Gone even when a local cache copy exists', async () => {
     const service = createService({ ...publicImage, status: 'error' });
     (service as any).fileCacheService.getCachedPath = jest.fn().mockReturnValue('/tmp/Cache/a58f374f-1b14');
-    await expect((service as any).getPublicMediaFile(publicImage.id)).rejects.toBeInstanceOf(BadRequestException);
+    await expect((service as any).getPublicMediaFile(publicImage.id)).rejects.toBeInstanceOf(GoneException);
   });
 });
 
@@ -111,20 +111,20 @@ describe('FileService getDownloadStream error guard', () => {
     return service;
   }
 
-  it('rejects error-status files without touching telegram or cache', async () => {
+  it('rejects error-status files with 410 Gone without touching telegram or cache', async () => {
     const service = createStreamService();
     const errorFile = { ...publicImage, status: 'error' };
-    await expect((service as any).getDownloadStream(errorFile)).rejects.toBeInstanceOf(BadRequestException);
+    await expect((service as any).getDownloadStream(errorFile)).rejects.toBeInstanceOf(GoneException);
     expect((service as any).telegramService.getRealtimeFileStream).not.toHaveBeenCalled();
     expect((service as any).fileCacheService.getOrCacheStream).not.toHaveBeenCalled();
     expect((service as any).fileCacheService.getNoCacheStream).not.toHaveBeenCalled();
   });
 
-  it('rejects error-status files even when a local cache copy exists', async () => {
+  it('rejects error-status files with 410 Gone even when a local cache copy exists', async () => {
     const service = createStreamService();
     (service as any).fileCacheService.getCachedPath = jest.fn().mockReturnValue('/tmp/Cache/a58f374f-1b14');
     const errorFile = { ...publicImage, status: 'error' };
-    await expect((service as any).getDownloadStream(errorFile)).rejects.toBeInstanceOf(BadRequestException);
+    await expect((service as any).getDownloadStream(errorFile)).rejects.toBeInstanceOf(GoneException);
     expect((service as any).telegramService.getRealtimeFileStream).not.toHaveBeenCalled();
   });
 
@@ -244,5 +244,174 @@ describe('FileService public media cold-range policy', () => {
     expect(result.start).toBe(0);
     expect(result.end).toBe(9);
     result.stream.on('error', () => {});
+  });
+});
+
+describe('FileService R4 恢复成功路径回写', () => {
+  function createRecoveryService(overrides: Record<string, unknown> = {}) {
+    const service = Object.create(FileService.prototype) as FileService;
+    Object.assign(service, {
+      fileCacheService: {
+        getCachedPath: jest.fn().mockReturnValue(null),
+        isNoCacheMode: jest.fn().mockReturnValue(false),
+        getOrCacheStream: jest.fn(),
+        getNoCacheStream: jest.fn(),
+        invalidate: jest.fn(),
+      },
+      telegramService: {
+        getRealtimeFileStream: jest.fn(),
+      },
+      fileRepository: { update: jest.fn().mockResolvedValue({ affected: 1 }) },
+      invalidMarkedAt: new Map(),
+      auditService: { log: jest.fn() },
+      logger: { warn: jest.fn(), log: jest.fn() },
+      ...overrides,
+    });
+    return service;
+  }
+
+  const staleFile = {
+    ...publicImage,
+    status: 'ready',
+    telegramFilePath: '/data/cb/old/path.png',
+    telegramFileId: 'fileid-1',
+    uploadVersion: 2,
+  };
+
+  it('恢复成功且路径变化时条件回写 telegramFilePath（含 uploadVersion 守卫）', async () => {
+    const service = createRecoveryService();
+    const stream = new (require('stream').Readable)();
+    // fetchFn 捕获回源后的 info
+    (service as any).fileCacheService.getOrCacheStream = jest.fn().mockImplementation(async (_id, _size, fetchFn) => {
+      await fetchFn();
+      return { stream, fromCache: false };
+    });
+    (service as any).telegramService.getRealtimeFileStream = jest.fn().mockResolvedValue({
+      stream,
+      info: { file_id: 'fileid-1', file_path: '/root/cb/new/path.png', file_size: publicImage.size },
+    });
+
+    await (service as any).getDownloadStream(staleFile);
+
+    expect((service as any).fileRepository.update).toHaveBeenCalledWith(
+      { id: publicImage.id, status: 'ready', uploadVersion: 2 },
+      { telegramFilePath: '/root/cb/new/path.png' },
+    );
+  });
+
+  it('路径未变化时不触发数据库写入', async () => {
+    const service = createRecoveryService();
+    const stream = new (require('stream').Readable)();
+    (service as any).fileCacheService.getOrCacheStream = jest.fn().mockImplementation(async (_id, _size, fetchFn) => {
+      await fetchFn();
+      return { stream, fromCache: false };
+    });
+    (service as any).telegramService.getRealtimeFileStream = jest.fn().mockResolvedValue({
+      stream,
+      info: { file_id: 'fileid-1', file_path: '/data/cb/old/path.png', file_size: publicImage.size },
+    });
+
+    await (service as any).getDownloadStream(staleFile);
+
+    expect((service as any).fileRepository.update).not.toHaveBeenCalled();
+  });
+
+  it('缓存命中（fetchFn 未触发回源）时不回写', async () => {
+    const service = createRecoveryService();
+    const stream = new (require('stream').Readable)();
+    // 命中缓存：fetchFn 不会被调用
+    (service as any).fileCacheService.getOrCacheStream = jest.fn().mockResolvedValue({ stream, fromCache: true });
+    (service as any).fileCacheService.getCachedPath = jest.fn().mockReturnValue('/tmp/cache/' + publicImage.id);
+
+    await (service as any).getDownloadStream(staleFile);
+
+    expect((service as any).telegramService.getRealtimeFileStream).not.toHaveBeenCalled();
+    expect((service as any).fileRepository.update).not.toHaveBeenCalled();
+  });
+
+  it('回写失败不阻断主流程', async () => {
+    const service = createRecoveryService({
+      fileRepository: { update: jest.fn().mockRejectedValue(new Error('db down')) },
+    });
+    const stream = new (require('stream').Readable)();
+    (service as any).fileCacheService.getOrCacheStream = jest.fn().mockImplementation(async (_id, _size, fetchFn) => {
+      await fetchFn();
+      return { stream, fromCache: false };
+    });
+    (service as any).telegramService.getRealtimeFileStream = jest.fn().mockResolvedValue({
+      stream,
+      info: { file_id: 'fileid-1', file_path: '/root/cb/new/path.png', file_size: publicImage.size },
+    });
+
+    await expect((service as any).getDownloadStream(staleFile)).resolves.toEqual({ stream, actualSize: publicImage.size });
+    expect((service as any).logger.warn).toHaveBeenCalled();
+  });
+});
+
+describe('FileService R5 已 error 文件全入口 410', () => {
+  it('getPublicMediaStream 对已 error 文件抛 GoneException', async () => {
+    const service = Object.create(FileService.prototype) as FileService;
+    Object.assign(service, {
+      fileRepository: { findOne: jest.fn().mockResolvedValue({ ...publicImage, status: 'error' }) },
+      fileCacheService: { getCachedPath: jest.fn().mockReturnValue(null) },
+      logger: { warn: jest.fn() },
+    });
+    await expect((service as any).getPublicMediaStream(publicImage.id)).rejects.toBeInstanceOf(GoneException);
+  });
+
+  it('getPreviewStream 对已 error 文件抛 GoneException', async () => {
+    const service = Object.create(FileService.prototype) as FileService;
+    Object.assign(service, {
+      fileRepository: { findOne: jest.fn().mockResolvedValue({ ...publicImage, status: 'error' }) },
+      fileCacheService: { getCachedPath: jest.fn().mockReturnValue(null) },
+      logger: { warn: jest.fn() },
+    });
+    const owner = { id: publicImage.uploaderId, role: 'user' };
+    await expect((service as any).getPreviewStream(publicImage.id, owner)).rejects.toBeInstanceOf(GoneException);
+  });
+
+  it('getStreamForShareDownload 对已 error 文件抛 GoneException', async () => {
+    const service = Object.create(FileService.prototype) as FileService;
+    Object.assign(service, {
+      fileRepository: { findOne: jest.fn().mockResolvedValue({ ...publicImage, status: 'error' }) },
+      fileCacheService: { getCachedPath: jest.fn().mockReturnValue(null) },
+      logger: { warn: jest.fn() },
+    });
+    await expect((service as any).getStreamForShareDownload(publicImage.id)).rejects.toBeInstanceOf(GoneException);
+  });
+
+  it('getPreviewStreamWithRange 对已 error 文件抛 GoneException', async () => {
+    const service = Object.create(FileService.prototype) as FileService;
+    Object.assign(service, {
+      fileRepository: { findOne: jest.fn().mockResolvedValue({ ...publicImage, status: 'error' }) },
+      fileCacheService: { getCachedPath: jest.fn().mockReturnValue('/tmp/cache/' + publicImage.id) },
+      logger: { warn: jest.fn() },
+    });
+    const owner = { id: publicImage.uploaderId, role: 'user' };
+    await expect(
+      (service as any).getPreviewStreamWithRange(publicImage.id, owner, 'bytes=0-9'),
+    ).rejects.toBeInstanceOf(GoneException);
+  });
+
+  it('getSharePreviewStreamWithRange 对已 error 文件抛 GoneException', async () => {
+    const service = Object.create(FileService.prototype) as FileService;
+    Object.assign(service, {
+      fileRepository: { findOne: jest.fn().mockResolvedValue({ ...publicImage, status: 'error' }) },
+      fileCacheService: { getCachedPath: jest.fn().mockReturnValue('/tmp/cache/' + publicImage.id) },
+      logger: { warn: jest.fn() },
+    });
+    await expect(
+      (service as any).getSharePreviewStreamWithRange(publicImage.id, 'bytes=0-9'),
+    ).rejects.toBeInstanceOf(GoneException);
+  });
+
+  it('getExistingMediaThumbnailStream 对已 error 文件抛 GoneException', async () => {
+    const service = Object.create(FileService.prototype) as FileService;
+    Object.assign(service, {
+      fileRepository: { findOne: jest.fn().mockResolvedValue({ ...publicImage, status: 'error' }) },
+      fileCacheService: { getCachedPath: jest.fn().mockReturnValue(null) },
+      logger: { warn: jest.fn() },
+    });
+    await expect((service as any).getExistingMediaThumbnailStream(publicImage.id)).rejects.toBeInstanceOf(GoneException);
   });
 });

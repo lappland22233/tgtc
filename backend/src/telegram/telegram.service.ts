@@ -6,7 +6,7 @@ import { createReadStream } from 'fs';
 import { promises as fs } from 'fs';
 import * as path from 'path';
 import FormData from 'form-data';
-import { TelegramFileNotFoundError } from './telegram.errors';
+import { TelegramFileNotFoundError, TelegramStreamPathError } from './telegram.errors';
 
 interface TelegramMediaResult {
   document?: { file_id?: string };
@@ -37,6 +37,11 @@ export class TelegramService {
    * 仅允许读取此目录内的文件；未配置时本地读取将被拒绝（fail-closed）。
    */
   private readonly localFileBase: string;
+  /**
+   * 进程内恢复去重表（R9）：按 fileId 合并单次强制回源 Promise，
+   * 避免共享同一 file_id 的复制记录并发触发重复回源。完成后立即删除。
+   */
+  private readonly recoveryInFlight = new Map<string, Promise<{ file_id: string; file_path: string; file_size: number }>>();
 
   constructor(private configService: ConfigService) {
     // 注意：botToken 在构造函数中一次性读取，不支持热更新
@@ -98,7 +103,19 @@ export class TelegramService {
       || lower.includes('file not found')
       || lower.includes('file_id_invalid')
       || lower.includes('file does not exist')
-      || lower.includes('file is not exist')
+      ||       lower.includes('file is not exist')
+    );
+  }
+
+  /**
+   * 判断 Telegram 描述是否为"本地路径失效 / 流式 size 不可用"型 502。
+   * 仅匹配**确证**的路径失效特征（Bot API 自托管流式端点在旧路径失效、
+   * 无法从 TDLib 获取精确文件大小时返回），避免把普通 502/网关错误误判。
+   */
+  private isTelegramStreamPathError(description: string): boolean {
+    const safe = this.safeTelegramDescription(description).toLowerCase();
+    return (
+      safe.includes('exact file size is unavailable from telegram')
     );
   }
 
@@ -151,6 +168,13 @@ export class TelegramService {
               );
             }
             throw new Error('Telegram Bot 未找到，请检查 Bot Token 是否正确');
+          }
+          // R1：HTTP 502 且描述命中"路径失效/流式 size 不可用"特征时，
+          // 判定为"本地路径失效型 502"，抛可恢复类型化错误（区别于普通 5xx）。
+          if (status === 502 && this.isTelegramStreamPathError(description)) {
+            throw new TelegramStreamPathError(
+              `Telegram 文件本地路径失效，流式 size 不可用：${this.safeTelegramDescription(description)}`,
+            );
           }
           // 移除错误对象中可能包含 bot token 的 URL 信息，防止泄露到日志
           if (axiosError.message) {
@@ -320,10 +344,13 @@ export class TelegramService {
   }
 
   /**
-   * 判断 file_path 是否为本地绝对路径（非 HTTP URL）
+   * 判断 file_path 是否为本地绝对路径（非 HTTP URL）。
+   * 支持 Unix/Linux 绝对路径（`/...`）、Windows 绝对路径（`C:\...`、`C:/...`）
+   * 及 UNC 路径（`\\server\share`）。
    */
   private isLocalPath(file_path: string): boolean {
-    return file_path.startsWith('/');
+    if (file_path.startsWith('/')) return true;
+    return /^[a-zA-Z]:[\\/]/.test(file_path) || file_path.startsWith('\\\\');
   }
 
   /** 安全解析本地文件路径，防止路径穿越攻击 */
@@ -350,6 +377,40 @@ export class TelegramService {
     }
 
     return resolved;
+  }
+
+  /**
+   * 安全打开本地文件流（R3）：在 createReadStream 前先 fs.promises.open/stat
+   * 确认路径存在且为文件，将 ENOENT/无法打开 同步转为可恢复的
+   * TelegramStreamPathError，避免延迟的 stream error 越过恢复边界。
+   * 打开成功后由调用方通过返回的句柄建立流（句柄由流关闭时释放）。
+   */
+  private async openLocalStream(filePath: string): Promise<{ stream: Readable; release: () => void }> {
+    const safePath = this.resolveLocalPath(filePath);
+    let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
+    try {
+      handle = await fs.open(safePath, 'r');
+      const stat = await handle.stat();
+      if (!stat.isFile()) {
+        await handle.close();
+        handle = undefined; // 已关闭，避免 catch 分支二次 close
+        this.logger.warn('Telegram 本地路径不是常规文件，拒绝打开（路径类别: 本地文件）');
+        throw new TelegramStreamPathError('Telegram 文件本地路径不是常规文件');
+      }
+      // 以打开的句柄建立流，避免 open→createReadStream 之间的 TOCTOU；
+      // 句柄由流的 close 事件自动释放。
+      const stream = createReadStream(safePath, { fd: handle });
+      handle = undefined; // 所有权已转移给流
+      return { stream, release: () => { /* fd 由流持有并自动关闭 */ } };
+    } catch (error: unknown) {
+      if (handle) {
+        try { await handle.close(); } catch { /* 忽略关闭失败 */ }
+      }
+      // ENOENT / 无法打开 → 可恢复路径失效错误
+      if (error instanceof TelegramStreamPathError) throw error;
+      this.logger.warn(`Telegram 本地文件无法打开（类别: 本地路径失效）`);
+      throw new TelegramStreamPathError('Telegram 文件本地路径失效，无法打开');
+    }
   }
 
   async getFile(file_id: string): Promise<Buffer> {
@@ -412,6 +473,30 @@ export class TelegramService {
     if (expectedSize !== undefined) headers['X-Telegram-File-Size'] = String(expectedSize);
     if (opts?.noCache) headers['X-Telegram-No-Cache'] = '1';
 
+    // 首次 streaming 请求（retries=1）。若命中 R1 路径失效型 502 抛
+    // TelegramStreamPathError，则进入单次强制回源恢复路径。
+    try {
+      return await this.requestRealtimeStream(fileId, expectedSize, headers);
+    } catch (error: unknown) {
+      // R2：仅对"路径失效型 502"执行单次强制回源，其余错误原样抛出
+      if (!(error instanceof TelegramStreamPathError)) {
+        throw error;
+      }
+      this.logger.warn(
+        `Telegram 实时流因本地路径失效触发回源（类别: 路径失效型 502）`,
+      );
+      return await this.recoverRealtimeStream(fileId, expectedSize, headers);
+    }
+  }
+
+  /**
+   * 执行一次真正的 streaming 请求并校验响应（提取自 getRealtimeFileStream）。
+   */
+  private async requestRealtimeStream(
+    fileId: string,
+    expectedSize: number | undefined,
+    headers: Record<string, string>,
+  ): Promise<{ stream: Readable; info: { file_id: string; file_path: string; file_size: number } }> {
     const url = `${this.fileStreamingBase}/stream/file/bot${this.botToken}/${encodeURIComponent(fileId)}`;
     const response = await this.telegramRequest(
       () => axios.get<Readable>(url, {
@@ -441,6 +526,95 @@ export class TelegramService {
   }
 
   /**
+   * 单次强制回源（R2）：对"路径失效型 502"执行一次非 metadata_only 的
+   * getFile（触发 Bot API 实际下载），成功后用新 file_path 安全打开本地流返回。
+   *
+   * 流程约束（禁止递归/无限重试）：
+   *   - 整体最多 streaming 1 次（已发生）+ getFile 1 次 + streaming 1 次（恢复路径）。
+   *   - 回源成功且返回非空 file_path → 返回 getFileStream 风格结果（本地安全打开）。
+   *   - 回源成功但 file_path 为空 → 再次尝试 streaming 一次并返回其结果；
+   *     仍失败则抛永久错误。
+   *   - 回源失败（TelegramFileNotFoundError 等）→ 抛永久不可用错误。
+   *
+   * R9：按 fileId 在进程内合并回源 Promise，避免共享 file_id 的复制记录
+   * 并发重复回源；完成后立即释放。
+   */
+  private async recoverRealtimeStream(
+    fileId: string,
+    expectedSize: number | undefined,
+    headers: Record<string, string>,
+  ): Promise<{ stream: Readable; info: { file_id: string; file_path: string; file_size: number } }> {
+    // R9：复用进程内进行中的回源 Promise（key = fileId），避免重复回源
+    const inFlight = this.recoveryInFlight.get(fileId);
+    if (inFlight) {
+      try {
+        const info = await inFlight;
+        return await this.openRecoveredStream(fileId, expectedSize, headers, info);
+      } catch (error) {
+        // 复用到的回源失败：与自身回源失败同等处理，抛永久错误
+        throw this.toPermanentRecoveryError(error);
+      }
+    }
+
+    // 发起一次真正触发 Bot API 下载的 getFile（metadataOnly=false，短超时 60s）
+    const recovery = this.getFileInfo(fileId, 60 * 1000, 'recoverRealtimeStream', false)
+      .finally(() => {
+        // 完成后立即释放，避免长期占用
+        this.recoveryInFlight.delete(fileId);
+      });
+    this.recoveryInFlight.set(fileId, recovery);
+
+    try {
+      const info = await recovery;
+      return await this.openRecoveredStream(fileId, expectedSize, headers, info);
+    } catch (error) {
+      throw this.toPermanentRecoveryError(error);
+    }
+  }
+
+  /**
+   * 根据回源后的 file_info 建立流：
+   * - 非空 file_path → 走 getFileStream 风格（本地安全打开 / 远程流）。
+   * - 空 file_path（Bot API 无本地路径）→ 再尝试 streaming 一次并返回其结果；
+   *   仍失败则抛永久错误。
+   */
+  private async openRecoveredStream(
+    fileId: string,
+    expectedSize: number | undefined,
+    headers: Record<string, string>,
+    info: { file_id: string; file_path: string; file_size: number },
+  ): Promise<{ stream: Readable; info: { file_id: string; file_path: string; file_size: number } }> {
+    if (info.file_path) {
+      // 回源成功且返回有效本地路径 → 传统 getFileStream 风格结果（安全打开）
+      return this.getFileStream(fileId);
+    }
+    // file_path 为空：Bot API 无本地路径，再次尝试 streaming 一次
+    try {
+      return await this.requestRealtimeStream(fileId, expectedSize, headers);
+    } catch (error) {
+      throw this.toPermanentRecoveryError(error);
+    }
+  }
+
+  /**
+   * 将回源失败统一转换为上层可识别的错误。
+   * 仅当回源明确返回 TelegramFileNotFoundError（Telegram 永久不存在）时，
+   * 才包装为"恢复失败，判定永久不可用"供上层标记 error；
+   * 其余原因（超时、429、普通 5xx、网络中断等暂时性错误）原样抛出，
+   * 保持原错误类型，避免把瞬时故障误判为永久失效而误标文件。
+   */
+  private toPermanentRecoveryError(cause: unknown): Error {
+    if (cause instanceof TelegramFileNotFoundError) {
+      return new TelegramFileNotFoundError(`Telegram 文件恢复失败，判定永久不可用：${cause.message}`);
+    }
+    if (cause instanceof Error) {
+      // 暂时性错误：保持原类型抛出，不包装成永久错误
+      throw cause;
+    }
+    throw new Error('Telegram 文件恢复失败');
+  }
+
+  /**
    * 流式获取文件（避免大文件全部加载到内存）
    */
   async getFileStream(file_id: string): Promise<{ stream: Readable; info: { file_id: string; file_path: string; file_size: number } }> {
@@ -449,7 +623,9 @@ export class TelegramService {
 
     let stream: Readable;
     if (this.isLocalPath(filePath)) {
-      stream = createReadStream(this.resolveLocalPath(filePath));
+      // R3：先安全打开确认存在再建立流，ENOENT 转为可恢复错误
+      const opened = await this.openLocalStream(filePath);
+      stream = opened.stream;
     } else {
       // 远程下载经 telegramRequest 包装，统一脱敏 bot token 并处理 429 重试
       const response = await this.telegramRequest(

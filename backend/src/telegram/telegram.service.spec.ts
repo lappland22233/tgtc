@@ -1,7 +1,10 @@
 import axios from 'axios';
 import { Readable } from 'stream';
+import { promises as fs } from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import { TelegramService } from './telegram.service';
-import { TelegramFileNotFoundError } from './telegram.errors';
+import { TelegramFileNotFoundError, TelegramStreamPathError } from './telegram.errors';
 
 jest.mock('axios');
 const mockedAxios = axios as jest.Mocked<typeof axios>;
@@ -320,6 +323,207 @@ describe('TelegramService realtime stream', () => {
       await expect(service.verifyFileExists('')).rejects.toBeInstanceOf(TelegramFileNotFoundError);
       await expect(service.verifyFileExists('x'.repeat(5000))).rejects.toBeInstanceOf(TelegramFileNotFoundError);
       expect(mockedAxios.get).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('realtime stream stale-path recovery', () => {
+    const streamPath502 = {
+      response: {
+        status: 502,
+        data: { ok: false, description: 'Exact file size is unavailable from Telegram' },
+      },
+    };
+
+    const createRecoveryService = async () => {
+      const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'tg-recovery-'));
+      const cfg = {
+        ...config,
+        TELEGRAM_LOCAL_FILE_DIR: tmpDir,
+      };
+      return {
+        service: new TelegramService({
+          get: jest.fn((key: string) => cfg[key as keyof typeof cfg]),
+        } as any),
+        tmpDir,
+      };
+    };
+
+    it('classifies the 502 "Exact file size" as a recoverable stream-path error', async () => {
+      const { service, tmpDir } = await createRecoveryService();
+      const localPath = path.join(tmpDir, 'file.bin');
+      await fs.writeFile(localPath, Buffer.from('hello'));
+
+      // 1) 首次 streaming → 502 路径失效
+      mockedAxios.get.mockRejectedValueOnce(streamPath502);
+      // 2) 恢复 getFileInfo（metadataOnly=false）
+      mockedAxios.get.mockResolvedValueOnce({
+        data: { result: { file_id: 'file-id', file_path: localPath, file_size: 5 } },
+      } as any);
+      // 3) getFileStream 内部的 getFileInfo
+      mockedAxios.get.mockResolvedValueOnce({
+        data: { result: { file_id: 'file-id', file_path: localPath, file_size: 5 } },
+      } as any);
+
+      const result = await service.getRealtimeFileStream('file-id', 5);
+
+      // 回源成功：返回的 file_path 为有效本地路径
+      expect(result.info.file_path).toBe(localPath);
+      expect(result.info.file_size).toBe(5);
+
+      // 恢复 getFileInfo 未传 metadata_only（metadataOnly=false 触发真实下载）
+      const getFileCalls = mockedAxios.get.mock.calls.filter(([url]) => String(url).includes('/getFile'));
+      expect(getFileCalls.length).toBe(2);
+      for (const [, options] of getFileCalls) {
+        expect((options as any)?.params?.metadata_only).toBeUndefined();
+      }
+    });
+
+    it('does not trigger recovery for a generic 502 description', async () => {
+      const { service } = await createRecoveryService();
+      const generic502 = new Error('Request failed with status code 502');
+      (generic502 as any).response = { status: 502, data: { ok: false, description: 'Bad Gateway' } };
+      mockedAxios.get.mockRejectedValueOnce(generic502);
+
+      await expect(service.getRealtimeFileStream('file-id', 5)).rejects.toThrow();
+
+      // 未触发回源：streaming 之后没有任何 /getFile 调用
+      const getFileCalls = mockedAxios.get.mock.calls.filter(([url]) => String(url).includes('/getFile'));
+      expect(getFileCalls.length).toBe(0);
+    });
+
+    it('throws a permanent error when recovery itself reports file-not-found, only re-sourcing once', async () => {
+      const { service } = await createRecoveryService();
+      // 1) streaming → 502 路径失效
+      mockedAxios.get.mockRejectedValueOnce(streamPath502);
+      // 2) 恢复 getFileInfo → invalid file_id（永久失效）
+      mockedAxios.get.mockRejectedValueOnce({
+        response: { status: 400, data: { ok: false, description: 'Bad Request: invalid file_id' } },
+      } as any);
+
+      const err = await service.getRealtimeFileStream('file-id', 5).catch((e) => e);
+
+      expect(err).toBeInstanceOf(TelegramFileNotFoundError);
+      expect(String(err?.message)).toMatch(/恢复失败/);
+
+      // 只回源一次（仅一次 /getFile 恢复调用）
+      const getFileCalls = mockedAxios.get.mock.calls.filter(([url]) => String(url).includes('/getFile'));
+      expect(getFileCalls.length).toBe(1);
+    });
+
+    it('keeps a transient 5xx during recovery as a transient error (not permanent, B1)', async () => {
+      const { service } = await createRecoveryService();
+      // 1) streaming → 502 路径失效
+      mockedAxios.get.mockRejectedValueOnce(streamPath502);
+      // 2) 恢复 getFileInfo → 普通 5xx（telegramRequest 重试 3 次后抛普通 Error）
+      const transient502 = new Error('Request failed with status code 502');
+      (transient502 as any).response = { status: 502, data: { ok: false, description: 'Bad Gateway' } };
+      mockedAxios.get.mockRejectedValue(transient502);
+
+      const err = await service.getRealtimeFileStream('file-id', 5).catch((e) => e);
+
+      // 瞬时错误保持原类型，绝不包装成永久错误
+      expect(err).not.toBeInstanceOf(TelegramFileNotFoundError);
+      expect(err).toBeInstanceOf(Error);
+    });
+
+    it('keeps a timeout during recovery as a transient error (not permanent, B1)', async () => {
+      const { service } = await createRecoveryService();
+      // 1) streaming → 502 路径失效
+      mockedAxios.get.mockRejectedValueOnce(streamPath502);
+      // 2) 恢复 getFileInfo → 超时（无 response，普通 Error）
+      const timeoutErr = new Error('timeout of 60000ms exceeded');
+      (timeoutErr as any).code = 'ECONNABORTED';
+      mockedAxios.get.mockRejectedValue(timeoutErr);
+
+      const err = await service.getRealtimeFileStream('file-id', 5).catch((e) => e);
+
+      expect(err).not.toBeInstanceOf(TelegramFileNotFoundError);
+      expect(err).toBeInstanceOf(Error);
+    });
+
+    it('does not recurse and keeps a stream-path error transient when empty file_path retry still fails', async () => {
+      const { service } = await createRecoveryService();
+      // 1) 首次 streaming → 502 路径失效
+      mockedAxios.get.mockRejectedValueOnce(streamPath502);
+      // 2) 恢复 getFileInfo → file_path 为空（Bot API 无本地路径）
+      mockedAxios.get.mockResolvedValueOnce({
+        data: { result: { file_id: 'file-id', file_path: '', file_size: 0 } },
+      } as any);
+      // 3) 恢复路径再次 streaming → 仍 502 路径失效（不应再进入回源；保持可恢复错误，不锁死文件）
+      mockedAxios.get.mockRejectedValueOnce(streamPath502);
+
+      const err = await service.getRealtimeFileStream('file-id', 5).catch((e) => e);
+
+      // 路径失效型 502 不代表 Telegram 永久不存在，保持可恢复错误类型，绝不转永久
+      expect(err).toBeInstanceOf(TelegramStreamPathError);
+      expect(err).not.toBeInstanceOf(TelegramFileNotFoundError);
+
+      // 总共 streaming 2 次（首次 + 恢复路径一次），无递归
+      const streamCalls = mockedAxios.get.mock.calls.filter(([url]) => String(url).includes('/stream/file'));
+      expect(streamCalls.length).toBe(2);
+    });
+
+    it('throws TelegramStreamPathError when a local absolute path is missing (ENOENT)', async () => {
+      const { service, tmpDir } = await createRecoveryService();
+      const missingPath = path.join(tmpDir, 'does-not-exist.bin');
+      mockedAxios.get.mockResolvedValueOnce({
+        data: { result: { file_id: 'file-id', file_path: missingPath, file_size: 5 } },
+      } as any);
+
+      await expect(service.getFileStream('file-id'))
+        .rejects.toBeInstanceOf(TelegramStreamPathError);
+    });
+
+    it('redacts the bot token from error messages', async () => {
+      const { service } = await createRecoveryService();
+      // 普通 5xx 保持普通错误，其 message 经 redactToken 脱敏
+      const axiosError = {
+        response: {
+          status: 500,
+          data: { ok: false, description: 'upstream failure' },
+        },
+        message: 'Request failed /file/bot123:secret-token/xyz',
+        config: { url: 'http://127.0.0.1:8081/file/bot123:secret-token/doc.bin' },
+      };
+      mockedAxios.get.mockRejectedValueOnce(axiosError);
+
+      const err = await service.getRealtimeFileStream('file-id', 5).catch((e) => e);
+
+      // telegramRequest 会脱敏 axiosError 的 message 与 config.url
+      expect(String(err?.message ?? '')).not.toContain('secret-token');
+      expect(String(axiosError.config?.url ?? '')).not.toContain('secret-token');
+    });
+
+    it('deduplicates concurrent recovery for the same file_id (R9)', async () => {
+      const { service, tmpDir } = await createRecoveryService();
+      const localPath = path.join(tmpDir, 'file.bin');
+      await fs.writeFile(localPath, Buffer.from('hello'));
+
+      // 两个并发调用共享同一 file_id：首次 streaming 均 502
+      mockedAxios.get.mockRejectedValueOnce(streamPath502);
+      mockedAxios.get.mockRejectedValueOnce(streamPath502);
+      // 恢复 getFileInfo 只应触发一次（R9 去重）
+      mockedAxios.get.mockResolvedValueOnce({
+        data: { result: { file_id: 'file-id', file_path: localPath, file_size: 5 } },
+      } as any);
+      // getFileStream 内部的 getFileInfo（两个并发调用可能各自触发）
+      mockedAxios.get.mockResolvedValue({
+        data: { result: { file_id: 'file-id', file_path: localPath, file_size: 5 } },
+      } as any);
+
+      const [r1, r2] = await Promise.all([
+        service.getRealtimeFileStream('file-id', 5),
+        service.getRealtimeFileStream('file-id', 5),
+      ]);
+
+      expect(r1.info.file_path).toBe(localPath);
+      expect(r2.info.file_path).toBe(localPath);
+
+      // 恢复 getFileInfo（recoverRealtimeStream 标签）应只执行一次：
+      // 两个并发调用共享同一恢复 Promise
+      const recoverCalls = mockedAxios.get.mock.calls.filter(([url]) => String(url).includes('/getFile'));
+      // 恢复(1) + 每个并发调用的 getFileStream getFileInfo(2) = 3
+      expect(recoverCalls.length).toBeLessThanOrEqual(3);
     });
   });
 });

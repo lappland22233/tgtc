@@ -27,6 +27,15 @@ describe('API 错误适配', () => {
     expect(classifyServiceAvailabilityError({ response: { status, data: {} } })?.kind).toBe('service_unavailable');
   });
 
+  it('将 410 独立映射为"文件已不可用"（区别于 502/503）', () => {
+    const error = { response: { status: 410, data: {} } };
+    expect(classifyServiceAvailabilityError(error)).toEqual({
+      kind: 'file_unavailable',
+      message: '文件已不可用',
+    });
+    expect(getErrorMessage(error)).toBe('文件已不可用');
+  });
+
   it('保留普通业务错误消息并兼容消息数组', () => {
     const error = { response: { status: 400, data: { code: 'VALIDATION_FAILED', message: ['邮箱无效', '密码过短'] } } };
 

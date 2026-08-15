@@ -89,3 +89,20 @@ export async function fetchFileVerifyTask(taskId: string, signal?: AbortSignal):
   const response = await api.get(`/admin/files/verify/${taskId}`, { signal });
   return response.data.data.task as FileVerifyTask;
 }
+
+/** 存量旧路径清理结果 */
+export interface StalePathCleanupResult {
+  mode: 'dry-run' | 'apply';
+  matched: number;
+  updated: number;
+}
+
+/**
+ * 存量旧路径清理（仅 SUPER_ADMIN）。
+ * dry-run：仅统计命中 /data/cb/tgtc-beta/ 前缀的旧 telegramFilePath 数量，不修改；
+ * apply：将这些记录的 telegramFilePath 清空为 NULL（幂等），不改变文件状态。
+ */
+export async function cleanupStalePaths(mode: 'dry-run' | 'apply'): Promise<StalePathCleanupResult> {
+  const response = await api.post('/admin/files/stale-paths/cleanup', { mode });
+  return response.data.data as StalePathCleanupResult;
+}

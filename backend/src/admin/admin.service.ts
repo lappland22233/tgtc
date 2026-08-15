@@ -1956,4 +1956,70 @@ export class AdminService {
       records,
     };
   }
+
+  // ==================== 存量旧路径清理 ====================
+
+  /**
+   * 固定旧根目录前缀（服务端硬编码，不接受参数，防止误配造成大面积清空）。
+   * 目录已从 /data/cb/tgtc-beta/ 迁移到 /root/cb。
+   */
+  private static readonly STALE_PATH_PREFIX = '/data/cb/tgtc-beta/';
+
+  /**
+   * 存量旧路径清理（仅 SUPER_ADMIN）：
+   * - dry-run：统计满足 isDeleted=false AND telegramFilePath LIKE '/data/cb/tgtc-beta/%' 的记录数，不修改任何记录。
+   * - apply：条件更新将这些记录的 telegramFilePath 清空为 NULL（幂等），不改变文件 status。
+   * 返回 { mode, matched, updated }；审计仅记录模式与数量，不记录完整路径/Token/文件信息。
+   */
+  async cleanupStalePaths(
+    user: User,
+    mode: 'dry-run' | 'apply' = 'dry-run',
+  ): Promise<{ mode: 'dry-run' | 'apply'; matched: number; updated: number }> {
+    const prefix = AdminService.STALE_PATH_PREFIX;
+    // 精确匹配该目录下：prefix 含尾斜杠，追加 % 通配以匹配目录内任意文件
+    const prefixWithWildcard = `${prefix}%`;
+
+    // dry-run：仅统计命中数量，不修改
+    const matched = await this.fileRepository
+      .createQueryBuilder('file')
+      .where('file.isDeleted = false')
+      .andWhere('file."telegramFilePath" IS NOT NULL')
+      .andWhere('file."telegramFilePath" LIKE :prefix', { prefix: prefixWithWildcard })
+      .getCount();
+
+    if (mode === 'dry-run') {
+      // 审计：仅记录模式与数量，脱敏
+      this.auditService.log({
+        action: 'file_stale_path_cleanup',
+        userId: user.id,
+        resourceType: 'file',
+        resourceId: 'stale-path-cleanup',
+        metadata: { mode: 'dry-run', matched, updated: 0 },
+      });
+      this.logger.log(`存量旧路径清理 dry-run：命中 ${matched} 条旧路径（未修改）`);
+      return { mode: 'dry-run', matched, updated: 0 };
+    }
+
+    // apply：条件更新清空 telegramFilePath（幂等，二次执行命中 0）
+    const result = await this.fileRepository
+      .createQueryBuilder()
+      .update(File)
+      .set({ telegramFilePath: null as unknown as string })
+      .where('isDeleted = false')
+      .andWhere('"telegramFilePath" IS NOT NULL')
+      .andWhere('"telegramFilePath" LIKE :prefix', { prefix: prefixWithWildcard })
+      .execute();
+    const updated = result.affected ?? 0;
+
+    // apply 为高敏感写操作，使用 logAwait 确保审计在响应前持久化
+    await this.auditService.logAwait({
+      action: 'file_stale_path_cleanup',
+      userId: user.id,
+      resourceType: 'file',
+      resourceId: 'stale-path-cleanup',
+      metadata: { mode: 'apply', matched, updated },
+    });
+    this.logger.log(`存量旧路径清理 apply：命中 ${matched} 条，已清空 ${updated} 条`);
+    return { mode: 'apply', matched, updated };
+  }
 }
