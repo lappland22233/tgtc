@@ -179,12 +179,15 @@ export class TelegramService {
             }
             throw new Error('Telegram Bot 未找到，请检查 Bot Token 是否正确');
           }
-          // R1：HTTP 502 且描述命中"路径失效/流式 size 不可用"特征时，
-          // 判定为"本地路径失效型 502"，抛可恢复类型化错误（区别于普通 5xx）。
-          if (status === 502 && this.isTelegramStreamPathError(description)) {
-            throw new TelegramStreamPathError(
-              `Telegram 文件本地路径失效，流式 size 不可用：${this.safeTelegramDescription(description)}`,
-            );
+          // R1：二改流式端点的任意 HTTP 502 都进入一次受控回源。
+          // 该端点在不同构建版本/代理下可能返回不同 description；对于专用
+          // /stream/file 请求，502 本身已足以说明当前 TDLib 流上下文不可用。
+          // 回源仍有严格的一次边界，且回源中的超时/429/普通 5xx 不会被转成永久错误。
+          if (status === 502 && label === 'getRealtimeFileStream') {
+            const reason = this.isTelegramStreamPathError(description)
+              ? this.safeTelegramDescription(description)
+              : '二改流式端点返回 502';
+            throw new TelegramStreamPathError(`Telegram 文件流上下文不可用：${reason}`);
           }
           // 移除错误对象中可能包含 bot token 的 URL 信息，防止泄露到日志
           if (axiosError.message) {

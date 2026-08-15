@@ -421,17 +421,37 @@ describe('TelegramService realtime stream', () => {
       expect(mockedAxios.get.mock.calls.some(([url]) => String(url).includes('/getFile'))).toBe(true);
     });
 
-    it('does not trigger recovery for a generic 502 description', async () => {
+    it('triggers recovery for a generic 502 from the dedicated stream endpoint', async () => {
+      const { service, tmpDir } = await createRecoveryService();
+      const localPath = path.join(tmpDir, 'generic-502.bin');
+      await fs.writeFile(localPath, Buffer.from('hello'));
+      const generic502 = new Error('Request failed with status code 502');
+      (generic502 as any).response = { status: 502, data: { ok: false, description: 'Bad Gateway' } };
+      mockedAxios.get.mockRejectedValueOnce(generic502);
+      mockedAxios.get.mockResolvedValueOnce({
+        data: { result: { file_id: 'file-id', file_path: localPath, file_size: 5 } },
+      } as any);
+      mockedAxios.get.mockResolvedValueOnce({
+        data: { result: { file_id: 'file-id', file_path: localPath, file_size: 5 } },
+      } as any);
+
+      await expect(service.getRealtimeFileStream('file-id', 5)).resolves.toMatchObject({
+        info: { file_path: localPath, file_size: 5 },
+      });
+      expect(mockedAxios.get.mock.calls.some(([url]) => String(url).includes('/getFile'))).toBe(true);
+    });
+
+    it('does not classify a generic 502 from a non-stream Telegram request', async () => {
       const { service } = await createRecoveryService();
       const generic502 = new Error('Request failed with status code 502');
       (generic502 as any).response = { status: 502, data: { ok: false, description: 'Bad Gateway' } };
       mockedAxios.get.mockRejectedValueOnce(generic502);
 
-      await expect(service.getRealtimeFileStream('file-id', 5)).rejects.toThrow();
-
-      // 未触发回源：streaming 之后没有任何 /getFile 调用
-      const getFileCalls = mockedAxios.get.mock.calls.filter(([url]) => String(url).includes('/getFile'));
-      expect(getFileCalls.length).toBe(0);
+      await expect((service as any).telegramRequest(
+        () => mockedAxios.get('http://127.0.0.1:8084/bot/test'),
+        'getFileInfo',
+        1,
+      )).rejects.not.toBeInstanceOf(TelegramStreamPathError);
     });
 
     it('throws a permanent error when recovery itself reports file-not-found, only re-sourcing once', async () => {

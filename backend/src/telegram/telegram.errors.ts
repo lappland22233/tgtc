@@ -21,9 +21,9 @@ export class TelegramFileNotFoundError extends Error {
 /**
  * Telegram 本地路径失效 / 流式 size 不可用型可恢复错误。
  *
- * 仅当 Bot API 流式端点返回 HTTP 502 且描述命中确证的"路径失效"特征
- * （如 "Exact file size is unavailable from Telegram"），或本地绝对路径
- * 在安全打开时发现不存在（ENOENT）时抛出。
+ * 仅当 Bot API 专用流式端点返回 HTTP 502（包括 size 未知/无法核对、
+ * 本地上下文缺失等构建版本差异），或本地绝对路径在安全打开时发现不存在
+ * （ENOENT）时抛出。普通 Telegram API 请求的 502 不转换为本类型。
  *
  * 与 {@link TelegramFileNotFoundError}（永久不存在）不同，本类型标识的是
  * **可能可恢复** 的路径失效：file_id 仍有效、Telegram 仍持有文件，
