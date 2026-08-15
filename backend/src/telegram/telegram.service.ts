@@ -53,8 +53,14 @@ export class TelegramService {
     const base = this.configService.get<string>('TELEGRAM_API_BASE') || 'https://api.telegram.org';
     this.apiBase = `${base}/bot`;
     this.fileBase = `${base}/file/bot`;
-    this.fileStreamingEnabled = this.configService.get<string>('TELEGRAM_FILE_STREAMING_ENABLED') === 'true';
-    const streamingBase = this.configService.get<string>('TELEGRAM_FILE_STREAM_BASE') || base;
+    const streamingBaseConfig = this.configService.get<string>('TELEGRAM_FILE_STREAM_BASE')?.trim();
+    // 显式配置二改 API 流式端口即视为启用，避免只设置新端口后仍静默走标准
+    // /file/bot/<file_path> 下载；TELEGRAM_FILE_STREAMING_ENABLED=false 仍可强制关闭。
+    const streamingEnabledConfig = this.configService.get<string>('TELEGRAM_FILE_STREAMING_ENABLED')?.trim().toLowerCase();
+    this.fileStreamingEnabled = streamingEnabledConfig === 'false'
+      ? false
+      : streamingEnabledConfig === 'true' || Boolean(streamingBaseConfig);
+    const streamingBase = streamingBaseConfig || base;
     this.fileStreamingBase = streamingBase.replace(/\/$/, '');
     const streamingTimeoutSeconds = Number(this.configService.get<string>('TELEGRAM_FILE_STREAM_TIMEOUT_SECONDS'));
     this.fileStreamingTimeoutMs = Number.isFinite(streamingTimeoutSeconds) && streamingTimeoutSeconds > 0

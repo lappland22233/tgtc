@@ -25,6 +25,26 @@ describe('TelegramService realtime stream', () => {
 
   beforeEach(() => jest.clearAllMocks());
 
+  it('enables the streaming route when only the streaming base is configured', async () => {
+    const stream = Readable.from(Buffer.from('hello'));
+    mockedAxios.get.mockResolvedValue({ data: stream, headers: { 'content-length': '5' } } as any);
+
+    const service = new TelegramService({
+      get: jest.fn((key: string) => ({
+        ...config,
+        TELEGRAM_FILE_STREAMING_ENABLED: undefined,
+        TELEGRAM_FILE_STREAM_BASE: 'http://127.0.0.1:8084',
+      } as any)[key]),
+    } as any);
+
+    await service.getRealtimeFileStream('file-id', 5);
+
+    expect(mockedAxios.get).toHaveBeenCalledWith(
+      'http://127.0.0.1:8084/stream/file/bot123:secret-token/file-id',
+      expect.objectContaining({ responseType: 'stream' }),
+    );
+  });
+
   it('uses the independent encoded file_id route and validates length', async () => {
     const stream = Readable.from(Buffer.from('hello'));
     mockedAxios.get.mockResolvedValue({ data: stream, headers: { 'content-length': '5' } } as any);
