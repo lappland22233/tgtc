@@ -378,6 +378,29 @@ describe('TelegramService realtime stream', () => {
       }
     });
 
+    it.each([
+      'File size is unavailable from Telegram',
+      'Exact file size unavailable from Telegram',
+    ])('classifies stream size unavailable variant as recoverable: %s', async (description) => {
+      const { service, tmpDir } = await createRecoveryService();
+      const localPath = path.join(tmpDir, 'variant.bin');
+      await fs.writeFile(localPath, Buffer.from('hello'));
+      mockedAxios.get.mockRejectedValueOnce({
+        response: { status: 502, data: { ok: false, description } },
+      } as any);
+      mockedAxios.get.mockResolvedValueOnce({
+        data: { result: { file_id: 'file-id', file_path: localPath, file_size: 5 } },
+      } as any);
+      mockedAxios.get.mockResolvedValueOnce({
+        data: { result: { file_id: 'file-id', file_path: localPath, file_size: 5 } },
+      } as any);
+
+      const result = await service.getRealtimeFileStream('file-id', 5);
+
+      expect(result.info.file_path).toBe(localPath);
+      expect(mockedAxios.get.mock.calls.some(([url]) => String(url).includes('/getFile'))).toBe(true);
+    });
+
     it('does not trigger recovery for a generic 502 description', async () => {
       const { service } = await createRecoveryService();
       const generic502 = new Error('Request failed with status code 502');

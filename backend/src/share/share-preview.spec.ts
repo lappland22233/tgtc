@@ -77,6 +77,27 @@ function stubFullStream(service: ShareService) {
 }
 
 describe('ShareService 预览访问计数（持久化预览会话）', () => {
+  it('分享下载复用 FileService 统一下载链路（包含 Telegram 冷回源自愈）', async () => {
+    const service = makeService();
+    const link = makeLink();
+    const downloadResult = {
+      stream: makeStream(),
+      contentType: 'application/octet-stream',
+      filename: 'demo.bin',
+      size: 100,
+      isInline: false,
+    };
+    (service as any).shareLinkRepo.findOne.mockResolvedValue(link);
+    (service as any).assertShareUsable = jest.fn().mockResolvedValue(undefined);
+    (service as any).consumeShareAccess = jest.fn().mockResolvedValue(undefined);
+    (service as any).fileService.getStreamForShareDownload.mockResolvedValue(downloadResult);
+
+    const result = await service.getShareDownloadStream('tok123', 'file-id-1', undefined, null);
+
+    expect(result).toBe(downloadResult);
+    expect((service as any).fileService.getStreamForShareDownload).toHaveBeenCalledWith('file-id-1', undefined);
+  });
+
   it('同访客同文件重复预览：会话服务仅首次返回 consumed，后续幂等', async () => {
     const service = makeService();
     (service as any).shareLinkRepo.findOne.mockResolvedValue(makeLink());

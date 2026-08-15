@@ -114,8 +114,12 @@ export class TelegramService {
    */
   private isTelegramStreamPathError(description: string): boolean {
     const safe = this.safeTelegramDescription(description).toLowerCase();
+    // 不同 bot-api 构建版本的描述略有差异，但都明确表示流式端点无法取得
+    // Telegram 文件大小；仅在这些确证特征下进入单次回源，普通 502 仍原样抛出。
     return (
       safe.includes('exact file size is unavailable from telegram')
+      || safe.includes('file size is unavailable from telegram')
+      || safe.includes('exact file size unavailable from telegram')
     );
   }
 
