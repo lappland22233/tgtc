@@ -100,6 +100,17 @@ export function validateEnv(): void {
     errors.push('FILE_CACHE_NO_CACHE_MODE 必须为 true 或 false');
   }
 
+  // ---- 日志分片/轮转（仅在显式配置但格式错误时报错，避免误值静默失效） ----
+  if (process.env.LOG_ROTATION_INTERVAL && !['daily', 'hourly'].includes(process.env.LOG_ROTATION_INTERVAL)) {
+    errors.push('LOG_ROTATION_INTERVAL 取值非法: ' + process.env.LOG_ROTATION_INTERVAL + '（应为 daily 或 hourly）');
+  }
+  if (process.env.LOG_RETENTION_DAYS && (!Number.isSafeInteger(Number(process.env.LOG_RETENTION_DAYS)) || Number(process.env.LOG_RETENTION_DAYS) <= 0)) {
+    errors.push('LOG_RETENTION_DAYS 必须为正整数');
+  }
+  if (process.env.LOG_MAX_FILE_SIZE && (!Number.isSafeInteger(Number(process.env.LOG_MAX_FILE_SIZE)) || Number(process.env.LOG_MAX_FILE_SIZE) <= 0)) {
+    errors.push('LOG_MAX_FILE_SIZE 必须为正整数（字节）');
+  }
+
   if (errors.length > 0) {
     const msg = '[启动失败] 环境变量校验不通过：\n  - ' + errors.join('\n  - ');
     throw new Error(msg);

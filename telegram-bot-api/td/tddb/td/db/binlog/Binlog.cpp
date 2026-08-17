@@ -676,7 +676,19 @@ void Binlog::do_reindex() {
 
   // finish_reindex
   auto status = unlink(path_);
-  LOG_IF(FATAL, status.is_error()) << "Failed to unlink old binlog: " << status;
+#if TD_PORT_POSIX
+  if (status.is_error() && status.code() == ENOENT) {
+    // The old binlog can already be absent (for example removed by an external
+    // cleanup process) by the time the reindex finishes. On POSIX, deleting a
+    // file that is still open is legal, so this race is possible. Treat "no such
+    // file" as an idempotent success and continue replacing the old binlog with
+    // the regenerated ".new" version; any other filesystem error stays fatal.
+    LOG(INFO) << "Old binlog already absent during reindex, continuing: " << status;
+  } else
+#endif
+  {
+    LOG_IF(FATAL, status.is_error()) << "Failed to unlink old binlog: " << status;
+  }
   old_fd.close();  // now we can close old file and release the system lock
   status = rename(new_path, path_);
   FileFd::remove_local_lock(new_path);  // now we can release local lock for temporary file

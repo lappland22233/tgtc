@@ -102,3 +102,35 @@ TEST(WorkdirCleanup, ThresholdDoesNotRejectOrDeleteActiveFile) {
   ASSERT_EQ(0, result.deleted_files);
   ASSERT_TRUE(td::stat(active).is_ok());
 }
+
+TEST(WorkdirCleanup, PersistentFilesAreNotCandidates) {
+  TempWorkdir dir;
+  ASSERT_FALSE(telegram_bot_api::is_workdir_cleanup_candidate(dir.path, dir.path + "td.binlog"));
+  ASSERT_FALSE(telegram_bot_api::is_workdir_cleanup_candidate(dir.path, dir.path + "td_test.binlog"));
+  ASSERT_FALSE(telegram_bot_api::is_workdir_cleanup_candidate(dir.path, dir.path + "td.binlog.new"));
+  ASSERT_FALSE(telegram_bot_api::is_workdir_cleanup_candidate(dir.path, dir.path + "db.sqlite"));
+  ASSERT_FALSE(telegram_bot_api::is_workdir_cleanup_candidate(dir.path, dir.path + "db.sqlite-wal"));
+  ASSERT_FALSE(telegram_bot_api::is_workdir_cleanup_candidate(dir.path, dir.path + "db.sqlite-shm"));
+  ASSERT_FALSE(telegram_bot_api::is_workdir_cleanup_candidate(dir.path, dir.path + "db.sqlite-journal"));
+  ASSERT_TRUE(telegram_bot_api::is_workdir_cleanup_candidate(dir.path, dir.path + "bot/files/a"));
+  ASSERT_TRUE(telegram_bot_api::is_workdir_cleanup_candidate(dir.path, dir.path + "photo.jpg"));
+}
+
+TEST(WorkdirCleanup, ProtectsTdlibPersistentFilesWhileCleaningMedia) {
+  TempWorkdir dir;
+  auto photo = dir.file("photo.jpg", "media-bytes");
+  auto binlog = dir.file("td.binlog", "binlog-bytes");
+  auto binlog_new = dir.file("td.binlog.new", "binlog-new-bytes");
+  auto sqlite = dir.file("db.sqlite", "sqlite-bytes");
+  auto sqlite_wal = dir.file("db.sqlite-wal", "wal-bytes");
+  auto sqlite_shm = dir.file("db.sqlite-shm", "shm-bytes");
+
+  auto result = telegram_bot_api::run_workdir_cleanup(config_for(dir), {});
+  ASSERT_EQ(1, result.deleted_files);
+  ASSERT_TRUE(td::stat(photo).is_error());
+  ASSERT_TRUE(td::stat(binlog).is_ok());
+  ASSERT_TRUE(td::stat(binlog_new).is_ok());
+  ASSERT_TRUE(td::stat(sqlite).is_ok());
+  ASSERT_TRUE(td::stat(sqlite_wal).is_ok());
+  ASSERT_TRUE(td::stat(sqlite_shm).is_ok());
+}
