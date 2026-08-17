@@ -1,59 +1,48 @@
 <template>
-  <div class="file-share-card">
-    <div class="type-icon-wrapper">
-      <ThumbnailImg
-        :file-id="info.id"
-        :mime-type="info.mimeType"
-        :file-name="info.name"
-        :size="112"
-        :src="buildShareThumbnailUrl(props.token, props.info.id)"
-        :context="`s:${props.token}`"
-        :version="info.uploadVersion"
-      />
+  <div class="file-share-row" :class="{ 'file-share-row--encrypted': isEncrypted }">
+    <div class="file-share-main">
+      <div class="file-share-thumb">
+        <ThumbnailImg
+          :file-id="info.id"
+          :mime-type="info.mimeType"
+          :file-name="info.name"
+          :size="48"
+          :src="buildShareThumbnailUrl(props.token, props.info.id)"
+          :context="`s:${props.token}`"
+          :version="info.uploadVersion"
+        />
+      </div>
+      <div class="file-share-info">
+        <h1 class="file-name" :title="info.name">{{ info.name }}</h1>
+        <div class="file-share-meta">
+          <span>{{ formatSize(info.size) }}</span>
+          <span class="meta-separator">·</span>
+          <span class="mime-type" :title="info.mimeType">{{ info.mimeType }}</span>
+          <span class="meta-separator">·</span>
+          <span>{{ formatDateTime(info.createdAt) }}</span>
+          <template v-if="info.expiresAt">
+            <span class="meta-separator">·</span>
+            <span class="expiry">有效期至 {{ formatDateTime(info.expiresAt) }}</span>
+          </template>
+        </div>
+        <div class="security-hint" :class="{ encrypted: isEncrypted }">
+          <t-icon :name="isEncrypted ? 'lock-on' : 'link'" />
+          <span>{{ isEncrypted ? '加密分享链接' : '公开分享链接' }}</span>
+        </div>
+      </div>
     </div>
-    <h1 class="file-name" :title="info.name">{{ info.name }}</h1>
-    <dl class="meta-list">
-      <div class="meta-row"><dt>大小</dt><dd>{{ formatSize(info.size) }}</dd></div>
-      <div class="meta-row"><dt>类型</dt><dd class="mime-type" :title="info.mimeType">{{ info.mimeType }}</dd></div>
-      <div class="meta-row"><dt>上传时间</dt><dd>{{ formatDateTime(info.createdAt) }}</dd></div>
-      <div v-if="info.expiresAt" class="meta-row"><dt>有效期至</dt><dd class="expiry">{{ formatDateTime(info.expiresAt) }}</dd></div>
-    </dl>
-    <!-- 在线预览（仅可预览类型显示） -->
-    <button v-if="previewKind" type="button" class="preview-btn" @click="openPreview">
-      <span class="download-icon">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/>
-          <circle cx="12" cy="12" r="3"/>
-        </svg>
-      </span>
-      <span>在线预览</span>
-    </button>
-    <button type="button" class="download-btn" :disabled="downloading" @click="handleDownload">
-      <span class="download-icon">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M12 3v12"/>
-          <path d="m7 12 5 5 5-5"/>
-          <path d="M5 21h14"/>
-        </svg>
-      </span>
-      <span>{{ downloading ? '下载中...' : '下载文件' }}</span>
-    </button>
-    <p v-if="isEncrypted" class="security-hint encrypted">
-      <svg class="hint-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-        <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
-        <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
-      </svg>
-      此文件通过加密分享链接提供，请勿传播
-    </p>
-    <p v-else class="security-hint">
-      <svg class="hint-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
-        <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
-      </svg>
-      公开分享链接，任何持有链接的人都可访问
-    </p>
+    <div class="file-share-actions">
+      <button v-if="previewKind" type="button" class="preview-btn" @click="openPreview">
+        <t-icon name="browse" />
+        <span>预览</span>
+      </button>
+      <button type="button" class="download-btn" :disabled="downloading" @click="handleDownload">
+        <t-icon name="download" />
+        <span>{{ downloading ? '下载中...' : '下载' }}</span>
+      </button>
     </div>
-    </template>
+  </div>
+</template>
 
 <script setup lang="ts">
 import { computed, ref } from 'vue';
@@ -70,24 +59,19 @@ interface FileInfo {
   mimeType: string;
   createdAt: string;
   expiresAt?: string | null;
-  /** 文件内容版本（覆盖上传时递增），用于进度记录版本校验 */
   uploadVersion?: number;
 }
 
 const props = defineProps<{
   info: FileInfo;
   token: string;
-  /** 该分享是否设置过密码（由 ShareView 在验证通过后标记；凭据本身存于 HttpOnly Cookie） */
   encrypted?: boolean;
 }>();
 
 const isEncrypted = computed(() => !!props.encrypted);
-
-/** 预览类别；null 时不显示「在线预览」按钮 */
 const previewKind = computed(() => getPreviewKind(props.info.mimeType, props.info.name));
 const mediaPlaybackStore = useMediaPlaybackStore();
 
-/** 打开全局预览会话（分享上下文；跨路由/收起不中断播放） */
 function openPreview() {
   const kind = previewKind.value;
   if (!kind) return;
@@ -108,7 +92,6 @@ function openPreview() {
   });
 }
 
-/** 固定构造同源分享下载路径；凭据由 HttpOnly Cookie 携带，URL 不含访问 JWT */
 const downloadUrl = computed(() => `/api/s/${encodeURIComponent(props.token)}/download/${encodeURIComponent(props.info.id)}`);
 
 function formatSize(bytes: number): string {
@@ -131,155 +114,126 @@ function formatDateTime(dateStr: string): string {
 
 const downloading = ref(false);
 
-/**
- * 直接调用浏览器原生下载。
- * 后端返回 Content-Disposition: attachment，浏览器下载器自带进度条、暂停/恢复、
- * 保存对话框，无需前端 fetch 预校验（旧实现的 GET 兜底会把整个文件先读进内存，
- * 相当于下载两次，已移除）。
- */
 function handleDownload() {
   if (downloading.value) return;
   downloading.value = true;
   triggerBrowserDownload(downloadUrl.value, props.info.name);
   MessagePlugin.success('已开始下载，请查看浏览器下载进度');
-  // 短暂禁用避免重复点击；浏览器接管后无需等待前端异步完成
   window.setTimeout(() => { downloading.value = false; }, 1000);
 }
 </script>
 
 <style scoped>
-.file-share-card {
-  background: var(--color-bg-surface);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-md);
-  padding: 32px 28px;
+.file-share-row {
   width: 100%;
-  max-width: 480px;
-  text-align: center;
-  box-shadow: var(--shadow-sm);
-  font-family: var(--font-body);
-  color: var(--text-primary);
-}
-
-.type-icon-wrapper {
-  width: 128px;
-  height: 128px;
-  margin: 0 auto 24px;
-  border-radius: 24px;
   display: flex;
   align-items: center;
-  justify-content: center;
-}
-
-.file-name {
-  font-size: 22px;
-  font-weight: 600;
-  margin: 0 0 24px;
-  word-break: break-all;
-  line-height: 1.4;
-  max-height: 4.2em;
-  overflow: hidden;
-}
-
-.meta-list {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 8px;
-  margin: 0 0 32px;
-  padding: 16px 20px;
-  background: var(--color-bg);
-  border-radius: var(--radius-md);
-  text-align: left;
-}
-
-.meta-row {
-  display: flex;
   justify-content: space-between;
-  align-items: center;
-  font-size: 13px;
-  padding: 4px 0;
+  gap: 20px;
+  padding: 14px 16px;
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-family: var(--font-body);
+  transition: border-color var(--duration-fast), background var(--duration-fast), box-shadow var(--duration-fast);
 }
 
-.meta-row dt { color: var(--text-secondary); font-weight: normal; min-width: 80px; }
-.meta-row dd { color: var(--text-primary); margin: 0; text-align: right; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-share-row:hover {
+  border-color: var(--border-accent);
+  background: var(--color-bg-hover);
+  box-shadow: var(--shadow-sm);
+}
 
-.mime-type { font-family: var(--font-mono); font-size: 12px; }
+.file-share-main {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.file-share-thumb {
+  width: 48px;
+  height: 48px;
+  flex: 0 0 48px;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-surface);
+}
+
+.file-share-info { min-width: 0; }
+.file-name {
+  margin: 0 0 6px;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-share-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.meta-separator { color: var(--text-tertiary); }
+.mime-type { max-width: 220px; overflow: hidden; font-family: var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
 .expiry { color: var(--color-warning); }
 
-.download-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  width: 100%;
-  padding: 16px 24px;
-  background: var(--seed-primary);
-  color: #fff;
-  border: none;
-  border-radius: var(--radius-md);
-  font-size: 16px;
-  font-weight: 500;
-  cursor: pointer;
-  text-decoration: none;
-  transition: background 0.2s, transform 0.1s;
-  font-family: inherit;
-  margin-bottom: 16px;
-}
-
-.download-btn:hover { background: color-mix(in srgb, var(--seed-primary) 85%, #fff); }
-.download-btn:active { transform: scale(0.98); }
-.download-btn:disabled { opacity: 0.6; cursor: not-allowed; transform: none; }
-
-/* 在线预览按钮：下载主按钮的弱化版（次级样式） */
-.preview-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  width: 100%;
-  padding: 14px 24px;
-  margin-bottom: 12px;
-  background: transparent;
-  color: var(--seed-primary);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-md);
-  font-size: 15px;
-  font-weight: 500;
-  cursor: pointer;
-  font-family: inherit;
-  transition: background 0.2s, border-color 0.2s, transform 0.1s;
-}
-
-.preview-btn:hover { background: var(--color-accent-soft); border-color: var(--seed-primary); }
-.preview-btn:active { transform: scale(0.98); }
-
-.download-icon {
-  display: inline-flex;
-  align-items: center;
-  line-height: 1;
-}
-
 .security-hint {
-  color: var(--text-tertiary);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 7px;
+  color: var(--color-success);
   font-size: 12px;
-  margin: 0;
+}
+.security-hint.encrypted { color: var(--color-warning); }
+
+.file-share-actions {
   display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+}
+.file-share-actions button {
+  display: inline-flex;
+  min-width: 76px;
+  min-height: 36px;
   align-items: center;
   justify-content: center;
   gap: 6px;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background var(--duration-fast), border-color var(--duration-fast), color var(--duration-fast);
 }
-
-.security-hint.encrypted {
-  color: var(--color-warning);
+.preview-btn {
+  color: var(--seed-primary);
+  background: transparent;
+  border: 1px solid var(--border-default);
 }
+.preview-btn:hover { background: var(--color-accent-soft); border-color: var(--border-accent); }
+.download-btn { color: #fff; background: var(--seed-primary); border: 1px solid var(--seed-primary); }
+.download-btn:hover { background: color-mix(in srgb, var(--seed-primary) 85%, #fff); }
+.download-btn:disabled { cursor: not-allowed; opacity: .6; }
 
-@media (max-width: 480px) {
-  .file-share-card { padding: 24px 16px; }
-  .file-name { font-size: 18px; }
-  .meta-row dd { max-width: 58%; }
-}
-
-.hint-icon {
-  flex-shrink: 0;
+@media (max-width: 640px) {
+  .file-share-row { align-items: flex-start; flex-direction: column; gap: 14px; padding: 12px; }
+  .file-share-main { width: 100%; }
+  .file-share-actions { width: 100%; }
+  .file-share-actions button { flex: 1; }
+  .mime-type { max-width: 150px; }
 }
 </style>

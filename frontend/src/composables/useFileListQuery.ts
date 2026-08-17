@@ -84,7 +84,7 @@ export function useFileListQuery(options: FileListQueryOptions) {
     fileStore.replaceFiles([]);
     listError.value = null;
     try {
-      await loadMoreFiles(folderId);
+      await loadMoreFiles(folderId, true);
     } catch (error) {
       if (generation === fileListGeneration) listError.value = error;
       throw error;
@@ -93,8 +93,8 @@ export function useFileListQuery(options: FileListQueryOptions) {
     }
   }
 
-  async function loadMoreFiles(folderId = currentFolderIdForApi.value) {
-    if (folderLoading.value || !hasMore.value) return;
+  async function loadMoreFiles(folderId = currentFolderIdForApi.value, isInitialLoad = false) {
+    if ((!isInitialLoad && folderLoading.value) || !hasMore.value) return;
     const generation = fileListGeneration;
     await loadMore(async (cursor, signal) => {
       const page = cursor ? parseInt(cursor, 10) : 1;
