@@ -4,7 +4,7 @@
     <div class="browser-header">
       <div class="folder-title-row">
         <span class="folder-icon-large">
-          <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
             <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
           </svg>
         </span>
@@ -33,88 +33,82 @@
       <t-loading size="medium" text="加载中..." />
     </div>
 
-    <!-- 内容区：子文件夹 + 文件 -->
-    <div v-else class="browser-content">
+    <!-- 表格列表 -->
+    <div v-else class="share-table">
+      <div class="share-table-head">
+        <span class="col col-name">名称</span>
+        <span class="col col-size">大小</span>
+        <span class="col col-date">上传时间</span>
+        <span class="col col-ops">操作</span>
+      </div>
+
       <!-- 空状态 -->
       <div v-if="currentContents.subfolders.length === 0 && currentContents.files.length === 0" class="empty-state">
         <div class="empty-icon">
-          <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
             <path d="M6 14l1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2"/>
           </svg>
         </div>
         <p>此文件夹为空</p>
       </div>
 
-      <!-- 子文件夹网格 -->
-      <div v-if="currentContents.subfolders.length > 0" class="subfolder-section">
-        <h2 class="section-title">文件夹 ({{ currentContents.subfolders.length }})</h2>
-        <div class="card-grid">
-          <button
-            v-for="sub in currentContents.subfolders"
-            :key="sub.id"
-            type="button"
-            class="subfolder-card"
-            :aria-label="`打开文件夹 ${sub.name}`"
-            :disabled="loading"
-            @click="openSubfolder(sub)"
-          >
-            <div class="subfolder-icon">
-              <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
-              </svg>
-            </div>
-            <div class="subfolder-name" :title="sub.name">{{ sub.name }}</div>
-          </button>
-        </div>
-      </div>
+      <!-- 子文件夹行 -->
+      <button
+        v-for="sub in currentContents.subfolders"
+        :key="sub.id"
+        type="button"
+        class="share-row folder-row"
+        :aria-label="`打开文件夹 ${sub.name}`"
+        :disabled="loading"
+        @click="openSubfolder(sub)"
+      >
+        <span class="col col-name">
+          <span class="row-icon folder-icon">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+            </svg>
+          </span>
+          <span class="row-name" :title="sub.name">{{ sub.name }}</span>
+        </span>
+        <span class="col col-size">—</span>
+        <span class="col col-date">{{ sub.createdAt ? formatRelativeDate(sub.createdAt) : '—' }}</span>
+        <span class="col col-ops"><span class="op-link">打开</span></span>
+      </button>
 
-      <!-- 文件网格 -->
-      <div v-if="currentContents.files.length > 0" class="file-section">
-        <h2 class="section-title">文件 ({{ currentContents.files.length }})</h2>
-        <div class="card-grid">
-          <div
-            v-for="file in currentContents.files"
-            :key="file.id"
-            class="share-file-card"
-            :title="file.name"
+      <!-- 文件行 -->
+      <div v-for="file in currentContents.files" :key="file.id" class="share-row file-row">
+        <span class="col col-name">
+          <ThumbnailImg
+            :file-id="file.id"
+            :mime-type="file.mimeType"
+            :file-name="file.name"
+            :size="40"
+            :src="buildShareThumbnailUrl(props.token, file.id)"
+            :context="`s:${props.token}`"
+            :version="file.uploadVersion"
+          />
+          <span class="row-name" :title="file.name">{{ file.name }}</span>
+        </span>
+        <span class="col col-size">{{ formatSize(file.size) }}</span>
+        <span class="col col-date">{{ formatRelativeDate(file.createdAt) }}</span>
+        <span class="col col-ops">
+          <button
+            v-if="isPreviewable(file.mimeType, file.name)"
+            type="button"
+            class="op-link"
+            @click.stop="openPreview(file)"
           >
-            <div class="file-card-preview">
-              <ThumbnailImg
-                :file-id="file.id"
-                :mime-type="file.mimeType"
-                :file-name="file.name"
-                :size="72"
-                :src="buildShareThumbnailUrl(props.token, file.id)"
-                :context="`s:${props.token}`"
-                :version="file.uploadVersion"
-              />
-            </div>
-            <div class="file-card-info">
-              <div class="file-card-name" :title="file.name">{{ file.name }}</div>
-              <div class="file-card-meta">
-                <span>{{ formatSize(file.size) }}</span>
-                <span class="meta-dot">·</span>
-                <span>{{ formatRelativeDate(file.createdAt) }}</span>
-              </div>
-            </div>
-            <button
-              v-if="isPreviewable(file.mimeType, file.name)"
-              type="button"
-              class="file-preview-btn"
-              @click.stop="openPreview(file)"
-            >
-              <span>预览</span>
-            </button>
-            <button
-              type="button"
-              class="file-download-btn"
-              :disabled="downloadingId === file.id"
-              @click.stop="downloadFile(file)"
-            >
-              <span>{{ downloadingId === file.id ? '下载中...' : '下载' }}</span>
-            </button>
-          </div>
-        </div>
+            预览
+          </button>
+          <button
+            type="button"
+            class="op-link"
+            :disabled="downloadingId === file.id"
+            @click.stop="downloadFile(file)"
+          >
+            {{ downloadingId === file.id ? '下载中...' : '下载' }}
+          </button>
+        </span>
       </div>
     </div>
 
@@ -349,7 +343,7 @@ function formatRelativeDate(dateStr: string): string {
   background: var(--color-bg-surface);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
-  padding: 16px 20px 20px;
+  padding: 16px 0 20px;
   box-shadow: var(--shadow-sm);
   font-family: var(--font-body);
   color: var(--text-primary);
@@ -357,8 +351,8 @@ function formatRelativeDate(dateStr: string): string {
 
 .browser-header {
   border-bottom: 1px solid var(--border-default);
-  padding-bottom: 16px;
-  margin-bottom: 20px;
+  padding: 0 20px 16px;
+  margin-bottom: 16px;
 }
 
 .folder-title-row {
@@ -402,7 +396,7 @@ function formatRelativeDate(dateStr: string): string {
 
 .breadcrumb-item:hover:not(:disabled) { color: var(--seed-primary); }
 .breadcrumb-item:focus-visible,
-.subfolder-card:focus-visible {
+.share-row:focus-visible {
   outline: 2px solid var(--color-accent);
   outline-offset: 2px;
 }
@@ -411,6 +405,105 @@ function formatRelativeDate(dateStr: string): string {
 .breadcrumb-separator { color: var(--text-tertiary); margin: 0 4px; }
 
 .loading-state { padding: 48px 0; text-align: center; }
+
+/* ===== 表格列表 ===== */
+.share-table {
+  display: flex;
+  flex-direction: column;
+}
+
+/* 列宽：名称弹性 / 大小 / 上传时间 / 操作 */
+.share-table-head,
+.share-row {
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) 96px 150px 160px;
+  gap: 12px;
+  align-items: center;
+  padding: 0 16px;
+}
+
+.share-table-head {
+  min-height: 40px;
+  background: var(--color-bg-elevated);
+  border-bottom: 1px solid var(--border-strong);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-tertiary);
+}
+
+.share-row {
+  min-height: 52px;
+  width: 100%;
+  border: 0;
+  border-bottom: 1px solid var(--border-default);
+  background: transparent;
+  text-align: left;
+  font: inherit;
+  color: var(--text-primary);
+  cursor: default;
+  transition: background var(--duration-fast);
+}
+
+.share-row:last-child { border-bottom: none; }
+
+.share-row.folder-row { cursor: pointer; }
+.share-row.folder-row:hover:not(:disabled) { background: var(--color-bg-hover); }
+.share-row.folder-row:disabled { cursor: not-allowed; opacity: .6; }
+.share-row.file-row:hover { background: var(--color-bg-hover); }
+
+/* 名称列：图标/缩略图 + 名称 */
+.col-name {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+.row-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+.row-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
+}
+.folder-icon { color: var(--seed-primary); }
+
+.col-size {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+.col-date {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+.col-ops {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.op-link {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--seed-primary);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.op-link:hover { color: var(--seed-accent); }
+.op-link:disabled { color: var(--text-disabled); cursor: not-allowed; }
 
 .empty-state {
   padding: 48px 0;
@@ -426,171 +519,33 @@ function formatRelativeDate(dateStr: string): string {
   color: var(--text-tertiary);
 }
 
-.browser-content {
-  display: flex;
-  flex-direction: column;
-  gap: 24px;
-}
-
-.section-title {
-  font-size: 14px;
-  font-weight: 500;
-  color: var(--text-secondary);
-  margin: 0 0 12px;
-}
-
-.card-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(min(160px, 100%), 1fr));
-  gap: 12px;
-}
-
-.subfolder-card {
-  background: var(--color-bg-elevated);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-sm);
-  padding: 12px;
-  cursor: pointer;
-  text-align: center;
-  transition: all 0.2s;
-}
-
-.subfolder-card:hover {
-  border-color: var(--seed-primary);
-  background: var(--color-accent-soft);
-  transform: translateY(-2px);
-}
-
-.subfolder-icon {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  margin-bottom: 6px;
-  color: var(--seed-primary);
-}
-
-.subfolder-name {
-  font-size: 13px;
-  font-weight: 500;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  color: var(--text-primary);
-}
-
-.share-file-card {
-  background: var(--color-bg-elevated);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-sm);
-  overflow: hidden;
-  cursor: pointer;
-  transition: all 0.2s;
-  display: flex;
-  flex-direction: column;
-}
-
-.share-file-card:hover {
-  border-color: var(--seed-primary);
-  transform: translateY(-2px);
-  box-shadow: var(--shadow-md);
-}
-
-.file-card-preview {
-  width: 100%;
-  aspect-ratio: 1.4 / 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--color-bg-hover);
-}
-
-.file-card-info {
-  padding: 8px 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.file-card-name {
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--text-primary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.file-card-meta {
-  font-size: 11px;
-  color: var(--text-tertiary);
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.meta-dot { color: var(--text-tertiary); }
-
-.file-download-btn {
-  display: block;
-  margin: 0 10px 10px;
-  padding: 6px 12px;
-  background: var(--seed-primary);
-  color: #fff;
-  border: none;
-  border-radius: var(--radius-sm);
-  font-size: 13px;
-  font-family: inherit;
-  text-align: center;
-  text-decoration: none;
-  cursor: pointer;
-  transition: background 0.2s;
-}
-
-.file-download-btn:hover { background: color-mix(in srgb, var(--seed-primary) 85%, #fff); }
-.file-download-btn:disabled { opacity: 0.6; cursor: not-allowed; }
-
-/* 预览按钮：下载主按钮的弱化版（次级样式） */
-.file-preview-btn {
-  display: block;
-  margin: 0 10px 6px;
-  padding: 5px 12px;
-  background: transparent;
-  color: var(--seed-primary);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
-  font-size: 13px;
-  font-family: inherit;
-  text-align: center;
-  cursor: pointer;
-  transition: background 0.2s, border-color 0.2s;
-}
-
-.file-preview-btn:hover { background: var(--color-accent-soft); border-color: var(--seed-primary); }
-
 .back-to-parent {
   margin-top: 16px;
+  padding: 0 20px;
   text-align: left;
 }
 
 .back-to-parent :deep(.t-button) { color: var(--text-secondary); }
 .back-to-parent :deep(.t-button:hover) { color: var(--seed-primary); }
 
-@media (min-width: 1200px) {
-  .card-grid {
-    grid-template-columns: repeat(auto-fill, minmax(160px, 200px));
-    justify-content: start;
-  }
-}
-
 @media (max-width: 768px) {
-  .folder-share-browser { padding: 12px; }
+  .folder-share-browser { padding: 12px 0 16px; border-radius: var(--radius-sm); }
+  .browser-header { padding: 0 12px 12px; }
   .folder-title { font-size: 18px; }
-  .folder-icon-large svg { width: 28px; height: 28px; }
+  .folder-icon-large svg { width: 24px; height: 24px; }
   .breadcrumb { font-size: 13px; }
-  .folder-share-browser { border-radius: var(--radius-sm); }
-  .card-grid {
-    grid-template-columns: repeat(auto-fill, minmax(min(140px, 100%), 1fr));
-    gap: 10px;
+
+  /* 移动端隐藏“上传时间”列 */
+  .share-table-head,
+  .share-row {
+    grid-template-columns: minmax(160px, 1fr) 88px 128px;
+    gap: 8px;
+    padding: 0 12px;
   }
+  .col-date { display: none; }
+
+  .row-name { font-size: 13px; }
+  .col-size { font-size: 12px; }
+  .back-to-parent { padding: 0 12px; }
 }
 </style>

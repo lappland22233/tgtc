@@ -1,45 +1,46 @@
 <template>
-  <div class="file-share-row" :class="{ 'file-share-row--encrypted': isEncrypted }">
-    <div class="file-share-main">
-      <div class="file-share-thumb">
-        <ThumbnailImg
-          :file-id="info.id"
-          :mime-type="info.mimeType"
-          :file-name="info.name"
-          :size="48"
-          :src="buildShareThumbnailUrl(props.token, props.info.id)"
-          :context="`s:${props.token}`"
-          :version="info.uploadVersion"
-        />
-      </div>
-      <div class="file-share-info">
-        <h1 class="file-name" :title="info.name">{{ info.name }}</h1>
-        <div class="file-share-meta">
-          <span>{{ formatSize(info.size) }}</span>
-          <span class="meta-separator">·</span>
-          <span class="mime-type" :title="info.mimeType">{{ info.mimeType }}</span>
-          <span class="meta-separator">·</span>
-          <span>{{ formatDateTime(info.createdAt) }}</span>
-          <template v-if="info.expiresAt">
-            <span class="meta-separator">·</span>
-            <span class="expiry">有效期至 {{ formatDateTime(info.expiresAt) }}</span>
-          </template>
-        </div>
-        <div class="security-hint" :class="{ encrypted: isEncrypted }">
-          <t-icon :name="isEncrypted ? 'lock-on' : 'link'" />
-          <span>{{ isEncrypted ? '加密分享链接' : '公开分享链接' }}</span>
-        </div>
-      </div>
+  <div class="file-share-card" :class="{ 'file-share-card--encrypted': isEncrypted }">
+    <!-- 预览大区：居中放大缩略图（图片/视频显示缩略图，其余显示大类型图标） -->
+    <div class="file-share-hero">
+      <ThumbnailImg
+        :file-id="info.id"
+        :mime-type="info.mimeType"
+        :file-name="info.name"
+        :size="160"
+        :src="buildShareThumbnailUrl(props.token, props.info.id)"
+        :context="`s:${props.token}`"
+        :version="info.uploadVersion"
+      />
     </div>
-    <div class="file-share-actions">
-      <button v-if="previewKind" type="button" class="preview-btn" @click="openPreview">
-        <t-icon name="browse" />
-        <span>预览</span>
-      </button>
-      <button type="button" class="download-btn" :disabled="downloading" @click="handleDownload">
-        <t-icon name="download" />
-        <span>{{ downloading ? '下载中...' : '下载' }}</span>
-      </button>
+
+    <!-- 内容区 -->
+    <div class="file-share-body">
+      <h1 class="file-name" :title="info.name">{{ info.name }}</h1>
+      <div class="file-share-meta">
+        <span>{{ formatSize(info.size) }}</span>
+        <span class="meta-separator">·</span>
+        <span class="mime-type" :title="info.mimeType">{{ info.mimeType }}</span>
+        <span class="meta-separator">·</span>
+        <span>{{ formatDateTime(info.createdAt) }}</span>
+        <template v-if="info.expiresAt">
+          <span class="meta-separator">·</span>
+          <span class="expiry">有效期至 {{ formatDateTime(info.expiresAt) }}</span>
+        </template>
+      </div>
+      <div class="security-hint" :class="{ encrypted: isEncrypted }">
+        <t-icon :name="isEncrypted ? 'lock-on' : 'link'" />
+        <span>{{ isEncrypted ? '加密分享链接' : '公开分享链接' }}</span>
+      </div>
+      <div class="file-share-actions">
+        <button v-if="previewKind" type="button" class="preview-btn" @click="openPreview">
+          <t-icon name="browse" />
+          <span>在线预览</span>
+        </button>
+        <button type="button" class="download-btn" :disabled="downloading" @click="handleDownload">
+          <t-icon name="download" />
+          <span>{{ downloading ? '下载中...' : '下载文件' }}</span>
+        </button>
+      </div>
     </div>
   </div>
 </template>
@@ -124,56 +125,49 @@ function handleDownload() {
 </script>
 
 <style scoped>
-.file-share-row {
+.file-share-card {
   width: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 20px;
-  padding: 14px 16px;
-  background: var(--color-bg-elevated);
+  background: var(--color-bg-surface);
   border: 1px solid var(--border-default);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-xl);
+  overflow: hidden;
+  box-shadow: var(--shadow-lg);
   color: var(--text-primary);
   font-family: var(--font-body);
-  transition: border-color var(--duration-fast), background var(--duration-fast), box-shadow var(--duration-fast);
+  transition: border-color var(--duration-fast), box-shadow var(--duration-fast);
 }
 
-.file-share-row:hover {
-  border-color: var(--border-accent);
-  background: var(--color-bg-hover);
-  box-shadow: var(--shadow-sm);
+.file-share-card:hover {
+  border-color: var(--border-strong);
 }
 
-.file-share-main {
-  min-width: 0;
+/* 预览大区：顶部极光渐变 + 居中放大缩略图 */
+.file-share-hero {
   display: flex;
   align-items: center;
-  gap: 14px;
+  justify-content: center;
+  padding: 56px 24px;
+  background:
+    radial-gradient(120% 100% at 50% 0%, color-mix(in srgb, var(--seed-primary) 16%, transparent), transparent 62%),
+    var(--color-bg);
 }
 
-.file-share-thumb {
-  width: 48px;
-  height: 48px;
-  flex: 0 0 48px;
-  display: grid;
-  place-items: center;
-  overflow: hidden;
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-sm);
-  background: var(--color-bg-surface);
+/* 内容区 */
+.file-share-body {
+  padding: 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
-.file-share-info { min-width: 0; }
 .file-name {
-  margin: 0 0 6px;
+  margin: 0;
   overflow: hidden;
   color: var(--text-primary);
-  font-size: 15px;
+  font-size: 22px;
   font-weight: 600;
-  line-height: 1.4;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  line-height: 1.35;
+  word-break: break-all;
 }
 
 .file-share-meta {
@@ -182,58 +176,64 @@ function handleDownload() {
   align-items: center;
   gap: 6px;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: 13px;
   line-height: 1.5;
 }
 .meta-separator { color: var(--text-tertiary); }
-.mime-type { max-width: 220px; overflow: hidden; font-family: var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+.mime-type { max-width: 260px; overflow: hidden; font-family: var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
 .expiry { color: var(--color-warning); }
 
 .security-hint {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  margin-top: 7px;
+  align-self: flex-start;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--color-success) 12%, transparent);
   color: var(--color-success);
   font-size: 12px;
 }
-.security-hint.encrypted { color: var(--color-warning); }
+.security-hint.encrypted {
+  background: color-mix(in srgb, var(--seed-primary) 16%, transparent);
+  color: var(--seed-accent);
+}
 
 .file-share-actions {
   display: flex;
-  flex: 0 0 auto;
-  align-items: center;
-  gap: 8px;
+  gap: 12px;
+  margin-top: 4px;
 }
 .file-share-actions button {
   display: inline-flex;
-  min-width: 76px;
-  min-height: 36px;
+  flex: 1;
+  min-height: 48px;
   align-items: center;
   justify-content: center;
-  gap: 6px;
-  padding: 8px 12px;
-  border-radius: var(--radius-sm);
+  gap: 8px;
+  padding: 12px 16px;
+  border-radius: var(--radius-md);
   font: inherit;
-  font-size: 13px;
+  font-size: 14px;
+  font-weight: 500;
   cursor: pointer;
   transition: background var(--duration-fast), border-color var(--duration-fast), color var(--duration-fast);
 }
 .preview-btn {
   color: var(--seed-primary);
   background: transparent;
-  border: 1px solid var(--border-default);
+  border: 1px solid var(--border-strong);
 }
-.preview-btn:hover { background: var(--color-accent-soft); border-color: var(--border-accent); }
+.preview-btn:hover { background: var(--color-accent-soft); border-color: var(--seed-primary); }
 .download-btn { color: #fff; background: var(--seed-primary); border: 1px solid var(--seed-primary); }
 .download-btn:hover { background: color-mix(in srgb, var(--seed-primary) 85%, #fff); }
 .download-btn:disabled { cursor: not-allowed; opacity: .6; }
 
-@media (max-width: 640px) {
-  .file-share-row { align-items: flex-start; flex-direction: column; gap: 14px; padding: 12px; }
-  .file-share-main { width: 100%; }
-  .file-share-actions { width: 100%; }
-  .file-share-actions button { flex: 1; }
-  .mime-type { max-width: 150px; }
+@media (max-width: 480px) {
+  .file-share-hero { padding: 40px 16px; }
+  .file-share-body { padding: 20px 16px; }
+  .file-name { font-size: 18px; }
+  .file-share-actions { flex-direction: column; }
+  .mime-type { max-width: 160px; }
 }
 </style>
