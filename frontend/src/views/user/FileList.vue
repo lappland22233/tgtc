@@ -101,7 +101,17 @@
       </t-button>
       <t-button theme="default" variant="outline" size="small" @click="openBatchTagDialog">批量标签</t-button>
       <t-button theme="default" variant="outline" size="small" @click="openMoveDialogForFiles()">移动到...</t-button>
-      <t-button theme="default" variant="text" size="small" @click="clearSelection">清除选择</t-button>
+      <t-button
+        theme="danger"
+        variant="outline"
+        size="small"
+        :loading="isBatchDeleting"
+        :disabled="isBatchDeleting"
+        @click="openBatchDeleteDialog"
+      >
+        批量删除
+      </t-button>
+      <t-button theme="default" variant="text" size="small" :disabled="isBatchDeleting" @click="clearSelection">清除选择</t-button>
     </div>
 
     <!-- ④ 已选标签筛选 -->
@@ -133,8 +143,15 @@
     </div>
 
     <!-- ⑥ 空状态：当前文件夹下既无文件也无子文件夹 -->
+    <div v-if="folderLoading" class="fl-loading-state">
+      <t-loading class="fl-loading" text="加载当前文件夹..." />
+    </div>
+    <div v-else-if="listError" class="fl-error-state">
+      <p>文件列表加载失败，请稍后重试。</p>
+      <t-button size="small" variant="outline" @click="refetchFiles">重试</t-button>
+    </div>
     <div
-      v-if="fileStore.files.length === 0 && subfoldersInCurrentFolder.length === 0 && !fileStore.loading && !cursorLoading"
+      v-else-if="fileStore.files.length === 0 && subfoldersInCurrentFolder.length === 0 && !fileStore.loading && !cursorLoading"
       class="upload-zone"
       @click="!consumeLongPressClick() && (showUploadModal = true)"
       @contextmenu.prevent="openBlankCtxMenu"
@@ -153,7 +170,7 @@
       class="fl-loading"
     />
     <div
-      v-else-if="displayFiles.length > 0 || subfoldersInCurrentFolder.length > 0"
+      v-else-if="!folderLoading && !listError && (displayFiles.length > 0 || subfoldersInCurrentFolder.length > 0)"
       class="os-list card"
       @contextmenu.prevent="openBlankCtxMenu"
     >
@@ -166,6 +183,8 @@
               <t-checkbox
                 :checked="isAllSelected"
                 :indeterminate="isIndeterminate"
+                :disabled="isBatchDeleting"
+                aria-label="全选当前已加载的可操作文件"
                 @change="toggleSelectAll"
               />
             </div>
@@ -291,6 +310,17 @@
 
       <!-- 移动端：文件夹行 + 文件卡片 -->
       <div v-else class="os-mobile">
+        <div v-if="selectableFiles.length > 0" class="mobile-selection-toolbar">
+          <t-checkbox
+            :checked="isAllSelected"
+            :indeterminate="isIndeterminate"
+            :disabled="isBatchDeleting"
+            @change="toggleSelectAll"
+          >
+            全选当前已加载的 {{ selectableFiles.length }} 个可操作文件
+          </t-checkbox>
+          <span v-if="selectedFileIds.length > 0" class="mobile-selection-count">已选 {{ selectedFileIds.length }} 项</span>
+        </div>
         <div
           v-for="folder in subfoldersInCurrentFolder"
           :key="`m-folder-${folder.id}`"
@@ -319,6 +349,15 @@
           @touchend="handleTouchEnd"
         >
           <div class="mobile-file-card-header">
+            <t-checkbox
+              v-if="isFileActionable(file)"
+              class="mobile-file-select"
+              :checked="selectedFileIds.includes(file.id)"
+              :disabled="isBatchDeleting"
+              :aria-label="`选择 ${file.originalName}`"
+              @change="toggleFileSelect(file)"
+              @click.stop
+            />
             <ThumbnailImg :file-id="file.id" :mime-type="file.mimeType" :size="40" :file-name="file.originalName" :context="thumbnailContext" :version="file.uploadVersion" />
             <div class="mobile-file-main">
               <div class="mobile-file-name" :class="{ 'deleted-name': file.isDeleted }">{{ file.originalName }}</div>
@@ -414,13 +453,16 @@
     <!-- 删除确认弹窗 -->
     <t-dialog
       v-model:visible="deleteDialog.visible"
-      header="确认删除文件"
+      :header="deleteDialog.isBatch ? '确认批量删除文件' : '确认删除文件'"
       width="420px"
+      :confirm-btn="{ content: deleteDialog.isBatch ? `删除 ${deleteDialog.fileIds.length} 个文件` : '删除', loading: isBatchDeleting }"
+      :confirm-button-props="{ disabled: isBatchDeleting }"
       @confirm="confirmDelete"
       @close="deleteDialog.visible = false"
     >
       <div class="fl-delete-body">
-        <p>确定要删除文件 <strong>{{ deleteDialog.fileName }}</strong> 吗？</p>
+        <p v-if="deleteDialog.isBatch">确定要删除已选的 <strong>{{ deleteDialog.fileIds.length }}</strong> 个文件吗？</p>
+        <p v-else>确定要删除文件 <strong>{{ deleteDialog.fileName }}</strong> 吗？</p>
         <div class="fl-delete-note">
           <p class="fl-delete-note-title">删除说明：</p>
           <ul>
@@ -539,6 +581,11 @@ const {
   displayFiles,
   hasMore,
   cursorLoading,
+  folderLoading,
+  listError,
+  beginFolderTransition,
+  getFileListGeneration,
+  loadInitialFiles,
   scrollSentinel,
   toggleSort,
   handleSearch,
@@ -653,6 +700,7 @@ const renameTargetFile = ref<FileItem | null>(null);
  * 保留 search/sortBy/sortOrder/tagIds 等既有 query 参数不丢失。
  */
 function onFolderNavigate(folderId: string | null) {
+  if (isBatchDeleting.value) return;
   if (folderId === folderStore.currentFolderId) return; // 已在目标目录，不产生多余历史记录
   const query = { ...route.query };
   if (folderId) query.folder = folderId;
@@ -679,21 +727,21 @@ watch(() => route.query.folder, async (raw) => {
   if (folderRouteSynced && targetId === folderStore.currentFolderId) return;
   folderRouteSynced = true;
 
-  if (targetId) {
-    const valid = await folderStore.openFolder(targetId);
-    if (!valid) {
-      MessagePlugin.warning('目标文件夹不存在或无权访问，已回到我的文件');
-      const query = { ...route.query };
-      delete query.folder;
-      router.replace({ query }); // replace 后 watch 以 null 再次触发，完成重置与加载
-      return;
-    }
-  } else {
-    await folderStore.openFolder(null);
+  // 必须在 openFolder 前推进代际：目录切换一开始就清空旧列表和选择。
+  selectedFileIds.value = [];
+  const generation = beginFolderTransition();
+  const valid = await folderStore.openFolder(targetId);
+  if (generation !== getFileListGeneration()) return;
+  if (!valid) {
+    MessagePlugin.warning('目标文件夹不存在或无权访问，已回到我的文件');
+    const query = { ...route.query };
+    delete query.folder;
+    router.replace({ query }); // replace 后 watch 以 null 再次触发，完成重置与加载
+    return;
   }
   selectedFileIds.value = [];
   try {
-    await refetchFiles();
+    await loadInitialFiles(generation, targetId ? targetId : 'root');
   } catch {
     // 初始/切换加载失败保留空列表，用户可手动刷新
   }
@@ -941,6 +989,7 @@ const subfoldersInCurrentFolder = computed<Folder[]>(() => {
 
 // ============ 选择（自定义列表） ============
 function toggleFileSelect(file: FileItem) {
+  if (!isFileActionable(file) || isBatchDeleting.value) return;
   const idx = selectedFileIds.value.indexOf(file.id);
   if (idx >= 0) {
     selectedFileIds.value.splice(idx, 1);
@@ -951,8 +1000,14 @@ function toggleFileSelect(file: FileItem) {
 
 /** 当前可被选中的文件（未删除、非处理中） */
 const selectableFiles = computed(() =>
-  displayFiles.value.filter(f => !f.isDeleted && f.status !== 'processing')
+  displayFiles.value.filter(f => isFileActionable(f))
 );
+
+/** 选择集合只保留当前视图中仍可操作、可见的文件，避免翻页/筛选后误操作。 */
+watch([displayFiles, selectableFiles], () => {
+  const visibleIds = new Set(selectableFiles.value.map((file) => file.id));
+  selectedFileIds.value = selectedFileIds.value.filter((id) => visibleIds.has(id));
+}, { deep: true });
 
 const isAllSelected = computed(() =>
   selectableFiles.value.length > 0 &&
@@ -965,6 +1020,7 @@ const isIndeterminate = computed(() => {
 });
 
 function toggleSelectAll() {
+  if (isBatchDeleting.value) return;
   if (isAllSelected.value) {
     const ids = new Set(selectableFiles.value.map(f => f.id));
     selectedFileIds.value = selectedFileIds.value.filter(id => !ids.has(id));
@@ -1034,15 +1090,35 @@ const expiresDialog = reactive({
 });
 
 // 删除确认弹窗
+const isBatchDeleting = ref(false);
 const deleteDialog = reactive({
   visible: false,
   fileId: '',
+  fileIds: [] as string[],
   fileName: '',
+  isBatch: false,
 });
 
 function openDeleteDialog(row: FileItem) {
   deleteDialog.fileId = row.id;
+  deleteDialog.fileIds = [row.id];
   deleteDialog.fileName = row.originalName;
+  deleteDialog.isBatch = false;
+  deleteDialog.visible = true;
+}
+
+function openBatchDeleteDialog() {
+  const ids = selectableFiles.value
+    .filter((file) => selectedFileIds.value.includes(file.id))
+    .map((file) => file.id);
+  if (ids.length === 0) {
+    MessagePlugin.warning('没有可删除的文件');
+    return;
+  }
+  deleteDialog.fileId = '';
+  deleteDialog.fileIds = ids;
+  deleteDialog.fileName = '';
+  deleteDialog.isBatch = true;
   deleteDialog.visible = true;
 }
 
@@ -1366,21 +1442,54 @@ function handleDelete(row: FileItem) {
 }
 
 async function confirmDelete() {
-  try {
-    const result = await fileStore.deleteFile(deleteDialog.fileId);
-    if (result.status === 'permanently_deleted') {
-      MessagePlugin.success('文件已永久删除');
-    } else if (result.status === 'already_deleted') {
-      const scheduledDate = result.scheduledAt ? formatDate(result.scheduledAt) : '7天后';
-      MessagePlugin.warning(`文件已处于待删除状态，将于 ${scheduledDate} 永久删除`);
-    } else {
-      const scheduledDate = result.scheduledAt ? formatDate(result.scheduledAt) : '7天后';
-      MessagePlugin.success(`文件已标记为待删除，将于 ${scheduledDate} 永久删除，期间可恢复`);
+  if (isBatchDeleting.value) return;
+  if (!deleteDialog.isBatch) {
+    try {
+      const result = await fileStore.deleteFile(deleteDialog.fileId);
+      if (result.status === 'permanently_deleted') {
+        MessagePlugin.success('文件已永久删除');
+      } else if (result.status === 'already_deleted') {
+        const scheduledDate = result.scheduledAt ? formatDate(result.scheduledAt) : '7天后';
+        MessagePlugin.warning(`文件已处于待删除状态，将于 ${scheduledDate} 永久删除`);
+      } else {
+        const scheduledDate = result.scheduledAt ? formatDate(result.scheduledAt) : '7天后';
+        MessagePlugin.success(`文件已标记为待删除，将于 ${scheduledDate} 永久删除，期间可恢复`);
+      }
+      deleteDialog.visible = false;
+      await refetchFiles();
+    } catch (error: unknown) {
+      MessagePlugin.error(getErrorMessage(error));
     }
+    return;
+  }
+
+  const ids = [...deleteDialog.fileIds];
+  isBatchDeleting.value = true;
+  try {
+    const results = await Promise.allSettled(ids.map((id) => fileStore.deleteFile(id)));
+    const successCount = results.filter((result) => result.status === 'fulfilled').length;
+    const failCount = results.length - successCount;
+    const failedIds = ids.filter((_, index) => results[index]?.status === 'rejected');
+    const statusCounts = results.reduce((counts, result) => {
+      if (result.status === 'fulfilled') counts[result.value.status] = (counts[result.value.status] || 0) + 1;
+      return counts;
+    }, {} as Record<string, number>);
     deleteDialog.visible = false;
+    // 成功项退出选择，失败项保留，方便用户查看并重试。
+    selectedFileIds.value = selectedFileIds.value.filter((id) => failedIds.includes(id));
     await refetchFiles();
-  } catch (error: unknown) {
-    MessagePlugin.error(getErrorMessage(error));
+    const statusSummary = [
+      statusCounts.pending ? `${statusCounts.pending} 个进入回收站` : '',
+      statusCounts.already_deleted ? `${statusCounts.already_deleted} 个已在回收站` : '',
+      statusCounts.permanently_deleted ? `${statusCounts.permanently_deleted} 个已永久删除` : '',
+    ].filter(Boolean).join('，');
+    if (failCount === 0) {
+      MessagePlugin.success(statusSummary || `已处理 ${successCount} 个文件`);
+    } else {
+      MessagePlugin.warning(`批量删除完成：${statusSummary || `${successCount} 个成功`}，${failCount} 个失败`);
+    }
+  } finally {
+    isBatchDeleting.value = false;
   }
 }
 
@@ -1956,11 +2065,31 @@ onUnmounted(() => {
   border-color: var(--border-accent);
 }
 
+.mobile-selection-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 2px 12px;
+  color: var(--text-secondary);
+}
+
+.mobile-selection-count {
+  color: var(--color-accent);
+  font-size: 12px;
+  font-weight: 600;
+}
+
 .mobile-file-card-header {
   display: flex;
   align-items: flex-start;
   gap: 12px;
   margin-bottom: 10px;
+}
+
+.mobile-file-select {
+  flex-shrink: 0;
+  margin-top: 4px;
 }
 
 .mobile-file-main {

@@ -76,11 +76,11 @@ watch(() => props.errorMessage, (v) => {
 .pwd-card {
   background: var(--color-bg-surface);
   border: 1px solid var(--border-default);
-  border-radius: var(--radius-lg);
-  padding: 48px 40px;
+  border-radius: var(--radius-md);
+  padding: 32px 28px;
   width: 100%;
   max-width: 420px;
-  box-shadow: var(--shadow-lg);
+  box-shadow: var(--shadow-sm);
   text-align: center;
   font-family: var(--font-body);
   color: var(--text-primary);
@@ -200,6 +200,11 @@ watch(() => props.errorMessage, (v) => {
 
 @keyframes spin {
   to { transform: rotate(360deg); }
+}
+
+@media (max-width: 480px) {
+  .pwd-card { padding: 24px 16px; }
+  .pwd-title { font-size: 20px; }
 }
 
 .security-hint {

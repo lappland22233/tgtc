@@ -66,7 +66,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue';
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
 import { useRoute } from 'vue-router';
 import { useMediaPlaybackStore } from '../../stores/mediaPlayback';
 import PasswordPrompt from './PasswordPrompt.vue';
@@ -123,6 +123,13 @@ const state = ref<State>({ kind: 'loading' });
 const isEncrypted = ref(false);
 const passwordError = ref('');
 const verifying = ref(false);
+let requestGeneration = 0;
+let activeRequest: AbortController | null = null;
+let verifyGeneration = 0;
+
+function isCurrent(generation: number): boolean {
+  return generation === requestGeneration;
+}
 
 /**
  * 拉取分享元数据。严格模式关键路径：
@@ -132,16 +139,21 @@ const verifying = ref(false);
  * 密码验证通过后凭据由 HttpOnly Cookie 携带，请求同源自动附带。
  */
 async function fetchInfo() {
+  const generation = ++requestGeneration;
+  activeRequest?.abort();
+  activeRequest = new AbortController();
+  const { signal } = activeRequest;
   // 【P3】token 缺失时直接展示"分享不存在"，避免 encodeURIComponent(undefined)
   // 产生字面量 "undefined" 并发出无效请求
-  if (!token) {
+  if (!token.value) {
     state.value = { kind: 'notFound', message: '分享链接无效' };
     return;
   }
   try {
     // 凭据由 Cookie 携带，URL 中不出现 access JWT（C-02 修复）
-    const res = await fetch(`/api/s/${encodeURIComponent(token.value)}`);
+    const res = await fetch(`/api/s/${encodeURIComponent(token.value)}`, { signal });
     const data = await res.json();
+    if (!isCurrent(generation)) return;
 
     // 业务错误：分享不存在 / 过期 / 次数耗尽
     if (!res.ok || data.code !== 0) {
@@ -184,6 +196,8 @@ async function fetchInfo() {
     // 异常响应
     state.value = { kind: 'notFound', message: '分享响应格式异常' };
   } catch (err) {
+    if (err instanceof DOMException && err.name === 'AbortError') return;
+    if (!isCurrent(generation)) return;
     state.value = {
       kind: 'notFound',
       message: err instanceof Error ? err.message : '网络错误',
@@ -192,10 +206,13 @@ async function fetchInfo() {
 }
 
 async function onPasswordSubmit(pwd: string) {
+  const generation = requestGeneration;
+  const verifyId = ++verifyGeneration;
   passwordError.value = '';
   verifying.value = true;
   try {
     const res = await fetch(`/api/s/${encodeURIComponent(token.value)}/verify`, {
+      signal: activeRequest?.signal,
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ password: pwd }),
@@ -203,6 +220,7 @@ async function onPasswordSubmit(pwd: string) {
       credentials: 'same-origin',
     });
     const data = await res.json();
+    if (generation !== requestGeneration || verifyId !== verifyGeneration) return;
     if (!res.ok || data.code !== 0) {
       passwordError.value = data.message || '密码错误';
       return;
@@ -212,9 +230,11 @@ async function onPasswordSubmit(pwd: string) {
     // 重新拉取分享元数据（此时 Cookie 已就位）
     await fetchInfo();
   } catch (err) {
+    if (err instanceof DOMException && err.name === 'AbortError') return;
+    if (generation !== requestGeneration || verifyId !== verifyGeneration) return;
     passwordError.value = err instanceof Error ? err.message : '网络错误';
   } finally {
-    verifying.value = false;
+    if (generation === requestGeneration && verifyId === verifyGeneration) verifying.value = false;
   }
 }
 
@@ -227,6 +247,11 @@ function stopCurrentShareMedia() {
 }
 
 onMounted(fetchInfo);
+onUnmounted(() => {
+  requestGeneration++;
+  verifyGeneration++;
+  activeRequest?.abort();
+});
 watch(token, async (newToken, oldToken) => {
   // H-02 修复：分享 token 改变 = 离开原分享授权域，
   // 必须停止仍在播放的旧分享媒体会话并销毁授权状态，禁止跨分享继续播放。
@@ -249,26 +274,15 @@ watch(token, async (newToken, oldToken) => {
   justify-content: center;
   position: relative;
   overflow: hidden;
+  background: var(--color-bg);
 }
 
-/* 背景 + 顶部微光 */
+/* 背景保持 FileList 的平面工业基底，避免独立大渐变 */
 .bg-gradient {
   position: fixed;
   inset: 0;
-  background: linear-gradient(135deg, var(--color-bg) 0%, var(--color-bg-surface) 50%, var(--color-bg) 100%);
+  background: var(--color-bg);
   z-index: -1;
-}
-
-.bg-gradient::before {
-  content: '';
-  position: absolute;
-  top: -200px;
-  left: 50%;
-  transform: translateX(-50%);
-  width: 800px;
-  height: 400px;
-  background: radial-gradient(ellipse, var(--color-accent-soft) 0%, transparent 70%);
-  pointer-events: none;
 }
 
 .share-container {
@@ -291,10 +305,10 @@ watch(token, async (newToken, oldToken) => {
 .state-card {
   background: var(--color-bg-surface);
   border: 1px solid var(--border-default);
-  border-radius: var(--radius-lg);
-  padding: 48px 40px;
+  border-radius: var(--radius-md);
+  padding: 40px 32px;
   text-align: center;
-  box-shadow: var(--shadow-lg);
+  box-shadow: var(--shadow-sm);
   color: var(--text-primary);
   font-family: var(--font-body);
 }

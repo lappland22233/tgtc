@@ -64,16 +64,37 @@ export function useFileListQuery(options: FileListQueryOptions) {
   let scrollObserver: IntersectionObserver | null = null;
   /** 列表代际：筛选 / 目录变化时递增，防止旧请求污染新列表 */
   let fileListGeneration = 0;
+  const folderLoading = ref(false);
+  const listError = ref<unknown>(null);
 
-  async function loadInitialFiles() {
+  /** 开始目录切换：在 openFolder 请求开始前立即清空旧列表，并使旧请求失效。 */
+  function beginFolderTransition() {
     fileListGeneration++;
     resetCursor();
     fileStore.replaceFiles([]);
-    await loadMoreFiles();
+    listError.value = null;
+    folderLoading.value = true;
+    return fileListGeneration;
   }
 
-  async function loadMoreFiles() {
-    if (!hasMore.value) return;
+  async function loadInitialFiles(generation = fileListGeneration + 1, folderId = currentFolderIdForApi.value) {
+    if (generation !== fileListGeneration) return;
+    fileListGeneration = generation;
+    resetCursor();
+    fileStore.replaceFiles([]);
+    listError.value = null;
+    try {
+      await loadMoreFiles(folderId);
+    } catch (error) {
+      if (generation === fileListGeneration) listError.value = error;
+      throw error;
+    } finally {
+      if (generation === fileListGeneration) folderLoading.value = false;
+    }
+  }
+
+  async function loadMoreFiles(folderId = currentFolderIdForApi.value) {
+    if (folderLoading.value || !hasMore.value) return;
     const generation = fileListGeneration;
     await loadMore(async (cursor, signal) => {
       const page = cursor ? parseInt(cursor, 10) : 1;
@@ -86,7 +107,7 @@ export function useFileListQuery(options: FileListQueryOptions) {
           sortBy.value || undefined,
           sortOrder.value || undefined,
           tagIds,
-          currentFolderIdForApi.value,
+          folderId,
           signal,
         );
         // 即使底层请求未遵守 AbortSignal，也禁止旧筛选/目录请求污染当前列表。
@@ -111,9 +132,14 @@ export function useFileListQuery(options: FileListQueryOptions) {
     });
   }
 
+  function getFileListGeneration() {
+    return fileListGeneration;
+  }
+
   /** 统一的重新获取文件列表（无限滚动：从头加载） */
   async function refetchFiles() {
-    await loadInitialFiles();
+    const generation = ++fileListGeneration;
+    await loadInitialFiles(generation);
   }
 
   function applyFilters() {
@@ -214,6 +240,10 @@ export function useFileListQuery(options: FileListQueryOptions) {
     displayFiles,
     hasMore,
     cursorLoading,
+    folderLoading,
+    listError,
+    beginFolderTransition,
+    getFileListGeneration,
     scrollSentinel,
     toggleSort,
     handleSearch,

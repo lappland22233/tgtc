@@ -12,16 +12,19 @@
       </div>
 
       <nav class="breadcrumb" v-if="breadcrumb.length > 0">
-        <a
+        <button
           v-for="(item, idx) in breadcrumb"
           :key="item.id"
+          type="button"
           class="breadcrumb-item"
           :class="{ active: idx === breadcrumb.length - 1 }"
+          :aria-current="idx === breadcrumb.length - 1 ? 'page' : undefined"
+          :disabled="idx === breadcrumb.length - 1 || loading"
           @click="onBreadcrumbClick(item, idx)"
         >
           <span class="breadcrumb-separator" v-if="idx > 0">/</span>
           <span class="breadcrumb-label">{{ item.name }}</span>
-        </a>
+        </button>
       </nav>
     </div>
 
@@ -46,10 +49,13 @@
       <div v-if="currentContents.subfolders.length > 0" class="subfolder-section">
         <h2 class="section-title">文件夹 ({{ currentContents.subfolders.length }})</h2>
         <div class="card-grid">
-          <div
+          <button
             v-for="sub in currentContents.subfolders"
             :key="sub.id"
+            type="button"
             class="subfolder-card"
+            :aria-label="`打开文件夹 ${sub.name}`"
+            :disabled="loading"
             @click="openSubfolder(sub)"
           >
             <div class="subfolder-icon">
@@ -58,7 +64,7 @@
               </svg>
             </div>
             <div class="subfolder-name" :title="sub.name">{{ sub.name }}</div>
-          </div>
+          </button>
         </div>
       </div>
 
@@ -122,7 +128,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive } from 'vue';
+import { ref, reactive, onUnmounted, watch } from 'vue';
 import MessagePlugin from '@/utils/message';
 import { triggerBrowserDownload } from '@/utils/download';
 import { isPreviewable, getPreviewKind, buildSharePreviewUrl, buildShareThumbnailUrl } from '@/utils/preview';
@@ -170,6 +176,21 @@ const currentContents = reactive<FolderContents>({
 const breadcrumb = ref<FolderSummary[]>([...props.initialBreadcrumb]);
 
 const mediaPlaybackStore = useMediaPlaybackStore();
+let loadGeneration = 0;
+
+watch(
+  () => [props.token, props.rootFolder.id, props.initialContents, props.initialBreadcrumb] as const,
+  () => {
+    loadGeneration++;
+    loadController?.abort();
+    currentFolderId.value = props.rootFolder.id;
+    currentContents.subfolders = [...props.initialContents.subfolders];
+    currentContents.files = [...props.initialContents.files];
+    breadcrumb.value = [...props.initialBreadcrumb];
+    loading.value = false;
+  },
+);
+let loadController: AbortController | null = null;
 
 /** 打开全局预览会话（分享上下文；跨路由/收起不中断播放）。仅 ready 文件可预览（H-12）。 */
 function openPreview(file: FileSummary) {
@@ -250,36 +271,47 @@ async function goBack() {
 }
 
 async function loadFolderContents(folderId: string) {
+  const generation = ++loadGeneration;
+  loadController?.abort();
+  loadController = new AbortController();
+  const { signal } = loadController;
   loading.value = true;
   try {
-    // 凭据由 HttpOnly Cookie 携带，URL 不附加 access JWT
+    // 凭据由 HttpOnly Cookie 携带，URL 不附加 access JWT；两次请求固定使用同一目录快照
     const [contentsRes, bcRes] = await Promise.all([
-      fetch(`/api/s/${encodeURIComponent(props.token)}/folder/${encodeURIComponent(folderId)}/contents`),
-      fetch(`/api/s/${encodeURIComponent(props.token)}/folder/${encodeURIComponent(folderId)}/breadcrumb`),
+      fetch(`/api/s/${encodeURIComponent(props.token)}/folder/${encodeURIComponent(folderId)}/contents`, { signal }),
+      fetch(`/api/s/${encodeURIComponent(props.token)}/folder/${encodeURIComponent(folderId)}/breadcrumb`, { signal }),
     ]);
     if (!contentsRes.ok) throw new Error('加载失败');
     const contentsData = await contentsRes.json();
+    if (generation !== loadGeneration) return;
     if (contentsData.code !== 0) throw new Error(contentsData.message || '加载失败');
     const payload = contentsData.data;
     if (payload.requiresPassword) {
       throw new Error('访问凭证已失效，请重新输入密码');
     }
+    const bcData = bcRes.ok ? await bcRes.json() : null;
+    if (generation !== loadGeneration) return;
     currentFolderId.value = folderId;
     currentContents.subfolders = payload.subfolders || [];
     currentContents.files = payload.files || [];
-    if (bcRes.ok) {
-      const bcData = await bcRes.json();
-      if (bcData.code === 0 && bcData.data.breadcrumb) {
-        breadcrumb.value = bcData.data.breadcrumb;
-      }
+    if (bcData?.code === 0 && bcData.data.breadcrumb) {
+      breadcrumb.value = bcData.data.breadcrumb;
     }
   } catch (err) {
+    if (err instanceof DOMException && err.name === 'AbortError') return;
+    if (generation !== loadGeneration) return;
     console.error('文件夹加载失败:', err);
     MessagePlugin.error(err instanceof Error ? err.message : '网络错误');
   } finally {
-    loading.value = false;
+    if (generation === loadGeneration) loading.value = false;
   }
 }
+
+onUnmounted(() => {
+  loadGeneration++;
+  loadController?.abort();
+});
 
 function formatSize(bytes: number): string {
   if (bytes <= 0) return '0 B';
@@ -316,9 +348,9 @@ function formatRelativeDate(dateStr: string): string {
   max-width: 960px;
   background: var(--color-bg-surface);
   border: 1px solid var(--border-default);
-  border-radius: var(--radius-lg);
-  padding: 24px 32px 32px;
-  box-shadow: var(--shadow-lg);
+  border-radius: var(--radius-md);
+  padding: 16px 20px 20px;
+  box-shadow: var(--shadow-sm);
   font-family: var(--font-body);
   color: var(--text-primary);
 }
@@ -360,12 +392,22 @@ function formatRelativeDate(dateStr: string): string {
 .breadcrumb-item {
   display: inline-flex;
   align-items: center;
+  border: 0;
+  padding: 0;
+  background: transparent;
   cursor: pointer;
   color: var(--text-secondary);
+  font: inherit;
 }
 
-.breadcrumb-item:hover { color: var(--seed-primary); }
-.breadcrumb-item.active { color: var(--text-primary); font-weight: 500; cursor: default; }
+.breadcrumb-item:hover:not(:disabled) { color: var(--seed-primary); }
+.breadcrumb-item:focus-visible,
+.subfolder-card:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+.breadcrumb-item.active,
+.breadcrumb-item:disabled { color: var(--text-primary); font-weight: 500; cursor: default; }
 .breadcrumb-separator { color: var(--text-tertiary); margin: 0 4px; }
 
 .loading-state { padding: 48px 0; text-align: center; }
@@ -404,10 +446,10 @@ function formatRelativeDate(dateStr: string): string {
 }
 
 .subfolder-card {
-  background: var(--color-bg);
+  background: var(--color-bg-elevated);
   border: 1px solid var(--border-default);
-  border-radius: var(--radius-md);
-  padding: 16px 12px;
+  border-radius: var(--radius-sm);
+  padding: 12px;
   cursor: pointer;
   text-align: center;
   transition: all 0.2s;
@@ -437,9 +479,9 @@ function formatRelativeDate(dateStr: string): string {
 }
 
 .share-file-card {
-  background: var(--color-bg);
+  background: var(--color-bg-elevated);
   border: 1px solid var(--border-default);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-sm);
   overflow: hidden;
   cursor: pointer;
   transition: all 0.2s;
@@ -541,7 +583,11 @@ function formatRelativeDate(dateStr: string): string {
 }
 
 @media (max-width: 768px) {
-  .folder-share-browser { padding: 16px; }
+  .folder-share-browser { padding: 12px; }
+  .folder-title { font-size: 18px; }
+  .folder-icon-large svg { width: 28px; height: 28px; }
+  .breadcrumb { font-size: 13px; }
+  .folder-share-browser { border-radius: var(--radius-sm); }
   .card-grid {
     grid-template-columns: repeat(auto-fill, minmax(min(140px, 100%), 1fr));
     gap: 10px;

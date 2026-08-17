@@ -262,10 +262,10 @@ onMounted(fetchShares);
   display: flex;
   align-items: flex-start;
   gap: 12px;
-  padding: 16px;
-  background: var(--color-bg-elevated);
+  padding: 12px;
+  background: var(--color-bg-surface);
   border: 1px solid var(--border-default);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-sm);
   transition: border-color var(--duration-fast);
 }
 
@@ -278,7 +278,12 @@ onMounted(fetchShares);
 }
 
 .share-icon {
-  font-size: 32px;
+  width: 36px;
+  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-accent);
   flex-shrink: 0;
 }
 
@@ -349,6 +354,9 @@ onMounted(fetchShares);
 }
 
 @media (max-width: 768px) {
+  .filter-bar { align-items: stretch; }
+  .filter-bar .t-radio-group { width: 100%; }
+  .filter-bar > .t-button { align-self: flex-end; }
   .share-item {
     flex-direction: column;
     align-items: stretch;

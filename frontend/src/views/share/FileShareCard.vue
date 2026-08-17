@@ -151,12 +151,12 @@ function handleDownload() {
 .file-share-card {
   background: var(--color-bg-surface);
   border: 1px solid var(--border-default);
-  border-radius: var(--radius-lg);
-  padding: 48px 40px;
+  border-radius: var(--radius-md);
+  padding: 32px 28px;
   width: 100%;
   max-width: 480px;
   text-align: center;
-  box-shadow: var(--shadow-lg);
+  box-shadow: var(--shadow-sm);
   font-family: var(--font-body);
   color: var(--text-primary);
 }
@@ -271,6 +271,12 @@ function handleDownload() {
 
 .security-hint.encrypted {
   color: var(--color-warning);
+}
+
+@media (max-width: 480px) {
+  .file-share-card { padding: 24px 16px; }
+  .file-name { font-size: 18px; }
+  .meta-row dd { max-width: 58%; }
 }
 
 .hint-icon {
