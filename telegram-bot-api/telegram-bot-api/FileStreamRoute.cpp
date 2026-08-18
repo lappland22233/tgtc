@@ -25,7 +25,7 @@ struct IpPrefix {
 
 bool parse_ipv6_prefix(td::Slice text, unsigned char out[16]) {
   td::IPAddress addr;
-  if (addr.init_ipv6_port(text, 0).is_error()) {
+  if (addr.init_ipv6_port(td::CSlice(text.data(), text.size()), 0).is_error()) {
     return false;
   }
   // IPAddress does not expose the raw 16-byte v6 address, so fall back to get_ipv6() string form.
@@ -187,8 +187,6 @@ td::Status validate_url_encoding(td::Slice value) {
   }
   return td::Status::OK();
 }
-
-}  // namespace
 
 td::Result<td::int64> parse_file_stream_size_hint(td::Slice value) {
   if (value.empty()) {
