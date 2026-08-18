@@ -25,7 +25,7 @@ struct IpPrefix {
 
 bool parse_ipv6_prefix(td::Slice text, unsigned char out[16]) {
   td::IPAddress addr;
-  if (addr.init_ipv6_port(td::CSlice(text.data(), text.size()), 0).is_error()) {
+  if (addr.init_ipv6_port(td::CSlice(text.begin(), text.end()), 0).is_error()) {
     return false;
   }
   // IPAddress does not expose the raw 16-byte v6 address, so fall back to get_ipv6() string form.
@@ -65,7 +65,7 @@ bool parse_allow_ip_entry(td::Slice entry, IpPrefix &result) {
   // IPv4 (with optional /prefix)
   {
     td::IPAddress addr;
-    if (addr.init_ipv4_port(addr_part, 0).is_ok()) {
+    if (addr.init_ipv4_port(td::CSlice(addr_part.begin(), addr_part.end()), 0).is_ok()) {
       result.is_ipv4 = true;
       result.ipv4 = addr.get_ipv4();
       result.prefix_len = prefix_len < 0 ? 32 : prefix_len;
