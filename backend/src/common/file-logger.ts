@@ -70,12 +70,24 @@ function currentLogFileName(now: Date = new Date()): string {
 
 // ===== 运行时状态（模块级单例，与 Nest LoggerService 单一实例语义一致） =====
 let stream: fs.WriteStream | null = null;
+/** 当前处于写入失败/退避期：为 true 时写入降级为仅 console 输出 */
 let streamFailed = false;
 let backpressured = false;
 const pendingLines: string[] = [];
 let approximateSize = 0;
 let currentFileName: string | null = null;
 let rotationTimer: NodeJS.Timeout | null = null;
+/** 连续写入失败次数（G4-14：带退避重试，成功后归零） */
+let streamFailCount = 0;
+/** 重建流的退避定时器 */
+let streamRetryTimer: NodeJS.Timeout | null = null;
+/** 连续失败超过阈值后的降级标记（G4-14），仅告警一次 */
+let streamDegraded = false;
+/** 连续失败达到该次数即降级为仅 console 并告警 */
+const STREAM_MAX_FAILURES = 5;
+/** 重建流退避基准（毫秒），指数递增，封顶 30s */
+const STREAM_BACKOFF_BASE_MS = 1000;
+const STREAM_BACKOFF_MAX_MS = 30000;
 
 /** 将背压期间积压的日志写回当前流，直到再次背压或缓冲清空 */
 function flushPending(): void {
@@ -101,10 +113,36 @@ function closeStream(): void {
   }
 }
 
-/** 惰性创建写入流，失败时标记 streamFailed 并降级为仅 console 输出 */
-function ensureStream(): fs.WriteStream | null {
-  if (stream) return stream;
-  if (streamFailed) return null;
+/**
+ * 调度一次重建流的退避探测（G4-14）。
+ * 仅在无活跃流时执行；成功后复位失败计数并回写积压，失败则继续退避。
+ */
+function scheduleStreamRetry(): void {
+  if (streamRetryTimer || stream) return;
+  const delay = Math.min(
+    STREAM_BACKOFF_BASE_MS * 2 ** Math.min(streamFailCount, 6),
+    STREAM_BACKOFF_MAX_MS,
+  );
+  streamRetryTimer = setTimeout(() => {
+    streamRetryTimer = null;
+    if (stream) return;
+    const rebuilt = tryCreateStream();
+    if (rebuilt) {
+      stream = rebuilt;
+      streamFailed = false;
+      streamFailCount = 0;
+      streamDegraded = false;
+      flushPending();
+    } else {
+      // 仍失败：保持失败态并继续退避
+      scheduleStreamRetry();
+    }
+  }, delay);
+  streamRetryTimer.unref?.();
+}
+
+/** 尝试实际创建写入流；失败返回 null（不抛出） */
+function tryCreateStream(): fs.WriteStream | null {
   try {
     const dir = getLogDir();
     fs.mkdirSync(dir, { recursive: true });
@@ -118,20 +156,51 @@ function ensureStream(): fs.WriteStream | null {
       backpressured = false;
       flushPending();
     });
-    // 写入错误不能让进程崩溃，标记失败后停止文件写入（console 仍可用）
-    s.on('error', () => {
-      streamFailed = true;
-      stream = null;
-      backpressured = false;
-      currentFileName = null;
-      pendingLines.length = 0;
-    });
-    stream = s;
     return s;
   } catch {
-    streamFailed = true;
     return null;
   }
+}
+
+/**
+ * 惰性创建写入流（G4-14 恢复机制）：
+ * - 创建失败/写入失败不永久降级；记入失败计数并按指数退避定时重建流。
+ * - 连续失败达到 STREAM_MAX_FAILURES 才降级为仅 console 并告警一次。
+ * - 重建成功后复位计数并回写积压，日志自动恢复。
+ */
+function ensureStream(): fs.WriteStream | null {
+  if (stream) return stream;
+  if (streamFailed) return null; // 退避期内降级为仅 console
+  const s = tryCreateStream();
+  if (!s) {
+    streamFailCount++;
+    if (streamFailCount >= STREAM_MAX_FAILURES && !streamDegraded) {
+      streamDegraded = true;
+      pendingLines.length = 0;
+      // eslint-disable-next-line no-console
+      console.error(`[FileLogger] 日志文件连续 ${streamFailCount} 次写入失败，已降级为仅 console 输出，将按退避继续尝试恢复`);
+    }
+    streamFailed = true;
+    scheduleStreamRetry();
+    return null;
+  }
+  s.on('error', () => {
+    // 写入错误不能让进程崩溃；关闭该流，进入失败/退避态（不丢弃积压）
+    if (stream === s) stream = null;
+    backpressured = false;
+    currentFileName = null;
+    streamFailCount++;
+    if (streamFailCount >= STREAM_MAX_FAILURES && !streamDegraded) {
+      streamDegraded = true;
+      pendingLines.length = 0;
+      // eslint-disable-next-line no-console
+      console.error(`[FileLogger] 日志文件连续 ${streamFailCount} 次写入失败，已降级为仅 console 输出，将按退避继续尝试恢复`);
+    }
+    streamFailed = true;
+    scheduleStreamRetry();
+  });
+  stream = s;
+  return s;
 }
 
 /** 单文件大小超限时，将当前文件归档为带递增序号的文件（app-YYYY-MM-DD.log.1 / .2 ...） */

@@ -24,6 +24,11 @@
 namespace telegram_bot_api {
 namespace {
 
+// G16-09: minimum interval between non-periodic full-workdir scans. A full walk+stat over a large
+// workdir is expensive, so the threshold re-check is throttled to this value instead of firing
+// every 60s.
+constexpr double THRESHOLD_CHECK_INTERVAL = 300.0;
+
 struct Candidate {
   td::string path;
   td::int64 size;
@@ -189,7 +194,11 @@ void WorkdirCleanupManager::timeout_expired() {
   if (periodic) {
     next_periodic_cleanup_ = now + config_.interval;
   }
-  next_threshold_check_ = now + td::min(60.0, config_.interval);
+  // G16-09: every full scan is a walk + stat over the whole workdir, which is expensive on large
+  // directories. The non-periodic threshold re-check no longer runs every 60s; it is throttled to
+  // THRESHOLD_CHECK_INTERVAL (5 minutes) so a large directory is scanned far less often. The
+  // periodic scan (config_.interval, default 1h) still performs the authoritative cleanup.
+  next_threshold_check_ = now + td::min(THRESHOLD_CHECK_INTERVAL, config_.interval);
   schedule_next();
 }
 

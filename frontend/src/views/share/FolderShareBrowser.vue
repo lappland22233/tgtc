@@ -160,6 +160,11 @@ const props = defineProps<{
   initialBreadcrumb: FolderSummary[];
 }>();
 
+/** 通知父级 ShareView：HttpOnly Cookie 凭据过期，需重新拉取元数据以切回密码输入状态 */
+const emit = defineEmits<{
+  (e: 'credential-expired'): void;
+}>();
+
 const loading = ref(false);
 const downloadingId = ref<string | null>(null);
 const currentFolderId = ref<string>(props.rootFolder.id);
@@ -282,7 +287,10 @@ async function loadFolderContents(folderId: string) {
     if (contentsData.code !== 0) throw new Error(contentsData.message || '加载失败');
     const payload = contentsData.data;
     if (payload.requiresPassword) {
-      throw new Error('访问凭证已失效，请重新输入密码');
+      // HttpOnly Cookie 凭据过期：通知父级 ShareView 重新拉取元数据，
+      // 后端会返回 requiresPassword 并自动切回密码输入状态（G13-01）。
+      emit('credential-expired');
+      return;
     }
     const bcData = bcRes.ok ? await bcRes.json() : null;
     if (generation !== loadGeneration) return;
@@ -535,10 +543,10 @@ function formatRelativeDate(dateStr: string): string {
   .folder-icon-large svg { width: 24px; height: 24px; }
   .breadcrumb { font-size: 13px; }
 
-  /* 移动端隐藏“上传时间”列 */
+  /* 移动端隐藏“上传时间”列；操作列改为 minmax 自适应，避免超宽横滚 */
   .share-table-head,
   .share-row {
-    grid-template-columns: minmax(160px, 1fr) 88px 128px;
+    grid-template-columns: minmax(160px, 1fr) 88px minmax(96px, auto);
     gap: 8px;
     padding: 0 12px;
   }
@@ -547,5 +555,18 @@ function formatRelativeDate(dateStr: string): string {
   .row-name { font-size: 13px; }
   .col-size { font-size: 12px; }
   .back-to-parent { padding: 0 12px; }
+}
+
+/* 超窄屏（≤480px）：操作按钮压缩间距，避免挤占名称列导致横滚 */
+@media (max-width: 480px) {
+  .share-table-head,
+  .share-row {
+    grid-template-columns: minmax(140px, 1fr) 72px minmax(84px, auto);
+    gap: 6px;
+    padding: 0 10px;
+  }
+  .col-ops { gap: 10px; }
+  .op-link { font-size: 12px; }
+  .col-size { font-size: 11px; }
 }
 </style>

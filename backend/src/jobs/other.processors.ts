@@ -6,6 +6,7 @@ import { QUEUE_NAMES } from './bull-queue.module';
 import { AlertEngineService } from '../alert/alert-engine.service';
 import { AlertGateway } from '../alert/alert.gateway';
 import { BehaviorAnalyzer } from '../security/behavior-analyzer.service';
+import { TelemetryService } from '../telemetry/telemetry.service';
 
 @Injectable()
 @Processor(QUEUE_NAMES.ALERT_EVALUATION)
@@ -46,7 +47,10 @@ export class AlertEvaluationProcessor {
       );
 
       if (!metrics) {
-        return;
+        // G3-16：预聚合缺失时静默 return 会漏报告警。改为记录 warn 并 throw，
+        // 触发 Bull 重试（与下方 L64-68 的 DB 故障处理一致），待聚合延迟追上后补上评估。
+        this.logger.warn(`告警评估缺失预聚合窗口 ${windowTime.toISOString()}，触发重试`);
+        throw new Error(`预聚合窗口 ${windowTime.toISOString()} 缺失`);
       }
 
       // 评估 + 创建告警（规则配置仅读取一次，冷却期原子去重）
@@ -170,15 +174,53 @@ export class DataArchivalProcessor {
         if (count < BATCH_SIZE) break;
       }
 
-      if (batches >= MAX_BATCHES) {
-        this.logger.warn(`数据归档达到单次任务批次上限 (${MAX_BATCHES})，剩余记录将在下次任务继续归档`);
+      // G8-13：file_access_logs 同样纳入保留期清理，避免该表随文件访问无限膨胀。
+      // 复用同一 retentionDays 与分批删除策略。
+      let fileAccessDeleted = 0;
+      let fileAccessBatches = 0;
+      while (fileAccessBatches < MAX_BATCHES) {
+        const result = await this._dataSource.query(
+          `DELETE FROM "file_access_logs" WHERE "createdAt" < $1 AND "id" IN (SELECT "id" FROM "file_access_logs" WHERE "createdAt" < $1 LIMIT $2)`,
+          [cutoff, BATCH_SIZE],
+        );
+        const count = Array.isArray(result) ? result[0]?.rowCount ?? 0 : (result[1] ?? 0);
+        fileAccessDeleted += count;
+        fileAccessBatches++;
+        if (count < BATCH_SIZE) break;
       }
 
-      if (deleted > 0) {
-        this.logger.log(`已归档 ${deleted} 条过期访问日志 (${retentionDays}天前)`);
+      if (batches >= MAX_BATCHES || fileAccessBatches >= MAX_BATCHES) {
+        this.logger.warn(`数据归档达到单次任务批次上限，剩余记录将在下次任务继续归档`);
+      }
+
+      if (deleted > 0 || fileAccessDeleted > 0) {
+        this.logger.log(`已归档 ${deleted} 条过期访问日志、${fileAccessDeleted} 条过期文件访问日志 (${retentionDays}天前)`);
       }
     } catch (error) {
       this.logger.warn(`数据归档失败: ${(error as Error).message}`);
+      throw error;
+    }
+  }
+}
+
+/** 每日清理过期遥测数据（默认保留 90 天），由 jobs-scheduler 调度 */
+@Injectable()
+@Processor(QUEUE_NAMES.DATA_ARCHIVAL)
+export class TelemetryCleanupProcessor {
+  private readonly logger = new Logger(TelemetryCleanupProcessor.name);
+
+  constructor(private telemetryService: TelemetryService) {}
+
+  @Process('telemetry-cleanup')
+  async cleanupTelemetry(_job: Job): Promise<void> {
+    try {
+      const deleted = await this.telemetryService.cleanupOld();
+      if (deleted > 0) {
+        this.logger.log(`已清理 ${deleted} 条过期遥测记录`);
+      }
+    } catch (error) {
+      this.logger.warn(`遥测数据清理失败: ${(error as Error).message}`);
+      // 抛出以触发 Bull 重试，避免暂时性故障导致清理永久缺失
       throw error;
     }
   }

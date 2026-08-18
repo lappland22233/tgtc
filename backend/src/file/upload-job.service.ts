@@ -1,6 +1,6 @@
 import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, In } from 'typeorm';
+import { Repository, Brackets } from 'typeorm';
 import { v4 as uuidv4 } from 'uuid';
 import { User } from '../common/entities/user.entity';
 import { File } from '../common/entities/file.entity';
@@ -30,6 +30,8 @@ export interface UploadJob {
 @Injectable()
 export class UploadJobService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(UploadJobService.name);
+  /** G3-09：启动时仅标记超过此时间未更新的 pending/uploading 任务，避免误伤多副本在途任务 */
+  private static readonly STARTUP_STALE_MS = 10 * 60 * 1000;
   /** 内存缓存：热路径查询，避免每次状态轮询都查库 */
   private jobs = new Map<string, UploadJob>();
   /** 每个 job 的串行持久化链，保证同一 job 的写入按调用顺序落库，避免并发乱序导致状态回退 */
@@ -42,20 +44,22 @@ export class UploadJobService implements OnModuleInit, OnModuleDestroy {
   ) {}
 
   /**
-   * 模块初始化时恢复未完成的任务，标记为失败
-   * 已完成的任务加载到内存缓存中
+   * 模块初始化时恢复未完成的任务，标记为失败。
+   * G3-09：不把启动时所有 pending/uploading 直接标失败——多副本滚动部署时，
+   * 在途任务可能属于其他存活实例，全部标失败会误伤。仅标记"已陈旧"（超过
+   * STARTUP_STALE_MS 未更新）的任务，短时间内的在途任务保留不动。
    */
   async onModuleInit() {
-    const pendingTasks = await this.uploadTaskRepo.find({
-      where: [
-        { status: 'pending' },
-        { status: 'uploading' },
-      ],
-    });
+    const staleCutoff = new Date(Date.now() - UploadJobService.STARTUP_STALE_MS);
+    const staleTasks = await this.uploadTaskRepo
+      .createQueryBuilder('task')
+      .where('task.status IN (:...statuses)', { statuses: ['pending', 'uploading'] })
+      .andWhere('task."updatedAt" < :cutoff', { cutoff: staleCutoff })
+      .getMany();
 
-    if (pendingTasks.length > 0) {
-      this.logger.warn(`发现 ${pendingTasks.length} 个未完成的上传任务，标记为失败`);
-      for (const task of pendingTasks) {
+    if (staleTasks.length > 0) {
+      this.logger.warn(`发现 ${staleTasks.length} 个陈旧的未完成任务（>${Math.round(UploadJobService.STARTUP_STALE_MS / 60000)}分钟），标记为失败`);
+      for (const task of staleTasks) {
         task.status = 'failed';
         task.error = '服务器进程重启，上传任务已丢失';
         await this.uploadTaskRepo.save(task);
@@ -125,32 +129,48 @@ export class UploadJobService implements OnModuleInit, OnModuleDestroy {
    * 清理过期任务：
    * - 超过 30 分钟的已完成/失败任务
    * - 超过 60 分钟的 pending/uploading 任务（进程异常退出卡住的任务）
-   * 同时清理内存和数据库
+   * G3-10：直接按 SQL 条件从库中删除（updatedAt < cutoff），不再只遍历内存 Map。
+   * 这样重启后从未载入内存的更早历史 completed/failed 记录也能被清理，表不无限膨胀。
+   * 同时同步清理内存缓存。
    */
   async cleanup(): Promise<void> {
     const now = Date.now();
-    const completedCutoff = now - 30 * 60 * 1000;
-    const stuckCutoff = now - 60 * 60 * 1000;
+    const completedCutoff = new Date(now - 30 * 60 * 1000);
+    const stuckCutoff = new Date(now - 60 * 60 * 1000);
 
-    const idsToDelete: string[] = [];
+    const result = await this.uploadTaskRepo
+      .createQueryBuilder()
+      .delete()
+      .from(UploadTask)
+      .where(
+        new Brackets((qb) => {
+          qb.where('(status IN (:...done) AND "updatedAt" < :completedCutoff)', {
+            done: ['completed', 'failed'],
+            completedCutoff,
+          }).orWhere('(status IN (:...stuck) AND "updatedAt" < :stuckCutoff)', {
+            stuck: ['pending', 'uploading'],
+            stuckCutoff,
+          });
+        }),
+      )
+      .execute();
+
+    const deletedCount = result.affected ?? 0;
+    if (deletedCount > 0) {
+      this.logger.log(`清理过期上传任务 ${deletedCount} 条（数据库直删）`);
+    }
+
+    // 同步清理内存缓存与写链，避免与 DB 不一致
     for (const [id, job] of this.jobs) {
       const updated = job.updatedAt.getTime();
-      if ((job.status === 'completed' || job.status === 'failed') && updated < completedCutoff) {
-        idsToDelete.push(id);
-      }
-      if ((job.status === 'pending' || job.status === 'uploading') && updated < stuckCutoff) {
+      if ((job.status === 'completed' || job.status === 'failed') && updated < completedCutoff.getTime()) {
+        this.jobs.delete(id);
+        this.writeChains.delete(id);
+      } else if ((job.status === 'pending' || job.status === 'uploading') && updated < stuckCutoff.getTime()) {
         this.logger.warn(`清理卡住的上传任务 ${id}: ${job.filename} (状态: ${job.status})`);
-        idsToDelete.push(id);
+        this.jobs.delete(id);
+        this.writeChains.delete(id);
       }
-    }
-
-    for (const id of idsToDelete) {
-      this.jobs.delete(id);
-      this.writeChains.delete(id);
-    }
-
-    if (idsToDelete.length > 0) {
-      await this.uploadTaskRepo.delete({ jobId: In(idsToDelete) });
     }
   }
 
@@ -190,15 +210,25 @@ export class UploadJobService implements OnModuleInit, OnModuleDestroy {
 
   /**
    * 从数据库实体转换为内存 Job 对象
+   * G3-11：result JSON.parse 包 try/catch，避免一行坏数据导致整个启动/恢复失败。
    */
   private toUploadJob(task: UploadTask): UploadJob {
+    let result: UploadJob['result'];
+    if (task.result) {
+      try {
+        result = JSON.parse(task.result);
+      } catch {
+        result = undefined;
+        this.logger.warn(`上传任务 ${task.jobId} 的 result 字段不是合法 JSON，已忽略该结果`);
+      }
+    }
     return {
       jobId: task.jobId,
       userId: task.userId,
       filename: task.filename,
       status: task.status,
       progress: task.progress,
-      result: task.result ? JSON.parse(task.result) : undefined,
+      result,
       error: task.error || undefined,
       createdAt: task.createdAt,
       updatedAt: task.updatedAt,

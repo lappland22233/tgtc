@@ -124,7 +124,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue';
+import { ref, onMounted, onUnmounted } from 'vue';
 import { api } from '@/stores/auth';
 import { formatDate } from '@/utils/format';
 import MessagePlugin from '@/utils/message';
@@ -235,9 +235,25 @@ async function handleAcknowledgeAll() {
   }
 }
 
+// 告警轮询（G15-24）：30s 刷新列表与未确认数，保证告警及时性；后台标签页暂停避免空转
+const ALERT_POLL_INTERVAL_MS = 30_000;
+let alertPollTimer: ReturnType<typeof setInterval> | null = null;
+
 onMounted(() => {
   fetchList(1);
   fetchUnacknowledgedCount();
+  alertPollTimer = setInterval(() => {
+    if (document.hidden) return;
+    fetchList(currentPage.value);
+    fetchUnacknowledgedCount();
+  }, ALERT_POLL_INTERVAL_MS);
+});
+
+onUnmounted(() => {
+  if (alertPollTimer) {
+    clearInterval(alertPollTimer);
+    alertPollTimer = null;
+  }
 });
 </script>
 

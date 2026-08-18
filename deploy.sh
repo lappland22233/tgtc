@@ -238,12 +238,25 @@ collect_inputs() {
     log "使用部署目录: $DEPLOY_DIR"
   fi
 
-  # ---- 运行用户 ----
-  local default_user="${SUDO_USER:-$(id -un)}"
-  [[ "$default_user" != "root" ]] || default_user="root"
+  # ---- 运行用户（安全默认：禁止以 root 直接运行服务）----
+  # 优先使用 sudo 调用者（SUDO_USER）；否则建议专用系统用户 tgtc。
+  # 以 root 直接运行脚本时（无 SUDO_USER），默认推荐专用非特权用户 tgtc，
+  # 服务以非 root 身份运行可显著降低被攻破后的横向影响（G9-14）。
+  local default_user="${SUDO_USER:-tgtc}"
+  if [[ "$default_user" == "root" ]]; then
+    default_user="tgtc"
+  fi
   prompt "systemd 服务与构建命令使用的系统用户" "$default_user"
   SERVICE_USER="$REPLY"
-  id "$SERVICE_USER" >/dev/null 2>&1 || die "系统用户不存在: $SERVICE_USER"
+  if [[ "$SERVICE_USER" == "root" ]]; then
+    die "不允许以 root 作为服务运行用户（安全要求）。请使用专用非特权用户，如 tgtc。"
+  fi
+  if ! id "$SERVICE_USER" >/dev/null 2>&1; then
+    warn "系统用户 $SERVICE_USER 不存在，将创建专用系统用户"
+    useradd --system --create-home --shell /usr/sbin/nologin "$SERVICE_USER" \
+      || die "创建系统用户 $SERVICE_USER 失败"
+    info "已创建系统用户: $SERVICE_USER"
+  fi
   SERVICE_GROUP="$(id -gn "$SERVICE_USER")"
   runuser -u "$SERVICE_USER" -- test -r "$DEPLOY_DIR/backend/package.json" \
     || die "用户 $SERVICE_USER 无法读取部署目录，请自行调整目录权限或选择其他用户"
@@ -589,12 +602,14 @@ setup_database() {
     DB_USER="$DB_USER"; DB_NAME="$DB_NAME"; DB_HOST="127.0.0.1"; DB_PORT="5432"
 
     # 重跑时复用原密码，不主动轮换正在使用的数据库凭据。
+    # G9-15：DB_PASS 通过 psql 变量（-v pass=... + :'pass'）传入，而非直接内插进 SQL，
+    # 避免密码含单引号/特殊字符时破坏 SQL 结构或引发注入。
     if su - postgres -c "psql -tAc \"SELECT 1 FROM pg_roles WHERE rolname='$DB_USER'\"" | grep -q 1; then
       info "数据库用户 $DB_USER 已存在，同步为配置中的密码"
-      su - postgres -c "psql -v ON_ERROR_STOP=1 -c \"ALTER ROLE $DB_USER LOGIN PASSWORD '$DB_PASS_GEN'\"" || die "同步数据库用户密码失败"
+      su - postgres -c "psql -v ON_ERROR_STOP=1 -v pass=\"$DB_PASS_GEN\" -c \"ALTER ROLE $DB_USER LOGIN PASSWORD :'pass'\"" || die "同步数据库用户密码失败"
     else
       info "创建数据库用户 $DB_USER ..."
-      su - postgres -c "psql -v ON_ERROR_STOP=1 -c \"CREATE ROLE $DB_USER LOGIN PASSWORD '$DB_PASS_GEN'\"" || die "创建数据库用户失败"
+      su - postgres -c "psql -v ON_ERROR_STOP=1 -v pass=\"$DB_PASS_GEN\" -c \"CREATE ROLE $DB_USER LOGIN PASSWORD :'pass'\"" || die "创建数据库用户失败"
     fi
 
     if su - postgres -c "psql -tAc \"SELECT 1 FROM pg_database WHERE datname='$DB_NAME'\"" | grep -q 1; then
@@ -672,11 +687,24 @@ generate_secrets() {
     echo "# 注意: 此文件包含敏感信息，请勿提交到版本库"
     echo "# =========================================="
     echo "NODE_ENV=production"
-    echo "APP_HOST=0.0.0.0"
+    # 安全默认：仅监听回环地址 127.0.0.1，对外必须经由反向代理（Caddy/nginx）暴露，
+    # 避免 Node 直接暴露公网端口。反代将 HTTPS 终结并将真实客户端 IP 经 X-Forwarded-For 透传。
+    echo "APP_HOST=127.0.0.1"
     echo "APP_PORT=$APP_PORT"
     echo "APP_URL=$APP_URL"
     echo "FRONTEND_URL=$APP_URL"
     echo "CORS_ORIGINS=$APP_URL"
+    # HTTPS 域名（APP_URL 以 https:// 开头）自动启用安全 Cookie 与反向代理信任：
+    # - SECURE_COOKIE=true：Cookie 仅经 HTTPS 传输（G9-03）
+    # - TRUST_PROXY_HOPS=1：信任 1 层反向代理，使 req.ip 解析为真实客户端 IP（G9-01/G1-07）
+    # 若实际反代层数多于 1，请按需调整 TRUST_PROXY_HOPS；若未配置反代请勿改回 0.0.0.0。
+    if [[ "$APP_URL" == https://* ]]; then
+      echo "SECURE_COOKIE=true"
+      echo "TRUST_PROXY_HOPS=1"
+    else
+      echo "# SECURE_COOKIE=true   # 使用 HTTPS 反代后请取消注释"
+      echo "# TRUST_PROXY_HOPS=1   # 使用 HTTPS 反代后请取消注释（信任的代理层数）"
+    fi
     echo ""
     echo "# ---------- 数据库 (PostgreSQL) ----------"
     echo "DB_HOST=$DB_HOST"
@@ -905,6 +933,28 @@ MemoryHigh=3072M
 MemoryMax=4096M
 StandardOutput=journal
 StandardError=journal
+# ---- G9-13 systemd 加固：被攻破后横向提权/逃逸受限 ----
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths="$DEPLOY_DIR/backend/tmp"
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+PrivateDevices=true
 
 [Install]
 WantedBy=multi-user.target
@@ -940,6 +990,28 @@ Restart=always
 RestartSec=10
 StandardOutput=journal
 StandardError=journal
+# ---- G9-13 systemd 加固 ----
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths="$BOT_API_DIR"
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+PrivateDevices=true
 
 [Install]
 WantedBy=multi-user.target
@@ -1042,8 +1114,14 @@ summary() {
   echo ""
   echo -e "${C_BOLD}后续事项：${C_RESET}"
   echo "  1. 首次访问注册的账号将成为 super_admin"
-  echo "  2. 建议部署 HTTPS 反向代理并将 SECURE_COOKIE=true 加入 backend/.env"
-  echo "  3. 如启用了防火墙，请放行 TCP 端口 $APP_PORT"
+  if [[ "$APP_URL" == https://* ]]; then
+    echo "  2. 已检测到 HTTPS 域名，backend/.env 已自动写入 SECURE_COOKIE=true 与 TRUST_PROXY_HOPS=1"
+    echo "     请确保反向代理已将 HTTPS 终结并透传 X-Forwarded-For（Trusted Proxies 放行回环）"
+  else
+    echo "  2. 当前使用 HTTP 地址，服务仅监听 127.0.0.1。生产环境请部署 HTTPS 反向代理"
+    echo "     并在 backend/.env 中设置 SECURE_COOKIE=true 与 TRUST_PROXY_HOPS=1（见文件内注释）"
+  fi
+  echo "  3. 如启用了防火墙，请仅放行反向代理所在端口（Node 服务本身不直接对外）"
   echo "  4. 常用命令:"
   echo "     systemctl restart tgtc-backend        重启后端"
   echo "     journalctl -u tgtc-backend -f         实时查看日志"

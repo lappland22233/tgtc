@@ -25,6 +25,8 @@ export const SEC_CONFIG_KEYS = {
   DOWNLOAD_THRESHOLD: 'sec_download_count',
   DOWNLOAD_WINDOW_HOURS: 'sec_download_window',
   DOWNLOAD_BAN_DURATION_HOURS: 'sec_download_ban_duration',
+  // G8-14：同 IP 1h 内下载的不同文件数阈值（异常下载，默认 50）
+  DOWNLOAD_FILES_THRESHOLD: 'sec_download_files',
 
   // --- 流量与限流 ---
   DOWNLOAD_RATE_LIMIT: 'sec_download_rate_limit',
@@ -81,6 +83,7 @@ export const SEC_CONFIG_DEFAULTS: Record<string, string> = {
   [SEC_CONFIG_KEYS.DOWNLOAD_THRESHOLD]: '1000',
   [SEC_CONFIG_KEYS.DOWNLOAD_WINDOW_HOURS]: '24',
   [SEC_CONFIG_KEYS.DOWNLOAD_BAN_DURATION_HOURS]: '6',
+  [SEC_CONFIG_KEYS.DOWNLOAD_FILES_THRESHOLD]: '50',
 
   // --- 流量与限流默认值 ---
   [SEC_CONFIG_KEYS.DOWNLOAD_RATE_LIMIT]: '10',
@@ -237,6 +240,14 @@ export const SEC_CONFIG_META: SecurityConfigMeta[] = [
     description: '触发异常下载后自动封禁的时长',
     type: 'number', min: 1, max: 168, step: 1,
     unit: '小时',
+    category: '异常下载检测',
+  },
+  {
+    key: SEC_CONFIG_KEYS.DOWNLOAD_FILES_THRESHOLD,
+    label: '下载不同文件数阈值',
+    description: '同 IP 窗口内下载的不同文件数超过此值触发异常下载判定',
+    type: 'number', min: 10, max: 1000, step: 10,
+    unit: '个',
     category: '异常下载检测',
   },
 

@@ -21,6 +21,30 @@ const SENSITIVE_QUERY_PARAMS = new Set([
   'api_key',
   'sign',
   'sig',
+  // G2-19：补齐常见凭据参数名，覆盖 OAuth / JWT / 会话令牌等场景
+  'access_token',
+  'access-token',
+  'jwt',
+  'session',
+  'session_id',
+  'sessionid',
+  'id_token',
+  'idtoken',
+  'refresh_token',
+  'refresh-token',
+  'bearer',
+  'credential',
+  'credentials',
+  'client_secret',
+  'clientsecret',
+  'private_key',
+  'privatekey',
+  'accesstoken',
+  'auth_token',
+  'authtoken',
+  // G4-13：缩略图访问令牌参数 `t`（旧 RSA 时间戳令牌 / 潜在凭据），
+  // 虽已移除令牌校验，仍不应以明文形式进入访问日志。
+  't',
 ]);
 
 /** 超过此长度的 query 参数值不进入日志（防止大值/超长凭据撑爆存储） */

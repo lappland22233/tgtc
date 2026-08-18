@@ -17,6 +17,7 @@ import {
   IsIn,
   IsEmail,
   ValidateIf,
+  Matches,
   registerDecorator,
   ValidationArguments,
   ValidationOptions,
@@ -123,6 +124,11 @@ export class ConfigDto {
   @IsString()
   @IsNotEmpty()
   @MaxLength(200)
+  // 拒绝安全规则键（sec_*）与敏感凭据键，防止通过通用配置端点绕过安全校验或写明文密码
+  @Matches(
+    /^(?!sec_|SMTP_PASSWORD$|TELEGRAM_BOT_TOKEN$|JWT_SECRET$|COOKIE_SECRET$|DB_PASSWORD$)[A-Z][A-Z0-9_]*$/,
+    { message: '不允许通过通用配置端点修改安全规则键或敏感凭据键' },
+  )
   key: string;
 
   @IsString()
@@ -178,10 +184,52 @@ export class SmtpTestDto {
   recipient: string;
 }
 
+/** G7-07：/admin/files 分页查询 DTO（page/limit 带类型转换与上限校验） */
+export class AdminFilesQueryDto {
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  page?: number = 1;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(100)
+  limit?: number = 20;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(100)
+  keyword?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(100)
+  userId?: string;
+
+  @IsOptional()
+  @IsString()
+  @IsIn(['originalName', 'createdAt', 'size', 'uploader.email'])
+  sortBy?: string;
+
+  @IsOptional()
+  @IsString()
+  @IsIn(['asc', 'desc'])
+  sortOrder?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(100)
+  cursor?: string;
+}
+
 export class UploadConfigDto {
   @IsOptional()
   @IsInt()
   @Min(1)
+  @Max(10 * 1024 * 1024 * 1024) // G7-08：上限 10GB（10 * 1024^3）
   maxFileSize?: number;
 
   @IsOptional()

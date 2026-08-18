@@ -36,12 +36,49 @@ async function startRedirect() {
   }
   isRedirecting = true;
   redirectTimer = setTimeout(async () => {
-    if (!isAuthPage()) {
-      const { default: router } = await import('../router');
-      router.push('/login');
+    try {
+      if (!isAuthPage()) {
+        // 1) 先清空登录态：401 表示服务端会话已失效，本地 user 必须一并清空，
+        //    否则 /login 的 guest 守卫会把“仍视为已登录”的用户弹回 '/'，形成重定向循环。
+        //    动态 import 避免 client ↔ auth 循环依赖。
+        const authModule = await import('../stores/auth');
+        const authStore = authModule.useAuthStore();
+        authStore.user = null;
+        authStore.initialized = true;
+
+        // 2) 携带 redirect 跳转登录页：redirect 取当前路由 path+query 并校验合法性，
+        //    登录成功后据此回跳原页面。redirect 参数本身（若存在）被排除，避免嵌套。
+        const { default: router, isValidRedirect } = await import('../router');
+        const redirect = buildRedirectParam();
+        router.push({
+          path: '/login',
+          query: redirect && isValidRedirect(redirect) ? { redirect } : undefined,
+        });
+      }
+      // 已在 /login 等免重定向页面（登录/注册/密码重置/公开分享页）：不重复跳转（边界处理）
+    } finally {
+      resetRedirectState();
     }
-    resetRedirectState();
   }, 300);
+}
+
+/**
+ * 构造当前页面的回跳参数（path + query）。
+ * 排除游客页 / 根路径 / 分享页（这些页面无需回跳），并排除自身 redirect 参数避免嵌套。
+ */
+function buildRedirectParam(): string | undefined {
+  try {
+    const path = window.location.pathname;
+    if (path === '/' || path === '/login' || path === '/register' || path === '/reset-password' || path.startsWith('/s/')) {
+      return undefined;
+    }
+    const url = new URL(window.location.href);
+    url.searchParams.delete('redirect');
+    const full = url.pathname + url.search;
+    return full.startsWith('/') ? full : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** 判断当前是否在无需 401 重定向的页面（登录/注册/密码重置/公开分享页） */
@@ -121,7 +158,20 @@ client.interceptors.request.use(
 
 // ---- 响应拦截器 ----
 client.interceptors.response.use(
-  (response) => response,
+  (response) => {
+    // 业务码校验（G10-04）：统一判断 data.code，非 0 视为业务失败并 reject。
+    // 向后兼容：仅当响应体存在 code 字段且其值非 0 时才 reject；
+    // 不含 code 字段的响应（如流式/下载、未包装的原始返回）原样放行。
+    const body = response.data as { code?: unknown; message?: string; data?: unknown } | undefined;
+    if (body && typeof body === 'object' && 'code' in body && body.code !== 0) {
+      const message = typeof body.message === 'string' && body.message
+        ? body.message
+        : '请求处理失败，请稍后重试';
+      console.warn(`[API] 业务码错误 code=${String(body.code)}:`, message, response.config?.url);
+      return Promise.reject(new Error(message));
+    }
+    return response;
+  },
   (error: AxiosError) => {
     const status = error.response?.status;
 

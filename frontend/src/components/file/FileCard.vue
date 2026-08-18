@@ -149,6 +149,8 @@ function onToggleSelect() {
   opacity: 1;
 }
 
+/* 触屏设备（无 hover 能力）常驻显示规则已抽到全局 assets/styles.css（G13-08） */
+
 .card-lock-badge {
   position: absolute;
   top: 8px;

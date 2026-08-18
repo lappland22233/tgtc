@@ -35,6 +35,21 @@ function warnLegacyFormat(kind: string): void {
   );
 }
 
+/**
+ * G9-12：判断一个密文是否为"旧版 AES-256-CBC / 明文"格式（需迁移至 v2 GCM）。
+ * 供一次性迁移脚本与启动检测复用。返回 true 表示该值仍为 CBC/明文旧格式，
+ * 尚无完整性校验，应尽快通过迁移脚本重加密为 v2。
+ */
+export function isLegacyEncrypted(value: string): boolean {
+  if (!value) return false;
+  // v2 当前格式（带完整性校验）不需要迁移
+  if (value.startsWith(VERSION_PREFIX_GCM)) return false;
+  // 无 ':' = 旧版明文（迁移前直接存明文的场景）
+  if (!value.includes(':')) return true;
+  // 其余（CBC 的 iv:encrypted 或 v1:iv:encrypted）视为旧格式
+  return true;
+}
+
 /** 使用 AES-256-GCM 加密 */
 export function encryptPassword(plaintext: string): string {
   const iv = randomBytes(IV_LENGTH);

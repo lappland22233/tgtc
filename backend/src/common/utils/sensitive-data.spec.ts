@@ -35,6 +35,17 @@ describe('sanitizeUrlForLog', () => {
     expect(sanitizeUrlForLog('/api/s/tok/preview/fid?access=abc')).toBe('/api/s/tok/preview/fid');
   });
 
+  it('剥离缩略图访问令牌参数 t（G4-13）', () => {
+    const out = sanitizeUrlForLog('/api/files/fid/thumbnail?t=abc123XYZ&v=2');
+    expect(out).not.toContain('abc123XYZ');
+    expect(out).toContain('v=2');
+    expect(out).toContain('/api/files/fid/thumbnail');
+  });
+
+  it('仅剩 t 参数时只保留 pathname', () => {
+    expect(sanitizeUrlForLog('/api/files/fid/thumbnail-hd?t=abc123')).toBe('/api/files/fid/thumbnail-hd');
+  });
+
   it('空值返回根路径', () => {
     expect(sanitizeUrlForLog('')).toBe('/');
     expect(sanitizeUrlForLog(null)).toBe('/');

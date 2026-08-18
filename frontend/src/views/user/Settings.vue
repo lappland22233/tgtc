@@ -20,7 +20,7 @@
           <t-input v-model="passwordForm.confirmPassword" type="password" placeholder="请再次输入新密码..." autocomplete="new-password" name="settings-confirm-pass" />
         </t-form-item>
         <t-form-item>
-          <t-button type="submit" theme="primary">保存修改</t-button>
+          <t-button type="submit" theme="primary" :loading="submitting" :disabled="submitting">保存修改</t-button>
         </t-form-item>
       </t-form>
     </div>
@@ -65,11 +65,29 @@ const passwordForm = reactive({
   confirmPassword: '',
 });
 
+/** G11-18：提交中状态，防止重复提交 */
+const submitting = ref(false);
+
+/** 密码强度校验：至少包含大写、小写、数字、特殊字符中的 3 类（G11-18） */
+function passwordStrengthValid(pwd: string): boolean {
+  if (!pwd || pwd.length < 6) return false;
+  let classes = 0;
+  if (/[a-z]/.test(pwd)) classes++;
+  if (/[A-Z]/.test(pwd)) classes++;
+  if (/[0-9]/.test(pwd)) classes++;
+  if (/[^A-Za-z0-9]/.test(pwd)) classes++;
+  return classes >= 3;
+}
+
 const passwordRules = {
   oldPassword: [{ required: true, message: '请输入原密码' }],
   newPassword: [
     { required: true, message: '请输入新密码' },
     { min: 6, message: '密码至少6位' },
+    {
+      validator: (val: string) => passwordStrengthValid(val),
+      message: '密码需至少包含大写字母、小写字母、数字、特殊字符中的 3 类',
+    },
   ],
   confirmPassword: [
     { required: true, message: '请确认新密码' },
@@ -95,12 +113,14 @@ function formatDate(date: string) {
 }
 
 async function handlePasswordChange() {
+  if (submitting.value) return;
   const valid = await passwordFormRef.value?.validate();
   if (valid !== true) return;
   if (!authStore.user) {
     MessagePlugin.error('用户信息缺失，请重新登录');
     return;
   }
+  submitting.value = true;
   try {
     await api.put('/users/me/password', {
       oldPassword: passwordForm.oldPassword,
@@ -110,6 +130,8 @@ async function handlePasswordChange() {
     passwordFormRef.value?.reset();
   } catch (error: unknown) {
     MessagePlugin.error(getErrorMessage(error));
+  } finally {
+    submitting.value = false;
   }
 }
 </script>

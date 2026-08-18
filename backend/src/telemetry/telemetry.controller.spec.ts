@@ -17,7 +17,8 @@ describe('TelemetryController', () => {
 
   it('associates valid cookie and bearer JWT subjects', async () => {
     jwt.verify.mockReturnValue({sub:'u'});
-    await controller.report({events:[{type:'error',data:{}}]} as any,req({cookies:{access_token:'a.b.c'}}));
+    // data.message 用唯一值，避免与其它 error 用例触发模块级指纹去重
+    await controller.report({events:[{type:'error',data:{message:'err-cookie-jwt'}}]} as any,req({cookies:{access_token:'a.b.c'}}));
     expect(telemetry.report).toHaveBeenLastCalledWith(expect.anything(),expect.anything(),expect.anything(),'u');
     await controller.report({events:[]} as any,req({headers:{authorization:'Bearer a.b.c'}}));
     expect(jwt.verify).toHaveBeenCalledWith('a.b.c',{algorithms:['HS256']});
@@ -46,7 +47,7 @@ describe('TelemetryController', () => {
   });
 
   it('accepts finite performance metrics and ignores unrelated events', async () => {
-    const events:any=[{type:'performance',data:{dns:0,tcp:1,ttfb:2,domReady:3,pageLoad:4,fcp:5}},{type:'error',data:{dns:-1}}];
+    const events:any=[{type:'performance',data:{dns:0,tcp:1,ttfb:2,domReady:3,pageLoad:4,fcp:5}},{type:'error',data:{message:'err-perf-ignored'}}];
     await expect(controller.report({events} as any,req())).resolves.toEqual(expect.objectContaining({count:2}));
   });
 });

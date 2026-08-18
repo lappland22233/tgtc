@@ -52,6 +52,13 @@ export function useFileListQuery(options: FileListQueryOptions) {
   // ─── 游标无限滚动（页码驱动） ───
   /** 无限滚动每批加载条数（不再提供分页，固定批次） */
   const BATCH_SIZE = 20;
+  /**
+   * 有界加载上限：防止无限滚动持续追加 DOM 行导致节点 / 缩略图观察器线性增长。
+   * 达到该上限后停止自动加载，提示"已加载 N 条 / 继续加载"，用户可手动继续。
+   */
+  const MAX_LOAD_LIMIT = 500;
+  /** 是否已达到加载上限（触发"继续加载"提示） */
+  const loadLimitExceeded = ref(false);
   const {
     hasMore,
     loading: cursorLoading,
@@ -65,12 +72,17 @@ export function useFileListQuery(options: FileListQueryOptions) {
   /** 列表代际：筛选 / 目录变化时递增，防止旧请求污染新列表 */
   let fileListGeneration = 0;
   const folderLoading = ref(false);
+  /** G11-12：搜索/排序重拉时保留旧列表并在其上叠加半透明 loading，避免列表闪空 */
+  const refreshing = ref(false);
+  /** G11-12：是否在下一页返回时用新数据整体替换旧列表（首次搜索/排序拉取时为 true） */
+  let pendingReplaceNextPage = false;
   const listError = ref<unknown>(null);
 
   /** 开始目录切换：在 openFolder 请求开始前立即清空旧列表，并使旧请求失效。 */
   function beginFolderTransition() {
     fileListGeneration++;
     resetCursor();
+    loadLimitExceeded.value = false;
     fileStore.replaceFiles([]);
     listError.value = null;
     folderLoading.value = true;
@@ -81,22 +93,33 @@ export function useFileListQuery(options: FileListQueryOptions) {
     if (generation !== fileListGeneration) return;
     fileListGeneration = generation;
     resetCursor();
-    fileStore.replaceFiles([]);
     listError.value = null;
+    // G11-12：搜索/排序重拉时保留旧列表，等待新数据到达后再整体替换，避免列表闪空。
+    // 目录切换路径（beginFolderTransition）已先清空列表并展示 folderLoading，此处列表为空时
+    // 不额外叠加 refreshing，仅在有旧内容时叠加半透明 loading。
+    const hasExistingList = fileStore.files.length > 0;
+    pendingReplaceNextPage = true;
+    if (hasExistingList) refreshing.value = true;
     try {
       await loadMoreFiles(folderId, true);
     } catch (error) {
       if (generation === fileListGeneration) listError.value = error;
       throw error;
     } finally {
-      if (generation === fileListGeneration) folderLoading.value = false;
+      pendingReplaceNextPage = false;
+      if (generation === fileListGeneration) {
+        refreshing.value = false;
+        folderLoading.value = false;
+      }
     }
   }
 
-  async function loadMoreFiles(folderId = currentFolderIdForApi.value, isInitialLoad = false) {
-    if ((!isInitialLoad && folderLoading.value) || !hasMore.value) return;
-    const generation = fileListGeneration;
-    await loadMore(async (cursor, signal) => {
+  /** 当前列表代际快照：buildFetchPageFn 内比较用 */
+  let pageGeneration = 0;
+
+  /** 构造单页拉取函数（供自动滚动与手动"继续加载"复用） */
+  function buildFetchPageFn(folderId: string) {
+    return async (cursor: string | null, signal: AbortSignal) => {
       const page = cursor ? parseInt(cursor, 10) : 1;
       const tagIds = selectedTagIds.value.length > 0 ? selectedTagIds.value : undefined;
       try {
@@ -111,12 +134,30 @@ export function useFileListQuery(options: FileListQueryOptions) {
           signal,
         );
         // 即使底层请求未遵守 AbortSignal，也禁止旧筛选/目录请求污染当前列表。
-        if (generation !== fileListGeneration) {
+        if (fileListGeneration !== pageGeneration) {
           return { data: [], nextCursor: cursor, hasMore: true };
         }
-        fileStore.appendFiles(result.files);
+        // G11-12：搜索/排序重拉时，首页返回后用新数据整体替换旧列表（避免追加导致新旧混排）；
+        // 其余分页照常追加。首页为空（如搜索无结果）时同样用空数组替换，避免残留旧列表。
+        if (pendingReplaceNextPage) {
+          fileStore.replaceFiles(result.files);
+          pendingReplaceNextPage = false;
+        } else {
+          fileStore.appendFiles(result.files);
+        }
         fileStore.total = result.total;
         const loadedAll = fileStore.files.length >= result.total || result.files.length === 0;
+        // 有界加载：达到上限后停止自动追加（hasMore=false 使哨兵不再触发），
+        // 由用户手动点击"继续加载"突破上限。
+        if (!loadedAll && fileStore.files.length >= MAX_LOAD_LIMIT) {
+          loadLimitExceeded.value = true;
+          return {
+            data: result.files,
+            nextCursor: String(page + 1),
+            hasMore: false,
+          };
+        }
+        loadLimitExceeded.value = false;
         return {
           data: result.files,
           nextCursor: loadedAll ? null : String(page + 1),
@@ -129,7 +170,25 @@ export function useFileListQuery(options: FileListQueryOptions) {
         }
         throw err;
       }
-    });
+    };
+  }
+
+  async function loadMoreFiles(folderId = currentFolderIdForApi.value, isInitialLoad = false) {
+    if ((!isInitialLoad && folderLoading.value) || !hasMore.value) return;
+    const generation = fileListGeneration;
+    pageGeneration = generation;
+    await loadMore(buildFetchPageFn(folderId));
+  }
+
+  /**
+   * 达到有界加载上限后，手动继续加载下一页。
+   * 通过 force 绕过 useCursorPagination 的 hasMore 拦截，单次加载一批后若再次触顶仍会停下。
+   */
+  async function continueLoadMore() {
+    if (folderLoading.value || cursorLoading.value) return;
+    const generation = fileListGeneration;
+    pageGeneration = generation;
+    await loadMore(buildFetchPageFn(currentFolderIdForApi.value), true);
   }
 
   function getFileListGeneration() {
@@ -202,9 +261,12 @@ export function useFileListQuery(options: FileListQueryOptions) {
   watch(scrollSentinel, (el) => {
     if (scrollObserver) { scrollObserver.disconnect(); scrollObserver = null; }
     if (!el) return;
+    // G11-25：记录哨兵挂载时刻的代际与目录。目录切换瞬间（代际推进中）哨兵仍可能触发
+    // 回调，此时若用旧 folderId 发请求会产生无效/浪费请求——回调内先比对代际，变了则跳过。
+    const observerGeneration = fileListGeneration;
     scrollObserver = new IntersectionObserver(
       (entries) => {
-        if (entries[0].isIntersecting) {
+        if (entries[0].isIntersecting && observerGeneration === fileListGeneration) {
           loadMoreFiles();
         }
       },
@@ -214,20 +276,45 @@ export function useFileListQuery(options: FileListQueryOptions) {
   });
 
   // ─── URL 双向同步（搜索/排序/标签，保留 folder 参数） ───
-  watch([search, sortBy, sortOrder, selectedTagIds], ([newSearch, newSortBy, newSortOrder, newTagIds]) => {
+  // G11-24：搜索框每键入一次都写 URL 会造成大量 router.replace 与历史记录噪音。
+  // 这里对 search 相关同步做防抖（仅提交/停顿后写一次），排序/标签即时同步。
+  let urlSyncTimer: ReturnType<typeof setTimeout> | null = null;
+  function syncUrlToQuery() {
     const query: Record<string, string> = {};
-    if (newSearch) query.search = newSearch;
-    if (newSortBy) query.sortBy = newSortBy;
-    if (newSortOrder) query.sortOrder = newSortOrder;
-    if (newTagIds && newTagIds.length > 0) query.tagIds = newTagIds.join(',');
+    if (search.value) query.search = search.value;
+    if (sortBy.value) query.sortBy = sortBy.value;
+    if (sortOrder.value) query.sortOrder = sortOrder.value;
+    if (selectedTagIds.value.length > 0) query.tagIds = selectedTagIds.value.join(',');
     if (folderStore.currentFolderId) query.folder = folderStore.currentFolderId;
     router.replace({ query });
+  }
+  function scheduleUrlSync() {
+    if (urlSyncTimer) clearTimeout(urlSyncTimer);
+    urlSyncTimer = setTimeout(() => {
+      urlSyncTimer = null;
+      syncUrlToQuery();
+    }, 400);
+  }
+
+  watch([search, sortBy, sortOrder, selectedTagIds], (vals, oldVals) => {
+    // 仅搜索变化时防抖；排序/标签变化立即同步，保证 URL 与筛选即时一致
+    if (vals[0] !== oldVals?.[0]) {
+      scheduleUrlSync();
+    } else {
+      if (urlSyncTimer) clearTimeout(urlSyncTimer);
+      urlSyncTimer = null;
+      syncUrlToQuery();
+    }
   }, { flush: 'post' });
 
   onUnmounted(() => {
     if (scrollObserver) {
       scrollObserver.disconnect();
       scrollObserver = null;
+    }
+    if (urlSyncTimer) {
+      clearTimeout(urlSyncTimer);
+      urlSyncTimer = null;
     }
   });
 
@@ -241,7 +328,10 @@ export function useFileListQuery(options: FileListQueryOptions) {
     hasMore,
     cursorLoading,
     folderLoading,
+    refreshing,
     listError,
+    loadLimitExceeded,
+    continueLoadMore,
     beginFolderTransition,
     getFileListGeneration,
     scrollSentinel,

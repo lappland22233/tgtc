@@ -28,4 +28,22 @@ describe('UploadConfigDto', () => {
       'accessCountMax',
     ]));
   });
+
+  it('accepts maxFileSize up to 10GB (G7-08 上限)', async () => {
+    const dto = plainToInstance(UploadConfigDto, {
+      maxFileSize: 10 * 1024 * 1024 * 1024,
+    });
+
+    const errors = await validate(dto, { whitelist: true, forbidNonWhitelisted: true });
+    expect(errors).toHaveLength(0);
+  });
+
+  it('rejects maxFileSize above 10GB (G7-08 @Max)', async () => {
+    const dto = plainToInstance(UploadConfigDto, {
+      maxFileSize: 10 * 1024 * 1024 * 1024 + 1,
+    });
+
+    const errors = await validate(dto, { whitelist: true, forbidNonWhitelisted: true });
+    expect(errors.map(error => error.property)).toContain('maxFileSize');
+  });
 });

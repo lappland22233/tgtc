@@ -239,7 +239,7 @@ export class CacheSessionCoordinator {
       // 在请求上游前先创建临时文件，保证首个进度事件到达时跟随者可安全打开。
       await fsp.writeFile(session.tmpPath, Buffer.alloc(0), { flag: 'wx' });
       // 持有在途上游句柄：若 totalDeadline 先触发，catch 中销毁其 stream 防连接泄漏
-      const upstreamPromise = fetchFn();
+      upstreamPromise = fetchFn();
       const { stream, info } = await Promise.race([upstreamPromise, totalDeadline]);
       session.upstream = stream;
       resetIdleDeadline();
@@ -292,7 +292,10 @@ export class CacheSessionCoordinator {
       if (session.bytesWritten !== session.expectedSize || stat.size !== session.expectedSize) {
         throw new Error(`缓存文件大小不一致: 期望 ${session.expectedSize}, 实际 ${stat.size}`);
       }
-      await fsp.rename(session.tmpPath, cachePath);
+      // G4-06：Windows 下 follower 的读句柄可能仍短暂占用临时文件，
+      // rename 会抛 EPERM/EBUSY；做有限退避重试，避免整次回源失败。
+      await this.renameWithRetry(session.tmpPath, cachePath);
+      this.diskManager.registerCache(session.fileId, session.expectedSize);
       this.fileAccessMap.set(session.fileId, Date.now());
       session.completed = true;
       session.events.emit('progress');
@@ -405,7 +408,7 @@ export class CacheSessionCoordinator {
       await fsp.writeFile(session.spoolPath, Buffer.alloc(0), { flag: 'wx' });
       // 与 build 路径一致的竞速保护：上游无响应时按总超时失败，
       // 避免会话永久卡在 fetchFn 导致 activeUpstreams 永不归零。
-      const upstreamPromise = fetchFn();
+      upstreamPromise = fetchFn();
       const { stream, info } = await Promise.race([upstreamPromise, totalDeadline]);
       // 竞态防护：等待上游期间会话可能已随最后一个消费者离开而被 teardown，
       // 此时直接释放刚获取的上游，避免连接泄漏。
@@ -544,6 +547,28 @@ export class CacheSessionCoordinator {
     session.output?.destroy();
     await fsp.unlink(session.spoolPath).catch(() => {});
     session.events.removeAllListeners();
+  }
+
+  // ---------- 发布辅助 ----------
+
+  /**
+   * 有限退避重试的 rename（G4-06）。
+   * Windows 上临时文件可能被 follower 的读句柄短暂占用，rename 会抛 EPERM/EBUSY。
+   * 最多重试 5 次（约 620ms），仍失败则抛错（由调用方 catch 清理临时文件）。
+   */
+  private async renameWithRetry(from: string, to: string): Promise<void> {
+    const MAX_ATTEMPTS = 5;
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await fsp.rename(from, to);
+        return;
+      } catch (error: unknown) {
+        const code = (error as { code?: string }).code;
+        const retryable = code === 'EPERM' || code === 'EBUSY' || code === 'EACCES';
+        if (attempt >= MAX_ATTEMPTS || !retryable) throw error;
+        await new Promise(resolve => setTimeout(resolve, 20 * attempt));
+      }
+    }
   }
 
   // ---------- follower / 等待 ----------

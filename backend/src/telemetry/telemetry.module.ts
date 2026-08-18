@@ -9,5 +9,6 @@ import { TelemetryService } from './telemetry.service';
   imports: [TypeOrmModule.forFeature([TelemetryRecord]), AuthModule],
   controllers: [TelemetryController],
   providers: [TelemetryService],
+  exports: [TelemetryService],
 })
 export class TelemetryModule {}

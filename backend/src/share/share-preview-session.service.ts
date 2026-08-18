@@ -77,6 +77,10 @@ export class SharePreviewSessionService {
     }
 
     // 第二步：尝试插入新会话；唯一冲突表示已有未过期会话 → 幂等免扣。
+    // G5-06：用 INSERT ... ON CONFLICT DO NOTHING RETURNING id，通过 result.raw 判断
+    // 是否真正插入，避免依赖 identifiers 在 ON CONFLICT 下行为不一致的隐患。
+    // 仅唯一约束冲突（PostgreSQL 23505）按幂等处理，其余异常一律向上抛，
+    // 不再把一切异常都静默当作幂等（会掩盖真实的 DB/约束错误）。
     let inserted = false;
     try {
       const result = await this.sessionRepo
@@ -84,11 +88,16 @@ export class SharePreviewSessionService {
         .insert()
         .values({ shareLinkId: link.id, fileId, visitorHash, consumed: true, expiresAt })
         .orIgnore()
+        .returning('id')
         .execute();
-      inserted = (result.identifiers?.length ?? 0) > 0;
-    } catch {
-      // orIgnore 唯一冲突在部分驱动/配置下可能以异常形式暴露，按幂等处理
-      inserted = false;
+      const raw = (result?.raw ?? []) as Array<{ id: string }>;
+      inserted = raw.length > 0;
+    } catch (error) {
+      if ((error as { code?: string })?.code === '23505') {
+        // 唯一约束冲突：并发下另一请求已插入同一会话 → 幂等免扣
+        return 'idempotent';
+      }
+      throw error;
     }
 
     if (!inserted) return 'idempotent';
@@ -145,15 +154,19 @@ export class SharePreviewSessionService {
    * 供请求路径低频触发与运维脚本共用；不做全表扫描。
    */
   async pruneExpired(limit = PRUNE_BATCH_LIMIT): Promise<number> {
+    const now = new Date();
     const sub = this.sessionRepo
       .createQueryBuilder()
       .select('id')
-      .where('"expiresAt" < :now', { now: new Date() })
+      .where('"expiresAt" < :now', { now })
       .orderBy('"expiresAt"', 'ASC')
       .limit(limit)
       .getQuery();
+    // G5-05：sub 查询含 $1 占位符，必须把参数一并传给 query()，
+    // 否则 PostgreSQL 会因参数缺失报错，被 catch 吞掉后过期会话永不清理。
     const result = await this.sessionRepo.query(
       `DELETE FROM "share_preview_sessions" WHERE "id" IN (${sub})`,
+      [now],
     );
     return Array.isArray(result) ? (result[1] as number) ?? 0 : 0;
   }

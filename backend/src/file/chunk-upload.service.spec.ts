@@ -1,5 +1,6 @@
-import { BadRequestException } from '@nestjs/common';
+import { BadRequestException, HttpStatus } from '@nestjs/common';
 import { promises as fsp } from 'fs';
+import * as path from 'path';
 
 jest.mock('./file.service', () => ({ FileService: class FileService {} }));
 
@@ -12,8 +13,16 @@ describe('ChunkUploadService session quota', () => {
   const fileService = {
     getMaxFileSize: jest.fn().mockResolvedValue(100 * MB),
     assertOverwriteTarget: jest.fn().mockResolvedValue(undefined),
+    getFileSampleFromPath: jest.fn(),
+    isFileTypeAllowed: jest.fn().mockResolvedValue({ allowed: true }),
+    getProcessingFileOrThrow: jest.fn(),
+    createProcessingFile: jest.fn(),
+    softDeleteProcessingFile: jest.fn().mockResolvedValue(undefined),
   };
-  const fileUploadQueue = { add: jest.fn() };
+  const fileUploadQueue = {
+    add: jest.fn().mockResolvedValue({}),
+    getJob: jest.fn().mockResolvedValue(undefined),
+  };
   const configService = { get: jest.fn() };
   let service: ChunkUploadService;
 
@@ -85,5 +94,71 @@ describe('ChunkUploadService session quota', () => {
     expect((service as any).sessions.size).toBe(0);
 
     mkdirSpy.mockRestore();
+  });
+
+  describe('finalizeMerge (G3-05 / G3-06 / G3-07)', () => {
+    // 通过 init 建立一个真实会话并写入 merged 文件，再直接驱动私有 finalizeMerge
+    async function setupSession() {
+      const { uploadId } = await init();
+      const session = (service as any).sessions.get(uploadId) as any;
+      const mergedPath = path.join((service as any).getChunkDir(uploadId), 'merged');
+      await fsp.writeFile(mergedPath, Buffer.alloc(MB, 1));
+      return { uploadId, session, mergedPath };
+    }
+
+    beforeEach(() => {
+      fileService.getFileSampleFromPath.mockReturnValue(Buffer.alloc(8, 1));
+      fileService.isFileTypeAllowed.mockResolvedValue({ allowed: true });
+      fileService.createProcessingFile.mockResolvedValue({
+        id: '11111111-1111-4111-8111-111111111111',
+        uploadVersion: 1,
+        originalName: 'file.bin',
+      });
+      fileUploadQueue.add.mockResolvedValue({});
+    });
+
+    it('G3-05 pre-checks 2x disk space and returns 507 when insufficient', async () => {
+      const { session, mergedPath } = await setupSession();
+      // 模拟磁盘不足：free - 2x fileSize < minFree
+      const statfsSpy = jest.spyOn(fsp, 'statfs').mockResolvedValue({
+        bavail: 1,
+        bsize: 1024,
+      } as any);
+
+      await expect(
+        (service as any).finalizeMerge(session, mergedPath, MB, new AbortController().signal),
+      ).rejects.toMatchObject({ status: HttpStatus.INSUFFICIENT_STORAGE });
+
+      expect(session.mergeStatus).toBe('error');
+      expect(fileService.createProcessingFile).not.toHaveBeenCalled();
+      statfsSpy.mockRestore();
+    });
+
+    it('G3-06 reuses the saved record on retry instead of creating a duplicate', async () => {
+      const { session, mergedPath } = await setupSession();
+      // freeBytes = 2GB，远大于 minFreeDiskBytes(1GB) + required(2MB)
+      const statfsSpy = jest.spyOn(fsp, 'statfs').mockResolvedValue({ bavail: 2 * 1024 * 1024, bsize: 1024 } as any);
+
+      // 第一次 finalizeMerge：createProcessingFile 建记录，savedFileId 存入 session
+      await (service as any).finalizeMerge(session, mergedPath, MB, new AbortController().signal);
+      expect(fileService.createProcessingFile).toHaveBeenCalledTimes(1);
+      expect(session.savedFileId).toBe('11111111-1111-4111-8111-111111111111');
+
+      // 第二次（重试）：不再 createProcessingFile，而是复用 savedFileId
+      fileService.getProcessingFileOrThrow.mockResolvedValue({
+        id: '11111111-1111-4111-8111-111111111111',
+        uploadVersion: 1,
+        originalName: 'file.bin',
+      });
+      const second = await (service as any).finalizeMerge(session, mergedPath, MB, new AbortController().signal);
+      expect(fileService.createProcessingFile).toHaveBeenCalledTimes(1);
+      expect(fileService.getProcessingFileOrThrow).toHaveBeenCalledWith(
+        '11111111-1111-4111-8111-111111111111',
+        1,
+      );
+      expect(second.id).toBe('11111111-1111-4111-8111-111111111111');
+
+      statfsSpy.mockRestore();
+    });
   });
 });

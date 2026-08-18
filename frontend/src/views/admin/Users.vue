@@ -27,7 +27,7 @@
         </template>
         <template #operations="{ row }">
           <t-button
-            v-if="row.role !== 'super_admin'"
+            v-if="row.role !== 'super_admin' && !isSelf(row.id)"
             size="small"
             theme="warning"
             variant="text"
@@ -40,12 +40,21 @@
             size="small"
             theme="primary"
             variant="text"
-            @click="grantAdmin(row.id)"
+            @click="grantAdmin(row)"
           >
             设为管理员
           </t-button>
           <t-button
-            v-if="row.role !== 'super_admin'"
+            v-else-if="row.role === 'admin'"
+            size="small"
+            theme="default"
+            variant="text"
+            @click="demoteAdmin(row)"
+          >
+            取消管理员
+          </t-button>
+          <t-button
+            v-if="row.role !== 'super_admin' && !isSelf(row.id)"
             size="small"
             theme="danger"
             variant="text"
@@ -74,7 +83,7 @@
           </div>
           <div style="display: flex; gap: 4px; margin-top: 8px; flex-wrap: wrap;">
             <t-button
-              v-if="user.role !== 'super_admin'"
+              v-if="user.role !== 'super_admin' && !isSelf(user.id)"
               size="small"
               theme="warning"
               variant="outline"
@@ -87,12 +96,21 @@
               size="small"
               theme="primary"
               variant="outline"
-              @click="grantAdmin(user.id)"
+              @click="grantAdmin(user)"
             >
               设为管理员
             </t-button>
             <t-button
-              v-if="user.role !== 'super_admin'"
+              v-else-if="user.role === 'admin'"
+              size="small"
+              theme="default"
+              variant="outline"
+              @click="demoteAdmin(user)"
+            >
+              取消管理员
+            </t-button>
+            <t-button
+              v-if="user.role !== 'super_admin' && !isSelf(user.id)"
               size="small"
               theme="danger"
               variant="outline"
@@ -114,8 +132,8 @@
       </div>
     </div>
 
-    <t-dialog v-model:visible="showCreateDialog" header="创建用户" @confirm="createUser">
-      <t-form :data="createForm" layout="vertical">
+    <t-dialog v-model:visible="showCreateDialog" header="创建用户" :on-confirm="createUser">
+      <t-form :data="createForm" :rules="createFormRules" layout="vertical" label-width="0">
         <t-form-item label="邮箱" name="email">
           <t-input v-model="createForm.email" placeholder="请输入邮箱" autocomplete="off" name="admin-create-email" />
         </t-form-item>
@@ -135,8 +153,12 @@ import { ref, onMounted } from 'vue';
 import { DialogPlugin } from 'tdesign-vue-next';
 import MessagePlugin from '@/utils/message';
 import { useMobile } from '../../composables/useMobile';
-import { api } from '../../stores/auth';
+import { api, useAuthStore } from '../../stores/auth';
 import { getErrorMessage } from '../../utils/error';
+
+// 当前登录用户（G15-25）：用于禁止管理员对自己执行封禁/删除，避免自我锁定
+const authStore = useAuthStore();
+const isSelf = (id: string) => authStore.user?.id === id;
 
 const users = ref<{ id: string; email: string; role: string; isBanned: boolean; emailVerified: boolean; createdAt: string; lastLoginAt?: string }[]>([]);
 const total = ref(0);
@@ -144,6 +166,34 @@ const page = ref(1);
 const searchEmail = ref('');
 const showCreateDialog = ref(false);
 const createForm = ref({ email: '', password: '', role: 'user' });
+
+// 创建用户前端校验（G15-26）：邮箱格式 + 密码最小长度 + 必填，避免空值/弱密码提交
+const createFormRules: Record<string, { required?: boolean; validator?: (val: string) => boolean; message?: string; type?: 'error' | 'warning' }[]> = {
+  email: [
+    { required: true, message: '请输入邮箱', type: 'error' },
+    {
+      validator: (val: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(val || ''),
+      message: '邮箱格式不正确',
+      type: 'error',
+    },
+  ],
+  password: [
+    { required: true, message: '请输入密码', type: 'error' },
+    { validator: (val: string) => (val || '').length >= 6, message: '密码至少 6 位', type: 'error' },
+  ],
+  role: [{ required: true, message: '请选择角色', type: 'error' }],
+};
+
+/** 手动校验创建表单（不依赖 t-form ref 的 validate 方法，避免类型耦合） */
+function validateCreateForm(): boolean {
+  const email = createForm.value.email.trim();
+  if (!email) { MessagePlugin.warning('请输入邮箱'); return false; }
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { MessagePlugin.warning('邮箱格式不正确'); return false; }
+  const password = createForm.value.password;
+  if (!password) { MessagePlugin.warning('请输入密码'); return false; }
+  if (password.length < 6) { MessagePlugin.warning('密码至少 6 位'); return false; }
+  return true;
+}
 
 const isMobile = useMobile();
 
@@ -201,24 +251,78 @@ async function searchUsers() {
   }
 }
 
-async function toggleBan(row: { id: string; isBanned: boolean }) {
-  try {
-    await api.put(`/users/${row.id}/ban`, { isBanned: !row.isBanned });
-    MessagePlugin.success(row.isBanned ? '已解封' : '已封禁');
-    fetchUsers();
-  } catch (error: unknown) {
-    MessagePlugin.error(getErrorMessage(error));
-  }
+/**
+ * 封禁/解封用户：先二次确认（G15-06）。
+ * 封禁时附带可选原因（用于对话框说明；后端暂不持久化 reason，仅提交 isBanned）。
+ */
+function toggleBan(row: { id: string; email: string; isBanned: boolean }) {
+  const banning = !row.isBanned;
+  const confirmDialog = DialogPlugin.confirm({
+    header: banning ? '封禁用户' : '解封用户',
+    body: banning
+      ? `确定要封禁用户 "${row.email}" 吗？封禁后该用户将无法登录系统。`
+      : `确定要解封用户 "${row.email}" 吗？解封后该用户可恢复正常登录。`,
+    theme: banning ? 'warning' : 'default',
+    confirmBtn: banning ? '封禁' : '解封',
+    cancelBtn: '取消',
+    onConfirm: async () => {
+      try {
+        await api.put(`/users/${row.id}/ban`, { isBanned: banning });
+        MessagePlugin.success(banning ? '已封禁' : '已解封');
+        fetchUsers();
+      } catch (error: unknown) {
+        MessagePlugin.error(getErrorMessage(error));
+      }
+      confirmDialog.destroy();
+    },
+    onClose: () => confirmDialog.destroy(),
+  });
 }
 
-async function grantAdmin(id: string) {
-  try {
-    await api.put(`/users/${id}/role`, { role: 'admin' });
-    MessagePlugin.success('已设为管理员');
-    fetchUsers();
-  } catch (error: unknown) {
-    MessagePlugin.error(getErrorMessage(error));
-  }
+/** 提升为管理员：二次确认并展示后果（G15-07） */
+function grantAdmin(row: { id: string; email: string }) {
+  const confirmDialog = DialogPlugin.confirm({
+    header: '设为管理员',
+    body: `确定要将 "${row.email}" 提升为管理员吗？`
+      + '提升后该用户将获得管理员权限，可管理用户、封禁 IP、查看系统配置等，请谨慎操作。',
+    theme: 'warning',
+    confirmBtn: '确认提升',
+    cancelBtn: '取消',
+    onConfirm: async () => {
+      try {
+        await api.put(`/users/${row.id}/role`, { role: 'admin' });
+        MessagePlugin.success('已设为管理员');
+        fetchUsers();
+      } catch (error: unknown) {
+        MessagePlugin.error(getErrorMessage(error));
+      }
+      confirmDialog.destroy();
+    },
+    onClose: () => confirmDialog.destroy(),
+  });
+}
+
+/** 降级为普通用户：二次确认（G15-07，恢复 admin→user 降级路径） */
+function demoteAdmin(row: { id: string; email: string }) {
+  const confirmDialog = DialogPlugin.confirm({
+    header: '取消管理员权限',
+    body: `确定要取消 "${row.email}" 的管理员权限，降级为普通用户吗？`
+      + '降级后该用户将失去管理后台访问权限。',
+    theme: 'warning',
+    confirmBtn: '确认降级',
+    cancelBtn: '取消',
+    onConfirm: async () => {
+      try {
+        await api.put(`/users/${row.id}/role`, { role: 'user' });
+        MessagePlugin.success('已降级为普通用户');
+        fetchUsers();
+      } catch (error: unknown) {
+        MessagePlugin.error(getErrorMessage(error));
+      }
+      confirmDialog.destroy();
+    },
+    onClose: () => confirmDialog.destroy(),
+  });
 }
 
 function deleteUser(id: string) {
@@ -242,16 +346,43 @@ function deleteUser(id: string) {
   });
 }
 
+/**
+ * 创建用户（G15-26）：先前端校验，再对 admin 角色二次确认，最后提交。
+ */
 async function createUser() {
-  try {
-    await api.post('/users', createForm.value);
-    MessagePlugin.success('创建成功');
-    showCreateDialog.value = false;
-    createForm.value = { email: '', password: '', role: 'user' };
-    fetchUsers();
-  } catch (error: unknown) {
-    MessagePlugin.error(getErrorMessage(error));
+  // 前端表单校验：空邮箱/空密码/弱密码/非法邮箱直接拦截（G15-26）
+  if (!validateCreateForm()) return;
+
+  const submit = async () => {
+    try {
+      await api.post('/users', createForm.value);
+      MessagePlugin.success('创建成功');
+      showCreateDialog.value = false;
+      createForm.value = { email: '', password: '', role: 'user' };
+      fetchUsers();
+    } catch (error: unknown) {
+      MessagePlugin.error(getErrorMessage(error));
+    }
+  };
+
+  // 创建管理员：权限授予属高风险操作，二次确认
+  if (createForm.value.role === 'admin') {
+    const confirmDialog = DialogPlugin.confirm({
+      header: '创建管理员',
+      body: `将为 "${createForm.value.email}" 创建管理员账户。`
+        + '管理员拥有用户管理、IP 封禁、系统配置等高级权限，请确认操作对象无误。',
+      theme: 'warning',
+      confirmBtn: '确认创建管理员',
+      cancelBtn: '取消',
+      onConfirm: () => {
+        confirmDialog.destroy();
+        void submit();
+      },
+      onClose: () => confirmDialog.destroy(),
+    });
+    return;
   }
+  await submit();
 }
 
 onMounted(fetchUsers);

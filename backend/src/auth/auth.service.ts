@@ -20,6 +20,11 @@ import { BCRYPT_ROUNDS } from '../common/constants/bcrypt';
  * 占位 bcrypt 哈希：用户不存在时执行一次 dummy compare，
  * 使"用户不存在"与"用户存在"路径耗时一致，消除时序侧信道（防邮箱枚举）。
  * 模块加载时用固定密码按 BCRYPT_ROUNDS 生成一次，保证哈希结构有效且轮数与真实校验一致。
+ *
+ * G9-16(P2)：bcryptjs 为纯 JS 实现。此处 hashSync 是唯一真正同步阻塞事件循环的调用
+ * （仅在进程启动时执行一次，成本可接受）；其余均为 async API（内部 setImmediate 让出，
+ * 但 CPU 仍占用主线程）。TODO: 登录/注册高峰如需彻底避免主线程 CPU 阻塞，评估将
+ * bcrypt 哈希/比对迁移至 worker_threads，或切换原生 bcrypt（需 node-gyp，未确认不擅自改）。
  */
 const DUMMY_PASSWORD_HASH = bcrypt.hashSync('timing-equalization-dummy', BCRYPT_ROUNDS);
 
@@ -111,8 +116,10 @@ export class AuthService {
       // 咨询锁仅锁定本临界区逻辑，随事务结束（commit/rollback）自动释放。
       await queryRunner.query('SELECT pg_advisory_xact_lock($1)', [REGISTRATION_ADVISORY_LOCK_KEY]);
       // 取得咨询锁后再统计用户数，保证"空表→首位超管"判定的串行化
+      // G1-02：与 ORM count() 口径一致，排除软删用户（deletedAt IS NULL），
+      // 避免"已软删用户仍占用首位超管名额"导致注册被误判关闭。
       const [{ count }] = await queryRunner.query(
-        'SELECT COUNT(*) as count FROM "users"',
+        'SELECT COUNT(*) as count FROM "users" WHERE "deletedAt" IS NULL',
       );
       // TOCTOU 修复：锁表后再检查注册开关，防止并发请求绕过"首位用户"限制
       if (registrationEnabled !== 'true' && Number(count) > 0) {
@@ -174,7 +181,7 @@ export class AuthService {
   async login(loginDto: LoginDto, ip: string): Promise<{ accessToken: string; user: Partial<User> }> {
     const now = new Date();
 
-    // 检查 IP 维度的封禁
+    // 检查 IP 维度的封禁（G1-01：追加 unbannedAt IS NULL，软解封后不再判封禁）
     const bannedIP = await this.bannedIPRepository
       .createQueryBuilder('bannedIP')
       .where('bannedIP.ip = :ip', { ip })
@@ -182,20 +189,34 @@ export class AuthService {
         '(bannedIP.isPermanent = true OR (bannedIP.isPermanent = false AND bannedIP.expiresAt > :now))',
         { now },
       )
+      .andWhere('bannedIP.unbannedAt IS NULL')
       .getOne();
 
     if (bannedIP) {
-      throw new UnauthorizedException(
-        bannedIP.isPermanent ? '您的IP已被永久封禁' : '您的IP已被临时封禁',
-      );
+      // G1-03：封禁 IP 分支在 bcrypt 前执行 dummy compare 对齐耗时，
+      // 并返回与"用户不存在/密码错误"一致的文案，消除枚举 oracle。
+      await bcrypt.compare(loginDto.password, DUMMY_PASSWORD_HASH);
+      this.auditService.log({
+        action: 'login_failed',
+        userId: null,
+        ip,
+        metadata: {
+          email: loginDto.email,
+          reason: bannedIP.isPermanent ? 'IP永久封禁' : 'IP临时封禁',
+        },
+        status: AuditStatus.FAILURE,
+      });
+      throw new UnauthorizedException('邮箱或密码错误');
     }
 
     // 登录失败限流检查（IP + email 维度，email 小写规范化防绕过）
     const loginLimitKey = `login:${ip}:${loginDto.email.toLowerCase().trim()}`;
 
-    const user = await this.userRepository.findOne({
-      where: { email: loginDto.email.toLowerCase().trim() },
-    });
+    const user = await this.userRepository
+      .createQueryBuilder('user')
+      .addSelect('user.password')
+      .where('user.email = :email', { email: loginDto.email.toLowerCase().trim() })
+      .getOne();
 
     if (!user) {
       // 用户不存在时执行一次 dummy bcrypt.compare，使本路径耗时与"用户存在"路径一致，
@@ -222,14 +243,32 @@ export class AuthService {
       throw new UnauthorizedException('邮箱或密码错误');
     }
 
+    // G1-03：封禁 / 未验证邮箱在 bcrypt 前快速返回差异化文案会构成枚举 oracle。
+    // 统一先执行 dummy bcrypt.compare 对齐耗时，再返回与"密码错误"一致的文案。
     if (user.isBanned) {
-      throw new UnauthorizedException('账号已被封禁');
+      await bcrypt.compare(loginDto.password, DUMMY_PASSWORD_HASH);
+      this.auditService.log({
+        action: 'login_failed',
+        userId: user.id,
+        ip,
+        metadata: { email: loginDto.email, reason: '账号封禁' },
+        status: AuditStatus.FAILURE,
+      });
+      throw new UnauthorizedException('邮箱或密码错误');
     }
 
     // 邮箱验证开启时，未验证用户不允许登录
     const emailVerificationEnabled = await this.getConfigValue('EMAIL_VERIFICATION_ENABLED', 'false');
     if (!user.emailVerified && emailVerificationEnabled === 'true') {
-      throw new UnauthorizedException('请先验证邮箱');
+      await bcrypt.compare(loginDto.password, DUMMY_PASSWORD_HASH);
+      this.auditService.log({
+        action: 'login_failed',
+        userId: user.id,
+        ip,
+        metadata: { email: loginDto.email, reason: '邮箱未验证' },
+        status: AuditStatus.FAILURE,
+      });
+      throw new UnauthorizedException('邮箱或密码错误');
     }
 
     const isPasswordValid = await bcrypt.compare(loginDto.password, user.password);
@@ -435,12 +474,42 @@ export class AuthService {
   async revokeToken(jti: string, userId: string, expiresAt: Date): Promise<void> {
     if (!jti || expiresAt.getTime() <= Date.now()) return;
     await this.revokedTokenRepository.upsert({ jti, userId, expiresAt } as JwtRevokedToken, ['jti']);
+    // 主动吊销后立即在缓存中标记为已吊销，避免吊销检查缓存（最多 5s）延迟导致已登出 token 仍可用
+    this.cacheRevoked(jti, true);
+  }
+
+  // G1-05：吊销检查内存 TTL 缓存。接受秒级吊销延迟（最长 REVOKE_CACHE_TTL_MS），
+  // 将"每次认证的吊销表查询"从 2 次 DB 降为 1 次（仅保留 users 状态查询）。
+  // 主动吊销（revokeToken）时同步失效缓存，避免正常登出后 token 在缓存期内仍可用。
+  private static readonly REVOKE_CACHE_TTL_MS = 5 * 1000;
+  private readonly revokedCache = new Map<string, { revoked: boolean; expiresAt: number }>();
+
+  private cachedIsRevoked(jti: string): boolean | undefined {
+    const cached = this.revokedCache.get(jti);
+    if (!cached) return undefined;
+    if (Date.now() > cached.expiresAt) {
+      this.revokedCache.delete(jti);
+      return undefined;
+    }
+    return cached.revoked;
+  }
+
+  private cacheRevoked(jti: string, revoked: boolean): void {
+    if (this.revokedCache.size > 10_000) this.revokedCache.clear();
+    this.revokedCache.set(jti, {
+      revoked,
+      expiresAt: Date.now() + AuthService.REVOKE_CACHE_TTL_MS,
+    });
   }
 
   async isTokenRevoked(jti: string): Promise<boolean> {
     if (!jti) return true;
+    const cached = this.cachedIsRevoked(jti);
+    if (cached !== undefined) return cached;
     const token = await this.revokedTokenRepository.findOne({ where: { jti } });
-    return !!token && token.expiresAt.getTime() > Date.now();
+    const revoked = !!token && token.expiresAt.getTime() > Date.now();
+    this.cacheRevoked(jti, revoked);
+    return revoked;
   }
 
   async validateUser(userId: string): Promise<User | null> {

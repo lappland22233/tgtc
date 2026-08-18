@@ -4,6 +4,7 @@
  * 用于后续错误排查和性能优化。
  */
 
+import axios from 'axios';
 import api from '../api/client';
 
 export type TelemetryEventType =
@@ -31,6 +32,103 @@ let buffer: TelemetryEvent[] = [];
 let flushTimer: ReturnType<typeof setTimeout> | null = null;
 let flushInFlight: Promise<void> | null = null;
 let initialized = false;
+
+// ---- 隐私合规开关（PIPL / GDPR）----
+// telemetryDisabled：模块级硬开关，置 true 后 enqueue/flush/onUnload 全部丢弃，
+// 即使某些全局监听无法卸载（匿名函数），也保证不再上报任何事件。
+// 用户可通过 disableTelemetry() 或后续设置页入口写入 localStorage 关闭。
+const TELEMETRY_DISABLED_KEY = 'telemetryDisabled';
+// 点击行为上下文（click_context）默认关闭采集，仅当用户显式同意（设置页/本地开关）后才采集，
+// 遵循「最小必要」原则，减少对用户行为的默认收集。
+const TELEMETRY_CLICK_CONTEXT_KEY = 'telemetryClickContext';
+
+let telemetryDisabled = false;
+let clickContextEnabled = false;
+
+/**
+ * 是否启用遥测（PIPL/GDPR opt-out）。
+ * 读取 localStorage 开关：'telemetryDisabled' === '1' 表示用户已关闭。
+ * 异常安全：存储不可用（隐私模式/被禁用）时默认返回 true（启用），避免破坏应用逻辑。
+ */
+export function isTelemetryEnabled(): boolean {
+  try {
+    return localStorage.getItem(TELEMETRY_DISABLED_KEY) !== '1';
+  } catch {
+    return true;
+  }
+}
+
+/** 是否启用点击行为上下文采集（默认关闭，仅显式开启才采集） */
+function isClickContextEnabled(): boolean {
+  try {
+    return localStorage.getItem(TELEMETRY_CLICK_CONTEXT_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+/** 同步模块级点击采集开关（initTelemetry 初始化时调用一次） */
+function updateClickContextEnabled() {
+  clickContextEnabled = isClickContextEnabled();
+}
+
+/**
+ * 显式开启点击行为上下文采集（供设置页在用户同意后调用）。
+ * 写入本地开关并同步模块级标志。
+ */
+export function enableClickContext(): void {
+  try {
+    localStorage.setItem(TELEMETRY_CLICK_CONTEXT_KEY, '1');
+  } catch {
+    /* 存储不可用时静默失败 */
+  }
+  clickContextEnabled = true;
+}
+
+/**
+ * 关闭遥测（PIPL/GDPR opt-out）：
+ * 1. 写入持久开关 'telemetryDisabled' = '1'；
+ * 2. 卸载可追踪的全局监听（点击监听具名 handler 可移除），其余由 telemetryDisabled 标志兜底丢弃；
+ * 3. 清空缓冲与相关定时器。
+ * 设置页的暴露入口属于后续 G15 批次，本次仅实现机制。
+ */
+export function disableTelemetry(): void {
+  try {
+    localStorage.setItem(TELEMETRY_DISABLED_KEY, '1');
+  } catch {
+    /* 存储不可用时静默失败 */
+  }
+  telemetryDisabled = true;
+  // 卸载点击监听（具名 handler 可直接移除）
+  if (typeof document !== 'undefined') {
+    document.removeEventListener('click', recordClick, { capture: true } as EventListenerOptions);
+  }
+  // 清空缓冲与定时器
+  buffer = [];
+  if (flushTimer) {
+    clearTimeout(flushTimer);
+    flushTimer = null;
+  }
+  if (postErrorCollector) {
+    clearTimeout(postErrorCollector);
+    postErrorCollector = null;
+  }
+}
+
+/**
+ * 遥测专用 axios 实例（G15-03）：
+ * 不复用主 api 实例，从而避开 client.ts 全局响应拦截器的副作用
+ * （503/507 全局 toast、401 登录重定向、CDN 错误页映射等），
+ * 保证遥测上报失败不会反向影响主应用 UX。baseURL 与主实例一致（/api），
+ * 保留独立重试/退避能力，超时较短（遥测静默失败）。
+ */
+const telemetryClient = axios.create({
+  baseURL: '/api',
+  timeout: 5000,
+  withCredentials: false,
+  xsrfCookieName: 'XSRF-TOKEN',
+  xsrfHeaderName: 'X-XSRF-TOKEN',
+});
 
 // ---- URL 脱敏（防止 token/分享密钥随遥测上传） ----
 
@@ -101,20 +199,65 @@ const SENSITIVE_SELECTOR = [
   '[data-telemetry-sensitive]',
 ].join(',');
 
-/** 文本脱敏：去除邮箱/手机号/URL/连续数字等 PII 模式，压缩空白并截断 */
-function sanitizeText(raw: string): string {
-  return raw
-    .replace(/https?:\/\/\S+/gi, '[url]')              // URL（可能含 token/分享密钥）
-    .replace(/[\w.+-]+@[\w-]+(?:\.[\w-]+)+/g, '[email]') // 邮箱
-    .replace(/(?<!\d)1[3-9]\d{9}(?!\d)/g, '[phone]')   // 国内手机号
-    .replace(/\d{4,}/g, '[num]')                       // 4 位以上连续数字（验证码/ID/卡号等）
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, 50);
+/**
+ * 国内手机号脱敏（不含 lookbehind，兼容 Safari/iOS 旧版）。
+ * 前置用捕获组「非数字或行首」替代 lookbehind，避免 Safari 14 以下崩溃（G15-15）。
+ */
+function maskPhone(raw: string): string {
+  return raw.replace(/(^|[^\d])1[3-9]\d{9}(?!\d)/g, '$1[phone]');
 }
 
-/** 记录单次点击（静默，已做 PII 脱敏） */
+/** 文本脱敏：去除邮箱/手机号/URL/连续数字等 PII 模式，压缩空白并截断 */
+function sanitizeText(raw: string): string {
+  return maskPhone(
+    raw
+      .replace(/https?:\/\/\S+/gi, '[url]')              // URL（可能含 token/分享密钥）
+      .replace(/[\w.+-]+@[\w-]+(?:\.[\w-]+)+/g, '[email]') // 邮箱
+      .replace(/\d{4,}/g, '[num]')                       // 4 位以上连续数字（验证码/ID/卡号等）
+      .replace(/\s+/g, ' ')
+      .trim(),
+  ).slice(0, 50);
+}
+
+/**
+ * 错误 message 脱敏：复用 sanitizeText 的 PII 规则但放宽长度上限，
+ * 保留足够上下文便于排查，同时避免 query/token 等敏感串泄漏（G15-02）。
+ */
+function sanitizeErrorMessage(raw: string): string {
+  // sanitizeText 截断到 50 太短，错误信息放宽到 500
+  return maskPhone(
+    raw
+      .replace(/https?:\/\/\S+/gi, '[url]')
+      .replace(/[\w.+-]+@[\w-]+(?:\.[\w-]+)+/g, '[email]')
+      .replace(/\d{4,}/g, '[num]')
+      .replace(/\s+/g, ' ')
+      .trim(),
+  ).slice(0, 500);
+}
+
+/**
+ * 错误堆栈脱敏：对 stack 中每行出现的 URL 做脱敏（复用 sanitizeUrl 的正则逻辑），
+ * 剥离 query 敏感参数与 hash；堆栈中的 token/分享密钥因此不会随遥测上传（G15-02）。
+ */
+function sanitizeStack(stack: string): string {
+  if (!stack) return '';
+  return stack
+    .split('\n')
+    .map((line) => {
+      // 逐处替换行内的绝对 URL（含协议），其余文本保留
+      return line.replace(/https?:\/\/[^\s)]+/gi, (url) => {
+        // 去掉行尾可能跟随的标点
+        const cleaned = url.replace(/[),;]+$/, '');
+        return sanitizeUrl(cleaned);
+      });
+    })
+    .join('\n')
+    .slice(0, 4000);
+}
+
+/** 记录单次点击（静默，已做 PII 脱敏）；仅在用户显式开启点击上下文采集时生效 */
 function recordClick(e: MouseEvent) {
+  if (!clickContextEnabled) return;
   const el = e.target as HTMLElement;
   if (!el) return;
   // 黑名单过滤：敏感元素（密码框/输入控件/敏感容器）直接不采集
@@ -166,8 +309,9 @@ function startPostErrorCollection() {
   }, CLICK_CONTEXT_POST);
 }
 
-/** 启动点击事件监听 */
+/** 启动点击事件监听（默认关闭，仅当用户显式开启点击上下文采集时才注册） */
 function startClickTracking() {
+  if (!clickContextEnabled) return;
   document.addEventListener('click', recordClick, { passive: true, capture: true });
 }
 
@@ -273,8 +417,44 @@ function printToConsole(event: TelemetryEvent) {
   }
 }
 
+// ---- 错误去重（G15-16）：同一 message+tag 在 1 分钟内只上报一次，错误风暴受控 ----
+const ERROR_DEDUPE_WINDOW_MS = 60_000;
+// 记录最近上报的错误指纹与其时间，超窗自动遗忘，避免无限增长
+const errorDedupeMap = new Map<string, number>();
+// 记录被去重合并的次数，便于诊断（可选，不影响逻辑）
+// let errorDedupeSuppressed = 0;
+
+function shouldDedupeError(event: TelemetryEvent): boolean {
+  if (event.type !== 'error' && event.type !== 'api_error' && event.type !== 'upload_error') {
+    return false;
+  }
+  const d = event.data as Record<string, any> | undefined;
+  if (!d) return false;
+  const tag = String(d.tag || '');
+  const message = String(d.message || '');
+  if (!tag && !message) return false; // 无指纹可去重
+  const key = `${tag}\u0000${message}`;
+  const now = Date.now();
+  const last = errorDedupeMap.get(key);
+  if (last != null && now - last < ERROR_DEDUPE_WINDOW_MS) {
+    // 窗口内重复：合并（仅更新时间戳，防止窗口滑动后重复放行同一持续错误流）
+    errorDedupeMap.set(key, now);
+    return true;
+  }
+  errorDedupeMap.set(key, now);
+  // 防止 Map 无限增长：周期性清理过期指纹
+  if (errorDedupeMap.size > 500) {
+    for (const [k, t] of errorDedupeMap) {
+      if (now - t >= ERROR_DEDUPE_WINDOW_MS) errorDedupeMap.delete(k);
+    }
+  }
+  return false;
+}
+
 /** 添加事件到有界缓冲，触发条件刷新 */
 function enqueue(event: TelemetryEvent) {
+  if (telemetryDisabled) return; // 隐私合规：关闭后丢弃所有事件，不再缓冲/上报
+  if (shouldDedupeError(event)) return; // 错误风暴去重（G15-16）
   buffer.push(event);
   if (buffer.length > MAX_BUFFER_CAPACITY) {
     buffer.splice(0, buffer.length - MAX_BUFFER_CAPACITY);
@@ -291,8 +471,17 @@ function scheduleFlush(delay = FLUSH_INTERVAL_MS) {
   flushTimer = setTimeout(() => void flush(), delay);
 }
 
+/**
+ * 模块级连续失败重试计数（G15-29）：
+ * 之前 flush(retryCount=0) 经 scheduleFlush → flush() 递归调用时参数恒为默认 0，
+ * 指数退避永远停留在第一档，形同失效。改为模块级计数，成功上报后归零，
+ * 失败递增，从而让退避真正生效。
+ */
+let flushFailStreak = 0;
+
 /** 上报缓冲中的遥测数据；失败事件回队并指数退避，避免网络抖动直接丢日志 */
-async function flush(retryCount = 0): Promise<void> {
+async function flush(): Promise<void> {
+  if (telemetryDisabled) return; // 隐私合规：关闭后不再上报
   if (flushInFlight) return flushInFlight;
   if (buffer.length === 0) {
     scheduleFlush();
@@ -307,17 +496,16 @@ async function flush(retryCount = 0): Promise<void> {
 
   flushInFlight = (async () => {
     try {
-      await api.post('/telemetry/report', { events }, {
-        timeout: 5000,
-        headers: { 'X-Telemetry-Internal': '1' },
-      });
+      // 使用独立实例上报，避开主 api 实例的全局拦截副作用（G15-03）
+      await telemetryClient.post('/telemetry/report', { events });
+      flushFailStreak = 0; // 成功后归零，退避重新从第一档开始
       scheduleFlush(buffer.length > 0 ? 0 : FLUSH_INTERVAL_MS);
     } catch {
       buffer = [...events, ...buffer].slice(0, MAX_BUFFER_CAPACITY);
-      const nextRetry = Math.min(retryCount + 1, MAX_FLUSH_RETRIES);
-      const delay = nextRetry >= MAX_FLUSH_RETRIES
+      flushFailStreak = Math.min(flushFailStreak + 1, MAX_FLUSH_RETRIES);
+      const delay = flushFailStreak >= MAX_FLUSH_RETRIES
         ? FLUSH_INTERVAL_MS
-        : RETRY_BASE_DELAY_MS * Math.pow(2, nextRetry - 1);
+        : RETRY_BASE_DELAY_MS * Math.pow(2, flushFailStreak - 1);
       scheduleFlush(delay);
     } finally {
       flushInFlight = null;
@@ -429,11 +617,11 @@ function captureErrors() {
       type: 'error',
       clientTimestamp: Date.now(),
       data: {
-        message: event.message,
-        source: event.filename,
+        message: sanitizeErrorMessage(event.message),
+        source: sanitizeUrl(event.filename || ''),
         lineno: event.lineno,
         colno: event.colno,
-        stack: event.error?.stack || '',
+        stack: sanitizeStack(event.error?.stack || ''),
         tag: 'uncaught',
       },
     });
@@ -447,8 +635,8 @@ function captureErrors() {
       type: 'error',
       clientTimestamp: Date.now(),
       data: {
-        message: reason instanceof Error ? reason.message : String(reason),
-        stack: reason instanceof Error ? reason.stack || '' : '',
+        message: sanitizeErrorMessage(reason instanceof Error ? reason.message : String(reason)),
+        stack: reason instanceof Error ? sanitizeStack(reason.stack || '') : '',
         tag: 'unhandled_rejection',
       },
     });
@@ -551,7 +739,8 @@ function captureEnvironment() {
       browser: navigator.appName || '',
       cookiesEnabled: navigator.cookieEnabled,
       onLine: navigator.onLine,
-      referrer: document.referrer || '',
+      // referrer 可能携带来源页的敏感 query/token，上报前脱敏（G15-12）
+      referrer: sanitizeUrl(document.referrer || ''),
     },
   });
 }
@@ -677,10 +866,10 @@ export function captureVueError(err: unknown, info: string) {
         type: 'error',
         clientTimestamp: now,
         data: {
-          message: `组件渲染失败: ${error.message}`,
+          message: sanitizeErrorMessage(`组件渲染失败: ${error.message}`),
           tag: 'render_failure',
-          stack: error.stack || '',
-          vueInfo: info,
+          stack: sanitizeStack(error.stack || ''),
+          vueInfo: sanitizeErrorMessage(info),
           consecutiveErrors: vueRenderErrorCount,
         },
       });
@@ -698,13 +887,13 @@ export function captureVueError(err: unknown, info: string) {
     type: 'error',
     clientTimestamp: Date.now(),
     data: {
-      message: error.message,
+      message: sanitizeErrorMessage(error.message),
       source: sanitizeUrl(location.href),
       lineno: 0,
       colno: 0,
-      stack: error.stack || '',
+      stack: sanitizeStack(error.stack || ''),
       tag: 'vue',
-      vueInfo: info,
+      vueInfo: sanitizeErrorMessage(info),
     },
   });
 }
@@ -713,26 +902,74 @@ export function captureVueError(err: unknown, info: string) {
 /** 遥测上报端点（与 flush 中 api.post('/telemetry/report') + baseURL '/api' 保持一致） */
 const REPORT_ENDPOINT = '/api/telemetry/report';
 
+/**
+ * 读取 CSRF 双重提交 Cookie（XSRF-TOKEN）。
+ * sendBeacon 无法携带自定义请求头，故将 token 放入 payload 字段，
+ * 由后端在遥测上报接口读取（G15-14）。cookie 缺失时不注入、不报错。
+ */
+function readXsrfToken(): string {
+  try {
+    const m = document.cookie.match(/(?:^|;\s*)XSRF-TOKEN=([^;]*)/);
+    return m && m[1] ? decodeURIComponent(m[1]) : '';
+  } catch {
+    return '';
+  }
+}
+
+/** 同步 XHR 兜底：sendBeacon 不可用或返回 false 时用于卸载瞬间的数据发送（G15-13） */
+function sendViaSyncXhr(payload: string) {
+  try {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', REPORT_ENDPOINT, false); // 同步：保证卸载前完成发送
+    xhr.setRequestHeader('Content-Type', 'application/json');
+    const xsrf = readXsrfToken();
+    if (xsrf) xhr.setRequestHeader('X-XSRF-TOKEN', xsrf);
+    xhr.send(payload);
+  } catch {
+    // 同步 XHR 兜底失败时静默丢弃（已尽力）
+  }
+}
+
 function onUnload() {
+  if (telemetryDisabled) return; // 隐私合规：关闭后不发送残留数据
   if (buffer.length === 0) return;
 
   const events = buffer.splice(0);
-  const payload = JSON.stringify({ events });
+  const xsrfToken = readXsrfToken();
+  // payload 携带 XSRF token 字段：sendBeacon 无法设自定义头，交由后端从 body 校验（G15-14）
+  const payload = JSON.stringify({ events, xsrfToken: xsrfToken || undefined });
 
-  // 使用 sendBeacon 保证页面卸载时可靠发送
-  if (navigator.sendBeacon) {
+  if (typeof navigator.sendBeacon === 'function') {
     try {
       const blob = new Blob([payload], { type: 'application/json' });
-      navigator.sendBeacon(REPORT_ENDPOINT, blob);
+      const queued = navigator.sendBeacon(REPORT_ENDPOINT, blob);
+      // sendBeacon 返回 false（如队列满/大小受限）时降级为同步 XHR，避免丢事件（G15-13）
+      if (!queued) {
+        sendViaSyncXhr(payload);
+      }
+      return;
     } catch {
-      // 静默失败
+      // sendBeacon 抛异常 → 降级同步 XHR
     }
   }
+  // sendBeacon 不存在时走同步 XHR 兜底（G15-13）
+  sendViaSyncXhr(payload);
 }
 
 // ---- 初始化 ----
 export function initTelemetry() {
   if (initialized) return;
+
+  // 隐私合规（PIPL/GDPR opt-out）：用户关闭遥测后，不再注册任何全局监听或上报。
+  if (!isTelemetryEnabled()) {
+    telemetryDisabled = true;
+    console.log('%c🔕 遥测已按用户偏好关闭（telemetryDisabled）', 'color: #999;');
+    return;
+  }
+
+  // 读取点击行为上下文开关（默认关闭，仅显式开启才采集）
+  updateClickContextEnabled();
+
   initialized = true;
 
   // 控制台启动标识（生产环境也显示）

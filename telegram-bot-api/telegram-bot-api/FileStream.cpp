@@ -72,6 +72,17 @@ void FileStreamConnection::on_file_ready(td::int32 file_id, td::int64 total_size
   if (static_cast<td::uint64>(total_size) > static_cast<td::uint64>(std::numeric_limits<std::size_t>::max())) {
     return fail(413, "File is too large for this build");
   }
+  // G16-08: enforce a streaming single-file size cap unconditionally (including --local mode,
+  // where the regular MAX_DOWNLOAD_FILE_SIZE check is skipped). Prevents --local from driving
+  // repeated multi-GB downloads through the streaming endpoint.
+  if (config_.max_size > 0 && total_size > config_.max_size) {
+    return fail(413, "File is too large for the streaming endpoint");
+  }
+  // G16-02: the first-byte timeout was started when the request arrived, which also covered
+  // TDLib initialization and remote-file resolution. Now that the download is confirmed started,
+  // restart the first-byte clock so a cold/remote file whose resolution exceeds the timeout is
+  // not aborted before the first chunk is produced.
+  set_timeout_in(config_.first_byte_timeout);
   cursor_.total_size = total_size;
   auto status = cursor_.update_progress(download_offset, downloaded_prefix_size, is_completed);
   if (status.is_error()) {
@@ -151,6 +162,13 @@ void FileStreamConnection::try_read() {
 
   read_in_flight_ = true;
   td::BufferSlice data(static_cast<std::size_t>(count));
+  // G16-04: this pread is a synchronous, blocking read of up to a full chunk (at most 4 MiB by
+  // default) executed on the FileStreamConnection actor, which inherits the slow-incoming HTTP
+  // scheduler thread. On a slow/contended disk this blocks that shared scheduler thread and can
+  // stall unrelated slow HTTP connections. Recommended follow-up (Linux): migrate the streaming
+  // actor and its disk reads to a dedicated scheduler (e.g. a new per-stream IO thread), or issue
+  // async reads. Conservative mitigation applied here: the maximum chunk size is capped to 1 MiB
+  // (see --file-stream-chunk-size validation) so each blocking read is bounded.
   auto read_size = local_file_.pread(data.as_mutable_slice(), cursor_.next_offset);
   if (read_size.is_error()) {
     read_in_flight_ = false;
@@ -206,8 +224,27 @@ void FileStreamConnection::on_chunk_flushed(td::Result<td::Unit> result) {
     return abort(std::move(status));
   }
   first_byte_sent_ = true;
+  // G16-01: the connection-layer idle timeout (default 500s) is a total connection lifetime cap
+  // and is not refreshed during a streaming transfer. Refresh it on every successfully flushed
+  // chunk so a stream longer than the default is not truncated mid-transfer. The stream-level
+  // idle timeout below remains the real progress timeout.
+  if (!connection_.empty()) {
+    send_closure(connection_, &td::HttpInboundConnection::touch_activity);
+  }
   set_timeout_in(config_.idle_timeout);
   try_read();
+}
+
+void FileStreamConnection::on_headers_flushed(td::Result<td::Unit> result) {
+  if (finished_) {
+    return;
+  }
+  if (result.is_error()) {
+    // The client disconnected before the response headers were flushed. Nothing has been sent,
+    // so abort (and thereby cancel the TDLib download) instead of leaving a zombie stream.
+    return abort(result.move_as_error());
+  }
+  // Headers reached the socket; normal streaming continues from try_read().
 }
 
 void FileStreamConnection::send_headers() {
@@ -226,7 +263,16 @@ void FileStreamConnection::send_headers() {
     return fail(500, "Failed to create streaming response headers");
   }
   headers_sent_ = true;
-  send_closure(connection_, &td::HttpInboundConnection::write_next_noflush, td::BufferSlice(header.ok()));
+  // G16-03: write the response headers with a promise so that a client disconnect before the
+  // headers reach the socket is surfaced to this actor. Without this, the response headers are
+  // queued but a dropped client produces no callback while TDLib has already started the whole
+  // file download, leaving a zombie stream consuming bandwidth and a slot.
+  auto promise = td::PromiseCreator::lambda(
+      [actor_id = actor_id(this)](td::Result<td::Unit> result) mutable {
+        send_closure(actor_id, &FileStreamConnection::on_headers_flushed, std::move(result));
+      });
+  send_closure(connection_, &td::HttpInboundConnection::write_next_with_promise, td::BufferSlice(header.ok()),
+               std::move(promise));
 }
 
 void FileStreamConnection::finish() {

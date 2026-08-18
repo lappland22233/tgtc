@@ -260,6 +260,7 @@ import { ref, reactive, computed, onMounted, onUnmounted, nextTick, h } from 'vu
 import { useRoute, useRouter } from 'vue-router';
 import * as echarts from '@/utils/echarts';
 import client from '../../api/client';
+import MessagePlugin from '@/utils/message';
 import { useMobile } from '../../composables/useMobile';
 import { CHART_COLORS, tooltipBase, legendBase, areaGradient, ensureCyberTheme } from '../../utils/echarts-theme';
 
@@ -326,11 +327,33 @@ interface RecordItem {
   clientTimestamp: number | string | null;
   createdAt: string;
 }
+// 敏感筛选（IP/用户ID）不写入 URL（G14-19）：
+// 这些个人标识会随 URL 进入浏览器历史/分享链接/访问日志，改为存入 sessionStorage，
+// URL 仅保留非敏感筛选字段。
+const SESSION_IP_KEY = 'telemetryFilterIp';
+const SESSION_USERID_KEY = 'telemetryFilterUserId';
+function readSessionFilter(key: string): string {
+  try {
+    return sessionStorage.getItem(key) || '';
+  } catch {
+    return '';
+  }
+}
+function writeSessionFilter(key: string, value: string) {
+  try {
+    if (value) sessionStorage.setItem(key, value);
+    else sessionStorage.removeItem(key);
+  } catch {
+    /* 存储不可用时静默降级 */
+  }
+}
+
 const records = ref<RecordItem[]>([]);
 const recordsLoading = ref(false);
 const typeFilter = ref(queryString(route.query.type));
-const ipFilter = ref(queryString(route.query.ip));
-const userIdFilter = ref(queryString(route.query.userId));
+// 敏感字段初始值从 sessionStorage 读取，不再从 URL 读取
+const ipFilter = ref(readSessionFilter(SESSION_IP_KEY));
+const userIdFilter = ref(readSessionFilter(SESSION_USERID_KEY));
 const errorTypeFilter = ref(queryString(route.query.errorType));
 const keywordFilter = ref(queryString(route.query.keyword));
 const errorTypeOptions = [
@@ -448,6 +471,17 @@ function formatNumber(n: number | undefined): string {
   return n.toString();
 }
 
+// 转义 HTML 特殊字符，用于 ECharts tooltip 内展示不可信文本（如客户端上报的 url），
+// 防止存储型 XSS。
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 function formatTime(t: string): string {
   if (!t) return '-';
   const d = new Date(t);
@@ -486,6 +520,18 @@ function openDetail(row: RecordItem) {
 }
 
 // ---- API 请求 ----
+// 失败提示去重（G14-20）：同一错误文案短时间内只提示一次，避免自动刷新下 toast 风暴
+const TELEMETRY_ERROR_DEDUPE_MS = 5000;
+let lastTelemetryError = '';
+let lastTelemetryErrorAt = 0;
+function notifyTelemetryError(message: string) {
+  const now = Date.now();
+  if (message === lastTelemetryError && now - lastTelemetryErrorAt < TELEMETRY_ERROR_DEDUPE_MS) return;
+  lastTelemetryError = message;
+  lastTelemetryErrorAt = now;
+  MessagePlugin.error(message);
+}
+
 async function fetchStats() {
   const gen = ++statsGen;
   try {
@@ -496,7 +542,10 @@ async function fetchStats() {
     updateTrendChart();
     updatePieChart();
   } catch (e) {
-    if (gen === statsGen) console.error('获取遥测统计失败:', e);
+    if (gen === statsGen) {
+      console.error('获取遥测统计失败:', e);
+      notifyTelemetryError('加载遥测统计失败');
+    }
   }
 }
 
@@ -524,7 +573,10 @@ async function fetchRecords() {
     records.value = body.items || [];
     pagination.total = body.total || 0;
   } catch (e) {
-    if (gen === recordsGen) console.error('获取遥测记录失败:', e);
+    if (gen === recordsGen) {
+      console.error('获取遥测记录失败:', e);
+      notifyTelemetryError('加载遥测记录失败');
+    }
   } finally {
     if (gen === recordsGen) recordsLoading.value = false;
   }
@@ -536,6 +588,7 @@ async function fetchErrors() {
     errors.value = (res.data.data || res.data) || [];
   } catch (e) {
     console.error('获取错误列表失败:', e);
+    notifyTelemetryError('加载错误列表失败');
   }
 }
 
@@ -550,6 +603,7 @@ async function fetchPerformance() {
     updatePerfChart();
   } catch (e) {
     console.error('获取性能概览失败:', e);
+    notifyTelemetryError('加载性能概览失败');
   }
 }
 
@@ -564,11 +618,13 @@ async function refreshAll(silent = false) {
 }
 
 function syncQueryState() {
+  // 敏感筛选（IP/用户ID）存入 sessionStorage，不写入 URL（G14-19）
+  writeSessionFilter(SESSION_IP_KEY, ipFilter.value.trim());
+  writeSessionFilter(SESSION_USERID_KEY, userIdFilter.value.trim());
+
   const query: Record<string, string> = {};
   if (timeRange.value !== '24h') query.timeRange = timeRange.value;
   if (typeFilter.value) query.type = typeFilter.value;
-  if (ipFilter.value.trim()) query.ip = ipFilter.value.trim();
-  if (userIdFilter.value.trim()) query.userId = userIdFilter.value.trim();
   if (errorTypeFilter.value) query.errorType = errorTypeFilter.value;
   if (keywordFilter.value.trim()) query.keyword = keywordFilter.value.trim();
   if (pagination.current > 1) query.page = String(pagination.current);
@@ -758,7 +814,9 @@ function updatePerfChart() {
         const p = reversed[idx];
         if (!p) return '';
         const lines = params.map((s: any) => s.marker + ' ' + s.seriesName + ': ' + s.value + 'ms').join('<br/>');
-        return '<b>' + p.url + '</b><br/>' + lines + '<br/>总计: ' + p.pageLoad + 'ms · 样本: ' + p.count;
+        // p.url 来自客户端遥测上报，属不可信输入；tooltip 按 HTML 渲染，
+        // 必须先转义，否则恶意 url 构成存储型 XSS。
+        return '<b>' + escapeHtml(String(p.url ?? '')) + '</b><br/>' + lines + '<br/>总计: ' + p.pageLoad + 'ms · 样本: ' + p.count;
       },
     },
     legend: { data: stages.map(s => s.name), ...legendBase, bottom: 0 },

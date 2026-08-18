@@ -134,7 +134,11 @@ function getBarHeight(count: number) {
 
 onMounted(async () => {
   await fetchData();
-  refreshTimer = window.setInterval(fetchData, 30_000);
+  refreshTimer = window.setInterval(() => {
+    // 后台标签页不轮询，避免空转（G15-27）
+    if (document.hidden) return;
+    void fetchData();
+  }, 30_000);
 });
 
 onUnmounted(() => {

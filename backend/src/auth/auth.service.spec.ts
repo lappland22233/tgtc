@@ -191,6 +191,15 @@ describe('AuthService - 邮箱验证开关与登录拦截', () => {
     findOne: jest.fn(),
     count: jest.fn(),
     update: jest.fn(),
+    createQueryBuilder: jest.fn(),
+  };
+  /** login 现用 createQueryBuilder().addSelect('user.password') 显式加载密码 */
+  const mockUserQuery = (user: any) => {
+    (mockUserRepo.createQueryBuilder as jest.Mock).mockReturnValue({
+      addSelect: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      getOne: jest.fn().mockResolvedValue(user),
+    });
   };
 
   const mockBannedIPRepo = {
@@ -374,14 +383,14 @@ describe('AuthService - 邮箱验证开关与登录拦截', () => {
         key === 'EMAIL_VERIFICATION_ENABLED' ? 'true' : 'false',
       );
       wireNoBannedIP();
-      mockUserRepo.findOne.mockResolvedValue(buildUser(false));
+      mockUserQuery(buildUser(false));
 
       await expect(
         service.login({ email: 'user@example.com', password: 'Correct#123' } as any, '127.0.0.1'),
       ).rejects.toThrow(UnauthorizedException);
       await expect(
         service.login({ email: 'user@example.com', password: 'Correct#123' } as any, '127.0.0.1'),
-      ).rejects.toThrow('请先验证邮箱');
+      ).rejects.toThrow('邮箱或密码错误');
     });
 
     it('开关开启时：已验证账号放行', async () => {
@@ -389,7 +398,7 @@ describe('AuthService - 邮箱验证开关与登录拦截', () => {
         key === 'EMAIL_VERIFICATION_ENABLED' ? 'true' : 'false',
       );
       wireNoBannedIP();
-      mockUserRepo.findOne.mockResolvedValue(buildUser(true));
+      mockUserQuery(buildUser(true));
       mockUserRepo.update.mockResolvedValue({ affected: 1 });
 
       const result = await service.login(
@@ -404,7 +413,7 @@ describe('AuthService - 邮箱验证开关与登录拦截', () => {
     it('开关关闭时：未验证账号也放行（拦截仅在开关开启时生效）', async () => {
       mockConfigCacheService.get.mockResolvedValue('false');
       wireNoBannedIP();
-      mockUserRepo.findOne.mockResolvedValue(buildUser(false));
+      mockUserQuery(buildUser(false));
       mockUserRepo.update.mockResolvedValue({ affected: 1 });
 
       const result = await service.login(

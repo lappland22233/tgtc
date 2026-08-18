@@ -178,8 +178,12 @@ int main(int argc, char *argv[]) {
   bool need_print_version = false;
   int http_port = 8081;
   int http_stat_port = 0;
-  td::string http_ip_address = "0.0.0.0";
-  td::string http_stat_ip_address = "0.0.0.0";
+  // G16-05: default to loopback only. The Bot API server carries bot tokens in the clear, so it
+  // must sit behind a TLS-terminating reverse proxy on the same host. Listening on all interfaces
+  // by default would expose the token on the network. Use --http-ip-address to bind elsewhere and
+  // ensure the --file-stream-allow-ip allowlist restricts the streaming endpoint.
+  td::string http_ip_address = "127.0.0.1";
+  td::string http_stat_ip_address = "127.0.0.1";
   td::string log_file_path;
   int default_verbosity_level = 0;
   int memory_verbosity_level = VERBOSITY_NAME(INFO);
@@ -225,6 +229,14 @@ int main(int argc, char *argv[]) {
   options.add_checked_option('\0', "file-stream-write-high-watermark",
                              "maximum queued streaming response bytes per connection",
                              td::OptionParser::parse_integer(parameters->file_stream_write_high_watermark_));
+  options.add_option('\0', "file-stream-allow-ip",
+                     "comma-separated list of IP addresses or CIDR networks allowed to use the file "
+                     "streaming endpoint; if unset, only loopback and private networks are allowed",
+                     td::OptionParser::parse_string(parameters->file_stream_allow_ip_));
+  options.add_checked_option('\0', "file-stream-max-size",
+                             "maximum single-file size in bytes allowed to be served by the file "
+                             "streaming endpoint (always enforced, including --local mode)",
+                             td::OptionParser::parse_integer(parameters->file_stream_max_size_));
   options.add_checked_option('\0', "workdir-cleanup-threshold-bytes",
                              "workdir usage warning threshold which triggers asynchronous cleanup",
                              td::OptionParser::parse_integer(parameters->workdir_cleanup_threshold_bytes_));
@@ -344,8 +356,11 @@ int main(int argc, char *argv[]) {
     return td::Status::OK();
   });
   options.add_check([&] {
-    if (parameters->file_stream_chunk_size_ < (16 << 10) || parameters->file_stream_chunk_size_ > (4 << 20)) {
-      return td::Status::Error("File stream chunk size must be between 16384 and 4194304 bytes");
+    // G16-04: cap the maximum chunk size at 1 MiB. The streaming actor performs a synchronous,
+    // blocking pread of one chunk on the shared slow-incoming scheduler thread, so a larger chunk
+    // would block that thread for longer on a slow disk. (See the comment in FileStream.cpp.)
+    if (parameters->file_stream_chunk_size_ < (16 << 10) || parameters->file_stream_chunk_size_ > (1 << 20)) {
+      return td::Status::Error("File stream chunk size must be between 16384 and 1048576 bytes");
     }
     if (parameters->file_stream_max_connections_ <= 0) {
       return td::Status::Error("File stream max connections must be positive");
@@ -355,6 +370,9 @@ int main(int argc, char *argv[]) {
     }
     if (parameters->file_stream_write_high_watermark_ < parameters->file_stream_chunk_size_) {
       return td::Status::Error("File stream write high watermark must not be smaller than chunk size");
+    }
+    if (parameters->file_stream_max_size_ < 0) {
+      return td::Status::Error("File stream max size must be non-negative");
     }
     if (parameters->workdir_cleanup_threshold_bytes_ <= 0 || parameters->workdir_cleanup_target_bytes_ < 0 ||
         parameters->workdir_cleanup_target_bytes_ >= parameters->workdir_cleanup_threshold_bytes_) {
@@ -537,6 +555,8 @@ int main(int argc, char *argv[]) {
   file_stream_config.first_byte_timeout = parameters->file_stream_first_byte_timeout_;
   file_stream_config.idle_timeout = parameters->file_stream_idle_timeout_;
   file_stream_config.write_high_watermark = parameters->file_stream_write_high_watermark_;
+  file_stream_config.max_size = parameters->file_stream_max_size_;
+  file_stream_config.allow_ip = parameters->file_stream_allow_ip_;
 
   auto client_manager = sched
                               .create_actor_unsafe<ClientManager>(SharedData::get_client_scheduler_id(), "ClientManager",

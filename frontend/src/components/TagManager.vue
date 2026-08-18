@@ -47,7 +47,7 @@
           theme="danger"
           variant="text"
           size="small"
-          @click="handleDelete(tag.id)"
+          @click.stop="handleDelete(tag.id)"
         >
           删除
         </t-button>
@@ -62,6 +62,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue';
+import { DialogPlugin } from 'tdesign-vue-next/es/dialog';
 import { useTagStore } from '../stores/tags';
 import { useAuthStore } from '../stores/auth';
 import MessagePlugin from '@/utils/message';
@@ -133,13 +134,26 @@ const deletingIds = ref(new Set<string>());
 
 async function handleDelete(id: string) {
   if (deletingIds.value.has(id)) return;
-  deletingIds.value.add(id);
-  try {
-    await tagStore.deleteTag(id);
-  } catch (err) {
-    MessagePlugin.error(getErrorMessage(err) || '删除标签失败');
-  } finally {
-    deletingIds.value.delete(id);
-  }
+  const tag = tagStore.tags?.find((t) => t.id === id);
+  const confirmDialog = DialogPlugin.confirm({
+    header: '删除标签',
+    body: `确定删除标签「${tag?.name || ''}」吗？删除后将解除该标签与文件的关联。`,
+    theme: 'warning',
+    confirmBtn: '删除',
+    cancelBtn: '取消',
+    onConfirm: async () => {
+      deletingIds.value.add(id);
+      try {
+        await tagStore.deleteTag(id);
+        MessagePlugin.success('标签已删除');
+      } catch (err) {
+        MessagePlugin.error(getErrorMessage(err) || '删除标签失败');
+      } finally {
+        deletingIds.value.delete(id);
+        confirmDialog.destroy();
+      }
+    },
+    onClose: () => confirmDialog.destroy(),
+  });
 }
 </script>

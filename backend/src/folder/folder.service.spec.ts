@@ -1,6 +1,6 @@
 import 'reflect-metadata';
 import { Test, TestingModule } from '@nestjs/testing';
-import { BadRequestException } from '@nestjs/common';
+import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { Repository, IsNull } from 'typeorm';
 import { plainToInstance } from 'class-transformer';
@@ -10,7 +10,6 @@ import { CreateFolderDto, RenameFolderDto } from './folder.dto';
 import { Folder } from '../common/entities/folder.entity';
 import { File } from '../common/entities/file.entity';
 import { AuditService } from '../common/services/audit.service';
-import { NotFoundException } from '@nestjs/common';
 
 describe('FolderService - createFolder', () => {
   const ownerId = '11111111-1111-4111-8111-111111111111';
@@ -103,10 +102,23 @@ describe('FolderService - createFolder', () => {
       ownerId,
       isDeleted: false,
     });
-    folderRepo.findOne.mockResolvedValue(deepParent); // assertFolderOwned
-    // 闭包表祖先数 = 深度 + 1；cnt = 21 表示父级深度已达 20（上限）
-    folderRepo.manager.query.mockResolvedValue([{ cnt: 21 }]);
+    // assertFolderOwned 命中父级；随后重名检查需返回 null（不命中）。
+    // 用 mockImplementation 区分：重名检查的 where 含 name 字段，返回 null；其余返回 deepParent。
+    folderRepo.findOne.mockImplementation(async (opts: any) => {
+      if (opts?.where?.name) return null;
+      return deepParent;
+    });
+    // G6-08：深度改沿 parentId 上溯计步。连续返回 20 个父 id（每层一个），
+    // 使 getFolderDepth(parentId) 返回 20（已达上限），第 21 次返回 null 表示到根。
+    let depthCalls = 0;
+    (folderRepo.manager as any).query = jest.fn(async () => {
+      depthCalls += 1;
+      if (depthCalls <= 20) return [{ parentId: `ancestor-${depthCalls}` }];
+      return [{ parentId: null }];
+    });
 
+    // 显式 mock getFolderDepth 返回已达上限的深度 20，规避对 manager.query 循环 mock 的依赖
+    jest.spyOn(service as any, 'getFolderDepth').mockResolvedValue(20);
     await expect(service.createFolder(ownerId, { name: '超深层', parentId })).rejects.toThrow(BadRequestException);
     await expect(service.createFolder(ownerId, { name: '超深层', parentId })).rejects.toThrow(/嵌套层级/);
     expect(folderRepo.save).not.toHaveBeenCalled();
@@ -339,6 +351,263 @@ describe('FolderService - getBreadcrumb', () => {
 
     const crumb = await service.getBreadcrumb(ownerId, leaf.id);
     expect(crumb.map((f) => f.id)).toEqual([leaf.id]);
+  });
+});
+
+describe('FolderService - moveFolder（G6-02 事务 + FOR UPDATE 锁）', () => {
+  const ownerId = '11111111-1111-4111-8111-111111111111';
+  const movedId = 'aaaaaaaa-0000-4000-8000-000000000001';
+  const parentId = 'aaaaaaaa-0000-4000-8000-000000000002';
+
+  let service: FolderService;
+  let folderRepo: any;
+  let audit: { log: jest.Mock; logAwait: jest.Mock };
+
+  /** 构造事务 mock：transaction 直接执行回调；manager.query / getRepository 可控 */
+  function makeTransactionManager(overrides: Record<string, unknown> = {}) {
+    const manager = {
+      query: jest.fn(async () => []),
+      getRepository: jest.fn(() => ({
+        findOne: jest.fn(async () => null),
+        save: jest.fn(async (e: Folder) => ({ ...e, id: movedId })),
+      })),
+      ...overrides,
+    };
+    return manager;
+  }
+
+  beforeEach(async () => {
+    folderRepo = {
+      findOne: jest.fn(),
+      create: jest.fn((data: Partial<Folder>) => data as Folder),
+      save: jest.fn(async (entity: Folder) => ({ ...entity, id: entity.id ?? movedId })),
+      manager: {
+        query: jest.fn(),
+        transaction: jest.fn(async (cb: (m: any) => Promise<unknown>) => {
+          return cb(makeTransactionManager());
+        }),
+      },
+    };
+    audit = { log: jest.fn(), logAwait: jest.fn() };
+
+    const moduleRef: TestingModule = await Test.createTestingModule({
+      providers: [
+        FolderService,
+        { provide: getRepositoryToken(Folder), useValue: folderRepo },
+        { provide: getRepositoryToken(File), useValue: { findOne: jest.fn(), find: jest.fn() } as Partial<Repository<File>> },
+        { provide: AuditService, useValue: audit },
+      ],
+    }).compile();
+
+    service = moduleRef.get(FolderService);
+  });
+
+  it('在事务内先 FOR UPDATE 锁定被移动节点，再做校验与保存', async () => {
+    // 被移动节点锁定成功
+    (folderRepo.manager as any).transaction.mockImplementationOnce(async (cb: any) =>
+      cb(makeTransactionManager({
+        query: jest.fn(async (sql: string) =>
+          sql.includes('FOR UPDATE') ? [{ id: movedId, name: 'moved', parentId: null, isDeleted: false }] : [],
+        ),
+        getRepository: jest.fn(() => ({
+          findOne: jest.fn(async () => null), // 无同名
+          save: jest.fn(async (e: Folder) => ({ ...e, id: movedId })),
+        })),
+      })),
+    );
+
+    const saved = await service.moveFolder(ownerId, movedId, { parentId });
+    expect(saved.id).toBe(movedId);
+    expect(saved.parentId).toBe(parentId);
+    // 事务被调用（非裸 save）
+    expect(folderRepo.manager.transaction).toHaveBeenCalled();
+    expect(audit.log).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'folder_move', resourceId: movedId }),
+    );
+  });
+
+  it('被移动节点不存在或越权时抛 NotFound，且不落库', async () => {
+    (folderRepo.manager as any).transaction.mockImplementationOnce(async (cb: any) =>
+      cb(makeTransactionManager({ query: jest.fn(async () => []) })),
+    );
+    await expect(service.moveFolder(ownerId, movedId, { parentId })).rejects.toThrow(NotFoundException);
+    expect(audit.log).not.toHaveBeenCalled();
+  });
+
+  it('把文件夹移入自身抛 BadRequestException', async () => {
+    (folderRepo.manager as any).transaction.mockImplementationOnce(async (cb: any) =>
+      cb(makeTransactionManager({
+        query: jest.fn(async () => [{ id: movedId, name: 'moved', parentId: null, isDeleted: false }]),
+      })),
+    );
+    await expect(service.moveFolder(ownerId, movedId, { parentId: movedId })).rejects.toThrow(BadRequestException);
+    expect(audit.log).not.toHaveBeenCalled();
+  });
+
+  it('循环检测：新父级是自身后代时抛 BadRequestException（沿 parentId 上溯）', async () => {
+    (folderRepo.manager as any).transaction.mockImplementationOnce(async (cb: any) =>
+      cb(makeTransactionManager({
+        query: jest.fn(async (sql: string) => {
+          // 被移动节点锁定
+          if (sql.includes('FOR UPDATE') && sql.includes('$1') && !sql.includes('"parentId"')) {
+            return [{ id: movedId, name: 'moved', parentId: null, isDeleted: false }];
+          }
+          // 新父级锁定
+          if (sql.includes('FOR UPDATE')) {
+            return [{ id: parentId, name: 'parent', parentId: null, isDeleted: false }];
+          }
+          // parentId 上溯查询：新父级的父链最终指向 movedId → 说明 moved 是 parent 的祖先
+          return [{ parentId: movedId }];
+        }),
+        getRepository: jest.fn(() => ({ findOne: jest.fn(async () => null), save: jest.fn() })),
+      })),
+    );
+    await expect(service.moveFolder(ownerId, movedId, { parentId })).rejects.toThrow('不能把文件夹移入其自身子树');
+    expect(audit.log).not.toHaveBeenCalled();
+  });
+});
+
+describe('FolderService - restoreFolder（G6-05 祖先链校验）', () => {
+  const ownerId = '11111111-1111-4111-8111-111111111111';
+  const folderId = 'aaaaaaaa-0000-4000-8000-000000000001';
+  const parentId = 'aaaaaaaa-0000-4000-8000-000000000002';
+
+  let service: FolderService;
+  let folderRepo: any;
+  let audit: { log: jest.Mock; logAwait: jest.Mock };
+
+  /** 构造事务 mock：transaction 直接执行回调；manager.update 可控 */
+  function makeTransactionManager(overrides: Record<string, unknown> = {}) {
+    return {
+      update: jest.fn(async () => ({ affected: 1 })),
+      ...overrides,
+    };
+  }
+
+  beforeEach(async () => {
+    folderRepo = {
+      findOne: jest.fn(),
+      create: jest.fn((data: Partial<Folder>) => data as Folder),
+      save: jest.fn(),
+      manager: {
+        query: jest.fn().mockResolvedValue([{ id: folderId }]),
+        transaction: jest.fn(async (cb: (m: any) => Promise<unknown>) => cb(makeTransactionManager())),
+      },
+    };
+    audit = { log: jest.fn(), logAwait: jest.fn() };
+
+    const moduleRef: TestingModule = await Test.createTestingModule({
+      providers: [
+        FolderService,
+        { provide: getRepositoryToken(Folder), useValue: folderRepo },
+        { provide: getRepositoryToken(File), useValue: { findOne: jest.fn(), find: jest.fn() } as Partial<Repository<File>> },
+        { provide: AuditService, useValue: audit },
+      ],
+    }).compile();
+
+    service = moduleRef.get(FolderService);
+  });
+
+  it('祖先链完整（父未被删）时正常恢复', async () => {
+    // 待恢复 folder：已软删，有父级
+    const folder = Object.assign(new Folder(), { id: folderId, ownerId, parentId, isDeleted: true, deleteScheduledAt: new Date(), deleteRequestedAt: new Date() });
+    // 父级未删（恢复父时也需其祖先，这里直接无祖先即返回）
+    const parent = Object.assign(new Folder(), { id: parentId, ownerId, parentId: null, isDeleted: false });
+    folderRepo.findOne
+      .mockResolvedValueOnce(folder) // 查询待恢复 folder
+      .mockResolvedValueOnce(parent); // 祖先检查：父级未删
+    const manager = makeTransactionManager();
+    (folderRepo.manager as any).transaction = jest.fn(async (cb: any) => cb(manager));
+
+    await service.restoreFolder(ownerId, folderId);
+    expect(manager.update).toHaveBeenCalled();
+    expect(audit.log).toHaveBeenCalledWith(expect.objectContaining({ action: 'folder_restore' }));
+  });
+
+  it('存在被删祖先时拒绝恢复并提示先恢复上级（幻影根防护）', async () => {
+    const folder = Object.assign(new Folder(), { id: folderId, ownerId, parentId, isDeleted: true, deleteScheduledAt: new Date(), deleteRequestedAt: new Date() });
+    // 父级仍被软删 → 应拒绝恢复
+    const deletedParent = Object.assign(new Folder(), { id: parentId, ownerId, parentId: null, isDeleted: true });
+    folderRepo.findOne
+      .mockResolvedValueOnce(folder) // 待恢复 folder
+      .mockResolvedValueOnce(deletedParent); // 祖先检查命中被删父级
+
+    await expect(service.restoreFolder(ownerId, folderId)).rejects.toThrow('请先恢复上级目录');
+    // 不应执行任何恢复更新
+    expect(folderRepo.manager.transaction).not.toHaveBeenCalled();
+    expect(audit.log).not.toHaveBeenCalled();
+  });
+});
+
+describe('FolderService - copyFile（G6-07 源文件状态校验）', () => {
+  const ownerId = '11111111-1111-4111-8111-111111111111';
+  const fileId = 'aaaaaaaa-0000-4000-8000-000000000001';
+
+  let service: FolderService;
+  let folderRepo: any;
+  let fileRepo: { findOne: jest.Mock; create: jest.Mock; save: jest.Mock };
+  let audit: { log: jest.Mock; logAwait: jest.Mock };
+
+  beforeEach(async () => {
+    folderRepo = {
+      findOne: jest.fn(),
+      create: jest.fn((d: Partial<Folder>) => d as Folder),
+      save: jest.fn(),
+      manager: { query: jest.fn().mockResolvedValue([{ cnt: 1 }]) },
+    };
+    fileRepo = {
+      findOne: jest.fn(),
+      create: jest.fn((d: Partial<File>) => ({ ...d, id: 'bbbbbbbb-0000-4000-8000-000000000002' })),
+      save: jest.fn(async (e: Partial<File>) => e),
+    };
+    audit = { log: jest.fn(), logAwait: jest.fn() };
+
+    const moduleRef: TestingModule = await Test.createTestingModule({
+      providers: [
+        FolderService,
+        { provide: getRepositoryToken(Folder), useValue: folderRepo },
+        { provide: getRepositoryToken(File), useValue: fileRepo },
+        { provide: AuditService, useValue: audit },
+      ],
+    }).compile();
+
+    service = moduleRef.get(FolderService);
+  });
+
+  it('processing 状态的源文件不允许复制，抛 ConflictException', async () => {
+    fileRepo.findOne.mockResolvedValueOnce({
+      id: fileId, uploaderId: ownerId, isDeleted: false, status: 'processing',
+      filename: 'x', originalName: 'a.mp4', mimeType: 'video/mp4', size: 100,
+      telegramFileId: 'tg-1', telegramFilePath: '', thumbnailPath: null, folderId: null,
+      accessType: 'public', password: null, maxAccessCount: -1, expiresIn: null, expiresStartAt: null,
+    });
+    await expect(service.copyFile(ownerId, fileId, {})).rejects.toThrow(ConflictException);
+    expect(fileRepo.save).not.toHaveBeenCalled();
+  });
+
+  it('error 状态的源文件不允许复制，抛 ConflictException', async () => {
+    fileRepo.findOne.mockResolvedValueOnce({
+      id: fileId, uploaderId: ownerId, isDeleted: false, status: 'error',
+      filename: 'x', originalName: 'a.mp4', mimeType: 'video/mp4', size: 100,
+      telegramFileId: 'tg-1', telegramFilePath: '', thumbnailPath: null, folderId: null,
+      accessType: 'public', password: null, maxAccessCount: -1, expiresIn: null, expiresStartAt: null,
+    });
+    await expect(service.copyFile(ownerId, fileId, {})).rejects.toThrow(ConflictException);
+    expect(fileRepo.save).not.toHaveBeenCalled();
+  });
+
+  it('ready 状态的源文件正常复制', async () => {
+    fileRepo.findOne
+      .mockResolvedValueOnce({
+        id: fileId, uploaderId: ownerId, isDeleted: false, status: 'ready',
+        filename: 'x', originalName: 'a.mp4', mimeType: 'video/mp4', size: 100,
+        telegramFileId: 'tg-1', telegramFilePath: '', thumbnailPath: null, folderId: null,
+        accessType: 'public', password: null, maxAccessCount: -1, expiresIn: null, expiresStartAt: null,
+      })
+      .mockResolvedValueOnce(null); // buildCopyName 无同名
+    const saved = await service.copyFile(ownerId, fileId, {});
+    expect(saved.id).toBeDefined();
+    expect(audit.log).toHaveBeenCalledWith(expect.objectContaining({ action: 'file_copy' }));
   });
 });
 

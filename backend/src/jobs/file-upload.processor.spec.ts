@@ -50,7 +50,7 @@ function makeRepo() {
   return {
     findOne: jest.fn(),
     findOneOrFail: jest.fn(),
-    update: jest.fn().mockResolvedValue({}),
+    update: jest.fn().mockResolvedValue({ affected: 1 }),
     query: jest.fn().mockResolvedValue([]),
   };
 }
@@ -184,8 +184,8 @@ describe('FileUploadProcessor failure persistence', () => {
     );
     // ready 原生 SQL 再次清空，覆盖任务恢复/旧数据边界；status IN 允许覆盖僵尸任务误标的 error
     expect(repo.query).toHaveBeenCalledWith(
-      'UPDATE files SET status = $1, "uploadFailureReason" = NULL WHERE id = $2 AND status IN ($3, $4)',
-      ['ready', fileId, 'processing', 'error'],
+      'UPDATE files SET status = $1, "uploadFailureReason" = NULL WHERE id = $2 AND status IN ($3, $4) AND "uploadVersion" = $5',
+      ['ready', fileId, 'processing', 'error', uploadVersion],
     );
   });
 
@@ -200,8 +200,8 @@ describe('FileUploadProcessor failure persistence', () => {
     await processor.uploadToTelegram(makeJob(0));
 
     expect(repo.query).toHaveBeenCalledWith(
-      'UPDATE files SET status = $1, "uploadFailureReason" = NULL WHERE id = $2 AND status IN ($3, $4)',
-      ['ready', fileId, 'processing', 'error'],
+      'UPDATE files SET status = $1, "uploadFailureReason" = NULL WHERE id = $2 AND status IN ($3, $4) AND "uploadVersion" = $5',
+      ['ready', fileId, 'processing', 'error', uploadVersion],
     );
   });
 
@@ -232,13 +232,64 @@ describe('FileUploadProcessor failure persistence', () => {
     repo.findOneOrFail
       .mockResolvedValueOnce(makeFile({ uploadStage: 'uploading' }))
       .mockResolvedValueOnce(makeFile({ uploadStage: 'remote_committed', telegramFileId: '   ' }));
-    // loadReceipt 返回空 file_id 的陈旧回执
-    mockedReadFile.mockResolvedValueOnce(JSON.stringify({ file_id: '', file_path: 'documents/x' }));
+    // loadReceipt 返回空 file_id 的陈旧回执（版本匹配，校验 file_id 为空被拒）
+    mockedReadFile.mockResolvedValueOnce(JSON.stringify({ file_id: '', file_path: 'documents/x', uploadVersion }));
     const processor = makeProcessor(repo, { uploadFile: jest.fn() });
 
     await expect(processor.uploadToTelegram(makeJob(0))).rejects.toThrow('缺少有效 file_id');
     // 不允许任何 ready 置位
     const readyQueries = repo.query.mock.calls.filter((c) => String(c[0]).includes("status = $1"));
     expect(readyQueries).toHaveLength(0);
+  });
+
+  it('G3-13 aborts when the CAS to uploading misses (affected = 0)', async () => {
+    mockedExistsSync.mockReturnValue(true);
+    const repo = makeRepo();
+    repo.findOne.mockResolvedValue(makeFile());
+    repo.update.mockResolvedValue({ affected: 0 }); // 升 uploading 未命中
+    const processor = makeProcessor(repo, { uploadFile: jest.fn() });
+
+    await processor.uploadToTelegram(makeJob(0));
+
+    // 不应继续上传或提交
+    expect(repo.update.mock.calls.some((c) => (c[1] as any)?.uploadStage === 'remote_committed')).toBe(false);
+    expect(repo.query).not.toHaveBeenCalled();
+  });
+
+  it('G3-13 does not overwrite a newer uploadVersion when the remote commit update misses', async () => {
+    mockedExistsSync.mockReturnValue(true);
+    const repo = makeRepo();
+    repo.findOne
+      .mockResolvedValueOnce(makeFile())
+      .mockResolvedValueOnce(makeFile({ uploadStage: 'remote_committed', telegramFileId: 'tg-id' }));
+    repo.findOneOrFail.mockResolvedValueOnce(makeFile({ uploadStage: 'uploading' }));
+    // 提交更新 0 命中（并发覆盖已把 uploadVersion 递增）→ 不得置 ready
+    repo.update.mockResolvedValueOnce({ affected: 1 }).mockResolvedValueOnce({ affected: 0 });
+    const telegram = { uploadFile: jest.fn().mockResolvedValue({ file_id: 'tg-id' }) };
+    const processor = makeProcessor(repo, telegram);
+
+    await expect(processor.uploadToTelegram(makeJob(0))).rejects.toThrow('条件未命中');
+    expect(repo.query).not.toHaveBeenCalled();
+  });
+
+  it('G3-14 marks recoverable and keeps artifacts when retries exhaust with a remote receipt', async () => {
+    mockedExistsSync.mockReturnValue(true);
+    const repo = makeRepo();
+    repo.findOne.mockResolvedValue(makeFile());
+    repo.findOneOrFail.mockResolvedValue(makeFile({ uploadStage: 'uploading' }));
+    // 首次提交 update 抛错（DB 失败），loadReceipt 返回有效回执
+    repo.update
+      .mockResolvedValueOnce({ affected: 1 })          // CAS 升 uploading
+      .mockRejectedValueOnce(new Error('db write failed')) // 提交失败
+      .mockResolvedValueOnce({ affected: 1 });          // recoverable 标记
+    mockedReadFile.mockResolvedValue(JSON.stringify({ file_id: 'tg-id', file_path: 'documents/x', uploadVersion }));
+    const processor = makeProcessor(repo, { uploadFile: jest.fn() });
+
+    await expect(processor.uploadToTelegram(makeJob(2))).rejects.toThrow('db write failed');
+
+    // 应标记 recoverable 而非 error/failed，且不删除本地文件/回执
+    const recoverableUpdate = repo.update.mock.calls.find((c) => (c[1] as any)?.uploadStage === 'recoverable');
+    expect(recoverableUpdate).toBeDefined();
+    expect((recoverableUpdate![1] as any).status).not.toBe('error');
   });
 });

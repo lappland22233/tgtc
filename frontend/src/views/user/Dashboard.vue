@@ -33,6 +33,13 @@
         最近上传
       </h3>
       <t-loading v-if="loading" />
+      <!-- G11-15：加载失败态 + 重试，避免 allSettled 静默吞失败 -->
+      <div v-else-if="loadError" class="empty-state">
+        <div class="empty-icon">!</div>
+        <p>{{ loadError }}</p>
+        <span class="empty-hint">数据加载失败，请检查网络后重试</span>
+        <t-button size="small" variant="outline" style="margin-top: 12px;" @click="loadDashboardData">重试</t-button>
+      </div>
       <div v-else-if="recentFiles.length === 0" class="empty-state">
         <div class="empty-icon">⊟</div>
         <p>暂无文件上传记录</p>
@@ -97,18 +104,35 @@ function getFileIcon(mimeType: string) {
   return 'default';
 }
 
-onMounted(async () => {
+/** G11-15：加载失败态（统计 / 最近文件任一请求失败即展示，避免 allSettled 静默吞失败） */
+const loadError = ref<string | null>(null);
+let loadSeq = 0;
+
+async function loadDashboardData() {
+  const seq = ++loadSeq;
+  loading.value = true;
+  loadError.value = null;
   const [statsResult, filesResult] = await Promise.allSettled([
     api.get('/users/me/stats'),
     api.get('/files?limit=5'),
   ]);
+  // 防止并发重试时旧请求覆盖新状态
+  if (seq !== loadSeq) return;
   if (statsResult.status === 'fulfilled') {
     stats.value = statsResult.value.data.data;
+  } else {
+    loadError.value = '统计信息加载失败';
   }
   if (filesResult.status === 'fulfilled') {
     recentFiles.value = filesResult.value.data.data.files;
+  } else if (!loadError.value) {
+    loadError.value = '最近文件加载失败';
   }
   loading.value = false;
+}
+
+onMounted(() => {
+  loadDashboardData();
 });
 
 onMounted(() => {

@@ -1,4 +1,10 @@
-import { IsString, IsInt, Min, Max, IsUUID, IsOptional, IsArray, MaxLength } from 'class-validator';
+import { IsString, IsInt, Min, Max, IsUUID, IsOptional, IsArray, MinLength, MaxLength, Matches } from 'class-validator';
+
+/**
+ * 文件名白名单：禁止控制字符、路径分隔符（/ \）及常见不安全字符。
+ * 与文件夹重命名白名单（folder.dto）保持一致，服务端在 init/finalize 统一 sanitize。
+ */
+export const FILE_NAME_WHITELIST = /^[^/\\\u0000-\u001F\u007F]+$/;
 
 /**
  * 分片上传单文件绝对上限（硬上限，仅用于拦截极端值防止磁盘分配 DoS）。
@@ -9,7 +15,9 @@ export const MAX_CHUNK_SIZE = 16 * 1024 * 1024; // 16MB，确保单请求磁盘�
 
 export class InitChunkUploadDto {
   @IsString()
+  @MinLength(1, { message: '文件名不能为空' })
   @MaxLength(255, { message: '文件名不能超过 255 个字符' })
+  @Matches(FILE_NAME_WHITELIST, { message: '文件名包含非法字符（禁止控制字符与路径分隔符）' })
   fileName: string;
 
   @IsInt()

@@ -405,11 +405,13 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted, computed, watch, defineAsyncComponent } from 'vue';
+import { ref, reactive, onMounted, onUnmounted, computed, watch, defineAsyncComponent } from 'vue';
+import { DialogPlugin } from 'tdesign-vue-next';
 import MessagePlugin from '@/utils/message';
 import { api, useAuthStore } from '@/stores/auth';
 import { storeToRefs } from 'pinia';
 import { formatDate, formatSize } from '@/utils/format';
+import { isValidIP } from '@/utils/ip';
 import { useMobile } from '../../composables/useMobile';
 
 // 懒加载：AlertManagement 仅在切换到告警管理 tab 时才加载
@@ -535,18 +537,7 @@ function attackTypeLabel(ruleId: string): string {
   return attackTypeLabels[ruleId] || ruleId.replace('ATTACK_', '').replace(/_/g, ' ');
 }
 
-function isValidIP(ip: string): boolean {
-  const ipv4Re = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
-  const m = ip.match(ipv4Re);
-  if (m) {
-    return m.slice(1).every((o) => {
-      const n = parseInt(o, 10);
-      return n >= 0 && n <= 255 && String(n) === o;
-    });
-  }
-  const ipv6Re = /^([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}$/;
-  return ipv6Re.test(ip);
-}
+// isValidIP 由公共 util 提供（G15-28）：严格 IPv4/IPv6 校验，与 Config.vue 保持一致
 
 function attackTypeCount(type: string): number {
   return attackAlerts.value.filter(a => a.ruleId === `ATTACK_${type.toUpperCase()}`).length;
@@ -745,9 +736,12 @@ async function fetchSecurityConfig() {
     const items: SecurityConfigItem[] = data?.data || data || [];
     configItems.value = items;
     // 初始化表单值
+    // 注意：合法值 "0"（阈值设为 0 表示关闭）不能被 Number() 的 falsy 吞掉，
+    // 必须用 Number.isFinite 判定，否则 0 会回落到默认值并在保存时覆盖服务端（G15-09）
     const form: Record<string, number> = {};
     for (const item of items) {
-      form[item.key] = Number(item.currentValue) || Number(item.defaultValue) || 0;
+      const cur = Number(item.currentValue);
+      form[item.key] = Number.isFinite(cur) ? cur : Number(item.defaultValue) || 0;
     }
     configForm.value = form;
   } catch {
@@ -757,21 +751,74 @@ async function fetchSecurityConfig() {
   }
 }
 
+/**
+ * 保存安全配置：安全阈值修改后立即生效，若将阈值放大到接近/超过默认值 N 倍，
+ * 等效于关闭对应防护，必须先二次确认；保存成功后展示变更摘要（G15-10）。
+ */
 async function saveSecurityConfig() {
-  configSaving.value = true;
-  try {
-    const configs = Object.entries(configForm.value).map(([key, value]) => ({
-      key,
-      value: String(value),
-    }));
-    await api.put('/admin/security-config', { configs });
-    MessagePlugin.success('安全配置已保存');
-    await fetchSecurityConfig();
-  } catch {
-    MessagePlugin.error('保存安全配置失败');
-  } finally {
-    configSaving.value = false;
+  // 与默认值相比偏离超过 10 倍，视为"高风险"（放大阈值 ≈ 削弱/关闭防护）
+  const RISK_MULTIPLE = 10;
+
+  // 变更项与高风险项
+  const changed: { key: string; label: string; before: number; after: number }[] = [];
+  const risky: { key: string; label: string; after: number }[] = [];
+  for (const item of configItems.value) {
+    const before = Number(item.currentValue);
+    const after = configForm.value[item.key];
+    if (before === after) continue;
+    changed.push({ key: item.key, label: item.label, before, after });
+    const def = Number(item.defaultValue);
+    // 阈值类：放大到默认值 10 倍以上即高风险（默认 0 时不适用放大判定）
+    if (def > 0 && after > 0 && after >= def * RISK_MULTIPLE) {
+      risky.push({ key: item.key, label: item.label, after });
+    }
   }
+
+  if (changed.length === 0) {
+    MessagePlugin.info('没有需要保存的配置变更');
+    return;
+  }
+
+  const doSave = async () => {
+    configSaving.value = true;
+    try {
+      const configs = Object.entries(configForm.value).map(([key, value]) => ({
+        key,
+        value: String(value),
+      }));
+      await api.put('/admin/security-config', { configs });
+      const summary = changed
+        .map((c) => `· ${c.label}: ${c.before} → ${c.after}`)
+        .join('\n');
+      MessagePlugin.success('安全配置已保存');
+      MessagePlugin.info(`已保存 ${changed.length} 项变更：\n${summary}`);
+      await fetchSecurityConfig();
+    } catch {
+      MessagePlugin.error('保存安全配置失败');
+    } finally {
+      configSaving.value = false;
+    }
+  };
+
+  // 存在高风险项：二次确认后放行
+  if (risky.length > 0) {
+    const confirmDialog = DialogPlugin.confirm({
+      header: '检测到高风险配置变更',
+      body: '以下项被调整为默认值的 10 倍以上，可能等效于关闭或大幅削弱对应安全防护，请谨慎确认：\n\n'
+        + risky.map((r) => `· ${r.label}（${r.after}）`).join('\n'),
+      theme: 'warning',
+      confirmBtn: '仍要保存',
+      cancelBtn: '取消',
+      onConfirm: () => {
+        confirmDialog.destroy();
+        void doSave();
+      },
+      onClose: () => confirmDialog.destroy(),
+    });
+    return;
+  }
+
+  await doSave();
 }
 
 async function resetSecurityConfig() {
@@ -796,6 +843,19 @@ watch(isSuperAdmin, (val) => {
   }
 });
 
+// 告警轮询（G14-16）：30s 定时刷新攻击告警，保证告警及时性；
+// 页面隐藏时不轮询，避免后台空转浪费请求。
+const SECURITY_POLL_INTERVAL_MS = 30_000;
+let securityPollTimer: ReturnType<typeof setInterval> | null = null;
+
+function startSecurityPolling() {
+  if (securityPollTimer) return;
+  securityPollTimer = setInterval(() => {
+    if (document.hidden) return;
+    fetchAttackAlerts();
+  }, SECURITY_POLL_INTERVAL_MS);
+}
+
 onMounted(() => {
   // 并发发起所有独立请求，失败的不影响其他数据区域渲染
   // Promise.allSettled 确保每个数据块独立到达后各自渲染
@@ -804,6 +864,14 @@ onMounted(() => {
   fetchAbnormalIps();
   if (isSuperAdmin.value) {
     fetchSecurityConfig();
+  }
+  startSecurityPolling();
+});
+
+onUnmounted(() => {
+  if (securityPollTimer) {
+    clearInterval(securityPollTimer);
+    securityPollTimer = null;
   }
 });
 </script>

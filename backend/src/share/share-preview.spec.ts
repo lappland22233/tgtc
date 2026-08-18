@@ -95,7 +95,7 @@ describe('ShareService 预览访问计数（持久化预览会话）', () => {
     const result = await service.getShareDownloadStream('tok123', 'file-id-1', undefined, null);
 
     expect(result).toBe(downloadResult);
-    expect((service as any).fileService.getStreamForShareDownload).toHaveBeenCalledWith('file-id-1', undefined);
+    expect((service as any).fileService.getStreamForShareDownload).toHaveBeenCalledWith('file-id-1', undefined, 'tok123');
   });
 
   it('同访客同文件重复预览：会话服务仅首次返回 consumed，后续幂等', async () => {
@@ -185,5 +185,56 @@ describe('ShareService 预览访问计数（持久化预览会话）', () => {
       service.getSharePreviewStream('tok123', 'file-id-1', 'bad-jwt', null, undefined, 'visitor-a'),
     ).rejects.toBeInstanceOf(ForbiddenException);
     expect((service as any).previewSessionService.consumePreviewAccess).not.toHaveBeenCalled();
+  });
+});
+
+describe('ShareService 预览消费启动有效期时钟（G5-02）', () => {
+  function makeClockService() {
+    const service = makeService();
+    // 模拟 createQueryBuilder().update().set().where().andWhere().execute()
+    const exec = jest.fn().mockResolvedValue({ affected: 1 });
+    const chain = {
+      update: jest.fn().mockReturnThis(),
+      set: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      andWhere: jest.fn().mockReturnThis(),
+      execute: exec,
+    };
+    (service as any).shareLinkRepo.createQueryBuilder = jest.fn(() => chain);
+    return service;
+  }
+
+  it('预览消费时对未启动有效期的分享执行 COALESCE 启动时钟', async () => {
+    const service = makeClockService();
+    const link = makeLink({ expiresIn: 24, expiresStartAt: null });
+    (service as any).shareLinkRepo.findOne.mockResolvedValue(link);
+    (service as any).assertShareUsable = jest.fn().mockResolvedValue(undefined);
+    stubFullStream(service);
+
+    await service.getSharePreviewStream('tok123', 'file-id-1', undefined, null, undefined, 'visitor-a');
+
+    // 必须发出原子启动时钟的 UPDATE（COALESCE 语义）
+    expect((service as any).shareLinkRepo.createQueryBuilder).toHaveBeenCalled();
+    const chain = (service as any).shareLinkRepo.createQueryBuilder.mock.results[0].value;
+    expect(chain.set).toHaveBeenCalledWith({ expiresStartAt: expect.any(Function) });
+    // 本地实体同步标记已启动
+    expect(link.expiresStartAt).toBeInstanceOf(Date);
+    // 预览会话消费仍被调用
+    expect((service as any).previewSessionService.consumePreviewAccess).toHaveBeenCalled();
+  });
+
+  it('预览消费时若已启动有效期则不重复执行时钟 UPDATE', async () => {
+    const service = makeClockService();
+    const started = new Date();
+    const link = makeLink({ expiresIn: 24, expiresStartAt: started });
+    (service as any).shareLinkRepo.findOne.mockResolvedValue(link);
+    (service as any).assertShareUsable = jest.fn().mockResolvedValue(undefined);
+    stubFullStream(service);
+
+    await service.getSharePreviewStream('tok123', 'file-id-1', undefined, null, undefined, 'visitor-a');
+
+    // 已启动 → 不再发出时钟 UPDATE
+    expect((service as any).shareLinkRepo.createQueryBuilder).not.toHaveBeenCalled();
+    expect(link.expiresStartAt).toBe(started);
   });
 });

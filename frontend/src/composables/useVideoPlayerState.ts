@@ -31,7 +31,10 @@ export function useVideoPlayerState(options: VideoPlayerStateOptions) {
 
   function loadSavedVolume(): number {
     try {
-      const saved = Number(localStorage.getItem(VIDEO_VOLUME_KEY));
+      const raw = localStorage.getItem(VIDEO_VOLUME_KEY);
+      // 无存储值时 Number(null) === 0，会被当作合法音量跳过默认值，导致新用户首播静音
+      if (raw == null) return DEFAULT_VIDEO_VOLUME;
+      const saved = Number(raw);
       if (Number.isFinite(saved) && saved >= 0 && saved <= 1) return saved;
     } catch { /* 隐私模式或存储被禁用时使用默认音量 */ }
     return DEFAULT_VIDEO_VOLUME;

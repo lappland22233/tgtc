@@ -75,6 +75,11 @@
           <div v-if="!data.topActiveUsers.length" class="empty-hint">暂无活跃用户数据</div>
         </div>
       </template>
+      <!-- 加载失败：与"暂无数据"区分，提供重试（G14-14） -->
+      <div v-else-if="!loading && errorShown" class="error-state">
+        <p>加载用户活跃数据失败</p>
+        <t-button variant="outline" size="small" @click="fetchData">重试</t-button>
+      </div>
       <div v-else-if="!loading" class="empty-hint">暂无数据</div>
     </t-loading>
   </div>
@@ -83,6 +88,7 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue';
 import { api } from '@/stores/auth';
+import MessagePlugin from '@/utils/message';
 import { formatDate } from '@/utils/format';
 import { useMobile } from '../../composables/useMobile';
 
@@ -97,6 +103,7 @@ interface UserActivityResponse {
 const timeRange = ref('30d');
 const loading = ref(false);
 const data = ref<UserActivityResponse | null>(null);
+const errorShown = ref(false); // 失败提示去重（G14-14）
 const isMobile = useMobile();
 
 const userColumns = [
@@ -113,8 +120,14 @@ async function fetchData() {
       params: { timeRange: timeRange.value },
     });
     data.value = (res.data || res) as UserActivityResponse;
+    errorShown.value = false;
   } catch {
     data.value = null;
+    // 失败需可见（G14-14）：避免静默降级为"暂无数据"造成虚假安心
+    if (!errorShown.value) {
+      errorShown.value = true;
+      MessagePlugin.error('加载用户活跃数据失败');
+    }
   } finally {
     loading.value = false;
   }
@@ -188,6 +201,21 @@ onMounted(() => {
   padding: 24px 0;
   color: var(--text-secondary);
   font-size: 13px;
+}
+
+/* Error state */
+.error-state {
+  text-align: center;
+  padding: 32px 0;
+  color: var(--error, #e34d59);
+  font-size: 13px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+.error-state p {
+  margin: 0;
 }
 
 @media (max-width: 768px) {

@@ -7,6 +7,7 @@ import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { User } from '../common/entities/user.entity';
 import { getClientIp } from '../common/utils/client-ip';
 import { JwtService } from '@nestjs/jwt';
+import { RateLimitService } from '../common/services/rate-limit.service';
 
 const getCookieOptions = (req: Request) => ({
   httpOnly: true,
@@ -25,6 +26,7 @@ export class AuthController {
   constructor(
     private readonly authService: AuthService,
     private readonly jwtService: JwtService,
+    private readonly rateLimitService: RateLimitService,
   ) {}
 
   @Post('register')
@@ -54,10 +56,28 @@ export class AuthController {
     const token = typeof req.cookies?.access_token === 'string'
       ? req.cookies.access_token
       : undefined;
+
+    // G1-04：仅在 JWT 验签通过后才写入吊销表（防止未验签的伪造 token 膨胀表）。
+    // 验签失败/缺失时仅清除 Cookie，不产生任何吊销写。
     if (token) {
-      const payload = this.jwtService.decode(token) as { jti?: string; sub?: string; exp?: number } | null;
-      if (payload?.jti && payload.sub && payload.exp) {
-        await this.authService.revokeToken(payload.jti, payload.sub, new Date(payload.exp * 1000));
+      try {
+        const payload = this.jwtService.verify(token) as { jti?: string; sub?: string; exp?: number };
+        if (payload?.jti && payload.sub && payload.exp) {
+          // 吊销写入限量流：同一 IP 高频率 logout 视为可疑，阻止表膨胀与伪造写放大
+          const ip = getClientIp(req);
+          const limit = await this.rateLimitService.checkAndIncrement(
+            `logout-revoke:${ip}`,
+            'logout_revoke',
+            30,           // 30 次/分钟
+            60 * 1000,    // 锁定 1 分钟
+            60 * 1000,    // 窗口 1 分钟
+          );
+          if (limit.allowed) {
+            await this.authService.revokeToken(payload.jti, payload.sub, new Date(payload.exp * 1000));
+          }
+        }
+      } catch {
+        // token 验签失败（过期/篡改/伪造）：不写入吊销表，仅清除 Cookie
       }
     }
     res.clearCookie('access_token', getCookieOptions(req));

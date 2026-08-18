@@ -209,6 +209,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue';
 import { useVideoPlayerState } from '../../composables/useVideoPlayerState';
+import MessagePlugin from '@/utils/message';
 
 export type VideoEndBehavior = 'loop' | 'next' | 'pause';
 
@@ -319,8 +320,12 @@ let longPressActive = false;
 let savedRate = 1;
 
 const bufferText = computed(() => {
-  if (bufferedPct.value > 0) return `正在缓冲…（已缓冲 ${Math.round(bufferedPct.value)}%）`;
-  return '正在缓冲…';
+  if (bufferedPct.value > 0) {
+    const base = `正在缓冲…（已缓冲 ${Math.round(bufferedPct.value)}%）`;
+    // 冷资源：seek 受限于已缓冲范围，缓存完成前无法跳转到未缓冲位置
+    return props.cold ? `${base}，缓存完成前无法跳转` : base;
+  }
+  return props.cold ? '正在生成缓存…完成后可跳转' : '正在缓冲…';
 });
 
 // ─── 视频事件处理 ────────────────────────────
@@ -444,11 +449,23 @@ function setEndBehavior(behavior: VideoEndBehavior) {
 
 function toggleFullscreen() {
   const el = playerRef.value;
+  const v = videoRef.value;
   if (!el) return;
   if (document.fullscreenElement) {
-    document.exitFullscreen();
-  } else {
-    el.requestFullscreen().catch(() => {});
+    document.exitFullscreen().catch(() => {});
+    return;
+  }
+  // iOS Safari 不支持标准 Fullscreen API，回退到 video.webkitEnterFullscreen
+  if (!el.requestFullscreen && v && typeof (v as any).webkitEnterFullscreen === 'function') {
+    try { (v as any).webkitEnterFullscreen(); return; } catch { /* fallthrough */ }
+  }
+  const elAny = el as HTMLElement & { webkitRequestFullscreen?: () => Promise<void> | void };
+  const req = el.requestFullscreen?.() ?? elAny.webkitRequestFullscreen?.();
+  if (req && typeof req.catch === 'function') {
+    req.catch(() => {
+      // 全屏请求被拒绝（如 iOS 无法进入）→ 提示，不静默失败
+      try { MessagePlugin.warning('当前浏览器不支持全屏'); } catch { /* 无反馈通道则忽略 */ }
+    });
   }
 }
 
@@ -522,15 +539,22 @@ function onProgressTouchStart(e: TouchEvent) {
   const onMove = (ev: TouchEvent) => {
     if (ev.touches[0]) previewSeekPct(getPctFromEvent(ev.touches[0]));
   };
-  const onEnd = () => {
+  const cleanup = () => {
     const targetPct = dragPct.value;
     isDragging.value = false;
-    if (targetPct != null) commitSeekPct(targetPct);
+    // touchcancel：手势被打断（如系统弹层/来电），不提交 seek，仅复位拖动态
+    if (targetPct != null && !dragCancelled) commitSeekPct(targetPct);
+    dragPct.value = null;
     document.removeEventListener('touchmove', onMove);
-    document.removeEventListener('touchend', onEnd);
+    document.removeEventListener('touchend', cleanup);
+    document.removeEventListener('touchcancel', cleanup);
   };
+  /** touchcancel 标记：为 true 时不提交 seek（与 onEnd 区分） */
+  let dragCancelled = false;
+  const onCancel = () => { dragCancelled = true; cleanup(); };
   document.addEventListener('touchmove', onMove, { passive: true });
-  document.addEventListener('touchend', onEnd);
+  document.addEventListener('touchend', cleanup);
+  document.addEventListener('touchcancel', onCancel);
 }
 
 function onProgressHover(e: MouseEvent) {
@@ -753,6 +777,8 @@ defineExpose({
   togglePlay,
   play: () => videoRef.value?.play(),
   pause: () => videoRef.value?.pause(),
+  /** 置 autoplay 意图：src 就绪（src watch）后自动播放，用于切换连播续播 */
+  requestAutoplay: () => { pendingPlayRequest = true; },
 });
 </script>
 

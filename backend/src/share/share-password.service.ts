@@ -35,6 +35,14 @@ export class SharePasswordService {
   private readonly PRECHECK_WINDOW = 60 * 1000;
   private readonly PRECHECK_MAX_ATTEMPTS = 10;
   private readonly PRECHECK_LOCK_DURATION = 60 * 1000;
+  // G5-08：token 维度失败累计锁定升级。
+  // 原实现 token 仅 10 次/分钟，锁定 60s 后即可继续爆破（约 600 次/小时）；
+  // IP 封禁可被分布式换 IP 绕过。这里对 token 做累计失败锁定：
+  // 连续失败达到 TOKEN_FAIL_LOCK_THRESHOLD（= 3 个窗口 × 每窗口 10 次 = 30 次）
+  // 即对该 token 锁定 TOKEN_FAIL_LOCK_DURATION_MS（24h），期间任何 IP 都无法验证。
+  private readonly TOKEN_FAIL_WINDOW = 3600 * 1000;
+  private readonly TOKEN_FAIL_LOCK_THRESHOLD = this.PRECHECK_MAX_ATTEMPTS * 3;
+  private readonly TOKEN_FAIL_LOCK_DURATION_MS = 24 * 3600 * 1000;
 
   constructor(
     @InjectRepository(BannedIP)
@@ -72,19 +80,51 @@ export class SharePasswordService {
   /**
    * 在昂贵的 bcrypt 前按 IP 与分享 token 双维度限流。
    * 任一维度达到阈值即拒绝；数据库 UPSERT 保证多实例和并发下不能绕过。
+   *
+   * G5-08：额外检查 token 的 24h 累计失败锁定。用 checkAndIncrement 对
+   * token-lock 键调用超大 maxAttempts（正常永不触发锁定），以复用其「锁定记录
+   * 被 WHERE 过滤 → allowed=false」的语义：token 一旦被 recordTokenFailedAttempt
+   * 锁定 24h，此处即返回 false，任何 IP 都无法继续验证。
    */
   async checkPasswordAttemptAllowed(ip: string | null, shareToken: string): Promise<boolean> {
     const keys = [`share-password:token:${shareToken}`];
     if (ip) keys.push(`share-password:ip:${ip}`);
+    // token 24h 累计失败锁定检查（maxAttempts 取极大值，仅作为锁定探针）
+    keys.push(`share-password:token-lock:${shareToken}`);
 
     const results = await Promise.all(keys.map((key) => this.rateLimitService.checkAndIncrement(
       key,
       'share_password_precheck',
-      this.PRECHECK_MAX_ATTEMPTS,
+      key.includes('share-password:token-lock') ? Number.MAX_SAFE_INTEGER : this.PRECHECK_MAX_ATTEMPTS,
       this.PRECHECK_LOCK_DURATION,
       this.PRECHECK_WINDOW,
     )));
     return results.every((result) => result.allowed);
+  }
+
+  /**
+   * G5-08：token 维度失败累计锁定升级。
+   * 每次密码失败对该 token 累计计数（1 小时窗口）；达到阈值（连续 3 个窗口 × 10 次）
+   * 后对该 token 加 24h 锁定。可被分布式换 IP 绕过的 IP 封禁之外，锁定 token 本体，
+   * 使爆破成本从「换 IP 无限续」提升到「同一 token 最多 30 次/阶段」。
+   */
+  async recordTokenFailedAttempt(shareToken: string): Promise<void> {
+    const failKey = `share-password:token-fail:${shareToken}`;
+    const counter = await this.rateLimitService.incrementCounter(
+      failKey, 'share_password_token_fail', 1, this.TOKEN_FAIL_WINDOW,
+    );
+    if (counter.count >= this.TOKEN_FAIL_LOCK_THRESHOLD) {
+      // 触发 24h 锁定（maxAttempts=1 保证本次调用即锁定）
+      await this.rateLimitService.checkAndIncrement(
+        `share-password:token-lock:${shareToken}`,
+        'share_password_token_lock',
+        1,
+        this.TOKEN_FAIL_LOCK_DURATION_MS,
+        this.TOKEN_FAIL_WINDOW,
+      );
+      // 重置累计失败计数，便于下一轮再累计
+      await this.rateLimitService.reset(failKey);
+    }
   }
 
   /** 记录失败的密码尝试，达到阈值触发封禁 */

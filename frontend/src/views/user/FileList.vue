@@ -17,7 +17,8 @@
     <!-- ① 地址栏：文件路径 + 新建文件夹 / 上传 -->
     <div class="fl-addressbar">
       <nav class="fl-path" aria-label="当前位置">
-        <span
+        <button
+          type="button"
           class="fl-path-item"
           :class="{ 'is-current': folderStore.currentFolderId === null, 'drag-over': dragOverFolderId === ROOT_DROP_TARGET }"
           @click="onFolderNavigate(null)"
@@ -28,17 +29,19 @@
         >
           <t-icon name="home" class="fl-path-home" />
           我的文件
-        </span>
+        </button>
         <template v-for="(folder, idx) in folderStore.breadcrumb" :key="folder.id">
           <t-icon name="chevron-right" class="fl-path-sep" />
-          <span
+          <button
+            type="button"
             class="fl-path-item"
             :class="{ 'is-current': idx === folderStore.breadcrumb.length - 1 }"
             :title="folder.name"
+            :aria-current="idx === folderStore.breadcrumb.length - 1 ? 'page' : undefined"
             @click="onFolderNavigate(folder.id)"
           >
             {{ folder.name }}
-          </span>
+          </button>
         </template>
       </nav>
       <div class="fl-addressbar-actions">
@@ -81,8 +84,10 @@
     <!-- ③ 批量操作栏：仅在选中文件时出现 -->
     <div v-if="selectedFileIds.length > 0" class="fl-batchbar">
       <span class="fl-batchbar-count">已选 {{ selectedFileIds.length }} 项</span>
+      <!-- G11-09：MK 按钮与“复制下载链接”按钮并列显示，不再互斥（避免全选图片时复制入口被挤掉）。
+            MK 仅对可直链的图片生成 Markdown；复制链接对全部选中项生成下载链接。 -->
       <t-button
-        v-if="selectedImages.length > 0 && selectedImages.length === selectedFileIds.length"
+        v-if="selectedImages.length > 0"
         theme="primary"
         variant="outline"
         size="small"
@@ -91,7 +96,6 @@
         批量 MK（{{ selectedImages.length }}）
       </t-button>
       <t-button
-        v-if="!(selectedImages.length === selectedFileIds.length)"
         theme="default"
         variant="outline"
         size="small"
@@ -172,8 +176,13 @@
     <div
       v-else-if="!folderLoading && !listError && (displayFiles.length > 0 || subfoldersInCurrentFolder.length > 0)"
       class="os-list card"
+      :class="{ 'is-refreshing': refreshing }"
       @contextmenu.prevent="openBlankCtxMenu"
     >
+      <!-- G11-12：搜索/排序重拉时保留旧列表并叠加半透明 loading，避免列表闪空 -->
+      <div v-if="refreshing" class="os-refresh-overlay">
+        <t-loading size="small" text="正在刷新..." />
+      </div>
       <!-- 桌面端：表格式列表 -->
       <div v-if="!isMobile" class="os-list-scroll">
         <div class="os-list-inner">
@@ -188,22 +197,42 @@
                 @change="toggleSelectAll"
               />
             </div>
-            <div class="os-cell os-name os-sortable" @click="toggleSort('originalName')">
-              名称
-              <t-icon
-                :name="sortBy === 'originalName' ? (sortOrder === 'DESC' ? 'caret-down-small' : 'caret-up-small') : 'view-list'"
-                class="os-sort-icon"
-                :class="{ active: sortBy === 'originalName' }"
-              />
+            <div class="os-cell os-name os-sortable">
+              <button
+                type="button"
+                class="os-sort-btn"
+                role="columnheader"
+                :aria-sort="sortBy === 'originalName' ? (sortOrder === 'ASC' ? 'ascending' : 'descending') : 'none'"
+                @click="toggleSort('originalName')"
+                @keydown.enter.prevent="toggleSort('originalName')"
+                @keydown.space.prevent="toggleSort('originalName')"
+              >
+                名称
+                <t-icon
+                  :name="sortBy === 'originalName' ? (sortOrder === 'DESC' ? 'caret-down-small' : 'caret-up-small') : 'view-list'"
+                  class="os-sort-icon"
+                  :class="{ active: sortBy === 'originalName' }"
+                />
+              </button>
             </div>
             <div class="os-cell os-size">大小</div>
-            <div class="os-cell os-date os-sortable" @click="toggleSort('createdAt')">
-              上传时间
-              <t-icon
-                :name="sortBy === 'createdAt' ? (sortOrder === 'DESC' ? 'caret-down-small' : 'caret-up-small') : 'view-list'"
-                class="os-sort-icon"
-                :class="{ active: sortBy === 'createdAt' }"
-              />
+            <div class="os-cell os-date os-sortable">
+              <button
+                type="button"
+                class="os-sort-btn"
+                role="columnheader"
+                :aria-sort="sortBy === 'createdAt' ? (sortOrder === 'ASC' ? 'ascending' : 'descending') : 'none'"
+                @click="toggleSort('createdAt')"
+                @keydown.enter.prevent="toggleSort('createdAt')"
+                @keydown.space.prevent="toggleSort('createdAt')"
+              >
+                上传时间
+                <t-icon
+                  :name="sortBy === 'createdAt' ? (sortOrder === 'DESC' ? 'caret-down-small' : 'caret-up-small') : 'view-list'"
+                  class="os-sort-icon"
+                  :class="{ active: sortBy === 'createdAt' }"
+                />
+              </button>
             </div>
           </div>
 
@@ -303,6 +332,10 @@
           <!-- 无限滚动哨兵 -->
           <div ref="scrollSentinel" class="os-sentinel">
             <t-loading v-if="cursorLoading" size="small" text="加载中..." />
+            <template v-else-if="loadLimitExceeded">
+              <span class="os-muted">已达加载上限 {{ fileStore.files.length }} 条，仍有更多文件</span>
+              <t-button size="small" variant="outline" class="os-sentinel-more" @click="continueLoadMore">继续加载</t-button>
+            </template>
             <span v-else-if="!hasMore" class="os-muted">已加载全部 {{ fileStore.total }} 个文件</span>
           </div>
         </div>
@@ -582,7 +615,10 @@ const {
   hasMore,
   cursorLoading,
   folderLoading,
+  refreshing,
   listError,
+  loadLimitExceeded,
+  continueLoadMore,
   beginFolderTransition,
   getFileListGeneration,
   loadInitialFiles,
@@ -1003,11 +1039,18 @@ const selectableFiles = computed(() =>
   displayFiles.value.filter(f => isFileActionable(f))
 );
 
-/** 选择集合只保留当前视图中仍可操作、可见的文件，避免翻页/筛选后误操作。 */
-watch([displayFiles, selectableFiles], () => {
+/**
+ * 选择集合只保留当前视图中仍可操作、可见的文件，避免翻页/筛选后误操作。
+ * G11-06：原 deep watch 会对大列表的每个文件对象做全量深遍历，开销随列表增长线性放大；
+ * 改为浅层监听（仅在 files 引用被替换时触发，如切换目录 / 重新拉取）＋ 在列表替换点显式调用
+ * pruneSelection() 清理。追加加载（appendFiles 不改变引用）不触发清理——新增文件不会使既有选择失效。
+ */
+function pruneSelection() {
   const visibleIds = new Set(selectableFiles.value.map((file) => file.id));
   selectedFileIds.value = selectedFileIds.value.filter((id) => visibleIds.has(id));
-}, { deep: true });
+}
+
+watch([displayFiles, selectableFiles], pruneSelection);
 
 const isAllSelected = computed(() =>
   selectableFiles.value.length > 0 &&
@@ -1503,13 +1546,31 @@ async function handleRestore(id: string) {
   }
 }
 
-async function handleForceDelete(id: string) {
-  try {
-    await fileStore.forceDeleteFile(id);
-    MessagePlugin.success('文件已永久删除');
-  } catch (error: unknown) {
-    MessagePlugin.error(getErrorMessage(error));
-  }
+/** 强制删除（永久删除）——必须二次确认，防止误删不可恢复的数据 */
+function handleForceDelete(id: string) {
+  // 定位文件以在确认文案中展示文件名（优先当前列表，其次全部已加载文件）
+  const file = displayFiles.value.find((f) => f.id === id)
+    || fileStore.files.find((f) => f.id === id);
+  const fileName = file?.originalName || id;
+
+  const confirmDialog = DialogPlugin.confirm({
+    header: '强制删除文件',
+    body: `确定要永久删除「${fileName}」吗？此操作不可恢复。`,
+    theme: 'danger',
+    confirmBtn: '永久删除',
+    cancelBtn: '取消',
+    // onConfirm 返回 Promise 时，TDesign 会禁用确认按钮直至完成，天然防重复提交
+    onConfirm: async () => {
+      try {
+        await fileStore.forceDeleteFile(id);
+        MessagePlugin.success('文件已永久删除');
+      } catch (error: unknown) {
+        MessagePlugin.error(getErrorMessage(error));
+      }
+      confirmDialog.destroy();
+    },
+    onClose: () => confirmDialog.destroy(),
+  });
 }
 
 function convertToMarkdown() {
@@ -1530,12 +1591,27 @@ function convertToMarkdown() {
     .join('\n');
 }
 
-function copyMarkdown() {
-  navigator.clipboard.writeText(markdownResult.value);
-  MessagePlugin.success('已复制到剪贴板');
+/**
+ * 统一剪贴板写入（G11-10）：await + catch + 失败提示，避免未捕获 Promise 拒绝。
+ */
+async function writeClipboard(text: string, successMsg: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text);
+    MessagePlugin.success(successMsg);
+    return true;
+  } catch (error: unknown) {
+    MessagePlugin.error(getErrorMessage(error));
+    return false;
+  }
 }
 
-function copyDownloadLinks() {
+/** 复制 Markdown 结果（G11-10：await + catch + 失败提示） */
+async function copyMarkdown() {
+  await writeClipboard(markdownResult.value, '已复制到剪贴板');
+}
+
+/** 批量复制下载链接（G11-10 + G11-11：await/catch + 私有文件检测统计） */
+async function copyDownloadLinks() {
   const files = displayFiles.value.filter(f => selectedFileIds.value.includes(f.id) && !f.isDeleted);
   if (files.length === 0) {
     MessagePlugin.warning('没有可复制的文件');
@@ -1543,8 +1619,14 @@ function copyDownloadLinks() {
   }
   const baseUrl = window.location.origin;
   const links = files.map(f => `${baseUrl}/files/public/${f.id}`).join('\n');
-  navigator.clipboard.writeText(links);
-  MessagePlugin.success(`已复制 ${files.length} 个下载链接`);
+  // G11-11：统计私有文件数量并提示——私有文件链接仅本人可访问，复制后可能产生无效分享链接。
+  const privateCount = files.filter(f => f.accessType === 'private').length;
+  const ok = await writeClipboard(links, `已复制 ${files.length} 个下载链接`);
+  if (ok && privateCount > 0) {
+    MessagePlugin.warning(
+      `其中 ${privateCount} 个为私有文件，链接仅你自己可访问；如需分享请使用「分享」功能`,
+    );
+  }
 }
 
 function openBatchTagDialog() {
@@ -1638,7 +1720,16 @@ onUnmounted(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  /* G11-08：面包屑改为可聚焦按钮，重置原生 button 样式 */
+  background: none;
+  border: none;
+  font: inherit;
+  text-align: left;
   transition: background var(--duration-fast), color var(--duration-fast);
+}
+.fl-path-item:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
 }
 
 .fl-path-item:hover {
@@ -1780,6 +1871,20 @@ onUnmounted(() => {
 .os-list {
   padding: 0;
   overflow: hidden;
+  position: relative;
+}
+
+/* G11-12：搜索/排序重拉时的半透明覆盖层，保留旧列表不闪空 */
+.os-refresh-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--bg-container, #0f1420) 72%, transparent);
+  backdrop-filter: blur(1px);
+  pointer-events: none;
 }
 
 .os-list-scroll {
@@ -1835,6 +1940,26 @@ onUnmounted(() => {
 
 .os-sortable:hover {
   color: var(--text-primary);
+}
+
+/* G11-07：排序表头改为可聚焦按钮，重置原生 button 样式并保持原有视觉 */
+.os-sort-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  user-select: none;
+}
+.os-sort-btn:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+  border-radius: 4px;
 }
 
 .os-sort-icon {
@@ -2004,6 +2129,11 @@ onUnmounted(() => {
   align-items: center;
   padding: 12px 0;
   border-bottom: none;
+  gap: 8px;
+}
+
+.os-sentinel-more {
+  margin-left: 4px;
 }
 
 /* ============ 移动端 ============ */

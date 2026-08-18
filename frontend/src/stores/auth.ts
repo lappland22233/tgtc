@@ -26,6 +26,37 @@ export const useAuthStore = defineStore('auth', () => {
   // fetchUser 并发锁：防止 router beforeEach 触发重复请求
   let fetchUserPromise: Promise<void> | null = null;
 
+  // ── 会话时效重拉（G10-05）──
+  /** /auth/me 最近一次成功拉取的时间戳（ms）；未拉取过为 0 */
+  let lastFetchedAt = 0;
+  /** 会话 TTL（ms）：超过该时长后，页面回到前台 / 守卫时触发重拉 */
+  const SESSION_REFRESH_TTL = 60 * 1000;
+
+  /** 判断当前会话数据是否已过期、需要重拉 */
+  function isSessionStale(): boolean {
+    if (!initialized.value) return true;
+    if (!user.value) return false; // 未登录无需重拉
+    return Date.now() - lastFetchedAt > SESSION_REFRESH_TTL;
+  }
+
+  /**
+   * 会话时效重拉：页面回到前台（visibilitychange）时调用。
+   * 仅当已有登录态且超过 TTL 才重拉 /auth/me，避免不必要的请求；
+   * 若命中封禁 / 降权（角色变化），由 fetchUser 返回的服务端权威状态直接覆盖。
+   */
+  function refreshIfStale() {
+    if (document.visibilityState !== 'visible') return;
+    if (!isSessionStale()) return;
+    // 静默刷新：失败不打断用户（保留当前状态），下次可见时再试
+    fetchUser().catch((err) => {
+      console.warn('[Auth] 会话时效重拉失败（保留当前状态）:', err);
+    });
+  }
+
+  if (typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', refreshIfStale);
+  }
+
   // 跨标签页登出同步 — 惰性初始化（HMR 安全）
   let authChannel: BroadcastChannel | null = null;
   function getAuthChannel(): BroadcastChannel | null {
@@ -107,9 +138,17 @@ export const useAuthStore = defineStore('auth', () => {
         // 避免静默写入无效用户状态导致后续逻辑异常。
         if (data && typeof data === 'object' && (data as User).id) {
           user.value = data as User;
+          lastFetchedAt = Date.now();
+          // 命中封禁：服务端权威状态为封禁用户时，本地登出，防止继续访问受保护页面。
+          // 由 router 守卫（G10-03）配合完成跳转。
+          if ((data as User).isBanned) {
+            console.warn('[Auth] /auth/me 返回封禁状态，本地登出');
+            user.value = null;
+          }
         } else {
           console.warn('[Auth] /auth/me 返回的用户数据结构异常，按未认证处理');
           user.value = null;
+          lastFetchedAt = Date.now();
         }
       } catch (err: unknown) {
         // 区分 401（token 过期/无效）和网络错误（临时网络问题）
@@ -137,6 +176,7 @@ export const useAuthStore = defineStore('auth', () => {
     user.value = null;
     // 与跨标签页接收端语义保持一致：登出后标记初始化已完成（已确认为登出状态）
     initialized.value = true;
+    lastFetchedAt = 0;
     // 广播登出事件到其他标签页
     if (authChannel) {
       authChannel.postMessage('logout');
@@ -153,6 +193,8 @@ export const useAuthStore = defineStore('auth', () => {
     fetchUser,
     logout,
     closeAuthChannel,
+    refreshIfStale,
+    isSessionStale,
   };
 });
 

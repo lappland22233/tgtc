@@ -28,6 +28,8 @@ export interface PlaylistControlsOptions {
   snap: PreviewSnapLike;
   /** 切换到指定项后应用内容（宿主协调文本/图片/视频加载） */
   applyItem: (item: MediaSessionItem) => void;
+  /** 激活视频真实媒体源并置 autoplay 意图，src 就绪后自动续播（宿主实现） */
+  activateVideo: () => void;
   getVideoRef: () => HTMLVideoElement | null;
   getAudioRef: () => HTMLAudioElement | null;
   getPlaylistPanelRef: () => HTMLElement | null;
@@ -45,7 +47,7 @@ function loadVideoEndBehavior(): VideoEndBehavior {
 }
 
 export function usePlaylistControls(options: PlaylistControlsOptions) {
-  const { mediaStore, snap, applyItem, getVideoRef, getAudioRef, getPlaylistPanelRef } = options;
+  const { mediaStore, snap, applyItem, activateVideo, getVideoRef, getAudioRef, getPlaylistPanelRef } = options;
 
   /** 会话中的播放列表（与当前媒体同类别） */
   const playlist = computed<MediaSessionItem[]>(() => mediaStore.session?.playlist ?? []);
@@ -81,7 +83,12 @@ export function usePlaylistControls(options: PlaylistControlsOptions) {
     clearAutoNextTimer();
     playlistOpen.value = false;
     applyItem(item);
-    if (item.kind === 'audio') nextTick(() => { void getAudioRef()?.play().catch(() => {}); });
+    if (item.kind === 'audio') {
+      nextTick(() => { void getAudioRef()?.play().catch(() => {}); });
+    } else if (item.kind === 'video') {
+      // 视频：置 autoplay 意图并激活真实媒体源，src 就绪后自动续播，避免连播断流停在封面
+      nextTick(() => activateVideo());
+    }
   }
 
   function playPrev() { if (hasPrev.value) switchToTrack(activeIndex.value - 1); }

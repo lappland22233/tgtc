@@ -42,16 +42,29 @@ export class FileUploadProcessor {
     return `${filePath}.telegram.json`;
   }
 
-  private async persistReceipt(filePath: string, result: { file_id: string; file_path?: string }): Promise<void> {
+  private async persistReceipt(
+    filePath: string,
+    result: { file_id: string; file_path?: string },
+    uploadVersion: number,
+  ): Promise<void> {
     const receiptPath = this.receiptPath(filePath);
     const tmpPath = `${receiptPath}.tmp`;
-    await writeFile(tmpPath, JSON.stringify(result), { flag: 'w' });
+    // G3-12：回执必须绑定 uploadVersion，防止覆盖上传复用同路径时读到陈旧回执提交错配内容。
+    await writeFile(tmpPath, JSON.stringify({ ...result, uploadVersion }), { flag: 'w' });
     await rename(tmpPath, receiptPath);
   }
 
-  private async loadReceipt(filePath: string): Promise<{ file_id: string; file_path?: string } | null> {
+  private async loadReceipt(
+    filePath: string,
+    expectedUploadVersion?: number,
+  ): Promise<{ file_id: string; file_path?: string; uploadVersion?: number } | null> {
     try {
-      return JSON.parse(await readFile(this.receiptPath(filePath), 'utf8'));
+      const receipt = JSON.parse(await readFile(this.receiptPath(filePath), 'utf8'));
+      // G3-12：回执版本不匹配当前任务视为无效（可能残留自旧版本上传），交由重新上传。
+      if (expectedUploadVersion !== undefined && receipt.uploadVersion !== expectedUploadVersion) {
+        return null;
+      }
+      return receipt;
     } catch {
       return null;
     }
@@ -110,14 +123,20 @@ export class FileUploadProcessor {
         return;
       }
 
-      await this.fileRepository.update(
+      // G3-13：CAS 升 uploading 必须校验 affected。若 0 行命中（并发覆盖/状态已变化/版本不匹配），
+      // 说明本次条件不再成立，继续往下走会用陈旧假设提交，必须放弃本轮处理交给后续任务。
+      const uploadUpdate = await this.fileRepository.update(
         { id: fileId, uploadVersion, uploadStage: file.uploadStage },
         { uploadStage: 'uploading' } as Partial<File>,
       );
+      if (uploadUpdate.affected === 0) {
+        this.logger.warn(`文件 ${fileId} 升 uploading 条件未命中（并发变更），放弃本轮`);
+        return;
+      }
       file = await this.fileRepository.findOneOrFail({ where: { id: fileId } });
 
       try {
-        let result = await this.loadReceipt(filePath);
+        let result = await this.loadReceipt(filePath, uploadVersion);
         if (!result) {
           result = await this.telegramService.uploadFile(
             createReadStream(filePath),
@@ -126,7 +145,7 @@ export class FileUploadProcessor {
             file.size,
           );
           // DB 提交失败前先原子保存回执，Bull 重试/进程重启可直接恢复提交。
-          await this.persistReceipt(filePath, result);
+          await this.persistReceipt(filePath, result, uploadVersion);
         }
         // 回执（含历史/陈旧回执）必须包含非空 file_id，否则视为提交失败，
         // 避免把空引用写入 DB 造成“假成功”。
@@ -134,7 +153,8 @@ export class FileUploadProcessor {
           throw new Error('Telegram 远端回执缺少有效 file_id，无法完成提交');
         }
         // 远端结果是幂等提交点：一次原子更新同时写入 TG 引用、清空历史失败原因并置 remote_committed。
-        await this.fileRepository.update(
+        // G3-13：校验 affected，若 0 行命中（并发覆盖导致 uploadVersion 已变），不得把旧版本内容覆盖到新记录上。
+        const commitUpdate = await this.fileRepository.update(
           { id: fileId, uploadVersion },
           {
             filename: result.file_id,
@@ -144,9 +164,13 @@ export class FileUploadProcessor {
             uploadFailureReason: null,
           } as Partial<File>,
         );
+        if (commitUpdate.affected === 0) {
+          this.logger.warn(`文件 ${fileId} 远端提交条件未命中（版本已变更），放弃本轮提交`);
+          throw new Error('远端提交条件未命中（uploadVersion 已变更）');
+        }
       } catch (error) {
         this.logger.warn(`文件远端上传或提交失败 (fileId=${fileId}, 第 ${attempt} 次): ${(error as Error).message}`);
-        const remoteReceipt = await this.loadReceipt(filePath);
+        const remoteReceipt = await this.loadReceipt(filePath, uploadVersion);
         if (job.attemptsMade >= 2 && !remoteReceipt) {
           await this.fileRepository.update(
             { id: fileId, uploadVersion },
@@ -160,6 +184,20 @@ export class FileUploadProcessor {
             `文件上传最终失败并标记 error: fileId=${fileId} uploadVersion=${uploadVersion} 原因=远端上传/提交重试耗尽，无远端回执`,
           );
           await this.removeUploadArtifacts(filePath);
+        } else if (job.attemptsMade >= 2 && remoteReceipt) {
+          // G3-14：远端已成功（有回执）但 DB 提交失败且重试耗尽。回执无人消费会导致内容已上传、
+          // 引用却写不进 DB。标记 recoverable 状态并保留本地文件/回执，由恢复任务凭回执提交，
+          // 避免逼用户整文件重传。
+          await this.fileRepository.update(
+            { id: fileId, uploadVersion },
+            {
+              uploadStage: 'recoverable',
+              uploadFailureReason: this.safeFailureReason((error as Error).message || '远端已提交但 DB 写入失败，等待恢复', filePath),
+            } as Partial<File>,
+          );
+          this.logger.warn(
+            `文件上传标记 recoverable（有远端回执但提交失败）: fileId=${fileId} uploadVersion=${uploadVersion}，交由恢复任务凭回执提交`,
+          );
         }
         // 已有远端回执时必须保留本地文件/回执，后续以相同确定性 jobId 恢复 DB 提交。
         throw error;
@@ -189,9 +227,10 @@ export class FileUploadProcessor {
       return;
     }
 
+    // G3-13：置 ready 的 SQL 必须带 uploadVersion 条件，防止旧版本收尾任务把并发覆盖后的新版本误标 ready。
     await this.fileRepository.query(
-      'UPDATE files SET status = $1, "uploadFailureReason" = NULL WHERE id = $2 AND status IN ($3, $4)',
-      ['ready', fileId, 'processing', 'error'],
+      'UPDATE files SET status = $1, "uploadFailureReason" = NULL WHERE id = $2 AND status IN ($3, $4) AND "uploadVersion" = $5',
+      ['ready', fileId, 'processing', 'error', uploadVersion],
     );
 
     try {

@@ -7,6 +7,7 @@ jest.mock('../file/file.service', () => ({ FileService: class FileService {} }))
 jest.mock('uuid', () => ({ v4: jest.fn(() => 'uuid') }));
 
 import { ServiceUnavailableException } from '@nestjs/common';
+import { In } from 'typeorm';
 import { FileVerifyService } from './file-verify.service';
 import { TelegramFileNotFoundError } from '../telegram/telegram.errors';
 
@@ -126,8 +127,9 @@ describe('FileVerifyService.runVerification', () => {
     // f2 标记 error
     const f2Set = fileRepository.createQueryBuilder.mock.results[2].value.set.mock.calls[0][0];
     expect(f2Set).toMatchObject({ status: 'error', uploadStage: 'failed' });
-    // 审计只记录统计摘要
-    const audit = auditService.log.mock.calls[0][0];
+    // apply 模式属高敏审计，改用 logAwait 记录统计摘要（不 fire-and-forget）
+    expect(auditService.log).not.toHaveBeenCalled();
+    const audit = auditService.logAwait.mock.calls[0][0];
     expect(audit.action).toBe('file_verify');
     expect(audit.userId).toBe('user-1');
     expect(audit.resourceId).toBe('task-1');
@@ -258,6 +260,33 @@ describe('FileVerifyService.runVerification', () => {
     expect(telegramService.verifyFileExists).not.toHaveBeenCalled();
     expect(fileVerifyTaskRepository.findOne).not.toHaveBeenCalled();
   });
+
+  it('G8-22：dry-run 只统计不修改，审计沿用 fire-and-forget log（非 logAwait）', async () => {
+    const { service, fileRepository, telegramService, auditService } = setupRun({ mode: 'dry-run' });
+    fileRepository.createQueryBuilder.mockReturnValueOnce(makeSelectChain([
+      { id: 'f1', originalName: 'a.bin', size: 10, telegramFileId: 'tg-1', telegramFilePath: null },
+    ]));
+    telegramService.verifyFileExists.mockResolvedValue({ file_id: 'tg-1', file_path: 'documents/a.bin', file_size: 10 });
+
+    await service.runVerification('task-1');
+
+    expect(auditService.log).toHaveBeenCalled();
+    expect(auditService.logAwait).not.toHaveBeenCalled();
+  });
+
+  it('G8-22：apply 审计使用 logAwait，logAwait 抛错时不阻断体检主流程', async () => {
+    const { service, fileRepository, telegramService, auditService, fileVerifyTaskRepository } = setupRun({ mode: 'apply' });
+    fileRepository.createQueryBuilder.mockReturnValueOnce(makeSelectChain([
+      { id: 'f1', originalName: 'a.bin', size: 10, telegramFileId: 'tg-1', telegramFilePath: 'documents/a.bin' },
+    ]));
+    telegramService.verifyFileExists.mockResolvedValue({ file_id: 'tg-1', file_path: 'documents/a.bin', file_size: 10 });
+    auditService.logAwait.mockRejectedValue(new Error('audit down'));
+
+    // 即使 logAwait 抛错（AUDIT_FAIL_FAST 开启场景），体检仍应正常完成
+    await expect(service.runVerification('task-1')).resolves.toBeUndefined();
+    const completed = taskSetPayloads(fileVerifyTaskRepository).find((s) => s.status === 'completed');
+    expect(completed).toMatchObject({ status: 'completed', valid: 1 });
+  });
 });
 
 describe('FileVerifyService.createTask', () => {
@@ -273,10 +302,16 @@ describe('FileVerifyService.createTask', () => {
 
     expect(result.isNewTask).toBe(true);
     expect(result.task).toMatchObject({ taskId: 'uuid' });
+    // G8-21：attempts>1 + backoff 自动重试瞬时抖动；removeOnFail:false 保留失败 job 供排查
     expect(fileVerifyQueue.add).toHaveBeenCalledWith(
       'verify',
       { taskId: 'uuid' },
-      expect.objectContaining({ jobId: 'uuid' }),
+      expect.objectContaining({
+        jobId: 'uuid',
+        attempts: 3,
+        backoff: { type: 'exponential', delay: 1000 },
+        removeOnFail: false,
+      }),
     );
   });
 
@@ -413,6 +448,51 @@ describe('FileVerifyService 启动孤儿任务清理', () => {
     fileVerifyTaskRepository.find.mockRejectedValue(new Error('DB down'));
     await expect(service.onModuleInit()).resolves.toBeUndefined();
     expect(fileVerifyQueue.getJob).not.toHaveBeenCalled();
+  });
+
+  it('running 任务队列中无对应 job 也被视为孤儿并标记 failed（修复遗漏 running）', async () => {
+    const { service, fileVerifyTaskRepository, fileVerifyQueue } = buildFileVerifyService();
+    // 扫描纳入 queued + running
+    fileVerifyTaskRepository.find.mockResolvedValue([
+      { taskId: 'orphan-running-1', isActive: true, status: 'running', startedAt: new Date() },
+    ]);
+    fileVerifyQueue.getJob.mockResolvedValue(null);
+    fileVerifyTaskRepository.createQueryBuilder.mockReturnValue(makeUpdateChain());
+
+    await service.onModuleInit();
+
+    // find 条件应同时包含 queued 与 running
+    const findWhere = fileVerifyTaskRepository.find.mock.calls[0][0].where;
+    expect(findWhere.status).toEqual(In(['queued', 'running']));
+    const failedSet = fileVerifyTaskRepository.createQueryBuilder.mock.results[0].value.set.mock.calls[0][0];
+    expect(failedSet).toMatchObject({ status: 'failed', isActive: false });
+  });
+
+  it('running 任务队列存在 job 但 startedAt 超过合理上限也标记 failed（卡死任务释放槽位）', async () => {
+    const { service, fileVerifyTaskRepository, fileVerifyQueue } = buildFileVerifyService();
+    const longAgo = new Date(Date.now() - 2 * 60 * 60 * 1000); // 2 小时前
+    fileVerifyTaskRepository.find.mockResolvedValue([
+      { taskId: 'stuck-running-1', isActive: true, status: 'running', startedAt: longAgo },
+    ]);
+    fileVerifyQueue.getJob.mockResolvedValue({ id: 'stuck-running-1' } as any);
+    fileVerifyTaskRepository.createQueryBuilder.mockReturnValue(makeUpdateChain());
+
+    await service.onModuleInit();
+
+    const failedSet = fileVerifyTaskRepository.createQueryBuilder.mock.results[0].value.set.mock.calls[0][0];
+    expect(failedSet).toMatchObject({ status: 'failed', isActive: false });
+  });
+
+  it('running 任务队列存在 job 且未超时上限时不清理', async () => {
+    const { service, fileVerifyTaskRepository, fileVerifyQueue } = buildFileVerifyService();
+    fileVerifyTaskRepository.find.mockResolvedValue([
+      { taskId: 'fresh-running-1', isActive: true, status: 'running', startedAt: new Date() },
+    ]);
+    fileVerifyQueue.getJob.mockResolvedValue({ id: 'fresh-running-1' } as any);
+
+    await service.onModuleInit();
+
+    expect(fileVerifyTaskRepository.createQueryBuilder).not.toHaveBeenCalled();
   });
 });
 

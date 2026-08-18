@@ -6,6 +6,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#0A0E17" />
     <meta name="color-scheme" content="dark" />
+    <!-- 不向跨源携带 Referer，防止分享 token 等凭证通过 referrer 泄露（G13-05） -->
+    <meta name="referrer" content="no-referrer" />
     <title>文件分发系统</title>
 
     <!--
@@ -16,13 +18,23 @@
         额外允许 fonts.googleapis.com 的字体样式表
       - font-src：允许 fonts.gstatic.com 字体文件与 data: 内联字体/图标
       - img-src：允许 data:（favicon/占位图）与 blob:（上传预览 ObjectURL）
+      - media-src：允许 blob:（FilePreviewDialog 用 URL.createObjectURL(MediaSource) 做 MSE 播放）
       - connect-src：同源 API + ws:/wss:（Vite HMR WebSocket）
       - object-src 'none' / base-uri 'self'：关闭插件嵌入与 base 注入面
       注意：字体 onload 内联属性必须与下方哈希对应的脚本内容完全一致，修改需重算哈希。
+
+      ⚠️ G10-07 安全说明（connect-src ws:/wss:）：
+      本地 index.html 的 CSP 由浏览器强制（HTML meta），而 Vite 开发态 HMR 依赖
+      WebSocket 连接（默认 ws://localhost:<port>），若此处移除 ws:/wss: 将导致
+      dev 模式下热更新失效。因此该 meta 中保留 ws:/wss: 仅服务于开发环境。
+      生产环境（部署）由服务端下发 CSP 响应头（Helmet / nginx）覆盖并收紧为
+      connect-src 'self'（不含任意主机 WS），杜绝任意主机 WebSocket 出口。
+      如需在生产打包产物（dist/index.html）中彻底移除 ws:/wss:，请同步服务端
+      CSP 头并确认无 HMR 依赖后再删除。
     -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self' 'sha256-eOcoZqh8pP0qUd41Lu2w/Pq/ao1wfGf5RKErKPEVuwM='; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self' ws: wss:; media-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'"
+      content="default-src 'self'; script-src 'self' 'sha256-eOcoZqh8pP0qUd41Lu2w/Pq/ao1wfGf5RKErKPEVuwM='; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self' ws: wss:; media-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'"
     />
 
     <!-- Preconnect to critical third-party origins（非阻塞资源提示，不可达时快速失败不影响首屏） -->

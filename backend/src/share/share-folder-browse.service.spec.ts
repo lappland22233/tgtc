@@ -23,7 +23,7 @@ function makeLink(overrides: Record<string, unknown> = {}): any {
 
 function makeService(overrides: Record<string, unknown> = {}) {
   const service = Object.create(ShareFolderBrowseService.prototype) as any;
-  service.fileRepo = { findOne: jest.fn(), find: jest.fn() };
+  service.fileRepo = { findOne: jest.fn(), find: jest.fn(), count: jest.fn().mockResolvedValue(0) };
   service.folderRepo = {
     findOne: jest.fn(),
     find: jest.fn(),
@@ -90,11 +90,15 @@ describe('ShareFolderBrowseService', () => {
       (service as any).fileRepo.find.mockResolvedValueOnce([
         { id: 'file-1', originalName: 'a.mp4', mimeType: 'video/mp4', size: 100, createdAt: new Date(), uploadVersion: 3, status: 'ready' },
       ]);
+      (service as any).fileRepo.count.mockResolvedValue(1);
       const result = await service.listFolderContentsForShare(makeLink(), 'folder-root');
       expect(result.subfolders).toHaveLength(1);
       expect(result.files[0].uploadVersion).toBe(3);
       expect(result.files[0].status).toBe('ready');
       expect(result.files[0].downloadUrl).toBe('/api/s/tok123/download/file-1');
+      // G5-13：分页元数据
+      expect(result.pagination).toEqual({ page: 1, limit: 100, total: 1, hasMore: false });
+      expect((service as any).fileRepo.count).toHaveBeenCalledWith({ where: { folderId: 'folder-root', isDeleted: false } });
       expect((service as any).audit.log).toHaveBeenCalledWith(expect.objectContaining({ action: 'share_link_access' }));
     });
   });
@@ -121,6 +125,27 @@ describe('ShareFolderBrowseService', () => {
         { id: 'folder-root', name: '根' },
         { id: 'folder-child', name: '子' },
       ]);
+    });
+
+    it('裁剪分享根之上的祖先，不泄漏分享范围外目录', async () => {
+      const service = makeService();
+      // 分享根是 folder-root，其上层还有 outer-ancestor 与 global-root
+      (service as any).folderRepo.manager.query.mockResolvedValue([{ 1: 1 }]);
+      (service as any).folderRepo.findOne.mockResolvedValue({ id: 'folder-child' });
+      (service as any).folderRepo.findAncestors.mockResolvedValue([
+        { id: 'folder-child', name: '子', isDeleted: false },
+        { id: 'folder-root', name: '根', isDeleted: false },
+        { id: 'outer-ancestor', name: '外祖先', isDeleted: false },
+        { id: 'global-root', name: '全局根', isDeleted: false },
+      ]);
+      const result = await service.getFolderBreadcrumbForShare(makeLink(), 'folder-child');
+      // 必须从 folder-root 开始，绝不包含 outer-ancestor / global-root
+      expect(result).toEqual([
+        { id: 'folder-root', name: '根' },
+        { id: 'folder-child', name: '子' },
+      ]);
+      expect(result.map((r) => r.id)).not.toContain('outer-ancestor');
+      expect(result.map((r) => r.id)).not.toContain('global-root');
     });
   });
 

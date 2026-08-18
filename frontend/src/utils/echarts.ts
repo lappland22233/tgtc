@@ -37,7 +37,7 @@ echarts.use([
 ]);
 
 // Re-export with full type signatures (re-export, not destructuring, to preserve overloads)
-export { init, registerTheme, graphic } from 'echarts/core';
+export { init, registerTheme, graphic, getInstanceByDom, dispose } from 'echarts/core';
 // v6 实例类型规范名为 EChartsType；保留 ECharts 别名兼容现有 `echarts.ECharts` 用法
 export type { EChartsType, EChartsType as ECharts } from 'echarts/core';
 export default echarts;

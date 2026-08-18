@@ -16,6 +16,14 @@ import { promises as fsp } from 'fs';
 import * as path from 'path';
 
 export class CacheDiskManager {
+  /**
+   * 内存维护的缓存总大小（G4-03）。
+   * - null = 尚未同步（首次需要时做一次全目录扫描初始化）。
+   * - 之后每次 发布/淘汰/清理/失效 都在内存增量增减，容量判断 O(1)，
+   *   避免每次冷未命中全目录 readdir+stat。
+   */
+  private cachedSizeBytes: number | null = null;
+
   constructor(private readonly cacheDir: string) {}
 
   getCachePath(fileId: string): string {
@@ -34,8 +42,16 @@ export class CacheDiskManager {
     }
   }
 
-  /** 获取缓存目录总大小（跳过 .tmp / .spool 临时文件） */
+  /** 获取缓存目录总大小（跳过 .tmp / .spool 临时文件）——O(1) 内存计数 */
   async getTotalCacheSize(): Promise<number> {
+    if (this.cachedSizeBytes === null) {
+      this.cachedSizeBytes = await this.scanCacheSize();
+    }
+    return this.cachedSizeBytes;
+  }
+
+  /** 全目录扫描统计总大小（仅在内存计数缺失时执行一次） */
+  private async scanCacheSize(): Promise<number> {
     try {
       const files = await fsp.readdir(this.cacheDir);
       let total = 0;
@@ -52,17 +68,43 @@ export class CacheDiskManager {
     }
   }
 
+  /** 记录一次缓存发布（rename 完成后），增量维护内存总大小（G4-03） */
+  registerCache(_fileId: string, size: number): void {
+    this.cachedSizeBytes = (this.cachedSizeBytes ?? 0) + size;
+  }
+
+  /** 从内存计数中扣减某文件的占用（淘汰/清理/失效时调用） */
+  private unregisterCache(_fileId: string, size?: number): void {
+    if (this.cachedSizeBytes === null) return; // 尚未同步，无需扣减（后续同步会重建）
+    this.cachedSizeBytes = Math.max(0, this.cachedSizeBytes - (size ?? 0));
+  }
+
   /** 检查磁盘空间是否充足 */
   hasEnoughDiskSpace(minFreeDiskBytes: number): boolean {
     try {
       const { statfsSync } = require('fs');
       const stats = statfsSync(this.cacheDir);
-      const freeBytes = stats.bsize * stats.bfree;
+      // 用 bavail（无特权进程实际可用的块数）而非 bfree（物理剩余块数）：
+      // bfree 会把为 root/保留块计作可用，导致"看起来有空间实则写入 ENOSPC"。
+      const availBlocks = stats.bavail > 0 ? stats.bavail : 0;
+      const freeBytes = stats.bsize * availBlocks;
       return freeBytes >= minFreeDiskBytes;
     } catch {
-      // 无法获取磁盘信息时保守允许缓存
-      return true;
+      // 无法获取磁盘信息时保守判定为空间不足（走 spool/直通），
+      // 避免在磁盘不可用时乐观放行导致写入失败（G4-07）。
+      this.warnOnStatfsFailure();
+      return false;
     }
+  }
+
+  /** 告警抑制：避免 statfs 持续失败时每次调用都刷一条 warn */
+  private statfsWarned = false;
+
+  private warnOnStatfsFailure(): void {
+    if (this.statfsWarned) return;
+    this.statfsWarned = true;
+    // eslint-disable-next-line no-console
+    console.warn(`[CacheDiskManager] statfs 失败，无法获取缓存盘剩余空间，将按空间不足处理（走 spool/直通）`);
   }
 
   /**
@@ -100,6 +142,7 @@ export class CacheDiskManager {
           fileAccessMap.delete(entry.name);
           freedBytes += entry.size;
           evicted++;
+          this.unregisterCache(entry.name, entry.size);
         } catch {
           continue;
         }
@@ -126,7 +169,18 @@ export class CacheDiskManager {
   }
 
   /**
-   * 容量准备：超限 / 磁盘不足时先尝试 LRU 淘汰，仍不满足则返回 false（走 spool）。
+   * LRU 淘汰节流窗口（G4-03）：冷未命中频繁触发时，同一窗口内只执行一次全目录
+   * LRU 淘汰，其余请求直接按容量不足处理（走 spool），避免每次冷下载都阻塞在
+   * readdir+stat+sort 上。
+   */
+  static readonly EVICT_THROTTLE_MS = 1000;
+
+  /** 最近一次实际执行 LRU 淘汰的时间戳（0 = 尚未执行） */
+  private lastEvictAt = 0;
+
+  /**
+   * 容量准备：超限 / 磁盘不足时尝试 LRU 淘汰（带节流），仍不满足则返回 false（走 spool）。
+   * 容量判断基于 O(1) 内存计数，淘汰通过 evictLRU 更新同一计数，无需二次全目录扫描。
    */
   async prepareCacheCapacity(
     expectedSize: number,
@@ -136,13 +190,25 @@ export class CacheDiskManager {
   ): Promise<boolean> {
     const totalSize = await this.getTotalCacheSize();
     if (totalSize + expectedSize > maxCacheSizeBytes) {
-      await this.evictLRU(totalSize + expectedSize - maxCacheSizeBytes, fileAccessMap);
+      if (this.shouldEvict()) {
+        await this.evictLRU(totalSize + expectedSize - maxCacheSizeBytes, fileAccessMap);
+      }
       if ((await this.getTotalCacheSize()) + expectedSize > maxCacheSizeBytes) return false;
     }
     if (!this.hasEnoughDiskSpace(minFreeDiskBytes)) {
-      await this.evictLRU(Math.max(expectedSize, minFreeDiskBytes), fileAccessMap);
+      if (this.shouldEvict()) {
+        await this.evictLRU(Math.max(expectedSize, minFreeDiskBytes), fileAccessMap);
+      }
       if (!this.hasEnoughDiskSpace(minFreeDiskBytes)) return false;
     }
+    return true;
+  }
+
+  /** 是否允许执行一次 LRU 淘汰（节流窗口内返回 false） */
+  private shouldEvict(): boolean {
+    const now = Date.now();
+    if (now - this.lastEvictAt < CacheDiskManager.EVICT_THROTTLE_MS) return false;
+    this.lastEvictAt = now;
     return true;
   }
 
@@ -168,6 +234,9 @@ export class CacheDiskManager {
         } else if (now - stat.mtimeMs > cacheTtlMs) {
           await fsp.unlink(fullPath);
           fileAccessMap.delete(f); // 同步清理 LRU 记录，防止 Map 泄漏
+          if (!f.endsWith('.tmp') && !f.endsWith('.spool')) {
+            this.unregisterCache(f, stat.size);
+          }
           cleaned++;
         } else {
           surviving.add(f);
@@ -186,10 +255,17 @@ export class CacheDiskManager {
   /** 失效文件：删除正式缓存 + .tmp + .spool 三件套（幂等） */
   async unlinkAllCacheFiles(fileId: string): Promise<void> {
     const cachePath = this.getCachePath(fileId);
+    // 正式缓存删除前记录大小，供内存计数扣减（G4-03）
+    let cacheSize: number | undefined;
+    try {
+      const stat = await fsp.stat(cachePath);
+      cacheSize = stat.size;
+    } catch { /* 不存在则忽略 */ }
     await Promise.all([
       fsp.unlink(cachePath).catch(() => {}),
       fsp.unlink(cachePath + '.tmp').catch(() => {}),
       fsp.unlink(cachePath + '.spool').catch(() => {}),
     ]);
+    if (cacheSize !== undefined) this.unregisterCache(fileId, cacheSize);
   }
 }

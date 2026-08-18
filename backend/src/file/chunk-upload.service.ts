@@ -28,6 +28,10 @@ interface ChunkSession {
   folderId: string | null;
   /** 覆盖目标 File 记录 id（可选）：合并完成后 in-place 覆盖该记录 */
   overwriteFileId?: string | null;
+  /** 首次 finalizeMerge 已创建的 File 记录 id（非覆盖路径）。重试时复用，避免产生重复记录（G3-06） */
+  savedFileId?: string;
+  /** 与 savedFileId 对应的 uploadVersion，用于重试入队时保持幂等 jobId */
+  savedFileUploadVersion?: number;
   createdAt: Date;
   /** 最后一次活动时间（分片上传/状态查询/合并触发时更新） */
   lastActivityAt: Date;
@@ -39,6 +43,30 @@ interface ChunkSession {
   mergeError?: string;
   mergeAbortController?: AbortController;
   mergePromise?: Promise<void>;
+}
+
+/** G3-04：简单信号量，控制合并并发上限 */
+class MergeSemaphore {
+  private count: number;
+  private waiters: Array<() => void> = [];
+
+  constructor(max: number) {
+    this.count = max;
+  }
+
+  async acquire(): Promise<void> {
+    if (this.count > 0) {
+      this.count--;
+      return;
+    }
+    await new Promise<void>((resolve) => this.waiters.push(resolve));
+  }
+
+  release(): void {
+    const next = this.waiters.shift();
+    if (next) next();
+    else this.count++;
+  }
 }
 
 @Injectable()
@@ -54,6 +82,19 @@ export class ChunkUploadService implements OnModuleInit {
   private inFlightRequests = 0;
   private inFlightBytes = 0;
   private readonly inFlightRequestsByUser = new Map<string, number>();
+  /** G3-04：合并并发信号量（全局 3 + 每用户 1），防止多账号并发大文件合并 OOM */
+  private readonly mergeSemaphoreGlobal = new MergeSemaphore(3);
+  private readonly mergeSemaphorePerUser = new Map<string, MergeSemaphore>();
+
+  /** 获取/创建用户级合并信号量 */
+  private getUserMergeSemaphore(userId: string): MergeSemaphore {
+    let sem = this.mergeSemaphorePerUser.get(userId);
+    if (!sem) {
+      sem = new MergeSemaphore(1);
+      this.mergeSemaphorePerUser.set(userId, sem);
+    }
+    return sem;
+  }
 
   /** 每用户最大并发会话数 */
   private static readonly MAX_SESSIONS_PER_USER = 10;
@@ -90,6 +131,9 @@ export class ChunkUploadService implements OnModuleInit {
     this.cleanupIncomingChunks().catch((err) => {
       this.logger.warn(`[分片上传] 启动清理未完成接收文件失败: ${(err as Error).message}`);
     });
+    this.cleanupOrphanPendingFiles().catch((err) => {
+      this.logger.warn(`[分片上传] 启动清理孤儿 pending 文件失败: ${(err as Error).message}`);
+    });
   }
 
   private readPositiveConfig(key: string, fallback: number): number {
@@ -100,6 +144,26 @@ export class ChunkUploadService implements OnModuleInit {
   private async cleanupIncomingChunks(): Promise<void> {
     const entries = await fsp.readdir(this.incomingDir).catch(() => [] as string[]);
     await Promise.all(entries.map((name) => this.removeIncomingChunk(path.join(this.incomingDir, name))));
+  }
+
+  /** G3-03：启动扫描 pending 目录，清理 DB 无对应记录（崩溃窗口残留）的孤儿临时文件与回执 */
+  private async cleanupOrphanPendingFiles(): Promise<void> {
+    const pendingDir = path.resolve(process.cwd(), 'tmp', 'uploads', 'pending');
+    const entries = await fsp.readdir(pendingDir).catch(() => [] as string[]);
+    const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    let cleaned = 0;
+    for (const name of entries) {
+      // 只处理 UUID 命名的主文件（跳过 .telegram.json 回执伴生文件，随主文件一并删除）
+      if (!uuidRe.test(name)) continue;
+      const exists = await this.fileService.fileRecordExists(name).catch(() => true);
+      if (exists) continue; // DB 有记录（处理中/待处理/已完成），保留
+      await fsp.rm(path.join(pendingDir, name), { force: true }).catch(() => {});
+      await fsp.rm(path.join(pendingDir, `${name}.telegram.json`), { force: true }).catch(() => {});
+      cleaned++;
+    }
+    if (cleaned > 0) {
+      this.logger.log(`[分片上传] 启动清理 ${cleaned} 个孤儿 pending 文件（DB 无对应记录）`);
+    }
   }
 
   private async cleanupOrphanChunkDirs(): Promise<void> {
@@ -363,29 +427,44 @@ export class ChunkUploadService implements OnModuleInit {
     session.mergeStatus = 'merging';
     session.mergeAbortController = new AbortController();
 
-    const mergePromise = this.withDeadline(
-      this.doMerge(session, uploadFn, session.mergeAbortController.signal),
-      ChunkUploadService.MERGE_TIMEOUT_MS,
-      session.mergeAbortController,
-    )
-      .then((result) => {
-        if (session.mergeAbortController?.signal.aborted) return;
-        session.mergeResult = result;
-        session.mergeStatus = 'done';
-        this.logger.log(`[分片上传] ${uploadId} 合并完成: ${result.originalName}`);
-        this.scheduleCleanup(uploadId);
-      })
-      .catch((err: Error) => {
-        session.mergeStatus = 'error';
-        session.mergeError = err.message;
-        this.logger.error(`[分片上传] ${uploadId} 合并失败: ${err.message}`);
-        this.scheduleCleanup(uploadId);
-      })
-      .finally(() => {
-        session.mergeAbortController = undefined;
-        session.mergePromise = undefined;
-      });
+    // G3-04：合并受全局 + 用户级信号量约束，防止多账号并发大文件合并造成 OOM/磁盘放大。
+    // 等待信号量不计入合并超时窗口（deadline 从真正开始合并时计时）。
+    const mergePromise = this.runMergeWithSemaphore(session, uploadFn, uploadId);
     session.mergePromise = mergePromise;
+  }
+
+  /** G3-04：在全局 + 用户级信号量保护下执行合并，统一结果写入/失败处理/收尾 */
+  private async runMergeWithSemaphore(
+    session: ChunkSession,
+    uploadFn: (file: Express.Multer.File) => Promise<{ id: string; originalName: string }>,
+    uploadId: string,
+  ): Promise<void> {
+    const userSem = this.getUserMergeSemaphore(session.uploadedBy);
+    await this.mergeSemaphoreGlobal.acquire();
+    await userSem.acquire();
+    try {
+      const controller = session.mergeAbortController!;
+      const result = await this.withDeadline(
+        this.doMerge(session, uploadFn, controller.signal),
+        ChunkUploadService.MERGE_TIMEOUT_MS,
+        controller,
+      );
+      if (controller.signal.aborted) return;
+      session.mergeResult = result;
+      session.mergeStatus = 'done';
+      this.logger.log(`[分片上传] ${uploadId} 合并完成: ${result.originalName}`);
+      this.scheduleCleanup(uploadId);
+    } catch (err) {
+      session.mergeStatus = 'error';
+      session.mergeError = (err as Error).message;
+      this.logger.error(`[分片上传] ${uploadId} 合并失败: ${(err as Error).message}`);
+      this.scheduleCleanup(uploadId);
+    } finally {
+      userSem.release();
+      this.mergeSemaphoreGlobal.release();
+      session.mergeAbortController = undefined;
+      session.mergePromise = undefined;
+    }
   }
 
   /**
@@ -525,6 +604,17 @@ export class ChunkUploadService implements OnModuleInit {
     this.throwIfAborted(signal);
     session.mergeStatus = 'uploading';
 
+    // G3-05：合并产物磁盘占用预检。
+    // merged(1x) 已写完，此处还需 pending copy(1x) + 缓存预热(1x) ≈ 2x fileSize。
+    // 空间不足置 error 并返回 507，避免 ENOSPC 破坏持久化目录或缓存盘。
+    try {
+      await this.ensureDiskSpace(2 * fileSize);
+    } catch (error) {
+      session.mergeStatus = 'error';
+      session.mergeError = (error as Error).message || '磁盘空间不足';
+      throw error;
+    }
+
     // magic bytes 类型检查
     const fileSample = this.fileService.getFileSampleFromPath(mergedPath);
     const typeCheck = await this.fileService.isFileTypeAllowed(
@@ -550,35 +640,78 @@ export class ChunkUploadService implements OnModuleInit {
       stream: null as any,
     };
 
+    // G3-06：error 后重试 complete 时复用已创建的 File 记录，避免僵尸重复记录。
+    // 首次成功 createProcessingFile 后把 savedFileId 存入 session；重试只重做 copyFile + queue.add。
+    let savedFile: { id: string; uploadVersion: number; originalName: string };
     this.throwIfAborted(signal);
-    const savedFile = await this.fileService.createProcessingFile(
-      mockFile,
-      session.fileName,
-      { id: session.uploadedBy } as User,
-      undefined,   // tagIds
-      true,        // skipTypeCheck
-      session.folderId,
-      session.overwriteFileId ?? undefined,
-    );
+    if (session.savedFileId && session.savedFileUploadVersion !== undefined) {
+      savedFile = await this.fileService.getProcessingFileOrThrow(
+        session.savedFileId,
+        session.savedFileUploadVersion,
+      );
+    } else {
+      const created = await this.fileService.createProcessingFile(
+        mockFile,
+        session.fileName,
+        { id: session.uploadedBy } as User,
+        undefined,   // tagIds
+        true,        // skipTypeCheck
+        session.folderId,
+        session.overwriteFileId ?? undefined,
+      );
+      session.savedFileId = created.id;
+      session.savedFileUploadVersion = created.uploadVersion;
+      savedFile = { id: created.id, uploadVersion: created.uploadVersion, originalName: created.originalName };
+    }
 
     this.throwIfAborted(signal);
     const pendingDir = path.resolve(process.cwd(), 'tmp', 'uploads', 'pending');
     fs.mkdirSync(pendingDir, { recursive: true });
     const pendingPath = path.join(pendingDir, savedFile.id);
+    // G3-12：覆盖上传复用同一 pendingPath，必须先删除旧版本可能残留的 .telegram.json 回执，
+    // 防止 v2 任务 loadReceipt 读到 v1 陈旧回执提交错配内容（配合 processor 的版本校验双保险）。
+    await fsp.rm(`${pendingPath}.telegram.json`, { force: true }).catch(() => {});
     await fsp.copyFile(mergedPath, pendingPath);
 
     this.throwIfAborted(signal);
-    await this.fileUploadQueue.add(
-      'upload',
-      { fileId: savedFile.id, filePath: pendingPath, uploadVersion: savedFile.uploadVersion },
-      {
-        jobId: `file-upload:${savedFile.id}:${savedFile.uploadVersion}`,
-        attempts: 3,
-        backoff: { type: 'exponential', delay: 10000 },
-        removeOnComplete: 100,
-        removeOnFail: 50,
-      },
-    );
+    const jobId = `file-upload:${savedFile.id}:${savedFile.uploadVersion}`;
+    try {
+      await this.fileUploadQueue.add(
+        'upload',
+        { fileId: savedFile.id, filePath: pendingPath, uploadVersion: savedFile.uploadVersion },
+        {
+          jobId,
+          attempts: 3,
+          backoff: { type: 'exponential', delay: 10000 },
+          removeOnComplete: 100,
+          removeOnFail: 50,
+        },
+      );
+    } catch (err) {
+      // G3-03：queue.add 失败（Redis 故障/不可达）时，刚 copyFile 生成的 pending 整份文件无人消费，
+      // 必须立即清理（连同回执），避免含用户原始内容的临时文件永久残留磁盘。
+      await fsp.rm(pendingPath, { force: true }).catch(() => {});
+      await fsp.rm(`${pendingPath}.telegram.json`, { force: true }).catch(() => {});
+      throw err;
+    }
+
+    // G3-07：withDeadline 超时 abort 与 queue.add 的竞态。
+    // queue.add 成功后复查 signal/会话状态：若已中止（超时/取消），立即移除刚入队任务并清理 DB 记录，
+    // 避免超时后仍产生"幽灵任务"跑上传。
+    // （signal.aborted 已涵盖中止场景；mergeStatus 可能被 abort/error 路径改写，用 isActiveSession 兜底）
+    if (signal.aborted || !this.isActiveSession(session)) {
+      this.logger.warn(
+        `[分片上传] ${session.uploadId} 入队后检测到中止，移除任务 ${jobId} 并清理记录 ${savedFile.id}`,
+      );
+      const queuedJob = await this.fileUploadQueue.getJob(jobId).catch(() => undefined);
+      if (queuedJob) {
+        await queuedJob.remove().catch(() => {});
+      }
+      if (!session.overwriteFileId) {
+        await this.fileService.softDeleteProcessingFile(savedFile.id).catch(() => {});
+      }
+      throw new Error('分片合并已取消');
+    }
 
     this.logger.log(`[分片上传] ${session.uploadId} 已入队后台上传: ${savedFile.id}`);
 
@@ -643,6 +776,12 @@ export class ChunkUploadService implements OnModuleInit {
       throw new ForbiddenException('无权操作此上传会话');
     }
 
+    // G3-02：合并已完成且队列任务已入队（uploading）时，abort 必须一并移除队列任务并软删 DB 记录，
+    // 否则后台任务仍会把文件上传到 Telegram，与"取消"语义违背（隐私）。
+    if (session.mergeStatus === 'uploading' && session.savedFileId) {
+      await this.cleanupUploadingSideEffects(session);
+    }
+
     await this.cancelMerge(session);
     this.sessions.delete(uploadId);
 
@@ -651,12 +790,34 @@ export class ChunkUploadService implements OnModuleInit {
     this.logger.log(`[分片上传] 取消会话 ${uploadId}`);
   }
 
+  /** G3-02：清理 uploading 阶段的队列任务、DB 记录与 pending 临时文件（abort 时调用） */
+  private async cleanupUploadingSideEffects(session: ChunkSession): Promise<void> {
+    const fileId = session.savedFileId!;
+    const uploadVersion = session.savedFileUploadVersion ?? 1;
+    const jobId = `file-upload:${fileId}:${uploadVersion}`;
+    try {
+      const queuedJob = await this.fileUploadQueue.getJob(jobId).catch(() => undefined);
+      if (queuedJob) await queuedJob.remove().catch(() => {});
+    } catch {
+      /* 任务可能已执行/已移除，静默 */
+    }
+    // 软删 DB 记录（保留审计痕迹，仅限 processing 阶段避免误伤已提交的覆盖目标）
+    await this.fileService.softDeleteProcessingFile(fileId).catch(() => {});
+    // 清理 pending 临时文件与回执
+    const pendingDir = path.resolve(process.cwd(), 'tmp', 'uploads', 'pending');
+    await fsp.rm(path.join(pendingDir, fileId), { force: true }).catch(() => {});
+    await fsp.rm(path.join(pendingDir, `${fileId}.telegram.json`), { force: true }).catch(() => {});
+  }
+
   /** 定时清理空闲过久的会话（基于 lastActivityAt） */
   @Cron(CronExpression.EVERY_HOUR)
   async cleanupExpiredSessions(): Promise<void> {
     const now = Date.now();
     let cleaned = 0;
     for (const [uploadId, session] of this.sessions) {
+      // G3-01：跳过进行中的活跃会话（pending/merging/uploading），
+      // 避免慢合并（最长 MERGE_TIMEOUT=30min）被本清理任务按 lastActivityAt 误中断。
+      if (this.isActiveSession(session)) continue;
       if (now - session.lastActivityAt.getTime() > ChunkUploadService.SESSION_MAX_IDLE) {
         await this.cancelMerge(session);
         this.sessions.delete(uploadId);

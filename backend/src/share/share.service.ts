@@ -59,6 +59,15 @@ export class ShareService {
     return this.configService.get<string>('APP_URL') || 'http://localhost:3000';
   }
 
+  /**
+   * 审计脱敏：分享 token 是匿名访问凭证（尤其无密码分享），明文入库审计
+   * 会导致审计库泄漏即暴露访问凭证。仅保留前 4 位前缀用于关联排查，
+   * 无法据此还原完整 token（剩余部分熵不可推断）。
+   */
+  private maskToken(token: string): string {
+    return token.slice(0, 4);
+  }
+
   // ---------- 创建分享 ----------
 
   async createShare(creatorId: string, dto: CreateShareDto): Promise<{ token: string; url: string; id: string }> {
@@ -110,7 +119,7 @@ export class ShareService {
       userId: creatorId,
       resourceType: 'share_link',
       resourceId: saved.id,
-      metadata: { token, targetType: dto.targetType, targetId: dto.targetId, hasPassword: !!password },
+      metadata: { tokenPrefix: this.maskToken(token), targetType: dto.targetType, targetId: dto.targetId, hasPassword: !!password },
     });
 
     return { token, url: `${this.appUrl}/s/${token}`, id: saved.id };
@@ -151,7 +160,7 @@ export class ShareService {
       action: 'share_link_access' as AuditAction,
       resourceType: 'share_link',
       resourceId: link.id,
-      metadata: { token, targetType: link.targetType },
+      metadata: { tokenPrefix: this.maskToken(token), targetType: link.targetType },
     });
 
     // 返回 target 元数据（不返回字节）
@@ -178,6 +187,11 @@ export class ShareService {
     const link = await this.shareLinkRepo.findOne({ where: { token, isDeleted: false } });
     if (!link) throw new BadRequestException('无法验证分享密码');
 
+    // G5-11：过期/次数耗尽的分享不允许继续验证密码。
+    // 必须在 bcrypt 之前完成可用性校验，避免对已失效分享浪费昂贵哈希计算，
+    // 也避免攻击者对已失效 token 仍可探测/枚举密码。
+    await this.assertShareUsable(link);
+
     // IP 封禁检查
     if (ip) {
       const ipCheck = await this.passwordService.isIPBanned(ip);
@@ -194,6 +208,8 @@ export class ShareService {
     const valid = await bcrypt.compare(password, link.password);
     if (!valid) {
       if (ip) await this.passwordService.recordFailedAttempt(ip);
+      // G5-08：token 维度失败累计锁定升级（IP 封禁可被分布式换 IP 绕过）
+      await this.passwordService.recordTokenFailedAttempt(token);
       this.audit.log({
         action: 'share_link_password_failed' as AuditAction,
         resourceType: 'share_link',
@@ -250,10 +266,10 @@ export class ShareService {
       action: 'share_link_download' as AuditAction,
       resourceType: 'share_link',
       resourceId: link.id,
-      metadata: { token, fileId, ip: ip || null },
+      metadata: { tokenPrefix: this.maskToken(token), fileId, ip: ip || null },
     });
 
-    return this.fileService.getStreamForShareDownload(fileId, ip || undefined);
+    return this.fileService.getStreamForShareDownload(fileId, ip || undefined, link.token);
   }
 
   /**
@@ -307,7 +323,7 @@ export class ShareService {
       action: 'share_link_preview' as AuditAction,
       resourceType: 'share_link',
       resourceId: link.id,
-      metadata: { token, fileId, ip: ip || null, isRange: !!rangeHeader },
+      metadata: { tokenPrefix: this.maskToken(token), fileId, ip: ip || null, isRange: !!rangeHeader },
     });
 
     // C-03 修复：无论 Range 命中还是回退全量流，在输出任何文件字节前完成会话确认。
@@ -319,7 +335,7 @@ export class ShareService {
       if (rangeResult) return rangeResult;
       // Range 无效或缓存未命中 → 回退全量流；会话已确认，不再重复扣次
     }
-    return this.fileService.getStreamForShareDownload(fileId, ip || undefined);
+    return this.fileService.getStreamForShareDownload(fileId, ip || undefined, link.token);
   }
 
   /** 分享缩略图：完整校验分享状态、密码凭证和文件范围，但不消费访问次数。 */
@@ -541,19 +557,28 @@ export class ShareService {
     }
   }
 
+  /**
+   * 原子启动有效期时钟（仅当 expiresIn 已配置且尚未启动时）。
+   * 下载与预览消费路径共用，保证「仅预览」的分享同样触发有效期，
+   * 避免预览分享因 expiresStartAt 恒为 null 而永久不过期。
+   * 失败（行不存在/已软删）抛 404，由调用方统一兜底。
+   */
+  private async startExpiryClock(link: ShareLink): Promise<void> {
+    if (!link.expiresIn || link.expiresStartAt) return;
+    const started = await this.shareLinkRepo
+      .createQueryBuilder()
+      .update(ShareLink)
+      .set({ expiresStartAt: () => 'COALESCE("expiresStartAt", NOW())' })
+      .where('id = :id', { id: link.id })
+      .andWhere('"isDeleted" = false')
+      .execute();
+    if (!started.affected) throw new NotFoundException('分享不存在或已被取消');
+    link.expiresStartAt = new Date();
+  }
+
   /** 实际访问入口调用：原子启动有效期并消费一次访问额度。 */
   async consumeShareAccess(link: ShareLink): Promise<void> {
-    if (link.expiresIn && !link.expiresStartAt) {
-      const started = await this.shareLinkRepo
-        .createQueryBuilder()
-        .update(ShareLink)
-        .set({ expiresStartAt: () => 'COALESCE("expiresStartAt", NOW())' })
-        .where('id = :id', { id: link.id })
-        .andWhere('"isDeleted" = false')
-        .execute();
-      if (!started.affected) throw new NotFoundException('分享不存在或已被取消');
-      link.expiresStartAt = new Date();
-    }
+    await this.startExpiryClock(link);
     const access = await this.tryIncrementAccessCount(link);
     if (!access.allowed) {
       await this.shareLinkRepo.update(link.id, { status: ShareLinkStatus.EXHAUSTED }).catch(() => {});
@@ -571,6 +596,8 @@ export class ShareService {
    * 由 ShareController 在调用预览流前派生 visitorHash 并传入。
    */
   async consumeSharePreviewAccess(link: ShareLink, fileId: string, visitorHash: string): Promise<void> {
+    // 与下载路径一致：首次预览消费前原子启动有效期时钟，保证仅预览的分享也会过期。
+    await this.startExpiryClock(link);
     const result = await this.previewSessionService.consumePreviewAccess(link, fileId, visitorHash);
     if (result === 'exhausted') {
       await this.shareLinkRepo.update(link.id, { status: ShareLinkStatus.EXHAUSTED }).catch(() => {});
@@ -636,8 +663,17 @@ export class ShareService {
   }
 
   /** 转发：列出文件夹分享内容（实现位于 ShareFolderBrowseService） */
-  async listFolderContentsForShare(link: ShareLink, folderId: string) {
-    return this.folderBrowse.listFolderContentsForShare(link, folderId);
+  async listFolderContentsForShare(
+    link: ShareLink,
+    folderId: string,
+    options: { page?: number; limit?: number } = {},
+  ) {
+    return this.folderBrowse.listFolderContentsForShare(link, folderId, options);
+  }
+
+  /** 转发：纯校验 folderId 是否在分享子树内（G5-07，消费配额前调用） */
+  async assertFolderInSharePublic(link: ShareLink, folderId: string): Promise<void> {
+    return this.folderBrowse.assertFolderInShare(link, folderId);
   }
 
   /** 转发：返回文件夹分享面包屑（实现位于 ShareFolderBrowseService） */

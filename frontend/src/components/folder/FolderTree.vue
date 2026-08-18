@@ -38,6 +38,7 @@
     <!-- 右键菜单 -->
     <div
       v-if="ctxMenu.visible"
+      ref="ctxMenuRef"
       class="ctx-menu"
       :style="{ top: ctxMenu.y + 'px', left: ctxMenu.x + 'px' }"
       @click.stop=""
@@ -82,12 +83,28 @@ function handleSelect(value: string | string[]) {
 
 // ---------- 右键菜单 ----------
 
+const ctxMenuRef = ref<HTMLElement | null>(null);
 const ctxMenu = ref({
   visible: false,
   x: 0,
   y: 0,
   folder: null as Folder | null,
 });
+
+/** 根据视口尺寸修正坐标，保证右键菜单完整可见（G13-09） */
+function adjustCtxMenuPosition() {
+  const el = ctxMenuRef.value;
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  const w = el?.offsetWidth || 140;
+  const h = el?.offsetHeight || 110;
+  let nx = ctxMenu.value.x;
+  let ny = ctxMenu.value.y;
+  if (nx + w > vw - 8) nx = Math.max(8, vw - w - 8);
+  if (ny + h > vh - 8) ny = Math.max(8, vh - h - 8);
+  ctxMenu.value.x = nx;
+  ctxMenu.value.y = ny;
+}
 
 function onContextMenu(e: MouseEvent, folder: Folder) {
   ctxMenu.value = {
@@ -96,10 +113,39 @@ function onContextMenu(e: MouseEvent, folder: Folder) {
     y: e.clientY,
     folder,
   };
+  // 渲染后按实际尺寸修正一次，避免超出视口右侧/底部
+  requestAnimationFrame(adjustCtxMenuPosition);
 }
 
 function closeCtxMenu() {
   ctxMenu.value.visible = false;
+}
+
+/**
+ * 判断当前浏览的文件夹是否位于以 rootId 为根的子树内（含 rootId 自身及其所有子孙）。
+ * 删除祖先文件夹时，若当前在子孙目录中，也应回到根目录。
+ */
+function isCurrentInSubtree(rootId: string): boolean {
+  const current = folderStore.currentFolderId;
+  if (!current) return false;
+  if (current === rootId) return true;
+  // 沿 parentId 从当前文件夹逐级上溯祖先链，判断是否命中 rootId
+  const parentMap = new Map<string, string>();
+  const collectParents = (nodes: Folder[]) => {
+    for (const node of nodes) {
+      if (node.parentId != null) parentMap.set(node.id, node.parentId);
+      if (node.children?.length) collectParents(node.children);
+    }
+  };
+  collectParents(folderStore.tree);
+  let cursor: string | undefined = current;
+  const seen = new Set<string>();
+  while (cursor && !seen.has(cursor)) {
+    if (cursor === rootId) return true;
+    seen.add(cursor);
+    cursor = parentMap.get(cursor);
+  }
+  return false;
 }
 
 async function onCtxAction(action: 'rename' | 'move' | 'delete') {
@@ -124,8 +170,8 @@ async function onCtxAction(action: 'rename' | 'move' | 'delete') {
         try {
           await folderStore.deleteFolder(folder.id);
           MessagePlugin.success('文件夹已放入回收站，7 天后永久删除');
-          // 如果当前正在浏览被删的文件夹或其子文件夹，回到根目录
-          if (folderStore.currentFolderId === folder.id) {
+          // 若当前浏览的文件夹位于被删子树内（含其子孙），回到根目录（G13-10）
+          if (isCurrentInSubtree(folder.id)) {
             emit('navigate', null);
           }
         } catch (err) {
@@ -138,12 +184,16 @@ async function onCtxAction(action: 'rename' | 'move' | 'delete') {
   }
 }
 
-// 点击其他位置关闭右键菜单
+// 点击其他位置 / 滚动 / 视口变化时关闭右键菜单
 onMounted(() => {
   document.addEventListener('click', closeCtxMenu);
+  window.addEventListener('scroll', closeCtxMenu, true);
+  window.addEventListener('resize', closeCtxMenu);
 });
 onUnmounted(() => {
   document.removeEventListener('click', closeCtxMenu);
+  window.removeEventListener('scroll', closeCtxMenu, true);
+  window.removeEventListener('resize', closeCtxMenu);
 });
 </script>
 

@@ -1,7 +1,10 @@
 import { Injectable, Logger, OnApplicationShutdown } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import * as fs from 'fs';
+import * as path from 'path';
 import { AuditLog, AuditAction, AuditStatus } from '../entities/audit-log.entity';
+import { ConfigCacheService } from './config-cache.service';
 
 export interface AuditEntry {
   action: AuditAction;
@@ -21,9 +24,16 @@ export class AuditService implements OnApplicationShutdown {
   private static readonly MAX_PENDING_WRITES = 10000;
   private droppedWrites = 0;
 
+  /** 审计降级文件的默认目录（可用 AUDIT_DEGRADED_DIR 覆盖） */
+  private readonly degradedDir = process.env.AUDIT_DEGRADED_DIR
+    || path.join(process.cwd(), 'tmp', 'degraded-audit');
+  /** 审计降级文件的写入是否已就绪（懒初始化） */
+  private degradedInitDone = false;
+
   constructor(
     @InjectRepository(AuditLog)
     private auditLogRepository: Repository<AuditLog>,
+    private configCacheService: ConfigCacheService,
   ) {}
 
   /**
@@ -66,7 +76,25 @@ export class AuditService implements OnApplicationShutdown {
       }
     }
     const message = lastError instanceof Error ? lastError.message : String(lastError);
+    // 高敏审计失败：触发 CRITICAL 级告警（日志告警通道）+ 写本地降级文件供后续补录，
+    // 避免高敏感操作（role_change/config_change/user_delete）无审计成功返回。
     this.logger.error(`审计日志写入失败（await，已重试 ${retries} 次）: ${message}`);
+    await this.writeDegradedFile(entry, message);
+
+    // 审计失败即操作失败开关（配置项 AUDIT_FAIL_FAST，默认关闭避免阻断主流程）：
+    // 仅当显式开启时才抛出，使高敏操作随审计失败而失败。
+    const failFast = await this.isAuditFailFastEnabled();
+    if (failFast) {
+      throw new Error(`高敏审计写入失败，按配置中止操作: ${message}`);
+    }
+  }
+
+  /**
+   * G8-20：返回累计丢弃的审计写入数（供指标/健康检查查询）。
+   * 审计缺口可量化，避免 pending 满 10000 时静默丢弃无人察觉。
+   */
+  getDroppedWrites(): number {
+    return this.droppedWrites;
   }
 
   async onApplicationShutdown(_signal?: string): Promise<void> {
@@ -139,5 +167,46 @@ export class AuditService implements OnApplicationShutdown {
     });
 
     await this.auditLogRepository.save(auditLogs);
+  }
+
+  /**
+   * 审计写入失败时，将条目追加写入本地降级文件（按天滚动），供运维后续补录。
+   * 异步 append，失败仅记录日志，不影响主流程。
+   */
+  private async writeDegradedFile(entry: AuditEntry, reason: string): Promise<void> {
+    try {
+      if (!this.degradedInitDone) {
+        fs.mkdirSync(this.degradedDir, { recursive: true });
+        this.degradedInitDone = true;
+      }
+      // 按天滚动文件名，避免单文件无限增长
+      const day = new Date().toISOString().slice(0, 10);
+      const filePath = path.join(this.degradedDir, `audit-${day}.ndjson`);
+      const line = JSON.stringify({
+        ts: new Date().toISOString(),
+        reason,
+        entry,
+      }) + '\n';
+      fs.appendFile(filePath, line, (err) => {
+        if (err) {
+          this.logger.error(`审计降级文件写入失败: ${err.message}`);
+        }
+      });
+    } catch (error) {
+      this.logger.error(`审计降级文件写入失败: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  /**
+   * 读取"审计失败即失败"开关（AUDIT_FAIL_FAST，默认 false）。
+   * 配置读取失败时保守回退为 false（不阻断主流程）。
+   */
+  private async isAuditFailFastEnabled(): Promise<boolean> {
+    try {
+      const value = await this.configCacheService.get('AUDIT_FAIL_FAST', 'false');
+      return value === 'true';
+    } catch {
+      return false;
+    }
   }
 }

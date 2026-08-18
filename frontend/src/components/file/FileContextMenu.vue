@@ -7,8 +7,10 @@
         class="file-ctx-menu"
         :style="{ top: pos.y + 'px', left: pos.x + 'px' }"
         role="menu"
+        aria-label="文件操作菜单"
         @click.stop
         @contextmenu.prevent.stop
+        @keydown="onMenuKeydown"
       >
         <!-- 文件目标菜单 -->
         <template v-if="target?.kind === 'file'">
@@ -25,18 +27,19 @@
               class="ctx-item"
               :class="{ disabled: target.file.deletedByAdmin && !isAdmin }"
               role="menuitem"
+              tabindex="-1"
               @click="!(target.file.deletedByAdmin && !isAdmin) && emitAction('restore')"
             >
               <t-icon name="rollback" class="ctx-icon" />恢复
             </div>
-            <div v-if="isAdmin" class="ctx-item danger" role="menuitem" @click="emitAction('force-delete')">
+            <div v-if="isAdmin" class="ctx-item danger" role="menuitem" tabindex="-1" @click="emitAction('force-delete')">
               <t-icon name="delete" class="ctx-icon" />强制删除
             </div>
           </template>
 
           <!-- 正常文件：完整操作 -->
           <template v-else>
-            <div class="ctx-item" role="menuitem" @click="emitAction('copy-link')">
+            <div class="ctx-item" role="menuitem" tabindex="-1" @click="emitAction('copy-link')">
               <t-icon name="link" class="ctx-icon" />复制分享链接
             </div>
             <div
@@ -44,6 +47,7 @@
               class="ctx-item"
               :class="{ disabled: target.file.accessType !== 'public' || target.file.hasPassword || target.file.maxAccessCount > 0 || target.file.expiresIn != null }"
               role="menuitem"
+              tabindex="-1"
               @click="target.file.accessType === 'public' && !target.file.hasPassword && target.file.maxAccessCount <= 0 && target.file.expiresIn == null && emitAction('copy-media-link')"
             >
               <t-icon name="image" class="ctx-icon" />复制媒体直链
@@ -56,43 +60,43 @@
             >
               <t-icon name="view" class="ctx-icon" />预览
             </div>
-            <div class="ctx-item" role="menuitem" @click="emitAction('download')">
+            <div class="ctx-item" role="menuitem" tabindex="-1" @click="emitAction('download')">
               <t-icon name="download" class="ctx-icon" />下载
             </div>
             <div class="ctx-divider" />
-            <div class="ctx-item" role="menuitem" @click="emitAction('rename')">
+            <div class="ctx-item" role="menuitem" tabindex="-1" @click="emitAction('rename')">
               <t-icon name="edit" class="ctx-icon" />重命名
             </div>
-            <div class="ctx-item" role="menuitem" @click="emitAction('copy')">
+            <div class="ctx-item" role="menuitem" tabindex="-1" @click="emitAction('copy')">
               <t-icon name="copy" class="ctx-icon" />复制
             </div>
-            <div class="ctx-item" role="menuitem" @click="emitAction('move')">
+            <div class="ctx-item" role="menuitem" tabindex="-1" @click="emitAction('move')">
               <t-icon name="folder-move" class="ctx-icon" />移动到...
             </div>
-            <div class="ctx-item" role="menuitem" @click="emitAction('tag')">
+            <div class="ctx-item" role="menuitem" tabindex="-1" @click="emitAction('tag')">
               <t-icon name="tag" class="ctx-icon" />标签
             </div>
-            <div class="ctx-item" role="menuitem" @click="emitAction('share')">
+            <div class="ctx-item" role="menuitem" tabindex="-1" @click="emitAction('share')">
               <t-icon name="share" class="ctx-icon" />分享
             </div>
             <div class="ctx-divider" />
             <!-- 访问控制（原表格内联列，现收纳进菜单） -->
-            <div class="ctx-item" role="menuitem" @click="emitAction('toggle-access')">
+            <div class="ctx-item" role="menuitem" tabindex="-1" @click="emitAction('toggle-access')">
               <t-icon :name="target.file.accessType === 'public' ? 'lock-off' : 'lock-on'" class="ctx-icon" />
               {{ target.file.accessType === 'public' ? '设为私有' : '设为公开' }}
             </div>
-            <div class="ctx-item" role="menuitem" @click="emitAction('password')">
+            <div class="ctx-item" role="menuitem" tabindex="-1" @click="emitAction('password')">
               <t-icon name="lock-on" class="ctx-icon" />
               {{ target.file.hasPassword ? '修改/移除密码' : '设置访问密码' }}
             </div>
-            <div class="ctx-item" role="menuitem" @click="emitAction('access-count')">
+            <div class="ctx-item" role="menuitem" tabindex="-1" @click="emitAction('access-count')">
               <t-icon name="view-list" class="ctx-icon" />访问次数限制…
             </div>
-            <div class="ctx-item" role="menuitem" @click="emitAction('expires')">
+            <div class="ctx-item" role="menuitem" tabindex="-1" @click="emitAction('expires')">
               <t-icon name="time" class="ctx-icon" />限时访问…
             </div>
             <div class="ctx-divider" />
-            <div class="ctx-item danger" role="menuitem" @click="emitAction('delete')">
+            <div class="ctx-item danger" role="menuitem" tabindex="-1" @click="emitAction('delete')">
               <t-icon name="delete" class="ctx-icon" />删除
             </div>
           </template>
@@ -101,36 +105,36 @@
         <!-- 文件夹目标菜单 -->
         <template v-else-if="target?.kind === 'folder'">
           <div class="ctx-header" :title="target.folder.name">{{ target.folder.name }}</div>
-          <div class="ctx-item" role="menuitem" @click="emitAction('open')">
+          <div class="ctx-item" role="menuitem" tabindex="-1" @click="emitAction('open')">
             <t-icon name="folder-opened" class="ctx-icon" />打开
           </div>
           <div class="ctx-divider" />
-          <div class="ctx-item" role="menuitem" @click="emitAction('rename')">
+          <div class="ctx-item" role="menuitem" tabindex="-1" @click="emitAction('rename')">
             <t-icon name="edit" class="ctx-icon" />重命名
           </div>
-          <div class="ctx-item" role="menuitem" @click="emitAction('move')">
+          <div class="ctx-item" role="menuitem" tabindex="-1" @click="emitAction('move')">
             <t-icon name="folder-move" class="ctx-icon" />移动到...
           </div>
-          <div class="ctx-item" role="menuitem" @click="emitAction('share')">
+          <div class="ctx-item" role="menuitem" tabindex="-1" @click="emitAction('share')">
             <t-icon name="share" class="ctx-icon" />分享
           </div>
           <div class="ctx-divider" />
-          <div class="ctx-item danger" role="menuitem" @click="emitAction('delete')">
+          <div class="ctx-item danger" role="menuitem" tabindex="-1" @click="emitAction('delete')">
             <t-icon name="delete" class="ctx-icon" />删除
           </div>
         </template>
 
         <!-- 空白处菜单 -->
         <template v-else>
-          <div class="ctx-item" role="menuitem" @click="emitAction('new-folder')">
+          <div class="ctx-item" role="menuitem" tabindex="-1" @click="emitAction('new-folder')">
             <t-icon name="folder-add" class="ctx-icon" />新建文件夹
           </div>
-          <div class="ctx-item" role="menuitem" @click="emitAction('upload')">
+          <div class="ctx-item" role="menuitem" tabindex="-1" @click="emitAction('upload')">
             <t-icon name="upload" class="ctx-icon" />上传文件
           </div>
           <template v-if="clipboardCount > 0">
             <div class="ctx-divider" />
-            <div class="ctx-item" role="menuitem" @click="emitAction('paste')">
+            <div class="ctx-item" role="menuitem" tabindex="-1" @click="emitAction('paste')">
               <t-icon name="paste" class="ctx-icon" />粘贴（{{ clipboardCount }} 个文件）
             </div>
           </template>
@@ -200,7 +204,11 @@ watch(() => props.visible, (v) => {
     // 记录打开时的滚动基准（惰性，在首个滚动事件确定实际滚动容器）
     scrollAnchor = null;
     // 渲染后按实际尺寸修正一次，避免首次估算偏差
-    nextTick(adjustPosition);
+    nextTick(() => {
+      adjustPosition();
+      // 键盘可访问：打开后将焦点移到第一个可操作菜单项
+      focusMenuItem(0);
+    });
   }
 });
 
@@ -210,6 +218,45 @@ function onDocClick() {
 }
 function onKeydown(e: KeyboardEvent) {
   if (e.key === 'Escape' && props.visible) emit('update:visible', false);
+}
+
+/** 收集当前可见且可操作（非 disabled）的菜单项元素 */
+function getActionableItems(): HTMLElement[] {
+  const el = menuRef.value;
+  if (!el) return [];
+  return Array.from(el.querySelectorAll<HTMLElement>('.ctx-item:not(.disabled)'));
+}
+
+/** 聚焦第 index 个可操作菜单项（越界时回绕） */
+function focusMenuItem(index: number) {
+  const items = getActionableItems();
+  if (items.length === 0) return;
+  const i = ((index % items.length) + items.length) % items.length;
+  items[i].focus();
+}
+
+/** 菜单容器方向键导航 + Enter/Space 激活（G13-07） */
+function onMenuKeydown(e: KeyboardEvent) {
+  if (e.key === 'ArrowDown') { e.preventDefault(); moveFocus(1); }
+  else if (e.key === 'ArrowUp') { e.preventDefault(); moveFocus(-1); }
+  else if (e.key === 'Home') { e.preventDefault(); focusMenuItem(0); }
+  else if (e.key === 'End') { e.preventDefault(); focusMenuItem(getActionableItems().length - 1); }
+  else if (e.key === 'Enter' || e.key === ' ') {
+    // 已聚焦到菜单项上（items 可被 Tab/方向键聚焦），激活其点击
+    const target = document.activeElement as HTMLElement | null;
+    if (target && menuRef.value?.contains(target) && target.classList.contains('ctx-item')) {
+      e.preventDefault();
+      target.click();
+    }
+  }
+}
+
+function moveFocus(dir: 1 | -1) {
+  const items = getActionableItems();
+  if (items.length === 0) return;
+  const active = document.activeElement as HTMLElement | null;
+  const cur = items.indexOf(active!);
+  focusMenuItem(cur === -1 ? (dir === 1 ? 0 : items.length - 1) : cur + dir);
 }
 
 /** 菜单打开后的滚动基准位置；null 表示尚未在本次打开中记录 */
@@ -294,6 +341,12 @@ onUnmounted(() => {
   transition: background var(--duration-fast);
 }
 .ctx-item:hover {
+  background: var(--color-accent-soft);
+  color: var(--text-accent);
+}
+.ctx-item:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: -2px;
   background: var(--color-accent-soft);
   color: var(--text-accent);
 }

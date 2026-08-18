@@ -3,7 +3,7 @@
     <div class="toolbar-header">
       <h1>仪表盘定制</h1>
       <t-space>
-        <t-select v-model="currentDashboardId" placeholder="选择仪表盘" style="width:220px" @change="loadDashboard">
+        <t-select v-model="currentDashboardId" placeholder="选择仪表盘" style="width:220px" @change="onDashboardSelect">
           <t-option v-for="d in dashboards" :key="d.id" :value="d.id" :label="d.name" />
         </t-select>
         <t-select v-model="presetName" placeholder="预设模板" clearable style="width:140px" @change="createPreset">
@@ -70,7 +70,8 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue';
+import { ref, onMounted, watch } from 'vue';
+import { DialogPlugin } from 'tdesign-vue-next';
 import MessagePlugin from '@/utils/message';
 import { useMobile } from '@/composables/useMobile';
 import { api } from '@/stores/auth';
@@ -107,6 +108,14 @@ const saving = ref(false);
 const showCreateDialog = ref(false);
 const newDashboardName = ref('');
 const presetName = ref('');
+
+// 未保存修改防护（G15-23）：编辑模式下组件被改动后置脏，切换仪表盘时确认，
+// 避免静默丢失修改。
+const editDirty = ref(false);
+function markEditDirty() { if (editMode.value) editDirty.value = true; }
+// 监听组件数组变化（增删/内容编辑），编辑模式下置脏
+watch(widgets, () => { markEditDirty(); }, { deep: true });
+watch(editMode, (val) => { if (val) editDirty.value = false; });
 
 const isMobile = useMobile();
 
@@ -171,19 +180,53 @@ async function fetchPresets() {
   }
 }
 
+/**
+ * 切换仪表盘（G15-23）：编辑中若存在未保存修改，先二次确认，避免静默丢失。
+ * 确认后才真正加载新仪表盘。
+ */
+function onDashboardSelect() {
+  if (!editDirty.value) {
+    void loadDashboard();
+    return;
+  }
+  const confirmDialog = DialogPlugin.confirm({
+    header: '未保存的修改',
+    body: '当前仪表盘存在未保存的修改，切换后将丢失。确定要切换吗？',
+    confirmBtn: '放弃修改并切换',
+    cancelBtn: '留在本页',
+    onConfirm: () => {
+      confirmDialog.destroy();
+      void loadDashboard();
+    },
+    onClose: () => confirmDialog.destroy(),
+  });
+}
+
+/**
+ * 加载仪表盘时同样校验端点白名单（G15-22）：
+ * 即使服务端存有非法/任意内部 API 端点（旧数据或绕过写入），加载时也过滤掉，
+ * 保证渲染与编辑阶段都无前端 SSRF 面。
+ */
 async function loadDashboard() {
   if (!currentDashboardId.value) { widgets.value = []; return; }
   try {
     const res = await api.get(`/admin/dashboards/${currentDashboardId.value}`);
     const dash = res.data?.data || null;
-    widgets.value = (dash?.config || []).map((w: any) => ({
+    const raw = (dash?.config || []) as any[];
+    const valid = raw.filter((w: any) => isValidWidgetEndpoint(w?.config?.endpoint));
+    // 记录被过滤的非法端点，便于管理员发现异常配置
+    if (valid.length < raw.length) {
+      MessagePlugin.warning(`已忽略 ${raw.length - valid.length} 个含非法数据端点的组件`);
+    }
+    widgets.value = valid.map((w: any) => ({
       i: w.i || uid(),
       type: w.type || 'metric-card',
       w: w.w || 3,
       h: w.h || 2,
       config: w.config || {},
     }));
-  } catch { widgets.value = []; }
+    editDirty.value = false;
+  } catch { widgets.value = []; editDirty.value = false; }
 }
 
 async function saveDashboard() {
@@ -199,6 +242,7 @@ async function saveDashboard() {
     await api.put(`/admin/dashboards/${currentDashboardId.value}`, { config: widgets.value });
     MessagePlugin.success('保存成功');
     editMode.value = false;
+    editDirty.value = false;
   } catch { MessagePlugin.error('保存失败'); }
   saving.value = false;
 }

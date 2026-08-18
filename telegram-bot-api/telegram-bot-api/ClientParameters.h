@@ -124,6 +124,14 @@ struct ClientParameters {
   double file_stream_first_byte_timeout_ = 30.0;
   double file_stream_idle_timeout_ = 60.0;
   td::int64 file_stream_write_high_watermark_ = 1 << 20;
+  // Comma-separated list of IPs / CIDR networks that are allowed to use the file streaming
+  // endpoint. Empty means "default policy": only loopback and RFC1918 private networks are
+  // allowed; everything else is rejected with 403.
+  td::string file_stream_allow_ip_;
+  // Maximum single-file size (in bytes) allowed to be served by the file streaming endpoint.
+  // Unlike the regular MAX_DOWNLOAD_FILE_SIZE check (which is skipped in --local mode), this
+  // limit always applies so that --local cannot drive repeated multi-GB streaming downloads.
+  td::int64 file_stream_max_size_ = 0;
 
   td::int64 workdir_cleanup_threshold_bytes_ = 20LL << 30;
   td::int64 workdir_cleanup_target_bytes_ = 15LL << 30;

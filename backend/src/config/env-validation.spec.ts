@@ -4,7 +4,7 @@ describe('validateEnv', () => {
   const original = process.env;
   const valid = {
     DB_HOST:'localhost',DB_PORT:'5432',DB_USERNAME:'u',DB_PASSWORD:'p',DB_DATABASE:'d',
-    JWT_SECRET:'x'.repeat(32),TELEGRAM_BOT_TOKEN:'123:abc_DEF-1',TELEGRAM_CHAT_ID:'1',
+    JWT_SECRET:'0123456789abcdef0123456789abcdef',TELEGRAM_BOT_TOKEN:'123:abc_DEF-1',TELEGRAM_CHAT_ID:'1',
     APP_URL:'http://localhost',NODE_ENV:'test',
   };
   beforeEach(() => { process.env = { ...original, ...valid }; });
@@ -29,8 +29,22 @@ describe('validateEnv', () => {
   it('validates complete SMTP configuration', () => {
     Object.assign(process.env,{SMTP_HOST:'smtp',SMTP_PORT:'bad',SMTP_SECURE:'yes'});
     expect(validateEnv).toThrow(/SMTP_PORT[\s\S]*SMTP_USER[\s\S]*SMTP_PASSWORD[\s\S]*SMTP_ENCRYPTION_KEY[\s\S]*SMTP_ENCRYPTION_SALT[\s\S]*SMTP_SECURE/);
-    Object.assign(process.env,{SMTP_PORT:'465',SMTP_USER:'u',SMTP_PASSWORD:'p',SMTP_ENCRYPTION_KEY:'k',SMTP_ENCRYPTION_SALT:'s',SMTP_SECURE:'TRUE'});
+    Object.assign(process.env,{SMTP_PORT:'465',SMTP_USER:'u',SMTP_PASSWORD:'p',SMTP_ENCRYPTION_KEY:'a'.repeat(32),SMTP_ENCRYPTION_SALT:'b'.repeat(16),SMTP_SECURE:'TRUE'});
     expect(validateEnv).not.toThrow();
+  });
+
+  it('rejects placeholder or non-hex SMTP encryption key/salt', () => {
+    Object.assign(process.env,{SMTP_HOST:'smtp',SMTP_PORT:'465',SMTP_USER:'u',SMTP_PASSWORD:'p',SMTP_ENCRYPTION_KEY:'change-me-64位随机hex字符串',SMTP_ENCRYPTION_SALT:'change-me-32位随机hex字符串'});
+    expect(validateEnv).toThrow(/SMTP_ENCRYPTION_KEY[\s\S]*SMTP_ENCRYPTION_SALT/);
+    Object.assign(process.env,{SMTP_ENCRYPTION_KEY:'nothex',SMTP_ENCRYPTION_SALT:'zzz'});
+    expect(validateEnv).toThrow(/SMTP_ENCRYPTION_KEY[\s\S]*SMTP_ENCRYPTION_SALT/);
+  });
+
+  it('rejects placeholder and weak-entropy JWT secrets', () => {
+    Object.assign(process.env,{JWT_SECRET:'your-super-secret-jwt-key-change-in-production'});
+    expect(validateEnv).toThrow(/JWT_SECRET 疑似占位值/);
+    Object.assign(process.env,{JWT_SECRET:'x'.repeat(32)});
+    expect(validateEnv).toThrow(/JWT_SECRET 熵过低/);
   });
 
   it('warns but accepts absent APP_URL', () => {

@@ -96,13 +96,11 @@ export class ShareFolderBrowseService {
   }
 
   /**
-   * 列出文件夹分享中指定子文件夹的内容（子文件夹 + 文件）。
-   * Phase 3 核心：用闭包表校验 folderId 在分享 target 的子树内，
-   * 然后查询该 folder 的直接 subfolders 和 files。
-   *
-   * 注意：folderId 等于 link.targetId 是合法的（根目录自身）。
+   * 纯校验方法：断言 folderId 属于分享 target 的子树（含 target 自身），
+   * 且文件夹存在、未软删。G5-07：供 Controller 在「消费访问配额」之前调用，
+   * 避免无效 folderId 请求烧掉有限次数的 maxAccessCount。
    */
-  async listFolderContentsForShare(link: ShareLink, folderId: string) {
+  async assertFolderInShare(link: ShareLink, folderId: string): Promise<void> {
     // 校验 folderId 在分享 target 的子树内（含 target 自身）
     if (folderId !== link.targetId) {
       const inSubtree = await this.isFolderInSubtree(link.targetId, folderId);
@@ -110,13 +108,36 @@ export class ShareFolderBrowseService {
         throw new ForbiddenException('文件夹不在此分享的子树内');
       }
     }
-
     // 校验 folder 未被软删
     const folder = await this.folderRepo.findOne({ where: { id: folderId, isDeleted: false } });
     if (!folder) throw new NotFoundException('文件夹不存在或已被删除');
+  }
 
-    // 并行查询子文件夹和文件
-    const [subfolders, files] = await Promise.all([
+  /**
+   * 列出文件夹分享中指定子文件夹的内容（子文件夹 + 文件）。
+   * Phase 3 核心：用闭包表校验 folderId 在分享 target 的子树内，
+   * 然后查询该 folder 的直接 subfolders 和 files。
+   *
+   * 注意：folderId 等于 link.targetId 是合法的（根目录自身）。
+   */
+  /**
+   * 列出文件夹分享中指定子文件夹的内容（子文件夹 + 文件）。
+   * G5-13：大目录支持 files 分页（page/limit，limit 上限 100），
+   * 避免全量 find 拉取超大目录导致响应膨胀。不传分页参数时 files 全量返回
+   * （保持既有调用方语义，如 getFolderInfoForShare 的根级内容）。
+   */
+  async listFolderContentsForShare(
+    link: ShareLink,
+    folderId: string,
+    options: { page?: number; limit?: number } = {},
+  ) {
+    await this.assertFolderInShare(link, folderId);
+
+    const page = Math.max(1, Math.floor(options.page ?? 1));
+    const limit = Math.min(100, Math.max(1, Math.floor(options.limit ?? 100)));
+
+    // 并行查询子文件夹和文件（文件按需分页）
+    const [subfolders, files, totalFiles] = await Promise.all([
       this.folderRepo.find({
         where: { parentId: folderId, isDeleted: false },
         order: { name: 'ASC' },
@@ -126,7 +147,10 @@ export class ShareFolderBrowseService {
         where: { folderId, isDeleted: false },
         order: { originalName: 'ASC' },
         select: ['id', 'originalName', 'mimeType', 'size', 'createdAt', 'uploadVersion', 'status'],
+        skip: (page - 1) * limit,
+        take: limit,
       }),
+      this.fileRepo.count({ where: { folderId, isDeleted: false } }),
     ]);
 
     this.audit.log({
@@ -137,6 +161,7 @@ export class ShareFolderBrowseService {
         browseFolderId: folderId,
         subfolderCount: subfolders.length,
         fileCount: files.length,
+        totalFiles,
       },
     });
 
@@ -158,6 +183,7 @@ export class ShareFolderBrowseService {
         // 文件夹分享下载 URL：走 /api/s/:token/download/:fileId
         downloadUrl: `/api/s/${link.token}/download/${f.id}`,
       })),
+      pagination: { page, limit, total: totalFiles, hasMore: page * limit < totalFiles },
     };
   }
 
@@ -185,12 +211,16 @@ export class ShareFolderBrowseService {
     const folder = await this.folderRepo.findOne({ where: { id: folderId } });
     if (!folder) throw new NotFoundException('文件夹不存在');
 
-    // findAncestors 返回从自身到根的顺序，需要反转为从根到自身
+    // findAncestors 返回从自身到根的顺序（含自身），需要反转为从根到自身。
+    // 关键：拿到全部祖先（含分享根之上）后，必须裁剪到分享 target 自身为止，
+    // 避免把分享范围外的祖先目录 id/名称泄漏给匿名访客。
     const ancestors = await this.folderRepo.findAncestors(folder);
     const filtered = ancestors
       .filter((f) => !f.isDeleted)
-      .reverse()
-      .map((f) => ({ id: f.id, name: f.name }));
-    return filtered;
+      .reverse();
+    // 找到分享根 targetId，截断其之后（target 之上）的所有祖先
+    const rootIndex = filtered.findIndex((f) => f.id === link.targetId);
+    const clipped = rootIndex >= 0 ? filtered.slice(rootIndex) : filtered;
+    return clipped.map((f) => ({ id: f.id, name: f.name }));
   }
 }

@@ -58,6 +58,36 @@
         <t-option value="batch_delete_files" label="批量删除" />
         <t-option value="batch_delete_files_by_admin" label="管理员批量删" />
       </t-select>
+      <t-input
+        v-model="filterUser"
+        placeholder="搜索用户..."
+        clearable
+        style="width: 160px;"
+        autocomplete="off"
+        name="audit-filter-user"
+        @enter="onFilterChange"
+        @clear="onFilterChange"
+      />
+      <t-input
+        v-model="filterIp"
+        placeholder="搜索 IP..."
+        clearable
+        style="width: 160px;"
+        autocomplete="off"
+        name="audit-filter-ip"
+        @enter="onFilterChange"
+        @clear="onFilterChange"
+      />
+      <t-input
+        v-model="filterKeyword"
+        placeholder="关键词（操作/资源/详情）..."
+        clearable
+        style="width: 200px;"
+        autocomplete="off"
+        name="audit-filter-keyword"
+        @enter="onFilterChange"
+        @clear="onFilterChange"
+      />
       <t-button variant="outline" @click="onRefresh">刷新</t-button>
     </div>
 
@@ -158,6 +188,10 @@ interface AuditLogItem {
 
 const timeRange = ref('24h');
 const filterAction = ref('');
+// 检索筛选（G15-21）：用户/IP/关键词，后端按 metadata 与 username/ip 支撑模糊匹配
+const filterUser = ref('');
+const filterIp = ref('');
+const filterKeyword = ref('');
 const loading = ref(false);
 const logs = ref<AuditLogItem[]>([]);
 const currentPage = ref(1);
@@ -268,6 +302,10 @@ async function fetchLogs() {
       timeRange: timeRange.value,
     };
     if (filterAction.value) params.action = filterAction.value;
+    // G15-21：用户/IP/关键词检索（后端 metadata 支撑）
+    if (filterUser.value.trim()) params.user = filterUser.value.trim();
+    if (filterIp.value.trim()) params.ip = filterIp.value.trim();
+    if (filterKeyword.value.trim()) params.keyword = filterKeyword.value.trim();
 
     const { data } = await client.get('/admin/audit-logs', { params });
     const d = data.data || data;

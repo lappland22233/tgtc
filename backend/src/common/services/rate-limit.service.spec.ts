@@ -46,6 +46,16 @@ describe('RateLimitService', () => {
     await expect(service.incrementCounter('k', 't', 3, 1000)).resolves.toEqual({ count: 1, thresholdReached: false });
   });
 
+  it('G9-11: incrementCounter preserves an active lockedUntil instead of clearing it', async () => {
+    query.mockResolvedValue([{ attemptCount: 2 }]);
+    await service.incrementCounter('k', 't', 5, 1000);
+    // 不应无条件置 lockedUntil = NULL；应保留既有未来锁
+    const sql = query.mock.calls[0][0] as string;
+    expect(sql).toContain('"lockedUntil" = CASE');
+    expect(sql).toContain('rate_limits."lockedUntil" > NOW()');
+    expect(sql).not.toContain('"lockedUntil" = NULL');
+  });
+
   it('resets safely and reports attempts', async () => {
     repo.delete.mockResolvedValue({ affected: 1 });
     await expect(service.reset('k')).resolves.toBeUndefined();

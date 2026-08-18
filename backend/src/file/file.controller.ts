@@ -16,12 +16,15 @@ import {
   Req,
   Res,
   BadRequestException,
-  ForbiddenException,
   HttpException,
   HttpStatus,
 } from '@nestjs/common';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { FileInterceptor, FilesInterceptor } from '@nestjs/platform-express';
+import { diskStorage } from 'multer';
+import * as path from 'path';
+import { randomUUID } from 'crypto';
+import * as fs from 'fs';
 import { pipeline } from 'stream';
 import { promisify } from 'util';
 import { FileService } from './file.service';
@@ -43,6 +46,33 @@ import { TagService } from '../tag/tag.service';
 // Multer 层硬上限（600MB，仅防止极端 DoS；精确的动态限制由 FileService.upload() 业务层负责）
 const multerFileSize = 600 * 1024 * 1024; // 600MB
 
+// G2-16：上传端点合理超时（接收阶段）。大文件上传本身耗时较长，设 30 分钟上限，
+// 避免恶意/异常慢连接长期占用 worker 与连接资源。
+const UPLOAD_REQUEST_TIMEOUT_MS = 30 * 60 * 1000;
+// G2-16：每用户并发上传数上限（内存计数）。防止单用户并发大量上传挤占带宽与磁盘。
+const UPLOAD_USER_CONCURRENCY_LIMIT = 3;
+const activeUploadsByUser = new Map<string, number>();
+
+// G2-17/G5-14：匿名媒体 /files/media/:id 的限流与并发上限。
+// 保守方案：IP 维度限流（复用 RateLimitService）+ 简单并发连接计数，防刷带宽。
+const MEDIA_RATE_LIMIT_PER_SEC = 30;              // 同 IP 每秒最多 30 次媒体请求
+const MEDIA_RATE_BAN_MS = 60 * 1000;              // 超限封禁 1 分钟
+const MEDIA_CONCURRENCY_PER_IP = 4;               // 同 IP 最大并发媒体连接数
+const activeMediaByIp = new Map<string, number>();
+
+// G2-07 修复：Multer 默认 memoryStorage 会把大文件整体驻留内存，多文件并发可 OOM。
+// 改为 diskStorage 落盘到临时目录（与分片上传的 incoming 目录同体系），
+// 由 FileService 在成功移入业务目录/失败时统一清理（cleanupTempFile / rename）。
+const multerUploadDir = path.resolve(process.cwd(), 'tmp', 'uploads', 'incoming');
+
+const multerDiskStorage = diskStorage({
+  destination: (_req, _file, callback) => {
+    fs.mkdirSync(multerUploadDir, { recursive: true });
+    callback(null, multerUploadDir);
+  },
+  filename: (_req, _file, callback) => callback(null, `${randomUUID()}.part`),
+});
+
 @Controller('files')
 export class FileController {
   constructor(
@@ -55,9 +85,29 @@ export class FileController {
     private folderService: FolderService,
   ) {}
 
+  /**
+   * G2-16：每用户并发上传限制。简单内存计数：并发达到上限则返回 429，
+   * 完成后释放槽位。不跨进程/副本共享（保守方案，避免引入分布式状态）。
+   */
+  private acquireUploadSlot(userId: string): () => void {
+    const current = activeUploadsByUser.get(userId) || 0;
+    if (current >= UPLOAD_USER_CONCURRENCY_LIMIT) {
+      throw new HttpException('上传并发过多，请等待现有上传完成', HttpStatus.TOO_MANY_REQUESTS);
+    }
+    activeUploadsByUser.set(userId, current + 1);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const remaining = (activeUploadsByUser.get(userId) || 1) - 1;
+      if (remaining > 0) activeUploadsByUser.set(userId, remaining);
+      else activeUploadsByUser.delete(userId);
+    };
+  }
+
   @Post('upload')
   @UseGuards(JwtAuthGuard)
-  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: multerFileSize } }))
+  @UseInterceptors(FileInterceptor('file', { storage: multerDiskStorage, limits: { fileSize: multerFileSize } }))
   async upload(
     @UploadedFile() file: Express.Multer.File,
     @CurrentUser() user: User,
@@ -65,20 +115,24 @@ export class FileController {
     @Res({ passthrough: true }) res: Response,
     @Body('tagIds') tagIdsRaw?: any,
   ) {
-    // 大文件上传：禁用请求和响应超时，防止上传/转发过程中连接被断开
-    req.setTimeout(0);
-    res.setTimeout(0);
-    if (!file) {
-      throw new BadRequestException('请选择要上传的文件');
+    // G2-16：大文件接收阶段设置合理超时 + 每用户并发上传数限制
+    applyUploadTimeout(req, res);
+    const release = this.acquireUploadSlot(user.id);
+    try {
+      if (!file) {
+        throw new BadRequestException('请选择要上传的文件');
+      }
+      const tagIds = parseTagIdsBody(tagIdsRaw);
+      if (tagIds?.length) await this.tagService.assertOwner(user.id, tagIds);
+      return await this.fileService.upload(file, user, tagIds);
+    } finally {
+      release();
     }
-    const tagIds = parseTagIdsBody(tagIdsRaw);
-    if (tagIds?.length) await this.tagService.assertOwner(user.id, tagIds);
-    return this.fileService.upload(file, user, tagIds);
   }
 
   @Post('upload-multiple')
   @UseGuards(JwtAuthGuard)
-  @UseInterceptors(FilesInterceptor('files', 10, { limits: { fileSize: multerFileSize } }))
+  @UseInterceptors(FilesInterceptor('files', 10, { storage: multerDiskStorage, limits: { fileSize: multerFileSize } }))
   async uploadMultiple(
     @UploadedFiles() files: Express.Multer.File[],
     @CurrentUser() user: User,
@@ -86,15 +140,19 @@ export class FileController {
     @Res({ passthrough: true }) res: Response,
     @Body('tagIds') tagIdsRaw?: any,
   ) {
-    // 大文件上传：禁用超时（仅接收阶段）
-    req.setTimeout(0);
-    res.setTimeout(0);
-    if (!files || files.length === 0) {
-      throw new BadRequestException('请选择要上传的文件');
+    // G2-16：大文件接收阶段设置合理超时 + 每用户并发上传数限制
+    applyUploadTimeout(req, res);
+    const release = this.acquireUploadSlot(user.id);
+    try {
+      if (!files || files.length === 0) {
+        throw new BadRequestException('请选择要上传的文件');
+      }
+      const tagIds = parseTagIdsBody(tagIdsRaw);
+      if (tagIds?.length) await this.tagService.assertOwner(user.id, tagIds);
+      return await this.fileService.uploadMultiple(files, user, tagIds);
+    } finally {
+      release();
     }
-    const tagIds = parseTagIdsBody(tagIdsRaw);
-    if (tagIds?.length) await this.tagService.assertOwner(user.id, tagIds);
-    return this.fileService.uploadMultiple(files, user, tagIds);
   }
 
   /**
@@ -104,7 +162,7 @@ export class FileController {
    */
   @Post('upload-async')
   @UseGuards(JwtAuthGuard)
-  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: multerFileSize } }))
+  @UseInterceptors(FileInterceptor('file', { storage: multerDiskStorage, limits: { fileSize: multerFileSize } }))
   async uploadAsync(
     @UploadedFile() file: Express.Multer.File,
     @CurrentUser() user: User,
@@ -114,16 +172,21 @@ export class FileController {
     @Body('folderId') folderId?: string,
     @Body('overwriteFileId') overwriteFileId?: string,
   ) {
-    req.setTimeout(0);
-    res.setTimeout(0);
-    if (!file) {
-      throw new BadRequestException('请选择要上传的文件');
+    // G2-16：接收阶段设置合理超时 + 每用户并发上传数限制
+    applyUploadTimeout(req, res);
+    const release = this.acquireUploadSlot(user.id);
+    try {
+      if (!file) {
+        throw new BadRequestException('请选择要上传的文件');
+      }
+      const tagIds = parseTagIdsBody(tagIdsRaw);
+      if (tagIds?.length) await this.tagService.assertOwner(user.id, tagIds);
+      // overwriteFileId 仅接受 UUID v4 格式，其余非法值直接拒绝（避免透传垃圾值）
+      const normalizedOverwriteFileId = normalizeOptionalUuid(overwriteFileId);
+      return await this.fileService.uploadAsync(file, user, tagIds, req, folderId || null, normalizedOverwriteFileId);
+    } finally {
+      release();
     }
-    const tagIds = parseTagIdsBody(tagIdsRaw);
-    if (tagIds?.length) await this.tagService.assertOwner(user.id, tagIds);
-    // overwriteFileId 仅接受 UUID v4 格式，其余非法值直接拒绝（避免透传垃圾值）
-    const normalizedOverwriteFileId = normalizeOptionalUuid(overwriteFileId);
-    return this.fileService.uploadAsync(file, user, tagIds, req, folderId || null, normalizedOverwriteFileId);
   }
 
   /**
@@ -131,7 +194,7 @@ export class FileController {
    */
   @Post('upload-multiple-async')
   @UseGuards(JwtAuthGuard)
-  @UseInterceptors(FilesInterceptor('files', 10, { limits: { fileSize: multerFileSize } }))
+  @UseInterceptors(FilesInterceptor('files', 10, { storage: multerDiskStorage, limits: { fileSize: multerFileSize } }))
   async uploadMultipleAsync(
     @UploadedFiles() files: Express.Multer.File[],
     @CurrentUser() user: User,
@@ -139,14 +202,19 @@ export class FileController {
     @Res({ passthrough: true }) res: Response,
     @Body('tagIds') tagIdsRaw?: any,
   ) {
-    req.setTimeout(0);
-    res.setTimeout(0);
-    if (!files || files.length === 0) {
-      throw new BadRequestException('请选择要上传的文件');
+    // G2-16：接收阶段设置合理超时 + 每用户并发上传数限制
+    applyUploadTimeout(req, res);
+    const release = this.acquireUploadSlot(user.id);
+    try {
+      if (!files || files.length === 0) {
+        throw new BadRequestException('请选择要上传的文件');
+      }
+      const tagIds = parseTagIdsBody(tagIdsRaw);
+      if (tagIds?.length) await this.tagService.assertOwner(user.id, tagIds);
+      return await this.fileService.uploadMultipleAsync(files, user, tagIds, req);
+    } finally {
+      release();
     }
-    const tagIds = parseTagIdsBody(tagIdsRaw);
-    if (tagIds?.length) await this.tagService.assertOwner(user.id, tagIds);
-    return this.fileService.uploadMultipleAsync(files, user, tagIds, req);
   }
 
   /**
@@ -247,6 +315,29 @@ export class FileController {
   ) {
     try {
       const clientIp = getClientIp(req);
+      // G2-17/G5-14：匿名媒体端点限流 —— 同 IP 速率限制 + 并发连接数上限（防刷带宽/击穿）
+      const rateResult = await this.rateLimitService.checkAndIncrement(
+        `media:${clientIp}`,
+        'media',
+        MEDIA_RATE_LIMIT_PER_SEC,
+        MEDIA_RATE_BAN_MS,
+        1000,
+      );
+      if (!rateResult.allowed) {
+        throw new HttpException('媒体访问过于频繁，请稍后再试', HttpStatus.TOO_MANY_REQUESTS);
+      }
+      const currentConcurrency = activeMediaByIp.get(clientIp) || 0;
+      if (currentConcurrency >= MEDIA_CONCURRENCY_PER_IP) {
+        throw new HttpException('媒体并发连接过多，请稍后再试', HttpStatus.TOO_MANY_REQUESTS);
+      }
+      activeMediaByIp.set(clientIp, currentConcurrency + 1);
+      const releaseMediaSlot = () => {
+        const remaining = (activeMediaByIp.get(clientIp) || 1) - 1;
+        if (remaining > 0) activeMediaByIp.set(clientIp, remaining);
+        else activeMediaByIp.delete(clientIp);
+      };
+      // 流响应结束/客户端断开时释放并发槽位
+      res.on('close', releaseMediaSlot);
       const rangeHeader = req.headers.range;
       if (rangeHeader) {
         const rangeResult = await this.fileService.getPublicMediaStreamWithRange(id, rangeHeader, clientIp);
@@ -383,26 +474,14 @@ export class FileController {
   async thumbnail(
     @Param('id') id: string,
     @CurrentUser() user: User,
-    @Query('t') encryptedToken: string,
     @Req() _req: Request,
     @Res() res: Response,
   ) {
     try {
-      if (!encryptedToken) {
-        throw new ForbiddenException('缺少访问令牌');
-      }
-
-      let timestamp: number;
-      try {
-        timestamp = this.cryptoService.decrypt(encryptedToken);
-      } catch {
-        throw new ForbiddenException('无效的访问令牌');
-      }
-
-      if (Math.abs(Date.now() - timestamp) > 10_000) {
-        throw new ForbiddenException('访问令牌已过期');
-      }
-
+      // G4-10：移除可自铸/重放的 RSA 时间戳令牌层。
+      // 该端点已由 JwtAuthGuard + getThumbnailStream(id, user) 完成鉴权与文件级授权，
+      // 公钥加密时间戳不绑定 fileId/userId，人人可自铸，属冗余层；直接移除校验。
+      // 前端旧逻辑仍会携带 ?t=，服务端忽略该参数（向后兼容）。
       const result = await this.fileService.getThumbnailStream(id, user);
 
       res.set({
@@ -435,26 +514,11 @@ export class FileController {
   async thumbnailHd(
     @Param('id') id: string,
     @CurrentUser() user: User,
-    @Query('t') encryptedToken: string,
     @Req() _req: Request,
     @Res() res: Response,
   ) {
     try {
-      if (!encryptedToken) {
-        throw new ForbiddenException('缺少访问令牌');
-      }
-
-      let timestamp: number;
-      try {
-        timestamp = this.cryptoService.decrypt(encryptedToken);
-      } catch {
-        throw new ForbiddenException('无效的访问令牌');
-      }
-
-      if (Math.abs(Date.now() - timestamp) > 10_000) {
-        throw new ForbiddenException('访问令牌已过期');
-      }
-
+      // G4-10：同 thumbnail，移除可自铸/重放的 RSA 时间戳令牌层，依赖 JWT 鉴权。
       const result = await this.fileService.getHdThumbnailStream(id, user);
 
       res.set({
@@ -525,7 +589,7 @@ export class FileController {
       if (rangeHeader) {
         const rangeResult = await this.fileService.getFileContentStreamWithRange(
           id, user, rangeHeader,
-          noCacheRequested ? { noCache: true } : undefined,
+          { noCache: noCacheRequested ? true : undefined, ip: clientIp },
         );
         if (rangeResult) {
           await this.streamResponder.send({
@@ -777,6 +841,16 @@ export class FileController {
   }
 }
 
+
+/**
+ * G2-16：为上传请求设置接收阶段的合理超时。
+ * 相比原先的 req.setTimeout(0) 无限期挂起，这里设 30 分钟上限，
+ * 慢连接不会长期占用 worker 与连接资源。
+ */
+function applyUploadTimeout(req: Request, res: Response): void {
+  req.setTimeout(UPLOAD_REQUEST_TIMEOUT_MS);
+  res.setTimeout(UPLOAD_REQUEST_TIMEOUT_MS);
+}
 
 /** 解析请求体中的 tagIds 字段，支持字符串和数组格式 */
 function parseTagIdsBody(raw: unknown): string[] | undefined {

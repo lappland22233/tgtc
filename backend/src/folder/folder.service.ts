@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, ConflictException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, TreeRepository, Not, IsNull, In } from 'typeorm';
 import { Folder } from '../common/entities/folder.entity';
@@ -147,7 +147,15 @@ export class FolderService {
       parentId: dto.parentId ?? null,
       parent: parentFolder,
     });
-    const saved = await this.folderRepo.save(folder);
+    let saved: Folder;
+    try {
+      saved = await this.folderRepo.save(folder);
+    } catch (error: unknown) {
+      // G6-06：并发下同层重名可能绕过服务层 pre-check，被部分唯一索引（23505）兜底拦截，
+      // 统一转为 409 冲突，与 pre-check 的语义一致。
+      this.throwConflictIfUniqueViolation(error, '同层级下已存在同名文件夹');
+      throw error;
+    }
     this.audit.log({
       action: 'folder_create' as AuditAction,
       userId: ownerId,
@@ -176,7 +184,14 @@ export class FolderService {
     }
     const oldName = folder.name;
     folder.name = dto.name;
-    const saved = await this.folderRepo.save(folder);
+    let saved: Folder;
+    try {
+      saved = await this.folderRepo.save(folder);
+    } catch (error: unknown) {
+      // G6-06：并发重命名撞同名，由唯一索引兜底转 409
+      this.throwConflictIfUniqueViolation(error, '同层级下已存在同名文件夹');
+      throw error;
+    }
     this.audit.log({
       action: 'folder_rename' as AuditAction,
       userId: ownerId,
@@ -188,49 +203,84 @@ export class FolderService {
   }
 
   async moveFolder(ownerId: string, id: string, dto: MoveFolderDto): Promise<Folder> {
-    const folder = await this.assertFolderOwned(id, ownerId);
     const newParentId = dto.parentId ?? null;
-    // 先记录原父级，避免修改 parentId 后审计 from/to 恒为新值
-    const oldParentId = folder.parentId;
 
-    if (newParentId === id) {
-      throw new BadRequestException('不能把文件夹移入自身');
-    }
-
-    if (newParentId) {
-      const newParent = await this.assertFolderOwned(newParentId, ownerId);
-      // 循环检测：新父级不能是当前文件夹的后代
-      if (await this.isDescendantOf(newParentId, id)) {
-        throw new BadRequestException('不能把文件夹移入其自身子树');
+    // 事务内完成「校验 + 保存」，避免 check-then-act 竞态：
+    // 先对被移动节点 SELECT ... FOR UPDATE 加行锁，串行化并发移动，
+    // 防止两个并发 move 交换父子关系后形成 parentId 互指环。
+    const { saved, oldParentId } = await this.folderRepo.manager.transaction(async (manager) => {
+      // 1. 锁定被移动节点（含软删/越权过滤），FOR UPDATE 保证本事务内视图一致
+      const lockedRows = await manager.query(
+        `SELECT * FROM folders WHERE id = $1 AND "ownerId" = $2 AND "isDeleted" = false FOR UPDATE`,
+        [id, ownerId],
+      );
+      if (lockedRows.length === 0) {
+        throw new NotFoundException('文件夹不存在或无权访问');
       }
-      // 嵌套深度上限校验：新父级深度 + 1 + 被移动子树高度 不得超过上限
-      const newParentDepth = await this.getFolderDepth(newParentId);
-      const subtreeHeight = await this.getSubtreeHeight(id);
-      if (newParentDepth + 1 + subtreeHeight > MAX_FOLDER_DEPTH) {
-        throw new BadRequestException(`移动后文件夹嵌套层级不能超过 ${MAX_FOLDER_DEPTH} 层`);
-      }
-      folder.parent = newParent;
-      folder.parentId = newParentId;
-    } else {
-      folder.parent = null;
-      folder.parentId = null;
-    }
+      const locked: Folder = lockedRows[0];
+      // 先记录原父级，避免修改 parentId 后审计 from/to 恒为新值
+      const oldParentId = locked.parentId;
 
-    // 同层级重名检查（排除自身）
-    const sibling = await this.folderRepo.findOne({
-      where: {
-        ownerId,
-        parentId: newParentId ?? IsNull(),
-        name: folder.name,
-        isDeleted: false,
-        id: Not(id),
-      },
+      if (newParentId === id) {
+        throw new BadRequestException('不能把文件夹移入自身');
+      }
+
+      let newParentIdFinal: string | null = null;
+      if (newParentId) {
+        // 2. 校验并锁定新父级（存在/未删/归属）
+        const parentRows = await manager.query(
+          `SELECT * FROM folders WHERE id = $1 AND "ownerId" = $2 AND "isDeleted" = false FOR UPDATE`,
+          [newParentId, ownerId],
+        );
+        if (parentRows.length === 0) {
+          throw new NotFoundException('文件夹不存在或无权访问');
+        }
+        // 3. 循环检测：新父级不能是当前文件夹的后代（沿 parentId 上溯，不依赖闭包表）
+        if (await this.isDescendantOfInManager(manager, newParentId, id)) {
+          throw new BadRequestException('不能把文件夹移入其自身子树');
+        }
+        // 4. 嵌套深度上限校验：新父级深度 + 1 + 被移动子树高度 不得超过上限
+        const newParentDepth = await this.getFolderDepthInManager(manager, newParentId);
+        const subtreeHeight = await this.getSubtreeHeightInManager(manager, id);
+        if (newParentDepth + 1 + subtreeHeight > MAX_FOLDER_DEPTH) {
+          throw new BadRequestException(`移动后文件夹嵌套层级不能超过 ${MAX_FOLDER_DEPTH} 层`);
+        }
+        newParentIdFinal = newParentId;
+      }
+
+      // 5. 同层级重名检查（排除自身）
+      const sibling = await manager.getRepository(Folder).findOne({
+        where: {
+          ownerId,
+          parentId: newParentIdFinal ?? IsNull(),
+          name: locked.name,
+          isDeleted: false,
+          id: Not(id),
+        },
+      });
+      if (sibling) {
+        throw new BadRequestException('目标层级下已存在同名文件夹');
+      }
+
+      // 6. 更新 parentId（走 SQL，保证闭包表与父链一致由 TypeORM save 语义处理）
+      const repo = manager.getRepository(Folder);
+      locked.parentId = newParentIdFinal;
+      if (newParentIdFinal) {
+        locked.parent = { id: newParentIdFinal } as Folder;
+      } else {
+        locked.parent = null;
+      }
+      let saved: Folder;
+      try {
+        saved = await repo.save(locked);
+      } catch (error: unknown) {
+        // G6-06：并发移动撞同名，由唯一索引兜底转 409
+        this.throwConflictIfUniqueViolation(error, '目标层级下已存在同名文件夹');
+        throw error;
+      }
+      return { saved, oldParentId };
     });
-    if (sibling) {
-      throw new BadRequestException('目标层级下已存在同名文件夹');
-    }
 
-    const saved = await this.folderRepo.save(folder);
     this.audit.log({
       action: 'folder_move' as AuditAction,
       userId: ownerId,
@@ -250,10 +300,8 @@ export class FolderService {
     const now = new Date();
     const scheduledAt = new Date(now.getTime() + SOFT_DELETE_GRACE_DAYS * 24 * 3600 * 1000);
 
-    // 拿到子树所有 folder id（包含自身）
-    const descendants = await this.folderRepo.findDescendants(folder);
-    const folderIds = descendants.map((f) => f.id).filter((fid) => fid !== id);
-    folderIds.push(id);
+    // 拿到子树所有 folder id（含自身），沿 parentId 递归 CTE，不依赖闭包表
+    const folderIds = await this.collectSubtreeIds(id);
 
     // 事务内原子执行：软删子文件夹 + 软删内含文件，避免中途失败导致部分删除不一致
     await this.folderRepo.manager.transaction(async (manager) => {
@@ -293,10 +341,23 @@ export class FolderService {
     if (!folder) {
       throw new NotFoundException('文件夹不存在或未被删除');
     }
+
+    // G6-05：恢复前校验祖先链。若存在被删（软删）的祖先，直接恢复会形成
+    // 「父级仍被删、子级已恢复」的幻影根，破坏树结构一致性。此时拒绝恢复，
+    // 提示先恢复顶层祖先；由上层递归逐级恢复保证整条链完整。
+    let ancestor = folder.parentId ? await this.folderRepo.findOne({ where: { id: folder.parentId } }) : null;
+    while (ancestor) {
+      if (ancestor.isDeleted) {
+        throw new BadRequestException('该文件夹的上级目录仍处于回收站中，请先恢复上级目录');
+      }
+      if (!ancestor.parentId) break;
+      ancestor = await this.folderRepo.findOne({ where: { id: ancestor.parentId } });
+    }
+
     // 还原子树中所有 folder——但只恢复与本文件夹同批删除的，
     // 避免恢复在文件夹删除之前已独立删除的子文件夹。
-    const descendants = await this.folderRepo.findDescendants(folder);
-    const folderIds = descendants.map((f) => f.id);
+    // 沿 parentId 递归 CTE 收集子树，不依赖闭包表。
+    const folderIds = await this.collectSubtreeIds(id);
 
     // 以本批次的计划删除时间作为同批标记（softDeleteFolder 对整批写入同一 deleteScheduledAt），
     // 比精确 deleteRequestedAt 更稳定；deleteScheduledAt 为空时回退到 deleteRequestedAt。
@@ -396,6 +457,12 @@ export class FolderService {
     if (!source) {
       throw new NotFoundException('文件不存在');
     }
+    // G6-07：只允许复制 status === 'ready' 的文件。
+    // processing/error 文件的 telegramFileId 尚未就绪或已失效，副本会指向无效引用，
+    // 复制后无法下载。统一在复制前校验，未就绪文件抛 409。
+    if (source.status !== 'ready') {
+      throw new ConflictException('仅就绪状态的文件可以复制，请等待处理完成或稍后重试');
+    }
     if (dto.folderId) {
       await this.assertFolderOwned(dto.folderId, ownerId);
     }
@@ -410,6 +477,12 @@ export class FolderService {
       thumbnailPath: source.thumbnailPath,
       folderId: dto.folderId ?? null,
       accessType: source.accessType,
+      // G2-18：副本完整继承源文件的保护条件（密码/访问次数/有效期），
+      // 避免副本"只继承 accessType 不继承约束"而裸奔（保护条件被绕过）。
+      password: source.password,
+      maxAccessCount: source.maxAccessCount,
+      expiresIn: source.expiresIn,
+      expiresStartAt: source.expiresStartAt,
       uploaderId: ownerId,
       status: 'ready',
     });
@@ -460,6 +533,22 @@ export class FolderService {
   }
 
   /**
+   * G6-06：将"同层重名"数据库唯一约束冲突（PostgreSQL 错误码 23505）
+   * 转换为 409 ConflictException，与服务层 pre-check 的语义保持一致。
+   * 该索引是并发场景下的最终防线：pre-check 通过后并发写入可能同时成功，
+   * 由数据库兜底拦截后在此统一转为业务可读的冲突错误。
+   */
+  private throwConflictIfUniqueViolation(error: unknown, message: string): void {
+    if (
+      error &&
+      typeof error === 'object' &&
+      (error as { code?: string }).code === '23505'
+    ) {
+      throw new ConflictException(message);
+    }
+  }
+
+  /**
    * 校验 folder 存在、未删除、且属于当前用户。
    * 返回 folder 实体供后续使用。
    */
@@ -474,48 +563,121 @@ export class FolderService {
   }
 
   /**
-   * 判断 candidateId 是否是 ancestorId 的后代（用于循环检测）。
-   * 使用 TypeORM findDescendantsTree 一次性拿到整棵子树。
+   * 收集以 rootId 为根的整棵子树 id（含自身），沿 parentId 递归 CTE 实现，
+   * 不依赖闭包表（folder_closure 行可能缺失，历史配置错误）。
+   * 结果含自身，供级联软删 / 恢复复用。
    */
-  private async isDescendantOf(candidateId: string, ancestorId: string): Promise<boolean> {
-    const ancestor = await this.folderRepo.findOne({ where: { id: ancestorId } });
-    if (!ancestor) return false;
-    const tree = await this.folderRepo.findDescendantsTree(ancestor);
-    return this.searchInTree(tree, candidateId);
+  private async collectSubtreeIds(rootId: string): Promise<string[]> {
+    const rows = await this.folderRepo.manager.query(
+      `WITH RECURSIVE subtree AS (
+         SELECT id FROM folders WHERE id = $1
+         UNION ALL
+         SELECT f.id FROM folders f
+         JOIN subtree s ON f."parentId" = s.id
+       )
+       SELECT id FROM subtree`,
+      [rootId],
+    );
+    return rows.map((r: { id: string }) => r.id);
   }
 
-  private searchInTree(node: Folder, targetId: string): boolean {
-    if (node.id === targetId) return true;
-    return (node.children || []).some((c) => this.searchInTree(c, targetId));
+  /**
+   * 事务内版本：判断 candidateId 是否是 ancestorId 的后代（沿 parentId 上溯）。
+   * 在 moveFolder 事务内使用，复用事务连接以保证与 FOR UPDATE 锁一致性视图。
+   */
+  private async isDescendantOfInManager(
+    manager: import('typeorm').EntityManager,
+    candidateId: string,
+    ancestorId: string,
+  ): Promise<boolean> {
+    const seen = new Set<string>();
+    let currentId: string | null = candidateId;
+    while (currentId) {
+      if (currentId === ancestorId) return true;
+      if (seen.has(currentId)) return false;
+      seen.add(currentId);
+      const rows: Array<{ parentId: string | null }> = await manager.query(
+        `SELECT "parentId" FROM folders WHERE id = $1`,
+        [currentId],
+      );
+      currentId = rows[0]?.parentId ?? null;
+    }
+    return false;
+  }
+
+  /**
+   * 事务内版本：返回文件夹深度（根目录直接子级为 0）。
+   * 沿 parentId 上溯计步，不依赖闭包表；与下载路径语义一致。
+   */
+  private async getFolderDepthInManager(
+    manager: import('typeorm').EntityManager,
+    folderId: string,
+  ): Promise<number> {
+    const seen = new Set<string>();
+    let depth = 0;
+    let currentId: string | null = folderId;
+    while (currentId) {
+      if (seen.has(currentId)) return depth; // 成环防御
+      seen.add(currentId);
+      const rows: Array<{ parentId: string | null }> = await manager.query(
+        `SELECT "parentId" FROM folders WHERE id = $1`,
+        [currentId],
+      );
+      const parentId = rows[0]?.parentId ?? null;
+      if (!parentId) break;
+      depth += 1;
+      currentId = parentId;
+    }
+    return depth;
+  }
+
+  /**
+   * 事务内版本：返回以 folderId 为根的子树高度（自身为 0 层）。
+   * 沿 parentId 向下递归 CTE 计算最大深度，不依赖闭包表。
+   */
+  private async getSubtreeHeightInManager(
+    manager: import('typeorm').EntityManager,
+    folderId: string,
+  ): Promise<number> {
+    const rows: Array<{ h: number }> = await manager.query(
+      `WITH RECURSIVE subtree AS (
+         SELECT id, 0 AS depth FROM folders WHERE id = $1
+         UNION ALL
+         SELECT f.id, s.depth + 1 FROM folders f
+         JOIN subtree s ON f."parentId" = s.id
+       )
+       SELECT COALESCE(MAX(depth), 0)::int AS h FROM subtree`,
+      [folderId],
+    );
+    return rows[0]?.h ?? 0;
   }
 
   /**
    * 返回文件夹深度（根目录直接子级为 0）。
-   * 闭包表含自身行，故祖先数 = 深度 + 1。
+   * G6-08：改为沿 parentId 链上溯计步，不再依赖闭包表（folder_closure 行可能缺失，
+   * 历史配置错误导致闭包行缺失时深度被错误地归零，绕过 MAX_FOLDER_DEPTH）。
+   * 表名从实体元数据获取，避免硬编码。与 getFolderDepthInManager 语义一致。
    */
   private async getFolderDepth(folderId: string): Promise<number> {
-    const rows = await this.folderRepo.manager.query(
-      `SELECT COUNT(*)::int AS cnt FROM folder_closure WHERE id_descendant = $1`,
-      [folderId],
-    );
-    return Math.max(0, (rows[0]?.cnt ?? 1) - 1);
-  }
-
-  /**
-   * 返回以 folderId 为根的子树高度（自身为 0 层，叶子子树高度为 0）。
-   * 统计子树内最深节点相对于根的层级，用于移动文件夹时校验移动后总深度。
-   */
-  private async getSubtreeHeight(folderId: string): Promise<number> {
-    const rows = await this.folderRepo.manager.query(
-      `SELECT COALESCE(MAX(cnt), 1)::int AS h FROM (
-         SELECT COUNT(*) AS cnt FROM folder_closure fc1
-         WHERE fc1.id_descendant IN (SELECT id_descendant FROM folder_closure WHERE id_ancestor = $1)
-           AND fc1.id_ancestor IN (SELECT id_descendant FROM folder_closure WHERE id_ancestor = $1)
-         GROUP BY fc1.id_descendant
-       ) sub`,
-      [folderId],
-    );
-    return Math.max(0, (rows[0]?.h ?? 1) - 1);
+    // 表名优先从实体元数据取（G6-08）；极端情况下（元数据未就绪）回退 'folders'，
+    // 避免硬编码造成表名不一致的同时保持对单元测试 mock 的健壮性。
+    const tableName = this.folderRepo.metadata?.tableName ?? 'folders';
+    const seen = new Set<string>();
+    let depth = 0;
+    let currentId: string | null = folderId;
+    while (currentId) {
+      if (seen.has(currentId)) break; // 成环防御
+      seen.add(currentId);
+      const rows: Array<{ parentId: string | null }> = await this.folderRepo.manager.query(
+        `SELECT "parentId" FROM ${tableName} WHERE id = $1`,
+        [currentId],
+      );
+      const parentId = rows[0]?.parentId ?? null;
+      if (!parentId) break;
+      depth += 1;
+      currentId = parentId;
+    }
+    return depth;
   }
 
   /**

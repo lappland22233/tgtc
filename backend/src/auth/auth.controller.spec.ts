@@ -6,8 +6,9 @@ describe('AuthController', () => {
     sendVerificationCode: jest.fn(), verifyEmail: jest.fn(), resetPassword: jest.fn(),
     getAuthStatus: jest.fn(),
   };
-  const jwtService = { decode: jest.fn() };
-  const controller = new AuthController(authService as any, jwtService as any);
+  const jwtService = { decode: jest.fn(), verify: jest.fn() };
+  const rateLimitService = { checkAndIncrement: jest.fn().mockResolvedValue({ allowed: true }) };
+  const controller = new AuthController(authService as any, jwtService as any, rateLimitService as any);
   const response = () => ({ cookie: jest.fn(), clearCookie: jest.fn() }) as any;
   const request = (overrides: any = {}) => ({
     headers: {}, cookies: {}, ip: '127.0.0.1', secure: false, ...overrides,
@@ -39,8 +40,8 @@ describe('AuthController', () => {
     expect(res.cookie.mock.calls[0][2].secure).toBe(secure);
   });
 
-  it('logout revokes a valid cookie token and clears cookie', async () => {
-    jwtService.decode.mockReturnValue({ jti: 'j', sub: 'u', exp: 123 });
+  it('logout verifies signature and revokes a valid cookie token, then clears cookie', async () => {
+    jwtService.verify.mockReturnValue({ jti: 'j', sub: 'u', exp: 123 });
     const res = response();
     await expect(controller.logout(request({ cookies: { access_token: 'jwt' } }), res)).resolves.toEqual({ message: '登出成功' });
     expect(authService.revokeToken).toHaveBeenCalledWith('j', 'u', new Date(123000));
@@ -48,9 +49,17 @@ describe('AuthController', () => {
   });
 
   it.each([{}, { cookies: { access_token: 123 } }, { cookies: { access_token: 'x' } }])('logout tolerates absent or invalid token', async (req) => {
-    jwtService.decode.mockReturnValue(null);
+    jwtService.verify.mockImplementation(() => { throw new Error('invalid'); });
     await controller.logout(request(req), response());
     expect(authService.revokeToken).not.toHaveBeenCalled();
+  });
+
+  it('logout does not revoke when signature verification fails', async () => {
+    jwtService.verify.mockImplementation(() => { throw new Error('token expired'); });
+    const res = response();
+    await controller.logout(request({ cookies: { access_token: 'forged' } }), res);
+    expect(authService.revokeToken).not.toHaveBeenCalled();
+    expect(res.clearCookie).toHaveBeenCalled();
   });
 
   it('delegates code, verification, reset, me and status', async () => {

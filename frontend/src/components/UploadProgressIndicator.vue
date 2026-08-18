@@ -1,4 +1,24 @@
 <template>
+  <!-- G11-21：收起后若仍有进行中上传，展示为小圆点/徽标（可点击展开），保证后台上传可感知 -->
+  <transition name="upload-indicator">
+    <button
+      v-if="collapsed"
+      type="button"
+      class="upload-indicator__badge"
+      role="status"
+      aria-live="polite"
+      :aria-label="`仍有 ${activeTotal} 个文件正在上传`"
+      title="展开上传进度"
+      @click="expand"
+    >
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M12 16V4M8 8l4-4 4 4" />
+        <path d="M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2" />
+      </svg>
+      <span class="upload-indicator__badge-count">{{ activeTotal }}</span>
+    </button>
+  </transition>
+
   <transition name="upload-indicator">
     <div v-if="visible" class="upload-indicator" role="status" aria-live="polite">
       <div class="upload-indicator__header">
@@ -66,6 +86,20 @@ const allFinished = computed(
 const successCount = computed(() => uploadStore.successCount);
 const failedCount = computed(() => uploadStore.errorCount);
 const visible = computed(() => !dismissed.value && uploadStore.entries.length > 0);
+/** G11-21：进行中/排队中的文件总数（用于收起后徽标计数） */
+const activeTotal = computed(() => uploadStore.activeCount + uploadStore.queuedCount);
+/**
+ * G11-21：收起后若有仍在进行的上传，展示为小圆点徽标（保留展开入口）。
+ * 无进行中上传（如全部完成）时完全隐藏，由完成态自动收起。
+ */
+const collapsed = computed(
+  () => dismissed.value && uploadStore.entries.length > 0 && hasActive.value,
+);
+
+/** G11-21：从徽标展开完整面板 */
+function expand() {
+  dismissed.value = false;
+}
 
 function clearHideTimer() {
   if (hideTimer) {
@@ -91,9 +125,10 @@ onUnmounted(() => {
   mediaPlaybackStore.setUploadPanelVisible(false);
 });
 
-// 浮层可见性 → 媒体会话 store（迷你播放器避让依据）
-watch(visible, (v) => {
-  mediaPlaybackStore.setUploadPanelVisible(v);
+// 浮层可见性 → 媒体会话 store（迷你播放器避让依据）。
+// G11-21：收起后的徽标同样占用右下角空间，一并计入避让。
+watch([visible, collapsed], ([v, c]) => {
+  mediaPlaybackStore.setUploadPanelVisible(v || c);
 }, { immediate: true });
 
 function dismiss() {
@@ -195,6 +230,45 @@ function handleCancelAll() {
   justify-content: flex-end;
   gap: var(--space-1);
   margin-top: var(--space-1);
+}
+
+/* G11-21：收起后的上传进行中徽标（小圆点 + 计数） */
+.upload-indicator__badge {
+  position: fixed;
+  right: var(--space-4);
+  bottom: var(--space-4);
+  z-index: 2500;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 40px;
+  height: 40px;
+  padding: 0 12px;
+  border: none;
+  border-radius: 999px;
+  background: var(--color-bg-surface);
+  color: var(--seed-primary);
+  box-shadow: var(--shadow-md);
+  cursor: pointer;
+  transition: background var(--duration-fast, 0.15s) ease, color var(--duration-fast, 0.15s) ease;
+}
+.upload-indicator__badge:hover,
+.upload-indicator__badge:focus-visible {
+  background: var(--color-bg-hover);
+}
+.upload-indicator__badge-count {
+  min-width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--seed-primary);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
 }
 
 /* 进出场动画 */

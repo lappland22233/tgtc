@@ -15,6 +15,19 @@
         </div>
         <div style="display: flex; gap: 12px; flex-wrap: wrap;">
           <t-button v-if="!isMobile" theme="primary" variant="outline" @click="batchDelete">批量删除（冷静期）</t-button>
+          <!-- 移动端批量操作（G14-18）：进入多选模式后卡片显示勾选框，可批量删除 -->
+          <t-button v-if="isMobile" theme="primary" variant="outline" @click="toggleMobileSelect">
+            {{ mobileSelectMode ? '退出多选' : '多选' }}
+          </t-button>
+          <t-button
+            v-if="isMobile && mobileSelectMode"
+            theme="danger"
+            variant="outline"
+            :disabled="selectedRows.length === 0"
+            @click="batchDelete"
+          >
+            批量删除 ({{ selectedRows.length }})
+          </t-button>
           <t-button theme="warning" variant="outline" @click="openVerifyDialog">文件体检</t-button>
           <t-button theme="warning" variant="outline" @click="openCleanupDialog">清理失效路径</t-button>
         </div>
@@ -25,12 +38,14 @@
         v-model:selected-row-keys="selectedRows"
         :data="files"
         :columns="columns"
-        :loading="cursorLoading && files.length === 0"
+        :loading="loading"
         :row-class-name="getRowClassName"
+        :pagination="pagination"
         row-key="id"
         hover
         table-layout="auto"
         @sort-change="handleSortChange"
+        @page-change="onPageChange"
       >
         <template #uploader="{ row }">
           <span style="font-size: 13px;">{{ row.uploader?.email || '未知' }}</span>
@@ -83,8 +98,22 @@
 
       <!-- 移动端：卡片列表 -->
       <div v-if="isMobile" class="mobile-card-list">
-        <div v-for="file in files" :key="file.id" class="mobile-file-admin-card">
+        <t-loading :loading="loading" size="small">
+        <div
+          v-for="file in files"
+          :key="file.id"
+          class="mobile-file-admin-card"
+          :class="{ 'mobile-card-selected': mobileSelectMode && isSelected(file.id) }"
+          @click="mobileSelectMode && toggleRowSelect(file.id)"
+        >
           <div style="display: flex; align-items: flex-start; gap: 12px;">
+            <t-checkbox
+              v-if="mobileSelectMode"
+              :checked="isSelected(file.id)"
+              style="margin-top: 10px;"
+              @click.stop
+              @change="() => toggleRowSelect(file.id)"
+            />
             <ThumbnailImg :file-id="file.id" :mime-type="file.mimeType" :size="40" :file-name="file.originalName" />
             <div style="flex: 1; min-width: 0;">
               <div :class="{ 'deleted-name': file.isDeleted }" style="font-weight: 500; word-break: break-all; font-size: 14px;">
@@ -111,11 +140,16 @@
             </template>
           </div>
         </div>
-      </div>
-
-      <div ref="scrollSentinel" style="margin-top: 16px; text-align: center; padding: 8px 0;">
-        <t-loading v-if="cursorLoading" size="small" text="加载中..." />
-        <span v-else-if="!hasMore && files.length > 0" style="color: var(--text-secondary);">已加载全部 {{ total }} 个文件</span>
+        <div v-if="files.length > 0" style="margin-top: 12px; display: flex; justify-content: center;">
+          <t-pagination
+            :current="pagination.current"
+            :total="pagination.total"
+            :page-size="pagination.pageSize"
+            size="small"
+            @change="onPageChange"
+          />
+        </div>
+        </t-loading>
       </div>
     </div>
 
@@ -224,7 +258,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
+import { ref, reactive, computed, onMounted, onUnmounted } from 'vue';
 import { DialogPlugin } from 'tdesign-vue-next';
 import MessagePlugin from '@/utils/message';
 import { api } from '../../stores/auth';
@@ -240,7 +274,6 @@ import {
 } from '../../api/admin-files';
 import { formatSize, formatDate } from '@/utils/format';
 import { getErrorMessage } from '../../utils/error';
-import { useCursorPagination } from '../../composables/useCursorPagination';
 import { useMobile } from '../../composables/useMobile';
 import ThumbnailImg from '../../components/ThumbnailImg.vue';
 
@@ -255,16 +288,37 @@ const sortOrder = ref<string>('');
 
 const isMobile = useMobile();
 
-// 无限滚动（以页码为游标，偏移分页保留排序能力）
-const {
-  hasMore,
-  loading: cursorLoading,
-  loadMore,
-  reset: resetCursor,
-} = useCursorPagination<AdminFileItem>();
+// 移动端多选模式（G14-18）：进入多选后卡片显示勾选框并支持批量删除
+const mobileSelectMode = ref(false);
+function isSelected(id: string): boolean {
+  return selectedRows.value.includes(id);
+}
+function toggleRowSelect(id: string) {
+  const idx = selectedRows.value.indexOf(id);
+  if (idx >= 0) {
+    selectedRows.value.splice(idx, 1);
+  } else {
+    selectedRows.value.push(id);
+  }
+}
+function toggleMobileSelect() {
+  mobileSelectMode.value = !mobileSelectMode.value;
+  if (!mobileSelectMode.value) {
+    selectedRows.value = [];
+  }
+}
 
-const scrollSentinel = ref<HTMLElement | null>(null);
-let scrollObserver: IntersectionObserver | null = null;
+// 有界服务端分页：仅保留当前页数据，避免全量累积导致 DOM/缩略图线性增长（G14-03）
+const currentPage = ref(1);
+const pageSize = ref(20);
+const loading = ref(false);
+const pagination = reactive({
+  current: 1,
+  pageSize: 20,
+  total: 0,
+  showJumper: true,
+  pageSizeOptions: [10, 20, 50],
+});
 
 const columns = [
   { colKey: 'row-select', type: 'multiple' as const, width: '50' },
@@ -288,21 +342,18 @@ function extractUploaders(fileList: AdminFileItem[]) {
       uploaderMap.set(f.uploader.id, f.uploader);
     }
   });
-  // 合并现有上传者（无限模式下需要累积）
+  // 合并现有上传者（跨页累积，供筛选下拉使用）
   const existing = new Map(uploaders.value.map(u => [u.id, u]));
   uploaderMap.forEach((v, k) => existing.set(k, v));
   uploaders.value = Array.from(existing.values());
 }
 
-/** 无限滚动每批加载条数 */
-const BATCH_SIZE = 20;
-
-/** 按页获取系统全部文件（不修改 files 列表，供无限滚动累加）。 */
+/** 按页获取系统全部文件。 */
 async function fetchAdminPage(pageNum: number, signal?: AbortSignal): Promise<{ files: AdminFileItem[]; total: number }> {
   const sortField = sortBy.value === 'uploader' ? 'uploader.email' : sortBy.value;
   return fetchAllAdminFiles({
     page: pageNum,
-    limit: BATCH_SIZE,
+    limit: pageSize.value,
     keyword: searchFile.value || undefined,
     userId: filterUploader.value || undefined,
     sortBy: sortField || undefined,
@@ -311,61 +362,53 @@ async function fetchAdminPage(pageNum: number, signal?: AbortSignal): Promise<{ 
   });
 }
 
-/** 初始加载 / 重置加载（无限滚动：从头加载） */
-async function loadInitialFiles() {
-  resetCursor();
-  files.value = [];
-  await loadMoreFiles(1);
-}
-
-/** 加载更多（以页码为游标驱动，偏移分页保留排序能力） */
-async function loadMoreFiles(pageNum?: number) {
-  if (!hasMore.value || cursorLoading.value) return;
-  await loadMore(async (cursor, signal) => {
-    const page = pageNum ?? (cursor ? parseInt(cursor, 10) : 1);
-    try {
-      const result = await fetchAdminPage(page, signal);
-      files.value = [...files.value, ...result.files];
-      total.value = result.total;
-      extractUploaders(result.files);
-      const loadedAll = files.value.length >= result.total || result.files.length === 0;
-      return {
-        data: result.files,
-        nextCursor: loadedAll ? null : String(page + 1),
-        hasMore: !loadedAll,
-      };
-    } catch (error) {
-      const canceled =
-        (error as { code?: string })?.code === 'ERR_CANCELED' ||
-        (error instanceof Error && error.name === 'AbortError');
-      if (!canceled) {
-        MessagePlugin.error(getErrorMessage(error) || '加载文件列表失败');
+/** 加载指定页（有界分页：仅保留当前页数据） */
+async function loadPage(pageNum: number) {
+  if (loading.value) return;
+  loading.value = true;
+  try {
+    const result = await fetchAdminPage(pageNum);
+    files.value = result.files;
+    total.value = result.total;
+    currentPage.value = pageNum;
+    pagination.current = pageNum;
+    pagination.pageSize = pageSize.value;
+    pagination.total = result.total;
+    // 页越界防护：当前页已无数据且非首页时回退到最后一页
+    if (result.files.length === 0 && pageNum > 1) {
+      const lastPage = Math.max(1, Math.ceil(result.total / pageSize.value));
+      if (lastPage < pageNum) {
+        await loadPage(lastPage);
+        return;
       }
-      return { data: [], nextCursor: cursor, hasMore: true };
     }
-  });
+    extractUploaders(result.files);
+  } catch (error) {
+    MessagePlugin.error(getErrorMessage(error) || '加载文件列表失败');
+  } finally {
+    loading.value = false;
+  }
 }
 
-/**
- * 哨兵元素变化时重新挂载 IntersectionObserver。
- * 修复无限滚动失效：列表清空重载时哨兵元素会卸载重建，旧 observer 指向已脱离
- * DOM 的元素而永不触发，这里监听哨兵 ref 变化即重新 observe。
- */
-watch(scrollSentinel, (el) => {
-  if (scrollObserver) { scrollObserver.disconnect(); scrollObserver = null; }
-  if (!el) return;
-  scrollObserver = new IntersectionObserver(
-    (entries) => {
-      if (entries[0].isIntersecting) loadMoreFiles();
-    },
-    { rootMargin: '600px' },
-  );
-  scrollObserver.observe(el);
-});
+/** 初始加载 / 重置加载 */
+async function loadInitialFiles() {
+  selectedRows.value = [];
+  await loadPage(1);
+}
 
 /** 刷新列表（操作后调用） */
 async function refreshList() {
-  await loadInitialFiles();
+  await loadPage(currentPage.value);
+}
+
+/** 分页切换 */
+function onPageChange(pageInfo: { current: number; pageSize: number }) {
+  if (pageInfo.pageSize !== pageSize.value) {
+    pageSize.value = pageInfo.pageSize;
+    loadPage(1);
+    return;
+  }
+  loadPage(pageInfo.current);
 }
 
 /** 管理员删除文件（7天冷静期，再次点击强制删除） */
@@ -386,7 +429,8 @@ function deleteFile(row: AdminFileItem) {
         const result = await api.delete(`/admin/files/${row.id}`);
         const msg = result.data?.message || '删除成功';
         MessagePlugin.success(msg);
-        refreshList();
+        // 就地更新行状态（进入冷静期），保留滚动位置（G14-17）
+        patchRow(row.id, { isDeleted: true, deleteRequestedAt: new Date().toISOString() });
       } catch (error: unknown) {
         MessagePlugin.error(getErrorMessage(error));
       }
@@ -396,12 +440,25 @@ function deleteFile(row: AdminFileItem) {
   });
 }
 
+/**
+ * 就地更新行状态（G14-17）：操作成功后直接更新当前页对应行，避免整页 refreshList 丢滚动位置。
+ * @param id 文件 id
+ * @param patch 应用到该行的字段
+ */
+function patchRow(id: string, patch: Partial<AdminFileItem>) {
+  const idx = files.value.findIndex((f) => f.id === id);
+  if (idx >= 0) {
+    files.value[idx] = { ...files.value[idx], ...patch };
+  }
+}
+
 /** 恢复已删除文件 */
 async function restoreFile(id: string) {
   try {
     await api.post(`/files/${id}/restore`);
     MessagePlugin.success('文件已恢复');
-    refreshList();
+    // 就地更新行状态，保留滚动位置（G14-17）
+    patchRow(id, { isDeleted: false, deletedByAdmin: false, deleteRequestedAt: null });
   } catch (error: unknown) {
     MessagePlugin.error(getErrorMessage(error));
   }
@@ -419,7 +476,8 @@ function forceDeleteFile(row: AdminFileItem) {
       try {
         await api.delete(`/admin/files/${row.id}`);
         MessagePlugin.success('文件已永久删除');
-        refreshList();
+        // 就地移除行，保留滚动位置（G14-17）
+        files.value = files.value.filter((f) => f.id !== row.id);
       } catch (error: unknown) {
         MessagePlugin.error(getErrorMessage(error));
       }
@@ -649,7 +707,6 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
-  if (scrollObserver) scrollObserver.disconnect();
   stopVerifyPolling();
   document.removeEventListener('visibilitychange', handleVisibilityChange);
 });
@@ -747,6 +804,11 @@ function closeCleanupResult() {
     border-radius: 8px;
     padding: 12px;
     margin-bottom: 10px;
+  }
+  /* 多选模式下选中态高亮（G14-18） */
+  .mobile-file-admin-card.mobile-card-selected {
+    border-color: var(--color-primary, #0052d9);
+    box-shadow: 0 0 0 1px var(--color-primary, #0052d9) inset;
   }
 }
 </style>

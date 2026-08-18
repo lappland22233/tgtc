@@ -18,6 +18,8 @@ export enum AccessAction {
 @Entity('file_access_logs')
 @Index('idx_access_logs_uploader_created', ['uploaderId', 'createdAt'])
 @Index('idx_access_logs_file_created', ['fileId', 'createdAt'])
+// G8-13：支持按 action + 时间窗口的扫描（异常下载/分享检测、归档清理走索引）
+@Index('idx_access_logs_action_created', ['action', 'createdAt'])
 export class FileAccessLog {
   @PrimaryColumn({ type: 'uuid', default: () => 'gen_random_uuid()' })
   id: string;

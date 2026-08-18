@@ -64,6 +64,18 @@ function resetRetryBreaker() {
   retryBreakerTripped = false;
 }
 
+// G11-27：断网恢复后自动重置熔断器，使队列可继续重试 / 重新上传。
+// 熔断在连续瞬时失败 ≥ BREAKER_TRIP_THRESHOLD 次后触发并暂停自动重试；
+// 网络恢复（online）视为故障已消除，重置计数以允许后续条目正常重试。
+if (typeof window !== 'undefined') {
+  window.addEventListener('online', () => {
+    if (retryBreakerTripped) {
+      console.info('[上传队列] 网络已恢复，重置重试熔断器');
+      resetRetryBreaker();
+    }
+  });
+}
+
 function genUid(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID();
   const bytes = new Uint8Array(16);
@@ -224,6 +236,9 @@ export const useUploadStore = defineStore('upload', () => {
   function finalizeEntry(entry: QueueEntry) {
     if (!isTerminal(entry.status)) return;
     pendingProgress.delete(entry.uid);
+    // G10-06：终态条目从 knownFiles 移除其 File 引用，使同一 File 可被重新拖拽上传。
+    // （WeakSet 不支持遍历删除，故在置空 file 前显式 delete。）
+    if (entry.file) knownFiles.delete(entry.file);
     entry.file = null;
     entry.tagIds = [];
   }
@@ -416,6 +431,17 @@ export const useUploadStore = defineStore('upload', () => {
     });
   }
 
+  /**
+   * 判断同一 File 引用是否已有“非终态”条目（进行中 / 等待 / 处理中）。
+   * 终态（成功/失败/取消）条目允许同一 File 重新拖拽上传（G11-26）。
+   */
+  function hasActiveFile(file: File): boolean {
+    for (const e of entries.value) {
+      if (e.file === file && !isTerminal(e.status)) return true;
+    }
+    return false;
+  }
+
   function appendEntries(newEntries: QueueEntry[]) {
     if (newEntries.length === 0) return;
     for (const entry of newEntries) {
@@ -433,7 +459,7 @@ export const useUploadStore = defineStore('upload', () => {
   function enqueue(files: File[], folderId: string | null, tagIds: string[]) {
     const newEntries: QueueEntry[] = [];
     for (const file of files) {
-      if (!file || knownFiles.has(file)) continue;
+      if (!file || hasActiveFile(file)) continue;
       knownFiles.add(file);
       newEntries.push(createEntry(file, folderId, tagIds));
     }
@@ -448,7 +474,7 @@ export const useUploadStore = defineStore('upload', () => {
     const newEntries: QueueEntry[] = [];
     const seenInBatch = new Set<string>();
     for (const item of items) {
-      if (!item.file || knownFiles.has(item.file)) continue;
+      if (!item.file || hasActiveFile(item.file)) continue;
       const batchKey = `${item.folderId ?? 'root'}:${item.file.name}`;
       if (seenInBatch.has(batchKey)) continue;
       seenInBatch.add(batchKey);

@@ -492,6 +492,17 @@ body {
   .file-item:hover { background: var(--color-bg-surface); }
   .nav-item { min-height: 44px; }
   .nav-item:active { background: var(--color-bg-selected); }
+
+  /* 触屏卡片（FileCard / FolderCard）：勾选框与操作条常驻显示，避免 hover-gated 不可见 */
+  .card-checkbox,
+  .folder-checkbox {
+    opacity: 1 !important;
+  }
+  .card-actions-overlay,
+  .folder-actions-overlay {
+    opacity: 1 !important;
+    background: linear-gradient(to top, rgba(0, 0, 0, 0.55), transparent) !important;
+  }
 }
 
 /* ============================================================

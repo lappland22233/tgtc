@@ -43,6 +43,10 @@ void HttpConnectionBase::live_event() {
   }
 }
 
+void HttpConnectionBase::touch_activity() {
+  live_event();
+}
+
 void HttpConnectionBase::start_up() {
   Scheduler::subscribe(fd_.get_poll_info().extract_pollable_fd(this));
   reader_.init(read_sink_.get_output(), max_post_size_, max_files_);

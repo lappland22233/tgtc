@@ -30,9 +30,16 @@ import {
   FileTypeQueryDto,
 } from './admin-stats.dto';
 
+/** getStats 仪表盘短 TTL 缓存（毫秒）：30 秒。避免每次刷新都对 users/files/access_logs
+ *  全表 COUNT，造成慢查询；可接受秒级延迟的仪表盘指标。 */
+const STATS_CACHE_TTL_MS = 30 * 1000;
+
 @Injectable()
 export class AdminService {
   private readonly logger = new Logger(AdminService.name);
+
+  /** G7-04：getStats 结果缓存（短 TTL），避免全表 COUNT 慢查询 */
+  private statsCache: { expiresAt: number; value: Awaited<ReturnType<AdminService['computeStats']>> } | null = null;
 
   constructor(
     @InjectRepository(SystemConfig)
@@ -59,6 +66,25 @@ export class AdminService {
   ) {}
 
   async getStats(): Promise<{
+    totalUsers: number;
+    totalFiles: number;
+    totalStorage: number;
+    bannedUsers: number;
+    activeUsers: number;
+    totalAccessCount: number;
+    monthlyAccess: { month: string; count: number }[];
+  }> {
+    // G7-04：短 TTL 缓存，避免仪表盘每次刷新都全表 COUNT 造成慢查询
+    const now = Date.now();
+    if (this.statsCache && this.statsCache.expiresAt > now) {
+      return this.statsCache.value;
+    }
+    const value = await this.computeStats();
+    this.statsCache = { expiresAt: now + STATS_CACHE_TTL_MS, value };
+    return value;
+  }
+
+  private async computeStats(): Promise<{
     totalUsers: number;
     totalFiles: number;
     totalStorage: number;
@@ -143,7 +169,15 @@ export class AdminService {
   }
 
   async getConfig(): Promise<SystemConfig[]> {
-    return this.systemConfigRepository.find();
+    const rows = await this.systemConfigRepository.find();
+    // G7-03：敏感配置键（SMTP_PASSWORD 等凭据）不回显给任何 ADMIN，返回掩码 `***`，
+    // 防止管理端读取密文/明文凭据造成泄漏面。
+    return rows.map((row) => {
+      if (this.SENSITIVE_KEYS.has(row.key)) {
+        return { ...row, value: '***' };
+      }
+      return row;
+    });
   }
 
   async getConfigByKey(key: string): Promise<string | null> {
@@ -159,7 +193,58 @@ export class AdminService {
     'DB_PASSWORD',
   ]);
 
+  /**
+   * 通用配置写入的 key 白名单。
+   * 仅允许通过通用入口修改此白名单内的普通配置键；安全规则（sec_*）与敏感凭据
+   * （SMTP_PASSWORD 等）一律走各自专用端点（updateSecurityConfig / updateSMTPConfig），
+   * 防止通过通用入口绕过安全校验或写入明文密码。
+   */
+  private static readonly GENERIC_CONFIG_KEY_WHITELIST = new Set([
+    'MAX_FILE_SIZE',
+    'FILE_TYPE_MODE',
+    'FILE_TYPE_FILTER',
+    'FILE_ACCESS_COUNT_DEFAULT',
+    'FILE_ACCESS_COUNT_MAX',
+    'FILE_CACHE_MAX_SIZE_GB',
+    'FILE_CACHE_MIN_FREE_DISK_GB',
+    'FILE_CACHE_TTL_DAYS',
+    'FILE_CACHE_NO_CACHE_MODE',
+    'REGISTRATION_ENABLED',
+    'EMAIL_VERIFICATION_ENABLED',
+    'SMTP_HOST',
+    'SMTP_PORT',
+    'SMTP_SECURE',
+    'SMTP_USER',
+    'SMTP_FROM',
+  ]);
+
+  /** 必须走专用加密/安全端点、禁止通用写入的键 */
+  private static readonly GENERIC_CONFIG_FORBIDDEN_KEYS = new Set([
+    'SMTP_PASSWORD',
+    'TELEGRAM_BOT_TOKEN',
+    'JWT_SECRET',
+    'COOKIE_SECRET',
+    'DB_PASSWORD',
+  ]);
+
+  /**
+   * 校验通用配置写入的 key 是否被允许。
+   * sec_* 安全键、敏感凭据键、以及白名单之外的未知键一律拒绝。
+   */
+  private assertGenericConfigKeyAllowed(key: string): void {
+    if (key.startsWith('sec_')) {
+      throw new BadRequestException(`安全配置键 ${key} 必须通过安全配置专用端点更新`);
+    }
+    if (AdminService.GENERIC_CONFIG_FORBIDDEN_KEYS.has(key)) {
+      throw new BadRequestException(`敏感配置键 ${key} 必须通过专用端点更新`);
+    }
+    if (!AdminService.GENERIC_CONFIG_KEY_WHITELIST.has(key)) {
+      throw new BadRequestException(`不允许通过通用配置端点修改未声明的键: ${key}`);
+    }
+  }
+
   async updateConfig(user: User, key: string, value: string, description?: string): Promise<void> {
+    this.assertGenericConfigKeyAllowed(key);
     await this.setConfigValue(key, value, description);
 
     // 审计日志：配置变更（敏感键脱敏）
@@ -182,6 +267,10 @@ export class AdminService {
   }
 
   async updateConfigs(user: User, configs: { key: string; value: string; description?: string }[]): Promise<void> {
+    // 逐键执行通用写入白名单校验，防止批量入口绕过安全规则/明文写敏感键
+    for (const c of configs) {
+      this.assertGenericConfigKeyAllowed(c.key);
+    }
     await this.configCacheService.setBatch(configs);
 
     // 审计日志：批量配置变更
@@ -925,10 +1014,14 @@ export class AdminService {
     }
 
     // 先获取总数，判断是否需要采样
-    const totalCount = await this.accessLogRepo
+    // G7-05：count 查询与下方数据查询同步追加 endDate 条件，保证区间统计口径一致。
+    const countQb = this.accessLogRepo
       .createQueryBuilder('log')
-      .where('log.createdAt >= :since', { since })
-      .getCount();
+      .where('log.createdAt >= :since', { since });
+    if (query.endDate) {
+      countQb.andWhere('log.createdAt <= :until', { until: new Date(query.endDate) });
+    }
+    const totalCount = await countQb.getCount();
 
     const samplingThreshold = 1_000_000;
     const sampled = totalCount > samplingThreshold;
@@ -1593,8 +1686,24 @@ export class AdminService {
 
   // ==================== Phase 7: 导出 & 对比 ====================
 
-  async exportData(options: ExportOptions) {
-    return this.exportService.export(options);
+  async exportData(user: User, options: ExportOptions) {
+    // G7-09：导出入口审计。记录操作人/类型/时间范围；行数在导出完成后回填。
+    const result = await this.exportService.export(options);
+    const rowCount = this.exportService.countRows(result.data, options.format);
+    this.auditService.log({
+      action: 'data_export',
+      userId: user.id,
+      resourceType: 'export',
+      resourceId: options.type,
+      metadata: {
+        format: options.format,
+        type: options.type,
+        timeRange: options.timeRange,
+        rowCount,
+        filename: result.filename,
+      },
+    });
+    return result;
   }
 
   async getComparison(timeRange: string = '7d') {
@@ -1710,9 +1819,12 @@ export class AdminService {
       }
     }
 
+    // G7-06：入库前归一化数值，`String(Number(c.value))`。避免 '1e1' 等指数形式
+    // 在后续 parseInt/parseFloat 解析时发生漂移（如 '1e1' 存库后按整数读取为 10 的
+    // 表示不一致）。上方校验已保证 Number.isFinite，此处归一化不会改变语义。
     const entries = configs.map((c) => ({
       key: c.key,
-      value: c.value,
+      value: String(Number(c.value)),
       description: `安全规则 - ${SEC_CONFIG_META.find(m => m.key === c.key)?.label || c.key}`,
     }));
 

@@ -17,13 +17,19 @@
             </div>
           </t-form-item>
           <t-form-item label="邮箱验证码">
-            <t-switch v-model="authConfig.emailVerificationEnabled" />
+            <t-switch :value="authConfig.emailVerificationEnabled" @change="onEmailVerificationToggle" />
             <div style="color: var(--text-secondary); font-size: 12px; margin-top: 4px;">
               开启后，注册时需要验证邮箱验证码
             </div>
           </t-form-item>
           <t-form-item>
-            <t-button theme="primary" @click="saveAuthConfig">保存认证配置</t-button>
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <t-button theme="primary" :disabled="!blockLoadState.auth" @click="saveAuthConfig">保存认证配置</t-button>
+              <t-button v-if="!blockLoadState.auth" variant="outline" @click="fetchAuthConfig">重新加载</t-button>
+            </div>
+            <div v-if="!blockLoadState.auth" style="color: var(--color-warning); font-size: 12px; margin-top: 4px;">
+              配置加载失败，当前显示默认值。为避免覆盖服务端配置，已禁用保存，请先重新加载。
+            </div>
           </t-form-item>
         </t-form>
       </div>
@@ -51,7 +57,13 @@
             <t-input v-model="smtpConfig.from" placeholder="显示名称" autocomplete="off" name="smtp-from" />
           </t-form-item>
           <t-form-item>
-            <t-button theme="primary" @click="saveSMTPConfig">保存SMTP配置</t-button>
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <t-button theme="primary" :disabled="!blockLoadState.smtp" @click="saveSMTPConfig">保存SMTP配置</t-button>
+              <t-button v-if="!blockLoadState.smtp" variant="outline" @click="fetchSMTPConfig">重新加载</t-button>
+            </div>
+            <div v-if="!blockLoadState.smtp" style="color: var(--color-warning); font-size: 12px; margin-top: 4px;">
+              配置加载失败，当前显示默认值。为避免覆盖服务端配置，已禁用保存，请先重新加载。
+            </div>
           </t-form-item>
         </t-form>
 
@@ -174,7 +186,13 @@
         </t-form-item>
 
         <t-form-item>
-          <t-button theme="primary" @click="saveUploadConfig">保存上传配置</t-button>
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <t-button theme="primary" :disabled="!blockLoadState.upload" @click="saveUploadConfig">保存上传配置</t-button>
+            <t-button v-if="!blockLoadState.upload" variant="outline" @click="fetchUploadConfig">重新加载</t-button>
+          </div>
+          <div v-if="!blockLoadState.upload" style="color: var(--color-warning); font-size: 12px; margin-top: 4px;">
+            配置加载失败，当前显示默认值。为避免覆盖服务端配置，已禁用保存，请先重新加载。
+          </div>
         </t-form-item>
       </t-form>
     </div>
@@ -201,11 +219,17 @@
           <span style="margin-left: 8px; font-size: 12px; color: var(--td-text-color-secondary);">超过此时间的缓存文件自动清理</span>
         </t-form-item>
         <t-form-item label="无缓存模式">
-          <t-switch v-model="cacheConfig.noCacheMode" />
+          <t-switch :value="cacheConfig.noCacheMode" @change="onNoCacheModeToggle" />
           <span style="margin-left: 8px; font-size: 12px; color: var(--td-text-color-secondary);">开启后所有文件下载实时回源直通，不读写本地缓存；Range 请求退化为完整下载，上游带宽压力增大</span>
         </t-form-item>
         <t-form-item>
-          <t-button theme="primary" @click="saveCacheConfig">保存缓存配置</t-button>
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <t-button theme="primary" :disabled="!blockLoadState.cache" @click="saveCacheConfig">保存缓存配置</t-button>
+            <t-button v-if="!blockLoadState.cache" variant="outline" @click="fetchCacheConfig">重新加载</t-button>
+          </div>
+          <div v-if="!blockLoadState.cache" style="color: var(--color-warning); font-size: 12px; margin-top: 4px;">
+            配置加载失败，当前显示默认值。为避免覆盖服务端配置，已禁用保存，请先重新加载。
+          </div>
         </t-form-item>
       </t-form>
     </div>
@@ -242,8 +266,20 @@
         <t-form-item label="封禁原因" name="reason">
           <t-input v-model="banForm.reason" placeholder="可选" autocomplete="off" name="config-ban-reason" />
         </t-form-item>
-        <t-form-item label="永久封禁">
-          <t-switch v-model="banForm.permanent" />
+        <t-form-item label="封禁类型">
+          <t-radio-group v-model="banForm.permanent">
+            <t-radio :value="false">临时封禁</t-radio>
+            <t-radio :value="true">永久封禁</t-radio>
+          </t-radio-group>
+        </t-form-item>
+        <t-form-item v-if="!banForm.permanent" label="封禁时长">
+          <t-input-number
+            v-model="banForm.durationHours"
+            :min="1"
+            :max="720"
+            style="width: 120px"
+          />
+          <span style="margin-left: 8px; color: var(--text-secondary); font-size: 13px">小时</span>
         </t-form-item>
       </t-form>
     </t-dialog>
@@ -251,13 +287,24 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted } from 'vue';
+import { ref, reactive, onMounted, onBeforeUnmount, watch } from 'vue';
+import { onBeforeRouteLeave } from 'vue-router';
+import { DialogPlugin } from 'tdesign-vue-next';
 import MessagePlugin from '@/utils/message';
 import { useMobile } from '../../composables/useMobile';
 import { api } from '../../stores/auth';
 import { getErrorMessage } from '../../utils/error';
+import { isValidIP } from '../../utils/ip';
 
 const isMobile = useMobile();
+
+// 各配置区块加载状态：加载失败时禁用对应保存按钮并阻止提交，防止用默认值覆盖服务端真实配置（G15-04）
+const blockLoadState = reactive({
+  auth: false as boolean,
+  smtp: false as boolean,
+  upload: false as boolean,
+  cache: false as boolean,
+});
 
 const authConfig = ref({
   registrationEnabled: false,
@@ -288,6 +335,56 @@ const cacheConfig = ref({
   noCacheMode: false,
 });
 
+// 未保存离开防护（G15-17）：任一配置表单被修改且未保存时置脏，
+// 触发 beforeunload / 路由离开确认，避免误操作丢失修改。
+const dirty = ref(false);
+// 初始加载期置 true，避免 fetch 回填表单值时误触发 dirty（非用户编辑）
+const suppressDirty = ref(true);
+function markDirty() {
+  if (suppressDirty.value) return;
+  if (!dirty.value) dirty.value = true;
+}
+function markClean() {
+  dirty.value = false;
+}
+// 深度监听各配置对象，任何字段变化即标记脏；保存成功后由 markClean 复位
+watch([authConfig, smtpConfig, uploadConfig, cacheConfig], () => {
+  markDirty();
+}, { deep: true });
+
+// 浏览器关闭/刷新拦截
+function handleBeforeUnload(e: BeforeUnloadEvent) {
+  if (!dirty.value) return;
+  e.preventDefault();
+  e.returnValue = '';
+}
+onMounted(() => {
+  window.addEventListener('beforeunload', handleBeforeUnload);
+});
+onBeforeUnmount(() => {
+  window.removeEventListener('beforeunload', handleBeforeUnload);
+});
+// SPA 路由离开确认
+onBeforeRouteLeave(() => {
+  if (!dirty.value) return true;
+  return new Promise<boolean>((resolve) => {
+    const dialog = DialogPlugin.confirm({
+      header: '未保存的修改',
+      body: '当前有未保存的配置修改，离开后将丢失。确定要离开吗？',
+      confirmBtn: '放弃修改并离开',
+      cancelBtn: '留在本页',
+      onConfirm: () => {
+        dialog.destroy();
+        resolve(true);
+      },
+      onClose: () => {
+        dialog.destroy();
+        resolve(false);
+      },
+    });
+  });
+});
+
 // 预设常用扩展名（危险类型已标注）
 const presetExtensions = [
   '.zip', '.rar', '.7z', '.tar.gz',
@@ -304,7 +401,7 @@ const customExtension = ref('');
 
 const bannedIPs = ref<{ id: string; ip: string; reason: string | null; isPermanent: boolean; expiresAt: string | null; createdAt: string }[]>([]);
 const showBanDialog = ref(false);
-const banForm = reactive({ ip: '', reason: '', permanent: true });
+const banForm = reactive({ ip: '', reason: '', permanent: true, durationHours: 6 });
 
 const ipColumns = [
   { colKey: 'ip', title: 'IP地址', width: '150' },
@@ -323,20 +420,57 @@ async function fetchAuthConfig(): Promise<boolean> {
   try {
     const res = await api.get('/admin/auth-config');
     authConfig.value = res.data.data ?? authConfig.value;
+    blockLoadState.auth = true;
     return true;
   } catch (err) {
     console.error('获取认证配置失败', err);
+    blockLoadState.auth = false;
     return false;
   }
 }
 
 async function saveAuthConfig() {
+  // 未成功加载的区块不允许保存，防止默认值覆盖服务端配置（G15-04）
+  if (!blockLoadState.auth) {
+    MessagePlugin.warning('认证配置加载失败，无法保存。请先点击"重新加载"');
+    return;
+  }
   try {
     await api.put('/admin/auth-config', authConfig.value);
     MessagePlugin.success('认证配置已保存');
+    markClean();
   } catch (error: unknown) {
     MessagePlugin.error(getErrorMessage(error));
   }
+}
+
+/**
+ * 邮箱验证码开关：由开→关属于放宽安全策略，需二次确认（G15-05）。
+ * 确认后才真正写入表单值。
+ */
+function onEmailVerificationToggle(value: boolean) {
+  const target = Boolean(value);
+  const wasEnabled = authConfig.value.emailVerificationEnabled;
+  if (target === wasEnabled) return;
+  if (target === true) {
+    // 由关→开：收紧策略，直接允许
+    authConfig.value.emailVerificationEnabled = true;
+    return;
+  }
+  // 由开→关：安全风险确认
+  const confirmDialog = DialogPlugin.confirm({
+    header: '关闭邮箱验证码',
+    body: '关闭邮箱验证码将放宽安全策略：此后注册无需邮箱验证即可完成。'
+      + '这可能降低账户安全性、增加垃圾账户注册风险。确定要关闭吗？',
+    theme: 'warning',
+    confirmBtn: '确定关闭',
+    cancelBtn: '取消',
+    onConfirm: () => {
+      authConfig.value.emailVerificationEnabled = false;
+      confirmDialog.destroy();
+    },
+    onClose: () => confirmDialog.destroy(),
+  });
 }
 
 async function fetchSMTPConfig(): Promise<boolean> {
@@ -347,14 +481,21 @@ async function fetchSMTPConfig(): Promise<boolean> {
       // GET /admin/smtp 不返回 password，保留表单中已有的密码值，避免被响应覆盖为空导致无法二次保存
       smtpConfig.value = { ...smtpConfig.value, ...data, password: smtpConfig.value.password };
     }
+    blockLoadState.smtp = true;
     return true;
   } catch (err) {
     console.error('获取SMTP配置失败', err);
+    blockLoadState.smtp = false;
     return false;
   }
 }
 
 async function saveSMTPConfig() {
+  // 未成功加载的区块不允许保存（G15-04）
+  if (!blockLoadState.smtp) {
+    MessagePlugin.warning('SMTP配置加载失败，无法保存。请先点击"重新加载"');
+    return;
+  }
   const { host, port, user, from } = smtpConfig.value;
   if (!String(host).trim() || !port || !String(user).trim() || !String(from).trim()) {
     MessagePlugin.warning('请填写SMTP服务器、端口、用户名和发件人');
@@ -363,6 +504,7 @@ async function saveSMTPConfig() {
   try {
     await api.put('/admin/smtp', smtpConfig.value);
     MessagePlugin.success('SMTP配置已保存');
+    markClean();
   } catch (error: unknown) {
     MessagePlugin.error(getErrorMessage(error));
   }
@@ -434,14 +576,21 @@ async function fetchUploadConfig(): Promise<boolean> {
     selectedExtensions.value = data.fileTypeFilter
       ? data.fileTypeFilter.split(',').map((s: string) => s.trim()).filter(Boolean)
       : [];
+    blockLoadState.upload = true;
     return true;
   } catch (err) {
     console.error('获取上传配置失败', err);
+    blockLoadState.upload = false;
     return false;
   }
 }
 
 async function saveUploadConfig() {
+  // 未成功加载的区块不允许保存（G15-04）
+  if (!blockLoadState.upload) {
+    MessagePlugin.warning('上传配置加载失败，无法保存。请先点击"重新加载"');
+    return;
+  }
   // 前端一致性校验（后端亦会兜底）：存在最大值(>0)时，默认值须为 1..max
   const { accessCountDefault: def, accessCountMax: max } = uploadConfig.value;
   if (max > 0 && (def <= 0 || def > max)) {
@@ -458,26 +607,64 @@ async function saveUploadConfig() {
     });
     uploadConfig.value.fileTypeFilter = selectedExtensions.value.join(',');
     MessagePlugin.success('上传配置已保存');
+    markClean();
   } catch (error: unknown) {
     MessagePlugin.error(getErrorMessage(error));
   }
+}
+
+/**
+ * 无缓存模式开关（G15-18）：由关→开会显著放大上游带宽/回源压力，需二次确认。
+ * 确认后才真正写入表单值。
+ */
+function onNoCacheModeToggle(value: boolean) {
+  const target = Boolean(value);
+  const wasOn = cacheConfig.value.noCacheMode;
+  if (target === wasOn) return;
+  if (target === false) {
+    // 关闭无缓存模式：恢复正常缓存，直接允许
+    cacheConfig.value.noCacheMode = false;
+    return;
+  }
+  // 开启无缓存模式：强调带宽影响
+  const confirmDialog = DialogPlugin.confirm({
+    header: '开启无缓存模式',
+    body: '开启后所有文件下载将实时回源直通、不读写本地缓存，且 Range（断点/拖动播放）请求会退化为完整下载。'
+      + '这将显著增大上游带宽压力与回源延迟。确定要开启吗？',
+    theme: 'warning',
+    confirmBtn: '仍要开启',
+    cancelBtn: '取消',
+    onConfirm: () => {
+      cacheConfig.value.noCacheMode = true;
+      confirmDialog.destroy();
+    },
+    onClose: () => confirmDialog.destroy(),
+  });
 }
 
 async function fetchCacheConfig(): Promise<boolean> {
   try {
     const res = await api.get('/admin/cache-config');
     cacheConfig.value = res.data.data ?? cacheConfig.value;
+    blockLoadState.cache = true;
     return true;
   } catch (err) {
     console.error('获取缓存配置失败', err);
+    blockLoadState.cache = false;
     return false;
   }
 }
 
 async function saveCacheConfig() {
+  // 未成功加载的区块不允许保存（G15-04）
+  if (!blockLoadState.cache) {
+    MessagePlugin.warning('缓存配置加载失败，无法保存。请先点击"重新加载"');
+    return;
+  }
   try {
     await api.put('/admin/cache-config', cacheConfig.value);
     MessagePlugin.success('缓存配置已保存');
+    markClean();
   } catch (error: unknown) {
     MessagePlugin.error(getErrorMessage(error));
   }
@@ -505,41 +692,49 @@ async function banIP() {
     return;
   }
   try {
-    await api.post('/admin/banned-ips', { ...banForm, ip });
+    // 临时封禁：附带到期时间（G15-19），与 SecurityMonitor 封禁行为一致
+    const payload: Record<string, unknown> = {
+      ip,
+      reason: banForm.reason,
+      permanent: banForm.permanent,
+    };
+    if (!banForm.permanent) {
+      payload.expiresAt = new Date(Date.now() + banForm.durationHours * 60 * 60 * 1000).toISOString();
+    }
+    await api.post('/admin/banned-ips', payload);
     MessagePlugin.success('IP已封禁');
     showBanDialog.value = false;
     banForm.ip = '';
     banForm.reason = '';
     banForm.permanent = true;
+    banForm.durationHours = 6;
     fetchBannedIPs();
   } catch (error: unknown) {
     MessagePlugin.error(getErrorMessage(error));
   }
 }
 
-function isValidIP(ip: string): boolean {
-  const ipv4Re = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
-  const m = ip.match(ipv4Re);
-  if (m) {
-    return m.slice(1).every((o) => {
-      const n = parseInt(o, 10);
-      return n >= 0 && n <= 255 && String(n) === o;
-    });
-  }
-  // 完整 IPv6 校验：8 组完整形式 / :: 压缩形式 / link-local / IPv4 映射与嵌入，
-  // 避免宽松正则让 ":::" 等无效地址通过
-  const ipv6Re = /^(?:([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(?::[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(?::[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(?::[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(?::[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:(?::[0-9a-fA-F]{1,4}){1,6}|:(?:(?::[0-9a-fA-F]{1,4}){1,7}|:)|fe80:(?::[0-9a-fA-F]{0,4}){0,4}%[0-9a-zA-Z]+|::(?:ffff(?::0{1,4})?:)?(?:(?:25[0-5]|(?:2[0-4]|1?[0-9])?[0-9])\.){3}(?:25[0-5]|(?:2[0-4]|1?[0-9])?[0-9])|(?:[0-9a-fA-F]{1,4}:){1,4}:(?:(?:25[0-5]|(?:2[0-4]|1?[0-9])?[0-9])\.){3}(?:25[0-5]|(?:2[0-4]|1?[0-9])?[0-9]))$/;
-  return ipv6Re.test(ip);
-}
+// isValidIP 由公共 util 提供（G15-28）：严格 IPv4/IPv6 校验，与 SecurityMonitor 复用同一实现
 
-async function unbanIP(ip: string) {
-  try {
-    await api.delete(`/admin/banned-ips/${ip}`);
-    MessagePlugin.success('IP已解封');
-    fetchBannedIPs();
-  } catch (error: unknown) {
-    MessagePlugin.error(getErrorMessage(error));
-  }
+// 解封二次确认 + IPv6 编码（G15-20）：IPv6 地址含冒号，直接拼 URL 会解析异常，须 encodeURIComponent
+function unbanIP(ip: string) {
+  const confirmDialog = DialogPlugin.confirm({
+    header: '解封 IP',
+    body: `确定要解封 IP「${ip}」吗？解封后该 IP 将可再次访问系统。`,
+    confirmBtn: '确认解封',
+    cancelBtn: '取消',
+    onConfirm: async () => {
+      confirmDialog.destroy();
+      try {
+        await api.delete(`/admin/banned-ips/${encodeURIComponent(ip)}`);
+        MessagePlugin.success('IP已解封');
+        fetchBannedIPs();
+      } catch (error: unknown) {
+        MessagePlugin.error(getErrorMessage(error));
+      }
+    },
+    onClose: () => confirmDialog.destroy(),
+  });
 }
 
 onMounted(() => {
@@ -556,6 +751,9 @@ onMounted(() => {
     if (failed > 0) {
       MessagePlugin.warning(`${failed} 项配置加载失败，当前显示默认值`);
     }
+  }).finally(() => {
+    // 初始加载完成：此后表单改动才算用户编辑，恢复脏检查（G15-17）
+    suppressDirty.value = false;
   });
 });
 </script>

@@ -4,6 +4,9 @@ import { Repository, DataSource } from 'typeorm';
 import * as bcrypt from 'bcryptjs';
 import { User, UserRole } from '../common/entities/user.entity';
 import { File } from '../common/entities/file.entity';
+import { Folder } from '../common/entities/folder.entity';
+import { Tag } from '../common/entities/tag.entity';
+import { ShareLink, ShareLinkStatus } from '../common/entities/share-link.entity';
 import { FileAccessLog } from '../common/entities/file-access-log.entity';
 import { AuditService } from '../common/services/audit.service';
 import { BCRYPT_ROUNDS } from '../common/constants/bcrypt';
@@ -64,11 +67,19 @@ export class UserService {
     // 邮箱归一化：trim + 小写，减少大小写/空白导致的重复账户
     const email = data.email.trim().toLowerCase();
 
+    // G6-10：用 withDeleted(true) 检查邮箱，避免「已软删用户占用邮箱」导致的死锁。
+    // email 唯一约束包含软删行，而默认 findOne 会排除软删用户；若某邮箱被已删除用户占用，
+    // 直接创建会命中唯一约束（23505），用户看到无法解释的「已注册」。
+    // 这里显式查出含软删的占用者：若命中已软删用户，明确提示可重新激活而非含糊的冲突。
     const existingUser = await this.userRepository.findOne({
       where: { email },
+      withDeleted: true,
     });
 
     if (existingUser) {
+      if (existingUser.deletedAt) {
+        throw new ConflictException('该邮箱曾注册且已被删除，如需使用请联系管理员重新激活该账户');
+      }
       throw new ConflictException('该邮箱已被注册');
     }
 
@@ -157,6 +168,29 @@ export class UserService {
         },
       );
 
+      // 事务内：级联软删除该用户的全部文件夹（与文件同一删除计划），
+      // 避免删除用户后 folders 行永久残留（isDeleted 仍 false 且无归属清理）。
+      await queryRunner.manager.update(
+        Folder,
+        { ownerId: id, isDeleted: false },
+        {
+          isDeleted: true,
+          deleteRequestedAt: now,
+          deleteScheduledAt: scheduledAt,
+        },
+      );
+
+      // 事务内：吊销该用户的全部 ShareLink，使宽限期内也无法匿名访问已删用户数据。
+      // 置 isDeleted + DISABLED，与「取消分享」语义一致。
+      await queryRunner.manager.update(
+        ShareLink,
+        { creatorId: id, isDeleted: false },
+        { isDeleted: true, status: ShareLinkStatus.DISABLED },
+      );
+
+      // 事务内：物理删除该用户的全部 Tag（Tag 无 isDeleted/延迟删除字段）。
+      await queryRunner.manager.delete(Tag, { userId: id });
+
       // 事务内：软删除用户（保留用户行）。
       // 不能硬删除：files.uploaderId → users.id 外键无 ON DELETE 策略，
       // 硬删除有文件的用户会因外键约束恒失败（500）。软删除设置 deletedAt，
@@ -186,6 +220,12 @@ export class UserService {
       throw new BadRequestException('只有超级管理员可以修改用户角色');
     }
 
+    // G6-09：禁止修改自己的角色（防止 super_admin 把自己降级为 admin/user 导致
+    // 平台失去最高权限，或操作者自锁死）。目标必须是他人。
+    if (requester.id === id) {
+      throw new BadRequestException('不能修改自己的角色');
+    }
+
     if (role === UserRole.SUPER_ADMIN) {
       throw new BadRequestException('不能通过接口创建超级管理员');
     }
@@ -198,6 +238,18 @@ export class UserService {
 
     if (user.role === UserRole.SUPER_ADMIN) {
       throw new BadRequestException('无法修改超级管理员角色');
+    }
+
+    // G6-09：不得降级最后一个 SUPER_ADMIN。
+    // 目标本身非 super_admin，此校验作为纵深防御：若系统中已无其他 super_admin
+    // （仅剩 requester），任何可能削减最高权限角色的操作都不可接受。
+    if (requester.role === UserRole.SUPER_ADMIN) {
+      const superAdminCount = await this.userRepository.count({
+        where: { role: UserRole.SUPER_ADMIN },
+      });
+      if (superAdminCount <= 1) {
+        throw new BadRequestException('系统至少需保留一个超级管理员，无法执行此操作');
+      }
     }
 
     await this.userRepository.update(id, { role });
@@ -245,7 +297,11 @@ export class UserService {
       throw new BadRequestException('新密码不能与旧密码相同');
     }
 
-    const user = await this.userRepository.findOne({ where: { id } });
+    const user = await this.userRepository
+      .createQueryBuilder('user')
+      .addSelect('user.password')
+      .where('user.id = :id', { id })
+      .getOne();
 
     if (!user) {
       throw new NotFoundException('用户不存在');

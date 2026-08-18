@@ -16,6 +16,7 @@ export interface UseCursorPaginationReturn<T> {
   loading: Ref<boolean>;
   loadMore: (
     fetchFn: (cursor: string | null, signal: AbortSignal) => Promise<CursorPageResult<T>>,
+    force?: boolean,
   ) => Promise<void>;
   reset: () => void;
 }
@@ -69,8 +70,9 @@ export function useCursorPagination<T = unknown>(): UseCursorPaginationReturn<T>
    */
   async function loadMore(
     fetchFn: (cursor: string | null, signal: AbortSignal) => Promise<CursorPageResult<T>>,
+    force = false,
   ): Promise<void> {
-    if (!_hasMore.value) return;
+    if (!force && !_hasMore.value) return;
     if (_loading.value) {
       // 加载中：合并并发请求（仅保留最新 fetchFn），待当前加载完成后自动补发，
       // 避免请求被静默丢弃导致无限滚动在滚动停止后不再加载

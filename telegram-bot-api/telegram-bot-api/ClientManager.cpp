@@ -102,6 +102,19 @@ void ClientManager::send_file_stream(td::ActorId<FileStreamConnection> stream, t
   }
 
   auto token_key = token + (is_test_dc ? "/test" : "");
+  // G16-07: enforce a per-bot concurrent stream quota (a fraction of the global cap) so a single
+  // token cannot occupy the entire global slot pool. The per-bot limit defaults to a quarter of
+  // the global --file-stream-max-connections value (at least 1).
+  {
+    auto per_bot_limit = td::max<td::int32>(1, parameters_->file_stream_max_connections_ / 4);
+    auto count_it = active_file_streams_by_token_.find(token_key);
+    auto count = count_it == active_file_streams_by_token_.end() ? 0 : count_it->second;
+    if (count >= per_bot_limit) {
+      LOG(INFO) << "Reject file stream for " << token_key << ": per-bot limit " << per_bot_limit
+                << " reached";
+      return fail(429, "Too many active file streams for this token");
+    }
+  }
   auto id_it = token_to_id_.find(token_key);
   if (id_it == token_to_id_.end()) {
     td::string ip_address = std::move(peer_ip_address);
@@ -145,6 +158,8 @@ void ClientManager::send_file_stream(td::ActorId<FileStreamConnection> stream, t
   }
 
   active_file_stream_ids_.insert(stream_id);
+  active_file_stream_token_[stream_id] = token_key;
+  active_file_streams_by_token_[token_key]++;
   auto client = clients_.get(id_it->second)->client_.get();
   send_closure(stream, &FileStreamConnection::set_client, client);
   send_closure(client, &Client::start_file_stream, stream, stream_id, std::move(file_id), expected_size);
@@ -152,6 +167,16 @@ void ClientManager::send_file_stream(td::ActorId<FileStreamConnection> stream, t
 
 void ClientManager::release_file_stream(td::int64 stream_id) {
   active_file_stream_ids_.erase(stream_id);
+  auto token_it = active_file_stream_token_.find(stream_id);
+  if (token_it != active_file_stream_token_.end()) {
+    auto count_it = active_file_streams_by_token_.find(token_it->second);
+    if (count_it != active_file_streams_by_token_.end()) {
+      if (--count_it->second <= 0) {
+        active_file_streams_by_token_.erase(count_it);
+      }
+    }
+    active_file_stream_token_.erase(token_it);
+  }
 }
 
 void ClientManager::send(PromisedQueryPtr query) {

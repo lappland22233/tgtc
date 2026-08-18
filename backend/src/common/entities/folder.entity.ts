@@ -27,6 +27,13 @@ import { User } from './user.entity';
 // 指定 closureTableName: 'folder' 后 TypeORM 拼 `_closure` 后缀解析为 folder_closure，与迁移及裸 SQL 对齐。
 @Tree('closure-table', { closureTableName: 'folder' })
 @Index('idx_folders_owner_parent_deleted', ['ownerId', 'parentId', 'isDeleted'])
+// G6-06/G6-13：与迁移 1798100000001-AddFolderSameLevelUniqueIndex 对齐——
+// 同层（ownerId + parentId）下未删除文件夹 name 唯一（部分唯一索引）。
+// TypeORM @Index where 即 SQL 的 WHERE 子句（PostgreSQL 部分索引）。
+@Index('uq_folders_owner_parent_name_active', ['ownerId', 'parentId', 'name'], {
+  unique: true,
+  where: '"isDeleted" = false',
+})
 export class Folder {
   @PrimaryColumn({ type: 'uuid', default: () => 'gen_random_uuid()' })
   id: string;

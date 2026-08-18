@@ -52,6 +52,13 @@ void HttpConnection::handle(td::unique_ptr<td::HttpQuery> http_query,
       auto code = route.error().code();
       return send_http_error(code >= 400 && code <= 599 ? code : 400, route.error().public_message());
     }
+    // G16-06: restrict the streaming endpoint by source IP/network. The default policy allows
+    // only loopback and private networks; an explicit --file-stream-allow-ip overrides it. The
+    // endpoint must be placed behind a TLS-terminating reverse proxy, and only the proxy should
+    // be allowed to reach it.
+    if (!is_file_stream_ip_allowed(http_query->peer_address_, file_stream_config_.allow_ip)) {
+      return send_http_error(403, "Forbidden: streaming endpoint source address is not allowed");
+    }
     auto expected_size = parse_file_stream_size_hint(http_query->get_header("x-telegram-file-size"));
     if (expected_size.is_error()) {
       return send_http_error(400, expected_size.error().public_message());

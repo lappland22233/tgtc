@@ -90,11 +90,17 @@
               @pointerup="onImagePointerUp"
               @pointercancel="onImagePointerUp"
             >
+              <div v-if="imageDecoding" class="fpv-image-loading">
+                <t-loading size="small" text="正在解码大图…" />
+              </div>
               <img
+                v-if="imageDisplaySrc"
                 class="fpv-image"
                 :class="{ 'fpv-image--dragging': imageDragging }"
-                :src="snap.src"
+                :src="imageDisplaySrc"
                 :alt="snap.name"
+                decoding="async"
+                loading="eager"
                 :style="imageStyle"
                 @load="onImageLoad"
                 @error="onMediaError"
@@ -214,7 +220,7 @@
                 />
               </div>
 
-              <!-- 自定义进度条（可点击 / 拖动跳转） -->
+              <!-- 自定义进度条（可点击 / 拖动跳转；Pointer Events 统一鼠标与触屏） -->
               <div
                 class="fpv-audio-progress"
                 role="slider"
@@ -226,8 +232,10 @@
                 :aria-valuetext="`${formatAudioTime(audioCurrentTime)} / ${formatAudioTime(audioDuration)}`"
                 @keydown.left.prevent="seekAudioBy(-5)"
                 @keydown.right.prevent="seekAudioBy(5)"
-                @mousedown="onAudioProgressDown"
-                @click="onAudioProgressClick"
+                @pointerdown="onAudioProgressDown"
+                @pointermove="onAudioProgressMove"
+                @pointerup="onAudioProgressUp"
+                @pointercancel="onAudioProgressUp"
               >
                 <div class="fpv-audio-progress-track">
                   <div class="fpv-audio-progress-played" :style="{ width: audioProgressPct + '%' }" />
@@ -383,10 +391,15 @@
             <!-- 无法预览 / 媒体加载失败 -->
             <div v-else class="fpv-state fpv-error">
               <t-icon name="close-circle" class="fpv-state-icon" />
-              <p>{{ mediaError ? (mediaErrorText || '文件加载失败，可能无权访问该文件') : '无法预览该文件' }}</p>
-              <button type="button" class="fpv-btn" @click="handleDownload">
-                <t-icon name="download" />下载文件
-              </button>
+              <p>{{ mediaError ? (mediaErrorText || '文件加载失败') : '无法预览该文件' }}</p>
+              <template v-if="mediaError">
+                <button type="button" class="fpv-btn" @click="retryMedia">
+                  <t-icon name="refresh" />重试
+                </button>
+                <button type="button" class="fpv-btn fpv-btn--ghost" @click="handleDownload">
+                  <t-icon name="download" />下载文件
+                </button>
+              </template>
             </div>
           </div>
 
@@ -425,11 +438,14 @@
                 </button>
               </div>
               <div class="fpv-playlist-list">
-                <div
+                <button
                   v-for="(item, idx) in playlist"
                   :key="item.id"
+                  type="button"
                   class="fpv-playlist-item"
                   :class="{ 'fpv-playing': idx === activeIndex, 'fpv-playlist-item--image': snap.kind === 'image' }"
+                  :aria-current="idx === activeIndex ? 'true' : undefined"
+                  :aria-label="`${idx === activeIndex ? '当前播放：' : '播放'}${item.name}`"
                   @click="switchToTrack(idx)"
                 >
                   <ThumbnailImg
@@ -452,7 +468,7 @@
                   <div v-if="idx === activeIndex" class="fpv-playlist-now">
                     <t-icon name="sound" />
                   </div>
-                </div>
+                </button>
               </div>
             </div>
           </transition>
@@ -508,6 +524,7 @@ const {
   retryPosterAfterCache,
   startPosterForFile,
   resetPoster,
+  checkColdStatus,
 } = poster;
 
 const textPreview = usePreviewText({ epoch: sessionEpoch });
@@ -528,6 +545,7 @@ const playlistControls = usePlaylistControls({
   mediaStore,
   snap,
   applyItem,
+  activateVideo,
   getVideoRef: () => videoRef.value,
   getAudioRef: () => audioRef.value,
   getPlaylistPanelRef: () => playlistPanelRef.value,
@@ -566,7 +584,7 @@ function applyItem(item: MediaSessionItem) {
   snap.downloadUrl = item.downloadUrl ?? null;
   mediaError.value = false;
   if (item.kind === 'text') void loadText(item.src);
-  if (item.kind === 'image') resetImageView();
+  if (item.kind === 'image') { resetImageView(); void setupImage(item.src); }
   if (item.kind === 'video') startPosterForFile(item.id);
 }
 
@@ -619,36 +637,47 @@ function seekAudioBy(seconds: number) {
 }
 
 /** 点击进度条跳转（直接点击不启用拖动状态） */
-function onAudioProgressClick(e: MouseEvent) {
-  const track = (e.currentTarget as HTMLElement).querySelector('.fpv-audio-progress-track');
-  if (!track) return;
+/** 从指针坐标计算进度比例（0-1） */
+function audioProgressRatioFromClientX(clientX: number): number {
+  const track = document.querySelector('.fpv-audio-progress-track');
+  if (!track) return 0;
   const rect = track.getBoundingClientRect();
-  if (rect.width <= 0 || audioDuration.value <= 0) return;
-  const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-  const a = audioRef.value;
-  if (a) a.currentTime = ratio * audioDuration.value;
+  if (rect.width <= 0) return 0;
+  return Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
 }
 
-/** 按下进度条开始拖动 */
-function onAudioProgressDown(e: MouseEvent) {
-  const track = (e.currentTarget as HTMLElement).querySelector('.fpv-audio-progress-track');
-  if (!track || audioDuration.value <= 0) return;
+/** 按下进度条开始拖动：Pointer Events 统一鼠标与触屏，setPointerCapture 保证拖动不脱手 */
+function onAudioProgressDown(e: PointerEvent) {
+  if (audioDuration.value <= 0) return;
+  const el = e.currentTarget as HTMLElement;
   audioSeeking.value = true;
-  const move = (ev: MouseEvent) => {
-    const rect = track.getBoundingClientRect();
-    if (rect.width <= 0) return;
-    const ratio = Math.max(0, Math.min(1, (ev.clientX - rect.left) / rect.width));
-    const a = audioRef.value;
-    if (a) a.currentTime = ratio * audioDuration.value;
-  };
-  const up = () => {
-    audioSeeking.value = false;
-    window.removeEventListener('mousemove', move);
-    window.removeEventListener('mouseup', up);
-  };
-  window.addEventListener('mousemove', move);
-  window.addEventListener('mouseup', up);
-  move(e);
+  el.setPointerCapture?.(e.pointerId);
+  applyAudioSeek(e.clientX);
+}
+
+/** 拖动中更新位置（仅当指针被捕获到进度条上） */
+function onAudioProgressMove(e: PointerEvent) {
+  if (!audioSeeking.value) return;
+  const el = e.currentTarget as HTMLElement;
+  if (el.hasPointerCapture?.(e.pointerId)) applyAudioSeek(e.clientX);
+}
+
+/** 拖动结束：释放捕获并复位状态 */
+function onAudioProgressUp(e: PointerEvent) {
+  if (!audioSeeking.value) return;
+  const el = e.currentTarget as HTMLElement;
+  if (el.hasPointerCapture?.(e.pointerId)) {
+    applyAudioSeek(e.clientX);
+    try { el.releasePointerCapture(e.pointerId); } catch { /* 已释放则忽略 */ }
+  }
+  audioSeeking.value = false;
+}
+
+/** 应用一次 seek：按下/移动/释放共用 */
+function applyAudioSeek(clientX: number) {
+  const a = audioRef.value;
+  if (!a || audioDuration.value <= 0) return;
+  a.currentTime = audioProgressRatioFromClientX(clientX) * audioDuration.value;
 }
 
 /** 静音切换 */
@@ -825,6 +854,9 @@ function resetState() {
   audioDuration.value = 0;
   audioSeeking.value = false;
   // 图片查看状态复位（切换文件时避免上一张的缩放/旋转残留）
+  if (imageDownsampleUrl) { URL.revokeObjectURL(imageDownsampleUrl); imageDownsampleUrl = null; }
+  imageDisplaySrc.value = null;
+  imageDecoding.value = false;
   imageLoaded.value = false;
   imageNatural.value = { w: 0, h: 0 };
   imageScale.value = 1;
@@ -856,12 +888,38 @@ function fullStop() {
   mediaStore.clearSession();
 }
 
-/** Esc 键收起 + 播放列表快捷键 */
+/** Esc 键收起 + 播放列表快捷键 + Tab 焦点陷阱 */
 function onKeydown(e: KeyboardEvent) {
   if (!mediaStore.expanded) return;
   if (e.key === 'Escape') {
     if (playlistOpen.value) playlistOpen.value = false;
     else fullStop();
+    return;
+  }
+  // Tab 焦点陷阱：焦点保持在弹窗内循环，不越出到背景页面（G12-09）
+  if (e.key === 'Tab') {
+    const dialog = dialogRef.value;
+    if (dialog) {
+      const focusables = Array.from(
+        dialog.querySelectorAll<HTMLElement>(
+          'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ),
+      );
+      if (focusables.length > 0) {
+        const first = focusables[0];
+        const last = focusables[focusables.length - 1];
+        const active = document.activeElement;
+        if (e.shiftKey) {
+          if (active === first || !dialog.contains(active)) {
+            e.preventDefault();
+            last.focus();
+          }
+        } else if (active === last || !dialog.contains(active)) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
+    }
     return;
   }
   // Shift+N / Shift+P → 当前媒体列表的下一项 / 上一项
@@ -902,10 +960,34 @@ function onVisibility() {
   if (document.visibilityState === 'hidden') mediaStore.persistProgress();
 }
 
-/** 媒体元素加载失败（图片/音频/PDF 共用；含 401/403 无权访问） */
+/** 媒体元素加载失败（图片/音频/PDF 共用；仅 401/403 提示权限，其余可重试） */
 function onMediaError() {
   mediaError.value = true;
-  mediaErrorText.value = null; // 使用默认文案；视频错误走细分分类
+  // 默认文案；仅当明确是权限类错误时才提示权限相关说明
+  mediaErrorText.value = null;
+}
+
+/** 错误态重试：清除错误标记，重新加载当前媒体 */
+function retryMedia() {
+  mediaError.value = false;
+  mediaErrorText.value = null;
+  if (snap.kind === 'image') {
+    // 图片重新走降采样加载链路
+    void setupImage(snap.src);
+  } else if (snap.kind === 'video') {
+    teardownVideo();
+    setupVideo();
+    videoPlayerRef.value?.requestAutoplay?.();
+  } else if (snap.kind === 'audio') {
+    const a = audioRef.value;
+    if (a) {
+      a.pause();
+      a.removeAttribute('src');
+      a.load();
+      a.src = snap.src || '';
+      a.load();
+    }
+  }
 }
 
 /** 根据浏览器媒体错误码分类提示，避免笼统「无法播放」 */
@@ -916,9 +998,9 @@ function classifyMediaErrorCode(code?: number): string {
     case 3: // MEDIA_ERR_DECODE
       return '媒体解码失败，文件可能已损坏或编码格式不支持';
     case 4: // MEDIA_ERR_SRC_NOT_SUPPORTED
-      return '无法加载媒体，文件可能已被删除、无权访问或格式不支持';
+      return '无法加载媒体，文件可能已被删除或格式不支持';
     default:
-      return '文件加载失败，可能无权访问该文件';
+      return '文件加载失败，请重试';
   }
 }
 
@@ -936,6 +1018,14 @@ const imageTranslate = ref({ x: 0, y: 0 });
 const imageDragging = ref(false);
 const imageNatural = ref({ w: 0, h: 0 });
 const imageLoaded = ref(false);
+/** 大图解码中（同步解码会阻塞主线程，改为异步 + 降采样） */
+const imageDecoding = ref(false);
+/** 实际渲染的图片地址：普通图直接用原图，超大图用 createImageBitmap 降采样后的 ObjectURL */
+const imageDisplaySrc = ref<string | null>(null);
+/** 降采样生成的 ObjectURL（需在切换/卸载时 revoke） */
+let imageDownsampleUrl: string | null = null;
+/** 大图降采样触发阈值（像素数） */
+const IMAGE_DOWNSAMPLE_PIXEL_THRESHOLD = 4096 * 4096;
 /** 拖拽起始点与初始偏移 */
 let imageDragStart = { x: 0, y: 0, tx: 0, ty: 0 };
 
@@ -969,6 +1059,92 @@ const imageScaleText = computed(() => {
   if (imageFit.value === 'contain') return '适应';
   return `${Math.round(imageScale.value * 100)}%`;
 });
+
+/**
+ * 加载图片：先尝试异步解码并检测超大图，超阈值时用 createImageBitmap 降采样，
+ * 避免超大图同步解码阻塞主线程导致白屏。切换/停止时通过代次令牌使旧任务失效。
+ */
+async function setupImage(src: string | null) {
+  // 释放上一张降采样资源
+  if (imageDownsampleUrl) {
+    URL.revokeObjectURL(imageDownsampleUrl);
+    imageDownsampleUrl = null;
+  }
+  imageDisplaySrc.value = null;
+  imageDecoding.value = false;
+  if (!src) return;
+  const token = sessionEpoch.value;
+
+  // 先异步探测图片尺寸（不阻塞主线程）
+  const probe = await probeImageSize(src, token);
+  if (token !== sessionEpoch.value) return;
+  if (probe === null) {
+    // 探测失败（非图片 / 网络失败）交由 <img> 的 error 事件处理
+    imageDisplaySrc.value = src;
+    return;
+  }
+  const pixels = probe.w * probe.h;
+  if (pixels > IMAGE_DOWNSAMPLE_PIXEL_THRESHOLD) {
+    // 超大图：createImageBitmap 降采样（限制边长为 2048，保持宽高比）
+    imageDecoding.value = true;
+    try {
+      const bitmap = await createImageBitmap(await fetch(src, { credentials: 'same-origin' }).then((r) => {
+        if (!r.ok) throw new Error('load failed');
+        return r.blob();
+      }), {
+        resizeWidth: Math.round(probe.w * (2048 / Math.max(probe.w, probe.h))),
+        resizeHeight: Math.round(probe.h * (2048 / Math.max(probe.w, probe.h))),
+        resizeQuality: 'high',
+      });
+      if (token !== sessionEpoch.value) { bitmap.close(); return; }
+      // ImageBitmap 不能直接作为 ObjectURL 源，先经 canvas 转成 Blob
+      const canvas = document.createElement('canvas');
+      canvas.width = bitmap.width;
+      canvas.height = bitmap.height;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) { bitmap.close(); throw new Error('canvas ctx unavailable'); }
+      ctx.drawImage(bitmap, 0, 0);
+      const blob: Blob = await new Promise((resolve) => canvas.toBlob((b) => resolve(b ?? new Blob()), 'image/png'));
+      const naturalW = bitmap.width;
+      const naturalH = bitmap.height;
+      bitmap.close();
+      if (token !== sessionEpoch.value) return;
+      imageDownsampleUrl = URL.createObjectURL(blob);
+      imageDisplaySrc.value = imageDownsampleUrl;
+      // 用降采样尺寸作为自然尺寸
+      imageNatural.value = { w: naturalW, h: naturalH };
+      imageLoaded.value = true;
+      resetImageView();
+    } catch {
+      if (token !== sessionEpoch.value) return;
+      // 降采样失败回退原图（由 <img> 的 error/load 决定最终态）
+      imageDisplaySrc.value = src;
+    } finally {
+      if (token === sessionEpoch.value) imageDecoding.value = false;
+    }
+  } else {
+    // 普通图：直接使用原图，异步解码避免白屏
+    imageDisplaySrc.value = src;
+  }
+}
+
+/** 轻量探测图片尺寸（HEAD 或读数据），仅用于决定是否降采样；失败返回 null */
+async function probeImageSize(src: string, token: number): Promise<{ w: number; h: number } | null> {
+  try {
+    const img = new Image();
+    img.decoding = 'async';
+    const loaded = new Promise<{ w: number; h: number }>((resolve, reject) => {
+      img.onload = () => resolve({ w: img.naturalWidth, h: img.naturalHeight });
+      img.onerror = () => reject(new Error('probe failed'));
+    });
+    img.src = src;
+    const size = await loaded;
+    if (token !== sessionEpoch.value) return null;
+    return size;
+  } catch {
+    return null;
+  }
+}
 
 function onImageLoad(e: Event) {
   const img = e.target as HTMLImageElement;
@@ -1121,6 +1297,10 @@ const videoBuffering = ref(false);
 const videoBufferedRatio = ref(0);
 /** seek 钳制防循环标志 */
 let seekClamping = false;
+/** 冷资源缓存状态轮询定时器（缓存完成后提前解锁 seek，不必等全量下载） */
+let coldCachePollTimer: ReturnType<typeof setInterval> | null = null;
+/** 冷资源缓存状态轮询间隔 */
+const COLD_CACHE_POLL_INTERVAL = 3000;
 
 /** MSE 会话状态（非响应式，每次打开预览建立一个） */
 interface MseSession {
@@ -1146,9 +1326,14 @@ function mseTypeSupported(mime: string): boolean {
   try { return MediaSource.isTypeSupported(mime); } catch { return false; }
 }
 
-/** 用户首次明确播放后才激活真实媒体源。 */
+/**
+ * 用户首次明确播放后才激活真实媒体源。
+ * 置 autoplay 意图（等效 CustomVideoPlayer 内部 pendingPlayRequest），
+ * src 就绪后自动续播；对用户手动播放幂等，不影响现有行为。
+ */
 function activateVideo() {
   if (videoSrc.value || !snap.src) return;
+  videoPlayerRef.value?.requestAutoplay?.();
   setupVideo();
 }
 
@@ -1168,6 +1353,30 @@ function setupVideo() {
   }
   videoUseMse.value = false;
   videoSrc.value = url;
+  startColdCachePoll();
+}
+
+/**
+ * 冷资源 seek 解锁：全量缓冲完成（updateBufferedRatio 兜底）或并行轮询 cache-status
+ * 发现缓存已就绪时提前解锁。轮询期间保持钳制，避免为越界位置发起动态分段请求。
+ */
+function startColdCachePoll() {
+  stopColdCachePoll();
+  if (!coldLoad.value) return;
+  coldCachePollTimer = setInterval(() => {
+    if (!coldLoad.value) { stopColdCachePoll(); return; }
+    void checkColdStatus().then(() => {
+      // checkColdStatus 会在 cache 就绪时把 coldLoad 置 false，随后停止轮询
+      if (!coldLoad.value) stopColdCachePoll();
+    });
+  }, COLD_CACHE_POLL_INTERVAL);
+}
+
+function stopColdCachePoll() {
+  if (coldCachePollTimer) {
+    clearInterval(coldCachePollTimer);
+    coldCachePollTimer = null;
+  }
 }
 
 function startMseVideo(url: string, mime: string) {
@@ -1332,6 +1541,10 @@ function teardownVideo() {
     v.removeEventListener('seeked', onVideoSeeked);
     v.removeEventListener('progress', updateBufferedRatio);
     v.removeEventListener('timeupdate', onVideoTimeUpdate);
+    // 中止拉流：移除 src 并 load()，立即停止正在进行的媒体请求（与音频路径对齐）
+    v.pause();
+    v.removeAttribute('src');
+    v.load();
   }
   videoRef.value = null;
   videoSrc.value = null;
@@ -1339,6 +1552,7 @@ function teardownVideo() {
   videoBuffering.value = false;
   videoBufferedRatio.value = 0;
   seekClamping = false;
+  stopColdCachePoll();
 }
 
 /** video error：MSE 模式先降级原生；原生模式再失败则进错误态并分类提示 */
@@ -1356,6 +1570,8 @@ function onVideoError() {
  * 进度条因此只能在已缓冲范围内拖动。防循环标志避免 seeking 事件死循环。
  */
 function onVideoSeeking() {
+  // 钳制仅针对冷资源模式；热资源交浏览器 Range 请求按需拉取未缓冲位置
+  if (!coldLoad.value) return;
   const v = videoRef.value;
   if (!v || seekClamping) return;
   let maxEnd = 0;
@@ -1385,6 +1601,7 @@ function updateBufferedRatio() {
   // 冷资源全量下载完成（整段已缓冲）→ 退出冷模式并补一次封面重试
   if (coldLoad.value && maxEnd >= v.duration - 0.5) {
     coldLoad.value = false;
+    stopColdCachePoll();
     void retryPosterAfterCache();
   }
 }
@@ -1470,6 +1687,9 @@ onBeforeUnmount(() => {
   releasePosterResource();
   teardownVideo();
   stopAudioWaveform();
+  if (imageDownsampleUrl) { URL.revokeObjectURL(imageDownsampleUrl); imageDownsampleUrl = null; }
+  imageDisplaySrc.value = null;
+  imageDecoding.value = false;
   audioPlaying.value = false;
   mediaStore.unregisterBridge();
 });
@@ -1649,6 +1869,17 @@ function formatSize(bytes: number | string | null | undefined): string {
 
 .fpv-image--dragging {
   transition: none;
+}
+
+/* 大图降采样加载中提示 */
+.fpv-image-loading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 3;
+  background: color-mix(in srgb, var(--seed-bg, #0b0d12) 30%, transparent);
 }
 
 /* 图片工具栏：深色悬浮条（与视频控制栏同语言） */
@@ -2131,6 +2362,17 @@ function formatSize(bytes: number | string | null | undefined): string {
 .fpv-btn:hover { background: color-mix(in srgb, var(--seed-primary) 85%, #fff); }
 .fpv-btn:active { transform: scale(0.98); }
 
+/* 次要按钮（错误态下载） */
+.fpv-btn--ghost {
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  color: var(--text-secondary);
+}
+.fpv-btn--ghost:hover {
+  background: var(--color-accent-soft);
+  color: var(--text-accent);
+}
+
 .fpv-footer {
   display: flex;
   align-items: center;
@@ -2263,10 +2505,20 @@ function formatSize(bytes: number | string | null | undefined): string {
   display: flex;
   align-items: center;
   gap: 10px;
+  width: 100%;
   padding: 8px 14px;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  text-align: left;
   cursor: pointer;
   transition: background 0.15s;
   position: relative;
+  color: var(--text-primary);
+}
+.fpv-playlist-item:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: -2px;
 }
 .fpv-playlist-item:hover {
   background: var(--color-accent-soft);

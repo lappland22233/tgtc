@@ -34,6 +34,11 @@ struct FileStreamConfig {
   double first_byte_timeout = 30.0;
   double idle_timeout = 60.0;
   td::int64 write_high_watermark = 1 << 20;
+  // Maximum single-file size (in bytes) served by the streaming endpoint; 0 means unlimited.
+  td::int64 max_size = 0;
+  // Comma-separated list of IPs / CIDR networks allowed to use the streaming endpoint. Empty
+  // means the default policy: loopback and private networks only (see is_file_stream_ip_allowed).
+  td::string allow_ip;
 };
 
 class FileStreamConnection final : public td::Actor {
@@ -85,6 +90,7 @@ class FileStreamConnection final : public td::Actor {
   void tear_down() final;
   void try_read();
   void on_chunk_flushed(td::Result<td::Unit> result);
+  void on_headers_flushed(td::Result<td::Unit> result);
   void send_headers();
   void finish();
   void fail(int http_status_code, td::Slice message);

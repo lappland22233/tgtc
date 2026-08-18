@@ -6,7 +6,7 @@ import { Roles } from '../common/decorators/roles.decorator';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { User, UserRole } from '../common/entities/user.entity';
-import { BanIPDto, UnbanIPDto, BatchDeleteFilesDto, ConfigDto, BatchConfigDto, SmtpConfigDto, SmtpTestDto, UploadConfigDto, AuthConfigDto, AccessLogQueryDto, SecurityConfigBatchDto, FileVerifyDto, StalePathCleanupDto } from './admin.dto';
+import { BanIPDto, UnbanIPDto, BatchDeleteFilesDto, ConfigDto, BatchConfigDto, SmtpConfigDto, SmtpTestDto, UploadConfigDto, AuthConfigDto, AccessLogQueryDto, SecurityConfigBatchDto, FileVerifyDto, StalePathCleanupDto, AdminFilesQueryDto } from './admin.dto';
 import { TopFilesQueryDto, TopPathsQueryDto, StatusByPathQueryDto, AbnormalIpsQueryDto, DateRangeQueryDto, RefererAnalysisQueryDto, UserAgentAnalysisQueryDto, BandwidthQueryDto, FileTypeQueryDto } from './admin-stats.dto';
 import { CacheConfigDto } from './dto/cache-config.dto';
 
@@ -96,25 +96,19 @@ export class AdminController {
   }
 
   // File Management
+  // G7-07：page/limit 走 DTO 校验（@Type Number + @Min/@Max，limit ≤ 100），
+  // 排序字段/方向白名单由 DTO @IsIn 统一约束，替代裸 Number() 与手写白名单。
   @Get('files')
-  async getAllFiles(
-    @Query('page') page = 1,
-    @Query('limit') limit = 20,
-    @Query('keyword') keyword?: string,
-    @Query('userId') userId?: string,
-    @Query('sortBy') sortBy?: string,
-    @Query('sortOrder') sortOrder?: string,
-    @Query('cursor') cursor?: string,
-  ) {
-    // 白名单校验排序字段与方向，防止裸字符串拼入 ORDER BY 的注入风险
-    const allowedSortFields = ['originalName', 'createdAt', 'size', 'uploader.email'];
-    if (sortBy !== undefined && !allowedSortFields.includes(sortBy)) {
-      throw new BadRequestException(`不支持的排序字段: ${sortBy}`);
-    }
-    if (sortOrder !== undefined && !['asc', 'desc'].includes(sortOrder.toLowerCase())) {
-      throw new BadRequestException(`不支持的排序方向: ${sortOrder}`);
-    }
-    return this.adminService.getAllFiles(Number(page), Number(limit), keyword, userId, sortBy, sortOrder, cursor);
+  async getAllFiles(@Query() query: AdminFilesQueryDto) {
+    return this.adminService.getAllFiles(
+      query.page ?? 1,
+      query.limit ?? 20,
+      query.keyword,
+      query.userId,
+      query.sortBy,
+      query.sortOrder,
+      query.cursor,
+    );
   }
 
   @Delete('files/:id')
@@ -296,6 +290,7 @@ export class AdminController {
   @Get('export')
   @Roles(UserRole.SUPER_ADMIN)
   async exportData(
+    @CurrentUser() user: User,
     @Query('format') format: string,
     @Query('timeRange') timeRange: string,
     @Query('type') type: string,
@@ -314,7 +309,7 @@ export class AdminController {
     if (timeRange && !validTimeRanges.includes(timeRange)) {
       throw new BadRequestException(`不支持的时间范围: ${timeRange}`);
     }
-    const result = await this.adminService.exportData({
+    const result = await this.adminService.exportData(user, {
       format: (format as 'csv' | 'json') || 'csv',
       timeRange: timeRange || '7d',
       type: (type as 'access-logs' | 'top-files' | 'bans' | 'alerts') || 'access-logs',

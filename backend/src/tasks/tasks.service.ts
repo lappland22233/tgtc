@@ -2,12 +2,15 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, LessThan, IsNull, Brackets } from 'typeorm';
 import { Cron, CronExpression } from '@nestjs/schedule';
+import { InjectQueue } from '@nestjs/bull';
+import { Queue } from 'bull';
 import { BannedIP } from '../common/entities/banned-ip.entity';
 import { ShareAudit } from '../common/entities/share-audit.entity';
 import { RateLimit } from '../common/entities/rate-limit.entity';
 import { AuditLog } from '../common/entities/audit-log.entity';
 import { JwtRevokedToken } from '../common/entities/jwt-revoked-token.entity';
 import { File } from '../common/entities/file.entity';
+import { QUEUE_NAMES } from '../jobs/bull-queue.module';
 
 /** 僵尸 processing 自动恢复的固定失败原因（不复用可能失效的旧 Telegram 引用） */
 export const STALE_PROCESSING_FAILURE_REASON = '上传任务超时，已自动标记失败，请重新上传';
@@ -29,6 +32,8 @@ export class TasksService {
     private revokedTokenRepository: Repository<JwtRevokedToken>,
     @InjectRepository(File)
     private fileRepository: Repository<File>,
+    @InjectQueue(QUEUE_NAMES.FILE_UPLOAD)
+    private fileUploadQueue: Queue,
   ) {}
 
   @Cron(CronExpression.EVERY_30_MINUTES)
@@ -179,6 +184,10 @@ export class TasksService {
     const MAX_BATCHES = 100;
 
     try {
+      // G3-14：先尝试恢复 uploadStage='recoverable' 的记录（远端已上传成功但 DB 提交失败、有回执）。
+      // 以确定性 jobId 重新入队，processor 会先 loadReceipt，凭回执完成 DB 提交而不再重传原文件。
+      await this.recoverReceiptCommittableFiles();
+
       let totalMarked = 0;
       let batches = 0;
       let marked = 0;
@@ -232,6 +241,50 @@ export class TasksService {
         '僵尸 processing 恢复失败',
         error instanceof Error ? error.message : String(error),
       );
+    }
+  }
+
+  /**
+   * G3-14：凭回执恢复可提交的文件（uploadStage='recoverable'）。
+   *
+   * recoverable 表示 Telegram 远端已成功（回执已落盘）但 DB 提交失败、Bull 重试耗尽。
+   * 这里以确定性 jobId 重新入队 FILE_UPLOAD 队列；processor 启动时会先 loadReceipt，
+   * 命中回执则跳过重传、直接完成 DB 提交。若回执缺失（进程重启时本地文件被误清理），
+   * processor 会按正常路径重新上传原文件，因此无需在此标记 error。
+   */
+  private async recoverReceiptCommittableFiles(): Promise<void> {
+    const batch = await this.fileRepository.find({
+      where: { status: 'processing', uploadStage: 'recoverable' as any },
+      take: 200,
+    });
+    if (batch.length === 0) return;
+
+    let requeued = 0;
+    for (const file of batch) {
+      const jobId = `file-upload:${file.id}:${file.uploadVersion}`;
+      const pendingPath = `${process.cwd()}/tmp/uploads/pending/${file.id}`;
+      try {
+        // removeOnFail:false 保留诊断痕迹；attempts 3 给提交重试机会
+        await this.fileUploadQueue.add(
+          'upload',
+          { fileId: file.id, filePath: pendingPath, uploadVersion: file.uploadVersion },
+          {
+            jobId,
+            attempts: 3,
+            backoff: { type: 'exponential', delay: 10000 },
+            removeOnComplete: 100,
+            removeOnFail: false,
+          },
+        );
+        requeued++;
+      } catch (error: unknown) {
+        this.logger.warn(
+          `恢复可提交文件入队失败 fileId=${file.id}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    if (requeued > 0) {
+      this.logger.log(`已重新入队 ${requeued} 条 recoverable 文件，凭回执恢复 DB 提交`);
     }
   }
 }

@@ -33,6 +33,10 @@ class HttpConnectionBase : public Actor {
   void write_next_with_promise(BufferSlice buffer, Promise<Unit> promise);
   void write_ok();
   void write_error(Status error);
+  // Refresh the connection-layer idle timeout without changing the current read/write state.
+  // Used by long-lived streaming responses (e.g. the file streaming endpoint) so that a stream
+  // longer than the default idle_timeout_ is not truncated while data is still being flushed.
+  void touch_activity();
 
  protected:
   enum class State { Read, Write, Close };

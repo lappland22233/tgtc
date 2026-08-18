@@ -44,6 +44,25 @@
         <p class="hint">请向分享者确认链接是否正确</p>
       </div>
 
+      <!-- 网络异常（区别于业务 notFound；弱网 / CDN 错误页 / 解析失败，可重试） -->
+      <div v-else-if="state.kind === 'networkError'" class="state-card network-error-card">
+        <div class="state-icon">
+          <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M1 9c5-4 17-4 22 0"/>
+            <path d="M5 13c4-3 10-3 14 0"/>
+            <path d="M9 17c2-1.5 4-1.5 6 0"/>
+            <path d="M12 20h.01"/>
+          </svg>
+        </div>
+        <h1>网络异常</h1>
+        <p>{{ state.message || '网络连接不稳定，请检查网络后重试' }}</p>
+        <div class="retry-row">
+          <t-button theme="primary" :loading="retrying" @click="onRetry">
+            {{ retrying ? '重试中...' : '重新加载' }}
+          </t-button>
+        </div>
+      </div>
+
       <!-- 文件分享 -->
       <FileShareCard
         v-else-if="state.kind === 'file'"
@@ -60,6 +79,7 @@
         :root-folder="state.data"
         :initial-contents="state.initialContents"
         :initial-breadcrumb="state.initialBreadcrumb"
+        @credential-expired="onCredentialExpired"
       />
     </div>
   </div>
@@ -115,6 +135,7 @@ type State =
   | { kind: 'needPassword' }
   | { kind: 'banned'; message: string }
   | { kind: 'notFound'; message?: string }
+  | { kind: 'networkError'; message?: string }
   | { kind: 'file'; data: FileInfo }
   | { kind: 'folder'; data: FolderInfo; initialContents: FolderContents; initialBreadcrumb: FolderSummary[] };
 
@@ -123,6 +144,8 @@ const state = ref<State>({ kind: 'loading' });
 const isEncrypted = ref(false);
 const passwordError = ref('');
 const verifying = ref(false);
+/** 网络异常卡片的重试进行中状态（防重复点击） */
+const retrying = ref(false);
 let requestGeneration = 0;
 let activeRequest: AbortController | null = null;
 let verifyGeneration = 0;
@@ -152,7 +175,16 @@ async function fetchInfo() {
   try {
     // 凭据由 Cookie 携带，URL 中不出现 access JWT（C-02 修复）
     const res = await fetch(`/api/s/${encodeURIComponent(token.value)}`, { signal });
-    const data = await res.json();
+    let data: any;
+    try {
+      // 弱网 / CDN 返回非 JSON 错误页（502 HTML）时 res.json() 会抛 SyntaxError，
+      // 归入网络异常分支而非业务 notFound（G13-02）。
+      data = await res.json();
+    } catch {
+      if (!isCurrent(generation)) return;
+      state.value = { kind: 'networkError', message: '服务响应异常，请稍后重试' };
+      return;
+    }
     if (!isCurrent(generation)) return;
 
     // 业务错误：分享不存在 / 过期 / 次数耗尽
@@ -198,11 +230,33 @@ async function fetchInfo() {
   } catch (err) {
     if (err instanceof DOMException && err.name === 'AbortError') return;
     if (!isCurrent(generation)) return;
+    // 断网 / 请求本身失败（fetch reject）→ 网络异常而非"分享不存在"
     state.value = {
-      kind: 'notFound',
+      kind: 'networkError',
       message: err instanceof Error ? err.message : '网络错误',
     };
   }
+}
+
+/** 网络异常卡片重试：重新拉取分享元数据 */
+async function onRetry() {
+  if (retrying.value) return;
+  retrying.value = true;
+  try {
+    await fetchInfo();
+  } finally {
+    retrying.value = false;
+  }
+}
+
+/**
+ * 文件夹浏览凭据过期（G13-01）：重新拉取分享元数据。
+ * 后端会在 Cookie 失效时返回 requiresPassword，fetchInfo 自动切回密码输入状态。
+ */
+function onCredentialExpired() {
+  // 销毁该分享的媒体会话（凭据失效后不应继续播放）
+  stopCurrentShareMedia();
+  void fetchInfo();
 }
 
 async function onPasswordSubmit(pwd: string) {
@@ -222,6 +276,12 @@ async function onPasswordSubmit(pwd: string) {
     const data = await res.json();
     if (generation !== requestGeneration || verifyId !== verifyGeneration) return;
     if (!res.ok || data.code !== 0) {
+      // 403 = IP 封禁（密码错误次数过多）：切到 banned 状态，而非仅显示密码错误
+      if (res.status === 403) {
+        stopCurrentShareMedia();
+        state.value = { kind: 'banned', message: data.message || '访问受限' };
+        return;
+      }
       passwordError.value = data.message || '密码错误';
       return;
     }
@@ -348,5 +408,13 @@ watch(token, async (newToken, oldToken) => {
 
 .not-found-card .state-icon {
   color: var(--text-tertiary);
+}
+
+.network-error-card .state-icon {
+  color: var(--color-warning);
+}
+
+.retry-row {
+  margin-top: 20px;
 }
 </style>

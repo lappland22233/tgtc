@@ -1,3 +1,9 @@
+<!--
+  [DEAD PAGE] 死页面（G11-03，2026-08-18）
+  该页面使用旧版 fileStore.uploadFile 单请求直传（无分片/断点续传/失败重试），
+  且 router/index.ts 中无对应路由，确为死页面。上传统一使用 FileList + UploadModal 分片链路。
+  文件本体待用户确认后删除；在此之前禁止在路由/组件中引用本文件。
+-->
 <template>
   <div>
     <div class="page-header">

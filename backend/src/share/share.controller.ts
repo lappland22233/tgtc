@@ -94,17 +94,19 @@ export class ShareController {
   ) {}
 
   /**
-   * 读取分享访问凭据：优先从 HttpOnly Cookie（C-02 新流程）读取，
-   * 兼容期回退到旧 query 参数 ?access=（迁移完成前保持双读）。
-   * 返回 undefined 表示未携带凭据。
+   * 读取分享访问凭据：仅从 HttpOnly Cookie（C-02 新流程）读取。
+   *
+   * G5-10：已移除旧 query 参数 ?access= 回退。
+   * 原因：?access=<JWT> 会把访问凭证写进 URL，落入访问日志 / 浏览器历史，
+   * 构成凭据泄漏面。前端 ShareView 已完全改用 HttpOnly Cookie 携带 access JWT
+   * （见 FolderShareBrowser.vue 注释「凭据由 HttpOnly Cookie 携带，URL 不附加
+   * access JWT」），因此可安全移除 query 回退。返回 undefined 表示未携带凭据。
    */
   private getAccessJwt(req: Request): string | undefined {
     const fromCookie = typeof req.cookies?.[SHARE_ACCESS_COOKIE] === 'string'
       ? (req.cookies[SHARE_ACCESS_COOKIE] as string)
       : undefined;
-    if (fromCookie) return fromCookie;
-    const fromQuery = typeof req.query.access === 'string' ? req.query.access : undefined;
-    return fromQuery;
+    return fromCookie;
   }
 
   /**
@@ -402,6 +404,8 @@ export class ShareController {
     @Param('token') token: string,
     @Param('folderId') folderId: string,
     @Req() req: Request,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
   ) {
     await this.assertShareRateLimit(token, req);
     const link = await this.shareService.getShareLinkByToken(token);
@@ -415,8 +419,15 @@ export class ShareController {
       const ok = await this.shareService.verifyAccessJwtForLink(link, accessJwt);
       if (!ok) return { requiresPassword: true };
     }
+    // G5-07：先做子树纯校验，再消费访问配额。
+    // 若 folderId 无效/越界/已删除，直接拒绝且不扣 maxAccessCount，
+    // 避免无效请求烧掉有限次数的分享配额（此前 consumeShareAccess 在子树校验之前）。
+    await this.shareService.assertFolderInSharePublic(link, folderId);
     await this.shareService.consumeShareAccess(link);
-    return this.shareService.listFolderContentsForShare(link, folderId);
+    return this.shareService.listFolderContentsForShare(link, folderId, {
+      page: page ? Number(page) : undefined,
+      limit: limit ? Number(limit) : undefined,
+    });
   }
 
   /**

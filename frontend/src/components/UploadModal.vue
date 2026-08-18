@@ -103,6 +103,14 @@
       <div v-if="preparingMsg" style="margin-top: 8px; font-size: 12px; color: var(--text-secondary);">
         {{ preparingMsg }}
       </div>
+      <!-- G11-20：目录预创建失败时保留批次，提供重试入口 -->
+      <div
+        v-else-if="pendingParsedError"
+        style="margin-top: 12px; padding: 10px 12px; background: var(--bg-secondary); border: 1px solid var(--color-error); border-radius: 8px; display: flex; align-items: center; justify-content: space-between; gap: 12px;"
+      >
+        <span style="font-size: 12px; color: var(--color-error);">目录准备失败：{{ pendingParsedError }}</span>
+        <t-button size="small" variant="outline" :disabled="preparing" @click="retryParsedBatch">重试</t-button>
+      </div>
     </div>
 
     <!-- 上传队列（读取全局 upload store，关闭弹窗后上传继续在后台进行） -->
@@ -230,6 +238,14 @@ const isDragover = ref(false);
 const preparing = ref(false);
 /** 目录准备进度文案（prepareDirectories onProgress 驱动） */
 const preparingMsg = ref('');
+/** G11-20：目录预创建失败时保留待重试批次（弱网/临时故障可重试，不整批放弃） */
+const pendingParsedBatch = ref<{
+  parsed: ParsedFile[];
+  emptyDirs: string[];
+  violations?: PathViolation[];
+} | null>(null);
+/** G11-20：目录预创建失败文案（供重试提示展示） */
+const pendingParsedError = ref('');
 const selectedTagIds = ref<string[]>([]);
 const showTagSelector = ref(false);
 const newTagName = ref('');
@@ -267,15 +283,8 @@ watch(successCount, (cur, old) => {
   if (cur > (old ?? 0)) emit('uploaded', false);
 });
 
-// 全部终态时给出与原 batchResult 完成提示等价的消息（仅状态翻转时触发一次）
-watch(allFinished, (done, was) => {
-  if (!done || was) return;
-  if (failedEntries.value.length === 0) {
-    MessagePlugin.success('文件接收完成，正在后台处理中，请稍后刷新查看');
-  } else if (successCount.value > 0) {
-    MessagePlugin.success(`${successCount.value} 个文件已接收，${failedEntries.value.length} 个失败。正在后台处理中`);
-  }
-});
+// G11-19：上传完成提示由全局 UploadProgressIndicator 统一承担，
+// 此处移除弹窗内完成 toast，避免与全局指示器重复提示（双份提示）。
 
 function handleConcurrencyChange(value: unknown) {
   uploadStore.setFileConcurrency(Number(value));
@@ -309,6 +318,9 @@ async function handleCreateTag() {
 function handleClose() {
   showConflictDialog.value = false;
   resetPendingConflict();
+  // G11-20：关闭弹窗时清空待重试批次，避免残留状态在下次打开时误显示
+  pendingParsedBatch.value = null;
+  pendingParsedError.value = '';
   emit('dropConsumed');
   emit('close');
 }
@@ -448,11 +460,26 @@ async function processParsedFiles(
       showConflictDialog.value = true;
     }
   } catch (err) {
-    MessagePlugin.error(getErrorMessage(err) || '目录准备失败，请重试');
+    // G11-20：目录预创建失败时保留批次，提供重试入口而非整批放弃
+    const msg = getErrorMessage(err) || '目录准备失败，请重试';
+    pendingParsedBatch.value = { parsed, emptyDirs, violations };
+    pendingParsedError.value = msg;
+    MessagePlugin.error(msg);
   } finally {
     preparing.value = false;
     preparingMsg.value = '';
   }
+}
+
+/**
+ * G11-20：目录预创建失败后重试——复用已暂存的批次重新走预创建/入队链路。
+ */
+async function retryParsedBatch() {
+  const batch = pendingParsedBatch.value;
+  if (!batch || preparing.value) return;
+  pendingParsedBatch.value = null;
+  pendingParsedError.value = '';
+  await processParsedFiles(batch.parsed, batch.emptyDirs, batch.violations);
 }
 
 /** 决策确认：覆盖项携带 overwriteFileId 入队；跳过项不入队 */
@@ -561,6 +588,33 @@ async function handleFolderSelect(e: Event) {
   await processParsedFiles(parsed, []);
 }
 
+// 已消费的拖拽载荷引用（防止「visible watcher」与「即时 watcher」重复消费）
+let lastConsumedDropFiles: File[] | null = null;
+let lastConsumedDropResult: DropCollectResult | null = null;
+
+// 弹窗已打开时宿主再次转发拖拽数据：initialDropResult / initialFiles 引用变化即消费，
+// 避免「弹窗打开期间再拖入文件被静默丢弃」（G11-04）。
+watch(
+  () => [props.initialDropResult, props.initialFiles] as const,
+  async ([dropResult, files]) => {
+    if (!props.visible) return;
+    if (dropResult && dropResult !== lastConsumedDropResult) {
+      lastConsumedDropResult = dropResult;
+      try {
+        await handleCollectResult(dropResult);
+      } finally {
+        emit('dropConsumed');
+      }
+      return;
+    }
+    if (files && files !== lastConsumedDropFiles && files.length > 0) {
+      lastConsumedDropFiles = files;
+      enqueueFiles(Array.from(files));
+      emit('dropConsumed');
+    }
+  },
+);
+
 // 上传配置改为弹窗打开时惰性获取，避免未打开弹窗也发请求
 watch(() => props.visible, async (isVisible) => {
   if (isVisible) {
@@ -571,10 +625,12 @@ watch(() => props.visible, async (isVisible) => {
     showTagSelector.value = false;
     newTagName.value = '';
     if (props.initialFiles && props.initialFiles.length > 0) {
+      lastConsumedDropFiles = props.initialFiles;
       enqueueFiles(Array.from(props.initialFiles));
     }
     // 页面级拖拽转发的采集结果：走与弹窗拖拽完全一致的链路
     if (props.initialDropResult) {
+      lastConsumedDropResult = props.initialDropResult;
       try {
         await handleCollectResult(props.initialDropResult);
       } finally {

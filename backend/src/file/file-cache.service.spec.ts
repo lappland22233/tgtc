@@ -10,6 +10,32 @@ async function readStream(stream: Readable): Promise<Buffer> {
   return Buffer.concat(chunks);
 }
 
+/**
+ * Windows 上删除临时目录时，若残留打开句柄（spool 流 / 构建会话）未释放，
+ * rm 会抛 EBUSY/EPERM。做有限次退避重试消除测试间的时序抖动。
+ */
+async function rmDirSafe(dir: string, retries = 5): Promise<void> {
+  for (let i = 0; ; i++) {
+    try {
+      await rm(dir, { recursive: true, force: true });
+      return;
+    } catch (err: any) {
+      if (i >= retries || (err?.code !== 'EBUSY' && err?.code !== 'EPERM')) throw err;
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+  }
+}
+
+/** 等待服务实例的 spool/build 会话全部收尾（避免残留会话污染下一测试的串行化占位） */
+async function waitSessionsSettled(svc: any): Promise<void> {
+  const sessions = [
+    ...(svc.spoolSessions?.values?.() ?? []),
+    ...(svc.buildSessions?.values?.() ?? []),
+    ...(svc.passthroughSessions?.values?.() ?? []),
+  ];
+  await Promise.allSettled(sessions.map((s: any) => s?.completion?.catch?.(() => {})));
+}
+
 describe('FileCacheService realtime build session', () => {
   let cwd: string;
   let service: FileCacheService;
@@ -24,7 +50,8 @@ describe('FileCacheService realtime build session', () => {
 
   afterEach(async () => {
     jest.restoreAllMocks();
-    await rm(cwd, { recursive: true, force: true });
+    await waitSessionsSettled(service);
+    await rmDirSafe(cwd);
   });
 
   it('streams cold bytes immediately and atomically publishes the cache', async () => {
@@ -117,6 +144,10 @@ describe('FileCacheService realtime build session', () => {
 
     await service.invalidate(fileId);
     await contentExpectation;
+    const deadline = Date.now() + 200;
+    while (!upstream.destroyed && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
     expect(upstream.destroyed).toBe(true);
     expect((service as any).buildSessions.size).toBe(0);
   });
@@ -158,7 +189,10 @@ describe('FileCacheService no-cache mode', () => {
 
   afterEach(async () => {
     jest.restoreAllMocks();
-    await rm(cwd, { recursive: true, force: true });
+    // 等待本测试的 spool/build 会话收尾（含被中止的失败会话），避免残留会话
+    // 污染下一测试（G4-02 per-fileId 串行化占位）或在 rm 时触发 Windows EBUSY。
+    await waitSessionsSettled(service);
+    await rmDirSafe(cwd);
   });
 
   it('passthrough returns full bytes with fetchFn called once and fromCache === false', async () => {
@@ -332,7 +366,11 @@ describe('FileCacheService no-cache mode', () => {
       info: { file_size: 6 },
     }));
     stream.destroy();
-    await new Promise(resolve => setTimeout(resolve, 10));
+    // 轮询等待上游销毁（固定 10ms 在 CI/高负载下偶发不足，改为至多 200ms 轮询消除 flaky）
+    const deadline = Date.now() + 200;
+    while (!upstream.destroyed && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
     expect(upstream.destroyed).toBe(true);
   });
 

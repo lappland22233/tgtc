@@ -24,6 +24,8 @@ function makeFileRepo(staleIds: string[][], updateAffected: number) {
     execute: jest.fn(() => Promise.resolve({ affected: updateAffected })),
   };
   return {
+    // G3-14 恢复路径：recoverReceiptCommittableFiles 先用 find 查 recoverable 记录，默认无 → 跳过
+    find: jest.fn().mockResolvedValue([]),
     createQueryBuilder: jest.fn(() => {
       // 偶数调用（0,2,..）为 select 查询，奇数调用为 update 查询
       return callIndex++ % 2 === 0 ? selectChain : updateChain;
@@ -31,9 +33,14 @@ function makeFileRepo(staleIds: string[][], updateAffected: number) {
   };
 }
 
+/** 默认 queue 桩：recoverStaleProcessingFiles 内部 recoverReceiptCommittableFiles 不触发入队 */
+function makeQueue() {
+  return { add: jest.fn() };
+}
+
 describe('TasksService', () => {
   const banned=repo(), share=repo(), rate=repo(), audit=repo(), revoked=repo(), files=makeFileRepo([], 0);
-  const service=new TasksService(banned,share,rate,audit,revoked,files as any);
+  const service=new TasksService(banned,share,rate,audit,revoked,files as any, makeQueue() as any);
   beforeEach(()=>jest.clearAllMocks());
 
   it('cleans each simple repository and tolerates database failures', async () => {
@@ -55,7 +62,7 @@ describe('TasksService', () => {
 
   it('recovers stale processing files with a fixed failure reason', async () => {
     const staleRepo = makeFileRepo([['id-1', 'id-2'], []], 2);
-    const svc = new TasksService(repo(), repo(), repo(), repo(), repo(), staleRepo as any);
+    const svc = new TasksService(repo(), repo(), repo(), repo(), repo(), staleRepo as any, makeQueue() as any);
     await svc.recoverStaleProcessingFiles();
     // 只处理 uploadStage 为 pending/uploading 的记录
     const whereCalls = staleRepo.createQueryBuilder.mock.results
@@ -73,8 +80,8 @@ describe('TasksService', () => {
   });
 
   it('tolerates database failures in stale processing recovery', async () => {
-    const failingRepo: any = { createQueryBuilder: jest.fn(() => { throw new Error('db'); }) };
-    const svc = new TasksService(repo(), repo(), repo(), repo(), repo(), failingRepo);
+    const failingRepo: any = { find: jest.fn().mockResolvedValue([]), createQueryBuilder: jest.fn(() => { throw new Error('db'); }) };
+    const svc = new TasksService(repo(), repo(), repo(), repo(), repo(), failingRepo, makeQueue() as any);
     await expect(svc.recoverStaleProcessingFiles()).resolves.toBeUndefined();
   });
 });

@@ -79,6 +79,10 @@ class ClientManager final : public td::Actor {
   bool close_db_started_ = false;
   bool close_finished_ = false;
   td::FlatHashSet<td::int64> active_file_stream_ids_;
+  // G16-07: per-bot concurrent stream accounting. Maps token_key -> number of active streams for
+  // that bot, and stream_id -> token_key so a release can decrement the right counter.
+  td::FlatHashMap<td::string, td::int32> active_file_streams_by_token_;
+  td::FlatHashMap<td::int64, td::string> active_file_stream_token_;
   td::vector<td::Promise<td::Unit>> close_promises_;
 
   td::ActorOwn<Watchdog> watchdog_id_;

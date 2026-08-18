@@ -22,16 +22,17 @@ export class User {
   id: string;
 
   /**
-   * 用户邮箱（唯一）。
-   * 注意：唯一约束大小写敏感，且当前无 lower(email) 函数索引，
-   * 'A@x.com' 与 'a@x.com' 被视为不同邮箱。完整的归一化需配合
-   * auth.service 登录/注册流程及存量数据迁移（lowercase）统一处理，
-   * 此处仅在服务层对管理员创建的邮箱做 trim+lowercase 归一化。
+   * 用户邮箱。
+   * G6-12：唯一性由 UNIQUE(lower(email)) 函数索引保证（见迁移
+   * CreateLowerEmailUniqueIndex），使邮箱大小写不敏感唯一。
+   * 注意：此处不再声明 `unique: true`（该单列唯一约束已在迁移中 DROP，
+   * 避免大小写敏感约束与新函数索引双重限制）；全链路归一化由服务层
+   * （auth.service / user.service）统一 trim + lowercase。
    */
-  @Column({ unique: true })
+  @Column()
   email: string;
 
-  @Column({ length: 255, comment: 'bcrypt hashed password, never store plaintext' })
+  @Column({ length: 255, comment: 'bcrypt hashed password, never store plaintext', select: false })
   password: string;
 
   @Column({ type: 'enum', enum: UserRole, default: UserRole.USER })

@@ -63,7 +63,8 @@ export type AuditAction =
   | 'share_link_password_failed'
   | 'share_link_download'
   | 'file_verify'
-  | 'file_stale_path_cleanup';
+  | 'file_stale_path_cleanup'
+  | 'data_export';
 
 /** 审计日志状态 */
 export enum AuditStatus {

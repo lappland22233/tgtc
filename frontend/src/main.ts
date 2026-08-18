@@ -105,7 +105,8 @@ setupRoutePrefetch(router);
 // 首屏渲染完成后，延迟加载非关键模块
 // 使用 requestIdleCallback 避免阻塞用户交互
 if (typeof requestIdleCallback !== 'undefined') {
-  requestIdleCallback(() => deferredInit(), { timeout: 3000 });
+  // 兜底 catch：遥测/主题等延迟模块初始化异常不得产生未处理 rejection 影响应用启动
+  requestIdleCallback(() => deferredInit().catch(console.error), { timeout: 3000 });
 } else {
-  setTimeout(() => deferredInit(), 200);
+  setTimeout(() => { deferredInit().catch(console.error); }, 200);
 }

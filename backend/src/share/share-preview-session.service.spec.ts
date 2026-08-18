@@ -52,11 +52,14 @@ function makeService() {
     return builder;
   };
   const mkInsert = (identifiers: unknown[]) => {
-    const execute = jest.fn().mockResolvedValue({ identifiers });
+    // G5-06：实现改为检查 result.raw（RETURNING id）。mock 同时返回 identifiers 与 raw，
+    // 其中 raw 直接复用 identifiers，使「插入成功」由 raw 非空体现、「冲突幂等」由 raw 空体现。
+    const execute = jest.fn().mockResolvedValue({ identifiers, raw: identifiers });
     const builder = {
       insert: jest.fn().mockReturnThis(),
       values: jest.fn().mockReturnThis(),
       orIgnore: jest.fn().mockReturnThis(),
+      returning: jest.fn().mockReturnThis(),
       execute,
     };
     return builder;
@@ -159,6 +162,11 @@ describe('SharePreviewSessionService', () => {
 
     const count = await service.pruneExpired();
     expect(count).toBe(3);
-    expect(sessionRepo.query).toHaveBeenCalledWith(expect.stringContaining('DELETE FROM "share_preview_sessions"'));
+    // G5-05：query 必须同时携带参数数组（含 $1 占位符的 DELETE IN 子查询需要 now 参数），
+    // 否则参数缺失报错被吞 → 过期会话永不清理。
+    expect(sessionRepo.query).toHaveBeenCalledWith(
+      expect.stringContaining('DELETE FROM "share_preview_sessions"'),
+      expect.any(Array),
+    );
   });
 });

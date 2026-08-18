@@ -4,6 +4,7 @@
 #pragma once
 
 #include "td/utils/common.h"
+#include "td/utils/port/IPAddress.h"
 #include "td/utils/Slice.h"
 #include "td/utils/Status.h"
 
@@ -34,5 +35,8 @@ td::Result<FileStreamRoute> parse_file_stream_route(td::Slice path);
 td::Result<td::int64> parse_file_stream_size_hint(td::Slice value);
 bool parse_file_stream_no_cache(td::Slice value);
 td::Result<td::int64> resolve_file_stream_size(td::int64 tdlib_size, td::int64 expected_size);
+// Returns true if peer_address is allowed to use the file streaming endpoint under the given
+// comma-separated --file-stream-allow-ip allowlist (empty = loopback/private networks only).
+bool is_file_stream_ip_allowed(const td::IPAddress &peer_address, td::Slice allow_ip);
 
 }  // namespace telegram_bot_api

@@ -269,7 +269,8 @@ interface UserAgentAnalysisResponse {
 // --- State ---
 
 const activeTab = ref('referer');
-const timeRange = ref('7d');
+// 与父页（AccessLogs 概览）及兄弟分析组件（Bandwidth/FileType）默认 24h 对齐（G14-12）
+const timeRange = ref('24h');
 const refererLoading = ref(false);
 const uaLoading = ref(false);
 const refererData = ref<RefererAnalysisResponse | null>(null);

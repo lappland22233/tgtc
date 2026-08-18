@@ -22,9 +22,9 @@ describe('thin controllers', () => {
     await c.updateConfigs(user, { configs: [] });
     await c.banIP(user, { ip: '1.2.3.4', reason: 'x', permanent: false, expiresAt: '2030-01-01' } as any);
     await c.unbanIP(user, '1.2.3.4'); await c.unbanIPByBody(user, { ip: '::1' });
-    await expect(c.getAllFiles(1, 20, undefined, undefined, 'bad')).rejects.toBeInstanceOf(BadRequestException);
-    await expect(c.getAllFiles(1, 20, undefined, undefined, 'size', 'sideways')).rejects.toBeInstanceOf(BadRequestException);
-    await c.getAllFiles(2, 10, 'q', 'u', 'size', 'DESC', 'cursor');
+    // G7-07：/admin/files 的 page/limit/sort 校验已下沉到 AdminFilesQueryDto（由 ValidationPipe 执行），
+    // 控制器仅做参数透传；因此这里不再断言控制器直接抛 BadRequest，改为验证正常调用委托。
+    await c.getAllFiles({ page: 2, limit: 10, keyword: 'q', userId: 'u', sortBy: 'size', sortOrder: 'DESC', cursor: 'cursor' } as any);
     await c.deleteFile(user, 'f'); await c.batchDeleteFiles(user, { ids: ['f'] });
     await c.updateSMTPConfig(user, {} as any); await c.sendTestSMTPMail(user, { recipient: 'a@b.com' });
     await c.updateUploadConfig(user, {} as any); await c.updateCacheConfig(user, {} as any); await c.updateAuthConfig(user, {} as any);
@@ -55,8 +55,8 @@ describe('thin controllers', () => {
     service.exportTelemetry.mockResolvedValue([{ id: 1 }]);
     const c = new AdminController(service, service);
     const res: any = { setHeader: jest.fn(), send: jest.fn(), set: jest.fn() };
-    for (const args of [['xml','',''],['','1y',''],['','','users']]) await expect(c.exportData(args[0],args[1],args[2],res)).rejects.toBeInstanceOf(BadRequestException);
-    await c.exportData('','','',res); await c.exportTelemetry(undefined,undefined,undefined,res);
+    for (const args of [['xml','',''],['','1y',''],['','','users']]) await expect(c.exportData(user, args[0],args[1],args[2],res)).rejects.toBeInstanceOf(BadRequestException);
+    await c.exportData(user,'','','',res); await c.exportTelemetry(undefined,undefined,undefined,res);
     expect(res.send).toHaveBeenCalledTimes(2);
   });
 

@@ -127,7 +127,7 @@ export class File {
 
   /** Telegram 原文件提交点与衍生媒体处理解耦的持久化状态机。 */
   @Column({ type: 'varchar', length: 32, default: 'committed' })
-  uploadStage: 'pending' | 'uploading' | 'remote_committed' | 'committed' | 'failed';
+  uploadStage: 'pending' | 'uploading' | 'remote_committed' | 'committed' | 'recoverable' | 'failed';
 
   /**
    * 最终上传失败的安全诊断原因（内部诊断用，默认查询不加载该字段）。

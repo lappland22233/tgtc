@@ -72,6 +72,13 @@ export class FileService implements OnModuleInit {
   /** 最近标记为 error 的文件 id → 时间戳，用于下载降级去重，避免并发下载造成审计/日志风暴 */
   private readonly invalidMarkedAt = new Map<string, number>();
 
+  // G2-15：Range 下载配额扣次短期去重（30s 内同文件同 IP 只扣一次）。
+  // 视频播放/断点续传会产生大量 Range 请求，若每个 Range 都扣一次 maxAccessCount，
+  // 单次播放即可耗尽有限次数的分享/下载配额。此 Map 以「fileId|ip|user」为键缓存
+  // 最近一次扣次时间，窗口内命中则幂等免扣。接受秒级误差，内存有界（超限即清空）。
+  private static readonly RANGE_QUOTA_DEDUP_MS = 30 * 1000;
+  private readonly rangeQuotaDedup = new Map<string, number>();
+
   constructor(
     @InjectRepository(File)
     private fileRepository: Repository<File>,
@@ -508,20 +515,42 @@ export class FileService implements OnModuleInit {
           // C-05 修复：进入 processing/replacing 前必须等待旧缓存（正式缓存 + spool + 在途 build）
           // 完全失效，避免覆盖上传期间旧缓存与新元数据错配。
           await this.fileCacheService.invalidate(target.id);
-          // tempId 占位语义与新记录一致，由 FileUploadProcessor 按 fileId 更新为真实 TG 引用
-          target.status = 'processing';
-          target.uploadVersion = (target.uploadVersion || 1) + 1;
-          target.uploadStage = 'pending';
-          target.uploadFailureReason = null; // 覆盖上传即视为重新开始，清空历史失败原因
-          target.originalName = fileName;
-          target.size = file.size;
-          target.mimeType = file.mimetype || 'application/octet-stream';
-          target.filename = tempId;
-          target.telegramFileId = tempId;
-          target.telegramFilePath = '';
-          target.thumbnailPath = null;
           await this.thumbnailService.deleteThumbnailsForFileId(target.id);
-          await this.fileRepository.save(target);
+          // G2-05 修复：uploadVersion+1 是读-改-写，必须放入事务 + 悲观行锁原子执行，
+          // 防止并发覆盖时两个事务各自基于旧版本递增导致版本丢失、内容不一致。
+          const updated = await this.fileRepository.manager.transaction(async (manager) => {
+            const repo = manager.getRepository(File);
+            const locked = await repo.findOne({
+              where: { id: target.id },
+              lock: { mode: 'pessimistic_write' },
+            });
+            if (!locked || locked.isDeleted) {
+              throw new NotFoundException('覆盖目标文件不存在或已被删除');
+            }
+            if (locked.uploaderId !== user.id) {
+              throw new BadRequestException('覆盖目标文件不属于当前用户');
+            }
+            if ((locked.folderId ?? null) !== resolvedFolderId) {
+              throw new BadRequestException('覆盖目标文件与上传目标目录不一致');
+            }
+            if (locked.status === 'processing') {
+              throw new BadRequestException('覆盖目标文件正在处理中，请稍后重试');
+            }
+            // tempId 占位语义与新记录一致，由 FileUploadProcessor 按 fileId 更新为真实 TG 引用
+            locked.status = 'processing';
+            locked.uploadVersion = (locked.uploadVersion || 1) + 1;
+            locked.uploadStage = 'pending';
+            locked.uploadFailureReason = null; // 覆盖上传即视为重新开始，清空历史失败原因
+            locked.originalName = fileName;
+            locked.size = file.size;
+            locked.mimeType = file.mimetype || 'application/octet-stream';
+            locked.filename = tempId;
+            locked.telegramFileId = tempId;
+            locked.telegramFilePath = '';
+            locked.thumbnailPath = null;
+            await repo.save(locked);
+            return locked;
+          });
           // 审计覆盖意图（status=processing，真实引用由 processor 落库后另有流程记录）
           this.auditService.log({
             action: 'file_overwrite',
@@ -530,7 +559,7 @@ export class FileService implements OnModuleInit {
             resourceId: target.id,
             metadata: { filename: fileName, size: file.size, status: 'processing', oldTelegramFileId },
           });
-          return target;
+          return updated;
         },
         'createProcessingFile',
       );
@@ -578,8 +607,20 @@ export class FileService implements OnModuleInit {
     if (!this.fileCacheService.isNoCacheMode() && file.path && fs.existsSync(file.path)) {
       this.fileCacheService.cacheFileFromPath(finalFile.id, file.path, file.size)
         .then(() => {
-          // 缓存预热完成 → 文件立即可用，无需等待 TG 上传；同时清空历史失败原因
-          this.fileRepository.update(finalFile.id, { status: 'ready', uploadFailureReason: null } as any).catch(() => {});
+          // 缓存预热完成 → 文件立即可用，无需等待 TG 上传；同时清空历史失败原因。
+          // G2-06 修复：条件更新（id + status=processing + uploadVersion=当前值）并检查 affected，
+          // 防止并发覆盖时 v1 收尾任务把已递增到 v2 的记录误标 ready。写法与
+          // maybeWriteBackRecoveredPath / markFileInvalidOnDownload 的版本条件一致。
+          const criteria: Record<string, unknown> = { id: finalFile.id, status: 'processing' };
+          if (finalFile.uploadVersion) criteria.uploadVersion = finalFile.uploadVersion;
+          this.fileRepository
+            .update(criteria as any, { status: 'ready', uploadFailureReason: null } as any)
+            .then((res) => {
+              if (res.affected === 0) {
+                this.logger.warn(`缓存就绪条件更新未命中（疑似并发覆盖），跳过置 ready: ${finalFile.id} (v${finalFile.uploadVersion})`);
+              }
+            })
+            .catch(() => {});
           this.logger.log(`文件缓存就绪: ${finalFile.id}`);
         })
         .catch((err) => {
@@ -588,6 +629,42 @@ export class FileService implements OnModuleInit {
     }
 
     return finalFile;
+  }
+
+  /**
+   * G3-06：分片上传 error 后重试 complete 时复用已创建的 File 记录。
+   * 按 id + uploadVersion 取出既有 processing 记录；不存在或版本不匹配则抛错（触发重新合并新建）。
+   */
+  async getProcessingFileOrThrow(
+    id: string,
+    uploadVersion: number,
+  ): Promise<{ id: string; uploadVersion: number; originalName: string }> {
+    const file = await this.fileRepository.findOne({ where: { id } });
+    if (!file || file.uploadVersion !== uploadVersion) {
+      throw new NotFoundException('已创建的上传记录不可复用，请重新合并');
+    }
+    return { id: file.id, uploadVersion: file.uploadVersion, originalName: file.originalName };
+  }
+
+  /**
+   * G3-07：分片上传入队后检测到中止时清理刚创建的 File 记录（非覆盖路径）。
+   * 软删（isDeleted=true + status=error）保留审计痕迹，避免直接硬删导致引用残缺。
+   */
+  /** G3-03：判断 File 记录是否存在（含软删），供上传 pending 临时文件启动清理使用 */
+  async fileRecordExists(id: string): Promise<boolean> {
+    const found = await this.fileRepository.findOne({
+      where: { id },
+      withDeleted: true,
+      select: { id: true },
+    });
+    return !!found;
+  }
+
+  async softDeleteProcessingFile(id: string): Promise<void> {
+    await this.fileRepository.update(
+      { id, status: 'processing' },
+      { isDeleted: true, status: 'error', uploadStage: 'failed' } as Partial<File>,
+    );
   }
 
   async upload(file: Express.Multer.File, user: User, tagIds?: string[]): Promise<File> {
@@ -734,6 +811,15 @@ export class FileService implements OnModuleInit {
     tagIds?: string[],
     folderId?: string,
   ): Promise<{ files: File[]; total: number; nextCursor?: string | null }> {
+    // G2-11：服务层钳制 limit。非法值（非正整数）回退默认 20，
+    // 超大 limit 钳制到上限 100，避免 limit=0 触发除零/空结果 500，
+    // 以及超大 limit 造成内存与查询压力。
+    const rawLimit = Number(limit);
+    if (!Number.isInteger(rawLimit) || rawLimit < 1) {
+      limit = 20;
+    } else if (rawLimit > 100) {
+      limit = 100;
+    }
     const where: Record<string, unknown> = {};
     if (!includeDeleted) {
       where.isDeleted = false;
@@ -819,6 +905,13 @@ export class FileService implements OnModuleInit {
       if (userId) { tagWheres.push(`file."uploaderId" = $${tagIdx++}`); tagParams.push(userId); }
       if (!includeDeleted) { tagWheres.push('file."isDeleted" = false'); }
       if (keyword) { tagWheres.push(`LOWER(file."originalName") LIKE $${tagIdx++}`); tagParams.push(`%${escapeLike(keyword.toLowerCase())}%`); }
+      // G2-09：标签计数 SQL 与主查询共用 folderId 条件，避免筛选计数与列表不一致
+      if (folderId === 'root') {
+        tagWheres.push('file."folderId" IS NULL');
+      } else if (folderId && folderId.length === 36) {
+        tagWheres.push(`file."folderId" = $${tagIdx++}`);
+        tagParams.push(folderId);
+      }
       const tagWhere = tagWheres.join(' AND ');
 
       if (tagIds.length > 1) {
@@ -1040,12 +1133,35 @@ export class FileService implements OnModuleInit {
       throw new BadRequestException('删除等待期已过，文件已永久删除');
     }
 
-    file.isDeleted = false;
-    file.deletedByAdmin = false;
-    file.deleteRequestedAt = null;
-    file.deleteScheduledAt = null;
-    file.deleteCooldownUntil = null;
-    await this.fileRepository.save(file);
+    // G2-08：恢复与清扫（sweepPendingDeletions）存在竞态 —— 清扫可能在 restore 的
+    // save 前删除行，导致 save 退化为 INSERT（重新插入一条幽灵记录）。
+    // 改为事务内锁定行 + 条件 UPDATE：仅在记录仍存在且仍为待删除态时更新，
+    // affected=0 表示清扫已删除该行，此时抛出"已永久删除"，绝不再 INSERT。
+    await this.fileRepository.manager.transaction(async (manager) => {
+      const locked = await manager.getRepository(File).findOne({
+        where: { id, isDeleted: true },
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (!locked) {
+        throw new BadRequestException('删除等待期已过，文件已永久删除');
+      }
+      const updated = await manager.getRepository(File)
+        .createQueryBuilder()
+        .update()
+        .set({
+          isDeleted: false,
+          deletedByAdmin: false,
+          deleteRequestedAt: null,
+          deleteScheduledAt: null,
+          deleteCooldownUntil: null,
+        })
+        .where('id = :id', { id })
+        .andWhere('isDeleted = true')
+        .execute();
+      if (!updated.affected) {
+        throw new BadRequestException('删除等待期已过，文件已永久删除');
+      }
+    });
 
     // 审计日志：文件恢复
     this.auditService.log({
@@ -1224,13 +1340,30 @@ export class FileService implements OnModuleInit {
 
     await this.fileRepository.update(id, { accessType });
 
+    // 纵深防御：文件转私有后，软删「遗留型」公开分享链接（token = fileId 的隐式分享），
+    // 防止攻击者用已知文件 ID 通过 /api/s/<fileId>/download/<fileId> 继续下载已转私有的文件。
+    // 显式创建的随机 token 分享不受影响。
+    let revokedLegacyShares = 0;
+    if (accessType === FileAccessType.PRIVATE) {
+      const revokeResult = await this.shareLinkRepository
+        .createQueryBuilder()
+        .update(ShareLink)
+        .set({ isDeleted: true })
+        .where('"targetType" = :targetType', { targetType: ShareTargetType.FILE })
+        .andWhere('"targetId" = :id', { id })
+        .andWhere('"token" = "targetId"')
+        .andWhere('"isDeleted" = false')
+        .execute();
+      revokedLegacyShares = revokeResult.affected ?? 0;
+    }
+
     // 审计日志：文件访问类型变更
     this.auditService.log({
       action: 'file_access_change',
       userId: user.id,
       resourceType: 'file',
       resourceId: id,
-      metadata: { accessType },
+      metadata: { accessType, ...(revokedLegacyShares > 0 ? { revokedLegacyShares } : {}) },
     });
   }
 
@@ -1854,7 +1987,7 @@ export class FileService implements OnModuleInit {
     id: string,
     user: User,
     rangeHeader: string,
-    opts?: { noCache?: boolean },
+    opts?: { noCache?: boolean; ip?: string },
   ): Promise<{
     stream: Readable;
     contentType: string;
@@ -1902,20 +2035,46 @@ export class FileService implements OnModuleInit {
     const chunkSize = actualEnd - start + 1;
     const readStream = createReadStream(cachedPath, { start, end: actualEnd });
 
-    // 原子访问计数：与完整下载路径一致，强制 maxAccessCount 上限并校验 affected，
-    // 防止受限文件被无限次范围下载绕过。
-    const updateResult = await this.fileRepository
-      .createQueryBuilder()
-      .update(File)
-      .set({ currentAccessCount: () => 'currentAccessCount + 1' })
-      .where('id = :id', { id })
-      .andWhere('(maxAccessCount <= 0 OR currentAccessCount < maxAccessCount)')
-      .andWhere('isDeleted = false')
-      .execute();
+    // G2-15：Range 配额扣次幂等去重 —— 30s 内同文件同（用户+IP）只扣一次，
+    // 避免一次视频播放的多个 Range 请求耗尽 maxAccessCount。
+    const dedupKey = `${id}|${user.id}|${opts?.ip || ''}`;
+    const now = Date.now();
+    const lastDedup = this.rangeQuotaDedup.get(dedupKey);
+    const shouldConsume = !lastDedup || now - lastDedup >= FileService.RANGE_QUOTA_DEDUP_MS;
+    if (shouldConsume) {
+      // 原子访问计数：与完整下载路径一致，强制 maxAccessCount 上限并校验 affected，
+      // 防止受限文件被无限次范围下载绕过。
+      const updateResult = await this.fileRepository
+        .createQueryBuilder()
+        .update(File)
+        .set({ currentAccessCount: () => '"currentAccessCount" + 1' })
+        .where('id = :id', { id })
+        .andWhere('("maxAccessCount" <= 0 OR "currentAccessCount" < "maxAccessCount")')
+        .andWhere('"isDeleted" = false')
+        .execute();
 
-    if (updateResult.affected === 0) {
-      readStream.destroy();
-      throw new ForbiddenException('访问次数已用尽或文件不存在');
+      if (updateResult.affected === 0) {
+        readStream.destroy();
+        throw new ForbiddenException('访问次数已用尽或文件不存在');
+      }
+      // 记录本次扣次时间；Map 有界，超出容量即整体清空（低频操作，可接受）
+      if (this.rangeQuotaDedup.size > 10_000) this.rangeQuotaDedup.clear();
+      this.rangeQuotaDedup.set(dedupKey, now);
+    }
+
+    // G2-14：Range 下载也记录访问日志（action='download_range'），与全量路径审计一致。
+    let accessLogId: string | undefined;
+    try {
+      const saved = await this.accessLogRepository.save({
+        fileId: id,
+        ip: opts?.ip || '',
+        action: 'download_range',
+        uploaderId: file.uploaderId,
+        responseSize: 0,
+      });
+      accessLogId = saved.id;
+    } catch {
+      // 日志记录失败不影响主流程
     }
 
     const mimeType = file.mimeType || 'application/octet-stream';
@@ -1929,6 +2088,7 @@ export class FileService implements OnModuleInit {
       start,
       end: actualEnd,
       total,
+      accessLogId,
     };
   }
 
@@ -2212,14 +2372,18 @@ export class FileService implements OnModuleInit {
     if (!isSafePublicInlineContentType(file.mimeType || '')) {
       throw new BadRequestException('该类型不支持媒体直链');
     }
+    // G5-12：访问次数限制语义统一为 maxAccessCount > 0 表示「有限制」。
+    // 该语义与 checkAndIncrement / isUnrestrictedPublic 全链路一致：
+    // 0 与负数均视为「无次数限制」，此处 0 不被当作无限次保护（保持既有数据语义，
+    // 避免破坏存量 maxAccessCount=0 的文件被媒体直链拒绝的回归）。> 0 的文件拒绝直链。
     if (file.password || file.maxAccessCount > 0) {
       throw new ForbiddenException('受密码或访问次数保护的文件不能使用媒体直链');
     }
+    // G5-12：清理冗余的过期判断死代码。
+    // 原实现中一旦 expiresIn 非空，无论是否已过期最终都会抛异常（要么「已过期」，
+    // 要么「限时不能直链」），即所有限时文件一律禁止永久媒体直链。
+    // 简化为单一拒绝分支，行为不变、逻辑更清晰。
     if (file.expiresIn !== null && file.expiresIn !== undefined) {
-      if (file.expiresStartAt) {
-        const expiresAt = new Date(file.expiresStartAt.getTime() + file.expiresIn * 3600 * 1000);
-        if (new Date() > expiresAt) throw new ForbiddenException('媒体文件已过期');
-      }
       throw new ForbiddenException('限时文件不能使用永久媒体直链');
     }
     this.assertFileUsable(file);
@@ -2245,38 +2409,12 @@ export class FileService implements OnModuleInit {
   }
 
   /**
-   * 流式获取公开文件内容（遗留公开访问能力）。
-   */
-  async getPublicFileContentStream(id: string, ip?: string): Promise<{
-    stream: Readable;
-    contentType: string;
-    filename: string;
-    size: number;
-    isInline: boolean;
-    accessLogId?: string;
-  }> {
-    const file = await this.fileRepository.findOne({
-      where: { id, isDeleted: false },
-    });
-
-    if (!file) {
-      throw new NotFoundException('文件不存在');
-    }
-
-    if (file.accessType !== FileAccessType.PUBLIC) {
-      throw new ForbiddenException('此文件为私有文件，不提供公开访问');
-    }
-
-    const { stream, actualSize } = await this.getDownloadStream(file);
-    const accessLogId = await this.createPublicMediaAccessLog(file, ip);
-    const mimeType = file.mimeType || 'application/octet-stream';
-    const isInline = /^(image|video|audio)\//.test(mimeType);
-    const filename = ensureFileExtension(file.originalName, mimeType);
-    return { stream, contentType: mimeType, filename, size: actualSize, isInline, accessLogId };
-  }
-
-  /**
-   * 批量生成 Markdown：无约束公开文件用永久公开 URL，含约束文件用分享链接
+   * 批量生成 Markdown：无约束公开文件用永久公开 URL，含约束文件用分享链接。
+   *
+   * G2-12 修复：
+   * - originalName 中的 Markdown 特殊字符（[]()\ 等）会被转义，防止文件名注入链接结构；
+   * - 仅对无约束公开文件生成 /media/ 直链；含密码/次数/时效约束的文件改用分享链接 /s/:id，
+   *   避免生成不可访问或绕过约束的裸文件链接。
    */
   async batchToMarkdown(ids: string[], user: User): Promise<string[]> {
     const files = await this.fileRepository.find({
@@ -2288,8 +2426,15 @@ export class FileService implements OnModuleInit {
 
     for (const file of files) {
       if (!file.mimeType.startsWith('image/')) continue;
-      const appUrl = `${baseUrl}/media/${file.id}`;
-      results.push(`![${file.originalName}](${appUrl})`);
+      const safeName = escapeMarkdownAlt(file.originalName);
+      if (await this.isUnrestrictedPublic(file.id)) {
+        const appUrl = `${baseUrl}/media/${file.id}`;
+        results.push(`![${safeName}](${appUrl})`);
+      } else {
+        // 含约束文件生成分享链接（/s/:id 由 ShareLink 懒创建支撑），不放裸文件直链
+        const shareUrl = `${baseUrl}/s/${file.id}`;
+        results.push(`[${safeName}](${shareUrl})`);
+      }
     }
 
     return results;
@@ -2681,13 +2826,13 @@ export class FileService implements OnModuleInit {
   /**
    * 为分享链接下载流式返回文件内容（Phase 2 新增）。
    *
-   * 与 getPublicFileContentStream 的区别：
+   * 特性（G2-13 后不再有 getPublicFileContentStream 遗留死代码）：
    * 1. 不检查 accessType —— ShareLink 本身就是访问凭证，private 文件也能通过分享链接下载。
    * 2. 访问日志记录 action='share_download'，便于按渠道统计。
    *
    * 由 ShareService 在校验完 token + access JWT 后调用。
    */
-  async getStreamForShareDownload(id: string, ip?: string): Promise<{
+  async getStreamForShareDownload(id: string, ip?: string, shareToken?: string): Promise<{
     stream: Readable;
     contentType: string;
     filename: string;
@@ -2700,6 +2845,13 @@ export class FileService implements OnModuleInit {
     });
     if (!file) {
       throw new NotFoundException('文件不存在');
+    }
+
+    // 纵深防御：遗留型分享（token = fileId）实质依赖文件自身的公开状态。
+    // 若文件已转私有，即使遗留分享链接未被软删（如并发窗口），也必须拒绝下载，
+    // 防止攻击者用已知文件 ID 访问 /api/s/<fileId>/download/<fileId> 下载已转私有的文件。
+    if (shareToken && shareToken === id && file.accessType !== FileAccessType.PUBLIC) {
+      throw new ForbiddenException('此文件已转为私有，公开分享已失效');
     }
 
     const { stream, actualSize } = await this.getDownloadStream(file);
@@ -2914,4 +3066,14 @@ export class FileService implements OnModuleInit {
       return undefined;
     }
   }
+}
+
+/**
+ * 转义 Markdown 图片/链接 alt 文本中的特殊字符（G2-12）。
+ * 文件名中若包含 `[` `]` `(` `)` `\` 等字符，会破坏或注入 Markdown 链接结构，
+ * 故统一反斜杠转义。其余 Unicode 字符（含中文、空格）原样保留。
+ */
+function escapeMarkdownAlt(name: string): string {
+  if (!name) return name;
+  return name.replace(/[\\[\]()]/g, (ch) => `\\${ch}`);
 }

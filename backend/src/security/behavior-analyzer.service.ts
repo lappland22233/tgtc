@@ -52,19 +52,30 @@ export class BehaviorAnalyzer {
           continue;
         }
 
+        // G8-11：小时/星期分桶统一用 UTC（AT TIME ZONE 'UTC'），与检测侧 getUTCHours 对齐，
+        // 不再依赖 DB 会话时区。
+        // G8-12：基线抗投毒 —— 剔除离群窗口（P99 截断）。先计算该指标过去 7 天窗口的 P99 值，
+        // 仅纳入 ≤ P99 的窗口参与 AVG/STDDEV，避免攻击流量抬高基线。
         await this.dataSource.query(
           `INSERT INTO "baseline_stats" ("metricName", "hourBucket", "dayOfWeek", "mean", "stddev", "sampleCount", "updatedAt")
            SELECT $1,
-             EXTRACT(HOUR FROM "windowTime")::int,
-             EXTRACT(DOW FROM "windowTime")::int,
+             EXTRACT(HOUR FROM "windowTime" AT TIME ZONE 'UTC')::int,
+             EXTRACT(DOW FROM "windowTime" AT TIME ZONE 'UTC')::int,
              AVG(${column}) AS mean,
              COALESCE(STDDEV(${column}), 0) AS stddev,
              COUNT(*) AS sample_count,
              NOW()
-           FROM "access_log_metrics_1min"
-           WHERE "windowTime" >= NOW() - INTERVAL '7 days'
-             AND "totalRequests" > 0
-           GROUP BY EXTRACT(HOUR FROM "windowTime"), EXTRACT(DOW FROM "windowTime")
+           FROM (
+             SELECT "windowTime",
+                    ${column} AS metric_value,
+                    PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY ${column}) OVER () AS p99
+             FROM "access_log_metrics_1min"
+             WHERE "windowTime" >= NOW() - INTERVAL '7 days'
+               AND "totalRequests" > 0
+           ) filtered
+           WHERE metric_value <= p99
+           GROUP BY EXTRACT(HOUR FROM "windowTime" AT TIME ZONE 'UTC'),
+                    EXTRACT(DOW FROM "windowTime" AT TIME ZONE 'UTC')
            ON CONFLICT ("metricName", "hourBucket", "dayOfWeek") DO UPDATE SET
              "mean" = EXCLUDED."mean",
              "stddev" = EXCLUDED."stddev",
@@ -110,25 +121,45 @@ export class BehaviorAnalyzer {
     return results;
   }
 
-  /** 模式 1: 异常下载 — 同 IP 1h 内下载不同文件 > 50 种 */
+  /** 模式 1: 异常下载 — 同 IP 1h 内下载不同文件超过阈值（默认 50）种 */
   private async detectAbnormalDownloads(): Promise<AnomalyDetectionResult[]> {
     const cutoff = new Date(Date.now() - 60 * 60 * 1000);
+    // G8-14：阈值配置化（读 security-config，默认 50），并叠加不同 userId 数量条件：
+    // 共享出口（NAT）下多个已认证用户各自下载，distinctUsers 会较大，
+    // 若 unique_files 超阈值但涉及多个 userId，则更可能是 NAT 而非单点异常，降级为仅告警。
+    const filesThreshold = Number(
+      await this.configCache.get(SEC_CONFIG_KEYS.DOWNLOAD_FILES_THRESHOLD, '50'),
+    ) || 50;
     const rows = await this.dataSource.query(
-      `SELECT fal.ip, COUNT(DISTINCT fal."fileId")::int as unique_files, COUNT(*)::int as total_downloads
+      `SELECT fal.ip,
+              COUNT(DISTINCT fal."fileId")::int as unique_files,
+              COUNT(DISTINCT fal."userId")::int as distinct_users,
+              COUNT(*)::int as total_downloads
        FROM "file_access_logs" fal
        WHERE fal."createdAt" >= $1 AND fal.action = 'download'
        GROUP BY fal.ip
-       HAVING COUNT(DISTINCT fal."fileId") > 50`,
-      [cutoff],
+       HAVING COUNT(DISTINCT fal."fileId") > $2`,
+      [cutoff, filesThreshold],
     );
 
-    return rows.map((r: { ip: string; unique_files: number; total_downloads: number }) => ({
-      type: 'abnormal_download',
-      severity: 'high' as const,
-      title: '异常下载行为',
-      message: `IP ${r.ip} 1小时内下载了 ${r.unique_files} 个不同文件 (共 ${r.total_downloads} 次)`,
-      details: { ip: r.ip, uniqueFiles: r.unique_files, totalDownloads: r.total_downloads },
-    }));
+    return rows.map((r: { ip: string; unique_files: number; distinct_users: number; total_downloads: number }) => {
+      // 涉及多个不同 userId → 疑似 NAT/办公共享出口，仅告警不封禁（降低误报）
+      const sharedNAT = r.distinct_users > 1;
+      return {
+        type: 'abnormal_download',
+        severity: 'high' as const,
+        title: '异常下载行为',
+        message: `IP ${r.ip} 1小时内下载了 ${r.unique_files} 个不同文件 (共 ${r.total_downloads} 次${sharedNAT ? `，涉及 ${r.distinct_users} 个用户` : ''})`,
+        details: {
+          ip: r.ip,
+          uniqueFiles: r.unique_files,
+          totalDownloads: r.total_downloads,
+          distinctUsers: r.distinct_users,
+          // 共享出口降级：由调用方（attack/alert 处理）决定仅告警不封禁
+          downgradedToAlert: sharedNAT,
+        },
+      };
+    });
   }
 
   /** 模式 2: 异常上传 — 单用户 1h 内上传 > 100 个文件 */
@@ -175,12 +206,14 @@ export class BehaviorAnalyzer {
 
   /** 模式 4: 时间异常 — 深夜 (2-5点) 请求量 > 全天均值 × 2 */
   private async detectTimeAnomaly(): Promise<AnomalyDetectionResult[]> {
-    // 获取过去 24 小时内深夜时段 (2-5点) 和全天每小时平均请求数
-    // 使用条件聚合（COUNT FILTER）单次扫描完成，替代原双子查询的全表重复扫描
+    // 获取过去 24 小时内深夜时段 (2-5点) 和全天每小时平均请求数。
+    // G8-23：按实际有数据的小时数归一（COUNT(DISTINCT date_trunc('hour', createdAt))），
+    // 不再无条件除以 24 —— 重启/新部署后数据不足 24h 时避免把全天均值算低而误报。
+    // 小时分桶统一用 UTC，避免会话时区漂移。
     const rows = await this.dataSource.query(
       `SELECT
-         COUNT(*) FILTER (WHERE EXTRACT(HOUR FROM "createdAt") BETWEEN 2 AND 5)::float / 3 as night_avg,
-         COUNT(*)::float / 24 as all_avg
+         COUNT(*) FILTER (WHERE EXTRACT(HOUR FROM "createdAt" AT TIME ZONE 'UTC') BETWEEN 2 AND 5)::float / 3 as night_avg,
+         COUNT(*)::float / NULLIF(COUNT(DISTINCT date_trunc('hour', "createdAt")), 0) as all_avg
        FROM "access_logs"
        WHERE "createdAt" >= NOW() - INTERVAL '24 hours'`,
     );

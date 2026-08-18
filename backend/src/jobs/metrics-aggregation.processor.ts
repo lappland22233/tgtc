@@ -16,12 +16,21 @@ export class MetricsAggregationProcessor {
     private accessLogRepo: Repository<AccessLog>,
   ) {}
 
-  /** 每分钟聚合 access_logs → access_log_metrics_1min */
+  /**
+   * 每分钟聚合 access_logs → access_log_metrics_1min
+   *
+   * G8-19：滞后一个窗口（聚合上一个已完整结束的分钟，而非当前分钟）。
+   * 原实现在 N:00 立即统计 [N-1:00, N:00) 窗口，而 N-1 分钟尾部（如 N-1:59.9）
+   * 的日志可能尚未落库，导致该窗口系统性漏计。滞后一个窗口（-60s）后，
+   * 聚合的是已完全结束的上一分钟，配合 5s 缓冲日志窗口的写入延迟，指标不再低估。
+   */
   @Process('aggregate-1min')
   async aggregate1Min(job: Job<{ windowTime?: string }>): Promise<void> {
+    // 滞后一个窗口：聚合「上一分钟」而非当前分钟，避免 N:00 立即统计时 N-1 分钟尾部日志
+    // 尚未落库导致漏计。窗口时间 = (now - 60s) 截断到分钟。
     const now = job.data?.windowTime
-      ? new Date(job.data.windowTime)
-      : new Date();
+      ? new Date(new Date(job.data.windowTime).getTime() - 60 * 1000)
+      : new Date(Date.now() - 60 * 1000);
     // 使用 UTC 时间截断到分钟，避免跨时区聚合偏差
     const windowTime = new Date(Date.UTC(
       now.getUTCFullYear(),
@@ -32,6 +41,7 @@ export class MetricsAggregationProcessor {
       0,
       0,
     ));
+    // 聚合窗口 = [windowTime - 60s, windowTime)
     const windowStart = new Date(windowTime.getTime() - 60 * 1000);
 
     try {

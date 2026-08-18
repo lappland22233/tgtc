@@ -47,6 +47,35 @@ export function validateEnv(): void {
     errors.push('JWT_SECRET 未设置');
   } else if (process.env.JWT_SECRET.length < 32) {
     errors.push('JWT_SECRET 长度不足，至少需要 32 个字符');
+  } else if (isPlaceholderSecret(process.env.JWT_SECRET)) {
+    errors.push('JWT_SECRET 疑似占位值/示例值，禁止上线使用，请生成随机密钥（openssl rand -hex 32）');
+  } else if (isWeakEntropy(process.env.JWT_SECRET)) {
+    errors.push('JWT_SECRET 熵过低（如全部相同字符），请使用随机生成的密钥');
+  }
+
+  // ---- G1-06：认证相关关键环境变量的格式/白名单校验 ----
+  // SECURE_COOKIE：可选，配置时必须为可识别的布尔字符串，避免 'false' 被误判为 true
+  if (process.env.SECURE_COOKIE && !/^(true|false)$/i.test(process.env.SECURE_COOKIE)) {
+    errors.push('SECURE_COOKIE 必须为 true 或 false');
+  }
+  // TOKEN_EXTRACTION_MODE：白名单校验，非法值会被 jwt.strategy 静默回退到默认，故启动期强制拦截
+  if (process.env.TOKEN_EXTRACTION_MODE && !['both', 'cookie_only'].includes(process.env.TOKEN_EXTRACTION_MODE)) {
+    errors.push('TOKEN_EXTRACTION_MODE 取值非法: ' + process.env.TOKEN_EXTRACTION_MODE + '（应为 both 或 cookie_only）');
+  }
+  // JWT_EXPIRES_IN：使用 ms 风格格式（如 7d / 8h / 30m / 3600s 或纯数字秒），拒绝非法值
+  if (process.env.JWT_EXPIRES_IN && !/^\d+(ms|s|m|h|d|w)?$/i.test(process.env.JWT_EXPIRES_IN)) {
+    errors.push('JWT_EXPIRES_IN 格式非法: ' + process.env.JWT_EXPIRES_IN + '（应为 ms 风格，如 7d / 8h / 30m / 3600s）');
+  }
+  // CODE_HMAC_SECRET：用于验证码 HMAC，缺失时回退到 JWT_SECRET（见 auth.service）。
+  // 显式配置时必须满足长度与熵要求，避免弱密钥被用于离线伪造验证码哈希。
+  if (process.env.CODE_HMAC_SECRET) {
+    if (process.env.CODE_HMAC_SECRET.length < 32) {
+      errors.push('CODE_HMAC_SECRET 长度不足，至少需要 32 个字符');
+    } else if (isPlaceholderSecret(process.env.CODE_HMAC_SECRET)) {
+      errors.push('CODE_HMAC_SECRET 疑似占位值/示例值，禁止上线使用，请生成随机密钥（openssl rand -hex 32）');
+    } else if (isWeakEntropy(process.env.CODE_HMAC_SECRET)) {
+      errors.push('CODE_HMAC_SECRET 熵过低（如全部相同字符），请使用随机生成的密钥');
+    }
   }
 
   // ---- Telegram 文件存储 ----
@@ -70,11 +99,16 @@ export function validateEnv(): void {
     if (!process.env.SMTP_PASSWORD) errors.push('SMTP_PASSWORD 未设置（SMTP_HOST 已配置）');
     // SMTP 密码以加密形式存储，解密依赖 SMTP_ENCRYPTION_KEY/SALT。
     // 缺失时首次发送邮件才会 500，故在启动期强制校验。
+    // KEY/SALT 必须为随机 hex 字符串且不能是 .env.example 中的占位值，防止复制示例直接上线。
     if (!process.env.SMTP_ENCRYPTION_KEY) {
       errors.push('SMTP_ENCRYPTION_KEY 未设置（SMTP_HOST 已配置，用于解密 SMTP 密码）');
+    } else if (isPlaceholderSecret(process.env.SMTP_ENCRYPTION_KEY) || !isHex(process.env.SMTP_ENCRYPTION_KEY)) {
+      errors.push('SMTP_ENCRYPTION_KEY 必须是随机 hex 字符串（如 openssl rand -hex 32），且不能使用示例占位值');
     }
     if (!process.env.SMTP_ENCRYPTION_SALT) {
       errors.push('SMTP_ENCRYPTION_SALT 未设置（SMTP_HOST 已配置，用于解密 SMTP 密码）');
+    } else if (isPlaceholderSecret(process.env.SMTP_ENCRYPTION_SALT) || !isHex(process.env.SMTP_ENCRYPTION_SALT)) {
+      errors.push('SMTP_ENCRYPTION_SALT 必须是随机 hex 字符串（如 openssl rand -hex 16），且不能使用示例占位值');
     }
     // SMTP_SECURE 若配置必须为可识别的布尔字符串，避免 'false' 被误判为 true
     if (process.env.SMTP_SECURE && !/^(true|false)$/i.test(process.env.SMTP_SECURE)) {
@@ -115,4 +149,44 @@ export function validateEnv(): void {
     const msg = '[启动失败] 环境变量校验不通过：\n  - ' + errors.join('\n  - ');
     throw new Error(msg);
   }
+}
+
+/**
+ * 已知占位/示例密钥黑名单（与 .env.example 中的示例值保持一致）。
+ * 用户若直接复制示例上线，会使用公开的已知密钥，故启动期强制拦截。
+ */
+const PLACEHOLDER_SECRETS: ReadonlySet<string> = new Set([
+  'change-me',
+  'your-super-secret',
+  'your-super-secret-jwt-key-change-in-production',
+  'change-me-64位随机hex字符串',
+  'change-me-32位随机hex字符串',
+  'changeme',
+  'secret',
+  'password',
+]);
+
+/** 判断是否命中已知占位/示例密钥（大小写不敏感、去空格后比较）。 */
+function isPlaceholderSecret(value: string): boolean {
+  const normalized = value.trim().toLowerCase();
+  if (PLACEHOLDER_SECRETS.has(normalized)) return true;
+  // 兜底：包含"占位"常见标记的也视为占位值
+  return /(^|[_-])(change-me|your-secret|your-super-secret|example)([_-]|$)/i.test(normalized);
+}
+
+/**
+ * 低熵检测：用于密钥强度快速判断。
+ * 判定规则：全部为同一字符、或长度明显不足。
+ * 注意：合法随机 hex 密钥（仅含 0-9a-f）属于"单字符类别"，但长度足够时视为可接受，
+ * 故仅对"全同字符"这种极端低熵情况报错，避免误伤 openssl rand -hex 生成的合法密钥。
+ */
+function isWeakEntropy(value: string): boolean {
+  if (value.length < 32) return true;
+  const first = value[0];
+  return [...value].every((c) => c === first);
+}
+
+/** 判断字符串是否为合法 hex（非空、偶数长度、仅含 0-9a-fA-F）。 */
+function isHex(value: string): boolean {
+  return value.length > 0 && value.length % 2 === 0 && /^[0-9a-fA-F]+$/.test(value);
 }

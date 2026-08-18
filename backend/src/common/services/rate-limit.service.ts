@@ -23,8 +23,15 @@ export class RateLimitService {
   private static readonly MS_PER_MINUTE = 60_000;
   /** 默认限流窗口时长（毫秒）：15 分钟 */
   static readonly DEFAULT_WINDOW_MS = 15 * 60 * 1000;
-  /** 清理过期记录的截止时间：1 小时 */
-  private static readonly CLEANUP_CUTOFF_MS = 60 * 60 * 1000;
+  /** 允许的最大窗口时长（毫秒）：24 小时（与 checkAndIncrement/incrementCounter 的 windowMs 上限对齐） */
+  static readonly MAX_WINDOW_MS = 24 * 60 * 60 * 1000;
+  /**
+   * 清理过期记录的截止时间：24 小时。
+   * 之前为 1 小时，会误删仍处于 24h 长窗口内的记录，导致长窗口限流被绕过
+   * （G9-10）。现与允许的最大 windowMs（24h）对齐，保证任意合法窗口的计数
+   * 都不会在窗口结束前被清理。
+   */
+  private static readonly CLEANUP_CUTOFF_MS = 24 * 60 * 60 * 1000;
 
   constructor(
     @InjectRepository(RateLimit)
@@ -146,11 +153,17 @@ export class RateLimitService {
            WHEN rate_limits."firstAttemptAt" < $4::timestamp THEN $3::timestamp
            ELSE rate_limits."firstAttemptAt"
          END,
-         "lockedUntil" = NULL,
+         -- 保留既有锁定：若该键当前处于锁定态（lockedUntil 未来时间），
+         -- 递增计数不应清除锁定，否则攻击者可借 incrementCounter 绕过锁定
+         -- （G9-11）。仅当记录已解锁时才随窗口重置将 lockedUntil 置空。
+         "lockedUntil" = CASE
+           WHEN rate_limits."lockedUntil" IS NOT NULL AND rate_limits."lockedUntil" > NOW() THEN rate_limits."lockedUntil"
+           ELSE NULL
+         END,
          "updatedAt" = NOW()
-       RETURNING "attemptCount"`,
-      [key, type, now, windowStart],
-    );
+         RETURNING "attemptCount"`,
+         [key, type, now, windowStart],
+         );
     const count = Number(result?.[0]?.attemptCount ?? 1);
     return { count, thresholdReached: count >= threshold };
   }

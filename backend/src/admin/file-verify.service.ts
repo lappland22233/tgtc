@@ -48,17 +48,34 @@ export class FileVerifyService implements OnModuleInit {
     await this.recoverOrphanTasks();
   }
 
+  /** running 任务的合理存活上限（分钟）：超过后即使队列仍存在 job 也视为卡死孤儿 */
+  private static readonly RUNNING_ORPHAN_TIMEOUT_MIN = 60;
+
   private async recoverOrphanTasks(): Promise<void> {
     try {
+      // 恢复扫描纳入 queued + running：running 任务被 kill 后 DB 可能永久停留 running/isActive=true，
+      // 占用唯一活动槽位并阻塞新任务。queued 按队列校验；running 若队列中无 job，
+      // 或 startedAt 超过合理上限（进程崩溃前已开始但从未完成）则标记失败释放槽位。
       const orphanCandidates = await this.fileVerifyTaskRepository.find({
-        where: { isActive: true, status: In(['queued']) },
+        where: { isActive: true, status: In(['queued', 'running']) },
       });
+      const runningTimeoutMs = FileVerifyService.RUNNING_ORPHAN_TIMEOUT_MIN * 60 * 1000;
       for (const task of orphanCandidates) {
         // 仅当 Bull 队列中不存在对应 job 时才视为孤儿（正常排队任务不受影响）
         const job = await this.fileVerifyQueue.getJob(task.taskId);
         if (!job) {
           this.logger.warn(`清理孤儿文件体检任务 taskId=${task.taskId}`);
           await this.markFailed(task.taskId, new Error('任务在入队前中断，已由系统标记失败'));
+          continue;
+        }
+        // running 任务即使队列中存在 job，若 startedAt 远早于当前时间（进程崩溃后
+        // Bull stalled job 未重投递），判定为卡死孤儿并标记失败释放活动槽位。
+        if (task.status === 'running' && task.startedAt) {
+          const startedMs = new Date(task.startedAt).getTime();
+          if (Number.isFinite(startedMs) && Date.now() - startedMs > runningTimeoutMs) {
+            this.logger.warn(`清理卡死运行中的文件体检任务 taskId=${task.taskId} startedAt=${task.startedAt.toISOString()}`);
+            await this.markFailed(task.taskId, new Error('任务运行超过合理上限，已由系统标记失败'));
+          }
         }
       }
     } catch (error) {
@@ -103,7 +120,20 @@ export class FileVerifyService implements OnModuleInit {
     }
 
     try {
-      await this.fileVerifyQueue.add('verify', { taskId }, { jobId: taskId, attempts: 1, removeOnComplete: true, removeOnFail: true });
+      // G8-21：瞬时 DB/Redis 抖动不应直接终态失败且清空 job 记录。提高 attempts 并配
+      // exponential backoff 实现自动重试；removeOnFail:false 保留失败 job 供排查。
+      // markStarted 已支持 running 接管（running → running），重试安全。
+      await this.fileVerifyQueue.add(
+        'verify',
+        { taskId },
+        {
+          jobId: taskId,
+          attempts: 3,
+          backoff: { type: 'exponential', delay: 1000 },
+          removeOnComplete: true,
+          removeOnFail: false,
+        },
+      );
     } catch (error) {
       // 入队失败（Redis 不可用等）：标记失败并释放槽位，避免永久占用活动槽位
       const summary = this.sanitizeSummary(
@@ -324,13 +354,27 @@ export class FileVerifyService implements OnModuleInit {
     }
 
     // 脱敏审计：仅记录统计摘要，不记录完整 file_id / 文件名列表
-    this.auditService.log({
-      action: 'file_verify',
+    const auditEntry = {
+      action: 'file_verify' as const,
       userId: createdBy,
-      resourceType: 'file',
+      resourceType: 'file' as const,
       resourceId: taskId,
       metadata: { ...stats, taskId },
-    });
+    };
+    if (task.mode === 'apply') {
+      // G8-22：apply 模式会批量将文件标记 error（不可逆），属高敏审计。改用 logAwait 确保
+      // 落库，避免 fire-and-forget 在审计队列满时（audit.service 上限）被静默丢弃。
+      // logAwait 内置重试 + 降级文件；FAIL_FAST 默认关闭，不会阻断体检主流程。
+      try {
+        await this.auditService.logAwait(auditEntry);
+      } catch {
+        // 显式开启 AUDIT_FAIL_FAST 时 logAwait 可能抛出，审计失败不阻断体检主流程
+        this.logger.warn(`apply 体检审计写入失败（不阻断） taskId=${taskId}`);
+      }
+    } else {
+      // dry-run 仅统计、不修改数据，非高敏，沿用 fire-and-forget
+      this.auditService.log(auditEntry);
+    }
 
     await this.markCompleted(taskId, stats);
     this.logger.log(

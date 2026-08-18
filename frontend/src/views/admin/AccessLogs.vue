@@ -6,7 +6,9 @@
     </div>
 
     <!-- Top-level Tabs -->
-    <t-tabs v-model="accessTab">
+    <!-- destroy-on-hide=false（G14-05）：子面板（来源/带宽/文件类型）切换时保持挂载，
+         避免其 onMounted 重新拉取数据（G14-11/13/15 一并修复）；配合 accessTab watch 做图表 resize -->
+    <t-tabs v-model="accessTab" destroy-on-hide="false">
       <t-tab-panel value="overview" label="概览">
     <!-- Template content continues... -->
 
@@ -35,6 +37,14 @@
           <span v-if="lastRefreshTime" style="font-size: 12px; color: var(--text-secondary); white-space: nowrap;">
             最后更新：{{ lastRefreshTime }}
           </span>
+          <t-button
+            variant="outline"
+            size="small"
+            :loading="refreshing"
+            @click="onRefresh"
+          >
+            刷新
+          </t-button>
         </div>
       </div>
     </div>
@@ -186,7 +196,6 @@
               variant="outline"
               size="small"
               theme="danger"
-              :loading="banningIp === row.ip"
               @click="handleBanIp(row.ip)"
             >
               封禁
@@ -321,6 +330,39 @@
         <FileTypeAnalysis ref="fileTypeRef" />
       </t-tab-panel>
     </t-tabs>
+
+    <!-- 异常 IP 封禁对话框（原因 + 时长，G15-08） -->
+    <t-dialog
+      v-model:visible="banDialogVisible"
+      header="封禁 IP"
+      :confirm-btn="{ content: '确认封禁', theme: 'danger', loading: banDialogSaving }"
+      :on-confirm="handleBanSubmit"
+      width="460px"
+    >
+      <t-form label-width="80px">
+        <t-form-item label="IP 地址">
+          <t-input :value="banForm.ip" disabled />
+        </t-form-item>
+        <t-form-item label="封禁原因">
+          <t-input v-model="banForm.reason" placeholder="封禁原因（选填）" autocomplete="off" name="accesslog-ban-reason" />
+        </t-form-item>
+        <t-form-item label="封禁类型">
+          <t-radio-group v-model="banForm.isPermanent">
+            <t-radio :value="false">临时封禁</t-radio>
+            <t-radio :value="true">永久封禁</t-radio>
+          </t-radio-group>
+        </t-form-item>
+        <t-form-item v-if="!banForm.isPermanent" label="封禁时长">
+          <t-input-number
+            v-model="banForm.durationHours"
+            :min="1"
+            :max="720"
+            style="width: 120px"
+          />
+          <span style="margin-left: 8px; color: var(--text-secondary); font-size: 13px">小时</span>
+        </t-form-item>
+      </t-form>
+    </t-dialog>
   </div>
 </template>
 
@@ -430,7 +472,6 @@ const topPaths = ref<TopPathItem[]>([]);
 const topPathsLoading = ref(false);
 const abnormalIps = ref<AbnormalIpItem[]>([]);
 const abnormalIpsLoading = ref(false);
-const banningIp = ref<string | null>(null);
 
 // Top files with computed rank
 const topFilesWithRank = computed(() =>
@@ -495,6 +536,8 @@ function updateAutoRefresh() {
   }
   if (autoRefreshInterval.value > 0) {
     autoRefreshTimer = setInterval(() => {
+      // 后台标签页不空转：页面不可见时跳过本轮自动刷新（G14-04）
+      if (document.hidden) return;
       refreshAll();
     }, autoRefreshInterval.value);
   }
@@ -603,6 +646,21 @@ async function fetchStats() {
   }
 }
 
+/**
+ * 趋势数据降采样（G14-08）：/trend 无粒度参数，30d 可能返回数千个数据点，
+ * 前端按最大点数做等距抽样，保证图表渲染流畅。
+ */
+const TREND_MAX_POINTS = 400;
+function downsampleTrend(items: TrendItem[]): TrendItem[] {
+  if (items.length <= TREND_MAX_POINTS) return items;
+  const step = items.length / TREND_MAX_POINTS;
+  const sampled: TrendItem[] = [];
+  for (let i = 0; i < TREND_MAX_POINTS; i++) {
+    sampled.push(items[Math.min(items.length - 1, Math.floor(i * step))]);
+  }
+  return sampled;
+}
+
 // Fetch trend
 const trendErrorShown = ref(false);
 async function fetchTrend() {
@@ -610,7 +668,7 @@ async function fetchTrend() {
   try {
     const { data } = await client.get('/admin/access-logs/trend', { params: { timeRange: timeRange.value } });
     if (gen !== refreshGeneration) return;
-    const td = (data.data || data) as TrendItem[];
+    const td = downsampleTrend((data.data || data) as TrendItem[]);
     trendData.value = td;
     trendErrorShown.value = false;
     await updateTrendChart(td);
@@ -725,17 +783,46 @@ async function fetchAbnormalIps() {
   }
 }
 
-// Ban an IP
-async function handleBanIp(ip: string) {
-  banningIp.value = ip;
+// Ban an IP：打开封禁对话框（原因 + 时长），避免一键误封（G15-08）
+function handleBanIp(ip: string) {
+  banForm.ip = ip;
+  banForm.reason = '';
+  banForm.isPermanent = false;
+  banForm.durationHours = 6;
+  banDialogVisible.value = true;
+}
+
+// 封禁对话框状态
+const banDialogVisible = ref(false);
+const banDialogSaving = ref(false);
+const banForm = reactive({
+  ip: '',
+  reason: '',
+  isPermanent: false,
+  durationHours: 6,
+});
+
+async function handleBanSubmit() {
+  if (!banForm.ip) return;
+  banDialogSaving.value = true;
   try {
-    await client.post('/admin/banned-ips', { ip });
-    MessagePlugin.success(`IP ${ip} 已封禁`);
-    abnormalIps.value = abnormalIps.value.filter((item) => item.ip !== ip);
+    const payload: Record<string, unknown> = {
+      ip: banForm.ip,
+      permanent: banForm.isPermanent,
+    };
+    if (banForm.reason.trim()) payload.reason = banForm.reason.trim();
+    if (!banForm.isPermanent) {
+      payload.expiresAt = new Date(Date.now() + banForm.durationHours * 60 * 60 * 1000).toISOString();
+    }
+    await client.post('/admin/banned-ips', payload);
+    const type = banForm.isPermanent ? '永久封禁' : `已封禁 ${banForm.durationHours} 小时`;
+    MessagePlugin.success(`IP ${banForm.ip} ${type}`);
+    banDialogVisible.value = false;
+    abnormalIps.value = abnormalIps.value.filter((item) => item.ip !== banForm.ip);
   } catch {
-    MessagePlugin.error(`封禁 IP ${ip} 失败`);
+    MessagePlugin.error(`封禁 IP ${banForm.ip} 失败`);
   } finally {
-    banningIp.value = null;
+    banDialogSaving.value = false;
   }
 }
 
@@ -744,13 +831,22 @@ async function updateTrendChart(trendData: TrendItem[]) {
   if (!trendChartRef.value) return;
 
   await ensureCyberTheme();
-  if (!trendChart || trendChart.isDisposed()) {
+  // 容器可能因 tab 切换被移除后重建，实例若已绑定到旧 DOM 必须重建，
+  // 避免 setOption 写入已移除节点。用 getInstanceByDom 校验容器当前实例归属。
+  const live = echarts.getInstanceByDom(trendChartRef.value);
+  if (!trendChart || trendChart.isDisposed() || live !== trendChart) {
+    trendChart?.dispose();
     trendChart = echarts.init(trendChartRef.value, 'cyber');
   }
 
+  // 按时间范围动态格式化（G14-06）：7d/30d 跨度下仅 HH:mm 会丢失日期信息，
+  // 短范围（1h/24h）用 HH:mm，长范围（7d/30d）用 MM-DD HH:mm
+  const isLongRange = timeRange.value === '7d' || timeRange.value === '30d';
   const times = trendData.map((t) => {
     const d = new Date(t.time);
-    return d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+    return isLongRange
+      ? d.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+      : d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
   });
 
   trendChart.setOption({
@@ -815,7 +911,9 @@ async function updatePieChart() {
   if (!pieChartRef.value) return;
 
   await ensureCyberTheme();
-  if (!pieChart || pieChart.isDisposed()) {
+  const live = echarts.getInstanceByDom(pieChartRef.value);
+  if (!pieChart || pieChart.isDisposed() || live !== pieChart) {
+    pieChart?.dispose();
     pieChart = echarts.init(pieChartRef.value, 'cyber');
   }
 
@@ -875,15 +973,25 @@ function onRefresh() {
   refreshAll();
 }
 
-function refreshAll() {
+// 整体刷新指示（G14-09）：刷新完成后才更新"最后更新"时间，避免时间戳超前于数据
+const refreshing = ref(false);
+
+async function refreshAll() {
+  // 避免并发刷新叠加
+  if (refreshing.value) return;
+  refreshing.value = true;
   refreshGeneration++;
-  fetchStats();
-  fetchTrend();
-  fetchLogs();
-  fetchTopFiles();
-  fetchTopPaths();
-  fetchAbnormalIps();
+  // Promise.all 等待全部请求完成后统一写时间戳，保证"最后更新"与实际数据一致
+  await Promise.allSettled([
+    fetchStats(),
+    fetchTrend(),
+    fetchLogs(),
+    fetchTopFiles(),
+    fetchTopPaths(),
+    fetchAbnormalIps(),
+  ]);
   lastRefreshTime.value = new Date().toLocaleTimeString('zh-CN');
+  refreshing.value = false;
 }
 
 // 切换到任意 tab 时触发对应子组件的图表 resize
@@ -891,7 +999,15 @@ const sourceAnalysisRef = ref<InstanceType<typeof SourceAnalysis> | null>(null);
 const bandwidthRef = ref<InstanceType<typeof BandwidthAnalysis> | null>(null);
 const fileTypeRef = ref<InstanceType<typeof FileTypeAnalysis> | null>(null);
 
-watch(accessTab, (tab) => {
+watch(accessTab, (tab, prev) => {
+  // 离开 overview 时其容器被 t-tabs 移除（destroyOnHide），主动 dispose 并置空实例，
+  // 避免切回时复用写入已移除 DOM 的旧实例；getInstanceByDom 作为双保险。
+  if (prev === 'overview' && tab !== 'overview') {
+    trendChart?.dispose();
+    trendChart = null;
+    pieChart?.dispose();
+    pieChart = null;
+  }
   nextTick(() => {
     setTimeout(async () => {
       if (tab === 'source') {

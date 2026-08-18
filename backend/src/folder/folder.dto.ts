@@ -52,10 +52,16 @@ export class MoveFileDto {
 }
 
 export class RenameFileDto {
-  /** 新的文件显示名（originalName） */
+  /**
+   * 新的文件显示名（originalName）。
+   * G6-11：与文件夹名一致的白名单（封堵 `/ \ : * ? " < > |` 等路径穿越与
+   * Windows 非法字符），杜绝通过重命名在下载/打包出口注入非法字符（zip-slip 面）。
+   * 文件名同样可能作为下载文件名或打包条目名使用，故采用同一套严格字符集。
+   */
   @IsString()
   @IsNotEmpty({ message: '文件名不能为空' })
   @ClassTransform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @Matches(FOLDER_NAME_PATTERN, { message: '文件名包含非法字符' })
   @MaxLength(255)
   newOriginalName: string;
 }

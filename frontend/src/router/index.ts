@@ -202,11 +202,11 @@ router.beforeEach(async (to, _from, next) => {
 
     const authStore = useAuthStore();
 
-    // 步骤 1：首次加载时从 cookie 恢复登录状态
+    // 步骤 1：首次加载或会话过期（G10-05）时从 cookie 恢复 / 重拉登录状态。
     // fetchUser 内部有并发锁，多次快速调用安全。
     // 额外包裹独立超时 + catch 兜底：/auth/me 挂起或失败时按“未认证”继续导航，
     // 避免阻塞串行导航锁导致全站路由跳转死锁。
-    if (!authStore.initialized) {
+    if (!authStore.initialized || authStore.isSessionStale()) {
       try {
         await withTimeout(authStore.fetchUser(), FETCH_USER_TIMEOUT);
       } catch (err) {
@@ -217,20 +217,33 @@ router.beforeEach(async (to, _from, next) => {
     const isAuthenticated = authStore.isAuthenticated;
     const userRole = authStore.user?.role;
 
-    // 步骤 2：需要认证但未登录 → 跳转登录页
+    // 步骤 2：封禁用户不允许导航到受保护页面 → 登出并跳转登录页
+    // 后端登录时也会强制拒绝封禁用户，这里做前端纵深防御，防止已存在的会话在
+    // 封禁期间继续访问受保护页面（G10-03）。
+    if (to.meta.requiresAuth && authStore.user?.isBanned) {
+      if (!to.meta.guest) {
+        // 仅清空本地会话状态（服务端会话由后端封禁逻辑拒绝），避免导航循环
+        authStore.user = null;
+        authStore.initialized = true;
+      }
+      next('/login');
+      return;
+    }
+
+    // 步骤 3：需要认证但未登录 → 跳转登录页
     if (to.meta.requiresAuth && !isAuthenticated) {
       const redirect = (to.path !== '/login' && to.path !== '/register') ? to.fullPath : undefined;
       next({ path: '/login', query: redirect ? { redirect: isValidRedirect(redirect) ? redirect : undefined } : undefined });
       return;
     }
 
-    // 步骤 3：已登录用户访问游客页 → 跳转首页
+    // 步骤 4：已登录用户访问游客页 → 跳转首页
     if (to.meta.guest && isAuthenticated) {
       next('/');
       return;
     }
 
-    // 步骤 4：页面权限校验（与桌面侧栏、移动抽屉共用唯一权限表）
+    // 步骤 5：页面权限校验（与桌面侧栏、移动抽屉共用唯一权限表）
     const requiredRoles = PAGE_ROLES[to.path]
       ?? (to.meta.superAdmin ? PAGE_ROLES['/admin/config'] : undefined)
       ?? (to.meta.admin ? PAGE_ROLES['/admin'] : undefined);

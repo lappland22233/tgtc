@@ -107,6 +107,28 @@ export class ExportService {
     }
   }
 
+  /**
+   * G7-09：估算导出行数，供审计记录。JSON 解析后取数组长度；CSV 按换行减表头计数。
+   * 解析失败时保守返回 0（不影响导出结果，仅审计元数据）。
+   */
+  countRows(data: string, format: 'csv' | 'json'): number {
+    try {
+      if (format === 'json') {
+        const parsed = JSON.parse(data);
+        return Array.isArray(parsed) ? parsed.length : 0;
+      }
+      const lines = data.split('\n');
+      // 去掉 BOM 表头行与可能的尾随空行
+      let count = 0;
+      for (let i = 1; i < lines.length; i++) {
+        if (lines[i].trim() !== '') count++;
+      }
+      return count;
+    } catch {
+      return 0;
+    }
+  }
+
   private toCSV(rows: Record<string, any>[]): string {
     if (rows.length === 0) return '';
     const headers = Object.keys(rows[0]);

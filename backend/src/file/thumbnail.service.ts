@@ -34,6 +34,10 @@ const VIDEO_COVER_MAX_WIDTH = 480;
 const VIDEO_HD_COVER_MAX_WIDTH = 1280;
 /** 高清封面 WebP 质量 */
 const VIDEO_HD_COVER_QUALITY = 75;
+/** 视频封面远程回源的单文件大小上限（G4-09）：超过则跳过远程回源，避免整段下载写满缩略图盘 */
+const REMOTE_SOURCE_MAX_BYTES = 500 * 1024 * 1024;
+/** 远程回源前要求缩略图盘保留的最小余量（G4-09） */
+const MIN_THUMBNAIL_DISK_FREE = 512 * 1024 * 1024;
 
 export interface VideoCoverOptions {
   sourcePath?: string;
@@ -142,6 +146,42 @@ export class ThumbnailService {
     }
   }
 
+  /**
+   * 缩略图盘剩余空间是否足够（G4-09）。
+   * 用 bavail 计算无特权进程可用空间；statfs 失败时保守返回 false（跳过远程回源）。
+   */
+  private hasEnoughThumbnailDiskSpace(): boolean {
+    try {
+      const { statfsSync } = require('fs');
+      const stats = statfsSync(this.thumbnailDir);
+      const avail = stats.bsize * (stats.bavail > 0 ? stats.bavail : 0);
+      return avail >= MIN_THUMBNAIL_DISK_FREE;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * 带大小上限的远程回源落盘（G4-09）：
+   * pipeline 累计字节超过 maxBytes 即中止（销毁流），避免整段超大文件写满缩略图盘。
+   */
+  private async downloadRemoteWithLimit(stream: Readable, destPath: string, maxBytes: number): Promise<void> {
+    const { Transform } = await import('stream');
+    const { pipeline } = await import('stream/promises');
+    let total = 0;
+    const counter = new Transform({
+      transform(chunk: Buffer, _encoding: string, callback: (err?: Error | null, data?: Buffer) => void) {
+        total += chunk.length;
+        if (total > maxBytes) {
+          callback(new Error(`远程回源超过大小上限（${maxBytes} bytes）`));
+          return;
+        }
+        callback(null, chunk);
+      },
+    });
+    await pipeline(stream, counter, fs.createWriteStream(destPath));
+  }
+
   /** 生成视频标准封面（按文件合并去重） */
   async generateAndSaveVideoCover(
     file: File,
@@ -184,9 +224,17 @@ export class ThumbnailService {
         sourcePath = tmpSource;
       }
       if (!sourcePath && options.allowRemoteSource) {
+        // G4-09：远程回源整段下载前做大小上限与磁盘余量检查，避免写满缩略图盘
+        if (Number.isFinite(file.size) && file.size > REMOTE_SOURCE_MAX_BYTES) {
+          this.logger.warn(`视频封面远程回源跳过超大文件 id=${file.id}（${file.size} bytes）`);
+          return;
+        }
+        if (!this.hasEnoughThumbnailDiskSpace()) {
+          this.logger.warn(`缩略图盘空间不足，跳过视频封面远程回源 id=${file.id}`);
+          return;
+        }
         const stream = await this.fetchRemoteSource(file);
-        const { pipeline } = await import('stream/promises');
-        await pipeline(stream, fs.createWriteStream(tmpSource));
+        await this.downloadRemoteWithLimit(stream, tmpSource, REMOTE_SOURCE_MAX_BYTES);
         sourcePath = tmpSource;
       }
       if (!sourcePath) return; // 页面封面请求不得触发整视频回源
@@ -296,9 +344,17 @@ export class ThumbnailService {
     const thumbFilename = `${file.id}.webp`;
     const thumbPath = path.join(this.thumbnailDir, thumbFilename);
     try {
+      // G4-09：图片原图远程回源同样受大小上限与磁盘余量约束
+      if (Number.isFinite(file.size) && file.size > REMOTE_SOURCE_MAX_BYTES) {
+        this.logger.warn(`缩略图远程回源跳过超大文件 id=${file.id}（${file.size} bytes）`);
+        return;
+      }
+      if (!this.hasEnoughThumbnailDiskSpace()) {
+        this.logger.warn(`缩略图盘空间不足，跳过缩略图远程回源 id=${file.id}`);
+        return;
+      }
       const stream = await this.fetchRemoteSource(file);
-      const { pipeline } = await import('stream/promises');
-      await pipeline(stream, fs.createWriteStream(tmpSource));
+      await this.downloadRemoteWithLimit(stream, tmpSource, REMOTE_SOURCE_MAX_BYTES);
 
       const metadata = await sharp(tmpSource).metadata();
       const width = metadata.width || 0;
@@ -362,12 +418,26 @@ export class ThumbnailService {
     }
   }
 
-  /** 按 fileId 删除该文件的标准缩略图与视频封面（覆盖 / 删除文件联动清理）。 */
+  /**
+   * 集中"按 fileId 枚举派生缩略图/封面文件名"（G4-08）：
+   * 覆盖/删除文件时所有可能存在的产物都从这里列出，避免遗漏新派生类型
+   * （如高清封面 ${fileId}.video.hd.webp）导致磁盘残留。
+   */
+  enumerateThumbnailDerivatives(fileId: string): string[] {
+    return [
+      `${fileId}.webp`,
+      `${fileId}.video.webp`,
+      `${fileId}.video.hd.webp`,
+    ];
+  }
+
+  /** 按 fileId 删除该文件的所有缩略图派生产物（标准/视频/高清封面，覆盖与删除联动清理）。 */
   async deleteThumbnailsForFileId(fileId: string): Promise<void> {
-    await Promise.all([
-      fs.promises.unlink(path.join(this.thumbnailDir, `${fileId}.webp`)).catch(() => {}),
-      fs.promises.unlink(path.join(this.thumbnailDir, `${fileId}.video.webp`)).catch(() => {}),
-    ]);
+    await Promise.all(
+      this.enumerateThumbnailDerivatives(fileId).map(name =>
+        fs.promises.unlink(path.join(this.thumbnailDir, name)).catch(() => {}),
+      ),
+    );
   }
 
   /** 获取已存在的缩略图文件路径（供推断缺失路径时复用）。 */

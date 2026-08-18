@@ -22,6 +22,14 @@
       <!-- 加载状态 -->
       <t-loading v-if="loading" />
 
+      <!-- G11-17：加载失败态 + 重试 -->
+      <div v-else-if="loadError" class="empty-state">
+        <div class="empty-icon" style="color: var(--color-error);">!</div>
+        <p>{{ loadError }}</p>
+        <p class="empty-hint">加载失败，请检查网络后重试</p>
+        <t-button size="small" variant="outline" style="margin-top: 12px;" @click="fetchShares">重试</t-button>
+      </div>
+
       <!-- 空状态 -->
       <div v-else-if="shares.length === 0" class="empty-state">
         <div class="empty-icon">
@@ -120,6 +128,8 @@
 import { ref, onMounted } from 'vue';
 import { MessagePlugin, DialogPlugin } from 'tdesign-vue-next';
 import { api } from '../../stores/auth';
+import { useFileStore } from '../../stores/files';
+import { useFolderStore, type Folder } from '../../stores/folders';
 
 interface ShareItem {
   id: string;
@@ -146,9 +156,33 @@ const total = ref(0);
 const page = ref(1);
 const pageSize = ref(20);
 const filterType = ref('');
+/** G11-17：加载失败态（区别于“无数据”），提供重试入口 */
+const loadError = ref<string | null>(null);
+
+const fileStore = useFileStore();
+const folderStore = useFolderStore();
+
+/** 递归收集文件夹树中所有 id → name 映射，用于分享目标名称匹配（G11-16） */
+function collectFolderNames(folders: Folder[], map: Map<string, string>) {
+  for (const f of folders) {
+    map.set(f.id, f.name);
+    if (f.children?.length) collectFolderNames(f.children, map);
+  }
+}
+
+/** 构建分享目标名称查找表：文件来自 fileStore 当前已加载列表，文件夹来自 folderStore 树 */
+function buildTargetNameMap(): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const f of fileStore.files) {
+    if (f.id && f.originalName) map.set(f.id, f.originalName);
+  }
+  collectFolderNames(folderStore.tree, map);
+  return map;
+}
 
 async function fetchShares() {
   loading.value = true;
+  loadError.value = null;
   try {
     const params: Record<string, unknown> = {
       page: page.value,
@@ -160,15 +194,23 @@ async function fetchShares() {
     shares.value = data.items || [];
     total.value = data.total || 0;
   } catch (err: any) {
-    MessagePlugin.error(err?.response?.data?.message || '加载分享列表失败');
+    const msg = err?.response?.data?.message || '加载分享列表失败';
+    loadError.value = msg;
+    MessagePlugin.error(msg);
   } finally {
     loading.value = false;
   }
 }
 
+/**
+ * G11-16：优先展示分享目标名称（后端列表若补 target 名称则直接使用，否则本地 fileStore/folderStore 匹配）。
+ * 匹配不到时回退为展示 targetId 前缀 + 类型，避免只显示无意义哈希。
+ */
 function getTargetName(share: ShareItem): string {
-  // 后端目前只返回 targetId，不返回 target 名称
-  // Phase 4 简化：显示 targetId 的前 8 位 + 类型
+  const targetName = (share as ShareItem & { targetName?: string }).targetName;
+  if (targetName) return targetName;
+  const name = buildTargetNameMap().get(share.targetId);
+  if (name) return name;
   return `${share.targetType === 'folder' ? '文件夹' : '文件'} ${share.targetId.slice(0, 8)}...`;
 }
 

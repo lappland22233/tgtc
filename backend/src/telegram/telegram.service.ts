@@ -78,10 +78,32 @@ export class TelegramService {
   }
 
   /**
-   * 从字符串中移除 Bot Token，防止泄露到错误日志
+   * 从字符串中移除 Bot Token，防止泄露到错误日志。
+   * G4-11：除 URL 形态（/bot<token>/）外，用 token 字面值全局替换，
+   * 覆盖网络层错误 config.url 原样携带 token 的场景。
    */
   private redactToken(str: string): string {
-    return str.replace(/\/bot[^/]+\//g, '/bot[REDACTED]/');
+    let out = str.replace(/\/bot[^/]+\//g, '/bot[REDACTED]/');
+    if (this.botToken) {
+      out = out.split(this.botToken).join('[REDACTED]');
+    }
+    return out;
+  }
+
+  /**
+   * 对任意错误对象脱敏其中可能携带 Bot Token 的 message / config.url。
+   * 必须在响应分支之外对所有错误执行（G4-11），网络层错误（无 response）
+   * 同样可能把 token 原样带出。
+   */
+  private redactError(error: unknown): void {
+    if (!error || typeof error !== 'object') return;
+    const e = error as { message?: string; config?: { url?: string } };
+    if (typeof e.message === 'string') {
+      e.message = this.redactToken(e.message);
+    }
+    if (e.config && typeof e.config.url === 'string') {
+      e.config.url = this.redactToken(e.config.url);
+    }
   }
 
   /**
@@ -189,14 +211,10 @@ export class TelegramService {
               : '二改流式端点返回 502';
             throw new TelegramStreamPathError(`Telegram 文件流上下文不可用：${reason}`);
           }
-          // 移除错误对象中可能包含 bot token 的 URL 信息，防止泄露到日志
-          if (axiosError.message) {
-            axiosError.message = this.redactToken(axiosError.message);
-          }
-          if (axiosError.config?.url) {
-            axiosError.config.url = this.redactToken(axiosError.config.url);
-          }
         }
+        // G4-11：脱敏移到 response 分支之外——网络层错误（无 response，
+        // 如 ECONNREFUSED/DNS）的 config.url 同样可能原样携带 Bot Token。
+        this.redactError(error);
         throw error;
       }
     }

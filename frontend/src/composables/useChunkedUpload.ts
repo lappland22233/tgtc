@@ -307,7 +307,8 @@ export function useChunkedUpload(concurrency = 2) {
         }
       }
       if (!mergeTriggered) {
-        throw new Error('无法启动合并任务，请重试');
+        // 按用户策略：不提供跨会话续传。合并触发失败即本次上传取消，明确提示需重新选择文件。
+        throw new Error('合并任务启动失败，本次上传已取消，请重新选择文件');
       }
 
       // 6. Poll for merge result (avoids Cloudflare 502 timeout on long-running uploads)
@@ -330,8 +331,11 @@ export function useChunkedUpload(concurrency = 2) {
         });
       }
       // complete 成功后服务端已接管合并；轮询失败或页面关闭只能停止观察，不能删除活动工作目录。
+      // 合并未启动时尽力通知服务端清理临时会话：连接失效则交由服务端 TTL 兜底清理，
+      // 客户端无论如何都不再保留可跨会话恢复的会话标记（不提供跨会话续传）。
       if (uploadId.value && !mergeTriggered) {
         await api.post(`/files/chunk/${uploadId.value}/abort`).catch(() => {});
+        uploadId.value = null;
       }
       throw err;
     }

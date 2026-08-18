@@ -2,7 +2,7 @@ import { Injectable, Logger, OnApplicationShutdown } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { OnEvent } from '@nestjs/event-emitter';
 import { Readable } from 'stream';
-import { createReadStream } from 'fs';
+import { createReadStream, constants as fsConstants } from 'fs';
 import { promises as fsp } from 'fs';
 import { ConfigCacheService } from '../common/services/config-cache.service';
 import { CacheDiskManager } from './cache-disk-manager';
@@ -87,7 +87,15 @@ export class FileCacheService implements OnApplicationShutdown {
 
   constructor(private readonly configCache: ConfigCacheService) {
     this.cacheDir = (require('path') as typeof import('path')).resolve(process.cwd(), 'tmp', 'Cache');
-    fsp.mkdir(this.cacheDir, { recursive: true }).catch(() => {});
+    // G4-04 增强：启动异步探测缓存目录可写性。mkdir 失败或目录不可写时给出明确告警
+    // （运行时 prepareCacheCapacity 遇磁盘满会自动走 spool/直通降级，但启动期应尽早暴露问题）。
+    fsp.mkdir(this.cacheDir, { recursive: true })
+      .then(() => fsp.access(this.cacheDir, fsConstants.W_OK))
+      .catch(() => {
+        this.logger.warn(
+          `缓存目录不可写或创建失败（${this.cacheDir}）：缓存功能将降级为直通回源，请检查磁盘挂载与权限`,
+        );
+      });
     this.diskManager = new CacheDiskManager(this.cacheDir);
     this.sessionCoordinator = new CacheSessionCoordinator({
       diskManager: this.diskManager,
@@ -380,6 +388,7 @@ export class FileCacheService implements OnApplicationShutdown {
     try {
       await fsp.writeFile(tmpPath, buffer);
       await fsp.rename(tmpPath, cachePath);
+      this.diskManager.registerCache(fileId, buffer.length);
     } catch (err) {
       // 清理临时文件
       await fsp.unlink(tmpPath).catch(() => {});
@@ -437,6 +446,7 @@ export class FileCacheService implements OnApplicationShutdown {
         return;
       }
       await fsp.rename(tmpPath, cachePath);
+      this.diskManager.registerCache(fileId, expectedSize);
       this.logger.log(`缓存预热完成: ${fileId} (${(stat.size / 1024 / 1024).toFixed(1)}MB)`);
     } catch (err) {
       await fsp.unlink(tmpPath).catch(() => {});
@@ -459,13 +469,23 @@ export class FileCacheService implements OnApplicationShutdown {
           timer.unref?.();
         }),
       ]);
+      // 等 runBuildSession 的 finally 中 setImmediate 从 map 移除已失效会话，
+      // 以便下方能区分"旧会话收尾"与"新会话已创建"。
+      await new Promise<void>(resolve => setImmediate(resolve));
     }
     // 可重放 spool 会话一并销毁（文件删除 / 覆盖更新时终止在途上游）
     const spool = this.spoolSessions.get(fileId);
     if (spool) await this.sessionCoordinator.teardownSpoolSession(spool);
-    await this.diskManager.unlinkAllCacheFiles(fileId);
+
+    // G4-05：abort/teardown 等待期间可能已有新会话（新请求/覆盖上传）为该 fileId 建立。
+    // 复查活动会话后再 unlink，避免无条件删除新会话的 .tmp/.spool 导致新构建被破坏。
+    const hasActiveSession =
+      this.buildSessions.has(fileId) || this.spoolSessions.has(fileId);
+    if (!hasActiveSession) {
+      await this.diskManager.unlinkAllCacheFiles(fileId);
+    }
     this.fileAccessMap.delete(fileId);
-    this.logger.debug(`缓存失效: ${fileId}`);
+    this.logger.debug(`缓存失效: ${fileId}${hasActiveSession ? '（存在新活动会话，跳过 unlink）' : ''}`);
   }
 
   /**

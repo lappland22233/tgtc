@@ -77,20 +77,25 @@ export class StreamResponderService {
    * - 5xx：生成 requestId 记录服务端日志（URL 脱敏），并回传 X-Request-Id。
    */
   handleError(res: Response, error: unknown, fallbackMessage: string, req?: Request): void {
-    const message = error instanceof Error ? error.message : fallbackMessage;
     const status = (error as { status?: number }).status || 500;
+    const isServerError = status >= 500;
+    // 服务端日志用原始错误信息（不脱敏内部细节，仅供排查）
+    const detailMessage = error instanceof Error ? error.message : fallbackMessage;
+    // 客户端可见文案（G4-12）：5xx 一律使用调用方提供的安全通用文案 + requestId，
+    // 不向客户端回显内部错误 message；仅 <500 的业务异常（白名单 HttpException 等）透传。
+    const clientMessage = isServerError ? fallbackMessage : detailMessage;
 
     if (!res.headersSent) {
       // 416：补充 Content-Range 通配头（RFC 7233）
       if (status === 416 && typeof (error as { total?: unknown }).total === 'number') {
         res.set('Content-Range', `bytes */${(error as { total: number }).total}`);
       }
-      const payload: Record<string, unknown> = { code: status, message, data: null };
-      if (status >= 500) {
+      const payload: Record<string, unknown> = { code: status, message: clientMessage, data: null };
+      if (isServerError) {
         const requestId = randomUUID();
         const safeUrl = sanitizeUrlForLog((req?.originalUrl || req?.url || '/').split('#')[0]);
         this.logger.error(
-          `HTTP ${status} [requestId=${requestId}] ${req?.method ?? ''} ${safeUrl}: ${message}`,
+          `HTTP ${status} [requestId=${requestId}] ${req?.method ?? ''} ${safeUrl}: ${detailMessage}`,
           error instanceof Error ? error.stack : undefined,
         );
         res.setHeader('X-Request-Id', requestId);
@@ -98,7 +103,7 @@ export class StreamResponderService {
       }
       res.status(status).json(payload);
     } else if (!res.destroyed) {
-      res.destroy(error instanceof Error ? error : new Error(message));
+      res.destroy(error instanceof Error ? error : new Error(clientMessage));
     }
   }
 }
