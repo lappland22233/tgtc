@@ -24,6 +24,10 @@ interface TelemetryEvent {
 // ---- 缓冲与上报配置 ----
 const MAX_BUFFER_SIZE = 20;
 const MAX_BUFFER_CAPACITY = 200;
+/** 后端单事件 data 上限为 2048 bytes，预留少量空间避免 UTF-8 边界误差。 */
+const MAX_EVENT_DATA_BYTES = 1800;
+const MAX_CLICK_CONTEXT_EVENTS = 12;
+const MAX_TELEMETRY_URL_LENGTH = 300;
 const FLUSH_INTERVAL_MS = 30_000;
 const RETRY_BASE_DELAY_MS = 2_000;
 const MAX_FLUSH_RETRIES = 3;
@@ -158,10 +162,11 @@ function sanitizeUrl(input: string): string {
     }
     u.hash = '';
     const safe = u.pathname + u.search;
-    return isAbsolute ? u.origin + safe : safe;
+    const result = isAbsolute ? u.origin + safe : safe;
+    return result.slice(0, MAX_TELEMETRY_URL_LENGTH);
   } catch {
-    // 解析失败时保守处理：丢弃 query 与 hash
-    return input.split(/[?#]/)[0];
+    // 解析失败时保守处理：丢弃 query 与 hash，并限制长度
+    return input.split(/[?#]/)[0].slice(0, MAX_TELEMETRY_URL_LENGTH);
   }
 }
 
@@ -284,13 +289,15 @@ function flushClickContext(triggeredByError: boolean) {
   const contextClicks = clickBuffer.filter(c => c.time >= beforeCutoff);
 
   if (contextClicks.length > 0) {
+    // 单事件 data 上限为 2KB；仅保留最近少量点击，避免整批遥测因一个事件超限而 400。
+    const boundedClicks = contextClicks.slice(-MAX_CLICK_CONTEXT_EVENTS);
     enqueue({
       type: 'click_context',
       clientTimestamp: now,
       data: {
-        totalClicks: contextClicks.length,
+        totalClicks: boundedClicks.length,
         window: triggeredByError ? 'pre_2min' : 'post_1min',
-        clicks: contextClicks,
+        clicks: boundedClicks,
       },
     });
   }
@@ -451,11 +458,38 @@ function shouldDedupeError(event: TelemetryEvent): boolean {
   return false;
 }
 
+/** 计算 UTF-8 JSON 字节数；上报前必须与后端 MaxJsonBytes 使用同一语义。 */
+function jsonByteLength(value: unknown): number {
+  const json = JSON.stringify(value);
+  if (typeof TextEncoder !== 'undefined') return new TextEncoder().encode(json).length;
+  return unescape(encodeURIComponent(json)).length;
+}
+
+/** 丢弃或压缩超过后端单事件限制的事件，避免坏事件污染整个重试批次。 */
+function constrainEvent(event: TelemetryEvent): TelemetryEvent | null {
+  if (jsonByteLength(event.data) <= MAX_EVENT_DATA_BYTES) return event;
+
+  if (event.type === 'click_context' && Array.isArray(event.data.clicks)) {
+    for (let count = Math.min(event.data.clicks.length, MAX_CLICK_CONTEXT_EVENTS); count > 0; count--) {
+      const candidate = {
+        ...event,
+        data: { ...event.data, totalClicks: count, clicks: event.data.clicks.slice(-count) },
+      };
+      if (jsonByteLength(candidate.data) <= MAX_EVENT_DATA_BYTES) return candidate;
+    }
+  }
+
+  // 单事件不可安全压缩时直接丢弃；不能把它放回 buffer 无限重试。
+  return null;
+}
+
 /** 添加事件到有界缓冲，触发条件刷新 */
 function enqueue(event: TelemetryEvent) {
   if (telemetryDisabled) return; // 隐私合规：关闭后丢弃所有事件，不再缓冲/上报
   if (shouldDedupeError(event)) return; // 错误风暴去重（G15-16）
-  buffer.push(event);
+  const safeEvent = constrainEvent(event);
+  if (!safeEvent) return;
+  buffer.push(safeEvent);
   if (buffer.length > MAX_BUFFER_CAPACITY) {
     buffer.splice(0, buffer.length - MAX_BUFFER_CAPACITY);
   }
@@ -500,8 +534,14 @@ async function flush(): Promise<void> {
       await telemetryClient.post('/telemetry/report', { events });
       flushFailStreak = 0; // 成功后归零，退避重新从第一档开始
       scheduleFlush(buffer.length > 0 ? 0 : FLUSH_INTERVAL_MS);
-    } catch {
-      buffer = [...events, ...buffer].slice(0, MAX_BUFFER_CAPACITY);
+    } catch (error: unknown) {
+      const status = axios.isAxiosError(error) ? error.response?.status : undefined;
+      // 4xx 是当前批次数据不可接受（尤其是 DTO 载荷校验），重放只会制造 400 风暴；
+      // 429 仍保留重试，其他网络/5xx 错误继续回队等待恢复。
+      const permanentBatchFailure = status !== undefined && status >= 400 && status < 500 && status !== 429;
+      if (!permanentBatchFailure) {
+        buffer = [...events, ...buffer].slice(0, MAX_BUFFER_CAPACITY);
+      }
       flushFailStreak = Math.min(flushFailStreak + 1, MAX_FLUSH_RETRIES);
       const delay = flushFailStreak >= MAX_FLUSH_RETRIES
         ? FLUSH_INTERVAL_MS
