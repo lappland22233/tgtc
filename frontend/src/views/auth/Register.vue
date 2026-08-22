@@ -101,6 +101,7 @@ import type { AuthStatus } from '../../types/config';
 
 type TurnstileWidgetId = string;
 type TurnstileApi = {
+  ready?: (callback: () => void) => void;
   render: (container: HTMLElement, options: {
     sitekey: string;
     action: string;
@@ -175,18 +176,40 @@ function loadTurnstileScript(): Promise<void> {
   if (window.turnstile) return Promise.resolve();
   if (turnstileScriptPromise) return turnstileScriptPromise;
   turnstileScriptPromise = new Promise((resolve, reject) => {
-    const script = document.createElement('script');
-    script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
-    script.async = true;
-    script.defer = true;
-    script.addEventListener('load', () => resolve(), { once: true });
-    script.addEventListener('error', () => {
+    const existingScript = document.querySelector<HTMLScriptElement>('script[data-turnstile-sdk]');
+    const script = existingScript || document.createElement('script');
+    let settled = false;
+    const fail = () => {
+      if (settled) return;
+      settled = true;
       turnstileScriptPromise = null;
       turnstileScript = null;
-      script.remove();
+      if (!existingScript) script.remove();
       reject(new Error('Turnstile 脚本加载失败'));
+    };
+    const ready = () => {
+      if (settled) return;
+      if (!window.turnstile) {
+        fail();
+        return;
+      }
+      settled = true;
+      resolve();
+    };
+    script.addEventListener('load', () => {
+      if (window.turnstile?.ready) window.turnstile.ready(ready);
+      else ready();
     }, { once: true });
-    document.head.appendChild(script);
+    script.addEventListener('error', fail, { once: true });
+    if (!existingScript) {
+      script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+      script.async = true;
+      script.defer = true;
+      script.dataset.turnstileSdk = 'true';
+      document.head.appendChild(script);
+    } else if (window.turnstile) {
+      ready();
+    }
     turnstileScript = script;
   });
   return turnstileScriptPromise;
