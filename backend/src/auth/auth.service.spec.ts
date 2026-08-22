@@ -14,6 +14,7 @@ import { MailerService } from '../mailer/mailer.service';
 import { ConfigCacheService } from '../common/services/config-cache.service';
 import { RateLimitService } from '../common/services/rate-limit.service';
 import { AuditService } from '../common/services/audit.service';
+import { TurnstileService } from '../common/services/turnstile.service';
 
 describe('AuthService - validateVerificationCode', () => {
   let service: AuthService;
@@ -107,6 +108,7 @@ describe('AuthService - validateVerificationCode', () => {
         { provide: ConfigCacheService, useValue: mockConfigCacheService },
         { provide: RateLimitService, useValue: mockRateLimitService },
         { provide: AuditService, useValue: mockAuditService },
+        { provide: TurnstileService, useValue: { verify: jest.fn().mockResolvedValue(true) } },
       ],
     }).compile();
 
@@ -230,6 +232,11 @@ describe('AuthService - 邮箱验证开关与登录拦截', () => {
 
   const mockDataSource = {
     createQueryRunner: jest.fn().mockReturnValue(mockQueryRunner),
+    transaction: jest.fn(async (callback: (manager: any) => Promise<void>) => callback({
+      update: jest.fn().mockResolvedValue(undefined),
+      create: jest.fn().mockImplementation((_entity: unknown, value: object) => value),
+      save: jest.fn().mockResolvedValue(undefined),
+    })),
   };
 
   const mockConfigCacheService = {
@@ -242,6 +249,10 @@ describe('AuthService - 邮箱验证开关与登录拦截', () => {
 
   const mockMailerService = {
     sendVerificationCode: jest.fn(),
+  };
+
+  const mockTurnstileService = {
+    verify: jest.fn().mockResolvedValue(true),
   };
 
   const mockRateLimitService = {
@@ -297,6 +308,7 @@ describe('AuthService - 邮箱验证开关与登录拦截', () => {
         { provide: ConfigCacheService, useValue: mockConfigCacheService },
         { provide: RateLimitService, useValue: mockRateLimitService },
         { provide: AuditService, useValue: mockAuditService },
+        { provide: TurnstileService, useValue: mockTurnstileService },
       ],
     }).compile();
 
@@ -363,6 +375,69 @@ describe('AuthService - 邮箱验证开关与登录拦截', () => {
         expect.objectContaining({ emailVerified: true }),
       );
       expect(result.user?.emailVerified).toBe(true);
+    });
+  });
+
+  describe('send-code Turnstile 阻断', () => {
+    const configureSendCode = (turnstileEnabled: boolean) => {
+      mockConfigCacheService.get.mockImplementation(async (key: string) => {
+        if (key === 'EMAIL_VERIFICATION_ENABLED') return 'true';
+        if (key === 'TURNSTILE_ENABLED') return String(turnstileEnabled);
+        if (key === 'TURNSTILE_HOSTNAMES') return 'example.com';
+        return 'false';
+      });
+      mockUserRepo.findOne.mockResolvedValue(null);
+      mockVerificationCodeRepo.findOne.mockResolvedValue(null);
+    };
+
+    it('Turnstile 失败时不保存验证码也不发邮件', async () => {
+      configureSendCode(true);
+      mockTurnstileService.verify.mockResolvedValue(false);
+
+      await expect(service.sendVerificationCode(
+        { email: 'a@example.com', type: 'register', turnstileToken: 'token' } as any,
+        '127.0.0.1',
+      )).rejects.toThrow('安全校验失败');
+
+      expect(mockTurnstileService.verify).toHaveBeenCalledWith('token', 'register', ['example.com']);
+      expect(mockDataSource.transaction).not.toHaveBeenCalled();
+      expect(mockMailerService.sendVerificationCode).not.toHaveBeenCalled();
+    });
+
+    it('Turnstile 成功后才保存验证码并发邮件', async () => {
+      configureSendCode(true);
+      mockTurnstileService.verify.mockResolvedValue(true);
+
+      await service.sendVerificationCode(
+        { email: 'a@example.com', type: 'register', turnstileToken: 'token' } as any,
+        '127.0.0.1',
+      );
+
+      expect(mockDataSource.transaction).toHaveBeenCalled();
+      expect(mockMailerService.sendVerificationCode).toHaveBeenCalledWith('a@example.com', expect.any(String));
+    });
+
+    it('Turnstile 关闭时不调用校验服务', async () => {
+      configureSendCode(false);
+
+      await service.sendVerificationCode(
+        { email: 'a@example.com', type: 'register' } as any,
+        '127.0.0.1',
+      );
+
+      expect(mockTurnstileService.verify).not.toHaveBeenCalled();
+    });
+
+    it('reset_password 不触发 Turnstile 校验', async () => {
+      configureSendCode(true);
+      mockUserRepo.findOne.mockResolvedValue({ id: 'u-1' });
+
+      await service.sendVerificationCode(
+        { email: 'a@example.com', type: 'reset_password' } as any,
+        '127.0.0.1',
+      );
+
+      expect(mockTurnstileService.verify).not.toHaveBeenCalled();
     });
   });
 

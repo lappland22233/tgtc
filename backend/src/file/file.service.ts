@@ -1616,8 +1616,10 @@ export class FileService implements OnModuleInit {
       const inferredCover = `${file.id}.video.webp`;
       const inferredPath = this.thumbnailService.getInferredThumbnailPath(file.id, 'video');
       if (fs.existsSync(inferredPath)) {
-        file.thumbnailPath = inferredCover;
-        await this.fileRepository.save(file);
+        await this.fileRepository.update(
+          { id: file.id },
+          { thumbnailPath: inferredCover },
+        );
         localThumb = await fs.promises.readFile(inferredPath);
       }
     }

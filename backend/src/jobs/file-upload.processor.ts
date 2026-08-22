@@ -227,12 +227,6 @@ export class FileUploadProcessor {
       return;
     }
 
-    // G3-13：置 ready 的 SQL 必须带 uploadVersion 条件，防止旧版本收尾任务把并发覆盖后的新版本误标 ready。
-    await this.fileRepository.query(
-      'UPDATE files SET status = $1, "uploadFailureReason" = NULL WHERE id = $2 AND status IN ($3, $4) AND "uploadVersion" = $5',
-      ['ready', fileId, 'processing', 'error', uploadVersion],
-    );
-
     try {
       if (file.uploadStage !== 'committed') {
         if (file.mimeType?.startsWith('video/')) {
@@ -248,6 +242,17 @@ export class FileUploadProcessor {
     } catch (error) {
       // 衍生媒体失败不回滚远端提交点，也不触发 Bull 原文件重试。
       this.logger.warn(`文件 ${fileId} 衍生媒体生成失败，原文件已提交: ${(error as Error).message}`);
+    }
+
+    // 收尾最后一步才置 ready，避免 ThumbnailService 使用旧实体状态覆盖 ready。
+    // 条件更新同时保护 uploadVersion 和当前状态，防止并发覆盖写入。
+    const readyUpdate = await this.fileRepository.query(
+      'UPDATE files SET status = $1, "uploadFailureReason" = NULL WHERE id = $2 AND status IN ($3, $4) AND "uploadVersion" = $5',
+      ['ready', fileId, 'processing', 'error', uploadVersion],
+    );
+    if (readyUpdate?.rowCount === 0 || readyUpdate?.affected === 0) {
+      this.logger.warn(`文件 ${fileId} 置 ready 条件未命中（状态或版本已变化），跳过本轮收尾`);
+      return;
     }
 
     await this.removeUploadArtifacts(filePath);

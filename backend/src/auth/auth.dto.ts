@@ -1,4 +1,4 @@
-import { IsEmail, IsString, MinLength, MaxLength, Matches, IsEnum, ValidateIf } from 'class-validator';
+import { IsEmail, IsString, MinLength, MaxLength, Matches, IsEnum, ValidateIf, IsOptional } from 'class-validator';
 
 export enum VerificationType {
   REGISTER = 'register',
@@ -36,6 +36,11 @@ export class SendCodeDto {
 
   @IsEnum(VerificationType, { message: '类型必须是 register 或 reset_password' })
   type: string;
+
+  /** Turnstile 前端组件返回的 token；仅注册发送验证码时强制服务端校验。 */
+  @IsOptional()
+  @IsString()
+  turnstileToken?: string;
 }
 
 export class VerifyEmailDto {

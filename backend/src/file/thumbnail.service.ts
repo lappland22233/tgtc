@@ -113,8 +113,10 @@ export class ThumbnailService {
           }
           totalProcessed++;
         } else if (file.thumbnailPath !== expectedName) {
-          file.thumbnailPath = expectedName;
-          await this.fileRepository.save(file);
+          await this.fileRepository.update(
+            { id: file.id },
+            { thumbnailPath: expectedName },
+          );
         }
       }
       lastId = files[files.length - 1].id;
@@ -206,8 +208,10 @@ export class ThumbnailService {
     const coverPath = path.join(this.thumbnailDir, coverFilename);
     if (fs.existsSync(coverPath)) {
       if (file.thumbnailPath !== coverFilename) {
-        file.thumbnailPath = coverFilename;
-        await this.fileRepository.save(file);
+        await this.fileRepository.update(
+          { id: file.id },
+          { thumbnailPath: coverFilename },
+        );
       }
       return;
     }
@@ -242,8 +246,10 @@ export class ThumbnailService {
 
       await this.extractVideoFrame(resolvedSourcePath, tmpCover, VIDEO_COVER_MAX_WIDTH, 65);
       await fs.promises.rename(tmpCover, coverPath);
-      file.thumbnailPath = coverFilename;
-      await this.fileRepository.save(file);
+      await this.fileRepository.update(
+        { id: file.id },
+        { thumbnailPath: coverFilename },
+      );
     } catch (error) {
       this.logger.warn(`视频封面生成失败 id=${file.id}: ${(error as Error).message}`);
     } finally {
@@ -271,10 +277,26 @@ export class ThumbnailService {
         '-frames:v', '1', '-vf', `scale=${scaleWidth}:-2:force_original_aspect_ratio=decrease`,
         '-c:v', 'libwebp', '-quality', String(quality), '-f', 'webp', outputPath,
       ], { windowsHide: true });
+      const timeoutMs = 60 * 1000;
       let stderr = '';
+      let settled = false;
+      const settle = (error?: Error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        error ? reject(error) : resolve();
+      };
+      const timeout = setTimeout(() => {
+        try { ffmpeg.kill('SIGKILL'); } catch { /* 子进程可能已退出 */ }
+        settle(new Error(`FFmpeg 抽帧超时（${timeoutMs}ms）`));
+      }, timeoutMs);
+      timeout.unref?.();
       ffmpeg.stderr.on('data', chunk => { stderr = (stderr + chunk.toString()).slice(-2048); });
-      ffmpeg.once('error', reject);
-      ffmpeg.once('close', code => code === 0 ? resolve() : reject(new Error(stderr || `FFmpeg 退出码 ${code}`)));
+      ffmpeg.once('error', error => settle(error));
+      ffmpeg.once('close', code => {
+        if (code === 0) settle();
+        else settle(new Error(stderr || `FFmpeg 退出码 ${code}`));
+      });
     });
   }
 
@@ -372,8 +394,10 @@ export class ThumbnailService {
         .toFile(tmpThumbnail);
       await fs.promises.rename(tmpThumbnail, thumbPath);
 
-      file.thumbnailPath = thumbFilename;
-      await this.fileRepository.save(file);
+      await this.fileRepository.update(
+        { id: file.id },
+        { thumbnailPath: thumbFilename },
+      );
     } catch (err) {
       this.logger.warn(`缩略图生成失败 id=${file.id}: ${(err as Error).message}`);
     } finally {

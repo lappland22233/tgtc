@@ -3,8 +3,10 @@ import { ref, computed } from 'vue';
 import api from '../api/client';
 import { clearRedirectState } from '../api/client';
 import type { User } from '../types/user';
+import type { AuthStatus } from '../types/config';
 
 export type SendCodeType = 'register' | 'reset_password';
+export type { AuthStatus };
 
 interface AuthResponseData {
   user?: User;
@@ -120,8 +122,12 @@ export const useAuthStore = defineStore('auth', () => {
     return response;
   }
 
-  async function sendCode(email: string, type: SendCodeType) {
-    return api.post('/auth/send-code', { email, type });
+  async function sendCode(email: string, type: SendCodeType, turnstileToken?: string) {
+    return api.post('/auth/send-code', {
+      email,
+      type,
+      ...(turnstileToken ? { turnstileToken } : {}),
+    });
   }
 
   async function fetchUser() {

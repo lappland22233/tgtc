@@ -1,6 +1,10 @@
 export interface AuthConfig {
   registrationEnabled: boolean;
   emailVerificationEnabled: boolean;
+  turnstileEnabled: boolean;
+  siteKey: string;
+  secretKey?: string;
+  hostnames: string;
 }
 
 export interface SMTPConfig {
@@ -20,5 +24,6 @@ export interface UploadConfig {
 export interface AuthStatus {
   registrationEnabled: boolean;
   emailVerificationEnabled: boolean;
-  hasSuperAdmin: boolean;
+  turnstileEnabled: boolean;
+  siteKey: string;
 }

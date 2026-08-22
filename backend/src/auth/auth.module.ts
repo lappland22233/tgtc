@@ -13,6 +13,7 @@ import { JwtRevokedToken } from '../common/entities/jwt-revoked-token.entity';
 import { SystemConfig } from '../common/entities/system-config.entity';
 import { MailerModule } from '../mailer/mailer.module';
 import { UserModule } from '../user/user.module';
+import { TurnstileService } from '../common/services/turnstile.service';
 
 @Module({
   imports: [
@@ -40,7 +41,7 @@ import { UserModule } from '../user/user.module';
     MailerModule,
   ],
   controllers: [AuthController],
-  providers: [AuthService, JwtStrategy],
+  providers: [AuthService, JwtStrategy, TurnstileService],
   exports: [AuthService, JwtModule],
 })
 export class AuthModule {}

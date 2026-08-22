@@ -184,7 +184,9 @@ export class TasksService {
     const MAX_BATCHES = 100;
 
     try {
-      // G3-14：先尝试恢复 uploadStage='recoverable' 的记录（远端已上传成功但 DB 提交失败、有回执）。
+      // 先恢复远端已提交的记录：committed 可安全补齐 ready，remote_committed 重新走收尾队列。
+      await this.recoverCommittedFiles();
+      // G3-14：再尝试恢复 uploadStage='recoverable' 的记录（远端已上传成功但 DB 提交失败、有回执）。
       // 以确定性 jobId 重新入队，processor 会先 loadReceipt，凭回执完成 DB 提交而不再重传原文件。
       await this.recoverReceiptCommittableFiles();
 
@@ -241,6 +243,56 @@ export class TasksService {
         '僵尸 processing 恢复失败',
         error instanceof Error ? error.message : String(error),
       );
+    }
+  }
+
+  /** 恢复远端已有有效引用但状态仍为 processing 的存量文件。 */
+  private async recoverCommittedFiles(): Promise<void> {
+    const batch = await this.fileRepository.find({
+      where: { status: 'processing' as const, uploadStage: 'committed' as any },
+      take: 200,
+    });
+    let markedReady = 0;
+    let requeued = 0;
+    for (const file of batch) {
+      if (file.telegramFileId?.trim()) {
+        const result = await this.fileRepository
+          .createQueryBuilder()
+          .update(File)
+          .set({ status: 'ready' as const, uploadFailureReason: null })
+          .where('id = :id', { id: file.id })
+          .andWhere('status = :status', { status: 'processing' })
+          .andWhere('uploadStage = :stage', { stage: 'committed' })
+          .andWhere('uploadVersion = :version', { version: file.uploadVersion })
+          .execute();
+        markedReady += result.affected ?? 0;
+      }
+    }
+    const remoteBatch = await this.fileRepository.find({
+      where: { status: 'processing' as const, uploadStage: 'remote_committed' as any },
+      take: 200,
+    });
+    for (const file of remoteBatch) {
+      if (!file.telegramFileId?.trim()) continue;
+      try {
+        await this.fileUploadQueue.add(
+          'upload',
+          { fileId: file.id, filePath: `${process.cwd()}/tmp/uploads/pending/${file.id}`, uploadVersion: file.uploadVersion },
+          {
+            jobId: `file-upload:${file.id}:${file.uploadVersion}`,
+            attempts: 3,
+            backoff: { type: 'exponential', delay: 10000 },
+            removeOnComplete: 100,
+            removeOnFail: false,
+          },
+        );
+        requeued++;
+      } catch (error: unknown) {
+        this.logger.warn(`恢复 remote_committed 文件入队失败 fileId=${file.id}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    if (markedReady || requeued) {
+      this.logger.log(`已恢复远端提交文件：${markedReady} 条置 ready，${requeued} 条 remote_committed 重新入队`);
     }
   }
 

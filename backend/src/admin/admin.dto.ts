@@ -262,6 +262,26 @@ export class AuthConfigDto {
   @IsOptional()
   @IsBoolean()
   emailVerificationEnabled?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  turnstileEnabled?: boolean;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(256)
+  siteKey?: string;
+
+  /** 留空时保留数据库中已有的加密密文 */
+  @IsOptional()
+  @IsString()
+  @MaxLength(512)
+  secretKey?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(2000)
+  hostnames?: string;
 }
 
 export class AccessLogQueryDto {

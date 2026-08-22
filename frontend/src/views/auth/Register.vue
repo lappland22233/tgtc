@@ -50,6 +50,10 @@
             name="confirm-password"
           />
         </t-form-item>
+        <div v-if="turnstileEnabled" class="turnstile-section">
+          <div ref="turnstileRef" class="turnstile-widget" />
+          <p v-if="turnstileStatus" class="turnstile-status">{{ turnstileStatus }}</p>
+        </div>
         <t-form-item v-if="authStatus.emailVerificationEnabled" label="验证码" name="code">
           <div class="code-row">
             <t-input
@@ -87,12 +91,31 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted, onUnmounted, computed } from 'vue';
+import { ref, reactive, onMounted, onUnmounted, computed, nextTick } from 'vue';
 import { useRouter } from 'vue-router';
 import MessagePlugin from '@/utils/message';
 import { useAuthStore } from '../../stores/auth';
 import { api } from '../../stores/auth';
 import { getErrorMessage } from '../../utils/error';
+import type { AuthStatus } from '../../types/config';
+
+type TurnstileWidgetId = string;
+type TurnstileApi = {
+  render: (container: HTMLElement, options: {
+    sitekey: string;
+    action: string;
+    callback: (token: string) => void;
+    'expired-callback': () => void;
+    'error-callback': () => void;
+  }) => TurnstileWidgetId;
+  reset: (widgetId?: TurnstileWidgetId) => void;
+};
+
+declare global {
+  interface Window {
+    turnstile?: TurnstileApi;
+  }
+}
 
 const router = useRouter();
 const authStore = useAuthStore();
@@ -108,12 +131,20 @@ const form = reactive({
 
 const countdown = ref(0);
 const loading = ref(false);
+const turnstileRef = ref<HTMLElement | null>(null);
+const turnstileToken = ref('');
+const turnstileStatus = ref('');
 let countdownTimer: ReturnType<typeof setInterval> | null = null;
-const authStatus = ref({
+let turnstileWidgetId: TurnstileWidgetId | null = null;
+let turnstileScript: HTMLScriptElement | null = null;
+let turnstileScriptPromise: Promise<void> | null = null;
+const authStatus = ref<AuthStatus>({
   registrationEnabled: true,
   emailVerificationEnabled: false,
-  hasSuperAdmin: false,
+  turnstileEnabled: false,
+  siteKey: '',
 });
+const turnstileEnabled = computed(() => authStatus.value.turnstileEnabled && !!authStatus.value.siteKey);
 
 const rules = computed(() => ({
   email: [
@@ -140,10 +171,67 @@ const rules = computed(() => ({
   } : {}),
 }));
 
+function loadTurnstileScript(): Promise<void> {
+  if (window.turnstile) return Promise.resolve();
+  if (turnstileScriptPromise) return turnstileScriptPromise;
+  turnstileScriptPromise = new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+    script.async = true;
+    script.defer = true;
+    script.addEventListener('load', () => resolve(), { once: true });
+    script.addEventListener('error', () => {
+      turnstileScriptPromise = null;
+      turnstileScript = null;
+      script.remove();
+      reject(new Error('Turnstile 脚本加载失败'));
+    }, { once: true });
+    document.head.appendChild(script);
+    turnstileScript = script;
+  });
+  return turnstileScriptPromise;
+}
+
+async function renderTurnstile() {
+  if (!turnstileEnabled.value || !turnstileRef.value || turnstileWidgetId !== null) return;
+  try {
+    await loadTurnstileScript();
+    if (!turnstileRef.value || !window.turnstile) return;
+    turnstileWidgetId = window.turnstile.render(turnstileRef.value, {
+      sitekey: authStatus.value.siteKey,
+      action: 'register',
+      callback: (token) => {
+        turnstileToken.value = token;
+        turnstileStatus.value = '';
+      },
+      'expired-callback': () => {
+        turnstileToken.value = '';
+        turnstileStatus.value = '验证已过期，请重新完成验证';
+      },
+      'error-callback': () => {
+        turnstileToken.value = '';
+        turnstileStatus.value = '验证失败，请重试';
+      },
+    });
+  } catch {
+    turnstileToken.value = '';
+    turnstileStatus.value = '验证组件加载失败，请刷新页面重试';
+  }
+}
+
+function resetTurnstile() {
+  turnstileToken.value = '';
+  if (turnstileWidgetId && window.turnstile) {
+    window.turnstile.reset(turnstileWidgetId);
+  }
+}
+
 async function fetchAuthStatus() {
   try {
     const res = await api.get('/auth/status');
-    authStatus.value = res.data.data;
+    authStatus.value = { ...authStatus.value, ...res.data.data };
+    await nextTick();
+    await renderTurnstile();
   } catch {
     MessagePlugin.warning('无法获取注册状态，请稍后重试');
   }
@@ -160,8 +248,13 @@ async function sendCode() {
     MessagePlugin.warning('请输入有效的邮箱地址');
     return;
   }
+  if (turnstileEnabled.value && !turnstileToken.value) {
+    turnstileStatus.value = '请先完成安全验证';
+    MessagePlugin.warning(turnstileStatus.value);
+    return;
+  }
   try {
-    await authStore.sendCode(form.email, 'register');
+    await authStore.sendCode(form.email, 'register', turnstileToken.value || undefined);
     MessagePlugin.success('验证码已发送');
     countdown.value = 60;
     // 新建 timer 前先清除旧 timer，防止叠加泄漏；
@@ -179,6 +272,8 @@ async function sendCode() {
     countdownTimer = timer;
   } catch (error: unknown) {
     MessagePlugin.error(getErrorMessage(error));
+  } finally {
+    resetTurnstile();
   }
 }
 
@@ -213,11 +308,33 @@ onUnmounted(() => {
     clearInterval(countdownTimer);
     countdownTimer = null;
   }
+  if (turnstileWidgetId && window.turnstile) {
+    try { window.turnstile.reset(turnstileWidgetId); } catch { /* 组件卸载时 SDK 可能已失效 */ }
+  }
+  turnstileWidgetId = null;
+  turnstileToken.value = '';
+  turnstileScript?.remove();
+  turnstileScript = null;
+  turnstileScriptPromise = null;
 });
 </script>
 
 <style scoped>
 /* .auth-footer / .auth-link 已提取为全局共享类，见 assets/styles.css */
+
+.turnstile-section {
+  margin: 0 0 16px;
+}
+
+.turnstile-widget {
+  min-height: 65px;
+}
+
+.turnstile-status {
+  color: var(--text-secondary);
+  font-size: 13px;
+  margin: 4px 0 0;
+}
 
 .code-row {
   display: flex;

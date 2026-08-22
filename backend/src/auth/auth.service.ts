@@ -15,6 +15,7 @@ import { AuditStatus } from '../common/entities/audit-log.entity';
 import { RegisterDto, LoginDto, VerifyEmailDto, SendCodeDto, ResetPasswordDto } from './auth.dto';
 import { RateLimitService } from '../common/services/rate-limit.service';
 import { BCRYPT_ROUNDS } from '../common/constants/bcrypt';
+import { TurnstileService } from '../common/services/turnstile.service';
 
 /**
  * 占位 bcrypt 哈希：用户不存在时执行一次 dummy compare，
@@ -60,6 +61,7 @@ export class AuthService {
     private mailerService: MailerService,
     private rateLimitService: RateLimitService,
     private auditService: AuditService,
+    private turnstileService: TurnstileService,
   ) {
     // 验证码 HMAC 密钥：启动时强制校验，缺失则拒绝启动。
     // 杜绝硬编码回退密钥（旧实现回退到 'tgtc-code-hmac-default'，
@@ -334,6 +336,20 @@ export class AuthService {
       throw new BadRequestException('邮箱验证码功能未开启');
     }
 
+    // 注册发送验证码前必须完成 Turnstile 服务端校验；重置密码流程保持原有行为。
+    if (type === 'register') {
+      const turnstileEnabled = await this.getConfigValue('TURNSTILE_ENABLED', 'false');
+      if (turnstileEnabled === 'true') {
+        const configuredHostnames = (await this.getConfigValue('TURNSTILE_HOSTNAMES', process.env.TURNSTILE_HOSTNAMES || ''))
+          .split(',')
+          .map((hostname) => hostname.trim().toLowerCase())
+          .filter(Boolean);
+        if (!(await this.turnstileService.verify(sendCodeDto.turnstileToken, 'register', configuredHostnames))) {
+          throw new BadRequestException('安全校验失败，请刷新页面后重试');
+        }
+      }
+    }
+
     // B-5: IP 维度全局限流（3次/60秒）
     const ipLimitKey = `send-code:ip:${ip}`;
     const ipCheck = await this.rateLimitService.checkAndIncrement(
@@ -527,16 +543,22 @@ export class AuthService {
   async getAuthStatus(): Promise<{
     registrationEnabled: boolean;
     emailVerificationEnabled: boolean;
-    hasSuperAdmin: boolean;
+    turnstileEnabled: boolean;
+    siteKey: string;
   }> {
     const userCount = await this.userRepository.count();
-    const registrationEnabled = await this.getConfigValue('REGISTRATION_ENABLED', 'false');
-    const emailVerificationEnabled = await this.getConfigValue('EMAIL_VERIFICATION_ENABLED', 'false');
+    const [registrationEnabled, emailVerificationEnabled, turnstileEnabled, siteKey] = await Promise.all([
+      this.getConfigValue('REGISTRATION_ENABLED', 'false'),
+      this.getConfigValue('EMAIL_VERIFICATION_ENABLED', 'false'),
+      this.getConfigValue('TURNSTILE_ENABLED', 'false'),
+      this.getConfigValue('TURNSTILE_SITE_KEY', ''),
+    ]);
 
     return {
       registrationEnabled: userCount === 0 || registrationEnabled === 'true',
       emailVerificationEnabled: emailVerificationEnabled === 'true',
-      hasSuperAdmin: userCount > 0,
+      turnstileEnabled: turnstileEnabled === 'true',
+      siteKey,
     };
   }
 }

@@ -22,6 +22,21 @@
               开启后，注册时需要验证邮箱验证码
             </div>
           </t-form-item>
+          <t-form-item label="Cloudflare Turnstile">
+            <t-switch v-model="authConfig.turnstileEnabled" />
+            <div style="color: var(--text-secondary); font-size: 12px; margin-top: 4px;">
+              开启后可在后续注册流程中启用 Turnstile 人机验证
+            </div>
+          </t-form-item>
+          <t-form-item label="Turnstile Site Key">
+            <t-input v-model="authConfig.siteKey" placeholder="请输入 Cloudflare Site Key" autocomplete="off" name="turnstile-site-key" />
+          </t-form-item>
+          <t-form-item label="Turnstile Secret Key">
+            <t-input v-model="authConfig.secretKey" type="password" placeholder="留空则保留原 Secret Key" autocomplete="new-password" name="turnstile-secret-key" />
+            <div style="color: var(--text-secondary); font-size: 12px; margin-top: 4px;">
+              Secret Key 仅超级管理员可写，服务端加密保存且不会返回明文
+            </div>
+          </t-form-item>
           <t-form-item>
             <div style="display: flex; align-items: center; gap: 8px;">
               <t-button theme="primary" :disabled="!blockLoadState.auth" @click="saveAuthConfig">保存认证配置</t-button>
@@ -309,6 +324,10 @@ const blockLoadState = reactive({
 const authConfig = ref({
   registrationEnabled: false,
   emailVerificationEnabled: false,
+  turnstileEnabled: false,
+  siteKey: '',
+  secretKey: '',
+  hostnames: '',
 });
 
 const smtpConfig = ref({
@@ -419,7 +438,11 @@ function formatDate(date: string) {
 async function fetchAuthConfig(): Promise<boolean> {
   try {
     const res = await api.get('/admin/auth-config');
-    authConfig.value = res.data.data ?? authConfig.value;
+    const data = res.data.data;
+    if (data) {
+      // Secret Key 只返回掩码；重新加载时保留当前输入，避免覆盖用户尚未保存的新密钥。
+      authConfig.value = { ...authConfig.value, ...data, secretKey: authConfig.value.secretKey };
+    }
     blockLoadState.auth = true;
     return true;
   } catch (err) {

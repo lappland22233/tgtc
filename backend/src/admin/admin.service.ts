@@ -191,6 +191,7 @@ export class AdminService {
     'JWT_SECRET',
     'COOKIE_SECRET',
     'DB_PASSWORD',
+    'TURNSTILE_SECRET_KEY',
   ]);
 
   /**
@@ -211,6 +212,8 @@ export class AdminService {
     'FILE_CACHE_NO_CACHE_MODE',
     'REGISTRATION_ENABLED',
     'EMAIL_VERIFICATION_ENABLED',
+    'TURNSTILE_ENABLED',
+    'TURNSTILE_SITE_KEY',
     'SMTP_HOST',
     'SMTP_PORT',
     'SMTP_SECURE',
@@ -225,6 +228,7 @@ export class AdminService {
     'JWT_SECRET',
     'COOKIE_SECRET',
     'DB_PASSWORD',
+    'TURNSTILE_SECRET_KEY',
   ]);
 
   /**
@@ -441,36 +445,72 @@ export class AdminService {
   async getAuthConfig(): Promise<{
     registrationEnabled: boolean;
     emailVerificationEnabled: boolean;
+    turnstileEnabled: boolean;
+    siteKey: string;
+    secretKey: string;
+    hostnames: string;
   }> {
-    const [registrationEnabled, emailVerificationEnabled] = await Promise.all([
+    const [registrationEnabled, emailVerificationEnabled, turnstileEnabled, siteKey, secretKey, hostnames] = await Promise.all([
       this.getConfigByKey('REGISTRATION_ENABLED'),
       this.getConfigByKey('EMAIL_VERIFICATION_ENABLED'),
+      this.getConfigByKey('TURNSTILE_ENABLED'),
+      this.getConfigByKey('TURNSTILE_SITE_KEY'),
+      this.getConfigByKey('TURNSTILE_SECRET_KEY'),
+      this.getConfigByKey('TURNSTILE_HOSTNAMES'),
     ]);
 
     return {
       registrationEnabled: registrationEnabled === 'true',
       emailVerificationEnabled: emailVerificationEnabled === 'true',
+      turnstileEnabled: turnstileEnabled === 'true',
+      siteKey: siteKey || '',
+      // 管理端只接收掩码；密钥从不回显明文，留空提交时由服务端保留原密文。
+      secretKey: secretKey ? '***' : '',
+      hostnames: hostnames || '',
     };
   }
 
   async updateAuthConfig(user: User, config: {
     registrationEnabled?: boolean;
     emailVerificationEnabled?: boolean;
+    turnstileEnabled?: boolean;
+    siteKey?: string;
+    secretKey?: string;
+    hostnames?: string;
   }): Promise<void> {
-    if (config.registrationEnabled !== undefined) {
-      await this.setConfigValue('REGISTRATION_ENABLED', config.registrationEnabled.toString(), '是否允许新用户注册');
+    const current = await Promise.all([
+      this.getConfigByKey('TURNSTILE_SITE_KEY'),
+      this.getConfigByKey('TURNSTILE_SECRET_KEY'),
+      this.getConfigByKey('TURNSTILE_HOSTNAMES'),
+    ]);
+    const enabled = config.turnstileEnabled ?? (await this.getConfigByKey('TURNSTILE_ENABLED')) === 'true';
+    const siteKey = (config.siteKey ?? current[0] ?? '').trim();
+    const hostnames = (config.hostnames ?? current[2] ?? '').split(',').map((v) => v.trim().toLowerCase()).filter(Boolean);
+    const secretKey = config.secretKey?.trim();
+    const hasSecret = secretKey && secretKey !== '***' ? true : Boolean(current[1]);
+    if (enabled && (!siteKey || !hasSecret || hostnames.length === 0)) {
+      throw new BadRequestException('开启 Turnstile 时必须完整配置 Site Key、Secret Key 和可信 Hostname');
     }
-    if (config.emailVerificationEnabled !== undefined) {
-      await this.setConfigValue('EMAIL_VERIFICATION_ENABLED', config.emailVerificationEnabled.toString(), '是否开启邮箱验证码');
-    }
+    const entries = [
+      { key: 'REGISTRATION_ENABLED', value: String(config.registrationEnabled ?? (await this.getConfigByKey('REGISTRATION_ENABLED'))), description: '是否允许新用户注册' },
+      { key: 'EMAIL_VERIFICATION_ENABLED', value: String(config.emailVerificationEnabled ?? (await this.getConfigByKey('EMAIL_VERIFICATION_ENABLED'))), description: '是否开启邮箱验证码' },
+      { key: 'TURNSTILE_ENABLED', value: String(enabled), description: '是否开启 Cloudflare Turnstile' },
+      { key: 'TURNSTILE_SITE_KEY', value: siteKey, description: 'Cloudflare Turnstile Site Key' },
+      { key: 'TURNSTILE_HOSTNAMES', value: hostnames.join(','), description: 'Cloudflare Turnstile 可信 Hostname 列表' },
+      ...(secretKey && secretKey !== '***' ? [{ key: 'TURNSTILE_SECRET_KEY', value: encryptPassword(secretKey), description: 'Cloudflare Turnstile Secret Key（已加密）' }] : []),
+    ];
+    await this.configCacheService.setBatch(entries);
 
-    // 审计日志：认证配置变更
     this.auditService.log({
       action: 'auth_config_change',
       userId: user.id,
       resourceType: 'config',
       resourceId: 'auth',
-      metadata: config,
+      metadata: {
+        ...config,
+        secretKey: config.secretKey ? '***' : undefined,
+        hostnames: hostnames.join(','),
+      },
     });
   }
 
