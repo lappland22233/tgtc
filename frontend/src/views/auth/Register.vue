@@ -203,8 +203,6 @@ function loadTurnstileScript(): Promise<void> {
     script.addEventListener('error', fail, { once: true });
     if (!existingScript) {
       script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
-      script.async = true;
-      script.defer = true;
       script.dataset.turnstileSdk = 'true';
       document.head.appendChild(script);
     } else if (window.turnstile) {
