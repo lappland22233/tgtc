@@ -37,6 +37,12 @@
               Secret Key 仅超级管理员可写，服务端加密保存且不会返回明文
             </div>
           </t-form-item>
+          <t-form-item label="Turnstile 可信 Hostname">
+            <t-input v-model="authConfig.hostnames" placeholder="例如 example.com，多个域名用英文逗号分隔" autocomplete="off" name="turnstile-hostnames" />
+            <div style="color: var(--text-secondary); font-size: 12px; margin-top: 4px;">
+              必须与 Cloudflare Widget 配置的 Hostnames 一致；开启验证时不能为空
+            </div>
+          </t-form-item>
           <t-form-item>
             <div style="display: flex; align-items: center; gap: 8px;">
               <t-button theme="primary" :disabled="!blockLoadState.auth" @click="saveAuthConfig">保存认证配置</t-button>
