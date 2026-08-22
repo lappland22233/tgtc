@@ -13,7 +13,7 @@
     <!--
       Content-Security-Policy（XSS 兜底防护）：
       - default-src 'self'：默认仅允许同源资源
-      - script-src 'self' + 字体加载内联事件的精确哈希（不允许任意内联脚本）
+      - script-src 'self' + Turnstile / Cloudflare Insights 外部脚本（不允许任意内联脚本）
       - style-src 'unsafe-inline'：TDesign 与运行时主题大量使用内联 style，必须放行；
         额外允许 fonts.googleapis.com 的字体样式表
       - font-src：允许 fonts.gstatic.com 字体文件与 data: 内联字体/图标
@@ -21,7 +21,7 @@
       - media-src：允许 blob:（FilePreviewDialog 用 URL.createObjectURL(MediaSource) 做 MSE 播放）
       - connect-src：同源 API + ws:/wss:（Vite HMR WebSocket）
       - object-src 'none' / base-uri 'self'：关闭插件嵌入与 base 注入面
-      注意：字体 onload 内联属性必须与下方哈希对应的脚本内容完全一致，修改需重算哈希。
+      注意：生产环境若启用 Cloudflare Web Analytics，需在 Cloudflare 控制台确认其注入脚本兼容当前 CSP；不要为此全局开启 unsafe-inline。
 
       ⚠️ G10-07 安全说明（connect-src ws:/wss:）：
       本地 index.html 的 CSP 由浏览器强制（HTML meta），而 Vite 开发态 HMR 依赖
@@ -34,7 +34,7 @@
     -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self' 'sha256-eOcoZqh8pP0qUd41Lu2w/Pq/ao1wfGf5RKErKPEVuwM=' https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self' ws: wss: https://challenges.cloudflare.com; frame-src 'self' https://challenges.cloudflare.com; media-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'"
+      content="default-src 'self'; script-src 'self' https://challenges.cloudflare.com https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self' ws: wss: https://challenges.cloudflare.com https://cloudflareinsights.com https://*.cloudflareinsights.com; frame-src 'self' https://challenges.cloudflare.com; media-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'"
     />
 
     <!-- Preconnect to critical third-party origins（非阻塞资源提示，不可达时快速失败不影响首屏） -->
@@ -42,7 +42,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 
     <!--
-      字体非阻塞加载（media=print + onload 切换，onload 脚本已被上方 CSP 哈希白名单放行）。
+      字体直接加载，避免 CSP 阻止内联 onload 事件处理器。
       国内部署提示：Google Fonts 在国内常不可达。该加载方式为非阻塞，不可达时仅回退系统字体，
       不会卡首屏；如需完整字体体验，建议：
         1) 将字体文件本地化到 public/fonts 并改用本地 @font-face；或
@@ -52,8 +52,6 @@
     <link
       rel="stylesheet"
       href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Noto+Sans+SC:wght@300;400;500;700&family=JetBrains+Mono:wght@400;500;600&display=swap"
-      media="print"
-      onload="this.media='all'; this.onload=null;"
     />
     <!-- Fallback for browsers that don't fire onload on link -->
     <noscript>

@@ -196,10 +196,9 @@ function loadTurnstileScript(): Promise<void> {
       settled = true;
       resolve();
     };
-    script.addEventListener('load', () => {
-      if (window.turnstile?.ready) window.turnstile.ready(ready);
-      else ready();
-    }, { once: true });
+    // load 事件已经保证 api.js 执行完成，不再调用 turnstile.ready()；
+    // Cloudflare 会对异步脚本调用 ready() 抛出 TurnstileError。
+    script.addEventListener('load', ready, { once: true });
     script.addEventListener('error', fail, { once: true });
     if (!existingScript) {
       script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
