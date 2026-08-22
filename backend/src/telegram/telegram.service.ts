@@ -157,17 +157,36 @@ export class TelegramService {
    */
   private async telegramRequest<T>(fn: () => Promise<T>, label: string, retries = 3): Promise<T> {
     for (let attempt = 1; attempt <= retries; attempt++) {
+      const startedAt = Date.now();
       try {
         return await fn();
       } catch (error: unknown) {
+        // 网络层错误通常没有 response，原先会直接静默上抛，导致只能看到“上传失败”。
+        // 在所有分支前记录安全摘要，便于区分 ECONNREFUSED、超时、连接重置和 HTTP 错误。
+        this.redactError(error);
+        const axiosError = error && typeof error === 'object'
+          ? error as { response?: { status?: number; data?: { description?: string; parameters?: { retry_after?: number } } }; message?: string; code?: string; config?: { url?: string } }
+          : undefined;
+        const status = axiosError?.response?.status;
+        const description = axiosError?.response?.data?.description || '';
+        const errorCode = axiosError?.code || 'UNKNOWN';
+        const errorErrno = axiosError && 'errno' in axiosError ? String((axiosError as { errno?: unknown }).errno ?? '') : '';
+        const errorSyscall = axiosError && 'syscall' in axiosError ? String((axiosError as { syscall?: unknown }).syscall ?? '') : '';
+        const transport = [errorCode, errorErrno, errorSyscall].filter(Boolean).join('/') || 'UNKNOWN';
+        const detail = this.safeTelegramDescription(description || axiosError?.message || '未知错误');
+        this.logger.warn(
+          `Telegram 请求失败 label=${label} attempt=${attempt}/${retries} elapsed=${Date.now() - startedAt}ms `
+          + `status=${status ?? 'none'} transport=${transport} response=${status === undefined ? 'none' : 'present'} reason=${detail}`,
+        );
+
         if (error && typeof error === 'object' && 'response' in error) {
-          const axiosError = error as { response?: { status?: number; data?: { description?: string; parameters?: { retry_after?: number } } }; message?: string; config?: { url?: string } };
-          const status = axiosError.response?.status;
-          const description = axiosError.response?.data?.description || '';
+          const responseError = error as { response?: { status?: number; data?: { description?: string; parameters?: { retry_after?: number } } }; message?: string; config?: { url?: string } };
+          const status = responseError.response?.status;
+          const description = responseError.response?.data?.description || '';
 
           // 429 限流 — 使用 Telegram 返回的 retry_after 秒数等待后重试
           if (status === 429 && attempt < retries) {
-            const retryAfter = axiosError.response?.data?.parameters?.retry_after || 3;
+            const retryAfter = responseError.response?.data?.parameters?.retry_after || 3;
             const delay = Math.max(retryAfter * 1000, 1000);
             this.logger.warn(`${label} 触发限流 (429)，${attempt}/${retries} 次重试，等待 ${delay}ms...`);
             await new Promise(resolve => setTimeout(resolve, delay));
