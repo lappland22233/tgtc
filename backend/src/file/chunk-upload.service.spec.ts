@@ -42,6 +42,13 @@ describe('ChunkUploadService session quota', () => {
 
   const init = () => service.init('file.bin', MB, 'application/octet-stream', 1, MB, userId);
 
+  it('accepts a session whose declared chunk size is exactly the 16MiB maximum', async () => {
+    const chunkSize = 16 * MB;
+    const result = await service.init('large.bin', chunkSize, 'video/mp4', 1, chunkSize, userId);
+
+    expect(result).toEqual({ uploadId: expect.any(String) });
+  });
+
   it('rejects the eleventh concurrently active session', async () => {
     await Promise.all(Array.from({ length: 10 }, () => init()));
 

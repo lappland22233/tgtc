@@ -59,7 +59,9 @@ export class ChunkUploadController {
         destination: incomingChunkDir,
         filename: (_req, _file, callback) => callback(null, `${randomUUID()}.part`),
       }),
-      limits: { fileSize: MAX_CHUNK_SIZE, files: 1, fields: 1 },
+      // busboy 在 fileSize === limit 时就会触发 limit 事件；上限需留 1 字节，
+      // 才能允许合法的 MAX_CHUNK_SIZE 分片（恰好 16MiB）通过 Multer。
+      limits: { fileSize: MAX_CHUNK_SIZE + 1, files: 1, fields: 1 },
     }),
   )
   async uploadChunk(
