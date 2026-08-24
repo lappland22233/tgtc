@@ -9,11 +9,7 @@ import { User } from '../common/entities/user.entity';
 import { FileAccessLog } from '../common/entities/file-access-log.entity';
 import { AccessLog } from '../common/entities/access-log.entity';
 import { AuditLog } from '../common/entities/audit-log.entity';
-import { DashboardConfig } from '../common/entities/dashboard-config.entity';
 import { Alert } from '../common/entities/alert.entity';
-import { TelemetryRecord } from '../common/entities/telemetry-record.entity';
-import { DashboardController } from './dashboard.controller';
-import { DashboardService } from './dashboard.service';
 import { ExportService } from './export.service';
 import { FileVerifyService } from './file-verify.service';
 import { FileVerifyTask } from '../common/entities/file-verify-task.entity';
@@ -24,14 +20,14 @@ import { AlertModule } from '../alert/alert.module';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([SystemConfig, BannedIP, File, User, FileAccessLog, AccessLog, AuditLog, DashboardConfig, Alert, TelemetryRecord, FileVerifyTask]),
+    TypeOrmModule.forFeature([SystemConfig, BannedIP, File, User, FileAccessLog, AccessLog, AuditLog, Alert, FileVerifyTask]),
     BullQueueModule,
     FileModule,
     MailerModule,
     forwardRef(() => AlertModule),
   ],
-  controllers: [AdminController, DashboardController],
-  providers: [AdminService, DashboardService, ExportService, FileVerifyService],
+  controllers: [AdminController],
+  providers: [AdminService, ExportService, FileVerifyService],
   exports: [AdminService, FileVerifyService],
 })
 export class AdminModule {}

@@ -67,7 +67,7 @@ describe('AuthController', () => {
     expect(await controller.sendCode({} as any, request())).toEqual({ message: '验证码已发送' });
     expect(await controller.verifyEmail({} as any)).toEqual({ message: '邮箱验证成功' });
     expect(await controller.resetPassword({} as any, request())).toEqual({ message: '密码重置成功' });
-    const user = { id: 'u', email: 'e', role: 'user', emailVerified: true, createdAt: new Date() } as any;
+    const user = { id: 'u', email: 'e', role: 'user', emailVerified: true, lastLoginAt: null, createdAt: new Date() } as any;
     expect(await controller.getMe(user)).toEqual(user);
     expect(await controller.getAuthStatus()).toEqual({ enabled: true });
     expect(authService.sendVerificationCode).toHaveBeenCalled();

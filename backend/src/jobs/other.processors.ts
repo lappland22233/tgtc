@@ -6,7 +6,6 @@ import { QUEUE_NAMES } from './bull-queue.module';
 import { AlertEngineService } from '../alert/alert-engine.service';
 import { AlertGateway } from '../alert/alert.gateway';
 import { BehaviorAnalyzer } from '../security/behavior-analyzer.service';
-import { TelemetryService } from '../telemetry/telemetry.service';
 
 @Injectable()
 @Processor(QUEUE_NAMES.ALERT_EVALUATION)
@@ -198,29 +197,6 @@ export class DataArchivalProcessor {
       }
     } catch (error) {
       this.logger.warn(`数据归档失败: ${(error as Error).message}`);
-      throw error;
-    }
-  }
-}
-
-/** 每日清理过期遥测数据（默认保留 90 天），由 jobs-scheduler 调度 */
-@Injectable()
-@Processor(QUEUE_NAMES.DATA_ARCHIVAL)
-export class TelemetryCleanupProcessor {
-  private readonly logger = new Logger(TelemetryCleanupProcessor.name);
-
-  constructor(private telemetryService: TelemetryService) {}
-
-  @Process('telemetry-cleanup')
-  async cleanupTelemetry(_job: Job): Promise<void> {
-    try {
-      const deleted = await this.telemetryService.cleanupOld();
-      if (deleted > 0) {
-        this.logger.log(`已清理 ${deleted} 条过期遥测记录`);
-      }
-    } catch (error) {
-      this.logger.warn(`遥测数据清理失败: ${(error as Error).message}`);
-      // 抛出以触发 Bull 重试，避免暂时性故障导致清理永久缺失
       throw error;
     }
   }

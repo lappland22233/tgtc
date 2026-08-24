@@ -13,6 +13,11 @@ function buildAdminService() {
     update: jest.fn(),
   };
   const auditService = { log: jest.fn(), logAwait: jest.fn() };
+  const configCacheService = {
+    get: jest.fn().mockResolvedValue(''),
+    set: jest.fn().mockResolvedValue(undefined),
+    setBatch: jest.fn().mockResolvedValue(undefined),
+  };
   const repoMock = () => ({}) as any;
   const service = new AdminService(
     repoMock(), // systemConfigRepository
@@ -22,15 +27,42 @@ function buildAdminService() {
     repoMock(), // accessLogRepository
     repoMock(), // accessLogRepo
     repoMock(), // auditLogRepo
-    repoMock(), // telemetryRepo
     {} as any, // fileService
-    {} as any, // configCacheService
+    configCacheService as any,
     auditService as any,
     {} as any, // exportService
     {} as any, // mailerService
   );
   return { service, fileRepository, auditService };
 }
+
+describe('AdminService.getTopFiles 带宽排序契约', () => {
+  it('将 bandwidth 排序交给数据库聚合并按 limit 截断', async () => {
+    const accessLogRepository = { createQueryBuilder: jest.fn() };
+    const qb = {
+      leftJoin: jest.fn().mockReturnThis(),
+      select: jest.fn().mockReturnThis(),
+      addSelect: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      andWhere: jest.fn().mockReturnThis(),
+      groupBy: jest.fn().mockReturnThis(),
+      orderBy: jest.fn().mockReturnThis(),
+      addOrderBy: jest.fn().mockReturnThis(),
+      limit: jest.fn().mockReturnThis(),
+      getRawMany: jest.fn().mockResolvedValue([]),
+    };
+    accessLogRepository.createQueryBuilder.mockReturnValue(qb);
+    const repoMock = () => ({}) as any;
+    const service = new AdminService(
+      repoMock(), repoMock(), repoMock(), repoMock(), accessLogRepository as any,
+      repoMock(), repoMock(), {} as any, {} as any, {} as any, {} as any, {} as any,
+    );
+
+    await expect(service.getTopFiles({ sortBy: 'bandwidth', limit: 7 } as any)).resolves.toEqual([]);
+    expect(qb.orderBy).toHaveBeenCalledWith('"totalBandwidth"', 'DESC');
+    expect(qb.limit).toHaveBeenCalledWith(7);
+  });
+});
 
 describe('AdminService 构造', () => {
   it('buildAdminService 可正常实例化（13 个依赖占位）', () => {
@@ -164,6 +196,7 @@ describe('AdminService 通用配置写入白名单 (G7-01)', () => {
   it('updateConfig 允许白名单内的普通配置键并写入', async () => {
     const { auditService } = buildAdminService();
     const configCache = {
+      get: jest.fn().mockResolvedValue(''),
       set: jest.fn().mockResolvedValue(undefined),
       setBatch: jest.fn().mockResolvedValue(undefined),
     };
@@ -172,7 +205,7 @@ describe('AdminService 通用配置写入白名单 (G7-01)', () => {
     const repoMock = () => ({}) as any;
     const svc = new AdminService(
       repoMock(), repoMock(), fileRepository as any, repoMock(), repoMock(),
-      repoMock(), repoMock(), repoMock(), {} as any, configCache as any,
+      repoMock(), repoMock(), {} as any, configCache as any,
       auditService as any, {} as any, {} as any,
     );
 
@@ -207,7 +240,7 @@ describe('AdminService.getConfig 敏感键掩码 (G7-03)', () => {
     const auditService = { log: jest.fn(), logAwait: jest.fn() };
     const svc = new AdminService(
       systemConfigRepository as any, repoMock(), fileRepository as any, repoMock(),
-      repoMock(), repoMock(), repoMock(), repoMock(), {} as any, {} as any,
+      repoMock(), repoMock(), repoMock(), {} as any, {} as any,
       auditService as any, {} as any, {} as any,
     );
 
@@ -247,7 +280,7 @@ describe('AdminService.getLatencyStats endDate 口径 (G7-05)', () => {
     const svc = new AdminService(
       repoMock(), repoMock(), fileRepository as any, repoMock(), repoMock(),
       accessLogRepo as any, repoMock(), repoMock(), {} as any, {} as any,
-      auditService as any, {} as any, {} as any,
+      auditService as any, {} as any,
     );
 
     const result = await svc.getLatencyStats({
@@ -271,6 +304,7 @@ describe('AdminService.updateSecurityConfig 归一化 (G7-06)', () => {
   it('指数形式输入入库前归一化为十进制字符串', async () => {
     const configCache = {
       get: jest.fn(),
+      set: jest.fn().mockResolvedValue(undefined),
       setBatch: jest.fn().mockResolvedValue(undefined),
     };
     const repoMock = () => ({}) as any;
@@ -278,7 +312,7 @@ describe('AdminService.updateSecurityConfig 归一化 (G7-06)', () => {
     const auditService = { log: jest.fn(), logAwait: jest.fn() };
     const svc = new AdminService(
       repoMock(), repoMock(), fileRepository as any, repoMock(), repoMock(),
-      repoMock(), repoMock(), repoMock(), {} as any, configCache as any,
+      repoMock(), repoMock(), {} as any, configCache as any,
       auditService as any, {} as any, {} as any,
     );
 
@@ -300,7 +334,7 @@ describe('AdminService.updateSecurityConfig 归一化 (G7-06)', () => {
     const auditService = { log: jest.fn(), logAwait: jest.fn() };
     const svc = new AdminService(
       repoMock(), repoMock(), fileRepository as any, repoMock(), repoMock(),
-      repoMock(), repoMock(), repoMock(), {} as any, configCache as any,
+      repoMock(), repoMock(), {} as any, configCache as any,
       auditService as any, {} as any, {} as any,
     );
 

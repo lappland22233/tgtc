@@ -160,6 +160,7 @@ export class AuthService {
           email: savedUser.email,
           role: savedUser.role,
           emailVerified: savedUser.emailVerified,
+          lastLoginAt: savedUser.lastLoginAt ?? null,
         },
         message: '注册成功',
       };
@@ -321,6 +322,7 @@ export class AuthService {
         email: user.email,
         role: user.role,
         emailVerified: user.emailVerified,
+        lastLoginAt: user.lastLoginAt ?? null,
       },
     };
   }

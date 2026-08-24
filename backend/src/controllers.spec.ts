@@ -5,7 +5,6 @@ import { AdminController } from './admin/admin.controller';
 import { UserController } from './user/user.controller';
 import { FolderController } from './folder/folder.controller';
 import { TagController } from './tag/tag.controller';
-import { DashboardController } from './admin/dashboard.controller';
 import { AlertController } from './alert/alert.controller';
 import { ChunkUploadController } from './file/chunk-upload.controller';
 import { AlertLevel } from './common/entities/alert.entity';
@@ -31,9 +30,7 @@ describe('thin controllers', () => {
     const queryMethods = ['getRefererAnalysis','getUserAgentAnalysis','getUserActivityStats','getBandwidthAnalysis','getFileTypeStats','getTopFiles','getTopPaths','getLatencyStats','getStatusByPath','getDownloadStats','getAbnormalIps','getAccessLogs'] as const;
     for (const method of queryMethods) await c[method]({} as any);
     await c.getComparison(); await c.getAccessLogStats(); await c.getAccessLogTrend('24h');
-    await c.getAuditLogs('2','3','x','u','7d'); await c.getTelemetryStats();
-    await c.getTelemetryRecords('2','3','error','ip','u','type','q','7d');
-    await c.getTelemetryPerformance(); await c.getTelemetryErrors('5');
+    await c.getAuditLogs('2','3','x','u','7d');
     await c.updateSecurityConfig(user, { configs: {} } as any);
     await c.createFileVerifyTask(user, { mode: 'dry-run' } as any);
     await c.getActiveFileVerifyTask();
@@ -52,12 +49,11 @@ describe('thin controllers', () => {
   it('streams admin exports and validates export parameters', async () => {
     const service = serviceProxy();
     service.exportData.mockResolvedValue({ contentType: 'text/csv', filename: 'x.csv', data: 'a,b' });
-    service.exportTelemetry.mockResolvedValue([{ id: 1 }]);
     const c = new AdminController(service, service);
     const res: any = { setHeader: jest.fn(), send: jest.fn(), set: jest.fn() };
     for (const args of [['xml','',''],['','1y',''],['','','users']]) await expect(c.exportData(user, args[0],args[1],args[2],res)).rejects.toBeInstanceOf(BadRequestException);
-    await c.exportData(user,'','','',res); await c.exportTelemetry(undefined,undefined,undefined,res);
-    expect(res.send).toHaveBeenCalledTimes(2);
+    await c.exportData(user,'','','',res);
+    expect(res.send).toHaveBeenCalledTimes(1);
   });
 
   it('covers user controller parsing and mutations', async () => {
@@ -78,10 +74,7 @@ describe('thin controllers', () => {
     await t.findAll(user); await t.create(user,{} as any); await t.update(user,'id',{} as any); await t.delete(user,'id');
   });
 
-  it('covers dashboard and alert controllers', async () => {
-    const ds = serviceProxy(); const d = new DashboardController(ds);
-    await d.list(user); await d.getPresets(); await d.createFromPreset(user,'p'); await d.get('id',user);
-    await d.create(user,{} as any); await d.create(user,{ name:'n',config:[{}],isDefault:true } as any); await d.update('id',user,{config:[]}); await d.delete('id',user);
+  it('covers alert controller', async () => {
     const as = serviceProxy(); as.acknowledgeAll.mockResolvedValue(3); const a = new AlertController(as);
     await a.getAlerts('2','5',AlertLevel.CRITICAL,'true'); await a.getAlerts(undefined,undefined,'bad','false');
     await a.getUnacknowledged(); await a.acknowledge('id',user); expect(await a.acknowledgeAll(user)).toEqual({ message:'已确认 3 条告警' });

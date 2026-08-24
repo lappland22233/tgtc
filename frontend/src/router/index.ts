@@ -124,11 +124,10 @@ const routes: RouteRecordRaw[] = [
         component: () => import('../views/admin/UserActivity.vue'),
         meta: { superAdmin: true },
       },
+      // 已移除管理后台自定义仪表盘，保留旧入口兼容重定向到管理后台首页。
       {
         path: 'admin/dashboard-customizer',
-        name: 'AdminDashboardCustomizer',
-        component: () => import('../views/admin/DashboardCustomizer.vue'),
-        meta: { admin: true },
+        redirect: '/admin',
       },
       {
         path: 'admin/access-logs',
@@ -140,12 +139,6 @@ const routes: RouteRecordRaw[] = [
         path: 'admin/audit-logs',
         name: 'AdminAuditLogs',
         component: () => import('../views/admin/AuditLogs.vue'),
-        meta: { superAdmin: true },
-      },
-      {
-        path: 'admin/telemetry',
-        name: 'AdminTelemetry',
-        component: () => import('../views/admin/TelemetryStats.vue'),
         meta: { superAdmin: true },
       },
     ],

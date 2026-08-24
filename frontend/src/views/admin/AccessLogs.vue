@@ -96,7 +96,7 @@
         <h3>文件访问排行</h3>
         <t-radio-group v-model="topFilesSortBy" variant="default-filled" size="small" @change="fetchTopFiles">
           <t-radio-button value="accessCount">按访问次数</t-radio-button>
-          <t-radio-button value="totalBandwidth">按带宽</t-radio-button>
+          <t-radio-button value="bandwidth">按带宽</t-radio-button>
         </t-radio-group>
       </div>
       <t-loading :loading="topFilesLoading" size="small">
@@ -466,7 +466,7 @@ const pagination = reactive({
 
 // New section state
 const topFiles = ref<TopFileItem[]>([]);
-const topFilesSortBy = ref<'accessCount' | 'totalBandwidth'>('accessCount');
+const topFilesSortBy = ref<'accessCount' | 'bandwidth'>('accessCount');
 const topFilesLoading = ref(false);
 const topPaths = ref<TopPathItem[]>([]);
 const topPathsLoading = ref(false);

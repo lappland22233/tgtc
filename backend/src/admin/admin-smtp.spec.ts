@@ -31,7 +31,6 @@ function buildAdminService() {
     repoMock(), // accessLogRepository
     repoMock(), // accessLogRepo
     repoMock(), // auditLogRepo
-    repoMock(), // telemetryRepo
     {} as any, // fileService
     configCacheService as any,
     auditService as any,
@@ -54,7 +53,7 @@ const baseConfig = {
 describe('AdminService query condition branches', () => {
   const chain = (raw: any[] = []) => {
     const q: any = {};
-    for (const m of ['where','andWhere','select','addSelect','groupBy','orderBy','leftJoin','setParameter','having','limit','skip','take']) q[m] = jest.fn(() => q);
+    for (const m of ['where','andWhere','select','addSelect','groupBy','orderBy','addOrderBy','leftJoin','setParameter','having','limit','skip','take']) q[m] = jest.fn(() => q);
     q.getCount = jest.fn().mockResolvedValue(raw.length);
     q.getMany = jest.fn().mockResolvedValue(raw);
     q.getRawMany = jest.fn().mockResolvedValue(raw);
@@ -68,7 +67,6 @@ describe('AdminService query condition branches', () => {
     access.createQueryBuilder = jest.fn(() => chain(raw));
     (service as any).accessLogRepository.createQueryBuilder = jest.fn(() => chain(raw));
     (service as any).auditLogRepo.createQueryBuilder = jest.fn(() => chain(raw));
-    (service as any).telemetryRepo.createQueryBuilder = jest.fn(() => chain(raw));
     return { service, access };
   };
 
@@ -141,23 +139,6 @@ describe('AdminService query condition branches', () => {
     configCacheService.get.mockResolvedValue(''); expect((await service.getSecurityConfig()).length).toBe(meta.length);
   });
 
-  it('covers telemetry record filters and pagination clamps', async () => {
-    let {service}=build([{id:'1',type:'error'},{id:'2',type:'error'}]);
-    const result=await service.getTelemetryRecords({page:0,limit:500,type:'error',ip:'1',userId:'u',errorType:'Type',keyword:'q',timeRange:'24h'});
-    expect(result.items).toHaveLength(2);
-    ({service}=build([]));
-    await expect(service.getTelemetryRecords({type:'',ip:' ',userId:' ',errorType:' ',keyword:' '})).resolves.toEqual({items:[],total:0});
-  });
-
-  it('maps telemetry aggregates with missing and invalid numeric fields', async () => {
-    const {service}=build(); const telemetry=(service as any).telemetryRepo;
-    telemetry.createQueryBuilder=jest.fn()
-      .mockReturnValueOnce(Object.assign(chain(),{getRawOne:jest.fn().mockResolvedValue(undefined)}))
-      .mockReturnValueOnce(Object.assign(chain(),{getRawMany:jest.fn().mockResolvedValue([{type:'custom',count:'bad'}])}))
-      .mockReturnValueOnce(Object.assign(chain(),{getRawOne:jest.fn().mockResolvedValue({uniqueIPs:null})}))
-      .mockReturnValueOnce(Object.assign(chain(),{getRawMany:jest.fn().mockResolvedValue([{time:'t',error:null,apiError:'x',uploadError:'1',performance:'2',environment:'3'}])}));
-    await expect(service.getTelemetryStats('bad')).resolves.toMatchObject({totalRecords:0,uniqueIPs:0,byType:{custom:0},trend:[{error:0,apiError:0,uploadError:1,performance:2,environment:3}]});
-  });
 });
 
 describe('AdminService.updateSMTPConfig 密码处理', () => {

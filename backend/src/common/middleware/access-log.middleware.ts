@@ -7,7 +7,7 @@ import { getClientIp } from '../utils/client-ip';
 import { sanitizeUrlForLog, sanitizeRefererForLog } from '../utils/sensitive-data';
 
 /** 不记录日志的路径前缀（减少管理后台日志噪音） */
-const SKIP_PATH_PREFIXES = ['/api/admin/access-logs', '/api/admin/audit-logs', '/api/admin/alerts', '/api/admin/ban-stats', '/api/admin/source-analysis', '/api/admin/user-activity', '/api/admin/bandwidth', '/api/admin/file-type-stats', '/api/admin/dashboards'];
+const SKIP_PATH_PREFIXES = ['/api/admin/access-logs', '/api/admin/audit-logs', '/api/admin/alerts', '/api/admin/ban-stats', '/api/admin/source-analysis', '/api/admin/user-activity', '/api/admin/bandwidth', '/api/admin/file-type-stats'];
 
 /** 批量写入参数：缓冲达到阈值或定时器到期时统一 flush，降低高 QPS 下的写放大 */
 const FLUSH_INTERVAL_MS = 5000;

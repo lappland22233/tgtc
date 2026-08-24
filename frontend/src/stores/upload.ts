@@ -5,7 +5,6 @@ import { useFileStore } from './files';
 import { useChunkedUpload } from '../composables/useChunkedUpload';
 import { isPageVisible } from '../composables/usePageVisibility';
 import { getErrorMessage } from '../utils/error';
-import { reportUploadError } from '../utils/telemetry';
 import { uploadScheduler } from '../utils/upload-scheduler';
 import { MAX_ENTRY_RETRIES, getRetryDelay, abortableBackoff, classifyUploadError } from '../utils/upload-retry';
 
@@ -291,17 +290,6 @@ export const useUploadStore = defineStore('upload', () => {
       changeStatus(entry, 'success');
       await attachTags(entry, result.id);
     } catch (error) {
-      const axiosError = error as { response?: { status?: number }; code?: string };
-      if (!controller.signal.aborted && axiosError.code !== 'ERR_CANCELED') {
-        reportUploadError({
-          stage: 'async_upload',
-          message: getErrorMessage(error),
-          fileName: file.name,
-          fileSize: file.size,
-          mimeType: file.type,
-          status: axiosError.response?.status,
-        });
-      }
       throw error;
     }
   }

@@ -79,9 +79,11 @@
         :aria-valuetext="`${formatTime(currentTime)} / ${formatTime(duration)}`"
         @keydown.left.prevent="seekBy(-5)"
         @keydown.right.prevent="seekBy(5)"
-        @mousedown="onProgressMouseDown"
+        @pointerdown="onProgressPointerDown"
+        @pointermove="onProgressPointerMove"
+        @pointerup="onProgressPointerUp"
+        @pointercancel="onProgressPointerCancel"
         @mousemove="onProgressHover"
-        @touchstart.passive="onProgressTouchStart"
       >
         <div class="cvp__progress-track">
           <div class="cvp__progress-buffered" :style="{ width: bufferedPct + '%' }" />
@@ -316,6 +318,7 @@ let hideTimer: ReturnType<typeof setTimeout> | null = null;
 let seekHideTimer: ReturnType<typeof setTimeout> | null = null;
 let pendingPlayRequest = false;
 let playFrame: number | null = null;
+let progressPointerCapture: { element: HTMLElement; pointerId: number } | null = null;
 let longPressActive = false;
 let savedRate = 1;
 
@@ -508,53 +511,52 @@ function seekBy(seconds: number) {
   showControls();
 }
 
-function getPctFromEvent(e: MouseEvent | Touch): number {
+function getPctFromEvent(e: MouseEvent | Touch | PointerEvent): number {
   const bar = playerRef.value?.querySelector('.cvp__progress') as HTMLElement;
   if (!bar) return 0;
   const rect = bar.getBoundingClientRect();
   return Math.max(0, Math.min(100, ((e.clientX - rect.left) / rect.width) * 100));
 }
 
-function onProgressMouseDown(e: MouseEvent) {
+function onProgressPointerDown(e: PointerEvent) {
+  if (!duration.value) return;
+  const bar = e.currentTarget as HTMLElement;
   isDragging.value = true;
+  bar.setPointerCapture?.(e.pointerId);
+  progressPointerCapture = { element: bar, pointerId: e.pointerId };
   previewSeekPct(getPctFromEvent(e));
-
-  const onMove = (ev: MouseEvent) => previewSeekPct(getPctFromEvent(ev));
-  const onUp = () => {
-    const targetPct = dragPct.value;
-    isDragging.value = false;
-    if (targetPct != null) commitSeekPct(targetPct);
-    document.removeEventListener('mousemove', onMove);
-    document.removeEventListener('mouseup', onUp);
-    resetHideTimer();
-  };
-  document.addEventListener('mousemove', onMove);
-  document.addEventListener('mouseup', onUp);
+  showControls();
 }
 
-function onProgressTouchStart(e: TouchEvent) {
-  isDragging.value = true;
-  if (e.touches[0]) previewSeekPct(getPctFromEvent(e.touches[0]));
+function onProgressPointerMove(e: PointerEvent) {
+  if (!isDragging.value) return;
+  const bar = e.currentTarget as HTMLElement;
+  if (bar.hasPointerCapture?.(e.pointerId)) {
+    e.preventDefault();
+    previewSeekPct(getPctFromEvent(e));
+  }
+}
 
-  const onMove = (ev: TouchEvent) => {
-    if (ev.touches[0]) previewSeekPct(getPctFromEvent(ev.touches[0]));
-  };
-  const cleanup = () => {
-    const targetPct = dragPct.value;
-    isDragging.value = false;
-    // touchcancel：手势被打断（如系统弹层/来电），不提交 seek，仅复位拖动态
-    if (targetPct != null && !dragCancelled) commitSeekPct(targetPct);
-    dragPct.value = null;
-    document.removeEventListener('touchmove', onMove);
-    document.removeEventListener('touchend', cleanup);
-    document.removeEventListener('touchcancel', cleanup);
-  };
-  /** touchcancel 标记：为 true 时不提交 seek（与 onEnd 区分） */
-  let dragCancelled = false;
-  const onCancel = () => { dragCancelled = true; cleanup(); };
-  document.addEventListener('touchmove', onMove, { passive: true });
-  document.addEventListener('touchend', cleanup);
-  document.addEventListener('touchcancel', onCancel);
+function finishProgressPointer(e: PointerEvent, commit: boolean) {
+  if (!isDragging.value) return;
+  const bar = e.currentTarget as HTMLElement;
+  const targetPct = dragPct.value;
+  if (commit && targetPct != null) commitSeekPct(targetPct);
+  else dragPct.value = null;
+  isDragging.value = false;
+  if (bar.hasPointerCapture?.(e.pointerId)) {
+    try { bar.releasePointerCapture(e.pointerId); } catch { /* 捕获已释放 */ }
+  }
+  progressPointerCapture = null;
+  resetHideTimer();
+}
+
+function onProgressPointerUp(e: PointerEvent) {
+  finishProgressPointer(e, true);
+}
+
+function onProgressPointerCancel(e: PointerEvent) {
+  finishProgressPointer(e, false);
 }
 
 function onProgressHover(e: MouseEvent) {
@@ -765,10 +767,20 @@ watch(() => props.interactive, (on) => {
 onBeforeUnmount(() => {
   bindGlobalListeners(false);
   cancelDeferredResume();
+  isDragging.value = false;
+  dragPct.value = null;
+  tooltipVisible.value = false;
+  if (progressPointerCapture) {
+    const { element, pointerId } = progressPointerCapture;
+    if (element.hasPointerCapture?.(pointerId)) {
+      try { element.releasePointerCapture(pointerId); } catch { /* 捕获已释放 */ }
+    }
+    progressPointerCapture = null;
+  }
   document.removeEventListener('fullscreenchange', onFullscreenChange);
   document.removeEventListener('click', onClickOutsideMenus);
-  if (hideTimer) clearTimeout(hideTimer);
-  if (seekHideTimer) clearTimeout(seekHideTimer);
+  if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; }
+  if (seekHideTimer) { clearTimeout(seekHideTimer); seekHideTimer = null; }
 });
 
 // 暴露方法供父组件调用
@@ -947,6 +959,7 @@ defineExpose({
   position: relative;
   width: 100%;
   height: 4px;
+  touch-action: none;
   margin-bottom: 8px;
   cursor: pointer;
   border-radius: 999px;

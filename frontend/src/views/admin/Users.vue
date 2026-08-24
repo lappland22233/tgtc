@@ -155,6 +155,7 @@ import MessagePlugin from '@/utils/message';
 import { useMobile } from '../../composables/useMobile';
 import { api, useAuthStore } from '../../stores/auth';
 import { getErrorMessage } from '../../utils/error';
+import { formatDate as formatSafeDate } from '../../utils/format';
 
 // 当前登录用户（G15-25）：用于禁止管理员对自己执行封禁/删除，避免自我锁定
 const authStore = useAuthStore();
@@ -221,8 +222,8 @@ function getRoleTheme(role: string) {
   return map[role] || 'default';
 }
 
-function formatDate(date: string) {
-  return new Date(date).toLocaleDateString('zh-CN');
+function formatDate(date: string | null | undefined) {
+  return formatSafeDate(date || '');
 }
 
 async function fetchUsers() {

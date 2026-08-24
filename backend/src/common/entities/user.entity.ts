@@ -48,7 +48,7 @@ export class User {
   lastLoginIP: string;
 
   @Column({ nullable: true })
-  lastLoginAt: Date;
+  lastLoginAt: Date | null;
 
   @OneToMany(() => File, (file) => file.uploader)
   files: File[];

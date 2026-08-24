@@ -191,7 +191,6 @@ import { useUploadStore } from '../stores/upload';
 import { api } from '../stores/auth';
 import { useMobile } from '../composables/useMobile';
 import { getErrorMessage } from '../utils/error';
-import { reportUploadError } from '../utils/telemetry';
 import ConflictResolveDialog from '@/components/ConflictResolveDialog.vue';
 import UploadQueueList from '@/components/upload/UploadQueueList.vue';
 // 文件夹上传工具链：采集 → 路径校验 → 目录预创建/复用 → 重复检测
@@ -344,25 +343,11 @@ function validateFiles(files: File[]): File[] {
   return files.filter((f) => {
     if (f.size > maxFileSizeBytes.value) {
       MessagePlugin.warning(`文件 "${f.name}" 超过 ${maxFileSizeMB.value}MB 限制，已跳过`);
-      reportUploadError({
-        stage: 'validation_size',
-        message: `文件超过 ${maxFileSizeMB.value}MB 限制`,
-        fileName: f.name,
-        fileSize: f.size,
-        mimeType: f.type,
-      });
       return false;
     }
     // 白名单模式下前端同步校验类型，避免 accept 属性被绕过
     if (fileTypeMode.value === 'whitelist' && !matchesAcceptTypes(f)) {
       MessagePlugin.warning(`文件 "${f.name}" 类型不受支持，已跳过`);
-      reportUploadError({
-        stage: 'validation_type',
-        message: '文件类型不受支持',
-        fileName: f.name,
-        fileSize: f.size,
-        mimeType: f.type,
-      });
       return false;
     }
     return true;

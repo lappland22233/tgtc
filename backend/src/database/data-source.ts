@@ -14,10 +14,8 @@ import { RateLimit } from '../common/entities/rate-limit.entity';
 import { AuditLog } from '../common/entities/audit-log.entity';
 import { AccessLog } from '../common/entities/access-log.entity';
 import { Alert } from '../common/entities/alert.entity';
-import { DashboardConfig } from '../common/entities/dashboard-config.entity';
 import { UploadTask } from '../common/entities/upload-task.entity';
 import { Tag } from '../common/entities/tag.entity';
-import { TelemetryRecord } from '../common/entities/telemetry-record.entity';
 import { JwtRevokedToken } from '../common/entities/jwt-revoked-token.entity';
 import { SharePreviewSession } from '../common/entities/share-preview-session.entity';
 import { FileVerifyTask } from '../common/entities/file-verify-task.entity';
@@ -29,7 +27,7 @@ export const AppDataSource = new DataSource({
   username: process.env.DB_USERNAME || 'postgres',
   password: process.env.DB_PASSWORD || undefined,
   database: process.env.DB_DATABASE || 'test',
-  entities: [User, File, Folder, ShareLink, SystemConfig, VerificationCode, BannedIP, ShareAudit, FileAccessLog, RateLimit, AuditLog, AccessLog, Alert, DashboardConfig, UploadTask, Tag, TelemetryRecord, JwtRevokedToken, SharePreviewSession, FileVerifyTask],
+  entities: [User, File, Folder, ShareLink, SystemConfig, VerificationCode, BannedIP, ShareAudit, FileAccessLog, RateLimit, AuditLog, AccessLog, Alert, UploadTask, Tag, JwtRevokedToken, SharePreviewSession, FileVerifyTask],
   // 相对本文件解析迁移目录，避免依赖运行时 CWD（编译产物 dist 下同样有效）
   migrations: [join(__dirname, '..', 'migrations', '*{.ts,.js}')],
   synchronize: false,

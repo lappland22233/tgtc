@@ -483,6 +483,11 @@ describe('AuthService - 邮箱验证开关与登录拦截', () => {
 
       expect(result.accessToken).toBe('mock-token');
       expect(result.user.emailVerified).toBe(true);
+      expect(result.user.lastLoginAt).toBeInstanceOf(Date);
+      expect(mockUserRepo.update).toHaveBeenCalledWith('u-1', expect.objectContaining({
+        lastLoginIP: '127.0.0.1',
+        lastLoginAt: expect.any(Date),
+      }));
     });
 
     it('开关关闭时：未验证账号也放行（拦截仅在开关开启时生效）', async () => {

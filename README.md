@@ -1,6 +1,6 @@
 # 文件分发系统
 
-基于 NestJS、Vue 3、PostgreSQL、Redis 与 Telegram Bot API 的文件分发与网盘系统。系统提供层级文件夹、标签、同步/异步/分片上传、私有与公开访问、独立分享链接、管理员审计、安全监控、访问分析和前端遥测。
+基于 NestJS、Vue 3、PostgreSQL、Redis 与 Telegram Bot API 的文件分发与网盘系统。系统提供层级文件夹、标签、同步/异步/分片上传、私有与公开访问、独立分享链接、管理员审计、安全监控和访问分析。
 
 ## 核心能力
 
@@ -50,7 +50,7 @@
 - 永久/临时 IP 封禁、攻击检测、行为异常检测和 WebSocket 告警
 - HTTP 访问日志、带宽与延迟分析、来源/UA 分析、用户活跃度和文件类型统计
 - 操作审计与 CSV/JSON 数据导出
-- 前端错误、性能、路由、网络和环境遥测
+
 
 ## 技术栈
 
@@ -231,6 +231,8 @@ Redis 承载 `metrics-aggregation`、`attack-detection`、`alert-evaluation`、`
 
 ### 管理后台文件体检
 
+管理后台保留普通分析与运营能力，包括管理后台首页、Bandwidth、AccessLogs、SourceAnalysis、UserActivity 等页面；普通用户的默认仪表盘 `/dashboard` 也不受影响。管理后台自定义仪表盘及其 CRUD API 已下线，旧前端路径 `/admin/dashboard-customizer` 会重定向到 `/admin`。部署新增迁移 `1798200000000-DropDashboardConfigs`，用于删除历史 `dashboard_configs` 表；不要修改或回滚已执行的历史迁移。
+
 超级管理员在 **文件管理** 页面可执行"文件体检"。体检是**持久化后台任务**（Bull `file-verify` 队列），发起后立即返回任务 ID（HTTP 202），由后台分批校验，前端通过轮询查看实时进度，刷新页面可恢复，同一时间全局仅允许一个活动任务：
 
 - `POST /api/admin/files/verify`：创建体检任务，返回 `{ task, isNewTask }`；已有活动任务时返回现有任务（`isNewTask=false`）；
@@ -358,11 +360,11 @@ backend/src/
 ├── folder/           闭包表文件夹树与文件移动/复制
 ├── share/            独立分享链接与公开分享访问
 ├── tag/              用户标签和文件关联
-├── admin/            全站管理、分析、配置、日志和遥测查询
+├── admin/            全站管理、分析、配置和日志查询
 ├── alert/            告警规则、持久化与 WebSocket 推送
 ├── jobs/             六个 Bull 队列及处理器
 ├── security/         行为异常检测
-├── telemetry/        前端遥测接收
+
 ├── telegram/         Telegram 上传、下载和实时流客户端
 ├── mailer/           SMTP 邮件服务
 ├── tasks/            定时清理任务
@@ -381,7 +383,7 @@ frontend/src/
 ├── api/              Axios 客户端与管理员文件专用 API
 ├── router/           公开、登录、用户和管理员路由守卫
 ├── types/            TypeScript 类型
-└── utils/            格式化、缩略图、权限和遥测工具
+└── utils/            格式化、缩略图和权限工具
 ```
 
 当前后端注册 17 个 TypeORM 实体，`app.module.ts` 与 `database/data-source.ts` 的实体列表必须保持同步。
@@ -453,7 +455,7 @@ npm run preview
 | `GET` | `/api/s/:token/thumbnail-hd/:fileId` | 分享高清视频封面 |
 | `GET` | `/api/s/:token/folder/:folderId/contents` | 浏览分享文件夹 |
 | `GET` | `/api/s/:token/folder/:folderId/breadcrumb` | 分享面包屑 |
-| `POST` | `/api/telemetry/report` | 批量上报前端遥测 |
+
 | `GET` | `/media/:id` | 公开媒体直链，直接返回图片、音频或视频本体 |
 | `GET` | `/files/public/:id` | 旧分享入口兼容重定向 |
 
@@ -513,10 +515,10 @@ npm run preview
 | `GET/PUT` | `/api/admin/security-config` | 安全规则，仅 `super_admin` |
 | `GET` | `/api/admin/access-logs*` | 访问日志及聚合分析 |
 | `GET` | `/api/admin/audit-logs` | 操作审计 |
-| `GET` | `/api/admin/telemetry/*` | 遥测统计、记录、错误和导出 |
+
 | `GET` | `/api/admin/export` | CSV/JSON 数据导出 |
 
-多数分析、审计、遥测、缓存和安全配置接口仅允许 `super_admin`。
+多数分析、审计、缓存和安全配置接口仅允许 `super_admin`。
 
 ## 安全说明
 
@@ -525,7 +527,7 @@ npm run preview
 - Telegram Token 会在错误日志中脱敏；生产异常响应不返回堆栈。
 - 全局 `ValidationPipe` 启用白名单、类型转换和非白名单字段拒绝。
 - Helmet 提供安全响应头；前端 CSP 由 `frontend/index.html` 管理。
-- 关键写操作进入审计日志；访问日志与遥测按配置定期清理。
+- 关键写操作进入审计日志；访问日志按配置定期清理。
 - 默认访问日志保留 30 天、审计日志保留 90 天。
 
 ## 许可证

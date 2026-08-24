@@ -230,8 +230,9 @@ function handleDownload() {
 .download-btn:disabled { cursor: not-allowed; opacity: .6; }
 
 @media (max-width: 480px) {
-  .file-share-hero { padding: 40px 16px; }
-  .file-share-body { padding: 20px 16px; }
+  .file-share-hero { padding: 24px 16px; }
+  .file-share-hero :deep(img) { max-width: 112px; max-height: 112px; }
+  .file-share-body { padding: 16px; gap: 8px; }
   .file-name { font-size: 18px; }
   .file-share-actions { flex-direction: column; }
   .mime-type { max-width: 160px; }

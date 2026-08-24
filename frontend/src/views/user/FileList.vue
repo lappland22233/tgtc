@@ -56,6 +56,16 @@
       </div>
     </div>
 
+    <button
+      v-if="isMobile && folderStore.currentFolderId !== null"
+      type="button"
+      class="fl-mobile-back"
+      @click="onFolderNavigate(parentFolderId)"
+    >
+      <t-icon name="chevron-left" />
+      返回上级
+    </button>
+
     <!-- ② 工具栏：搜索 + 标签 -->
     <div class="fl-toolbar">
       <form autocomplete="off" class="fl-search-form" @submit.prevent="handleSearch">
@@ -592,6 +602,7 @@ import { useMediaPlaybackStore, type MediaSessionItem } from '../../stores/media
 import { isPreviewable, getPreviewKind, isMediaDirectLinkKind, buildFilePreviewUrl } from '../../utils/preview';
 import { useTagStore } from '../../stores/tags';
 import { useFolderStore, type Folder } from '../../stores/folders';
+import { getParentFolderId } from '../../utils/folder-navigation';
 import type { FileItem } from '../../types/file';
 
 const fileStore = useFileStore();
@@ -786,6 +797,14 @@ watch(() => route.query.folder, async (raw) => {
 function openCreateFolderDialog() {
   showCreateFolderDialog.value = true;
 }
+
+const parentFolderId = computed<string | null>(() =>
+  getParentFolderId(
+    folderStore.tree,
+    folderStore.currentFolderId,
+    folderStore.breadcrumb[folderStore.breadcrumb.length - 1] ?? null,
+  ),
+);
 
 function onFolderOpen(folder: Folder) {
   onFolderNavigate(folder.id);
@@ -2366,6 +2385,23 @@ onUnmounted(() => {
 
   .fl-path-item {
     max-width: 140px;
+  }
+
+  .fl-mobile-back {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin: -4px 0 12px;
+    padding: 4px 0;
+    border: 0;
+    background: transparent;
+    color: var(--text-secondary);
+    font: inherit;
+    cursor: pointer;
+  }
+
+  .fl-mobile-back:hover {
+    color: var(--color-accent);
   }
 }
 </style>

@@ -2617,10 +2617,24 @@ function formatSize(bytes: number | string | null | undefined): string {
   .fpv-dialog--pdf,
   .fpv-dialog--text,
   .fpv-dialog--audio {
-    width: 100%;
-    height: 100%;
-    max-height: none;
+    width: min(100%, 640px);
+    height: auto;
+    max-height: calc(100dvh - 16px);
     border-radius: var(--radius-sm, 6px);
+  }
+
+  .fpv-dialog--video,
+  .fpv-dialog--image {
+    height: min(72dvh, 560px);
+  }
+
+  .fpv-dialog--pdf,
+  .fpv-dialog--text {
+    height: min(82dvh, 680px);
+  }
+
+  .fpv-dialog--audio {
+    width: min(100%, 520px);
   }
 
   .fpv-header {
@@ -2651,7 +2665,8 @@ function formatSize(bytes: number | string | null | undefined): string {
   }
 
   .fpv-audio-player {
-    padding: 18px 16px 16px;
+    padding: 16px 14px 14px;
+    gap: 12px;
   }
 
   .fpv-audio-icon {

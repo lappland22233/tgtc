@@ -264,9 +264,9 @@ async function onBreadcrumbClick(item: FolderSummary, _idx: number) {
 
 async function goBack() {
   const idx = breadcrumb.value.findIndex((b) => b.id === currentFolderId.value);
-  if (idx > 0) {
-    await loadFolderContents(breadcrumb.value[idx - 1].id);
-  }
+  // 分享根目录是边界：不发起无效请求，也不修改当前内容/面包屑。
+  if (idx <= 0 || currentFolderId.value === props.rootFolder.id) return;
+  await loadFolderContents(breadcrumb.value[idx - 1].id);
 }
 
 async function loadFolderContents(folderId: string) {

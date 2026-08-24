@@ -8,7 +8,6 @@ import {
   BaselineCalculationProcessor,
   DataArchivalProcessor,
   AnomalyDetectionProcessor,
-  TelemetryCleanupProcessor,
   WeeklyReportProcessor,
 } from './other.processors';
 import { FileUploadProcessor } from './file-upload.processor';
@@ -23,7 +22,6 @@ import { Alert } from '../common/entities/alert.entity';
 import { File } from '../common/entities/file.entity';
 import { AlertModule } from '../alert/alert.module';
 import { FileModule } from '../file/file.module';
-import { TelemetryModule } from '../telemetry/telemetry.module';
 
 @Module({
   imports: [
@@ -33,7 +31,6 @@ import { TelemetryModule } from '../telemetry/telemetry.module';
     SecurityModule,
     FileModule,
     AdminModule,
-    TelemetryModule,
   ],
   providers: [
     MetricsAggregationProcessor,
@@ -42,7 +39,6 @@ import { TelemetryModule } from '../telemetry/telemetry.module';
     BaselineCalculationProcessor,
     DataArchivalProcessor,
     AnomalyDetectionProcessor,
-    TelemetryCleanupProcessor,
     WeeklyReportProcessor,
     FileUploadProcessor,
     FileVerifyProcessor,

@@ -11,7 +11,6 @@ export const PAGE_ROLES: Readonly<Record<string, readonly UserRole[]>> = {
   '/shares': ALL_ROLES,
   '/settings': ALL_ROLES,
   '/admin': ADMIN_ROLES,
-  '/admin/dashboard-customizer': ADMIN_ROLES,
   '/admin/users': ADMIN_ROLES,
   '/admin/files': ADMIN_ROLES,
   '/admin/config': SUPER_ADMIN_ROLES,
@@ -19,7 +18,6 @@ export const PAGE_ROLES: Readonly<Record<string, readonly UserRole[]>> = {
   '/admin/security': SUPER_ADMIN_ROLES,
   '/admin/user-activity': SUPER_ADMIN_ROLES,
   '/admin/audit-logs': SUPER_ADMIN_ROLES,
-  '/admin/telemetry': SUPER_ADMIN_ROLES,
 };
 
 export function hasAnyRole(

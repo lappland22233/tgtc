@@ -112,6 +112,7 @@ export class AuthController {
       email: user.email,
       role: user.role,
       emailVerified: user.emailVerified,
+      lastLoginAt: user.lastLoginAt ?? null,
       createdAt: user.createdAt,
     };
   }

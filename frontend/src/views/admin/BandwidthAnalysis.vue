@@ -229,7 +229,7 @@ async function fetchData() {
   loading.value = true;
   try {
     const { data: res } = await api.get('/admin/bandwidth/top-files', {
-      params: { timeRange: timeRange.value },
+      params: { timeRange: timeRange.value, limit: 20 },
     });
     data.value = (res.data || res) as BandwidthResponse;
     await nextTick();

@@ -156,6 +156,13 @@ export class BandwidthQueryDto {
   @IsString()
   @IsIn(['1h', '24h', '7d', '30d'])
   timeRange?: string = '24h';
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(100)
+  limit?: number = 20;
 }
 
 export class FileTypeQueryDto {

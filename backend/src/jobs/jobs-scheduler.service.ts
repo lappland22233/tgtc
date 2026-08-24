@@ -124,7 +124,6 @@ export class JobsSchedulerService implements OnModuleInit, OnModuleDestroy {
       { queue: this.baselineCalculationQueue, name: 'calculate-baseline', cron: '0 4 * * *' },
       { queue: this.dataArchivalQueue, name: 'archive-data', cron: '0 2 * * *' },
       { queue: this.dataArchivalQueue, name: 'weekly-report', cron: '0 9 * * 1' },
-      { queue: this.dataArchivalQueue, name: 'telemetry-cleanup', cron: '0 3 * * *' },
     ];
 
     for (const { queue, name, cron } of repeatJobs) {
@@ -233,19 +232,5 @@ export class JobsSchedulerService implements OnModuleInit, OnModuleDestroy {
       },
     );
 
-    // 每日 03:00 遥测数据清理（保留 90 天）
-    await this.dataArchivalQueue.add(
-      'telemetry-cleanup',
-      {},
-      {
-        jobId: 'repeat:archival:telemetry-cleanup',
-        repeat: { cron: '0 3 * * *' },
-        removeOnComplete: 10,
-        removeOnFail: 5,
-        timeout: 10 * 60 * 1000,
-        attempts: 2,
-        backoff: { type: 'exponential', delay: 30 * 1000 },
-      },
-    );
   }
 }
