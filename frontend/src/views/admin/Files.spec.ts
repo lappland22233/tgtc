@@ -82,6 +82,15 @@ vi.mock('tdesign-vue-next', () => {
   const Tag = { name: 'TTag', inheritAttrs: false, template: '<span class="t-tag-stub"><slot /></span>' };
   const Loading = { name: 'TLoading', inheritAttrs: false, template: '<div class="t-loading-stub" />' };
   const Table = { name: 'TTable', inheritAttrs: false, template: '<div class="t-table-stub" />' };
+  const Pagination = { name: 'TPagination', inheritAttrs: false, props: ['current', 'total', 'pageSize'], emits: ['change'], template: '<div class="t-pagination-stub" />' };
+  const Checkbox = {
+    name: 'TCheckbox',
+    inheritAttrs: false,
+    props: ['checked', 'modelValue'],
+    emits: ['change', 'update:checked', 'update:modelValue'],
+    template:
+      '<label class="t-checkbox-stub"><input type="checkbox" :checked="checked ?? modelValue" @change="$emit(\'change\', $event.target.checked)" /><slot /></label>',
+  };
   return {
     DialogPlugin: { confirm: vi.fn(), alert: vi.fn(), info: vi.fn(), warning: vi.fn() },
     Dialog,
@@ -93,6 +102,8 @@ vi.mock('tdesign-vue-next', () => {
     Tag,
     Loading,
     Table,
+    Pagination,
+    Checkbox,
   };
 });
 
