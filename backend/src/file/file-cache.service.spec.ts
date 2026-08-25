@@ -218,6 +218,26 @@ describe('FileCacheService no-cache mode', () => {
     expect(fetchFn).toHaveBeenCalledTimes(1);
   });
 
+  it('no-cache 首段在上游结束前立即实时转发', async () => {
+    const upstream = new PassThrough();
+    const fetchFn = jest.fn(async () => ({ stream: upstream, info: { file_size: 6 } }));
+    const { stream } = await service.getOrCacheStream(fileId, 6, fetchFn);
+    const firstChunk = new Promise<Buffer>((resolve, reject) => {
+      stream.once('data', chunk => resolve(Buffer.from(chunk)));
+      stream.once('error', reject);
+    });
+
+    upstream.write(Buffer.from('abc'));
+    await expect(Promise.race([
+      firstChunk,
+      new Promise<Buffer>((_, reject) => setTimeout(() => reject(new Error('首段实时转发超时')), 500)),
+    ])).resolves.toEqual(Buffer.from('abc'));
+    expect(upstream.readableEnded).toBe(false);
+
+    stream.destroy();
+    upstream.end(Buffer.from('def'));
+  });
+
   it('no-cache tee: 并发消费者共享一个上游连接（fetchFn 只调用一次）', async () => {
     const upstream = new PassThrough();
     const fetchFn = jest.fn(async () => ({ stream: upstream, info: { file_size: 6 } }));

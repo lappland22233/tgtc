@@ -173,6 +173,8 @@ const currentContents = reactive<FolderContents>({
   files: [...props.initialContents.files],
 });
 const breadcrumb = ref<FolderSummary[]>([...props.initialBreadcrumb]);
+// 仅记录已通过接口校验并提交的路径，返回上级不依赖可能陈旧的展示状态。
+const verifiedPath = ref<FolderSummary[]>([...props.initialBreadcrumb]);
 
 const mediaPlaybackStore = useMediaPlaybackStore();
 let loadGeneration = 0;
@@ -186,6 +188,7 @@ watch(
     currentContents.subfolders = [...props.initialContents.subfolders];
     currentContents.files = [...props.initialContents.files];
     breadcrumb.value = [...props.initialBreadcrumb];
+    verifiedPath.value = [...props.initialBreadcrumb];
     loading.value = false;
   },
 );
@@ -263,10 +266,30 @@ async function onBreadcrumbClick(item: FolderSummary, _idx: number) {
 }
 
 async function goBack() {
-  const idx = breadcrumb.value.findIndex((b) => b.id === currentFolderId.value);
-  // 分享根目录是边界：不发起无效请求，也不修改当前内容/面包屑。
+  // 只使用最近一次成功提交的路径，避免展示中的陈旧 breadcrumb 让返回按钮静默失效。
+  const idx = verifiedPath.value.findIndex((item) => item.id === currentFolderId.value);
   if (idx <= 0 || currentFolderId.value === props.rootFolder.id) return;
-  await loadFolderContents(breadcrumb.value[idx - 1].id);
+  const parent = verifiedPath.value[idx - 1];
+  if (!parent?.id || parent.id === currentFolderId.value) return;
+  await loadFolderContents(parent.id);
+}
+
+class CredentialExpiredError extends Error {}
+
+function isCredentialExpiredResponse(response: Response): boolean {
+  return response.status === 401 || response.status === 403;
+}
+
+function isFolderContents(value: unknown): value is FolderContents {
+  if (!value || typeof value !== 'object') return false;
+  const data = value as Partial<FolderContents>;
+  return Array.isArray(data.subfolders) && Array.isArray(data.files);
+}
+
+function isBreadcrumb(value: unknown): value is FolderSummary[] {
+  return Array.isArray(value) && value.length > 0 && value.every((item) => (
+    item && typeof item === 'object' && typeof item.id === 'string' && typeof item.name === 'string'
+  ));
 }
 
 async function loadFolderContents(folderId: string) {
@@ -276,35 +299,48 @@ async function loadFolderContents(folderId: string) {
   const { signal } = loadController;
   loading.value = true;
   try {
-    // 凭据由 HttpOnly Cookie 携带，URL 不附加 access JWT；两次请求固定使用同一目录快照
+    // 两个请求必须同时成功且数据结构有效，之后才一次性提交目录状态。
     const [contentsRes, bcRes] = await Promise.all([
       fetch(`/api/s/${encodeURIComponent(props.token)}/folder/${encodeURIComponent(folderId)}/contents`, { signal }),
       fetch(`/api/s/${encodeURIComponent(props.token)}/folder/${encodeURIComponent(folderId)}/breadcrumb`, { signal }),
     ]);
-    if (!contentsRes.ok) throw new Error('加载失败');
-    const contentsData = await contentsRes.json();
-    if (generation !== loadGeneration) return;
-    if (contentsData.code !== 0) throw new Error(contentsData.message || '加载失败');
-    const payload = contentsData.data;
-    if (payload.requiresPassword) {
-      // HttpOnly Cookie 凭据过期：通知父级 ShareView 重新拉取元数据，
-      // 后端会返回 requiresPassword 并自动切回密码输入状态（G13-01）。
-      emit('credential-expired');
-      return;
+    if (isCredentialExpiredResponse(contentsRes) || isCredentialExpiredResponse(bcRes)) {
+      throw new CredentialExpiredError('分享凭据已过期，请重新验证');
     }
-    const bcData = bcRes.ok ? await bcRes.json() : null;
+    if (!contentsRes.ok) throw new Error(`目录内容加载失败（HTTP ${contentsRes.status}）`);
+    if (!bcRes.ok) throw new Error(`目录路径加载失败（HTTP ${bcRes.status}）`);
+
+    const [contentsData, bcData] = await Promise.all([contentsRes.json(), bcRes.json()]);
     if (generation !== loadGeneration) return;
+    if (contentsData?.data?.requiresPassword || bcData?.data?.requiresPassword) {
+      throw new CredentialExpiredError('分享凭据已过期，请重新验证');
+    }
+    if (contentsData?.code !== 0) throw new Error(contentsData?.message || '目录内容加载失败');
+    if (bcData?.code !== 0) throw new Error(bcData?.message || '目录路径加载失败');
+
+    const nextContents = contentsData.data;
+    const nextBreadcrumb = bcData.data?.breadcrumb;
+    if (!isFolderContents(nextContents)) throw new Error('目录内容响应无效');
+    if (!isBreadcrumb(nextBreadcrumb)) throw new Error('目录路径响应无效');
+    if (nextBreadcrumb[nextBreadcrumb.length - 1].id !== folderId) {
+      throw new Error('目录路径与当前目录不一致');
+    }
+
+    // 所有校验完成后原子更新，任一必要响应失败都不会污染旧状态。
     currentFolderId.value = folderId;
-    currentContents.subfolders = payload.subfolders || [];
-    currentContents.files = payload.files || [];
-    if (bcData?.code === 0 && bcData.data.breadcrumb) {
-      breadcrumb.value = bcData.data.breadcrumb;
-    }
+    currentContents.subfolders = [...nextContents.subfolders];
+    currentContents.files = [...nextContents.files];
+    breadcrumb.value = [...nextBreadcrumb];
+    verifiedPath.value = [...nextBreadcrumb];
   } catch (err) {
     if (err instanceof DOMException && err.name === 'AbortError') return;
     if (generation !== loadGeneration) return;
+    if (err instanceof CredentialExpiredError) {
+      emit('credential-expired');
+      return;
+    }
     console.error('文件夹加载失败:', err);
-    MessagePlugin.error(err instanceof Error ? err.message : '网络错误');
+    MessagePlugin.error(err instanceof Error ? err.message : '目录加载失败，请稍后重试');
   } finally {
     if (generation === loadGeneration) loading.value = false;
   }

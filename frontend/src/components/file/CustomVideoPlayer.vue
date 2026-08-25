@@ -255,6 +255,7 @@ const emit = defineEmits<{
   'update:end-behavior': [behavior: VideoEndBehavior];
   /** 暴露 video 元素引用给父组件（用于 MSE 等外部控制） */
   'video-ref': [el: HTMLVideoElement | null];
+  'seeking-change': [seeking: boolean];
 }>();
 
 // ─── Refs ────────────────────────────
@@ -522,6 +523,7 @@ function onProgressPointerDown(e: PointerEvent) {
   if (!duration.value) return;
   const bar = e.currentTarget as HTMLElement;
   isDragging.value = true;
+  emit('seeking-change', true);
   bar.setPointerCapture?.(e.pointerId);
   progressPointerCapture = { element: bar, pointerId: e.pointerId };
   previewSeekPct(getPctFromEvent(e));
@@ -542,8 +544,16 @@ function finishProgressPointer(e: PointerEvent, commit: boolean) {
   const bar = e.currentTarget as HTMLElement;
   const targetPct = dragPct.value;
   if (commit && targetPct != null) commitSeekPct(targetPct);
-  else dragPct.value = null;
+  else {
+    dragPct.value = null;
+    const v = videoRef.value;
+    if (v && duration.value > 0) {
+      currentTime.value = v.currentTime;
+      playedPct.value = (v.currentTime / duration.value) * 100;
+    }
+  }
   isDragging.value = false;
+  emit('seeking-change', false);
   if (bar.hasPointerCapture?.(e.pointerId)) {
     try { bar.releasePointerCapture(e.pointerId); } catch { /* 捕获已释放 */ }
   }
@@ -767,6 +777,7 @@ watch(() => props.interactive, (on) => {
 onBeforeUnmount(() => {
   bindGlobalListeners(false);
   cancelDeferredResume();
+  if (isDragging.value) emit('seeking-change', false);
   isDragging.value = false;
   dragPct.value = null;
   tooltipVisible.value = false;

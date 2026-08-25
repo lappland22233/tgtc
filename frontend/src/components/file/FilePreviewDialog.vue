@@ -190,6 +190,7 @@
                 @play="onVideoPlay"
                 @pause="onVideoPaused"
                 @ended="onVideoEnded"
+                @seeking-change="onVideoSeekingChange"
                 @error="onVideoError"
               />
             </div>
@@ -228,14 +229,14 @@
                 aria-label="音频进度"
                 :aria-valuemin="0"
                 :aria-valuemax="Math.max(0, Math.round(audioDuration))"
-                :aria-valuenow="Math.max(0, Math.round(audioCurrentTime))"
-                :aria-valuetext="`${formatAudioTime(audioCurrentTime)} / ${formatAudioTime(audioDuration)}`"
+                :aria-valuenow="Math.max(0, Math.round(audioDisplayTime))"
+                :aria-valuetext="`${formatAudioTime(audioDisplayTime)} / ${formatAudioTime(audioDuration)}`"
                 @keydown.left.prevent="seekAudioBy(-5)"
                 @keydown.right.prevent="seekAudioBy(5)"
                 @pointerdown="onAudioProgressDown"
                 @pointermove="onAudioProgressMove"
                 @pointerup="onAudioProgressUp"
-                @pointercancel="onAudioProgressUp"
+                @pointercancel="onAudioProgressCancel"
               >
                 <div class="fpv-audio-progress-track">
                   <div class="fpv-audio-progress-played" :style="{ width: audioProgressPct + '%' }" />
@@ -245,7 +246,7 @@
 
               <!-- 时间行 -->
               <div class="fpv-audio-time-row">
-                <span class="fpv-audio-time-current">{{ formatAudioTime(audioCurrentTime) }}</span>
+                <span class="fpv-audio-time-current">{{ formatAudioTime(audioDisplayTime) }}</span>
                 <span class="fpv-audio-time-duration">{{ formatAudioTime(audioDuration) }}</span>
               </div>
 
@@ -602,13 +603,17 @@ const AUDIO_RATES = [0.5, 0.75, 1, 1.25, 1.5, 2, 3] as const;
 const audioRate = ref(1);
 /** 音量输入框 v-model 绑定的中间值（避免拖动时被事件回写干扰） */
 const audioVolumeInput = ref(0.5);
-/** 进度条拖动中：拖动时不回写 thumb 位置 */
+/** 进度条拖动中：只更新草稿，不触碰媒体 currentTime */
 const audioSeeking = ref(false);
+const audioSeekDraft = ref<number | null>(null);
+const videoSeeking = ref(false);
+const audioDisplayTime = computed(() => audioSeekDraft.value ?? audioCurrentTime.value);
 
 /** 播放进度百分比（0-100） */
 const audioProgressPct = computed(() => {
-  if (audioDuration.value <= 0 || !Number.isFinite(audioCurrentTime.value)) return 0;
-  return Math.min(100, Math.max(0, (audioCurrentTime.value / audioDuration.value) * 100));
+  const time = audioDisplayTime.value;
+  if (audioDuration.value <= 0 || !Number.isFinite(time)) return 0;
+  return Math.min(100, Math.max(0, (time / audioDuration.value) * 100));
 });
 
 /** 时间格式化：mm:ss / h:mm:ss */
@@ -638,8 +643,9 @@ function seekAudioBy(seconds: number) {
 
 /** 点击进度条跳转（直接点击不启用拖动状态） */
 /** 从指针坐标计算进度比例（0-1） */
-function audioProgressRatioFromClientX(clientX: number): number {
-  const track = document.querySelector('.fpv-audio-progress-track');
+function audioProgressRatioFromClientX(clientX: number, progressEl?: HTMLElement): number {
+  const track = progressEl?.querySelector<HTMLElement>('.fpv-audio-progress-track')
+    ?? document.querySelector<HTMLElement>('.fpv-audio-progress-track');
   if (!track) return 0;
   const rect = track.getBoundingClientRect();
   if (rect.width <= 0) return 0;
@@ -647,37 +653,69 @@ function audioProgressRatioFromClientX(clientX: number): number {
 }
 
 /** 按下进度条开始拖动：Pointer Events 统一鼠标与触屏，setPointerCapture 保证拖动不脱手 */
+function ensureAudioDuration(): HTMLAudioElement | null {
+  const audio = document.querySelector<HTMLAudioElement>('.fpv-audio-core') ?? audioRef.value;
+  if (audioDuration.value <= 0 && audio && Number.isFinite(audio.duration) && audio.duration > 0) {
+    audioDuration.value = audio.duration;
+  }
+  if (audio) audioRef.value = audio;
+  return audio;
+}
+
 function onAudioProgressDown(e: PointerEvent) {
-  if (audioDuration.value <= 0) return;
+  const audio = ensureAudioDuration();
   const el = e.currentTarget as HTMLElement;
+  audioRef.value ||= audio;
   audioSeeking.value = true;
+  audioSeekDraft.value = audioProgressRatioFromClientX(e.clientX, el) * audioDuration.value;
   el.setPointerCapture?.(e.pointerId);
-  applyAudioSeek(e.clientX);
+  previewAudioSeek(e.clientX);
 }
 
 /** 拖动中更新位置（仅当指针被捕获到进度条上） */
 function onAudioProgressMove(e: PointerEvent) {
   if (!audioSeeking.value) return;
-  const el = e.currentTarget as HTMLElement;
-  if (el.hasPointerCapture?.(e.pointerId)) applyAudioSeek(e.clientX);
+  ensureAudioDuration();
+  // Pointer capture is an enhancement; jsdom and some browsers may deliver the event without it.
+  previewAudioSeek(e.clientX, e.currentTarget as HTMLElement);
 }
 
 /** 拖动结束：释放捕获并复位状态 */
 function onAudioProgressUp(e: PointerEvent) {
   if (!audioSeeking.value) return;
   const el = e.currentTarget as HTMLElement;
+  if (audioSeekDraft.value == null) previewAudioSeek(e.clientX);
+  if (audioSeekDraft.value != null) commitAudioSeek(audioSeekDraft.value);
+  audioSeekDraft.value = null;
+  audioSeeking.value = false;
   if (el.hasPointerCapture?.(e.pointerId)) {
-    applyAudioSeek(e.clientX);
     try { el.releasePointerCapture(e.pointerId); } catch { /* 已释放则忽略 */ }
   }
-  audioSeeking.value = false;
 }
 
-/** 应用一次 seek：按下/移动/释放共用 */
-function applyAudioSeek(clientX: number) {
+function onAudioProgressCancel(e: PointerEvent) {
+  if (!audioSeeking.value) return;
+  const el = e.currentTarget as HTMLElement;
+  audioSeekDraft.value = null;
+  audioSeeking.value = false;
+  if (el.hasPointerCapture?.(e.pointerId)) {
+    try { el.releasePointerCapture(e.pointerId); } catch { /* 已释放则忽略 */ }
+  }
+}
+
+/** 拖动预览：只更新 UI 草稿，不写入媒体 currentTime */
+function previewAudioSeek(clientX: number, progressEl?: HTMLElement) {
+  const audio = ensureAudioDuration();
+  const duration = audioDuration.value > 0 ? audioDuration.value : audio?.duration ?? 0;
+  if (duration <= 0) return;
+  audioSeekDraft.value = audioProgressRatioFromClientX(clientX, progressEl) * duration;
+}
+
+/** 拖动结束时仅执行一次真实 seek */
+function commitAudioSeek(target: number) {
   const a = audioRef.value;
   if (!a || audioDuration.value <= 0) return;
-  a.currentTime = audioProgressRatioFromClientX(clientX) * audioDuration.value;
+  a.currentTime = Math.max(0, Math.min(audioDuration.value, target));
 }
 
 /** 静音切换 */
@@ -798,9 +836,13 @@ function onAudioEnded() {
 }
 
 /** 音频进度同步（驱动自定义进度条）+ 节流持久化 */
-function onAudioTimeUpdate() {
-  const a = audioRef.value;
+function onAudioTimeUpdate(e: Event) {
+  const a = (e.currentTarget as HTMLAudioElement | null)
+    || (e.target as HTMLAudioElement | null)
+    || audioRef.value
+    || document.querySelector<HTMLAudioElement>('.fpv-audio-core');
   if (!a) return;
+  audioRef.value ||= a;
   audioCurrentTime.value = a.currentTime;
   if (Number.isFinite(a.duration) && a.duration > 0) audioDuration.value = a.duration;
   mediaStore.setProgress(a.currentTime, a.duration);
@@ -808,8 +850,10 @@ function onAudioTimeUpdate() {
 }
 
 /** 音频元数据可用后应用恢复点（恢复点已在 store 层完成版本校验） */
-function onAudioLoadedMeta() {
-  const a = audioRef.value;
+function onAudioLoadedMeta(e: Event) {
+  const a = (e.currentTarget as HTMLAudioElement | null)
+    || (e.target as HTMLAudioElement | null)
+    || audioRef.value;
   const resume = mediaStore.pendingResume;
   if (!a) return;
   // 同步时长与音量/倍速偏好（倍速恢复与视频保持一致）
@@ -853,6 +897,7 @@ function resetState() {
   audioCurrentTime.value = 0;
   audioDuration.value = 0;
   audioSeeking.value = false;
+  audioSeekDraft.value = null;
   // 图片查看状态复位（切换文件时避免上一张的缩放/旋转残留）
   if (imageDownsampleUrl) { URL.revokeObjectURL(imageDownsampleUrl); imageDownsampleUrl = null; }
   imageDisplaySrc.value = null;
@@ -957,7 +1002,9 @@ function onKeydown(e: KeyboardEvent) {
 
 /** 页面隐藏时补写进度（避免后台期间丢失最后位置） */
 function onVisibility() {
-  if (document.visibilityState === 'hidden') mediaStore.persistProgress();
+  if (document.visibilityState === 'hidden' && !audioSeeking.value && !videoSeeking.value) {
+    mediaStore.persistProgress();
+  }
 }
 
 /** 媒体元素加载失败（图片/音频/PDF 共用；仅 401/403 提示权限，其余可重试） */
@@ -1279,10 +1326,15 @@ function onCustomPlayerVideoRef(el: HTMLVideoElement | null) {
   }
 }
 
+/** 视频进度条拖动状态：拖动期间暂停真实进度同步与持久化 */
+function onVideoSeekingChange(seeking: boolean) {
+  videoSeeking.value = seeking;
+}
+
 /** 视频进度同步 + 节流持久化 */
 function onVideoTimeUpdate() {
   const v = videoRef.value;
-  if (!v) return;
+  if (!v || videoSeeking.value) return;
   mediaStore.setProgress(v.currentTime, v.duration);
   throttlePersist();
 }

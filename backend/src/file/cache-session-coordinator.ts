@@ -542,7 +542,10 @@ export class CacheSessionCoordinator {
           }
           if (session.error) throw session.error;
           if (offset > end || session.completed) break;
-          await coordinator.waitForSessionChange(session);
+          await coordinator.waitForSessionChange(
+            session,
+            () => offset < session.bytesWritten || session.completed || Boolean(session.error),
+          );
         }
       } finally {
         coordinator.fileAccessMap.set(session.fileId, Date.now());
@@ -615,7 +618,10 @@ export class CacheSessionCoordinator {
 
   // ---------- follower / 等待 ----------
 
-  private waitForSessionChange(session: Pick<CacheBuildSession, 'events'> | Pick<SpoolSession, 'events'>): Promise<void> {
+  private waitForSessionChange(
+    session: Pick<CacheBuildSession, 'events'> | Pick<SpoolSession, 'events'>,
+    isReady?: () => boolean,
+  ): Promise<void> {
     return new Promise((resolve, reject) => {
       const cleanup = () => {
         session.events.off('progress', onProgress);
@@ -631,12 +637,20 @@ export class CacheSessionCoordinator {
       };
       session.events.once('progress', onProgress);
       session.events.once('failed', onFailed);
+      // 注册监听后再次检查状态，封闭“先检查、后监听”窗口，避免错过唯一一次进度通知。
+      if (isReady?.()) {
+        cleanup();
+        resolve();
+      }
     });
   }
 
   async waitForSessionReadable(session: CacheBuildSession): Promise<void> {
     while (session.bytesWritten === 0 && !session.completed && !session.error) {
-      await this.waitForSessionChange(session);
+      await this.waitForSessionChange(
+        session,
+        () => session.bytesWritten > 0 || session.completed || Boolean(session.error),
+      );
     }
     if (session.error) throw session.error;
   }
@@ -667,7 +681,10 @@ export class CacheSessionCoordinator {
           }
           if (session.error) throw session.error;
           if (offset > end || (session.completed && offset >= session.expectedSize)) break;
-          await coordinator.waitForSessionChange(session);
+          await coordinator.waitForSessionChange(
+            session,
+            () => offset < session.bytesWritten || session.completed || Boolean(session.error),
+          );
         }
       } finally {
         coordinator.fileAccessMap.set(session.fileId, Date.now());
