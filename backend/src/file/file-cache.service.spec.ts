@@ -183,11 +183,19 @@ describe('FileCacheService no-cache mode', () => {
     cwd = await mkdtemp(path.join(tmpdir(), 'file-cache-nocache-test-'));
     jest.spyOn(process, 'cwd').mockReturnValue(cwd);
     service = createNoCacheService();
+    // 测试缩短宽限期；生产默认值固定为 120 秒。
+    (service as any).sessionCoordinator.spoolConsumerGracePeriodMs = 20;
     // 等待构造期 reloadConfig 生效（与现有 harness 一致）
     await new Promise(resolve => setTimeout(resolve, 10));
   });
 
   afterEach(async () => {
+    // 测试可能使用 fake timers；先恢复真实定时器，确保收尾清理不会被挂起。
+    jest.useRealTimers();
+    // 测试结束时主动清理宽限中的 spool，避免等待 120 秒并污染下一用例。
+    for (const session of [...(service.spoolSessions?.values?.() ?? [])]) {
+      await (service as any).sessionCoordinator.teardownSpoolSession(session);
+    }
     jest.restoreAllMocks();
     // 等待本测试的 spool/build 会话收尾（含被中止的失败会话），避免残留会话
     // 污染下一测试（G4-02 per-fileId 串行化占位）或在 rm 时触发 Windows EBUSY。
@@ -306,6 +314,9 @@ describe('FileCacheService no-cache mode', () => {
 
     await nextTick();
     expect((defaultService as any).buildSessions.size).toBe(0);
+    for (const session of [...(defaultService.spoolSessions?.values?.() ?? [])]) {
+      await (defaultService as any).sessionCoordinator.teardownSpoolSession(session);
+    }
     await waitForDir(true);
   });
 
@@ -359,19 +370,16 @@ describe('FileCacheService no-cache mode', () => {
     expect(svc2.isNoCacheMode()).toBe(true);
   });
 
-  it('destroys the upstream when the client disconnects immediately', async () => {
+  it('客户端立即断开时在宽限期内保留 spool 上游', async () => {
     const upstream = new PassThrough();
     const { stream } = await service.getOrCacheStream(fileId, 6, async () => ({
       stream: upstream,
       info: { file_size: 6 },
     }));
     stream.destroy();
-    // 轮询等待上游销毁（固定 10ms 在 CI/高负载下偶发不足，改为至多 200ms 轮询消除 flaky）
-    const deadline = Date.now() + 200;
-    while (!upstream.destroyed && Date.now() < deadline) {
-      await new Promise(resolve => setTimeout(resolve, 10));
-    }
-    expect(upstream.destroyed).toBe(true);
+    await new Promise(resolve => setTimeout(resolve, 5));
+    expect(upstream.destroyed).toBe(false);
+    expect((service as any).spoolSessions.has(fileId)).toBe(true);
   });
 
   it('C-04：迟到消费者从 offset 0 逐字节重放，不缺失已前进前缀', async () => {
@@ -395,7 +403,26 @@ describe('FileCacheService no-cache mode', () => {
     expect(fetchFn).toHaveBeenCalledTimes(1);
   });
 
-  it('C-04：spool 完成后磁盘上不残留正式缓存（不发布），仅临时 spool 清理后空目录', async () => {
+  it('C-04：spool Range follower 返回指定区间，并在宽限期内重连复用会话', async () => {
+    (service as any).sessionCoordinator.spoolConsumerGracePeriodMs = 40;
+    const upstream = new PassThrough();
+    const fetchFn = jest.fn(async () => ({ stream: upstream, info: { file_size: 6 } }));
+    const first = await service.getOrCacheRangeStream(fileId, 6, 1, 3, fetchFn);
+    expect(first).not.toBeNull();
+    upstream.write(Buffer.from('abcdef'));
+    await expect(readStream(first!)).resolves.toEqual(Buffer.from('bcd'));
+
+    const second = await service.getOrCacheRangeStream(fileId, 6, 4, 5, fetchFn);
+    expect(second).not.toBeNull();
+    await expect(readStream(second!)).resolves.toEqual(Buffer.from('ef'));
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    await new Promise(resolve => setTimeout(resolve, 60));
+    expect((service as any).spoolSessions.size).toBe(0);
+    expect(await listCacheDir()).toEqual([]);
+  });
+
+  it('C-04：spool 完成后磁盘上不残留正式缓存（不发布），宽限期后清理 spool', async () => {
+    (service as any).sessionCoordinator.spoolConsumerGracePeriodMs = 20;
     const upstream = new PassThrough();
     const { stream } = await service.getOrCacheStream(fileId, 4, async () => ({
       stream: upstream,
@@ -405,10 +432,115 @@ describe('FileCacheService no-cache mode', () => {
     upstream.end(Buffer.from('data'));
     await expect(contentPromise).resolves.toEqual(Buffer.from('data'));
 
-    // 消费者关闭后 teardown 异步清理 spool 文件
+    // 消费者关闭后 teardown 异步清理 spool
     await new Promise(resolve => setTimeout(resolve, 30));
     expect(await listCacheDir()).toEqual([]);
     expect(service.getCachedPath(fileId)).toBeNull();
+  });
+
+  it('spool 最后一个消费者断开后 119 秒不清理、120 秒无人时清理', async () => {
+    jest.useFakeTimers();
+    (service as any).sessionCoordinator.spoolConsumerGracePeriodMs = 120_000;
+    const upstream = new PassThrough();
+    const { stream } = await service.getOrCacheStream(fileId, 4, async () => ({
+      stream: upstream,
+      info: { file_size: 4 },
+    }));
+    const contentPromise = readStream(stream);
+    upstream.end(Buffer.from('data'));
+    await expect(contentPromise).resolves.toEqual(Buffer.from('data'));
+    const session = (service as any).spoolSessions.get(fileId);
+    expect(session.consumerCount).toBe(0);
+
+    jest.advanceTimersByTime(119_000);
+    await Promise.resolve();
+    expect((service as any).spoolSessions.get(fileId)).toBe(session);
+
+    jest.advanceTimersByTime(1_000);
+    await jest.runAllTimersAsync();
+    await session.completion;
+    expect((service as any).spoolSessions.has(fileId)).toBe(false);
+    jest.useRealTimers();
+    await waitForDir(true);
+  });
+
+  it('重连取消旧 timer，并在再次断开时从零重置宽限 timer', async () => {
+    (service as any).sessionCoordinator.spoolConsumerGracePeriodMs = 120_000;
+    const upstream = new PassThrough();
+    const fetchFn = jest.fn(async () => ({ stream: upstream, info: { file_size: 6 } }));
+    const first = await service.getOrCacheRangeStream(fileId, 6, 0, 1, fetchFn);
+    upstream.end(Buffer.from('abcdef'));
+    await expect(readStream(first!)).resolves.toEqual(Buffer.from('ab'));
+    const session = (service as any).spoolSessions.get(fileId);
+    clearTimeout(session.teardownTimer);
+    session.teardownTimer = undefined;
+
+    jest.useFakeTimers();
+    const coordinator = (service as any).sessionCoordinator;
+    const disconnected = coordinator.createSpoolFollowerStream(session, 0, 1);
+    disconnected.emit('close');
+    const oldTimer = session.teardownTimer;
+    expect(oldTimer).toBeDefined();
+    jest.advanceTimersByTime(60_000);
+
+    const reconnected = coordinator.createSpoolFollowerStream(session, 2, 3);
+    expect(session.teardownTimer).toBeUndefined();
+    expect((service as any).spoolSessions.get(fileId)).toBe(session);
+    reconnected.emit('close');
+    expect(session.teardownTimer).toBeDefined();
+    expect(session.teardownTimer).not.toBe(oldTimer);
+
+    // 重连取消旧 timer；再次断开后从零开始计时。
+    jest.advanceTimersByTime(119_999);
+    expect((service as any).spoolSessions.get(fileId)).toBe(session);
+    jest.advanceTimersByTime(1);
+    await jest.runAllTimersAsync();
+    expect((service as any).spoolSessions.has(fileId)).toBe(false);
+  });
+
+  it('重复 close 不会重复减少消费者计数', async () => {
+    (service as any).sessionCoordinator.spoolConsumerGracePeriodMs = 120_000;
+    const upstream = new PassThrough();
+    const { stream } = await service.getOrCacheStream(fileId, 4, async () => ({
+      stream: upstream,
+      info: { file_size: 4 },
+    }));
+    const session = (service as any).spoolSessions.get(fileId);
+    upstream.end(Buffer.from('data'));
+    await expect(readStream(stream)).resolves.toEqual(Buffer.from('data'));
+    stream.emit('close');
+    stream.emit('close');
+    expect(session.consumerCount).toBe(0);
+  });
+
+  it('上游完成后宽限期内仍可按 Range 读取同一 spool', async () => {
+    (service as any).sessionCoordinator.spoolConsumerGracePeriodMs = 120_000;
+    const upstream = new PassThrough();
+    const fetchFn = jest.fn(async () => ({ stream: upstream, info: { file_size: 6 } }));
+    const first = await service.getOrCacheStream(fileId, 6, fetchFn);
+    upstream.end(Buffer.from('abcdef'));
+    await expect(readStream(first.stream)).resolves.toEqual(Buffer.from('abcdef'));
+
+    const range = await service.getOrCacheRangeStream(fileId, 6, 2, 4, fetchFn);
+    await expect(readStream(range!)).resolves.toEqual(Buffer.from('cde'));
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect((service as any).spoolSessions.has(fileId)).toBe(true);
+  });
+
+  it('shutdown 立即清理宽限期中的 spool 会话和文件', async () => {
+    (service as any).sessionCoordinator.spoolConsumerGracePeriodMs = 120_000;
+    const upstream = new PassThrough();
+    const { stream } = await service.getOrCacheStream(fileId, 4, async () => ({
+      stream: upstream,
+      info: { file_size: 4 },
+    }));
+    upstream.end(Buffer.from('data'));
+    await expect(readStream(stream)).resolves.toEqual(Buffer.from('data'));
+    expect((service as any).spoolSessions.has(fileId)).toBe(true);
+
+    await service.onApplicationShutdown();
+    expect((service as any).spoolSessions.has(fileId)).toBe(false);
+    expect(await listCacheDir()).toEqual([]);
   });
 
   it('H-06：冷回源并发预算——达到上限时拒绝新建并抛 503', async () => {

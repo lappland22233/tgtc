@@ -322,15 +322,22 @@ export class ShareController {
       fileId,
       this.getAccessJwt(req),
       ip,
+      req.headers.range,
+      typeof req.headers['if-range'] === 'string' ? req.headers['if-range'] : undefined,
     );
 
+    const isRange = result.start !== undefined && result.end !== undefined && result.total !== undefined;
     await this.streamResponder.send({
       res,
+      status: isRange ? 206 : undefined,
+      range: isRange ? { start: result.start!, end: result.end!, total: result.total! } : undefined,
       headers: {
         'Content-Type': result.contentType,
         // 分享下载始终用 attachment 触发浏览器原生下载 UI，不内联预览
         'Content-Disposition': buildContentDisposition('attachment', result.filename),
         'Content-Length': result.size.toString(),
+        ETag: result.etag || '"0"',
+        'Accept-Ranges': 'bytes',
         'Cache-Control': 'no-store, no-cache, must-revalidate',
         'Referrer-Policy': 'no-referrer',
         'X-Content-Type-Options': 'nosniff',
@@ -366,6 +373,7 @@ export class ShareController {
         ip,
         rangeHeader || undefined,
         this.getOrCreateVisitorHash(req, res),
+        typeof req.headers['if-range'] === 'string' ? req.headers['if-range'] : undefined,
       );
 
       // 命中 Range → 206 + Content-Range；否则 200 全量
@@ -380,7 +388,8 @@ export class ShareController {
           'Content-Type': sanitizePreviewContentType(result.contentType),
           'Content-Disposition': buildContentDisposition('inline', result.filename),
           'Content-Length': result.size.toString(),
-          'Accept-Ranges': rangeHeader && !isRange ? 'none' : 'bytes',
+          ETag: result.etag || '"0"',
+          'Accept-Ranges': 'bytes',
           'Cache-Control': 'no-store, no-cache, must-revalidate',
           'X-Content-Type-Options': 'nosniff',
           'Referrer-Policy': 'no-referrer',

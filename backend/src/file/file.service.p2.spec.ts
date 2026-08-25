@@ -25,7 +25,10 @@ function createService(overrides: Record<string, unknown> = {}): FileService {
   const service = Object.create(FileService.prototype) as FileService;
   Object.assign(service, {
     fileRepository: { findOne: jest.fn(), createQueryBuilder: jest.fn(), manager: { query: jest.fn() } },
-    fileCacheService: { getCachedPath: jest.fn() },
+    fileCacheService: {
+      getCachedPath: jest.fn(),
+      getOrCacheRangeStream: jest.fn().mockResolvedValue(new Readable()),
+    },
     accessLogRepository: { save: jest.fn() },
     configService: { get: jest.fn() },
     rangeQuotaDedup: new Map<string, number>(),
@@ -125,7 +128,11 @@ describe('G2-15: Range 配额扣次 30s 幂等去重', () => {
         findOne: jest.fn().mockResolvedValue(readyFile),
         createQueryBuilder: jest.fn().mockReturnValue(qbUpdate),
       },
-      fileCacheService: { getCachedPath: jest.fn().mockReturnValue('/tmp/cache/f-1') },
+      fileCacheService: {
+        getCachedPath: jest.fn().mockReturnValue('/tmp/cache/f-1'),
+        isNoCacheMode: jest.fn().mockReturnValue(false),
+        getOrCacheRangeStream: jest.fn().mockResolvedValue(new Readable()),
+      },
       accessLogRepository: { save: jest.fn().mockResolvedValue({ id: 'log-1' }) },
     });
     return { service, update };

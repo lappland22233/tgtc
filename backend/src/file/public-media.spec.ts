@@ -1,5 +1,6 @@
 import 'reflect-metadata';
 import { BadRequestException, ForbiddenException, GoneException } from '@nestjs/common';
+import { PassThrough } from 'stream';
 
 jest.mock('file-type', () => ({ fileTypeFromBuffer: jest.fn() }), { virtual: true });
 
@@ -12,7 +13,11 @@ function createService(file: Record<string, unknown>) {
   const service = Object.create(FileService.prototype) as FileService;
   Object.assign(service, {
     fileRepository: { findOne: jest.fn().mockResolvedValue(file) },
-    fileCacheService: { getCachedPath: jest.fn().mockReturnValue(null) },
+    fileCacheService: {
+      getCachedPath: jest.fn().mockReturnValue(null),
+      isNoCacheMode: jest.fn().mockReturnValue(false),
+      getOrCacheRangeStream: jest.fn().mockResolvedValue(null),
+    },
   });
   return service;
 }
@@ -231,13 +236,15 @@ describe('FileService getDownloadStream error guard', () => {
 describe('FileService public media cold-range policy', () => {
   it('returns null for cold public media Range (fallback to full single connection)', async () => {
     const service = createService(publicImage);
+    (service as any).fileCacheService.getOrCacheRangeStream = jest.fn().mockResolvedValue(new PassThrough());
     await expect(
       (service as any).getPublicMediaStreamWithRange(publicImage.id, 'bytes=0-99'),
-    ).resolves.toBeNull();
+    ).resolves.toMatchObject({ start: 0, end: 99, total: 128 });
   });
 
   it('serves a range stream from the local cache for public media', async () => {
     const service = createService(publicImage);
+    (service as any).fileCacheService.getOrCacheRangeStream = jest.fn().mockResolvedValue(new PassThrough());
     (service as any).fileCacheService.getCachedPath = jest.fn().mockReturnValue('/tmp/Cache/a58f374f-1b14');
     const result = await (service as any).getPublicMediaStreamWithRange(publicImage.id, 'bytes=0-9');
     expect(result).not.toBeNull();

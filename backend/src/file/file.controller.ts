@@ -340,7 +340,7 @@ export class FileController {
       res.on('close', releaseMediaSlot);
       const rangeHeader = req.headers.range;
       if (rangeHeader) {
-        const rangeResult = await this.fileService.getPublicMediaStreamWithRange(id, rangeHeader, clientIp);
+        const rangeResult = await this.fileService.getPublicMediaStreamWithRange(id, rangeHeader, clientIp, typeof req.headers['if-range'] === 'string' ? req.headers['if-range'] : undefined);
         if (rangeResult) {
           await this.streamResponder.send({
             res,
@@ -350,6 +350,7 @@ export class FileController {
               'Content-Type': rangeResult.contentType,
               'Content-Disposition': buildContentDisposition('inline', rangeResult.filename),
               'Content-Length': rangeResult.size.toString(),
+              ETag: rangeResult.etag || '"0"',
               'Accept-Ranges': 'bytes',
               // C-01/H-03 修复：公开媒体是权限可变资源（可删除/转私有/加约束），
               // 不保留长 TTL 公开缓存；并强制 nosniff + no-referrer + 限制性 CSP 纵深防御。
@@ -373,7 +374,8 @@ export class FileController {
           'Content-Type': result.contentType,
           'Content-Disposition': buildContentDisposition('inline', result.filename),
           'Content-Length': result.size.toString(),
-          'Accept-Ranges': rangeHeader ? 'none' : 'bytes',
+          ETag: result.etag,
+          'Accept-Ranges': 'bytes',
           // C-01/H-03 修复：同 206 分支，禁止长 TTL 缓存与凭据外泄。
           'Cache-Control': 'no-store',
           'X-Content-Type-Options': 'nosniff',
@@ -410,7 +412,13 @@ export class FileController {
       // Range 请求支持（仅缓存命中时可用）
       const rangeHeader = req.headers.range;
       if (rangeHeader) {
-        const rangeResult = await this.fileService.getPreviewStreamWithRange(id, user, rangeHeader, clientIp);
+        const rangeResult = await this.fileService.getPreviewStreamWithRange(
+          id,
+          user,
+          rangeHeader,
+          clientIp,
+          typeof req.headers['if-range'] === 'string' ? req.headers['if-range'] : undefined,
+        );
         if (rangeResult) {
           await this.streamResponder.send({
             res,
@@ -420,6 +428,7 @@ export class FileController {
               'Content-Type': sanitizePreviewContentType(rangeResult.contentType),
               'Content-Disposition': buildContentDisposition('inline', rangeResult.filename),
               'Content-Length': rangeResult.size.toString(),
+              ETag: rangeResult.etag || '"0"',
               'Accept-Ranges': 'bytes',
               'Cache-Control': 'private, no-cache',
               'X-Content-Type-Options': 'nosniff',
@@ -431,8 +440,7 @@ export class FileController {
           });
           return;
         }
-        // Range 不支持（未缓存）→ 回退全量预览
-      }
+        }
 
       const result = await this.fileService.getPreviewStream(id, user, clientIp);
 
@@ -442,7 +450,8 @@ export class FileController {
           'Content-Type': sanitizePreviewContentType(result.contentType),
           'Content-Disposition': buildContentDisposition('inline', result.filename),
           'Content-Length': result.size.toString(),
-          'Accept-Ranges': rangeHeader ? 'none' : 'bytes',
+          ETag: result.etag,
+          'Accept-Ranges': 'bytes',
           'Cache-Control': 'private, no-cache',
           'X-Content-Type-Options': 'nosniff',
           'Referrer-Policy': 'no-referrer',
@@ -589,7 +598,7 @@ export class FileController {
       if (rangeHeader) {
         const rangeResult = await this.fileService.getFileContentStreamWithRange(
           id, user, rangeHeader,
-          { noCache: noCacheRequested ? true : undefined, ip: clientIp },
+          { noCache: noCacheRequested ? true : undefined, ip: clientIp, ifRange: typeof req.headers['if-range'] === 'string' ? req.headers['if-range'] : undefined as string | undefined },
         );
         if (rangeResult) {
           await this.streamResponder.send({
@@ -600,6 +609,7 @@ export class FileController {
               'Content-Type': rangeResult.contentType,
               'Content-Disposition': buildContentDisposition('attachment', rangeResult.filename),
               'Content-Length': rangeResult.size.toString(),
+              ETag: rangeResult.etag || '"0"',
               'Accept-Ranges': 'bytes',
               'Cache-Control': 'private, no-cache',
               'X-Content-Type-Options': 'nosniff',

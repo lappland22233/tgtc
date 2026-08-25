@@ -34,6 +34,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { BCRYPT_ROUNDS } from '../common/constants/bcrypt';
 import { FILE_DELETE_GRACE_MS, FILE_DELETE_COOLDOWN_MS } from '../common/constants/durations';
 import { isSafePublicInlineContentType } from '../common/utils/preview-content-type';
+import { buildFileVersionETag, matchesIfRange } from '../common/utils/file-range-validator';
 import { parseByteRange } from '../common/utils/byte-range';
 import {
   RangeNotSatisfiableException,
@@ -1981,15 +1982,34 @@ export class FileService implements OnModuleInit {
     return { stream, contentType: mimeType, filename, size: Number(file.size), accessLogId };
   }
 
-  /**
-   * 流式下载支持 Range 请求（仅缓存命中时可用）
-   * 返回 206 范围流或 null（表示不支持 Range，回退完整下载）
-   */
+  /** 为 Range 提供统一的 Telegram 回源函数：无缓存走 spool，正式缓存走 build。 */
+  private async getRangeDownloadStream(
+    file: File,
+    start: number,
+    end: number,
+    noCache = false,
+  ): Promise<Readable | null> {
+    const expectedSize = Number(file.size);
+    const forceNoCache = noCache && !this.fileCacheService.isNoCacheMode();
+    const fetchFn = async () => this.telegramService.getRealtimeFileStream(
+      file.telegramFileId || file.filename,
+      expectedSize,
+      { noCache: this.fileCacheService.isNoCacheMode() || forceNoCache },
+    );
+    const stream = await this.fileCacheService.getOrCacheRangeStream(
+      file.id, expectedSize, start, end, fetchFn,
+      { noCache: forceNoCache },
+    );
+    if (stream) this.attachDownloadInvalidHandler(file, stream);
+    return stream;
+  }
+
+  /** 流式下载支持 Range；冷资源和无缓存模式也保持 206。 */
   async getFileContentStreamWithRange(
     id: string,
     user: User,
     rangeHeader: string,
-    opts?: { noCache?: boolean; ip?: string },
+    opts?: { noCache?: boolean; ip?: string; ifRange?: string },
   ): Promise<{
     stream: Readable;
     contentType: string;
@@ -1999,23 +2019,16 @@ export class FileService implements OnModuleInit {
     end: number;
     total: number;
     accessLogId?: string;
+    etag?: string;
   } | null> {
-    // 请求级无缓存：Range 依赖本地缓存文件，无缓存时回退完整下载
-    if (opts?.noCache) return null;
-
     const file = await this.fileRepository.findOne({
       where: { id, isDeleted: false },
     });
     if (!file) throw new NotFoundException('文件不存在');
 
+    const etag = buildFileVersionETag(file);
+    if (opts?.ifRange && !matchesIfRange(opts.ifRange, etag)) return null;
     await this.assertFileReadable(file, user);
-
-    // 仅对本地缓存的文件支持 Range
-    const cachedPath = this.fileCacheService.getCachedPath(file.id);
-    if (!cachedPath) {
-      // 未缓存的文件回退到完整下载（Telegram API 不支持 Range）
-      return null;
-    }
 
     this.assertFileUsable(file);
     // 文件仍在处理中（TG 未同步）→ 拒绝范围下载，避免用临时 UUID 回源
@@ -2033,9 +2046,12 @@ export class FileService implements OnModuleInit {
     const start = parsed.range.start;
     const actualEnd = parsed.range.end;
 
-    // 读取指定范围的文件片段
+    // 缓存命中走本地文件；冷资源/无缓存走 spool/build，均保持 Range。
     const chunkSize = actualEnd - start + 1;
-    const readStream = createReadStream(cachedPath, { start, end: actualEnd });
+    const readStream = await this.getRangeDownloadStream(file, start, actualEnd, opts?.noCache);
+    if (!readStream) {
+      throw new BadRequestException('文件暂不可提供范围下载');
+    }
 
     // G2-15：Range 配额扣次幂等去重 —— 30s 内同文件同（用户+IP）只扣一次，
     // 避免一次视频播放的多个 Range 请求耗尽 maxAccessCount。
@@ -2091,6 +2107,7 @@ export class FileService implements OnModuleInit {
       end: actualEnd,
       total,
       accessLogId,
+      etag: buildFileVersionETag(file),
     };
   }
 
@@ -2313,6 +2330,7 @@ export class FileService implements OnModuleInit {
     filename: string;
     size: number;
     accessLogId?: string;
+    etag: string;
   }> {
     const file = await this.getPublicMediaFile(id);
     const { stream, actualSize } = await this.getDownloadStream(file);
@@ -2323,11 +2341,12 @@ export class FileService implements OnModuleInit {
       filename: ensureFileExtension(file.originalName, file.mimeType),
       size: actualSize,
       accessLogId,
+      etag: buildFileVersionETag(file),
     };
   }
 
-  /** 公开媒体 Range：仅正式缓存命中时返回范围流，冷文件由控制器回退完整响应。 */
-  async getPublicMediaStreamWithRange(id: string, rangeHeader: string, ip?: string): Promise<{
+  /** 公开媒体 Range：单区间命中时返回 206，冷资源也通过无缓存 spool 保持 Range。 */
+  async getPublicMediaStreamWithRange(id: string, rangeHeader: string, ip?: string, ifRange?: string): Promise<{
     stream: Readable;
     contentType: string;
     filename: string;
@@ -2336,9 +2355,12 @@ export class FileService implements OnModuleInit {
     end: number;
     total: number;
     accessLogId?: string;
+    etag?: string;
   } | null> {
     const file = await this.getPublicMediaFile(id);
     const total = Number(file.size);
+    const etag = buildFileVersionETag(file);
+    if (ifRange && !matchesIfRange(ifRange, etag)) return null;
     const parsed = parseByteRange(rangeHeader, total);
     // 非法/越界统一 416（含正确 Content-Range）；语法性错误同样按不可满足处理，
     // 避免把垃圾 Range 悄悄回退为 200 造成客户端按完整长度解析出错。
@@ -2347,11 +2369,17 @@ export class FileService implements OnModuleInit {
     }
     const { start, end } = parsed.range;
 
-    const cachedPath = this.fileCacheService.getCachedPath(file.id);
-    if (!cachedPath) return null;
+    const expectedSize = Number(file.size);
+    const fetchFn = () => this.telegramService.getRealtimeFileStream(
+      file.telegramFileId || file.filename,
+      expectedSize,
+      { noCache: this.fileCacheService.isNoCacheMode() },
+    );
+    const stream = await this.fileCacheService.getOrCacheRangeStream(file.id, expectedSize, start, end, fetchFn);
+    if (!stream) throw new BadRequestException('文件暂不可提供范围预览');
 
     return {
-      stream: createReadStream(cachedPath, { start, end }),
+      stream,
       contentType: file.mimeType,
       filename: ensureFileExtension(file.originalName, file.mimeType),
       size: end - start + 1,
@@ -2359,6 +2387,7 @@ export class FileService implements OnModuleInit {
       end,
       total,
       accessLogId: await this.createPublicMediaAccessLog(file, ip),
+      etag,
     };
   }
 
@@ -2841,6 +2870,7 @@ export class FileService implements OnModuleInit {
     size: number;
     isInline: boolean;
     accessLogId?: string;
+    etag: string;
   }> {
     const file = await this.fileRepository.findOne({
       where: { id, isDeleted: false },
@@ -2876,7 +2906,54 @@ export class FileService implements OnModuleInit {
     const isInline = /^(image|video|audio)\//.test(mimeType);
     const filename = ensureFileExtension(file.originalName, mimeType);
 
-    return { stream, contentType: mimeType, filename, size: actualSize, isInline, accessLogId };
+    return { stream, contentType: mimeType, filename, size: actualSize, isInline, accessLogId, etag: buildFileVersionETag(file) };
+  }
+
+  /** 分享下载单区间：始终使用无缓存 spool，避免冷资源静默退化为 200。 */
+  async getShareDownloadStreamWithRange(
+    id: string,
+    rangeHeader: string,
+    ip?: string,
+    ifRange?: string,
+  ): Promise<{
+    stream: Readable;
+    contentType: string;
+    filename: string;
+    size: number;
+    isInline: boolean;
+    start: number;
+    end: number;
+    total: number;
+    accessLogId?: string;
+    etag: string;
+  } | null> {
+    const file = await this.fileRepository.findOne({ where: { id, isDeleted: false } });
+    if (!file) throw new NotFoundException('文件不存在');
+    const etag = buildFileVersionETag(file);
+    if (ifRange && !matchesIfRange(ifRange, etag)) return null;
+    this.assertFileUsable(file);
+    const total = Number(file.size);
+    const parsed = parseByteRange(rangeHeader, total);
+    if (!parsed.ok) throw new RangeNotSatisfiableException(total);
+    const { start, end } = parsed.range;
+    const stream = await this.getRangeDownloadStream(file, start, end, true);
+    if (!stream) throw new BadRequestException('文件暂不可提供范围下载');
+    let accessLogId: string | undefined;
+    try {
+      const saved = await this.accessLogRepository.save({
+        fileId: id, ip: ip || '', action: 'share_download', uploaderId: file.uploaderId, responseSize: 0,
+      });
+      accessLogId = saved.id;
+    } catch { /* 日志失败不影响下载 */ }
+    const mimeType = file.mimeType || 'application/octet-stream';
+    return {
+      stream,
+      contentType: mimeType,
+      filename: ensureFileExtension(file.originalName, mimeType),
+      size: end - start + 1,
+      isInline: /^(image|video|audio)\//.test(mimeType),
+      start, end, total, accessLogId, etag,
+    };
   }
 
   /**
@@ -2891,6 +2968,7 @@ export class FileService implements OnModuleInit {
     filename: string;
     size: number;
     accessLogId?: string;
+    etag: string;
   }> {
     const file = await this.fileRepository.findOne({
       where: { id, isDeleted: false },
@@ -2922,7 +3000,7 @@ export class FileService implements OnModuleInit {
     const mimeType = file.mimeType || 'application/octet-stream';
     const filename = ensureFileExtension(file.originalName, mimeType);
 
-    return { stream, contentType: mimeType, filename, size: Number(file.size), accessLogId };
+    return { stream, contentType: mimeType, filename, size: Number(file.size), accessLogId, etag: buildFileVersionETag(file) };
   }
 
   /**
@@ -2935,6 +3013,7 @@ export class FileService implements OnModuleInit {
     user: User,
     rangeHeader: string,
     ip?: string,
+    ifRange?: string,
   ): Promise<{
     stream: Readable;
     contentType: string;
@@ -2944,6 +3023,7 @@ export class FileService implements OnModuleInit {
     end: number;
     total: number;
     accessLogId?: string;
+    etag?: string;
   } | null> {
     const file = await this.fileRepository.findOne({
       where: { id, isDeleted: false },
@@ -2960,6 +3040,9 @@ export class FileService implements OnModuleInit {
     }
 
     const total = Number(file.size);
+    const etag = buildFileVersionETag(file);
+    // If-Range 不匹配时返回 null，由控制器按 HTTP 语义发送完整 200；其余有效 Range 必须保持 206。
+    if (ifRange && !matchesIfRange(ifRange, etag)) return null;
     // 严格单 Range 解析：支持 closed/open-ended/suffix；非法/越界统一 416
     const parsed = parseByteRange(rangeHeader, total);
     if (!parsed.ok) {
@@ -2971,9 +3054,15 @@ export class FileService implements OnModuleInit {
     // 冷资源（无正式缓存）不支持真实分片：返回 null 交由控制器回退全量预览，
     // 由 getPreviewStream → getOrCacheStream 复用同一缓存构建会话，保证单连接加载；
     // 前端在冷资源阶段钳制 seek，拖动进度条不再触发新的动态分段回源。
-    const cachedPath = this.fileCacheService.getCachedPath(file.id);
-    if (!cachedPath) return null;
-    const readStream = createReadStream(cachedPath, { start, end: actualEnd });
+    const fetchFn = () => this.telegramService.getRealtimeFileStream(
+      file.telegramFileId || file.filename,
+      total,
+      { noCache: this.fileCacheService.isNoCacheMode() },
+    );
+    const readStream = await this.fileCacheService.getOrCacheRangeStream(file.id, total, start, actualEnd, fetchFn);
+    if (!readStream) {
+      throw new BadRequestException('文件暂不可提供范围预览');
+    }
 
     // 预览不递增 currentAccessCount，仅写访问日志（action=preview）
 
@@ -3003,6 +3092,7 @@ export class FileService implements OnModuleInit {
       end: actualEnd,
       total,
       accessLogId,
+      etag: buildFileVersionETag(file),
     };
   }
 
@@ -3012,7 +3102,7 @@ export class FileService implements OnModuleInit {
    * 仅正式缓存命中时返回范围流，冷文件返回 null 由上层回退完整响应。
    * 访问日志 action 记为 'share_preview'。
    */
-  async getSharePreviewStreamWithRange(fileId: string, rangeHeader: string, ip?: string): Promise<{
+  async getSharePreviewStreamWithRange(fileId: string, rangeHeader: string, ip?: string, ifRange?: string): Promise<{
     stream: Readable;
     contentType: string;
     filename: string;
@@ -3022,6 +3112,7 @@ export class FileService implements OnModuleInit {
     end: number;
     total: number;
     accessLogId?: string;
+    etag?: string;
   } | null> {
     const file = await this.fileRepository.findOne({ where: { id: fileId, isDeleted: false } });
     if (!file) throw new NotFoundException('文件不存在');
@@ -3029,6 +3120,8 @@ export class FileService implements OnModuleInit {
     this.assertFileUsable(file);
 
     const total = Number(file.size);
+    const etag = buildFileVersionETag(file);
+    if (ifRange && !matchesIfRange(ifRange, etag)) return null;
     // 严格单 Range 解析：支持 closed/open-ended/suffix；非法/越界统一 416
     const parsed = parseByteRange(rangeHeader, total);
     if (!parsed.ok) {
@@ -3037,12 +3130,19 @@ export class FileService implements OnModuleInit {
     const start = parsed.range.start;
     const end = parsed.range.end;
 
-    const cachedPath = this.fileCacheService.getCachedPath(file.id);
-    if (!cachedPath) return null;
+    const fetchFn = () => this.telegramService.getRealtimeFileStream(
+      file.telegramFileId || file.filename,
+      total,
+      { noCache: this.fileCacheService.isNoCacheMode() },
+    );
+    const stream = await this.fileCacheService.getOrCacheRangeStream(file.id, total, start, end, fetchFn);
+    if (!stream) {
+      throw new BadRequestException('文件暂不可提供范围预览');
+    }
 
     const mimeType = file.mimeType || 'application/octet-stream';
     return {
-      stream: createReadStream(cachedPath, { start, end }),
+      stream,
       contentType: mimeType,
       filename: ensureFileExtension(file.originalName, mimeType),
       size: end - start + 1,

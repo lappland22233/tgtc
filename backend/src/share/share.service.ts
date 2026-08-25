@@ -235,6 +235,8 @@ export class ShareService {
     fileId: string,
     accessJwt: string | undefined,
     ip: string | null,
+    rangeHeader?: string,
+    ifRange?: string,
   ): Promise<{
     stream: Readable;
     contentType: string;
@@ -242,6 +244,10 @@ export class ShareService {
     size: number;
     isInline: boolean;
     accessLogId?: string;
+    start?: number;
+    end?: number;
+    total?: number;
+    etag?: string;
   }> {
     const link = await this.shareLinkRepo.findOne({ where: { token, isDeleted: false } });
     if (!link) throw new NotFoundException('分享不存在');
@@ -269,6 +275,12 @@ export class ShareService {
       metadata: { tokenPrefix: this.maskToken(token), fileId, ip: ip || null },
     });
 
+    if (rangeHeader) {
+      const rangeResult = await this.fileService.getShareDownloadStreamWithRange(
+        fileId, rangeHeader, ip || undefined, ifRange,
+      );
+      if (rangeResult) return rangeResult;
+    }
     return this.fileService.getStreamForShareDownload(fileId, ip || undefined, link.token);
   }
 
@@ -290,6 +302,7 @@ export class ShareService {
     ip: string | null,
     rangeHeader: string | undefined,
     visitorHash: string,
+    ifRange?: string,
   ): Promise<{
     stream: Readable;
     contentType: string;
@@ -300,6 +313,7 @@ export class ShareService {
     start?: number;
     end?: number;
     total?: number;
+    etag?: string;
   }> {
     const link = await this.shareLinkRepo.findOne({ where: { token, isDeleted: false } });
     if (!link) throw new NotFoundException('分享不存在');
@@ -331,9 +345,11 @@ export class ShareService {
     await this.consumeSharePreviewAccess(link, fileId, visitorHash);
 
     if (rangeHeader) {
-      const rangeResult = await this.fileService.getSharePreviewStreamWithRange(fileId, rangeHeader, ip || undefined);
+      const rangeResult = await this.fileService.getSharePreviewStreamWithRange(
+        fileId, rangeHeader, ip || undefined, ifRange,
+      );
       if (rangeResult) return rangeResult;
-      // Range 无效或缓存未命中 → 回退全量流；会话已确认，不再重复扣次
+      // 仅在缓存组件明确无法提供流时才允许内部降级；非法 Range 已由 FileService 抛出 416。
     }
     return this.fileService.getStreamForShareDownload(fileId, ip || undefined, link.token);
   }

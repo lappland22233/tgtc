@@ -19,6 +19,7 @@ import { createWriteStream } from 'fs';
 import { promises as fsp } from 'fs';
 import { FileHandle } from 'fs/promises';
 import { EventEmitter } from 'events';
+import { randomUUID } from 'crypto';
 import type { CacheDiskManager } from './cache-disk-manager';
 
 export interface CacheBuildSession {
@@ -57,8 +58,10 @@ export interface SpoolSession {
   abort: (error: Error) => void;
   upstream?: Readable;
   output?: ReturnType<typeof createWriteStream>;
-  /** 活跃消费者数；完成后全部离开时清理 spool 文件 */
+  /** 活跃消费者数；完成后全部离开时进入宽限保活 */
   consumerCount: number;
+  /** 最后一个消费者离开后的延迟清理 timer */
+  teardownTimer?: NodeJS.Timeout;
 }
 
 export interface SessionCoordinatorDeps {
@@ -83,6 +86,8 @@ export class CacheSessionCoordinator {
   buildIdleTimeoutMs = this.readPositiveTimeout('FILE_CACHE_BUILD_IDLE_TIMEOUT_MS', 60_000);
   /** 构建总超时（毫秒）：整个上游回源超过该时长则中止 */
   buildTotalTimeoutMs = this.readPositiveTimeout('FILE_CACHE_BUILD_TOTAL_TIMEOUT_MS', 30 * 60_000);
+  /** 无缓存 spool 最后一个消费者断开后的会话复用宽限期。 */
+  readonly spoolConsumerGracePeriodMs = 120_000;
 
   constructor(private readonly deps: SessionCoordinatorDeps) {}
 
@@ -144,7 +149,7 @@ export class CacheSessionCoordinator {
     session = {
       fileId,
       expectedSize,
-      tmpPath: this.diskManager.getCachePath(fileId) + '.tmp',
+      tmpPath: `${this.diskManager.getCachePath(fileId)}.${randomUUID()}.tmp`,
       bytesWritten: 0,
       completed: false,
       events,
@@ -172,9 +177,11 @@ export class CacheSessionCoordinator {
     fileId: string,
     expectedSize: number,
     fetchFn: () => Promise<{ stream: Readable; info: { file_size: number } }>,
+    start = 0,
+    end = expectedSize - 1,
   ): Promise<{ stream: Readable; fromCache: boolean }> {
     await this.abortBuildSession(fileId);
-    return this.getSpooledStream(fileId, expectedSize, fetchFn);
+    return this.getSpooledStream(fileId, expectedSize, fetchFn, start, end);
   }
 
   /**
@@ -332,9 +339,14 @@ export class CacheSessionCoordinator {
     fileId: string,
     expectedSize: number,
     fetchFn: () => Promise<{ stream: Readable; info: { file_size: number } }>,
+    start = 0,
+    end = expectedSize - 1,
   ): Promise<{ stream: Readable; fromCache: boolean }> {
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end < start || end >= expectedSize) {
+      throw new Error(`非法的 Range: ${start}-${end}`);
+    }
     const session = await this.getOrCreateSpoolSession(fileId, expectedSize, fetchFn);
-    const stream = this.createSpoolFollowerStream(session);
+    const stream = this.createSpoolFollowerStream(session, start, end);
     return { stream, fromCache: false };
   }
 
@@ -358,7 +370,7 @@ export class CacheSessionCoordinator {
     session = {
       fileId,
       expectedSize,
-      spoolPath: this.diskManager.getCachePath(fileId) + '.spool',
+      spoolPath: `${this.diskManager.getCachePath(fileId)}.${randomUUID()}.spool`,
       bytesWritten: 0,
       completed: false,
       events,
@@ -477,12 +489,14 @@ export class CacheSessionCoordinator {
       upstreamPromise?.then(({ stream: s }) => s.destroy()).catch(() => {});
       session.upstream?.destroy();
       session.output?.destroy();
-      // 完成后清理：若已完成由 teardown 管理；失败时立即清理
-      if (!session.completed) {
-        await fsp.unlink(session.spoolPath).catch(() => {});
-        if (this.spoolSessions.get(session.fileId) === session) {
-          this.spoolSessions.delete(session.fileId);
-        }
+      // 上游错误/超时必须立即清理，不受消费者宽限期影响。
+      if (session.teardownTimer) {
+        clearTimeout(session.teardownTimer);
+        session.teardownTimer = undefined;
+      }
+      await fsp.unlink(session.spoolPath).catch(() => {});
+      if (this.spoolSessions.get(session.fileId) === session) {
+        this.spoolSessions.delete(session.fileId);
       }
       session.events.emit('failed', session.error);
       throw session.error;
@@ -495,16 +509,24 @@ export class CacheSessionCoordinator {
     }
   }
 
-  /** 新增一个从 offset 0 独立跟随读取的消费者流 */
-  private createSpoolFollowerStream(session: SpoolSession): Readable {
+  /** 新增一个按指定 Range 独立跟随读取的消费者流。 */
+  private createSpoolFollowerStream(
+    session: SpoolSession,
+    start = 0,
+    end = session.expectedSize - 1,
+  ): Readable {
     const coordinator = this;
+    if (session.teardownTimer) {
+      clearTimeout(session.teardownTimer);
+      session.teardownTimer = undefined;
+    }
     const stream = Readable.from((async function* follow(): AsyncGenerator<Buffer> {
-      let offset = 0;
+      let offset = start;
       const buffer = Buffer.allocUnsafe(256 * 1024);
       try {
-        while (offset < session.expectedSize) {
-          while (offset < session.bytesWritten && offset < session.expectedSize) {
-            const available = Math.min(buffer.length, session.bytesWritten - offset, session.expectedSize - offset);
+        while (offset <= end) {
+          while (offset < session.bytesWritten && offset <= end) {
+            const available = Math.min(buffer.length, session.bytesWritten - offset, end - offset + 1);
             let handle: FileHandle | undefined;
             try {
               handle = await fsp.open(session.spoolPath, 'r');
@@ -519,7 +541,7 @@ export class CacheSessionCoordinator {
             yield Buffer.from(buffer.subarray(0, bytesRead));
           }
           if (session.error) throw session.error;
-          if (offset >= session.expectedSize || session.completed) break;
+          if (offset > end || session.completed) break;
           await coordinator.waitForSessionChange(session);
         }
       } finally {
@@ -529,17 +551,37 @@ export class CacheSessionCoordinator {
 
     session.consumerCount++;
     stream.once('close', () => {
-      session.consumerCount--;
-      // 完成后所有消费者离开 → 清理 spool 文件与会话
-      if (session.consumerCount <= 0) {
+      session.consumerCount = Math.max(0, session.consumerCount - 1);
+      if (session.consumerCount !== 0) return;
+      // 上游错误/超时会直接从 runSpoolSession 清理；正常无消费者时保留会话，
+      // 让短暂断线后的 Range 请求复用已写入 spool，避免重新连接 Telegram。
+      if (session.error || coordinator.shuttingDown) {
         void coordinator.teardownSpoolSession(session);
+        return;
       }
+      const sessionAtSchedule = session;
+      if (session.teardownTimer) clearTimeout(session.teardownTimer);
+      session.teardownTimer = setTimeout(() => {
+        session.teardownTimer = undefined;
+        if (
+          coordinator.spoolSessions.get(sessionAtSchedule.fileId) === sessionAtSchedule &&
+          sessionAtSchedule.consumerCount === 0 &&
+          !sessionAtSchedule.error
+        ) {
+          void coordinator.teardownSpoolSession(sessionAtSchedule);
+        }
+      }, coordinator.spoolConsumerGracePeriodMs);
+      session.teardownTimer.unref?.();
     });
     return stream;
   }
 
   /** 清理 spool 会话：删除 spool 文件并从 map 移除（幂等） */
   async teardownSpoolSession(session: SpoolSession): Promise<void> {
+    if (session.teardownTimer) {
+      clearTimeout(session.teardownTimer);
+      session.teardownTimer = undefined;
+    }
     if (this.spoolSessions.get(session.fileId) === session) {
       this.spoolSessions.delete(session.fileId);
     }

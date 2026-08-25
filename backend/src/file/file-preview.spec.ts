@@ -36,7 +36,13 @@ const ownerUser = { id: uploaderId, role: UserRole.USER };
 
 function createService(overrides: Record<string, unknown> = {}) {
   const service = Object.create(FileService.prototype) as FileService;
-  const fileCacheService = { getCachedPath: jest.fn().mockReturnValue(null) };
+  const fileCacheService = {
+    getCachedPath: jest.fn().mockReturnValue(null),
+    isNoCacheMode: jest.fn().mockReturnValue(false),
+    getOrCacheRangeStream: jest.fn().mockImplementation((_id: string, _total: number, start: number, end: number) =>
+      fileCacheService.getCachedPath() ? Readable.from(Buffer.alloc(end - start + 1)) : null,
+    ),
+  };
   const thumbnailDir = (overrides.thumbnailDir as string) || path.join(os.tmpdir(), 'tgtc-preview-test');
   const thumbnailService = new ThumbnailService(
     (overrides.fileRepository as any) || { findOne: jest.fn() },
@@ -65,13 +71,13 @@ function readAll(stream: Readable): Promise<Buffer> {
 }
 
 describe('FileService 冷资源单连接预览策略', () => {
-  it('冷资源（无正式缓存）Range 预览返回 null，回退控制器全量单连接', async () => {
+  it('冷资源无法建立 Range 流时抛错，不回退控制器全量 200', async () => {
     const service = createService({
       fileRepository: { findOne: jest.fn().mockResolvedValue(readyVideo) },
     });
-    const result = await (service as any).getPreviewStreamWithRange(fileId, ownerUser, 'bytes=0-999');
-    expect(result).toBeNull();
-    // 冷资源回退全量预览时不写独立日志（由全量预览路径统一记录）
+    await expect(
+      (service as any).getPreviewStreamWithRange(fileId, ownerUser, 'bytes=0-999'),
+    ).rejects.toBeInstanceOf(BadRequestException);
     expect((service as any).accessLogRepository.save).not.toHaveBeenCalled();
   });
 

@@ -243,16 +243,31 @@ export class FileCacheService implements OnApplicationShutdown {
     start: number,
     end: number,
     fetchFn: () => Promise<{ stream: Readable; info: { file_size: number } }>,
+    options?: { noCache?: boolean },
   ): Promise<Readable | null> {
     this.validateFileId(fileId);
-    if (this.noCacheMode || start < 0 || end < start || end >= expectedSize) return null;
+    if (start < 0 || end < start || end >= expectedSize) return null;
+    // 请求级无缓存必须与全局无缓存使用同一 spool 语义，绝不发布正式缓存。
+    if (this.noCacheMode || options?.noCache) {
+      const result = await this.sessionCoordinator.getNoCacheStream(fileId, expectedSize, fetchFn, start, end);
+      return result.stream;
+    }
 
     const cachedPath = this.getCachedPath(fileId);
     if (cachedPath) {
       this.fileAccessMap.set(fileId, Date.now());
       return createReadStream(cachedPath, { start, end });
     }
-    if (!(await this.prepareCacheCapacity(expectedSize)) || this.noCacheMode) return null;
+    if (!(await this.prepareCacheCapacity(expectedSize))) {
+      // 无法建立正式缓存时仍保持 Range 语义：使用可重放 spool，而不是回退 200。
+      const result = await this.sessionCoordinator.getSpooledStream(fileId, expectedSize, fetchFn, start, end);
+      return result.stream;
+    }
+    // 容量准备期间模式可能翻转；无缓存模式由协调器提供 spool/直通 Range。
+    if (this.noCacheMode) {
+      const result = await this.sessionCoordinator.getNoCacheStream(fileId, expectedSize, fetchFn, start, end);
+      return result.stream;
+    }
 
     const session = this.sessionCoordinator.getOrCreateBuildSession(fileId, expectedSize, fetchFn);
     return this.sessionCoordinator.createFollowerStream(session, start, end);
