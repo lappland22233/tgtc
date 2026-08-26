@@ -70,6 +70,40 @@ describe('FolderShareBrowser 目录状态提交', () => {
     vi.unstubAllGlobals();
   });
 
+  it('子目录请求返回 401 时触发 credential-expired', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(response({ message: '凭据已失效' }, false, 401))
+      .mockResolvedValueOnce(response({ code: 0, data: { breadcrumb: [root, child] } }));
+    vi.stubGlobal('fetch', fetchMock);
+    const wrapper = mountBrowser();
+
+    await wrapper.find('button[aria-label="打开文件夹 子目录"]').trigger('click');
+    await vi.waitFor(() => expect(wrapper.emitted('credential-expired')).toHaveLength(1));
+
+    expect(MessagePlugin.error).not.toHaveBeenCalled();
+    expect(wrapper.find('.breadcrumb-item.active').text()).toContain('根目录');
+    expect(wrapper.text()).toContain('root-file.txt');
+    vi.unstubAllGlobals();
+  });
+
+  it('子目录请求返回 403 时保留当前目录并显示后端消息，不触发 credential-expired', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(response({ code: 403, message: '没有访问该子目录的权限' }, false, 403))
+      .mockResolvedValueOnce(response({ code: 0, data: { breadcrumb: [root, child] } }));
+    vi.stubGlobal('fetch', fetchMock);
+    const wrapper = mountBrowser();
+
+    await wrapper.find('button[aria-label="打开文件夹 子目录"]').trigger('click');
+    await vi.waitFor(() => expect(MessagePlugin.error).toHaveBeenCalledWith('没有访问该子目录的权限'));
+
+    expect(wrapper.emitted('credential-expired')).toBeUndefined();
+    expect(wrapper.find('.breadcrumb-item.active').text()).toContain('根目录');
+    expect(wrapper.text()).toContain('root-file.txt');
+    expect(wrapper.text()).toContain('子目录');
+    expect(wrapper.find('.back-to-parent').exists()).toBe(false);
+    vi.unstubAllGlobals();
+  });
+
   it('成功进入子目录后可返回父级并恢复父级内容', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(response({ code: 0, data: contents([], []) }))

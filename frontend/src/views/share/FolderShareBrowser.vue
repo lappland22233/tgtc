@@ -277,7 +277,20 @@ async function goBack() {
 class CredentialExpiredError extends Error {}
 
 function isCredentialExpiredResponse(response: Response): boolean {
-  return response.status === 401 || response.status === 403;
+  return response.status === 401;
+}
+
+/** 尽量保留后端业务消息；非 JSON 错误响应则回退为明确的 HTTP 错误。 */
+async function createHttpError(response: Response, fallback: string): Promise<Error> {
+  try {
+    const data = await response.json();
+    if (data && typeof data === 'object' && typeof (data as { message?: unknown }).message === 'string') {
+      return new Error((data as { message: string }).message);
+    }
+  } catch {
+    // 响应体不可解析时使用调用方提供的 HTTP 回退消息。
+  }
+  return new Error(fallback);
 }
 
 function isFolderContents(value: unknown): value is FolderContents {
@@ -307,8 +320,12 @@ async function loadFolderContents(folderId: string) {
     if (isCredentialExpiredResponse(contentsRes) || isCredentialExpiredResponse(bcRes)) {
       throw new CredentialExpiredError('分享凭据已过期，请重新验证');
     }
-    if (!contentsRes.ok) throw new Error(`目录内容加载失败（HTTP ${contentsRes.status}）`);
-    if (!bcRes.ok) throw new Error(`目录路径加载失败（HTTP ${bcRes.status}）`);
+    if (!contentsRes.ok) {
+      throw await createHttpError(contentsRes, `目录内容加载失败（HTTP ${contentsRes.status}）`);
+    }
+    if (!bcRes.ok) {
+      throw await createHttpError(bcRes, `目录路径加载失败（HTTP ${bcRes.status}）`);
+    }
 
     const [contentsData, bcData] = await Promise.all([contentsRes.json(), bcRes.json()]);
     if (generation !== loadGeneration) return;

@@ -210,9 +210,17 @@ bool parse_file_stream_no_cache(td::Slice value) {
 }
 
 td::Result<td::int64> resolve_file_stream_size(td::int64 tdlib_size, td::int64 expected_size) {
-  (void)expected_size;
+  if (tdlib_size > 0 && expected_size > 0) {
+    if (tdlib_size != expected_size) {
+      return td::Status::Error(502, "Exact file sizes from Telegram don't match");
+    }
+    return tdlib_size;
+  }
   if (tdlib_size > 0) {
     return tdlib_size;
+  }
+  if (expected_size > 0) {
+    return expected_size;
   }
   return td::Status::Error(502, "Exact file size is unavailable from Telegram");
 }

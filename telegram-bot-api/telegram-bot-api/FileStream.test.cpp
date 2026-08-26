@@ -55,12 +55,21 @@ TEST(FileStream, NoCacheHeader) {
 }
 
 TEST(FileStream, ResolvesExactSize) {
-  ASSERT_EQ(10, telegram_bot_api::resolve_file_stream_size(10, -1).move_as_ok());
   ASSERT_EQ(10, telegram_bot_api::resolve_file_stream_size(10, 10).move_as_ok());
-  ASSERT_EQ(10, telegram_bot_api::resolve_file_stream_size(10, 1).move_as_ok());
-  ASSERT_EQ(10, telegram_bot_api::resolve_file_stream_size(10, 1000).move_as_ok());
-  ASSERT_TRUE(telegram_bot_api::resolve_file_stream_size(0, 10).is_error());
-  ASSERT_TRUE(telegram_bot_api::resolve_file_stream_size(0, -1).is_error());
+  ASSERT_EQ(10, telegram_bot_api::resolve_file_stream_size(10, -1).move_as_ok());
+  ASSERT_EQ(10, telegram_bot_api::resolve_file_stream_size(10, 0).move_as_ok());
+  ASSERT_EQ(10, telegram_bot_api::resolve_file_stream_size(-1, 10).move_as_ok());
+  ASSERT_EQ(10, telegram_bot_api::resolve_file_stream_size(0, 10).move_as_ok());
+
+  auto mismatched_sizes = telegram_bot_api::resolve_file_stream_size(10, 1000);
+  ASSERT_TRUE(mismatched_sizes.is_error());
+  ASSERT_EQ(502, mismatched_sizes.error().code());
+
+  for (auto sizes : {std::pair<td::int64, td::int64>{-1, -1}, {-1, 0}, {0, 0}}) {
+    auto unavailable_size = telegram_bot_api::resolve_file_stream_size(sizes.first, sizes.second);
+    ASSERT_TRUE(unavailable_size.is_error());
+    ASSERT_EQ(502, unavailable_size.error().code());
+  }
 }
 
 TEST(FileStream, CursorCompleteFile) {
