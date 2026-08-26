@@ -25,6 +25,7 @@
       @pause="onPause"
       @ended="onEnded"
       @timeupdate="onTimeUpdate"
+      @seeked="onSeeked"
       @loadedmetadata="onLoadedMeta"
       @durationchange="onDurationChange"
       @progress="onProgress"
@@ -220,11 +221,7 @@ const props = withDefaults(defineProps<{
   src: string | null;
   /** 视频封面（poster）URL，冷资源未生成时可为空 */
   poster?: string | null;
-  /**
-   * 冷资源加载模式：文件尚未有正式本地缓存时开启。
-   * 开启后所有 seek（进度条/键盘/快捷键）都被钳制到已缓冲末尾，
-   * 避免浏览器为越界位置发起新的动态分段请求。
-   */
+  /** 冷资源加载模式：用于展示缓存状态，不限制浏览器原生 seek。 */
   cold?: boolean;
   /** 播放结束后的行为，由预览弹窗统一执行 */
   endBehavior?: VideoEndBehavior;
@@ -253,19 +250,18 @@ const emit = defineEmits<{
   error: [];
   'request-play': [];
   'update:end-behavior': [behavior: VideoEndBehavior];
+  /** 跳转请求尚未由媒体内核确认时，父层暂停采信旧的播放进度。 */
+  'seeking-change': [seeking: boolean];
   /** 暴露 video 元素引用给父组件（用于 MSE 等外部控制） */
   'video-ref': [el: HTMLVideoElement | null];
-  'seeking-change': [seeking: boolean];
 }>();
 
 // ─── Refs ────────────────────────────
 const playerRef = ref<HTMLElement>();
 const videoRef = ref<HTMLVideoElement | null>(null);
 
-// ─── State（播放/进度/指示器/持久化/延迟恢复） ───
+// ─── State（播放/进度/指示器/持久化/恢复） ───
 const playerState = useVideoPlayerState({
-  getVideoRef: () => videoRef.value,
-  getCold: () => props.cold,
   getInitialTime: () => props.initialTime,
 });
 const {
@@ -295,11 +291,8 @@ const {
   DEFAULT_VIDEO_VOLUME,
   saveVolume,
   saveRate,
-  clampSeekTarget,
-  cancelDeferredResume,
   applyInitialTime,
   resetInitialTime,
-  tryDeferredResume,
   onFullscreenChange,
   formatTime,
 } = playerState;
@@ -322,14 +315,45 @@ let playFrame: number | null = null;
 let progressPointerCapture: { element: HTMLElement; pointerId: number } | null = null;
 let longPressActive = false;
 let savedRate = 1;
+/** 最近一次用户 seek 的目标；旧 timeupdate 到达前保持 UI 停在此位置。 */
+let pendingSeekTarget: number | null = null;
+let pendingSeekTimer: ReturnType<typeof setTimeout> | null = null;
+const PENDING_SEEK_TIMEOUT_MS = 2000;
+
+function clearPendingSeek(syncTime = false, notifyParent = true) {
+  const v = videoRef.value;
+  pendingSeekTarget = null;
+  if (pendingSeekTimer) {
+    clearTimeout(pendingSeekTimer);
+    pendingSeekTimer = null;
+  }
+  if (notifyParent) emit('seeking-change', false);
+  if (syncTime && v && duration.value > 0) {
+    currentTime.value = v.currentTime;
+    playedPct.value = (v.currentTime / duration.value) * 100;
+  }
+}
+
+function setPendingSeek(target: number) {
+  clearPendingSeek(false, false);
+  pendingSeekTarget = target;
+  emit('seeking-change', true);
+  pendingSeekTimer = setTimeout(() => {
+    const v = videoRef.value;
+    // 慢速 Range/解码期间仍在跳转时继续保护目标 UI，避免旧 timeupdate 回弹。
+    if (pendingSeekTarget !== null && v?.seeking) {
+      pendingSeekTimer = setTimeout(() => {
+        if (pendingSeekTarget !== null) setPendingSeek(pendingSeekTarget);
+      }, PENDING_SEEK_TIMEOUT_MS);
+      return;
+    }
+    clearPendingSeek(true);
+  }, PENDING_SEEK_TIMEOUT_MS);
+}
 
 const bufferText = computed(() => {
-  if (bufferedPct.value > 0) {
-    const base = `正在缓冲…（已缓冲 ${Math.round(bufferedPct.value)}%）`;
-    // 冷资源：seek 受限于已缓冲范围，缓存完成前无法跳转到未缓冲位置
-    return props.cold ? `${base}，缓存完成前无法跳转` : base;
-  }
-  return props.cold ? '正在生成缓存…完成后可跳转' : '正在缓冲…';
+  if (bufferedPct.value > 0) return `正在缓冲…（已缓冲 ${Math.round(bufferedPct.value)}%）`;
+  return props.cold ? '正在生成缓存…' : '正在缓冲…';
 });
 
 // ─── 视频事件处理 ────────────────────────────
@@ -354,10 +378,19 @@ function onEnded() {
 }
 
 function onError() {
+  clearPendingSeek();
   emit('error');
 }
 
 function onTimeUpdate() {
+  const v = videoRef.value;
+  if (!v || isDragging.value || pendingSeekTarget !== null) return;
+  currentTime.value = v.currentTime;
+  playedPct.value = duration.value > 0 ? (v.currentTime / duration.value) * 100 : 0;
+}
+
+function onSeeked() {
+  clearPendingSeek();
   const v = videoRef.value;
   if (!v || isDragging.value) return;
   currentTime.value = v.currentTime;
@@ -384,8 +417,6 @@ function onProgress() {
     if (v.buffered.end(i) > maxEnd) maxEnd = v.buffered.end(i);
   }
   bufferedPct.value = Math.min(100, (maxEnd / duration.value) * 100);
-  // 冷资源延迟恢复：buffered 覆盖恢复点后执行一次 seek
-  tryDeferredResume();
 }
 
 // ─── 播放控制 ────────────────────────────
@@ -484,27 +515,21 @@ function previewSeekPct(pct: number) {
 function commitSeekPct(pct: number) {
   const v = videoRef.value;
   if (!v || !duration.value) return;
-  const target = clampSeekTarget((pct / 100) * duration.value);
-  // 冷资源且尚无任何缓冲时不允许跳转（此时任何位置都不可读）
-  if (props.cold && target <= 0) {
-    dragPct.value = null;
-    return;
-  }
-  // fastSeek 允许浏览器选择邻近关键帧，普通赋值作为兼容回退。
-  // 冷资源阶段直接用 currentTime 赋值，避免 fastSeek 跳到缓冲区间之外的关键帧。
-  if (!props.cold && typeof v.fastSeek === 'function') v.fastSeek(target);
-  else v.currentTime = target;
+  const target = (pct / 100) * duration.value;
+  setPendingSeek(target);
+  // 直接提交精确目标，确保滑块位置与用户释放位置一致，并触发目标 Range 请求。
+  v.currentTime = target;
   currentTime.value = target;
-  playedPct.value = duration.value > 0 ? (target / duration.value) * 100 : 0;
+  playedPct.value = (target / duration.value) * 100;
   dragPct.value = null;
 }
 
 function seekBy(seconds: number) {
   const v = videoRef.value;
   if (!v || !duration.value) return;
-  const rawTarget = Math.max(0, Math.min(duration.value, v.currentTime + seconds));
-  const target = clampSeekTarget(rawTarget);
-  // 冷资源且目标被钳制到 0（尚无缓冲）时仅更新指示器，不真正 seek
+  const base = pendingSeekTarget ?? v.currentTime;
+  const target = Math.max(0, Math.min(duration.value, base + seconds));
+  setPendingSeek(target);
   v.currentTime = target;
   currentTime.value = target;
   playedPct.value = (target / duration.value) * 100;
@@ -523,7 +548,6 @@ function onProgressPointerDown(e: PointerEvent) {
   if (!duration.value) return;
   const bar = e.currentTarget as HTMLElement;
   isDragging.value = true;
-  emit('seeking-change', true);
   bar.setPointerCapture?.(e.pointerId);
   progressPointerCapture = { element: bar, pointerId: e.pointerId };
   previewSeekPct(getPctFromEvent(e));
@@ -553,7 +577,6 @@ function finishProgressPointer(e: PointerEvent, commit: boolean) {
     }
   }
   isDragging.value = false;
-  emit('seeking-change', false);
   if (bar.hasPointerCapture?.(e.pointerId)) {
     try { bar.releasePointerCapture(e.pointerId); } catch { /* 捕获已释放 */ }
   }
@@ -702,10 +725,10 @@ function onKeyup(e: KeyboardEvent) {
 
 // ─── 生命周期 ────────────────────────────
 watch(() => props.src, (src) => {
+  resetInitialTime(); // 新 src 允许应用新的恢复点
+  clearPendingSeek();
   const v = videoRef.value;
   if (!v) return;
-  resetInitialTime(); // 新 src 允许应用新的恢复点
-  cancelDeferredResume(); // 新 src 清除旧的待恢复位置
   currentTime.value = 0;
   playedPct.value = 0;
   bufferedPct.value = 0;
@@ -776,8 +799,7 @@ watch(() => props.interactive, (on) => {
 
 onBeforeUnmount(() => {
   bindGlobalListeners(false);
-  cancelDeferredResume();
-  if (isDragging.value) emit('seeking-change', false);
+  clearPendingSeek();
   isDragging.value = false;
   dragPct.value = null;
   tooltipVisible.value = false;

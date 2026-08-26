@@ -510,6 +510,8 @@ const snap = reactive({
 const sessionEpoch = ref(0);
 
 const mediaError = ref(false);
+/** 视频跳转尚未由媒体内核确认时，暂停同步旧播放进度。 */
+const videoSeeking = ref(false);
 /** 媒体加载失败的具体原因分类（优于笼统默认文案） */
 const mediaErrorText = ref<string | null>(null);
 const dialogRef = ref<HTMLElement | null>(null);
@@ -606,7 +608,6 @@ const audioVolumeInput = ref(0.5);
 /** 进度条拖动中：只更新草稿，不触碰媒体 currentTime */
 const audioSeeking = ref(false);
 const audioSeekDraft = ref<number | null>(null);
-const videoSeeking = ref(false);
 const audioDisplayTime = computed(() => audioSeekDraft.value ?? audioCurrentTime.value);
 
 /** 播放进度百分比（0-100） */
@@ -1002,7 +1003,7 @@ function onKeydown(e: KeyboardEvent) {
 
 /** 页面隐藏时补写进度（避免后台期间丢失最后位置） */
 function onVisibility() {
-  if (document.visibilityState === 'hidden' && !audioSeeking.value && !videoSeeking.value) {
+  if (document.visibilityState === 'hidden' && !audioSeeking.value) {
     mediaStore.persistProgress();
   }
 }
@@ -1306,37 +1307,43 @@ function throttlePersist() {
 
 /**
  * 从 CustomVideoPlayer 获取内部 <video> 元素引用。
- * 绑定 MSE 所需的事件监听（seek 钳制 + 缓冲追踪 + 进度同步）。
+ * 绑定缓冲追踪与进度持久化所需的媒体事件监听。
  */
 function onCustomPlayerVideoRef(el: HTMLVideoElement | null) {
   // 清理旧监听
   const old = videoRef.value;
   if (old) {
-    old.removeEventListener('seeking', onVideoSeeking);
-    old.removeEventListener('seeked', onVideoSeeked);
     old.removeEventListener('progress', updateBufferedRatio);
-    old.removeEventListener('timeupdate', onVideoTimeUpdate);
+    old.removeEventListener('timeupdate', handleVideoTimeUpdate);
   }
   videoRef.value = el;
   if (el) {
-    el.addEventListener('seeking', onVideoSeeking);
-    el.addEventListener('seeked', onVideoSeeked);
     el.addEventListener('progress', updateBufferedRatio);
-    el.addEventListener('timeupdate', onVideoTimeUpdate);
+    el.addEventListener('timeupdate', handleVideoTimeUpdate);
   }
 }
 
-/** 视频进度条拖动状态：拖动期间暂停真实进度同步与持久化 */
+function handleVideoTimeUpdate() {
+  onVideoTimeUpdate();
+}
+
+/** 视频跳转期间暂停采信旧位置；媒体确认后立即同步目标位置。 */
 function onVideoSeekingChange(seeking: boolean) {
   videoSeeking.value = seeking;
+  if (!seeking) onVideoTimeUpdate(true);
 }
 
 /** 视频进度同步 + 节流持久化 */
-function onVideoTimeUpdate() {
+function onVideoTimeUpdate(forcePersist = false) {
   const v = videoRef.value;
   if (!v || videoSeeking.value) return;
   mediaStore.setProgress(v.currentTime, v.duration);
-  throttlePersist();
+  if (forcePersist) {
+    lastPersist = Date.now();
+    mediaStore.persistProgress();
+  } else {
+    throttlePersist();
+  }
 }
 
 /** 当前 <video> 实际 src：MSE 模式为 MediaSource 对象 URL，回退模式为原始地址 */
@@ -1347,8 +1354,6 @@ const videoUseMse = ref(false);
 const videoBuffering = ref(false);
 /** 已缓冲百分比（buffered 最大 end / duration 估算） */
 const videoBufferedRatio = ref(0);
-/** seek 钳制防循环标志 */
-let seekClamping = false;
 /** 冷资源缓存状态轮询定时器（缓存完成后提前解锁 seek，不必等全量下载） */
 let coldCachePollTimer: ReturnType<typeof setInterval> | null = null;
 /** 冷资源缓存状态轮询间隔 */
@@ -1395,7 +1400,6 @@ function setupVideo() {
   if (!url) return;
   videoBuffering.value = true;
   videoBufferedRatio.value = 0;
-  seekClamping = false;
   const mime = snap.mimeType || 'video/mp4';
   // 默认统一交给原生媒体元素按需发起 Range。保留旧 MSE 实现仅用于后续分段化改造。
   const enableLegacyMse = false;
@@ -1589,10 +1593,8 @@ function teardownVideo() {
   teardownMse();
   const v = videoRef.value;
   if (v) {
-    v.removeEventListener('seeking', onVideoSeeking);
-    v.removeEventListener('seeked', onVideoSeeked);
     v.removeEventListener('progress', updateBufferedRatio);
-    v.removeEventListener('timeupdate', onVideoTimeUpdate);
+    v.removeEventListener('timeupdate', handleVideoTimeUpdate);
     // 中止拉流：移除 src 并 load()，立即停止正在进行的媒体请求（与音频路径对齐）
     v.pause();
     v.removeAttribute('src');
@@ -1603,7 +1605,6 @@ function teardownVideo() {
   videoUseMse.value = false;
   videoBuffering.value = false;
   videoBufferedRatio.value = 0;
-  seekClamping = false;
   stopColdCachePoll();
 }
 
@@ -1615,30 +1616,6 @@ function onVideoError() {
   }
   mediaError.value = true;
   mediaErrorText.value = classifyMediaErrorCode(videoRef.value?.error?.code);
-}
-
-/**
- * seek 钳制（MSE 与原生共用）：超出已缓冲末尾的 seek 被拉回，
- * 进度条因此只能在已缓冲范围内拖动。防循环标志避免 seeking 事件死循环。
- */
-function onVideoSeeking() {
-  // 钳制仅针对冷资源模式；热资源交浏览器 Range 请求按需拉取未缓冲位置
-  if (!coldLoad.value) return;
-  const v = videoRef.value;
-  if (!v || seekClamping) return;
-  let maxEnd = 0;
-  for (let i = 0; i < v.buffered.length; i++) {
-    if (v.buffered.end(i) > maxEnd) maxEnd = v.buffered.end(i);
-  }
-  if (maxEnd <= 0) return;
-  const limit = Math.max(0, maxEnd - 0.1);
-  if (v.currentTime > limit) {
-    seekClamping = true;
-    v.currentTime = limit;
-  }
-}
-function onVideoSeeked() {
-  seekClamping = false;
 }
 
 /** 已缓冲进度估算（buffered 最大 end / duration） */
