@@ -280,42 +280,6 @@ Redis 承载 `metrics-aggregation`、`attack-detection`、`alert-evaluation`、`
 
 Multer 单文件硬上限为 600 MB，单分片硬上限为 100 MB；实际业务上限由 `MAX_FILE_SIZE` 或管理后台动态配置决定，默认示例为 80 MB。
 
-## 快速部署（一键脚本）
-
-仓库根目录提供交互式一键部署脚本 `deploy.sh`，面向 Ubuntu 22.04/24.04 LTS 与 Debian 12。克隆仓库后运行一次即可完成依赖安装、配置生成、前后端构建、数据库迁移与 systemd 服务注册。
-
-```bash
-# 以 root 或 sudo 运行
-sudo bash deploy.sh
-```
-
-脚本会按以下阶段引导部署：
-
-| 阶段 | 说明 |
-|------|------|
-| 预检 | 校验 root 权限、操作系统、仓库目录结构与磁盘空间 |
-| 配置收集 | 交互选择克隆所在部署目录、构建/systemd 运行用户、应用地址、Telegram Bot Token/Chat ID、PostgreSQL/Redis（本机安装或连接外部服务二选一）、SMTP（可选）、是否编译本地 Bot API |
-| 依赖安装 | 自动安装 Node.js 20 LTS、PostgreSQL、Redis、编译工具链 |
-| 配置生成 | 自动生成强随机密钥（JWT、SMTP 加密密钥与盐）并写入生产版 `backend/.env`（权限 600） |
-| 构建 | 并行构建前端与后端（`npm ci` + `npm run build`） |
-| 迁移 | 在 `backend/` 目录执行 `npm run migration:run` |
-| 服务注册 | 创建并启用 `tgtc-backend`（及可选 `tgtc-telegram-bot-api`）systemd 服务 |
-| 健康检查 | 轮询端口与 `/api/auth/status`，输出部署摘要 |
-
-常用参数：
-
-```bash
-sudo bash deploy.sh --yes   # 对确认问题自动回答“是”（配置项仍需交互输入）
-```
-
-其他说明：
-
-- 脚本幂等可重跑；已生成的配置与服务会询问是否覆盖。重跑时会先执行 `dpkg --configure -a`、`apt-get -f install` 修复终端断开造成的未完成安装。
-- 本机 Redis 无法启动时，脚本先记录 `systemctl`/`journalctl` 诊断；确认 6379 没有可用实例后，将旧配置与数据隔离备份到 `/var/backups/tgtc-deploy/redis-<时间戳>/`，再使用 Debian/Ubuntu 默认配置干净重装。旧数据不会被删除或自动覆盖新实例。
-- 脚本忽略 SSH 断开产生的 `SIGHUP`，每次部署日志写入根目录 `deploy-<时间戳>.log`；长时间编译仍建议在 `tmux`/`screen` 会话内运行。
-- 选择编译本地 `telegram-bot-api` 时，脚本会同时生成 `tgtc-telegram-bot-api.service`，并以本地模式（`--local --enable-file-streaming`）运行，后端 `.env` 自动对接流式端点与本地文件目录；编译约需 20~60 分钟。
-- 部署完成后访问脚本输出的地址，**第一个注册的账号自动成为 `super_admin`**。
-
 ### 手工生产部署
 
 ```bash
