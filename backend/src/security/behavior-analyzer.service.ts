@@ -124,16 +124,16 @@ export class BehaviorAnalyzer {
   /** 模式 1: 异常下载 — 同 IP 1h 内下载不同文件超过阈值（默认 50）种 */
   private async detectAbnormalDownloads(): Promise<AnomalyDetectionResult[]> {
     const cutoff = new Date(Date.now() - 60 * 60 * 1000);
-    // G8-14：阈值配置化（读 security-config，默认 50），并叠加不同 userId 数量条件：
-    // 共享出口（NAT）下多个已认证用户各自下载，distinctUsers 会较大，
-    // 若 unique_files 超阈值但涉及多个 userId，则更可能是 NAT 而非单点异常，降级为仅告警。
+    // G8-14：阈值配置化（读 security-config，默认 50），并叠加不同 uploaderId 数量条件：
+    // 共享出口（NAT）下多个文件上传者的文件被下载，distinctUsers 会较大，
+    // 若 unique_files 超阈值但涉及多个 uploaderId，则更可能是 NAT 而非单点异常，降级为仅告警。
     const filesThreshold = Number(
       await this.configCache.get(SEC_CONFIG_KEYS.DOWNLOAD_FILES_THRESHOLD, '50'),
     ) || 50;
     const rows = await this.dataSource.query(
       `SELECT fal.ip,
               COUNT(DISTINCT fal."fileId")::int as unique_files,
-              COUNT(DISTINCT fal."userId")::int as distinct_users,
+              COUNT(DISTINCT fal."uploaderId")::int as distinct_users,
               COUNT(*)::int as total_downloads
        FROM "file_access_logs" fal
        WHERE fal."createdAt" >= $1 AND fal.action = 'download'
@@ -143,7 +143,7 @@ export class BehaviorAnalyzer {
     );
 
     return rows.map((r: { ip: string; unique_files: number; distinct_users: number; total_downloads: number }) => {
-      // 涉及多个不同 userId → 疑似 NAT/办公共享出口，仅告警不封禁（降低误报）
+      // 涉及多个不同 uploaderId → 疑似 NAT/办公共享出口，仅告警不封禁（降低误报）
       const sharedNAT = r.distinct_users > 1;
       return {
         type: 'abnormal_download',

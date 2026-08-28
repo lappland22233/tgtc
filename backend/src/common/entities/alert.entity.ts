@@ -42,7 +42,7 @@ export class Alert {
   @Column({ nullable: true, type: databaseColumnType('timestamptz') as 'timestamptz' })
   acknowledgedAt: Date | null;
 
-  @Column({ nullable: true, type: 'uuid' })
+  @Column({ nullable: true, type: databaseColumnType('uuid') })
   acknowledgedBy: string | null;
 
   @CreateDateColumn({ type: databaseColumnType('timestamptz') as 'timestamptz' })

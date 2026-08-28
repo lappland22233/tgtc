@@ -5,7 +5,7 @@ describe('BehaviorAnalyzer',()=>{
  beforeEach(()=>{jest.clearAllMocks();cache.get.mockImplementation((_k:string,d:string)=>Promise.resolve(d))});
  it('calculates all baseline metrics and isolates individual query failures',async()=>{ds.query.mockResolvedValue([]); await s.calculateBaselines(); expect(ds.query).toHaveBeenCalledTimes(10); ds.query.mockRejectedValue(new Error('db')); await expect(s.calculateBaselines()).resolves.toBeUndefined()});
  it('maps all primary anomaly rows',async()=>{ds.query
-  .mockResolvedValueOnce([{ip:'1.1.1.1',unique_files:51,total_downloads:60}])
+  .mockResolvedValueOnce([{ip:'1.1.1.1',unique_files:51,distinct_users:2,total_downloads:60}])
   .mockResolvedValueOnce([{uploaderId:'u',upload_count:101}])
   .mockResolvedValueOnce([{fileId:'f',unique_ips:201,total_access:300}])
   .mockResolvedValueOnce([{night_avg:30,all_avg:10}])

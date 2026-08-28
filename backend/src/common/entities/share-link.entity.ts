@@ -67,10 +67,10 @@ export class ShareLink {
 
   /** 关联的 file.id 或 folder.id，按 targetType 解释 */
   @Index()
-  @Column({ type: 'uuid' })
+  @Column({ type: databaseColumnType('uuid') })
   targetId: string;
 
-  @Column({ type: 'uuid' })
+  @Column({ type: databaseColumnType('uuid') })
   creatorId: string;
 
   @ManyToOne(() => User)

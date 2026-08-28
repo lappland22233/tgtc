@@ -1,3 +1,4 @@
+import { databaseColumnType } from '../../database/database-types';
 import {
   Entity,
   PrimaryGeneratedColumn,
@@ -49,7 +50,7 @@ export class AccessLog {
   referer: string | null;
 
   @Index()
-  @Column({ nullable: true, type: 'uuid', comment: '关联用户 ID（已登录请求）' })
+  @Column({ nullable: true, type: databaseColumnType('uuid'), comment: '关联用户 ID（已登录请求）' })
   userId: string | null;
 
   @CreateDateColumn({ comment: '请求时间' })
