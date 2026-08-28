@@ -4,6 +4,7 @@ require("dotenv/config");
 const fs_1 = require("fs");
 const path_1 = require("path");
 const typeorm_1 = require("typeorm");
+const _0000000000000_SqliteEntitySchema_1 = require("../src/migrations/0000000000000-SqliteEntitySchema");
 function loadDatabaseModules(type) {
     process.env.DB_TYPE = type;
     for (const file of Object.keys(require.cache)) {
@@ -38,10 +39,14 @@ async function migrateTable(source, target, sourceEntity) {
     const metadata = source.getMetadata(sourceEntity);
     const table = metadata.tableName;
     const columns = metadata.columns.map(c => c.databaseName);
-    let offset = 0;
+    const primaryColumn = metadata.primaryColumns[0].databaseName;
+    let lastPrimaryKey;
     let copied = 0;
     while (true) {
-        const rows = await source.query(`SELECT ${columns.map(quote).join(', ')} FROM ${quote(table)} ORDER BY ${quote(metadata.primaryColumns[0].databaseName)} LIMIT $1 OFFSET $2`, [BATCH_SIZE, offset]);
+        const where = lastPrimaryKey === undefined ? '' : ` WHERE ${quote(primaryColumn)} > $1`;
+        const parameters = lastPrimaryKey === undefined ? [BATCH_SIZE] : [lastPrimaryKey, BATCH_SIZE];
+        const limitParameter = lastPrimaryKey === undefined ? '$1' : '$2';
+        const rows = await source.query(`SELECT ${columns.map(quote).join(', ')} FROM ${quote(table)}${where} ORDER BY ${quote(primaryColumn)} LIMIT ${limitParameter}`, parameters);
         if (!rows.length)
             break;
         for (const row of rows) {
@@ -50,7 +55,7 @@ async function migrateTable(source, target, sourceEntity) {
             await target.query(`INSERT INTO ${quote(table)} (${columns.map(quote).join(', ')}) VALUES (${placeholders})`, values);
         }
         copied += rows.length;
-        offset += rows.length;
+        lastPrimaryKey = rows[rows.length - 1][primaryColumn];
         if (rows.length < BATCH_SIZE)
             break;
     }
@@ -89,7 +94,7 @@ async function main() {
     const source = new typeorm_1.DataSource(sourceOptions);
     const targetModules = loadDatabaseModules('sqlite');
     const targetOptions = targetModules.createDatabaseOptions({ ...process.env, DB_TYPE: 'sqlite', DB_DATABASE: tempPath, DB_MIGRATIONS_RUN: 'true' });
-    const target = new typeorm_1.DataSource(targetOptions);
+    const target = new typeorm_1.DataSource({ ...targetOptions, migrations: [_0000000000000_SqliteEntitySchema_1.SqliteEntitySchema1700000000000] });
     const report = { startedAt: new Date().toISOString(), source: String(sourceOptions.database || ''), target: targetPath, batchSize: BATCH_SIZE, tables: [] };
     try {
         await source.initialize();
