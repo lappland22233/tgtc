@@ -15,6 +15,7 @@ export type AuditAction =
   | 'register'
   | 'password_reset'
   | 'email_verify'
+  | 'email_verification_send'
   | 'role_change'
   | 'user_create'
   | 'user_delete'

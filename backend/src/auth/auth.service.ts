@@ -42,6 +42,14 @@ export class AuthService {
   private async getLoginLockDuration(): Promise<number> { return (Number(await this.configCacheService.get('sec_login_lock_duration', '15')) || 15) * 60 * 1000; }
   private async getCodeMaxErrors(): Promise<number> { return Number(await this.configCacheService.get('sec_code_max_errors', '5')) || 5; }
 
+  /** 审计中仅保留可识别但不可还原的邮箱片段，避免写入完整敏感邮箱。 */
+  private maskEmail(email: string): string {
+    const [localPart, domain] = email.split('@');
+    if (!localPart || !domain) return '***';
+    const visible = localPart.length <= 2 ? localPart.charAt(0) : localPart.slice(0, 2);
+    return `${visible}***@${domain}`;
+  }
+
   /** 验证码 HMAC 密钥（启动时解析并校验，见构造函数） */
   private readonly codeHmacSecret: string;
 
@@ -149,7 +157,7 @@ export class AuthService {
         ip: _ip,
         resourceType: 'user',
         resourceId: savedUser.id,
-        metadata: { email: savedUser.email, role: role },
+        metadata: { email: this.maskEmail(savedUser.email), role: role },
       });
 
       const accessToken = this.generateToken(savedUser);
@@ -205,7 +213,7 @@ export class AuthService {
         userId: null,
         ip,
         metadata: {
-          email: loginDto.email,
+          email: this.maskEmail(loginDto.email),
           reason: bannedIP.isPermanent ? 'IP永久封禁' : 'IP临时封禁',
         },
         status: AuditStatus.FAILURE,
@@ -238,7 +246,7 @@ export class AuthService {
         action: 'login_failed',
         userId: null,
         ip,
-        metadata: { email: loginDto.email, reason: '用户不存在' },
+        metadata: { email: this.maskEmail(loginDto.email), reason: '用户不存在' },
         status: AuditStatus.FAILURE,
       });
       if (!result.allowed) {
@@ -255,7 +263,7 @@ export class AuthService {
         action: 'login_failed',
         userId: user.id,
         ip,
-        metadata: { email: loginDto.email, reason: '账号封禁' },
+        metadata: { email: this.maskEmail(loginDto.email), reason: '账号封禁' },
         status: AuditStatus.FAILURE,
       });
       throw new UnauthorizedException('邮箱或密码错误');
@@ -269,7 +277,7 @@ export class AuthService {
         action: 'login_failed',
         userId: user.id,
         ip,
-        metadata: { email: loginDto.email, reason: '邮箱未验证' },
+        metadata: { email: this.maskEmail(loginDto.email), reason: '邮箱未验证' },
         status: AuditStatus.FAILURE,
       });
       throw new UnauthorizedException('邮箱或密码错误');
@@ -402,7 +410,37 @@ export class AuthService {
     });
 
     if (type === 'register' || type === 'reset_password') {
-      await this.mailerService.sendVerificationCode(email, code);
+      try {
+        await this.mailerService.sendVerificationCode(email, code);
+        // SMTP 成功仅表示发送请求被 SMTP 接受，不代表邮件最终到达收件箱。
+        this.auditService.log({
+          action: 'email_verification_send',
+          userId: user?.id ?? null,
+          ip,
+          resourceType: 'email',
+          metadata: {
+            type,
+            recipient: this.maskEmail(email),
+            result: 'send_request_accepted',
+          },
+          status: AuditStatus.SUCCESS,
+        });
+      } catch (error: unknown) {
+        // 保持原错误处理，同时记录失败；审计中不写入验证码、正文或完整邮箱。
+        this.auditService.log({
+          action: 'email_verification_send',
+          userId: user?.id ?? null,
+          ip,
+          resourceType: 'email',
+          metadata: {
+            type,
+            recipient: this.maskEmail(email),
+            result: 'failure',
+          },
+          status: AuditStatus.FAILURE,
+        });
+        throw error;
+      }
     }
   }
 

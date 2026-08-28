@@ -870,12 +870,47 @@ export class AdminService {
 
   // ==================== 审计日志查询 ====================
 
+  /** 验证邮件发送统计：只聚合审计结果，不读取或返回收件人、验证码等敏感数据。 */
+  async getEmailVerificationStats(timeRange = '24h'): Promise<{
+    total: number;
+    success: number;
+    failure: number;
+    successRate: number;
+    unknown: number;
+    result: 'success' | 'failure' | 'mixed' | 'unknown' | 'none';
+  }> {
+    const since = this.parseTimeRange(timeRange);
+    const [raw] = await this.auditLogRepo
+      .createQueryBuilder('log')
+      .select('COUNT(*)', 'total')
+      .addSelect("SUM(CASE WHEN log.status = 'success' THEN 1 ELSE 0 END)", 'success')
+      .addSelect("SUM(CASE WHEN log.status = 'failure' THEN 1 ELSE 0 END)", 'failure')
+      .addSelect("SUM(CASE WHEN log.status IS NULL OR log.status NOT IN ('success', 'failure') THEN 1 ELSE 0 END)", 'unknown')
+      .where('log.action = :action', { action: 'email_verification_send' })
+      .andWhere('log.createdAt >= :since', { since })
+      .getRawMany<{ total: string; success: string; failure: string; unknown: string }>();
+
+    const total = Number(raw?.total || 0);
+    const success = Number(raw?.success || 0);
+    const failure = Number(raw?.failure || 0);
+    const unknown = Number(raw?.unknown || 0);
+    return {
+      total,
+      success,
+      failure,
+      unknown,
+      successRate: total > 0 ? Number(((success / total) * 100).toFixed(2)) : 0,
+      result: total === 0 ? 'none' : unknown > 0 ? 'unknown' : failure === 0 ? 'success' : success === 0 ? 'failure' : 'mixed',
+    };
+  }
+
   async getAuditLogs(query: {
     page?: number;
     limit?: number;
     action?: string;
     userId?: string;
     timeRange?: string;
+    status?: string;
   }): Promise<{ items: (AuditLog & { username?: string })[]; total: number }> {
     const page = Math.max(1, query.page || 1);
     const limit = Math.min(100, Math.max(1, query.limit || 20));
@@ -892,6 +927,10 @@ export class AdminService {
 
     if (query.userId) {
       baseQb.andWhere('log.userId = :userId', { userId: query.userId });
+    }
+
+    if (query.status && ['success', 'failure'].includes(query.status)) {
+      baseQb.andWhere('log.status = :status', { status: query.status });
     }
 
     const total = await baseQb.getCount();

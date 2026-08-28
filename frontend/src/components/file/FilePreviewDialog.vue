@@ -182,9 +182,13 @@
                 :poster="snap.kind === 'video' ? posterUrl : null"
                 :cold="coldLoad"
                 :end-behavior="videoEndBehavior"
+                :list-loop="listLoop"
+                :shuffle="shuffle"
                 :initial-time="mediaStore.pendingResume"
                 :interactive="mediaStore.expanded"
                 @update:end-behavior="setVideoEndBehavior"
+                @update:list-loop="setListLoop"
+                @update:shuffle="setShuffle"
                 @video-ref="onCustomPlayerVideoRef"
                 @request-play="activateVideo"
                 @play="onVideoPlay"
@@ -297,6 +301,22 @@
                   <svg v-if="audioMuted || audioVolume === 0" viewBox="0 0 24 24" width="20" height="20"><path d="M16.5 12A4.5 4.5 0 0 0 14 8.5v2.09l2.41 2.41c.06-.31.09-.63.09-1zM19 12c0 .94-.2 1.82-.54 2.64l1.51 1.51A8.796 8.796 0 0 0 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3 3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06a8.99 8.99 0 0 0 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4 9.91 6.09 12 8.18V4z" fill="currentColor"/></svg>
                   <svg v-else viewBox="0 0 24 24" width="20" height="20"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3A4.5 4.5 0 0 0 14 8.5v7a4.47 4.47 0 0 0 2.5-3.5z" fill="currentColor"/></svg>
                 </button>
+
+                <!-- 播放结束动作：与视频菜单保持同一语义 -->
+                <button
+                  type="button"
+                  class="fpv-audio-rate"
+                  :aria-label="listLoop ? '关闭列表循环' : '开启列表循环'"
+                  :title="listLoop ? '列表循环：开' : '列表循环：关'"
+                  @click="setListLoop(!listLoop)"
+                >{{ listLoop ? '列表循环' : '顺序播放' }}</button>
+                <button
+                  type="button"
+                  class="fpv-audio-rate"
+                  :aria-label="shuffle ? '关闭乱序播放' : '开启乱序播放'"
+                  :title="shuffle ? '乱序播放：开' : '乱序播放：关'"
+                  @click="setShuffle(!shuffle)"
+                >{{ shuffle ? '乱序' : '顺序' }}</button>
 
                 <!-- 倍速 -->
                 <button
@@ -575,6 +595,10 @@ const {
   playlistOpen,
   videoEndBehavior,
   setVideoEndBehavior,
+  listLoop,
+  shuffle,
+  setListLoop,
+  setShuffle,
   clearAutoNextTimer,
   switchToTrack,
   playPrev,
@@ -583,6 +607,7 @@ const {
   onVideoPlay,
   onVideoEnded,
   onVideoPaused,
+  onAudioEnded: handlePlaylistAudioEnded,
 } = playlistControls;
 
 /** 根据播放项同步快照并按媒体类型重新加载内容 */
@@ -787,7 +812,6 @@ function cycleAudioRate() {
   audioRate.value = AUDIO_RATES[(idx + 1) % AUDIO_RATES.length];
   const a = audioRef.value;
   if (a) a.playbackRate = audioRate.value;
-  try { localStorage.setItem('file-preview-audio-rate', String(audioRate.value)); } catch { /* 不影响播放 */ }
 }
 
 // ============ 音频波形 ============
@@ -869,7 +893,7 @@ function onAudioPause() {
 }
 function onAudioEnded() {
   onAudioPause();
-  if (hasNext.value) switchToTrack(activeIndex.value + 1);
+  handlePlaylistAudioEnded();
 }
 
 /** 音频进度同步（驱动自定义进度条）+ 节流持久化 */
@@ -898,13 +922,9 @@ function onAudioLoadedMeta(e: Event) {
   audioVolume.value = a.volume;
   audioMuted.value = a.muted;
   audioVolumeInput.value = a.volume;
-  try {
-    const saved = localStorage.getItem('file-preview-audio-rate');
-    if (saved && AUDIO_RATES.includes(Number(saved) as (typeof AUDIO_RATES)[number])) {
-      audioRate.value = Number(saved) as (typeof AUDIO_RATES)[number];
-    }
-  } catch { /* 存储不可用时使用默认 1× */ }
-  a.playbackRate = audioRate.value;
+  // 倍速仅属于当前预览会话；新媒体元数据就绪时强制应用 1×。
+  audioRate.value = 1;
+  a.playbackRate = 1;
   if (!resume || resume <= 0) return;
   if (!Number.isFinite(a.duration) || a.duration <= 0) return;
   const t = Math.min(resume, Math.max(0, a.duration - 1));
@@ -959,6 +979,7 @@ function minimize() {
 
 /** 真正停止：释放媒体资源并清空全局会话 */
 function fullStop() {
+  clearAutoNextTimer();
   teardownVideo();
   stopAudioWaveform();
   const audio = audioRef.value;
@@ -1755,6 +1776,7 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  clearAutoNextTimer();
   window.removeEventListener('keydown', onKeydown);
   document.removeEventListener('visibilitychange', onVisibility);
   abortText();

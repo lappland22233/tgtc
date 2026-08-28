@@ -156,6 +156,22 @@
           <transition name="cvp-fade">
             <div v-if="endBehaviorMenuOpen" class="cvp__end-behavior-menu" role="menu" aria-label="播放结束行为">
               <button
+                type="button"
+                role="menuitemcheckbox"
+                :aria-checked="listLoop"
+                class="cvp__end-behavior-item"
+                :class="{ 'cvp__end-behavior-item--active': listLoop }"
+                @click="emit('update:list-loop', !listLoop)"
+              >列表循环 <span>{{ listLoop ? '✓' : '' }}</span></button>
+              <button
+                type="button"
+                role="menuitemcheckbox"
+                :aria-checked="shuffle"
+                class="cvp__end-behavior-item"
+                :class="{ 'cvp__end-behavior-item--active': shuffle }"
+                @click="emit('update:shuffle', !shuffle)"
+              >乱序播放 <span>{{ shuffle ? '✓' : '' }}</span></button>
+              <button
                 v-for="option in endBehaviorOptions"
                 :key="option.value"
                 type="button"
@@ -235,12 +251,16 @@ const props = withDefaults(defineProps<{
    * 收起为迷你播放器后禁用全局键盘快捷键，避免影响用户对页面的正常操作。
    */
   interactive?: boolean;
+  listLoop?: boolean;
+  shuffle?: boolean;
 }>(), {
   endBehavior: 'next',
   poster: null,
   cold: false,
   initialTime: 0,
   interactive: true,
+  listLoop: false,
+  shuffle: false,
 });
 
 const emit = defineEmits<{
@@ -251,6 +271,8 @@ const emit = defineEmits<{
   'play-rejected': [reason: string];
   'request-play': [];
   'update:end-behavior': [behavior: VideoEndBehavior];
+  'update:list-loop': [value: boolean];
+  'update:shuffle': [value: boolean];
   /** 跳转请求尚未由媒体内核确认时，父层暂停采信旧的播放进度。 */
   'seeking-change': [seeking: boolean];
   /** 暴露 video 元素引用给父组件（用于 MSE 等外部控制） */
@@ -291,7 +313,6 @@ const {
   isFullscreen,
   DEFAULT_VIDEO_VOLUME,
   saveVolume,
-  saveRate,
   applyInitialTime,
   resetInitialTime,
   onFullscreenChange,
@@ -468,7 +489,6 @@ function setSpeed(s: number) {
   if (!v) return;
   v.playbackRate = s;
   currentSpeed.value = s;
-  saveRate(s);
   speedMenuOpen.value = false;
 }
 
@@ -728,8 +748,12 @@ function onKeyup(e: KeyboardEvent) {
 watch(() => props.src, (src) => {
   resetInitialTime(); // 新 src 允许应用新的恢复点
   clearPendingSeek();
+  speedMenuOpen.value = false;
+  endBehaviorMenuOpen.value = false;
+  currentSpeed.value = 1;
   const v = videoRef.value;
   if (!v) return;
+  v.playbackRate = 1;
   currentTime.value = 0;
   playedPct.value = 0;
   bufferedPct.value = 0;
@@ -784,8 +808,9 @@ onMounted(() => {
   if (video) {
     video.volume = volume.value;
     video.muted = false;
-    // 恢复上次倍速
-    video.playbackRate = currentSpeed.value;
+    // 新播放器会话始终从正常速度开始
+    video.playbackRate = 1;
+    currentSpeed.value = 1;
   }
   bindGlobalListeners(props.interactive);
   document.addEventListener('fullscreenchange', onFullscreenChange);
@@ -800,6 +825,12 @@ watch(() => props.interactive, (on) => {
 
 onBeforeUnmount(() => {
   bindGlobalListeners(false);
+  if (playFrame !== null) {
+    cancelAnimationFrame(playFrame);
+    playFrame = null;
+  }
+  pendingPlayRequest = false;
+  longPressActive = false;
   clearPendingSeek();
   isDragging.value = false;
   dragPct.value = null;

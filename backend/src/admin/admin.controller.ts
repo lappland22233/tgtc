@@ -393,6 +393,12 @@ export class AdminController {
     return this.adminService.getAccessLogs(query);
   }
 
+  @Get('audit-logs/email-verification-stats')
+  @Roles(UserRole.SUPER_ADMIN)
+  async getEmailVerificationStats(@Query('timeRange') timeRange?: string) {
+    return this.adminService.getEmailVerificationStats(timeRange);
+  }
+
   @Get('audit-logs')
   @Roles(UserRole.SUPER_ADMIN)
   async getAuditLogs(
@@ -401,6 +407,7 @@ export class AdminController {
     @Query('action') action?: string,
     @Query('userId') userId?: string,
     @Query('timeRange') timeRange?: string,
+    @Query('status') status?: string,
   ) {
     return this.adminService.getAuditLogs({
       page: page ? parseInt(page) : undefined,
@@ -408,6 +415,7 @@ export class AdminController {
       action,
       userId,
       timeRange,
+      status,
     });
   }
 

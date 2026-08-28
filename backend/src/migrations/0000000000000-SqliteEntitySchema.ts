@@ -37,6 +37,11 @@ export class SqliteEntitySchema1700000000000 implements MigrationInterface {
   public async up(queryRunner: QueryRunner): Promise<void> {
     if (queryRunner.connection.options.type !== 'sqlite') return;
     const metadatas = queryRunner.connection.entityMetadatas;
+    const partialUniqueColumns = new Set(
+      metadatas.flatMap((metadata) => metadata.indices
+        .filter((index) => index.isUnique && Boolean(index.where))
+        .flatMap((index) => index.columns.map((column) => `${metadata.tableName}.${typeof column === 'string' ? column : column.databaseName}`))),
+    );
     for (const metadata of metadatas) {
       if (await queryRunner.hasTable(metadata.tableName)) continue;
       await queryRunner.createTable(new Table({
@@ -48,7 +53,8 @@ export class SqliteEntitySchema1700000000000 implements MigrationInterface {
           length: typeof column.length === 'string' && /^\\d+$/.test(column.length) ? column.length : undefined,
           isPrimary: column.isPrimary,
           isNullable: column.isNullable,
-          isUnique: (column as unknown as EntityColumnMetadata).isUnique,
+          isUnique: !partialUniqueColumns.has(`${metadata.tableName}.${column.databaseName}`)
+            && (column as unknown as EntityColumnMetadata).isUnique,
           isGenerated: false,
           default: sqliteColumnDefault(column),
         })),
@@ -75,6 +81,7 @@ export class SqliteEntitySchema1700000000000 implements MigrationInterface {
           name: index.name,
           columnNames: index.columns.map((column) => typeof column === 'string' ? column : column.databaseName),
           isUnique: index.isUnique,
+          where: index.where,
         }));
       }
     }

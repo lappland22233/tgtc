@@ -12,7 +12,7 @@
  * - applyItem：切换到指定项后的内容加载协调（由宿主实现）。
  * - getVideoRef / getAudioRef / getPlaylistPanelRef：宿主媒体元素访问器。
  */
-import { computed, nextTick, ref } from 'vue';
+import { computed, nextTick, ref, watch } from 'vue';
 import type { PreviewKind } from '../utils/preview';
 import type { MediaSessionItem } from '../stores/mediaPlayback';
 import type { useMediaPlaybackStore } from '../stores/mediaPlayback';
@@ -53,8 +53,6 @@ export function usePlaylistControls(options: PlaylistControlsOptions) {
   const playlist = computed<MediaSessionItem[]>(() => mediaStore.session?.playlist ?? []);
   const hasPlaylist = computed(() => playlist.value.length > 1);
   const activeIndex = computed(() => mediaStore.session?.playlistIndex ?? -1);
-  const hasPrev = computed(() => activeIndex.value > 0);
-  const hasNext = computed(() => activeIndex.value < playlist.value.length - 1);
 
   const isMediaCollection = computed(() => snap.kind === 'video' || snap.kind === 'audio' || snap.kind === 'image');
   const isContinuousMedia = computed(() => snap.kind === 'video' || snap.kind === 'audio');
@@ -63,7 +61,41 @@ export function usePlaylistControls(options: PlaylistControlsOptions) {
   const playlistOpen = ref(false);
 
   const videoEndBehavior = ref<VideoEndBehavior>(loadVideoEndBehavior());
+  const listLoopKey = 'file-preview-list-loop';
+  const shuffleKey = 'file-preview-shuffle';
+  const listLoop = ref(loadBoolean(listLoopKey));
+  const shuffle = ref(loadBoolean(shuffleKey));
+  const playOrder = ref<number[]>([]);
+  const hasPrev = computed(() => playlist.value.length > 1 && (listLoop.value || orderedPosition(activeIndex.value) > 0));
+  const hasNext = computed(() => playlist.value.length > 1 && (listLoop.value || orderedPosition(activeIndex.value) < playOrder.value.length - 1));
   let autoNextTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function loadBoolean(key: string): boolean {
+    try { return localStorage.getItem(key) === 'true'; } catch { return false; }
+  }
+  function saveBoolean(key: string, value: boolean) {
+    try { localStorage.setItem(key, String(value)); } catch { /* 不影响播放 */ }
+  }
+  function rebuildPlayOrder() {
+    const indices = playlist.value.map((_, index) => index);
+    if (shuffle.value && indices.length > 1) {
+      for (let i = indices.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [indices[i], indices[j]] = [indices[j], indices[i]];
+      }
+    }
+    playOrder.value = indices;
+  }
+  function setListLoop(value: boolean) {
+    listLoop.value = value;
+    saveBoolean(listLoopKey, value);
+  }
+  function setShuffle(value: boolean) {
+    shuffle.value = value;
+    saveBoolean(shuffleKey, value);
+    rebuildPlayOrder();
+  }
+  function orderedPosition(index: number) { return playOrder.value.indexOf(index); }
 
   function setVideoEndBehavior(behavior: VideoEndBehavior) {
     videoEndBehavior.value = behavior;
@@ -91,8 +123,24 @@ export function usePlaylistControls(options: PlaylistControlsOptions) {
     }
   }
 
-  function playPrev() { if (hasPrev.value) switchToTrack(activeIndex.value - 1); }
-  function playNext() { if (hasNext.value) switchToTrack(activeIndex.value + 1); }
+  function playPrev() {
+    if (playlist.value.length <= 1) return;
+    const position = orderedPosition(activeIndex.value);
+    if (position > 0) switchToTrack(playOrder.value[position - 1]);
+    else if (listLoop.value) switchToTrack(playOrder.value[playOrder.value.length - 1]);
+  }
+  function playNext() {
+    if (playlist.value.length === 1) {
+      if (listLoop.value) switchToTrack(playOrder.value[0]);
+      return;
+    }
+    if (playlist.value.length <= 1) return;
+    const position = orderedPosition(activeIndex.value);
+    if (position >= 0 && position < playOrder.value.length - 1) switchToTrack(playOrder.value[position + 1]);
+    else if (listLoop.value) switchToTrack(playOrder.value[0]);
+  }
+
+  watch(playlist, rebuildPlayOrder, { immediate: true });
 
   /** 播放列表展开后，点击面板之外的弹窗区域立即收起，不遮挡媒体。 */
   function onDialogPointerDown(event: PointerEvent) {
@@ -109,7 +157,7 @@ export function usePlaylistControls(options: PlaylistControlsOptions) {
     mediaStore.setPlayState('playing');
   }
 
-  /** 根据用户选择处理视频结束：单集循环、自动下一个或停在结尾。 */
+  /** 根据用户选择处理视频结束；列表循环独立于单集循环。 */
   function onVideoEnded() {
     clearAutoNextTimer();
     mediaStore.setPlayState('ended');
@@ -119,6 +167,10 @@ export function usePlaylistControls(options: PlaylistControlsOptions) {
       if (!video) return;
       video.currentTime = 0;
       void video.play().catch(() => {});
+      return;
+    }
+    if (listLoop.value && playlist.value.length > 0) {
+      playNext();
       return;
     }
     if (videoEndBehavior.value === 'next' && hasNext.value) {
@@ -134,6 +186,13 @@ export function usePlaylistControls(options: PlaylistControlsOptions) {
     mediaStore.persistProgress();
   }
 
+  function onAudioEnded() {
+    clearAutoNextTimer();
+    mediaStore.setPlayState('ended');
+    mediaStore.persistProgress();
+    if (hasNext.value || listLoop.value) playNext();
+  }
+
   return {
     playlist,
     hasPlaylist,
@@ -147,6 +206,10 @@ export function usePlaylistControls(options: PlaylistControlsOptions) {
     playlistOpen,
     videoEndBehavior,
     setVideoEndBehavior,
+    listLoop,
+    shuffle,
+    setListLoop,
+    setShuffle,
     clearAutoNextTimer,
     switchToTrack,
     playPrev,
@@ -155,5 +218,6 @@ export function usePlaylistControls(options: PlaylistControlsOptions) {
     onVideoPlay,
     onVideoEnded,
     onVideoPaused,
+    onAudioEnded,
   };
 }

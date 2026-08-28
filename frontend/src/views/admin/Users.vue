@@ -161,7 +161,17 @@ import { formatDate as formatSafeDate } from '../../utils/format';
 const authStore = useAuthStore();
 const isSelf = (id: string) => authStore.user?.id === id;
 
-const users = ref<{ id: string; email: string; role: string; isBanned: boolean; emailVerified: boolean; createdAt: string; lastLoginAt?: string }[]>([]);
+interface AdminUserRow {
+  id: string;
+  email: string;
+  role: string;
+  isBanned: boolean;
+  emailVerified: boolean;
+  createdAt: string;
+  lastLoginAt: string | null;
+}
+
+const users = ref<AdminUserRow[]>([]);
 const total = ref(0);
 const page = ref(1);
 const searchEmail = ref('');
@@ -226,11 +236,33 @@ function formatDate(date: string | null | undefined) {
   return formatSafeDate(date || '');
 }
 
+function applyUsersResponse(response: { data?: unknown }) {
+  const body = response.data && typeof response.data === 'object' ? response.data as { data?: unknown } : {};
+  const payload = body.data && typeof body.data === 'object' ? body.data as Record<string, unknown> : body as Record<string, unknown>;
+  const rawUsers = Array.isArray(payload.users) ? payload.users : Array.isArray(payload.items) ? payload.items : [];
+
+  users.value = rawUsers.map((raw) => {
+    const user = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+    return {
+      id: String(user.id || ''),
+      email: String(user.email || ''),
+      role: String(user.role || 'user'),
+      isBanned: Boolean(user.isBanned),
+      emailVerified: Boolean(user.emailVerified),
+      createdAt: typeof user.createdAt === 'string' ? user.createdAt : '',
+      // 兼容旧接口的 lastLogin 字段，并将 null/缺失统一为空值。
+      lastLoginAt: typeof user.lastLoginAt === 'string'
+        ? user.lastLoginAt
+        : typeof user.lastLogin === 'string' ? user.lastLogin : null,
+    };
+  });
+  total.value = typeof payload.total === 'number' ? payload.total : users.value.length;
+}
+
 async function fetchUsers() {
   try {
     const res = await api.get('/users', { params: { page: page.value } });
-    users.value = res.data.data.users;
-    total.value = res.data.data.total;
+    applyUsersResponse(res);
   } catch (error: unknown) {
     MessagePlugin.error(getErrorMessage(error) || '加载用户列表失败');
   }
@@ -245,8 +277,7 @@ async function searchUsers() {
   try {
     page.value = 1;
     const res = await api.get('/users', { params: { page: 1, search: searchEmail.value } });
-    users.value = res.data.data.users;
-    total.value = res.data.data.total;
+    applyUsersResponse(res);
   } catch (error: unknown) {
     MessagePlugin.error(getErrorMessage(error) || '搜索用户失败');
   }

@@ -3,7 +3,7 @@
  *
  * 职责：
  * - 播放 / 进度 / 指示器 / 全屏状态 refs。
- * - 音量与倍速 localStorage 持久化偏好。
+ * - 音量偏好 localStorage 持久化；倍速仅限当前播放器会话。
  * - 媒体元数据可用后一次性恢复播放进度。
  * - 时间格式化工具。
  *
@@ -22,7 +22,6 @@ export function useVideoPlayerState(options: VideoPlayerStateOptions) {
 
   // ─── 持久化偏好 ────────────────────────────
   const VIDEO_VOLUME_KEY = 'file-preview-video-volume';
-  const VIDEO_RATE_KEY = 'file-preview-video-rate';
   const DEFAULT_VIDEO_VOLUME = 0.5;
 
   function loadSavedVolume(): number {
@@ -40,18 +39,6 @@ export function useVideoPlayerState(options: VideoPlayerStateOptions) {
     try { localStorage.setItem(VIDEO_VOLUME_KEY, String(value)); } catch { /* 不影响播放 */ }
   }
 
-  function loadSavedRate(): number {
-    try {
-      const saved = Number(localStorage.getItem(VIDEO_RATE_KEY));
-      if (Number.isFinite(saved) && saved >= 0.5 && saved <= 3) return saved;
-    } catch { /* 存储不可用时使用默认倍速 */ }
-    return 1;
-  }
-
-  function saveRate(value: number) {
-    try { localStorage.setItem(VIDEO_RATE_KEY, String(value)); } catch { /* 不影响播放 */ }
-  }
-
   // ─── 播放状态 ────────────────────────────
   const isPaused = ref(true);
   const isEnded = ref(false);
@@ -60,7 +47,7 @@ export function useVideoPlayerState(options: VideoPlayerStateOptions) {
   const duration = ref(0);
   const volume = ref(loadSavedVolume());
   const isMuted = ref(false);
-  const currentSpeed = ref(loadSavedRate());
+  const currentSpeed = ref(1);
   const controlsVisible = ref(true);
   const speedMenuOpen = ref(false);
   const endBehaviorMenuOpen = ref(false);
@@ -148,10 +135,9 @@ export function useVideoPlayerState(options: VideoPlayerStateOptions) {
     seekIndicator,
     // 全屏
     isFullscreen,
-    // 持久化
+    // 音量偏好
     DEFAULT_VIDEO_VOLUME,
     saveVolume,
-    saveRate,
     // 工具 / 状态机
     applyInitialTime,
     resetInitialTime,
