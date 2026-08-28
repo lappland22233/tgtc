@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, copyFileSync } from 'fs';
+import { existsSync, mkdirSync, writeFileSync, renameSync } from 'fs';
 import { dirname, resolve } from 'path';
 import { DataSource, DataSourceOptions } from 'typeorm';
 
@@ -12,10 +12,7 @@ function loadDatabaseModules(type: 'postgres' | 'sqlite'): DatabaseModules {
   process.env.DB_TYPE = type;
   for (const file of Object.keys(require.cache)) {
     if (file.includes(`${require('path').sep}common${require('path').sep}entities${require('path').sep}`)
-      || file.endsWith(`${require('path').sep}database${require('path').sep}database-types.js`)
-      || file.endsWith(`${require('path').sep}database${require('path').sep}database.config.js`)
-      || file.endsWith(`${require('path').sep}database${require('path').sep}entities.js`)
-      || file.endsWith(`${require('path').sep}database${require('path').sep}uuid.subscriber.js`)) {
+      || /[\\/]database[\\/](database-types|database\.config|entities|uuid\.subscriber)\.(ts|js)$/.test(file)) {
       delete require.cache[file];
     }
   }
