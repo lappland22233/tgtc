@@ -28,6 +28,7 @@ import { ShareService } from './share.service';
 import { FileService } from '../file/file.service';
 import { CreateShareDto, UpdateShareDto, VerifyPasswordDto } from './share.dto';
 import { ShareTargetType } from '../common/entities/share-link.entity';
+import { MediaTicketService } from '../common/services/media-ticket.service';
 
 /**
  * 分享访问凭据 HttpOnly Cookie 名。
@@ -91,6 +92,7 @@ export class ShareController {
     private readonly rateLimitService: RateLimitService,
     private readonly configCacheService: ConfigCacheService,
     private readonly streamResponder: StreamResponderService,
+    private readonly mediaTicketService: MediaTicketService,
   ) {}
 
   /**
@@ -346,6 +348,75 @@ export class ShareController {
       accessLogId: result.accessLogId,
       updateAccessLog: (id, bytes) => this.fileService.updateAccessLogResponseSize(id, bytes),
     });
+  }
+
+  /** 为已验证的分享访问签发短期媒体预览票据；密码凭据仅从 HttpOnly Cookie 读取。 */
+  @Post('s/:token/media-ticket/:fileId')
+  async issueShareMediaTicket(
+    @Param('token') token: string,
+    @Param('fileId') fileId: string,
+    @Req() req: Request,
+  ) {
+    await this.assertSharePreviewRateLimit(token, req);
+    const file = await this.shareService.getShareMediaTicketFile(token, fileId, this.getAccessJwt(req));
+    const link = await this.shareService.getShareLinkByToken(token);
+    return {
+      ticket: this.mediaTicketService.issue({
+        fileId: file.id,
+        uploadVersion: file.uploadVersion,
+        subject: link.id,
+        scope: 'share',
+        purpose: 'preview',
+      }),
+      expiresIn: 300,
+    };
+  }
+
+  /**
+   * 匿名分享媒体取流：票据签发阶段完成密码 Cookie 校验；取流阶段持续校验
+   * 分享状态、次数、文件归属和版本，以支持不携带浏览器 Cookie 的 Android 媒体栈。
+   */
+  @Get('media/share-ticket')
+  async previewShareWithMediaTicket(@Query('ticket') ticket: string, @Req() req: Request, @Res() res: Response) {
+    try {
+      const payload = this.mediaTicketService.verify(ticket);
+      if (payload.scope !== 'share' || payload.purpose !== 'preview') {
+        throw new HttpException('媒体票据用途不匹配', HttpStatus.BAD_REQUEST);
+      }
+      const rangeHeader = req.headers.range;
+      const result = await this.shareService.getSharePreviewStreamForMediaTicket(
+        payload.subject,
+        payload.fileId,
+        payload.uploadVersion,
+        getClientIp(req),
+        rangeHeader || undefined,
+        payload.nonce,
+        typeof req.headers['if-range'] === 'string' ? req.headers['if-range'] : undefined,
+      );
+      const range = 'start' in result
+        ? { start: result.start, end: result.end, total: result.total }
+        : undefined;
+      await this.streamResponder.send({
+        res,
+        status: range ? 206 : undefined,
+        range,
+        headers: {
+          'Content-Type': sanitizePreviewContentType(result.contentType),
+          'Content-Disposition': buildContentDisposition('inline', result.filename),
+          'Content-Length': result.size.toString(),
+          ETag: result.etag || '"0"',
+          'Accept-Ranges': 'bytes',
+          'Cache-Control': 'no-store, no-cache, must-revalidate',
+          'X-Content-Type-Options': 'nosniff',
+          'Referrer-Policy': 'no-referrer',
+        },
+        stream: result.stream,
+        accessLogId: result.accessLogId,
+        updateAccessLog: (accessLogId, bytes) => this.fileService.updateAccessLogResponseSize(accessLogId, bytes),
+      });
+    } catch (error) {
+      this.streamResponder.handleError(res, error, '媒体票据预览失败', req);
+    }
   }
 
   /**

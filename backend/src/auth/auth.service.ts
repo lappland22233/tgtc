@@ -113,11 +113,12 @@ export class AuthService {
     try {
       await queryRunner.connect();
       await queryRunner.startTransaction();
-      // 使用事务级咨询锁串行化"首位用户=超管"竞态临界区，确保首个注册用户获得 super_admin。
-      // 替代旧的 LOCK TABLE "users" IN EXCLUSIVE MODE 全表排他锁，避免阻塞 users 表的其他并发读写；
-      // 咨询锁仅锁定本临界区逻辑，随事务结束（commit/rollback）自动释放。
-      await queryRunner.query('SELECT pg_advisory_xact_lock($1)', [REGISTRATION_ADVISORY_LOCK_KEY]);
-      // 取得咨询锁后再统计用户数，保证"空表→首位超管"判定的串行化
+      // PostgreSQL 使用事务级咨询锁；SQLite 通过 BEGIN IMMEDIATE（驱动事务）串行化写入，
+      // 不执行 PostgreSQL 专有函数，避免 SQLite 启动注册路径直接失败。
+      if ((this.dataSource.options as { type?: string } | undefined)?.type === 'postgres') {
+        await queryRunner.query('SELECT pg_advisory_xact_lock($1)', [REGISTRATION_ADVISORY_LOCK_KEY]);
+      }
+      // 取得锁后再统计用户数，保证"空表→首位超管"判定的串行化
       // G1-02：与 ORM count() 口径一致，排除软删用户（deletedAt IS NULL），
       // 避免"已软删用户仍占用首位超管名额"导致注册被误判关闭。
       const [{ count }] = await queryRunner.query(

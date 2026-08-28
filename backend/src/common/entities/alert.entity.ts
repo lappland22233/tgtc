@@ -1,6 +1,7 @@
+import { databaseColumnType } from '../../database/database-types';
 import {
   Entity,
-  PrimaryColumn,
+  PrimaryGeneratedColumn,
   Column,
   CreateDateColumn,
   Index,
@@ -20,7 +21,7 @@ export enum AlertLevel {
 @Index('IDX_alerts_acknowledged', ['acknowledgedAt'], { where: '"acknowledgedAt" IS NULL' })
 @Index('IDX_alerts_unacknowledged_createdAt', ['createdAt'], { where: '"acknowledgedAt" IS NULL' })
 export class Alert {
-  @PrimaryColumn({ type: 'uuid', default: () => 'gen_random_uuid()' })
+  @PrimaryGeneratedColumn('uuid')
   id: string;
 
   @Column({ type: 'varchar', length: 100 })
@@ -35,15 +36,15 @@ export class Alert {
   @Column({ type: 'text', nullable: true })
   message: string | null;
 
-  @Column({ type: 'jsonb', nullable: true })
+  @Column({ type: databaseColumnType('jsonb') as 'jsonb', nullable: true })
   context: Record<string, unknown> | null;
 
-  @Column({ nullable: true, type: 'timestamptz' })
+  @Column({ nullable: true, type: databaseColumnType('timestamptz') as 'timestamptz' })
   acknowledgedAt: Date | null;
 
   @Column({ nullable: true, type: 'uuid' })
   acknowledgedBy: string | null;
 
-  @CreateDateColumn({ type: 'timestamptz' })
+  @CreateDateColumn({ type: databaseColumnType('timestamptz') as 'timestamptz' })
   createdAt: Date;
 }

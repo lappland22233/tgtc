@@ -15,6 +15,7 @@ import { SharePreviewSession } from '../common/entities/share-preview-session.en
 import { FileModule } from '../file/file.module';
 import { ConfigCacheModule } from '../common/services/config-cache.module';
 import { RateLimitModule } from '../common/services/rate-limit.module';
+import { MediaTicketModule } from '../common/services/media-ticket.module';
 
 /**
  * 分享链接模块：Phase 2 核心实现。
@@ -37,6 +38,7 @@ import { RateLimitModule } from '../common/services/rate-limit.module';
     FileModule,
     ConfigCacheModule,
     RateLimitModule,
+    MediaTicketModule,
     JwtModule.registerAsync({
       imports: [ConfigModule],
       inject: [ConfigService],

@@ -1,6 +1,6 @@
 import {
   Entity,
-  PrimaryColumn,
+  PrimaryGeneratedColumn,
   Column,
   CreateDateColumn,
   UpdateDateColumn,
@@ -9,6 +9,7 @@ import {
   Index,
 } from 'typeorm';
 import { User } from './user.entity';
+import { databaseColumnType } from '../../database/database-types';
 
 /**
  * 分享目标类型：
@@ -53,7 +54,7 @@ export enum ShareLinkStatus {
 @Entity('share_links')
 @Index('idx_share_links_creatorId', ['creatorId'])
 export class ShareLink {
-  @PrimaryColumn({ type: 'uuid', default: () => 'gen_random_uuid()' })
+  @PrimaryGeneratedColumn('uuid')
   id: string;
 
   /** URL 段 token，全局唯一。新生成的 token 是 12 字符 base64url（~72 bit 熵），但迁移脚本会把老文件的 UUID（36 字符）作为 token 以兼容老链接 */
@@ -61,7 +62,7 @@ export class ShareLink {
   @Column({ type: 'varchar', length: 64 })
   token: string;
 
-  @Column({ type: 'enum', enum: ShareTargetType })
+  @Column({ type: databaseColumnType('enum') as 'enum', enum: ShareTargetType })
   targetType: ShareTargetType;
 
   /** 关联的 file.id 或 folder.id，按 targetType 解释 */
@@ -93,11 +94,11 @@ export class ShareLink {
   expiresIn: number | null;
 
   /** 首次访问时间，expiresStartAt + expiresIn = 过期时间 */
-  @Column({ nullable: true, type: 'timestamp' })
+  @Column({ nullable: true, type: databaseColumnType('timestamp') as 'timestamp' })
   expiresStartAt: Date | null;
 
   @Column({
-    type: 'enum',
+    type: databaseColumnType('enum') as 'enum',
     enum: ShareLinkStatus,
     default: ShareLinkStatus.ACTIVE,
   })

@@ -1,6 +1,6 @@
 import {
   Entity,
-  PrimaryColumn,
+  PrimaryGeneratedColumn,
   Column,
   CreateDateColumn,
   UpdateDateColumn,
@@ -8,6 +8,7 @@ import {
   OneToMany,
 } from 'typeorm';
 import { File } from './file.entity';
+import { databaseColumnType } from '../../database/database-types';
 import { Folder } from './folder.entity';
 
 export enum UserRole {
@@ -18,7 +19,7 @@ export enum UserRole {
 
 @Entity('users')
 export class User {
-  @PrimaryColumn({ type: 'uuid', default: () => 'gen_random_uuid()' })
+  @PrimaryGeneratedColumn('uuid')
   id: string;
 
   /**
@@ -35,7 +36,7 @@ export class User {
   @Column({ length: 255, comment: 'bcrypt hashed password, never store plaintext', select: false })
   password: string;
 
-  @Column({ type: 'enum', enum: UserRole, default: UserRole.USER })
+  @Column({ type: databaseColumnType('enum') as 'enum', enum: UserRole, default: UserRole.USER })
   role: UserRole;
 
   @Column({ default: false })
@@ -47,7 +48,7 @@ export class User {
   @Column({ nullable: true })
   lastLoginIP: string;
 
-  @Column({ nullable: true })
+  @Column({ nullable: true, type: databaseColumnType('timestamp') as 'timestamp' })
   lastLoginAt: Date | null;
 
   @OneToMany(() => File, (file) => file.uploader)
@@ -63,7 +64,7 @@ export class User {
   updatedAt: Date;
 
   /** 密码或安全凭证最后变更时间，用于 JWT token 吊销检测 */
-  @Column({ type: 'timestamptz', nullable: true })
+  @Column({ type: databaseColumnType('timestamptz') as 'timestamptz', nullable: true })
   passwordUpdatedAt: Date | null;
 
   /**
@@ -71,6 +72,6 @@ export class User {
    * 避免 files.uploaderId 外键（无 ON DELETE 策略）导致硬删除恒失败；
    * TypeORM 会在常规查询中自动排除已软删除的用户。
    */
-  @DeleteDateColumn({ type: 'timestamp', nullable: true })
+  @DeleteDateColumn({ type: databaseColumnType('timestamp') as 'timestamp', nullable: true })
   deletedAt: Date | null;
 }

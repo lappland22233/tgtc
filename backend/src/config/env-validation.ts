@@ -8,14 +8,19 @@ export function validateEnv(): void {
   const errors: string[] = [];
 
   // ---- 数据库连接 ----
-  if (!process.env.DB_HOST) errors.push('DB_HOST 未设置');
-  if (!process.env.DB_PORT) errors.push('DB_PORT 未设置');
-  else if (isNaN(Number(process.env.DB_PORT)) || Number(process.env.DB_PORT) < 1 || Number(process.env.DB_PORT) > 65535) {
-    errors.push('DB_PORT 不是有效端口号 (1–65535)');
+  const dbType = (process.env.DB_TYPE || 'postgres').toLowerCase();
+  if (!['postgres', 'sqlite'].includes(dbType)) errors.push('DB_TYPE 必须是 postgres 或 sqlite');
+  if (dbType === 'sqlite') {
+    if (!process.env.DB_DATABASE) errors.push('DB_DATABASE 未设置（SQLite 应为数据库文件路径）');
+  } else if (!process.env.DB_HOST) errors.push('DB_HOST 未设置');
+  if (dbType !== 'sqlite') {
+    if (!process.env.DB_PORT) errors.push('DB_PORT 未设置');
+    else if (isNaN(Number(process.env.DB_PORT)) || Number(process.env.DB_PORT) < 1 || Number(process.env.DB_PORT) > 65535) {
+      errors.push('DB_PORT 不是有效端口号 (1–65535)');
+    }
+    if (!process.env.DB_USERNAME) errors.push('DB_USERNAME 未设置');
+    if (!process.env.DB_PASSWORD) errors.push('DB_PASSWORD 未设置');
   }
-  if (!process.env.DB_USERNAME) errors.push('DB_USERNAME 未设置');
-  if (!process.env.DB_PASSWORD) errors.push('DB_PASSWORD 未设置');
-  if (!process.env.DB_DATABASE) errors.push('DB_DATABASE 未设置');
 
   const dbTimeoutDefaults: Record<string, number> = {
     DB_POOL_SIZE: 20,

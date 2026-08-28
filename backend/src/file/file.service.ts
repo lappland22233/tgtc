@@ -900,9 +900,11 @@ export class FileService implements OnModuleInit {
     let total: number;
     if (tagIds && tagIds.length > 0) {
       // 标签筛选的计数使用原始 SQL，避免 TypeORM query builder 的 getRawMany + JOIN 兼容问题
-      const tagParams: any[] = [tagIds];
-      let tagIdx = 2;
-      const tagWheres: string[] = ['ft."tagId" = ANY($1::uuid[])'];
+      const tagParams: any[] = [];
+      let tagIdx = 1;
+      const tagPlaceholders = tagIds.map(() => `$${tagIdx++}`).join(', ');
+      tagParams.push(...tagIds);
+      const tagWheres: string[] = [`ft."tagId" IN (${tagPlaceholders})`];
       if (userId) { tagWheres.push(`file."uploaderId" = $${tagIdx++}`); tagParams.push(userId); }
       if (!includeDeleted) { tagWheres.push('file."isDeleted" = false'); }
       if (keyword) { tagWheres.push(`LOWER(file."originalName") LIKE $${tagIdx++}`); tagParams.push(`%${escapeLike(keyword.toLowerCase())}%`); }
@@ -918,7 +920,7 @@ export class FileService implements OnModuleInit {
       if (tagIds.length > 1) {
         tagParams.push(tagIds.length);
         const res = await this.fileRepository.manager.query(
-          `SELECT COUNT(*)::int AS cnt FROM (
+          `SELECT COUNT(*) AS cnt FROM (
             SELECT 1 FROM files file
             INNER JOIN file_tags ft ON ft."fileId" = file.id
             WHERE ${tagWhere}
@@ -929,7 +931,7 @@ export class FileService implements OnModuleInit {
         total = parseInt(res[0]?.cnt || '0', 10);
       } else {
         const res = await this.fileRepository.manager.query(
-          `SELECT COUNT(*)::int AS cnt FROM files file
+          `SELECT COUNT(*) AS cnt FROM files file
           INNER JOIN file_tags ft ON ft."fileId" = file.id
           WHERE ${tagWhere}`,
           tagParams,
@@ -956,8 +958,8 @@ export class FileService implements OnModuleInit {
         `SELECT ft."fileId", t.id, t.name, t.color, t."userId", t."createdAt"
          FROM file_tags ft
          INNER JOIN tags t ON t.id = ft."tagId"
-         WHERE ft."fileId" = ANY($1::uuid[])`,
-        [fileIds],
+         WHERE ft."fileId" IN (${fileIds.map((_, i) => `$${i + 1}`).join(', ')})`,
+        fileIds,
       );
       const tagsMap = new Map<string, { id: string; name: string; color: string }[]>();
       for (const row of tagRows) {
@@ -2761,9 +2763,11 @@ export class FileService implements OnModuleInit {
         throw new NotFoundException('文件不存在');
       }
       if (uniqueTagIds.length > 0) {
+        const tagPlaceholders = uniqueTagIds.map((_, index) => `$${index + 1}`).join(', ');
+        const lockSuffix = manager.connection.options.type === 'postgres' ? ' FOR KEY SHARE' : '';
         await manager.query(
-          'SELECT id FROM tags WHERE id = ANY($1::uuid[]) ORDER BY id FOR KEY SHARE',
-          [uniqueTagIds],
+          `SELECT id FROM tags WHERE id IN (${tagPlaceholders}) ORDER BY id${lockSuffix}`,
+          uniqueTagIds,
         );
       }
       await manager.query('DELETE FROM file_tags WHERE "fileId" = $1', [fileId]);
@@ -2863,7 +2867,7 @@ export class FileService implements OnModuleInit {
    *
    * 由 ShareService 在校验完 token + access JWT 后调用。
    */
-  async getStreamForShareDownload(id: string, ip?: string, shareToken?: string): Promise<{
+  async getStreamForShareDownload(id: string, ip?: string, shareToken?: string, expectedUploadVersion?: number): Promise<{
     stream: Readable;
     contentType: string;
     filename: string;
@@ -2873,9 +2877,10 @@ export class FileService implements OnModuleInit {
     etag: string;
   }> {
     const file = await this.fileRepository.findOne({
-      where: { id, isDeleted: false },
+      where: { id, isDeleted: false, ...(expectedUploadVersion === undefined ? {} : { uploadVersion: expectedUploadVersion }) },
     });
     if (!file) {
+      if (expectedUploadVersion !== undefined) throw new ForbiddenException('媒体票据对应的文件版本已失效');
       throw new NotFoundException('文件不存在');
     }
 
@@ -2962,7 +2967,19 @@ export class FileService implements OnModuleInit {
    * 1. 不递增 currentAccessCount —— 预览不消耗访问次数配额。
    * 2. 访问日志 action 记为 'preview'。
    */
-  async getPreviewStream(id: string, user: User, ip?: string): Promise<{
+  /**
+   * 校验用户媒体票据绑定的文件版本与当前读取权限。票据仅短期授权，
+   * 每次实际取流前仍重新读取文件，覆盖删除、覆盖上传和权限变化。
+   */
+  async assertMediaTicketUserReadable(fileId: string, uploadVersion: number, userId: string): Promise<void> {
+    const file = await this.fileRepository.findOne({ where: { id: fileId, isDeleted: false } });
+    if (!file || file.uploadVersion !== uploadVersion || file.uploaderId !== userId) {
+      throw new ForbiddenException('媒体票据对应的文件已不可访问');
+    }
+    this.assertFileUsable(file);
+  }
+
+  async getPreviewStream(id: string, user: User, ip?: string, expectedUploadVersion?: number): Promise<{
     stream: Readable;
     contentType: string;
     filename: string;
@@ -2971,10 +2988,11 @@ export class FileService implements OnModuleInit {
     etag: string;
   }> {
     const file = await this.fileRepository.findOne({
-      where: { id, isDeleted: false },
+      where: { id, isDeleted: false, ...(expectedUploadVersion === undefined ? {} : { uploadVersion: expectedUploadVersion }) },
     });
 
     if (!file) {
+      if (expectedUploadVersion !== undefined) throw new ForbiddenException('媒体票据对应的文件版本已失效');
       throw new NotFoundException('文件不存在');
     }
 
@@ -3014,6 +3032,7 @@ export class FileService implements OnModuleInit {
     rangeHeader: string,
     ip?: string,
     ifRange?: string,
+    expectedUploadVersion?: number,
   ): Promise<{
     stream: Readable;
     contentType: string;
@@ -3026,9 +3045,12 @@ export class FileService implements OnModuleInit {
     etag?: string;
   } | null> {
     const file = await this.fileRepository.findOne({
-      where: { id, isDeleted: false },
+      where: { id, isDeleted: false, ...(expectedUploadVersion === undefined ? {} : { uploadVersion: expectedUploadVersion }) },
     });
-    if (!file) throw new NotFoundException('文件不存在');
+    if (!file) {
+      if (expectedUploadVersion !== undefined) throw new ForbiddenException('媒体票据对应的文件版本已失效');
+      throw new NotFoundException('文件不存在');
+    }
 
     await this.assertFileReadable(file, user);
 
@@ -3102,7 +3124,7 @@ export class FileService implements OnModuleInit {
    * 仅正式缓存命中时返回范围流，冷文件返回 null 由上层回退完整响应。
    * 访问日志 action 记为 'share_preview'。
    */
-  async getSharePreviewStreamWithRange(fileId: string, rangeHeader: string, ip?: string, ifRange?: string): Promise<{
+  async getSharePreviewStreamWithRange(fileId: string, rangeHeader: string, ip?: string, ifRange?: string, expectedUploadVersion?: number): Promise<{
     stream: Readable;
     contentType: string;
     filename: string;
@@ -3114,8 +3136,13 @@ export class FileService implements OnModuleInit {
     accessLogId?: string;
     etag?: string;
   } | null> {
-    const file = await this.fileRepository.findOne({ where: { id: fileId, isDeleted: false } });
-    if (!file) throw new NotFoundException('文件不存在');
+    const file = await this.fileRepository.findOne({
+      where: { id: fileId, isDeleted: false, ...(expectedUploadVersion === undefined ? {} : { uploadVersion: expectedUploadVersion }) },
+    });
+    if (!file) {
+      if (expectedUploadVersion !== undefined) throw new ForbiddenException('媒体票据对应的文件版本已失效');
+      throw new NotFoundException('文件不存在');
+    }
 
     this.assertFileUsable(file);
 
@@ -3151,6 +3178,7 @@ export class FileService implements OnModuleInit {
       end,
       total,
       accessLogId: await this.createSharePreviewAccessLog(file, ip),
+      etag,
     };
   }
 

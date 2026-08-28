@@ -1,6 +1,6 @@
 import {
   Entity,
-  PrimaryColumn,
+  PrimaryGeneratedColumn,
   Column,
   CreateDateColumn,
   Index,
@@ -21,7 +21,7 @@ export enum AccessAction {
 // G8-13：支持按 action + 时间窗口的扫描（异常下载/分享检测、归档清理走索引）
 @Index('idx_access_logs_action_created', ['action', 'createdAt'])
 export class FileAccessLog {
-  @PrimaryColumn({ type: 'uuid', default: () => 'gen_random_uuid()' })
+  @PrimaryGeneratedColumn('uuid')
   id: string;
 
   @ManyToOne(() => File)

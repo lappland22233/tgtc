@@ -24,6 +24,7 @@ import { FileCacheService } from './file-cache.service';
 import { ThumbnailService } from './thumbnail.service';
 import { ConfigCacheModule } from '../common/services/config-cache.module';
 import { RateLimitModule } from '../common/services/rate-limit.module';
+import { MediaTicketModule } from '../common/services/media-ticket.module';
 import { TagModule } from '../tag/tag.module';
 
 @Module({
@@ -32,6 +33,7 @@ import { TagModule } from '../tag/tag.module';
     ConfigCacheModule,
     RateLimitModule,
     TagModule,
+    MediaTicketModule,
     FolderModule,
     TelegramModule,
     BullModule.registerQueue({ name: QUEUE_NAMES.FILE_UPLOAD }),

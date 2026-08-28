@@ -248,6 +248,7 @@ const emit = defineEmits<{
   pause: [];
   ended: [];
   error: [];
+  'play-rejected': [reason: string];
   'request-play': [];
   'update:end-behavior': [behavior: VideoEndBehavior];
   /** 跳转请求尚未由媒体内核确认时，父层暂停采信旧的播放进度。 */

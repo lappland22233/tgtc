@@ -1,6 +1,6 @@
 import {
   Entity,
-  PrimaryColumn,
+  PrimaryGeneratedColumn,
   Column,
   CreateDateColumn,
   UpdateDateColumn,
@@ -12,6 +12,7 @@ import {
   Index,
 } from 'typeorm';
 import { User } from './user.entity';
+import { databaseColumnType } from '../../database/database-types';
 
 /**
  * 文件夹实体（网盘层级）。
@@ -35,7 +36,7 @@ import { User } from './user.entity';
   where: '"isDeleted" = false',
 })
 export class Folder {
-  @PrimaryColumn({ type: 'uuid', default: () => 'gen_random_uuid()' })
+  @PrimaryGeneratedColumn('uuid')
   id: string;
 
   @Column({ length: 255 })
@@ -62,11 +63,11 @@ export class Folder {
   isDeleted: boolean;
 
   /** 请求删除的时间（延迟删除机制），null 表示未请求删除 */
-  @Column({ nullable: true, type: 'timestamp' })
+  @Column({ nullable: true, type: databaseColumnType('timestamp') as 'timestamp' })
   deleteRequestedAt: Date | null;
 
   /** 计划执行永久删除的时间（deleteRequestedAt + 7 天） */
-  @Column({ nullable: true, type: 'timestamp' })
+  @Column({ nullable: true, type: databaseColumnType('timestamp') as 'timestamp' })
   deleteScheduledAt: Date | null;
 
   @CreateDateColumn()

@@ -1,3 +1,4 @@
+import { databaseColumnType } from '../../database/database-types';
 import {
   Entity,
   PrimaryGeneratedColumn,
@@ -30,15 +31,15 @@ export class SharePreviewSession {
 
   /** 分享链接 ID（share_links.id） */
   @Index()
-  @Column({ type: 'uuid' })
+  @Column({ type: databaseColumnType('uuid') })
   shareLinkId: string;
 
   /** 文件 ID（files.id） */
-  @Column({ type: 'uuid' })
+  @Column({ type: databaseColumnType('uuid') })
   fileId: string;
 
   /** 访客会话标识的 sha256 摘要（64 位 hex）。派生自短期 HttpOnly 分享访客凭据，不可逆。 */
-  @Column({ type: 'char', length: 64 })
+  @Column({ type: 'varchar', length: 64 })
   visitorHash: string;
 
   /**
@@ -53,6 +54,6 @@ export class SharePreviewSession {
   createdAt: Date;
 
   /** 会话有效期（与 access JWT 5 分钟对齐）；过期后再次预览视为新会话重新扣次 */
-  @Column({ type: 'timestamp' })
+  @Column({ type: databaseColumnType('timestamp') as 'timestamp' })
   expiresAt: Date;
 }

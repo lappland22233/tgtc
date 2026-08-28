@@ -1,6 +1,6 @@
 import {
   Entity,
-  PrimaryColumn,
+  PrimaryGeneratedColumn,
   Column,
   CreateDateColumn,
   Index,
@@ -14,7 +14,7 @@ import {
 @Index('IDX_access_logs_createdAt_ip', ['createdAt', 'ip'])
 @Index('IDX_access_logs_createdAt_statusCode', ['createdAt', 'statusCode'])
 export class AccessLog {
-  @PrimaryColumn({ type: 'uuid', default: () => 'gen_random_uuid()' })
+  @PrimaryGeneratedColumn('uuid')
   id: string;
 
   @Index()

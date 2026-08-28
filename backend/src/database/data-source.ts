@@ -1,46 +1,5 @@
 import 'dotenv/config';
 import { DataSource } from 'typeorm';
-import { join } from 'path';
-import { User } from '../common/entities/user.entity';
-import { File } from '../common/entities/file.entity';
-import { Folder } from '../common/entities/folder.entity';
-import { ShareLink } from '../common/entities/share-link.entity';
-import { SystemConfig } from '../common/entities/system-config.entity';
-import { VerificationCode } from '../common/entities/verification-code.entity';
-import { BannedIP } from '../common/entities/banned-ip.entity';
-import { ShareAudit } from '../common/entities/share-audit.entity';
-import { FileAccessLog } from '../common/entities/file-access-log.entity';
-import { RateLimit } from '../common/entities/rate-limit.entity';
-import { AuditLog } from '../common/entities/audit-log.entity';
-import { AccessLog } from '../common/entities/access-log.entity';
-import { Alert } from '../common/entities/alert.entity';
-import { UploadTask } from '../common/entities/upload-task.entity';
-import { Tag } from '../common/entities/tag.entity';
-import { JwtRevokedToken } from '../common/entities/jwt-revoked-token.entity';
-import { SharePreviewSession } from '../common/entities/share-preview-session.entity';
-import { FileVerifyTask } from '../common/entities/file-verify-task.entity';
+import { createDatabaseOptions } from './database.config';
 
-export const AppDataSource = new DataSource({
-  type: 'postgres',
-  host: process.env.DB_HOST || 'localhost',
-  port: parseInt(process.env.DB_PORT || '5432'),
-  username: process.env.DB_USERNAME || 'postgres',
-  password: process.env.DB_PASSWORD || undefined,
-  database: process.env.DB_DATABASE || 'test',
-  entities: [User, File, Folder, ShareLink, SystemConfig, VerificationCode, BannedIP, ShareAudit, FileAccessLog, RateLimit, AuditLog, AccessLog, Alert, UploadTask, Tag, JwtRevokedToken, SharePreviewSession, FileVerifyTask],
-  // 相对本文件解析迁移目录，避免依赖运行时 CWD（编译产物 dist 下同样有效）
-  migrations: [join(__dirname, '..', 'migrations', '*{.ts,.js}')],
-  synchronize: false,
-  logging: process.env.NODE_ENV === 'development',
-  maxQueryExecutionTime: 5000, // D-4: 慢查询检测阈值（毫秒）
-  // 连接池大小，与应用配置保持一致
-  extra: {
-    max: parseInt(process.env.DB_POOL_SIZE || '20', 10),
-    connectionTimeoutMillis: parseInt(process.env.DB_CONNECTION_TIMEOUT_MS || '5000', 10),
-    statement_timeout: parseInt(process.env.DB_STATEMENT_TIMEOUT_MS || '30000', 10),
-    query_timeout: parseInt(process.env.DB_QUERY_TIMEOUT_MS || '35000', 10),
-    lock_timeout: parseInt(process.env.DB_LOCK_TIMEOUT_MS || '3000', 10),
-    idle_in_transaction_session_timeout: parseInt(process.env.DB_IDLE_TRANSACTION_TIMEOUT_MS || '30000', 10),
-    ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: true } : undefined,
-  },
-});
+export const AppDataSource = new DataSource(createDatabaseOptions());

@@ -1,6 +1,7 @@
+import { databaseColumnType, databaseCurrentTimestamp } from '../../database/database-types';
 import {
   Entity,
-  PrimaryColumn,
+  PrimaryGeneratedColumn,
   Column,
   CreateDateColumn,
   UpdateDateColumn,
@@ -11,7 +12,7 @@ import {
 @Index('IDX_rate_limits_lockedUntil', ['lockedUntil'])
 @Index('IDX_rate_limits_updatedAt', ['updatedAt'])
 export class RateLimit {
-  @PrimaryColumn({ type: 'uuid', default: () => 'gen_random_uuid()' })
+  @PrimaryGeneratedColumn('uuid')
   id: string;
 
   @Column({ unique: true })
@@ -23,10 +24,10 @@ export class RateLimit {
   @Column({ default: 1 })
   attemptCount: number;
 
-  @Column({ type: 'timestamp', default: () => 'NOW()' })
+  @Column({ type: databaseColumnType('timestamp') as 'timestamp', default: () => databaseCurrentTimestamp() })
   firstAttemptAt: Date;
 
-  @Column({ nullable: true, type: 'timestamp' })
+  @Column({ nullable: true, type: databaseColumnType('timestamp') as 'timestamp' })
   lockedUntil: Date | null;
 
   @CreateDateColumn()

@@ -354,6 +354,55 @@ export class ShareService {
     return this.fileService.getStreamForShareDownload(fileId, ip || undefined, link.token);
   }
 
+  /**
+   * 为分享媒体票据取流提供实时授权校验。密码只在票据签发时由浏览器 Cookie 校验；
+   * Android 系统媒体栈后续 Range 请求不携带 Cookie，故此处以短期、签名且绑定分享的
+   * 票据 nonce 作为预览会话标识，同时仍校验分享状态、文件归属、版本和访问次数。
+   */
+  async getSharePreviewStreamForMediaTicket(
+    shareId: string,
+    fileId: string,
+    uploadVersion: number,
+    ip: string | null,
+    rangeHeader: string | undefined,
+    ticketNonce: string,
+    ifRange?: string,
+  ) {
+    const link = await this.shareLinkRepo.findOne({ where: { id: shareId, isDeleted: false } });
+    if (!link) throw new NotFoundException('分享不存在');
+    await this.assertShareUsable(link);
+    await this.folderBrowse.assertFileInShare(link, fileId);
+    const file = await this.fileRepo.findOne({ where: { id: fileId, isDeleted: false } });
+    if (!file || file.uploadVersion !== uploadVersion) {
+      throw new ForbiddenException('媒体票据对应的文件版本已失效');
+    }
+    this.audit.log({
+      action: 'share_link_preview' as AuditAction,
+      resourceType: 'share_link',
+      resourceId: link.id,
+      metadata: { tokenPrefix: this.maskToken(link.token), fileId, ip: ip || null, isRange: !!rangeHeader, via: 'media_ticket' },
+    });
+    await this.consumeSharePreviewAccess(link, fileId, ticketNonce);
+    if (rangeHeader) {
+      const rangeResult = await this.fileService.getSharePreviewStreamWithRange(fileId, rangeHeader, ip || undefined, ifRange, uploadVersion);
+      if (rangeResult) return rangeResult;
+    }
+    return this.fileService.getStreamForShareDownload(fileId, ip || undefined, link.token, uploadVersion);
+  }
+
+  /** 获取当前分享中指定文件的版本；签发前完成全部授权边界校验。 */
+  async getShareMediaTicketFile(token: string, fileId: string, accessJwt?: string): Promise<File> {
+    const link = await this.getShareLinkByToken(token);
+    await this.assertShareUsable(link);
+    if (link.password && (!accessJwt || !await this.passwordService.verifyAccessJwt(accessJwt, link.id, link.password))) {
+      throw new ForbiddenException('访问凭证已失效，请重新输入密码');
+    }
+    await this.folderBrowse.assertFileInShare(link, fileId);
+    const file = await this.fileRepo.findOne({ where: { id: fileId, isDeleted: false } });
+    if (!file) throw new NotFoundException('文件不存在');
+    return file;
+  }
+
   /** 分享缩略图：完整校验分享状态、密码凭证和文件范围，但不消费访问次数。 */
   async getShareThumbnailStream(
     token: string,

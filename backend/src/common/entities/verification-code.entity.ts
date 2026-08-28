@@ -1,6 +1,7 @@
+import { databaseColumnType } from '../../database/database-types';
 import {
   Entity,
-  PrimaryColumn,
+  PrimaryGeneratedColumn,
   Column,
   CreateDateColumn,
   Index,
@@ -9,7 +10,7 @@ import {
 @Entity('verification_codes')
 @Index('IDX_verification_codes_email_type_isUsed_expiresAt', ['email', 'type', 'isUsed', 'expiresAt'])
 export class VerificationCode {
-  @PrimaryColumn({ type: 'uuid', default: () => 'gen_random_uuid()' })
+  @PrimaryGeneratedColumn('uuid')
   id: string;
 
   @Column()
@@ -24,7 +25,7 @@ export class VerificationCode {
   @Column({ default: false })
   isUsed: boolean;
 
-  @Column()
+  @Column({ type: databaseColumnType('timestamp') as 'timestamp' })
   expiresAt: Date;
 
   @CreateDateColumn()

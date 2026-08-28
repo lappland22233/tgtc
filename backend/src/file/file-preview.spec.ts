@@ -29,6 +29,7 @@ const readyVideo = {
   expiresIn: null,
   expiresStartAt: null,
   status: 'ready',
+  uploadVersion: 1,
   thumbnailPath: null,
 };
 
@@ -159,6 +160,19 @@ describe('FileService 冷资源单连接预览策略', () => {
     await expect(
       (service as any).getPreviewStreamWithRange(fileId, ownerUser, 'bytes=0-99'),
     ).rejects.toBeInstanceOf(GoneException);
+  });
+});
+
+describe('FileService 媒体票据权限绑定', () => {
+  it('拒绝文件版本、文件所有者或可用状态已变化的用户票据', async () => {
+    const repository = { findOne: jest.fn().mockResolvedValue(readyVideo) };
+    const service = createService({ fileRepository: repository });
+    await expect((service as any).assertMediaTicketUserReadable(fileId, (readyVideo as any).uploadVersion, uploaderId)).resolves.toBeUndefined();
+    await expect((service as any).assertMediaTicketUserReadable(fileId, (readyVideo as any).uploadVersion + 1, uploaderId)).rejects.toBeInstanceOf(ForbiddenException);
+    await expect((service as any).assertMediaTicketUserReadable(fileId, (readyVideo as any).uploadVersion, 'other-user')).rejects.toBeInstanceOf(ForbiddenException);
+
+    repository.findOne.mockResolvedValueOnce(null);
+    await expect((service as any).getPreviewStream(fileId, ownerUser, undefined, (readyVideo as any).uploadVersion)).rejects.toBeInstanceOf(ForbiddenException);
   });
 });
 

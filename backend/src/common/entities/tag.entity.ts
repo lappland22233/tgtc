@@ -1,6 +1,6 @@
 import {
   Entity,
-  PrimaryColumn,
+  PrimaryGeneratedColumn,
   Column,
   CreateDateColumn,
   Unique,
@@ -13,7 +13,7 @@ import { User } from './user.entity';
 @Entity('tags')
 @Unique(['name', 'userId'])
 export class Tag {
-  @PrimaryColumn({ type: 'uuid', default: () => 'gen_random_uuid()' })
+  @PrimaryGeneratedColumn('uuid')
   id: string;
 
   @Column({ length: 50 })

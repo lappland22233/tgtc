@@ -42,7 +42,8 @@ export class UserService {
       // 转义 SQL 通配符防止 LIKE 注入。必须先转义反斜杠本身，再转义 % 和 _，
       // 否则输入中的反斜杠仍会充当转义字符。
       const escapedSearch = search.replace(/\\/g, '\\\\').replace(/[%_]/g, '\\$&');
-      queryBuilder.andWhere('user.email ILIKE :search ESCAPE \'\\\'', { search: `%${escapedSearch}%` });
+      // SQLite 没有 ILIKE；LOWER + LIKE 在两种数据库上均可运行。
+      queryBuilder.andWhere('LOWER(user.email) LIKE LOWER(:search) ESCAPE \'\\\'', { search: `%${escapedSearch}%` });
     }
 
     const [users, total] = await queryBuilder.getManyAndCount();

@@ -1,6 +1,7 @@
+import { databaseColumnType } from '../../database/database-types';
 import {
   Entity,
-  PrimaryColumn,
+  PrimaryGeneratedColumn,
   Column,
   CreateDateColumn,
   Index,
@@ -77,7 +78,7 @@ export enum AuditStatus {
 @Index(['action'])
 @Index(['createdAt'])
 export class AuditLog {
-  @PrimaryColumn({ type: 'uuid', default: () => 'gen_random_uuid()' })
+  @PrimaryGeneratedColumn('uuid')
   id: string;
 
   @Column({ nullable: true, comment: '操作者ID，匿名操作可为空' })
@@ -95,7 +96,7 @@ export class AuditLog {
   @Column({ nullable: true, comment: '资源ID' })
   resourceId: string;
 
-  @Column({ type: 'jsonb', nullable: true, comment: '元数据JSON（如变更前后值、失败原因等）' })
+  @Column({ type: databaseColumnType('jsonb') as 'jsonb', nullable: true, comment: '元数据JSON（如变更前后值、失败原因等）' })
   metadata: Record<string, unknown> | null;
 
   @Column({ type: 'varchar', length: 20, default: AuditStatus.SUCCESS, comment: '操作状态：success / failure' })

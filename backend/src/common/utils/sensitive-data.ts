@@ -9,6 +9,8 @@
 /** 需要从 URL query 中移除的敏感参数名（小写匹配） */
 const SENSITIVE_QUERY_PARAMS = new Set([
   'access',
+  // 媒体票据会出现在受限预览 URL 中，必须始终从日志 URL 剥离。
+  'ticket',
   'token',
   'code',
   'password',

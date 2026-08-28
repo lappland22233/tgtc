@@ -1,3 +1,4 @@
+import { databaseColumnType } from '../../database/database-types';
 import {
   Entity,
   PrimaryColumn,
@@ -15,10 +16,10 @@ import {
 @Index('idx_upload_tasks_updatedAt', ['updatedAt'])
 export class UploadTask {
   /** 上传任务 ID，由调用方传入 uuid v4，不设 default（避免隐式生成） */
-  @PrimaryColumn({ type: 'uuid' })
+  @PrimaryColumn({ type: databaseColumnType('uuid') })
   jobId: string;
 
-  @Column({ type: 'uuid' })
+  @Column({ type: databaseColumnType('uuid') })
   userId: string;
 
   @Column()

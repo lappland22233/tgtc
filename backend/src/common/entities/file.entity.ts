@@ -1,6 +1,6 @@
 import {
   Entity,
-  PrimaryColumn,
+  PrimaryGeneratedColumn,
   Column,
   CreateDateColumn,
   UpdateDateColumn,
@@ -9,6 +9,7 @@ import {
   Index,
 } from 'typeorm';
 import { User } from './user.entity';
+import { databaseColumnType } from '../../database/database-types';
 import { Folder } from './folder.entity';
 
 export enum FileAccessType {
@@ -19,7 +20,7 @@ export enum FileAccessType {
 @Entity('files')
 @Index('idx_files_uploader_folder_deleted', ['uploaderId', 'folderId', 'isDeleted'])
 export class File {
-  @PrimaryColumn({ type: 'uuid', default: () => 'gen_random_uuid()' })
+  @PrimaryGeneratedColumn('uuid')
   id: string;
 
   @Column()
@@ -59,7 +60,7 @@ export class File {
   @JoinColumn({ name: 'folderId' })
   folder: Folder | null;
 
-  @Column({ type: 'enum', enum: FileAccessType, default: FileAccessType.PUBLIC })
+  @Column({ type: databaseColumnType('enum') as 'enum', enum: FileAccessType, default: FileAccessType.PUBLIC })
   accessType: FileAccessType;
 
   /**
@@ -77,7 +78,7 @@ export class File {
   /**
    * @deprecated Phase 2 起由 ShareLink.expiresStartAt 管理。此字段保留用于数据迁移兼容，将在下一个 major 版本删除。
    */
-  @Column({ nullable: true, type: 'timestamp' })
+  @Column({ nullable: true, type: databaseColumnType('timestamp') as 'timestamp' })
   expiresStartAt: Date | null;
 
   /**
@@ -96,15 +97,15 @@ export class File {
   isDeleted: boolean;
 
   /** 请求删除的时间（延迟删除机制），null 表示未请求删除 */
-  @Column({ nullable: true, type: 'timestamp' })
+  @Column({ nullable: true, type: databaseColumnType('timestamp') as 'timestamp' })
   deleteRequestedAt: Date | null;
 
   /** 计划执行永久删除的时间（deleteRequestedAt + 7 天） */
-  @Column({ nullable: true, type: 'timestamp' })
+  @Column({ nullable: true, type: databaseColumnType('timestamp') as 'timestamp' })
   deleteScheduledAt: Date | null;
 
   /** 删除操作冷却窗口截止时间（10 分钟），防止短时间内重复请求 */
-  @Column({ nullable: true, type: 'timestamp' })
+  @Column({ nullable: true, type: databaseColumnType('timestamp') as 'timestamp' })
   deleteCooldownUntil: Date | null;
 
   /** 是否由管理员删除（管理员删除时普通用户不可恢复） */

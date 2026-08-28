@@ -1,3 +1,4 @@
+import { databaseColumnType } from '../../database/database-types';
 import {
   Entity,
   PrimaryColumn,
@@ -23,11 +24,11 @@ export const FILE_VERIFY_ACTIVE_STATUSES: FileVerifyTaskStatus[] = ['queued', 'r
 @Index('uq_file_verify_tasks_active_slot', ['isActive'], { unique: true, where: '"isActive" = true' })
 export class FileVerifyTask {
   /** 任务 ID，由调用方传入 uuid v4，不设 default（避免隐式生成） */
-  @PrimaryColumn({ type: 'uuid' })
+  @PrimaryColumn({ type: databaseColumnType('uuid') })
   taskId: string;
 
   /** 发起人（管理员）ID */
-  @Column({ type: 'uuid' })
+  @Column({ type: databaseColumnType('uuid') })
   createdBy: string;
 
   /** dry-run：仅统计不修改（默认）；apply：按结果标记 error / 回填 telegramFilePath */
@@ -84,10 +85,10 @@ export class FileVerifyTask {
   @Column({ nullable: true, type: 'text' })
   errorSummary: string | null;
 
-  @Column({ nullable: true, type: 'timestamptz' })
+  @Column({ nullable: true, type: databaseColumnType('timestamptz') })
   startedAt: Date | null;
 
-  @Column({ nullable: true, type: 'timestamptz' })
+  @Column({ nullable: true, type: databaseColumnType('timestamptz') })
   completedAt: Date | null;
 
   @CreateDateColumn()

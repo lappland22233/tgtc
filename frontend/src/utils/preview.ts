@@ -2,7 +2,8 @@
  * 文件预览工具 —— 判断可预览类型并构造登录态 / 分享预览 URL。
  *
  * 预览接口（返回 inline 内容）：
- * - 登录态: GET /api/files/:fileId/preview（同源 Cookie 自动携带，支持 Range）
+ * - 非媒体登录态: GET /api/files/:fileId/preview（同源 Cookie 自动携带，支持 Range）
+ * - 音视频: 先由浏览器签发短期媒体票据，再由原生媒体内核使用票据流 URL。
  * - 分享:   GET /api/s/:token/preview/:fileId（密码分享凭据通过 HttpOnly Cookie 携带，
  *           前端不再持有或拼接 access JWT，防止凭据落入 URL、Referer、日志与导出）
  */
@@ -74,6 +75,32 @@ export function buildShareHdThumbnailUrl(token: string, fileId: string): string 
 /** 构造分享预览 URL（凭据由 Cookie 携带）。 */
 export function buildSharePreviewUrl(token: string, fileId: string): string {
   return `/api/s/${encodeURIComponent(token)}/preview/${encodeURIComponent(fileId)}`;
+}
+
+/** 构造登录态媒体票据流 URL；票据短时有效且仅限当前文件预览。 */
+export function buildFileMediaTicketUrl(ticket: string): string {
+  return `/api/files/media-ticket?ticket=${encodeURIComponent(ticket)}`;
+}
+
+/** 构造分享媒体票据流 URL；不包含登录或分享访问 JWT。 */
+export function buildShareMediaTicketUrl(ticket: string): string {
+  return `/api/media/share-ticket?ticket=${encodeURIComponent(ticket)}`;
+}
+
+/** 向浏览器签发登录态媒体票据。 */
+export async function issueFileMediaTicket(fileId: string): Promise<string> {
+  const response = await api.post(`/files/${encodeURIComponent(fileId)}/media-ticket`);
+  const ticket = response.data?.data?.ticket;
+  if (typeof ticket !== 'string' || !ticket) throw new Error('媒体票据签发失败');
+  return ticket;
+}
+
+/** 向已验证分享签发媒体票据；密码凭据只经 HttpOnly Cookie 发送。 */
+export async function issueShareMediaTicket(token: string, fileId: string): Promise<string> {
+  const response = await api.post(`/s/${encodeURIComponent(token)}/media-ticket/${encodeURIComponent(fileId)}`);
+  const ticket = response.data?.data?.ticket;
+  if (typeof ticket !== 'string' || !ticket) throw new Error('媒体票据签发失败');
+  return ticket;
 }
 
 /**

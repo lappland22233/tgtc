@@ -42,6 +42,7 @@ import { RateLimitService } from '../common/services/rate-limit.service';
 import { ConfigCacheService } from '../common/services/config-cache.service';
 import { StreamResponderService } from '../common/services/stream-responder.service';
 import { TagService } from '../tag/tag.service';
+import { MediaTicketService } from '../common/services/media-ticket.service';
 
 // Multer 层硬上限（600MB，仅防止极端 DoS；精确的动态限制由 FileService.upload() 业务层负责）
 const multerFileSize = 600 * 1024 * 1024; // 600MB
@@ -83,6 +84,7 @@ export class FileController {
     private streamResponder: StreamResponderService,
     private tagService: TagService,
     private folderService: FolderService,
+    private mediaTicketService: MediaTicketService,
   ) {}
 
   /**
@@ -388,6 +390,62 @@ export class FileController {
       });
     } catch (error) {
       this.streamResponder.handleError(res, error, '媒体文件访问失败', req);
+    }
+  }
+
+  /** 签发仅供 URL 媒体预览使用的短期票据，绝不将登录 JWT 写入 URL。 */
+  @Post(':id/media-ticket')
+  @UseGuards(JwtAuthGuard)
+  async issueMediaTicket(@Param('id') id: string, @CurrentUser() user: User) {
+    const file = await this.fileService.findOne(id, user);
+    return {
+      ticket: this.mediaTicketService.issue({
+        fileId: file.id,
+        uploadVersion: file.uploadVersion,
+        subject: user.id,
+        scope: 'user',
+        purpose: 'preview',
+      }),
+      expiresIn: 300,
+    };
+  }
+
+  /** 匿名媒体取流端点：票据和文件版本/当前权限均须通过校验。 */
+  @Get('media-ticket')
+  async previewWithMediaTicket(@Query('ticket') ticket: string, @Req() req: Request, @Res() res: Response) {
+    try {
+      const payload = this.mediaTicketService.verify(ticket);
+      if (payload.scope !== 'user' || payload.purpose !== 'preview') {
+        throw new BadRequestException('媒体票据用途不匹配');
+      }
+      await this.fileService.assertMediaTicketUserReadable(payload.fileId, payload.uploadVersion, payload.subject);
+      const ticketUser = { id: payload.subject, role: UserRole.USER } as User;
+      const rangeHeader = req.headers.range;
+      const rangeResult = rangeHeader
+        ? await this.fileService.getPreviewStreamWithRange(payload.fileId, ticketUser, rangeHeader, getClientIp(req), typeof req.headers['if-range'] === 'string' ? req.headers['if-range'] : undefined, payload.uploadVersion)
+        : null;
+      const result = rangeResult || await this.fileService.getPreviewStream(payload.fileId, ticketUser, getClientIp(req), payload.uploadVersion);
+      const isRange = !!rangeResult;
+      await this.streamResponder.send({
+        res,
+        status: isRange ? 206 : undefined,
+        range: isRange ? rangeResult! : undefined,
+        headers: {
+          'Content-Type': sanitizePreviewContentType(result.contentType),
+          'Content-Disposition': buildContentDisposition('inline', result.filename),
+          'Content-Length': result.size.toString(),
+          ETag: result.etag || '"0"',
+          'Accept-Ranges': 'bytes',
+          'Cache-Control': 'no-store, no-cache, must-revalidate',
+          'X-Content-Type-Options': 'nosniff',
+          'Referrer-Policy': 'no-referrer',
+        },
+        stream: result.stream,
+        accessLogId: result.accessLogId,
+        updateAccessLog: (accessLogId, bytes) => this.fileService.updateAccessLogResponseSize(accessLogId, bytes),
+      });
+    } catch (error) {
+      this.streamResponder.handleError(res, error, '媒体票据预览失败', req);
     }
   }
 

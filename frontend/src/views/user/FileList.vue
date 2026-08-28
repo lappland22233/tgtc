@@ -5,6 +5,7 @@
     @dragover="handlePageDragOver"
     @dragleave="handlePageDragLeave"
     @drop="handlePageDrop"
+    @paste="handlePagePaste"
   >
     <!-- 拖拽上传覆盖层 -->
     <div v-if="isDraggedOver" class="drop-overlay">
@@ -604,6 +605,7 @@ import { useTagStore } from '../../stores/tags';
 import { useFolderStore, type Folder } from '../../stores/folders';
 import { getParentFolderId } from '../../utils/folder-navigation';
 import type { FileItem } from '../../types/file';
+import { extractPastedMediaFiles } from '../../utils/clipboard-upload';
 
 const fileStore = useFileStore();
 const authStore = useAuthStore();
@@ -1269,6 +1271,25 @@ const dragOverFolderId = ref<string | null>(null);
 function hasExternalFiles(e: DragEvent): boolean {
   return Array.from(e.dataTransfer?.types || []).includes('Files');
 }
+
+/** 编辑控件保留浏览器原生粘贴行为，不触发页面上传。 */
+function isEditingTarget(target: EventTarget | null): boolean {
+  const element = target instanceof HTMLElement ? target : null;
+  return Boolean(element?.closest('input, textarea, select, [contenteditable="true"]'));
+}
+
+/** Ctrl+V 粘贴上传：只接收剪贴板中的图片和视频，文本/非媒体不拦截。 */
+function handlePagePaste(e: ClipboardEvent) {
+  if (isEditingTarget(e.target)) return;
+  const files = extractPastedMediaFiles(e.clipboardData?.files || []);
+  if (files.length === 0) return;
+
+  e.preventDefault();
+  dropCollected.value = null;
+  dropFiles.value = files;
+  showUploadModal.value = true;
+}
+
 function isInternalFileDrag(e: DragEvent): boolean {
   return Array.from(e.dataTransfer?.types || []).includes(INTERNAL_DRAG_MIME);
 }

@@ -192,6 +192,7 @@
                 @ended="onVideoEnded"
                 @seeking-change="onVideoSeekingChange"
                 @error="onVideoError"
+                @play-rejected="onVideoPlayRejected"
               />
             </div>
 
@@ -337,7 +338,7 @@
                 ref="audioRef"
                 :key="snap.src"
                 class="fpv-audio-core"
-                :src="snap.src"
+                :src="mediaStreamSrc || undefined"
                 preload="metadata"
                 @play="onAudioPlay"
                 @pause="onAudioPause"
@@ -481,6 +482,12 @@
 <script setup lang="ts">
 import { ref, reactive, watch, nextTick, computed, onMounted, onBeforeUnmount } from 'vue';
 import type { PreviewKind } from '../../utils/preview';
+import {
+  buildFileMediaTicketUrl,
+  buildShareMediaTicketUrl,
+  issueFileMediaTicket,
+  issueShareMediaTicket,
+} from '../../utils/preview';
 import { triggerBrowserDownload } from '../../utils/download';
 import CustomVideoPlayer from './CustomVideoPlayer.vue';
 import ThumbnailImg from '../ThumbnailImg.vue';
@@ -543,6 +550,8 @@ const {
 } = textPreview;
 
 const audioRef = ref<HTMLAudioElement | null>(null);
+/** 原生音视频最终使用的短时票据 URL；不得复用登录 JWT 或分享访问 JWT。 */
+const mediaStreamSrc = ref<string | null>(null);
 
 const playlistControls = usePlaylistControls({
   mediaStore,
@@ -589,6 +598,33 @@ function applyItem(item: MediaSessionItem) {
   if (item.kind === 'text') void loadText(item.src);
   if (item.kind === 'image') { resetImageView(); void setupImage(item.src); }
   if (item.kind === 'video') startPosterForFile(item.id);
+  if (item.kind === 'audio') void prepareNativeMediaSource(item.id, sessionEpoch.value);
+}
+
+/**
+ * 在浏览器网络栈中签发一次短时票据，再交由原生媒体内核进行后续 Range 请求。
+ * 票据绑定文件版本和访问上下文；系统媒体服务即使不携带 Cookie 也无法越权访问其他资源。
+ */
+async function prepareNativeMediaSource(fileId: string, epoch: number): Promise<string | null> {
+  if (mediaStreamSrc.value) return mediaStreamSrc.value;
+  const context = mediaStore.session?.context;
+  if (!context) return null;
+  try {
+    const ticket = context.type === 'share'
+      ? await issueShareMediaTicket(context.token, fileId)
+      : await issueFileMediaTicket(fileId);
+    if (epoch !== sessionEpoch.value || mediaStore.session?.item.id !== fileId) return null;
+    mediaStreamSrc.value = context.type === 'share'
+      ? buildShareMediaTicketUrl(ticket)
+      : buildFileMediaTicketUrl(ticket);
+    return mediaStreamSrc.value;
+  } catch {
+    if (epoch === sessionEpoch.value) {
+      mediaError.value = true;
+      mediaErrorText.value = '无法获取媒体播放凭据，请刷新后重试';
+    }
+    return null;
+  }
 }
 
 // ============ 自定义音频控制 ============
@@ -912,6 +948,7 @@ function resetState() {
   imageDragging.value = false;
   mediaError.value = false;
   mediaErrorText.value = null;
+  mediaStreamSrc.value = null;
 }
 
 /** 收起为迷你播放器：音视频继续播放，其余类型直接停止 */
@@ -1024,8 +1061,9 @@ function retryMedia() {
     void setupImage(snap.src);
   } else if (snap.kind === 'video') {
     teardownVideo();
-    setupVideo();
+    mediaStreamSrc.value = null;
     videoPlayerRef.value?.requestAutoplay?.();
+    void activateVideo();
   } else if (snap.kind === 'audio') {
     const a = audioRef.value;
     if (a) {
@@ -1388,15 +1426,16 @@ function mseTypeSupported(mime: string): boolean {
  * 置 autoplay 意图（等效 CustomVideoPlayer 内部 pendingPlayRequest），
  * src 就绪后自动续播；对用户手动播放幂等，不影响现有行为。
  */
-function activateVideo() {
+async function activateVideo() {
   if (videoSrc.value || !snap.src) return;
   videoPlayerRef.value?.requestAutoplay?.();
-  setupVideo();
+  const sourceUrl = await prepareNativeMediaSource(mediaStore.session?.item.id || '', sessionEpoch.value);
+  if (sourceUrl) setupVideo(sourceUrl);
 }
 
 /** 激活视频预览：MSE 优先，不支持时原生回退 */
-function setupVideo() {
-  const url = snap.src;
+function setupVideo(sourceUrl = mediaStreamSrc.value) {
+  const url = sourceUrl;
   if (!url) return;
   videoBuffering.value = true;
   videoBufferedRatio.value = 0;
@@ -1565,7 +1604,7 @@ function maybeEndOfStream() {
 function fallbackToNative() {
   teardownMse();
   videoUseMse.value = false;
-  videoSrc.value = snap.src;
+  videoSrc.value = mediaStreamSrc.value;
   videoBuffering.value = true;
   nextTick(() => videoRef.value?.load());
 }
@@ -1616,6 +1655,13 @@ function onVideoError() {
   }
   mediaError.value = true;
   mediaErrorText.value = classifyMediaErrorCode(videoRef.value?.error?.code);
+}
+
+function onVideoPlayRejected(reason: string) {
+  mediaError.value = true;
+  mediaErrorText.value = reason === 'NotAllowedError'
+    ? '浏览器阻止了自动播放，请再次点击播放按钮'
+    : '无法开始播放，请重试或检查媒体格式';
 }
 
 /** 已缓冲进度估算（buffered 最大 end / duration） */

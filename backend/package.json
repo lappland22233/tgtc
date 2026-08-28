@@ -17,7 +17,9 @@
     "migration:create": "typeorm-ts-node-commonjs migration:create src/migrations/Migration",
     "migration:generate": "typeorm-ts-node-commonjs migration:generate -d src/database/data-source.ts src/migrations/Migration",
     "migration:run": "typeorm-ts-node-commonjs migration:run -d src/database/data-source.ts",
-    "migration:revert": "typeorm-ts-node-commonjs migration:revert -d src/database/data-source.ts"
+    "migration:revert": "typeorm-ts-node-commonjs migration:revert -d src/database/data-source.ts",
+    "migration:run:sqlite": "cross-env DB_TYPE=sqlite DB_DATABASE=data/tgtc.sqlite DB_MIGRATIONS_RUN=false typeorm-ts-node-commonjs migration:run -d src/database/data-source.ts",
+    "build:data-migrator": "tsc --target ES2021 --module commonjs --moduleResolution node --esModuleInterop --experimentalDecorators --emitDecoratorMetadata --skipLibCheck --outDir dist-migrator scripts/build-data-migrator.ts"
   },
   "dependencies": {
     "@nestjs/bull": "11.0.5",
@@ -51,6 +53,7 @@
     "rxjs": "^7.8.1",
     "sharp": "^0.35.3",
     "socket.io": "^4.8.3",
+    "sqlite3": "^5.1.7",
     "typeorm": "0.3.31",
     "ua-parser-js": "^2.0.10",
     "uuid": "11.1.1"
@@ -69,6 +72,7 @@
     "@types/passport-jwt": "^4.0.0",
     "@types/supertest": "^7.2.1",
     "@types/uuid": "10.0.0",
+    "cross-env": "^7.0.3",
     "dotenv": "^17.4.2",
     "jest": "^29.7.0",
     "supertest": "^7.2.2",
