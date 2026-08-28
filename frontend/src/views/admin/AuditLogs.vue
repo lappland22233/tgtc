@@ -247,7 +247,7 @@ const columns = [
 
 const actionLabels: Record<string, string> = {
   login: '登录', login_failed: '登录失败', logout: '登出',   register: '注册', email_verification_send: '发送验证邮件',
-  password_reset: '密码重置', email_verify: '邮箱验证', email_verification_send: '发送验证邮件', role_change: '角色变更',
+  password_reset: '密码重置', email_verify: '邮箱验证', role_change: '角色变更',
   user_create: '创建用户', user_delete: '删除用户', user_ban: '封禁用户', user_unban: '解封用户',
   file_upload: '文件上传', file_download: '文件下载', file_delete: '文件删除',
   file_delete_request: '请求删除', file_delete_by_admin: '管理员删除', file_restore: '文件恢复',
