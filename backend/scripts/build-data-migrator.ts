@@ -55,12 +55,11 @@ async function migrateTable(source: DataSource, target: DataSource, sourceEntity
   const table = metadata.tableName;
   const columns = metadata.columns.map(c => c.databaseName);
   const primaryColumn = metadata.primaryColumns[0].databaseName;
-  const [countRows, maxKeyRows] = await Promise.all([
-    source.query(`SELECT COUNT(*) AS count FROM ${quote(table)}`),
-    source.query(`SELECT ${quote(primaryColumn)} AS max_key FROM ${quote(table)} ORDER BY ${quote(primaryColumn)} DESC LIMIT 1`),
-  ]);
-  const sourceCount = Number(countRows[0]?.count || 0);
-  const maxPrimaryKey = maxKeyRows[0]?.max_key;
+  const snapshotRows = await source.query(
+    `SELECT COUNT(*) AS count, (SELECT ${quote(primaryColumn)} FROM ${quote(table)} ORDER BY ${quote(primaryColumn)} DESC LIMIT 1) AS max_key FROM ${quote(table)}`,
+  );
+  const sourceCount = Number(snapshotRows[0]?.count || 0);
+  const maxPrimaryKey = snapshotRows[0]?.max_key;
   let lastPrimaryKey: unknown;
   let copied = 0;
   while (true) {
