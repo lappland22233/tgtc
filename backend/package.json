@@ -19,7 +19,7 @@
     "migration:run": "typeorm-ts-node-commonjs migration:run -d src/database/data-source.ts",
     "migration:revert": "typeorm-ts-node-commonjs migration:revert -d src/database/data-source.ts",
     "migration:run:sqlite": "cross-env DB_TYPE=sqlite DB_DATABASE=data/tgtc.sqlite DB_MIGRATIONS_RUN=false typeorm-ts-node-commonjs migration:run -d src/database/data-source.ts",
-    "build:data-migrator": "tsc --target ES2021 --module commonjs --moduleResolution node --esModuleInterop --experimentalDecorators --emitDecoratorMetadata --skipLibCheck --outDir dist-migrator scripts/build-data-migrator.ts && node -e \"require('fs').writeFileSync('dist-migrator/build-data-migrator.js','\\\"use strict\\\";\\nrequire(\\\"./scripts/build-data-migrator.js\\\");\\n')\""
+    "build:data-migrator": "tsc --target ES2021 --module commonjs --moduleResolution node --rootDir . --esModuleInterop --experimentalDecorators --emitDecoratorMetadata --skipLibCheck --outDir dist-migrator scripts/build-data-migrator.ts && node -e \"require('fs').writeFileSync('dist-migrator/build-data-migrator.js','\\\"use strict\\\";\\nrequire(\\\"./scripts/build-data-migrator.js\\\");\\n')\""
   },
   "dependencies": {
     "@nestjs/bull": "11.0.5",

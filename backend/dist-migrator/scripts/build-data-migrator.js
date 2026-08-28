@@ -4,10 +4,21 @@ require("dotenv/config");
 const fs_1 = require("fs");
 const path_1 = require("path");
 const typeorm_1 = require("typeorm");
-const database_config_1 = require("../src/database/database.config");
-const entities_1 = require("../src/database/entities");
+function loadDatabaseModules(type) {
+    process.env.DB_TYPE = type;
+    for (const file of Object.keys(require.cache)) {
+        if (file.includes(`${require('path').sep}common${require('path').sep}entities${require('path').sep}`)
+            || /[\\/]database[\\/](database-types|database\.config|entities|uuid\.subscriber)\.(ts|js)$/.test(file)) {
+            delete require.cache[file];
+        }
+    }
+    const config = require('../src/database/database.config');
+    const entities = require('../src/database/entities');
+    return { createDatabaseOptions: config.createDatabaseOptions, databaseEntities: entities.databaseEntities };
+}
 const BATCH_SIZE = Math.max(1, Number(process.env.MIGRATION_BATCH_SIZE || 500));
-const sourceOptions = (0, database_config_1.createDatabaseOptions)({ ...process.env, DB_TYPE: 'postgres', DB_MIGRATIONS_RUN: 'false' });
+const sourceModules = loadDatabaseModules('postgres');
+const sourceOptions = sourceModules.createDatabaseOptions({ ...process.env, DB_TYPE: 'postgres', DB_MIGRATIONS_RUN: 'false' });
 const targetPath = (0, path_1.resolve)(process.env.MIGRATION_TARGET || process.env.DB_SQLITE_PATH || 'data/tgtc.sqlite');
 const tempPath = `${targetPath}.migrating-${process.pid}`;
 const diagnosticPath = `${targetPath}.failed-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
@@ -23,8 +34,8 @@ async function count(ds, table) {
     const rows = await ds.query(`SELECT COUNT(*) AS count FROM ${quote(table)}`);
     return Number(rows[0]?.count || 0);
 }
-async function migrateTable(source, target, entity) {
-    const metadata = source.getMetadata(entity);
+async function migrateTable(source, target, sourceEntity) {
+    const metadata = source.getMetadata(sourceEntity);
     const table = metadata.tableName;
     const columns = metadata.columns.map(c => c.databaseName);
     let offset = 0;
@@ -45,9 +56,9 @@ async function migrateTable(source, target, entity) {
     }
     return { table, rows: copied };
 }
-async function validate(target, source) {
+async function validate(target, source, sourceEntities, targetEntities) {
     const tables = {};
-    for (const entity of entities_1.databaseEntities) {
+    for (const entity of sourceEntities) {
         const table = source.getMetadata(entity).tableName;
         const sourceCount = await count(source, table);
         const targetCount = await count(target, table);
@@ -58,7 +69,7 @@ async function validate(target, source) {
     const foreignKeys = await target.query('PRAGMA foreign_key_check');
     if (foreignKeys.length)
         throw new Error(`外键校验失败: ${JSON.stringify(foreignKeys.slice(0, 20))}`);
-    for (const entity of entities_1.databaseEntities) {
+    for (const entity of targetEntities) {
         const metadata = target.getMetadata(entity);
         for (const unique of metadata.uniques) {
             const columns = unique.columns.map(c => typeof c === 'string' ? c : c.databaseName);
@@ -76,18 +87,20 @@ async function main() {
         throw new Error(`已有迁移临时文件，拒绝覆盖: ${tempPath}`);
     (0, fs_1.mkdirSync)((0, path_1.dirname)(targetPath), { recursive: true });
     const source = new typeorm_1.DataSource(sourceOptions);
-    const target = new typeorm_1.DataSource((0, database_config_1.createDatabaseOptions)({ ...process.env, DB_TYPE: 'sqlite', DB_DATABASE: tempPath, DB_MIGRATIONS_RUN: 'true' }));
-    const report = { startedAt: new Date().toISOString(), source: sourceOptions.database, target: targetPath, batchSize: BATCH_SIZE, tables: [] };
+    const targetModules = loadDatabaseModules('sqlite');
+    const targetOptions = targetModules.createDatabaseOptions({ ...process.env, DB_TYPE: 'sqlite', DB_DATABASE: tempPath, DB_MIGRATIONS_RUN: 'true' });
+    const target = new typeorm_1.DataSource(targetOptions);
+    const report = { startedAt: new Date().toISOString(), source: String(sourceOptions.database || ''), target: targetPath, batchSize: BATCH_SIZE, tables: [] };
     try {
         await source.initialize();
         await target.initialize();
         await target.query('PRAGMA foreign_keys = OFF');
-        for (const entity of entities_1.databaseEntities) {
+        for (const entity of sourceModules.databaseEntities) {
             const result = await migrateTable(source, target, entity);
             report.tables.push(result);
         }
         await target.query('PRAGMA foreign_keys = ON');
-        report.validation = await validate(target, source);
+        report.validation = await validate(target, source, sourceModules.databaseEntities, targetModules.databaseEntities);
         report.completedAt = new Date().toISOString();
         (0, fs_1.writeFileSync)(`${tempPath}.report.json`, JSON.stringify(report, null, 2));
         await target.destroy();
