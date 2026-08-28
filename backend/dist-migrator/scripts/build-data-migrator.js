@@ -17,7 +17,8 @@ function loadDatabaseModules(type) {
     const entities = require('../src/database/entities');
     return { createDatabaseOptions: config.createDatabaseOptions, databaseEntities: entities.databaseEntities };
 }
-const BATCH_SIZE = Math.max(1, Number(process.env.MIGRATION_BATCH_SIZE || 500));
+const BATCH_SIZE = Math.max(1, Number(process.env.MIGRATION_BATCH_SIZE || 2000));
+const SQLITE_PARAMETER_LIMIT = Math.max(1, Number(process.env.MIGRATION_SQLITE_PARAMETER_LIMIT || 900));
 const sourceModules = loadDatabaseModules('postgres');
 const sourceOptions = sourceModules.createDatabaseOptions({ ...process.env, DB_TYPE: 'postgres', DB_MIGRATIONS_RUN: 'false' });
 const targetPath = (0, path_1.resolve)(process.env.MIGRATION_TARGET || process.env.DB_SQLITE_PATH || 'data/tgtc.sqlite');
@@ -40,36 +41,51 @@ async function migrateTable(source, target, sourceEntity) {
     const table = metadata.tableName;
     const columns = metadata.columns.map(c => c.databaseName);
     const primaryColumn = metadata.primaryColumns[0].databaseName;
+    const snapshotRows = await source.query(`SELECT COUNT(*) AS count, MAX(${quote(primaryColumn)}) AS max_key FROM ${quote(table)}`);
+    const sourceCount = Number(snapshotRows[0]?.count || 0);
+    const maxPrimaryKey = snapshotRows[0]?.max_key;
     let lastPrimaryKey;
     let copied = 0;
     while (true) {
-        const where = lastPrimaryKey === undefined ? '' : ` WHERE ${quote(primaryColumn)} > $1`;
-        const parameters = lastPrimaryKey === undefined ? [BATCH_SIZE] : [lastPrimaryKey, BATCH_SIZE];
-        const limitParameter = lastPrimaryKey === undefined ? '$1' : '$2';
-        const rows = await source.query(`SELECT ${columns.map(quote).join(', ')} FROM ${quote(table)}${where} ORDER BY ${quote(primaryColumn)} LIMIT ${limitParameter}`, parameters);
+        const conditions = [];
+        const parameters = [];
+        if (lastPrimaryKey !== undefined) {
+            conditions.push(`${quote(primaryColumn)} > $${parameters.length + 1}`);
+            parameters.push(lastPrimaryKey);
+        }
+        if (maxPrimaryKey !== null && maxPrimaryKey !== undefined) {
+            conditions.push(`${quote(primaryColumn)} <= $${parameters.length + 1}`);
+            parameters.push(maxPrimaryKey);
+        }
+        parameters.push(BATCH_SIZE);
+        const rows = await source.query(`SELECT ${columns.map(quote).join(', ')} FROM ${quote(table)}${conditions.length ? ` WHERE ${conditions.join(' AND ')}` : ''} ORDER BY ${quote(primaryColumn)} LIMIT $${parameters.length}`, parameters);
         if (!rows.length)
             break;
-        for (const row of rows) {
-            const values = columns.map(column => normalize(row[column]));
-            const placeholders = values.map(() => '?').join(', ');
-            await target.query(`INSERT INTO ${quote(table)} (${columns.map(quote).join(', ')}) VALUES (${placeholders})`, values);
+        const columnSql = columns.map(quote).join(', ');
+        const rowsPerInsert = Math.max(1, Math.floor(SQLITE_PARAMETER_LIMIT / columns.length));
+        for (let start = 0; start < rows.length; start += rowsPerInsert) {
+            const chunk = rows.slice(start, start + rowsPerInsert);
+            const values = chunk.flatMap(row => columns.map(column => normalize(row[column])));
+            const placeholders = chunk.map(() => `(${columns.map(() => '?').join(', ')})`).join(', ');
+            await target.query(`INSERT INTO ${quote(table)} (${columnSql}) VALUES ${placeholders}`, values);
         }
         copied += rows.length;
         lastPrimaryKey = rows[rows.length - 1][primaryColumn];
         if (rows.length < BATCH_SIZE)
             break;
     }
-    return { table, rows: copied };
+    return { table, primaryColumn, maxPrimaryKey, sourceCount, copied };
 }
-async function validate(target, source, sourceEntities, targetEntities) {
+async function validate(target, snapshots, targetEntities) {
     const tables = {};
-    for (const entity of sourceEntities) {
-        const table = source.getMetadata(entity).tableName;
-        const sourceCount = await count(source, table);
-        const targetCount = await count(target, table);
-        if (sourceCount !== targetCount)
-            throw new Error(`逐表行数校验失败: ${table}: source=${sourceCount}, target=${targetCount}`);
-        tables[table] = { source: sourceCount, target: targetCount };
+    for (const snapshot of snapshots) {
+        const targetCount = snapshot.maxPrimaryKey === null || snapshot.maxPrimaryKey === undefined
+            ? 0
+            : await count(target, snapshot.table);
+        if (targetCount !== snapshot.copied || snapshot.copied !== snapshot.sourceCount) {
+            throw new Error(`迁移快照校验失败: ${snapshot.table}: snapshot=${snapshot.sourceCount}, copied=${snapshot.copied}, target=${targetCount}`);
+        }
+        tables[snapshot.table] = { snapshot: snapshot.sourceCount, copied: snapshot.copied, target: targetCount, maxPrimaryKey: snapshot.maxPrimaryKey };
     }
     const foreignKeys = await target.query('PRAGMA foreign_key_check');
     if (foreignKeys.length)
@@ -100,12 +116,20 @@ async function main() {
         await source.initialize();
         await target.initialize();
         await target.query('PRAGMA foreign_keys = OFF');
+        await target.query('PRAGMA synchronous = OFF');
+        await target.query('PRAGMA journal_mode = MEMORY');
+        await target.query('BEGIN TRANSACTION');
+        const snapshots = [];
         for (const entity of sourceModules.databaseEntities) {
             const result = await migrateTable(source, target, entity);
+            snapshots.push(result);
             report.tables.push(result);
         }
+        await target.query('COMMIT');
+        await target.query('PRAGMA synchronous = NORMAL');
+        await target.query('PRAGMA journal_mode = DELETE');
         await target.query('PRAGMA foreign_keys = ON');
-        report.validation = await validate(target, source, sourceModules.databaseEntities, targetModules.databaseEntities);
+        report.validation = await validate(target, snapshots, targetModules.databaseEntities);
         report.completedAt = new Date().toISOString();
         (0, fs_1.writeFileSync)(`${tempPath}.report.json`, JSON.stringify(report, null, 2));
         await target.destroy();
@@ -116,6 +140,10 @@ async function main() {
         console.log(JSON.stringify({ ok: true, target: targetPath, report: `${tempPath}.report.json` }, null, 2));
     }
     catch (error) {
+        try {
+            await target.query('ROLLBACK');
+        }
+        catch { /* transaction may not have started or already committed */ }
         report.error = error instanceof Error ? error.message : String(error);
         report.failedAt = new Date().toISOString();
         (0, fs_1.writeFileSync)(diagnosticPath, JSON.stringify(report, null, 2));
