@@ -11,6 +11,7 @@ import { Tag } from '../common/entities/tag.entity';
 import { AuditService } from '../common/services/audit.service';
 import { CreateTagDto } from './dto/create-tag.dto';
 import { UpdateTagDto } from './dto/update-tag.dto';
+import { databaseForUpdate, databaseQuery, getDatabaseType, isDatabaseUniqueViolation } from '../database/database-types';
 
 @Injectable()
 export class TagService {
@@ -76,8 +77,8 @@ export class TagService {
     try {
       saved = await this.tagRepository.save(tag);
     } catch (error) {
-      // TOCTOU：并发重名可能在 findOne 之后命中唯一约束（23505），转为 409
-      if ((error as { code?: string })?.code === '23505') {
+      // TOCTOU：并发重名可能在 findOne 之后命中唯一约束，跨数据库转为 409
+      if (isDatabaseUniqueViolation(error)) {
         throw new ConflictException('标签名称已存在');
       }
       throw error;
@@ -150,10 +151,7 @@ export class TagService {
 
     await this.dataSource.transaction(async (manager) => {
       // 与文件标签替换保持一致：先锁 tags 父行，再由级联删除 file_tags。
-      const lockedTags = await manager.query(
-        'SELECT id FROM tags WHERE id = $1 FOR UPDATE',
-        [id],
-      );
+      const lockedTags = await databaseQuery<Array<{ id: string }>>(manager, `SELECT id FROM tags WHERE id = $1${databaseForUpdate(manager.connection.options.type)}`, [id], getDatabaseType());
       if (lockedTags.length === 0) {
         throw new NotFoundException('标签不存在');
       }

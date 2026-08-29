@@ -23,6 +23,7 @@ import { TelegramFileNotFoundError } from '../telegram/telegram.errors';
 import { ConfigCacheService } from '../common/services/config-cache.service';
 import { User, UserRole } from '../common/entities/user.entity';
 import { BannedIP } from '../common/entities/banned-ip.entity';
+import { databaseForUpdate, databaseQuery, getDatabaseType } from '../database/database-types';
 import { ShareAudit } from '../common/entities/share-audit.entity';
 import { RateLimitService } from '../common/services/rate-limit.service';
 import { AuditService } from '../common/services/audit.service';
@@ -2755,20 +2756,14 @@ export class FileService implements OnModuleInit {
 
     // 固定锁顺序：files → 排序后的 tags → file_tags，避免与父表级联删除形成环形等待。
     await this.fileRepository.manager.transaction(async (manager) => {
-      const lockedFiles = await manager.query(
-        'SELECT id FROM files WHERE id = $1 FOR UPDATE',
-        [fileId],
-      );
+      const dbType = getDatabaseType();
+      const lockedFiles = await databaseQuery<Array<{ id: string }>>(manager, `SELECT id FROM files WHERE id = $1${databaseForUpdate(manager.connection.options.type)}`, [fileId], dbType);
       if (lockedFiles.length === 0) {
         throw new NotFoundException('文件不存在');
       }
       if (uniqueTagIds.length > 0) {
         const tagPlaceholders = uniqueTagIds.map((_, index) => `$${index + 1}`).join(', ');
-        const lockSuffix = manager.connection.options.type === 'postgres' ? ' FOR KEY SHARE' : '';
-        await manager.query(
-          `SELECT id FROM tags WHERE id IN (${tagPlaceholders}) ORDER BY id${lockSuffix}`,
-          uniqueTagIds,
-        );
+        await databaseQuery(manager, `SELECT id FROM tags WHERE id IN (${tagPlaceholders}) ORDER BY id${databaseForUpdate(manager.connection.options.type, 'key-share')}`, uniqueTagIds, dbType);
       }
       await manager.query('DELETE FROM file_tags WHERE "fileId" = $1', [fileId]);
       if (uniqueTagIds.length > 0) {

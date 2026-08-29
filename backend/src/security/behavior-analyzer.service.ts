@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import { ConfigCacheService } from '../common/services/config-cache.service';
 import { SEC_CONFIG_KEYS } from '../admin/security-config.defaults';
+import { databaseCast, databaseCurrentTimestamp, databaseQuery, getDatabaseType } from '../database/database-types';
 
 export interface AnomalyDetectionResult {
   type: string;
@@ -56,33 +57,37 @@ export class BehaviorAnalyzer {
         // 不再依赖 DB 会话时区。
         // G8-12：基线抗投毒 —— 剔除离群窗口（P99 截断）。先计算该指标过去 7 天窗口的 P99 值，
         // 仅纳入 ≤ P99 的窗口参与 AVG/STDDEV，避免攻击流量抬高基线。
-        await this.dataSource.query(
-          `INSERT INTO "baseline_stats" ("metricName", "hourBucket", "dayOfWeek", "mean", "stddev", "sampleCount", "updatedAt")
-           SELECT $1,
-             EXTRACT(HOUR FROM "windowTime" AT TIME ZONE 'UTC')::int,
-             EXTRACT(DOW FROM "windowTime" AT TIME ZONE 'UTC')::int,
-             AVG(${column}) AS mean,
-             COALESCE(STDDEV(${column}), 0) AS stddev,
-             COUNT(*) AS sample_count,
-             NOW()
-           FROM (
-             SELECT "windowTime",
-                    ${column} AS metric_value,
-                    PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY ${column}) OVER () AS p99
-             FROM "access_log_metrics_1min"
-             WHERE "windowTime" >= NOW() - INTERVAL '7 days'
-               AND "totalRequests" > 0
-           ) filtered
-           WHERE metric_value <= p99
-           GROUP BY EXTRACT(HOUR FROM "windowTime" AT TIME ZONE 'UTC'),
-                    EXTRACT(DOW FROM "windowTime" AT TIME ZONE 'UTC')
-           ON CONFLICT ("metricName", "hourBucket", "dayOfWeek") DO UPDATE SET
-             "mean" = EXCLUDED."mean",
-             "stddev" = EXCLUDED."stddev",
-             "sampleCount" = EXCLUDED."sampleCount",
-             "updatedAt" = NOW()`,
-          [metric],
-        );
+        if (getDatabaseType() === 'sqlite') {
+          await this.calculateSqliteBaseline(metric, column);
+        } else {
+          await this.dataSource.query(
+            `INSERT INTO "baseline_stats" ("metricName", "hourBucket", "dayOfWeek", "mean", "stddev", "sampleCount", "updatedAt")
+             SELECT $1,
+               EXTRACT(HOUR FROM "windowTime" AT TIME ZONE 'UTC')::int,
+               EXTRACT(DOW FROM "windowTime" AT TIME ZONE 'UTC')::int,
+               AVG(${column}) AS mean,
+               COALESCE(STDDEV(${column}), 0) AS stddev,
+               COUNT(*) AS sample_count,
+               NOW()
+             FROM (
+               SELECT "windowTime",
+                      ${column} AS metric_value,
+                      PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY ${column}) OVER () AS p99
+               FROM "access_log_metrics_1min"
+               WHERE "windowTime" >= NOW() - INTERVAL '7 days'
+                 AND "totalRequests" > 0
+             ) filtered
+             WHERE metric_value <= p99
+             GROUP BY EXTRACT(HOUR FROM "windowTime" AT TIME ZONE 'UTC'),
+                      EXTRACT(DOW FROM "windowTime" AT TIME ZONE 'UTC')
+             ON CONFLICT ("metricName", "hourBucket", "dayOfWeek") DO UPDATE SET
+               "mean" = EXCLUDED."mean",
+               "stddev" = EXCLUDED."stddev",
+               "sampleCount" = EXCLUDED."sampleCount",
+               "updatedAt" = NOW()`,
+            [metric],
+          );
+        }
 
         const countResult = await this.dataSource.query(
           `SELECT COUNT(*) as cnt FROM "baseline_stats" WHERE "metricName" = $1`,
@@ -98,6 +103,60 @@ export class BehaviorAnalyzer {
       `基线计算完成: qps=${counts['qps']}, error_rate=${counts['error_rate']}, ` +
       `bandwidth=${counts['bandwidth']}, unique_ips=${counts['unique_ips']}, p95=${counts['p95_duration']} 条`,
     );
+  }
+
+  /** SQLite 没有 PERCENTILE_CONT/STDDEV：读取七天有效窗口后在应用层按 PostgreSQL
+   * percentile_cont 与样本标准差语义计算，再使用原子 UPSERT 写回。 */
+  private async calculateSqliteBaseline(metric: string, column: string): Promise<void> {
+    const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    const rows = await databaseQuery<Array<{ windowTime: string | Date; metricValue: number | string }>>(
+      this.dataSource,
+      `SELECT "windowTime", ${column} AS "metricValue"
+       FROM "access_log_metrics_1min"
+       WHERE "windowTime" >= $1 AND "totalRequests" > 0
+       ORDER BY ${column} ASC`,
+      [since],
+      'sqlite',
+    );
+    if (rows.length === 0) return;
+
+    const sortedValues = rows.map((row) => Number(row.metricValue)).filter(Number.isFinite).sort((a, b) => a - b);
+    if (sortedValues.length === 0) return;
+    const percentilePosition = (sortedValues.length - 1) * 0.99;
+    const lower = Math.floor(percentilePosition);
+    const upper = Math.ceil(percentilePosition);
+    const fraction = percentilePosition - lower;
+    const p99 = sortedValues[lower] + (sortedValues[upper] - sortedValues[lower]) * fraction;
+
+    const buckets = new Map<string, number[]>();
+    for (const row of rows) {
+      const value = Number(row.metricValue);
+      if (!Number.isFinite(value) || value > p99) continue;
+      const time = new Date(row.windowTime);
+      if (!Number.isFinite(time.getTime())) continue;
+      const key = `${time.getUTCHours()}:${time.getUTCDay()}`;
+      const values = buckets.get(key) ?? [];
+      values.push(value);
+      buckets.set(key, values);
+    }
+
+    for (const [key, values] of buckets) {
+      const [hourBucket, dayOfWeek] = key.split(':').map(Number);
+      const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
+      const variance = values.length > 1
+        ? values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / (values.length - 1)
+        : 0;
+      await databaseQuery(
+        this.dataSource,
+        `INSERT INTO "baseline_stats" ("metricName", "hourBucket", "dayOfWeek", "mean", "stddev", "sampleCount", "updatedAt")
+         VALUES ($1, $2, $3, $4, $5, $6, ${databaseCurrentTimestamp()})
+         ON CONFLICT ("metricName", "hourBucket", "dayOfWeek") DO UPDATE SET
+           "mean" = excluded."mean", "stddev" = excluded."stddev",
+           "sampleCount" = excluded."sampleCount", "updatedAt" = ${databaseCurrentTimestamp()}`,
+        [metric, hourBucket, dayOfWeek, mean, Math.sqrt(variance), values.length],
+        'sqlite',
+      );
+    }
   }
 
   /**
@@ -132,9 +191,9 @@ export class BehaviorAnalyzer {
     ) || 50;
     const rows = await this.dataSource.query(
       `SELECT fal.ip,
-              COUNT(DISTINCT fal."fileId")::int as unique_files,
-              COUNT(DISTINCT fal."uploaderId")::int as distinct_users,
-              COUNT(*)::int as total_downloads
+              ${databaseCast('COUNT(DISTINCT fal."fileId")', 'int')} as unique_files,
+              ${databaseCast('COUNT(DISTINCT fal."uploaderId")', 'int')} as distinct_users,
+              ${databaseCast('COUNT(*)', 'int')} as total_downloads
        FROM "file_access_logs" fal
        WHERE fal."createdAt" >= $1 AND fal.action = 'download'
        GROUP BY fal.ip
@@ -166,7 +225,7 @@ export class BehaviorAnalyzer {
   private async detectAbnormalUploads(): Promise<AnomalyDetectionResult[]> {
     const cutoff = new Date(Date.now() - 60 * 60 * 1000);
     const rows = await this.dataSource.query(
-      `SELECT f."uploaderId", COUNT(*)::int as upload_count
+      `SELECT f."uploaderId", ${databaseCast('COUNT(*)', 'int')} as upload_count
        FROM "files" f
        WHERE f."createdAt" >= $1 AND f."isDeleted" = false
        GROUP BY f."uploaderId"
@@ -187,7 +246,7 @@ export class BehaviorAnalyzer {
   private async detectAbnormalSharing(): Promise<AnomalyDetectionResult[]> {
     const cutoff = new Date(Date.now() - 60 * 60 * 1000);
     const rows = await this.dataSource.query(
-      `SELECT fal."fileId", COUNT(DISTINCT fal.ip)::int as unique_ips, COUNT(*)::int as total_access
+      `SELECT fal."fileId", ${databaseCast('COUNT(DISTINCT fal.ip)', 'int')} as unique_ips, ${databaseCast('COUNT(*)', 'int')} as total_access
        FROM "file_access_logs" fal
        WHERE fal."createdAt" >= $1 AND (fal.action = 'public_share' OR fal.action = 'public_direct')
        GROUP BY fal."fileId"
@@ -210,13 +269,24 @@ export class BehaviorAnalyzer {
     // G8-23：按实际有数据的小时数归一（COUNT(DISTINCT date_trunc('hour', createdAt))），
     // 不再无条件除以 24 —— 重启/新部署后数据不足 24h 时避免把全天均值算低而误报。
     // 小时分桶统一用 UTC，避免会话时区漂移。
-    const rows = await this.dataSource.query(
-      `SELECT
-         COUNT(*) FILTER (WHERE EXTRACT(HOUR FROM "createdAt" AT TIME ZONE 'UTC') BETWEEN 2 AND 5)::float / 3 as night_avg,
-         COUNT(*)::float / NULLIF(COUNT(DISTINCT date_trunc('hour', "createdAt")), 0) as all_avg
-       FROM "access_logs"
-       WHERE "createdAt" >= NOW() - INTERVAL '24 hours'`,
-    );
+    const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const rows = getDatabaseType() === 'sqlite'
+      ? await databaseQuery<Array<{ night_avg: number; all_avg: number }>>(
+        this.dataSource,
+        `SELECT
+           SUM(CASE WHEN CAST(strftime('%H', "createdAt") AS INTEGER) BETWEEN 2 AND 5 THEN 1 ELSE 0 END) * 1.0 / 3 AS night_avg,
+           COUNT(*) * 1.0 / NULLIF(COUNT(DISTINCT strftime('%Y-%m-%d %H:00:00', "createdAt")), 0) AS all_avg
+         FROM "access_logs" WHERE "createdAt" >= $1`,
+        [cutoff],
+        'sqlite',
+      )
+      : await this.dataSource.query(
+        `SELECT
+           COUNT(*) FILTER (WHERE EXTRACT(HOUR FROM "createdAt" AT TIME ZONE 'UTC') BETWEEN 2 AND 5)::float / 3 as night_avg,
+           COUNT(*)::float / NULLIF(COUNT(DISTINCT date_trunc('hour', "createdAt")), 0) as all_avg
+         FROM "access_logs" WHERE "createdAt" >= $1`,
+        [cutoff],
+      );
 
     if (rows.length === 0) return [];
     const r = rows[0];
@@ -238,13 +308,16 @@ export class BehaviorAnalyzer {
   /** 模式 5: 爬虫增强 — UA 缺失 + 请求间隔标准差 < 100ms */
   private async detectCrawlerEnhanced(): Promise<AnomalyDetectionResult[]> {
     const cutoff = new Date(Date.now() - 15 * 60 * 1000);
-    const rows = await this.dataSource.query(
-      `SELECT ip, COUNT(*)::int as request_count
+    const dbType = getDatabaseType();
+    const rows = await databaseQuery<Array<{ ip: string; request_count: number }>>(
+      this.dataSource,
+      `SELECT ip, ${databaseCast('COUNT(*)', 'int')} as request_count
        FROM "access_logs"
        WHERE "createdAt" >= $1 AND ("userAgent" IS NULL OR "userAgent" = '')
        GROUP BY ip
        HAVING COUNT(*) > 100`,
       [cutoff],
+      dbType,
     );
 
     // 批量获取所有候选 IP 的时间戳（每 IP 最多 200 条），消除原逐 IP 的 N+1 查询
@@ -252,14 +325,19 @@ export class BehaviorAnalyzer {
     if (rows.length === 0) return results;
 
     const candidateIps = rows.map((r: { ip: string }) => r.ip);
-    const timestampRows = await this.dataSource.query(
+    const ipPredicate = dbType === 'sqlite'
+      ? `ip IN (${candidateIps.map((_, index) => `$${index + 2}`).join(', ')})`
+      : 'ip = ANY($2)';
+    const timestampRows = await databaseQuery<Array<{ ip: string; createdAt: string | Date }>>(
+      this.dataSource,
       `SELECT ip, "createdAt" FROM (
          SELECT ip, "createdAt",
            ROW_NUMBER() OVER (PARTITION BY ip ORDER BY "createdAt" ASC) as rn
          FROM "access_logs"
-         WHERE "createdAt" >= $1 AND ip = ANY($2) AND ("userAgent" IS NULL OR "userAgent" = '')
+         WHERE "createdAt" >= $1 AND ${ipPredicate} AND ("userAgent" IS NULL OR "userAgent" = '')
        ) t WHERE rn <= 200 ORDER BY ip, "createdAt" ASC`,
-      [cutoff, candidateIps],
+      dbType === 'sqlite' ? [cutoff, ...candidateIps] : [cutoff, candidateIps],
+      dbType,
     );
 
     // 按 IP 分组时间戳（查询已按 ip, createdAt 排序，分组后保持时间升序）

@@ -11,6 +11,7 @@ import { TelegramService } from '../telegram/telegram.service';
 import { TelegramFileNotFoundError } from '../telegram/telegram.errors';
 import { AuditService } from '../common/services/audit.service';
 import { QUEUE_NAMES } from '../jobs/bull-queue.module';
+import { databaseCurrentTimestamp } from '../database/database-types';
 
 interface FileVerifyStats {
   totalCandidates: number;
@@ -142,7 +143,7 @@ export class FileVerifyService implements OnModuleInit {
       await this.fileVerifyTaskRepository
         .createQueryBuilder()
         .update(FileVerifyTask)
-        .set({ status: 'failed', isActive: false, errorSummary: summary, completedAt: () => 'now()' })
+        .set({ status: 'failed', isActive: false, errorSummary: summary, completedAt: () => databaseCurrentTimestamp() })
         .where('taskId = :taskId', { taskId })
         .andWhere("status = 'queued'")
         .execute();
@@ -393,7 +394,7 @@ export class FileVerifyService implements OnModuleInit {
     const result = await this.fileVerifyTaskRepository
       .createQueryBuilder()
       .update(FileVerifyTask)
-      .set({ status: 'running', startedAt: () => 'now()' })
+      .set({ status: 'running', startedAt: () => databaseCurrentTimestamp() })
       .where('taskId = :taskId', { taskId })
       .andWhere("status IN ('queued','running')")
       .execute();
@@ -441,7 +442,7 @@ export class FileVerifyService implements OnModuleInit {
         sizeMismatch: stats.sizeMismatch,
         backfilled: stats.backfilled,
         markedError: stats.markedError,
-        completedAt: () => 'now()',
+        completedAt: () => databaseCurrentTimestamp(),
       })
       .where('taskId = :taskId', { taskId })
       .andWhere("status IN ('queued','running')")
@@ -455,7 +456,7 @@ export class FileVerifyService implements OnModuleInit {
     await this.fileVerifyTaskRepository
       .createQueryBuilder()
       .update(FileVerifyTask)
-      .set({ status: 'failed', isActive: false, errorSummary: summary, completedAt: () => 'now()' })
+      .set({ status: 'failed', isActive: false, errorSummary: summary, completedAt: () => databaseCurrentTimestamp() })
       .where('taskId = :taskId', { taskId })
       .andWhere("status IN ('queued','running')")
       .execute();

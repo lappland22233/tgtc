@@ -6,6 +6,7 @@ import { File } from '../common/entities/file.entity';
 import { AuditService } from '../common/services/audit.service';
 import { AuditAction } from '../common/entities/audit-log.entity';
 import { CreateFolderDto, RenameFolderDto, MoveFolderDto, MoveFileDto, RenameFileDto, CopyFileDto } from './folder.dto';
+import { databaseCast, databaseForUpdate, databaseQuery, getDatabaseType, isDatabaseUniqueViolation } from '../database/database-types';
 
 const SOFT_DELETE_GRACE_DAYS = 7;
 
@@ -209,11 +210,9 @@ export class FolderService {
     // 先对被移动节点 SELECT ... FOR UPDATE 加行锁，串行化并发移动，
     // 防止两个并发 move 交换父子关系后形成 parentId 互指环。
     const { saved, oldParentId } = await this.folderRepo.manager.transaction(async (manager) => {
+      const dbType = getDatabaseType();
       // 1. 锁定被移动节点（含软删/越权过滤），FOR UPDATE 保证本事务内视图一致
-      const lockedRows = await manager.query(
-        `SELECT * FROM folders WHERE id = $1 AND "ownerId" = $2 AND "isDeleted" = false FOR UPDATE`,
-        [id, ownerId],
-      );
+      const lockedRows = await databaseQuery<Folder[]>(manager, `SELECT * FROM folders WHERE id = $1 AND "ownerId" = $2 AND "isDeleted" = false${databaseForUpdate(dbType)}`, [id, ownerId], dbType);
       if (lockedRows.length === 0) {
         throw new NotFoundException('文件夹不存在或无权访问');
       }
@@ -228,10 +227,7 @@ export class FolderService {
       let newParentIdFinal: string | null = null;
       if (newParentId) {
         // 2. 校验并锁定新父级（存在/未删/归属）
-        const parentRows = await manager.query(
-          `SELECT * FROM folders WHERE id = $1 AND "ownerId" = $2 AND "isDeleted" = false FOR UPDATE`,
-          [newParentId, ownerId],
-        );
+        const parentRows = await databaseQuery<Folder[]>(manager, `SELECT * FROM folders WHERE id = $1 AND "ownerId" = $2 AND "isDeleted" = false${databaseForUpdate(dbType)}`, [newParentId, ownerId], dbType);
         if (parentRows.length === 0) {
           throw new NotFoundException('文件夹不存在或无权访问');
         }
@@ -533,17 +529,11 @@ export class FolderService {
   }
 
   /**
-   * G6-06：将"同层重名"数据库唯一约束冲突（PostgreSQL 错误码 23505）
-   * 转换为 409 ConflictException，与服务层 pre-check 的语义保持一致。
-   * 该索引是并发场景下的最终防线：pre-check 通过后并发写入可能同时成功，
-   * 由数据库兜底拦截后在此统一转为业务可读的冲突错误。
+   * G6-06：将"同层重名"数据库唯一约束冲突转换为 409 ConflictException，
+   * 与服务层 pre-check 的语义保持一致。该索引是并发场景下的最终防线。
    */
   private throwConflictIfUniqueViolation(error: unknown, message: string): void {
-    if (
-      error &&
-      typeof error === 'object' &&
-      (error as { code?: string }).code === '23505'
-    ) {
+    if (isDatabaseUniqueViolation(error)) {
       throw new ConflictException(message);
     }
   }
@@ -646,7 +636,7 @@ export class FolderService {
          SELECT f.id, s.depth + 1 FROM folders f
          JOIN subtree s ON f."parentId" = s.id
        )
-       SELECT COALESCE(MAX(depth), 0)::int AS h FROM subtree`,
+       SELECT ${databaseCast('COALESCE(MAX(depth), 0)', 'int')} AS h FROM subtree`,
       [folderId],
     );
     return rows[0]?.h ?? 0;

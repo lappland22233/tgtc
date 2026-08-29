@@ -3,6 +3,8 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Alert } from '../common/entities/alert.entity';
 import { ConfigCacheService } from '../common/services/config-cache.service';
+import { randomUUID } from 'crypto';
+import { databaseCurrentTimestamp, databaseQuery, getDatabaseType } from '../database/database-types';
 import { createAlertRules, AlertRuleEvaluation, AlertRule, AggregatedMetrics } from './alert.rules';
 
 @Injectable()
@@ -102,11 +104,13 @@ export class AlertEngineService {
     const cooldownSince = new Date(Date.now() - cooldownMinutes * 60 * 1000);
     try {
       const rows = await this.alertRepo.manager.transaction(async (manager) => {
-        // 同一规则使用事务级 advisory lock 串行化冷却检查，跨进程/队列重试同样有效。
-        await manager.query('SELECT pg_advisory_xact_lock(hashtext($1))', [eval_.ruleId]);
-        return manager.query(
+        // PostgreSQL 使用事务级 advisory lock；SQLite 写事务本身串行化，不执行 PG 专用锁。
+        if (getDatabaseType() === 'postgres') {
+          await manager.query('SELECT pg_advisory_xact_lock(hashtext($1))', [eval_.ruleId]);
+        }
+        return databaseQuery(manager,
           `INSERT INTO alerts (id, "ruleId", level, title, message, context, "createdAt")
-           SELECT gen_random_uuid(), $1, $2, $3, $4, $5, NOW()
+           SELECT $7, $1, $2, $3, $4, $5, ${databaseCurrentTimestamp()}
            WHERE NOT EXISTS (
              SELECT 1 FROM alerts WHERE "ruleId" = $1 AND "createdAt" > $6
            )
@@ -119,10 +123,13 @@ export class AlertEngineService {
             eval_.message,
             JSON.stringify(eval_.context ?? {}),
             cooldownSince,
+            randomUUID(),
           ],
+          getDatabaseType(),
         );
       });
-      return rows && rows.length > 0 ? (rows[0] as Alert) : null;
+      const resultRows = rows as Array<Record<string, unknown>>;
+      return resultRows.length > 0 ? (resultRows[0] as unknown as Alert) : null;
     } catch (error) {
       this.logger.error(`创建告警失败 (${eval_.ruleId}): ${(error as Error).message}`);
       throw error;

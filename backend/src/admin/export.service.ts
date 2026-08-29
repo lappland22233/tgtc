@@ -5,6 +5,7 @@ import { AccessLog } from '../common/entities/access-log.entity';
 import { FileAccessLog } from '../common/entities/file-access-log.entity';
 import { BannedIP } from '../common/entities/banned-ip.entity';
 import { Alert } from '../common/entities/alert.entity';
+import { databaseCast } from '../database/database-types';
 
 export interface ExportOptions {
   format: 'csv' | 'json';
@@ -70,8 +71,8 @@ export class ExportService {
         const logs = await this.fileAccessLogRepo
           .createQueryBuilder('fal')
           .select('fal."fileId"', 'fileId')
-          .addSelect('COUNT(*)::int', 'accessCount')
-          .addSelect('SUM(fal."responseSize")::bigint', 'totalBandwidth')
+          .addSelect(databaseCast('COUNT(*)', 'int', process.env), 'accessCount')
+          .addSelect(databaseCast('SUM(fal."responseSize")', 'bigint', process.env), 'totalBandwidth')
           .where('fal."createdAt" >= :since', { since })
           .groupBy('fal."fileId"')
           .orderBy('accessCount', 'DESC')

@@ -5,6 +5,7 @@ import { Repository } from 'typeorm';
 import { Job } from 'bull';
 import { AccessLog } from '../common/entities/access-log.entity';
 import { QUEUE_NAMES } from './bull-queue.module';
+import { databaseQuery, getDatabaseType } from '../database/database-types';
 
 @Injectable()
 @Processor(QUEUE_NAMES.METRICS_AGGREGATION)
@@ -45,6 +46,7 @@ export class MetricsAggregationProcessor {
     const windowStart = new Date(windowTime.getTime() - 60 * 1000);
 
     try {
+      const dbType = getDatabaseType();
       const result = await this.accessLogRepo
         .createQueryBuilder('a')
         .select('COUNT(*)', 'totalRequests')
@@ -65,7 +67,9 @@ export class MetricsAggregationProcessor {
         )
         .addSelect('COALESCE(SUM(a."responseSize"), 0)', 'totalBandwidth')
         .addSelect(
-          'COALESCE(PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY a.duration), 0)',
+          dbType === 'sqlite'
+            ? '0'
+            : 'COALESCE(PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY a.duration), 0)',
           'p95Duration',
         )
         .addSelect(
@@ -87,7 +91,28 @@ export class MetricsAggregationProcessor {
         }>();
 
       if (result && Number(result.totalRequests || 0) > 0) {
-        await this.accessLogRepo.manager.query(
+        let p95Duration = Number(result.p95Duration);
+        if (dbType === 'sqlite') {
+          const durationRows = await databaseQuery<Array<{ duration: number }>>(
+            this.accessLogRepo.manager,
+            `SELECT duration FROM "access_logs"
+             WHERE "createdAt" >= $1 AND "createdAt" < $2
+             ORDER BY duration ASC`,
+            [windowStart, windowTime],
+            dbType,
+          );
+          const durations = durationRows.map((row) => Number(row.duration)).filter(Number.isFinite);
+          if (durations.length > 0) {
+            const position = (durations.length - 1) * 0.95;
+            const lower = Math.floor(position);
+            const upper = Math.ceil(position);
+            p95Duration = durations[lower] + (durations[upper] - durations[lower]) * (position - lower);
+          } else {
+            p95Duration = 0;
+          }
+        }
+        await databaseQuery(
+          this.accessLogRepo.manager,
           `INSERT INTO "access_log_metrics_1min" ("windowTime", "totalRequests", "qpsAvg", "error5xxCount", "error4xxCount", "totalBandwidth", "p95Duration", "uniqueIps")
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
            ON CONFLICT ("windowTime") DO UPDATE SET
@@ -105,9 +130,10 @@ export class MetricsAggregationProcessor {
             Number(result.error5xxCount),
             Number(result.error4xxCount),
             Number(result.totalBandwidth),
-            Number(result.p95Duration),
+            p95Duration,
             Number(result.uniqueIps),
           ],
+          dbType,
         );
       }
     } catch (error) {

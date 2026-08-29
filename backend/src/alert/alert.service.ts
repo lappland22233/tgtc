@@ -3,6 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, MoreThan, IsNull } from 'typeorm';
 import { Alert, AlertLevel } from '../common/entities/alert.entity';
 import { getAlertRuleMetadata } from './alert.rules';
+import { databaseCurrentTimestamp, databaseQuery, getDatabaseType } from '../database/database-types';
 
 @Injectable()
 export class AlertService {
@@ -72,13 +73,15 @@ export class AlertService {
 
     // 分批 UPDATE（每批 1000 条），避免无条件全表 UPDATE 造成长事务锁表
     while (batches < MAX_BATCHES) {
-      const rows = await this.alertRepo.manager.query(
-        `UPDATE alerts SET "acknowledgedAt" = NOW(), "acknowledgedBy" = $1
+      const rows = await databaseQuery(
+        this.alertRepo.manager,
+        `UPDATE alerts SET "acknowledgedAt" = ${databaseCurrentTimestamp()}, "acknowledgedBy" = $1
          WHERE id IN (
            SELECT id FROM alerts WHERE "acknowledgedAt" IS NULL LIMIT ${BATCH_SIZE}
          )
          RETURNING id`,
         [userId],
+        getDatabaseType(),
       );
       const affected = Array.isArray(rows) ? rows.length : 0;
       total += affected;

@@ -1,7 +1,9 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { randomUUID } from 'crypto';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { RateLimit } from '../entities/rate-limit.entity';
+import { databaseCurrentTimestamp, databaseQuery, getDatabaseType } from '../../database/database-types';
 
 export interface RateLimitResult {
   allowed: boolean;
@@ -63,35 +65,43 @@ export class RateLimitService {
     }
     const now = new Date();
     const windowStart = new Date(now.getTime() - windowMs);
+    const databaseType = getDatabaseType();
+    const currentTimestamp = databaseCurrentTimestamp();
+    const timestampParameter = databaseType === 'sqlite' ? '$5' : '$5::timestamp';
+    const lockUntilExpression = databaseType === 'sqlite'
+      ? `datetime(${currentTimestamp}, '+' || ($7 / 1000.0) || ' seconds')`
+      : `NOW() + ($7 || ' milliseconds')::interval`;
 
     // 单一原子化 UPSERT：计数递增、窗口重置、阈值锁定均在同一个 SQL 中完成
-    // lockedUntil 通过 CASE WHEN 在 DO UPDATE 中原子化计算，无需后续独立 UPDATE
-    const result = await this.rateLimitRepo.manager.query(
-      `INSERT INTO rate_limits ("key", "type", "attemptCount", "firstAttemptAt", "lockedUntil", "updatedAt")
-       VALUES ($1, $2, 1, $3, NULL, NOW())
+    // lockedUntil 在 INSERT 与 DO UPDATE 两个分支中均原子计算，避免 maxAttempts=1 首次放行。
+    const result = await databaseQuery(this.rateLimitRepo.manager,
+      `INSERT INTO rate_limits (id, "key", "type", "attemptCount", "firstAttemptAt", "lockedUntil", "createdAt", "updatedAt")
+       VALUES ($1, $2, $3, 1, $4, CASE WHEN $6 <= 1 THEN ${lockUntilExpression} ELSE NULL END, ${currentTimestamp}, ${currentTimestamp})
        ON CONFLICT ("key") DO UPDATE SET
          "attemptCount" = CASE
-           WHEN rate_limits."firstAttemptAt" < $4::timestamp THEN 1
+           WHEN rate_limits."firstAttemptAt" < ${timestampParameter} THEN 1
            ELSE rate_limits."attemptCount" + 1
          END,
          "firstAttemptAt" = CASE
-           WHEN rate_limits."firstAttemptAt" < $4::timestamp THEN $3::timestamp
+           WHEN rate_limits."firstAttemptAt" < ${timestampParameter} THEN $4
            ELSE rate_limits."firstAttemptAt"
          END,
          "lockedUntil" = CASE
-           WHEN rate_limits."firstAttemptAt" < $4::timestamp THEN NULL
-           WHEN rate_limits."attemptCount" + 1 >= $5 THEN NOW() + ($6 || ' milliseconds')::interval
+           WHEN rate_limits."firstAttemptAt" < ${timestampParameter} THEN NULL
+           WHEN rate_limits."attemptCount" + 1 >= $6 THEN ${lockUntilExpression}
            ELSE rate_limits."lockedUntil"
          END,
-         "updatedAt" = NOW()
+         "updatedAt" = ${currentTimestamp}
        WHERE rate_limits."lockedUntil" IS NULL
-          OR rate_limits."lockedUntil" < NOW()
+          OR rate_limits."lockedUntil" < ${currentTimestamp}
        RETURNING "attemptCount", "firstAttemptAt", "lockedUntil"`,
-      [key, type, now, windowStart, maxAttempts, lockDurationMs.toString()],
+      [randomUUID(), key, type, now, windowStart, maxAttempts, lockDurationMs],
+      databaseType,
     );
 
     // 无返回行 → 记录已被其他请求锁定（WHERE 条件过滤了锁定记录）
-    if (!result || result.length === 0) {
+    const rows = result as Array<Record<string, unknown>>;
+    if (rows.length === 0) {
       // 查询实际 lockedUntil 返回精确剩余等待时间，替代 lockDurationMs 近似值
       const locked = await this.rateLimitRepo.findOne({ where: { key } });
       if (locked?.lockedUntil && locked.lockedUntil.getTime() > now.getTime()) {
@@ -105,8 +115,8 @@ export class RateLimitService {
       return { allowed: false, waitMinutes };
     }
 
-    const row = result[0];
-    const lockedUntil = row.lockedUntil ? new Date(row.lockedUntil) : null;
+    const row = rows[0];
+    const lockedUntil = this.parseDatabaseDate(row.lockedUntil, databaseType);
 
     // 检测本次操作是否已达到阈值并原子化设置了锁
     if (lockedUntil && now < lockedUntil) {
@@ -141,31 +151,45 @@ export class RateLimitService {
 
     const now = new Date();
     const windowStart = new Date(now.getTime() - windowMs);
-    const result = await this.rateLimitRepo.manager.query(
-      `INSERT INTO rate_limits ("key", "type", "attemptCount", "firstAttemptAt", "lockedUntil", "updatedAt")
-       VALUES ($1, $2, 1, $3, NULL, NOW())
+    const databaseType = getDatabaseType();
+    const currentTimestamp = databaseCurrentTimestamp();
+    const timestampParameter = databaseType === 'sqlite' ? '$5' : '$5::timestamp';
+    const result = await databaseQuery(this.rateLimitRepo.manager,
+      `INSERT INTO rate_limits (id, "key", "type", "attemptCount", "firstAttemptAt", "lockedUntil", "createdAt", "updatedAt")
+       VALUES ($1, $2, $3, 1, $4, NULL, ${currentTimestamp}, ${currentTimestamp})
        ON CONFLICT ("key") DO UPDATE SET
          "attemptCount" = CASE
-           WHEN rate_limits."firstAttemptAt" < $4::timestamp THEN 1
+           WHEN rate_limits."firstAttemptAt" < ${timestampParameter} THEN 1
            ELSE rate_limits."attemptCount" + 1
          END,
          "firstAttemptAt" = CASE
-           WHEN rate_limits."firstAttemptAt" < $4::timestamp THEN $3::timestamp
+           WHEN rate_limits."firstAttemptAt" < ${timestampParameter} THEN $4
            ELSE rate_limits."firstAttemptAt"
          END,
          -- 保留既有锁定：若该键当前处于锁定态（lockedUntil 未来时间），
          -- 递增计数不应清除锁定，否则攻击者可借 incrementCounter 绕过锁定
          -- （G9-11）。仅当记录已解锁时才随窗口重置将 lockedUntil 置空。
          "lockedUntil" = CASE
-           WHEN rate_limits."lockedUntil" IS NOT NULL AND rate_limits."lockedUntil" > NOW() THEN rate_limits."lockedUntil"
+           WHEN rate_limits."lockedUntil" IS NOT NULL AND rate_limits."lockedUntil" > ${currentTimestamp} THEN rate_limits."lockedUntil"
            ELSE NULL
          END,
-         "updatedAt" = NOW()
+         "updatedAt" = ${currentTimestamp}
          RETURNING "attemptCount"`,
-         [key, type, now, windowStart],
-         );
-    const count = Number(result?.[0]?.attemptCount ?? 1);
+         [randomUUID(), key, type, now, windowStart],
+      databaseType,
+    );
+    const countRows = result as Array<Record<string, unknown>>;
+    const count = Number(countRows[0]?.attemptCount ?? 1);
     return { count, thresholdReached: count >= threshold };
+  }
+
+  private parseDatabaseDate(value: unknown, databaseType: 'postgres' | 'sqlite'): Date | null {
+    if (!value) return null;
+    if (value instanceof Date) return value;
+    if (databaseType === 'sqlite' && typeof value === 'string' && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/.test(value)) {
+      return new Date(`${value.replace(' ', 'T')}Z`);
+    }
+    return new Date(value as string | number);
   }
 
   /**

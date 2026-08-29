@@ -1,4 +1,4 @@
-import { MigrationInterface, QueryRunner, Table, TableColumn, TableForeignKey, TableIndex } from 'typeorm';
+import { MigrationInterface, QueryRunner, Table, TableColumn, TableForeignKey, TableIndex, TableUnique } from 'typeorm';
 
 type EntityColumnMetadata = {
   type: unknown;
@@ -61,6 +61,14 @@ export class SqliteEntitySchema1700000000000 implements MigrationInterface {
       }), true);
     }
     for (const metadata of metadatas) {
+      for (const unique of metadata.uniques) {
+        const table = await queryRunner.getTable(metadata.tableName);
+        if (!table || table.uniques.some((existing) => existing.name === unique.name)) continue;
+        await queryRunner.createUniqueConstraint(metadata.tableName, new TableUnique({
+          name: unique.name,
+          columnNames: unique.columns.map((column) => column.databaseName),
+        }));
+      }
       for (const relation of metadata.relations) {
         if (!relation.isManyToOne || !relation.joinColumns.length) continue;
         const join = relation.joinColumns[0];
@@ -77,6 +85,8 @@ export class SqliteEntitySchema1700000000000 implements MigrationInterface {
       }
       for (const index of metadata.indices) {
         if (index.synchronize === false || !index.columns.length) continue;
+        const table = await queryRunner.getTable(metadata.tableName);
+        if (!table || table.indices.some((existing) => existing.name === index.name)) continue;
         await queryRunner.createIndex(metadata.tableName, new TableIndex({
           name: index.name,
           columnNames: index.columns.map((column) => typeof column === 'string' ? column : column.databaseName),
@@ -89,8 +99,7 @@ export class SqliteEntitySchema1700000000000 implements MigrationInterface {
 
   public async down(queryRunner: QueryRunner): Promise<void> {
     if (queryRunner.connection.options.type !== 'sqlite') return;
-    for (const metadata of [...queryRunner.connection.entityMetadatas].reverse()) {
-      if (await queryRunner.hasTable(metadata.tableName)) await queryRunner.dropTable(metadata.tableName, true);
-    }
+    // SQLite 基线可能已经承载业务数据；revert 不得静默删表或删数据。
+    // 如需回退，请使用备份恢复，或编写经过审查的前向修复迁移。
   }
 }

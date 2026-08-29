@@ -21,6 +21,7 @@ import { SharePreviewSessionService } from './share-preview-session.service';
 import { ShareFolderBrowseService, computeShareExpiry } from './share-folder-browse.service';
 import { CreateShareDto, UpdateShareDto } from './share.dto';
 import { BCRYPT_ROUNDS } from '../common/constants/bcrypt';
+import { databaseCurrentTimestamp } from '../database/database-types';
 
 const SHARE_TOKEN_BYTES = 9; // 12 字符 base64url，熵 ~72 bit
 
@@ -633,7 +634,7 @@ export class ShareService {
     const started = await this.shareLinkRepo
       .createQueryBuilder()
       .update(ShareLink)
-      .set({ expiresStartAt: () => 'COALESCE("expiresStartAt", NOW())' })
+      .set({ expiresStartAt: () => `COALESCE("expiresStartAt", ${databaseCurrentTimestamp()})` })
       .where('id = :id', { id: link.id })
       .andWhere('"isDeleted" = false')
       .execute();

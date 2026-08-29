@@ -1,4 +1,5 @@
 import { Injectable, NotFoundException, BadRequestException, Logger } from '@nestjs/common';
+import { randomUUID } from 'crypto';
 import { UAParser } from 'ua-parser-js';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, LessThan, IsNull, SelectQueryBuilder, In } from 'typeorm';
@@ -15,6 +16,7 @@ import { ConfigCacheService } from '../common/services/config-cache.service';
 import { AuditService } from '../common/services/audit.service';
 import { encryptPassword } from '../common/utils/crypto.util';
 import { FILE_DELETE_GRACE_MS, FILE_DELETE_COOLDOWN_MS, MS_PER_DAY } from '../common/constants/durations';
+import { databaseCast, databaseCurrentTimestamp, databaseDateBucket, databaseQuery, getDatabaseType } from '../database/database-types';
 import { ExportService, ExportOptions } from './export.service';
 import { SEC_CONFIG_META, SEC_CONFIG_DEFAULTS } from './security-config.defaults';
 import {
@@ -129,9 +131,12 @@ export class AdminService {
   }
 
   private async getMonthlyAccessStats(): Promise<{ month: string; count: number }[]> {
+    const monthExpression = getDatabaseType() === 'sqlite'
+      ? "strftime('%Y-%m', log.createdAt)"
+      : "TO_CHAR(log.createdAt, 'YYYY-MM')";
     const raw = await this.accessLogRepository
       .createQueryBuilder('log')
-      .select("TO_CHAR(log.createdAt, 'YYYY-MM')", 'month')
+      .select(monthExpression, 'month')
       .addSelect('COUNT(*)', 'count')
       .where("log.createdAt >= :since", { since: new Date(Date.now() - 365 * 24 * 3600 * 1000) })
       .groupBy('month')
@@ -297,19 +302,23 @@ export class AdminService {
     }
 
     // 单条 UPSERT 同时覆盖首次封禁和历史记录重新激活；活跃记录不更新。
-    // 避免 findOne→insert/update 的 TOCTOU，并确保并发请求只有一个成功。
-    const rows = await this.bannedIPRepository.manager.query(
+    // UUID 在应用侧生成，时间和占位符按驱动转换，SQLite 写锁冲突做有限重试。
+    const dbType = getDatabaseType();
+    const currentTimestamp = databaseCurrentTimestamp();
+    const rows = await databaseQuery<Array<{ id: string }>>(
+      this.bannedIPRepository.manager,
       `INSERT INTO banned_ips (id, ip, reason, "isPermanent", "expiresAt", "unbanned_at", "createdAt")
-       VALUES (gen_random_uuid(), $1, $2, $3, $4, NULL, NOW())
+       VALUES ($1, $2, $3, $4, $5, NULL, ${currentTimestamp})
        ON CONFLICT (ip) DO UPDATE SET
          reason = COALESCE(EXCLUDED.reason, banned_ips.reason),
          "isPermanent" = EXCLUDED."isPermanent",
          "expiresAt" = EXCLUDED."expiresAt",
          "unbanned_at" = NULL,
-         "createdAt" = NOW()
+         "createdAt" = ${currentTimestamp}
        WHERE banned_ips."unbanned_at" IS NOT NULL
        RETURNING id`,
-      [ip, reason ?? null, permanent, normalizedExpiry ?? null],
+      [randomUUID(), ip, reason ?? null, permanent, normalizedExpiry ?? null],
+      dbType,
     );
     if (!rows || rows.length === 0) {
       throw new BadRequestException('该IP已被封禁');
@@ -750,7 +759,8 @@ export class AdminService {
     }
 
     if (query.path) {
-      qb.andWhere('log.path ILIKE :path', { path: `%${query.path.replace(/[%_]/g, '\\$&')}%` });
+      const escapedPath = query.path.replace(/\\/g, '\\\\').replace(/[%_]/g, '\\$&');
+      qb.andWhere('LOWER(log.path) LIKE LOWER(:path) ESCAPE \'\\\'', { path: `%${escapedPath}%` });
     }
 
     if (query.statusCode) {
@@ -804,7 +814,7 @@ export class AdminService {
     try {
       const peak = await this.accessLogRepo
         .createQueryBuilder('log')
-        .select("DATE_TRUNC('minute', log.createdAt)", 'bucket')
+        .select(databaseDateBucket('log.createdAt', 'minute'), 'bucket')
         .addSelect('COUNT(*)', 'count')
         .where('log.createdAt >= :since', { since })
         .groupBy('bucket')
@@ -852,11 +862,10 @@ export class AdminService {
 
     const raw = await this.accessLogRepo
       .createQueryBuilder('log')
-      .select('DATE_TRUNC(:trunc, log.createdAt)', 'time')
+      .select(databaseDateBucket('log.createdAt', trunc as 'minute' | 'hour' | 'day'), 'time')
       .addSelect('COUNT(*)', 'requests')
       .addSelect('COALESCE(SUM(log.responseSize), 0)', 'bandwidth')
       .where('log.createdAt >= :since', { since })
-      .setParameter('trunc', trunc)
       .groupBy('time')
       .orderBy('time', 'ASC')
       .getRawMany<{ time: string; requests: string; bandwidth: string }>();
@@ -939,16 +948,15 @@ export class AdminService {
     // 将 log.userId（存 UUID 的 varchar）转换为 uuid 与 users 主键关联，
     // 避免对 u.id 做 CAST 导致 users 主键索引失效全表扫描；
     // 用 UUID 正则保护转换，非法/历史脏值安全地返回 NULL 而不抛错。
-    const items = await baseQb
-      .leftJoin(
-        User,
-        'u',
-        `u.id = CASE
-           WHEN log.userId ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+    const userJoinCondition = getDatabaseType() === 'sqlite'
+      ? 'u.id = log.userId'
+      : `u.id = CASE
+           WHEN log.userId ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
            THEN CAST(log.userId AS uuid)
            ELSE NULL
-         END`,
-      )
+         END`;
+    const items = await baseQb
+      .leftJoin(User, 'u', userJoinCondition)
       .select([
         'log.id', 'log.userId', 'log.action', 'log.ip',
         'log.resourceType', 'log.resourceId', 'log.metadata',
@@ -1001,8 +1009,8 @@ export class AdminService {
       .addSelect('f."originalName"', 'fileName')
       .addSelect('f."mimeType"', 'mimeType')
       .addSelect('f.size', 'fileSize')
-      .addSelect('COUNT(*)::int', 'accessCount')
-      .addSelect('SUM(COALESCE(NULLIF(fal."responseSize", 0), f.size))::bigint', 'totalBandwidth')
+      .addSelect(databaseCast('COUNT(*)', 'int'), 'accessCount')
+      .addSelect(databaseCast('SUM(COALESCE(NULLIF(fal."responseSize", 0), f.size))', 'bigint'), 'totalBandwidth')
       .where('fal.createdAt >= :since', { since })
       .andWhere('f."isDeleted" = false');
 
@@ -1051,9 +1059,9 @@ export class AdminService {
     const qb = this.accessLogRepo
       .createQueryBuilder('log')
       .select('log.path', 'path')
-      .addSelect('COUNT(*)::int', 'requestCount')
-      .addSelect('SUM(log."responseSize")::bigint', 'totalBandwidth')
-      .addSelect('AVG(log.duration)::numeric(10,2)', 'avgDuration')
+      .addSelect(databaseCast('COUNT(*)', 'int'), 'requestCount')
+      .addSelect(databaseCast('SUM(log."responseSize")', 'bigint'), 'totalBandwidth')
+      .addSelect(databaseCast('AVG(log.duration)', 'numeric'), 'avgDuration')
       .where('log.createdAt >= :since', { since });
 
     if (query.excludePaths) {
@@ -1103,36 +1111,63 @@ export class AdminService {
     const samplingThreshold = 1_000_000;
     const sampled = totalCount > samplingThreshold;
 
-    let baseQb: SelectQueryBuilder<AccessLog>;
-    if (sampled) {
-      // TABLESAMPLE 在 TypeORM 中难以直用，使用 MOD 哈希采样替代
-      baseQb = this.accessLogRepo
-        .createQueryBuilder('log')
-        .where('log.createdAt >= :since', { since })
-        .andWhere("(MOD(hashtext(log.id::text), 100)) < 10");
+    let stats: { avgDuration: string | number; p50Duration: string | number; p95Duration: string | number; p99Duration: string | number } | undefined;
+    if (getDatabaseType() === 'sqlite') {
+      // SQLite 无 hashtext/PERCENTILE_CONT。超大区间按稳定排序每 10 行取 1 行，
+      // 再在应用层以 percentile_cont 的线性插值语义计算百分位。
+      const parameters: unknown[] = [since];
+      let endPredicate = '';
+      if (query.endDate) {
+        parameters.push(new Date(query.endDate));
+        endPredicate = ` AND "createdAt" <= $${parameters.length}`;
+      }
+      const sourceSql = `SELECT duration FROM "access_logs" WHERE "createdAt" >= $1${endPredicate}`;
+      const durationRows = await databaseQuery<Array<{ duration: number }>>(
+        this.accessLogRepo.manager,
+        sampled
+          ? `SELECT duration FROM (SELECT duration, ROW_NUMBER() OVER (ORDER BY id) AS rn FROM (${sourceSql})) WHERE (rn - 1) % 10 = 0 ORDER BY duration`
+          : `${sourceSql} ORDER BY duration`,
+        parameters,
+        'sqlite',
+      );
+      const values = durationRows.map((row) => Number(row.duration)).filter(Number.isFinite);
+      const percentile = (fraction: number): number => {
+        if (values.length === 0) return 0;
+        const position = (values.length - 1) * fraction;
+        const lower = Math.floor(position);
+        const upper = Math.ceil(position);
+        return values[lower] + (values[upper] - values[lower]) * (position - lower);
+      };
+      stats = {
+        avgDuration: values.length > 0 ? values.reduce((sum, value) => sum + value, 0) / values.length : 0,
+        p50Duration: percentile(0.5),
+        p95Duration: percentile(0.95),
+        p99Duration: percentile(0.99),
+      };
     } else {
-      baseQb = this.accessLogRepo
-        .createQueryBuilder('log')
-        .where('log.createdAt >= :since', { since });
+      let baseQb: SelectQueryBuilder<AccessLog>;
+      if (sampled) {
+        baseQb = this.accessLogRepo
+          .createQueryBuilder('log')
+          .where('log.createdAt >= :since', { since })
+          .andWhere("(MOD(hashtext(log.id::text), 100)) < 10");
+      } else {
+        baseQb = this.accessLogRepo
+          .createQueryBuilder('log')
+          .where('log.createdAt >= :since', { since });
+      }
+      if (query.endDate) {
+        baseQb.andWhere('log.createdAt <= :until', { until: new Date(query.endDate) });
+      }
+      stats = await baseQb
+        .select([
+          'AVG(log.duration)::numeric(10,2) as "avgDuration"',
+          'PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY log.duration)::numeric(10,2) as "p50Duration"',
+          'PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY log.duration)::numeric(10,2) as "p95Duration"',
+          'PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY log.duration)::numeric(10,2) as "p99Duration"',
+        ])
+        .getRawOne();
     }
-
-    if (query.endDate) {
-      baseQb.andWhere('log.createdAt <= :until', { until: new Date(query.endDate) });
-    }
-
-    const stats = await baseQb
-      .select([
-        'AVG(log.duration)::numeric(10,2) as "avgDuration"',
-        'PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY log.duration)::numeric(10,2) as "p50Duration"',
-        'PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY log.duration)::numeric(10,2) as "p95Duration"',
-        'PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY log.duration)::numeric(10,2) as "p99Duration"',
-      ])
-      .getRawOne<{
-        avgDuration: string;
-        p50Duration: string;
-        p95Duration: string;
-        p99Duration: string;
-      }>();
 
     return {
       avgDuration: Number(stats?.avgDuration || 0),
@@ -1153,22 +1188,22 @@ export class AdminService {
       .createQueryBuilder('log')
       .select('log.path', 'path')
       .addSelect(
-        'SUM(CASE WHEN log."statusCode" >= 200 AND log."statusCode" < 300 THEN 1 ELSE 0 END)::int',
+        databaseCast('SUM(CASE WHEN log."statusCode" >= 200 AND log."statusCode" < 300 THEN 1 ELSE 0 END)', 'int'),
         'count2xx',
       )
       .addSelect(
-        'SUM(CASE WHEN log."statusCode" >= 300 AND log."statusCode" < 400 THEN 1 ELSE 0 END)::int',
+        databaseCast('SUM(CASE WHEN log."statusCode" >= 300 AND log."statusCode" < 400 THEN 1 ELSE 0 END)', 'int'),
         'count3xx',
       )
       .addSelect(
-        'SUM(CASE WHEN log."statusCode" >= 400 AND log."statusCode" < 500 THEN 1 ELSE 0 END)::int',
+        databaseCast('SUM(CASE WHEN log."statusCode" >= 400 AND log."statusCode" < 500 THEN 1 ELSE 0 END)', 'int'),
         'count4xx',
       )
       .addSelect(
-        'SUM(CASE WHEN log."statusCode" >= 500 AND log."statusCode" < 600 THEN 1 ELSE 0 END)::int',
+        databaseCast('SUM(CASE WHEN log."statusCode" >= 500 AND log."statusCode" < 600 THEN 1 ELSE 0 END)', 'int'),
         'count5xx',
       )
-      .addSelect('COUNT(*)::int', 'totalCount')
+      .addSelect(databaseCast('COUNT(*)', 'int'), 'totalCount')
       .where('log.createdAt >= :since', { since });
 
     if (query.statusCode !== undefined) {
@@ -1216,8 +1251,8 @@ export class AdminService {
     const [downloadStats] = await this.accessLogRepository
       .createQueryBuilder('fal')
       .select([
-        'COUNT(*)::int as "totalDownloads"',
-        'SUM(fal."responseSize")::bigint as "totalBandwidth"',
+        `${databaseCast('COUNT(*)', 'int')} as "totalDownloads"`,
+        `${databaseCast('COALESCE(SUM(fal."responseSize"), 0)', 'bigint')} as "totalBandwidth"`,
       ])
       .where('fal.action = :action', { action: 'download' })
       .andWhere('fal.createdAt >= :since', { since })
@@ -1226,8 +1261,8 @@ export class AdminService {
     // 下载趋势（按小时聚合）
     const trendRaw = await this.accessLogRepository
       .createQueryBuilder('fal')
-      .select("DATE_TRUNC('hour', fal.createdAt)", 'time')
-      .addSelect('COUNT(*)::int', 'count')
+      .select(databaseDateBucket('fal.createdAt', 'hour'), 'time')
+      .addSelect(databaseCast('COUNT(*)', 'int'), 'count')
       .where('fal.action = :action', { action: 'download' })
       .andWhere('fal.createdAt >= :since', { since })
       .groupBy('time')
@@ -1238,8 +1273,8 @@ export class AdminService {
     const topDownloadersRaw = await this.accessLogRepository
       .createQueryBuilder('fal')
       .select('fal.ip', 'ip')
-      .addSelect('COUNT(*)::int', 'count')
-      .addSelect('SUM(fal."responseSize")::bigint', 'bandwidth')
+      .addSelect(databaseCast('COUNT(*)', 'int'), 'count')
+      .addSelect(databaseCast('COALESCE(SUM(fal."responseSize"), 0)', 'bigint'), 'bandwidth')
       .where('fal.action = :action', { action: 'download' })
       .andWhere('fal.createdAt >= :since', { since })
       .groupBy('fal.ip')
@@ -1271,13 +1306,13 @@ export class AdminService {
     const raw = await this.accessLogRepo
       .createQueryBuilder('log')
       .select('log.ip', 'ip')
-      .addSelect('COUNT(*)::int', 'requestCount')
+      .addSelect(databaseCast('COUNT(*)', 'int'), 'requestCount')
       .addSelect(
-        'SUM(CASE WHEN log."statusCode" >= 400 THEN 1 ELSE 0 END)::int',
+        databaseCast('SUM(CASE WHEN log."statusCode" >= 400 THEN 1 ELSE 0 END)', 'int'),
         'errorCount',
       )
-      .addSelect('SUM(log."responseSize")::bigint', 'bandwidth')
-      .addSelect('COUNT(DISTINCT log.path)::int', 'uniquePaths')
+      .addSelect(databaseCast('COALESCE(SUM(log."responseSize"), 0)', 'bigint'), 'bandwidth')
+      .addSelect(databaseCast('COUNT(DISTINCT log.path)', 'int'), 'uniquePaths')
       .where('log.createdAt >= :since', { since })
       .groupBy('log.ip')
       .having('COUNT(*) >= :minCount', { minCount: minRequests })
@@ -1334,10 +1369,10 @@ export class AdminService {
       this.bannedIPRepository
         .createQueryBuilder('b')
         .select([
-          'COUNT(*)::int as "totalBanned"',
-          'SUM(CASE WHEN b.unbannedAt IS NOT NULL THEN 1 ELSE 0 END)::int as "historicalBans"',
-          'SUM(CASE WHEN b.unbannedAt IS NULL AND (b.isPermanent = true OR b.expiresAt > NOW()) THEN 1 ELSE 0 END)::int as "activeBans"',
-          'SUM(CASE WHEN b.unbannedAt IS NULL AND b.isPermanent = true THEN 1 ELSE 0 END)::int as "permanentBans"',
+          `${databaseCast('COUNT(*)', 'int')} as "totalBanned"`,
+          `${databaseCast('SUM(CASE WHEN b.unbannedAt IS NOT NULL THEN 1 ELSE 0 END)', 'int')} as "historicalBans"`,
+          `${databaseCast(`SUM(CASE WHEN b.unbannedAt IS NULL AND (b.isPermanent = true OR b.expiresAt > ${databaseCurrentTimestamp()}) THEN 1 ELSE 0 END)`, 'int')} as "activeBans"`,
+          `${databaseCast('SUM(CASE WHEN b.unbannedAt IS NULL AND b.isPermanent = true THEN 1 ELSE 0 END)', 'int')} as "permanentBans"`,
         ])
         .getRawMany<{ totalBanned: string; historicalBans: string; activeBans: string; permanentBans: string }>(),
       this.bannedIPRepository
@@ -1399,7 +1434,7 @@ export class AdminService {
     const since = this.parseTimeRange(query.timeRange || '7d');
 
     const raw = await this.accessLogRepo.manager.query(
-      `SELECT referer, COUNT(*)::int as count
+      `SELECT referer, ${databaseCast('COUNT(*)', 'int')} as count
        FROM access_logs
        WHERE "createdAt" >= $1 AND referer IS NOT NULL AND referer != ''
        GROUP BY referer
@@ -1424,7 +1459,7 @@ export class AdminService {
 
     // Add direct access count
     const directResult = await this.accessLogRepo.manager.query(
-      `SELECT COUNT(*)::int as count FROM access_logs
+      `SELECT ${databaseCast('COUNT(*)', 'int')} as count FROM access_logs
        WHERE "createdAt" >= $1 AND (referer IS NULL OR referer = '')`,
       [since],
     );
@@ -1495,7 +1530,7 @@ export class AdminService {
     const topN = query.topN || 500;
 
     const raw = await this.accessLogRepo.manager.query(
-      `SELECT "userAgent", COUNT(*)::int as count
+      `SELECT "userAgent", ${databaseCast('COUNT(*)', 'int')} as count
        FROM access_logs
        WHERE "createdAt" >= $1 AND "userAgent" IS NOT NULL AND "userAgent" != ''
        GROUP BY "userAgent"
@@ -1590,8 +1625,8 @@ export class AdminService {
         .select('f.id', 'fileId')
         .addSelect('f."originalName"', 'fileName')
         .addSelect('f."mimeType"', 'mimeType')
-        .addSelect('SUM(COALESCE(NULLIF(fal."responseSize", 0), f."size"))::bigint', 'totalBandwidth')
-        .addSelect('COUNT(*)::int', 'accessCount')
+        .addSelect(databaseCast('SUM(COALESCE(NULLIF(fal."responseSize", 0), f."size"))', 'bigint'), 'totalBandwidth')
+        .addSelect(databaseCast('COUNT(*)', 'int'), 'accessCount')
         .where('fal.createdAt >= :since', { since })
         .andWhere('f."isDeleted" = false')
         .groupBy('f.id, f."originalName", f."mimeType"')
@@ -1610,8 +1645,8 @@ export class AdminService {
         .createQueryBuilder('fal')
         .leftJoin(File, 'f', 'f.id = fal.fileId')
         .select('fal.ip', 'ip')
-        .addSelect('SUM(COALESCE(NULLIF(fal."responseSize", 0), f.size))::bigint', 'bandwidth')
-        .addSelect('COUNT(*)::int', 'requestCount')
+        .addSelect(databaseCast('SUM(COALESCE(NULLIF(fal."responseSize", 0), f.size))', 'bigint'), 'bandwidth')
+        .addSelect(databaseCast('COUNT(*)', 'int'), 'requestCount')
         .where('fal.createdAt >= :since', { since })
         .groupBy('fal.ip')
         .orderBy('"bandwidth"', 'DESC')
@@ -1621,8 +1656,8 @@ export class AdminService {
       this.accessLogRepository
         .createQueryBuilder('fal')
         .leftJoin(File, 'f', 'f.id = fal.fileId')
-        .select("DATE_TRUNC('hour', fal.createdAt)", 'time')
-        .addSelect('SUM(COALESCE(NULLIF(fal."responseSize", 0), f.size))::bigint', 'bandwidth')
+        .select(databaseDateBucket('fal.createdAt', 'hour'), 'time')
+        .addSelect(databaseCast('SUM(COALESCE(NULLIF(fal."responseSize", 0), f.size))', 'bigint'), 'bandwidth')
         .where('fal.createdAt >= :since', { since })
         .groupBy('time')
         .orderBy('time', 'ASC')
@@ -1652,15 +1687,22 @@ export class AdminService {
   async getFileTypeStats(_query: FileTypeQueryDto) {
     // 使用 SQL GROUP BY 在数据库侧完成分类与聚合，避免将全部文件加载进内存
     // （原实现 getRawMany 全量加载后逐条分类，数十万文件易 OOM）
+    const mimeType = `LOWER(COALESCE(f."mimeType", ''))`;
+    const documentPredicate = getDatabaseType() === 'sqlite'
+      ? `(${mimeType} LIKE '%pdf%' OR ${mimeType} LIKE '%document%' OR ${mimeType} LIKE '%spreadsheet%' OR ${mimeType} LIKE '%presentation%' OR ${mimeType} LIKE '%text%' OR ${mimeType} LIKE '%msword%' OR ${mimeType} LIKE '%officedocument%' OR ${mimeType} LIKE '%opendocument%')`
+      : `${mimeType} ~ '(pdf|document|spreadsheet|presentation|text|msword|officedocument|opendocument)'`;
+    const archivePredicate = getDatabaseType() === 'sqlite'
+      ? `(${mimeType} LIKE '%zip%' OR ${mimeType} LIKE '%rar%' OR ${mimeType} LIKE '%7z%' OR ${mimeType} LIKE '%tar%' OR ${mimeType} LIKE '%gz%' OR ${mimeType} LIKE '%compress%' OR ${mimeType} LIKE '%archive%')`
+      : `${mimeType} ~ '(zip|rar|7z|tar|gz|compress|archive)'`;
     const rows = await this.fileRepository
       .createQueryBuilder('f')
       .select(
         `CASE
-           WHEN LOWER(COALESCE(f."mimeType", '')) LIKE 'image/%' THEN '图片'
-           WHEN LOWER(COALESCE(f."mimeType", '')) LIKE 'video/%' THEN '视频'
-           WHEN LOWER(COALESCE(f."mimeType", '')) LIKE 'audio/%' THEN '音频'
-           WHEN LOWER(COALESCE(f."mimeType", '')) ~ '(pdf|document|spreadsheet|presentation|text|msword|officedocument|opendocument)' THEN '文档'
-           WHEN LOWER(COALESCE(f."mimeType", '')) ~ '(zip|rar|7z|tar|gz|compress|archive)' THEN '压缩包'
+           WHEN ${mimeType} LIKE 'image/%' THEN '图片'
+           WHEN ${mimeType} LIKE 'video/%' THEN '视频'
+           WHEN ${mimeType} LIKE 'audio/%' THEN '音频'
+           WHEN ${documentPredicate} THEN '文档'
+           WHEN ${archivePredicate} THEN '压缩包'
            ELSE '其他'
          END`,
         'category',
@@ -1739,7 +1781,7 @@ export class AdminService {
         .createQueryBuilder('log')
         .select('log.userId', 'userId')
         .addSelect('log.ip', 'ip')
-        .addSelect('COUNT(*)::int', 'requestCount')
+        .addSelect(databaseCast('COUNT(*)', 'int'), 'requestCount')
         .addSelect('MAX(log.createdAt)', 'lastSeen')
         .where('log.createdAt >= :since', { since })
         .andWhere('log.userId IS NOT NULL')
@@ -1794,22 +1836,26 @@ export class AdminService {
     const previousSince = new Date(now.getTime() - 2 * periodMs);
     const previousUntil = new Date(now.getTime() - periodMs);
 
+    const dbType = getDatabaseType();
+    const comparisonSelect = `SELECT ${databaseCast('COUNT(*)', 'int')} as requests,
+              ${databaseCast('COALESCE(SUM("responseSize"), 0)', 'bigint')} as bandwidth,
+              ${databaseCast('COUNT(DISTINCT ip)', 'int')} as uv
+       FROM access_logs`;
+
     // 当前周期统计
-    const [currentStats] = await this.accessLogRepo.manager.query(
-      `SELECT COUNT(*)::int as requests,
-              SUM("responseSize")::bigint as bandwidth,
-              COUNT(DISTINCT ip)::int as uv
-       FROM access_logs WHERE "createdAt" >= $1`,
+    const [currentStats] = await databaseQuery<Array<{ requests: number; bandwidth: string | number; uv: number }>>(
+      this.accessLogRepo.manager,
+      `${comparisonSelect} WHERE "createdAt" >= $1`,
       [currentSince],
+      dbType,
     );
 
     // 上一周期统计
-    const [previousStats] = await this.accessLogRepo.manager.query(
-      `SELECT COUNT(*)::int as requests,
-              SUM("responseSize")::bigint as bandwidth,
-              COUNT(DISTINCT ip)::int as uv
-       FROM access_logs WHERE "createdAt" >= $1 AND "createdAt" < $2`,
+    const [previousStats] = await databaseQuery<Array<{ requests: number; bandwidth: string | number; uv: number }>>(
+      this.accessLogRepo.manager,
+      `${comparisonSelect} WHERE "createdAt" >= $1 AND "createdAt" < $2`,
       [previousSince, previousUntil],
+      dbType,
     );
 
     const calcChange = (current: number, previous: number) => {

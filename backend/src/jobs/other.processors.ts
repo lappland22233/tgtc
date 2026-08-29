@@ -6,6 +6,7 @@ import { QUEUE_NAMES } from './bull-queue.module';
 import { AlertEngineService } from '../alert/alert-engine.service';
 import { AlertGateway } from '../alert/alert.gateway';
 import { BehaviorAnalyzer } from '../security/behavior-analyzer.service';
+import { databaseCast, databaseQuery, getDatabaseType } from '../database/database-types';
 
 @Injectable()
 @Processor(QUEUE_NAMES.ALERT_EVALUATION)
@@ -213,28 +214,35 @@ export class WeeklyReportProcessor {
   @Process('weekly-report')
   async generateWeeklyReport(_job: Job): Promise<void> {
     const since = new Date(Date.now() - 7 * 24 * 3600 * 1000);
+    const dbType = getDatabaseType();
     try {
-      const [stats] = await this.dataSource.query(
+      const [stats] = await databaseQuery<Array<Record<string, string | number>>>(
+        this.dataSource,
         `SELECT
-           COUNT(*)::int as total_requests,
-           COUNT(DISTINCT ip)::int as unique_visitors,
-           SUM("responseSize")::bigint as total_bandwidth,
-           SUM(CASE WHEN "statusCode" >= 500 THEN 1 ELSE 0 END)::int as errors_5xx,
-           SUM(CASE WHEN "statusCode" >= 400 AND "statusCode" < 500 THEN 1 ELSE 0 END)::int as errors_4xx
+           ${databaseCast('COUNT(*)', 'int')} as total_requests,
+           ${databaseCast('COUNT(DISTINCT ip)', 'int')} as unique_visitors,
+           ${databaseCast('COALESCE(SUM("responseSize"), 0)', 'bigint')} as total_bandwidth,
+           ${databaseCast('SUM(CASE WHEN "statusCode" >= 500 THEN 1 ELSE 0 END)', 'int')} as errors_5xx,
+           ${databaseCast('SUM(CASE WHEN "statusCode" >= 400 AND "statusCode" < 500 THEN 1 ELSE 0 END)', 'int')} as errors_4xx
          FROM access_logs WHERE "createdAt" >= $1`,
         [since],
+        dbType,
       );
 
-      const [userStats] = await this.dataSource.query(
-        `SELECT COUNT(*)::int as new_users FROM "users" WHERE "createdAt" >= $1`,
+      const [userStats] = await databaseQuery<Array<Record<string, string | number>>>(
+        this.dataSource,
+        `SELECT ${databaseCast('COUNT(*)', 'int')} as new_users FROM "users" WHERE "createdAt" >= $1`,
         [since],
+        dbType,
       );
 
-      const [alertStats] = await this.dataSource.query(
-        `SELECT COUNT(*)::int as total_alerts,
-                SUM(CASE WHEN "acknowledgedAt" IS NULL THEN 1 ELSE 0 END)::int as unacknowledged
+      const [alertStats] = await databaseQuery<Array<Record<string, string | number>>>(
+        this.dataSource,
+        `SELECT ${databaseCast('COUNT(*)', 'int')} as total_alerts,
+                ${databaseCast('SUM(CASE WHEN "acknowledgedAt" IS NULL THEN 1 ELSE 0 END)', 'int')} as unacknowledged
          FROM alerts WHERE "createdAt" >= $1`,
         [since],
+        dbType,
       );
 
       this.logger.log(

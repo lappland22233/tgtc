@@ -1,6 +1,6 @@
 # 文件分发系统
 
-基于 NestJS、Vue 3、PostgreSQL、Redis 与 Telegram Bot API 的文件分发与网盘系统。系统提供层级文件夹、标签、同步/异步/分片上传、私有与公开访问、独立分享链接、管理员审计、安全监控和访问分析。
+基于 NestJS、Vue 3、TypeORM、Redis 与 Telegram Bot API 的文件分发与网盘系统。元数据数据库默认使用 PostgreSQL，也正式支持显式 opt-in 的 SQLite 单机部署。系统提供层级文件夹、标签、同步/异步/分片上传、私有与公开访问、独立分享链接、管理员审计、安全监控和访问分析。
 
 ## 核心能力
 
@@ -58,7 +58,7 @@
 |---|---|
 | 后端 | NestJS 11、TypeScript、TypeORM 0.3 |
 | 前端 | Vue 3.5、TypeScript、Vite 6、TDesign Vue Next |
-| 数据库 | PostgreSQL 14+ |
+| 数据库 | PostgreSQL 14+（默认）/ SQLite 3（单机显式 opt-in） |
 | 队列 | Bull 4、Redis |
 | 文件存储 | Telegram Bot API / 二次开发本地 Bot API |
 | 认证 | Passport JWT、bcryptjs、HttpOnly Cookie |
@@ -74,9 +74,9 @@
 
 - Node.js 18+
 - npm（项目未使用 yarn 或 pnpm）
-- PostgreSQL 14+
-- Redis
-- Telegram Bot Token 与用于存储文件的 Chat ID
+- PostgreSQL 14+（默认、推荐用于多实例和较高写并发），或 SQLite 3（仅单实例/低写并发，必须设置 `DB_TYPE=sqlite`）
+- Redis（两种数据库模式均必需，Bull 队列不由 SQLite 替代）
+- Telegram Bot Token 与用于存储文件的 Chat ID（两种数据库模式均必需，SQLite 只保存元数据）
 - 可选：SMTP 服务
 - 可选：自建或本项目二次开发的 `telegram-bot-api`
 
@@ -90,6 +90,17 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 ```
 
 迁移会尝试创建 `uuid-ossp`。如果数据库账号没有创建扩展的权限，请先使用 PostgreSQL 超级用户执行第二条语句。
+
+SQLite 无需创建数据库服务，但不会被默认启用。SQLite 单机首次部署示例：
+
+```env
+DB_TYPE=sqlite
+DB_DATABASE=./data/tgtc.sqlite
+DB_SQLITE_BUSY_TIMEOUT_MS=5000
+DB_MIGRATIONS_RUN=false
+```
+
+随后在 `backend` 工作目录执行 `npm run migration:run:sqlite`。相对数据库路径按进程当前工作目录解析，因此 systemd/容器/PM2 的工作目录必须固定且与迁移命令一致。
 
 ### 2. 配置并启动后端
 
@@ -138,14 +149,16 @@ VITE_API_PROXY_TARGET=http://localhost:3000
 
 | 变量 | 默认值 | 说明 |
 |---|---:|---|
-| `DB_HOST` | `localhost` | PostgreSQL 地址，启动必检 |
-| `DB_PORT` | `5432` | PostgreSQL 端口，启动必检 |
-| `DB_USERNAME` | `postgres` | 数据库用户，启动必检 |
-| `DB_PASSWORD` | - | 数据库密码，启动必检 |
-| `DB_DATABASE` | `test` | 数据库名，启动必检 |
-| `DB_SYNCHRONIZE` | `false` | 仅开发环境可按需启用；生产环境始终强制关闭 |
-| `DB_MIGRATIONS_RUN` | `false` | 启动时自动执行迁移 |
-| `DB_POOL_SIZE` | `20` | 连接池上限，最大允许 200 |
+| `DB_TYPE` | `postgres` | `postgres`（默认）或 `sqlite`；SQLite 必须显式 opt-in |
+| `DB_HOST` | `localhost` | PostgreSQL 地址，仅 PostgreSQL 必需 |
+| `DB_PORT` | `5432` | PostgreSQL 端口，仅 PostgreSQL 必需 |
+| `DB_USERNAME` | `postgres` | 数据库用户，仅 PostgreSQL 必需 |
+| `DB_PASSWORD` | - | 数据库密码，仅 PostgreSQL 必需 |
+| `DB_DATABASE` | PG: `test` / SQLite: `data/tgtc.sqlite` | PostgreSQL 数据库名或 SQLite 文件路径；相对路径基于进程工作目录 |
+| `DB_SQLITE_BUSY_TIMEOUT_MS` | `5000` | SQLite 写锁等待上限；超时仍会失败，不等于提高写并发能力 |
+| `DB_SYNCHRONIZE` | `false` | 兼容项；实现始终关闭，表结构只能由迁移管理 |
+| `DB_MIGRATIONS_RUN` | `false` | 启动时自动执行迁移；生产推荐部署前显式运行 |
+| `DB_POOL_SIZE` | `20` | PostgreSQL 连接池上限，最大允许 200；SQLite 不适用 |
 | `DB_CONNECTION_TIMEOUT_MS` | `5000` | 获取数据库连接超时 |
 | `DB_STATEMENT_TIMEOUT_MS` | `30000` | PostgreSQL statement timeout |
 | `DB_QUERY_TIMEOUT_MS` | `35000` | 驱动查询超时，不得小于 statement timeout |
@@ -154,6 +167,22 @@ VITE_API_PROXY_TARGET=http://localhost:3000
 | `DB_SSL` | `false` | 是否启用数据库 TLS |
 
 生产环境不要使用 `DB_SYNCHRONIZE=true`，应通过迁移管理结构变化。
+
+#### 数据库正式支持矩阵与 SQLite 运维边界
+
+| 能力/场景 | PostgreSQL 14+ | SQLite 3 |
+|---|---|---|
+| 默认启用 | 是（未设置 `DB_TYPE` 时使用） | 否，必须 `DB_TYPE=sqlite` |
+| 部署形态 | 单实例或多实例 | 仅单应用实例、单 SQLite 文件、低写并发 |
+| Schema 生命周期 | PostgreSQL 迁移链 | 独立 SQLite 基线与增量迁移链 |
+| 队列与文件存储 | 仍需 Redis + Telegram | 仍需 Redis + Telegram |
+| 建议用途 | 生产默认、较高并发 | 小规模单机生产、开发/验收 |
+
+SQLite 允许并发读取，但写入最终串行化。`DB_SQLITE_BUSY_TIMEOUT_MS` 仅控制等待锁的时长；超过上限仍可能出现 `SQLITE_BUSY`。不要多开后端实例共享同一 SQLite 文件，不要将数据库置于 NFS/SMB 等网络文件系统，也不要把高频写负载误当作已获得与 PostgreSQL 相同的并发能力；达到这些需求时使用 PostgreSQL。
+
+迁移与发布步骤：停止写流量（SQLite 建议停应用）→ 备份 → 执行对应迁移命令 → 运行检查 → 启动。PostgreSQL 使用 `npm run migration:run:postgres`（原 `migration:run` 外部 DB 路径仍保留）；SQLite 使用 `npm run migration:run:sqlite`。SQLite 发布门禁为 `npm run gate:sqlite`，覆盖隔离迁移链、真实文件迁移/回滚重放、完整性、关键仓储业务与锁冲突测试；该门禁使用测试替身处理业务外围依赖，**不代表真实 Redis 或 Telegram 网络端到端验证**。
+
+SQLite 备份前应停止应用或使用 SQLite 在线备份能力取得一致快照，不要在写入期间直接复制单个文件。至少保留数据库文件及同目录可能存在的 `-wal`/`-shm` 文件的一致集合；恢复时先停应用，在同一固定路径完整替换并检查权限，再运行 `PRAGMA integrity_check` 与迁移。数据库备份不能替代 Telegram Bot API workdir 备份。
 
 ### 应用与认证
 
@@ -221,7 +250,8 @@ Redis 承载 `metrics-aggregation`、`attack-detection`、`alert-evaluation`、`
 - 后端 `TELEGRAM_LOCAL_FILE_DIR` 必须与 systemd 服务 `ExecStart` 中的 `--dir` 参数**完全一致**；
 - 禁止使用 `/tmp` 等临时目录作为 workdir（会被系统清理）；
 - 禁止在同一 Bot Token 上使用多个不同的 `--dir` 交替启动；
-- 备份/迁移时必须整体保留 workdir（含 session 与 documents 等子目录），不可只复制数据库。
+- workdir 是不可变的持久化资产。尤其不得删除、截断、覆盖或排除其中的 `db.sqlite` 与 `td.binlog`；它们不是本项目可重建的缓存；
+- 备份/迁移时必须在 Bot API 停止或取得一致快照后整体保留 workdir（含 `db.sqlite`、`td.binlog`、session、documents 等），不可只复制后端 PostgreSQL/SQLite 元数据库。恢复时也必须整体恢复到原绝对路径，并保持属主与权限。
 
 `deploy.sh` 已在编译本地 Bot API 阶段加入 workdir 一致性检查（绝对路径、非 `/tmp`、已有数据时提示保留）。
 
@@ -365,8 +395,13 @@ npm test
 npm run test:cov
 npm run migration:create
 npm run migration:generate
-npm run migration:run
+npm run migration:run             # 环境驱动，未设置 DB_TYPE 时为 PostgreSQL
+npm run migration:run:postgres    # 显式 PostgreSQL（外部 DB 路径）
+npm run migration:run:sqlite      # 显式 SQLite
 npm run migration:revert
+npm run migration:revert:postgres
+npm run migration:revert:sqlite
+npm run gate:sqlite               # SQLite 迁移 + 真实文件集成发布门禁
 npm run start:prod
 ```
 

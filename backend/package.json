@@ -18,7 +18,13 @@
     "migration:generate": "typeorm-ts-node-commonjs migration:generate -d src/database/data-source.ts src/migrations/Migration",
     "migration:run": "typeorm-ts-node-commonjs migration:run -d src/database/data-source.ts",
     "migration:revert": "typeorm-ts-node-commonjs migration:revert -d src/database/data-source.ts",
-    "migration:run:sqlite": "cross-env DB_TYPE=sqlite DB_DATABASE=data/tgtc.sqlite DB_MIGRATIONS_RUN=false typeorm-ts-node-commonjs migration:run -d src/database/data-source.ts",
+    "migration:run:postgres": "cross-env DB_TYPE=postgres typeorm-ts-node-commonjs migration:run -d src/database/data-source.ts",
+    "migration:revert:postgres": "cross-env DB_TYPE=postgres typeorm-ts-node-commonjs migration:revert -d src/database/data-source.ts",
+    "migration:run:sqlite": "cross-env DB_TYPE=sqlite DB_MIGRATIONS_RUN=false typeorm-ts-node-commonjs migration:run -d src/database/data-source.ts",
+    "migration:revert:sqlite": "cross-env DB_TYPE=sqlite DB_MIGRATIONS_RUN=false typeorm-ts-node-commonjs migration:revert -d src/database/data-source.ts",
+    "test:integration:sqlite": "cross-env DB_TYPE=sqlite jest --runInBand src/database/sqlite-real-qa.spec.ts",
+    "test:migrations:sqlite": "cross-env DB_TYPE=sqlite jest --runInBand src/migrations/sqlite-migrations.spec.ts",
+    "gate:sqlite": "jest --runInBand scripts/data-migrator-utils.spec.ts && npm run test:migrations:sqlite && npm run test:integration:sqlite",
     "build:data-migrator": "tsc --target ES2021 --module commonjs --moduleResolution node --rootDir . --esModuleInterop --experimentalDecorators --emitDecoratorMetadata --skipLibCheck --outDir dist-migrator scripts/build-data-migrator.ts && node -e \"require('fs').writeFileSync('dist-migrator/build-data-migrator.js','\\\"use strict\\\";\\nrequire(\\\"./scripts/build-data-migrator.js\\\");\\n')\""
   },
   "dependencies": {
