@@ -77,4 +77,5 @@ DEADLOCK_STATIC_REVIEW.md
 .qoder/*
 .github/workflows/quality-gates.yml
 .workbuddy/*
+# 本地正式发行产物（按 .Releases/v<版本>/ 独立存放）
 .Releases/*

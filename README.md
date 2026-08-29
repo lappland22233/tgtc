@@ -310,6 +310,20 @@ Redis 承载 `metrics-aggregation`、`attack-detection`、`alert-evaluation`、`
 
 Multer 单文件硬上限为 600 MB，单分片硬上限为 100 MB；实际业务上限由 `MAX_FILE_SIZE` 或管理后台动态配置决定，默认示例为 80 MB。
 
+### Linux x64 预编译发行版
+
+正式发行文件按版本存放于 `.Releases/v<版本>/`。完整 Linux x64 包包含已构建前端、后端生产依赖、Node.js 运行时和二次开发 Telegram Bot API 可执行文件：
+
+```text
+.Releases/
+├── tgtc-v1.x.x-linux-x64.tar.gz
+├── SHA256SUMS
+├── RELEASE.txt
+└── README.md
+```
+
+发行包不包含 TypeScript 源码、测试和开发依赖。数据库结构仍由包内编译后的正式运行时迁移维护；这些迁移不是开发文件，新库初始化和后续升级均依赖它们。
+
 ### 手工生产部署
 
 ```bash
