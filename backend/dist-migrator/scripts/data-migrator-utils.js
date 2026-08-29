@@ -1,11 +1,29 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.sqliteForeignKeyMatches = sqliteForeignKeyMatches;
 exports.normalizeSql = normalizeSql;
 exports.sqliteIndexMatches = sqliteIndexMatches;
 exports.beginPostgresReadOnlySnapshot = beginPostgresReadOnlySnapshot;
 exports.publishMigratedFile = publishMigratedFile;
 exports.publishMigrationArtifacts = publishMigrationArtifacts;
 const fs_1 = require("fs");
+/** SQLite 用 id 区分独立外键、用 seq 表示复合外键列顺序。 */
+function sqliteForeignKeyMatches(actualRows, expected) {
+    const groups = new Map();
+    for (const row of actualRows) {
+        const group = groups.get(row.id) || [];
+        group.push(row);
+        groups.set(row.id, group);
+    }
+    return [...groups.values()].some((group) => {
+        const rows = [...group].sort((left, right) => left.seq - right.seq);
+        return rows.length === expected.columns.length
+            && rows.every((row, index) => row.table === expected.referencedTable
+                && row.from === expected.columns[index]
+                && row.to === expected.referencedColumns[index]
+                && (!expected.onDelete || row.on_delete.toUpperCase() === expected.onDelete.toUpperCase()));
+    });
+}
 function normalizeSql(value) {
     return (value || '')
         .replace(/["`\[\]]/g, '')

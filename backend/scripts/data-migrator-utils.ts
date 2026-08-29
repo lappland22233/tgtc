@@ -13,6 +13,44 @@ export type SqliteIndexShape = {
   sql?: string;
 };
 
+export type SqliteForeignKeyRow = {
+  id: number;
+  seq: number;
+  table: string;
+  from: string;
+  to: string;
+  on_delete: string;
+};
+
+export type ExpectedSqliteForeignKey = {
+  columns: string[];
+  referencedTable: string;
+  referencedColumns: string[];
+  onDelete?: string;
+};
+
+/** SQLite 用 id 区分独立外键、用 seq 表示复合外键列顺序。 */
+export function sqliteForeignKeyMatches(
+  actualRows: readonly SqliteForeignKeyRow[],
+  expected: ExpectedSqliteForeignKey,
+): boolean {
+  const groups = new Map<number, SqliteForeignKeyRow[]>();
+  for (const row of actualRows) {
+    const group = groups.get(row.id) || [];
+    group.push(row);
+    groups.set(row.id, group);
+  }
+
+  return [...groups.values()].some((group) => {
+    const rows = [...group].sort((left, right) => left.seq - right.seq);
+    return rows.length === expected.columns.length
+      && rows.every((row, index) => row.table === expected.referencedTable
+        && row.from === expected.columns[index]
+        && row.to === expected.referencedColumns[index]
+        && (!expected.onDelete || row.on_delete.toUpperCase() === expected.onDelete.toUpperCase()));
+  });
+}
+
 export function normalizeSql(value: string | undefined): string {
   return (value || '')
     .replace(/["`\[\]]/g, '')

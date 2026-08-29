@@ -43,6 +43,9 @@ export class SqliteEntitySchema1700000000000 implements MigrationInterface {
         .flatMap((index) => index.columns.map((column) => `${metadata.tableName}.${typeof column === 'string' ? column : column.databaseName}`))),
     );
     for (const metadata of metadatas) {
+      // TypeORM 自动注册的 closure-junction metadata 不含外键定义；交由后续
+      // SQLiteSchemaAlignment 以显式 DDL 创建，避免先占位成无外键闭包表。
+      if (metadata.tableType === 'closure-junction') continue;
       if (await queryRunner.hasTable(metadata.tableName)) continue;
       await queryRunner.createTable(new Table({
         name: metadata.tableName,

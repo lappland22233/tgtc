@@ -312,13 +312,9 @@ async function validateSchema(target, expectations) {
         }
         const foreignKeys = await target.query(`PRAGMA foreign_key_list(${quote(expected.table)})`);
         for (const expectedForeignKey of expected.foreignKeys) {
-            const grouped = foreignKeys.filter((foreignKey) => foreignKey.table === expectedForeignKey.referencedTable)
-                .sort((a, b) => a.seq - b.seq);
-            const found = expectedForeignKey.columns.every((column, index) => grouped[index]?.from === column
-                && grouped[index]?.to === expectedForeignKey.referencedColumns[index])
-                && (!expectedForeignKey.onDelete || grouped[0]?.on_delete.toUpperCase() === expectedForeignKey.onDelete.toUpperCase());
-            if (!found)
+            if (!(0, data_migrator_utils_1.sqliteForeignKeyMatches)(foreignKeys, expectedForeignKey)) {
                 throw new Error(`schema/外键校验失败: ${expected.table}(${expectedForeignKey.columns.join(',')})`);
+            }
         }
         const indexRows = await target.query(`PRAGMA index_list(${quote(expected.table)})`);
         const actualIndexes = await Promise.all(indexRows.map((index) => readIndex(target, expected.table, index)));

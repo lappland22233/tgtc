@@ -4,7 +4,13 @@ import { dirname, resolve } from 'path';
 import { DataSource, DataSourceOptions, EntityMetadata, QueryRunner } from 'typeorm';
 import { SqliteEntitySchema1700000000000 } from '../src/migrations/0000000000000-SqliteEntitySchema';
 import { SqliteSchemaAlignment1800000000000 } from '../src/migrations/1800000000000-SqliteSchemaAlignment';
-import { beginPostgresReadOnlySnapshot, publishMigrationArtifacts, sqliteIndexMatches } from './data-migrator-utils';
+import {
+  beginPostgresReadOnlySnapshot,
+  publishMigrationArtifacts,
+  sqliteForeignKeyMatches,
+  sqliteIndexMatches,
+  SqliteForeignKeyRow,
+} from './data-migrator-utils';
 
 type DatabaseModules = {
   createDatabaseOptions: (env?: NodeJS.ProcessEnv) => DataSourceOptions;
@@ -345,14 +351,13 @@ async function validateSchema(target: DataSource, expectations: readonly SchemaE
         throw new Error(`schema/列可空性校验失败: ${expected.table}.${expectedColumn.name}`);
       }
     }
-    const foreignKeys = await target.query(`PRAGMA foreign_key_list(${quote(expected.table)})`) as Array<{ id: number; seq: number; table: string; from: string; to: string; on_delete: string }>;
+    const foreignKeys = await target.query(
+      `PRAGMA foreign_key_list(${quote(expected.table)})`,
+    ) as SqliteForeignKeyRow[];
     for (const expectedForeignKey of expected.foreignKeys) {
-      const grouped = foreignKeys.filter((foreignKey) => foreignKey.table === expectedForeignKey.referencedTable)
-        .sort((a, b) => a.seq - b.seq);
-      const found = expectedForeignKey.columns.every((column, index) => grouped[index]?.from === column
-        && grouped[index]?.to === expectedForeignKey.referencedColumns[index])
-        && (!expectedForeignKey.onDelete || grouped[0]?.on_delete.toUpperCase() === expectedForeignKey.onDelete.toUpperCase());
-      if (!found) throw new Error(`schema/外键校验失败: ${expected.table}(${expectedForeignKey.columns.join(',')})`);
+      if (!sqliteForeignKeyMatches(foreignKeys, expectedForeignKey)) {
+        throw new Error(`schema/外键校验失败: ${expected.table}(${expectedForeignKey.columns.join(',')})`);
+      }
     }
     const indexRows = await target.query(`PRAGMA index_list(${quote(expected.table)})`) as SqliteIndexInfo[];
     const actualIndexes = await Promise.all(indexRows.map((index) => readIndex(target, expected.table, index)));

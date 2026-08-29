@@ -60,6 +60,27 @@ describe('SQLite schema migrations（隔离内存库）', () => {
     expect(isBanned?.type.toLowerCase()).toBe('boolean');
     expect(sqliteAffinity(isBanned.type)).toBe('NUMERIC');
 
+    const closureForeignKeys = await dataSource.query('PRAGMA foreign_key_list("folder_closure")') as Array<{
+      id: number;
+      seq: number;
+      table: string;
+      from: string;
+      to: string;
+      on_delete: string;
+    }>;
+    expect(closureForeignKeys).toHaveLength(2);
+    expect(new Set(closureForeignKeys.map((foreignKey) => foreignKey.id)).size).toBe(2);
+    expect(closureForeignKeys.map((foreignKey) => ({
+      seq: foreignKey.seq,
+      table: foreignKey.table,
+      from: foreignKey.from,
+      to: foreignKey.to,
+      onDelete: foreignKey.on_delete,
+    })).sort((left, right) => left.from.localeCompare(right.from))).toEqual([
+      { seq: 0, table: 'folders', from: 'id_ancestor', to: 'id', onDelete: 'CASCADE' },
+      { seq: 0, table: 'folders', from: 'id_descendant', to: 'id', onDelete: 'CASCADE' },
+    ]);
+
     const integrity = await dataSource.query('PRAGMA integrity_check');
     expect(Object.values(integrity[0])).toEqual(['ok']);
   });

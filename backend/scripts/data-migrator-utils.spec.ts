@@ -2,6 +2,7 @@ import {
   beginPostgresReadOnlySnapshot,
   publishMigratedFile,
   publishMigrationArtifacts,
+  sqliteForeignKeyMatches,
   sqliteIndexMatches,
 } from './data-migrator-utils';
 
@@ -18,6 +19,51 @@ describe('beginPostgresReadOnlySnapshot', () => {
       'transaction:REPEATABLE READ',
       'query:SET TRANSACTION READ ONLY',
     ]);
+  });
+});
+
+describe('sqliteForeignKeyMatches', () => {
+  const folderForeignKeys = [
+    { id: 0, seq: 0, table: 'folders', from: 'id_descendant', to: 'id', on_delete: 'CASCADE' },
+    { id: 1, seq: 0, table: 'folders', from: 'id_ancestor', to: 'id', on_delete: 'CASCADE' },
+  ];
+
+  it('区分两个指向同一张表的独立单列外键', () => {
+    expect(sqliteForeignKeyMatches(folderForeignKeys, {
+      columns: ['id_ancestor'], referencedTable: 'folders', referencedColumns: ['id'], onDelete: 'CASCADE',
+    })).toBe(true);
+    expect(sqliteForeignKeyMatches(folderForeignKeys, {
+      columns: ['id_descendant'], referencedTable: 'folders', referencedColumns: ['id'], onDelete: 'cascade',
+    })).toBe(true);
+  });
+
+  it('按 id 与 seq 匹配完整复合外键，拒绝乱序和前缀匹配', () => {
+    const rows = [
+      { id: 2, seq: 1, table: 'parents', from: 'tenant_id', to: 'tenant_id', on_delete: 'CASCADE' },
+      { id: 3, seq: 0, table: 'parents', from: 'alternate_id', to: 'id', on_delete: 'CASCADE' },
+      { id: 2, seq: 0, table: 'parents', from: 'parent_id', to: 'id', on_delete: 'CASCADE' },
+    ];
+    expect(sqliteForeignKeyMatches(rows, {
+      columns: ['parent_id', 'tenant_id'],
+      referencedTable: 'parents',
+      referencedColumns: ['id', 'tenant_id'],
+      onDelete: 'CASCADE',
+    })).toBe(true);
+    expect(sqliteForeignKeyMatches(rows, {
+      columns: ['tenant_id', 'parent_id'],
+      referencedTable: 'parents',
+      referencedColumns: ['tenant_id', 'id'],
+      onDelete: 'CASCADE',
+    })).toBe(false);
+    expect(sqliteForeignKeyMatches(rows, {
+      columns: ['parent_id'], referencedTable: 'parents', referencedColumns: ['id'], onDelete: 'CASCADE',
+    })).toBe(false);
+  });
+
+  it('拒绝删除动作不一致的外键', () => {
+    expect(sqliteForeignKeyMatches(folderForeignKeys, {
+      columns: ['id_ancestor'], referencedTable: 'folders', referencedColumns: ['id'], onDelete: 'SET NULL',
+    })).toBe(false);
   });
 });
 

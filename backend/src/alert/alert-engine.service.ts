@@ -102,17 +102,21 @@ export class AlertEngineService {
     cooldownMinutes: number,
   ): Promise<Alert | null> {
     const cooldownSince = new Date(Date.now() - cooldownMinutes * 60 * 1000);
+    const databaseType = getDatabaseType();
+    // PG 18 会分别从 INSERT 目标列和比较运算推断重复参数 $1；显式统一为 varchar，
+    // 避免 ruleId 列的 varchar 与比较上下文的 text 产生类型推断冲突。
+    const ruleIdParameter = databaseType === 'postgres' ? '$1::varchar' : '$1';
     try {
       const rows = await this.alertRepo.manager.transaction(async (manager) => {
         // PostgreSQL 使用事务级 advisory lock；SQLite 写事务本身串行化，不执行 PG 专用锁。
-        if (getDatabaseType() === 'postgres') {
+        if (databaseType === 'postgres') {
           await manager.query('SELECT pg_advisory_xact_lock(hashtext($1))', [eval_.ruleId]);
         }
         return databaseQuery(manager,
           `INSERT INTO alerts (id, "ruleId", level, title, message, context, "createdAt")
-           SELECT $7, $1, $2, $3, $4, $5, ${databaseCurrentTimestamp()}
+           SELECT $7, ${ruleIdParameter}, $2, $3, $4, $5, ${databaseCurrentTimestamp()}
            WHERE NOT EXISTS (
-             SELECT 1 FROM alerts WHERE "ruleId" = $1 AND "createdAt" > $6
+             SELECT 1 FROM alerts WHERE "ruleId" = ${ruleIdParameter} AND "createdAt" > $6
            )
            RETURNING id, "ruleId", level, title, message, context,
                      "acknowledgedAt", "acknowledgedBy", "createdAt"`,
@@ -125,7 +129,7 @@ export class AlertEngineService {
             cooldownSince,
             randomUUID(),
           ],
-          getDatabaseType(),
+          databaseType,
         );
       });
       const resultRows = rows as Array<Record<string, unknown>>;
