@@ -89,7 +89,10 @@ function sqliteAffinity(type: string): string {
   return 'NUMERIC';
 }
 function expectedAffinity(type: unknown): string {
-  if (type === Number || type === Boolean || type === 'bigint' || type === 'integer' || type === 'int' || type === 'boolean') return 'INTEGER';
+  if (type === Number || type === 'bigint' || type === 'integer' || type === 'int') return 'INTEGER';
+  // SQLite 基线/增量迁移将布尔列声明为 boolean；按 SQLite 类型亲和性规则，
+  // BOOLEAN 属于 NUMERIC，而不是 INTEGER。值仍由 convertValue 规范化为 0/1。
+  if (type === Boolean || type === 'boolean') return 'NUMERIC';
   if (type === Buffer || type === 'blob') return 'BLOB';
   if (type === Date || type === 'timestamp' || type === 'timestamptz' || type === 'datetime') return 'NUMERIC';
   return 'TEXT';

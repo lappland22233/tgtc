@@ -1,5 +1,14 @@
 import { DataSource, EntitySchema } from 'typeorm';
 
+function sqliteAffinity(type: string): string {
+  const normalized = type.toUpperCase();
+  if (normalized.includes('INT')) return 'INTEGER';
+  if (normalized.includes('CHAR') || normalized.includes('CLOB') || normalized.includes('TEXT')) return 'TEXT';
+  if (normalized.includes('BLOB') || !normalized) return 'BLOB';
+  if (normalized.includes('REAL') || normalized.includes('FLOA') || normalized.includes('DOUB')) return 'REAL';
+  return 'NUMERIC';
+}
+
 describe('SQLite schema migrations（隔离内存库）', () => {
   let dataSource: DataSource;
   const originalDbType = process.env.DB_TYPE;
@@ -45,6 +54,11 @@ describe('SQLite schema migrations（隔离内存库）', () => {
     const verifyIndexes = await dataSource.query('PRAGMA index_list("file_verify_tasks")');
     expect(verifyIndexes.find((index: { name: string }) => index.name === 'uq_file_verify_tasks_active_slot'))
       .toMatchObject({ unique: 1, partial: 1 });
+
+    const userColumns = await dataSource.query('PRAGMA table_info("users")');
+    const isBanned = userColumns.find((column: { name: string }) => column.name === 'isBanned');
+    expect(isBanned?.type.toLowerCase()).toBe('boolean');
+    expect(sqliteAffinity(isBanned.type)).toBe('NUMERIC');
 
     const integrity = await dataSource.query('PRAGMA integrity_check');
     expect(Object.values(integrity[0])).toEqual(['ok']);
