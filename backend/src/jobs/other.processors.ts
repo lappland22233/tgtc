@@ -4,6 +4,7 @@ import { DataSource } from 'typeorm';
 import { Job } from 'bull';
 import { QUEUE_NAMES } from './bull-queue.module';
 import { AlertEngineService } from '../alert/alert-engine.service';
+import { AggregatedMetrics } from '../alert/alert.rules';
 import { AlertGateway } from '../alert/alert.gateway';
 import { BehaviorAnalyzer } from '../security/behavior-analyzer.service';
 import { databaseCast, databaseQuery, getDatabaseType } from '../database/database-types';
@@ -21,13 +22,15 @@ export class AlertEvaluationProcessor {
 
   /** 每 1 分钟评估告警规则 */
   @Process('evaluate-alerts')
-  async evaluateAlerts(_job: Job): Promise<void> {
+  async evaluateAlerts(job: Job<{ windowTime?: string }>): Promise<void> {
     try {
       // 从预聚合表读取最近 1 分钟的指标
       // 使用 UTC 时间截断到分钟，与 metrics-aggregation 处理器写入窗口保持一致；
       // 若用本地时间截断，非 UTC 部署时永远查不到预聚合窗口，告警系统会静默失效。
-      // 评估上一完整分钟，确保聚合任务已有机会写入对应窗口。
-      const now = new Date(Date.now() - 60 * 1000);
+      // 显式窗口锚点与聚合任务语义一致：先减一分钟，再截断到分钟。
+      const now = job.data?.windowTime
+        ? new Date(new Date(job.data.windowTime).getTime() - 60 * 1000)
+        : new Date(Date.now() - 60 * 1000);
       const windowTime = new Date(Date.UTC(
         now.getUTCFullYear(),
         now.getUTCMonth(),
@@ -38,12 +41,14 @@ export class AlertEvaluationProcessor {
         0,
       ));
 
-      const [metrics] = await this.dataSource.query(
+      const [metrics] = await databaseQuery<AggregatedMetrics[]>(
+        this.dataSource,
         `SELECT "totalRequests", "qpsAvg", "error5xxCount", "error4xxCount",
                 "totalBandwidth", "p95Duration", "uniqueIps"
          FROM "access_log_metrics_1min"
          WHERE "windowTime" = $1`,
         [windowTime],
+        getDatabaseType(),
       );
 
       if (!metrics) {

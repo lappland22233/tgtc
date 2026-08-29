@@ -211,7 +211,7 @@ describe('真实 SQLite 数据源关键业务与并发 QA', () => {
     const { AccessLog } = require('../common/entities/access-log.entity') as typeof import('../common/entities/access-log.entity');
     const { FolderService } = require('../folder/folder.service') as typeof import('../folder/folder.service');
     const { BehaviorAnalyzer } = require('../security/behavior-analyzer.service') as typeof import('../security/behavior-analyzer.service');
-    const { WeeklyReportProcessor } = require('../jobs/other.processors') as typeof import('../jobs/other.processors');
+    const { AlertEvaluationProcessor, WeeklyReportProcessor } = require('../jobs/other.processors') as typeof import('../jobs/other.processors');
     const { MetricsAggregationProcessor } = require('../jobs/metrics-aggregation.processor') as typeof import('../jobs/metrics-aggregation.processor');
 
     await dataSource.query(`CREATE TABLE IF NOT EXISTS "access_log_metrics_1min" (
@@ -241,9 +241,24 @@ describe('真实 SQLite 数据源关键业务与并发 QA', () => {
       ip: `203.0.113.${index + 1}`, method: 'GET', path: '/aggregate', statusCode: index === 3 ? 500 : 200,
       responseSize: 100, duration, userAgent: index === 0 ? null : 'qa', referer: null, userId: owner.id, createdAt: sourceTime,
     })));
-    await new MetricsAggregationProcessor(accessLogRepo).aggregate1Min({ data: { windowTime: new Date(windowTime.getTime() + 60_000).toISOString() } } as any);
-    const [metric] = await dataSource.query('SELECT * FROM "access_log_metrics_1min" ORDER BY "windowTime" DESC LIMIT 1');
+    const jobWindowTime = new Date(windowTime.getTime() + 60_000).toISOString();
+    await new MetricsAggregationProcessor(accessLogRepo).aggregate1Min({ data: { windowTime: jobWindowTime } } as any);
+    const [metric] = await dataSource.query(
+      'SELECT *, typeof("windowTime") AS "windowTimeType" FROM "access_log_metrics_1min" WHERE "windowTime" = ?',
+      [windowTime.toISOString().replace('T', ' ').replace('Z', '')],
+    );
+    expect(metric.windowTime).toBe(windowTime.toISOString().replace('T', ' ').replace('Z', ''));
+    expect(metric.windowTimeType).toBe('text');
     expect(Number(metric.p95Duration)).toBeCloseTo(38.5);
+
+    const alertEngine = { evaluateAndCreateAlerts: jest.fn().mockResolvedValue([]) } as any;
+    const alertGateway = { broadcastAlert: jest.fn() } as any;
+    await new AlertEvaluationProcessor(dataSource, alertEngine, alertGateway)
+      .evaluateAlerts({ data: { windowTime: jobWindowTime } } as any);
+    expect(alertEngine.evaluateAndCreateAlerts).toHaveBeenCalledWith(expect.objectContaining({
+      totalRequests: 4,
+      error5xxCount: 1,
+    }));
 
     const analyzer = new BehaviorAnalyzer(dataSource, { get: jest.fn().mockImplementation((_key: string, fallback: string) => fallback) } as any);
     await analyzer.calculateBaselines();
