@@ -6,6 +6,7 @@ import { SqliteEntitySchema1700000000000 } from '../src/migrations/0000000000000
 import { SqliteSchemaAlignment1800000000000 } from '../src/migrations/1800000000000-SqliteSchemaAlignment';
 import {
   beginPostgresReadOnlySnapshot,
+  NON_ENTITY_TABLE_DEFINITIONS,
   publishMigrationArtifacts,
   sqliteForeignKeyMatches,
   sqliteIndexMatches,
@@ -169,12 +170,13 @@ async function buildPlans(source: DataSource, sourceSnapshot: QueryExecutor, tar
       targetMetadata,
     };
   });
-  const nonEntityPlans: TablePlan[] = [
-    { table: 'file_tags', columns: ['fileId', 'tagId'], primaryColumns: ['fileId', 'tagId'] },
-    { table: 'folder_closure', columns: ['id_ancestor', 'id_descendant'], primaryColumns: ['id_ancestor', 'id_descendant'] },
-  ];
-  for (const plan of nonEntityPlans) {
-    if (await postgresTableExists(sourceSnapshot, plan.table)) plans.push(plan);
+  for (const definition of NON_ENTITY_TABLE_DEFINITIONS) {
+    if (!(await postgresTableExists(sourceSnapshot, definition.table))) continue;
+    plans.push({
+      table: definition.table,
+      columns: definition.columns.map((column) => column.name),
+      primaryColumns: definition.primaryColumns,
+    });
   }
   return plans;
 }
@@ -266,54 +268,21 @@ function metadataExpectation(metadata: EntityMetadata): SchemaExpectation {
 }
 
 function nonEntityExpectations(): SchemaExpectation[] {
-  return [
-    {
-      table: 'file_tags',
-      columns: [{ name: 'fileId', type: 'TEXT', nullable: false }, { name: 'tagId', type: 'TEXT', nullable: false }],
-      primaryColumns: ['fileId', 'tagId'],
-      foreignKeys: [
-        { columns: ['fileId'], referencedTable: 'files', referencedColumns: ['id'], onDelete: 'CASCADE' },
-        { columns: ['tagId'], referencedTable: 'tags', referencedColumns: ['id'], onDelete: 'CASCADE' },
-      ],
-      indexes: [
-        { name: 'idx_file_tags_tagId', columns: ['tagId'], unique: false },
-        { name: 'idx_file_tags_fileId', columns: ['fileId'], unique: false },
-      ],
-    },
-    {
-      table: 'folder_closure',
-      columns: [{ name: 'id_ancestor', type: 'TEXT', nullable: false }, { name: 'id_descendant', type: 'TEXT', nullable: false }],
-      primaryColumns: ['id_ancestor', 'id_descendant'],
-      foreignKeys: [
-        { columns: ['id_ancestor'], referencedTable: 'folders', referencedColumns: ['id'], onDelete: 'CASCADE' },
-        { columns: ['id_descendant'], referencedTable: 'folders', referencedColumns: ['id'], onDelete: 'CASCADE' },
-      ],
-      indexes: [{ name: 'IDX_closure_descendant', columns: ['id_descendant'], unique: false }],
-    },
-  ];
+  return NON_ENTITY_TABLE_DEFINITIONS.map((definition) => ({
+    table: definition.table,
+    columns: definition.columns,
+    primaryColumns: definition.primaryColumns,
+    foreignKeys: definition.foreignKeys,
+    indexes: definition.indexes,
+  }));
 }
 
 async function ensureNonEntityTables(target: DataSource, plans: readonly TablePlan[]): Promise<void> {
-  if (plans.some((plan) => plan.table === 'file_tags')) {
-    await target.query(`CREATE TABLE IF NOT EXISTS "file_tags" (
-      "fileId" varchar NOT NULL,
-      "tagId" varchar NOT NULL,
-      PRIMARY KEY ("fileId", "tagId"),
-      FOREIGN KEY ("fileId") REFERENCES "files"("id") ON DELETE CASCADE,
-      FOREIGN KEY ("tagId") REFERENCES "tags"("id") ON DELETE CASCADE
-    )`);
-    await target.query('CREATE INDEX IF NOT EXISTS "idx_file_tags_tagId" ON "file_tags" ("tagId")');
-    await target.query('CREATE INDEX IF NOT EXISTS "idx_file_tags_fileId" ON "file_tags" ("fileId")');
-  }
-  if (plans.some((plan) => plan.table === 'folder_closure')) {
-    await target.query(`CREATE TABLE IF NOT EXISTS "folder_closure" (
-      "id_ancestor" varchar NOT NULL,
-      "id_descendant" varchar NOT NULL,
-      PRIMARY KEY ("id_ancestor", "id_descendant"),
-      FOREIGN KEY ("id_ancestor") REFERENCES "folders"("id") ON DELETE CASCADE,
-      FOREIGN KEY ("id_descendant") REFERENCES "folders"("id") ON DELETE CASCADE
-    )`);
-    await target.query('CREATE INDEX IF NOT EXISTS "IDX_closure_descendant" ON "folder_closure" ("id_descendant")');
+  const plannedTables = new Set(plans.map((plan) => plan.table));
+  for (const definition of NON_ENTITY_TABLE_DEFINITIONS) {
+    if (!plannedTables.has(definition.table)) continue;
+    await target.query(definition.createSql);
+    for (const sql of definition.indexSql) await target.query(sql);
   }
 }
 

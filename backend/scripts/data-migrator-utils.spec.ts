@@ -1,10 +1,54 @@
+import { DataSource } from 'typeorm';
 import {
   beginPostgresReadOnlySnapshot,
+  NON_ENTITY_TABLE_DEFINITIONS,
   publishMigratedFile,
   publishMigrationArtifacts,
   sqliteForeignKeyMatches,
   sqliteIndexMatches,
 } from './data-migrator-utils';
+
+describe('NON_ENTITY_TABLE_DEFINITIONS', () => {
+  it('覆盖 jobs 依赖的全部无实体聚合表及其迁移主键', () => {
+    const definitions = new Map(NON_ENTITY_TABLE_DEFINITIONS.map((definition) => [definition.table, definition]));
+    expect(definitions.get('access_log_metrics_1min')?.primaryColumns).toEqual(['windowTime']);
+    expect(definitions.get('baseline_stats')?.primaryColumns).toEqual(['id']);
+    expect(definitions.get('daily_active_users')?.primaryColumns).toEqual(['date']);
+    expect(definitions.get('baseline_stats')?.indexes).toContainEqual({
+      columns: ['metricName', 'hourBucket', 'dayOfWeek'], unique: true,
+    });
+  });
+
+  it('SQLite DDL 可建表，并支持 baseline_stats 不传 id 的运行时 upsert', async () => {
+    const dataSource = new DataSource({ type: 'sqlite', database: ':memory:' });
+    await dataSource.initialize();
+    try {
+      for (const definition of NON_ENTITY_TABLE_DEFINITIONS.filter((item) => [
+        'access_log_metrics_1min', 'baseline_stats', 'daily_active_users',
+      ].includes(item.table))) {
+        await dataSource.query(definition.createSql);
+        for (const sql of definition.indexSql) await dataSource.query(sql);
+      }
+
+      await dataSource.query(`INSERT INTO "baseline_stats"
+        ("metricName", "hourBucket", "dayOfWeek", "mean", "stddev", "sampleCount")
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT ("metricName", "hourBucket", "dayOfWeek") DO UPDATE SET "mean" = excluded."mean"`,
+      ['qps', 8, 1, 10, 2, 5]);
+      await dataSource.query(`INSERT INTO "baseline_stats"
+        ("metricName", "hourBucket", "dayOfWeek", "mean", "stddev", "sampleCount")
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT ("metricName", "hourBucket", "dayOfWeek") DO UPDATE SET "mean" = excluded."mean"`,
+      ['qps', 8, 1, 12, 2, 5]);
+
+      const [row] = await dataSource.query('SELECT "id", "mean" FROM "baseline_stats"');
+      expect(row.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+      expect(row.mean).toBe(12);
+    } finally {
+      await dataSource.destroy();
+    }
+  });
+});
 
 describe('beginPostgresReadOnlySnapshot', () => {
   it('在读取前依次建立 repeatable read 与 read only 事务', async () => {

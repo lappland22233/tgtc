@@ -31,6 +31,8 @@ const RESERVED_DEVICE_NAME_PATTERN = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)
  */
 @Injectable()
 export class FolderService {
+  private sqliteCreateChain: Promise<void> = Promise.resolve();
+
   constructor(
     @InjectRepository(Folder)
     private readonly folderRepo: TreeRepository<Folder>,
@@ -123,6 +125,21 @@ export class FolderService {
   // ---------- 写操作 ----------
 
   async createFolder(ownerId: string, dto: CreateFolderDto): Promise<Folder> {
+    if (getDatabaseType() === 'sqlite') {
+      const previous = this.sqliteCreateChain;
+      let release!: () => void;
+      this.sqliteCreateChain = new Promise<void>((resolve) => { release = resolve; });
+      await previous;
+      try {
+        return await this.createFolderInternal(ownerId, dto);
+      } finally {
+        release();
+      }
+    }
+    return this.createFolderInternal(ownerId, dto);
+  }
+
+  private async createFolderInternal(ownerId: string, dto: CreateFolderDto): Promise<Folder> {
     // 特殊保留名称拦截（'.'/'..'/Windows 设备名），在任何持久化操作之前执行
     this.assertFolderNameAllowed(dto.name);
     // 保留 assertFolderOwned 返回的完整父实体，供下方 parent 关联使用；
@@ -140,7 +157,7 @@ export class FolderService {
       where: { ownerId, parentId: dto.parentId ?? IsNull(), name: dto.name, isDeleted: false },
     });
     if (existing) {
-      throw new BadRequestException('同层级下已存在同名文件夹');
+      throw new ConflictException('同层级下已存在同名文件夹');
     }
     const folder = this.folderRepo.create({
       name: dto.name,
