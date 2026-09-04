@@ -124,7 +124,7 @@ describe('FolderService - createFolder', () => {
     expect(folderRepo.save).not.toHaveBeenCalled();
   });
 
-  it('同层级重名抛 BadRequestException', async () => {
+  it('同层级重名抛 ConflictException（409）', async () => {
     folderRepo.findOne.mockResolvedValue(
       Object.assign(new Folder(), {
         id: '55555555-5555-4555-8555-555555555555',
@@ -135,7 +135,8 @@ describe('FolderService - createFolder', () => {
       }),
     ); // 重名检查命中
 
-    await expect(service.createFolder(ownerId, { name: '文档' })).rejects.toThrow(BadRequestException);
+    // G6-06：同层重名统一为 409 Conflict（pre-check 与唯一索引兜底语义一致）
+    await expect(service.createFolder(ownerId, { name: '文档' })).rejects.toThrow(ConflictException);
     await expect(service.createFolder(ownerId, { name: '文档' })).rejects.toThrow('同层级下已存在同名文件夹');
     expect(folderRepo.create).not.toHaveBeenCalled();
     expect(folderRepo.save).not.toHaveBeenCalled();

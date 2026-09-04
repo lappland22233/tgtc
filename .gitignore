@@ -18,16 +18,12 @@ lerna-debug.log*
 
 # IDE
 .vscode/
-!.vscode/extensions.json
-!.vscode/launch.json
-!.vscode/settings.json
 .codebuddy/
 .idea/
 *.swp
 *.swo
 *~
 .learnings/
-.codebuddy
 CODEBUDDY.md
 .qder/
 # OS
@@ -64,7 +60,9 @@ backend/ecosystem.config.js
 .ecosystem.config.js
 
 # Secrets & Certificates
+# 发布验证公钥是唯一例外：必须随仓库与发行包分发（私钥只存在于 CI secret）。
 *.pem
+!scripts/release/update-public-key.pem
 *.key
 *.crt
 *.cert
@@ -75,7 +73,9 @@ secrets/
 STATIC_REVIEW_RETROSPECTIVE.md
 DEADLOCK_STATIC_REVIEW.md
 .qoder/*
-.github/workflows/quality-gates.yml
+# GitHub 工作流必须入库（Release 流水线依赖）；忽略 .github 其他本地内容
+.github/*
+!.github/workflows/
 .workbuddy/*
 # 本地正式发行产物（按 .Releases/v<版本>/ 独立存放）
-.Releases/*
+.Releases/

@@ -1,0 +1,251 @@
+name: Quality gates
+
+on:
+  pull_request:
+  push:
+    branches:
+      - beta
+      - main
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-gates-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend / Node 20 / PostgreSQL 16 / Redis 7
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: file_distribution_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d file_distribution_ci"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      CI: true
+      NODE_ENV: test
+      DB_HOST: 127.0.0.1
+      DB_PORT: 5432
+      DB_USERNAME: postgres
+      DB_PASSWORD: postgres
+      DB_DATABASE: file_distribution_ci
+      DB_SSL: "false"
+      REDIS_HOST: 127.0.0.1
+      REDIS_PORT: 6379
+      JWT_SECRET: ci-only-jwt-secret-at-least-32-characters
+      TELEGRAM_BOT_TOKEN: 000000000:ci-placeholder
+      TELEGRAM_CHAT_ID: "0"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Validate dependency tree
+        run: npm ls --all
+
+      - name: Block high and critical production advisories
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Type-check
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+      - name: Smoke-test the complete forward migration chain on an empty database
+        run: npm run migration:run
+
+      - name: Verify no forward migrations remain pending
+        shell: bash
+        run: |
+          output="$(npx typeorm-ts-node-commonjs migration:show -d src/database/data-source.ts)"
+          printf '%s\n' "$output"
+          if grep -Fq '[ ]' <<< "$output"; then
+            echo 'Pending migrations remain after migration smoke test' >&2
+            exit 1
+          fi
+
+      - name: Verify a second forward migration run is a no-op
+        run: npm run migration:run
+
+      - name: Run SQLite migration and real-file integration release gate
+        run: npm run gate:sqlite
+
+      - name: Run tests and enforce configured coverage thresholds
+        run: npm run test:cov -- --runInBand
+
+      - name: Upload backend coverage report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-coverage
+          path: backend/coverage
+          if-no-files-found: warn
+          retention-days: 14
+
+  frontend:
+    name: Frontend / Node 20
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: frontend
+    env:
+      CI: true
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Validate dependency tree
+        run: npm ls --all
+
+      - name: Block high and critical production advisories
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Type-check
+        run: npm run typecheck
+
+      - name: Build from a clean checkout
+        run: npm run build
+
+      - name: Require a frontend coverage test command
+        run: node -e "const scripts=require('./package.json').scripts||{}; if (!scripts['test:cov']) throw new Error('frontend package.json must define a blocking test:cov script')"
+
+      - name: Run frontend tests and publish baseline coverage
+        run: npm run test:cov
+
+  release-scripts:
+    name: Release scripts / static safety gates
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install ShellCheck
+        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends shellcheck
+
+      - name: Parse and lint release scripts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          scripts=(scripts/build-linux-x64-release.sh scripts/release/*.sh)
+          bash -n "${scripts[@]}"
+          shellcheck --severity=warning "${scripts[@]}"
+          old_script_path='.codebuddy/'scripts
+          ! grep -RIn --exclude-dir=.git --exclude-dir=.codebuddy --exclude='*.md' -- "$old_script_path" scripts .github README.md
+
+      - name: Enforce release payload state exclusions
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ! grep -Eq 'mkdir -p .*telegram-bot-api/data|cp .*telegram-bot-api/data' scripts/build-linux-x64-release.sh
+          grep -Fq 'assert_no_protected_payload' scripts/release/upgrade.sh
+          grep -Fq 'assert_no_protected_payload' scripts/release/rollback.sh
+          grep -Fq 'sha256sum' scripts/release/validate-release.sh
+          grep -Fq 'zip --quiet' scripts/build-linux-x64-release.sh
+          grep -Fq 'unzip -q' scripts/release/upgrade.sh
+          bash scripts/release/check-version.sh
+
+  release-package:
+    name: Release package / Linux x64 ZIP
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: |
+            backend/package-lock.json
+            frontend/package-lock.json
+
+      - name: Install native build dependencies
+        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends build-essential cmake gperf libssl-dev zlib1g-dev zip unzip rsync xz-utils
+
+      - name: Build and validate ZIP release package
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash scripts/build-linux-x64-release.sh
+          version="$(tr -d '\r\n' < VERSION)"
+          release_dir=".Releases/v${version}"
+          archive="$release_dir/tgtc-v${version}-linux-x64.zip"
+          bash scripts/release/validate-release.sh "$archive" "$release_dir/SHA256SUMS"
+          zipinfo -1 "$archive" | grep -Fqx "tgtc-v${version}-linux-x64/VERSION"
+
+  telegram-bot-api:
+    name: C++ / GCC / CMake / CTest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: telegram-bot-api
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install native build dependencies
+        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends build-essential cmake gperf libssl-dev zlib1g-dev
+
+      - name: Configure
+        run: cmake -S . -B build-ci -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+
+      - name: Build server and tests
+        run: cmake --build build-ci --config Release --parallel 2
+
+      - name: Run registered CTest tests
+        run: ctest --test-dir build-ci --build-config Release --output-on-failure --no-tests=error

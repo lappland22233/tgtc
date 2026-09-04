@@ -5,6 +5,27 @@
       <p>配置SMTP邮箱、文件上传限制和IP封禁</p>
     </div>
 
+    <div class="card" style="margin-bottom: 20px;">
+      <h3 style="margin-bottom: 16px;">网站标题</h3>
+      <t-form layout="vertical">
+        <t-form-item label="浏览器标题">
+          <t-input v-model="siteConfig.title" :maxlength="200" placeholder="请输入网站标题" autocomplete="off" name="site-title" />
+          <div style="color: var(--text-secondary); font-size: 12px; margin-top: 4px;">
+            保存后，新打开页面会使用此标题。
+          </div>
+        </t-form-item>
+        <t-form-item>
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <t-button theme="primary" :disabled="!blockLoadState.site" @click="saveSiteConfig">保存网站标题</t-button>
+            <t-button v-if="!blockLoadState.site" variant="outline" @click="fetchSiteConfig">重新加载</t-button>
+          </div>
+          <div v-if="!blockLoadState.site" style="color: var(--color-warning); font-size: 12px; margin-top: 4px;">
+            配置加载失败，当前显示默认值。为避免覆盖服务端配置，已禁用保存，请先重新加载。
+          </div>
+        </t-form-item>
+      </t-form>
+    </div>
+
     <div class="config-grid" :class="{ 'mobile-single-col': isMobile }">
       <!-- 认证配置 -->
       <div class="card">
@@ -321,10 +342,15 @@ const isMobile = useMobile();
 
 // 各配置区块加载状态：加载失败时禁用对应保存按钮并阻止提交，防止用默认值覆盖服务端真实配置（G15-04）
 const blockLoadState = reactive({
+  site: false as boolean,
   auth: false as boolean,
   smtp: false as boolean,
   upload: false as boolean,
   cache: false as boolean,
+});
+
+const siteConfig = ref({
+  title: '',
 });
 
 const authConfig = ref({
@@ -439,6 +465,44 @@ const ipColumns = [
 
 function formatDate(date: string) {
   return new Date(date).toLocaleDateString('zh-CN');
+}
+
+async function fetchSiteConfig(): Promise<boolean> {
+  try {
+    const res = await api.get('/public-config');
+    const title = res.data.data?.siteTitle;
+    siteConfig.value.title = typeof title === 'string' ? title : '';
+    blockLoadState.site = true;
+    return true;
+  } catch (err) {
+    console.error('获取网站标题失败', err);
+    blockLoadState.site = false;
+    return false;
+  }
+}
+
+async function saveSiteConfig() {
+  if (!blockLoadState.site) {
+    MessagePlugin.warning('网站标题加载失败，无法保存。请先点击"重新加载"');
+    return;
+  }
+  const title = siteConfig.value.title.trim();
+  if (!title) {
+    MessagePlugin.warning('网站标题不能为空');
+    return;
+  }
+  try {
+    await api.put('/admin/config', {
+      key: 'SITE_TITLE',
+      value: title,
+      description: '网站浏览器标题',
+    });
+    siteConfig.value.title = title;
+    MessagePlugin.success('网站标题已保存');
+    markClean();
+  } catch (error: unknown) {
+    MessagePlugin.error(getErrorMessage(error));
+  }
 }
 
 async function fetchAuthConfig(): Promise<boolean> {
@@ -768,6 +832,7 @@ function unbanIP(ip: string) {
 
 onMounted(() => {
   Promise.allSettled([
+    fetchSiteConfig(),
     fetchAuthConfig(),
     fetchSMTPConfig(),
     fetchUploadConfig(),

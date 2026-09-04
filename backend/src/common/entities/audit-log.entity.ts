@@ -66,7 +66,13 @@ export type AuditAction =
   | 'share_link_download'
   | 'file_verify'
   | 'file_stale_path_cleanup'
-  | 'data_export';
+  | 'data_export'
+  | 'update_check'
+  | 'update_install'
+  | 'update_cancel'
+  | 'update_succeeded'
+  | 'update_failed'
+  | 'update_rollback';
 
 /** 审计日志状态 */
 export enum AuditStatus {

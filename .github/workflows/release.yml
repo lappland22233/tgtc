@@ -1,0 +1,117 @@
+name: Release
+
+# 稳定版发布流水线：
+#   tag `vX.Y.Z` 推送触发（或手动 dispatch 且显式 publish）。
+#   顺序：完整质量门禁 → 构建 Linux x64 发行包 → 清单与 SHA256SUMS 签名 →
+#         重解包验证 → 发布非 draft、非 prerelease 的稳定 Release。
+#   tag、包名、清单、包内 VERSION 任一不一致即失败。
+# 私钥来源：仓库 secret RELEASE_SIGNING_KEY（RSA-3072 PEM）；公钥已提交仓库。
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: '构建后发布正式 Release（手动运行默认 false：仅构建与验证，不发布）'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  quality:
+    name: Quality gates
+    uses: ./.github/workflows/quality-gates.yml
+    permissions:
+      contents: read
+
+  publish:
+    name: Build, sign and publish stable release
+    needs: quality
+    if: ${{ github.event_name == 'push' || inputs.publish == true }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: |
+            backend/package-lock.json
+            frontend/package-lock.json
+
+      - name: Install native build dependencies
+        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends build-essential cmake gperf libssl-dev zlib1g-dev zip unzip rsync xz-utils
+
+      - name: Export signing key from secret
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: |
+          set -Eeuo pipefail
+          if [[ -z "$RELEASE_SIGNING_KEY" ]]; then
+            echo '缺少 RELEASE_SIGNING_KEY 仓库 secret；拒绝发布未签名的稳定版。' >&2
+            exit 1
+          fi
+          umask 077
+          printf '%s\n' "$RELEASE_SIGNING_KEY" > "$RUNNER_TEMP/release-signing-key.pem"
+
+      - name: Build, sign and validate ZIP release package
+        env:
+          RELEASE_SIGNING_KEY_PATH: ${{ runner.temp }}/release-signing-key.pem
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash scripts/build-linux-x64-release.sh
+          version="$(tr -d '\r\n' < VERSION)"
+          release_dir=".Releases/v${version}"
+          # 发布前重解包验证：结构、敏感内容、清单一致性、签名（validate 内置公钥校验）。
+          bash scripts/release/validate-release.sh "$release_dir/tgtc-v${version}-linux-x64.zip" "$release_dir/SHA256SUMS"
+          test -s "$release_dir/SHA256SUMS.sig"
+          test -s "$release_dir/release-manifest.json"
+          test -s "$release_dir/RELEASE.txt"
+
+      - name: Publish stable GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          version="$(tr -d '\r\n' < VERSION)"
+          tag="v${version}"
+          if [[ "$GITHUB_EVENT_NAME" == 'push' && "$GITHUB_REF_TYPE" == 'tag' && "$GITHUB_REF_NAME" != "$tag" ]]; then
+            echo "触发标签 ${GITHUB_REF_NAME} 与 VERSION 产出的 ${tag} 不一致；拒绝发布。" >&2
+            exit 1
+          fi
+          release_dir=".Releases/v${version}"
+          assets=(
+            "$release_dir/tgtc-v${version}-linux-x64.zip"
+            "$release_dir/SHA256SUMS"
+            "$release_dir/SHA256SUMS.sig"
+            "$release_dir/release-manifest.json"
+            "$release_dir/RELEASE.txt"
+          )
+          for asset in "${assets[@]}"; do
+            [[ -s "$asset" ]] || { echo "缺少发行资产：$asset" >&2; exit 1; }
+          done
+          # 非 draft、非 prerelease 的稳定 Release；--verify-tag 确保基于已推送的 tag。
+          gh release create "$tag" "${assets[@]}" \
+            --title "TGTC v${version}" \
+            --notes-file "$release_dir/RELEASE.txt" \
+            --verify-tag \
+            --latest
+
+      - name: Remove signing key
+        if: ${{ always() }}
+        run: rm -f "$RUNNER_TEMP/release-signing-key.pem"

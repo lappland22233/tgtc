@@ -348,11 +348,14 @@
           </div>
         </div>
 
+        <div v-if="configLoadError" class="config-load-error" role="alert">
+          {{ configLoadError }}
+        </div>
         <div v-if="configItems.length > 0" style="margin-top: 24px; display: flex; gap: 12px">
-          <t-button theme="primary" :loading="configSaving" @click="saveSecurityConfig">
+          <t-button theme="primary" :loading="configSaving" :disabled="!configLoaded" @click="saveSecurityConfig">
             保存配置
           </t-button>
-          <t-button theme="default" variant="outline" :loading="configLoading" @click="resetSecurityConfig">
+          <t-button theme="default" variant="outline" :loading="configLoading" :disabled="!configLoaded" @click="resetSecurityConfig">
             重置为默认值
           </t-button>
         </div>
@@ -406,6 +409,7 @@
 
 <script setup lang="ts">
 import { ref, reactive, onMounted, onUnmounted, computed, watch, defineAsyncComponent } from 'vue';
+import axios from 'axios';
 import { DialogPlugin } from 'tdesign-vue-next';
 import MessagePlugin from '@/utils/message';
 import { api, useAuthStore } from '@/stores/auth';
@@ -719,6 +723,8 @@ const configItems = ref<SecurityConfigItem[]>([]);
 const configForm = ref<Record<string, number>>({});
 const configLoading = ref(false);
 const configSaving = ref(false);
+const configLoaded = ref(false);
+const configLoadError = ref('');
 
 const configCategories = computed(() => {
   const cats = new Set(configItems.value.map((item) => item.category));
@@ -729,23 +735,59 @@ function configItemsByCategory(cat: string) {
   return configItems.value.filter((item) => item.category === cat);
 }
 
-async function fetchSecurityConfig() {
+function getApiErrorMessage(error: unknown, fallback: string): string {
+  if (axios.isAxiosError(error)) {
+    const message = error.response?.data && typeof error.response.data === 'object'
+      ? (error.response.data as { message?: unknown }).message
+      : undefined;
+    if (typeof message === 'string' && message.trim()) return message;
+    if (error.response?.status === 401) return '登录已失效，请重新登录后再试';
+    if (error.response?.status === 403) return '当前账号没有修改安全配置的权限';
+    if (error.response?.status && error.response.status >= 500) return '服务端写入安全配置失败，请稍后重试';
+    if (!error.response) return '网络异常，无法连接到安全配置服务';
+  }
+  return error instanceof Error && error.message ? error.message : fallback;
+}
+
+function validateSecurityConfig(item: SecurityConfigItem, value: unknown): string | null {
+  const numberValue = Number(value);
+  if (!Number.isFinite(numberValue)) return `${item.label} 必须为有效数值`;
+  if (item.min !== undefined && numberValue < item.min) return `${item.label} 不能小于 ${item.min}`;
+  if (item.max !== undefined && numberValue > item.max) return `${item.label} 不能大于 ${item.max}`;
+  if (item.step !== undefined) {
+    const precision = String(item.step).split('.')[1]?.length || 0;
+    const scale = 10 ** precision;
+    const base = item.min ?? 0;
+    if (Math.abs(Math.round((numberValue - base) * scale) % Math.round(item.step * scale)) !== 0) {
+      return `${item.label} 必须按步长 ${item.step} 设置`;
+    }
+  }
+  return null;
+}
+
+async function fetchSecurityConfig(options: { silent?: boolean } = {}): Promise<boolean> {
   configLoading.value = true;
+  configLoadError.value = '';
   try {
     const { data } = await api.get('/admin/security-config');
     const items: SecurityConfigItem[] = data?.data || data || [];
-    configItems.value = items;
-    // 初始化表单值
-    // 注意：合法值 "0"（阈值设为 0 表示关闭）不能被 Number() 的 falsy 吞掉，
-    // 必须用 Number.isFinite 判定，否则 0 会回落到默认值并在保存时覆盖服务端（G15-09）
+    if (!Array.isArray(items) || items.length === 0) throw new Error('未获取到安全配置项');
     const form: Record<string, number> = {};
     for (const item of items) {
       const cur = Number(item.currentValue);
-      form[item.key] = Number.isFinite(cur) ? cur : Number(item.defaultValue) || 0;
+      const fallback = Number(item.defaultValue);
+      if (!Number.isFinite(cur) && !Number.isFinite(fallback)) throw new Error(`${item.label} 的当前值无效`);
+      form[item.key] = Number.isFinite(cur) ? cur : fallback;
     }
+    configItems.value = items;
     configForm.value = form;
-  } catch {
-    // 静默失败
+    configLoaded.value = true;
+    return true;
+  } catch (error) {
+    configLoaded.value = false;
+    configLoadError.value = getApiErrorMessage(error, '加载安全配置失败，暂不能保存');
+    if (!options.silent) MessagePlugin.error(configLoadError.value);
+    return false;
   } finally {
     configLoading.value = false;
   }
@@ -756,20 +798,26 @@ async function fetchSecurityConfig() {
  * 等效于关闭对应防护，必须先二次确认；保存成功后展示变更摘要（G15-10）。
  */
 async function saveSecurityConfig() {
-  // 与默认值相比偏离超过 10 倍，视为"高风险"（放大阈值 ≈ 削弱/关闭防护）
-  const RISK_MULTIPLE = 10;
+  if (!configLoaded.value) {
+    MessagePlugin.warning('安全配置尚未成功加载，不能保存');
+    return;
+  }
 
-  // 变更项与高风险项
+  const RISK_MULTIPLE = 10;
   const changed: { key: string; label: string; before: number; after: number }[] = [];
   const risky: { key: string; label: string; after: number }[] = [];
   for (const item of configItems.value) {
     const before = Number(item.currentValue);
     const after = configForm.value[item.key];
+    const validationMessage = validateSecurityConfig(item, after);
+    if (validationMessage) {
+      MessagePlugin.error(validationMessage);
+      return;
+    }
     if (before === after) continue;
     changed.push({ key: item.key, label: item.label, before, after });
-    const def = Number(item.defaultValue);
-    // 阈值类：放大到默认值 10 倍以上即高风险（默认 0 时不适用放大判定）
-    if (def > 0 && after > 0 && after >= def * RISK_MULTIPLE) {
+    const defaultValue = Number(item.defaultValue);
+    if (defaultValue > 0 && after > 0 && after >= defaultValue * RISK_MULTIPLE) {
       risky.push({ key: item.key, label: item.label, after });
     }
   }
@@ -782,25 +830,22 @@ async function saveSecurityConfig() {
   const doSave = async () => {
     configSaving.value = true;
     try {
-      const configs = Object.entries(configForm.value).map(([key, value]) => ({
-        key,
-        value: String(value),
-      }));
+      const configs = changed.map(({ key, after }) => ({ key, value: String(after) }));
       await api.put('/admin/security-config', { configs });
-      const summary = changed
-        .map((c) => `· ${c.label}: ${c.before} → ${c.after}`)
-        .join('\n');
-      MessagePlugin.success('安全配置已保存');
-      MessagePlugin.info(`已保存 ${changed.length} 项变更：\n${summary}`);
-      await fetchSecurityConfig();
-    } catch {
-      MessagePlugin.error('保存安全配置失败');
+      const reloaded = await fetchSecurityConfig({ silent: true });
+      if (!reloaded) {
+        MessagePlugin.warning('安全配置已提交，但回读确认失败，请刷新页面后核对');
+        return;
+      }
+      const summary = changed.map((change) => `· ${change.label}: ${change.before} → ${change.after}`).join('\n');
+      MessagePlugin.success(`安全配置已保存并确认：\n${summary}`);
+    } catch (error) {
+      MessagePlugin.error(getApiErrorMessage(error, '保存安全配置失败'));
     } finally {
       configSaving.value = false;
     }
   };
 
-  // 存在高风险项：二次确认后放行
   if (risky.length > 0) {
     const confirmDialog = DialogPlugin.confirm({
       header: '检测到高风险配置变更',
@@ -822,6 +867,10 @@ async function saveSecurityConfig() {
 }
 
 async function resetSecurityConfig() {
+  if (!configLoaded.value) {
+    MessagePlugin.warning('安全配置尚未成功加载，不能重置');
+    return;
+  }
   configLoading.value = true;
   try {
     // 恢复为默认值
@@ -1001,6 +1050,16 @@ onUnmounted(() => {
   background: var(--color-bg-elevated);
   padding: 2px 8px;
   border-radius: 4px;
+}
+
+.config-load-error {
+  margin-top: 16px;
+  padding: 12px 14px;
+  color: var(--color-danger);
+  background: color-mix(in srgb, var(--color-danger) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-danger) 35%, transparent);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
 }
 
 .config-item-hint {
