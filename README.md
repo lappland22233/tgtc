@@ -451,7 +451,7 @@ npm run gate:sqlite               # SQLite 迁移 + 真实文件集成发布门�
 npm run start:prod
 ```
 
-`migration:generate` 默认生成到 `src/migrations/Migration.ts`，生成后应使用时间戳和语义化名称重命名；也可以直接调用 TypeORM CLI 指定目标文件名。
+`migration:generate` 默认生成到 `src/migrations/Migration.ts`，生成后应使用时间戳和语义化名称重命名；也可以直接调用 TypeORM CLI 指定目标文件名。迁移加载 glob 只匹配以数字时间戳开头的文件（`[0-9]*.ts`），未重命名或含 `.spec.`/`.test.` 的测试文件不会进入迁移集合。
 
 ### 前端
 
