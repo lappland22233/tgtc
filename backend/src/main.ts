@@ -4,8 +4,8 @@ import { ValidationPipe, Logger } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import cookieParser from 'cookie-parser';
 import helmet from 'helmet';
-import { join } from 'path';
 import { existsSync } from 'fs';
+import { join } from 'path';
 import { AppModule } from './app.module';
 import { TransformInterceptor } from './common/interceptors/transform.interceptor';
 import { GlobalExceptionFilter } from './common/filters/http-exception.filter';
@@ -122,8 +122,15 @@ async function bootstrap() {
   // 避免在密钥/盐不一致或迁移中断时破坏数据。检测失败不阻塞启动（仅记录）。
   await detectLegacyCryptoValues(app, logger);
 
-  // 服务前端静态文件（生产构建产物）
-  const frontendDist = join(__dirname, '..', '..', 'frontend', 'dist');
+  // 服务前端静态文件（生产构建产物）。
+  // 开发/源码布局：frontend/dist；发行包布局：frontend/（构建脚本将 dist 内容平铺）。
+  // 按存在 index.html 的目录探测，避免发行包前端 404。
+  const frontendCandidates = [
+    join(__dirname, '..', '..', 'frontend', 'dist'),
+    join(__dirname, '..', '..', 'frontend'),
+  ];
+  const frontendDist =
+    frontendCandidates.find((dir) => existsSync(join(dir, 'index.html'))) ?? frontendCandidates[0];
   app.useStaticAssets(frontendDist, { prefix: '/' });
 
   const expressApp = app.getHttpAdapter().getInstance();

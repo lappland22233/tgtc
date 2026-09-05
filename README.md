@@ -316,13 +316,45 @@ Multer 单文件硬上限为 600 MB，单分片硬上限为 100 MB；实际业�
 
 ```text
 .Releases/
-├── tgtc-v1.x.x-linux-x64.tar.gz
-├── SHA256SUMS
-├── RELEASE.txt
-└── README.md
+└── vX.Y.Z/
+    ├── tgtc-vX.Y.Z-linux-x64.zip
+    ├── SHA256SUMS
+    └── RELEASE.txt
 ```
 
-发行包不包含 TypeScript 源码、测试和开发依赖。数据库结构仍由包内编译后的正式运行时迁移维护；这些迁移不是开发文件，新库初始化和后续升级均依赖它们。
+`ZIP` 是唯一支持的发行压缩格式。归档必须且只能含 `tgtc-vX.Y.Z-linux-x64/` 顶层目录，且包内 `VERSION`、顶层目录、ZIP 文件名及 `SHA256SUMS` 的资产名必须为同一版本。归档至少包含 `backend/`、`frontend/index.html`、`runtime/bin/node`、`telegram-bot-api/bin/telegram-bot-api`、`bin/tgtc`、`start.sh` 和完整的 `scripts/release/` 运维脚本。
+
+发行包不包含 TypeScript 源码、测试、source map、开发依赖、`.env`、数据库、Redis 持久化、Telegram Bot API workdir、上传分片、日志、缓存或用户数据。`start.sh`、运行二进制和可执行运维脚本必须保留 Unix 可执行权限。数据库结构仍由包内编译后的正式运行时迁移维护；这些迁移不是开发文件，新库初始化和后续升级均依赖它们。
+
+### 发行包部署、升级与回退
+
+`VERSION` 是唯一的发行版本源，必须与前后端 `package.json` 和 lockfile 根包版本一致。Linux x64 构建在 Linux 环境执行：
+
+```bash
+bash scripts/build-linux-x64-release.sh
+```
+
+构建产物包含 `backend/`、`frontend/`、`telegram-bot-api/`、`runtime/`、`bin/`、`start.sh` 和 `scripts/release/`。首次安装使用包根目录的 `./start.sh`；已使用 `current` 符号链接部署的实例可使用：
+
+```bash
+# 检查真实服务、数据库依赖、前端入口和运行版本
+./scripts/release/health-check.sh
+
+# 独立校验 ZIP 的摘要、版本、结构、权限与安全边界
+./scripts/release/validate-release.sh /absolute/path/tgtc-vX.Y.Z-linux-x64.zip /absolute/path/SHA256SUMS
+
+# 校验 ZIP、备份、迁移、原子切换；失败仅回退程序，不回退不可逆迁移
+./scripts/release/upgrade.sh /absolute/path/tgtc-vX.Y.Z-linux-x64.zip /absolute/path/SHA256SUMS
+
+# 原子回退到上一程序版本或指定版本；不移动数据库、.env 或 Telegram workdir
+./scripts/release/rollback.sh [X.Y.Z]
+```
+
+升级会把 `.env`、数据库和 Telegram Bot API workdir 保持在发行目录外。特别是 Bot API 的 `telegram-bot-api/data` 与历史 `file_id` 强绑定，严禁删除、重命名、迁移或由发行包覆盖。备份脚本根据 `DB_TYPE` 使用 PostgreSQL 逻辑备份或停止写入后的 SQLite 一致性备份：
+
+```bash
+./scripts/release/backup.sh
+```
 
 ### 手工生产部署
 
@@ -419,7 +451,7 @@ npm run gate:sqlite               # SQLite 迁移 + 真实文件集成发布门�
 npm run start:prod
 ```
 
-`migration:generate` 默认生成到 `src/migrations/Migration.ts`，生成后应使用时间戳和语义化名称重命名；也可以直接调用 TypeORM CLI 指定目标文件名。
+`migration:generate` 默认生成到 `src/migrations/Migration.ts`，生成后应使用时间戳和语义化名称重命名；也可以直接调用 TypeORM CLI 指定目标文件名。迁移加载 glob 只匹配以数字时间戳开头的文件（`[0-9]*.ts`），未重命名或含 `.spec.`/`.test.` 的测试文件不会进入迁移集合。
 
 ### 前端
 

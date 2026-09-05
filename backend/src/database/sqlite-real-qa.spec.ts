@@ -48,6 +48,7 @@ describe('真实 SQLite 数据源关键业务与并发 QA', () => {
     const appliedBefore = await dataSource.query('SELECT name FROM migrations ORDER BY timestamp');
     expect(appliedBefore.map((row: { name: string }) => row.name)).toEqual([
       'SqliteEntitySchema1700000000000',
+      'SqliteCreateUpdateTasks1798400000000',
       'SqliteSchemaAlignment1800000000000',
     ]);
 

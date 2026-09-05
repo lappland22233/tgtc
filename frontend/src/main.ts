@@ -60,25 +60,49 @@ async function deferredInit() {
 
 }
 
-const app = createApp(App);
-const pinia = createPinia();
+function initializeDocumentTitle() {
+  const defaultTitle = document.title;
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), 2_000);
 
-app.use(pinia);
-app.use(router);
-
-// 全局注册图标组件：<t-icon name="..."> 统一由此组件按名称映射到 TDesign 图标
-app.component('TIcon', TIcon);
-
-app.mount('#app');
-
-// 路由级预载：根据当前路由在空闲时预加载相邻路由 chunk
-setupRoutePrefetch(router);
-
-// 首屏渲染完成后，延迟加载非关键模块
-// 使用 requestIdleCallback 避免阻塞用户交互
-if (typeof requestIdleCallback !== 'undefined') {
-  // 兜底 catch：主题等延迟模块初始化异常不得产生未处理 rejection 影响应用启动
-  requestIdleCallback(() => deferredInit().catch(console.error), { timeout: 3000 });
-} else {
-  setTimeout(() => { deferredInit().catch(console.error); }, 200);
+  void fetch('/api/public-config', { signal: controller.signal })
+    .then(async (response) => {
+      if (!response.ok) return;
+      const payload = await response.json() as { data?: { siteTitle?: unknown } };
+      const siteTitle = typeof payload.data?.siteTitle === 'string' ? payload.data.siteTitle.trim() : '';
+      document.title = siteTitle || defaultTitle;
+    })
+    .catch(() => {
+      document.title = defaultTitle;
+    })
+    .finally(() => window.clearTimeout(timeout));
 }
+
+async function bootstrapFrontend() {
+  initializeDocumentTitle();
+
+  const app = createApp(App);
+  const pinia = createPinia();
+
+  app.use(pinia);
+  app.use(router);
+
+  // 全局注册图标组件：<t-icon name="..."> 统一由此组件按名称映射到 TDesign 图标
+  app.component('TIcon', TIcon);
+
+  app.mount('#app');
+
+  // 路由级预载：根据当前路由在空闲时预加载相邻路由 chunk
+  setupRoutePrefetch(router);
+
+  // 首屏渲染完成后，延迟加载非关键模块
+  // 使用 requestIdleCallback 避免阻塞用户交互
+  if (typeof requestIdleCallback !== 'undefined') {
+    // 兜底 catch：主题等延迟模块初始化异常不得产生未处理 rejection 影响应用启动
+    requestIdleCallback(() => deferredInit().catch(console.error), { timeout: 3000 });
+  } else {
+    setTimeout(() => { deferredInit().catch(console.error); }, 200);
+  }
+}
+
+bootstrapFrontend().catch(console.error);

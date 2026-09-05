@@ -1,0 +1,31 @@
+# TGTC 更新任务 systemd oneshot 单元样例。
+#
+# 部署：复制到 /etc/systemd/system/，按实际安装路径修改 ExecStart 与 User，
+#       然后 systemctl daemon-reload。
+# 触发：由后端 UpdateRunnerService 通过 `systemd-run` 或 sudo 调用固定更新器；
+#       也可人工执行：systemctl start tgtc-update@<task-uuid>.service
+# 注意：不设置 Restart —— 更新任务失败由状态机与人工流程处理，绝不自动重跑。
+
+[Unit]
+Description=TGTC update task %i
+After=network-online.target
+Wants=network-online.target
+# 更新期间不应与其他运维操作并发
+Conflicts=tgtc-maintenance.service
+
+[Service]
+Type=oneshot
+User=tgtc
+Group=tgtc
+# 更新器需要 root 权限（systemctl 重启服务、写 releases 目录），
+# 经 sudoers 白名单以固定入口+uuid 参数提升；不得去掉 sudo 直接以 tgtc 运行。
+ExecStart=/usr/bin/sudo -n /opt/tgtc/current/scripts/release/updater.sh %i
+# 任务整体超时兜底（与 UPDATE_TASK_TIMEOUT_MS 对齐）
+TimeoutStartSec=1800
+# 更新过程可能重启 tgtc.service；oneshot 自身不受影响
+KillMode=control-group
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

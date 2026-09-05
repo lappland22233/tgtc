@@ -221,6 +221,7 @@ export class AdminService {
     'SMTP_SECURE',
     'SMTP_USER',
     'SMTP_FROM',
+    'SITE_TITLE',
   ]);
 
   /** 必须走专用加密/安全端点、禁止通用写入的键 */
@@ -249,8 +250,21 @@ export class AdminService {
     }
   }
 
+  private validateGenericConfigValue(key: string, value: string): void {
+    if (key === 'SITE_TITLE') {
+      const title = value.trim();
+      if (!title) {
+        throw new BadRequestException('网站标题不能为空');
+      }
+      if (title.length > 200) {
+        throw new BadRequestException('网站标题不能超过 200 个字符');
+      }
+    }
+  }
+
   async updateConfig(user: User, key: string, value: string, description?: string): Promise<void> {
     this.assertGenericConfigKeyAllowed(key);
+    this.validateGenericConfigValue(key, value);
     await this.setConfigValue(key, value, description);
 
     // 审计日志：配置变更（敏感键脱敏）
@@ -276,6 +290,7 @@ export class AdminService {
     // 逐键执行通用写入白名单校验，防止批量入口绕过安全规则/明文写敏感键
     for (const c of configs) {
       this.assertGenericConfigKeyAllowed(c.key);
+      this.validateGenericConfigValue(c.key, c.value);
     }
     await this.configCacheService.setBatch(configs);
 
@@ -1953,7 +1968,14 @@ export class AdminService {
       description: `安全规则 - ${SEC_CONFIG_META.find(m => m.key === c.key)?.label || c.key}`,
     }));
 
-    await this.configCacheService.setBatch(entries);
+    const keys = configs.map((config) => config.key);
+    try {
+      await this.configCacheService.setBatch(entries);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.error(`安全配置批量写入失败（userId=${user.id}, count=${keys.length}, keys=${keys.join(',')}）: ${message}`);
+      throw error;
+    }
 
     // 审计日志：仅记录变更的配置键与数量，避免把配置明文值写入审计存储
     this.auditService.log({
@@ -1961,10 +1983,10 @@ export class AdminService {
       userId: user.id,
       resourceType: 'security_config',
       resourceId: 'batch',
-      metadata: { keys: configs.map(c => c.key), count: configs.length },
+      metadata: { keys, count: keys.length },
     });
 
-    this.logger.log(`安全配置已由用户 ${user.email} 更新: ${configs.map(c => `${c.key}=${c.value}`).join(', ')}`);
+    this.logger.log(`安全配置已更新（userId=${user.id}, count=${keys.length}, keys=${keys.join(',')}）`);
   }
 
   // ==================== 存量旧路径清理 ====================
