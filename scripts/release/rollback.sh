@@ -13,7 +13,17 @@ if [[ $# -eq 1 ]]; then valid_version "$1" || die "$EXIT_USAGE" '版本必须为
 [[ -n "$TARGET" && -d "$TARGET" ]] || die "$EXIT_PRECHECK" '没有可用回退版本。'
 assert_no_protected_payload "$TARGET"; VERSION=$(read_version "$TARGET/VERSION")
 ln -s "$TARGET" "$INSTALL_ROOT/.current.rollback"; mv -Tf "$INSTALL_ROOT/.current.rollback" "$CURRENT_LINK"
-if ! systemctl restart "$SERVICE" || ! TGTC_EXPECTED_VERSION="$VERSION" "$TARGET/scripts/release/health-check.sh"; then
+# 与 upgrade.sh 相同的就绪等待窗口：restart 返回不代表应用已可服务。
+wait_app_ready() {
+  local attempts="${TGTC_READY_WAIT_ATTEMPTS:-15}"
+  for _ in $(seq 1 "$attempts"); do
+    api_get health >/dev/null 2>&1 && return 0
+    sleep 2
+  done
+  return 1
+}
+systemctl restart "$SERVICE" || { ln -s "$CURRENT" "$INSTALL_ROOT/.current.restore" && mv -Tf "$INSTALL_ROOT/.current.restore" "$CURRENT_LINK"; systemctl restart "$SERVICE" || die "$EXIT_ROLLBACK" '回退失败且无法恢复原服务。'; die "$EXIT_ROLLBACK" '回退后服务重启失败，已恢复原版本。'; }
+if ! wait_app_ready || ! TGTC_EXPECTED_VERSION="$VERSION" "$TARGET/scripts/release/health-check.sh"; then
   ln -s "$CURRENT" "$INSTALL_ROOT/.current.restore" && mv -Tf "$INSTALL_ROOT/.current.restore" "$CURRENT_LINK"
   systemctl restart "$SERVICE" || die "$EXIT_ROLLBACK" '回退失败且无法恢复原服务。'
   die "$EXIT_OPERATION" '回退健康检查失败，已恢复原版本。'

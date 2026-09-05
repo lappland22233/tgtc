@@ -59,12 +59,19 @@ fi
 NODE_ARCHIVE="node-v${NODE_VERSION}-linux-x64.tar.xz"
 NODE_SHASUMS="SHASUMS256.txt"
 NODE_BASE_URL="https://nodejs.org/dist/v${NODE_VERSION}"
-curl --fail --location --retry 3 --silent --show-error \
-  "$NODE_BASE_URL/$NODE_SHASUMS" \
-  --output "$WORK_DIR/$NODE_SHASUMS"
-curl --fail --location --retry 3 --silent --show-error \
-  "$NODE_BASE_URL/$NODE_ARCHIVE" \
-  --output "$WORK_DIR/$NODE_ARCHIVE"
+# NODE_RUNTIME_CACHE：指向含已缓存的 Node tarball 与 SHASUMS256.txt 的目录
+# （通常是历史构建的工作目录），跳过 nodejs.org 下载，仍执行 SHA-256 校验。
+NODE_RUNTIME_CACHE="${NODE_RUNTIME_CACHE:-}"
+if [[ -n "$NODE_RUNTIME_CACHE" && -f "$NODE_RUNTIME_CACHE/$NODE_ARCHIVE" && -f "$NODE_RUNTIME_CACHE/$NODE_SHASUMS" ]]; then
+  cp "$NODE_RUNTIME_CACHE/$NODE_ARCHIVE" "$NODE_RUNTIME_CACHE/$NODE_SHASUMS" "$WORK_DIR/"
+else
+  curl --fail --location --retry 3 --silent --show-error \
+    "$NODE_BASE_URL/$NODE_SHASUMS" \
+    --output "$WORK_DIR/$NODE_SHASUMS"
+  curl --fail --location --retry 3 --silent --show-error \
+    "$NODE_BASE_URL/$NODE_ARCHIVE" \
+    --output "$WORK_DIR/$NODE_ARCHIVE"
+fi
 (
   cd "$WORK_DIR"
   grep -F "  $NODE_ARCHIVE" "$NODE_SHASUMS" | sha256sum --check --strict --status

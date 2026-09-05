@@ -29,6 +29,9 @@
 
 1. 服务以 `current` 符号链接部署（`systemctl cat tgtc.service` 必须引用 `$INSTALL_ROOT/current/`），
    旧版目录保留在 `$INSTALL_ROOT/releases/<版本>/`。
+   **目录命名约定：`releases/` 下使用纯版本号（如 `releases/1.1.2`，不带 `v` 前缀）**；
+   首次部署（start.sh）在解压目录原地运行时目录名为 `tgtc-vX.Y.Z-linux-x64`，属正常形态，
+   rollback.sh 按版本排序兼容两者，但人工运维应统一使用纯版本号命名。
 2. 运行时状态必须在发行目录之外：`.env`、数据库、Redis、Telegram Bot API workdir、上传分片。
    更新器对 `telegram-bot-api/data`、`td.binlog*`、`db.sqlite*`、`uploads/`、`logs/` 等有硬性保护断言，出现即拒绝执行。
 3. 发布签名公钥随发行包内置（`scripts/release/update-public-key.pem`）；

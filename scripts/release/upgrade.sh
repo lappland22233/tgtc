@@ -38,7 +38,9 @@ run_target_migrations() {
   log "运行目标发行版 $NEW_VERSION 的数据库迁移。"
   (
     cd "$TARGET/backend"
-    dotenv_config_path="$ENV_FILE" "$TARGET/runtime/bin/node" \
+    # dotenv 的 env-options 机制只读大写 DOTENV_CONFIG_PATH；小写变量静默失效，
+    # 会导致迁移回退到 database.config.ts 的默认库名（"test"）而连错库。
+    DOTENV_CONFIG_PATH="$ENV_FILE" "$TARGET/runtime/bin/node" \
       -r "$TARGET/backend/node_modules/dotenv/config" \
       "$TARGET/backend/node_modules/typeorm/cli.js" migration:run \
       -d "$TARGET/backend/dist/database/data-source.js"
@@ -65,6 +67,9 @@ assert_no_protected_payload "$CANDIDATE"
 NEW_VERSION=$(read_version "$CANDIDATE/VERSION")
 TARGET="$INSTALL_ROOT/releases/$NEW_VERSION"
 [[ ! -e "$TARGET" ]] || die "$EXIT_PRECHECK" "目标版本已存在，拒绝覆盖：$TARGET"
+# releases/ 目录命名约定：纯版本号（不带 v 前缀）。提前打印目标路径，
+# 避免运维排障时按错误的目录名（如 v1.1.1）误判升级未生效。
+log "升级目标：$TARGET"
 PREVIOUS=''
 [[ -L "$CURRENT_LINK" ]] && PREVIOUS=$(readlink -f "$CURRENT_LINK")
 [[ -n "$PREVIOUS" && -d "$PREVIOUS" ]] || die "$EXIT_PRECHECK" 'current 必须指向现有发行目录。'
@@ -75,6 +80,12 @@ TGTC_SKIP_LOCK=1 TGTC_ENV_FILE="$ENV_FILE" bash "$SCRIPT_DIR/backup.sh"
 mkdir -p "$INSTALL_ROOT/releases"
 report_phase extracting
 mv "$CANDIDATE" "$TARGET"
+# mv 就位断言：关键运行文件缺失说明移动不完整，立即停止（current 仍未切换）。
+for required in "$TARGET/VERSION" "$TARGET/backend/dist/main.js" "$TARGET/runtime/bin/node" \
+  "$TARGET/backend/node_modules/typeorm/cli.js" "$TARGET/backend/node_modules/dotenv/config.js"; do
+  [[ -e "$required" ]] || die "$EXIT_OPERATION" "新版本就位校验失败（缺少 $required）；未切换 current。"
+done
+log "新版本已就位：$TARGET"
 report_phase migrating
 run_target_migrations
 
@@ -88,6 +99,19 @@ mv -Tf "$INSTALL_ROOT/.current.new" "$CURRENT_LINK"
 report_phase restarting
 if ! systemctl restart "$SERVICE"; then
   rollback_after_activation_failure '新程序启动失败'
+fi
+# systemctl restart 返回即代表进程已 exec；应用完成 Nest 启动还需要数秒。
+# 在跑严格 health-check 前先等待就绪窗口（轮询 /api/health），避免启动竞态误判。
+wait_app_ready() {
+  local attempts="${TGTC_READY_WAIT_ATTEMPTS:-15}"
+  for _ in $(seq 1 "$attempts"); do
+    api_get health >/dev/null 2>&1 && return 0
+    sleep 2
+  done
+  return 1
+}
+if ! wait_app_ready; then
+  log "WARN: 就绪等待窗口内 /api/health 未恢复，交由 health-check 最终判定。"
 fi
 report_phase health_checking
 if ! TGTC_EXPECTED_VERSION="$NEW_VERSION" TGTC_API_URL="${TGTC_API_URL:-http://127.0.0.1:3000}" "$TARGET/scripts/release/health-check.sh"; then
