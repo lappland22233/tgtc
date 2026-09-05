@@ -145,7 +145,16 @@ else
   printf '警告：未设置 RELEASE_SIGNING_KEY_PATH，跳过 SHA256SUMS 签名（正式发布必须签名）。\n' >&2
 fi
 bash "$ROOT_DIR/scripts/release/validate-release.sh" "$OUTPUT_DIR/$ARCHIVE_NAME" "$OUTPUT_DIR/SHA256SUMS"
-printf 'TGTC v%s\nTarget: Linux x86_64\nNode.js: %s\nBundled Telegram Bot API: 10.2-tgtc.1\n' \
-  "$VERSION" "$NODE_VERSION" > "$OUTPUT_DIR/RELEASE.txt"
+# RELEASE.txt 附带本次版本的更新内容（docs/release-notes/v<版本>.md），供发布与运维查阅。
+RELEASE_NOTES="$ROOT_DIR/docs/release-notes/v${VERSION}.md"
+{
+  printf 'TGTC v%s\nTarget: Linux x86_64\nNode.js: %s\nBundled Telegram Bot API: 10.2-tgtc.1\n\n' \
+    "$VERSION" "$NODE_VERSION"
+  if [[ -f "$RELEASE_NOTES" ]]; then
+    cat "$RELEASE_NOTES"
+  else
+    printf '（未找到 docs/release-notes/v%s.md，缺少本版本更新内容。）\n' "$VERSION" >&2
+  fi
+} > "$OUTPUT_DIR/RELEASE.txt"
 
 echo "发布完成：$OUTPUT_DIR"
