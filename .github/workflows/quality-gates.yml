@@ -103,6 +103,15 @@ jobs:
       - name: Verify a second forward migration run is a no-op
         run: npm run migration:run
 
+      # 迁移成功 ≠ 插入成功：api_keys.id 默认值缺陷（生产 23502）只能靠
+      # 真实 PG 插入路径暴露。开关显式注入，套件内不设条件跳过以外的降级路径。
+      - name: Run PostgreSQL api_keys.id regression against a real database
+        env:
+          PG_API_KEY_IT: "1"
+        run: |
+          test -f src/database/postgres-api-key.integration.spec.ts
+          npm run test:integration:pg
+
       - name: Run SQLite migration and real-file integration release gate
         run: npm run gate:sqlite
 

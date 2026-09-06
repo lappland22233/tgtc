@@ -11,7 +11,7 @@
         <t-form-item label="浏览器标题">
           <t-input v-model="siteConfig.title" :maxlength="200" placeholder="请输入网站标题" autocomplete="off" name="site-title" />
           <div style="color: var(--text-secondary); font-size: 12px; margin-top: 4px;">
-            保存后，新打开页面会使用此标题。
+            保存后立即同步左侧导航标题与浏览器标签标题。
           </div>
         </t-form-item>
         <t-form-item>
@@ -335,10 +335,12 @@ import { DialogPlugin } from 'tdesign-vue-next';
 import MessagePlugin from '@/utils/message';
 import { useMobile } from '../../composables/useMobile';
 import { api } from '../../stores/auth';
+import { usePublicConfigStore } from '../../stores/public-config';
 import { getErrorMessage } from '../../utils/error';
 import { isValidIP } from '../../utils/ip';
 
 const isMobile = useMobile();
+const publicConfigStore = usePublicConfigStore();
 
 // 各配置区块加载状态：加载失败时禁用对应保存按钮并阻止提交，防止用默认值覆盖服务端真实配置（G15-04）
 const blockLoadState = reactive({
@@ -468,17 +470,16 @@ function formatDate(date: string) {
 }
 
 async function fetchSiteConfig(): Promise<boolean> {
-  try {
-    const res = await api.get('/public-config');
-    const title = res.data.data?.siteTitle;
-    siteConfig.value.title = typeof title === 'string' ? title : '';
+  // 经共享 store 读取（与启动初始化合并并发请求）；失败时 store 保留最后成功值，
+  // 本页按加载失败禁用保存，防止用默认值覆盖服务端配置。
+  const ok = await publicConfigStore.fetchSiteTitle();
+  if (ok) {
+    siteConfig.value.title = publicConfigStore.siteTitle;
     blockLoadState.site = true;
-    return true;
-  } catch (err) {
-    console.error('获取网站标题失败', err);
+  } else {
     blockLoadState.site = false;
-    return false;
   }
+  return ok;
 }
 
 async function saveSiteConfig() {
@@ -498,6 +499,8 @@ async function saveSiteConfig() {
       description: '网站浏览器标题',
     });
     siteConfig.value.title = title;
+    // 提交到共享 store：侧栏大标题与浏览器标签立即同步，无需刷新或重拉
+    publicConfigStore.setSiteTitle(title);
     MessagePlugin.success('网站标题已保存');
     markClean();
   } catch (error: unknown) {

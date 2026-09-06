@@ -3,7 +3,7 @@
     <div class="sidebar-logo">
       <h2>
         <span class="logo-icon" v-html="icons.logo"></span>
-        文件分发系统
+        <span class="sidebar-title" :title="siteTitle">{{ siteTitle }}</span>
       </h2>
     </div>
 
@@ -57,6 +57,7 @@ import { computed } from 'vue';
 import { useRoute } from 'vue-router';
 import type { UserRole } from '../types/user';
 import { PAGE_ROLES, hasAnyRole } from '../utils/permissions';
+import { usePublicConfigStore } from '../stores/public-config';
 
 const props = defineProps<{
   role: UserRole;
@@ -71,6 +72,9 @@ const emit = defineEmits<{
 }>();
 
 const route = useRoute();
+
+/** 网站标题来自公共配置 store：启动初始化与设置页保存共同维护，桌面 / 移动侧栏自动共用 */
+const siteTitle = computed(() => usePublicConfigStore().siteTitle);
 
 /**
  * 高亮判断：精确匹配或子路由前缀匹配。

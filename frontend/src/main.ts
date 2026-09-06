@@ -3,6 +3,7 @@ import { createPinia } from 'pinia';
 import App from './App.vue';
 import router from './router';
 import { setupRoutePrefetch } from './composables/useRoutePrefetch';
+import { usePublicConfigStore } from './stores/public-config';
 import TIcon from './components/TIcon.vue';
 import 'tdesign-vue-next/dist/tdesign.css';
 import './assets/styles.css';
@@ -60,34 +61,17 @@ async function deferredInit() {
 
 }
 
-function initializeDocumentTitle() {
-  const defaultTitle = document.title;
-  const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), 2_000);
-
-  void fetch('/api/public-config', { signal: controller.signal })
-    .then(async (response) => {
-      if (!response.ok) return;
-      const payload = await response.json() as { data?: { siteTitle?: unknown } };
-      const siteTitle = typeof payload.data?.siteTitle === 'string' ? payload.data.siteTitle.trim() : '';
-      document.title = siteTitle || defaultTitle;
-    })
-    .catch(() => {
-      document.title = defaultTitle;
-    })
-    .finally(() => window.clearTimeout(timeout));
-}
-
 async function bootstrapFrontend() {
-  initializeDocumentTitle();
-
   const app = createApp(App);
   const pinia = createPinia();
 
   app.use(pinia);
   app.use(router);
 
-  // 全局注册图标组件：<t-icon name="..."> 统一由此组件按名称映射到 TDesign 图标
+  // 非阻塞初始化公共配置（网站标题）：侧栏与浏览器标签共用 store 的响应式
+  // 标题；失败 / 超时保留默认值，不阻塞挂载。保存成功后的同步走 store 本地提交。
+  void usePublicConfigStore().fetchSiteTitle();
+
   app.component('TIcon', TIcon);
 
   app.mount('#app');

@@ -266,6 +266,13 @@ body {
   font-size: 16px; flex-shrink: 0; color: #fff;
 }
 
+/* 自定义网站标题可能长达 200 字符：文本独立容器可收缩，
+   单行省略避免撑宽 240px 侧栏 / 挤压图标；完整文本经 title 提示查看 */
+.sidebar-logo .sidebar-title {
+  min-width: 0; flex: 1;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
 .sidebar-nav { flex: 1; padding: 4px 8px; }
 
 .nav-section {

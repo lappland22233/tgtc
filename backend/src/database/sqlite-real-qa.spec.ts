@@ -64,6 +64,33 @@ describe('真实 SQLite 数据源关键业务与并发 QA', () => {
     expect(foreignKeys).toEqual([]);
   });
 
+  it('API 密钥真实创建由 UuidSubscriber 生成 UUID，摘要落库、明文不落库', async () => {
+    const { ApiKey } = require('../common/entities/api-key.entity') as typeof import('../common/entities/api-key.entity');
+    const { ApiKeyService } = require('../api-key/api-key.service') as typeof import('../api-key/api-key.service');
+    const { User } = require('../common/entities/user.entity') as typeof import('../common/entities/user.entity');
+    const userRepo = dataSource.getRepository(User);
+    const user = await userRepo.save(userRepo.create({
+      email: `apikey-${randomUUID()}@example.com`, password: 'hash',
+    }));
+    const audit = { log: jest.fn(), logAwait: jest.fn() } as any;
+    const service = new ApiKeyService(dataSource.getRepository(ApiKey), userRepo, audit);
+
+    // PG 侧该路径曾因建表迁移遗漏 id DEFAULT 而 23502；SQLite 依赖
+    // subscriber 应用层生成 id，此测试防止该生成链路回归。
+    const created = await service.create(user, 'SQLite 回归');
+    expect(created.id).toMatch(/^[0-9a-f-]{36}$/);
+    expect(created.key.startsWith('tgtc_')).toBe(true);
+
+    const row = await dataSource.getRepository(ApiKey).findOneByOrFail({ id: created.id });
+    expect(row.keyHash).toHaveLength(64);
+    expect(JSON.stringify(row)).not.toContain(created.key);
+
+    const rotated = await service.rotate(user, created.id);
+    expect(rotated.id).not.toBe(created.id);
+    expect((await dataSource.getRepository(ApiKey).findOneByOrFail({ id: created.id })).revokedAt)
+      .toBeInstanceOf(Date);
+  });
+
   it('限流原子计数在并发调用下准确达到阈值', async () => {
     const { RateLimit } = require('../common/entities/rate-limit.entity') as typeof import('../common/entities/rate-limit.entity');
     const { RateLimitService } = require('../common/services/rate-limit.service') as typeof import('../common/services/rate-limit.service');
