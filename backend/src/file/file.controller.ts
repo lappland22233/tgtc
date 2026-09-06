@@ -19,7 +19,8 @@ import {
   HttpException,
   HttpStatus,
 } from '@nestjs/common';
-import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
+import { JwtOrApiKeyAuthGuard } from '../api-key/jwt-or-api-key.guard';
+import { hasAdminPrivileges } from '../common/auth-context';
 import { FileInterceptor, FilesInterceptor } from '@nestjs/platform-express';
 import { diskStorage } from 'multer';
 import * as path from 'path';
@@ -108,7 +109,7 @@ export class FileController {
   }
 
   @Post('upload')
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtOrApiKeyAuthGuard)
   @UseInterceptors(FileInterceptor('file', { storage: multerDiskStorage, limits: { fileSize: multerFileSize } }))
   async upload(
     @UploadedFile() file: Express.Multer.File,
@@ -133,7 +134,7 @@ export class FileController {
   }
 
   @Post('upload-multiple')
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtOrApiKeyAuthGuard)
   @UseInterceptors(FilesInterceptor('files', 10, { storage: multerDiskStorage, limits: { fileSize: multerFileSize } }))
   async uploadMultiple(
     @UploadedFiles() files: Express.Multer.File[],
@@ -163,7 +164,7 @@ export class FileController {
    * 前端通过 GET /api/files/upload-status/:jobId 轮询结果。
    */
   @Post('upload-async')
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtOrApiKeyAuthGuard)
   @UseInterceptors(FileInterceptor('file', { storage: multerDiskStorage, limits: { fileSize: multerFileSize } }))
   async uploadAsync(
     @UploadedFile() file: Express.Multer.File,
@@ -195,7 +196,7 @@ export class FileController {
    * 异步批量上传
    */
   @Post('upload-multiple-async')
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtOrApiKeyAuthGuard)
   @UseInterceptors(FilesInterceptor('files', 10, { storage: multerDiskStorage, limits: { fileSize: multerFileSize } }))
   async uploadMultipleAsync(
     @UploadedFiles() files: Express.Multer.File[],
@@ -223,14 +224,14 @@ export class FileController {
    * 查询异步上传任务状态
    */
   @Get('upload-status/:jobId')
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtOrApiKeyAuthGuard)
   async getUploadStatus(@Param('jobId') jobId: string, @CurrentUser() user: User) {
     const job = this.fileService.getUploadJob(jobId);
     if (!job) {
       throw new BadRequestException('任务不存在或已过期');
     }
-    // 仅允许任务创建者查询
-    if (job.userId !== user.id && user.role !== UserRole.ADMIN && user.role !== UserRole.SUPER_ADMIN) {
+    // 仅允许任务创建者查询（API Key 请求一律 owner-only）
+    if (job.userId !== user.id && !hasAdminPrivileges(user)) {
       throw new BadRequestException('无权访问此任务');
     }
     // 只返回必要字段
@@ -246,7 +247,7 @@ export class FileController {
   }
 
   @Get()
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtOrApiKeyAuthGuard)
   async findAll(
     @Query('page') page = 1,
     @Query('limit') limit = 20,
@@ -288,8 +289,8 @@ export class FileController {
       await this.tagService.assertOwner(user.id, tagIds);
     }
 
-    // Non-admin users can only see their own files
-    if (user.role === UserRole.USER) {
+    // Non-admin users（含 API Key 请求）can only see their own files
+    if (!hasAdminPrivileges(user)) {
       return this.fileService.findAll(Number(page), Number(limit), user.id, keyword, shouldIncludeDeleted, sortBy, sortOrder, cursor, tagIds, folderId);
     }
     // Admin: only show all files when userId filter is explicitly provided;
@@ -315,8 +316,14 @@ export class FileController {
     @Req() req: Request,
     @Res() res: Response,
   ) {
+    // R8：槽位释放改为幂等 + 异常路径兜底。限流检查为异步 await，
+    // 期间客户端可能已断开（close 事件先于监听器注册触发），
+    // 此时若照常占槽将永久泄漏该 IP 的并发额度。
+    let releaseMediaSlot = () => {};
     try {
       const clientIp = getClientIp(req);
+      // 客户端已断开：无需占槽也无需继续取流
+      if (res.destroyed) return;
       // G2-17/G5-14：匿名媒体端点限流 —— 同 IP 速率限制 + 并发连接数上限（防刷带宽/击穿）
       const rateResult = await this.rateLimitService.checkAndIncrement(
         `media:${clientIp}`,
@@ -332,12 +339,18 @@ export class FileController {
       if (currentConcurrency >= MEDIA_CONCURRENCY_PER_IP) {
         throw new HttpException('媒体并发连接过多，请稍后再试', HttpStatus.TOO_MANY_REQUESTS);
       }
-      activeMediaByIp.set(clientIp, currentConcurrency + 1);
-      const releaseMediaSlot = () => {
+      // 限流 await 期间客户端断开：close 已错过，直接放弃，不占槽
+      if (res.destroyed) return;
+      let slotHeld = false;
+      releaseMediaSlot = () => {
+        if (!slotHeld) return;
+        slotHeld = false;
         const remaining = (activeMediaByIp.get(clientIp) || 1) - 1;
         if (remaining > 0) activeMediaByIp.set(clientIp, remaining);
         else activeMediaByIp.delete(clientIp);
       };
+      activeMediaByIp.set(clientIp, currentConcurrency + 1);
+      slotHeld = true;
       // 流响应结束/客户端断开时释放并发槽位
       res.on('close', releaseMediaSlot);
       const rangeHeader = req.headers.range;
@@ -390,12 +403,15 @@ export class FileController {
       });
     } catch (error) {
       this.streamResponder.handleError(res, error, '媒体文件访问失败', req);
+      // R8：异常路径兜底释放（幂等）。close 正常触发时 slotHeld 已为 false，无副作用；
+      // close 在监听器注册前已错过时，这里防止槽位泄漏。
+      releaseMediaSlot();
     }
   }
 
   /** 签发仅供 URL 媒体预览使用的短期票据，绝不将登录 JWT 写入 URL。 */
   @Post(':id/media-ticket')
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtOrApiKeyAuthGuard)
   async issueMediaTicket(@Param('id') id: string, @CurrentUser() user: User) {
     const file = await this.fileService.findOne(id, user);
     return {
@@ -457,7 +473,7 @@ export class FileController {
    * - 防 XSS：html/svg+xml/xml 类型强制降级为 text/plain（配合 nosniff）
    */
   @Get(':id/preview')
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtOrApiKeyAuthGuard)
   async preview(
     @Param('id') id: string,
     @CurrentUser() user: User,
@@ -524,7 +540,7 @@ export class FileController {
   }
 
   @Get(':id')
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtOrApiKeyAuthGuard)
   async findOne(@Param('id') id: string, @CurrentUser() user: User) {
     return this.fileService.findOne(id, user);
   }
@@ -537,7 +553,7 @@ export class FileController {
    * - 不受私有/加密/次数/过期限制
    */
   @Get(':id/thumbnail')
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtOrApiKeyAuthGuard)
   async thumbnail(
     @Param('id') id: string,
     @CurrentUser() user: User,
@@ -577,7 +593,7 @@ export class FileController {
    * - 高清封面不可用时回退标准封面；完全不可用返回 404
    */
   @Get(':id/thumbnail-hd')
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtOrApiKeyAuthGuard)
   async thumbnailHd(
     @Param('id') id: string,
     @CurrentUser() user: User,
@@ -612,13 +628,13 @@ export class FileController {
    * 供前端在视频预览前判断冷资源单连接策略。
    */
   @Get(':id/cache-status')
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtOrApiKeyAuthGuard)
   async cacheStatus(@Param('id') id: string, @CurrentUser() user: User) {
     return this.fileService.getCacheStatus(id, user);
   }
 
   @Get(':id/download')
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtOrApiKeyAuthGuard)
   async download(
     @Param('id') id: string,
     @CurrentUser() user: User,
@@ -647,8 +663,8 @@ export class FileController {
         );
       }
 
-      // 请求级无缓存：仅管理员可通过 ?nocache=1|true 强制实时回源直通，普通用户传参忽略
-      const isAdmin = user.role === UserRole.ADMIN || user.role === UserRole.SUPER_ADMIN;
+      // 请求级无缓存：仅管理员可通过 ?nocache=1|true 强制实时回源直通，普通用户/API Key 传参忽略
+      const isAdmin = hasAdminPrivileges(user);
       const noCacheRequested = isAdmin && (req.query.nocache === '1' || req.query.nocache === 'true');
 
       // Range 请求支持（仅缓存命中时可用）
@@ -707,7 +723,7 @@ export class FileController {
   }
 
   @Put(':id/access-type')
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtOrApiKeyAuthGuard)
   async updateAccessType(
     @Param('id') id: string,
     @Body() data: UpdateAccessTypeDto,
@@ -718,7 +734,7 @@ export class FileController {
   }
 
   @Put(':id/access-count')
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtOrApiKeyAuthGuard)
   async updateAccessCount(
     @Param('id') id: string,
     @Body() data: UpdateAccessCountDto,
@@ -729,7 +745,7 @@ export class FileController {
   }
 
   @Put(':id/password')
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtOrApiKeyAuthGuard)
   async setPassword(
     @Param('id') id: string,
     @Body() data: SetPasswordDto,
@@ -740,7 +756,7 @@ export class FileController {
   }
 
   @Put(':id/expires')
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtOrApiKeyAuthGuard)
   async updateExpires(
     @Param('id') id: string,
     @Body() data: UpdateExpiresDto,
@@ -757,7 +773,7 @@ export class FileController {
    *   - folderId = <uuid>：移动到指定文件夹（必须是当前用户拥有的文件夹）
    */
   @Patch(':id/move')
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtOrApiKeyAuthGuard)
   async moveFile(
     @Param('id') id: string,
     @Body() dto: MoveFileDto,
@@ -772,7 +788,7 @@ export class FileController {
    * Body: { newOriginalName: string }
    */
   @Patch(':id/rename')
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtOrApiKeyAuthGuard)
   async renameFile(
     @Param('id') id: string,
     @Body() dto: RenameFileDto,
@@ -787,7 +803,7 @@ export class FileController {
    * Body: { folderId: string | null }（null 表示复制到根目录）
    */
   @Post(':id/copy')
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtOrApiKeyAuthGuard)
   async copyFile(
     @Param('id') id: string,
     @Body() dto: CopyFileDto,
@@ -797,13 +813,13 @@ export class FileController {
   }
 
   @Delete(':id')
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtOrApiKeyAuthGuard)
   async delete(@Param('id') id: string, @CurrentUser() user: User) {
     return this.fileService.delete(id, user);
   }
 
   @Post(':id/restore')
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtOrApiKeyAuthGuard)
   async restoreDelete(@Param('id') id: string, @CurrentUser() user: User) {
     await this.fileService.restoreDelete(id, user);
     return { message: '文件已恢复' };
@@ -811,14 +827,14 @@ export class FileController {
 
   /** 文件主强制永久删除自己的文件（跳过 7 天等待期） */
   @Post(':id/force-delete')
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtOrApiKeyAuthGuard)
   async forceDelete(@Param('id') id: string, @CurrentUser() user: User) {
     await this.fileService.forceDelete(id, user);
     return { message: '文件已永久删除' };
   }
 
   @Post('batch-markdown')
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtOrApiKeyAuthGuard)
   async batchToMarkdown(
     @Body() data: BatchMarkdownDto,
     @CurrentUser() user: User,
@@ -829,7 +845,7 @@ export class FileController {
 
   /** 设置文件标签（全量替换） */
   @Put(':id/tags')
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtOrApiKeyAuthGuard)
   async setFileTags(
     @Param('id') id: string,
     @CurrentUser() user: User,
@@ -848,7 +864,7 @@ export class FileController {
 
   /** 移除文件单个标签 */
   @Delete(':id/tags/:tagId')
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtOrApiKeyAuthGuard)
   async removeFileTag(
     @Param('id') id: string,
     @Param('tagId') tagId: string,
@@ -899,7 +915,7 @@ export class FileController {
 
   // Generate share link
   @Get(':id/share')
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtOrApiKeyAuthGuard)
   async generateShareLink(
     @Param('id') id: string,
     @CurrentUser() user: User,
@@ -907,6 +923,44 @@ export class FileController {
     const link = await this.fileService.generateShareLink(id, user);
     return { link };
   }
+
+  /**
+   * 获取下载链接（三种模式，query 参数控制）：
+   *
+   * - GET /api/files/:id/download-link?mode=permanent
+   *     将文件转换为公开文件并返回公开下载链接（匿名可访问，无时效/次数限制）
+   * - GET /api/files/:id/download-link?mode=timed&durationHours=24
+   *     返回限时公开下载链接，durationHours 为有效小时数（1-720，可选参数，
+   *     缺省按未提供处理并报错——限时模式必须显式指定）
+   * - GET /api/files/:id/download-link?mode=count_limited&maxAccessCount=10
+   *     返回限次数下载链接，maxAccessCount 为最大访问次数（1-1000000）
+   *
+   * timed / count_limited 均创建独立 ShareLink（匿名访问 /s/:token），
+   * 不改变文件本身的公开属性；过期或次数耗尽后链接自动失效。
+   */
+  @Get(':id/download-link')
+  @UseGuards(JwtOrApiKeyAuthGuard)
+  async getDownloadLink(
+    @Param('id') id: string,
+    @CurrentUser() user: User,
+    @Query('mode') mode?: string,
+    @Query('durationHours') durationHours?: string,
+    @Query('maxAccessCount') maxAccessCount?: string,
+  ) {
+    const parsedDuration = parseOptionalPositiveInt(durationHours);
+    const parsedMaxAccess = parseOptionalPositiveInt(maxAccessCount);
+    return this.fileService.createDownloadLink(id, user, mode || '', parsedDuration, parsedMaxAccess);
+  }
+}
+
+/** 可选正整数 query 参数解析：未提供返回 undefined；非法值抛 400 */
+function parseOptionalPositiveInt(raw?: string): number | undefined {
+  if (raw === undefined || raw === null || raw === '') return undefined;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 1) {
+    throw new BadRequestException('参数必须是正整数');
+  }
+  return value;
 }
 
 

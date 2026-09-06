@@ -17,10 +17,11 @@ import { JwtRevokedToken } from '../common/entities/jwt-revoked-token.entity';
 import { SharePreviewSession } from '../common/entities/share-preview-session.entity';
 import { FileVerifyTask } from '../common/entities/file-verify-task.entity';
 import { UpdateTask } from '../common/entities/update-task.entity';
+import { ApiKey } from '../common/entities/api-key.entity';
 
 /** 单一实体清单：Nest 运行时与 TypeORM CLI 必须共用，避免漏表。 */
 export const databaseEntities = [
   User, File, Folder, ShareLink, SystemConfig, VerificationCode, BannedIP,
   ShareAudit, FileAccessLog, RateLimit, AuditLog, AccessLog, Alert, UploadTask,
-  Tag, JwtRevokedToken, SharePreviewSession, FileVerifyTask, UpdateTask,
+  Tag, JwtRevokedToken, SharePreviewSession, FileVerifyTask, UpdateTask, ApiKey,
 ] as const;

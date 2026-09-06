@@ -50,6 +50,7 @@ describe('真实 SQLite 数据源关键业务与并发 QA', () => {
       'SqliteEntitySchema1700000000000',
       'SqliteCreateUpdateTasks1798400000000',
       'SqliteSchemaAlignment1800000000000',
+      'SqliteCreateApiKeys1801000000000',
     ]);
 
     await dataSource.undoLastMigration();

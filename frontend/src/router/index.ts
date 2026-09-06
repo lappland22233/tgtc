@@ -166,24 +166,18 @@ let navLock: Promise<void> = Promise.resolve();
 /**
  * fetchUser 独立超时（ms）。
  * /auth/me 若挂起（默认 axios 30s 超时），会阻塞串行导航锁导致全站路由跳转卡死。
- * 这里设置更短的独立超时，超时后按“未认证”兜底继续导航，绝不阻塞。
+ * 该超时由 fetchUser 内部实现（abort 底层请求），超时后按“未认证”兜底继续导航，绝不阻塞。
  */
 const FETCH_USER_TIMEOUT = 8000;
 
-/** 为 Promise 包裹独立超时：超时则 reject，避免无限期等待 */
-function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      reject(new Error(`fetchUser 超时（>${ms}ms）`));
-    }, ms);
-    promise.then(
-      (val) => { clearTimeout(timer); resolve(val); },
-      (err) => { clearTimeout(timer); reject(err); },
-    );
-  });
-}
-
 router.beforeEach(async (to, _from, next) => {
+  // 步骤 0：公开路由（分享页 /s/:token）直接放行，不进入导航队列、不触发 fetchUser。
+  // 这是匿名访问场景：不应被重定向，也不应因慢会话恢复排队而阻塞分享页打开。
+  if (to.meta.public) {
+    next();
+    return;
+  }
+
   // 串行化所有导航守卫：快速切换时排队执行
   const prevLock = navLock;
   let releaseLock: () => void;
@@ -192,22 +186,15 @@ router.beforeEach(async (to, _from, next) => {
   try {
     await prevLock;
 
-    // 步骤 0：公开路由（分享页 /s/:token）直接放行，不触发 fetchUser
-    // 这是匿名访问场景，不应被重定向到登录页
-    if (to.meta.public) {
-      next();
-      return;
-    }
-
     const authStore = useAuthStore();
 
     // 步骤 1：首次加载或会话过期（G10-05）时从 cookie 恢复 / 重拉登录状态。
     // fetchUser 内部有并发锁，多次快速调用安全。
-    // 额外包裹独立超时 + catch 兜底：/auth/me 挂起或失败时按“未认证”继续导航，
-    // 避免阻塞串行导航锁导致全站路由跳转死锁。
+    // 独立超时在 fetchUser 内部通过 abort 实现：/auth/me 挂起或失败时按“未认证”继续导航，
+    // 避免阻塞串行导航锁导致全站路由跳转死锁；catch 兜底保持不变。
     if (!authStore.initialized || authStore.isSessionStale()) {
       try {
-        await withTimeout(authStore.fetchUser(), FETCH_USER_TIMEOUT);
+        await authStore.fetchUser({ timeoutMs: FETCH_USER_TIMEOUT });
       } catch (err) {
         console.warn('[Router] fetchUser 失败或超时，按未认证状态继续导航:', err);
       }

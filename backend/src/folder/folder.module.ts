@@ -4,6 +4,7 @@ import { Folder } from '../common/entities/folder.entity';
 import { File } from '../common/entities/file.entity';
 import { FolderController } from './folder.controller';
 import { FolderService } from './folder.service';
+import { ApiKeyModule } from '../api-key/api-key.module';
 
 /**
  * 文件夹模块：网盘层级管理。
@@ -15,7 +16,7 @@ import { FolderService } from './folder.service';
  * AuditModule 是全局模块，无需显式 import；AuditService 通过全局 DI 注入。
  */
 @Module({
-  imports: [TypeOrmModule.forFeature([Folder, File])],
+  imports: [TypeOrmModule.forFeature([Folder, File]), ApiKeyModule],
   controllers: [FolderController],
   providers: [FolderService],
   exports: [FolderService],

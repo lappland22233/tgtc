@@ -15,7 +15,7 @@ import {
 } from '@nestjs/common';
 import { Request, Response, CookieOptions } from 'express';
 import { createHash, randomBytes } from 'crypto';
-import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
+import { JwtOrApiKeyAuthGuard } from '../api-key/jwt-or-api-key.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { User } from '../common/entities/user.entity';
 import { getClientIp } from '../common/utils/client-ip';
@@ -179,13 +179,13 @@ export class ShareController {
   // ==================== 需登录的接口 ====================
 
   @Post('shares')
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtOrApiKeyAuthGuard)
   async createShare(@CurrentUser() user: User, @Body() dto: CreateShareDto) {
     return this.shareService.createShare(user.id, dto);
   }
 
   @Get('shares')
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtOrApiKeyAuthGuard)
   async listMyShares(
     @CurrentUser() user: User,
     @Query('targetType') targetType?: ShareTargetType,
@@ -200,13 +200,13 @@ export class ShareController {
   }
 
   @Get('shares/:id')
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtOrApiKeyAuthGuard)
   async getShare(@Param('id') id: string, @CurrentUser() user: User) {
     return this.shareService.getShareById(id, user.id);
   }
 
   @Patch('shares/:id')
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtOrApiKeyAuthGuard)
   async updateShare(
     @Param('id') id: string,
     @CurrentUser() user: User,
@@ -216,7 +216,7 @@ export class ShareController {
   }
 
   @Delete('shares/:id')
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtOrApiKeyAuthGuard)
   async cancelShare(@Param('id') id: string, @CurrentUser() user: User) {
     await this.shareService.cancelShare(id, user.id);
     return { status: 'cancelled' };

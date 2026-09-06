@@ -79,6 +79,9 @@
             <div class="ctx-item" role="menuitem" tabindex="-1" @click="emitAction('share')">
               <t-icon name="share" class="ctx-icon" />分享
             </div>
+            <div class="ctx-item" role="menuitem" tabindex="-1" @click="emitAction('download-link')">
+              <t-icon name="link" class="ctx-icon" />获取下载链接…
+            </div>
             <div class="ctx-divider" />
             <!-- 访问控制（原表格内联列，现收纳进菜单） -->
             <div class="ctx-item" role="menuitem" tabindex="-1" @click="emitAction('toggle-access')">

@@ -12,9 +12,11 @@ export {}
 declare module 'vue' {
   export interface GlobalComponents {
     AlertBanner: typeof import('./src/components/AlertBanner.vue')['default']
+    ApiKeyManager: typeof import('./src/components/settings/ApiKeyManager.vue')['default']
     ConflictResolveDialog: typeof import('./src/components/ConflictResolveDialog.vue')['default']
     CreateShareDialog: typeof import('./src/components/share/CreateShareDialog.vue')['default']
     CustomVideoPlayer: typeof import('./src/components/file/CustomVideoPlayer.vue')['default']
+    DownloadLinkDialog: typeof import('./src/components/share/DownloadLinkDialog.vue')['default']
     FileCard: typeof import('./src/components/file/FileCard.vue')['default']
     FileContextMenu: typeof import('./src/components/file/FileContextMenu.vue')['default']
     FilePreviewDialog: typeof import('./src/components/file/FilePreviewDialog.vue')['default']

@@ -330,16 +330,30 @@ export class UserService {
     });
   }
 
-  async getUserStats(userId: string): Promise<{ fileCount: number; totalSize: number; totalAccessCount: number }> {
+  async getUserStats(
+    userId: string,
+    options?: { todayStart?: Date },
+  ): Promise<{
+    fileCount: number;
+    totalSize: number;
+    totalAccessCount: number;
+    todayUploadCount: number;
+  }> {
+    // 今日口径：优先使用客户端传入的本地日零点；未提供时回退服务器本地日零点。
+    // 统计条件聚合（CASE WHEN）与 COUNT 同查询完成，不增加逐文件查询；
+    // 口径与列表一致：仅统计未删除文件。
+    const dayStart = options?.todayStart ?? new Date(new Date().setHours(0, 0, 0, 0));
     const [fileStats, accessStats] = await Promise.all([
       this.fileRepository
         .createQueryBuilder('file')
         .select([
           'COUNT(*) as "fileCount"',
           'COALESCE(SUM(file.size), 0) as "totalSize"',
+          'COALESCE(SUM(CASE WHEN file.createdAt >= :dayStart THEN 1 ELSE 0 END), 0) as "todayUploadCount"',
         ])
         .where('file.uploaderId = :userId', { userId })
         .andWhere('file.isDeleted = false')
+        .setParameters({ userId, dayStart })
         .getRawMany(),
       this.accessLogRepository
         .createQueryBuilder('log')
@@ -352,6 +366,7 @@ export class UserService {
       fileCount: Number(fileStats[0]?.fileCount || 0),
       totalSize: Number(fileStats[0]?.totalSize || 0),
       totalAccessCount: Number(accessStats[0]?.count || 0),
+      todayUploadCount: Number(fileStats[0]?.todayUploadCount || 0),
     };
   }
 }

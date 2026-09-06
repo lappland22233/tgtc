@@ -44,6 +44,10 @@
         </t-descriptions-item>
       </t-descriptions>
     </div>
+
+    <div class="card" style="margin-top: 20px;">
+      <ApiKeyManager />
+    </div>
   </div>
 </template>
 
@@ -54,6 +58,7 @@ import { useAuthStore } from '../../stores/auth';
 import { api } from '../../stores/auth';
 import { getErrorMessage } from '../../utils/error';
 import type { UserRole } from '../../types/user';
+import ApiKeyManager from '../../components/settings/ApiKeyManager.vue';
 
 const authStore = useAuthStore();
 

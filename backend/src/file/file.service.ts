@@ -7,6 +7,7 @@ import { OnEvent } from '@nestjs/event-emitter';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { Readable } from 'stream';
 import { Request } from 'express';
+import { randomBytes } from 'crypto';
 import * as fs from 'fs';
 import { createReadStream, writeFileSync } from 'fs';
 import * as path from 'path';
@@ -21,7 +22,8 @@ import { ShareLink, ShareLinkStatus, ShareTargetType } from '../common/entities/
 import { TelegramService } from '../telegram/telegram.service';
 import { TelegramFileNotFoundError } from '../telegram/telegram.errors';
 import { ConfigCacheService } from '../common/services/config-cache.service';
-import { User, UserRole } from '../common/entities/user.entity';
+import { User } from '../common/entities/user.entity';
+import { hasAdminPrivileges } from '../common/auth-context';
 import { BannedIP } from '../common/entities/banned-ip.entity';
 import { databaseForUpdate, databaseQuery, getDatabaseType } from '../database/database-types';
 import { ShareAudit } from '../common/entities/share-audit.entity';
@@ -983,11 +985,11 @@ export class FileService implements OnModuleInit {
   }
 
   /**
-   * 统一权限校验：登录用户只能读取自己的文件，管理员可读取所有文件
+   * 统一权限校验：登录用户只能读取自己的文件，管理员可读取所有文件。
+   * API Key 认证请求一律视为普通用户（owner-only），即使关联账号是管理员。
    */
   private async assertFileReadable(file: File, user: User): Promise<void> {
-    const adminRoles: UserRole[] = [UserRole.ADMIN, UserRole.SUPER_ADMIN];
-    if (file.uploaderId !== user.id && !adminRoles.includes(user.role)) {
+    if (file.uploaderId !== user.id && !hasAdminPrivileges(user)) {
       throw new ForbiddenException('无权访问此文件');
     }
   }
@@ -999,7 +1001,7 @@ export class FileService implements OnModuleInit {
    * @throws ForbiddenException 如果无权修改
    */
   private assertFileWritable(file: File, user: User): void {
-    if (file.uploaderId !== user.id && user.role === UserRole.USER) {
+    if (file.uploaderId !== user.id && !hasAdminPrivileges(user)) {
       throw new ForbiddenException('无权修改此文件');
     }
   }
@@ -1064,9 +1066,9 @@ export class FileService implements OnModuleInit {
 
     const now = new Date();
 
-    // 文件已被管理员删除 → 普通用户不可操作
+    // 文件已被管理员删除 → 普通用户/API Key 不可操作
     if (file.isDeleted && file.deletedByAdmin) {
-      if (user.role !== UserRole.ADMIN && user.role !== UserRole.SUPER_ADMIN) {
+      if (!hasAdminPrivileges(user)) {
         throw new ForbiddenException('该文件由管理员删除，请联系管理员处理');
       }
       // 管理员可以直接强制删除
@@ -1124,8 +1126,8 @@ export class FileService implements OnModuleInit {
       throw new BadRequestException('该文件未处于待删除状态');
     }
 
-    // 管理员删除的文件，普通用户不可恢复
-    if (file.deletedByAdmin && user.role !== UserRole.ADMIN && user.role !== UserRole.SUPER_ADMIN) {
+    // 管理员删除的文件，普通用户/API Key 不可恢复
+    if (file.deletedByAdmin && !hasAdminPrivileges(user)) {
       throw new ForbiddenException('该文件由管理员删除，普通用户不可恢复。请联系管理员处理');
     }
 
@@ -2139,6 +2141,136 @@ export class FileService implements OnModuleInit {
     return shareLink;
   }
 
+  /**
+   * 按模式生成下载链接（供 API 与前端统一入口）：
+   *
+   * - permanent：将文件转为公开文件（accessType=public），复用旧公开链接
+   *   （/files/public/:id → /s/:id），匿名可访问、无时效/次数限制；
+   * - timed：创建独立的 ShareLink，携带 durationHours（小时，1-720）作为有效期，
+   *   首次访问触发计时（expiresStartAt），不改变文件本身的公开属性；
+   * - count_limited：创建独立的 ShareLink，携带 maxAccessCount（1-1000000），
+   *   通过 checkAndIncrementAccess / consumeShareAccess 原子扣次，Range 分段
+   *   下载沿用现有 rangeQuotaDedup / 访客会话去重语义，一次完整下载只计一次。
+   *
+   * 权限：assertFileWritable（所有者；API Key 请求即使关联管理员也 owner-only）。
+   */
+  async createDownloadLink(
+    id: string,
+    user: User,
+    mode: string,
+    durationHours?: number,
+    maxAccessCount?: number,
+  ): Promise<{
+    mode: string;
+    url: string;
+    token: string;
+    expiresIn: number | null;
+    maxAccessCount: number;
+  }> {
+    if (mode !== 'permanent' && mode !== 'timed' && mode !== 'count_limited') {
+      throw new BadRequestException('mode 必须是 permanent、timed 或 count_limited');
+    }
+
+    const file = await this.fileRepository.findOne({
+      where: { id, isDeleted: false },
+    });
+    if (!file) {
+      throw new NotFoundException('文件不存在');
+    }
+    this.assertFileWritable(file, user);
+
+    const baseUrl = this.configService.get<string>('APP_URL') || 'http://localhost:3000';
+
+    if (mode === 'permanent') {
+      // 公开链接承诺「任何人可访问」：文件遗留的密码/访问次数/时效约束会被
+      // 旧公开链路（ensureLegacyPublicShare / checkAndIncrementAccess）继承或
+      // 拦截访客，转公开时一并显式清除（deprecated 字段语义：maxAccessCount<=0 不限）。
+      const hasLegacyConstraints = !!file.password
+        || (file.maxAccessCount ?? -1) > 0
+        || (file.expiresIn !== null && file.expiresIn !== undefined);
+      if (file.accessType !== FileAccessType.PUBLIC || hasLegacyConstraints) {
+        await this.fileRepository.update(id, {
+          accessType: FileAccessType.PUBLIC,
+          password: null,
+          maxAccessCount: -1,
+          currentAccessCount: 0,
+          expiresIn: null,
+          expiresStartAt: null,
+        });
+        this.auditService.log({
+          action: 'file_access_change',
+          userId: user.id,
+          resourceType: 'file',
+          resourceId: id,
+          metadata: {
+            accessType: FileAccessType.PUBLIC,
+            clearedLegacyConstraints: hasLegacyConstraints,
+            via: 'download-link',
+          },
+        });
+      }
+      const url = await this.generateShareLink(id, user);
+      return { mode, url, token: id, expiresIn: null, maxAccessCount: -1 };
+    }
+
+    // 参数校验（与 CreateShareDto 的分享限制范围保持一致）
+    if (mode === 'timed') {
+      if (!Number.isInteger(durationHours) || (durationHours as number) < 1 || (durationHours as number) > 720) {
+        throw new BadRequestException('durationHours 必须是 1 到 720 之间的整数（小时）');
+      }
+    } else {
+      if (!Number.isInteger(maxAccessCount) || (maxAccessCount as number) < 1 || (maxAccessCount as number) > 1000000) {
+        throw new BadRequestException('maxAccessCount 必须是 1 到 1000000 之间的整数');
+      }
+    }
+
+    // 生成唯一 token（与 ShareService.createShare 相同的碰撞重试策略）
+    let token = '';
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      token = randomBytes(9).toString('base64url');
+      const exists = await this.shareLinkRepository.findOne({ where: { token }, select: ['id'] });
+      if (!exists) break;
+      if (attempt === 4) throw new BadRequestException('分享链接生成失败，请重试');
+    }
+
+    const link = await this.shareLinkRepository.save(
+      this.shareLinkRepository.create({
+        token,
+        targetType: ShareTargetType.FILE,
+        targetId: id,
+        creatorId: user.id,
+        password: null,
+        maxAccessCount: mode === 'count_limited' ? (maxAccessCount as number) : -1,
+        expiresIn: mode === 'timed' ? (durationHours as number) : null,
+        expiresStartAt: null, // 首次访问时才设置
+        status: ShareLinkStatus.ACTIVE,
+        isDeleted: false,
+      }),
+    );
+
+    // 审计日志：token 仅记录前 4 位（与 ShareService.maskToken 脱敏口径一致）
+    this.auditService.log({
+      action: 'file_share',
+      userId: user.id,
+      resourceType: 'file',
+      resourceId: id,
+      metadata: {
+        mode,
+        tokenPrefix: token.slice(0, 4),
+        expiresIn: link.expiresIn,
+        maxAccessCount: link.maxAccessCount,
+      },
+    });
+
+    return {
+      mode,
+      url: `${baseUrl}/s/${token}`,
+      token,
+      expiresIn: link.expiresIn,
+      maxAccessCount: link.maxAccessCount,
+    };
+  }
+
 
   /**
    * 检查文件是否为无约束公开文件（无需任何凭证即可访问）
@@ -2747,8 +2879,8 @@ export class FileService implements OnModuleInit {
       throw new NotFoundException('文件不存在');
     }
 
-    // 权限校验：文件所有者或管理员
-    if (file.uploaderId !== user.id && user.role !== UserRole.ADMIN && user.role !== UserRole.SUPER_ADMIN) {
+    // 权限校验：文件所有者或管理员（API Key 一律按普通用户处理）
+    if (file.uploaderId !== user.id && !hasAdminPrivileges(user)) {
       throw new ForbiddenException('无权操作此文件');
     }
 
@@ -2789,7 +2921,7 @@ export class FileService implements OnModuleInit {
       throw new NotFoundException('文件不存在');
     }
 
-    if (file.uploaderId !== user.id && user.role !== UserRole.ADMIN && user.role !== UserRole.SUPER_ADMIN) {
+    if (file.uploaderId !== user.id && !hasAdminPrivileges(user)) {
       throw new ForbiddenException('无权操作此文件');
     }
 

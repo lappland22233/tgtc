@@ -28,16 +28,28 @@ export const useAuthStore = defineStore('auth', () => {
   // fetchUser 并发锁：防止 router beforeEach 触发重复请求
   let fetchUserPromise: Promise<void> | null = null;
 
+  // 会话代际：登录/登出会使在途的 /auth/me 响应过期，
+  // 防止迟到的恢复响应覆盖新的会话状态（如登出瞬间旧请求返回）。
+  let sessionEpoch = 0;
+
   // ── 会话时效重拉（G10-05）──
   /** /auth/me 最近一次成功拉取的时间戳（ms）；未拉取过为 0 */
   let lastFetchedAt = 0;
   /** 会话 TTL（ms）：超过该时长后，页面回到前台 / 守卫时触发重拉 */
   const SESSION_REFRESH_TTL = 60 * 1000;
+  /** 上次恢复失败的时间戳；0 表示无失败 */
+  let lastFetchFailedAt = 0;
+  /** 恢复失败后的最小重试间隔（ms）：防止断网期间每次导航都打 /auth/me */
+  const RESTORE_RETRY_INTERVAL = 5 * 1000;
 
   /** 判断当前会话数据是否已过期、需要重拉 */
   function isSessionStale(): boolean {
     if (!initialized.value) return true;
-    if (!user.value) return false; // 未登录无需重拉
+    if (!user.value) {
+      // 首次恢复遇到网络/服务临时失败 ≠ 确认匿名（401）：
+      // 允许自然重试（导航/回前台触发），并做最小间隔节流防止请求风暴。
+      return lastFetchFailedAt > 0 && Date.now() - lastFetchFailedAt >= RESTORE_RETRY_INTERVAL;
+    }
     return Date.now() - lastFetchedAt > SESSION_REFRESH_TTL;
   }
 
@@ -72,6 +84,8 @@ export const useAuthStore = defineStore('auth', () => {
       if (event.data === 'logout') {
         user.value = null;
         initialized.value = true;
+        lastFetchFailedAt = 0;
+        sessionEpoch++; // 使在途恢复响应过期
       }
     };
     return authChannel;
@@ -130,21 +144,38 @@ export const useAuthStore = defineStore('auth', () => {
     });
   }
 
-  async function fetchUser() {
+  async function fetchUser(options?: { timeoutMs?: number }) {
     // 并发锁：如果已有进行中的请求，复用其 Promise
     if (fetchUserPromise) {
       return fetchUserPromise;
     }
 
+    // 独立超时（可选）：由守卫传入，超时 abort 底层请求使 Promise 尽快失败，
+    // 而不是像外层 Promise 超时那样只放弃等待、请求仍挂起并被后续调用重复等待。
+    const timeoutMs = options?.timeoutMs;
+    let timeoutTimer: ReturnType<typeof setTimeout> | null = null;
+    let timeoutController: AbortController | null = null;
+    if (timeoutMs && timeoutMs > 0) {
+      timeoutController = new AbortController();
+      timeoutTimer = setTimeout(() => timeoutController?.abort(), timeoutMs);
+    }
+
+    const epochAtStart = sessionEpoch;
     fetchUserPromise = (async () => {
       try {
-        const response = await api.get('/auth/me');
+        const response = await api.get('/auth/me', timeoutController ? { signal: timeoutController.signal } : undefined);
         const data = response.data?.data;
+        // 会话代际校验：请求期间发生登出（本地/跨标签页）则丢弃迟到响应
+        if (epochAtStart !== sessionEpoch) {
+          console.info('[Auth] /auth/me 响应到达时会话已变更，丢弃迟到响应');
+          return;
+        }
         // 空值/结构校验：仅接受包含 id 的用户对象，结构异常时按未认证处理并记录日志，
         // 避免静默写入无效用户状态导致后续逻辑异常。
         if (data && typeof data === 'object' && (data as User).id) {
           user.value = data as User;
           lastFetchedAt = Date.now();
+          lastFetchFailedAt = 0;
           // 命中封禁：服务端权威状态为封禁用户时，本地登出，防止继续访问受保护页面。
           // 由 router 守卫（G10-03）配合完成跳转。
           if ((data as User).isBanned) {
@@ -155,6 +186,7 @@ export const useAuthStore = defineStore('auth', () => {
           console.warn('[Auth] /auth/me 返回的用户数据结构异常，按未认证处理');
           user.value = null;
           lastFetchedAt = Date.now();
+          lastFetchFailedAt = 0;
         }
       } catch (err: unknown) {
         // 区分 401（token 过期/无效）和网络错误（临时网络问题）
@@ -162,9 +194,15 @@ export const useAuthStore = defineStore('auth', () => {
         const axiosErr = err as { response?: { status?: number } };
         if (axiosErr?.response?.status === 401) {
           user.value = null;
+          lastFetchFailedAt = 0; // 明确匿名：无需自然重试
+        } else {
+          // 网络/超时/5xx：恢复暂时失败。首次加载时用户为 null 但不清 initialized，
+          // 由 isSessionStale 允许后续导航/回前台自然重试（最小间隔节流）。
+          lastFetchFailedAt = Date.now();
         }
         // 403 = 已认证但无权限，保留用户状态，由调用方处理权限提示
       } finally {
+        if (timeoutTimer) clearTimeout(timeoutTimer);
         initialized.value = true;
         fetchUserPromise = null;
       }
@@ -183,6 +221,8 @@ export const useAuthStore = defineStore('auth', () => {
     // 与跨标签页接收端语义保持一致：登出后标记初始化已完成（已确认为登出状态）
     initialized.value = true;
     lastFetchedAt = 0;
+    lastFetchFailedAt = 0;
+    sessionEpoch++; // 使在途恢复响应过期，防止迟到响应覆盖登出状态
     // 广播登出事件到其他标签页
     if (authChannel) {
       authChannel.postMessage('logout');

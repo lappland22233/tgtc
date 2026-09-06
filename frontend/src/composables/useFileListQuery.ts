@@ -77,6 +77,8 @@ export function useFileListQuery(options: FileListQueryOptions) {
   /** G11-12：是否在下一页返回时用新数据整体替换旧列表（首次搜索/排序拉取时为 true） */
   let pendingReplaceNextPage = false;
   const listError = ref<unknown>(null);
+  /** R6：续页（非首屏）加载失败状态，由哨兵处展示“加载失败，重试”入口 */
+  const loadMoreError = ref<unknown>(null);
 
   /** 开始目录切换：在 openFolder 请求开始前立即清空旧列表，并使旧请求失效。 */
   function beginFolderTransition() {
@@ -85,6 +87,7 @@ export function useFileListQuery(options: FileListQueryOptions) {
     loadLimitExceeded.value = false;
     fileStore.replaceFiles([]);
     listError.value = null;
+    loadMoreError.value = null;
     folderLoading.value = true;
     return fileListGeneration;
   }
@@ -106,19 +109,22 @@ export function useFileListQuery(options: FileListQueryOptions) {
       if (generation === fileListGeneration) listError.value = error;
       throw error;
     } finally {
-      pendingReplaceNextPage = false;
+      // 仅当代际未变时清理共享替换标记：旧请求被新筛选取代后，
+      // 其 finally 不得清掉新请求的 pendingReplaceNextPage（R5 竞态修复）。
       if (generation === fileListGeneration) {
+        pendingReplaceNextPage = false;
         refreshing.value = false;
         folderLoading.value = false;
       }
     }
   }
 
-  /** 当前列表代际快照：buildFetchPageFn 内比较用 */
-  let pageGeneration = 0;
-
   /** 构造单页拉取函数（供自动滚动与手动"继续加载"复用） */
   function buildFetchPageFn(folderId: string) {
+    // R5：请求级代际捕获。闭包持有构建时刻的不可变代际，
+    // 旧请求完成时与当前 fileListGeneration 比较的是自身快照，
+    // 修复旧实现共享 pageGeneration 被新请求改写后旧请求误判为“当前代际”的缺口。
+    const myGeneration = fileListGeneration;
     return async (cursor: string | null, signal: AbortSignal) => {
       const page = cursor ? parseInt(cursor, 10) : 1;
       const tagIds = selectedTagIds.value.length > 0 ? selectedTagIds.value : undefined;
@@ -134,7 +140,7 @@ export function useFileListQuery(options: FileListQueryOptions) {
           signal,
         );
         // 即使底层请求未遵守 AbortSignal，也禁止旧筛选/目录请求污染当前列表。
-        if (fileListGeneration !== pageGeneration) {
+        if (fileListGeneration !== myGeneration) {
           return { data: [], nextCursor: cursor, hasMore: true };
         }
         // G11-12：搜索/排序重拉时，首页返回后用新数据整体替换旧列表（避免追加导致新旧混排）；
@@ -176,8 +182,18 @@ export function useFileListQuery(options: FileListQueryOptions) {
   async function loadMoreFiles(folderId = currentFolderIdForApi.value, isInitialLoad = false) {
     if ((!isInitialLoad && folderLoading.value) || !hasMore.value) return;
     const generation = fileListGeneration;
-    pageGeneration = generation;
-    await loadMore(buildFetchPageFn(folderId));
+    try {
+      await loadMore(buildFetchPageFn(folderId));
+      if (generation === fileListGeneration) loadMoreError.value = null;
+    } catch (err) {
+      const e = err as { name?: string; code?: string };
+      if (e.name === 'AbortError' || e.code === 'ERR_CANCELED') return;
+      if (generation === fileListGeneration) loadMoreError.value = err;
+      if (isInitialLoad) throw err; // 首屏错误沿用 listError 呈现
+      // R6：续页失败不再向外抛出（哨兵观察器为 fire-and-forget，避免未处理 rejection），
+      // 错误状态由哨兵处“加载失败，重试”入口消费。
+      console.warn('[FileList] 续页加载失败（可重试）:', err);
+    }
   }
 
   /**
@@ -186,9 +202,28 @@ export function useFileListQuery(options: FileListQueryOptions) {
    */
   async function continueLoadMore() {
     if (folderLoading.value || cursorLoading.value) return;
-    const generation = fileListGeneration;
-    pageGeneration = generation;
-    await loadMore(buildFetchPageFn(currentFolderIdForApi.value), true);
+    try {
+      await loadMore(buildFetchPageFn(currentFolderIdForApi.value), true);
+      loadMoreError.value = null;
+    } catch (err) {
+      const e = err as { name?: string; code?: string };
+      if (e.name === 'AbortError' || e.code === 'ERR_CANCELED') return;
+      loadMoreError.value = err;
+      console.warn('[FileList] 手动继续加载失败（可重试）:', err);
+    }
+  }
+
+  /** R6：续页失败后的就地重试（沿用当前游标/页码，不刷新整张列表） */
+  function retryLoadMore() {
+    if (folderLoading.value || cursorLoading.value) return;
+    loadMoreError.value = null;
+    // hasMore 在失败时保持原值（useCursorPagination 不会因错误翻转 hasMore），
+    // 失败若发生在触顶后的手动继续（hasMore=false），需走 force 路径。
+    if (hasMore.value) {
+      void loadMoreFiles();
+    } else {
+      void continueLoadMore();
+    }
   }
 
   function getFileListGeneration() {
@@ -198,6 +233,7 @@ export function useFileListQuery(options: FileListQueryOptions) {
   /** 统一的重新获取文件列表（无限滚动：从头加载） */
   async function refetchFiles() {
     const generation = ++fileListGeneration;
+    loadMoreError.value = null;
     await loadInitialFiles(generation);
   }
 
@@ -330,6 +366,8 @@ export function useFileListQuery(options: FileListQueryOptions) {
     folderLoading,
     refreshing,
     listError,
+    loadMoreError,
+    retryLoadMore,
     loadLimitExceeded,
     continueLoadMore,
     beginFolderTransition,

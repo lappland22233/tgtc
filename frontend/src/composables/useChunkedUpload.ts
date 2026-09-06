@@ -2,7 +2,7 @@ import { ref } from 'vue';
 import type { AxiosResponse } from 'axios';
 import api from '../api/client';
 import { uploadScheduler } from '../utils/upload-scheduler';
-import { classifyUploadError } from '../utils/upload-retry';
+import { classifyUploadError, createMergeBusinessError } from '../utils/upload-retry';
 
 export interface ChunkUploadProgress {
   totalChunks: number;
@@ -399,6 +399,7 @@ async function pollMergeResult(
     if (signal?.aborted) throw new Error('上传已取消');
     await new Promise(resolve => setTimeout(resolve, 5000));
 
+    let businessError: Error | null = null;
     try {
       const res = await api.get(`/files/chunk/${uploadId}/status`, { signal });
       const { mergeStatus, mergeResult, mergeError } = res.data.data;
@@ -410,33 +411,36 @@ async function pollMergeResult(
         return mergeResult;
       }
       if (mergeStatus === 'error') {
-        throw new Error(mergeError || '合并失败');
+        // 后端明确合并失败：打上业务标记，防止任意 mergeError 文案被队列误判为可重试
+        businessError = createMergeBusinessError(mergeError || '合并失败');
       }
     } catch (err: any) {
       // Cancel/Abort — 直接抛出
       if (err?.name === 'AbortError' || err?.code === 'ERR_CANCELED') {
         throw err;
       }
-
-      // 业务层错误（mergeError 等）— 直接抛出
-      if (err?.message && !err?.response && err?.code !== 'ERR_NETWORK') {
-        throw err;
-      }
-
-      // 网络/代理层错误（502, 520-524, 超时等）— 可重试
-      consecutiveFailures++;
-      console.warn(
-        `[分片上传] 状态轮询失败 (${consecutiveFailures}/${maxConsecutiveFailures}): ${err?.message || err?.code}`,
-      );
-
-      if (consecutiveFailures >= maxConsecutiveFailures) {
-        throw new Error('服务暂时不可用，合并仍在后台进行，请稍后刷新文件列表查看');
-      }
-
-      // 退避重试：2s, 4s, 8s
-      const delay = 2000 * Math.pow(2, consecutiveFailures - 1);
-      await new Promise(resolve => setTimeout(resolve, delay));
+      // 其余一律视为“状态查询暂时失败”（网络断开/超时/限流/503/CDN 错误页等）：
+      // status GET 不会影响后台合并任务，合并可能仍在正常推进，因此进入有限容错，
+      // 而不是像旧逻辑那样把转换后的裸 Error（有 message、无 response、非 ERR_NETWORK）
+      // 误判为业务失败而立即放弃观察。
     }
+
+    // 业务失败必须在容错计数之外立即结束（不重试、不重新上传）
+    if (businessError) throw businessError;
+
+    // 网络/代理层错误（502, 503, 520-524, 超时等）— 可重试的观察中断
+    consecutiveFailures++;
+    console.warn(
+      `[分片上传] 状态轮询失败 (${consecutiveFailures}/${maxConsecutiveFailures}): 请求暂时不可用`,
+    );
+
+    if (consecutiveFailures >= maxConsecutiveFailures) {
+      throw new Error('服务暂时不可用，合并仍在后台进行，请稍后刷新文件列表查看');
+    }
+
+    // 退避重试：2s, 4s, 8s
+    const delay = 2000 * Math.pow(2, consecutiveFailures - 1);
+    await new Promise(resolve => setTimeout(resolve, delay));
   }
   throw new Error('合并处理中，请稍后刷新文件列表查看；如文件未出现，请重新上传');
 }

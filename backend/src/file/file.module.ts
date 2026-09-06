@@ -26,6 +26,7 @@ import { ConfigCacheModule } from '../common/services/config-cache.module';
 import { RateLimitModule } from '../common/services/rate-limit.module';
 import { MediaTicketModule } from '../common/services/media-ticket.module';
 import { TagModule } from '../tag/tag.module';
+import { ApiKeyModule } from '../api-key/api-key.module';
 
 @Module({
   imports: [
@@ -33,6 +34,7 @@ import { TagModule } from '../tag/tag.module';
     ConfigCacheModule,
     RateLimitModule,
     TagModule,
+    ApiKeyModule,
     MediaTicketModule,
     FolderModule,
     TelegramModule,

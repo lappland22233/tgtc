@@ -247,13 +247,18 @@
             </div>
           </div>
 
-          <!-- 文件夹行（OS 风格，双击进入） -->
+          <!-- 文件夹行（OS 风格，双击进入；R9：支持键盘 Tab + Enter/Space 进入） -->
           <div
             v-for="folder in subfoldersInCurrentFolder"
             :key="`folder-${folder.id}`"
             class="os-row os-folder"
             :class="{ 'drag-over': dragOverFolderId === folder.id }"
+            role="button"
+            tabindex="0"
+            :aria-label="`打开文件夹 ${folder.name}`"
             @dblclick="onFolderOpen(folder)"
+            @keydown.enter.self.prevent="onFolderOpen(folder)"
+            @keydown.space.self.prevent="onFolderOpen(folder)"
             @contextmenu.prevent.stop="openFolderCtxMenu($event, folder)"
             @touchstart="handleTouchStart($event, 'folder', folder)"
             @touchmove="handleTouchMove"
@@ -280,6 +285,9 @@
             class="os-row os-file"
             :class="[getRowClassName({ row: file }), { dragging: draggingFileIds.includes(file.id) }]"
             :draggable="!isMobile && isFileActionable(file)"
+            :tabindex="!isMobile && isFileActionable(file) ? 0 : -1"
+            :role="!isMobile && isFileActionable(file) ? 'button' : undefined"
+            :aria-label="!isMobile && isFileActionable(file) ? `下载 ${file.originalName}` : undefined"
             @dragstart="onFileDragStart($event, file)"
             @dragend="onFileDragEnd"
             @contextmenu.prevent.stop="openFileCtxMenu($event, file)"
@@ -287,6 +295,7 @@
             @touchmove="handleTouchMove"
             @touchend="handleTouchEnd"
             @dblclick="isFileActionable(file) && downloadFile(file)"
+            @keydown.enter.self.prevent="isFileActionable(file) && downloadFile(file)"
           >
             <div class="os-cell os-check">
               <t-checkbox
@@ -300,7 +309,12 @@
                 v-if="canPreviewFile(file)"
                 class="os-thumb-click"
                 :title="'点击预览 ' + file.originalName"
+                role="button"
+                tabindex="0"
+                :aria-label="`预览 ${file.originalName}`"
                 @click.stop="openPreview(file)"
+                @keydown.enter.prevent="openPreview(file)"
+                @keydown.space.prevent="openPreview(file)"
               >
                 <ThumbnailImg :file-id="file.id" :mime-type="file.mimeType" :size="32" :file-name="file.originalName" :context="thumbnailContext" :version="file.uploadVersion" />
               </span>
@@ -318,7 +332,12 @@
                     v-for="tag in file.tags"
                     :key="tag.id"
                     class="os-tag-click"
+                    role="button"
+                    tabindex="0"
+                    :aria-label="`按标签 ${tag.name} 筛选`"
                     @click.stop="addTagFilter(tag.id)"
+                    @keydown.enter.prevent="addTagFilter(tag.id)"
+                    @keydown.space.prevent="addTagFilter(tag.id)"
                   >
                     <t-tag
                       size="small"
@@ -343,6 +362,10 @@
           <!-- 无限滚动哨兵 -->
           <div ref="scrollSentinel" class="os-sentinel">
             <t-loading v-if="cursorLoading" size="small" text="加载中..." />
+            <template v-else-if="loadMoreError">
+              <span class="os-muted">更多文件加载失败</span>
+              <t-button size="small" variant="outline" class="os-sentinel-more" @click="retryLoadMore">重试</t-button>
+            </template>
             <template v-else-if="loadLimitExceeded">
               <span class="os-muted">已达加载上限 {{ fileStore.files.length }} 条，仍有更多文件</span>
               <t-button size="small" variant="outline" class="os-sentinel-more" @click="continueLoadMore">继续加载</t-button>
@@ -557,6 +580,13 @@
       :target-name="shareTargetName"
     />
 
+    <!-- 获取下载链接弹窗（永久公开 / 限时公开 / 限次下载） -->
+    <DownloadLinkDialog
+      v-model:visible="showDownloadLinkDialog"
+      :file-id="downloadLinkTargetId"
+      :file-name="downloadLinkTargetName"
+    />
+
     <!-- 文件重命名弹窗 -->
     <FileRenameDialog v-model:visible="showRenameFileDialog" :file="renameTargetFile" />
 
@@ -597,6 +627,7 @@ import FolderCreateDialog from '../../components/folder/FolderCreateDialog.vue';
 import FolderRenameDialog from '../../components/folder/FolderRenameDialog.vue';
 import FolderMoveDialog from '../../components/folder/FolderMoveDialog.vue';
 import CreateShareDialog from '../../components/share/CreateShareDialog.vue';
+import DownloadLinkDialog from '../../components/share/DownloadLinkDialog.vue';
 import FileContextMenu, { type CtxTarget } from '../../components/file/FileContextMenu.vue';
 import FileRenameDialog from '../../components/file/FileRenameDialog.vue';
 import { useMediaPlaybackStore, type MediaSessionItem } from '../../stores/mediaPlayback';
@@ -630,6 +661,8 @@ const {
   folderLoading,
   refreshing,
   listError,
+  loadMoreError,
+  retryLoadMore,
   loadLimitExceeded,
   continueLoadMore,
   beginFolderTransition,
@@ -838,6 +871,17 @@ function onFileShare(file: FileItem) {
   showShareDialog.value = true;
 }
 
+// ============ 获取下载链接弹窗状态 ============
+const showDownloadLinkDialog = ref(false);
+const downloadLinkTargetId = ref('');
+const downloadLinkTargetName = ref('');
+
+function onFileDownloadLink(file: FileItem) {
+  downloadLinkTargetId.value = file.id;
+  downloadLinkTargetName.value = file.originalName;
+  showDownloadLinkDialog.value = true;
+}
+
 function openMoveDialogForFiles(fileIds?: string[]) {
   const ids = fileIds && fileIds.length > 0 ? fileIds : selectedFileIds.value;
   if (ids.length === 0) {
@@ -965,6 +1009,7 @@ async function onCtxAction(action: string, target: CtxTarget | null) {
       case 'move': openMoveDialogForFiles([file.id]); break;
       case 'tag': openTagEditor(file); break;
       case 'share': onFileShare(file); break;
+      case 'download-link': onFileDownloadLink(file); break;
       case 'delete': handleDelete(file); break;
       // 访问控制（原表格内联列）
       case 'toggle-access':
@@ -2392,6 +2437,18 @@ onUnmounted(() => {
 }
 .os-thumb-click:hover {
   opacity: 0.8;
+}
+
+/* R9：键盘焦点可见性 —— 仅 :focus-visible 生效，不影响鼠标点击体验 */
+.os-row:focus-visible {
+  outline: 2px solid var(--color-accent, var(--td-brand-color, #4d7cfe));
+  outline-offset: -2px;
+  border-radius: var(--radius-sm);
+}
+.os-thumb-click:focus-visible,
+.os-tag-click:focus-visible {
+  outline: 2px solid var(--color-accent, var(--td-brand-color, #4d7cfe));
+  outline-offset: 1px;
 }
 
 /* ============ 响应式 ============ */

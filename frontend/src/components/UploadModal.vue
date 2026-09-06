@@ -109,7 +109,8 @@
         style="margin-top: 12px; padding: 10px 12px; background: var(--bg-secondary); border: 1px solid var(--color-error); border-radius: 8px; display: flex; align-items: center; justify-content: space-between; gap: 12px;"
       >
         <span style="font-size: 12px; color: var(--color-error);">目录准备失败：{{ pendingParsedError }}</span>
-        <t-button size="small" variant="outline" :disabled="preparing" @click="retryParsedBatch">重试</t-button>
+        <!-- R10：阻止冒泡，避免重试点击穿透到上传区触发系统文件选择器 -->
+        <t-button size="small" variant="outline" :disabled="preparing" @click.stop="retryParsedBatch">重试</t-button>
       </div>
     </div>
 

@@ -25,6 +25,7 @@ import { PublicConfigModule } from './public-config/public-config.module';
 import { HealthModule } from './health/health.module';
 import { VersionModule } from './version/version.module';
 import { UpdateModule } from './update/update.module';
+import { ApiKeyModule } from './api-key/api-key.module';
 
 @Module({
   imports: [
@@ -56,6 +57,7 @@ import { UpdateModule } from './update/update.module';
     VersionModule,
     UpdateModule,
     TelegramModule,
+    ApiKeyModule,
   ],
 })
 export class AppModule {}

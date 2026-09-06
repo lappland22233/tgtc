@@ -29,7 +29,28 @@ const JOB_BUSINESS_MESSAGES = [
   '上传处理超时',
   '合并失败',
   '服务暂时不可用，合并仍在后台进行',
+  '合并处理中',
 ];
+
+// ---- 合并业务失败标记 ----
+// 后端已明确返回 mergeStatus=error 的业务失败必须与“状态查询暂时失败”区分：
+// 前者重试会产生重复文件；后者后台合并仍在进行，只是观察中断。
+const MERGE_BUSINESS_MARKER = '__tgtcMergeBusinessError__';
+
+/** 创建带业务失败标记的合并错误（upload-retry 无法 import composable，故用标记而非类） */
+export function createMergeBusinessError(message: string): Error {
+  const err = new Error(message);
+  Object.defineProperty(err, MERGE_BUSINESS_MARKER, { value: true, enumerable: false });
+  return err;
+}
+
+function isMergeBusinessError(error: unknown): boolean {
+  return (
+    !!error &&
+    typeof error === 'object' &&
+    (error as Record<PropertyKey, unknown>)[MERGE_BUSINESS_MARKER] === true
+  );
+}
 
 /**
  * 将任意错误分类为是否可自动重试。纯函数，无副作用。
@@ -55,6 +76,11 @@ export function classifyUploadError(error: unknown): UploadErrorClassification {
     message.includes('上传已取消')
   ) {
     return { retryable: false, kind: 'cancelled' };
+  }
+
+  // 1b. 合并业务失败（后端明确 mergeStatus=error）：无论文案内容如何都不重试
+  if (isMergeBusinessError(error)) {
+    return { retryable: false, kind: 'business' };
   }
 
   // 2. 带 response 的 HTTP 错误：429 限流可重试；5xx 服务器内部错误不重试
