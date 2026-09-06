@@ -589,4 +589,98 @@ describe('TelegramService realtime stream', () => {
       expect(recoverCalls.length).toBeLessThanOrEqual(3);
     });
   });
+
+  describe('upload transport memory fixes', () => {
+    const mockFileInfo = (expectedFileId: string) => {
+      mockedAxios.get.mockResolvedValueOnce({
+        data: { result: { file_id: expectedFileId, file_path: 'documents/file.bin', file_size: 4 } },
+      } as any);
+    };
+
+    it('sends uploads without following redirects (native transport, no body re-buffering)', async () => {
+      mockedAxios.post.mockResolvedValueOnce({
+        data: { ok: true, result: { document: { file_id: 'document-id' } } },
+      } as any);
+      mockFileInfo('document-id');
+
+      await createService().uploadFile(Buffer.from('test'), 'test.bin');
+
+      expect(mockedAxios.post).toHaveBeenCalledWith(
+        expect.stringContaining('/sendDocument'),
+        expect.anything(),
+        expect.objectContaining({
+          maxRedirects: 0,
+          timeout: 15 * 60 * 1000,
+        }),
+      );
+    });
+
+    it('sends sendPhoto without following redirects', async () => {
+      mockedAxios.post.mockResolvedValueOnce({
+        data: { ok: true, result: { photo: [{ file_id: 'p1' }, { file_id: 'p2' }] } },
+      } as any);
+      mockFileInfo('p2');
+
+      await createService().uploadPhoto(Buffer.from('img'), 'img.png');
+
+      expect(mockedAxios.post).toHaveBeenCalledWith(
+        expect.stringContaining('/sendPhoto'),
+        expect.anything(),
+        expect.objectContaining({ maxRedirects: 0 }),
+      );
+    });
+
+    it('destroys the upload source stream when the request fails', async () => {
+      const source = Readable.from(Buffer.alloc(1024));
+      const err502 = new Error('Bad Gateway');
+      (err502 as any).response = { status: 502, data: { ok: false, description: 'Bad Gateway' } };
+      mockedAxios.post.mockRejectedValueOnce(err502);
+
+      await expect(createService().uploadFile(source, 'test.bin')).rejects.toThrow('Bad Gateway');
+      expect(source.destroyed).toBe(true);
+    });
+
+    it('releases the source stream before the follow-up getFile metadata query', async () => {
+      const source = Readable.from(Buffer.from('abc'));
+      let releasedAtGetFile: boolean | undefined;
+      mockedAxios.post.mockResolvedValueOnce({
+        data: { ok: true, result: { document: { file_id: 'document-id' } } },
+      } as any);
+      mockedAxios.get.mockImplementationOnce(async () => {
+        // cleanup 必须发生在 getFile 元数据查询之前
+        releasedAtGetFile = source.destroyed || source.readableEnded;
+        return {
+          data: { result: { file_id: 'document-id', file_path: 'documents/file.bin', file_size: 3 } },
+        } as any;
+      });
+
+      const result = await createService().uploadFile(source, 'test.bin');
+
+      expect(result.file_id).toBe('document-id');
+      expect(releasedAtGetFile).toBe(true);
+    });
+
+    it('rejects redirect responses without following or retrying them', async () => {
+      mockedAxios.post.mockRejectedValue({
+        response: { status: 302, data: {}, headers: { location: 'http://redirect.example/somewhere' } },
+      } as any);
+
+      await expect(createService().uploadFile(Buffer.from('test'), 'test.bin'))
+        .rejects.toThrow('重定向');
+      // 3xx 不是可重试错误：仅一次上传尝试，且不向 Location 重发请求体
+      expect(mockedAxios.post).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps stream uploads single-attempt and releases the source on exhausted retries', async () => {
+      const source = Readable.from(Buffer.from('x'));
+      const err429 = new Error('Request failed with status code 429');
+      (err429 as any).response = { status: 429, data: { ok: false, parameters: { retry_after: 1 } } };
+      mockedAxios.post.mockRejectedValue(err429);
+
+      await expect(createService().uploadFile(source, 'test.bin')).rejects.toThrow();
+      // 流式上传保持 1 次尝试（流只能消费一次），失败后源流已释放
+      expect(mockedAxios.post).toHaveBeenCalledTimes(1);
+      expect(source.destroyed).toBe(true);
+    });
+  });
 });

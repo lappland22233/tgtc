@@ -16,11 +16,6 @@ interface TelegramMediaResult {
   voice?: { file_id?: string };
 }
 
-interface TelegramSendDocumentResponse {
-  ok?: boolean;
-  result?: TelegramMediaResult;
-}
-
 @Injectable()
 export class TelegramService {
   private readonly logger = new Logger(TelegramService.name);
@@ -245,6 +240,71 @@ export class TelegramService {
   }
 
   /**
+   * multipart 上传专用 POST：请求级关闭自动重定向（maxRedirects=0）。
+   * Axios 会因此选择原生 http/https 传输，绕过 follow-redirects 对请求体
+   * chunk 的整包保留（_requestBodyBuffers）——这是大文件上传 O(文件大小)
+   * 内存峰值与上传后内存水位不回落的根源；原生分支仍对流式请求体执行
+   * maxBodyLength 校验（计入整个 multipart 请求体）。
+   * 3xx 视为失败：不跟随、不重发文件。
+   */
+  private async postUploadMultipart<TResult>(
+    method: string,
+    form: FormData,
+    options: {
+      timeoutMs: number;
+      maxSize: number;
+      signal?: AbortSignal;
+      /** 流式上传的一次性源流：由本服务负责在请求结束后关闭 */
+      source?: Readable;
+    },
+  ): Promise<TResult | undefined> {
+    try {
+      const response = await axios.post<{ result?: TResult }>(`${this.getBaseUrl()}/${method}`, form, {
+        headers: form.getHeaders(),
+        maxRedirects: 0,
+        timeout: options.timeoutMs,
+        maxContentLength: options.maxSize,
+        maxBodyLength: options.maxSize,
+        signal: options.signal,
+      });
+      return response.data?.result;
+    } catch (error) {
+      // 3xx：给出可操作的配置提示；错误信息不携带 Location，避免跳转目标中的凭据泄露。
+      const status = (error as { response?: { status?: number } })?.response?.status;
+      if (typeof status === 'number' && status >= 300 && status < 400) {
+        throw new Error(
+          `上传目标返回重定向响应 (${status})：已按策略禁止跟随，请将 TELEGRAM_API_BASE 配置为无 3xx 跳转的最终上传地址`,
+        );
+      }
+      throw error;
+    } finally {
+      // multipart 请求结束（成功/失败/取消）立即释放传输资源，先于 getFileInfo 等后续查询
+      this.releaseUploadResources(form, options.source);
+    }
+  }
+
+  /**
+   * 释放一次 multipart 上传占用的传输层资源：
+   * - 源文件流销毁后文件句柄即刻释放（先于调用方删除临时文件，兼容 Windows 句柄行为）；
+   * - form-data 底层 CombinedStream.destroy 重置内部队列并发出 close；
+   * - 已结束/已销毁的流上调用是安全的；清理失败不得覆盖原始业务错误。
+   */
+  private releaseUploadResources(form: FormData, source?: Readable): void {
+    if (source && !source.destroyed && !source.readableEnded) {
+      try {
+        source.destroy();
+      } catch {
+        // 忽略清理异常
+      }
+    }
+    try {
+      (form as unknown as { destroy?: () => void }).destroy?.();
+    } catch {
+      // 忽略清理异常
+    }
+  }
+
+  /**
    * 调用 Telegram /getFile 获取元数据，不请求 /file/bot... 下载地址，不传输文件内容。
    * 上传提交后的路径解析允许较长等待；批量体检使用独立短超时，避免单项探测拖慢整批。
    */
@@ -316,15 +376,13 @@ export class TelegramService {
 
       // 服务层上传体积上限（默认 2GB，对齐 Telegram 本地 Bot API 上限），可通过环境变量覆盖
       const maxSize = Number(process.env.TELEGRAM_MAX_UPLOAD_SIZE) || 2 * 1024 * 1024 * 1024;
-      const response = await axios.post<TelegramSendDocumentResponse>(`${this.getBaseUrl()}/sendDocument`, form, {
-        headers: form.getHeaders(),
-        timeout: 15 * 60 * 1000,           // 大文件上传超时 15 分钟
-        maxContentLength: maxSize,
-        maxBodyLength: maxSize,
+      const result = await this.postUploadMultipart<TelegramMediaResult>('sendDocument', form, {
+        timeoutMs: 15 * 60 * 1000,         // 大文件上传超时 15 分钟
+        maxSize,
         signal,
+        source: isStream ? file : undefined,
       });
 
-      const result = response.data?.result;
       // 自托管 Bot API 即使接收 sendDocument，也可能按内容重新识别媒体类型：
       // MP4 可能被识别为 animation/video，MP3/OGG 等音频可能被识别为 audio/voice。
       // 普通 document 保持优先，避免多媒体字段并存时改变现有文件行为。
@@ -360,21 +418,21 @@ export class TelegramService {
       form.append('chat_id', this.chatId);
       form.append('photo', file, filename);
 
-      const response = await axios.post(`${this.getBaseUrl()}/sendPhoto`, form, {
-        headers: form.getHeaders(),
-        timeout: 5 * 60 * 1000,          // Telegram API 请求超时 5 分钟
-        maxContentLength: 700 * 1024 * 1024, // 最大请求体 700MB
-        maxBodyLength: 700 * 1024 * 1024,
+      const result = await this.postUploadMultipart<{ photo?: Array<{ file_id?: string }> }>('sendPhoto', form, {
+        timeoutMs: 5 * 60 * 1000,          // Telegram API 请求超时 5 分钟
+        maxSize: 700 * 1024 * 1024,        // 最大请求体 700MB
         signal,
       });
 
-      const result = response.data.result;
       // sendPhoto 消息中可能包含多个尺寸，取最后一个（最大分辨率）的 file_id
-      const photos = result.photo;
+      const photos = result?.photo;
       if (!photos || photos.length === 0) {
         throw new Error('Telegram sendPhoto 响应缺少 photo 信息，可能文件格式不被支持');
       }
       const file_id = photos[photos.length - 1].file_id;
+      if (!file_id) {
+        throw new Error('Telegram sendPhoto 响应缺少 photo 信息，可能文件格式不被支持');
+      }
 
       // sendPhoto 返回的 file_path 不可靠，需二次调用 getFile 获取真实路径
       return this.getFileInfo(file_id);

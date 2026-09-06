@@ -539,48 +539,70 @@ export class ChunkUploadService implements OnModuleInit {
       flags: 'w',
       highWaterMark: 64 * 1024, // 64KB 缓冲区，提升写入吞吐
     });
-    let activeReadStream: ReturnType<typeof createReadStream> | undefined;
-    const abortError = new Error('分片合并已取消');
-    signal.addEventListener('abort', () => {
-      activeReadStream?.destroy(abortError);
-      writeStream.destroy();
-    }, { once: true });
-    let written = 0;
 
-    for (let i = 0; i < session.totalChunks; i++) {
-      this.throwIfAborted(signal);
-      const chunkPath = path.join(dir, String(i));
-      try {
-        const stat = await fsp.stat(chunkPath);
+    // 单管道：顺序异步生成器逐片打开/读取/关闭，经一次 pipeline 写入目标文件。
+    // 旧实现对同一 WriteStream 循环 pipeline({ end: false })，目标流监听器随分片数
+    // 累积并触发 MaxListenersExceededWarning（125 片实际报告）；此处监听器数量恒定。
+    let currentReadStream: fs.ReadStream | undefined;
+    let written = 0;
+    const abortError = new Error('分片合并已取消');
+
+    async function* chunkSequence(): AsyncGenerator<Buffer> {
+      for (let i = 0; i < session.totalChunks; i++) {
+        if (signal.aborted) throw abortError;
+        const chunkPath = path.join(dir, String(i));
+        let stat: fs.Stats;
+        try {
+          stat = await fsp.stat(chunkPath);
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+            throw new Error(`分片 ${i} 缺失，请重新上传`);
+          }
+          throw err;
+        }
         if (stat.size === 0) {
           throw new Error(`分片 ${i} 为空`);
         }
         const readStream = createReadStream(chunkPath);
-        activeReadStream = readStream;
-        await pipelineAsync(readStream, writeStream, { end: false });
-        activeReadStream = undefined;
-        written += stat.size;
-      } catch (err) {
-        writeStream.destroy();
-        // 清理未完成的合并文件
-        await fsp.unlink(mergedPath).catch(() => {});
-        if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-          throw new Error(`分片 ${i} 缺失，请重新上传`);
+        currentReadStream = readStream;
+        try {
+          for await (const buf of readStream) {
+            if (signal.aborted) throw abortError;
+            written += buf.length;
+            yield buf;
+          }
+        } finally {
+          currentReadStream = undefined;
+          readStream.destroy();
         }
-        if ((err as NodeJS.ErrnoException).code === 'ENOSPC') {
-          throw new Error(`磁盘空间不足，无法合并 ${(session.fileSize / 1024 / 1024).toFixed(1)}MB 文件，请联系管理员清理空间后重试`);
-        }
-        throw err;
       }
     }
 
-    // 关闭写入流
-    await new Promise<void>((resolve, reject) => {
-      writeStream.end((err?: Error | null) => {
-        if (err) reject(err);
-        else resolve();
-      });
-    });
+    // 取消需在写背压/读盘等待期间同样生效：销毁正在读取的分片流
+    //（目标流与生成器源由 pipeline 的 signal 统一销毁，生成器 finally 关闭分片流）
+    const onAbort = () => {
+      currentReadStream?.destroy(abortError);
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    try {
+      try {
+        // 取消信号传入管道：abort 时源与目标流由 pipeline 统一销毁
+        await pipelineAsync(chunkSequence(), writeStream, { signal });
+      } finally {
+        signal.removeEventListener('abort', onAbort);
+      }
+    } catch (err) {
+      writeStream.destroy();
+      // 清理未完成的合并文件（原分片保留，仍有重试价值）
+      await fsp.unlink(mergedPath).catch(() => {});
+      if (signal.aborted) {
+        throw abortError;
+      }
+      if ((err as NodeJS.ErrnoException).code === 'ENOSPC') {
+        throw new Error(`磁盘空间不足，无法合并 ${(session.fileSize / 1024 / 1024).toFixed(1)}MB 文件，请联系管理员清理空间后重试`);
+      }
+      throw err;
+    }
 
     if (written !== session.fileSize) {
       await fsp.unlink(mergedPath).catch(() => {});

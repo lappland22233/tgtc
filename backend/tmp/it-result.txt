@@ -1,0 +1,49 @@
+﻿[33m[Nest] 19036  - [39m2026/09/06 18:29:31 [33m   WARN[39m [38;5;3m[TelegramService] [39m[33mTelegram 请求失败 label=uploadFile attempt=1/1 elapsed=16ms status=none transport=UNKNOWN response=none reason=上传目标返回重定向响应 (302)：已按策略禁止跟随，请将 TELEGRAM_API_BASE 配置为无 3xx 跳转的最终上传地址[39m
+[33m[Nest] 19036  - [39m2026/09/06 18:29:35 [33m   WARN[39m [38;5;3m[TelegramService] [39m[33mTelegram 请求失败 label=uploadFile attempt=1/1 elapsed=15ms status=400 transport=ERR_BAD_REQUEST response=present reason=bad request: payload rejected[39m
+[33m[Nest] 19036  - [39m2026/09/06 18:29:35 [33m   WARN[39m [38;5;3m[TelegramService] [39m[33mTelegram 请求失败 label=uploadFile attempt=1/1 elapsed=7ms status=none transport=ECONNRESET response=none reason=read ECONNRESET[39m
+[33m[Nest] 19036  - [39m2026/09/06 18:29:35 [33m   WARN[39m [38;5;3m[TelegramService] [39m[33mTelegram 请求失败 label=uploadFile attempt=1/1 elapsed=6ms status=none transport=ERR_CANCELED response=none reason=canceled[39m
+[33m[Nest] 19036  - [39m2026/09/06 18:29:35 [33m   WARN[39m [38;5;3m[TelegramService] [39m[33mTelegram 请求失败 label=uploadFile attempt=1/1 elapsed=3ms status=none transport=ERR_BAD_REQUEST response=none reason=Request body larger than maxBodyLength limit[39m
+node.exe : FAIL src/telegram/telegram-upload.integration.spec.ts (6.734 s)
+At line:1 char:1
++ & "C:\Program Files\nodejs/node.exe" "C:\Program Files\nodejs/node_mo ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (FAIL src/telegr...ec.ts (6.734 s):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  Telegram upload real transport integration (native HTTP, maxRedirects=0)
+    √ uploads a large stream through the native transport and delivers the full body (76 ms)
+    √ rejects 3xx without following and never re-sends the body to the target (4012 ms)
+    √ releases the source stream when the server rejects early with 400 (18 ms)
+    √ releases the source stream when the connection is reset (9 ms)
+    √ propagates a mid-upload abort and releases the source stream (46 ms)
+    √ keeps maxBodyLength enforcement on the native transport (5 ms)
+    × applies backpressure on slow receivers instead of pre-reading the whole file (159 ms)
+
+  ● Telegram upload real transport integration (native HTTP, maxRedirects=0) › applies backpressure on slow receivers i
+nstead of pre-reading the whole file
+
+    expect(received).toBeLessThan(expected)
+
+    Expected: < 8388608
+    Received:   8388608
+
+    [0m [90m 241 |[39m
+     [90m 242 |[39m     [90m// 慢接收窗口内，源读取停留在有界缓冲，不得抢先读完整个 8MiB 文件[39m
+    [31m[1m>[22m[39m[90m 243 |[39m     expect(emitted)[33m.[39mtoBeLessThan(fileBuf[33m.[39mlength)[33m;[39
+m
+     [90m     |[39m                     [31m[1m^[22m[39m
+     [90m 244 |[39m
+     [90m 245 |[39m     [36mconst[39m result [33m=[39m [36mawait[39m pending[33m;[39m
+     [90m 246 |[39m     expect(result[33m.[39mfile_id)[33m.[39mtoBe([32m'it-file-id'[39m)[33m;[39m[0m
+
+      at Object.<anonymous> (src/telegram/telegram-upload.integration.spec.ts:243:21)
+
+Test Suites: 1 failed, 1 total
+Tests:       1 failed, 6 passed, 7 total
+Snapshots:   0 total
+Time:        6.81 s, estimated 10 s
+Ran all test suites matching /src\\telegram\\telegram-upload.integration.spec.ts/i.
+Jest did not exit one second after the test run has completed.
+
+'This usually means that there are asynchronous operations that weren't stopped in your tests. Consider running Jest wi
+th `--detectOpenHandles` to troubleshoot this issue.
