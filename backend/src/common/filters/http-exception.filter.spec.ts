@@ -65,6 +65,24 @@ describe('GlobalExceptionFilter', () => {
     expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ message: 'bad input', data: null }));
   });
 
+  it('preserves strict upload budget retry metadata in response headers', () => {
+    const ex = new HttpException(
+      {
+        statusCode: HttpStatus.TOO_MANY_REQUESTS,
+        code: 'UPLOAD_DISK_BUDGET_BUSY',
+        retryAfterMs: 5000,
+        message: '服务器正在为另一份大文件保留磁盘空间，请稍候',
+      },
+      HttpStatus.TOO_MANY_REQUESTS,
+    );
+    filter.catch(ex, host);
+
+    expect(res.status).toHaveBeenCalledWith(HttpStatus.TOO_MANY_REQUESTS);
+    expect(res.setHeader).toHaveBeenCalledWith('X-Tgtc-Error-Code', 'UPLOAD_DISK_BUDGET_BUSY');
+    expect(res.setHeader).toHaveBeenCalledWith('Retry-After', '5');
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ code: 429, data: null }));
+  });
+
   it('returns generic 500 + requestId for 5xx HttpException without leaking message', () => {
     const loggerSpy = jest.spyOn((filter as any).logger, 'error').mockImplementation(() => {});
     const ex = new HttpException('internal path /etc/secrets', HttpStatus.INTERNAL_SERVER_ERROR);

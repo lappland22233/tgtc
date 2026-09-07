@@ -8,12 +8,19 @@ import * as path from 'path';
 import FormData from 'form-data';
 import { TelegramFileNotFoundError, TelegramStreamPathError } from './telegram.errors';
 
+interface TelegramMedia {
+  file_id?: string;
+  file_size?: number;
+}
+
 interface TelegramMediaResult {
-  document?: { file_id?: string };
-  animation?: { file_id?: string };
-  video?: { file_id?: string };
-  audio?: { file_id?: string };
-  voice?: { file_id?: string };
+  document?: TelegramMedia;
+  animation?: TelegramMedia;
+  video?: TelegramMedia;
+  audio?: TelegramMedia;
+  voice?: TelegramMedia;
+  /** 自建 Bot API 严格无缓存扩展：false 表示远端消息成功但 TDLib 本地副本待释放。 */
+  local_cache_released?: boolean;
 }
 
 @Injectable()
@@ -256,11 +263,16 @@ export class TelegramService {
       signal?: AbortSignal;
       /** 流式上传的一次性源流：由本服务负责在请求结束后关闭 */
       source?: Readable;
+      /** 自建 Bot API 成功回执后删除 TDLib 本地媒体副本；仅严格无缓存上传启用。 */
+      noCache?: boolean;
     },
   ): Promise<TResult | undefined> {
     try {
       const response = await axios.post<{ result?: TResult }>(`${this.getBaseUrl()}/${method}`, form, {
-        headers: form.getHeaders(),
+        headers: {
+          ...form.getHeaders(),
+          ...(options.noCache ? { 'X-Telegram-No-Cache': '1' } : {}),
+        },
         maxRedirects: 0,
         timeout: options.timeoutMs,
         maxContentLength: options.maxSize,
@@ -353,6 +365,7 @@ export class TelegramService {
     filename: string,
     signal?: AbortSignal,
     knownLength?: number,
+    options?: { noCache?: boolean },
   ): Promise<{
     file_id: string;
     file_path: string;
@@ -381,16 +394,18 @@ export class TelegramService {
         maxSize,
         signal,
         source: isStream ? file : undefined,
+        noCache: options?.noCache === true,
       });
 
       // 自托管 Bot API 即使接收 sendDocument，也可能按内容重新识别媒体类型：
       // MP4 可能被识别为 animation/video，MP3/OGG 等音频可能被识别为 audio/voice。
       // 普通 document 保持优先，避免多媒体字段并存时改变现有文件行为。
-      const file_id = result?.document?.file_id
-        || result?.animation?.file_id
-        || result?.video?.file_id
-        || result?.audio?.file_id
-        || result?.voice?.file_id;
+      const media = result?.document
+        || result?.animation
+        || result?.video
+        || result?.audio
+        || result?.voice;
+      const file_id = media?.file_id;
       if (!file_id) {
         const mediaFields = result && typeof result === 'object'
           ? Object.keys(result).filter((key) => key !== 'text').slice(0, 10).join(', ') || 'none'
@@ -399,9 +414,45 @@ export class TelegramService {
         throw new Error('Telegram sendDocument 响应缺少可识别的媒体 file_id');
       }
 
-      // sendDocument 返回的 file_path 不可靠，需二次调用 getFile 获取真实路径
-      return this.getFileInfo(file_id);
+      // 上传回执已包含可持久化 file_id（通常也有 file_size）。不得在这里调用普通
+      // getFile：自建 Bot API 的非 metadata_only getFile 会将刚上传的媒体完整下载进 workdir。
+      // file_path 留空；实际下载/恢复时由相应路径按需解析，避免改变 file_id 与回执语义。
+      const responseSize = media.file_size;
+      const fallbackSize = isStream ? knownLength : file.length;
+      const file_size = typeof responseSize === 'number' && Number.isSafeInteger(responseSize) && responseSize >= 0
+        ? responseSize
+        : (typeof fallbackSize === 'number' && Number.isSafeInteger(fallbackSize) && fallbackSize >= 0
+          ? fallbackSize
+          : 0);
+      return {
+        file_id,
+        file_path: '',
+        file_size,
+        // 严格任务要求 fork 明确确认本地媒体已释放；缺字段的旧 fork 保守标记 false，
+        // Worker 只会重试 releaseLocalFile，绝不重新发送同一 Telegram 文件。
+        ...(options?.noCache ? { localCacheReleased: result?.local_cache_released === true } : {}),
+      };
     }, 'uploadFile', retries);
+  }
+
+  /**
+   * 自建 Bot API 扩展：通过远端 file_id 定位并删除 TDLib 本地媒体副本。
+   * 此接口不删除 Telegram 消息或云端文件；仅供严格无缓存上传在已持久化回执后重试清理。
+   */
+  async releaseLocalFile(fileId: string): Promise<void> {
+    if (!fileId || fileId.length > 4096) {
+      throw new TelegramFileNotFoundError('非法的 Telegram file_id');
+    }
+    await this.telegramRequest(async () => {
+      const response = await axios.post<{ ok?: boolean; result?: boolean }>(
+        `${this.getBaseUrl()}/releaseLocalFile`,
+        { file_id: fileId },
+        { timeout: 30 * 1000, maxRedirects: 0 },
+      );
+      if (response.data?.ok !== true || response.data.result !== true) {
+        throw new Error('Telegram 本地媒体释放未确认成功');
+      }
+    }, 'releaseLocalFile');
   }
 
   async uploadPhoto(

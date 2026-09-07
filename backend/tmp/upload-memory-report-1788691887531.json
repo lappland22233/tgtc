@@ -1,0 +1,131 @@
+{
+  "startedAt": "2026-09-06T10:51:41.118Z",
+  "platform": "linux node=v20.20.2",
+  "config": {
+    "sizeBytes": 8388608,
+    "rounds": 1,
+    "concurrency": 1,
+    "idleSeconds": 2
+  },
+  "note": "arrayBuffers 已包含在 external 中，分析时禁止相加；anon/swap 仅 Linux 可用",
+  "rounds": [
+    {
+      "round": 1,
+      "durationMs": 76,
+      "rssBeforeMB": 87.4,
+      "anonBeforeMB": 41.9
+    }
+  ],
+  "summary": {
+    "warmBaselineRssMB": 87.4,
+    "peakRssMB": 87.7,
+    "peakAnonMB": 42.2,
+    "peakExternalMB": 7.3,
+    "peakArrayBuffersMB": 4.1,
+    "peakSwapMB": 0,
+    "finalRssMB": 87.7,
+    "finalAnonMB": 42.2,
+    "finalSwapMB": 0,
+    "finalFds": 21
+  },
+  "timeline": [
+    {
+      "tMs": 0,
+      "stage": "cold",
+      "rssMB": 70.1,
+      "heapUsedMB": 13.3,
+      "heapTotalMB": 19.1,
+      "externalMB": 3.1,
+      "arrayBuffersMB": 0.1,
+      "maxRssMB": 70.2,
+      "procRssMB": 70.2,
+      "anonMB": 25.2,
+      "swapMB": 0,
+      "fds": 20
+    },
+    {
+      "tMs": 1,
+      "stage": "warmup",
+      "rssMB": 70.2,
+      "heapUsedMB": 13.3,
+      "heapTotalMB": 19.1,
+      "externalMB": 3.1,
+      "arrayBuffersMB": 0.1,
+      "maxRssMB": 70.2,
+      "procRssMB": 70.2,
+      "anonMB": 25.2,
+      "swapMB": 0,
+      "fds": 20
+    },
+    {
+      "tMs": 184,
+      "stage": "round-1",
+      "rssMB": 87.4,
+      "heapUsedMB": 10.8,
+      "heapTotalMB": 28.6,
+      "externalMB": 3.3,
+      "arrayBuffersMB": 0.1,
+      "maxRssMB": 87.4,
+      "procRssMB": 87.4,
+      "anonMB": 41.9,
+      "swapMB": 0,
+      "fds": 21
+    },
+    {
+      "tMs": 260,
+      "stage": "idle",
+      "rssMB": 87.7,
+      "heapUsedMB": 11.2,
+      "heapTotalMB": 28.9,
+      "externalMB": 7.3,
+      "arrayBuffersMB": 4.1,
+      "maxRssMB": 87.7,
+      "procRssMB": 87.7,
+      "anonMB": 42.2,
+      "swapMB": 0,
+      "fds": 21
+    },
+    {
+      "tMs": 1001,
+      "stage": "idle",
+      "rssMB": 87.7,
+      "heapUsedMB": 11.2,
+      "heapTotalMB": 28.9,
+      "externalMB": 7.3,
+      "arrayBuffersMB": 4.1,
+      "maxRssMB": 87.7,
+      "procRssMB": 87.7,
+      "anonMB": 42.2,
+      "swapMB": 0,
+      "fds": 21
+    },
+    {
+      "tMs": 2002,
+      "stage": "idle",
+      "rssMB": 87.7,
+      "heapUsedMB": 11.2,
+      "heapTotalMB": 28.9,
+      "externalMB": 7.3,
+      "arrayBuffersMB": 4.1,
+      "maxRssMB": 87.7,
+      "procRssMB": 87.7,
+      "anonMB": 42.2,
+      "swapMB": 0,
+      "fds": 21
+    },
+    {
+      "tMs": 2263,
+      "stage": "final",
+      "rssMB": 87.7,
+      "heapUsedMB": 11.2,
+      "heapTotalMB": 28.9,
+      "externalMB": 7.3,
+      "arrayBuffersMB": 4.1,
+      "maxRssMB": 87.7,
+      "procRssMB": 87.7,
+      "anonMB": 42.2,
+      "swapMB": 0,
+      "fds": 21
+    }
+  ]
+}

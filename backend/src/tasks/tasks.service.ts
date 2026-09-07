@@ -2,6 +2,8 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, LessThan, IsNull, Brackets } from 'typeorm';
 import { Cron, CronExpression } from '@nestjs/schedule';
+import { readFile } from 'fs/promises';
+import * as path from 'path';
 import { InjectQueue } from '@nestjs/bull';
 import { Queue } from 'bull';
 import { BannedIP } from '../common/entities/banned-ip.entity';
@@ -246,6 +248,20 @@ export class TasksService {
     }
   }
 
+  /** 从同版本回执恢复严格磁盘策略；无回执或旧回执按非严格处理。 */
+  private async getRecoveredStrictDiskLease(fileId: string, uploadVersion: number): Promise<boolean> {
+    try {
+      const receiptPath = path.join(process.cwd(), 'tmp', 'uploads', 'pending', `${fileId}.telegram.json`);
+      const receipt = JSON.parse(await readFile(receiptPath, 'utf8')) as {
+        uploadVersion?: unknown;
+        strictDiskLease?: unknown;
+      };
+      return receipt.uploadVersion === uploadVersion && receipt.strictDiskLease === true;
+    } catch {
+      return false;
+    }
+  }
+
   /** 恢复远端已有有效引用但状态仍为 processing 的存量文件。 */
   private async recoverCommittedFiles(): Promise<void> {
     const batch = await this.fileRepository.find({
@@ -275,9 +291,11 @@ export class TasksService {
     for (const file of remoteBatch) {
       if (!file.telegramFileId?.trim()) continue;
       try {
+        const pendingPath = path.join(process.cwd(), 'tmp', 'uploads', 'pending', file.id);
+        const strictDiskLease = await this.getRecoveredStrictDiskLease(file.id, file.uploadVersion);
         await this.fileUploadQueue.add(
           'upload',
-          { fileId: file.id, filePath: `${process.cwd()}/tmp/uploads/pending/${file.id}`, uploadVersion: file.uploadVersion },
+          { fileId: file.id, filePath: pendingPath, uploadVersion: file.uploadVersion, strictDiskLease },
           {
             jobId: `file-upload:${file.id}:${file.uploadVersion}`,
             attempts: 3,

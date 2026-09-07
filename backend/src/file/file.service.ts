@@ -487,6 +487,7 @@ export class FileService implements OnModuleInit {
     skipTypeCheck?: boolean,
     folderId?: string | null,
     overwriteFileId?: string,
+    options?: { deferCachePrewarm?: boolean },
   ): Promise<File> {
     if (file.size > this.maxFileSize) {
       throw new BadRequestException(`文件大小不能超过 ${this.maxFileSize / 1024 / 1024}MB`);
@@ -606,33 +607,36 @@ export class FileService implements OnModuleInit {
 
     const finalFile = savedFile;
 
-    // 预热缓存：将文件直接放入缓存目录，首次下载无需等待 TG 回源（按同一 id 对覆盖记录天然生效）
-    // 无缓存模式下跳过整块预热：status 保持 processing，由 file-upload.processor 在 TG 上传完成后补齐 ready
-    if (!this.fileCacheService.isNoCacheMode() && file.path && fs.existsSync(file.path)) {
-      this.fileCacheService.cacheFileFromPath(finalFile.id, file.path, file.size)
-        .then(() => {
-          // 缓存预热完成 → 文件立即可用，无需等待 TG 上传；同时清空历史失败原因。
-          // G2-06 修复：条件更新（id + status=processing + uploadVersion=当前值）并检查 affected，
-          // 防止并发覆盖时 v1 收尾任务把已递增到 v2 的记录误标 ready。写法与
-          // maybeWriteBackRecoveredPath / markFileInvalidOnDownload 的版本条件一致。
-          const criteria: Record<string, unknown> = { id: finalFile.id, status: 'processing' };
-          if (finalFile.uploadVersion) criteria.uploadVersion = finalFile.uploadVersion;
-          this.fileRepository
-            .update(criteria as any, { status: 'ready', uploadFailureReason: null } as any)
-            .then((res) => {
-              if (res.affected === 0) {
-                this.logger.warn(`缓存就绪条件更新未命中（疑似并发覆盖），跳过置 ready: ${finalFile.id} (v${finalFile.uploadVersion})`);
-              }
-            })
-            .catch(() => {});
-          this.logger.log(`文件缓存就绪: ${finalFile.id}`);
-        })
-        .catch((err) => {
-          this.logger.warn(`缓存预热失败 (${finalFile.id}): ${err.message}`);
-        });
+    // 预热缓存：将文件直接放入缓存目录，首次下载无需等待 TG 回源（按同一 id 对覆盖记录天然生效）。
+    // 分片路径需要先原子交接到 pending，避免预热异步流读取已移动的 merged 文件。
+    if (!options?.deferCachePrewarm) {
+      this.startCachePrewarm(finalFile, file.path, file.size);
     }
 
     return finalFile;
+  }
+
+  /** 分片上传在原子交接后调用，普通上传仍由 createProcessingFile 直接触发。 */
+  startCachePrewarm(file: Pick<File, 'id' | 'uploadVersion'>, sourcePath?: string, expectedSize?: number): Promise<void> {
+    if (this.fileCacheService.isNoCacheMode() || !sourcePath || !fs.existsSync(sourcePath)) {
+      return Promise.resolve();
+    }
+    return this.fileCacheService.cacheFileFromPath(file.id, sourcePath, expectedSize ?? 0)
+      .then(() => {
+        const criteria: Record<string, unknown> = { id: file.id, status: 'processing' };
+        if (file.uploadVersion) criteria.uploadVersion = file.uploadVersion;
+        return this.fileRepository.update(criteria as any, { status: 'ready', uploadFailureReason: null } as any);
+      })
+      .then((res) => {
+        if (res && res.affected === 0) {
+          this.logger.warn(`缓存就绪条件更新未命中（疑似并发覆盖），跳过置 ready: ${file.id} (v${file.uploadVersion})`);
+        } else {
+          this.logger.log(`文件缓存就绪: ${file.id}`);
+        }
+      })
+      .catch((err: Error) => {
+        this.logger.warn(`缓存预热失败 (${file.id}): ${err.message}`);
+      });
   }
 
   /**
@@ -668,6 +672,18 @@ export class FileService implements OnModuleInit {
     await this.fileRepository.update(
       { id, status: 'processing' },
       { isDeleted: true, status: 'error', uploadStage: 'failed' } as Partial<File>,
+    );
+  }
+
+  /** 覆盖上传失败时保留原记录 id 和审计轨迹，只结束 processing 状态，不软删除用户原文件记录。 */
+  async markProcessingFileFailed(id: string): Promise<void> {
+    await this.fileRepository.update(
+      { id, status: 'processing' },
+      {
+        status: 'error',
+        uploadStage: 'failed',
+        uploadFailureReason: '上传已取消或未能入队，请重新上传',
+      } as Partial<File>,
     );
   }
 
@@ -1765,8 +1781,11 @@ export class FileService implements OnModuleInit {
   /**
    * 生成图片缩略图（委托 ThumbnailService，保持公开 API 不变）。
    */
-  async generateAndSaveThumbnail(file: File): Promise<void> {
-    return this.thumbnailService.generateAndSaveThumbnail(file);
+  async generateAndSaveThumbnail(
+    file: File,
+    options: { sourcePath?: string; sourceBuffer?: Buffer; allowRemoteSource?: boolean } = {},
+  ): Promise<void> {
+    return this.thumbnailService.generateAndSaveThumbnail(file, options);
   }
 
   /**

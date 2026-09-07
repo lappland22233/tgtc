@@ -17,6 +17,8 @@ interface UploadServerHandle {
   url: string;
   /** 按 URL 统计的请求数（用于断言跳转目标收到零请求） */
   paths: Map<string, number>;
+  /** 每个请求的无缓存上传标记，用于验证严格小盘协议真正传至 Bot API。 */
+  noCacheHeaders: string[];
   /** 服务端已收到的请求体分片（增量记录） */
   received: Buffer[];
   /** slow 模式：首个分片到达且 socket 已暂停时 resolve */
@@ -32,6 +34,7 @@ const openServers: UploadServerHandle[] = [];
 function startUploadServer(mode: UploadMode): Promise<UploadServerHandle> {
   const received: Buffer[] = [];
   const paths = new Map<string, number>();
+  const noCacheHeaders: string[] = [];
   let notifyPaused: (() => void) | undefined;
   let notifyFirstChunk: (() => void) | undefined;
   const pausedPromise = new Promise<void>((resolve) => { notifyPaused = resolve; });
@@ -40,6 +43,8 @@ function startUploadServer(mode: UploadMode): Promise<UploadServerHandle> {
   const server = http.createServer((req, res) => {
     const url = req.url || '';
     paths.set(url, (paths.get(url) || 0) + 1);
+    const noCacheHeader = req.headers['x-telegram-no-cache'];
+    noCacheHeaders.push(Array.isArray(noCacheHeader) ? noCacheHeader[0] || '' : noCacheHeader || '');
 
     if (url.includes('/getFile')) {
       res.writeHead(200, { 'content-type': 'application/json' });
@@ -90,7 +95,10 @@ function startUploadServer(mode: UploadMode): Promise<UploadServerHandle> {
 
     req.on('end', () => {
       res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ ok: true, result: { document: { file_id: 'it-file-id' } } }));
+      res.end(JSON.stringify({
+        ok: true,
+        result: { document: { file_id: 'it-file-id', file_size: 4 * MB } },
+      }));
     });
   });
 
@@ -100,6 +108,7 @@ function startUploadServer(mode: UploadMode): Promise<UploadServerHandle> {
       const handle: UploadServerHandle = {
         url: `http://127.0.0.1:${port}`,
         paths,
+        noCacheHeaders,
         received,
         pausedPromise,
         firstChunkPromise,
@@ -153,11 +162,26 @@ describe('Telegram upload real transport integration (native HTTP, maxRedirects=
 
     const result = await service.uploadFile(Readable.from(fileBuf), 'it.bin', undefined, fileBuf.length);
 
-    expect(result.file_id).toBe('it-file-id');
+    expect(result).toEqual({ file_id: 'it-file-id', file_path: '', file_size: 4 * MB });
+    // 上传成功不额外请求 /getFile；在自建 Bot API 上这会触发完整媒体下载到 workdir。
+    expect([...server.paths.keys()].some((url) => url.includes('/getFile'))).toBe(false);
     const body = Buffer.concat(server.received);
     // 完整请求体送达（multipart 信封包含原始字节）
     expect(body.length).toBeGreaterThan(fileBuf.length);
     expect(body.includes(fileBuf)).toBe(true);
+    await server.close();
+  });
+
+  it('marks strict no-cache uploads for Bot API local-media release without getFile fallback', async () => {
+    const server = await startUploadServer('ok');
+    const service = createService(server.url);
+    const fileBuf = makeFileBuffer(2 * MB);
+
+    const result = await service.uploadFile(Readable.from(fileBuf), 'it.bin', undefined, fileBuf.length, { noCache: true });
+
+    expect(result).toEqual({ file_id: 'it-file-id', file_path: '', file_size: 4 * MB });
+    expect(server.noCacheHeaders).toContain('1');
+    expect([...server.paths.keys()].some((url) => url.includes('/getFile'))).toBe(false);
     await server.close();
   });
 

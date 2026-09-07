@@ -405,6 +405,7 @@ bool Client::init_methods() {
   methods_.emplace("deletewebhook", &Client::process_set_webhook_query);
   methods_.emplace("getwebhookinfo", &Client::process_get_webhook_info_query);
   methods_.emplace("getfile", &Client::process_get_file_query);
+  methods_.emplace("releaselocalfile", &Client::process_release_local_file_query);
   return true;
 }
 
@@ -1506,8 +1507,14 @@ class Client::JsonAudios final : public td::Jsonable {
 
 class Client::JsonMessage final : public td::Jsonable {
  public:
-  JsonMessage(const MessageInfo *message, bool need_reply, const td::string &source, const Client *client)
-      : message_(message), need_reply_(need_reply), source_(source), client_(client) {
+  JsonMessage(const MessageInfo *message, bool need_reply, const td::string &source, const Client *client,
+              bool local_cache_released = true, bool include_local_cache_release_status = false)
+      : message_(message)
+      , need_reply_(need_reply)
+      , source_(source)
+      , client_(client)
+      , local_cache_released_(local_cache_released)
+      , include_local_cache_release_status_(include_local_cache_release_status) {
   }
   void store(td::JsonValueScope *scope) const;
 
@@ -1516,6 +1523,9 @@ class Client::JsonMessage final : public td::Jsonable {
   bool need_reply_;
   const td::string &source_;
   const Client *client_;
+  // 自定义无缓存上传协议仅由严格路径开启；普通 Bot API 响应保持完全不变。
+  bool local_cache_released_ = true;
+  bool include_local_cache_release_status_ = false;
 
   void add_caption(td::JsonObjectScope &object, const object_ptr<td_api::formattedText> &caption,
                    bool show_caption_above_media) const {
@@ -4745,6 +4755,9 @@ void Client::JsonMessage::store(td::JsonValueScope *scope) const {
     }
   }
   object("message_id", as_client_message_id_unchecked(message_->id));
+  if (include_local_cache_release_status_) {
+    object("local_cache_released", td::JsonBool(local_cache_released_));
+  }
   if (message_->ephemeral_message_id != 0) {
     object("ephemeral_message_id", message_->ephemeral_message_id);
   }
@@ -7674,6 +7687,38 @@ class Client::TdOnDeleteFileCallback final : public TdQueryCallback {
 
  private:
   int32 file_id_;
+};
+
+class Client::TdOnDeleteFileAndAnswerCallback final : public TdQueryCallback {
+ public:
+  TdOnDeleteFileAndAnswerCallback(int32 file_id, td::BufferSlice released_answer,
+                                  td::BufferSlice pending_release_answer, PromisedQueryPtr query)
+      : file_id_(file_id)
+      , released_answer_(std::move(released_answer))
+      , pending_release_answer_(std::move(pending_release_answer))
+      , query_(std::move(query)) {
+  }
+
+  void on_result(object_ptr<td_api::Object> result) final {
+    if (result->get_id() == td_api::error::ID) {
+      auto error = move_object_as<td_api::error>(result);
+      // 远端消息已经成功，不能以 HTTP 失败诱使 Worker 重发 sendDocument。明确回传
+      // local_cache_released=false，后端会只调用 releaseLocalFile 重试本地释放并继续占用预算。
+      LOG(WARNING) << "Failed to delete strict no-cache upload file " << file_id_ << ": " << error->message_;
+      query_->set_ok(std::move(pending_release_answer_));
+    } else {
+      CHECK(result->get_id() == td_api::ok::ID);
+      LOG(DEBUG) << "Deleted local copy of strict no-cache upload file " << file_id_;
+      query_->set_ok(std::move(released_answer_));
+    }
+    query_.reset();
+  }
+
+ private:
+  int32 file_id_;
+  td::BufferSlice released_answer_;
+  td::BufferSlice pending_release_answer_;
+  PromisedQueryPtr query_;
 };
 
 class Client::TdOnGetReplyMessageCallback final : public TdQueryCallback {
@@ -13708,6 +13753,55 @@ void Client::on_message_send_succeeded(object_ptr<td_api::message> &&message, in
 
   auto query_id = extract_yet_unsent_message_query_id(chat_id, old_message_id);
   auto &query = *pending_send_message_queries_[query_id];
+  // sendDocument 成功后，TDLib 已拿到远端引用；严格无缓存上传只清理本地文件 ID，
+  // 不调用 deleteMessages，因此不会影响 Telegram 消息或服务端 file_id。
+  if (query.remove_local_file && !logging_out_ && !closing_ && !query.is_multisend) {
+    int32 local_file_id = 0;
+    switch (message_info->content->get_id()) {
+      case td_api::messageAnimation::ID: {
+        const auto *content = static_cast<const td_api::messageAnimation *>(message_info->content.get());
+        local_file_id = content->animation_->animation_->id_;
+        break;
+      }
+      case td_api::messageAudio::ID: {
+        const auto *content = static_cast<const td_api::messageAudio *>(message_info->content.get());
+        local_file_id = content->audio_->audio_->id_;
+        break;
+      }
+      case td_api::messageDocument::ID: {
+        const auto *content = static_cast<const td_api::messageDocument *>(message_info->content.get());
+        local_file_id = content->document_->document_->id_;
+        break;
+      }
+      case td_api::messageVideo::ID: {
+        const auto *content = static_cast<const td_api::messageVideo *>(message_info->content.get());
+        local_file_id = content->video_->video_->id_;
+        break;
+      }
+      case td_api::messageVoiceNote::ID: {
+        const auto *content = static_cast<const td_api::messageVoiceNote *>(message_info->content.get());
+        local_file_id = content->voice_note_->voice_->id_;
+        break;
+      }
+      default:
+        break;
+    }
+    if (local_file_id > 0) {
+      // 先编码两种原始 sendDocument 响应：deleteFile 成功才确认已释放；失败仍返回远端
+      // file_id，但明确标记本地副本待释放，供后端安全重试而不是重传消息。
+      auto released_answer = td::json_encode<td::BufferSlice>(JsonQueryOk<JsonMessage>(
+          JsonMessage(message_info, true, "sent message", this, true, true), td::Slice()));
+      auto pending_release_answer = td::json_encode<td::BufferSlice>(JsonQueryOk<JsonMessage>(
+          JsonMessage(message_info, true, "sent message", this, false, true), td::Slice()));
+      auto pending_query = std::move(query.query);
+      pending_send_message_queries_.erase(query_id);
+      send_request(make_object<td_api::deleteFile>(local_file_id),
+                   td::make_unique<TdOnDeleteFileAndAnswerCallback>(
+                       local_file_id, std::move(released_answer), std::move(pending_release_answer),
+                       std::move(pending_query)));
+      return;
+    }
+  }
   if (query.is_multisend) {
     if (query.query->method() == "forwardmessages" || query.query->method() == "copymessages") {
       query.messages.push_back(td::json_encode<td::string>(JsonMessageId(new_message_id)));
@@ -13729,7 +13823,11 @@ void Client::on_message_send_succeeded(object_ptr<td_api::message> &&message, in
     if (query.query->method() == "copymessage") {
       answer_query(JsonMessageId(new_message_id), std::move(query.query));
     } else {
-      answer_query(JsonMessage(message_info, true, "sent message", this), std::move(query.query));
+      // 未能从消息内容取到本地 TDLib 文件 ID 时，仍返回远端 file_id，但将严格任务
+      // 标为待释放；Node 会调用 releaseLocalFile 按远端 file_id 重试，不会提前放行预算。
+      answer_query(JsonMessage(message_info, true, "sent message", this,
+                               !query.remove_local_file, query.remove_local_file),
+                   std::move(query.query));
     }
     pending_send_message_queries_.erase(query_id);
   }
@@ -17066,6 +17164,22 @@ td::Status Client::process_get_file_query(PromisedQueryPtr &query) {
   return td::Status::OK();
 }
 
+td::Status Client::process_release_local_file_query(PromisedQueryPtr &query) {
+  td::string file_id = query->arg("file_id").str();
+  // 仅接受有效的远端 file_id，并拒绝正在下载或被流式端点使用的媒体，避免释放活跃数据。
+  check_remote_file_id(file_id, std::move(query),
+                       [this](object_ptr<td_api::file> file, PromisedQueryPtr query) {
+    auto local_file_id = file->id_;
+    if (local_file_id <= 0 || is_file_being_downloaded(local_file_id)
+        || file_stream_listeners_.count(local_file_id) != 0) {
+      return fail_query(409, "Conflict: file is currently in use", std::move(query));
+    }
+    send_request(make_object<td_api::deleteFile>(local_file_id),
+                 td::make_unique<TdOnOkQueryCallback>(std::move(query)));
+  });
+  return td::Status::OK();
+}
+
 void Client::do_get_file(object_ptr<td_api::file> file, PromisedQueryPtr query) {
   if (!parameters_->local_mode_ &&
       td::max(file->expected_size_, file->local_->downloaded_size_) > MAX_DOWNLOAD_FILE_SIZE) {  // speculative check
@@ -17458,11 +17572,14 @@ void Client::do_send_message(object_ptr<td_api::InputMessageContent> input_messa
 }
 
 td::int64 Client::get_send_message_query_id(PromisedQueryPtr query, bool is_multisend) {
+  // 此标记由后端严格无缓存上传专用；普通 Bot API 调用保持既有本地媒体缓存行为。
+  auto remove_local_file = parse_file_stream_no_cache(query->get_header("x-telegram-no-cache"));
   auto query_id = current_send_message_query_id_++;
   auto &pending_query = pending_send_message_queries_[query_id];
   CHECK(pending_query == nullptr);
   pending_query = td::make_unique<PendingSendMessageQuery>();
   pending_query->query = std::move(query);
+  pending_query->remove_local_file = remove_local_file;
   pending_query->is_multisend = is_multisend;
   return query_id;
 }

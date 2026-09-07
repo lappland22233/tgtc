@@ -1,4 +1,4 @@
-import { Injectable, BadRequestException, NotFoundException, ForbiddenException, HttpException, HttpStatus, Logger, OnModuleInit } from '@nestjs/common';
+import { Injectable, BadRequestException, NotFoundException, ForbiddenException, ConflictException, HttpException, HttpStatus, Logger, OnModuleInit } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { InjectQueue } from '@nestjs/bull';
 import { ConfigService } from '@nestjs/config';
@@ -13,6 +13,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { CHUNK_CLEANUP_DELAY_MS, CHUNK_SESSION_MAX_IDLE_MS } from '../common/constants/durations';
 import { QUEUE_NAMES } from '../jobs/bull-queue.module';
 import { FileService } from './file.service';
+import { UploadDiskBudgetService } from './upload-disk-budget.service';
 import { User } from '../common/entities/user.entity';
 
 const pipelineAsync = promisify(pipeline);
@@ -32,6 +33,10 @@ interface ChunkSession {
   savedFileId?: string;
   /** 与 savedFileId 对应的 uploadVersion，用于重试入队时保持幂等 jobId */
   savedFileUploadVersion?: number;
+  /** 严格小盘模式下已从会话目录原子交接的唯一上传源；队列入队失败时可直接重试，不重建分片。 */
+  handoffPath?: string;
+  /** 在 init 时固定的严格磁盘租约，配置热切换不会改变在途会话的所有权与清理规则。 */
+  strictDiskLease?: boolean;
   createdAt: Date;
   /** 最后一次活动时间（分片上传/状态查询/合并触发时更新） */
   lastActivityAt: Date;
@@ -82,6 +87,8 @@ export class ChunkUploadService implements OnModuleInit {
   private inFlightRequests = 0;
   private inFlightBytes = 0;
   private readonly inFlightRequestsByUser = new Map<string, number>();
+  /** 严格模式下每个文件只允许一条分片接收请求，避免 incoming 临时分片突破 2S 预算。 */
+  private readonly inFlightRequestsBySession = new Map<string, number>();
   /** G3-04：合并并发信号量（全局 3 + 每用户 1），防止多账号并发大文件合并 OOM */
   private readonly mergeSemaphoreGlobal = new MergeSemaphore(3);
   private readonly mergeSemaphorePerUser = new Map<string, MergeSemaphore>();
@@ -108,6 +115,7 @@ export class ChunkUploadService implements OnModuleInit {
     @InjectQueue(QUEUE_NAMES.FILE_UPLOAD)
     private fileUploadQueue: Queue,
     private readonly configService: ConfigService,
+    private readonly uploadDiskBudget?: UploadDiskBudgetService,
   ) {
     this.baseDir = path.resolve(process.cwd(), 'tmp', 'uploads');
     this.incomingDir = path.join(this.baseDir, 'incoming');
@@ -125,15 +133,23 @@ export class ChunkUploadService implements OnModuleInit {
    * 异步执行，不阻塞启动。
    */
   async onModuleInit(): Promise<void> {
-    this.cleanupOrphanChunkDirs().catch((err) => {
-      this.logger.warn(`[分片上传] 启动清理孤儿分片目录失败: ${(err as Error).message}`);
-    });
-    this.cleanupIncomingChunks().catch((err) => {
-      this.logger.warn(`[分片上传] 启动清理未完成接收文件失败: ${(err as Error).message}`);
-    });
-    this.cleanupOrphanPendingFiles().catch((err) => {
-      this.logger.warn(`[分片上传] 启动清理孤儿 pending 文件失败: ${(err as Error).message}`);
-    });
+    // 严格小盘模式在接受新会话前先完成遗留临时数据收敛；否则重启后的孤儿分片会与
+    // 新文件短暂重叠，占用不属于任何活动预算。
+    await Promise.all([
+      this.cleanupOrphanChunkDirs(),
+      this.cleanupIncomingChunks(),
+      this.cleanupOrphanPendingFiles(),
+    ].map(async (task) => {
+      try {
+        await task;
+      } catch (err) {
+        this.logger.warn(`[分片上传] 启动清理临时数据失败: ${(err as Error).message}`);
+      }
+    }));
+  }
+
+  private isStrictDiskMode(): boolean {
+    return this.uploadDiskBudget?.isStrictMode() === true;
   }
 
   private readPositiveConfig(key: string, fallback: number): number {
@@ -249,6 +265,13 @@ export class ChunkUploadService implements OnModuleInit {
     }
 
     const uploadId = uuidv4();
+    // 严格模式的峰值由“已接收分片 S + 合并输出 S”或“上传源 S + Bot API 媒体 S”组成。
+    // 在正文落盘前一次性核验 2S，后续阶段不再额外要求一份完整文件的可用空间。
+    const strictDiskLease = this.isStrictDiskMode();
+    if (strictDiskLease) {
+      await this.ensureDiskSpace(2 * fileSize);
+      await this.uploadDiskBudget!.acquireSession(uploadId, fileSize);
+    }
     const now = new Date();
     const session: ChunkSession = {
       uploadId,
@@ -260,6 +283,7 @@ export class ChunkUploadService implements OnModuleInit {
       uploadedBy: userId,
       folderId: folderId ?? null,
       overwriteFileId: overwriteFileId ?? null,
+      strictDiskLease,
       createdAt: now,
       lastActivityAt: now,
       mergeStatus: 'pending',
@@ -273,6 +297,7 @@ export class ChunkUploadService implements OnModuleInit {
       await fsp.mkdir(dir, { recursive: true });
     } catch (error) {
       this.sessions.delete(uploadId);
+      this.uploadDiskBudget?.releaseSession(uploadId);
       await fsp.rm(dir, { recursive: true, force: true }).catch(() => {});
       throw error;
     }
@@ -294,16 +319,24 @@ export class ChunkUploadService implements OnModuleInit {
       throw new BadRequestException('请求体超过声明的分片大小');
     }
     const userRequests = this.inFlightRequestsByUser.get(userId) || 0;
+    const sessionRequests = this.inFlightRequestsBySession.get(uploadId) || 0;
     if (userRequests >= this.maxConcurrentRequestsPerUser
       || this.inFlightRequests >= this.maxInFlightRequests
-      || this.inFlightBytes + reservedBytes > this.maxInFlightBytes) {
-      throw new HttpException('上传请求过多，请稍后重试', HttpStatus.TOO_MANY_REQUESTS);
+      || this.inFlightBytes + reservedBytes > this.maxInFlightBytes
+      || (session.strictDiskLease && sessionRequests >= 1)) {
+      throw new HttpException(
+        session.strictDiskLease
+          ? { statusCode: HttpStatus.TOO_MANY_REQUESTS, code: 'UPLOAD_DISK_BUDGET_BUSY', retryAfterMs: 5000, message: '正在按小盘模式接收上一分片，请稍候' }
+          : '上传请求过多，请稍后重试',
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
     }
     await this.ensureDiskSpace(reservedBytes);
 
     this.inFlightRequests++;
     this.inFlightBytes += reservedBytes;
     this.inFlightRequestsByUser.set(userId, userRequests + 1);
+    this.inFlightRequestsBySession.set(uploadId, sessionRequests + 1);
     let released = false;
     return () => {
       if (released) return;
@@ -313,6 +346,9 @@ export class ChunkUploadService implements OnModuleInit {
       const remaining = (this.inFlightRequestsByUser.get(userId) || 1) - 1;
       if (remaining > 0) this.inFlightRequestsByUser.set(userId, remaining);
       else this.inFlightRequestsByUser.delete(userId);
+      const remainingSession = (this.inFlightRequestsBySession.get(uploadId) || 1) - 1;
+      if (remainingSession > 0) this.inFlightRequestsBySession.set(uploadId, remainingSession);
+      else this.inFlightRequestsBySession.delete(uploadId);
     };
   }
 
@@ -518,6 +554,22 @@ export class ChunkUploadService implements OnModuleInit {
     const dir = this.getChunkDir(session.uploadId);
     const mergedPath = path.join(dir, 'merged');
 
+    // Redis 入队短暂失败时，唯一上传源可能仍在 pending，或已安全回退为 merged；重试
+    // complete 只重试交接/入队，不重建文件或误报分片缺失。
+    if (session.handoffPath) {
+      const handoffStat = await fsp.stat(session.handoffPath).catch(() => undefined);
+      if (!handoffStat?.isFile() || handoffStat.size !== session.fileSize) {
+        throw new Error('已交接的上传源缺失或大小不一致，请重新上传');
+      }
+      return this.finalizeMerge(session, session.handoffPath, handoffStat.size, signal);
+    }
+    if (session.savedFileId) {
+      const existingMerged = await fsp.stat(mergedPath).catch(() => undefined);
+      if (existingMerged?.isFile() && existingMerged.size === session.fileSize) {
+        return this.finalizeMerge(session, mergedPath, existingMerged.size, signal);
+      }
+    }
+
     // 日志：记录合并开始（用于排查 OOM/磁盘问题）
     this.logger.log(`[分片上传] ${session.uploadId} 开始合并 ${session.totalChunks} 个分片 (${(session.fileSize / 1024 / 1024).toFixed(1)}MB)`);
 
@@ -615,7 +667,11 @@ export class ChunkUploadService implements OnModuleInit {
   }
 
   /**
-   * 合并后处理：创建文件记录 → 复制到持久化目录 → 入队后台上传
+   * 合并后处理：创建文件记录 → 原子交接唯一上传源 → 入队后台上传。
+   *
+   * 交接不再复制完整 `merged` 为 `pending`：同一 `tmp/uploads` 文件系统内使用 rename，
+   * 随后立即释放原分片目录。无缓存严格模式的峰值因此为“分片 S + 合并 S”或
+   * “pending S + Bot API 媒体 S”，而不是三份或更多完整文件重叠。
    */
   private async finalizeMerge(
     session: ChunkSession,
@@ -626,15 +682,16 @@ export class ChunkUploadService implements OnModuleInit {
     this.throwIfAborted(signal);
     session.mergeStatus = 'uploading';
 
-    // G3-05：合并产物磁盘占用预检。
-    // merged(1x) 已写完，此处还需 pending copy(1x) + 缓存预热(1x) ≈ 2x fileSize。
-    // 空间不足置 error 并返回 507，避免 ENOSPC 破坏持久化目录或缓存盘。
-    try {
-      await this.ensureDiskSpace(2 * fileSize);
-    } catch (error) {
-      session.mergeStatus = 'error';
-      session.mergeError = (error as Error).message || '磁盘空间不足';
-      throw error;
+    // 非严格模式仍保留一份交接所需的可用空间检查；严格模式已在 init 预留完整 2S，
+    // 此处不得再要求额外两份空间，否则小盘永远无法进入最终交接阶段。
+    if (!session.strictDiskLease) {
+      try {
+        await this.ensureDiskSpace(fileSize);
+      } catch (error) {
+        session.mergeStatus = 'error';
+        session.mergeError = (error as Error).message || '磁盘空间不足';
+        throw error;
+      }
     }
 
     // magic bytes 类型检查
@@ -662,8 +719,8 @@ export class ChunkUploadService implements OnModuleInit {
       stream: null as any,
     };
 
-    // G3-06：error 后重试 complete 时复用已创建的 File 记录，避免僵尸重复记录。
-    // 首次成功 createProcessingFile 后把 savedFileId 存入 session；重试只重做 copyFile + queue.add。
+    // 首次成功 createProcessingFile 后复用同一记录；预热延后到原子交接完成，避免异步
+    // 缓存读取即将被 rename 的路径。已经交接却暂未入队时，只重新尝试入队，不重建分片。
     let savedFile: { id: string; uploadVersion: number; originalName: string };
     this.throwIfAborted(signal);
     if (session.savedFileId && session.savedFileUploadVersion !== undefined) {
@@ -676,10 +733,11 @@ export class ChunkUploadService implements OnModuleInit {
         mockFile,
         session.fileName,
         { id: session.uploadedBy } as User,
-        undefined,   // tagIds
-        true,        // skipTypeCheck
+        undefined,
+        true,
         session.folderId,
         session.overwriteFileId ?? undefined,
+        { deferCachePrewarm: true },
       );
       session.savedFileId = created.id;
       session.savedFileUploadVersion = created.uploadVersion;
@@ -688,19 +746,53 @@ export class ChunkUploadService implements OnModuleInit {
 
     this.throwIfAborted(signal);
     const pendingDir = path.resolve(process.cwd(), 'tmp', 'uploads', 'pending');
-    fs.mkdirSync(pendingDir, { recursive: true });
+    await fsp.mkdir(pendingDir, { recursive: true });
     const pendingPath = path.join(pendingDir, savedFile.id);
-    // G3-12：覆盖上传复用同一 pendingPath，必须先删除旧版本可能残留的 .telegram.json 回执，
-    // 防止 v2 任务 loadReceipt 读到 v1 陈旧回执提交错配内容（配合 processor 的版本校验双保险）。
-    await fsp.rm(`${pendingPath}.telegram.json`, { force: true }).catch(() => {});
-    await fsp.copyFile(mergedPath, pendingPath);
+    const alreadyHandedOff = session.handoffPath === pendingPath;
+    if (!alreadyHandedOff) {
+      // 覆盖上传复用同一 pendingPath：移除陈旧版本回执，避免 v2 读到 v1 的远端结果。
+      await fsp.rm(`${pendingPath}.telegram.json`, { force: true }).catch(() => {});
+      try {
+        await fsp.rename(mergedPath, pendingPath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'EXDEV') {
+          throw new Error('上传暂存目录与 pending 目录必须位于同一文件系统，严格模式拒绝创建额外完整副本');
+        }
+        throw error;
+      }
+      session.handoffPath = pendingPath;
+    }
+
+    // 普通缓存模式在入队前完成预热，避免 Worker 删除 pending 时与预热流竞争。
+    // 严格无缓存模式跳过这一步，因此此处只会保留 pending 这一份上传源。
+    if (!session.strictDiskLease && typeof this.fileService.startCachePrewarm === 'function') {
+      await this.fileService.startCachePrewarm(savedFile, pendingPath, fileSize);
+    }
+
+    // Bull 在 add 成功后可能立刻开始 Worker。严格模式必须先释放分片 S，确保 Worker
+    // 上传期间只有 pending S 与 Bot API 媒体副本最多重叠；若 add 失败，下方会把 pending
+    // 原子回退为 merged，保留完整恢复源。
+    if (session.strictDiskLease && !alreadyHandedOff) {
+      await fsp.rm(this.getChunkDir(session.uploadId), { recursive: true, force: true });
+    }
 
     this.throwIfAborted(signal);
     const jobId = `file-upload:${savedFile.id}:${savedFile.uploadVersion}`;
+    const leaseTransferred = session.strictDiskLease
+      ? this.uploadDiskBudget!.transferSessionToJob(session.uploadId, savedFile.id, savedFile.uploadVersion)
+      : true;
+    if (!leaseTransferred) {
+      throw new Error('上传磁盘预算租约已丢失，请重新上传');
+    }
     try {
       await this.fileUploadQueue.add(
         'upload',
-        { fileId: savedFile.id, filePath: pendingPath, uploadVersion: savedFile.uploadVersion },
+        {
+          fileId: savedFile.id,
+          filePath: pendingPath,
+          uploadVersion: savedFile.uploadVersion,
+          strictDiskLease: session.strictDiskLease === true,
+        },
         {
           jobId,
           attempts: 3,
@@ -710,33 +802,28 @@ export class ChunkUploadService implements OnModuleInit {
         },
       );
     } catch (err) {
-      // G3-03：queue.add 失败（Redis 故障/不可达）时，刚 copyFile 生成的 pending 整份文件无人消费，
-      // 必须立即清理（连同回执），避免含用户原始内容的临时文件永久残留磁盘。
-      await fsp.rm(pendingPath, { force: true }).catch(() => {});
-      await fsp.rm(`${pendingPath}.telegram.json`, { force: true }).catch(() => {});
+      // 入队失败时保留已交接的唯一源并把租约还给会话。分片目录可能已释放；下次
+      // complete 通过 handoffPath 仅重试入队，绝不能吞掉回迁失败后再尝试重建分片。
+      this.uploadDiskBudget?.transferJobToSession(session.uploadId, savedFile.id, savedFile.uploadVersion);
       throw err;
     }
 
-    // G3-07：withDeadline 超时 abort 与 queue.add 的竞态。
-    // queue.add 成功后复查 signal/会话状态：若已中止（超时/取消），立即移除刚入队任务并清理 DB 记录，
-    // 避免超时后仍产生"幽灵任务"跑上传。
-    // （signal.aborted 已涵盖中止场景；mergeStatus 可能被 abort/error 路径改写，用 isActiveSession 兜底）
+    // withDeadline 超时 abort 与 queue.add 的竞态：成功入队后仍可能收到取消，移除任务并清理。
     if (signal.aborted || !this.isActiveSession(session)) {
       this.logger.warn(
         `[分片上传] ${session.uploadId} 入队后检测到中止，移除任务 ${jobId} 并清理记录 ${savedFile.id}`,
       );
       const queuedJob = await this.fileUploadQueue.getJob(jobId).catch(() => undefined);
-      if (queuedJob) {
-        await queuedJob.remove().catch(() => {});
-      }
-      if (!session.overwriteFileId) {
-        await this.fileService.softDeleteProcessingFile(savedFile.id).catch(() => {});
-      }
+      if (queuedJob) await queuedJob.remove().catch(() => {});
+      await this.cleanupUploadingSideEffects(session);
       throw new Error('分片合并已取消');
     }
 
+    // 队列接管后 pending 是唯一恢复源，原分片立即删除，避免固定 5 分钟的额外 S 占用。
+    await fsp.rm(this.getChunkDir(session.uploadId), { recursive: true, force: true }).catch((error) => {
+      this.logger.warn(`[分片上传] 入队后清理分片目录失败: ${(error as Error).message}`);
+    });
     this.logger.log(`[分片上传] ${session.uploadId} 已入队后台上传: ${savedFile.id}`);
-
     return { id: savedFile.id, originalName: savedFile.originalName };
   }
 
@@ -780,12 +867,15 @@ export class ChunkUploadService implements OnModuleInit {
       || session.mergeStatus === 'uploading';
   }
 
-  /** 延迟清理会话和临时文件 */
+  /** 延迟清理会话查询状态；错误会话的分片与严格预算在此收敛。 */
   private scheduleCleanup(uploadId: string): void {
     setTimeout(() => {
+      const session = this.sessions.get(uploadId);
       this.sessions.delete(uploadId);
       const dir = this.getChunkDir(uploadId);
       fsp.rm(dir, { recursive: true, force: true }).catch(() => {});
+      // 成功会话的租约已转交给 Worker job；错误会话仍持有 session 租约，清理后归还。
+      if (session?.mergeStatus === 'error') this.uploadDiskBudget?.releaseSession(uploadId);
     }, CHUNK_CLEANUP_DELAY_MS); // 允许客户端查询结果
   }
 
@@ -798,37 +888,60 @@ export class ChunkUploadService implements OnModuleInit {
       throw new ForbiddenException('无权操作此上传会话');
     }
 
-    // G3-02：合并已完成且队列任务已入队（uploading）时，abort 必须一并移除队列任务并软删 DB 记录，
-    // 否则后台任务仍会把文件上传到 Telegram，与"取消"语义违背（隐私）。
-    if (session.mergeStatus === 'uploading' && session.savedFileId) {
-      await this.cleanupUploadingSideEffects(session);
+    await this.cancelMerge(session);
+
+    // 入队任务可能已被 Worker 取得并打开 pending 文件。此时强行取消会破坏回执恢复并让
+    // 严格预算错误释放；明确返回冲突，由后台任务安全收尾。尚未开始的 waiting/delayed 任务可取消。
+    if (session.savedFileId && session.handoffPath) {
+      const removedBeforeStart = await this.cleanupUploadingSideEffects(session);
+      if (!removedBeforeStart) {
+        throw new ConflictException('上传已被后台处理接管，无法安全取消，请等待任务完成');
+      }
     }
 
-    await this.cancelMerge(session);
     this.sessions.delete(uploadId);
-
     const dir = this.getChunkDir(uploadId);
     await fsp.rm(dir, { recursive: true, force: true }).catch(() => {});
+    this.uploadDiskBudget?.releaseSession(uploadId);
     this.logger.log(`[分片上传] 取消会话 ${uploadId}`);
   }
 
-  /** G3-02：清理 uploading 阶段的队列任务、DB 记录与 pending 临时文件（abort 时调用） */
-  private async cleanupUploadingSideEffects(session: ChunkSession): Promise<void> {
+  /** 仅清理尚未开始的队列任务；返回是否已确认删除其 pending 上传源。 */
+  private async cleanupUploadingSideEffects(session: ChunkSession): Promise<boolean> {
     const fileId = session.savedFileId!;
     const uploadVersion = session.savedFileUploadVersion ?? 1;
     const jobId = `file-upload:${fileId}:${uploadVersion}`;
+    let safelyRemovedBeforeStart = false;
     try {
       const queuedJob = await this.fileUploadQueue.getJob(jobId).catch(() => undefined);
-      if (queuedJob) await queuedJob.remove().catch(() => {});
+      if (queuedJob) {
+        const state = typeof queuedJob.getState === 'function' ? await queuedJob.getState().catch(() => 'unknown') : 'unknown';
+        if (state === 'waiting' || state === 'delayed' || state === 'paused') {
+          await queuedJob.remove();
+          safelyRemovedBeforeStart = true;
+        }
+      }
     } catch {
-      /* 任务可能已执行/已移除，静默 */
+      // active/failed/remove race：保留上传源和严格预算，由 Worker 的终态清理收尾。
     }
-    // 软删 DB 记录（保留审计痕迹，仅限 processing 阶段避免误伤已提交的覆盖目标）
-    await this.fileService.softDeleteProcessingFile(fileId).catch(() => {});
-    // 清理 pending 临时文件与回执
+    if (!safelyRemovedBeforeStart) return false;
+
+    // 只有确认 Worker 尚未取得任务时才结束 processing／删除源；活跃 Worker 可能仍持有打开的
+    // 文件描述符，过早改变数据库状态或释放预算会破坏回执恢复与严格空间保证。
+    if (session.overwriteFileId) {
+      await this.fileService.markProcessingFileFailed?.(fileId).catch(() => {});
+    } else {
+      await this.fileService.softDeleteProcessingFile(fileId).catch(() => {});
+    }
+
+    // 活跃 Worker 可能仍持有打开的
+    // 文件描述符，过早释放会让严格模式在同一物理空间上错误放行下一份大文件。
     const pendingDir = path.resolve(process.cwd(), 'tmp', 'uploads', 'pending');
-    await fsp.rm(path.join(pendingDir, fileId), { force: true }).catch(() => {});
-    await fsp.rm(path.join(pendingDir, `${fileId}.telegram.json`), { force: true }).catch(() => {});
+    const pendingPath = path.join(pendingDir, fileId);
+    const sourceRemoved = await fsp.rm(pendingPath, { force: true }).then(() => true).catch(() => false);
+    await fsp.rm(`${pendingPath}.telegram.json`, { force: true }).catch(() => {});
+    if (sourceRemoved) this.uploadDiskBudget?.releaseJob(fileId, uploadVersion);
+    return sourceRemoved;
   }
 
   /** 定时清理空闲过久的会话（基于 lastActivityAt） */

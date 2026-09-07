@@ -25,11 +25,20 @@ describe('ChunkUploadService session quota', () => {
     getJob: jest.fn().mockResolvedValue(undefined),
   };
   const configService = { get: jest.fn() };
+  const uploadDiskBudget = {
+    isStrictMode: jest.fn().mockReturnValue(false),
+    acquireSession: jest.fn().mockResolvedValue(undefined),
+    transferSessionToJob: jest.fn().mockReturnValue(true),
+    transferJobToSession: jest.fn(),
+    releaseSession: jest.fn(),
+    releaseJob: jest.fn(),
+  };
   let service: ChunkUploadService;
 
   beforeEach(() => {
     jest.clearAllMocks();
-    service = new ChunkUploadService(fileService as any, fileUploadQueue as any, configService as any);
+    uploadDiskBudget.isStrictMode.mockReturnValue(false);
+    service = new ChunkUploadService(fileService as any, fileUploadQueue as any, configService as any, uploadDiskBudget as any);
   });
 
   afterEach(async () => {
@@ -168,6 +177,47 @@ describe('ChunkUploadService session quota', () => {
 
       statfsSpy.mockRestore();
     });
+
+    it('严格模式在 Worker 可启动前释放分片，仅保留 pending 上传源', async () => {
+      uploadDiskBudget.isStrictMode.mockReturnValue(true);
+      const { uploadId, session, mergedPath } = await setupSession();
+      const pendingPath = path.resolve(process.cwd(), 'tmp', 'uploads', 'pending', '11111111-1111-4111-8111-111111111111');
+      fileUploadQueue.add.mockImplementation(async () => {
+        await expect(fsp.stat((service as any).getChunkDir(uploadId))).rejects.toMatchObject({ code: 'ENOENT' });
+        await expect(fsp.stat(pendingPath)).resolves.toMatchObject({ size: MB });
+        return {};
+      });
+
+      await (service as any).finalizeMerge(session, mergedPath, MB, new AbortController().signal);
+
+      expect(uploadDiskBudget.acquireSession).toHaveBeenCalledWith(uploadId, MB);
+      expect(uploadDiskBudget.transferSessionToJob).toHaveBeenCalledWith(
+        uploadId,
+        '11111111-1111-4111-8111-111111111111',
+        1,
+      );
+      await expect(fsp.stat(mergedPath)).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(fsp.stat(pendingPath)).resolves.toMatchObject({ size: MB });
+    });
+
+    it('严格模式在 Redis 入队失败时保留 pending 源和会话租约供安全重试', async () => {
+      uploadDiskBudget.isStrictMode.mockReturnValue(true);
+      const { uploadId, session, mergedPath } = await setupSession();
+      fileUploadQueue.add.mockRejectedValueOnce(new Error('redis unavailable'));
+
+      await expect((service as any).finalizeMerge(session, mergedPath, MB, new AbortController().signal))
+        .rejects.toThrow('redis unavailable');
+
+      expect(uploadDiskBudget.transferJobToSession).toHaveBeenCalledWith(
+        uploadId,
+        '11111111-1111-4111-8111-111111111111',
+        1,
+      );
+      await expect(fsp.stat(mergedPath)).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(fsp.stat(path.resolve(process.cwd(), 'tmp', 'uploads', 'pending', '11111111-1111-4111-8111-111111111111')))
+        .resolves.toMatchObject({ size: MB });
+      expect(session.handoffPath).toContain('tmp');
+    });
   });
 
   describe('doMerge large-file single pipeline', () => {
@@ -246,13 +296,15 @@ describe('ChunkUploadService session quota', () => {
         process.off('warning', warningListener);
       }
 
-      // 内容与顺序一致（逐片填充 i % 256）
-      const mergedPath = path.join((service as any).getChunkDir(uploadId), 'merged');
+      // 内容与顺序一致（逐片填充 i % 256）：合并产物已原子交接为 pending，
+      // 不再保留 session/merged 或原分片目录占用一份完整数据。
       const expected = Buffer.concat(
         Array.from({ length: totalChunks }, (_, i) => Buffer.alloc(chunkSize, i % 256)),
       );
-      const merged = await fsp.readFile(mergedPath);
-      expect(merged.equals(expected)).toBe(true);
+      const pendingPath = path.join(pendingDir, '11111111-1111-4111-8111-111111111111');
+      const handedOff = await fsp.readFile(pendingPath);
+      expect(handedOff.equals(expected)).toBe(true);
+      await expect(fsp.stat((service as any).getChunkDir(uploadId))).rejects.toMatchObject({ code: 'ENOENT' });
 
       // 目标流监听器不随片数增长：旧实现对同一 WriteStream 循环 pipeline，
       // 每片重复注册且清理延迟到 close，125 片即触发 MaxListenersExceededWarning；

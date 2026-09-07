@@ -61,11 +61,8 @@
       />
     </noscript>
 
-    <!-- Inline critical dark-theme background to prevent white flash（CSP style-src 'unsafe-inline' 已放行） -->
-    <style>
-      html { background-color: #0A0E17; color-scheme: dark; }
-      body { margin: 0; background-color: #0A0E17; }
-    </style>
+    <!-- 首屏深色背景，避免白屏闪烁；使用静态文件以避免 Vite HTML 内联 CSS 代理问题。 -->
+    <link rel="stylesheet" href="/critical.css" />
   </head>
   <body>
     <div id="app"></div>

@@ -337,6 +337,7 @@ class Client final : public WebhookActor::Callback {
   class TdOnFileStreamDownloadCallback;
   class TdOnCancelDownloadFileCallback;
   class TdOnDeleteFileCallback;
+  class TdOnDeleteFileAndAnswerCallback;
   class TdOnSendCustomRequestCallback;
 
   void on_get_reply_message(int64 chat_id, object_ptr<td_api::message> reply_to_message);
@@ -1023,6 +1024,7 @@ class Client final : public WebhookActor::Callback {
   td::Status process_set_webhook_query(PromisedQueryPtr &query);
   td::Status process_get_webhook_info_query(PromisedQueryPtr &query);
   td::Status process_get_file_query(PromisedQueryPtr &query);
+  td::Status process_release_local_file_query(PromisedQueryPtr &query);
 
   void webhook_verified(td::string cached_ip_address) final;
   void webhook_success() final;
@@ -1624,6 +1626,9 @@ class Client final : public WebhookActor::Callback {
 
   struct PendingSendMessageQuery {
     PromisedQueryPtr query;
+    // 无缓存上传在 Telegram 确认消息后删除 TDLib 的本地媒体副本；只影响本地缓存，
+    // 不删除消息或远端 file_id。由请求头 X-Telegram-No-Cache 显式开启。
+    bool remove_local_file = false;
     bool is_multisend = false;
     int32 total_message_count = 0;
     int32 awaited_message_count = 0;

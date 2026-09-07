@@ -45,6 +45,14 @@ export interface VideoCoverOptions {
   allowRemoteSource?: boolean;
 }
 
+export interface ImageThumbnailOptions {
+  /** 已接收／待上传的本地源优先用于生成缩略图，避免上传成功后再完整回源下载。 */
+  sourcePath?: string;
+  sourceBuffer?: Buffer;
+  /** 无本地源时才允许 Telegram 回源；调用方可关闭以保护小盘。 */
+  allowRemoteSource?: boolean;
+}
+
 @Injectable()
 export class ThumbnailService {
   private readonly logger = new Logger(ThumbnailService.name);
@@ -335,16 +343,16 @@ export class ThumbnailService {
   }
 
   /**
-   * 从 Telegram 下载原图，用 sharp 生成十分之一分辨率缩略图，存到本地。
-   * 成功后将缩略图路径写入 File 实体。
+   * 用本地上传源或受限 Telegram 回源生成图片缩略图。
+   * 成功后将缩略图路径写入 File 实体；上传完成路径优先使用 pending 本地源，避免额外下载。
    */
-  async generateAndSaveThumbnail(file: File): Promise<void> {
+  async generateAndSaveThumbnail(file: File, options: ImageThumbnailOptions = {}): Promise<void> {
     if (!file.mimeType?.startsWith('image/')) return;
 
     const activeBuild = this.thumbnailBuilds.get(file.id);
     if (activeBuild) return activeBuild;
 
-    const build = this.buildAndSaveThumbnail(file).finally(() => {
+    const build = this.buildAndSaveThumbnail(file, options).finally(() => {
       if (this.thumbnailBuilds.get(file.id) === build) {
         this.thumbnailBuilds.delete(file.id);
       }
@@ -353,7 +361,7 @@ export class ThumbnailService {
     return build;
   }
 
-  private async buildAndSaveThumbnail(file: File): Promise<void> {
+  private async buildAndSaveThumbnail(file: File, options: ImageThumbnailOptions): Promise<void> {
     if (file.thumbnailPath) {
       const fullPath = path.join(this.thumbnailDir, file.thumbnailPath);
       if (fs.existsSync(fullPath)) return;
@@ -366,19 +374,28 @@ export class ThumbnailService {
     const thumbFilename = `${file.id}.webp`;
     const thumbPath = path.join(this.thumbnailDir, thumbFilename);
     try {
-      // G4-09：图片原图远程回源同样受大小上限与磁盘余量约束
-      if (Number.isFinite(file.size) && file.size > REMOTE_SOURCE_MAX_BYTES) {
-        this.logger.warn(`缩略图远程回源跳过超大文件 id=${file.id}（${file.size} bytes）`);
-        return;
+      let source: string | Buffer | undefined;
+      if (options.sourcePath && fs.existsSync(options.sourcePath)) {
+        source = options.sourcePath;
+      } else if (options.sourceBuffer?.length) {
+        source = options.sourceBuffer;
+      } else {
+        if (options.allowRemoteSource === false) return;
+        // G4-09：只有无本地源时才执行受限回源，避免上传成功后再将完整原图下载到 workdir。
+        if (Number.isFinite(file.size) && file.size > REMOTE_SOURCE_MAX_BYTES) {
+          this.logger.warn(`缩略图远程回源跳过超大文件 id=${file.id}（${file.size} bytes）`);
+          return;
+        }
+        if (!this.hasEnoughThumbnailDiskSpace()) {
+          this.logger.warn(`缩略图盘空间不足，跳过缩略图远程回源 id=${file.id}`);
+          return;
+        }
+        const stream = await this.fetchRemoteSource(file);
+        await this.downloadRemoteWithLimit(stream, tmpSource, REMOTE_SOURCE_MAX_BYTES);
+        source = tmpSource;
       }
-      if (!this.hasEnoughThumbnailDiskSpace()) {
-        this.logger.warn(`缩略图盘空间不足，跳过缩略图远程回源 id=${file.id}`);
-        return;
-      }
-      const stream = await this.fetchRemoteSource(file);
-      await this.downloadRemoteWithLimit(stream, tmpSource, REMOTE_SOURCE_MAX_BYTES);
 
-      const metadata = await sharp(tmpSource).metadata();
+      const metadata = await sharp(source!).metadata();
       const width = metadata.width || 0;
       const height = metadata.height || 0;
       if (width <= 0 || height <= 0) throw new Error('无法读取图片尺寸');
@@ -388,7 +405,7 @@ export class ThumbnailService {
       const thumbWidth = isSmallImage ? width : Math.max(16, Math.round(width / 10));
       const thumbHeight = isSmallImage ? height : Math.max(16, Math.round(height / 10));
 
-      await sharp(tmpSource)
+      await sharp(source!)
         .resize(thumbWidth, thumbHeight, { fit: 'inside', withoutEnlargement: true })
         .webp({ quality: 60 })
         .toFile(tmpThumbnail);

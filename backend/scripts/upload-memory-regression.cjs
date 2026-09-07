@@ -38,13 +38,18 @@ function parseArgs(argv) {
   for (let i = 2; i < argv.length; i++) {
     const key = argv[i];
     const value = argv[i + 1];
-    if (key === '--size-bytes') args.sizeBytes = Number(value);
-    else if (key === '--rounds') args.rounds = Number(value);
-    else if (key === '--concurrency') args.concurrency = Number(value);
-    else if (key === '--idle-seconds') args.idleSeconds = Number(value);
-    else if (key === '--report') args.report = value;
-    else if (key === '--receiver' || key === '--child') args[key.slice(2)] = true;
-    if (value !== undefined) i++;
+    switch (key) {
+      // 带值标志：消费下一个 token
+      case '--size-bytes': args.sizeBytes = Number(value); i++; break;
+      case '--rounds': args.rounds = Number(value); i++; break;
+      case '--concurrency': args.concurrency = Number(value); i++; break;
+      case '--idle-seconds': args.idleSeconds = Number(value); i++; break;
+      case '--report': args.report = value; i++; break;
+      // 无值标志：不跳过后续 token
+      case '--receiver': args.receiver = true; break;
+      case '--child': args.child = true; break;
+      default: break; // 忽略未知 token
+    }
   }
   return args;
 }
@@ -259,7 +264,7 @@ async function runParent(args) {
     || path.join(__dirname, '..', 'tmp', `upload-memory-report-${Date.now()}.json`);
   fs.mkdirSync(path.dirname(reportPath), { recursive: true });
 
-  const receiver = fork(__filename, ['--receiver'], { stdio: ['ignore', 'pipe', 'inherit'] });
+  const receiver = fork(__filename, ['--receiver'], { stdio: ['ignore', 'pipe', 'inherit', 'ipc'] });
   const port = await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('接收端启动超时')), 10000);
     receiver.stdout.on('data', (data) => {
@@ -280,7 +285,7 @@ async function runParent(args) {
     '--concurrency', String(args.concurrency),
     '--idle-seconds', String(args.idleSeconds),
     '--report', reportPath,
-  ], { stdio: 'inherit', env: { ...process.env, MEM_REGRESSION_PORT: String(port) } });
+  ], { stdio: ['inherit', 'inherit', 'inherit', 'ipc'], env: { ...process.env, MEM_REGRESSION_PORT: String(port) } });
 
   const exitCode = await new Promise((resolve) => child.on('exit', resolve));
   receiver.kill('SIGTERM');

@@ -336,11 +336,13 @@ import MessagePlugin from '@/utils/message';
 import { useMobile } from '../../composables/useMobile';
 import { api } from '../../stores/auth';
 import { usePublicConfigStore } from '../../stores/public-config';
+import { useUploadConfigStore } from '../../stores/upload-config';
 import { getErrorMessage } from '../../utils/error';
 import { isValidIP } from '../../utils/ip';
 
 const isMobile = useMobile();
 const publicConfigStore = usePublicConfigStore();
+const uploadConfigStore = useUploadConfigStore();
 
 // 各配置区块加载状态：加载失败时禁用对应保存按钮并阻止提交，防止用默认值覆盖服务端真实配置（G15-04）
 const blockLoadState = reactive({
@@ -702,6 +704,13 @@ async function saveUploadConfig() {
       accessCountMax: max,
     });
     uploadConfig.value.fileTypeFilter = selectedExtensions.value.join(',');
+    uploadConfigStore.setConfig({
+      maxFileSize: uploadConfig.value.maxFileSizeMB * 1024 * 1024,
+      fileTypeMode: uploadConfig.value.fileTypeMode,
+      fileTypeFilter: selectedExtensions.value,
+      // /admin/upload-config 不控制运行时小盘模式；保留最近一次认证上传配置读取的严格策略。
+      strictSerialUpload: uploadConfigStore.config.strictSerialUpload,
+    });
     MessagePlugin.success('上传配置已保存');
     markClean();
   } catch (error: unknown) {

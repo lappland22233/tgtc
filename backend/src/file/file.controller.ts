@@ -30,6 +30,8 @@ import { pipeline } from 'stream';
 import { promisify } from 'util';
 import { FileService } from './file.service';
 import { ThumbnailCryptoService } from './thumbnail-crypto.service';
+import { StrictUploadModeGuard } from './strict-upload-mode.guard';
+import { UploadDiskBudgetService } from './upload-disk-budget.service';
 import { BatchMarkdownDto, UpdateAccessTypeDto, UpdateAccessCountDto, SetPasswordDto, UpdateExpiresDto } from './file.dto';
 import { FolderService } from '../folder/folder.service';
 import { MoveFileDto, RenameFileDto, CopyFileDto } from '../folder/folder.dto';
@@ -86,6 +88,7 @@ export class FileController {
     private tagService: TagService,
     private folderService: FolderService,
     private mediaTicketService: MediaTicketService,
+    private uploadDiskBudget: UploadDiskBudgetService,
   ) {}
 
   /**
@@ -109,7 +112,7 @@ export class FileController {
   }
 
   @Post('upload')
-  @UseGuards(JwtOrApiKeyAuthGuard)
+  @UseGuards(JwtOrApiKeyAuthGuard, StrictUploadModeGuard)
   @UseInterceptors(FileInterceptor('file', { storage: multerDiskStorage, limits: { fileSize: multerFileSize } }))
   async upload(
     @UploadedFile() file: Express.Multer.File,
@@ -134,7 +137,7 @@ export class FileController {
   }
 
   @Post('upload-multiple')
-  @UseGuards(JwtOrApiKeyAuthGuard)
+  @UseGuards(JwtOrApiKeyAuthGuard, StrictUploadModeGuard)
   @UseInterceptors(FilesInterceptor('files', 10, { storage: multerDiskStorage, limits: { fileSize: multerFileSize } }))
   async uploadMultiple(
     @UploadedFiles() files: Express.Multer.File[],
@@ -164,7 +167,7 @@ export class FileController {
    * 前端通过 GET /api/files/upload-status/:jobId 轮询结果。
    */
   @Post('upload-async')
-  @UseGuards(JwtOrApiKeyAuthGuard)
+  @UseGuards(JwtOrApiKeyAuthGuard, StrictUploadModeGuard)
   @UseInterceptors(FileInterceptor('file', { storage: multerDiskStorage, limits: { fileSize: multerFileSize } }))
   async uploadAsync(
     @UploadedFile() file: Express.Multer.File,
@@ -196,7 +199,7 @@ export class FileController {
    * 异步批量上传
    */
   @Post('upload-multiple-async')
-  @UseGuards(JwtOrApiKeyAuthGuard)
+  @UseGuards(JwtOrApiKeyAuthGuard, StrictUploadModeGuard)
   @UseInterceptors(FilesInterceptor('files', 10, { storage: multerDiskStorage, limits: { fileSize: multerFileSize } }))
   async uploadMultipleAsync(
     @UploadedFiles() files: Express.Multer.File[],
@@ -240,10 +243,16 @@ export class FileController {
   }
 
   @Get('upload-config')
+  @UseGuards(JwtOrApiKeyAuthGuard)
   async getUploadConfig() {
     const maxFileSize = await this.fileService.getMaxFileSize();
     const typeConfig = await this.fileService.getFileTypeConfig();
-    return { maxFileSize, ...typeConfig };
+    return {
+      maxFileSize,
+      ...typeConfig,
+      // 前端据此把文件队列及单文件分片并发压为 1，并统一走 chunk API。
+      strictSerialUpload: this.uploadDiskBudget.isStrictMode(),
+    };
   }
 
   @Get()
