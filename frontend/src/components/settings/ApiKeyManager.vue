@@ -44,10 +44,18 @@
       <template #lastUsedAt="{ row }">{{ formatDateTime(row.lastUsedAt) }}</template>
       <template #op="{ row }">
         <t-space size="small">
+          <t-link
+            v-if="row.revealable"
+            theme="primary"
+            :disabled="!!row.revokedAt"
+            @click="handleReveal(row)"
+          >查看</t-link>
+          <t-link theme="primary" :disabled="!!row.revokedAt" @click="handleRotate(row)">轮换</t-link>
+          <t-link theme="default" :disabled="!!row.revokedAt" @click="openAllowlist(row)">白名单</t-link>
+          <t-link theme="default" @click="openUsage(row)">使用记录</t-link>
           <t-popconfirm content="撤销后该密钥立即失效，确定撤销？" @confirm="handleRevoke(row)">
             <t-link theme="danger" :disabled="!!row.revokedAt">撤销</t-link>
           </t-popconfirm>
-          <t-link theme="primary" :disabled="!!row.revokedAt" @click="handleRotate(row)">轮换</t-link>
         </t-space>
       </template>
     </t-table>
@@ -75,11 +83,88 @@
         我已保存，关闭
       </t-button>
     </t-dialog>
+
+    <!-- 重显密钥（仅所有者；新密钥可用） -->
+    <t-dialog
+      :visible="!!revealedKey"
+      :header="`查看密钥：${revealedRow?.name || ''}`"
+      :on-close="closeRevealDialog"
+      :footer="false"
+      width="480px"
+    >
+      <div class="secret-row">
+        <t-input :value="revealedKey?.key" readonly class="secret-input" />
+        <t-button theme="primary" @click="copyRevealed">复制</t-button>
+      </div>
+      <div class="secret-meta">请勿将密钥写入日志或公开仓库。</div>
+      <t-button block variant="outline" style="margin-top: 16px" @click="closeRevealDialog">关闭</t-button>
+    </t-dialog>
+
+    <!-- 每把密钥独立 IP 白名单 -->
+    <t-dialog
+      :visible="allowlistVisible"
+      :header="`IP 白名单：${allowlistRow?.name || ''}`"
+      :on-close="closeAllowlist"
+      width="520px"
+      :confirm-btn="{ content: '保存', loading: allowlistSaving }"
+      @confirm="submitAllowlist"
+    >
+      <p class="allowlist-hint">
+        每行一条规则，支持单 IP 与 CIDR（如 <code>192.168.1.0/24</code>、<code>2408:8456::/32</code>）。
+        留空表示不限制来源 IP；保存后该密钥仅允许白名单内的来源调用。
+      </p>
+      <t-textarea v-model="allowlistText" autosize :maxlength="4000" placeholder="192.168.1.10&#10;10.0.0.0/8" />
+    </t-dialog>
+
+    <!-- 使用记录（IP 已脱敏） -->
+    <t-dialog
+      :visible="usageVisible"
+      :header="`使用记录：${usageRow?.name || ''}`"
+      :on-close="closeUsage"
+      :footer="false"
+      width="640px"
+    >
+      <p class="allowlist-hint">
+        最长保留 7 天；来源 IP 已脱敏（仅显示最前与最后一段）。
+      </p>
+      <t-loading :loading="usageLoading" size="small">
+        <div v-if="usageItems.length > 0" class="usage-list">
+          <div v-for="item in usageItems" :key="item.id" class="usage-item">
+            <div class="usage-item-top">
+              <t-tag
+                :theme="item.result === 'allowed' ? 'success' : 'danger'"
+                variant="light"
+                size="small"
+              >
+                {{ item.result === 'allowed' ? item.statusCode ?? '成功' : 'IP 拒绝' }}
+              </t-tag>
+              <span class="usage-method">{{ item.method }}</span>
+              <span class="usage-route">{{ item.route }}</span>
+            </div>
+            <div class="usage-item-meta">
+              <span>{{ item.maskedIp }}</span>
+              <span>{{ formatDateTime(item.createdAt) }}</span>
+            </div>
+          </div>
+        </div>
+        <div v-else-if="!usageLoading" class="empty-hint">最近 7 天内没有调用记录。</div>
+      </t-loading>
+      <div v-if="usageTotal > usageLimit" class="usage-pager">
+        <t-button size="small" variant="outline" :disabled="usagePage <= 1" @click="usagePage -= 1">上一页</t-button>
+        <span class="usage-pager-info">{{ usagePage }} / {{ Math.ceil(usageTotal / usageLimit) }}</span>
+        <t-button
+          size="small"
+          variant="outline"
+          :disabled="usagePage >= Math.ceil(usageTotal / usageLimit)"
+          @click="usagePage += 1"
+        >下一页</t-button>
+      </div>
+    </t-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue';
+import { ref, onMounted, watch } from 'vue';
 import MessagePlugin from '@/utils/message';
 import { getErrorMessage } from '@/utils/error';
 import {
@@ -87,7 +172,12 @@ import {
   createApiKey,
   revokeApiKey,
   rotateApiKey,
+  revealApiKey,
+  getApiKeyAllowlist,
+  setApiKeyAllowlist,
+  listApiKeyUsage,
   type ApiKeySummary,
+  type ApiKeyUsageItem,
   type CreatedApiKey,
 } from '../../api/api-keys';
 
@@ -106,7 +196,7 @@ const columns = [
   { colKey: 'status', title: '状态', width: 90 },
   { colKey: 'createdAt', title: '创建时间', width: 110 },
   { colKey: 'lastUsedAt', title: '最近使用', width: 160 },
-  { colKey: 'op', title: '操作', width: 130 },
+  { colKey: 'op', title: '操作', width: 250 },
 ] as const;
 
 async function loadKeys() {
@@ -172,6 +262,118 @@ async function copySecret() {
 
 function closeSecretDialog() {
   createdKey.value = null;
+}
+
+// ---------- 重显密钥（v1.2.6） ----------
+const revealedKey = ref<{ key: string } | null>(null);
+const revealedRow = ref<ApiKeySummary | null>(null);
+
+async function handleReveal(row: ApiKeySummary) {
+  try {
+    revealedKey.value = await revealApiKey(row.id);
+    revealedRow.value = row;
+  } catch (error: unknown) {
+    MessagePlugin.error(getErrorMessage(error) || '回显密钥失败');
+  }
+}
+
+async function copyRevealed() {
+  if (!revealedKey.value) return;
+  try {
+    await navigator.clipboard.writeText(revealedKey.value.key);
+    MessagePlugin.success('密钥已复制');
+  } catch {
+    MessagePlugin.error('复制失败，请手动复制');
+  }
+}
+
+function closeRevealDialog() {
+  revealedKey.value = null;
+  revealedRow.value = null;
+}
+
+// ---------- 每把密钥独立 IP 白名单（v1.2.6） ----------
+const allowlistVisible = ref(false);
+const allowlistSaving = ref(false);
+const allowlistRow = ref<ApiKeySummary | null>(null);
+const allowlistText = ref('');
+
+async function openAllowlist(row: ApiKeySummary) {
+  allowlistRow.value = row;
+  allowlistVisible.value = true;
+  try {
+    const rules = await getApiKeyAllowlist(row.id);
+    allowlistText.value = rules.join('\n');
+  } catch (error: unknown) {
+    allowlistText.value = '';
+    MessagePlugin.error(getErrorMessage(error) || '加载白名单失败');
+  }
+}
+
+async function submitAllowlist() {
+  if (!allowlistRow.value || allowlistSaving.value) return;
+  allowlistSaving.value = true;
+  try {
+    const rules = allowlistText.value
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    await setApiKeyAllowlist(allowlistRow.value.id, rules);
+    MessagePlugin.success(rules.length > 0 ? `已保存 ${rules.length} 条白名单规则` : '白名单已清空（不限制来源）');
+    allowlistVisible.value = false;
+  } catch (error: unknown) {
+    MessagePlugin.error(getErrorMessage(error) || '保存白名单失败');
+  } finally {
+    allowlistSaving.value = false;
+  }
+}
+
+function closeAllowlist() {
+  allowlistVisible.value = false;
+  allowlistRow.value = null;
+  allowlistText.value = '';
+}
+
+// ---------- 使用记录（v1.2.6，IP 已脱敏） ----------
+const usageVisible = ref(false);
+const usageLoading = ref(false);
+const usageRow = ref<ApiKeySummary | null>(null);
+const usageItems = ref<ApiKeyUsageItem[]>([]);
+const usageTotal = ref(0);
+const usagePage = ref(1);
+const usageLimit = 10;
+
+async function openUsage(row: ApiKeySummary) {
+  usageRow.value = row;
+  usageVisible.value = true;
+  usagePage.value = 1;
+  await loadUsage();
+}
+
+async function loadUsage() {
+  if (!usageRow.value) return;
+  usageLoading.value = true;
+  try {
+    const data = await listApiKeyUsage(usageRow.value.id, usagePage.value, usageLimit);
+    usageItems.value = data.items;
+    usageTotal.value = data.total;
+  } catch (error: unknown) {
+    MessagePlugin.error(getErrorMessage(error) || '加载使用记录失败');
+  } finally {
+    usageLoading.value = false;
+  }
+}
+
+watch(usagePage, () => {
+  void loadUsage();
+});
+
+function closeUsage() {
+  usageVisible.value = false;
+  usageRow.value = null;
+  usageItems.value = [];
+  usageTotal.value = 0;
+  usagePage.value = 1;
 }
 
 function formatDate(date: string) {
@@ -262,5 +464,80 @@ onMounted(loadKeys);
   margin-top: 8px;
   font-size: 12px;
   color: var(--text-tertiary);
+}
+
+.allowlist-hint {
+  margin: 0 0 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.allowlist-hint code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-accent);
+  background: var(--color-accent-soft);
+  padding: 1px 4px;
+  border-radius: 4px;
+}
+
+.usage-list {
+  max-height: 380px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.usage-item {
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+}
+
+.usage-item-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.usage-method {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-accent);
+  flex-shrink: 0;
+}
+
+.usage-route {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.usage-item-meta {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+}
+
+.usage-pager {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.usage-pager-info {
+  font-size: 12px;
+  color: var(--text-secondary);
 }
 </style>

@@ -18,10 +18,14 @@ import { SharePreviewSession } from '../common/entities/share-preview-session.en
 import { FileVerifyTask } from '../common/entities/file-verify-task.entity';
 import { UpdateTask } from '../common/entities/update-task.entity';
 import { ApiKey } from '../common/entities/api-key.entity';
+import { DirectoryName } from '../common/entities/directory-name.entity';
+import { ApiKeyIpAllowlist } from '../common/entities/api-key-ip-allowlist.entity';
+import { ApiKeyUsageLog } from '../common/entities/api-key-usage-log.entity';
 
 /** 单一实体清单：Nest 运行时与 TypeORM CLI 必须共用，避免漏表。 */
 export const databaseEntities = [
   User, File, Folder, ShareLink, SystemConfig, VerificationCode, BannedIP,
   ShareAudit, FileAccessLog, RateLimit, AuditLog, AccessLog, Alert, UploadTask,
   Tag, JwtRevokedToken, SharePreviewSession, FileVerifyTask, UpdateTask, ApiKey,
+  DirectoryName, ApiKeyIpAllowlist, ApiKeyUsageLog,
 ] as const;

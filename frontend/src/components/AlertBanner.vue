@@ -4,7 +4,7 @@
     style="cursor: pointer"
     aria-live="polite"
     role="alert"
-    @click="router.push('/admin/security')"
+    @click="router.push('/admin/security?tab=alerts')"
   >
     <t-alert :theme="unacknowledgedCount > 5 ? 'error' : 'warning'" :message="`有 ${unacknowledgedCount} 条未确认告警，点击查看`" />
   </div>

@@ -179,7 +179,10 @@ describe('Telegram upload real transport integration (native HTTP, maxRedirects=
 
     const result = await service.uploadFile(Readable.from(fileBuf), 'it.bin', undefined, fileBuf.length, { noCache: true });
 
-    expect(result).toEqual({ file_id: 'it-file-id', file_path: '', file_size: 4 * MB });
+    // noCache 上传会附加 localCacheReleased 标记字段（telegram.service.ts L433），用 objectContaining 断言核心字段
+    expect(result).toEqual(
+      expect.objectContaining({ file_id: 'it-file-id', file_path: '', file_size: 4 * MB }),
+    );
     expect(server.noCacheHeaders).toContain('1');
     expect([...server.paths.keys()].some((url) => url.includes('/getFile'))).toBe(false);
     await server.close();

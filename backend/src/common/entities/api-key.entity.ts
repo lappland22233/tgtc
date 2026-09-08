@@ -35,10 +35,21 @@ export class ApiKey {
   @Column({ type: 'varchar', length: 16 })
   prefix: string;
 
-  /** SHA-256(key) 十六进制摘要，唯一；原始密钥永不落库 */
+  /** SHA-256(key) 十六进制摘要，唯一；用于认证 */
   @Index('uq_api_keys_keyHash', { unique: true })
   @Column({ type: 'varchar', length: 64 })
   keyHash: string;
+
+  /**
+   * AES-256-GCM 密文（v1.2.6 起新密钥保存），供所有者在登录会话中重显完整明文。
+   * 格式 v1:<iv_b64>:<tag_b64>:<ciphertext_b64>；历史密钥为 null（不可重显，需轮换）。
+   */
+  @Column({ type: 'varchar', length: 512, nullable: true })
+  keyCipher: string | null;
+
+  /** 密文算法/密钥版本（如 v1） */
+  @Column({ type: 'varchar', length: 16, nullable: true })
+  cipherVersion: string | null;
 
   @Column({ type: databaseColumnType('timestamptz') as 'timestamptz', nullable: true })
   lastUsedAt: Date | null;

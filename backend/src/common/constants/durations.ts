@@ -5,6 +5,8 @@ export const MS_PER_DAY = 24 * MS_PER_HOUR;
 
 export const FILE_DELETE_GRACE_MS = 7 * MS_PER_DAY;
 export const FILE_DELETE_COOLDOWN_MS = 10 * MS_PER_MINUTE;
+/** 用户自助强制删除的冷静期：软删除满 1 分钟后才可永久删除（管理员豁免） */
+export const FILE_FORCE_DELETE_WAIT_MS = 1 * MS_PER_MINUTE;
 export const CHUNK_CLEANUP_DELAY_MS = 5 * MS_PER_MINUTE;
 // G3-01：会话空闲上限必须大于合并超时（MERGE_TIMEOUT_MS=30min），
 // 否则慢合并期间会话会被按 lastActivityAt 清理中断。35min > 30min。

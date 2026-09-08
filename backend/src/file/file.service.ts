@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, ForbiddenException, BadRequestException, GoneException, OnModuleInit, Logger } from '@nestjs/common';
+import { Injectable, NotFoundException, ForbiddenException, BadRequestException, ConflictException, GoneException, OnModuleInit, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, In, IsNull, EntityManager } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
@@ -25,17 +25,18 @@ import { ConfigCacheService } from '../common/services/config-cache.service';
 import { User } from '../common/entities/user.entity';
 import { hasAdminPrivileges } from '../common/auth-context';
 import { BannedIP } from '../common/entities/banned-ip.entity';
-import { databaseForUpdate, databaseQuery, getDatabaseType } from '../database/database-types';
+import { databaseForUpdate, databaseQuery, getDatabaseType, isDatabaseUniqueViolation } from '../database/database-types';
 import { ShareAudit } from '../common/entities/share-audit.entity';
 import { RateLimitService } from '../common/services/rate-limit.service';
 import { AuditService } from '../common/services/audit.service';
+import { DirectoryNamespaceService } from '../common/services/directory-namespace.service';
 import { UploadJobService, UploadJob } from './upload-job.service';
 import { FileCacheService } from './file-cache.service';
 import { ThumbnailService } from './thumbnail.service';
 import * as bcrypt from 'bcryptjs';
 import { v4 as uuidv4 } from 'uuid';
 import { BCRYPT_ROUNDS } from '../common/constants/bcrypt';
-import { FILE_DELETE_GRACE_MS, FILE_DELETE_COOLDOWN_MS } from '../common/constants/durations';
+import { FILE_DELETE_GRACE_MS, FILE_DELETE_COOLDOWN_MS, FILE_FORCE_DELETE_WAIT_MS, MS_PER_SECOND } from '../common/constants/durations';
 import { isSafePublicInlineContentType } from '../common/utils/preview-content-type';
 import { buildFileVersionETag, matchesIfRange } from '../common/utils/file-range-validator';
 import { parseByteRange } from '../common/utils/byte-range';
@@ -105,6 +106,7 @@ export class FileService implements OnModuleInit {
     private auditService: AuditService,
     private fileCacheService: FileCacheService,
     private thumbnailService: ThumbnailService,
+    private namespaceService: DirectoryNamespaceService,
     @InjectQueue(QUEUE_NAMES.FILE_UPLOAD)
     private fileUploadQueue: Queue,
   ) {
@@ -589,10 +591,28 @@ export class FileService implements OnModuleInit {
         uploadVersion: 1,
         uploadStage: 'pending',
       });
-      savedFile = await this.fileRepository.save(newFile);
-
-      if (tagIds?.length) {
-        await this.insertFileTags(this.fileRepository.manager, savedFile.id, tagIds);
+      // v1.2.6：文件记录与统一命名空间名称占用同事务；与同目录文件/文件夹
+      // 重名（大小写不敏感）冲突时整体回滚，由数据库唯一索引兜底并发。
+      try {
+        savedFile = await this.fileRepository.manager.transaction(async (manager) => {
+          const created = await manager.getRepository(File).save(newFile);
+          if (tagIds?.length) {
+            await this.insertFileTags(manager, created.id, tagIds);
+          }
+          await this.namespaceService.acquire(manager, {
+            ownerId: user.id,
+            folderId: resolvedFolderId,
+            name: fileName,
+            entityType: 'file',
+            entityId: created.id,
+          });
+          return created;
+        });
+      } catch (error: unknown) {
+        if (isDatabaseUniqueViolation(error)) {
+          throw new ConflictException('当前目录已存在同名文件或文件夹');
+        }
+        throw error;
       }
 
       this.auditService.log({
@@ -1112,7 +1132,11 @@ export class FileService implements OnModuleInit {
     file.deleteRequestedAt = now;
     file.deleteScheduledAt = new Date(now.getTime() + FILE_DELETE_GRACE_MS);
     file.deleteCooldownUntil = new Date(now.getTime() + FILE_DELETE_COOLDOWN_MS);
-    await this.fileRepository.save(file);
+    // v1.2.6：软删除与统一命名空间名称释放同事务（进入回收站即释放名称）
+    await this.fileRepository.manager.transaction(async (manager) => {
+      await manager.getRepository(File).save(file);
+      await this.namespaceService.release(manager, { entityType: 'file', entityId: id });
+    });
 
     // 审计日志：文件请求删除
     this.auditService.log({
@@ -1159,31 +1183,42 @@ export class FileService implements OnModuleInit {
     // save 前删除行，导致 save 退化为 INSERT（重新插入一条幽灵记录）。
     // 改为事务内锁定行 + 条件 UPDATE：仅在记录仍存在且仍为待删除态时更新，
     // affected=0 表示清扫已删除该行，此时抛出"已永久删除"，绝不再 INSERT。
-    await this.fileRepository.manager.transaction(async (manager) => {
-      const locked = await manager.getRepository(File).findOne({
-        where: { id, isDeleted: true },
-        lock: { mode: 'pessimistic_write' },
+    try {
+      await this.fileRepository.manager.transaction(async (manager) => {
+        const locked = await manager.getRepository(File).findOne({
+          where: { id, isDeleted: true },
+          lock: { mode: 'pessimistic_write' },
+        });
+        if (!locked) {
+          throw new BadRequestException('删除等待期已过，文件已永久删除');
+        }
+        const updated = await manager.getRepository(File)
+          .createQueryBuilder()
+          .update()
+          .set({
+            isDeleted: false,
+            deletedByAdmin: false,
+            deleteRequestedAt: null,
+            deleteScheduledAt: null,
+            deleteCooldownUntil: null,
+          })
+          .where('id = :id', { id })
+          .andWhere('isDeleted = true')
+          .execute();
+        if (!updated.affected) {
+          throw new BadRequestException('删除等待期已过，文件已永久删除');
+        }
+        // v1.2.6：恢复时重新占用统一命名空间名称；与现存文件/文件夹重名即失败回滚
+        await this.namespaceService.reactivateMany(manager, [
+          { entityType: 'file', entityId: id },
+        ]);
       });
-      if (!locked) {
-        throw new BadRequestException('删除等待期已过，文件已永久删除');
+    } catch (error: unknown) {
+      if (isDatabaseUniqueViolation(error)) {
+        throw new BadRequestException('恢复失败：当前目录已存在同名文件或文件夹，请先处理重名');
       }
-      const updated = await manager.getRepository(File)
-        .createQueryBuilder()
-        .update()
-        .set({
-          isDeleted: false,
-          deletedByAdmin: false,
-          deleteRequestedAt: null,
-          deleteScheduledAt: null,
-          deleteCooldownUntil: null,
-        })
-        .where('id = :id', { id })
-        .andWhere('isDeleted = true')
-        .execute();
-      if (!updated.affected) {
-        throw new BadRequestException('删除等待期已过，文件已永久删除');
-      }
-    });
+      throw error;
+    }
 
     // 审计日志：文件恢复
     this.auditService.log({
@@ -1196,7 +1231,13 @@ export class FileService implements OnModuleInit {
   }
 
   /**
-   * 文件所有者或管理员强制永久删除本站文件记录，不等待 7 天冷静期。
+   * 强制永久删除本站文件记录，不等待 7 天冷静期。
+   *
+   * 冷静期规则（v1.2.6）：
+   * - 普通用户/API Key：仅可强删自己的、已软删除的文件，且距删除请求（deleteRequestedAt）
+   *   已满 FILE_FORCE_DELETE_WAIT_MS（1 分钟）。未软删、管理员删除的文件、等待未满均拒绝。
+   * - 管理员：沿用两阶段删除语义（先标记删除、再次调用立即强删），不受 1 分钟等待限制。
+   *
    * 不调用 Telegram deleteMessage：当前仅保存 file_id，且引用副本可能共享远端对象。
    */
   async forceDelete(id: string, user: User): Promise<void> {
@@ -1206,6 +1247,32 @@ export class FileService implements OnModuleInit {
 
     if (!file) {
       throw new NotFoundException('文件不存在');
+    }
+
+    const isAdmin = hasAdminPrivileges(user);
+
+    if (isAdmin) {
+      // 管理员强删要求文件已进入待删除状态（两阶段删除第二步）
+      if (!file.isDeleted) {
+        throw new BadRequestException('文件未处于待删除状态，请先执行删除操作');
+      }
+    } else {
+      // 普通用户/API Key：必须已软删且非管理员删除，并等待冷静期满 1 分钟
+      if (!file.isDeleted) {
+        throw new BadRequestException('请先将文件移入回收站，再执行强制删除');
+      }
+      if (file.deletedByAdmin) {
+        throw new ForbiddenException('该文件由管理员删除，请联系管理员处理');
+      }
+      if (file.deleteRequestedAt) {
+        const elapsedMs = Date.now() - file.deleteRequestedAt.getTime();
+        if (elapsedMs < FILE_FORCE_DELETE_WAIT_MS) {
+          const remainingSeconds = Math.ceil((FILE_FORCE_DELETE_WAIT_MS - elapsedMs) / 1000);
+          throw new BadRequestException(
+            `强制删除需等待 ${FILE_FORCE_DELETE_WAIT_MS / MS_PER_SECOND} 秒，请 ${remainingSeconds} 秒后再试`,
+          );
+        }
+      }
     }
 
     // 安全校验：只能强制删除自己上传的文件或管理员/超级管理员可删所有
@@ -1224,6 +1291,8 @@ export class FileService implements OnModuleInit {
       }
       this.assertFileWritable(lockedFile, user);
       await manager.getRepository(FileAccessLog).delete({ fileId: id });
+      // v1.2.6：物理删除同时移除统一命名空间名称行（软删时已释放，此处幂等清理）
+      await this.namespaceService.remove(manager, { entityType: 'file', entityId: id });
       await manager.getRepository(File).remove(lockedFile);
     });
 
@@ -1231,9 +1300,9 @@ export class FileService implements OnModuleInit {
     this.deleteLocalThumbnail(file);
     this.fileCacheService.invalidate(id);
 
-    // 审计日志：管理员强制删除
+    // 审计日志：按实际操作者区分管理员强删与用户自助强删
     await this.auditService.logAwait({
-      action: 'file_delete_by_admin',
+      action: isAdmin ? 'file_delete_by_admin' : 'file_force_delete',
       userId: user.id,
       resourceType: 'file',
       resourceId: id,
@@ -1311,6 +1380,8 @@ export class FileService implements OnModuleInit {
               return false;
             }
             await manager.getRepository(FileAccessLog).delete({ fileId });
+            // v1.2.6：物理删除同时移除统一命名空间名称行（软删时已释放，幂等清理）
+            await this.namespaceService.remove(manager, { entityType: 'file', entityId: fileId });
             await manager.getRepository(File).remove(lockedFile);
             return true;
           });
@@ -1360,24 +1431,35 @@ export class FileService implements OnModuleInit {
 
     this.assertFileWritable(file, user);
 
-    await this.fileRepository.update(id, { accessType });
-
-    // 纵深防御：文件转私有后，软删「遗留型」公开分享链接（token = fileId 的隐式分享），
-    // 防止攻击者用已知文件 ID 通过 /api/s/<fileId>/download/<fileId> 继续下载已转私有的文件。
-    // 显式创建的随机 token 分享不受影响。
+    // 访问类型变更与「遗留型公开分享」撤销必须在同一事务内完成：
+    // 历史缺陷是先更新文件再撤销分享，撤销失败（varchar=uuid 解析错误）会留下
+    // 「文件已 private 但 legacy 直链仍可访问」的中间状态。
     let revokedLegacyShares = 0;
-    if (accessType === FileAccessType.PRIVATE) {
-      const revokeResult = await this.shareLinkRepository
-        .createQueryBuilder()
-        .update(ShareLink)
-        .set({ isDeleted: true })
-        .where('"targetType" = :targetType', { targetType: ShareTargetType.FILE })
-        .andWhere('"targetId" = :id', { id })
-        .andWhere('"token" = "targetId"')
-        .andWhere('"isDeleted" = false')
-        .execute();
-      revokedLegacyShares = revokeResult.affected ?? 0;
-    }
+    await this.fileRepository.manager.transaction(async (manager) => {
+      await manager.getRepository(File).update(id, { accessType });
+
+      if (accessType === FileAccessType.PRIVATE) {
+        // 纵深防御：文件转私有后，软删「遗留型」公开分享链接，
+        // 防止攻击者用已知文件 ID 通过 /api/s/<fileId>/download/<fileId> 继续下载已转私有的文件。
+        // 显式创建的随机 token 分享不受影响。
+        //
+        // 注意：legacy token 就是文件 ID 本身（36 字符 UUID 字符串）。
+        // 禁止写 "token" = "targetId" —— token 是 varchar(64)、targetId 是 uuid，
+        // PostgreSQL 解析期即报 operator does not exist: character varying = uuid。
+        // 改为将已知文件 ID 作为参数与 token（varchar）比较，类型安全且跨库一致。
+        const revokeResult = await manager
+          .getRepository(ShareLink)
+          .createQueryBuilder()
+          .update(ShareLink)
+          .set({ isDeleted: true })
+          .where('"targetType" = :targetType', { targetType: ShareTargetType.FILE })
+          .andWhere('"targetId" = :id', { id })
+          .andWhere('"token" = :legacyToken', { legacyToken: id })
+          .andWhere('"isDeleted" = false')
+          .execute();
+        revokedLegacyShares = revokeResult.affected ?? 0;
+      }
+    });
 
     // 审计日志：文件访问类型变更
     this.auditService.log({

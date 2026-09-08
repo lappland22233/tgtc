@@ -473,6 +473,15 @@
             <t-button v-if="isAdmin" size="small" theme="danger" variant="text" @click="handleForceDelete(file.id)">
               强制删除
             </t-button>
+            <t-button
+              v-else-if="!file.deletedByAdmin && file.deleteRequestedAt && selfForceDeleteReady(file)"
+              size="small"
+              theme="danger"
+              variant="text"
+              @click="handleForceDelete(file.id)"
+            >
+              永久删除
+            </t-button>
           </div>
         </div>
       </div>
@@ -1641,6 +1650,22 @@ async function handleRestore(id: string) {
   }
 }
 
+/** 用户自助永久删除冷静期（与后端 FILE_FORCE_DELETE_WAIT_MS 一致） */
+const FORCE_DELETE_WAIT_MS = 60_000;
+
+/** 非管理员：文件软删满 1 分钟后可自助永久删除 */
+function selfForceDeleteReady(file: FileItem): boolean {
+  if (!file.deleteRequestedAt) return false;
+  return Date.now() - new Date(file.deleteRequestedAt).getTime() >= FORCE_DELETE_WAIT_MS;
+}
+
+/** 计算距可自助永久删除的剩余秒数；不可判定时返回 Infinity */
+function selfForceDeleteRemainingSeconds(file: FileItem | undefined): number {
+  if (!file?.deleteRequestedAt) return Number.POSITIVE_INFINITY;
+  const elapsed = Date.now() - new Date(file.deleteRequestedAt).getTime();
+  return Math.ceil((FORCE_DELETE_WAIT_MS - elapsed) / 1000);
+}
+
 /** 强制删除（永久删除）——必须二次确认，防止误删不可恢复的数据 */
 function handleForceDelete(id: string) {
   // 定位文件以在确认文案中展示文件名（优先当前列表，其次全部已加载文件）
@@ -1648,9 +1673,15 @@ function handleForceDelete(id: string) {
     || fileStore.files.find((f) => f.id === id);
   const fileName = file?.originalName || id;
 
+  // 非管理员在冷静期内给出剩余等待提示，避免无效请求
+  const remaining = selfForceDeleteRemainingSeconds(file);
+  const waitHint = !isAdmin && remaining > 0
+    ? `\n冷静期剩余约 ${remaining >= 60 ? `${Math.ceil(remaining / 60)} 分钟` : `${remaining} 秒`}，期间无法永久删除。`
+    : '';
+
   const confirmDialog = DialogPlugin.confirm({
     header: '强制删除文件',
-    body: `确定要永久删除「${fileName}」吗？此操作不可恢复。`,
+    body: `确定要永久删除「${fileName}」吗？此操作不可恢复。${waitHint}`,
     theme: 'danger',
     confirmBtn: '永久删除',
     cancelBtn: '取消',

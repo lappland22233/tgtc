@@ -3,6 +3,7 @@ import { DataSource } from 'typeorm';
 import { createDatabaseOptions } from './database.config';
 import { User } from '../common/entities/user.entity';
 import { ApiKey } from '../common/entities/api-key.entity';
+import { ApiKeyIpAllowlist } from '../common/entities/api-key-ip-allowlist.entity';
 import { ApiKeyService } from '../api-key/api-key.service';
 
 /**
@@ -77,10 +78,17 @@ describePg('PG 真库回归：api_keys.id 默认值修复', () => {
     }));
 
     const audit = { log: jest.fn(), logAwait: jest.fn() } as never;
+    // v1.2.6：加密服务以不可用模式注入（未配置根密钥），密钥以「不可重显」历史形态创建；
+    // 使用审计写入为内存 stub，不触碰数据库。
+    const crypto = { isAvailable: () => false, encrypt: () => null, decrypt: () => null } as never;
+    const usage = { record: jest.fn(), assertKeyOwnedForMutation: jest.fn() } as never;
     apiKeyService = new ApiKeyService(
       dataSource.getRepository(ApiKey),
       userRepo,
+      dataSource.getRepository(ApiKeyIpAllowlist),
       audit,
+      crypto,
+      usage,
     );
   }, 120_000);
 

@@ -250,7 +250,8 @@ const actionLabels: Record<string, string> = {
   password_reset: '密码重置', email_verify: '邮箱验证', role_change: '角色变更',
   user_create: '创建用户', user_delete: '删除用户', user_ban: '封禁用户', user_unban: '解封用户',
   file_upload: '文件上传', file_download: '文件下载', file_delete: '文件删除',
-  file_delete_request: '请求删除', file_delete_by_admin: '管理员删除', file_restore: '文件恢复',
+  file_delete_request: '请求删除', file_delete_by_admin: '管理员删除', file_force_delete: '强制删除文件',
+  file_restore: '文件恢复',
   file_share: '生成分享', file_password_set: '设置密码', file_password_remove: '移除密码',
   file_access_change: '访问变更', file_expiry_set: '有效期设置', file_verify: '文件校验',
   file_stale_path_cleanup: '清理失效路径', file_move: '移动文件', file_rename: '重命名文件',
@@ -266,6 +267,9 @@ const actionLabels: Record<string, string> = {
   folder_delete: '删除文件夹', folder_delete_by_admin: '管理员删除文件夹', folder_restore: '恢复文件夹',
   share_link_create: '创建分享链接', share_link_update: '更新分享链接', share_link_delete: '取消分享链接',
   share_link_access: '访问分享链接', share_link_password_failed: '分享密码错误', share_link_download: '分享链接下载',
+  share_link_preview: '分享预览',
+  api_key_create: '创建API密钥', api_key_revoke: '撤销API密钥', api_key_reveal: '查看API密钥',
+  api_key_allowlist_update: '更新密钥IP白名单',
   data_export: '导出数据',
 };
 
@@ -293,6 +297,8 @@ function resourceTypeLabel(type: string): string {
   const map: Record<string, string> = {
     user: '用户', file: '文件', folder: '文件夹', share_link: '分享链接',
     tag: '标签', config: '配置', security_config: '安全配置', ip: 'IP', export: '数据导出',
+    api_key: 'API密钥', email: '邮件', update: '系统更新', update_task: '更新任务',
+    ip_ban: 'IP封禁', rate_limit: '限流', system: '系统',
   };
   return map[type] || (type ? `未知资源（${type}）` : '未知资源');
 }

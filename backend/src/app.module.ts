@@ -14,6 +14,7 @@ import { TasksModule } from './tasks/tasks.module';
 import { ConfigCacheModule } from './common/services/config-cache.module';
 import { RateLimitModule } from './common/services/rate-limit.module';
 import { AuditModule } from './common/services/audit.module';
+import { DirectoryNamespaceModule } from './common/services/directory-namespace.module';
 import { StreamResponderModule } from './common/services/stream-responder.module';
 import { AccessLogModule } from './common/access-log.module';
 import { JobsModule } from './jobs/jobs.module';
@@ -46,6 +47,7 @@ import { ApiKeyModule } from './api-key/api-key.module';
     ConfigCacheModule,
     RateLimitModule,
     AuditModule,
+    DirectoryNamespaceModule,
     StreamResponderModule,
     AccessLogModule,
     JobsModule,

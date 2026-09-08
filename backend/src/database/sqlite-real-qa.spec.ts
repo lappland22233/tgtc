@@ -51,6 +51,10 @@ describe('真实 SQLite 数据源关键业务与并发 QA', () => {
       'SqliteCreateUpdateTasks1798400000000',
       'SqliteSchemaAlignment1800000000000',
       'SqliteCreateApiKeys1801000000000',
+      // v1.2.6：私密分享安全回填 / 统一目录命名空间 / API 密钥安全治理
+      'SqliteRevokePrivateLegacyShares1802000000000',
+      'SqliteCreateDirectoryNames1802100000000',
+      'SqliteApiKeySecurityGovernance1802200000000',
     ]);
 
     await dataSource.undoLastMigration();
@@ -73,7 +77,17 @@ describe('真实 SQLite 数据源关键业务与并发 QA', () => {
       email: `apikey-${randomUUID()}@example.com`, password: 'hash',
     }));
     const audit = { log: jest.fn(), logAwait: jest.fn() } as any;
-    const service = new ApiKeyService(dataSource.getRepository(ApiKey), userRepo, audit);
+    // v1.2.6：加密服务以不可用模式注入（密钥不可重显）；白名单/使用审计依赖真实仓库与 stub
+    const crypto = { isAvailable: () => false, encrypt: () => null, decrypt: () => null } as any;
+    const usage = { record: jest.fn(), assertKeyOwnedForMutation: jest.fn() } as any;
+    const service = new ApiKeyService(
+      dataSource.getRepository(ApiKey),
+      userRepo,
+      dataSource.getRepository(require('../common/entities/api-key-ip-allowlist.entity').ApiKeyIpAllowlist),
+      audit,
+      crypto,
+      usage,
+    );
 
     // PG 侧该路径曾因建表迁移遗漏 id DEFAULT 而 23502；SQLite 依赖
     // subscriber 应用层生成 id，此测试防止该生成链路回归。
@@ -121,7 +135,15 @@ describe('真实 SQLite 数据源关键业务与并发 QA', () => {
       email: `owner-${randomUUID()}@example.com`, password: 'hash',
     }));
     const audit = { log: jest.fn(), logAwait: jest.fn() } as any;
-    const folderService = new FolderService(dataSource.getTreeRepository(Folder), dataSource.getRepository(File), audit);
+    const namespace = {
+      acquire: jest.fn(async () => undefined),
+      release: jest.fn(async () => undefined),
+      releaseMany: jest.fn(async () => undefined),
+      remove: jest.fn(async () => undefined),
+      reactivateMany: jest.fn(async () => undefined),
+      isNameTaken: jest.fn(async () => false),
+    } as any;
+    const folderService = new FolderService(dataSource.getTreeRepository(Folder), dataSource.getRepository(File), audit, namespace);
     const tagService = new TagService(dataSource.getRepository(Tag), audit, dataSource);
 
     const folderResults = await Promise.allSettled([
@@ -256,7 +278,15 @@ describe('真实 SQLite 数据源关键业务与并发 QA', () => {
     const owner = await userRepo.save(userRepo.create({ email: `dialect-${randomUUID()}@example.com`, password: 'hash' }));
     const folderRepo = dataSource.getTreeRepository(Folder);
     const audit = { log: jest.fn(), logAwait: jest.fn() } as any;
-    const folderService = new FolderService(folderRepo, dataSource.getRepository(File), audit);
+    const namespace = {
+      acquire: jest.fn(async () => undefined),
+      release: jest.fn(async () => undefined),
+      releaseMany: jest.fn(async () => undefined),
+      remove: jest.fn(async () => undefined),
+      reactivateMany: jest.fn(async () => undefined),
+      isNameTaken: jest.fn(async () => false),
+    } as any;
+    const folderService = new FolderService(folderRepo, dataSource.getRepository(File), audit, namespace);
     const root = await folderService.createFolder(owner.id, { name: `root-${randomUUID()}` });
     const child = await folderService.createFolder(owner.id, { name: `child-${randomUUID()}`, parentId: root.id });
     expect(await (folderService as any).getSubtreeHeightInManager(dataSource.manager, root.id)).toBe(1);

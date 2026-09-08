@@ -54,6 +54,15 @@ export const SEC_CONFIG_KEYS = {
   ALERT_BASELINE_ZSCORE_WARN: 'sec_alert_baseline_zscore_warn',
   ALERT_BASELINE_ZSCORE_CRIT: 'sec_alert_baseline_zscore_crit',
   ALERT_BASELINE_MIN_DEVIATION_PCT: 'sec_alert_baseline_min_deviation_pct',
+  // v1.2.6：降噪门槛（样本/绝对值）
+  ALERT_BASELINE_MIN_SAMPLES: 'sec_alert_baseline_min_samples',
+  ALERT_BASELINE_MIN_ABS_QPS: 'sec_alert_baseline_min_abs_qps',
+  ALERT_BASELINE_MIN_ABS_BANDWIDTH_MB: 'sec_alert_baseline_min_abs_bandwidth_mb',
+
+  // 深夜时段流量异常（v1.2.6：修正统计口径 + 降噪门槛）
+  ALERT_TIME_ANOMALY_RATIO: 'sec_alert_time_anomaly_ratio',
+  ALERT_TIME_ANOMALY_MIN_NIGHT_REQUESTS: 'sec_alert_time_anomaly_min_night_requests',
+  ALERT_TIME_ANOMALY_MIN_NIGHT_AVG: 'sec_alert_time_anomaly_min_night_avg',
 
   // 告警冷却时间
   ALERT_COOLDOWN_QPS_WARN: 'sec_alert_cooldown_qps_warn',
@@ -108,6 +117,15 @@ export const SEC_CONFIG_DEFAULTS: Record<string, string> = {
   [SEC_CONFIG_KEYS.ALERT_BASELINE_ZSCORE_WARN]: '3',
   [SEC_CONFIG_KEYS.ALERT_BASELINE_ZSCORE_CRIT]: '5',
   [SEC_CONFIG_KEYS.ALERT_BASELINE_MIN_DEVIATION_PCT]: '0.2',
+  // v1.2.6：基线样本与绝对值门槛（低流量站点的小方差不再触发告警）
+  [SEC_CONFIG_KEYS.ALERT_BASELINE_MIN_SAMPLES]: '8',
+  [SEC_CONFIG_KEYS.ALERT_BASELINE_MIN_ABS_QPS]: '20',
+  [SEC_CONFIG_KEYS.ALERT_BASELINE_MIN_ABS_BANDWIDTH_MB]: '50',
+
+  // v1.2.6：深夜异常 = 3 倍全天均值 + 深夜样本 ≥300 + 深夜均值 ≥60 req/h（且 02:00-05:00 有 ≥2 个小时桶）
+  [SEC_CONFIG_KEYS.ALERT_TIME_ANOMALY_RATIO]: '3',
+  [SEC_CONFIG_KEYS.ALERT_TIME_ANOMALY_MIN_NIGHT_REQUESTS]: '300',
+  [SEC_CONFIG_KEYS.ALERT_TIME_ANOMALY_MIN_NIGHT_AVG]: '60',
 
   [SEC_CONFIG_KEYS.ALERT_COOLDOWN_QPS_WARN]: '10',
   [SEC_CONFIG_KEYS.ALERT_COOLDOWN_QPS_CRIT]: '5',
@@ -392,6 +410,54 @@ export const SEC_CONFIG_META: SecurityConfigMeta[] = [
     label: '基线偏离最小百分比',
     description: 'bandwidth/qps 至少偏离此比例才触发告警，防止 stddev 极小导致误报',
     type: 'number', min: 0.05, max: 1, step: 0.05,
+    category: '告警阈值配置',
+  },
+  {
+    key: SEC_CONFIG_KEYS.ALERT_BASELINE_MIN_SAMPLES,
+    label: '基线最小样本数',
+    description: '同时段基线样本数低于此值时不触发基线偏离告警',
+    type: 'number', min: 3, max: 168, step: 1,
+    unit: '个',
+    category: '告警阈值配置',
+  },
+  {
+    key: SEC_CONFIG_KEYS.ALERT_BASELINE_MIN_ABS_QPS,
+    label: 'QPS 绝对下限',
+    description: '当前 QPS 低于此值时不触发基线偏离告警（低流量降噪）',
+    type: 'number', min: 0, max: 10000, step: 5,
+    unit: 'req/s',
+    category: '告警阈值配置',
+  },
+  {
+    key: SEC_CONFIG_KEYS.ALERT_BASELINE_MIN_ABS_BANDWIDTH_MB,
+    label: '带宽绝对下限',
+    description: '当前每分钟带宽低于此值（MB/min）时不触发基线偏离告警（低流量降噪）',
+    type: 'number', min: 0, max: 100000, step: 10,
+    unit: 'MB/min',
+    category: '告警阈值配置',
+  },
+  {
+    key: SEC_CONFIG_KEYS.ALERT_TIME_ANOMALY_RATIO,
+    label: '深夜异常倍数',
+    description: '深夜平均请求超过全天均值此倍数才可能触发深夜流量异常告警',
+    type: 'number', min: 1.5, max: 10, step: 0.5,
+    unit: '倍',
+    category: '告警阈值配置',
+  },
+  {
+    key: SEC_CONFIG_KEYS.ALERT_TIME_ANOMALY_MIN_NIGHT_REQUESTS,
+    label: '深夜最小请求数',
+    description: '过去 24 小时深夜时段（02:00-05:00 UTC）总请求低于此值时不告警',
+    type: 'number', min: 0, max: 100000, step: 50,
+    unit: '次',
+    category: '告警阈值配置',
+  },
+  {
+    key: SEC_CONFIG_KEYS.ALERT_TIME_ANOMALY_MIN_NIGHT_AVG,
+    label: '深夜最小均值',
+    description: '深夜时段平均请求低于此值（req/h）时不告警',
+    type: 'number', min: 0, max: 100000, step: 10,
+    unit: 'req/h',
     category: '告警阈值配置',
   },
   {

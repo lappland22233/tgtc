@@ -2,102 +2,17 @@
   <div class="security-page">
     <div class="page-header">
       <h1>安全监控</h1>
-      <p>攻击检测、封禁管理与异常流量监控</p>
+      <p>告警处置、封禁管理与异常流量监控</p>
     </div>
 
     <t-tabs v-model="activeTab">
-      <t-tab-panel value="detection" label="攻击检测" />
+      <t-tab-panel value="alerts" label="告警管理" />
       <t-tab-panel value="bans" label="封禁统计" />
       <t-tab-panel value="abnormal" label="异常 IP 监控" />
-      <t-tab-panel value="alerts" label="告警管理" />
       <t-tab-panel v-if="isSuperAdmin" value="config" label="安全配置" />
     </t-tabs>
 
-    <!-- Tab 1: 攻击检测 -->
-    <div v-if="activeTab === 'detection'" class="tab-content">
-      <!-- 统计卡片 -->
-      <div class="metrics-grid" style="margin-bottom: 16px">
-        <div class="metric-card" style="border-left: 3px solid var(--color-danger)">
-          <div class="metric-label">今日攻击事件</div>
-          <div class="metric-value" style="color: var(--color-danger)">{{ attackAlerts.length }}</div>
-        </div>
-        <div class="metric-card" style="border-left: 3px solid var(--color-warning)">
-          <div class="metric-label">高频扫描</div>
-          <div class="metric-value" style="color: var(--color-warning)">{{ attackTypeCount('high_frequency_scan') }}</div>
-        </div>
-        <div class="metric-card" style="border-left: 3px solid var(--color-danger)">
-          <div class="metric-label">登录爆破</div>
-          <div class="metric-value" style="color: var(--color-danger)">{{ attackTypeCount('brute_force') }}</div>
-        </div>
-        <div class="metric-card" style="border-left: 3px solid var(--color-warning)">
-          <div class="metric-label">爬虫/异常下载</div>
-          <div class="metric-value" style="color: var(--color-warning)">{{ attackTypeCount('crawler') + attackTypeCount('abnormal_download') }}</div>
-        </div>
-      </div>
-
-      <!-- 攻击告警表格 -->
-      <div class="card">
-        <h3 class="card-title" style="margin: 0 0 16px;">攻击行为告警</h3>
-        <t-loading :loading="attackLoading" size="small">
-          <div v-if="!isMobile && attackAlerts.length > 0">
-            <t-table
-              :data="attackAlerts"
-              :columns="attackColumns"
-              row-key="id"
-              hover
-              max-height="500"
-            >
-              <template #ruleId="{ row }">
-                <t-tag variant="light">{{ attackTypeLabel(row.ruleId) }}</t-tag>
-              </template>
-              <template #level="{ row }">
-                <t-tag :theme="row.level === 'critical' ? 'danger' : 'warning'" variant="light-outline">
-                  {{ row.level === 'critical' ? '严重' : '警告' }}
-                </t-tag>
-              </template>
-              <template #message="{ row }">
-                <span style="font-size:13px">{{ row.message }}</span>
-              </template>
-              <template #createdAt="{ row }">
-                {{ formatDateTime(row.createdAt) }}
-              </template>
-              <template #acknowledgedAt="{ row }">
-                <span v-if="row.acknowledgedAt" style="color:var(--color-success)">已确认</span>
-                <span v-else style="color:var(--color-warning)">待处理</span>
-              </template>
-            </t-table>
-          </div>
-          <div v-if="isMobile && attackAlerts.length > 0" class="mobile-card-list">
-            <div v-for="alert in attackAlerts" :key="alert.id" class="mobile-card">
-              <div class="mobile-card-row">
-                <t-tag variant="light" size="small">{{ attackTypeLabel(alert.ruleId) }}</t-tag>
-                <t-tag :theme="alert.level === 'critical' ? 'danger' : 'warning'" variant="light-outline" size="small">
-                  {{ alert.level === 'critical' ? '严重' : '警告' }}
-                </t-tag>
-              </div>
-              <div class="mobile-card-body">{{ alert.message }}</div>
-              <div class="mobile-card-meta">
-                <span>{{ formatDateTime(alert.createdAt) }}</span>
-                <span v-if="alert.acknowledgedAt" style="color:var(--color-success)">已确认</span>
-                <span v-else style="color:var(--color-warning)">待处理</span>
-              </div>
-            </div>
-          </div>
-          <div v-if="!attackAlerts.length" class="placeholder-block">
-            <div class="placeholder-icon">
-              <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <circle cx="12" cy="12" r="10" />
-                <path d="M9 12l2 2 4-4" />
-              </svg>
-            </div>
-            <h3>当前无攻击行为</h3>
-            <p>系统每 5 分钟自动检测扫描、爆破、爬虫、异常下载等攻击行为</p>
-          </div>
-        </t-loading>
-      </div>
-    </div>
-
-    <!-- Tab 2: 封禁统计 -->
+    <!-- Tab: 封禁统计 -->
     <div v-if="activeTab === 'bans'" class="tab-content">
       <div class="metrics-grid">
         <div class="metric-card">
@@ -408,7 +323,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted, onUnmounted, computed, watch, defineAsyncComponent } from 'vue';
+import { ref, reactive, onMounted, computed, watch, defineAsyncComponent } from 'vue';
 import axios from 'axios';
 import { DialogPlugin } from 'tdesign-vue-next';
 import MessagePlugin from '@/utils/message';
@@ -459,23 +374,25 @@ interface AbnormalIp {
   riskLevel: 'low' | 'medium' | 'high' | 'critical';
 }
 
-interface AttackAlert {
-  id: string;
-  ruleId: string;
-  level: string;
-  title: string;
-  message: string;
-  context: any;
-  acknowledgedAt: string | null;
-  createdAt: string;
-}
-
 // State
-const activeTab = ref('detection');
+// v1.2.6：告警管理为安全页默认入口；支持 ?tab=bans|abnormal|config 深链定位
+const validTabs = ['alerts', 'bans', 'abnormal', 'config'] as const;
+function resolveInitialTab(): string {
+  const requested = new URLSearchParams(window.location.search).get('tab');
+  if (requested && (validTabs as readonly string[]).includes(requested)) {
+    if (requested === 'config' && !isSuperAdmin.value) return 'alerts';
+    return requested;
+  }
+  return 'alerts';
+}
+const activeTab = ref(resolveInitialTab());
 
-// Attack alerts
-const attackAlerts = ref<AttackAlert[]>([]);
-const attackLoading = ref(false);
+// 告警横幅深链消费：/admin/security?tab=alerts 打开后清除 query，避免刷新时重复定位
+if (window.history.length > 0 && window.location.search.includes('tab=')) {
+  const url = new URL(window.location.href);
+  url.searchParams.delete('tab');
+  window.history.replaceState({}, '', url.pathname + url.search);
+}
 
 // Ban stats
 const banStats = reactive<BanStats>({
@@ -522,30 +439,7 @@ const abnormalColumns = [
   { colKey: 'action', title: '操作', width: 90 },
 ];
 
-const attackColumns = [
-  { colKey: 'ruleId', title: '攻击类型', width: 120, cell: 'ruleId' },
-  { colKey: 'level', title: '级别', width: 80, cell: 'level' },
-  { colKey: 'message', title: '详情', ellipsis: true, cell: 'message' },
-  { colKey: 'createdAt', title: '检测时间', width: 170, cell: 'createdAt' },
-  { colKey: 'acknowledgedAt', title: '状态', width: 80, cell: 'acknowledgedAt' },
-];
-
-const attackTypeLabels: Record<string, string> = {
-  ATTACK_HIGH_FREQUENCY_SCAN: '高频扫描',
-  ATTACK_BRUTE_FORCE: '登录爆破',
-  ATTACK_CRAWLER: '爬虫行为',
-  ATTACK_ABNORMAL_DOWNLOAD: '异常下载',
-};
-
-function attackTypeLabel(ruleId: string): string {
-  return attackTypeLabels[ruleId] || ruleId.replace('ATTACK_', '').replace(/_/g, ' ');
-}
-
 // isValidIP 由公共 util 提供（G15-28）：严格 IPv4/IPv6 校验，与 Config.vue 保持一致
-
-function attackTypeCount(type: string): number {
-  return attackAlerts.value.filter(a => a.ruleId === `ATTACK_${type.toUpperCase()}`).length;
-}
 
 // Error rate tag theme
 function errorRateTheme(rate: number): string {
@@ -573,13 +467,6 @@ function riskLabel(level: string): string {
     critical: '严重',
   };
   return map[level] || level;
-}
-
-// 非法日期降级为 '-'，避免直接 toLocaleString 输出 "Invalid Date"
-function formatDateTime(dateStr: string | null): string {
-  if (!dateStr) return '-';
-  const d = new Date(dateStr);
-  return isNaN(d.getTime()) ? '-' : d.toLocaleString('zh-CN');
 }
 
 // Fetch ban stats
@@ -682,24 +569,6 @@ async function handleBanSubmit() {
     MessagePlugin.error(`封禁 IP ${banForm.ip.trim()} 失败`);
   } finally {
     banDialogSaving.value = false;
-  }
-}
-
-// Fetch attack alerts
-async function fetchAttackAlerts() {
-  attackLoading.value = true;
-  try {
-    const { data } = await api.get('/admin/alerts', {
-      params: { limit: 50 },
-    });
-    const items = (data?.data?.items || data?.items || data) as AttackAlert[];
-    attackAlerts.value = (Array.isArray(items) ? items : []).filter(
-      a => a.ruleId?.startsWith('ATTACK_') || a.ruleId?.startsWith('SEC_'),
-    );
-  } catch {
-    // 静默失败，攻击检测后台自动运行
-  } finally {
-    attackLoading.value = false;
   }
 }
 
@@ -892,35 +761,13 @@ watch(isSuperAdmin, (val) => {
   }
 });
 
-// 告警轮询（G14-16）：30s 定时刷新攻击告警，保证告警及时性；
-// 页面隐藏时不轮询，避免后台空转浪费请求。
-const SECURITY_POLL_INTERVAL_MS = 30_000;
-let securityPollTimer: ReturnType<typeof setInterval> | null = null;
-
-function startSecurityPolling() {
-  if (securityPollTimer) return;
-  securityPollTimer = setInterval(() => {
-    if (document.hidden) return;
-    fetchAttackAlerts();
-  }, SECURITY_POLL_INTERVAL_MS);
-}
-
 onMounted(() => {
   // 并发发起所有独立请求，失败的不影响其他数据区域渲染
-  // Promise.allSettled 确保每个数据块独立到达后各自渲染
-  fetchAttackAlerts();
+  // v1.2.6：攻击检测展示页已移除；后端检测任务与告警管理页继续承担该职责
   fetchBanStats();
   fetchAbnormalIps();
   if (isSuperAdmin.value) {
     fetchSecurityConfig();
-  }
-  startSecurityPolling();
-});
-
-onUnmounted(() => {
-  if (securityPollTimer) {
-    clearInterval(securityPollTimer);
-    securityPollTimer = null;
   }
 });
 </script>

@@ -33,8 +33,9 @@ export class JwtOrApiKeyAuthGuard extends AuthGuard('jwt') implements CanActivat
     const rawKey = typeof header === 'string' ? header.trim() : '';
 
     if (rawKey) {
+      const clientIp = getClientIp(request);
       return this.apiKeyService
-        .authenticate(rawKey)
+        .authenticate(rawKey, clientIp)
         .then((user) => {
           request.user = user;
           return true;
