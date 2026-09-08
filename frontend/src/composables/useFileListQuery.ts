@@ -41,6 +41,16 @@ export function useFileListQuery(options: FileListQueryOptions) {
     (route.query.tagIds as string || '').split(',').filter(Boolean),
   );
 
+  /**
+   * 已生效查询关键词快照（搜索修复）：
+   * - searchRef 是输入框实时值，submit/clear 时才写入 submittedSearch；
+   * - 分页/续页一律读取 submittedSearch，避免旧输入混入新请求；
+   * - displayedSearch 在新代际首页成功后原子切换，供目录列表等展示层过滤使用，
+   *   保证"文件结果"与"文件夹结果"始终来自同一时刻的查询。
+   */
+  const submittedSearch = ref(search.value);
+  const displayedSearch = ref(search.value);
+
   /** 当前文件夹 ID 的 API 表示（null → root） */
   const currentFolderIdForApi = computed(() => {
     return folderStore.currentFolderId === null ? 'root' : folderStore.currentFolderId;
@@ -132,7 +142,7 @@ export function useFileListQuery(options: FileListQueryOptions) {
         const result = await fileStore.fetchFilesPage(
           page,
           BATCH_SIZE,
-          search.value || undefined,
+          submittedSearch.value || undefined,
           sortBy.value || undefined,
           sortOrder.value || undefined,
           tagIds,
@@ -148,6 +158,9 @@ export function useFileListQuery(options: FileListQueryOptions) {
         if (pendingReplaceNextPage) {
           fileStore.replaceFiles(result.files);
           pendingReplaceNextPage = false;
+          // 搜索修复：新代际首页成功返回后，展示层关键词（目录过滤依据）才原子切换。
+          // 首屏失败/取消时不切换，保持"新目录+旧文件"不再出现的旧展示一致性。
+          displayedSearch.value = submittedSearch.value;
         } else {
           fileStore.appendFiles(result.files);
         }
@@ -232,6 +245,9 @@ export function useFileListQuery(options: FileListQueryOptions) {
 
   /** 统一的重新获取文件列表（无限滚动：从头加载） */
   async function refetchFiles() {
+    // 排序/标签/目录等入口也重走此处：先对齐已生效关键词，保证所有触发路径
+    // 的文件查询与目录过滤使用同一关键词快照（搜索修复）。
+    submittedSearch.value = search.value;
     const generation = ++fileListGeneration;
     loadMoreError.value = null;
     await loadInitialFiles(generation);
@@ -254,11 +270,15 @@ export function useFileListQuery(options: FileListQueryOptions) {
 
   // ─── 搜索 ───
   function handleSearch() {
+    // 搜索修复：提交时才把输入框值提升为"已生效关键词"并推进代际，
+    // 分页/目录过滤从此读取该快照；未提交的输入只影响 URL 同步。
+    submittedSearch.value = search.value;
     refetchFiles();
   }
 
   function handleClearSearch() {
     search.value = '';
+    submittedSearch.value = '';
     refetchFiles();
   }
 
@@ -361,6 +381,8 @@ export function useFileListQuery(options: FileListQueryOptions) {
     selectedTagIds,
     currentFolderIdForApi,
     displayFiles,
+    displayedSearch,
+    submittedSearch,
     hasMore,
     cursorLoading,
     folderLoading,

@@ -21,6 +21,7 @@ import { ChunkUploadService } from './chunk-upload.service';
 import { ChunkUploadController } from './chunk-upload.controller';
 import { ChunkUploadResourceInterceptor } from './chunk-upload-resource.interceptor';
 import { FileCacheService } from './file-cache.service';
+import { DownloadAdmissionService } from './download-admission.service';
 import { ThumbnailService } from './thumbnail.service';
 import { UploadDiskBudgetService } from './upload-disk-budget.service';
 import { StrictUploadModeGuard } from './strict-upload-mode.guard';
@@ -66,6 +67,7 @@ import { ApiKeyModule } from '../api-key/api-key.module';
     StrictUploadModeGuard,
     FileCacheService,
     ThumbnailService,
+    DownloadAdmissionService,
   ],
   exports: [FileService, UploadDiskBudgetService],
 })

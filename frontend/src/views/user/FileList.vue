@@ -656,6 +656,7 @@ const {
   sortOrder,
   selectedTagIds,
   displayFiles,
+  displayedSearch,
   hasMore,
   cursorLoading,
   folderLoading,
@@ -1070,10 +1071,15 @@ async function pasteFiles() {
 }
 
 // ============ 当前文件夹下的直接子文件夹（OS 列表文件夹行数据源） ============
+// 搜索修复：按"已生效查询关键词"过滤当前层文件夹名称（大小写不敏感包含匹配），
+// 与文件名搜索语义一致；未提交的输入不改变目录结果，清空搜索后恢复完整列表。
+// 只对当前层切片做只读派生，不修改 folderStore.tree 共享数据。
 const subfoldersInCurrentFolder = computed<Folder[]>(() => {
   const parentId = folderStore.currentFolderId;
+  const keyword = displayedSearch.value.trim().toLowerCase();
+  const matches = (f: Folder) => !keyword || f.name.toLowerCase().includes(keyword);
   if (parentId === null) {
-    return folderStore.tree.filter(f => !f.isDeleted);
+    return folderStore.tree.filter(f => !f.isDeleted && matches(f));
   }
   const find = (nodes: Folder[], id: string): Folder | null => {
     for (const n of nodes) {
@@ -1086,7 +1092,7 @@ const subfoldersInCurrentFolder = computed<Folder[]>(() => {
     return null;
   };
   const current = find(folderStore.tree, parentId);
-  return (current?.children ?? []).filter(f => !f.isDeleted);
+  return (current?.children ?? []).filter(f => !f.isDeleted && matches(f));
 });
 
 // ============ 选择（自定义列表） ============
@@ -1561,6 +1567,10 @@ async function copyMediaLink(row: FileItem) {
 }
 
 function downloadFile(row: FileItem) {
+  // 下载排队修复：服务器空间不足时后端会保持请求等待（排队至多 30 分钟），
+  // 浏览器原生下载在服务端排队期间显示"浏览器转圈"，用户无感知失败。
+  // 此处提示等待语义，避免用户误以为点击无效而重复点击。
+  MessagePlugin.info('正在开始下载；如服务器空间紧张，下载可能需要短暂排队，请勿重复点击');
   // 直接调用浏览器原生下载（后端返回 attachment，浏览器下载器接管进度/保存）
   triggerBrowserDownload(`/api/files/${row.id}/download`, row.originalName);
 }

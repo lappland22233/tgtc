@@ -7,6 +7,7 @@ import { promises as fsp } from 'fs';
 import { ConfigCacheService } from '../common/services/config-cache.service';
 import { CacheDiskManager } from './cache-disk-manager';
 import { CacheSessionCoordinator, type CacheBuildSession, type SpoolSession } from './cache-session-coordinator';
+import { DownloadAdmissionService } from './download-admission.service';
 
 export const CACHE_CONFIG_KEYS = {
   MAX_SIZE_GB: 'FILE_CACHE_MAX_SIZE_GB',
@@ -30,6 +31,8 @@ export class FileCacheService implements OnApplicationShutdown {
   private readonly diskManager: CacheDiskManager;
   /** 会话协调器：build/spool 会话生命周期、并发预算、超时竞速 */
   private readonly sessionCoordinator: CacheSessionCoordinator;
+  /** 下载磁盘准入：小盘持续下载时排队等空间，避免直接 ENOSPC/503 */
+  readonly admission: DownloadAdmissionService;
 
   /** 运行时配置（可从管理后台动态调整） */
   private maxCacheSizeBytes = parseInt(CACHE_CONFIG_DEFAULTS[CACHE_CONFIG_KEYS.MAX_SIZE_GB]) * 1024 * 1024 * 1024;
@@ -97,12 +100,16 @@ export class FileCacheService implements OnApplicationShutdown {
         );
       });
     this.diskManager = new CacheDiskManager(this.cacheDir);
+    this.admission = new DownloadAdmissionService();
+    this.admission.setProbeDir(this.cacheDir);
     this.sessionCoordinator = new CacheSessionCoordinator({
       diskManager: this.diskManager,
       fileAccessMap: this.fileAccessMap,
       logger: this.logger,
       isShuttingDown: () => this.shuttingDown,
       setShuttingDown: (value: boolean) => { this.shuttingDown = value; },
+      admission: this.admission,
+      minFreeDiskBytes: () => this.minFreeDiskBytes,
     });
     // 异步加载持久化配置
     this.reloadConfig();
@@ -228,6 +235,15 @@ export class FileCacheService implements OnApplicationShutdown {
       return this.sessionCoordinator.getNoCacheStream(fileId, expectedSize, fetchFn);
     }
 
+    // 下载排队修复：并发满额时等待名额释放（有界等待），不再立即 503
+    if (!this.sessionCoordinator.canStartUpstream()) {
+      const acquired = await this.sessionCoordinator.waitForUpstreamSlot();
+      if (!acquired) {
+        this.logger.warn(`回源并发等待超时/关闭，文件 ${fileId} 回退 503`);
+        throw new Error('系统回源繁忙，请稍后重试');
+      }
+    }
+
     const session = this.sessionCoordinator.getOrCreateBuildSession(fileId, expectedSize, fetchFn);
     await this.sessionCoordinator.waitForSessionReadable(session);
     return { stream: this.sessionCoordinator.createFollowerStream(session), fromCache: false };
@@ -267,6 +283,15 @@ export class FileCacheService implements OnApplicationShutdown {
     if (this.noCacheMode) {
       const result = await this.sessionCoordinator.getNoCacheStream(fileId, expectedSize, fetchFn, start, end);
       return result.stream;
+    }
+
+    // 与 getOrCacheStream 一致：并发满额时等待名额（有界等待），不再立即 503
+    if (!this.sessionCoordinator.canStartUpstream()) {
+      const acquired = await this.sessionCoordinator.waitForUpstreamSlot();
+      if (!acquired) {
+        this.logger.warn(`回源并发等待超时/关闭，文件 ${fileId}（Range）回退 503`);
+        throw new Error('系统回源繁忙，请稍后重试');
+      }
     }
 
     const session = this.sessionCoordinator.getOrCreateBuildSession(fileId, expectedSize, fetchFn);
@@ -328,6 +353,7 @@ export class FileCacheService implements OnApplicationShutdown {
    * 置位关闭信号、中止构建、等待上游收尾、清理 spool。
    */
   async onApplicationShutdown(): Promise<void> {
+    this.admission.shutdown();
     await this.sessionCoordinator.shutdown();
   }
 
