@@ -10,6 +10,7 @@ SUMS=${2:-"$(dirname "$ARCHIVE")/SHA256SUMS"}
 # INSTALL_ROOT 由 common.sh 统一解析（含 releases/ 布局特判），此处不得重算。
 CURRENT_LINK="$INSTALL_ROOT/current"
 SERVICE="${TGTC_SERVICE:-tgtc.service}"
+BOT_SERVICE="${TGTC_BOT_SERVICE:-tgtc-telegram-bot-api.service}"
 ENV_FILE="${TGTC_ENV_FILE:-$RUNTIME_DIR/backend/.env}"
 
 # 任务模式（由 updater.sh 派发）通过 TGTC_PROGRESS_FILE 回写状态机阶段；
@@ -20,31 +21,54 @@ report_phase() {
   fi
 }
 
+restart_bot_if_present() {
+  if systemctl cat "$BOT_SERVICE" >/dev/null 2>&1; then
+    # R3：新 Bot API 二进制随发行包交付，必须重启才真正生效；
+    # 失败不中止（Bot API 仅影响流式下载，由后端就绪检查兜底）。
+    systemctl restart "$BOT_SERVICE" || log "WARN: $BOT_SERVICE 重启失败，请人工检查。"
+  fi
+}
+
 rollback_after_activation_failure() {
   local reason=$1
   [[ -n "$PREVIOUS" ]] || die "$EXIT_ROLLBACK" "$reason，且没有可回退版本。"
   report_phase rolling_back
   ln -s "$PREVIOUS" "$INSTALL_ROOT/.current.rollback"
   mv -Tf "$INSTALL_ROOT/.current.rollback" "$CURRENT_LINK"
+  restart_bot_if_present
   systemctl restart "$SERVICE" || die "$EXIT_ROLLBACK" "$reason，且回退后的服务也无法启动。"
+  WRITE_STOPPED=0
   die "$EXIT_OPERATION" "$reason，已成功回退。"
 }
 
+# P1-06 停写窗口：迁移、切链在服务停止状态下完成，防止窗口期写入遗漏进
+# 备份与迁移回填。WRITE_STOPPED 标记用于失败路径恢复旧版本服务。
+WRITE_STOPPED=0
+restore_service_on_failure() {
+  if [[ "$WRITE_STOPPED" == 1 ]]; then
+    log '升级失败：恢复旧版本服务运行。'
+    systemctl start "$SERVICE" >/dev/null 2>&1 || true
+  fi
+}
+
+# P1-05：迁移子进程的工作目录必须是 .env 所在目录（$RUNTIME_DIR/backend）。
+# SQLite 的 DB_DATABASE 常为相对路径（data/tgtc.sqlite），由 cwd 解析；
+# 此前 cd 到新发行目录会连到空库——真实库未迁移而流程继续。
 run_target_migrations() {
-  [[ -x "$TARGET/runtime/bin/node" ]] || die "$EXIT_VERIFY" "候选发行包缺少 Node.js：$TARGET/runtime/bin/node"
-  [[ -f "$TARGET/backend/node_modules/typeorm/cli.js" ]] || die "$EXIT_VERIFY" '候选发行包缺少 TypeORM CLI。'
-  [[ -f "$TARGET/backend/dist/database/data-source.js" ]] || die "$EXIT_VERIFY" '候选发行包缺少编译后的数据库数据源。'
-  [[ -r "$ENV_FILE" ]] || die "$EXIT_PRECHECK" "无法读取迁移环境文件：$ENV_FILE"
+  if [[ ! -x "$TARGET/runtime/bin/node" ]]; then log "ERROR: 候选发行包缺少 Node.js：$TARGET/runtime/bin/node"; return 1; fi
+  if [[ ! -f "$TARGET/backend/node_modules/typeorm/cli.js" ]]; then log 'ERROR: 候选发行包缺少 TypeORM CLI。'; return 1; fi
+  if [[ ! -f "$TARGET/backend/dist/database/data-source.js" ]]; then log 'ERROR: 候选发行包缺少编译后的数据库数据源。'; return 1; fi
+  if [[ ! -r "$ENV_FILE" ]]; then log "ERROR: 无法读取迁移环境文件：$ENV_FILE"; return 1; fi
   log "运行目标发行版 $NEW_VERSION 的数据库迁移。"
   (
-    cd "$TARGET/backend"
+    cd "$RUNTIME_DIR/backend"
     # dotenv 的 env-options 机制只读大写 DOTENV_CONFIG_PATH；小写变量静默失效，
     # 会导致迁移回退到 database.config.ts 的默认库名（"test"）而连错库。
     DOTENV_CONFIG_PATH="$ENV_FILE" "$TARGET/runtime/bin/node" \
       -r "$TARGET/backend/node_modules/dotenv/config" \
       "$TARGET/backend/node_modules/typeorm/cli.js" migration:run \
       -d "$TARGET/backend/dist/database/data-source.js"
-  ) || die "$EXIT_OPERATION" "目标发行版 $NEW_VERSION 的数据库迁移失败；未切换 current。"
+  )
 }
 
 require_linux
@@ -58,7 +82,7 @@ systemctl cat "$SERVICE" 2>/dev/null | grep -Fq "$CURRENT_LINK/" \
 bash "$SCRIPT_DIR/validate-release.sh" "$ARCHIVE" "$SUMS"
 
 STAGE=$(mktemp -d "$INSTALL_ROOT/.tgtc-stage.XXXXXX")
-trap 'rm -rf -- "$STAGE"' EXIT
+trap 'rm -rf -- "$STAGE"; restore_service_on_failure' EXIT
 unzip -q "$ARCHIVE" -d "$STAGE"
 mapfile -t candidates < <(find "$STAGE" -mindepth 1 -maxdepth 1 -type d)
 [[ ${#candidates[@]} -eq 1 ]] || die "$EXIT_VERIFY" '归档必须恰有一个顶层目录。'
@@ -74,9 +98,15 @@ PREVIOUS=''
 [[ -L "$CURRENT_LINK" ]] && PREVIOUS=$(readlink -f "$CURRENT_LINK")
 [[ -n "$PREVIOUS" && -d "$PREVIOUS" ]] || die "$EXIT_PRECHECK" 'current 必须指向现有发行目录。'
 
-# 备份和迁移都在切换 current 前完成；任一失败都会保留旧程序运行。
+# 备份和迁移都在切换 current 前完成；任一失败都会恢复旧程序运行。
+# P1-06 停写窗口：TGTC_BACKUP_KEEP_STOPPED=1 让 SQLite 备份后保持停机；
+# PostgreSQL 由下方统一停服。迁移与切链全部在停写状态下完成后才重启。
 report_phase backing_up
-TGTC_SKIP_LOCK=1 TGTC_ENV_FILE="$ENV_FILE" bash "$SCRIPT_DIR/backup.sh"
+TGTC_SKIP_LOCK=1 TGTC_ENV_FILE="$ENV_FILE" TGTC_BACKUP_KEEP_STOPPED=1 bash "$SCRIPT_DIR/backup.sh"
+if systemctl is-active --quiet "$SERVICE"; then
+  systemctl stop "$SERVICE"
+fi
+WRITE_STOPPED=1
 mkdir -p "$INSTALL_ROOT/releases"
 report_phase extracting
 mv "$CANDIDATE" "$TARGET"
@@ -87,7 +117,12 @@ for required in "$TARGET/VERSION" "$TARGET/backend/dist/main.js" "$TARGET/runtim
 done
 log "新版本已就位：$TARGET"
 report_phase migrating
-run_target_migrations
+if ! run_target_migrations; then
+  # 迁移失败：current 未切换，恢复旧版本服务（EXIT trap），
+  # 并清理未激活的 TARGET 目录，避免"目标版本已存在"阻塞重试。
+  rm -rf -- "$TARGET"
+  die "$EXIT_OPERATION" "目标发行版 $NEW_VERSION 的数据库迁移失败；未切换 current，已清理未激活目录。"
+fi
 
 # Runtime data remains outside releases. Refuse implicit migration/copying of protected paths.
 for protected in "$INSTALL_ROOT/telegram-bot-api/data" "$INSTALL_ROOT/backend/.env" "$INSTALL_ROOT/.env" "$INSTALL_ROOT/redis" "$INSTALL_ROOT/uploads" "$INSTALL_ROOT/logs" "$INSTALL_ROOT/cache"; do
@@ -97,9 +132,12 @@ report_phase activating
 ln -s "releases/$NEW_VERSION" "$INSTALL_ROOT/.current.new"
 mv -Tf "$INSTALL_ROOT/.current.new" "$CURRENT_LINK"
 report_phase restarting
+# R3：先重启 Bot API（新二进制随发行包交付），再重启后端（单元 Requires 依赖）。
+restart_bot_if_present
 if ! systemctl restart "$SERVICE"; then
   rollback_after_activation_failure '新程序启动失败'
 fi
+WRITE_STOPPED=0
 # systemctl restart 返回即代表进程已 exec；应用完成 Nest 启动还需要数秒。
 # 在跑严格 health-check 前先等待就绪窗口（轮询 /api/health），避免启动竞态误判。
 wait_app_ready() {

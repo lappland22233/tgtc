@@ -28,21 +28,23 @@ ARCHIVE_SHA256=$(sha256sum "$ARCHIVE" | awk '{print $1}')
   fi
 ) || die "$EXIT_VERIFY" 'SHA256SUMS 必须且只能包含与 ZIP 和 release-manifest.json 匹配的摘要行。'
 
-# 存在签名时必须通过内置公钥验证；无签名仅允许本地构建场景（正式发布强制签名由 CI 保证）。
+# R4：签名验证强制执行（与自动更新链路的强制验签保持一致）。
+# 手工升级路径此前允许无签名通过，攻击者可借手工安装绕过签名门。
 # openssl dgst -verify 会忽略签名文件尾部多余字节，因此先断言签名长度等于公钥模长。
-if [[ -f "$SUMS.sig" ]]; then
-  require_cmd openssl
-  require_cmd stat
-  PUB="$RELEASE_ROOT/scripts/release/update-public-key.pem"
-  [[ -f "$PUB" ]] || die "$EXIT_PRECHECK" "检测到 SHA256SUMS.sig 但缺少验证公钥：$PUB"
-  key_bits=$(openssl rsa -pubin -in "$PUB" -noout -text 2>/dev/null | grep -oE '[0-9]+ bit' | head -n1 | grep -oE '[0-9]+')
-  [[ -n "$key_bits" ]] || die "$EXIT_PRECHECK" '无法解析验证公钥模长。'
-  sig_bytes=$(stat -c '%s' "$SUMS.sig")
-  [[ "$sig_bytes" -eq $((key_bits / 8)) ]] || die "$EXIT_VERIFY" 'SHA256SUMS 签名长度非法。'
-  openssl dgst -sha256 -verify "$PUB" -signature "$SUMS.sig" "$SUMS" >/dev/null 2>&1 \
-    || die "$EXIT_VERIFY" 'SHA256SUMS 签名验证失败。'
-  log "OK: SHA256SUMS 签名验证通过。"
+if [[ ! -f "$SUMS.sig" ]]; then
+  die "$EXIT_VERIFY" '缺少 SHA256SUMS.sig；拒绝未签名的发行包（与自动更新链路强制验签保持一致）。'
 fi
+require_cmd openssl
+require_cmd stat
+PUB="$RELEASE_ROOT/scripts/release/update-public-key.pem"
+[[ -f "$PUB" ]] || die "$EXIT_PRECHECK" "缺少验证公钥：$PUB"
+key_bits=$(openssl rsa -pubin -in "$PUB" -noout -text 2>/dev/null | grep -oE '[0-9]+ bit' | head -n1 | grep -oE '[0-9]+')
+[[ -n "$key_bits" ]] || die "$EXIT_PRECHECK" '无法解析验证公钥模长。'
+sig_bytes=$(stat -c '%s' "$SUMS.sig")
+[[ "$sig_bytes" -eq $((key_bits / 8)) ]] || die "$EXIT_VERIFY" 'SHA256SUMS 签名长度非法。'
+openssl dgst -sha256 -verify "$PUB" -signature "$SUMS.sig" "$SUMS" >/dev/null 2>&1 \
+  || die "$EXIT_VERIFY" 'SHA256SUMS 签名验证失败。'
+log "OK: SHA256SUMS 签名验证通过。"
 
 if ! ARCHIVE="$ARCHIVE" ARCHIVE_NAME="$ARCHIVE_NAME" MANIFEST="$MANIFEST" ARCHIVE_SHA256="$ARCHIVE_SHA256" python3 <<'PY'
 import json
@@ -67,12 +69,16 @@ required = {
     f'{root}/scripts/release/health-check.sh', f'{root}/scripts/release/backup.sh',
     f'{root}/scripts/release/upgrade.sh', f'{root}/scripts/release/rollback.sh',
     f'{root}/scripts/release/validate-release.sh', f'{root}/scripts/release/update-public-key.pem',
+    # P1-03：更新执行链必须随包交付，否则应用内更新从首个版本起不可用且无法自愈。
+    f'{root}/scripts/release/updater.sh', f'{root}/scripts/release/download-release.sh',
+    f'{root}/scripts/release/systemd/tgtc-update@.service', f'{root}/scripts/release/systemd/tgtc-update.sudoers',
 }
 executables = {
     f'{root}/start.sh', f'{root}/bin/tgtc', f'{root}/runtime/bin/node',
     f'{root}/telegram-bot-api/bin/telegram-bot-api', f'{root}/scripts/release/health-check.sh',
     f'{root}/scripts/release/backup.sh', f'{root}/scripts/release/upgrade.sh',
     f'{root}/scripts/release/rollback.sh', f'{root}/scripts/release/validate-release.sh',
+    f'{root}/scripts/release/updater.sh', f'{root}/scripts/release/download-release.sh',
 }
 forbidden_parts = ('telegram-bot-api/data/', 'redis/', 'uploads/', 'logs/', 'cache/')
 forbidden_files = ('.env', 'backend/.env')

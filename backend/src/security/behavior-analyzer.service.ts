@@ -453,8 +453,10 @@ export class BehaviorAnalyzer {
     const minAbsBandwidthMb = parseFloat(
       await this.configCache.get(SEC_CONFIG_KEYS.ALERT_BASELINE_MIN_ABS_BANDWIDTH_MB, '50'),
     );
-    // totalBandwidth 为 1 分钟窗口累计字节数 → MB/min = bytes / (60 * 1024^2)
-    const minAbsBandwidthBytes = minAbsBandwidthMb * 60 * 1024 * 1024;
+    // S4：totalBandwidth 为 1 分钟窗口累计字节数，配置单位 MB/min，
+    // 阈值 = MB * 1024^2（此前多乘 60，把 50MB/min 按 3000MB/min 执行，
+    // 低于该值的带宽偏离告警完全静默）。
+    const minAbsBandwidthBytes = minAbsBandwidthMb * 1024 * 1024;
 
     try {
       // 获取当前时刻对应的 hour bucket 和 day of week

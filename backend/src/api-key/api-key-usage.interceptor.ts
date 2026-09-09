@@ -1,7 +1,7 @@
-import { CallHandler, ExecutionContext, Injectable, NestInterceptor } from '@nestjs/common';
+import { CallHandler, ExecutionContext, HttpException, Injectable, NestInterceptor } from '@nestjs/common';
 import { APP_INTERCEPTOR } from '@nestjs/core';
-import { Observable } from 'rxjs';
-import { finalize } from 'rxjs/operators';
+import { Observable, throwError } from 'rxjs';
+import { catchError, finalize } from 'rxjs/operators';
 import { getApiKeyContext } from '../common/auth-context';
 import { getClientIp } from '../common/utils/client-ip';
 import { ApiKeyUsageResult } from '../common/entities/api-key-usage-log.entity';
@@ -37,17 +37,31 @@ export class ApiKeyUsageInterceptor implements NestInterceptor {
     const route = rawUrl.split('?')[0] || '';
     const ip = getClientIp(request) || '';
 
+    // S2：业务异常（404/409/429 等）由全局异常过滤器在拦截器 finalize 之后处理，
+    // finalize 读到的 response.statusCode 仍是 200——审计会失真。
+    // 在 catchError 中先行记录真实状态码并用 recorded 标志防止 finalize 双写。
+    let recorded = false;
+    const recordOnce = (statusCode: number) => {
+      if (recorded) return;
+      recorded = true;
+      this.usageService.record({
+        apiKeyId: keyContext.keyId,
+        userId: request.user?.id ?? '',
+        method,
+        route,
+        result: ApiKeyUsageResult.ALLOWED,
+        statusCode,
+        ip,
+      });
+    };
+
     return next.handle().pipe(
+      catchError((error: unknown) => {
+        recordOnce(error instanceof HttpException ? error.getStatus() : 500);
+        return throwError(() => error);
+      }),
       finalize(() => {
-        this.usageService.record({
-          apiKeyId: keyContext.keyId,
-          userId: request.user?.id ?? '',
-          method,
-          route,
-          result: ApiKeyUsageResult.ALLOWED,
-          statusCode: typeof response?.statusCode === 'number' ? response.statusCode : null,
-          ip,
-        });
+        recordOnce(typeof response?.statusCode === 'number' ? response.statusCode : 200);
       }),
     );
   }

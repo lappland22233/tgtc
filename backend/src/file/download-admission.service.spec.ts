@@ -50,15 +50,22 @@ describe('DownloadAdmissionService', () => {
     expect(service.waitingCount).toBe(0);
   });
 
-  it('预约记账：释放按实际写入归还', async () => {
+  it('预约记账：会话结束全额归还（P1-09 回归：完整下载后预约归零）', async () => {
     mockFree(1024 * 1024);
     const minFree = 0;
     const t1 = await service.admit(1024, minFree);
     await t1.done;
     expect(service.pendingReservedBytes).toBe(1024);
-    // 写了 600 字节就中止 → 归还 424
-    service.releasePartial(600, 1024, minFree);
-    expect(service.pendingReservedBytes).toBe(600);
+    // 提前中止（写入 600 字节）→ 仍全额归还，物理占用由 statfs 反映
+    service.release(1024, minFree);
+    expect(service.pendingReservedBytes).toBe(0);
+
+    // 完整下载（written == admitted）：归还后预约必须归零，不得累积
+    const t2 = await service.admit(1024, minFree);
+    await t2.done;
+    expect(service.pendingReservedBytes).toBe(1024);
+    service.release(1024, minFree);
+    expect(service.pendingReservedBytes).toBe(0);
   });
 
   it('单会话超过可用空间时立即拒绝（CAPACITY_EXCEEDED）', async () => {

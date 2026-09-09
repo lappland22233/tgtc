@@ -2,8 +2,10 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
 
 /**
  * v1.2.6：统一目录命名空间（SQLite 方言）。
- * 表结构由 SQLite 基线迁移按实体元数据创建（DirectoryName 已注册实体清单），
- * 本迁移仅负责补充索引（幂等，IF NOT EXISTS）与历史数据回填。
+ * 全新库由 SQLite 基线迁移按实体元数据建表；存量库基线已执行不会重跑，
+ * 因此本迁移使用 CREATE TABLE IF NOT EXISTS / CREATE INDEX IF NOT EXISTS 自建补齐
+ * （结构对齐实体元数据，模式参照 1798400000000-SqliteCreateUpdateTasks），
+ * 再执行历史数据回填。
  * 回填策略与 PostgreSQL 版一致：保留最早记录，冲突跳过。
  */
 export class SqliteCreateDirectoryNames1802100000000 implements MigrationInterface {
@@ -11,6 +13,21 @@ export class SqliteCreateDirectoryNames1802100000000 implements MigrationInterfa
 
   public async up(queryRunner: QueryRunner): Promise<void> {
     if (queryRunner.connection.options.type !== 'sqlite') return;
+
+    // 存量库基线已执行不会重跑，必须在此补齐表（对全新库幂等）。
+    await queryRunner.query(`
+      CREATE TABLE IF NOT EXISTS "directory_names" (
+        "id" varchar PRIMARY KEY NOT NULL,
+        "ownerId" varchar NOT NULL,
+        "scopeKey" varchar(64) NOT NULL,
+        "nameKey" varchar(255) NOT NULL,
+        "entityType" varchar(10) NOT NULL,
+        "entityId" varchar NOT NULL,
+        "isDeleted" boolean NOT NULL DEFAULT 0,
+        "createdAt" datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        "updatedAt" datetime NOT NULL DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
 
     await queryRunner.query(`
       CREATE UNIQUE INDEX IF NOT EXISTS "uq_directory_names_active"

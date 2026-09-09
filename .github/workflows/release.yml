@@ -70,6 +70,10 @@ jobs:
       - name: Build, sign and validate ZIP release package
         env:
           RELEASE_SIGNING_KEY_PATH: ${{ runner.temp }}/release-signing-key.pem
+          # 清单标志必须显式声明（generate-manifest.sh 对缺失即失败）。
+          # 每次发布前按本版本实际内容复核：本版本含数据库迁移（含不可逆回填）→ 不保证程序回退安全。
+          RELEASE_INCLUDES_DB_MIGRATION: 'true'
+          RELEASE_ROLLBACK_SAFE: 'false'
         shell: bash
         run: |
           set -Eeuo pipefail

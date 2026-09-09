@@ -209,18 +209,16 @@ export class DownloadAdmissionService {
   }
 
   /**
-   * 会话完成/中止/清理后调用：先按实际写入扣减预约，再唤醒等待队列。
-   * 调用方必须保证 bytes 与 admit 时登记一致（或提供实际写入量差值）。
+   * 会话完成/中止/清理后调用：全额归还准入额度，再唤醒等待队列。
+   * 预约语义为「峰值增量」：admit 登记多少，release 就归还多少。
+   * 已写入的部分已转为物理占用并体现在 statfs 中（spool 保留期/删除后的空间变化
+   * 均由物理空闲反映），不再按写入量扣减归还——否则完整下载归还 0，
+   * reservedPendingBytes 永久累积，最终自我拒绝服务。
+   * 调用方必须保证 bytes 与 admit 时登记一致。
    */
   release(bytes: number, minFreeBytes: number): void {
     this.reservedPendingBytes = Math.max(0, this.reservedPendingBytes - bytes);
     this.pump(minFreeBytes);
-  }
-
-  /** 会话写入过程中释放部分额度（如提前中止，按未写入部分归还） */
-  releasePartial(writtenBytes: number, admittedBytes: number, minFreeBytes: number): void {
-    const unmet = Math.max(0, admittedBytes - writtenBytes);
-    this.release(unmet, minFreeBytes);
   }
 
   /** 关闭：拒绝所有等待项并停止轮询 */

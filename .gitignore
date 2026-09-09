@@ -33,6 +33,7 @@ Thumbs.db
 # Testing
 coverage/
 .nyc_output/
+backend/tmp/
 
 # Build outputs
 build/

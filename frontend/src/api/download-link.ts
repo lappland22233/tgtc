@@ -24,7 +24,8 @@ export async function fetchDownloadLink(
   mode: DownloadLinkMode,
   params?: { durationHours?: number; maxAccessCount?: number },
 ): Promise<DownloadLinkResult> {
-  const res = await api.get(`/files/${fileId}/download-link`, {
+  // 写语义端点（permanent 会将文件转公开）：必须 POST，防跨站顶层导航 CSRF（P1-10）
+  const res = await api.post(`/files/${fileId}/download-link`, null, {
     params: {
       mode,
       ...(mode === 'timed' ? { durationHours: params?.durationHours } : {}),

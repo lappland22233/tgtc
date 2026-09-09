@@ -88,6 +88,10 @@ const emit = defineEmits<{
 
 const loading = ref(false);
 const result = ref<DownloadLinkResult | null>(null);
+// F2：代际令牌。A 文件的请求慢响应时用户可能已关闭对话框并打开 B 文件——
+// 迟到响应若写回共享 result，界面显示 B 的文件名、复制的却是 A 的链接
+// （permanent 模式还会把 A 静默转公开）。响应只在代际匹配且文件未切换时写回。
+let requestGeneration = 0;
 
 const form = reactive({
   // 默认选择限时公开（可逆、影响面最小），避免一键确认即把文件永久公开
@@ -105,10 +109,13 @@ function onModeChange() {
 // 打开时重置
 watch(() => props.visible, (v) => {
   if (v) {
+    requestGeneration++;
     form.mode = 'timed';
     form.durationHours = 24;
     form.maxAccessCount = 10;
     result.value = null;
+  } else {
+    requestGeneration++; // 关闭即失效在途请求
   }
 });
 
@@ -117,17 +124,24 @@ async function handleConfirm() {
     handleClose();
     return;
   }
+  const generation = ++requestGeneration;
+  const targetFileId = props.fileId;
   loading.value = true;
   try {
-    result.value = await fetchDownloadLink(props.fileId, form.mode, {
+    const link = await fetchDownloadLink(targetFileId, form.mode, {
       durationHours: form.durationHours,
       maxAccessCount: form.maxAccessCount,
     });
+    if (generation !== requestGeneration || props.fileId !== targetFileId) return;
+    result.value = link;
     MessagePlugin.success('下载链接已生成');
   } catch (err) {
+    if (generation !== requestGeneration || props.fileId !== targetFileId) return;
     MessagePlugin.error(getErrorMessage(err) || '生成下载链接失败');
   } finally {
-    loading.value = false;
+    if (generation === requestGeneration) {
+      loading.value = false;
+    }
   }
 }
 

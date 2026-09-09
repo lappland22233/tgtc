@@ -68,12 +68,22 @@ export class DirectoryNamespaceService {
     const repo = manager.getRepository(DirectoryName);
 
     // 1. 已有本实体名称行 → 原位更新（改名/移动/恢复共用）
-    const updated = await repo
-      .createQueryBuilder()
-      .update(DirectoryName)
-      .set({ ownerId, scopeKey, nameKey, isDeleted: false })
-      .where('"entityType" = :entityType AND "entityId" = :entityId', { entityType, entityId })
-      .execute();
+    // N5：改名/移动撞名时该 UPDATE 同样触发唯一约束——此前在 try 之外，
+    // QueryFailedError 会以 500 逸出而不是 409。与 INSERT 分支统一转换。
+    let updated: { affected?: number | null };
+    try {
+      updated = await repo
+        .createQueryBuilder()
+        .update(DirectoryName)
+        .set({ ownerId, scopeKey, nameKey, isDeleted: false })
+        .where('"entityType" = :entityType AND "entityId" = :entityId', { entityType, entityId })
+        .execute();
+    } catch (error: unknown) {
+      if (isDatabaseUniqueViolation(error)) {
+        throw new ConflictException('当前目录已存在同名文件或文件夹');
+      }
+      throw error;
+    }
     if ((updated.affected ?? 0) > 0) return;
 
     // 2. 无名称行 → 插入（历史回填遗漏时补建）

@@ -38,14 +38,22 @@ case "$DB_TYPE" in
   sqlite)
     require_cmd sqlite3; require_cmd systemctl
     DB_DATABASE=$(env_value DB_DATABASE); [[ -n "$DB_DATABASE" ]] || die "$EXIT_PRECHECK" 'SQLite DB_DATABASE 未配置。'
-    [[ "$DB_DATABASE" = /* ]] || DB_DATABASE="$RELEASE_ROOT/backend/$DB_DATABASE"
+    # P1-05：.env 与运行库都位于 $RUNTIME_DIR/backend（服务 WorkingDirectory 同为该目录），
+    # 相对路径必须以 .env 所在目录解析；此前按发行目录解析必然找不到真实库。
+    [[ "$DB_DATABASE" = /* ]] || DB_DATABASE="$RUNTIME_DIR/backend/$DB_DATABASE"
     [[ -f "$DB_DATABASE" ]] || die "$EXIT_PRECHECK" "SQLite 数据库不存在：$DB_DATABASE"
     systemctl is-active --quiet "$SERVICE" && systemctl stop "$SERVICE"
     stopped=1
-    trap '[[ ${stopped:-0} == 1 ]] && systemctl start "$SERVICE" >/dev/null 2>&1 || true' EXIT
+    # TGTC_BACKUP_KEEP_STOPPED=1（升级流程调用）：备份后保持停机进入停写窗口，
+    # 由 upgrade.sh 在迁移+切链完成后统一恢复服务；独立备份仍默认恢复运行。
+    trap 'if [[ ${stopped:-0} == 1 && ${TGTC_BACKUP_KEEP_STOPPED:-0} != 1 ]]; then systemctl start "$SERVICE" >/dev/null 2>&1 || true; fi' EXIT
     sqlite3 "$DB_DATABASE" ".backup '$DEST/database.sqlite'"
     [[ "$(sqlite3 "$DEST/database.sqlite" 'PRAGMA integrity_check;')" == ok ]] || die "$EXIT_VERIFY" 'SQLite 备份完整性检查失败。'
-    systemctl start "$SERVICE"; stopped=0
+    if [[ ${TGTC_BACKUP_KEEP_STOPPED:-0} == 1 ]]; then
+      log '按升级流程要求保持服务停止（停写窗口）；服务恢复由调用方负责。'
+    else
+      systemctl start "$SERVICE"; stopped=0
+    fi
     ;;
   *) die "$EXIT_PRECHECK" "不支持的 DB_TYPE：$DB_TYPE" ;;
 esac

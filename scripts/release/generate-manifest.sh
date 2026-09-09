@@ -10,8 +10,9 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/common.sh"
 # 环境变量：
 #   RELEASE_MIN_UPGRADABLE        默认 0.0.0（不设下限）
 #   RELEASE_MAX_UPGRADABLE        默认空（null，不设上限）
-#   RELEASE_INCLUDES_DB_MIGRATION 默认 false
-#   RELEASE_ROLLBACK_SAFE         默认 true
+#   RELEASE_INCLUDES_DB_MIGRATION 必填（true/false）——缺失即失败，绝不默认。
+#     该标志失实会误导更新器的迁移/回退风险判断（如 v1.2.6 含不可逆回填迁移却声明无迁移）。
+#   RELEASE_ROLLBACK_SAFE         必填（true/false）——缺失即失败。
 #   RELEASE_HEALTH_PATH           默认 /api/health
 #   RELEASE_HEALTH_TIMEOUT_MS     默认 30000
 #
@@ -30,6 +31,14 @@ ARCHIVE="$OUTPUT_DIR/$ASSET_NAME"
 [[ -f "$ARCHIVE" ]] || die "$EXIT_PRECHECK" "发行 ZIP 不存在：$ARCHIVE"
 ASSET_SIZE=$(stat -c '%s' "$ARCHIVE")
 ASSET_SHA256=$(sha256sum "$ARCHIVE" | awk '{print $1}')
+
+# 清单标志 fail-closed：未显式提供即失败，防止静默产出失实清单。
+if [[ -z "${RELEASE_INCLUDES_DB_MIGRATION:-}" ]]; then
+  die "$EXIT_PRECHECK" 'RELEASE_INCLUDES_DB_MIGRATION 未显式设置（true/false）；拒绝猜测清单标志。'
+fi
+if [[ -z "${RELEASE_ROLLBACK_SAFE:-}" ]]; then
+  die "$EXIT_PRECHECK" 'RELEASE_ROLLBACK_SAFE 未显式设置（true/false）；拒绝猜测清单标志。'
+fi
 
 export MANIFEST_VERSION="$VERSION" \
   MANIFEST_ASSET_NAME="$ASSET_NAME" \

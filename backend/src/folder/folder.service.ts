@@ -440,19 +440,36 @@ export class FolderService {
           { isDeleted: false, deleteRequestedAt: null, deleteScheduledAt: null, deletedByAdmin: false },
         );
 
-        // v1.2.6：收集本批实际还原的实体并重新激活名称行
+        // v1.2.6：收集本批实际还原的实体并重新占用名称行。
+        // N3：走完整 acquire 而非仅 reactivateMany——升级前已软删的实体没有名称行，
+        // UPDATE 命中 0 行且静默成功，恢复后会出现重名（唯一约束失效）。
+        // acquire 对有名称行的实体原位重激活，对无名称行的实体补建并与活跃名称冲突校验。
         const restoredFolders = await manager.getRepository(Folder).find({
           where: { id: In(folderIds), isDeleted: false, deleteRequestedAt: null } as any,
-          select: ['id'],
+          select: ['id', 'ownerId', 'parentId', 'name'],
         });
+        for (const f of restoredFolders) {
+          await this.namespace.acquire(manager, {
+            ownerId: f.ownerId,
+            folderId: f.parentId,
+            name: f.name,
+            entityType: 'folder',
+            entityId: f.id,
+          });
+        }
         const restoredFiles = await manager.getRepository(File).find({
           where: { folderId: In(folderIds), isDeleted: false, deleteRequestedAt: null } as any,
-          select: ['id'],
+          select: ['id', 'uploaderId', 'folderId', 'originalName'],
         });
-        await this.namespace.reactivateMany(manager, [
-          ...restoredFolders.map((f) => ({ entityType: 'folder' as const, entityId: f.id })),
-          ...restoredFiles.map((f) => ({ entityType: 'file' as const, entityId: f.id })),
-        ]);
+        for (const f of restoredFiles) {
+          await this.namespace.acquire(manager, {
+            ownerId: f.uploaderId,
+            folderId: f.folderId,
+            name: f.originalName,
+            entityType: 'file',
+            entityId: f.id,
+          });
+        }
       });
     } catch (error: unknown) {
       if (isDatabaseUniqueViolation(error)) {

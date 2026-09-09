@@ -123,12 +123,23 @@ export function parseIpRule(rawRule: string): ParsedIpRule {
   return { ok: true, normalized: prefixText === undefined ? addr : `${addr}/${prefix}`, version: 6, value, prefix };
 }
 
+/**
+ * S3：IPv4-mapped IPv6 查询地址（::ffff:a.b.c.d）归一为 IPv4 语义。
+ * 双栈/反代输出常为该形式，不做归一会导致无法命中 IPv4 规则，
+ * 合法客户端被 401 锁出。规则侧保持原样（用户配置什么匹配什么）。
+ */
+function unwrapIpv4Mapped(addr: string): string {
+  const mapped = addr.match(/^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/);
+  return mapped ? mapped[1] : addr;
+}
+
 /** 判断查询 IP 是否命中已解析规则（版本必须一致） */
 export function ipMatchesRule(ip: string, parsed: ParsedIpRule): boolean {
   const normalized = normalizeIpString(ip);
   if (!normalized) return false;
   // 注意：解析的是「查询 IP」，parsed 中保存的是规则地址的网络值
-  const [addr] = normalized.split('/');
+  const [rawAddr] = normalized.split('/');
+  const addr = unwrapIpv4Mapped(rawAddr);
   let value: bigint | null;
   let version: 4 | 6;
   if (isIpv4(addr)) {

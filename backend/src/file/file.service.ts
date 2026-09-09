@@ -235,6 +235,15 @@ export class FileService implements OnModuleInit {
         telegramFilePath: params.telegramFilePath,
         thumbnailPath: null,
       } as any);
+      // N1：覆盖会改 originalName，名称表必须同步更新——否则旧名残留占用
+      // （此后同名新建被误 409）且新名不受唯一保护。新名撞其他活跃实体时整体回滚。
+      await this.namespaceService.acquire(manager, {
+        ownerId: locked.uploaderId,
+        folderId: locked.folderId,
+        name: params.originalName,
+        entityType: 'file',
+        entityId: target.id,
+      });
     });
 
     // 事务外使本地缓存和旧衍生图失效，固定文件 ID 覆盖后不得继续展示旧内容。
@@ -689,10 +698,16 @@ export class FileService implements OnModuleInit {
   }
 
   async softDeleteProcessingFile(id: string): Promise<void> {
-    await this.fileRepository.update(
-      { id, status: 'processing' },
-      { isDeleted: true, status: 'error', uploadStage: 'failed' } as Partial<File>,
-    );
+    await this.fileRepository.manager.transaction(async (manager) => {
+      await manager.getRepository(File).update(
+        { id, status: 'processing' },
+        { isDeleted: true, status: 'error', uploadStage: 'failed' } as Partial<File>,
+      );
+      // N2：取消路径此前只置 isDeleted，未释放名称占用——分片完成后、
+      // worker 启动前取消会导致名称残留，同名重传稳定 409。与软删除语义
+      // 对齐（软删即释放名称），并在同一事务内保证原子性。
+      await this.namespaceService.release(manager, { entityType: 'file', entityId: id });
+    });
   }
 
   /** 覆盖上传失败时保留原记录 id 和审计轨迹，只结束 processing 状态，不软删除用户原文件记录。 */
@@ -745,11 +760,27 @@ export class FileService implements OnModuleInit {
       maxAccessCount: this.accessCountDefault,
     });
 
-    const savedFile = await this.fileRepository.save(newFile);
-
-    if (tagIds && tagIds.length > 0) {
-      await this.insertFileTags(this.fileRepository.manager, savedFile.id, tagIds);
-    }
+    const savedFile = await this.fileRepository.manager.transaction(async (manager) => {
+      // N1：普通上传此前直接 save，不经统一命名空间——同目录可建出与
+      // 文件/文件夹重名的实体。记录写入与名称占用纳入同一事务。
+      const created = await manager.getRepository(File).save(newFile);
+      if (tagIds && tagIds.length > 0) {
+        await this.insertFileTags(manager, created.id, tagIds);
+      }
+      await this.namespaceService.acquire(manager, {
+        ownerId: user.id,
+        folderId: newFile.folderId ?? null,
+        name: originalName,
+        entityType: 'file',
+        entityId: created.id,
+      });
+      return created;
+    }).catch((error: unknown) => {
+      if (isDatabaseUniqueViolation(error)) {
+        throw new ConflictException('当前目录已存在同名文件或文件夹');
+      }
+      throw error;
+    });
 
     this.auditService.log({
       action: 'file_upload',
@@ -1208,10 +1239,16 @@ export class FileService implements OnModuleInit {
         if (!updated.affected) {
           throw new BadRequestException('删除等待期已过，文件已永久删除');
         }
-        // v1.2.6：恢复时重新占用统一命名空间名称；与现存文件/文件夹重名即失败回滚
-        await this.namespaceService.reactivateMany(manager, [
-          { entityType: 'file', entityId: id },
-        ]);
+        // v1.2.6：恢复时重新占用统一命名空间名称；与现存文件/文件夹重名即失败回滚。
+        // N3：必须走完整 acquire——升级前已软删的实体没有名称行，仅 reactivateMany
+        // 的 UPDATE 命中 0 行且静默成功，恢复后会出现重名（唯一约束失效）。
+        await this.namespaceService.acquire(manager, {
+          ownerId: file.uploaderId,
+          folderId: file.folderId,
+          name: file.originalName,
+          entityType: 'file',
+          entityId: id,
+        });
       });
     } catch (error: unknown) {
       if (isDatabaseUniqueViolation(error)) {
@@ -2953,7 +2990,23 @@ export class FileService implements OnModuleInit {
       maxAccessCount: this.accessCountDefault,
     });
 
-    const savedFile = await this.fileRepository.save(newFile);
+    const savedFile = await this.fileRepository.manager.transaction(async (manager) => {
+      // N1：异步（分片合并后）上传路径同样必须占用统一命名空间名称。
+      const created = await manager.getRepository(File).save(newFile);
+      await this.namespaceService.acquire(manager, {
+        ownerId: user.id,
+        folderId: newFile.folderId ?? null,
+        name: originalName,
+        entityType: 'file',
+        entityId: created.id,
+      });
+      return created;
+    }).catch((error: unknown) => {
+      if (isDatabaseUniqueViolation(error)) {
+        throw new ConflictException('当前目录已存在同名文件或文件夹');
+      }
+      throw error;
+    });
     await this.generateUploadedMediaThumbnail(savedFile, file);
     this.cleanupTempFile(file);
     return savedFile;

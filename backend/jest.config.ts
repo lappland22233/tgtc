@@ -20,5 +20,7 @@ module.exports = {
   testPathIgnorePatterns: ['/node_modules/', '/dist/'],
   moduleNameMapper: {
     '^src/(.*)$': '<rootDir>/src/$1',
+    // file-type v20 为 ESM-only（exports 无 require 条件），CJS ts-jest 无法加载，统一替换为桩。
+    '^file-type$': '<rootDir>/test/mocks/file-type.stub.js',
   },
 };

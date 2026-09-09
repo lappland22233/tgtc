@@ -1,10 +1,9 @@
 import { Inject, Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { spawn } from 'child_process';
 import type { ChildProcess } from 'child_process';
-import { copyFile, mkdir, readFile, writeFile } from 'fs/promises';
+import { copyFile, mkdir, readFile, stat, writeFile } from 'fs/promises';
 import { join } from 'path';
 import { UpdateTask } from '../common/entities/update-task.entity';
-import { VersionService } from '../version/version.service';
 import { isTerminalStatus } from './update-state-machine';
 import type { UpdateTaskStatus } from '../common/entities/update-task.entity';
 import { UpdateTaskService } from './update-task.service';
@@ -37,14 +36,19 @@ const FORWARD_PATH: readonly UpdateTaskStatus[] = [
 
 const POLL_INTERVAL_MS = 5000;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+/** 心跳文件超过该时长未更新则不再刷新 DB 心跳（执行器疑似失联，交由超时收敛） */
+const HEARTBEAT_FILE_STALE_MS = 60_000;
 
 /**
  * 更新执行器派发与同步服务。
  *
- * - 只写任务描述并调用固定入口（updater.sh），绝不拼接 shell、绝不传递任意路径。
- * - 心跳/状态文件轮询驱动 DB 状态机推进；进程退出码决定终态。
- * - 服务随升级被重启后：基于"运行版本 vs 任务目标版本"收敛激活后任务
- *   （成功 → succeeded；回退 → rolled_back），绝不盲目重跑。
+ * - 只写任务描述并经 systemd oneshot 单元（tgtc-update@<taskId>.service）派发固定更新器入口，
+ *   绝不拼接 shell、绝不传递任意路径。更新器运行在独立 cgroup：后端服务重启不会回收
+ *   更新进程（P1-04），且后端（NoNewPrivileges）无需 sudo，由 polkit 限定仅可 start 本单元。
+ * - 心跳/状态文件轮询驱动 DB 状态机推进；执行器失联超过 taskTimeoutMs 时，
+ *   按状态机合法链收敛到 rollback_failed 并释放活动槽位（R2）。
+ * - 服务随升级被重启后一律保守挂起（P1-07）：succeeded 终态只能由健康检查通过后的
+ *   执行器（state 文件）上报，重启收敛不再产生终态，避免健康检查失败回退后任务仍显示成功。
  */
 @Injectable()
 export class UpdateRunnerService implements OnModuleInit, OnModuleDestroy {
@@ -57,7 +61,6 @@ export class UpdateRunnerService implements OnModuleInit, OnModuleDestroy {
   constructor(
     private readonly taskService: UpdateTaskService,
     private readonly updateService: UpdateService,
-    private readonly versionService: VersionService,
     @Inject(UPDATE_CONFIG) private readonly config: UpdateConfig,
   ) {}
 
@@ -154,26 +157,37 @@ export class UpdateRunnerService implements OnModuleInit, OnModuleDestroy {
     if (task.status === 'queued') {
       await this.taskService.transitionTask(task, 'downloading', { heartbeatAt: new Date() });
     }
-    const child = spawn('sudo', ['-n', this.config.updaterPath as string, safeName], {
+    // P1-04：经独立 systemd oneshot 单元派发（--no-block 立即返回）。
+    // 更新器在自身 cgroup 中运行，升级流程重启 tgtc.service 不会回收它；
+    // 授权由部署时安装的 polkit 规则限定（仅允许服务用户 start tgtc-update@<uuid>.service）。
+    // 后端单元 NoNewPrivileges=true 下 sudo 本就不可用，此路径是唯一可行通道。
+    const child = spawn('systemctl', ['start', '--no-block', `tgtc-update@${safeName}.service`], {
       stdio: 'ignore',
-      detached: false,
     });
     this.activeChild = child;
     child.unref?.();
     child.on('exit', (code) => {
       if (this.activeChild === child) this.activeChild = null;
-      this.logger.log(`更新器进程退出：task=${task.taskId} code=${code ?? 'signal'}`);
+      // --no-block 下非零退出码通常表示 systemd 拒绝（单元不存在/未授权）；
+      // 任务由 R2 心跳超时收敛，避免在轮询外直接改写状态机。
+      if (code !== 0) {
+        this.logger.error(`更新单元触发失败：task=${task.taskId} code=${code}（检查 tgtc-update@.service 与 polkit 规则）`);
+      } else {
+        this.logger.log(`更新单元已触发：task=${task.taskId}`);
+      }
     });
     child.on('error', (error) => {
       if (this.activeChild === child) this.activeChild = null;
-      this.logger.error(`更新器进程启动失败：${error.message}`);
+      this.logger.error(`更新单元触发失败：${error.message}`);
     });
   }
 
   /**
-   * 后端随升级重启后的收敛逻辑（不盲目重跑）：
-   * - activating/restarting/health_checking：比对运行版本与任务目标版本；
-   *   运行版本 == 目标 → 升级已成功；运行版本 == 任务起始版本 → 已回退；否则保守挂起。
+   * 后端随升级重启后的收敛逻辑（不盲目重跑、不产生终态）：
+   * - P1-07：健康检查可能尚未执行（时序：切链→重启后端→本恢复逻辑→upgrade.sh 健康检查
+   *   →失败自动回退）。此处若把"运行版本==目标"收敛为 succeeded，回退后任务将永久显示成功。
+   *   因此激活后阶段一律保守挂起：终态只由执行器 state 文件（健康检查通过后写入 succeeded、
+   *   失败回退写入 rolled_back）经轮询上报；执行器失联由 R2 心跳超时收敛为 rollback_failed。
    * - queued：执行器未跑过；具备派发条件时重新派发（downloading 起步由执行器推进）。
    * - 其余非终态：保持原状，由心跳轮询或人工处理。
    */
@@ -194,20 +208,14 @@ export class UpdateRunnerService implements OnModuleInit, OnModuleDestroy {
 
   private async recoverSingleTask(task: UpdateTask): Promise<void> {
     if (task.status === 'activating' || task.status === 'restarting' || task.status === 'health_checking') {
-      const runningVersion = this.versionService.getCurrentVersion();
-      if (runningVersion === task.targetVersion) {
-        // 沿合法正向链逐级收敛到 succeeded（禁止跨阶跳转）。
-        await this.walkForwardTo(task, 'succeeded');
-        await this.updateService.recordTaskOutcome(task, 'succeeded');
-        this.logger.log(`更新任务 ${task.taskId} 在重启后确认成功（运行版本 ${runningVersion}）。`);
-      } else if (runningVersion === task.currentVersion) {
-        await this.walkRollback(task, 'rolled_back');
-        await this.updateService.recordTaskOutcome(task, 'rolled_back');
-        this.logger.warn(`更新任务 ${task.taskId} 在重启后确认已回退。`);
-      } else {
-        this.logger.warn(`更新任务 ${task.taskId} 运行版本 ${runningVersion} 与预期不符，保持 ${task.status} 等待人工确认。`);
-      }
-    } else if (task.status === 'queued' && this.canExecute()) {
+      // P1-07：保守挂起——升级窗口内后端可能被重启多次（正常重启 + 健康检查失败回退），
+      // 运行版本比对无法区分这两种情形，绝不在此产生终态。
+      this.logger.warn(
+        `更新任务 ${task.taskId} 处于 ${task.status}，保守挂起等待执行器回报终态（健康检查通过/回退后由 state 文件上报）。`,
+      );
+      return;
+    }
+    if (task.status === 'queued' && this.canExecute()) {
       await this.dispatch(task);
     }
   }
@@ -221,6 +229,21 @@ export class UpdateRunnerService implements OnModuleInit, OnModuleDestroy {
       if (!task || isTerminalStatus(task.status)) return;
       if (task.status === 'queued') {
         await this.dispatch(task);
+        return;
+      }
+      // R2：执行器失联超时收敛。心跳（DB 或文件）超过 taskTimeoutMs 未更新，
+      // 按状态机合法链收敛到 rollback_failed 并释放活动槽位，避免任务永久占槽。
+      const lastSignalMs = task.heartbeatAt
+        ? new Date(task.heartbeatAt).getTime()
+        : task.startedAt
+          ? new Date(task.startedAt).getTime()
+          : Date.now();
+      if (Date.now() - lastSignalMs > this.config.taskTimeoutMs) {
+        this.logger.error(
+          `更新任务 ${task.taskId} 执行器心跳超时（> ${this.config.taskTimeoutMs}ms），收敛为 rollback_failed。`,
+        );
+        await this.walkRollback(task, 'rollback_failed');
+        await this.updateService.recordTaskOutcome(task, 'rollback_failed');
         return;
       }
       const taskDir = this.config.taskDir;
@@ -243,7 +266,7 @@ export class UpdateRunnerService implements OnModuleInit, OnModuleDestroy {
   /** 把执行器回报的阶段同步为 DB 状态（只允许沿正向路径或回退路径前进）。 */
   private async applyObservedStatus(task: UpdateTask, observed: UpdateTaskStatus): Promise<void> {
     if (task.status === observed) {
-      await this.touchHeartbeat(task);
+      await this.touchHeartbeatIfFresh(task);
       return;
     }
     // 回退路径：回报进入 rollback 流程或失败终态。
@@ -258,7 +281,7 @@ export class UpdateRunnerService implements OnModuleInit, OnModuleDestroy {
     }
     // 正向路径：沿固定顺序逐级推进（跳阶一律拒绝，防止状态机被越过）。
     await this.walkForwardTo(task, observed);
-    await this.touchHeartbeat(task);
+    await this.touchHeartbeatIfFresh(task);
   }
 
   /** 沿正向路径逐级推进到目标状态；目标不在正向路径或已在之后时不做任何操作。 */
@@ -276,18 +299,41 @@ export class UpdateRunnerService implements OnModuleInit, OnModuleDestroy {
     task: UpdateTask,
     target: Extract<UpdateTaskStatus, 'rollback_pending' | 'rolling_back' | 'rolled_back' | 'rollback_failed'>,
   ): Promise<void> {
+    // R1：只从当前状态在回退链上的下一环开始推进。
+    // 此前固定重放 ['rollback_pending','rolling_back',target] 会对已处于 rolling_back 的任务
+    // 再次尝试 rolling_back→rollback_pending（状态机拒绝），抛错后任务卡在 active 占槽，
+    // 后续升级永久 409。按索引从当前位置起走，已越过的环不再重放。
+    const chain: readonly UpdateTaskStatus[] = ['rollback_pending', 'rolling_back', target];
+    const targetIndex = chain.indexOf(target);
     let current = task;
-    for (const status of ['rollback_pending', 'rolling_back', target] as const) {
-      if (current.status === status) continue;
-      current = await this.taskService.transitionTask(current, status, { heartbeatAt: new Date() });
+    for (let index = chain.indexOf(current.status) + 1; index <= targetIndex; index++) {
+      current = await this.taskService.transitionTask(current, chain[index], { heartbeatAt: new Date() });
     }
   }
 
-  private async touchHeartbeat(task: UpdateTask): Promise<void> {
+  /**
+   * R2：仅当执行器心跳文件仍新鲜时才刷新 DB 心跳。
+   * 此前只要 state 文件存在且状态未变就无条件刷心跳——执行器死亡后 DB 心跳永远新鲜，
+   * 超时收敛永不触发，任务永久显示活跃。
+   */
+  private async touchHeartbeatIfFresh(task: UpdateTask): Promise<void> {
+    const ageMs = await this.heartbeatFileAgeMs(task);
+    if (ageMs !== null && ageMs > HEARTBEAT_FILE_STALE_MS) return;
     try {
       await this.taskService.touchHeartbeat(task.taskId);
     } catch {
       // 心跳更新失败不影响状态同步；下轮轮询重试。
+    }
+  }
+
+  private async heartbeatFileAgeMs(task: UpdateTask): Promise<number | null> {
+    const taskDir = this.config.taskDir;
+    if (!taskDir) return null;
+    try {
+      const info = await stat(join(taskDir, `${task.taskId}.heartbeat`));
+      return Date.now() - info.mtimeMs;
+    } catch {
+      return null;
     }
   }
 

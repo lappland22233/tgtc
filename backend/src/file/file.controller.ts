@@ -16,6 +16,7 @@ import {
   Req,
   Res,
   BadRequestException,
+  ForbiddenException,
   HttpException,
   HttpStatus,
 } from '@nestjs/common';
@@ -936,29 +937,58 @@ export class FileController {
   /**
    * 获取下载链接（三种模式，query 参数控制）：
    *
-   * - GET /api/files/:id/download-link?mode=permanent
+   * - POST /api/files/:id/download-link?mode=permanent
    *     将文件转换为公开文件并返回公开下载链接（匿名可访问，无时效/次数限制）
-   * - GET /api/files/:id/download-link?mode=timed&durationHours=24
+   * - POST /api/files/:id/download-link?mode=timed&durationHours=24
    *     返回限时公开下载链接，durationHours 为有效小时数（1-720，可选参数，
    *     缺省按未提供处理并报错——限时模式必须显式指定）
-   * - GET /api/files/:id/download-link?mode=count_limited&maxAccessCount=10
+   * - POST /api/files/:id/download-link?mode=count_limited&maxAccessCount=10
    *     返回限次数下载链接，maxAccessCount 为最大访问次数（1-1000000）
    *
    * timed / count_limited 均创建独立 ShareLink（匿名访问 /s/:token），
    * 不改变文件本身的公开属性；过期或次数耗尽后链接自动失效。
+   *
+   * 安全（P1-10）：permanent 模式会改变文件访问属性（转公开），必须为写语义：
+   * - 改用 POST：认证 Cookie 为 SameSite=Lax，跨站顶层表单 POST 不携带 Cookie；
+   * - 附带同源校验（Origin/Referer host 与请求 host 比对），防御未来 Cookie 策略放宽。
+   * 旧 GET 路由不再存在，无法再经顶层导航 CSRF 静默转公开。
    */
-  @Get(':id/download-link')
+  @Post(':id/download-link')
   @UseGuards(JwtOrApiKeyAuthGuard)
   async getDownloadLink(
     @Param('id') id: string,
     @CurrentUser() user: User,
+    @Req() req: Request,
     @Query('mode') mode?: string,
     @Query('durationHours') durationHours?: string,
     @Query('maxAccessCount') maxAccessCount?: string,
   ) {
+    assertSameOriginWrite(req);
     const parsedDuration = parseOptionalPositiveInt(durationHours);
     const parsedMaxAccess = parseOptionalPositiveInt(maxAccessCount);
     return this.fileService.createDownloadLink(id, user, mode || '', parsedDuration, parsedMaxAccess);
+  }
+}
+
+/**
+ * 写语义端点的同源校验（CSRF 纵深防御）：
+ * - 浏览器跨站请求必带 Origin（POST 一定携带），Referer 兜底；
+ * - 仅比对 host（忽略 scheme，兼容反代终止 TLS 的部署），不匹配即 403；
+ * - 无 Origin/Referer 的非浏览器客户端（API Key 脚本调用）放行。
+ */
+export function assertSameOriginWrite(req: Request): void {
+  const raw = (req.headers['origin'] as string | undefined)
+    ?? (req.headers['referer'] as string | undefined);
+  if (!raw) return;
+  let originHost: string | undefined;
+  try {
+    originHost = new URL(raw).host;
+  } catch {
+    throw new ForbiddenException('非法的 Origin/Referer');
+  }
+  if (!originHost) return;
+  if (originHost !== req.hostname) {
+    throw new ForbiddenException('跨站请求被拒绝');
   }
 }
 

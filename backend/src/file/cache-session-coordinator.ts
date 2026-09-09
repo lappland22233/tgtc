@@ -432,12 +432,15 @@ export class CacheSessionCoordinator {
     await admission.admit(expectedSize, minFreeBytes);
   }
 
-  /** 会话结束后释放准入额度（按实际写入与准入值差值归还），并唤醒等待队列 */
-  private releaseAdmissionOnSessionEnd(session: SpoolSession, admittedBytes: number): void {
+  /** 会话结束后全额归还准入额度并唤醒等待队列 */
+  private releaseAdmissionOnSessionEnd(admittedBytes: number): void {
     const admission = this.deps.admission;
     if (!admission) return;
     const minFreeBytes = this.deps.minFreeDiskBytes?.() ?? 0;
-    admission.releasePartial(session.bytesWritten, admittedBytes, minFreeBytes);
+    // 预约语义为「峰值增量」：无论实际写入多少（含完整下载 written == admitted），
+    // 会话结束必须全额归还 admittedBytes；已写入部分已转为物理占用、由 statfs 反映。
+    // 按差值归还会导致完整下载归还 0、预约量永久累积（P1-09）。
+    admission.release(admittedBytes, minFreeBytes);
   }
 
   private async runSpoolSession(
@@ -559,10 +562,10 @@ export class CacheSessionCoordinator {
       session.upstream = undefined;
       session.output = undefined;
       this.activeUpstreams = Math.max(0, this.activeUpstreams - 1);
-      // 会话结束（完成/失败）按实际写入归还准入额度并唤醒等待队列；
-      // spool 文件在宽限期后才真正删除，这里释放的是"本会话预约的增量"，
-      // spool 保留期占用已体现在物理空闲中，不会重复扣减。
-      this.releaseAdmissionOnSessionEnd(session, admittedBytes);
+      // 会话结束（完成/失败）全额归还准入额度并唤醒等待队列；
+      // spool 文件在宽限期后才真正删除，其保留期占用已体现在物理空闲中，
+      // 预约计数按 admit 登记量整笔撤销，不与物理占用重复记账。
+      this.releaseAdmissionOnSessionEnd(admittedBytes);
     }
   }
 

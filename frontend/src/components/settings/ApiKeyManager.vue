@@ -106,7 +106,7 @@
       :header="`IP 白名单：${allowlistRow?.name || ''}`"
       :on-close="closeAllowlist"
       width="520px"
-      :confirm-btn="{ content: '保存', loading: allowlistSaving }"
+      :confirm-btn="{ content: allowlistLoaded ? '保存' : '加载中…', loading: allowlistSaving, disabled: !allowlistLoaded }"
       @confirm="submitAllowlist"
     >
       <p class="allowlist-hint">
@@ -295,16 +295,27 @@ function closeRevealDialog() {
 // ---------- 每把密钥独立 IP 白名单（v1.2.6） ----------
 const allowlistVisible = ref(false);
 const allowlistSaving = ref(false);
+const allowlistLoaded = ref(false);
 const allowlistRow = ref<ApiKeySummary | null>(null);
 const allowlistText = ref('');
+// F1：代际令牌。A 的白名单请求慢响应时，用户已切到 B——迟到响应不得回写
+// 到 B 的编辑框（跨密钥串写后保存会把 A 的规则写到 B 上）。
+let allowlistGeneration = 0;
 
 async function openAllowlist(row: ApiKeySummary) {
   allowlistRow.value = row;
   allowlistVisible.value = true;
+  const generation = ++allowlistGeneration;
+  allowlistLoaded.value = false;
+  allowlistText.value = '';
   try {
     const rules = await getApiKeyAllowlist(row.id);
+    if (generation !== allowlistGeneration || allowlistRow.value?.id !== row.id) return;
     allowlistText.value = rules.join('\n');
+    // 仅加载成功才允许保存：加载失败时保存会把 PUT [] 发出去，静默清空来源限制。
+    allowlistLoaded.value = true;
   } catch (error: unknown) {
+    if (generation !== allowlistGeneration || allowlistRow.value?.id !== row.id) return;
     allowlistText.value = '';
     MessagePlugin.error(getErrorMessage(error) || '加载白名单失败');
   }
@@ -312,6 +323,10 @@ async function openAllowlist(row: ApiKeySummary) {
 
 async function submitAllowlist() {
   if (!allowlistRow.value || allowlistSaving.value) return;
+  if (!allowlistLoaded.value) {
+    MessagePlugin.warning('白名单尚未加载成功，已取消保存（避免误清空来源限制）');
+    return;
+  }
   allowlistSaving.value = true;
   try {
     const rules = allowlistText.value
@@ -329,9 +344,11 @@ async function submitAllowlist() {
 }
 
 function closeAllowlist() {
+  allowlistGeneration++; // 使在途加载响应失效
   allowlistVisible.value = false;
   allowlistRow.value = null;
   allowlistText.value = '';
+  allowlistLoaded.value = false;
 }
 
 // ---------- 使用记录（v1.2.6，IP 已脱敏） ----------

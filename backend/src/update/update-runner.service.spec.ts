@@ -6,7 +6,6 @@ import { UpdateRunnerService } from './update-runner.service';
 import { UpdateTask } from '../common/entities/update-task.entity';
 import { UpdateTaskService } from './update-task.service';
 import { UpdateService } from './update.service';
-import { VersionService } from '../version/version.service';
 
 jest.mock('child_process', () => ({
   ...jest.requireActual('child_process'),
@@ -64,7 +63,6 @@ describe('UpdateRunnerService', () => {
     touchHeartbeat: jest.Mock;
   };
   let updateService: { recordTaskOutcome: jest.Mock };
-  let versionService: { getCurrentVersion: jest.Mock };
 
   let originalPlatform: NodeJS.Platform;
 
@@ -109,14 +107,12 @@ describe('UpdateRunnerService', () => {
       touchHeartbeat: jest.fn().mockResolvedValue(undefined),
     };
     updateService = { recordTaskOutcome: jest.fn().mockResolvedValue(undefined) };
-    versionService = { getCurrentVersion: jest.fn(() => '1.0.0') };
   });
 
   function buildRunner(overrides: Partial<UpdateConfig> = {}) {
     return new UpdateRunnerService(
       taskService as unknown as UpdateTaskService,
       updateService as unknown as UpdateService,
-      versionService as unknown as VersionService,
       { ...config, ...overrides },
     );
   }
@@ -130,7 +126,7 @@ describe('UpdateRunnerService', () => {
     expect(buildRunner().canExecute()).toBe(false);
   });
 
-  it('dispatch：写入任务描述 JSON 并以固定参数调用更新器（无 shell）', async () => {
+  it('dispatch：写入任务描述 JSON 并经独立 oneshot 单元派发（P1-04）', async () => {
     const runner = buildRunner();
     await runner.dispatch(taskFixture);
 
@@ -146,9 +142,10 @@ describe('UpdateRunnerService', () => {
       programRollbackSafe: true,
     });
     expect(description.asset.sha256).toHaveLength(64);
+    // P1-04：更新器必须经 systemd oneshot 单元派发（独立 cgroup + 无 sudo 依赖）。
     expect(mockedSpawn).toHaveBeenCalledWith(
-      'sudo',
-      ['-n', '/opt/tgtc/current/scripts/release/updater.sh', taskFixture.taskId],
+      'systemctl',
+      ['start', '--no-block', `tgtc-update@${taskFixture.taskId}.service`],
       expect.objectContaining({ stdio: 'ignore' }),
     );
     expect(transitions.map((entry) => entry.to)).toEqual(['downloading']);
@@ -186,35 +183,36 @@ describe('UpdateRunnerService', () => {
     expect(updateService.recordTaskOutcome).toHaveBeenCalledWith(expect.anything(), 'rolled_back');
   });
 
-  it('重启恢复：运行版本等于目标版本 → succeeded 并记录成功审计', async () => {
-    versionService.getCurrentVersion.mockReturnValue('1.1.0');
+  it('P1-07：激活后阶段重启恢复一律保守挂起，不产生终态', async () => {
+    // 时序：切链→重启后端→恢复逻辑→upgrade.sh 健康检查→可能失败回退。
+    // 运行版本==目标不代表最终成功（健康检查可能尚未执行），终态只能由执行器上报。
     taskFixture.status = 'health_checking';
-
-    const runner = buildRunner();
-    await runner.recoverAfterRestart();
-
-    expect(transitions.map((entry) => entry.to)).toEqual(['succeeded']);
-    expect(updateService.recordTaskOutcome).toHaveBeenCalledWith(expect.anything(), 'succeeded');
-  });
-
-  it('重启恢复：运行版本等于起始版本 → 已回退终态', async () => {
-    taskFixture.status = 'restarting';
-
-    const runner = buildRunner();
-    await runner.recoverAfterRestart();
-
-    expect(transitions.map((entry) => entry.to)).toEqual(['rollback_pending', 'rolling_back', 'rolled_back']);
-    expect(updateService.recordTaskOutcome).toHaveBeenCalledWith(expect.anything(), 'rolled_back');
-  });
-
-  it('重启恢复：运行版本与预期不符时保守挂起，不盲目重跑', async () => {
-    versionService.getCurrentVersion.mockReturnValue('0.9.0');
-    taskFixture.status = 'activating';
 
     const runner = buildRunner();
     await runner.recoverAfterRestart();
 
     expect(transitions).toEqual([]);
     expect(updateService.recordTaskOutcome).not.toHaveBeenCalled();
+  });
+
+  it('P1-07：restarting 阶段重启恢复同样保守挂起（不能误判为已回退）', async () => {
+    taskFixture.status = 'restarting';
+
+    const runner = buildRunner();
+    await runner.recoverAfterRestart();
+
+    expect(transitions).toEqual([]);
+    expect(updateService.recordTaskOutcome).not.toHaveBeenCalled();
+  });
+
+  it('状态同步：rolling_back 观测到 rolled_back 直接收敛，不再重放 rollback_pending（R1）', async () => {
+    const runner = buildRunner();
+    taskFixture.status = 'rolling_back';
+    writeFileSync(join(taskDir, `${taskFixture.taskId}.state`), 'rolled_back\n');
+
+    await (runner as unknown as { syncActiveTask(): Promise<void> }).syncActiveTask();
+
+    expect(transitions.map((entry) => entry.to)).toEqual(['rolled_back']);
+    expect(updateService.recordTaskOutcome).toHaveBeenCalledWith(expect.anything(), 'rolled_back');
   });
 });

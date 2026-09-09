@@ -18,7 +18,7 @@ RELEASE_ROOT="$(find_release_root)"
 if [[ "$(basename "$(dirname "$RELEASE_ROOT")")" == releases ]]; then
   INSTALL_ROOT="$(dirname "$(dirname "$RELEASE_ROOT")")"
 else
-  INSTALL_ROOT="${TGTC_INSTALL_ROOT:-$(dirname "$RELEASE_ROOT")}" 
+  INSTALL_ROOT="${TGTC_INSTALL_ROOT:-$(dirname "$RELEASE_ROOT")}"
 fi
 # 持久化运行时目录（.env、数据库、Bot API workdir）由各运维脚本读取，故在此统一解析。
 # shellcheck disable=SC2034

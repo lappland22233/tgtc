@@ -27,7 +27,7 @@ function mockKeyEntity(overrides: Partial<ApiKey> = {}): ApiKey {
 
 describe('ApiKeyService', () => {
   let service: ApiKeyService;
-  let apiKeyRepo: { findOne: jest.Mock; find: jest.Mock; count: jest.Mock; create: jest.Mock; save: jest.Mock; update: jest.Mock };
+  let apiKeyRepo: { findOne: jest.Mock; find: jest.Mock; count: jest.Mock; create: jest.Mock; save: jest.Mock; update: jest.Mock; manager: Record<string, jest.Mock> };
   let userRepo: { findOne: jest.Mock };
   let allowlistRepo: { find: jest.Mock };
   let cryptoService: { isAvailable: jest.Mock; encrypt: jest.Mock; decrypt: jest.Mock };
@@ -38,6 +38,16 @@ describe('ApiKeyService', () => {
   const adminUser = { id: 'user-2', email: 'admin@b.c', role: UserRole.ADMIN, isBanned: false } as User;
 
   beforeEach(() => {
+    // S1：rotate 经 manager.transaction 执行，mock 事务直接透传 manager。
+    const manager: Record<string, jest.Mock> = {
+      findOne: jest.fn(),
+      find: jest.fn().mockResolvedValue([]),
+      create: jest.fn((cls: unknown, data: unknown) => data ?? cls),
+      save: jest.fn(async (x) => ({ id: 'new-key-id', createdAt: new Date(), ...x })),
+      update: jest.fn().mockResolvedValue({ affected: 1 }),
+      insert: jest.fn().mockResolvedValue({}),
+    };
+    manager.transaction = jest.fn(async (cb: (m: Record<string, jest.Mock>) => Promise<unknown>) => cb(manager));
     apiKeyRepo = {
       findOne: jest.fn(),
       find: jest.fn().mockResolvedValue([]),
@@ -45,6 +55,7 @@ describe('ApiKeyService', () => {
       create: jest.fn((x) => x),
       save: jest.fn(async (x) => ({ id: 'new-key-id', createdAt: new Date(), ...x })),
       update: jest.fn().mockResolvedValue({ affected: 1 }),
+      manager,
     };
     userRepo = { findOne: jest.fn() };
     allowlistRepo = { find: jest.fn().mockResolvedValue([]) };
@@ -182,17 +193,26 @@ describe('ApiKeyService', () => {
       await expect(service.revoke(activeUser, 'key-1')).rejects.toBeInstanceOf(NotFoundException);
     });
 
-    it('轮换会撤销旧密钥并返回新明文', async () => {
-      apiKeyRepo.findOne.mockResolvedValue(mockKeyEntity());
+    it('轮换会撤销旧密钥并返回新明文（S1：单事务 + 继承白名单）', async () => {
+      apiKeyRepo.manager.findOne.mockResolvedValue(mockKeyEntity());
+      apiKeyRepo.manager.find.mockResolvedValue([{ apiKeyId: 'key-1', rule: '10.0.0.0/8' }]);
       const created = await service.rotate(activeUser, 'key-1', '新名字');
-      expect(apiKeyRepo.update).toHaveBeenCalledWith('key-1', expect.objectContaining({ revokedAt: expect.any(Date) }));
+      expect(apiKeyRepo.manager.update).toHaveBeenCalledWith(ApiKey, 'key-1', expect.objectContaining({ revokedAt: expect.any(Date) }));
       expect(created.key).toMatch(/^tgtc_/);
       expect(created.name).toBe('新名字');
+      // S1：新密钥必须继承旧密钥的 IP 白名单（不 fail-open）。
+      expect(apiKeyRepo.manager.insert).toHaveBeenCalledWith(
+        ApiKeyIpAllowlist,
+        [expect.objectContaining({ apiKeyId: 'new-key-id', rule: '10.0.0.0/8' })],
+      );
     });
 
     it('已撤销的密钥不能轮换', async () => {
-      apiKeyRepo.findOne.mockResolvedValue(mockKeyEntity({ revokedAt: new Date() }));
+      apiKeyRepo.manager.findOne.mockResolvedValue(mockKeyEntity({ revokedAt: new Date() }));
       await expect(service.rotate(activeUser, 'key-1')).rejects.toBeInstanceOf(BadRequestException);
+      // 事务回滚语义：未撤销旧密钥、未创建新密钥
+      expect(apiKeyRepo.manager.update).not.toHaveBeenCalled();
+      expect(apiKeyRepo.manager.save).not.toHaveBeenCalled();
     });
   });
 

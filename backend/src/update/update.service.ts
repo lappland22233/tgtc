@@ -1,4 +1,6 @@
 import { BadRequestException, ConflictException, Inject, Injectable, Logger } from '@nestjs/common';
+import { writeFile } from 'fs/promises';
+import { join } from 'path';
 import { AuditService } from '../common/services/audit.service';
 import { UpdateTask } from '../common/entities/update-task.entity';
 import { compareSemver } from '../version/semver';
@@ -175,6 +177,23 @@ export class UpdateService {
         }
         throw error;
       });
+
+    // P1-08：取消必须可达执行器。写入取消标记文件，updater.sh 在各阶段交接点
+    // 检查该标记并在进入不可逆区前安全退出；否则已派发的更新器会继续
+    // 备份/迁移/切换，用户以为已取消而升级仍在推进。标记写入失败仅告警
+    // （DB 已终态，执行器退出码不影响任务状态）。
+    if (this.config.taskDir) {
+      try {
+        await writeFile(join(this.config.taskDir, `${taskId}.cancel`), new Date().toISOString(), {
+          encoding: 'utf8',
+          mode: 0o640,
+        });
+      } catch (error) {
+        this.logger.warn(
+          `取消标记写入失败（任务 ${taskId}）：${error instanceof Error ? error.message : '未知错误'}`,
+        );
+      }
+    }
 
     await this.auditService.logAwait({
       action: 'update_cancel',

@@ -181,17 +181,65 @@ export class ApiKeyService {
     } as never);
   }
 
-  /** 轮换：撤销旧密钥并创建同名新密钥；新明文仅返回一次。 */
+  /**
+   * 轮换：撤销旧密钥并创建同名新密钥；新明文仅返回一次。
+   * S1：单事务内完成「创建新密钥 → 复制 IP 白名单 → 撤销旧密钥」。
+   * 此前的 revoke+create 两步实现有两个缺陷：
+   * 1）create 失败时旧密钥已被撤销（可用性事故）；2）新密钥不继承白名单，
+   * 受 IP 限制的密钥轮换后变成无来源限制（fail-open）。
+   * 事务保证两者要么全部生效要么全部回滚。
+   */
   async rotate(user: User, id: string, name?: string): Promise<CreatedApiKey> {
-    const key = await this.apiKeyRepository.findOne({ where: { id } });
-    if (!key || key.userId !== user.id) {
-      throw new NotFoundException('API 密钥不存在');
-    }
-    if (key.revokedAt) {
-      throw new BadRequestException('密钥已撤销，无法轮换，请直接创建新密钥');
-    }
-    await this.revoke(user, id);
-    return this.create(user, name ?? key.name);
+    return this.apiKeyRepository.manager.transaction(async (manager) => {
+      const key = await manager.findOne(ApiKey, { where: { id } });
+      if (!key || key.userId !== user.id) {
+        throw new NotFoundException('API 密钥不存在');
+      }
+      if (key.revokedAt) {
+        throw new BadRequestException('密钥已撤销，无法轮换，请直接创建新密钥');
+      }
+
+      const trimmedName = (name ?? '').trim() || key.name;
+      const rawKey = `${API_KEY_SECRET_PREFIX}_${randomBytes(32).toString('base64url')}`;
+      const keyCipher = this.cryptoService.encrypt(rawKey);
+      const entity = await manager.save(
+        manager.create(ApiKey, {
+          userId: user.id,
+          name: trimmedName.slice(0, 64),
+          prefix: rawKey.slice(0, 14),
+          keyHash: this.hashKey(rawKey),
+          keyCipher,
+          cipherVersion: keyCipher ? 'v1' : null,
+        }),
+      );
+
+      // 新密钥继承旧密钥的 IP 白名单（来源限制不因轮换丢失）。
+      const rules = await manager.find(ApiKeyIpAllowlist, { where: { apiKeyId: id } });
+      if (rules.length > 0) {
+        await manager.insert(
+          ApiKeyIpAllowlist,
+          rules.map((row) => manager.create(ApiKeyIpAllowlist, { apiKeyId: entity.id, rule: row.rule })),
+        );
+      }
+
+      await manager.update(ApiKey, id, { revokedAt: new Date() });
+
+      this.auditService.log({
+        action: 'api_key_rotate' as never,
+        userId: user.id,
+        resourceType: 'api_key',
+        resourceId: entity.id,
+        metadata: { prefix: entity.prefix, rotatedFrom: id, inheritedAllowlistRules: rules.length },
+      } as never);
+
+      return {
+        id: entity.id,
+        name: entity.name,
+        prefix: entity.prefix,
+        key: rawKey,
+        createdAt: entity.createdAt,
+      };
+    });
   }
 
   // ---------- IP 白名单（每把密钥独立配置） ----------

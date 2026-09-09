@@ -56,6 +56,17 @@ assert_not_widely_writable "$(stat -c '%a' "$RELEASE_ROOT/scripts/release/update
 
 acquire_lock   # OS 文件锁：与 API 派发、人工运维脚本互斥
 
+# P1-08：取消必须可达执行器。后端取消接口在取消任务时写入 $TASK_ID.cancel 标记；
+# 更新器在每个阶段交接点检查标记，被取消的任务在进入不可逆区之前安全退出。
+# DB 端仅 queued/downloading 可取消；存在派发同步延迟（轮询周期内），此处检查兜底。
+check_cancelled() {
+  if [[ -f "$TASK_DIR/$TASK_ID.cancel" ]]; then
+    log '检测到取消标记：任务已被操作者取消，安全退出。'
+    set_state cancelled
+    exit "$EXIT_OPERATION"
+  fi
+}
+
 # 建立并加固 root 专属工作根目录（符号链接拒绝；root 运行时强制属主与 0700）。
 if [[ -L "$UPDATE_WORK_ROOT" ]]; then
   die "$EXIT_PRECHECK" '更新工作根目录不允许为符号链接。'
@@ -128,6 +139,7 @@ PREVIOUS=$(readlink -f "$CURRENT_LINK")
 [[ -d "$PREVIOUS" ]] || die "$EXIT_PRECHECK" 'current 指向不存在的发行目录。'
 
 # ---- 下载：固定 staging、大小/时长/重定向受限、主机白名单 ----
+check_cancelled
 bash "$SCRIPT_DIR/download-release.sh" "$ASSET_URL" "$WORK_DIR/$ASSET_NAME" "$MAX_ASSET_BYTES"
 bash "$SCRIPT_DIR/download-release.sh" "$SUMS_URL" "$WORK_DIR/SHA256SUMS" 1048576
 bash "$SCRIPT_DIR/download-release.sh" "$SIG_URL" "$WORK_DIR/SHA256SUMS.sig" 4096
@@ -136,6 +148,7 @@ bash "$SCRIPT_DIR/download-release.sh" "$MANIFEST_URL" "$WORK_DIR/release-manife
   || { report_task_error 'artifact_size_mismatch' '发行包大小与任务描述不一致。'; die "$EXIT_VERIFY" '发行包大小与任务描述不一致。'; }
 
 # ---- 校验：签名 → 摘要 → 清单 schema/版本/平台/兼容性 ----
+check_cancelled
 set_state verifying
 PUB="$RELEASE_ROOT/scripts/release/update-public-key.pem"
 key_bits=$(openssl rsa -pubin -in "$PUB" -noout -text 2>/dev/null | grep -oE '[0-9]+ bit' | head -n1 | grep -oE '[0-9]+')
@@ -190,6 +203,7 @@ else
 fi
 
 # ---- 预检：磁盘、服务单元形态 ----
+check_cancelled
 set_state prechecking
 AVAILABLE_KB=$(df -Pk "$INSTALL_ROOT" | awk 'NR==2 {print $4}')
 REQUIRED_KB=$(( (ASSET_SIZE / 1024) * 2 + 262144 ))
@@ -199,6 +213,8 @@ systemctl cat "$SERVICE" 2>/dev/null | grep -Fq "$CURRENT_LINK/" \
 
 # ---- 交接 upgrade.sh：备份 → 解包 → 迁移 → 切换 → 重启 → 健康检查 ----
 # upgrade.sh 通过 TGTC_PROGRESS_FILE 回写状态机阶段；失败在对应阶段停止。
+# 此后进入不可逆区（backing_up 起不可取消）；最后一次取消检查在此执行。
+check_cancelled
 set_state backing_up
 set +e
 TGTC_SKIP_LOCK=1 TGTC_ENV_FILE="$ENV_FILE" TGTC_PROGRESS_FILE="$STATE_FILE" \

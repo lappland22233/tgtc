@@ -98,28 +98,36 @@ EOF
 cp "$ROOT_DIR/scripts/release/start.sh" "$STAGE_DIR/start.sh"
 # 运维脚本随发行包交付；不复制任何运行时数据、数据库或密钥文件。
 # update-public-key.pem 是发布验证公钥（私钥只存在于 CI secret），供部署侧离线验证更新资产。
-for script in common.sh health-check.sh backup.sh upgrade.sh rollback.sh validate-release.sh; do
+# P1-03：更新器执行链必须随包交付（updater.sh/download-release.sh/systemd 样例），
+# 否则后端派发的更新入口在部署机上不存在，应用内「系统更新」从首个版本起即不可用。
+for script in common.sh health-check.sh backup.sh upgrade.sh rollback.sh validate-release.sh \
+  updater.sh download-release.sh; do
   cp "$ROOT_DIR/scripts/release/$script" "$STAGE_DIR/scripts/release/$script"
 done
 cp "$ROOT_DIR/scripts/release/update-public-key.pem" "$STAGE_DIR/scripts/release/update-public-key.pem"
+mkdir -p "$STAGE_DIR/scripts/release/systemd"
+cp "$ROOT_DIR/scripts/release/systemd/tgtc-update@.service" \
+   "$ROOT_DIR/scripts/release/systemd/tgtc-update.sudoers" \
+   "$STAGE_DIR/scripts/release/systemd/"
 cp "$ROOT_DIR/LICENSE" "$STAGE_DIR/LICENSE"
 printf '%s\n' "$VERSION" > "$STAGE_DIR/VERSION"
 chmod +x "$STAGE_DIR/start.sh" "$STAGE_DIR/bin/tgtc" "$STAGE_DIR/runtime/bin/node" "$STAGE_DIR/telegram-bot-api/bin/telegram-bot-api" \
   "$STAGE_DIR/scripts/release/health-check.sh" "$STAGE_DIR/scripts/release/backup.sh" \
-  "$STAGE_DIR/scripts/release/upgrade.sh" "$STAGE_DIR/scripts/release/rollback.sh" "$STAGE_DIR/scripts/release/validate-release.sh"
+  "$STAGE_DIR/scripts/release/upgrade.sh" "$STAGE_DIR/scripts/release/rollback.sh" "$STAGE_DIR/scripts/release/validate-release.sh" \
+  "$STAGE_DIR/scripts/release/updater.sh" "$STAGE_DIR/scripts/release/download-release.sh"
 
 find "$STAGE_DIR" -type f \( -name '*.ts' -o -name '*.map' -o -name '*.spec.js' \) -delete
 find "$STAGE_DIR/backend/node_modules" -type d \( -name test -o -name tests -o -name __tests__ \) -prune -exec rm -rf {} +
 rm -rf "$STAGE_DIR/backend/node_modules/@types"
 
-for required_path in backend/dist/main.js backend/dist/database/data-source.js frontend/index.html telegram-bot-api/bin/telegram-bot-api runtime/bin/node bin/tgtc start.sh scripts/release/common.sh scripts/release/health-check.sh scripts/release/backup.sh scripts/release/upgrade.sh scripts/release/rollback.sh scripts/release/validate-release.sh scripts/release/update-public-key.pem VERSION; do
+for required_path in backend/dist/main.js backend/dist/database/data-source.js frontend/index.html telegram-bot-api/bin/telegram-bot-api runtime/bin/node bin/tgtc start.sh scripts/release/common.sh scripts/release/health-check.sh scripts/release/backup.sh scripts/release/upgrade.sh scripts/release/rollback.sh scripts/release/validate-release.sh scripts/release/updater.sh scripts/release/download-release.sh scripts/release/systemd/tgtc-update@.service scripts/release/systemd/tgtc-update.sudoers scripts/release/update-public-key.pem VERSION; do
   [[ -e "$STAGE_DIR/$required_path" ]] || { echo "错误：发布包缺少 $required_path" >&2; exit 1; }
 done
 if find "$STAGE_DIR" -type f \( -name '*.ts' -o -name '*.spec.js' -o -name '*.map' \) -print -quit | grep -q .; then
   echo "错误：发布包混入 TypeScript、测试或 source map。" >&2
   exit 1
 fi
-for executable in start.sh bin/tgtc runtime/bin/node telegram-bot-api/bin/telegram-bot-api scripts/release/health-check.sh scripts/release/backup.sh scripts/release/upgrade.sh scripts/release/rollback.sh scripts/release/validate-release.sh; do
+for executable in start.sh bin/tgtc runtime/bin/node telegram-bot-api/bin/telegram-bot-api scripts/release/health-check.sh scripts/release/backup.sh scripts/release/upgrade.sh scripts/release/rollback.sh scripts/release/validate-release.sh scripts/release/updater.sh scripts/release/download-release.sh; do
   [[ -x "$STAGE_DIR/$executable" ]] || { echo "错误：发布包可执行文件权限缺失：$executable" >&2; exit 1; }
 done
 

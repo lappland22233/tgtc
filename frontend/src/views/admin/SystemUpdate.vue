@@ -341,6 +341,9 @@ function schedulePoll(): void {
   pollTimer = setTimeout(async () => {
     try {
       await loadStatus();
+      // F3：轮询必须同步刷新任务历史快照——否则升级成功/失败/回退的终态
+      // 与告警不展示，历史任务永久停留在「处理中」。
+      await loadTasks().catch(() => {});
       reconnecting.value = false;
       pollDelay = POLL_BASE_MS;
     } catch {
