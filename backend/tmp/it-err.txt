@@ -1,6 +1,0 @@
-PASS src/telegram/telegram-upload.integration.spec.ts
-
-Test Suites: 1 passed, 1 total
-Tests:       7 passed, 7 total
-Snapshots:   0 total
-Time:        3.733 s, estimated 12 s
