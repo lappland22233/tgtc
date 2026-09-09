@@ -563,17 +563,33 @@ describe('FileCacheService no-cache mode', () => {
     expect(await listCacheDir()).toEqual([]);
   });
 
-  it('H-06：冷回源并发预算——达到上限时拒绝新建并抛 503', async () => {
-    // 将预算压到 1：第一个回源占满预算，第二个被拒绝
+  it('H-06（下载排队修复后）：并发满额时排队等待名额，释放后继续；超时才回退 503', async () => {
     (service as any).maxConcurrentUpstreams = 1;
     (service as any).activeUpstreams = 1;
-    await expect(
-      service.getNoCacheStream(fileId, 4, async () => ({
-        stream: new PassThrough(),
-        info: { file_size: 4 },
-      })),
-    ).rejects.toThrow(/繁忙|retry|稍后|重试/i);
-  });
+
+    // 1) 释放名额前请求排队：使用短超时的 waitForUpstreamSlot 模拟超时回退。
+    //    getNoCacheStream → getSpooledStream 内部固定 60s 等待，这里直接校验
+    //    "等待中不抛 503、等待后能拿到名额"的语义。
+    const coordinator = (service as any).sessionCoordinator;
+    const waiting = coordinator.waitForUpstreamSlot(300);
+    // 名额仍被占用 → 释放后（activeUpstreams=0）等待应当 resolve(true)
+    coordinator.activeUpstreams = 0;
+    await expect(waiting).resolves.toBe(true);
+
+    // 2) 全局无缓存关闭：等待返回 false，调用方回退 503 契约保持
+    (service as any).shuttingDown = true;
+    await expect(coordinator.waitForUpstreamSlot(100)).resolves.toBe(false);
+    (service as any).shuttingDown = false;
+
+    // 3) 名额空闲后正常创建会话（不再抛 503）
+    const upstream = new PassThrough();
+    const { stream } = await service.getNoCacheStream(fileId, 4, async () => ({
+      stream: upstream,
+      info: { file_size: 4 },
+    }));
+    upstream.end(Buffer.from('data'));
+    await expect(readStream(stream)).resolves.toEqual(Buffer.from('data'));
+  }, 10_000);
 
   it('H-09：onApplicationShutdown 中止构建会话并释放 spool', async () => {
     const upstream = new PassThrough();

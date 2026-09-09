@@ -1,0 +1,15 @@
+# TGTC 更新器最小 sudoers 样例。
+#
+# 部署：按实际安装路径与运行账号调整后，写入 /etc/sudoers.d/tgtc-update（0440）。
+# 原则：只允许以 sudo 执行固定更新器入口，且只允许 uuid 形式的任务参数；
+#       绝不允许通配命令、选项或交互 shell。
+#
+# sudoers 通配符：? 匹配任意单个字符。以下规则精确匹配 36 字符 uuid 参数。
+
+Cmnd_Alias TGTC_UPDATE_CMD = /opt/tgtc/current/scripts/release/updater.sh ????????-????-????-????-????????????
+
+tgtc ALL=(root) NOPASSWD: TGTC_UPDATE_CMD
+
+# 安全说明：保持 sudo 默认的 env_reset 与 secure_path（不要添加 !env_reset），
+# 防止通过 UPDATE_* / TGTC_* 环境变量覆盖更新器的安全参数；
+# 更新器内部所需的固定配置应写入 /etc/environment 或服务单元，而不是 sudo 环境。

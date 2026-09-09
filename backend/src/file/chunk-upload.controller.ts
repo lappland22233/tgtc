@@ -13,7 +13,7 @@ import { FileInterceptor } from '@nestjs/platform-express';
 import { diskStorage } from 'multer';
 import * as path from 'path';
 import { randomUUID } from 'crypto';
-import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
+import { JwtOrApiKeyAuthGuard } from '../api-key/jwt-or-api-key.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { User } from '../common/entities/user.entity';
 import { ChunkUploadService } from './chunk-upload.service';
@@ -23,7 +23,7 @@ import { ChunkUploadResourceInterceptor } from './chunk-upload-resource.intercep
 const incomingChunkDir = path.resolve(process.cwd(), 'tmp', 'uploads', 'incoming');
 
 @Controller('files/chunk')
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtOrApiKeyAuthGuard)
 export class ChunkUploadController {
   constructor(
     private readonly chunkUploadService: ChunkUploadService,

@@ -171,7 +171,8 @@ export class AuditService implements OnApplicationShutdown {
 
   /**
    * 审计写入失败时，将条目追加写入本地降级文件（按天滚动），供运维后续补录。
-   * 异步 append，失败仅记录日志，不影响主流程。
+   * 会等待写入完成后再返回（logAwait 的等待链包含本写入）；
+   * 写入失败仅记录日志、不影响主流程。
    */
   private async writeDegradedFile(entry: AuditEntry, reason: string): Promise<void> {
     try {
@@ -187,11 +188,9 @@ export class AuditService implements OnApplicationShutdown {
         reason,
         entry,
       }) + '\n';
-      fs.appendFile(filePath, line, (err) => {
-        if (err) {
-          this.logger.error(`审计降级文件写入失败: ${err.message}`);
-        }
-      });
+      // 必须等待写入完成：logAwait 语义要求降级记录在返回前已落盘，
+      // 否则调用方无法确信审计可补录（回调式写法曾导致等待链提前结束）。
+      await fs.promises.appendFile(filePath, line);
     } catch (error) {
       this.logger.error(`审计降级文件写入失败: ${error instanceof Error ? error.message : String(error)}`);
     }

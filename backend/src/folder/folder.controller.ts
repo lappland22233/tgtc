@@ -9,7 +9,7 @@ import {
   Query,
   UseGuards,
 } from '@nestjs/common';
-import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
+import { JwtOrApiKeyAuthGuard } from '../api-key/jwt-or-api-key.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { User } from '../common/entities/user.entity';
 import { FolderService } from './folder.service';
@@ -23,7 +23,7 @@ import {
 /**
  * 文件夹控制器：网盘层级管理 API。
  *
- * 所有接口需登录（@UseGuards(JwtAuthGuard)），并通过 @CurrentUser 获取用户身份。
+ * 所有接口需登录（@UseGuards(JwtOrApiKeyAuthGuard)，支持 JWT 或 X-API-Key），并通过 @CurrentUser 获取用户身份。
  * 全局前缀 /api；本控制器路由前缀 /folders。
  *
  * 路由列表：
@@ -37,7 +37,7 @@ import {
  * - POST   /folders/:id/restore             恢复软删
  */
 @Controller('folders')
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtOrApiKeyAuthGuard)
 export class FolderController {
   constructor(private readonly folderService: FolderService) {}
 

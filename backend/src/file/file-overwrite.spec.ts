@@ -24,7 +24,21 @@ import { TelegramService } from '../telegram/telegram.service';
 import { ConfigCacheService } from '../common/services/config-cache.service';
 import { RateLimitService } from '../common/services/rate-limit.service';
 import { AuditService } from '../common/services/audit.service';
+import { DirectoryNamespaceService } from '../common/services/directory-namespace.service';
+
+/** 统一命名空间服务 mock：默认无冲突 */
+function makeNamespaceMock() {
+  return {
+    acquire: jest.fn(async () => undefined),
+    release: jest.fn(async () => undefined),
+    releaseMany: jest.fn(async () => undefined),
+    remove: jest.fn(async () => undefined),
+    reactivateMany: jest.fn(async () => undefined),
+    isNameTaken: jest.fn(async () => false),
+  };
+}
 import { UploadJobService } from './upload-job.service';
+import { UploadDiskBudgetService } from './upload-disk-budget.service';
 import { FileCacheService } from './file-cache.service';
 import { ThumbnailService } from './thumbnail.service';
 import { QUEUE_NAMES } from '../jobs/bull-queue.module';
@@ -112,6 +126,7 @@ describe('FileService - assertOverwriteTarget', () => {
         { provide: RateLimitService, useValue: {} },
         { provide: UploadJobService, useValue: {} },
         { provide: AuditService, useValue: audit },
+        { provide: DirectoryNamespaceService, useValue: makeNamespaceMock() },
         { provide: FileCacheService, useValue: fileCache },
         { provide: getQueueToken(QUEUE_NAMES.FILE_UPLOAD), useValue: { add: jest.fn() } },
       ],
@@ -211,6 +226,7 @@ describe('FileService - createProcessingFile 覆盖分支', () => {
         { provide: RateLimitService, useValue: {} },
         { provide: UploadJobService, useValue: {} },
         { provide: AuditService, useValue: audit },
+        { provide: DirectoryNamespaceService, useValue: makeNamespaceMock() },
         { provide: FileCacheService, useValue: fileCache },
         { provide: getQueueToken(QUEUE_NAMES.FILE_UPLOAD), useValue: { add: jest.fn() } },
       ],
@@ -386,6 +402,7 @@ describe('FileService - applyOverwrite', () => {
         { provide: RateLimitService, useValue: {} },
         { provide: UploadJobService, useValue: {} },
         { provide: AuditService, useValue: audit },
+        { provide: DirectoryNamespaceService, useValue: makeNamespaceMock() },
         { provide: FileCacheService, useValue: fileCache },
         { provide: getQueueToken(QUEUE_NAMES.FILE_UPLOAD), useValue: { add: jest.fn() } },
       ],
@@ -467,7 +484,16 @@ describe('FileService - access policy branches', () => {
   };
 
   beforeEach(() => {
-    fileRepo = { findOne: jest.fn(), update: jest.fn(), createQueryBuilder: jest.fn(), manager: {} };
+    fileRepo = {
+      findOne: jest.fn(),
+      update: jest.fn(),
+      createQueryBuilder: jest.fn(),
+      // v1.2.6：updateAccessType 在事务内更新 + 撤销遗留分享；事务级 manager 委派回 fileRepo 本体
+      manager: {
+        transaction: jest.fn(async (cb: (m: unknown) => Promise<unknown>) =>
+          cb({ getRepository: () => fileRepo })),
+      },
+    };
     bannedRepo = { createQueryBuilder: jest.fn(), upsert: jest.fn() };
     rateLimit = { incrementCounter: jest.fn(), reset: jest.fn() };
     audit = { log: jest.fn() };
@@ -475,7 +501,8 @@ describe('FileService - access policy branches', () => {
       fileRepo, { findOne: jest.fn() } as any, {} as any, bannedRepo, {} as any, {} as any,
       {} as any, { get: jest.fn() } as any, {} as any,
       { get: jest.fn(async (_key: string, fallback: string) => fallback) } as any,
-      rateLimit, {} as any, audit, {} as any, {} as any, {} as any,
+      rateLimit, {} as any, audit, {} as any, {} as any,
+      { acquire: jest.fn(), release: jest.fn(), remove: jest.fn() } as any, {} as any,
     );
   });
 
@@ -600,6 +627,14 @@ describe('ChunkUploadService - init 覆盖目标预校验', () => {
         { provide: FileService, useValue: fileServiceMock },
         { provide: getQueueToken(QUEUE_NAMES.FILE_UPLOAD), useValue: { add: jest.fn() } },
         { provide: ConfigService, useValue: { get: jest.fn() } },
+        { provide: UploadDiskBudgetService, useValue: {
+          isStrictMode: jest.fn(() => false),
+          acquireSession: jest.fn(),
+          releaseSession: jest.fn(),
+          transferSessionToJob: jest.fn(),
+          transferJobToSession: jest.fn(),
+          releaseJob: jest.fn(),
+        } },
       ],
     }).compile();
 
@@ -698,6 +733,7 @@ describe('FileService - G2-05 覆盖上传 uploadVersion 原子化（事务+悲�
         { provide: RateLimitService, useValue: {} },
         { provide: UploadJobService, useValue: {} },
         { provide: AuditService, useValue: audit },
+        { provide: DirectoryNamespaceService, useValue: makeNamespaceMock() },
         { provide: FileCacheService, useValue: fileCache },
         { provide: getQueueToken(QUEUE_NAMES.FILE_UPLOAD), useValue: { add: jest.fn() } },
       ],
@@ -746,8 +782,11 @@ describe('FileService - G2-05 覆盖上传 uploadVersion 原子化（事务+悲�
       makeMulterFile(), '并发.png', makeUser(ownerId), undefined, true, null, targetFileId,
     );
 
-    // 关键：并发已被占用的目标记录版本未被递增（txFileRepo.save 未调用）
-    expect(txFileRepo.save).not.toHaveBeenCalled();
+    // 关键：并发已被占用的目标记录版本未被递增——
+    // v1.2.6 后新建降级也走事务（名称占用同事务），故断言改为：
+    // 任何 save 调用都不得是「目标记录」或「递增后的版本」
+    const savedEntities = txFileRepo.save.mock.calls.map((c: any) => c[0]);
+    expect(savedEntities.some((e: any) => e.id === targetFileId || e.uploadVersion === 2)).toBe(false);
     // 降级为新建记录（新 id，uploadVersion=1）
     expect(result.id).not.toBe(targetFileId);
     expect(result.uploadVersion).toBe(1);
@@ -806,6 +845,7 @@ describe('FileService - G2-06 缓存预热完成条件更新（版本守卫）',
         { provide: RateLimitService, useValue: {} },
         { provide: UploadJobService, useValue: {} },
         { provide: AuditService, useValue: audit },
+        { provide: DirectoryNamespaceService, useValue: makeNamespaceMock() },
         { provide: FileCacheService, useValue: fileCache },
         { provide: getQueueToken(QUEUE_NAMES.FILE_UPLOAD), useValue: { add: jest.fn() } },
       ],

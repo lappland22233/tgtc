@@ -7,6 +7,22 @@ import { getDatabaseType } from './database-types';
 export type DatabaseType = 'postgres' | 'sqlite';
 
 /**
+ * TypeORM 迁移 glob。只匹配以数字时间戳开头的正式迁移文件：
+ * - 排除 *.spec.ts / *.test.ts 等测试文件，避免 CLI（无 Jest 全局）在 require 时
+ *   抛出 "describe is not defined"（CI 空库迁移 smoke test 曾因此失败）。
+ * - 同时覆盖 ts-node 源码执行（.ts）与构建产物执行（.js）两条链路。
+ * - migration:create / migration:generate 产物名均为 "时间戳-名称.ts"，天然匹配。
+ */
+export function getMigrationPatterns(type: DatabaseType): string[] {
+  if (type === 'sqlite') {
+    // PG 历史迁移包含 CREATE EXTENSION、ILIKE 等 SQLite 不支持的方言；SQLite 只加载
+    // SQLite 基线及 SQLite 专用增量迁移，避免误执行 PostgreSQL 历史迁移。
+    return [join(__dirname, '..', 'migrations', '*-Sqlite*{.ts,.js}')];
+  }
+  return [join(__dirname, '..', 'migrations', '[0-9]*{.ts,.js}')];
+}
+
+/**
  * SQLite 与 PostgreSQL 的统一配置工厂。
  * 默认仍为 PostgreSQL；迁移是正式 schema 生命周期，synchronize 永远关闭。
  */
@@ -18,17 +34,13 @@ function positiveInt(env: NodeJS.ProcessEnv, key: string, fallback: number): num
 export function createDatabaseOptions(env: NodeJS.ProcessEnv = process.env): DataSourceOptions {
   const type = getDatabaseType(env);
 
-  const migrations = [join(__dirname, '..', 'migrations', '*{.ts,.js}')];
   if (type === 'sqlite') {
-    // PG 历史迁移包含 CREATE EXTENSION、ILIKE 等 SQLite 不支持的方言；SQLite 只加载
-    // SQLite 基线及 SQLite 专用增量迁移，避免误执行 PostgreSQL 历史迁移。
-    const sqliteMigrations = [join(__dirname, '..', 'migrations', '*-Sqlite*{.ts,.js}')];
     return {
       type: 'sqlite',
       database: env.DB_DATABASE || 'data/tgtc.sqlite',
       entities: [...databaseEntities],
       subscribers: [UuidSubscriber],
-      migrations: sqliteMigrations,
+      migrations: getMigrationPatterns('sqlite'),
       synchronize: false,
       migrationsRun: env.DB_MIGRATIONS_RUN === 'true',
       logging: env.NODE_ENV === 'development',
@@ -44,7 +56,7 @@ export function createDatabaseOptions(env: NodeJS.ProcessEnv = process.env): Dat
     password: env.DB_PASSWORD || undefined,
     database: env.DB_DATABASE || 'test',
     entities: [...databaseEntities],
-    migrations,
+    migrations: getMigrationPatterns('postgres'),
     synchronize: false,
     migrationsRun: env.DB_MIGRATIONS_RUN === 'true',
     logging: env.NODE_ENV === 'development',

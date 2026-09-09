@@ -80,7 +80,12 @@ import type { FileItem } from '../../types/file';
 const authStore = useAuthStore();
 const { user } = storeToRefs(authStore);
 
-const stats = shallowRef({ fileCount: 0, totalSize: 0, totalAccessCount: 0 });
+const stats = shallowRef({
+  fileCount: 0,
+  totalSize: 0,
+  totalAccessCount: 0,
+  todayUploadCount: 0,
+});
 const recentFiles = shallowRef<FileItem[]>([]);
 const loading = ref(true);
 
@@ -94,7 +99,11 @@ const roleText = computed(() => {
 const todayStr = ref(new Date().toDateString());
 let dayRefreshTimer: ReturnType<typeof setInterval> | null = null;
 
+/** R7：今日上传使用后端 stats 聚合的准确计数（客户端本地日零点口径），
+ * 不再从最近 5 条列表估算；stats 缺失字段时回退到最近列表估算避免显示 0 误导 */
 const todayUploads = computed(() => {
+  const todayCount = stats.value.todayUploadCount;
+  if (typeof todayCount === 'number') return todayCount;
   return recentFiles.value.filter(f => new Date(f.createdAt).toDateString() === todayStr.value).length;
 });
 
@@ -112,8 +121,11 @@ async function loadDashboardData() {
   const seq = ++loadSeq;
   loading.value = true;
   loadError.value = null;
+  // R7：以客户端本地今日零点为统计口径传给后端，避免服务器/用户时区不一致
+  const localDayStart = new Date();
+  localDayStart.setHours(0, 0, 0, 0);
   const [statsResult, filesResult] = await Promise.allSettled([
-    api.get('/users/me/stats'),
+    api.get('/users/me/stats', { params: { todayStart: localDayStart.toISOString() } }),
     api.get('/files?limit=5'),
   ]);
   // 防止并发重试时旧请求覆盖新状态
@@ -141,6 +153,8 @@ onMounted(() => {
     const d = new Date().toDateString();
     if (d !== todayStr.value) {
       todayStr.value = d;
+      // R7：跨天后重新拉取统计，使“今日上传”按新一天口径归零并保持准确
+      void loadDashboardData();
     }
   }, 60_000);
 });

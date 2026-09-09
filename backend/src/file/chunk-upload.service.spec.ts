@@ -1,4 +1,5 @@
 import { BadRequestException, HttpStatus } from '@nestjs/common';
+import * as fs from 'fs';
 import { promises as fsp } from 'fs';
 import * as path from 'path';
 
@@ -24,11 +25,20 @@ describe('ChunkUploadService session quota', () => {
     getJob: jest.fn().mockResolvedValue(undefined),
   };
   const configService = { get: jest.fn() };
+  const uploadDiskBudget = {
+    isStrictMode: jest.fn().mockReturnValue(false),
+    acquireSession: jest.fn().mockResolvedValue(undefined),
+    transferSessionToJob: jest.fn().mockReturnValue(true),
+    transferJobToSession: jest.fn(),
+    releaseSession: jest.fn(),
+    releaseJob: jest.fn(),
+  };
   let service: ChunkUploadService;
 
   beforeEach(() => {
     jest.clearAllMocks();
-    service = new ChunkUploadService(fileService as any, fileUploadQueue as any, configService as any);
+    uploadDiskBudget.isStrictMode.mockReturnValue(false);
+    service = new ChunkUploadService(fileService as any, fileUploadQueue as any, configService as any, uploadDiskBudget as any);
   });
 
   afterEach(async () => {
@@ -166,6 +176,185 @@ describe('ChunkUploadService session quota', () => {
       expect(second.id).toBe('11111111-1111-4111-8111-111111111111');
 
       statfsSpy.mockRestore();
+    });
+
+    it('严格模式在 Worker 可启动前释放分片，仅保留 pending 上传源', async () => {
+      uploadDiskBudget.isStrictMode.mockReturnValue(true);
+      const { uploadId, session, mergedPath } = await setupSession();
+      const pendingPath = path.resolve(process.cwd(), 'tmp', 'uploads', 'pending', '11111111-1111-4111-8111-111111111111');
+      fileUploadQueue.add.mockImplementation(async () => {
+        await expect(fsp.stat((service as any).getChunkDir(uploadId))).rejects.toMatchObject({ code: 'ENOENT' });
+        await expect(fsp.stat(pendingPath)).resolves.toMatchObject({ size: MB });
+        return {};
+      });
+
+      await (service as any).finalizeMerge(session, mergedPath, MB, new AbortController().signal);
+
+      expect(uploadDiskBudget.acquireSession).toHaveBeenCalledWith(uploadId, MB);
+      expect(uploadDiskBudget.transferSessionToJob).toHaveBeenCalledWith(
+        uploadId,
+        '11111111-1111-4111-8111-111111111111',
+        1,
+      );
+      await expect(fsp.stat(mergedPath)).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(fsp.stat(pendingPath)).resolves.toMatchObject({ size: MB });
+    });
+
+    it('严格模式在 Redis 入队失败时保留 pending 源和会话租约供安全重试', async () => {
+      uploadDiskBudget.isStrictMode.mockReturnValue(true);
+      const { uploadId, session, mergedPath } = await setupSession();
+      fileUploadQueue.add.mockRejectedValueOnce(new Error('redis unavailable'));
+
+      await expect((service as any).finalizeMerge(session, mergedPath, MB, new AbortController().signal))
+        .rejects.toThrow('redis unavailable');
+
+      expect(uploadDiskBudget.transferJobToSession).toHaveBeenCalledWith(
+        uploadId,
+        '11111111-1111-4111-8111-111111111111',
+        1,
+      );
+      await expect(fsp.stat(mergedPath)).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(fsp.stat(path.resolve(process.cwd(), 'tmp', 'uploads', 'pending', '11111111-1111-4111-8111-111111111111')))
+        .resolves.toMatchObject({ size: MB });
+      expect(session.handoffPath).toContain('tmp');
+    });
+  });
+
+  describe('doMerge large-file single pipeline', () => {
+    const pendingDir = path.resolve(process.cwd(), 'tmp', 'uploads', 'pending');
+
+    const createChunk = async (uploadId: string, index: number, fill: number, size: number) => {
+      const chunkPath = path.join((service as any).getChunkDir(uploadId), String(index));
+      await fsp.writeFile(chunkPath, Buffer.alloc(size, fill));
+    };
+
+    const setupMergeSession = async (totalChunks: number, chunkSize: number) => {
+      const fileSize = totalChunks * chunkSize;
+      const { uploadId } = await service.init('big.bin', fileSize, 'application/octet-stream', totalChunks, chunkSize, userId);
+      const session = (service as any).sessions.get(uploadId) as any;
+      return { uploadId, session };
+    };
+
+    let statfsSpy: jest.SpyInstance;
+
+    beforeEach(() => {
+      // doMerge 成功路径会进入 finalizeMerge：准备充足的磁盘与文件服务 mock
+      statfsSpy = jest.spyOn(fsp, 'statfs').mockResolvedValue({ bavail: 2 * 1024 * 1024, bsize: 1024 } as any);
+      fileService.getFileSampleFromPath.mockReturnValue(Buffer.alloc(8, 1));
+      fileService.isFileTypeAllowed.mockResolvedValue({ allowed: true });
+      fileService.createProcessingFile.mockResolvedValue({
+        id: '11111111-1111-4111-8111-111111111111',
+        uploadVersion: 1,
+        originalName: 'big.bin',
+      });
+      fileUploadQueue.add.mockResolvedValue({});
+    });
+
+    afterEach(async () => {
+      statfsSpy.mockRestore();
+      await fsp.rm(path.join(pendingDir, '11111111-1111-4111-8111-111111111111'), { force: true });
+      await fsp.rm(path.join(pendingDir, '11111111-1111-4111-8111-111111111111.telegram.json'), { force: true });
+    });
+
+    it('merges 250 chunks in order via a single pipeline with bounded target-stream listeners', async () => {
+      const totalChunks = 250;
+      const chunkSize = 64 * 1024;
+      const { uploadId, session } = await setupMergeSession(totalChunks, chunkSize);
+      for (let i = 0; i < totalChunks; i++) {
+        await createChunk(uploadId, i, i % 256, chunkSize);
+      }
+
+      // 统计目标 WriteStream 的 error 监听器注册次数
+      //（fs 模块的 createWriteStream 属性不可重定义，改用原型方法计数）
+      const writeStreamProto = (fs.WriteStream as any).prototype;
+      const origOn = writeStreamProto.on;
+      const origOnce = writeStreamProto.once;
+      let errorListenerRegistrations = 0;
+      writeStreamProto.on = function (event: string, handler: any) {
+        if (event === 'error') errorListenerRegistrations++;
+        return origOn.call(this, event, handler);
+      };
+      writeStreamProto.once = function (event: string, handler: any) {
+        if (event === 'error') errorListenerRegistrations++;
+        return origOnce.call(this, event, handler);
+      };
+
+      const warnings: string[] = [];
+      const warningListener = (w: Error) => {
+        if (w.name === 'MaxListenersExceededWarning') warnings.push(w.name);
+      };
+      process.on('warning', warningListener);
+
+      try {
+        await (service as any).doMerge(session, jest.fn(), new AbortController().signal);
+        // 等待可能延迟投递的 process warning
+        await new Promise((resolve) => setImmediate(resolve));
+        await new Promise((resolve) => setImmediate(resolve));
+      } finally {
+        writeStreamProto.on = origOn;
+        writeStreamProto.once = origOnce;
+        process.off('warning', warningListener);
+      }
+
+      // 内容与顺序一致（逐片填充 i % 256）：合并产物已原子交接为 pending，
+      // 不再保留 session/merged 或原分片目录占用一份完整数据。
+      const expected = Buffer.concat(
+        Array.from({ length: totalChunks }, (_, i) => Buffer.alloc(chunkSize, i % 256)),
+      );
+      const pendingPath = path.join(pendingDir, '11111111-1111-4111-8111-111111111111');
+      const handedOff = await fsp.readFile(pendingPath);
+      expect(handedOff.equals(expected)).toBe(true);
+      await expect(fsp.stat((service as any).getChunkDir(uploadId))).rejects.toMatchObject({ code: 'ENOENT' });
+
+      // 目标流监听器不随片数增长：旧实现对同一 WriteStream 循环 pipeline，
+      // 每片重复注册且清理延迟到 close，125 片即触发 MaxListenersExceededWarning；
+      // 单管道实现整个合并只注册个位数
+      expect(errorListenerRegistrations).toBeLessThanOrEqual(20);
+      expect(warnings).toHaveLength(0);
+    });
+
+    it('cancels mid-merge, removes the partial merged file and keeps original chunks', async () => {
+      const totalChunks = 8;
+      const chunkSize = 2 * 1024 * 1024; // 16MiB 总量，走大文件分支
+      const { uploadId, session } = await setupMergeSession(totalChunks, chunkSize);
+      for (let i = 0; i < totalChunks; i++) {
+        await createChunk(uploadId, i, i % 256, chunkSize);
+      }
+
+      const controller = new AbortController();
+      const chunk5Path = path.join((service as any).getChunkDir(uploadId), '5');
+      const realStat = fsp.stat;
+      // 在第 5 片 stat 完成时取消（合并已在进行中）
+      const statSpy = jest.spyOn(fsp, 'stat').mockImplementation((async (target: any) => {
+        const result = await realStat(target);
+        if (target === chunk5Path) controller.abort();
+        return result;
+      }) as any);
+
+      try {
+        await expect((service as any).doMerge(session, jest.fn(), controller.signal))
+          .rejects.toThrow('分片合并已取消');
+      } finally {
+        statSpy.mockRestore();
+      }
+
+      // 部分合并产物被清理，原分片全部保留（仍有重试价值）
+      const dirPath = (service as any).getChunkDir(uploadId);
+      await expect(fsp.stat(path.join(dirPath, 'merged'))).rejects.toMatchObject({ code: 'ENOENT' });
+      for (let i = 0; i < totalChunks; i++) {
+        await expect(fsp.stat(path.join(dirPath, String(i)))).resolves.toBeTruthy();
+      }
+    });
+
+    it('maps a missing chunk to a retryable error and removes the partial merged file', async () => {
+      const { uploadId, session } = await setupMergeSession(2, 8 * 1024 * 1024);
+      await createChunk(uploadId, 0, 1, 8 * 1024 * 1024);
+      // 分片 1 缺失
+
+      const dirPath = (service as any).getChunkDir(uploadId);
+      await expect((service as any).doMerge(session, jest.fn(), new AbortController().signal))
+        .rejects.toThrow('分片 1 缺失，请重新上传');
+      await expect(fsp.stat(path.join(dirPath, 'merged'))).rejects.toMatchObject({ code: 'ENOENT' });
     });
   });
 });

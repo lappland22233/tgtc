@@ -10,6 +10,30 @@ import { CreateFolderDto, RenameFolderDto } from './folder.dto';
 import { Folder } from '../common/entities/folder.entity';
 import { File } from '../common/entities/file.entity';
 import { AuditService } from '../common/services/audit.service';
+import { DirectoryNamespaceService } from '../common/services/directory-namespace.service';
+
+/** 统一命名空间服务的测试 mock：默认无冲突，全部方法静默成功 */
+function makeNamespaceMock() {
+  return {
+    acquire: jest.fn(async () => undefined),
+    release: jest.fn(async () => undefined),
+    releaseMany: jest.fn(async () => undefined),
+    remove: jest.fn(async () => undefined),
+    reactivateMany: jest.fn(async () => undefined),
+    acquireStandalone: jest.fn(async () => undefined),
+    releaseStandalone: jest.fn(async () => undefined),
+    isNameTaken: jest.fn(async () => false),
+  };
+}
+
+/** 给仅含 query 的 manager mock 补充 transaction：事务内 getRepository(Folder) 复用 folderRepo.save（惰性求值） */
+function makeManagerWithTransaction(getSave: () => unknown) {
+  return {
+    query: jest.fn().mockResolvedValue([{ cnt: 1 }]),
+    transaction: jest.fn(async (cb: (m: unknown) => Promise<unknown>) =>
+      cb({ getRepository: () => ({ save: getSave() }) })),
+  };
+}
 
 describe('FolderService - createFolder', () => {
   const ownerId = '11111111-1111-4111-8111-111111111111';
@@ -29,7 +53,7 @@ describe('FolderService - createFolder', () => {
       // create 原样返回入参（模拟 TypeORM 用入参构造实体实例），便于断言传给 save 的内容
       create: jest.fn((data: Partial<Folder>) => data as Folder),
       save: jest.fn(async (entity: Folder) => ({ ...entity, id: entity.id ?? '22222222-2222-4222-8222-222222222222' })),
-      manager: { query: jest.fn().mockResolvedValue([{ cnt: 1 }]) },
+      manager: makeManagerWithTransaction(() => folderRepo?.save),
     };
     audit = { log: jest.fn(), logAwait: jest.fn() };
 
@@ -39,6 +63,7 @@ describe('FolderService - createFolder', () => {
         { provide: getRepositoryToken(Folder), useValue: folderRepo },
         { provide: getRepositoryToken(File), useValue: { findOne: jest.fn(), find: jest.fn() } as Partial<Repository<File>> },
         { provide: AuditService, useValue: audit },
+        { provide: DirectoryNamespaceService, useValue: makeNamespaceMock() },
       ],
     }).compile();
 
@@ -124,7 +149,7 @@ describe('FolderService - createFolder', () => {
     expect(folderRepo.save).not.toHaveBeenCalled();
   });
 
-  it('同层级重名抛 BadRequestException', async () => {
+  it('同层级重名抛 ConflictException（409）', async () => {
     folderRepo.findOne.mockResolvedValue(
       Object.assign(new Folder(), {
         id: '55555555-5555-4555-8555-555555555555',
@@ -135,7 +160,8 @@ describe('FolderService - createFolder', () => {
       }),
     ); // 重名检查命中
 
-    await expect(service.createFolder(ownerId, { name: '文档' })).rejects.toThrow(BadRequestException);
+    // G6-06：同层重名统一为 409 Conflict（pre-check 与唯一索引兜底语义一致）
+    await expect(service.createFolder(ownerId, { name: '文档' })).rejects.toThrow(ConflictException);
     await expect(service.createFolder(ownerId, { name: '文档' })).rejects.toThrow('同层级下已存在同名文件夹');
     expect(folderRepo.create).not.toHaveBeenCalled();
     expect(folderRepo.save).not.toHaveBeenCalled();
@@ -158,7 +184,7 @@ describe('FolderService - 特殊保留名称校验', () => {
       findOne: jest.fn().mockResolvedValue(null),
       create: jest.fn((data: Partial<Folder>) => data as Folder),
       save: jest.fn(async (entity: Folder) => ({ ...entity, id: entity.id ?? '22222222-2222-4222-8222-222222222222' })),
-      manager: { query: jest.fn().mockResolvedValue([{ cnt: 1 }]) },
+      manager: makeManagerWithTransaction(() => folderRepo?.save),
     };
 
     const moduleRef: TestingModule = await Test.createTestingModule({
@@ -167,6 +193,7 @@ describe('FolderService - 特殊保留名称校验', () => {
         { provide: getRepositoryToken(Folder), useValue: folderRepo },
         { provide: getRepositoryToken(File), useValue: { findOne: jest.fn(), find: jest.fn() } as Partial<Repository<File>> },
         { provide: AuditService, useValue: { log: jest.fn(), logAwait: jest.fn() } },
+        { provide: DirectoryNamespaceService, useValue: makeNamespaceMock() },
       ],
     }).compile();
 
@@ -285,6 +312,7 @@ describe('FolderService - getBreadcrumb', () => {
         { provide: getRepositoryToken(Folder), useValue: folderRepo },
         { provide: getRepositoryToken(File), useValue: { findOne: jest.fn(), find: jest.fn() } as Partial<Repository<File>> },
         { provide: AuditService, useValue: { log: jest.fn(), logAwait: jest.fn() } },
+        { provide: DirectoryNamespaceService, useValue: makeNamespaceMock() },
       ],
     }).compile();
 
@@ -396,6 +424,7 @@ describe('FolderService - moveFolder（G6-02 事务 + FOR UPDATE 锁）', () => 
         { provide: getRepositoryToken(Folder), useValue: folderRepo },
         { provide: getRepositoryToken(File), useValue: { findOne: jest.fn(), find: jest.fn() } as Partial<Repository<File>> },
         { provide: AuditService, useValue: audit },
+        { provide: DirectoryNamespaceService, useValue: makeNamespaceMock() },
       ],
     }).compile();
 
@@ -480,6 +509,8 @@ describe('FolderService - restoreFolder（G6-05 祖先链校验）', () => {
   function makeTransactionManager(overrides: Record<string, unknown> = {}) {
     return {
       update: jest.fn(async () => ({ affected: 1 })),
+      // v1.2.6：恢复流程在事务内回查还原实体以重新激活名称行；默认空结果
+      getRepository: jest.fn(() => ({ find: jest.fn(async () => []) })),
       ...overrides,
     };
   }
@@ -502,6 +533,7 @@ describe('FolderService - restoreFolder（G6-05 祖先链校验）', () => {
         { provide: getRepositoryToken(Folder), useValue: folderRepo },
         { provide: getRepositoryToken(File), useValue: { findOne: jest.fn(), find: jest.fn() } as Partial<Repository<File>> },
         { provide: AuditService, useValue: audit },
+        { provide: DirectoryNamespaceService, useValue: makeNamespaceMock() },
       ],
     }).compile();
 
@@ -545,7 +577,7 @@ describe('FolderService - copyFile（G6-07 源文件状态校验）', () => {
 
   let service: FolderService;
   let folderRepo: any;
-  let fileRepo: { findOne: jest.Mock; create: jest.Mock; save: jest.Mock };
+  let fileRepo: { findOne: jest.Mock; create: jest.Mock; save: jest.Mock; manager: { transaction: jest.Mock } };
   let audit: { log: jest.Mock; logAwait: jest.Mock };
 
   beforeEach(async () => {
@@ -553,12 +585,17 @@ describe('FolderService - copyFile（G6-07 源文件状态校验）', () => {
       findOne: jest.fn(),
       create: jest.fn((d: Partial<Folder>) => d as Folder),
       save: jest.fn(),
-      manager: { query: jest.fn().mockResolvedValue([{ cnt: 1 }]) },
+      manager: makeManagerWithTransaction(() => folderRepo?.save),
     };
     fileRepo = {
       findOne: jest.fn(),
       create: jest.fn((d: Partial<File>) => ({ ...d, id: 'bbbbbbbb-0000-4000-8000-000000000002' })),
       save: jest.fn(async (e: Partial<File>) => e),
+      // v1.2.6：copyFile 在事务内完成副本保存 + 名称占用
+      manager: {
+        transaction: jest.fn(async (cb: (m: unknown) => Promise<unknown>) =>
+          cb({ getRepository: () => ({ save: fileRepo.save }) })),
+      },
     };
     audit = { log: jest.fn(), logAwait: jest.fn() };
 
@@ -568,6 +605,7 @@ describe('FolderService - copyFile（G6-07 源文件状态校验）', () => {
         { provide: getRepositoryToken(Folder), useValue: folderRepo },
         { provide: getRepositoryToken(File), useValue: fileRepo },
         { provide: AuditService, useValue: audit },
+        { provide: DirectoryNamespaceService, useValue: makeNamespaceMock() },
       ],
     }).compile();
 

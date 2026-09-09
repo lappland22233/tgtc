@@ -8,17 +8,19 @@ import * as path from 'path';
 import FormData from 'form-data';
 import { TelegramFileNotFoundError, TelegramStreamPathError } from './telegram.errors';
 
-interface TelegramMediaResult {
-  document?: { file_id?: string };
-  animation?: { file_id?: string };
-  video?: { file_id?: string };
-  audio?: { file_id?: string };
-  voice?: { file_id?: string };
+interface TelegramMedia {
+  file_id?: string;
+  file_size?: number;
 }
 
-interface TelegramSendDocumentResponse {
-  ok?: boolean;
-  result?: TelegramMediaResult;
+interface TelegramMediaResult {
+  document?: TelegramMedia;
+  animation?: TelegramMedia;
+  video?: TelegramMedia;
+  audio?: TelegramMedia;
+  voice?: TelegramMedia;
+  /** 自建 Bot API 严格无缓存扩展：false 表示远端消息成功但 TDLib 本地副本待释放。 */
+  local_cache_released?: boolean;
 }
 
 @Injectable()
@@ -245,6 +247,76 @@ export class TelegramService {
   }
 
   /**
+   * multipart 上传专用 POST：请求级关闭自动重定向（maxRedirects=0）。
+   * Axios 会因此选择原生 http/https 传输，绕过 follow-redirects 对请求体
+   * chunk 的整包保留（_requestBodyBuffers）——这是大文件上传 O(文件大小)
+   * 内存峰值与上传后内存水位不回落的根源；原生分支仍对流式请求体执行
+   * maxBodyLength 校验（计入整个 multipart 请求体）。
+   * 3xx 视为失败：不跟随、不重发文件。
+   */
+  private async postUploadMultipart<TResult>(
+    method: string,
+    form: FormData,
+    options: {
+      timeoutMs: number;
+      maxSize: number;
+      signal?: AbortSignal;
+      /** 流式上传的一次性源流：由本服务负责在请求结束后关闭 */
+      source?: Readable;
+      /** 自建 Bot API 成功回执后删除 TDLib 本地媒体副本；仅严格无缓存上传启用。 */
+      noCache?: boolean;
+    },
+  ): Promise<TResult | undefined> {
+    try {
+      const response = await axios.post<{ result?: TResult }>(`${this.getBaseUrl()}/${method}`, form, {
+        headers: {
+          ...form.getHeaders(),
+          ...(options.noCache ? { 'X-Telegram-No-Cache': '1' } : {}),
+        },
+        maxRedirects: 0,
+        timeout: options.timeoutMs,
+        maxContentLength: options.maxSize,
+        maxBodyLength: options.maxSize,
+        signal: options.signal,
+      });
+      return response.data?.result;
+    } catch (error) {
+      // 3xx：给出可操作的配置提示；错误信息不携带 Location，避免跳转目标中的凭据泄露。
+      const status = (error as { response?: { status?: number } })?.response?.status;
+      if (typeof status === 'number' && status >= 300 && status < 400) {
+        throw new Error(
+          `上传目标返回重定向响应 (${status})：已按策略禁止跟随，请将 TELEGRAM_API_BASE 配置为无 3xx 跳转的最终上传地址`,
+        );
+      }
+      throw error;
+    } finally {
+      // multipart 请求结束（成功/失败/取消）立即释放传输资源，先于 getFileInfo 等后续查询
+      this.releaseUploadResources(form, options.source);
+    }
+  }
+
+  /**
+   * 释放一次 multipart 上传占用的传输层资源：
+   * - 源文件流销毁后文件句柄即刻释放（先于调用方删除临时文件，兼容 Windows 句柄行为）；
+   * - form-data 底层 CombinedStream.destroy 重置内部队列并发出 close；
+   * - 已结束/已销毁的流上调用是安全的；清理失败不得覆盖原始业务错误。
+   */
+  private releaseUploadResources(form: FormData, source?: Readable): void {
+    if (source && !source.destroyed && !source.readableEnded) {
+      try {
+        source.destroy();
+      } catch {
+        // 忽略清理异常
+      }
+    }
+    try {
+      (form as unknown as { destroy?: () => void }).destroy?.();
+    } catch {
+      // 忽略清理异常
+    }
+  }
+
+  /**
    * 调用 Telegram /getFile 获取元数据，不请求 /file/bot... 下载地址，不传输文件内容。
    * 上传提交后的路径解析允许较长等待；批量体检使用独立短超时，避免单项探测拖慢整批。
    */
@@ -293,6 +365,7 @@ export class TelegramService {
     filename: string,
     signal?: AbortSignal,
     knownLength?: number,
+    options?: { noCache?: boolean },
   ): Promise<{
     file_id: string;
     file_path: string;
@@ -316,23 +389,23 @@ export class TelegramService {
 
       // 服务层上传体积上限（默认 2GB，对齐 Telegram 本地 Bot API 上限），可通过环境变量覆盖
       const maxSize = Number(process.env.TELEGRAM_MAX_UPLOAD_SIZE) || 2 * 1024 * 1024 * 1024;
-      const response = await axios.post<TelegramSendDocumentResponse>(`${this.getBaseUrl()}/sendDocument`, form, {
-        headers: form.getHeaders(),
-        timeout: 15 * 60 * 1000,           // 大文件上传超时 15 分钟
-        maxContentLength: maxSize,
-        maxBodyLength: maxSize,
+      const result = await this.postUploadMultipart<TelegramMediaResult>('sendDocument', form, {
+        timeoutMs: 15 * 60 * 1000,         // 大文件上传超时 15 分钟
+        maxSize,
         signal,
+        source: isStream ? file : undefined,
+        noCache: options?.noCache === true,
       });
 
-      const result = response.data?.result;
       // 自托管 Bot API 即使接收 sendDocument，也可能按内容重新识别媒体类型：
       // MP4 可能被识别为 animation/video，MP3/OGG 等音频可能被识别为 audio/voice。
       // 普通 document 保持优先，避免多媒体字段并存时改变现有文件行为。
-      const file_id = result?.document?.file_id
-        || result?.animation?.file_id
-        || result?.video?.file_id
-        || result?.audio?.file_id
-        || result?.voice?.file_id;
+      const media = result?.document
+        || result?.animation
+        || result?.video
+        || result?.audio
+        || result?.voice;
+      const file_id = media?.file_id;
       if (!file_id) {
         const mediaFields = result && typeof result === 'object'
           ? Object.keys(result).filter((key) => key !== 'text').slice(0, 10).join(', ') || 'none'
@@ -341,9 +414,45 @@ export class TelegramService {
         throw new Error('Telegram sendDocument 响应缺少可识别的媒体 file_id');
       }
 
-      // sendDocument 返回的 file_path 不可靠，需二次调用 getFile 获取真实路径
-      return this.getFileInfo(file_id);
+      // 上传回执已包含可持久化 file_id（通常也有 file_size）。不得在这里调用普通
+      // getFile：自建 Bot API 的非 metadata_only getFile 会将刚上传的媒体完整下载进 workdir。
+      // file_path 留空；实际下载/恢复时由相应路径按需解析，避免改变 file_id 与回执语义。
+      const responseSize = media.file_size;
+      const fallbackSize = isStream ? knownLength : file.length;
+      const file_size = typeof responseSize === 'number' && Number.isSafeInteger(responseSize) && responseSize >= 0
+        ? responseSize
+        : (typeof fallbackSize === 'number' && Number.isSafeInteger(fallbackSize) && fallbackSize >= 0
+          ? fallbackSize
+          : 0);
+      return {
+        file_id,
+        file_path: '',
+        file_size,
+        // 严格任务要求 fork 明确确认本地媒体已释放；缺字段的旧 fork 保守标记 false，
+        // Worker 只会重试 releaseLocalFile，绝不重新发送同一 Telegram 文件。
+        ...(options?.noCache ? { localCacheReleased: result?.local_cache_released === true } : {}),
+      };
     }, 'uploadFile', retries);
+  }
+
+  /**
+   * 自建 Bot API 扩展：通过远端 file_id 定位并删除 TDLib 本地媒体副本。
+   * 此接口不删除 Telegram 消息或云端文件；仅供严格无缓存上传在已持久化回执后重试清理。
+   */
+  async releaseLocalFile(fileId: string): Promise<void> {
+    if (!fileId || fileId.length > 4096) {
+      throw new TelegramFileNotFoundError('非法的 Telegram file_id');
+    }
+    await this.telegramRequest(async () => {
+      const response = await axios.post<{ ok?: boolean; result?: boolean }>(
+        `${this.getBaseUrl()}/releaseLocalFile`,
+        { file_id: fileId },
+        { timeout: 30 * 1000, maxRedirects: 0 },
+      );
+      if (response.data?.ok !== true || response.data.result !== true) {
+        throw new Error('Telegram 本地媒体释放未确认成功');
+      }
+    }, 'releaseLocalFile');
   }
 
   async uploadPhoto(
@@ -360,21 +469,21 @@ export class TelegramService {
       form.append('chat_id', this.chatId);
       form.append('photo', file, filename);
 
-      const response = await axios.post(`${this.getBaseUrl()}/sendPhoto`, form, {
-        headers: form.getHeaders(),
-        timeout: 5 * 60 * 1000,          // Telegram API 请求超时 5 分钟
-        maxContentLength: 700 * 1024 * 1024, // 最大请求体 700MB
-        maxBodyLength: 700 * 1024 * 1024,
+      const result = await this.postUploadMultipart<{ photo?: Array<{ file_id?: string }> }>('sendPhoto', form, {
+        timeoutMs: 5 * 60 * 1000,          // Telegram API 请求超时 5 分钟
+        maxSize: 700 * 1024 * 1024,        // 最大请求体 700MB
         signal,
       });
 
-      const result = response.data.result;
       // sendPhoto 消息中可能包含多个尺寸，取最后一个（最大分辨率）的 file_id
-      const photos = result.photo;
+      const photos = result?.photo;
       if (!photos || photos.length === 0) {
         throw new Error('Telegram sendPhoto 响应缺少 photo 信息，可能文件格式不被支持');
       }
       const file_id = photos[photos.length - 1].file_id;
+      if (!file_id) {
+        throw new Error('Telegram sendPhoto 响应缺少 photo 信息，可能文件格式不被支持');
+      }
 
       // sendPhoto 返回的 file_path 不可靠，需二次调用 getFile 获取真实路径
       return this.getFileInfo(file_id);

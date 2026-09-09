@@ -8,7 +8,9 @@ describe('BehaviorAnalyzer',()=>{
   .mockResolvedValueOnce([{ip:'1.1.1.1',unique_files:51,distinct_users:2,total_downloads:60}])
   .mockResolvedValueOnce([{uploaderId:'u',upload_count:101}])
   .mockResolvedValueOnce([{fileId:'f',unique_ips:201,total_access:300}])
-  .mockResolvedValueOnce([{night_avg:30,all_avg:10}])
+  // v1.2.6 契约：night_count/night_hours/all_avg；nightAvg=night_count/3=100，
+  // 门槛（≥300 次、≥60/h、>3×全天均值 30）全部满足时才产生 time_anomaly
+  .mockResolvedValueOnce([{night_count:300,night_hours:3,all_avg:10}])
   .mockResolvedValueOnce([])
   .mockResolvedValueOnce([]);
  const r=await s.detectAnomalies(); expect(r.map(x=>x.type)).toEqual(['abnormal_download','abnormal_upload','abnormal_sharing','time_anomaly'])});

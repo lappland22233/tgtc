@@ -193,6 +193,12 @@ describe('AdminService 通用配置写入白名单 (G7-01)', () => {
     ).rejects.toThrow('不允许通过通用配置端点修改未声明的键');
   });
 
+  it('updateConfig 对 SITE_TITLE 执行非空和长度校验', async () => {
+    const { service } = buildAdminService();
+    await expect(service.updateConfig(user, 'SITE_TITLE', '   ')).rejects.toThrow('网站标题不能为空');
+    await expect(service.updateConfig(user, 'SITE_TITLE', 'a'.repeat(201))).rejects.toThrow('网站标题不能超过 200 个字符');
+  });
+
   it('updateConfig 允许白名单内的普通配置键并写入', async () => {
     const { auditService } = buildAdminService();
     const configCache = {

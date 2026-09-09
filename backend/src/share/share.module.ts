@@ -13,6 +13,7 @@ import { SharePreviewSessionService } from './share-preview-session.service';
 import { ShareFolderBrowseService } from './share-folder-browse.service';
 import { SharePreviewSession } from '../common/entities/share-preview-session.entity';
 import { FileModule } from '../file/file.module';
+import { ApiKeyModule } from '../api-key/api-key.module';
 import { ConfigCacheModule } from '../common/services/config-cache.module';
 import { RateLimitModule } from '../common/services/rate-limit.module';
 import { MediaTicketModule } from '../common/services/media-ticket.module';
@@ -36,6 +37,7 @@ import { MediaTicketModule } from '../common/services/media-ticket.module';
   imports: [
     TypeOrmModule.forFeature([ShareLink, File, Folder, BannedIP, SharePreviewSession]),
     FileModule,
+    ApiKeyModule,
     ConfigCacheModule,
     RateLimitModule,
     MediaTicketModule,

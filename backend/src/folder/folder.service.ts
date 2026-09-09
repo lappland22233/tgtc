@@ -7,6 +7,7 @@ import { AuditService } from '../common/services/audit.service';
 import { AuditAction } from '../common/entities/audit-log.entity';
 import { CreateFolderDto, RenameFolderDto, MoveFolderDto, MoveFileDto, RenameFileDto, CopyFileDto } from './folder.dto';
 import { databaseCast, databaseForUpdate, databaseQuery, getDatabaseType, isDatabaseUniqueViolation } from '../database/database-types';
+import { DirectoryNamespaceService } from '../common/services/directory-namespace.service';
 
 const SOFT_DELETE_GRACE_DAYS = 7;
 
@@ -39,6 +40,7 @@ export class FolderService {
     @InjectRepository(File)
     private readonly fileRepo: Repository<File>,
     private readonly audit: AuditService,
+    private readonly namespace: DirectoryNamespaceService,
   ) {}
 
   // ---------- 查询方法 ----------
@@ -167,11 +169,23 @@ export class FolderService {
     });
     let saved: Folder;
     try {
-      saved = await this.folderRepo.save(folder);
+      // v1.2.6：文件夹记录与统一命名空间占用在同一事务内完成，
+      // 与文件/文件夹跨表重名（大小写不敏感）冲突时整体回滚。
+      saved = await this.folderRepo.manager.transaction(async (manager) => {
+        const created = await manager.getRepository(Folder).save(folder);
+        await this.namespace.acquire(manager, {
+          ownerId,
+          folderId: dto.parentId ?? null,
+          name: dto.name,
+          entityType: 'folder',
+          entityId: created.id,
+        });
+        return created;
+      });
     } catch (error: unknown) {
       // G6-06：并发下同层重名可能绕过服务层 pre-check，被部分唯一索引（23505）兜底拦截，
       // 统一转为 409 冲突，与 pre-check 的语义一致。
-      this.throwConflictIfUniqueViolation(error, '同层级下已存在同名文件夹');
+      this.throwConflictIfUniqueViolation(error, '同层级下已存在同名文件或文件夹');
       throw error;
     }
     this.audit.log({
@@ -204,10 +218,21 @@ export class FolderService {
     folder.name = dto.name;
     let saved: Folder;
     try {
-      saved = await this.folderRepo.save(folder);
+      // v1.2.6：重命名与统一命名空间键更新同事务，跨表（文件）重名同样冲突
+      saved = await this.folderRepo.manager.transaction(async (manager) => {
+        const renamed = await manager.getRepository(Folder).save(folder);
+        await this.namespace.acquire(manager, {
+          ownerId,
+          folderId: folder.parentId ?? null,
+          name: dto.name,
+          entityType: 'folder',
+          entityId: id,
+        });
+        return renamed;
+      });
     } catch (error: unknown) {
       // G6-06：并发重命名撞同名，由唯一索引兜底转 409
-      this.throwConflictIfUniqueViolation(error, '同层级下已存在同名文件夹');
+      this.throwConflictIfUniqueViolation(error, '同层级下已存在同名文件或文件夹');
       throw error;
     }
     this.audit.log({
@@ -286,9 +311,17 @@ export class FolderService {
       let saved: Folder;
       try {
         saved = await repo.save(locked);
+        // v1.2.6：移动同步更新统一命名空间 scopeKey；目标目录存在同名文件/文件夹时冲突回滚
+        await this.namespace.acquire(manager, {
+          ownerId,
+          folderId: newParentIdFinal,
+          name: locked.name,
+          entityType: 'folder',
+          entityId: id,
+        });
       } catch (error: unknown) {
         // G6-06：并发移动撞同名，由唯一索引兜底转 409
-        this.throwConflictIfUniqueViolation(error, '目标层级下已存在同名文件夹');
+        this.throwConflictIfUniqueViolation(error, '目标层级下已存在同名文件或文件夹');
         throw error;
       }
       return { saved, oldParentId };
@@ -316,7 +349,7 @@ export class FolderService {
     // 拿到子树所有 folder id（含自身），沿 parentId 递归 CTE，不依赖闭包表
     const folderIds = await this.collectSubtreeIds(id);
 
-    // 事务内原子执行：软删子文件夹 + 软删内含文件，避免中途失败导致部分删除不一致
+    // 事务内原子执行：软删子文件夹 + 软删内含文件 + 释放统一命名空间名称
     await this.folderRepo.manager.transaction(async (manager) => {
       await manager.update(
         Folder,
@@ -328,6 +361,18 @@ export class FolderService {
         { folderId: In(folderIds), isDeleted: false },
         { isDeleted: true, deleteRequestedAt: now, deleteScheduledAt: scheduledAt, deletedByAdmin: byAdmin },
       );
+
+      // v1.2.6：释放子树内所有文件夹与文件的名称占用（幂等）
+      const affectedFileIds = (
+        await manager.getRepository(File).find({
+          where: { folderId: In(folderIds), deleteRequestedAt: now },
+          select: ['id'],
+        })
+      ).map((f) => f.id);
+      await this.namespace.releaseMany(manager, [
+        ...folderIds.map((id) => ({ entityType: 'folder' as const, entityId: id })),
+        ...affectedFileIds.map((id) => ({ entityType: 'file' as const, entityId: id })),
+      ]);
     });
 
     await this.audit.logAwait({
@@ -380,19 +425,58 @@ export class FolderService {
       ? { deleteScheduledAt: batchScheduledAt }
       : { deleteRequestedAt: batchRequestedAt };
 
-    // 事务内原子还原子文件夹与内含文件
-    await this.folderRepo.manager.transaction(async (manager) => {
-      await manager.update(
-        Folder,
-        { id: In(folderIds), ...batchCriteria } as any,
-        { isDeleted: false, deleteRequestedAt: null, deleteScheduledAt: null },
-      );
-      await manager.update(
-        File,
-        { folderId: In(folderIds), ...batchCriteria } as any,
-        { isDeleted: false, deleteRequestedAt: null, deleteScheduledAt: null, deletedByAdmin: false },
-      );
-    });
+    // 事务内原子还原子文件夹与内含文件，并重新占用统一命名空间名称；
+    // 与其他活跃名称（文件或文件夹）冲突时整体回滚并给出明确提示。
+    try {
+      await this.folderRepo.manager.transaction(async (manager) => {
+        await manager.update(
+          Folder,
+          { id: In(folderIds), ...batchCriteria } as any,
+          { isDeleted: false, deleteRequestedAt: null, deleteScheduledAt: null },
+        );
+        await manager.update(
+          File,
+          { folderId: In(folderIds), ...batchCriteria } as any,
+          { isDeleted: false, deleteRequestedAt: null, deleteScheduledAt: null, deletedByAdmin: false },
+        );
+
+        // v1.2.6：收集本批实际还原的实体并重新占用名称行。
+        // N3：走完整 acquire 而非仅 reactivateMany——升级前已软删的实体没有名称行，
+        // UPDATE 命中 0 行且静默成功，恢复后会出现重名（唯一约束失效）。
+        // acquire 对有名称行的实体原位重激活，对无名称行的实体补建并与活跃名称冲突校验。
+        const restoredFolders = await manager.getRepository(Folder).find({
+          where: { id: In(folderIds), isDeleted: false, deleteRequestedAt: null } as any,
+          select: ['id', 'ownerId', 'parentId', 'name'],
+        });
+        for (const f of restoredFolders) {
+          await this.namespace.acquire(manager, {
+            ownerId: f.ownerId,
+            folderId: f.parentId,
+            name: f.name,
+            entityType: 'folder',
+            entityId: f.id,
+          });
+        }
+        const restoredFiles = await manager.getRepository(File).find({
+          where: { folderId: In(folderIds), isDeleted: false, deleteRequestedAt: null } as any,
+          select: ['id', 'uploaderId', 'folderId', 'originalName'],
+        });
+        for (const f of restoredFiles) {
+          await this.namespace.acquire(manager, {
+            ownerId: f.uploaderId,
+            folderId: f.folderId,
+            name: f.originalName,
+            entityType: 'file',
+            entityId: f.id,
+          });
+        }
+      });
+    } catch (error: unknown) {
+      if (isDatabaseUniqueViolation(error)) {
+        throw new BadRequestException('恢复失败：目标位置已存在同名文件或文件夹，请先处理重名后重试');
+      }
+      throw error;
+    }
 
     this.audit.log({
       action: 'folder_restore' as AuditAction,
@@ -416,7 +500,18 @@ export class FolderService {
     }
     const oldFolderId = file.folderId;
     file.folderId = dto.folderId ?? null;
-    const saved = await this.fileRepo.save(file);
+    // v1.2.6：移动与统一命名空间 scopeKey 更新同事务；目标目录有同名文件/文件夹时冲突
+    const saved = await this.fileRepo.manager.transaction(async (manager) => {
+      const moved = await manager.getRepository(File).save(file);
+      await this.namespace.acquire(manager, {
+        ownerId,
+        folderId: dto.folderId ?? null,
+        name: file.originalName,
+        entityType: 'file',
+        entityId: fileId,
+      });
+      return moved;
+    });
     this.audit.log({
       action: 'file_move' as AuditAction,
       userId: ownerId,
@@ -442,7 +537,18 @@ export class FolderService {
     }
     const oldName = file.originalName;
     file.originalName = dto.newOriginalName;
-    const saved = await this.fileRepo.save(file);
+    // v1.2.6：重命名与统一命名空间 nameKey 更新同事务；与同目录文件夹重名同样冲突
+    const saved = await this.fileRepo.manager.transaction(async (manager) => {
+      const renamed = await manager.getRepository(File).save(file);
+      await this.namespace.acquire(manager, {
+        ownerId,
+        folderId: file.folderId ?? null,
+        name: dto.newOriginalName,
+        entityType: 'file',
+        entityId: fileId,
+      });
+      return renamed;
+    });
     this.audit.log({
       action: 'file_rename' as AuditAction,
       userId: ownerId,
@@ -480,9 +586,10 @@ export class FolderService {
       await this.assertFolderOwned(dto.folderId, ownerId);
     }
 
+    const copyName = await this.buildCopyName(source.originalName, ownerId, dto.folderId ?? null);
     const copy = this.fileRepo.create({
       filename: source.filename,
-      originalName: await this.buildCopyName(source.originalName, ownerId, dto.folderId ?? null),
+      originalName: copyName,
       mimeType: source.mimeType,
       size: source.size,
       telegramFileId: source.telegramFileId,
@@ -499,7 +606,18 @@ export class FolderService {
       uploaderId: ownerId,
       status: 'ready',
     });
-    const saved = await this.fileRepo.save(copy);
+    // v1.2.6：副本记录与名称占用同事务（副本名已按跨表命名空间探测，并发时由唯一索引兜底）
+    const saved = await this.fileRepo.manager.transaction(async (manager) => {
+      const created = await manager.getRepository(File).save(copy);
+      await this.namespace.acquire(manager, {
+        ownerId,
+        folderId: dto.folderId ?? null,
+        name: copyName,
+        entityType: 'file',
+        entityId: created.id,
+      });
+      return created;
+    });
     this.audit.log({
       action: 'file_copy' as AuditAction,
       userId: ownerId,
@@ -511,8 +629,9 @@ export class FolderService {
   }
 
   /**
-   * 生成不与目标文件夹内现有文件重名的副本名称。
+   * 生成不与目标目录内现有文件或文件夹（大小写不敏感）重名的副本名称。
    * 形如 "photo.png - 副本"、"photo.png - 副本 2"……
+   * v1.2.6：改查统一命名空间（directory_names），跨文件/文件夹判定。
    */
   private async buildCopyName(originalName: string, ownerId: string, folderId: string | null): Promise<string> {
     const base = `${originalName} - 副本`;
@@ -520,11 +639,8 @@ export class FolderService {
     let counter = 1;
     // 逐个探测重名（副本操作低频，O(k) 查询可接受；k 为同名副本数量）
     for (;;) {
-      const exists = await this.fileRepo.findOne({
-        where: { uploaderId: ownerId, folderId: folderId ?? IsNull(), originalName: candidate, isDeleted: false },
-        select: ['id'],
-      });
-      if (!exists) return candidate;
+      const taken = await this.namespace.isNameTaken(ownerId, folderId, candidate);
+      if (!taken) return candidate;
       counter += 1;
       candidate = `${base} ${counter}`;
     }

@@ -30,8 +30,15 @@ export class UserController {
   }
 
   @Get('me/stats')
-  async getMyStats(@CurrentUser() user: User) {
-    return this.userService.getUserStats(user.id);
+  async getMyStats(@CurrentUser() user: User, @Query('todayStart') todayStart?: string) {
+    // 可选 todayStart（ISO 时间）：以客户端本地“今日零点”为口径统计今日上传，
+    // 避免服务器时区与用户时区不一致导致跨日错位；未提供或缺省时用服务器本地日边界。
+    let todayStartDate: Date | undefined;
+    if (todayStart) {
+      const parsed = new Date(todayStart);
+      if (!Number.isNaN(parsed.getTime())) todayStartDate = parsed;
+    }
+    return this.userService.getUserStats(user.id, { todayStart: todayStartDate });
   }
 
   @Get(':id')

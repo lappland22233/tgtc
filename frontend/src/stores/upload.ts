@@ -107,6 +107,8 @@ export const useUploadStore = defineStore('upload', () => {
   const entries = shallowRef<QueueEntry[]>([]);
   const isPumping = ref(false);
   const fileConcurrency = ref(2);
+  const strictSerialUpload = ref(false);
+  let preferredFileConcurrency = 2;
   const activeCount = ref(0);
   const queuedCount = ref(0);
   const successCount = ref(0);
@@ -248,7 +250,7 @@ export const useUploadStore = defineStore('upload', () => {
   }
 
   async function uploadChunked(entry: QueueEntry, file: File, controller: AbortController) {
-    const chunked = useChunkedUpload(2);
+    const chunked = useChunkedUpload(strictSerialUpload.value ? 1 : 2);
     chunkedSessions.set(entry.uid, chunked);
     const result = await chunked.uploadFile(
       file,
@@ -306,7 +308,7 @@ export const useUploadStore = defineStore('upload', () => {
     try {
       for (;;) {
         try {
-          if (file.size > CHUNK_THRESHOLD) await uploadChunked(entry, file, controller);
+          if (strictSerialUpload.value || file.size > CHUNK_THRESHOLD) await uploadChunked(entry, file, controller);
           else await uploadSmall(entry, file, controller);
           resetRetryBreaker();
           return;
@@ -509,7 +511,15 @@ export const useUploadStore = defineStore('upload', () => {
   }
 
   function setFileConcurrency(n: number) {
-    fileConcurrency.value = Math.min(4, Math.max(1, Math.floor(n)));
+    preferredFileConcurrency = Math.min(4, Math.max(1, Math.floor(n)));
+    fileConcurrency.value = strictSerialUpload.value ? 1 : preferredFileConcurrency;
+    if (queuedCount.value > 0) ensurePump();
+  }
+
+  /** 严格小盘模式下，文件队列和单文件分片均串行；关闭后恢复用户选择的并发值。 */
+  function setStrictSerialUpload(enabled: boolean) {
+    strictSerialUpload.value = enabled;
+    fileConcurrency.value = enabled ? 1 : preferredFileConcurrency;
     if (queuedCount.value > 0) ensurePump();
   }
 
@@ -525,12 +535,14 @@ export const useUploadStore = defineStore('upload', () => {
     finishedCount,
     overallProgress,
     overallSpeed,
+    strictSerialUpload,
     enqueue,
     enqueueFolderFiles,
     cancelOne,
     cancelAll,
     clearFinished,
     setFileConcurrency,
+    setStrictSerialUpload,
     flushProgress,
   };
 });

@@ -1,0 +1,104 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://raw.githubusercontent.com/lappland22233/tgtc/main/scripts/release/release-manifest.schema.json",
+  "title": "TGTC release manifest",
+  "description": "TGTC 稳定版 Release 的机器可读清单。生成端（generate-manifest.sh）、校验端（validate-release.sh / 后端 update 模块 / updater.sh）必须以本文件为唯一字段契约；字段集合为封闭集合，未知主 schemaVersion 拒绝安装。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "version",
+    "channel",
+    "publishedAt",
+    "platform",
+    "arch",
+    "asset",
+    "minUpgradableVersion",
+    "maxUpgradableVersion",
+    "includesDbMigration",
+    "programRollbackSafe",
+    "healthCheck"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "description": "清单协议主版本。当前为 1；消费者遇到未知主版本必须拒绝。",
+      "type": "integer",
+      "const": 1
+    },
+    "version": {
+      "description": "稳定版本号 X.Y.Z（不含预发布/构建后缀），与 Git tag（去 v 前缀）、包名、包内 VERSION 完全一致。",
+      "type": "string",
+      "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)$"
+    },
+    "channel": {
+      "description": "更新通道。本期只发布 stable。",
+      "const": "stable"
+    },
+    "publishedAt": {
+      "description": "发布时间（ISO 8601，UTC）。",
+      "type": "string",
+      "format": "date-time"
+    },
+    "platform": {
+      "const": "linux"
+    },
+    "arch": {
+      "const": "x64"
+    },
+    "asset": {
+      "description": "唯一发行 ZIP 制品的名称、字节数与 SHA-256（小写十六进制）。资产名严格匹配，不做模糊选择。",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "size", "sha256"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^tgtc-v(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)-linux-x64\\.zip$"
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "minUpgradableVersion": {
+      "description": "可自动升级到本版本的最低当前版本（含边界）。低于该版本必须走人工运维流程。",
+      "type": "string",
+      "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)$"
+    },
+    "maxUpgradableVersion": {
+      "description": "可自动升级到本版本的最高当前版本（含边界）；null 表示不设上限。",
+      "type": ["string", "null"],
+      "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)$"
+    },
+    "includesDbMigration": {
+      "description": "本版本是否包含数据库迁移。为 true 时执行器必须在切换前完成备份与新目录迁移。",
+      "type": "boolean"
+    },
+    "programRollbackSafe": {
+      "description": "激活失败后仅回退程序（不逆向数据库）是否安全。为 false 时阻止自动流程并提示按运维文档人工升级。",
+      "type": "boolean"
+    },
+    "healthCheck": {
+      "description": "激活后健康检查路径与超时（毫秒）。执行器必须同时验证健康端点与 /api/version 等于目标版本。",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "timeoutMs"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "pattern": "^/[A-Za-z0-9._\\-/]*$"
+        },
+        "timeoutMs": {
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 600000
+        }
+      }
+    }
+  }
+}

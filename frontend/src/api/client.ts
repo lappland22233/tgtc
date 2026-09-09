@@ -181,7 +181,9 @@ client.interceptors.response.use(
     if (availabilityError) {
       console.warn(`[API] ${availabilityError.kind}:`, status, error.config?.url);
       showAvailabilityNotice(availabilityError.message);
-      return Promise.reject(new Error(availabilityError.message));
+      // 保留 cause 供调试/分类使用（如上传合并轮询需要区分暂时故障与业务失败）；
+      // 不保留 response，避免消费方误将其当作普通 HTTP 业务错误。
+      return Promise.reject(Object.assign(new Error(availabilityError.message), { cause: error }));
     }
 
     // Cloudflare 代理层错误（413 请求体过大 / 502 网关不可用 / 5xx 源站错误）
@@ -198,7 +200,7 @@ client.interceptors.response.use(
             : status === 520 || status === 521 || status === 522 || status === 523 || status === 524
               ? '源站暂时不可用，请稍后重试'
               : `CDN 代理层错误 (${status})，请稍后重试`;
-        return Promise.reject(new Error(cloudflareMsg));
+        return Promise.reject(Object.assign(new Error(cloudflareMsg), { cause: error }));
       }
     }
 

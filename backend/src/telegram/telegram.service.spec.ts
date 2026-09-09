@@ -120,102 +120,49 @@ describe('TelegramService realtime stream', () => {
   });
 
   describe('uploadFile media response compatibility', () => {
-    const mockFileInfo = (expectedFileId: string) => {
-      mockedAxios.get.mockResolvedValueOnce({
-        data: { result: { file_id: expectedFileId, file_path: 'documents/file.bin', file_size: 4 } },
-      } as any);
-    };
-
-    it('uses document.file_id for normal files', async () => {
+    it.each([
+      ['document', 'document-id', 'test.bin'],
+      ['animation', 'animation-id', 'short.mp4'],
+      ['video', 'video-id', 'video.mp4'],
+      ['audio', 'audio-id', 'song.mp3'],
+      ['voice', 'voice-id', 'memo.ogg'],
+    ])('uses %s.file_id without resolving the uploaded media through getFile', async (field, fileId, filename) => {
       mockedAxios.post.mockResolvedValueOnce({
-        data: { ok: true, result: { document: { file_id: 'document-id' } } },
+        data: { ok: true, result: { [field]: { file_id: fileId, file_size: 12 } } },
       } as any);
-      mockFileInfo('document-id');
 
-      const result = await createService().uploadFile(Buffer.from('test'), 'test.bin');
+      const result = await createService().uploadFile(Buffer.from('test'), filename);
 
-      expect(result.file_id).toBe('document-id');
-      expect(mockedAxios.get).toHaveBeenCalledWith(
-        expect.stringContaining('/getFile'),
-        expect.objectContaining({ params: { file_id: 'document-id' } }),
-      );
+      expect(result).toEqual({ file_id: fileId, file_path: '', file_size: 12 });
+      expect(mockedAxios.get).not.toHaveBeenCalled();
     });
 
-    it('falls back to animation.file_id for short MP4 responses', async () => {
-      mockedAxios.post.mockResolvedValueOnce({
-        data: { ok: true, result: { animation: { file_id: 'animation-id' } } },
-      } as any);
-      mockFileInfo('animation-id');
-
-      const result = await createService().uploadFile(Buffer.from('test'), 'short.mp4');
-
-      expect(result.file_id).toBe('animation-id');
-      expect(mockedAxios.get).toHaveBeenCalledWith(
-        expect.stringContaining('/getFile'),
-        expect.objectContaining({ params: { file_id: 'animation-id' } }),
-      );
-    });
-
-    it('falls back to video.file_id for MP4 video responses', async () => {
-      mockedAxios.post.mockResolvedValueOnce({
-        data: { ok: true, result: { video: { file_id: 'video-id' } } },
-      } as any);
-      mockFileInfo('video-id');
-
-      const result = await createService().uploadFile(Buffer.from('test'), 'video.mp4');
-
-      expect(result.file_id).toBe('video-id');
-      expect(mockedAxios.get).toHaveBeenCalledWith(
-        expect.stringContaining('/getFile'),
-        expect.objectContaining({ params: { file_id: 'video-id' } }),
-      );
-    });
-
-    it('falls back to audio.file_id for MP3/audio responses', async () => {
-      mockedAxios.post.mockResolvedValueOnce({
-        data: { ok: true, result: { audio: { file_id: 'audio-id' } } },
-      } as any);
-      mockFileInfo('audio-id');
-
-      const result = await createService().uploadFile(Buffer.from('test'), 'song.mp3');
-
-      expect(result.file_id).toBe('audio-id');
-      expect(mockedAxios.get).toHaveBeenCalledWith(
-        expect.stringContaining('/getFile'),
-        expect.objectContaining({ params: { file_id: 'audio-id' } }),
-      );
-    });
-
-    it('falls back to voice.file_id for voice responses', async () => {
-      mockedAxios.post.mockResolvedValueOnce({
-        data: { ok: true, result: { voice: { file_id: 'voice-id' } } },
-      } as any);
-      mockFileInfo('voice-id');
-
-      const result = await createService().uploadFile(Buffer.from('test'), 'memo.ogg');
-
-      expect(result.file_id).toBe('voice-id');
-      expect(mockedAxios.get).toHaveBeenCalledWith(
-        expect.stringContaining('/getFile'),
-        expect.objectContaining({ params: { file_id: 'voice-id' } }),
-      );
-    });
-
-    it('prefers document.file_id when multiple media fields exist', async () => {
+    it('prefers document metadata when multiple media fields exist', async () => {
       mockedAxios.post.mockResolvedValueOnce({
         data: {
           ok: true,
           result: {
-            document: { file_id: 'document-id' },
-            animation: { file_id: 'animation-id' },
+            document: { file_id: 'document-id', file_size: 12 },
+            animation: { file_id: 'animation-id', file_size: 7 },
           },
         },
       } as any);
-      mockFileInfo('document-id');
 
       const result = await createService().uploadFile(Buffer.from('test'), 'mixed.mp4');
 
-      expect(result.file_id).toBe('document-id');
+      expect(result).toEqual({ file_id: 'document-id', file_path: '', file_size: 12 });
+      expect(mockedAxios.get).not.toHaveBeenCalled();
+    });
+
+    it('falls back to the known upload size when Telegram omits file_size', async () => {
+      mockedAxios.post.mockResolvedValueOnce({
+        data: { ok: true, result: { document: { file_id: 'document-id' } } },
+      } as any);
+
+      const result = await createService().uploadFile(Buffer.from('test'), 'test.bin');
+
+      expect(result).toEqual({ file_id: 'document-id', file_path: '', file_size: 4 });
+      expect(mockedAxios.get).not.toHaveBeenCalled();
     });
 
     it('reports an invalid response without blaming the file format', async () => {
@@ -587,6 +534,136 @@ describe('TelegramService realtime stream', () => {
       const recoverCalls = mockedAxios.get.mock.calls.filter(([url]) => String(url).includes('/getFile'));
       // 恢复(1) + 每个并发调用的 getFileStream getFileInfo(2) = 3
       expect(recoverCalls.length).toBeLessThanOrEqual(3);
+    });
+  });
+
+  describe('upload transport memory fixes', () => {
+    const mockFileInfo = (expectedFileId: string) => {
+      mockedAxios.get.mockResolvedValueOnce({
+        data: { result: { file_id: expectedFileId, file_path: 'documents/file.bin', file_size: 4 } },
+      } as any);
+    };
+
+    it('sends uploads without following redirects (native transport, no body re-buffering)', async () => {
+      mockedAxios.post.mockResolvedValueOnce({
+        data: { ok: true, result: { document: { file_id: 'document-id' } } },
+      } as any);
+      mockFileInfo('document-id');
+
+      await createService().uploadFile(Buffer.from('test'), 'test.bin');
+
+      expect(mockedAxios.post).toHaveBeenCalledWith(
+        expect.stringContaining('/sendDocument'),
+        expect.anything(),
+        expect.objectContaining({
+          maxRedirects: 0,
+          timeout: 15 * 60 * 1000,
+        }),
+      );
+    });
+
+    it('sends sendPhoto without following redirects', async () => {
+      mockedAxios.post.mockResolvedValueOnce({
+        data: { ok: true, result: { photo: [{ file_id: 'p1' }, { file_id: 'p2' }] } },
+      } as any);
+      mockFileInfo('p2');
+
+      await createService().uploadPhoto(Buffer.from('img'), 'img.png');
+
+      expect(mockedAxios.post).toHaveBeenCalledWith(
+        expect.stringContaining('/sendPhoto'),
+        expect.anything(),
+        expect.objectContaining({ maxRedirects: 0 }),
+      );
+    });
+
+    it('destroys the upload source stream when the request fails', async () => {
+      const source = Readable.from(Buffer.alloc(1024));
+      const err502 = new Error('Bad Gateway');
+      (err502 as any).response = { status: 502, data: { ok: false, description: 'Bad Gateway' } };
+      mockedAxios.post.mockRejectedValueOnce(err502);
+
+      await expect(createService().uploadFile(source, 'test.bin')).rejects.toThrow('Bad Gateway');
+      expect(source.destroyed).toBe(true);
+    });
+
+    it('releases the source stream without issuing a follow-up getFile query', async () => {
+      const source = Readable.from(Buffer.from('abc'));
+      mockedAxios.post.mockResolvedValueOnce({
+        data: { ok: true, result: { document: { file_id: 'document-id' } } },
+      } as any);
+
+      const result = await createService().uploadFile(source, 'test.bin', undefined, 3);
+
+      expect(result).toEqual({ file_id: 'document-id', file_path: '', file_size: 3 });
+      expect(source.destroyed || source.readableEnded).toBe(true);
+      expect(mockedAxios.get).not.toHaveBeenCalled();
+    });
+
+    it('marks only strict no-cache uploads for Bot API local-media release', async () => {
+      mockedAxios.post.mockResolvedValueOnce({
+        data: {
+          ok: true,
+          result: { document: { file_id: 'document-id', file_size: 4 }, local_cache_released: true },
+        },
+      } as any);
+
+      await expect(createService().uploadFile(Buffer.from('test'), 'test.bin', undefined, 4, { noCache: true }))
+        .resolves.toEqual({ file_id: 'document-id', file_path: '', file_size: 4, localCacheReleased: true });
+
+      expect(mockedAxios.post).toHaveBeenCalledWith(
+        expect.stringContaining('/sendDocument'),
+        expect.anything(),
+        expect.objectContaining({
+          headers: expect.objectContaining({ 'X-Telegram-No-Cache': '1' }),
+        }),
+      );
+      expect(mockedAxios.get).not.toHaveBeenCalled();
+    });
+
+    it('exposes pending local-media cleanup and retries only the guarded release endpoint', async () => {
+      mockedAxios.post
+        .mockResolvedValueOnce({
+          data: {
+            ok: true,
+            result: { document: { file_id: 'document-id', file_size: 4 }, local_cache_released: false },
+          },
+        } as any)
+        .mockResolvedValueOnce({ data: { ok: true, result: true } } as any);
+      const service = createService();
+
+      await expect(service.uploadFile(Buffer.from('test'), 'test.bin', undefined, 4, { noCache: true }))
+        .resolves.toEqual({ file_id: 'document-id', file_path: '', file_size: 4, localCacheReleased: false });
+      await expect(service.releaseLocalFile('document-id')).resolves.toBeUndefined();
+
+      expect(mockedAxios.post).toHaveBeenLastCalledWith(
+        expect.stringContaining('/releaseLocalFile'),
+        { file_id: 'document-id' },
+        expect.objectContaining({ maxRedirects: 0, timeout: 30 * 1000 }),
+      );
+    });
+
+    it('rejects redirect responses without following or retrying them', async () => {
+      mockedAxios.post.mockRejectedValue({
+        response: { status: 302, data: {}, headers: { location: 'http://redirect.example/somewhere' } },
+      } as any);
+
+      await expect(createService().uploadFile(Buffer.from('test'), 'test.bin'))
+        .rejects.toThrow('重定向');
+      // 3xx 不是可重试错误：仅一次上传尝试，且不向 Location 重发请求体
+      expect(mockedAxios.post).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps stream uploads single-attempt and releases the source on exhausted retries', async () => {
+      const source = Readable.from(Buffer.from('x'));
+      const err429 = new Error('Request failed with status code 429');
+      (err429 as any).response = { status: 429, data: { ok: false, parameters: { retry_after: 1 } } };
+      mockedAxios.post.mockRejectedValue(err429);
+
+      await expect(createService().uploadFile(source, 'test.bin')).rejects.toThrow();
+      // 流式上传保持 1 次尝试（流只能消费一次），失败后源流已释放
+      expect(mockedAxios.post).toHaveBeenCalledTimes(1);
+      expect(source.destroyed).toBe(true);
     });
   });
 });

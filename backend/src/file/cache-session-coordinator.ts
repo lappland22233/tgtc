@@ -21,6 +21,7 @@ import { FileHandle } from 'fs/promises';
 import { EventEmitter } from 'events';
 import { randomUUID } from 'crypto';
 import type { CacheDiskManager } from './cache-disk-manager';
+import type { DownloadAdmissionService } from './download-admission.service';
 
 export interface CacheBuildSession {
   fileId: string;
@@ -71,6 +72,13 @@ export interface SessionCoordinatorDeps {
   /** 关闭信号：置位后不再新建 build/spool 会话，正在进行的会话按策略收尾 */
   isShuttingDown: () => boolean;
   setShuttingDown: (value: boolean) => void;
+  /**
+   * 下载磁盘准入（小盘持续下载修复）：spool/build 写盘前按卷预算准入。
+   * 可选注入；未注入时保持既有行为（仅并发预算），便于既有单测兼容。
+   */
+  admission?: DownloadAdmissionService;
+  /** 最低安全余量（字节），配合 admission 使用 */
+  minFreeDiskBytes?: () => number;
 }
 
 export class CacheSessionCoordinator {
@@ -117,6 +125,21 @@ export class CacheSessionCoordinator {
     return !this.shuttingDown && this.activeUpstreams < this.maxConcurrentUpstreams;
   }
 
+  /**
+   * 等待上游并发预算（下载排队修复）：
+   * 并发满额时不再立即 503，而是等待既有会话完成释放连接名额（有界轮询）。
+   * 返回 false 表示等待期间系统关闭，调用方应回退 503。
+   */
+  async waitForUpstreamSlot(timeoutMs = 60_000): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (!this.canStartUpstream()) {
+      if (this.shuttingDown) return false;
+      if (Date.now() >= deadline) return false;
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    return true;
+  }
+
   /** buildIdleTimeoutMs 供测试覆盖 */
   setBuildIdleTimeoutMs(value: number): void {
     this.buildIdleTimeoutMs = value;
@@ -139,7 +162,8 @@ export class CacheSessionCoordinator {
       if (session.expectedSize !== expectedSize) throw new Error('活动缓存会话的文件大小不一致');
       return session;
     }
-    // 冷回源并发预算（H-06）：达到上限或正在关闭时拒绝新建，调用方回退 503
+    // 冷回源并发预算（H-06）：达到上限或正在关闭时拒绝新建，调用方回退 503。
+    // 并发等待在调用方（FileCacheService，异步上下文）先完成，本方法保持同步契约。
     if (!this.canStartUpstream()) {
       throw new ServiceUnavailableException('系统回源繁忙，请稍后重试');
     }
@@ -361,9 +385,13 @@ export class CacheSessionCoordinator {
       // 大小不一致（覆盖 / 数据异常）：先清理旧 spool 再重建，避免旧大小消费者串流
       await this.teardownSpoolSession(session);
     }
-    // 冷回源并发预算（H-06）：达到上限或正在关闭时拒绝新建，调用方回退 503
+    // 冷回源并发预算（H-06）+ 排队修复：并发满额时等待名额释放，
+    // 不再立即 503；系统关闭或等待超时（60s）才回退拒绝。
     if (!this.canStartUpstream()) {
-      throw new ServiceUnavailableException('系统回源繁忙，请稍后重试');
+      const acquired = await this.waitForUpstreamSlot();
+      if (!acquired) {
+        throw new ServiceUnavailableException('系统回源繁忙，请稍后重试');
+      }
     }
     const events = new EventEmitter();
     events.setMaxListeners(0);
@@ -390,12 +418,40 @@ export class CacheSessionCoordinator {
     return session;
   }
 
+  /**
+   * 下载磁盘准入（小盘持续下载修复）：
+   * spool 写盘前按卷剩余空间准入，空间不足时进入有界 FIFO 等待，
+   * 空间释放（本服务会话完成/清理）后事件唤醒，不再立即 503/ENOSPC。
+   * - 并发预算仍保留：等待期间不启动上游连接；
+   * - admission 未注入（旧测试/降级）时直接放行。
+   */
+  private async admitSpoolWrite(expectedSize: number): Promise<void> {
+    const admission = this.deps.admission;
+    if (!admission) return;
+    const minFreeBytes = this.deps.minFreeDiskBytes?.() ?? 0;
+    await admission.admit(expectedSize, minFreeBytes);
+  }
+
+  /** 会话结束后全额归还准入额度并唤醒等待队列 */
+  private releaseAdmissionOnSessionEnd(admittedBytes: number): void {
+    const admission = this.deps.admission;
+    if (!admission) return;
+    const minFreeBytes = this.deps.minFreeDiskBytes?.() ?? 0;
+    // 预约语义为「峰值增量」：无论实际写入多少（含完整下载 written == admitted），
+    // 会话结束必须全额归还 admittedBytes；已写入部分已转为物理占用、由 statfs 反映。
+    // 按差值归还会导致完整下载归还 0、预约量永久累积（P1-09）。
+    admission.release(admittedBytes, minFreeBytes);
+  }
+
   private async runSpoolSession(
     session: SpoolSession,
     fetchFn: () => Promise<{ stream: Readable; info: { file_size: number } }>,
   ): Promise<void> {
     let idleTimer: NodeJS.Timeout | undefined;
     let totalTimer: NodeJS.Timeout | undefined;
+    // 等待期间不占用上游/不写盘：先做磁盘准入（有界等待），拿到许可后再计时。
+    await this.admitSpoolWrite(session.expectedSize);
+    const admittedBytes = session.expectedSize;
     const resetIdleDeadline = () => {
       if (idleTimer) clearTimeout(idleTimer);
       idleTimer = setTimeout(() => {
@@ -506,6 +562,10 @@ export class CacheSessionCoordinator {
       session.upstream = undefined;
       session.output = undefined;
       this.activeUpstreams = Math.max(0, this.activeUpstreams - 1);
+      // 会话结束（完成/失败）全额归还准入额度并唤醒等待队列；
+      // spool 文件在宽限期后才真正删除，其保留期占用已体现在物理空闲中，
+      // 预约计数按 admit 登记量整笔撤销，不与物理占用重复记账。
+      this.releaseAdmissionOnSessionEnd(admittedBytes);
     }
   }
 

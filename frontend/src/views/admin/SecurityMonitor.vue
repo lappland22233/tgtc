@@ -2,102 +2,17 @@
   <div class="security-page">
     <div class="page-header">
       <h1>安全监控</h1>
-      <p>攻击检测、封禁管理与异常流量监控</p>
+      <p>告警处置、封禁管理与异常流量监控</p>
     </div>
 
     <t-tabs v-model="activeTab">
-      <t-tab-panel value="detection" label="攻击检测" />
+      <t-tab-panel value="alerts" label="告警管理" />
       <t-tab-panel value="bans" label="封禁统计" />
       <t-tab-panel value="abnormal" label="异常 IP 监控" />
-      <t-tab-panel value="alerts" label="告警管理" />
       <t-tab-panel v-if="isSuperAdmin" value="config" label="安全配置" />
     </t-tabs>
 
-    <!-- Tab 1: 攻击检测 -->
-    <div v-if="activeTab === 'detection'" class="tab-content">
-      <!-- 统计卡片 -->
-      <div class="metrics-grid" style="margin-bottom: 16px">
-        <div class="metric-card" style="border-left: 3px solid var(--color-danger)">
-          <div class="metric-label">今日攻击事件</div>
-          <div class="metric-value" style="color: var(--color-danger)">{{ attackAlerts.length }}</div>
-        </div>
-        <div class="metric-card" style="border-left: 3px solid var(--color-warning)">
-          <div class="metric-label">高频扫描</div>
-          <div class="metric-value" style="color: var(--color-warning)">{{ attackTypeCount('high_frequency_scan') }}</div>
-        </div>
-        <div class="metric-card" style="border-left: 3px solid var(--color-danger)">
-          <div class="metric-label">登录爆破</div>
-          <div class="metric-value" style="color: var(--color-danger)">{{ attackTypeCount('brute_force') }}</div>
-        </div>
-        <div class="metric-card" style="border-left: 3px solid var(--color-warning)">
-          <div class="metric-label">爬虫/异常下载</div>
-          <div class="metric-value" style="color: var(--color-warning)">{{ attackTypeCount('crawler') + attackTypeCount('abnormal_download') }}</div>
-        </div>
-      </div>
-
-      <!-- 攻击告警表格 -->
-      <div class="card">
-        <h3 class="card-title" style="margin: 0 0 16px;">攻击行为告警</h3>
-        <t-loading :loading="attackLoading" size="small">
-          <div v-if="!isMobile && attackAlerts.length > 0">
-            <t-table
-              :data="attackAlerts"
-              :columns="attackColumns"
-              row-key="id"
-              hover
-              max-height="500"
-            >
-              <template #ruleId="{ row }">
-                <t-tag variant="light">{{ attackTypeLabel(row.ruleId) }}</t-tag>
-              </template>
-              <template #level="{ row }">
-                <t-tag :theme="row.level === 'critical' ? 'danger' : 'warning'" variant="light-outline">
-                  {{ row.level === 'critical' ? '严重' : '警告' }}
-                </t-tag>
-              </template>
-              <template #message="{ row }">
-                <span style="font-size:13px">{{ row.message }}</span>
-              </template>
-              <template #createdAt="{ row }">
-                {{ formatDateTime(row.createdAt) }}
-              </template>
-              <template #acknowledgedAt="{ row }">
-                <span v-if="row.acknowledgedAt" style="color:var(--color-success)">已确认</span>
-                <span v-else style="color:var(--color-warning)">待处理</span>
-              </template>
-            </t-table>
-          </div>
-          <div v-if="isMobile && attackAlerts.length > 0" class="mobile-card-list">
-            <div v-for="alert in attackAlerts" :key="alert.id" class="mobile-card">
-              <div class="mobile-card-row">
-                <t-tag variant="light" size="small">{{ attackTypeLabel(alert.ruleId) }}</t-tag>
-                <t-tag :theme="alert.level === 'critical' ? 'danger' : 'warning'" variant="light-outline" size="small">
-                  {{ alert.level === 'critical' ? '严重' : '警告' }}
-                </t-tag>
-              </div>
-              <div class="mobile-card-body">{{ alert.message }}</div>
-              <div class="mobile-card-meta">
-                <span>{{ formatDateTime(alert.createdAt) }}</span>
-                <span v-if="alert.acknowledgedAt" style="color:var(--color-success)">已确认</span>
-                <span v-else style="color:var(--color-warning)">待处理</span>
-              </div>
-            </div>
-          </div>
-          <div v-if="!attackAlerts.length" class="placeholder-block">
-            <div class="placeholder-icon">
-              <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <circle cx="12" cy="12" r="10" />
-                <path d="M9 12l2 2 4-4" />
-              </svg>
-            </div>
-            <h3>当前无攻击行为</h3>
-            <p>系统每 5 分钟自动检测扫描、爆破、爬虫、异常下载等攻击行为</p>
-          </div>
-        </t-loading>
-      </div>
-    </div>
-
-    <!-- Tab 2: 封禁统计 -->
+    <!-- Tab: 封禁统计 -->
     <div v-if="activeTab === 'bans'" class="tab-content">
       <div class="metrics-grid">
         <div class="metric-card">
@@ -348,11 +263,14 @@
           </div>
         </div>
 
+        <div v-if="configLoadError" class="config-load-error" role="alert">
+          {{ configLoadError }}
+        </div>
         <div v-if="configItems.length > 0" style="margin-top: 24px; display: flex; gap: 12px">
-          <t-button theme="primary" :loading="configSaving" @click="saveSecurityConfig">
+          <t-button theme="primary" :loading="configSaving" :disabled="!configLoaded" @click="saveSecurityConfig">
             保存配置
           </t-button>
-          <t-button theme="default" variant="outline" :loading="configLoading" @click="resetSecurityConfig">
+          <t-button theme="default" variant="outline" :loading="configLoading" :disabled="!configLoaded" @click="resetSecurityConfig">
             重置为默认值
           </t-button>
         </div>
@@ -405,7 +323,8 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted, onUnmounted, computed, watch, defineAsyncComponent } from 'vue';
+import { ref, reactive, onMounted, computed, watch, defineAsyncComponent } from 'vue';
+import axios from 'axios';
 import { DialogPlugin } from 'tdesign-vue-next';
 import MessagePlugin from '@/utils/message';
 import { api, useAuthStore } from '@/stores/auth';
@@ -455,23 +374,25 @@ interface AbnormalIp {
   riskLevel: 'low' | 'medium' | 'high' | 'critical';
 }
 
-interface AttackAlert {
-  id: string;
-  ruleId: string;
-  level: string;
-  title: string;
-  message: string;
-  context: any;
-  acknowledgedAt: string | null;
-  createdAt: string;
-}
-
 // State
-const activeTab = ref('detection');
+// v1.2.6：告警管理为安全页默认入口；支持 ?tab=bans|abnormal|config 深链定位
+const validTabs = ['alerts', 'bans', 'abnormal', 'config'] as const;
+function resolveInitialTab(): string {
+  const requested = new URLSearchParams(window.location.search).get('tab');
+  if (requested && (validTabs as readonly string[]).includes(requested)) {
+    if (requested === 'config' && !isSuperAdmin.value) return 'alerts';
+    return requested;
+  }
+  return 'alerts';
+}
+const activeTab = ref(resolveInitialTab());
 
-// Attack alerts
-const attackAlerts = ref<AttackAlert[]>([]);
-const attackLoading = ref(false);
+// 告警横幅深链消费：/admin/security?tab=alerts 打开后清除 query，避免刷新时重复定位
+if (window.history.length > 0 && window.location.search.includes('tab=')) {
+  const url = new URL(window.location.href);
+  url.searchParams.delete('tab');
+  window.history.replaceState({}, '', url.pathname + url.search);
+}
 
 // Ban stats
 const banStats = reactive<BanStats>({
@@ -518,30 +439,7 @@ const abnormalColumns = [
   { colKey: 'action', title: '操作', width: 90 },
 ];
 
-const attackColumns = [
-  { colKey: 'ruleId', title: '攻击类型', width: 120, cell: 'ruleId' },
-  { colKey: 'level', title: '级别', width: 80, cell: 'level' },
-  { colKey: 'message', title: '详情', ellipsis: true, cell: 'message' },
-  { colKey: 'createdAt', title: '检测时间', width: 170, cell: 'createdAt' },
-  { colKey: 'acknowledgedAt', title: '状态', width: 80, cell: 'acknowledgedAt' },
-];
-
-const attackTypeLabels: Record<string, string> = {
-  ATTACK_HIGH_FREQUENCY_SCAN: '高频扫描',
-  ATTACK_BRUTE_FORCE: '登录爆破',
-  ATTACK_CRAWLER: '爬虫行为',
-  ATTACK_ABNORMAL_DOWNLOAD: '异常下载',
-};
-
-function attackTypeLabel(ruleId: string): string {
-  return attackTypeLabels[ruleId] || ruleId.replace('ATTACK_', '').replace(/_/g, ' ');
-}
-
 // isValidIP 由公共 util 提供（G15-28）：严格 IPv4/IPv6 校验，与 Config.vue 保持一致
-
-function attackTypeCount(type: string): number {
-  return attackAlerts.value.filter(a => a.ruleId === `ATTACK_${type.toUpperCase()}`).length;
-}
 
 // Error rate tag theme
 function errorRateTheme(rate: number): string {
@@ -569,13 +467,6 @@ function riskLabel(level: string): string {
     critical: '严重',
   };
   return map[level] || level;
-}
-
-// 非法日期降级为 '-'，避免直接 toLocaleString 输出 "Invalid Date"
-function formatDateTime(dateStr: string | null): string {
-  if (!dateStr) return '-';
-  const d = new Date(dateStr);
-  return isNaN(d.getTime()) ? '-' : d.toLocaleString('zh-CN');
 }
 
 // Fetch ban stats
@@ -681,24 +572,6 @@ async function handleBanSubmit() {
   }
 }
 
-// Fetch attack alerts
-async function fetchAttackAlerts() {
-  attackLoading.value = true;
-  try {
-    const { data } = await api.get('/admin/alerts', {
-      params: { limit: 50 },
-    });
-    const items = (data?.data?.items || data?.items || data) as AttackAlert[];
-    attackAlerts.value = (Array.isArray(items) ? items : []).filter(
-      a => a.ruleId?.startsWith('ATTACK_') || a.ruleId?.startsWith('SEC_'),
-    );
-  } catch {
-    // 静默失败，攻击检测后台自动运行
-  } finally {
-    attackLoading.value = false;
-  }
-}
-
 // ==================== 安全规则配置 ====================
 
 interface SecurityConfigItem {
@@ -719,6 +592,8 @@ const configItems = ref<SecurityConfigItem[]>([]);
 const configForm = ref<Record<string, number>>({});
 const configLoading = ref(false);
 const configSaving = ref(false);
+const configLoaded = ref(false);
+const configLoadError = ref('');
 
 const configCategories = computed(() => {
   const cats = new Set(configItems.value.map((item) => item.category));
@@ -729,23 +604,59 @@ function configItemsByCategory(cat: string) {
   return configItems.value.filter((item) => item.category === cat);
 }
 
-async function fetchSecurityConfig() {
+function getApiErrorMessage(error: unknown, fallback: string): string {
+  if (axios.isAxiosError(error)) {
+    const message = error.response?.data && typeof error.response.data === 'object'
+      ? (error.response.data as { message?: unknown }).message
+      : undefined;
+    if (typeof message === 'string' && message.trim()) return message;
+    if (error.response?.status === 401) return '登录已失效，请重新登录后再试';
+    if (error.response?.status === 403) return '当前账号没有修改安全配置的权限';
+    if (error.response?.status && error.response.status >= 500) return '服务端写入安全配置失败，请稍后重试';
+    if (!error.response) return '网络异常，无法连接到安全配置服务';
+  }
+  return error instanceof Error && error.message ? error.message : fallback;
+}
+
+function validateSecurityConfig(item: SecurityConfigItem, value: unknown): string | null {
+  const numberValue = Number(value);
+  if (!Number.isFinite(numberValue)) return `${item.label} 必须为有效数值`;
+  if (item.min !== undefined && numberValue < item.min) return `${item.label} 不能小于 ${item.min}`;
+  if (item.max !== undefined && numberValue > item.max) return `${item.label} 不能大于 ${item.max}`;
+  if (item.step !== undefined) {
+    const precision = String(item.step).split('.')[1]?.length || 0;
+    const scale = 10 ** precision;
+    const base = item.min ?? 0;
+    if (Math.abs(Math.round((numberValue - base) * scale) % Math.round(item.step * scale)) !== 0) {
+      return `${item.label} 必须按步长 ${item.step} 设置`;
+    }
+  }
+  return null;
+}
+
+async function fetchSecurityConfig(options: { silent?: boolean } = {}): Promise<boolean> {
   configLoading.value = true;
+  configLoadError.value = '';
   try {
     const { data } = await api.get('/admin/security-config');
     const items: SecurityConfigItem[] = data?.data || data || [];
-    configItems.value = items;
-    // 初始化表单值
-    // 注意：合法值 "0"（阈值设为 0 表示关闭）不能被 Number() 的 falsy 吞掉，
-    // 必须用 Number.isFinite 判定，否则 0 会回落到默认值并在保存时覆盖服务端（G15-09）
+    if (!Array.isArray(items) || items.length === 0) throw new Error('未获取到安全配置项');
     const form: Record<string, number> = {};
     for (const item of items) {
       const cur = Number(item.currentValue);
-      form[item.key] = Number.isFinite(cur) ? cur : Number(item.defaultValue) || 0;
+      const fallback = Number(item.defaultValue);
+      if (!Number.isFinite(cur) && !Number.isFinite(fallback)) throw new Error(`${item.label} 的当前值无效`);
+      form[item.key] = Number.isFinite(cur) ? cur : fallback;
     }
+    configItems.value = items;
     configForm.value = form;
-  } catch {
-    // 静默失败
+    configLoaded.value = true;
+    return true;
+  } catch (error) {
+    configLoaded.value = false;
+    configLoadError.value = getApiErrorMessage(error, '加载安全配置失败，暂不能保存');
+    if (!options.silent) MessagePlugin.error(configLoadError.value);
+    return false;
   } finally {
     configLoading.value = false;
   }
@@ -756,20 +667,26 @@ async function fetchSecurityConfig() {
  * 等效于关闭对应防护，必须先二次确认；保存成功后展示变更摘要（G15-10）。
  */
 async function saveSecurityConfig() {
-  // 与默认值相比偏离超过 10 倍，视为"高风险"（放大阈值 ≈ 削弱/关闭防护）
-  const RISK_MULTIPLE = 10;
+  if (!configLoaded.value) {
+    MessagePlugin.warning('安全配置尚未成功加载，不能保存');
+    return;
+  }
 
-  // 变更项与高风险项
+  const RISK_MULTIPLE = 10;
   const changed: { key: string; label: string; before: number; after: number }[] = [];
   const risky: { key: string; label: string; after: number }[] = [];
   for (const item of configItems.value) {
     const before = Number(item.currentValue);
     const after = configForm.value[item.key];
+    const validationMessage = validateSecurityConfig(item, after);
+    if (validationMessage) {
+      MessagePlugin.error(validationMessage);
+      return;
+    }
     if (before === after) continue;
     changed.push({ key: item.key, label: item.label, before, after });
-    const def = Number(item.defaultValue);
-    // 阈值类：放大到默认值 10 倍以上即高风险（默认 0 时不适用放大判定）
-    if (def > 0 && after > 0 && after >= def * RISK_MULTIPLE) {
+    const defaultValue = Number(item.defaultValue);
+    if (defaultValue > 0 && after > 0 && after >= defaultValue * RISK_MULTIPLE) {
       risky.push({ key: item.key, label: item.label, after });
     }
   }
@@ -782,25 +699,22 @@ async function saveSecurityConfig() {
   const doSave = async () => {
     configSaving.value = true;
     try {
-      const configs = Object.entries(configForm.value).map(([key, value]) => ({
-        key,
-        value: String(value),
-      }));
+      const configs = changed.map(({ key, after }) => ({ key, value: String(after) }));
       await api.put('/admin/security-config', { configs });
-      const summary = changed
-        .map((c) => `· ${c.label}: ${c.before} → ${c.after}`)
-        .join('\n');
-      MessagePlugin.success('安全配置已保存');
-      MessagePlugin.info(`已保存 ${changed.length} 项变更：\n${summary}`);
-      await fetchSecurityConfig();
-    } catch {
-      MessagePlugin.error('保存安全配置失败');
+      const reloaded = await fetchSecurityConfig({ silent: true });
+      if (!reloaded) {
+        MessagePlugin.warning('安全配置已提交，但回读确认失败，请刷新页面后核对');
+        return;
+      }
+      const summary = changed.map((change) => `· ${change.label}: ${change.before} → ${change.after}`).join('\n');
+      MessagePlugin.success(`安全配置已保存并确认：\n${summary}`);
+    } catch (error) {
+      MessagePlugin.error(getApiErrorMessage(error, '保存安全配置失败'));
     } finally {
       configSaving.value = false;
     }
   };
 
-  // 存在高风险项：二次确认后放行
   if (risky.length > 0) {
     const confirmDialog = DialogPlugin.confirm({
       header: '检测到高风险配置变更',
@@ -822,6 +736,10 @@ async function saveSecurityConfig() {
 }
 
 async function resetSecurityConfig() {
+  if (!configLoaded.value) {
+    MessagePlugin.warning('安全配置尚未成功加载，不能重置');
+    return;
+  }
   configLoading.value = true;
   try {
     // 恢复为默认值
@@ -843,35 +761,13 @@ watch(isSuperAdmin, (val) => {
   }
 });
 
-// 告警轮询（G14-16）：30s 定时刷新攻击告警，保证告警及时性；
-// 页面隐藏时不轮询，避免后台空转浪费请求。
-const SECURITY_POLL_INTERVAL_MS = 30_000;
-let securityPollTimer: ReturnType<typeof setInterval> | null = null;
-
-function startSecurityPolling() {
-  if (securityPollTimer) return;
-  securityPollTimer = setInterval(() => {
-    if (document.hidden) return;
-    fetchAttackAlerts();
-  }, SECURITY_POLL_INTERVAL_MS);
-}
-
 onMounted(() => {
   // 并发发起所有独立请求，失败的不影响其他数据区域渲染
-  // Promise.allSettled 确保每个数据块独立到达后各自渲染
-  fetchAttackAlerts();
+  // v1.2.6：攻击检测展示页已移除；后端检测任务与告警管理页继续承担该职责
   fetchBanStats();
   fetchAbnormalIps();
   if (isSuperAdmin.value) {
     fetchSecurityConfig();
-  }
-  startSecurityPolling();
-});
-
-onUnmounted(() => {
-  if (securityPollTimer) {
-    clearInterval(securityPollTimer);
-    securityPollTimer = null;
   }
 });
 </script>
@@ -1001,6 +897,16 @@ onUnmounted(() => {
   background: var(--color-bg-elevated);
   padding: 2px 8px;
   border-radius: 4px;
+}
+
+.config-load-error {
+  margin-top: 16px;
+  padding: 12px 14px;
+  color: var(--color-danger);
+  background: color-mix(in srgb, var(--color-danger) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-danger) 35%, transparent);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
 }
 
 .config-item-hint {

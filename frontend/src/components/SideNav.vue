@@ -3,7 +3,7 @@
     <div class="sidebar-logo">
       <h2>
         <span class="logo-icon" v-html="icons.logo"></span>
-        文件分发系统
+        <span class="sidebar-title" :title="siteTitle">{{ siteTitle }}</span>
       </h2>
     </div>
 
@@ -57,6 +57,7 @@ import { computed } from 'vue';
 import { useRoute } from 'vue-router';
 import type { UserRole } from '../types/user';
 import { PAGE_ROLES, hasAnyRole } from '../utils/permissions';
+import { usePublicConfigStore } from '../stores/public-config';
 
 const props = defineProps<{
   role: UserRole;
@@ -71,6 +72,9 @@ const emit = defineEmits<{
 }>();
 
 const route = useRoute();
+
+/** 网站标题来自公共配置 store：启动初始化与设置页保存共同维护，桌面 / 移动侧栏自动共用 */
+const siteTitle = computed(() => usePublicConfigStore().siteTitle);
 
 /**
  * 高亮判断：精确匹配或子路由前缀匹配。
@@ -97,6 +101,7 @@ const icons = {
   security: svg('<path d="M10 2L3 5.5v4.5c0 4.5 3 8 7 9.5 4-1.5 7-5 7-9.5V5.5L10 2z"/><path d="M7 10l2 2 4-4"/>'),
   userActivity: svg('<polyline points="2 10 5 10 7 4 10 16 13 8 15 10 18 10"/>'),
   auditLogs: svg('<rect x="4" y="2" width="12" height="16" rx="2"/><line x1="7" y1="7" x2="13" y2="7"/><line x1="7" y1="10" x2="13" y2="10"/><line x1="7" y1="13" x2="10" y2="13"/>'),
+  systemUpdate: svg('<path d="M10 2L17 6v8l-7 4-7-4V6l7-4z"/><path d="M7 10l2 2 4-4"/><path d="M6 14a6 6 0 008 2"/><path d="M14 6a6 6 0 00-8-2"/>'),
 };
 
 interface NavItem {
@@ -123,6 +128,7 @@ const adminNav: NavItem[] = [
   // 系统配置包含仅超级管理员可读取的缓存配置和仅超级管理员可保存的全局配置，
   // 因此按“拥有完整页面权限”原则只向超级管理员展示。
   { to: '/admin/config', label: '系统配置', icon: icons.config, roles: PAGE_ROLES['/admin/config'] },
+  { to: '/admin/update', label: '系统更新', icon: icons.systemUpdate, roles: PAGE_ROLES['/admin/update'] },
 ];
 
 const visibleAdminNav = computed(() => adminNav.filter((item) => hasAnyRole(props.role, item.roles)));

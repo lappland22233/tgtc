@@ -2,7 +2,7 @@ import { ref } from 'vue';
 import type { AxiosResponse } from 'axios';
 import api from '../api/client';
 import { uploadScheduler } from '../utils/upload-scheduler';
-import { classifyUploadError } from '../utils/upload-retry';
+import { classifyUploadError, createMergeBusinessError } from '../utils/upload-retry';
 
 export interface ChunkUploadProgress {
   totalChunks: number;
@@ -44,11 +44,55 @@ const STATUS_TIMEOUT = 15 * 1000;
 /** 合并触发请求超时 (ms) */
 const COMPLETE_TIMEOUT = 30 * 1000;
 
-/** 最大重试次数 */
+/** 常规网络／代理故障最大重试次数 */
 const MAX_RETRIES = 3;
+/** 严格小盘模式等待服务器磁盘名额的最大次数（5 秒间隔，最多约 30 分钟，可随时取消）。 */
+const MAX_DISK_BUDGET_RETRIES = 360;
 
 /** 重试退避基数 (ms) */
 const RETRY_BASE_DELAY = 2000;
+const DISK_BUDGET_RETRY_DELAY = 5000;
+
+function getDiskBudgetRetryDelay(error: unknown): number | null {
+  const response = (error as {
+    response?: {
+      data?: { code?: unknown; retryAfterMs?: unknown };
+      headers?: Record<string, unknown>;
+    };
+  })?.response;
+  const headerCode = String(response?.headers?.['x-tgtc-error-code'] || '');
+  const isBudgetBusy = response?.data?.code === 'UPLOAD_DISK_BUDGET_BUSY'
+    || headerCode === 'UPLOAD_DISK_BUDGET_BUSY';
+  if (!isBudgetBusy) return null;
+
+  const bodyRetryAfterMs = Number(response?.data?.retryAfterMs);
+  if (Number.isSafeInteger(bodyRetryAfterMs) && bodyRetryAfterMs >= 1000 && bodyRetryAfterMs <= 60_000) {
+    return bodyRetryAfterMs;
+  }
+  const retryAfterSeconds = Number(response?.headers?.['retry-after']);
+  return Number.isFinite(retryAfterSeconds) && retryAfterSeconds >= 1 && retryAfterSeconds <= 60
+    ? retryAfterSeconds * 1000
+    : DISK_BUDGET_RETRY_DELAY;
+}
+
+async function waitForRetry(ms: number, signal?: AbortSignal): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new Error('上传已取消'));
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      reject(new Error('上传已取消'));
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
 
 /**
  * 分片上传 composable
@@ -95,8 +139,10 @@ export function useChunkedUpload(concurrency = 2) {
     const totalChunks = Math.ceil(file.size / chunkSize);
 
     try {
-      // 1. Init（独立 30s 超时 + 与外部取消信号合并；失败按可重试处理，指数退避重试）
+      // 1. Init（独立 30s 超时 + 与外部取消信号合并）。严格模式的磁盘名额忙碌
+      // 不消耗常规网络重试次数，保持浏览器文件在队列中等待服务器释放空间。
       let initRes: AxiosResponse;
+      let diskBudgetAttempts = 0;
       for (let attempt = 0; ; attempt++) {
         try {
           initRes = await withTimeoutSignal(INIT_TIMEOUT, signal, (s) =>
@@ -113,12 +159,23 @@ export function useChunkedUpload(concurrency = 2) {
           break;
         } catch (err: any) {
           if (signal?.aborted) throw err;
+          const diskBudgetDelay = getDiskBudgetRetryDelay(err);
+          if (diskBudgetDelay !== null) {
+            diskBudgetAttempts++;
+            if (diskBudgetAttempts > MAX_DISK_BUDGET_RETRIES) {
+              throw new Error('服务器磁盘空间长时间被其他上传占用，请稍后重新上传');
+            }
+            console.info(`[分片上传] 等待服务器磁盘名额，${(diskBudgetDelay / 1000).toFixed(1)}s 后重试 (${diskBudgetAttempts}/${MAX_DISK_BUDGET_RETRIES})`);
+            await waitForRetry(diskBudgetDelay, signal);
+            attempt--;
+            continue;
+          }
           // 统一由 classifyUploadError 判定：带 response 的 4xx/5xx、CDN 413 文案、
           // job 业务失败均不可重试；仅无 response 的传输层/CDN 代理层错误可重试。
           if (!classifyUploadError(err).retryable || attempt >= MAX_RETRIES) throw err;
           const delay = RETRY_BASE_DELAY * Math.pow(2, attempt) + Math.floor(Math.random() * 1000);
           console.warn(`[分片上传] init 失败，${(delay / 1000).toFixed(1)}s 后重试 (${attempt + 1}/${MAX_RETRIES})`);
-          await new Promise(resolve => setTimeout(resolve, delay));
+          await waitForRetry(delay, signal);
         }
       }
       uploadId.value = initRes.data.data.uploadId;
@@ -399,6 +456,7 @@ async function pollMergeResult(
     if (signal?.aborted) throw new Error('上传已取消');
     await new Promise(resolve => setTimeout(resolve, 5000));
 
+    let businessError: Error | null = null;
     try {
       const res = await api.get(`/files/chunk/${uploadId}/status`, { signal });
       const { mergeStatus, mergeResult, mergeError } = res.data.data;
@@ -410,33 +468,36 @@ async function pollMergeResult(
         return mergeResult;
       }
       if (mergeStatus === 'error') {
-        throw new Error(mergeError || '合并失败');
+        // 后端明确合并失败：打上业务标记，防止任意 mergeError 文案被队列误判为可重试
+        businessError = createMergeBusinessError(mergeError || '合并失败');
       }
     } catch (err: any) {
       // Cancel/Abort — 直接抛出
       if (err?.name === 'AbortError' || err?.code === 'ERR_CANCELED') {
         throw err;
       }
-
-      // 业务层错误（mergeError 等）— 直接抛出
-      if (err?.message && !err?.response && err?.code !== 'ERR_NETWORK') {
-        throw err;
-      }
-
-      // 网络/代理层错误（502, 520-524, 超时等）— 可重试
-      consecutiveFailures++;
-      console.warn(
-        `[分片上传] 状态轮询失败 (${consecutiveFailures}/${maxConsecutiveFailures}): ${err?.message || err?.code}`,
-      );
-
-      if (consecutiveFailures >= maxConsecutiveFailures) {
-        throw new Error('服务暂时不可用，合并仍在后台进行，请稍后刷新文件列表查看');
-      }
-
-      // 退避重试：2s, 4s, 8s
-      const delay = 2000 * Math.pow(2, consecutiveFailures - 1);
-      await new Promise(resolve => setTimeout(resolve, delay));
+      // 其余一律视为“状态查询暂时失败”（网络断开/超时/限流/503/CDN 错误页等）：
+      // status GET 不会影响后台合并任务，合并可能仍在正常推进，因此进入有限容错，
+      // 而不是像旧逻辑那样把转换后的裸 Error（有 message、无 response、非 ERR_NETWORK）
+      // 误判为业务失败而立即放弃观察。
     }
+
+    // 业务失败必须在容错计数之外立即结束（不重试、不重新上传）
+    if (businessError) throw businessError;
+
+    // 网络/代理层错误（502, 503, 520-524, 超时等）— 可重试的观察中断
+    consecutiveFailures++;
+    console.warn(
+      `[分片上传] 状态轮询失败 (${consecutiveFailures}/${maxConsecutiveFailures}): 请求暂时不可用`,
+    );
+
+    if (consecutiveFailures >= maxConsecutiveFailures) {
+      throw new Error('服务暂时不可用，合并仍在后台进行，请稍后刷新文件列表查看');
+    }
+
+    // 退避重试：2s, 4s, 8s
+    const delay = 2000 * Math.pow(2, consecutiveFailures - 1);
+    await new Promise(resolve => setTimeout(resolve, delay));
   }
   throw new Error('合并处理中，请稍后刷新文件列表查看；如文件未出现，请重新上传');
 }

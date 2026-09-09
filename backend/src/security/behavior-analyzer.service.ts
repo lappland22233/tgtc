@@ -263,18 +263,38 @@ export class BehaviorAnalyzer {
     }));
   }
 
-  /** 模式 4: 时间异常 — 深夜 (2-5点) 请求量 > 全天均值 × 2 */
+  /**
+   * 模式 4: 时间异常 — 深夜流量异常（v1.2.6 降噪版）。
+   *
+   * 统计口径修正与降噪（历史缺陷：BETWEEN 2 AND 5 实际含 4 个小时桶却除以 3，
+   * 且无样本/绝对值门槛，低流量站点极易误报）：
+   * - 深夜窗口 = UTC 02:00（含）至 05:00（不含），共 3 个小时桶，分母与桶数一致；
+   * - 全天均值按实际有数据的小时数归一（G8-23 语义保留）；
+   * - 告警需同时满足：深夜有数据的小时桶 ≥2、深夜总请求 ≥ minNightRequests、
+   *   深夜平均 ≥ minNightAvg、深夜均值 > 全天均值 × ratio（默认 3 倍）。
+   */
   private async detectTimeAnomaly(): Promise<AnomalyDetectionResult[]> {
-    // 获取过去 24 小时内深夜时段 (2-5点) 和全天每小时平均请求数。
-    // G8-23：按实际有数据的小时数归一（COUNT(DISTINCT date_trunc('hour', createdAt))），
-    // 不再无条件除以 24 —— 重启/新部署后数据不足 24h 时避免把全天均值算低而误报。
-    // 小时分桶统一用 UTC，避免会话时区漂移。
+    const ratio = parseFloat(
+      await this.configCache.get(SEC_CONFIG_KEYS.ALERT_TIME_ANOMALY_RATIO, '3'),
+    ) || 3;
+    const minNightRequests = parseInt(
+      await this.configCache.get(SEC_CONFIG_KEYS.ALERT_TIME_ANOMALY_MIN_NIGHT_REQUESTS, '300'), 10,
+    ) || 300;
+    const minNightAvg = parseFloat(
+      await this.configCache.get(SEC_CONFIG_KEYS.ALERT_TIME_ANOMALY_MIN_NIGHT_AVG, '60'),
+    ) || 60;
+
     const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    // 深夜窗口：UTC 小时 ∈ [2, 5)，即 02/03/04 三个小时桶
     const rows = getDatabaseType() === 'sqlite'
-      ? await databaseQuery<Array<{ night_avg: number; all_avg: number }>>(
+      ? await databaseQuery<Array<{ night_count: number; night_hours: number; all_avg: number }>>(
         this.dataSource,
         `SELECT
-           SUM(CASE WHEN CAST(strftime('%H', "createdAt") AS INTEGER) BETWEEN 2 AND 5 THEN 1 ELSE 0 END) * 1.0 / 3 AS night_avg,
+           SUM(CASE WHEN CAST(strftime('%H', "createdAt") AS INTEGER) >= 2
+                     AND CAST(strftime('%H', "createdAt") AS INTEGER) < 5 THEN 1 ELSE 0 END) AS night_count,
+           COUNT(DISTINCT CASE WHEN CAST(strftime('%H', "createdAt") AS INTEGER) >= 2
+                     AND CAST(strftime('%H', "createdAt") AS INTEGER) < 5
+                THEN strftime('%Y-%m-%d %H:00:00', "createdAt") END) AS night_hours,
            COUNT(*) * 1.0 / NULLIF(COUNT(DISTINCT strftime('%Y-%m-%d %H:00:00', "createdAt")), 0) AS all_avg
          FROM "access_logs" WHERE "createdAt" >= $1`,
         [cutoff],
@@ -282,7 +302,14 @@ export class BehaviorAnalyzer {
       )
       : await this.dataSource.query(
         `SELECT
-           COUNT(*) FILTER (WHERE EXTRACT(HOUR FROM "createdAt" AT TIME ZONE 'UTC') BETWEEN 2 AND 5)::float / 3 as night_avg,
+           COUNT(*) FILTER (
+             WHERE EXTRACT(HOUR FROM "createdAt" AT TIME ZONE 'UTC') >= 2
+               AND EXTRACT(HOUR FROM "createdAt" AT TIME ZONE 'UTC') < 5
+           ) AS night_count,
+           COUNT(DISTINCT CASE
+             WHEN EXTRACT(HOUR FROM "createdAt" AT TIME ZONE 'UTC') >= 2
+               AND EXTRACT(HOUR FROM "createdAt" AT TIME ZONE 'UTC') < 5
+             THEN date_trunc('hour', "createdAt") END) AS night_hours,
            COUNT(*)::float / NULLIF(COUNT(DISTINCT date_trunc('hour', "createdAt")), 0) as all_avg
          FROM "access_logs" WHERE "createdAt" >= $1`,
         [cutoff],
@@ -290,16 +317,33 @@ export class BehaviorAnalyzer {
 
     if (rows.length === 0) return [];
     const r = rows[0];
-    const nightAvg = Number(r.night_avg) || 0;
-    const allAvg = Number(r.all_avg) || 1;
+    const nightCount = Number(r.night_count) || 0;
+    const nightHours = Number(r.night_hours) || 0;
+    const allAvg = Number(r.all_avg) || 0;
+    // 深夜均值 = 深夜总请求 / 3 个小时桶（固定窗口，口径与窗口定义一致）
+    const nightAvg = nightCount / 3;
 
-    if (nightAvg > allAvg * 2) {
+    // 降噪门槛：样本不足、绝对量过低或桶数不足时仅保留分析，不产生告警
+    if (nightHours < 2) return [];
+    if (nightCount < minNightRequests) return [];
+    if (nightAvg < minNightAvg) return [];
+
+    if (allAvg > 0 && nightAvg > allAvg * ratio) {
       return [{
         type: 'time_anomaly',
         severity: 'low' as const,
         title: '深夜时段流量异常',
-        message: `深夜 (2-5点) 平均请求 ${nightAvg.toFixed(1)}/h，远超全天均值 ${allAvg.toFixed(1)}/h`,
-        details: { nightAvg, allAvg, ratio: (nightAvg / allAvg).toFixed(2) },
+        message: `深夜 (02-05 UTC) 平均请求 ${nightAvg.toFixed(1)}/h，超过全天均值 ${allAvg.toFixed(1)}/h 的 ${ratio} 倍`,
+        details: {
+          nightCount,
+          nightHours,
+          nightAvg: Number(nightAvg.toFixed(2)),
+          allAvg: Number(allAvg.toFixed(2)),
+          ratio: (allAvg > 0 ? nightAvg / allAvg : 0).toFixed(2),
+          thresholdRatio: ratio,
+          thresholdMinNightRequests: minNightRequests,
+          thresholdMinNightAvg: minNightAvg,
+        },
       }];
     }
     return [];
@@ -397,6 +441,22 @@ export class BehaviorAnalyzer {
     const zScoreWarn = parseFloat(
       await this.configCache.get(SEC_CONFIG_KEYS.ALERT_BASELINE_ZSCORE_WARN, '3'),
     );
+    // v1.2.6 降噪门槛：
+    // - 基线最小样本数（原硬编码 5，新部署数据不足时 z-score 噪声大）
+    // - qps / bandwidth 的绝对下限（低流量站点 stddev 极小，任意波动都会产生高 z-score）
+    const minSamples = parseInt(
+      await this.configCache.get(SEC_CONFIG_KEYS.ALERT_BASELINE_MIN_SAMPLES, '8'), 10,
+    ) || 8;
+    const minAbsQps = parseFloat(
+      await this.configCache.get(SEC_CONFIG_KEYS.ALERT_BASELINE_MIN_ABS_QPS, '20'),
+    );
+    const minAbsBandwidthMb = parseFloat(
+      await this.configCache.get(SEC_CONFIG_KEYS.ALERT_BASELINE_MIN_ABS_BANDWIDTH_MB, '50'),
+    );
+    // S4：totalBandwidth 为 1 分钟窗口累计字节数，配置单位 MB/min，
+    // 阈值 = MB * 1024^2（此前多乘 60，把 50MB/min 按 3000MB/min 执行，
+    // 低于该值的带宽偏离告警完全静默）。
+    const minAbsBandwidthBytes = minAbsBandwidthMb * 1024 * 1024;
 
     try {
       // 获取当前时刻对应的 hour bucket 和 day of week
@@ -416,12 +476,12 @@ export class BehaviorAnalyzer {
 
       if (!currentMetrics) return results;
 
-      // 获取对应时段的基线
+      // 获取对应时段的基线（样本数门槛可配置）
       const baselines = await this.dataSource.query(
         `SELECT "metricName", "mean", "stddev"
          FROM "baseline_stats"
-         WHERE "hourBucket" = $1 AND "dayOfWeek" = $2 AND "sampleCount" >= 5`,
-        [hourBucket, dayOfWeek],
+         WHERE "hourBucket" = $1 AND "dayOfWeek" = $2 AND "sampleCount" >= $3`,
+        [hourBucket, dayOfWeek, minSamples],
       );
 
       if (baselines.length === 0) return results;
@@ -438,6 +498,11 @@ export class BehaviorAnalyzer {
           case 'bandwidth': currentValue = Number(currentMetrics.totalBandwidth) || 0; break;
           default: continue;
         }
+
+        // v1.2.6：绝对值下限 —— 当前值本身就处于低位时，基线偏离（无论百分比/z-score）
+        // 都属于噪声，直接跳过。error_rate 为比例指标，不适用。
+        if (metricName === 'qps' && currentValue < minAbsQps) continue;
+        if (metricName === 'bandwidth' && currentValue < minAbsBandwidthBytes) continue;
 
         // 百分比偏差门槛：bandwidth/qps 防 stddev 极小导致的误报
         // error_rate 不适用百分比门槛（0→0.03 是 ∞% 但确实异常）

@@ -65,8 +65,17 @@ export class GlobalExceptionFilter implements ExceptionFilter {
         if (typeof exceptionResponse === 'string') {
           message = exceptionResponse;
         } else if (typeof exceptionResponse === 'object' && exceptionResponse !== null) {
-          const resp = exceptionResponse as { message?: string | string[] };
+          const resp = exceptionResponse as { message?: string | string[]; code?: unknown; retryAfterMs?: unknown };
           message = resp.message ?? exception.message;
+          // 上传磁盘预算等待使用结构化 429 契约；保留业务码及重试提示给浏览器队列，
+          // 同时写 Retry-After 以便非前端客户端遵守背压。
+          if (resp.code === 'UPLOAD_DISK_BUDGET_BUSY') {
+            res.setHeader('X-Tgtc-Error-Code', 'UPLOAD_DISK_BUDGET_BUSY');
+            const retryAfterMs = Number(resp.retryAfterMs);
+            if (Number.isSafeInteger(retryAfterMs) && retryAfterMs >= 1000) {
+              res.setHeader('Retry-After', String(Math.max(1, Math.ceil(retryAfterMs / 1000))));
+            }
+          }
         }
       }
       // 5xx（含显式抛出的 InternalServerErrorException）也应记录服务端日志并回传

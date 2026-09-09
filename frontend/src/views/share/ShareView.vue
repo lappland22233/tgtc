@@ -54,7 +54,7 @@
             <path d="M12 20h.01"/>
           </svg>
         </div>
-        <h1>网络异常</h1>
+        <h1>{{ state.title || '网络异常' }}</h1>
         <p>{{ state.message || '网络连接不稳定，请检查网络后重试' }}</p>
         <div class="retry-row">
           <t-button theme="primary" :loading="retrying" @click="onRetry">
@@ -135,7 +135,7 @@ type State =
   | { kind: 'needPassword' }
   | { kind: 'banned'; message: string }
   | { kind: 'notFound'; message?: string }
-  | { kind: 'networkError'; message?: string }
+  | { kind: 'networkError'; title?: string; message?: string }
   | { kind: 'file'; data: FileInfo }
   | { kind: 'folder'; data: FolderInfo; initialContents: FolderContents; initialBreadcrumb: FolderSummary[] };
 
@@ -187,7 +187,7 @@ async function fetchInfo() {
     }
     if (!isCurrent(generation)) return;
 
-    // 业务错误：分享不存在 / 过期 / 次数耗尽
+    // 业务错误：分享不存在 / 过期 / 次数耗尽 / 限流 / 临时服务故障
     if (!res.ok || data.code !== 0) {
       const msg = data.message || '分享访问失败';
       // H-02 修复：凭据失效 / 分享不可用（403/410/业务错误）时销毁该分享的媒体会话
@@ -195,7 +195,18 @@ async function fetchInfo() {
       // 403 通常对应 IP 封禁
       if (res.status === 403) {
         state.value = { kind: 'banned', message: msg };
+      } else if (res.status === 429 || res.status >= 500) {
+        // 限流 / 临时服务故障 ≠ 链接失效：进入可恢复分支（保留重试入口），
+        // 避免把“稍后可恢复”的故障误报为“分享不存在”误导用户去找分享者。
+        state.value = {
+          kind: 'networkError',
+          title: res.status === 429 ? '访问过于频繁' : '服务暂时不可用',
+          message: res.status === 429
+            ? (msg || '请求过于频繁，请稍后再试')
+            : (msg || '服务暂时不可用，请稍后重试'),
+        };
       } else {
+        // 404/410 及其余业务错误：分享确实不存在/已失效
         state.value = { kind: 'notFound', message: msg };
       }
       return;

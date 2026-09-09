@@ -14,6 +14,7 @@ import { TasksModule } from './tasks/tasks.module';
 import { ConfigCacheModule } from './common/services/config-cache.module';
 import { RateLimitModule } from './common/services/rate-limit.module';
 import { AuditModule } from './common/services/audit.module';
+import { DirectoryNamespaceModule } from './common/services/directory-namespace.module';
 import { StreamResponderModule } from './common/services/stream-responder.module';
 import { AccessLogModule } from './common/access-log.module';
 import { JobsModule } from './jobs/jobs.module';
@@ -21,6 +22,11 @@ import { AlertModule } from './alert/alert.module';
 import { TelegramModule } from './telegram/telegram.module';
 import { SecurityModule } from './security/security.module';
 import { TagModule } from './tag/tag.module';
+import { PublicConfigModule } from './public-config/public-config.module';
+import { HealthModule } from './health/health.module';
+import { VersionModule } from './version/version.module';
+import { UpdateModule } from './update/update.module';
+import { ApiKeyModule } from './api-key/api-key.module';
 
 @Module({
   imports: [
@@ -41,13 +47,19 @@ import { TagModule } from './tag/tag.module';
     ConfigCacheModule,
     RateLimitModule,
     AuditModule,
+    DirectoryNamespaceModule,
     StreamResponderModule,
     AccessLogModule,
     JobsModule,
     AlertModule,
     SecurityModule,
     TagModule,
+    PublicConfigModule,
+    HealthModule,
+    VersionModule,
+    UpdateModule,
     TelegramModule,
+    ApiKeyModule,
   ],
 })
 export class AppModule {}

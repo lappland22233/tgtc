@@ -12,10 +12,12 @@
       <t-select
         :value="uploadStore.fileConcurrency"
         :options="concurrencyOptions"
+        :disabled="uploadStore.strictSerialUpload"
         style="width: 80px;"
         size="small"
         @change="handleConcurrencyChange"
       />
+      <span v-if="uploadStore.strictSerialUpload" style="font-size: 12px; color: var(--text-secondary);">严格小盘模式：单文件串行上传</span>
     </div>
 
     <!-- 标签选择 -->
@@ -103,13 +105,18 @@
       <div v-if="preparingMsg" style="margin-top: 8px; font-size: 12px; color: var(--text-secondary);">
         {{ preparingMsg }}
       </div>
+      <div v-else-if="pendingConfigFiles" style="margin-top: 12px; padding: 10px 12px; background: var(--bg-secondary); border: 1px solid var(--color-warning); border-radius: 8px; display: flex; align-items: center; justify-content: space-between; gap: 12px;">
+        <span style="font-size: 12px; color: var(--color-warning);">上传规则暂时无法读取，文件已保留</span>
+        <t-button size="small" variant="outline" :loading="configPreparing" @click.stop="retryPendingConfigFiles">重试</t-button>
+      </div>
       <!-- G11-20：目录预创建失败时保留批次，提供重试入口 -->
       <div
         v-else-if="pendingParsedError"
         style="margin-top: 12px; padding: 10px 12px; background: var(--bg-secondary); border: 1px solid var(--color-error); border-radius: 8px; display: flex; align-items: center; justify-content: space-between; gap: 12px;"
       >
         <span style="font-size: 12px; color: var(--color-error);">目录准备失败：{{ pendingParsedError }}</span>
-        <t-button size="small" variant="outline" :disabled="preparing" @click="retryParsedBatch">重试</t-button>
+        <!-- R10：阻止冒泡，避免重试点击穿透到上传区触发系统文件选择器 -->
+        <t-button size="small" variant="outline" :disabled="preparing" @click.stop="retryParsedBatch">重试</t-button>
       </div>
     </div>
 
@@ -188,7 +195,7 @@ import { usePageVisibility } from '../composables/usePageVisibility';
 import MessagePlugin from '@/utils/message';
 import { useTagStore } from '../stores/tags';
 import { useUploadStore } from '../stores/upload';
-import { api } from '../stores/auth';
+import { useUploadConfigStore } from '../stores/upload-config';
 import { useMobile } from '../composables/useMobile';
 import { getErrorMessage } from '../utils/error';
 import ConflictResolveDialog from '@/components/ConflictResolveDialog.vue';
@@ -224,11 +231,16 @@ const dialogVisible = computed({
 
 const uploadStore = useUploadStore();
 const tagStore = useTagStore();
+const uploadConfigStore = useUploadConfigStore();
 
-const maxFileSizeBytes = ref(20 * 1024 * 1024);
-const maxFileSizeMB = ref(20);
-const acceptTypes = ref('');
-const fileTypeMode = ref<'blacklist' | 'whitelist'>('blacklist');
+const maxFileSizeBytes = computed(() => uploadConfigStore.config.maxFileSize);
+const maxFileSizeMB = computed(() => uploadConfigStore.maxFileSizeMB);
+const acceptTypes = computed(() => uploadConfigStore.acceptTypes);
+const fileTypeMode = computed(() => uploadConfigStore.config.fileTypeMode);
+const configPreparing = ref(false);
+const pendingConfigFiles = ref<File[] | null>(null);
+/** 收起弹窗会推进代际，使配置请求完成后的迟到回调无法复活已取消载荷。 */
+let payloadEpoch = 0;
 
 const fileInput = ref<HTMLInputElement>();
 const folderInput = ref<HTMLInputElement>();
@@ -272,7 +284,7 @@ const hasActiveUploads = computed(
   () => uploadStore.isPumping || uploadStore.activeCount > 0 || uploadStore.queuedCount > 0,
 );
 const successCount = computed(() => uploadStore.successCount);
-const failedEntries = computed(() => uploadStore.entries.filter((e) => e.status === 'error'));
+const failedEntries = computed(() => uploadStore.entries.filter((e: { status: string }) => e.status === 'error'));
 const cancelledCount = computed(() => uploadStore.cancelledCount);
 const finishedCount = computed(() => uploadStore.finishedCount);
 const allFinished = computed(() => uploadStore.entries.length > 0 && !hasActiveUploads.value);
@@ -315,11 +327,13 @@ async function handleCreateTag() {
  * 不再 abort / resetQueue，上传继续在后台进行（由全局指示器展示进度）。
  */
 function handleClose() {
+  payloadEpoch += 1;
   showConflictDialog.value = false;
   resetPendingConflict();
   // G11-20：关闭弹窗时清空待重试批次，避免残留状态在下次打开时误显示
   pendingParsedBatch.value = null;
   pendingParsedError.value = '';
+  pendingConfigFiles.value = null;
   emit('dropConsumed');
   emit('close');
 }
@@ -359,10 +373,39 @@ function validateFiles(files: File[]): File[] {
  * 上传进行中可重复调用（无 uploading 守卫），store 按 File 引用去重。
  * 标签在入队时快照到条目，后续修改选择不影响已入队文件。
  */
-function enqueueFiles(files: File[]) {
+async function ensureUploadConfig(): Promise<boolean> {
+  if (uploadConfigStore.loaded) {
+    uploadStore.setStrictSerialUpload(uploadConfigStore.config.strictSerialUpload);
+    return true;
+  }
+  configPreparing.value = true;
+  const loaded = await uploadConfigStore.fetchUploadConfig();
+  configPreparing.value = false;
+  if (loaded) uploadStore.setStrictSerialUpload(uploadConfigStore.config.strictSerialUpload);
+  return loaded;
+}
+
+async function enqueueFiles(files: File[]) {
+  if (files.length === 0) return;
+  const epoch = payloadEpoch;
+  if (!await ensureUploadConfig()) {
+    if (epoch !== payloadEpoch || !props.visible) return;
+    pendingConfigFiles.value = [...files];
+    MessagePlugin.warning('无法读取上传规则，文件未入队，请重试');
+    return;
+  }
+  if (epoch !== payloadEpoch || !props.visible) return;
+  pendingConfigFiles.value = null;
   const validated = validateFiles(files);
   if (validated.length === 0) return;
   uploadStore.enqueue(validated, props.folderId ?? null, selectedTagIds.value);
+}
+
+async function retryPendingConfigFiles() {
+  const files = pendingConfigFiles.value;
+  if (!files || configPreparing.value) return;
+  pendingConfigFiles.value = null;
+  await enqueueFiles(files);
 }
 
 // ---- 文件夹上传链路 ----
@@ -382,6 +425,7 @@ async function processParsedFiles(
   emptyDirs: string[],
   violations?: PathViolation[],
 ) {
+  const epoch = payloadEpoch;
   // 准备中防重复触发
   if (preparing.value) {
     MessagePlugin.warning('正在准备目录，请稍候');
@@ -400,7 +444,15 @@ async function processParsedFiles(
     return;
   }
 
-  // 2. 复用现有大小/类型校验（逐文件提示并跳过）
+  // 2. 先读取受认证保护的上传规则，再按真实字节和类型校验，避免首拖按 20MiB 默认值误拦截。
+  if (!await ensureUploadConfig()) {
+    if (epoch !== payloadEpoch || !props.visible) return;
+    pendingParsedBatch.value = { parsed, emptyDirs, violations };
+    pendingParsedError.value = '无法读取上传规则，请重试';
+    MessagePlugin.warning('无法读取上传规则，文件夹批次已保留，请重试');
+    return;
+  }
+  if (epoch !== payloadEpoch || !props.visible) return;
   const validFiles = validateFiles(parsed.map((p) => p.file));
   if (validFiles.length === 0) return;
   const validSet = new Set(validFiles);
@@ -433,6 +485,7 @@ async function processParsedFiles(
       MessagePlugin.info(`${blockedCount} 个既有文件处理中，将按新文件上传`);
     }
     if (conflicts.length === 0) {
+      if (epoch !== payloadEpoch || !props.visible) return;
       uploadStore.enqueueFolderFiles(clean, selectedTagIds.value, genBatchId());
       emit('uploaded', true);
     } else {
@@ -506,26 +559,6 @@ async function handleCollectResult(result: DropCollectResult) {
   }
   if (result.plainFiles.length > 0) enqueueFiles(result.plainFiles);
   await processParsedFiles(result.parsed, result.emptyDirs, result.violations);
-}
-
-async function fetchUploadConfig() {
-  try {
-    const res = await api.get('/files/upload-config');
-    const data = res.data.data;
-    if (data.maxFileSize) {
-      maxFileSizeBytes.value = data.maxFileSize;
-      maxFileSizeMB.value = Math.round((data.maxFileSize / 1024 / 1024) * 100) / 100;
-    }
-    fileTypeMode.value = data.fileTypeMode || 'blacklist';
-    const filterList: string[] = data.fileTypeFilter || [];
-    if (fileTypeMode.value === 'whitelist' && filterList.length > 0) {
-      acceptTypes.value = filterList.join(',');
-    } else {
-      acceptTypes.value = '';
-    }
-  } catch {
-    // 使用默认值
-  }
 }
 
 async function handleDrop(e: DragEvent) {
@@ -603,18 +636,19 @@ watch(
 // 上传配置改为弹窗打开时惰性获取，避免未打开弹窗也发请求
 watch(() => props.visible, async (isVisible) => {
   if (isVisible) {
-    // 打开时获取上传配置（大小上限/类型白名单），确保校验使用最新服务端配置
-    await fetchUploadConfig();
+    // 预热受认证的共享上传规则；实际消费载荷仍由各入口等待此 Promise 后执行。
+    void uploadConfigStore.fetchUploadConfig();
     await tagStore.fetchTags();
     selectedTagIds.value = [];
     showTagSelector.value = false;
     newTagName.value = '';
-    if (props.initialFiles && props.initialFiles.length > 0) {
+    if (props.initialFiles && props.initialFiles.length > 0 && props.initialFiles !== lastConsumedDropFiles) {
       lastConsumedDropFiles = props.initialFiles;
-      enqueueFiles(Array.from(props.initialFiles));
+      await enqueueFiles(Array.from(props.initialFiles));
+      emit('dropConsumed');
     }
     // 页面级拖拽转发的采集结果：走与弹窗拖拽完全一致的链路
-    if (props.initialDropResult) {
+    if (props.initialDropResult && props.initialDropResult !== lastConsumedDropResult) {
       lastConsumedDropResult = props.initialDropResult;
       try {
         await handleCollectResult(props.initialDropResult);

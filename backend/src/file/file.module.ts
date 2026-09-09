@@ -21,11 +21,15 @@ import { ChunkUploadService } from './chunk-upload.service';
 import { ChunkUploadController } from './chunk-upload.controller';
 import { ChunkUploadResourceInterceptor } from './chunk-upload-resource.interceptor';
 import { FileCacheService } from './file-cache.service';
+import { DownloadAdmissionService } from './download-admission.service';
 import { ThumbnailService } from './thumbnail.service';
+import { UploadDiskBudgetService } from './upload-disk-budget.service';
+import { StrictUploadModeGuard } from './strict-upload-mode.guard';
 import { ConfigCacheModule } from '../common/services/config-cache.module';
 import { RateLimitModule } from '../common/services/rate-limit.module';
 import { MediaTicketModule } from '../common/services/media-ticket.module';
 import { TagModule } from '../tag/tag.module';
+import { ApiKeyModule } from '../api-key/api-key.module';
 
 @Module({
   imports: [
@@ -33,6 +37,7 @@ import { TagModule } from '../tag/tag.module';
     ConfigCacheModule,
     RateLimitModule,
     TagModule,
+    ApiKeyModule,
     MediaTicketModule,
     FolderModule,
     TelegramModule,
@@ -52,7 +57,18 @@ import { TagModule } from '../tag/tag.module';
     }),
   ],
   controllers: [FileController, ChunkUploadController],
-  providers: [FileService, ThumbnailCryptoService, UploadJobService, ChunkUploadService, ChunkUploadResourceInterceptor, FileCacheService, ThumbnailService],
-  exports: [FileService],
+  providers: [
+    FileService,
+    ThumbnailCryptoService,
+    UploadJobService,
+    UploadDiskBudgetService,
+    ChunkUploadService,
+    ChunkUploadResourceInterceptor,
+    StrictUploadModeGuard,
+    FileCacheService,
+    ThumbnailService,
+    DownloadAdmissionService,
+  ],
+  exports: [FileService, UploadDiskBudgetService],
 })
 export class FileModule {}

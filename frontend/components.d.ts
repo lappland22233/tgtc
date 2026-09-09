@@ -12,9 +12,11 @@ export {}
 declare module 'vue' {
   export interface GlobalComponents {
     AlertBanner: typeof import('./src/components/AlertBanner.vue')['default']
+    ApiKeyManager: typeof import('./src/components/settings/ApiKeyManager.vue')['default']
     ConflictResolveDialog: typeof import('./src/components/ConflictResolveDialog.vue')['default']
     CreateShareDialog: typeof import('./src/components/share/CreateShareDialog.vue')['default']
     CustomVideoPlayer: typeof import('./src/components/file/CustomVideoPlayer.vue')['default']
+    DownloadLinkDialog: typeof import('./src/components/share/DownloadLinkDialog.vue')['default']
     FileCard: typeof import('./src/components/file/FileCard.vue')['default']
     FileContextMenu: typeof import('./src/components/file/FileContextMenu.vue')['default']
     FilePreviewDialog: typeof import('./src/components/file/FilePreviewDialog.vue')['default']
@@ -48,6 +50,7 @@ declare module 'vue' {
     TIcon: typeof import('./src/components/TIcon.vue')['default']
     TInput: typeof import('tdesign-vue-next')['Input']
     TInputNumber: typeof import('tdesign-vue-next')['InputNumber']
+    TLink: typeof import('tdesign-vue-next')['Link']
     TLoading: typeof import('tdesign-vue-next')['Loading']
     TOption: typeof import('tdesign-vue-next')['Option']
     TPagination: typeof import('tdesign-vue-next')['Pagination']
@@ -57,6 +60,7 @@ declare module 'vue' {
     TRadioButton: typeof import('tdesign-vue-next')['RadioButton']
     TRadioGroup: typeof import('tdesign-vue-next')['RadioGroup']
     TSelect: typeof import('tdesign-vue-next')['Select']
+    TSpace: typeof import('tdesign-vue-next')['Space']
     TSwitch: typeof import('tdesign-vue-next')['Switch']
     TTable: typeof import('tdesign-vue-next')['Table']
     TTabPanel: typeof import('tdesign-vue-next')['TabPanel']

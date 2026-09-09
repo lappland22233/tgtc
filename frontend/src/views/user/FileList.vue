@@ -247,13 +247,18 @@
             </div>
           </div>
 
-          <!-- 文件夹行（OS 风格，双击进入） -->
+          <!-- 文件夹行（OS 风格，双击进入；R9：支持键盘 Tab + Enter/Space 进入） -->
           <div
             v-for="folder in subfoldersInCurrentFolder"
             :key="`folder-${folder.id}`"
             class="os-row os-folder"
             :class="{ 'drag-over': dragOverFolderId === folder.id }"
+            role="button"
+            tabindex="0"
+            :aria-label="`打开文件夹 ${folder.name}`"
             @dblclick="onFolderOpen(folder)"
+            @keydown.enter.self.prevent="onFolderOpen(folder)"
+            @keydown.space.self.prevent="onFolderOpen(folder)"
             @contextmenu.prevent.stop="openFolderCtxMenu($event, folder)"
             @touchstart="handleTouchStart($event, 'folder', folder)"
             @touchmove="handleTouchMove"
@@ -280,6 +285,9 @@
             class="os-row os-file"
             :class="[getRowClassName({ row: file }), { dragging: draggingFileIds.includes(file.id) }]"
             :draggable="!isMobile && isFileActionable(file)"
+            :tabindex="!isMobile && isFileActionable(file) ? 0 : -1"
+            :role="!isMobile && isFileActionable(file) ? 'button' : undefined"
+            :aria-label="!isMobile && isFileActionable(file) ? `下载 ${file.originalName}` : undefined"
             @dragstart="onFileDragStart($event, file)"
             @dragend="onFileDragEnd"
             @contextmenu.prevent.stop="openFileCtxMenu($event, file)"
@@ -287,6 +295,7 @@
             @touchmove="handleTouchMove"
             @touchend="handleTouchEnd"
             @dblclick="isFileActionable(file) && downloadFile(file)"
+            @keydown.enter.self.prevent="isFileActionable(file) && downloadFile(file)"
           >
             <div class="os-cell os-check">
               <t-checkbox
@@ -300,7 +309,12 @@
                 v-if="canPreviewFile(file)"
                 class="os-thumb-click"
                 :title="'点击预览 ' + file.originalName"
+                role="button"
+                tabindex="0"
+                :aria-label="`预览 ${file.originalName}`"
                 @click.stop="openPreview(file)"
+                @keydown.enter.prevent="openPreview(file)"
+                @keydown.space.prevent="openPreview(file)"
               >
                 <ThumbnailImg :file-id="file.id" :mime-type="file.mimeType" :size="32" :file-name="file.originalName" :context="thumbnailContext" :version="file.uploadVersion" />
               </span>
@@ -318,7 +332,12 @@
                     v-for="tag in file.tags"
                     :key="tag.id"
                     class="os-tag-click"
+                    role="button"
+                    tabindex="0"
+                    :aria-label="`按标签 ${tag.name} 筛选`"
                     @click.stop="addTagFilter(tag.id)"
+                    @keydown.enter.prevent="addTagFilter(tag.id)"
+                    @keydown.space.prevent="addTagFilter(tag.id)"
                   >
                     <t-tag
                       size="small"
@@ -343,6 +362,10 @@
           <!-- 无限滚动哨兵 -->
           <div ref="scrollSentinel" class="os-sentinel">
             <t-loading v-if="cursorLoading" size="small" text="加载中..." />
+            <template v-else-if="loadMoreError">
+              <span class="os-muted">更多文件加载失败</span>
+              <t-button size="small" variant="outline" class="os-sentinel-more" @click="retryLoadMore">重试</t-button>
+            </template>
             <template v-else-if="loadLimitExceeded">
               <span class="os-muted">已达加载上限 {{ fileStore.files.length }} 条，仍有更多文件</span>
               <t-button size="small" variant="outline" class="os-sentinel-more" @click="continueLoadMore">继续加载</t-button>
@@ -449,6 +472,15 @@
             </t-button>
             <t-button v-if="isAdmin" size="small" theme="danger" variant="text" @click="handleForceDelete(file.id)">
               强制删除
+            </t-button>
+            <t-button
+              v-else-if="!file.deletedByAdmin && file.deleteRequestedAt && selfForceDeleteReady(file)"
+              size="small"
+              theme="danger"
+              variant="text"
+              @click="handleForceDelete(file.id)"
+            >
+              永久删除
             </t-button>
           </div>
         </div>
@@ -557,6 +589,13 @@
       :target-name="shareTargetName"
     />
 
+    <!-- 获取下载链接弹窗（永久公开 / 限时公开 / 限次下载） -->
+    <DownloadLinkDialog
+      v-model:visible="showDownloadLinkDialog"
+      :file-id="downloadLinkTargetId"
+      :file-name="downloadLinkTargetName"
+    />
+
     <!-- 文件重命名弹窗 -->
     <FileRenameDialog v-model:visible="showRenameFileDialog" :file="renameTargetFile" />
 
@@ -597,6 +636,7 @@ import FolderCreateDialog from '../../components/folder/FolderCreateDialog.vue';
 import FolderRenameDialog from '../../components/folder/FolderRenameDialog.vue';
 import FolderMoveDialog from '../../components/folder/FolderMoveDialog.vue';
 import CreateShareDialog from '../../components/share/CreateShareDialog.vue';
+import DownloadLinkDialog from '../../components/share/DownloadLinkDialog.vue';
 import FileContextMenu, { type CtxTarget } from '../../components/file/FileContextMenu.vue';
 import FileRenameDialog from '../../components/file/FileRenameDialog.vue';
 import { useMediaPlaybackStore, type MediaSessionItem } from '../../stores/mediaPlayback';
@@ -625,11 +665,14 @@ const {
   sortOrder,
   selectedTagIds,
   displayFiles,
+  displayedSearch,
   hasMore,
   cursorLoading,
   folderLoading,
   refreshing,
   listError,
+  loadMoreError,
+  retryLoadMore,
   loadLimitExceeded,
   continueLoadMore,
   beginFolderTransition,
@@ -838,6 +881,17 @@ function onFileShare(file: FileItem) {
   showShareDialog.value = true;
 }
 
+// ============ 获取下载链接弹窗状态 ============
+const showDownloadLinkDialog = ref(false);
+const downloadLinkTargetId = ref('');
+const downloadLinkTargetName = ref('');
+
+function onFileDownloadLink(file: FileItem) {
+  downloadLinkTargetId.value = file.id;
+  downloadLinkTargetName.value = file.originalName;
+  showDownloadLinkDialog.value = true;
+}
+
 function openMoveDialogForFiles(fileIds?: string[]) {
   const ids = fileIds && fileIds.length > 0 ? fileIds : selectedFileIds.value;
   if (ids.length === 0) {
@@ -965,6 +1019,7 @@ async function onCtxAction(action: string, target: CtxTarget | null) {
       case 'move': openMoveDialogForFiles([file.id]); break;
       case 'tag': openTagEditor(file); break;
       case 'share': onFileShare(file); break;
+      case 'download-link': onFileDownloadLink(file); break;
       case 'delete': handleDelete(file); break;
       // 访问控制（原表格内联列）
       case 'toggle-access':
@@ -1025,10 +1080,15 @@ async function pasteFiles() {
 }
 
 // ============ 当前文件夹下的直接子文件夹（OS 列表文件夹行数据源） ============
+// 搜索修复：按"已生效查询关键词"过滤当前层文件夹名称（大小写不敏感包含匹配），
+// 与文件名搜索语义一致；未提交的输入不改变目录结果，清空搜索后恢复完整列表。
+// 只对当前层切片做只读派生，不修改 folderStore.tree 共享数据。
 const subfoldersInCurrentFolder = computed<Folder[]>(() => {
   const parentId = folderStore.currentFolderId;
+  const keyword = displayedSearch.value.trim().toLowerCase();
+  const matches = (f: Folder) => !keyword || f.name.toLowerCase().includes(keyword);
   if (parentId === null) {
-    return folderStore.tree.filter(f => !f.isDeleted);
+    return folderStore.tree.filter(f => !f.isDeleted && matches(f));
   }
   const find = (nodes: Folder[], id: string): Folder | null => {
     for (const n of nodes) {
@@ -1041,7 +1101,7 @@ const subfoldersInCurrentFolder = computed<Folder[]>(() => {
     return null;
   };
   const current = find(folderStore.tree, parentId);
-  return (current?.children ?? []).filter(f => !f.isDeleted);
+  return (current?.children ?? []).filter(f => !f.isDeleted && matches(f));
 });
 
 // ============ 选择（自定义列表） ============
@@ -1516,6 +1576,10 @@ async function copyMediaLink(row: FileItem) {
 }
 
 function downloadFile(row: FileItem) {
+  // 下载排队修复：服务器空间不足时后端会保持请求等待（排队至多 30 分钟），
+  // 浏览器原生下载在服务端排队期间显示"浏览器转圈"，用户无感知失败。
+  // 此处提示等待语义，避免用户误以为点击无效而重复点击。
+  MessagePlugin.info('正在开始下载；如服务器空间紧张，下载可能需要短暂排队，请勿重复点击');
   // 直接调用浏览器原生下载（后端返回 attachment，浏览器下载器接管进度/保存）
   triggerBrowserDownload(`/api/files/${row.id}/download`, row.originalName);
 }
@@ -1586,6 +1650,22 @@ async function handleRestore(id: string) {
   }
 }
 
+/** 用户自助永久删除冷静期（与后端 FILE_FORCE_DELETE_WAIT_MS 一致） */
+const FORCE_DELETE_WAIT_MS = 60_000;
+
+/** 非管理员：文件软删满 1 分钟后可自助永久删除 */
+function selfForceDeleteReady(file: FileItem): boolean {
+  if (!file.deleteRequestedAt) return false;
+  return Date.now() - new Date(file.deleteRequestedAt).getTime() >= FORCE_DELETE_WAIT_MS;
+}
+
+/** 计算距可自助永久删除的剩余秒数；不可判定时返回 Infinity */
+function selfForceDeleteRemainingSeconds(file: FileItem | undefined): number {
+  if (!file?.deleteRequestedAt) return Number.POSITIVE_INFINITY;
+  const elapsed = Date.now() - new Date(file.deleteRequestedAt).getTime();
+  return Math.ceil((FORCE_DELETE_WAIT_MS - elapsed) / 1000);
+}
+
 /** 强制删除（永久删除）——必须二次确认，防止误删不可恢复的数据 */
 function handleForceDelete(id: string) {
   // 定位文件以在确认文案中展示文件名（优先当前列表，其次全部已加载文件）
@@ -1593,9 +1673,15 @@ function handleForceDelete(id: string) {
     || fileStore.files.find((f) => f.id === id);
   const fileName = file?.originalName || id;
 
+  // 非管理员在冷静期内给出剩余等待提示，避免无效请求
+  const remaining = selfForceDeleteRemainingSeconds(file);
+  const waitHint = !isAdmin && remaining > 0
+    ? `\n冷静期剩余约 ${remaining >= 60 ? `${Math.ceil(remaining / 60)} 分钟` : `${remaining} 秒`}，期间无法永久删除。`
+    : '';
+
   const confirmDialog = DialogPlugin.confirm({
     header: '强制删除文件',
-    body: `确定要永久删除「${fileName}」吗？此操作不可恢复。`,
+    body: `确定要永久删除「${fileName}」吗？此操作不可恢复。${waitHint}`,
     theme: 'danger',
     confirmBtn: '永久删除',
     cancelBtn: '取消',
@@ -2392,6 +2478,18 @@ onUnmounted(() => {
 }
 .os-thumb-click:hover {
   opacity: 0.8;
+}
+
+/* R9：键盘焦点可见性 —— 仅 :focus-visible 生效，不影响鼠标点击体验 */
+.os-row:focus-visible {
+  outline: 2px solid var(--color-accent, var(--td-brand-color, #4d7cfe));
+  outline-offset: -2px;
+  border-radius: var(--radius-sm);
+}
+.os-thumb-click:focus-visible,
+.os-tag-click:focus-visible {
+  outline: 2px solid var(--color-accent, var(--td-brand-color, #4d7cfe));
+  outline-offset: 1px;
 }
 
 /* ============ 响应式 ============ */

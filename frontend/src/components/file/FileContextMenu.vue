@@ -32,9 +32,25 @@
             >
               <t-icon name="rollback" class="ctx-icon" />恢复
             </div>
+            <!-- 管理员：不受冷静期限制，软删后可立即强删 -->
             <div v-if="isAdmin" class="ctx-item danger" role="menuitem" tabindex="-1" @click="emitAction('force-delete')">
               <t-icon name="delete" class="ctx-icon" />强制删除
             </div>
+            <!-- 文件主：软删满 1 分钟后可自助永久删除 -->
+            <template v-else-if="!target.file.deletedByAdmin && target.file.deleteRequestedAt">
+              <div
+                v-if="selfForceDeleteRemainingSeconds <= 0"
+                class="ctx-item danger"
+                role="menuitem"
+                tabindex="-1"
+                @click="emitAction('force-delete')"
+              >
+                <t-icon name="delete" class="ctx-icon" />永久删除
+              </div>
+              <div v-else class="ctx-item disabled" role="menuitem" tabindex="-1" :title="'冷静期结束后可永久删除'">
+                <t-icon name="time" class="ctx-icon" />{{ selfForceDeleteWaitLabel }}后可永久删除
+              </div>
+            </template>
           </template>
 
           <!-- 正常文件：完整操作 -->
@@ -78,6 +94,9 @@
             </div>
             <div class="ctx-item" role="menuitem" tabindex="-1" @click="emitAction('share')">
               <t-icon name="share" class="ctx-icon" />分享
+            </div>
+            <div class="ctx-item" role="menuitem" tabindex="-1" @click="emitAction('download-link')">
+              <t-icon name="link" class="ctx-icon" />获取下载链接…
             </div>
             <div class="ctx-divider" />
             <!-- 访问控制（原表格内联列，现收纳进菜单） -->
@@ -145,10 +164,13 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, watch, nextTick, onMounted, onUnmounted } from 'vue';
+import { ref, reactive, computed, watch, nextTick, onMounted, onUnmounted } from 'vue';
 import { isPreviewable, getPreviewKind, isMediaDirectLinkKind } from '../../utils/preview';
 import type { FileItem } from '../../types/file';
 import type { Folder } from '../../stores/folders';
+
+/** 用户自助永久删除冷静期（与后端 FILE_FORCE_DELETE_WAIT_MS 一致） */
+const FORCE_DELETE_WAIT_MS = 60_000;
 
 /** 右键菜单目标：文件 / 文件夹 / 空白处 */
 export type CtxTarget =
@@ -176,6 +198,20 @@ const emit = defineEmits<{
 const menuRef = ref<HTMLElement | null>(null);
 /** 实际渲染坐标（经过视口边界修正，避免菜单溢出屏幕） */
 const pos = reactive({ x: 0, y: 0 });
+
+/** 当前文件距可自助永久删除的剩余秒数（<=0 表示可执行）。菜单每次打开随 target 变化重新求值。 */
+const selfForceDeleteRemainingSeconds = computed(() => {
+  const f = props.target?.kind === 'file' ? props.target.file : null;
+  if (!f?.deleteRequestedAt) return Number.POSITIVE_INFINITY;
+  const elapsed = Date.now() - new Date(f.deleteRequestedAt).getTime();
+  return Math.ceil((FORCE_DELETE_WAIT_MS - elapsed) / 1000);
+});
+
+const selfForceDeleteWaitLabel = computed(() => {
+  const s = selfForceDeleteRemainingSeconds.value;
+  if (s <= 0) return '';
+  return s >= 60 ? `${Math.ceil(s / 60)} 分钟` : `${s} 秒`;
+});
 
 function emitAction(action: string) {
   emit('action', action, props.target);

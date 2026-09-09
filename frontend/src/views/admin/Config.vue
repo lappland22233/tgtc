@@ -5,6 +5,27 @@
       <p>配置SMTP邮箱、文件上传限制和IP封禁</p>
     </div>
 
+    <div class="card" style="margin-bottom: 20px;">
+      <h3 style="margin-bottom: 16px;">网站标题</h3>
+      <t-form layout="vertical">
+        <t-form-item label="浏览器标题">
+          <t-input v-model="siteConfig.title" :maxlength="200" placeholder="请输入网站标题" autocomplete="off" name="site-title" />
+          <div style="color: var(--text-secondary); font-size: 12px; margin-top: 4px;">
+            保存后立即同步左侧导航标题与浏览器标签标题。
+          </div>
+        </t-form-item>
+        <t-form-item>
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <t-button theme="primary" :disabled="!blockLoadState.site" @click="saveSiteConfig">保存网站标题</t-button>
+            <t-button v-if="!blockLoadState.site" variant="outline" @click="fetchSiteConfig">重新加载</t-button>
+          </div>
+          <div v-if="!blockLoadState.site" style="color: var(--color-warning); font-size: 12px; margin-top: 4px;">
+            配置加载失败，当前显示默认值。为避免覆盖服务端配置，已禁用保存，请先重新加载。
+          </div>
+        </t-form-item>
+      </t-form>
+    </div>
+
     <div class="config-grid" :class="{ 'mobile-single-col': isMobile }">
       <!-- 认证配置 -->
       <div class="card">
@@ -314,17 +335,26 @@ import { DialogPlugin } from 'tdesign-vue-next';
 import MessagePlugin from '@/utils/message';
 import { useMobile } from '../../composables/useMobile';
 import { api } from '../../stores/auth';
+import { usePublicConfigStore } from '../../stores/public-config';
+import { useUploadConfigStore } from '../../stores/upload-config';
 import { getErrorMessage } from '../../utils/error';
 import { isValidIP } from '../../utils/ip';
 
 const isMobile = useMobile();
+const publicConfigStore = usePublicConfigStore();
+const uploadConfigStore = useUploadConfigStore();
 
 // 各配置区块加载状态：加载失败时禁用对应保存按钮并阻止提交，防止用默认值覆盖服务端真实配置（G15-04）
 const blockLoadState = reactive({
+  site: false as boolean,
   auth: false as boolean,
   smtp: false as boolean,
   upload: false as boolean,
   cache: false as boolean,
+});
+
+const siteConfig = ref({
+  title: '',
 });
 
 const authConfig = ref({
@@ -439,6 +469,45 @@ const ipColumns = [
 
 function formatDate(date: string) {
   return new Date(date).toLocaleDateString('zh-CN');
+}
+
+async function fetchSiteConfig(): Promise<boolean> {
+  // 经共享 store 读取（与启动初始化合并并发请求）；失败时 store 保留最后成功值，
+  // 本页按加载失败禁用保存，防止用默认值覆盖服务端配置。
+  const ok = await publicConfigStore.fetchSiteTitle();
+  if (ok) {
+    siteConfig.value.title = publicConfigStore.siteTitle;
+    blockLoadState.site = true;
+  } else {
+    blockLoadState.site = false;
+  }
+  return ok;
+}
+
+async function saveSiteConfig() {
+  if (!blockLoadState.site) {
+    MessagePlugin.warning('网站标题加载失败，无法保存。请先点击"重新加载"');
+    return;
+  }
+  const title = siteConfig.value.title.trim();
+  if (!title) {
+    MessagePlugin.warning('网站标题不能为空');
+    return;
+  }
+  try {
+    await api.put('/admin/config', {
+      key: 'SITE_TITLE',
+      value: title,
+      description: '网站浏览器标题',
+    });
+    siteConfig.value.title = title;
+    // 提交到共享 store：侧栏大标题与浏览器标签立即同步，无需刷新或重拉
+    publicConfigStore.setSiteTitle(title);
+    MessagePlugin.success('网站标题已保存');
+    markClean();
+  } catch (error: unknown) {
+    MessagePlugin.error(getErrorMessage(error));
+  }
 }
 
 async function fetchAuthConfig(): Promise<boolean> {
@@ -635,6 +704,13 @@ async function saveUploadConfig() {
       accessCountMax: max,
     });
     uploadConfig.value.fileTypeFilter = selectedExtensions.value.join(',');
+    uploadConfigStore.setConfig({
+      maxFileSize: uploadConfig.value.maxFileSizeMB * 1024 * 1024,
+      fileTypeMode: uploadConfig.value.fileTypeMode,
+      fileTypeFilter: selectedExtensions.value,
+      // /admin/upload-config 不控制运行时小盘模式；保留最近一次认证上传配置读取的严格策略。
+      strictSerialUpload: uploadConfigStore.config.strictSerialUpload,
+    });
     MessagePlugin.success('上传配置已保存');
     markClean();
   } catch (error: unknown) {
@@ -768,6 +844,7 @@ function unbanIP(ip: string) {
 
 onMounted(() => {
   Promise.allSettled([
+    fetchSiteConfig(),
     fetchAuthConfig(),
     fetchSMTPConfig(),
     fetchUploadConfig(),
