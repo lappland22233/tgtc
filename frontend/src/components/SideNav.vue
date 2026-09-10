@@ -84,7 +84,13 @@ function isActive(to: string): boolean {
   return route.path === to || route.path.startsWith(to + '/');
 }
 
-/** 图标统一为 currentColor 描边 SVG，随 nav-item 状态变色。静态资源，无 XSS 风险。 */
+/**
+ * 图标统一为 currentColor 描边 SVG，随 nav-item 状态变色。
+ *
+ * L4 约束（不可放宽）：`v-html` 仅允许渲染下方代码内常量字符串。
+ * 严禁把用户输入、接口返回或远程内容传入 `svg()`/`v-html`——一旦来源动态化即构成 XSS。
+ * 需要动态图标时改用组件渲染，不得拼接 HTML 字符串。
+ */
 const svg = (inner: string) =>
   `<svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">${inner}</svg>`;
 

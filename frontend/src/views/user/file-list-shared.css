@@ -1,0 +1,36 @@
+/**
+ * FileList 页面跨组件共享样式（M6 拆分专项）。
+ *
+ * Vue 的 scoped 样式不会作用到子组件内部元素，因此把「同时命中多个组件元素」的
+ * 规则集中在此，各组件以 <style scoped src="./file-list-shared.css"> 引入，
+ * 保持单一来源；各组件只会命中自己渲染的元素（其余选择器自然不匹配）。
+ *
+ * 当前命中情况：
+ * - 长按抑制：FileList（空状态 .upload-zone）、FileListDesktopRows、FileListMobileList
+ * - .deleted-name：桌面文件行与移动文件卡片
+ * - .os-muted：桌面行内的弱化文本与宿主列表底部的哨兵提示
+ *
+ * 新增规则前请确认「确实会被 2 个及以上组件命中」，仅单组件使用的样式留在组件内。
+ */
+
+/* 移动端长按弹出菜单：抑制文本选中与系统预览浮层 */
+.os-file,
+.os-folder,
+.mobile-file-card,
+.mobile-folder-row,
+.upload-zone {
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* 已删除文件名：删除线 + 弱化（桌面行与移动卡片共用） */
+.deleted-name {
+  text-decoration: line-through;
+  opacity: 0.6;
+}
+
+/* 弱化文本（桌面行的占位/提示、宿主列表哨兵文案共用） */
+.os-muted {
+  color: var(--text-tertiary);
+}

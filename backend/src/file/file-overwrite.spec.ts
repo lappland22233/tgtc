@@ -12,6 +12,8 @@ import { getQueueToken } from '@nestjs/bull';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 import { FileService } from './file.service';
+import { FileAccessControlService } from './file-access-control.service';
+import { FileUploadConfigService } from './file-upload-config.service';
 import { ChunkUploadService } from './chunk-upload.service';
 import { InitChunkUploadDto } from './chunk-upload.dto';
 import { File } from '../common/entities/file.entity';
@@ -112,6 +114,11 @@ describe('FileService - assertOverwriteTarget', () => {
     const moduleRef: TestingModule = await Test.createTestingModule({
       providers: [
         FileService,
+        // M6 拆分：上传配置 / 类型校验域（用真实实现；其依赖 ConfigService / ConfigCacheService 已在下方提供）
+        FileUploadConfigService,
+        // M6 拆分：访问策略 / 密码 / 封禁域已下沉到 FileAccessControlService；
+        // 这些套件只覆盖上传与覆盖逻辑，注入空桩即可（调用其方法会显式报错，避免静默通过）。
+        { provide: FileAccessControlService, useValue: {} },
         { provide: getRepositoryToken(File), useValue: fileRepo },
         { provide: getRepositoryToken(Folder), useValue: { findOne: jest.fn() } },
         { provide: ThumbnailService, useValue: { deleteThumbnailsForFileId: jest.fn().mockResolvedValue(undefined) } },
@@ -212,6 +219,11 @@ describe('FileService - createProcessingFile 覆盖分支', () => {
     const moduleRef: TestingModule = await Test.createTestingModule({
       providers: [
         FileService,
+        // M6 拆分：上传配置 / 类型校验域（用真实实现；其依赖 ConfigService / ConfigCacheService 已在下方提供）
+        FileUploadConfigService,
+        // M6 拆分：访问策略 / 密码 / 封禁域已下沉到 FileAccessControlService；
+        // 这些套件只覆盖上传与覆盖逻辑，注入空桩即可（调用其方法会显式报错，避免静默通过）。
+        { provide: FileAccessControlService, useValue: {} },
         { provide: getRepositoryToken(File), useValue: fileRepo },
         { provide: getRepositoryToken(Folder), useValue: { findOne: jest.fn() } },
         { provide: ThumbnailService, useValue: { deleteThumbnailsForFileId: jest.fn().mockResolvedValue(undefined) } },
@@ -388,6 +400,11 @@ describe('FileService - applyOverwrite', () => {
     const moduleRef: TestingModule = await Test.createTestingModule({
       providers: [
         FileService,
+        // M6 拆分：上传配置 / 类型校验域（用真实实现；其依赖 ConfigService / ConfigCacheService 已在下方提供）
+        FileUploadConfigService,
+        // M6 拆分：访问策略 / 密码 / 封禁域已下沉到 FileAccessControlService；
+        // 这些套件只覆盖上传与覆盖逻辑，注入空桩即可（调用其方法会显式报错，避免静默通过）。
+        { provide: FileAccessControlService, useValue: {} },
         { provide: getRepositoryToken(File), useValue: fileRepo },
         { provide: getRepositoryToken(Folder), useValue: { findOne: jest.fn() } },
         { provide: ThumbnailService, useValue: { deleteThumbnailsForFileId: jest.fn().mockResolvedValue(undefined) } },
@@ -497,12 +514,22 @@ describe('FileService - access policy branches', () => {
     bannedRepo = { createQueryBuilder: jest.fn(), upsert: jest.fn() };
     rateLimit = { incrementCounter: jest.fn(), reset: jest.fn() };
     audit = { log: jest.fn() };
+    const configCache = { get: jest.fn(async (_key: string, fallback: string) => fallback) };
+    // M6 拆分：访问策略 / 密码 / IP 封禁实现已下沉到 FileAccessControlService，
+    // 此处注入**真实实例**（依赖仍为 mock），使本节断言依旧覆盖真实实现而非桩。
+    const accessControl = new FileAccessControlService(
+      fileRepo, bannedRepo, audit as any, configCache as any, rateLimit,
+    );
     service = new FileService(
-      fileRepo, { findOne: jest.fn() } as any, {} as any, bannedRepo, {} as any, {} as any,
+      // M6 拆分后 FileService 不再直接依赖 BannedIP / RateLimitService（随访问控制域下沉）
+      fileRepo, { findOne: jest.fn() } as any, {} as any, {} as any, {} as any,
       {} as any, { get: jest.fn() } as any, {} as any,
-      { get: jest.fn(async (_key: string, fallback: string) => fallback) } as any,
-      rateLimit, {} as any, audit, {} as any, {} as any,
+      configCache as any,
+      {} as any, audit, {} as any, {} as any,
       { acquire: jest.fn(), release: jest.fn(), remove: jest.fn() } as any, {} as any,
+      accessControl,
+      // 本 describe 只覆盖访问策略分支，不上传文件，上传配置域注入空桩即可
+      {} as any,
     );
   });
 
@@ -719,6 +746,11 @@ describe('FileService - G2-05 覆盖上传 uploadVersion 原子化（事务+悲�
     const moduleRef: TestingModule = await Test.createTestingModule({
       providers: [
         FileService,
+        // M6 拆分：上传配置 / 类型校验域（用真实实现；其依赖 ConfigService / ConfigCacheService 已在下方提供）
+        FileUploadConfigService,
+        // M6 拆分：访问策略 / 密码 / 封禁域已下沉到 FileAccessControlService；
+        // 这些套件只覆盖上传与覆盖逻辑，注入空桩即可（调用其方法会显式报错，避免静默通过）。
+        { provide: FileAccessControlService, useValue: {} },
         { provide: getRepositoryToken(File), useValue: fileRepo },
         { provide: getRepositoryToken(Folder), useValue: { findOne: jest.fn() } },
         { provide: ThumbnailService, useValue: { deleteThumbnailsForFileId: jest.fn().mockResolvedValue(undefined) } },
@@ -831,6 +863,11 @@ describe('FileService - G2-06 缓存预热完成条件更新（版本守卫）',
     const moduleRef: TestingModule = await Test.createTestingModule({
       providers: [
         FileService,
+        // M6 拆分：上传配置 / 类型校验域（用真实实现；其依赖 ConfigService / ConfigCacheService 已在下方提供）
+        FileUploadConfigService,
+        // M6 拆分：访问策略 / 密码 / 封禁域已下沉到 FileAccessControlService；
+        // 这些套件只覆盖上传与覆盖逻辑，注入空桩即可（调用其方法会显式报错，避免静默通过）。
+        { provide: FileAccessControlService, useValue: {} },
         { provide: getRepositoryToken(File), useValue: fileRepo },
         { provide: getRepositoryToken(Folder), useValue: { findOne: jest.fn() } },
         { provide: ThumbnailService, useValue: thumbnailService },

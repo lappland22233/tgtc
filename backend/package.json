@@ -1,6 +1,6 @@
 {
   "name": "file-distribution-system-backend",
-  "version": "1.2.7",
+  "version": "1.2.8",
   "description": "Small file distribution system with Telegram storage",
   "main": "dist/main.js",
   "_cryptoNote": "G9-16(P2): bcryptjs 为纯 JS 实现，其异步 API 内部用 setImmediate 让出事件循环，但哈希/比对仍占用主线程 CPU，登录/注册高峰可能阻塞。替代候选：原生 bcrypt（需 node-gyp 编译，安装风险大，未经确认不擅自切换）或 worker_threads 池。TODO: 评估 worker_threads 迁移方案后落地。",
@@ -49,17 +49,17 @@
     "class-validator": "^0.14.0",
     "cookie-parser": "^1.4.7",
     "dotenv": "^17.4.2",
-    "file-type": "^20.5.0",
+    "file-type": "^21.3.4",
     "form-data": "4.0.6",
     "helmet": "^8.3.0",
-    "multer": "2.2.0",
-    "nodemailer": "9.0.5",
+    "multer": "2.3.0",
+    "nodemailer": "9.1.1",
     "passport": "^0.7.0",
     "passport-jwt": "^4.0.1",
     "pg": "8.23.0",
     "reflect-metadata": "0.2.2",
     "rxjs": "^7.8.1",
-    "sharp": "^0.35.3",
+    "sharp": "^0.35.4",
     "socket.io": "^4.8.3",
     "sqlite3": "^6.0.1",
     "typeorm": "0.3.31",
@@ -86,5 +86,9 @@
     "ts-jest": "29.4.12",
     "ts-node": "^10.9.2",
     "typescript": "^5.3.3"
+  },
+  "_overridesNote": "multer <2.3.0 命中 GHSA-wc9g-mqfw-jrwm / GHSA-qfvm-cv95-jqjf / GHSA-535w-7cp7-47q4（high）。@nestjs/platform-express@11.1.28 精确钉死 multer@2.2.0，且 @nestjs/platform-express@12.0.1 仍钉 2.2.0，升级 Nest 无法覆盖，故用 overrides 受控越界到同大版本补丁级 2.3.0。升级 multer 后必须做真实上传冒烟（单文件/多文件/超大/中断）。",
+  "overrides": {
+    "multer": "2.3.0"
   }
 }

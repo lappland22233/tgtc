@@ -2,7 +2,7 @@ import { computed, ref } from 'vue';
 import { defineStore } from 'pinia';
 import { api } from './auth';
 
-const DEFAULT_MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024;
+export const DEFAULT_MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024;
 
 export interface UploadValidationConfig {
   maxFileSize: number;
@@ -80,5 +80,18 @@ export const useUploadConfigStore = defineStore('upload-config', () => {
     return inflight;
   }
 
-  return { config, loaded, loading, loadError, maxFileSizeMB, acceptTypes, setConfig, fetchUploadConfig };
+  /** M7：登出/切换账号时丢弃上传规则缓存，换账号后重新拉取当前账号的规则。 */
+  function reset() {
+    config.value = {
+      maxFileSize: DEFAULT_MAX_FILE_SIZE_BYTES,
+      fileTypeMode: 'blacklist',
+      fileTypeFilter: [],
+      strictSerialUpload: false,
+    };
+    loaded.value = false;
+    loading.value = false;
+    loadError.value = null;
+  }
+
+  return { config, loaded, loading, loadError, maxFileSizeMB, acceptTypes, setConfig, fetchUploadConfig, reset };
 });

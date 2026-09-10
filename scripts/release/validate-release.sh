@@ -36,7 +36,7 @@ if [[ ! -f "$SUMS.sig" ]]; then
 fi
 require_cmd openssl
 require_cmd stat
-PUB="$RELEASE_ROOT/scripts/release/update-public-key.pem"
+PUB="$(resolve_verify_public_key)"
 [[ -f "$PUB" ]] || die "$EXIT_PRECHECK" "缺少验证公钥：$PUB"
 key_bits=$(openssl rsa -pubin -in "$PUB" -noout -text 2>/dev/null | grep -oE '[0-9]+ bit' | head -n1 | grep -oE '[0-9]+')
 [[ -n "$key_bits" ]] || die "$EXIT_PRECHECK" '无法解析验证公钥模长。'

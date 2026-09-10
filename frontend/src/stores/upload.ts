@@ -523,6 +523,41 @@ export const useUploadStore = defineStore('upload', () => {
     if (queuedCount.value > 0) ensurePump();
   }
 
+  /**
+   * M7：登出/切换账号时停止并清空上传队列。
+   * 取消在途任务、复位计数器与定时器，避免旧账号的进度/结果残留到新会话。
+   */
+  function reset() {
+    for (const entry of entries.value) {
+      if (entry.file) knownFiles.delete(entry.file);
+    }
+    cancelAll();
+    for (const controller of controllers.values()) controller.abort();
+    controllers.clear();
+    chunkedSessions.clear();
+    entryByUid.clear();
+    activeEntries.clear();
+    pendingProgress.clear();
+    pendingQueue.length = 0;
+    pendingCursor = 0;
+    activeWorkers = 0;
+    entries.value = [];
+    isPumping.value = false;
+    activeCount.value = 0;
+    queuedCount.value = 0;
+    successCount.value = 0;
+    errorCount.value = 0;
+    cancelledCount.value = 0;
+    totalBytes.value = 0;
+    loadedBytes.value = 0;
+    strictSerialUpload.value = false;
+    preferredFileConcurrency = 2;
+    fileConcurrency.value = 2;
+    resetRetryBreaker();
+    if (speedTimer) { clearInterval(speedTimer); speedTimer = null; }
+    if (progressTimer) { clearTimeout(progressTimer); progressTimer = null; }
+  }
+
   return {
     entries,
     isPumping,
@@ -536,6 +571,7 @@ export const useUploadStore = defineStore('upload', () => {
     overallProgress,
     overallSpeed,
     strictSerialUpload,
+    reset,
     enqueue,
     enqueueFolderFiles,
     cancelOne,

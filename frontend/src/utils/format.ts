@@ -8,6 +8,25 @@ export function formatSize(bytes: number | string): string {
   return parseFloat((num / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 }
 
+/**
+ * 紧凑文件大小格式化（B 取整、KB 及以上保留 1 位小数）。
+ *
+ * 与上方 `formatSize` 的差异仅在精度与去尾策略（如 1.25 MB：本函数输出 "1.3 MB"，
+ * 上方输出 "1.25 MB"）。预览弹窗（播放列表 / 底部元信息）的历史输出即为此格式，
+ * 改动会造成用户可见的文案变化，因此保留两个变体，勿合并。
+ *
+ * 允许 null/undefined：后端 bigint 序列化可能返回字符串或空值。
+ */
+export function formatSizeCompact(bytes: number | string | null | undefined): string {
+  const num = Number(bytes);
+  if (!Number.isFinite(num) || num <= 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let i = 0;
+  let size = num;
+  while (size >= 1024 && i < units.length - 1) { size /= 1024; i++; }
+  return `${size.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+}
+
 export function formatDate(date: string): string {
   if (!date) return '-';
   const d = new Date(date);

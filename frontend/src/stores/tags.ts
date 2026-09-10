@@ -63,5 +63,11 @@ export const useTagStore = defineStore('tags', () => {
     tags.value = tags.value.filter((t) => t.id !== id);
   }
 
-  return { tags, loading, fetchTags, createTag, updateTag, deleteTag };
+  /** M7：登出/切换账号时清空标签缓存（标签按用户隔离）。 */
+  function reset() {
+    tags.value = [];
+    loading.value = false;
+  }
+
+  return { tags, loading, reset, fetchTags, createTag, updateTag, deleteTag };
 });

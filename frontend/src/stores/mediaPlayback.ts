@@ -327,6 +327,19 @@ export const useMediaPlaybackStore = defineStore('mediaPlayback', () => {
     errorMessage.value = null;
   }
 
+  /**
+   * M7：登出/切换账号时停止播放并复位会话状态。
+   * 先经桥接层停止真实媒体实例，再清空 store 状态，避免旧账号媒体继续播放。
+   */
+  function reset() {
+    if (bridge) bridge.stop();
+    clearSession();
+    uploadPanelVisible.value = false;
+    volume.value = 0.5;
+    muted.value = false;
+    playbackRate.value = 1;
+  }
+
   // ─── 播放控制桥（转发到实际媒体实例） ───
   function registerBridge(b: MediaPlayerBridge) {
     bridge = b;
@@ -363,6 +376,7 @@ export const useMediaPlaybackStore = defineStore('mediaPlayback', () => {
     expand,
     requestStop,
     clearSession,
+    reset,
     setPlayState,
     setProgress,
     setVolume,

@@ -8,6 +8,15 @@ import { User } from '../common/entities/user.entity';
 import { getClientIp } from '../common/utils/client-ip';
 import { JwtService } from '@nestjs/jwt';
 import { RateLimitService } from '../common/services/rate-limit.service';
+import { generateXsrfToken, getXsrfCookieOptions, XSRF_COOKIE_NAME } from '../common/utils/xsrf';
+
+/**
+ * M1：会话建立时同时下发非 httpOnly 的 XSRF-TOKEN Cookie（CSRF 双重提交）。
+ * 与 access_token 使用完全一致的安全属性，仅 httpOnly 不同。
+ */
+const issueXsrfCookie = (req: Request, res: Response) => {
+  res.cookie(XSRF_COOKIE_NAME, generateXsrfToken(), getXsrfCookieOptions(req));
+};
 
 const getCookieOptions = (req: Request) => ({
   httpOnly: true,
@@ -36,6 +45,7 @@ export class AuthController {
 
     if (result.accessToken) {
       res.cookie('access_token', result.accessToken, getCookieOptions(req));
+      issueXsrfCookie(req, res);
     }
 
     const { accessToken: _accessToken, ...browserResponse } = result;
@@ -47,6 +57,7 @@ export class AuthController {
     const ip = getClientIp(req);
     const result = await this.authService.login(loginDto, ip);
     res.cookie('access_token', result.accessToken, getCookieOptions(req));
+    issueXsrfCookie(req, res);
     const { accessToken: _accessToken, ...browserResponse } = result;
     return browserResponse;
   }
@@ -81,6 +92,14 @@ export class AuthController {
       }
     }
     res.clearCookie('access_token', getCookieOptions(req));
+    // M1：登出时一并清除 XSRF Cookie，避免残留令牌被下一个会话复用。
+    const xsrfOptions = getXsrfCookieOptions(req);
+    res.clearCookie(XSRF_COOKIE_NAME, {
+      httpOnly: xsrfOptions.httpOnly,
+      secure: xsrfOptions.secure,
+      sameSite: xsrfOptions.sameSite,
+      path: xsrfOptions.path,
+    });
     return { message: '登出成功' };
   }
 

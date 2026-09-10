@@ -113,9 +113,9 @@ const client: AxiosInstance = axios.create({
   withCredentials: true,
   // CSRF 双重提交 Cookie（Double-Submit Cookie）配置：
   // axios 会在发起请求时读取名为 XSRF-TOKEN 的 cookie，并自动写入 X-XSRF-TOKEN 请求头。
-  // ⚠️ 需后端配合：在登录/会话建立时下发一个名为 XSRF-TOKEN（非 httpOnly）的随机令牌 cookie，
-  //    并在所有状态变更接口校验请求头 X-XSRF-TOKEN 与该 cookie 一致。
-  // 若后端尚未下发该 cookie，前端读取为空时不会注入请求头、也不会报错（见下方请求拦截器，容错处理）。
+  // 后端已在登录/注册会话建立时下发非 httpOnly 的 XSRF-TOKEN Cookie，并由全局 CsrfGuard
+  // 对所有状态变更方法校验「同源 + 请求头与 Cookie 一致」。
+  // 容错：cookie 不存在时（如匿名公开分享页、Bearer/API Key 调用）不注入请求头、也不报错。
   xsrfCookieName: 'XSRF-TOKEN',
   xsrfHeaderName: 'X-XSRF-TOKEN',
   // 不设置 Content-Type，由 axios 根据请求数据类型自动推断：
@@ -140,8 +140,7 @@ client.interceptors.request.use(
   (config: InternalAxiosRequestConfig) => {
     // Cookie 由 axios withCredentials 自动携带，无需手动添加 Authorization header。
     // CSRF 防护（双重提交 Cookie）：读取后端下发的 XSRF-TOKEN cookie 并注入 X-XSRF-TOKEN 请求头。
-    // ⚠️ 需后端配合下发该 cookie；此处做了容错——cookie 不存在时不注入请求头、也不报错，
-    //    因此在后端尚未启用该机制前不会影响现有请求。
+    // 容错——cookie 不存在时不注入请求头、也不报错（公开分享页/非浏览器调用场景）。
     const headers = config.headers;
     if (headers && !headers.has('X-XSRF-TOKEN')) {
       const xsrfToken = readCookie('XSRF-TOKEN');

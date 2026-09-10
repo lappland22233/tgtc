@@ -1,0 +1,56 @@
+/**
+ * 预览弹窗跨组件共享样式（M6 拆分专项）。
+ *
+ * 这些规则被多个组件同时使用（宿主 FilePreviewDialog、PreviewTextPanel 等）：
+ * Vue 的 scoped 样式不会作用到子组件内部元素，因此把公共规则集中在此文件，
+ * 各组件以 <style scoped src="./preview-shared.css"> 引入，保持单一来源。
+ *
+ * 新增规则前请确认「确实被 2 个及以上组件使用」，仅单组件使用的样式留在组件内。
+ */
+
+/* 加载 / 错误兜底态 */
+.fpv-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 32px;
+  text-align: center;
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+.fpv-state p { margin: 0; }
+.fpv-state-icon {
+  font-size: 36px;
+  color: var(--text-tertiary);
+}
+.fpv-error .fpv-state-icon { color: var(--color-danger); }
+
+/* 通用小按钮（错误态下载 / 底部下载） */
+.fpv-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 18px;
+  background: var(--seed-primary);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius-md);
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.2s, transform 0.1s;
+}
+.fpv-btn:hover { background: color-mix(in srgb, var(--seed-primary) 85%, #fff); }
+.fpv-btn:active { transform: scale(0.98); }
+
+/* 次要按钮（错误态下载） */
+.fpv-btn--ghost {
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  color: var(--text-secondary);
+}
+.fpv-btn--ghost:hover {
+  background: var(--color-accent-soft);
+  color: var(--text-accent);
+}

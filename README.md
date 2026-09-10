@@ -190,18 +190,21 @@ SQLite 备份前应停止应用或使用 SQLite 在线备份能力取得一致�
 | 变量 | 默认值 | 说明 |
 |---|---:|---|
 | `NODE_ENV` | `development` | `development/test/staging/production` |
-| `APP_HOST` | `127.0.0.1` | 监听地址；示例配置为 `0.0.0.0` |
+| `APP_HOST` | `127.0.0.1` | 监听地址；仅本机可访问，公网必须经反向代理 |
 | `APP_PORT` | `3000` | 服务端口 |
+| `DEPLOYMENT_MODE` | `single` | 部署形态；仅支持 `single`，`multi` 会被启动预检拒绝 |
 | `APP_URL` | `http://localhost:3000` | 对外公开地址，用于分享链接 |
 | `FRONTEND_URL` | - | CORS 单一来源回退值 |
 | `CORS_ORIGINS` | - | 逗号分隔的允许来源，优先于 `FRONTEND_URL` |
 | `JWT_SECRET` | - | 至少 32 字符，启动必检 |
 | `JWT_EXPIRES_IN` | `7d` | JWT 有效期 |
-| `SECURE_COOKIE` | `false` | HTTPS 生产环境建议设为 `true` |
+| `SECURE_COOKIE` | `false` | HTTPS 生产环境必须显式设为 `true` |
 | `TOKEN_EXTRACTION_MODE` | `both` | `both` 或 `cookie_only` |
-| `TRUST_PROXY_HOPS` | `1` | Express 信任的反向代理跳数 |
+| `TRUST_PROXY_HOPS` | 未设置 | Express 信任的反向代理跳数；位于反代之后必须设置（如 `1`） |
 
 启用 Cookie 凭据时禁止将 `CORS_ORIGINS` 配置为 `*`。多层代理部署必须根据真实拓扑设置 `TRUST_PROXY_HOPS`，并确保上游正确维护 `X-Forwarded-For`。
+
+生产环境启动预检（`backend/src/config/deployment-preflight.ts`）会在以下情况输出高可见度告警：既未设置 `SECURE_COOKIE=true` 也未设置 `TRUST_PROXY_HOPS`（Cookie 可能失去 `Secure`）、监听 `0.0.0.0`。若设置 `DEPLOYMENT_MODE=multi`，预检将**直接拒绝启动**（当前版本不支持多实例）。
 
 ### Redis 与 Bull
 
@@ -382,11 +385,18 @@ NODE_ENV=production npm run start:prod
    - `tmp/uploads`：异步上传与分片临时文件
    - `tmp/thumbnails`：缩略图
    - `tmp/logs`：应用日志
-2. **反向代理**：正确设置 `X-Forwarded-For` 和 `X-Forwarded-Proto`，并匹配 `TRUST_PROXY_HOPS`。
+2. **反向代理**：正确设置 `X-Forwarded-For` 和 `X-Forwarded-Proto`，并匹配 `TRUST_PROXY_HOPS`。Node 必须监听 `127.0.0.1`（`.env.example` 默认值），由反向代理暴露公网。
 3. **大文件**：提高代理请求体限制和读写超时；下载链路应关闭不必要的代理缓冲并透传 Range 请求。
-4. **HTTPS**：设置 `SECURE_COOKIE=true`，配置明确的 `CORS_ORIGINS`，不要使用通配符。
+4. **HTTPS**：设置 `SECURE_COOKIE=true`，配置明确的 `CORS_ORIGINS`，不要使用通配符。若 TLS 在反向代理终止，必须同时设置 `TRUST_PROXY_HOPS`（使后端识别 `X-Forwarded-Proto: https`）或显式 `SECURE_COOKIE=true`，否则会话 Cookie 将缺少 `Secure` 标志。启动预检会对生产环境下的不安全组合发出明确告警（见下）。
 5. **迁移**：生产环境保持 `DB_SYNCHRONIZE=false`，部署前运行 `npm run migration:run`。
-6. **多实例**：当前分片会话与部分上传任务状态保存在单实例内存，本地临时文件和缓存也依赖实例磁盘。多实例部署需要会话粘性与共享存储，或先将相关状态外置。文件缓存（`tmp/Cache`）、缩略图（`tmp/thumbnails`）与冷回源会话状态均为**实例本地**，`FILE_CACHE_NO_CACHE_MODE=true` 可跳过磁盘缓存，但各实例仍有独立的 spool 与会话并发预算。
+6. **多实例：当前版本不支持**。本版本必须**单后端实例**部署（PostgreSQL + Redis + Telegram Bot API 可共享，但后端进程只能有一个）。原因是核心链路上仍有进程内内存态，多实例会直接导致功能异常：
+   - 分片上传会话（`chunk-upload.service.ts` 的 `sessions`）：实例 A 创建的会话分片落到实例 B 会 `session not found`，大文件分片上传**随机失败**；
+   - 缓存冷回源 single-flight（`cache-session-coordinator.ts` 的 `buildSessions`/`spoolSessions`）：多实例会重复向 Telegram 回源同一文件、重复写盘，去重失效；
+   - 上传任务态（`upload-job.service.ts` 的 `jobs`）与合并并发信号量（`mergeSemaphorePerUser`）：进程重启即丢失、跨实例不共享；
+   - 缩略图构建去重（`thumbnail.service.ts` 的 `thumbnailBuilds`）及其他进程内 Map；
+   - 文件缓存 `tmp/Cache`、缩略图 `tmp/thumbnails` 与冷回源 spool 均为**实例本地磁盘**。
+
+   `FILE_CACHE_NO_CACHE_MODE=true` 可跳过磁盘缓存，但**不能**解决上述会话/任务/单飞的内存态问题。需要多实例前必须先完成 Redis 外置专项（会议纪要见 `docs/multi-instance-redis-design.md`）。若误配多实例，启动预检会输出高可见度错误（`CLUSTER_MODE` 相关校验）。
 7. **优雅退出**：应用已启用 Nest shutdown hooks；进程管理器应发送可处理的终止信号并给予日志 flush 时间。
 
 HTTP 服务器参数：活动连接空闲超时 120 秒、Keep-Alive 65 秒、请求头超时 66 秒；上传端点另行禁用请求超时。

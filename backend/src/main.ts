@@ -9,7 +9,10 @@ import { join } from 'path';
 import { AppModule } from './app.module';
 import { TransformInterceptor } from './common/interceptors/transform.interceptor';
 import { GlobalExceptionFilter } from './common/filters/http-exception.filter';
+import { CsrfGuard } from './common/guards/csrf.guard';
+import { generateXsrfToken, getXsrfCookieOptions, XSRF_COOKIE_NAME } from './common/utils/xsrf';
 import { validateEnv } from './config/env-validation';
+import { evaluateDeploymentPreflight } from './config/deployment-preflight';
 import { FileLogger } from './common/file-logger';
 import { isLegacyEncrypted } from './common/utils/crypto.util';
 
@@ -22,6 +25,17 @@ async function bootstrap() {
     validateEnv();
   } catch (err) {
     logger.error((err as Error).message);
+    process.exit(1);
+  }
+
+  // 部署形态与传输安全组合预检（H1/L2/L7）：
+  // 声明多实例直接拒绝启动；生产环境 TLS/Cookie 组合不安全时高可见度告警。
+  const preflight = evaluateDeploymentPreflight();
+  for (const warning of preflight.warnings) {
+    logger.warn(`[部署预检] ${warning}`);
+  }
+  if (preflight.errors.length > 0) {
+    logger.error('[启动失败] 部署预检不通过：\n  - ' + preflight.errors.join('\n  - '));
     process.exit(1);
   }
 
@@ -70,6 +84,10 @@ async function bootstrap() {
 
   // 全局异常过滤器：统一错误响应结构，生产环境不回显堆栈
   app.useGlobalFilters(new GlobalExceptionFilter());
+
+  // M1：全局 CSRF 防护。对非安全方法执行「同源校验 + 双重提交」两层校验；
+  // 无会话 Cookie 的 Bearer/API Key 请求不做双重提交（不误伤），但仍受同源校验与认证保护。
+  app.useGlobalGuards(new CsrfGuard());
 
   // 安全响应头（X-Content-Type-Options / X-Frame-Options / Referrer-Policy 等）。
   // CSP 交由前端 index.html 的 <meta> 控制（G9-06：确认前端 index.html 的 meta CSP
@@ -134,6 +152,22 @@ async function bootstrap() {
   app.useStaticAssets(frontendDist, { prefix: '/' });
 
   const expressApp = app.getHttpAdapter().getInstance();
+
+  // M1：为已存在会话（升级前登录、或未经过登录接口拿到的会话）补发非 httpOnly 的
+  // XSRF-TOKEN Cookie，使前端能读取并回填 X-XSRF-TOKEN 请求头。
+  // 该中间件只负责签发、不构成任何放行依据：真正的校验在 CsrfGuard 中，
+  // 攻击者无法跨站读取该 Cookie，因此补发不影响双提交的安全性。
+  expressApp.use((req, res, next) => {
+    try {
+      const cookies = (req as typeof req & { cookies?: Record<string, string> }).cookies ?? {};
+      if (cookies['access_token'] && !cookies[XSRF_COOKIE_NAME]) {
+        res.cookie(XSRF_COOKIE_NAME, generateXsrfToken(), getXsrfCookieOptions(req));
+      }
+      next();
+    } catch (err) {
+      next(err);
+    }
+  });
 
   // 公开文件与媒体直链 URL 重写，让外部引用无需 /api 前缀。
   // 同时为媒体直链路由单独设置安全响应头（G9-06）：

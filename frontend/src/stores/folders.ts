@@ -201,12 +201,25 @@ export const useFolderStore = defineStore('folders', () => {
     return null;
   }
 
+  /** M7：登出/切换账号时清理文件夹树与导航状态，并中止在途请求。 */
+  function reset() {
+    treeAbortController?.abort();
+    treeAbortController = null;
+    breadcrumbAbortController?.abort();
+    breadcrumbAbortController = null;
+    tree.value = [];
+    currentFolderId.value = null;
+    breadcrumb.value = [];
+    loading.value = false;
+  }
+
   return {
     tree,
     currentFolderId,
     breadcrumb,
     loading,
     currentFolderName,
+    reset,
     fetchTree,
     openFolder,
     createFolder,

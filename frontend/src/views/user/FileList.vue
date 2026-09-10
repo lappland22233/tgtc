@@ -15,147 +15,48 @@
       </div>
     </div>
 
-    <!-- ① 地址栏：文件路径 + 新建文件夹 / 上传 -->
-    <div class="fl-addressbar">
-      <nav class="fl-path" aria-label="当前位置">
-        <button
-          type="button"
-          class="fl-path-item"
-          :class="{ 'is-current': folderStore.currentFolderId === null, 'drag-over': dragOverFolderId === ROOT_DROP_TARGET }"
-          @click="onFolderNavigate(null)"
-          @dragover.prevent="onFolderDragOver($event, ROOT_DROP_TARGET)"
-          @dragenter.prevent="onFolderDragOver($event, ROOT_DROP_TARGET)"
-          @dragleave="onFolderDragLeave($event, ROOT_DROP_TARGET)"
-          @drop.prevent.stop="onDropOnFolder($event, ROOT_DROP_TARGET)"
-        >
-          <t-icon name="home" class="fl-path-home" />
-          我的文件
-        </button>
-        <template v-for="(folder, idx) in folderStore.breadcrumb" :key="folder.id">
-          <t-icon name="chevron-right" class="fl-path-sep" />
-          <button
-            type="button"
-            class="fl-path-item"
-            :class="{ 'is-current': idx === folderStore.breadcrumb.length - 1 }"
-            :title="folder.name"
-            :aria-current="idx === folderStore.breadcrumb.length - 1 ? 'page' : undefined"
-            @click="onFolderNavigate(folder.id)"
-          >
-            {{ folder.name }}
-          </button>
-        </template>
-      </nav>
-      <div class="fl-addressbar-actions">
-        <t-button theme="default" variant="outline" @click="openCreateFolderDialog">
-          <template #icon><t-icon name="folder-add" /></template>
-          新建文件夹
-        </t-button>
-        <t-button theme="primary" @click="showUploadModal = true">
-          <template #icon><t-icon name="upload" /></template>
-          上传文件
-        </t-button>
-      </div>
-    </div>
+    <!-- ① 地址栏：文件路径 + 新建文件夹 / 上传（M6 拆出为展示组件） -->
+    <FileListAddressBar
+      :current-folder-id="folderStore.currentFolderId"
+      :breadcrumb="folderStore.breadcrumb"
+      :drag-over-folder-id="dragOverFolderId"
+      :root-drop-target="ROOT_DROP_TARGET"
+      :show-mobile-back="isMobile && folderStore.currentFolderId !== null"
+      :parent-folder-id="parentFolderId"
+      @navigate="onFolderNavigate"
+      @create-folder="openCreateFolderDialog"
+      @upload="showUploadModal = true"
+      @folder-drag-over="onFolderDragOver"
+      @folder-drag-leave="onFolderDragLeave"
+      @drop-on-folder="onDropOnFolder"
+    />
 
-    <button
-      v-if="isMobile && folderStore.currentFolderId !== null"
-      type="button"
-      class="fl-mobile-back"
-      @click="onFolderNavigate(parentFolderId)"
-    >
-      <t-icon name="chevron-left" />
-      返回上级
-    </button>
+    <!-- ② 工具栏：搜索 + 标签（M6 拆出为展示组件） -->
+    <FileListToolbar
+      v-model:search="search"
+      :tag-button-label="tagButtonLabel"
+      @search="handleSearch"
+      @clear="handleClearSearch"
+      @manage-tags="showTagManager = true"
+    />
 
-    <!-- ② 工具栏：搜索 + 标签 -->
-    <div class="fl-toolbar">
-      <form autocomplete="off" class="fl-search-form" @submit.prevent="handleSearch">
-        <t-input
-          v-model="search"
-          placeholder="搜索当前文件夹..."
-          class="fl-search-input"
-          autocomplete="off"
-          name="q-file-search"
-          clearable
-          @enter="handleSearch"
-          @clear="handleClearSearch"
-        >
-          <template #prefix-icon><t-icon name="search" /></template>
-        </t-input>
-        <t-button theme="default" @click="handleSearch">搜索</t-button>
-      </form>
-      <div class="fl-toolbar-right">
-        <t-button size="medium" variant="outline" @click="showTagManager = true">
-          <template #icon><t-icon name="tag" /></template>
-          {{ (tagStore.tags && tagStore.tags.length > 0) || selectedTagIds.length > 0 ? '标签筛选' : '管理标签' }}
-        </t-button>
-      </div>
-    </div>
-
-    <!-- ③ 批量操作栏：仅在选中文件时出现 -->
-    <div v-if="selectedFileIds.length > 0" class="fl-batchbar">
-      <span class="fl-batchbar-count">已选 {{ selectedFileIds.length }} 项</span>
-      <!-- G11-09：MK 按钮与“复制下载链接”按钮并列显示，不再互斥（避免全选图片时复制入口被挤掉）。
-            MK 仅对可直链的图片生成 Markdown；复制链接对全部选中项生成下载链接。 -->
-      <t-button
-        v-if="selectedImages.length > 0"
-        theme="primary"
-        variant="outline"
-        size="small"
-        @click="convertToMarkdown"
-      >
-        批量 MK（{{ selectedImages.length }}）
-      </t-button>
-      <t-button
-        theme="default"
-        variant="outline"
-        size="small"
-        @click="copyDownloadLinks"
-      >
-        复制下载链接
-      </t-button>
-      <t-button theme="default" variant="outline" size="small" @click="openBatchTagDialog">批量标签</t-button>
-      <t-button theme="default" variant="outline" size="small" @click="openMoveDialogForFiles()">移动到...</t-button>
-      <t-button
-        theme="danger"
-        variant="outline"
-        size="small"
-        :loading="isBatchDeleting"
-        :disabled="isBatchDeleting"
-        @click="openBatchDeleteDialog"
-      >
-        批量删除
-      </t-button>
-      <t-button theme="default" variant="text" size="small" :disabled="isBatchDeleting" @click="clearSelection">清除选择</t-button>
-    </div>
-
-    <!-- ④ 已选标签筛选 -->
-    <div v-if="selectedTagIds.length > 0" class="fl-tagfilters">
-      <t-tag
-        v-for="tagId in selectedTagIds"
-        :key="tagId"
-        closable
-        size="small"
-        theme="primary"
-        variant="light"
-        @close="removeTagFilter(tagId)"
-      >
-        {{ getTagName(tagId) }}
-      </t-tag>
-      <t-button size="small" variant="text" @click="clearTagFilters">清除全部</t-button>
-    </div>
-
-    <!-- ⑤ Markdown 结果区域 -->
-    <div v-if="markdownResult" class="fl-markdown">
-      <div class="fl-markdown-head">
-        <span class="fl-markdown-title">Markdown 结果</span>
-        <div class="fl-markdown-actions">
-          <t-button size="small" theme="primary" variant="outline" @click="copyMarkdown">复制</t-button>
-          <t-button size="small" theme="default" variant="text" @click="markdownResult = ''">关闭</t-button>
-        </div>
-      </div>
-      <t-input v-model="markdownResult" type="textarea" readonly :rows="6" autocomplete="off" />
-    </div>
+    <!-- ③④⑤ 批量操作栏 / 已选标签筛选 / Markdown 结果（M6 拆出为展示组件） -->
+    <FileListBatchActions
+      v-model:markdown="markdownResult"
+      :selected-count="selectedFileIds.length"
+      :image-count="selectedImages.length"
+      :busy="isBatchDeleting"
+      :tag-filters="filteredTagItems"
+      @convert-markdown="convertToMarkdown"
+      @copy-links="copyDownloadLinks"
+      @batch-tag="openBatchTagDialog"
+      @move="openMoveDialogForFiles()"
+      @batch-delete="openBatchDeleteDialog"
+      @clear-selection="clearSelection"
+      @remove-tag="removeTagFilter"
+      @clear-tags="clearTagFilters"
+      @copy-markdown="copyMarkdown"
+    />
 
     <!-- ⑥ 空状态：当前文件夹下既无文件也无子文件夹 -->
     <div v-if="folderLoading" class="fl-loading-state">
@@ -197,167 +98,37 @@
       <!-- 桌面端：表格式列表 -->
       <div v-if="!isMobile" class="os-list-scroll">
         <div class="os-list-inner">
-          <!-- 表头 -->
-          <div class="os-row os-head">
-            <div class="os-cell os-check">
-              <t-checkbox
-                :checked="isAllSelected"
-                :indeterminate="isIndeterminate"
-                :disabled="isBatchDeleting"
-                aria-label="全选当前已加载的可操作文件"
-                @change="toggleSelectAll"
-              />
-            </div>
-            <div class="os-cell os-name os-sortable">
-              <button
-                type="button"
-                class="os-sort-btn"
-                role="columnheader"
-                :aria-sort="sortBy === 'originalName' ? (sortOrder === 'ASC' ? 'ascending' : 'descending') : 'none'"
-                @click="toggleSort('originalName')"
-                @keydown.enter.prevent="toggleSort('originalName')"
-                @keydown.space.prevent="toggleSort('originalName')"
-              >
-                名称
-                <t-icon
-                  :name="sortBy === 'originalName' ? (sortOrder === 'DESC' ? 'caret-down-small' : 'caret-up-small') : 'view-list'"
-                  class="os-sort-icon"
-                  :class="{ active: sortBy === 'originalName' }"
-                />
-              </button>
-            </div>
-            <div class="os-cell os-size">大小</div>
-            <div class="os-cell os-date os-sortable">
-              <button
-                type="button"
-                class="os-sort-btn"
-                role="columnheader"
-                :aria-sort="sortBy === 'createdAt' ? (sortOrder === 'ASC' ? 'ascending' : 'descending') : 'none'"
-                @click="toggleSort('createdAt')"
-                @keydown.enter.prevent="toggleSort('createdAt')"
-                @keydown.space.prevent="toggleSort('createdAt')"
-              >
-                上传时间
-                <t-icon
-                  :name="sortBy === 'createdAt' ? (sortOrder === 'DESC' ? 'caret-down-small' : 'caret-up-small') : 'view-list'"
-                  class="os-sort-icon"
-                  :class="{ active: sortBy === 'createdAt' }"
-                />
-              </button>
-            </div>
-          </div>
-
-          <!-- 文件夹行（OS 风格，双击进入；R9：支持键盘 Tab + Enter/Space 进入） -->
-          <div
-            v-for="folder in subfoldersInCurrentFolder"
-            :key="`folder-${folder.id}`"
-            class="os-row os-folder"
-            :class="{ 'drag-over': dragOverFolderId === folder.id }"
-            role="button"
-            tabindex="0"
-            :aria-label="`打开文件夹 ${folder.name}`"
-            @dblclick="onFolderOpen(folder)"
-            @keydown.enter.self.prevent="onFolderOpen(folder)"
-            @keydown.space.self.prevent="onFolderOpen(folder)"
-            @contextmenu.prevent.stop="openFolderCtxMenu($event, folder)"
-            @touchstart="handleTouchStart($event, 'folder', folder)"
-            @touchmove="handleTouchMove"
-            @touchend="handleTouchEnd"
-            @dragover.prevent="onFolderDragOver($event, folder.id)"
-            @dragenter.prevent="onFolderDragOver($event, folder.id)"
-            @dragleave="onFolderDragLeave($event, folder.id)"
-            @drop.prevent.stop="onDropOnFolder($event, folder.id)"
-          >
-            <div class="os-cell os-check"></div>
-            <div class="os-cell os-name" :title="folder.name">
-              <t-icon name="folder" class="os-folder-icon" />
-              <span class="os-name-text">{{ folder.name }}</span>
-              <t-tag size="small" theme="warning" variant="light" class="os-kind-tag">文件夹</t-tag>
-            </div>
-            <div class="os-cell os-size os-muted">{{ folder.children?.length ? `${folder.children.length} 项` : '—' }}</div>
-            <div class="os-cell os-date os-muted">{{ formatDate(folder.createdAt) }}</div>
-          </div>
-
-          <!-- 文件行 -->
-          <div
-            v-for="file in displayFiles"
-            :key="file.id"
-            class="os-row os-file"
-            :class="[getRowClassName({ row: file }), { dragging: draggingFileIds.includes(file.id) }]"
-            :draggable="!isMobile && isFileActionable(file)"
-            :tabindex="!isMobile && isFileActionable(file) ? 0 : -1"
-            :role="!isMobile && isFileActionable(file) ? 'button' : undefined"
-            :aria-label="!isMobile && isFileActionable(file) ? `下载 ${file.originalName}` : undefined"
-            @dragstart="onFileDragStart($event, file)"
-            @dragend="onFileDragEnd"
-            @contextmenu.prevent.stop="openFileCtxMenu($event, file)"
-            @touchstart="handleTouchStart($event, 'file', file)"
-            @touchmove="handleTouchMove"
-            @touchend="handleTouchEnd"
-            @dblclick="isFileActionable(file) && downloadFile(file)"
-            @keydown.enter.self.prevent="isFileActionable(file) && downloadFile(file)"
-          >
-            <div class="os-cell os-check">
-              <t-checkbox
-                v-if="!file.isDeleted && file.status !== 'processing'"
-                :checked="selectedFileIds.includes(file.id)"
-                @change="toggleFileSelect(file)"
-              />
-            </div>
-            <div class="os-cell os-name">
-              <span
-                v-if="canPreviewFile(file)"
-                class="os-thumb-click"
-                :title="'点击预览 ' + file.originalName"
-                role="button"
-                tabindex="0"
-                :aria-label="`预览 ${file.originalName}`"
-                @click.stop="openPreview(file)"
-                @keydown.enter.prevent="openPreview(file)"
-                @keydown.space.prevent="openPreview(file)"
-              >
-                <ThumbnailImg :file-id="file.id" :mime-type="file.mimeType" :size="32" :file-name="file.originalName" :context="thumbnailContext" :version="file.uploadVersion" />
-              </span>
-              <ThumbnailImg v-else :file-id="file.id" :mime-type="file.mimeType" :size="32" :file-name="file.originalName" :context="thumbnailContext" :version="file.uploadVersion" />
-              <div class="os-name-block">
-                <span class="os-name-text" :class="{ 'deleted-name': file.isDeleted }" :title="file.originalName">
-                  {{ file.originalName }}
-                </span>
-                <div class="os-name-sub">
-                  <t-tag v-if="file.status === 'error'" theme="danger" size="small">上传失败</t-tag>
-                  <t-tag v-else-if="file.status === 'processing'" theme="primary" size="small">处理中</t-tag>
-                  <t-tag v-else-if="file.isDeleted && file.deletedByAdmin" theme="danger" size="small">被管理员删除</t-tag>
-                  <t-tag v-else-if="file.isDeleted" theme="warning" size="small">删除中</t-tag>
-                  <span
-                    v-for="tag in file.tags"
-                    :key="tag.id"
-                    class="os-tag-click"
-                    role="button"
-                    tabindex="0"
-                    :aria-label="`按标签 ${tag.name} 筛选`"
-                    @click.stop="addTagFilter(tag.id)"
-                    @keydown.enter.prevent="addTagFilter(tag.id)"
-                    @keydown.space.prevent="addTagFilter(tag.id)"
-                  >
-                    <t-tag
-                      size="small"
-                      variant="light"
-                      :style="{ background: tag.color + '20', color: tag.color, borderColor: tag.color + '40' }"
-                    >
-                      {{ tag.name }}
-                    </t-tag>
-                  </span>
-                </div>
-              </div>
-            </div>
-            <div class="os-cell os-size os-mono">{{ formatSize(file.size) }}</div>
-            <div class="os-cell os-date">
-              <div>{{ formatDate(file.createdAt) }}</div>
-              <div v-if="file.isDeleted && file.deleteRequestedAt" class="os-deleted-date">
-                删除于 {{ formatDate(file.deleteRequestedAt) }}
-              </div>
-            </div>
-          </div>
+          <!-- 表头 + 文件夹行 + 文件行（M6 拆出为展示组件） -->
+          <FileListDesktopRows
+            :subfolders="subfoldersInCurrentFolder"
+            :files="displayFiles"
+            :selected-ids="selectedFileIds"
+            :is-all-selected="isAllSelected"
+            :is-indeterminate="isIndeterminate"
+            :busy="isBatchDeleting"
+            :sort-by="sortBy"
+            :sort-order="sortOrder"
+            :drag-over-folder-id="dragOverFolderId"
+            :dragging-file-ids="draggingFileIds"
+            :thumbnail-context="thumbnailContext"
+            @toggle-sort="toggleSort"
+            @toggle-select-all="toggleSelectAll"
+            @file-select="toggleFileSelect"
+            @folder-open="onFolderOpen"
+            @folder-ctxmenu="openFolderCtxMenu"
+            @file-ctxmenu="openFileCtxMenu"
+            @touch-start="handleTouchStart"
+            @touch-move="handleTouchMove"
+            @touch-end="handleTouchEnd"
+            @folder-drag-over="onFolderDragOver"
+            @folder-drag-leave="onFolderDragLeave"
+            @drop-on-folder="onDropOnFolder"
+            @file-drag-start="onFileDragStart"
+            @file-drag-end="onFileDragEnd"
+            @download="downloadFile"
+            @preview="openPreview"
+            @tag-filter="addTagFilter"
+          />
 
           <!-- 无限滚动哨兵 -->
           <div ref="scrollSentinel" class="os-sentinel">
@@ -375,116 +146,35 @@
         </div>
       </div>
 
-      <!-- 移动端：文件夹行 + 文件卡片 -->
-      <div v-else class="os-mobile">
-        <div v-if="selectableFiles.length > 0" class="mobile-selection-toolbar">
-          <t-checkbox
-            :checked="isAllSelected"
-            :indeterminate="isIndeterminate"
-            :disabled="isBatchDeleting"
-            @change="toggleSelectAll"
-          >
-            全选当前已加载的 {{ selectableFiles.length }} 个可操作文件
-          </t-checkbox>
-          <span v-if="selectedFileIds.length > 0" class="mobile-selection-count">已选 {{ selectedFileIds.length }} 项</span>
-        </div>
-        <div
-          v-for="folder in subfoldersInCurrentFolder"
-          :key="`m-folder-${folder.id}`"
-          class="mobile-folder-row"
-          @click="!consumeLongPressClick() && onFolderOpen(folder)"
-          @contextmenu.prevent.stop="openFolderCtxMenu($event, folder)"
-          @touchstart="handleTouchStart($event, 'folder', folder)"
-          @touchmove="handleTouchMove"
-          @touchend="handleTouchEnd"
-        >
-          <t-icon name="folder" class="os-folder-icon" />
-          <div class="mobile-folder-info">
-            <div class="mobile-folder-name">{{ folder.name }}</div>
-            <div class="mobile-folder-meta">文件夹 · {{ formatDate(folder.createdAt) }}</div>
-          </div>
-          <t-icon name="chevron-right" class="mobile-folder-arrow" />
-        </div>
-
-        <div
-          v-for="file in displayFiles"
-          :key="`m-file-${file.id}`"
-          class="mobile-file-card"
-          @contextmenu.prevent.stop="openFileCtxMenu($event, file)"
-          @touchstart="handleTouchStart($event, 'file', file)"
-          @touchmove="handleTouchMove"
-          @touchend="handleTouchEnd"
-        >
-          <div class="mobile-file-card-header">
-            <t-checkbox
-              v-if="isFileActionable(file)"
-              class="mobile-file-select"
-              :checked="selectedFileIds.includes(file.id)"
-              :disabled="isBatchDeleting"
-              :aria-label="`选择 ${file.originalName}`"
-              @change="toggleFileSelect(file)"
-              @click.stop
-            />
-            <ThumbnailImg :file-id="file.id" :mime-type="file.mimeType" :size="40" :file-name="file.originalName" :context="thumbnailContext" :version="file.uploadVersion" />
-            <div class="mobile-file-main">
-              <div class="mobile-file-name" :class="{ 'deleted-name': file.isDeleted }">{{ file.originalName }}</div>
-              <div class="mobile-file-meta">{{ formatSize(file.size) }} · {{ formatDate(file.createdAt) }}</div>
-              <div class="mobile-file-tags">
-                <t-tag v-if="file.isDeleted && file.deletedByAdmin" theme="danger" size="small">被管理员删除</t-tag>
-                <t-tag v-else-if="file.isDeleted" theme="warning" size="small">删除中</t-tag>
-                <t-tag v-else-if="file.accessType === 'public'" theme="success" size="small">公开</t-tag>
-                <t-tag v-else theme="default" size="small">私有</t-tag>
-                <t-tag v-if="file.hasPassword" theme="warning" size="small">已加密</t-tag>
-                <span
-                  v-for="tag in file.tags?.slice(0, 2)"
-                  :key="tag.id"
-                  class="os-tag-click"
-                  @click.stop="addTagFilter(tag.id)"
-                >
-                  <t-tag
-                    size="small"
-                    variant="light"
-                    :style="{ background: tag.color + '18', color: tag.color, borderColor: tag.color + '33' }"
-                  >
-                    {{ tag.name }}
-                  </t-tag>
-                </span>
-                <span v-if="file.tags && file.tags.length > 2" class="mobile-tag-more">+{{ file.tags.length - 2 }}</span>
-              </div>
-            </div>
-          </div>
-          <div v-if="!file.isDeleted" class="mobile-file-card-actions">
-            <t-button size="small" theme="primary" variant="text" @click="copyLink(file)">复制</t-button>
-            <t-button v-if="canPreviewFile(file)" size="small" variant="text" @click="openPreview(file)">预览</t-button>
-            <t-button size="small" variant="text" @click="downloadFile(file)">下载</t-button>
-            <t-button size="small" variant="text" @click="openTagEditor(file)">标签</t-button>
-            <t-button size="small" theme="danger" variant="text" @click="handleDelete(file)">删除</t-button>
-          </div>
-          <div v-else class="mobile-file-card-actions">
-            <t-button
-              size="small"
-              theme="success"
-              variant="text"
-              :disabled="file.deletedByAdmin && !isAdmin"
-              @click="handleRestore(file.id)"
-            >
-              恢复
-            </t-button>
-            <t-button v-if="isAdmin" size="small" theme="danger" variant="text" @click="handleForceDelete(file.id)">
-              强制删除
-            </t-button>
-            <t-button
-              v-else-if="!file.deletedByAdmin && file.deleteRequestedAt && selfForceDeleteReady(file)"
-              size="small"
-              theme="danger"
-              variant="text"
-              @click="handleForceDelete(file.id)"
-            >
-              永久删除
-            </t-button>
-          </div>
-        </div>
-      </div>
+      <!-- 移动端：文件夹行 + 文件卡片（M6 拆出为展示组件） -->
+      <FileListMobileList
+        v-else
+        :subfolders="subfoldersInCurrentFolder"
+        :files="displayFiles"
+        :selectable-count="selectableFiles.length"
+        :selected-ids="selectedFileIds"
+        :is-all-selected="isAllSelected"
+        :is-indeterminate="isIndeterminate"
+        :busy="isBatchDeleting"
+        :is-admin="isAdmin"
+        :thumbnail-context="thumbnailContext"
+        @toggle-select-all="toggleSelectAll"
+        @folder-click="onMobileFolderClick"
+        @folder-ctxmenu="openFolderCtxMenu"
+        @file-ctxmenu="openFileCtxMenu"
+        @touch-start="handleTouchStart"
+        @touch-move="handleTouchMove"
+        @touch-end="handleTouchEnd"
+        @file-select="toggleFileSelect"
+        @tag-filter="addTagFilter"
+        @copy-link="copyLink"
+        @preview="openPreview"
+        @download="downloadFile"
+        @tag-editor="openTagEditor"
+        @delete="handleDelete"
+        @restore="handleRestore"
+        @force-delete="handleForceDelete"
+      />
     </div>
 
     <!-- 上传弹窗 -->
@@ -622,7 +312,7 @@ import { DialogPlugin } from 'tdesign-vue-next';
 import { useFileStore } from '../../stores/files';
 import { useAuthStore, api } from '../../stores/auth';
 import { getErrorMessage } from '../../utils/error';
-import { formatSize, formatDate } from '@/utils/format';
+import { formatDate } from '@/utils/format';
 import { triggerBrowserDownload } from '@/utils/download';
 import { useFileListQuery } from '../../composables/useFileListQuery';
 import { useMobile } from '../../composables/useMobile';
@@ -631,7 +321,14 @@ import { collectFromDrop } from '../../utils/folder-traverse';
 import type { DropCollectResult } from '../../utils/folder-traverse';
 import TagManager from '../../components/TagManager.vue';
 import FileTagEditor from '../../components/FileTagEditor.vue';
-import ThumbnailImg from '../../components/ThumbnailImg.vue';
+// M6 拆分：地址栏 / 工具栏 / 批量操作区 / 桌面列表行 / 移动列表已拆为展示组件（本目录内）
+import FileListAddressBar from './FileListAddressBar.vue';
+import FileListToolbar from './FileListToolbar.vue';
+import FileListBatchActions from './FileListBatchActions.vue';
+import FileListDesktopRows from './FileListDesktopRows.vue';
+import FileListMobileList from './FileListMobileList.vue';
+// M6 拆分：行判定（可预览 / 可操作 / 行类名 / 冷静期常量）与两个列表组件共用
+import { FORCE_DELETE_WAIT_MS, canPreviewFile, isFileActionable } from '../../utils/file-row-predicates';
 import FolderCreateDialog from '../../components/folder/FolderCreateDialog.vue';
 import FolderRenameDialog from '../../components/folder/FolderRenameDialog.vue';
 import FolderMoveDialog from '../../components/folder/FolderMoveDialog.vue';
@@ -640,7 +337,7 @@ import DownloadLinkDialog from '../../components/share/DownloadLinkDialog.vue';
 import FileContextMenu, { type CtxTarget } from '../../components/file/FileContextMenu.vue';
 import FileRenameDialog from '../../components/file/FileRenameDialog.vue';
 import { useMediaPlaybackStore, type MediaSessionItem } from '../../stores/mediaPlayback';
-import { isPreviewable, getPreviewKind, isMediaDirectLinkKind, buildFilePreviewUrl } from '../../utils/preview';
+import { getPreviewKind, isMediaDirectLinkKind, buildFilePreviewUrl } from '../../utils/preview';
 import { useTagStore } from '../../stores/tags';
 import { useFolderStore, type Folder } from '../../stores/folders';
 import { getParentFolderId } from '../../utils/folder-navigation';
@@ -698,6 +395,17 @@ const dropFiles = ref<File[]>([]);
 /** 页面级拖拽采集结果（含目录结构），转发给上传弹窗处理，避免双重入队 */
 const dropCollected = ref<DropCollectResult | null>(null);
 const showTagManager = ref(false);
+
+/**
+ * M6 拆分：标签入口文案与已选标签筛选项由宿主计算后传入展示组件，
+ * 使拆出的组件不访问 store（保持可测与解耦）。
+ */
+const tagButtonLabel = computed(() =>
+  (tagStore.tags && tagStore.tags.length > 0) || selectedTagIds.value.length > 0 ? '标签筛选' : '管理标签',
+);
+const filteredTagItems = computed(() =>
+  selectedTagIds.value.map((tagId) => ({ id: tagId, name: getTagName(tagId) })),
+);
 const tagEditorVisible = ref(false);
 const batchTagDialog = reactive({
   visible: false,
@@ -733,13 +441,6 @@ const fileClipboard = ref<FileItem[]>([]);
 
 // ============ 文件预览状态 ============
 const mediaPlaybackStore = useMediaPlaybackStore();
-
-/** 是否可点击预览：类型可预览且文件处于可用状态（非删除/处理中） */
-function canPreviewFile(file: FileItem): boolean {
-  return isPreviewable(file.mimeType, file.originalName)
-    && !file.isDeleted
-    && file.status !== 'processing';
-}
 
 /** 打开全局预览会话（由常驻媒体宿主呈现，跨路由/收起不中断播放） */
 function openPreview(file: FileItem) {
@@ -997,6 +698,15 @@ function consumeLongPressClick(): boolean {
   return false;
 }
 
+/**
+ * 移动端文件夹行点击（由 FileListMobileList 的 folder-click 事件触发）。
+ * 长按已弹出菜单时必须抑制随后的 click，避免「弹出菜单 + 同时进入目录」；
+ * 该抑制状态（longPressFired）留在宿主，故判定也必须在宿主完成。
+ */
+function onMobileFolderClick(folder: Folder) {
+  if (!consumeLongPressClick()) onFolderOpen(folder);
+}
+
 /** 菜单动作统一分发 */
 async function onCtxAction(action: string, target: CtxTarget | null) {
   if (!target) return;
@@ -1183,14 +893,7 @@ const selectedImages = computed(() =>
   )
 );
 
-function getRowClassName({ row }: { row: FileItem }) {
-  if (row.status === 'processing') return 'row-processing';
-  return row.isDeleted ? 'row-deleted' : '';
-}
-
-function isFileActionable(row: FileItem): boolean {
-  return row.status !== 'processing' && !row.isDeleted;
-}
+// 行类名与可操作性判定已上移到 utils/file-row-predicates（与列表组件共用）
 
 // 密码弹窗状态
 const passwordDialog = reactive({
@@ -1650,15 +1353,6 @@ async function handleRestore(id: string) {
   }
 }
 
-/** 用户自助永久删除冷静期（与后端 FILE_FORCE_DELETE_WAIT_MS 一致） */
-const FORCE_DELETE_WAIT_MS = 60_000;
-
-/** 非管理员：文件软删满 1 分钟后可自助永久删除 */
-function selfForceDeleteReady(file: FileItem): boolean {
-  if (!file.deleteRequestedAt) return false;
-  return Date.now() - new Date(file.deleteRequestedAt).getTime() >= FORCE_DELETE_WAIT_MS;
-}
-
 /** 计算距可自助永久删除的剩余秒数；不可判定时返回 Infinity */
 function selfForceDeleteRemainingSeconds(file: FileItem | undefined): number {
   if (!file?.deleteRequestedAt) return Number.POSITIVE_INFINITY;
@@ -1805,175 +1499,16 @@ onUnmounted(() => {
 });
 </script>
 
+<!-- 跨拆出组件的共享规则（长按抑制 / .os-muted / .deleted-name） -->
+<style scoped src="./file-list-shared.css"></style>
+
 <style scoped>
 .filelist-page {
   position: relative;
 }
 
-/* ============ 地址栏（文件路径） ============ */
-.fl-addressbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  flex-wrap: wrap;
-  background: var(--color-bg-surface);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-md);
-  padding: 10px 14px;
-  margin-bottom: 16px;
-}
-
-.fl-path {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 2px;
-  min-width: 0;
-  font-size: 14px;
-}
-
-.fl-path-item {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 4px 8px;
-  border-radius: var(--radius-sm);
-  color: var(--text-secondary);
-  cursor: pointer;
-  user-select: none;
-  max-width: 220px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  /* G11-08：面包屑改为可聚焦按钮，重置原生 button 样式 */
-  background: none;
-  border: none;
-  font: inherit;
-  text-align: left;
-  transition: background var(--duration-fast), color var(--duration-fast);
-}
-.fl-path-item:focus-visible {
-  outline: 2px solid var(--color-accent);
-  outline-offset: 1px;
-}
-
-.fl-path-item:hover {
-  background: var(--color-accent-soft);
-  color: var(--text-primary);
-}
-
-.fl-path-item.is-current {
-  color: var(--text-primary);
-  font-weight: 500;
-  cursor: default;
-}
-
-.fl-path-item.is-current:hover {
-  background: transparent;
-}
-
-.fl-path-home {
-  font-size: 15px;
-  color: var(--color-accent);
-}
-
-.fl-path-sep {
-  color: var(--text-tertiary);
-  font-size: 14px;
-  flex-shrink: 0;
-}
-
-.fl-addressbar-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-shrink: 0;
-}
-
-/* ============ 工具栏 ============ */
-.fl-toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  flex-wrap: wrap;
-  margin-bottom: 16px;
-}
-
-.fl-search-form {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 0;
-  flex: 1;
-  min-width: 220px;
-  max-width: 420px;
-}
-
-.fl-search-input {
-  flex: 1;
-}
-
-.fl-toolbar-right {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-/* ============ 批量操作栏 ============ */
-.fl-batchbar {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-  padding: 10px 12px;
-  margin-bottom: 16px;
-  background: var(--color-accent-soft);
-  border: 1px solid var(--border-accent);
-  border-radius: var(--radius-md);
-}
-
-.fl-batchbar-count {
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--color-accent);
-  margin-right: 4px;
-}
-
-/* ============ 标签筛选 ============ */
-.fl-tagfilters {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-bottom: 16px;
-}
-
-/* ============ Markdown 结果 ============ */
-.fl-markdown {
-  margin-bottom: 16px;
-  padding: 16px;
-  background: var(--color-bg-elevated);
-  border-radius: var(--radius-md);
-  border: 1px solid var(--border-default);
-}
-
-.fl-markdown-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 8px;
-}
-
-.fl-markdown-title {
-  font-weight: 500;
-}
-
-.fl-markdown-actions {
-  display: flex;
-  gap: 8px;
-}
+/* 地址栏 / 工具栏 / 批量操作栏 / 标签筛选 / Markdown 结果区样式
+   已随 FileListAddressBar.vue、FileListToolbar.vue、FileListBatchActions.vue 迁移（M6 拆分） */
 
 /* ============ 空状态 ============ */
 .empty-upload-icon {
@@ -2021,232 +1556,9 @@ onUnmounted(() => {
   min-width: 0;
 }
 
-.os-row {
-  display: grid;
-  content-visibility: auto;
-  contain-intrinsic-size: 48px;
-  grid-template-columns:
-    44px
-    minmax(240px, 1fr)
-    96px
-    150px;
-  align-items: center;
-  gap: 8px;
-  padding: 0 12px;
-  min-height: 52px;
-  border-bottom: 1px solid var(--border-default);
-  transition: background var(--duration-fast);
-}
-
-.os-row:last-child {
-  border-bottom: none;
-}
-
-/* 表头 */
-.os-head {
-  min-height: 44px;
-  background: var(--color-bg-elevated);
-  border-bottom: 1px solid var(--border-strong);
-  font-family: var(--font-mono);
-  font-size: 11px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--text-tertiary);
-}
-
-.os-sortable {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  cursor: pointer;
-  user-select: none;
-  transition: color var(--duration-fast);
-}
-
-.os-sortable:hover {
-  color: var(--text-primary);
-}
-
-/* G11-07：排序表头改为可聚焦按钮，重置原生 button 样式并保持原有视觉 */
-.os-sort-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  background: none;
-  border: none;
-  padding: 0;
-  margin: 0;
-  font: inherit;
-  color: inherit;
-  cursor: pointer;
-  user-select: none;
-}
-.os-sort-btn:focus-visible {
-  outline: 2px solid var(--color-accent);
-  outline-offset: 2px;
-  border-radius: 4px;
-}
-
-.os-sort-icon {
-  font-size: 14px;
-  opacity: 0.35;
-}
-
-.os-sort-icon.active {
-  opacity: 1;
-  color: var(--color-accent);
-}
-
-/* 行 hover */
-.os-folder,
-.os-file {
-  cursor: default;
-}
-
-.os-folder:hover,
-.os-file:hover {
-  background: var(--color-bg-hover);
-}
-
-.os-folder {
-  cursor: pointer;
-}
-
-/* ============ 拖拽移动视觉反馈 ============ */
-/* 正在被拖动的文件行：半透明 + 虚线轮廓 */
-.os-file.dragging {
-  opacity: 0.4;
-  outline: 1px dashed var(--color-accent);
-  outline-offset: -1px;
-}
-/* 拖拽悬停的文件夹行：高亮提示可放置 */
-.os-folder.drag-over {
-  background: var(--color-accent-soft) !important;
-  outline: 2px dashed var(--color-accent);
-  outline-offset: -2px;
-}
-/* 拖拽悬停的根目录（我的文件）路径项 */
-.fl-path-item.drag-over {
-  background: var(--color-accent-soft);
-  color: var(--color-accent);
-  outline: 1px dashed var(--color-accent);
-}
-/* 可拖动的文件行使用抓取光标提示 */
-.os-file[draggable='true'] {
-  cursor: grab;
-}
-.os-file[draggable='true']:active {
-  cursor: grabbing;
-}
-
-/* 移动端长按弹出菜单：抑制文本选中与系统预览浮层 */
-.os-file,
-.os-folder,
-.mobile-file-card,
-.mobile-folder-row,
-.upload-zone {
-  -webkit-touch-callout: none;
-  -webkit-user-select: none;
-  user-select: none;
-}
-
-/* 单元格 */
-.os-cell {
-  min-width: 0;
-}
-
-.os-name {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-width: 0;
-}
-
-.os-folder-icon {
-  font-size: 22px;
-  color: var(--color-warning);
-  flex-shrink: 0;
-}
-
-.os-name-block {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-}
-
-.os-name-text {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-weight: 450;
-}
-
-.os-name-sub {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  flex-wrap: wrap;
-}
-
-.os-kind-tag {
-  flex-shrink: 0;
-}
-
-.os-tag-click {
-  cursor: pointer;
-  display: inline-flex;
-}
-
-.os-muted {
-  color: var(--text-tertiary);
-}
-
-.os-italic {
-  font-style: italic;
-  font-size: 13px;
-}
-
-.os-mono {
-  font-family: var(--font-mono);
-  font-size: 13px;
-  font-variant-numeric: tabular-nums;
-}
-
-.os-processing-hint {
-  font-size: 12px;
-}
-
-.os-deleted-date {
-  font-size: 11px;
-  color: var(--color-warning);
-  margin-top: 2px;
-}
-
-.os-ops {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  flex-wrap: wrap;
-}
-
-/* 行状态 */
-.os-file.row-deleted {
-  background: var(--color-bg-elevated);
-  opacity: 0.85;
-}
-
-.os-file.row-processing {
-  background: var(--color-accent-soft);
-  opacity: 0.9;
-}
-
-.deleted-name {
-  text-decoration: line-through;
-  opacity: 0.6;
-}
+/* 行（表头 / 文件夹行 / 文件行）、拖拽反馈、单元格与行状态样式
+   已随 FileListDesktopRows.vue 迁移；长按抑制与 .os-muted / .deleted-name
+   为跨组件共享规则，见 file-list-shared.css。 */
 
 /* 无限滚动哨兵 */
 .os-sentinel {
@@ -2262,129 +1574,7 @@ onUnmounted(() => {
   margin-left: 4px;
 }
 
-/* ============ 移动端 ============ */
-.os-mobile {
-  padding: 12px;
-}
-
-.mobile-folder-row {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 12px;
-  border-radius: var(--radius-md);
-  border: 1px solid var(--border-default);
-  margin-bottom: 10px;
-  cursor: pointer;
-  transition: border-color var(--duration-fast);
-}
-
-.mobile-folder-row:hover {
-  border-color: var(--border-accent);
-}
-
-.mobile-folder-info {
-  flex: 1;
-  min-width: 0;
-}
-
-.mobile-folder-name {
-  font-weight: 500;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.mobile-folder-meta {
-  font-size: 12px;
-  color: var(--text-secondary);
-  margin-top: 2px;
-}
-
-.mobile-folder-arrow {
-  color: var(--text-tertiary);
-  flex-shrink: 0;
-}
-
-.mobile-file-card {
-  content-visibility: auto;
-  contain-intrinsic-size: 132px;
-  background: var(--color-bg-elevated);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-md);
-  padding: 14px;
-  margin-bottom: 10px;
-  transition: border-color var(--duration-fast);
-}
-
-.mobile-file-card:hover {
-  border-color: var(--border-accent);
-}
-
-.mobile-selection-toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 4px 2px 12px;
-  color: var(--text-secondary);
-}
-
-.mobile-selection-count {
-  color: var(--color-accent);
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.mobile-file-card-header {
-  display: flex;
-  align-items: flex-start;
-  gap: 12px;
-  margin-bottom: 10px;
-}
-
-.mobile-file-select {
-  flex-shrink: 0;
-  margin-top: 4px;
-}
-
-.mobile-file-main {
-  flex: 1;
-  min-width: 0;
-}
-
-.mobile-file-name {
-  font-weight: 500;
-  word-break: break-all;
-  line-height: 1.4;
-  font-size: 14px;
-}
-
-.mobile-file-meta {
-  font-size: 12px;
-  color: var(--text-secondary);
-  margin-top: 2px;
-}
-
-.mobile-file-tags {
-  display: flex;
-  gap: 4px;
-  margin-top: 4px;
-  flex-wrap: wrap;
-}
-
-.mobile-tag-more {
-  font-size: 11px;
-  color: var(--text-secondary);
-}
-
-.mobile-file-card-actions {
-  display: flex;
-  gap: 4px;
-  flex-wrap: wrap;
-  border-top: 1px solid var(--border-default);
-  padding-top: 8px;
-}
+/* 移动端列表（.os-mobile / .mobile-*）样式已随 FileListMobileList.vue 迁移（M6 拆分） */
 
 /* ============ 分页 ============ */
 .fl-pagination {
@@ -2469,58 +1659,8 @@ onUnmounted(() => {
   cursor: pointer;
 }
 
-/* 桌面端缩略图可点击预览 */
-.os-thumb-click {
-  display: inline-flex;
-  cursor: pointer;
-  border-radius: var(--radius-sm);
-  transition: opacity var(--duration-fast);
-}
-.os-thumb-click:hover {
-  opacity: 0.8;
-}
+/* 缩略图可点击预览与键盘焦点可见性（.os-thumb-click / .os-row:focus-visible /
+   .os-tag-click:focus-visible）已随 FileListDesktopRows.vue 迁移（M6 拆分） */
 
-/* R9：键盘焦点可见性 —— 仅 :focus-visible 生效，不影响鼠标点击体验 */
-.os-row:focus-visible {
-  outline: 2px solid var(--color-accent, var(--td-brand-color, #4d7cfe));
-  outline-offset: -2px;
-  border-radius: var(--radius-sm);
-}
-.os-thumb-click:focus-visible,
-.os-tag-click:focus-visible {
-  outline: 2px solid var(--color-accent, var(--td-brand-color, #4d7cfe));
-  outline-offset: 1px;
-}
-
-/* ============ 响应式 ============ */
-@media (max-width: 768px) {
-  .fl-addressbar {
-    padding: 8px 10px;
-  }
-
-  .fl-search-form {
-    max-width: 100%;
-  }
-
-  .fl-path-item {
-    max-width: 140px;
-  }
-
-  .fl-mobile-back {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    margin: -4px 0 12px;
-    padding: 4px 0;
-    border: 0;
-    background: transparent;
-    color: var(--text-secondary);
-    font: inherit;
-    cursor: pointer;
-  }
-
-  .fl-mobile-back:hover {
-    color: var(--color-accent);
-  }
-}
+/* 响应式：地址栏 / 工具栏 / 移动端返回按钮的窄屏规则已随各自组件迁移（M6 拆分） */
 </style>

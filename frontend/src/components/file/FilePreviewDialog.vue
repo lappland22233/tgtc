@@ -17,64 +17,24 @@
           :aria-label="snap.name || '文件预览'"
           @pointerdown="onDialogPointerDown"
         >
-          <!-- 头部：文件名 + 播放列表导航 + 最小化/关闭 -->
-          <div class="fpv-header">
-            <div class="fpv-name" :title="snap.name">{{ snap.name || '文件预览' }}</div>
-            <div class="fpv-header-actions">
-              <!-- 播放列表导航 -->
-              <template v-if="hasPlaylist && isMediaCollection">
-                <span class="fpv-playlist-indicator">
-                  {{ activeIndex + 1 }} / {{ playlist.length }}
-                </span>
-                <button
-                  type="button"
-                  class="fpv-nav-btn"
-                  :disabled="!hasPrev"
-                  :aria-label="`上一个${collectionItemLabel} (Shift+P)`"
-                  title="上一个 (Shift+P)"
-                  @click="playPrev"
-                >
-                  <t-icon name="chevron-left" />
-                </button>
-                <button
-                  type="button"
-                  class="fpv-nav-btn"
-                  :disabled="!hasNext"
-                  :aria-label="`下一个${collectionItemLabel} (Shift+N)`"
-                  title="下一个 (Shift+N)"
-                  @click="playNext"
-                >
-                  <t-icon name="chevron-right" />
-                </button>
-                <button
-                  type="button"
-                  class="fpv-nav-btn fpv-playlist-toggle"
-                  :class="{ 'fpv-active': playlistOpen }"
-                  aria-label="播放列表"
-                  title="播放列表"
-                  :aria-expanded="playlistOpen"
-                  aria-controls="fpv-playlist-panel"
-                  @click.stop="playlistOpen = !playlistOpen"
-                >
-                  <t-icon name="view-list" />
-                </button>
-              </template>
-              <!-- 最小化：仅音视频持续播放时可用（其余类型等价于关闭） -->
-              <button
-                v-if="isContinuousMedia"
-                type="button"
-                class="fpv-nav-btn"
-                aria-label="收起为迷你播放器（继续播放）"
-                title="收起为迷你播放器（继续播放）"
-                @click="minimize"
-              >
-                <t-icon name="chevron-down" />
-              </button>
-              <button type="button" class="fpv-close" aria-label="关闭预览" @click="fullStop">
-                <t-icon name="close" />
-              </button>
-            </div>
-          </div>
+          <!-- 头部：文件名 + 播放列表导航 + 最小化/关闭（M6 拆出为展示组件，状态与快捷键仍由宿主持有） -->
+          <PreviewHeader
+            :name="snap.name"
+            :has-playlist="hasPlaylist"
+            :is-media-collection="isMediaCollection"
+            :active-index="activeIndex"
+            :playlist-length="playlist.length"
+            :has-prev="hasPrev"
+            :has-next="hasNext"
+            :playlist-open="playlistOpen"
+            :is-continuous-media="isContinuousMedia"
+            :item-label="collectionItemLabel"
+            @prev="playPrev"
+            @next="playNext"
+            @toggle-playlist="playlistOpen = !playlistOpen"
+            @minimize="minimize"
+            @close="fullStop"
+          />
 
           <!-- 内容区：按 kind 分支渲染；弹窗收起（v-show）时媒体 DOM 保留不中断 -->
           <div class="fpv-body">
@@ -378,37 +338,18 @@
               :title="snap.name || 'PDF 预览'"
             />
 
-            <!-- 文本：打开时 fetch 读取 -->
-            <template v-else-if="snap.kind === 'text'">
-              <div v-if="textLoading" class="fpv-state">
-                <t-loading size="medium" text="正在加载文本内容…" />
-              </div>
-              <div v-else-if="textTooLarge" class="fpv-state fpv-error">
-                <t-icon name="info-circle" class="fpv-state-icon" />
-                <p>文件过大，请下载查看</p>
-              </div>
-              <div v-else-if="textError" class="fpv-state fpv-error">
-                <t-icon name="close-circle" class="fpv-state-icon" />
-                <p>{{ textError }}</p>
-                <button type="button" class="fpv-btn" @click="handleDownload">
-                  <t-icon name="download" />下载文件
-                </button>
-              </div>
-              <div v-else class="fpv-text-panel">
-                <div class="fpv-text-toolbar">
-                  <div class="fpv-text-toolbar-left">
-                    <t-icon name="file-code" class="fpv-text-type-icon" aria-hidden="true" />
-                    <span class="fpv-text-type-label">文本文件</span>
-                  </div>
-                  <div class="fpv-text-toolbar-meta">
-                    <template v-if="snap.mimeType"><span>{{ snap.mimeType }}</span></template>
-                    <template v-if="snap.size != null"><span> · {{ formatSize(snap.size) }}</span></template>
-                    <template v-if="textCharCount > 0"><span> · {{ textCharCount }} 字符</span></template>
-                  </div>
-                </div>
-                <pre class="fpv-text">{{ textContent }}</pre>
-              </div>
-            </template>
+            <!-- 文本：打开时 fetch 读取（M6 拆出为展示组件，加载/超限/失败三态由 props 驱动） -->
+            <PreviewTextPanel
+              v-else-if="snap.kind === 'text'"
+              :loading="textLoading"
+              :too-large="textTooLarge"
+              :error-message="textError"
+              :mime-type="snap.mimeType"
+              :size="snap.size"
+              :char-count="textCharCount"
+              :content="textContent"
+              @download="handleDownload"
+            />
 
             <!-- 无法预览 / 媒体加载失败 -->
             <div v-else class="fpv-state fpv-error">
@@ -436,64 +377,18 @@
             </button>
           </div>
 
-          <!-- 播放列表面板 -->
-          <transition name="fpv-slide">
-            <div
-              v-if="playlistOpen && hasPlaylist"
-              id="fpv-playlist-panel"
-              ref="playlistPanelRef"
-              class="fpv-playlist-panel"
-              role="region"
-              :aria-label="collectionTitle"
-            >
-              <div class="fpv-playlist-header">
-                <span class="fpv-playlist-title">{{ collectionTitle }}</span>
-                <span class="fpv-playlist-count">{{ playlist.length }} 个{{ collectionItemLabel }}</span>
-                <button
-                  type="button"
-                  class="fpv-playlist-close"
-                  aria-label="收起播放列表"
-                  title="收起播放列表"
-                  @click="playlistOpen = false"
-                >
-                  <t-icon name="close" />
-                </button>
-              </div>
-              <div class="fpv-playlist-list">
-                <button
-                  v-for="(item, idx) in playlist"
-                  :key="item.id"
-                  type="button"
-                  class="fpv-playlist-item"
-                  :class="{ 'fpv-playing': idx === activeIndex, 'fpv-playlist-item--image': snap.kind === 'image' }"
-                  :aria-current="idx === activeIndex ? 'true' : undefined"
-                  :aria-label="`${idx === activeIndex ? '当前播放：' : '播放'}${item.name}`"
-                  @click="switchToTrack(idx)"
-                >
-                  <ThumbnailImg
-                    v-if="snap.kind === 'image'"
-                    class="fpv-playlist-thumb"
-                    :file-id="item.id"
-                    :mime-type="item.mimeType"
-                    :file-name="item.name"
-                    :size="48"
-                    :context="currentMediaContext()"
-                    :version="item.contentVersion"
-                  />
-                  <div v-else class="fpv-playlist-index">{{ idx + 1 }}</div>
-                  <div class="fpv-playlist-info">
-                    <div class="fpv-playlist-name" :title="item.name">{{ item.name }}</div>
-                    <div class="fpv-playlist-meta">
-                      {{ item.mimeType }}<template v-if="item.size"> · {{ formatSize(item.size) }}</template>
-                    </div>
-                  </div>
-                  <div v-if="idx === activeIndex" class="fpv-playlist-now">
-                    <t-icon name="sound" />
-                  </div>
-                </button>
-              </div>
-            </div>
-          </transition>
+          <!-- 播放列表面板（M6 拆出为展示组件，展开态与列表数据仍由宿主持有） -->
+          <PreviewPlaylistPanel
+            ref="playlistPanelComp"
+            v-model:open="playlistOpen"
+            :items="playlist"
+            :active-index="activeIndex"
+            :kind="snap.kind"
+            :title="collectionTitle"
+            :item-label="collectionItemLabel"
+            :thumb-context="currentMediaContext()"
+            @switch="switchToTrack"
+          />
         </div>
       </div>
   </teleport>
@@ -509,8 +404,11 @@ import {
   issueShareMediaTicket,
 } from '../../utils/preview';
 import { triggerBrowserDownload } from '../../utils/download';
+import { formatSizeCompact as formatSize } from '../../utils/format';
 import CustomVideoPlayer from './CustomVideoPlayer.vue';
-import ThumbnailImg from '../ThumbnailImg.vue';
+import PreviewHeader from './PreviewHeader.vue';
+import PreviewPlaylistPanel from './PreviewPlaylistPanel.vue';
+import PreviewTextPanel from './PreviewTextPanel.vue';
 import {
   useMediaPlaybackStore,
   type MediaPlayerBridge,
@@ -520,6 +418,8 @@ import {
 import { usePreviewPoster } from '../../composables/usePreviewPoster';
 import { usePreviewText } from '../../composables/usePreviewText';
 import { usePlaylistControls } from '../../composables/usePlaylistControls';
+import { useImageViewer } from '../../composables/useImageViewer';
+import { useAudioPlayer } from '../../composables/useAudioPlayer';
 
 const mediaStore = useMediaPlaybackStore();
 
@@ -542,7 +442,9 @@ const videoSeeking = ref(false);
 /** 媒体加载失败的具体原因分类（优于笼统默认文案） */
 const mediaErrorText = ref<string | null>(null);
 const dialogRef = ref<HTMLElement | null>(null);
-const playlistPanelRef = ref<HTMLElement | null>(null);
+/** 播放列表面板组件（M6 拆出后经 defineExpose 暴露真实 DOM，供「点击面板外收起」判断） */
+const playlistPanelComp = ref<InstanceType<typeof PreviewPlaylistPanel> | null>(null);
+const playlistPanelEl = computed<HTMLElement | null>(() => playlistPanelComp.value?.panelEl ?? null);
 
 const poster = usePreviewPoster({ mediaStore, snap, epoch: sessionEpoch });
 const {
@@ -580,7 +482,7 @@ const playlistControls = usePlaylistControls({
   activateVideo,
   getVideoRef: () => videoRef.value,
   getAudioRef: () => audioRef.value,
-  getPlaylistPanelRef: () => playlistPanelRef.value,
+  getPlaylistPanelRef: () => playlistPanelEl.value,
 });
 const {
   playlist,
@@ -652,290 +554,50 @@ async function prepareNativeMediaSource(fileId: string, epoch: number): Promise<
   }
 }
 
-// ============ 自定义音频控制 ============
-/** 音频当前播放位置（由 timeupdate 驱动，供自定义进度条渲染） */
-const audioCurrentTime = ref(0);
-/** 音频总时长（loadedmetadata 后可用） */
-const audioDuration = ref(0);
-/** 音量（0-1，跟随 audio.volume；静音时归零显示） */
-const audioVolume = ref(0.5);
-/** 静音状态（跟随 audio.muted） */
-const audioMuted = ref(false);
-/** 倍速档位（与 CustomVideoPlayer 档位保持一致） */
-const AUDIO_RATES = [0.5, 0.75, 1, 1.25, 1.5, 2, 3] as const;
-const audioRate = ref(1);
-/** 音量输入框 v-model 绑定的中间值（避免拖动时被事件回写干扰） */
-const audioVolumeInput = ref(0.5);
-/** 进度条拖动中：只更新草稿，不触碰媒体 currentTime */
-const audioSeeking = ref(false);
-const audioSeekDraft = ref<number | null>(null);
-const audioDisplayTime = computed(() => audioSeekDraft.value ?? audioCurrentTime.value);
-
-/** 播放进度百分比（0-100） */
-const audioProgressPct = computed(() => {
-  const time = audioDisplayTime.value;
-  if (audioDuration.value <= 0 || !Number.isFinite(time)) return 0;
-  return Math.min(100, Math.max(0, (time / audioDuration.value) * 100));
+// ============ 自定义音频控制 + 波形 ============
+// M6 拆分：音频播放/进度/音量/倍速与 Web Audio 波形已下沉到 composables/useAudioPlayer.ts，
+// 此处仅保留绑定（模板与快捷键）与生命周期转发；行为与拆分前一致。
+const {
+  audioDisplayTime,
+  audioProgressPct,
+  formatAudioTime,
+  audioPlaying,
+  audioWaveBars,
+  audioMuted,
+  audioVolume,
+  audioVolumeInput,
+  audioRate,
+  audioDuration,
+  audioSeeking,
+  toggleAudioPlay,
+  seekAudioBy,
+  onAudioProgressDown,
+  onAudioProgressMove,
+  onAudioProgressUp,
+  onAudioProgressCancel,
+  toggleAudioMute,
+  onAudioVolumeInput,
+  cycleAudioRate,
+  onAudioPlay,
+  onAudioPause,
+  onAudioEnded,
+  onAudioTimeUpdate,
+  onAudioLoadedMeta,
+  onAudioVolumeChange,
+  resumeAudioWaveformLoop,
+  pauseAudioWaveformLoop,
+  stopAudioPlayback,
+  resetAudioState,
+  disposeAudioPlayer,
+} = useAudioPlayer({
+  mediaStore,
+  audioEl: audioRef,
+  onEnded: handlePlaylistAudioEnded,
+  // 节流持久化与视频路径共用同一实现（函数声明提升，晚于此处定义也安全）
+  persistProgress: throttlePersist,
 });
 
-/** 时间格式化：mm:ss / h:mm:ss */
-function formatAudioTime(s: number): string {
-  if (!Number.isFinite(s) || s < 0) return '0:00';
-  const h = Math.floor(s / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  const sec = Math.floor(s % 60);
-  if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
-  return `${m}:${String(sec).padStart(2, '0')}`;
-}
-
-/** 播放 / 暂停切换（与桥接语义一致） */
-function toggleAudioPlay() {
-  const a = audioRef.value;
-  if (!a) return;
-  if (a.paused) void a.play().catch(() => {});
-  else a.pause();
-}
-
-/** 相对跳转 */
-function seekAudioBy(seconds: number) {
-  const a = audioRef.value;
-  if (!a) return;
-  a.currentTime = Math.max(0, Math.min(a.duration || 0, a.currentTime + seconds));
-}
-
-/** 点击进度条跳转（直接点击不启用拖动状态） */
-/** 从指针坐标计算进度比例（0-1） */
-function audioProgressRatioFromClientX(clientX: number, progressEl?: HTMLElement): number {
-  const track = progressEl?.querySelector<HTMLElement>('.fpv-audio-progress-track')
-    ?? document.querySelector<HTMLElement>('.fpv-audio-progress-track');
-  if (!track) return 0;
-  const rect = track.getBoundingClientRect();
-  if (rect.width <= 0) return 0;
-  return Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
-}
-
-/** 按下进度条开始拖动：Pointer Events 统一鼠标与触屏，setPointerCapture 保证拖动不脱手 */
-function ensureAudioDuration(): HTMLAudioElement | null {
-  const audio = document.querySelector<HTMLAudioElement>('.fpv-audio-core') ?? audioRef.value;
-  if (audioDuration.value <= 0 && audio && Number.isFinite(audio.duration) && audio.duration > 0) {
-    audioDuration.value = audio.duration;
-  }
-  if (audio) audioRef.value = audio;
-  return audio;
-}
-
-function onAudioProgressDown(e: PointerEvent) {
-  const audio = ensureAudioDuration();
-  const el = e.currentTarget as HTMLElement;
-  audioRef.value ||= audio;
-  audioSeeking.value = true;
-  audioSeekDraft.value = audioProgressRatioFromClientX(e.clientX, el) * audioDuration.value;
-  el.setPointerCapture?.(e.pointerId);
-  previewAudioSeek(e.clientX);
-}
-
-/** 拖动中更新位置（仅当指针被捕获到进度条上） */
-function onAudioProgressMove(e: PointerEvent) {
-  if (!audioSeeking.value) return;
-  ensureAudioDuration();
-  // Pointer capture is an enhancement; jsdom and some browsers may deliver the event without it.
-  previewAudioSeek(e.clientX, e.currentTarget as HTMLElement);
-}
-
-/** 拖动结束：释放捕获并复位状态 */
-function onAudioProgressUp(e: PointerEvent) {
-  if (!audioSeeking.value) return;
-  const el = e.currentTarget as HTMLElement;
-  if (audioSeekDraft.value == null) previewAudioSeek(e.clientX);
-  if (audioSeekDraft.value != null) commitAudioSeek(audioSeekDraft.value);
-  audioSeekDraft.value = null;
-  audioSeeking.value = false;
-  if (el.hasPointerCapture?.(e.pointerId)) {
-    try { el.releasePointerCapture(e.pointerId); } catch { /* 已释放则忽略 */ }
-  }
-}
-
-function onAudioProgressCancel(e: PointerEvent) {
-  if (!audioSeeking.value) return;
-  const el = e.currentTarget as HTMLElement;
-  audioSeekDraft.value = null;
-  audioSeeking.value = false;
-  if (el.hasPointerCapture?.(e.pointerId)) {
-    try { el.releasePointerCapture(e.pointerId); } catch { /* 已释放则忽略 */ }
-  }
-}
-
-/** 拖动预览：只更新 UI 草稿，不写入媒体 currentTime */
-function previewAudioSeek(clientX: number, progressEl?: HTMLElement) {
-  const audio = ensureAudioDuration();
-  const duration = audioDuration.value > 0 ? audioDuration.value : audio?.duration ?? 0;
-  if (duration <= 0) return;
-  audioSeekDraft.value = audioProgressRatioFromClientX(clientX, progressEl) * duration;
-}
-
-/** 拖动结束时仅执行一次真实 seek */
-function commitAudioSeek(target: number) {
-  const a = audioRef.value;
-  if (!a || audioDuration.value <= 0) return;
-  a.currentTime = Math.max(0, Math.min(audioDuration.value, target));
-}
-
-/** 静音切换 */
-function toggleAudioMute() {
-  const a = audioRef.value;
-  if (!a) return;
-  a.muted = !a.muted;
-}
-
-/** 音量滑块输入（输入框值 → audio.volume） */
-function onAudioVolumeInput() {
-  const a = audioRef.value;
-  if (!a) return;
-  a.volume = audioVolumeInput.value;
-  if (a.volume > 0 && a.muted) a.muted = false;
-  audioVolume.value = a.volume;
-  audioMuted.value = a.muted;
-}
-
-/** audio.volumechange 同步状态（迷你播放器 / 外部修改时保持同步） */
-function onAudioVolumeChange() {
-  const a = audioRef.value;
-  if (!a) return;
-  audioVolume.value = a.volume;
-  audioMuted.value = a.muted;
-  audioVolumeInput.value = a.volume;
-}
-
-/** 循环切换倍速档位 */
-function cycleAudioRate() {
-  const idx = AUDIO_RATES.indexOf(audioRate.value as (typeof AUDIO_RATES)[number]);
-  audioRate.value = AUDIO_RATES[(idx + 1) % AUDIO_RATES.length];
-  const a = audioRef.value;
-  if (a) a.playbackRate = audioRate.value;
-}
-
-// ============ 音频波形 ============
-/** 音频是否正在播放（驱动波形装饰动画） */
-const audioPlaying = ref(false);
-const AUDIO_WAVE_BAR_COUNT = 28;
-const AUDIO_WAVE_REFRESH_INTERVAL = 1000 / 45;
-const audioWaveBars = ref(Array.from({ length: AUDIO_WAVE_BAR_COUNT }, () => ({ height: 28 })));
-let audioContext: AudioContext | null = null;
-let audioAnalyser: AnalyserNode | null = null;
-let audioSource: MediaElementAudioSourceNode | null = null;
-let audioWaveFrame = 0;
-let audioWaveLastUpdate = 0;
-let audioWaveData: Uint8Array | null = null;
-
-function stopAudioWaveform() {
-  if (audioWaveFrame) cancelAnimationFrame(audioWaveFrame);
-  audioWaveFrame = 0;
-  audioWaveLastUpdate = 0;
-  audioSource?.disconnect();
-  audioAnalyser?.disconnect();
-  audioSource = null;
-  audioAnalyser = null;
-  audioWaveData = null;
-  if (audioContext) void audioContext.close().catch(() => {});
-  audioContext = null;
-  audioWaveBars.value = Array.from({ length: AUDIO_WAVE_BAR_COUNT }, () => ({ height: 28 }));
-}
-
-function updateAudioWaveform(timestamp: number) {
-  if (!audioPlaying.value || !audioAnalyser || !audioWaveData) return;
-  if (timestamp - audioWaveLastUpdate < AUDIO_WAVE_REFRESH_INTERVAL) {
-    audioWaveFrame = requestAnimationFrame(updateAudioWaveform);
-    return;
-  }
-  audioWaveLastUpdate = timestamp;
-  audioAnalyser.getByteTimeDomainData(audioWaveData as any);
-  const bucketSize = Math.max(1, Math.floor(audioWaveData.length / AUDIO_WAVE_BAR_COUNT));
-  audioWaveBars.value = Array.from({ length: AUDIO_WAVE_BAR_COUNT }, (_, index) => {
-    const start = index * bucketSize;
-    const end = Math.min(audioWaveData!.length, start + bucketSize);
-    let peak = 0;
-    for (let i = start; i < end; i++) peak = Math.max(peak, Math.abs(audioWaveData![i] - 128));
-    return { height: Math.min(100, Math.max(28, 28 + peak * 2.4)) };
-  });
-  audioWaveFrame = requestAnimationFrame(updateAudioWaveform);
-}
-
-function setupAudioWaveform() {
-  const audio = audioRef.value;
-  if (!audio || audioAnalyser) return;
-  try {
-    audioContext = new AudioContext();
-    audioAnalyser = audioContext.createAnalyser();
-    audioAnalyser.fftSize = 256;
-    audioWaveData = new Uint8Array(audioAnalyser.frequencyBinCount);
-    audioSource = audioContext.createMediaElementSource(audio);
-    audioSource.connect(audioAnalyser);
-    audioAnalyser.connect(audioContext.destination);
-  } catch {
-    stopAudioWaveform();
-  }
-}
-
-function onAudioPlay() {
-  audioPlaying.value = true;
-  mediaStore.setPlayState('playing');
-  setupAudioWaveform();
-  if (audioContext?.state === 'suspended') void audioContext.resume();
-  if (!audioWaveFrame) audioWaveFrame = requestAnimationFrame(updateAudioWaveform);
-}
-function onAudioPause() {
-  audioPlaying.value = false;
-  mediaStore.setPlayState('paused');
-  if (audioWaveFrame) cancelAnimationFrame(audioWaveFrame);
-  audioWaveFrame = 0;
-  audioWaveLastUpdate = 0;
-  mediaStore.persistProgress();
-}
-function onAudioEnded() {
-  onAudioPause();
-  handlePlaylistAudioEnded();
-}
-
-/** 音频进度同步（驱动自定义进度条）+ 节流持久化 */
-function onAudioTimeUpdate(e: Event) {
-  const a = (e.currentTarget as HTMLAudioElement | null)
-    || (e.target as HTMLAudioElement | null)
-    || audioRef.value
-    || document.querySelector<HTMLAudioElement>('.fpv-audio-core');
-  if (!a) return;
-  audioRef.value ||= a;
-  audioCurrentTime.value = a.currentTime;
-  if (Number.isFinite(a.duration) && a.duration > 0) audioDuration.value = a.duration;
-  mediaStore.setProgress(a.currentTime, a.duration);
-  throttlePersist();
-}
-
-/** 音频元数据可用后应用恢复点（恢复点已在 store 层完成版本校验） */
-function onAudioLoadedMeta(e: Event) {
-  const a = (e.currentTarget as HTMLAudioElement | null)
-    || (e.target as HTMLAudioElement | null)
-    || audioRef.value;
-  const resume = mediaStore.pendingResume;
-  if (!a) return;
-  // 同步时长与音量/倍速偏好（倍速恢复与视频保持一致）
-  if (Number.isFinite(a.duration) && a.duration > 0) audioDuration.value = a.duration;
-  audioVolume.value = a.volume;
-  audioMuted.value = a.muted;
-  audioVolumeInput.value = a.volume;
-  // 倍速仅属于当前预览会话；新媒体元数据就绪时强制应用 1×。
-  audioRate.value = 1;
-  a.playbackRate = 1;
-  if (!resume || resume <= 0) return;
-  if (!Number.isFinite(a.duration) || a.duration <= 0) return;
-  const t = Math.min(resume, Math.max(0, a.duration - 1));
-  // 仅当目标位置可定位时才设置 currentTime，避免冷资源下在未缓冲位置触发重复请求
-  const seekable = a.seekable;
-  let canSeek = false;
-  for (let i = 0; i < seekable.length; i++) {
-    if (t >= seekable.start(i) && t <= seekable.end(i)) { canSeek = true; break; }
-  }
-  if (canSeek || seekable.length === 0) a.currentTime = t;
-}
+/* 音频进度条 / 音量 / 倍速的全部交互实现已随 useAudioPlayer 下沉 */
 
 function resetState() {
   sessionEpoch.value++;
@@ -943,29 +605,10 @@ function resetState() {
   clearAutoNextTimer();
   resetPoster();
   teardownVideo();
-  stopAudioWaveform();
-  const audio = audioRef.value;
-  if (audio) {
-    audio.pause();
-    audio.removeAttribute('src');
-    audio.load();
-  }
-  audioPlaying.value = false;
-  audioCurrentTime.value = 0;
-  audioDuration.value = 0;
-  audioSeeking.value = false;
-  audioSeekDraft.value = null;
+  // 音频复位（停波形 + 卸载内核载荷 + 清零进度/拖动草稿）
+  resetAudioState();
   // 图片查看状态复位（切换文件时避免上一张的缩放/旋转残留）
-  if (imageDownsampleUrl) { URL.revokeObjectURL(imageDownsampleUrl); imageDownsampleUrl = null; }
-  imageDisplaySrc.value = null;
-  imageDecoding.value = false;
-  imageLoaded.value = false;
-  imageNatural.value = { w: 0, h: 0 };
-  imageScale.value = 1;
-  imageRotation.value = 0;
-  imageFit.value = 'contain';
-  imageTranslate.value = { x: 0, y: 0 };
-  imageDragging.value = false;
+  resetImageViewerState();
   mediaError.value = false;
   mediaErrorText.value = null;
   mediaStreamSrc.value = null;
@@ -981,14 +624,7 @@ function minimize() {
 function fullStop() {
   clearAutoNextTimer();
   teardownVideo();
-  stopAudioWaveform();
-  const audio = audioRef.value;
-  if (audio) {
-    audio.pause();
-    audio.removeAttribute('src');
-    audio.load();
-  }
-  audioPlaying.value = false;
+  stopAudioPlayback();
   mediaStore.clearSession();
 }
 
@@ -1112,242 +748,37 @@ function classifyMediaErrorCode(code?: number): string {
 }
 
 // ============ 图片查看器（缩放 / 旋转 / 适应 / 拖拽） ============
-const IMAGE_SCALE_MIN = 0.1;
-const IMAGE_SCALE_MAX = 8;
-/** 缩放档位步进比例（相对当前值，指数步进更符合视觉感受） */
-const IMAGE_SCALE_STEP = 1.2;
-const imageStageRef = ref<HTMLElement | null>(null);
-const imageScale = ref(1);
-const imageRotation = ref(0);
-/** 视图模式：contain = 适应窗口；manual = 手动缩放（含 100% 实际尺寸） */
-const imageFit = ref<'contain' | 'manual'>('contain');
-const imageTranslate = ref({ x: 0, y: 0 });
-const imageDragging = ref(false);
-const imageNatural = ref({ w: 0, h: 0 });
-const imageLoaded = ref(false);
-/** 大图解码中（同步解码会阻塞主线程，改为异步 + 降采样） */
-const imageDecoding = ref(false);
-/** 实际渲染的图片地址：普通图直接用原图，超大图用 createImageBitmap 降采样后的 ObjectURL */
-const imageDisplaySrc = ref<string | null>(null);
-/** 降采样生成的 ObjectURL（需在切换/卸载时 revoke） */
-let imageDownsampleUrl: string | null = null;
-/** 大图降采样触发阈值（像素数） */
-const IMAGE_DOWNSAMPLE_PIXEL_THRESHOLD = 4096 * 4096;
-/** 拖拽起始点与初始偏移 */
-let imageDragStart = { x: 0, y: 0, tx: 0, ty: 0 };
+// M6 拆分：状态、异步探测/降采样与全部交互已下沉到 composables/useImageViewer.ts。
+// 此处仅保留绑定（模板 ref / 计算属性）与键盘快捷键转发；行为与拆分前一致。
+const {
+  IMAGE_SCALE_MIN,
+  IMAGE_SCALE_MAX,
+  imageStageRef,
+  imageScale,
+  imageStyle,
+  imageScaleText,
+  imageDisplaySrc,
+  imageDecoding,
+  imageDragging,
+  setupImage,
+  resetImageView,
+  resetImageViewerState,
+  disposeImageViewer,
+  zoomImageBy,
+  toggleImageFit,
+  rotateImage,
+  onImageLoad,
+  onImageWheel,
+  onImagePointerDown,
+  onImagePointerMove,
+  onImagePointerUp,
+} = useImageViewer({ epoch: sessionEpoch });
 
-/** 旋转后是否发生宽高交换（90/270 度） */
-const imageSwapped = computed(() => imageRotation.value % 180 !== 0);
+/* 图片视图的计算属性（适配比例 / 当前缩放 / transform / 文案）已随 useImageViewer 下沉 */
 
-/** 图片适应窗口的缩放比例（依据舞台尺寸与自然尺寸，旋转后交换宽高） */
-const imageFitScale = computed(() => {
-  const stage = imageStageRef.value;
-  if (!stage || imageNatural.value.w <= 0 || imageNatural.value.h <= 0) return 1;
-  const sw = stage.clientWidth;
-  const sh = stage.clientHeight;
-  if (sw <= 0 || sh <= 0) return 1;
-  const iw = imageSwapped.value ? imageNatural.value.h : imageNatural.value.w;
-  const ih = imageSwapped.value ? imageNatural.value.w : imageNatural.value.h;
-  return Math.min(sw / iw, sh / ih, 1);
-});
+/* 图片加载链路（异步探测 → 超大图降采样 → 渲染）与 onImageLoad 已随 useImageViewer 下沉 */
 
-/** 当前实际缩放比例（手动模式直接用缩放值；适应模式用计算值） */
-const imageCurrentScale = computed(() => (
-  imageFit.value === 'contain' ? imageFitScale.value : imageScale.value
-));
-
-/** 图片元素 transform：先缩放后旋转，再平移 */
-const imageStyle = computed(() => ({
-  transform: `translate(${imageTranslate.value.x}px, ${imageTranslate.value.y}px) scale(${imageCurrentScale.value}) rotate(${imageRotation.value}deg)`,
-}));
-
-/** 工具栏缩放比例文案：适应模式显示「适应」，手动模式显示百分比 */
-const imageScaleText = computed(() => {
-  if (imageFit.value === 'contain') return '适应';
-  return `${Math.round(imageScale.value * 100)}%`;
-});
-
-/**
- * 加载图片：先尝试异步解码并检测超大图，超阈值时用 createImageBitmap 降采样，
- * 避免超大图同步解码阻塞主线程导致白屏。切换/停止时通过代次令牌使旧任务失效。
- */
-async function setupImage(src: string | null) {
-  // 释放上一张降采样资源
-  if (imageDownsampleUrl) {
-    URL.revokeObjectURL(imageDownsampleUrl);
-    imageDownsampleUrl = null;
-  }
-  imageDisplaySrc.value = null;
-  imageDecoding.value = false;
-  if (!src) return;
-  const token = sessionEpoch.value;
-
-  // 先异步探测图片尺寸（不阻塞主线程）
-  const probe = await probeImageSize(src, token);
-  if (token !== sessionEpoch.value) return;
-  if (probe === null) {
-    // 探测失败（非图片 / 网络失败）交由 <img> 的 error 事件处理
-    imageDisplaySrc.value = src;
-    return;
-  }
-  const pixels = probe.w * probe.h;
-  if (pixels > IMAGE_DOWNSAMPLE_PIXEL_THRESHOLD) {
-    // 超大图：createImageBitmap 降采样（限制边长为 2048，保持宽高比）
-    imageDecoding.value = true;
-    try {
-      const bitmap = await createImageBitmap(await fetch(src, { credentials: 'same-origin' }).then((r) => {
-        if (!r.ok) throw new Error('load failed');
-        return r.blob();
-      }), {
-        resizeWidth: Math.round(probe.w * (2048 / Math.max(probe.w, probe.h))),
-        resizeHeight: Math.round(probe.h * (2048 / Math.max(probe.w, probe.h))),
-        resizeQuality: 'high',
-      });
-      if (token !== sessionEpoch.value) { bitmap.close(); return; }
-      // ImageBitmap 不能直接作为 ObjectURL 源，先经 canvas 转成 Blob
-      const canvas = document.createElement('canvas');
-      canvas.width = bitmap.width;
-      canvas.height = bitmap.height;
-      const ctx = canvas.getContext('2d');
-      if (!ctx) { bitmap.close(); throw new Error('canvas ctx unavailable'); }
-      ctx.drawImage(bitmap, 0, 0);
-      const blob: Blob = await new Promise((resolve) => canvas.toBlob((b) => resolve(b ?? new Blob()), 'image/png'));
-      const naturalW = bitmap.width;
-      const naturalH = bitmap.height;
-      bitmap.close();
-      if (token !== sessionEpoch.value) return;
-      imageDownsampleUrl = URL.createObjectURL(blob);
-      imageDisplaySrc.value = imageDownsampleUrl;
-      // 用降采样尺寸作为自然尺寸
-      imageNatural.value = { w: naturalW, h: naturalH };
-      imageLoaded.value = true;
-      resetImageView();
-    } catch {
-      if (token !== sessionEpoch.value) return;
-      // 降采样失败回退原图（由 <img> 的 error/load 决定最终态）
-      imageDisplaySrc.value = src;
-    } finally {
-      if (token === sessionEpoch.value) imageDecoding.value = false;
-    }
-  } else {
-    // 普通图：直接使用原图，异步解码避免白屏
-    imageDisplaySrc.value = src;
-  }
-}
-
-/** 轻量探测图片尺寸（HEAD 或读数据），仅用于决定是否降采样；失败返回 null */
-async function probeImageSize(src: string, token: number): Promise<{ w: number; h: number } | null> {
-  try {
-    const img = new Image();
-    img.decoding = 'async';
-    const loaded = new Promise<{ w: number; h: number }>((resolve, reject) => {
-      img.onload = () => resolve({ w: img.naturalWidth, h: img.naturalHeight });
-      img.onerror = () => reject(new Error('probe failed'));
-    });
-    img.src = src;
-    const size = await loaded;
-    if (token !== sessionEpoch.value) return null;
-    return size;
-  } catch {
-    return null;
-  }
-}
-
-function onImageLoad(e: Event) {
-  const img = e.target as HTMLImageElement;
-  imageNatural.value = { w: img.naturalWidth || 0, h: img.naturalHeight || 0 };
-  imageLoaded.value = true;
-  resetImageView();
-}
-
-/** 相对缩放：传入方向（-1 缩小 / +1 放大），保持中心点不漂移 */
-function zoomImageBy(dir: -1 | 1) {
-  const target = imageFit.value === 'contain'
-    ? imageFitScale.value * (dir > 0 ? IMAGE_SCALE_STEP : 1 / IMAGE_SCALE_STEP)
-    : imageScale.value * (dir > 0 ? IMAGE_SCALE_STEP : 1 / IMAGE_SCALE_STEP);
-  zoomImageTo(target);
-}
-
-function zoomImageTo(scale: number) {
-  imageFit.value = 'manual';
-  imageScale.value = Math.min(IMAGE_SCALE_MAX, Math.max(IMAGE_SCALE_MIN, scale));
-  clampImageTranslate();
-}
-
-/** 适应窗口 / 实际尺寸（100%）切换 */
-function toggleImageFit() {
-  if (imageFit.value === 'contain') {
-    // 进入实际尺寸：以 100% 为基准，保留已有平移
-    imageFit.value = 'manual';
-    imageScale.value = 1;
-  } else {
-    imageFit.value = 'contain';
-    imageTranslate.value = { x: 0, y: 0 };
-  }
-  clampImageTranslate();
-}
-
-/** 顺时针旋转 90°（旋转后平移量需重算，回到居中） */
-function rotateImage() {
-  imageRotation.value = (imageRotation.value + 90) % 360;
-  imageTranslate.value = { x: 0, y: 0 };
-  // 适应模式下重算适应比例；手动模式保持当前缩放
-  if (imageFit.value === 'contain') imageScale.value = imageFitScale.value;
-  clampImageTranslate();
-}
-
-/** 重置视图：适应窗口 + 归零旋转与平移 */
-function resetImageView() {
-  imageRotation.value = 0;
-  imageTranslate.value = { x: 0, y: 0 };
-  imageFit.value = 'contain';
-  imageScale.value = imageFitScale.value;
-}
-
-/** 平移边界钳制：放大后图片边缘不能完全离开视口 */
-function clampImageTranslate() {
-  const stage = imageStageRef.value;
-  if (!stage) return;
-  const scale = imageCurrentScale.value;
-  const iw = (imageSwapped.value ? imageNatural.value.h : imageNatural.value.w) * scale;
-  const ih = (imageSwapped.value ? imageNatural.value.w : imageNatural.value.h) * scale;
-  const sw = stage.clientWidth;
-  const sh = stage.clientHeight;
-  const maxX = Math.max(0, (iw - sw) / 2);
-  const maxY = Math.max(0, (ih - sh) / 2);
-  imageTranslate.value = {
-    x: Math.min(maxX, Math.max(-maxX, imageTranslate.value.x)),
-    y: Math.min(maxY, Math.max(-maxY, imageTranslate.value.y)),
-  };
-}
-
-/** Ctrl/⌘ + 滚轮缩放（不抢占普通滚动） */
-function onImageWheel(e: WheelEvent) {
-  if (!e.ctrlKey && !e.metaKey) return;
-  e.preventDefault();
-  zoomImageBy(e.deltaY < 0 ? 1 : -1);
-}
-
-/** 指针按下：放大状态下启动拖拽 */
-function onImagePointerDown(e: PointerEvent) {
-  if (imageFit.value === 'contain' && imageCurrentScale.value <= imageFitScale.value + 0.001) return;
-  imageDragging.value = true;
-  imageDragStart = { x: e.clientX, y: e.clientY, tx: imageTranslate.value.x, ty: imageTranslate.value.y };
-  (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
-}
-
-function onImagePointerMove(e: PointerEvent) {
-  if (!imageDragging.value) return;
-  imageTranslate.value = {
-    x: imageDragStart.tx + (e.clientX - imageDragStart.x),
-    y: imageDragStart.ty + (e.clientY - imageDragStart.y),
-  };
-}
-
-function onImagePointerUp() {
-  imageDragging.value = false;
-  clampImageTranslate();
-}
+/* 缩放 / 旋转 / 适应 / 边界钳制 / 滚轮与拖拽交互已随 useImageViewer 下沉 */
 
 // ============ 视频预览（MSE 优先 + 原生回退） ============
 const videoRef = ref<HTMLVideoElement | null>(null);
@@ -1727,13 +1158,9 @@ watch(() => mediaStore.expanded, (v) => {
   }
   // 收起为迷你播放器时暂停波形动画（音频仍在播放，避免隐藏状态空转 rAF）
   if (v) {
-    if (audioPlaying.value && !audioWaveFrame) {
-      audioWaveFrame = requestAnimationFrame(updateAudioWaveform);
-    }
-  } else if (audioWaveFrame) {
-    cancelAnimationFrame(audioWaveFrame);
-    audioWaveFrame = 0;
-    audioWaveLastUpdate = 0;
+    resumeAudioWaveformLoop();
+  } else {
+    pauseAudioWaveformLoop();
   }
 }, { immediate: true });
 
@@ -1783,11 +1210,8 @@ onBeforeUnmount(() => {
   clearPosterRetryTimer();
   releasePosterResource();
   teardownVideo();
-  stopAudioWaveform();
-  if (imageDownsampleUrl) { URL.revokeObjectURL(imageDownsampleUrl); imageDownsampleUrl = null; }
-  imageDisplaySrc.value = null;
-  imageDecoding.value = false;
-  audioPlaying.value = false;
+  disposeAudioPlayer();
+  disposeImageViewer();
   mediaStore.unregisterBridge();
 });
 
@@ -1798,20 +1222,12 @@ function handleDownload() {
   triggerBrowserDownload(url, snap.name || undefined);
 }
 
-/**
- * 安全的文件大小格式化。
- * 后端/调用方可能传入字符串、空值或非法数值，统一先做数值归一化。
- */
-function formatSize(bytes: number | string | null | undefined): string {
-  const num = Number(bytes);
-  if (!Number.isFinite(num) || num <= 0) return '0 B';
-  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-  let i = 0;
-  let size = num;
-  while (size >= 1024 && i < units.length - 1) { size /= 1024; i++; }
-  return `${size.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
-}
+// 文件大小格式化已上移到 utils/format.ts（formatSizeCompact），
+// 与拆分出的 PreviewPlaylistPanel 共用同一实现，避免两处精度策略漂移。
 </script>
+
+<!-- 跨拆出组件的共享规则（.fpv-state / .fpv-btn），见文件头注释 -->
+<style scoped src="./preview-shared.css"></style>
 
 <style scoped>
 /* 全屏遮罩：风格与 FileContextMenu 的浮层体系保持一致 */
@@ -1879,44 +1295,7 @@ function formatSize(bytes: number | string | null | undefined): string {
   max-height: calc(100dvh - 48px);
 }
 
-.fpv-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 12px 16px;
-  border-bottom: 1px solid var(--border-default);
-  flex-shrink: 0;
-}
-
-.fpv-name {
-  font-size: 14px;
-  font-weight: 500;
-  color: var(--text-primary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.fpv-close {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  flex-shrink: 0;
-  background: transparent;
-  border: none;
-  border-radius: var(--radius-sm, 6px);
-  color: var(--text-secondary);
-  font-size: 16px;
-  cursor: pointer;
-  transition: background var(--duration-fast), color var(--duration-fast);
-}
-.fpv-close:hover {
-  background: var(--color-accent-soft);
-  color: var(--text-accent);
-}
+/* 头部（.fpv-header / .fpv-name / .fpv-close）样式已迁移至 PreviewHeader.vue（M6 拆分） */
 
 .fpv-body {
   flex: 1;
@@ -2339,136 +1718,8 @@ function formatSize(bytes: number | string | null | undefined): string {
   flex-shrink: 0;
 }
 
-/* ═══════════════ 文本预览面板 ═══════════════ */
-.fpv-text-panel {
-  align-self: stretch;
-  width: 100%;
-  height: 100%;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  background: var(--color-bg-elevated);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-md);
-  overflow: hidden;
-}
-
-.fpv-text-toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 8px 14px;
-  border-bottom: 1px solid var(--border-default);
-  background: color-mix(in srgb, var(--seed-primary) 4%, var(--color-bg-overlay));
-  flex-shrink: 0;
-}
-
-.fpv-text-toolbar-left {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-}
-
-.fpv-text-type-icon {
-  font-size: 16px;
-  color: var(--seed-primary);
-  flex-shrink: 0;
-}
-
-.fpv-text-type-label {
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--text-primary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.fpv-text-toolbar-meta {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
-  color: var(--text-tertiary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  flex-shrink: 1;
-}
-
-.fpv-text {
-  flex: 1;
-  min-height: 0;
-  margin: 0;
-  overflow: auto;
-  overscroll-behavior: contain;
-  padding: 14px 16px;
-  font-family: var(--font-mono);
-  font-size: 12.5px;
-  line-height: 1.7;
-  color: var(--text-primary);
-  tab-size: 4;
-  white-space: pre-wrap;
-  word-break: break-word;
-  user-select: text;
-}
-
-/* 文本阅读区滚动条 */
-.fpv-text::-webkit-scrollbar { width: 8px; height: 8px; }
-.fpv-text::-webkit-scrollbar-track { background: transparent; }
-.fpv-text::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 4px; }
-.fpv-text::-webkit-scrollbar-thumb:hover { background: var(--text-tertiary); }
-
-/* 加载 / 错误兜底态 */
-.fpv-state {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 12px;
-  padding: 32px;
-  text-align: center;
-  color: var(--text-secondary);
-  font-size: 14px;
-}
-.fpv-state p { margin: 0; }
-.fpv-state-icon {
-  font-size: 36px;
-  color: var(--text-tertiary);
-}
-.fpv-error .fpv-state-icon { color: var(--color-danger); }
-
-/* 通用小按钮（错误态下载 / 底部下载） */
-.fpv-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 7px 18px;
-  background: var(--seed-primary);
-  color: #fff;
-  border: none;
-  border-radius: var(--radius-md);
-  font-size: 13px;
-  font-family: inherit;
-  cursor: pointer;
-  transition: background 0.2s, transform 0.1s;
-}
-.fpv-btn:hover { background: color-mix(in srgb, var(--seed-primary) 85%, #fff); }
-.fpv-btn:active { transform: scale(0.98); }
-
-/* 次要按钮（错误态下载） */
-.fpv-btn--ghost {
-  background: transparent;
-  border: 1px solid var(--border-strong);
-  color: var(--text-secondary);
-}
-.fpv-btn--ghost:hover {
-  background: var(--color-accent-soft);
-  color: var(--text-accent);
-}
+/* 文本面板样式已随组件迁移至 PreviewTextPanel.vue；
+   .fpv-state / .fpv-btn 为跨组件共享规则，见 preview-shared.css。 */
 
 .fpv-footer {
   display: flex;
@@ -2489,218 +1740,8 @@ function formatSize(bytes: number | string | null | undefined): string {
   white-space: nowrap;
 }
 
-/* 头部右侧操作区 */
-.fpv-header-actions {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  flex-shrink: 0;
-}
-
-.fpv-playlist-indicator {
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--text-tertiary);
-  font-family: var(--font-mono);
-  padding: 0 6px;
-  white-space: nowrap;
-}
-
-.fpv-nav-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  background: transparent;
-  border: none;
-  border-radius: var(--radius-sm, 6px);
-  color: var(--text-secondary);
-  font-size: 16px;
-  cursor: pointer;
-  transition: background var(--duration-fast), color var(--duration-fast);
-}
-.fpv-nav-btn:hover:not(:disabled) {
-  background: var(--color-accent-soft);
-  color: var(--text-accent);
-}
-.fpv-nav-btn:disabled {
-  color: var(--text-quaternary, #999);
-  cursor: default;
-  opacity: 0.5;
-}
-.fpv-nav-btn.fpv-active {
-  color: var(--seed-primary);
-  background: var(--color-accent-soft);
-}
-
-/* 播放列表面板 */
-.fpv-playlist-panel {
-  position: absolute;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  width: 280px;
-  max-width: 80%;
-  background: var(--color-bg-overlay);
-  border-left: 1px solid var(--border-default);
-  display: flex;
-  flex-direction: column;
-  z-index: 10;
-}
-
-.fpv-playlist-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 12px 14px;
-  border-bottom: 1px solid var(--border-default);
-  flex-shrink: 0;
-}
-
-.fpv-playlist-title {
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--text-primary);
-}
-
-.fpv-playlist-count {
-  font-size: 11px;
-  color: var(--text-tertiary);
-}
-
-.fpv-playlist-close {
-  display: inline-grid;
-  place-items: center;
-  width: 30px;
-  height: 30px;
-  margin-left: auto;
-  border: 0;
-  border-radius: var(--radius-sm, 6px);
-  background: transparent;
-  color: var(--text-secondary);
-  cursor: pointer;
-}
-
-.fpv-playlist-close:hover {
-  background: var(--color-accent-soft);
-  color: var(--text-accent);
-}
-
-.fpv-playlist-list {
-  flex: 1;
-  overflow-y: auto;
-  padding: 6px 0;
-  scrollbar-width: thin;
-  scrollbar-color: var(--border-default) transparent;
-}
-.fpv-playlist-list::-webkit-scrollbar { width: 4px; }
-.fpv-playlist-list::-webkit-scrollbar-track { background: transparent; }
-.fpv-playlist-list::-webkit-scrollbar-thumb { background: var(--border-default); border-radius: 2px; }
-
-.fpv-playlist-item {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  width: 100%;
-  padding: 8px 14px;
-  border: 0;
-  background: transparent;
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-  transition: background 0.15s;
-  position: relative;
-  color: var(--text-primary);
-}
-.fpv-playlist-item:focus-visible {
-  outline: 2px solid var(--color-accent);
-  outline-offset: -2px;
-}
-.fpv-playlist-item:hover {
-  background: var(--color-accent-soft);
-}
-.fpv-playlist-item.fpv-playing {
-  background: color-mix(in srgb, var(--seed-primary) 8%, transparent);
-}
-.fpv-playlist-item.fpv-playing::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 6px;
-  bottom: 6px;
-  width: 3px;
-  background: var(--seed-primary);
-  border-radius: 0 2px 2px 0;
-}
-
-.fpv-playlist-thumb {
-  width: 48px;
-  height: 48px;
-  flex: 0 0 48px;
-  object-fit: cover;
-  border-radius: var(--radius-sm, 6px);
-  background: var(--color-bg-secondary);
-  border: 1px solid var(--border-default);
-}
-
-.fpv-playlist-item--image {
-  min-height: 64px;
-}
-
-.fpv-playlist-index {
-  width: 20px;
-  font-size: 11px;
-  font-weight: 500;
-  color: var(--text-quaternary, #999);
-  text-align: center;
-  flex-shrink: 0;
-  font-family: var(--font-mono);
-}
-
-.fpv-playlist-info {
-  flex: 1;
-  min-width: 0;
-}
-
-.fpv-playlist-name {
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--text-primary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  line-height: 1.4;
-}
-.fpv-playing .fpv-playlist-name {
-  color: var(--seed-primary);
-}
-
-.fpv-playlist-meta {
-  font-size: 11px;
-  color: var(--text-tertiary);
-  margin-top: 1px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.fpv-playlist-now {
-  color: var(--seed-primary);
-  font-size: 16px;
-  flex-shrink: 0;
-}
-
-/* 播放列表滑入动画 */
-.fpv-slide-enter-active,
-.fpv-slide-leave-active {
-  transition: transform var(--duration-fast, 0.15s) ease, opacity var(--duration-fast, 0.15s) ease;
-}
-.fpv-slide-enter-from,
-.fpv-slide-leave-to {
-  transform: translateX(100%);
-  opacity: 0;
-}
+/* 头部右侧操作区与导航按钮样式已迁移至 PreviewHeader.vue（M6 拆分）；
+   播放列表面板样式已迁移至 PreviewPlaylistPanel.vue。 */
 
 @media (max-width: 720px) {
   .fpv-overlay {
@@ -2732,25 +1773,6 @@ function formatSize(bytes: number | string | null | undefined): string {
 
   .fpv-dialog--audio {
     width: min(100%, 520px);
-  }
-
-  .fpv-header {
-    min-height: 48px;
-    padding: 8px 10px;
-  }
-
-  .fpv-name {
-    font-size: 13px;
-  }
-
-  .fpv-playlist-indicator {
-    display: none;
-  }
-
-  .fpv-nav-btn,
-  .fpv-close {
-    width: 36px;
-    height: 36px;
   }
 
   .fpv-body {
@@ -2810,28 +1832,11 @@ function formatSize(bytes: number | string | null | undefined): string {
     flex-wrap: wrap;
   }
 
-  .fpv-text-toolbar-meta {
-    font-size: 10px;
-  }
-
   .fpv-footer {
     padding: 8px 10px;
   }
 
-  .fpv-playlist-panel {
-    top: auto;
-    width: 100%;
-    max-width: none;
-    max-height: min(62%, 520px);
-    border-top: 1px solid var(--border-default);
-    border-left: 0;
-    box-shadow: 0 -12px 32px rgba(0, 0, 0, 0.28);
-  }
-
-  .fpv-slide-enter-from,
-  .fpv-slide-leave-to {
-    transform: translateY(100%);
-  }
+  /* 播放列表面板的窄屏覆盖已随组件迁移至 PreviewPlaylistPanel.vue */
 }
 
 @media (max-height: 560px) and (orientation: landscape) {
@@ -2850,7 +1855,7 @@ function formatSize(bytes: number | string | null | undefined): string {
     max-height: none;
   }
 
-  .fpv-header,
+  /* 头部同一压缩规则在 PreviewHeader.vue 内（scoped 样式不跨组件，需各自声明） */
   .fpv-footer {
     padding-block: 6px;
   }
@@ -2861,11 +1866,6 @@ function formatSize(bytes: number | string | null | undefined): string {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .fpv-slide-enter-active,
-  .fpv-slide-leave-active {
-    transition: none;
-  }
-
   .fpv-audio-wave--playing span {
     animation: none;
   }

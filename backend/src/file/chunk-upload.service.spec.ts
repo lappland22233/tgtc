@@ -357,4 +357,84 @@ describe('ChunkUploadService session quota', () => {
       await expect(fsp.stat(path.join(dirPath, 'merged'))).rejects.toMatchObject({ code: 'ENOENT' });
     });
   });
+
+  // M3：分片合并信号量的回收（原实现 Map 只 get/set、永不 delete，长期运行内存单调增长）。
+  describe('merge semaphore lifecycle (M3)', () => {
+    const makeSession = (userId: string): any => ({
+      uploadedBy: userId,
+      mergeAbortController: new AbortController(),
+    });
+
+    beforeEach(() => {
+      jest.spyOn(service as any, 'scheduleCleanup').mockImplementation(() => undefined);
+    });
+
+    it('recycles the per-user semaphore after a successful merge', async () => {
+      jest.spyOn(service as any, 'doMerge').mockResolvedValue({ id: 'f1', originalName: 'x.bin' });
+
+      await (service as any).runMergeWithSemaphore(makeSession('u1'), jest.fn(), 'upload-1');
+
+      expect((service as any).getMergeSemaphoreStats()).toEqual({
+        activeUsers: 0,
+        trackedRefs: 0,
+        recycled: 1,
+        globalBusy: false,
+      });
+    });
+
+    it('recycles the per-user semaphore on the failure path', async () => {
+      jest.spyOn(service as any, 'doMerge').mockRejectedValue(new Error('boom'));
+
+      const session = makeSession('u-err');
+      await (service as any).runMergeWithSemaphore(session, jest.fn(), 'upload-err');
+
+      expect(session.mergeStatus).toBe('error');
+      expect((service as any).getMergeSemaphoreStats()).toEqual({
+        activeUsers: 0,
+        trackedRefs: 0,
+        recycled: 1,
+        globalBusy: false,
+      });
+    });
+
+    it('keeps per-user concurrency at 1 when a waiter is queued', async () => {
+      let active = 0;
+      let maxActive = 0;
+      jest.spyOn(service as any, 'doMerge').mockImplementation(async () => {
+        active++;
+        maxActive = Math.max(maxActive, active);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        active--;
+        return { id: 'f1', originalName: 'x.bin' };
+      });
+
+      const first = (service as any).runMergeWithSemaphore(makeSession('u2'), jest.fn(), 'm-1');
+      // 确保首个合并已取得用户级信号量后再发起第二个
+      await Promise.resolve();
+      const second = (service as any).runMergeWithSemaphore(makeSession('u2'), jest.fn(), 'm-2');
+      await Promise.all([first, second]);
+
+      expect(maxActive).toBe(1);
+      // 等待者未导致信号量被提前回收而产生第二个实例
+      expect((service as any).getMergeSemaphoreStats().activeUsers).toBe(0);
+    });
+
+    it('tracks independent semaphores per user', async () => {
+      const seen: number[] = [];
+      jest.spyOn(service as any, 'doMerge').mockImplementation(async () => {
+        seen.push((service as any).getMergeSemaphoreStats().activeUsers);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        return { id: 'f1', originalName: 'x.bin' };
+      });
+
+      await Promise.all([
+        (service as any).runMergeWithSemaphore(makeSession('a'), jest.fn(), 'a'),
+        (service as any).runMergeWithSemaphore(makeSession('b'), jest.fn(), 'b'),
+      ]);
+
+      expect(seen.filter((n) => n >= 1).length).toBeGreaterThan(0);
+      expect((service as any).getMergeSemaphoreStats().activeUsers).toBe(0);
+      expect((service as any).getMergeSemaphoreStats().trackedRefs).toBe(0);
+    });
+  });
 });

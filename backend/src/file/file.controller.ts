@@ -16,7 +16,6 @@ import {
   Req,
   Res,
   BadRequestException,
-  ForbiddenException,
   HttpException,
   HttpStatus,
 } from '@nestjs/common';
@@ -40,6 +39,9 @@ import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { User, UserRole } from '../common/entities/user.entity';
 import { FileAccessType } from '../common/entities/file.entity';
 import { getClientIp } from '../common/utils/client-ip';
+// M1：同源校验抽出为共用工具（全局 CsrfGuard 复用）；此处保持原导出路径以兼容既有引用与测试。
+export { assertSameOriginWrite } from '../common/utils/same-origin';
+import { assertSameOriginWrite } from '../common/utils/same-origin';
 import { sanitizePreviewContentType } from '../common/utils/preview-content-type';
 import { buildContentDisposition } from '../common/utils/content-disposition';
 import { RateLimitService } from '../common/services/rate-limit.service';
@@ -903,9 +905,30 @@ export class FileController {
   @Get('public/:id')
   async getPublicFile(
     @Param('id') id: string,
+    @Req() req: Request,
     @Res() res: Response,
   ) {
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
+
+    // L1：该匿名 GET 会触发 ShareLink 懒创建（读请求产生写副作用）。
+    // token 唯一约束保证同一文件最多一条兼容分享（并发创建由唯一索引兜底），
+    // 此处再按 IP 限流，避免被用于批量枚举公开文件 ID 造成 share_links 表膨胀。
+    const clientIp = getClientIp(req);
+    const legacyRate = await this.rateLimitService.checkAndIncrement(
+      `legacy-public:${clientIp}`,
+      'legacy_public_share',
+      60,            // 60 次
+      60 * 1000,     // 锁定 1 分钟
+      60 * 1000,     // 窗口 1 分钟
+    );
+    if (!legacyRate.allowed) {
+      res.status(HttpStatus.TOO_MANY_REQUESTS).json({
+        code: HttpStatus.TOO_MANY_REQUESTS,
+        message: '访问过于频繁，请稍后再试',
+        data: null,
+      });
+      return;
+    }
 
     // 校验 + 懒创建 ShareLink 的逻辑已下沉到 FileService（Controller 不再直接访问 Repository）
     try {
@@ -967,28 +990,6 @@ export class FileController {
     const parsedDuration = parseOptionalPositiveInt(durationHours);
     const parsedMaxAccess = parseOptionalPositiveInt(maxAccessCount);
     return this.fileService.createDownloadLink(id, user, mode || '', parsedDuration, parsedMaxAccess);
-  }
-}
-
-/**
- * 写语义端点的同源校验（CSRF 纵深防御）：
- * - 浏览器跨站请求必带 Origin（POST 一定携带），Referer 兜底；
- * - 仅比对 host（忽略 scheme，兼容反代终止 TLS 的部署），不匹配即 403；
- * - 无 Origin/Referer 的非浏览器客户端（API Key 脚本调用）放行。
- */
-export function assertSameOriginWrite(req: Request): void {
-  const raw = (req.headers['origin'] as string | undefined)
-    ?? (req.headers['referer'] as string | undefined);
-  if (!raw) return;
-  let originHost: string | undefined;
-  try {
-    originHost = new URL(raw).host;
-  } catch {
-    throw new ForbiddenException('非法的 Origin/Referer');
-  }
-  if (!originHost) return;
-  if (originHost !== req.hostname) {
-    throw new ForbiddenException('跨站请求被拒绝');
   }
 }
 

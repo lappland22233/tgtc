@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, ForbiddenException, BadRequestException, ConflictException, GoneException, OnModuleInit, Logger } from '@nestjs/common';
+import { Injectable, NotFoundException, ForbiddenException, BadRequestException, ConflictException, GoneException, HttpException, OnModuleInit, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, In, IsNull, EntityManager } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
@@ -11,7 +11,7 @@ import { randomBytes } from 'crypto';
 import * as fs from 'fs';
 import { createReadStream, writeFileSync } from 'fs';
 import * as path from 'path';
-import { fileTypeFromBuffer } from 'file-type';
+// file-type 随类型校验迁移至 FileUploadConfigService
 import { InjectQueue } from '@nestjs/bull';
 import { Queue } from 'bull';
 import { QUEUE_NAMES } from '../jobs/bull-queue.module';
@@ -24,18 +24,20 @@ import { TelegramFileNotFoundError } from '../telegram/telegram.errors';
 import { ConfigCacheService } from '../common/services/config-cache.service';
 import { User } from '../common/entities/user.entity';
 import { hasAdminPrivileges } from '../common/auth-context';
-import { BannedIP } from '../common/entities/banned-ip.entity';
+// M6 拆分：BannedIP / RateLimitService / bcrypt 随访问控制域迁移至 FileAccessControlService
 import { databaseForUpdate, databaseQuery, getDatabaseType, isDatabaseUniqueViolation } from '../database/database-types';
 import { ShareAudit } from '../common/entities/share-audit.entity';
-import { RateLimitService } from '../common/services/rate-limit.service';
+
 import { AuditService } from '../common/services/audit.service';
 import { DirectoryNamespaceService } from '../common/services/directory-namespace.service';
 import { UploadJobService, UploadJob } from './upload-job.service';
 import { FileCacheService } from './file-cache.service';
 import { ThumbnailService } from './thumbnail.service';
-import * as bcrypt from 'bcryptjs';
+import { FileAccessControlService } from './file-access-control.service';
+import { FileUploadConfigService } from './file-upload-config.service';
+import { assertFileReadable, assertFileWritable } from '../common/utils/file-permissions';
 import { v4 as uuidv4 } from 'uuid';
-import { BCRYPT_ROUNDS } from '../common/constants/bcrypt';
+
 import { FILE_DELETE_GRACE_MS, FILE_DELETE_COOLDOWN_MS, FILE_FORCE_DELETE_WAIT_MS, MS_PER_SECOND } from '../common/constants/durations';
 import { isSafePublicInlineContentType } from '../common/utils/preview-content-type';
 import { buildFileVersionETag, matchesIfRange } from '../common/utils/file-range-validator';
@@ -47,7 +49,6 @@ import {
   escapeLike,
   fixFilenameEncoding,
   ensureFileExtension,
-  parseFileSize,
   parseAccessCount,
 } from './file-utils';
 
@@ -56,6 +57,13 @@ export { RangeNotSatisfiableException };
 export interface BatchUploadFailedItem {
   name: string;
   reason: string;
+  /**
+   * 是否可安全重试（M2/N1 修复：统一批量上传结果语义）：
+   * - 类型/大小/同名冲突等确定性失败为 false；
+   * - Telegram 网络、数据库瞬时故障等可重试失败为 true。
+   * 可选字段，保持对既有调用方的向后兼容。
+   */
+  retryable?: boolean;
 }
 
 export interface BatchUploadResult {
@@ -63,15 +71,26 @@ export interface BatchUploadResult {
   failed: BatchUploadFailedItem[];
 }
 
-/** 已知复合扩展名列表（优先匹配，防止 .tar.gz 被错误识别为 .gz） */
-const COMPOUND_EXTENSIONS = ['.tar.gz', '.tar.bz2', '.tar.xz'] as const;
+// 复合扩展名与 magic bytes 采样逻辑随类型校验迁移至 FileUploadConfigService
+
+
+/**
+ * M2/N1：判定上传失败是否可安全重试。
+ * 确定性失败（类型/大小/同名冲突/权限等 4xx）不应误导用户重试；
+ * 其余（Telegram 网络、数据库瞬时故障等）标记为可重试。
+ */
+function isRetryableUploadFailure(error: unknown): boolean {
+  if (error instanceof HttpException) {
+    return error.getStatus() >= 500;
+  }
+  return true;
+}
 
 @Injectable()
 export class FileService implements OnModuleInit {
   private readonly logger = new Logger(FileService.name);
-  private maxFileSize: number;
-  private fileTypeMode: 'blacklist' | 'whitelist' = 'blacklist';
-  private fileTypeFilter: string[] = [];
+  // M6 拆分：最大文件大小 / 类型过滤（maxFileSize、fileTypeMode、fileTypeFilter）
+  // 已随上传配置域迁移至 FileUploadConfigService
   private accessCountDefault = -1;
   private accessCountMax = -1;
   /** 最近标记为 error 的文件 id → 时间戳，用于下载降级去重，避免并发下载造成审计/日志风暴 */
@@ -91,8 +110,6 @@ export class FileService implements OnModuleInit {
     private folderRepository: Repository<Folder>,
     @InjectRepository(FileAccessLog)
     private accessLogRepository: Repository<FileAccessLog>,
-    @InjectRepository(BannedIP)
-    private bannedIPRepository: Repository<BannedIP>,
     @InjectRepository(ShareAudit)
     private shareAuditRepository: Repository<ShareAudit>,
     @InjectRepository(ShareLink)
@@ -101,7 +118,6 @@ export class FileService implements OnModuleInit {
     private configService: ConfigService,
     private jwtService: JwtService,
     private configCacheService: ConfigCacheService,
-    private rateLimitService: RateLimitService,
     private uploadJobService: UploadJobService,
     private auditService: AuditService,
     private fileCacheService: FileCacheService,
@@ -109,8 +125,12 @@ export class FileService implements OnModuleInit {
     private namespaceService: DirectoryNamespaceService,
     @InjectQueue(QUEUE_NAMES.FILE_UPLOAD)
     private fileUploadQueue: Queue,
+    // M6 拆分：访问策略 / 密码 / IP 封禁域（见 file-access-control.service.ts）。
+    // 置于末位以尽量降低对既有构造顺序的扰动。
+    private readonly accessControl: FileAccessControlService,
+    // M6 拆分：上传配置与类型/大小校验域（见 file-upload-config.service.ts）
+    private readonly uploadConfig: FileUploadConfigService,
   ) {
-    this.maxFileSize = parseFileSize(this.configService.get<string>('MAX_FILE_SIZE'));
   }
 
   async onModuleInit() {
@@ -129,26 +149,23 @@ export class FileService implements OnModuleInit {
       payload.key === 'MAX_FILE_SIZE'
       || payload.key === 'FILE_TYPE_MODE'
       || payload.key === 'FILE_TYPE_FILTER'
-      || payload.key === 'FILE_ACCESS_COUNT_DEFAULT'
+    ) {
+      await this.uploadConfig.reload();
+    }
+    if (
+      payload.key === 'FILE_ACCESS_COUNT_DEFAULT'
       || payload.key === 'FILE_ACCESS_COUNT_MAX'
     ) {
       await this.reloadUploadConfig();
     }
   }
 
+  /** 访问次数相关配置热更新（类型/大小配置由 FileUploadConfigService 自行维护） */
   private async reloadUploadConfig() {
-    const [maxFileSize, fileTypeMode, fileTypeFilter, accessCountDefault, accessCountMax] = await Promise.all([
-      this.configCacheService.get('MAX_FILE_SIZE', '20971520'),
-      this.configCacheService.get('FILE_TYPE_MODE', 'blacklist'),
-      this.configCacheService.get('FILE_TYPE_FILTER', ''),
+    const [accessCountDefault, accessCountMax] = await Promise.all([
       this.configCacheService.get('FILE_ACCESS_COUNT_DEFAULT', '-1'),
       this.configCacheService.get('FILE_ACCESS_COUNT_MAX', '-1'),
     ]);
-    this.maxFileSize = parseFileSize(maxFileSize);
-    this.fileTypeMode = (fileTypeMode === 'whitelist' ? 'whitelist' : 'blacklist');
-    this.fileTypeFilter = fileTypeFilter
-      ? fileTypeFilter.split(',').map(s => s.trim().toLowerCase()).filter(Boolean)
-      : [];
     this.accessCountDefault = parseAccessCount(accessCountDefault);
     this.accessCountMax = parseAccessCount(accessCountMax);
   }
@@ -305,173 +322,34 @@ export class FileService implements OnModuleInit {
     }
   }
 
+  // ---------- 上传配置与类型/大小校验（M6 拆分：实现见 FileUploadConfigService） ----------
+
   async getMaxFileSize(): Promise<number> {
-    return this.maxFileSize;
+    return this.uploadConfig.getMaxFileSize();
   }
 
   async getFileTypeConfig(): Promise<{
     fileTypeMode: 'blacklist' | 'whitelist';
     fileTypeFilter: string[];
   }> {
-    return {
-      fileTypeMode: this.fileTypeMode,
-      fileTypeFilter: [...this.fileTypeFilter],
-    };
-  }
-
-  /**
-   * 从 Multer 文件对象中提取前 maxBytes 字节用于 magic bytes 检测。
-   * 同时支持内存存储 (buffer) 和磁盘存储 (path) 模式。
-   */
-  private getFileSample(
-    file: Express.Multer.File,
-    maxBytes: number = 4100,
-  ): Buffer {
-    if (file.buffer && file.buffer.length > 0) {
-      const end = Math.min(file.buffer.length, maxBytes);
-      return file.buffer.subarray(0, end);
-    }
-
-    if (file.path && fs.existsSync(file.path)) {
-      let fd: number | undefined;
-      try {
-        fd = fs.openSync(file.path, 'r');
-        const buffer = Buffer.alloc(maxBytes);
-        const bytesRead = fs.readSync(fd, buffer, 0, maxBytes, 0);
-        return bytesRead === 0 ? Buffer.alloc(0) : buffer.subarray(0, bytesRead);
-      } finally {
-        if (fd !== undefined) {
-          fs.closeSync(fd);
-        }
-      }
-    }
-
-    return Buffer.alloc(0);
+    return this.uploadConfig.getFileTypeConfig();
   }
 
   /**
    * 从文件路径读取前 maxBytes 字节（供分片上传合并后使用）
    */
-  getFileSampleFromPath(
-    filePath: string,
-    maxBytes: number = 4100,
-  ): Buffer {
-    let fd: number | undefined;
-    try {
-      fd = fs.openSync(filePath, 'r');
-      const buffer = Buffer.alloc(maxBytes);
-      const bytesRead = fs.readSync(fd, buffer, 0, maxBytes, 0);
-      return bytesRead === 0 ? Buffer.alloc(0) : buffer.subarray(0, bytesRead);
-    } finally {
-      if (fd !== undefined) {
-        fs.closeSync(fd);
-      }
-    }
+  getFileSampleFromPath(filePath: string, maxBytes?: number): Buffer {
+    return this.uploadConfig.getFileSampleFromPath(filePath, maxBytes);
   }
 
   /**
    * 检查文件类型是否被允许（含 magic bytes 检测）
-   *
-   * - 有 buffer → 使用 fileTypeFromBuffer() 检测 magic bytes
-   *   - 检测到类型 → 使用检测结果进行过滤
-   *   - 未检测到 → 白名单直接拒绝，黑名单回退到文件名后缀匹配
-   * - 无 buffer → 回退到后缀规则（向后兼容）
    */
   async isFileTypeAllowed(
     filename: string,
     buffer?: Buffer,
   ): Promise<{ allowed: boolean; reason?: string }> {
-    // === 阶段 1: Magic bytes 检测 ===
-    let detectedExt: string | null = null;
-
-    if (buffer && buffer.length > 0) {
-      const lowerName = filename.toLowerCase();
-      const hasZipSignature = buffer.length >= 4
-        && buffer[0] === 0x50
-        && buffer[1] === 0x4b
-        && (
-          (buffer[2] === 0x03 && buffer[3] === 0x04)
-          || (buffer[2] === 0x05 && buffer[3] === 0x06)
-          || (buffer[2] === 0x07 && buffer[3] === 0x08)
-        );
-
-      // file-type 会深入遍历 ZIP entry。对仅含文件前缀的样本，首个 entry
-      // 超出样本边界时会抛 EndOfStreamError；ZIP 文件只需验证容器签名即可。
-      if (lowerName.endsWith('.zip') && hasZipSignature) {
-        detectedExt = 'zip';
-      } else {
-        try {
-          const result = await fileTypeFromBuffer(buffer);
-          if (result) {
-            detectedExt = result.ext;
-          }
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          this.logger.warn(`文件类型解析失败，按未识别类型处理: ${filename} (${message})`);
-        }
-      }
-    }
-
-    // === 阶段 2: 确定用于过滤的扩展名 ===
-    let effectiveExt: string;
-
-    if (detectedExt) {
-      const dotExt = `.${detectedExt}`;
-      let matchedCompound: string | null = null;
-      for (const ce of COMPOUND_EXTENSIONS) {
-        if (filename.toLowerCase().endsWith(ce) && ce.endsWith(dotExt)) {
-          matchedCompound = ce;
-          break;
-        }
-      }
-      effectiveExt = matchedCompound || dotExt;
-    } else if (this.fileTypeMode === 'whitelist') {
-      return {
-        allowed: false,
-        reason: '无法识别文件类型，白名单模式下仅允许可明确识别的文件类型',
-      };
-    } else {
-      // 黑名单模式：回退到文件名后缀匹配
-      const lowerName = filename.toLowerCase();
-      let ext = '(无扩展名)';
-      for (const ce of COMPOUND_EXTENSIONS) {
-        if (lowerName.endsWith(ce)) {
-          ext = ce;
-          break;
-        }
-      }
-      if (ext === '(无扩展名)') {
-        const lastDot = lowerName.lastIndexOf('.');
-        ext = lastDot > 0 ? '.' + lowerName.slice(lastDot + 1) : '(无扩展名)';
-      }
-      effectiveExt = ext;
-    }
-
-    // === 阶段 3: 特殊规则 ===
-    if (this.fileTypeMode === 'blacklist' && this.fileTypeFilter.length === 0) {
-      return { allowed: true };
-    }
-    if (this.fileTypeMode === 'whitelist' && this.fileTypeFilter.length === 0) {
-      return {
-        allowed: false,
-        reason: `文件类型 ${effectiveExt} 被拒绝：白名单模式未配置允许类型`,
-      };
-    }
-
-    // === 阶段 4: 过滤器匹配 ===
-    const matched = this.fileTypeFilter.includes(effectiveExt);
-
-    if (this.fileTypeMode === 'blacklist') {
-      if (matched) {
-        return { allowed: false, reason: `文件类型 ${effectiveExt} 被拒绝：该类型在禁止列表中` };
-      }
-    } else {
-      if (!matched) {
-        return { allowed: false, reason: `文件类型 ${effectiveExt} 被拒绝：该类型不在允许列表中` };
-      }
-    }
-
-    return { allowed: true };
+    return this.uploadConfig.isFileTypeAllowed(filename, buffer);
   }
 
   /**
@@ -500,8 +378,8 @@ export class FileService implements OnModuleInit {
     overwriteFileId?: string,
     options?: { deferCachePrewarm?: boolean },
   ): Promise<File> {
-    if (file.size > this.maxFileSize) {
-      throw new BadRequestException(`文件大小不能超过 ${this.maxFileSize / 1024 / 1024}MB`);
+    if (file.size > this.uploadConfig.maxFileSizeBytes) {
+      throw new BadRequestException(`文件大小不能超过 ${this.uploadConfig.maxFileSizeBytes / 1024 / 1024}MB`);
     }
 
     const fileName = fixFilenameEncoding(originalName);
@@ -509,8 +387,8 @@ export class FileService implements OnModuleInit {
     await this.assertUploadFolder(folderId, user.id);
 
     if (!skipTypeCheck) {
-      const fileSample = this.getFileSample(file);
-      const typeCheck = await this.isFileTypeAllowed(fileName, fileSample);
+      const fileSample = this.uploadConfig.getFileSample(file);
+      const typeCheck = await this.uploadConfig.isFileTypeAllowed(fileName, fileSample);
       if (!typeCheck.allowed) {
         throw new BadRequestException(typeCheck.reason || '不允许上传此类型的文件');
       }
@@ -723,14 +601,14 @@ export class FileService implements OnModuleInit {
   }
 
   async upload(file: Express.Multer.File, user: User, tagIds?: string[]): Promise<File> {
-    if (file.size > this.maxFileSize) {
-      throw new BadRequestException(`文件大小不能超过 ${this.maxFileSize / 1024 / 1024}MB`);
+    if (file.size > this.uploadConfig.maxFileSizeBytes) {
+      throw new BadRequestException(`文件大小不能超过 ${this.uploadConfig.maxFileSizeBytes / 1024 / 1024}MB`);
     }
 
     const originalName = fixFilenameEncoding(file.originalname);
 
-    const fileSample = await this.getFileSample(file);
-    const typeCheck = await this.isFileTypeAllowed(originalName, fileSample);
+    const fileSample = await this.uploadConfig.getFileSample(file);
+    const typeCheck = await this.uploadConfig.isFileTypeAllowed(originalName, fileSample);
 
     if (!typeCheck.allowed) {
       throw new BadRequestException(typeCheck.reason || '不允许上传此类型的文件');
@@ -806,16 +684,16 @@ export class FileService implements OnModuleInit {
     const passPreCheck: Express.Multer.File[] = [];
 
     for (const file of files) {
-      if (file.size > this.maxFileSize) {
+      if (file.size > this.uploadConfig.maxFileSizeBytes) {
         preCheckFailed.push({
           name: file.originalname,
-          reason: `文件大小超过 ${this.maxFileSize / 1024 / 1024}MB 限制`,
+          reason: `文件大小超过 ${this.uploadConfig.maxFileSizeBytes / 1024 / 1024}MB 限制`,
         });
         continue;
       }
       const originalName = fixFilenameEncoding(file.originalname);
-      const fileSample = this.getFileSample(file);
-      const typeCheck = await this.isFileTypeAllowed(originalName, fileSample);
+      const fileSample = this.uploadConfig.getFileSample(file);
+      const typeCheck = await this.uploadConfig.isFileTypeAllowed(originalName, fileSample);
       if (!typeCheck.allowed) {
         preCheckFailed.push({
           name: file.originalname,
@@ -1056,9 +934,8 @@ export class FileService implements OnModuleInit {
    * API Key 认证请求一律视为普通用户（owner-only），即使关联账号是管理员。
    */
   private async assertFileReadable(file: File, user: User): Promise<void> {
-    if (file.uploaderId !== user.id && !hasAdminPrivileges(user)) {
-      throw new ForbiddenException('无权访问此文件');
-    }
+    // M6 拆分：判定实现上移到 common/utils/file-permissions（与访问控制服务共用）
+    return assertFileReadable(file, user);
   }
 
   /**
@@ -1068,9 +945,8 @@ export class FileService implements OnModuleInit {
    * @throws ForbiddenException 如果无权修改
    */
   private assertFileWritable(file: File, user: User): void {
-    if (file.uploaderId !== user.id && !hasAdminPrivileges(user)) {
-      throw new ForbiddenException('无权修改此文件');
-    }
+    // M6 拆分：判定实现上移到 common/utils/file-permissions（与访问控制服务共用）
+    assertFileWritable(file, user);
   }
 
   async findOne(id: string, user: User): Promise<File> {
@@ -1457,226 +1333,48 @@ export class FileService implements OnModuleInit {
     return deletedCount;
   }
 
+  // ---------- 访问策略变更（M6 拆分：实现见 FileAccessControlService） ----------
+
   async updateAccessType(id: string, accessType: FileAccessType, user: User): Promise<void> {
-    const file = await this.fileRepository.findOne({
-      where: { id, isDeleted: false },
-    });
-
-    if (!file) {
-      throw new NotFoundException('文件不存在');
-    }
-
-    this.assertFileWritable(file, user);
-
-    // 访问类型变更与「遗留型公开分享」撤销必须在同一事务内完成：
-    // 历史缺陷是先更新文件再撤销分享，撤销失败（varchar=uuid 解析错误）会留下
-    // 「文件已 private 但 legacy 直链仍可访问」的中间状态。
-    let revokedLegacyShares = 0;
-    await this.fileRepository.manager.transaction(async (manager) => {
-      await manager.getRepository(File).update(id, { accessType });
-
-      if (accessType === FileAccessType.PRIVATE) {
-        // 纵深防御：文件转私有后，软删「遗留型」公开分享链接，
-        // 防止攻击者用已知文件 ID 通过 /api/s/<fileId>/download/<fileId> 继续下载已转私有的文件。
-        // 显式创建的随机 token 分享不受影响。
-        //
-        // 注意：legacy token 就是文件 ID 本身（36 字符 UUID 字符串）。
-        // 禁止写 "token" = "targetId" —— token 是 varchar(64)、targetId 是 uuid，
-        // PostgreSQL 解析期即报 operator does not exist: character varying = uuid。
-        // 改为将已知文件 ID 作为参数与 token（varchar）比较，类型安全且跨库一致。
-        const revokeResult = await manager
-          .getRepository(ShareLink)
-          .createQueryBuilder()
-          .update(ShareLink)
-          .set({ isDeleted: true })
-          .where('"targetType" = :targetType', { targetType: ShareTargetType.FILE })
-          .andWhere('"targetId" = :id', { id })
-          .andWhere('"token" = :legacyToken', { legacyToken: id })
-          .andWhere('"isDeleted" = false')
-          .execute();
-        revokedLegacyShares = revokeResult.affected ?? 0;
-      }
-    });
-
-    // 审计日志：文件访问类型变更
-    this.auditService.log({
-      action: 'file_access_change',
-      userId: user.id,
-      resourceType: 'file',
-      resourceId: id,
-      metadata: { accessType, ...(revokedLegacyShares > 0 ? { revokedLegacyShares } : {}) },
-    });
+    return this.accessControl.updateAccessType(id, accessType, user);
   }
 
   async updateAccessCount(id: string, maxAccessCount: number, user: User): Promise<void> {
-    const file = await this.fileRepository.findOne({
-      where: { id, isDeleted: false },
-    });
-
-    if (!file) {
-      throw new NotFoundException('文件不存在');
-    }
-
-    this.assertFileWritable(file, user);
-
-    if (this.accessCountMax > 0 && (maxAccessCount < 1 || maxAccessCount > this.accessCountMax)) {
-      throw new BadRequestException(`访问次数必须为 1 到 ${this.accessCountMax} 之间`);
-    }
-
-    await this.fileRepository.update(id, { maxAccessCount });
-
-    // 审计日志：访问次数限制变更
-    this.auditService.log({
-      action: 'file_access_change',
-      userId: user.id,
-      resourceType: 'file',
-      resourceId: id,
-      metadata: { maxAccessCount },
-    });
+    // 次数上限来自本服务的配置热更新（FILE_ACCESS_COUNT_MAX），显式传入以保持单一来源
+    return this.accessControl.updateAccessCount(id, maxAccessCount, user, this.accessCountMax);
   }
 
   async setPassword(id: string, password: string, user: User): Promise<void> {
-    const file = await this.fileRepository.findOne({
-      where: { id, isDeleted: false },
-    });
-
-    if (!file) {
-      throw new NotFoundException('文件不存在');
-    }
-
-    this.assertFileWritable(file, user);
-
-    const hashedPassword = password ? await bcrypt.hash(password, BCRYPT_ROUNDS) : null;
-    await this.fileRepository.update(id, { password: hashedPassword });
-
-    // 审计日志：文件密码设置/移除
-    this.auditService.log({
-      action: password ? 'file_password_set' : 'file_password_remove',
-      userId: user.id,
-      resourceType: 'file',
-      resourceId: id,
-    });
+    return this.accessControl.setPassword(id, password, user);
   }
 
   async updateExpires(id: string, expiresIn: number | null, user: User): Promise<void> {
-    const file = await this.fileRepository.findOne({
-      where: { id, isDeleted: false },
-    });
-
-    if (!file) {
-      throw new NotFoundException('文件不存在');
-    }
-
-    this.assertFileWritable(file, user);
-
-    await this.fileRepository.update(id, { expiresIn, expiresStartAt: expiresIn !== null ? new Date() : null });
-
-    // 审计日志：文件有效期设置
-    this.auditService.log({
-      action: 'file_expiry_set',
-      userId: user.id,
-      resourceType: 'file',
-      resourceId: id,
-      metadata: { expiresIn },
-    });
+    return this.accessControl.updateExpires(id, expiresIn, user);
   }
 
+  // ---------- 访问校验与防爆破（M6 拆分：实现见 FileAccessControlService） ----------
+
   async verifyPassword(id: string, password: string): Promise<boolean> {
-    const file = await this.fileRepository.findOne({
-      where: { id, isDeleted: false },
-    });
-
-    if (!file || !file.password) {
-      return true;
-    }
-
-    return bcrypt.compare(password, file.password);
+    return this.accessControl.verifyPassword(id, password);
   }
 
   /**
    * 检查文件访问约束并递增计数器，返回是否允许访问
    */
   async checkAndIncrementAccess(id: string): Promise<{ allowed: boolean; reason?: string }> {
-    const file = await this.fileRepository.findOne({
-      where: { id, isDeleted: false },
-      select: ['maxAccessCount', 'currentAccessCount', 'expiresIn', 'expiresStartAt'],
-    });
-
-    if (!file) return { allowed: false, reason: '文件不存在' };
-
-    // 检查时效限制（用设置时间 expiresStartAt 计算过期）
-    if (file.expiresIn !== null && file.expiresIn !== undefined && file.expiresStartAt) {
-      const expiresAt = new Date(file.expiresStartAt.getTime() + file.expiresIn * 3600 * 1000);
-      if (new Date() > expiresAt) {
-        return { allowed: false, reason: '文件分享已过期' };
-      }
-    }
-
-    // 检查访问次数（原子 UPDATE，防止并发超发）
-    if (file.maxAccessCount > 0) {
-      const result = await this.fileRepository
-        .createQueryBuilder()
-        .update(File)
-        .set({ currentAccessCount: () => '"currentAccessCount" + 1' })
-        .where('id = :id', { id })
-        .andWhere('"currentAccessCount" < "maxAccessCount"')
-        .andWhere('"isDeleted" = false')
-        .execute();
-
-      if (result.affected === 0) {
-        return { allowed: false, reason: '文件访问次数已用尽' };
-      }
-    }
-
-    return { allowed: true };
+    return this.accessControl.checkAndIncrementAccess(id);
   }
 
   async hasPassword(id: string): Promise<boolean> {
-    const file = await this.fileRepository.findOne({
-      where: { id, isDeleted: false },
-      select: ['password'],
-    });
-    return !!(file && file.password);
+    return this.accessControl.hasPassword(id);
   }
 
   async isPrivateFile(id: string): Promise<boolean> {
-    const file = await this.fileRepository.findOne({
-      where: { id, isDeleted: false },
-      select: ['accessType'],
-    });
-    return !!(file && file.accessType === FileAccessType.PRIVATE);
+    return this.accessControl.isPrivateFile(id);
   }
 
-  /** 从安全配置动态读取密码错误限流阈值（热更新） */
-  private async getPwdErrorLimit(): Promise<number> { return Number(await this.configCacheService.get('sec_pwd_error_limit', '5')) || 5; }
-  private async getPwdBanDuration(): Promise<number> { return (Number(await this.configCacheService.get('sec_pwd_ban_duration', '5')) || 5) * 60 * 1000; }
-
-  private readonly BAN_6H = 6 * 3600 * 1000; // 第5次封禁升级为6小时
-  private readonly BAN_COUNT_LIMIT = 5;     // 1小时内被封禁5次触发升级
-  private readonly BAN_WINDOW = 3600 * 1000; // 1小时窗口
-  private readonly PWD_WINDOW = 3600 * 1000; // 密码错误窗口
-
   async isIPBanned(ip: string): Promise<{ banned: boolean; message?: string }> {
-    const now = new Date();
-    const ban = await this.bannedIPRepository
-      .createQueryBuilder('bannedIP')
-      .where('bannedIP.ip = :ip', { ip })
-      .andWhere(
-        '(bannedIP.isPermanent = true OR (bannedIP.isPermanent = false AND bannedIP.expiresAt > :now))',
-        { now },
-      )
-      .getOne();
-
-    if (ban) {
-      const remaining = ban.isPermanent
-        ? '永久'
-        : Math.ceil((ban.expiresAt!.getTime() - now.getTime()) / 60000) + '分钟';
-      return {
-        banned: true,
-        message: `该IP因多次密码错误已被封禁，剩余 ${remaining}`,
-      };
-    }
-    return { banned: false };
+    return this.accessControl.isIPBanned(ip);
   }
 
   /**
@@ -1685,51 +1383,7 @@ export class FileService implements OnModuleInit {
    * 1小时内被封禁5次 → 升级为封禁6小时
    */
   async recordFailedPasswordAttempt(ip: string): Promise<void> {
-    const pwdLimitKey = `pwd:${ip}`;
-    const banLimitKey = `ban:${ip}`;
-    const pwdErrorLimit = await this.getPwdErrorLimit();
-    const pwdBanDuration = await this.getPwdBanDuration();
-
-    // 密码错误计数（仅计数，不锁定——达到阈值后才触发封禁）
-    const pwdResult = await this.rateLimitService.incrementCounter(
-      pwdLimitKey, 'password_error', pwdErrorLimit, this.PWD_WINDOW,
-    );
-
-    // 未达到阈值，仅记录
-    if (!pwdResult.thresholdReached) {
-      return;
-    }
-
-    // 达到阈值，原子递增 1 小时内封禁触发次数
-    const banResult = await this.rateLimitService.incrementCounter(
-      banLimitKey, 'ban_count', this.BAN_COUNT_LIMIT, this.BAN_WINDOW,
-    );
-
-    const now = Date.now();
-    const currentBanCount = banResult.count;
-
-    // T3-5: 使用 UPSERT 原子化封禁记录的创建/更新，消除 findOne→save 的 TOCTOU 窗口
-    if (currentBanCount >= this.BAN_COUNT_LIMIT) {
-      // 连续封禁 → 升级为6小时
-      const expiresAt = new Date(now + this.BAN_6H);
-      const reason = `密码错误${pwdErrorLimit}次，1小时内第${currentBanCount}次触发封禁，升级为6小时`;
-      await this.bannedIPRepository.upsert(
-        { ip, reason, isPermanent: false, expiresAt } as BannedIP,
-        ['ip'],
-      );
-      await this.rateLimitService.reset(banLimitKey);
-    } else {
-      // 首次封禁 → 动态时长
-      const expiresAt = new Date(now + pwdBanDuration);
-      const reason = `密码错误${pwdErrorLimit}次，1小时内第${currentBanCount}次触发封禁`;
-      await this.bannedIPRepository.upsert(
-        { ip, reason, isPermanent: false, expiresAt } as BannedIP,
-        ['ip'],
-      );
-    }
-
-    // 重置错误计数器
-    await this.rateLimitService.reset(pwdLimitKey);
+    return this.accessControl.recordFailedPasswordAttempt(ip);
   }
 
   /**
@@ -2763,16 +2417,16 @@ export class FileService implements OnModuleInit {
     folderId?: string | null,
     overwriteFileId?: string,
   ): Promise<{ jobId: string; warning: string }> {
-    if (file.size > this.maxFileSize) {
-      throw new BadRequestException(`文件大小不能超过 ${this.maxFileSize / 1024 / 1024}MB`);
+    if (file.size > this.uploadConfig.maxFileSizeBytes) {
+      throw new BadRequestException(`文件大小不能超过 ${this.uploadConfig.maxFileSizeBytes / 1024 / 1024}MB`);
     }
 
     const originalName = fixFilenameEncoding(file.originalname);
 
     await this.assertUploadFolder(folderId, user.id);
 
-    const fileSample = await this.getFileSample(file);
-    const typeCheck = await this.isFileTypeAllowed(originalName, fileSample);
+    const fileSample = await this.uploadConfig.getFileSample(file);
+    const typeCheck = await this.uploadConfig.isFileTypeAllowed(originalName, fileSample);
     if (!typeCheck.allowed) {
       throw new BadRequestException(typeCheck.reason || '不允许上传此类型的文件');
     }
@@ -2817,27 +2471,26 @@ export class FileService implements OnModuleInit {
 
       for (let i = 0; i < files.length; i++) {
         const file = files[i];
+        const originalName = fixFilenameEncoding(file.originalname);
         try {
           // 每个文件上传前检查是否已被放弃
           if (abortController.signal.aborted) {
             throw new Error('任务已被放弃（客户端连接断开）');
           }
-          const originalName = fixFilenameEncoding(file.originalname);
-          const fileSample = this.getFileSample(file);
-          const typeCheck = await this.isFileTypeAllowed(originalName, fileSample);
+          const fileSample = this.uploadConfig.getFileSample(file);
+          const typeCheck = await this.uploadConfig.isFileTypeAllowed(originalName, fileSample);
           if (!typeCheck.allowed) {
-            failed.push({ name: originalName, reason: typeCheck.reason || '不允许上传此类型的文件' });
+            failed.push({ name: originalName, reason: typeCheck.reason || '不允许上传此类型的文件', retryable: false });
             continue;
           }
-          if (file.size > this.maxFileSize) {
-            failed.push({ name: originalName, reason: `文件大小超过 ${this.maxFileSize / 1024 / 1024}MB` });
+          if (file.size > this.uploadConfig.maxFileSizeBytes) {
+            failed.push({ name: originalName, reason: `文件大小超过 ${this.uploadConfig.maxFileSizeBytes / 1024 / 1024}MB`, retryable: false });
             continue;
           }
-          const uploadedFile = await this.uploadToTelegram(file, user, originalName, abortController.signal);
-          // 上传完成后关联标签（参数化查询）
-          if (tagIds && tagIds.length > 0) {
-            await this.insertFileTags(this.fileRepository.manager, uploadedFile.id, tagIds);
-          }
+          // M2/N1：tagIds 与文件行写入同事务，标签失败即整体回滚，不再产生幽灵失败。
+          const uploadedFile = await this.uploadToTelegram(
+            file, user, originalName, abortController.signal, null, undefined, tagIds,
+          );
           success.push(uploadedFile);
         } catch (error: unknown) {
           // 任务被放弃时直接退出循环
@@ -2846,8 +2499,9 @@ export class FileService implements OnModuleInit {
             break;
           }
           failed.push({
-            name: file.originalname,
+            name: originalName,
             reason: error instanceof Error ? error.message : '上传失败',
+            retryable: isRetryableUploadFailure(error),
           });
         }
         this.uploadJobService.updateJob(job.jobId, {
@@ -2898,12 +2552,10 @@ export class FileService implements OnModuleInit {
         throw new Error('任务已被放弃');
       }
 
-      const savedFile = await this.uploadToTelegram(file, user, originalName, abortSignal, folderId, overwriteFileId);
-
-      // 上传完成后关联标签（参数化查询）
-      if (tagIds && tagIds.length > 0) {
-        await this.insertFileTags(this.fileRepository.manager, savedFile.id, tagIds);
-      }
+      // M2/N1：tagIds 直接传入 uploadToTelegram，与文件行写入同事务，杜绝幽灵失败。
+      const savedFile = await this.uploadToTelegram(
+        file, user, originalName, abortSignal, folderId, overwriteFileId, tagIds,
+      );
 
       // 完成前再次检查，避免连接断开后仍写入成功结果
       if (abortSignal?.aborted) {
@@ -2941,6 +2593,7 @@ export class FileService implements OnModuleInit {
     abortSignal?: AbortSignal,
     folderId?: string | null,
     overwriteFileId?: string,
+    tagIds?: string[],
   ): Promise<File> {
     // GIF 文件加 .bin 后缀防止 Telegram 转码为 MP4
     const uploadName = file.mimetype === 'image/gif' ? originalName + '.bin' : originalName;
@@ -2993,6 +2646,12 @@ export class FileService implements OnModuleInit {
     const savedFile = await this.fileRepository.manager.transaction(async (manager) => {
       // N1：异步（分片合并后）上传路径同样必须占用统一命名空间名称。
       const created = await manager.getRepository(File).save(newFile);
+      // M2/N1：标签写入必须与文件行写入处于同一事务。此前标签在事务外补写，
+      // 一旦失败会在文件已落库后抛出普通「上传失败」，形成「前端失败但文件真实存在」
+      // 的幽灵失败（用户重复上传产生重复文件）。
+      if (tagIds && tagIds.length > 0) {
+        await this.insertFileTags(manager, created.id, tagIds);
+      }
       await this.namespaceService.acquire(manager, {
         ownerId: user.id,
         folderId: newFile.folderId ?? null,
@@ -3002,6 +2661,12 @@ export class FileService implements OnModuleInit {
       });
       return created;
     }).catch((error: unknown) => {
+      // 补偿策略：Telegram 上传无法参与数据库事务，DB 事务失败即产生一个无 DB 引用的
+      // 孤儿远端文件。记录 file_id 供运维清理；用户侧返回失败且库中无记录，可安全重试。
+      this.logger.warn(
+        `[上传补偿] 数据库事务失败，Telegram 已上传文件成为孤儿（file_id=${telegramFile.file_id}，name=${originalName}）：` +
+          `${error instanceof Error ? error.message : String(error)}`,
+      );
       if (isDatabaseUniqueViolation(error)) {
         throw new ConflictException('当前目录已存在同名文件或文件夹');
       }

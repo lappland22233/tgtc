@@ -70,13 +70,16 @@ jobs:
       - name: Build, sign and validate ZIP release package
         env:
           RELEASE_SIGNING_KEY_PATH: ${{ runner.temp }}/release-signing-key.pem
-          # 清单标志必须显式声明（generate-manifest.sh 对缺失即失败）。
-          # 每次发布前按本版本实际内容复核：本版本含数据库迁移（含不可逆回填）→ 不保证程序回退安全。
-          RELEASE_INCLUDES_DB_MIGRATION: 'true'
-          RELEASE_ROLLBACK_SAFE: 'false'
         shell: bash
         run: |
           set -Eeuo pipefail
+          # 清单标志的唯一事实来源（与 quality-gates.yml 共用同一文件）。
+          # 发布前必须按本版本实际内容复核该文件中的两个标志。
+          set -a
+          . scripts/release/release-flags.env
+          set +a
+          # 正式发布使用仓库内置公钥验签（update-public-key.pem）；
+          # 此处刻意不设置 RELEASE_VERIFY_PUBLIC_KEY，以保证 tag 路径信任根不可替换。
           bash scripts/build-linux-x64-release.sh
           version="$(tr -d '\r\n' < VERSION)"
           release_dir=".Releases/v${version}"

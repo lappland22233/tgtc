@@ -50,12 +50,12 @@ interface ChunkSession {
   mergePromise?: Promise<void>;
 }
 
-/** G3-04：简单信号量，控制合并并发上限 */
+/** G3-04：简单信号量，控制合并并发上限；M3：暴露 busy 供引用计数式回收判断。 */
 class MergeSemaphore {
   private count: number;
   private waiters: Array<() => void> = [];
 
-  constructor(max: number) {
+  constructor(private readonly max: number) {
     this.count = max;
   }
 
@@ -71,6 +71,11 @@ class MergeSemaphore {
     const next = this.waiters.shift();
     if (next) next();
     else this.count++;
+  }
+
+  /** 仍有持有者或等待者时为 true；仅当完全空闲才允许从 Map 回收。 */
+  get busy(): boolean {
+    return this.count < this.max || this.waiters.length > 0;
   }
 }
 
@@ -92,15 +97,57 @@ export class ChunkUploadService implements OnModuleInit {
   /** G3-04：合并并发信号量（全局 3 + 每用户 1），防止多账号并发大文件合并 OOM */
   private readonly mergeSemaphoreGlobal = new MergeSemaphore(3);
   private readonly mergeSemaphorePerUser = new Map<string, MergeSemaphore>();
+  /**
+   * M3：每用户信号量的引用计数（get 时 +1，调用方 finally 时 -1）。
+   * 仅当计数归零且信号量完全空闲（无持有者/等待者）才从 Map 回收，
+   * 避免出现「等待者持有旧实例、新请求拿到新实例」导致的每用户并发上限失效。
+   */
+  private readonly mergeSemaphoreRefs = new Map<string, number>();
+  /** M3：信号量回收次数（可观测性，便于生产验证内存不再单调增长）。 */
+  private mergeSemaphoreRecycled = 0;
 
-  /** 获取/创建用户级合并信号量 */
+  /** 获取/创建用户级合并信号量（必须与 releaseUserMergeSemaphore 配对调用）。 */
   private getUserMergeSemaphore(userId: string): MergeSemaphore {
     let sem = this.mergeSemaphorePerUser.get(userId);
     if (!sem) {
       sem = new MergeSemaphore(1);
       this.mergeSemaphorePerUser.set(userId, sem);
     }
+    this.mergeSemaphoreRefs.set(userId, (this.mergeSemaphoreRefs.get(userId) ?? 0) + 1);
     return sem;
+  }
+
+  /** M3：释放引用；引用归零且信号量空闲时回收 Map 条目，防止长期运行内存单调增长。 */
+  private releaseUserMergeSemaphore(userId: string): void {
+    const remaining = (this.mergeSemaphoreRefs.get(userId) ?? 1) - 1;
+    if (remaining > 0) {
+      this.mergeSemaphoreRefs.set(userId, remaining);
+      return;
+    }
+    this.mergeSemaphoreRefs.delete(userId);
+    const sem = this.mergeSemaphorePerUser.get(userId);
+    if (sem && !sem.busy) {
+      this.mergeSemaphorePerUser.delete(userId);
+      this.mergeSemaphoreRecycled++;
+      this.logger.debug(
+        `[分片上传] 回收用户合并信号量：user=${userId}，当前在册 ${this.mergeSemaphorePerUser.size}，累计回收 ${this.mergeSemaphoreRecycled}`,
+      );
+    }
+  }
+
+  /** M3：合并信号量可观测性快照（供健康检查/日志/测试断言）。 */
+  getMergeSemaphoreStats(): {
+    activeUsers: number;
+    trackedRefs: number;
+    recycled: number;
+    globalBusy: boolean;
+  } {
+    return {
+      activeUsers: this.mergeSemaphorePerUser.size,
+      trackedRefs: this.mergeSemaphoreRefs.size,
+      recycled: this.mergeSemaphoreRecycled,
+      globalBusy: this.mergeSemaphoreGlobal.busy,
+    };
   }
 
   /** 每用户最大并发会话数 */
@@ -476,9 +523,13 @@ export class ChunkUploadService implements OnModuleInit {
     uploadId: string,
   ): Promise<void> {
     const userSem = this.getUserMergeSemaphore(session.uploadedBy);
-    await this.mergeSemaphoreGlobal.acquire();
-    await userSem.acquire();
+    let globalAcquired = false;
+    let userAcquired = false;
     try {
+      await this.mergeSemaphoreGlobal.acquire();
+      globalAcquired = true;
+      await userSem.acquire();
+      userAcquired = true;
       const controller = session.mergeAbortController!;
       const result = await this.withDeadline(
         this.doMerge(session, uploadFn, controller.signal),
@@ -496,8 +547,11 @@ export class ChunkUploadService implements OnModuleInit {
       this.logger.error(`[分片上传] ${uploadId} 合并失败: ${(err as Error).message}`);
       this.scheduleCleanup(uploadId);
     } finally {
-      userSem.release();
-      this.mergeSemaphoreGlobal.release();
+      // M3：仅在确实获取成功时释放，避免异常路径下多释放导致并发上限被放大。
+      if (userAcquired) userSem.release();
+      if (globalAcquired) this.mergeSemaphoreGlobal.release();
+      // 引用计数归零且空闲时回收 Map 条目（异常/取消/超时路径同样走到这里）。
+      this.releaseUserMergeSemaphore(session.uploadedBy);
       session.mergeAbortController = undefined;
       session.mergePromise = undefined;
     }

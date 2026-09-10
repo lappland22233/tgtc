@@ -12,6 +12,9 @@ CURRENT=$(readlink -f "$CURRENT_LINK"); [[ -d "$CURRENT" ]] || die "$EXIT_PRECHE
 if [[ $# -eq 1 ]]; then valid_version "$1" || die "$EXIT_USAGE" '版本必须为有效 SemVer。'; TARGET="$INSTALL_ROOT/releases/$1"; else mapfile -t releases < <(find "$INSTALL_ROOT/releases" -mindepth 1 -maxdepth 1 -type d -name '.*' -prune -o -type d -printf '%f\n' | sort -Vr); TARGET=''; for version in "${releases[@]}"; do [[ "$INSTALL_ROOT/releases/$version" != "$CURRENT" ]] && { TARGET="$INSTALL_ROOT/releases/$version"; break; }; done; fi
 [[ -n "$TARGET" && -d "$TARGET" ]] || die "$EXIT_PRECHECK" '没有可用回退版本。'
 assert_no_protected_payload "$TARGET"; VERSION=$(read_version "$TARGET/VERSION")
+# M4：消费发布清单的程序回退安全标志。current（待回退版本）声明不可安全回退、
+# 或清单缺失时，拒绝「只切回代码而把数据库留在新 schema」的伪安全回退。
+require_rollback_safe "$CURRENT" "$TARGET" "$(read_version "$CURRENT/VERSION")"
 ln -s "$TARGET" "$INSTALL_ROOT/.current.rollback"; mv -Tf "$INSTALL_ROOT/.current.rollback" "$CURRENT_LINK"
 # 与 upgrade.sh 相同的就绪等待窗口：restart 返回不代表应用已可服务。
 wait_app_ready() {
@@ -30,3 +33,4 @@ if ! wait_app_ready || ! TGTC_EXPECTED_VERSION="$VERSION" "$TARGET/scripts/relea
 fi
 record_state "rollback ok version=$VERSION previous=$(read_version "$CURRENT/VERSION")"
 log "OK: 已原子回退至 $VERSION；未处理 Telegram 数据、数据库或 .env。"
+log "提示：Bot API 工作目录（--dir）与 file_id 强绑定，未被删除/重命名；数据库仍为回退前的状态，需人工确认是否与 $VERSION 匹配。"
