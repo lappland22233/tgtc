@@ -7,6 +7,8 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { getQueueToken } from '@nestjs/bull';
 import { FileService } from './file.service';
+import { FileAccessControlService } from './file-access-control.service';
+import { FileUploadConfigService } from './file-upload-config.service';
 import { File } from '../common/entities/file.entity';
 import { Folder } from '../common/entities/folder.entity';
 import { FileAccessLog } from '../common/entities/file-access-log.entity';
@@ -86,6 +88,10 @@ describe('FileService 上传标签事务（M2/N1）', () => {
     const moduleRef: TestingModule = await Test.createTestingModule({
       providers: [
         FileService,
+        // M6 拆分：上传配置 / 类型校验域（用真实实现，保证大小/类型校验行为不变）
+        FileUploadConfigService,
+        // M6 拆分：访问策略 / 密码 / 封禁域已下沉到 FileAccessControlService（本套件不涉及）
+        { provide: FileAccessControlService, useValue: {} },
         { provide: getRepositoryToken(File), useValue: fileRepo },
         { provide: getRepositoryToken(Folder), useValue: { findOne: jest.fn() } },
         { provide: ThumbnailService, useValue: { deleteThumbnailsForFileId: jest.fn().mockResolvedValue(undefined) } },

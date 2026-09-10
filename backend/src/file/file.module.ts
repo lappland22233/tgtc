@@ -6,6 +6,8 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { QUEUE_NAMES } from '../jobs/bull-queue.module';
 import { FileController } from './file.controller';
 import { FileService } from './file.service';
+import { FileAccessControlService } from './file-access-control.service';
+import { FileUploadConfigService } from './file-upload-config.service';
 import { File } from '../common/entities/file.entity';
 import { Folder } from '../common/entities/folder.entity';
 import { FileAccessLog } from '../common/entities/file-access-log.entity';
@@ -59,6 +61,10 @@ import { ApiKeyModule } from '../api-key/api-key.module';
   controllers: [FileController, ChunkUploadController],
   providers: [
     FileService,
+    // M6 拆分：访问策略 / 密码 / IP 封禁域
+    FileAccessControlService,
+    // M6 拆分：上传配置与类型/大小校验域
+    FileUploadConfigService,
     ThumbnailCryptoService,
     UploadJobService,
     UploadDiskBudgetService,

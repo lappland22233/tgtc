@@ -4,13 +4,17 @@ jest.mock('file-type', () => ({
   }),
 }), { virtual: true });
 
-import { FileService } from './file.service';
+import { FileUploadConfigService } from './file-upload-config.service';
 
-function createService(): FileService {
-  return Object.create(FileService.prototype) as FileService;
+/**
+ * M6 拆分：类型校验实现已从 FileService 下沉到 FileUploadConfigService，
+ * 断言与用例保持不变，仅把被测对象改为承载实现的类（行为契约不变）。
+ */
+function createService(): FileUploadConfigService {
+  return Object.create(FileUploadConfigService.prototype) as FileUploadConfigService;
 }
 
-describe('FileService file type validation', () => {
+describe('FileUploadConfigService file type validation', () => {
   it('accepts a ZIP prefix sample even when the first entry exceeds the sample', async () => {
     const service = createService();
     Object.assign(service, {
