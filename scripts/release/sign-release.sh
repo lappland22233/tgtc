@@ -14,7 +14,7 @@ KEY=${2:-${RELEASE_SIGNING_KEY_PATH:-}}
 [[ -n "$KEY" ]] || die "$EXIT_USAGE" '缺少签名私钥：传入私钥路径或设置 RELEASE_SIGNING_KEY_PATH。'
 [[ -f "$KEY" ]] || die "$EXIT_PRECHECK" "签名私钥不存在：$KEY"
 require_cmd openssl
-PUB="$RELEASE_ROOT/scripts/release/update-public-key.pem"
+PUB="$(resolve_verify_public_key)"
 [[ -f "$PUB" ]] || die "$EXIT_PRECHECK" "缺少内置验证公钥：$PUB"
 SUMS_DIR=$(cd "$(dirname "$SUMS")" && pwd -P)
 SUMS="$SUMS_DIR/$(basename "$SUMS")"

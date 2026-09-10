@@ -53,6 +53,27 @@ assert_no_protected_payload() {
 }
 api_get() { local endpoint=$1; require_cmd curl; curl --fail --silent --show-error --max-time "${TGTC_HTTP_TIMEOUT:-5}" "${TGTC_API_URL:-http://127.0.0.1:3000}/api/$endpoint"; }
 
+# ---- 验签公钥解析（默认仓库内置信任根，CI 演练可显式替换） ----
+# 默认信任根是仓库内 scripts/release/update-public-key.pem（私钥只存在于 CI secret）。
+# quality-gates 需要在 pull_request（含 fork PR，拿不到 secret）上完整演练
+# 「签名 → 长度断言 → 验签」链路，因此允许通过 RELEASE_VERIFY_PUBLIC_KEY 显式替换。
+# 硬约束：GITHUB_REF_TYPE=tag 时禁止覆盖 —— 正式发布只能使用仓库内置公钥，
+# 防止"临时信任根"被误用于真实发行。未设置该变量时行为与历史完全一致。
+resolve_verify_public_key() {
+  local default_key="$RELEASE_ROOT/scripts/release/update-public-key.pem"
+  local override="${RELEASE_VERIFY_PUBLIC_KEY:-}"
+  if [[ -z "$override" ]]; then
+    printf '%s' "$default_key"
+    return 0
+  fi
+  if [[ "${GITHUB_REF_TYPE:-}" == 'tag' ]]; then
+    die "$EXIT_PRECHECK" 'GITHUB_REF_TYPE=tag 时禁止用 RELEASE_VERIFY_PUBLIC_KEY 替换验签公钥；正式发布只能使用仓库内置公钥。'
+  fi
+  [[ -f "$override" ]] || die "$EXIT_PRECHECK" "RELEASE_VERIFY_PUBLIC_KEY 指定的公钥不存在：$override"
+  log "WARN: 已用 RELEASE_VERIFY_PUBLIC_KEY 替换验签公钥（仅限非 tag 的 CI/演练路径）：$override"
+  printf '%s' "$override"
+}
+
 # ---- M4：程序回退安全标志（fail-closed） ----
 # 读取发行目录内 release-manifest.json 的 programRollbackSafe。
 # 输出 true / false / unknown；清单缺失、为符号链接或字段非法一律返回 unknown。
