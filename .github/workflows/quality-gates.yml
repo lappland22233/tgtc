@@ -189,6 +189,14 @@ jobs:
           old_script_path='.codebuddy/'scripts
           ! grep -RIn --exclude-dir=.git --exclude-dir=.codebuddy --exclude='*.md' -- "$old_script_path" scripts .github README.md
 
+      - name: Run release script regression tests
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash -n scripts/release/tests/rollback-safe-flag.test.sh
+          shellcheck --severity=warning scripts/release/tests/rollback-safe-flag.test.sh
+          bash scripts/release/tests/rollback-safe-flag.test.sh
+
       - name: Enforce release payload state exclusions
         shell: bash
         run: |
@@ -196,6 +204,9 @@ jobs:
           ! grep -Eq 'mkdir -p .*telegram-bot-api/data|cp .*telegram-bot-api/data' scripts/build-linux-x64-release.sh
           grep -Fq 'assert_no_protected_payload' scripts/release/upgrade.sh
           grep -Fq 'assert_no_protected_payload' scripts/release/rollback.sh
+          # M4：回滚脚本必须消费发布清单的程序回退安全标志。
+          grep -Fq 'require_rollback_safe' scripts/release/rollback.sh
+          grep -Fq 'release_rollback_safe_flag' scripts/release/common.sh
           grep -Fq 'sha256sum' scripts/release/validate-release.sh
           grep -Fq 'zip --quiet' scripts/build-linux-x64-release.sh
           grep -Fq 'unzip -q' scripts/release/upgrade.sh

@@ -368,12 +368,29 @@ export const useFileStore = defineStore('files', () => {
     return res.data.data;
   }
 
+  /**
+   * M7：登出/切换账号时清理会话相关状态。
+   * 先中止在途列表请求，避免旧账号的迟到响应写回新账号的列表。
+   */
+  function reset() {
+    listAbortController?.abort();
+    listAbortController = null;
+    cursorAbortController?.abort();
+    cursorAbortController = null;
+    activeListRequests = 0;
+    files.value = [];
+    total.value = 0;
+    loading.value = false;
+    currentUserRole.value = 'user';
+  }
+
   return {
     files,
     total,
     loading,
     currentUserRole,
     setCurrentUserRole,
+    reset,
     fetchFiles,
     fetchFilesCursor,
     fetchFilesPage,

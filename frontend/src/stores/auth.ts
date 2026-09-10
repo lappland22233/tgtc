@@ -86,6 +86,8 @@ export const useAuthStore = defineStore('auth', () => {
         initialized.value = true;
         lastFetchFailedAt = 0;
         sessionEpoch++; // 使在途恢复响应过期
+        // M7：跨标签页登出同样清理业务缓存，避免其他标签页残留旧账号数据。
+        void resetSessionStores();
       }
     };
     return authChannel;
@@ -211,12 +213,36 @@ export const useAuthStore = defineStore('auth', () => {
     return fetchUserPromise;
   }
 
+  /**
+   * M7：登出/切换账号时清空所有会话相关的业务 store，避免旧账号缓存残留。
+   *
+   * - 先停止活跃副作用（上传队列、媒体播放与未完成请求）；
+   * - 再清空业务缓存（文件列表、文件夹树、标签、按用户拉取的上传规则）；
+   * - 动态 import 避免 store ↔ auth 的循环依赖（files/folders/tags 从本模块取 api 实例）；
+   * - allSettled：清理是尽力而为，绝不能因某个 store 抛错而让用户登不出去。
+   */
+  async function resetSessionStores(): Promise<void> {
+    await Promise.allSettled([
+      import('./upload').then((m) => m.useUploadStore().reset()),
+      import('./mediaPlayback').then((m) => m.useMediaPlaybackStore().reset()),
+    ]);
+    await Promise.allSettled([
+      import('./files').then((m) => m.useFileStore().reset()),
+      import('./folders').then((m) => m.useFolderStore().reset()),
+      import('./tags').then((m) => m.useTagStore().reset()),
+      import('./upload-config').then((m) => m.useUploadConfigStore().reset()),
+    ]);
+  }
+
   async function logout() {
     try {
       await api.post('/auth/logout');
     } catch {
       // 即使请求失败也清除本地状态
     }
+    // M7：先清理业务缓存与副作用，再清空 auth 自身状态（顺序不可颠倒，
+    // 否则清理过程中若有请求携带旧 Cookie 会与已清空的 user 状态不一致）。
+    await resetSessionStores();
     user.value = null;
     // 与跨标签页接收端语义保持一致：登出后标记初始化已完成（已确认为登出状态）
     initialized.value = true;

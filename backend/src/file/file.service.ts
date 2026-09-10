@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, ForbiddenException, BadRequestException, ConflictException, GoneException, OnModuleInit, Logger } from '@nestjs/common';
+import { Injectable, NotFoundException, ForbiddenException, BadRequestException, ConflictException, GoneException, HttpException, OnModuleInit, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, In, IsNull, EntityManager } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
@@ -56,6 +56,13 @@ export { RangeNotSatisfiableException };
 export interface BatchUploadFailedItem {
   name: string;
   reason: string;
+  /**
+   * 是否可安全重试（M2/N1 修复：统一批量上传结果语义）：
+   * - 类型/大小/同名冲突等确定性失败为 false；
+   * - Telegram 网络、数据库瞬时故障等可重试失败为 true。
+   * 可选字段，保持对既有调用方的向后兼容。
+   */
+  retryable?: boolean;
 }
 
 export interface BatchUploadResult {
@@ -65,6 +72,18 @@ export interface BatchUploadResult {
 
 /** 已知复合扩展名列表（优先匹配，防止 .tar.gz 被错误识别为 .gz） */
 const COMPOUND_EXTENSIONS = ['.tar.gz', '.tar.bz2', '.tar.xz'] as const;
+
+/**
+ * M2/N1：判定上传失败是否可安全重试。
+ * 确定性失败（类型/大小/同名冲突/权限等 4xx）不应误导用户重试；
+ * 其余（Telegram 网络、数据库瞬时故障等）标记为可重试。
+ */
+function isRetryableUploadFailure(error: unknown): boolean {
+  if (error instanceof HttpException) {
+    return error.getStatus() >= 500;
+  }
+  return true;
+}
 
 @Injectable()
 export class FileService implements OnModuleInit {
@@ -2817,27 +2836,26 @@ export class FileService implements OnModuleInit {
 
       for (let i = 0; i < files.length; i++) {
         const file = files[i];
+        const originalName = fixFilenameEncoding(file.originalname);
         try {
           // 每个文件上传前检查是否已被放弃
           if (abortController.signal.aborted) {
             throw new Error('任务已被放弃（客户端连接断开）');
           }
-          const originalName = fixFilenameEncoding(file.originalname);
           const fileSample = this.getFileSample(file);
           const typeCheck = await this.isFileTypeAllowed(originalName, fileSample);
           if (!typeCheck.allowed) {
-            failed.push({ name: originalName, reason: typeCheck.reason || '不允许上传此类型的文件' });
+            failed.push({ name: originalName, reason: typeCheck.reason || '不允许上传此类型的文件', retryable: false });
             continue;
           }
           if (file.size > this.maxFileSize) {
-            failed.push({ name: originalName, reason: `文件大小超过 ${this.maxFileSize / 1024 / 1024}MB` });
+            failed.push({ name: originalName, reason: `文件大小超过 ${this.maxFileSize / 1024 / 1024}MB`, retryable: false });
             continue;
           }
-          const uploadedFile = await this.uploadToTelegram(file, user, originalName, abortController.signal);
-          // 上传完成后关联标签（参数化查询）
-          if (tagIds && tagIds.length > 0) {
-            await this.insertFileTags(this.fileRepository.manager, uploadedFile.id, tagIds);
-          }
+          // M2/N1：tagIds 与文件行写入同事务，标签失败即整体回滚，不再产生幽灵失败。
+          const uploadedFile = await this.uploadToTelegram(
+            file, user, originalName, abortController.signal, null, undefined, tagIds,
+          );
           success.push(uploadedFile);
         } catch (error: unknown) {
           // 任务被放弃时直接退出循环
@@ -2846,8 +2864,9 @@ export class FileService implements OnModuleInit {
             break;
           }
           failed.push({
-            name: file.originalname,
+            name: originalName,
             reason: error instanceof Error ? error.message : '上传失败',
+            retryable: isRetryableUploadFailure(error),
           });
         }
         this.uploadJobService.updateJob(job.jobId, {
@@ -2898,12 +2917,10 @@ export class FileService implements OnModuleInit {
         throw new Error('任务已被放弃');
       }
 
-      const savedFile = await this.uploadToTelegram(file, user, originalName, abortSignal, folderId, overwriteFileId);
-
-      // 上传完成后关联标签（参数化查询）
-      if (tagIds && tagIds.length > 0) {
-        await this.insertFileTags(this.fileRepository.manager, savedFile.id, tagIds);
-      }
+      // M2/N1：tagIds 直接传入 uploadToTelegram，与文件行写入同事务，杜绝幽灵失败。
+      const savedFile = await this.uploadToTelegram(
+        file, user, originalName, abortSignal, folderId, overwriteFileId, tagIds,
+      );
 
       // 完成前再次检查，避免连接断开后仍写入成功结果
       if (abortSignal?.aborted) {
@@ -2941,6 +2958,7 @@ export class FileService implements OnModuleInit {
     abortSignal?: AbortSignal,
     folderId?: string | null,
     overwriteFileId?: string,
+    tagIds?: string[],
   ): Promise<File> {
     // GIF 文件加 .bin 后缀防止 Telegram 转码为 MP4
     const uploadName = file.mimetype === 'image/gif' ? originalName + '.bin' : originalName;
@@ -2993,6 +3011,12 @@ export class FileService implements OnModuleInit {
     const savedFile = await this.fileRepository.manager.transaction(async (manager) => {
       // N1：异步（分片合并后）上传路径同样必须占用统一命名空间名称。
       const created = await manager.getRepository(File).save(newFile);
+      // M2/N1：标签写入必须与文件行写入处于同一事务。此前标签在事务外补写，
+      // 一旦失败会在文件已落库后抛出普通「上传失败」，形成「前端失败但文件真实存在」
+      // 的幽灵失败（用户重复上传产生重复文件）。
+      if (tagIds && tagIds.length > 0) {
+        await this.insertFileTags(manager, created.id, tagIds);
+      }
       await this.namespaceService.acquire(manager, {
         ownerId: user.id,
         folderId: newFile.folderId ?? null,
@@ -3002,6 +3026,12 @@ export class FileService implements OnModuleInit {
       });
       return created;
     }).catch((error: unknown) => {
+      // 补偿策略：Telegram 上传无法参与数据库事务，DB 事务失败即产生一个无 DB 引用的
+      // 孤儿远端文件。记录 file_id 供运维清理；用户侧返回失败且库中无记录，可安全重试。
+      this.logger.warn(
+        `[上传补偿] 数据库事务失败，Telegram 已上传文件成为孤儿（file_id=${telegramFile.file_id}，name=${originalName}）：` +
+          `${error instanceof Error ? error.message : String(error)}`,
+      );
       if (isDatabaseUniqueViolation(error)) {
         throw new ConflictException('当前目录已存在同名文件或文件夹');
       }
