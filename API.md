@@ -319,6 +319,7 @@ GET /api/bot-dl/:token
 | 认证 | 无需认证 |
 | 有效期 | 默认 4 小时（后台「Telegram Bot 设置」可调，1–720 小时；已签发链接沿用签发时的有效期） |
 | 次数 | **不限次数**，仅受时间限制 |
+| 文件大小 | **不限**。Bot 文件不经过本站上传链路，不受后台上传配置的 `MAX_FILE_SIZE` 约束；本地 Bot API 以 `--local` 运行跳过内置 20MB 下载上限，流式端点 `--file-stream-max-size` 默认 `0`（不限制） |
 | 响应 | 完整下载 `200`（含 `Content-Length`）；单区间 Range 返回 `206`（含 `Content-Range`）；`Content-Disposition: attachment`、`Cache-Control: no-store`、`X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`、`Accept-Ranges: bytes` |
 | 失效 | 不存在 / 已撤销 / 已过期**统一返回 `404`**，不区分原因（防枚举） |
 | 限流 | 按来源 IP 与 Token 前缀双维度限流，超限返回 `429` |

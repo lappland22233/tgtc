@@ -1,9 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
 import { TelegramService } from '../telegram/telegram.service';
 import { AuditService } from '../common/services/audit.service';
 import { AuditStatus } from '../common/entities/audit-log.entity';
-import { ConfigCacheService } from '../common/services/config-cache.service';
 import type { TelegramMessage, TelegramUpdate, TelegramUser } from '../telegram/telegram.types';
 import { TelegramBotConfigService } from './telegram-bot-config.service';
 import { TelegramBotGrantService } from './telegram-bot-grant.service';
@@ -20,8 +18,11 @@ const MAX_LINK_QUERY_RESULTS = 20;
  * 入站更新分发：私聊校验、命令路由、document 提取、配额判定与直链签发。
  *
  * 处理顺序（重要）：
- *   私聊校验 → 幂等命中 → 命令 → 文档校验 → 域名解析(fail-closed) → 配额 → 签发 → 回复
+ *   私聊校验 → 幂等命中 → 命令 → document 提取 → 域名解析(fail-closed) → 配额 → 签发 → 回复
  * 域名解析在配额扣减之前，避免因管理员未配置域名而白白消耗用户额度。
+ *
+ * 不限制文件大小：`MAX_FILE_SIZE` 属于本站上传策略，Bot 文件不经上传链路；
+ * 本地 Bot API（`--local` + 流式端点）对可服务的文件大小无上限。
  */
 @Injectable()
 export class TelegramBotDispatchService {
@@ -29,13 +30,11 @@ export class TelegramBotDispatchService {
 
   constructor(
     private readonly telegramService: TelegramService,
-    private readonly configService: ConfigService,
     private readonly botConfigService: TelegramBotConfigService,
     private readonly quotaService: TelegramBotQuotaService,
     private readonly grantService: TelegramBotGrantService,
     private readonly adminService: TelegramBotAdminService,
     private readonly auditService: AuditService,
-    private readonly configCacheService: ConfigCacheService,
   ) {}
 
   /** 处理单条更新（异常不外抛，避免中断轮询循环） */
@@ -318,17 +317,12 @@ export class TelegramBotDispatchService {
       return;
     }
 
-    // 大小校验（Telegram 上报的 file_size 可能缺失）
-    const maxSize = await this.resolveMaxFileSize();
+    // 不设文件大小上限（含 `MAX_FILE_SIZE`）：
+    // - Bot 文件不经过本站上传链路，`MAX_FILE_SIZE` 是「后台上传配置」的上传策略，与下载无关；
+    // - 本地 Bot API 以 `--local` 运行时跳过 `MAX_DOWNLOAD_FILE_SIZE`（20MB）检查，
+    //   流式端点 `--file-stream-max-size` 默认 0（不限制），因此可服务任意大小；
+    // - 是否可播放/下载由客户端与磁盘决定，服务端不再提前拒绝。
     const fileSize = typeof doc.file_size === 'number' && doc.file_size > 0 ? doc.file_size : null;
-    if (fileSize !== null && maxSize > 0 && fileSize > maxSize) {
-      await this.reply(
-        chatId,
-        `文件过大（${this.formatBytes(fileSize)}），超过上限 ${this.formatBytes(maxSize)}。`,
-        message.message_id,
-      );
-      return;
-    }
 
     await this.auditDocumentReceived(identity, message, fileSize);
 
@@ -457,20 +451,6 @@ export class TelegramBotDispatchService {
     if (!value) return null;
     const cleaned = value.replace(/[\u0000-\u001F\u007F]/g, '').trim();
     return cleaned ? cleaned.slice(0, maxLength) : null;
-  }
-
-  private async resolveMaxFileSize(): Promise<number> {
-    const fallback = Number(this.configService.get<string>('MAX_FILE_SIZE') || 83886080);
-    const raw = await this.configCacheService.get('MAX_FILE_SIZE', String(Number.isSafeInteger(fallback) ? fallback : 83886080));
-    const value = Number(raw);
-    return Number.isSafeInteger(value) && value > 0 ? value : 83886080;
-  }
-
-  private formatBytes(bytes: number): string {
-    if (bytes >= 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
-    if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-    if (bytes >= 1024) return `${(bytes / 1024).toFixed(0)} KB`;
-    return `${bytes} B`;
   }
 
   private buildHelpText(): string {
