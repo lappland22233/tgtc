@@ -240,7 +240,11 @@ export class TelegramBotAdminService {
       [sinceParam],
     );
 
-    const bucket = databaseDateBucket('"createdAt"', 'day');
+    // 趋势粒度与时间范围匹配（与 getAccessLogTrend 口径一致）：1h 按分钟、
+    // 24h/7d 按小时、30d 按天。固定按天会让短范围只产生一个点，趋势图失去意义。
+    const bucketUnit: 'minute' | 'hour' | 'day' =
+      range === '1h' ? 'minute' : range === '30d' ? 'day' : 'hour';
+    const bucket = databaseDateBucket('"createdAt"', bucketUnit);
     const trendRows = await this.dataSource.query(
       `SELECT ${bucket} AS "bucket",
               COUNT(*) AS "downloads",

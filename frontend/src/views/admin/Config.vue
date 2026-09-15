@@ -348,19 +348,6 @@
         </t-form-item>
       </t-form>
 
-      <h4 class="bot-group-title">Bot 使用情况</h4>
-      <div class="bot-usage-row">
-        <span>下载次数：<strong>{{ botUsage.downloads }}</strong></span>
-        <span>去重用户：<strong>{{ botUsage.uniqueUsers }}</strong></span>
-        <span>总带宽：<strong>{{ formatBytes(botUsage.totalBytes) }}</strong></span>
-        <t-select
-          v-model="botUsageRange"
-          :options="botUsageOptions"
-          size="small"
-          style="width: 130px;"
-          @change="fetchBotUsage"
-        />
-      </div>
     </div>
 
     <!-- IP封禁管理 -->
@@ -489,14 +476,6 @@ const botConfig = ref({
 const botEffectiveDomain = ref('');
 const botCryptoAvailable = ref(false);
 const detectingDomain = ref(false);
-const botUsage = ref({ downloads: 0, uniqueUsers: 0, totalBytes: '0' });
-const botUsageRange = ref('7d');
-const botUsageOptions = [
-  { label: '近 1 小时', value: '1h' },
-  { label: '近 24 小时', value: '24h' },
-  { label: '近 7 天', value: '7d' },
-  { label: '近 30 天', value: '30d' },
-];
 
 // 未保存离开防护（G15-17）：任一配置表单被修改且未保存时置脏，
 // 触发 beforeunload / 路由离开确认，避免误操作丢失修改。
@@ -971,31 +950,6 @@ async function saveBotConfig() {
   }
 }
 
-async function fetchBotUsage() {
-  try {
-    const res = await api.get('/admin/bot-usage', { params: { timeRange: botUsageRange.value } });
-    const data = res.data.data;
-    if (data) {
-      botUsage.value = {
-        downloads: Number(data.downloads ?? 0),
-        uniqueUsers: Number(data.uniqueUsers ?? 0),
-        totalBytes: String(data.totalBytes ?? '0'),
-      };
-    }
-  } catch (err) {
-    console.error('获取 Bot 使用情况失败', err);
-  }
-}
-
-function formatBytes(value: string): string {
-  const bytes = Number(value);
-  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
-  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
-  if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
-  if (bytes >= 1024) return `${(bytes / 1024).toFixed(0)} KB`;
-  return `${bytes} B`;
-}
-
 async function fetchBannedIPs(): Promise<boolean> {
   try {
     const res = await api.get('/admin/banned-ips');
@@ -1071,7 +1025,6 @@ onMounted(() => {
     fetchUploadConfig(),
     fetchCacheConfig(),
     fetchBotConfig(),
-    fetchBotUsage(),
     fetchBannedIPs(),
   ]).then((results) => {
     const failed = results.filter(
@@ -1144,20 +1097,6 @@ onMounted(() => {
   font-size: 13px;
   color: var(--text-accent);
   word-break: break-all;
-}
-
-.bot-usage-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 16px;
-  font-size: 13px;
-  color: var(--text-secondary);
-}
-
-.bot-usage-row strong {
-  color: var(--text-primary);
-  font-family: var(--font-mono);
 }
 
 @media (max-width: 768px) {

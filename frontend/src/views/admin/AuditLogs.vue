@@ -48,40 +48,12 @@
         style="width: 200px;"
         @change="onFilterChange"
       >
-        <t-option value="" label="全部操作" />
-        <t-option value="login" label="登录" />
-        <t-option value="login_failed" label="登录失败" />
-        <t-option value="register" label="注册" />
-        <t-option value="email_verification_send" label="发送验证邮件" />
-        <t-option value="password_reset" label="密码重置" />
-        <t-option value="role_change" label="角色变更" />
-        <t-option value="user_create" label="创建用户" />
-        <t-option value="user_delete" label="删除用户" />
-        <t-option value="user_ban" label="封禁用户" />
-        <t-option value="user_unban" label="解封用户" />
-        <t-option value="file_upload" label="文件上传" />
-        <t-option value="file_delete" label="文件删除" />
-        <t-option value="file_delete_request" label="请求删除" />
-        <t-option value="file_delete_by_admin" label="管理员删除" />
-        <t-option value="file_restore" label="文件恢复" />
-        <t-option value="file_share" label="生成分享" />
-        <t-option value="file_password_set" label="设置密码" />
-        <t-option value="file_access_change" label="访问变更" />
-        <t-option value="file_expiry_set" label="有效期设置" />
-        <t-option value="share_link_create" label="创建分享链接" />
-        <t-option value="share_link_update" label="更新分享链接" />
-        <t-option value="share_link_delete" label="取消分享链接" />
-        <t-option value="share_link_access" label="访问分享链接" />
-        <t-option value="share_link_password_failed" label="分享密码错误" />
-        <t-option value="share_link_download" label="分享链接下载" />
-        <t-option value="config_change" label="配置变更" />
-        <t-option value="smtp_config_change" label="SMTP变更" />
-        <t-option value="upload_config_change" label="上传配置" />
-        <t-option value="auth_config_change" label="认证配置" />
-        <t-option value="ip_ban" label="IP封禁" />
-        <t-option value="ip_unban" label="IP解封" />
-        <t-option value="batch_delete_files" label="批量删除" />
-        <t-option value="batch_delete_files_by_admin" label="管理员批量删" />
+        <t-option
+          v-for="opt in actionOptions"
+          :key="opt.value || 'all'"
+          :value="opt.value"
+          :label="opt.label"
+        />
       </t-select>
       <t-input
         v-model="filterUser"
@@ -193,7 +165,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted } from 'vue';
+import { ref, reactive, computed, onMounted } from 'vue';
 import MessagePlugin from '@/utils/message';
 import client from '../../api/client';
 import { useMobile } from '../../composables/useMobile';
@@ -271,7 +243,26 @@ const actionLabels: Record<string, string> = {
   api_key_create: '创建API密钥', api_key_revoke: '撤销API密钥', api_key_reveal: '查看API密钥',
   api_key_allowlist_update: '更新密钥IP白名单',
   data_export: '导出数据',
+  // Telegram Bot 文件直链（v1.3.1 新增审计动作，缺失会显示为“未知操作”）
+  telegram_bot_file_received: 'Bot 收到文件',
+  telegram_bot_link_issued: 'Bot 签发直链',
+  telegram_bot_link_accessed: 'Bot 直链访问',
+  telegram_bot_link_revoked: 'Bot 撤销直链',
+  telegram_bot_link_queried: 'Bot 查询直链',
+  telegram_bot_quota_denied: 'Bot 额度拒绝',
+  telegram_bot_whitelist_add: 'Bot 白名单加入',
+  telegram_bot_whitelist_remove: 'Bot 白名单移除',
+  telegram_bot_command_denied: 'Bot 越权命令',
 };
+
+/**
+ * 操作类型筛选项由 actionLabels 派生：新增审计动作只需补一处映射，
+ * 避免下拉选项与标签表脱节，导致新动作无法筛选、只能看到原始英文名。
+ */
+const actionOptions = computed(() => [
+  { value: '', label: '全部操作' },
+  ...Object.entries(actionLabels).map(([value, label]) => ({ value, label })),
+]);
 
 function updateEmailResultLabel(result: string) {
   emailResultLabel.value = result === 'success' ? '当前时间范围内全部成功'
@@ -286,6 +277,10 @@ function actionLabel(action: string): string {
 }
 
 function actionTheme(action: string): string {
+  // Bot 动作需先于通用规则判定：telegram_bot_file_* 会被 includes('file') 误判为成功
+  if (action.startsWith('telegram_bot_')) {
+    return action.includes('denied') || action.includes('revoked') ? 'warning' : 'primary';
+  }
   if (action.includes('login') || action === 'register') return 'primary';
   if (action.includes('delete') || action.includes('ban')) return 'danger';
   if (action.includes('config') || action.includes('role') || action.includes('password_failed')) return 'warning';
@@ -299,6 +294,8 @@ function resourceTypeLabel(type: string): string {
     tag: '标签', config: '配置', security_config: '安全配置', ip: 'IP', export: '数据导出',
     api_key: 'API密钥', email: '邮件', update: '系统更新', update_task: '更新任务',
     ip_ban: 'IP封禁', rate_limit: '限流', system: '系统',
+    bot_config: 'Bot 配置', telegram_bot_grant: 'Bot 直链', telegram_bot_quota: 'Bot 额度',
+    telegram_bot_file: 'Bot 文件', telegram_bot_whitelist: 'Bot 白名单', telegram_bot_command: 'Bot 命令',
   };
   return map[type] || (type ? `未知资源（${type}）` : '未知资源');
 }

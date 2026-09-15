@@ -113,9 +113,6 @@ describe('Config.vue 网站标题保存与同步', () => {
           },
         };
       }
-      if (url.startsWith('/admin/bot-usage')) {
-        return { data: { data: { downloads: 3, uniqueUsers: 2, totalBytes: '4096', trend: [] } } };
-      }
       return { data: { data: {} } };
     });
     vi.mocked(api.put).mockResolvedValue({ data: { data: {} } });
@@ -211,23 +208,19 @@ describe('Config.vue Telegram Bot 设置', () => {
           },
         };
       }
-      if (url.startsWith('/admin/bot-usage')) {
-        return { data: { data: { downloads: 3, uniqueUsers: 2, totalBytes: '4096', trend: [] } } };
-      }
       return { data: { data: {} } };
     });
     vi.mocked(api.put).mockResolvedValue({ data: { data: {} } });
   });
 
-  it('加载后展示生效域名、加密降级提示与使用情况', async () => {
+  it('加载后展示生效域名与加密降级提示', async () => {
     const wrapper = mountConfig();
     await flushMicrotasks(wrapper);
 
     expect(wrapper.text()).toContain('https://text.lappland.top');
     expect(wrapper.text()).toContain('TELEGRAM_BOT_ENCRYPTION_KEY');
-    expect(wrapper.text()).toContain('下载次数：3');
-    expect(wrapper.text()).toContain('去重用户：2');
-    expect(wrapper.text()).toContain('4 KB');
+    // Bot 使用情况已迁至「访问统计 → Bot 使用」tab（BotUsageAnalysis），配置页不再展示统计
+    expect(wrapper.text()).not.toContain('Bot 使用情况');
   });
 
   it('保存成功：PUT /admin/bot-config 载荷经 trim 且包含全部字段', async () => {
