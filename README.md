@@ -31,7 +31,8 @@
 - 冷文件可通过二次开发的 Telegram Bot API 实时流端点边下载边构建缓存
 - 同一文件并发冷下载只建立一个上游回源；各客户端从临时缓存独立跟随读取
 - 缓存使用临时文件、大小校验和原子发布；失败会清理不完整文件
-- Range 下载仅在完整缓存命中时返回 `206`；冷文件 Range 请求回退为完整 `200` 下载
+- 支持标准单区间 Range（closed / open-ended / suffix）：缓存命中直接返回 `206`；冷文件通过 build/spool follower 同样保持 `206`，断点续传可用
+- 上游始终单路顺序回源，请求区间若尚未回源完成会等待补齐（并发多线程下载未回源部分无法立即应答）；非法或越界 Range 返回 `416` 而非静默回退 `200`
 
 ### 分享
 
@@ -42,6 +43,16 @@
 - 文件夹分享支持子目录、面包屑和单文件下载
 - 我的分享列表支持筛选、复制链接、修改和取消
 - 旧入口 `/files/public/:id` 兼容重定向至分享页
+
+### Telegram Bot 文件直链
+
+- 用户在 Bot **私聊**中发送**文件**（`document`），即可获得带有效期的匿名下载直链
+- 非白名单用户按日限额（默认 5 个文件/天），白名单用户不限；额度、有效期、切日时区可在后台热更新
+- 直链仅受时间限制，不限下载次数；可被管理员按链接立即撤销
+- 复用站内同一套本地缓存 / Range 链路：支持单区间 Range 与断点续传（`206` + `Content-Range`），越界 Range 返回 `416`
+- 仅接受 `document`：图片/视频/音频等媒体类型会收到提示且**不消耗额度**；群组/频道消息一律静默忽略
+- Bot 使用情况写入后端访问日志（`access_logs.botGrantId` / `botTelegramUserId`），并在后台汇总展示
+- 管理员可在 Bot 私聊中维护白名单、按 TG 用户 ID 查询完整直链、按直链撤销（全程审计）
 
 ### 管理与可观测性
 
@@ -119,6 +130,8 @@ npm run start:dev
 - 长度不少于 32 字符的 `JWT_SECRET`
 - `TELEGRAM_BOT_TOKEN`、`TELEGRAM_CHAT_ID`
 - `CORS_ORIGINS=http://localhost:5173`
+
+如启用 Bot 入站文件直链（默认**关闭**），还需配置 `TELEGRAM_BOT_UPDATES_ENABLED=true`、`TELEGRAM_BOT_ADMIN_IDS`（初始管理员 TG 用户 ID）、`TELEGRAM_BOT_ENCRYPTION_KEY`（32 字节 base64/hex，用于直链回放），并在后台「Telegram Bot 设置」中确认站点域名。
 
 如果配置了 `SMTP_HOST`，还必须同时配置完整 SMTP 参数以及 `SMTP_ENCRYPTION_KEY`、`SMTP_ENCRYPTION_SALT`；否则启动校验会拒绝启动。暂不使用邮件时，应移除或注释全部 SMTP 配置，并在系统认证配置中关闭依赖邮件的功能。
 
@@ -243,6 +256,47 @@ Redis 承载 `metrics-aggregation`、`attack-detection`、`alert-evaluation`、`
 ```
 
 缓存容量、最低磁盘空间和 TTL 存放在系统配置中，默认分别为 10 GB、1 GB、3 天，可从超级管理员后台热更新。
+
+### Telegram Bot 入站（文件直链）
+
+| 变量 | 默认值 | 说明 |
+|---|---:|---|
+| `TELEGRAM_BOT_UPDATES_ENABLED` | `false` | 入站消费总开关；仅显式 `true` 时启用，**不支持热更新**（安全边界） |
+| `TELEGRAM_BOT_ADMIN_IDS` | - | 初始管理员 TG 用户 ID，逗号分隔；开启入站时必填 |
+| `TELEGRAM_BOT_POLL_TIMEOUT_SECONDS` | `30` | 长轮询超时（1–120 秒） |
+| `TELEGRAM_BOT_ENCRYPTION_KEY` | - | 直链 Token 可逆加密根密钥（32 字节 base64/64 位 hex）；缺失时 `/link_query` 只能返回前缀 |
+| `TELEGRAM_BOT_DAILY_LIMIT` | `5` | 非白名单用户每日直链额度（env 兜底，面板可调） |
+| `TELEGRAM_BOT_LINK_TTL_HOURS` | `4` | 直链有效期（小时，env 兜底，面板可调） |
+| `TELEGRAM_BOT_QUOTA_TIMEZONE` | `Asia/Shanghai` | 每日额度切日时区（env 兜底，面板可调） |
+| `TELEGRAM_BOT_LINK_DOMAIN_MODE` | `auto` | `auto` 自动获取 / `manual` 手动设置（env 兜底，面板可调） |
+| `TELEGRAM_BOT_LINK_DOMAIN` | - | 手动模式下的站点域名，如 `https://text.lappland.top`（env 兜底，面板可调） |
+
+**站点域名解析优先级（防 Host 伪造）**：手动模式配置 > `APP_URL` > 受信代理头（仅 `TRUST_PROXY_HOPS` 正确配置时）> **fail-closed**。系统**绝不**回退到 `localhost` 或裸 `Host` 头；无可信来源时会拒绝签发并提示管理员在后台配置。
+
+**单消费者约束**：同一 Bot Token 只能有一个入站更新消费者。本模块与文件存储共用 `TELEGRAM_BOT_TOKEN`，因此**不得**同时启用 Webhook 或其他 `getUpdates` 消费者。启动时若检测到已设置 Webhook，会写入错误日志告警（`getUpdates` 会返回 409）。
+
+**Bot 命令**
+
+| 命令 | 权限 | 说明 |
+|---|---|---|
+| `/help`、`/start` | 所有用户 | 用法说明 |
+| `/id` | 所有用户 | 返回自己的 TG 用户 ID |
+| `/quota` | 所有用户 | 查询今日剩余额度（白名单提示不限额） |
+| `/wl_add <TG用户ID>` | 管理员 | 永久加入白名单 |
+| `/wl_remove <TG用户ID>` | 管理员 | 移出白名单 |
+| `/wl_list` | 管理员 | 列出白名单（截断） |
+| `/link_query <TG用户ID>` | 管理员 | 按 TG 用户 ID 查询完整有效直链（每次调用全审计） |
+| `/link_revoke <直链URL或Token>` | 管理员 | 按直链撤销，立即失效 |
+
+管理员身份仅依据**数字 TG 用户 ID**（`TELEGRAM_BOT_ADMIN_IDS`）；`@username` 属于用户可控字段，仅用于审计展示，绝不参与权限判定。审计记录 TG 用户 ID 与用户名（如有），且**从不记录完整 Token**。
+
+**灰度开启步骤**
+
+1. 在 `.env` 配置 `TELEGRAM_BOT_ADMIN_IDS` 与 `TELEGRAM_BOT_ENCRYPTION_KEY`（并确认 `APP_URL` 为对外真实地址）；
+2. 运行迁移（`npm run migration:run`），确认 `telegram_bot_*` 三张表与 `access_logs` 新列已创建；
+3. 设置 `TELEGRAM_BOT_UPDATES_ENABLED=true` 并重启后端；
+4. 以初始管理员身份私聊 Bot，先执行 `/help` 与 `/wl_add`，再发送一个文件验证直链可用；
+5. 在后台「Telegram Bot 设置」确认「当前生效域名」正确后再放开给普通用户。
 
 ## Telegram 文件引用完整性
 
@@ -516,6 +570,7 @@ npm run preview
 
 | `GET` | `/media/:id` | 公开媒体直链，直接返回图片、音频或视频本体 |
 | `GET` | `/files/public/:id` | 旧分享入口兼容重定向 |
+| `GET` | `/api/bot-dl/:token` | Telegram Bot 文件直链（匿名，仅时间限制；无效/已撤销/已过期统一 404） |
 
 ### 登录用户接口
 
@@ -573,6 +628,9 @@ npm run preview
 | `GET/PUT` | `/api/admin/security-config` | 安全规则，仅 `super_admin` |
 | `GET` | `/api/admin/access-logs*` | 访问日志及聚合分析 |
 | `GET` | `/api/admin/audit-logs` | 操作审计 |
+| `GET/PUT` | `/api/admin/bot-config` | Telegram Bot 配置（有效期/额度/时区/站点域名，仅 `super_admin`） |
+| `GET` | `/api/admin/bot-config/detected-domain` | 探测可信站点域名候选值（仅 `super_admin`） |
+| `GET` | `/api/admin/bot-usage` | Bot 使用情况汇总（下载次数/去重用户/带宽/趋势，仅 `super_admin`） |
 
 | `GET` | `/api/admin/export` | CSV/JSON 数据导出 |
 

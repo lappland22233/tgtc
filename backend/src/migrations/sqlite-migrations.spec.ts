@@ -287,4 +287,52 @@ describe('SQLite schema migrations（隔离内存库）', () => {
     // 幂等：重复执行不报错。
     await new SqliteApiKeySecurityGovernance1802200000000().up(dataSource.createQueryRunner());
   });
+
+  it('存量库升级：180230 自建 Bot 三表并为 access_logs 补 Bot 标识列', async () => {
+    dataSource = new DataSource({ type: 'sqlite', database: ':memory:', entities: [], synchronize: false });
+    await dataSource.initialize();
+    await dataSource.query(`CREATE TABLE "migrations" (
+      "id" integer PRIMARY KEY AUTOINCREMENT NOT NULL,
+      "timestamp" bigint NOT NULL, "name" varchar NOT NULL
+    )`);
+    await dataSource.query(`CREATE TABLE "access_logs" (
+      "id" varchar PRIMARY KEY NOT NULL, "ip" varchar NOT NULL, "method" varchar(10) NOT NULL,
+      "path" varchar(500) NOT NULL, "statusCode" integer NOT NULL, "responseSize" bigint NOT NULL DEFAULT 0,
+      "duration" integer NOT NULL DEFAULT 0, "userAgent" varchar(500), "referer" varchar(300),
+      "userId" varchar, "createdAt" datetime NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`);
+
+    const { SqliteTelegramBotLinks1802300000000 } = require('./1802300000000-SqliteTelegramBotLinks') as typeof import('./1802300000000-SqliteTelegramBotLinks');
+    await new SqliteTelegramBotLinks1802300000000().up(dataSource.createQueryRunner());
+
+    const tables = await dataSource.query(
+      `SELECT name FROM sqlite_master WHERE type='table' AND name IN ('telegram_bot_file_grants','telegram_bot_daily_usage','telegram_bot_whitelist')`,
+    );
+    expect(tables.map((row: { name: string }) => row.name).sort()).toEqual([
+      'telegram_bot_daily_usage',
+      'telegram_bot_file_grants',
+      'telegram_bot_whitelist',
+    ]);
+
+    const grantIndexes = await dataSource.query('PRAGMA index_list("telegram_bot_file_grants")');
+    expect(grantIndexes.find((index: { name: string }) => index.name === 'uq_tg_bot_grants_tokenHash'))
+      .toMatchObject({ unique: 1 });
+    expect(grantIndexes.find((index: { name: string }) => index.name === 'uq_tg_bot_grants_message'))
+      .toMatchObject({ unique: 1 });
+
+    const usageIndexes = await dataSource.query('PRAGMA index_list("telegram_bot_daily_usage")');
+    expect(usageIndexes.find((index: { name: string }) => index.name === 'uq_tg_bot_daily_usage_user_date'))
+      .toMatchObject({ unique: 1 });
+
+    const whitelistIndexes = await dataSource.query('PRAGMA index_list("telegram_bot_whitelist")');
+    expect(whitelistIndexes.find((index: { name: string }) => index.name === 'uq_tg_bot_whitelist_tgUser'))
+      .toMatchObject({ unique: 1 });
+
+    const accessLogColumns = await dataSource.query('PRAGMA table_info("access_logs")');
+    expect(accessLogColumns.find((column: { name: string }) => column.name === 'botGrantId')).toBeDefined();
+    expect(accessLogColumns.find((column: { name: string }) => column.name === 'botTelegramUserId')).toBeDefined();
+
+    // 幂等：重复执行不报错。
+    await new SqliteTelegramBotLinks1802300000000().up(dataSource.createQueryRunner());
+  });
 });

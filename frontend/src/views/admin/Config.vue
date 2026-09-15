@@ -276,6 +276,93 @@
       </t-form>
     </div>
 
+    <!-- Telegram Bot 设置（本页仅 SUPER_ADMIN 可访问） -->
+    <div class="card" style="margin-top: 20px;">
+      <h3 style="margin-bottom: 4px;">Telegram Bot 设置</h3>
+      <p style="color: var(--text-secondary); font-size: 12px; margin: 0 0 16px;">
+        Bot 文件直链的有效期、每日额度、切日时区与站点域名。保存后立即生效，无需重启；
+        已签发的直链沿用签发时的有效期。
+      </p>
+
+      <h4 class="bot-group-title">基础配置</h4>
+      <t-form layout="vertical">
+        <t-form-item label="直链有效期（小时）">
+          <t-input-number v-model="botConfig.linkTtlHours" :min="1" :max="720" :step="1" />
+          <div class="bot-hint">1–720 小时</div>
+        </t-form-item>
+        <t-form-item label="每日额度（个/天）">
+          <t-input-number v-model="botConfig.dailyLimit" :min="1" :max="100000" :step="1" />
+          <div class="bot-hint">非白名单用户每日可签发的文件数；白名单用户不受限</div>
+        </t-form-item>
+        <t-form-item label="切日时区">
+          <t-input
+            v-model="botConfig.quotaTimezone"
+            placeholder="如 Asia/Shanghai"
+            autocomplete="off"
+            name="tg-bot-timezone"
+          />
+          <div class="bot-hint">IANA 时区名，用于每日额度按日重置</div>
+        </t-form-item>
+      </t-form>
+
+      <h4 class="bot-group-title">站点链接设置</h4>
+      <t-form layout="vertical">
+        <t-form-item label="域名模式">
+          <t-radio-group v-model="botConfig.linkDomainMode">
+            <t-radio value="auto">自动获取</t-radio>
+            <t-radio value="manual">手动设置</t-radio>
+          </t-radio-group>
+        </t-form-item>
+        <t-form-item label="站点域名">
+          <div style="display: flex; gap: 8px; width: 100%;">
+            <t-input
+              v-model="botConfig.linkDomain"
+              :disabled="botConfig.linkDomainMode !== 'manual'"
+              placeholder="https://text.lappland.top"
+              autocomplete="off"
+              name="tg-bot-domain"
+            />
+            <t-button
+              variant="outline"
+              :disabled="botConfig.linkDomainMode !== 'manual'"
+              :loading="detectingDomain"
+              @click="detectBotDomain"
+            >自动获取</t-button>
+          </div>
+          <div class="bot-hint">须为 http(s)://host[:port]，不含路径；自动模式优先使用 APP_URL</div>
+        </t-form-item>
+        <t-form-item label="当前生效域名">
+          <div class="bot-effective-domain">{{ botEffectiveDomain || '未配置（无法签发直链）' }}</div>
+          <div v-if="!botCryptoAvailable" class="bot-hint" style="color: var(--color-warning);">
+            未配置 TELEGRAM_BOT_ENCRYPTION_KEY：Bot 直链无法回放完整链接，/link_query 仅返回前缀
+          </div>
+        </t-form-item>
+        <t-form-item>
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <t-button theme="primary" :disabled="!blockLoadState.bot" @click="saveBotConfig">保存 Bot 配置</t-button>
+            <t-button v-if="!blockLoadState.bot" variant="outline" @click="fetchBotConfig">重新加载</t-button>
+          </div>
+          <div v-if="!blockLoadState.bot" style="color: var(--color-warning); font-size: 12px; margin-top: 4px;">
+            配置加载失败，当前显示默认值。为避免覆盖服务端配置，已禁用保存，请先重新加载。
+          </div>
+        </t-form-item>
+      </t-form>
+
+      <h4 class="bot-group-title">Bot 使用情况</h4>
+      <div class="bot-usage-row">
+        <span>下载次数：<strong>{{ botUsage.downloads }}</strong></span>
+        <span>去重用户：<strong>{{ botUsage.uniqueUsers }}</strong></span>
+        <span>总带宽：<strong>{{ formatBytes(botUsage.totalBytes) }}</strong></span>
+        <t-select
+          v-model="botUsageRange"
+          :options="botUsageOptions"
+          size="small"
+          style="width: 130px;"
+          @change="fetchBotUsage"
+        />
+      </div>
+    </div>
+
     <!-- IP封禁管理 -->
     <div class="card" style="margin-top: 20px;">
       <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 12px;">
@@ -351,6 +438,7 @@ const blockLoadState = reactive({
   smtp: false as boolean,
   upload: false as boolean,
   cache: false as boolean,
+  bot: false as boolean,
 });
 
 const siteConfig = ref({
@@ -390,6 +478,26 @@ const cacheConfig = ref({
   noCacheMode: false,
 });
 
+// Telegram Bot 设置（D14 + D16）：统一走 /admin/bot-config 热更新
+const botConfig = ref({
+  linkTtlHours: 4,
+  dailyLimit: 5,
+  quotaTimezone: 'Asia/Shanghai',
+  linkDomainMode: 'auto' as 'auto' | 'manual',
+  linkDomain: '',
+});
+const botEffectiveDomain = ref('');
+const botCryptoAvailable = ref(false);
+const detectingDomain = ref(false);
+const botUsage = ref({ downloads: 0, uniqueUsers: 0, totalBytes: '0' });
+const botUsageRange = ref('7d');
+const botUsageOptions = [
+  { label: '近 1 小时', value: '1h' },
+  { label: '近 24 小时', value: '24h' },
+  { label: '近 7 天', value: '7d' },
+  { label: '近 30 天', value: '30d' },
+];
+
 // 未保存离开防护（G15-17）：任一配置表单被修改且未保存时置脏，
 // 触发 beforeunload / 路由离开确认，避免误操作丢失修改。
 const dirty = ref(false);
@@ -403,7 +511,7 @@ function markClean() {
   dirty.value = false;
 }
 // 深度监听各配置对象，任何字段变化即标记脏；保存成功后由 markClean 复位
-watch([authConfig, smtpConfig, uploadConfig, cacheConfig], () => {
+watch([authConfig, smtpConfig, uploadConfig, cacheConfig, botConfig], () => {
   markDirty();
 }, { deep: true });
 
@@ -775,6 +883,119 @@ async function saveCacheConfig() {
   }
 }
 
+// —— Telegram Bot 设置 ——
+
+async function fetchBotConfig(): Promise<boolean> {
+  try {
+    const res = await api.get('/admin/bot-config');
+    const data = res.data.data;
+    if (data?.config) {
+      botConfig.value = { ...botConfig.value, ...data.config };
+    }
+    botEffectiveDomain.value = data?.effectiveDomain || '';
+    botCryptoAvailable.value = Boolean(data?.cryptoAvailable);
+    blockLoadState.bot = true;
+    return true;
+  } catch (err) {
+    console.error('获取 Bot 配置失败', err);
+    blockLoadState.bot = false;
+    return false;
+  }
+}
+
+/** 「自动获取」：调探测端点回填候选域名（不自动保存，供管理员确认） */
+async function detectBotDomain() {
+  if (detectingDomain.value) return;
+  detectingDomain.value = true;
+  try {
+    const res = await api.get('/admin/bot-config/detected-domain');
+    const detected = res.data.data?.detectedDomain;
+    if (detected) {
+      botConfig.value.linkDomain = detected;
+      botConfig.value.linkDomainMode = 'manual';
+      MessagePlugin.success('已回填检测到的域名，请确认后保存');
+    } else {
+      MessagePlugin.warning('未能从可信来源获取域名（APP_URL 未配置且无可信代理头），请手动填写');
+    }
+  } catch (error: unknown) {
+    MessagePlugin.error(getErrorMessage(error));
+  } finally {
+    detectingDomain.value = false;
+  }
+}
+
+async function saveBotConfig() {
+  if (!blockLoadState.bot) {
+    MessagePlugin.warning('Bot 配置加载失败，无法保存。请先点击"重新加载"');
+    return;
+  }
+  const ttl = Number(botConfig.value.linkTtlHours);
+  if (!Number.isInteger(ttl) || ttl < 1 || ttl > 720) {
+    MessagePlugin.warning('直链有效期必须为 1–720 的整数（小时）');
+    return;
+  }
+  const limit = Number(botConfig.value.dailyLimit);
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100000) {
+    MessagePlugin.warning('每日额度必须为 1–100000 的整数');
+    return;
+  }
+  const timezone = botConfig.value.quotaTimezone.trim();
+  if (!timezone) {
+    MessagePlugin.warning('切日时区不能为空');
+    return;
+  }
+  const domain = botConfig.value.linkDomain.trim();
+  if (botConfig.value.linkDomainMode === 'manual') {
+    if (!domain) {
+      MessagePlugin.warning('手动模式下必须填写站点域名');
+      return;
+    }
+    if (!/^https?:\/\/[^\s/]+$/i.test(domain)) {
+      MessagePlugin.warning('站点域名须为 http(s)://host[:port] 形式，且不含路径');
+      return;
+    }
+  }
+  try {
+    await api.put('/admin/bot-config', {
+      linkTtlHours: ttl,
+      dailyLimit: limit,
+      quotaTimezone: timezone,
+      linkDomainMode: botConfig.value.linkDomainMode,
+      linkDomain: domain,
+    });
+    await fetchBotConfig();
+    MessagePlugin.success('Bot 配置已保存');
+    markClean();
+  } catch (error: unknown) {
+    MessagePlugin.error(getErrorMessage(error));
+  }
+}
+
+async function fetchBotUsage() {
+  try {
+    const res = await api.get('/admin/bot-usage', { params: { timeRange: botUsageRange.value } });
+    const data = res.data.data;
+    if (data) {
+      botUsage.value = {
+        downloads: Number(data.downloads ?? 0),
+        uniqueUsers: Number(data.uniqueUsers ?? 0),
+        totalBytes: String(data.totalBytes ?? '0'),
+      };
+    }
+  } catch (err) {
+    console.error('获取 Bot 使用情况失败', err);
+  }
+}
+
+function formatBytes(value: string): string {
+  const bytes = Number(value);
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
+  if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${bytes} B`;
+}
+
 async function fetchBannedIPs(): Promise<boolean> {
   try {
     const res = await api.get('/admin/banned-ips');
@@ -849,6 +1070,8 @@ onMounted(() => {
     fetchSMTPConfig(),
     fetchUploadConfig(),
     fetchCacheConfig(),
+    fetchBotConfig(),
+    fetchBotUsage(),
     fetchBannedIPs(),
   ]).then((results) => {
     const failed = results.filter(
@@ -897,6 +1120,44 @@ onMounted(() => {
   margin-top: var(--space-2);
   font-size: 12px;
   color: var(--text-secondary);
+}
+
+.bot-group-title {
+  margin: 0 0 12px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.bot-group-title:not(:first-of-type) {
+  margin-top: 20px;
+}
+
+.bot-hint {
+  color: var(--text-secondary);
+  font-size: 12px;
+  margin-top: 4px;
+}
+
+.bot-effective-domain {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text-accent);
+  word-break: break-all;
+}
+
+.bot-usage-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.bot-usage-row strong {
+  color: var(--text-primary);
+  font-family: var(--font-mono);
 }
 
 @media (max-width: 768px) {

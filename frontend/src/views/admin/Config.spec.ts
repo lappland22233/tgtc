@@ -34,6 +34,8 @@ vi.mock('tdesign-vue-next', () => ({
   Switch: { props: ['value', 'modelValue'], template: '<span class="t-switch-stub" />' },
   RadioGroup: { template: '<div><slot /></div>' },
   Radio: { props: ['value'], template: '<label><slot /></label>' },
+  Select: { props: ['modelValue', 'options'], template: '<span class="t-select-stub" />' },
+  Alert: { template: '<div class="t-alert-stub"><slot /></div>' },
   Checkbox: { props: ['checked'], template: '<label><slot /></label>' },
   Tag: { template: '<span class="t-tag-stub"><slot /></span>' },
   Table: { template: '<div class="t-table-stub" />' },
@@ -93,6 +95,26 @@ describe('Config.vue 网站标题保存与同步', () => {
     vi.mocked(api.get).mockImplementation(async (url: string) => {
       if (url.startsWith('/admin/banned-ips')) {
         return { data: { data: { list: [], total: 0 } } };
+      }
+      if (url.startsWith('/admin/bot-config')) {
+        return {
+          data: {
+            data: {
+              config: {
+                linkTtlHours: 4,
+                dailyLimit: 5,
+                quotaTimezone: 'Asia/Shanghai',
+                linkDomainMode: 'auto',
+                linkDomain: '',
+              },
+              effectiveDomain: 'https://text.lappland.top',
+              cryptoAvailable: true,
+            },
+          },
+        };
+      }
+      if (url.startsWith('/admin/bot-usage')) {
+        return { data: { data: { downloads: 3, uniqueUsers: 2, totalBytes: '4096', trend: [] } } };
       }
       return { data: { data: {} } };
     });
@@ -157,5 +179,114 @@ describe('Config.vue 网站标题保存与同步', () => {
     const saveButton = findButton(wrapper, '保存网站标题');
     expect(saveButton.attributes('disabled')).toBeDefined();
     expect(wrapper.text()).toContain('已禁用保存');
+  });
+});
+
+describe('Config.vue Telegram Bot 设置', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    document.title = DEFAULT_SITE_TITLE;
+    vi.mocked(apiClient.get).mockResolvedValue({ data: { data: { siteTitle: '服务端标题' } } });
+    vi.mocked(api.get).mockImplementation(async (url: string) => {
+      if (url.startsWith('/admin/banned-ips')) {
+        return { data: { data: { list: [], total: 0 } } };
+      }
+      if (url.startsWith('/admin/bot-config/detected-domain')) {
+        return { data: { data: { detectedDomain: 'https://detected.example' } } };
+      }
+      if (url.startsWith('/admin/bot-config')) {
+        return {
+          data: {
+            data: {
+              config: {
+                linkTtlHours: 4,
+                dailyLimit: 5,
+                quotaTimezone: 'Asia/Shanghai',
+                linkDomainMode: 'manual',
+                linkDomain: 'https://text.lappland.top',
+              },
+              effectiveDomain: 'https://text.lappland.top',
+              cryptoAvailable: false,
+            },
+          },
+        };
+      }
+      if (url.startsWith('/admin/bot-usage')) {
+        return { data: { data: { downloads: 3, uniqueUsers: 2, totalBytes: '4096', trend: [] } } };
+      }
+      return { data: { data: {} } };
+    });
+    vi.mocked(api.put).mockResolvedValue({ data: { data: {} } });
+  });
+
+  it('加载后展示生效域名、加密降级提示与使用情况', async () => {
+    const wrapper = mountConfig();
+    await flushMicrotasks(wrapper);
+
+    expect(wrapper.text()).toContain('https://text.lappland.top');
+    expect(wrapper.text()).toContain('TELEGRAM_BOT_ENCRYPTION_KEY');
+    expect(wrapper.text()).toContain('下载次数：3');
+    expect(wrapper.text()).toContain('去重用户：2');
+    expect(wrapper.text()).toContain('4 KB');
+  });
+
+  it('保存成功：PUT /admin/bot-config 载荷经 trim 且包含全部字段', async () => {
+    const wrapper = mountConfig();
+    await flushMicrotasks(wrapper);
+
+    await findButton(wrapper, '保存 Bot 配置').trigger('click');
+    await flushMicrotasks(wrapper);
+
+    expect(api.put).toHaveBeenCalledWith('/admin/bot-config', {
+      linkTtlHours: 4,
+      dailyLimit: 5,
+      quotaTimezone: 'Asia/Shanghai',
+      linkDomainMode: 'manual',
+      linkDomain: 'https://text.lappland.top',
+    });
+    expect(MessagePlugin.success).toHaveBeenCalledWith('Bot 配置已保存');
+  });
+
+  it('切日时区为空时阻止保存并提示', async () => {
+    const wrapper = mountConfig();
+    await flushMicrotasks(wrapper);
+
+    await wrapper.find('input[name="tg-bot-timezone"]').setValue('   ');
+    await findButton(wrapper, '保存 Bot 配置').trigger('click');
+    await flushMicrotasks(wrapper);
+
+    expect(MessagePlugin.warning).toHaveBeenCalledWith('切日时区不能为空');
+    expect(api.put).not.toHaveBeenCalledWith('/admin/bot-config', expect.anything());
+  });
+
+  it('手动模式下域名为空或含路径时阻止保存', async () => {
+    const wrapper = mountConfig();
+    await flushMicrotasks(wrapper);
+
+    const domainInput = wrapper.find('input[name="tg-bot-domain"]');
+    await domainInput.setValue('https://example.com/some/path');
+    await findButton(wrapper, '保存 Bot 配置').trigger('click');
+    await flushMicrotasks(wrapper);
+    expect(MessagePlugin.warning).toHaveBeenCalledWith('站点域名须为 http(s)://host[:port] 形式，且不含路径');
+    expect(api.put).not.toHaveBeenCalledWith('/admin/bot-config', expect.anything());
+
+    await domainInput.setValue('');
+    await findButton(wrapper, '保存 Bot 配置').trigger('click');
+    await flushMicrotasks(wrapper);
+    expect(MessagePlugin.warning).toHaveBeenCalledWith('手动模式下必须填写站点域名');
+    expect(api.put).not.toHaveBeenCalledWith('/admin/bot-config', expect.anything());
+  });
+
+  it('「自动获取」回填探测到的域名并切换到手动模式', async () => {
+    const wrapper = mountConfig();
+    await flushMicrotasks(wrapper);
+
+    const detectButton = findButton(wrapper, '自动获取');
+    expect(detectButton.attributes('disabled')).toBeUndefined();
+    await detectButton.trigger('click');
+    await flushMicrotasks(wrapper);
+
+    expect((wrapper.find('input[name="tg-bot-domain"]').element as HTMLInputElement).value)
+      .toBe('https://detected.example');
   });
 });

@@ -7,6 +7,7 @@ import { promises as fs } from 'fs';
 import * as path from 'path';
 import FormData from 'form-data';
 import { TelegramFileNotFoundError, TelegramStreamPathError } from './telegram.errors';
+import type { TelegramSendMessageResult, TelegramUpdate } from './telegram.types';
 
 interface TelegramMedia {
   file_id?: string;
@@ -853,5 +854,111 @@ export class TelegramService {
     }
 
     return true;
+  }
+
+  /**
+   * 发送文本消息（Bot 入站功能的回复通道）。
+   *
+   * - 复用 telegramRequest 的 429 重试与 Token 脱敏；
+   * - 默认不解析 HTML/Markdown（对用户可控内容不设置 parse_mode，避免注入）；
+   * - URL 会被 Telegram 自动识别为可点击链接。
+   */
+  async sendMessage(
+    chatId: string | number,
+    text: string,
+    options?: { replyToMessageId?: number; disableNotification?: boolean },
+  ): Promise<TelegramSendMessageResult> {
+    if (!this.botToken) {
+      throw new Error('TELEGRAM_BOT_TOKEN 未配置，无法发送消息');
+    }
+    const payload: Record<string, unknown> = {
+      chat_id: String(chatId),
+      text,
+      disable_web_page_preview: false,
+    };
+    if (options?.replyToMessageId) {
+      payload.reply_to_message_id = options.replyToMessageId;
+    }
+    if (options?.disableNotification) {
+      payload.disable_notification = true;
+    }
+
+    const response = await this.telegramRequest(
+      () => axios.post<{ ok: boolean; result: TelegramSendMessageResult; description?: string }>(
+        `${this.getBaseUrl()}/sendMessage`,
+        payload,
+        { timeout: 30 * 1000 },
+      ),
+      'sendMessage',
+    );
+
+    if (!response.data?.ok || !response.data.result) {
+      throw new Error(`Telegram sendMessage 返回异常: ${this.safeTelegramDescription(response.data?.description || 'unknown')}`);
+    }
+    return response.data.result;
+  }
+
+  /**
+   * 长轮询获取更新（getUpdates）。
+   *
+   * - `offset` 为上一次 update_id + 1；返回空数组表示本次超时无更新；
+   * - `timeoutSeconds` 为长轮询等待秒数（服务端 hold）；
+   * - 失败时原样抛出，由轮询服务做退避重试（此处不做无限内重试）；
+   * - 网络超时（长轮询常见）不视为致命错误，由调用方统一处理。
+   */
+  async getUpdates(
+    offset: number,
+    timeoutSeconds: number,
+    limit = 100,
+  ): Promise<TelegramUpdate[]> {
+    if (!this.botToken) {
+      throw new Error('TELEGRAM_BOT_TOKEN 未配置，无法接收更新');
+    }
+    // 长轮询超时 > axios timeout 会误判为失败：客户端超时取 timeout+15s 余量。
+    const clientTimeoutMs = (timeoutSeconds + 15) * 1000;
+
+    const response = await this.telegramRequest(
+      () => axios.get<{ ok: boolean; result: TelegramUpdate[]; description?: string }>(
+        `${this.getBaseUrl()}/getUpdates`,
+        {
+          timeout: clientTimeoutMs,
+          params: {
+            offset,
+            timeout: timeoutSeconds,
+            limit,
+            allowed_updates: JSON.stringify(['message']),
+          },
+        },
+      ),
+      'getUpdates',
+      2,
+    );
+
+    if (!response.data?.ok || !Array.isArray(response.data.result)) {
+      throw new Error(`Telegram getUpdates 返回异常: ${this.safeTelegramDescription(response.data?.description || 'unknown')}`);
+    }
+    return response.data.result;
+  }
+
+  /**
+   * 查询 Webhook 状态（R1：入站长轮询与 Webhook 互斥）。
+   * 若已设置 Webhook，getUpdates 将返回 409，启动预检据此告警。
+   */
+  async getWebhookInfo(): Promise<{ url: string; pending_update_count: number }> {
+    if (!this.botToken) {
+      throw new Error('TELEGRAM_BOT_TOKEN 未配置');
+    }
+    const response = await this.telegramRequest(
+      () => axios.get<{ ok: boolean; result: { url?: string; pending_update_count?: number } }>(
+        `${this.getBaseUrl()}/getWebhookInfo`,
+        { timeout: 15 * 1000 },
+      ),
+      'getWebhookInfo',
+      2,
+    );
+    return {
+      url: response.data?.result?.url || '',
+      pending_update_count: response.data?.result?.pending_update_count || 0,
+    };
   }
 }

@@ -6,6 +6,15 @@ import { AccessLog } from '../entities/access-log.entity';
 import { getClientIp } from '../utils/client-ip';
 import { sanitizeUrlForLog, sanitizeRefererForLog } from '../utils/sensitive-data';
 
+/**
+ * Bot 直链控制器在请求对象上挂载的身份上下文（D8/C-2）。
+ * 中间件在 res 'finish' 阶段读取并写入 access_logs 的 botGrantId/botTelegramUserId 列。
+ */
+export interface BotAccessContext {
+  botGrantId?: string | null;
+  botTelegramUserId?: string | null;
+}
+
 /** 不记录日志的路径前缀（减少管理后台日志噪音） */
 const SKIP_PATH_PREFIXES = ['/api/admin/access-logs', '/api/admin/audit-logs', '/api/admin/alerts', '/api/admin/ban-stats', '/api/admin/source-analysis', '/api/admin/user-activity', '/api/admin/bandwidth', '/api/admin/file-type-stats'];
 
@@ -77,6 +86,9 @@ export class AccessLogMiddleware implements NestMiddleware, OnApplicationShutdow
         parseInt(res.getHeader('content-length') as string) ||
         0;
 
+      // Bot 直链身份：控制器在开始处理时挂到 req 上（finish 阶段读取同一对象）
+      const botContext = req as Request & BotAccessContext;
+
       const entry: Partial<AccessLog> = {
         ip,
         method: req.method,
@@ -87,6 +99,8 @@ export class AccessLogMiddleware implements NestMiddleware, OnApplicationShutdow
         userAgent: (req.headers['user-agent'] as string)?.substring(0, 500) || null,
         referer: sanitizeRefererForLog(req.headers['referer'] as string | undefined),
         userId, // 仅记录认证链路提供的可信用户 ID
+        botGrantId: botContext.botGrantId ?? null,
+        botTelegramUserId: botContext.botTelegramUserId ?? null,
       };
 
       this.buffer.push(entry);

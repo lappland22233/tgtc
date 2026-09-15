@@ -53,6 +53,18 @@ export class AccessLog {
   @Column({ nullable: true, type: databaseColumnType('uuid'), comment: '关联用户 ID（已登录请求）' })
   userId: string | null;
 
+  /**
+   * Bot 直链下载标识（D8/C-2）：匿名直链请求会把 Bot 身份挂到 req，
+   * 由中间件在 res 结束时写入，用于统计 Bot 使用情况。非 Bot 请求为 null。
+   */
+  @Index('IDX_access_logs_botGrantId')
+  @Column({ nullable: true, type: databaseColumnType('uuid'), comment: 'Bot 直链 grant ID' })
+  botGrantId: string | null;
+
+  /** Bot 直链下载者 TG 用户 ID（字符串存储，非 Bot 请求为 null） */
+  @Column({ nullable: true, type: 'varchar', length: 32, comment: 'Bot 下载者 TG 用户 ID' })
+  botTelegramUserId: string | null;
+
   @CreateDateColumn({ comment: '请求时间' })
   createdAt: Date;
 }

@@ -78,7 +78,17 @@ export type AuditAction =
   | 'update_cancel'
   | 'update_succeeded'
   | 'update_failed'
-  | 'update_rollback';
+  | 'update_rollback'
+  // ---- Telegram Bot 文件直链 ----
+  | 'telegram_bot_file_received'
+  | 'telegram_bot_link_issued'
+  | 'telegram_bot_link_accessed'
+  | 'telegram_bot_link_revoked'
+  | 'telegram_bot_link_queried'
+  | 'telegram_bot_quota_denied'
+  | 'telegram_bot_whitelist_add'
+  | 'telegram_bot_whitelist_remove'
+  | 'telegram_bot_command_denied';
 
 /** 审计日志状态 */
 export enum AuditStatus {

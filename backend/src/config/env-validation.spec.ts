@@ -142,6 +142,42 @@ describe('validateEnv', () => {
     }
   });
 
+  it('validates Telegram Bot inbound configuration', () => {
+    // 入站启用但未配置初始管理员 → 拒绝（否则无人可维护白名单）
+    const missingAdmin: NodeJS.ProcessEnv = { ...valid, TELEGRAM_BOT_UPDATES_ENABLED: 'true' };
+    expect(() => validateEnv(missingAdmin)).toThrow(/TELEGRAM_BOT_ADMIN_IDS/);
+
+    const badValues: NodeJS.ProcessEnv = {
+      ...valid,
+      TELEGRAM_BOT_UPDATES_ENABLED: 'yes',
+      TELEGRAM_BOT_ADMIN_IDS: 'abc',
+      TELEGRAM_BOT_DAILY_LIMIT: '0',
+      TELEGRAM_BOT_LINK_TTL_HOURS: '900',
+      TELEGRAM_BOT_QUOTA_TIMEZONE: 'Not/AZone',
+      TELEGRAM_BOT_LINK_DOMAIN_MODE: 'random',
+      TELEGRAM_BOT_LINK_DOMAIN: 'https://example.com/path',
+      TELEGRAM_BOT_ENCRYPTION_KEY: 'short',
+      TELEGRAM_BOT_POLL_TIMEOUT_SECONDS: '0',
+    };
+    expect(() => validateEnv(badValues)).toThrow(
+      /TELEGRAM_BOT_UPDATES_ENABLED[\s\S]*TELEGRAM_BOT_ADMIN_IDS[\s\S]*TELEGRAM_BOT_DAILY_LIMIT[\s\S]*TELEGRAM_BOT_LINK_TTL_HOURS[\s\S]*TELEGRAM_BOT_QUOTA_TIMEZONE[\s\S]*TELEGRAM_BOT_LINK_DOMAIN_MODE[\s\S]*TELEGRAM_BOT_LINK_DOMAIN[\s\S]*TELEGRAM_BOT_ENCRYPTION_KEY[\s\S]*TELEGRAM_BOT_POLL_TIMEOUT_SECONDS/,
+    );
+
+    const ok: NodeJS.ProcessEnv = {
+      ...valid,
+      TELEGRAM_BOT_UPDATES_ENABLED: 'true',
+      TELEGRAM_BOT_ADMIN_IDS: '123456, 789012',
+      TELEGRAM_BOT_DAILY_LIMIT: '10',
+      TELEGRAM_BOT_LINK_TTL_HOURS: '24',
+      TELEGRAM_BOT_QUOTA_TIMEZONE: 'Asia/Shanghai',
+      TELEGRAM_BOT_LINK_DOMAIN_MODE: 'manual',
+      TELEGRAM_BOT_LINK_DOMAIN: 'https://text.lappland.top',
+      TELEGRAM_BOT_ENCRYPTION_KEY: 'a'.repeat(64),
+      TELEGRAM_BOT_POLL_TIMEOUT_SECONDS: '30',
+    };
+    expect(() => validateEnv(ok)).not.toThrow();
+  });
+
   it('reads process.env by default when called without arguments', () => {
     // 默认参数契约：无参调用读取当前 process.env（仅此用例替换环境，afterEach 恢复）。
     process.env = { ...valid };

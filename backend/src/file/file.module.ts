@@ -75,6 +75,7 @@ import { ApiKeyModule } from '../api-key/api-key.module';
     ThumbnailService,
     DownloadAdmissionService,
   ],
-  exports: [FileService, UploadDiskBudgetService],
+  // FileCacheService 供 Bot 直链匿名下载复用（同一实例，保证会话/缓存目录唯一）
+  exports: [FileService, UploadDiskBudgetService, FileCacheService],
 })
 export class FileModule {}

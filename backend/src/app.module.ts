@@ -27,6 +27,7 @@ import { HealthModule } from './health/health.module';
 import { VersionModule } from './version/version.module';
 import { UpdateModule } from './update/update.module';
 import { ApiKeyModule } from './api-key/api-key.module';
+import { TelegramBotModule } from './telegram-bot/telegram-bot.module';
 
 @Module({
   imports: [
@@ -60,6 +61,7 @@ import { ApiKeyModule } from './api-key/api-key.module';
     UpdateModule,
     TelegramModule,
     ApiKeyModule,
+    TelegramBotModule,
   ],
 })
 export class AppModule {}

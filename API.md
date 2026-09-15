@@ -16,6 +16,7 @@
 - [获取下载链接（三种模式）](#获取下载链接三种模式)
 - [文件夹操作](#文件夹操作)
 - [分享管理](#分享管理)
+- [Telegram Bot 文件直链](#telegram-bot-文件直链)
 - [限制与安全须知](#限制与安全须知)
 
 ---
@@ -24,7 +25,7 @@
 
 使用任意已登录账号（所有角色均可）在 **网页端 → 个人设置 → API 密钥** 中创建；或先通过账号登录获取 JWT Cookie 后调用管理接口（见[密钥管理](#密钥管理)）。
 
-明文密钥格式为 `tgtc_<随机段>`，**仅在创建/轮换的响应中出现一次**，关闭弹窗后无法再次查看，请立即妥善保存。此后只能凭前缀（如 `tgtc_a1b2c3d4`）在列表中识别密钥。
+明文密钥格式为 `tgtc_<随机段>`，在创建/轮换的响应中出现（网页端「查看」按钮同样可回显）。密钥以 AES-256-GCM 密文保存，因此关闭弹窗后仍可由所有者在列表中点「查看」重新回显——**历史密钥**（未保存密文）、**已撤销密钥**以及**根密钥变更**导致解密失败的密钥除外；这三种情况会返回明确的错误提示，需重新创建或轮换。
 
 ## 认证方式
 
@@ -300,6 +301,108 @@ curl -X POST https://your-domain.example/api/shares \
 成功响应的 `data` 含 `token`、`url` 和 `id`；分享页地址为 `https://<前端域名>/s/<token>`。
 
 > 不受 `X-API-Key` 影响的公开端点：`GET /api/s/:token` 系列（分享元数据、密码验证、下载、预览、文件夹浏览）保持匿名可用，行为与网页访客一致。
+
+---
+
+## Telegram Bot 文件直链
+
+Bot 直链由 Telegram 私聊交互签发，面向**匿名下载**，与 API 密钥体系完全解耦（不复用 JWT，也不暴露 Bot Token、`file_id` 或本站用户凭据）。需管理员先设置 `TELEGRAM_BOT_UPDATES_ENABLED=true` 并重启后端。
+
+### 匿名直链下载
+
+```http
+GET /api/bot-dl/:token
+```
+
+| 项 | 说明 |
+|---|---|
+| 认证 | 无需认证 |
+| 有效期 | 默认 4 小时（后台「Telegram Bot 设置」可调，1–720 小时；已签发链接沿用签发时的有效期） |
+| 次数 | **不限次数**，仅受时间限制 |
+| 响应 | 完整下载 `200`（含 `Content-Length`）；单区间 Range 返回 `206`（含 `Content-Range`）；`Content-Disposition: attachment`、`Cache-Control: no-store`、`X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`、`Accept-Ranges: bytes` |
+| 失效 | 不存在 / 已撤销 / 已过期**统一返回 `404`**，不区分原因（防枚举） |
+| 限流 | 按来源 IP 与 Token 前缀双维度限流，超限返回 `429` |
+
+> **Range 与断点续传**：端点复用与站内下载完全相同的本地缓存 / Range 链路（`FileCacheService`），**支持标准单区间 Range 与断点续传**——`bytes=0-99`（closed）、`bytes=500-`（open-ended）、`bytes=-500`（suffix）均返回真实 `206` + `Content-Range`。
+>
+> - 上游始终**单路顺序回源并写入本地缓存**，客户端请求的区间若尚未回源完成，由区间 follower 等待补齐后再继续输出；因此**并发多线程下载尚未回源的部分无法立即应答**（表现为等待，而不是报错、也不会重复回源）。
+> - 非法或越界 Range（含多区间 `bytes=0-1,5-6`、错误单位等）统一返回 `416` + `Content-Range: bytes */<total>`，**不会**静默退化为 `200`，避免客户端按完整长度解析出错。
+> - 仅当 Telegram 未上报 `file_size`（无法计算 `Content-Range` / `Content-Length`）时，才退化为完整 `200` 直连传输，此时不返回 `Accept-Ranges`。
+> - 缓存键由 Telegram `file_id` 经带命名空间的 SHA-256 派生为稳定 UUID，因此同一文件的多次直链访问（含跨 grant）复用同一份缓存。
+
+### 管理配置
+
+```http
+GET /api/admin/bot-config
+PUT /api/admin/bot-config
+```
+
+仅 `super_admin`。`GET` 返回 `config`、`effectiveDomain`、`detectedDomain`、`cryptoAvailable`。
+
+`PUT` 请求体（字段均可选，写入后**热更新生效**）：
+
+```json
+{
+  "linkTtlHours": 4,
+  "dailyLimit": 5,
+  "quotaTimezone": "Asia/Shanghai",
+  "linkDomainMode": "auto",
+  "linkDomain": "https://text.lappland.top"
+}
+```
+
+| 字段 | 校验 |
+|---|---|
+| `linkTtlHours` | 1–720 的整数（小时） |
+| `dailyLimit` | 1–100000 的整数 |
+| `quotaTimezone` | 合法 IANA 时区名 |
+| `linkDomainMode` | `auto` 或 `manual` |
+| `linkDomain` | `http(s)://host[:port]`，不含路径/查询串/用户信息；可为空字符串 |
+
+非法值返回 `400`（后端为权威校验方）。变更写入 `config_change` 审计（`resourceType: 'bot_config'`），且不记录敏感明文。
+
+### 域名探测
+
+```http
+GET /api/admin/bot-config/detected-domain
+```
+
+返回 `{ "detectedDomain": "https://..." | null }`。与签发时的解析优先级一致：**手动配置 > `APP_URL` > 受信代理头（需 `TRUST_PROXY_HOPS`）> fail-closed**；不采信裸 `Host` 头，无可用来源时返回 `null`。
+
+### 使用情况汇总
+
+```http
+GET /api/admin/bot-usage?timeRange=7d
+```
+
+`timeRange` 支持 `1h` / `24h` / `7d` / `30d`（默认 `7d`）。返回基于 `access_logs` 的 Bot 直链下载统计：
+
+```json
+{
+  "timeRange": "7d",
+  "downloads": 42,
+  "uniqueUsers": 7,
+  "totalBytes": "104857600",
+  "trend": [{ "bucket": "2026-09-15 00:00:00", "downloads": 12, "bytes": "20971520" }]
+}
+```
+
+`totalBytes` 为字符串（bigint 在 SQL 侧聚合，超出 `Number.MAX_SAFE_INTEGER` 亦不丢精度）。
+
+### Bot 命令（Telegram 私聊）
+
+| 命令 | 权限 | 说明 |
+|---|---|---|
+| `/help`、`/start` | 所有用户 | 用法说明 |
+| `/id` | 所有用户 | 返回自己的 TG 用户 ID |
+| `/quota` | 所有用户 | 查询今日剩余额度 |
+| `/wl_add <TG用户ID>` | 管理员 | 永久加入白名单 |
+| `/wl_remove <TG用户ID>` | 管理员 | 移出白名单 |
+| `/wl_list` | 管理员 | 列出白名单（截断） |
+| `/link_query <TG用户ID>` | 管理员 | 返回完整可点直链（每次调用全审计） |
+| `/link_revoke <直链URL或Token>` | 管理员 | 按直链撤销，立即失效 |
+
+> 管理员身份仅依据数字 TG 用户 ID；`@username` 仅用于审计展示。**不提供**用户侧用量历史命令（无 `/history`）。
 
 ---
 
