@@ -4,6 +4,12 @@ import { join } from 'path';
 import { DataSource } from 'typeorm';
 
 const DB_PATH = join(process.cwd(), 'tmp', `sqlite-real-qa-${process.pid}-${Date.now()}.sqlite`);
+/**
+ * 建库/迁移/销毁的真实耗时在并行跑整套 Jest 时会超过默认 5s（DataSource 初始化 +
+ * 完整迁移链 + PRAGMA），导致整组用例因 beforeAll 超时而全灭。此处显式放宽，
+ * 使失败只反映真实缺陷而非机器负载。
+ */
+const DB_SETUP_TIMEOUT_MS = 30_000;
 
 describe('真实 SQLite 数据源关键业务与并发 QA', () => {
   let dataSource: DataSource;
@@ -26,7 +32,7 @@ describe('真实 SQLite 数据源关键业务与并发 QA', () => {
     await dataSource.initialize();
     await dataSource.runMigrations();
     await dataSource.query('PRAGMA foreign_keys = ON');
-  });
+  }, DB_SETUP_TIMEOUT_MS);
 
   afterAll(async () => {
     if (secondDataSource?.isInitialized) await secondDataSource.destroy();
@@ -36,7 +42,7 @@ describe('真实 SQLite 数据源关键业务与并发 QA', () => {
     else process.env.DB_TYPE = originalDbType;
     if (originalDatabase === undefined) delete process.env.DB_DATABASE;
     else process.env.DB_DATABASE = originalDatabase;
-  });
+  }, DB_SETUP_TIMEOUT_MS);
 
   it('迁移升级、安全 revert、重放及完整性检查均保留业务数据', async () => {
     const userId = randomUUID();

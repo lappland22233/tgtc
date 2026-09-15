@@ -9,5 +9,8 @@ describe('AlertService',()=>{
  it('lists unacknowledged alerts',async()=>{repo.find.mockResolvedValue(['a']); await expect(s.getUnacknowledged()).resolves.toEqual(['a']);});
  it('acknowledges existing alert and rejects missing alert',async()=>{repo.update.mockResolvedValueOnce({affected:1}).mockResolvedValueOnce({affected:0}); await expect(s.acknowledge('a','u')).resolves.toBeUndefined(); await expect(s.acknowledge('x','u')).rejects.toBeInstanceOf(NotFoundException)});
  it('acknowledges all in batches and ignores invalid result shape',async()=>{repo.manager.query.mockResolvedValueOnce(Array(1000).fill({})).mockResolvedValueOnce([{}]); await expect(s.acknowledgeAll('u')).resolves.toBe(1001); repo.manager.query.mockResolvedValue({}); await expect(s.acknowledgeAll('u')).resolves.toBe(0)});
+ // 回归：PostgreSQL 下 UPDATE ... RETURNING 经 TypeORM 返回 [rows, affectedCount] 元组，
+ // 未归一化时 rows.length 恒为 2 → 只处理首批且数量错报为 2。
+ it('counts rows correctly under the PostgreSQL [rows, affected] tuple shape',async()=>{repo.manager.query.mockResolvedValueOnce([Array(1000).fill({}),1000]).mockResolvedValueOnce([[{}],1]); await expect(s.acknowledgeAll('u')).resolves.toBe(1001); expect(repo.manager.query).toHaveBeenCalledTimes(2)});
  it('returns rule metadata',()=>expect(s.getRules().length).toBeGreaterThan(0));
 });
