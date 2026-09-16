@@ -21,10 +21,12 @@
       <div class="metrics-grid">
         <div class="metric-card">
           <span class="metric-icon">
+            <!-- 文件纸张图标：避免用上下箭头（易与「上传/下载」混淆） -->
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <path d="M12 13V4" />
-              <path d="M8 8l4-4 4 4" />
-              <path d="M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3" />
+              <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" />
+              <path d="M14 3v5h5" />
+              <path d="M9 13h6" />
+              <path d="M9 17h4" />
             </svg>
           </span>
           <div class="metric-body">
@@ -98,11 +100,18 @@
         </div>
       </div>
 
-      <!-- 趋势图 -->
+      <!-- 趋势图：拆成两张共享时间轴的单一量纲图（避免双轴 + 多序列导致的误读） -->
       <div class="card chart-card">
-        <h3>使用趋势</h3>
-        <div ref="chartRef" class="chart-container"></div>
-        <div v-if="!loading && summary.trend.length === 0" class="empty-hint">所选时间范围内暂无 Bot 直链下载记录</div>
+        <div class="chart-header">
+          <h3>使用趋势</h3>
+          <span v-if="summary.trend.length > 0" class="chart-hint">{{ granularityHint }}</span>
+        </div>
+
+        <template v-if="summary.trend.length > 0">
+          <div ref="volumeChartRef" class="chart-container chart-container--volume"></div>
+          <div ref="bandwidthChartRef" class="chart-container chart-container--bandwidth"></div>
+        </template>
+        <div v-else-if="!loading" class="empty-hint">所选时间范围内暂无 Bot 直链记录</div>
       </div>
 
       <!-- 明细表 -->
@@ -291,8 +300,10 @@ const summary = ref<BotUsageSummary>({
   trend: [],
 });
 
-const chartRef = ref<HTMLDivElement | null>(null);
-let chart: echarts.ECharts | null = null;
+const volumeChartRef = ref<HTMLDivElement | null>(null);
+const bandwidthChartRef = ref<HTMLDivElement | null>(null);
+let volumeChart: echarts.ECharts | null = null;
+let bandwidthChart: echarts.ECharts | null = null;
 const isMobile = useMobile();
 
 const detailColumns = [
@@ -334,6 +345,52 @@ const peakDownloads = computed(() =>
 /** 明细表按时间倒序，最近时段在前 */
 const trendRowsDesc = computed(() => [...summary.value.trend].reverse());
 
+/**
+ * 图表桶上限：后端按「1h→分钟、24h/7d→小时、30d→天」出桶，7 天范围会有 168 个小时桶，
+ * 逐桶画柱会细到无法辨认；超过上限时把相邻桶合并（求和）后再画。
+ * 时段明细表仍保留后端原始粒度，图表只做显示层降采样。
+ */
+const MAX_CHART_BUCKETS_DESKTOP = 40;
+const MAX_CHART_BUCKETS_MOBILE = 20;
+
+/** 原始桶的粒度单位（与后端 getUsageSummary 的 bucketUnit 对齐） */
+const rawBucketUnit = computed(() => (timeRange.value === '1h' ? '分钟' : timeRange.value === '30d' ? '天' : '小时'));
+
+/** 合并步长优先取自然刻度，使合并后的标签落在整点/整天上（「每 6 小时」优于「每 5 小时」） */
+const COLLAPSE_STEPS = [1, 2, 3, 4, 6, 8, 12, 24];
+
+function pickCollapseStep(bucketCount: number, maxBuckets: number): number {
+  if (bucketCount <= maxBuckets) return 1;
+  return COLLAPSE_STEPS.find((step) => Math.ceil(bucketCount / step) <= maxBuckets)
+    ?? Math.ceil(bucketCount / maxBuckets);
+}
+
+const maxChartBuckets = computed(() => (isMobile.value ? MAX_CHART_BUCKETS_MOBILE : MAX_CHART_BUCKETS_DESKTOP));
+const collapseStep = computed(() => pickCollapseStep(summary.value.trend.length, maxChartBuckets.value));
+
+/** 合并相邻桶（求和），桶标签取区间起点；单桶值均为小量级，JS 侧累加无精度风险 */
+const chartRows = computed<BotUsageTrendRow[]>(() => {
+  const rows = summary.value.trend;
+  const step = collapseStep.value;
+  if (step <= 1) return rows;
+  const collapsed: BotUsageTrendRow[] = [];
+  for (let start = 0; start < rows.length; start += step) {
+    const chunk = rows.slice(start, start + step);
+    collapsed.push({
+      bucket: chunk[0].bucket,
+      downloads: chunk.reduce((total, row) => total + row.downloads, 0),
+      files: chunk.reduce((total, row) => total + row.files, 0),
+      bytes: String(chunk.reduce((total, row) => total + Number(row.bytes), 0)),
+      fileBytes: String(chunk.reduce((total, row) => total + Number(row.fileBytes), 0)),
+    });
+  }
+  return collapsed;
+});
+
+/** 图表粒度说明（合并后必须显式标注，避免与明细表的原始粒度混淆） */
+const granularityHint = computed(() =>
+  summary.value.trend.length === 0 ? '' : `粒度：每 ${collapseStep.value} ${rawBucketUnit.value}`);
+
 function formatNumber(n: number): string {
   if (!Number.isFinite(n)) return '0';
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
@@ -368,88 +425,117 @@ function formatBucket(bucket: string): string {
 }
 
 const handleResize = () => {
-  chart?.resize();
+  volumeChart?.resize();
+  bandwidthChart?.resize();
 };
 
+// 移动端会改用更少的桶（见 chartRows），因此不能只 resize，必须整图重绘
 watch(isMobile, () => {
-  nextTick(() => setTimeout(handleResize, 100));
+  nextTick(() => setTimeout(() => { void renderCharts(); }, 100));
 });
 
-async function renderChart() {
-  if (!chartRef.value) return;
+/** 两张图共用的网格与坐标轴基线，保证上下时间轴严格对齐（小倍数图） */
+const CHART_GRID = { left: 60, right: 20 };
+
+/** x 轴刻度：不旋转（旋转标签会显著降低可读性），重叠时由 ECharts 自动抽稀 */
+const categoryAxisBase = {
+  type: 'category' as const,
+  boundaryGap: true,
+  axisTick: { show: false },
+  axisLabel: { fontSize: 11, hideOverlap: true },
+};
+
+/** 统一的轴提示格式化：带宽按大小、其余按次数 */
+const axisTooltipFormatter = (params: unknown) => {
+  const list = (Array.isArray(params) ? params : [params]) as {
+    axisValue: string;
+    seriesName: string;
+    value: number;
+  }[];
+  if (list.length === 0) return '';
+  const lines = list.map((item) =>
+    item.seriesName === '带宽'
+      ? `${item.seriesName}：${formatSize(Number(item.value))}`
+      : `${item.seriesName}：${formatNumber(Number(item.value))} 次`,
+  );
+  return `${list[0].axisValue}<br/>${lines.join('<br/>')}`;
+};
+
+/**
+ * 渲染两张单一量纲的小倍数图：
+ * - 上：收到文件 / 下载次数（分组柱，同为「次数」，单一 y 轴）；
+ * - 下：带宽（面积折线，独立 y 轴但不再与次数共享画布）。
+ * 二者共用 `CHART_GRID` 与同一批桶，上下对照即可读出「同一时间的收发量 vs 流量」。
+ */
+async function renderCharts() {
+  const rows = chartRows.value;
+  if (rows.length === 0) {
+    volumeChart?.dispose();
+    volumeChart = null;
+    bandwidthChart?.dispose();
+    bandwidthChart = null;
+    return;
+  }
   await ensureCyberTheme();
-  // 容器在 tab 切换/重建后归属可能变化，统一 dispose 后重建，避免写入已移除节点
-  chart?.dispose();
-  chart = echarts.init(chartRef.value, 'cyber');
 
-  const rows = summary.value.trend;
   const labels = rows.map((row) => formatBucket(row.bucket));
-  // 刻度过密时旋转，避免长范围下标签互相覆盖
-  const rotate = labels.length > 24 ? 45 : 0;
+  const tooltip = { trigger: 'axis' as const, ...tooltipBase, formatter: axisTooltipFormatter };
+  // 柱体过密时限制单柱宽度，保证相邻柱之间有可辨识的间隙
+  const barStyle = { barMaxWidth: 16, barGap: '18%', barCategoryGap: '38%' };
 
-  chart.setOption(
-    {
-      tooltip: {
-        trigger: 'axis',
-        ...tooltipBase,
-        formatter: (params: unknown) => {
-          const list = (Array.isArray(params) ? params : [params]) as {
-            axisValue: string;
-            seriesName: string;
-            value: number;
-          }[];
-          if (list.length === 0) return '';
-          const lines = list.map((p) =>
-            p.seriesName === '带宽'
-              ? `${p.seriesName}：${formatSize(Number(p.value))}`
-              : `${p.seriesName}：${formatNumber(Number(p.value))}`,
-          );
-          return `${list[0].axisValue}<br/>${lines.join('<br/>')}`;
-        },
+  // 容器在 tab 切换/重建后归属可能变化，统一 dispose 后重建，避免写入已移除节点
+  if (volumeChartRef.value) {
+    volumeChart?.dispose();
+    volumeChart = echarts.init(volumeChartRef.value, 'cyber');
+    volumeChart.setOption({
+      tooltip,
+      legend: { data: ['收到文件', '下载次数'], ...legendBase, top: 0 },
+      grid: { ...CHART_GRID, top: 26, bottom: 4 },
+      xAxis: { ...categoryAxisBase, data: labels, axisLabel: { show: false } },
+      yAxis: {
+        type: 'value',
+        name: '次数',
+        nameTextStyle: { fontSize: 11 },
+        minInterval: 1,
+        axisLabel: { fontSize: 11 },
       },
-      legend: {
-        data: ['收到文件', '下载次数', '带宽'],
-        ...legendBase,
-        top: 0,
-      },
-      grid: { left: 50, right: 70, top: 30, bottom: 40 },
-      xAxis: {
-        type: 'category',
-        data: labels,
-        axisLabel: { rotate },
-      },
-      yAxis: [
-        {
-          type: 'value',
-          name: '次数',
-          nameTextStyle: { fontSize: 11 },
-          minInterval: 1,
-        },
-        {
-          type: 'value',
-          name: '带宽',
-          nameTextStyle: { fontSize: 11 },
-          axisLabel: { formatter: (v: number) => formatSize(v) },
-          splitLine: { show: false },
-        },
-      ],
       series: [
         {
           name: '收到文件',
           type: 'bar',
+          ...barStyle,
           data: rows.map((row) => row.files),
           itemStyle: { color: CHART_COLORS.success, borderRadius: [2, 2, 0, 0] },
         },
         {
           name: '下载次数',
           type: 'bar',
+          ...barStyle,
           data: rows.map((row) => row.downloads),
           itemStyle: { color: CHART_COLORS.primary, borderRadius: [2, 2, 0, 0] },
         },
+      ],
+    }, true);
+    volumeChart.resize();
+  }
+
+  if (bandwidthChartRef.value) {
+    bandwidthChart?.dispose();
+    bandwidthChart = echarts.init(bandwidthChartRef.value, 'cyber');
+    bandwidthChart.setOption({
+      tooltip,
+      grid: { ...CHART_GRID, top: 26, bottom: 22 },
+      xAxis: { ...categoryAxisBase, data: labels },
+      yAxis: {
+        type: 'value',
+        name: '带宽',
+        nameTextStyle: { fontSize: 11 },
+        axisLabel: { fontSize: 11, formatter: (value: number) => formatSize(value) },
+      },
+      series: [
         {
           name: '带宽',
           type: 'line',
-          yAxisIndex: 1,
           data: rows.map((row) => Number(row.bytes)),
           smooth: true,
           symbol: 'none',
@@ -457,10 +543,9 @@ async function renderChart() {
           areaStyle: { color: areaGradient(CHART_COLORS.teal) },
         },
       ],
-    },
-    true,
-  );
-  chart.resize();
+    }, true);
+    bandwidthChart.resize();
+  }
 }
 
 async function fetchData() {
@@ -489,7 +574,7 @@ async function fetchData() {
     };
     lastRefreshTime.value = new Date().toLocaleTimeString('zh-CN');
     await nextTick();
-    await renderChart();
+    await renderCharts();
   } catch {
     summary.value = {
       timeRange: timeRange.value,
@@ -501,7 +586,7 @@ async function fetchData() {
       trend: [],
     };
     await nextTick();
-    await renderChart();
+    await renderCharts();
   } finally {
     loading.value = false;
   }
@@ -554,7 +639,7 @@ function onUserPageChange(pageInfo: { current: number; pageSize: number }) {
 /** 切换到本 tab 时由父组件调用：容器刚从隐藏变为可见，需重绘并重新测量尺寸 */
 function refreshChart() {
   nextTick(async () => {
-    await renderChart();
+    await renderCharts();
   });
 }
 
@@ -567,8 +652,10 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
-  chart?.dispose();
-  chart = null;
+  volumeChart?.dispose();
+  volumeChart = null;
+  bandwidthChart?.dispose();
+  bandwidthChart = null;
   window.removeEventListener('resize', handleResize);
 });
 </script>
@@ -752,12 +839,39 @@ onUnmounted(() => {
 }
 
 .chart-card {
-  min-height: 380px;
+  min-height: 0;
+}
+
+.chart-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.chart-header h3 {
+  margin: 0;
+}
+
+.chart-hint {
+  font-size: 12px;
+  color: var(--text-secondary);
 }
 
 .chart-container {
   width: 100%;
-  height: 320px;
+}
+
+/* 上：收到文件 / 下载次数（隐藏 x 轴标签）；下：带宽（承载 x 轴标签）。
+   两图 grid 左右留白一致，上下对齐形成小倍数图，共读同一条时间轴。 */
+.chart-container--volume {
+  height: 220px;
+}
+
+.chart-container--bandwidth {
+  height: 150px;
 }
 
 .empty-hint {
@@ -799,8 +913,12 @@ onUnmounted(() => {
     font-size: 22px;
   }
 
-  .chart-container {
-    height: 240px;
+  .chart-container--volume {
+    height: 180px;
+  }
+
+  .chart-container--bandwidth {
+    height: 130px;
   }
 
   .filter-input,

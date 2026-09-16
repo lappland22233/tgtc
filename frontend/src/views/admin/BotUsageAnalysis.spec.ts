@@ -167,6 +167,41 @@ describe('BotUsageAnalysis', () => {
     });
   });
 
+  it('桶数超过上限时按自然步长合并（仅图表降采样），明细表保留原始粒度', async () => {
+    const wrapper = mountPage();
+    await flushPromises();
+    const vm = wrapper.vm as unknown as {
+      timeRange: string;
+      summary: { trend: unknown[] };
+      chartRows: Record<string, unknown>[];
+      granularityHint: string;
+    };
+    const makeBuckets = (count: number, unit: 'hours' | 'minutes') =>
+      Array.from({ length: count }, (_, index) => ({
+        bucket: `${unit}-${index}`,
+        downloads: 1,
+        bytes: '100',
+        files: 2,
+        fileBytes: '200',
+      }));
+
+    // 7 天 → 168 个小时桶，超过桌面上限 40，按自然步长 6 合并为 28 个点
+    vm.timeRange = '7d';
+    vm.summary = { ...vm.summary, trend: makeBuckets(168, 'hours') };
+    await flushPromises();
+    expect(vm.chartRows).toHaveLength(28);
+    expect(vm.granularityHint).toBe('粒度：每 6 小时');
+    expect(vm.chartRows[0]).toMatchObject({ downloads: 6, bytes: '600', files: 12, fileBytes: '1200' });
+    expect(vm.summary.trend).toHaveLength(168);
+
+    // 1 小时 → 60 个分钟桶，按步长 2 合并为 30 个点
+    vm.timeRange = '1h';
+    vm.summary = { ...vm.summary, trend: makeBuckets(60, 'minutes') };
+    await flushPromises();
+    expect(vm.chartRows).toHaveLength(30);
+    expect(vm.granularityHint).toBe('粒度：每 2 分钟');
+  });
+
   it('接口异常时清空用户列表并归零总数', async () => {
     get.mockImplementation(async (url: string) => {
       if (url === '/admin/bot-usage') return { data: { data: summaryPayload } };
