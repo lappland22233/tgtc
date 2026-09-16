@@ -8,7 +8,8 @@ import { sanitizeUrlForLog, sanitizeRefererForLog } from '../utils/sensitive-dat
 
 /**
  * Bot 直链控制器在请求对象上挂载的身份上下文（D8/C-2）。
- * 中间件在 res 'finish' 阶段读取并写入 access_logs 的 botGrantId/botTelegramUserId 列。
+ * 中间件在 res 'finish'（正常完成）或 'close'（客户端提前断开）阶段读取并写入
+ * access_logs 的 botGrantId/botTelegramUserId 列。
  */
 export interface BotAccessContext {
   botGrantId?: string | null;
@@ -56,15 +57,29 @@ export class AccessLogMiddleware implements NestMiddleware, OnApplicationShutdow
     // 中间件阶段不解码未验签 Cookie；仅接受上游认证链路已写入的可信用户上下文。
     const userId = (req as Request & { user?: { id?: string } }).user?.id || null;
 
-    // 记录响应开始时的已发送字节数，finish 时计算差值。
+    // 记录响应开始时的已发送字节数，finish/close 时计算差值。
     // 注意：bytesWritten 含 HTTP 响应头，并非精确的响应体大小，仅作带宽估算。
-    const startBytesSent = res.socket?.bytesWritten ?? 0;
-    const self = this;
+    // 必须在进入中间件时冻结 socket 引用：Node 在响应结束后会把 res.socket 置为 null，
+    // 等到 finish/close 阶段再读 res.socket 会恒为 0，导致响应大小只能退化为
+    // Content-Length 头（未声明该头时全部记成 0）。
+    const socket = res.socket ?? null;
+    const startBytesSent = socket?.bytesWritten ?? 0;
 
-    res.on('finish', () => {
-      const bytesSent = (res.socket?.bytesWritten ?? 0) - startBytesSent;
-      self.enqueue(req, res, Date.now() - start, rawPath, bytesSent, userId);
-    });
+    let recorded = false;
+    const finalize = (event: 'finish' | 'close'): void => {
+      if (recorded) return;
+      const bytesSent = (socket?.bytesWritten ?? 0) - startBytesSent;
+      // 客户端提前断开时（大文件流式下载被截断、Telegram 链接预览爬虫固定只抓前几 MB、
+      // 用户取消下载等）Node 只 emit 'close'，不 emit 'finish'。此前只监听 finish，
+      // 使这类请求一条都不落库——Bot 直链成功下载的访问日志长期为空即源于此。
+      // 但若响应头都还没发出（连接在服务端处理阶段就断了），不算一次已提供的响应，跳过。
+      if (event === 'close' && !res.headersSent && bytesSent <= 0) return;
+      recorded = true;
+      this.enqueue(req, res, Date.now() - start, rawPath, bytesSent, userId);
+    };
+
+    res.on('finish', () => finalize('finish'));
+    res.on('close', () => finalize('close'));
 
     next();
   }
@@ -86,7 +101,7 @@ export class AccessLogMiddleware implements NestMiddleware, OnApplicationShutdow
         parseInt(res.getHeader('content-length') as string) ||
         0;
 
-      // Bot 直链身份：控制器在开始处理时挂到 req 上（finish 阶段读取同一对象）
+      // Bot 直链身份：控制器在开始处理时挂到 req 上（finish/close 阶段读取同一对象）
       const botContext = req as Request & BotAccessContext;
 
       const entry: Partial<AccessLog> = {
