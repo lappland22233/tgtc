@@ -72,10 +72,25 @@ export class TelegramBotAdminController {
     return { detectedDomain: detected };
   }
 
-  /** Bot 使用情况汇总（基于 access_logs，SQL 侧聚合） */
+  /** Bot 使用情况汇总（下载来自 access_logs，收到文件来自 telegram_bot_file_grants） */
   @Get('bot-usage')
   @Roles(UserRole.SUPER_ADMIN)
   async getUsage(@Query('timeRange') timeRange?: string) {
     return this.botAdminService.getUsageSummary(timeRange || '7d');
+  }
+
+  /**
+   * Bot 用户明细：按 TG 用户 ID 聚合，直接给出 @用户名（不是昵称），
+   * 支持 `keyword`（匹配用户 ID / 用户名）与 `timeRange`（默认 all）筛选及分页。
+   */
+  @Get('bot-usage/users')
+  @Roles(UserRole.SUPER_ADMIN)
+  async getBotUsers(
+    @Query('keyword') keyword?: string,
+    @Query('timeRange') timeRange?: string,
+    @Query('page') page?: string,
+    @Query('pageSize') pageSize?: string,
+  ) {
+    return this.botAdminService.getUserBreakdown({ keyword, timeRange, page: Number(page), pageSize: Number(pageSize) });
   }
 }

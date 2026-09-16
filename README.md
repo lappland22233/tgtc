@@ -631,7 +631,8 @@ npm run preview
 | `GET` | `/api/admin/audit-logs` | 操作审计 |
 | `GET/PUT` | `/api/admin/bot-config` | Telegram Bot 配置（有效期/额度/时区/站点域名，仅 `super_admin`） |
 | `GET` | `/api/admin/bot-config/detected-domain` | 探测可信站点域名候选值（仅 `super_admin`） |
-| `GET` | `/api/admin/bot-usage` | Bot 使用情况汇总（下载次数/去重用户/带宽/趋势，仅 `super_admin`） |
+| `GET` | `/api/admin/bot-usage` | Bot 使用情况汇总（收到文件/下载次数/去重用户/带宽/趋势，仅 `super_admin`） |
+| `GET` | `/api/admin/bot-usage/users` | Bot 用户明细（TG 用户 ID + @用户名，支持关键字/时间筛选与分页，仅 `super_admin`） |
 
 | `GET` | `/api/admin/export` | CSV/JSON 数据导出 |
 

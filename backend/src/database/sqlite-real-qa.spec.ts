@@ -234,6 +234,28 @@ describe('真实 SQLite 数据源关键业务与并发 QA', () => {
     expect(usage.trend).toHaveLength(1);
     expect(usage.trend[0].bytes).toBe('2048');
 
+    // 收到文件统计来自 telegram_bot_file_grants（同窗口），并与下载趋势按时间桶合并
+    expect(usage).toMatchObject({ filesReceived: 1, receivedBytes: '1024' });
+    expect(usage.trend[0]).toMatchObject({ downloads: 1, files: 1, fileBytes: '1024' });
+
+    // 用户明细：SQL 侧聚合，直接给出 TG 用户 ID 与 @用户名（不含昵称），支持关键字筛选
+    const breakdown = await adminService.getUserBreakdown({});
+    expect(breakdown).toMatchObject({ total: 1, page: 1, pageSize: 20 });
+    expect(breakdown.rows[0]).toMatchObject({
+      telegramUserId: '80000000000000001',
+      telegramUsername: '@qa',
+      filesReceived: 1,
+      receivedBytes: '1024',
+      downloads: 0,
+    });
+    expect(breakdown.rows[0]).not.toHaveProperty('telegramDisplayName');
+    expect((await adminService.getUserBreakdown({ keyword: '@QA' })).total).toBe(1);
+    expect((await adminService.getUserBreakdown({ keyword: '80000000000000001' })).total).toBe(1);
+    // LIKE 通配符已转义：未转义时 '8_0' 会命中 '80000000000000001'
+    expect((await adminService.getUserBreakdown({ keyword: '8_0' })).total).toBe(0);
+    expect((await adminService.getUserBreakdown({ timeRange: '24h' })).total).toBe(1);
+    expect((await adminService.getUserBreakdown({ pageSize: 500 })).pageSize).toBe(100);
+
     // 清理：后续用例的访问日志统计断言基于全表，避免本用例污染计数
     await accessRepo.delete({ botTelegramUserId: '80000000000000001' });
   });

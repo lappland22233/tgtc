@@ -376,7 +376,7 @@ GET /api/admin/bot-config/detected-domain
 GET /api/admin/bot-usage?timeRange=7d
 ```
 
-`timeRange` 支持 `1h` / `24h` / `7d` / `30d`（默认 `7d`）。返回基于 `access_logs` 的 Bot 直链下载统计：
+`timeRange` 支持 `1h` / `24h` / `7d` / `30d`（默认 `7d`）。两个数据源：**下载**侧来自 `access_logs`，**收到文件**侧来自 `telegram_bot_file_grants`（即 Bot 收到文件并成功签发直链的记录，被配额拒绝的文件不计入）：
 
 ```json
 {
@@ -384,11 +384,57 @@ GET /api/admin/bot-usage?timeRange=7d
   "downloads": 42,
   "uniqueUsers": 7,
   "totalBytes": "104857600",
-  "trend": [{ "bucket": "2026-09-15 00:00:00", "downloads": 12, "bytes": "20971520" }]
+  "filesReceived": 18,
+  "receivedBytes": "734003200",
+  "trend": [
+    {
+      "bucket": "2026-09-15 00:00:00",
+      "downloads": 12,
+      "bytes": "20971520",
+      "files": 4,
+      "fileBytes": "104857600"
+    }
+  ]
 }
 ```
 
-`totalBytes` 为字符串（bigint 在 SQL 侧聚合，超出 `Number.MAX_SAFE_INTEGER` 亦不丢精度）。
+- `totalBytes` / `receivedBytes` / `fileBytes` 均为字符串（bigint 在 SQL 侧聚合，超出 `Number.MAX_SAFE_INTEGER` 亦不丢精度）；
+- 两个数据源的时间桶使用同一表达式与粒度，已按桶合并为一条 `trend`。
+
+### Bot 用户明细
+
+```http
+GET /api/admin/bot-usage/users?timeRange=all&keyword=@alice&page=1&pageSize=20
+```
+
+按 TG 用户 ID 聚合的 Bot 使用明细，**直接给出用户 ID 与 @用户名**（`telegramUsername` 为该用户最新一次非空的快照；不返回昵称 `telegramDisplayName`）：
+
+| 参数 | 说明 |
+|---|---|
+| `timeRange` | `all`（默认，不限时间）/ `1h` / `24h` / `7d` / `30d`，按「收到文件」时间过滤 |
+| `keyword` | 同时匹配 TG 用户 ID 与 @用户名（大小写不敏感，`%`/`_`/`\` 已转义） |
+| `page` / `pageSize` | 页码（默认 1）与每页条数（默认 20，上限 100） |
+
+```json
+{
+  "total": 3,
+  "page": 1,
+  "pageSize": 20,
+  "rows": [
+    {
+      "telegramUserId": "80000000000000001",
+      "telegramUsername": "@alice",
+      "filesReceived": 6,
+      "receivedBytes": "734003200",
+      "downloads": 11,
+      "lastReceivedAt": "2026-09-15T08:12:33.000Z",
+      "lastAccessedAt": "2026-09-15T09:40:02.000Z"
+    }
+  ]
+}
+```
+
+`downloads` 为该用户文件直链的**累计**访问次数（`accessCount` 之和，不随时间范围变化）。
 
 ### Bot 命令（Telegram 私聊）
 

@@ -1,6 +1,9 @@
 import { TelegramBotAdminService } from './telegram-bot-admin.service';
 
-function makeService(envValues: Record<string, string | undefined> = {}) {
+function makeService(
+  envValues: Record<string, string | undefined> = {},
+  dataSource: unknown = {},
+) {
   const configService = { get: jest.fn((key: string) => envValues[key]) };
   const auditService = { log: jest.fn() };
   const grantService = {
@@ -14,14 +17,13 @@ function makeService(envValues: Record<string, string | undefined> = {}) {
   };
   const quotaService = {} as never;
   const configServiceForDomain = { resolveSiteOriginAsync: jest.fn(async () => 'https://example.com') };
-  const dataSource = {} as never;
   const service = new TelegramBotAdminService(
     configService as never,
     auditService as never,
     grantService as never,
     quotaService,
     configServiceForDomain as never,
-    dataSource,
+    dataSource as never,
   );
   return { service, auditService, grantService, configServiceForDomain };
 }
@@ -121,5 +123,137 @@ describe('TelegramBotAdminService', () => {
     expect(auditPayload.action).toBe('telegram_bot_link_revoked');
     expect(JSON.stringify(auditPayload)).not.toContain(token);
     expect(auditPayload.metadata.tokenPrefix).toBe('tgl_bbbbbbbb');
+  });
+
+  it('Bot 使用汇总同时给出下载与收到文件，并按时间桶合并趋势', async () => {
+    const queries: string[] = [];
+    const dataSource = {
+      query: jest.fn(async (sql: string) => {
+        queries.push(sql);
+        if (sql.includes('AS "filesReceived"')) return [{ filesReceived: 2, receivedBytes: '3072' }];
+        if (sql.includes('AS "files"')) return [{ bucket: 'B', files: 1, fileBytes: '1024' }];
+        if (sql.includes('AS "uniqueUsers"')) return [{ downloads: 5, uniqueUsers: 3, totalBytes: '2048' }];
+        return [{ bucket: 'A', downloads: 5, bytes: '2048' }];
+      }),
+    };
+    const { service } = makeService({}, dataSource);
+
+    const summary = await service.getUsageSummary('7d');
+
+    expect(summary).toMatchObject({
+      timeRange: '7d',
+      downloads: 5,
+      uniqueUsers: 3,
+      totalBytes: '2048',
+      filesReceived: 2,
+      receivedBytes: '3072',
+    });
+    // 收到文件侧独立查询 grants，不与 access_logs 混算
+    expect(queries.some((sql) => sql.includes('"telegram_bot_file_grants"'))).toBe(true);
+    // 两个数据源的时间桶合并为一条趋势（含只有收到文件、没有下载的桶）
+    expect(summary.trend.map((row) => row.bucket)).toEqual(['A', 'B']);
+    expect(summary.trend[0]).toMatchObject({ downloads: 5, bytes: '2048', files: 0, fileBytes: '0' });
+    expect(summary.trend[1]).toMatchObject({ downloads: 0, bytes: '0', files: 1, fileBytes: '1024' });
+  });
+
+  it('收到文件与下载落在同一时间桶时合并为同一行', async () => {
+    const dataSource = {
+      query: jest.fn(async (sql: string) => {
+        if (sql.includes('AS "filesReceived"')) return [{ filesReceived: 1, receivedBytes: '1024' }];
+        if (sql.includes('AS "files"')) return [{ bucket: '2026-09-16 10:00:00', files: 1, fileBytes: '1024' }];
+        if (sql.includes('AS "uniqueUsers"')) return [{ downloads: 1, uniqueUsers: 1, totalBytes: '2048' }];
+        return [{ bucket: '2026-09-16 10:00:00', downloads: 1, bytes: '2048' }];
+      }),
+    };
+    const { service } = makeService({}, dataSource);
+
+    const summary = await service.getUsageSummary('24h');
+
+    expect(summary.trend).toHaveLength(1);
+    expect(summary.trend[0]).toMatchObject({ downloads: 1, bytes: '2048', files: 1, fileBytes: '1024' });
+  });
+
+  it('用户明细按 TG 用户 ID 聚合，直接返回 @用户名且不含昵称', async () => {
+    const calls: { sql: string; params: unknown[] }[] = [];
+    const dataSource = {
+      query: jest.fn(async (sql: string, params: unknown[] = []) => {
+        calls.push({ sql, params });
+        if (sql.includes('COUNT(DISTINCT g."telegramUserId")')) return [{ total: '1' }];
+        return [{
+          telegramUserId: '80000000000000001',
+          telegramUsername: '@qa',
+          filesReceived: '2',
+          receivedBytes: '2048',
+          downloads: '7',
+          lastReceivedAt: '2026-09-16T10:00:00.000Z',
+          lastAccessedAt: null,
+        }];
+      }),
+    };
+    const { service } = makeService({}, dataSource);
+
+    const result = await service.getUserBreakdown({});
+
+    expect(result).toMatchObject({ total: 1, page: 1, pageSize: 20 });
+    expect(result.rows[0]).toEqual({
+      telegramUserId: '80000000000000001',
+      telegramUsername: '@qa',
+      filesReceived: 2,
+      receivedBytes: '2048',
+      downloads: 7,
+      lastReceivedAt: '2026-09-16T10:00:00.000Z',
+      lastAccessedAt: null,
+    });
+    // 明确不返回昵称（需求：只看用户 ID 与 @用户名）
+    expect(Object.keys(result.rows[0])).not.toContain('telegramDisplayName');
+    expect(calls[0].sql).toContain('GROUP BY g."telegramUserId"');
+    // 取该用户最新一次非空的用户名快照
+    expect(calls[0].sql).toContain('ORDER BY g2."createdAt" DESC');
+    // 无筛选条件时占位符从 $1 开始，ID 与用户名共用 LIKE 参数
+    expect(calls[0].sql).toContain('LIMIT $1 OFFSET $2');
+    expect(calls[0].params).toEqual([20, 0]);
+  });
+
+  it('用户明细关键字转义通配符、大小写不敏感，并同时匹配 ID 与用户名', async () => {
+    const calls: { sql: string; params: unknown[] }[] = [];
+    const dataSource = {
+      query: jest.fn(async (sql: string, params: unknown[] = []) => {
+        calls.push({ sql, params });
+        return sql.includes('AS "total"') ? [{ total: '0' }] : [];
+      }),
+    };
+    const { service } = makeService({}, dataSource);
+
+    await service.getUserBreakdown({ keyword: '  A_B% ', timeRange: '24h', page: 3, pageSize: 1000 });
+
+    const { sql, params } = calls[0];
+    expect(sql).toContain('g."createdAt" >= $1');
+    expect(sql).toContain(`LOWER(g."telegramUsername") LIKE $3 ESCAPE '\\'`);
+    expect(params[0]).toBeInstanceOf(Date);
+    expect(params[1]).toBe('%a\\_b\\%%');
+    expect(params[2]).toBe('%a\\_b\\%%');
+    // pageSize 上限 100、page=3 → offset 200
+    expect(params[3]).toBe(100);
+    expect(params[4]).toBe(200);
+    // 计数查询复用同一批筛选参数（不含分页参数）
+    expect(calls[1].params).toEqual(params.slice(0, 3));
+  });
+
+  it('用户明细未知时间范围回退为不限时间，页大小夹紧到下限', async () => {
+    const calls: { sql: string; params: unknown[] }[] = [];
+    const dataSource = {
+      query: jest.fn(async (sql: string, params: unknown[] = []) => {
+        calls.push({ sql, params });
+        return sql.includes('AS "total"') ? [{ total: '0' }] : [];
+      }),
+    };
+    const { service } = makeService({}, dataSource);
+
+    await service.getUserBreakdown({ timeRange: 'bogus', pageSize: 0, page: 0 });
+
+    const { sql, params } = calls[0];
+    expect(sql).toContain('WHERE 1=1');
+    expect(sql).toContain('LIMIT $1 OFFSET $2');
+    expect(params).toEqual([1, 0]);
   });
 });
