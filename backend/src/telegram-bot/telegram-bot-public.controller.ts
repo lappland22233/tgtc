@@ -119,8 +119,11 @@ export class TelegramBotPublicController {
         stream = result.stream;
         contentLength = expectedSize;
       } else {
-        const result = await this.telegramService.getRealtimeFileStream(grant.telegramFileId);
-        stream = result.stream;
+        // 文件大小未知：无法预测磁盘占用、也无从生成 Content-Length / Content-Range，
+        // 走有界滚动缓冲直通（不落盘、受上游并发租约约束），保证文件始终可下载。
+        stream = await this.fileCacheService.getDirectOnlyStream(cacheKey, () =>
+          this.telegramService.getRealtimeFileStream(grant.telegramFileId),
+        );
       }
 
       // 统计计数（不影响下载）

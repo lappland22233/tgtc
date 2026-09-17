@@ -1642,12 +1642,27 @@ export class FileService implements OnModuleInit {
       };
 
       if (noCache) {
-        const result = await this.fileCacheService.getNoCacheStream(file.id, expectedSize, fetch);
+        const result = await this.fileCacheService.getNoCacheStream(
+          file.id,
+          expectedSize,
+          fetch,
+          0,
+          expectedSize - 1,
+          file.uploadVersion,
+        );
         this.attachDownloadInvalidHandler(file, result.stream);
         await this.maybeWriteBackRecoveredPath(file, recoveredInfo);
         return { stream: result.stream, actualSize: expectedSize };
       }
-      const result = await this.fileCacheService.getOrCacheStream(file.id, expectedSize, fetch);
+      const result = await this.fileCacheService.getOrCacheStream(
+        file.id,
+        expectedSize,
+        fetch,
+        file.uploadVersion,
+        // 直接下载端点（非任务化）只做有限等待：超时返回结构化 429/503 + Retry-After，
+        // 而不是让浏览器长时间悬挂。前端应先用下载任务 API 观察排队状态。
+        { waitTimeoutMs: this.fileCacheService.directDownloadWaitMs },
+      );
       this.attachDownloadInvalidHandler(file, result.stream);
       await this.maybeWriteBackRecoveredPath(file, recoveredInfo);
       return { stream: result.stream, actualSize: expectedSize };
@@ -1795,7 +1810,7 @@ export class FileService implements OnModuleInit {
     );
     const stream = await this.fileCacheService.getOrCacheRangeStream(
       file.id, expectedSize, start, end, fetchFn,
-      { noCache: forceNoCache },
+      { noCache: forceNoCache, contentVersion: file.uploadVersion },
     );
     if (stream) this.attachDownloadInvalidHandler(file, stream);
     return stream;
@@ -2302,7 +2317,9 @@ export class FileService implements OnModuleInit {
       expectedSize,
       { noCache: this.fileCacheService.isNoCacheMode() },
     );
-    const stream = await this.fileCacheService.getOrCacheRangeStream(file.id, expectedSize, start, end, fetchFn);
+    const stream = await this.fileCacheService.getOrCacheRangeStream(file.id, expectedSize, start, end, fetchFn, {
+      contentVersion: file.uploadVersion,
+    });
     if (!stream) throw new BadRequestException('文件暂不可提供范围预览');
 
     return {
@@ -3027,7 +3044,9 @@ export class FileService implements OnModuleInit {
       total,
       { noCache: this.fileCacheService.isNoCacheMode() },
     );
-    const readStream = await this.fileCacheService.getOrCacheRangeStream(file.id, total, start, actualEnd, fetchFn);
+    const readStream = await this.fileCacheService.getOrCacheRangeStream(file.id, total, start, actualEnd, fetchFn, {
+      contentVersion: file.uploadVersion,
+    });
     if (!readStream) {
       throw new BadRequestException('文件暂不可提供范围预览');
     }
@@ -3108,7 +3127,9 @@ export class FileService implements OnModuleInit {
       total,
       { noCache: this.fileCacheService.isNoCacheMode() },
     );
-    const stream = await this.fileCacheService.getOrCacheRangeStream(file.id, total, start, end, fetchFn);
+    const stream = await this.fileCacheService.getOrCacheRangeStream(file.id, total, start, end, fetchFn, {
+      contentVersion: file.uploadVersion,
+    });
     if (!stream) {
       throw new BadRequestException('文件暂不可提供范围预览');
     }

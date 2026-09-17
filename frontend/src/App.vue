@@ -23,6 +23,8 @@
     </router-view>
     <!-- 常驻媒体宿主：路由出口之外，保证跨导航/预览收起播放不中断 -->
     <PersistentMediaHost />
+    <!-- 全局下载队列：排队中/准备中的下载任务与取消入口（无任务时自动隐藏） -->
+    <DownloadQueueIndicator />
   </t-config-provider>
 </template>
 
@@ -31,6 +33,7 @@ import { ref, computed, onErrorCaptured, onUnmounted, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { useAuthStore } from './stores/auth';
 import PersistentMediaHost from './components/file/PersistentMediaHost.vue';
+import DownloadQueueIndicator from './components/DownloadQueueIndicator.vue';
 
 const authStore = useAuthStore();
 

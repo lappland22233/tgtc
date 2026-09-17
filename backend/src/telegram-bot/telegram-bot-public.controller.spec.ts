@@ -71,6 +71,11 @@ function makeController(overrides: Record<string, unknown> | null = {}) {
         _end: number,
       ): Promise<Readable | null> => makeReadable(),
     ),
+    // 未知大小的有界直通：真实实现会调用 fetchFn 取上游流，这里保持同一契约
+    getDirectOnlyStream: jest.fn(async (
+      _sessionKey: string,
+      fetchFn: () => Promise<{ stream: Readable; info: { file_size: number } }>,
+    ): Promise<Readable> => (await fetchFn()).stream),
   };
   const rateLimitService = {
     checkAndIncrement: jest.fn(

@@ -245,7 +245,7 @@
       <t-form label-width="160px">
         <t-form-item label="缓存总大小上限 (GB)">
           <t-input-number v-model="cacheConfig.maxSizeGB" :min="1" :max="1000" :step="1" />
-          <span style="margin-left: 8px; font-size: 12px; color: var(--td-text-color-secondary);">超过此值停止写入新缓存</span>
+          <span style="margin-left: 8px; font-size: 12px; color: var(--td-text-color-secondary);">超过此值先按最近最少使用淘汰旧缓存，仍不足则改走临时中转</span>
         </t-form-item>
         <t-form-item label="磁盘最低剩余空间 (GB)">
           <t-input-number
@@ -254,15 +254,15 @@
             :max="100"
             :step="0.5"
           />
-          <span style="margin-left: 8px; font-size: 12px; color: var(--td-text-color-secondary);">低于此值停止缓存，防止磁盘爆满</span>
+          <span style="margin-left: 8px; font-size: 12px; color: var(--td-text-color-secondary);">缓存与下载临时占用的最低保留空间，低于此值不再新建缓存或完整中转</span>
         </t-form-item>
         <t-form-item label="缓存有效期 (天)">
           <t-input-number v-model="cacheConfig.ttlDays" :min="1" :max="365" :step="1" />
-          <span style="margin-left: 8px; font-size: 12px; color: var(--td-text-color-secondary);">超过此时间的缓存文件自动清理</span>
+          <span style="margin-left: 8px; font-size: 12px; color: var(--td-text-color-secondary);">超过此时间的缓存文件自动清理（正在下载中的文件会跳过本轮清理）</span>
         </t-form-item>
         <t-form-item label="无缓存模式">
           <t-switch :value="cacheConfig.noCacheMode" @change="onNoCacheModeToggle" />
-          <span style="margin-left: 8px; font-size: 12px; color: var(--td-text-color-secondary);">开启后所有文件下载实时回源直通，不读写本地缓存；Range 请求退化为完整下载，上游带宽压力增大</span>
+          <span style="margin-left: 8px; font-size: 12px; color: var(--td-text-color-secondary);">开启后不发布正式缓存，下载仍会写入临时中转文件（可重放给同一文件的并发下载）；Range 请求保持 206，但冷文件仍会完整回源，上游带宽压力增大</span>
         </t-form-item>
         <t-form-item>
           <div style="display: flex; align-items: center; gap: 8px;">
@@ -274,6 +274,86 @@
           </div>
         </t-form-item>
       </t-form>
+    </div>
+
+    <!-- 下载资源调度：磁盘预约/排队与直通兜底 -->
+    <div class="card" style="margin-top: 20px;">
+      <h3 style="margin-bottom: 4px;">下载资源调度</h3>
+      <p style="color: var(--text-secondary); font-size: 12px; margin: 0 0 16px;">
+        下载按「预测占用 → 预约 → 排队」调度：已获得资源的下裁任务不会被新任务抢占，
+        空间紧张时新任务排队等待。任何已上传文件都可以下载，完整暂存不可行时会自动改用受限缓冲直通。
+      </p>
+      <t-form label-width="160px">
+        <t-form-item label="总预约上限 (GB)">
+          <t-input-number v-model="downloadConfig.maxReservedGB" :min="0" :max="10000" :step="1" />
+          <span style="margin-left: 8px; font-size: 12px; color: var(--td-text-color-secondary);">所有在途任务未写入预约之和的上限，0 表示只受物理空间约束</span>
+        </t-form-item>
+        <t-form-item label="上游并发数">
+          <t-input-number v-model="downloadConfig.maxConcurrentUpstreams" :min="1" :max="64" :step="1" />
+          <span style="margin-left: 8px; font-size: 12px; color: var(--td-text-color-secondary);">同时进行的 Telegram 冷文件回源数量，占用越多带宽与磁盘压力越大</span>
+        </t-form-item>
+        <t-form-item label="排队上限 (个)">
+          <t-input-number v-model="downloadConfig.queueCapacity" :min="1" :max="10000" :step="1" />
+          <span style="margin-left: 8px; font-size: 12px; color: var(--td-text-color-secondary);">等待磁盘或上游的名额上限，超过后下载请求直接返回「服务器繁忙」</span>
+        </t-form-item>
+        <t-form-item label="排队等待上限 (秒)">
+          <t-input-number v-model="downloadConfig.queueTimeoutSeconds" :min="5" :max="86400" :step="30" />
+          <span style="margin-left: 8px; font-size: 12px; color: var(--td-text-color-secondary);">单个任务最长排队时间，超时返回可重试状态并释放名额</span>
+        </t-form-item>
+        <t-form-item label="临时中转宽限 (秒)">
+          <t-input-number v-model="downloadConfig.spoolGraceSeconds" :min="0" :max="3600" :step="10" />
+          <span style="margin-left: 8px; font-size: 12px; color: var(--td-text-color-secondary);">最后一个下载者断开后临时文件的保留时间，便于断点续传复用</span>
+        </t-form-item>
+        <t-form-item label="直通缓冲窗口 (MB)">
+          <t-input-number v-model="downloadConfig.directWindowMB" :min="1" :max="1024" :step="1" />
+          <span style="margin-left: 8px; font-size: 12px; color: var(--td-text-color-secondary);">完整暂存不可行时的直通缓冲上限，值越小内存占用越低</span>
+        </t-form-item>
+        <t-form-item label="下载任务保留 (秒)">
+          <t-input-number v-model="downloadConfig.taskRetentionSeconds" :min="60" :max="86400" :step="60" />
+          <span style="margin-left: 8px; font-size: 12px; color: var(--td-text-color-secondary);">下载任务状态（排队/可下载）的保留时间</span>
+        </t-form-item>
+        <t-form-item>
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <t-button theme="primary" :disabled="!blockLoadState.download" @click="saveDownloadConfig">保存调度配置</t-button>
+            <t-button variant="outline" @click="fetchDownloadRuntime">刷新运行状态</t-button>
+            <t-button v-if="!blockLoadState.download" variant="outline" @click="fetchDownloadConfig">重新加载</t-button>
+          </div>
+          <div v-if="!blockLoadState.download" style="color: var(--color-warning); font-size: 12px; margin-top: 4px;">
+            配置加载失败，当前显示默认值。为避免覆盖服务端配置，已禁用保存，请先重新加载。
+          </div>
+        </t-form-item>
+      </t-form>
+      <div v-if="downloadRuntime" class="download-runtime">
+        <div class="download-runtime__item">
+          <span class="download-runtime__label">磁盘可用</span>
+          <span class="download-runtime__value">{{ formatBytes(downloadRuntime.freeBytes) }}</span>
+        </div>
+        <div class="download-runtime__item">
+          <span class="download-runtime__label">未写入预约</span>
+          <span class="download-runtime__value">{{ formatBytes(downloadRuntime.reservedRemainingBytes) }}</span>
+        </div>
+        <div class="download-runtime__item">
+          <span class="download-runtime__label">排队任务</span>
+          <span class="download-runtime__value">{{ downloadRuntime.waitingDiskTasks }} 磁盘 / {{ downloadRuntime.waitingUpstreamTasks }} 上游</span>
+        </div>
+        <div class="download-runtime__item">
+          <span class="download-runtime__label">活跃回源</span>
+          <span class="download-runtime__value">{{ downloadRuntime.activeUpstreams }} / {{ downloadRuntime.maxConcurrentUpstreams }}</span>
+        </div>
+        <div class="download-runtime__item">
+          <span class="download-runtime__label">缓存占用</span>
+          <span class="download-runtime__value">
+            {{ formatBytes(downloadRuntime.cacheCommittedBytes) }} / {{ formatBytes(downloadRuntime.cacheMaxBytes) }}
+          </span>
+        </div>
+        <div class="download-runtime__item">
+          <span class="download-runtime__label">最长等待</span>
+          <span class="download-runtime__value">{{ Math.round(downloadRuntime.oldestDiskWaitMs / 1000) }} 秒</span>
+        </div>
+      </div>
+      <div v-else style="color: var(--text-tertiary); font-size: 12px;">
+        运行状态需要后端支持（/admin/download-runtime），当前不可用。
+      </div>
     </div>
 
     <!-- Telegram Bot 设置（本页仅 SUPER_ADMIN 可访问） -->
@@ -425,6 +505,7 @@ const blockLoadState = reactive({
   smtp: false as boolean,
   upload: false as boolean,
   cache: false as boolean,
+  download: false as boolean,
   bot: false as boolean,
 });
 
@@ -465,6 +546,50 @@ const cacheConfig = ref({
   noCacheMode: false,
 });
 
+// 下载资源调度（FILE_DOWNLOAD_*）：默认值需与后端 DOWNLOAD_CONFIG_DEFAULTS 保持一致
+const downloadConfig = ref({
+  maxReservedGB: 0,
+  maxConcurrentUpstreams: 8,
+  queueCapacity: 128,
+  queueTimeoutSeconds: 1800,
+  spoolGraceSeconds: 120,
+  directWindowMB: 16,
+  directWaitSeconds: 60,
+  taskRetentionSeconds: 900,
+});
+
+interface DownloadRuntime {
+  freeBytes: number;
+  minimumFreeBytes: number;
+  reservedRemainingBytes: number;
+  cacheReservedBytes: number;
+  cacheCommittedBytes: number;
+  cacheMaxBytes: number;
+  waitingDiskTasks: number;
+  waitingUpstreamTasks: number;
+  activeUpstreams: number;
+  maxConcurrentUpstreams: number;
+  oldestDiskWaitMs: number;
+  activeReservations: number;
+  noCacheMode: boolean;
+  runtimeUnavailable?: boolean;
+}
+
+const downloadRuntime = ref<DownloadRuntime | null>(null);
+
+/** 字节数展示（运行状态卡使用） */
+function formatBytes(value: number | undefined): string {
+  if (value === undefined || value === null || value < 0) return '未知';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let size = value;
+  let unit = 0;
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024;
+    unit += 1;
+  }
+  return `${size >= 10 || unit === 0 ? Math.round(size) : size.toFixed(1)} ${units[unit]}`;
+}
+
 // Telegram Bot 设置（D14 + D16）：统一走 /admin/bot-config 热更新
 const botConfig = ref({
   linkTtlHours: 4,
@@ -490,7 +615,7 @@ function markClean() {
   dirty.value = false;
 }
 // 深度监听各配置对象，任何字段变化即标记脏；保存成功后由 markClean 复位
-watch([authConfig, smtpConfig, uploadConfig, cacheConfig, botConfig], () => {
+watch([authConfig, smtpConfig, uploadConfig, cacheConfig, downloadConfig, botConfig], () => {
   markDirty();
 }, { deep: true });
 
@@ -821,8 +946,9 @@ function onNoCacheModeToggle(value: boolean) {
   // 开启无缓存模式：强调带宽影响
   const confirmDialog = DialogPlugin.confirm({
     header: '开启无缓存模式',
-    body: '开启后所有文件下载将实时回源直通、不读写本地缓存，且 Range（断点/拖动播放）请求会退化为完整下载。'
-      + '这将显著增大上游带宽压力与回源延迟。确定要开启吗？',
+    body: '开启后不再发布正式缓存：下载仍需写入临时中转文件（用于同一文件的并发下载复用），'
+      + 'Range（断点/拖动播放）请求保持 206，但冷文件仍会完整回源，因此会显著增大上游带宽压力与回源延迟。'
+      + '确定要开启吗？',
     theme: 'warning',
     confirmBtn: '仍要开启',
     cancelBtn: '取消',
@@ -859,6 +985,48 @@ async function saveCacheConfig() {
     markClean();
   } catch (error: unknown) {
     MessagePlugin.error(getErrorMessage(error));
+  }
+}
+
+// —— 下载资源调度 ——
+
+async function fetchDownloadConfig(): Promise<boolean> {
+  try {
+    const res = await api.get('/admin/download-config');
+    downloadConfig.value = res.data.data ?? downloadConfig.value;
+    blockLoadState.download = true;
+    return true;
+  } catch (err) {
+    console.error('获取下载调度配置失败', err);
+    blockLoadState.download = false;
+    return false;
+  }
+}
+
+async function saveDownloadConfig() {
+  // 未成功加载的区块不允许保存（G15-04）
+  if (!blockLoadState.download) {
+    MessagePlugin.warning('下载调度配置加载失败，无法保存。请先点击"重新加载"');
+    return;
+  }
+  try {
+    await api.put('/admin/download-config', downloadConfig.value);
+    MessagePlugin.success('下载调度配置已保存（对后续下载任务生效，不中断进行中的下载）');
+    markClean();
+    await fetchDownloadRuntime();
+  } catch (error: unknown) {
+    MessagePlugin.error(getErrorMessage(error));
+  }
+}
+
+/** 运行状态快照：磁盘余量、预约量、队列长度与活跃回源 */
+async function fetchDownloadRuntime(): Promise<void> {
+  try {
+    const res = await api.get('/admin/download-runtime');
+    downloadRuntime.value = res.data.data ?? null;
+  } catch (err) {
+    console.error('获取下载运行状态失败', err);
+    downloadRuntime.value = null;
   }
 }
 
@@ -1024,6 +1192,7 @@ onMounted(() => {
     fetchSMTPConfig(),
     fetchUploadConfig(),
     fetchCacheConfig(),
+    fetchDownloadConfig(),
     fetchBotConfig(),
     fetchBannedIPs(),
   ]).then((results) => {
@@ -1037,6 +1206,8 @@ onMounted(() => {
     // 初始加载完成：此后表单改动才算用户编辑，恢复脏检查（G15-17）
     suppressDirty.value = false;
   });
+  // 下载运行状态为只读观测：加载失败不影响保存，单独请求即可
+  void fetchDownloadRuntime();
 });
 </script>
 
@@ -1051,6 +1222,38 @@ onMounted(() => {
   margin-top: var(--space-4);
   padding-top: var(--space-4);
   border-top: 1px solid var(--border-default);
+}
+
+.download-runtime {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: var(--space-3);
+  margin-top: var(--space-4);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--border-default);
+}
+
+.download-runtime__item {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-3);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-overlay);
+}
+
+.download-runtime__label {
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+.download-runtime__value {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-primary);
 }
 
 .smtp-test__title {

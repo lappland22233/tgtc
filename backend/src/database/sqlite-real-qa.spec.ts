@@ -63,6 +63,8 @@ describe('真实 SQLite 数据源关键业务与并发 QA', () => {
       'SqliteApiKeySecurityGovernance1802200000000',
       // v1.2.9：Telegram Bot 文件直链
       'SqliteTelegramBotLinks1802300000000',
+      // v1.3.3：下载任务持久化（下载磁盘配额与排队）
+      'SqliteCreateDownloadTasks1802500000000',
     ]);
 
     await dataSource.undoLastMigration();
@@ -354,7 +356,7 @@ describe('真实 SQLite 数据源关键业务与并发 QA', () => {
     const admin = new AdminService(
       dataSource.getRepository(SystemConfig), dataSource.getRepository(BannedIP), fileRepo, userRepo,
       dataSource.getRepository(FileAccessLog), dataSource.getRepository(AccessLog), dataSource.getRepository(AuditLog),
-      {} as any, {} as any, audit, {} as any, {} as any,
+      {} as any, {} as any, audit, {} as any, {} as any, {} as any,
     );
     await admin.banIP(owner, '198.51.100.7', 'QA', true);
     await expect(admin.banIP(owner, '198.51.100.7', 'QA duplicate', true)).rejects.toThrow('该IP已被封禁');

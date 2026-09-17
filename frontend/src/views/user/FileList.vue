@@ -311,9 +311,9 @@ import MessagePlugin from '@/utils/message';
 import { DialogPlugin } from 'tdesign-vue-next';
 import { useFileStore } from '../../stores/files';
 import { useAuthStore, api } from '../../stores/auth';
-import { getErrorMessage } from '../../utils/error';
+import { getErrorMessage, getDownloadErrorMessage } from '../../utils/error';
 import { formatDate } from '@/utils/format';
-import { triggerBrowserDownload } from '@/utils/download';
+import { useDownloadsStore } from '../../stores/downloads';
 import { useFileListQuery } from '../../composables/useFileListQuery';
 import { useMobile } from '../../composables/useMobile';
 import UploadModal from '../../components/UploadModal.vue';
@@ -348,6 +348,7 @@ const fileStore = useFileStore();
 const authStore = useAuthStore();
 const tagStore = useTagStore();
 const folderStore = useFolderStore();
+const downloads = useDownloadsStore();
 
 /** 缩略图 / 封面共享缓存上下文（与视频预览封面共用同一 Blob 缓存） */
 const thumbnailContext = computed(() => `u:${authStore.user?.id ?? ''}`);
@@ -1278,13 +1279,14 @@ async function copyMediaLink(row: FileItem) {
   }
 }
 
-function downloadFile(row: FileItem) {
-  // 下载排队修复：服务器空间不足时后端会保持请求等待（排队至多 30 分钟），
-  // 浏览器原生下载在服务端排队期间显示"浏览器转圈"，用户无感知失败。
-  // 此处提示等待语义，避免用户误以为点击无效而重复点击。
-  MessagePlugin.info('正在开始下载；如服务器空间紧张，下载可能需要短暂排队，请勿重复点击');
-  // 直接调用浏览器原生下载（后端返回 attachment，浏览器下载器接管进度/保存）
-  triggerBrowserDownload(`/api/files/${row.id}/download`, row.originalName);
+async function downloadFile(row: FileItem) {
+  // 两阶段下载：先创建下载任务获得真实的资源可用性/排队原因，
+  // 服务器资源可用时立即触发浏览器原生下载；繁忙时进入排队并由全局指示器展示进度与取消。
+  try {
+    await downloads.requestDownload({ fileId: row.id, fileName: row.originalName });
+  } catch (error: unknown) {
+    MessagePlugin.error(getDownloadErrorMessage(error) ?? getErrorMessage(error));
+  }
 }
 
 function handleDelete(row: FileItem) {

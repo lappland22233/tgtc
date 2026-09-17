@@ -153,6 +153,70 @@ curl -H "X-API-Key: tgtc_xxxx" -OJ \
   "https://your-domain.example/api/files/<file-id>/download"
 ```
 
+#### 下载任务（排队与负载感知）
+
+服务器磁盘或 Telegram 回源繁忙时，直接发起下载会进入服务端队列。为便于展示真实排队状态而非长时间等待，可先创建下载任务：
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `POST` | `/api/files/:id/download-tasks` | 创建下载任务，返回可否立即下载或排队原因 |
+| `GET` | `/api/download-tasks/:taskId` | 查询任务状态（服务端每次重新评估队列情况） |
+| `DELETE` | `/api/download-tasks/:taskId` | 取消排队中的任务（幂等） |
+
+请求体（可选）：
+
+```json
+{ "nocache": false }
+```
+
+响应示例（排队中）：
+
+```json
+{
+  "code": 0,
+  "message": "success",
+  "data": {
+    "taskId": "8f0d…",
+    "status": "queued",
+    "queueReason": "disk",
+    "queuePosition": 3,
+    "retryAfterMs": 5000,
+    "expectedSize": 10485760,
+    "downloadUrl": "/api/files/<file-id>/download",
+    "expiresAt": "2026-09-17T12:30:00.000Z",
+    "message": "正在等待服务器释放磁盘空间，前面还有 2 个任务"
+  }
+}
+```
+
+字段说明：
+
+- `status`：`queued`（排队中）/ `streamable`（可开始下载）/ `cancelled` / `expired`；
+- `queueReason`：`disk`（磁盘空间）/ `upstream`（回源连接）/ `server_load`（综合负载或缓存容量饱和）；
+- `retryAfterMs`：建议的查询间隔（客户端应按此退避，页面隐藏时可进一步降频）；
+- `downloadUrl`：拿到 `streamable` 后由浏览器原生下载使用（同源 Cookie 鉴权，URL 不额外签发票据）。
+
+```bash
+# 1) 创建任务
+TASK=$(curl -s -H "X-API-Key: tgtc_xxxx" -H "Content-Type: application/json" \
+  -d '{}' "https://your-domain.example/api/files/<file-id>/download-tasks" | jq -r .data.taskId)
+
+# 2) 轮询直到可下载（按 retryAfterMs 退避，示例固定 2s）
+curl -s -H "X-API-Key: tgtc_xxxx" \
+  "https://your-domain.example/api/download-tasks/$TASK" | jq .data.status
+
+# 3) 取消排队（可选）
+curl -s -X DELETE -H "X-API-Key: tgtc_xxxx" \
+  "https://your-domain.example/api/download-tasks/$TASK"
+```
+
+说明：
+
+- 下载任务**不传输文件**，仅上报调度状态；最终文件传输仍由 `/api/files/:id/download` 完成；
+- 任务状态保存在服务端内存中（与「仅支持单后端实例」的约束一致），服务重启后任务过期需重新创建；
+- 任务归属绑定创建者身份，其他用户查询/取消一律返回 `404`；
+- 若直接调用下载端点而未使用任务接口，服务器会在有限等待（`FILE_DOWNLOAD_DIRECT_WAIT_SECONDS`）后返回结构化错误（`429` / `503` / `507` + `Retry-After` + `X-Tgtc-Error-Code`），不会无限悬挂。
+
 ### 修改与删除
 
 | 方法 | 路径 | 请求体 | 说明 |

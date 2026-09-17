@@ -11,6 +11,8 @@ import { FileAccessLog } from '../common/entities/file-access-log.entity';
 import { AccessLog } from '../common/entities/access-log.entity';
 import { AuditLog } from '../common/entities/audit-log.entity';
 import { FileService } from '../file/file.service';
+import { FileCacheService } from '../file/file-cache.service';
+import { DOWNLOAD_CONFIG_DEFAULTS, DOWNLOAD_CONFIG_KEYS } from '../file/download-resource-coordinator.service';
 import { MailerService } from '../mailer/mailer.service';
 import { ConfigCacheService } from '../common/services/config-cache.service';
 import { AuditService } from '../common/services/audit.service';
@@ -62,6 +64,8 @@ export class AdminService {
     private auditService: AuditService,
     private exportService: ExportService,
     private mailerService: MailerService,
+    // 可选注入：仅用于下载资源运行状态观测；缺失时状态接口降级返回 config
+    private fileCacheService?: FileCacheService,
   ) {}
 
   async getStats(): Promise<{
@@ -731,6 +735,128 @@ export class AdminService {
       resourceId: 'file_cache',
       metadata: config,
     });
+  }
+
+  // ==================== 下载资源调度配置 ====================
+
+  /** 读取下载调度配置（FILE_DOWNLOAD_*），未配置的键回退默认值 */
+  async getDownloadConfig(): Promise<{
+    maxReservedGB: number;
+    maxConcurrentUpstreams: number;
+    queueCapacity: number;
+    queueTimeoutSeconds: number;
+    spoolGraceSeconds: number;
+    directWindowMB: number;
+    directWaitSeconds: number;
+    taskRetentionSeconds: number;
+  }> {
+    const keys = DOWNLOAD_CONFIG_KEYS;
+    const values = await Promise.all([
+      this.getConfigByKey(keys.MAX_RESERVED_GB),
+      this.getConfigByKey(keys.MAX_CONCURRENT_UPSTREAMS),
+      this.getConfigByKey(keys.QUEUE_CAPACITY),
+      this.getConfigByKey(keys.QUEUE_TIMEOUT_SECONDS),
+      this.getConfigByKey(keys.SPOOL_GRACE_SECONDS),
+      this.getConfigByKey(keys.DIRECT_WINDOW_MB),
+      this.getConfigByKey(keys.DIRECT_WAIT_SECONDS),
+      this.getConfigByKey(keys.TASK_RETENTION_SECONDS),
+    ]);
+    const fallback = DOWNLOAD_CONFIG_DEFAULTS;
+    const num = (raw: string | null | undefined, key: string) => {
+      const parsed = Number(raw);
+      return Number.isFinite(parsed) && parsed >= 0
+        ? parsed
+        : Number(fallback[key]);
+    };
+    return {
+      maxReservedGB: num(values[0], keys.MAX_RESERVED_GB),
+      maxConcurrentUpstreams: num(values[1], keys.MAX_CONCURRENT_UPSTREAMS),
+      queueCapacity: num(values[2], keys.QUEUE_CAPACITY),
+      queueTimeoutSeconds: num(values[3], keys.QUEUE_TIMEOUT_SECONDS),
+      spoolGraceSeconds: num(values[4], keys.SPOOL_GRACE_SECONDS),
+      directWindowMB: num(values[5], keys.DIRECT_WINDOW_MB),
+      directWaitSeconds: num(values[6], keys.DIRECT_WAIT_SECONDS),
+      taskRetentionSeconds: num(values[7], keys.TASK_RETENTION_SECONDS),
+    };
+  }
+
+  async updateDownloadConfig(user: User, config: {
+    maxReservedGB?: number;
+    maxConcurrentUpstreams?: number;
+    queueCapacity?: number;
+    queueTimeoutSeconds?: number;
+    spoolGraceSeconds?: number;
+    directWindowMB?: number;
+    directWaitSeconds?: number;
+    taskRetentionSeconds?: number;
+  }): Promise<void> {
+    const keys = DOWNLOAD_CONFIG_KEYS;
+    if (config.maxReservedGB !== undefined) {
+      if (config.maxReservedGB < 0 || config.maxReservedGB > 10000) {
+        throw new BadRequestException('下载总预约上限应在 0-10000 GB 之间（0 表示不限制）');
+      }
+      await this.setConfigValue(keys.MAX_RESERVED_GB, String(config.maxReservedGB), '下载任务未写入预约总上限 (GB，0 为不限)');
+    }
+    if (config.maxConcurrentUpstreams !== undefined) {
+      if (config.maxConcurrentUpstreams < 1 || config.maxConcurrentUpstreams > 64) {
+        throw new BadRequestException('上游并发数应在 1-64 之间');
+      }
+      await this.setConfigValue(keys.MAX_CONCURRENT_UPSTREAMS, String(config.maxConcurrentUpstreams), '下载上游回源并发上限');
+    }
+    if (config.queueCapacity !== undefined) {
+      if (config.queueCapacity < 1 || config.queueCapacity > 10000) {
+        throw new BadRequestException('下载队列容量应在 1-10000 之间');
+      }
+      await this.setConfigValue(keys.QUEUE_CAPACITY, String(config.queueCapacity), '下载等待队列容量');
+    }
+    if (config.queueTimeoutSeconds !== undefined) {
+      if (config.queueTimeoutSeconds < 5 || config.queueTimeoutSeconds > 86400) {
+        throw new BadRequestException('排队等待上限应在 5-86400 秒之间');
+      }
+      await this.setConfigValue(keys.QUEUE_TIMEOUT_SECONDS, String(config.queueTimeoutSeconds), '下载排队等待上限 (秒)');
+    }
+    if (config.spoolGraceSeconds !== undefined) {
+      if (config.spoolGraceSeconds < 0 || config.spoolGraceSeconds > 3600) {
+        throw new BadRequestException('临时中转宽限期应在 0-3600 秒之间');
+      }
+      await this.setConfigValue(keys.SPOOL_GRACE_SECONDS, String(config.spoolGraceSeconds), '临时中转文件复用宽限期 (秒)');
+    }
+    if (config.directWindowMB !== undefined) {
+      if (config.directWindowMB < 1 || config.directWindowMB > 1024) {
+        throw new BadRequestException('直通缓冲窗口应在 1-1024 MB 之间');
+      }
+      await this.setConfigValue(keys.DIRECT_WINDOW_MB, String(config.directWindowMB), '直通模式缓冲窗口 (MB)');
+    }
+    if (config.directWaitSeconds !== undefined) {
+      if (config.directWaitSeconds < 0 || config.directWaitSeconds > 600) {
+        throw new BadRequestException('直接下载等待上限应在 0-600 秒之间');
+      }
+      await this.setConfigValue(keys.DIRECT_WAIT_SECONDS, String(config.directWaitSeconds), '直接下载端点有限等待上限 (秒)');
+    }
+    if (config.taskRetentionSeconds !== undefined) {
+      if (config.taskRetentionSeconds < 60 || config.taskRetentionSeconds > 86400) {
+        throw new BadRequestException('下载任务保留时间应在 60-86400 秒之间');
+      }
+      await this.setConfigValue(keys.TASK_RETENTION_SECONDS, String(config.taskRetentionSeconds), '下载任务状态保留时间 (秒)');
+    }
+
+    this.auditService.log({
+      action: 'download_config_change',
+      userId: user.id,
+      resourceType: 'config',
+      resourceId: 'download_schedule',
+      metadata: config,
+    });
+  }
+
+  /** 下载资源运行状态快照（磁盘余量、预约量、队列长度、活跃回源） */
+  async getDownloadRuntimeStatus(): Promise<Record<string, unknown>> {
+    const snapshot = this.fileCacheService?.getDownloadRuntimeSnapshot();
+    const cfg = await this.getDownloadConfig();
+    return {
+      ...(snapshot ?? { runtimeUnavailable: true }),
+      config: cfg,
+    };
   }
 
   // ==================== 访问日志统计 ====================

@@ -81,16 +81,31 @@ export class StreamResponderService {
     const isServerError = status >= 500;
     // 服务端日志用原始错误信息（不脱敏内部细节，仅供排查）
     const detailMessage = error instanceof Error ? error.message : fallbackMessage;
+    // 结构化业务错误（下载资源协调器/上传磁盘预算）：文案由本仓库显式提供且不含内部细节，
+    // 保留它前端才能展示"服务器繁忙 / 排队等待"等可行动提示，并写 Retry-After 便于自动退避。
+    const structured = extractStructuredStreamError(error);
     // 客户端可见文案（G4-12）：5xx 一律使用调用方提供的安全通用文案 + requestId，
-    // 不向客户端回显内部错误 message；仅 <500 的业务异常（白名单 HttpException 等）透传。
-    const clientMessage = isServerError ? fallbackMessage : detailMessage;
+    // 不向客户端回显内部错误 message；仅 <500 的业务异常（白名单 HttpException 等）与结构化业务码透传。
+    const clientMessage = isServerError ? (structured?.message ?? fallbackMessage) : detailMessage;
 
     if (!res.headersSent) {
       // 416：补充 Content-Range 通配头（RFC 7233）
       if (status === 416 && typeof (error as { total?: unknown }).total === 'number') {
         res.set('Content-Range', `bytes */${(error as { total: number }).total}`);
       }
-      const payload: Record<string, unknown> = { code: status, message: clientMessage, data: null };
+      if (structured) {
+        res.setHeader('X-Tgtc-Error-Code', structured.errorCode);
+        if (structured.retryAfterMs !== undefined) {
+          res.setHeader('Retry-After', String(Math.max(1, Math.ceil(structured.retryAfterMs / 1000))));
+        }
+      }
+      const payload: Record<string, unknown> = {
+        code: status,
+        message: clientMessage,
+        data: null,
+        ...(structured ? { errorCode: structured.errorCode } : {}),
+        ...(structured?.retryAfterMs !== undefined ? { retryAfterMs: structured.retryAfterMs } : {}),
+      };
       if (isServerError) {
         const requestId = randomUUID();
         const safeUrl = sanitizeUrlForLog((req?.originalUrl || req?.url || '/').split('#')[0]);
@@ -106,4 +121,55 @@ export class StreamResponderService {
       res.destroy(error instanceof Error ? error : new Error(clientMessage));
     }
   }
+}
+
+interface StructuredStreamError {
+  errorCode: string;
+  retryAfterMs?: number;
+  message?: string;
+}
+
+/**
+ * 从异常对象或 HttpException 响应体中提取结构化业务码。
+ * 兼容 `errorCode`（下载资源协调器）与历史 `code`（上传磁盘预算）两种写法。
+ */
+function extractStructuredStreamError(error: unknown): StructuredStreamError | null {
+  const candidate = error as {
+    errorCode?: unknown;
+    retryAfterMs?: unknown;
+    getResponse?: () => unknown;
+  } | null;
+
+  let errorCode = typeof candidate?.errorCode === 'string' && candidate.errorCode
+    ? candidate.errorCode
+    : undefined;
+  let retryAfterMs = normalizeRetryAfter(candidate?.retryAfterMs);
+  let message: string | undefined;
+
+  if (typeof candidate?.getResponse === 'function') {
+    const body = candidate.getResponse();
+    if (body && typeof body === 'object') {
+      const resp = body as { errorCode?: unknown; code?: unknown; retryAfterMs?: unknown; message?: unknown };
+      if (!errorCode) {
+        errorCode = typeof resp.errorCode === 'string' && resp.errorCode
+          ? resp.errorCode
+          : (typeof resp.code === 'string' && resp.code ? resp.code : undefined);
+      }
+      retryAfterMs = retryAfterMs ?? normalizeRetryAfter(resp.retryAfterMs);
+      if (typeof resp.message === 'string') message = resp.message;
+    }
+  }
+
+  if (!errorCode) return null;
+  return {
+    errorCode,
+    ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
+    ...(message ? { message } : {}),
+  };
+}
+
+/** 合法（>=1s）的建议重试间隔（毫秒） */
+function normalizeRetryAfter(value: unknown): number | undefined {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= 1000 ? parsed : undefined;
 }

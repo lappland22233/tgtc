@@ -230,6 +230,7 @@ const actionLabels: Record<string, string> = {
   file_copy: '复制文件', file_overwrite: '覆盖文件', file_overwrite_fallback: '覆盖回退',
   config_change: '配置变更', smtp_config_change: 'SMTP变更', smtp_test_mail: 'SMTP测试邮件', upload_config_change: '上传配置',
   auth_config_change: '认证配置', cache_config_change: '缓存配置',
+  download_config_change: '下载调度配置',
   ip_ban: 'IP封禁', ip_unban: 'IP解封',
   batch_delete_files: '批量删除', batch_delete_files_by_admin: '管理员批量删',
   update_check: '版本检查', update_install: '触发系统更新', update_cancel: '取消系统更新',

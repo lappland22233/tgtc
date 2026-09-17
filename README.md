@@ -34,6 +34,18 @@
 - 支持标准单区间 Range（closed / open-ended / suffix）：缓存命中直接返回 `206`；冷文件通过 build/spool follower 同样保持 `206`，断点续传可用
 - 上游始终单路顺序回源，请求区间若尚未回源完成会等待补齐（并发多线程下载未回源部分无法立即应答）；非法或越界 Range 返回 `416` 而非静默回退 `200`
 
+#### 下载磁盘配额与排队
+
+所有会新增本地占用的下载环节（正式缓存构建、临时中转、缓存预热）统一走同一套调度：
+
+- **占用预测 → 预约 → 排队**：按文件大小预测峰值占比并先行预约；准入公式为「物理空闲 − 最低安全余量 − 其他任务未写入预约 ≥ 本次新增」，避免多个任务复用同一份空闲空间；
+- **写入即核销**：每写入一段数据就把预约量核销同等额度，已落盘部分由文件系统反映，不做物理/逻辑双重扣减；
+- **不抢占**：已获得预约的任务不会被新任务或配置热更新撤销；回收只作用于已发布且未被读取的旧缓存，绝不删除进行中的临时文件；
+- **始终可下载**：没有「超过某上限就拒绝下载」的规则。完整暂存不可行（单文件超过缓存上限，或卷内空间结构性不足）时自动降级为受限缓冲直通（`FILE_DOWNLOAD_DIRECT_WINDOW_MB`，不写本地副本），保持 `206`/`416` 与首字节语义；
+- **排队可见**：`POST /api/files/:id/download-tasks` 返回是否可立即下载或排队原因（磁盘 / 上游 / 负载）、近似队列位置与建议重试间隔；前端据此展示全局下载队列指示器并支持取消（详见 `API.md`）。
+
+运维注意：本调度管理的是后端缓存卷（`tmp/Cache`）。自建 Telegram Bot API/TDLib 的 `--dir` 工作目录是**独立磁盘域**，两者位于同一物理卷时仍可能互相抢占，建议分卷部署并分别配置最低余量（`FILE_CACHE_MIN_FREE_DISK_GB` 与 `--workdir-min-free-bytes`）。
+
 ### 分享
 
 - 独立 `ShareLink` 模型，同一文件或文件夹可创建多条分享链接
@@ -247,6 +259,14 @@ Redis 承载 `metrics-aggregation`、`attack-detection`、`alert-evaluation`、`
 | `TELEGRAM_FILE_STREAM_TIMEOUT_SECONDS` | `120` | 实时流请求超时 |
 | `FILE_CACHE_BUILD_IDLE_TIMEOUT_MS` | `60000` | 缓存构建无进展超时 |
 | `FILE_CACHE_BUILD_TOTAL_TIMEOUT_MS` | `1800000` | 单次缓存构建总时限 |
+| `FILE_DOWNLOAD_MAX_RESERVED_GB` | `0` | 在途下载任务「未写入预约」总上限（GB），0 表示仅受物理空间约束 |
+| `FILE_DOWNLOAD_MAX_CONCURRENT_UPSTREAMS` | `8` | 同时进行的 Telegram 冷回源数量 |
+| `FILE_DOWNLOAD_QUEUE_CAPACITY` | `128` | 磁盘/上游等待队列容量，超过后直接返回「服务器繁忙」 |
+| `FILE_DOWNLOAD_QUEUE_TIMEOUT_SECONDS` | `1800` | 单个下载任务排队等待上限（秒） |
+| `FILE_DOWNLOAD_SPOOL_GRACE_SECONDS` | `120` | 临时中转文件最后一个下载者离开后的保留时间（秒） |
+| `FILE_DOWNLOAD_DIRECT_WINDOW_MB` | `16` | 受限缓冲直通的缓冲窗口（MB），越小内存占用越低 |
+| `FILE_DOWNLOAD_DIRECT_WAIT_SECONDS` | `60` | 直接下载端点（非任务化）允许的有限等待上限（秒） |
+| `FILE_DOWNLOAD_TASK_RETENTION_SECONDS` | `900` | 下载任务状态保留时间（秒） |
 | `THUMBNAIL_DIR` | `tmp/thumbnails` | 缩略图目录 |
 | `FILE_PROCESSING_STALE_MINUTES` | `60` | 上传队列僵尸任务恢复阈值（分钟） |
 

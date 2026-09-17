@@ -10,6 +10,7 @@ import { FileAccessControlService } from './file-access-control.service';
 import { FileUploadConfigService } from './file-upload-config.service';
 import { File } from '../common/entities/file.entity';
 import { Folder } from '../common/entities/folder.entity';
+import { DownloadTask } from '../common/entities/download-task.entity';
 import { FileAccessLog } from '../common/entities/file-access-log.entity';
 import { BannedIP } from '../common/entities/banned-ip.entity';
 import { ShareAudit } from '../common/entities/share-audit.entity';
@@ -21,9 +22,11 @@ import { ThumbnailCryptoService } from './thumbnail-crypto.service';
 import { UploadJobService } from './upload-job.service';
 import { ChunkUploadService } from './chunk-upload.service';
 import { ChunkUploadController } from './chunk-upload.controller';
+import { DownloadTaskController } from './download-task.controller';
+import { DownloadTaskService } from './download-task.service';
 import { ChunkUploadResourceInterceptor } from './chunk-upload-resource.interceptor';
 import { FileCacheService } from './file-cache.service';
-import { DownloadAdmissionService } from './download-admission.service';
+import { DownloadResourceCoordinatorService } from './download-resource-coordinator.service';
 import { ThumbnailService } from './thumbnail.service';
 import { UploadDiskBudgetService } from './upload-disk-budget.service';
 import { StrictUploadModeGuard } from './strict-upload-mode.guard';
@@ -35,7 +38,7 @@ import { ApiKeyModule } from '../api-key/api-key.module';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([File, Folder, FileAccessLog, BannedIP, ShareAudit, ShareLink, UploadTask]),
+    TypeOrmModule.forFeature([File, Folder, FileAccessLog, BannedIP, ShareAudit, ShareLink, UploadTask, DownloadTask]),
     ConfigCacheModule,
     RateLimitModule,
     TagModule,
@@ -58,7 +61,7 @@ import { ApiKeyModule } from '../api-key/api-key.module';
       }),
     }),
   ],
-  controllers: [FileController, ChunkUploadController],
+  controllers: [FileController, ChunkUploadController, DownloadTaskController],
   providers: [
     FileService,
     // M6 拆分：访问策略 / 密码 / IP 封禁域
@@ -73,9 +76,12 @@ import { ApiKeyModule } from '../api-key/api-key.module';
     StrictUploadModeGuard,
     FileCacheService,
     ThumbnailService,
-    DownloadAdmissionService,
+    // 下载资源协调器：磁盘/缓存逻辑容量预约与上游 FIFO 租约的唯一单例
+    DownloadResourceCoordinatorService,
+    // 下载任务：排队状态上报与取消（两阶段下载的第一阶段）
+    DownloadTaskService,
   ],
   // FileCacheService 供 Bot 直链匿名下载复用（同一实例，保证会话/缓存目录唯一）
-  exports: [FileService, UploadDiskBudgetService, FileCacheService],
+  exports: [FileService, UploadDiskBudgetService, FileCacheService, DownloadResourceCoordinatorService],
 })
 export class FileModule {}
