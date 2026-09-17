@@ -155,6 +155,24 @@ export class TelegramService {
   }
 
   /**
+   * 判断 Telegram 描述是否为"TDLib 本地副本不可用"型错误（二改 Bot API 流式端点上报）。
+   *
+   * 仅匹配**确证**的本地副本特征（本地文件打不开/读不到、TDLib 找不到真实文件路径），
+   * 供 R10 把这类 500/504 视同"路径失效型 502"进入既有的一次回源：workdir 副本被清理后，
+   * TDLib 只在重新发起下载时才重新校验本地路径，因此冷文件的第一个请求可能先拿到该错误，
+   * 而紧接着的下一次请求已经可用（2026-09-17 线上 500 即此形态）。
+   */
+  private isTelegramStreamLocalFileError(description: string): boolean {
+    const safe = this.safeTelegramDescription(description).toLowerCase();
+    return (
+      safe.includes('failed to open tdlib local file')
+      || safe.includes('failed to read tdlib local file')
+      || safe.includes('tdlib local file returned an incomplete part')
+      || safe.includes("can't find real file path")
+    );
+  }
+
+  /**
    * 包装 axios 请求，统一处理 Telegram API 错误，提供更友好的错误消息。
    * 429 限流时自动重试（最多 3 次，指数退避）。
    */
@@ -232,6 +250,21 @@ export class TelegramService {
               ? this.safeTelegramDescription(description)
               : '二改流式端点返回 502';
             throw new TelegramStreamPathError(`Telegram 文件流上下文不可用：${reason}`);
+          }
+          // R10：流式端点的 504 只可能在首字节写出前产生（已经开始的传输只会中断连接、
+          // 不会返回 504），因此它与 R1 的 502 同属"流上下文不可用"，进入同一条单次回源链路。
+          if (status === 504 && label === 'getRealtimeFileStream') {
+            throw new TelegramStreamPathError(
+              `Telegram 文件流首字节失败：${this.safeTelegramDescription(description)}`,
+            );
+          }
+          // R10：TDLib 本地副本缺失/不可读时流式端点以 500 上报（非 502 形态），
+          // 仅在确证特征下同样视为可恢复；其余 500 保持瞬时错误语义，避免反复回源。
+          if (status === 500 && label === 'getRealtimeFileStream'
+            && this.isTelegramStreamLocalFileError(description)) {
+            throw new TelegramStreamPathError(
+              `Telegram 文件流本地副本不可用：${this.safeTelegramDescription(description)}`,
+            );
           }
         }
         // G4-11：脱敏移到 response 分支之外——网络层错误（无 response，

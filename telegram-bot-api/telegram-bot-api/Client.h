@@ -55,6 +55,10 @@ class Client final : public WebhookActor::Callback {
   void start_file_stream(td::ActorId<FileStreamConnection> stream, td::int64 stream_id, td::string file_id,
                          td::int64 expected_size);
   void remove_file_stream(td::int64 stream_id, td::int32 file_id, bool remove_local_file);
+  // Re-requests the download of a file that a streaming connection found locally unusable. TDLib
+  // re-validates the local location on every download start, so this restores a workdir copy that
+  // was removed behind its back; a file that is already downloading is not downloaded twice.
+  void request_file_redownload(td::int32 file_id);
 
   void close();
 

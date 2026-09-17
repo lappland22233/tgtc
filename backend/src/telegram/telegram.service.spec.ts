@@ -388,6 +388,62 @@ describe('TelegramService realtime stream', () => {
       expect(mockedAxios.get.mock.calls.some(([url]) => String(url).includes('/getFile'))).toBe(true);
     });
 
+    it.each([
+      [500, 'Failed to open TDLib local file: No such file or directory'],
+      [500, 'Failed to read TDLib local file: Input/output error'],
+      [500, 'TDLib local file returned an incomplete part'],
+      [500, "Can't find real file path"],
+      [504, 'File stream first byte timeout'],
+    ])('classifies a %i failure from the stream endpoint as recoverable: %s', async (status, description) => {
+      const { service, tmpDir } = await createRecoveryService();
+      const localPath = path.join(tmpDir, 'local-file.bin');
+      await fs.writeFile(localPath, Buffer.from('hello'));
+
+      // 1) 首次 streaming → TDLib 本地副本不可用（500/504，非 502 形态）
+      mockedAxios.get.mockRejectedValueOnce({
+        response: { status, data: { ok: false, error_code: status, description } },
+      } as any);
+      // 2) 恢复 getFileInfo（metadataOnly=false）
+      mockedAxios.get.mockResolvedValueOnce({
+        data: { result: { file_id: 'file-id', file_path: localPath, file_size: 5 } },
+      } as any);
+      // 3) getFileStream 内部的 getFileInfo
+      mockedAxios.get.mockResolvedValueOnce({
+        data: { result: { file_id: 'file-id', file_path: localPath, file_size: 5 } },
+      } as any);
+
+      await expect(service.getRealtimeFileStream('file-id', 5)).resolves.toMatchObject({
+        info: { file_path: localPath, file_size: 5 },
+      });
+      expect(mockedAxios.get.mock.calls.some(([url]) => String(url).includes('/getFile'))).toBe(true);
+    });
+
+    it('does not classify an unrelated 500 from the stream endpoint', async () => {
+      const { service } = await createRecoveryService();
+      mockedAxios.get.mockRejectedValueOnce({
+        response: { status: 500, data: { ok: false, description: 'upstream failure' } },
+      } as any);
+
+      await expect(service.getRealtimeFileStream('file-id', 5))
+        .rejects.not.toBeInstanceOf(TelegramStreamPathError);
+    });
+
+    it.each([
+      [500, 'Failed to open TDLib local file'],
+      [504, 'File stream first byte timeout'],
+    ])('does not classify a %i failure reported by a non-stream request', async (status, description) => {
+      const { service } = await createRecoveryService();
+      mockedAxios.get.mockRejectedValueOnce({
+        response: { status, data: { ok: false, description } },
+      } as any);
+
+      await expect((service as any).telegramRequest(
+        () => mockedAxios.get('http://127.0.0.1:8084/bot/test/getFile'),
+        'getFileInfo',
+        1,
+      )).rejects.not.toBeInstanceOf(TelegramStreamPathError);
+    });
+
     it('does not classify a generic 502 from a non-stream Telegram request', async () => {
       const { service } = await createRecoveryService();
       const generic502 = new Error('Request failed with status code 502');

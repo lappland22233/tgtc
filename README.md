@@ -256,6 +256,12 @@ Redis 承载 `metrics-aggregation`、`attack-detection`、`alert-evaluation`、`
 /stream/file/bot<TOKEN>/<encoded-file-id>
 ```
 
+实时流的失效处理约定：
+
+- **首字节前不失败**：TDLib 报「已下载」但 workdir 副本已不存在时（缓存清理、换目录等），流会请求 TDLib 重新回源并等待，而不是让冷文件的首个请求直接 5xx；只有已经开始传输后才中断（TDLib 的下载错误始终经 `on_file_error` 正常上报）。
+- **首字节前一律返回 JSON 错误 + 真实 HTTP 状态码**：不再裸断连接（历史表现为 nginx `upstream prematurely closed connection while reading response header`）。
+- **后端一次受控回源**：流式端点返回 502（路径失效/尺寸不可用），或返回带「TDLib 本地副本不可用」（打不开/读不到/找不到真实路径）特征的 500/504 时，后端执行一次强制回源（非 `metadata_only` `getFile`），失败保持瞬时错误语义、不顺延重试。
+
 缓存容量、最低磁盘空间和 TTL 存放在系统配置中，默认分别为 10 GB、1 GB、3 天，可从超级管理员后台热更新。
 
 ### Telegram Bot 入站（文件直链）

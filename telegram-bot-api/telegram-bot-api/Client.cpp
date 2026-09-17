@@ -8814,6 +8814,19 @@ void Client::remove_file_stream(int64 stream_id, int32 file_id, bool remove_loca
   }
 }
 
+void Client::request_file_redownload(int32 file_id) {
+  if (closing_ || logging_out_) {
+    return;
+  }
+  if (file_id <= 0 || file_stream_listeners_.count(file_id) == 0) {
+    // No streaming connection is waiting for this file any more.
+    return;
+  }
+  LOG(INFO) << "Request re-download of file " << file_id << " for file streaming";
+  send_request(make_object<td_api::downloadFile>(file_id, 1, 0, 0, false),
+               td::make_unique<TdOnFileStreamDownloadCallback>(this, file_id));
+}
+
 void Client::send(PromisedQueryPtr query) {
   if (!query->is_internal()) {
     query->set_stat_actor(stat_actor_);
