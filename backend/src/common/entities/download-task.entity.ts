@@ -1,4 +1,5 @@
 import { Column, CreateDateColumn, Entity, Index, PrimaryColumn, UpdateDateColumn } from 'typeorm';
+import { databaseColumnType } from '../../database/database-types';
 
 /**
  * 下载任务（持久化）。
@@ -21,7 +22,7 @@ export class DownloadTask {
   ownerKey: string;
 
   @Index('idx_download_tasks_file')
-  @Column({ type: 'uuid' })
+  @Column({ type: databaseColumnType('uuid') as 'uuid' })
   fileId: string;
 
   @Column({ type: 'varchar', length: 255, nullable: true })
@@ -47,8 +48,13 @@ export class DownloadTask {
   @UpdateDateColumn()
   updatedAt: Date;
 
-  /** 过期时刻：超过后任务视为 expired，可由定时清理删除 */
+  /**
+   * 过期时刻：超过后任务视为 expired，可由定时清理删除。
+   * 必须走 databaseColumnType：PG 只接受 timestamptz/timestamp，
+   * 直接写 SQLite 的 'datetime' 会让 PG 在 DataSource.initialize() 阶段抛
+   * DataTypeNotSupportedError（迁移与启动双阻断）。
+   */
   @Index('idx_download_tasks_expires')
-  @Column({ type: 'datetime' })
+  @Column({ type: databaseColumnType('timestamptz') as 'timestamptz' })
   expiresAt: Date;
 }

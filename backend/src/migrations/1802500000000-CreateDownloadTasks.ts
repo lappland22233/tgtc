@@ -20,9 +20,10 @@ export class CreateDownloadTasks1802500000000 implements MigrationInterface {
         "queueReason" character varying(16),
         "errorCode" character varying(64),
         "expectedSize" bigint NOT NULL DEFAULT 0,
-        "createdAt" TIMESTAMP NOT NULL DEFAULT now(),
-        "updatedAt" TIMESTAMP NOT NULL DEFAULT now(),
-        "expiresAt" TIMESTAMP NOT NULL,
+        "createdAt" timestamp NOT NULL DEFAULT now(),
+        "updatedAt" timestamp NOT NULL DEFAULT now(),
+        -- 与实体 databaseColumnType('timestamptz') 对齐（CreateDateColumn/UpdateDateColumn 用 timestamp）
+        "expiresAt" timestamptz NOT NULL,
         CONSTRAINT "PK_download_tasks_id" PRIMARY KEY ("id")
       )
     `);
