@@ -131,6 +131,141 @@ describe('FileCacheService realtime build session', () => {
     expect((service as any).buildSessions.size).toBe(0);
   });
 
+  it('总时限 0 = 禁用：有持续进度的慢速长传输不会被误杀', async () => {
+    // 旧实现用固定 30 分钟总时限判断卡死且不随进度刷新，4GiB 慢速传输必然被误杀。
+    // 这里把空闲阈值压到 60ms，验证只要持续有进度就永不中断。
+    (service as any).buildFirstByteTimeoutMs = 0;
+    (service as any).buildIdleTimeoutMs = 300;
+    (service as any).buildTotalTimeoutMs = 0;
+
+    const upstream = new PassThrough();
+    const resultPromise = service.getOrCacheStream(fileId, 6, async () => ({
+      stream: upstream,
+      info: { file_size: 6 },
+    }));
+    // 首块先到达，避免阻塞在「等待会话可读」阶段
+    upstream.write(Buffer.from('a'));
+    const { stream } = await resultPromise;
+    const readPromise = readStream(stream);
+
+    // 总耗时约 300ms，但每 60ms 都有数据到达（远小于空闲阈值）
+    for (const ch of ['b', 'c', 'd', 'e']) {
+      await new Promise(resolve => setTimeout(resolve, 60));
+      upstream.write(Buffer.from(ch));
+    }
+    await new Promise(resolve => setTimeout(resolve, 60));
+    upstream.end(Buffer.from('f'));
+
+    await expect(readPromise).resolves.toEqual(Buffer.from('abcdef'));
+  });
+
+  it('首字节超时独立生效：上游迟迟不返回首块时按首字节超时失败', async () => {
+    (service as any).buildFirstByteTimeoutMs = 150;
+    (service as any).buildIdleTimeoutMs = 5000;
+    (service as any).buildTotalTimeoutMs = 0;
+
+    // 首块永不到达：会话在等待上游阶段即被首字节超时中止并释放资源
+    const resultPromise = service.getOrCacheStream(fileId, 6, () => new Promise(() => {}));
+    await expect(resultPromise).rejects.toThrow('首字节超时');
+
+    // 等待会话收尾（finally 中归还磁盘预约与上游租约）
+    await waitSessionsSettled(service);
+    await new Promise(resolve => setImmediate(resolve));
+    expect(service.getCachedPath(fileId)).toBeNull();
+    // 中止分支必须幂等归零上游租约，否则后续下载会被永久限流
+    expect((service as any).activeUpstreams).toBe(0);
+  });
+
+  it('总时限默认禁用，且显式配置 0 也保持禁用（历史实现只接受正数）', () => {
+    const previous = process.env.FILE_CACHE_BUILD_TOTAL_TIMEOUT_MS;
+    const build = (): FileCacheService =>
+      new FileCacheService({ get: jest.fn((_key: string, fallback: string) => fallback) } as any);
+    try {
+      delete process.env.FILE_CACHE_BUILD_TOTAL_TIMEOUT_MS;
+      const byDefault = build();
+      expect((byDefault as any).buildTotalTimeoutMs).toBe(0);
+      expect((byDefault as any).buildFirstByteTimeoutMs)
+        .toBeGreaterThan((byDefault as any).buildIdleTimeoutMs);
+
+      process.env.FILE_CACHE_BUILD_TOTAL_TIMEOUT_MS = '0';
+      expect((build() as any).buildTotalTimeoutMs).toBe(0);
+
+      process.env.FILE_CACHE_BUILD_TOTAL_TIMEOUT_MS = '123000';
+      expect((build() as any).buildTotalTimeoutMs).toBe(123000);
+    } finally {
+      if (previous === undefined) delete process.env.FILE_CACHE_BUILD_TOTAL_TIMEOUT_MS;
+      else process.env.FILE_CACHE_BUILD_TOTAL_TIMEOUT_MS = previous;
+    }
+  });
+
+  it('上游预算为 1 时冷缓存构建仍能开始（权重与连接计数不可混用）', async () => {
+    // 回归：canStartUpstream 曾用「活跃连接数 < 权重预算」判断，导致 leader 拿到租约后
+    // 仍被自己占用的名额误拒（预算=1 时每个冷回源都 503）。
+    (service as any).maxConcurrentUpstreams = 1;
+    const upstream = new PassThrough();
+    const fetchFn = jest.fn(async () => ({ stream: upstream, info: { file_size: 6 } }));
+
+    const resultPromise = service.getOrCacheStream(fileId, 6, fetchFn);
+    upstream.write(Buffer.from('a'));
+    const { stream } = await resultPromise;
+
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect((service as any).activeUpstreams).toBe(1);
+    upstream.end(Buffer.from('bcdef'));
+    await expect(readStream(stream)).resolves.toEqual(Buffer.from('abcdef'));
+  });
+
+  it('准入前占位：同文件并发冷下载只建立一个会话、只回源一次', async () => {
+    const upstream = new PassThrough();
+    const fetchFn = jest.fn(async () => ({ stream: upstream, info: { file_size: 6 } }));
+
+    const pending = [
+      service.getOrCacheStream(fileId, 6, fetchFn),
+      service.getOrCacheStream(fileId, 6, fetchFn),
+      service.getOrCacheStream(fileId, 6, fetchFn),
+    ];
+    // 首个 leader 拿到首块后才返回，其余在会话锁内复查后合流为 follower
+    upstream.write(Buffer.from('a'));
+    const results = await Promise.all(pending);
+
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect((service as any).buildSessions.size).toBe(1);
+    expect((service as any).activeUpstreams).toBe(1);
+    // 三个消费者都从同一份临时文件独立读取
+    expect(results.every(result => result.fromCache === false)).toBe(true);
+
+    upstream.end(Buffer.from('bcdef'));
+    const contents = await Promise.all(results.map(result => readStream(result.stream)));
+    for (const content of contents) expect(content).toEqual(Buffer.from('abcdef'));
+  });
+
+  it('未知大小直通的每文件互斥：并发串行化，等待超时返回 null', async () => {
+    const coordinator = (service as any).sessionCoordinator;
+    const first = await coordinator.acquireDirectLock('file:direct', 1000);
+    expect(typeof first).toBe('function');
+
+    // 已被占用：有限等待后返回 null（调用方据此返回结构化 503 + Retry-After）
+    await expect(coordinator.acquireDirectLock('file:direct', 50)).resolves.toBeNull();
+
+    first();
+    const second = await coordinator.acquireDirectLock('file:direct', 50);
+    expect(typeof second).toBe('function');
+    second();
+  });
+
+  it('未知大小直通：第一条上游流结束后才建立第二条连接', async () => {
+    const first = new PassThrough();
+    const fetchFn = jest.fn(async () => ({ stream: first, info: { file_size: 0 } }));
+    const streamA = await service.getDirectOnlyStream(fileId, fetchFn);
+    const pendingB = service.getDirectOnlyStream(fileId, fetchFn);
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+
+    streamA.destroy();
+    const streamB = await pendingB;
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+    streamB.destroy();
+  });
+
   it('actively aborts a build before invalidating its files', async () => {
     const upstream = new PassThrough();
     const resultPromise = service.getOrCacheStream(fileId, 6, async () => ({
@@ -617,5 +752,151 @@ describe('FileCacheService no-cache mode', () => {
 
     expect(await listCacheDir()).toEqual([]);
     expect(service.getCachedPath(fileId)).toBeNull();
+  });
+});
+
+describe('FileCacheService 磁盘预约、降级与 pin（下载配额）', () => {
+  let cwd: string;
+  let service: FileCacheService;
+  const fileId = '33333333-3333-4333-8333-333333333333';
+  const listCacheDir = () => readdir(path.join(cwd, 'tmp', 'Cache')).catch(() => [] as string[]);
+
+  /** 模拟卷内可用空间结构性不足（低于安全余量） */
+  const forceInsufficientDisk = () => {
+    jest.spyOn(service.resources, 'probeFreeBytes').mockReturnValue(1024);
+    service.resources.configure({ minFreeBytes: 10 * 1024 * 1024 * 1024 });
+  };
+
+  beforeEach(async () => {
+    cwd = await mkdtemp(path.join(tmpdir(), 'file-cache-quota-test-'));
+    jest.spyOn(process, 'cwd').mockReturnValue(cwd);
+    service = new FileCacheService({ get: jest.fn((_key: string, fallback: string) => fallback) } as any);
+    await new Promise(resolve => setTimeout(resolve, 10));
+  });
+
+  afterEach(async () => {
+    jest.useRealTimers();
+    jest.restoreAllMocks();
+    await service.onApplicationShutdown();
+    await rmDirSafe(cwd);
+  });
+
+  it('正式缓存构建完成后预约与上游租约全额归还（不泄漏、不累积）', async () => {
+    const upstream = new PassThrough();
+    const resultPromise = service.getOrCacheStream(fileId, 4, async () => ({
+      stream: upstream,
+      info: { file_size: 4 },
+    }));
+    // waitForSessionReadable 需要首字节到达，先写入再等待
+    upstream.write(Buffer.from('da'));
+    const { stream } = await resultPromise;
+    expect(service.resources.activeReservationCount).toBe(1);
+    const contentPromise = readStream(stream);
+    upstream.end(Buffer.from('ta'));
+    await expect(contentPromise).resolves.toEqual(Buffer.from('data'));
+
+    // 等待会话完整收尾（发布/清理 + finally 释放资源）
+    await (service as any).buildSessions.get(fileId)?.completion?.catch(() => {});
+    await new Promise(resolve => setImmediate(resolve));
+    expect(service.resources.pendingReservedBytes).toBe(0);
+    expect(service.resources.cacheReservedTotalBytes).toBe(0);
+    expect(service.resources.activeReservationCount).toBe(0);
+    expect(service.resources.activeUpstreamCount).toBe(0);
+  });
+
+  it('上游失败时预约与上游租约同样全额归还', async () => {
+    const upstream = new PassThrough();
+    const resultPromise = service.getOrCacheStream(fileId, 6, async () => ({
+      stream: upstream,
+      info: { file_size: 6 },
+    }));
+    upstream.write(Buffer.from('abc'));
+    const { stream } = await resultPromise;
+    const contentPromise = readStream(stream);
+    upstream.once('error', () => {});
+    upstream.destroy(new Error('quota upstream failed'));
+
+    await expect(contentPromise).rejects.toThrow('quota upstream failed');
+    // 等待失败会话收尾（清理 .tmp + finally 释放剩余预约与上游租约）
+    await (service as any).buildSessions.get(fileId)?.completion?.catch(() => {});
+    expect(service.resources.pendingReservedBytes).toBe(0);
+    expect(service.resources.activeUpstreamCount).toBe(0);
+  });
+
+  it('完整暂存不可行时自动降级为有界直通，不拒绝下载、不落盘', async () => {
+    forceInsufficientDisk();
+    const upstream = new PassThrough();
+    const { stream } = await service.getOrCacheStream(fileId, 8, async () => ({
+      stream: upstream,
+      info: { file_size: 8 },
+    }));
+    const contentPromise = readStream(stream);
+    upstream.end(Buffer.from('12345678'));
+
+    await expect(contentPromise).resolves.toEqual(Buffer.from('12345678'));
+    // 直通模式不产生本地副本
+    expect(await listCacheDir()).toEqual([]);
+    expect(service.resources.pendingReservedBytes).toBe(0);
+  });
+
+  it('直通模式的 Range 请求只输出请求区间，响应语义不变', async () => {
+    forceInsufficientDisk();
+    const upstream = new PassThrough();
+    const range = await service.getOrCacheRangeStream(fileId, 6, 2, 4, async () => ({
+      stream: upstream,
+      info: { file_size: 6 },
+    }));
+    expect(range).not.toBeNull();
+    const contentPromise = readStream(range!);
+    upstream.end(Buffer.from('abcdef'));
+
+    await expect(contentPromise).resolves.toEqual(Buffer.from('cde'));
+  });
+
+  it('内容版本变更（覆盖上传）时不复用旧会话', async () => {
+    const upstreamOld = new PassThrough();
+    upstreamOld.on('error', () => {});
+    const firstPromise = service.getOrCacheStream(
+      fileId,
+      4,
+      async () => ({ stream: upstreamOld, info: { file_size: 4 } }),
+      1,
+    );
+    upstreamOld.write(Buffer.from('aa'));
+    const first = await firstPromise;
+    const firstRead = readStream(first.stream);
+    // 旧会话随后会被中止：先挂一个兜底 handler，避免未处理拒绝干扰断言
+    firstRead.catch(() => {});
+
+    // 覆盖上传：同 fileId 的新内容版本
+    const upstreamNew = new PassThrough();
+    const fetchNew = jest.fn(async () => ({ stream: upstreamNew, info: { file_size: 4 } }));
+    const secondPromise = service.getOrCacheStream(fileId, 4, fetchNew, 2);
+    upstreamNew.write(Buffer.from('bb'));
+    const second = await secondPromise;
+    const secondRead = readStream(second.stream);
+
+    upstreamNew.end(Buffer.from('bb'));
+    // 旧会话内容属过期版本，被中止；新请求获得独立新会话（不合并到过期内容）
+    await expect(firstRead).rejects.toThrow();
+    await expect(secondRead).resolves.toEqual(Buffer.from('bbbb'));
+    expect(fetchNew).toHaveBeenCalledTimes(1);
+  });
+
+  it('LRU 淘汰跳过正在读取的缓存（pin 保护），读者释放后可淘汰', async () => {
+    const cachePath = path.join(cwd, 'tmp', 'Cache', fileId);
+    await writeFile(cachePath, Buffer.from('cached'));
+    (service as any).diskManager.registerCache(fileId, 6);
+
+    const stream = service.getCachedReadStream(fileId, 6);
+    expect(stream).not.toBeNull();
+
+    // 读者持有期间不淘汰（Windows 下删除打开中的文件会失败）
+    expect(await service.evictLRU(1024)).toBe(0);
+    await expect(readStream(stream!)).resolves.toEqual(Buffer.from('cached'));
+
+    // 读者关闭后即可淘汰
+    await new Promise(resolve => setTimeout(resolve, 10));
+    expect(await service.evictLRU(1024)).toBe(1);
   });
 });

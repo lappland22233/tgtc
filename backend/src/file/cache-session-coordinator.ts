@@ -3,15 +3,17 @@
  *
  * 职责：
  * - CacheBuildSession / SpoolSession 的创建、运行、teardown 与中止。
- * - 冷回源并发预算（activeUpstreams + maxConcurrentUpstreams）。
+ * - 冷回源并发预算（上游租约，来自 DownloadResourceCoordinatorService 的 FIFO 队列）。
  * - 空闲 / 总超时竞速（与 fetchFn 的 Promise.race + 在途连接防泄漏）。
  * - follower 流：消费者从临时文件 offset 0 独立跟随读取。
  *
  * 设计说明：
  * - 非 @Injectable，由 FileCacheService 在构造时创建并注入依赖。
- * - 持有 buildSessions / spoolSessions / activeUpstreams / shuttingDown 等会话状态，
+ * - 持有 buildSessions / spoolSessions / shuttingDown 等会话状态，
  *   FileCacheService 通过 getter 暴露给测试与外部（保持 spec 兼容）。
  * - 磁盘路径/容量等由 CacheDiskManager 提供；fileAccessMap 与 service 共享同一实例。
+ * - 磁盘与缓存容量预约、上游并发租约统一由 DownloadResourceCoordinatorService 管理，
+ *   leader 会话在创建前取得租约，follower 直接合流不重复占用。
  */
 import { Logger, ServiceUnavailableException } from '@nestjs/common';
 import { Readable } from 'stream';
@@ -21,11 +23,17 @@ import { FileHandle } from 'fs/promises';
 import { EventEmitter } from 'events';
 import { randomUUID } from 'crypto';
 import type { CacheDiskManager } from './cache-disk-manager';
-import type { DownloadAdmissionService } from './download-admission.service';
+import {
+  DownloadResourceCoordinatorService,
+  type DownloadReservation,
+  type DownloadUpstreamLease,
+} from './download-resource-coordinator.service';
 
 export interface CacheBuildSession {
   fileId: string;
   expectedSize: number;
+  /** 内容版本（覆盖上传时递增）：用于避免复用过期内容的会话 */
+  contentVersion?: string | number;
   tmpPath: string;
   bytesWritten: number;
   completed: boolean;
@@ -50,6 +58,8 @@ export interface CacheBuildSession {
 export interface SpoolSession {
   fileId: string;
   expectedSize: number;
+  /** 内容版本（覆盖上传时递增）：用于避免复用过期内容的会话 */
+  contentVersion?: string | number;
   spoolPath: string;
   bytesWritten: number;
   completed: boolean;
@@ -73,12 +83,18 @@ export interface SessionCoordinatorDeps {
   isShuttingDown: () => boolean;
   setShuttingDown: (value: boolean) => void;
   /**
-   * 下载磁盘准入（小盘持续下载修复）：spool/build 写盘前按卷预算准入。
-   * 可选注入；未注入时保持既有行为（仅并发预算），便于既有单测兼容。
+   * 下载资源协调器（DI 单例）：磁盘/缓存逻辑容量预约与上游并发租约。
+   * 统一在此处申请，保证 build 与 spool 走同一套预算与 FIFO 队列。
    */
-  admission?: DownloadAdmissionService;
-  /** 最低安全余量（字节），配合 admission 使用 */
-  minFreeDiskBytes?: () => number;
+  resources: DownloadResourceCoordinatorService;
+}
+
+/** leader 会话所需的资源集合（会话创建前申请，会话结束时释放） */
+export interface SessionResourceLease {
+  reservation: DownloadReservation;
+  upstream: DownloadUpstreamLease;
+  /** 释放全部资源（幂等） */
+  release(): void;
 }
 
 export class CacheSessionCoordinator {
@@ -86,16 +102,27 @@ export class CacheSessionCoordinator {
   readonly buildSessions = new Map<string, CacheBuildSession>();
   /** 可重放 spool 会话（无缓存直通 / 容量不足时使用）。 */
   readonly spoolSessions = new Map<string, SpoolSession>();
-  /** 当前活跃上游回源数（build + spool），用于冷回源全局并发预算 */
-  activeUpstreams = 0;
-  /** 上游并发预算：同一时间允许的 Telegram 冷回源上限（可配置） */
-  maxConcurrentUpstreams = 8;
-  /** 构建空闲超时（毫秒）：写期间无数据则中止会话 */
-  buildIdleTimeoutMs = this.readPositiveTimeout('FILE_CACHE_BUILD_IDLE_TIMEOUT_MS', 60_000);
-  /** 构建总超时（毫秒）：整个上游回源超过该时长则中止 */
-  buildTotalTimeoutMs = this.readPositiveTimeout('FILE_CACHE_BUILD_TOTAL_TIMEOUT_MS', 30 * 60_000);
-  /** 无缓存 spool 最后一个消费者断开后的会话复用宽限期。 */
-  readonly spoolConsumerGracePeriodMs = 120_000;
+  /**
+   * 构建首字节超时（毫秒）：只覆盖「等待 Telegram 返回第一个数据块」的阶段。
+   * 冷文件需要 TDLib 先回源，必须显著长于传输空闲超时；0 表示禁用。
+   */
+  buildFirstByteTimeoutMs = this.readNonNegativeTimeout('FILE_CACHE_BUILD_FIRST_BYTE_TIMEOUT_MS', 210_000);
+  /** 构建空闲超时（毫秒）：传输期间无数据则中止会话；每收到数据即刷新 */
+  buildIdleTimeoutMs = this.readPositiveTimeout('FILE_CACHE_BUILD_IDLE_TIMEOUT_MS', 150_000);
+  /**
+   * 构建总超时（毫秒）：**0 表示禁用**（默认）。
+   *
+   * 历史实现固定 30 分钟，且从会话开始计时、不随进度刷新，导致 4GiB 文件在平均速度
+   * 低于约 2.28MiB/s 时必然被误杀——即使全程都有数据。卡死由首字节/空闲超时判定，
+   * 需要绝对上限的场景再显式配置。
+   */
+  buildTotalTimeoutMs = this.readNonNegativeTimeout('FILE_CACHE_BUILD_TOTAL_TIMEOUT_MS', 0);
+  /** spool 宽限期显式覆盖值（测试/诊断使用；未设置时取资源协调器配置，支持热更新） */
+  private spoolGraceOverrideMs: number | null = null;
+  /** 领导者选举串行化锁（会话键 → 排队链尾） */
+  private readonly sessionLocks = new Map<string, Promise<void>>();
+  /** 未知大小直通的每文件互斥锁 */
+  private readonly directLocks = new Map<string, Promise<void>>();
 
   constructor(private readonly deps: SessionCoordinatorDeps) {}
 
@@ -105,6 +132,10 @@ export class CacheSessionCoordinator {
 
   private get diskManager(): CacheDiskManager {
     return this.deps.diskManager;
+  }
+
+  private get resources(): DownloadResourceCoordinatorService {
+    return this.deps.resources;
   }
 
   private get fileAccessMap(): Map<string, number> {
@@ -120,24 +151,78 @@ export class CacheSessionCoordinator {
     return Number.isSafeInteger(value) && value > 0 ? value : fallback;
   }
 
-  /** 是否允许开启新的冷回源（关闭中或达到并发预算则拒绝，调用方应回退 503） */
-  canStartUpstream(): boolean {
-    return !this.shuttingDown && this.activeUpstreams < this.maxConcurrentUpstreams;
+  /**
+   * 读取非负超时配置：0 是合法值，表示「禁用该超时」。
+   * 只有非法值（NaN / 负数 / 非整数 / 空串）才回退默认值。
+   */
+  private readNonNegativeTimeout(key: string, fallback: number): number {
+    const raw = process.env[key];
+    if (raw === undefined || raw.trim() === '') return fallback;
+    const value = Number(raw);
+    return Number.isSafeInteger(value) && value >= 0 ? value : fallback;
+  }
+
+  /** 当前活跃上游回源数（来自资源协调器的租约计数） */
+  get activeUpstreams(): number {
+    return this.resources.activeUpstreamCount;
+  }
+
+  /** 兼容既有测试：直接设置活跃上游数（仅测试/诊断使用） */
+  set activeUpstreams(value: number) {
+    this.resources.setActiveUpstreamCount(value);
+  }
+
+  /** 上游并发预算（来自资源协调器配置） */
+  get maxConcurrentUpstreams(): number {
+    return this.resources.getConfig().maxConcurrentUpstreams;
+  }
+
+  set maxConcurrentUpstreams(value: number) {
+    this.resources.configure({ maxConcurrentUpstreams: Math.max(1, Math.floor(value) || 1) });
   }
 
   /**
-   * 等待上游并发预算（下载排队修复）：
-   * 并发满额时不再立即 503，而是等待既有会话完成释放连接名额（有界轮询）。
-   * 返回 false 表示等待期间系统关闭，调用方应回退 503。
+   * 是否允许开启新的冷回源（关闭中或**权重预算**已满则返回 false）。
+   * 注意：准入的唯一权威是 `DownloadResourceCoordinatorService.acquireUpstreamSlot`；
+   * 本方法只用于粗粒度判断，不可用于「已持有租约」的 leader 路径（会把自己的租约算进去）。
+   */
+  canStartUpstream(): boolean {
+    if (this.shuttingDown) return false;
+    const budget = Math.max(1, this.resources.getConfig().maxConcurrentUpstreams);
+    return this.resources.activeUpstreamWeightTotal < budget;
+  }
+
+  /**
+   * spool 最后一个消费者离开后的会话复用宽限期（毫秒）。
+   * 默认取资源协调器配置（FILE_DOWNLOAD_SPOOL_GRACE_SECONDS，热更新生效）；
+   * 显式赋值用于测试/诊断覆盖。
+   */
+  get spoolConsumerGracePeriodMs(): number {
+    return this.spoolGraceOverrideMs ?? this.resources.getConfig().spoolGraceMs;
+  }
+
+  set spoolConsumerGracePeriodMs(value: number) {
+    this.spoolGraceOverrideMs = value;
+  }
+
+  /**
+   * 等待上游并发名额（兼容既有调用/测试）：等待到有名额后立即归还，
+   * 真正的名额占用由 `acquireSessionResources` 取得的租约负责。
    */
   async waitForUpstreamSlot(timeoutMs = 60_000): Promise<boolean> {
-    const deadline = Date.now() + timeoutMs;
-    while (!this.canStartUpstream()) {
-      if (this.shuttingDown) return false;
-      if (Date.now() >= deadline) return false;
-      await new Promise(resolve => setTimeout(resolve, 100));
+    if (this.shuttingDown) return false;
+    try {
+      const lease = await this.resources.acquireUpstreamSlot({ waitTimeoutMs: timeoutMs });
+      lease.release();
+      return true;
+    } catch {
+      return false;
     }
-    return true;
+  }
+
+  /** buildFirstByteTimeoutMs 供测试覆盖 */
+  setBuildFirstByteTimeoutMs(value: number): void {
+    this.buildFirstByteTimeoutMs = value;
   }
 
   /** buildIdleTimeoutMs 供测试覆盖 */
@@ -150,29 +235,174 @@ export class CacheSessionCoordinator {
     this.buildTotalTimeoutMs = value;
   }
 
+  /**
+   * 申请 leader 会话资源：磁盘（可选缓存逻辑容量）预约 + 上游并发租约。
+   * 先取磁盘预约再取上游名额（等待磁盘期间不占用 Telegram 连接）；
+   * 上游等待失败时归还磁盘预约，避免预约泄漏。
+   */
+  async acquireSessionResources(
+    fileId: string,
+    expectedSize: number,
+    options?: {
+      countsTowardCache?: boolean;
+      signal?: AbortSignal;
+      waitTimeoutMs?: number;
+      contentVersion?: string | number;
+    },
+  ): Promise<SessionResourceLease> {
+    const reservation = await this.resources.reserve({
+      sessionKey: this.buildSessionKey(fileId, options?.contentVersion),
+      bytes: expectedSize,
+      countsTowardCache: options?.countsTowardCache ?? false,
+      signal: options?.signal,
+      waitTimeoutMs: options?.waitTimeoutMs,
+    });
+    let upstream: DownloadUpstreamLease;
+    try {
+      upstream = await this.resources.acquireUpstreamSlot({
+        signal: options?.signal,
+        waitTimeoutMs: options?.waitTimeoutMs,
+        // 大文件按体量占用更多并发预算，避免 3×4GiB 冷分卷同秒全部回源
+        bytes: expectedSize,
+      });
+    } catch (error) {
+      reservation.release();
+      throw error;
+    }
+    let released = false;
+    return {
+      reservation,
+      upstream,
+      release: () => {
+        if (released) return;
+        released = true;
+        reservation.release();
+        upstream.release();
+      },
+    };
+  }
+
+  /** 预约会话键：fileId + 内容版本（覆盖上传后不与旧会话共用预算） */
+  private buildSessionKey(fileId: string, contentVersion?: string | number): string {
+    return contentVersion === undefined ? `file:${fileId}` : `file:${fileId}:v${contentVersion}`;
+  }
+
+  /** 会话键（公开给 FileCacheService 做领导者选举串行化） */
+  sessionKeyFor(fileId: string, contentVersion?: string | number): string {
+    return this.buildSessionKey(fileId, contentVersion);
+  }
+
+  /**
+   * 按会话键串行化「冷回源领导者选举」。
+   *
+   * 为什么需要：`getOrCacheStream` 的会话查找与资源申请之间存在 await 窗口，
+   * 两个并发请求可能都判定「无活动会话」，各自申请完整磁盘预约与上游槽位，
+   * 后者再在 `getOrCreateBuildSession` 中释放并降级为 follower——瞬时双占用会污染
+   * 排队与运行指标，对 4GiB 这种「整块磁盘」的请求尤其危险。
+   * 串行化后，第二个请求在锁内复查会话并直接合流为 follower。
+   */
+  async withSessionLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+    const previous = this.sessionLocks.get(key) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const queued = previous.then(() => gate, () => gate);
+    this.sessionLocks.set(key, queued);
+    await previous.catch(() => {});
+    try {
+      return await fn();
+    } finally {
+      release();
+      // 队列已空则清理，避免 Map 按会话键无界增长
+      if (this.sessionLocks.get(key) === queued) this.sessionLocks.delete(key);
+    }
+  }
+
+  /**
+   * 未知大小直通的每文件互斥（带有限等待）。
+   *
+   * 未知大小无法预估磁盘占用，也就无法用 build/spool 去重；若放任并发，
+   * 同一文件的多个请求会各自建立一条 Telegram 上游连接。等待超过 `waitTimeoutMs`
+   * 时返回 null，由调用方返回结构化「服务器繁忙 + Retry-After」，绝不把请求挂死。
+   */
+  async acquireDirectLock(fileId: string, waitTimeoutMs: number): Promise<(() => void) | null> {
+    const deadline = Date.now() + Math.max(0, waitTimeoutMs);
+    for (;;) {
+      const current = this.directLocks.get(fileId);
+      if (!current) {
+        let release!: () => void;
+        const gate = new Promise<void>(resolve => { release = resolve; });
+        this.directLocks.set(fileId, gate);
+        return () => {
+          if (this.directLocks.get(fileId) === gate) this.directLocks.delete(fileId);
+          release();
+        };
+      }
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return null;
+      await Promise.race([
+        current,
+        new Promise<void>(resolve => {
+          const timer = setTimeout(resolve, Math.min(remaining, 250));
+          timer.unref?.();
+        }),
+      ]);
+    }
+  }
+
+  /**
+   * 会话内容是否与本次请求一致。
+   * 任一侧未提供版本时保持既有行为（不因版本缺失而重建会话）。
+   */
+  private sameContentVersion(
+    session: { contentVersion?: string | number },
+    contentVersion?: string | number,
+  ): boolean {
+    if (contentVersion === undefined || session.contentVersion === undefined) return true;
+    return String(session.contentVersion) === String(contentVersion);
+  }
+
   // ---------- build 会话 ----------
 
+  /**
+   * 创建（或复用）正式缓存构建会话。
+   * - 已存在同文件会话：视为 follower，立即释放本次申请的资源；
+   * - 新建：消费调用方已取得的资源租约（在 runBuildSession 的 finally 中释放）。
+   */
   getOrCreateBuildSession(
     fileId: string,
     expectedSize: number,
     fetchFn: () => Promise<{ stream: Readable; info: { file_size: number } }>,
+    lease: SessionResourceLease,
+    contentVersion?: string | number,
   ): CacheBuildSession {
-    let session = this.buildSessions.get(fileId);
-    if (session) {
-      if (session.expectedSize !== expectedSize) throw new Error('活动缓存会话的文件大小不一致');
-      return session;
+    let existing = this.buildSessions.get(fileId);
+    if (existing && !this.sameContentVersion(existing, contentVersion)) {
+      // 覆盖上传：旧会话内容是过期版本，中止并重建，避免向新请求返回旧内容
+      this.logger.warn(`文件内容版本已变更，重建缓存构建会话: ${fileId}`);
+      existing.abort(new Error('文件内容已更新，缓存构建已中止'));
+      if (this.buildSessions.get(fileId) === existing) this.buildSessions.delete(fileId);
+      existing = undefined;
     }
-    // 冷回源并发预算（H-06）：达到上限或正在关闭时拒绝新建，调用方回退 503。
-    // 并发等待在调用方（FileCacheService，异步上下文）先完成，本方法保持同步契约。
-    if (!this.canStartUpstream()) {
+    if (existing) {
+      // follower：不重复占用磁盘/上游资源
+      lease.release();
+      if (existing.expectedSize !== expectedSize) throw new Error('活动缓存会话的文件大小不一致');
+      return existing;
+    }
+    // 关闭中拒绝新建。并发预算**不在此判断**：上游名额已由 acquireSessionResources 通过
+    // 权重预算（acquireUpstreamSlot）唯一把关；此处再判会因为「连接数 vs 权重预算」单位不一致
+    // 而误拒刚拿到租约的 leader（maxConcurrentUpstreams=1 时每个 leader 都会失败）。
+    if (this.shuttingDown) {
+      lease.release();
       throw new ServiceUnavailableException('系统回源繁忙，请稍后重试');
     }
 
     const events = new EventEmitter();
     events.setMaxListeners(0);
-    session = {
+    const session: CacheBuildSession = {
       fileId,
       expectedSize,
+      contentVersion,
       tmpPath: `${this.diskManager.getCachePath(fileId)}.${randomUUID()}.tmp`,
       bytesWritten: 0,
       completed: false,
@@ -187,7 +417,7 @@ export class CacheSessionCoordinator {
       },
     };
     this.buildSessions.set(fileId, session);
-    session.completion = this.runBuildSession(session, fetchFn);
+    session.completion = this.runBuildSession(session, fetchFn, lease);
     session.completion.catch(() => {});
     return session;
   }
@@ -195,7 +425,7 @@ export class CacheSessionCoordinator {
   /**
    * 无缓存直通：中止该文件的既有构建会话，实时回源并直通上游流。
    * 同一文件并发消费者共享一个 Telegram 上游连接（in-flight 合并）。
-   * 不读缓存、不写缓存（无 .tmp/rename）、不计算容量、不触发 LRU。
+   * 不读缓存、不写正式缓存（无 rename）、不触发 LRU。
    */
   async getNoCacheStream(
     fileId: string,
@@ -203,9 +433,11 @@ export class CacheSessionCoordinator {
     fetchFn: () => Promise<{ stream: Readable; info: { file_size: number } }>,
     start = 0,
     end = expectedSize - 1,
+    contentVersion?: string | number,
+    options?: { waitTimeoutMs?: number },
   ): Promise<{ stream: Readable; fromCache: boolean }> {
     await this.abortBuildSession(fileId);
-    return this.getSpooledStream(fileId, expectedSize, fetchFn, start, end);
+    return this.getSpooledStream(fileId, expectedSize, fetchFn, start, end, contentVersion, options);
   }
 
   /**
@@ -243,12 +475,25 @@ export class CacheSessionCoordinator {
   private async runBuildSession(
     session: CacheBuildSession,
     fetchFn: () => Promise<{ stream: Readable; info: { file_size: number } }>,
+    lease: SessionResourceLease,
   ): Promise<void> {
     const cachePath = this.diskManager.getCachePath(session.fileId);
     let idleTimer: NodeJS.Timeout | undefined;
     let totalTimer: NodeJS.Timeout | undefined;
+    let firstByteTimer: NodeJS.Timeout | undefined;
     let rejectTotal: ((error: Error) => void) | undefined;
+    // 总时限：0 = 禁用（默认）。禁用时该 Promise 永不 settle，由首字节/空闲超时兜底。
     const totalDeadline = new Promise<never>((_, reject) => { rejectTotal = reject; });
+    // 首字节超时：与空闲超时分离，冷启动允许 TDLib 更长时间才吐出首块
+    const firstByteDeadline = new Promise<never>((_, reject) => {
+      if (this.buildFirstByteTimeoutMs <= 0) return;
+      firstByteTimer = setTimeout(() => {
+        const error = new Error(`缓存构建首字节超时（${this.buildFirstByteTimeoutMs}ms）`);
+        session.abort(error);
+        reject(error);
+      }, this.buildFirstByteTimeoutMs);
+      firstByteTimer.unref?.();
+    });
     const resetIdleDeadline = () => {
       if (idleTimer) clearTimeout(idleTimer);
       idleTimer = setTimeout(() => {
@@ -256,22 +501,27 @@ export class CacheSessionCoordinator {
       }, this.buildIdleTimeoutMs);
       idleTimer.unref?.();
     };
-    totalTimer = setTimeout(() => {
-      const error = new Error(`缓存构建总超时（${this.buildTotalTimeoutMs}ms）`);
-      session.abort(error);
-      rejectTotal?.(error);
-    }, this.buildTotalTimeoutMs);
-    totalTimer.unref?.();
+    if (this.buildTotalTimeoutMs > 0) {
+      totalTimer = setTimeout(() => {
+        const error = new Error(`缓存构建总超时（${this.buildTotalTimeoutMs}ms）`);
+        session.abort(error);
+        rejectTotal?.(error);
+      }, this.buildTotalTimeoutMs);
+      totalTimer.unref?.();
+    }
 
     let upstreamPromise: Promise<{ stream: Readable; info: { file_size: number } }> | undefined;
-    this.activeUpstreams++;
     try {
       await fsp.unlink(session.tmpPath).catch(() => {});
       // 在请求上游前先创建临时文件，保证首个进度事件到达时跟随者可安全打开。
       await fsp.writeFile(session.tmpPath, Buffer.alloc(0), { flag: 'wx' });
-      // 持有在途上游句柄：若 totalDeadline 先触发，catch 中销毁其 stream 防连接泄漏
+      // 持有在途上游句柄：若超时先触发，catch 中销毁其 stream 防连接泄漏
       upstreamPromise = fetchFn();
-      const { stream, info } = await Promise.race([upstreamPromise, totalDeadline]);
+      const { stream, info } = await Promise.race([upstreamPromise, totalDeadline, firstByteDeadline]);
+      if (firstByteTimer) {
+        clearTimeout(firstByteTimer);
+        firstByteTimer = undefined;
+      }
       session.upstream = stream;
       resetIdleDeadline();
       if (!Number.isSafeInteger(info.file_size) || info.file_size !== session.expectedSize) {
@@ -303,6 +553,8 @@ export class CacheSessionCoordinator {
           });
           if (outputError) throw outputError;
           session.bytesWritten += chunk.length;
+          // 已写入字节由 statfs 反映，同步核销逻辑预约（避免物理/逻辑双重扣减）
+          lease.reservation.consume(chunk.length);
           session.events.emit('progress');
           resetIdleDeadline();
         }
@@ -326,6 +578,7 @@ export class CacheSessionCoordinator {
       // G4-06：Windows 下 follower 的读句柄可能仍短暂占用临时文件，
       // rename 会抛 EPERM/EBUSY；做有限退避重试，避免整次回源失败。
       await this.renameWithRetry(session.tmpPath, cachePath);
+      // 先登记已发布缓存、再释放缓存逻辑容量占位，保证计数切换无空窗
       this.diskManager.registerCache(session.fileId, session.expectedSize);
       this.fileAccessMap.set(session.fileId, Date.now());
       session.completed = true;
@@ -344,9 +597,11 @@ export class CacheSessionCoordinator {
     } finally {
       if (idleTimer) clearTimeout(idleTimer);
       if (totalTimer) clearTimeout(totalTimer);
+      if (firstByteTimer) clearTimeout(firstByteTimer);
       session.upstream = undefined;
       session.output = undefined;
-      this.activeUpstreams = Math.max(0, this.activeUpstreams - 1);
+      // 任意分支（成功/失败/超时/中止/关闭）都必须归还剩余预约与上游租约
+      lease.release();
       setImmediate(() => {
         if (this.buildSessions.get(session.fileId) === session) {
           this.buildSessions.delete(session.fileId);
@@ -365,39 +620,64 @@ export class CacheSessionCoordinator {
     fetchFn: () => Promise<{ stream: Readable; info: { file_size: number } }>,
     start = 0,
     end = expectedSize - 1,
+    contentVersion?: string | number,
+    options?: { waitTimeoutMs?: number },
   ): Promise<{ stream: Readable; fromCache: boolean }> {
     if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end < start || end >= expectedSize) {
       throw new Error(`非法的 Range: ${start}-${end}`);
     }
-    const session = await this.getOrCreateSpoolSession(fileId, expectedSize, fetchFn);
-    const stream = this.createSpoolFollowerStream(session, start, end);
-    return { stream, fromCache: false };
+    const existing = this.spoolSessions.get(fileId);
+    if (
+      existing
+      && existing.expectedSize === expectedSize
+      && this.sameContentVersion(existing, contentVersion)
+    ) {
+      return { stream: this.createSpoolFollowerStream(existing, start, end), fromCache: false };
+    }
+    // leader：先申请磁盘预约与上游租约（等待期间不写盘、不占用 Telegram 连接）
+    const lease = await this.acquireSessionResources(fileId, expectedSize, {
+      countsTowardCache: false,
+      contentVersion,
+      waitTimeoutMs: options?.waitTimeoutMs,
+    });
+    try {
+      const session = await this.getOrCreateSpoolSession(fileId, expectedSize, fetchFn, lease, contentVersion);
+      return { stream: this.createSpoolFollowerStream(session, start, end), fromCache: false };
+    } catch (error) {
+      lease.release();
+      throw error;
+    }
   }
 
+  /** 创建 spool 会话；若等待期间已有其他请求建立同文件会话则释放本次资源并复用。 */
   private async getOrCreateSpoolSession(
     fileId: string,
     expectedSize: number,
     fetchFn: () => Promise<{ stream: Readable; info: { file_size: number } }>,
+    lease: SessionResourceLease,
+    contentVersion?: string | number,
   ): Promise<SpoolSession> {
-    let session = this.spoolSessions.get(fileId);
-    if (session) {
-      if (session.expectedSize === expectedSize) return session;
-      // 大小不一致（覆盖 / 数据异常）：先清理旧 spool 再重建，避免旧大小消费者串流
-      await this.teardownSpoolSession(session);
-    }
-    // 冷回源并发预算（H-06）+ 排队修复：并发满额时等待名额释放，
-    // 不再立即 503；系统关闭或等待超时（60s）才回退拒绝。
-    if (!this.canStartUpstream()) {
-      const acquired = await this.waitForUpstreamSlot();
-      if (!acquired) {
-        throw new ServiceUnavailableException('系统回源繁忙，请稍后重试');
+    const current = this.spoolSessions.get(fileId);
+    if (current) {
+      if (current.expectedSize === expectedSize && this.sameContentVersion(current, contentVersion)) {
+        lease.release();
+        return current;
       }
+      // 大小不一致（覆盖 / 数据异常）或内容版本已更新：先清理旧 spool 再重建，避免串流过期内容
+      await this.teardownSpoolSession(current);
     }
+    // 冷回源并发预算（H-06）：关闭中拒绝新建（资源申请已在调用方完成）
+    if (this.shuttingDown) {
+      lease.release();
+      throw new ServiceUnavailableException('系统回源繁忙，请稍后重试');
+    }
+
     const events = new EventEmitter();
     events.setMaxListeners(0);
-    session = {
+    const session: SpoolSession = {
       fileId,
       expectedSize,
+      contentVersion,
       spoolPath: `${this.diskManager.getCachePath(fileId)}.${randomUUID()}.spool`,
       bytesWritten: 0,
       completed: false,
@@ -413,45 +693,19 @@ export class CacheSessionCoordinator {
       },
     };
     this.spoolSessions.set(fileId, session);
-    session.completion = this.runSpoolSession(session, fetchFn);
+    session.completion = this.runSpoolSession(session, fetchFn, lease);
     session.completion.catch(() => {});
     return session;
-  }
-
-  /**
-   * 下载磁盘准入（小盘持续下载修复）：
-   * spool 写盘前按卷剩余空间准入，空间不足时进入有界 FIFO 等待，
-   * 空间释放（本服务会话完成/清理）后事件唤醒，不再立即 503/ENOSPC。
-   * - 并发预算仍保留：等待期间不启动上游连接；
-   * - admission 未注入（旧测试/降级）时直接放行。
-   */
-  private async admitSpoolWrite(expectedSize: number): Promise<void> {
-    const admission = this.deps.admission;
-    if (!admission) return;
-    const minFreeBytes = this.deps.minFreeDiskBytes?.() ?? 0;
-    await admission.admit(expectedSize, minFreeBytes);
-  }
-
-  /** 会话结束后全额归还准入额度并唤醒等待队列 */
-  private releaseAdmissionOnSessionEnd(admittedBytes: number): void {
-    const admission = this.deps.admission;
-    if (!admission) return;
-    const minFreeBytes = this.deps.minFreeDiskBytes?.() ?? 0;
-    // 预约语义为「峰值增量」：无论实际写入多少（含完整下载 written == admitted），
-    // 会话结束必须全额归还 admittedBytes；已写入部分已转为物理占用、由 statfs 反映。
-    // 按差值归还会导致完整下载归还 0、预约量永久累积（P1-09）。
-    admission.release(admittedBytes, minFreeBytes);
   }
 
   private async runSpoolSession(
     session: SpoolSession,
     fetchFn: () => Promise<{ stream: Readable; info: { file_size: number } }>,
+    lease: SessionResourceLease,
   ): Promise<void> {
     let idleTimer: NodeJS.Timeout | undefined;
     let totalTimer: NodeJS.Timeout | undefined;
-    // 等待期间不占用上游/不写盘：先做磁盘准入（有界等待），拿到许可后再计时。
-    await this.admitSpoolWrite(session.expectedSize);
-    const admittedBytes = session.expectedSize;
+    let firstByteTimer: NodeJS.Timeout | undefined;
     const resetIdleDeadline = () => {
       if (idleTimer) clearTimeout(idleTimer);
       idleTimer = setTimeout(() => {
@@ -460,24 +714,39 @@ export class CacheSessionCoordinator {
       idleTimer.unref?.();
     };
     let rejectTotal: ((error: Error) => void) | undefined;
+    // 总时限：0 = 禁用（默认）；首字节超时独立计时
     const totalDeadline = new Promise<never>((_, reject) => { rejectTotal = reject; });
-    totalTimer = setTimeout(() => {
-      const error = new Error(`spool 写入总超时（${this.buildTotalTimeoutMs}ms）`);
-      session.abort(error);
-      rejectTotal?.(error);
-    }, this.buildTotalTimeoutMs);
-    totalTimer.unref?.();
+    const firstByteDeadline = new Promise<never>((_, reject) => {
+      if (this.buildFirstByteTimeoutMs <= 0) return;
+      firstByteTimer = setTimeout(() => {
+        const error = new Error(`spool 首字节超时（${this.buildFirstByteTimeoutMs}ms）`);
+        session.abort(error);
+        reject(error);
+      }, this.buildFirstByteTimeoutMs);
+      firstByteTimer.unref?.();
+    });
+    if (this.buildTotalTimeoutMs > 0) {
+      totalTimer = setTimeout(() => {
+        const error = new Error(`spool 写入总超时（${this.buildTotalTimeoutMs}ms）`);
+        session.abort(error);
+        rejectTotal?.(error);
+      }, this.buildTotalTimeoutMs);
+      totalTimer.unref?.();
+    }
 
     let upstreamPromise: Promise<{ stream: Readable; info: { file_size: number } }> | undefined;
-    this.activeUpstreams++;
     try {
       await fsp.unlink(session.spoolPath).catch(() => {});
       // 在请求上游前先创建 spool 文件，保证首个进度事件到达时跟随者可安全打开。
       await fsp.writeFile(session.spoolPath, Buffer.alloc(0), { flag: 'wx' });
       // 与 build 路径一致的竞速保护：上游无响应时按总超时失败，
-      // 避免会话永久卡在 fetchFn 导致 activeUpstreams 永不归零。
+      // 避免会话永久卡在 fetchFn 导致租约永不归零。
       upstreamPromise = fetchFn();
-      const { stream, info } = await Promise.race([upstreamPromise, totalDeadline]);
+      const { stream, info } = await Promise.race([upstreamPromise, totalDeadline, firstByteDeadline]);
+      if (firstByteTimer) {
+        clearTimeout(firstByteTimer);
+        firstByteTimer = undefined;
+      }
       // 竞态防护：等待上游期间会话可能已随最后一个消费者离开而被 teardown，
       // 此时直接释放刚获取的上游，避免连接泄漏。
       if (this.spoolSessions.get(session.fileId) !== session) {
@@ -515,6 +784,8 @@ export class CacheSessionCoordinator {
           });
           if (outputError) throw outputError;
           session.bytesWritten += chunk.length;
+          // 已写入字节由 statfs 反映，同步核销逻辑预约
+          lease.reservation.consume(chunk.length);
           session.events.emit('progress');
           resetIdleDeadline();
         }
@@ -559,14 +830,86 @@ export class CacheSessionCoordinator {
     } finally {
       if (idleTimer) clearTimeout(idleTimer);
       if (totalTimer) clearTimeout(totalTimer);
+      if (firstByteTimer) clearTimeout(firstByteTimer);
       session.upstream = undefined;
       session.output = undefined;
-      this.activeUpstreams = Math.max(0, this.activeUpstreams - 1);
-      // 会话结束（完成/失败）全额归还准入额度并唤醒等待队列；
-      // spool 文件在宽限期后才真正删除，其保留期占用已体现在物理空闲中，
-      // 预约计数按 admit 登记量整笔撤销，不与物理占用重复记账。
-      this.releaseAdmissionOnSessionEnd(admittedBytes);
+      // 会话结束（完成/失败/并发抢占退出）归还剩余磁盘预约与上游租约；
+      // spool 文件在宽限期后才真正删除，其保留期占用已体现在物理空闲中。
+      lease.release();
     }
+  }
+
+  /**
+   * 有界滚动缓冲直通（direct 模式）：
+   * 完整暂存（build/spool）在当前卷无论如何都无法满足时使用，保证「已上传的文件始终可下载」。
+   * - 不写本地副本，内存占用由 Node 流的背压（highWaterMark）约束，与文件大小无关；
+   * - 上游流式端点不支持 Range，因此 Range 请求从首部读取并丢弃 start 之前的字节，
+   *   仍由调用方返回正确的 206 响应头；
+   * - 不发布正式缓存、不参与 follower 重放，仅受上游并发租约约束。
+   */
+  async getDirectStream(
+    fileId: string,
+    fetchFn: () => Promise<{ stream: Readable; info: { file_size: number } }>,
+    start = 0,
+    end?: number,
+    options?: { signal?: AbortSignal; waitTimeoutMs?: number; windowBytes?: number; expectedSize?: number },
+  ): Promise<{ stream: Readable; release: () => void }> {
+    const lease = await this.resources.acquireUpstreamSlot({
+      signal: options?.signal,
+      waitTimeoutMs: options?.waitTimeoutMs,
+      bytes: options?.expectedSize,
+    });
+    let upstream: Readable;
+    try {
+      upstream = (await fetchFn()).stream;
+    } catch (error) {
+      lease.release();
+      throw error;
+    }
+
+    this.logger.log(
+      `有界滚动缓冲直通: ${fileId}${start > 0 || end !== undefined ? ` range=${start}-${end ?? 'EOF'}` : ''}`,
+    );
+
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      upstream.destroy();
+      lease.release();
+    };
+
+    // 有界缓冲窗口：只允许窗口大小的预读（highWaterMark），内存占用与文件大小无关
+    const windowBytes = options?.windowBytes && options.windowBytes > 0
+      ? options.windowBytes
+      : this.resources.getConfig().directWindowBytes;
+
+    const stream = Readable.from((async function* relay(): AsyncGenerator<Buffer> {
+      let offset = 0;
+      try {
+        for await (const raw of upstream) {
+          const chunk = Buffer.isBuffer(raw) ? raw : Buffer.from(raw);
+          const chunkStart = offset;
+          offset += chunk.length;
+          // 已越过请求范围末尾：停止后续读取（上游随之释放）
+          if (end !== undefined && chunkStart > end) break;
+          let sliceStart = 0;
+          if (chunkStart < start) sliceStart = Math.min(chunk.length, start - chunkStart);
+          if (sliceStart >= chunk.length) continue;
+          const sliceEnd = end === undefined
+            ? chunk.length
+            : Math.min(chunk.length, end - chunkStart + 1);
+          if (sliceEnd <= sliceStart) continue;
+          yield chunk.subarray(sliceStart, sliceEnd);
+        }
+      } finally {
+        release();
+      }
+    })(), { highWaterMark: windowBytes });
+
+    // 消费者提前断开（浏览器取消、代理超时）时也要释放上游连接与租约
+    stream.once('close', release);
+    return { stream, release };
   }
 
   /** 新增一个按指定 Range 独立跟随读取的消费者流。 */
@@ -768,9 +1111,9 @@ export class CacheSessionCoordinator {
       session.abort(new Error('应用关闭，缓存构建已中止'));
       session.completion.catch(() => {});
     }
-    // 等待活跃上游收尾（spool 与 build 共用计数）
+    // 等待活跃上游收尾（spool 与 build 共用租约计数）
     const deadline = Date.now() + 3000;
-    while (this.activeUpstreams > 0 && Date.now() < deadline) {
+    while (this.resources.activeUpstreamCount > 0 && Date.now() < deadline) {
       await new Promise(resolve => setTimeout(resolve, 50));
     }
     for (const session of this.spoolSessions.values()) {

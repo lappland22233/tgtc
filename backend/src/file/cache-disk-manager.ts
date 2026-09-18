@@ -50,6 +50,14 @@ export class CacheDiskManager {
     return this.cachedSizeBytes;
   }
 
+  /**
+   * 同步读取内存中的已发布缓存总量（供资源协调器的缓存逻辑容量预约使用）。
+   * 返回 null 表示尚未完成首次全目录扫描；调用方应保守处理（按 0 计并尽快触发扫描）。
+   */
+  getTotalCacheSizeSync(): number | null {
+    return this.cachedSizeBytes;
+  }
+
   /** 全目录扫描统计总大小（仅在内存计数缺失时执行一次） */
   private async scanCacheSize(): Promise<number> {
     try {
@@ -73,8 +81,8 @@ export class CacheDiskManager {
     this.cachedSizeBytes = (this.cachedSizeBytes ?? 0) + size;
   }
 
-  /** 从内存计数中扣减某文件的占用（淘汰/清理/失效时调用） */
-  private unregisterCache(_fileId: string, size?: number): void {
+  /** 从内存计数中扣减某文件的占用（淘汰/清理/失效/过期删除时调用） */
+  unregisterCache(_fileId: string, size?: number): void {
     if (this.cachedSizeBytes === null) return; // 尚未同步，无需扣减（后续同步会重建）
     this.cachedSizeBytes = Math.max(0, this.cachedSizeBytes - (size ?? 0));
   }
@@ -112,7 +120,11 @@ export class CacheDiskManager {
    * 直到释放足够的空间或没有更多可淘汰文件。
    * @returns 被淘汰的文件数
    */
-  async evictLRU(targetFreeBytes: number, fileAccessMap: Map<string, number>): Promise<number> {
+  async evictLRU(
+    targetFreeBytes: number,
+    fileAccessMap: Map<string, number>,
+    isPinned?: (fileId: string) => boolean,
+  ): Promise<number> {
     let evicted = 0;
 
     try {
@@ -121,6 +133,9 @@ export class CacheDiskManager {
       const entries: { name: string; accessTime: number; size: number }[] = [];
       for (const f of files) {
         if (f.endsWith('.tmp') || f.endsWith('.spool')) continue; // 跳过构建/重放临时文件
+        // 正在被读取（follower / Range / 预热目标）或正在构建的缓存不淘汰：
+        // Windows 下删除打开中的文件会失败（EBUSY），且会让在途下载中断
+        if (isPinned?.(f)) continue;
         try {
           const stat = await fsp.stat(path.join(this.cacheDir, f));
           const accessTime = fileAccessMap.get(f) || stat.atimeMs;
@@ -220,6 +235,7 @@ export class CacheDiskManager {
     cacheTtlMs: number,
     fileAccessMap: Map<string, number>,
     isBuilding: (fileId: string) => boolean,
+    isPinned?: (fileId: string) => boolean,
   ): Promise<number> {
     const files = await fsp.readdir(this.cacheDir);
     const now = Date.now();
@@ -230,6 +246,9 @@ export class CacheDiskManager {
       try {
         const stat = await fsp.stat(fullPath);
         if (f.endsWith('.tmp') && isBuilding(f.slice(0, -4))) {
+          surviving.add(f);
+        } else if (isPinned?.(f)) {
+          // 正在被读取的缓存：即使过期也保留，避免中断在途下载（下一轮清理再处理）
           surviving.add(f);
         } else if (now - stat.mtimeMs > cacheTtlMs) {
           await fsp.unlink(fullPath);
@@ -252,7 +271,7 @@ export class CacheDiskManager {
     return cleaned;
   }
 
-  /** 失效文件：删除正式缓存 + .tmp + .spool 三件套（幂等） */
+  /** 失效文件：删除正式缓存 + 所有同名临时副本（幂等） */
   async unlinkAllCacheFiles(fileId: string): Promise<void> {
     const cachePath = this.getCachePath(fileId);
     // 正式缓存删除前记录大小，供内存计数扣减（G4-03）
@@ -266,6 +285,25 @@ export class CacheDiskManager {
       fsp.unlink(cachePath + '.tmp').catch(() => {}),
       fsp.unlink(cachePath + '.spool').catch(() => {}),
     ]);
+    // 活动会话的临时文件命名是 `<cachePath>.<randomUUID>.tmp|.spool`（见 CacheSessionCoordinator），
+    // 历史实现只删固定后缀，导致进程崩溃后的孤儿文件永远不会被这一步回收。
+    await this.removeTempSiblings(cachePath);
     if (cacheSize !== undefined) this.unregisterCache(fileId, cacheSize);
+  }
+
+  /** 删除 `<cachePath>.<uuid>.tmp|.spool` 形式的临时兄弟文件（幂等，失败仅忽略） */
+  private async removeTempSiblings(cachePath: string): Promise<void> {
+    const dir = path.dirname(cachePath);
+    const base = path.basename(cachePath);
+    let entries: string[];
+    try {
+      entries = await fsp.readdir(dir);
+    } catch {
+      return;
+    }
+    const targets = entries.filter(
+      (name) => name.startsWith(`${base}.`) && (name.endsWith('.tmp') || name.endsWith('.spool')),
+    );
+    await Promise.all(targets.map((name) => fsp.unlink(path.join(dir, name)).catch(() => {})));
   }
 }

@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { classifyServiceAvailabilityError, getApiErrorDetails, getErrorMessage } from './error';
+import {
+  classifyServiceAvailabilityError,
+  getApiErrorDetails,
+  getDownloadError,
+  getDownloadErrorMessage,
+  getErrorMessage,
+} from './error';
 
 describe('API 错误适配', () => {
   it('将 507 映射为明确的磁盘空间不足提示', () => {
@@ -45,5 +51,43 @@ describe('API 错误适配', () => {
       message: '邮箱无效；密码过短',
     });
     expect(getErrorMessage(error)).toBe('邮箱无效；密码过短');
+  });
+});
+
+describe('下载调度错误码文案', () => {
+  // 覆盖既有 + 新增全部 DOWNLOAD_* 业务码（含任务过期）
+  const codes = [
+    'DOWNLOAD_QUEUE_FULL',
+    'DOWNLOAD_QUEUE_TIMEOUT',
+    'DOWNLOAD_QUEUE_CANCELLED',
+    'DOWNLOAD_SERVER_BUSY',
+    'DOWNLOAD_STORAGE_PROBE_UNAVAILABLE',
+    'DOWNLOAD_INSUFFICIENT_STORAGE',
+    'DOWNLOAD_TASK_EXPIRED',
+    'DOWNLOAD_SHUTTING_DOWN',
+  ];
+
+  it.each(codes)('%s 有专属可读文案', (code) => {
+    const error = { response: { status: 503, data: { code } } };
+    const mapped = getDownloadError(error);
+    expect(mapped?.code).toBe(code);
+    expect(mapped?.message).toBeTruthy();
+    expect(getDownloadErrorMessage(error)).toBe(mapped?.message);
+  });
+
+  it('DOWNLOAD_* 不会被通用 503/507 文案劫持', () => {
+    for (const status of [503, 507]) {
+      const error = {
+        response: { status, data: { code: 'DOWNLOAD_SERVER_BUSY', message: '后端原始消息' } },
+      };
+      // 下载类错误不做通用基础设施归类，保留后端原始文案
+      expect(classifyServiceAvailabilityError(error)).toBeNull();
+      expect(getErrorMessage(error)).toBe('后端原始消息');
+    }
+  });
+
+  it('非下载类错误不产生下载文案', () => {
+    expect(getDownloadError({ response: { status: 500, data: { code: 'SOMETHING_ELSE' } } })).toBeNull();
+    expect(getDownloadErrorMessage({ response: { status: 500, data: {} } })).toBeUndefined();
   });
 });

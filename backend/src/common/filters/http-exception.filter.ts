@@ -55,6 +55,9 @@ export class GlobalExceptionFilter implements ExceptionFilter {
     let status = HttpStatus.INTERNAL_SERVER_ERROR;
     let message: string | string[] = '服务器内部错误';
     let requestId: string | undefined;
+    // 结构化业务错误（我方显式构造的 errorCode）：保留给前端队列/自动重试使用
+    let structuredErrorCode: string | undefined;
+    let structuredRetryAfterMs: number | undefined;
 
     if (exception instanceof HttpException) {
       status = exception.getStatus();
@@ -65,16 +68,17 @@ export class GlobalExceptionFilter implements ExceptionFilter {
         if (typeof exceptionResponse === 'string') {
           message = exceptionResponse;
         } else if (typeof exceptionResponse === 'object' && exceptionResponse !== null) {
-          const resp = exceptionResponse as { message?: string | string[]; code?: unknown; retryAfterMs?: unknown };
+          const resp = exceptionResponse as {
+            message?: string | string[];
+            code?: unknown;
+            errorCode?: unknown;
+            retryAfterMs?: unknown;
+          };
           message = resp.message ?? exception.message;
-          // 上传磁盘预算等待使用结构化 429 契约；保留业务码及重试提示给浏览器队列，
-          // 同时写 Retry-After 以便非前端客户端遵守背压。
-          if (resp.code === 'UPLOAD_DISK_BUDGET_BUSY') {
-            res.setHeader('X-Tgtc-Error-Code', 'UPLOAD_DISK_BUDGET_BUSY');
-            const retryAfterMs = Number(resp.retryAfterMs);
-            if (Number.isSafeInteger(retryAfterMs) && retryAfterMs >= 1000) {
-              res.setHeader('Retry-After', String(Math.max(1, Math.ceil(retryAfterMs / 1000))));
-            }
+          structuredErrorCode = pickErrorCode(resp);
+          if (structuredErrorCode) {
+            applyStructuredErrorHeaders(res, structuredErrorCode, resp.retryAfterMs);
+            structuredRetryAfterMs = retryAfterMsOf(resp.retryAfterMs);
           }
         }
       }
@@ -87,7 +91,20 @@ export class GlobalExceptionFilter implements ExceptionFilter {
           `HTTP ${status} [requestId=${requestId}] ${req.method} ${safeUrl}: ${exception.message}`,
           exception.stack,
         );
-        message = '服务器内部错误';
+        // 结构化业务错误（上传磁盘预算、下载资源协调器）的文案由本仓库显式提供且不含内部细节，
+        // 保留它前端才能展示"服务器繁忙/排队等待"等可行动提示；其余 5xx 仍回退通用文案。
+        const structuredResponse = exception.getResponse();
+        if (typeof structuredResponse === 'object' && structuredResponse !== null) {
+          const resp = structuredResponse as { code?: unknown; errorCode?: unknown; retryAfterMs?: unknown };
+          structuredErrorCode = structuredErrorCode ?? pickErrorCode(resp);
+          if (structuredErrorCode) {
+            applyStructuredErrorHeaders(res, structuredErrorCode, resp.retryAfterMs);
+            structuredRetryAfterMs = structuredRetryAfterMs ?? retryAfterMsOf(resp.retryAfterMs);
+            const structuredMessage = (structuredResponse as { message?: string | string[] }).message;
+            message = structuredMessage ?? message;
+          }
+        }
+        if (!structuredErrorCode) message = '服务器内部错误';
         res.setHeader('X-Request-Id', requestId);
       }
     } else if (exception instanceof Error) {
@@ -123,6 +140,30 @@ export class GlobalExceptionFilter implements ExceptionFilter {
       code: status,
       message,
       data: null,
+      ...(structuredErrorCode ? { errorCode: structuredErrorCode } : {}),
+      ...(structuredRetryAfterMs !== undefined ? { retryAfterMs: structuredRetryAfterMs } : {}),
     });
+  }
+}
+
+/** 提取结构化业务码：优先 `errorCode`，兼容历史 `code: 'UPLOAD_DISK_BUDGET_BUSY'` 写法 */
+function pickErrorCode(resp: { code?: unknown; errorCode?: unknown }): string | undefined {
+  if (typeof resp.errorCode === 'string' && resp.errorCode) return resp.errorCode;
+  if (typeof resp.code === 'string' && resp.code) return resp.code;
+  return undefined;
+}
+
+/** 合法（>=1s）的建议重试间隔（毫秒） */
+function retryAfterMsOf(value: unknown): number | undefined {
+  const retryAfterMs = Number(value);
+  return Number.isSafeInteger(retryAfterMs) && retryAfterMs >= 1000 ? retryAfterMs : undefined;
+}
+
+/** 写入 X-Tgtc-Error-Code 与 Retry-After，供前端排队提示与客户端自动退避 */
+function applyStructuredErrorHeaders(res: Response, errorCode: string, retryAfterRaw: unknown): void {
+  res.setHeader('X-Tgtc-Error-Code', errorCode);
+  const retryAfterMs = retryAfterMsOf(retryAfterRaw);
+  if (retryAfterMs !== undefined) {
+    res.setHeader('Retry-After', String(Math.max(1, Math.ceil(retryAfterMs / 1000))));
   }
 }

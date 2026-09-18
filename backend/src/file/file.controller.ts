@@ -49,6 +49,9 @@ import { ConfigCacheService } from '../common/services/config-cache.service';
 import { StreamResponderService } from '../common/services/stream-responder.service';
 import { TagService } from '../tag/tag.service';
 import { MediaTicketService } from '../common/services/media-ticket.service';
+import { DownloadTaskService } from './download-task.service';
+import { FileCacheService } from './file-cache.service';
+import { CreateDownloadTaskDto } from './dto/create-download-task.dto';
 
 // Multer 层硬上限（600MB，仅防止极端 DoS；精确的动态限制由 FileService.upload() 业务层负责）
 const multerFileSize = 600 * 1024 * 1024; // 600MB
@@ -92,6 +95,8 @@ export class FileController {
     private folderService: FolderService,
     private mediaTicketService: MediaTicketService,
     private uploadDiskBudget: UploadDiskBudgetService,
+    private downloadTasks: DownloadTaskService,
+    private fileCacheService: FileCacheService,
   ) {}
 
   /**
@@ -645,6 +650,36 @@ export class FileController {
     return this.fileService.getCacheStatus(id, user);
   }
 
+  /**
+   * 创建下载任务（两阶段下载的第一阶段）。
+   *
+   * 返回能否立即开始下载，或"排队原因 + 近似队列位置 + 建议重试间隔"。
+   * 任务本身不持有流：前端拿到 streamable 后仍触发浏览器原生下载（同源 cookie 鉴权），
+   * 从而在不引入第二套取流路径的前提下把服务器负载与排队状态暴露给用户。
+   */
+  @Post(':id/download-tasks')
+  @UseGuards(JwtOrApiKeyAuthGuard)
+  async createDownloadTask(
+    @Param('id') id: string,
+    @CurrentUser() user: User,
+    @Body() dto: CreateDownloadTaskDto,
+  ) {
+    const file = await this.fileService.findOne(id, user);
+    const expectedSize = Number(file.size);
+    if (!Number.isSafeInteger(expectedSize) || expectedSize <= 0) {
+      throw new BadRequestException('文件大小无效，暂时无法创建下载任务');
+    }
+    const nocache = Boolean(dto?.nocache);
+    return this.downloadTasks.create({
+      ownerKey: `user:${user.id}`,
+      fileId: file.id,
+      contentVersion: file.uploadVersion,
+      expectedSize,
+      downloadUrl: `/api/files/${file.id}/download${nocache ? '?nocache=1' : ''}`,
+      countsTowardCache: !nocache && !this.fileCacheService.isNoCacheMode(),
+    });
+  }
+
   @Get(':id/download')
   @UseGuards(JwtOrApiKeyAuthGuard)
   async download(
@@ -678,6 +713,14 @@ export class FileController {
       // 请求级无缓存：仅管理员可通过 ?nocache=1|true 强制实时回源直通，普通用户/API Key 传参忽略
       const isAdmin = hasAdminPrivileges(user);
       const noCacheRequested = isAdmin && (req.query.nocache === '1' || req.query.nocache === 'true');
+
+      // 两阶段下载第二阶段：任务票据原子消费（单次有效）。
+      // 命中时把任务已持有的磁盘预约交接给本次正文请求，使其不再重新排队；
+      // 无效/已消费/归属或文件不匹配则静默忽略，走常规准入路径（不影响旧前端与直接下载）。
+      const taskTicket = typeof req.query.taskTicket === 'string' ? req.query.taskTicket : undefined;
+      if (taskTicket) {
+        this.downloadTasks.consumeTicket(taskTicket, `user:${user.id}`, id);
+      }
 
       // Range 请求支持（仅缓存命中时可用）
       const rangeHeader = req.headers.range;
@@ -724,6 +767,8 @@ export class FileController {
           'Cache-Control': 'private, no-cache',
           'X-Content-Type-Options': 'nosniff',
           'Referrer-Policy': 'no-referrer',
+          // 完整 200 与分段 206 使用同一版本标识，客户端续传语义一致
+          ...(result.etag ? { ETag: result.etag, 'Accept-Ranges': 'bytes' } : {}),
         },
         stream: result.stream,
         accessLogId: result.accessLogId,

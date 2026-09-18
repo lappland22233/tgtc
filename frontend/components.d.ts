@@ -17,6 +17,7 @@ declare module 'vue' {
     CreateShareDialog: typeof import('./src/components/share/CreateShareDialog.vue')['default']
     CustomVideoPlayer: typeof import('./src/components/file/CustomVideoPlayer.vue')['default']
     DownloadLinkDialog: typeof import('./src/components/share/DownloadLinkDialog.vue')['default']
+    DownloadQueueIndicator: typeof import('./src/components/DownloadQueueIndicator.vue')['default']
     FileCard: typeof import('./src/components/file/FileCard.vue')['default']
     FileContextMenu: typeof import('./src/components/file/FileContextMenu.vue')['default']
     FilePreviewDialog: typeof import('./src/components/file/FilePreviewDialog.vue')['default']

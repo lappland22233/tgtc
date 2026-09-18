@@ -93,6 +93,60 @@ export function validateEnv(env: NodeJS.ProcessEnv = process.env): void {
     errors.push('TELEGRAM_CHAT_ID 未设置');
   }
 
+  // ---- Telegram Bot 入站（文件直链） ----
+  // 入站消费总开关：不做热更新（安全边界）。仅显式 true 时启用。
+  const botUpdatesEnabled = (env.TELEGRAM_BOT_UPDATES_ENABLED || '').trim().toLowerCase() === 'true';
+  if (env.TELEGRAM_BOT_UPDATES_ENABLED && !/^(true|false)$/i.test(env.TELEGRAM_BOT_UPDATES_ENABLED.trim())) {
+    errors.push('TELEGRAM_BOT_UPDATES_ENABLED 必须为 true 或 false');
+  }
+  // 初始管理员 TG 用户 ID（逗号分隔）；入站启用时必须有管理员，否则无人可维护白名单
+  const adminIds = (env.TELEGRAM_BOT_ADMIN_IDS || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (adminIds.some((id) => !/^\d{1,20}$/.test(id))) {
+    errors.push('TELEGRAM_BOT_ADMIN_IDS 格式错误（应为逗号分隔的 TG 数字用户 ID）');
+  }
+  if (botUpdatesEnabled && adminIds.length === 0) {
+    errors.push('TELEGRAM_BOT_UPDATES_ENABLED=true 时必须配置 TELEGRAM_BOT_ADMIN_IDS（初始管理员 TG 用户 ID）');
+  }
+  if (env.TELEGRAM_BOT_DAILY_LIMIT !== undefined && env.TELEGRAM_BOT_DAILY_LIMIT !== '') {
+    const limit = Number(env.TELEGRAM_BOT_DAILY_LIMIT);
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100000) {
+      errors.push('TELEGRAM_BOT_DAILY_LIMIT 必须为 1–100000 的整数');
+    }
+  }
+  if (env.TELEGRAM_BOT_LINK_TTL_HOURS !== undefined && env.TELEGRAM_BOT_LINK_TTL_HOURS !== '') {
+    const ttl = Number(env.TELEGRAM_BOT_LINK_TTL_HOURS);
+    if (!Number.isSafeInteger(ttl) || ttl < 1 || ttl > 720) {
+      errors.push('TELEGRAM_BOT_LINK_TTL_HOURS 必须为 1–720 的整数（小时）');
+    }
+  }
+  if (env.TELEGRAM_BOT_QUOTA_TIMEZONE && !isValidTimeZone(env.TELEGRAM_BOT_QUOTA_TIMEZONE)) {
+    errors.push(`TELEGRAM_BOT_QUOTA_TIMEZONE 不是合法 IANA 时区: ${env.TELEGRAM_BOT_QUOTA_TIMEZONE}`);
+  }
+  if (env.TELEGRAM_BOT_LINK_DOMAIN_MODE && !['auto', 'manual'].includes(env.TELEGRAM_BOT_LINK_DOMAIN_MODE.trim())) {
+    errors.push('TELEGRAM_BOT_LINK_DOMAIN_MODE 取值非法（应为 auto 或 manual）');
+  }
+  if (env.TELEGRAM_BOT_LINK_DOMAIN && !isValidSiteOrigin(env.TELEGRAM_BOT_LINK_DOMAIN)) {
+    errors.push('TELEGRAM_BOT_LINK_DOMAIN 必须为 http(s)://host[:port] 形式，且不含路径/查询串');
+  }
+  if (botUpdatesEnabled && !env.TELEGRAM_BOT_ENCRYPTION_KEY) {
+    console.warn(
+      '[env-validation] TELEGRAM_BOT_ENCRYPTION_KEY 未设置：Bot 直链将以不可回放模式签发，'
+      + '/link_query 仅能返回前缀。建议设置 32 字节 base64/hex 根密钥。',
+    );
+  }
+  if (env.TELEGRAM_BOT_ENCRYPTION_KEY && !isValidEncryptionKey(env.TELEGRAM_BOT_ENCRYPTION_KEY)) {
+    errors.push('TELEGRAM_BOT_ENCRYPTION_KEY 必须为 32 字节的 base64 或 64 位 hex 字符串');
+  }
+  if (env.TELEGRAM_BOT_POLL_TIMEOUT_SECONDS !== undefined && env.TELEGRAM_BOT_POLL_TIMEOUT_SECONDS !== '') {
+    const poll = Number(env.TELEGRAM_BOT_POLL_TIMEOUT_SECONDS);
+    if (!Number.isSafeInteger(poll) || poll < 1 || poll > 120) {
+      errors.push('TELEGRAM_BOT_POLL_TIMEOUT_SECONDS 必须为 1–120 的整数');
+    }
+  }
+
   // ---- SMTP 邮件（仅当存在 SMTP_HOST 时校验） ----
   if (env.SMTP_HOST) {
     if (!env.SMTP_PORT) errors.push('SMTP_PORT 未设置（SMTP_HOST 已配置）');
@@ -138,6 +192,47 @@ export function validateEnv(env: NodeJS.ProcessEnv = process.env): void {
     errors.push('FILE_CACHE_NO_CACHE_MODE 必须为 true 或 false');
   }
 
+  // ---- 下载回源超时分层（首字节 / 空闲 / 总时限） ----
+  // 背景：历史实现用固定的 30 分钟「总时限」判断卡死，且不随进度刷新，
+  // 4GiB 文件在平均速度低于约 2.28MiB/s 时必然被误杀。现拆分为三层，
+  // 并按「有持续进度即刷新」判定，总时限默认禁用（0）。
+  const cacheFirstByteMs = readNonNegativeTimeoutEnv(env, 'FILE_CACHE_BUILD_FIRST_BYTE_TIMEOUT_MS', 210_000, errors);
+  const cacheIdleMs = readNonNegativeTimeoutEnv(env, 'FILE_CACHE_BUILD_IDLE_TIMEOUT_MS', 150_000, errors);
+  const cacheTotalMs = readNonNegativeTimeoutEnv(env, 'FILE_CACHE_BUILD_TOTAL_TIMEOUT_MS', 0, errors);
+  const telegramStreamSeconds = readPositiveIntEnv(env, 'TELEGRAM_FILE_STREAM_TIMEOUT_SECONDS', 180, errors);
+  // 只接受正整数：main.ts 对 0/非法值一律回退默认 180s，接受 0 会与实现语义不一致
+  const httpIdleSeconds = readPositiveIntEnv(env, 'HTTP_IDLE_TIMEOUT_SECONDS', 180, errors);
+
+  // 层级关系只告警不阻断：既有部署可能已自定义其中某一项，直接拒绝启动会让升级失败；
+  // 但必须高可见度提示，否则外层会先于内层断开，产生无法分类的 502/504。
+  const timeoutWarnings: string[] = [];
+  if (cacheFirstByteMs > 0 && cacheIdleMs > 0 && cacheFirstByteMs < cacheIdleMs) {
+    timeoutWarnings.push(
+      `FILE_CACHE_BUILD_FIRST_BYTE_TIMEOUT_MS(${cacheFirstByteMs}) 小于 FILE_CACHE_BUILD_IDLE_TIMEOUT_MS(${cacheIdleMs})，建议首字节不小于空闲超时`,
+    );
+  }
+  if (cacheTotalMs > 0 && cacheFirstByteMs > 0 && cacheTotalMs <= cacheFirstByteMs) {
+    timeoutWarnings.push(
+      `FILE_CACHE_BUILD_TOTAL_TIMEOUT_MS(${cacheTotalMs}) 不大于首字节超时(${cacheFirstByteMs})，总时限会先于首字节触发`,
+    );
+  }
+  if (cacheFirstByteMs > 0 && cacheFirstByteMs <= telegramStreamSeconds * 1000) {
+    timeoutWarnings.push(
+      `FILE_CACHE_BUILD_FIRST_BYTE_TIMEOUT_MS(${cacheFirstByteMs}) 不大于 TELEGRAM_FILE_STREAM_TIMEOUT_SECONDS*1000(${telegramStreamSeconds * 1000})，外层 HTTP 会先断开`,
+    );
+  }
+  if (httpIdleSeconds > 0 && cacheIdleMs > 0 && httpIdleSeconds * 1000 <= cacheIdleMs) {
+    timeoutWarnings.push(
+      `HTTP_IDLE_TIMEOUT_SECONDS*1000(${httpIdleSeconds * 1000}) 不大于缓存空闲超时(${cacheIdleMs})，Node 会先断开 socket，长传输表现为无原因中断`,
+    );
+  }
+  if (timeoutWarnings.length > 0) {
+    console.warn(
+      '[env-validation] 下载超时层级存在冲突（不阻断启动，但会导致 502/504 无法分类）：\n  - '
+      + timeoutWarnings.join('\n  - '),
+    );
+  }
+
   // ---- 日志分片/轮转（仅在显式配置但格式错误时报错，避免误值静默失效） ----
   if (env.LOG_ROTATION_INTERVAL && !['daily', 'hourly'].includes(env.LOG_ROTATION_INTERVAL)) {
     errors.push('LOG_ROTATION_INTERVAL 取值非法: ' + env.LOG_ROTATION_INTERVAL + '（应为 daily 或 hourly）');
@@ -153,6 +248,43 @@ export function validateEnv(env: NodeJS.ProcessEnv = process.env): void {
     const msg = '[启动失败] 环境变量校验不通过：\n  - ' + errors.join('\n  - ');
     throw new Error(msg);
   }
+}
+
+/**
+ * 读取非负整数毫秒配置：0 是合法值，表示「禁用该超时」。
+ * 非法值记入 errors 并回退默认值（避免把 fixed 总时限写死后无法关闭）。
+ */
+function readNonNegativeTimeoutEnv(
+  env: NodeJS.ProcessEnv,
+  key: string,
+  fallback: number,
+  errors: string[],
+): number {
+  const raw = env[key];
+  if (raw === undefined || raw.trim() === '') return fallback;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < 0) {
+    errors.push(`${key} 必须为不小于 0 的整数（毫秒，0 表示禁用）`);
+    return fallback;
+  }
+  return value;
+}
+
+/** 读取正整数配置；非法值记入 errors 并回退默认值。 */
+function readPositiveIntEnv(
+  env: NodeJS.ProcessEnv,
+  key: string,
+  fallback: number,
+  errors: string[],
+): number {
+  const raw = env[key];
+  if (raw === undefined || raw.trim() === '') return fallback;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    errors.push(`${key} 必须为正整数`);
+    return fallback;
+  }
+  return value;
 }
 
 /**
@@ -193,4 +325,51 @@ function isWeakEntropy(value: string): boolean {
 /** 判断字符串是否为合法 hex（非空、偶数长度、仅含 0-9a-fA-F）。 */
 function isHex(value: string): boolean {
   return value.length > 0 && value.length % 2 === 0 && /^[0-9a-fA-F]+$/.test(value);
+}
+
+/** 判断是否为合法 IANA 时区名（依赖 ICU 的 Intl 实现）。 */
+export function isValidTimeZone(value: string): boolean {
+  const tz = value.trim();
+  if (!tz) return false;
+  try {
+    // 非法时区名会抛 RangeError
+    new Intl.DateTimeFormat('en-US', { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 判断是否为合法站点来源：http(s)://host[:port]，不含路径、查询串、用户信息、片段。
+ * 用于直链域名配置/面板写入校验（防止生成钓鱼链接，R11）。
+ */
+export function isValidSiteOrigin(value: string): boolean {
+  const raw = value.trim();
+  if (!raw || raw.length > 255) return false;
+  if (/[\u0000-\u001F\u007F\s]/.test(raw)) return false;
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return false;
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return false;
+  if (!url.hostname) return false;
+  if (url.username || url.password) return false;
+  // pathname 必须为空或根路径；query/hash 一律拒绝
+  if (url.pathname && url.pathname !== '/' && url.pathname !== '') return false;
+  if (url.search || url.hash) return false;
+  return true;
+}
+
+/** 校验可逆加密根密钥：32 字节 base64 或 64 位 hex。 */
+export function isValidEncryptionKey(value: string): boolean {
+  const raw = value.trim();
+  if (/^[0-9a-fA-F]{64}$/.test(raw)) return true;
+  try {
+    return Buffer.from(raw, 'base64').length === 32;
+  } catch {
+    return false;
+  }
 }

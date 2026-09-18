@@ -212,7 +212,7 @@ describe('AdminService 通用配置写入白名单 (G7-01)', () => {
     const svc = new AdminService(
       repoMock(), repoMock(), fileRepository as any, repoMock(), repoMock(),
       repoMock(), repoMock(), {} as any, configCache as any,
-      auditService as any, {} as any, {} as any,
+      auditService as any, {} as any, {} as any, {} as any,
     );
 
     await svc.updateConfig(user, 'MAX_FILE_SIZE', '20971520');
@@ -319,7 +319,7 @@ describe('AdminService.updateSecurityConfig 归一化 (G7-06)', () => {
     const svc = new AdminService(
       repoMock(), repoMock(), fileRepository as any, repoMock(), repoMock(),
       repoMock(), repoMock(), {} as any, configCache as any,
-      auditService as any, {} as any, {} as any,
+      auditService as any, {} as any, {} as any, {} as any,
     );
 
     // 使用 scan 请求阈值键，'1e3' -> Number('1e3')=1000 -> String(1000)='1000'
@@ -341,7 +341,7 @@ describe('AdminService.updateSecurityConfig 归一化 (G7-06)', () => {
     const svc = new AdminService(
       repoMock(), repoMock(), fileRepository as any, repoMock(), repoMock(),
       repoMock(), repoMock(), {} as any, configCache as any,
-      auditService as any, {} as any, {} as any,
+      auditService as any, {} as any, {} as any, {} as any,
     );
 
     await expect(

@@ -12,6 +12,8 @@ RUNTIME_DIR="$INSTALL_ROOT/runtime"
 BACKEND_DIR="$ROOT_DIR/backend"
 BOT_DIR="$ROOT_DIR/telegram-bot-api"
 BOT_DATA_DIR="$RUNTIME_DIR/telegram-bot-api/data"
+# Bot API 的 HTTP 临时目录：显式落在受控路径（默认落到 /tmp 会脱离 workdir 配额与清理统计）
+BOT_TEMP_DIR="$RUNTIME_DIR/telegram-bot-api/tmp"
 NODE="$ROOT_DIR/runtime/bin/node"
 APP_ENV="$RUNTIME_DIR/backend/.env"
 BOT_ENV="$RUNTIME_DIR/telegram-bot-api/.env"
@@ -511,11 +513,19 @@ EOF
   write_env_line "$APP_ENV" TELEGRAM_CHAT_ID "$chat_id"
 
   if [[ "$ENABLE_BOT_API" == true ]]; then
+    # 超时分层（必须满足 内层 < 外层，否则外层先断开会让故障无法分类）——两条互相独立的链路：
+    #   首字节链：Bot API 首字节 120s  <  Nest HTTP 180s  <  缓存首字节 210s
+    #   空闲链：  Bot API 空闲 120s    <  缓存空闲 150s    <  Node 空闲 180s  <  Nginx read 210s
+    # 缓存构建总时限保持 0（禁用）：固定总时限会把低于约 2.28MiB/s 的 4GiB 正常传输误杀。
     cat >> "$APP_ENV" <<EOF
 TELEGRAM_API_BASE="http://127.0.0.1:8081"
 TELEGRAM_FILE_STREAMING_ENABLED=true
 TELEGRAM_FILE_STREAM_BASE="http://127.0.0.1:8081"
-TELEGRAM_FILE_STREAM_TIMEOUT_SECONDS=120
+TELEGRAM_FILE_STREAM_TIMEOUT_SECONDS=180
+HTTP_IDLE_TIMEOUT_SECONDS=180
+FILE_CACHE_BUILD_FIRST_BYTE_TIMEOUT_MS=210000
+FILE_CACHE_BUILD_IDLE_TIMEOUT_MS=150000
+FILE_CACHE_BUILD_TOTAL_TIMEOUT_MS=0
 EOF
     write_env_line "$APP_ENV" TELEGRAM_LOCAL_FILE_DIR "$BOT_DATA_DIR"
     : > "$BOT_ENV"
@@ -558,13 +568,20 @@ unit_escape() {
 }
 
 install_services() {
-  local service_user=$1 current_q backend_q app_env_q bot_dir_q bot_data_q bot_env_q
+  local service_user=$1 current_q backend_q app_env_q bot_dir_q bot_data_q bot_env_q bot_temp_q
   current_q=$(unit_escape "$CURRENT_ROOT")
   backend_q=$(unit_escape "$RUNTIME_DIR/backend")
   app_env_q=$(unit_escape "$APP_ENV")
   bot_dir_q=$(unit_escape "$CURRENT_ROOT/telegram-bot-api")
   bot_data_q=$(unit_escape "$BOT_DATA_DIR")
   bot_env_q=$(unit_escape "$BOT_ENV")
+  bot_temp_q=$(unit_escape "$BOT_TEMP_DIR")
+
+  # Bot API 统计端口默认关闭：开启后需自行保证仅本机可访问（见 README 运维章节）。
+  local bot_stats_args=''
+  if [[ -n "${TGTC_BOT_STATS_PORT:-}" ]]; then
+    bot_stats_args="--http-stat-port=${TGTC_BOT_STATS_PORT}"
+  fi
 
   # P1-04：更新任务经独立 systemd oneshot 单元（tgtc-update@.service）派发，
   # 与后端服务不同 cgroup——后端重启（tgtc.service restart）不会回收更新器进程；
@@ -635,7 +652,7 @@ Type=simple
 User=$service_user
 Group=$(id -gn "$service_user")
 EnvironmentFile=-$bot_env_q
-ExecStart=$bot_dir_q/bin/telegram-bot-api --api-id=\${TELEGRAM_API_ID} --api-hash=\${TELEGRAM_API_HASH} --local --http-port=8081 --dir=$bot_data_q --enable-file-streaming
+ExecStart=$bot_dir_q/bin/telegram-bot-api --api-id=\${TELEGRAM_API_ID} --api-hash=\${TELEGRAM_API_HASH} --local --http-port=8081 --dir=$bot_data_q --enable-file-streaming --temp-dir=$bot_temp_q --file-stream-first-byte-timeout=120 --file-stream-idle-timeout=120 --file-stream-max-connections=100 --file-stream-max-size=0 --workdir-cleanup-threshold-bytes=21474836480 --workdir-cleanup-target-bytes=16106127360 --workdir-cleanup-interval=3600 --workdir-file-ttl=86400 --workdir-min-free-bytes=1073741824 --workdir-unknown-file-min-free-bytes=536870912 $bot_stats_args
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=60
@@ -665,7 +682,7 @@ EOF
 prepare_permissions() {
   local service_user=$1
   install -d -m 0750 -o "$service_user" -g "$(id -gn "$service_user")" \
-    "$RUNTIME_DIR/backend" "$RUNTIME_DIR/telegram-bot-api" "$RUNTIME_DIR/backend/data" "$RUNTIME_DIR/backend/tmp" "$BOT_DATA_DIR"
+    "$RUNTIME_DIR/backend" "$RUNTIME_DIR/telegram-bot-api" "$RUNTIME_DIR/backend/data" "$RUNTIME_DIR/backend/tmp" "$BOT_DATA_DIR" "$BOT_TEMP_DIR"
   chown "$service_user:$(id -gn "$service_user")" "$APP_ENV"
   [[ ! -f "$BOT_ENV" ]] || chown "$service_user:$(id -gn "$service_user")" "$BOT_ENV"
   chmod 600 "$APP_ENV"

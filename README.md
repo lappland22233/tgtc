@@ -31,7 +31,20 @@
 - 冷文件可通过二次开发的 Telegram Bot API 实时流端点边下载边构建缓存
 - 同一文件并发冷下载只建立一个上游回源；各客户端从临时缓存独立跟随读取
 - 缓存使用临时文件、大小校验和原子发布；失败会清理不完整文件
-- Range 下载仅在完整缓存命中时返回 `206`；冷文件 Range 请求回退为完整 `200` 下载
+- 支持标准单区间 Range（closed / open-ended / suffix）：缓存命中直接返回 `206`；冷文件通过 build/spool follower 同样保持 `206`，断点续传可用
+- 上游始终单路顺序回源，请求区间若尚未回源完成会等待补齐（并发多线程下载未回源部分无法立即应答）；非法或越界 Range 返回 `416` 而非静默回退 `200`
+
+#### 下载磁盘配额与排队
+
+所有会新增本地占用的下载环节（正式缓存构建、临时中转、缓存预热）统一走同一套调度：
+
+- **占用预测 → 预约 → 排队**：按文件大小预测峰值占比并先行预约；准入公式为「物理空闲 − 最低安全余量 − 其他任务未写入预约 ≥ 本次新增」，避免多个任务复用同一份空闲空间；
+- **写入即核销**：每写入一段数据就把预约量核销同等额度，已落盘部分由文件系统反映，不做物理/逻辑双重扣减；
+- **不抢占**：已获得预约的任务不会被新任务或配置热更新撤销；回收只作用于已发布且未被读取的旧缓存，绝不删除进行中的临时文件；
+- **结构性不可行时降级直通（并非"无条件可下载"）**：完整暂存不可行（单文件超过缓存上限，或卷内空间结构性不足）时自动降级为受限缓冲直通（`FILE_DOWNLOAD_DIRECT_WINDOW_MB`，不写本地副本），保持 `206`/`416` 与首字节语义。但准入仍在：等待队列满返回 `429 DOWNLOAD_QUEUE_FULL`；非任务化的直接下载在 `FILE_DOWNLOAD_DIRECT_WAIT_SECONDS` 内拿不到资源返回 `503 DOWNLOAD_SERVER_BUSY` + `Retry-After`。因此不保证「任何时刻都能立即开始下载」；
+- **排队可见**：`POST /api/files/:id/download-tasks` 返回是否可立即下载或排队原因（磁盘 / 上游 / 负载）、近似队列位置与建议重试间隔；前端据此展示全局下载队列指示器并支持取消（详见 `API.md`）。
+
+运维注意：本调度管理的是后端缓存卷（`tmp/Cache`）。自建 Telegram Bot API/TDLib 的 `--dir` 工作目录是**独立磁盘域**，两者位于同一物理卷时仍可能互相抢占，建议分卷部署并分别配置最低余量（`FILE_CACHE_MIN_FREE_DISK_GB` 与 `--workdir-min-free-bytes`）。
 
 ### 分享
 
@@ -42,6 +55,17 @@
 - 文件夹分享支持子目录、面包屑和单文件下载
 - 我的分享列表支持筛选、复制链接、修改和取消
 - 旧入口 `/files/public/:id` 兼容重定向至分享页
+
+### Telegram Bot 文件直链
+
+- 用户在 Bot **私聊**中发送**文件**（`document`），即可获得带有效期的匿名下载直链
+- 非白名单用户按日限额（默认 5 个文件/天），白名单用户不限；额度、有效期、切日时区可在后台热更新
+- 直链仅受时间限制，不限下载次数；可被管理员按链接立即撤销
+- 复用站内同一套本地缓存 / Range 链路：支持单区间 Range 与断点续传（`206` + `Content-Range`），越界 Range 返回 `416`
+- **协议层无显式大小上限**：Bot 文件不经过本站上传链路，因此不受后台上传配置 `MAX_FILE_SIZE` 约束；本地 Bot API（`--local` + `--enable-file-streaming`）跳过内置的 20MB 下载上限，流式端点 `--file-stream-max-size` 默认 `0`（不限制）。实际可下载大小仍受 x64 平台、磁盘与缓存余量、代理临时卷、超时策略、链接有效期与 Telegram 本身能力约束
+- 仅接受 `document`：图片/视频/音频等媒体类型会收到提示且**不消耗额度**；群组/频道消息一律静默忽略
+- Bot 使用情况写入后端访问日志（`access_logs.botGrantId` / `botTelegramUserId`），并在后台汇总展示
+- 管理员可在 Bot 私聊中维护白名单、按 TG 用户 ID 查询完整直链、按直链撤销（全程审计）
 
 ### 管理与可观测性
 
@@ -119,6 +143,8 @@ npm run start:dev
 - 长度不少于 32 字符的 `JWT_SECRET`
 - `TELEGRAM_BOT_TOKEN`、`TELEGRAM_CHAT_ID`
 - `CORS_ORIGINS=http://localhost:5173`
+
+如启用 Bot 入站文件直链（默认**关闭**），还需配置 `TELEGRAM_BOT_UPDATES_ENABLED=true`、`TELEGRAM_BOT_ADMIN_IDS`（初始管理员 TG 用户 ID）、`TELEGRAM_BOT_ENCRYPTION_KEY`（32 字节 base64/hex，用于直链回放），并在后台「Telegram Bot 设置」中确认站点域名。
 
 如果配置了 `SMTP_HOST`，还必须同时配置完整 SMTP 参数以及 `SMTP_ENCRYPTION_KEY`、`SMTP_ENCRYPTION_SALT`；否则启动校验会拒绝启动。暂不使用邮件时，应移除或注释全部 SMTP 配置，并在系统认证配置中关闭依赖邮件的功能。
 
@@ -230,11 +256,23 @@ Redis 承载 `metrics-aggregation`、`attack-detection`、`alert-evaluation`、`
 | `TELEGRAM_LOCAL_FILE_DIR` | - | 自建 Bot API 本地文件目录白名单 |
 | `TELEGRAM_FILE_STREAMING_ENABLED` | `false` | 是否使用二次开发实时流端点 |
 | `TELEGRAM_FILE_STREAM_BASE` | `TELEGRAM_API_BASE` | 实时流服务地址 |
-| `TELEGRAM_FILE_STREAM_TIMEOUT_SECONDS` | `120` | 实时流请求超时 |
-| `FILE_CACHE_BUILD_IDLE_TIMEOUT_MS` | `60000` | 缓存构建无进展超时 |
-| `FILE_CACHE_BUILD_TOTAL_TIMEOUT_MS` | `1800000` | 单次缓存构建总时限 |
+| `TELEGRAM_FILE_STREAM_TIMEOUT_SECONDS` | `180` | 后端请求实时流端点的读超时（秒）；须**小于**首字节超时，并大于 Bot API `--file-stream-first-byte-timeout` |
+| `HTTP_IDLE_TIMEOUT_SECONDS` | `180` | Node HTTP 空闲超时（秒）；须**大于**缓存空闲超时、**小于**外层 Nginx `proxy_read_timeout` |
+| `FILE_CACHE_BUILD_FIRST_BYTE_TIMEOUT_MS` | `210000` | 缓存构建**首字节**超时（毫秒）；冷启动允许 TDLib 更久才出首块，`0` 表示禁用 |
+| `FILE_CACHE_BUILD_IDLE_TIMEOUT_MS` | `150000` | 缓存构建**无进展**超时（毫秒），每收到数据即刷新 |
+| `FILE_CACHE_BUILD_TOTAL_TIMEOUT_MS` | `0` | 单次缓存构建**总时限**（毫秒）；`0` = 禁用（默认），固定总时限会误杀长传输 |
+| `FILE_DOWNLOAD_MAX_RESERVED_GB` | `0` | 在途下载任务「未写入预约」总上限（GB），0 表示仅受物理空间约束（SystemConfig 热更新） |
+| `FILE_DOWNLOAD_MAX_CONCURRENT_UPSTREAMS` | `8` | 上游冷回源**权重预算**（非连接数）：`>1GiB` 权重 8、`256MiB–1GiB` 权重 2、其余 1；默认预算下大文件一次只跑 1 个，提到 `16` 可跑 2 个（SystemConfig 热更新） |
+| `FILE_DOWNLOAD_QUEUE_CAPACITY` | `128` | 磁盘/上游等待队列容量，超过后直接返回「服务器繁忙」（`429`）（SystemConfig 热更新） |
+| `FILE_DOWNLOAD_QUEUE_TIMEOUT_SECONDS` | `1800` | 单个下载任务排队等待上限（秒）（SystemConfig 热更新） |
+| `FILE_DOWNLOAD_SPOOL_GRACE_SECONDS` | `120` | 临时中转文件最后一个下载者离开后的保留时间（秒）（SystemConfig 热更新） |
+| `FILE_DOWNLOAD_DIRECT_WINDOW_MB` | `16` | 受限缓冲直通的缓冲窗口（MB），越小内存占用越低（SystemConfig 热更新） |
+| `FILE_DOWNLOAD_DIRECT_WAIT_SECONDS` | `60` | 非任务化直接下载端点的有限等待上限（秒）；超时返回 `503 DOWNLOAD_SERVER_BUSY` + `Retry-After`（不再挂到 1800s）；4GiB 场景建议上调到 `180`（SystemConfig 热更新） |
+| `FILE_DOWNLOAD_TASK_RETENTION_SECONDS` | `900` | 下载任务状态保留时间（秒）（SystemConfig 热更新） |
 | `THUMBNAIL_DIR` | `tmp/thumbnails` | 缩略图目录 |
 | `FILE_PROCESSING_STALE_MINUTES` | `60` | 上传队列僵尸任务恢复阈值（分钟） |
+
+> **配置来源**：`FILE_CACHE_BUILD_*` 三层超时、`HTTP_IDLE_TIMEOUT_SECONDS`、`TELEGRAM_FILE_STREAM_TIMEOUT_SECONDS` 与 `FILE_CACHE_NO_CACHE_MODE`（初始值）为**真实环境变量**，`.env` 生效；而 `FILE_DOWNLOAD_*` 及 `FILE_CACHE_MAX_SIZE_GB` / `FILE_CACHE_MIN_FREE_DISK_GB` / `FILE_CACHE_TTL_DAYS` 由管理后台「下载资源调度 / 缓存配置」以 **SystemConfig 热更新**为来源——**环境变量不是它们的来源**，上表默认值仅为参考。
 
 实时流要求二次开发 Bot API 使用 `--enable-file-streaming` 启动，后端访问：
 
@@ -242,7 +280,54 @@ Redis 承载 `metrics-aggregation`、`attack-detection`、`alert-evaluation`、`
 /stream/file/bot<TOKEN>/<encoded-file-id>
 ```
 
+实时流的失效处理约定：
+
+- **首字节前不失败**：TDLib 报「已下载」但 workdir 副本已不存在时（缓存清理、换目录等），流会请求 TDLib 重新回源并等待，而不是让冷文件的首个请求直接 5xx；只有已经开始传输后才中断（TDLib 的下载错误始终经 `on_file_error` 正常上报）。
+- **首字节前一律返回 JSON 错误 + 真实 HTTP 状态码**：不再裸断连接（历史表现为 nginx `upstream prematurely closed connection while reading response header`）。
+- **后端一次受控回源**：流式端点返回 502（路径失效/尺寸不可用），或返回带「TDLib 本地副本不可用」（打不开/读不到/找不到真实路径）特征的 500/504 时，后端执行一次强制回源（非 `metadata_only` `getFile`），失败保持瞬时错误语义、不顺延重试。
+
 缓存容量、最低磁盘空间和 TTL 存放在系统配置中，默认分别为 10 GB、1 GB、3 天，可从超级管理员后台热更新。
+
+### Telegram Bot 入站（文件直链）
+
+| 变量 | 默认值 | 说明 |
+|---|---:|---|
+| `TELEGRAM_BOT_UPDATES_ENABLED` | `false` | 入站消费总开关；仅显式 `true` 时启用，**不支持热更新**（安全边界） |
+| `TELEGRAM_BOT_ADMIN_IDS` | - | 初始管理员 TG 用户 ID，逗号分隔；开启入站时必填 |
+| `TELEGRAM_BOT_POLL_TIMEOUT_SECONDS` | `30` | 长轮询超时（1–120 秒） |
+| `TELEGRAM_BOT_ENCRYPTION_KEY` | - | 直链 Token 可逆加密根密钥（32 字节 base64/64 位 hex）；缺失时 `/link_query` 只能返回前缀 |
+| `TELEGRAM_BOT_DAILY_LIMIT` | `5` | 非白名单用户每日直链额度（env 兜底，面板可调） |
+| `TELEGRAM_BOT_LINK_TTL_HOURS` | `4` | 直链有效期（小时，env 兜底，面板可调） |
+| `TELEGRAM_BOT_QUOTA_TIMEZONE` | `Asia/Shanghai` | 每日额度切日时区（env 兜底，面板可调） |
+| `TELEGRAM_BOT_LINK_DOMAIN_MODE` | `auto` | `auto` 自动获取 / `manual` 手动设置（env 兜底，面板可调） |
+| `TELEGRAM_BOT_LINK_DOMAIN` | - | 手动模式下的站点域名，如 `https://text.lappland.top`（env 兜底，面板可调） |
+
+**站点域名解析优先级（防 Host 伪造）**：手动模式配置 > `APP_URL` > 受信代理头（仅 `TRUST_PROXY_HOPS` 正确配置时）> **fail-closed**。系统**绝不**回退到 `localhost` 或裸 `Host` 头；无可信来源时会拒绝签发并提示管理员在后台配置。
+
+**单消费者约束**：同一 Bot Token 只能有一个入站更新消费者。本模块与文件存储共用 `TELEGRAM_BOT_TOKEN`，因此**不得**同时启用 Webhook 或其他 `getUpdates` 消费者。启动时若检测到已设置 Webhook，会写入错误日志告警（`getUpdates` 会返回 409）。
+
+**Bot 命令**
+
+| 命令 | 权限 | 说明 |
+|---|---|---|
+| `/help`、`/start` | 所有用户 | 用法说明 |
+| `/id` | 所有用户 | 返回自己的 TG 用户 ID |
+| `/quota` | 所有用户 | 查询今日剩余额度（白名单提示不限额） |
+| `/wl_add <TG用户ID>` | 管理员 | 永久加入白名单 |
+| `/wl_remove <TG用户ID>` | 管理员 | 移出白名单 |
+| `/wl_list` | 管理员 | 列出白名单（截断） |
+| `/link_query <TG用户ID>` | 管理员 | 按 TG 用户 ID 查询完整有效直链（每次调用全审计） |
+| `/link_revoke <直链URL或Token>` | 管理员 | 按直链撤销，立即失效 |
+
+管理员身份仅依据**数字 TG 用户 ID**（`TELEGRAM_BOT_ADMIN_IDS`）；`@username` 属于用户可控字段，仅用于审计展示，绝不参与权限判定。审计记录 TG 用户 ID 与用户名（如有），且**从不记录完整 Token**。
+
+**灰度开启步骤**
+
+1. 在 `.env` 配置 `TELEGRAM_BOT_ADMIN_IDS` 与 `TELEGRAM_BOT_ENCRYPTION_KEY`（并确认 `APP_URL` 为对外真实地址）；
+2. 运行迁移（`npm run migration:run`），确认 `telegram_bot_*` 三张表与 `access_logs` 新列已创建；
+3. 设置 `TELEGRAM_BOT_UPDATES_ENABLED=true` 并重启后端；
+4. 以初始管理员身份私聊 Bot，先执行 `/help` 与 `/wl_add`，再发送一个文件验证直链可用；
+5. 在后台「Telegram Bot 设置」确认「当前生效域名」正确后再放开给普通用户。
 
 ## Telegram 文件引用完整性
 
@@ -296,6 +381,89 @@ Redis 承载 `metrics-aggregation`、`attack-detection`、`alert-evaluation`、`
 | `SMTP_ENCRYPTION_SALT` | 密钥派生盐；启用 SMTP 时必需 |
 
 不要提交实际 `.env`、Bot Token、数据库密码或 SMTP 密钥。
+
+## 下载超时分层
+
+下载链路跨越多层，任何**外层**先于内层断开，都会让客户端只看到「无原因中断」而不是可分类的超时（历史 4GiB 分卷事件即由此放大）。因此各层超时必须满足 **内层 < 外层**。
+
+层级链（与 `scripts/release/start.sh` 写入的 systemd 单元、`.env` 及 `backend/src/config/env-validation.ts` 注释一致）：
+
+```text
+首字节链：Bot API 首字节 120s < Nest HTTP 180s < 缓存首字节 210s
+空闲链：  Bot API 空闲 120s   < 缓存空闲 150s   < Node 空闲 180s < Nginx read 210s
+```
+
+两条链互相独立：**首字节链**管「等第一个数据块」的阶段（冷文件需要 TDLib 先回源），
+**空闲链**管「已经开始传输但长时间没有新数据」的阶段。两者都不设固定总时长。
+
+对应的配置项与默认值：
+
+| 层级 | 配置项 / 参数 | 默认值 | 作用 |
+|---|---|---|---|
+| 最内层：Bot API 首字节 | `--file-stream-first-byte-timeout` | `120`（秒） | TDLib 回源后首个字节到达上限 |
+| Nest 上游请求 | `TELEGRAM_FILE_STREAM_TIMEOUT_SECONDS` | `180`（秒） | 后端请求实时流端点的读超时 |
+| 缓存构建空闲 | `FILE_CACHE_BUILD_IDLE_TIMEOUT_MS` | `150000`（毫秒） | 传输中无数据则中止会话；**每收到数据即刷新** |
+| 缓存构建首字节 | `FILE_CACHE_BUILD_FIRST_BYTE_TIMEOUT_MS` | `210000`（毫秒） | 冷启动允许 TDLib 更久才吐出首块 |
+| 缓存构建总时限 | `FILE_CACHE_BUILD_TOTAL_TIMEOUT_MS` | `0`（禁用） | 需绝对上限的场景再显式开启，必须大于首字节超时 |
+| Node HTTP 空闲 | `HTTP_IDLE_TIMEOUT_SECONDS` | `180`（秒） | 数据传输中不超时，仅空闲时生效 |
+| 最外层：Nginx read | `proxy_read_timeout` | `210s` | 见 `nginx-download.conf.template`；**不得设置固定总时长** |
+
+两条必须理解的原则：
+
+- **内层必须小于外层**：`env-validation` 会对非法数值（非整数、负数）直接报错；对层级冲突（如首字节小于空闲、`HTTP_IDLE_TIMEOUT_SECONDS*1000` 不大于缓存空闲、总时限不大于首字节）只输出**高可见度告警**、不阻断启动，以免既有自定义部署升级失败。冲突时外层会先断开，表现为无法分类的 502/504。
+- **总时限默认禁用（`0`）**：固定总时限不随进度刷新，会把速度低于约 **2.28 MiB/s** 的 4GiB 长传输直接误杀（4GiB ÷ 1800s ≈ 2.28MiB/s）。真正的卡死改由**首字节超时**与**有进度即刷新**的空闲超时来判定。
+
+## 磁盘占用与清理
+
+一次大文件下载会同时涉及多个磁盘域，需分别配置与监控：
+
+| 位置 | 路径 | 默认策略 | 清理/准入 |
+|---|---|---|---|
+| 后端下载缓存 | `tmp/Cache` | 上限 `10GiB`、TTL `3` 天、LRU 淘汰 | 命中刷新；超上限按 LRU 淘汰；过期清理；管理后台可热更新 |
+| TDLib workdir | `runtime/telegram-bot-api/data` | 清理阈值 `20GiB` / 目标 `15GiB` / 间隔 `3600s` / 文件 TTL `86400s` / 最低余量 `1GiB` | workdir 清理任务 + **写前空间准入** |
+| Bot API 临时目录 | `runtime/telegram-bot-api/tmp` | `start.sh` 以 `--temp-dir` 显式落在受控路径 | 组件自身管理（默认 `/tmp` 会脱离 workdir 配额统计） |
+| Nginx 代理临时卷 | `proxy_temp_path` / `client_body_temp_path` | 下载端点 `proxy_max_temp_file_size 0`（直通不落盘） | 模板声明 + 容量告警清单 |
+
+- **workdir 中不可删除的是控制状态**：`db.sqlite*` 与 `td.binlog*`（以及 session）是 `file_id` 的绑定凭据，删除/清空/重命名会让历史 `file_id` 全部失效；**媒体副本本身可被回收**（可由 `file_id` 重新回源）。
+- **bot 直链上游按引用计数回收 workdir 副本**：后端请求 bot 直链文件时携带 `X-Telegram-No-Cache`，流正常结束后，Bot API 在**无其他流监听者/下载监听者**时删除 TDLib workdir 中的本地副本（引用计数安全），使「Cache + workdir」两份完整副本收敛为一份；中断传输的行为与不带该头一致。
+- **写前空间准入（fail-closed）**：开始为文件建立本地副本前检查「可用空间 − `workdir-min-free-bytes` ≥ 预计增量」；未知大小用 `--workdir-unknown-file-min-free-bytes`（默认 `512MiB`）。不满足时在首字节前返回结构化 **`507`**（JSON + 真实状态码），并计数告警。
+- **缓存占用明细**：`GET /api/admin/download-runtime` 暴露 `buildBytes` / `spoolBytes` / `orphanBytes` / `orphanFiles` / `cleanupFailureTotal` / `cacheUsageScannedAt`。应用启动时与**每 6 小时**清理进程崩溃残留的 `.tmp` / `.spool`；`unlinkAllCacheFiles` 已改为前缀匹配（此前只删固定后缀，孤儿文件永不清）。
+
+## Bot 直链断点续传
+
+`GET /api/bot-dl/:token` 复用与站内下载**完全相同**的本地缓存 / Range 链路，断点续传契约如下：
+
+- 完整下载返回 `200`（含 `Content-Length`、`Accept-Ranges: bytes`、强 `ETag`）；
+- 单区间 Range 返回 `206`（含 `Content-Range`），且**与完整响应使用同一 ETag**；
+- 稳定强 `ETag` = `sha256('telegram-bot:' + file_id + ':' + size)` 的十六进制摘要（带引号），不含明文凭据，同一 Telegram 文件跨不同直链保持一致；
+- `If-Range` **仅在强 ETag 精确匹配时**才认 Range；弱标签（`W/"..."`）、版本不匹配、日期值一律**忽略 Range 回完整 `200`**，避免客户端把不同版本的分段拼成损坏文件；
+- 越界与多区间 Range 仍返回 `416` + `Content-Range: bytes */<total>`（`416` 也携带 `ETag`）；
+- 文件大小未知（Telegram 未上报）时**不声明 `Accept-Ranges`、不下发 `ETag`**，退化为完整 `200` 直通；
+- **续传前提是链接仍在有效期内**：过期 / 已撤销 / 不存在统一 `404`，无法从旧链接续传。
+
+冷文件的 Range 请求仍从 Telegram **偏移 0 顺序回源并写入本地缓存**，客户端请求的区间若尚未回源完成，由区间 follower **等待补齐**后再继续输出——**不是随机读取**，并发多线程下载尚未回源的部分无法立即应答（表现为等待，而不是报错或重复回源）。
+
+`curl -C -` 自动断点续传示例：
+
+```bash
+curl -C - -OJ "https://your-domain.example/api/bot-dl/<token>"
+```
+
+完整的 200/206/416 响应头契约、`If-Range` 语义表与显式续传示例见 [API.md](API.md)。
+
+## 下载端点反向代理要求
+
+为避免代理侧再次放大占用、破坏 Range/`206` 语义或最先断开长传输：
+
+- **模板**：`scripts/release/nginx-download.conf.template`（`/api/bot-dl/` 与 `/api/s/` 直通片段）——`proxy_buffering off`、`proxy_request_buffering off`、`proxy_cache off`、`proxy_max_temp_file_size 0`、`gzip off`、`proxy_read_timeout 210s`、不设固定总时长、Range/`If-Range` 透传、`map $uri $tgtc_redacted_uri` 日志脱敏、代理临时目录声明与容量告警清单。
+- **部署自检**：`scripts/release/check-download-proxy.sh`——静态校验 Nginx 下载 location + 真实 HTTP 探针（`206` / `Content-Range` / `Accept-Ranges` / 强 `ETag` + `If-Range` 不匹配回 `200` + 磁盘余量阈值）；配套回归测试 `scripts/release/tests/check-download-proxy.test.sh`（16 用例）。
+- **生产 Nginx 不在本仓库**，本模板只是片段，**实际应用由运维执行**；部署后必须运行自检脚本验收。
+
+运维要点：
+
+- **`TGTC_BOT_STATS_PORT` 为 opt-in**：`start.sh` 仅在设置了该变量时才给 Bot API 加 `--http-stat-port`（默认关闭）。开启后暴露的 stats 端点**必须自行限制为仅本机可访问**（绑定回环 / 防火墙 / 仅允许受控监控来源），不要直接暴露公网。
+- **4GiB 分卷场景**建议将 `FILE_DOWNLOAD_DIRECT_WAIT_SECONDS` 上调到 `180`（仍须小于 Nginx `proxy_read_timeout` `210s`）。
+- `start.sh` 会为 Bot API 生成 systemd 单元并写入 `.env`：显式传入首字节 `120s`、空闲 `120s`、最大连接 `100`、最大文件 `0`（不限）、workdir 清理阈值 `20GiB`/目标 `15GiB`/间隔 `3600s`/TTL `86400s`/最低余量 `1GiB`/未知大小余量 `512MiB` 与 `--temp-dir`。
 
 ## 上传模式
 
@@ -399,7 +567,7 @@ NODE_ENV=production npm run start:prod
    `FILE_CACHE_NO_CACHE_MODE=true` 可跳过磁盘缓存，但**不能**解决上述会话/任务/单飞的内存态问题。需要多实例前必须先完成 Redis 外置专项（会议纪要见 `docs/multi-instance-redis-design.md`）。若误配多实例，启动预检会输出高可见度错误（`CLUSTER_MODE` 相关校验）。
 7. **优雅退出**：应用已启用 Nest shutdown hooks；进程管理器应发送可处理的终止信号并给予日志 flush 时间。
 
-HTTP 服务器参数：活动连接空闲超时 120 秒、Keep-Alive 65 秒、请求头超时 66 秒；上传端点另行禁用请求超时。
+HTTP 服务器参数：活动连接空闲超时默认 `180` 秒（`HTTP_IDLE_TIMEOUT_SECONDS`，需大于缓存空闲超时且小于外层 Nginx `proxy_read_timeout`）、Keep-Alive 65 秒、请求头超时 66 秒；上传端点另行禁用请求超时。
 
 ## 项目结构
 
@@ -516,6 +684,7 @@ npm run preview
 
 | `GET` | `/media/:id` | 公开媒体直链，直接返回图片、音频或视频本体 |
 | `GET` | `/files/public/:id` | 旧分享入口兼容重定向 |
+| `GET` | `/api/bot-dl/:token` | Telegram Bot 文件直链（匿名，仅时间限制；无效/已撤销/已过期统一 404） |
 
 ### 登录用户接口
 
@@ -573,6 +742,10 @@ npm run preview
 | `GET/PUT` | `/api/admin/security-config` | 安全规则，仅 `super_admin` |
 | `GET` | `/api/admin/access-logs*` | 访问日志及聚合分析 |
 | `GET` | `/api/admin/audit-logs` | 操作审计 |
+| `GET/PUT` | `/api/admin/bot-config` | Telegram Bot 配置（有效期/额度/时区/站点域名，仅 `super_admin`） |
+| `GET` | `/api/admin/bot-config/detected-domain` | 探测可信站点域名候选值（仅 `super_admin`） |
+| `GET` | `/api/admin/bot-usage` | Bot 使用情况汇总（收到文件/下载次数/去重用户/带宽/趋势，仅 `super_admin`） |
+| `GET` | `/api/admin/bot-usage/users` | Bot 用户明细（TG 用户 ID + @用户名，支持关键字/时间筛选与分页，仅 `super_admin`） |
 
 | `GET` | `/api/admin/export` | CSV/JSON 数据导出 |
 

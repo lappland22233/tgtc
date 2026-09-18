@@ -4,6 +4,12 @@ import { join } from 'path';
 import { DataSource } from 'typeorm';
 
 const DB_PATH = join(process.cwd(), 'tmp', `sqlite-real-qa-${process.pid}-${Date.now()}.sqlite`);
+/**
+ * 建库/迁移/销毁的真实耗时在并行跑整套 Jest 时会超过默认 5s（DataSource 初始化 +
+ * 完整迁移链 + PRAGMA），导致整组用例因 beforeAll 超时而全灭。此处显式放宽，
+ * 使失败只反映真实缺陷而非机器负载。
+ */
+const DB_SETUP_TIMEOUT_MS = 30_000;
 
 describe('真实 SQLite 数据源关键业务与并发 QA', () => {
   let dataSource: DataSource;
@@ -26,7 +32,7 @@ describe('真实 SQLite 数据源关键业务与并发 QA', () => {
     await dataSource.initialize();
     await dataSource.runMigrations();
     await dataSource.query('PRAGMA foreign_keys = ON');
-  });
+  }, DB_SETUP_TIMEOUT_MS);
 
   afterAll(async () => {
     if (secondDataSource?.isInitialized) await secondDataSource.destroy();
@@ -36,7 +42,7 @@ describe('真实 SQLite 数据源关键业务与并发 QA', () => {
     else process.env.DB_TYPE = originalDbType;
     if (originalDatabase === undefined) delete process.env.DB_DATABASE;
     else process.env.DB_DATABASE = originalDatabase;
-  });
+  }, DB_SETUP_TIMEOUT_MS);
 
   it('迁移升级、安全 revert、重放及完整性检查均保留业务数据', async () => {
     const userId = randomUUID();
@@ -55,6 +61,12 @@ describe('真实 SQLite 数据源关键业务与并发 QA', () => {
       'SqliteRevokePrivateLegacyShares1802000000000',
       'SqliteCreateDirectoryNames1802100000000',
       'SqliteApiKeySecurityGovernance1802200000000',
+      // v1.2.9：Telegram Bot 文件直链
+      'SqliteTelegramBotLinks1802300000000',
+      // v1.3.3：下载任务持久化（下载磁盘配额与排队）
+      'SqliteCreateDownloadTasks1802500000000',
+      // v1.4.0：access_logs 传输结果字段（续传 / 中断 / 结束原因）
+      'SqliteAddAccessLogTransferFields1802600000000',
     ]);
 
     await dataSource.undoLastMigration();
@@ -122,6 +134,134 @@ describe('真实 SQLite 数据源关键业务与并发 QA', () => {
 
     const oneShot = await service.checkAndIncrement(`qa-one:${randomUUID()}`, 'qa', 1, 60_000, 60_000);
     expect(oneShot.allowed).toBe(false);
+  });
+
+  it('Bot 每日配额并发扣减原子精确，白名单仅永久增删', async () => {
+    const { TelegramBotDailyUsage } = require('../common/entities/telegram-bot-daily-usage.entity') as typeof import('../common/entities/telegram-bot-daily-usage.entity');
+    const { TelegramBotWhitelist } = require('../common/entities/telegram-bot-whitelist.entity') as typeof import('../common/entities/telegram-bot-whitelist.entity');
+    const { TelegramBotQuotaService } = require('../telegram-bot/telegram-bot-quota.service') as typeof import('../telegram-bot/telegram-bot-quota.service');
+
+    const service = new TelegramBotQuotaService(
+      dataSource.getRepository(TelegramBotDailyUsage),
+      dataSource.getRepository(TelegramBotWhitelist),
+      dataSource,
+    );
+
+    // 切日时区按 IANA 计算业务日期：UTC 20:00 → Asia/Shanghai 次日
+    expect(service.getBusinessDate('Asia/Shanghai', new Date('2026-09-15T20:00:00Z'))).toBe('2026-09-16');
+    expect(service.getBusinessDate('Asia/Shanghai', new Date('2026-09-15T10:00:00Z'))).toBe('2026-09-15');
+
+    const tgUserId = `qa-${Date.now()}`;
+    const results = await Promise.all(
+      Array.from({ length: 20 }, () => service.consume(tgUserId, '2026-09-15', 5)),
+    );
+    expect(results.filter((result) => result.allowed)).toHaveLength(5);
+    expect(results.filter((result) => !result.allowed)).toHaveLength(15);
+    expect(await service.getUsed(tgUserId, '2026-09-15')).toBe(5);
+
+    // 归还一次后额度恢复 1（失败补偿路径）
+    await service.refund(tgUserId, '2026-09-15');
+    expect(await service.getUsed(tgUserId, '2026-09-15')).toBe(4);
+
+    expect(await service.isWhitelisted(tgUserId)).toBe(false);
+    await service.addToWhitelist(tgUserId, '9001', 'admin');
+    expect(await service.isWhitelisted(tgUserId)).toBe(true);
+    // 重复加入幂等
+    expect((await service.addToWhitelist(tgUserId, '9001', 'admin')).created).toBe(false);
+    await service.removeFromWhitelist(tgUserId);
+    expect(await service.isWhitelisted(tgUserId)).toBe(false);
+  });
+
+  it('Bot 直链 grant 以消息作幂等锚点，access_logs 已具备 Bot 标识列', async () => {
+    const { TelegramBotFileGrant } = require('../common/entities/telegram-bot-file-grant.entity') as typeof import('../common/entities/telegram-bot-file-grant.entity');
+    const repo = dataSource.getRepository(TelegramBotFileGrant);
+    const base = {
+      telegramUserId: '80000000000000001',
+      telegramUsername: '@qa',
+      telegramDisplayName: 'QA',
+      chatId: '80000000000000001',
+      messageId: '42',
+      telegramFileId: 'fid-qa',
+      fileName: 'qa.bin',
+      mimeType: 'application/octet-stream',
+      fileSize: '1024',
+      tokenHash: 'a'.repeat(64),
+      tokenCipher: null,
+      tokenPrefix: 'tgl_aaaaaaaa',
+      cipherVersion: null,
+      expiresAt: new Date(Date.now() + 3600 * 1000),
+      revokedAt: null,
+      revokedBy: null,
+    };
+
+    await repo.save(repo.create(base));
+    await expect(
+      repo.save(repo.create({ ...base, tokenHash: 'b'.repeat(64) })),
+    ).rejects.toMatchObject({ code: 'SQLITE_CONSTRAINT' });
+
+    const accessLogColumns = await dataSource.query(`PRAGMA table_info('access_logs')`);
+    const names = accessLogColumns.map((column: { name: string }) => column.name);
+    expect(names).toContain('botGrantId');
+    expect(names).toContain('botTelegramUserId');
+
+    // Bot 标识可写入 access_logs（供 bot-usage 汇总）
+    const { AccessLog } = require('../common/entities/access-log.entity') as typeof import('../common/entities/access-log.entity');
+    const accessRepo = dataSource.getRepository(AccessLog);
+    await accessRepo.insert({
+      ip: '127.0.0.1',
+      method: 'GET',
+      path: '/api/bot-dl/token',
+      statusCode: 200,
+      responseSize: 2048,
+      duration: 5,
+      userAgent: null,
+      referer: null,
+      userId: null,
+      botGrantId: '11111111-1111-1111-1111-111111111111',
+      botTelegramUserId: '80000000000000001',
+    });
+    const botRows = await accessRepo.count({ where: { botTelegramUserId: '80000000000000001' } });
+    expect(botRows).toBe(1);
+
+    // bot-usage 汇总必须在 SQL 侧聚合且与 access_logs 一致（D13）
+    const { TelegramBotAdminService } = require('../telegram-bot/telegram-bot-admin.service') as typeof import('../telegram-bot/telegram-bot-admin.service');
+    const adminService = new TelegramBotAdminService(
+      { get: jest.fn() } as any,
+      { log: jest.fn() } as any,
+      { tokenPrefixOf: (t: string) => `tgl_${t.slice(0, 8)}` } as any,
+      { listWhitelist: jest.fn(), addToWhitelist: jest.fn(), removeFromWhitelist: jest.fn() } as any,
+      { resolveSiteOriginAsync: jest.fn() } as any,
+      dataSource,
+    );
+    const usage = await adminService.getUsageSummary('24h');
+    expect(usage).toMatchObject({ timeRange: '24h', downloads: 1, uniqueUsers: 1, totalBytes: '2048' });
+    expect(usage.trend).toHaveLength(1);
+    expect(usage.trend[0].bytes).toBe('2048');
+
+    // 收到文件统计来自 telegram_bot_file_grants（同窗口），并与下载趋势按时间桶合并
+    expect(usage).toMatchObject({ filesReceived: 1, receivedBytes: '1024' });
+    expect(usage.trend[0]).toMatchObject({ downloads: 1, files: 1, fileBytes: '1024' });
+
+    // 用户明细：SQL 侧聚合，直接给出 TG 用户 ID 与 @用户名（不含昵称），支持关键字筛选
+    const breakdown = await adminService.getUserBreakdown({});
+    expect(breakdown).toMatchObject({ total: 1, page: 1, pageSize: 20 });
+    expect(breakdown.rows[0]).toMatchObject({
+      telegramUserId: '80000000000000001',
+      telegramUsername: '@qa',
+      filesReceived: 1,
+      receivedBytes: '1024',
+      downloads: 0,
+    });
+    expect(breakdown.rows[0]).not.toHaveProperty('telegramDisplayName');
+    expect((await adminService.getUserBreakdown({ keyword: '@QA' })).total).toBe(1);
+    expect((await adminService.getUserBreakdown({ keyword: '80000000000000001' })).total).toBe(1);
+    // LIKE 通配符已转义：未转义时 '8_0' 会命中 '80000000000000001'
+    expect((await adminService.getUserBreakdown({ keyword: '8_0' })).total).toBe(0);
+    expect((await adminService.getUserBreakdown({ timeRange: '24h' })).total).toBe(1);
+    expect((await adminService.getUserBreakdown({ pageSize: 500 })).pageSize).toBe(100);
+
+    // 清理：后续用例的访问日志统计断言基于全表，避免本用例污染计数
+    await accessRepo.delete({ botTelegramUserId: '80000000000000001' });
   });
 
   it('文件夹、标签并发重名由唯一约束兜底，且外键拒绝孤儿记录', async () => {
@@ -218,7 +358,7 @@ describe('真实 SQLite 数据源关键业务与并发 QA', () => {
     const admin = new AdminService(
       dataSource.getRepository(SystemConfig), dataSource.getRepository(BannedIP), fileRepo, userRepo,
       dataSource.getRepository(FileAccessLog), dataSource.getRepository(AccessLog), dataSource.getRepository(AuditLog),
-      {} as any, {} as any, audit, {} as any, {} as any,
+      {} as any, {} as any, audit, {} as any, {} as any, {} as any,
     );
     await admin.banIP(owner, '198.51.100.7', 'QA', true);
     await expect(admin.banIP(owner, '198.51.100.7', 'QA duplicate', true)).rejects.toThrow('该IP已被封禁');

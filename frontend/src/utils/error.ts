@@ -18,6 +18,55 @@ const STORAGE_ERROR_CODES = new Set([
   'TELEGRAM_STORAGE_UNAVAILABLE',
 ]);
 
+/**
+ * 下载调度业务码（资源协调器 / 下载任务）：
+ * 这些场景有各自的排队与重试语义，必须由下载入口展示具体文案，
+ * 不能被通用「文件服务暂时不可用 / 存储空间不足」提示覆盖。
+ */
+const DOWNLOAD_SCHEDULE_ERROR_CODES = new Set([
+  'DOWNLOAD_QUEUE_FULL',
+  'DOWNLOAD_QUEUE_TIMEOUT',
+  'DOWNLOAD_QUEUE_CANCELLED',
+  'DOWNLOAD_SERVER_BUSY',
+  'DOWNLOAD_STORAGE_PROBE_UNAVAILABLE',
+  'DOWNLOAD_INSUFFICIENT_STORAGE',
+  'DOWNLOAD_SHUTTING_DOWN',
+  'DOWNLOAD_TASK_EXPIRED',
+]);
+
+/** 下载调度业务码 → 用户可读文案 */
+export const DOWNLOAD_ERROR_MESSAGES: Record<string, string> = {
+  DOWNLOAD_QUEUE_FULL: '服务器当前下载任务较多，请稍后重试',
+  DOWNLOAD_QUEUE_TIMEOUT: '等待时间过长，请稍后重新下载',
+  DOWNLOAD_QUEUE_CANCELLED: '下载任务已取消',
+  DOWNLOAD_SERVER_BUSY: '服务器下载连接繁忙，请稍后重试',
+  DOWNLOAD_STORAGE_PROBE_UNAVAILABLE: '服务器暂时无法确认存储状态，请稍后重试',
+  DOWNLOAD_INSUFFICIENT_STORAGE: '服务器存储空间不足，暂时无法准备此文件',
+  DOWNLOAD_SHUTTING_DOWN: '服务正在重启，请稍后重试',
+  DOWNLOAD_TASK_EXPIRED: '下载任务已过期，请重新发起下载',
+};
+
+/**
+ * 提取下载调度业务码及其文案。
+ * 若非下载类错误返回 null，调用方应回退到通用错误处理。
+ */
+export function getDownloadError(error: unknown): { code: string; message: string } | null {
+  const { code, message } = getApiErrorDetails(error);
+  const normalized = String(code ?? '').toUpperCase();
+  if (!DOWNLOAD_SCHEDULE_ERROR_CODES.has(normalized)) return null;
+  return {
+    code: normalized,
+    message: DOWNLOAD_ERROR_MESSAGES[normalized] ?? message ?? '下载暂时不可用，请稍后重试',
+  };
+}
+
+/** 下载调度错误文案（无匹配时回退通用文案） */
+export function getDownloadErrorMessage(error: unknown): string | undefined {
+  const download = getDownloadError(error);
+  if (download) return download.message;
+  return undefined;
+}
+
 /** 从 Axios/NestJS 统一错误响应中提取状态、业务码和消息。 */
 export function getApiErrorDetails(error: unknown): ApiErrorDetails {
   const axiosErr = error as {
@@ -42,6 +91,8 @@ export function getApiErrorDetails(error: unknown): ApiErrorDetails {
 export function classifyServiceAvailabilityError(error: unknown): ServiceAvailabilityError | null {
   const { status, code, message } = getApiErrorDetails(error);
   const normalizedCode = String(code ?? '').toUpperCase();
+  // 下载调度类错误有独立的排队/重试文案，不做通用基础设施故障归类
+  if (DOWNLOAD_SCHEDULE_ERROR_CODES.has(normalizedCode)) return null;
   const normalizedMessage = (message ?? '').toLowerCase();
   const mentionsStorage = /磁盘|空间不足|存储空间|disk\s*(?:full|space)|no space left|insufficient storage/.test(normalizedMessage);
 

@@ -249,6 +249,9 @@ int main(int argc, char *argv[]) {
   options.add_checked_option('\0', "workdir-min-free-bytes",
                              "minimum free bytes before reporting HTTP 507 and shutting down (default 1 GiB)",
                              td::OptionParser::parse_integer(parameters->workdir_min_free_bytes_));
+  options.add_checked_option('\0', "workdir-unknown-file-min-free-bytes",
+                             "additional free bytes reserved before downloading a file of unknown size",
+                             td::OptionParser::parse_integer(parameters->workdir_unknown_file_min_free_bytes_));
   options.add_checked_option(
       '\0', "api-id",
       "application identifier for Telegram API access, which can be obtained at https://my.telegram.org (defaults to "
@@ -381,6 +384,9 @@ int main(int argc, char *argv[]) {
     if (parameters->workdir_cleanup_interval_ <= 0 || parameters->workdir_file_ttl_ < 0 ||
         parameters->workdir_min_free_bytes_ <= 0) {
       return td::Status::Error("Workdir cleanup interval and minimum free bytes must be positive; TTL must be non-negative");
+    }
+    if (parameters->workdir_unknown_file_min_free_bytes_ < 0) {
+      return td::Status::Error("Workdir unknown file minimum free bytes must be non-negative");
     }
     return td::Status::OK();
   });

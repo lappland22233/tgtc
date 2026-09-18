@@ -25,6 +25,52 @@ const METRIC_COLUMN_MAP: Record<string, string> = {
   p95_duration: '"p95Duration"',
 };
 
+/** 基线样本来源窗口（与 detectBaselineDeviation 的 7 天口径一致） */
+const BASELINE_WINDOW_SQL = `"windowTime" >= NOW() - INTERVAL '7 days'
+       AND "totalRequests" > 0`;
+
+/**
+ * PostgreSQL 基线 UPSERT 语句（仅 PG 使用；SQLite 走应用层计算）。
+ *
+ * G8-12 抗投毒（P99 截断）必须用「标量子查询」而不是窗口函数：
+ * PostgreSQL 的 ordered-set 聚合不允许叠加窗口语法，
+ * `PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY x) OVER ()` 会直接报
+ * `OVER is not supported for ordered-set aggregate percentile_cont`，
+ * 使全部 5 个指标的基线计算 100% 失败、baseline_stats 长期停滞在旧值
+ * （异常检测 ANOMALY_BASELINE_DEVIATION 据此判定，必然失准）。
+ *
+ * 标量子查询与主查询使用完全相同的过滤条件，语义等价：先取 7 天窗口的 P99，
+ * 再仅纳入 ≤ P99 的样本参与 AVG/STDDEV。7 天内无样本时子查询返回 NULL，
+ * `metric_value <= NULL` 不成立 → 不插入任何行（保留旧基线），
+ * 与 SQLite 分支「无数据即早退」的行为一致。
+ *
+ * 导出以便静态回归测试（无 PG 实例也能守住「不得再出现 OVER ()」）。
+ */
+export function buildPostgresBaselineSql(column: string): string {
+  return `INSERT INTO "baseline_stats" ("metricName", "hourBucket", "dayOfWeek", "mean", "stddev", "sampleCount", "updatedAt")
+     SELECT $1,
+       EXTRACT(HOUR FROM "windowTime" AT TIME ZONE 'UTC')::int,
+       EXTRACT(DOW FROM "windowTime" AT TIME ZONE 'UTC')::int,
+       AVG(${column}) AS mean,
+       COALESCE(STDDEV(${column}), 0) AS stddev,
+       COUNT(*) AS sample_count,
+       NOW()
+     FROM "access_log_metrics_1min"
+     WHERE ${BASELINE_WINDOW_SQL}
+       AND ${column} <= (
+         SELECT PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY ${column})
+         FROM "access_log_metrics_1min"
+         WHERE ${BASELINE_WINDOW_SQL}
+       )
+     GROUP BY EXTRACT(HOUR FROM "windowTime" AT TIME ZONE 'UTC'),
+              EXTRACT(DOW FROM "windowTime" AT TIME ZONE 'UTC')
+     ON CONFLICT ("metricName", "hourBucket", "dayOfWeek") DO UPDATE SET
+       "mean" = EXCLUDED."mean",
+       "stddev" = EXCLUDED."stddev",
+       "sampleCount" = EXCLUDED."sampleCount",
+       "updatedAt" = NOW()`;
+}
+
 @Injectable()
 export class BehaviorAnalyzer {
   private readonly logger = new Logger(BehaviorAnalyzer.name);
@@ -60,33 +106,7 @@ export class BehaviorAnalyzer {
         if (getDatabaseType() === 'sqlite') {
           await this.calculateSqliteBaseline(metric, column);
         } else {
-          await this.dataSource.query(
-            `INSERT INTO "baseline_stats" ("metricName", "hourBucket", "dayOfWeek", "mean", "stddev", "sampleCount", "updatedAt")
-             SELECT $1,
-               EXTRACT(HOUR FROM "windowTime" AT TIME ZONE 'UTC')::int,
-               EXTRACT(DOW FROM "windowTime" AT TIME ZONE 'UTC')::int,
-               AVG(${column}) AS mean,
-               COALESCE(STDDEV(${column}), 0) AS stddev,
-               COUNT(*) AS sample_count,
-               NOW()
-             FROM (
-               SELECT "windowTime",
-                      ${column} AS metric_value,
-                      PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY ${column}) OVER () AS p99
-               FROM "access_log_metrics_1min"
-               WHERE "windowTime" >= NOW() - INTERVAL '7 days'
-                 AND "totalRequests" > 0
-             ) filtered
-             WHERE metric_value <= p99
-             GROUP BY EXTRACT(HOUR FROM "windowTime" AT TIME ZONE 'UTC'),
-                      EXTRACT(DOW FROM "windowTime" AT TIME ZONE 'UTC')
-             ON CONFLICT ("metricName", "hourBucket", "dayOfWeek") DO UPDATE SET
-               "mean" = EXCLUDED."mean",
-               "stddev" = EXCLUDED."stddev",
-               "sampleCount" = EXCLUDED."sampleCount",
-               "updatedAt" = NOW()`,
-            [metric],
-          );
+          await this.dataSource.query(buildPostgresBaselineSql(column), [metric]);
         }
 
         const countResult = await this.dataSource.query(

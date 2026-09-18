@@ -9,6 +9,7 @@
 #include "td/utils/port/path.h"
 #include "td/utils/tests.h"
 
+#include <limits>
 #include <unordered_map>
 
 namespace {
@@ -101,6 +102,91 @@ TEST(WorkdirCleanup, ThresholdDoesNotRejectOrDeleteActiveFile) {
   ASSERT_TRUE(result.threshold_cleanup);
   ASSERT_EQ(0, result.deleted_files);
   ASSERT_TRUE(td::stat(active).is_ok());
+}
+
+TEST(WorkdirCleanup, SpaceCheckKnownSize) {
+  using telegram_bot_api::check_workdir_space;
+  constexpr td::int64 GIB = 1LL << 30;
+
+  // free - min_free >= increment.
+  auto ok = check_workdir_space(2 * GIB, GIB, GIB / 2, 0, 0);
+  ASSERT_TRUE(ok.allowed);
+  ASSERT_TRUE(ok.free_space_known);
+  ASSERT_FALSE(ok.unknown_size);
+  ASSERT_EQ(GIB / 2, ok.increment_bytes);
+  ASSERT_EQ(GIB + GIB / 2, ok.required_bytes);
+
+  // Exactly on the boundary is allowed.
+  ASSERT_TRUE(check_workdir_space(GIB + GIB / 2, GIB, GIB / 2, 0, 0).allowed);
+  // One byte short is rejected.
+  ASSERT_FALSE(check_workdir_space(GIB + GIB / 2 - 1, GIB, GIB / 2, 0, 0).allowed);
+
+  // An existing local copy only charges the missing tail.
+  auto partial = check_workdir_space(GIB + GIB / 2, GIB, GIB, GIB / 2, 0);
+  ASSERT_TRUE(partial.allowed);
+  ASSERT_EQ(GIB / 2, partial.increment_bytes);
+  ASSERT_EQ(GIB + GIB / 2, partial.required_bytes);
+  // A complete local copy needs no extra space at all.
+  auto complete = check_workdir_space(GIB, GIB, GIB, GIB, 0);
+  ASSERT_TRUE(complete.allowed);
+  ASSERT_EQ(0, complete.increment_bytes);
+  // existing_local_size larger than the file must not produce a negative increment.
+  ASSERT_EQ(0, check_workdir_space(GIB, GIB, 10, 100, 0).increment_bytes);
+}
+
+TEST(WorkdirCleanup, SpaceCheckUnknownSizeUsesMargin) {
+  using telegram_bot_api::check_workdir_space;
+  constexpr td::int64 MIB = 1LL << 20;
+
+  auto ok = check_workdir_space(3 * MIB, MIB, -1, 0, MIB);
+  ASSERT_TRUE(ok.allowed);
+  ASSERT_TRUE(ok.unknown_size);
+  ASSERT_EQ(MIB, ok.increment_bytes);
+  ASSERT_EQ(2 * MIB, ok.required_bytes);
+
+  // The margin must be reserved on top of min_free_bytes.
+  ASSERT_FALSE(check_workdir_space(2 * MIB - 1, MIB, -1, 0, MIB).allowed);
+}
+
+TEST(WorkdirCleanup, SpaceCheckFailsClosedWithoutDiskInfo) {
+  using telegram_bot_api::check_workdir_space;
+
+  // Unknown free space is always rejected, for both known and unknown file sizes.
+  auto known = check_workdir_space(-1, 0, 1, 0, 0);
+  ASSERT_FALSE(known.allowed);
+  ASSERT_FALSE(known.free_space_known);
+  ASSERT_EQ(-1, known.free_bytes);
+
+  auto unknown = check_workdir_space(-1, 0, -1, 0, 1);
+  ASSERT_FALSE(unknown.allowed);
+  ASSERT_FALSE(unknown.free_space_known);
+}
+
+TEST(WorkdirCleanup, SpaceCheckClampsAndSaturates) {
+  using telegram_bot_api::check_workdir_space;
+  constexpr td::int64 MAX = std::numeric_limits<td::int64>::max();
+
+  // A negative minimum free space is clamped to zero.
+  auto clamped = check_workdir_space(10, -5, 4, 0, 0);
+  ASSERT_TRUE(clamped.allowed);
+  ASSERT_EQ(0, clamped.min_free_bytes);
+  ASSERT_EQ(4, clamped.required_bytes);
+
+  // An overflowing required size saturates instead of wrapping to a small value.
+  auto saturated = check_workdir_space(MAX, MAX, MAX, 0, 0);
+  ASSERT_EQ(MAX, saturated.required_bytes);
+  ASSERT_TRUE(saturated.allowed);  // free == saturated required_bytes
+  auto short_free = check_workdir_space(MAX - 1, MAX, MAX, 0, 0);
+  ASSERT_EQ(MAX, short_free.required_bytes);
+  ASSERT_FALSE(short_free.allowed);
+}
+
+TEST(WorkdirCleanup, RealFreeSpaceIsUsable) {
+  TempWorkdir dir;
+  auto free_bytes = telegram_bot_api::get_workdir_free_bytes(dir.path);
+  if (free_bytes >= 0) {
+    ASSERT_TRUE(telegram_bot_api::check_workdir_space(free_bytes, 0, 0, 0, 0).allowed);
+  }
 }
 
 TEST(WorkdirCleanup, PersistentFilesAreNotCandidates) {

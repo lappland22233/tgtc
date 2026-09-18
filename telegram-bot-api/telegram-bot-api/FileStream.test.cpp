@@ -5,6 +5,7 @@
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 //
 #include "telegram-bot-api/FileStreamCore.h"
+#include "telegram-bot-api/FileStreamRecovery.h"
 
 #include "td/utils/tests.h"
 
@@ -113,6 +114,24 @@ TEST(FileStream, CursorChunkBoundaries) {
     }
     ASSERT_EQ(total_size, cursor.next_offset);
   }
+}
+
+TEST(FileStream, LocalFileRecoveryPolicy) {
+  using telegram_bot_api::file_stream_fails_on_stopped_download;
+  using telegram_bot_api::file_stream_waits_for_redownload;
+
+  // TDLib claims the file is downloaded, but its local copy is unusable.
+  ASSERT_TRUE(file_stream_waits_for_redownload(true, false));
+  ASSERT_FALSE(file_stream_waits_for_redownload(true, true));
+  ASSERT_FALSE(file_stream_waits_for_redownload(false, false));
+  ASSERT_FALSE(file_stream_waits_for_redownload(false, true));
+
+  // "Not completed and not downloading": fatal only once data has been streamed, because a cold
+  // file that has not started downloading yet and a re-check of a stale local copy look the same.
+  ASSERT_TRUE(file_stream_fails_on_stopped_download(false, true));
+  ASSERT_FALSE(file_stream_fails_on_stopped_download(false, false));
+  ASSERT_FALSE(file_stream_fails_on_stopped_download(true, false));
+  ASSERT_FALSE(file_stream_fails_on_stopped_download(true, true));
 }
 
 TEST(FileStream, ReassemblesExactBytes) {
