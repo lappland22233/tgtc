@@ -13,13 +13,21 @@
           <span class="download-queue__name" :title="job.fileName">{{ job.fileName }}</span>
         </div>
         <div class="download-queue__row download-queue__row--meta">
-          <span class="download-queue__status">
-            <svg class="download-queue__spinner" viewBox="0 0 24 24" aria-hidden="true">
+          <span class="download-queue__status" :class="statusClass(job)">
+            <svg v-if="job.status === 'queued'" class="download-queue__spinner" viewBox="0 0 24 24" aria-hidden="true">
               <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-dasharray="42 60" />
             </svg>
-            {{ job.message || queueReasonLabel(job.queueReason) }}
+            <svg v-else-if="job.status === 'streamable'" class="download-queue__icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 3v12m0 0 4-4m-4 4-4-4M4 21h16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+            </svg>
+            <svg v-else class="download-queue__icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 3 2 20h20L12 3z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" />
+              <path d="M12 10v4M12 17h.01" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+            </svg>
+            <span class="download-queue__status-text">{{ downloadStatusLabel(job) }}</span>
           </span>
           <button
+            v-if="job.status === 'queued'"
             type="button"
             class="download-queue__cancel"
             :aria-label="`取消下载 ${job.fileName}`"
@@ -36,15 +44,29 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted } from 'vue';
 import FileTypeIcon from './FileTypeIcon.vue';
-import { useDownloadsStore, queueReasonLabel } from '../stores/downloads';
+import { useDownloadsStore, downloadStatusLabel, type DownloadJob } from '../stores/downloads';
 
 const store = useDownloadsStore();
 
+/** 头部提示：排队时说明原因，就绪/直通时说明正在交给浏览器下载 */
 const headerHint = computed(() => {
-  if (store.queuedJobs.length === 0) return '正在准备文件';
-  const reason = store.queuedJobs[0]?.queueReason;
-  return reason === 'upstream' ? '下载连接繁忙，等待中' : '服务器资源紧张，排队中';
+  if (store.queuedJobs.length > 0) {
+    const reason = store.queuedJobs[0]?.queueReason;
+    return reason === 'upstream' ? '下载连接繁忙，等待中' : '服务器资源紧张，排队中';
+  }
+  if (store.jobs.some(job => job.status === 'streamable' && job.mode === 'direct')) {
+    return '直通下载（不占本地缓存）';
+  }
+  if (store.jobs.some(job => job.status === 'streamable')) {
+    return '已就绪，正在交给浏览器下载';
+  }
+  return '下载任务已结束';
 });
+
+/** 状态样式修饰：按状态区分（排队/就绪/直通/中断/过期） */
+function statusClass(job: DownloadJob): string {
+  return `download-queue__status--${job.status}${job.mode === 'direct' ? ' download-queue__status--direct' : ''}`;
+}
 
 function handleVisibility(): void {
   store.refreshOnVisible();
@@ -150,6 +172,30 @@ onUnmounted(() => {
   color: var(--seed-primary);
   animation: download-queue-spin 1.2s linear infinite;
 }
+
+.download-queue__icon {
+  width: 12px;
+  height: 12px;
+  flex: none;
+  color: var(--seed-primary);
+}
+
+.download-queue__status-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 状态用「图标 + 文案 + 颜色」三重表达，不依赖单一颜色 */
+.download-queue__status--streamable { color: var(--color-success); }
+.download-queue__status--streamable .download-queue__icon { color: var(--color-success); }
+.download-queue__status--streamable.download-queue__status--direct { color: var(--seed-primary); }
+.download-queue__status--streamable.download-queue__status--direct .download-queue__icon { color: var(--seed-primary); }
+.download-queue__status--expired { color: var(--color-warning); }
+.download-queue__status--expired .download-queue__icon { color: var(--color-warning); }
+.download-queue__status--cancelled { color: var(--text-tertiary); }
+.download-queue__status--cancelled .download-queue__icon { color: var(--text-tertiary); }
 
 @keyframes download-queue-spin {
   to {

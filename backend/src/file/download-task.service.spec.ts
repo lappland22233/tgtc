@@ -20,11 +20,34 @@ function makeTaskRepository() {
   };
 }
 
+/** 可断言 release 次数的预约桩（任务必须真实持有并释放磁盘预约） */
+function makeReservation() {
+  let active = true;
+  return {
+    id: `res-${Math.random().toString(36).slice(2, 8)}`,
+    sessionKey: 'file:stub',
+    grantedBytes: 1024,
+    remainingBytes: 1024,
+    countsTowardCache: true,
+    get active() {
+      return active;
+    },
+    consume: jest.fn(),
+    release: jest.fn(() => {
+      active = false;
+    }),
+  };
+}
+
 function makeService(options: {
   cached?: boolean;
   probe?: Partial<ProbeStub>;
   retentionMs?: number;
   taskRepository?: ReturnType<typeof makeTaskRepository>;
+  /** 同步立即授予是否成功（false 模拟需要排队等待） */
+  canReserveNow?: boolean;
+  /** 异步排队永不返回（模拟长时间等待，便于稳定观察 queued 状态） */
+  reservePending?: boolean;
 }) {
   const probe: ProbeStub = {
     admitted: true,
@@ -36,9 +59,24 @@ function makeService(options: {
     retryAfterMs: 5000,
     ...options.probe,
   };
+  const reservations: ReturnType<typeof makeReservation>[] = [];
   const fileCacheService = {
     getCachedPath: jest.fn((_fileId: string) => (options.cached ? '/tmp/Cache/x' : null)),
     probeDownloadAdmission: jest.fn((_size: number, _opts?: unknown) => ({ ...probe })),
+    tryReserveDownloadNow: jest.fn((_fileId: string, _size: number, _opts?: unknown) => {
+      if (options.canReserveNow === false) return null;
+      const reservation = makeReservation();
+      reservations.push(reservation);
+      return reservation;
+    }),
+    reserveDownload: jest.fn(async (_fileId: string, _size: number, _opts?: unknown) => {
+      if (options.reservePending) return new Promise<never>(() => {});
+      const reservation = makeReservation();
+      reservations.push(reservation);
+      return reservation;
+    }),
+    handOffDownloadReservation: jest.fn(),
+    purgeExpiredDownloadReservations: jest.fn(),
     get downloadTaskRetentionMs() {
       return options.retentionMs ?? 900_000;
     },
@@ -47,7 +85,7 @@ function makeService(options: {
     fileCacheService as never,
     options.taskRepository as never,
   );
-  return { service, fileCacheService, probe };
+  return { service, fileCacheService, probe, reservations };
 }
 
 const baseInput = {
@@ -63,23 +101,29 @@ describe('DownloadTaskService', () => {
     jest.restoreAllMocks();
   });
 
-  it('缓存命中时直接可下载，不进入排队', () => {
+  it('缓存命中时直接可下载，不进入排队（票据挂到目标地址）', () => {
     const { service } = makeService({ cached: true });
     const view = service.create(baseInput);
 
     expect(view.status).toBe('streamable');
-    expect(view.downloadUrl).toBe(baseInput.downloadUrl);
+    expect(view.downloadUrl).toContain(baseInput.downloadUrl);
+    expect(view.ticket).toBeDefined();
+    expect(view.downloadUrl).toContain(`taskTicket=${view.ticket}`);
     expect(view.queueReason).toBeUndefined();
     expect(view.queuePosition).toBeUndefined();
   });
 
-  it('资源可用（未命中缓存）时同样立即给出可下载与目标地址', () => {
-    const { service } = makeService({ cached: false });
+  it('资源可用（未命中缓存）时同步持有真实预约并签发一次性票据', () => {
+    const { service, reservations } = makeService({ cached: false });
     const view = service.create(baseInput);
 
     expect(view.status).toBe('streamable');
-    expect(view.downloadUrl).toBe(baseInput.downloadUrl);
     expect(view.expectedSize).toBe(1024);
+    // 任务真实持有磁盘预约（不再只是只读探测）
+    expect(reservations).toHaveLength(1);
+    expect(view.ticket).toBeDefined();
+    expect(view.ticketExpiresAt).toBeDefined();
+    expect(view.downloadUrl).toContain(`taskTicket=${view.ticket}`);
   });
 
   it('磁盘空间不足时报告排队原因、近似位置与建议重试间隔', () => {
@@ -118,16 +162,96 @@ describe('DownloadTaskService', () => {
     expect(view.message).toContain('负载较高');
   });
 
-  it('结构性不可行（完整暂存放不下）仍视为可下载（走直通），不拒绝用户', () => {
+  it('结构性不可行（完整暂存放不下）立即变为可下载并标记 direct，不拒绝用户', () => {
     const { service } = makeService({
       probe: { admitted: false, structural: true, reason: 'disk' },
     });
     const view = service.create(baseInput);
 
-    expect(view.status).toBe('queued');
+    // 历史缺陷：此状态停在 queued，前端会一直轮询到任务过期
+    expect(view.status).toBe('streamable');
+    expect(view.mode).toBe('direct');
     expect(view.message).toContain('直通');
     expect(view.errorCode).toBeUndefined();
-    expect(view.downloadUrl).toBe(baseInput.downloadUrl);
+    expect(view.downloadUrl).toContain(baseInput.downloadUrl);
+    expect(view.queueReason).toBeUndefined();
+  });
+
+  it('票据原子消费：单次有效、绑定归属与文件，并把预约交接给正文请求', () => {
+    const { service, fileCacheService, reservations } = makeService({ cached: false });
+    const created = service.create(baseInput);
+    const ticket = created.ticket!;
+    const ownerKey = baseInput.ownerKey;
+    const fileId = baseInput.fileId;
+
+    expect(service.consumeTicket(ticket, ownerKey, fileId)).toBe(true);
+    expect(fileCacheService.handOffDownloadReservation).toHaveBeenCalledTimes(1);
+    // 单次有效：重放失败
+    expect(service.consumeTicket(ticket, ownerKey, fileId)).toBe(false);
+    // 交接后任务不再持有预约（所有权已转移），关闭时也不应重复释放
+    expect(service.heldReservationCount).toBe(0);
+    expect(reservations[0].release).not.toHaveBeenCalled();
+  });
+
+  it('票据绑定归属与文件：跨用户或跨文件消费失败且仍失效', () => {
+    const { service, fileCacheService } = makeService({ cached: false });
+    const created = service.create(baseInput);
+    const ticket = created.ticket!;
+
+    expect(service.consumeTicket(ticket, 'user:other', baseInput.fileId)).toBe(false);
+    expect(service.consumeTicket(ticket, baseInput.ownerKey, 'other-file')).toBe(false);
+    // 票据已失效，正确调用者也无法再用
+    expect(service.consumeTicket(ticket, baseInput.ownerKey, baseInput.fileId)).toBe(false);
+    expect(fileCacheService.handOffDownloadReservation).not.toHaveBeenCalled();
+  });
+
+  it('取消任务会释放已持有的真实预约并作废票据', () => {
+    const { service, reservations } = makeService({ cached: false });
+    const created = service.create(baseInput);
+
+    const cancelled = service.cancel(created.taskId, baseInput.ownerKey);
+    expect(cancelled.status).toBe('cancelled');
+    expect(reservations[0].release).toHaveBeenCalledTimes(1);
+    expect(service.heldReservationCount).toBe(0);
+    // 取消后票据不可再用
+    expect(service.consumeTicket(created.ticket!, baseInput.ownerKey, baseInput.fileId)).toBe(false);
+  });
+
+  it('票据超时未使用：释放预约并作废票据（避免 4GiB 预约滞留到任务保留期）', () => {
+    const { service, reservations } = makeService({ cached: false });
+    const created = service.create(baseInput);
+    expect(service.heldReservationCount).toBe(1);
+
+    // 模拟客户端拿到票据后始终不发起正文请求
+    const record = (service as unknown as {
+      tasks: Map<string, { ticketExpiresAt?: number }>;
+    }).tasks.get(created.taskId)!;
+    record.ticketExpiresAt = Date.now() - 1;
+
+    const refreshed = service.refresh(created.taskId, baseInput.ownerKey);
+    expect(reservations[0].release).toHaveBeenCalledTimes(1);
+    expect(service.heldReservationCount).toBe(0);
+    expect(refreshed.status).toBe('streamable');
+    // 票据已作废：过期后不得再被消费
+    expect(service.consumeTicket(created.ticket!, baseInput.ownerKey, baseInput.fileId)).toBe(false);
+  });
+
+  it('等待预约的任务在取得资源后变为 streamable 并签发票据', async () => {
+    const { service, fileCacheService, probe } = makeService({
+      cached: false,
+      probe: { admitted: false, structural: false, reason: 'disk', queuePosition: 2 },
+    });
+    // 首轮探测判定排队 → 走异步真实排队；随后模拟资源释放
+    const created = service.create(baseInput);
+    expect(created.status).toBe('queued');
+    expect(fileCacheService.reserveDownload).toHaveBeenCalledTimes(1);
+
+    probe.admitted = true;
+    // 异步排队是 fire-and-forget：等待其完成后再查询
+    await new Promise(resolve => setImmediate(resolve));
+    const refreshed = service.refresh(created.taskId, baseInput.ownerKey);
+    expect(refreshed.status).toBe('streamable');
+    expect(refreshed.ticket).toBeDefined();
   });
 
   it('查询会重新评估状态（排队 → 可下载）', () => {
@@ -146,6 +270,7 @@ describe('DownloadTaskService', () => {
   it('取消排队任务后状态为 cancelled 且幂等', () => {
     const { service } = makeService({
       probe: { admitted: false, structural: false, reason: 'disk', queuePosition: 2 },
+      reservePending: true,
     });
     const created = service.create(baseInput);
 
@@ -180,16 +305,18 @@ describe('DownloadTaskService', () => {
     expect(view.downloadUrl).toBeUndefined();
   });
 
-  it('状态探测只读：不占用预约、不排队（轮询不影响真实调度）', () => {
+  it('轮询只读：refresh 不重复申请资源（不影响真实调度）', () => {
     const { service, fileCacheService } = makeService({
       probe: { admitted: false, structural: false, reason: 'disk', queuePosition: 1 },
+      reservePending: true,
     });
     const created = service.create(baseInput);
     service.refresh(created.taskId, baseInput.ownerKey);
     service.refresh(created.taskId, baseInput.ownerKey);
 
-    // 每次评估最多一次探测调用，且仅调用只读探测接口
+    // 每次评估最多一次只读探测；真实排队只在创建时发起一次
     expect(fileCacheService.probeDownloadAdmission).toHaveBeenCalledTimes(3);
+    expect(fileCacheService.reserveDownload).toHaveBeenCalledTimes(1);
     expect(service.activeTaskCount).toBe(1);
   });
 
@@ -198,6 +325,7 @@ describe('DownloadTaskService', () => {
     const { service } = makeService({
       taskRepository,
       probe: { admitted: false, structural: false, reason: 'disk', queuePosition: 2 },
+      reservePending: true,
     });
     const created = service.create(baseInput);
     // 创建：写一次
@@ -254,6 +382,7 @@ describe('DownloadTaskService', () => {
   it('关闭时取消排队任务并清空记录', async () => {
     const { service } = makeService({
       probe: { admitted: false, structural: false, reason: 'disk', queuePosition: 1 },
+      reservePending: true,
     });
     const created = service.create(baseInput);
     await service.onApplicationShutdown();

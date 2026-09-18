@@ -6,6 +6,8 @@
 //
 #pragma once
 
+#include "telegram-bot-api/WorkdirCleanupManager.h"
+
 #include "td/db/KeyValueSyncInterface.h"
 #include "td/db/TQueue.h"
 
@@ -39,6 +41,18 @@ struct SharedData {
   std::atomic<td::int64> workdir_deleted_bytes_{0};
   std::atomic<bool> workdir_disk_emergency_{false};
   std::atomic<bool> workdir_shutdown_requested_{false};
+  // Number of download starts that were rejected by the pre-write workdir space admission check.
+  std::atomic<td::int64> workdir_space_rejections_{0};
+  // Number of file streams that ended because the first byte / the transfer stalled.
+  std::atomic<td::int64> file_stream_first_byte_timeouts_{0};
+  std::atomic<td::int64> file_stream_idle_timeouts_{0};
+  // Local cache copy deletion handshake counters (see Client::remove_file_stream and
+  // Client::process_release_local_file_query). "attempts" counts issued deleteFile requests,
+  // "successes"/"failures" count their results. A deletion that is reported as pending is counted
+  // as a failure so that it stays visible until a retry succeeds.
+  std::atomic<td::int64> file_delete_attempts_{0};
+  std::atomic<td::int64> file_delete_successes_{0};
+  std::atomic<td::int64> file_delete_failures_{0};
   td::ActorId<WorkdirCleanupManager> workdir_cleanup_manager_;
 
   // not thread-safe, must be used from a single thread
@@ -138,6 +152,9 @@ struct ClientParameters {
   double workdir_cleanup_interval_ = 3600.0;
   td::int64 workdir_file_ttl_ = 86400;
   td::int64 workdir_min_free_bytes_ = 1LL << 30;
+  // Extra free space (in bytes) reserved beyond workdir_min_free_bytes_ before creating a new local
+  // copy of a file whose exact size is not known yet (see check_workdir_space).
+  td::int64 workdir_unknown_file_min_free_bytes_ = DEFAULT_WORKDIR_UNKNOWN_FILE_MIN_FREE_BYTES;
 
   td::int32 api_id_ = 0;
   td::string api_hash_;

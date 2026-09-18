@@ -1746,6 +1746,7 @@ export class FileService implements OnModuleInit {
     filename: string;
     size: number;
     accessLogId?: string;
+    etag?: string;
   }> {
     const file = await this.fileRepository.findOne({
       where: { id, isDeleted: false },

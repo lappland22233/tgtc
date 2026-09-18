@@ -2,6 +2,7 @@ import {
   DOWNLOAD_ERROR_CODES,
   DOWNLOAD_RESOURCE_DEFAULTS,
   DownloadResourceCoordinatorService,
+  upstreamWeightForSize,
   type DownloadReservation,
 } from './download-resource-coordinator.service';
 
@@ -359,6 +360,102 @@ describe('DownloadResourceCoordinatorService', () => {
       lease.release();
       lease.release();
       expect(service.activeUpstreamCount).toBe(0);
+    });
+  });
+
+  describe('大文件加权上游并发（4GiB 分卷事件）', () => {
+    const GB = 1024 * MB;
+
+    it('按体量映射权重：小文件共享预算，>1GiB 占满默认预算', () => {
+      const budget = 8;
+      expect(upstreamWeightForSize(64 * MB, budget)).toBe(1);
+      // 恰好等于阈值仍属小/中档（避免边界抖动误判为大文件）
+      expect(upstreamWeightForSize(256 * MB, budget)).toBe(1);
+      expect(upstreamWeightForSize(512 * MB, budget)).toBe(2);
+      expect(upstreamWeightForSize(GB, budget)).toBe(2);
+      expect(upstreamWeightForSize(GB + 1, budget)).toBe(8);
+      expect(upstreamWeightForSize(4 * GB, budget)).toBe(8);
+      // 未知/非法大小按最小权重处理，不会因此被永久拒绝
+      expect(upstreamWeightForSize(0, budget)).toBe(1);
+      expect(upstreamWeightForSize(Number.NaN, budget)).toBe(1);
+      // 权重不得超过预算，否则会产生永远无法满足的等待项
+      expect(upstreamWeightForSize(4 * GB, 4)).toBe(4);
+      expect(upstreamWeightForSize(4 * GB, 16)).toBe(8);
+    });
+
+    it('预算 8 时两个 4GiB 冷回源不会同时启动，小文件同样遵守严格 FIFO', async () => {
+      service.configure({ maxConcurrentUpstreams: 8 });
+      const first = await service.acquireUpstreamSlot({ bytes: 4 * GB });
+      expect(first.weight).toBe(8);
+      expect(service.activeUpstreamWeightTotal).toBe(8);
+
+      const second = service.acquireUpstreamSlot({ bytes: 4 * GB, waitTimeoutMs: 5000 });
+      expect(service.waitingUpstreamCount).toBe(1);
+      // 大文件占满预算时，小文件也排队（严格 FIFO，避免大任务被持续插队饿死）
+      const small = service.acquireUpstreamSlot({ bytes: 64 * MB, waitTimeoutMs: 5000 });
+      expect(service.waitingUpstreamCount).toBe(2);
+
+      first.release();
+      const secondLease = await second;
+      expect(secondLease.weight).toBe(8);
+      expect(service.waitingUpstreamCount).toBe(1);
+
+      secondLease.release();
+      const smallLease = await small;
+      expect(smallLease.weight).toBe(1);
+      smallLease.release();
+      expect(service.activeUpstreamWeightTotal).toBe(0);
+    });
+
+    it('预算提升到 16 后可同时放行两个 4GiB 冷回源', async () => {
+      service.configure({ maxConcurrentUpstreams: 16 });
+      const first = await service.acquireUpstreamSlot({ bytes: 4 * GB });
+      const second = await service.acquireUpstreamSlot({ bytes: 4 * GB });
+
+      expect(first.weight).toBe(8);
+      expect(second.weight).toBe(8);
+      expect(service.activeUpstreamCount).toBe(2);
+      expect(service.activeUpstreamWeightTotal).toBe(16);
+
+      first.release();
+      second.release();
+      expect(service.activeUpstreamWeightTotal).toBe(0);
+    });
+
+    it('运行快照暴露已占用权重（管理后台可解释「为何排队」）', async () => {
+      service.configure({ maxConcurrentUpstreams: 8 });
+      const lease = await service.acquireUpstreamSlot({ bytes: 4 * GB });
+      const snapshot = service.getSnapshot();
+      expect(snapshot.activeUpstreams).toBe(1);
+      expect(snapshot.activeUpstreamWeight).toBe(8);
+      expect(snapshot.maxConcurrentUpstreams).toBe(8);
+
+      lease.release();
+      expect(service.getSnapshot().activeUpstreamWeight).toBe(0);
+    });
+
+    it('运行中调低预算后队头仍能被放行（不产生永久阻塞）', async () => {
+      service.configure({ maxConcurrentUpstreams: 8 });
+      const first = await service.acquireUpstreamSlot({ bytes: 4 * GB });
+      const queued = service.acquireUpstreamSlot({ bytes: 4 * GB, waitTimeoutMs: 5000 });
+      expect(service.waitingUpstreamCount).toBe(1);
+
+      // 入队时 weight=8；把预算降到 4 后该权重永远无法满足，
+      // 必须按当前预算重新裁剪，否则队头及其后续等待项全部阻塞到超时。
+      service.configure({ maxConcurrentUpstreams: 4 });
+      first.release();
+
+      const lease = await queued;
+      expect(lease.weight).toBe(4);
+      lease.release();
+      expect(service.activeUpstreamWeightTotal).toBe(0);
+    });
+
+    it('显式权重被裁剪到预算内，不会出现永远无法满足的等待项', async () => {
+      service.configure({ maxConcurrentUpstreams: 4 });
+      const lease = await service.acquireUpstreamSlot({ weight: 999 });
+      expect(lease.weight).toBe(4);
+      lease.release();
     });
   });
 

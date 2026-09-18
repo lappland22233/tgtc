@@ -714,6 +714,14 @@ export class FileController {
       const isAdmin = hasAdminPrivileges(user);
       const noCacheRequested = isAdmin && (req.query.nocache === '1' || req.query.nocache === 'true');
 
+      // 两阶段下载第二阶段：任务票据原子消费（单次有效）。
+      // 命中时把任务已持有的磁盘预约交接给本次正文请求，使其不再重新排队；
+      // 无效/已消费/归属或文件不匹配则静默忽略，走常规准入路径（不影响旧前端与直接下载）。
+      const taskTicket = typeof req.query.taskTicket === 'string' ? req.query.taskTicket : undefined;
+      if (taskTicket) {
+        this.downloadTasks.consumeTicket(taskTicket, `user:${user.id}`, id);
+      }
+
       // Range 请求支持（仅缓存命中时可用）
       const rangeHeader = req.headers.range;
       if (rangeHeader) {
@@ -759,6 +767,8 @@ export class FileController {
           'Cache-Control': 'private, no-cache',
           'X-Content-Type-Options': 'nosniff',
           'Referrer-Policy': 'no-referrer',
+          // 完整 200 与分段 206 使用同一版本标识，客户端续传语义一致
+          ...(result.etag ? { ETag: result.etag, 'Accept-Ranges': 'bytes' } : {}),
         },
         stream: result.stream,
         accessLogId: result.accessLogId,

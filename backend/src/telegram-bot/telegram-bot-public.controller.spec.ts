@@ -3,6 +3,7 @@ import { Readable } from 'stream';
 import { Request, Response } from 'express';
 import { TelegramBotPublicController } from './telegram-bot-public.controller';
 import { StreamSendOptions } from '../common/services/stream-responder.service';
+import { buildOpaqueETag } from '../common/utils/file-range-validator';
 import { RangeNotSatisfiableException } from '../file/file-utils';
 
 const VALID_TOKEN = 'A'.repeat(43);
@@ -122,9 +123,14 @@ function makeController(overrides: Record<string, unknown> | null = {}) {
   };
 }
 
-const res = {} as Response;
+/** 控制器会在分发前用 res.set 预写 ETag（保证 416 也带上版本标识），桩需支持 */
+const res = { set: jest.fn() } as unknown as Response;
 
 describe('TelegramBotPublicController 匿名直链', () => {
+  beforeEach(() => {
+    (res.set as jest.Mock).mockClear();
+  });
+
   it('无 Range 时走缓存完整传输：200 + Content-Length + Accept-Ranges', async () => {
     const ctx = makeController();
     await ctx.controller.download(VALID_TOKEN, makeRequest(), res);
@@ -257,7 +263,11 @@ describe('TelegramBotPublicController 匿名直链', () => {
     const successLog = ctx.auditService.log.mock.calls[0][0];
     expect(successLog.action).toBe('telegram_bot_link_accessed');
     // 审计取 DB 中的 tokenPrefix 快照（非由请求 Token 重新推导）
-    expect(successLog.metadata).toMatchObject({ ranged: true, tokenPrefix: 'tgl_aaaaaaaa' });
+    expect(successLog.metadata).toMatchObject({
+      ranged: true,
+      tokenPrefix: 'tgl_aaaaaaaa',
+      terminationReason: 'completed',
+    });
     expect(JSON.stringify(successLog)).not.toContain(VALID_TOKEN);
 
     ctx.fileCacheService.getOrCacheStream.mockRejectedValue(new Error('upstream down'));
@@ -266,5 +276,154 @@ describe('TelegramBotPublicController 匿名直链', () => {
     const failureLog = ctx.auditService.log.mock.calls[1][0];
     expect(failureLog.status).toBe('failure');
     expect((failureLog.metadata as { success: boolean }).success).toBe(false);
+    // 失败请求不得计入访问次数（历史缺陷：输出前就计数，中断也算一次下载）
+    expect(ctx.grantService.recordAccess).toHaveBeenCalledTimes(1);
+  });
+
+  it('完整下载返回稳定强 ETag，并计入访问次数', async () => {
+    const ctx = makeController();
+    await ctx.controller.download(VALID_TOKEN, makeRequest(), res);
+
+    const expected = buildOpaqueETag('telegram-bot', TELEGRAM_FILE_ID, TOTAL_SIZE);
+    expect(expected.startsWith('"') && expected.endsWith('"')).toBe(true);
+    expect(ctx.lastSend().headers?.['ETag']).toBe(expected);
+    expect(res.set).toHaveBeenCalledWith('ETag', expected);
+    expect(ctx.grantService.recordAccess).toHaveBeenCalledTimes(1);
+  });
+
+  it('同一 Telegram 文件的 ETag 跨不同授权保持一致', async () => {
+    const first = makeController({ id: 'grant-a', tokenPrefix: 'tgl_a' });
+    await first.controller.download(VALID_TOKEN, makeRequest(), res);
+    const second = makeController({ id: 'grant-b', tokenPrefix: 'tgl_b' });
+    await second.controller.download(VALID_TOKEN, makeRequest(), res);
+
+    expect(first.lastSend().headers?.['ETag']).toBe(second.lastSend().headers?.['ETag']);
+  });
+
+  it('206 与 200 返回同一个 ETag', async () => {
+    const full = makeController();
+    await full.controller.download(VALID_TOKEN, makeRequest(), res);
+    const partial = makeController();
+    await partial.controller.download(VALID_TOKEN, makeRequest({ headers: { range: 'bytes=0-9' } }), res);
+
+    expect(partial.lastSend().status).toBe(206);
+    expect(partial.lastSend().headers?.['ETag']).toBe(full.lastSend().headers?.['ETag']);
+  });
+
+  it('If-Range 强 ETag 精确匹配时按 Range 返回 206', async () => {
+    const ctx = makeController();
+    const etag = buildOpaqueETag('telegram-bot', TELEGRAM_FILE_ID, TOTAL_SIZE);
+    await ctx.controller.download(
+      VALID_TOKEN,
+      makeRequest({ headers: { range: 'bytes=100-199', 'if-range': etag } }),
+      res,
+    );
+
+    expect(ctx.lastSend().status).toBe(206);
+    expect(ctx.fileCacheService.getOrCacheRangeStream).toHaveBeenCalledTimes(1);
+    expect(ctx.fileCacheService.getOrCacheStream).not.toHaveBeenCalled();
+  });
+
+  it('If-Range 不匹配时忽略 Range 回完整 200（避免拼接不同版本）', async () => {
+    const ctx = makeController();
+    await ctx.controller.download(
+      VALID_TOKEN,
+      makeRequest({ headers: { range: 'bytes=100-199', 'if-range': '"stale-version"' } }),
+      res,
+    );
+
+    expect(ctx.fileCacheService.getOrCacheRangeStream).not.toHaveBeenCalled();
+    expect(ctx.fileCacheService.getOrCacheStream).toHaveBeenCalledTimes(1);
+    const sendArgs = ctx.lastSend();
+    expect(sendArgs.status).toBeUndefined();
+    expect(sendArgs.range).toBeUndefined();
+    expect(sendArgs.headers?.['Content-Length']).toBe(String(TOTAL_SIZE));
+  });
+
+  it('弱 ETag 与日期形式的 If-Range 同样回完整 200', async () => {
+    const etag = buildOpaqueETag('telegram-bot', TELEGRAM_FILE_ID, TOTAL_SIZE);
+    for (const ifRange of [`W/${etag}`, 'Wed, 21 Oct 2015 07:28:00 GMT']) {
+      const ctx = makeController();
+      await ctx.controller.download(
+        VALID_TOKEN,
+        makeRequest({ headers: { range: 'bytes=0-9', 'if-range': ifRange } }),
+        res,
+      );
+      expect(ctx.lastSend().status).toBeUndefined();
+      expect(ctx.fileCacheService.getOrCacheStream).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it('无 If-Range 的 Range 请求仍返回 206', async () => {
+    const ctx = makeController();
+    await ctx.controller.download(VALID_TOKEN, makeRequest({ headers: { range: 'bytes=0-9' } }), res);
+    expect(ctx.lastSend().status).toBe(206);
+  });
+
+  it('总长未知时不声明 ETag 与 Accept-Ranges', async () => {
+    const ctx = makeController({ fileSize: null });
+    await ctx.controller.download(VALID_TOKEN, makeRequest(), res);
+
+    const sendArgs = ctx.lastSend();
+    expect(sendArgs.headers?.['ETag']).toBeUndefined();
+    expect(sendArgs.headers?.['Accept-Ranges']).toBeUndefined();
+    expect(res.set).not.toHaveBeenCalled();
+  });
+
+  it('416 也携带 ETag，便于客户端刷新本地版本', async () => {
+    const ctx = makeController();
+    await ctx.controller.download(VALID_TOKEN, makeRequest({ headers: { range: 'bytes=5000-' } }), res);
+
+    expect(res.set).toHaveBeenCalledWith(
+      'ETag',
+      buildOpaqueETag('telegram-bot', TELEGRAM_FILE_ID, TOTAL_SIZE),
+    );
+  });
+
+  it('限流键使用不可逆摘要，不落明文 Token', async () => {
+    const ctx = makeController();
+    await ctx.controller.download(VALID_TOKEN, makeRequest(), res);
+
+    const tokenKey = ctx.rateLimitService.checkAndIncrement.mock.calls
+      .map((call) => String(call[0]))
+      .find((key) => key.startsWith('bot-dl:token:'));
+    expect(tokenKey).toBeDefined();
+    expect(tokenKey).not.toContain(VALID_TOKEN);
+    expect(String(tokenKey).replace('bot-dl:token:', '')).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('传输结果上下文：标记为可分类下载并记录分段与结束原因', async () => {
+    const ctx = makeController();
+    const request = makeRequest({ headers: { range: 'bytes=0-9' } });
+    await ctx.controller.download(VALID_TOKEN, request, res);
+
+    const tracked = request as unknown as {
+      transferTracked?: boolean;
+      ranged?: boolean;
+      terminationReason?: string;
+    };
+    expect(tracked.transferTracked).toBe(true);
+    expect(tracked.ranged).toBe(true);
+  });
+
+  it('源流失败时同步分类结束原因（不误记为客户端中断）', async () => {
+    const ctx = makeController();
+    ctx.fileCacheService.getOrCacheStream.mockResolvedValue({
+      stream: Readable.from([Buffer.from('x')]),
+      fromCache: false,
+    });
+    // 模拟真实 pipeline：源流先 emit 'error'，随后 send 以中断异常 reject
+    ctx.streamResponder.send.mockImplementation(async (options: StreamSendOptions) => {
+      options.stream.emit('error', new Error('缓存构建空闲超时（60000ms）'));
+      throw new Error('premature close');
+    });
+
+    await ctx.controller.download(VALID_TOKEN, makeRequest(), res);
+
+    const failureLog = ctx.auditService.log.mock.calls.at(-1)?.[0];
+    expect(failureLog?.status).toBe('failure');
+    // 结束原因取源流的同步分类（timeout），而不是外层中断异常的 client_abort
+    expect((failureLog?.metadata as { terminationReason?: string }).terminationReason).toBe('timeout');
+    expect(ctx.grantService.recordAccess).not.toHaveBeenCalled();
   });
 });

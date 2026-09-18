@@ -156,7 +156,40 @@ export const DOWNLOAD_RESOURCE_DEFAULTS = {
   POLL_INTERVAL_MS: 30_000,
   /** LRU 淘汰请求的最小间隔（毫秒，避免队头阻塞时反复全目录扫描） */
   EVICTION_THROTTLE_MS: 1_000,
+  /** 任务票据交接后的预约保留上限（毫秒）：超时未被子请求采用则归还，避免预约泄漏 */
+  HANDOFF_TTL_MS: 120_000,
 } as const;
+
+/** 大文件阈值（字节）：超过即按大文件权重占用并发预算 */
+const LARGE_FILE_THRESHOLD_BYTES = 1024 ** 3;
+/** 中等文件阈值（字节） */
+const MEDIUM_FILE_THRESHOLD_BYTES = 256 * 1024 ** 2;
+/** 大文件权重（等于默认预算 8 → 默认一次只跑 1 个） */
+const LARGE_FILE_WEIGHT = 8;
+/** 中等文件权重 */
+const MEDIUM_FILE_WEIGHT = 2;
+/** 小文件权重 */
+const SMALL_FILE_WEIGHT = 1;
+
+/**
+ * 上游并发权重：大文件按体量占用更多「并发预算」，避免 3×4GiB 冷分卷同秒全部回源。
+ *
+ * `FILE_DOWNLOAD_MAX_CONCURRENT_UPSTREAMS` 在本实现中是**权重预算**（默认 8）：
+ * - `>1GiB`：权重 8 → 默认预算下同时只允许 1 个大文件冷回源（把预算提到 16 即可跑 2 个）；
+ * - `256MiB–1GiB`：权重 2 → 最多 4 个；
+ * - `<256MiB`：权重 1 → 最多 budget 个。
+ *
+ * 权重超过预算时被裁剪到预算（否则会产生永远无法满足的等待项）。
+ * 上游队列仍为严格 FIFO，大任务不会被持续到达的小任务插队饿死
+ * （代价是队头阻塞时小任务也要等）。
+ */
+export function upstreamWeightForSize(bytes: number, budget: number): number {
+  const total = Math.max(1, Math.floor(budget) || 1);
+  if (!Number.isFinite(bytes) || bytes <= 0) return Math.min(SMALL_FILE_WEIGHT, total);
+  if (bytes > LARGE_FILE_THRESHOLD_BYTES) return Math.min(LARGE_FILE_WEIGHT, total);
+  if (bytes > MEDIUM_FILE_THRESHOLD_BYTES) return Math.min(MEDIUM_FILE_WEIGHT, total);
+  return Math.min(SMALL_FILE_WEIGHT, total);
+}
 
 /** 磁盘/缓存预约句柄 */
 export interface DownloadReservation {
@@ -178,6 +211,8 @@ export interface DownloadReservation {
 export interface DownloadUpstreamLease {
   readonly id: string;
   readonly active: boolean;
+  /** 该租约占用的并发权重（大文件 >1），释放时等额归还预算 */
+  readonly weight: number;
   /** 释放槽位并唤醒等待队列（幂等） */
   release(): void;
 }
@@ -201,6 +236,10 @@ export interface AcquireUpstreamOptions {
   waitTimeoutMs?: number;
   signal?: AbortSignal;
   onQueued?: (info: { reason: DownloadQueueReason; position: number; retryAfterMs: number }) => void;
+  /** 预计文件大小（字节）：用于计算并发权重；未提供时按权重 1 处理 */
+  bytes?: number;
+  /** 显式权重覆盖（测试/诊断用）；优先级高于 bytes */
+  weight?: number;
 }
 
 /** 运行状态快照（管理后台观测） */
@@ -213,6 +252,8 @@ export interface DownloadResourceSnapshot {
   waitingDiskTasks: number;
   waitingUpstreamTasks: number;
   activeUpstreams: number;
+  /** 已占用的上游并发权重（大文件按体量加权，权重预算见 maxConcurrentUpstreams） */
+  activeUpstreamWeight: number;
   maxConcurrentUpstreams: number;
   queueCapacity: number;
   oldestDiskWaitMs: number;
@@ -247,6 +288,8 @@ interface DiskWaiter {
 interface UpstreamWaiter {
   id: string;
   enqueuedAt: number;
+  /** 该等待项需要的并发权重 */
+  weight: number;
   resolve: (lease: DownloadUpstreamLease) => void;
   reject: (error: Error) => void;
   timer?: NodeJS.Timeout;
@@ -284,10 +327,17 @@ export class DownloadResourceCoordinatorService {
   private readonly waitingDisk: DiskWaiter[] = [];
   /** 上游 FIFO 等待队列 */
   private readonly waitingUpstream: UpstreamWaiter[] = [];
-  /** 活跃上游回源数 */
+  /** 活跃上游回源数（连接数，用于展示） */
   private activeUpstreams = 0;
+  /** 活跃上游并发权重之和（准入按权重判断，大文件独占预算） */
+  private activeUpstreamWeight = 0;
   /** 活跃上游租约 */
   private readonly upstreamLeases = new Map<string, DownloadUpstreamLease>();
+  /**
+   * 任务票据交接池：下载任务持有的磁盘预约在正文 GET 到达前暂存在此，
+   * 由 `reserve()` 按会话键采用（原子消费，避免正文请求重新排队）。
+   */
+  private readonly handedOffReservations = new Map<string, { reservation: DownloadReservation; expiresAt: number }>();
 
   private pollTimer: NodeJS.Timeout | null = null;
   private shuttingDown = false;
@@ -367,9 +417,16 @@ export class DownloadResourceCoordinatorService {
     return this.activeUpstreams;
   }
 
-  /** 兼容既有测试：直接设置活跃上游数（仅测试/诊断使用） */
+  /** 已占用的上游并发权重（大文件按体量加权，>= 活跃连接数） */
+  get activeUpstreamWeightTotal(): number {
+    return this.activeUpstreamWeight;
+  }
+
+  /** 兼容既有测试：直接设置活跃上游数（仅测试/诊断使用；按单位权重记账） */
   setActiveUpstreamCount(value: number): void {
-    this.activeUpstreams = Math.max(0, Math.floor(value) || 0);
+    const normalized = Math.max(0, Math.floor(value) || 0);
+    this.activeUpstreams = normalized;
+    this.activeUpstreamWeight = normalized;
     this.pumpUpstream();
   }
 
@@ -388,6 +445,7 @@ export class DownloadResourceCoordinatorService {
       waitingDiskTasks: this.waitingDisk.length,
       waitingUpstreamTasks: this.waitingUpstream.length,
       activeUpstreams: this.activeUpstreams,
+      activeUpstreamWeight: this.activeUpstreamWeight,
       maxConcurrentUpstreams: this.config.maxConcurrentUpstreams,
       queueCapacity: this.config.queueCapacity,
       oldestDiskWaitMs: this.waitingDisk.length > 0 ? Date.now() - this.waitingDisk[0].enqueuedAt : 0,
@@ -431,6 +489,14 @@ export class DownloadResourceCoordinatorService {
     }
     if (signal?.aborted) throw this.cancelledError('下载任务已取消');
 
+    // 任务票据交接：同会话已有预授权预约时直接采用（原子消费），不再重新排队
+    const handedOff = this.takeHandedOffReservation(sessionKey);
+    if (handedOff) {
+      if (handedOff.grantedBytes >= bytes) return handedOff;
+      // 预授权不足以覆盖本次请求（例如内容大小已变化）：归还后按常规路径重新申请
+      handedOff.release();
+    }
+
     const freeBytes = this.probeFreeBytes();
     if (freeBytes < 0) {
       throw this.probeUnavailableError();
@@ -455,6 +521,79 @@ export class DownloadResourceCoordinatorService {
     });
     this.ensurePollTimer();
     return waiter;
+  }
+
+  /**
+   * 同步尝试立即授予预约（不排队、不抛结构性异常）。
+   *
+   * 供下载任务在创建时"顺手"持有真实预约：只读探测已确认可准入时无需异步排队，
+   * 保持 `create()` 同步返回 `streamable` 的既有契约；不可立即满足时返回 null，
+   * 由调用方改用异步 `reserve()` 真实排队。
+   */
+  tryReserveNow(options: {
+    sessionKey: string;
+    bytes: number;
+    countsTowardCache?: boolean;
+  }): DownloadReservation | null {
+    if (this.shuttingDown) return null;
+    const { sessionKey, bytes, countsTowardCache = false } = options;
+    if (!Number.isSafeInteger(bytes) || bytes <= 0) return null;
+
+    const handedOff = this.takeHandedOffReservation(sessionKey);
+    if (handedOff) {
+      if (handedOff.grantedBytes >= bytes) return handedOff;
+      handedOff.release();
+      return null;
+    }
+
+    const freeBytes = this.probeFreeBytes();
+    if (freeBytes < 0) return null;
+    const result = this.tryGrant({ sessionKey, bytes, countsTowardCache, freeBytes });
+    return result.granted ? result.reservation : null;
+  }
+
+  /**
+   * 把下载任务已持有的预约交接给同会话的正文请求（两阶段下载的第二阶段）。
+   * 覆盖同键旧条目时立即归还，避免预约泄漏；超时未采用由 `purgeExpiredHandOffs` 回收。
+   */
+  handOffToSession(sessionKey: string, reservation: DownloadReservation): void {
+    this.purgeExpiredHandOffs();
+    const existing = this.handedOffReservations.get(sessionKey);
+    if (existing && existing.reservation !== reservation) existing.reservation.release();
+    this.handedOffReservations.set(sessionKey, {
+      reservation,
+      expiresAt: Date.now() + DOWNLOAD_RESOURCE_DEFAULTS.HANDOFF_TTL_MS,
+    });
+  }
+
+  /** 取出并采用一次交接预约（原子：无论有效与否都从池中移除） */
+  private takeHandedOffReservation(sessionKey: string): DownloadReservation | null {
+    const entry = this.handedOffReservations.get(sessionKey);
+    if (!entry) return null;
+    this.handedOffReservations.delete(sessionKey);
+    if (entry.expiresAt <= Date.now() || !entry.reservation.active) {
+      entry.reservation.release();
+      return null;
+    }
+    return entry.reservation;
+  }
+
+  /** 回收超时未采用的交接预约（返回回收数量） */
+  purgeExpiredHandOffs(): number {
+    const now = Date.now();
+    let purged = 0;
+    for (const [key, entry] of this.handedOffReservations) {
+      if (entry.expiresAt > now) continue;
+      this.handedOffReservations.delete(key);
+      entry.reservation.release();
+      purged++;
+    }
+    return purged;
+  }
+
+  /** 当前暂存的交接预约数（观测用） */
+  get handedOffReservationCount(): number {
+    return this.handedOffReservations.size;
   }
 
   private enqueueDisk(input: {
@@ -607,7 +746,8 @@ export class DownloadResourceCoordinatorService {
     }
 
     const verdict = this.evaluateGrant({ bytes, countsTowardCache, freeBytes });
-    if (verdict.ok && activeUpstreams < this.config.maxConcurrentUpstreams && waitingUpstream === 0) {
+    const weight = upstreamWeightForSize(bytes, this.config.maxConcurrentUpstreams);
+    if (verdict.ok && waitingUpstream === 0 && this.canGrantUpstream(weight)) {
       return { admitted: true, structural: false, freeBytes, ...base };
     }
     // 磁盘/缓存已可就绪但上游名额吃紧：排队原因记为上游
@@ -703,14 +843,15 @@ export class DownloadResourceCoordinatorService {
   // ---------- 上游并发租约 ----------
 
   /**
-   * 获取上游回源槽位租约（严格 FIFO）。
-   * 并发满额时排队等待，超时抛 `DOWNLOAD_SERVER_BUSY`。
+   * 获取上游回源槽位租约（严格 FIFO + 大文件加权）。
+   * 权重预算或连接数不足时排队等待，超时抛 `DOWNLOAD_SERVER_BUSY`。
    */
   async acquireUpstreamSlot(options?: AcquireUpstreamOptions): Promise<DownloadUpstreamLease> {
     if (this.shuttingDown) throw this.shuttingDownError();
     if (options?.signal?.aborted) throw this.cancelledError('下载任务已取消');
-    if (this.activeUpstreams < this.config.maxConcurrentUpstreams) {
-      return this.grantUpstreamLease();
+    const weight = this.resolveUpstreamWeight(options);
+    if (this.canGrantUpstream(weight)) {
+      return this.grantUpstreamLease(weight);
     }
     if (this.waitingUpstream.length >= this.config.queueCapacity) {
       throw this.queueFullError('upstream');
@@ -720,6 +861,7 @@ export class DownloadResourceCoordinatorService {
       const waiter: UpstreamWaiter = {
         id: randomUUID(),
         enqueuedAt: Date.now(),
+        weight,
         resolve,
         reject,
         settled: false,
@@ -750,8 +892,27 @@ export class DownloadResourceCoordinatorService {
     });
   }
 
-  private grantUpstreamLease(): DownloadUpstreamLease {
+  /** 解析本次请求的上游并发权重（显式值优先，其次按文件体量；结果不超过预算） */
+  private resolveUpstreamWeight(options?: AcquireUpstreamOptions): number {
+    const budget = Math.max(1, Math.floor(this.config.maxConcurrentUpstreams) || 1);
+    const requested = options?.weight !== undefined && Number.isFinite(options.weight)
+      ? Math.floor(options.weight)
+      : upstreamWeightForSize(options?.bytes ?? 0, budget);
+    return Math.min(Math.max(1, requested), budget);
+  }
+
+  /**
+   * 上游权重预算是否足够。
+   * 预算即 `maxConcurrentUpstreams`：大文件权重等于预算 → 同时只放行 1 个。
+   */
+  private canGrantUpstream(weight: number): boolean {
+    const budget = Math.max(1, Math.floor(this.config.maxConcurrentUpstreams) || 1);
+    return this.activeUpstreamWeight + weight <= budget;
+  }
+
+  private grantUpstreamLease(weight = 1): DownloadUpstreamLease {
     this.activeUpstreams += 1;
+    this.activeUpstreamWeight += weight;
     const id = randomUUID();
     const service = this;
     let active = true;
@@ -760,11 +921,15 @@ export class DownloadResourceCoordinatorService {
       get active(): boolean {
         return active;
       },
+      get weight(): number {
+        return weight;
+      },
       release(): void {
         if (!active) return;
         active = false;
         service.upstreamLeases.delete(id);
         service.activeUpstreams = Math.max(0, service.activeUpstreams - 1);
+        service.activeUpstreamWeight = Math.max(0, service.activeUpstreamWeight - weight);
         service.pumpUpstream();
       },
     };
@@ -805,16 +970,18 @@ export class DownloadResourceCoordinatorService {
     this.stopPollTimer();
   }
 
-  /** 上游队列泵 */
+  /** 上游队列泵（严格 FIFO：队头权重不足时不跳过，避免大任务被持续插队饿死） */
   private pumpUpstream(): void {
-    while (
-      this.waitingUpstream.length > 0
-      && this.activeUpstreams < this.config.maxConcurrentUpstreams
-    ) {
+    const budget = Math.max(1, Math.floor(this.config.maxConcurrentUpstreams) || 1);
+    while (this.waitingUpstream.length > 0) {
       const head = this.waitingUpstream[0];
+      // 权重按**当前**预算重新裁剪：运行中调低预算后，入队时按旧预算计算的权重
+      // 可能永远无法满足，会让队头及其后续等待项全部阻塞到超时。
+      const effective = Math.min(head.weight, budget);
+      if (!this.canGrantUpstream(effective)) return;
       if (!this.removeUpstreamWaiter(head)) continue;
       head.settled = true;
-      head.resolve(this.grantUpstreamLease());
+      head.resolve(this.grantUpstreamLease(effective));
     }
   }
 
@@ -897,6 +1064,11 @@ export class DownloadResourceCoordinatorService {
     if (this.shuttingDown) return;
     this.shuttingDown = true;
     this.stopPollTimer();
+    // 关闭时不会再有正文请求来采用交接预约：全部归还，避免预约残留
+    for (const [key, entry] of this.handedOffReservations) {
+      entry.reservation.release();
+      this.handedOffReservations.delete(key);
+    }
     for (const waiter of this.waitingDisk.splice(0)) {
       this.detachWaiter(waiter);
       if (waiter.settled) continue;
@@ -995,3 +1167,4 @@ export class DownloadResourceCoordinatorService {
     });
   }
 }
+ 

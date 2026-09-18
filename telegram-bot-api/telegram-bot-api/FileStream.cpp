@@ -422,7 +422,12 @@ void FileStreamConnection::abort(td::Status error) {
 }
 
 void FileStreamConnection::timeout_expired() {
-  auto message = first_byte_sent_ ? td::Slice("File stream stalled") : td::Slice("File stream first byte timeout");
+  auto first_byte_timeout = !first_byte_sent_;
+  // Record the timeout for the /getStats counters before the stream is torn down.
+  if (!client_manager_.empty()) {
+    send_closure(client_manager_, &ClientManager::on_file_stream_timeout, first_byte_timeout);
+  }
+  auto message = first_byte_timeout ? td::Slice("File stream first byte timeout") : td::Slice("File stream stalled");
   on_file_error(td::Status::Error(504, message));
 }
 

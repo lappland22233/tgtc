@@ -179,6 +179,12 @@ void ClientManager::release_file_stream(td::int64 stream_id) {
   }
 }
 
+void ClientManager::on_file_stream_timeout(bool first_byte_timeout) {
+  auto &counter = first_byte_timeout ? parameters_->shared_data_->file_stream_first_byte_timeouts_
+                                     : parameters_->shared_data_->file_stream_idle_timeouts_;
+  counter.fetch_add(1, std::memory_order_relaxed);
+}
+
 void ClientManager::send(PromisedQueryPtr query) {
   if (close_flag_) {
     // automatically send 429
@@ -375,6 +381,32 @@ void ClientManager::get_stats(td::Promise<td::BufferSlice> promise,
        << parameters_->shared_data_->workdir_deleted_bytes_.load(std::memory_order_relaxed) << '\n';
     sb << "workdir_disk_emergency\t"
        << parameters_->shared_data_->workdir_disk_emergency_.load(std::memory_order_acquire) << '\n';
+    sb << "workdir_free_bytes\t" << get_workdir_free_bytes(parameters_->working_directory_) << '\n';
+    sb << "workdir_min_free_bytes\t" << parameters_->workdir_min_free_bytes_ << '\n';
+    sb << "workdir_space_rejections\t"
+       << parameters_->shared_data_->workdir_space_rejections_.load(std::memory_order_relaxed) << '\n';
+    sb << "active_file_streams\t" << active_file_stream_ids_.size() << '\n';
+    // Total number of (file -> stream) listener registrations across all bots. All Clients run on
+    // the same scheduler as ClientManager, so their state can be read synchronously (the same way
+    // get_top_clients already reads get_bot_info()).
+    td::int64 active_file_stream_listeners = 0;
+    for (auto id : clients_.ids()) {
+      auto *client_info = clients_.get(id);
+      if (client_info != nullptr && !client_info->client_.empty()) {
+        active_file_stream_listeners += client_info->client_.get_actor_unsafe()->get_active_file_stream_listener_count();
+      }
+    }
+    sb << "active_file_stream_listeners\t" << active_file_stream_listeners << '\n';
+    sb << "file_stream_first_byte_timeouts\t"
+       << parameters_->shared_data_->file_stream_first_byte_timeouts_.load(std::memory_order_relaxed) << '\n';
+    sb << "file_stream_idle_timeouts\t"
+       << parameters_->shared_data_->file_stream_idle_timeouts_.load(std::memory_order_relaxed) << '\n';
+    sb << "file_delete_attempts\t"
+       << parameters_->shared_data_->file_delete_attempts_.load(std::memory_order_relaxed) << '\n';
+    sb << "file_delete_successes\t"
+       << parameters_->shared_data_->file_delete_successes_.load(std::memory_order_relaxed) << '\n';
+    sb << "file_delete_failures\t"
+       << parameters_->shared_data_->file_delete_failures_.load(std::memory_order_relaxed) << '\n';
     auto stats = stat_.as_vector(now);
     for (auto &stat : stats) {
       sb << stat.key_ << "\t" << stat.value_ << '\n';

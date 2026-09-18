@@ -53,8 +53,30 @@ const SENSITIVE_QUERY_PARAMS = new Set([
 const MAX_QUERY_VALUE_LENGTH = 200;
 
 /**
+ * 需要脱敏的路径凭据规则（凭据位于 path 段，而非 query）。
+ *
+ * `/api/bot-dl/<下载Token>` 与 `/api/s/<分享Token>/...` 的路径段本身就是可直接
+ * 换取文件内容的凭据：一旦被持久化到访问日志、5xx 日志或导出文件，任何能读到
+ * 日志的人都能重放。清洗时保留路由模板（含后续资源 ID 段），只把凭据段替换为
+ * `[REDACTED]`，使统计仍能按路由聚合。
+ */
+const SENSITIVE_PATH_SEGMENT_RULES: ReadonlyArray<{ match: RegExp; replacement: string }> = [
+  { match: /^\/api\/bot-dl\/[^/]+/i, replacement: '/api/bot-dl/[REDACTED]' },
+  { match: /^\/api\/s\/[^/]+/i, replacement: '/api/s/[REDACTED]' },
+];
+
+/** 把路径中的凭据段替换为 [REDACTED]（无匹配时原样返回） */
+function redactSensitivePath(pathname: string): string {
+  for (const rule of SENSITIVE_PATH_SEGMENT_RULES) {
+    if (rule.match.test(pathname)) return pathname.replace(rule.match, rule.replacement);
+  }
+  return pathname;
+}
+
+/**
  * 清洗用于日志的请求 URL：
  * - 剥离 hash 片段；
+ * - 路径中的凭据段（bot-dl Token / 分享 Token）替换为 [REDACTED]；
  * - 移除敏感 query 参数（access/token/code/password/...），其余参数保留；
  * - 超长 query 值截断。
  *
@@ -63,7 +85,7 @@ const MAX_QUERY_VALUE_LENGTH = 200;
 export function sanitizeUrlForLog(rawUrl: string | undefined | null): string {
   if (!rawUrl) return '/';
   const [pathPart, queryPart] = rawUrl.split('?');
-  const pathname = (pathPart || '/').split('#')[0] || '/';
+  const pathname = redactSensitivePath((pathPart || '/').split('#')[0] || '/');
   if (queryPart === undefined) return pathname;
 
   try {
@@ -91,16 +113,16 @@ export function sanitizeUrlForLog(rawUrl: string | undefined | null): string {
 
 /**
  * 清洗 Referer：仅保留 origin + pathname，剥离 query 与 hash，
- * 防止访问凭据经 Referer 进入访问日志。
+ * 并同样脱敏路径中的凭据段，防止访问凭据经 Referer 进入访问日志。
  */
 export function sanitizeRefererForLog(referer: string | null | undefined): string | null {
   if (!referer) return null;
   try {
     const url = new URL(referer);
-    return url.origin + url.pathname;
+    return url.origin + redactSensitivePath(url.pathname);
   } catch {
     const cleaned = referer.split('?')[0].split('#')[0].trim();
-    return cleaned ? cleaned.substring(0, 300) : null;
+    return cleaned ? redactSensitivePath(cleaned).substring(0, 300) : null;
   }
 }
 

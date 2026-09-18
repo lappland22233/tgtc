@@ -34,6 +34,25 @@ export class TelegramService {
   private readonly fileStreamingEnabled: boolean;
   private readonly fileStreamingBase: string;
   private readonly fileStreamingTimeoutMs: number;
+
+  /**
+   * 首字节前可安全重试的瞬时 HTTP 状态码（仅在 `retryTransient` 显式启用时生效）。
+   * 注意：流式端点的 502/504 会先被归类为「流上下文不可用」并走单次强制回源，
+   * 不会走到这里的盲目重试——TDLib 本地路径陈旧时重试同一端点只会浪费一个超时周期。
+   */
+  private static readonly TRANSIENT_RETRY_STATUSES: ReadonlySet<number> = new Set([502, 503, 504]);
+  /** 瞬时重试退避（毫秒）：1s / 3s，附加抖动避免并发请求同时重试形成风暴 */
+  private static readonly TRANSIENT_RETRY_DELAYS_MS: readonly number[] = [1000, 3000];
+  /** 首字节前可重试的网络层错误码（不含超时：超时由首字节/空闲超时兜底，重试只会翻倍等待） */
+  private static readonly RETRYABLE_TRANSPORT_CODES: ReadonlySet<string> = new Set([
+    'ECONNRESET',
+    'ECONNREFUSED',
+    'EPIPE',
+    'EAI_AGAIN',
+    'ENETUNREACH',
+    'EHOSTUNREACH',
+    'ENETDOWN',
+  ]);
   /**
    * 本地 Bot API 文件存储的允许根目录（白名单）。
    * 自建 telegram-bot-api 时 getFile 可能返回本地绝对路径，
@@ -66,9 +85,11 @@ export class TelegramService {
     const streamingBase = streamingBaseConfig || base;
     this.fileStreamingBase = streamingBase.replace(/\/$/, '');
     const streamingTimeoutSeconds = Number(this.configService.get<string>('TELEGRAM_FILE_STREAM_TIMEOUT_SECONDS'));
+    // 默认 180s：必须大于 Bot API 的首字节超时（默认 120s），否则外层 HTTP 会先断开，
+    // 让冷启动失败表现为无法分类的网络错误而不是可恢复的 504。
     this.fileStreamingTimeoutMs = Number.isFinite(streamingTimeoutSeconds) && streamingTimeoutSeconds > 0
       ? streamingTimeoutSeconds * 1000
-      : 120000;
+      : 180_000;
     // 本地文件白名单根目录，如 /var/lib/telegram-bot-api 或容器内 tmp 目录
     this.localFileBase = this.configService.get<string>('TELEGRAM_LOCAL_FILE_DIR') || '';
 
@@ -174,9 +195,18 @@ export class TelegramService {
 
   /**
    * 包装 axios 请求，统一处理 Telegram API 错误，提供更友好的错误消息。
-   * 429 限流时自动重试（最多 3 次，指数退避）。
+   *
+   * - 429 限流：按 Telegram 返回的 retry_after 退避重试（始终启用）。
+   * - `retryTransient=true`（仅供幂等 GET 调用方）：首字节前的 502/503/504 与网络层
+   *   错误（ECONNRESET/ECONNREFUSED/EPIPE 等）追加最多 2 次 1s/3s 退避重试。
+   *   超时不重试：超时由首字节/空闲超时兜底，重试只会把等待时间翻倍。
    */
-  private async telegramRequest<T>(fn: () => Promise<T>, label: string, retries = 3): Promise<T> {
+  private async telegramRequest<T>(
+    fn: () => Promise<T>,
+    label: string,
+    retries = 3,
+    options?: { retryTransient?: boolean },
+  ): Promise<T> {
     for (let attempt = 1; attempt <= retries; attempt++) {
       const startedAt = Date.now();
       try {
@@ -266,6 +296,28 @@ export class TelegramService {
               `Telegram 文件流本地副本不可用：${this.safeTelegramDescription(description)}`,
             );
           }
+          // 首字节前的瞬时网关错误有限重试（仅幂等 GET 调用方启用）。
+          // 流式端点的 502/504/本地副本型 500 已在上面归类为「流上下文不可用」，
+          // 走单次强制回源；能走到这里的只有其它标签的 502/503/504。
+          if (
+            options?.retryTransient
+            && attempt < retries
+            && typeof status === 'number'
+            && TelegramService.TRANSIENT_RETRY_STATUSES.has(status)
+          ) {
+            await this.sleepBeforeTransientRetry(label, attempt, `HTTP ${status}`);
+            continue;
+          }
+        }
+        // 首字节前的网络层错误有限重试（仅幂等 GET 调用方启用）：
+        // 连接被重置/拒绝、DNS 暂时失败都属于可自愈的瞬时故障。
+        if (
+          options?.retryTransient
+          && attempt < retries
+          && TelegramService.RETRYABLE_TRANSPORT_CODES.has(errorCode)
+        ) {
+          await this.sleepBeforeTransientRetry(label, attempt, `transport ${transport}`);
+          continue;
         }
         // G4-11：脱敏移到 response 分支之外——网络层错误（无 response，
         // 如 ECONNREFUSED/DNS）的 config.url 同样可能原样携带 Bot Token。
@@ -274,6 +326,18 @@ export class TelegramService {
       }
     }
     throw new Error(`Telegram API 请求失败: ${label}（已重试 ${retries} 次）`);
+  }
+
+  /**
+   * 瞬时错误的有界退避等待（1s / 3s + 抖动）。
+   * 抖动用于打散同一时刻并发发起的重试，避免多客户端同时重试形成重试风暴。
+   */
+  private async sleepBeforeTransientRetry(label: string, attempt: number, reason: string): Promise<void> {
+    const delays = TelegramService.TRANSIENT_RETRY_DELAYS_MS;
+    const base = delays[Math.min(attempt - 1, delays.length - 1)];
+    const delay = base + Math.floor(Math.random() * 250);
+    this.logger.warn(`${label} 首字节前瞬时失败（${reason}），第 ${attempt} 次重试前等待 ${delay}ms`);
+    await new Promise(resolve => setTimeout(resolve, delay));
   }
 
   private getBaseUrl() {
@@ -699,7 +763,10 @@ export class TelegramService {
         headers: Object.keys(headers).length > 0 ? headers : undefined,
       }),
       'getRealtimeFileStream',
-      1,
+      3,
+      // 首字节前允许对网络抖动 / 503 做有限重试；502/504/本地副本型 500 已在上方
+      // 归类为可恢复的流路径错误，交由 getRealtimeFileStream 的单次强制回源处理。
+      { retryTransient: true },
     );
     const rawLength = response.headers['content-length'];
     const fileSize = Number(Array.isArray(rawLength) ? rawLength[0] : rawLength);
@@ -827,6 +894,9 @@ export class TelegramService {
           timeout: 5 * 60 * 1000,
         }),
         'getFileStream',
+        3,
+        // 幂等 GET：冷回源前的网络抖动与网关 5xx 允许有限重试
+        { retryTransient: true },
       );
       stream = response.data as Readable;
     }

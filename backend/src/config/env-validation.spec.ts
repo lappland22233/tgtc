@@ -90,6 +90,46 @@ describe('validateEnv', () => {
     expect(() => validateEnv(env)).toThrow(/DB_POOL_SIZE[\s\S]*DB_QUERY_TIMEOUT_MS[\s\S]*DB_LOCK_TIMEOUT_MS/);
   });
 
+  it('接受下载超时分层的 0=禁用语义', () => {
+    const env: NodeJS.ProcessEnv = {
+      ...valid,
+      FILE_CACHE_BUILD_FIRST_BYTE_TIMEOUT_MS: '210000',
+      FILE_CACHE_BUILD_IDLE_TIMEOUT_MS: '150000',
+      // 历史实现只接受正数，0 会被静默回退成默认值，使固定总时限无法关闭
+      FILE_CACHE_BUILD_TOTAL_TIMEOUT_MS: '0',
+      TELEGRAM_FILE_STREAM_TIMEOUT_SECONDS: '180',
+    };
+    expect(() => validateEnv(env)).not.toThrow();
+  });
+
+  it('拒绝非法超时数值，但层级冲突只告警不阻断启动', () => {
+    const malformed: NodeJS.ProcessEnv = {
+      ...valid,
+      FILE_CACHE_BUILD_IDLE_TIMEOUT_MS: '-1',
+      FILE_CACHE_BUILD_TOTAL_TIMEOUT_MS: 'abc',
+      TELEGRAM_FILE_STREAM_TIMEOUT_SECONDS: '0',
+    };
+    expect(() => validateEnv(malformed)).toThrow(
+      /FILE_CACHE_BUILD_IDLE_TIMEOUT_MS[\s\S]*FILE_CACHE_BUILD_TOTAL_TIMEOUT_MS[\s\S]*TELEGRAM_FILE_STREAM_TIMEOUT_SECONDS/,
+    );
+
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      // 总时限小于首字节：外层会先于内层断开，但既有部署可能已自定义其中一项，
+      // 因此只高可见度告警，不阻断升级。
+      const conflicting: NodeJS.ProcessEnv = {
+        ...valid,
+        FILE_CACHE_BUILD_FIRST_BYTE_TIMEOUT_MS: '210000',
+        FILE_CACHE_BUILD_IDLE_TIMEOUT_MS: '150000',
+        FILE_CACHE_BUILD_TOTAL_TIMEOUT_MS: '60000',
+      };
+      expect(() => validateEnv(conflicting)).not.toThrow();
+      expect(warn.mock.calls.flat().join('\n')).toContain('下载超时层级存在冲突');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it('validates complete SMTP configuration', () => {
     const invalid: NodeJS.ProcessEnv = { ...valid, SMTP_HOST: 'smtp', SMTP_PORT: 'bad', SMTP_SECURE: 'yes' };
     expect(() => validateEnv(invalid)).toThrow(

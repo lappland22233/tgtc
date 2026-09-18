@@ -1,6 +1,6 @@
 import { AccessLogMiddleware } from './access-log.middleware';
 
-const response=()=>{const listeners:any={};return {statusCode:200,headersSent:false,socket:{bytesWritten:10},headers:{} as any,on:jest.fn((e:string,fn:any)=>listeners[e]=fn),getHeader:jest.fn((k:string)=>k==='content-length'?'12':undefined),listeners} as any};
+const response=()=>{const listeners:any={};return {statusCode:200,headersSent:false,socket:{bytesWritten:10},headers:{} as any,on:jest.fn((e:string,fn:any)=>listeners[e]=fn),getHeader:jest.fn((k:string)=>k==='content-length'?'12':undefined),getHeaders:jest.fn(()=>({}) as any),listeners} as any};
 describe('AccessLogMiddleware',()=>{
  jest.useFakeTimers(); const repo:any={insert:jest.fn()}; let m:AccessLogMiddleware;
  beforeEach(()=>{jest.clearAllMocks();repo.insert.mockResolvedValue({});m=new AccessLogMiddleware(repo)}); afterEach(()=>jest.clearAllTimers());
@@ -11,7 +11,16 @@ describe('AccessLogMiddleware',()=>{
 
  // 回归：客户端提前断开（大文件流式下载被截断）只 emit close、不 emit finish，
  // 历史上这条路径完全不落库，导致 Bot 直链使用统计恒为 0。
- it('records aborted responses on close without finish',async()=>{const res=response(),req:any={originalUrl:'/api/bot-dl/tokenabcdefgh12345678',method:'GET',ip:'149.154.161.1',ips:[],socket:{},botGrantId:'g-1',botTelegramUserId:'42',headers:{'user-agent':'TelegramBot (like TwitterBot)'}};m.use(req,res,jest.fn());res.headersSent=true;res.socket.bytesWritten=3000;res.listeners.close();jest.runOnlyPendingTimers();await Promise.resolve();await Promise.resolve();expect(repo.insert).toHaveBeenCalledWith([expect.objectContaining({path:'/api/bot-dl/tokenabcdefgh12345678',responseSize:2990,statusCode:200,botGrantId:'g-1',botTelegramUserId:'42'})])});
+ it('records aborted responses on close without finish',async()=>{const res=response(),req:any={originalUrl:'/api/bot-dl/tokenabcdefgh12345678',method:'GET',ip:'149.154.161.1',ips:[],socket:{},botGrantId:'g-1',botTelegramUserId:'42',headers:{'user-agent':'TelegramBot (like TwitterBot)'}};m.use(req,res,jest.fn());res.headersSent=true;res.socket.bytesWritten=3000;res.listeners.close();jest.runOnlyPendingTimers();await Promise.resolve();await Promise.resolve();expect(repo.insert).toHaveBeenCalledWith([expect.objectContaining({path:'/api/bot-dl/[REDACTED]',responseSize:2990,statusCode:200,botGrantId:'g-1',botTelegramUserId:'42'})])});
+
+ // 传输结果字段：只有显式标记 transferTracked 的下载请求才写入，普通请求保持 null
+ it('records completed transfer fields for tracked downloads',async()=>{const res=response(),req:any={originalUrl:'/api/bot-dl/tok',method:'GET',ip:'1.2.3.4',ips:[],socket:{},transferTracked:true,ranged:true,headers:{}};m.use(req,res,jest.fn());res.socket.bytesWritten=22;res.listeners.finish();jest.runOnlyPendingTimers();await Promise.resolve();await Promise.resolve();expect(repo.insert).toHaveBeenCalledWith([expect.objectContaining({transferCompleted:true,transferAborted:false,ranged:true,terminationReason:'completed',responseBodyBytes:'12'})])});
+
+ it('uses the controller reason for aborted transfers',async()=>{const res=response(),req:any={originalUrl:'/api/bot-dl/tok',method:'GET',ip:'1.2.3.4',ips:[],socket:{},transferTracked:true,ranged:true,terminationReason:'upstream_error',headers:{}};m.use(req,res,jest.fn());res.headersSent=true;res.socket.bytesWritten=500;res.listeners.close();jest.runOnlyPendingTimers();await Promise.resolve();await Promise.resolve();expect(repo.insert).toHaveBeenCalledWith([expect.objectContaining({transferCompleted:false,transferAborted:true,ranged:true,terminationReason:'upstream_error'})])});
+
+ it('defaults unclassified close to client_abort',async()=>{const res=response(),req:any={originalUrl:'/api/bot-dl/tok',method:'GET',ip:'1.2.3.4',ips:[],socket:{},transferTracked:true,ranged:false,headers:{}};m.use(req,res,jest.fn());res.headersSent=true;res.socket.bytesWritten=500;res.listeners.close();jest.runOnlyPendingTimers();await Promise.resolve();await Promise.resolve();expect(repo.insert).toHaveBeenCalledWith([expect.objectContaining({terminationReason:'client_abort',ranged:false})])});
+
+ it('omits transfer fields for untracked requests',async()=>{const res=response(),req:any={originalUrl:'/api/files/x',method:'GET',ip:'1.2.3.4',ips:[],socket:{},headers:{}};m.use(req,res,jest.fn());res.socket.bytesWritten=22;res.listeners.finish();await m.onApplicationShutdown();const entry=(repo.insert as jest.Mock).mock.calls[0][0][0];expect(entry.transferCompleted).toBeUndefined();expect(entry.terminationReason).toBeUndefined()});
 
  it('does not double record when close follows finish',async()=>{const res=response(),req:any={originalUrl:'/api/files/x',method:'GET',ip:'1.2.3.4',ips:[],socket:{},headers:{}};m.use(req,res,jest.fn());res.socket.bytesWritten=110;res.listeners.finish();res.listeners.close();await m.onApplicationShutdown();expect(repo.insert).toHaveBeenCalledTimes(1);expect((repo.insert as jest.Mock).mock.calls[0][0]).toHaveLength(1)});
 

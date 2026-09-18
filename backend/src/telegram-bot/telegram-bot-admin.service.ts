@@ -17,7 +17,16 @@ import { TelegramBotIdentity } from './telegram-bot.types';
 
 export interface BotUsageTrendRow {
   bucket: string;
+  /** @deprecated 兼容旧前端：等于 requests（HTTP 请求数，不是完整下载数） */
   downloads: number;
+  /** HTTP 请求数（含完整、分段与中断） */
+  requests: number;
+  /** 其中 Range 分段（206）请求数 */
+  ranged: number;
+  /** 完整写完响应的请求数 */
+  completed: number;
+  /** 被中断的请求数 */
+  aborted: number;
   bytes: string;
   /** 同一时间桶内 Bot 收到的文件数（来源 telegram_bot_file_grants） */
   files: number;
@@ -27,9 +36,23 @@ export interface BotUsageTrendRow {
 
 export interface BotUsageSummary {
   timeRange: string;
-  downloads: number;
+  /** HTTP 请求数（含完整与分段、含中断） */
+  requests: number;
+  /** Range 分段（206）请求数：**断点续传是否真的发生，看这个值** */
+  rangedRequests: number;
+  /** 完整写完响应的请求数 */
+  completedRequests: number;
+  /** 被中断的请求数（客户端断开 / 上游失败 / 超时 / 服务关闭） */
+  abortedRequests: number;
+  /** 中断原因分布（terminationReason → 次数；不含 completed） */
+  abortedByReason: Record<string, number>;
   uniqueUsers: number;
   totalBytes: string;
+  /**
+   * @deprecated 兼容旧前端：历史上该字段就是「HTTP 请求数」而非完整下载数。
+   * 新前端请使用 requests / rangedRequests / completedRequests / abortedRequests。
+   */
+  downloads: number;
   /** 时间窗口内 Bot 收到的文件数（成功签发直链的 grant 数） */
   filesReceived: number;
   /** 时间窗口内收到文件的总大小（字节，字符串以兼容 bigint） */
@@ -83,6 +106,18 @@ function clampInt(value: unknown, fallback: number, min: number, max: number): n
   if (!Number.isFinite(parsed)) return fallback;
   return Math.min(Math.max(Math.trunc(parsed), min), max);
 }
+
+/**
+ * 跨方言把布尔列求和成次数。
+ * PG 为 `boolean`、SQLite 为 0/1，`CASE WHEN` 在两侧语义一致；
+ * NULL（未分类的普通请求与本次升级前的历史行）计为 0。
+ */
+function sumFlag(column: string): string {
+  return `COALESCE(SUM(CASE WHEN ${column} THEN 1 ELSE 0 END), 0)`;
+}
+
+/** 带宽口径：优先实际正文字节，历史行回退 responseSize（含响应头的估算值） */
+const BANDWIDTH_EXPR = 'COALESCE(SUM(COALESCE("responseBodyBytes", "responseSize")), 0)';
 
 /**
  * Bot 管理能力：管理员身份判定、白名单维护、直链查询/撤销，以及 Bot 使用情况汇总。
@@ -301,23 +336,39 @@ export class TelegramBotAdminService {
       range === '1h' ? 'minute' : range === '30d' ? 'day' : 'hour';
     const bucket = databaseDateBucket('"createdAt"', bucketUnit);
 
-    const [totals, trendRows, receivedTotals, receivedTrendRows] = await Promise.all([
+    const [totals, trendRows, reasonRows, receivedTotals, receivedTrendRows] = await Promise.all([
       this.dataSource.query(
-        `SELECT COUNT(*) AS "downloads",
+        `SELECT COUNT(*) AS "requests",
                 COUNT(DISTINCT "botTelegramUserId") AS "uniqueUsers",
-                ${databaseCast('COALESCE(SUM("responseSize"), 0)', 'bigint')} AS "totalBytes"
+                ${sumFlag('"ranged"')} AS "rangedRequests",
+                ${sumFlag('"transferCompleted"')} AS "completedRequests",
+                ${sumFlag('"transferAborted"')} AS "abortedRequests",
+                ${databaseCast(BANDWIDTH_EXPR, 'bigint')} AS "totalBytes"
            FROM "access_logs"
           WHERE ${where}`,
         [sinceParam],
       ),
       this.dataSource.query(
         `SELECT ${bucket} AS "bucket",
-                COUNT(*) AS "downloads",
-                ${databaseCast('COALESCE(SUM("responseSize"), 0)', 'bigint')} AS "bytes"
+                COUNT(*) AS "requests",
+                ${sumFlag('"ranged"')} AS "ranged",
+                ${sumFlag('"transferCompleted"')} AS "completed",
+                ${sumFlag('"transferAborted"')} AS "aborted",
+                ${databaseCast(BANDWIDTH_EXPR, 'bigint')} AS "bytes"
            FROM "access_logs"
           WHERE ${where}
           GROUP BY ${bucket}
           ORDER BY ${bucket} ASC`,
+        [sinceParam],
+      ),
+      // 中断原因分布：用于区分「客户端主动断开」与「上游失败 / 超时 / 服务关闭」
+      this.dataSource.query(
+        `SELECT "terminationReason" AS "reason", COUNT(*) AS "count"
+           FROM "access_logs"
+          WHERE ${where}
+            AND "terminationReason" IS NOT NULL
+            AND "terminationReason" <> 'completed'
+          GROUP BY "terminationReason"`,
         [sinceParam],
       ),
       this.dataSource.query(
@@ -341,15 +392,34 @@ export class TelegramBotAdminService {
 
     const totalRow = Array.isArray(totals) && totals.length > 0 ? totals[0] : {};
     const receivedRow = Array.isArray(receivedTotals) && receivedTotals.length > 0 ? receivedTotals[0] : {};
+    const requests = Number(totalRow.requests ?? 0);
     return {
       timeRange: range,
-      downloads: Number(totalRow.downloads ?? 0),
+      requests,
+      rangedRequests: Number(totalRow.rangedRequests ?? 0),
+      completedRequests: Number(totalRow.completedRequests ?? 0),
+      abortedRequests: Number(totalRow.abortedRequests ?? 0),
+      abortedByReason: this.toReasonCounts(reasonRows),
       uniqueUsers: Number(totalRow.uniqueUsers ?? 0),
       totalBytes: String(totalRow.totalBytes ?? '0'),
+      // 兼容旧前端：旧字段语义一直是「请求数」
+      downloads: requests,
       filesReceived: Number(receivedRow.filesReceived ?? 0),
       receivedBytes: String(receivedRow.receivedBytes ?? '0'),
       trend: this.mergeUsageTrend(trendRows, receivedTrendRows),
     };
+  }
+
+  /** 中断原因分布行 → { reason: count } */
+  private toReasonCounts(rows: unknown): Record<string, number> {
+    const result: Record<string, number> = {};
+    if (!Array.isArray(rows)) return result;
+    for (const row of rows as Record<string, unknown>[]) {
+      const reason = row.reason === null || row.reason === undefined ? '' : String(row.reason);
+      if (!reason) continue;
+      result[reason] = Number(row.count ?? 0);
+    }
+    return result;
   }
 
   /**
@@ -371,9 +441,14 @@ export class TelegramBotAdminService {
       Array.isArray(source) ? (source as Record<string, unknown>[]) : [];
 
     for (const row of rows(downloadRows)) {
+      const requests = Number(row.requests ?? 0);
       merged.set(keyOf(row.bucket), {
         bucket: String(row.bucket),
-        downloads: Number(row.downloads ?? 0),
+        downloads: requests,
+        requests,
+        ranged: Number(row.ranged ?? 0),
+        completed: Number(row.completed ?? 0),
+        aborted: Number(row.aborted ?? 0),
         bytes: String(row.bytes ?? '0'),
         files: 0,
         fileBytes: '0',
@@ -388,7 +463,17 @@ export class TelegramBotAdminService {
         existing.files = files;
         existing.fileBytes = fileBytes;
       } else {
-        merged.set(key, { bucket: String(row.bucket), downloads: 0, bytes: '0', files, fileBytes });
+        merged.set(key, {
+          bucket: String(row.bucket),
+          downloads: 0,
+          requests: 0,
+          ranged: 0,
+          completed: 0,
+          aborted: 0,
+          bytes: '0',
+          files,
+          fileBytes,
+        });
       }
     }
 

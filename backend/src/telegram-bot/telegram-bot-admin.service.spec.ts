@@ -125,15 +125,25 @@ describe('TelegramBotAdminService', () => {
     expect(auditPayload.metadata.tokenPrefix).toBe('tgl_bbbbbbbb');
   });
 
-  it('Bot 使用汇总同时给出下载与收到文件，并按时间桶合并趋势', async () => {
+  it('Bot 使用汇总同时给出请求/分段/完成/中断口径与收到文件，并按时间桶合并趋势', async () => {
     const queries: string[] = [];
     const dataSource = {
       query: jest.fn(async (sql: string) => {
         queries.push(sql);
         if (sql.includes('AS "filesReceived"')) return [{ filesReceived: 2, receivedBytes: '3072' }];
         if (sql.includes('AS "files"')) return [{ bucket: 'B', files: 1, fileBytes: '1024' }];
-        if (sql.includes('AS "uniqueUsers"')) return [{ downloads: 5, uniqueUsers: 3, totalBytes: '2048' }];
-        return [{ bucket: 'A', downloads: 5, bytes: '2048' }];
+        if (sql.includes('AS "reason"')) return [{ reason: 'client_abort', count: 1 }];
+        if (sql.includes('AS "uniqueUsers"')) {
+          return [{
+            requests: 5,
+            uniqueUsers: 3,
+            rangedRequests: 2,
+            completedRequests: 4,
+            abortedRequests: 1,
+            totalBytes: '2048',
+          }];
+        }
+        return [{ bucket: 'A', requests: 5, ranged: 2, completed: 4, aborted: 1, bytes: '2048' }];
       }),
     };
     const { service } = makeService({}, dataSource);
@@ -142,27 +152,47 @@ describe('TelegramBotAdminService', () => {
 
     expect(summary).toMatchObject({
       timeRange: '7d',
+      // 旧字段是「请求数」的兼容别名，语义必须与 requests 一致
       downloads: 5,
+      requests: 5,
+      rangedRequests: 2,
+      completedRequests: 4,
+      abortedRequests: 1,
       uniqueUsers: 3,
       totalBytes: '2048',
       filesReceived: 2,
       receivedBytes: '3072',
     });
+    expect(summary.abortedByReason).toEqual({ client_abort: 1 });
     // 收到文件侧独立查询 grants，不与 access_logs 混算
     expect(queries.some((sql) => sql.includes('"telegram_bot_file_grants"'))).toBe(true);
-    // 两个数据源的时间桶合并为一条趋势（含只有收到文件、没有下载的桶）
+    // 趋势查询必须统计 206 分段数，否则「生产 0 次 206」无法被证实
+    expect(queries.some((sql) => sql.includes('AS "ranged"'))).toBe(true);
+    // 两个数据源的时间桶合并为一条趋势（含只有收到文件、没有请求的桶）
     expect(summary.trend.map((row) => row.bucket)).toEqual(['A', 'B']);
-    expect(summary.trend[0]).toMatchObject({ downloads: 5, bytes: '2048', files: 0, fileBytes: '0' });
-    expect(summary.trend[1]).toMatchObject({ downloads: 0, bytes: '0', files: 1, fileBytes: '1024' });
+    expect(summary.trend[0]).toMatchObject({
+      downloads: 5,
+      requests: 5,
+      ranged: 2,
+      completed: 4,
+      aborted: 1,
+      bytes: '2048',
+      files: 0,
+      fileBytes: '0',
+    });
+    expect(summary.trend[1]).toMatchObject({ requests: 0, bytes: '0', files: 1, fileBytes: '1024' });
   });
 
-  it('收到文件与下载落在同一时间桶时合并为同一行', async () => {
+  it('收到文件与请求落在同一时间桶时合并为同一行', async () => {
     const dataSource = {
       query: jest.fn(async (sql: string) => {
         if (sql.includes('AS "filesReceived"')) return [{ filesReceived: 1, receivedBytes: '1024' }];
         if (sql.includes('AS "files"')) return [{ bucket: '2026-09-16 10:00:00', files: 1, fileBytes: '1024' }];
-        if (sql.includes('AS "uniqueUsers"')) return [{ downloads: 1, uniqueUsers: 1, totalBytes: '2048' }];
-        return [{ bucket: '2026-09-16 10:00:00', downloads: 1, bytes: '2048' }];
+        if (sql.includes('AS "reason"')) return [];
+        if (sql.includes('AS "uniqueUsers"')) {
+          return [{ requests: 1, uniqueUsers: 1, rangedRequests: 1, completedRequests: 1, abortedRequests: 0, totalBytes: '2048' }];
+        }
+        return [{ bucket: '2026-09-16 10:00:00', requests: 1, ranged: 1, completed: 1, aborted: 0, bytes: '2048' }];
       }),
     };
     const { service } = makeService({}, dataSource);
@@ -170,7 +200,16 @@ describe('TelegramBotAdminService', () => {
     const summary = await service.getUsageSummary('24h');
 
     expect(summary.trend).toHaveLength(1);
-    expect(summary.trend[0]).toMatchObject({ downloads: 1, bytes: '2048', files: 1, fileBytes: '1024' });
+    expect(summary.trend[0]).toMatchObject({
+      requests: 1,
+      ranged: 1,
+      completed: 1,
+      aborted: 0,
+      bytes: '2048',
+      files: 1,
+      fileBytes: '1024',
+    });
+    expect(summary.abortedByReason).toEqual({});
   });
 
   it('用户明细按 TG 用户 ID 聚合，直接返回 @用户名且不含昵称', async () => {

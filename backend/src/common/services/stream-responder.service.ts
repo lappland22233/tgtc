@@ -38,10 +38,16 @@ export interface StreamSendOptions {
 export class StreamResponderService {
   private readonly logger = new Logger(StreamResponderService.name);
 
-  /** 记录 pipeline 前的已发送字节数，返回用于完成后回填日志的闭包 */
+  /**
+   * 记录 pipeline 前的已发送字节数，返回用于完成后回填日志的闭包。
+   *
+   * 必须在进入时冻结 socket 引用：响应结束后 Node 会把 `res.socket` 置为 null，
+   * 等到 pipeline 之后（finally）再读会恒为 0，使回填的字节数退化为 0 或负值。
+   */
   private trackBytesSent(res: Response): () => number {
-    const startBytes = res.socket?.bytesWritten ?? 0;
-    return () => (res.socket?.bytesWritten ?? 0) - startBytes;
+    const socket = res.socket ?? null;
+    const startBytes = socket?.bytesWritten ?? 0;
+    return () => (socket?.bytesWritten ?? 0) - startBytes;
   }
 
   /**

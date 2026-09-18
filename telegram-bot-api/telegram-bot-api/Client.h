@@ -64,6 +64,9 @@ class Client final : public WebhookActor::Callback {
 
   // for stats
   ServerBotInfo get_bot_info() const;
+  // Total number of (file -> stream) listener registrations currently held by this bot. Read
+  // synchronously by ClientManager::get_stats on the shared client scheduler.
+  td::int64 get_active_file_stream_listener_count() const;
 
  private:
   using int32 = td::int32;
@@ -342,6 +345,7 @@ class Client final : public WebhookActor::Callback {
   class TdOnCancelDownloadFileCallback;
   class TdOnDeleteFileCallback;
   class TdOnDeleteFileAndAnswerCallback;
+  class TdOnDeleteFileQueryCallback;
   class TdOnSendCustomRequestCallback;
 
   void on_get_reply_message(int64 chat_id, object_ptr<td_api::message> reply_to_message);
@@ -1061,6 +1065,15 @@ class Client final : public WebhookActor::Callback {
                                        PromisedQueryPtr &query);
 
   void do_get_file(object_ptr<td_api::file> file, PromisedQueryPtr query);
+
+  // Pre-write workdir space admission check (see check_workdir_space). Returns true when the local
+  // copy may be (re)created; on rejection it records an observable counter and log line.
+  bool check_workdir_space_for_download(int64 file_size, int64 existing_local_size);
+
+  // Local cache copy deletion handshake counters (see Client::remove_file_stream and
+  // Client::process_release_local_file_query).
+  void on_local_file_delete_attempt();
+  void on_local_file_delete_finished(bool success);
 
   bool is_file_being_downloaded(int32 file_id) const;
   void on_file_download(int32 file_id, td::Result<object_ptr<td_api::file>> r_file);
