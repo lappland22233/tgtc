@@ -329,6 +329,27 @@ Redis 承载 `metrics-aggregation`、`attack-detection`、`alert-evaluation`、`
 4. 以初始管理员身份私聊 Bot，先执行 `/help` 与 `/wl_add`，再发送一个文件验证直链可用；
 5. 在后台「Telegram Bot 设置」确认「当前生效域名」正确后再放开给普通用户。
 
+### Bot 账号池（多账号回源，默认关闭）
+
+> 默认关闭；`TELEGRAM_ACCOUNT_POOL_ENABLED` 不是 `true` 时，行为与单账号部署完全一致（可安全回退）。
+
+| 变量 | 默认值 | 说明 |
+|---|---:|---|
+| `TELEGRAM_ACCOUNT_POOL_ENABLED` | `false` | 账号池总开关；仅显式 `true` 时启用 |
+| `TELEGRAM_ACCOUNT_POOL` | - | 账号 JSON 数组：`[{id,token,chatId,weight,maxInflight,enabled,note}]`（推荐，信息最全） |
+| `TELEGRAM_BOT_TOKENS` | - | 逗号分隔 Token 列表（简化输入；存储 Chat 复用 `TELEGRAM_CHAT_ID`，**归档群不可充当存储目标**） |
+| `TELEGRAM_ARCHIVE_CHAT_ID` | - | 收到的文件由接收账号转发到该群（**仅审计留痕**；严禁作为账号存储 Chat） |
+| `TELEGRAM_POOL_TARGET_REPLICAS` | `2` | 期望副本数；不足时在真实下载的后台按需扩散（设为 `1` 表示不主动扩散） |
+| `TELEGRAM_USER_RELAY_ENABLED` | `false` | 用户账号 MTProto 中继（策略 B）；**客户端尚未接入，设为 `true` 会被启动预检直接拒绝** |
+
+**前置条件**（任一不满足时启动预检直接拒绝启用）：显式 `TELEGRAM_FILE_STREAMING_ENABLED=true`、`TELEGRAM_FILE_STREAM_BASE` 为合法 http/https 地址，且自建 Bot API 以 `--enable-file-streaming` 启动。每个账号必须有自己的 Token、自己的存储 Chat（`chatId`）与回源能力。
+
+**不可回退约束**：`file_id` 按账号隔离，**不得跨账号复用**；跨账号逻辑聚合只用 `file_unique_id`（缺失时该文件不参与扩散，只能由源账号回源）；回复必须由「收到消息的账号」发出（失败不会改用默认账号代发）；仅支持**单后端实例**（账号画像、在飞计数、复制去重均为进程内状态）。
+
+**只读诊断**：`GET /api/admin/bot-account-pool`（仅超级管理员）返回脱敏快照（账号 `tokenPreview`、在飞/带宽/健康/冷却）与计数（选号/换号/回退/复制/流式失败/回复失败），用于区分「服务健康」与「账号池已启用但未生效」；`/api/health` 形状保持不变。
+
+**回退**：把 `TELEGRAM_ACCOUNT_POOL_ENABLED` 置回 `false` 即可止血（功能降级，不是数据库回滚）；副本表与 `sourceAccountId` 均为 expand 式增量结构，回退程序版本无需回退数据库。
+
 ## Telegram 文件引用完整性
 
 ### Bot API workdir 持久性（根因预防）

@@ -50,6 +50,18 @@ export class TelegramBotFileGrant {
   @Column({ type: 'varchar', length: 512, comment: 'Telegram file_id' })
   telegramFileId: string;
 
+  /**
+   * 产生该 `file_id` 的 Bot 账号 ID（账号池回退安全锚点）。
+   *
+   * 为什么必须记录：`file_id` 按账号隔离，把 A 账号的 `file_id` 交给 B 账号回源
+   * 会得到上游 `Exact file size is unavailable from Telegram`。因此回源失败需要
+   * 回退时，只允许使用「与该账号匹配的 Token」；为空（单账号历史数据）时
+   * **不得回退到默认账号**，只能返回可诊断错误。
+   * 允许为空：非池化路径与历史数据不写入该字段，保持向后兼容。
+   */
+  @Column({ type: 'varchar', length: 64, nullable: true, comment: '产生 file_id 的 Bot 账号 ID（回退安全锚点）' })
+  sourceAccountId: string | null;
+
   @Column({ type: 'varchar', length: 255, nullable: true, comment: '文件名' })
   fileName: string | null;
 

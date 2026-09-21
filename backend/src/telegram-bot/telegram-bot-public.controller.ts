@@ -1,7 +1,11 @@
-import { Controller, Get, HttpException, HttpStatus, NotFoundException, Param, Req, Res } from '@nestjs/common';
+import { Controller, Get, HttpException, HttpStatus, Logger, NotFoundException, Optional, Param, Req, Res } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Request, Response } from 'express';
 import { createHash } from 'crypto';
 import { Readable } from 'stream';
+import { TelegramBotFileGrant } from '../common/entities/telegram-bot-file-grant.entity';
+import { AccountAwareDownloadService } from '../telegram-account-pool/account-aware-download.service';
+import { FileCopyService } from '../telegram-account-pool/file-copy.service';
 import { AuditService } from '../common/services/audit.service';
 import { AuditStatus } from '../common/entities/audit-log.entity';
 import { RateLimitService } from '../common/services/rate-limit.service';
@@ -51,6 +55,8 @@ const MIME_PATTERN = /^[a-z0-9][a-z0-9!#$&^_.+-]{0,63}\/[a-z0-9][a-z0-9!#$&^_.+-
  */
 @Controller('bot-dl')
 export class TelegramBotPublicController {
+  private readonly logger = new Logger(TelegramBotPublicController.name);
+
   constructor(
     private readonly grantService: TelegramBotGrantService,
     private readonly telegramService: TelegramService,
@@ -58,7 +64,152 @@ export class TelegramBotPublicController {
     private readonly rateLimitService: RateLimitService,
     private readonly streamResponder: StreamResponderService,
     private readonly auditService: AuditService,
+    // 账号池增强（可选）：启用时由账号池按负载选账号回源；未启用时全部走原单账号链路
+    @Optional() private readonly accountPoolDownload: AccountAwareDownloadService | null = null,
+    @Optional() private readonly fileCopies: FileCopyService | null = null,
+    @Optional() private readonly configService: ConfigService | null = null,
   ) {}
+
+  /**
+   * 取上游流（账号池感知）。
+   *
+   * **回退矩阵（安全优先，fail-closed）**：
+   *
+   * | 条件 | 处理 |
+   * | --- | --- |
+   * | 账号池未启用 | 原单账号链路（与改造前调用形状逐字一致） |
+   * | 池化可用（有 ready 副本） | 加权选号回源；失败换号 ≤3，按错误分类冷却 |
+   * | 池化失败，但 `sourceAccountId` 可确认（在池内） | 用**源账号**回源 + 回退计数/告警 |
+   * | `sourceAccountId` 不在池内但等于默认 Token 的账号 | 与默认账号同一身份，走原单账号链路 |
+   * | 归属不明（`sourceAccountId` 为空或身份无法确认） | **不回退默认账号**，返回可诊断失败 |
+   *
+   * 为什么必须 fail-closed：`file_id` 按账号隔离，把 A 账号的 `file_id` 交给 B 账号会得到
+   * 上游 `Exact file size is unavailable from Telegram`。宁可返回可诊断错误，也不跨账号误用。
+   */
+  private async acquireUpstreamStream(
+    grant: TelegramBotFileGrant,
+    expectedSize?: number,
+    noCache = false,
+  ): Promise<{ stream: Readable; info: { file_id: string; file_size: number } }> {
+    const pool = this.accountPoolDownload;
+
+    if (pool?.isActive()) {
+      // 1) 池化：按负载选号（含非阻断懒扩散与失败换号）
+      const pooled = await this.tryPooledStream(pool, grant, expectedSize, noCache);
+      if (pooled) return pooled;
+
+      // 2) 回退矩阵：仅当「源账号身份可确认」时才回退
+      const fallback = await this.trySourceAccountStream(pool, grant, expectedSize, noCache);
+      if (fallback) return fallback;
+
+      // 3) 归属不可确认：绝不交给默认账号，返回可诊断失败
+      pool.bumpCounter('unresolved');
+      this.logger.error(
+        `账号池回源失败且无法确认文件归属（sourceAccountId=${grant.sourceAccountId ?? 'null'}），`
+        + '按安全策略拒绝跨账号回退',
+      );
+      throw new HttpException(
+        '文件暂不可用：账号池回源失败且无法确认文件归属，请稍后重试。',
+        HttpStatus.SERVICE_UNAVAILABLE,
+      );
+    }
+
+    return this.singleAccountStream(grant, expectedSize, noCache);
+  }
+
+  /** 池化回源：锚点定位副本集合 → 加权选号；任何异常都记录后返回 null，交由回退矩阵处理。 */
+  private async tryPooledStream(
+    pool: AccountAwareDownloadService,
+    grant: TelegramBotFileGrant,
+    expectedSize?: number,
+    noCache = false,
+  ): Promise<{ stream: Readable; info: { file_id: string; file_size: number } } | null> {
+    if (!this.fileCopies || !grant.chatId || !grant.messageId) return null;
+    try {
+      // 入站时以 file_unique_id 为主键登记副本，这里用「用户私聊 chat + 消息 id」反查主键
+      const anchor = await this.fileCopies.findByAnchor(String(grant.chatId), String(grant.messageId));
+      if (!anchor) return null;
+      const configured = Number(this.configService?.get<string>('TELEGRAM_POOL_TARGET_REPLICAS') || 2);
+      const opened = await pool.openStream({
+        ownerType: anchor.ownerType,
+        ownerId: anchor.ownerId,
+        expectedSize,
+        noCache,
+        fileName: grant.fileName || 'download',
+        desiredReplicas: Number.isSafeInteger(configured) && configured > 1 ? configured : undefined,
+      });
+      return opened ? { stream: opened.stream, info: opened.info } : null;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      // 副本表暂时不可用等异常不得阻断可用性：进入回退判定（源账号身份可确认则回退源账号）
+      this.logger.warn(`账号池回源异常，进入回退判定: ${message}`);
+      return null;
+    }
+  }
+
+  /**
+   * 回退矩阵：仅当「源账号身份可确认」时才回退。
+   * 返回 null 表示身份不可确认——调用方据此返回可诊断失败，**绝不使用默认账号**。
+   */
+  private async trySourceAccountStream(
+    pool: AccountAwareDownloadService,
+    grant: TelegramBotFileGrant,
+    expectedSize?: number,
+    noCache = false,
+  ): Promise<{ stream: Readable; info: { file_id: string; file_size: number } } | null> {
+    const sourceAccountId = (grant.sourceAccountId || '').trim();
+    if (!sourceAccountId) return null;
+
+    if (pool.hasAccount(sourceAccountId)) {
+      const opened = await pool.openSourceStream({
+        accountId: sourceAccountId,
+        fileId: grant.telegramFileId,
+        expectedSize,
+        noCache,
+      });
+      if (!opened) return null;
+      pool.bumpCounter('fallbacks');
+      this.logger.warn(
+        `账号池回源失败，已回退到源账号 ${sourceAccountId} 回源（请关注回退率指标）`,
+      );
+      return { stream: opened.stream, info: opened.info };
+    }
+
+    // 源账号不在池内，但与默认 Token 同属一个账号：身份一致，可安全走原单账号链路
+    if (sourceAccountId === this.defaultBotId()) {
+      this.logger.warn(
+        `源账号 ${sourceAccountId} 不在账号池内，但等于默认 Bot Token 的账号，按单账号链路回源`,
+      );
+      return this.singleAccountStream(grant, expectedSize, noCache);
+    }
+
+    return null;
+  }
+
+  /**
+   * 原单账号链路。
+   * 严格保持改造前的调用形状（含 noCache 语义与实参个数），
+   * 确保「关闭开关 = 原行为」不被本次改造改变。
+   */
+  private async singleAccountStream(
+    grant: TelegramBotFileGrant,
+    expectedSize?: number,
+    noCache = false,
+  ): Promise<{ stream: Readable; info: { file_id: string; file_size: number } }> {
+    if (noCache) {
+      return this.telegramService.getRealtimeFileStream(grant.telegramFileId, expectedSize, { noCache: true });
+    }
+    return expectedSize === undefined
+      ? this.telegramService.getRealtimeFileStream(grant.telegramFileId)
+      : this.telegramService.getRealtimeFileStream(grant.telegramFileId, expectedSize);
+  }
+
+  /** 默认 Bot Token 的账号 ID（botId）；无法解析（未配置/占位符）时返回 null。 */
+  private defaultBotId(): string | null {
+    const token = (this.configService?.get<string>('TELEGRAM_BOT_TOKEN') || '').trim();
+    const botId = token.split(':')[0]?.trim();
+    return botId && /^\d+$/.test(botId) ? botId : null;
+  }
 
   @Get(':token')
   async download(
@@ -105,9 +256,7 @@ export class TelegramBotPublicController {
       // 无其他监听者时才删）。后端若保留正式缓存，它就是唯一持久副本；否则（无缓存/直通）
       // 本就不该长期占用 workdir。这是把「Cache 12G + workdir 12G」两份完整副本收敛为
       // 一份的关键：不删除时 TDLib 会一直保留整份文件。
-      const fetchFn = () => this.telegramService.getRealtimeFileStream(grant.telegramFileId, expectedSize, {
-        noCache: true,
-      });
+      const fetchFn = () => this.acquireUpstreamStream(grant, expectedSize, true);
 
       const rangeHeader = req.headers.range;
       const ifRange = typeof req.headers['if-range'] === 'string' ? req.headers['if-range'] : undefined;
@@ -153,7 +302,7 @@ export class TelegramBotPublicController {
         // 文件大小未知：无法预测磁盘占用、也无从生成 Content-Length / Content-Range，
         // 走有界滚动缓冲直通（不落盘、受上游并发租约约束），保证文件始终可下载。
         stream = await this.fileCacheService.getDirectOnlyStream(cacheKey, () =>
-          this.telegramService.getRealtimeFileStream(grant.telegramFileId),
+          this.acquireUpstreamStream(grant),
         );
       }
 

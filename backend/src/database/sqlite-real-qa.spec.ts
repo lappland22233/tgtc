@@ -67,6 +67,8 @@ describe('真实 SQLite 数据源关键业务与并发 QA', () => {
       'SqliteCreateDownloadTasks1802500000000',
       // v1.4.0：access_logs 传输结果字段（续传 / 中断 / 结束原因）
       'SqliteAddAccessLogTransferFields1802600000000',
+      // v1.5.0：Telegram 文件副本表（多账号回源）+ grants 源账号锚点
+      'SqliteTelegramFileCopies1802900000000',
     ]);
 
     await dataSource.undoLastMigration();

@@ -1,8 +1,12 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { TelegramService } from '../telegram/telegram.service';
 import { AuditService } from '../common/services/audit.service';
 import { AuditStatus } from '../common/entities/audit-log.entity';
 import type { TelegramMessage, TelegramUpdate, TelegramUser } from '../telegram/telegram.types';
+import { FileCopyService } from '../telegram-account-pool/file-copy.service';
+import { TelegramAccountClientService } from '../telegram-account-pool/telegram-account-client.service';
+import { TelegramAccountPoolService } from '../telegram-account-pool/telegram-account-pool.service';
 import { TelegramBotConfigService } from './telegram-bot-config.service';
 import { TelegramBotGrantService } from './telegram-bot-grant.service';
 import { TelegramBotQuotaService } from './telegram-bot-quota.service';
@@ -15,11 +19,28 @@ const MAX_MESSAGE_LENGTH = 3800;
 const MAX_LINK_QUERY_RESULTS = 20;
 
 /**
+ * 单条更新的上下文。
+ *
+ * `accountId` 只在账号池模式下存在，表示**收到该消息的 Bot 账号**；
+ * 它必须贯穿分发全链路，用于：
+ * - 由同一账号回复用户（跨账号代发会造成身份错用）；
+ * - 把该账号的 `file_id` 归属写入 Grant（回退安全锚点）与副本表。
+ */
+export interface BotUpdateContext {
+  accountId?: string;
+}
+
+/**
  * 入站更新分发：私聊校验、命令路由、document 提取、配额判定与直链签发。
  *
  * 处理顺序（重要）：
  *   私聊校验 → 幂等命中 → 命令 → document 提取 → 域名解析(fail-closed) → 配额 → 签发 → 回复
  * 域名解析在配额扣减之前，避免因管理员未配置域名而白白消耗用户额度。
+ *
+ * 多账号契约（账号池模式）：
+ * - **谁收到消息谁回复**：所有回复都走 `reply(...)`，按 `accountId` 用该账号的 Token 发送；
+ * - **谁收到文件谁登记**：`file_unique_id` 为跨账号稳定主键，登记该账号的副本；
+ * - 回复失败**不得**改用默认账号代发，只记结构化日志与计数（fail-closed）。
  *
  * 不限制文件大小：`MAX_FILE_SIZE` 属于本站上传策略，Bot 文件不经上传链路；
  * 本地 Bot API（`--local` + 流式端点）对可服务的文件大小无上限。
@@ -35,15 +56,28 @@ export class TelegramBotDispatchService {
     private readonly grantService: TelegramBotGrantService,
     private readonly adminService: TelegramBotAdminService,
     private readonly auditService: AuditService,
+    // 以下四项仅用于「账号池」增强路径；未启用时全部为可选依赖（保持原单账号行为）
+    @Optional() private readonly pool: TelegramAccountPoolService | null = null,
+    @Optional() private readonly copies: FileCopyService | null = null,
+    @Optional() private readonly accountClient: TelegramAccountClientService | null = null,
+    @Optional() private readonly configService: ConfigService | null = null,
   ) {}
 
   /** 处理单条更新（异常不外抛，避免中断轮询循环） */
-  async handleUpdate(update: TelegramUpdate): Promise<void> {
+  async handleUpdate(update: TelegramUpdate, context?: BotUpdateContext): Promise<void> {
+    const accountId = context?.accountId;
     try {
       const message = update.message;
       if (!message) return;
       // D7：仅私聊；群组/频道消息静默忽略，不回复、不扣配额
-      if (!message.chat || message.chat.type !== 'private') return;
+      if (!message.chat || message.chat.type !== 'private') {
+        // 池化模式的跨账号可见性补登记：若该消息来自用户账号中继（群/频道），
+        // 每个 bot 会各自收到一次 → 在此登记「本账号的副本」（策略 B 的完成条件）。
+        if (message.document?.file_id) {
+          await this.registerInboundCopyAndForward(message, accountId);
+        }
+        return;
+      }
       if (!message.from || message.from.is_bot) return;
 
       const identity = this.normalizeIdentity(message.from);
@@ -51,18 +85,23 @@ export class TelegramBotDispatchService {
       const text = (message.text || '').trim();
 
       if (text.startsWith('/')) {
-        await this.handleCommand(message, identity, text);
+        await this.handleCommand(message, identity, text, accountId);
         return;
       }
       if (message.document) {
-        await this.handleDocument(message, identity);
+        await this.handleDocument(message, identity, accountId);
         return;
       }
       if (this.isNonDocumentMedia(message)) {
-        await this.reply(chatId, '请以「文件」方式发送：在 Telegram 中选择附件 → 文件，而不是图片/视频。', message.message_id);
+        await this.reply(
+          chatId,
+          '请以「文件」方式发送：在 Telegram 中选择附件 → 文件，而不是图片/视频。',
+          message.message_id,
+          accountId,
+        );
         return;
       }
-      await this.reply(chatId, this.buildHelpText(), message.message_id);
+      await this.reply(chatId, this.buildHelpText(), message.message_id, accountId);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.logger.error(`处理 Bot 更新失败（已忽略）: ${message}`);
@@ -104,6 +143,7 @@ export class TelegramBotDispatchService {
     message: TelegramMessage,
     identity: TelegramBotIdentity,
     rawText: string,
+    accountId?: string,
   ): Promise<void> {
     const chatId = String(message.chat.id);
     // 支持 /cmd@BotName 形式
@@ -113,23 +153,31 @@ export class TelegramBotDispatchService {
     switch (command) {
       case '/start':
       case '/help':
-        await this.reply(chatId, this.buildHelpText(), message.message_id);
+        await this.reply(chatId, this.buildHelpText(), message.message_id, accountId);
         return;
       case '/id':
-        await this.reply(chatId, `你的 Telegram 用户 ID：${identity.telegramUserId}`, message.message_id);
+        await this.reply(chatId, `你的 Telegram 用户 ID：${identity.telegramUserId}`, message.message_id, accountId);
         return;
       case '/quota':
-        await this.handleQuotaCommand(chatId, identity, message.message_id);
+        await this.handleQuotaCommand(chatId, identity, message.message_id, accountId);
         return;
       case '/wl_add':
       case '/wl_remove':
       case '/wl_list':
       case '/link_query':
       case '/link_revoke':
-        await this.handleAdminCommand(command, args, chatId, identity, message.message_id, message.chat.type);
+        await this.handleAdminCommand(
+          command,
+          args,
+          chatId,
+          identity,
+          message.message_id,
+          message.chat.type,
+          accountId,
+        );
         return;
       default:
-        await this.reply(chatId, '未知命令，发送 /help 查看可用命令。', message.message_id);
+        await this.reply(chatId, '未知命令，发送 /help 查看可用命令。', message.message_id, accountId);
     }
   }
 
@@ -137,11 +185,12 @@ export class TelegramBotDispatchService {
     chatId: string,
     identity: TelegramBotIdentity,
     replyToMessageId: number,
+    accountId?: string,
   ): Promise<void> {
     const config = await this.botConfigService.getConfig();
     const whitelisted = await this.quotaService.isWhitelisted(identity.telegramUserId);
     if (whitelisted) {
-      await this.reply(chatId, '你在白名单中，不限每日文件数。', replyToMessageId);
+      await this.reply(chatId, '你在白名单中，不限每日文件数。', replyToMessageId, accountId);
       return;
     }
     const usageDate = this.quotaService.getBusinessDate(config.quotaTimezone);
@@ -151,6 +200,7 @@ export class TelegramBotDispatchService {
       chatId,
       `今日已使用 ${used} / ${config.dailyLimit}，剩余 ${remaining} 次。\n（切日时区：${config.quotaTimezone}）`,
       replyToMessageId,
+      accountId,
     );
   }
 
@@ -161,32 +211,33 @@ export class TelegramBotDispatchService {
     identity: TelegramBotIdentity,
     replyToMessageId: number,
     chatType: string,
+    accountId?: string,
   ): Promise<void> {
     if (!this.adminService.isAdmin(identity.telegramUserId)) {
       // 越权：只回通用拒绝，且不泄露命令内容
       this.adminService.auditCommandDenied(identity, command, chatType);
-      await this.reply(chatId, '该命令仅限管理员使用。', replyToMessageId);
+      await this.reply(chatId, '该命令仅限管理员使用。', replyToMessageId, accountId);
       return;
     }
 
     switch (command) {
       case '/wl_add':
-        await this.handleWhitelistAdd(args, chatId, identity, replyToMessageId);
+        await this.handleWhitelistAdd(args, chatId, identity, replyToMessageId, accountId);
         return;
       case '/wl_remove':
-        await this.handleWhitelistRemove(args, chatId, identity, replyToMessageId);
+        await this.handleWhitelistRemove(args, chatId, identity, replyToMessageId, accountId);
         return;
       case '/wl_list':
-        await this.handleWhitelistList(chatId, replyToMessageId);
+        await this.handleWhitelistList(chatId, replyToMessageId, accountId);
         return;
       case '/link_query':
-        await this.handleLinkQuery(args, chatId, identity, replyToMessageId);
+        await this.handleLinkQuery(args, chatId, identity, replyToMessageId, accountId);
         return;
       case '/link_revoke':
-        await this.handleLinkRevoke(args, chatId, identity, replyToMessageId);
+        await this.handleLinkRevoke(args, chatId, identity, replyToMessageId, accountId);
         return;
       default:
-        await this.reply(chatId, '未知命令，发送 /help 查看可用命令。', replyToMessageId);
+        await this.reply(chatId, '未知命令，发送 /help 查看可用命令。', replyToMessageId, accountId);
     }
   }
 
@@ -195,10 +246,11 @@ export class TelegramBotDispatchService {
     chatId: string,
     identity: TelegramBotIdentity,
     replyToMessageId: number,
+    accountId?: string,
   ): Promise<void> {
     const target = (args[0] || '').trim();
     if (!/^\d{1,20}$/.test(target)) {
-      await this.reply(chatId, '用法：/wl_add <TG用户ID>', replyToMessageId);
+      await this.reply(chatId, '用法：/wl_add <TG用户ID>', replyToMessageId, accountId);
       return;
     }
     const { created } = await this.adminService.addWhitelist(identity, target);
@@ -206,6 +258,7 @@ export class TelegramBotDispatchService {
       chatId,
       created ? `已加入白名单：${target}` : `${target} 已在白名单中。`,
       replyToMessageId,
+      accountId,
     );
   }
 
@@ -214,10 +267,11 @@ export class TelegramBotDispatchService {
     chatId: string,
     identity: TelegramBotIdentity,
     replyToMessageId: number,
+    accountId?: string,
   ): Promise<void> {
     const target = (args[0] || '').trim();
     if (!/^\d{1,20}$/.test(target)) {
-      await this.reply(chatId, '用法：/wl_remove <TG用户ID>', replyToMessageId);
+      await this.reply(chatId, '用法：/wl_remove <TG用户ID>', replyToMessageId, accountId);
       return;
     }
     const removed = await this.adminService.removeWhitelist(identity, target);
@@ -225,19 +279,24 @@ export class TelegramBotDispatchService {
       chatId,
       removed ? `已移出白名单：${target}` : `${target} 不在白名单中。`,
       replyToMessageId,
+      accountId,
     );
   }
 
-  private async handleWhitelistList(chatId: string, replyToMessageId: number): Promise<void> {
+  private async handleWhitelistList(
+    chatId: string,
+    replyToMessageId: number,
+    accountId?: string,
+  ): Promise<void> {
     const list = await this.adminService.listWhitelist();
     if (list.length === 0) {
-      await this.reply(chatId, '白名单为空。', replyToMessageId);
+      await this.reply(chatId, '白名单为空。', replyToMessageId, accountId);
       return;
     }
     const shown = list.slice(0, MAX_LINK_QUERY_RESULTS);
     const lines = shown.map((item, index) => `${index + 1}. ${item.telegramUserId}`);
     const suffix = list.length > shown.length ? `\n……共 ${list.length} 个（已截断）` : `\n共 ${list.length} 个`;
-    await this.reply(chatId, `白名单：\n${lines.join('\n')}${suffix}`, replyToMessageId);
+    await this.reply(chatId, `白名单：\n${lines.join('\n')}${suffix}`, replyToMessageId, accountId);
   }
 
   private async handleLinkQuery(
@@ -245,15 +304,16 @@ export class TelegramBotDispatchService {
     chatId: string,
     identity: TelegramBotIdentity,
     replyToMessageId: number,
+    accountId?: string,
   ): Promise<void> {
     const target = (args[0] || '').trim();
     if (!/^\d{1,20}$/.test(target)) {
-      await this.reply(chatId, '用法：/link_query <TG用户ID>', replyToMessageId);
+      await this.reply(chatId, '用法：/link_query <TG用户ID>', replyToMessageId, accountId);
       return;
     }
     const results = await this.adminService.queryLinks(identity, target);
     if (results.length === 0) {
-      await this.reply(chatId, `${target} 当前没有有效的直链。`, replyToMessageId);
+      await this.reply(chatId, `${target} 当前没有有效的直链。`, replyToMessageId, accountId);
       return;
     }
     const shown = results.slice(0, MAX_LINK_QUERY_RESULTS);
@@ -266,7 +326,7 @@ export class TelegramBotDispatchService {
       return `${index + 1}. ${name}\n   过期：${expires}\n   前缀：${item.prefix}（未启用加密存储，无法回放完整链接，请重新签发）`;
     });
     const suffix = results.length > shown.length ? `\n……共 ${results.length} 条（已截断）` : '';
-    await this.reply(chatId, `直链（${target}）：\n${lines.join('\n')}${suffix}`, replyToMessageId);
+    await this.reply(chatId, `直链（${target}）：\n${lines.join('\n')}${suffix}`, replyToMessageId, accountId);
   }
 
   private async handleLinkRevoke(
@@ -274,10 +334,11 @@ export class TelegramBotDispatchService {
     chatId: string,
     identity: TelegramBotIdentity,
     replyToMessageId: number,
+    accountId?: string,
   ): Promise<void> {
     const input = (args[0] || '').trim();
     if (!input) {
-      await this.reply(chatId, '用法：/link_revoke <直链URL或Token>', replyToMessageId);
+      await this.reply(chatId, '用法：/link_revoke <直链URL或Token>', replyToMessageId, accountId);
       return;
     }
     const result = await this.adminService.revokeByToken(identity, input);
@@ -286,19 +347,99 @@ export class TelegramBotDispatchService {
         chatId,
         result.reason === 'invalid_input' ? '无法解析直链，请粘贴完整直链 URL 或 Token。' : '未找到对应的直链（可能已过期或已撤销）。',
         replyToMessageId,
+        accountId,
       );
       return;
     }
-    await this.reply(chatId, '直链已撤销，立即失效。', replyToMessageId);
+    await this.reply(chatId, '直链已撤销，立即失效。', replyToMessageId, accountId);
   }
 
   // ---------------- 文件处理 ----------------
 
-  private async handleDocument(message: TelegramMessage, identity: TelegramBotIdentity): Promise<void> {
+  /**
+   * 账号池增强路径（仅池化模式生效，未启用时直接返回）：
+   * 1. 登记「收到该文件的账号」副本 —— 逻辑主键必须用 Telegram `file_unique_id`
+   *    （跨账号稳定），这样后续「按负载选一个账号回源」才有候选集合；
+   * 2. 若配置了归档群，则用接收账号把消息转发到归档群（`TELEGRAM_ARCHIVE_CHAT_ID`）。
+   *
+   * **注意**：转发到群**不会**让其它 bot 拿到该文件（Telegram 规定 bot 看不到其它 bot 的消息）。
+   * 跨账号共享由「副本扩散」（策略 A）或「用户账号中继」（策略 B）完成，见
+   * `docs/backend-pool-adaptation.md`；转发只是审计/归属留痕。
+   */
+  private async registerInboundCopyAndForward(
+    message: TelegramMessage,
+    accountId?: string,
+  ): Promise<void> {
+    const pool = this.pool;
+    const copies = this.copies;
+    if (!accountId || !pool?.isActive() || !copies) return;
+    const doc = message.document;
+    if (!doc?.file_id) return;
+    const chatId = String(message.chat?.id ?? '');
+    const messageId = String(message.message_id ?? '');
+
+    // 逻辑主键必须是跨账号稳定的 `file_unique_id`；缺失时**绝不退化为 `file_id`**
+    // （`file_id` 按账号隔离，用它当逻辑主键会把不同账号的文件错误聚合成同一逻辑文件）。
+    // 缺失时跳过副本登记：该文件只能由「源账号」回源（降级路径），并计数 + 告警以便发现。
+    const uniqueId = doc.file_unique_id;
+    if (!uniqueId) {
+      pool.bumpCounter('inboundRegistrationFailures');
+      this.logger.warn(
+        `账号 ${accountId} 收到的文件缺少 file_unique_id，已跳过副本登记`
+        + '（该文件仅可由源账号回源，不参与跨账号扩散）',
+      );
+    } else {
+      try {
+        await copies.upsertReady({
+          ownerType: 'fileUnique',
+          ownerId: uniqueId,
+          accountId,
+          telegramFileId: doc.file_id,
+          chatId,
+          messageId,
+          fileSize: typeof doc.file_size === 'number' && doc.file_size > 0 ? doc.file_size : null,
+          source: 'inbound',
+        });
+        this.logger.log(`已登记入站副本：账号 ${accountId} / fileUnique=${uniqueId.slice(0, 16)}…`);
+      } catch (error) {
+        pool.bumpCounter('inboundRegistrationFailures');
+        const text = error instanceof Error ? error.message : String(error);
+        this.logger.warn(`入站副本登记失败（忽略，不影响直链签发）: ${text}`);
+      }
+    }
+
+    // 归档转发与副本登记解耦：即使登记失败也保留审计留痕。
+    const archiveChatId = (this.configService?.get<string>('TELEGRAM_ARCHIVE_CHAT_ID') || '').trim();
+    const account = pool.getConfig(accountId);
+    if (!archiveChatId || !account || !this.accountClient || !chatId || !messageId) return;
+    if (chatId === archiveChatId) return; // 已在归档群，避免自转发循环
+    try {
+      const forwarded = await this.accountClient.forwardMessage(
+        accountId,
+        account.token,
+        archiveChatId,
+        chatId,
+        messageId,
+      );
+      this.logger.log(`已用账号 ${accountId} 转发到归档群（审计留痕，messageId=${forwarded.messageId}）`);
+    } catch (error) {
+      const text = error instanceof Error ? error.message : String(error);
+      this.logger.warn(`转发到归档群失败（忽略）: ${text}`);
+    }
+  }
+
+  private async handleDocument(
+    message: TelegramMessage,
+    identity: TelegramBotIdentity,
+    accountId?: string,
+  ): Promise<void> {
     const doc = message.document;
     if (!doc || !doc.file_id) return;
     const chatId = String(message.chat.id);
     const messageId = String(message.message_id);
+
+    // 池化模式：先把「哪个账号收到了这个文件」落库（幂等），再走原有直链签发流程
+    await this.registerInboundCopyAndForward(message, accountId);
 
     // 幂等：同一条消息只签发一次、只扣一次配额
     const existing = await this.grantService.findByMessage(identity.telegramUserId, chatId, messageId);
@@ -310,9 +451,15 @@ export class TelegramBotDispatchService {
           chatId,
           `该文件的下载链接：\n${this.grantService.buildUrl(origin, token)}\n（有效期至 ${new Date(existing.expiresAt).toISOString()}）`,
           message.message_id,
+          accountId,
         );
       } else {
-        await this.reply(chatId, '该文件的链接已失效（过期或已撤销），请重新发送文件以获取新链接。', message.message_id);
+        await this.reply(
+          chatId,
+          '该文件的链接已失效（过期或已撤销），请重新发送文件以获取新链接。',
+          message.message_id,
+          accountId,
+        );
       }
       return;
     }
@@ -333,6 +480,7 @@ export class TelegramBotDispatchService {
         chatId,
         '服务暂不可用：管理员尚未配置站点域名（直链域名）。请联系管理员在后台「Telegram Bot 设置」中配置。',
         message.message_id,
+        accountId,
       );
       return;
     }
@@ -362,6 +510,7 @@ export class TelegramBotDispatchService {
           chatId,
           `今日额度已用完（${config.dailyLimit} 个文件/天）。明日将自动重置，或联系管理员加入白名单。`,
           message.message_id,
+          accountId,
         );
         return;
       }
@@ -378,6 +527,8 @@ export class TelegramBotDispatchService {
           chatId,
           messageId,
           telegramFileId: doc.file_id,
+          // 回退安全锚点：池化模式=收到消息的账号；单账号模式=默认 Token 的 botId
+          sourceAccountId: accountId ?? this.defaultSourceAccountId(),
           fileName: this.sanitizePlain(doc.file_name, 255),
           mimeType: this.sanitizePlain(doc.mime_type, 128),
           fileSize: fileSize === null ? null : String(fileSize),
@@ -402,6 +553,7 @@ export class TelegramBotDispatchService {
           quotaUsed,
           viaWhitelist: whitelisted,
           domainMode: config.linkDomainMode,
+          sourceAccountId: grant.sourceAccountId,
           fileName,
         },
       });
@@ -410,6 +562,7 @@ export class TelegramBotDispatchService {
         chatId,
         `文件已收到：${fileName}\n下载直链（${config.linkTtlHours} 小时内有效，仅受时间限制）：\n${url}`,
         message.message_id,
+        accountId,
       );
     } catch (error) {
       // 签发失败：归还已消耗的配额，避免用户白白损失额度
@@ -418,7 +571,7 @@ export class TelegramBotDispatchService {
       }
       const detail = error instanceof Error ? error.message : String(error);
       this.logger.error(`直链签发失败: ${detail}`);
-      await this.reply(chatId, '内部错误：生成下载链接失败，请稍后重试。', message.message_id);
+      await this.reply(chatId, '内部错误：生成下载链接失败，请稍后重试。', message.message_id, accountId);
     }
   }
 
@@ -453,6 +606,19 @@ export class TelegramBotDispatchService {
     return cleaned ? cleaned.slice(0, maxLength) : null;
   }
 
+  /**
+   * 单账号模式下的源账号标识：默认 Bot Token 的数字前缀（botId）。
+   *
+   * 写入它的意义：若日后启用账号池，这些历史 Grant 的 `file_id` 归属仍可确认，
+   * 从而可以「只用源账号回源」，避免跨账号错用；无法解析（未配置/占位符）时返回 null，
+   * 回退链路会按「归属不明」fail-closed 处理。
+   */
+  private defaultSourceAccountId(): string | null {
+    const token = (this.configService?.get<string>('TELEGRAM_BOT_TOKEN') || '').trim();
+    const botId = token.split(':')[0]?.trim();
+    return botId && /^\d+$/.test(botId) ? botId : null;
+  }
+
   private buildHelpText(): string {
     return [
       '发送「文件」（Telegram 附件 → 文件）即可获得下载直链。',
@@ -472,13 +638,53 @@ export class TelegramBotDispatchService {
     ].join('\n');
   }
 
-  /** 回复消息（失败只记录日志，不影响业务流程） */
-  private async reply(chatId: string, text: string, replyToMessageId?: number): Promise<void> {
+  /**
+   * 回复消息：**必须由收到消息的账号发送**（池化模式），未启用池化时保持原单账号链路。
+   *
+   * 安全约束：按账号发送失败时**不得**改用默认账号代发——那会让用户从另一个 Bot 收到
+   * 本账号的回复（身份错用），且与 Grant 的 `sourceAccountId` 记录不一致。
+   * 失败只记录结构化日志与计数，便于在「池化已启用但回复总失败」时被发现。
+   */
+  private async reply(
+    chatId: string,
+    text: string,
+    replyToMessageId?: number,
+    accountId?: string,
+  ): Promise<void> {
     const content = text.length > MAX_MESSAGE_LENGTH ? `${text.slice(0, MAX_MESSAGE_LENGTH)}…` : text;
+    const pool = this.pool;
+    const client = this.accountClient;
+
+    // 池化启用 + 已给出 accountId：**必须由该账号发送**。
+    // 即使配置解析失败（账号被移除/配置漂移）或客户端未装配，也不得回落默认账号——
+    // 否则用户会从另一个 Bot 收到本账号的回复（跨账号身份错用），故一律 fail-closed。
+    if (accountId && pool?.isActive()) {
+      const account = client ? pool.getConfig(accountId) : null;
+      if (!account || !client) {
+        pool.bumpCounter('replyFailures');
+        this.logger.error(
+          `账号 ${accountId} 未解析到可用配置，已放弃回复（不跨账号代发，chat=${chatId}）`,
+        );
+        return;
+      }
+      try {
+        await client.sendMessage(accountId, account.token, chatId, content, { replyToMessageId });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        pool.bumpCounter('replyFailures');
+        this.logger.error(
+          `账号 ${accountId} 回复失败（不跨账号代发，chat=${chatId}）: ${message}`,
+        );
+      }
+      return;
+    }
+
+    // 未启用池化：保持原单账号链路
     try {
       await this.telegramService.sendMessage(chatId, content, { replyToMessageId });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      pool?.bumpCounter('replyFailures');
       this.logger.warn(`Bot 回复失败（忽略）: ${message}`);
     }
   }

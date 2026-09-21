@@ -83,14 +83,78 @@ export function validateEnv(env: NodeJS.ProcessEnv = process.env): void {
   }
 
   // ---- Telegram 文件存储 ----
-  if (!env.TELEGRAM_BOT_TOKEN) {
-    errors.push('TELEGRAM_BOT_TOKEN 未设置');
-  } else if (!/^\d+:[\w-]+$/.test(env.TELEGRAM_BOT_TOKEN)) {
-    errors.push('TELEGRAM_BOT_TOKEN 格式错误（应为 <bot_id>:<token>）');
+  // 账号池模式（多 Bot）下允许只配置账号池、不配单账号 Token/Chat：
+  // 池化启用且有账号来源时，单账号项降级为「可选」（未配置时上传/入站走池内账号）。
+  const poolEnabled = (env.TELEGRAM_ACCOUNT_POOL_ENABLED || '').trim().toLowerCase() === 'true';
+  const poolRaw = (env.TELEGRAM_ACCOUNT_POOL || '').trim();
+  const multiTokens = (env.TELEGRAM_BOT_TOKENS || '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+  const poolConfigured = poolEnabled && (poolRaw.length > 0 || multiTokens.length > 0);
+
+  if (!poolConfigured) {
+    if (!env.TELEGRAM_BOT_TOKEN) {
+      errors.push('TELEGRAM_BOT_TOKEN 未设置');
+    } else if (!/^\d+:[\w-]+$/.test(env.TELEGRAM_BOT_TOKEN)) {
+      errors.push('TELEGRAM_BOT_TOKEN 格式错误（应为 <bot_id>:<token>）');
+    }
+    // TELEGRAM_CHAT_ID 为上传必需项，缺失时上传会在运行期才失败，故列为启动必检
+    if (!env.TELEGRAM_CHAT_ID) {
+      errors.push('TELEGRAM_CHAT_ID 未设置');
+    }
   }
-  // TELEGRAM_CHAT_ID 为上传必需项，缺失时上传会在运行期才失败，故列为启动必检
-  if (!env.TELEGRAM_CHAT_ID) {
-    errors.push('TELEGRAM_CHAT_ID 未设置');
+
+  // ---- Telegram Bot 账号池（多账号回源）----
+  if (env.TELEGRAM_ACCOUNT_POOL_ENABLED
+    && !/^(true|false)$/i.test((env.TELEGRAM_ACCOUNT_POOL_ENABLED || '').trim())) {
+    errors.push('TELEGRAM_ACCOUNT_POOL_ENABLED 必须为 true 或 false');
+  }
+  if (poolRaw) {
+    try {
+      const parsed = JSON.parse(poolRaw) as unknown;
+      if (!Array.isArray(parsed) || parsed.length === 0) {
+        errors.push('TELEGRAM_ACCOUNT_POOL 必须是非空 JSON 数组');
+      } else {
+        parsed.forEach((item, index) => {
+          const entry = item as Record<string, unknown>;
+          const token = String(entry?.token ?? '').trim();
+          if (!/^\d+:[\w-]+$/.test(token)) {
+            errors.push(`TELEGRAM_ACCOUNT_POOL[${index}].token 格式错误（应为 <bot_id>:<token>）`);
+          }
+          if (!String(entry?.chatId ?? entry?.chat_id ?? '').trim()) {
+            errors.push(`TELEGRAM_ACCOUNT_POOL[${index}].chatId 未设置（账号池需要每个账号的上传目标 chat）`);
+          }
+          const maxInflight = Number(entry?.maxInflight);
+          if (entry?.maxInflight !== undefined && (!Number.isSafeInteger(maxInflight) || maxInflight < 1)) {
+            errors.push(`TELEGRAM_ACCOUNT_POOL[${index}].maxInflight 必须为正整数`);
+          }
+        });
+      }
+    } catch {
+      errors.push('TELEGRAM_ACCOUNT_POOL 不是合法 JSON');
+    }
+  }
+  multiTokens.forEach((token, index) => {
+    if (!/^\d+:[\w-]+$/.test(token)) {
+      errors.push(`TELEGRAM_BOT_TOKENS 第 ${index + 1} 项格式错误（应为 <bot_id>:<token>）`);
+    }
+  });
+  // 简化输入（TELEGRAM_BOT_TOKENS）必须显式提供存储 Chat：
+  // 归档群（TELEGRAM_ARCHIVE_CHAT_ID）只用于审计转发，不得作为隐式存储目标，
+  // 否则副本会被上传进审计群，混淆审计流与存储流。
+  if (poolEnabled && multiTokens.length > 0 && !poolRaw && !(env.TELEGRAM_CHAT_ID || '').trim()) {
+    errors.push(
+      'TELEGRAM_BOT_TOKENS 作为账号池来源时必须设置 TELEGRAM_CHAT_ID（各账号的上传存储 Chat）；'
+      + 'TELEGRAM_ARCHIVE_CHAT_ID 仅用于审计转发，不能充当存储目标。',
+    );
+  }
+  if (env.TELEGRAM_ARCHIVE_CHAT_ID && !/^-?\d{5,20}$/.test(env.TELEGRAM_ARCHIVE_CHAT_ID.trim())) {
+    errors.push('TELEGRAM_ARCHIVE_CHAT_ID 格式错误（应为数字 chat id，群组通常以 -100 开头）');
+  }
+  if (env.TELEGRAM_USER_RELAY_ENABLED
+    && !/^(true|false)$/i.test((env.TELEGRAM_USER_RELAY_ENABLED || '').trim())) {
+    errors.push('TELEGRAM_USER_RELAY_ENABLED 必须为 true 或 false');
   }
 
   // ---- Telegram Bot 入站（文件直链） ----

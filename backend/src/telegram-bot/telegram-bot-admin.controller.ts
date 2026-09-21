@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Put, Query, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Optional, Put, Query, Req, UseGuards } from '@nestjs/common';
 import { Request } from 'express';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
@@ -11,6 +11,7 @@ import { TelegramBotAdminService } from './telegram-bot-admin.service';
 import { TelegramBotTokenCryptoService } from './telegram-bot-token-crypto.service';
 import { UpdateBotConfigDto } from './telegram-bot.dto';
 import { TelegramBotRuntimeConfig } from './telegram-bot.types';
+import { TelegramAccountPoolService } from '../telegram-account-pool/telegram-account-pool.service';
 
 /**
  * Telegram Bot 管理端点（仅 SUPER_ADMIN）。
@@ -26,6 +27,8 @@ export class TelegramBotAdminController {
     private readonly botAdminService: TelegramBotAdminService,
     private readonly tokenCryptoService: TelegramBotTokenCryptoService,
     private readonly auditService: AuditService,
+    // 账号池只读诊断（可选依赖：未装配时接口仍可访问并给出明确原因）
+    @Optional() private readonly accountPool: TelegramAccountPoolService | null = null,
   ) {}
 
   /** 读取 Bot 配置 + 当前生效域名（便于面板展示） */
@@ -77,6 +80,37 @@ export class TelegramBotAdminController {
   @Roles(UserRole.SUPER_ADMIN)
   async getUsage(@Query('timeRange') timeRange?: string) {
     return this.botAdminService.getUsageSummary(timeRange || '7d');
+  }
+
+  /**
+   * Bot 账号池只读诊断（SUPER_ADMIN）。
+   *
+   * 用途：区分「服务健康」与「账号池已启用但未生效」——
+   * `enabled=false` 时 `inactiveReason` 给出可诊断原因（开关未开 / 账号来源为空）。
+   *
+   * 安全：只返回快照（账号 `tokenPreview` 已脱敏）与进程内计数，
+   * **绝不返回 Token 原文、完整 file_id 或原始 URL**；不改动 `/api/health` 形状
+   * （发布健康检查脚本依赖其稳定）。
+   */
+  @Get('bot-account-pool')
+  @Roles(UserRole.SUPER_ADMIN)
+  async getAccountPoolStatus() {
+    const pool = this.accountPool;
+    if (!pool) {
+      return {
+        enabled: false,
+        inactiveReason: '账号池模块未装配（TelegramAccountPoolModule 未注册）',
+        counters: null,
+        accounts: [],
+      };
+    }
+    const snapshot = pool.snapshot();
+    return {
+      enabled: snapshot.enabled,
+      inactiveReason: snapshot.inactiveReason,
+      counters: snapshot.counters,
+      accounts: snapshot.accounts,
+    };
   }
 
   /**

@@ -55,6 +55,12 @@ describe('SQLite schema migrations（隔离内存库）', () => {
     expect(verifyIndexes.find((index: { name: string }) => index.name === 'uq_file_verify_tasks_active_slot'))
       .toMatchObject({ unique: 1, partial: 1 });
 
+    // 副本实体由基线按实体元数据建表，且必须带唯一约束与入站锚点索引（与 180290 增量迁移同口径）。
+    const copyIndexes = await dataSource.query('PRAGMA index_list("telegram_file_copies")');
+    expect(copyIndexes.find((index: { name: string }) => index.name === 'uq_tg_file_copies_owner_account'))
+      .toMatchObject({ unique: 1 });
+    expect(copyIndexes.find((index: { name: string }) => index.name === 'idx_tg_file_copies_anchor')).toBeDefined();
+
     const userColumns = await dataSource.query('PRAGMA table_info("users")');
     const isBanned = userColumns.find((column: { name: string }) => column.name === 'isBanned');
     expect(isBanned?.type.toLowerCase()).toBe('boolean');
@@ -334,5 +340,60 @@ describe('SQLite schema migrations（隔离内存库）', () => {
 
     // 幂等：重复执行不报错。
     await new SqliteTelegramBotLinks1802300000000().up(dataSource.createQueryRunner());
+  });
+
+  it('存量库升级：180290 自建副本表并为 grants 补源账号列', async () => {
+    dataSource = new DataSource({ type: 'sqlite', database: ':memory:', entities: [], synchronize: false });
+    await dataSource.initialize();
+    await dataSource.query(`CREATE TABLE "migrations" (
+      "id" integer PRIMARY KEY AUTOINCREMENT NOT NULL,
+      "timestamp" bigint NOT NULL, "name" varchar NOT NULL
+    )`);
+    await dataSource.query(`CREATE TABLE "telegram_bot_file_grants" (
+      "id" varchar PRIMARY KEY NOT NULL, "telegramUserId" varchar(32) NOT NULL
+    )`);
+
+    const { SqliteTelegramFileCopies1802900000000 } = require('./1802900000000-SqliteTelegramFileCopies') as typeof import('./1802900000000-SqliteTelegramFileCopies');
+    await new SqliteTelegramFileCopies1802900000000().up(dataSource.createQueryRunner());
+
+    const tables = await dataSource.query(
+      `SELECT name FROM sqlite_master WHERE type='table' AND name IN ('telegram_file_copies','telegram_bot_file_grants')`,
+    );
+    expect(tables.map((row: { name: string }) => row.name).sort()).toEqual([
+      'telegram_bot_file_grants',
+      'telegram_file_copies',
+    ]);
+
+    const copyIndexes = await dataSource.query('PRAGMA index_list("telegram_file_copies")');
+    expect(copyIndexes.find((index: { name: string }) => index.name === 'uq_tg_file_copies_owner_account'))
+      .toMatchObject({ unique: 1 });
+    expect(copyIndexes.find((index: { name: string }) => index.name === 'idx_tg_file_copies_anchor')).toBeDefined();
+    expect(copyIndexes.find((index: { name: string }) => index.name === 'idx_tg_file_copies_owner')).toBeDefined();
+    expect(copyIndexes.find((index: { name: string }) => index.name === 'idx_tg_file_copies_status')).toBeDefined();
+
+    const grantColumns = await dataSource.query('PRAGMA table_info("telegram_bot_file_grants")');
+    expect(grantColumns.find((column: { name: string }) => column.name === 'sourceAccountId')).toBeDefined();
+
+    // 副本表可写，且唯一约束生效（重投幂等的前提）；不同账号可有各自副本。
+    await dataSource.query(
+      `INSERT INTO "telegram_file_copies" ("id","ownerType","ownerId","accountId","telegramFileId")
+       VALUES ('c1','fileUnique','u1','bot1','file-1')`,
+    );
+    await expect(dataSource.query(
+      `INSERT INTO "telegram_file_copies" ("id","ownerType","ownerId","accountId","telegramFileId")
+       VALUES ('c2','fileUnique','u1','bot1','file-2')`,
+    )).rejects.toThrow();
+    await dataSource.query(
+      `INSERT INTO "telegram_file_copies" ("id","ownerType","ownerId","accountId","telegramFileId")
+       VALUES ('c3','fileUnique','u1','bot2','file-2')`,
+    );
+
+    // 幂等：重复执行不报错、不重复建表或重复加列。
+    await new SqliteTelegramFileCopies1802900000000().up(dataSource.createQueryRunner());
+    const copyCount = await dataSource.query('SELECT COUNT(*) AS count FROM "telegram_file_copies"');
+    expect(copyCount[0].count).toBe(2);
+
+    const integrity = await dataSource.query('PRAGMA integrity_check');
+    expect(Object.values(integrity[0])).toEqual(['ok']);
   });
 });

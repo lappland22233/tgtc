@@ -25,6 +25,7 @@ import { TelegramBotFileGrant } from '../common/entities/telegram-bot-file-grant
 import { TelegramBotDailyUsage } from '../common/entities/telegram-bot-daily-usage.entity';
 import { TelegramBotWhitelist } from '../common/entities/telegram-bot-whitelist.entity';
 import { DownloadTask } from '../common/entities/download-task.entity';
+import { TelegramFileCopy } from '../common/entities/telegram-file-copy.entity';
 
 /** 单一实体清单：Nest 运行时与 TypeORM CLI 必须共用，避免漏表。 */
 export const databaseEntities = [
@@ -33,5 +34,5 @@ export const databaseEntities = [
   Tag, JwtRevokedToken, SharePreviewSession, FileVerifyTask, UpdateTask, ApiKey,
   DirectoryName, ApiKeyIpAllowlist, ApiKeyUsageLog,
   TelegramBotFileGrant, TelegramBotDailyUsage, TelegramBotWhitelist,
-  DownloadTask,
+  DownloadTask, TelegramFileCopy,
 ] as const;

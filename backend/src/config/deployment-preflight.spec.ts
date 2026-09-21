@@ -64,6 +64,53 @@ describe('evaluateDeploymentPreflight', () => {
     expect(result.errors.join('\n')).toMatch(/DEPLOYMENT_MODE 取值非法/);
   });
 
+  it('rejects account pool without explicit streaming preconditions', () => {
+    const missingStreaming = evaluateDeploymentPreflight({
+      NODE_ENV: 'production',
+      SECURE_COOKIE: 'true',
+      TELEGRAM_ACCOUNT_POOL_ENABLED: 'true',
+    });
+    expect(missingStreaming.errors.join('\n')).toMatch(/TELEGRAM_FILE_STREAMING_ENABLED 必须显式设为 true/);
+
+    const badBase = evaluateDeploymentPreflight({
+      NODE_ENV: 'production',
+      SECURE_COOKIE: 'true',
+      TELEGRAM_ACCOUNT_POOL_ENABLED: 'true',
+      TELEGRAM_FILE_STREAMING_ENABLED: 'true',
+      TELEGRAM_FILE_STREAM_BASE: 'not-a-url',
+    });
+    expect(badBase.errors.join('\n')).toMatch(/TELEGRAM_FILE_STREAM_BASE 不是合法的 http\/https URL/);
+
+    // 留空会回落到官方 API（无 /stream/file 端点）→ 必须拒绝启用
+    const emptyBase = evaluateDeploymentPreflight({
+      NODE_ENV: 'production',
+      SECURE_COOKIE: 'true',
+      TELEGRAM_ACCOUNT_POOL_ENABLED: 'true',
+      TELEGRAM_FILE_STREAMING_ENABLED: 'true',
+    });
+    expect(emptyBase.errors.join('\n')).toMatch(/TELEGRAM_FILE_STREAM_BASE 必须指向自建 Bot API 的流式基址/);
+  });
+
+  it('accepts account pool with complete streaming preconditions', () => {
+    const result = evaluateDeploymentPreflight({
+      NODE_ENV: 'production',
+      SECURE_COOKIE: 'true',
+      TELEGRAM_ACCOUNT_POOL_ENABLED: 'true',
+      TELEGRAM_FILE_STREAMING_ENABLED: 'true',
+      TELEGRAM_FILE_STREAM_BASE: 'http://127.0.0.1:8081',
+    });
+    expect(result.errors).toEqual([]);
+  });
+
+  it('rejects user relay switch until the MTProto client is integrated', () => {
+    const result = evaluateDeploymentPreflight({
+      NODE_ENV: 'production',
+      SECURE_COOKIE: 'true',
+      TELEGRAM_USER_RELAY_ENABLED: 'true',
+    });
+    expect(result.errors.join('\n')).toMatch(/TELEGRAM_USER_RELAY_ENABLED=true 被拒绝/);
+  });
+
   it('accepts explicit single-instance deployment', () => {
     const result = evaluateDeploymentPreflight({
       NODE_ENV: 'production',

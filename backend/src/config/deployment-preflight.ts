@@ -35,6 +35,10 @@ function parseTrustProxyHops(raw: string | undefined): number | undefined {
  *   缓存单飞、上传任务态、合并信号量、缩略图去重），多实例会直接导致随机失败，
  *   因此在 Redis 外置专项落地前必须拒绝，而不是用文档模糊描述。
  * - `DEPLOYMENT_MODE` 非法取值。
+ * - 账号池启用但缺少流式前置（未显式 `TELEGRAM_FILE_STREAMING_ENABLED=true`，
+ *   或 `TELEGRAM_FILE_STREAM_BASE` 非法）：账号池回源依赖实时流端点。
+ * - `TELEGRAM_USER_RELAY_ENABLED=true`：用户账号中继客户端尚未接入，
+ *   开启只会得到「已配置但不可用」的假象。
  *
  * 告警项（warnings）：
  * - 生产环境既未显式 `SECURE_COOKIE=true` 也未配置 `TRUST_PROXY_HOPS`：
@@ -59,6 +63,51 @@ export function evaluateDeploymentPreflight(
         '分片上传会话、缓存单飞、上传任务态、合并信号量、缩略图构建去重均为进程内内存态，' +
         '多实例会导致分片上传随机失败、冷回源去重失效、任务态丢失。' +
         '必须部署为单后端实例；多实例支持需先完成 Redis 外置专项（见 docs/multi-instance-redis-design.md）。',
+    );
+  }
+
+  // ---- Bot 账号池前置条件（P0：不满足即拒绝启用，绝不请求时静默降级） ----
+  const poolEnabled = (env.TELEGRAM_ACCOUNT_POOL_ENABLED ?? '').trim().toLowerCase() === 'true';
+  if (poolEnabled) {
+    // 账号池回源完全依赖自建 Bot API fork 的实时流端点；未显式启用流式时，
+    // 「账号池已启用」只是假象——运行期只会不断回退，因此直接拒绝启动。
+    const streamingFlag = (env.TELEGRAM_FILE_STREAMING_ENABLED ?? '').trim().toLowerCase();
+    if (streamingFlag !== 'true') {
+      errors.push(
+        'TELEGRAM_ACCOUNT_POOL_ENABLED=true 时 TELEGRAM_FILE_STREAMING_ENABLED 必须显式设为 true：' +
+          '账号池回源依赖自建 Bot API 的 /stream/file 实时流端点（Bot API 需以 --enable-file-streaming 启动），' +
+          '缺少该端点会在运行期持续回退，属于「启用了但未生效」。',
+      );
+    }
+    // 流式基址必须**非空且有效**：为空时代码会回落到 TELEGRAM_API_BASE（默认官方 api.telegram.org），
+    // 而官方 API 不存在 /stream/file 端点，池化回源会持续失败——必须在启动期就拒绝，而不是运行期降级。
+    const streamBase = (env.TELEGRAM_FILE_STREAM_BASE ?? '').trim();
+    if (!streamBase) {
+      errors.push(
+        'TELEGRAM_ACCOUNT_POOL_ENABLED=true 时 TELEGRAM_FILE_STREAM_BASE 必须指向自建 Bot API 的流式基址：'
+        + '留空会回落到官方 API（无 /stream/file 端点），导致池化回源持续失败。',
+      );
+    } else {
+      let protocol = '';
+      try {
+        protocol = new URL(streamBase).protocol;
+      } catch {
+        protocol = '';
+      }
+      if (protocol !== 'http:' && protocol !== 'https:') {
+        errors.push(
+          `TELEGRAM_FILE_STREAM_BASE 不是合法的 http/https URL: ${streamBase}（账号池启用时该地址必须有效）。`,
+        );
+      }
+    }
+  }
+
+  // ---- 用户账号中继（策略 B）：客户端未接入前必须拒绝而非仅告警 ----
+  // 历史实现只记 warning 后回退到策略 A，会让运维误以为「已启用中继」。
+  if ((env.TELEGRAM_USER_RELAY_ENABLED ?? '').trim().toLowerCase() === 'true') {
+    errors.push(
+      'TELEGRAM_USER_RELAY_ENABLED=true 被拒绝：用户账号 MTProto 中继客户端尚未接入本版本，' +
+        '开启只会得到「已配置但不可用」的假象。请保持 false，或等待后续版本单独评审（含 session 保管与风控）。',
     );
   }
 

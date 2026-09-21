@@ -180,6 +180,38 @@ export async function createAlertRules(configCache: ConfigCacheService): Promise
       cooldownMinutes: 30,
       evaluate: async () => null,
     },
+
+    // ===== Bot 账号池告警（由 TelegramAccountPoolAlertService 按运行状态触发，非流量指标驱动） =====
+    // 这些规则的 evaluate 恒为 null：触发条件依赖账号池运行态（冷却/回退率/复制失败），
+    // 由池模块周期性采集后走 `AlertEngineService.createAlerts()`；此处仅声明级别与冷却。
+    {
+      id: 'BOT_POOL_ALL_UNAVAILABLE',
+      name: 'Bot 账号池全部不可用',
+      level: AlertLevel.CRITICAL,
+      cooldownMinutes: 5,
+      evaluate: async () => null,
+    },
+    {
+      id: 'BOT_POOL_FALLBACK_RATE',
+      name: 'Bot 账号池回退率偏高',
+      level: AlertLevel.WARNING,
+      cooldownMinutes: 15,
+      evaluate: async () => null,
+    },
+    {
+      id: 'BOT_POOL_REPLICATION_FAILING',
+      name: 'Bot 副本扩散持续失败',
+      level: AlertLevel.WARNING,
+      cooldownMinutes: 15,
+      evaluate: async () => null,
+    },
+    {
+      id: 'BOT_REPLY_FAILING',
+      name: 'Bot 入站回复失败',
+      level: AlertLevel.WARNING,
+      cooldownMinutes: 15,
+      evaluate: async () => null,
+    },
   ];
 }
 
@@ -198,5 +230,9 @@ export function getAlertRuleMetadata() {
     { id: 'SEC_IP_FLOOD', name: '单IP高频访问', level: AlertLevel.CRITICAL },
     { id: 'SEC_BRUTE_FORCE', name: '登录爆破', level: AlertLevel.CRITICAL },
     { id: 'SEC_ABNORMAL_DOWNLOAD', name: '异常下载', level: AlertLevel.WARNING },
+    { id: 'BOT_POOL_ALL_UNAVAILABLE', name: 'Bot 账号池全部不可用', level: AlertLevel.CRITICAL },
+    { id: 'BOT_POOL_FALLBACK_RATE', name: 'Bot 账号池回退率偏高', level: AlertLevel.WARNING },
+    { id: 'BOT_POOL_REPLICATION_FAILING', name: 'Bot 副本扩散持续失败', level: AlertLevel.WARNING },
+    { id: 'BOT_REPLY_FAILING', name: 'Bot 入站回复失败', level: AlertLevel.WARNING },
   ];
 }

@@ -16,6 +16,11 @@ export interface IssueGrantInput {
   fileName: string | null;
   mimeType: string | null;
   fileSize: string | null;
+  /**
+   * 产生该 `file_id` 的 Bot 账号 ID（回退安全锚点）。
+   * 池化模式为「收到消息的账号」；单账号模式为默认 Token 的 botId；无法确定时为 null。
+   */
+  sourceAccountId?: string | null;
 }
 
 export interface IssuedGrant {
@@ -82,6 +87,7 @@ export class TelegramBotGrantService {
       chatId: input.chatId,
       messageId: input.messageId,
       telegramFileId: input.telegramFileId,
+      sourceAccountId: input.sourceAccountId ?? null,
       fileName: input.fileName,
       mimeType: input.mimeType,
       fileSize: input.fileSize,

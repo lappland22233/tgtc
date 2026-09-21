@@ -427,3 +427,198 @@ describe('TelegramBotPublicController 匿名直链', () => {
     expect(ctx.grantService.recordAccess).not.toHaveBeenCalled();
   });
 });
+
+describe('TelegramBotPublicController 账号池回退矩阵（fail-closed）', () => {
+  const DEFAULT_BOT_TOKEN = '1234567:DEFAULT-TOKEN';
+
+  function makePoolController(options: {
+    poolActive?: boolean;
+    sourceAccountId?: string | null;
+    anchor?: { ownerType: string; ownerId: string } | null;
+    openStreamResult?: 'ok' | 'null';
+    sourceStreamResult?: 'ok' | 'null';
+    anchorThrows?: boolean;
+    hasSourceAccount?: boolean;
+  } = {}) {
+    let capturedError: unknown = null;
+    const counters: Record<string, number> = { unresolved: 0, fallbacks: 0 };
+
+    const grantService = {
+      findByToken: jest.fn(async () => ({
+        id: 'grant-1',
+        tokenPrefix: 'tgl_aaaaaaaa',
+        telegramUserId: '7001',
+        telegramFileId: TELEGRAM_FILE_ID,
+        sourceAccountId: options.sourceAccountId === undefined ? '9999999' : options.sourceAccountId,
+        chatId: '7001',
+        messageId: '100',
+        fileName: 'report.pdf',
+        mimeType: 'application/pdf',
+        fileSize: String(TOTAL_SIZE),
+        revokedAt: null,
+        expiresAt: new Date(Date.now() + 3600_000),
+      })),
+      isActive: jest.fn(() => true),
+      recordAccess: jest.fn(async () => undefined),
+    };
+    const telegramService = {
+      getRealtimeFileStream: jest.fn(async () => ({
+        stream: makeReadable(),
+        info: { file_id: 'f', file_size: TOTAL_SIZE },
+      })),
+    };
+    const fileCacheService = {
+      getOrCacheStream: jest.fn(async (
+        _key: string,
+        _size: number,
+        fetchFn: () => Promise<{ stream: Readable }>,
+      ) => ({ stream: (await fetchFn()).stream, fromCache: false })),
+      getOrCacheRangeStream: jest.fn(),
+      getDirectOnlyStream: jest.fn(),
+    };
+    const rateLimitService = { checkAndIncrement: jest.fn(async () => ({ allowed: true })) };
+    const streamResponder = {
+      send: jest.fn(async () => undefined),
+      handleError: jest.fn((_res: Response, error: unknown) => { capturedError = error; }),
+    };
+    const auditService = { log: jest.fn() };
+    const fileCopies = {
+      findByAnchor: options.anchorThrows
+        ? jest.fn(async () => { throw new Error('副本表不可用'); })
+        : jest.fn(async () => (options.anchor === undefined ? { ownerType: 'fileUnique', ownerId: 'UNIQ-1' } : options.anchor)),
+    };
+    const accountPoolDownload = {
+      isActive: jest.fn(() => options.poolActive ?? true),
+      inactiveReason: jest.fn(() => null),
+      hasAccount: jest.fn(() => options.hasSourceAccount ?? true),
+      bumpCounter: jest.fn((key: string, delta = 1) => { counters[key] = (counters[key] ?? 0) + delta; }),
+      openStream: jest.fn(async () => (options.openStreamResult === 'ok'
+        ? { stream: makeReadable(), info: { file_id: 'pooled', file_size: TOTAL_SIZE }, accountId: '2222222', copy: null, selectionReason: 'weighted' }
+        : null)),
+      openSourceStream: jest.fn(async () => (options.sourceStreamResult === 'ok'
+        ? { stream: makeReadable(), info: { file_id: 'source', file_size: TOTAL_SIZE }, accountId: '9999999', copy: null, selectionReason: 'source-account-fallback' }
+        : null)),
+    };
+    const configService = {
+      get: jest.fn((key: string) => {
+        if (key === 'TELEGRAM_BOT_TOKEN') return DEFAULT_BOT_TOKEN;
+        if (key === 'TELEGRAM_POOL_TARGET_REPLICAS') return '2';
+        return '';
+      }),
+    };
+
+    const controller = new TelegramBotPublicController(
+      grantService as never,
+      telegramService as never,
+      fileCacheService as never,
+      rateLimitService as never,
+      streamResponder as never,
+      auditService as never,
+      accountPoolDownload as never,
+      fileCopies as never,
+      configService as never,
+    );
+
+    return {
+      controller,
+      counters,
+      grantService,
+      telegramService,
+      fileCacheService,
+      accountPoolDownload,
+      fileCopies,
+      configService,
+      getCapturedError: () => capturedError,
+    };
+  }
+
+  it('池化可用时按负载回源，不触碰单账号链路', async () => {
+    const ctx = makePoolController({ openStreamResult: 'ok' });
+    await ctx.controller.download(VALID_TOKEN, makeRequest(), res);
+
+    expect(ctx.accountPoolDownload.openStream).toHaveBeenCalledWith(expect.objectContaining({
+      ownerType: 'fileUnique',
+      ownerId: 'UNIQ-1',
+      desiredReplicas: 2,
+    }));
+    // 池化成功：不得再调用默认账号
+    expect(ctx.telegramService.getRealtimeFileStream).not.toHaveBeenCalled();
+    expect(ctx.getCapturedError()).toBeNull();
+  });
+
+  it('池化失败但源账号可确认：用源账号回源并记回退计数', async () => {
+    const ctx = makePoolController({ openStreamResult: 'null', sourceStreamResult: 'ok', sourceAccountId: '9999999' });
+    await ctx.controller.download(VALID_TOKEN, makeRequest(), res);
+
+    expect(ctx.accountPoolDownload.openSourceStream).toHaveBeenCalledWith({
+      accountId: '9999999',
+      fileId: TELEGRAM_FILE_ID,
+      expectedSize: TOTAL_SIZE,
+      noCache: true,
+    });
+    expect(ctx.counters.fallbacks).toBe(1);
+    expect(ctx.telegramService.getRealtimeFileStream).not.toHaveBeenCalled();
+    expect(ctx.getCapturedError()).toBeNull();
+  });
+
+  it('副本表暂时不可用但源账号可确认：仍回退源账号（不阻断可用性）', async () => {
+    const ctx = makePoolController({ anchorThrows: true, sourceStreamResult: 'ok', sourceAccountId: '9999999' });
+    await ctx.controller.download(VALID_TOKEN, makeRequest(), res);
+
+    expect(ctx.accountPoolDownload.openSourceStream).toHaveBeenCalledTimes(1);
+    expect(ctx.telegramService.getRealtimeFileStream).not.toHaveBeenCalled();
+  });
+
+  it('归属不明（sourceAccountId 为空）：拒绝跨账号回退并返回可诊断失败', async () => {
+    const ctx = makePoolController({ openStreamResult: 'null', sourceAccountId: null });
+    await ctx.controller.download(VALID_TOKEN, makeRequest(), res);
+
+    expect(ctx.accountPoolDownload.openSourceStream).not.toHaveBeenCalled();
+    expect(ctx.telegramService.getRealtimeFileStream).not.toHaveBeenCalled();
+    expect(ctx.counters.unresolved).toBe(1);
+    const error = ctx.getCapturedError();
+    expect(error).toBeInstanceOf(HttpException);
+    expect((error as HttpException).getStatus()).toBe(503);
+  });
+
+  it('源账号不在池内且与默认账号不一致：同样拒绝回退默认账号', async () => {
+    const ctx = makePoolController({
+      openStreamResult: 'null',
+      sourceAccountId: '8888888',
+      hasSourceAccount: false,
+    });
+    await ctx.controller.download(VALID_TOKEN, makeRequest(), res);
+
+    expect(ctx.telegramService.getRealtimeFileStream).not.toHaveBeenCalled();
+    expect((ctx.getCapturedError() as HttpException)?.getStatus()).toBe(503);
+  });
+
+  it('源账号不在池内但等于默认 Token 的账号：按单账号链路回源（身份一致）', async () => {
+    const ctx = makePoolController({
+      openStreamResult: 'null',
+      sourceAccountId: '1234567',
+      hasSourceAccount: false,
+    });
+    await ctx.controller.download(VALID_TOKEN, makeRequest(), res);
+
+    expect(ctx.telegramService.getRealtimeFileStream).toHaveBeenCalledWith(
+      TELEGRAM_FILE_ID,
+      TOTAL_SIZE,
+      { noCache: true },
+    );
+    expect(ctx.getCapturedError()).toBeNull();
+  });
+
+  it('账号池未启用：保持原单账号链路，且不查询副本表', async () => {
+    const ctx = makePoolController({ poolActive: false });
+    await ctx.controller.download(VALID_TOKEN, makeRequest(), res);
+
+    expect(ctx.fileCopies.findByAnchor).not.toHaveBeenCalled();
+    expect(ctx.accountPoolDownload.openStream).not.toHaveBeenCalled();
+    expect(ctx.telegramService.getRealtimeFileStream).toHaveBeenCalledWith(
+      TELEGRAM_FILE_ID,
+      TOTAL_SIZE,
+      { noCache: true },
+    );
+  });
+});

@@ -28,6 +28,7 @@ import { VersionModule } from './version/version.module';
 import { UpdateModule } from './update/update.module';
 import { ApiKeyModule } from './api-key/api-key.module';
 import { TelegramBotModule } from './telegram-bot/telegram-bot.module';
+import { TelegramAccountPoolModule } from './telegram-account-pool/telegram-account-pool.module';
 
 @Module({
   imports: [
@@ -62,6 +63,7 @@ import { TelegramBotModule } from './telegram-bot/telegram-bot.module';
     TelegramModule,
     ApiKeyModule,
     TelegramBotModule,
+    TelegramAccountPoolModule,
   ],
 })
 export class AppModule {}

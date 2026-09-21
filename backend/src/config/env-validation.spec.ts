@@ -218,6 +218,53 @@ describe('validateEnv', () => {
     expect(() => validateEnv(ok)).not.toThrow();
   });
 
+  it('validates Bot 账号池配置，并允许池化模式下省略单账号 Token/Chat', () => {
+    // 池化模式：单账号 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID 降级为可选，
+    // 由账号池配置提供账号来源（否则「不配单账号 Token 也能入站/回复」无法落地）。
+    const poolOnly: NodeJS.ProcessEnv = {
+      ...valid,
+      TELEGRAM_BOT_TOKEN: undefined,
+      TELEGRAM_CHAT_ID: undefined,
+      TELEGRAM_ACCOUNT_POOL_ENABLED: 'true',
+      TELEGRAM_ACCOUNT_POOL: JSON.stringify([
+        { id: 'bot1', token: '123456:AAA', chatId: '-1001234567890' },
+      ]),
+    };
+    expect(() => validateEnv(poolOnly)).not.toThrow();
+
+    const badPool: NodeJS.ProcessEnv = {
+      ...valid,
+      TELEGRAM_ACCOUNT_POOL_ENABLED: 'yes',
+      TELEGRAM_ACCOUNT_POOL: JSON.stringify([{ token: 'not-a-token', chatId: '' }]),
+      TELEGRAM_BOT_TOKENS: 'nope',
+      TELEGRAM_ARCHIVE_CHAT_ID: 'group',
+      TELEGRAM_USER_RELAY_ENABLED: 'maybe',
+    };
+    expect(() => validateEnv(badPool)).toThrow(
+      /TELEGRAM_ACCOUNT_POOL_ENABLED[\s\S]*token 格式错误[\s\S]*chatId 未设置[\s\S]*TELEGRAM_BOT_TOKENS[\s\S]*TELEGRAM_ARCHIVE_CHAT_ID[\s\S]*TELEGRAM_USER_RELAY_ENABLED/,
+    );
+
+    // 简化输入（TELEGRAM_BOT_TOKENS）必须显式提供存储 Chat；归档群不能充当存储目标
+    const tokensWithoutStorage: NodeJS.ProcessEnv = {
+      ...valid,
+      TELEGRAM_ACCOUNT_POOL_ENABLED: 'true',
+      TELEGRAM_BOT_TOKENS: '123456:AAA',
+      TELEGRAM_CHAT_ID: undefined,
+      TELEGRAM_ARCHIVE_CHAT_ID: '-100999',
+    };
+    expect(() => validateEnv(tokensWithoutStorage)).toThrow(
+      /TELEGRAM_BOT_TOKENS 作为账号池来源时必须设置 TELEGRAM_CHAT_ID/,
+    );
+
+    // 非法 JSON 必须被拒绝（否则账号池会静默退化为「无账号」）。
+    const malformed: NodeJS.ProcessEnv = {
+      ...valid,
+      TELEGRAM_ACCOUNT_POOL_ENABLED: 'true',
+      TELEGRAM_ACCOUNT_POOL: '[{"token":]',
+    };
+    expect(() => validateEnv(malformed)).toThrow(/TELEGRAM_ACCOUNT_POOL 不是合法 JSON/);
+  });
+
   it('reads process.env by default when called without arguments', () => {
     // 默认参数契约：无参调用读取当前 process.env（仅此用例替换环境，afterEach 恢复）。
     process.env = { ...valid };

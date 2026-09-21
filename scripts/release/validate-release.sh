@@ -80,7 +80,7 @@ executables = {
     f'{root}/scripts/release/rollback.sh', f'{root}/scripts/release/validate-release.sh',
     f'{root}/scripts/release/updater.sh', f'{root}/scripts/release/download-release.sh',
 }
-forbidden_parts = ('telegram-bot-api/data/', 'redis/', 'uploads/', 'logs/', 'cache/')
+forbidden_parts = ('telegram-bot-api/data/', 'redis/', 'uploads/', 'logs/', 'cache/', 'beta/')
 forbidden_files = ('.env', 'backend/.env')
 max_members = 100_000
 max_member_bytes = 2 * 1024 * 1024 * 1024
