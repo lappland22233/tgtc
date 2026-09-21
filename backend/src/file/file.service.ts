@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, ForbiddenException, BadRequestException, ConflictException, GoneException, HttpException, OnModuleInit, Logger } from '@nestjs/common';
+import { Injectable, NotFoundException, ForbiddenException, BadRequestException, ConflictException, GoneException, HttpException, OnModuleInit, Logger, Optional, Inject } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, In, IsNull, EntityManager } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
@@ -37,6 +37,11 @@ import { FileAccessControlService } from './file-access-control.service';
 import { FileUploadConfigService } from './file-upload-config.service';
 import { assertFileReadable, assertFileWritable } from '../common/utils/file-permissions';
 import { v4 as uuidv4 } from 'uuid';
+// 阶段 4：普通 Web 上传文件的回源接入账号池（可选依赖，未装配/未启用时保持原单账号链路）
+import { AccountAwareDownloadService } from '../telegram-account-pool/account-aware-download.service';
+import { FileCopyService } from '../telegram-account-pool/file-copy.service';
+// 镜像触发（可选依赖：不装配时不产生任何行为变化）
+import { TelegramMirrorTriggerService } from '../telegram-mirror/telegram-mirror-trigger.service';
 
 import { FILE_DELETE_GRACE_MS, FILE_DELETE_COOLDOWN_MS, FILE_FORCE_DELETE_WAIT_MS, MS_PER_SECOND } from '../common/constants/durations';
 import { isSafePublicInlineContentType } from '../common/utils/preview-content-type';
@@ -130,7 +135,147 @@ export class FileService implements OnModuleInit {
     private readonly accessControl: FileAccessControlService,
     // M6 拆分：上传配置与类型/大小校验域（见 file-upload-config.service.ts）
     private readonly uploadConfig: FileUploadConfigService,
+    // 阶段 4（P2）可选依赖：账号池回源与副本表。均为 @Optional：
+    // 模块未装配或账号池未启用时，回源行为与改造前逐字节一致。
+    @Optional() @Inject(AccountAwareDownloadService)
+    private readonly accountAwareDownload: AccountAwareDownloadService | null = null,
+    @Optional() @Inject(FileCopyService)
+    private readonly fileCopies: FileCopyService | null = null,
+    // 镜像触发（可选依赖；关闭时零开销）
+    @Optional() @Inject(TelegramMirrorTriggerService)
+    private readonly mirrorTrigger: TelegramMirrorTriggerService | null = null,
   ) {
+  }
+
+  /**
+   * 统一的 Telegram 回源入口（阶段 4：Web 上传文件接入账号池）。
+   *
+   * 行为约定：
+   * - 账号池可用且该文件已有副本记录 → 按负载选号回源（失败自动换号，账号级冷却）；
+   * - 其他任何情况（未装配 / 未启用 / 无副本 / 选号失败）→ **原单账号链路**，
+   *   不改变返回结构与 Range/缓存语义。
+   *
+   * 安全：这里只做「取流」选择，绝不把 A 账号的 `file_id` 交给 B 账号——
+   * 每个候选副本都带有它自己的 `file_id`（副本表事实）。
+   */
+  private async openTelegramSourceStream(
+    file: File,
+    expectedSize: number,
+    options?: { noCache?: boolean },
+  ): Promise<{ stream: Readable; info: { file_id: string; file_path: string; file_size: number } }> {
+    const noCache = options?.noCache === true;
+    const poolDownload = this.accountAwareDownload;
+    if (poolDownload?.isActive() && this.fileCopies) {
+      try {
+        const copies = await this.fileCopies.listReady('file', file.id);
+        if (copies.length > 0) {
+          const opened = await poolDownload.openStream({
+            ownerType: 'file',
+            ownerId: file.id,
+            expectedSize,
+            noCache,
+            fileName: file.originalName || file.filename,
+          });
+          if (opened) {
+            return {
+              stream: opened.stream,
+              // 池化副本的 file_path 属于该账号的 Bot API 实例，不回写主副本路径
+              info: { file_id: opened.info.file_id, file_path: '', file_size: opened.info.file_size },
+            };
+          }
+          this.logger.warn(`账号池回源未取得流，回退单账号链路（file=${file.id}）`);
+        }
+      } catch (error) {
+        this.logger.warn(
+          `账号池回源异常，回退单账号链路（file=${file.id}）：${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    return this.telegramService.getRealtimeFileStream(
+      file.telegramFileId || file.filename,
+      expectedSize,
+      { noCache },
+    );
+  }
+
+  /**
+   * 记录主副本定位信息并登记副本（best-effort，绝不影响上传结果）。
+   *
+   * 为什么必须记录：用户账号无源复制需要源 `chat_id + message_id`；
+   * 副本表需要 `file_unique_id`（跨账号稳定）或站内文件 ID 作为逻辑主键。
+   * 任何字段缺失（旧 fork 不回 message_id）都只跳过对应能力，不回滚上传。
+   */
+  async registerPrimaryTelegramSource(
+    file: File,
+    uploaded: {
+      file_id: string;
+      chat_id?: string | null;
+      message_id?: string | null;
+      file_unique_id?: string | null;
+    },
+  ): Promise<void> {
+    try {
+      await this.fileRepository.update({ id: file.id }, {
+        telegramChatId: uploaded.chat_id ?? null,
+        telegramMessageId: uploaded.message_id ?? null,
+        telegramFileUniqueId: uploaded.file_unique_id ?? null,
+        telegramSourceAccountId: this.defaultBotAccountId(),
+      });
+
+      if (this.fileCopies && uploaded.chat_id && uploaded.message_id) {
+        await this.fileCopies.upsertReady({
+          ownerType: 'file',
+          ownerId: file.id,
+          accountId: this.defaultBotAccountId() ?? 'default',
+          telegramFileId: uploaded.file_id,
+          chatId: uploaded.chat_id,
+          messageId: uploaded.message_id,
+          fileSize: Number(file.size) || null,
+          source: 'inbound',
+        });
+      }
+    } catch (error) {
+      this.logger.warn(
+        `主副本定位信息记录失败（file=${file.id}，不影响上传结果）：${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  /** Web 上传单账号链路的产生账号（默认 Bot 的 token 前缀） */
+  private defaultBotAccountId(): string | null {
+    const token = (this.configService.get<string>('TELEGRAM_BOT_TOKEN') || '').trim();
+    const prefix = token.split(':')[0];
+    return prefix && token.includes(':') ? prefix : null;
+  }
+
+  /**
+   * 主文件远端提交成功后触发镜像（fire-and-forget）。
+   *
+   * 时机契约：站内状态已提交后调用；镜像失败**不回滚**主上传，
+   * 主文件可用性与备份状态在后台分开展示。
+   */
+  async triggerMirrorForFile(
+    file: File,
+    uploaded: { chat_id?: string | null; message_id?: string | null },
+  ): Promise<void> {
+    if (!this.mirrorTrigger) return;
+    try {
+      await this.mirrorTrigger.onFileCommitted(
+        {
+          ownerType: 'file',
+          ownerId: file.id,
+          sourceVersion: Number(file.uploadVersion) || 1,
+          sourceAccountId: this.defaultBotAccountId(),
+          sourceChatId: uploaded.chat_id ?? null,
+          sourceMessageId: uploaded.message_id ?? null,
+        },
+        'web_upload',
+      );
+    } catch (error) {
+      this.logger.warn(
+        `镜像触发失败（file=${file.id}，不影响上传结果）：${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   async onModuleInit() {
@@ -667,6 +812,10 @@ export class FileService implements OnModuleInit {
       resourceId: savedFile.id,
       metadata: { filename: originalName, size: file.size, mimeType: file.mimetype },
     });
+
+    // 站内状态已提交：记录主副本定位并触发镜像（best-effort，失败不影响上传结果）
+    await this.registerPrimaryTelegramSource(savedFile, telegramFile);
+    void this.triggerMirrorForFile(savedFile, telegramFile);
 
     if (file.mimetype.startsWith('video/')) {
       await this.generateAndSaveVideoCover(savedFile, { sourcePath: file.path, sourceBuffer: file.buffer });
@@ -1632,11 +1781,9 @@ export class FileService implements OnModuleInit {
       // 否则动态跟随全局配置（默认构建缓存路径不带头，容量准备期间翻转进入无缓存早退分支则带头）。
       const forceNoCache = noCache && !this.fileCacheService.isNoCacheMode();
       const fetch = async () => {
-        const result = await this.telegramService.getRealtimeFileStream(
-          file.telegramFileId || file.filename,
-          expectedSize,
-          { noCache: this.fileCacheService.isNoCacheMode() || forceNoCache },
-        );
+        const result = await this.openTelegramSourceStream(file, expectedSize, {
+          noCache: this.fileCacheService.isNoCacheMode() || forceNoCache,
+        });
         recoveredInfo = result.info;
         return result;
       };
@@ -1804,11 +1951,9 @@ export class FileService implements OnModuleInit {
   ): Promise<Readable | null> {
     const expectedSize = Number(file.size);
     const forceNoCache = noCache && !this.fileCacheService.isNoCacheMode();
-    const fetchFn = async () => this.telegramService.getRealtimeFileStream(
-      file.telegramFileId || file.filename,
-      expectedSize,
-      { noCache: this.fileCacheService.isNoCacheMode() || forceNoCache },
-    );
+    const fetchFn = async () => this.openTelegramSourceStream(file, expectedSize, {
+      noCache: this.fileCacheService.isNoCacheMode() || forceNoCache,
+    });
     const stream = await this.fileCacheService.getOrCacheRangeStream(
       file.id, expectedSize, start, end, fetchFn,
       { noCache: forceNoCache, contentVersion: file.uploadVersion },
@@ -2313,11 +2458,9 @@ export class FileService implements OnModuleInit {
     const { start, end } = parsed.range;
 
     const expectedSize = Number(file.size);
-    const fetchFn = () => this.telegramService.getRealtimeFileStream(
-      file.telegramFileId || file.filename,
-      expectedSize,
-      { noCache: this.fileCacheService.isNoCacheMode() },
-    );
+    const fetchFn = () => this.openTelegramSourceStream(file, expectedSize, {
+      noCache: this.fileCacheService.isNoCacheMode(),
+    });
     const stream = await this.fileCacheService.getOrCacheRangeStream(file.id, expectedSize, start, end, fetchFn, {
       contentVersion: file.uploadVersion,
     });
@@ -2642,6 +2785,9 @@ export class FileService implements OnModuleInit {
         'uploadToTelegram',
       );
       if (overwritten) {
+        // 覆盖上传递增 uploadVersion：定位信息按新版本重写，旧镜像任务会自动作废
+        await this.registerPrimaryTelegramSource(overwritten, telegramFile);
+        void this.triggerMirrorForFile(overwritten, telegramFile);
         await this.generateUploadedMediaThumbnail(overwritten, file);
         this.cleanupTempFile(file);
         return overwritten;
@@ -2690,6 +2836,10 @@ export class FileService implements OnModuleInit {
       }
       throw error;
     });
+    // 非覆盖新建分支：必须与覆盖分支、同步上传分支保持同一收尾（定位登记 + 镜像触发），
+    // 否则批量上传/分片合并后的文件会「有主文件、无定位、无备份」。
+    await this.registerPrimaryTelegramSource(savedFile, telegramFile);
+    void this.triggerMirrorForFile(savedFile, telegramFile);
     await this.generateUploadedMediaThumbnail(savedFile, file);
     this.cleanupTempFile(file);
     return savedFile;
@@ -3040,11 +3190,9 @@ export class FileService implements OnModuleInit {
     // 冷资源（无正式缓存）不支持真实分片：返回 null 交由控制器回退全量预览，
     // 由 getPreviewStream → getOrCacheStream 复用同一缓存构建会话，保证单连接加载；
     // 前端在冷资源阶段钳制 seek，拖动进度条不再触发新的动态分段回源。
-    const fetchFn = () => this.telegramService.getRealtimeFileStream(
-      file.telegramFileId || file.filename,
-      total,
-      { noCache: this.fileCacheService.isNoCacheMode() },
-    );
+    const fetchFn = () => this.openTelegramSourceStream(file, total, {
+      noCache: this.fileCacheService.isNoCacheMode(),
+    });
     const readStream = await this.fileCacheService.getOrCacheRangeStream(file.id, total, start, actualEnd, fetchFn, {
       contentVersion: file.uploadVersion,
     });
@@ -3123,11 +3271,9 @@ export class FileService implements OnModuleInit {
     const start = parsed.range.start;
     const end = parsed.range.end;
 
-    const fetchFn = () => this.telegramService.getRealtimeFileStream(
-      file.telegramFileId || file.filename,
-      total,
-      { noCache: this.fileCacheService.isNoCacheMode() },
-    );
+    const fetchFn = () => this.openTelegramSourceStream(file, total, {
+      noCache: this.fileCacheService.isNoCacheMode(),
+    });
     const stream = await this.fileCacheService.getOrCacheRangeStream(file.id, total, start, end, fetchFn, {
       contentVersion: file.uploadVersion,
     });

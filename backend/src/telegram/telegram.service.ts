@@ -11,6 +11,7 @@ import type { TelegramSendMessageResult, TelegramUpdate } from './telegram.types
 
 interface TelegramMedia {
   file_id?: string;
+  file_unique_id?: string;
   file_size?: number;
 }
 
@@ -20,6 +21,9 @@ interface TelegramMediaResult {
   video?: TelegramMedia;
   audio?: TelegramMedia;
   voice?: TelegramMedia;
+  /** 上传产生的消息 ID 与所在 chat（用户账号无源复制需要用它定位源消息）。 */
+  message_id?: number;
+  chat?: { id?: number };
   /** 自建 Bot API 严格无缓存扩展：false 表示远端消息成功但 TDLib 本地副本待释放。 */
   local_cache_released?: boolean;
 }
@@ -463,21 +467,28 @@ export class TelegramService {
     filename: string,
     signal?: AbortSignal,
     knownLength?: number,
-    options?: { noCache?: boolean },
+    options?: { noCache?: boolean; chatId?: string },
   ): Promise<{
     file_id: string;
     file_path: string;
     file_size: number;
+    /** 主副本定位信息：镜像任务与用户账号无源复制依赖它 */
+    message_id: string | null;
+    chat_id: string | null;
+    file_unique_id: string | null;
   }> {
     // 流式上传：form-data 支持 Readable stream，使用 knownLength 避免一次性读入内存
     const isStream = file instanceof Readable;
     // 流只能被消费一次：429 重试会复用已消费的流，导致重试必然失败或上传损坏。
     // 因此流式上传禁用自动重试（retries=1）；Buffer 上传可安全重发，保留 3 次重试。
     const retries = isStream ? 1 : 3;
+    // 目标 Chat 可覆盖：镜像备份需要把文件上传到**备份群**而不是主存储 Chat；
+    // 未指定时保持原行为（主存储 Chat），单账号链路不受影响。
+    const chatId = (options?.chatId || this.chatId || '').trim();
 
     return this.telegramRequest(async () => {
       const form = new FormData();
-      form.append('chat_id', this.chatId);
+      form.append('chat_id', chatId);
 
       if (isStream) {
         form.append('document', file, { filename, knownLength });
@@ -522,10 +533,20 @@ export class TelegramService {
         : (typeof fallbackSize === 'number' && Number.isSafeInteger(fallbackSize) && fallbackSize >= 0
           ? fallbackSize
           : 0);
+      // 消息定位：镜像备份（用户账号无源复制）必须持有源 chat_id + message_id；
+      // 与 file_id 一样属于回执事实，不额外调用 getFile。
+      const rawMessageId = result?.message_id;
+      const rawChatId = result?.chat?.id;
       return {
         file_id,
         file_path: '',
         file_size,
+        message_id: typeof rawMessageId === 'number' && Number.isSafeInteger(rawMessageId)
+          ? String(rawMessageId)
+          : null,
+        // 缺 chat.id 的旧实现回落到本次请求实际使用的 chatId，语义仍准确。
+        chat_id: rawChatId != null ? String(rawChatId) : (chatId || null),
+        file_unique_id: media.file_unique_id ? String(media.file_unique_id) : null,
         // 严格任务要求 fork 明确确认本地媒体已释放；缺字段的旧 fork 保守标记 false，
         // Worker 只会重试 releaseLocalFile，绝不重新发送同一 Telegram 文件。
         ...(options?.noCache ? { localCacheReleased: result?.local_cache_released === true } : {}),

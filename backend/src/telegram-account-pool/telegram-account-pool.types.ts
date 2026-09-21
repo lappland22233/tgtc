@@ -24,6 +24,11 @@ export interface TelegramAccountConfig {
   enabled: boolean;
   /** 备注（如机房/线路，便于报告与排障；不含敏感信息） */
   note?: string;
+  /**
+   * 配置来源：`env`=环境变量引导（进程启动时固定）；`panel`=后台账号管理（数据库，可热更新）。
+   * 用于把「面板账号集合」与「env 引导账号」分开刷新：刷新只替换 panel 项，env 项保持不变。
+   */
+  source?: 'env' | 'panel';
 }
 
 /** 账号运行期状态（进程内，重启即重置） */
@@ -133,5 +138,7 @@ export interface AccountPoolSnapshot {
     totalBytes: number;
     lastErrorKind: AccountFailureKind | null;
     note?: string;
+    /** 配置来源：env=环境变量引导；panel=后台账号管理（热更新） */
+    source?: 'env' | 'panel';
   }>;
 }

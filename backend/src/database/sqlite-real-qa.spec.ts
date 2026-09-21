@@ -69,6 +69,10 @@ describe('真实 SQLite 数据源关键业务与并发 QA', () => {
       'SqliteAddAccessLogTransferFields1802600000000',
       // v1.5.0：Telegram 文件副本表（多账号回源）+ grants 源账号锚点
       'SqliteTelegramFileCopies1802900000000',
+      // v1.5.2：账号池后台管理（账号主数据）+ 镜像规则/任务 + files 主副本定位字段
+      'SqliteCreateTelegramAccounts1803000000000',
+      'SqliteCreateTelegramMirror1803100000000',
+      'SqliteAddFileTelegramSourceFields1803200000000',
     ]);
 
     await dataSource.undoLastMigration();

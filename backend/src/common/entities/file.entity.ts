@@ -47,6 +47,27 @@ export class File {
   @Column({ nullable: true })
   telegramFilePath: string;
 
+  /**
+   * 主副本的远端定位信息（账号池 / 镜像备份使用）。
+   *
+   * 为什么需要：`telegramFileId` 只能取流，无法定位「哪条消息、哪个群、哪个账号产生」；
+   * 用户账号无源复制（MTProto copyMessages）必须持有源 `chat_id + message_id`，
+   * 镜像任务与副本归属校验也需要账号锚点。全部允许为空，历史数据保持兼容。
+   */
+  @Column({ type: 'varchar', length: 32, nullable: true, comment: '主副本所在 Chat' })
+  telegramChatId: string | null;
+
+  @Column({ type: 'varchar', length: 32, nullable: true, comment: '主副本消息 ID' })
+  telegramMessageId: string | null;
+
+  /** Telegram `file_unique_id`：跨账号稳定，作为副本表的逻辑主键 */
+  @Column({ type: 'varchar', length: 256, nullable: true, comment: 'Telegram file_unique_id（跨账号稳定）' })
+  telegramFileUniqueId: string | null;
+
+  /** 产生主副本 `telegramFileId` 的账号 ID（禁止跨账号复用该 file_id） */
+  @Column({ type: 'varchar', length: 64, nullable: true, comment: '主副本所属账号 ID' })
+  telegramSourceAccountId: string | null;
+
   /** 本地缩略图路径（相对于 THUMBNAIL_DIR，如 {id}.webp） */
   @Column({ type: 'varchar', length: 512, nullable: true, default: null })
   thumbnailPath: string | null;

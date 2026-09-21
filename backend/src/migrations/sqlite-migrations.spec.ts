@@ -1,5 +1,9 @@
 import { DataSource, EntitySchema } from 'typeorm';
 
+// SQLite 建库 + 全量迁移在 CI 满负载下可能超过 jest 默认 5s（该套件本身耗时数百毫秒，
+// 整体套件同进程串行执行时会被资源争用拖慢）→ 统一放宽超时，避免偶发假失败。
+jest.setTimeout(30_000);
+
 function sqliteAffinity(type: string): string {
   const normalized = type.toUpperCase();
   if (normalized.includes('INT')) return 'INTEGER';
@@ -60,6 +64,25 @@ describe('SQLite schema migrations（隔离内存库）', () => {
     expect(copyIndexes.find((index: { name: string }) => index.name === 'uq_tg_file_copies_owner_account'))
       .toMatchObject({ unique: 1 });
     expect(copyIndexes.find((index: { name: string }) => index.name === 'idx_tg_file_copies_anchor')).toBeDefined();
+
+    // 账号与镜像实体同样由基线建表，索引口径必须与增量迁移一致。
+    const accountIndexes = await dataSource.query('PRAGMA index_list("telegram_accounts")');
+    expect(accountIndexes.find((index: { name: string }) => index.name === 'uq_tg_accounts_type_external'))
+      .toMatchObject({ unique: 1 });
+    expect(accountIndexes.find((index: { name: string }) => index.name === 'idx_tg_accounts_status')).toBeDefined();
+    expect(accountIndexes.find((index: { name: string }) => index.name === 'idx_tg_accounts_enabled')).toBeDefined();
+
+    const mirrorRuleIndexes = await dataSource.query('PRAGMA index_list("telegram_mirror_rules")');
+    expect(mirrorRuleIndexes.find((index: { name: string }) => index.name === 'idx_tg_mirror_rules_enabled')).toBeDefined();
+
+    const mirrorTaskIndexes = await dataSource.query('PRAGMA index_list("telegram_mirror_tasks")');
+    expect(mirrorTaskIndexes.find((index: { name: string }) => index.name === 'uq_tg_mirror_tasks_idempotency'))
+      .toMatchObject({ unique: 1 });
+    expect(mirrorTaskIndexes.find((index: { name: string }) => index.name === 'idx_tg_mirror_tasks_next_retry')).toBeDefined();
+
+    const fileColumns = await dataSource.query('PRAGMA table_info("files")');
+    expect(fileColumns.find((column: { name: string }) => column.name === 'telegramMessageId')).toBeDefined();
+    expect(fileColumns.find((column: { name: string }) => column.name === 'telegramSourceAccountId')).toBeDefined();
 
     const userColumns = await dataSource.query('PRAGMA table_info("users")');
     const isBanned = userColumns.find((column: { name: string }) => column.name === 'isBanned');
@@ -392,6 +415,81 @@ describe('SQLite schema migrations（隔离内存库）', () => {
     await new SqliteTelegramFileCopies1802900000000().up(dataSource.createQueryRunner());
     const copyCount = await dataSource.query('SELECT COUNT(*) AS count FROM "telegram_file_copies"');
     expect(copyCount[0].count).toBe(2);
+
+    const integrity = await dataSource.query('PRAGMA integrity_check');
+    expect(Object.values(integrity[0])).toEqual(['ok']);
+  });
+
+  it('存量库升级：180300/180310/180320 自建账号与镜像表并补 files 定位列', async () => {
+    // 模拟旧基线库存量库：账号与镜像表尚不存在，files 也没有主副本定位列。
+    dataSource = new DataSource({ type: 'sqlite', database: ':memory:', entities: [], synchronize: false });
+    await dataSource.initialize();
+    await dataSource.query(`CREATE TABLE "migrations" (
+      "id" integer PRIMARY KEY AUTOINCREMENT NOT NULL,
+      "timestamp" bigint NOT NULL, "name" varchar NOT NULL
+    )`);
+    await dataSource.query(`CREATE TABLE "files" (
+      "id" varchar PRIMARY KEY NOT NULL, "filename" varchar NOT NULL, "originalName" varchar NOT NULL,
+      "uploaderId" varchar NOT NULL, "telegramFileId" varchar NOT NULL
+    )`);
+
+    const { SqliteCreateTelegramAccounts1803000000000 } = require('./1803000000000-SqliteCreateTelegramAccounts') as typeof import('./1803000000000-SqliteCreateTelegramAccounts');
+    const { SqliteCreateTelegramMirror1803100000000 } = require('./1803100000000-SqliteCreateTelegramMirror') as typeof import('./1803100000000-SqliteCreateTelegramMirror');
+    const { SqliteAddFileTelegramSourceFields1803200000000 } = require('./1803200000000-SqliteAddFileTelegramSourceFields') as typeof import('./1803200000000-SqliteAddFileTelegramSourceFields');
+
+    await new SqliteCreateTelegramAccounts1803000000000().up(dataSource.createQueryRunner());
+    await new SqliteCreateTelegramMirror1803100000000().up(dataSource.createQueryRunner());
+    await new SqliteAddFileTelegramSourceFields1803200000000().up(dataSource.createQueryRunner());
+
+    const tables = await dataSource.query(
+      `SELECT name FROM sqlite_master WHERE type='table' AND name IN ('telegram_accounts','telegram_mirror_rules','telegram_mirror_tasks')`,
+    );
+    expect(tables.map((row: { name: string }) => row.name).sort()).toEqual([
+      'telegram_accounts',
+      'telegram_mirror_rules',
+      'telegram_mirror_tasks',
+    ]);
+
+    const accountIndexes = await dataSource.query('PRAGMA index_list("telegram_accounts")');
+    expect(accountIndexes.find((index: { name: string }) => index.name === 'uq_tg_accounts_type_external'))
+      .toMatchObject({ unique: 1 });
+
+    // 账号表可写：同一 (type, externalId) 重复登记必须被唯一约束拦截。
+    await dataSource.query(
+      `INSERT INTO "telegram_accounts" ("id","type","name","externalId","status","enabled","weight","maxInflight")
+       VALUES ('a1','bot','主存储 Bot','123456','active',1,1,8)`,
+    );
+    await expect(dataSource.query(
+      `INSERT INTO "telegram_accounts" ("id","type","name","externalId","status","enabled","weight","maxInflight")
+       VALUES ('a2','bot','重复 Bot','123456','active',1,1,8)`,
+    )).rejects.toThrow();
+
+    // 镜像任务幂等键：同 (ruleId, ownerType, ownerId, sourceVersion) 只允许一条。
+    await dataSource.query(
+      `INSERT INTO "telegram_mirror_tasks" ("id","ruleId","ownerType","ownerId","sourceVersion","mode","status")
+       VALUES ('t1','r1','file','f1',1,'bot_upload','queued')`,
+    );
+    await expect(dataSource.query(
+      `INSERT INTO "telegram_mirror_tasks" ("id","ruleId","ownerType","ownerId","sourceVersion","mode","status")
+       VALUES ('t2','r1','file','f1',1,'bot_upload','queued')`,
+    )).rejects.toThrow();
+    // 覆盖上传（版本递增）允许产生新任务。
+    await dataSource.query(
+      `INSERT INTO "telegram_mirror_tasks" ("id","ruleId","ownerType","ownerId","sourceVersion","mode","status")
+       VALUES ('t3','r1','file','f1',2,'bot_upload','queued')`,
+    );
+
+    const fileColumns = await dataSource.query('PRAGMA table_info("files")');
+    for (const name of ['telegramChatId', 'telegramMessageId', 'telegramFileUniqueId', 'telegramSourceAccountId']) {
+      expect(fileColumns.find((column: { name: string }) => column.name === name)).toBeDefined();
+    }
+
+    // 幂等：重复执行不报错、不重复建表或重复加列。
+    await new SqliteCreateTelegramAccounts1803000000000().up(dataSource.createQueryRunner());
+    await new SqliteCreateTelegramMirror1803100000000().up(dataSource.createQueryRunner());
+    await new SqliteAddFileTelegramSourceFields1803200000000().up(dataSource.createQueryRunner());
+    expect(await dataSource.query('SELECT COUNT(*) AS count FROM "telegram_accounts"')).toEqual([{ count: 1 }]);
+    expect(await dataSource.query('SELECT COUNT(*) AS count FROM "telegram_mirror_tasks"')).toEqual([{ count: 2 }]);
 
     const integrity = await dataSource.query('PRAGMA integrity_check');
     expect(Object.values(integrity[0])).toEqual(['ok']);

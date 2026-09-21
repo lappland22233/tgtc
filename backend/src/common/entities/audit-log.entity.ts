@@ -89,7 +89,27 @@ export type AuditAction =
   | 'telegram_bot_quota_denied'
   | 'telegram_bot_whitelist_add'
   | 'telegram_bot_whitelist_remove'
-  | 'telegram_bot_command_denied';
+  | 'telegram_bot_command_denied'
+  // ---- Telegram 账号池管理 + 文件镜像备份 ----
+  | 'telegram_account_created'
+  | 'telegram_account_updated'
+  | 'telegram_account_enabled'
+  | 'telegram_account_disabled'
+  | 'telegram_account_deleted'
+  | 'telegram_account_credential_rotated'
+  | 'telegram_account_tested'
+  | 'telegram_account_auth_started'
+  | 'telegram_account_auth_succeeded'
+  | 'telegram_account_auth_failed'
+  | 'telegram_mirror_feature_enabled'
+  | 'telegram_mirror_feature_disabled'
+  | 'telegram_mirror_config_changed'
+  | 'telegram_mirror_rule_tested'
+  | 'telegram_mirror_task_retried'
+  | 'telegram_mirror_task_cancelled'
+  | 'telegram_mirror_fallback_applied'
+  | 'telegram_mirror_backfill_started'
+  | 'telegram_mirror_backfill_resumed';
 
 /** 审计日志状态 */
 export enum AuditStatus {

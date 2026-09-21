@@ -111,6 +111,24 @@ describe('evaluateDeploymentPreflight', () => {
     expect(result.errors.join('\n')).toMatch(/TELEGRAM_USER_RELAY_ENABLED=true 被拒绝/);
   });
 
+  it('warns when account features are enabled without the credential encryption key', () => {
+    const missingKey = evaluateDeploymentPreflight({
+      NODE_ENV: 'production',
+      SECURE_COOKIE: 'true',
+      TELEGRAM_MIRROR_ENABLED: 'true',
+    });
+    expect(missingKey.errors).toEqual([]);
+    expect(missingKey.warnings.join('\n')).toMatch(/TELEGRAM_ACCOUNT_ENCRYPTION_KEY/);
+
+    const withKey = evaluateDeploymentPreflight({
+      NODE_ENV: 'production',
+      SECURE_COOKIE: 'true',
+      TELEGRAM_MIRROR_ENABLED: 'true',
+      TELEGRAM_ACCOUNT_ENCRYPTION_KEY: 'a'.repeat(64),
+    });
+    expect(withKey.warnings.join('\n')).not.toMatch(/TELEGRAM_ACCOUNT_ENCRYPTION_KEY/);
+  });
+
   it('accepts explicit single-instance deployment', () => {
     const result = evaluateDeploymentPreflight({
       NODE_ENV: 'production',

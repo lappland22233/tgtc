@@ -70,6 +70,20 @@ export class TelegramAccountPoolService implements OnModuleInit, OnApplicationSh
   /** 供健康探测注入：`(id) => Promise<void>`；由模块装配阶段设置，避免循环依赖 */
   private probeFn: ((accountId: string) => Promise<{ ok: boolean; latencyMs?: number; error?: string }>) | null = null;
 
+  /**
+   * 面板（数据库）账号来源，由账号管理模块在装配阶段注册。
+   *
+   * 为什么用注册回调而不是直接 import 账号管理模块：账号管理模块需要本服务做
+   * 连通性探测（`TelegramAccountClientService`），直接互相 import 会形成模块环。
+   */
+  private externalAccountSource: (() => Promise<TelegramAccountConfig[]>) | null = null;
+
+  /**
+   * 运行时开关（来自 `SystemConfig` 的面板热切换）。
+   * `null` 表示尚未同步，沿用环境变量的引导值；同步后以面板值为准。
+   */
+  private runtimeEnabled: boolean | null = null;
+
   constructor(private readonly configService: ConfigService) {
     this.enabled = (this.configService.get<string>('TELEGRAM_ACCOUNT_POOL_ENABLED') || '')
       .trim()
@@ -94,9 +108,14 @@ export class TelegramAccountPoolService implements OnModuleInit, OnApplicationSh
     }
   }
 
+  /** 当前生效的开关值（面板运行时值优先，未同步时用环境变量引导值） */
+  effectiveEnabled(): boolean {
+    return this.runtimeEnabled ?? this.enabled;
+  }
+
   /** 是否处于"可用的池化模式"（启用 + 至少一个账号） */
   isActive(): boolean {
-    return this.enabled && this.runtimes.size > 0;
+    return this.effectiveEnabled() && this.runtimes.size > 0;
   }
 
   /**
@@ -104,11 +123,86 @@ export class TelegramAccountPoolService implements OnModuleInit, OnApplicationSh
    * 用于区分「服务健康」与「账号池已启用但未生效（配置缺失/非法）」。
    */
   inactiveReason(): string | null {
-    if (!this.enabled) return 'TELEGRAM_ACCOUNT_POOL_ENABLED 未显式设为 true';
+    if (!this.effectiveEnabled()) {
+      return this.runtimeEnabled === null
+        ? 'TELEGRAM_ACCOUNT_POOL_ENABLED 未显式设为 true'
+        : '账号池总开关已关闭（后台运行时配置）';
+    }
     if (this.runtimes.size === 0) {
-      return '未解析到任何账号（TELEGRAM_ACCOUNT_POOL / TELEGRAM_BOT_TOKENS 为空或非法）';
+      return '未解析到任何账号（TELEGRAM_ACCOUNT_POOL / TELEGRAM_BOT_TOKENS 为空，且后台未启用任何账号）';
     }
     return null;
+  }
+
+  /**
+   * 注册面板账号来源（由账号管理模块装配阶段调用）。
+   * 来源必须**已解密**凭据且只返回可用账号（禁用/撤销/待授权的账号不得出现在结果中）。
+   */
+  registerAccountSource(fn: () => Promise<TelegramAccountConfig[]>): void {
+    this.externalAccountSource = fn;
+  }
+
+  /**
+   * 刷新面板账号与运行时开关（幂等，可反复调用）。
+   *
+   * 语义：
+   * - **只替换 `source='panel'` 的账号**，env 引导账号（source='env'）保持不变；
+   * - 已存在的面板账号保留运行期画像（健康/带宽/冷却），只更新静态配置；
+   * - 面板中已删除/停用的账号被移除，不再参与调度（在途请求由调用方自然收尾）；
+   * - 运行时开关立即生效：关闭只阻止新任务（`isActive()=false`），不中断已开始的流。
+   */
+  async refreshExternalAccounts(runtimeEnabled: boolean | null): Promise<void> {
+    this.runtimeEnabled = runtimeEnabled;
+    if (!this.externalAccountSource) return;
+
+    let configs: TelegramAccountConfig[];
+    try {
+      configs = await this.externalAccountSource();
+    } catch (error) {
+      // 面板账号刷新失败不影响 env 账号与既有调度；下轮重试
+      this.logger.warn(
+        `面板账号刷新失败（保留现有账号继续调度）：${error instanceof Error ? error.message : String(error)}`,
+      );
+      return;
+    }
+
+    const incoming = new Map(configs.map((config) => [config.id, { ...config, source: 'panel' as const }]));
+    const removed: string[] = [];
+    for (const [id, runtime] of this.runtimes.entries()) {
+      if (runtime.config.source !== 'panel') continue;
+      if (!incoming.has(id)) {
+        this.runtimes.delete(id);
+        removed.push(id);
+      }
+    }
+
+    const added: string[] = [];
+    for (const [id, config] of incoming.entries()) {
+      const existing = this.runtimes.get(id);
+      if (existing) {
+        // 保留运行期画像（冷却/带宽/成功率/在飞计数），只更新静态配置
+        existing.config = { ...existing.config, ...config };
+      } else {
+        this.runtimes.set(id, this.createRuntime(config));
+        added.push(id);
+      }
+    }
+
+    if (added.length > 0 || removed.length > 0) {
+      this.logger.log(
+        `面板账号已同步：新增 ${added.length} 个${added.length ? `（${added.join(', ')}）` : ''}`
+        + `，移除 ${removed.length} 个${removed.length ? `（${removed.join(', ')}）` : ''}`,
+      );
+    }
+
+    // 新账号立即探测一轮，避免「未探测 → 中性分」长时间误导选择
+    if (added.length > 0 && this.effectiveEnabled() && this.probeFn) {
+      for (const id of added) {
+        void this.probeFn(id).then((result) => this.recordProbe(id, result.ok, result.latencyMs, result.error));
+      }
+    }
+    // 热开启（env 关闭 → 面板开启）后补上周期探测
+    this.ensureProbeTimer();
   }
 
   /** 计数（进程内，单实例语义） */
@@ -134,11 +228,24 @@ export class TelegramAccountPoolService implements OnModuleInit, OnApplicationSh
   }
 
   async onModuleInit(): Promise<void> {
+    this.ensureProbeTimer();
+  }
+
+  /**
+   * 确保健康探测定时器在「池化真正可用」时运行。
+   *
+   * 为什么不能只在 onModuleInit 判断一次：`env 关闭 → 后台热开启` 是推荐路径，
+   * 启动时 `isActive()=false` 会永久跳过定时探测，账号健康度只能靠"新增时探一次"，
+   * 冷却恢复与在线状态识别都会失准。这里做成幂等的"按需启动"。
+   */
+  private ensureProbeTimer(): void {
     if (!this.isActive()) return;
-    // 启动即探测一轮，避免"新账号未探测 → 中性分"长时间误导选择
+    if (this.probeTimer) return;
+    // 启动即探测一轮，避免"未探测 → 中性分"长时间误导选择
     void this.probeAll();
     this.probeTimer = setInterval(() => void this.probeAll(), HEALTH_PROBE_INTERVAL_MS);
     this.probeTimer.unref?.();
+    this.logger.log(`账号池健康探测已启动：每 ${HEALTH_PROBE_INTERVAL_MS / 1000}s 一次`);
   }
 
   onApplicationShutdown(): void {
@@ -219,6 +326,7 @@ export class TelegramAccountPoolService implements OnModuleInit, OnApplicationSh
       note: raw.note === undefined
         ? undefined
         : String(raw.note).replace(/[\u0000-\u001F\u007F]/g, '').trim().slice(0, 120) || undefined,
+      source: 'env',
     };
   }
 
@@ -268,7 +376,11 @@ export class TelegramAccountPoolService implements OnModuleInit, OnApplicationSh
   select(candidateIds?: string[], nowMs: number = Date.now()): AccountSelection | null {
     // 开关兜底（防御纵深）：未启用池化时任何路径都不得选中账号，
     // 保证「关闭开关 = 原单账号行为」不依赖调用方是否记得检查 isActive()。
-    if (!this.enabled) return null;
+    //
+    // 必须用 `effectiveEnabled()`（运行时值优先）而不是构造期固化的 `this.enabled`：
+    // 「env 默认关闭 + 后台热开启」是推荐部署路径，若此处读 env 值会导致
+    // isActive()=true 但选号恒为 null —— 池化静默失效（有账号、永远选不中）。
+    if (!this.effectiveEnabled()) return null;
 
     const schedulable = (candidateIds && candidateIds.length > 0
       ? candidateIds.map((id) => this.runtimes.get(id)).filter((item): item is TelegramAccountRuntime => Boolean(item))
@@ -438,6 +550,7 @@ export class TelegramAccountPoolService implements OnModuleInit, OnApplicationSh
           totalBytes: runtime.totalBytes,
           lastErrorKind: runtime.lastErrorKind,
           note: runtime.config.note,
+          source: runtime.config.source ?? 'env',
         };
       }),
     };

@@ -10,6 +10,7 @@ import { FileService } from '../file/file.service';
 import { UploadDiskBudgetService } from '../file/upload-disk-budget.service';
 import { createReadStream, existsSync } from 'fs';
 import { readFile, rename, unlink, writeFile } from 'fs/promises';
+import { databaseQuery, getDatabaseType } from '../database/database-types';
 
 interface FileUploadJobData {
   fileId: string;
@@ -23,6 +24,10 @@ interface UploadReceipt {
   file_id: string;
   file_path?: string;
   file_size?: number;
+  /** 主副本远端定位（镜像备份与用户账号无源复制依赖；旧版回执可能没有） */
+  message_id?: string | null;
+  chat_id?: string | null;
+  file_unique_id?: string | null;
   uploadVersion?: number;
   /** 严格模式中必须显式为 true 后才可删除 pending 并释放磁盘租约。 */
   localCacheReleased?: boolean;
@@ -306,13 +311,41 @@ export class FileUploadProcessor {
 
     // 收尾最后一步才置 ready，避免 ThumbnailService 使用旧实体状态覆盖 ready。
     // 条件更新同时保护 uploadVersion 和当前状态，防止并发覆盖写入。
-    const readyUpdate = await this.fileRepository.query(
-      'UPDATE files SET status = $1, "uploadFailureReason" = NULL WHERE id = $2 AND status IN ($3, $4) AND "uploadVersion" = $5',
+    //
+    // 必须经 `databaseQuery()` + `RETURNING id`：PG 的 UPDATE 返回 `[rows, rowCount]` 元组，
+    // 直接读 `rowCount/affected` 在 PG 下两个字段均为 undefined（判断恒假），
+    // 0 行命中时不会跳过收尾——这正是团队历史上两起静默失效的同一根因。
+    const readyRows = await databaseQuery<Array<{ id: string }>>(
+      this.fileRepository.manager,
+      'UPDATE files SET status = $1, "uploadFailureReason" = NULL WHERE id = $2 AND status IN ($3, $4) AND "uploadVersion" = $5 RETURNING id',
       ['ready', fileId, 'processing', 'error', uploadVersion],
+      getDatabaseType(),
     );
-    if (readyUpdate?.rowCount === 0 || readyUpdate?.affected === 0) {
+    if (!Array.isArray(readyRows) || readyRows.length === 0) {
       this.logger.warn(`文件 ${fileId} 置 ready 条件未命中（状态或版本已变化），跳过本轮收尾`);
       return;
+    }
+
+    // 主副本远端定位登记 + 镜像触发（best-effort；失败只告警，不影响上传结论）。
+    // 回执在远端提交时已原子落盘，重启恢复路径同样能取到定位信息。
+    try {
+      const receipt = await this.loadReceipt(filePath, uploadVersion);
+      if (receipt?.chat_id && receipt.message_id) {
+        await this.fileService.registerPrimaryTelegramSource(file, {
+          file_id: receipt.file_id,
+          chat_id: receipt.chat_id,
+          message_id: receipt.message_id,
+          file_unique_id: receipt.file_unique_id ?? null,
+        });
+        void this.fileService.triggerMirrorForFile(file, {
+          chat_id: receipt.chat_id,
+          message_id: receipt.message_id,
+        });
+      }
+    } catch (error) {
+      this.logger.warn(
+        `文件 ${fileId} 主副本定位登记/镜像触发失败（不影响上传结果）：${(error as Error).message}`,
+      );
     }
 
     await this.removeUploadArtifacts(filePath, fileId, uploadVersion);

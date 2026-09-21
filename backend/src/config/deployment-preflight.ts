@@ -44,6 +44,8 @@ function parseTrustProxyHops(raw: string | undefined): number | undefined {
  * - 生产环境既未显式 `SECURE_COOKIE=true` 也未配置 `TRUST_PROXY_HOPS`：
  *   若反向代理未转发 `X-Forwarded-Proto: https`，会话 Cookie 会缺少 Secure 标志。
  * - 生产环境监听 `0.0.0.0`：应经反向代理暴露，避免 Node 直接监听公网端口。
+ * - 账号池/镜像开关已启用但未配置 `TELEGRAM_ACCOUNT_ENCRYPTION_KEY`：
+ *   后台新增/轮换账号会被拒绝（不阻断启动，但属可操作性缺口）。
  */
 export function evaluateDeploymentPreflight(
   env: NodeJS.ProcessEnv = process.env,
@@ -108,6 +110,18 @@ export function evaluateDeploymentPreflight(
     errors.push(
       'TELEGRAM_USER_RELAY_ENABLED=true 被拒绝：用户账号 MTProto 中继客户端尚未接入本版本，' +
         '开启只会得到「已配置但不可用」的假象。请保持 false，或等待后续版本单独评审（含 session 保管与风控）。',
+    );
+  }
+
+  // ---- 账号池后台管理 / 镜像备份的可操作性告警（不阻断启动，任何环境都提示） ----
+  // 管理员在后台新增或轮换账号必须能加密凭据；缺根密钥时会出现
+  // 「开关已打开，但加不了账号 / 轮换被拒」的可操作性缺口，必须在启动时显式提示。
+  const flagTrue = (value: string | undefined): boolean => (value ?? '').trim().toLowerCase() === 'true';
+  const wantsAccountFeatures = flagTrue(env.TELEGRAM_MIRROR_ENABLED) || flagTrue(env.TELEGRAM_ACCOUNT_POOL_ENABLED);
+  if (wantsAccountFeatures && (env.TELEGRAM_ACCOUNT_ENCRYPTION_KEY ?? '').trim() === '') {
+    warnings.push(
+      '账号池/镜像已启用但未配置 TELEGRAM_ACCOUNT_ENCRYPTION_KEY（32 字节 base64 或 64 位 hex）：' +
+        '后台新增与轮换账号会被拒绝（凭据绝不会明文落库）；环境变量引导的单账号链路不受影响。',
     );
   }
 

@@ -162,7 +162,15 @@ describe('Telegram upload real transport integration (native HTTP, maxRedirects=
 
     const result = await service.uploadFile(Readable.from(fileBuf), 'it.bin', undefined, fileBuf.length);
 
-    expect(result).toEqual({ file_id: 'it-file-id', file_path: '', file_size: 4 * MB });
+    // 上传回执额外携带消息定位字段（未回 message_id/chat.id 时为 null / 回落默认 chat）
+    expect(result).toEqual({
+      file_id: 'it-file-id',
+      file_path: '',
+      file_size: 4 * MB,
+      message_id: null,
+      chat_id: '1',
+      file_unique_id: null,
+    });
     // 上传成功不额外请求 /getFile；在自建 Bot API 上这会触发完整媒体下载到 workdir。
     expect([...server.paths.keys()].some((url) => url.includes('/getFile'))).toBe(false);
     const body = Buffer.concat(server.received);

@@ -197,6 +197,30 @@ describe('TelegramAccountPoolService（选号 / 冷却 / 快照）', () => {
     expect(snapshot.accounts[0].tokenPreview).toMatch(/^1111111:[A-Za-z0-9_-]{1,6}\*\*\*$/);
   });
 
+  it('面板热开启：env 未启用但运行时开关打开后，面板账号必须可被选中（不得静默失效）', async () => {
+    // 推荐部署路径是「env 留空作为首次默认值 + 后台热开启」。
+    // 回归点：选号兜底若读构造期固化的 env 值，会出现 isActive()=true 但 select() 恒 null
+    // ——池化「有账号、永远选不中」，静默回退单账号。
+    const pool = makePool({});
+    expect(pool.isActive()).toBe(false);
+
+    pool.registerAccountSource(async () => [
+      { id: 'panel1', token: TOKEN_A, chatId: '-1001', weight: 1, maxInflight: 4, enabled: true },
+    ]);
+    await pool.refreshExternalAccounts(true);
+
+    expect(pool.isActive()).toBe(true);
+    expect(pool.select()?.accountId).toBe('panel1');
+    expect(pool.getConfig('panel1')?.source).toBe('panel');
+    expect(pool.snapshot().accounts[0].source).toBe('panel');
+
+    // 关闭运行时开关：只阻止新任务，账号配置保留（不删除、不清空）
+    await pool.refreshExternalAccounts(false);
+    expect(pool.isActive()).toBe(false);
+    expect(pool.select()).toBeNull();
+    expect(pool.ids()).toEqual(['panel1']);
+  });
+
   it('重复账号 id 只保留首次出现（避免重复分流）', () => {
     const pool = makePool({
       TELEGRAM_ACCOUNT_POOL_ENABLED: 'true',

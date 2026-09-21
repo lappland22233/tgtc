@@ -35,6 +35,9 @@ import { RateLimitModule } from '../common/services/rate-limit.module';
 import { MediaTicketModule } from '../common/services/media-ticket.module';
 import { TagModule } from '../tag/tag.module';
 import { ApiKeyModule } from '../api-key/api-key.module';
+// 阶段 4：文件回源接入账号池 + 上传成功后触发镜像（均为可选增强，关闭时行为不变）
+import { TelegramAccountPoolModule } from '../telegram-account-pool/telegram-account-pool.module';
+import { TelegramMirrorModule } from '../telegram-mirror/telegram-mirror.module';
 
 @Module({
   imports: [
@@ -46,6 +49,9 @@ import { ApiKeyModule } from '../api-key/api-key.module';
     MediaTicketModule,
     FolderModule,
     TelegramModule,
+    // 账号池（副本表 + 账号感知回源）与镜像模块（触发入口）；未启用时不影响原链路
+    TelegramAccountPoolModule,
+    TelegramMirrorModule,
     BullModule.registerQueue({ name: QUEUE_NAMES.FILE_UPLOAD }),
     JwtModule.registerAsync({
       imports: [ConfigModule],

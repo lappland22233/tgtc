@@ -47,11 +47,15 @@ function makeFile(overrides: Record<string, unknown> = {}) {
 }
 
 function makeRepo() {
+  // ready 置位经 `databaseQuery(repo.manager, ... RETURNING id)`：PG 下 UPDATE 返回
+  // `[rows, rowCount]` 元组，必须走归一化路径才能正确判断「0 行命中」。
+  const query = jest.fn().mockResolvedValue([{ id: fileId }]);
   return {
     findOne: jest.fn(),
     findOneOrFail: jest.fn(),
     update: jest.fn().mockResolvedValue({ affected: 1 }),
-    query: jest.fn().mockResolvedValue([]),
+    query,
+    manager: { query },
   };
 }
 
@@ -59,7 +63,12 @@ function makeProcessor(repo: ReturnType<typeof makeRepo>, telegram?: any, fileSe
   return new FileUploadProcessor(
     repo as any,
     telegram || { uploadFile: jest.fn() } as any,
-    fileService || { generateAndSaveThumbnail: jest.fn(), generateAndSaveVideoCover: jest.fn() } as any,
+    fileService || {
+      generateAndSaveThumbnail: jest.fn(),
+      generateAndSaveVideoCover: jest.fn(),
+      registerPrimaryTelegramSource: jest.fn(),
+      triggerMirrorForFile: jest.fn(),
+    } as any,
   );
 }
 
@@ -184,7 +193,7 @@ describe('FileUploadProcessor failure persistence', () => {
     );
     // ready 原生 SQL 再次清空，覆盖任务恢复/旧数据边界；status IN 允许覆盖僵尸任务误标的 error
     expect(repo.query).toHaveBeenCalledWith(
-      'UPDATE files SET status = $1, "uploadFailureReason" = NULL WHERE id = $2 AND status IN ($3, $4) AND "uploadVersion" = $5',
+      'UPDATE files SET status = $1, "uploadFailureReason" = NULL WHERE id = $2 AND status IN ($3, $4) AND "uploadVersion" = $5 RETURNING id',
       ['ready', fileId, 'processing', 'error', uploadVersion],
     );
   });
@@ -200,9 +209,34 @@ describe('FileUploadProcessor failure persistence', () => {
     await processor.uploadToTelegram(makeJob(0));
 
     expect(repo.query).toHaveBeenCalledWith(
-      'UPDATE files SET status = $1, "uploadFailureReason" = NULL WHERE id = $2 AND status IN ($3, $4) AND "uploadVersion" = $5',
+      'UPDATE files SET status = $1, "uploadFailureReason" = NULL WHERE id = $2 AND status IN ($3, $4) AND "uploadVersion" = $5 RETURNING id',
       ['ready', fileId, 'processing', 'error', uploadVersion],
     );
+  });
+
+  it('ready 条件未命中（0 行）时跳过收尾，不做定位登记与镜像触发', async () => {
+    mockedExistsSync.mockReturnValue(true);
+    const repo = makeRepo();
+    // 0 行命中：并发覆盖导致 uploadVersion 已变
+    repo.query.mockResolvedValueOnce([]);
+    const fileService = {
+      generateAndSaveThumbnail: jest.fn(),
+      generateAndSaveVideoCover: jest.fn(),
+      registerPrimaryTelegramSource: jest.fn(),
+      triggerMirrorForFile: jest.fn(),
+    };
+    repo.findOne.mockResolvedValue(makeFile({ uploadStage: 'remote_committed', telegramFileId: 'tg-id' }));
+    repo.findOneOrFail.mockResolvedValue(makeFile({ uploadStage: 'remote_committed', telegramFileId: 'tg-id' }));
+    const processor = makeProcessor(repo, { uploadFile: jest.fn() }, fileService);
+
+    await processor.uploadToTelegram(makeJob(0));
+
+    expect(repo.update).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ status: 'ready' }),
+    );
+    expect(fileService.registerPrimaryTelegramSource).not.toHaveBeenCalled();
+    expect(fileService.triggerMirrorForFile).not.toHaveBeenCalled();
   });
 
   it('marks error instead of ready when the committed record lacks a telegramFileId', async () => {

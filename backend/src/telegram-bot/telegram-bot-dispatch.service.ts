@@ -7,6 +7,8 @@ import type { TelegramMessage, TelegramUpdate, TelegramUser } from '../telegram/
 import { FileCopyService } from '../telegram-account-pool/file-copy.service';
 import { TelegramAccountClientService } from '../telegram-account-pool/telegram-account-client.service';
 import { TelegramAccountPoolService } from '../telegram-account-pool/telegram-account-pool.service';
+import { TelegramBotFileGrant } from '../common/entities/telegram-bot-file-grant.entity';
+import { TelegramMirrorTriggerService } from '../telegram-mirror/telegram-mirror-trigger.service';
 import { TelegramBotConfigService } from './telegram-bot-config.service';
 import { TelegramBotGrantService } from './telegram-bot-grant.service';
 import { TelegramBotQuotaService } from './telegram-bot-quota.service';
@@ -61,6 +63,8 @@ export class TelegramBotDispatchService {
     @Optional() private readonly copies: FileCopyService | null = null,
     @Optional() private readonly accountClient: TelegramAccountClientService | null = null,
     @Optional() private readonly configService: ConfigService | null = null,
+    // 镜像备份触发（可选依赖：未装配或未启用时零行为变化）
+    @Optional() private readonly mirrorTrigger: TelegramMirrorTriggerService | null = null,
   ) {}
 
   /** 处理单条更新（异常不外抛，避免中断轮询循环） */
@@ -564,6 +568,9 @@ export class TelegramBotDispatchService {
         message.message_id,
         accountId,
       );
+
+      // 镜像备份（Bot 入站）：grant 已持久化后才触发；镜像失败不回滚签发与配额
+      void this.triggerInboundMirror(grant, accountId);
     } catch (error) {
       // 签发失败：归还已消耗的配额，避免用户白白损失额度
       if (quotaConsumed) {
@@ -572,6 +579,35 @@ export class TelegramBotDispatchService {
       const detail = error instanceof Error ? error.message : String(error);
       this.logger.error(`直链签发失败: ${detail}`);
       await this.reply(chatId, '内部错误：生成下载链接失败，请稍后重试。', message.message_id, accountId);
+    }
+  }
+
+  /**
+   * Bot 私聊入站文件的镜像触发（fire-and-forget）。
+   *
+   * 归属对象用 `grant`：它同时持有 `file_id`、源 `chat_id + message_id`、文件名与大小，
+   * 是用户账号无源复制所需的全部定位信息；`sourceAccountId` 是回退安全锚点
+   * （池化模式下必须用收到文件的账号自己的 file_id 取源）。
+   */
+  private async triggerInboundMirror(grant: TelegramBotFileGrant, accountId?: string): Promise<void> {
+    if (!this.mirrorTrigger) return;
+    try {
+      await this.mirrorTrigger.onFileCommitted(
+        {
+          ownerType: 'grant',
+          ownerId: grant.id,
+          // Bot 入站文件没有覆盖上传语义，版本固定为 1（幂等键稳定）
+          sourceVersion: 1,
+          sourceAccountId: grant.sourceAccountId ?? accountId ?? null,
+          sourceChatId: grant.chatId ? String(grant.chatId) : null,
+          sourceMessageId: grant.messageId ? String(grant.messageId) : null,
+        },
+        'bot_inbound',
+      );
+    } catch (error) {
+      this.logger.warn(
+        `入站镜像触发失败（不影响直链签发）：${error instanceof Error ? error.message : String(error)}`,
+      );
     }
   }
 

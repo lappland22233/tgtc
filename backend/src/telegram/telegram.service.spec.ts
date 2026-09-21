@@ -133,7 +133,16 @@ describe('TelegramService realtime stream', () => {
 
       const result = await createService().uploadFile(Buffer.from('test'), filename);
 
-      expect(result).toEqual({ file_id: fileId, file_path: '', file_size: 12 });
+      // 上传回执同时携带消息定位（镜像/无源复制依赖）：mock 未回 message_id/chat.id 时
+      // chat_id 回落到本次请求实际使用的 chat，message_id 与 file_unique_id 为 null。
+      expect(result).toEqual({
+        file_id: fileId,
+        file_path: '',
+        file_size: 12,
+        message_id: null,
+        chat_id: '1',
+        file_unique_id: null,
+      });
       expect(mockedAxios.get).not.toHaveBeenCalled();
     });
 
@@ -150,8 +159,53 @@ describe('TelegramService realtime stream', () => {
 
       const result = await createService().uploadFile(Buffer.from('test'), 'mixed.mp4');
 
-      expect(result).toEqual({ file_id: 'document-id', file_path: '', file_size: 12 });
+      expect(result).toEqual({
+        file_id: 'document-id',
+        file_path: '',
+        file_size: 12,
+        message_id: null,
+        chat_id: '1',
+        file_unique_id: null,
+      });
       expect(mockedAxios.get).not.toHaveBeenCalled();
+    });
+
+    it('returns message_id/chat_id/file_unique_id and honors a chatId override (mirror backup)', async () => {
+      let sentBody = '';
+      mockedAxios.post.mockImplementationOnce((async (_url: string, form: { getBuffer?: () => Buffer }) => {
+        // 在 mock 内部读取表单，避免服务在请求结束后销毁 FormData 导致读到不完整内容
+        sentBody = form.getBuffer?.().toString('utf8') ?? '';
+        return {
+          data: {
+            ok: true,
+            result: {
+              message_id: 4242,
+              chat: { id: -1001234567890 },
+              document: { file_id: 'document-id', file_unique_id: 'unique-id', file_size: 8 },
+            },
+          },
+        };
+      }) as never);
+
+      const result = await createService().uploadFile(
+        Buffer.from('test'),
+        'test.bin',
+        undefined,
+        4,
+        { chatId: '-1001234567890' },
+      );
+
+      expect(result).toEqual({
+        file_id: 'document-id',
+        file_path: '',
+        file_size: 8,
+        message_id: '4242',
+        chat_id: '-1001234567890',
+        file_unique_id: 'unique-id',
+      });
+      // 备份群上传必须使用覆盖后的 chat_id，而不是默认存储 Chat
+      expect(sentBody).toContain('name="chat_id"');
+      expect(sentBody).toContain('-1001234567890');
     });
 
     it('falls back to the known upload size when Telegram omits file_size', async () => {
@@ -161,7 +215,14 @@ describe('TelegramService realtime stream', () => {
 
       const result = await createService().uploadFile(Buffer.from('test'), 'test.bin');
 
-      expect(result).toEqual({ file_id: 'document-id', file_path: '', file_size: 4 });
+      expect(result).toEqual({
+        file_id: 'document-id',
+        file_path: '',
+        file_size: 4,
+        message_id: null,
+        chat_id: '1',
+        file_unique_id: null,
+      });
       expect(mockedAxios.get).not.toHaveBeenCalled();
     });
 
@@ -651,7 +712,14 @@ describe('TelegramService realtime stream', () => {
 
       const result = await createService().uploadFile(source, 'test.bin', undefined, 3);
 
-      expect(result).toEqual({ file_id: 'document-id', file_path: '', file_size: 3 });
+      expect(result).toEqual({
+        file_id: 'document-id',
+        file_path: '',
+        file_size: 3,
+        message_id: null,
+        chat_id: '1',
+        file_unique_id: null,
+      });
       expect(source.destroyed || source.readableEnded).toBe(true);
       expect(mockedAxios.get).not.toHaveBeenCalled();
     });
@@ -665,7 +733,15 @@ describe('TelegramService realtime stream', () => {
       } as any);
 
       await expect(createService().uploadFile(Buffer.from('test'), 'test.bin', undefined, 4, { noCache: true }))
-        .resolves.toEqual({ file_id: 'document-id', file_path: '', file_size: 4, localCacheReleased: true });
+        .resolves.toEqual({
+          file_id: 'document-id',
+          file_path: '',
+          file_size: 4,
+          message_id: null,
+          chat_id: '1',
+          file_unique_id: null,
+          localCacheReleased: true,
+        });
 
       expect(mockedAxios.post).toHaveBeenCalledWith(
         expect.stringContaining('/sendDocument'),
@@ -689,7 +765,15 @@ describe('TelegramService realtime stream', () => {
       const service = createService();
 
       await expect(service.uploadFile(Buffer.from('test'), 'test.bin', undefined, 4, { noCache: true }))
-        .resolves.toEqual({ file_id: 'document-id', file_path: '', file_size: 4, localCacheReleased: false });
+        .resolves.toEqual({
+          file_id: 'document-id',
+          file_path: '',
+          file_size: 4,
+          message_id: null,
+          chat_id: '1',
+          file_unique_id: null,
+          localCacheReleased: false,
+        });
       await expect(service.releaseLocalFile('document-id')).resolves.toBeUndefined();
 
       expect(mockedAxios.post).toHaveBeenLastCalledWith(

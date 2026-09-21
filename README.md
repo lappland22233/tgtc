@@ -350,6 +350,41 @@ Redis 承载 `metrics-aggregation`、`attack-detection`、`alert-evaluation`、`
 
 **回退**：把 `TELEGRAM_ACCOUNT_POOL_ENABLED` 置回 `false` 即可止血（功能降级，不是数据库回滚）；副本表与 `sourceAccountId` 均为 expand 式增量结构，回退程序版本无需回退数据库。
 
+### 账号池后台管理 + 文件镜像备份（默认关闭；v1.5.2）
+
+> 超级管理员在后台「Telegram 账号池」（`/admin/telegram-accounts`）管理 Bot 与用户账号，并配置一条镜像备份规则，把进入系统的新文件同步到独立备份群。**三层开关**：全局账号池、镜像功能、单账号与单规则；**关闭只阻止新任务**，不中断已开始的传输，也不删除已备份内容。
+
+| 变量 | 默认值 | 说明 |
+|---|---:|---|
+| `TELEGRAM_ACCOUNT_ENCRYPTION_KEY` | - | **账号凭据加密根密钥**（32 字节 base64/64 位 hex）；缺失时后台新增/轮换账号会被拒绝（不会明文落库） |
+| `TELEGRAM_ACCOUNT_POOL_ENABLED` | `false` | 账号池总开关的**首次默认值**；后台「运行时配置」优先并即时生效 |
+| `TELEGRAM_MIRROR_ENABLED` | `false` | 镜像功能总开关的**首次默认值**；后台可热切换 |
+| `TELEGRAM_ACCOUNT_POOL_FORCE_DISABLED` | `false` | 紧急止血：设为 `true` 时后台无法开启账号池（需移除变量并重启恢复） |
+| `TELEGRAM_MIRROR_FORCE_DISABLED` | `false` | 紧急止血：设为 `true` 时后台无法开启镜像 |
+| `TELEGRAM_USER_CLIENT_TIMEOUT_MS` | `60000` | 用户账号 MTProto（`teleproto`）单次调用整体超时 |
+
+**接口**（全部仅 `super_admin`，JWT Cookie，不接受 API Key，写操作均审计）：
+
+- `GET/PUT /api/admin/telegram-accounts/overview|feature`：总览与账号池总开关；
+- `GET/POST/PATCH/DELETE /api/admin/telegram-accounts[/bots|/users|/:id]`：账号全生命周期（创建即校验、测试、启停、轮换、撤销）；
+- `POST /api/admin/telegram-accounts/:id/auth/start|verify|cancel`：用户账号交互式授权（验证码与 2FA 密码**不入库不入日志**）；
+- `GET/PUT /api/admin/telegram-mirror`、`PUT .../feature`、`PUT .../rule/enabled`、`POST .../test`：规则配置与权限探测；
+- `GET /api/admin/telegram-mirror/tasks`、`POST .../tasks/:id/retry|cancel`：任务列表与人工干预；
+- `POST/GET /api/admin/telegram-mirror/backfill[/pause|/resume|/cancel]`：历史文件补偿（按批限速、可暂停取消、`dry-run` 只统计）；
+- 兼容端点 `GET /api/admin/bot-account-pool` 保持不变（只读脱敏诊断）。
+
+**两条镜像路径的事实边界（不可含糊）**：
+
+1. **Bot 路径 = 目标账号二次上传**：备份群消息由目标 Bot 自己产生，各自持有独立 `file_id`（文件字节上传两次）；不允许把 A 账号的 `file_id` 交给 B 账号；
+2. **用户账号路径 = MTProto 无源复制**（`copyMessages`）：文件字节只上传一次，但**仍需源 `chat_id + message_id` 可访问**，且用户账号必须同时是源群可读成员与备份群可写成员；
+3. 主存储群与备份群**必须分离**，备份群不得是任一账号的主存储 Chat；启用规则前必须通过一次真实权限测试；
+4. 任务幂等键为 `ruleId + 归属对象 + 源版本`：重复事件、重试与重启都收敛为一次有效备份；覆盖上传递增 `uploadVersion` 会让旧任务自动作废；
+5. `429` 尊重 `retry_after` 退避，权限/源消息失效/凭据失效进入 `blocked` 并告警，**不会无限重试**；目标上传成功而状态落库失败时保存回执，重试凭回执确认（不重复上传）。
+
+**只支持单后端实例**：账号画像、镜像任务对账与补偿进度均为进程内状态；`DEPLOYMENT_MODE=multi` 会被启动预检拒绝。
+
+**回退**：先停用镜像规则 → 再停用异常账号 → 最后关闭账号池/镜像总开关；已写入备份群的消息不会自动删除；新增表与可空列均为 expand 式增量，回退程序版本无需回退数据库。
+
 ## Telegram 文件引用完整性
 
 ### Bot API workdir 持久性（根因预防）

@@ -1,6 +1,6 @@
 {
   "name": "file-distribution-system-backend",
-  "version": "1.5.0",
+  "version": "1.5.2",
   "description": "Small file distribution system with Telegram storage",
   "main": "dist/main.js",
   "_cryptoNote": "G9-16(P2): bcryptjs 为纯 JS 实现，其异步 API 内部用 setImmediate 让出事件循环，但哈希/比对仍占用主线程 CPU，登录/注册高峰可能阻塞。替代候选：原生 bcrypt（需 node-gyp 编译，安装风险大，未经确认不擅自切换）或 worker_threads 池。TODO: 评估 worker_threads 迁移方案后落地。",
@@ -62,6 +62,7 @@
     "sharp": "^0.35.4",
     "socket.io": "^4.8.3",
     "sqlite3": "^6.0.1",
+    "teleproto": "1.229.0",
     "typeorm": "0.3.31",
     "ua-parser-js": "^2.0.10",
     "uuid": "11.1.1"

@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TelegramAccountPoolModule } from '../telegram-account-pool/telegram-account-pool.module';
+import { TelegramMirrorModule } from '../telegram-mirror/telegram-mirror.module';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { TelegramModule } from '../telegram/telegram.module';
 import { FileModule } from '../file/file.module';
@@ -30,6 +31,8 @@ import { TelegramBotAdminController } from './telegram-bot-admin.controller';
     FileModule,
     // 多账号（Bot 账号池）：入站归属登记、副本扩散与按负载回源；未启用时不影响原链路
     TelegramAccountPoolModule,
+    // 镜像备份触发（入站文件在 grant 持久化后入队；未启用时零开销）
+    TelegramMirrorModule,
   ],
   controllers: [TelegramBotPublicController, TelegramBotAdminController],
   providers: [
