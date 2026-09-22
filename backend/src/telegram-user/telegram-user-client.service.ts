@@ -7,6 +7,25 @@ const CLIENT_MODULE_CANDIDATES = ['teleproto', 'telegram'] as const;
 /** 单次 MTProto 操作的整体超时（连接 + 调用），避免网络卡死时请求悬挂 */
 const DEFAULT_TIMEOUT_MS = 60_000;
 
+/** teleproto Logger 的 `none` 级别（该包未从主入口导出 LogLevel 枚举，故用字面量） */
+const MT_PROTO_LOG_LEVEL_NONE = 'none';
+
+/**
+ * 兜底静默 logger（不打印任何 MTProto 会话/协议日志）。
+ *
+ * 只有在模块未导出 `Logger` 时才使用，因此接口必须与 teleproto 的 `Logger` 完全一致，
+ * 任何遗漏方法都会在构造期或运行期炸掉整条用户账号链路。
+ */
+const SILENT_MT_PROTO_LOGGER: MtprotoLogger = {
+  canSend: () => false,
+  error: () => undefined,
+  warn: () => undefined,
+  info: () => undefined,
+  debug: () => undefined,
+  log: () => undefined,
+  setLevel: () => undefined,
+};
+
 export type TelegramUserFailureKind =
   | 'unavailable'
   | 'unsupported'
@@ -102,6 +121,24 @@ interface MtprotoClient {
   session: MtprotoSession;
 }
 
+/**
+ * teleproto `Logger` 的真实接口。
+ *
+ * `baseLogger` 会被 teleproto **直接赋给内部 `this._log`**（构造期即调用 `.info()`，
+ * 后续还会用到 `warn/error/debug/setLevel`），因此这里必须逐方法对齐；曾经只传
+ * `{ log, warn, error }` 会在 `new TelegramClient()` 内抛
+ * `TypeError: this._log.info is not a function`。
+ */
+interface MtprotoLogger {
+  canSend(level: string): boolean;
+  error(message: string, error?: unknown): void;
+  warn(message: string, error?: unknown): void;
+  info(message: string, error?: unknown): void;
+  debug(message: string, error?: unknown): void;
+  log(level: string, message: string, error?: unknown): void;
+  setLevel(level: string): void;
+}
+
 interface MtprotoModule {
   TelegramClient: new (
     session: unknown,
@@ -111,6 +148,8 @@ interface MtprotoModule {
   ) => MtprotoClient;
   sessions: { StringSession: new (session?: string) => MtprotoSession };
   Api: Record<string, any>;
+  /** teleproto@1.229.0 从主入口导出（实测），用于构造完全静默的 baseLogger */
+  Logger?: new (level?: string) => MtprotoLogger;
 }
 
 /**
@@ -301,14 +340,23 @@ export class TelegramUserClientService {
     if (!Number.isSafeInteger(credentials.apiId) || credentials.apiId <= 0 || !credentials.apiHash) {
       throw new TelegramUserClientError('API ID / API Hash 配置无效', 'auth');
     }
-    const session = new module.sessions.StringSession(credentials.session || '');
-    const client = new module.TelegramClient(session, credentials.apiId, credentials.apiHash, {
-      connectionRetries: 3,
-      useWSS: false,
-      autoReconnect: false,
-      // 不打印任何会话/协议级日志，避免把 MTProto 内部细节写入后端日志
-      baseLogger: { log: () => undefined, warn: () => undefined, error: () => undefined },
-    });
+    let client: MtprotoClient;
+    try {
+      const session = new module.sessions.StringSession(credentials.session || '');
+      client = new module.TelegramClient(session, credentials.apiId, credentials.apiHash, {
+        connectionRetries: 3,
+        useWSS: false,
+        autoReconnect: false,
+        // 不打印任何会话/协议级日志，避免把 MTProto 内部细节写入后端日志
+        baseLogger: this.createBaseLogger(module),
+      });
+    } catch (error) {
+      // 构造期异常必须同样归类并落日志：历史上 baseLogger 接口漂移导致构造函数内抛
+      // TypeError，原始英文异常直接变成 500 响应体且日志无痕（“界面看得到、日志查不到”）。
+      const failure = this.classify(error);
+      this.logger.warn(`MTProto 客户端构造失败（${failure.kind}）：${failure.message}`);
+      throw failure;
+    }
     try {
       await this.withTimeout(client.connect(), 'connect');
       return await fn(client, module.Api);
@@ -321,6 +369,25 @@ export class TelegramUserClientService {
         // 断连失败不影响结果
       }
     }
+  }
+
+  /**
+   * 构造完全静默的 `baseLogger`。
+   *
+   * 优先复用模块自带的 `Logger` 并压到 `none` 级别——这样能自动跟随 teleproto 后续
+   * 为 `_log` 新增的方法，避免再次因接口漂移在构造期崩溃；模块未导出 `Logger` 或
+   * 构造失败时回退到接口完整的 no-op 实现，**绝不返回残缺对象**。
+   */
+  private createBaseLogger(module: MtprotoModule): MtprotoLogger {
+    const LoggerCtor = module.Logger;
+    if (typeof LoggerCtor === 'function') {
+      try {
+        return new LoggerCtor(MT_PROTO_LOG_LEVEL_NONE);
+      } catch {
+        // 忽略：回退到下面的完整 no-op 实现
+      }
+    }
+    return SILENT_MT_PROTO_LOGGER;
   }
 
   private async resolveChat(
