@@ -191,6 +191,14 @@
       </div>
 
       <div class="table-filters">
+        <t-select v-model="accountStatus" class="filter-select" placeholder="状态" @change="onAccountFilterChange">
+          <t-option value="" label="全部（不含已撤销）" />
+          <t-option value="active" :label="statusText('active')" />
+          <t-option value="degraded" :label="statusText('degraded')" />
+          <t-option value="disabled" :label="statusText('disabled')" />
+          <t-option value="revoked" :label="statusText('revoked')" />
+          <t-option value="pending_auth" :label="statusText('pending_auth')" />
+        </t-select>
         <t-input
           v-model="accountKeyword"
           class="filter-input"
@@ -255,7 +263,15 @@
               </t-button>
               <t-button variant="text" size="small" @click="openEdit(row)">编辑</t-button>
               <t-button variant="text" size="small" @click="openRotate(row)">轮换</t-button>
-              <t-button variant="text" theme="danger" size="small" @click="confirmDelete(row)">删除</t-button>
+              <t-button
+                v-if="row.status !== 'revoked'"
+                variant="text"
+                theme="danger"
+                size="small"
+                @click="confirmDelete(row)"
+              >
+                删除
+              </t-button>
             </div>
           </template>
         </t-table>
@@ -281,7 +297,15 @@
             <t-button v-if="row.type === 'user'" variant="text" size="small" @click="openAuthorize(row)">授权</t-button>
             <t-button variant="text" size="small" @click="openEdit(row)">编辑</t-button>
             <t-button variant="text" size="small" @click="openRotate(row)">轮换</t-button>
-            <t-button variant="text" theme="danger" size="small" @click="confirmDelete(row)">删除</t-button>
+            <t-button
+              v-if="row.status !== 'revoked'"
+              variant="text"
+              theme="danger"
+              size="small"
+              @click="confirmDelete(row)"
+            >
+              删除
+            </t-button>
           </div>
         </div>
         <div v-if="!accountsLoading && accounts.length === 0" class="empty-hint">暂无账号</div>
@@ -837,6 +861,8 @@ const accountTab = ref<TelegramAccountType>('bot');
 const accounts = ref<TelegramAccountView[]>([]);
 const accountsLoading = ref(false);
 const accountKeyword = ref('');
+/** 账号状态筛选：默认空字符串 = 「全部（不含已撤销）」（后端默认即排除 revoked） */
+const accountStatus = ref<TelegramAccountStatus | ''>('');
 const accountPagination = reactive({ current: 1, pageSize: 20, total: 0 });
 
 const accountColumns = [
@@ -924,6 +950,8 @@ async function loadAccounts() {
   try {
     const { items, total } = await fetchAccounts({
       type: accountTab.value,
+      // 仅在选择具体状态时传 status；默认空字符串不传，等价于「全部（不含已撤销）」
+      status: accountStatus.value || undefined,
       keyword: accountKeyword.value.trim() || undefined,
       page: accountPagination.current,
       pageSize: accountPagination.pageSize,
@@ -1117,6 +1145,10 @@ function confirmDelete(account: TelegramAccountView) {
       try {
         await deleteAccount(account.id);
         MessagePlugin.success('账号已撤销');
+        // 撤销后该行默认不再出现在列表：若本页仅剩这一条，回退一页避免停留在空页
+        if (accounts.value.length === 1 && accountPagination.current > 1) {
+          accountPagination.current -= 1;
+        }
         await Promise.all([loadAccounts(), loadOverview()]);
       } catch (error) {
         MessagePlugin.error(getErrorMessage(error));

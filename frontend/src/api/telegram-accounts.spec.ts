@@ -116,6 +116,17 @@ describe('账号池接口', () => {
     expect(result).toEqual({ items: [{ id: 'a1' }], total: 3, envAccounts: [] });
   });
 
+  it('fetchAccounts 原样透传 includeRevoked（不传即排除已撤销）', async () => {
+    get.mockResolvedValue(respond({ items: [], total: 0 }));
+
+    await fetchAccounts({ type: 'bot', includeRevoked: true });
+
+    expect(get).toHaveBeenCalledWith('/admin/telegram-accounts', {
+      params: { type: 'bot', includeRevoked: true },
+      signal: undefined,
+    });
+  });
+
   it('fetchAccounts 响应缺失字段时回退为空列表与 0', async () => {
     get.mockResolvedValue(respond(undefined));
 

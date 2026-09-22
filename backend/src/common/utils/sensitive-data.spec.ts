@@ -3,6 +3,7 @@ import {
   sanitizeUrlForLog,
   sanitizeRefererForLog,
   isLikelyCredential,
+  redactBotToken,
 } from './sensitive-data';
 
 describe('sanitizeUrlForLog', () => {
@@ -127,5 +128,33 @@ describe('isLikelyCredential', () => {
     expect(isLikelyCredential('abc')).toBe(false);
     expect(isLikelyCredential('')).toBe(false);
     expect(isLikelyCredential('page=2')).toBe(false);
+  });
+});
+
+describe('redactBotToken', () => {
+  const TOKEN = '123456:AAF-xyz_secret';
+
+  it('替换 URL 形态的 Token（与 TelegramService.redactToken 同策略）', () => {
+    const raw = `Request failed: https://api.telegram.org/bot${TOKEN}/getUpdates`;
+    const out = redactBotToken(raw);
+    expect(out).not.toContain(TOKEN);
+    expect(out).toContain('/bot[REDACTED]/getUpdates');
+  });
+
+  it('已知字面 Token 全局替换（覆盖不带 /bot.../ 形态的网络层错误）', () => {
+    const out = redactBotToken(`token ${TOKEN} rejected by upstream`, TOKEN);
+    expect(out).toBe('token [REDACTED] rejected by upstream');
+  });
+
+  it('未提供字面 Token 时只做 URL 形态替换，不误伤普通文本', () => {
+    expect(redactBotToken(`bare ${TOKEN}`, null)).toBe(`bare ${TOKEN}`);
+    expect(redactBotToken(`bare ${TOKEN}`, '   ')).toBe(`bare ${TOKEN}`);
+  });
+
+  it('无匹配时原样返回，空值返回空串', () => {
+    expect(redactBotToken('ordinary failure message', TOKEN)).toBe('ordinary failure message');
+    expect(redactBotToken('', TOKEN)).toBe('');
+    expect(redactBotToken(null, TOKEN)).toBe('');
+    expect(redactBotToken(undefined, TOKEN)).toBe('');
   });
 });

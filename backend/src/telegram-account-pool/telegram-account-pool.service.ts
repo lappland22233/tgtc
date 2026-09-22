@@ -72,6 +72,25 @@ export class TelegramAccountPoolService implements OnModuleInit, OnApplicationSh
   private probeFn: ((accountId: string) => Promise<{ ok: boolean; latencyMs?: number; error?: string }>) | null = null;
 
   /**
+   * 「账号池由未生效变为生效」时的补装回调（由模块装配阶段注册）。
+   *
+   * 为什么需要：模块级后台任务（运行态告警采集、副本记录清理）若只在启动时按
+   * `isActive()` 判断一次，就会在「env 默认关闭 + 后台热开启」这条推荐部署路径上
+   * 永不启动——表现为「账号池看着在跑，但告警静默、副本记录表无界增长」，
+   * 与「共享状态只在其中一条分支初始化」属同一类静默失效。
+   */
+  private readonly activeHooks: Array<() => void> = [];
+
+  /**
+   * 上次对外可见的生效状态。
+   *
+   * 为什么需要：`refreshExternalAccounts()` 会被周期调用（面板账号同步），
+   * 若每次刷新都广播回调，回调里的重活（定时器装配、账号就绪检查）会被高频重复执行；
+   * 因此只把 `false → true` 的**跃迁**当作一次热开启事件上报。
+   */
+  private lastActiveState = false;
+
+  /**
    * 面板（数据库）账号来源，由账号管理模块在装配阶段注册。
    *
    * 为什么用注册回调而不是直接 import 账号管理模块：账号管理模块需要本服务做
@@ -169,6 +188,9 @@ export class TelegramAccountPoolService implements OnModuleInit, OnApplicationSh
    */
   async refreshExternalAccounts(runtimeEnabled: boolean | null): Promise<void> {
     this.runtimeEnabled = runtimeEnabled;
+    // 开关本身就可能让 isActive() 变为 true（env 已配账号、面板刚开启）：
+    // 必须在下面的两处早退之前补装，否则热开启的定时器与探针永远补不上
+    this.applyRuntimeReadiness();
     if (!this.externalAccountSource) return;
 
     let configs: TelegramAccountConfig[];
@@ -240,8 +262,9 @@ export class TelegramAccountPoolService implements OnModuleInit, OnApplicationSh
         void this.probeFn(id).then((result) => this.recordProbe(id, result.ok, result.latencyMs, result.error));
       }
     }
-    // 热开启（env 关闭 → 面板开启）后补上周期探测
-    this.ensureProbeTimer();
+    // 账号集合变化后再次补装：新增账号也可能让 isActive() 由 false 变 true
+    // （幂等：探针定时器与生效跃迁回调都不会重复启动）
+    this.applyRuntimeReadiness();
   }
 
   /** 计数（进程内，单实例语义） */
@@ -327,8 +350,55 @@ export class TelegramAccountPoolService implements OnModuleInit, OnApplicationSh
     this.probeFn = fn;
   }
 
+  /**
+   * 注册「账号池变为生效」时的补装回调（由模块装配阶段调用）。
+   *
+   * 幂等：同一函数重复注册只保留一份，避免装配顺序变化或多处注册导致回调叠加
+   * （补装回调里含定时器装配与账号校验，重复执行会放大副作用）。
+   *
+   * 与 `registerProbe` 同属「装配期注入、避免模块环」的解耦手法：账号池服务
+   * 不能反向依赖模块，但模块级定时器需要在热开启时被唤醒。
+   */
+  registerActiveHook(fn: () => void): void {
+    if (this.activeHooks.includes(fn)) return;
+    this.activeHooks.push(fn);
+  }
+
   async onModuleInit(): Promise<void> {
+    this.applyRuntimeReadiness();
+  }
+
+  /**
+   * 运行时就绪状态变化后的统一补装入口（幂等）。
+   *
+   * 为什么必须在 `refreshExternalAccounts()` 的**两处早退之前**也调用一次：
+   * `isActive()` 的两个因子都可能在这个方法里由 false 变 true
+   * （`runtimeEnabled` 同步、账号集合变化），一旦早退就会跳过
+   * 「周期健康探测」与「模块级定时器」的补装。
+   */
+  private applyRuntimeReadiness(): void {
     this.ensureProbeTimer();
+    this.notifyActiveTransition();
+  }
+
+  /**
+   * 广播「由未生效变为生效」的跃迁（只在跃迁上触发，见 `lastActiveState` 注释）。
+   *
+   * 回调异常只告警不抛出：补装失败不该影响账号池本身的调度能力。
+   */
+  private notifyActiveTransition(): void {
+    const active = this.isActive();
+    if (active === this.lastActiveState) return;
+    this.lastActiveState = active;
+    if (!active) return;
+    for (const hook of this.activeHooks) {
+      try {
+        hook();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.logger.warn(`账号池生效回调执行失败（忽略）: ${message}`);
+      }
+    }
   }
 
   /**

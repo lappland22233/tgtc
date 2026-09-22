@@ -357,6 +357,45 @@ describe('TelegramAccountsService（SQLite 内存库）', () => {
     expect(keyword.items[0].type).toBe('user');
   });
 
+  it('账号列表：默认排除已撤销（total 同步排除）；includeRevoked/status=revoked 让位', async () => {
+    const { service } = await setup();
+    await service.createBot({ name: 'A', token: '111111:AAAAAAAAAAAA' }, 'admin-1');
+    const revoked = await service.createBot({ name: 'B', token: '222222:BBBBBBBBBBBB' }, 'admin-1');
+    await service.remove(revoked.id, 'admin-1');
+
+    // 默认：隐藏已撤销，且 total 计数同步排除（分页与列表一致）
+    const page = await service.list({ type: 'bot' });
+    expect(page.total).toBe(1);
+    expect(page.items.map((item) => item.name)).toEqual(['A']);
+
+    // 显式 includeRevoked=true：不排除，返回全部
+    const all = await service.list({ type: 'bot', includeRevoked: true });
+    expect(all.total).toBe(2);
+    expect(all.items.map((item) => item.status).sort()).toEqual(['active', 'revoked']);
+
+    // 显式 status=revoked：排除条件必须让位，否则「已撤销」筛选恒为空
+    const revokedOnly = await service.list({ status: 'revoked' });
+    expect(revokedOnly.total).toBe(1);
+    expect(revokedOnly.items[0].id).toBe(revoked.id);
+
+    // status=active：仍排除 revoked
+    const actives = await service.list({ status: 'active' });
+    expect(actives.total).toBe(1);
+    expect(actives.items[0].name).toBe('A');
+  });
+
+  it('账号列表：非法 status 参数被忽略（收口到合法集合，不拼入 SQL）', async () => {
+    const { service } = await setup();
+    await service.createBot({ name: 'A', token: '111111:AAAAAAAAAAAA' }, 'admin-1');
+    const revoked = await service.createBot({ name: 'B', token: '222222:BBBBBBBBBBBB' }, 'admin-1');
+    await service.remove(revoked.id, 'admin-1');
+
+    const page = await service.list({ status: "'active' OR 1=1" });
+    // 非法值被忽略 → 等价于不带 status：默认仍排除已撤销
+    expect(page.total).toBe(1);
+    expect(page.items[0].name).toBe('A');
+  });
+
   it('总览：暴露环境变量主 Bot 的只读脱敏视图与池运行态', async () => {
     const { service, envSnapshots } = await setup();
     envSnapshots.push(primarySnapshot());

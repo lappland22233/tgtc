@@ -12,6 +12,7 @@ import { TelegramBotTokenCryptoService } from './telegram-bot-token-crypto.servi
 import { UpdateBotConfigDto } from './telegram-bot.dto';
 import { TelegramBotRuntimeConfig } from './telegram-bot.types';
 import { TelegramAccountPoolService } from '../telegram-account-pool/telegram-account-pool.service';
+import { TelegramBotPollingService } from './telegram-bot-polling.service';
 
 /**
  * Telegram Bot 管理端点（仅 SUPER_ADMIN）。
@@ -29,6 +30,8 @@ export class TelegramBotAdminController {
     private readonly auditService: AuditService,
     // 账号池只读诊断（可选依赖：未装配时接口仍可访问并给出明确原因）
     @Optional() private readonly accountPool: TelegramAccountPoolService | null = null,
+    // 入站轮询只读诊断（同模块 provider；未装配时接口仍可访问并给出明确原因）
+    @Optional() private readonly polling: TelegramBotPollingService | null = null,
   ) {}
 
   /** 读取 Bot 配置 + 当前生效域名（便于面板展示） */
@@ -109,6 +112,47 @@ export class TelegramBotAdminController {
       enabled: snapshot.enabled,
       inactiveReason: snapshot.inactiveReason,
       counters: snapshot.counters,
+      accounts: snapshot.accounts,
+    };
+  }
+
+  /**
+   * Bot 入站长轮询只读诊断（SUPER_ADMIN）。
+   *
+   * 用途：回答「入站到底有没有在消费」。v1.5.3 的 P0 回归（池化分支漏置共享消费态
+   * 标志 → 循环条件恒假 → 循环体一次都不执行）表现就是**无日志、无异常、offset
+   * 永不推进**，除了主动巡检没有任何被动信号；`selfCheck` 与逐账号计数正是为此补的。
+   *
+   * 安全：只按白名单字段投影快照（账号标识、offset、计数、时间戳与已脱敏截断的
+   * 错误摘要），**绝不返回 Bot Token、file_id 或原始上游地址**；不改动 `/api/health`
+   * 形状（发布健康检查脚本依赖其稳定）。
+   */
+  @Get('bot-inbound-status')
+  @Roles(UserRole.SUPER_ADMIN)
+  getInboundStatus() {
+    const polling = this.polling;
+    if (!polling) {
+      return {
+        enabled: false,
+        mode: 'disabled' as const,
+        running: false,
+        startedAtMs: null,
+        lastPollAtMs: null,
+        selfCheck: null,
+        modeDrift: { restartRequired: false, reason: null },
+        accounts: [],
+        unavailableReason: '入站轮询服务未装配（TelegramBotModule 未注册）',
+      };
+    }
+    const snapshot = polling.snapshot();
+    return {
+      enabled: snapshot.enabled,
+      mode: snapshot.mode,
+      running: snapshot.running,
+      startedAtMs: snapshot.startedAtMs,
+      lastPollAtMs: snapshot.lastPollAtMs,
+      selfCheck: snapshot.selfCheck,
+      modeDrift: snapshot.modeDrift,
       accounts: snapshot.accounts,
     };
   }

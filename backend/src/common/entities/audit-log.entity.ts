@@ -71,6 +71,7 @@ export type AuditAction =
   | 'api_key_revoke'
   | 'api_key_reveal'
   | 'api_key_allowlist_update'
+  | 'api_key_rotate'
   | 'file_verify'
   | 'file_stale_path_cleanup'
   | 'data_export'

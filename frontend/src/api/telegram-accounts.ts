@@ -166,6 +166,11 @@ export interface TelegramAccountListQuery {
   status?: TelegramAccountStatus;
   enabled?: boolean;
   keyword?: string;
+  /**
+   * 是否一并返回「已撤销」（软删除）账号。默认不传即排除已撤销；
+   * 显式筛选 `status='revoked'` 时后端也会自动让位。
+   */
+  includeRevoked?: boolean;
   page?: number;
   pageSize?: number;
 }

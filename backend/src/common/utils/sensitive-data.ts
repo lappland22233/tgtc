@@ -139,3 +139,28 @@ export function isLikelyCredential(value: string): boolean {
   if (/^[A-Za-z0-9_-]{32,}$/.test(value)) return true;
   return false;
 }
+
+/** Bot Token 的替换标记（与 TelegramService / TelegramAccountClientService 一致） */
+export const BOT_TOKEN_REDACTION = '[REDACTED]';
+
+/**
+ * 从任意文本中移除 Bot Token。
+ *
+ * 策略与 `TelegramService.redactToken`、`TelegramAccountClientService.redact` 完全一致，
+ * 保证已经写入这些链路的内容与新增的诊断快照使用同一套规则：
+ * 1. URL 形态 `.../bot<token>/...` → `.../bot[REDACTED]/...`；
+ * 2. 已知字面 Token 全局替换（覆盖网络层错误把 token 塞进 message / url 的场景）。
+ *
+ * 为什么集中到公共工具：入站轮询快照会经管理端接口对外暴露，任何一处漏脱敏
+ * 都会把凭据直接送出进程；把规则收敛到单点便于审计与回归。
+ *
+ * @param text 待脱敏文本（null/undefined 返回空串）
+ * @param token 可选的已知 Token 字面值（为空时只做 URL 形态替换）
+ */
+export function redactBotToken(text: string | null | undefined, token?: string | null): string {
+  if (!text) return '';
+  let out = String(text).replace(/\/bot[^/]+\//g, `/bot${BOT_TOKEN_REDACTION}/`);
+  const literal = (token || '').trim();
+  if (literal) out = out.split(literal).join(BOT_TOKEN_REDACTION);
+  return out;
+}

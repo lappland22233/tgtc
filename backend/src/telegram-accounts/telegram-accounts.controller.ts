@@ -89,6 +89,7 @@ export class TelegramAccountsController {
     @Query('status') status?: string,
     @Query('enabled') enabled?: string,
     @Query('keyword') keyword?: string,
+    @Query('includeRevoked') includeRevoked?: string,
     @Query('page') page?: string,
     @Query('pageSize') pageSize?: string,
   ) {
@@ -97,6 +98,8 @@ export class TelegramAccountsController {
       status,
       enabled,
       keyword,
+      // 与 enabled 同一字符串判定风格：只有显式 'true' 才算 true，其余（含 'false'/缺省）视为排除
+      includeRevoked: includeRevoked === 'true',
       page: page === undefined ? undefined : Number(page),
       pageSize: pageSize === undefined ? undefined : Number(pageSize),
     });

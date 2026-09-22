@@ -306,3 +306,114 @@ describe('TelegramAccountPoolService（选号 / 冷却 / 快照）', () => {
     expect(pool.isEnvTokenRegistered(TOKEN_B)).toBe(false);
   });
 });
+
+/**
+ * 生效跃迁广播与「补装」时序。
+ *
+ * 回归背景：`refreshExternalAccounts()` 内有两处提前 return，原先只在正常路径末尾
+ * 补装探针定时器；一旦早退（未注册账号来源 / 面板账号加载抛错），补装与生效广播
+ * 都会被跳过——这就是模块级告警与副本清理定时器在热开启部署下永不启动的根因。
+ */
+describe('TelegramAccountPoolService（生效跃迁与补装）', () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  it('未生效 → 生效只广播一次；周期性刷新不重复触发', async () => {
+    const pool = makePool({
+      TELEGRAM_ACCOUNT_POOL: JSON.stringify([{ token: TOKEN_A, chatId: '-1001' }]),
+    });
+    pool.registerAccountSource(async () => []);
+    const hook = jest.fn();
+    pool.registerActiveHook(hook);
+
+    await pool.onModuleInit();
+    expect(pool.isActive()).toBe(false);
+    expect(hook).not.toHaveBeenCalled();
+
+    // 面板开启开关（env 已配账号 → 立即生效）
+    await pool.refreshExternalAccounts(true);
+    expect(pool.isActive()).toBe(true);
+    expect(hook).toHaveBeenCalledTimes(1);
+
+    // 刷新是周期性的：仍处生效态时不得重复广播（否则重活会被高频重复执行）
+    await pool.refreshExternalAccounts(true);
+    await pool.refreshExternalAccounts(true);
+    expect(hook).toHaveBeenCalledTimes(1);
+  });
+
+  it('未注册面板账号来源时（第一处早退）仍补装探针并广播', async () => {
+    const intervalSpy = jest.spyOn(global, 'setInterval').mockImplementation(
+      (() => ({ unref: () => undefined }) as unknown as NodeJS.Timeout) as unknown as typeof setInterval,
+    );
+    const pool = makePool({
+      TELEGRAM_ACCOUNT_POOL: JSON.stringify([{ token: TOKEN_A, chatId: '-1001' }]),
+    });
+    const hook = jest.fn();
+    pool.registerActiveHook(hook);
+
+    await pool.refreshExternalAccounts(true);
+
+    expect(pool.isActive()).toBe(true);
+    expect(hook).toHaveBeenCalledTimes(1);
+    expect(intervalSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('面板账号加载抛错时（第二处早退）仍补装探针并广播', async () => {
+    const intervalSpy = jest.spyOn(global, 'setInterval').mockImplementation(
+      (() => ({ unref: () => undefined }) as unknown as NodeJS.Timeout) as unknown as typeof setInterval,
+    );
+    const pool = makePool({
+      TELEGRAM_ACCOUNT_POOL: JSON.stringify([{ token: TOKEN_A, chatId: '-1001' }]),
+    });
+    pool.registerAccountSource(async () => {
+      throw new Error('面板账号加载失败');
+    });
+    const hook = jest.fn();
+    pool.registerActiveHook(hook);
+
+    await pool.refreshExternalAccounts(true);
+
+    expect(pool.isActive()).toBe(true);
+    expect(hook).toHaveBeenCalledTimes(1);
+    expect(intervalSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('回落为未生效时不广播，再次生效会重新广播', async () => {
+    const pool = makePool({
+      TELEGRAM_ACCOUNT_POOL_ENABLED: 'true',
+      TELEGRAM_ACCOUNT_POOL: JSON.stringify([{ token: TOKEN_A, chatId: '-1001' }]),
+    });
+    const hook = jest.fn();
+    pool.registerActiveHook(hook);
+
+    await pool.onModuleInit();
+    expect(hook).toHaveBeenCalledTimes(1);
+
+    await pool.refreshExternalAccounts(false);
+    expect(pool.isActive()).toBe(false);
+    expect(hook).toHaveBeenCalledTimes(1);
+
+    await pool.refreshExternalAccounts(true);
+    expect(pool.isActive()).toBe(true);
+    expect(hook).toHaveBeenCalledTimes(2);
+  });
+
+  it('单个生效回调抛错不影响其它回调，也不中断账号刷新', async () => {
+    const pool = makePool({
+      TELEGRAM_ACCOUNT_POOL: JSON.stringify([{ token: TOKEN_A, chatId: '-1001' }]),
+    });
+    const broken = jest.fn(() => {
+      throw new Error('hook boom');
+    });
+    const healthy = jest.fn();
+    pool.registerActiveHook(broken);
+    pool.registerActiveHook(healthy);
+
+    await expect(pool.refreshExternalAccounts(true)).resolves.toBeUndefined();
+
+    expect(broken).toHaveBeenCalledTimes(1);
+    expect(healthy).toHaveBeenCalledTimes(1);
+    expect(pool.isActive()).toBe(true);
+  });
+});

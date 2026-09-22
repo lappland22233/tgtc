@@ -57,6 +57,8 @@ export class TelegramAccountPoolModule implements OnModuleInit, OnApplicationShu
   private readonly logger = new Logger(TelegramAccountPoolModule.name);
   private alertTimer: NodeJS.Timeout | null = null;
   private cleanupTimer: NodeJS.Timeout | null = null;
+  /** 账号就绪检查只做一次（启动或首次热开启，二者取先到者） */
+  private accountsVerified = false;
 
   constructor(
     private readonly pool: TelegramAccountPoolService,
@@ -68,6 +70,13 @@ export class TelegramAccountPoolModule implements OnModuleInit, OnApplicationShu
       const config = this.pool.getConfig(accountId);
       if (!config) return { ok: false, error: '账号配置不存在' };
       return this.client.getMe(accountId, config.token);
+    });
+
+    // 热开启（env 关闭 → 面板开启）后补装后台定时任务与账号就绪检查。
+    // 没有这个回调时，本模块的告警采集与副本清理会在整条热开启部署路径上永不启动。
+    this.pool.registerActiveHook(() => {
+      this.ensureRuntimeTimers();
+      void this.verifyAccountsOnce();
     });
   }
 
@@ -82,21 +91,49 @@ export class TelegramAccountPoolModule implements OnModuleInit, OnApplicationShu
    * `TelegramBotPollingService` 中按账号执行。
    */
   async onModuleInit(): Promise<void> {
+    if (this.pool.isActive()) await this.verifyAccountsOnce();
+    this.ensureRuntimeTimers();
+  }
+
+  /**
+   * 装配后台定时任务（幂等，可重复调用）。
+   *
+   * 为什么必须幂等且可被热开启唤醒：`env 默认关闭 + 后台热开启`是推荐部署路径
+   * （见 `TelegramAccountPoolService` 与后台开关的说明），若这里只按启动时的
+   * `isActive()` 早退，热开启后告警采集与副本清理就永远不会启动——表现为
+   * 「账号池看着在跑，但运行态告警静默、telegram_file_copies 无界增长」，
+   * 与入站轮询那次 P0 同属「共享状态只在其中一条分支初始化」的静默失效。
+   */
+  private ensureRuntimeTimers(): void {
     if (!this.pool.isActive()) return;
 
-    await this.verifyAccounts();
-
     // 运行态告警：把「账号冷却 / 回退率 / 复制失败 / 回复失败」转为告警事件
-    this.alertTimer = setInterval(() => void this.alerts.runOnce(), ALERT_INTERVAL_MS);
-    this.alertTimer.unref?.();
+    if (!this.alertTimer) {
+      this.alertTimer = setInterval(() => void this.alerts.runOnce(), ALERT_INTERVAL_MS);
+      this.alertTimer.unref?.();
+    }
 
-    // 副本记录生命周期清理（策略见 FileCopyService.purgeStale）
-    this.logger.log(
-      `副本清理策略已启用：每 ${CLEANUP_INTERVAL_MS / 60_000} 分钟一次；`
-      + `保留窗口 failed=${FAILED_RECORD_TTL_HOURS}h pending=${PENDING_RECORD_TTL_HOURS}h stale=${STALE_COPY_TTL_DAYS}d`,
-    );
-    this.cleanupTimer = setInterval(() => void this.runCleanup(), CLEANUP_INTERVAL_MS);
-    this.cleanupTimer.unref?.();
+    if (!this.cleanupTimer) {
+      // 副本记录生命周期清理（策略见 FileCopyService.purgeStale）
+      this.logger.log(
+        `副本清理策略已启用：每 ${CLEANUP_INTERVAL_MS / 60_000} 分钟一次；`
+        + `保留窗口 failed=${FAILED_RECORD_TTL_HOURS}h pending=${PENDING_RECORD_TTL_HOURS}h stale=${STALE_COPY_TTL_DAYS}d`,
+      );
+      this.cleanupTimer = setInterval(() => void this.runCleanup(), CLEANUP_INTERVAL_MS);
+      this.cleanupTimer.unref?.();
+    }
+  }
+
+  /**
+   * 账号就绪检查（只做一次）。
+   *
+   * 正常启动与热开启都可能成为「账号池首次可用」的时刻，两条路径都会调用这里；
+   * 用一次性标志避免同一批账号被重复 `getChat` 校验（热开启回调会被周期性刷新唤醒）。
+   */
+  private async verifyAccountsOnce(): Promise<void> {
+    if (this.accountsVerified) return;
+    this.accountsVerified = true;
+    await this.verifyAccounts();
   }
 
   onApplicationShutdown(): void {

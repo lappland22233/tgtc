@@ -10,6 +10,7 @@ import { Repository } from 'typeorm';
 import {
   TelegramAccount,
   TelegramAccountCapabilities,
+  TelegramAccountStatus,
 } from '../common/entities/telegram-account.entity';
 import { AuditStatus } from '../common/entities/audit-log.entity';
 import { AuditService } from '../common/services/audit.service';
@@ -105,12 +106,28 @@ export interface TelegramAccountListQuery {
   status?: string;
   enabled?: string;
   keyword?: string;
+  /**
+   * 是否把「已撤销」（软删除）账号一并返回。默认 `false`：列表隐藏 revoked 行，
+   * 与产品「删除=撤销后不再出现」的语义一致；显式 `true` 或显式筛选 `status=revoked`
+   * 时排除条件让位（详见 `list()`）。
+   */
+  includeRevoked?: boolean;
   page?: number;
   pageSize?: number;
 }
 
 const MAX_PAGE_SIZE = 100;
 const FAILURE_SUMMARY_LIMIT = 500;
+
+/** 合法账号状态集合（与 `TelegramAccountStatus` 对齐）：非法 `status` 查询参数直接忽略 */
+const TELEGRAM_ACCOUNT_STATUSES: readonly TelegramAccountStatus[] = [
+  'pending_auth',
+  'active',
+  'disabled',
+  'degraded',
+  'revoked',
+  'draining',
+];
 
 /**
  * Telegram 账号主数据服务（Bot 与用户账号统一生命周期）。
@@ -164,8 +181,16 @@ export class TelegramAccountsService {
     if (query.type === 'bot' || query.type === 'user') {
       builder.andWhere('account.type = :type', { type: query.type });
     }
-    if (query.status) {
-      builder.andWhere('account.status = :status', { status: query.status });
+    // 收口到合法状态集合：非法 status 参数忽略（不拼进 SQL，避免无意义查询）
+    const status = TELEGRAM_ACCOUNT_STATUSES.find((item) => item === query.status);
+    if (status) {
+      builder.andWhere('account.status = :status', { status });
+    }
+    // 默认隐藏已撤销（软删除）账号；显式筛选 revoked 或 includeRevoked=true 时排除条件让位，
+    // 否则「已撤销」筛选会恒为空。status 为其它具体值时仍排除 revoked。
+    const includeRevoked = query.includeRevoked === true || status === 'revoked';
+    if (!includeRevoked) {
+      builder.andWhere('account.status != :revokedStatus', { revokedStatus: 'revoked' });
     }
     if (query.enabled === 'true' || query.enabled === 'false') {
       builder.andWhere('account.enabled = :enabled', { enabled: query.enabled === 'true' });
