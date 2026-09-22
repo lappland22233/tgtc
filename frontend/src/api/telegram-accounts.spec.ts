@@ -21,6 +21,12 @@ vi.mock('./client', () => ({
   },
 }));
 
+import type {
+  AccountPoolState,
+  TelegramAccountRuntimeView,
+  TelegramEnvAccountView,
+} from './telegram-accounts';
+
 import {
   cancelMirrorBackfill,
   cancelMirrorTask,
@@ -35,6 +41,7 @@ import {
   fetchMirrorOverview,
   fetchMirrorTasks,
   pauseMirrorBackfill,
+  probeEnvAccount,
   resumeMirrorBackfill,
   retryMirrorTask,
   startMirrorBackfill,
@@ -106,7 +113,7 @@ describe('账号池接口', () => {
       params: { type: 'bot', status: 'active', page: 2, pageSize: 20 },
       signal: undefined,
     });
-    expect(result).toEqual({ items: [{ id: 'a1' }], total: 3 });
+    expect(result).toEqual({ items: [{ id: 'a1' }], total: 3, envAccounts: [] });
   });
 
   it('fetchAccounts 响应缺失字段时回退为空列表与 0', async () => {
@@ -115,7 +122,7 @@ describe('账号池接口', () => {
     const result = await fetchAccounts();
 
     expect(get).toHaveBeenCalledWith('/admin/telegram-accounts', { params: {}, signal: undefined });
-    expect(result).toEqual({ items: [], total: 0 });
+    expect(result).toEqual({ items: [], total: 0, envAccounts: [] });
   });
 
   it('createBotAccount 提交 bots 端点', async () => {
@@ -219,6 +226,142 @@ describe('账号池接口', () => {
 
     expect(post).toHaveBeenCalledWith('/admin/telegram-accounts/u1/auth/cancel');
     expect(result).toEqual({ ok: true });
+  });
+
+  // ---------------- 环境变量主 Bot 只读展示（新契约） ----------------
+
+  /** 完整 Token（仅用于断言脱敏：不得出现在任何返回视图中） */
+  const FULL_TOKEN = '123456:AAFwxyzSECRETsecretTOKEN';
+
+  const runtimeView: TelegramAccountRuntimeView = {
+    inflight: 2,
+    maxInflight: 8,
+    bandwidthMbps: 12.5,
+    successRate: 0.98,
+    latencyMs: 120,
+    coolingDown: false,
+    cooldownRemainingMs: 0,
+    consecutiveFailures: 0,
+    totalRequests: 42,
+    failures: 1,
+    lastErrorKind: null,
+    storageConfigured: true,
+  };
+
+  const envAccountView: TelegramEnvAccountView = {
+    id: '123456',
+    primary: true,
+    source: 'env',
+    readOnly: true,
+    tokenPreview: '123456:AAF***',
+    chatId: '-1001234567890',
+    enabled: true,
+    weight: 1,
+    maxInflight: 8,
+    note: null,
+    runtime: runtimeView,
+  };
+
+  it('fetchAccountOverview 解析 pool 与 envAccounts 新字段', async () => {
+    const pool: AccountPoolState = {
+      enabled: true,
+      inactiveReason: null,
+      primaryAccountId: '123456',
+      accountCount: 2,
+      envAccountCount: 1,
+    };
+    const payload = {
+      feature: { accountPoolEnabled: true },
+      counts: { total: 2 },
+      pool,
+      envAccounts: [envAccountView],
+      precheck: [
+        { id: 'primary_bot', ok: true, hint: '环境变量主 Bot 已注册为只读账号' },
+        { id: 'env_storage_chat', ok: false, hint: '环境变量账号未配置存储 Chat' },
+      ],
+    };
+    get.mockResolvedValue(respond(payload));
+
+    const result = await fetchAccountOverview();
+
+    expect(get).toHaveBeenCalledWith('/admin/telegram-accounts/overview', { signal: undefined });
+    expect(result.pool.primaryAccountId).toBe('123456');
+    expect(result.pool.envAccountCount).toBe(1);
+    expect(result.envAccounts).toHaveLength(1);
+    expect(result.envAccounts[0].source).toBe('env');
+    expect(result.envAccounts[0].readOnly).toBe(true);
+    expect(result.envAccounts[0].runtime.storageConfigured).toBe(true);
+    const precheckIds = result.precheck.map((item) => item.id);
+    expect(precheckIds).toContain('primary_bot');
+    expect(precheckIds).toContain('env_storage_chat');
+  });
+
+  it('fetchAccounts 解析 envAccounts 只读区（不占数据库分页）', async () => {
+    get.mockResolvedValue(respond({ items: [{ id: 'a1' }], total: 1, envAccounts: [envAccountView] }));
+
+    const result = await fetchAccounts({ type: 'bot' });
+
+    expect(result.envAccounts).toHaveLength(1);
+    expect(result.envAccounts[0].id).toBe('123456');
+    expect(result.envAccounts[0].primary).toBe(true);
+    expect(result.envAccounts[0].runtime.maxInflight).toBe(8);
+    expect(result.envAccounts[0].runtime.inflight).toBe(2);
+  });
+
+  it('fetchAccounts 的账号项解析 source=both 与 runtime 运行态', async () => {
+    get.mockResolvedValue(
+      respond({ items: [{ id: 'a1', source: 'both', runtime: runtimeView }], total: 1 }),
+    );
+
+    const result = await fetchAccounts({ type: 'bot' });
+
+    expect(result.items[0].source).toBe('both');
+    expect(result.items[0].runtime?.inflight).toBe(2);
+    expect(result.items[0].runtime?.lastErrorKind).toBeNull();
+    expect(result.items[0].runtime?.storageConfigured).toBe(true);
+  });
+
+  it('fetchAccounts 在 type=user 时 envAccounts 恒为空数组', async () => {
+    get.mockResolvedValue(respond({ items: [], total: 0, envAccounts: [] }));
+
+    const result = await fetchAccounts({ type: 'user' });
+
+    expect(get).toHaveBeenCalledWith('/admin/telegram-accounts', {
+      params: { type: 'user' },
+      signal: undefined,
+    });
+    expect(result.envAccounts).toEqual([]);
+  });
+
+  it('probeEnvAccount 用 POST 请求 env/:id/probe 并解包 message/probe', async () => {
+    const probe = {
+      ok: false,
+      message: '环境变量账号探测失败',
+      capabilities: { canUpload: false, supportsPolling: true },
+      chatTitle: null,
+      chatType: null,
+      errorCode: 'probe_get_me_failed',
+    };
+    post.mockResolvedValue(respond({ message: probe.message, probe }));
+
+    const result = await probeEnvAccount('123456');
+
+    expect(post).toHaveBeenCalledWith('/admin/telegram-accounts/env/123456/probe');
+    expect(result.message).toBe('环境变量账号探测失败');
+    expect(result.probe.ok).toBe(false);
+    expect(result.probe.errorCode).toBe('probe_get_me_failed');
+  });
+
+  it('环境变量账号 tokenPreview 已脱敏，响应中不含完整 Token', async () => {
+    get.mockResolvedValue(respond({ items: [], total: 0, envAccounts: [envAccountView] }));
+
+    const result = await fetchAccounts({ type: 'bot' });
+    const serialized = JSON.stringify(result.envAccounts);
+
+    expect(result.envAccounts[0].tokenPreview).toMatch(/^\d+:[A-Za-z0-9_-]{1,6}\*\*\*$/);
+    expect(result.envAccounts[0].tokenPreview).toBe('123456:AAF***');
+    expect(serialized).not.toContain(FULL_TOKEN);
+    expect(serialized).not.toContain('AAFwxyzSECRETsecretTOKEN');
   });
 });
 

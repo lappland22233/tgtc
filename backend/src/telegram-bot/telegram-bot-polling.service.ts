@@ -3,7 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { TelegramService } from '../telegram/telegram.service';
 import { ConfigCacheService } from '../common/services/config-cache.service';
 import { TelegramBotDispatchService } from './telegram-bot-dispatch.service';
-import { BOT_UPDATE_OFFSET_KEY } from './telegram-bot.types';
+import { BOT_UPDATE_OFFSET_KEY, BOT_UPDATE_OFFSET_OWNER_KEY } from './telegram-bot.types';
 import { TelegramAccountClientService } from '../telegram-account-pool/telegram-account-client.service';
 import { TelegramAccountPoolService } from '../telegram-account-pool/telegram-account-pool.service';
 
@@ -78,7 +78,7 @@ export class TelegramBotPollingService implements OnModuleInit, OnApplicationShu
         await this.warnIfWebhookConfigured(accountId);
         const state: AccountPollState = {
           accountId,
-          offset: await this.loadOffset(this.offsetKeyFor(accountId)),
+          offset: await this.resolveInitialOffset(accountId),
           backoffMs: INITIAL_BACKOFF_MS,
           running: true,
           promise: null,
@@ -92,6 +92,8 @@ export class TelegramBotPollingService implements OnModuleInit, OnApplicationShu
 
     await this.warnIfWebhookConfigured();
     this.offset = await this.loadOffset(BOT_UPDATE_OFFSET_KEY);
+    // 记录全局 offset 的归属，供后续切到池化模式时安全继承
+    await this.persistOwnerMarker(this.defaultBotAccountId());
     this.running = true;
     this.logger.log(`Telegram Bot 入站消费已启动（单账号长轮询 ${this.pollTimeoutSeconds}s，offset=${this.offset}）`);
     this.loopPromise = this.loop();
@@ -101,6 +103,41 @@ export class TelegramBotPollingService implements OnModuleInit, OnApplicationShu
     return `${BOT_UPDATE_OFFSET_KEY}:${accountId}`;
   }
 
+  /**
+   * 池化模式下每账号 offset 的初始值。
+   *
+   * 为什么需要继承：某个账号从「单账号模式」（用全局键 `BOT_UPDATE_OFFSET_KEY`）
+   * 切到「池化模式」（用账号级键）时，账号级键是全新的（0），直接用会让 Telegram
+   * 重放约 24 小时的更新（重复下载、重复回复、重复登记副本）。
+   *
+   * 但**不能无差别继承**：不同 Bot 的 `update_id` 是各自独立的序列，
+   * 把 A 的偏移套到 B 上会跳过 B 尚未消费的更新（入站文件永久丢失）。
+   * 因此只在「全局 offset 明确属于该账号」时继承，归属判定顺序：
+   * 1. `BOT_UPDATE_OFFSET_OWNER_KEY` 归属标记（新一轮启动会写入）；
+   * 2. 旧部署没有标记时，按「该账号就是环境变量主 Bot」推断（升级路径最典型的情形）。
+   */
+  private async resolveInitialOffset(accountId: string): Promise<number> {
+    const key = this.offsetKeyFor(accountId);
+    const own = await this.loadOffset(key);
+    if (own > 0) return own;
+
+    const owner = await this.loadOwnerMarker();
+    const belongsToAccount = owner
+      ? owner === accountId
+      : accountId === this.pool.primaryAccountId();
+    if (!belongsToAccount) return own;
+
+    const inherited = await this.loadOffset(BOT_UPDATE_OFFSET_KEY);
+    if (inherited <= own) return own;
+
+    this.logger.log(
+      `账号 ${accountId} 继承历史全局 offset（${inherited}）以避免重放旧更新（账号级键：${key}）`,
+    );
+    await this.persistOffset(key, inherited);
+    await this.persistOwnerMarker(accountId);
+    return inherited;
+  }
+
   private async loadOffset(key: string): Promise<number> {
     try {
       const stored = await this.configCacheService.get(key, '0');
@@ -108,6 +145,42 @@ export class TelegramBotPollingService implements OnModuleInit, OnApplicationShu
       return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : 0;
     } catch {
       return 0;
+    }
+  }
+
+  /** 环境变量主 Bot 的账号 id（`TELEGRAM_BOT_TOKEN` 的数字前缀） */
+  private defaultBotAccountId(): string | null {
+    const raw = this.configService.get<string>('TELEGRAM_BOT_TOKEN') || '';
+    const token = raw.trim();
+    const prefix = token.split(':')[0];
+    return prefix && token.includes(':') ? prefix : null;
+  }
+
+  /** 读取全局 offset 的归属 Bot（旧部署可能没有） */
+  private async loadOwnerMarker(): Promise<string | null> {
+    try {
+      const stored = await this.configCacheService.get(BOT_UPDATE_OFFSET_OWNER_KEY, '');
+      const trimmed = (stored || '').trim();
+      return trimmed || null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** 写入全局 offset 的归属 Bot（幂等；值未变化时不写库） */
+  private async persistOwnerMarker(botId: string | null): Promise<void> {
+    if (!botId) return;
+    try {
+      const current = await this.loadOwnerMarker();
+      if (current === botId) return;
+      await this.configCacheService.set(
+        BOT_UPDATE_OFFSET_OWNER_KEY,
+        botId,
+        'Telegram Bot 长轮询 offset 归属（自动维护）',
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn(`offset 归属标记写入失败（忽略）: ${message}`);
     }
   }
 

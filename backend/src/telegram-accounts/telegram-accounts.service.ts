@@ -13,6 +13,7 @@ import {
 } from '../common/entities/telegram-account.entity';
 import { AuditStatus } from '../common/entities/audit-log.entity';
 import { AuditService } from '../common/services/audit.service';
+import { TelegramAccountPoolService } from '../telegram-account-pool/telegram-account-pool.service';
 import { TelegramAccountCredentialService } from './telegram-account-credential.service';
 import { TelegramAccountFeatureService, TelegramAccountFeatureState } from './telegram-account-feature.service';
 import { TelegramAccountProbeService } from './telegram-account-probe.service';
@@ -24,7 +25,14 @@ import {
   RotateUserCredentialDto,
   UpdateTelegramAccountDto,
 } from './telegram-account.dto';
-import { TelegramAccountView, toAccountView } from './telegram-account-view';
+import {
+  TelegramAccountRuntimeView,
+  TelegramAccountView,
+  TelegramEnvAccountView,
+  toAccountView,
+  toEnvAccountView,
+  toRuntimeView,
+} from './telegram-account-view';
 
 /** 凭据载荷（落库前整体加密；明文只在本进程内短暂存在） */
 export interface TelegramAccountCredentialPayload {
@@ -47,6 +55,16 @@ export interface PoolBotAccount {
   maxInflight: number;
 }
 
+/** 环境变量账号探测结论（脱敏；不含 Token） */
+export interface EnvAccountProbeResult {
+  ok: boolean;
+  message: string;
+  capabilities: TelegramAccount['capabilities'];
+  chatTitle: string | null;
+  chatType: string | null;
+  errorCode: string | null;
+}
+
 export interface AccountPoolOverview {
   feature: TelegramAccountFeatureState;
   credentialCryptoAvailable: boolean;
@@ -63,6 +81,22 @@ export interface AccountPoolOverview {
     revoked: number;
     pendingAuth: number;
   };
+  /**
+   * 账号池运行态摘要（来自进程内注册表）。
+   * 用途：区分「后台有账号」与「账号池真的生效」，并让管理员看到环境变量主 Bot。
+   */
+  pool: {
+    enabled: boolean;
+    inactiveReason: string | null;
+    /** 环境变量主 Bot 的账号 id（未配置 `TELEGRAM_BOT_TOKEN` 时为 null） */
+    primaryAccountId: string | null;
+    /** 池内注册账号总数（含环境变量与数据库账号） */
+    accountCount: number;
+    /** 其中来自环境变量的账号数 */
+    envAccountCount: number;
+  };
+  /** 环境变量账号（主 Bot 与 TELEGRAM_ACCOUNT_POOL 配置项）的只读脱敏视图 */
+  envAccounts: TelegramEnvAccountView[];
   precheck: Array<{ id: string; ok: boolean; hint: string }>;
 }
 
@@ -101,11 +135,23 @@ export class TelegramAccountsService {
     private readonly probe: TelegramAccountProbeService,
     private readonly userClient: TelegramUserClientService,
     private readonly audit: AuditService,
+    /**
+     * 账号池（只读取注册表做去重与运行态展示）。
+     *
+     * 依赖方向：accounts → pool 为单向（由 `TelegramAccountsModule` imports 保证）；
+     * 反向的数据来源通过 `registerAccountSource` 回调注入，二者不成环。
+     */
+    private readonly pool: TelegramAccountPoolService,
   ) {}
 
   // ---------------- 查询 ----------------
 
-  async list(query: TelegramAccountListQuery): Promise<{ items: TelegramAccountView[]; total: number }> {
+  async list(query: TelegramAccountListQuery): Promise<{
+    items: TelegramAccountView[];
+    total: number;
+    /** 环境变量账号只读视图（不占数据库分页；用户页签恒为空数组） */
+    envAccounts: TelegramEnvAccountView[];
+  }> {
     const page = Number.isSafeInteger(query.page) && (query.page as number) > 0 ? Number(query.page) : 1;
     const rawSize = Number.isSafeInteger(query.pageSize) && (query.pageSize as number) > 0 ? Number(query.pageSize) : 20;
     const pageSize = Math.min(rawSize, MAX_PAGE_SIZE);
@@ -136,17 +182,55 @@ export class TelegramAccountsService {
       .getManyAndCount();
 
     return {
-      items: rows.map((account) => toAccountView(account, {
-        credentialConfigured: Boolean(account.credentialCiphertext),
-      })),
+      items: rows.map((account) => {
+        const runtime = this.runtimeFor(account);
+        return toAccountView(account, {
+          credentialConfigured: Boolean(account.credentialCiphertext),
+          runtime,
+          source: this.sourceFor(account, runtime),
+        });
+      }),
       total,
+      // 环境变量账号不占用数据库分页：Bot 页签需要独立只读区展示（用户页签没有池内运行态）
+      envAccounts: query.type === 'user' ? [] : this.envAccounts(),
     };
   }
 
   async detail(id: string): Promise<TelegramAccountView> {
     const account = await this.findWithCredential(id);
     if (!account) throw new NotFoundException('账号不存在');
-    return toAccountView(account, { credentialConfigured: Boolean(account.credentialCiphertext) });
+    const runtime = this.runtimeFor(account);
+    return toAccountView(account, {
+      credentialConfigured: Boolean(account.credentialCiphertext),
+      runtime,
+      source: this.sourceFor(account, runtime),
+    });
+  }
+
+  /**
+   * 账号池运行态（按 Bot 的 `externalId` 与池 id 对齐）。
+   *
+   * 为什么用 externalId：账号池的账号 id 对 Bot 而言就是 Bot ID（token 数字前缀），
+   * 环境变量账号与数据库账号因此可以在同一命名空间里对齐、去重与合并展示。
+   * 用户账号不参与账号池，运行态恒为 null。
+   */
+  private runtimeFor(account: TelegramAccount): TelegramAccountRuntimeView | null {
+    if (account.type !== 'bot' || !account.externalId) return null;
+    const snapshot = this.pool.runtimeView(account.externalId);
+    return snapshot ? toRuntimeView(snapshot) : null;
+  }
+
+  /** 配置来源：同一 Bot 既在数据库又被环境变量注册时标记 `both`（提示后台不要重复维护密钥） */
+  private sourceFor(account: TelegramAccount, runtime: TelegramAccountRuntimeView | null): 'panel' | 'both' {
+    if (!runtime || account.type !== 'bot' || !account.externalId) return 'panel';
+    return this.pool.isEnvAccount(account.externalId) ? 'both' : 'panel';
+  }
+
+  /** 环境变量账号（主 Bot 与 `TELEGRAM_ACCOUNT_POOL` 配置项）的只读脱敏视图 */
+  private envAccounts(): TelegramEnvAccountView[] {
+    return this.pool.snapshot().accounts
+      .filter((account) => account.source !== 'panel')
+      .map((account) => toEnvAccountView(account));
   }
 
   async overview(): Promise<AccountPoolOverview> {
@@ -168,6 +252,11 @@ export class TelegramAccountsService {
     };
     const usable = count((account) => account.enabled && (account.status === 'active' || account.status === 'degraded'));
     const userClientAvailable = this.userClient.isAvailable();
+    const poolSnapshot = this.pool.snapshot();
+    const envAccounts = poolSnapshot.accounts
+      .filter((account) => account.source !== 'panel')
+      .map((account) => toEnvAccountView(account));
+    const primaryAccountId = this.pool.primaryAccountId();
 
     return {
       feature,
@@ -175,6 +264,14 @@ export class TelegramAccountsService {
       userClientAvailable,
       userClientUnavailableReason: this.userClient.unavailableReason(),
       counts,
+      pool: {
+        enabled: poolSnapshot.enabled,
+        inactiveReason: poolSnapshot.inactiveReason,
+        primaryAccountId,
+        accountCount: poolSnapshot.accounts.length,
+        envAccountCount: envAccounts.length,
+      },
+      envAccounts,
       precheck: [
         {
           id: 'credential_crypto',
@@ -183,8 +280,20 @@ export class TelegramAccountsService {
         },
         {
           id: 'usable_account',
-          ok: usable > 0,
-          hint: '至少需要一个已启用且非 revoked/pending_auth 的账号才能开启账号池',
+          ok: usable > 0 || envAccounts.length > 0,
+          hint: '至少需要一个已启用且非 revoked/pending_auth 的账号（或环境变量主 Bot）才能开启账号池',
+        },
+        {
+          id: 'primary_bot',
+          ok: Boolean(primaryAccountId),
+          hint: primaryAccountId
+            ? `环境变量主 Bot 已注册为只读账号（${primaryAccountId}）；密钥轮换请改 .env，后台不提供编辑/删除`
+            : '未配置 TELEGRAM_BOT_TOKEN：没有环境变量主 Bot，后台账号全部来自数据库',
+        },
+        {
+          id: 'env_storage_chat',
+          ok: envAccounts.every((account) => account.runtime.storageConfigured),
+          hint: '环境变量账号未配置存储 Chat（TELEGRAM_CHAT_ID）：该账号只参与下载回源，不会被选为上传/镜像目标',
         },
         {
           id: 'user_client',
@@ -205,6 +314,14 @@ export class TelegramAccountsService {
   async createBot(dto: CreateBotAccountDto, actorId: string): Promise<TelegramAccountView> {
     this.assertCryptoAvailable('创建 Bot 账号');
     const botId = dto.token.split(':')[0];
+    // 环境变量是密钥管理边界：同一 Token 已由 `.env` 注册时直接拒绝，
+    // 否则会出现「后台新增成功、实际被环境变量账号屏蔽」的双账号假象。
+    if (this.pool.isEnvTokenRegistered(dto.token)) {
+      throw new ConflictException(
+        '该 Bot Token 已由环境变量账号（主 Bot 或账号池配置）注册，后台只读；'
+        + '请改用其它 Bot，或先从 .env 移除该账号',
+      );
+    }
     await this.assertExternalIdFree('bot', botId);
 
     const probe = await this.probe.probeBot(dto.token, dto.primaryChatId ?? null);
@@ -383,6 +500,14 @@ export class TelegramAccountsService {
     if (account.type !== 'bot') throw new BadRequestException('该账号不是 Bot 账号');
 
     const botId = dto.token.split(':')[0];
+    // 与 createBot 同一守卫：不得把账号轮换成某个环境变量账号的 Token
+    // （否则又会出现「同一 Bot 两个逻辑账号」）；允许用自身当前 Token 做幂等轮换。
+    if (botId !== account.externalId && this.pool.isEnvTokenRegistered(dto.token)) {
+      throw new ConflictException(
+        '该 Bot Token 已由环境变量账号（主 Bot 或账号池配置）注册，后台只读；'
+        + '请改用其它 Bot，或先从 .env 移除该账号',
+      );
+    }
     await this.assertExternalIdFree('bot', botId, account.id);
     const probe = await this.probe.probeBot(dto.token, dto.primaryChatId ?? account.primaryChatId);
     if (!probe.ok) {
@@ -553,6 +678,53 @@ export class TelegramAccountsService {
       });
     }
     return this.detail(account.id);
+  }
+
+  /**
+   * 探测**环境变量账号**（主 Bot 或 `TELEGRAM_ACCOUNT_POOL` 配置项）。
+   *
+   * 为什么单独一个入口：环境变量账号是只读的（密钥在 `.env`），后台不能编辑/轮换，
+   * 但必须能确认「配置是否还有效」——否则主 Bot 探测失败后，管理员只能从日志里猜。
+   * 探测结论会回写账号池运行态（健康/冷却），使失败立即影响选号。
+   * 响应只回脱敏结论，不含 Token。写操作审计。
+   */
+  async probeEnvAccount(accountId: string, actorId: string): Promise<EnvAccountProbeResult> {
+    const config = this.pool.getConfig(accountId);
+    if (!config) throw new NotFoundException('环境变量账号不存在（未在账号池注册）');
+    if (config.source === 'panel') {
+      throw new BadRequestException('该账号来自数据库，请使用账号测试功能');
+    }
+
+    const startedAt = Date.now();
+    const probe = await this.probe.probeBot(config.token, config.chatId || null);
+    // 探测失败必须立即影响选号：否则界面显示失败但调度器仍在往该账号派活
+    this.pool.recordProbe(accountId, probe.ok, Date.now() - startedAt, probe.error ?? undefined);
+
+    this.audit.log({
+      action: 'telegram_account_tested',
+      userId: actorId,
+      resourceType: 'telegram_account',
+      resourceId: `env:${accountId}`,
+      status: probe.ok ? AuditStatus.SUCCESS : AuditStatus.FAILURE,
+      metadata: {
+        source: 'env',
+        primary: config.primary === true,
+        externalIdMasked: maskTail(accountId),
+        chatId: config.chatId || null,
+        chatType: probe.chatType,
+        capabilities: probe.capabilities,
+        errorCode: probe.errorCode,
+      },
+    });
+
+    return {
+      ok: probe.ok,
+      message: probe.ok ? '环境变量账号探测通过' : (probe.error ?? '环境变量账号探测失败'),
+      capabilities: probe.capabilities,
+      chatTitle: probe.chatTitle,
+      chatType: probe.chatType,
+      errorCode: probe.errorCode,
+    };
   }
 
   // ---------------- 供账号池 / 镜像使用 ----------------

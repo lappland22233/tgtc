@@ -350,7 +350,7 @@ Redis 承载 `metrics-aggregation`、`attack-detection`、`alert-evaluation`、`
 
 **回退**：把 `TELEGRAM_ACCOUNT_POOL_ENABLED` 置回 `false` 即可止血（功能降级，不是数据库回滚）；副本表与 `sourceAccountId` 均为 expand 式增量结构，回退程序版本无需回退数据库。
 
-### 账号池后台管理 + 文件镜像备份（默认关闭；v1.5.2）
+### 账号池后台管理 + 文件镜像备份（默认关闭；v1.5.3）
 
 > 超级管理员在后台「Telegram 账号池」（`/admin/telegram-accounts`）管理 Bot 与用户账号，并配置一条镜像备份规则，把进入系统的新文件同步到独立备份群。**三层开关**：全局账号池、镜像功能、单账号与单规则；**关闭只阻止新任务**，不中断已开始的传输，也不删除已备份内容。
 
@@ -365,8 +365,9 @@ Redis 承载 `metrics-aggregation`、`attack-detection`、`alert-evaluation`、`
 
 **接口**（全部仅 `super_admin`，JWT Cookie，不接受 API Key，写操作均审计）：
 
-- `GET/PUT /api/admin/telegram-accounts/overview|feature`：总览与账号池总开关；
-- `GET/POST/PATCH/DELETE /api/admin/telegram-accounts[/bots|/users|/:id]`：账号全生命周期（创建即校验、测试、启停、轮换、撤销）；
+- `GET/PUT /api/admin/telegram-accounts/overview|feature`：总览与账号池总开关（响应含 `pool` 运行态与 `envAccounts` 只读视图）；
+- `GET/POST/PATCH/DELETE /api/admin/telegram-accounts[/bots|/users|/:id]`：账号全生命周期（创建即校验、测试、启停、轮换、撤销）；列表项带 `source`（`panel`/`both`）与 `runtime` 运行态；
+- `POST /api/admin/telegram-accounts/env/:accountId/probe`：**环境变量账号**（主 Bot 或 `TELEGRAM_ACCOUNT_POOL` 配置项）重新探测，只回脱敏结论并写审计；
 - `POST /api/admin/telegram-accounts/:id/auth/start|verify|cancel`：用户账号交互式授权（验证码与 2FA 密码**不入库不入日志**）；
 - `GET/PUT /api/admin/telegram-mirror`、`PUT .../feature`、`PUT .../rule/enabled`、`POST .../test`：规则配置与权限探测；
 - `GET /api/admin/telegram-mirror/tasks`、`POST .../tasks/:id/retry|cancel`：任务列表与人工干预；
@@ -384,6 +385,25 @@ Redis 承载 `metrics-aggregation`、`attack-detection`、`alert-evaluation`、`
 **只支持单后端实例**：账号画像、镜像任务对账与补偿进度均为进程内状态；`DEPLOYMENT_MODE=multi` 会被启动预检拒绝。
 
 **回退**：先停用镜像规则 → 再停用异常账号 → 最后关闭账号池/镜像总开关；已写入备份群的消息不会自动删除；新增表与可空列均为 expand 式增量，回退程序版本无需回退数据库。
+
+### 环境变量主 Bot 与统一选号（v1.5.3）
+
+> `.env` 配置的 `TELEGRAM_BOT_TOKEN`（主 Bot）**始终**注册进账号池注册表，并在后台「Telegram 账号池 → Bot」页签的**环境变量账号**只读区可见；账号池关闭时行为与单 Bot 部署完全一致。
+
+| 行为 | 说明 |
+|---|---|
+| 后台可见 | 展示来源徽标（环境变量）、主 Bot 标签、脱敏 `tokenPreview`、存储 Chat、权重、`inflight/maxInflight`、带宽/健康/冷却与最近错误；唯一操作是「重新探测」，**不提供编辑/删除/轮换**（密钥轮换只能改 `.env`） |
+| 去重 | 同一 Token 只对应**一个逻辑账号**：显式池配置已含该 Token 时只标记 `primary`；数据库账号与环境变量账号同 Token 时环境变量优先（面板条目被跳过并告警）；`createBot`/`rotateBot` 命中环境变量 Token 时直接拒绝并提示 |
+| 存储 Chat | 未配置存储 Chat 的账号只参与**下载回源**，不会被选为上传/镜像目标（后台行内提示，池初始化时告警一次） |
+| 统一选号 | 下载回源、Web 新文件上传（同步/异步/分片合并）、副本扩散、镜像目标上传全部走同一套加权评分（权重 × 带宽 × 健康 × 容量，失败换号 + 账号级冷却 + 上限） |
+| 严格无缓存旁路 | `noCache`（严格磁盘策略）任务**不**走池化上传，保留 fork 的 `local_cache_released` / `releaseLocalFile` 语义 |
+| 轮询行为变更 | 池化模式下按账号逐一长轮询（含主 Bot）。账号级 offset 键首次出现时，仅当历史全局 offset **归属该账号**（`TELEGRAM_BOT_UPDATE_OFFSET_OWNER` 标记，旧部署按「是否为主 Bot」推断）才继承，避免重放约 24 小时旧更新，也避免把 A 的偏移套到 B 上跳过未消费更新 |
+| 归属正确性 | 池化上传的 `file_id` 只属于实际上传账号：主副本定位（`telegramSourceAccountId`）、副本表、镜像任务的源锚点都写**真实账号**，回源时优先用该账号自己的 `file_id` |
+
+**已知限制**：
+
+1. 缩略图/衍生媒体链路仍走单账号回源（一次性小体量生成，不参与用户面向的下载/预览路径）；如需池化应抽 `TelegramSourceStreamResolver` 共用，而不是复制回退逻辑；
+2. 下载回源在「来源账号已不在池内/被禁用且无任何副本」时会退回默认账号尝试（该 `file_id` 属于其它账号，**预期失败**，日志会给出原因）；彻底 fail-closed 需按上一条抽出统一源解析器后实施。
 
 ## Telegram 文件引用完整性
 

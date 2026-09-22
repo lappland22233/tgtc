@@ -84,6 +84,39 @@ describe('TelegramAccountsService（SQLite 内存库）', () => {
     const probe = { probeBot };
     const audit = { log: jest.fn() };
     const userClient = { isAvailable: () => true, unavailableReason: () => null };
+    // 账号池只读取注册表做去重/运行态展示；默认「无环境变量账号」以保持既有用例语义
+    const envTokens = new Set<string>();
+    const envSnapshots: Array<Record<string, unknown>> = [];
+    const recordProbe = jest.fn();
+    const pool = {
+      isTokenRegistered: (token: string) => envTokens.has(token),
+      isEnvTokenRegistered: (token: string) => envTokens.has(token),
+      isEnvAccount: (id: string) => envSnapshots.some((item) => item.id === id),
+      primaryAccountId: () => (envSnapshots.find((item) => item.primary)?.id as string | undefined) ?? null,
+      ids: () => envSnapshots.map((item) => item.id as string),
+      getConfig: (id: string) => {
+        const snapshot = envSnapshots.find((item) => item.id === id);
+        if (!snapshot) return null;
+        return {
+          id,
+          token: `${id}:SECRET-VALUE-NEVER-EXPOSED`,
+          chatId: (snapshot.chatId as string) ?? '',
+          weight: 1,
+          maxInflight: 8,
+          enabled: true,
+          source: (snapshot.source as 'env' | 'panel') ?? 'env',
+          primary: snapshot.primary === true,
+        };
+      },
+      recordProbe,
+      runtimeView: (id: string) => envSnapshots.find((item) => item.id === id) ?? null,
+      snapshot: () => ({
+        enabled: envSnapshots.length > 0,
+        inactiveReason: null,
+        counters: {} as never,
+        accounts: envSnapshots,
+      }),
+    };
 
     const service = new TelegramAccountsService(
       dataSource.getRepository((require('../common/entities/telegram-account.entity') as typeof import('../common/entities/telegram-account.entity')).TelegramAccount),
@@ -92,8 +125,47 @@ describe('TelegramAccountsService（SQLite 内存库）', () => {
       probe as never,
       userClient as never,
       audit as never,
+      pool as never,
     );
-    return { service, repo: dataSource.getRepository((require('../common/entities/telegram-account.entity') as typeof import('../common/entities/telegram-account.entity')).TelegramAccount), credentials, feature, probe, audit };
+    return {
+      service,
+      repo: dataSource.getRepository((require('../common/entities/telegram-account.entity') as typeof import('../common/entities/telegram-account.entity')).TelegramAccount),
+      credentials,
+      feature,
+      probe,
+      audit,
+      pool,
+      envTokens,
+      envSnapshots,
+      recordProbe,
+    };
+  }
+
+  /** 环境变量主 Bot 的池快照桩（字段与 `AccountPoolAccountSnapshot` 对齐） */
+  function primarySnapshot(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      id: '123456',
+      tokenPreview: '123456:AAF***',
+      chatId: '-1001234567890',
+      enabled: true,
+      weight: 1,
+      maxInflight: 8,
+      inflight: 2,
+      bandwidthMbps: 1.5,
+      successRate: 0.98,
+      latencyMs: 42,
+      coolingDown: false,
+      cooldownRemainingMs: 0,
+      consecutiveFailures: 0,
+      totalRequests: 10,
+      failures: 0,
+      totalBytes: 1024,
+      lastErrorKind: null,
+      source: 'env',
+      primary: true,
+      storageConfigured: true,
+      ...overrides,
+    };
   }
 
   const BOT_TOKEN = '123456:AAF-DEMO-TOKEN-VALUE';
@@ -128,6 +200,15 @@ describe('TelegramAccountsService（SQLite 内存库）', () => {
     const { service } = await setup();
     await service.createBot({ name: '主存储 Bot', token: BOT_TOKEN }, 'admin-1');
     await expectHttpStatus(service.createBot({ name: '重复 Bot', token: BOT_TOKEN }, 'admin-1'), 409);
+  });
+
+  it('创建 Bot：Token 已被环境变量账号注册时拒绝（后台只读，避免双账号假象）', async () => {
+    const { service, repo, envTokens } = await setup();
+    envTokens.add(BOT_TOKEN);
+
+    await expectHttpStatus(service.createBot({ name: '重复主 Bot', token: BOT_TOKEN }, 'admin-1'), 409);
+    // 拒绝必须发生在落库前：不得留下「看起来存在但被环境变量屏蔽」的账号
+    expect(await repo.count()).toBe(0);
   });
 
   it('用户账号：创建后停留在待授权、不参与任务；授权完成后转为启用', async () => {
@@ -211,6 +292,18 @@ describe('TelegramAccountsService（SQLite 内存库）', () => {
     expect(credentials.cipherVersion()).toBe('v1');
   });
 
+  it('轮换：新 Token 命中环境变量账号时拒绝（不得造出同一 Bot 的两个逻辑账号）', async () => {
+    const { service, envTokens, probe } = await setup();
+    const created = await service.createBot({ name: '主存储 Bot', token: BOT_TOKEN }, 'admin-1');
+    envTokens.add('999999:ENV-TOKEN-VALUE');
+
+    await expectHttpStatus(service.rotateBot(created.id, { token: '999999:ENV-TOKEN-VALUE' }, 'admin-1'), 409);
+    // 必须在探测与落库之前拒绝：探测次数应仍停留在「创建时那一次」
+    expect(probe.probeBot).toHaveBeenCalledTimes(1);
+    const after = await service.resolveCredential(created.id);
+    expect(after?.payload.token).toBe(BOT_TOKEN);
+  });
+
   it('账号池取号：只返回启用且非 revoked/pending_auth 的 Bot 账号', async () => {
     const { service } = await setup();
     const active = await service.createBot({ name: 'A', token: '111111:AAAAAAAAAAAA' }, 'admin-1');
@@ -262,5 +355,82 @@ describe('TelegramAccountsService（SQLite 内存库）', () => {
     const keyword = await service.list({ keyword: '用户' });
     expect(keyword.total).toBe(1);
     expect(keyword.items[0].type).toBe('user');
+  });
+
+  it('总览：暴露环境变量主 Bot 的只读脱敏视图与池运行态', async () => {
+    const { service, envSnapshots } = await setup();
+    envSnapshots.push(primarySnapshot());
+
+    const overview = await service.overview();
+    expect(overview.pool.primaryAccountId).toBe('123456');
+    expect(overview.pool.accountCount).toBe(1);
+    expect(overview.pool.envAccountCount).toBe(1);
+    expect(overview.envAccounts).toHaveLength(1);
+
+    const env = overview.envAccounts[0];
+    expect(env).toMatchObject({ id: '123456', primary: true, source: 'env', readOnly: true, enabled: true });
+    expect(env.runtime).toMatchObject({ inflight: 2, maxInflight: 8, storageConfigured: true });
+    expect(overview.precheck.find((item) => item.id === 'primary_bot')?.ok).toBe(true);
+    expect(overview.precheck.find((item) => item.id === 'env_storage_chat')?.ok).toBe(true);
+    // 脱敏：环境变量账号视图不得出现完整 Token
+    expect(JSON.stringify(overview)).not.toContain('SECRET-VALUE-NEVER-EXPOSED');
+  });
+
+  it('总览：环境变量账号缺存储 Chat 时预检提示，且不影响其它账号', async () => {
+    const { service, envSnapshots } = await setup();
+    envSnapshots.push(primarySnapshot({ chatId: '', storageConfigured: false }));
+
+    const overview = await service.overview();
+    expect(overview.envAccounts[0].chatId).toBeNull();
+    expect(overview.envAccounts[0].runtime.storageConfigured).toBe(false);
+    expect(overview.precheck.find((item) => item.id === 'env_storage_chat')?.ok).toBe(false);
+  });
+
+  it('列表：与环境变量同 Bot 的数据库账号标记双来源并带运行态；用户查询不返回环境变量账号', async () => {
+    const { service, envSnapshots } = await setup();
+    await service.createBot({ name: '主存储 Bot', token: BOT_TOKEN, primaryChatId: '-1' }, 'admin-1');
+    envSnapshots.push(primarySnapshot());
+
+    const bots = await service.list({ type: 'bot' });
+    expect(bots.items[0].source).toBe('both');
+    expect(bots.items[0].runtime?.inflight).toBe(2);
+    expect(bots.envAccounts).toHaveLength(1);
+    expect(JSON.stringify(bots)).not.toContain('SECRET-VALUE-NEVER-EXPOSED');
+
+    const users = await service.list({ type: 'user' });
+    expect(users.envAccounts).toEqual([]);
+  });
+
+  it('探测环境变量账号：结论回写池运行态并写审计（不泄露 Token）', async () => {
+    const { service, envSnapshots, recordProbe, audit } = await setup();
+    envSnapshots.push(primarySnapshot());
+
+    const result = await service.probeEnvAccount('123456', 'admin-1');
+    expect(result.ok).toBe(true);
+    expect(result.message).toBe('环境变量账号探测通过');
+    expect(recordProbe).toHaveBeenCalledWith('123456', true, expect.any(Number), undefined);
+
+    const audited = audit.log.mock.calls.at(-1)?.[0] as { metadata?: Record<string, unknown> };
+    expect(audited.metadata?.source).toBe('env');
+    expect(audited.metadata?.primary).toBe(true);
+    expect(JSON.stringify(audited)).not.toContain('SECRET-VALUE-NEVER-EXPOSED');
+  });
+
+  it('探测环境变量账号：失败结论同样回写运行态（失败必须立即影响选号）', async () => {
+    const { service, envSnapshots, recordProbe, probe } = await setup({ ok: false, error: 'Unauthorized', errorCode: 'probe_get_me_failed' });
+    envSnapshots.push(primarySnapshot());
+
+    const result = await service.probeEnvAccount('123456', 'admin-1');
+    expect(result.ok).toBe(false);
+    expect(probe.probeBot).toHaveBeenCalledWith('123456:SECRET-VALUE-NEVER-EXPOSED', '-1001234567890');
+    expect(recordProbe).toHaveBeenCalledWith('123456', false, expect.any(Number), 'Unauthorized');
+  });
+
+  it('探测环境变量账号：未注册返回 404，数据库账号返回 400（不得混用入口）', async () => {
+    const { service, envSnapshots } = await setup();
+    await expectHttpStatus(service.probeEnvAccount('123456', 'admin-1'), 404);
+
+    envSnapshots.push(primarySnapshot({ source: 'panel', primary: false }));
+    await expectHttpStatus(service.probeEnvAccount('123456', 'admin-1'), 400);
   });
 });

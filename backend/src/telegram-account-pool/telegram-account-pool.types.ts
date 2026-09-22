@@ -29,6 +29,16 @@ export interface TelegramAccountConfig {
    * 用于把「面板账号集合」与「env 引导账号」分开刷新：刷新只替换 panel 项，env 项保持不变。
    */
   source?: 'env' | 'panel';
+  /**
+   * 是否为环境变量配置的「主 Bot」（`TELEGRAM_BOT_TOKEN`）。
+   *
+   * 语义：
+   * - 主 Bot 始终注册在账号池内（后台可见、可探测、参与调度），但**后台只读**：
+   *   密钥轮换只能改 `.env`，不接受后台编辑/删除；
+   * - 同一 Token 已由 `TELEGRAM_ACCOUNT_POOL` / `TELEGRAM_BOT_TOKENS` 显式配置时，
+   *   只给该条打 `primary` 标记，不重复注册（防双重轮询/双重计数）。
+   */
+  primary?: boolean;
 }
 
 /** 账号运行期状态（进程内，重启即重置） */
@@ -111,6 +121,34 @@ export interface AccountPoolCounters {
 
 export type AccountPoolCounterKey = keyof AccountPoolCounters;
 
+/** 单个账号的运行态快照条目（脱敏，永不含 Token 原文） */
+export interface AccountPoolAccountSnapshot {
+  id: string;
+  tokenPreview: string;
+  chatId: string;
+  enabled: boolean;
+  weight: number;
+  maxInflight: number;
+  inflight: number;
+  bandwidthMbps: number;
+  successRate: number;
+  latencyMs: number;
+  coolingDown: boolean;
+  cooldownRemainingMs: number;
+  consecutiveFailures: number;
+  totalRequests: number;
+  failures: number;
+  totalBytes: number;
+  lastErrorKind: AccountFailureKind | null;
+  note?: string;
+  /** 配置来源：env=环境变量引导；panel=后台账号管理（热更新） */
+  source?: 'env' | 'panel';
+  /** 是否为环境变量配置的主 Bot（后台只读、不可编辑/删除） */
+  primary: boolean;
+  /** 是否配置了存储 Chat（未配置时只能参与下载回源，不会被选为上传/镜像目标） */
+  storageConfigured: boolean;
+}
+
 /** 账号池快照（管理端/日志/实验采集用；不含 token） */
 export interface AccountPoolSnapshot {
   /** 是否处于「可用的池化模式」（启用 + 至少一个账号） */
@@ -119,26 +157,5 @@ export interface AccountPoolSnapshot {
   inactiveReason: string | null;
   /** 进程内计数（选择/换号/回退/复制/回复失败等） */
   counters: AccountPoolCounters;
-  accounts: Array<{
-    id: string;
-    tokenPreview: string;
-    chatId: string;
-    enabled: boolean;
-    weight: number;
-    maxInflight: number;
-    inflight: number;
-    bandwidthMbps: number;
-    successRate: number;
-    latencyMs: number;
-    coolingDown: boolean;
-    cooldownRemainingMs: number;
-    consecutiveFailures: number;
-    totalRequests: number;
-    failures: number;
-    totalBytes: number;
-    lastErrorKind: AccountFailureKind | null;
-    note?: string;
-    /** 配置来源：env=环境变量引导；panel=后台账号管理（热更新） */
-    source?: 'env' | 'panel';
-  }>;
+  accounts: AccountPoolAccountSnapshot[];
 }

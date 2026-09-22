@@ -8,6 +8,7 @@ import { File } from '../common/entities/file.entity';
 import { TelegramService } from '../telegram/telegram.service';
 import { FileService } from '../file/file.service';
 import { UploadDiskBudgetService } from '../file/upload-disk-budget.service';
+import { AccountAwareUploadService } from '../telegram-account-pool/account-aware-upload.service';
 import { createReadStream, existsSync } from 'fs';
 import { readFile, rename, unlink, writeFile } from 'fs/promises';
 import { databaseQuery, getDatabaseType } from '../database/database-types';
@@ -33,6 +34,12 @@ interface UploadReceipt {
   localCacheReleased?: boolean;
   /** 任务创建时冻结的严格磁盘策略，供重启恢复任务保持相同的空间语义。 */
   strictDiskLease?: boolean;
+  /**
+   * 实际产生该 `file_id` 的账号（池化上传写入）。
+   * 必须随回执持久化：重启恢复提交时只有回执可依，否则会把池内账号的 `file_id`
+   * 记成默认 Bot 的归属，导致后续回源/镜像取错账号。
+   */
+  sourceAccountId?: string | null;
 }
 
 @Injectable()
@@ -46,6 +53,12 @@ export class FileUploadProcessor {
     private telegramService: TelegramService,
     private fileService: FileService,
     @Optional() private readonly uploadDiskBudget?: UploadDiskBudgetService,
+    /**
+     * 账号池上传选号（可选依赖）：未启用账号池时逐字节等价于原单账号链路。
+     * 严格无缓存任务（`strictDiskLease`）永远不走池化——它依赖 fork 的
+     * `local_cache_released` / `releaseLocalFile` 语义，池化客户端不提供该契约。
+     */
+    @Optional() private readonly accountUpload?: AccountAwareUploadService,
   ) {}
 
   private async removeTempFile(filePath: string): Promise<boolean> {
@@ -113,6 +126,39 @@ export class FileUploadProcessor {
     const released = { ...receipt, localCacheReleased: true };
     await this.persistReceipt(filePath, released, uploadVersion);
     return released;
+  }
+
+  /**
+   * 账号池上传（仅非严格任务）。
+   *
+   * 返回 null 表示本次未使用池化（未装配 / 未启用 / 无可用候选 / 换号耗尽 / 异常），
+   * 调用方据此回退单账号链路；回执中的 `sourceAccountId` 是**实际上传账号**，
+   * 提交阶段必须据此登记主副本归属。
+   */
+  private async tryPooledUpload(filePath: string, file: File): Promise<UploadReceipt | null> {
+    if (!this.accountUpload?.isActive()) return null;
+    try {
+      const pooled = await this.accountUpload.upload({
+        filename: file.originalName,
+        knownLength: file.size,
+        // 换号重试必须新开流：流只能被消费一次
+        openStream: () => createReadStream(filePath),
+      });
+      if (!pooled) return null;
+      return {
+        file_id: pooled.fileId,
+        // 池化上传不调用普通 getFile（会触发完整回源下载），路径留空
+        file_path: '',
+        file_size: pooled.fileSize,
+        message_id: pooled.messageId || null,
+        chat_id: pooled.chatId || null,
+        file_unique_id: pooled.fileUniqueId,
+        sourceAccountId: pooled.accountId,
+      };
+    } catch (error) {
+      this.logger.warn(`账号池上传异常，回退单账号链路: ${(error as Error).message}`);
+      return null;
+    }
   }
 
   private async removeUploadArtifacts(
@@ -193,7 +239,10 @@ export class FileUploadProcessor {
       try {
         let result = await this.loadReceipt(filePath, uploadVersion);
         if (!result) {
-          result = await this.telegramService.uploadFile(
+          // 池化优先（仅非严格任务）：按权重/健康/容量选号上传，并记录**实际上传账号**；
+          // 严格任务保留单账号链路，以维持 noCache/localCacheReleased/releaseLocalFile 契约。
+          const pooled = strictDiskLease ? null : await this.tryPooledUpload(filePath, file);
+          result = pooled ?? await this.telegramService.uploadFile(
             createReadStream(filePath),
             file.originalName,
             undefined,
@@ -336,11 +385,11 @@ export class FileUploadProcessor {
           chat_id: receipt.chat_id,
           message_id: receipt.message_id,
           file_unique_id: receipt.file_unique_id ?? null,
-        });
+        }, receipt.sourceAccountId ?? null);
         void this.fileService.triggerMirrorForFile(file, {
           chat_id: receipt.chat_id,
           message_id: receipt.message_id,
-        });
+        }, receipt.sourceAccountId ?? null);
       }
     } catch (error) {
       this.logger.warn(

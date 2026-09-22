@@ -3,6 +3,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { AlertModule } from '../alert/alert.module';
 import { TelegramFileCopy } from '../common/entities/telegram-file-copy.entity';
 import { AccountAwareDownloadService } from './account-aware-download.service';
+import { AccountAwareUploadService } from './account-aware-upload.service';
 import { FileCopyService } from './file-copy.service';
 import { TelegramAccountClientService } from './telegram-account-client.service';
 import { TelegramAccountPoolAlertService } from './telegram-account-pool-alert.service';
@@ -39,6 +40,7 @@ const STALE_COPY_TTL_DAYS = 30;
     FileCopyService,
     UserRelayService,
     AccountAwareDownloadService,
+    AccountAwareUploadService,
     TelegramAccountPoolAlertService,
   ],
   exports: [
@@ -47,6 +49,7 @@ const STALE_COPY_TTL_DAYS = 30;
     FileCopyService,
     UserRelayService,
     AccountAwareDownloadService,
+    AccountAwareUploadService,
     TelegramAccountPoolAlertService,
   ],
 })

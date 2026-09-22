@@ -31,6 +31,48 @@ export interface TelegramAccountCapabilities {
   supportsPolling?: boolean;
 }
 
+/**
+ * 账号池运行态视图（进程内画像的脱敏投影）。
+ * 只含计数、带宽、健康与冷却信息，**不含任何凭据**。
+ */
+export interface TelegramAccountRuntimeView {
+  inflight: number;
+  maxInflight: number;
+  bandwidthMbps: number;
+  successRate: number;
+  latencyMs: number;
+  coolingDown: boolean;
+  cooldownRemainingMs: number;
+  consecutiveFailures: number;
+  totalRequests: number;
+  failures: number;
+  lastErrorKind: string | null;
+  /** 是否配置了存储 Chat（false 时该账号只参与下载回源，不会被选为上传/镜像目标） */
+  storageConfigured: boolean;
+}
+
+/**
+ * 环境变量账号只读视图（主 Bot 与 `TELEGRAM_ACCOUNT_POOL` 配置项）。
+ *
+ * 后台只读：密钥轮换只能改 `.env`，**不提供编辑/删除/轮换**。
+ * 视图永不含完整 Token，只给出已脱敏的 `tokenPreview`（如 `123456:AAF***`）。
+ */
+export interface TelegramEnvAccountView {
+  id: string;
+  /** 是否为环境变量主 Bot（`TELEGRAM_BOT_TOKEN`） */
+  primary: boolean;
+  source: 'env';
+  /** 恒为 true：后台不提供编辑/删除/轮换 */
+  readOnly: true;
+  tokenPreview: string;
+  chatId: string | null;
+  enabled: boolean;
+  weight: number;
+  maxInflight: number;
+  note: string | null;
+  runtime: TelegramAccountRuntimeView;
+}
+
 /** 账号脱敏视图（`externalId` 形如 `***7890`） */
 export interface TelegramAccountView {
   id: string;
@@ -53,6 +95,10 @@ export interface TelegramAccountView {
   note: string | null;
   createdAt: string;
   updatedAt: string;
+  /** 配置来源：`panel`=仅数据库账号；`both`=同一 Bot 既在数据库又被环境变量注册（密钥以 `.env` 为准） */
+  source?: 'panel' | 'both';
+  /** 账号池运行态（Bot 账号已在池内注册时有值；用户账号为 null） */
+  runtime?: TelegramAccountRuntimeView | null;
 }
 
 /** 三层开关的取值来源 */
@@ -87,12 +133,31 @@ export interface AccountPoolCounts {
   pendingAuth: number;
 }
 
+/**
+ * 账号池是否**真正生效**（区分「后台有账号」与「账号池可用」）。
+ * `enabled=false` 时 `inactiveReason` 给出可诊断原因。
+ */
+export interface AccountPoolState {
+  enabled: boolean;
+  inactiveReason: string | null;
+  /** 环境变量主 Bot 的账号 id（未配置 `TELEGRAM_BOT_TOKEN` 时为 null） */
+  primaryAccountId: string | null;
+  /** 池内注册账号总数（含环境变量与数据库账号） */
+  accountCount: number;
+  /** 其中来自环境变量的账号数 */
+  envAccountCount: number;
+}
+
 export interface AccountPoolOverview {
   feature: TelegramAccountFeatureState;
   credentialCryptoAvailable: boolean;
   userClientAvailable: boolean;
   userClientUnavailableReason: string | null;
   counts: AccountPoolCounts;
+  /** 账号池生效状态（新契约） */
+  pool: AccountPoolState;
+  /** 环境变量账号只读视图（主 Bot 与 `TELEGRAM_ACCOUNT_POOL` 配置项） */
+  envAccounts: TelegramEnvAccountView[];
   precheck: PrecheckItem[];
 }
 
@@ -177,10 +242,17 @@ export async function setAccountPoolEnabled(enabled: boolean): Promise<{ message
 export async function fetchAccounts(
   query: TelegramAccountListQuery = {},
   signal?: AbortSignal,
-): Promise<{ items: TelegramAccountView[]; total: number }> {
+): Promise<{ items: TelegramAccountView[]; total: number; envAccounts: TelegramEnvAccountView[] }> {
   const response = await api.get('/admin/telegram-accounts', { params: query, signal });
-  const data = response.data.data as { items?: TelegramAccountView[]; total?: number } | undefined;
-  return { items: data?.items ?? [], total: Number(data?.total ?? 0) };
+  const data = response.data.data as
+    | { items?: TelegramAccountView[]; total?: number; envAccounts?: TelegramEnvAccountView[] }
+    | undefined;
+  return {
+    items: data?.items ?? [],
+    total: Number(data?.total ?? 0),
+    // 环境变量账号只读视图：Bot 页签独立只读区展示（用户页签后端恒为空数组）
+    envAccounts: data?.envAccounts ?? [],
+  };
 }
 
 /** 添加 Bot 账号（创建即 getMe + 主存储 Chat 校验，失败不落库） */
@@ -219,6 +291,29 @@ export async function deleteAccount(id: string): Promise<{ message: string; acco
 export async function testAccount(id: string): Promise<{ message: string; account: TelegramAccountView }> {
   const response = await api.post(`/admin/telegram-accounts/${id}/test`);
   return response.data.data as { message: string; account: TelegramAccountView };
+}
+
+/** 环境变量账号探测结论（脱敏；不含 Token） */
+export interface EnvAccountProbeResult {
+  ok: boolean;
+  message: string;
+  capabilities: TelegramAccountCapabilities | null;
+  chatTitle: string | null;
+  chatType: string | null;
+  errorCode: string | null;
+}
+
+/**
+ * 重新探测**环境变量账号**（主 Bot 或 `TELEGRAM_ACCOUNT_POOL` 配置项）。
+ *
+ * 只读账号不提供编辑/删除/轮换，但必须能验证配置是否仍然有效。
+ * 后端仅超级管理员可调用；未注册的账号 id → 404，数据库账号 id → 400。
+ */
+export async function probeEnvAccount(
+  accountId: string,
+): Promise<{ message: string; probe: EnvAccountProbeResult }> {
+  const response = await api.post(`/admin/telegram-accounts/env/${accountId}/probe`);
+  return response.data.data as { message: string; probe: EnvAccountProbeResult };
 }
 
 /** 轮换凭据（Bot：新 Token；用户账号：重启授权流程） */

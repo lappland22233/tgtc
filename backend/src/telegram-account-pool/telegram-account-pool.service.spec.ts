@@ -233,4 +233,76 @@ describe('TelegramAccountPoolService（选号 / 冷却 / 快照）', () => {
     expect(pool.ids()).toEqual(['dup']);
     expect(pool.getConfig('dup')?.token).toBe(TOKEN_A);
   });
+
+  it('环境变量主 Bot 始终注册为只读 primary 账号（不影响未启用时的 isActive 语义）', () => {
+    const pool = makePool({
+      TELEGRAM_BOT_TOKEN: TOKEN_C,
+      TELEGRAM_CHAT_ID: '-100777',
+    });
+
+    // 注册表可见（后台需要展示主 Bot 的来源/健康/负载），但未开启池化 → 选号仍为 null
+    expect(pool.ids()).toEqual(['3333333']);
+    expect(pool.getConfig('3333333')).toMatchObject({
+      token: TOKEN_C,
+      chatId: '-100777',
+      source: 'env',
+      primary: true,
+    });
+    expect(pool.primaryAccountId()).toBe('3333333');
+    expect(pool.isActive()).toBe(false);
+    expect(pool.select()).toBeNull();
+
+    const snapshot = pool.snapshot();
+    expect(snapshot.accounts).toHaveLength(1);
+    expect(snapshot.accounts[0]).toMatchObject({ primary: true, source: 'env' });
+    // 快照必须脱敏：不得出现完整 Token
+    expect(JSON.stringify(snapshot)).not.toContain(TOKEN_C);
+  });
+
+  it('主 Bot 与显式配置同 Token 时只标记 primary，不重复注册（防双重轮询/计数）', () => {
+    const pool = makePool({
+      TELEGRAM_ACCOUNT_POOL_ENABLED: 'true',
+      TELEGRAM_ACCOUNT_POOL: JSON.stringify([{ id: 'bot1', token: TOKEN_A, chatId: '-1001' }]),
+      TELEGRAM_BOT_TOKEN: TOKEN_A,
+      TELEGRAM_CHAT_ID: '-1001',
+    });
+
+    expect(pool.ids()).toEqual(['bot1']);
+    expect(pool.getConfig('bot1')?.primary).toBe(true);
+    expect(pool.snapshot().accounts).toHaveLength(1);
+  });
+
+  it('面板账号与环境变量账号同 Token 时被跳过（环境变量优先，不产生第二个逻辑账号）', async () => {
+    const pool = makePool({ TELEGRAM_BOT_TOKEN: TOKEN_A, TELEGRAM_CHAT_ID: '-1001' });
+    pool.registerAccountSource(async () => [
+      { id: 'panel-dup', token: TOKEN_A, chatId: '-1001', weight: 5, maxInflight: 4, enabled: true },
+    ]);
+    await pool.refreshExternalAccounts(true);
+
+    expect(pool.ids()).toEqual(['1111111']);
+    expect(pool.getConfig('panel-dup')).toBeNull();
+    expect(pool.isTokenRegistered(TOKEN_A)).toBe(true);
+    expect(pool.isEnvTokenRegistered(TOKEN_A)).toBe(true);
+  });
+
+  it('面板账号不得覆盖同 id 的环境变量账号（env 优先，Token 不被替换）', async () => {
+    const pool = makePool({ TELEGRAM_BOT_TOKEN: TOKEN_A, TELEGRAM_CHAT_ID: '-1001' });
+    pool.registerAccountSource(async () => [
+      { id: '1111111', token: TOKEN_B, chatId: '-2002', weight: 9, maxInflight: 1, enabled: true },
+    ]);
+    await pool.refreshExternalAccounts(true);
+
+    expect(pool.getConfig('1111111')).toMatchObject({ token: TOKEN_A, source: 'env', primary: true });
+  });
+
+  it('isEnvTokenRegistered 只认环境变量账号：面板账号 Token 不算 env 冲突', async () => {
+    const pool = makePool({ TELEGRAM_ACCOUNT_POOL_ENABLED: 'true' });
+    pool.registerAccountSource(async () => [
+      { id: 'panel1', token: TOKEN_B, chatId: '-2', weight: 1, maxInflight: 4, enabled: true },
+    ]);
+    await pool.refreshExternalAccounts(true);
+
+    expect(pool.isTokenRegistered(TOKEN_B)).toBe(true);
+    expect(pool.isEnvTokenRegistered(TOKEN_B)).toBe(false);
+  });
 });

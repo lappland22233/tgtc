@@ -4,7 +4,8 @@ import { TelegramMirrorRule } from '../common/entities/telegram-mirror-rule.enti
 import { TelegramMirrorTask } from '../common/entities/telegram-mirror-task.entity';
 import { TelegramService } from '../telegram/telegram.service';
 import { TelegramAccountPoolService } from '../telegram-account-pool/telegram-account-pool.service';
-import { TelegramAccountClientService } from '../telegram-account-pool/telegram-account-client.service';
+import { TelegramAccountClientService, TelegramAccountError } from '../telegram-account-pool/telegram-account-client.service';
+import { AccountAttemptSample } from '../telegram-account-pool/telegram-account-pool.types';
 import { AccountAwareDownloadService } from '../telegram-account-pool/account-aware-download.service';
 import { FileCopyService } from '../telegram-account-pool/file-copy.service';
 import { TelegramAccountsService } from '../telegram-accounts/telegram-accounts.service';
@@ -13,10 +14,14 @@ import { MirrorExecutionError, isAccountCredentialError } from './telegram-mirro
 import { MirrorExecutionResult } from './telegram-mirror.types';
 
 interface TargetBot {
+  /**
+   * `panel` = 用**账号级客户端**上传（池内账号：数据库账号或环境变量账号，需要 Token）；
+   * `default` = 用默认 Bot 的单账号链路上传（无任何池内/面板候选时的最后兜底）。
+   */
   kind: 'panel' | 'default';
   /** 账号外部标识（botId）：写入任务的 targetAccountId */
   accountId: string;
-  /** 账号主数据行 ID（仅面板账号有；凭据失效时用于标记 degraded） */
+  /** 账号主数据行 ID（仅数据库账号有；凭据失效时用于标记 degraded） */
   rowId?: string;
   token?: string;
 }
@@ -58,13 +63,23 @@ export class TelegramMirrorBotService {
 
     try {
       if (target.kind === 'panel' && target.token) {
-        const uploaded = await this.uploadWithPanelAccount({
-          target,
-          chatId: rule.targetChatId,
-          stream,
-          fileName,
-          size,
-        });
+        // 账号级上传必须计入池内运行态（在飞 + 带宽/健康采样）：
+        // 否则镜像上传会绕过账号池的容量与冷却控制，把某账号压垮而不自知。
+        const tracked = this.pool.beginAttempt(target.accountId);
+        let uploaded: Awaited<ReturnType<TelegramMirrorBotService['uploadWithPanelAccount']>>;
+        try {
+          uploaded = await this.uploadWithPanelAccount({
+            target,
+            chatId: rule.targetChatId,
+            stream,
+            fileName,
+            size,
+          });
+        } catch (error) {
+          if (tracked) this.pool.finishAttempt(target.accountId, this.toFailureSample(error));
+          throw error;
+        }
+        if (tracked) this.pool.finishAttempt(target.accountId, uploaded.sample);
         await this.recordBackupCopy(task, target.accountId, uploaded.fileId, uploaded.chatId, uploaded.messageId, size);
         this.logger.log(
           `镜像完成（bot_upload）：${task.ownerType}:${task.ownerId} → 账号 ${target.accountId} / chat ${rule.targetChatId}`,
@@ -121,14 +136,21 @@ export class TelegramMirrorBotService {
     }
   }
 
-  /** 面板账号上传：凭据失效时明确标记账号降级，让管理员在后台看见并重新轮换 Token */
+  /** 账号级上传：凭据失效时明确标记账号降级，让管理员在后台看见并重新轮换 Token */
   private async uploadWithPanelAccount(params: {
     target: TargetBot;
     chatId: string;
     stream: Readable;
     fileName: string;
     size: number;
-  }): Promise<{ fileId: string; fileSize: number; chatId: string; messageId: string }> {
+  }): Promise<{
+    fileId: string;
+    fileSize: number;
+    chatId: string;
+    messageId: string;
+    fileUniqueId: string | null;
+    sample: AccountAttemptSample;
+  }> {
     try {
       return await this.client.sendDocumentStream(
         params.target.accountId,
@@ -233,7 +255,16 @@ export class TelegramMirrorBotService {
     return candidate;
   }
 
-  /** 选择镜像目标 Bot：优先规则指定账号，其次池内可用账号，最后回落默认单账号链路 */
+  /**
+   * 选择镜像目标 Bot。
+   *
+   * 降级链（顺序即优先级）：
+   * 1. **规则指定账号**：管理员显式意图，不做负载改写；
+   * 2. **账号池评分选号**：池可用时用与下载/上传同一套 `pool.select`
+   *    （权重 × 带宽 × 健康 × 容量，排除源账号）在「已配置存储 Chat」的账号中选号；
+   * 3. **面板账号权重轮转**：池不可用时保留原 `pickWeighted`（非池部署行为逐字节不变）；
+   * 4. **默认单账号兜底**：无任何候选时回落默认 Bot；池已启用却无候选才累计 `fallbacks`。
+   */
   private async resolveTargetBot(rule: TelegramMirrorRule, sourceAccountId: string | null): Promise<TargetBot> {
     let candidates: Awaited<ReturnType<TelegramAccountsService['resolveEnabledBotAccounts']>> = [];
     try {
@@ -249,15 +280,61 @@ export class TelegramMirrorBotService {
       if (preferred) {
         return { kind: 'panel', accountId: preferred.accountId, rowId: preferred.id, token: preferred.token };
       }
-      this.logger.warn(`规则指定的优先账号 ${rule.preferredAccountId} 不可用，改为按权重选择`);
+      // 环境变量账号（主 Bot 或 TELEGRAM_ACCOUNT_POOL 配置项）不在数据库，但同样可被规则指定
+      const preferredEnv = this.pool.getConfig(rule.preferredAccountId);
+      if (preferredEnv?.enabled && preferredEnv.chatId) {
+        return { kind: 'panel', accountId: preferredEnv.id, token: preferredEnv.token };
+      }
+      this.logger.warn(`规则指定的优先账号 ${rule.preferredAccountId} 不可用，改为按负载选择`);
     }
 
-    const excludingSource = candidates.filter((item) => item.accountId !== sourceAccountId);
-    const picked = this.pickWeighted(excludingSource.length > 0 ? excludingSource : candidates);
+    // 账号池可用 → 复用统一调度器（与下载/上传同一套评分与冷却）
+    if (this.pool.isActive()) {
+      const storageIds = this.pool.storageAccountIds();
+      // 注意：`pool.select()` 把**空数组**当作「不限定候选 = 全池」，
+      // 所以必须先确认候选非空，绝不能把空数组传进去……
+      if (storageIds.length > 0) {
+        const excludingSource = storageIds.filter((id) => id !== sourceAccountId);
+        const selection = this.pool.select(excludingSource.length > 0 ? excludingSource : storageIds);
+        const account = selection ? this.pool.getConfig(selection.accountId) : null;
+        if (selection && account) {
+          this.logger.log(`镜像目标账号按负载选择 ${account.id}（依据 ${selection.reason}）`);
+          return {
+            kind: 'panel',
+            accountId: account.id,
+            rowId: candidates.find((item) => item.accountId === account.id)?.id,
+            token: account.token,
+          };
+        }
+      }
+      // ……否则会选中「未配置存储 Chat」的账号，产生必败上传且回退计数失真。
+      //
+      // 池已启用但无可用候选（无存储 Chat / 全部冷却或满载）：不再用 pickWeighted
+      // 绕过池的冷却与容量判定，直接按默认兜底并计入回退。
+      const defaultBotId = ((process.env.TELEGRAM_BOT_TOKEN || '').split(':')[0] || '').trim();
+      this.pool.bumpCounter('fallbacks');
+      return { kind: 'default', accountId: defaultBotId || 'default' };
+    }
+
+    // 池未启用：保留既有「面板账号权重展平 + 游标」选号（非池部署行为逐字节不变）
+    const excludingSourceRows = candidates.filter((item) => item.accountId !== sourceAccountId);
+    const picked = this.pickWeighted(excludingSourceRows.length > 0 ? excludingSourceRows : candidates);
     if (picked) return { kind: 'panel', accountId: picked.accountId, rowId: picked.id, token: picked.token };
 
     const defaultBotId = ((process.env.TELEGRAM_BOT_TOKEN || '').split(':')[0] || '').trim();
     return { kind: 'default', accountId: defaultBotId || 'default' };
+  }
+
+  /** 失败尝试的采样（供账号池更新健康度与冷却） */
+  private toFailureSample(error: unknown): AccountAttemptSample {
+    const accountError = error instanceof TelegramAccountError ? error : null;
+    return {
+      ok: false,
+      failureKind: accountError?.kind ?? 'other',
+      status: accountError?.status,
+      retryAfterSeconds: accountError?.retryAfterSeconds,
+      errorMessage: error instanceof Error ? error.message : String(error),
+    };
   }
 
   /** 权重展平 + 游标轮转：权重高者被选中概率更高，同权重账号均匀分流 */

@@ -45,6 +45,9 @@ function snapshot(options: {
         failures: 0,
         totalBytes: 0,
         lastErrorKind: null,
+        source: 'env' as const,
+        primary: false,
+        storageConfigured: true,
       })),
   };
 }

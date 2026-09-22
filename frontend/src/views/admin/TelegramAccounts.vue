@@ -98,6 +98,98 @@
         <t-tab-panel value="user" label="用户账号" />
       </t-tabs>
 
+      <!-- 环境变量账号只读区（独立于数据库账号列表，不参与分页/筛选） -->
+      <div v-if="accountTab === 'bot'" class="env-accounts" aria-label="环境变量账号">
+        <div class="env-accounts-head">
+          <h4 class="env-accounts-title">环境变量账号</h4>
+          <span class="section-hint">
+            来自 .env（TELEGRAM_BOT_TOKEN / TELEGRAM_ACCOUNT_POOL），后台只读：密钥轮换请改 .env，不提供编辑/删除/轮换。
+          </span>
+        </div>
+
+        <t-alert
+          v-if="poolNotice"
+          :theme="poolNotice.theme"
+          :title="poolNotice.title"
+          :message="poolNotice.message"
+        />
+
+        <div v-if="envAccounts.length === 0" class="empty-hint">未检测到环境变量账号</div>
+
+        <ul v-else class="env-account-list">
+          <li v-for="account in envAccounts" :key="account.id" class="env-account-row">
+            <div class="env-account-main">
+              <div class="env-account-head">
+                <t-tag theme="primary" variant="light" size="small">环境变量</t-tag>
+                <t-tag v-if="account.primary" theme="warning" variant="light" size="small">主 Bot</t-tag>
+                <span class="cell-strong env-account-id">{{ account.id }}</span>
+                <span class="cell-mono">{{ account.tokenPreview }}</span>
+                <t-tag :theme="account.enabled ? 'success' : 'default'" variant="light" size="small">
+                  {{ account.enabled ? '已启用' : '已停用' }}
+                </t-tag>
+              </div>
+
+              <dl class="env-account-meta">
+                <div class="env-meta-item">
+                  <dt>存储 Chat</dt>
+                  <dd>
+                    <span v-if="account.chatId" class="cell-mono">{{ account.chatId }}</span>
+                    <span v-else class="cell-muted">未配置存储 Chat</span>
+                  </dd>
+                </div>
+                <div class="env-meta-item">
+                  <dt>权重</dt>
+                  <dd>{{ account.weight }}</dd>
+                </div>
+                <div class="env-meta-item">
+                  <dt>在飞</dt>
+                  <dd>{{ account.runtime.inflight }} / {{ account.runtime.maxInflight }}</dd>
+                </div>
+                <div class="env-meta-item">
+                  <dt>带宽</dt>
+                  <dd>{{ formatBandwidth(account.runtime.bandwidthMbps) }}</dd>
+                </div>
+                <div class="env-meta-item">
+                  <dt>健康</dt>
+                  <dd>
+                    <t-tag :theme="envHealthTheme(account.runtime)" variant="light" size="small">
+                      {{ envHealthText(account.runtime) }}
+                    </t-tag>
+                  </dd>
+                </div>
+                <div class="env-meta-item">
+                  <dt>成功率</dt>
+                  <dd>{{ formatSuccessRate(account.runtime.successRate) }}</dd>
+                </div>
+                <div class="env-meta-item">
+                  <dt>冷却剩余</dt>
+                  <dd>{{ formatCooldown(account.runtime.cooldownRemainingMs) }}</dd>
+                </div>
+                <div class="env-meta-item">
+                  <dt>最近错误</dt>
+                  <dd>{{ errorKindText(account.runtime.lastErrorKind) }}</dd>
+                </div>
+              </dl>
+
+              <p v-if="!account.runtime.storageConfigured" class="env-account-warn">
+                未配置存储 Chat：仅参与下载回源，不会被选为上传/镜像目标。
+              </p>
+            </div>
+
+            <div class="env-account-actions">
+              <t-button
+                variant="outline"
+                size="small"
+                :loading="envProbingId === account.id"
+                @click="runEnvProbe(account)"
+              >
+                重新探测
+              </t-button>
+            </div>
+          </li>
+        </ul>
+      </div>
+
       <div class="table-filters">
         <t-input
           v-model="accountKeyword"
@@ -126,6 +218,11 @@
             <div class="cell-stack">
               <span class="cell-strong">{{ row.name }}</span>
               <span class="cell-mono">Token：{{ row.externalId || '—' }}</span>
+              <t-tag v-if="row.source === 'both'" theme="primary" variant="light" size="small">
+                双来源（环境变量优先）
+              </t-tag>
+              <span v-if="row.source === 'both'" class="cell-note">同一 Bot 已被环境变量注册，密钥以 .env 为准</span>
+              <span v-if="row.runtime" class="cell-note">{{ runtimeSummary(row.runtime) }}</span>
             </div>
           </template>
           <template #status="{ row }">
@@ -171,6 +268,10 @@
             <t-tag :theme="statusTheme(row.status)" variant="light">{{ statusText(row.status) }}</t-tag>
           </div>
           <div class="mobile-card-meta">Token：{{ row.externalId || '—' }}</div>
+          <div v-if="row.source === 'both'" class="mobile-card-meta">
+            双来源（环境变量优先）：密钥以 .env 为准
+          </div>
+          <div v-if="row.runtime" class="mobile-card-meta">运行态：{{ runtimeSummary(row.runtime) }}</div>
           <div class="mobile-card-meta">能力：{{ capabilityText(row) }}</div>
           <div class="mobile-card-meta">权重 / 并发：{{ row.weight }} / {{ row.maxInflight }}</div>
           <div class="mobile-card-meta">最近成功：{{ formatTime(row.lastSuccessAt) }}</div>
@@ -636,6 +737,7 @@ import {
   fetchMirrorOverview,
   fetchMirrorTasks,
   pauseMirrorBackfill,
+  probeEnvAccount,
   resumeMirrorBackfill,
   retryMirrorTask,
   rotateAccount,
@@ -656,9 +758,11 @@ import {
   type MirrorRuleTestResult,
   type MirrorTaskListItem,
   type MirrorTaskSummary,
+  type TelegramAccountRuntimeView,
   type TelegramAccountStatus,
   type TelegramAccountType,
   type TelegramAccountView,
+  type TelegramEnvAccountView,
   type TelegramMirrorMode,
   type TelegramMirrorTaskStatus,
   type UpdateTelegramAccountInput,
@@ -1020,6 +1124,155 @@ function confirmDelete(account: TelegramAccountView) {
     },
     onClose: () => dialog.destroy(),
   });
+}
+
+// ---------------- 环境变量账号（只读） ----------------
+
+/** 环境变量账号只读视图（来自总览；独立于数据库账号列表，不参与分页/筛选） */
+const envAccounts = computed<TelegramEnvAccountView[]>(() => overview.value?.envAccounts ?? []);
+
+const envProbingId = ref<string | null>(null);
+
+const ERROR_KIND_TEXT: Record<string, string> = {
+  flood: '限流',
+  unavailable: '不可用',
+  timeout: '超时',
+  network: '网络',
+  other: '其它',
+};
+
+function errorKindText(kind: string | null): string {
+  if (!kind) return '无';
+  return ERROR_KIND_TEXT[kind] ?? kind;
+}
+
+function formatBandwidth(mbps: number): string {
+  if (!Number.isFinite(mbps) || mbps <= 0) return '—';
+  return `${mbps.toFixed(1)} Mbps`;
+}
+
+function formatSuccessRate(rate: number): string {
+  if (!Number.isFinite(rate)) return '—';
+  return `${Math.round(rate * 100)}%`;
+}
+
+function formatCooldown(ms: number): string {
+  if (!ms || ms <= 0) return '—';
+  const seconds = Math.ceil(ms / 1000);
+  if (seconds < 60) return `${seconds} 秒`;
+  return `${Math.ceil(seconds / 60)} 分钟`;
+}
+
+function envHealthTheme(runtime: TelegramAccountRuntimeView): 'success' | 'warning' | 'danger' {
+  if (runtime.coolingDown) return 'danger';
+  if (runtime.consecutiveFailures > 0) return 'warning';
+  return 'success';
+}
+
+function envHealthText(runtime: TelegramAccountRuntimeView): string {
+  if (runtime.coolingDown) return '冷却中';
+  if (runtime.consecutiveFailures > 0) return `连续失败 ${runtime.consecutiveFailures} 次`;
+  return '正常';
+}
+
+/** 运行态摘要（数据库账号行与环境变量账号区共用） */
+function runtimeSummary(runtime: TelegramAccountRuntimeView): string {
+  const parts = [
+    `在飞 ${runtime.inflight}/${runtime.maxInflight}`,
+    `成功率 ${formatSuccessRate(runtime.successRate)}`,
+  ];
+  if (runtime.coolingDown) parts.push(`冷却 ${formatCooldown(runtime.cooldownRemainingMs)}`);
+  return parts.join(' · ');
+}
+
+/**
+ * 账号池状态提示：用总览的 `pool` + `precheck` 区分具体原因，
+ * 避免笼统地显示「账号池正常」而掩盖配置问题。
+ */
+const poolNotice = computed<{ theme: 'info' | 'warning' | 'success'; title: string; message: string } | null>(() => {
+  const data = overview.value;
+  if (!data) return null;
+  const pool = data.pool;
+  const primaryAccountId = pool?.primaryAccountId ?? null;
+
+  // 1) 未配置环境变量主 Bot
+  if (!primaryAccountId) {
+    return {
+      theme: 'info',
+      title: '未配置环境变量主 Bot',
+      message: '未设置 TELEGRAM_BOT_TOKEN：账号池中没有环境变量主 Bot，后台账号全部来自数据库。',
+    };
+  }
+
+  // 2) 已配置但主 Bot 探测失败/不可用（precheck 失败，或冷却中/连续失败）
+  const primaryPrecheck = data.precheck.find((item) => item.id === 'primary_bot');
+  const primaryEnv = envAccounts.value.find((account) => account.primary);
+  const primaryUnhealthy = Boolean(
+    primaryEnv && (primaryEnv.runtime.coolingDown || primaryEnv.runtime.consecutiveFailures > 0),
+  );
+  if ((primaryPrecheck && !primaryPrecheck.ok) || primaryUnhealthy) {
+    return {
+      theme: 'warning',
+      title: '环境变量主 Bot 当前不可用',
+      message: primaryPrecheck && !primaryPrecheck.ok
+        ? primaryPrecheck.hint
+        : `主 Bot ${primaryAccountId} 探测失败或处于冷却（连续失败 ${primaryEnv?.runtime.consecutiveFailures ?? 0} 次），调度器已暂时摘除该账号。`,
+    };
+  }
+
+  // 3) 被 FORCE_DISABLED 强制关闭 / 前置检查阻断
+  if (data.feature.accountPoolForceDisabled) {
+    return {
+      theme: 'warning',
+      title: '账号池已被环境变量强制关闭',
+      message: 'FORCE_DISABLED 生效：面板无法开启账号池，请检查部署环境变量。',
+    };
+  }
+
+  // 4) 账号池未生效：区分「功能关闭」与「已开启但无可用账号」
+  if (!pool?.enabled) {
+    const reason = pool?.inactiveReason ?? '';
+    if (reason.includes('未解析到任何账号')) {
+      return {
+        theme: 'warning',
+        title: '账号池已开启但没有可调度账号',
+        message: reason,
+      };
+    }
+    return {
+      theme: 'info',
+      title: '账号池未生效',
+      message: reason || '账号池当前未启用。',
+    };
+  }
+
+  // 全部正常：给出可核对的具体计数，而非笼统的「正常」
+  return {
+    theme: 'success',
+    title: '账号池已生效',
+    message: `池内共 ${pool.accountCount} 个账号（其中环境变量 ${pool.envAccountCount} 个）。`,
+  };
+});
+
+/** 重新探测环境变量账号：成功后刷新列表/总览并提示结论 */
+async function runEnvProbe(account: TelegramEnvAccountView) {
+  if (envProbingId.value) return;
+  envProbingId.value = account.id;
+  try {
+    const result = await probeEnvAccount(account.id);
+    const conclusion = result.message || (result.probe.ok ? '环境变量账号探测通过' : '环境变量账号探测失败');
+    if (result.probe.ok) {
+      MessagePlugin.success(conclusion);
+    } else {
+      MessagePlugin.error(conclusion);
+    }
+  } catch (error) {
+    MessagePlugin.error(getErrorMessage(error));
+  } finally {
+    envProbingId.value = null;
+    // 探测结论会回写账号池运行态（健康/冷却）：无论成功失败都刷新
+    await Promise.all([loadAccounts(), loadOverview()]);
+  }
 }
 
 // ---------------- 轮换 ----------------
@@ -1869,6 +2122,117 @@ onMounted(() => {
   padding: var(--space-6) 0;
   color: var(--text-secondary);
   font-size: 13px;
+}
+
+/* ---------- 环境变量账号（只读） ---------- */
+.env-accounts {
+  margin: var(--space-4) 0;
+  padding: var(--space-4);
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+}
+
+.env-accounts-head {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin-bottom: var(--space-3);
+}
+
+.env-accounts-title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.env-account-list {
+  list-style: none;
+  margin: var(--space-3) 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.env-account-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  padding: var(--space-3);
+  background: var(--color-bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+}
+
+.env-account-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.env-account-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.env-account-id {
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+
+.env-account-meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: var(--space-2) var(--space-3);
+  margin: 0;
+}
+
+.env-meta-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.env-meta-item dt {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.env-meta-item dd {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-primary);
+  word-break: break-all;
+}
+
+.env-account-warn {
+  margin: 0;
+  font-size: 12px;
+  color: var(--color-warning);
+}
+
+.env-account-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-shrink: 0;
+}
+
+.cell-note {
+  font-size: 12px;
+  color: var(--text-tertiary);
 }
 
 /* ---------- 弹窗表单 ---------- */

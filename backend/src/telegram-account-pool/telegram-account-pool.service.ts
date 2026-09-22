@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import {
   AccountAttemptSample,
   AccountFailureKind,
+  AccountPoolAccountSnapshot,
   AccountPoolCounters,
   AccountPoolCounterKey,
   AccountPoolSnapshot,
@@ -104,6 +105,21 @@ export class TelegramAccountPoolService implements OnModuleInit, OnApplicationSh
         this.logger.log(
           `Bot 账号池已启用：${this.runtimes.size} 个账号（${this.ids().join(', ')}）`,
         );
+        // 无存储 Chat 的账号只能参与下载回源，不能被选为上传/镜像目标。
+        // 这类配置在池化模式下会表现为「上传全部回退单账号」，必须显式提示而不是静默降级。
+        const noStorage = Array.from(this.runtimes.values())
+          .filter((runtime) => !runtime.config.chatId)
+          .map((runtime) => runtime.config.id);
+        if (noStorage.length === this.runtimes.size) {
+          this.logger.warn(
+            `账号池内没有任何账号配置存储 Chat（${noStorage.join(', ')}）：`
+            + '上传与镜像将回退单账号链路（每账号的存储 Chat 必须显式确认）',
+          );
+        } else if (noStorage.length > 0) {
+          this.logger.warn(
+            `以下账号未配置存储 Chat，仅参与下载回源、不会被选为上传/镜像目标：${noStorage.join(', ')}`,
+          );
+        }
       }
     }
   }
@@ -166,7 +182,25 @@ export class TelegramAccountPoolService implements OnModuleInit, OnApplicationSh
       return;
     }
 
-    const incoming = new Map(configs.map((config) => [config.id, { ...config, source: 'panel' as const }]));
+    // 环境变量账号（含主 Bot）优先：同一 Token 的面板账号必须被丢弃，
+    // 否则同一 Bot 会以两个 id 同时出现在池内 —— 双重轮询、双重计数、双重任务。
+    const envTokens = new Set(
+      Array.from(this.runtimes.values())
+        .filter((runtime) => runtime.config.source !== 'panel')
+        .map((runtime) => runtime.config.token),
+    );
+    const duplicated = configs.filter((config) => envTokens.has(config.token)).map((config) => config.id);
+    if (duplicated.length > 0) {
+      this.logger.warn(
+        `面板账号与环境变量账号 Token 相同，已跳过（环境变量优先）：${duplicated.join(', ')}`,
+      );
+    }
+
+    const incoming = new Map(
+      configs
+        .filter((config) => !envTokens.has(config.token))
+        .map((config) => [config.id, { ...config, source: 'panel' as const, primary: undefined }]),
+    );
     const removed: string[] = [];
     for (const [id, runtime] of this.runtimes.entries()) {
       if (runtime.config.source !== 'panel') continue;
@@ -180,6 +214,11 @@ export class TelegramAccountPoolService implements OnModuleInit, OnApplicationSh
     for (const [id, config] of incoming.entries()) {
       const existing = this.runtimes.get(id);
       if (existing) {
+        // 防御纵深：环境变量账号绝不被面板账号覆盖（即使 id 相同）
+        if (existing.config.source !== 'panel') {
+          this.logger.warn(`面板账号 id 与环境变量账号冲突，已保留环境变量账号：${id}`);
+          continue;
+        }
         // 保留运行期画像（冷却/带宽/成功率/在飞计数），只更新静态配置
         existing.config = { ...existing.config, ...config };
       } else {
@@ -218,8 +257,69 @@ export class TelegramAccountPoolService implements OnModuleInit, OnApplicationSh
     return Array.from(this.runtimes.keys());
   }
 
+  /**
+   * 可作为**上传/镜像目标**的账号（已启用且配置了存储 Chat）。
+   *
+   * 为什么必须单独一个集合：没有存储 Chat 的账号上传必然失败，
+   * 若进入上传候选集，会表现为「池化上传持续换号后回退单账号」，掩盖真实配置缺失。
+   */
+  storageAccountIds(): string[] {
+    return Array.from(this.runtimes.values())
+      .filter((runtime) => runtime.config.enabled && Boolean(runtime.config.chatId))
+      .map((runtime) => runtime.config.id);
+  }
+
   getConfig(accountId: string): TelegramAccountConfig | null {
     return this.runtimes.get(accountId)?.config ?? null;
+  }
+
+  /**
+   * 该 Token 是否已在账号池注册（含环境变量主 Bot）。
+   *
+   * 用途：Token 级去重。同一 Bot 只允许存在一个逻辑账号，
+   * 否则会双重轮询、双重计数、双重执行任务。
+   */
+  isTokenRegistered(token: string): boolean {
+    return this.findByToken(token) !== null;
+  }
+
+  /**
+   * 该 Token 是否由**环境变量**注册（主 Bot 或 `TELEGRAM_ACCOUNT_POOL` / `TELEGRAM_BOT_TOKENS`）。
+   *
+   * 用途：后台创建 Bot 账号前拒绝与环境变量账号重复的 Token。
+   * 环境变量是密钥管理边界：这类账号后台只读，不允许再以数据库账号形式重复承载。
+   */
+  isEnvTokenRegistered(token: string): boolean {
+    const runtime = this.findByToken(token);
+    return runtime !== null && runtime.config.source !== 'panel';
+  }
+
+  /**
+   * 该账号 id 是否由**环境变量**注册（主 Bot 或 `TELEGRAM_ACCOUNT_POOL` / `TELEGRAM_BOT_TOKENS`）。
+   *
+   * 用途：后台把「同一 Bot 既在数据库又被环境变量注册」标记为双来源（`both`），
+   * 提示管理员该账号的密钥以 `.env` 为准、后台不应重复维护。
+   */
+  isEnvAccount(accountId: string): boolean {
+    const runtime = this.runtimes.get((accountId || '').trim());
+    return runtime !== undefined && runtime.config.source !== 'panel';
+  }
+
+  private findByToken(token: string): TelegramAccountRuntime | null {
+    const normalized = (token || '').trim();
+    if (!normalized) return null;
+    for (const runtime of this.runtimes.values()) {
+      if (runtime.config.token === normalized) return runtime;
+    }
+    return null;
+  }
+
+  /** 环境变量主 Bot 的账号 id（未配置 `TELEGRAM_BOT_TOKEN` 时为 null） */
+  primaryAccountId(): string | null {
+    for (const runtime of this.runtimes.values()) {
+      if (runtime.config.primary) return runtime.config.id;
+    }
+    return null;
   }
 
   /** 注册健康探测函数（由模块装配调用；避免构造期循环依赖） */
@@ -260,9 +360,14 @@ export class TelegramAccountPoolService implements OnModuleInit, OnApplicationSh
    * 1. `TELEGRAM_ACCOUNT_POOL`（JSON 数组，字段见 TelegramAccountConfig，可含 note/weight/maxInflight，推荐）；
    * 2. `TELEGRAM_BOT_TOKENS`（逗号分隔 token 列表）+ `TELEGRAM_CHAT_ID`（上传存储 Chat）作为 chat；
    *    注意：`TELEGRAM_ARCHIVE_CHAT_ID` 只用于审计转发，**不得**充当隐式存储目标；
-   * 3. 兜底：`TELEGRAM_BOT_TOKEN` 单账号（仅当启用池化时用于兼容，等价于池内唯一账号）。
+   * 3. **始终**并入 `TELEGRAM_BOT_TOKEN` 主 Bot（标记 `primary: true`，后台只读；同 Token 不重复注册）。
    */
   private loadConfigs(): TelegramAccountConfig[] {
+    return this.withPrimaryBot(this.loadExplicitConfigs());
+  }
+
+  /** 显式配置的账号（不含环境变量主 Bot 的兜底注册） */
+  private loadExplicitConfigs(): TelegramAccountConfig[] {
     const raw = (this.configService.get<string>('TELEGRAM_ACCOUNT_POOL') || '').trim();
     if (raw) {
       try {
@@ -296,15 +401,49 @@ export class TelegramAccountPoolService implements OnModuleInit, OnApplicationSh
       if (configs.length > 0) return this.dedupe(configs);
     }
 
-    if (this.enabled) {
-      const single = (this.configService.get<string>('TELEGRAM_BOT_TOKEN') || '').trim();
-      const chatId = (this.configService.get<string>('TELEGRAM_CHAT_ID') || '').trim();
-      if (single && chatId) {
-        const config = this.normalizeConfig({ token: single, chatId });
-        if (config) return [config];
-      }
-    }
     return [];
+  }
+
+  /**
+   * 始终把「环境变量主 Bot」（`TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID`）并入账号注册表。
+   *
+   * 为什么必须始终注册（而不是只在池化启用时兜底）：
+   * - 后台账号池页面要展示主 Bot 的来源/健康/负载，否则管理员无法确认「账号池是否真的生效」；
+   * - 池化模式下的入站轮询按 `ids()` 逐账号进行，主 Bot 不在册会导致它的私聊消息无人消费；
+   * - 主 Bot 是 `file_id` 归属的天然锚点：注册 id 取 Token 数字前缀，与
+   *   `FileService.defaultBotAccountId()` 完全一致，便于副本与定位字段对齐。
+   *
+   * 去重规则（防双重轮询/双重计数）：显式配置里已有同一 Token 时，只给它打 `primary` 标记，
+   * 不重复注册；若主 Bot 的默认 id 已被「不同 Token」的账号占用，则保留既有账号并告警。
+   *
+   * 注意：本方法**不改变** `isActive()` 语义（仍为「开关开启 + 注册账号数大于 0」）。
+   * 关闭开关时注册表里有主 Bot 也不会进入池化模式，`select()` 依然返回 null。
+   */
+  private withPrimaryBot(configs: TelegramAccountConfig[]): TelegramAccountConfig[] {
+    const token = (this.configService.get<string>('TELEGRAM_BOT_TOKEN') || '').trim();
+    if (!token || !token.includes(':')) return configs;
+
+    const existingByToken = configs.find((config) => config.token === token);
+    if (existingByToken) {
+      existingByToken.primary = true;
+      return configs;
+    }
+
+    const primary = this.normalizeConfig({
+      token,
+      chatId: (this.configService.get<string>('TELEGRAM_CHAT_ID') || '').trim(),
+      primary: true,
+    });
+    if (!primary) return configs;
+
+    if (configs.some((config) => config.id === primary.id)) {
+      this.logger.warn(
+        `环境变量主 Bot（${primary.id}）与已配置账号 id 冲突且 Token 不同，已保留既有账号：`
+        + '请检查 TELEGRAM_ACCOUNT_POOL 中的 id 配置',
+      );
+      return configs;
+    }
+    return [...configs, primary];
   }
 
   private normalizeConfig(raw: Record<string, unknown>): TelegramAccountConfig | null {
@@ -327,6 +466,7 @@ export class TelegramAccountPoolService implements OnModuleInit, OnApplicationSh
         ? undefined
         : String(raw.note).replace(/[\u0000-\u001F\u007F]/g, '').trim().slice(0, 120) || undefined,
       source: 'env',
+      primary: raw.primary === true ? true : undefined,
     };
   }
 
@@ -529,30 +669,43 @@ export class TelegramAccountPoolService implements OnModuleInit, OnApplicationSh
       enabled: this.isActive(),
       inactiveReason: this.inactiveReason(),
       counters: this.countersSnapshot(),
-      accounts: Array.from(this.runtimes.values()).map((runtime) => {
-        const now = Date.now();
-        return {
-          id: runtime.config.id,
-          tokenPreview: this.tokenPreview(runtime.config.token),
-          chatId: runtime.config.chatId,
-          enabled: runtime.config.enabled,
-          weight: runtime.config.weight,
-          maxInflight: runtime.config.maxInflight,
-          inflight: runtime.inflight,
-          bandwidthMbps: Number((runtime.bandwidthEwmaBps / 1024 / 1024).toFixed(3)),
-          successRate: Number(runtime.successEwma.toFixed(4)),
-          latencyMs: Math.round(runtime.latencyEwmaMs),
-          coolingDown: runtime.cooldownUntilMs > now,
-          cooldownRemainingMs: Math.max(0, runtime.cooldownUntilMs - now),
-          consecutiveFailures: runtime.consecutiveFailures,
-          totalRequests: runtime.totalRequests,
-          failures: runtime.failures,
-          totalBytes: runtime.totalBytes,
-          lastErrorKind: runtime.lastErrorKind,
-          note: runtime.config.note,
-          source: runtime.config.source ?? 'env',
-        };
-      }),
+      accounts: Array.from(this.runtimes.values()).map((runtime) => this.toAccountSnapshot(runtime)),
+    };
+  }
+
+  /**
+   * 单个账号的运行态脱敏条目（未注册时返回 null）。
+   * 供后台账号列表把「数据库账号」与「池内运行态」对齐展示（按账号 id 匹配）。
+   */
+  runtimeView(accountId: string): AccountPoolAccountSnapshot | null {
+    const runtime = this.runtimes.get((accountId || '').trim());
+    return runtime ? this.toAccountSnapshot(runtime) : null;
+  }
+
+  private toAccountSnapshot(runtime: TelegramAccountRuntime): AccountPoolAccountSnapshot {
+    const now = Date.now();
+    return {
+      id: runtime.config.id,
+      tokenPreview: this.tokenPreview(runtime.config.token),
+      chatId: runtime.config.chatId,
+      enabled: runtime.config.enabled,
+      weight: runtime.config.weight,
+      maxInflight: runtime.config.maxInflight,
+      inflight: runtime.inflight,
+      bandwidthMbps: Number((runtime.bandwidthEwmaBps / 1024 / 1024).toFixed(3)),
+      successRate: Number(runtime.successEwma.toFixed(4)),
+      latencyMs: Math.round(runtime.latencyEwmaMs),
+      coolingDown: runtime.cooldownUntilMs > now,
+      cooldownRemainingMs: Math.max(0, runtime.cooldownUntilMs - now),
+      consecutiveFailures: runtime.consecutiveFailures,
+      totalRequests: runtime.totalRequests,
+      failures: runtime.failures,
+      totalBytes: runtime.totalBytes,
+      lastErrorKind: runtime.lastErrorKind,
+      note: runtime.config.note,
+      source: runtime.config.source ?? 'env',
+      primary: runtime.config.primary === true,
+      storageConfigured: Boolean(runtime.config.chatId),
     };
   }
 

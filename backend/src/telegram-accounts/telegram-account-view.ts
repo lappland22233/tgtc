@@ -4,6 +4,84 @@ import {
   TelegramAccountStatus,
   TelegramAccountType,
 } from '../common/entities/telegram-account.entity';
+import { AccountPoolAccountSnapshot } from '../telegram-account-pool/telegram-account-pool.types';
+
+/**
+ * 账号池运行态视图（进程内画像的脱敏投影）。
+ * 只含计数、带宽、健康与冷却信息，**不含任何凭据**。
+ */
+export interface TelegramAccountRuntimeView {
+  inflight: number;
+  maxInflight: number;
+  bandwidthMbps: number;
+  successRate: number;
+  latencyMs: number;
+  coolingDown: boolean;
+  cooldownRemainingMs: number;
+  consecutiveFailures: number;
+  totalRequests: number;
+  failures: number;
+  lastErrorKind: string | null;
+  /** 是否配置了存储 Chat（false 时该账号只参与下载回源，不会被选为上传/镜像目标） */
+  storageConfigured: boolean;
+}
+
+/**
+ * 环境变量账号只读视图。
+ *
+ * 用途：后台「Telegram 账号池」必须能看到 `.env` 配置的主 Bot（来源、健康、负载、是否参与调度），
+ * 否则管理员无法判断「账号池是否真的生效」。该视图**永不含**完整 Token：
+ * 只给出 `tokenPreview`（token 前缀 + 少量掩码）与 chatId。
+ * `readOnly` 恒为 true：密钥轮换只能改 `.env`，后台不提供编辑/删除/轮换。
+ */
+export interface TelegramEnvAccountView {
+  id: string;
+  primary: boolean;
+  source: 'env';
+  readOnly: true;
+  tokenPreview: string;
+  chatId: string | null;
+  enabled: boolean;
+  weight: number;
+  maxInflight: number;
+  note: string | null;
+  runtime: TelegramAccountRuntimeView;
+}
+
+/** 账号池快照条目 → 运行态视图 */
+export function toRuntimeView(snapshot: AccountPoolAccountSnapshot): TelegramAccountRuntimeView {
+  return {
+    inflight: snapshot.inflight,
+    maxInflight: snapshot.maxInflight,
+    bandwidthMbps: snapshot.bandwidthMbps,
+    successRate: snapshot.successRate,
+    latencyMs: snapshot.latencyMs,
+    coolingDown: snapshot.coolingDown,
+    cooldownRemainingMs: snapshot.cooldownRemainingMs,
+    consecutiveFailures: snapshot.consecutiveFailures,
+    totalRequests: snapshot.totalRequests,
+    failures: snapshot.failures,
+    lastErrorKind: snapshot.lastErrorKind ?? null,
+    storageConfigured: snapshot.storageConfigured,
+  };
+}
+
+/** 账号池快照条目 → 环境变量账号只读视图 */
+export function toEnvAccountView(snapshot: AccountPoolAccountSnapshot): TelegramEnvAccountView {
+  return {
+    id: snapshot.id,
+    primary: snapshot.primary,
+    source: 'env',
+    readOnly: true,
+    tokenPreview: snapshot.tokenPreview,
+    chatId: snapshot.chatId || null,
+    enabled: snapshot.enabled,
+    weight: snapshot.weight,
+    maxInflight: snapshot.maxInflight,
+    note: snapshot.note ?? null,
+    runtime: toRuntimeView(snapshot),
+  };
+}
 
 /**
  * 账号脱敏视图（**唯一允许对外序列化的形状**）。
@@ -33,6 +111,10 @@ export interface TelegramAccountView {
   note: string | null;
   createdAt: string;
   updatedAt: string;
+  /** 配置来源：panel=仅数据库账号；both=数据库账号与环境变量账号同属一个 Bot（合并展示，避免重复操作） */
+  source?: 'panel' | 'both';
+  /** 账号池运行态（bot 账号已在池内注册时有值；用户账号为 null） */
+  runtime?: TelegramAccountRuntimeView | null;
 }
 
 /** 标识脱敏：只保留末 4 位（Bot ID / TG 用户 ID 均按此处理） */
@@ -63,7 +145,11 @@ export function toIso(value: Date | null | undefined): string | null {
  */
 export function toAccountView(
   account: TelegramAccount,
-  options: { credentialConfigured?: boolean } = {},
+  options: {
+    credentialConfigured?: boolean;
+    runtime?: TelegramAccountRuntimeView | null;
+    source?: 'panel' | 'both';
+  } = {},
 ): TelegramAccountView {
   return {
     id: account.id,
@@ -86,5 +172,7 @@ export function toAccountView(
     note: account.note ?? null,
     createdAt: toIso(account.createdAt) ?? '',
     updatedAt: toIso(account.updatedAt) ?? '',
+    source: options.source ?? 'panel',
+    runtime: options.runtime ?? null,
   };
 }

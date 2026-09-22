@@ -36,6 +36,15 @@ export const BOT_CONFIG_KEYS = {
 /** 长轮询 offset 的持久化键（重启不丢更新） */
 export const BOT_UPDATE_OFFSET_KEY = 'TELEGRAM_BOT_UPDATE_OFFSET';
 
+/**
+ * `BOT_UPDATE_OFFSET_KEY` 的**归属标记**：记录该全局 offset 属于哪个 Bot（botId）。
+ *
+ * 为什么需要：池化模式下每个账号有自己的 offset 键；从单账号模式切到池化模式时，
+ * 只有「该 offset 原本就属于这个账号」才能继承——把 A 账号的偏移套用到 B 账号
+ * 会跳过 B 尚未消费的更新（入站文件永久丢失），所以不能简单地「谁大用谁」。
+ */
+export const BOT_UPDATE_OFFSET_OWNER_KEY = 'TELEGRAM_BOT_UPDATE_OFFSET_OWNER';
+
 /** Token 展示前缀前缀（如 tgl_a1b2c3d4） */
 export const BOT_TOKEN_PREFIX = 'tgl_';
 

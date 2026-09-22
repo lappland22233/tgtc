@@ -118,6 +118,22 @@ export class TelegramAccountsController {
     return { message: '用户账号已创建，请完成交互式授权', account };
   }
 
+  /**
+   * 重新探测**环境变量账号**（主 Bot 或 `TELEGRAM_ACCOUNT_POOL` 配置项）。
+   *
+   * 只读账号不提供编辑/删除/轮换（密钥只能在 `.env` 轮换），但必须能验证配置是否仍然有效。
+   * 声明在 `:id` 路由之前，避免 `env` 被当作账号 id 吞掉。
+   */
+  @Post('env/:accountId/probe')
+  @Roles(UserRole.SUPER_ADMIN)
+  async probeEnvAccount(@CurrentUser() user: User, @Param('accountId') accountId: string) {
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(accountId)) {
+      throw new BadRequestException('环境变量账号 id 非法');
+    }
+    const probe = await this.accounts.probeEnvAccount(accountId, user.id);
+    return { message: probe.message, probe };
+  }
+
   @Get(':id')
   @Roles(UserRole.SUPER_ADMIN)
   async detail(@Param('id') id: string) {

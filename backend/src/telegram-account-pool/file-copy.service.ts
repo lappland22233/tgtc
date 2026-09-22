@@ -145,7 +145,9 @@ export class FileCopyService {
     desiredCount: number,
   ): Promise<string[]> {
     const held = new Set(await this.readyAccountIds(ownerType, ownerId));
-    const poolIds = this.pool.ids();
+    // 只把「已配置存储 Chat」的账号作为扩散目标：没有存储 Chat 的账号上传必然失败，
+    // 让它进入候选只会产生必败上传并放大上游请求（表现为「扩散持续失败」）。
+    const poolIds = this.pool.storageAccountIds();
     const need = Math.max(0, desiredCount - held.size);
     if (need === 0) return [];
     const candidates = poolIds.filter((id) => !held.has(id));
@@ -193,6 +195,11 @@ export class FileCopyService {
     const target = this.pool.getConfig(params.targetAccountId);
     if (!target) {
       this.logger.warn(`副本扩散目标账号不存在：${params.targetAccountId}`);
+      return null;
+    }
+    // 无存储 Chat 的账号无法承载副本（上传必失败），直接跳过并留痕
+    if (!target.chatId) {
+      this.logger.warn(`副本扩散目标账号未配置存储 Chat，已跳过：${params.targetAccountId}`);
       return null;
     }
     // 1) 选源：优先调用方指定，否则从现有 ready 副本里按加权挑（读侧也做负载分散）

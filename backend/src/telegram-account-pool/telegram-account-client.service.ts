@@ -220,6 +220,8 @@ export class TelegramAccountClientService {
     fileSize: number;
     chatId: string;
     messageId: string;
+    /** 跨账号稳定的逻辑标识（缺失时调用方退化用站内文件 ID 关联） */
+    fileUniqueId: string | null;
     sample: AccountAttemptSample;
   }> {
     const started = Date.now();
@@ -249,6 +251,8 @@ export class TelegramAccountClientService {
         fileSize: Number(media.file_size ?? knownLength),
         chatId: String(result.chat?.id ?? chatId),
         messageId: String(result.message_id ?? ''),
+        // 跨账号逻辑聚合只用 file_unique_id；缺失时保持 null，由调用方决定降级策略
+        fileUniqueId: media.file_unique_id ? String(media.file_unique_id) : null,
         sample: { ok: true, bytes: knownLength, durationMs },
       };
     } catch (error) {
