@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { createHash } from 'crypto';
 
 /** MTProto 客户端模块候选：优先使用维护中的 teleproto，兼容已归档的 gramjs */
 const CLIENT_MODULE_CANDIDATES = ['teleproto', 'telegram'] as const;
@@ -34,6 +35,14 @@ export type TelegramUserFailureKind =
   | 'not_found'
   | 'flood'
   | 'network'
+  /**
+   * 服务端已接受复制（`invoke` 成功），但返回的 `Updates` 里没有可确认的目标消息 ID。
+   *
+   * 语义必须是「**副作用可能已经发生，但我们无法确认结果**」：调用方**不得**把它
+   * 当成普通的可重试失败——`copyMessages`/`forwardMessages` 没有天然的幂等保证，
+   * 盲目重试会在备份群留下重复消息。
+   */
+  | 'unverified'
   | 'other';
 
 /** 用户账号 MTProto 调用错误（**已脱敏**：绝不携带 session / apiHash / 验证码） */
@@ -115,7 +124,7 @@ interface MtprotoClient {
   ): Promise<Record<string, unknown>>;
   invoke(request: unknown): Promise<unknown>;
   getEntity(entity: unknown): Promise<Record<string, unknown>>;
-  getInputEntity(entity: string | number): Promise<unknown>;
+  getInputEntity(entity: unknown): Promise<unknown>;
   copyMessages?(entity: unknown, params: Record<string, unknown>): Promise<MtprotoMessage[]>;
   forwardMessages?(entity: unknown, params: Record<string, unknown>): Promise<MtprotoMessage[]>;
   session: MtprotoSession;
@@ -150,6 +159,10 @@ interface MtprotoModule {
   Api: Record<string, any>;
   /** teleproto@1.229.0 从主入口导出（实测），用于构造完全静默的 baseLogger */
   Logger?: new (level?: string) => MtprotoLogger;
+  /** teleproto 的 long 工具，用于构造确定性 `random_id`（缺失时退化为无幂等键） */
+  helpers?: {
+    readBigIntFromBuffer?: (buffer: Buffer, little?: boolean, signed?: boolean) => unknown;
+  };
 }
 
 /**
@@ -288,40 +301,209 @@ export class TelegramUserClientService {
    * 事实边界（不可含糊）：`copyMessages`/`forwardMessages` 是**服务端复制**，
    * 不重新上传文件字节，但**仍需源 `chat_id + message_id` 可被该用户账号访问**；
    * 用户账号必须同时是源群可读成员与备份群可写成员。
+   *
+   * 幂等与回执（两条硬约束，缺一不可）：
+   * 1. 请求**显式携带确定性 `random_id`**（由 `idempotencyKey` 派生）作为服务端幂等键，
+   *    使同一逻辑操作的重试不会在备份群产生重复消息；
+   * 2. 目标消息 ID **优先从 `UpdateMessageID` 按 `random_id` 配对解析**，而不是依赖
+   *    `UpdateNewChannelMessage` 携带的消息实体——频道到频道复制时服务端常常不回实体，
+   *    teleproto 的封装因此返回 `undefined`，会把「其实已复制成功」误判成失败并反复重试。
    */
   async copyMessage(params: {
     credentials: TelegramUserCredentials;
     sourceChatId: string;
     sourceMessageId: string;
     targetChatId: string;
+    /**
+     * 幂等键：**同一逻辑操作（同一任务 + 同一执行账号）的所有重试必须传相同值**。
+     * 缺省时退化为库自动生成的随机 `random_id`，即失去幂等保护（仅适用于一次性调用）。
+     */
+    idempotencyKey?: string;
   }): Promise<TelegramCopyResult> {
-    const { credentials, sourceChatId, sourceMessageId, targetChatId } = params;
-    return this.withClient(credentials, async (client) => {
+    const { credentials, sourceChatId, sourceMessageId, targetChatId, idempotencyKey } = params;
+    return this.withClient(credentials, async (client, Api) => {
       const sourceEntity = await this.resolveChat(client, sourceChatId);
       const targetEntity = await this.resolveChat(client, targetChatId);
       const messageId = Number(sourceMessageId);
       if (!Number.isSafeInteger(messageId) || messageId <= 0) {
         throw new TelegramUserClientError('源消息 ID 非法', 'not_found');
       }
-      const forwardParams = { messages: [messageId], fromPeer: sourceEntity };
-      const copy = client.copyMessages?.bind(client);
-      const forward = client.forwardMessages?.bind(client);
-      let copied: MtprotoMessage[];
-      if (copy) {
-        copied = await copy(targetEntity, forwardParams);
-      } else if (forward) {
-        // dropAuthor 只影响署名，不改变「服务端复制、不重传字节」的事实
-        copied = await forward(targetEntity, { ...forwardParams, dropAuthor: true });
-      } else {
-        throw new TelegramUserClientError('当前 MTProto 客户端不支持 copyMessages/forwardMessages', 'unsupported');
+      const module = this.tryLoad();
+      const randomId = module && idempotencyKey
+        ? this.buildDeterministicRandomId(module, idempotencyKey)
+        : null;
+      const ForwardMessages = (Api?.messages as Record<string, any> | undefined)?.ForwardMessages;
+      if (typeof ForwardMessages === 'function') {
+        return this.forwardWithIdempotencyKey({
+          client, Api, ForwardMessages, randomId, messageId,
+          sourceEntity, targetEntity, targetChatId,
+        });
       }
-      const created = Array.isArray(copied) ? copied[0] : null;
-      const newId = created?.id;
-      if (newId === undefined || newId === null) {
-        throw new TelegramUserClientError('复制后未返回目标消息 ID', 'other');
-      }
-      return { targetChatId, targetMessageId: String(newId) };
+      // 兜底：模块未提供标准 TL 构造器时退回封装调用（无幂等键，解析能力也更弱）
+      return this.forwardWithLegacyApi({ client, messageId, sourceEntity, targetEntity, targetChatId });
     });
+  }
+
+  /**
+   * 标准路径：直接构造 `messages.forwardMessages` 并显式携带 `random_id`。
+   *
+   * 为什么不复用 `client.copyMessages()`：teleproto 的封装不透传 `randomId`，构造期会
+   * **自动生成随机值**（`tl/runtime/createApi.js`），导致每次重试的幂等键都不同——重试
+   * 既无法去重，也无法用 `UpdateMessageID` 做配对解析。
+   */
+  private async forwardWithIdempotencyKey(input: {
+    client: MtprotoClient;
+    Api: Record<string, any>;
+    ForwardMessages: new (args: Record<string, unknown>) => unknown;
+    randomId: unknown | null;
+    messageId: number;
+    sourceEntity: Record<string, unknown>;
+    targetEntity: Record<string, unknown>;
+    targetChatId: string;
+  }): Promise<TelegramCopyResult> {
+    const { client, Api, ForwardMessages, randomId, messageId, sourceEntity, targetEntity, targetChatId } = input;
+    const request = new ForwardMessages({
+      fromPeer: await client.getInputEntity(sourceEntity),
+      id: [messageId],
+      toPeer: await client.getInputEntity(targetEntity),
+      // dropAuthor 只影响署名，不改变「服务端复制、不重传字节」的事实
+      dropAuthor: true,
+      // randomId 缺失时交给库自己生成（无幂等保护），而不是传 null 让序列化失败
+      ...(randomId === null || randomId === undefined ? {} : { randomId: [randomId] }),
+    });
+    const result = await client.invoke(request);
+    const newId = this.extractForwardedMessageId(result, randomId, targetEntity, Api);
+    if (newId === null) {
+      throw new TelegramUserClientError(
+        '复制请求已被服务端接受，但返回结果未包含目标消息 ID，无法确认备份位置',
+        'unverified',
+      );
+    }
+    return { targetChatId, targetMessageId: String(newId) };
+  }
+
+  /** 兜底路径：客户端未提供标准 TL 构造器时退回封装 API（无幂等键，失败一律不自动重试） */
+  private async forwardWithLegacyApi(input: {
+    client: MtprotoClient;
+    messageId: number;
+    sourceEntity: Record<string, unknown>;
+    targetEntity: Record<string, unknown>;
+    targetChatId: string;
+  }): Promise<TelegramCopyResult> {
+    const { client, messageId, sourceEntity, targetEntity, targetChatId } = input;
+    const forwardParams = { messages: [messageId], fromPeer: sourceEntity };
+    const copy = client.copyMessages?.bind(client);
+    const forward = client.forwardMessages?.bind(client);
+    let copied: MtprotoMessage[];
+    if (copy) {
+      copied = await copy(targetEntity, forwardParams);
+    } else if (forward) {
+      copied = await forward(targetEntity, { ...forwardParams, dropAuthor: true });
+    } else {
+      throw new TelegramUserClientError('当前 MTProto 客户端不支持 copyMessages/forwardMessages', 'unsupported');
+    }
+    const created = Array.isArray(copied) ? copied[0] : null;
+    const newId = created?.id;
+    if (newId === undefined || newId === null) {
+      throw new TelegramUserClientError(
+        '复制后未返回目标消息 ID，无法确认备份位置',
+        'unverified',
+      );
+    }
+    return { targetChatId, targetMessageId: String(newId) };
+  }
+
+  /**
+   * 从 `Updates` 中解析新产生的目标消息 ID。
+   *
+   * 解析优先级（越靠前越可靠）：
+   * 1. `UpdateMessageID.randomId == 本次请求的 random_id`：服务端对发送类操作几乎总会
+   *    返回它，且**不依赖消息实体是否下发**，是频道复制场景下唯一稳定的来源；
+   * 2. 目标会话的新消息实体（`UpdateNewChannelMessage` / `UpdateNewMessage`）：频道复制
+   *    时可能整体缺失，仅作次优兜底。
+   *
+   * 两者都拿不到时返回 `null`，由调用方按 `unverified` 处理——**绝不猜测 ID**。
+   */
+  private extractForwardedMessageId(
+    result: unknown,
+    randomId: unknown | null,
+    targetEntity: Record<string, unknown>,
+    Api: Record<string, any>,
+  ): number | string | null {
+    const updates = this.collectUpdates(result, Api);
+    const wanted = randomId === null || randomId === undefined ? null : String(randomId);
+
+    if (wanted !== null) {
+      const UpdateMessageID = Api?.UpdateMessageID;
+      if (typeof UpdateMessageID === 'function') {
+        for (const update of updates) {
+          if (update instanceof UpdateMessageID && String(update.randomId) === wanted) {
+            return (update as { id: number }).id ?? null;
+          }
+        }
+      }
+    }
+
+    const UpdateNewChannelMessage = Api?.UpdateNewChannelMessage;
+    const UpdateNewMessage = Api?.UpdateNewMessage;
+    for (const update of updates) {
+      const isNewMessage = (typeof UpdateNewChannelMessage === 'function' && update instanceof UpdateNewChannelMessage)
+        || (typeof UpdateNewMessage === 'function' && update instanceof UpdateNewMessage);
+      if (!isNewMessage) continue;
+      const message = update.message as Record<string, unknown> | undefined;
+      if (!message) continue;
+      const messageRandom = message.randomId === undefined || message.randomId === null
+        ? null
+        : String(message.randomId);
+      // random_id 匹配时无需再看会话（就是本次请求产生的那条）；否则要求属于目标会话
+      if ((wanted !== null && messageRandom === wanted) || this.matchesTargetPeer(message.peerId, targetEntity)) {
+        return (message.id as number) ?? null;
+      }
+    }
+    return null;
+  }
+
+  /** 归一化 `Updates` / `UpdatesCombined` / `UpdateShort` 三种返回形态的 updates 列表 */
+  private collectUpdates(result: unknown, Api: Record<string, any>): Array<Record<string, any>> {
+    if (!result || typeof result !== 'object') return [];
+    const UpdateShort = Api?.UpdateShort;
+    if (typeof UpdateShort === 'function' && result instanceof UpdateShort) {
+      const update = (result as { update?: unknown }).update;
+      return update ? [update as Record<string, any>] : [];
+    }
+    const updates = (result as { updates?: unknown }).updates;
+    return Array.isArray(updates) ? (updates as Array<Record<string, any>>) : [];
+  }
+
+  /**
+   * 判断 update 里的消息是否属于目标会话。
+   *
+   * 无法判定时返回 `true`（宁可放宽也不误杀）；只有**确定不属于目标会话**时才排除，
+   * 避免把同一批次里其它会话的消息误当成复制结果。
+   */
+  private matchesTargetPeer(peerId: unknown, targetEntity: Record<string, unknown>): boolean {
+    if (!peerId || typeof peerId !== 'object') return true;
+    const targetId = targetEntity?.id;
+    if (targetId === undefined || targetId === null) return true;
+    const peer = peerId as Record<string, unknown>;
+    const candidate = peer.channelId ?? peer.chatId ?? peer.userId;
+    if (candidate === undefined || candidate === null) return true;
+    return String(candidate) === String(targetId);
+  }
+
+  /**
+   * 由幂等键派生**确定性 `random_id`**（64 位有符号 long）。
+   *
+   * 为什么必须用 teleproto 自己的工具构造：`random_id` 序列化走 `toSignedLittleBuffer`
+   * （即 big-integer 的 `Integer` 实例），传 JS `number` 或字符串都不保证兼容。这里复用
+   * `readBigIntFromBuffer`，与库内 `generateRandomLong` 的实现完全一致，只是把随机字节
+   * 换成了幂等键的 sha256 前缀。模块未导出 helpers 时返回 `null`（退化为无幂等保护）。
+   */
+  private buildDeterministicRandomId(module: MtprotoModule, idempotencyKey: string): unknown | null {
+    const readBigIntFromBuffer = module.helpers?.readBigIntFromBuffer;
+    if (typeof readBigIntFromBuffer !== 'function') return null;
+    const digest = createHash('sha256').update(idempotencyKey).digest();
+    return readBigIntFromBuffer(digest.subarray(0, 8), true, true);
   }
 
   // ---------------- 内部实现 ----------------

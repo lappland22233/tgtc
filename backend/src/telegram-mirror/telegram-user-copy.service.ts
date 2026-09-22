@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { createHash } from 'crypto';
 import { TelegramMirrorRule } from '../common/entities/telegram-mirror-rule.entity';
 import { TelegramMirrorTask } from '../common/entities/telegram-mirror-task.entity';
 import { TelegramAccountsService } from '../telegram-accounts/telegram-accounts.service';
@@ -21,7 +22,6 @@ import { MirrorExecutionResult } from './telegram-mirror.types';
 @Injectable()
 export class TelegramUserCopyService {
   private readonly logger = new Logger(TelegramUserCopyService.name);
-  private cursor = 0;
 
   constructor(
     private readonly source: TelegramMirrorSourceService,
@@ -69,7 +69,7 @@ export class TelegramUserCopyService {
         'blocked',
       );
     }
-    const chosen = this.pickUser(candidates, rule.preferredAccountId);
+    const chosen = this.pickUser(candidates, rule.preferredAccountId, task.id);
 
     let copied: { targetChatId: string; targetMessageId: string };
     try {
@@ -78,6 +78,9 @@ export class TelegramUserCopyService {
         sourceChatId,
         sourceMessageId,
         targetChatId: rule.targetChatId,
+        // 幂等键 = 任务 + 执行账号：账号选择是确定性的（见 pickUser），因此同一任务
+        // 的所有重试都会派生出同一个 random_id，服务端据此去重，不会留下重复副本。
+        idempotencyKey: `${task.id}:${chosen.id}`,
       });
     } catch (error) {
       // 凭据失效必须让管理员可见：把实际使用的账号标记为 degraded（否则账号会一直
@@ -106,8 +109,20 @@ export class TelegramUserCopyService {
     };
   }
 
-  /** 优先规则指定账号；否则按权重展平后轮转（同权重账号均匀分流） */
-  private pickUser<T extends { id: string; weight: number }>(candidates: T[], preferredAccountId?: string | null): T {
+  /**
+   * 优先规则指定账号；否则按权重展平后用**稳定种子**选择（同权重账号均匀分流）。
+   *
+   * 「确定性」是幂等的前提：MTProto 的 `random_id` 去重维度是**发送者账号**，只有同一
+   * 任务每次重试都落到同一账号，确定性 `random_id` 才能阻止重复复制。原实现用进程内
+   * 游标轮转，重试会换账号 → 换一个发送者重新复制一份，属于「重试不幂等」的直接成因。
+   *
+   * 用任务 ID 作种子而非游标，还能让账号分流在**多进程/重启后保持一致**。
+   */
+  private pickUser<T extends { id: string; weight: number }>(
+    candidates: T[],
+    preferredAccountId: string | null | undefined,
+    seed: string,
+  ): T {
     if (preferredAccountId) {
       const preferred = candidates.find((item) => item.id === preferredAccountId);
       if (preferred) return preferred;
@@ -118,8 +133,7 @@ export class TelegramUserCopyService {
       const weight = Math.max(1, Math.min(Math.floor(item.weight) || 1, 10));
       for (let index = 0; index < weight; index += 1) expanded.push(item);
     }
-    const chosen = expanded[this.cursor % expanded.length];
-    this.cursor = (this.cursor + 1) % Number.MAX_SAFE_INTEGER;
-    return chosen;
+    const digest = createHash('sha256').update(seed).digest();
+    return expanded[digest.readUInt32BE(0) % expanded.length];
   }
 }

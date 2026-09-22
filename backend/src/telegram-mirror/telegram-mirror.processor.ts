@@ -217,6 +217,13 @@ export class TelegramMirrorProcessor {
     // 凭据类错误的账号降级在**执行器内部**完成（只有它们知道实际使用的账号行 ID），
     // 这里只负责任务状态收敛，避免把「账号标识」与「账号主数据 ID」混用。
 
+    // 「复制请求已被接受、但无法确认目标消息 ID」**禁止降级为 Bot 重新上传**：源侧副作用
+    // 可能已经发生，降级会在备份群再增加一条 Bot 重传的副本，把「结果不确定」变成
+    // 「确定的重复」。此类任务必须停在 blocked，等人工核对备份群后再决定重试或清理。
+    if (classification.code === 'user_copy_receipt_unresolved') {
+      return this.settle(task, classification.code, classification.summary, classification.kind, classification.retryAfterMs);
+    }
+
     if (mode === 'user_copy' && rule.fallbackMode === 'bot_upload') {
       this.logger.warn(
         `用户无源复制失败（${classification.code}），按规则显式降级为 Bot 重新上传：${classification.summary}`,

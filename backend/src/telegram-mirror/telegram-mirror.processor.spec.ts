@@ -366,6 +366,59 @@ describe('TelegramMirrorProcessor（SQLite 内存库 + 伪执行器）', () => {
     expect(harness.metrics.snapshot().fallbackCount).toBe(1);
   });
 
+  it('回执未解析（unverified）：禁止降级 Bot 重传，任务停在 blocked 且不再安排重试', async () => {
+    const harness = await setup({
+      rule: {
+        id: 'rule-1',
+        enabled: true,
+        mode: 'user_copy',
+        fallbackMode: 'bot_upload',
+        sourceChatId: '-100111',
+        targetChatId: '-100222',
+      },
+    });
+    await seedFile(harness);
+    const { TelegramUserClientError } = require('../telegram-user/telegram-user-client.service') as typeof import('../telegram-user/telegram-user-client.service');
+    harness.userCopy.execute.mockRejectedValueOnce(
+      new TelegramUserClientError('复制请求已被服务端接受，但返回结果未包含目标消息 ID', 'unverified'),
+    );
+    const { task } = await harness.tasks.enqueue({ ...enqueueParams, mode: 'user_copy' as never });
+    const queuedBefore = (harness.queue.add as jest.Mock).mock.calls.length;
+
+    await harness.processor.handle({ data: { taskId: task.id } });
+
+    // 降级会在备份群再写一条 Bot 重传副本，把「结果不确定」变成「确定的重复」
+    expect(harness.bot.execute).not.toHaveBeenCalled();
+    expect((harness.queue.add as jest.Mock).mock.calls.length).toBe(queuedBefore);
+    const saved = await harness.tasks.findById(task.id);
+    expect(saved?.status).toBe('blocked');
+    expect(saved?.lastErrorCode).toBe('user_copy_receipt_unresolved');
+  });
+
+  it('对照：普通可重试失败仍按规则降级为 Bot 上传', async () => {
+    const harness = await setup({
+      rule: {
+        id: 'rule-1',
+        enabled: true,
+        mode: 'user_copy',
+        fallbackMode: 'bot_upload',
+        sourceChatId: '-100111',
+        targetChatId: '-100222',
+      },
+    });
+    await seedFile(harness);
+    const { TelegramUserClientError } = require('../telegram-user/telegram-user-client.service') as typeof import('../telegram-user/telegram-user-client.service');
+    harness.userCopy.execute.mockRejectedValueOnce(
+      new TelegramUserClientError('MTProto connect 超时', 'network'),
+    );
+    const { task } = await harness.tasks.enqueue({ ...enqueueParams, mode: 'user_copy' as never });
+
+    await harness.processor.handle({ data: { taskId: task.id } });
+
+    expect(harness.bot.execute).toHaveBeenCalledTimes(1);
+    expect((await harness.tasks.findById(task.id))?.status).toBe('succeeded');
+  });
+
   it('缺少 taskId 的 job 直接忽略（不产生副作用）', async () => {
     const harness = await setup();
     await harness.processor.handle({ data: {} });

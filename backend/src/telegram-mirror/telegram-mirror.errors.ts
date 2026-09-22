@@ -128,6 +128,12 @@ export function classifyMirrorError(error: unknown): MirrorErrorClassification {
     if (error.kind === 'auth') return { code: 'user_session_invalid', kind: 'blocked', summary };
     if (error.kind === 'permission') return { code: 'user_permission_denied', kind: 'blocked', summary };
     if (error.kind === 'not_found') return { code: 'source_message_missing', kind: 'blocked', summary };
+    if (error.kind === 'unverified') {
+      // 「副作用可能已经发生、但无法确认结果」**绝不能按可重试处理**：MTProto 的
+      // copyMessages/forwardMessages 没有天然幂等保证，重试会在备份群留下重复消息。
+      // 收敛为 blocked，等人工核对备份群后再手动重试或清理。
+      return { code: 'user_copy_receipt_unresolved', kind: 'blocked', summary };
+    }
     if (error.kind === 'unavailable' || error.kind === 'unsupported') {
       return { code: 'user_client_unavailable', kind: 'blocked', summary };
     }

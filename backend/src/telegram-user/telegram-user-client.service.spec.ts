@@ -85,3 +85,137 @@ describe('TelegramUserClientService（baseLogger 接口兼容性）', () => {
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('MTProto 客户端构造失败'));
   });
 });
+
+/**
+ * 回归保护：无源复制必须携带**确定性 `random_id`**，且目标消息 ID 要从 `UpdateMessageID`
+ * 解析——而不是依赖 `UpdateNewChannelMessage` 里的消息实体。
+ *
+ * 事故背景：频道到频道的复制，服务端返回的 `Updates` 常常不含新消息实体，teleproto 的封装
+ * 因此返回 `undefined`；上游把「其实已复制成功」判成失败（`kind='other'` → retryable），
+ * `MIRROR_MAX_ATTEMPTS=5` 下每次重试都在备份群真的多留一份副本。
+ */
+describe('TelegramUserClientService（无源复制的幂等键与回执解析）', () => {
+  const credentials = { apiId: API_ID, apiHash: API_HASH, session: '' };
+
+  function setupCopy(invoke: jest.Mock) {
+    const service = new TelegramUserClientService({ get: () => undefined } as never);
+    const client = {
+      connect: jest.fn(async () => undefined),
+      disconnect: jest.fn(async () => undefined),
+      getEntity: jest.fn(async (entity: unknown) => entity),
+      getInputEntity: jest.fn(async (entity: unknown) => entity),
+      invoke,
+      session: { save: () => '' },
+    };
+    class FakeTelegramClient {
+      constructor() {
+        return client as never;
+      }
+    }
+    jest.spyOn(service as unknown as { tryLoad(): unknown }, 'tryLoad').mockReturnValue({
+      TelegramClient: FakeTelegramClient,
+      sessions: { StringSession: class { save() { return ''; } } },
+      Api: teleproto.Api,
+      Logger: teleproto.Logger,
+      helpers: teleproto.helpers,
+    });
+    return { service, client, invoke };
+  }
+
+  function updates(updateList: unknown[]) {
+    return new teleproto.Api.Updates({
+      updates: updateList,
+      users: [],
+      chats: [],
+      date: new Date(),
+      seq: 0,
+    });
+  }
+
+  const params = {
+    credentials,
+    sourceChatId: '-100111',
+    sourceMessageId: '5',
+    targetChatId: '-100222',
+    idempotencyKey: 'task-1:acc-a',
+  };
+
+  it('同一幂等键派生出相同 random_id，并以 dropAuthor 转发提交', async () => {
+    const seen: string[] = [];
+    const invoke = jest.fn(async (request: Record<string, any>) => {
+      seen.push(String(request.randomId?.[0]));
+      return updates([]);
+    });
+    const { service, client } = setupCopy(invoke);
+
+    await expect(service.copyMessage(params)).rejects.toMatchObject({ kind: 'unverified' });
+    await expect(service.copyMessage(params)).rejects.toMatchObject({ kind: 'unverified' });
+
+    // 重试必须复用同一个服务端幂等键，否则每次重试都是「新消息」
+    expect(new Set(seen).size).toBe(1);
+    expect(seen[0]).not.toBe('undefined');
+    const request = invoke.mock.calls[0][0] as Record<string, any>;
+    expect(request.dropAuthor).toBe(true);
+    expect(request.id).toEqual([5]);
+    expect(request.fromPeer).toBe(-100111);
+    expect(request.toPeer).toBe(-100222);
+    expect(client.disconnect).toHaveBeenCalledTimes(2);
+  });
+
+  it('不同幂等键派生出不同 random_id（互不顶替）', async () => {
+    const seen: string[] = [];
+    const invoke = jest.fn(async (request: Record<string, any>) => {
+      seen.push(String(request.randomId?.[0]));
+      return updates([]);
+    });
+    const { service } = setupCopy(invoke);
+
+    await expect(service.copyMessage({ ...params, idempotencyKey: 'task-1:acc-a' }))
+      .rejects.toMatchObject({ kind: 'unverified' });
+    await expect(service.copyMessage({ ...params, idempotencyKey: 'task-2:acc-a' }))
+      .rejects.toMatchObject({ kind: 'unverified' });
+
+    expect(seen[0]).not.toBe(seen[1]);
+  });
+
+  it('从 UpdateMessageID 解析目标消息 ID：服务端未下发消息实体也能拿到', async () => {
+    const invoke = jest.fn(async (request: Record<string, any>) => updates([
+      new teleproto.Api.UpdateMessageID({ id: 9201, randomId: request.randomId[0] }),
+    ]));
+    const { service } = setupCopy(invoke);
+
+    await expect(service.copyMessage(params)).resolves.toEqual({
+      targetChatId: '-100222',
+      targetMessageId: '9201',
+    });
+  });
+
+  it('退回消息实体解析：仅目标会话的新消息实体存在时仍能拿到 ID', async () => {
+    const invoke = jest.fn(async () => updates([
+      new teleproto.Api.UpdateNewChannelMessage({
+        message: new teleproto.Api.Message({
+          id: 9300,
+          peerId: new teleproto.Api.PeerChannel({ channelId: 100222 }),
+          date: new Date(),
+          message: '',
+        }),
+      }),
+    ]));
+    const { service } = setupCopy(invoke);
+
+    await expect(service.copyMessage(params)).resolves.toEqual({
+      targetChatId: '-100222',
+      targetMessageId: '9300',
+    });
+  });
+
+  it('既无 UpdateMessageID 也无消息实体：归类为 unverified，绝不猜测 ID', async () => {
+    const invoke = jest.fn(async () => updates([]));
+    const { service } = setupCopy(invoke);
+
+    const error = await service.copyMessage(params).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({ name: 'TelegramUserClientError', kind: 'unverified' });
+    expect((error as Error).message).toContain('无法确认备份位置');
+  });
+});
