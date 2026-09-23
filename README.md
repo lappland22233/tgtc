@@ -46,6 +46,39 @@
 
 运维注意：本调度管理的是后端缓存卷（`tmp/Cache`）。自建 Telegram Bot API/TDLib 的 `--dir` 工作目录是**独立磁盘域**，两者位于同一物理卷时仍可能互相抢占，建议分卷部署并分别配置最低余量（`FILE_CACHE_MIN_FREE_DISK_GB` 与 `--workdir-min-free-bytes`）。
 
+#### 回源权重预算、队列公平与内存治理
+
+三个「权重/上限」概念必须分开，禁止互相换算：
+
+| 配置/字段 | 层级 | 语义 |
+|---|---|---|
+| `telegram_accounts.weight` | 账号池 | 账号**选号**的加权概率（不影响全局预算） |
+| `telegram_accounts.maxInflight` | 账号池 | 单账号在飞请求上限 |
+| `FILE_DOWNLOAD_MAX_CONCURRENT_UPSTREAMS` | 下载资源协调器 | **全局上游回源权重预算**（不是连接数，也不是「账号数 × maxInflight」） |
+
+- **权重映射**：`>1GiB` → 8、`256MiB–1GiB` → 2、其余 → 1；权重超过预算时按预算裁剪。
+- **预算自动扩缩容**（`FILE_DOWNLOAD_AUTO_CAPACITY_ENABLED=true`，默认开启）：按**有效 Bot 数**映射 `min(64, max(8, n×8))`（1 个 → 8、2 个 → 16、4 个 → 32，上限 64）。「有效 Bot」= 同时满足 `enabled` + 已配置存储 Chat + 健康（未冷却、连续失败低于阈值）+ **该账号存在自己的 `status=ready` 副本**。闸门：升档需目标值连续 2 个评估周期稳定（60s/次）且窗口内无新增回源失败、无账号处于限流冷却；每次最多 `+8`；降档需目标持续偏低 10 个周期，每次最多 `-8`、永不低于 `8`；`有效 Bot = 0` 时挂起自动调整（无依据不缩容）。每次写入都会同时落审计日志（旧值/新值/有效 Bot 数/原因/来源）与运行日志。**任何调整都不撤销已授予的租约**，只影响后续准入。
+- **队列等待策略**（`FILE_DOWNLOAD_UPSTREAM_QUEUE_POLICY`，默认 `strict_fifo`）：
+  - `strict_fifo`：严格 FIFO，队首权重不足时后续任务也不放行（紧急回退模式）；
+  - `bounded_fit`：队首暂时放不下时，仅在队首之后的前 8 个等待项中按 FIFO 顺序放过可适配的任务；单个队首最多被绕过 8 次，或被绕过至等待超过 10 秒后进入「队首保留」，不再发放非队首任务（大文件不会被小任务饿死）。绕过次数、队首等待年龄与保留状态均可在运行快照中观测。
+- **副本目标**（`TELEGRAM_POOL_TARGET_REPLICAS`，SystemConfig 热更新，1-8，默认 2）：有效目标 = `min(配置值, 可承载副本账号数)`，无可承载账号时自动降为 1 并在运行快照中显示降级原因；Web 下载、Bot 公开下载与镜像回源共用同一解析结果。同一逻辑文件的扩散任务使用 single-flight，目标账号按 claim 去重（跨请求不重复排队同一目标）；跨逻辑文件的复制并发上限为 2，复制失败后 claim 立即释放以便下一轮重试。
+- **内存治理**：spool/build follower **每块数据独立分配** 256KiB 读缓冲，读取后直接把该块内存的视图交给下游（不再 `Buffer.from(subarray)` 复制），从而去掉「复用缓冲 + 每块一次拷贝」的双重分配。**禁止复用已 push 的缓冲**：经 `pipeline(stream, res)` 消费时，`res.write()` 会把缓冲留在 socket 写队列里（尚未刷入内核），复用同一块内存会造成下载内容被后一块静默覆盖——`readableLength === 0` 只说明数据已离开本流的内部缓冲，**不代表下游已释放**。direct 直通流显式使用**字节模式**（`objectMode:false`），窗口（`FILE_DOWNLOAD_DIRECT_WINDOW_MB`，1-4MiB，默认 1MiB）即单请求预读内存上限，与文件总大小无关。运行快照暴露 `rssBytes`/`heapUsedBytes`/`externalBytes`/`arrayBuffersBytes`、直通流数与窗口总量、follower 缓冲分配次数——`heapUsed` 无法反映 glibc 原生堆的扩张，必须结合这些进程级读数判断。
+
+**发布顺序（手工步骤）**：
+
+1. 上线「配置读取修复 + 运行时指标 + direct 字节模式 + follower 回归测试」，队列保持 `strict_fifo`；
+2. 管理后台把直通窗口设为 `1 MiB`，观察 RSS 与吞吐；
+3. 完成账号资格审计（账号池页「副本扩散策略」卡）与副本 dry-run（覆盖率与缺失样例），**不立即批量复制**；
+4. 对少量热门文件执行副本补齐，确认至少两个可承载 Bot 均出现 ready 副本；
+5. 低峰期切换 `bounded_fit`，观察队首等待、绕过次数、小文件 503 与大文件公平等待；
+6. 稳定后扩大副本补齐范围；只有在可承载账号数与 Telegram 限流都允许时才提高期望副本数（4 不是默认值）。
+
+**回滚开关**：队列异常 → 切回 `strict_fifo`（不改预算）；内存异常 → 直通窗口保持/降回 `1 MiB`；复制异常 → 暂停后台复制或把期望副本数降为当前已就绪路数（不删除已有 ready 副本）；Telegram 限流异常 → 关闭 `FILE_DOWNLOAD_AUTO_CAPACITY_ENABLED` 并维持当前预算（禁止直接手工翻倍）；配置展示异常 → 回退管理端 GET 变更，保留运行时安全区间与监控。
+
+**发布阻塞条件**（任一命中都不得扩大流量或副本目标）：活跃权重超过预算或存在无法释放的租约；大文件在公平阈值内被持续绕过；账号池把没有对应 ready 副本的账号选为回源账号；`file_id` 归属校验失败；RSS/swap 随传输周期持续增长或 glibc `[heap]` 未形成平台；`FLOOD_WAIT`、复制失败或上游 503 显著高于基线。
+
+**压测与观测场景**：① 2 个 4GiB 分卷并发（预算 16）混入多个 64MiB 以下小文件；② 16 个小文件持续回源（验证权重/账号在飞/direct 窗口）；③ 多个 follower 读取同一 spool（迟到、慢消费、断开重连、Range）；④ noCache 连续下载并重复 ≥3 个周期；⑤ 副本补齐与下载同时发生。Linux 侧额外采集 `/proc/<pid>/smaps_rollup`、`VmRSS`、`VmHWM`、swap 与 `[heap]` 段变化；验收阈值：固定并发下 RSS 在 10 分钟内回落到峰值 1.25 倍以内或形成平台，swap 不随周期线性增长。仅当代码侧治理完成后原生堆仍长期偏高，才在 canary 上单独验证 `MALLOC_ARENA_MAX` 等 allocator 参数（每次只改一个变量）。
+
 ### 分享
 
 - 独立 `ShareLink` 模型，同一文件或文件夹可创建多条分享链接
@@ -262,11 +295,13 @@ Redis 承载 `metrics-aggregation`、`attack-detection`、`alert-evaluation`、`
 | `FILE_CACHE_BUILD_IDLE_TIMEOUT_MS` | `150000` | 缓存构建**无进展**超时（毫秒），每收到数据即刷新 |
 | `FILE_CACHE_BUILD_TOTAL_TIMEOUT_MS` | `0` | 单次缓存构建**总时限**（毫秒）；`0` = 禁用（默认），固定总时限会误杀长传输 |
 | `FILE_DOWNLOAD_MAX_RESERVED_GB` | `0` | 在途下载任务「未写入预约」总上限（GB），0 表示仅受物理空间约束（SystemConfig 热更新） |
-| `FILE_DOWNLOAD_MAX_CONCURRENT_UPSTREAMS` | `8` | 上游冷回源**权重预算**（非连接数）：`>1GiB` 权重 8、`256MiB–1GiB` 权重 2、其余 1；默认预算下大文件一次只跑 1 个，提到 `16` 可跑 2 个（SystemConfig 热更新） |
+| `FILE_DOWNLOAD_MAX_CONCURRENT_UPSTREAMS` | `8` | 上游冷回源**权重预算**（非连接数）：`>1GiB` 权重 8、`256MiB–1GiB` 权重 2、其余 1；自动扩缩容开启时按有效 Bot 数映射 `min(64, max(8, n×8))`（1→8、2→16、4→32），范围 1-64（SystemConfig 热更新） |
+| `FILE_DOWNLOAD_UPSTREAM_QUEUE_POLICY` | `strict_fifo` | 上游等待项选择策略：`strict_fifo`（严格 FIFO，回退模式）/ `bounded_fit`（前 8 个等待项内适配优先，队首最多被绕过 8 次或等待 10 秒后进入队首保留）（SystemConfig 热更新） |
+| `FILE_DOWNLOAD_AUTO_CAPACITY_ENABLED` | `true` | 全局权重预算是否按有效 Bot 数自动扩缩容（关闭后只保留人工设置）（SystemConfig 热更新） |
 | `FILE_DOWNLOAD_QUEUE_CAPACITY` | `128` | 磁盘/上游等待队列容量，超过后直接返回「服务器繁忙」（`429`）（SystemConfig 热更新） |
 | `FILE_DOWNLOAD_QUEUE_TIMEOUT_SECONDS` | `1800` | 单个下载任务排队等待上限（秒）（SystemConfig 热更新） |
 | `FILE_DOWNLOAD_SPOOL_GRACE_SECONDS` | `120` | 临时中转文件最后一个下载者离开后的保留时间（秒）（SystemConfig 热更新） |
-| `FILE_DOWNLOAD_DIRECT_WINDOW_MB` | `16` | 受限缓冲直通的缓冲窗口（MB），越小内存占用越低（SystemConfig 热更新） |
+| `FILE_DOWNLOAD_DIRECT_WINDOW_MB` | `1` | 受限缓冲直通的缓冲窗口（MB，**1-4**，推荐 `1`）：字节模式下的 `highWaterMark` 即单请求预读内存上限，与文件总大小无关（SystemConfig 热更新） |
 | `FILE_DOWNLOAD_DIRECT_WAIT_SECONDS` | `60` | 非任务化直接下载端点的有限等待上限（秒）；超时返回 `503 DOWNLOAD_SERVER_BUSY` + `Retry-After`（不再挂到 1800s）；4GiB 场景建议上调到 `180`（SystemConfig 热更新） |
 | `FILE_DOWNLOAD_TASK_RETENTION_SECONDS` | `900` | 下载任务状态保留时间（秒）（SystemConfig 热更新） |
 | `THUMBNAIL_DIR` | `tmp/thumbnails` | 缩略图目录 |
@@ -339,7 +374,7 @@ Redis 承载 `metrics-aggregation`、`attack-detection`、`alert-evaluation`、`
 | `TELEGRAM_ACCOUNT_POOL` | - | 账号 JSON 数组：`[{id,token,chatId,weight,maxInflight,enabled,note}]`（推荐，信息最全） |
 | `TELEGRAM_BOT_TOKENS` | - | 逗号分隔 Token 列表（简化输入；存储 Chat 复用 `TELEGRAM_CHAT_ID`，**归档群不可充当存储目标**） |
 | `TELEGRAM_ARCHIVE_CHAT_ID` | - | 收到的文件由接收账号转发到该群（**仅审计留痕**；严禁作为账号存储 Chat）；同时作为「用户账号中继」在下载期懒扩散路径上的**副本可见群** |
-| `TELEGRAM_POOL_TARGET_REPLICAS` | `2` | 期望副本数；不足时在真实下载的后台按需扩散（设为 `1` 表示不主动扩散） |
+| `TELEGRAM_POOL_TARGET_REPLICAS` | `2` | 期望副本数（**范围 1-8**）；已迁移为 SystemConfig 热更新（后台「账号池 → 副本扩散策略」），本环境变量仅作为**初始值/回退**。有效目标 = `min(配置值, 可承载副本账号数)`，`1` 表示不主动扩散；Web 下载、Bot 公开下载与镜像回源共用同一解析结果 |
 | `TELEGRAM_USER_RELAY_ENABLED` | `false` | 用户账号 MTProto 中继（策略 B）；已接入客户端，不可用时明确失败并**自动回退策略 A**（启动预检只告警不阻断） |
 
 **前置条件**（任一不满足时启动预检直接拒绝启用）：显式 `TELEGRAM_FILE_STREAMING_ENABLED=true`、`TELEGRAM_FILE_STREAM_BASE` 为合法 http/https 地址，且自建 Bot API 以 `--enable-file-streaming` 启动。每个账号必须有自己的 Token、自己的存储 Chat（`chatId`）与回源能力。
@@ -368,6 +403,8 @@ Redis 承载 `metrics-aggregation`、`attack-detection`、`alert-evaluation`、`
 - `GET/PUT /api/admin/telegram-accounts/overview|feature`：总览与账号池总开关（响应含 `pool` 运行态与 `envAccounts` 只读视图）；
 - `GET/POST/PATCH/DELETE /api/admin/telegram-accounts[/bots|/users|/:id]`：账号全生命周期（创建即校验、测试、启停、轮换、撤销）；列表项带 `source`（`panel`/`both`）与 `runtime` 运行态；
 - `POST /api/admin/telegram-accounts/env/:accountId/probe`：**环境变量账号**（主 Bot 或 `TELEGRAM_ACCOUNT_POOL` 配置项）重新探测，只回脱敏结论并写审计；
+- `GET /api/admin/telegram-accounts/replication-audit`：副本扩散资格审计（目标解析 `configured`/`eligible`/`effectiveTarget` + 降级原因、逐账号资格与排除原因、ready 覆盖率与缺失样例、容量策略状态），只读、不触发扩散；
+- `PUT /api/admin/telegram-accounts/replication-target`：期望副本数热更新（1-8，写入 SystemConfig 并审计；有效目标按可承载账号数收敛）；
 - `POST /api/admin/telegram-accounts/:id/auth/start|verify|cancel`：用户账号交互式授权（验证码与 2FA 密码**不入库不入日志**）；
 - `GET/PUT /api/admin/telegram-mirror`、`PUT .../feature`、`PUT .../rule/enabled`、`POST .../test`：规则配置与权限探测；
 - `GET /api/admin/telegram-mirror/tasks`、`POST .../tasks/:id/retry|cancel`：任务列表与人工干预；

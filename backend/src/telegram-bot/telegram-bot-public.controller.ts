@@ -6,6 +6,7 @@ import { Readable } from 'stream';
 import { TelegramBotFileGrant } from '../common/entities/telegram-bot-file-grant.entity';
 import { AccountAwareDownloadService } from '../telegram-account-pool/account-aware-download.service';
 import { FileCopyService } from '../telegram-account-pool/file-copy.service';
+import { ReplicaTargetResolver } from '../telegram-account-pool/replica-target.resolver';
 import { AuditService } from '../common/services/audit.service';
 import { AuditStatus } from '../common/entities/audit-log.entity';
 import { RateLimitService } from '../common/services/rate-limit.service';
@@ -73,6 +74,9 @@ export class TelegramBotPublicController {
     private readonly fileCopies: FileCopyService | null = null,
     @Optional() @Inject(ConfigService)
     private readonly configService: ConfigService | null = null,
+    // 统一的副本目标解析（SystemConfig 优先，env 仅作回退）：避免各入口各读一套配置
+    @Optional() @Inject(ReplicaTargetResolver)
+    private readonly replicaTargets: ReplicaTargetResolver | null = null,
   ) {}
 
   /**
@@ -134,14 +138,15 @@ export class TelegramBotPublicController {
       // 入站时以 file_unique_id 为主键登记副本，这里用「用户私聊 chat + 消息 id」反查主键
       const anchor = await this.fileCopies.findByAnchor(String(grant.chatId), String(grant.messageId));
       if (!anchor) return null;
-      const configured = Number(this.configService?.get<string>('TELEGRAM_POOL_TARGET_REPLICAS') || 2);
       const opened = await pool.openStream({
         ownerType: anchor.ownerType,
         ownerId: anchor.ownerId,
         expectedSize,
         noCache,
         fileName: grant.fileName || 'download',
-        desiredReplicas: Number.isSafeInteger(configured) && configured > 1 ? configured : undefined,
+        // 期望副本数统一由 ReplicaTargetResolver 解析（SystemConfig 热更新 → env → 默认），
+        // 并已按可承载账号数收敛，避免对不存在目标的固定账号数反复发起必败上传。
+        desiredReplicas: await this.replicaTargets?.desiredReplicas(),
       });
       return opened ? { stream: opened.stream, info: opened.info } : null;
     } catch (error) {

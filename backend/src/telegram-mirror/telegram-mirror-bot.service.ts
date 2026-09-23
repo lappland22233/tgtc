@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { Readable } from 'stream';
 import { TelegramMirrorRule } from '../common/entities/telegram-mirror-rule.entity';
 import { TelegramMirrorTask } from '../common/entities/telegram-mirror-task.entity';
@@ -8,6 +8,7 @@ import { TelegramAccountClientService, TelegramAccountError } from '../telegram-
 import { AccountAttemptSample } from '../telegram-account-pool/telegram-account-pool.types';
 import { AccountAwareDownloadService } from '../telegram-account-pool/account-aware-download.service';
 import { FileCopyService } from '../telegram-account-pool/file-copy.service';
+import { ReplicaTargetResolver } from '../telegram-account-pool/replica-target.resolver';
 import { TelegramAccountsService } from '../telegram-accounts/telegram-accounts.service';
 import { TelegramMirrorSourceService } from './telegram-mirror-source.service';
 import { MirrorExecutionError, isAccountCredentialError } from './telegram-mirror.errors';
@@ -48,6 +49,9 @@ export class TelegramMirrorBotService {
     private readonly downloader: AccountAwareDownloadService,
     private readonly copies: FileCopyService,
     private readonly accounts: TelegramAccountsService,
+    // 统一副本目标解析（可选依赖；未装配时保持既有行为，不触发懒扩散）
+    @Optional() @Inject(ReplicaTargetResolver)
+    private readonly replicaTargets: ReplicaTargetResolver | null = null,
   ) {}
 
   async execute(task: TelegramMirrorTask, rule: TelegramMirrorRule): Promise<MirrorExecutionResult> {
@@ -184,7 +188,10 @@ export class TelegramMirrorBotService {
         ownerType: task.ownerType,
         ownerId: task.ownerId,
         expectedSize,
+        // 已有锚点 file_id 时不请求懒扩散：镜像自身就要把这些字节再上传一次，
+        // 同时扩散会成倍放大出网带宽（目标数量仍由统一解析器决定，见 desiredReplicas）。
         fileName: descriptor.fileId ? undefined : 'mirror-backup',
+        desiredReplicas: await this.replicaTargets?.desiredReplicas(),
       });
       if (opened) {
         const size = this.resolveSize(opened.info.file_size, expectedSize, opened.stream);

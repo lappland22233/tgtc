@@ -439,6 +439,8 @@ describe('TelegramBotPublicController 账号池回退矩阵（fail-closed）', (
     sourceStreamResult?: 'ok' | 'null';
     anchorThrows?: boolean;
     hasSourceAccount?: boolean;
+    /** 统一副本目标解析结果；null 表示「无有效目标」（不触发懒扩散） */
+    desiredReplicas?: number | null;
   } = {}) {
     let capturedError: unknown = null;
     const counters: Record<string, number> = { unresolved: 0, fallbacks: 0 };
@@ -502,9 +504,13 @@ describe('TelegramBotPublicController 账号池回退矩阵（fail-closed）', (
     const configService = {
       get: jest.fn((key: string) => {
         if (key === 'TELEGRAM_BOT_TOKEN') return DEFAULT_BOT_TOKEN;
-        if (key === 'TELEGRAM_POOL_TARGET_REPLICAS') return '2';
         return '';
       }),
+    };
+    // 统一副本目标解析器（期望副本数不再由各入口直接读配置）
+    const replicaTargets = {
+      desiredReplicas: jest.fn(async () =>
+        (options.desiredReplicas === undefined ? 2 : options.desiredReplicas ?? undefined)),
     };
 
     const controller = new TelegramBotPublicController(
@@ -517,6 +523,7 @@ describe('TelegramBotPublicController 账号池回退矩阵（fail-closed）', (
       accountPoolDownload as never,
       fileCopies as never,
       configService as never,
+      replicaTargets as never,
     );
 
     return {
@@ -528,6 +535,7 @@ describe('TelegramBotPublicController 账号池回退矩阵（fail-closed）', (
       accountPoolDownload,
       fileCopies,
       configService,
+      replicaTargets,
       getCapturedError: () => capturedError,
     };
   }
@@ -544,6 +552,20 @@ describe('TelegramBotPublicController 账号池回退矩阵（fail-closed）', (
     // 池化成功：不得再调用默认账号
     expect(ctx.telegramService.getRealtimeFileStream).not.toHaveBeenCalled();
     expect(ctx.getCapturedError()).toBeNull();
+  });
+
+  it('期望副本数统一取自 ReplicaTargetResolver（无有效目标时不传，避免必败上传）', async () => {
+    const withTarget = makePoolController({ openStreamResult: 'ok', desiredReplicas: 3 });
+    await withTarget.controller.download(VALID_TOKEN, makeRequest(), res);
+    expect(withTarget.accountPoolDownload.openStream).toHaveBeenCalledWith(
+      expect.objectContaining({ desiredReplicas: 3 }),
+    );
+
+    const noTarget = makePoolController({ openStreamResult: 'ok', desiredReplicas: null });
+    await noTarget.controller.download(VALID_TOKEN, makeRequest(), res);
+    expect(noTarget.accountPoolDownload.openStream).toHaveBeenCalledWith(
+      expect.objectContaining({ desiredReplicas: undefined }),
+    );
   });
 
   it('池化失败但源账号可确认：用源账号回源并记回退计数', async () => {

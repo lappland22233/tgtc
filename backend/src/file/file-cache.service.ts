@@ -15,8 +15,11 @@ import {
   DOWNLOAD_RESOURCE_DEFAULTS,
   DownloadResourceCoordinatorService,
   DownloadResourceException,
+  normalizeDownloadConfigNumber,
+  normalizeUpstreamQueuePolicy,
   type DownloadReservation,
   type DownloadResourceSnapshot,
+  type UpstreamQueuePolicy,
 } from './download-resource-coordinator.service';
 
 export const CACHE_CONFIG_KEYS = {
@@ -241,18 +244,60 @@ export class FileCacheService implements OnApplicationShutdown {
 
   /**
    * 下载资源运行状态快照（管理后台观测）：
-   * 磁盘余量、预约量、队列长度、活跃回源、缓存占用与上限。
+   * 磁盘余量、预约量、队列长度与队首等待年龄、权重预算与策略、
+   * 缓存占用与上限，以及进程内存与直通/follower 流规模。
+   *
+   * 内存指标的意义：判断「RSS/external/arrayBuffers 是否随已传输总字节数增长」
+   * 依靠的是这些进程级读数与 direct 窗口总量、follower 缓冲分配次数的组合，
+   * 单看 V8 `heapUsed` 会把 glibc 原生堆的持续扩张完全隐藏掉。
    */
   getDownloadRuntimeSnapshot(): DownloadResourceSnapshot & {
     cacheCommittedBytes: number;
     cacheMaxBytes: number;
     noCacheMode: boolean;
+    memory: {
+      rssBytes: number;
+      heapUsedBytes: number;
+      heapTotalBytes: number;
+      externalBytes: number;
+      arrayBuffersBytes: number;
+    };
+    streams: {
+      /** 活跃 build 会话（每个会话至少一个 follower 消费者） */
+      buildSessions: number;
+      /** 活跃 spool 会话 */
+      spoolSessions: number;
+      /** 活跃 spool 消费者流数 */
+      spoolConsumers: number;
+      /** 活跃 direct 直通流数 */
+      directStreams: number;
+      /** 活跃 direct 流的窗口字节总量（直通路径的潜在外部内存上限） */
+      directWindowBytesTotal: number;
+      /** follower 读缓冲分配累计次数（256KiB/次） */
+      followerBufferAllocations: number;
+    };
   } {
+    const usage = process.memoryUsage();
     return {
       ...this.resources.getSnapshot(),
       cacheCommittedBytes: this.diskManager.getTotalCacheSizeSync() ?? 0,
       cacheMaxBytes: this.maxCacheSizeBytes,
       noCacheMode: this.noCacheMode,
+      memory: {
+        rssBytes: usage.rss,
+        heapUsedBytes: usage.heapUsed,
+        heapTotalBytes: usage.heapTotal,
+        externalBytes: usage.external,
+        arrayBuffersBytes: usage.arrayBuffers,
+      },
+      streams: {
+        buildSessions: this.sessionCoordinator.activeBuildSessionCount,
+        spoolSessions: this.sessionCoordinator.activeSpoolSessionCount,
+        spoolConsumers: this.sessionCoordinator.activeSpoolConsumerCount,
+        directStreams: this.sessionCoordinator.activeDirectStreamCount,
+        directWindowBytesTotal: this.sessionCoordinator.activeDirectWindowBytesTotal,
+        followerBufferAllocations: this.sessionCoordinator.followerBufferAllocationCount,
+      },
     };
   }
 
@@ -305,6 +350,7 @@ export class FileCacheService implements OnApplicationShutdown {
         maxSizeStr, minFreeStr, ttlStr, noCacheStr,
         maxReservedStr, upstreamsStr, queueCapacityStr, queueTimeoutStr,
         spoolGraceStr, directWindowStr, directWaitStr, taskRetentionStr,
+        upstreamQueuePolicyStr,
       ] = await Promise.all([
         this.configCache.get(CACHE_CONFIG_KEYS.MAX_SIZE_GB, CACHE_CONFIG_DEFAULTS[CACHE_CONFIG_KEYS.MAX_SIZE_GB]),
         this.configCache.get(CACHE_CONFIG_KEYS.MIN_FREE_DISK_GB, CACHE_CONFIG_DEFAULTS[CACHE_CONFIG_KEYS.MIN_FREE_DISK_GB]),
@@ -318,20 +364,25 @@ export class FileCacheService implements OnApplicationShutdown {
         this.configCache.get(d.DIRECT_WINDOW_MB, dd[d.DIRECT_WINDOW_MB]),
         this.configCache.get(d.DIRECT_WAIT_SECONDS, dd[d.DIRECT_WAIT_SECONDS]),
         this.configCache.get(d.TASK_RETENTION_SECONDS, dd[d.TASK_RETENTION_SECONDS]),
+        this.configCache.get(d.UPSTREAM_QUEUE_POLICY, dd[d.UPSTREAM_QUEUE_POLICY]),
       ]);
       this.maxCacheSizeBytes = Math.max(1, parseInt(maxSizeStr) || 10) * 1024 * 1024 * 1024;
       this.minFreeDiskBytes = Math.max(0.5, parseFloat(minFreeStr) || 1) * 1024 * 1024 * 1024;
       this.cacheTtlMs = Math.max(1, parseInt(ttlStr) || 3) * 24 * 60 * 60 * 1000;
 
-      // 下载调度配置：热更新只影响后续任务的准入判断，已授予的租约不被撤销
-      const maxReservedGb = parsePositiveNumber(maxReservedStr, 0);
-      const upstreams = Math.max(1, Math.floor(parsePositiveNumber(upstreamsStr, 8)) || 8);
-      const queueCapacity = Math.max(1, Math.floor(parsePositiveNumber(queueCapacityStr, 128)) || 128);
-      const queueTimeoutMs = Math.max(1, parsePositiveNumber(queueTimeoutStr, 1800)) * 1000;
-      const spoolGraceMs = parsePositiveNumber(spoolGraceStr, 120) * 1000;
-      const directWindowBytes = Math.max(1, parsePositiveNumber(directWindowStr, 16)) * 1024 * 1024;
-      this.directWaitMs = parsePositiveNumber(directWaitStr, 60) * 1000;
-      this.taskRetentionMs = Math.max(60, parsePositiveNumber(taskRetentionStr, 900)) * 1000;
+      // 下载调度配置：热更新只影响后续任务的准入判断，已授予的租约不被撤销。
+      // 全部走统一规范化函数：缺失/空值回退仓库默认值，越界值裁剪到统一区间，
+      // 保证管理端展示、管理端校验与运行时行为三者一致。
+      const maxReservedGb = normalizeDownloadConfigNumber(d.MAX_RESERVED_GB, maxReservedStr);
+      const upstreams = Math.floor(normalizeDownloadConfigNumber(d.MAX_CONCURRENT_UPSTREAMS, upstreamsStr));
+      const queueCapacity = Math.floor(normalizeDownloadConfigNumber(d.QUEUE_CAPACITY, queueCapacityStr));
+      const queueTimeoutMs = normalizeDownloadConfigNumber(d.QUEUE_TIMEOUT_SECONDS, queueTimeoutStr) * 1000;
+      const spoolGraceMs = normalizeDownloadConfigNumber(d.SPOOL_GRACE_SECONDS, spoolGraceStr) * 1000;
+      const directWindowMb = normalizeDownloadConfigNumber(d.DIRECT_WINDOW_MB, directWindowStr);
+      const directWindowBytes = directWindowMb * 1024 * 1024;
+      const upstreamQueuePolicy: UpstreamQueuePolicy = normalizeUpstreamQueuePolicy(upstreamQueuePolicyStr);
+      this.directWaitMs = normalizeDownloadConfigNumber(d.DIRECT_WAIT_SECONDS, directWaitStr) * 1000;
+      this.taskRetentionMs = normalizeDownloadConfigNumber(d.TASK_RETENTION_SECONDS, taskRetentionStr) * 1000;
       this.resources.configure({
         minFreeBytes: this.minFreeDiskBytes,
         maxReservedBytes: maxReservedGb > 0 ? maxReservedGb * 1024 * 1024 * 1024 : 0,
@@ -342,6 +393,7 @@ export class FileCacheService implements OnApplicationShutdown {
         directWindowBytes,
         directWaitMs: this.directWaitMs,
         taskRetentionMs: this.taskRetentionMs,
+        upstreamQueuePolicy,
       });
 
       // 无缓存模式翻转：false → true 时中止所有进行中的缓存构建
@@ -355,9 +407,9 @@ export class FileCacheService implements OnApplicationShutdown {
       );
       this.logger.log(
         `下载调度配置: 预约上限 ${maxReservedGb > 0 ? `${maxReservedGb}GB` : '不限'}, ` +
-        `上游并发 ${upstreams}, 队列容量 ${queueCapacity}, ` +
+        `上游权重预算 ${upstreams}, 队列策略 ${upstreamQueuePolicy}, 队列容量 ${queueCapacity}, ` +
         `排队超时 ${queueTimeoutMs / 1000}s, spool 宽限期 ${spoolGraceMs / 1000}s, ` +
-        `直通窗口 ${directWindowBytes / 1024 / 1024}MB`,
+        `直通窗口 ${directWindowMb}MB`,
       );
       if (!prevNoCacheMode && this.noCacheMode) {
         this.logger.warn('无缓存模式已启用：中止所有进行中的缓存构建，后续下载实时回源直通');

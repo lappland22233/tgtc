@@ -97,6 +97,50 @@ export interface SessionResourceLease {
   release(): void;
 }
 
+/**
+ * follower 读块大小（字节）。
+ *
+ * 与历史实现一致（256KiB），同时兼作 follower 流的 `highWaterMark`：
+ * 水位线等于单块大小时，流内最多只有一块数据，缓冲复用的判定条件才成立。
+ */
+const FOLLOWER_READ_CHUNK_BYTES = 256 * 1024;
+
+/** direct（有界滚动直通）窗口下限（字节） */
+const DIRECT_WINDOW_MIN_BYTES = 1 * 1024 * 1024;
+/**
+ * direct 窗口硬上限（字节）。
+ *
+ * 与 `DOWNLOAD_CONFIG_RANGES[DIRECT_WINDOW_MB]`（1-4 MiB）保持一致：
+ * 字节模式下的 `highWaterMark` 是**内存上限**，任何来源的越界值都必须被收敛。
+ */
+const DIRECT_WINDOW_MAX_BYTES = 4 * 1024 * 1024;
+
+/** direct 流释放原因（首个生效者被记录，用于解释租约何时归还） */
+type DirectReleaseReason = 'relay_completed' | 'upstream_error' | 'stream_closed' | 'caller';
+
+/**
+ * follower 数据源（spool / build 两种会话的差异全部收敛于此）。
+ *
+ * 所有权契约：`readInto` 写入的缓冲由读取器提供，push 之后其所有权**完全移交下游**，
+ * 读取器不再触碰（因此下一块必须新分配缓冲）。详见 `createFollowerReadable()` 的说明。
+ */
+interface FollowerReadSource {
+  /** 请求范围起点（含） */
+  start: number;
+  /** 请求范围终点（含） */
+  end: number;
+  /** 当前已写入、可供读取的字节上限 */
+  readLimit: () => number;
+  /** 会话错误（有值时按流错误抛出） */
+  getError: () => Error | undefined;
+  /** 是否已到终止条件（不会再产生新数据） */
+  isTerminal: (offset: number) => boolean;
+  /** 读取 `bytes` 字节到 `buffer` 的 `fileOffset` 位置，返回实际读取字节数 */
+  readInto: (buffer: Buffer, fileOffset: number, bytes: number) => Promise<number>;
+  /** 等待会话产生新数据（progress / complete / failed），禁止忙轮询 */
+  waitForChange: (offset: number) => Promise<void>;
+}
+
 export class CacheSessionCoordinator {
   /** 同一业务文件只允许一个上游回源；消费者从临时文件独立跟随读取。 */
   readonly buildSessions = new Map<string, CacheBuildSession>();
@@ -124,6 +168,14 @@ export class CacheSessionCoordinator {
   /** 未知大小直通的每文件互斥锁 */
   private readonly directLocks = new Map<string, Promise<void>>();
 
+  // ---------- 观测计数（进程内，单实例语义） ----------
+  /** 活跃 direct 直通流数 */
+  private activeDirectStreams = 0;
+  /** 活跃 direct 流的窗口字节总量（= 直通路径的潜在外部内存上限） */
+  private activeDirectWindowBytes = 0;
+  /** follower 读缓冲分配累计次数（256KiB/次；用于区分「复用生效」与「逐块新分配」） */
+  private followerBufferAllocations = 0;
+
   constructor(private readonly deps: SessionCoordinatorDeps) {}
 
   private get logger(): Logger {
@@ -140,6 +192,38 @@ export class CacheSessionCoordinator {
 
   private get fileAccessMap(): Map<string, number> {
     return this.deps.fileAccessMap;
+  }
+
+  /** 活跃 direct 直通流数（观测） */
+  get activeDirectStreamCount(): number {
+    return this.activeDirectStreams;
+  }
+
+  /** 活跃 direct 流的窗口字节总量（观测：直通路径的外部内存上限） */
+  get activeDirectWindowBytesTotal(): number {
+    return this.activeDirectWindowBytes;
+  }
+
+  /** follower 读缓冲分配累计次数（观测：内存压力的直接来源） */
+  get followerBufferAllocationCount(): number {
+    return this.followerBufferAllocations;
+  }
+
+  /** 活跃 build 会话数（每个会话至少有一个 follower 消费者） */
+  get activeBuildSessionCount(): number {
+    return this.buildSessions.size;
+  }
+
+  /** 活跃 spool 会话数 */
+  get activeSpoolSessionCount(): number {
+    return this.spoolSessions.size;
+  }
+
+  /** 活跃 spool 消费者流数 */
+  get activeSpoolConsumerCount(): number {
+    let total = 0;
+    for (const session of this.spoolSessions.values()) total += session.consumerCount;
+    return total;
   }
 
   private get shuttingDown(): boolean {
@@ -871,18 +955,32 @@ export class CacheSessionCoordinator {
       `有界滚动缓冲直通: ${fileId}${start > 0 || end !== undefined ? ` range=${start}-${end ?? 'EOF'}` : ''}`,
     );
 
+    // 有界缓冲窗口：只允许窗口大小的预读（highWaterMark），内存占用与文件大小无关。
+    // 显式规范化：任何来源（配置热更新 / 调用方覆盖）都必须落在 [1MiB, 4MiB]，
+    // 避免单请求异常配置重新制造大块外部内存。
+    const windowBytes = this.normalizeDirectWindow(options?.windowBytes);
+    this.activeDirectStreams += 1;
+    this.activeDirectWindowBytes += windowBytes;
+
+    /**
+     * 释放上游连接与并发租约（幂等）。
+     * 三个终止分支（消费者关闭 / 上游报错 / 生成器正常结束）都会走到这里，
+     * 但只有第一次调用生效，且记录首个释放原因供观测归因。
+     */
     let released = false;
-    const release = () => {
+    const release = (reason: DirectReleaseReason) => {
       if (released) return;
       released = true;
+      this.activeDirectStreams = Math.max(0, this.activeDirectStreams - 1);
+      this.activeDirectWindowBytes = Math.max(0, this.activeDirectWindowBytes - windowBytes);
       upstream.destroy();
       lease.release();
+      this.logger.debug(
+        `有界滚动缓冲直通释放: ${fileId} reason=${reason} window=${windowBytes}B`
+          + `${options?.expectedSize ? ` size=${options.expectedSize}` : ''}`
+          + `${start > 0 || end !== undefined ? ` range=${start}-${end ?? 'EOF'}` : ''}`,
+      );
     };
-
-    // 有界缓冲窗口：只允许窗口大小的预读（highWaterMark），内存占用与文件大小无关
-    const windowBytes = options?.windowBytes && options.windowBytes > 0
-      ? options.windowBytes
-      : this.resources.getConfig().directWindowBytes;
 
     const stream = Readable.from((async function* relay(): AsyncGenerator<Buffer> {
       let offset = 0;
@@ -902,14 +1000,31 @@ export class CacheSessionCoordinator {
           if (sliceEnd <= sliceStart) continue;
           yield chunk.subarray(sliceStart, sliceEnd);
         }
+      } catch (error) {
+        release('upstream_error');
+        throw error;
       } finally {
-        release();
+        release('relay_completed');
       }
-    })(), { highWaterMark: windowBytes });
+    })(), {
+      // 必须是**字节模式**：object-mode 下 `highWaterMark` 表示「可排队对象数量」，
+      // 会把 16（= 16MiB 的数值）误当成「可以排队 16 个任意大小的块」，内存无界。
+      objectMode: false,
+      highWaterMark: windowBytes,
+    });
 
     // 消费者提前断开（浏览器取消、代理超时）时也要释放上游连接与租约
-    stream.once('close', release);
-    return { stream, release };
+    stream.once('close', () => release('stream_closed'));
+    return { stream, release: () => release('caller') };
+  }
+
+  /** 规范化 direct 窗口：非有限值/越界值一律收敛到 [1MiB, 4MiB]（字节模式水位线） */
+  private normalizeDirectWindow(override?: number): number {
+    const fallback = this.resources.getConfig().directWindowBytes;
+    const candidate = typeof override === 'number' && Number.isFinite(override) && override > 0
+      ? override
+      : fallback;
+    return Math.min(DIRECT_WINDOW_MAX_BYTES, Math.max(DIRECT_WINDOW_MIN_BYTES, Math.floor(candidate)));
   }
 
   /** 新增一个按指定 Range 独立跟随读取的消费者流。 */
@@ -923,37 +1038,25 @@ export class CacheSessionCoordinator {
       clearTimeout(session.teardownTimer);
       session.teardownTimer = undefined;
     }
-    const stream = Readable.from((async function* follow(): AsyncGenerator<Buffer> {
-      let offset = start;
-      const buffer = Buffer.allocUnsafe(256 * 1024);
-      try {
-        while (offset <= end) {
-          while (offset < session.bytesWritten && offset <= end) {
-            const available = Math.min(buffer.length, session.bytesWritten - offset, end - offset + 1);
-            let handle: FileHandle | undefined;
-            try {
-              handle = await fsp.open(session.spoolPath, 'r');
-            } catch (error) {
-              if (!session.completed) throw error;
-              handle = await fsp.open(session.spoolPath, 'r');
-            }
-            const { bytesRead } = await handle.read(buffer, 0, available, offset);
-            await handle.close();
-            if (bytesRead <= 0) break;
-            offset += bytesRead;
-            yield Buffer.from(buffer.subarray(0, bytesRead));
-          }
-          if (session.error) throw session.error;
-          if (offset > end || session.completed) break;
-          await coordinator.waitForSessionChange(
-            session,
-            () => offset < session.bytesWritten || session.completed || Boolean(session.error),
-          );
-        }
-      } finally {
-        coordinator.fileAccessMap.set(session.fileId, Date.now());
-      }
-    })());
+    const stream = coordinator.createFollowerReadable(session.fileId, {
+      start,
+      end,
+      readLimit: () => session.bytesWritten,
+      getError: () => session.error,
+      isTerminal: () => session.completed,
+      readInto: (buffer, fileOffset, bytes) => coordinator.readFollowerBytes(
+        () => session.spoolPath,
+        // spool 文件在整个保活期内路径不变：仅当会话已完成时才允许重试同路径
+        () => (session.completed ? session.spoolPath : null),
+        buffer,
+        fileOffset,
+        bytes,
+      ),
+      waitForChange: (offset) => coordinator.waitForSessionChange(
+        session,
+        () => offset < session.bytesWritten || session.completed || Boolean(session.error),
+      ),
+    });
 
     session.consumerCount++;
     stream.once('close', () => {
@@ -1058,42 +1161,157 @@ export class CacheSessionCoordinator {
     if (session.error) throw session.error;
   }
 
+  /**
+   * follower 数据源：spool 与 build 会话的全部差异收敛在这里
+   * （可读字节上限、终止条件、读路径与读失败回退）。
+   *
+   * 内存所有权契约（**硬约束，改动前务必读**）：
+   * - 每块数据由**独立分配**的缓冲承载，push 后其所有权完全移交下游；
+   * - **禁止复用已 push 的缓冲**。`readableLength === 0` 只说明数据已离开本流的内部缓冲，
+   *   **不代表下游已释放**：经 `pipeline(stream, res)` 消费时，`res.write()` 会把缓冲留在
+   *   socket 写队列里（尚未刷入内核），此时复用同一块内存会造成**静默内容损坏**
+   *   （表现为下载到的字节被后一块覆盖）。
+   * - 因此这里不做「固定缓冲 + 复用」优化：相比改造前，仅去掉每次读取的
+   *   `Buffer.from(subarray)` 拷贝与每流的常驻缓冲，分配次数与数据块数同阶。
+   */
+  private createFollowerReadable(fileId: string, source: FollowerReadSource): Readable {
+    let offset = source.start;
+    let pumping = false;
+    let finished = false;
+    let destroyed = false;
+
+    const readable = new Readable({
+      // 显式字节模式：highWaterMark 是字节上限（不是对象个数）
+      objectMode: false,
+      highWaterMark: FOLLOWER_READ_CHUNK_BYTES,
+      read: () => {
+        void pump();
+      },
+      destroy: (error, callback) => {
+        destroyed = true;
+        callback(error ?? null);
+      },
+    });
+
+    const finish = (): void => {
+      if (finished) return;
+      finished = true;
+      readable.push(null);
+    };
+
+    const pump = async (): Promise<void> => {
+      if (pumping || finished || destroyed) return;
+      pumping = true;
+      try {
+        while (!finished && !destroyed) {
+          if (offset > source.end) {
+            finish();
+            return;
+          }
+          const limit = source.readLimit();
+          if (offset < limit) {
+            const available = Math.min(FOLLOWER_READ_CHUNK_BYTES, limit - offset, source.end - offset + 1);
+            if (available > 0) {
+              // 每块独立分配：push 后所有权移交下游，绝不复用（见方法头部的所有权契约）
+              const buffer = this.allocateFollowerBuffer();
+              const bytesRead = await source.readInto(buffer, offset, available);
+              if (destroyed || finished) return;
+              if (bytesRead > 0) {
+                offset += bytesRead;
+                // 直接把该块内存的视图交给下游（不再 Buffer.from(subarray) 复制）
+                if (!readable.push(buffer.subarray(0, bytesRead))) return; // 背压：等下一次 _read
+                continue;
+              }
+            }
+          }
+          const error = source.getError();
+          if (error) throw error;
+          if (source.isTerminal(offset)) {
+            finish();
+            return;
+          }
+          // 没有新数据可用：等待 progress/complete/failed 事件，绝不忙轮询
+          await source.waitForChange(offset);
+        }
+      } catch (error) {
+        finished = true;
+        readable.destroy(error as Error);
+      } finally {
+        pumping = false;
+      }
+    };
+
+    // 释放会话引用（访问时间回写）：正常结束、错误与消费者提前断开都会走到 close
+    readable.once('close', () => {
+      destroyed = true;
+      this.fileAccessMap.set(fileId, Date.now());
+    });
+    return readable;
+  }
+
+  /**
+   * 分配一块 follower 读缓冲并计入观测（内存压力的直接来源）。
+   * 每块数据一块缓冲：push 后所有权移交下游，禁止复用（见 `createFollowerReadable`）。
+   */
+  private allocateFollowerBuffer(): Buffer {
+    this.followerBufferAllocations += 1;
+    return Buffer.allocUnsafe(FOLLOWER_READ_CHUNK_BYTES);
+  }
+
+  /**
+   * 从 follower 文件读取一段字节（每轮短暂持有句柄）。
+   *
+   * `fallbackPath` 为 null 表示「不允许回退重试」；返回非 null 时代表首选路径打开失败
+   * 后改用该路径（缓存发布后 tmp 路径消失 → 切到正式缓存路径）。
+   */
+  private async readFollowerBytes(
+    primaryPath: () => string,
+    fallbackPath: () => string | null,
+    buffer: Buffer,
+    fileOffset: number,
+    bytes: number,
+  ): Promise<number> {
+    let handle: FileHandle;
+    try {
+      handle = await fsp.open(primaryPath(), 'r');
+    } catch (error) {
+      const fallback = fallbackPath();
+      if (!fallback) throw error;
+      handle = await fsp.open(fallback, 'r');
+    }
+    try {
+      const { bytesRead } = await handle.read(buffer, 0, bytes, fileOffset);
+      return bytesRead;
+    } finally {
+      await handle.close();
+    }
+  }
+
   createFollowerStream(session: CacheBuildSession, start = 0, end = session.expectedSize - 1): Readable {
     const coordinator = this;
-    async function* follow(): AsyncGenerator<Buffer> {
-      let offset = start;
-      const buffer = Buffer.allocUnsafe(256 * 1024);
-      try {
-        while (offset <= end) {
-          while (offset < session.bytesWritten && offset <= end) {
-            const available = Math.min(buffer.length, session.bytesWritten - offset, end - offset + 1);
-            let handle: FileHandle | undefined;
-            try {
-              // 每轮短暂持有句柄，兼容 Windows 上活动读句柄会阻止 rename 的行为。
-              // 缓存发布后临时路径消失，自动切换到正式缓存文件。
-              handle = await fsp.open(session.completed ? coordinator.diskManager.getCachePath(session.fileId) : session.tmpPath, 'r');
-            } catch (error) {
-              if (!session.completed) throw error;
-              handle = await fsp.open(coordinator.diskManager.getCachePath(session.fileId), 'r');
-            }
-            const { bytesRead } = await handle.read(buffer, 0, available, offset);
-            await handle.close();
-            if (bytesRead <= 0) break;
-            offset += bytesRead;
-            yield Buffer.from(buffer.subarray(0, bytesRead));
-          }
-          if (session.error) throw session.error;
-          if (offset > end || (session.completed && offset >= session.expectedSize)) break;
-          await coordinator.waitForSessionChange(
-            session,
-            () => offset < session.bytesWritten || session.completed || Boolean(session.error),
-          );
-        }
-      } finally {
-        coordinator.fileAccessMap.set(session.fileId, Date.now());
-      }
-    }
-    return Readable.from(follow());
+    return coordinator.createFollowerReadable(session.fileId, {
+      start,
+      end,
+      readLimit: () => session.bytesWritten,
+      getError: () => session.error,
+      // 完成且已读到期望大小即为终止（避免缓存文件尾部补齐前的空转等待）
+      isTerminal: (offset) => session.completed && offset >= session.expectedSize,
+      readInto: (buffer, fileOffset, bytes) => coordinator.readFollowerBytes(
+        // 每轮短暂持有句柄，兼容 Windows 上活动读句柄会阻止 rename 的行为。
+        // 缓存发布后临时路径消失，自动切换到正式缓存文件。
+        () => (session.completed
+          ? coordinator.diskManager.getCachePath(session.fileId)
+          : session.tmpPath),
+        () => (session.completed ? coordinator.diskManager.getCachePath(session.fileId) : null),
+        buffer,
+        fileOffset,
+        bytes,
+      ),
+      waitForChange: (offset) => coordinator.waitForSessionChange(
+        session,
+        () => offset < session.bytesWritten || session.completed || Boolean(session.error),
+      ),
+    });
   }
 
   /**

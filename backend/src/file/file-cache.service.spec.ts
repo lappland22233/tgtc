@@ -900,3 +900,80 @@ describe('FileCacheService 磁盘预约、降级与 pin（下载配额）', () =
     expect(await service.evictLRU(1024)).toBe(1);
   });
 });
+
+describe('FileCacheService 下载调度配置规范化', () => {
+  let cwd: string;
+
+  beforeEach(async () => {
+    cwd = await mkdtemp(path.join(tmpdir(), 'file-cache-config-'));
+    jest.spyOn(process, 'cwd').mockReturnValue(cwd);
+  });
+
+  afterEach(async () => {
+    jest.restoreAllMocks();
+    await rmDirSafe(cwd);
+  });
+
+  /** 构造服务并等待构造函数内的异步配置加载完成 */
+  async function buildService(configs: Record<string, string> = {}): Promise<FileCacheService> {
+    const configCache = {
+      get: jest.fn(async (key: string, fallback: string) => configs[key] ?? fallback),
+    };
+    const svc = new FileCacheService(configCache as any);
+    await new Promise(resolve => setTimeout(resolve, 10));
+    return svc;
+  }
+
+  it('缺失配置回退仓库默认值：权重预算 8、直通窗口 1MiB、策略 strict_fifo', async () => {
+    const svc = await buildService();
+    const cfg = svc.resources.getConfig();
+    expect(cfg.maxConcurrentUpstreams).toBe(8);
+    expect(cfg.directWindowBytes).toBe(1 * 1024 * 1024);
+    expect(cfg.upstreamQueuePolicy).toBe('strict_fifo');
+  });
+
+  it('空串视为未配置，不再被 Number(\'\') 误判成 0', async () => {
+    const svc = await buildService({
+      FILE_DOWNLOAD_MAX_CONCURRENT_UPSTREAMS: '',
+      FILE_DOWNLOAD_DIRECT_WINDOW_MB: '   ',
+      FILE_DOWNLOAD_QUEUE_CAPACITY: '',
+    });
+    const cfg = svc.resources.getConfig();
+    expect(cfg.maxConcurrentUpstreams).toBe(8);
+    expect(cfg.directWindowBytes).toBe(1 * 1024 * 1024);
+    expect(cfg.queueCapacity).toBe(128);
+  });
+
+  it('越界值在运行时被裁剪：直通窗口上限 4MiB、权重预算上限 64', async () => {
+    const svc = await buildService({
+      FILE_DOWNLOAD_DIRECT_WINDOW_MB: '16',
+      FILE_DOWNLOAD_MAX_CONCURRENT_UPSTREAMS: '999',
+      FILE_DOWNLOAD_UPSTREAM_QUEUE_POLICY: 'bounded_fit',
+    });
+    const cfg = svc.resources.getConfig();
+    expect(cfg.directWindowBytes).toBe(4 * 1024 * 1024);
+    expect(cfg.maxConcurrentUpstreams).toBe(64);
+    expect(cfg.upstreamQueuePolicy).toBe('bounded_fit');
+  });
+
+  it('直通窗口为 0 时回落到下限 1MiB（不会出现零字节窗口）', async () => {
+    const svc = await buildService({ FILE_DOWNLOAD_DIRECT_WINDOW_MB: '0' });
+    expect(svc.resources.getConfig().directWindowBytes).toBe(1 * 1024 * 1024);
+  });
+
+  it('运行快照暴露进程内存与流规模指标（不依赖 V8 堆判断原生堆）', async () => {
+    const svc = await buildService();
+    const snapshot = svc.getDownloadRuntimeSnapshot();
+
+    expect(snapshot.memory.rssBytes).toBeGreaterThan(0);
+    expect(snapshot.memory.heapUsedBytes).toBeGreaterThan(0);
+    expect(snapshot.memory.arrayBuffersBytes).toBeGreaterThanOrEqual(0);
+    expect(snapshot.streams.directStreams).toBe(0);
+    expect(snapshot.streams.directWindowBytesTotal).toBe(0);
+    expect(snapshot.streams.followerBufferAllocations).toBe(0);
+    // 队列策略与队首等待年龄同时可用，便于解释 503
+    expect(snapshot.upstreamQueuePolicy).toBe('strict_fifo');
+    expect(snapshot.oldestUpstreamWaitMs).toBe(0);
+    expect(snapshot.activeUpstreamWeight).toBe(0);
+  });
+});

@@ -9,6 +9,7 @@ import { TelegramAccountCredentialModule } from './telegram-account-credential.m
 import { TelegramAccountFeatureService } from './telegram-account-feature.service';
 import { TelegramAccountPoolBridgeService } from './telegram-account-pool-bridge.service';
 import { TelegramAccountProbeService } from './telegram-account-probe.service';
+import { TelegramReplicationAuditService } from './telegram-replication-audit.service';
 import { TelegramUserAuthService } from './telegram-user-auth.service';
 
 /**
@@ -36,7 +37,8 @@ import { TelegramUserAuthService } from './telegram-user-auth.service';
     TelegramAccountProbeService,
     TelegramUserAuthService,
     TelegramAccountPoolBridgeService,
+    TelegramReplicationAuditService,
   ],
-  exports: [TelegramAccountsService, TelegramAccountFeatureService],
+  exports: [TelegramAccountsService, TelegramAccountFeatureService, TelegramReplicationAuditService],
 })
 export class TelegramAccountsModule {}

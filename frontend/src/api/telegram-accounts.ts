@@ -184,6 +184,91 @@ export interface CreateBotAccountInput {
   note?: string;
 }
 
+// ============================================================
+// 副本扩散资格审计（阶段 2 观测面）
+// ============================================================
+
+/** 目标解析视图：配置值、可承载账号数与最终有效目标 */
+export interface ReplicationTargetView {
+  configured: number;
+  configuredSource: 'system' | 'env' | 'default';
+  eligibleCount: number;
+  effectiveTarget: number;
+  /** 降级原因（例如可承载账号数低于配置目标） */
+  degradedReason: string | null;
+  allowedRange: { min: number; max: number };
+}
+
+/** 单个 Bot 账号的副本资格与副本分布（脱敏） */
+export interface ReplicationAccountView {
+  accountId: string;
+  enabled: boolean;
+  storageConfigured: boolean;
+  coolingDown: boolean;
+  cooldownRemainingMs: number;
+  consecutiveFailures: number;
+  inflight: number;
+  maxInflight: number;
+  readyCopies: number;
+  eligible: boolean;
+  /** 不可承载副本的原因（已本地化，可直接展示） */
+  reasons: string[];
+}
+
+export interface ReplicationCoverageView {
+  scannedFiles: number;
+  satisfied: number;
+  unsatisfied: number;
+  truncated: boolean;
+  missingSamples: Array<{ ownerId: string; readyAccountCount: number; missing: number }>;
+}
+
+/** 容量策略状态（全局权重预算自动扩缩容） */
+export interface DownloadCapacityView {
+  enabled: boolean;
+  currentBudget: number;
+  targetBudget: number;
+  activeBotCount: number;
+  eligibleCount: number;
+  activeBotIds: string[];
+  suspendedReason: string | null;
+  frozenReason: string | null;
+  pendingUpCycles: number;
+  pendingDownCycles: number;
+  lastChange: {
+    at: string;
+    from: number;
+    to: number;
+    reason: string;
+    activeBotCount: number;
+    eligibleCount: number;
+  } | null;
+}
+
+export interface ReplicationAuditReport {
+  generatedAt: string;
+  target: ReplicationTargetView;
+  poolActive: boolean;
+  accounts: ReplicationAccountView[];
+  coverage: ReplicationCoverageView;
+  capacity: DownloadCapacityView | null;
+  notes: string[];
+}
+
+/** 副本扩散资格审计报告（只读，不触发扩散） */
+export async function fetchReplicationAudit(signal?: AbortSignal): Promise<ReplicationAuditReport> {
+  const response = await api.get('/admin/telegram-accounts/replication-audit', { signal });
+  return response.data.data as ReplicationAuditReport;
+}
+
+/** 期望副本数热更新（1-8；有效目标会按可承载账号数收敛） */
+export async function updateReplicationTarget(
+  desiredReplicas: number,
+): Promise<{ message: string; target: ReplicationTargetView }> {
+  const response = await api.put('/admin/telegram-accounts/replication-target', { desiredReplicas });
+  return response.data.data as { message: string; target: ReplicationTargetView };
+}
+
 export interface CreateUserAccountInput {
   name: string;
   apiId: number;

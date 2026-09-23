@@ -1,9 +1,14 @@
 import {
+  DOWNLOAD_CONFIG_KEYS,
   DOWNLOAD_ERROR_CODES,
   DOWNLOAD_RESOURCE_DEFAULTS,
   DownloadResourceCoordinatorService,
+  normalizeBooleanFlag,
+  normalizeDownloadConfigNumber,
+  normalizeUpstreamQueuePolicy,
   upstreamWeightForSize,
   type DownloadReservation,
+  type DownloadUpstreamLease,
 } from './download-resource-coordinator.service';
 
 // 生产代码通过 require('fs').statfsSync 读取，Jest 中与 import 指向同一 module 对象，
@@ -572,6 +577,208 @@ describe('DownloadResourceCoordinatorService', () => {
       expect(typeof reservation.id).toBe('string');
       expect(service.cacheReservedTotalBytes).toBe(KB);
       reservation.release();
+    });
+  });
+
+  describe('bounded_fit 上游队列公平策略（队首阻塞治理）', () => {
+    /** 用 weight=1 的占位租约把预算占满，便于精确制造「剩余预算不足但非零」的场景 */
+    async function fillBudget(units: number) {
+      const leases = [];
+      for (let i = 0; i < units; i++) leases.push(await service.acquireUpstreamSlot({ weight: 1 }));
+      return leases;
+    }
+
+    it('队首大文件暂时放不下时，后续小文件按适配优先获得租约', async () => {
+      service.configure({ maxConcurrentUpstreams: 16, upstreamQueuePolicy: 'bounded_fit' });
+      const fillers = await fillBudget(16);
+      const head = service.acquireUpstreamSlot({ weight: 8, waitTimeoutMs: 30_000 });
+      const small = service.acquireUpstreamSlot({ weight: 1, waitTimeoutMs: 30_000 });
+      expect(service.waitingUpstreamCount).toBe(2);
+
+      // 释放 1 点权重：大文件仍放不下，小文件可以（strict_fifo 下两者都会被阻塞）
+      fillers[0].release();
+      const smallLease = await small;
+      expect(smallLease.weight).toBe(1);
+      expect(service.waitingUpstreamCount).toBe(1);
+      expect(service.upstreamHeadBypassCount).toBe(1);
+      expect(service.upstreamBypassCount).toBe(1);
+
+      // 释放足够权重后队首最终被放行，不会被小文件饿死
+      for (let i = 1; i < 16; i++) fillers[i].release();
+      const headLease = await head;
+      expect(headLease.weight).toBe(8);
+
+      smallLease.release();
+      headLease.release();
+      expect(service.activeUpstreamWeightTotal).toBe(0);
+    });
+
+    it('strict_fifo 回退：同样的场景下队首大文件阻塞后续小文件（既有行为不变）', async () => {
+      service.configure({ maxConcurrentUpstreams: 16, upstreamQueuePolicy: 'strict_fifo' });
+      const fillers = await fillBudget(16);
+      const headCtl = new AbortController();
+      const head = service.acquireUpstreamSlot({ weight: 8, waitTimeoutMs: 30_000, signal: headCtl.signal });
+      const small = service.acquireUpstreamSlot({ weight: 1, waitTimeoutMs: 30_000 });
+
+      fillers[0].release();
+      expect(service.waitingUpstreamCount).toBe(2);
+      expect(service.upstreamBypassCount).toBe(0);
+
+      // 切回 bounded_fit 后同一个等待项立即可以被适配放行
+      service.configure({ upstreamQueuePolicy: 'bounded_fit' });
+      const smallLease = await small;
+      expect(smallLease.weight).toBe(1);
+
+      headCtl.abort();
+      await head.catch(() => undefined);
+      for (let i = 1; i < 16; i++) fillers[i].release();
+      smallLease.release();
+    });
+
+    it('小文件连续到达时，队首达绕过上限后进入保留状态（大文件不被饿死）', async () => {
+      service.configure({ maxConcurrentUpstreams: 16, upstreamQueuePolicy: 'bounded_fit' });
+      const fillers = await fillBudget(16);
+      const head = service.acquireUpstreamSlot({ weight: 8, waitTimeoutMs: 60_000 });
+      const smalls = [];
+      for (let i = 0; i < 10; i++) {
+        smalls.push(service.acquireUpstreamSlot({ weight: 1, waitTimeoutMs: 60_000 }));
+      }
+      expect(service.waitingUpstreamCount).toBe(11);
+
+      // 每次释放 1 点权重都绕过队首放行一个小文件，直到绕过上限（8 次）
+      const grantedSmalls: DownloadUpstreamLease[] = [];
+      for (let i = 0; i < 8; i++) {
+        fillers[i].release();
+        grantedSmalls.push(await smalls[i]);
+        expect(service.upstreamHeadBypassCount).toBe(i + 1);
+      }
+      expect(service.upstreamBypassCount).toBe(8);
+      expect(service.upstreamHeadReserved).toBe(true);
+
+      // 达到绕过上限后，新的释放不再绕过队首
+      fillers[8].release();
+      expect(service.waitingUpstreamCount).toBe(3);
+      expect(service.upstreamBypassCount).toBe(8);
+
+      // 释放足够权重后队首仍能被正常放行（保留状态只阻止绕过，不阻塞队首自身）
+      for (let i = 9; i < 16; i++) fillers[i].release();
+      const headLease = await head;
+      expect(headLease.weight).toBe(8);
+
+      for (const lease of grantedSmalls) lease.release();
+      const rest = await Promise.all(smalls.slice(8));
+      expect(rest.map((lease) => lease.weight)).toEqual([1, 1]);
+
+      headLease.release();
+      for (const lease of rest) lease.release();
+    });
+
+    it('队首等待超过公平阈值后进入保留状态，不再被绕过', async () => {
+      jest.useFakeTimers();
+      try {
+        service.configure({ maxConcurrentUpstreams: 16, upstreamQueuePolicy: 'bounded_fit' });
+        const fillers = await fillBudget(16);
+        const head = service.acquireUpstreamSlot({ weight: 8, waitTimeoutMs: 600_000 });
+        const small = service.acquireUpstreamSlot({ weight: 1, waitTimeoutMs: 600_000 });
+        expect(service.waitingUpstreamCount).toBe(2);
+
+        jest.advanceTimersByTime(10_000);
+        expect(service.upstreamHeadReserved).toBe(true);
+
+        fillers[0].release();
+        expect(service.waitingUpstreamCount).toBe(2);
+        expect(service.upstreamBypassCount).toBe(0);
+
+        // 释放足够权重后队首与后续小文件都能被放行
+        for (let i = 1; i < 16; i++) fillers[i].release();
+        expect((await head).weight).toBe(8);
+        expect((await small).weight).toBe(1);
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('队列前移与预算热更新：取消队首后提高预算立即唤醒等待项', async () => {
+      service.configure({ maxConcurrentUpstreams: 8, upstreamQueuePolicy: 'bounded_fit' });
+      const holder = await service.acquireUpstreamSlot({ weight: 8 });
+      const headCtl = new AbortController();
+      const head = service.acquireUpstreamSlot({ weight: 8, waitTimeoutMs: 60_000, signal: headCtl.signal });
+      const queued = service.acquireUpstreamSlot({ weight: 8, waitTimeoutMs: 60_000 });
+      expect(service.waitingUpstreamCount).toBe(2);
+
+      const headRejected = head.catch(() => undefined);
+      headCtl.abort();
+      expect(service.waitingUpstreamCount).toBe(1);
+      await headRejected;
+
+      // 提高预算：已授予租约不被撤销，等待项立即被唤醒
+      service.configure({ maxConcurrentUpstreams: 16 });
+      const lease = await queued;
+      expect(lease.weight).toBe(8);
+      expect(service.activeUpstreamWeightTotal).toBe(16);
+
+      holder.release();
+      expect(service.activeUpstreamWeightTotal).toBe(8);
+      lease.release();
+    });
+
+    it('运行快照暴露队列策略、队首等待年龄与绕过计数', async () => {
+      service.configure({ maxConcurrentUpstreams: 8, upstreamQueuePolicy: 'bounded_fit' });
+      const holder = await service.acquireUpstreamSlot({ weight: 8 });
+      const queued = service.acquireUpstreamSlot({ weight: 8, waitTimeoutMs: 30_000 });
+
+      const snapshot = service.getSnapshot();
+      expect(snapshot.upstreamQueuePolicy).toBe('bounded_fit');
+      expect(snapshot.waitingUpstreamTasks).toBe(1);
+      expect(snapshot.oldestUpstreamWaitMs).toBeGreaterThanOrEqual(0);
+      expect(snapshot.upstreamHeadReserved).toBe(false);
+      expect(snapshot.upstreamHeadBypassCount).toBe(0);
+      expect(snapshot.activeUpstreamWeight).toBe(8);
+      expect(snapshot.maxConcurrentUpstreams).toBe(8);
+
+      holder.release();
+      const lease = await queued;
+      expect(service.oldestUpstreamWaitMs).toBe(0);
+      lease.release();
+    });
+  });
+
+  describe('下载调度配置规范化（管理端校验、展示与运行时同一套规则）', () => {
+    it('缺失、空串与非数值一律回退仓库默认值（不再被 Number(\'\') 误判为 0）', () => {
+      expect(normalizeDownloadConfigNumber(DOWNLOAD_CONFIG_KEYS.MAX_CONCURRENT_UPSTREAMS, null)).toBe(8);
+      expect(normalizeDownloadConfigNumber(DOWNLOAD_CONFIG_KEYS.MAX_CONCURRENT_UPSTREAMS, undefined)).toBe(8);
+      expect(normalizeDownloadConfigNumber(DOWNLOAD_CONFIG_KEYS.MAX_CONCURRENT_UPSTREAMS, '')).toBe(8);
+      expect(normalizeDownloadConfigNumber(DOWNLOAD_CONFIG_KEYS.MAX_CONCURRENT_UPSTREAMS, '   ')).toBe(8);
+      expect(normalizeDownloadConfigNumber(DOWNLOAD_CONFIG_KEYS.MAX_CONCURRENT_UPSTREAMS, 'not-a-number')).toBe(8);
+      expect(normalizeDownloadConfigNumber(DOWNLOAD_CONFIG_KEYS.DIRECT_WINDOW_MB, '')).toBe(1);
+      expect(normalizeDownloadConfigNumber(DOWNLOAD_CONFIG_KEYS.TASK_RETENTION_SECONDS, '')).toBe(900);
+    });
+
+    it('越界值裁剪到统一区间（权重预算 1-64、直通窗口 1-4 MiB）', () => {
+      expect(normalizeDownloadConfigNumber(DOWNLOAD_CONFIG_KEYS.MAX_CONCURRENT_UPSTREAMS, '999')).toBe(64);
+      expect(normalizeDownloadConfigNumber(DOWNLOAD_CONFIG_KEYS.MAX_CONCURRENT_UPSTREAMS, '0')).toBe(1);
+      expect(normalizeDownloadConfigNumber(DOWNLOAD_CONFIG_KEYS.DIRECT_WINDOW_MB, '1024')).toBe(4);
+      expect(normalizeDownloadConfigNumber(DOWNLOAD_CONFIG_KEYS.DIRECT_WINDOW_MB, '0')).toBe(1);
+      expect(normalizeDownloadConfigNumber(DOWNLOAD_CONFIG_KEYS.QUEUE_TIMEOUT_SECONDS, '1')).toBe(5);
+      expect(normalizeDownloadConfigNumber(DOWNLOAD_CONFIG_KEYS.QUEUE_CAPACITY, '32')).toBe(32);
+    });
+
+    it('队列策略与布尔开关的缺失/非法值回退默认', () => {
+      expect(normalizeUpstreamQueuePolicy('bounded_fit')).toBe('bounded_fit');
+      expect(normalizeUpstreamQueuePolicy(' BOUNDED_FIT ')).toBe('bounded_fit');
+      expect(normalizeUpstreamQueuePolicy('unknown')).toBe('strict_fifo');
+      expect(normalizeUpstreamQueuePolicy(null)).toBe('strict_fifo');
+      expect(normalizeBooleanFlag('false', true)).toBe(false);
+      expect(normalizeBooleanFlag('', true)).toBe(true);
+      expect(normalizeBooleanFlag(undefined, false)).toBe(false);
+      expect(normalizeBooleanFlag('maybe', false)).toBe(false);
+    });
+
+    it('权重映射仍受预算裁剪（大文件权重不超过当前权重预算）', () => {
+      expect(upstreamWeightForSize(4 * 1024 * MB, 16)).toBe(8);
+      expect(upstreamWeightForSize(4 * 1024 * MB, 4)).toBe(4);
+      expect(upstreamWeightForSize(512 * MB, 16)).toBe(2);
+      expect(upstreamWeightForSize(64 * MB, 16)).toBe(1);
     });
   });
 });

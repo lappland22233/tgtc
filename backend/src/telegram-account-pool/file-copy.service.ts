@@ -15,6 +15,27 @@ import { UserRelayService } from './user-relay.service';
 const MAX_REPLICATION_TARGETS = 4;
 
 /**
+ * 目标 claim 有效期（毫秒）。
+ *
+ * 为什么需要：`planTargets()` 只是「选号」，`pool.select()` 不占用任何在飞额度，
+ * 因此并发请求会各自选出同一批目标并重复排队上传（互相看不到对方的计划）。
+ * claim 表在「选中目标 → 复制结束」之间占位，让跨请求的目标选择互斥；
+ * 复制结束后立即释放，失败仍可在下一轮重试。
+ */
+const REPLICATION_CLAIM_TTL_MS = 5 * 60 * 1000;
+/** claim 表清理阈值（超过该规模才做一次过期清理，避免每轮遍历） */
+const REPLICATION_CLAIM_PRUNE_THRESHOLD = 1024;
+/**
+ * 跨逻辑文件的复制并发上限。
+ *
+ * 每个逻辑文件内部保持串行；跨文件若不限制，多个文件的扩散会同时向 Telegram
+ * 发起上传，与下载回源争抢账号在飞额度与出网带宽（复制只能是下载的「副产品」）。
+ */
+const MAX_GLOBAL_REPLICATION_CONCURRENCY = 2;
+/** 副本覆盖率审计单次扫描的逻辑文件分组上限（管理端接口不得把全表拉进内存） */
+export const REPLICATION_COVERAGE_MAX_GROUPS = 5000;
+
+/**
  * 单次桥接最多关联的逻辑文件数。
  *
  * `file_unique_id` 在站内**不是唯一键**（同一内容被上传两次会形成两条 `files` 记录），
@@ -59,6 +80,13 @@ export class FileCopyService {
   private readonly logger = new Logger(FileCopyService.name);
   /** 进程内复制去重：key=`owner:account` → Promise */
   private readonly inflight = new Map<string, Promise<TelegramFileCopy | null>>();
+  /** 同一逻辑文件的批量扩散 single-flight：key=`ownerType:ownerId` → Promise（并发请求共享） */
+  private readonly ensureCopiesInflight = new Map<string, Promise<ReplicationResult>>();
+  /** 目标 claim：key=`ownerType:ownerId:accountId` → 到期时间戳（跨请求互斥同一目标） */
+  private readonly targetClaims = new Map<string, number>();
+  /** 跨逻辑文件复制并发闸门 */
+  private activeReplications = 0;
+  private readonly replicationWaiters: Array<() => void> = [];
 
   constructor(
     @InjectRepository(TelegramFileCopy)
@@ -231,28 +259,223 @@ export class FileCopyService {
 
   /**
    * 选出「应当持有副本」的目标账号：优先当前吞吐最优、且尚未持有副本的账号。
-   * @param desiredCount 期望的副本总数（例如 min(账号数, C / 每账号在飞上限)）
+   *
+   * 契约说明（修正历史注释）：`pool.select()` **不会**增加任何在飞额度，
+   * 原实现只是靠单次调用内的 `picked` 集合避免重复选中；跨请求的重复排队由
+   * 目标 claim 表（`targetClaims`）与 `ensureCopies` 的 single-flight 共同保证。
+   *
+   * 目标资格（全部满足，任一不满足即排除并可通过 `evaluateTargetEligibility` 解释）：
+   * enabled、已配置存储 Chat（无存储 Chat 的上传必失败）、未处于冷却、
+   * 在飞未达 `maxInflight`、不等于源账号、当前无同文件 claim、尚未持有 ready 副本。
+   *
+   * @param desiredCount 期望的副本总数（由 `ReplicaTargetResolver` 解析并收敛）
+   * @param sourceAccountId 源账号（绝不作为自己的扩散目标）
    */
   async planTargets(
     ownerType: TelegramCopyOwnerType,
     ownerId: string,
     desiredCount: number,
+    sourceAccountId?: string,
   ): Promise<string[]> {
     const held = new Set(await this.readyAccountIds(ownerType, ownerId));
-    // 只把「已配置存储 Chat」的账号作为扩散目标：没有存储 Chat 的账号上传必然失败，
-    // 让它进入候选只会产生必败上传并放大上游请求（表现为「扩散持续失败」）。
-    const poolIds = this.pool.storageAccountIds();
     const need = Math.max(0, desiredCount - held.size);
     if (need === 0) return [];
-    const candidates = poolIds.filter((id) => !held.has(id));
+
+    const now = Date.now();
+    const candidates = this.eligibleTargets(ownerType, ownerId, held, sourceAccountId, now);
     const picked: string[] = [];
-    // 逐个挑选：每次选择都会把已选账号计入在飞，天然避免重复选中同一账号
     for (let index = 0; index < Math.min(need, candidates.length); index += 1) {
       const selection = this.pool.select(candidates.filter((id) => !picked.includes(id)));
       if (!selection) break;
       picked.push(selection.accountId);
+      // 选中即占位：其它请求在同一窗口内不会再选到同一目标
+      this.claimTarget(ownerType, ownerId, selection.accountId, now);
     }
     return picked;
+  }
+
+  /**
+   * 可承载副本的候选账号（含排除原因）。
+   *
+   * 与「下载选号」共用同一份账号运行态快照：冷却/在飞上限必须在这里被尊重，
+   * 否则扩散会绕开账号池的容量控制，把某账号压垮而不自知。
+   */
+  evaluateTargetEligibility(
+    ownerType: TelegramCopyOwnerType,
+    ownerId: string,
+    heldAccountIds: string[],
+    sourceAccountId?: string,
+    nowMs: number = Date.now(),
+  ): Array<{ accountId: string; eligible: boolean; reasons: string[] }> {
+    const held = new Set(heldAccountIds);
+    const source = (sourceAccountId || '').trim();
+    return this.pool.snapshot().accounts.map((account) => {
+      const reasons: string[] = [];
+      if (!account.enabled) reasons.push('账号已禁用');
+      // 只按「该账号自己是否配置了存储 Chat」判定：
+      // `storageAccountIds()` 还要求 enabled，直接复用会把「已禁用」误报成「未配置存储 Chat」。
+      if (!account.storageConfigured) reasons.push('未配置存储 Chat');
+      if (account.coolingDown) reasons.push('账号冷却中');
+      if (account.inflight >= account.maxInflight) reasons.push('已达在飞上限');
+      if (source && account.id === source) reasons.push('与源账号相同');
+      if (held.has(account.id)) reasons.push('已持有 ready 副本');
+      if (this.isClaimed(ownerType, ownerId, account.id, nowMs)) reasons.push('已有扩散任务排队中');
+      return { accountId: account.id, eligible: reasons.length === 0, reasons };
+    });
+  }
+
+  /** 过滤出可承载副本的候选账号 id（顺序沿用账号池快照顺序） */
+  private eligibleTargets(
+    ownerType: TelegramCopyOwnerType,
+    ownerId: string,
+    held: Set<string>,
+    sourceAccountId: string | undefined,
+    nowMs: number,
+  ): string[] {
+    return this.evaluateTargetEligibility(ownerType, ownerId, Array.from(held), sourceAccountId, nowMs)
+      .filter((item) => item.eligible)
+      .map((item) => item.accountId);
+  }
+
+  private claimKey(ownerType: TelegramCopyOwnerType, ownerId: string, accountId: string): string {
+    return `${ownerType}:${ownerId}:${accountId}`;
+  }
+
+  private isClaimed(
+    ownerType: TelegramCopyOwnerType,
+    ownerId: string,
+    accountId: string,
+    nowMs: number,
+  ): boolean {
+    const key = this.claimKey(ownerType, ownerId, accountId);
+    const until = this.targetClaims.get(key);
+    if (until === undefined) return false;
+    if (until <= nowMs) {
+      this.targetClaims.delete(key);
+      return false;
+    }
+    return true;
+  }
+
+  private claimTarget(
+    ownerType: TelegramCopyOwnerType,
+    ownerId: string,
+    accountId: string,
+    nowMs: number,
+  ): void {
+    this.pruneClaims(nowMs);
+    this.targetClaims.set(this.claimKey(ownerType, ownerId, accountId), nowMs + REPLICATION_CLAIM_TTL_MS);
+  }
+
+  /** 复制结束（成功/失败/异常）后释放 claim，让失败目标能在下一轮重试 */
+  private releaseClaim(ownerType: TelegramCopyOwnerType, ownerId: string, accountId: string): void {
+    this.targetClaims.delete(this.claimKey(ownerType, ownerId, accountId));
+  }
+
+  /** 清理过期 claim（仅在表规模较大时遍历，避免每轮扫描） */
+  private pruneClaims(nowMs: number): void {
+    if (this.targetClaims.size < REPLICATION_CLAIM_PRUNE_THRESHOLD) return;
+    for (const [key, until] of this.targetClaims) {
+      if (until <= nowMs) this.targetClaims.delete(key);
+    }
+  }
+
+  /** 获取跨文件复制槽位（超出并发上限则排队等待） */
+  private async acquireReplicationSlot(): Promise<void> {
+    if (this.activeReplications < MAX_GLOBAL_REPLICATION_CONCURRENCY) {
+      this.activeReplications += 1;
+      return;
+    }
+    await new Promise<void>((resolve) => {
+      this.replicationWaiters.push(resolve);
+    });
+    this.activeReplications += 1;
+  }
+
+  /** 归还跨文件复制槽位并唤醒下一个等待者 */
+  private releaseReplicationSlot(): void {
+    this.activeReplications = Math.max(0, this.activeReplications - 1);
+    const next = this.replicationWaiters.shift();
+    next?.();
+  }
+
+  /**
+   * 副本覆盖率概览（管理端审计用）：
+   * - 按「逻辑文件 → 去重后的 ready 账号数」分组统计满足/未满足目标的数量；
+   * - 返回未满足目标文件的缺失样例（升序取前 N 条）。
+   *
+   * 有界性：分组行数按 `maxGroups` 截断（覆盖率达标的文件可能很多，
+   * 管理端接口不应把全表分组结果一次性拉进内存），截断时返回 `truncated=true`。
+   */
+  async replicationCoverage(params: {
+    ownerType: TelegramCopyOwnerType;
+    target: number;
+    maxGroups?: number;
+    sampleLimit?: number;
+  }): Promise<{
+    /** 本次扫描到的「有 ready 副本的逻辑文件」数 */
+    scannedFiles: number;
+    satisfied: number;
+    unsatisfied: number;
+    truncated: boolean;
+    missingSamples: Array<{ ownerId: string; readyAccountCount: number; missing: number }>;
+  }> {
+    const target = Math.max(1, Math.floor(params.target) || 1);
+    const maxGroups = Math.max(1, Math.floor(params.maxGroups ?? REPLICATION_COVERAGE_MAX_GROUPS));
+    const sampleLimit = Math.max(1, Math.floor(params.sampleLimit ?? 20));
+
+    // 多取一行用于判定「是否被上限截断」；ORDER BY ownerId 让截断结果稳定可复现
+    const rows = await this.repo
+      .createQueryBuilder('copy')
+      .select('copy.ownerId', 'ownerId')
+      .addSelect('COUNT(DISTINCT copy.accountId)', 'readyAccountCount')
+      .where('copy.ownerType = :ownerType', { ownerType: params.ownerType })
+      .andWhere('copy.status = :status', { status: 'ready' })
+      .groupBy('copy.ownerId')
+      .orderBy('copy.ownerId', 'ASC')
+      .limit(maxGroups + 1)
+      .getRawMany<{ ownerId: string; readyAccountCount: string }>();
+
+    const truncated = rows.length > maxGroups;
+    const counts = rows.slice(0, maxGroups).map((row) => ({
+      ownerId: row.ownerId,
+      readyAccountCount: Number(row.readyAccountCount) || 0,
+    }));
+    const unsatisfiedItems = counts
+      .filter((item) => item.readyAccountCount < target)
+      .sort((a, b) => a.readyAccountCount - b.readyAccountCount);
+
+    return {
+      scannedFiles: counts.length,
+      satisfied: counts.length - unsatisfiedItems.length,
+      unsatisfied: unsatisfiedItems.length,
+      truncated,
+      missingSamples: unsatisfiedItems.slice(0, sampleLimit).map((item) => ({
+        ownerId: item.ownerId,
+        readyAccountCount: item.readyAccountCount,
+        missing: target - item.readyAccountCount,
+      })),
+    };
+  }
+
+  /**
+   * 各账号持有的 ready 副本数（按 `ownerType` 可选过滤）。
+   *
+   * 供两处使用：
+   * - 管理端副本资格审计（覆盖率与账号分布）；
+   * - 容量策略的 `activeBotCount`（账号是否至少存在一个自己的 ready 副本）。
+   *
+   * 用 QueryBuilder 分组（无方言特有函数），并同时兼容 PG 与 SQLite。
+   */
+  async countReadyByAccount(ownerType?: TelegramCopyOwnerType): Promise<Map<string, number>> {
+    const qb = this.repo
+      .createQueryBuilder('copy')
+      .select('copy.accountId', 'accountId')
+      .addSelect('COUNT(*)', 'count')
+      .where('copy.status = :status', { status: 'ready' });
+    if (ownerType) qb.andWhere('copy.ownerType = :ownerType', { ownerType });
+    const rows = await qb.groupBy('copy.accountId').getRawMany<{ accountId: string; count: string }>();
+    return new Map(rows.map((row) => [row.accountId, Number(row.count) || 0]));
   }
 
   /**
@@ -273,12 +496,34 @@ export class FileCopyService {
     const running = this.inflight.get(key);
     if (running) return running;
 
-    const task = this.doEnsureCopy(params).finally(() => this.inflight.delete(key));
+    const task = this.doEnsureCopy(params).finally(() => {
+      this.inflight.delete(key);
+      // 无论成功与失败都释放 claim：失败必须能在下一轮（或稍后）重试同一目标
+      this.releaseClaim(params.ownerType, params.ownerId, params.targetAccountId);
+    });
     this.inflight.set(key, task);
     return task;
   }
 
+  /** 复制并发闸门包装：跨逻辑文件最多 `MAX_GLOBAL_REPLICATION_CONCURRENCY` 个复制同时进行 */
   private async doEnsureCopy(params: {
+    ownerType: TelegramCopyOwnerType;
+    ownerId: string;
+    targetAccountId: string;
+    fileName: string;
+    expectedSize: number;
+    sourceAccountId?: string;
+  }): Promise<TelegramFileCopy | null> {
+    await this.acquireReplicationSlot();
+    try {
+      return await this.performCopy(params);
+    } finally {
+      this.releaseReplicationSlot();
+    }
+  }
+
+  /** 实际复制：源账号取流 → 目标账号重新上传 → 登记 ready 副本（失败留痕并交账号池冷却） */
+  private async performCopy(params: {
     ownerType: TelegramCopyOwnerType;
     ownerId: string;
     targetAccountId: string;
@@ -298,12 +543,20 @@ export class FileCopyService {
     }
     // 1) 选源：优先调用方指定，否则从现有 ready 副本里按加权挑（读侧也做负载分散）
     const sources = await this.listReady(params.ownerType, params.ownerId);
-    const sourceCopy = params.sourceAccountId
+    // 目标已持有 ready 副本 → 无可扩散内容（幂等：不重复上传、不消耗上游额度）
+    const alreadyHeld = sources.find((item) => item.accountId === params.targetAccountId);
+    if (alreadyHeld) {
+      this.logger.debug(`副本扩散目标 ${params.targetAccountId} 已持有 ready 副本，跳过重复上传`);
+      return alreadyHeld;
+    }
+    // 源账号与目标账号不能相同：直接把 A 的副本「复制给 A」没有意义
+    const sourceCopy = params.sourceAccountId && params.sourceAccountId !== params.targetAccountId
       ? sources.find((item) => item.accountId === params.sourceAccountId) ?? null
       : null;
-    const fallbackSelection = this.pool.select(sources.map((item) => item.accountId));
+    const sourceCandidates = sources.filter((item) => item.accountId !== params.targetAccountId);
+    const fallbackSelection = this.pool.select(sourceCandidates.map((item) => item.accountId));
     const chosenSource = sourceCopy
-      ?? (fallbackSelection ? sources.find((item) => item.accountId === fallbackSelection.accountId) ?? null : null);
+      ?? (fallbackSelection ? sourceCandidates.find((item) => item.accountId === fallbackSelection.accountId) ?? null : null);
     if (!chosenSource) {
       this.pool.bumpCounter('replicationsFailed');
       this.logger.warn(
@@ -449,6 +702,29 @@ export class FileCopyService {
     desiredCount: number;
     sourceAccountId?: string;
   }): Promise<ReplicationResult> {
+    const key = `${params.ownerType}:${params.ownerId}`;
+    const running = this.ensureCopiesInflight.get(key);
+    if (running) return running;
+
+    const task = this.doEnsureCopies(params).finally(() => this.ensureCopiesInflight.delete(key));
+    this.ensureCopiesInflight.set(key, task);
+    return task;
+  }
+
+  /**
+   * 实际执行批量扩散（同一逻辑文件内**串行**，跨文件由复制并发闸门限制）。
+   *
+   * single-flight 语义：并发调用共享同一轮结果；若后到者需要更多目标，
+   * 会由下一轮懒扩散补齐（扩散是持续过程，不追求单次到齐）。
+   */
+  private async doEnsureCopies(params: {
+    ownerType: TelegramCopyOwnerType;
+    ownerId: string;
+    fileName: string;
+    expectedSize: number;
+    desiredCount: number;
+    sourceAccountId?: string;
+  }): Promise<ReplicationResult> {
     const result: ReplicationResult = { created: [], skipped: [], failed: [], relayed: false };
 
     const held = await this.readyAccountIds(params.ownerType, params.ownerId);
@@ -469,8 +745,14 @@ export class FileCopyService {
       + '回退逐账号副本扩散',
     );
 
-    const targets = (await this.planTargets(params.ownerType, params.ownerId, params.desiredCount))
-      .slice(0, MAX_REPLICATION_TARGETS);
+    // 目标数量在规划阶段就收敛到单次上限：避免为「不会被处理」的目标留下 claim
+    // （claim 要等 5min TTL 或进程重启才消失，会让这些账号在窗口内无法被其它请求选中）
+    const targets = await this.planTargets(
+      params.ownerType,
+      params.ownerId,
+      Math.min(params.desiredCount, MAX_REPLICATION_TARGETS),
+      params.sourceAccountId,
+    );
     for (const accountId of targets) {
       const copy = await this.ensureCopy({
         ownerType: params.ownerType,

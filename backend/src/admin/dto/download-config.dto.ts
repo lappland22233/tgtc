@@ -1,5 +1,6 @@
-import { IsInt, IsNumber, IsOptional, Max, Min } from 'class-validator';
+import { IsBoolean, IsIn, IsInt, IsNumber, IsOptional, Max, Min } from 'class-validator';
 import { Type } from 'class-transformer';
+import { UPSTREAM_QUEUE_POLICIES, type UpstreamQueuePolicy } from '../../file/download-resource-coordinator.service';
 
 /**
  * 下载资源调度配置（FILE_DOWNLOAD_*）。
@@ -14,7 +15,7 @@ export class DownloadConfigDto {
   @Max(10000)
   maxReservedGB?: number;
 
-  /** 上游冷回源并发上限 */
+  /** 上游冷回源的全局权重预算（1-64；按有效 Bot 数自动扩缩容） */
   @IsOptional()
   @Type(() => Number)
   @IsInt()
@@ -46,12 +47,12 @@ export class DownloadConfigDto {
   @Max(3600)
   spoolGraceSeconds?: number;
 
-  /** 有界滚动缓冲直通的窗口大小（MB）：值越小内存占用越低、吞吐越依赖上游速度 */
+  /** 有界滚动缓冲直通的窗口大小（MB，1-4）：值越小内存占用越低、吞吐越依赖上游速度 */
   @IsOptional()
   @Type(() => Number)
   @IsInt()
   @Min(1)
-  @Max(1024)
+  @Max(4)
   directWindowMB?: number;
 
   /** 直接下载端点（非任务化）允许的有限等待上限（秒），0 表示不等待 */
@@ -69,4 +70,18 @@ export class DownloadConfigDto {
   @Min(60)
   @Max(86400)
   taskRetentionSeconds?: number;
+
+  /**
+   * 上游等待项选择策略：
+   * - `strict_fifo`：严格 FIFO（紧急回退，保持既有行为）；
+   * - `bounded_fit`：前 N 个等待项内适配优先，避免大文件队首长期阻塞小文件。
+   */
+  @IsOptional()
+  @IsIn(UPSTREAM_QUEUE_POLICIES)
+  upstreamQueuePolicy?: UpstreamQueuePolicy;
+
+  /** 全局权重预算自动扩缩容开关（关闭后预算只由人工设置） */
+  @IsOptional()
+  @IsBoolean()
+  autoCapacityEnabled?: boolean;
 }

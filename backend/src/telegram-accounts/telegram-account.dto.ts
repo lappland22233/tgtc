@@ -10,6 +10,7 @@ import {
   MaxLength,
   Min,
 } from 'class-validator';
+import { REPLICA_TARGET_RANGE } from '../telegram-account-pool/replica-target.resolver';
 
 /** 账号调度参数上限（防止一次配置把单实例打进限流） */
 export const ACCOUNT_LIMITS = {
@@ -222,4 +223,13 @@ export class VerifyUserAuthDto {
 export class SetFeatureSwitchDto {
   @IsBoolean()
   enabled: boolean;
+}
+
+/** 期望副本数热更新（1-8；有效目标会按可承载账号数收敛） */
+export class ReplicationTargetDto {
+  @Type(() => Number)
+  @IsInt()
+  @Min(REPLICA_TARGET_RANGE.min)
+  @Max(REPLICA_TARGET_RANGE.max)
+  desiredReplicas: number;
 }

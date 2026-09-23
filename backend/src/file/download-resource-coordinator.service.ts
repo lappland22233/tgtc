@@ -25,7 +25,7 @@ import { randomUUID } from 'crypto';
 export const DOWNLOAD_CONFIG_KEYS = {
   /** 全部在途任务未写入预约总上限（GB，0 = 仅受物理空间约束） */
   MAX_RESERVED_GB: 'FILE_DOWNLOAD_MAX_RESERVED_GB',
-  /** 上游冷回源并发上限 */
+  /** 上游冷回源的**全局权重预算**（不是连接数，也不是账号池 maxInflight） */
   MAX_CONCURRENT_UPSTREAMS: 'FILE_DOWNLOAD_MAX_CONCURRENT_UPSTREAMS',
   /** 等待队列容量（磁盘与上游共用该上限） */
   QUEUE_CAPACITY: 'FILE_DOWNLOAD_QUEUE_CAPACITY',
@@ -39,6 +39,10 @@ export const DOWNLOAD_CONFIG_KEYS = {
   DIRECT_WAIT_SECONDS: 'FILE_DOWNLOAD_DIRECT_WAIT_SECONDS',
   /** 下载任务状态保留时间（秒） */
   TASK_RETENTION_SECONDS: 'FILE_DOWNLOAD_TASK_RETENTION_SECONDS',
+  /** 上游等待项选择策略（`strict_fifo` 紧急回退 / `bounded_fit` 适配优先） */
+  UPSTREAM_QUEUE_POLICY: 'FILE_DOWNLOAD_UPSTREAM_QUEUE_POLICY',
+  /** 全局权重预算自动扩缩容开关（kill switch） */
+  AUTO_CAPACITY_ENABLED: 'FILE_DOWNLOAD_AUTO_CAPACITY_ENABLED',
 } as const;
 
 export const DOWNLOAD_CONFIG_DEFAULTS: Record<string, string> = {
@@ -47,10 +51,78 @@ export const DOWNLOAD_CONFIG_DEFAULTS: Record<string, string> = {
   [DOWNLOAD_CONFIG_KEYS.QUEUE_CAPACITY]: '128',
   [DOWNLOAD_CONFIG_KEYS.QUEUE_TIMEOUT_SECONDS]: '1800',
   [DOWNLOAD_CONFIG_KEYS.SPOOL_GRACE_SECONDS]: '120',
-  [DOWNLOAD_CONFIG_KEYS.DIRECT_WINDOW_MB]: '16',
+  /** 默认 1 MiB：直通内存量由窗口大小决定，而非文件总大小 */
+  [DOWNLOAD_CONFIG_KEYS.DIRECT_WINDOW_MB]: '1',
   [DOWNLOAD_CONFIG_KEYS.DIRECT_WAIT_SECONDS]: '60',
   [DOWNLOAD_CONFIG_KEYS.TASK_RETENTION_SECONDS]: '900',
+  [DOWNLOAD_CONFIG_KEYS.UPSTREAM_QUEUE_POLICY]: 'strict_fifo',
+  [DOWNLOAD_CONFIG_KEYS.AUTO_CAPACITY_ENABLED]: 'true',
 };
+
+/**
+ * 下载调度配置的取值区间。
+ *
+ * 管理端 DTO 校验、管理端 GET 展示与运行时规范化**共用同一份区间**，
+ * 避免「管理端接受范围与运行时接受范围不一致」（历史缺陷：管理端限 1-64，
+ * 运行时无上限；直通窗口管理端限 1024MB，运行时无上限）。
+ */
+export const DOWNLOAD_CONFIG_RANGES: Record<string, { min: number; max: number }> = {
+  [DOWNLOAD_CONFIG_KEYS.MAX_RESERVED_GB]: { min: 0, max: 10_000 },
+  [DOWNLOAD_CONFIG_KEYS.MAX_CONCURRENT_UPSTREAMS]: { min: 1, max: 64 },
+  [DOWNLOAD_CONFIG_KEYS.QUEUE_CAPACITY]: { min: 1, max: 10_000 },
+  [DOWNLOAD_CONFIG_KEYS.QUEUE_TIMEOUT_SECONDS]: { min: 5, max: 86_400 },
+  [DOWNLOAD_CONFIG_KEYS.SPOOL_GRACE_SECONDS]: { min: 0, max: 3_600 },
+  /** 上限先设 4 MiB：单请求异常配置不得重新制造大块外部内存 */
+  [DOWNLOAD_CONFIG_KEYS.DIRECT_WINDOW_MB]: { min: 1, max: 4 },
+  [DOWNLOAD_CONFIG_KEYS.DIRECT_WAIT_SECONDS]: { min: 0, max: 600 },
+  [DOWNLOAD_CONFIG_KEYS.TASK_RETENTION_SECONDS]: { min: 60, max: 86_400 },
+};
+
+/** 上游等待项选择策略取值 */
+export const UPSTREAM_QUEUE_POLICIES = ['strict_fifo', 'bounded_fit'] as const;
+export type UpstreamQueuePolicy = (typeof UPSTREAM_QUEUE_POLICIES)[number];
+
+/**
+ * 统一规范化下载调度数值配置（管理 GET、管理校验与运行时加载共用）：
+ * 1. `null` / `undefined` / 空串视为「未配置」并回退仓库默认值
+ *    （历史缺陷：`Number('') === 0` 让「未配置」被展示成 0，而运行时按默认值 8 运行）；
+ * 2. 非数值同样回退默认值；
+ * 3. 越界值裁剪进 `DOWNLOAD_CONFIG_RANGES`。
+ */
+export function normalizeDownloadConfigNumber(
+  key: string,
+  raw: string | number | null | undefined,
+): number {
+  const fallback = Number(DOWNLOAD_CONFIG_DEFAULTS[key]);
+  const safeFallback = Number.isFinite(fallback) ? fallback : 0;
+  if (raw === null || raw === undefined) return safeFallback;
+  const text = typeof raw === 'string' ? raw.trim() : raw;
+  if (text === '') return safeFallback;
+  const parsed = typeof text === 'number' ? text : Number(text);
+  if (!Number.isFinite(parsed)) return safeFallback;
+  const range = DOWNLOAD_CONFIG_RANGES[key];
+  if (!range) return parsed;
+  return Math.min(range.max, Math.max(range.min, parsed));
+}
+
+/** 规范化上游队列策略（缺失或非法值回退仓库默认值，当前为 strict_fifo） */
+export function normalizeUpstreamQueuePolicy(raw: string | null | undefined): UpstreamQueuePolicy {
+  const fallback = DOWNLOAD_CONFIG_DEFAULTS[DOWNLOAD_CONFIG_KEYS.UPSTREAM_QUEUE_POLICY] as UpstreamQueuePolicy;
+  const value = typeof raw === 'string' ? raw.trim().toLowerCase() : '';
+  return (UPSTREAM_QUEUE_POLICIES as readonly string[]).includes(value)
+    ? (value as UpstreamQueuePolicy)
+    : fallback;
+}
+
+/** 规范化布尔开关配置（缺失或非法值回退指定默认值） */
+export function normalizeBooleanFlag(raw: string | null | undefined, fallback: boolean): boolean {
+  if (raw === null || raw === undefined) return fallback;
+  const value = String(raw).trim().toLowerCase();
+  if (value === '') return fallback;
+  if (value === 'true' || value === '1' || value === 'yes' || value === 'on') return true;
+  if (value === 'false' || value === '0' || value === 'no' || value === 'off') return false;
+  return fallback;
+}
 
 /** 结构化业务错误码（供 HTTP 层与前端映射文案） */
 export const DOWNLOAD_ERROR_CODES = {
@@ -145,6 +217,8 @@ export interface DownloadResourceConfig {
   directWaitMs: number;
   /** 下载任务状态保留时间（毫秒） */
   taskRetentionMs: number;
+  /** 上游等待项选择策略（默认 strict_fifo，保持既有行为） */
+  upstreamQueuePolicy: UpstreamQueuePolicy;
 }
 
 export const DOWNLOAD_RESOURCE_DEFAULTS = {
@@ -158,6 +232,24 @@ export const DOWNLOAD_RESOURCE_DEFAULTS = {
   EVICTION_THROTTLE_MS: 1_000,
   /** 任务票据交接后的预约保留上限（毫秒）：超时未被子请求采用则归还，避免预约泄漏 */
   HANDOFF_TTL_MS: 120_000,
+} as const;
+
+/** 上游等待项被授予的原因（诊断：解释「为什么它是被放行的那个」） */
+export type UpstreamGrantReason = 'head' | 'head_after_wait' | 'fit_skip';
+
+/**
+ * `bounded_fit` 公平策略参数（首版为代码常量，避免第一版引入过多运维配置）。
+ *
+ * 目标不是让小文件无条件插队，而是在队首大文件无法适配当前剩余预算时，
+ * 利用已经空闲的权重；同时保证大文件不会被连续小任务饿死。
+ */
+export const UPSTREAM_FIT_POLICY_DEFAULTS = {
+  /** 队列仍按入队顺序保存，绕过时只扫描队首之后的前 N 个等待项（不做全队列扫描） */
+  SCAN_WINDOW: 8,
+  /** 单个队首任务最多被绕过的次数 */
+  MAX_HEAD_BYPASS: 8,
+  /** 队首公平等待阈值（毫秒）：超过后进入「队首保留」状态 */
+  HEAD_FAIR_WAIT_MS: 10_000,
 } as const;
 
 /** 大文件阈值（字节）：超过即按大文件权重占用并发预算 */
@@ -180,8 +272,10 @@ const SMALL_FILE_WEIGHT = 1;
  * - `<256MiB`：权重 1 → 最多 budget 个。
  *
  * 权重超过预算时被裁剪到预算（否则会产生永远无法满足的等待项）。
- * 上游队列仍为严格 FIFO，大任务不会被持续到达的小任务插队饿死
- * （代价是队头阻塞时小任务也要等）。
+ * 等待项选择策略由 `FILE_DOWNLOAD_UPSTREAM_QUEUE_POLICY` 决定：
+ * - `strict_fifo`：严格 FIFO，大任务不会被持续到达的小任务插队饿死（队头阻塞时小任务也要等）；
+ * - `bounded_fit`：队首暂时放不下时，只在前 N 个等待项内适配放行，并按绕过次数与公平等待
+ *   阈值进入「队首保留」，兼顾小文件时延与大文件公平性（见 `UPSTREAM_FIT_POLICY_DEFAULTS`）。
  */
 export function upstreamWeightForSize(bytes: number, budget: number): number {
   const total = Math.max(1, Math.floor(budget) || 1);
@@ -257,6 +351,16 @@ export interface DownloadResourceSnapshot {
   maxConcurrentUpstreams: number;
   queueCapacity: number;
   oldestDiskWaitMs: number;
+  /** 队首上游等待项的等待年龄（毫秒）：503 归因与「队首保留」判定依据 */
+  oldestUpstreamWaitMs: number;
+  /** 当前上游等待项选择策略 */
+  upstreamQueuePolicy: UpstreamQueuePolicy;
+  /** 队首处于「保留」状态（达绕过上限或公平等待阈值）：此时不再放行后续小任务 */
+  upstreamHeadReserved: boolean;
+  /** 队首任务累计被绕过的次数 */
+  upstreamHeadBypassCount: number;
+  /** 累计绕过队首次数（进程内自启动累计，用于观测公平策略是否被频繁触发） */
+  upstreamBypassTotal: number;
   shuttingDown: boolean;
 }
 
@@ -288,8 +392,14 @@ interface DiskWaiter {
 interface UpstreamWaiter {
   id: string;
   enqueuedAt: number;
-  /** 该等待项需要的并发权重 */
+  /** 入队时按当时预算计算的请求权重 */
   weight: number;
+  /** 按**当前**预算裁剪后的生效权重（每次 pump 刷新，用于解释 503 与观测） */
+  effectiveWeight: number;
+  /** 作为队首时被后续任务绕过的累计次数（`bounded_fit` 专用） */
+  bypassCount: number;
+  /** 最终授予原因（诊断用） */
+  grantReason?: UpstreamGrantReason;
   resolve: (lease: DownloadUpstreamLease) => void;
   reject: (error: Error) => void;
   timer?: NodeJS.Timeout;
@@ -331,6 +441,8 @@ export class DownloadResourceCoordinatorService {
   private activeUpstreams = 0;
   /** 活跃上游并发权重之和（准入按权重判断，大文件独占预算） */
   private activeUpstreamWeight = 0;
+  /** `bounded_fit` 累计绕过队首次数（观测公平策略触发频率） */
+  private upstreamBypassTotal = 0;
   /** 活跃上游租约 */
   private readonly upstreamLeases = new Map<string, DownloadUpstreamLease>();
   /**
@@ -349,9 +461,10 @@ export class DownloadResourceCoordinatorService {
     queueTimeoutMs: 1_800_000,
     maxConcurrentUpstreams: 8,
     spoolGraceMs: 120_000,
-    directWindowBytes: 16 * 1024 * 1024,
+    directWindowBytes: 1 * 1024 * 1024,
     directWaitMs: 60_000,
     taskRetentionMs: 900_000,
+    upstreamQueuePolicy: 'strict_fifo',
   };
 
   // ---------- 依赖注入（由 FileCacheService 在启动/热更新时配置） ----------
@@ -422,6 +535,28 @@ export class DownloadResourceCoordinatorService {
     return this.activeUpstreamWeight;
   }
 
+  /** 上游队首等待年龄（毫秒）：0 表示队列为空 */
+  get oldestUpstreamWaitMs(): number {
+    return this.waitingUpstream.length > 0 ? Date.now() - this.waitingUpstream[0].enqueuedAt : 0;
+  }
+
+  /** 队首是否处于「保留」状态（`bounded_fit` 下不再放行后续小任务） */
+  get upstreamHeadReserved(): boolean {
+    if (this.waitingUpstream.length === 0) return false;
+    if (this.config.upstreamQueuePolicy !== 'bounded_fit') return false;
+    return this.isHeadReserved(this.waitingUpstream[0]);
+  }
+
+  /** 队首累计被绕过次数 */
+  get upstreamHeadBypassCount(): number {
+    return this.waitingUpstream.length > 0 ? this.waitingUpstream[0].bypassCount : 0;
+  }
+
+  /** 累计绕过队首次数（进程内累计） */
+  get upstreamBypassCount(): number {
+    return this.upstreamBypassTotal;
+  }
+
   /** 兼容既有测试：直接设置活跃上游数（仅测试/诊断使用；按单位权重记账） */
   setActiveUpstreamCount(value: number): void {
     const normalized = Math.max(0, Math.floor(value) || 0);
@@ -449,6 +584,11 @@ export class DownloadResourceCoordinatorService {
       maxConcurrentUpstreams: this.config.maxConcurrentUpstreams,
       queueCapacity: this.config.queueCapacity,
       oldestDiskWaitMs: this.waitingDisk.length > 0 ? Date.now() - this.waitingDisk[0].enqueuedAt : 0,
+      oldestUpstreamWaitMs: this.oldestUpstreamWaitMs,
+      upstreamQueuePolicy: this.config.upstreamQueuePolicy,
+      upstreamHeadReserved: this.upstreamHeadReserved,
+      upstreamHeadBypassCount: this.upstreamHeadBypassCount,
+      upstreamBypassTotal: this.upstreamBypassTotal,
       shuttingDown: this.shuttingDown,
     };
   }
@@ -621,6 +761,8 @@ export class DownloadResourceCoordinatorService {
         if (!this.removeDiskWaiter(waiter)) return;
         waiter.settled = true;
         waiter.reject(this.queueTimeoutError(waiter));
+        // 队首被移除后其后继可能已可准入：显式唤醒（与上游队列同一处理）
+        this.pumpDisk();
       }, input.waitTimeoutMs);
       timer.unref?.();
       waiter.timer = timer;
@@ -629,6 +771,7 @@ export class DownloadResourceCoordinatorService {
           if (!this.removeDiskWaiter(waiter)) return;
           waiter.settled = true;
           waiter.reject(this.cancelledError('下载任务已取消'));
+          this.pumpDisk();
         };
         input.signal.addEventListener('abort', waiter.abortHandler, { once: true });
       }
@@ -747,7 +890,11 @@ export class DownloadResourceCoordinatorService {
 
     const verdict = this.evaluateGrant({ bytes, countsTowardCache, freeBytes });
     const weight = upstreamWeightForSize(bytes, this.config.maxConcurrentUpstreams);
-    if (verdict.ok && waitingUpstream === 0 && this.canGrantUpstream(weight)) {
+    // 注意：这是**保守近似**。真实准入（`acquireUpstreamSlot`）在预算足够时总是即时放行，
+    // 不检查队列是否非空（历史行为，本次未改变）；因此队列非空但仍有空闲权重时，
+    // 探测可能报告「排队」而实际请求会被立即放行——仅用于状态展示，不作为准入结论。
+    const upstreamReady = waitingUpstream === 0 && this.canGrantUpstream(weight);
+    if (verdict.ok && upstreamReady) {
       return { admitted: true, structural: false, freeBytes, ...base };
     }
     // 磁盘/缓存已可就绪但上游名额吃紧：排队原因记为上游
@@ -862,6 +1009,8 @@ export class DownloadResourceCoordinatorService {
         id: randomUUID(),
         enqueuedAt: Date.now(),
         weight,
+        effectiveWeight: this.effectiveWaiterWeight(weight),
+        bypassCount: 0,
         resolve,
         reject,
         settled: false,
@@ -872,6 +1021,9 @@ export class DownloadResourceCoordinatorService {
         if (!this.removeUpstreamWaiter(waiter)) return;
         waiter.settled = true;
         waiter.reject(this.serverBusyError('下载连接等待超时，请稍后重试'));
+        // 移除队首后其后继可能已可放入预算：上游队列没有兜底轮询，
+        // 必须显式唤醒，否则后续等待项会被饿到自身超时。
+        this.pumpUpstream();
       }, waitTimeoutMs);
       timer.unref?.();
       waiter.timer = timer;
@@ -880,6 +1032,7 @@ export class DownloadResourceCoordinatorService {
           if (!this.removeUpstreamWaiter(waiter)) return;
           waiter.settled = true;
           waiter.reject(this.cancelledError('下载任务已取消'));
+          this.pumpUpstream();
         };
         options.signal.addEventListener('abort', waiter.abortHandler, { once: true });
       }
@@ -892,9 +1045,19 @@ export class DownloadResourceCoordinatorService {
     });
   }
 
+  /** 当前全局上游权重预算（下限 1，避免异常配置造成永久阻塞） */
+  private currentUpstreamBudget(): number {
+    return Math.max(1, Math.floor(this.config.maxConcurrentUpstreams) || 1);
+  }
+
+  /** 按当前预算裁剪单个权重（入队时与每次 pump 都刷新，避免降预算后产生无法满足的等待项） */
+  private effectiveWaiterWeight(weight: number): number {
+    return Math.min(Math.max(1, Math.floor(weight) || 1), this.currentUpstreamBudget());
+  }
+
   /** 解析本次请求的上游并发权重（显式值优先，其次按文件体量；结果不超过预算） */
   private resolveUpstreamWeight(options?: AcquireUpstreamOptions): number {
-    const budget = Math.max(1, Math.floor(this.config.maxConcurrentUpstreams) || 1);
+    const budget = this.currentUpstreamBudget();
     const requested = options?.weight !== undefined && Number.isFinite(options.weight)
       ? Math.floor(options.weight)
       : upstreamWeightForSize(options?.bytes ?? 0, budget);
@@ -906,8 +1069,7 @@ export class DownloadResourceCoordinatorService {
    * 预算即 `maxConcurrentUpstreams`：大文件权重等于预算 → 同时只放行 1 个。
    */
   private canGrantUpstream(weight: number): boolean {
-    const budget = Math.max(1, Math.floor(this.config.maxConcurrentUpstreams) || 1);
-    return this.activeUpstreamWeight + weight <= budget;
+    return this.activeUpstreamWeight + weight <= this.currentUpstreamBudget();
   }
 
   private grantUpstreamLease(weight = 1): DownloadUpstreamLease {
@@ -970,19 +1132,75 @@ export class DownloadResourceCoordinatorService {
     this.stopPollTimer();
   }
 
-  /** 上游队列泵（严格 FIFO：队头权重不足时不跳过，避免大任务被持续插队饿死） */
+  /**
+   * 上游队列泵。
+   *
+   * - `strict_fifo`（默认/紧急回退）：队首权重不足时直接返回，保持既有行为；
+   * - `bounded_fit`：队首放不下时，只在队首之后的前 N 个等待项中寻找最早的、能适配
+   *   剩余预算的任务放行，避免 4GB 队首把后续小文件阻塞到 60 秒超时；
+   *   每次绕过累加队首 `bypassCount`，达到绕过上限或公平等待阈值后进入「队首保留」，
+   *   不再发放任何非队首任务，直到队首被放行/取消/超时或切回 `strict_fifo`。
+   *
+   * 权重按**当前**预算重新裁剪：运行中调低预算后，入队时按旧预算计算的权重
+   * 可能永远无法满足，会让队头及其后续等待项全部阻塞到超时。
+   */
   private pumpUpstream(): void {
-    const budget = Math.max(1, Math.floor(this.config.maxConcurrentUpstreams) || 1);
     while (this.waitingUpstream.length > 0) {
       const head = this.waitingUpstream[0];
-      // 权重按**当前**预算重新裁剪：运行中调低预算后，入队时按旧预算计算的权重
-      // 可能永远无法满足，会让队头及其后续等待项全部阻塞到超时。
-      const effective = Math.min(head.weight, budget);
-      if (!this.canGrantUpstream(effective)) return;
-      if (!this.removeUpstreamWaiter(head)) continue;
-      head.settled = true;
-      head.resolve(this.grantUpstreamLease(effective));
+      const headWeight = this.effectiveWaiterWeight(head.weight);
+      head.effectiveWeight = headWeight;
+
+      if (this.canGrantUpstream(headWeight)) {
+        if (!this.removeUpstreamWaiter(head)) continue;
+        head.settled = true;
+        head.grantReason = head.bypassCount > 0 ? 'head_after_wait' : 'head';
+        head.resolve(this.grantUpstreamLease(headWeight));
+        continue;
+      }
+
+      // 严格 FIFO 或队首处于保留状态：不绕过，等待资源释放
+      if (this.config.upstreamQueuePolicy !== 'bounded_fit') return;
+      if (this.isHeadReserved(head)) return;
+
+      const candidateIndex = this.findFitCandidateIndex();
+      if (candidateIndex < 0) return;
+      const candidate = this.waitingUpstream[candidateIndex];
+      const weight = this.effectiveWaiterWeight(candidate.weight);
+      if (!this.removeUpstreamWaiter(candidate)) continue;
+
+      // 绕过队首一次：累计用于队首保留判定与观测
+      head.bypassCount += 1;
+      this.upstreamBypassTotal += 1;
+      candidate.settled = true;
+      candidate.grantReason = 'fit_skip';
+      this.logger.debug(
+        `上游队列适配优先放行: session=${candidate.id} 权重=${weight} 队首旁路次数=${head.bypassCount}`,
+      );
+      candidate.resolve(this.grantUpstreamLease(weight));
     }
+  }
+
+  /**
+   * 在队首之后的前 `SCAN_WINDOW` 个等待项中寻找最早的、能放入剩余预算的任务。
+   * 返回其在 `waitingUpstream` 中的索引；找不到返回 -1。不做全队列扫描。
+   */
+  private findFitCandidateIndex(): number {
+    const limit = Math.min(
+      this.waitingUpstream.length,
+      UPSTREAM_FIT_POLICY_DEFAULTS.SCAN_WINDOW + 1,
+    );
+    for (let i = 1; i < limit; i++) {
+      const waiter = this.waitingUpstream[i];
+      if (waiter.settled) continue;
+      if (this.canGrantUpstream(this.effectiveWaiterWeight(waiter.weight))) return i;
+    }
+    return -1;
+  }
+
+  /** 队首是否进入「保留」状态（达绕过上限或公平等待阈值） */
+  private isHeadReserved(head: UpstreamWaiter): boolean {
+    if (head.bypassCount >= UPSTREAM_FIT_POLICY_DEFAULTS.MAX_HEAD_BYPASS) return true;
+    return Date.now() - head.enqueuedAt >= UPSTREAM_FIT_POLICY_DEFAULTS.HEAD_FAIR_WAIT_MS;
   }
 
   private removeDiskWaiter(waiter: DiskWaiter): boolean {

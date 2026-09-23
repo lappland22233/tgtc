@@ -1,4 +1,4 @@
-import { Logger, Module, OnApplicationShutdown, OnModuleInit } from '@nestjs/common';
+import { Inject, Logger, Module, OnApplicationShutdown, OnModuleInit, Optional } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AlertModule } from '../alert/alert.module';
 import { File } from '../common/entities/file.entity';
@@ -9,10 +9,12 @@ import { TelegramAccountCredentialModule } from '../telegram-accounts/telegram-a
 import { TelegramUserModule } from '../telegram-user/telegram-user.module';
 import { AccountAwareDownloadService } from './account-aware-download.service';
 import { AccountAwareUploadService } from './account-aware-upload.service';
+import { DownloadCapacityPolicyService } from './download-capacity-policy.service';
 import { FileCopyService } from './file-copy.service';
 import { TelegramAccountClientService } from './telegram-account-client.service';
 import { TelegramAccountPoolAlertService } from './telegram-account-pool-alert.service';
 import { TelegramAccountPoolService } from './telegram-account-pool.service';
+import { ReplicaTargetResolver } from './replica-target.resolver';
 import { UserAccountDirectoryService } from './user-account-directory.service';
 import { UserRelayService } from './user-relay.service';
 
@@ -60,6 +62,10 @@ const STALE_COPY_TTL_DAYS = 30;
     AccountAwareDownloadService,
     AccountAwareUploadService,
     TelegramAccountPoolAlertService,
+    // 统一的副本目标解析：全部下载入口（Web / Bot 公开下载 / 镜像回源）共用
+    ReplicaTargetResolver,
+    // 全局权重预算按有效 Bot 数自动扩缩容（带闸门与审计）
+    DownloadCapacityPolicyService,
   ],
   exports: [
     TelegramAccountPoolService,
@@ -70,6 +76,8 @@ const STALE_COPY_TTL_DAYS = 30;
     AccountAwareDownloadService,
     AccountAwareUploadService,
     TelegramAccountPoolAlertService,
+    ReplicaTargetResolver,
+    DownloadCapacityPolicyService,
   ],
 })
 export class TelegramAccountPoolModule implements OnModuleInit, OnApplicationShutdown {
@@ -84,6 +92,11 @@ export class TelegramAccountPoolModule implements OnModuleInit, OnApplicationShu
     private readonly client: TelegramAccountClientService,
     private readonly copies: FileCopyService,
     private readonly alerts: TelegramAccountPoolAlertService,
+    // 可选（单测直接构造模块时缺省）：全局权重预算自动扩缩容评估。
+    // 必须显式 `@Inject(X)`：`X | null` 联合类型发出的是 `Object`，
+    // 否则 `@Optional()` 会把解析失败静默降级成 `null`（扩缩容定时器永不装配）。
+    @Optional() @Inject(DownloadCapacityPolicyService)
+    private readonly capacity: DownloadCapacityPolicyService | null = null,
   ) {
     this.pool.registerProbe(async (accountId: string) => {
       const config = this.pool.getConfig(accountId);
@@ -141,6 +154,10 @@ export class TelegramAccountPoolModule implements OnModuleInit, OnApplicationShu
       this.cleanupTimer = setInterval(() => void this.runCleanup(), CLEANUP_INTERVAL_MS);
       this.cleanupTimer.unref?.();
     }
+
+    // 全局权重预算自动扩缩容：与告警/清理同属「热开启必须补装」的模块级定时器，
+    // 否则「env 默认关闭 + 后台热开启」路径上预算永远不会随有效 Bot 数扩容。
+    this.capacity?.ensureTimer();
   }
 
   /**

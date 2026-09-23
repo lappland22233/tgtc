@@ -288,9 +288,27 @@
           <t-input-number v-model="downloadConfig.maxReservedGB" :min="0" :max="10000" :step="1" />
           <span style="margin-left: 8px; font-size: 12px; color: var(--td-text-color-secondary);">所有在途任务未写入预约之和的上限，0 表示只受物理空间约束</span>
         </t-form-item>
-        <t-form-item label="上游并发数">
+        <t-form-item label="上游权重预算">
           <t-input-number v-model="downloadConfig.maxConcurrentUpstreams" :min="1" :max="64" :step="1" />
-          <span style="margin-left: 8px; font-size: 12px; color: var(--td-text-color-secondary);">同时进行的 Telegram 冷文件回源数量，占用越多带宽与磁盘压力越大</span>
+          <span style="margin-left: 8px; font-size: 12px; color: var(--td-text-color-secondary);">
+            冷回源的全局「权重预算」：大文件占 8、中等文件占 2、小文件占 1；自动扩缩容开启时会按有效 Bot 数调整（1 个 → 8，2 个 → 16，4 个 → 32，上限 64）
+          </span>
+        </t-form-item>
+        <t-form-item label="队列等待策略">
+          <t-select
+            v-model="downloadConfig.upstreamQueuePolicy"
+            :options="queuePolicyOptions"
+            style="width: 220px;"
+          />
+          <span style="margin-left: 8px; font-size: 12px; color: var(--td-text-color-secondary);">
+            适配优先：队首大文件暂时放不下时，仅在前 8 个等待项内放过可适配的任务，避免小文件被 4GB 队首阻塞到超时
+          </span>
+        </t-form-item>
+        <t-form-item label="预算自动扩缩容">
+          <t-switch v-model="downloadConfig.autoCapacityEnabled" />
+          <span style="margin-left: 8px; font-size: 12px; color: var(--td-text-color-secondary);">
+            按「有效 Bot 数」（已启用 + 存储 Chat + 健康 + 已有 ready 副本）自动调整权重预算；关闭后只保留人工设置
+          </span>
         </t-form-item>
         <t-form-item label="排队上限 (个)">
           <t-input-number v-model="downloadConfig.queueCapacity" :min="1" :max="10000" :step="1" />
@@ -305,8 +323,10 @@
           <span style="margin-left: 8px; font-size: 12px; color: var(--td-text-color-secondary);">最后一个下载者断开后临时文件的保留时间，便于断点续传复用</span>
         </t-form-item>
         <t-form-item label="直通缓冲窗口 (MB)">
-          <t-input-number v-model="downloadConfig.directWindowMB" :min="1" :max="1024" :step="1" />
-          <span style="margin-left: 8px; font-size: 12px; color: var(--td-text-color-secondary);">完整暂存不可行时的直通缓冲上限，值越小内存占用越低</span>
+          <t-input-number v-model="downloadConfig.directWindowMB" :min="1" :max="4" :step="1" />
+          <span style="margin-left: 8px; font-size: 12px; color: var(--td-text-color-secondary);">
+            完整暂存不可行时的直通缓冲上限（1-4MB，推荐 1MB）：窗口即单请求的预读内存上限，与文件总大小无关
+          </span>
         </t-form-item>
         <t-form-item label="下载任务保留 (秒)">
           <t-input-number v-model="downloadConfig.taskRetentionSeconds" :min="60" :max="86400" :step="60" />
@@ -338,7 +358,14 @@
         </div>
         <div class="download-runtime__item">
           <span class="download-runtime__label">活跃回源</span>
-          <span class="download-runtime__value">{{ downloadRuntime.activeUpstreams }} / {{ downloadRuntime.maxConcurrentUpstreams }}</span>
+          <span class="download-runtime__value">
+            {{ downloadRuntime.activeUpstreams }} 个 / 权重 {{ downloadRuntime.activeUpstreamWeight ?? 0 }} ÷
+            {{ downloadRuntime.maxConcurrentUpstreams }}
+          </span>
+        </div>
+        <div class="download-runtime__item">
+          <span class="download-runtime__label">队列策略</span>
+          <span class="download-runtime__value">{{ queuePolicyText(downloadRuntime.upstreamQueuePolicy) }}</span>
         </div>
         <div class="download-runtime__item">
           <span class="download-runtime__label">缓存占用</span>
@@ -348,7 +375,44 @@
         </div>
         <div class="download-runtime__item">
           <span class="download-runtime__label">最长等待</span>
-          <span class="download-runtime__value">{{ Math.round(downloadRuntime.oldestDiskWaitMs / 1000) }} 秒</span>
+          <span class="download-runtime__value">
+            磁盘 {{ Math.round(downloadRuntime.oldestDiskWaitMs / 1000) }} 秒
+            / 上游 {{ Math.round((downloadRuntime.oldestUpstreamWaitMs ?? 0) / 1000) }} 秒
+          </span>
+        </div>
+        <div class="download-runtime__item">
+          <span class="download-runtime__label">直通与跟随流</span>
+          <span class="download-runtime__value">
+            直通 {{ downloadRuntime.streams?.directStreams ?? 0 }} 个（窗口合计
+            {{ formatBytes(downloadRuntime.streams?.directWindowBytesTotal) }}） ·
+            构建 {{ downloadRuntime.streams?.buildSessions ?? 0 }} · spool
+            {{ downloadRuntime.streams?.spoolConsumers ?? 0 }} 消费者
+          </span>
+        </div>
+        <div class="download-runtime__item">
+          <span class="download-runtime__label">进程内存</span>
+          <span class="download-runtime__value">
+            RSS {{ formatBytes(downloadRuntime.memory?.rssBytes) }} · JS 堆
+            {{ formatBytes(downloadRuntime.memory?.heapUsedBytes) }} · external
+            {{ formatBytes(downloadRuntime.memory?.externalBytes) }} · arrayBuffers
+            {{ formatBytes(downloadRuntime.memory?.arrayBuffersBytes) }}
+          </span>
+        </div>
+        <div class="download-runtime__item">
+          <span class="download-runtime__label">follower 缓冲分配</span>
+          <span class="download-runtime__value">
+            {{ downloadRuntime.streams?.followerBufferAllocations ?? 0 }} 次（256KB/次，累计）
+          </span>
+        </div>
+        <div class="download-runtime__item">
+          <span class="download-runtime__label">副本有效目标</span>
+          <span class="download-runtime__value">
+            <template v-if="replicaTarget">
+              {{ replicaTarget.effectiveTarget }} 路（配置 {{ replicaTarget.configured }}，可承载账号
+              {{ replicaTarget.eligibleCount }}）
+            </template>
+            <template v-else>未知（需账号池生效；在账号池页面查看审计详情）</template>
+          </span>
         </div>
       </div>
       <div v-else style="color: var(--text-tertiary); font-size: 12px;">
@@ -493,6 +557,8 @@ import { usePublicConfigStore } from '../../stores/public-config';
 import { useUploadConfigStore } from '../../stores/upload-config';
 import { getErrorMessage } from '../../utils/error';
 import { isValidIP } from '../../utils/ip';
+// 副本有效目标（只读观测）：与「Telegram 账号池」页共用同一份解析结果
+import { fetchReplicationAudit } from '../../api/telegram-accounts';
 
 const isMobile = useMobile();
 const publicConfigStore = usePublicConfigStore();
@@ -553,9 +619,13 @@ const downloadConfig = ref({
   queueCapacity: 128,
   queueTimeoutSeconds: 1800,
   spoolGraceSeconds: 120,
-  directWindowMB: 16,
+  directWindowMB: 1,
   directWaitSeconds: 60,
   taskRetentionSeconds: 900,
+  // 上游等待项选择策略：strict_fifo=严格 FIFO（回退）；bounded_fit=适配优先
+  upstreamQueuePolicy: 'strict_fifo' as 'strict_fifo' | 'bounded_fit',
+  // 全局权重预算自动扩缩容开关（按有效 Bot 数）
+  autoCapacityEnabled: true,
 });
 
 interface DownloadRuntime {
@@ -573,9 +643,49 @@ interface DownloadRuntime {
   activeReservations: number;
   noCacheMode: boolean;
   runtimeUnavailable?: boolean;
+  /** 已占用的上游并发权重（大文件按体量加权） */
+  activeUpstreamWeight?: number;
+  /** 上游队首等待年龄（毫秒） */
+  oldestUpstreamWaitMs?: number;
+  /** 当前上游等待项选择策略 */
+  upstreamQueuePolicy?: 'strict_fifo' | 'bounded_fit';
+  /** 进程内存与流规模（阶段 5 观测） */
+  memory?: {
+    rssBytes: number;
+    heapUsedBytes: number;
+    heapTotalBytes: number;
+    externalBytes: number;
+    arrayBuffersBytes: number;
+  };
+  streams?: {
+    buildSessions: number;
+    spoolSessions: number;
+    spoolConsumers: number;
+    directStreams: number;
+    directWindowBytesTotal: number;
+    followerBufferAllocations: number;
+  };
 }
 
 const downloadRuntime = ref<DownloadRuntime | null>(null);
+
+/** 副本有效目标（只读展示；详见「Telegram 账号池」页的副本扩散策略卡） */
+const replicaTarget = ref<{
+  configured: number;
+  eligibleCount: number;
+  effectiveTarget: number;
+} | null>(null);
+
+/** 队列策略文案（未知值按严格 FIFO 展示，避免误导） */
+function queuePolicyText(policy: DownloadRuntime['upstreamQueuePolicy']): string {
+  return policy === 'bounded_fit' ? '适配优先（bounded_fit）' : '严格 FIFO';
+}
+
+/** 队列策略下拉选项（与后端 UPSTREAM_QUEUE_POLICIES 对齐） */
+const queuePolicyOptions = [
+  { value: 'strict_fifo', label: '严格 FIFO（回退模式）' },
+  { value: 'bounded_fit', label: '适配优先（bounded_fit）' },
+];
 
 /** 字节数展示（运行状态卡使用） */
 function formatBytes(value: number | undefined): string {
@@ -1019,7 +1129,7 @@ async function saveDownloadConfig() {
   }
 }
 
-/** 运行状态快照：磁盘余量、预约量、队列长度与活跃回源 */
+/** 运行状态快照：磁盘余量、预约量、队列长度、权重预算与进程内存 */
 async function fetchDownloadRuntime(): Promise<void> {
   try {
     const res = await api.get('/admin/download-runtime');
@@ -1027,6 +1137,16 @@ async function fetchDownloadRuntime(): Promise<void> {
   } catch (err) {
     console.error('获取下载运行状态失败', err);
     downloadRuntime.value = null;
+  }
+}
+
+/** 副本有效目标（只读观测；失败不提示，避免与账号池页面重复报错） */
+async function fetchReplicaTarget(): Promise<void> {
+  try {
+    const report = await fetchReplicationAudit();
+    replicaTarget.value = report.target;
+  } catch {
+    replicaTarget.value = null;
   }
 }
 
@@ -1206,8 +1326,9 @@ onMounted(() => {
     // 初始加载完成：此后表单改动才算用户编辑，恢复脏检查（G15-17）
     suppressDirty.value = false;
   });
-  // 下载运行状态为只读观测：加载失败不影响保存，单独请求即可
+  // 下载运行状态与副本目标为只读观测：加载失败不影响保存，单独请求即可
   void fetchDownloadRuntime();
+  void fetchReplicaTarget();
 });
 </script>
 

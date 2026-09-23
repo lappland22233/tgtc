@@ -192,3 +192,78 @@ describe('G2-12: batchToMarkdown 转义与直链约束', () => {
     expect(results[0]).toBe('![a\\[1\\]\\(x\\).png](https://cdn.example.com/media/f-1)');
   });
 });
+
+/**
+ * Web 下载入口的副本目标一致性：
+ * 期望副本数必须来自统一的 ReplicaTargetResolver（SystemConfig 热更新 → env → 默认），
+ * 与 Bot 公开下载、镜像回源使用同一解析结果；解析器缺失时保持既有行为（不触发懒扩散）。
+ */
+describe('Web 下载入口：统一副本目标解析', () => {
+  function wire(overrides: Record<string, unknown> = {}) {
+    const openStream = jest.fn(async (..._args: unknown[]) => ({
+      stream: Readable.from([Buffer.from('x')]),
+      info: { file_id: 'pooled-file-id', file_size: 1 },
+      accountId: 'bot-a',
+      copy: null,
+      selectionReason: 'weighted',
+    }));
+    const service = createService({
+      accountAwareDownload: { isActive: () => true, openStream },
+      fileCopies: { listReady: jest.fn(async () => [{ accountId: 'bot-a', telegramFileId: 'x' }]) },
+      ...overrides,
+    });
+    return { service, openStream };
+  }
+
+  it('把解析器给出的期望副本数透传给账号池（与其它入口一致）', async () => {
+    const desiredReplicas = jest.fn(async () => 3);
+    const { service, openStream } = wire({ replicaTargets: { desiredReplicas } });
+
+    const result = await (service as any).openTelegramSourceStream(
+      { id: 'f-1', originalName: 'a.bin', filename: 'a.bin' } as any,
+      1024,
+    );
+
+    expect(desiredReplicas).toHaveBeenCalledTimes(1);
+    expect(openStream).toHaveBeenCalledWith(expect.objectContaining({
+      ownerType: 'file',
+      ownerId: 'f-1',
+      expectedSize: 1024,
+      fileName: 'a.bin',
+      desiredReplicas: 3,
+    }));
+    expect(result.info.file_id).toBe('pooled-file-id');
+  });
+
+  it('解析器缺失（单账号部署/未装配）时不传 desiredReplicas，回源行为与改造前一致', async () => {
+    const { service, openStream } = wire();
+
+    await (service as any).openTelegramSourceStream(
+      { id: 'f-1', originalName: 'a.bin', filename: 'a.bin' } as any,
+      8,
+    );
+
+    const params = openStream.mock.calls[0][0] as { desiredReplicas?: number };
+    expect(params.desiredReplicas).toBeUndefined();
+  });
+
+  it('无可用副本时不进入池化路径（保持单账号链路语义）', async () => {
+    const getRealtimeFileStream = jest.fn(async () => ({
+      stream: Readable.from([Buffer.from('y')]),
+      info: { file_id: 'legacy-file-id', file_path: 'p', file_size: 1 },
+    }));
+    const { service, openStream } = wire({
+      fileCopies: { listReady: jest.fn(async () => []) },
+      telegramService: { getRealtimeFileStream },
+    });
+
+    const result = await (service as any).openTelegramSourceStream(
+      { id: 'f-2', originalName: 'a.bin', filename: 'a.bin' } as any,
+      8,
+    );
+
+    expect(openStream).not.toHaveBeenCalled();
+    expect(getRealtimeFileStream).toHaveBeenCalledWith('a.bin', 8, { noCache: false });
+    expect(result.info.file_id).toBe('legacy-file-id');
+  });
+});

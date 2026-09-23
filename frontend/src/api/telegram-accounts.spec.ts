@@ -40,6 +40,7 @@ import {
   fetchMirrorBackfill,
   fetchMirrorOverview,
   fetchMirrorTasks,
+  fetchReplicationAudit,
   pauseMirrorBackfill,
   probeEnvAccount,
   resumeMirrorBackfill,
@@ -54,6 +55,7 @@ import {
   testMirrorRule,
   updateAccount,
   updateMirrorRule,
+  updateReplicationTarget,
   verifyUserAuth,
 } from './telegram-accounts';
 
@@ -496,5 +498,35 @@ describe('镜像接口', () => {
     expect(post).toHaveBeenNthCalledWith(1, '/admin/telegram-mirror/backfill/pause');
     expect(post).toHaveBeenNthCalledWith(2, '/admin/telegram-mirror/backfill/resume');
     expect(post).toHaveBeenNthCalledWith(3, '/admin/telegram-mirror/backfill/cancel');
+  });
+
+  it('fetchReplicationAudit 读取副本资格审计报告并解包 data', async () => {
+    get.mockResolvedValue(respond({
+      generatedAt: '2026-09-24T00:00:00.000Z',
+      target: { configured: 2, configuredSource: 'system', eligibleCount: 2, effectiveTarget: 2, degradedReason: null, allowedRange: { min: 1, max: 8 } },
+      poolActive: true,
+      accounts: [{ accountId: 'a1', readyCopies: 8, eligible: true, reasons: [] }],
+      coverage: { scannedFiles: 10, satisfied: 8, unsatisfied: 2, truncated: false, missingSamples: [] },
+      capacity: { enabled: true, currentBudget: 16, targetBudget: 16, activeBotCount: 2 },
+      notes: ['USERbot 中继不计入 Bot ready 副本覆盖。'],
+    }));
+
+    const report = await fetchReplicationAudit();
+
+    expect(get).toHaveBeenCalledWith('/admin/telegram-accounts/replication-audit', { signal: undefined });
+    expect(report.target.effectiveTarget).toBe(2);
+    expect(report.accounts[0]).toMatchObject({ accountId: 'a1', readyCopies: 8 });
+  });
+
+  it('updateReplicationTarget 以 PUT 提交期望副本数并返回目标解析', async () => {
+    put.mockResolvedValue(respond({
+      message: '期望副本数已更新为 3',
+      target: { configured: 3, configuredSource: 'system', eligibleCount: 2, effectiveTarget: 2, degradedReason: '收敛', allowedRange: { min: 1, max: 8 } },
+    }));
+
+    const result = await updateReplicationTarget(3);
+
+    expect(put).toHaveBeenCalledWith('/admin/telegram-accounts/replication-target', { desiredReplicas: 3 });
+    expect(result.target).toMatchObject({ configured: 3, effectiveTarget: 2 });
   });
 });

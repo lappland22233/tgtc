@@ -83,6 +83,115 @@
       </div>
     </section>
 
+    <!-- 副本扩散策略：目标解析 + 容量预算 + 覆盖率 + 资格审计 -->
+    <section class="card" aria-label="副本扩散策略">
+      <div class="section-header">
+        <h3>副本扩散策略</h3>
+        <div class="section-actions">
+          <t-button variant="outline" size="small" :loading="replicationLoading" @click="loadReplicationAudit">
+            刷新审计
+          </t-button>
+          <t-button size="small" :loading="replicationSaving" @click="saveReplicationTarget">
+            保存期望副本数
+          </t-button>
+        </div>
+      </div>
+
+      <div v-if="replication" class="replica-grid">
+        <div class="stat-card">
+          <h3>期望副本数</h3>
+          <div class="replica-input">
+            <t-input-number
+              v-model="replicationForm.desiredReplicas"
+              :min="replication.target.allowedRange.min"
+              :max="replication.target.allowedRange.max"
+              :step="1"
+              size="small"
+            />
+          </div>
+          <div class="stat-sub">
+            来源：{{ targetSourceText(replication.target.configuredSource) }} · 可承载账号 {{ replication.target.eligibleCount }} 个
+          </div>
+          <div class="stat-sub">有效目标 {{ replication.target.effectiveTarget }} 路（按可承载账号数收敛）</div>
+          <div v-if="replication.target.degradedReason" class="stat-sub replica-warn">
+            {{ replication.target.degradedReason }}
+          </div>
+        </div>
+
+        <div class="stat-card">
+          <h3>全局权重预算</h3>
+          <div class="value">{{ capacity?.currentBudget ?? '—' }}</div>
+          <div class="stat-sub">
+            自动扩缩容：{{ capacity?.enabled ? '已开启' : '已关闭' }} · 目标预算 {{ capacity?.targetBudget ?? '—' }}
+          </div>
+          <div class="stat-sub">
+            有效 Bot 数 {{ capacity?.activeBotCount ?? 0 }} · 可承载账号 {{ capacity?.eligibleCount ?? 0 }}
+          </div>
+          <div v-if="capacity?.suspendedReason" class="stat-sub replica-warn">{{ capacity.suspendedReason }}</div>
+          <div v-else-if="capacity?.frozenReason" class="stat-sub replica-warn">{{ capacity.frozenReason }}</div>
+          <div v-if="capacity?.lastChange" class="stat-sub">
+            最近调整 {{ capacity.lastChange.from }} → {{ capacity.lastChange.to }}
+            · {{ formatTime(capacity.lastChange.at) }}
+          </div>
+        </div>
+
+        <div class="stat-card">
+          <h3>副本覆盖率</h3>
+          <div class="value">{{ coverage.satisfied }} / {{ coverage.scannedFiles }}</div>
+          <div class="stat-sub">未达标 {{ coverage.unsatisfied }} 个文件（目标 {{ replication.target.effectiveTarget }} 路）</div>
+          <div v-if="coverage.truncated" class="stat-sub replica-warn">统计已按扫描上限截断，仅覆盖部分文件</div>
+          <div v-if="!replication.poolActive" class="stat-sub replica-warn">账号池未生效，副本统计已跳过</div>
+        </div>
+      </div>
+
+      <p v-if="replication && !replication.poolActive" class="replica-warn">
+        账号池当前未生效：以下账号资格与副本数据仅作诊断，不会触发任何扩散。
+      </p>
+
+      <div v-if="replication && replication.accounts.length > 0" class="table-scroll">
+        <t-table
+          :data="replication.accounts"
+          :columns="replicaColumns"
+          row-key="accountId"
+          size="small"
+          :loading="replicationLoading"
+          table-layout="auto"
+        >
+          <template #enabled="{ row }">{{ row.enabled ? '已启用' : '已停用' }}</template>
+          <template #storageConfigured="{ row }">{{ row.storageConfigured ? '已配置' : '未配置' }}</template>
+          <template #health="{ row }">
+            {{ row.coolingDown
+              ? `冷却中（${Math.ceil(row.cooldownRemainingMs / 1000)}s）`
+              : `连续失败 ${row.consecutiveFailures} 次` }}
+          </template>
+          <template #inflight="{ row }">{{ row.inflight }} / {{ row.maxInflight }}</template>
+          <template #eligible="{ row }">
+            <t-tag :theme="row.eligible ? 'success' : 'warning'" variant="light" size="small">
+              {{ row.eligible ? '可承载' : '不可承载' }}
+            </t-tag>
+          </template>
+          <template #reasons="{ row }">
+            <span :class="{ 'replica-warn': row.reasons.length > 0 }">
+              {{ row.reasons.length > 0 ? row.reasons.join('；') : '—' }}
+            </span>
+          </template>
+        </t-table>
+      </div>
+
+      <div v-if="coverage.missingSamples.length > 0" class="replica-missing">
+        <h3>副本不足的文件（示例）</h3>
+        <ul>
+          <li v-for="item in coverage.missingSamples" :key="item.ownerId">
+            {{ item.ownerId }}：现有 {{ item.readyAccountCount }} 路，缺 {{ item.missing }} 路
+          </li>
+        </ul>
+      </div>
+
+      <ul v-if="replication" class="replica-notes">
+        <li v-for="note in replication.notes" :key="note">{{ note }}</li>
+      </ul>
+    </section>
+
     <!-- 账号区 -->
     <section class="card" aria-label="账号管理">
       <div class="section-header">
@@ -760,6 +869,7 @@ import {
   fetchAccounts,
   fetchMirrorOverview,
   fetchMirrorTasks,
+  fetchReplicationAudit,
   pauseMirrorBackfill,
   probeEnvAccount,
   resumeMirrorBackfill,
@@ -774,6 +884,7 @@ import {
   testMirrorRule,
   updateAccount,
   updateMirrorRule,
+  updateReplicationTarget,
   verifyUserAuth,
   type AccountPoolOverview,
   type MirrorBackfillJob,
@@ -782,6 +893,7 @@ import {
   type MirrorRuleTestResult,
   type MirrorTaskListItem,
   type MirrorTaskSummary,
+  type ReplicationAuditReport,
   type TelegramAccountRuntimeView,
   type TelegramAccountStatus,
   type TelegramAccountType,
@@ -1812,6 +1924,67 @@ async function doCancelTask(row: MirrorTaskListItem) {
   }
 }
 
+// ---------------- 副本扩散策略（阶段 2/3 观测面） ----------------
+
+const replication = ref<ReplicationAuditReport | null>(null);
+const replicationLoading = ref(false);
+const replicationSaving = ref(false);
+const replicationForm = reactive({ desiredReplicas: 2 });
+
+const capacity = computed(() => replication.value?.capacity ?? null);
+const coverage = computed(() => replication.value?.coverage ?? {
+  scannedFiles: 0,
+  satisfied: 0,
+  unsatisfied: 0,
+  truncated: false,
+  missingSamples: [],
+});
+
+const replicaColumns = [
+  { colKey: 'accountId', title: '账号', width: 150 },
+  { colKey: 'enabled', title: '启用', width: 80 },
+  { colKey: 'storageConfigured', title: '存储 Chat', width: 100 },
+  { colKey: 'health', title: '健康', width: 170 },
+  { colKey: 'inflight', title: '在飞', width: 90 },
+  { colKey: 'readyCopies', title: 'ready 副本', width: 110 },
+  { colKey: 'eligible', title: '资格', width: 100 },
+  { colKey: 'reasons', title: '排除原因' },
+];
+
+/** 期望副本数的配置来源文案（运行时配置优先，env 仅作回退） */
+function targetSourceText(source: 'system' | 'env' | 'default'): string {
+  if (source === 'system') return '运行时配置';
+  if (source === 'env') return '环境变量（回退值）';
+  return '内置默认值';
+}
+
+async function loadReplicationAudit() {
+  replicationLoading.value = true;
+  try {
+    const data = await fetchReplicationAudit();
+    replication.value = data;
+    // 仅在加载成功时回填表单，避免失败时把输入框重置成空值
+    replicationForm.desiredReplicas = data.target.configured;
+  } catch {
+    MessagePlugin.error('副本扩散审计加载失败，已保留上次数据');
+  } finally {
+    replicationLoading.value = false;
+  }
+}
+
+async function saveReplicationTarget() {
+  replicationSaving.value = true;
+  try {
+    const result = await updateReplicationTarget(replicationForm.desiredReplicas);
+    MessagePlugin.success(result.message);
+    await loadReplicationAudit();
+  } catch (error) {
+    MessagePlugin.error(getErrorMessage(error));
+  } finally {
+    replicationSaving.value = false;
+  }
+}
+
 // ---------------- 数据加载 ----------------
 
 async function loadOverview() {
@@ -1842,6 +2015,7 @@ async function loadAll() {
     loadAccounts(),
     loadTasks(),
     loadBackfill(),
+    loadReplicationAudit(),
   ]);
 }
 
@@ -1930,6 +2104,49 @@ onMounted(() => {
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+
+/* ---------- 副本扩散策略 ---------- */
+.replica-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: var(--space-4);
+  margin-bottom: var(--space-4);
+}
+
+.replica-input {
+  margin: var(--space-2) 0;
+}
+
+.replica-warn {
+  color: var(--color-warning);
+}
+
+.replica-missing {
+  margin-top: var(--space-4);
+}
+
+.replica-missing h3 {
+  margin: 0 0 var(--space-2);
+  font-family: var(--font-display);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.replica-missing ul {
+  margin: 0;
+  padding-left: var(--space-4);
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.7;
+}
+
+.replica-notes {
+  margin: var(--space-4) 0 0;
+  padding-left: var(--space-4);
+  font-size: 12px;
+  color: var(--text-tertiary);
+  line-height: 1.7;
 }
 
 /* ---------- 区块通用 ---------- */

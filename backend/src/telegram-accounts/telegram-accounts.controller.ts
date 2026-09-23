@@ -17,12 +17,15 @@ import { Roles } from '../common/decorators/roles.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { User, UserRole } from '../common/entities/user.entity';
 import { AuditService } from '../common/services/audit.service';
+import { REPLICA_TARGET_CONFIG_KEY } from '../telegram-account-pool/replica-target.resolver';
 import { TelegramAccountsService } from './telegram-accounts.service';
 import { TelegramAccountFeatureService } from './telegram-account-feature.service';
+import { TelegramReplicationAuditService } from './telegram-replication-audit.service';
 import { TelegramUserAuthService } from './telegram-user-auth.service';
 import {
   CreateBotAccountDto,
   CreateUserAccountDto,
+  ReplicationTargetDto,
   RotateAccountCredentialDto,
   SetFeatureSwitchDto,
   StartUserAuthDto,
@@ -46,6 +49,7 @@ export class TelegramAccountsController {
     private readonly feature: TelegramAccountFeatureService,
     private readonly userAuth: TelegramUserAuthService,
     private readonly audit: AuditService,
+    private readonly replicationAudit: TelegramReplicationAuditService,
   ) {}
 
   /** 总览：三层开关状态、账号计数、能力前置检查结果 */
@@ -103,6 +107,42 @@ export class TelegramAccountsController {
       page: page === undefined ? undefined : Number(page),
       pageSize: pageSize === undefined ? undefined : Number(pageSize),
     });
+  }
+
+  /**
+   * 副本资格审计：目标解析（configured / eligible / effective + 降级原因）、
+   * 逐账号资格表、ready 覆盖率与容量策略状态。
+   *
+   * 必须声明在 `:id` 路由之前，否则会被当作账号 id 吞掉。
+   */
+  @Get('replication-audit')
+  @Roles(UserRole.SUPER_ADMIN)
+  async getReplicationAudit() {
+    return this.replicationAudit.getReport();
+  }
+
+  /** 期望副本数热更新（写入 SystemConfig，1-8；有效目标按可承载账号数收敛） */
+  @Put('replication-target')
+  @Roles(UserRole.SUPER_ADMIN)
+  async setReplicationTarget(@CurrentUser() user: User, @Body() dto: ReplicationTargetDto) {
+    const before = await this.replicationAudit.getReport();
+    const target = await this.replicationAudit.setTarget(dto.desiredReplicas);
+    this.audit.log({
+      action: 'config_change',
+      userId: user.id,
+      resourceType: 'telegram_account_pool',
+      resourceId: REPLICA_TARGET_CONFIG_KEY,
+      metadata: {
+        previous: before.target.configured,
+        configured: target.configured,
+        eligibleCount: target.eligibleCount,
+        effectiveTarget: target.effectiveTarget,
+      },
+    });
+    return {
+      message: `期望副本数已更新为 ${target.configured}（当前有效目标 ${target.effectiveTarget}）`,
+      target,
+    };
   }
 
   /** 添加 Bot 账号（创建即 getMe + 主存储 Chat 校验，失败不落库） */

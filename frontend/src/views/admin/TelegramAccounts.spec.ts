@@ -6,6 +6,7 @@ import type {
   AccountPoolOverview,
   MirrorBackfillJob,
   MirrorOverview,
+  ReplicationAuditReport,
   TelegramAccountView,
 } from '@/api/telegram-accounts';
 import TelegramAccounts from './TelegramAccounts.vue';
@@ -93,6 +94,7 @@ vi.mock('@/api/telegram-accounts', () => ({
   fetchAccounts: vi.fn(),
   fetchMirrorOverview: vi.fn(),
   fetchMirrorTasks: vi.fn(),
+  fetchReplicationAudit: vi.fn(),
   pauseMirrorBackfill: vi.fn(),
   probeEnvAccount: vi.fn(),
   resumeMirrorBackfill: vi.fn(),
@@ -107,6 +109,7 @@ vi.mock('@/api/telegram-accounts', () => ({
   testMirrorRule: vi.fn(),
   updateAccount: vi.fn(),
   updateMirrorRule: vi.fn(),
+  updateReplicationTarget: vi.fn(),
   verifyUserAuth: vi.fn(),
 }));
 
@@ -181,6 +184,70 @@ function backfillFixture(): MirrorBackfillJob {
   };
 }
 
+function replicationFixture(): ReplicationAuditReport {
+  return {
+    generatedAt: '2026-09-24T00:00:00.000Z',
+    target: {
+      configured: 2,
+      configuredSource: 'system',
+      eligibleCount: 2,
+      effectiveTarget: 2,
+      degradedReason: null,
+      allowedRange: { min: 1, max: 8 },
+    },
+    poolActive: true,
+    accounts: [
+      {
+        accountId: 'a1',
+        enabled: true,
+        storageConfigured: true,
+        coolingDown: false,
+        cooldownRemainingMs: 0,
+        consecutiveFailures: 0,
+        inflight: 0,
+        maxInflight: 8,
+        readyCopies: 8,
+        eligible: true,
+        reasons: [],
+      },
+      {
+        accountId: 'a2',
+        enabled: true,
+        storageConfigured: false,
+        coolingDown: false,
+        cooldownRemainingMs: 0,
+        consecutiveFailures: 0,
+        inflight: 0,
+        maxInflight: 8,
+        readyCopies: 0,
+        eligible: false,
+        reasons: ['未配置存储 Chat'],
+      },
+    ],
+    coverage: {
+      scannedFiles: 10,
+      satisfied: 8,
+      unsatisfied: 2,
+      truncated: false,
+      missingSamples: [{ ownerId: 'file-9', readyAccountCount: 0, missing: 2 }],
+    },
+    capacity: {
+      enabled: true,
+      currentBudget: 16,
+      targetBudget: 16,
+      activeBotCount: 2,
+      eligibleCount: 2,
+      activeBotIds: ['a1', 'a2'],
+      suspendedReason: null,
+      frozenReason: null,
+      pendingUpCycles: 0,
+      pendingDownCycles: 0,
+      lastChange: null,
+    },
+    notes: ['USERbot 中继不计入 Bot ready 副本覆盖。'],
+  };
+}
+
 function accountView(overrides: Partial<TelegramAccountView> = {}): TelegramAccountView {
   return {
     id: 'a1',
@@ -229,6 +296,7 @@ describe('TelegramAccounts.vue 账号状态筛选', () => {
     mockedApi.fetchMirrorTasks.mockResolvedValue({ items: [], total: 0 });
     mockedApi.fetchMirrorBackfill.mockResolvedValue(backfillFixture());
     mockedApi.fetchAccounts.mockResolvedValue({ items: [], total: 0, envAccounts: [] });
+    mockedApi.fetchReplicationAudit.mockResolvedValue(replicationFixture());
   });
 
   it('默认加载：不带 status，也不打开 includeRevoked（后端默认排除已撤销）', async () => {
@@ -281,5 +349,67 @@ describe('TelegramAccounts.vue 账号状态筛选', () => {
     const activeButtons = cards[1].findAll('button.t-button-stub').map((b) => b.text());
     expect(activeButtons).toContain('轮换');
     expect(activeButtons).toContain('删除');
+  });
+});
+
+describe('TelegramAccounts.vue 副本扩散策略', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockedApi.fetchAccountOverview.mockResolvedValue(overviewFixture());
+    mockedApi.fetchMirrorOverview.mockResolvedValue(mirrorFixture());
+    mockedApi.fetchMirrorTasks.mockResolvedValue({ items: [], total: 0 });
+    mockedApi.fetchMirrorBackfill.mockResolvedValue(backfillFixture());
+    mockedApi.fetchAccounts.mockResolvedValue({ items: [], total: 0, envAccounts: [] });
+    mockedApi.fetchReplicationAudit.mockResolvedValue(replicationFixture());
+  });
+
+  it('加载审计：展示有效目标、权重预算与覆盖率（含未达标样例）', async () => {
+    const wrapper = mountView();
+    await settle(wrapper);
+
+    expect(mockedApi.fetchReplicationAudit).toHaveBeenCalledTimes(1);
+    const text = wrapper.text();
+    expect(text).toContain('副本扩散策略');
+    expect(text).toContain('有效目标 2 路');
+    expect(text).toContain('可承载账号 2 个');
+    expect(text).toContain('8 / 10');
+    expect(text).toContain('file-9');
+    expect(text).toContain('USERbot');
+  });
+
+  it('保存期望副本数：调用热更新接口并重新拉取审计', async () => {
+    const wrapper = mountView();
+    await settle(wrapper);
+    const callsBefore = mockedApi.fetchReplicationAudit.mock.calls.length;
+    mockedApi.updateReplicationTarget.mockResolvedValue({
+      message: '期望副本数已更新为 2',
+      target: replicationFixture().target,
+    });
+
+    const saveButton = wrapper
+      .findAll('button.t-button-stub')
+      .find((button) => button.text().includes('保存期望副本数'));
+    expect(saveButton).toBeTruthy();
+    await saveButton!.trigger('click');
+    await settle(wrapper);
+
+    // 表单初值来自审计结果（configured=2）
+    expect(mockedApi.updateReplicationTarget).toHaveBeenCalledWith(2);
+    expect(mockedApi.fetchReplicationAudit.mock.calls.length).toBeGreaterThan(callsBefore);
+  });
+
+  it('审计加载失败时保留上次数据并提示，不重置表单', async () => {
+    const wrapper = mountView();
+    await settle(wrapper);
+    mockedApi.fetchReplicationAudit.mockRejectedValueOnce(new Error('boom'));
+
+    await wrapper
+      .findAll('button.t-button-stub')
+      .find((button) => button.text().includes('刷新审计'))!
+      .trigger('click');
+    await settle(wrapper);
+
+    // 失败不清空既有报告（仍展示上一次的目标与覆盖率）
+    expect(wrapper.text()).toContain('有效目标 2 路');
   });
 });

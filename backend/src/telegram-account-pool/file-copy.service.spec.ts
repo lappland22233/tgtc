@@ -4,6 +4,7 @@ function makeRepo() {
   return {
     find: jest.fn(async () => []),
     findOne: jest.fn(async () => null),
+    createQueryBuilder: jest.fn(),
     create: jest.fn((value: Record<string, unknown>) => ({ ...value })),
     save: jest.fn(async (value: Record<string, unknown>) => ({ ...value, id: 'copy-1' })),
     update: jest.fn(async () => ({ affected: 1 })),
@@ -11,9 +12,42 @@ function makeRepo() {
   };
 }
 
+/** 账号池账号快照条目（只填复制目标判定关心的字段） */
+function accountSnapshot(id: string, overrides: Record<string, unknown> = {}) {
+  return {
+    id,
+    tokenPreview: `${id}…`,
+    chatId: '-1001',
+    enabled: true,
+    weight: 1,
+    maxInflight: 8,
+    inflight: 0,
+    bandwidthMbps: 0,
+    successRate: 1,
+    latencyMs: 0,
+    coolingDown: false,
+    cooldownRemainingMs: 0,
+    consecutiveFailures: 0,
+    totalRequests: 0,
+    failures: 0,
+    totalBytes: 0,
+    lastErrorKind: null,
+    primary: false,
+    storageConfigured: true,
+    ...overrides,
+  };
+}
+
 function makePool() {
   return {
     ids: jest.fn(() => ['a1', 'a2']),
+    storageAccountIds: jest.fn(() => ['a1', 'a2']),
+    snapshot: jest.fn(() => ({
+      enabled: true,
+      inactiveReason: null,
+      counters: {} as never,
+      accounts: [accountSnapshot('a1'), accountSnapshot('a2')] as never[],
+    })),
     getConfig: jest.fn((id: string) => (id === 'a1' || id === 'a2'
       ? { id, token: `${id}:SECRET`, chatId: '-1001', weight: 1, maxInflight: 8, enabled: true }
       : null)),
@@ -223,6 +257,163 @@ describe('FileCopyService（副本登记 / 去重 / 生命周期清理）', () =
     });
 
     expect(result).toEqual({ failed: 0, pending: 0, staleReadyUsed: 0, staleReadyUnused: 0 });
+  });
+});
+
+/**
+ * 副本扩散的目标规划、跨请求去重与并发闸门。
+ *
+ * 事故背景（本组用例保护的语义）：`planTargets()` 只是「选号」，`pool.select()`
+ * 不会占用任何在飞额度；若没有 single-flight 与目标 claim，并发下载会各自选出同一批
+ * 目标并重复排队上传（表现为同一账号被反复重传、上游请求被放大）。
+ */
+describe('FileCopyService（副本扩散目标规划与去重）', () => {
+  /** 让一次复制成功的最小桩（源流 + 目标上传回执） */
+  function wireSuccessfulCopy(ctx: ReturnType<typeof setup>) {
+    ctx.client.openRealtimeStream.mockResolvedValue({
+      stream: { once: jest.fn(), destroy: jest.fn() },
+      info: { file_id: 'a1-file', file_size: 100 },
+      sample: () => ({ ok: true, bytes: 100, durationMs: 10 }),
+    } as never);
+    ctx.client.sendDocumentStream.mockResolvedValue({
+      fileId: 'a2-file',
+      fileSize: 100,
+      chatId: '-1001',
+      messageId: '9',
+      fileUniqueId: 'UQ-a2',
+      sample: { ok: true, bytes: 100, durationMs: 10 },
+    } as never);
+  }
+
+  it('planTargets：已持有 ready 副本的账号不再作为目标，只补缺失账号', async () => {
+    const ctx = setup();
+    ctx.repo.find.mockResolvedValue([
+      { id: 'c1', accountId: 'a1', telegramFileId: 'a1-file', fileSize: '100' },
+    ] as never);
+
+    const targets = await ctx.service.planTargets('fileUnique', 'UNIQ-1', 2);
+
+    expect(targets).toEqual(['a2']);
+  });
+
+  it('planTargets：排除无存储 Chat / 冷却 / 满载 / 源账号，并给出可读原因', async () => {
+    const ctx = setup();
+    ctx.pool.storageAccountIds.mockReturnValue(['a2']);
+    ctx.pool.snapshot.mockReturnValue({
+      enabled: true,
+      inactiveReason: null,
+      counters: {} as never,
+      accounts: [
+        accountSnapshot('a1'),
+        accountSnapshot('a2'),
+        accountSnapshot('a3', { storageConfigured: false }),
+        accountSnapshot('a4', { coolingDown: true, cooldownRemainingMs: 30_000 }),
+        accountSnapshot('a5', { inflight: 8, maxInflight: 8 }),
+      ] as never[],
+    });
+
+    // 资格判定在「选中并 claim」之前
+    const eligibility = ctx.service.evaluateTargetEligibility('fileUnique', 'UNIQ-1', [], 'a1');
+    const byId = new Map(eligibility.map((item) => [item.accountId, item]));
+    expect(byId.get('a1')?.reasons.join()).toContain('源账号');
+    expect(byId.get('a3')?.reasons.join()).toContain('存储 Chat');
+    expect(byId.get('a4')?.reasons.join()).toContain('冷却');
+    expect(byId.get('a5')?.reasons.join()).toContain('在飞上限');
+    expect(byId.get('a2')?.eligible).toBe(true);
+
+    const targets = await ctx.service.planTargets('fileUnique', 'UNIQ-1', 5, 'a1');
+    expect(targets).toEqual(['a2']);
+    // 选中即占位：同一文件的目标在 claim 有效期内不会被再次选中
+    const claimed = ctx.service.evaluateTargetEligibility('fileUnique', 'UNIQ-1', [], 'a1');
+    expect(claimed.find((item) => item.accountId === 'a2')?.reasons.join()).toContain('排队中');
+  });
+
+  it('同一文件的并发 ensureCopies 只执行一轮扩散（single-flight）', async () => {
+    const ctx = setup();
+    ctx.repo.find.mockResolvedValue([
+      { id: 'c1', accountId: 'a1', telegramFileId: 'a1-file', fileSize: '100' },
+    ] as never);
+    wireSuccessfulCopy(ctx);
+
+    const params = {
+      ownerType: 'fileUnique' as const,
+      ownerId: 'UNIQ-1',
+      fileName: 'f.bin',
+      expectedSize: 100,
+      desiredCount: 2,
+    };
+    const [first, second] = await Promise.all([
+      ctx.service.ensureCopies(params),
+      ctx.service.ensureCopies(params),
+    ]);
+
+    expect(first.created).toEqual(['a2']);
+    expect(second.created).toEqual(['a2']);
+    // 一次实际复制（源流 + 目标上传各一次），而不是两次
+    expect(ctx.client.openRealtimeStream).toHaveBeenCalledTimes(1);
+    expect(ctx.client.sendDocumentStream).toHaveBeenCalledTimes(1);
+    // held 查询 + planTargets 的 held 查询 + performCopy 的选源查询 = 仅一轮（并发会翻倍）
+    expect(ctx.repo.find).toHaveBeenCalledTimes(3);
+  });
+
+  it('复制失败后 claim 被释放：同一目标可在下一轮重试（不产生重复 pending）', async () => {
+    const ctx = setup();
+    ctx.repo.find.mockResolvedValue([
+      { id: 'c1', accountId: 'a1', telegramFileId: 'a1-file', fileSize: '100' },
+    ] as never);
+    ctx.client.openRealtimeStream.mockResolvedValue({
+      stream: { once: jest.fn(), destroy: jest.fn() },
+      info: { file_id: 'a1-file', file_size: 100 },
+      sample: () => ({ ok: true, bytes: 100, durationMs: 10 }),
+    } as never);
+    ctx.client.sendDocumentStream
+      .mockRejectedValueOnce(new Error('flood wait'))
+      .mockResolvedValueOnce({
+        fileId: 'a2-file',
+        fileSize: 100,
+        chatId: '-1001',
+        messageId: '9',
+        fileUniqueId: 'UQ-a2',
+        sample: { ok: true, bytes: 100, durationMs: 10 },
+      } as never);
+
+    const params = {
+      ownerType: 'fileUnique' as const,
+      ownerId: 'UNIQ-1',
+      fileName: 'f.bin',
+      expectedSize: 100,
+      desiredCount: 2,
+    };
+    const failed = await ctx.service.ensureCopies(params);
+    expect(failed.created).toEqual([]);
+    expect(failed.failed.map((item) => item.accountId)).toEqual(['a2']);
+
+    const retried = await ctx.service.ensureCopies(params);
+    expect(retried.created).toEqual(['a2']);
+    expect(ctx.client.sendDocumentStream).toHaveBeenCalledTimes(2);
+  });
+
+  it('countReadyByAccount 按账号分组统计 ready 副本（审计与容量策略共用）', async () => {
+    const ctx = setup();
+    const qb = {
+      select: jest.fn().mockReturnThis(),
+      addSelect: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      andWhere: jest.fn().mockReturnThis(),
+      groupBy: jest.fn().mockReturnThis(),
+      getRawMany: jest.fn(async () => [
+        { accountId: 'a1', count: '8' },
+        { accountId: 'a2', count: '3' },
+      ]),
+    };
+    ctx.repo.createQueryBuilder.mockReturnValue(qb as never);
+
+    const counts = await ctx.service.countReadyByAccount('file');
+
+    expect(counts.get('a1')).toBe(8);
+    expect(counts.get('a2')).toBe(3);
+    expect(qb.where).toHaveBeenCalledWith('copy.status = :status', { status: 'ready' });
+    expect(qb.andWhere).toHaveBeenCalledWith('copy.ownerType = :ownerType', { ownerType: 'file' });
   });
 });
 
