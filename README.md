@@ -338,9 +338,9 @@ Redis 承载 `metrics-aggregation`、`attack-detection`、`alert-evaluation`、`
 | `TELEGRAM_ACCOUNT_POOL_ENABLED` | `false` | 账号池总开关；仅显式 `true` 时启用 |
 | `TELEGRAM_ACCOUNT_POOL` | - | 账号 JSON 数组：`[{id,token,chatId,weight,maxInflight,enabled,note}]`（推荐，信息最全） |
 | `TELEGRAM_BOT_TOKENS` | - | 逗号分隔 Token 列表（简化输入；存储 Chat 复用 `TELEGRAM_CHAT_ID`，**归档群不可充当存储目标**） |
-| `TELEGRAM_ARCHIVE_CHAT_ID` | - | 收到的文件由接收账号转发到该群（**仅审计留痕**；严禁作为账号存储 Chat） |
+| `TELEGRAM_ARCHIVE_CHAT_ID` | - | 收到的文件由接收账号转发到该群（**仅审计留痕**；严禁作为账号存储 Chat）；同时作为「用户账号中继」在下载期懒扩散路径上的**副本可见群** |
 | `TELEGRAM_POOL_TARGET_REPLICAS` | `2` | 期望副本数；不足时在真实下载的后台按需扩散（设为 `1` 表示不主动扩散） |
-| `TELEGRAM_USER_RELAY_ENABLED` | `false` | 用户账号 MTProto 中继（策略 B）；**客户端尚未接入，设为 `true` 会被启动预检直接拒绝** |
+| `TELEGRAM_USER_RELAY_ENABLED` | `false` | 用户账号 MTProto 中继（策略 B）；已接入客户端，不可用时明确失败并**自动回退策略 A**（启动预检只告警不阻断） |
 
 **前置条件**（任一不满足时启动预检直接拒绝启用）：显式 `TELEGRAM_FILE_STREAMING_ENABLED=true`、`TELEGRAM_FILE_STREAM_BASE` 为合法 http/https 地址，且自建 Bot API 以 `--enable-file-streaming` 启动。每个账号必须有自己的 Token、自己的存储 Chat（`chatId`）与回源能力。
 
@@ -385,6 +385,32 @@ Redis 承载 `metrics-aggregation`、`attack-detection`、`alert-evaluation`、`
 **只支持单后端实例**：账号画像、镜像任务对账与补偿进度均为进程内状态；`DEPLOYMENT_MODE=multi` 会被启动预检拒绝。
 
 **回退**：先停用镜像规则 → 再停用异常账号 → 最后关闭账号池/镜像总开关；已写入备份群的消息不会自动删除；新增表与可空列均为 expand 式增量，回退程序版本无需回退数据库。
+
+### 副本扩散与下载负载均衡（v1.5.4）
+
+> 目标：**一次转发，多 Bot 共享副本，下载按负载分流**。Web 上传或 Bot 收到文件后，由**用户账号**把源消息服务端转发进「副本可见群」；群内每个 Bot 各自收到该消息、登记**自己账号的** `file_id` 副本；这些副本经桥接写入站内文件的副本记录后，下载回源即可在多个 Bot 之间按权重 × 带宽 × 健康 × 容量选号。
+
+**为什么必须用用户账号**：Telegram 规定 bot 永远看不到其它 bot 发送的消息（与隐私模式、管理员身份无关）。因此「接收 Bot 转发到群」不能让其它 Bot 获得该文件；只有**用户账号**发出的消息才能被全群 Bot 看到。详见 `TELEGRAM_USER_RELAY_ENABLED` 的配置说明。
+
+| 环节 | 实现位置 | 关键契约 |
+|---|---|---|
+| 中继 | `telegram-account-pool/user-relay.service.ts`（策略 B 接入点）、`telegram-mirror/telegram-user-copy.service.ts` | 服务端转发、**零字节重传**；幂等键 = 逻辑操作 + 执行账号（派生确定性 `random_id`，重试不产生重复消息） |
+| 副本认领 | `telegram-bot/telegram-bot-dispatch.service.ts` | 各 Bot 长轮询各自收到群消息后登记本账号副本；**缺失 `file_unique_id` 时拒绝登记**（不退化为 `file_id`） |
+| 桥接 | `telegram-account-pool/file-copy.service.ts` | 按 `file_unique_id` 反查 `files.telegramFileUniqueId`，额外写 `ownerType='file'` 副本；`file_id` 严格归属产生它的账号，**禁止跨账号借用** |
+| 选号回源 | `telegram-account-pool/account-aware-download.service.ts` | 加权选号 + 失败换号（最多 3 次）+ 副本不足时后台懒扩散（不阻塞首字节） |
+
+**部署前置条件**（缺任一项都不会损坏数据，但副本无法扩散，下载仍集中在单账号）：
+
+1. `TELEGRAM_BOT_UPDATES_ENABLED=true`，且账号池已启用、存在 ≥2 个 Bot 账号；
+2. **副本可见群内每个 Bot 都必须关闭隐私模式（BotFather `/setprivacy` → Disable）或设为管理员**——否则 Bot 收不到用户账号发出的普通群消息；
+3. 至少一个已授权的 `user` 账号，且**同时是源群与副本可见群成员**、对副本可见群有发送权限；
+4. `TELEGRAM_USER_RELAY_ENABLED=true`；中继目标群按「**启用中的镜像规则备份群 → `TELEGRAM_ARCHIVE_CHAT_ID`**」顺序解析，两者至少要有一个指向副本可见群（否则中继返回 `user_relay_target_missing` 并回退策略 A）。
+
+**Bot 私聊来源（Bot 收到用户私聊文件）**：用户账号读不到「Bot 与用户的私聊」，因此这类来源会先由**接收该消息的 Bot** 用 Bot API `forwardMessage`（服务端复制、零字节）搬到中转群（规则源群，未配置时回退 `TELEGRAM_ARCHIVE_CHAT_ID`），再把中转消息作为中继源锚点；锚点写回任务行，重试不会重复搬运。中转群缺失或与备份群相同时任务进入 `blocked` 并给出可执行提示。
+
+**可见性与放大抑制**：来自备份群的消息只登记副本、**不再向归档群转发**（否则群内 N 个 Bot 会各转发一次，消息量按 Bot 数放大）。
+
+**排障信号**：`GET /api/admin/bot-account-pool` 的计数新增 `userRelaysOk` / `userRelaysFailed` / `inboundBridgeMisses`（后者表示群消息与站内文件无关，属正常）；`userRelaysFailed` 连续增长会触发 `BOT_POOL_USER_RELAY_FAILING` 告警并附可执行检查项。
 
 ### 环境变量主 Bot 与统一选号（v1.5.3）
 

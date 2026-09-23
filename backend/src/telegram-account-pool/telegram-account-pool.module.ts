@@ -1,13 +1,19 @@
 import { Logger, Module, OnApplicationShutdown, OnModuleInit } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AlertModule } from '../alert/alert.module';
+import { File } from '../common/entities/file.entity';
+import { TelegramAccount } from '../common/entities/telegram-account.entity';
 import { TelegramFileCopy } from '../common/entities/telegram-file-copy.entity';
+import { TelegramMirrorRule } from '../common/entities/telegram-mirror-rule.entity';
+import { TelegramAccountCredentialModule } from '../telegram-accounts/telegram-account-credential.module';
+import { TelegramUserModule } from '../telegram-user/telegram-user.module';
 import { AccountAwareDownloadService } from './account-aware-download.service';
 import { AccountAwareUploadService } from './account-aware-upload.service';
 import { FileCopyService } from './file-copy.service';
 import { TelegramAccountClientService } from './telegram-account-client.service';
 import { TelegramAccountPoolAlertService } from './telegram-account-pool-alert.service';
 import { TelegramAccountPoolService } from './telegram-account-pool.service';
+import { UserAccountDirectoryService } from './user-account-directory.service';
 import { UserRelayService } from './user-relay.service';
 
 /** 账号池告警采集间隔（毫秒） */
@@ -31,13 +37,25 @@ const STALE_COPY_TTL_DAYS = 30;
  *   `TelegramAccountClientService`，若写进 `TelegramAccountPoolService` 的构造函数
  *   会形成循环依赖，故用注册回调的方式解耦；
  * - 告警与副本清理按固定间隔在本模块内驱动（复用单实例约束，不引入新队列）。
+ *
+ * 依赖方向（刻意单向，避免循环）：
+ * - → `TelegramUserModule`（MTProto 客户端，叶子模块）——用户账号中继（策略 B）需要；
+ * - → `TelegramAccountCredentialModule`（凭据解密，叶子模块）——用户账号 session 解密需要；
+ * - → 直接注入 `TelegramAccount` / `File` 实体仓库读取账号与逻辑文件
+ *   （**严禁** import `TelegramAccountsModule`，否则与账号管理模块成环）。
  */
 @Module({
-  imports: [TypeOrmModule.forFeature([TelegramFileCopy]), AlertModule],
+  imports: [
+    TypeOrmModule.forFeature([TelegramFileCopy, TelegramAccount, File, TelegramMirrorRule]),
+    AlertModule,
+    TelegramUserModule,
+    TelegramAccountCredentialModule,
+  ],
   providers: [
     TelegramAccountPoolService,
     TelegramAccountClientService,
     FileCopyService,
+    UserAccountDirectoryService,
     UserRelayService,
     AccountAwareDownloadService,
     AccountAwareUploadService,
@@ -47,6 +65,7 @@ const STALE_COPY_TTL_DAYS = 30;
     TelegramAccountPoolService,
     TelegramAccountClientService,
     FileCopyService,
+    UserAccountDirectoryService,
     UserRelayService,
     AccountAwareDownloadService,
     AccountAwareUploadService,

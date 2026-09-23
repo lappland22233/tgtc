@@ -29,6 +29,9 @@ export interface MirrorRuleTestResult {
   details: Array<{ chat: 'source' | 'target'; ok: boolean; title: string | null; type: string | null; error?: string }>;
 }
 
+/** 备份群集合缓存 TTL：入站判定是热路径，但规则变更不频繁 */
+const TARGET_CHAT_CACHE_TTL_MS = 30_000;
+
 /**
  * 镜像规则配置（首发单规则）。
  *
@@ -41,6 +44,9 @@ export interface MirrorRuleTestResult {
 @Injectable()
 export class TelegramMirrorConfigService {
   private readonly logger = new Logger(TelegramMirrorConfigService.name);
+  /** 备份群 chat id 缓存（见 listTargetChatIds） */
+  private cachedTargetChats: string[] = [];
+  private targetChatsAtMs = 0;
 
   constructor(
     @InjectRepository(TelegramMirrorRule)
@@ -61,6 +67,39 @@ export class TelegramMirrorConfigService {
 
   async getRuleById(id: string): Promise<TelegramMirrorRule | null> {
     return this.repo.findOne({ where: { id } });
+  }
+
+  /**
+   * 全部「备份群」chat id 集合（去重、去空）。
+   *
+   * 用途：入站链路据此判断「这条群消息是否来自备份群」。来自备份群的消息只登记副本、
+   * **不再向 `TELEGRAM_ARCHIVE_CHAT_ID` 归档转发**——否则副本可见群里的每条消息都会被
+   * 群内每个 Bot 各转发一次，消息量与上游调用按 Bot 数（N）放大。
+   *
+   * 带短 TTL 缓存：该判定在每条群内文件消息上触发，不该每次都打库。
+   */
+  async listTargetChatIds(): Promise<string[]> {
+    // 缓存**命中**才走快路径；未命中（含首次，`targetChatsAtMs=0`）必须查库。
+    // 判据写反会退化成「永远返回空数组 + 永不查库」，让放大抑制静默失效。
+    if (this.targetChatsFresh()) return this.cachedTargetChats;
+    try {
+      const rows = await this.repo.find({ select: ['targetChatId'] });
+      this.cachedTargetChats = Array.from(
+        new Set(rows.map((row) => (row.targetChatId || '').trim()).filter((id) => id.length > 0)),
+      );
+      this.targetChatsAtMs = Date.now();
+    } catch (error) {
+      this.logger.warn(
+        `镜像备份群列表读取失败（将沿用上一次结果）：${error instanceof Error ? error.message : String(error)}`,
+      );
+      // 读不到时：有上次结果则沿用并短暂缓存（避免每条消息都打库），无结果则不刷新时间戳以便立即重试
+      this.targetChatsAtMs = this.cachedTargetChats.length > 0 ? Date.now() : 0;
+    }
+    return this.cachedTargetChats;
+  }
+
+  private targetChatsFresh(): boolean {
+    return this.targetChatsAtMs > 0 && Date.now() - this.targetChatsAtMs < TARGET_CHAT_CACHE_TTL_MS;
   }
 
   /** 创建或更新首发规则（不存在则创建；存在则按传入字段更新） */
@@ -216,12 +255,19 @@ export class TelegramMirrorConfigService {
 
     const ok = details.length > 0 && details.every((item) => item.ok);
     const failed = details.filter((item) => !item.ok);
-    const summary = ok
+    // 用户账号路径的**副本认领**前提无法在服务端验证（取决于群内每个 Bot 的隐私模式设置），
+    // 因此在结论里显式提示：这是运维必须在 Telegram 侧完成的动作，漏做时表现为
+    // 「镜像成功但副本数不增长、下载仍集中在单账号」。
+    const relayHint = rule.mode === 'bot_upload'
+      ? ''
+      : '；副本认领前提：备份群内**每个 Bot 都需关闭隐私模式或设为管理员**，'
+        + '且中继用户账号需同时是源群与备份群成员';
+    const base = ok
       ? `权限测试通过（Bot 账号 ${botProbe.accountId} 可访问源群与备份群）`
       : failed
         .map((item) => `${item.chat === 'source' ? '源群' : '备份群'}不可用：${item.error ?? '未知原因'}`)
-        .join('；')
-        .slice(0, 500);
+        .join('；');
+    const summary = `${base}${relayHint}`.slice(0, 500);
     await this.markTest(rule.id, ok ? 'ok' : 'failed', summary);
 
     this.audit.log({

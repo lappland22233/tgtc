@@ -102,13 +102,37 @@ describe('evaluateDeploymentPreflight', () => {
     expect(result.errors).toEqual([]);
   });
 
-  it('rejects user relay switch until the MTProto client is integrated', () => {
+  /**
+   * 用户账号中继（策略 B）已接入客户端，**不再**在启动期硬拒绝。
+   *
+   * 为什么改成告警而不是 error：中继可用性取决于运行期事实（是否已授权 user 账号、
+   * session 能否解密、副本可见群的隐私模式设置），纯函数预检读不到；硬拒绝会让
+   * 「还没在后台完成授权」的部署无法启动。真实判定在 `UserRelayService.relay()`，
+   * 不可用时返回可诊断失败并自动回退策略 A。
+   */
+  it('warns (but does not block) when user relay is enabled without an archive chat', () => {
     const result = evaluateDeploymentPreflight({
       NODE_ENV: 'production',
       SECURE_COOKIE: 'true',
       TELEGRAM_USER_RELAY_ENABLED: 'true',
     });
-    expect(result.errors.join('\n')).toMatch(/TELEGRAM_USER_RELAY_ENABLED=true 被拒绝/);
+    expect(result.errors).toEqual([]);
+    const warnings = result.warnings.join('\n');
+    expect(warnings).toMatch(/TELEGRAM_USER_RELAY_ENABLED=true/);
+    expect(warnings).toMatch(/TELEGRAM_ARCHIVE_CHAT_ID/);
+    // 副本认领的硬前提必须显式提示（漏做时表现为「镜像成功但副本数不增长」）
+    expect(warnings).toMatch(/关闭隐私模式或设为管理员/);
+  });
+
+  it('does not warn about the archive chat when user relay is enabled with one configured', () => {
+    const result = evaluateDeploymentPreflight({
+      NODE_ENV: 'production',
+      SECURE_COOKIE: 'true',
+      TELEGRAM_USER_RELAY_ENABLED: 'true',
+      TELEGRAM_ARCHIVE_CHAT_ID: '-100999',
+    });
+    expect(result.errors).toEqual([]);
+    expect(result.warnings.join('\n')).not.toMatch(/未配置 TELEGRAM_ARCHIVE_CHAT_ID/);
   });
 
   it('warns when account features are enabled without the credential encryption key', () => {

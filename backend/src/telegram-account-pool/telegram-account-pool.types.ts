@@ -117,6 +117,20 @@ export interface AccountPoolCounters {
   replyFailures: number;
   /** 入站副本登记失败次数（含缺失 file_unique_id 而拒绝登记） */
   inboundRegistrationFailures: number;
+  /**
+   * 用户账号中继成功次数（策略 B：一次服务端转发 → 各账号由入站链路自行登记副本）。
+   * 与 `replicationsOk` 区分：后者是「逐账号重新上传」的策略 A。
+   */
+  userRelaysOk: number;
+  /** 用户账号中继失败次数（未配置/无账号/源不可读/执行失败，随后回退策略 A） */
+  userRelaysFailed: number;
+  /**
+   * 入站副本**未能**匹配到站内逻辑文件（反查 `files.telegramFileUniqueId` 未命中）。
+   *
+   * 这是**正常现象**而非故障：备份群/归档群里存在大量与站内文件无关的消息。
+   * 单独计数是为了在排障时能区分「桥接没生效」与「本来就没有对应站内文件」。
+   */
+  inboundBridgeMisses: number;
 }
 
 export type AccountPoolCounterKey = keyof AccountPoolCounters;

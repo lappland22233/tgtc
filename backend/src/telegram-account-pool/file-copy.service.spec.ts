@@ -32,11 +32,23 @@ function makeClient() {
   };
 }
 
-function setup() {
+function makeFilesRepo(ids: string[] = []) {
+  return {
+    find: jest.fn(async () => ids.map((id) => ({ id }))),
+  };
+}
+
+function setup(filesRepo: ReturnType<typeof makeFilesRepo> | null = null) {
   const repo = makeRepo();
   const pool = makePool();
   const client = makeClient();
-  const service = new FileCopyService(repo as never, pool as never, client as never, null);
+  const service = new FileCopyService(
+    repo as never,
+    pool as never,
+    client as never,
+    null,
+    filesRepo as never,
+  );
   return { service, repo, pool, client };
 }
 
@@ -211,5 +223,123 @@ describe('FileCopyService（副本登记 / 去重 / 生命周期清理）', () =
     });
 
     expect(result).toEqual({ failed: 0, pending: 0, staleReadyUsed: 0, staleReadyUnused: 0 });
+  });
+});
+
+/**
+ * 入站副本 → 站内文件桥接。
+ *
+ * 事故背景（本组用例保护的语义）：入站登记写 `ownerType='fileUnique'`，而站内下载只查
+ * `ownerType='file'`；两侧不打通时，副本可见群里各 Bot 认领到的副本永远不会被下载选号消费，
+ * 「让所有 Bot 都能获取副本实现负载均衡」形同虚设。
+ */
+describe('FileCopyService（入站副本桥接到站内逻辑文件）', () => {
+  it('命中单个逻辑文件时写入 ownerType=file 副本，且只用该账号自己的 file_id', async () => {
+    const files = makeFilesRepo(['file-1']);
+    const ctx = setup(files);
+
+    const result = await ctx.service.bridgeInboundCopyToLogicalFile({
+      fileUniqueId: 'UNIQ-abc',
+      accountId: 'a2',
+      telegramFileId: 'a2-own-file-id',
+      chatId: '-100777',
+      messageId: '55',
+      fileSize: 4096,
+    });
+
+    expect(result).toEqual({ bridged: true, matchedFileIds: ['file-1'] });
+    expect(files.find).toHaveBeenCalledWith(expect.objectContaining({
+      where: { telegramFileUniqueId: 'UNIQ-abc' },
+    }));
+    // 红线：写入的 file_id 必须是产生它的那个账号自己的，禁止跨账号借用
+    expect(ctx.repo.create).toHaveBeenCalledWith(expect.objectContaining({
+      ownerType: 'file',
+      ownerId: 'file-1',
+      accountId: 'a2',
+      telegramFileId: 'a2-own-file-id',
+      chatId: '-100777',
+      messageId: '55',
+      fileSize: '4096',
+      source: 'inbound',
+    }));
+  });
+
+  it('file_unique_id 不唯一时一对多桥接（同一内容被上传两次形成的多条记录）', async () => {
+    const ctx = setup(makeFilesRepo(['file-1', 'file-2']));
+
+    const result = await ctx.service.bridgeInboundCopyToLogicalFile({
+      fileUniqueId: 'UNIQ-dup',
+      accountId: 'a1',
+      telegramFileId: 'a1-file',
+      chatId: '-100777',
+      messageId: '56',
+    });
+
+    expect(result.bridged).toBe(true);
+    expect(result.matchedFileIds).toEqual(['file-1', 'file-2']);
+    expect(ctx.repo.create).toHaveBeenCalledTimes(2);
+  });
+
+  it('未命中站内文件（群消息与站内无关）时不写库、不抛错', async () => {
+    const ctx = setup(makeFilesRepo([]));
+
+    const result = await ctx.service.bridgeInboundCopyToLogicalFile({
+      fileUniqueId: 'UNIQ-none',
+      accountId: 'a1',
+      telegramFileId: 'a1-file',
+      chatId: '-100777',
+      messageId: '57',
+    });
+
+    expect(result).toEqual({ bridged: false, matchedFileIds: [] });
+    expect(ctx.repo.create).not.toHaveBeenCalled();
+    expect(ctx.repo.save).not.toHaveBeenCalled();
+  });
+
+  it('逻辑文件仓库未装配（非池化部署/单测）时静默跳过', async () => {
+    const ctx = setup(null);
+
+    const result = await ctx.service.bridgeInboundCopyToLogicalFile({
+      fileUniqueId: 'UNIQ-abc',
+      accountId: 'a1',
+      telegramFileId: 'a1-file',
+      chatId: '-100777',
+      messageId: '58',
+    });
+
+    expect(result).toEqual({ bridged: false, matchedFileIds: [] });
+    expect(ctx.repo.save).not.toHaveBeenCalled();
+  });
+
+  it('缺少 file_unique_id 时不做任何反查', async () => {
+    const files = makeFilesRepo(['file-1']);
+    const ctx = setup(files);
+
+    const result = await ctx.service.bridgeInboundCopyToLogicalFile({
+      fileUniqueId: '   ',
+      accountId: 'a1',
+      telegramFileId: 'a1-file',
+      chatId: '-100777',
+      messageId: '59',
+    });
+
+    expect(result).toEqual({ bridged: false, matchedFileIds: [] });
+    expect(files.find).not.toHaveBeenCalled();
+  });
+
+  it('反查抛错时不影响入站主流程（返回未桥接）', async () => {
+    const files = makeFilesRepo([]);
+    files.find.mockRejectedValue(new Error('index unavailable') as never);
+    const ctx = setup(files);
+
+    const result = await ctx.service.bridgeInboundCopyToLogicalFile({
+      fileUniqueId: 'UNIQ-boom',
+      accountId: 'a1',
+      telegramFileId: 'a1-file',
+      chatId: '-100777',
+      messageId: '60',
+    });
+
+    expect(result).toEqual({ bridged: false, matchedFileIds: [] });
   });
 });

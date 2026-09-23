@@ -13,6 +13,9 @@ function counters(overrides: Partial<AccountPoolCounters> = {}): AccountPoolCoun
     streamFailures: 0,
     replyFailures: 0,
     inboundRegistrationFailures: 0,
+    userRelaysOk: 0,
+    userRelaysFailed: 0,
+    inboundBridgeMisses: 0,
     ...overrides,
   };
 }

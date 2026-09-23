@@ -37,8 +37,6 @@ function parseTrustProxyHops(raw: string | undefined): number | undefined {
  * - `DEPLOYMENT_MODE` 非法取值。
  * - 账号池启用但缺少流式前置（未显式 `TELEGRAM_FILE_STREAMING_ENABLED=true`，
  *   或 `TELEGRAM_FILE_STREAM_BASE` 非法）：账号池回源依赖实时流端点。
- * - `TELEGRAM_USER_RELAY_ENABLED=true`：用户账号中继客户端尚未接入，
- *   开启只会得到「已配置但不可用」的假象。
  *
  * 告警项（warnings）：
  * - 生产环境既未显式 `SECURE_COOKIE=true` 也未配置 `TRUST_PROXY_HOPS`：
@@ -46,6 +44,9 @@ function parseTrustProxyHops(raw: string | undefined): number | undefined {
  * - 生产环境监听 `0.0.0.0`：应经反向代理暴露，避免 Node 直接监听公网端口。
  * - 账号池/镜像开关已启用但未配置 `TELEGRAM_ACCOUNT_ENCRYPTION_KEY`：
  *   后台新增/轮换账号会被拒绝（不阻断启动，但属可操作性缺口）。
+ * - `TELEGRAM_USER_RELAY_ENABLED=true`：用户账号中继（策略 B）依赖
+ *   「已授权的 user 账号 + 副本可见群（全部 Bot 关闭隐私模式或为管理员）」，
+ *   这些是**运行期**事实，启动期无法判定，因此只提示并在运行期自动回退策略 A。
  */
 export function evaluateDeploymentPreflight(
   env: NodeJS.ProcessEnv = process.env,
@@ -104,12 +105,27 @@ export function evaluateDeploymentPreflight(
     }
   }
 
-  // ---- 用户账号中继（策略 B）：客户端未接入前必须拒绝而非仅告警 ----
-  // 历史实现只记 warning 后回退到策略 A，会让运维误以为「已启用中继」。
+  // ---- 用户账号中继（策略 B）：客户端已接入，改为运行期能力校验 + 启动期前置提示 ----
+  // 为什么不在这里做「能力校验」并拒绝启动：中继的可用性取决于**运行期事实**
+  // （是否已授权 user 账号、账号 session 能否解密、副本可见群权限），纯函数预检读不到这些。
+  // 若在此硬拒绝，运维会因为「还没在后台完成授权」而无法启动服务，反而更糟。
+  // 真实判定在 UserRelayService.isConfigured()/relay()：不可用时返回可诊断失败，
+  // 上层自动回退策略 A（逐账号二次上传），文件可用性不受影响。
   if ((env.TELEGRAM_USER_RELAY_ENABLED ?? '').trim().toLowerCase() === 'true') {
-    errors.push(
-      'TELEGRAM_USER_RELAY_ENABLED=true 被拒绝：用户账号 MTProto 中继客户端尚未接入本版本，' +
-        '开启只会得到「已配置但不可用」的假象。请保持 false，或等待后续版本单独评审（含 session 保管与风控）。',
+    if (!(env.TELEGRAM_ARCHIVE_CHAT_ID ?? '').trim()) {
+      warnings.push(
+        'TELEGRAM_USER_RELAY_ENABLED=true 但未配置 TELEGRAM_ARCHIVE_CHAT_ID：'
+          + '下载期的懒扩散中继没有目标群，将无法通过用户账号中继补齐副本（会回退到逐账号二次上传）。'
+          + '若只使用镜像规则的备份群，可忽略本条。',
+      );
+    }
+    warnings.push(
+      'TELEGRAM_USER_RELAY_ENABLED=true（用户账号中继 / 策略 B）：请确认——'
+        + '(1) 已在「账号管理」授权至少一个 user 账号并启用；'
+        + '(2) 该账号同时是源群与副本可见群的成员且可写；'
+        + '(3) 副本可见群内**每个 Bot 都已关闭隐私模式或设为管理员**'
+        + '（Telegram 硬限制：默认隐私模式下 Bot 收不到用户账号发出的普通群消息，副本将无法被认领）。'
+        + '不满足时中继会明确失败并自动回退到逐账号二次上传，不影响文件可用性。',
     );
   }
 

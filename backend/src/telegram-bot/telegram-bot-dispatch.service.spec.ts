@@ -11,6 +11,9 @@ type Counters = {
   streamFailures: number;
   replyFailures: number;
   inboundRegistrationFailures: number;
+  userRelaysOk: number;
+  userRelaysFailed: number;
+  inboundBridgeMisses: number;
 };
 
 function makeCounters(): Counters {
@@ -24,6 +27,9 @@ function makeCounters(): Counters {
     streamFailures: 0,
     replyFailures: 0,
     inboundRegistrationFailures: 0,
+    userRelaysOk: 0,
+    userRelaysFailed: 0,
+    inboundBridgeMisses: 0,
   };
 }
 
@@ -74,14 +80,28 @@ function makeMessageUpdate(overrides: {
 
 function makeService(options: {
   pool?: ReturnType<typeof makePool> | null;
-  copies?: { upsertReady: jest.Mock } | null;
+  copies?: {
+    upsertReady: jest.Mock;
+    bridgeInboundCopyToLogicalFile?: jest.Mock;
+  } | null;
   accountClient?: { sendMessage: jest.Mock; forwardMessage: jest.Mock } | null;
   archiveChatId?: string;
   defaultBotToken?: string;
   issueMock?: jest.Mock;
+  /** 镜像备份群集合（用于验证「来自备份群的消息不再归档转发」） */
+  mirrorTargetChatIds?: string[];
 }) {
   const counters = makeCounters();
   const pool = options.pool === undefined ? null : options.pool;
+  const copies = options.copies
+    ? {
+        bridgeInboundCopyToLogicalFile: jest.fn(async () => ({ bridged: false, matchedFileIds: [] })),
+        ...options.copies,
+      }
+    : null;
+  const mirrorConfig = options.mirrorTargetChatIds
+    ? { listTargetChatIds: jest.fn(async () => options.mirrorTargetChatIds) }
+    : null;
   const telegramService = { sendMessage: jest.fn(async () => ({ message_id: 1, chat: { id: 7001 } })) };
   const botConfigService = {
     getConfig: jest.fn(async () => ({
@@ -142,9 +162,11 @@ function makeService(options: {
     adminService as never,
     auditService as never,
     pool as never,
-    (options.copies ?? null) as never,
+    copies as never,
     (options.accountClient ?? null) as never,
     configService as never,
+    null,
+    mirrorConfig as never,
   );
 
   return {
@@ -158,6 +180,8 @@ function makeService(options: {
     auditService,
     configService,
     pool,
+    copies,
+    mirrorConfig,
   };
 }
 
@@ -294,6 +318,74 @@ describe('TelegramBotDispatchService（多 Bot 身份链路）', () => {
     // 群消息不回复、不扣配额
     expect(accountClient.sendMessage).not.toHaveBeenCalled();
     expect(ctx.quotaService.consume).not.toHaveBeenCalled();
+  });
+
+  it('入站副本桥接到站内逻辑文件：桥接入参与副本记录完全一致（含 file_id 归属）', async () => {
+    const pool = makePool(true);
+    const bridge = jest.fn(async () => ({ bridged: true, matchedFileIds: ['file-1'] }));
+    const copies = { upsertReady: jest.fn(async () => ({})), bridgeInboundCopyToLogicalFile: bridge };
+    const accountClient = { sendMessage: jest.fn(async () => undefined), forwardMessage: jest.fn() };
+    const ctx = makeService({ pool, copies, accountClient });
+
+    await ctx.service.handleUpdate(
+      makeMessageUpdate({ chatType: 'group', chatId: -100777 }),
+      { accountId: '1234567' },
+    );
+
+    // 桥接缺失时下载选号（按 ownerType='file' 查副本）看不到这些副本，负载均衡无从发生
+    expect(bridge).toHaveBeenCalledWith({
+      fileUniqueId: 'UNIQ-1',
+      accountId: '1234567',
+      telegramFileId: 'FILE-1',
+      chatId: '-100777',
+      messageId: '100',
+      fileSize: 1024,
+    });
+    // 命中站内文件 → 不计入「未命中」
+    expect(pool.counters.inboundBridgeMisses).toBe(0);
+  });
+
+  it('桥接未命中站内文件（群消息与站内无关）时只计数，不影响副本登记', async () => {
+    const pool = makePool(true);
+    const copies = {
+      upsertReady: jest.fn(async () => ({})),
+      bridgeInboundCopyToLogicalFile: jest.fn(async () => ({ bridged: false, matchedFileIds: [] })),
+    };
+    const accountClient = { sendMessage: jest.fn(async () => undefined), forwardMessage: jest.fn() };
+    const ctx = makeService({ pool, copies, accountClient });
+
+    await ctx.service.handleUpdate(
+      makeMessageUpdate({ chatType: 'group', chatId: -100777 }),
+      { accountId: '1234567' },
+    );
+
+    expect(copies.upsertReady).toHaveBeenCalled();
+    expect(pool.counters.inboundBridgeMisses).toBe(1);
+    expect(pool.counters.inboundRegistrationFailures).toBe(0);
+  });
+
+  it('来自镜像备份群的消息：登记副本但**不再归档转发**（抑制 N 倍放大）', async () => {
+    const pool = makePool(true);
+    const copies = { upsertReady: jest.fn(async () => ({})) };
+    const accountClient = {
+      sendMessage: jest.fn(async () => undefined),
+      forwardMessage: jest.fn(async () => ({ messageId: '555' })),
+    };
+    const ctx = makeService({
+      pool,
+      copies,
+      accountClient,
+      archiveChatId: '-100999',
+      mirrorTargetChatIds: ['-100777'],
+    });
+
+    await ctx.service.handleUpdate(
+      makeMessageUpdate({ chatType: 'group', chatId: -100777 }),
+      { accountId: '1234567' },
+    );
+
+    expect(copies.upsertReady).toHaveBeenCalled();
+    expect(accountClient.forwardMessage).not.toHaveBeenCalled();
   });
 
   it('未启用池化时不登记副本（保持原行为）', async () => {

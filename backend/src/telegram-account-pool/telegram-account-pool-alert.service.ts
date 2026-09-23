@@ -11,9 +11,10 @@ import { TelegramAccountPoolService } from './telegram-account-pool.service';
  */
 const FALLBACK_RATE_WARNING = 0.2;
 const FALLBACK_RATE_MIN_SAMPLES = 5;
-/** 单次采集窗口内「复制持续失败 / 回复失败」的告警触发次数 */
+/** 单次采集窗口内「复制持续失败 / 回复失败 / 用户账号中继失败」的告警触发次数 */
 const REPLICATION_FAILURE_BURST = 3;
 const REPLY_FAILURE_BURST = 1;
+const USER_RELAY_FAILURE_BURST = 3;
 
 const COUNTER_KEYS: Array<keyof AccountPoolCounters> = [
   'selections',
@@ -25,6 +26,9 @@ const COUNTER_KEYS: Array<keyof AccountPoolCounters> = [
   'streamFailures',
   'replyFailures',
   'inboundRegistrationFailures',
+  'userRelaysOk',
+  'userRelaysFailed',
+  'inboundBridgeMisses',
 ];
 
 function zeroCounters(): AccountPoolCounters {
@@ -38,6 +42,9 @@ function zeroCounters(): AccountPoolCounters {
     streamFailures: 0,
     replyFailures: 0,
     inboundRegistrationFailures: 0,
+    userRelaysOk: 0,
+    userRelaysFailed: 0,
+    inboundBridgeMisses: 0,
   };
 }
 
@@ -129,6 +136,19 @@ export class TelegramAccountPoolAlertService {
         message: `最近失败 ${delta.replicationsFailed} 次副本扩散（成功 ${delta.replicationsOk} 次）；`
           + '请检查目标账号的存储 Chat 是否存在、Bot 是否已被加入并具备发送权限。',
         context: { failed: delta.replicationsFailed, ok: delta.replicationsOk },
+      });
+    }
+
+    if (delta.userRelaysFailed >= USER_RELAY_FAILURE_BURST) {
+      evaluations.push({
+        ruleId: 'BOT_POOL_USER_RELAY_FAILING',
+        level: AlertLevel.WARNING,
+        title: '用户账号中继持续失败',
+        message: `最近失败 ${delta.userRelaysFailed} 次用户账号中继（成功 ${delta.userRelaysOk} 次）；`
+          + '副本已自动回退到「逐账号二次上传」，但会出现上传流量放大。'
+          + '请检查：user 账号是否已授权并启用、是否同时是源群与副本可见群成员、'
+          + '以及副本可见群内每个 Bot 是否已关闭隐私模式或设为管理员。',
+        context: { failed: delta.userRelaysFailed, ok: delta.userRelaysOk },
       });
     }
 

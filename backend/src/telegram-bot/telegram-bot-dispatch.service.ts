@@ -8,6 +8,7 @@ import { FileCopyService } from '../telegram-account-pool/file-copy.service';
 import { TelegramAccountClientService } from '../telegram-account-pool/telegram-account-client.service';
 import { TelegramAccountPoolService } from '../telegram-account-pool/telegram-account-pool.service';
 import { TelegramBotFileGrant } from '../common/entities/telegram-bot-file-grant.entity';
+import { TelegramMirrorConfigService } from '../telegram-mirror/telegram-mirror-config.service';
 import { TelegramMirrorTriggerService } from '../telegram-mirror/telegram-mirror-trigger.service';
 import { TelegramBotConfigService } from './telegram-bot-config.service';
 import { TelegramBotGrantService } from './telegram-bot-grant.service';
@@ -65,6 +66,8 @@ export class TelegramBotDispatchService {
     @Optional() private readonly configService: ConfigService | null = null,
     // 镜像备份触发（可选依赖：未装配或未启用时零行为变化）
     @Optional() private readonly mirrorTrigger: TelegramMirrorTriggerService | null = null,
+    // 镜像规则读取（可选依赖）：仅用于识别「消息来自备份群」以抑制归档转发放大
+    @Optional() private readonly mirrorConfig: TelegramMirrorConfigService | null = null,
   ) {}
 
   /** 处理单条更新（异常不外抛，避免中断轮询循环） */
@@ -364,11 +367,18 @@ export class TelegramBotDispatchService {
    * 账号池增强路径（仅池化模式生效，未启用时直接返回）：
    * 1. 登记「收到该文件的账号」副本 —— 逻辑主键必须用 Telegram `file_unique_id`
    *    （跨账号稳定），这样后续「按负载选一个账号回源」才有候选集合；
-   * 2. 若配置了归档群，则用接收账号把消息转发到归档群（`TELEGRAM_ARCHIVE_CHAT_ID`）。
+   * 2. **桥接**：把该入站副本同时写成「站内逻辑文件（`ownerType='file'`）」的副本，
+   *    否则下载选号（按站内 `file.id` 查副本）永远看不到它，副本扩散形同虚设；
+   * 3. 若配置了归档群，则用接收账号把消息转发到归档群（`TELEGRAM_ARCHIVE_CHAT_ID`）。
    *
    * **注意**：转发到群**不会**让其它 bot 拿到该文件（Telegram 规定 bot 看不到其它 bot 的消息）。
-   * 跨账号共享由「副本扩散」（策略 A）或「用户账号中继」（策略 B）完成，见
-   * `docs/backend-pool-adaptation.md`；转发只是审计/归属留痕。
+   * 跨账号共享由「副本扩散」（策略 A）或「用户账号中继」（策略 B）完成：
+   * 用户账号把源消息转发进副本可见群后，群内每个 Bot（管理员/关闭隐私模式）各自收到更新，
+   * 在此处登记**自己账号的** `file_id` 副本，这就是策略 B 的完成条件。
+   * 转发到归档群只是审计/归属留痕。
+   *
+   * 放大抑制：来自镜像备份群的消息**只登记副本**，不再归档转发——否则群内 N 个 Bot
+   * 会各自转发一次，把归档群消息量按 Bot 数放大（见 `isMirrorTargetChat`）。
    */
   private async registerInboundCopyAndForward(
     message: TelegramMessage,
@@ -405,6 +415,17 @@ export class TelegramBotDispatchService {
           source: 'inbound',
         });
         this.logger.log(`已登记入站副本：账号 ${accountId} / fileUnique=${uniqueId.slice(0, 16)}…`);
+        // 副本扩散的「最后一公里」：桥接到站内逻辑文件，让下载选号能用上这些副本。
+        // 未命中（该群消息与站内文件无关）属正常现象，只计数、不告警。
+        const bridged = await copies.bridgeInboundCopyToLogicalFile({
+          fileUniqueId: uniqueId,
+          accountId,
+          telegramFileId: doc.file_id,
+          chatId,
+          messageId,
+          fileSize: typeof doc.file_size === 'number' && doc.file_size > 0 ? doc.file_size : null,
+        });
+        if (!bridged.bridged) pool.bumpCounter('inboundBridgeMisses');
       } catch (error) {
         pool.bumpCounter('inboundRegistrationFailures');
         const text = error instanceof Error ? error.message : String(error);
@@ -417,6 +438,13 @@ export class TelegramBotDispatchService {
     const account = pool.getConfig(accountId);
     if (!archiveChatId || !account || !this.accountClient || !chatId || !messageId) return;
     if (chatId === archiveChatId) return; // 已在归档群，避免自转发循环
+
+    // 来自「镜像备份群」的消息只登记副本、不再归档转发：副本可见群里的每条消息会被
+    // 群内每个 Bot 各收到一次，逐个转发会让归档群消息量按 Bot 数（N）放大。
+    if (await this.isMirrorTargetChat(chatId)) {
+      this.logger.debug(`来源为镜像备份群（chat=${chatId}），跳过归档转发以避免 N 倍放大`);
+      return;
+    }
     try {
       const forwarded = await this.accountClient.forwardMessage(
         accountId,
@@ -429,6 +457,25 @@ export class TelegramBotDispatchService {
     } catch (error) {
       const text = error instanceof Error ? error.message : String(error);
       this.logger.warn(`转发到归档群失败（忽略）: ${text}`);
+    }
+  }
+
+  /**
+   * 判断某个 chat 是否是镜像规则的「备份群」（副本可见群）。
+   *
+   * 读不到规则时返回 false：宁可多发一次归档转发，也不要因为规则暂时不可读
+   * 而漏掉「副本可见性」这类真实可用性问题。
+   */
+  private async isMirrorTargetChat(chatId: string): Promise<boolean> {
+    if (!this.mirrorConfig) return false;
+    try {
+      const targets = await this.mirrorConfig.listTargetChatIds();
+      return targets.includes(chatId);
+    } catch (error) {
+      this.logger.debug(
+        `备份群集合读取失败（按「非备份群」处理）：${error instanceof Error ? error.message : String(error)}`,
+      );
+      return false;
     }
   }
 

@@ -73,6 +73,8 @@ describe('真实 SQLite 数据源关键业务与并发 QA', () => {
       'SqliteCreateTelegramAccounts1803000000000',
       'SqliteCreateTelegramMirror1803100000000',
       'SqliteAddFileTelegramSourceFields1803200000000',
+      // v1.5.4：入站副本 → 站内文件桥接（files.telegramFileUniqueId 索引）
+      'SqliteAddFileTelegramUniqueIdIndex1803300000000',
     ]);
 
     await dataSource.undoLastMigration();

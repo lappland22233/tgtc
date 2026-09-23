@@ -66,6 +66,9 @@ export class TelegramAccountPoolService implements OnModuleInit, OnApplicationSh
     streamFailures: 0,
     replyFailures: 0,
     inboundRegistrationFailures: 0,
+    userRelaysOk: 0,
+    userRelaysFailed: 0,
+    inboundBridgeMisses: 0,
   };
 
   /** 供健康探测注入：`(id) => Promise<void>`；由模块装配阶段设置，避免循环依赖 */
