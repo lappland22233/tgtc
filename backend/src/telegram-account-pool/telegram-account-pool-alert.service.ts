@@ -1,4 +1,4 @@
-import { Injectable, Logger, Optional } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { AlertLevel } from '../common/entities/alert.entity';
 import { AlertEngineService } from '../alert/alert-engine.service';
 import { AlertRuleEvaluation } from '../alert/alert.rules';
@@ -74,7 +74,10 @@ export class TelegramAccountPoolAlertService {
 
   constructor(
     private readonly pool: TelegramAccountPoolService,
-    @Optional() private readonly alertEngine: AlertEngineService | null = null,
+    // 必须显式 `@Inject(X)`：`X | null` 联合类型发出的是 `Object`，
+    // 否则 `@Optional()` 会把解析失败静默降级成 `null`（告警只写日志、永不落库）。
+    @Optional() @Inject(AlertEngineService)
+    private readonly alertEngine: AlertEngineService | null = null,
   ) {}
 
   /**

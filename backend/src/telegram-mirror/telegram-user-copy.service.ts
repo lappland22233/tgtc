@@ -1,4 +1,4 @@
-import { Injectable, Logger, Optional } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
@@ -41,10 +41,15 @@ export class TelegramUserCopyService {
     private readonly source: TelegramMirrorSourceService,
     private readonly accounts: TelegramAccountsService,
     private readonly userClient: TelegramUserClientService,
-    // 以下为搬运私聊来源所需的可选依赖：未装配时 private-chat 来源会给出可诊断的 blocked 错误
-    @Optional() private readonly client: TelegramAccountClientService | null = null,
-    @Optional() private readonly pool: TelegramAccountPoolService | null = null,
-    @Optional() private readonly configService: ConfigService | null = null,
+    // 以下为搬运私聊来源所需的可选依赖：未装配时 private-chat 来源会给出可诊断的 blocked 错误。
+    // 必须显式 `@Inject(X)`：`X | null` 联合类型发出的是 `Object`，
+    // 否则 `@Optional()` 会把解析失败静默降级成 `null`（私聊搬运能力整体缺失）。
+    @Optional() @Inject(TelegramAccountClientService)
+    private readonly client: TelegramAccountClientService | null = null,
+    @Optional() @Inject(TelegramAccountPoolService)
+    private readonly pool: TelegramAccountPoolService | null = null,
+    @Optional() @Inject(ConfigService)
+    private readonly configService: ConfigService | null = null,
     @Optional() @InjectRepository(TelegramMirrorTask)
     private readonly tasks: Repository<TelegramMirrorTask> | null = null,
   ) {}

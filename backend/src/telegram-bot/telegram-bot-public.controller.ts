@@ -1,4 +1,4 @@
-import { Controller, Get, HttpException, HttpStatus, Logger, NotFoundException, Optional, Param, Req, Res } from '@nestjs/common';
+import { Controller, Get, HttpException, HttpStatus, Inject, Logger, NotFoundException, Optional, Param, Req, Res } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Request, Response } from 'express';
 import { createHash } from 'crypto';
@@ -64,10 +64,15 @@ export class TelegramBotPublicController {
     private readonly rateLimitService: RateLimitService,
     private readonly streamResponder: StreamResponderService,
     private readonly auditService: AuditService,
-    // 账号池增强（可选）：启用时由账号池按负载选账号回源；未启用时全部走原单账号链路
-    @Optional() private readonly accountPoolDownload: AccountAwareDownloadService | null = null,
-    @Optional() private readonly fileCopies: FileCopyService | null = null,
-    @Optional() private readonly configService: ConfigService | null = null,
+    // 账号池增强（可选）：启用时由账号池按负载选账号回源；未启用时全部走原单账号链路。
+    // 必须显式 `@Inject(X)`：`X | null` 联合类型发出的是 `Object`，
+    // 否则 `@Optional()` 会把解析失败静默降级成 `null`（池化回源整条链路失效）。
+    @Optional() @Inject(AccountAwareDownloadService)
+    private readonly accountPoolDownload: AccountAwareDownloadService | null = null,
+    @Optional() @Inject(FileCopyService)
+    private readonly fileCopies: FileCopyService | null = null,
+    @Optional() @Inject(ConfigService)
+    private readonly configService: ConfigService | null = null,
   ) {}
 
   /**

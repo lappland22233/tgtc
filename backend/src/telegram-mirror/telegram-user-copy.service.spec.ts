@@ -23,6 +23,8 @@ describe('TelegramUserCopyService（账号粘性与幂等键）', () => {
     taskSourceChatId?: string | null;
     taskSourceMessageId?: string | null;
     panelAccounts?: Array<{ id: string; accountId: string; token: string }>;
+    /** 账号级 Bot API 客户端是否装配（`false` 模拟未装配的降级路径） */
+    clientWired?: boolean;
   } = {}) {
     const source = {
       describe: jest.fn(async () => options.descriptor
@@ -55,7 +57,7 @@ describe('TelegramUserCopyService（账号粘性与幂等键）', () => {
       source as never,
       accounts as never,
       userClient as never,
-      client as never,
+      (options.clientWired === false ? null : client) as never,
       pool as never,
       configService as never,
       tasks as never,
@@ -207,6 +209,24 @@ describe('TelegramUserCopyService（账号粘性与幂等键）', () => {
         ),
       ).rejects.toMatchObject({ code: 'relay_forward_bot_unresolved' });
       expect(ctx.client.forwardMessage).not.toHaveBeenCalled();
+    });
+
+    it('账号级 Bot API 客户端未装配时 blocked（可诊断失败，不静默按单账号继续）', async () => {
+      const ctx = setup({
+        descriptor: { chatId: '7001', messageId: '5', fileSize: 1024 },
+        ruleSourceChatId: '-100111',
+        clientWired: false,
+      });
+
+      await expect(
+        ctx.service.execute(
+          task('task-priv', { sourceAccountId: '1234567' }) as never,
+          rule(null, '-100111') as never,
+        ),
+      ).rejects.toMatchObject({ code: 'relay_client_unavailable' });
+      // 未装配时不得改用默认账号代搬（跨账号代搬会错用身份）
+      expect(ctx.client.forwardMessage).not.toHaveBeenCalled();
+      expect(ctx.tasks.update).not.toHaveBeenCalled();
     });
   });
 });

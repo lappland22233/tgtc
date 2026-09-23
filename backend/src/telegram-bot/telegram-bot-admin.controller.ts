@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Optional, Put, Query, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Inject, Optional, Put, Query, Req, UseGuards } from '@nestjs/common';
 import { Request } from 'express';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
@@ -28,10 +28,14 @@ export class TelegramBotAdminController {
     private readonly botAdminService: TelegramBotAdminService,
     private readonly tokenCryptoService: TelegramBotTokenCryptoService,
     private readonly auditService: AuditService,
-    // 账号池只读诊断（可选依赖：未装配时接口仍可访问并给出明确原因）
-    @Optional() private readonly accountPool: TelegramAccountPoolService | null = null,
+    // 账号池只读诊断（可选依赖：未装配时接口仍可访问并给出明确原因）。
+    // 必须显式 `@Inject(X)`：`X | null` 联合类型发出的是 `Object`，
+    // 否则 `@Optional()` 会把解析失败静默降级成 `null`（诊断端点永远读不到真实快照）。
+    @Optional() @Inject(TelegramAccountPoolService)
+    private readonly accountPool: TelegramAccountPoolService | null = null,
     // 入站轮询只读诊断（同模块 provider；未装配时接口仍可访问并给出明确原因）
-    @Optional() private readonly polling: TelegramBotPollingService | null = null,
+    @Optional() @Inject(TelegramBotPollingService)
+    private readonly polling: TelegramBotPollingService | null = null,
   ) {}
 
   /** 读取 Bot 配置 + 当前生效域名（便于面板展示） */

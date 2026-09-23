@@ -1,4 +1,4 @@
-import { Injectable, Logger, Optional } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { TelegramService } from '../telegram/telegram.service';
 import { AuditService } from '../common/services/audit.service';
@@ -59,15 +59,25 @@ export class TelegramBotDispatchService {
     private readonly grantService: TelegramBotGrantService,
     private readonly adminService: TelegramBotAdminService,
     private readonly auditService: AuditService,
-    // 以下四项仅用于「账号池」增强路径；未启用时全部为可选依赖（保持原单账号行为）
-    @Optional() private readonly pool: TelegramAccountPoolService | null = null,
-    @Optional() private readonly copies: FileCopyService | null = null,
-    @Optional() private readonly accountClient: TelegramAccountClientService | null = null,
-    @Optional() private readonly configService: ConfigService | null = null,
+    // 以下参数仅用于「账号池」增强路径；未启用时全部为可选依赖（保持原单账号行为）。
+    //
+    // 必须显式 `@Inject(X)`：`X | null` 联合类型在运行时只会发出 `Object`，
+    // 按类型拿不到服务类 token，`@Optional()` 会把解析失败静默降级成 `null`
+    // （既有的「账号池增强全部不生效但不报错」即由此产生）。
+    @Optional() @Inject(TelegramAccountPoolService)
+    private readonly pool: TelegramAccountPoolService | null = null,
+    @Optional() @Inject(FileCopyService)
+    private readonly copies: FileCopyService | null = null,
+    @Optional() @Inject(TelegramAccountClientService)
+    private readonly accountClient: TelegramAccountClientService | null = null,
+    @Optional() @Inject(ConfigService)
+    private readonly configService: ConfigService | null = null,
     // 镜像备份触发（可选依赖：未装配或未启用时零行为变化）
-    @Optional() private readonly mirrorTrigger: TelegramMirrorTriggerService | null = null,
+    @Optional() @Inject(TelegramMirrorTriggerService)
+    private readonly mirrorTrigger: TelegramMirrorTriggerService | null = null,
     // 镜像规则读取（可选依赖）：仅用于识别「消息来自备份群」以抑制归档转发放大
-    @Optional() private readonly mirrorConfig: TelegramMirrorConfigService | null = null,
+    @Optional() @Inject(TelegramMirrorConfigService)
+    private readonly mirrorConfig: TelegramMirrorConfigService | null = null,
   ) {}
 
   /** 处理单条更新（异常不外抛，避免中断轮询循环） */
