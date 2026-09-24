@@ -7,31 +7,18 @@ import {
   TelegramCopySource,
   TelegramFileCopy,
 } from '../common/entities/telegram-file-copy.entity';
-import { TelegramAccountClientService, TelegramAccountError } from './telegram-account-client.service';
+import type {
+  ReplicationAttemptStatus,
+  UserRelayFailureReason,
+} from '../common/entities/telegram-replication-attempt.entity';
 import { TelegramAccountPoolService } from './telegram-account-pool.service';
+import {
+  attemptStatusForRelayFailure,
+  BeginRoundResult,
+  ReplicationAttemptService,
+} from './replication-attempt.service';
 import { UserRelayService } from './user-relay.service';
 
-/** 单次请求最多为几个目标账号做副本扩散（防止一次请求打爆上传带宽） */
-const MAX_REPLICATION_TARGETS = 4;
-
-/**
- * 目标 claim 有效期（毫秒）。
- *
- * 为什么需要：`planTargets()` 只是「选号」，`pool.select()` 不占用任何在飞额度，
- * 因此并发请求会各自选出同一批目标并重复排队上传（互相看不到对方的计划）。
- * claim 表在「选中目标 → 复制结束」之间占位，让跨请求的目标选择互斥；
- * 复制结束后立即释放，失败仍可在下一轮重试。
- */
-const REPLICATION_CLAIM_TTL_MS = 5 * 60 * 1000;
-/** claim 表清理阈值（超过该规模才做一次过期清理，避免每轮遍历） */
-const REPLICATION_CLAIM_PRUNE_THRESHOLD = 1024;
-/**
- * 跨逻辑文件的复制并发上限。
- *
- * 每个逻辑文件内部保持串行；跨文件若不限制，多个文件的扩散会同时向 Telegram
- * 发起上传，与下载回源争抢账号在飞额度与出网带宽（复制只能是下载的「副产品」）。
- */
-const MAX_GLOBAL_REPLICATION_CONCURRENCY = 2;
 /** 副本覆盖率审计单次扫描的逻辑文件分组上限（管理端接口不得把全表拉进内存） */
 export const REPLICATION_COVERAGE_MAX_GROUPS = 5000;
 
@@ -47,15 +34,14 @@ export const ANCHOR_RESOLVE_MAX_ROWS = 200;
 /** 多义锚点告警日志的最小间隔（毫秒）：避免异常数据把日志刷爆 */
 const ANCHOR_CONFLICT_LOG_INTERVAL_MS = 5 * 60 * 1000;
 
-/** 大文件阈值（字节）：>1GiB 视为大文件，与账号池的每账号回源槽位口径一致 */
-const LARGE_FILE_THRESHOLD_BYTES = 1024 ** 3;
-
 /**
  * 用户账号中继后的「入站认领」等待窗口与复查间隔（毫秒）。
  *
  * 取值依据：群内各 Bot 通过长轮询收 update，典型延迟秒级（轮询周期 + 网络）；
  * 窗口必须显著短于「下载期懒扩散」的等待容忍度（首个字节不能被复制阻塞）。
  * 故意不设成长时间等待：窗口之外由下一轮懒扩散继续补齐。
+ *
+ * **预发布压测后冻结**：窗口越长，认领越可能到齐，但下载期懒扩散占用的事件循环越久。
  */
 const RELAY_CLAIM_WAIT_MS = 12_000;
 const RELAY_CLAIM_POLL_MS = 1_500;
@@ -95,51 +81,63 @@ export interface CopyRecordInput {
 }
 
 export interface ReplicationResult {
+  /** 本轮收口状态（与 `telegram_replication_attempts.status` 同一套语义） */
+  status: ReplicationAttemptStatus;
+  /** 本轮**新增**的 ready 副本账号（不含轮次开始前已持有的） */
   created: string[];
-  skipped: string[];
-  failed: Array<{ accountId: string; error: string }>;
-  /** 是否使用了用户账号中继（策略 B） */
+  /** 仍缺副本的合格账号（缺口展示；不再对应任何排队中的上传任务） */
+  missing: string[];
+  /** 中继是否已成功转发（转发成功 ≠ 副本 ready，仍需 Bot 认领） */
   relayed: boolean;
+  /** 标准化失败原因（阻塞与可重试失败共用；成功时为 undefined） */
+  failureReason?: UserRelayFailureReason;
+  /** 持久化轮次 ID（未落库时为 undefined） */
+  attemptId?: string;
+  /** 因退避窗口未到期而整轮跳过（未写轮次记录） */
+  skipped?: boolean;
 }
 
 /**
  * 文件副本服务：多账号回源的「共享层」。
  *
- * 两条共享策略（对应产品方案 A + B）：
- * - **A. 副本扩散（默认，纯 bot）**：任取一个已有副本作为源，把字节用目标账号重新上传，
- *   目标账号由此获得**自己的** `file_id`。代价是上传流量 ×(K−1)，但无外部依赖。
- * - **B. 用户账号中继（可选）**：由 MTProto 用户账号把源消息转发进群，群里各 bot（管理员）
- *   各自收到更新 → 由入站链路登记自己的副本。只需一次转发流量，但依赖 user session。
+ * **副本扩散只有一条执行方式（策略 B：用户账号服务端中继）**：
+ * 由 MTProto 用户账号把源消息转发进副本可见群，群里各 bot（管理员/关闭隐私模式）
+ * 各自收到更新 → 由入站链路登记自己的副本。只需一次转发流量，且**不发生文件字节的
+ * 二次下载/上传**。
  *
- * 并发安全：`(ownerType, ownerId, accountId)` 唯一 + 进程内 in-flight 去重，
- * 保证同一文件同一账号不会被并发重复复制。
+ * 原「策略 A（从源 Bot 下载后向目标 Bot 上传）」已整体移除：它会在中继不可用时
+ * 静默放大上传流量（N 个账号就是 N 次重传），且与下载争抢同一账号额度。
+ * 现在中继不可用一律 fail-closed——写入明确的阻塞/失败状态并按指数退避重试。
+ *
+ * 并发安全：`(ownerType, ownerId, accountId)` 唯一 + 进程内 single-flight，
+ * 保证同一文件不会被并发重复发起多轮中继。
  */
 @Injectable()
 export class FileCopyService {
   private readonly logger = new Logger(FileCopyService.name);
-  /** 进程内复制去重：key=`owner:account` → Promise */
-  private readonly inflight = new Map<string, Promise<TelegramFileCopy | null>>();
   /** 同一逻辑文件的批量扩散 single-flight：key=`ownerType:ownerId` → Promise（并发请求共享） */
   private readonly ensureCopiesInflight = new Map<string, Promise<ReplicationResult>>();
-  /** 目标 claim：key=`ownerType:ownerId:accountId` → 到期时间戳（跨请求互斥同一目标） */
-  private readonly targetClaims = new Map<string, number>();
-  /** 跨逻辑文件复制并发闸门 */
-  private activeReplications = 0;
-  private readonly replicationWaiters: Array<() => void> = [];
 
   constructor(
     @InjectRepository(TelegramFileCopy)
     private readonly repo: Repository<TelegramFileCopy>,
     private readonly pool: TelegramAccountPoolService,
-    private readonly client: TelegramAccountClientService,
     @Optional() @Inject(UserRelayService) private readonly relay: UserRelayService | null,
     /**
      * 站内逻辑文件仓库（入站副本桥接用）。
      *
-     * 用 `@Optional()`：大量单测以 `new FileCopyService(repo, pool, client, relay)` 直接构造，
+     * 用 `@Optional()`：大量单测以 `new FileCopyService(repo, pool, relay)` 直接构造，
      * 桥接是可选增强能力，缺失时应静默跳过而非抛错。
      */
     @Optional() @InjectRepository(File) private readonly files: Repository<File> | null = null,
+    /**
+     * 扩散轮次持久化（可观测性底座）。
+     *
+     * 用 `@Optional()`：单测可直接构造本服务；缺失时扩散仍按状态机执行，
+     * 只是不落库、后台看不到时间线（**绝不因为观测缺失而阻塞扩散本身**）。
+     */
+    @Optional() @Inject(ReplicationAttemptService)
+    private readonly attempts: ReplicationAttemptService | null = null,
   ) {}
 
   // ---------------- 查询 ----------------
@@ -271,10 +269,19 @@ export class FileCopyService {
     chatId: string;
     messageId: string;
     fileSize?: number | null;
+    /**
+     * 副本来源标注：命中站内逻辑文件且消息来自**启用中的镜像规则目标群**时传 `relayed`，
+     * 其余（备份群/归档群的普通入站消息）保持默认 `inbound`。
+     *
+     * 为什么必须区分：`relayed` 是「副本扩散真的生效了」的证据，而 `inbound` 只是
+     * 「某个 Bot 看到了这条消息」。把两者混在一起，后台就无法回答「中继到底有没有产生副本」。
+     */
+    source?: Extract<TelegramCopySource, 'inbound' | 'relayed'>;
   }): Promise<{ bridged: boolean; matchedFileIds: string[] }> {
     const result: { bridged: boolean; matchedFileIds: string[] } = { bridged: false, matchedFileIds: [] };
     const fileUniqueId = (params.fileUniqueId || '').trim();
     if (!fileUniqueId || !this.files) return result;
+    const source: Extract<TelegramCopySource, 'inbound' | 'relayed'> = params.source ?? 'inbound';
 
     let matches: Array<{ id: string }>;
     try {
@@ -302,7 +309,7 @@ export class FileCopyService {
           chatId: params.chatId,
           messageId: params.messageId,
           fileSize: params.fileSize ?? null,
-          source: 'inbound',
+          source,
         });
         result.matchedFileIds.push(match.id);
       } catch (error) {
@@ -325,6 +332,18 @@ export class FileCopyService {
 
   // ---------------- 写入（幂等） ----------------
 
+  /**
+   * 副本来源合并规则：语义强度 `relayed` > `replicated` > `inbound`，**只升不降**。
+   *
+   * 为什么不能后写覆盖：同一账号可能先后因不同来源登记同一个 owner（例如中继扩散后
+   * 用户又把同一文件发进非镜像群）。若允许降级，`relayed` 会被 `inbound` 覆盖，
+   * 后台的「扩散是否真的生效」就失去了可信证据。
+   */
+  private mergeCopySource(current: TelegramCopySource, incoming: TelegramCopySource): TelegramCopySource {
+    const rank: Record<TelegramCopySource, number> = { inbound: 0, replicated: 1, relayed: 2 };
+    return rank[incoming] >= rank[current] ? incoming : current;
+  }
+
   /** 登记/更新副本（同 owner+account 覆盖，重投幂等） */
   async upsertReady(input: CopyRecordInput): Promise<TelegramFileCopy> {
     const existing = await this.find(input.ownerType, input.ownerId, input.accountId);
@@ -333,7 +352,9 @@ export class FileCopyService {
       existing.chatId = input.chatId ?? existing.chatId;
       existing.messageId = input.messageId ?? existing.messageId;
       existing.fileSize = input.fileSize != null ? String(input.fileSize) : existing.fileSize;
-      existing.source = input.source;
+      // source 只升不降：`relayed` 是「中继扩散确实生效」的唯一证据，
+      // 不能被后续一次非中继来源的重复登记（inbound / replicated）抹掉。
+      existing.source = this.mergeCopySource(existing.source, input.source);
       existing.status = input.status ?? 'ready';
       existing.lastError = null;
       return this.repo.save(existing);
@@ -352,19 +373,6 @@ export class FileCopyService {
     }));
   }
 
-  async markFailed(
-    ownerType: TelegramCopyOwnerType,
-    ownerId: string,
-    accountId: string,
-    error: string,
-  ): Promise<void> {
-    const existing = await this.find(ownerType, ownerId, accountId);
-    if (!existing) return;
-    existing.status = 'failed';
-    existing.lastError = error.slice(0, 500);
-    await this.repo.save(existing);
-  }
-
   async touchUsed(copy: TelegramFileCopy): Promise<void> {
     try {
       await this.repo.update({ id: copy.id }, { lastUsedAt: new Date() });
@@ -376,15 +384,15 @@ export class FileCopyService {
   // ---------------- 选择与扩散 ----------------
 
   /**
-   * 选出「应当持有副本」的目标账号：优先当前吞吐最优、且尚未持有副本的账号。
+   * 计算「应当持有副本但仍未持有」的合格账号（**纯查询，无任何副作用**）。
    *
-   * 契约说明（修正历史注释）：`pool.select()` **不会**增加任何在飞额度，
-   * 原实现只是靠单次调用内的 `picked` 集合避免重复选中；跨请求的重复排队由
-   * 目标 claim 表（`targetClaims`）与 `ensureCopies` 的 single-flight 共同保证。
+   * 语义变更（策略 A 移除后）：本方法**不再占位、不再排队上传**，只用于
+   * 「缺口展示」——后台需要回答「还差哪几个账号」，但扩散的执行与收敛
+   * 完全由 `ensureCopies` 的中继状态机负责。
    *
-   * 目标资格（全部满足，任一不满足即排除并可通过 `evaluateTargetEligibility` 解释）：
-   * enabled、已配置存储 Chat（无存储 Chat 的上传必失败）、未处于冷却、
-   * 在飞未达 `maxInflight`、不等于源账号、当前无同文件 claim、尚未持有 ready 副本。
+   * 为什么去掉 claim：原 claim 表是为了让并发的上传任务互斥同一个目标账号；
+   * 现在扩散不再按账号逐个上传，占位只会让账号在 TTL 内无法被其它请求选中，
+   * 属于纯副作用。
    *
    * @param desiredCount 期望的副本总数（由 `ReplicaTargetResolver` 解析并收敛）
    * @param sourceAccountId 源账号（绝不作为自己的扩散目标）
@@ -398,32 +406,22 @@ export class FileCopyService {
     const held = new Set(await this.readyAccountIds(ownerType, ownerId));
     const need = Math.max(0, desiredCount - held.size);
     if (need === 0) return [];
-
-    const now = Date.now();
-    const candidates = this.eligibleTargets(ownerType, ownerId, held, sourceAccountId, now);
-    const picked: string[] = [];
-    for (let index = 0; index < Math.min(need, candidates.length); index += 1) {
-      const selection = this.pool.select(candidates.filter((id) => !picked.includes(id)));
-      if (!selection) break;
-      picked.push(selection.accountId);
-      // 选中即占位：其它请求在同一窗口内不会再选到同一目标
-      this.claimTarget(ownerType, ownerId, selection.accountId, now);
-    }
-    return picked;
+    const candidates = this.eligibleTargets(held, sourceAccountId);
+    return candidates.slice(0, need);
   }
 
   /**
    * 可承载副本的候选账号（含排除原因）。
    *
    * 与「下载选号」共用同一份账号运行态快照：冷却/在飞上限必须在这里被尊重，
-   * 否则扩散会绕开账号池的容量控制，把某账号压垮而不自知。
+   * 否则缺口展示会把「当前根本不可调度」的账号算成「可以补副本」。
+   *
+   * 说明（策略 A 移除后）：`heldAccountIds` 与 `sourceAccountId` 都由调用方传入，
+   * 方法本身是**纯函数**——不再读取任何进程内 claim 状态。
    */
   evaluateTargetEligibility(
-    ownerType: TelegramCopyOwnerType,
-    ownerId: string,
     heldAccountIds: string[],
     sourceAccountId?: string,
-    nowMs: number = Date.now(),
   ): Array<{ accountId: string; eligible: boolean; reasons: string[] }> {
     const held = new Set(heldAccountIds);
     const source = (sourceAccountId || '').trim();
@@ -437,84 +435,18 @@ export class FileCopyService {
       if (account.inflight >= account.maxInflight) reasons.push('已达在飞上限');
       if (source && account.id === source) reasons.push('与源账号相同');
       if (held.has(account.id)) reasons.push('已持有 ready 副本');
-      if (this.isClaimed(ownerType, ownerId, account.id, nowMs)) reasons.push('已有扩散任务排队中');
       return { accountId: account.id, eligible: reasons.length === 0, reasons };
     });
   }
 
   /** 过滤出可承载副本的候选账号 id（顺序沿用账号池快照顺序） */
   private eligibleTargets(
-    ownerType: TelegramCopyOwnerType,
-    ownerId: string,
     held: Set<string>,
     sourceAccountId: string | undefined,
-    nowMs: number,
   ): string[] {
-    return this.evaluateTargetEligibility(ownerType, ownerId, Array.from(held), sourceAccountId, nowMs)
+    return this.evaluateTargetEligibility(Array.from(held), sourceAccountId)
       .filter((item) => item.eligible)
       .map((item) => item.accountId);
-  }
-
-  private claimKey(ownerType: TelegramCopyOwnerType, ownerId: string, accountId: string): string {
-    return `${ownerType}:${ownerId}:${accountId}`;
-  }
-
-  private isClaimed(
-    ownerType: TelegramCopyOwnerType,
-    ownerId: string,
-    accountId: string,
-    nowMs: number,
-  ): boolean {
-    const key = this.claimKey(ownerType, ownerId, accountId);
-    const until = this.targetClaims.get(key);
-    if (until === undefined) return false;
-    if (until <= nowMs) {
-      this.targetClaims.delete(key);
-      return false;
-    }
-    return true;
-  }
-
-  private claimTarget(
-    ownerType: TelegramCopyOwnerType,
-    ownerId: string,
-    accountId: string,
-    nowMs: number,
-  ): void {
-    this.pruneClaims(nowMs);
-    this.targetClaims.set(this.claimKey(ownerType, ownerId, accountId), nowMs + REPLICATION_CLAIM_TTL_MS);
-  }
-
-  /** 复制结束（成功/失败/异常）后释放 claim，让失败目标能在下一轮重试 */
-  private releaseClaim(ownerType: TelegramCopyOwnerType, ownerId: string, accountId: string): void {
-    this.targetClaims.delete(this.claimKey(ownerType, ownerId, accountId));
-  }
-
-  /** 清理过期 claim（仅在表规模较大时遍历，避免每轮扫描） */
-  private pruneClaims(nowMs: number): void {
-    if (this.targetClaims.size < REPLICATION_CLAIM_PRUNE_THRESHOLD) return;
-    for (const [key, until] of this.targetClaims) {
-      if (until <= nowMs) this.targetClaims.delete(key);
-    }
-  }
-
-  /** 获取跨文件复制槽位（超出并发上限则排队等待） */
-  private async acquireReplicationSlot(): Promise<void> {
-    if (this.activeReplications < MAX_GLOBAL_REPLICATION_CONCURRENCY) {
-      this.activeReplications += 1;
-      return;
-    }
-    await new Promise<void>((resolve) => {
-      this.replicationWaiters.push(resolve);
-    });
-    this.activeReplications += 1;
-  }
-
-  /** 归还跨文件复制槽位并唤醒下一个等待者 */
-  private releaseReplicationSlot(): void {
-    this.activeReplications = Math.max(0, this.activeReplications - 1);
-    const next = this.replicationWaiters.shift();
-    next?.();
   }
 
   /**
@@ -754,201 +686,6 @@ export class FileCopyService {
   }
 
   /**
-   * 确保指定账号持有文件副本（策略 A；失败自动记录并交由账号池冷却）。
-   * `source` 可指定复制来源（例如刚收到文件的账号）；不指定则由账号池从现有副本中挑最优者。
-   */
-  async ensureCopy(
-    params: {
-      ownerType: TelegramCopyOwnerType;
-      ownerId: string;
-      targetAccountId: string;
-      fileName: string;
-      expectedSize: number;
-      sourceAccountId?: string;
-    },
-  ): Promise<TelegramFileCopy | null> {
-    const key = `${params.ownerType}:${params.ownerId}:${params.targetAccountId}`;
-    const running = this.inflight.get(key);
-    if (running) return running;
-
-    const task = this.doEnsureCopy(params).finally(() => {
-      this.inflight.delete(key);
-      // 无论成功与失败都释放 claim：失败必须能在下一轮（或稍后）重试同一目标
-      this.releaseClaim(params.ownerType, params.ownerId, params.targetAccountId);
-    });
-    this.inflight.set(key, task);
-    return task;
-  }
-
-  /** 复制并发闸门包装：跨逻辑文件最多 `MAX_GLOBAL_REPLICATION_CONCURRENCY` 个复制同时进行 */
-  private async doEnsureCopy(params: {
-    ownerType: TelegramCopyOwnerType;
-    ownerId: string;
-    targetAccountId: string;
-    fileName: string;
-    expectedSize: number;
-    sourceAccountId?: string;
-  }): Promise<TelegramFileCopy | null> {
-    await this.acquireReplicationSlot();
-    try {
-      return await this.performCopy(params);
-    } finally {
-      this.releaseReplicationSlot();
-    }
-  }
-
-  /** 实际复制：源账号取流 → 目标账号重新上传 → 登记 ready 副本（失败留痕并交账号池冷却） */
-  private async performCopy(params: {
-    ownerType: TelegramCopyOwnerType;
-    ownerId: string;
-    targetAccountId: string;
-    fileName: string;
-    expectedSize: number;
-    sourceAccountId?: string;
-  }): Promise<TelegramFileCopy | null> {
-    const target = this.pool.getConfig(params.targetAccountId);
-    if (!target) {
-      this.logger.warn(`副本扩散目标账号不存在：${params.targetAccountId}`);
-      return null;
-    }
-    // 无存储 Chat 的账号无法承载副本（上传必失败），直接跳过并留痕
-    if (!target.chatId) {
-      this.logger.warn(`副本扩散目标账号未配置存储 Chat，已跳过：${params.targetAccountId}`);
-      return null;
-    }
-    // 1) 选源：优先调用方指定，否则从现有 ready 副本里按加权挑（读侧也做负载分散）
-    const sources = await this.listReady(params.ownerType, params.ownerId);
-    // 目标已持有 ready 副本 → 无可扩散内容（幂等：不重复上传、不消耗上游额度）
-    const alreadyHeld = sources.find((item) => item.accountId === params.targetAccountId);
-    if (alreadyHeld) {
-      this.logger.debug(`副本扩散目标 ${params.targetAccountId} 已持有 ready 副本，跳过重复上传`);
-      return alreadyHeld;
-    }
-    // 源账号与目标账号不能相同：直接把 A 的副本「复制给 A」没有意义
-    const sourceCopy = params.sourceAccountId && params.sourceAccountId !== params.targetAccountId
-      ? sources.find((item) => item.accountId === params.sourceAccountId) ?? null
-      : null;
-    // 大小必须在选源之前解析：档位（大文件槽位）与复制权重都依赖它
-    const size = Number(sourceCopy?.fileSize ?? sources[0]?.fileSize ?? params.expectedSize);
-    if (!Number.isSafeInteger(size) || size <= 0) {
-      this.logger.warn(`副本扩散缺少有效大小（${params.ownerType}:${params.ownerId}）`);
-      return null;
-    }
-    const sourceCandidates = sources.filter((item) => item.accountId !== params.targetAccountId);
-    // 复制选源同样按复制角色选号：已有复制流的账号被排除（下载优先，复制不与之争同一账号额度）
-    const fallbackSelection = this.pool.select(
-      sourceCandidates.map((item) => item.accountId),
-      Date.now(),
-      { role: 'replication', largeFile: size > LARGE_FILE_THRESHOLD_BYTES },
-    );
-    const chosenSource = sourceCopy
-      ?? (fallbackSelection ? sourceCandidates.find((item) => item.accountId === fallbackSelection.accountId) ?? null : null);
-    if (!chosenSource) {
-      this.pool.bumpCounter('replicationsFailed');
-      this.logger.warn(
-        `副本扩散缺少可用源（${params.ownerType}:${params.ownerId}）——请先登记至少一个 inbound 副本`,
-      );
-      return null;
-    }
-    const sourceAccount = this.pool.getConfig(chosenSource.accountId);
-    if (!sourceAccount) return null;
-
-    // 2) 源账号取流：走**复制专属**原子准入（冷却 + 在飞 + 复制并发），
-    //    与下载共享同一账号计数，保证「两条复制流偷占唯一源账号的下载额度」不再发生。
-    const sourceAdmission = this.pool.admit({
-      accountId: sourceAccount.id,
-      role: 'replication',
-      bytes: size,
-    });
-    if (!sourceAdmission.granted || !sourceAdmission.admission) {
-      // 复制是「副产品」：拿不到额度就本轮不做，绝不排队占用下载资源
-      this.pool.bumpCounter('replicationsFailed');
-      this.logger.debug(
-        `副本扩散跳过（源账号 ${sourceAccount.id} 无复制额度：${sourceAdmission.reason ?? 'unknown'}）`,
-      );
-      return null;
-    }
-    const sourceSlot = sourceAdmission.admission;
-    let session: Awaited<ReturnType<TelegramAccountClientService['openRealtimeStream']>>;
-    try {
-      session = await this.client.openRealtimeStream(sourceAccount.id, sourceAccount.token, chosenSource.telegramFileId, size);
-    } catch (error) {
-      sourceSlot.release();
-      const message = error instanceof Error ? error.message : String(error);
-      this.logger.warn(`副本扩散取源失败（${sourceAccount.id}）：${message}`);
-      return null;
-    }
-    // 源流采样必须**幂等**：`close` 与 `error` 都可能触发（例如先 error 后 close），
-    // 重复回报会二次释放在飞额度、翻倍累计请求/失败并放大冷却，污染账号画像、
-    // 削弱「每账号在飞上限」的限流保护。
-    let sourceSettled = false;
-    const settleSource = (): void => {
-      if (sourceSettled) return;
-      sourceSettled = true;
-      sourceSlot.finish(session.sample());
-    };
-    session.stream.once('close', settleSource);
-    session.stream.once('error', settleSource);
-
-    // 3) 目标账号上传：同样按复制角色准入（目标账号也算一条复制流）
-    const targetAdmission = this.pool.admit({
-      accountId: target.id,
-      role: 'replication',
-      bytes: size,
-    });
-    if (!targetAdmission.granted || !targetAdmission.admission) {
-      // 只销毁源流，并由 settleSource 释放且仅释放一次额度
-      // （destroy 触发的 close 会再次回调同一守卫，不会重复释放）
-      session.stream.destroy();
-      settleSource();
-      this.pool.bumpCounter('replicationsFailed');
-      this.logger.debug(
-        `副本扩散跳过（目标账号 ${target.id} 无复制额度：${targetAdmission.reason ?? 'unknown'}）`,
-      );
-      return null;
-    }
-    const targetSlot = targetAdmission.admission;
-    try {
-      const uploaded = await this.client.sendDocumentStream(
-        target.id,
-        target.token,
-        target.chatId,
-        session.stream,
-        params.fileName,
-        size,
-      );
-      targetSlot.finish(uploaded.sample);
-      const copy = await this.upsertReady({
-        ownerType: params.ownerType,
-        ownerId: params.ownerId,
-        accountId: target.id,
-        telegramFileId: uploaded.fileId,
-        chatId: uploaded.chatId,
-        messageId: uploaded.messageId,
-        fileSize: uploaded.fileSize,
-        source: 'replicated',
-      });
-      this.pool.bumpCounter('replicationsOk');
-      this.logger.log(
-        `副本扩散成功：${params.ownerType}:${params.ownerId} → 账号 ${target.id}（源 ${sourceAccount.id}）`,
-      );
-      return copy;
-    } catch (error) {
-      const accountError = error instanceof TelegramAccountError ? error : null;
-      targetSlot.finish({
-        ok: false,
-        failureKind: accountError?.kind ?? 'other',
-        status: accountError?.status,
-        retryAfterSeconds: accountError?.retryAfterSeconds,
-        errorMessage: error instanceof Error ? error.message : String(error),
-      });
-      this.pool.bumpCounter('replicationsFailed');
-      await this.markFailed(params.ownerType, params.ownerId, target.id, error instanceof Error ? error.message : String(error));
-      return null;
-    }
-  }
-
-  /**
    * 副本记录生命周期清理（策略定义）。
    *
    * 为什么需要：副本表是「逻辑文件 → 账号 → file_id」的映射，会随扩散失败、账号摘除、
@@ -995,103 +732,269 @@ export class FileCopyService {
   }
 
   /**
-   * 批量确保副本：给 planTargets 选出的账号逐个扩散（串行，避免抢占下载带宽）。
-   * 若配置了用户账号中继（策略 B），优先尝试中继（省一次上传流量）。
+   * 确保副本达标（**策略 B 单链路**，fail-closed 状态机）。
+   *
+   * 执行顺序（每一步都会落成可查询的轮次状态，不再有静默跳过）：
+   * 1. 缺口计算：已达标直接返回 `succeeded`，**不写轮次**（无工作可做）；
+   * 2. 前置能力校验：中继未启用 / 源锚点缺失 / 目标群未配置 → 直接收口为 `blocked_*`；
+   * 3. 幂等中继：服务端转发（重试不产生重复群消息）；
+   * 4. 有界认领等待：转发成功 ≠ 副本 ready，必须等 Bot 认领；
+   * 5. 落状态：`succeeded` / `partial_success` / `claim_timeout` / `retryable_failed`。
+   *
+   * **绝不发生文件字节的二次下载/上传**：中继不可用时只写失败状态并退避重试，
+   * 已有副本的下载不受影响（文件始终可用，只是不再产生新副本）。
+   *
+   * single-flight 语义：并发调用共享同一轮结果；缺口由下一轮懒扩散继续补齐。
    */
   async ensureCopies(params: {
     ownerType: TelegramCopyOwnerType;
     ownerId: string;
-    fileName: string;
-    expectedSize: number;
     desiredCount: number;
     sourceAccountId?: string;
+    /**
+     * 手动重试（后台显式操作）。
+     *
+     * 语义差异：跳过退避窗口与合并窗口、新建轮次并记录操作人与来源轮次。
+     * 但**不绕过** single-flight——若已有轮次在途，先等它收口再强制新开一轮，
+     * 否则手动重试会被在途轮次合并后又被退避跳过（表现为「点了重试没反应」）。
+     */
+    manualRetry?: { operatorUserId: string; retriedFromId: string };
   }): Promise<ReplicationResult> {
     const key = `${params.ownerType}:${params.ownerId}`;
     const running = this.ensureCopiesInflight.get(key);
-    if (running) return running;
+    if (running) {
+      if (!params.manualRetry) return running;
+      // 手动重试：等在途轮次收口（不继承其结果），随后强制新开一轮。
+      // 等待期间可能又有人开了新轮次，必须重新检查——否则会并发两轮中继。
+      await running.catch(() => undefined);
+      const pending = this.ensureCopiesInflight.get(key);
+      if (pending && pending !== running) await pending.catch(() => undefined);
+    }
 
-    const task = this.doEnsureCopies(params).finally(() => this.ensureCopiesInflight.delete(key));
+    const task = this.doEnsureCopies(params).finally(() => {
+      // 只清理自己的任务：无条件 delete 会把后来者的在途任务从 map 摘掉，
+      // 之后任何人都会再开一轮 → single-flight 失效。
+      if (this.ensureCopiesInflight.get(key) === task) this.ensureCopiesInflight.delete(key);
+    });
     this.ensureCopiesInflight.set(key, task);
     return task;
   }
 
-  /**
-   * 实际执行批量扩散（同一逻辑文件内**串行**，跨文件由复制并发闸门限制）。
-   *
-   * single-flight 语义：并发调用共享同一轮结果；若后到者需要更多目标，
-   * 会由下一轮懒扩散补齐（扩散是持续过程，不追求单次到齐）。
-   */
+  /** 状态机实现（见 `ensureCopies` 的执行顺序说明） */
   private async doEnsureCopies(params: {
     ownerType: TelegramCopyOwnerType;
     ownerId: string;
-    fileName: string;
-    expectedSize: number;
     desiredCount: number;
     sourceAccountId?: string;
+    manualRetry?: { operatorUserId: string; retriedFromId: string };
   }): Promise<ReplicationResult> {
-    const result: ReplicationResult = { created: [], skipped: [], failed: [], relayed: false };
+    const { ownerType, ownerId } = params;
+    const desired = Math.max(1, Math.floor(params.desiredCount) || 1);
+    const result: ReplicationResult = {
+      status: 'planned',
+      created: [],
+      missing: [],
+      relayed: false,
+    };
 
-    const held = await this.readyAccountIds(params.ownerType, params.ownerId);
-    if (held.length >= params.desiredCount) {
-      result.skipped = held;
+    // 1) 缺口计算：达标即结束，不写轮次（否则「健康文件」会持续制造无意义事件行）
+    const held = await this.readyAccountIds(ownerType, ownerId);
+    if (held.length >= desired) {
+      result.status = 'succeeded';
       return result;
     }
 
-    // 策略 B：用户账号中继（一次转发 → 各 bot 由入站链路自行登记副本）。
-    // **中继成功 ≠ 副本 ready**：群内 Bot 未加入/隐私模式/轮询未开时，
-    // 转发出去的消息无人认领。因此中继成功后必须先等一个**认领窗口**，
-    // 只有确实新增了 ready 副本才算完成；否则回退策略 A，绝不静默跳过扩散。
-    const relayed = await this.tryRelayViaUser(params.ownerType, params.ownerId, params.sourceAccountId);
-    if (relayed.ok) {
-      const claimed = await this.waitForRelayClaims(
-        params.ownerType,
-        params.ownerId,
-        held.length,
-        params.desiredCount,
+    // 源锚点：中继必须持有 (chatId, messageId)，且该消息所在的群要对用户账号可读
+    const sources = await this.listReady(ownerType, ownerId);
+    const anchor = (params.sourceAccountId
+      ? sources.find((item) => item.accountId === params.sourceAccountId)
+      : undefined) ?? sources[0] ?? null;
+    const anchorChatId = (anchor?.chatId || '').trim();
+    const anchorMessageId = (anchor?.messageId || '').trim();
+    // 目标群唯一权威：启用中的镜像规则（不再回退归档群，见 UserRelayService.resolveTargetChatId）
+    const targetChatId = (await this.relay?.resolveTargetChatId() ?? '').trim();
+
+    const begin = await this.attempts?.beginRound({
+      ownerType,
+      ownerId,
+      sourceAccountId: anchor?.accountId ?? params.sourceAccountId ?? null,
+      targetChatId: targetChatId || null,
+      idempotencyKey: `copy:${ownerType}:${ownerId}`,
+      desiredCount: desired,
+      baselineReadyCount: held.length,
+      force: Boolean(params.manualRetry),
+      triggeredBy: params.manualRetry ? 'manual' : 'lazy',
+      operatorUserId: params.manualRetry?.operatorUserId ?? null,
+      retriedFromId: params.manualRetry?.retriedFromId ?? null,
+    }) ?? null;
+
+    if (begin?.skipped) {
+      // 退避窗口未到期：整轮跳过且不写行（这是行数控制与限流保护的主要手段）
+      result.skipped = true;
+      result.status = 'planned';
+      result.missing = await this.planTargets(ownerType, ownerId, desired, params.sourceAccountId);
+      return result;
+    }
+    result.attemptId = begin?.attempt?.id ?? undefined;
+
+    // 2) 前置能力校验：不满足即收口为 blocked_*，绝不进入任何字节传输路径
+    const blocker = this.evaluateRelayBlockers({
+      relayAvailable: Boolean(this.relay),
+      relayEnabled: this.relay?.isEnabledByConfig() ?? false,
+      targetChatId,
+      anchorChatId,
+      anchorMessageId,
+    });
+    if (blocker) {
+      await this.settleBlockedRound(begin, blocker.status, blocker.reason, blocker.summary, desired, held.length);
+      result.status = blocker.status;
+      result.failureReason = blocker.reason;
+      result.missing = await this.planTargets(ownerType, ownerId, desired, params.sourceAccountId);
+      this.logger.log(
+        `副本扩散阻塞（${ownerType}:${ownerId} / ${blocker.reason}）：${blocker.summary}`
+        + '——策略 B 为唯一链路，不产生任何字节二次传输',
       );
-      if (claimed.length > held.length) {
-        result.relayed = true;
-        result.created = claimed.filter((accountId) => !held.includes(accountId));
-        this.logger.log(
-          `用户账号中继已生效：${params.ownerType}:${params.ownerId} 新增 ${result.created.length} 个认领账号`
-          + `（${result.created.join(', ')}）`,
-        );
-        return result;
-      }
+      return result;
+    }
+
+    // 3) 幂等中继
+    if (result.attemptId) await this.attempts?.markRelayStarted(result.attemptId);
+    const relayed = await this.relay!.relay({
+      sourceChatId: anchorChatId,
+      sourceMessageId: anchorMessageId,
+      targetChatId,
+      idempotencyKey: `copy:${ownerType}:${ownerId}`,
+      // 重试尽量落回上一轮的执行账号：`random_id` 由「幂等键 + 执行账号」派生，
+      // 只有同账号重试才能命中服务端去重（不产生重复群消息）。账号不可用时
+      // `pickUserAccount` 会确定性回落并在日志中告警——那种情况下去重不再成立。
+      preferredAccountId: begin?.previousRelayAccountId ?? undefined,
+    });
+    if (!relayed.ok) {
+      const reason: UserRelayFailureReason = relayed.reason ?? 'unknown';
+      const status = attemptStatusForRelayFailure(reason);
+      await this.settleBlockedRound(
+        begin,
+        status,
+        reason,
+        relayed.detail ?? `中继失败（${reason}）`,
+        desired,
+        held.length,
+      );
+      result.status = status;
+      result.failureReason = reason;
+      result.missing = await this.planTargets(ownerType, ownerId, desired, params.sourceAccountId);
+      this.logger.warn(`副本扩散中继失败（${ownerType}:${ownerId} / ${reason}）：${relayed.detail ?? '无详情'}`);
+      return result;
+    }
+
+    // 4) 有界认领等待：转发成功 ≠ 副本 ready
+    const claimDeadlineAt = new Date(Date.now() + RELAY_CLAIM_WAIT_MS);
+    if (result.attemptId) {
+      await this.attempts?.markRelaySucceeded(result.attemptId, {
+        relayAccountId: relayed.accountId ?? '',
+        relayMessageId: relayed.messageId ?? null,
+        claimDeadlineAt,
+      });
+    }
+    const claimed = await this.waitForRelayClaims(ownerType, ownerId, held.length, desired);
+
+    // 5) 落状态：新增 ≥1 个 ready 副本 = partial_success；达到目标 = succeeded；零新增 = claim_timeout
+    result.relayed = true;
+    result.created = claimed.filter((accountId) => !held.includes(accountId));
+    result.missing = await this.planTargets(ownerType, ownerId, desired, params.sourceAccountId);
+
+    if (result.attemptId) {
+      const settled = await this.attempts?.settleClaims(result.attemptId, {
+        desiredCount: desired,
+        baselineReadyCount: held.length,
+        readyAccountIds: claimed,
+      });
+      result.status = settled?.status ?? this.deriveClaimStatus(claimed, held.length, desired);
+    } else {
+      result.status = this.deriveClaimStatus(claimed, held.length, desired);
+    }
+
+    if (result.status === 'claim_timeout' || result.status === 'blocked_manual') {
       this.pool.bumpCounter('relayClaimsMissed');
       this.logger.warn(
-        `用户账号中继转发成功但无人认领（${params.ownerType}:${params.ownerId}，`
+        `用户账号中继转发成功但无人认领（${ownerType}:${ownerId}，`
         + `等待 ${RELAY_CLAIM_WAIT_MS}ms 内 ready 副本数未增加）：`
-        + '请核查群内 Bot 是否已加入、隐私模式是否已关闭、入站轮询是否开启；本次回退逐账号副本扩散',
+        + '请核查群内 Bot 是否已加入、隐私模式是否已关闭、入站轮询是否开启',
       );
     } else {
       this.logger.log(
-        `用户账号中继未生效（${params.ownerType}:${params.ownerId} / ${relayed.reason ?? 'unknown'}），`
-        + '回退逐账号副本扩散',
+        `用户账号中继已生效：${ownerType}:${ownerId} 新增 ${result.created.length} 个认领账号`
+        + `（状态 ${result.status}）`,
       );
     }
-
-    // 目标数量在规划阶段就收敛到单次上限：避免为「不会被处理」的目标留下 claim
-    // （claim 要等 5min TTL 或进程重启才消失，会让这些账号在窗口内无法被其它请求选中）
-    const targets = await this.planTargets(
-      params.ownerType,
-      params.ownerId,
-      Math.min(params.desiredCount, MAX_REPLICATION_TARGETS),
-      params.sourceAccountId,
-    );
-    for (const accountId of targets) {
-      const copy = await this.ensureCopy({
-        ownerType: params.ownerType,
-        ownerId: params.ownerId,
-        targetAccountId: accountId,
-        fileName: params.fileName,
-        expectedSize: params.expectedSize,
-        sourceAccountId: params.sourceAccountId,
-      });
-      if (copy) result.created.push(accountId);
-      else result.failed.push({ accountId, error: 'replication_failed_or_unavailable' });
-    }
     return result;
+  }
+
+  /** 认领结算口径（无持久化时的本地推导，与 `ReplicationAttemptService.settleClaims` 保持一致） */
+  private deriveClaimStatus(
+    claimed: string[],
+    baselineCount: number,
+    desiredCount: number,
+  ): ReplicationAttemptStatus {
+    if (claimed.length <= baselineCount) return 'claim_timeout';
+    return claimed.length >= desiredCount ? 'succeeded' : 'partial_success';
+  }
+
+  /**
+   * 前置能力校验（策略 B fail-closed 的判定表）。
+   *
+   * 为什么在调用 `relay()` 之前先查一遍：中继内部也会判定同样的事，但那里的失败
+   * 会先消耗一次「尝试」计数；这里把「确定性不可用」（开关未开、目标群未配、源锚点缺失）
+   * 提前分流，使告警里的失败数只反映真正的执行失败。
+   */
+  private evaluateRelayBlockers(input: {
+    relayAvailable: boolean;
+    relayEnabled: boolean;
+    targetChatId: string;
+    anchorChatId: string;
+    anchorMessageId: string;
+  }): { status: ReplicationAttemptStatus; reason: UserRelayFailureReason; summary: string } | null {
+    if (!input.relayAvailable || !input.relayEnabled) {
+      return {
+        status: 'blocked_not_configured',
+        reason: 'not_configured',
+        summary: 'TELEGRAM_USER_RELAY_ENABLED 未开启：策略 B 不可用，需配置后重启（构造期读取）',
+      };
+    }
+    if (!input.anchorChatId || !input.anchorMessageId) {
+      return {
+        status: 'blocked_source_anchor',
+        reason: 'source_missing',
+        summary: '缺少可中继的源消息锚点（chatId + messageId）：源群必须对用户账号可读',
+      };
+    }
+    if (!input.targetChatId) {
+      return {
+        status: 'blocked_target_chat',
+        reason: 'target_missing',
+        summary: '没有启用中的镜像规则目标群（副本可见群），中继没有可写入的目标位置',
+      };
+    }
+    return null;
+  }
+
+  /** 把前置阻塞/中继失败收口为轮次终态（观测缺失时静默跳过，绝不阻塞主链路） */
+  private async settleBlockedRound(
+    begin: BeginRoundResult | null,
+    status: ReplicationAttemptStatus,
+    reason: UserRelayFailureReason,
+    summary: string,
+    desiredCount: number,
+    readyCount: number,
+  ): Promise<void> {
+    const attemptId = begin?.attempt?.id;
+    if (!attemptId || !this.attempts) return;
+    await this.attempts.finishBlocked(attemptId, {
+      status,
+      failureReason: reason,
+      failureSummary: summary,
+      missingCount: Math.max(0, desiredCount - readyCount),
+    });
   }
 
   /**
@@ -1118,37 +1021,6 @@ export class FileCopyService {
       accounts = await this.readyAccountIds(ownerType, ownerId);
     }
     return accounts;
-  }
-
-  /** 策略 B：尝试用用户账号把源消息转发进群（未配置时返回可诊断原因，绝不伪装成功） */
-  private async tryRelayViaUser(
-    ownerType: TelegramCopyOwnerType,
-    ownerId: string,
-    sourceAccountId?: string,
-  ): Promise<{ ok: boolean; reason?: string }> {
-    // 只看「开关是否打开」，**不用** isConfigured() 提前短路：
-    // 后者把「客户端不可用」也折叠成 not_configured，会让 relay() 里的
-    // user_relay_unavailable 分支永远不可达 → 该类失败不进计数、不进告警（静默盲区）。
-    // 这里把「是否可用」交给 relay() 判定，由它统一计数与给出可诊断原因。
-    if (!this.relay || !this.relay.isEnabledByConfig()) {
-      return { ok: false, reason: 'user_relay_not_configured' };
-    }
-    const sources = await this.listReady(ownerType, ownerId);
-    const anchor = sourceAccountId
-      ? sources.find((item) => item.accountId === sourceAccountId)
-      : sources[0];
-    if (!anchor?.chatId || !anchor.messageId) {
-      return { ok: false, reason: 'anchor_message_missing' };
-    }
-    // 目标群由中继自行解析：优先启用中镜像规则的备份群，其次 TELEGRAM_ARCHIVE_CHAT_ID
-    const targetChatId = await this.relay.resolveTargetChatId();
-    return this.relay.relay({
-      sourceChatId: anchor.chatId,
-      sourceMessageId: anchor.messageId,
-      targetChatId,
-      // 中继同样遵守「源账号优先」：用记录里的源账号 file_id 对应的那条消息作锚点
-      idempotencyKey: `copy:${ownerType}:${ownerId}`,
-    });
   }
 
   /** 日志用的短前缀（避免把完整 file_unique_id 写进日志） */

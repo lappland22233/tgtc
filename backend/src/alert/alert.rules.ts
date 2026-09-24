@@ -199,17 +199,50 @@ export async function createAlertRules(configCache: ConfigCacheService): Promise
       evaluate: async () => null,
     },
     {
-      id: 'BOT_POOL_REPLICATION_FAILING',
-      name: 'Bot 副本扩散持续失败',
+      id: 'BOT_REPLY_FAILING',
+      name: 'Bot 入站回复失败',
+      level: AlertLevel.WARNING,
+      cooldownMinutes: 15,
+      evaluate: async () => null,
+    },
+
+    // ===== 副本扩散（策略 B：用户账号中继）告警 =====
+    // 与账号池同构：evaluate 恒为 null，触发条件由 `TelegramAccountPoolAlertService`
+    // 采集「中继能力快照 / 轮次增量 / 观测降级标记 / 大文件覆盖率」后走 createAlerts 触发；
+    // 此处只声明级别与冷却（冷却值是运维排障节奏的下限，不是可调阈值）。
+    {
+      id: 'RELAY_NOT_READY',
+      name: '用户账号中继未就绪',
+      level: AlertLevel.CRITICAL,
+      cooldownMinutes: 60,
+      evaluate: async () => null,
+    },
+    {
+      id: 'RELAY_FAILURE_BURST',
+      name: '用户账号中继持续失败',
       level: AlertLevel.WARNING,
       cooldownMinutes: 15,
       evaluate: async () => null,
     },
     {
-      id: 'BOT_REPLY_FAILING',
-      name: 'Bot 入站回复失败',
+      id: 'RELAY_CLAIM_TIMEOUT_BURST',
+      name: '中继成功但无人认领副本',
       level: AlertLevel.WARNING,
       cooldownMinutes: 15,
+      evaluate: async () => null,
+    },
+    {
+      id: 'LARGE_FILE_COVERAGE_DEGRADED',
+      name: '大文件副本覆盖率退化',
+      level: AlertLevel.WARNING,
+      cooldownMinutes: 360,
+      evaluate: async () => null,
+    },
+    {
+      id: 'REPLICATION_OBSERVABILITY_GAP',
+      name: '副本扩散观测数据缺失',
+      level: AlertLevel.WARNING,
+      cooldownMinutes: 120,
       evaluate: async () => null,
     },
 
@@ -285,8 +318,12 @@ export function getAlertRuleMetadata() {
     { id: 'SEC_ABNORMAL_DOWNLOAD', name: '异常下载', level: AlertLevel.WARNING },
     { id: 'BOT_POOL_ALL_UNAVAILABLE', name: 'Bot 账号池全部不可用', level: AlertLevel.CRITICAL },
     { id: 'BOT_POOL_FALLBACK_RATE', name: 'Bot 账号池回退率偏高', level: AlertLevel.WARNING },
-    { id: 'BOT_POOL_REPLICATION_FAILING', name: 'Bot 副本扩散持续失败', level: AlertLevel.WARNING },
     { id: 'BOT_REPLY_FAILING', name: 'Bot 入站回复失败', level: AlertLevel.WARNING },
+    { id: 'RELAY_NOT_READY', name: '用户账号中继未就绪', level: AlertLevel.CRITICAL },
+    { id: 'RELAY_FAILURE_BURST', name: '用户账号中继持续失败', level: AlertLevel.WARNING },
+    { id: 'RELAY_CLAIM_TIMEOUT_BURST', name: '中继成功但无人认领副本', level: AlertLevel.WARNING },
+    { id: 'LARGE_FILE_COVERAGE_DEGRADED', name: '大文件副本覆盖率退化', level: AlertLevel.WARNING },
+    { id: 'REPLICATION_OBSERVABILITY_GAP', name: '副本扩散观测数据缺失', level: AlertLevel.WARNING },
     { id: 'MIRROR_FAILURE_STREAK', name: '镜像连续失败', level: AlertLevel.CRITICAL },
     { id: 'MIRROR_SUCCESS_RATE_LOW', name: '镜像备份成功率偏低', level: AlertLevel.WARNING },
     { id: 'MIRROR_USER_SESSION_EXPIRED', name: '镜像用户账号 session 失效', level: AlertLevel.WARNING },

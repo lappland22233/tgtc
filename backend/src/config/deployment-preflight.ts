@@ -44,9 +44,11 @@ function parseTrustProxyHops(raw: string | undefined): number | undefined {
  * - 生产环境监听 `0.0.0.0`：应经反向代理暴露，避免 Node 直接监听公网端口。
  * - 账号池/镜像开关已启用但未配置 `TELEGRAM_ACCOUNT_ENCRYPTION_KEY`：
  *   后台新增/轮换账号会被拒绝（不阻断启动，但属可操作性缺口）。
- * - `TELEGRAM_USER_RELAY_ENABLED=true`：用户账号中继（策略 B）依赖
- *   「已授权的 user 账号 + 副本可见群（全部 Bot 关闭隐私模式或为管理员）」，
- *   这些是**运行期**事实，启动期无法判定，因此只提示并在运行期自动回退策略 A。
+ * - `TELEGRAM_USER_RELAY_ENABLED=true`：用户账号中继是副本扩散的**唯一**链路，
+ *   依赖「已授权的 user 账号 + 可读源群 + 可写副本可见群（全部 Bot 关闭隐私模式或为管理员）」，
+ *   这些是**运行期**事实，启动期无法判定，因此只提示；运行期由扩散状态机收口为
+ *   `blocked_*` / `retryable_failed` 并按指数退避重试，**不存在任何字节二次传输的降级路径**。
+ *   发布前可用 `POST /api/admin/telegram-accounts/relay-preflight` 做只读探测。
  */
 export function evaluateDeploymentPreflight(
   env: NodeJS.ProcessEnv = process.env,
@@ -105,27 +107,35 @@ export function evaluateDeploymentPreflight(
     }
   }
 
-  // ---- 用户账号中继（策略 B）：客户端已接入，改为运行期能力校验 + 启动期前置提示 ----
+  // ---- 用户账号中继（策略 B）：运行期能力校验 + 启动期前置提示 ----
   // 为什么不在这里做「能力校验」并拒绝启动：中继的可用性取决于**运行期事实**
   // （是否已授权 user 账号、账号 session 能否解密、副本可见群权限），纯函数预检读不到这些。
   // 若在此硬拒绝，运维会因为「还没在后台完成授权」而无法启动服务，反而更糟。
-  // 真实判定在 UserRelayService.isConfigured()/relay()：不可用时返回可诊断失败，
-  // 上层自动回退策略 A（逐账号二次上传），文件可用性不受影响。
+  // 真实判定在 UserRelayService：不可用时返回**标准化可诊断失败**，由扩散状态机收口为
+  // blocked_* / retryable_failed 并按指数退避重试。
+  //
+  // 重要：策略 B 是副本扩散的**唯一**链路，不存在任何字节二次传输的降级路径。
+  // 因此这里的提示不是「可选优化建议」，而是「不满足就没有副本扩散」的硬前置条件。
   if ((env.TELEGRAM_USER_RELAY_ENABLED ?? '').trim().toLowerCase() === 'true') {
     if (!(env.TELEGRAM_ARCHIVE_CHAT_ID ?? '').trim()) {
       warnings.push(
         'TELEGRAM_USER_RELAY_ENABLED=true 但未配置 TELEGRAM_ARCHIVE_CHAT_ID：'
-          + '下载期的懒扩散中继没有目标群，将无法通过用户账号中继补齐副本（会回退到逐账号二次上传）。'
-          + '若只使用镜像规则的备份群，可忽略本条。',
+          + '入站消息的归档转发（审计留痕）会缺少目的地。'
+          + '注意归档群**不再**充当副本可见群——中继目标群只取「启用中的镜像规则目标群」，'
+          + '未配置启用规则时扩散会直接判定 blocked_target_chat。',
       );
     }
     warnings.push(
-      'TELEGRAM_USER_RELAY_ENABLED=true（用户账号中继 / 策略 B）：请确认——'
-        + '(1) 已在「账号管理」授权至少一个 user 账号并启用；'
-        + '(2) 该账号同时是源群与副本可见群的成员且可写；'
-        + '(3) 副本可见群内**每个 Bot 都已关闭隐私模式或设为管理员**'
+      'TELEGRAM_USER_RELAY_ENABLED=true（用户账号中继）：副本扩散只保留这一条链路，'
+        + '发布前必须逐项确认——'
+        + '(1) 该开关在构造期读取，变更后必须重启后端才生效；'
+        + '(2) 已在「账号管理」授权至少一个 user 账号并启用；'
+        + '(3) 该账号对源群可读（Bot 私聊来源必须先经源消息准备链路进入可读群）；'
+        + '(4) 已配置并启用镜像规则目标群（副本可见群），且该账号对目标群可写；'
+        + '(5) 目标群内**每个 Bot 都已关闭隐私模式或设为管理员**'
         + '（Telegram 硬限制：默认隐私模式下 Bot 收不到用户账号发出的普通群消息，副本将无法被认领）。'
-        + '不满足时中继会明确失败并自动回退到逐账号二次上传，不影响文件可用性。',
+        + '不满足时扩散会明确失败并退避重试，副本缺口持续存在，但文件可用性不受影响。'
+        + '可用管理接口 POST /api/admin/telegram-accounts/relay-preflight 做只读探测（默认不发送任何消息）。',
     );
   }
 

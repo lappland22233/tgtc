@@ -103,12 +103,12 @@ describe('evaluateDeploymentPreflight', () => {
   });
 
   /**
-   * 用户账号中继（策略 B）已接入客户端，**不再**在启动期硬拒绝。
+   * 用户账号中继**不再**在启动期硬拒绝。
    *
-   * 为什么改成告警而不是 error：中继可用性取决于运行期事实（是否已授权 user 账号、
-   * session 能否解密、副本可见群的隐私模式设置），纯函数预检读不到；硬拒绝会让
-   * 「还没在后台完成授权」的部署无法启动。真实判定在 `UserRelayService.relay()`，
-   * 不可用时返回可诊断失败并自动回退策略 A。
+   * 为什么只告警：中继可用性取决于运行期事实（是否已授权 user 账号、session 能否解密、
+   * 副本可见群的隐私模式设置），纯函数预检读不到；硬拒绝会让「还没在后台完成授权」的
+   * 部署无法启动。真实判定在 `UserRelayService`，不可用时返回**标准化可诊断失败**，
+   * 由扩散状态机收口为 blocked_* / retryable_failed 并按指数退避重试。
    */
   it('warns (but does not block) when user relay is enabled without an archive chat', () => {
     const result = evaluateDeploymentPreflight({
@@ -120,8 +120,28 @@ describe('evaluateDeploymentPreflight', () => {
     const warnings = result.warnings.join('\n');
     expect(warnings).toMatch(/TELEGRAM_USER_RELAY_ENABLED=true/);
     expect(warnings).toMatch(/TELEGRAM_ARCHIVE_CHAT_ID/);
-    // 副本认领的硬前提必须显式提示（漏做时表现为「镜像成功但副本数不增长」）
+    // 副本认领的硬前提必须显式提示（漏做时表现为「中继成功但副本数不增长」）
     expect(warnings).toMatch(/关闭隐私模式或设为管理员/);
+    // 发布前置检查项：开关重启生效 / 用户账号 / 源群可读 / 目标群可写 + 只读探测入口
+    expect(warnings).toMatch(/必须重启后端才生效/);
+    expect(warnings).toMatch(/对源群可读/);
+    expect(warnings).toMatch(/启用镜像规则目标群/);
+    expect(warnings).toMatch(/relay-preflight/);
+    // 策略 A 已移除：预检文案不得再承诺任何回退路径
+    expect(warnings).not.toMatch(/回退策略 A/);
+    expect(warnings).not.toMatch(/逐账号二次上传/);
+  });
+
+  it('归档群不再充当副本可见群（目标群唯一权威是启用中的镜像规则）', () => {
+    const result = evaluateDeploymentPreflight({
+      NODE_ENV: 'production',
+      SECURE_COOKIE: 'true',
+      TELEGRAM_USER_RELAY_ENABLED: 'true',
+      TELEGRAM_ARCHIVE_CHAT_ID: '-100999',
+    });
+    const warnings = result.warnings.join('\n');
+    expect(warnings).toMatch(/不再配置 TELEGRAM_ARCHIVE_CHAT_ID|relay-preflight/);
+    expect(warnings).not.toMatch(/回退策略 A/);
   });
 
   it('does not warn about the archive chat when user relay is enabled with one configured', () => {

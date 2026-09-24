@@ -29,11 +29,15 @@ function setup(options: {
     failovers: 0,
     fallbacks: 0,
     unresolved: 0,
-    replicationsOk: 0,
-    replicationsFailed: 0,
     streamFailures: 0,
     replyFailures: 0,
     inboundRegistrationFailures: 0,
+    relayAttempts: 0,
+    relaySucceeded: 0,
+    relayFailed: 0,
+    relayClaimsMissed: 0,
+    inboundBridgeMisses: 0,
+    anchorConflicts: 0,
     fallbackThrottled: 0,
     largeFileSlotThrottled: 0,
   };
@@ -109,7 +113,12 @@ function setup(options: {
       accountId,
       telegramFileId: `${accountId}-file`,
     }))),
-    ensureCopies: options.ensureCopies ?? jest.fn(async () => ({ created: [], skipped: [], failed: [], relayed: false })),
+    ensureCopies: options.ensureCopies ?? jest.fn(async () => ({
+      status: 'succeeded',
+      created: [],
+      missing: [],
+      relayed: false,
+    })),
     touchUsed: jest.fn(async () => undefined),
   };
 
@@ -178,7 +187,7 @@ describe('AccountAwareDownloadService（选号 / 换号 / 非阻断懒扩散）'
   });
 
   it('副本不足时后台触发懒扩散，且不阻塞首个字节', async () => {
-    const never = jest.fn(() => new Promise(() => undefined));
+    const never = jest.fn((_params: Record<string, unknown>) => new Promise(() => undefined));
     const ctx = setup({ readyAccounts: ['a1'], ensureCopies: never as unknown as jest.Mock });
 
     const result = await ctx.service.openStream({
@@ -193,18 +202,21 @@ describe('AccountAwareDownloadService（选号 / 换号 / 非阻断懒扩散）'
     expect(never).toHaveBeenCalledWith(expect.objectContaining({
       ownerType: 'fileUnique',
       ownerId: 'u1',
-      fileName: 'report.pdf',
-      expectedSize: 100,
       desiredCount: 2,
     }));
+    // 策略 A 已移除：扩散调用只带归属与期望数，不再携带文件名/大小或逐账号上传目标
+    const call = never.mock.calls[0][0];
+    expect(call).not.toHaveProperty('fileName');
+    expect(call).not.toHaveProperty('expectedSize');
   });
 
-  it('扩散持续失败时进入退避窗口，不再随每次下载反复放大上传请求', async () => {
+  it('扩散持续失败时进入退避窗口，不再随每次下载反复触发中继', async () => {
     const ensureCopies = jest.fn(async () => ({
+      status: 'retryable_failed',
       created: [],
-      skipped: [],
-      failed: [{ accountId: 'a2', error: 'storage chat invalid' }],
+      missing: ['a2'],
       relayed: false,
+      failureReason: 'network',
     }));
     const ctx = setup({ readyAccounts: ['a1'], ensureCopies: ensureCopies as unknown as jest.Mock });
 

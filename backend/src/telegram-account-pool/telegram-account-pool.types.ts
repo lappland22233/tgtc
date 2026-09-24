@@ -68,13 +68,6 @@ export interface TelegramAccountRuntime {
    * `maxLargeInflight` 一起构成「每账号大文件回源槽位」，是避免单账号独扛 DC-5 的闸门。
    */
   largeInflight: number;
-  /**
-   * 当前在飞的复制（副本扩散）请求数。
-   *
-   * 复制只能是下载的「副产品」：它同样消耗该账号的上游额度与出网带宽，
-   * 因此单独记账并按比例限制，保证下载优先。
-   */
-  replicationInflight: number;
   /** EWMA 实测带宽（字节/秒）；未探测过为 0 */
   bandwidthEwmaBps: number;
   /** EWMA 成功率（0..1，初值 1） */
@@ -101,12 +94,14 @@ export type AccountFailureKind = 'flood' | 'unavailable' | 'timeout' | 'network'
 /**
  * 一次占用账号额度的用途。
  *
- * 为什么要区分：三类用途共享同一个账号的上游额度与出网带宽，必须能分别记账与限额——
- * - `download`：用户下载回源（最高优先级，不可被复制挤占）；
- * - `replication`：副本扩散（取源 + 重传，只能是下载的「副产品」）；
+ * 为什么要区分：两类用途共享同一个账号的上游额度与出网带宽，必须能分别记账与限额——
+ * - `download`：用户下载回源（最高优先级）；
  * - `upload`：镜像/上传（与下载同属前台业务）。
+ *
+ * 副本扩散（策略 B）**不在其中**：它由用户账号做服务端转发，既不占用 Bot 账号额度，
+ * 也不消耗 Bot 的出网带宽，因此不再需要 `replication` 角色与其专属并发闸门。
  */
-export type AccountAttemptRole = 'download' | 'replication' | 'upload';
+export type AccountAttemptRole = 'download' | 'upload';
 
 /** 准入被拒的原因（可诊断，直接用于日志与告警文案） */
 export type AccountAdmissionDenyReason =
@@ -119,9 +114,7 @@ export type AccountAdmissionDenyReason =
   /** 已达每账号在飞上限 */
   | 'inflight_full'
   /** 已达每账号大文件回源槽位 */
-  | 'large_inflight_full'
-  /** 已达每账号复制并发上限（下载优先：复制让位给下载） */
-  | 'replication_full';
+  | 'large_inflight_full';
 
 /** 一次已授予的账号额度（必须 finish/release，二者幂等） */
 export interface AccountAttemptAdmission {
@@ -192,10 +185,6 @@ export interface AccountPoolCounters {
   fallbacks: number;
   /** 归属无法确认（sourceAccountId 为空或不在池内）的可诊断失败次数 */
   unresolved: number;
-  /** 副本扩散成功次数 */
-  replicationsOk: number;
-  /** 副本扩散失败次数 */
-  replicationsFailed: number;
   /** 流式回源失败次数 */
   streamFailures: number;
   /** 入站回复失败次数（收到消息的账号发送失败；绝不改用其它账号代发） */
@@ -203,12 +192,20 @@ export interface AccountPoolCounters {
   /** 入站副本登记失败次数（含缺失 file_unique_id 而拒绝登记） */
   inboundRegistrationFailures: number;
   /**
-   * 用户账号中继成功次数（策略 B：一次服务端转发 → 各账号由入站链路自行登记副本）。
-   * 与 `replicationsOk` 区分：后者是「逐账号重新上传」的策略 A。
+   * 用户账号中继尝试次数（策略 B 是副本扩散的唯一执行方式）。
+   *
+   * 与 `relaySucceeded` / `relayFailed` 一起构成「中继健康度」的三元组：
+   * 只有尝试数持续增长而成功数为 0，才说明中继真的在失败，而不是「本轮没有需要扩散的文件」。
    */
-  userRelaysOk: number;
-  /** 用户账号中继失败次数（未配置/无账号/源不可读/执行失败，随后回退策略 A） */
-  userRelaysFailed: number;
+  relayAttempts: number;
+  /** 用户账号中继成功次数（服务端转发已成功；**不等于**副本已扩散，仍需 Bot 认领） */
+  relaySucceeded: number;
+  /**
+   * 用户账号中继失败次数（客户端不可用/无账号/源不可读/目标群缺失/执行失败）。
+   *
+   * 不含「中继开关未开启」：那是明确的产品状态，不是故障，否则关闭中继的部署会一直报故障。
+   */
+  relayFailed: number;
   /**
    * 用户账号中继**已成功但无人认领**的次数（中继后等待窗口内没有任何账号登记新副本）。
    *
@@ -263,8 +260,6 @@ export interface AccountPoolAccountSnapshot {
   largeInflight: number;
   /** 每账号大文件回源槽位（>1GiB 的冷回源并发上限） */
   maxLargeInflight: number;
-  /** 当前在飞的复制（副本扩散）请求数 */
-  replicationInflight: number;
   bandwidthMbps: number;
   successRate: number;
   latencyMs: number;

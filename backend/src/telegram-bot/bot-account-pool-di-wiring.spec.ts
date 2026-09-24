@@ -10,6 +10,9 @@ import { StreamResponderService } from '../common/services/stream-responder.serv
 import { FileCacheService } from '../file/file-cache.service';
 import { AccountAwareDownloadService } from '../telegram-account-pool/account-aware-download.service';
 import { FileCopyService } from '../telegram-account-pool/file-copy.service';
+import { RelayCapabilityService } from '../telegram-account-pool/relay-capability.service';
+import { ReplicaTargetResolver } from '../telegram-account-pool/replica-target.resolver';
+import { ReplicationAttemptService } from '../telegram-account-pool/replication-attempt.service';
 import { TelegramAccountClientService } from '../telegram-account-pool/telegram-account-client.service';
 import { TelegramAccountPoolAlertService } from '../telegram-account-pool/telegram-account-pool-alert.service';
 import { TelegramAccountPoolService } from '../telegram-account-pool/telegram-account-pool.service';
@@ -176,20 +179,33 @@ describe('Bot 账号池副本链：可选依赖的真实装配（容器级）', 
     expect(injected(service, 'tasks')).toBe(deps.tasks);
   });
 
-  it('TelegramAccountPoolAlertService：告警引擎按服务类 token 注入', async () => {
+  it('TelegramAccountPoolAlertService：告警引擎与扩散观测依赖按服务类 token 注入', async () => {
     const pool = depMock('TelegramAccountPoolService');
     const alertEngine = depMock('AlertEngineService');
+    const capability = depMock('RelayCapabilityService');
+    const attempts = depMock('ReplicationAttemptService');
+    const copies = depMock('FileCopyService');
+    const replicaTargets = depMock('ReplicaTargetResolver');
 
     const moduleRef = await compile([
       TelegramAccountPoolAlertService,
       { provide: TelegramAccountPoolService, useValue: pool },
       { provide: AlertEngineService, useValue: alertEngine },
+      { provide: RelayCapabilityService, useValue: capability },
+      { provide: ReplicationAttemptService, useValue: attempts },
+      { provide: FileCopyService, useValue: copies },
+      { provide: ReplicaTargetResolver, useValue: replicaTargets },
     ]);
 
     const service = moduleRef.get(TelegramAccountPoolAlertService);
 
     // 缺失时告警只写日志、永不落库
     expect(injected(service, 'alertEngine')).toBe(alertEngine);
+    // 缺失时「中继未就绪 / 观测降级 / 大文件覆盖率退化」三条规则静默不触发（不误报）
+    expect(injected(service, 'capability')).toBe(capability);
+    expect(injected(service, 'attempts')).toBe(attempts);
+    expect(injected(service, 'copies')).toBe(copies);
+    expect(injected(service, 'replicaTargets')).toBe(replicaTargets);
   });
 
   it('TelegramBotAdminController：2 个诊断依赖按服务类 token 注入', async () => {
@@ -284,7 +300,7 @@ describe('Bot 账号池副本链：依赖确实未注册时仍降级（单账号
     expect(injected(service, 'tasks')).toBeNull();
   });
 
-  it('TelegramAccountPoolAlertService：告警引擎缺失时为 null 且不影响主链路', async () => {
+  it('TelegramAccountPoolAlertService：告警引擎与扩散观测依赖缺失时为 null 且不影响主链路', async () => {
     const moduleRef = await compile([
       TelegramAccountPoolAlertService,
       { provide: TelegramAccountPoolService, useValue: depMock('TelegramAccountPoolService') },
@@ -293,6 +309,10 @@ describe('Bot 账号池副本链：依赖确实未注册时仍降级（单账号
     const service = moduleRef.get(TelegramAccountPoolAlertService);
 
     expect(injected(service, 'alertEngine')).toBeNull();
+    expect(injected(service, 'capability')).toBeNull();
+    expect(injected(service, 'attempts')).toBeNull();
+    expect(injected(service, 'copies')).toBeNull();
+    expect(injected(service, 'replicaTargets')).toBeNull();
   });
 
   it('TelegramBotAdminController：诊断依赖缺失时返回明确原因而非真实快照', async () => {

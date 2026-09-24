@@ -80,6 +80,13 @@ describe('SQLite schema migrations（隔离内存库）', () => {
       .toMatchObject({ unique: 1 });
     expect(mirrorTaskIndexes.find((index: { name: string }) => index.name === 'idx_tg_mirror_tasks_next_retry')).toBeDefined();
 
+    // 扩散轮次实体同样由基线建表：索引口径必须与 180350 增量迁移一致
+    const attemptIndexes = await dataSource.query('PRAGMA index_list("telegram_replication_attempts")');
+    expect(attemptIndexes.find((index: { name: string }) => index.name === 'idx_tg_replication_attempts_owner')).toBeDefined();
+    expect(attemptIndexes.find((index: { name: string }) => index.name === 'idx_tg_replication_attempts_status')).toBeDefined();
+    expect(attemptIndexes.find((index: { name: string }) => index.name === 'idx_tg_replication_attempts_reason')).toBeDefined();
+    expect(attemptIndexes.find((index: { name: string }) => index.name === 'idx_tg_replication_attempts_updated')).toBeDefined();
+
     const fileColumns = await dataSource.query('PRAGMA table_info("files")');
     expect(fileColumns.find((column: { name: string }) => column.name === 'telegramMessageId')).toBeDefined();
     expect(fileColumns.find((column: { name: string }) => column.name === 'telegramSourceAccountId')).toBeDefined();
@@ -545,6 +552,57 @@ describe('SQLite schema migrations（隔离内存库）', () => {
     await new SqliteAddFileTelegramSourceFields1803200000000().up(dataSource.createQueryRunner());
     expect(await dataSource.query('SELECT COUNT(*) AS count FROM "telegram_accounts"')).toEqual([{ count: 1 }]);
     expect(await dataSource.query('SELECT COUNT(*) AS count FROM "telegram_mirror_tasks"')).toEqual([{ count: 2 }]);
+
+    const integrity = await dataSource.query('PRAGMA integrity_check');
+    expect(Object.values(integrity[0])).toEqual(['ok']);
+  });
+
+  it('存量库升级：180350 自建扩散轮次表（索引齐全、可写、幂等）', async () => {
+    dataSource = new DataSource({ type: 'sqlite', database: ':memory:', entities: [], synchronize: false });
+    await dataSource.initialize();
+    await dataSource.query(`CREATE TABLE "migrations" (
+      "id" integer PRIMARY KEY AUTOINCREMENT NOT NULL,
+      "timestamp" bigint NOT NULL, "name" varchar NOT NULL
+    )`);
+
+    const { SqliteCreateTelegramReplicationAttempts1803500000000 } = require('./1803500000000-SqliteCreateTelegramReplicationAttempts') as typeof import('./1803500000000-SqliteCreateTelegramReplicationAttempts');
+    await new SqliteCreateTelegramReplicationAttempts1803500000000().up(dataSource.createQueryRunner());
+
+    const tables = await dataSource.query(
+      `SELECT name FROM sqlite_master WHERE type='table' AND name='telegram_replication_attempts'`,
+    );
+    expect(tables).toHaveLength(1);
+
+    const indexes = await dataSource.query('PRAGMA index_list("telegram_replication_attempts")');
+    for (const name of [
+      'idx_tg_replication_attempts_owner',
+      'idx_tg_replication_attempts_status',
+      'idx_tg_replication_attempts_reason',
+      'idx_tg_replication_attempts_updated',
+    ]) {
+      expect(indexes.find((index: { name: string }) => index.name === name)).toBeDefined();
+    }
+
+    // 轮次表可写：策略 B 不发生文件字节二次传输，因此没有 bytesTransferred 列
+    await dataSource.query(
+      `INSERT INTO "telegram_replication_attempts"
+        ("id","ownerType","ownerId","status","desiredCount","baselineReadyCount")
+       VALUES ('a1','file','file-1','succeeded',3,1)`,
+    );
+    const columns = await dataSource.query('PRAGMA table_info("telegram_replication_attempts")');
+    expect(columns.find((column: { name: string }) => column.name === 'bytesTransferred')).toBeUndefined();
+    expect(columns.find((column: { name: string }) => column.name === 'claimedAccountIds')).toBeDefined();
+
+    // 幂等：重复执行不报错、不重复建表
+    await new SqliteCreateTelegramReplicationAttempts1803500000000().up(dataSource.createQueryRunner());
+    expect(await dataSource.query('SELECT COUNT(*) AS count FROM "telegram_replication_attempts"')).toEqual([{ count: 1 }]);
+
+    // down 只删本迁移新增的表与索引
+    await new SqliteCreateTelegramReplicationAttempts1803500000000().down(dataSource.createQueryRunner());
+    const afterDown = await dataSource.query(
+      `SELECT name FROM sqlite_master WHERE type='table' AND name='telegram_replication_attempts'`,
+    );
+    expect(afterDown).toHaveLength(0);
 
     const integrity = await dataSource.query('PRAGMA integrity_check');
     expect(Object.values(integrity[0])).toEqual(['ok']);

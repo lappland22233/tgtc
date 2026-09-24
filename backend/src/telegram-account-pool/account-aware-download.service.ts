@@ -113,8 +113,6 @@ export class AccountAwareDownloadService {
       this.scheduleReplication({
         ownerType: params.ownerType,
         ownerId: params.ownerId,
-        fileName: params.fileName,
-        expectedSize: params.expectedSize,
         desiredCount: params.desiredReplicas,
       });
     }
@@ -284,14 +282,12 @@ export class AccountAwareDownloadService {
   private scheduleReplication(params: {
     ownerType: TelegramCopyOwnerType;
     ownerId: string;
-    fileName: string;
-    expectedSize: number;
     desiredCount: number;
   }): void {
     const key = `${params.ownerType}:${params.ownerId}`;
     const now = Date.now();
 
-    // 熔断窗口内不再触发：目标账号存储 Chat 无效时，持续失败会随下载量放大上传请求
+    // 熔断窗口内不再触发：中继持续失败时，持续触发会随下载量放大中继请求
     if ((this.replicationBackoffUntil.get(key) ?? 0) > now) return;
     if (this.replicationInflight.has(key)) return;
 
@@ -300,18 +296,20 @@ export class AccountAwareDownloadService {
     void this.copies.ensureCopies({
       ownerType: params.ownerType,
       ownerId: params.ownerId,
-      fileName: params.fileName,
-      expectedSize: params.expectedSize,
       desiredCount: params.desiredCount,
     }).then((result) => {
-      // 本轮一个都没成功、且存在失败 → 进入退避窗口
-      if (result.failed.length > 0 && result.created.length === 0) {
-        this.replicationBackoffUntil.set(key, Date.now() + REPLICATION_FAILURE_BACKOFF_MS);
-        this.logger.warn(
-          `后台副本扩散未成功（${key}，失败 ${result.failed.length} 个目标），`
-          + `${REPLICATION_FAILURE_BACKOFF_MS / 60_000} 分钟内暂停该文件的扩散`,
-        );
-      }
+      if (result.skipped) return;
+      if (result.created.length > 0) return;
+      if (result.status === 'succeeded') return;
+      // 本轮无任何新增副本 → 进入退避窗口。
+      // 这是**观测/持久化不可用时的兜底背压**：主退避由轮次记录的 `nextRetryAt`
+      // 负责（指数退避 + 合并窗口），两层叠加不会互相干扰（本地窗口更粗、只防风暴）。
+      this.replicationBackoffUntil.set(key, Date.now() + REPLICATION_FAILURE_BACKOFF_MS);
+      this.logger.warn(
+        `后台副本扩散未产生新副本（${key} / ${result.status}`
+        + `${result.failureReason ? ` / ${result.failureReason}` : ''}），`
+        + `${REPLICATION_FAILURE_BACKOFF_MS / 60_000} 分钟内暂停该文件的扩散`,
+      );
     }).catch((error: unknown) => {
       const message = error instanceof Error ? error.message : String(error);
       this.replicationBackoffUntil.set(key, Date.now() + REPLICATION_FAILURE_BACKOFF_MS);

@@ -245,13 +245,261 @@ export interface DownloadCapacityView {
   } | null;
 }
 
+/** 单档大小分层的覆盖率（≥4GiB / 1–4GiB 等） */
+export interface ReplicationSizeCoverageTier {
+  label: string;
+  minBytes: number;
+  files: number;
+  satisfied: number;
+  unsatisfied: number;
+  minReadyAccounts: number;
+  readyAccountCounts: number[];
+  missingSamples: Array<{ ownerId: string; readyAccountCount: number; missing: number }>;
+}
+
+export interface ReplicationSizeCoverageView {
+  scannedFiles: number;
+  truncated: boolean;
+  tiers: ReplicationSizeCoverageTier[];
+}
+
+/** 单项能力探测结论：三态必须区分（「未检查」不得渲染成「通过」） */
+export type RelayCheckStatus = 'ok' | 'failed' | 'not_checked';
+
+/** 中继能力快照（策略卡数据源；全部脱敏） */
+export interface RelayCapabilitySnapshot {
+  relayEnabledByConfig: boolean;
+  userClientAvailable: boolean;
+  userClientUnavailableReason: string | null;
+  enabledAuthorizedUserCount: number;
+  resolvedTargetChatIdPreview: string | null;
+  sourceChatIdPreview: string | null;
+  sourceChatReadable: RelayCheckStatus;
+  targetChatWritable: RelayCheckStatus;
+  botsCanReceiveRelay: RelayCheckStatus;
+  checkedAt: string | null;
+  checkStatus: 'not_checked' | 'ok' | 'partial' | 'failed';
+  notes: string[];
+}
+
+/** 当前扩散策略（对外稳定契约：策略 A 已移除、不可能发生字节二次传输） */
+export interface ReplicationStrategyView {
+  mode: 'user_relay_only';
+  label: string;
+  strategyARemoved: true;
+  byteReplicationPossible: false;
+  relayEnabledByConfig: boolean;
+  restartRequiredForToggle: true;
+  capability: RelayCapabilitySnapshot;
+}
+
+/** 扩散轮次状态（与后端 `telegram-replication-attempt.entity.ts` 的联合类型一一对应） */
+export type ReplicationAttemptStatus =
+  | 'planned'
+  | 'blocked_not_configured'
+  | 'blocked_user_client'
+  | 'blocked_no_user_account'
+  | 'blocked_source_anchor'
+  | 'blocked_target_chat'
+  | 'blocked_manual'
+  | 'relay_running'
+  | 'waiting_claims'
+  | 'succeeded'
+  | 'partial_success'
+  | 'claim_timeout'
+  | 'retryable_failed';
+
+/** 标准化中继失败原因（与后端 `UserRelayFailureReason` 一一对应） */
+export type UserRelayFailureReason =
+  | 'not_configured'
+  | 'client_unavailable'
+  | 'no_account'
+  | 'source_missing'
+  | 'target_missing'
+  | 'permission_denied'
+  | 'auth_invalid'
+  | 'rate_limited'
+  | 'network'
+  | 'unknown';
+
+/**
+ * 失败原因中文名（指标卡 Top N 分布用）。
+ *
+ * 后端只回传稳定键值；界面文案在前端维护，避免把中文写进持久化数据。
+ */
+export const RELAY_FAILURE_REASON_LABELS: Record<UserRelayFailureReason, string> = {
+  not_configured: '中继未启用',
+  client_unavailable: 'MTProto 客户端不可用',
+  no_account: '无可用用户账号',
+  source_missing: '源消息不可读',
+  target_missing: '目标群未配置',
+  permission_denied: '目标群权限不足',
+  auth_invalid: '用户账号认证失效',
+  rate_limited: 'Telegram 限流',
+  network: '网络异常',
+  unknown: '未知错误',
+};
+
+/** 窗口内的中继指标（来自持久化轮次表；低样本时比率为 null） */
+export interface RelayMetricsView {
+  windowMs: number;
+  since: string;
+  attempts: number;
+  relaySucceeded: number;
+  relayFailed: number;
+  blocked: number;
+  succeeded: number;
+  partialSuccess: number;
+  claimTimeouts: number;
+  relaySuccessRate: number | null;
+  claimRate: number | null;
+  relayDurationP50Ms: number | null;
+  relayDurationP95Ms: number | null;
+  claimDurationP50Ms: number | null;
+  claimDurationP95Ms: number | null;
+  failureReasons: Array<{ reason: UserRelayFailureReason; count: number }>;
+  /** 契约常量：策略 B 不发生文件字节二次传输 */
+  bytesRelayed: 0;
+  sampleSufficient: boolean;
+  truncated: boolean;
+}
+
+/** 大文件覆盖率单档视图 */
+export interface ReplicationLargeFileTierView {
+  label: string;
+  minBytes: number;
+  files: number;
+  satisfied: number;
+  unsatisfied: number;
+  readyAccountCounts: number[];
+  missingSamples: Array<{ ownerId: string; readyAccountCount: number; missing: number }>;
+}
+
+/** 大文件覆盖率与负载均衡前提（≥4GiB 主视图 + 1–4GiB 对照） */
+export interface ReplicationLargeFileCoverageView {
+  ownerType: 'fileUnique';
+  primary: ReplicationLargeFileTierView | null;
+  secondary: ReplicationLargeFileTierView | null;
+  scannedFiles: number;
+  truncated: boolean;
+  /** 已登记 ready 副本的账号数（历史事实） */
+  readyAccounts: number;
+  /** 当前可调度的账号数（分流能力） */
+  schedulableAccounts: number;
+}
+
+/** 后台时间线里的单条扩散轮次（脱敏） */
+export interface ReplicationAttemptView {
+  id: string;
+  ownerType: 'file' | 'fileUnique' | 'grant';
+  ownerLabel: string;
+  status: ReplicationAttemptStatus;
+  statusLabel: string;
+  failureReason: UserRelayFailureReason | null;
+  failureReasonLabel: string | null;
+  failureSummary: string | null;
+  retryCount: number;
+  desiredCount: number;
+  baselineReadyCount: number;
+  readyCount: number;
+  missingCount: number;
+  claimedAccountIds: string[];
+  relayAccountId: string | null;
+  targetChatPreview: string | null;
+  triggeredBy: 'lazy' | 'manual';
+  createdAt: string;
+  relayCompletedAt: string | null;
+  completedAt: string | null;
+  nextRetryAt: string | null;
+  relayDurationMs: number | null;
+  claimDurationMs: number | null;
+  retryable: boolean;
+}
+
+/** 观测健康：降级时必须提示「观测数据不完整」，不得渲染成健康态 */
+export interface ReplicationObservabilityView {
+  degraded: boolean;
+  reason: string | null;
+  since: string | null;
+  writeFailures: number;
+}
+
 export interface ReplicationAuditReport {
   generatedAt: string;
+  strategy: ReplicationStrategyView;
+  relayMetrics: RelayMetricsView;
+  largeFileCoverage: ReplicationLargeFileCoverageView;
+  recentAttempts: ReplicationAttemptView[];
+  observability: ReplicationObservabilityView;
   target: ReplicationTargetView;
   poolActive: boolean;
   accounts: ReplicationAccountView[];
   coverage: ReplicationCoverageView;
+  botCoverage?: ReplicationCoverageView;
+  sizeCoverage?: ReplicationSizeCoverageView;
+  botSizeCoverage?: ReplicationSizeCoverageView;
   capacity: DownloadCapacityView | null;
+  notes: string[];
+}
+
+/** 扩散轮次详情：时间线 + 为什么失败 / 影响 / 建议操作 / 是否可重试 */
+export interface ReplicationAttemptDetailView {
+  id: string;
+  ownerType: string;
+  ownerLabel: string;
+  status: ReplicationAttemptStatus;
+  statusLabel: string;
+  failureReason: UserRelayFailureReason | null;
+  failureSummary: string | null;
+  retryCount: number;
+  desiredCount: number;
+  baselineReadyCount: number;
+  readyCount: number;
+  missingCount: number;
+  claimedAccountIds: string[];
+  relayAccountId: string | null;
+  relayMessageId: string | null;
+  targetChatPreview: string | null;
+  triggeredBy: 'lazy' | 'manual';
+  startedAt: string | null;
+  relayCompletedAt: string | null;
+  claimDeadlineAt: string | null;
+  completedAt: string | null;
+  nextRetryAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  retryable: boolean;
+  timeline: Array<{ at: string; label: string; detail?: string }>;
+  why: string;
+  impact: string;
+  advice: string;
+}
+
+export interface ReplicationAttemptListView {
+  generatedAt: string;
+  items: ReplicationAttemptView[];
+  truncated: boolean;
+  observability: ReplicationObservabilityView;
+}
+
+export interface RelayPreflightCheck {
+  id: string;
+  label: string;
+  status: RelayCheckStatus;
+  detail: string;
+  advice?: string;
+}
+
+export interface RelayPreflightReport {
+  dryRun: boolean;
+  checkedAt: string;
+  status: 'ok' | 'partial' | 'failed';
+  checks: RelayPreflightCheck[];
+  /** 非 dry-run 时是否真的发出了 Telegram 测试消息（界面必须显式告知） */
+  sentTestMessage: boolean;
+  testMessageId: string | null;
+  targetChatPreview: string | null;
+  sourceChatPreview: string | null;
   notes: string[];
 }
 
@@ -267,6 +515,79 @@ export async function updateReplicationTarget(
 ): Promise<{ message: string; target: ReplicationTargetView }> {
   const response = await api.put('/admin/telegram-accounts/replication-target', { desiredReplicas });
   return response.data.data as { message: string; target: ReplicationTargetView };
+}
+
+/** 扩散轮次时间线（可按状态 / 失败原因 / 归属对象 / 时间窗口筛选） */
+export async function fetchReplicationAttempts(
+  params: {
+    status?: string;
+    failureReason?: string;
+    ownerType?: string;
+    ownerId?: string;
+    sinceMs?: number;
+    limit?: number;
+  } = {},
+  signal?: AbortSignal,
+): Promise<ReplicationAttemptListView> {
+  const response = await api.get('/admin/telegram-accounts/replication-attempts', {
+    params,
+    signal,
+  });
+  return response.data.data as ReplicationAttemptListView;
+}
+
+/** 单轮扩散详情（含处理建议；仅用于展开失败详情） */
+export async function fetchReplicationAttemptDetail(
+  attemptId: string,
+  signal?: AbortSignal,
+): Promise<ReplicationAttemptDetailView> {
+  const response = await api.get(
+    `/admin/telegram-accounts/replication-attempts/${encodeURIComponent(attemptId)}`,
+    { signal },
+  );
+  return response.data.data as ReplicationAttemptDetailView;
+}
+
+/**
+ * 手动重试单轮扩散（**只走用户账号中继**，界面不提供策略选择项）。
+ *
+ * 仅「可重试失败」「认领超时」可用；后端会二次校验状态，避免前端状态过期导致误重试。
+ */
+export async function retryReplicationAttempt(attemptId: string): Promise<{
+  message: string;
+  attemptId: string | null;
+  status: ReplicationAttemptStatus;
+  created: string[];
+  missing: string[];
+  failureReason?: UserRelayFailureReason;
+}> {
+  const response = await api.post(
+    `/admin/telegram-accounts/replication-attempts/${encodeURIComponent(attemptId)}/retry`,
+  );
+  return response.data.data as {
+    message: string;
+    attemptId: string | null;
+    status: ReplicationAttemptStatus;
+    created: string[];
+    missing: string[];
+    failureReason?: UserRelayFailureReason;
+  };
+}
+
+/**
+ * 中继能力预检（**默认 dry-run：只读检查，不产生任何 Telegram 消息**）。
+ *
+ * 只有显式传 `dryRun: false` 才会向目标群发送一条受控测试消息；
+ * 调用方必须在界面上明确告知「将产生一条 Telegram 消息」并二次确认。
+ */
+export async function runRelayPreflight(input: {
+  dryRun?: boolean;
+  sourceChatId?: string;
+  targetChatId?: string;
+  testMessage?: string;
+} = {}): Promise<RelayPreflightReport> {
+  const response = await api.post('/admin/telegram-accounts/relay-preflight', input);
+  return response.data.data as RelayPreflightReport;
 }
 
 export interface CreateUserAccountInput {

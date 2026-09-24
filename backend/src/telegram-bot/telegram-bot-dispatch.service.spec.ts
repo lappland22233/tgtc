@@ -6,13 +6,13 @@ type Counters = {
   failovers: number;
   fallbacks: number;
   unresolved: number;
-  replicationsOk: number;
-  replicationsFailed: number;
   streamFailures: number;
   replyFailures: number;
   inboundRegistrationFailures: number;
-  userRelaysOk: number;
-  userRelaysFailed: number;
+  relayAttempts: number;
+  relaySucceeded: number;
+  relayFailed: number;
+  relayClaimsMissed: number;
   inboundBridgeMisses: number;
 };
 
@@ -22,13 +22,13 @@ function makeCounters(): Counters {
     failovers: 0,
     fallbacks: 0,
     unresolved: 0,
-    replicationsOk: 0,
-    replicationsFailed: 0,
     streamFailures: 0,
     replyFailures: 0,
     inboundRegistrationFailures: 0,
-    userRelaysOk: 0,
-    userRelaysFailed: 0,
+    relayAttempts: 0,
+    relaySucceeded: 0,
+    relayFailed: 0,
+    relayClaimsMissed: 0,
     inboundBridgeMisses: 0,
   };
 }
@@ -90,6 +90,10 @@ function makeService(options: {
   issueMock?: jest.Mock;
   /** 镜像备份群集合（用于验证「来自备份群的消息不再归档转发」） */
   mirrorTargetChatIds?: string[];
+  /** 启用中镜像规则目标群（= 中继目标群；用于验证 relayed 标注口径） */
+  enabledMirrorTargetChatIds?: string[];
+  /** 扩散轮次回写替身 */
+  attempts?: { recordClaim: jest.Mock } | null;
 }) {
   const counters = makeCounters();
   const pool = options.pool === undefined ? null : options.pool;
@@ -99,9 +103,15 @@ function makeService(options: {
         ...options.copies,
       }
     : null;
-  const mirrorConfig = options.mirrorTargetChatIds
-    ? { listTargetChatIds: jest.fn(async () => options.mirrorTargetChatIds) }
+  const mirrorConfig = (options.mirrorTargetChatIds || options.enabledMirrorTargetChatIds)
+    ? {
+        listTargetChatIds: jest.fn(async () => options.mirrorTargetChatIds ?? []),
+        listEnabledTargetChatIds: jest.fn(async () => options.enabledMirrorTargetChatIds ?? []),
+      }
     : null;
+  const attempts = options.attempts === undefined
+    ? { recordClaim: jest.fn(async () => undefined) }
+    : options.attempts;
   const telegramService = { sendMessage: jest.fn(async () => ({ message_id: 1, chat: { id: 7001 } })) };
   const botConfigService = {
     getConfig: jest.fn(async () => ({
@@ -167,6 +177,7 @@ function makeService(options: {
     configService as never,
     null,
     mirrorConfig as never,
+    attempts as never,
   );
 
   return {
@@ -182,6 +193,7 @@ function makeService(options: {
     pool,
     copies,
     mirrorConfig,
+    attempts,
   };
 }
 
@@ -340,9 +352,119 @@ describe('TelegramBotDispatchService（多 Bot 身份链路）', () => {
       chatId: '-100777',
       messageId: '100',
       fileSize: 1024,
+      // 非中继目标群 → 只能标注 inbound（普通备份群消息不得伪装成中继生效）
+      source: 'inbound',
     });
     // 命中站内文件 → 不计入「未命中」
     expect(pool.counters.inboundBridgeMisses).toBe(0);
+    // 认领回写：fileUnique 与命中的 file 两个命名空间都要写，否则轮次里的认领对不上
+    expect(ctx.attempts!.recordClaim).toHaveBeenCalledWith('fileUnique', 'UNIQ-1', '1234567');
+    expect(ctx.attempts!.recordClaim).toHaveBeenCalledWith('file', 'file-1', '1234567');
+  });
+
+  it('来自中继目标群的认领标注 relayed（副本扩散生效的唯一证据）', async () => {
+    const pool = makePool(true);
+    const bridge = jest.fn(async () => ({ bridged: true, matchedFileIds: ['file-1'] }));
+    const copies = { upsertReady: jest.fn(async () => ({})), bridgeInboundCopyToLogicalFile: bridge };
+    const accountClient = { sendMessage: jest.fn(async () => undefined), forwardMessage: jest.fn() };
+    const ctx = makeService({
+      pool,
+      copies,
+      accountClient,
+      enabledMirrorTargetChatIds: ['-100777'],
+    });
+
+    await ctx.service.handleUpdate(
+      makeMessageUpdate({ chatType: 'group', chatId: -100777 }),
+      { accountId: '1234567' },
+    );
+
+    expect(bridge).toHaveBeenCalledWith(expect.objectContaining({ source: 'relayed' }));
+    expect(copies.upsertReady).toHaveBeenCalledWith(expect.objectContaining({ source: 'relayed' }));
+  });
+
+  it('未启用规则的目标群消息不得标注 relayed（用未启用规则判定会污染观测数据）', async () => {
+    const pool = makePool(true);
+    const bridge = jest.fn(async () => ({ bridged: true, matchedFileIds: ['file-1'] }));
+    const copies = { upsertReady: jest.fn(async () => ({})), bridgeInboundCopyToLogicalFile: bridge };
+    const accountClient = { sendMessage: jest.fn(async () => undefined), forwardMessage: jest.fn() };
+    const ctx = makeService({
+      pool,
+      copies,
+      accountClient,
+      // 抑制归档转发用的是「全部规则」，relayed 判定用的是「启用中的规则」——两者必须分开
+      mirrorTargetChatIds: ['-100777'],
+      enabledMirrorTargetChatIds: [],
+    });
+
+    await ctx.service.handleUpdate(
+      makeMessageUpdate({ chatType: 'group', chatId: -100777 }),
+      { accountId: '1234567' },
+    );
+
+    expect(bridge).toHaveBeenCalledWith(expect.objectContaining({ source: 'inbound' }));
+    expect(copies.upsertReady).toHaveBeenCalledWith(expect.objectContaining({ source: 'inbound' }));
+  });
+
+  it('中继目标群但未命中站内文件：fileUnique 行仍为 inbound（只有真正产生副本才算 relayed）', async () => {
+    const pool = makePool(true);
+    const copies = {
+      upsertReady: jest.fn(async () => ({})),
+      bridgeInboundCopyToLogicalFile: jest.fn(async () => ({ bridged: false, matchedFileIds: [] })),
+    };
+    const accountClient = { sendMessage: jest.fn(async () => undefined), forwardMessage: jest.fn() };
+    const ctx = makeService({
+      pool,
+      copies,
+      accountClient,
+      enabledMirrorTargetChatIds: ['-100777'],
+    });
+
+    await ctx.service.handleUpdate(
+      makeMessageUpdate({ chatType: 'group', chatId: -100777 }),
+      { accountId: '1234567' },
+    );
+
+    expect(copies.upsertReady).toHaveBeenCalledWith(expect.objectContaining({ source: 'inbound' }));
+    expect(ctx.attempts!.recordClaim).toHaveBeenCalledWith('fileUnique', 'UNIQ-1', '1234567');
+  });
+
+  it('轮次服务未装配时认领回写静默跳过（观测缺失不得影响入站主链路）', async () => {
+    const pool = makePool(true);
+    const copies = {
+      upsertReady: jest.fn(async () => ({})),
+      bridgeInboundCopyToLogicalFile: jest.fn(async () => ({ bridged: true, matchedFileIds: ['file-1'] })),
+    };
+    const accountClient = { sendMessage: jest.fn(async () => undefined), forwardMessage: jest.fn() };
+    const ctx = makeService({ pool, copies, accountClient, attempts: null });
+
+    await expect(ctx.service.handleUpdate(
+      makeMessageUpdate({ chatType: 'group', chatId: -100777 }),
+      { accountId: '1234567' },
+    )).resolves.toBeUndefined();
+
+    expect(copies.upsertReady).toHaveBeenCalled();
+  });
+
+  it('认领回写抛错不影响副本登记（观测故障不得回滚业务写入）', async () => {
+    const pool = makePool(true);
+    const copies = { upsertReady: jest.fn(async () => ({})) };
+    const accountClient = { sendMessage: jest.fn(async () => undefined), forwardMessage: jest.fn() };
+    const ctx = makeService({
+      pool,
+      copies,
+      accountClient,
+      attempts: { recordClaim: jest.fn(async () => { throw new Error('db down'); }) },
+    });
+
+    await ctx.service.handleUpdate(
+      makeMessageUpdate({ chatType: 'group', chatId: -100777 }),
+      { accountId: '1234567' },
+    );
+
+    expect(copies.upsertReady).toHaveBeenCalled();
+    // 观测写入失败不得回滚业务写入，也不得污染「入站登记失败」计数
+    expect(pool.counters.inboundRegistrationFailures).toBe(0);
   });
 
   it('桥接未命中站内文件（群消息与站内无关）时只计数，不影响副本登记', async () => {

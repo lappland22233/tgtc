@@ -26,14 +26,17 @@ function makeModule(options: { active: { value: boolean } }) {
   };
   const copies = { purgeStale: jest.fn(async () => undefined) };
   const alerts = { runOnce: jest.fn(async () => undefined) };
+  const attempts = { purgeStale: jest.fn(async () => ({ converged: 0, deleted: 0 })) };
 
   const moduleRef = new TelegramAccountPoolModule(
     pool as never,
     client as never,
     copies as never,
     alerts as never,
+    null,
+    attempts as never,
   );
-  return { moduleRef, hooks, pool, client, copies, alerts, active: options.active };
+  return { moduleRef, hooks, pool, client, copies, alerts, attempts, active: options.active };
 }
 
 /** 捕获 setInterval 注册的回调，避免真实定时器在测试里泄漏 */
@@ -95,9 +98,9 @@ describe('TelegramAccountPoolModule（后台定时器装配）', () => {
     expect(client.getChat).toHaveBeenCalledTimes(1);
   });
 
-  it('两个定时器分别委派到告警采集与副本清理', async () => {
+  it('两个定时器分别委派到告警采集与副本清理（含扩散轮次清理）', async () => {
     const { callbacks } = spyIntervals();
-    const { moduleRef, alerts, copies } = makeModule({ active: { value: true } });
+    const { moduleRef, alerts, copies, attempts } = makeModule({ active: { value: true } });
 
     await moduleRef.onModuleInit();
     expect(callbacks).toHaveLength(2);
@@ -111,6 +114,11 @@ describe('TelegramAccountPoolModule（后台定时器装配）', () => {
       failedBefore: expect.any(Date),
       pendingBefore: expect.any(Date),
       staleReadyBefore: expect.any(Date),
+    });
+    // 轮次清理与副本清理分开评审：保留窗口不同，必须都跑
+    expect(attempts.purgeStale).toHaveBeenCalledWith({
+      activeBefore: expect.any(Date),
+      terminalBefore: expect.any(Date),
     });
   });
 

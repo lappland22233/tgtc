@@ -233,3 +233,30 @@ export class ReplicationTargetDto {
   @Max(REPLICA_TARGET_RANGE.max)
   desiredReplicas: number;
 }
+
+/**
+ * 中继能力预检（默认 dry-run）。
+ *
+ * `dryRun` 默认 true 且**必须显式传 false** 才会向目标群发送一条测试消息：
+ * 预检是发布前的常规动作，误发消息会在群里留下垃圾并可能触发限流。
+ */
+export class RelayPreflightDto {
+  @IsOptional()
+  @IsBoolean()
+  dryRun?: boolean;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(ACCOUNT_LIMITS.maxChatIdLength)
+  sourceChatId?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(ACCOUNT_LIMITS.maxChatIdLength)
+  targetChatId?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  testMessage?: string;
+}

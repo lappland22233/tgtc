@@ -85,6 +85,72 @@ export class TelegramAccountClientService {
     }
   }
 
+  /**
+   * 读取账号自身信息（只读）：Bot ID + 群隐私模式开关。
+   *
+   * 为什么需要它：`can_read_all_group_messages=true` 是**副本能否被认领的前提**——
+   * 默认隐私模式下 Bot 收不到用户账号发出的普通群消息，中继会「转发成功但无人认领」，
+   * 表现为副本数长期为 0 而日志里全是成功记录。仅靠 `getMe` 的 ok 判定看不出这一点。
+   */
+  async getMeInfo(
+    accountId: string,
+    token: string,
+  ): Promise<{ ok: boolean; botId: string | null; canReadAllGroupMessages: boolean | null; error?: string }> {
+    try {
+      const response = await axios.get(`${this.apiBase}${token}/getMe`, { timeout: 10_000 });
+      const result = response.data?.result;
+      if (response.data?.ok !== true || !result) {
+        return { ok: false, botId: null, canReadAllGroupMessages: null, error: 'getMe 返回 ok!=true' };
+      }
+      return {
+        ok: true,
+        botId: result.id ? String(result.id) : null,
+        canReadAllGroupMessages: typeof result.can_read_all_group_messages === 'boolean'
+          ? result.can_read_all_group_messages
+          : null,
+      };
+    } catch (error) {
+      // 账号标识用于排障定位（不含 token；describeError 已脱敏）
+      this.logger.debug(`账号 ${accountId} getMeInfo 失败：${this.describeError(error, token)}`);
+      return {
+        ok: false,
+        botId: null,
+        canReadAllGroupMessages: null,
+        error: this.describeError(error, token),
+      };
+    }
+  }
+
+  /**
+   * 查询某成员在 chat 内的身份与发言权限（只读）。
+   *
+   * 用于中继预检：确认目标群内每个 Bot 都已加入（否则它永远不会认领副本）。
+   * 未加入时会抛 `permission` 类错误（Telegram 用 400 表示「不是成员」），由调用方翻译。
+   */
+  async getChatMember(
+    accountId: string,
+    token: string,
+    chatId: string,
+    userId: string,
+  ): Promise<{ status: string; canPostMessages: boolean | null }> {
+    try {
+      const response = await axios.get(`${this.apiBase}${token}/getChatMember`, {
+        params: { chat_id: chatId, user_id: userId },
+        timeout: 10_000,
+      });
+      const result = response.data?.result;
+      if (response.data?.ok !== true || !result) {
+        throw new TelegramAccountError('getChatMember 返回 ok!=true', accountId, 'other');
+      }
+      return {
+        status: String(result.status ?? ''),
+        canPostMessages: typeof result.can_post_messages === 'boolean' ? result.can_post_messages : null,
+      };
+    } catch (error) {
+      throw this.toAccountError(error, token, accountId);
+    }
+  }
+
   /** Webhook 状态（与 getUpdates 互斥，启动时用于冲突告警） */
   async getWebhookInfo(accountId: string, token: string): Promise<{ url?: string }> {
     try {
@@ -204,8 +270,10 @@ export class TelegramAccountClientService {
   }
 
   /**
-   * 上传文档（用于「副本扩散」：把已有副本的字节用另一个账号各上传一份）。
-   * 流式上传必须给 knownLength，且流只能消费一次（失败不自动重试）。
+   * 上传文档（用于 Web 上传与镜像 `bot_upload` 任务）。
+   *
+   * **注意**：副本扩散（策略 B）不使用本方法——它由用户账号做服务端转发，
+   * 不发生文件字节的二次传输。流式上传必须给 knownLength，且流只能消费一次（失败不自动重试）。
    */
   async sendDocumentStream(
     accountId: string,

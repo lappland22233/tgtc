@@ -28,6 +28,7 @@ import type {
 } from './telegram-accounts';
 
 import {
+  RELAY_FAILURE_REASON_LABELS,
   cancelMirrorBackfill,
   cancelMirrorTask,
   cancelUserAuth,
@@ -40,11 +41,15 @@ import {
   fetchMirrorBackfill,
   fetchMirrorOverview,
   fetchMirrorTasks,
+  fetchReplicationAttemptDetail,
+  fetchReplicationAttempts,
   fetchReplicationAudit,
   pauseMirrorBackfill,
   probeEnvAccount,
   resumeMirrorBackfill,
   retryMirrorTask,
+  retryReplicationAttempt,
+  runRelayPreflight,
   startMirrorBackfill,
   rotateAccount,
   setAccountPoolEnabled,
@@ -528,5 +533,189 @@ describe('镜像接口', () => {
 
     expect(put).toHaveBeenCalledWith('/admin/telegram-accounts/replication-target', { desiredReplicas: 3 });
     expect(result.target).toMatchObject({ configured: 3, effectiveTarget: 2 });
+  });
+
+  it('fetchReplicationAudit 解析策略 B 观测面（strategy / relayMetrics / largeFileCoverage / recentAttempts）', async () => {
+    get.mockResolvedValue(respond({
+      generatedAt: '2026-09-24T00:00:00.000Z',
+      strategy: {
+        mode: 'user_relay_only',
+        label: '仅用户账号中继',
+        strategyARemoved: true,
+        byteReplicationPossible: false,
+        relayEnabledByConfig: true,
+        restartRequiredForToggle: true,
+        capability: {
+          relayEnabledByConfig: true,
+          userClientAvailable: true,
+          userClientUnavailableReason: null,
+          enabledAuthorizedUserCount: 1,
+          resolvedTargetChatIdPreview: '***7890',
+          sourceChatIdPreview: '***1234',
+          sourceChatReadable: 'ok',
+          targetChatWritable: 'not_checked',
+          botsCanReceiveRelay: 'failed',
+          checkedAt: '2026-09-24T01:00:00.000Z',
+          checkStatus: 'partial',
+          notes: [],
+        },
+      },
+      relayMetrics: {
+        windowMs: 86_400_000,
+        since: '2026-09-23T00:00:00.000Z',
+        attempts: 3,
+        relaySucceeded: 2,
+        relayFailed: 1,
+        blocked: 0,
+        succeeded: 1,
+        partialSuccess: 0,
+        claimTimeouts: 1,
+        relaySuccessRate: null,
+        claimRate: null,
+        relayDurationP50Ms: null,
+        relayDurationP95Ms: null,
+        claimDurationP50Ms: null,
+        claimDurationP95Ms: null,
+        failureReasons: [{ reason: 'rate_limited', count: 1 }],
+        bytesRelayed: 0,
+        sampleSufficient: false,
+        truncated: false,
+      },
+      largeFileCoverage: {
+        ownerType: 'fileUnique',
+        primary: null,
+        secondary: null,
+        scannedFiles: 0,
+        truncated: false,
+        readyAccounts: 1,
+        schedulableAccounts: 1,
+      },
+      recentAttempts: [],
+      observability: { degraded: false, reason: null, since: null, writeFailures: 0 },
+      target: { configured: 2, configuredSource: 'system', eligibleCount: 2, effectiveTarget: 2, degradedReason: null, allowedRange: { min: 1, max: 8 } },
+      poolActive: true,
+      accounts: [],
+      coverage: { scannedFiles: 0, satisfied: 0, unsatisfied: 0, truncated: false, missingSamples: [] },
+      botCoverage: { scannedFiles: 0, satisfied: 0, unsatisfied: 0, truncated: false, missingSamples: [] },
+      sizeCoverage: { scannedFiles: 0, truncated: false, tiers: [] },
+      botSizeCoverage: { scannedFiles: 0, truncated: false, tiers: [] },
+      capacity: null,
+      notes: [],
+    }));
+
+    const report = await fetchReplicationAudit();
+
+    expect(report.strategy.mode).toBe('user_relay_only');
+    expect(report.strategy.strategyARemoved).toBe(true);
+    expect(report.strategy.byteReplicationPossible).toBe(false);
+    expect(report.strategy.capability.targetChatWritable).toBe('not_checked');
+    expect(report.relayMetrics.bytesRelayed).toBe(0);
+    // 低样本时比率必须为 null（界面据此显示「样本不足」而不是 0%）
+    expect(report.relayMetrics.relaySuccessRate).toBeNull();
+    expect(report.observability.degraded).toBe(false);
+  });
+
+  it('fetchReplicationAttempts 带上筛选参数并解包 items/truncated/observability', async () => {
+    get.mockResolvedValue(respond({
+      generatedAt: '2026-09-24T00:00:00.000Z',
+      items: [{ id: 'att-1', status: 'claim_timeout', retryable: true }],
+      truncated: true,
+      observability: { degraded: true, reason: '写入失败', since: null, writeFailures: 1 },
+    }));
+
+    const result = await fetchReplicationAttempts({ status: 'claim_timeout', limit: 20 });
+
+    expect(get).toHaveBeenCalledWith('/admin/telegram-accounts/replication-attempts', {
+      params: { status: 'claim_timeout', limit: 20 },
+      signal: undefined,
+    });
+    expect(result.items[0]).toMatchObject({ id: 'att-1', retryable: true });
+    expect(result.truncated).toBe(true);
+    expect(result.observability.degraded).toBe(true);
+  });
+
+  it('fetchReplicationAttemptDetail 对 id 做 URL 编码', async () => {
+    get.mockResolvedValue(respond({ id: 'att 1', retryable: true, timeline: [], why: '', impact: '', advice: '' }));
+
+    await fetchReplicationAttemptDetail('att 1');
+
+    expect(get).toHaveBeenCalledWith('/admin/telegram-accounts/replication-attempts/att%201', {
+      signal: undefined,
+    });
+  });
+
+  it('retryReplicationAttempt 请求 retry 子端点并返回策略 B 结果', async () => {
+    post.mockResolvedValue(respond({
+      message: '重试已提交',
+      attemptId: 'att-2',
+      status: 'partial_success',
+      created: ['a1'],
+      missing: ['a2'],
+    }));
+
+    const result = await retryReplicationAttempt('att-1');
+
+    expect(post).toHaveBeenCalledWith('/admin/telegram-accounts/replication-attempts/att-1/retry');
+    expect(result.status).toBe('partial_success');
+    expect(result.created).toEqual(['a1']);
+    expect(result.missing).toEqual(['a2']);
+  });
+
+  it('runRelayPreflight 默认提交 dryRun=true（不产生 Telegram 消息）', async () => {
+    const report = {
+      dryRun: true,
+      checkedAt: '2026-09-24T03:00:00.000Z',
+      status: 'partial' as const,
+      checks: [{ id: 'config', label: '中继开关', status: 'ok' as const, detail: 'ok' }],
+      sentTestMessage: false,
+      testMessageId: null,
+      targetChatPreview: '***7890',
+      sourceChatPreview: null,
+      notes: [],
+    };
+    post.mockResolvedValue(respond(report));
+
+    const result = await runRelayPreflight();
+
+    expect(post).toHaveBeenCalledWith('/admin/telegram-accounts/relay-preflight', {});
+    expect(result).toBe(report);
+    expect(result.sentTestMessage).toBe(false);
+  });
+
+  it('runRelayPreflight 显式 dryRun=false 时才允许发送测试消息', async () => {
+    post.mockResolvedValue(respond({
+      dryRun: false,
+      checkedAt: '2026-09-24T03:00:00.000Z',
+      status: 'ok',
+      checks: [],
+      sentTestMessage: true,
+      testMessageId: null,
+      targetChatPreview: '***7890',
+      sourceChatPreview: null,
+      notes: [],
+    }));
+
+    const result = await runRelayPreflight({ dryRun: false });
+
+    expect(post).toHaveBeenCalledWith('/admin/telegram-accounts/relay-preflight', { dryRun: false });
+    expect(result.sentTestMessage).toBe(true);
+  });
+
+  it('失败原因中文映射覆盖后端全部标准化键（避免出现英文键直出）', () => {
+    const keys = [
+      'not_configured',
+      'client_unavailable',
+      'no_account',
+      'source_missing',
+      'target_missing',
+      'permission_denied',
+      'auth_invalid',
+      'rate_limited',
+      'network',
+      'unknown',
+    ];
+    for (const key of keys) {
+      expect(RELAY_FAILURE_REASON_LABELS[key as keyof typeof RELAY_FAILURE_REASON_LABELS]).toBeTruthy();
+    }
   });
 });

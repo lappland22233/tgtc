@@ -102,6 +102,32 @@ export class TelegramMirrorConfigService {
     return this.targetChatsAtMs > 0 && Date.now() - this.targetChatsAtMs < TARGET_CHAT_CACHE_TTL_MS;
   }
 
+  /**
+   * **启用中**规则的备份群 chat id 集合（去重、去空）。
+   *
+   * 与 `listTargetChatIds()` 的区别：这里只返回 `enabled=true` 的规则目标群。
+   * 副本扩散的「中继目标群」唯一权威就是启用中的规则（见 `UserRelayService.resolveTargetChatId`），
+   * 因此入站链路判断「这条消息是不是中继过来的」必须用同一口径：
+   * 用未启用规则的目标群判定，会把普通备份群消息误标成 `relayed`，
+   * 让后台把「非中继来源」统计成「中继已生效」——观测数据直接失真。
+   *
+   * 读不到规则时返回空数组：宁可漏标（记为 `inbound`），也不要误标。
+   */
+  async listEnabledTargetChatIds(): Promise<string[]> {
+    try {
+      const rows = await this.repo.find({ where: { enabled: true }, select: ['targetChatId'] });
+      return Array.from(
+        new Set(rows.map((row) => (row.targetChatId || '').trim()).filter((id) => id.length > 0)),
+      );
+    } catch (error) {
+      this.logger.warn(
+        `启用中镜像规则目标群读取失败（按「非中继来源」处理）：`
+        + `${error instanceof Error ? error.message : String(error)}`,
+      );
+      return [];
+    }
+  }
+
   /** 创建或更新首发规则（不存在则创建；存在则按传入字段更新） */
   async upsert(input: MirrorRuleInput, actorId: string): Promise<TelegramMirrorRule> {
     const current = await this.getRule();

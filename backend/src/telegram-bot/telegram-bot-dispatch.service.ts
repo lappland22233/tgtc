@@ -5,6 +5,7 @@ import { AuditService } from '../common/services/audit.service';
 import { AuditStatus } from '../common/entities/audit-log.entity';
 import type { TelegramMessage, TelegramUpdate, TelegramUser } from '../telegram/telegram.types';
 import { FileCopyService } from '../telegram-account-pool/file-copy.service';
+import { ReplicationAttemptService } from '../telegram-account-pool/replication-attempt.service';
 import { TelegramAccountClientService } from '../telegram-account-pool/telegram-account-client.service';
 import { TelegramAccountPoolService } from '../telegram-account-pool/telegram-account-pool.service';
 import { TelegramBotFileGrant } from '../common/entities/telegram-bot-file-grant.entity';
@@ -78,6 +79,9 @@ export class TelegramBotDispatchService {
     // 镜像规则读取（可选依赖）：仅用于识别「消息来自备份群」以抑制归档转发放大
     @Optional() @Inject(TelegramMirrorConfigService)
     private readonly mirrorConfig: TelegramMirrorConfigService | null = null,
+    // 扩散轮次回写（可选依赖）：把 Bot 认领事件落到轮次记录，让「中继 → 认领」闭环可查询
+    @Optional() @Inject(ReplicationAttemptService)
+    private readonly attempts: ReplicationAttemptService | null = null,
   ) {}
 
   /** 处理单条更新（异常不外抛，避免中断轮询循环） */
@@ -382,10 +386,9 @@ export class TelegramBotDispatchService {
    * 3. 若配置了归档群，则用接收账号把消息转发到归档群（`TELEGRAM_ARCHIVE_CHAT_ID`）。
    *
    * **注意**：转发到群**不会**让其它 bot 拿到该文件（Telegram 规定 bot 看不到其它 bot 的消息）。
-   * 跨账号共享由「副本扩散」（策略 A）或「用户账号中继」（策略 B）完成：
-   * 用户账号把源消息转发进副本可见群后，群内每个 Bot（管理员/关闭隐私模式）各自收到更新，
-   * 在此处登记**自己账号的** `file_id` 副本，这就是策略 B 的完成条件。
-   * 转发到归档群只是审计/归属留痕。
+   * 跨账号共享只有一条链路——**用户账号中继**：用户账号把源消息服务端转发进副本可见群后，
+   * 群内每个 Bot（管理员/关闭隐私模式）各自收到更新，在此处登记**自己账号的** `file_id` 副本，
+   * 这就是副本扩散的完成条件（转发成功本身不算）。转发到归档群只是审计/归属留痕。
    *
    * 放大抑制：来自镜像备份群的消息**只登记副本**，不再归档转发——否则群内 N 个 Bot
    * 会各自转发一次，把归档群消息量按 Bot 数放大（见 `isMirrorTargetChat`）。
@@ -414,6 +417,25 @@ export class TelegramBotDispatchService {
       );
     } else {
       try {
+        const fileSize = typeof doc.file_size === 'number' && doc.file_size > 0 ? doc.file_size : null;
+        // 中继来源判定：只认**启用中**镜像规则的目标群，与 UserRelayService.resolveTargetChatId 同一口径
+        const fromRelayTarget = await this.isEnabledMirrorTargetChat(chatId);
+
+        // 桥接先做：它既决定这条入站副本能否被站内下载消费，也决定能否标注 relayed
+        // （未命中该群消息与站内文件无关，属正常现象，只计数、不告警）
+        const bridged = await copies.bridgeInboundCopyToLogicalFile({
+          fileUniqueId: uniqueId,
+          accountId,
+          telegramFileId: doc.file_id,
+          chatId,
+          messageId,
+          fileSize,
+          source: fromRelayTarget ? 'relayed' : 'inbound',
+        });
+        if (!bridged.bridged) pool.bumpCounter('inboundBridgeMisses');
+
+        // fileUnique 行：只有「中继来源 + 确实命中站内逻辑文件」才标注 relayed。
+        // 否则普通备份群消息会被统计成「中继已生效」，后台观测数据直接失真。
         await copies.upsertReady({
           ownerType: 'fileUnique',
           ownerId: uniqueId,
@@ -421,21 +443,13 @@ export class TelegramBotDispatchService {
           telegramFileId: doc.file_id,
           chatId,
           messageId,
-          fileSize: typeof doc.file_size === 'number' && doc.file_size > 0 ? doc.file_size : null,
-          source: 'inbound',
+          fileSize,
+          source: fromRelayTarget && bridged.bridged ? 'relayed' : 'inbound',
         });
         this.logger.log(`已登记入站副本：账号 ${accountId} / fileUnique=${uniqueId.slice(0, 16)}…`);
-        // 副本扩散的「最后一公里」：桥接到站内逻辑文件，让下载选号能用上这些副本。
-        // 未命中（该群消息与站内文件无关）属正常现象，只计数、不告警。
-        const bridged = await copies.bridgeInboundCopyToLogicalFile({
-          fileUniqueId: uniqueId,
-          accountId,
-          telegramFileId: doc.file_id,
-          chatId,
-          messageId,
-          fileSize: typeof doc.file_size === 'number' && doc.file_size > 0 ? doc.file_size : null,
-        });
-        if (!bridged.bridged) pool.bumpCounter('inboundBridgeMisses');
+
+        // 认领回写：让「中继 → 认领」闭环在后台可查询（找不到进行中轮次时静默返回）
+        await this.recordRelayClaim(uniqueId, bridged.matchedFileIds, accountId);
       } catch (error) {
         pool.bumpCounter('inboundRegistrationFailures');
         const text = error instanceof Error ? error.message : String(error);
@@ -486,6 +500,60 @@ export class TelegramBotDispatchService {
         `备份群集合读取失败（按「非备份群」处理）：${error instanceof Error ? error.message : String(error)}`,
       );
       return false;
+    }
+  }
+
+  /**
+   * 判断某个 chat 是否是**启用中**镜像规则的目标群（= 副本扩散的中继目标群）。
+   *
+   * 与 `isMirrorTargetChat` 的分工：
+   * - 后者用于「是否抑制归档转发」，覆盖全部规则（含未启用）；
+   * - 这里用于「这条消息是不是中继过来的」，**只认启用中的规则**——
+   *   用未启用规则的目标群判定，会把普通备份群消息误标成 `relayed`，
+   *   让后台把「非中继来源」统计成「中继已生效」。
+   *
+   * 读不到规则时返回 false（宁可漏标为 `inbound`，也不要误标）。
+   */
+  private async isEnabledMirrorTargetChat(chatId: string): Promise<boolean> {
+    if (!this.mirrorConfig || !chatId) return false;
+    try {
+      const targets = await this.mirrorConfig.listEnabledTargetChatIds();
+      return targets.includes(chatId);
+    } catch (error) {
+      this.logger.debug(
+        `启用中备份群集合读取失败（按「非中继来源」处理）：`
+        + `${error instanceof Error ? error.message : String(error)}`,
+      );
+      return false;
+    }
+  }
+
+  /**
+   * 把 Bot 认领事件回写到扩散轮次。
+   *
+   * 为什么要写两个命名空间：轮次是按**发起扩散时的 owner** 建的（下载期懒扩散用
+   * `file:<站内 id>`），而认领天然只知道 `file_unique_id`。只写一个会让
+   * 「中继成功」与「Bot 认领」在后台对不上，认领超时会被误判。
+   *
+   * 找不到进行中轮次时 `recordClaim` 内部静默返回（普通备份群消息本就没有对应轮次）。
+   */
+  private async recordRelayClaim(
+    uniqueId: string,
+    matchedFileIds: string[],
+    accountId: string,
+  ): Promise<void> {
+    const attempts = this.attempts;
+    if (!attempts) return;
+    try {
+      await attempts.recordClaim('fileUnique', uniqueId, accountId);
+      for (const fileId of matchedFileIds) {
+        await attempts.recordClaim('file', fileId, accountId);
+      }
+    } catch (error) {
+      // 观测写入失败**不得**回滚或污染业务写入（副本已登记成功），也不计入登记失败计数
+      this.logger.debug(
+        `认领回写失败（忽略，不影响副本登记）：${error instanceof Error ? error.message : String(error)}`,
+      );
     }
   }
 

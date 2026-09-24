@@ -5,12 +5,15 @@ import { File } from '../common/entities/file.entity';
 import { TelegramAccount } from '../common/entities/telegram-account.entity';
 import { TelegramFileCopy } from '../common/entities/telegram-file-copy.entity';
 import { TelegramMirrorRule } from '../common/entities/telegram-mirror-rule.entity';
+import { TelegramReplicationAttempt } from '../common/entities/telegram-replication-attempt.entity';
 import { TelegramAccountCredentialModule } from '../telegram-accounts/telegram-account-credential.module';
 import { TelegramUserModule } from '../telegram-user/telegram-user.module';
 import { AccountAwareDownloadService } from './account-aware-download.service';
 import { AccountAwareUploadService } from './account-aware-upload.service';
 import { DownloadCapacityPolicyService } from './download-capacity-policy.service';
 import { FileCopyService } from './file-copy.service';
+import { RelayCapabilityService } from './relay-capability.service';
+import { ReplicationAttemptService } from './replication-attempt.service';
 import { TelegramAccountClientService } from './telegram-account-client.service';
 import { TelegramAccountPoolAlertService } from './telegram-account-pool-alert.service';
 import { TelegramAccountPoolService } from './telegram-account-pool.service';
@@ -26,6 +29,9 @@ const CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
 const FAILED_RECORD_TTL_HOURS = 24;
 const PENDING_RECORD_TTL_HOURS = 1;
 const STALE_COPY_TTL_DAYS = 30;
+/** 扩散轮次保留窗口：悬挂轮次收敛阈值 / 终态轮次保留期（与副本清理分开评审） */
+const HANGING_ATTEMPT_TTL_HOURS = 2;
+const TERMINAL_ATTEMPT_TTL_DAYS = 30;
 
 /**
  * Bot 账号池模块（多账号上传/回源）。
@@ -48,7 +54,13 @@ const STALE_COPY_TTL_DAYS = 30;
  */
 @Module({
   imports: [
-    TypeOrmModule.forFeature([TelegramFileCopy, TelegramAccount, File, TelegramMirrorRule]),
+    TypeOrmModule.forFeature([
+      TelegramFileCopy,
+      TelegramAccount,
+      File,
+      TelegramMirrorRule,
+      TelegramReplicationAttempt,
+    ]),
     AlertModule,
     TelegramUserModule,
     TelegramAccountCredentialModule,
@@ -59,6 +71,10 @@ const STALE_COPY_TTL_DAYS = 30;
     FileCopyService,
     UserAccountDirectoryService,
     UserRelayService,
+    // 扩散轮次持久化：策略 B 的状态机、指标与清理的唯一写入方
+    ReplicationAttemptService,
+    // 中继能力快照与预检：后台「现在缺哪一项、怎么处理」的唯一事实来源
+    RelayCapabilityService,
     AccountAwareDownloadService,
     AccountAwareUploadService,
     TelegramAccountPoolAlertService,
@@ -73,6 +89,8 @@ const STALE_COPY_TTL_DAYS = 30;
     FileCopyService,
     UserAccountDirectoryService,
     UserRelayService,
+    ReplicationAttemptService,
+    RelayCapabilityService,
     AccountAwareDownloadService,
     AccountAwareUploadService,
     TelegramAccountPoolAlertService,
@@ -97,6 +115,9 @@ export class TelegramAccountPoolModule implements OnModuleInit, OnApplicationShu
     // 否则 `@Optional()` 会把解析失败静默降级成 `null`（扩缩容定时器永不装配）。
     @Optional() @Inject(DownloadCapacityPolicyService)
     private readonly capacity: DownloadCapacityPolicyService | null = null,
+    // 可选（同上）：扩散轮次清理。缺失时只是不清理轮次表，不影响扩散主链路。
+    @Optional() @Inject(ReplicationAttemptService)
+    private readonly attempts: ReplicationAttemptService | null = null,
   ) {
     this.pool.registerProbe(async (accountId: string) => {
       const config = this.pool.getConfig(accountId);
@@ -215,6 +236,17 @@ export class TelegramAccountPoolModule implements OnModuleInit, OnApplicationShu
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.logger.warn(`副本记录清理失败（忽略，下轮重试）: ${message}`);
+    }
+
+    // 扩散轮次清理：先收敛悬挂轮次，再按保留窗口删除终态行（内部自带降级标记，不抛错）
+    try {
+      await this.attempts?.purgeStale({
+        activeBefore: new Date(now - HANGING_ATTEMPT_TTL_HOURS * 3_600_000),
+        terminalBefore: new Date(now - TERMINAL_ATTEMPT_TTL_DAYS * 86_400_000),
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn(`扩散轮次清理失败（忽略，下轮重试）: ${message}`);
     }
   }
 }

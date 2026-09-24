@@ -38,14 +38,6 @@ const PROBE_FAILURE_KIND: AccountFailureKind = 'network';
 const LARGE_FILE_THRESHOLD_BYTES = 1024 ** 3;
 /** 每账号大文件回源槽位默认值（未显式配置时）：同一账号同时只跑 1 个大文件冷回源 */
 const LARGE_INFLIGHT_DEFAULT = 1;
-/**
- * 每账号复制（副本扩散）并发上限。
- *
- * 复制与下载共享同一账号的上游额度，且复制本身就是「用下载带宽换副本分布」，
- * 因此按 1 严格限制：任何时刻同一账号最多一条复制流，且它必须先通过
- * `admit({role:'replication'})`——下载优先由调用方在准入前判断系统负载。
- */
-const REPLICATION_INFLIGHT_MAX = 1;
 /** 准入被拒（非冷却）时的建议重试间隔（毫秒） */
 const ADMISSION_RETRY_AFTER_MS = 5_000;
 
@@ -79,19 +71,18 @@ export class TelegramAccountPoolService implements OnModuleInit, OnApplicationSh
   private probeTimer: NodeJS.Timeout | null = null;
   /** 平局轮转游标：让得分相同的账号也能被均匀分流（见 select 注释） */
   private rotateCursor = 0;
-  /** 进程内计数（选择/换号/回退/复制/回复失败），供诊断与告警判定 */
+  /** 进程内计数（选择/换号/回退/中继/回复失败），供诊断与告警判定 */
   private readonly counters: AccountPoolCounters = {
     selections: 0,
     failovers: 0,
     fallbacks: 0,
     unresolved: 0,
-    replicationsOk: 0,
-    replicationsFailed: 0,
     streamFailures: 0,
     replyFailures: 0,
     inboundRegistrationFailures: 0,
-    userRelaysOk: 0,
-    userRelaysFailed: 0,
+    relayAttempts: 0,
+    relaySucceeded: 0,
+    relayFailed: 0,
     relayClaimsMissed: 0,
     inboundBridgeMisses: 0,
     anchorConflicts: 0,
@@ -595,7 +586,6 @@ export class TelegramAccountPoolService implements OnModuleInit, OnApplicationSh
       config,
       inflight: 0,
       largeInflight: 0,
-      replicationInflight: 0,
       bandwidthEwmaBps: 0,
       successEwma: 1,
       latencyEwmaMs: 0,
@@ -621,9 +611,9 @@ export class TelegramAccountPoolService implements OnModuleInit, OnApplicationSh
    * @param candidateIds 限定候选（例如「持有该文件副本的账号」）；为空表示全池
    * @param options.largeFile 本次回源是否为大文件（>1GiB）：为 true 时把
    *   「已达每账号大文件槽位」的账号排除在候选之外，避免选出一个立刻会被准入拒绝的账号；
-   *   同时把大文件在飞数与复制在飞数计入容量分，使多账号下的分流更均匀。
-   * @param options.role 用途：复制（replication）时把「已有复制流」的账号降权
-   *   （下载优先：复制不与下载争抢同一账号的瞬时额度）。
+   *   同时把大文件在飞数计入容量分，使多账号下的分流更均匀。
+   * @param options.role 用途（download / upload）。副本扩散不再参与账号选择：
+   *   策略 B 由用户账号做服务端转发，不占用 Bot 账号额度。
    */
   select(
     candidateIds?: string[],
@@ -674,7 +664,7 @@ export class TelegramAccountPoolService implements OnModuleInit, OnApplicationSh
       const reason = `bw=${(runtime.bandwidthEwmaBps / 1024 / 1024).toFixed(2)}MB/s `
         + `health=${healthScore.toFixed(2)} inflight=${runtime.inflight}/${runtime.config.maxInflight} `
         + `large=${runtime.largeInflight}/${this.maxLargeInflightOf(runtime)} `
-        + `replication=${runtime.replicationInflight} weight=${runtime.config.weight}`;
+        + `weight=${runtime.config.weight}`;
       if (!best || score > best.score) {
         best = { accountId: runtime.config.id, score, reason };
       }
@@ -692,8 +682,6 @@ export class TelegramAccountPoolService implements OnModuleInit, OnApplicationSh
     if (runtime.cooldownUntilMs > nowMs) return false;
     // 大文件回源：已达每账号槽位的账号不再作为候选（否则会被 admit 立刻拒绝，白白消耗一次尝试）
     if (options?.largeFile && runtime.largeInflight >= this.maxLargeInflightOf(runtime)) return false;
-    // 复制：同一账号已有复制流时不再被选为复制源/目标（下载优先）
-    if (options?.role === 'replication' && runtime.replicationInflight >= REPLICATION_INFLIGHT_MAX) return false;
     return true;
   }
 
@@ -747,19 +735,13 @@ export class TelegramAccountPoolService implements OnModuleInit, OnApplicationSh
 
     const role: AccountAttemptRole = request.role ?? 'download';
     const largeFile = isLargeFileBytes(request.bytes);
-    if (largeFile && role !== 'replication') {
-      if (runtime.largeInflight >= this.maxLargeInflightOf(runtime)) {
-        return { granted: false, reason: 'large_inflight_full', retryAfterMs: ADMISSION_RETRY_AFTER_MS };
-      }
-    }
-    if (role === 'replication' && runtime.replicationInflight >= REPLICATION_INFLIGHT_MAX) {
-      return { granted: false, reason: 'replication_full', retryAfterMs: ADMISSION_RETRY_AFTER_MS };
+    if (largeFile && runtime.largeInflight >= this.maxLargeInflightOf(runtime)) {
+      return { granted: false, reason: 'large_inflight_full', retryAfterMs: ADMISSION_RETRY_AFTER_MS };
     }
 
     // 同步占用（本方法内无 await，判定与占用不可被拆分）
     runtime.inflight += 1;
-    if (largeFile && role !== 'replication') runtime.largeInflight += 1;
-    if (role === 'replication') runtime.replicationInflight += 1;
+    if (largeFile) runtime.largeInflight += 1;
 
     return {
       granted: true,
@@ -783,12 +765,7 @@ export class TelegramAccountPoolService implements OnModuleInit, OnApplicationSh
     let settled: 'finish' | 'release' | null = null;
     const releaseCounters = (): void => {
       runtime.inflight = Math.max(0, runtime.inflight - 1);
-      if (largeFile && role !== 'replication') {
-        runtime.largeInflight = Math.max(0, runtime.largeInflight - 1);
-      }
-      if (role === 'replication') {
-        runtime.replicationInflight = Math.max(0, runtime.replicationInflight - 1);
-      }
+      if (largeFile) runtime.largeInflight = Math.max(0, runtime.largeInflight - 1);
     };
     return {
       accountId: runtime.config.id,
@@ -922,7 +899,6 @@ export class TelegramAccountPoolService implements OnModuleInit, OnApplicationSh
       inflight: runtime.inflight,
       largeInflight: runtime.largeInflight,
       maxLargeInflight: this.maxLargeInflightOf(runtime),
-      replicationInflight: runtime.replicationInflight,
       bandwidthMbps: Number((runtime.bandwidthEwmaBps / 1024 / 1024).toFixed(3)),
       successRate: Number(runtime.successEwma.toFixed(4)),
       latencyMs: Math.round(runtime.latencyEwmaMs),
