@@ -43,6 +43,21 @@ export function databaseForUpdate(dataSourceType: string, lock: 'update' | 'key-
   return lock === 'key-share' ? ' FOR KEY SHARE' : ' FOR UPDATE';
 }
 
+/**
+ * TypeORM `findOne` 的行锁选项：**仅 PostgreSQL 可用**。
+ *
+ * 为什么必须按方言省略：SQLite 驱动不支持行锁，传入 `pessimistic_write` 会直接抛
+ * `LockNotSupportedOnGivenDriverError`——这不是「少一层保护」，而是整条路径 500
+ * （覆盖上传、删除/恢复等）。SQLite 的写事务本身已串行化，省略该选项即语义等价。
+ *
+ * 用法：`repo.findOne({ where, ...databasePessimisticWriteLock() })`。
+ */
+export function databasePessimisticWriteLock(
+  env: NodeJS.ProcessEnv = process.env,
+): { lock?: { mode: 'pessimistic_write' } } {
+  return getDatabaseType(env) === 'postgres' ? { lock: { mode: 'pessimistic_write' } } : {};
+}
+
 /** 将 PostgreSQL $n 占位符转换为 SQLite 编号占位符 ?n，保留重复参数的索引语义。 */
 export function databaseQueryText(sql: string, type: DatabaseType): string {
   if (type !== 'sqlite') return sql;

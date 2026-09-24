@@ -81,6 +81,8 @@ describe('真实 SQLite 数据源关键业务与并发 QA', () => {
       'SqliteCreateTelegramReplicationAttempts1803500000000',
       // 副本扩散改造：主群锚点（「Bot 先搬进主群 → userbot 再转发到镜像群」的落点）
       'SqliteCreateTelegramMainChatAnchors1803600000000',
+      // 副本扩散改造：grant 内容标识（群内认领归因回 grant，修正轮次结算）
+      'SqliteAddGrantFileUniqueId1803700000000',
     ]);
 
     await dataSource.undoLastMigration();

@@ -109,6 +109,9 @@ export class TelegramUserCopyService {
         sourceMessageId: descriptor.messageId,
         // 归属优先用任务行固化的事实（任务创建时写入），缺失时回落到描述
         sourceAccountId: task.sourceAccountId ?? descriptor.sourceAccountId,
+        // 源内容版本（仅日志/诊断用）：主群锚点据此识别「同一 file.id 覆盖上传」并重搬，
+        // 避免新版本任务从旧版本的主群消息中继（镜像群停在旧内容）
+        sourceVersion: task.sourceVersion,
       });
     } catch (error) {
       await this.closeRoundFailed(round, error);

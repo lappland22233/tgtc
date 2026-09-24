@@ -24,6 +24,7 @@ import {
 @Index('idx_tg_bot_grants_expiresAt', ['expiresAt'])
 @Index('uq_tg_bot_grants_tokenHash', ['tokenHash'], { unique: true })
 @Index('uq_tg_bot_grants_message', ['telegramUserId', 'chatId', 'messageId'], { unique: true })
+@Index('idx_tg_bot_grants_fileUniqueId', ['fileUniqueId'])
 export class TelegramBotFileGrant {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -49,6 +50,19 @@ export class TelegramBotFileGrant {
   /** Telegram 文件标识，用于取流 */
   @Column({ type: 'varchar', length: 512, comment: 'Telegram file_id' })
   telegramFileId: string;
+
+  /**
+   * 内容标识 `file_unique_id`（跨账号稳定，可空）。
+   *
+   * 为什么需要：镜像群/主群里的消息只携带 `file_unique_id`（跨账号稳定），
+   * 而 grant 只有私聊锚点 `(telegramUserId, chatId, messageId)` + 账号级
+   * `telegramFileId`，无法把「群内某条消息的认领」归因回某条 grant ——
+   * 扩散轮次结算按 `grant:<id>` 查 ready 副本时恒为空，误判 `claim_timeout`。
+   *
+   * 允许为空：历史数据保持 NULL，不写该列也不影响既有直链链路。
+   */
+  @Column({ type: 'varchar', length: 128, nullable: true, comment: '内容标识 file_unique_id（跨账号稳定，用于把群内认领归因回该 grant）' })
+  fileUniqueId: string | null;
 
   /**
    * 产生该 `file_id` 的 Bot 账号 ID（账号池回退安全锚点）。

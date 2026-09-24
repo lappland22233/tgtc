@@ -21,6 +21,13 @@ export interface IssueGrantInput {
    * 池化模式为「收到消息的账号」；单账号模式为默认 Token 的 botId；无法确定时为 null。
    */
   sourceAccountId?: string | null;
+  /**
+   * 内容标识 `file_unique_id`（可空）。
+   *
+   * 为什么记录：镜像群里的消息只携带 `file_unique_id`（跨账号稳定），认领归因需要
+   * 用它反查 grant（群内消息不含私聊锚点）；历史/降级路径允许缺省。
+   */
+  fileUniqueId?: string | null;
 }
 
 export interface IssuedGrant {
@@ -73,6 +80,21 @@ export class TelegramBotGrantService {
     return this.grantRepository.findOne({ where: { tokenHash } });
   }
 
+  /**
+   * 按内容标识查 grant（跨群认领归因：群内消息只带 file_unique_id）。
+   * 按签发时间倒序取最近若干条。
+   */
+  async findByFileUniqueId(fileUniqueId: string, limit = 5): Promise<TelegramBotFileGrant[]> {
+    const unique = (fileUniqueId || '').trim();
+    // 空串/空白串直接返回：绝不拿空串查库（否则会把 fileUniqueId 为空的历史行全部命中）
+    if (!unique) return [];
+    return this.grantRepository.find({
+      where: { fileUniqueId: unique },
+      order: { createdAt: 'DESC' },
+      take: limit,
+    });
+  }
+
   /** 签发直链授权记录 */
   async issue(input: IssueGrantInput, ttlHours: number): Promise<IssuedGrant> {
     const token = this.generateToken();
@@ -87,6 +109,8 @@ export class TelegramBotGrantService {
       chatId: input.chatId,
       messageId: input.messageId,
       telegramFileId: input.telegramFileId,
+      // 内容标识（可空）：把群内认领归因回该 grant 的索引键；缺省时保持 NULL（向后兼容）
+      fileUniqueId: input.fileUniqueId ?? null,
       sourceAccountId: input.sourceAccountId ?? null,
       fileName: input.fileName,
       mimeType: input.mimeType,

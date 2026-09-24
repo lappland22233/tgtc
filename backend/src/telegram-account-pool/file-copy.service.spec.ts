@@ -1,3 +1,4 @@
+import { Logger } from '@nestjs/common';
 import { FileCopyService } from './file-copy.service';
 function makeRepo() {
   return {
@@ -433,5 +434,122 @@ describe('FileCopyService（入站副本桥接到站内逻辑文件）', () => {
     });
 
     expect(result).toEqual({ bridged: false, matchedFileIds: [] });
+  });
+});
+
+/**
+ * 覆盖上传后的旧副本失效：副本行没有内容版本，覆盖会换掉 telegramFileId，
+ * 其它账号的旧行仍会被 `listReady` 选中并回源（表现为「覆盖后下载到旧内容」），
+ * 必须按归属整体删除——本组用例保护这条唯一的内容一致性手段。
+ */
+describe('FileCopyService（按归属失效旧内容副本）', () => {
+  it('invalidateByOwner 删除其它账号行、保留 exceptAccountId 指定行，并返回受影响行数', async () => {
+    const ctx = setup();
+    ctx.repo.delete.mockResolvedValueOnce({ affected: 3 } as never);
+    const logSpy = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+    try {
+      const removed = await ctx.service.invalidateByOwner('file', 'file-1', 'a2');
+
+      expect(removed).toBe(3);
+      const where = ctx.repo.delete.mock.calls[0][0] as Record<string, unknown>;
+      expect(where.ownerType).toBe('file');
+      expect(where.ownerId).toBe('file-1');
+      // 保留 exceptAccountId：删除条件必须带 `accountId != except`（Not 运算符），
+      // 否则会连本次上传账号随后要写的主副本行一起删掉
+      const accountCondition = where.accountId as { type?: string; value?: unknown } | undefined;
+      expect(accountCondition?.type).toBe('not');
+      expect(accountCondition?.value).toBe('a2');
+      // 命中时留一条脱敏日志（ownerId 经 preview 截断，不打印 file_id）
+      expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('已失效旧内容副本'));
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
+  it('invalidateByOwner 不带 exceptAccountId 时删除该归属的全部行（条件不含账号过滤）', async () => {
+    const ctx = setup();
+    ctx.repo.delete.mockResolvedValueOnce({ affected: 2 } as never);
+
+    const removed = await ctx.service.invalidateByOwner('file', 'file-1');
+
+    expect(removed).toBe(2);
+    expect(ctx.repo.delete).toHaveBeenCalledWith({ ownerType: 'file', ownerId: 'file-1' });
+  });
+
+  it('invalidateByOwner 无匹配行时返回 0 且不抛错（不误报）', async () => {
+    const ctx = setup();
+    ctx.repo.delete.mockResolvedValueOnce({ affected: 0 } as never);
+
+    await expect(ctx.service.invalidateByOwner('file', 'file-1', 'a1')).resolves.toBe(0);
+  });
+
+  it('invalidateByOwner 仓库抛错时返回 0 并只记 warn（绝不阻断上传主流程）', async () => {
+    const ctx = setup();
+    ctx.repo.delete.mockRejectedValueOnce(new Error('SQLITE_BUSY: database is locked') as never);
+    const warnSpy = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const logSpy = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+
+    try {
+      const removed = await ctx.service.invalidateByOwner('file', 'file-1', 'a2');
+
+      expect(removed).toBe(0);
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('副本失效删除失败'));
+      expect(logSpy).not.toHaveBeenCalled();
+    } finally {
+      warnSpy.mockRestore();
+      logSpy.mockRestore();
+    }
+  });
+});
+
+/**
+ * 批量取 ready 副本：历史补偿等批处理场景用它替代逐文件 `listReady`（避免 N+1）。
+ * 本组用例守住三个边界：空数组不查库、按 ownerId 分组、take 有界。
+ */
+describe('FileCopyService（批量取 ready 副本 listReadyByOwnerIds）', () => {
+  it('空数组（含空白项）直接返回空 Map，且不查库', async () => {
+    const ctx = setup();
+
+    const empty = await ctx.service.listReadyByOwnerIds('file', []);
+    const blanks = await ctx.service.listReadyByOwnerIds('file', ['', '   ']);
+
+    expect(empty.size).toBe(0);
+    expect(blanks.size).toBe(0);
+    expect(ctx.repo.find).not.toHaveBeenCalled();
+  });
+
+  it('按 ownerId 分组返回，且 take 有界（去重后归属数 × 8）', async () => {
+    const ctx = setup();
+    ctx.repo.find.mockResolvedValue([
+      copyRow('a1', { ownerId: 'file-1' }),
+      copyRow('a2', { ownerId: 'file-1' }),
+      copyRow('a1', { ownerId: 'file-2' }),
+    ] as never);
+
+    const result = await ctx.service.listReadyByOwnerIds('file', ['file-1', 'file-2', 'file-1', ' ']);
+
+    // 一次查询（不是逐文件查询），重复/空白项被去重后作为 IN 条件
+    expect(ctx.repo.find).toHaveBeenCalledTimes(1);
+    const findArgs = ctx.repo.find.mock.calls[0][0]! as {
+      where: { ownerType?: string; status?: string; ownerId?: { type?: string; value?: unknown } };
+      take?: number;
+    };
+    expect(findArgs.where.ownerType).toBe('file');
+    expect(findArgs.where.status).toBe('ready');
+    expect(findArgs.where.ownerId?.type).toBe('in');
+    expect(findArgs.where.ownerId?.value).toEqual(['file-1', 'file-2']);
+    // 有界：2 个去重归属 × 8 = 16（单归属最多取 8 行足够判定可执行性）
+    expect(findArgs.take).toBe(16);
+    expect(result.get('file-1')).toHaveLength(2);
+    expect(result.get('file-2')).toHaveLength(1);
+  });
+
+  it('无匹配行时返回空 Map（不误报、不抛错）', async () => {
+    const ctx = setup();
+    ctx.repo.find.mockResolvedValue([] as never);
+
+    const result = await ctx.service.listReadyByOwnerIds('file', ['file-1']);
+
+    expect(result.size).toBe(0);
   });
 });

@@ -1,4 +1,4 @@
-import { databaseQuery } from './database-types';
+import { databasePessimisticWriteLock, databaseQuery } from './database-types';
 
 /**
  * TypeORM 的 PostgresQueryRunner 对 `UPDATE`/`DELETE` 返回 `[rows, affectedCount]`
@@ -46,5 +46,26 @@ describe('databaseQuery 返回值归一化（PG UPDATE/DELETE 元组）', () => 
   it('SQLite 方言不做元组解包（其 RETURNING 路径由 sqliteAll 单独处理）', async () => {
     const runner = pgRunner([[], 0]);
     await expect(databaseQuery(runner, 'UPDATE "t" SET x = 1', [], 'sqlite')).resolves.toEqual([[], 0]);
+  });
+});
+
+/**
+ * 行锁方言差异：TypeORM 的 SQLite 驱动不支持 `pessimistic_write`，传入会抛
+ * `LockNotSupportedOnGivenDriverError`——这不是「少一层保护」，而是整条路径 500
+ * （覆盖上传、删除/恢复）。因此必须按方言省略，SQLite 的写事务本身已串行化。
+ */
+describe('databasePessimisticWriteLock（行锁仅 PG 可用）', () => {
+  it('PostgreSQL 返回 pessimistic_write 行锁选项', () => {
+    expect(databasePessimisticWriteLock({ DB_TYPE: 'postgres' } as NodeJS.ProcessEnv))
+      .toEqual({ lock: { mode: 'pessimistic_write' } });
+  });
+
+  it('SQLite 返回空对象（驱动不支持行锁，传入会直接抛错）', () => {
+    expect(databasePessimisticWriteLock({ DB_TYPE: 'sqlite' } as NodeJS.ProcessEnv)).toEqual({});
+  });
+
+  it('未设置 DB_TYPE 时按默认 postgres 处理，保持既有加锁行为', () => {
+    expect(databasePessimisticWriteLock({} as NodeJS.ProcessEnv))
+      .toEqual({ lock: { mode: 'pessimistic_write' } });
   });
 });

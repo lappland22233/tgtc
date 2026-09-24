@@ -1,3 +1,4 @@
+import { Logger } from '@nestjs/common';
 import { Readable } from 'stream';
 import { AccountAwareUploadService } from './account-aware-upload.service';
 import { TelegramAccountError } from './telegram-account-client.service';
@@ -189,5 +190,30 @@ describe('AccountAwareUploadService（上传选号 / 换号 / 回退）', () => 
     expect(result?.accountId).toBe('with-chat');
     expect(send).toHaveBeenCalledTimes(1);
     expect(send.mock.calls[0][0]).toBe('with-chat');
+  });
+
+  it('候选存在但全部不可调度（冷却/满载/禁用）：返回 null 不抛出、记录限频 warn、不发起上传', async () => {
+    const warnSpy = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const debugSpy = jest.spyOn(Logger.prototype, 'debug').mockImplementation(() => undefined);
+    try {
+      const { service, pool, send } = makeService({});
+      // 唯一候选进入冷却（持续不可调度）→ select 无可用候选 → 回退单账号链路
+      pool.finishAttempt('a1', { ok: false });
+
+      const first = await service.upload({ filename: 'a.bin', knownLength: 10, openStream: streamFactory().factory });
+      const second = await service.upload({ filename: 'a.bin', knownLength: 10, openStream: streamFactory().factory });
+
+      // 不抛出：调用方据此回退默认单账号链路
+      expect(first).toBeNull();
+      expect(second).toBeNull();
+      expect(send).not.toHaveBeenCalled();
+      expect(debugSpy).toHaveBeenCalledWith('池化上传选号无可用候选（冷却/满载/禁用），回退单账号链路');
+      // 60s 限频：账号持续冷却时第二次上传不再重复 warn，避免刷屏
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('无可用候选'));
+    } finally {
+      warnSpy.mockRestore();
+      debugSpy.mockRestore();
+    }
   });
 });

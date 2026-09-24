@@ -467,6 +467,32 @@ describe('FileService - applyOverwrite', () => {
     );
   });
 
+  it('SQLite 方言下覆盖不传行锁（驱动不支持 pessimistic_write，传入会直接抛 LockNotSupportedOnGivenDriverError）', async () => {
+    const previous = process.env.DB_TYPE;
+    process.env.DB_TYPE = 'sqlite';
+    try {
+      const target = makeTargetFile();
+      txFileRepo.findOne.mockResolvedValue(makeTargetFile());
+
+      const result = await service.applyOverwrite(target, {
+        telegramFileId: 'new-tg-file-id',
+        telegramFilePath: 'new/path',
+        filename: 'new-tg-file-id',
+        originalName: '新文件.png',
+        size: 5,
+        mimeType: 'image/png',
+        user: makeUser(ownerId),
+      });
+
+      // 关键回归：SQLite 下必须省略 lock（其写事务本身串行化），否则整条覆盖路径直接 500
+      expect(txFileRepo.findOne).toHaveBeenCalledWith({ where: { id: targetFileId } });
+      expect(result.uploadVersion).toBe(2);
+    } finally {
+      if (previous === undefined) delete process.env.DB_TYPE;
+      else process.env.DB_TYPE = previous;
+    }
+  });
+
   it('事务内复核发现目标已处理中（TOCTOU）抛 BadRequestException，不执行更新', async () => {
     const target = makeTargetFile();
     txFileRepo.findOne.mockResolvedValue(makeTargetFile({ status: 'processing' }));
@@ -826,7 +852,13 @@ describe('FileService - G2-05 覆盖上传 uploadVersion 原子化（事务+悲�
   });
 });
 
-describe('FileService - G2-06 缓存预热完成条件更新（版本守卫）', () => {
+/**
+ * 缺陷回归（预热不得写状态）：`startCachePrewarm` 只把字节写入缓存目录，不得再执行
+ * 「置 ready 的条件更新」——旧实现会抢先把文件置 ready，导致 FileUploadProcessor 收尾
+ * 的条件更新 0 行命中并跳过来源登记与镜像触发。本组用例由旧 G2-06（预热条件更新
+ * 版本守卫）用例改写：断言反转为「缓存照写、状态零写入」，并发覆盖场景下记录保持 processing。
+ */
+describe('FileService - 缓存预热不写状态（原 G2-06 条件更新已移除）', () => {
   let service: FileService;
   let fileRepo: any;
   let txFileRepo: { findOne: jest.Mock; save: jest.Mock };
@@ -855,7 +887,7 @@ describe('FileService - G2-06 缓存预热完成条件更新（版本守卫）',
     thumbnailService = { deleteThumbnailsForFileId: jest.fn().mockResolvedValue(undefined) };
     fileCache = {
       invalidate: jest.fn().mockResolvedValue(undefined),
-      // 预热成功回调需手动触发，以便断言条件更新
+      // 预热按新契约只写缓存目录、不写状态；回调用 setImmediate 等待后即可断言
       cacheFileFromPath: jest.fn().mockResolvedValue(undefined),
       isNoCacheMode: jest.fn().mockReturnValue(false),
     };
@@ -891,7 +923,7 @@ describe('FileService - G2-06 缓存预热完成条件更新（版本守卫）',
     service = moduleRef.get(FileService);
   });
 
-  it('缓存就绪条件更新携带 id + status=processing + uploadVersion，不按裸 id 全量置 ready', async () => {
+  it('预热成功只写缓存目录，不写任何数据库状态（置 ready 条件更新已移除）', async () => {
     const multer = makeMulterFile();
     // 真实存在的临时文件，触发磁盘文件缓存预热分支（fs.existsSync 返回 true）
     const tmpPath = path.join(process.cwd(), 'tmp', `g2-06-a-${Date.now()}.part`);
@@ -911,15 +943,14 @@ describe('FileService - G2-06 缓存预热完成条件更新（版本守卫）',
       try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
     }
 
+    // 字节侧行为保留：缓存照常写入
     expect(fileCache.cacheFileFromPath).toHaveBeenCalledWith(targetFileId, multer.path, multer.size);
-    // 条件更新必须携带 finalFile.uploadVersion（覆盖递增后 = 3+1=4）与 status=processing（防并发覆盖误标）
-    expect(fileRepo.update).toHaveBeenCalledWith(
-      { id: targetFileId, status: 'processing', uploadVersion: 4 },
-      { status: 'ready', uploadFailureReason: null },
-    );
+    // 核心回归：预热不得写任何数据库状态——置 ready 唯一入口是 FileUploadProcessor 收尾；
+    // 预热抢先置 ready 会让收尾条件更新 0 行命中并跳过来源登记与镜像触发
+    expect(fileRepo.update).not.toHaveBeenCalled();
   });
 
-  it('并发覆盖后 v1 收尾：条件更新 affected=0 时不把 v2 记录误标 ready', async () => {
+  it('并发覆盖后 v1 收尾：预热不再触碰状态，记录保持 processing（不会把 v2 记录误标 ready）', async () => {
     const multer = makeMulterFile();
     const tmpPath = path.join(process.cwd(), 'tmp', `g2-06-b-${Date.now()}.part`);
     fs.writeFileSync(tmpPath, 'hello');
@@ -929,8 +960,8 @@ describe('FileService - G2-06 缓存预热完成条件更新（版本守卫）',
       fileRepo.findOne.mockResolvedValue(makeTargetFile({ uploadVersion: 1 }));
       txFileRepo.findOne.mockResolvedValue(makeTargetFile({ uploadVersion: 1 }));
 
-      // 预热完成回调触发条件更新时，模拟 affected=0（此时记录已因并发覆盖递增到 v2，条件不匹配）
-      fileRepo.update.mockResolvedValue({ affected: 0 });
+      // 旧实现会在此场景下条件更新 affected=0 并静默跳过；新契约下预热根本不写状态
+      // （因此这里不再需要伪造 update 的 affected，见下方 not.toHaveBeenCalled 断言）
 
       result = await service.createProcessingFile(
         multer, '新文件.png', makeUser(ownerId), undefined, true, null, targetFileId,
@@ -941,12 +972,10 @@ describe('FileService - G2-06 缓存预热完成条件更新（版本守卫）',
       try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
     }
 
-    // 更新按本次覆盖递增后的版本（v1→v2）条件执行，且未命中（affected=0）——不会把后续覆盖记录误标 ready
-    expect(fileRepo.update).toHaveBeenCalledWith(
-      { id: targetFileId, status: 'processing', uploadVersion: 2 },
-      { status: 'ready', uploadFailureReason: null },
-    );
-    // 无抛错、无意外状态覆盖
+    // 预热完成（缓存已写）但状态零写入：不会把后续并发覆盖的 v2 记录误标 ready
+    expect(fileCache.cacheFileFromPath).toHaveBeenCalledWith(targetFileId, multer.path, multer.size);
+    expect(fileRepo.update).not.toHaveBeenCalled();
+    // 无抛错、无意外状态覆盖：记录保持 processing，等待 Worker 收尾统一置位
     expect(result.status).toBe('processing');
   });
 });

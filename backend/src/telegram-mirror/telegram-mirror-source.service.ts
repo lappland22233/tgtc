@@ -4,8 +4,36 @@ import { Repository } from 'typeorm';
 import { File } from '../common/entities/file.entity';
 import { TelegramBotFileGrant } from '../common/entities/telegram-bot-file-grant.entity';
 import { FileCopyService } from '../telegram-account-pool/file-copy.service';
-import { TelegramCopyOwnerType } from '../common/entities/telegram-file-copy.entity';
+import { TelegramCopyOwnerType, TelegramFileCopy } from '../common/entities/telegram-file-copy.entity';
 import { MirrorExecutionError } from './telegram-mirror.errors';
+
+/**
+ * 副本锚点能否用于补齐站内文件的源定位。
+ *
+ * 为什么要求「同归属 + 当前版本」：
+ * - 同归属：副本行的 ownerType/ownerId 必须就是该站内文件（由调用方保证），
+ *   绝不跨账号借用 file_id，也不把别的逻辑文件的锚点套过来；
+ * - 当前版本：副本行没有内容版本列，覆盖上传后可能残留旧行（新版已在覆盖时
+ *   整体失效，但历史脏数据仍可能存在）。因此当双方都已知大小时要求一致——
+ *   宁可阻塞（等人工核查），也不从中继旧内容。
+ */
+export function isUsableSourceCopyAnchor(
+  fileSize: number | null | undefined,
+  copy: Pick<TelegramFileCopy, 'chatId' | 'messageId' | 'fileSize'>,
+): boolean {
+  const chatId = (copy.chatId ?? '').trim();
+  const messageId = (copy.messageId ?? '').trim();
+  if (!chatId || !messageId) return false;
+
+  const copySize = copy.fileSize === null || copy.fileSize === undefined || String(copy.fileSize).trim() === ''
+    ? null
+    : Number(copy.fileSize);
+  const knownFileSize = fileSize === null || fileSize === undefined ? null : Number(fileSize);
+  // 至少一方大小未知时视为可用（无法做版本比对，但锚点本身可信）；
+  // 双方都已知时必须严格一致，否则视为旧版本残留。
+  if (copySize === null || knownFileSize === null) return true;
+  return copySize === knownFileSize;
+}
 
 /**
  * 镜像源文件描述：副本扩散链路的**源事实**。
@@ -70,11 +98,57 @@ export class TelegramMirrorSourceService {
       sourceAccountId: file.telegramSourceAccountId ?? null,
       sourceVersion: Number(file.uploadVersion) || 1,
     };
+    // 源定位与 file_id 都完整：直接返回（热路径不触达副本表）
+    if (descriptor.fileId && descriptor.chatId && descriptor.messageId) return descriptor;
+
+    // 5b 锚点补齐：主记录缺 chatId/messageId 时，同归属的 ready 副本里可能已有可信锚点。
+    // 为什么必须补：否则下游 ensureAnchor 只能以 source_message_unresolved 阻塞，
+    // 而副本表里的锚点本可直接完成「搬运到主群」。
+    if (!descriptor.chatId || !descriptor.messageId) {
+      const completed = await this.completeAnchorFromCopies(ownerId, file, descriptor);
+      if (completed) return completed;
+    }
+
     if (descriptor.fileId) return descriptor;
 
     // 主副本 file_id 缺失（历史数据/异常状态）：尝试用副本表兜底
     const fromCopies = await this.describeFromCopies('file', ownerId, descriptor.fileName);
     return fromCopies ?? descriptor;
+  }
+
+  /**
+   * 用**同归属**的 ready 副本补齐主记录缺失的源定位（chatId/messageId/sourceAccountId）。
+   *
+   * 只接受通过 `isUsableSourceCopyAnchor`（同归属 + 当前版本）的行；
+   * 没有可用副本时返回 null（保持原描述符，下游按 source_message_unresolved 阻塞）。
+   */
+  private async completeAnchorFromCopies(
+    ownerId: string,
+    file: File,
+    descriptor: MirrorSourceDescriptor,
+  ): Promise<MirrorSourceDescriptor | null> {
+    let ready: TelegramFileCopy[];
+    try {
+      ready = await this.copies.listReady('file', ownerId);
+    } catch (error) {
+      // 副本表暂时不可用不得抛错：保持原描述符，让下游以 blocked 收口（与 describeFromCopies 同口径）
+      this.logger.warn(
+        `副本表查询失败（file:${ownerId}）：${error instanceof Error ? error.message : String(error)}`,
+      );
+      return null;
+    }
+    const copy = ready.find((item) => isUsableSourceCopyAnchor(file.size, item));
+    if (!copy) return null;
+    this.logger.debug(
+      `主记录缺源定位，已用账号 ${copy.accountId} 的副本锚点补齐（file:${ownerId}）`,
+    );
+    return {
+      ...descriptor,
+      chatId: copy.chatId,
+      messageId: copy.messageId,
+      // 搬运只允许由持有该消息的账号执行，绝不跨账号代搬
+      sourceAccountId: copy.accountId,
+    };
   }
 
   private async describeGrant(ownerId: string): Promise<MirrorSourceDescriptor> {

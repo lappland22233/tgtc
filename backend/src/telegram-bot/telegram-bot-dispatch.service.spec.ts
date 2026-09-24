@@ -78,6 +78,27 @@ function makeMessageUpdate(overrides: {
   return { update_id: 1, message } as unknown as TelegramUpdate;
 }
 
+/** 频道帖：以 `channel_post` 到达（镜像群/主群可能是频道），且没有 `from` 用户 */
+function makeChannelPostUpdate(overrides: {
+  document?: Record<string, unknown> | null;
+  chatId?: number;
+} = {}): TelegramUpdate {
+  const message: Record<string, unknown> = {
+    message_id: 200,
+    chat: { id: overrides.chatId ?? -1007001, type: 'channel' },
+  };
+  if (overrides.document !== null) {
+    message.document = overrides.document ?? {
+      file_id: 'CH-FILE-1',
+      file_unique_id: 'CH-UNIQ-1',
+      file_name: 'video.mp4',
+      mime_type: 'video/mp4',
+      file_size: 2048,
+    };
+  }
+  return { update_id: 2, channel_post: message } as unknown as TelegramUpdate;
+}
+
 function makeService(options: {
   pool?: ReturnType<typeof makePool> | null;
   copies?: {
@@ -94,6 +115,8 @@ function makeService(options: {
   enabledMirrorTargetChatIds?: string[];
   /** 扩散轮次回写替身 */
   attempts?: { recordClaim: jest.Mock } | null;
+  /** `findByFileUniqueId` 的命中结果（grant 命名空间归因用） */
+  grantMatches?: Array<{ id: string }>;
 }) {
   const counters = makeCounters();
   const pool = options.pool === undefined ? null : options.pool;
@@ -130,17 +153,20 @@ function makeService(options: {
     consume: jest.fn(async () => ({ allowed: true, used: 1 })),
     refund: jest.fn(async () => undefined),
   };
-  const issueMock = options.issueMock ?? jest.fn(async (input: { sourceAccountId?: string | null }) => ({
+  const issueMock = options.issueMock ?? jest.fn(async (input: { sourceAccountId?: string | null; fileUniqueId?: string | null }) => ({
     grant: {
       id: 'grant-1',
       tokenPrefix: 'tgl_aaaaaaaa',
       expiresAt: new Date(Date.now() + 3600_000),
       sourceAccountId: input.sourceAccountId ?? null,
+      fileUniqueId: input.fileUniqueId ?? null,
     },
     token: 'TOKEN',
   }));
   const grantService = {
     findByMessage: jest.fn(async () => null),
+    // 跨群认领归因：默认无命中；用例可经 grantMatches 注入命中结果
+    findByFileUniqueId: jest.fn(async () => options.grantMatches ?? []),
     issue: issueMock,
     buildUrl: jest.fn((origin: string, token: string) => `${origin}/api/bot-dl/${token}`),
     isActive: jest.fn(() => true),
@@ -544,5 +570,134 @@ describe('TelegramBotDispatchService（多 Bot 身份链路）', () => {
       expect.stringContaining('域名'),
       { replyToMessageId: 100 },
     );
+  });
+
+  it('频道帖（channel_post）含 document：登记本账号副本，不回复、不扣配额、不签发直链', async () => {
+    const pool = makePool(true);
+    const copies = { upsertReady: jest.fn(async () => ({})) };
+    const accountClient = { sendMessage: jest.fn(async () => undefined), forwardMessage: jest.fn() };
+    const ctx = makeService({ pool, copies, accountClient });
+
+    await ctx.service.handleUpdate(makeChannelPostUpdate(), { accountId: '1234567' });
+
+    // 频道帖与群消息同等对待：只做非私聊副本登记（ownerType=fileUnique，file_id 来自该账号）
+    expect(copies.upsertReady).toHaveBeenCalledWith(expect.objectContaining({
+      ownerType: 'fileUnique',
+      ownerId: 'CH-UNIQ-1',
+      accountId: '1234567',
+      telegramFileId: 'CH-FILE-1',
+    }));
+    // 频道帖不是用户私聊：不回复消息、不扣配额、不签发直链
+    expect(accountClient.sendMessage).not.toHaveBeenCalled();
+    expect(ctx.telegramService.sendMessage).not.toHaveBeenCalled();
+    expect(ctx.quotaService.consume).not.toHaveBeenCalled();
+    expect(ctx.grantService.issue).not.toHaveBeenCalled();
+  });
+
+  it('频道帖（channel_post）无 document：无任何副作用', async () => {
+    const pool = makePool(true);
+    const copies = { upsertReady: jest.fn(async () => ({})) };
+    const accountClient = { sendMessage: jest.fn(async () => undefined), forwardMessage: jest.fn() };
+    const ctx = makeService({ pool, copies, accountClient });
+
+    await ctx.service.handleUpdate(makeChannelPostUpdate({ document: null }), { accountId: '1234567' });
+
+    expect(copies.upsertReady).not.toHaveBeenCalled();
+    expect(accountClient.sendMessage).not.toHaveBeenCalled();
+    expect(ctx.quotaService.consume).not.toHaveBeenCalled();
+    expect(ctx.grantService.issue).not.toHaveBeenCalled();
+  });
+
+  it('私聊入站签发：issue 记录 fileUniqueId，并写入 grant 命名空间主副本行', async () => {
+    const pool = makePool(true);
+    const copies = { upsertReady: jest.fn(async () => ({})) };
+    const accountClient = { sendMessage: jest.fn(async () => undefined), forwardMessage: jest.fn() };
+    const ctx = makeService({ pool, copies, accountClient });
+
+    await ctx.service.handleUpdate(makeMessageUpdate(), { accountId: '1234567' });
+
+    // 内容标识落库到 grant：群内认领归因（findByFileUniqueId）的唯一键
+    expect(ctx.grantService.issue).toHaveBeenCalledWith(
+      expect.objectContaining({ fileUniqueId: 'UNIQ-1', sourceAccountId: '1234567' }),
+      4,
+    );
+    // grant 命名空间主副本行：轮次结算的基线（source=inbound，账号为该消息的接收账号）
+    expect(copies.upsertReady).toHaveBeenCalledWith(expect.objectContaining({
+      ownerType: 'grant',
+      ownerId: 'grant-1',
+      accountId: '1234567',
+      telegramFileId: 'FILE-1',
+      source: 'inbound',
+    }));
+  });
+
+  it('群内认领命中 grant（中继目标群）：写 grant 副本（relayed）并回写 grant 认领', async () => {
+    const pool = makePool(true);
+    const bridge = jest.fn(async () => ({ bridged: true, matchedFileIds: ['file-1'] }));
+    const copies = { upsertReady: jest.fn(async () => ({})), bridgeInboundCopyToLogicalFile: bridge };
+    const accountClient = { sendMessage: jest.fn(async () => undefined), forwardMessage: jest.fn() };
+    const ctx = makeService({
+      pool,
+      copies,
+      accountClient,
+      enabledMirrorTargetChatIds: ['-100777'],
+      grantMatches: [{ id: 'grant-1' }],
+    });
+
+    await ctx.service.handleUpdate(
+      makeMessageUpdate({ chatType: 'group', chatId: -100777 }),
+      { accountId: '1234567' },
+    );
+
+    // 群内消息只带 file_unique_id → 必须用它反查 grant 才能归因
+    expect(ctx.grantService.findByFileUniqueId).toHaveBeenCalledWith('UNIQ-1');
+    expect(copies.upsertReady).toHaveBeenCalledWith(expect.objectContaining({
+      ownerType: 'grant',
+      ownerId: 'grant-1',
+      accountId: '1234567',
+      telegramFileId: 'FILE-1',
+      source: 'relayed',
+    }));
+    // 轮次结算按 grant:<id> 查 ready 副本 → 认领必须回写到 grant 命名空间
+    expect(ctx.attempts!.recordClaim).toHaveBeenCalledWith('grant', 'grant-1', '1234567', {
+      targetChatId: '-100777',
+    });
+  });
+
+  it('非中继来源的群消息：不写 grant 命名空间副本、不写 grant 认领（只保留既有回写）', async () => {
+    const pool = makePool(true);
+    const bridge = jest.fn(async () => ({ bridged: true, matchedFileIds: ['file-1'] }));
+    const copies = { upsertReady: jest.fn(async () => ({})), bridgeInboundCopyToLogicalFile: bridge };
+    const accountClient = { sendMessage: jest.fn(async () => undefined), forwardMessage: jest.fn() };
+    const ctx = makeService({
+      pool,
+      copies,
+      accountClient,
+      // 该群不是启用中的镜像规则目标群 → 普通备份群消息
+      enabledMirrorTargetChatIds: [],
+      grantMatches: [{ id: 'grant-1' }],
+    });
+
+    await ctx.service.handleUpdate(
+      makeMessageUpdate({ chatType: 'group', chatId: -100777 }),
+      { accountId: '1234567' },
+    );
+
+    // grant 归因整段不执行：普通群消息不得抬高 grant 命名空间的副本计数
+    expect(ctx.grantService.findByFileUniqueId).not.toHaveBeenCalled();
+    expect(copies.upsertReady).not.toHaveBeenCalledWith(expect.objectContaining({ ownerType: 'grant' }));
+    expect(ctx.attempts!.recordClaim).not.toHaveBeenCalledWith(
+      'grant',
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+    );
+    // 既有 fileUnique / file 两个命名空间的回写保持不动
+    expect(ctx.attempts!.recordClaim).toHaveBeenCalledWith('fileUnique', 'UNIQ-1', '1234567', {
+      targetChatId: '-100777',
+    });
+    expect(ctx.attempts!.recordClaim).toHaveBeenCalledWith('file', 'file-1', '1234567', {
+      targetChatId: '-100777',
+    });
   });
 });

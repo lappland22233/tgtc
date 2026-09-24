@@ -717,6 +717,12 @@ export class TelegramAccountPoolService implements OnModuleInit, OnApplicationSh
    * 与 `beginAttempt` 的关系：后者保留为**向后兼容**的纯记账入口（上传/镜像等
    * 既有调用点），新代码一律走本方法。二者共享同一 `inflight` 计数，
    * 因此旧调用点占用的额度同样会被新准入看见。
+   *
+   * **归还额度与采样更新必须分离**：admission 的 `finish()`/`release()` 自己
+   * 归还一次额度（`releaseCounters`），采样只走 `recordSample`（不含在途扣减）；
+   * `finishAttempt` 仍是 `beginAttempt` 的配对入口，语义为「归还一次额度 + 采样」。
+   * 历史上 `finish()` 在 `releaseCounters()` 后又调用 `finishAttempt()`，导致一次
+   * finish 双重扣减在途数、在飞上限失效——禁止把这两条路径再合回去。
    */
   admit(request: AccountAdmissionRequest): AccountAdmissionResult {
     const runtime = this.runtimes.get((request.accountId || '').trim());
@@ -759,7 +765,11 @@ export class TelegramAccountPoolService implements OnModuleInit, OnApplicationSh
     return LARGE_INFLIGHT_DEFAULT;
   }
 
-  /** 构造幂等归还句柄：finish 产生采样，release 不产生采样（客户端取消不计 flood） */
+  /**
+   * 构造幂等归还句柄：`finish` = 归还一次额度 + 采样；`release` = 仅归还额度
+   * （客户端取消不计 flood）。归还走 `releaseCounters`、采样走 `recordSample`——
+   * **不得在此调用 `finishAttempt`**（它会再归还一次额度，造成双重扣减）。
+   */
   private buildAdmission(
     runtime: TelegramAccountRuntime,
     role: AccountAttemptRole,
@@ -778,7 +788,7 @@ export class TelegramAccountPoolService implements OnModuleInit, OnApplicationSh
         if (settled) return;
         settled = 'finish';
         releaseCounters();
-        this.finishAttempt(runtime.config.id, sample ?? { ok: true });
+        this.recordSample(runtime.config.id, sample ?? { ok: true });
       },
       release: (): void => {
         if (settled) return;
@@ -788,11 +798,32 @@ export class TelegramAccountPoolService implements OnModuleInit, OnApplicationSh
     };
   }
 
-  /** 请求结束：释放额度 + 更新带宽/健康 EWMA + 必要时进入冷却 */
+  /**
+   * 请求结束：归还一次在飞额度 + 采样（`beginAttempt` 的配对入口，公开语义不变）。
+   * 注意：本方法**含**在途扣减，admission 的 `finish()` 不得复用它（会双重扣减），
+   * 只能走 `releaseCounters()` + `recordSample()`。
+   */
   finishAttempt(accountId: string, sample: AccountAttemptSample): void {
     const runtime = this.runtimes.get(accountId);
     if (!runtime) return;
     runtime.inflight = Math.max(0, runtime.inflight - 1);
+    this.recordSample(accountId, sample);
+  }
+
+  /**
+   * 采样更新（**不含在途扣减**）：`totalRequests++`、成功/失败 EWMA、带宽 EWMA、
+   * `consecutiveFailures`、冷却计算与「账号 X 失败（kind...），冷却 Ns」告警日志——
+   * 即原 `finishAttempt()` 去掉在途扣减后的全部逻辑。
+   *
+   * 为什么必须拆开：admission 的 `finish()` 已自己归还一次额度（`releaseCounters`），
+   * 若再调用 `finishAttempt` 会二次扣减 `inflight`，一次 finish 放行两个名额、
+   * 在飞上限失效（已复现）。此后：
+   * - admission 路径：`releaseCounters()` + `recordSample()`；
+   * - 旧调用对：`beginAttempt()` + `finishAttempt()`（归还 + 采样）。
+   */
+  private recordSample(accountId: string, sample: AccountAttemptSample): void {
+    const runtime = this.runtimes.get(accountId);
+    if (!runtime) return;
     runtime.totalRequests += 1;
     const now = Date.now();
 

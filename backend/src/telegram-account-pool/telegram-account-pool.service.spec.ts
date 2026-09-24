@@ -417,3 +417,142 @@ describe('TelegramAccountPoolService（生效跃迁与补装）', () => {
     expect(pool.isActive()).toBe(true);
   });
 });
+
+/**
+ * 准入额度归还回归。
+ *
+ * 缺陷背景：`buildAdmission().finish()` 先 `releaseCounters()`（inflight--），
+ * 紧接着又调用 `finishAttempt()`（内部再次 inflight--），一次 finish 双重扣减在途数：
+ * maxInflight=2 时两次准入后 A.finish() 使 inflight 直接归零，随后可再连续放行两个
+ * 准入 → 实际在途 3 个流超过上限。
+ * 修复口径：admission 自己归还一次额度，采样走 `recordSample`；
+ * `finishAttempt` 保持「归还 + 采样」旧语义（`beginAttempt` 的配对入口）。
+ */
+describe('TelegramAccountPoolService（准入归还与采样拆分回归）', () => {
+  it('两条并行流只结算各自额度：A.finish 后 inflight=1，C 放行、D 以 inflight_full 拒绝', () => {
+    const pool = makePool({
+      TELEGRAM_ACCOUNT_POOL_ENABLED: 'true',
+      TELEGRAM_ACCOUNT_POOL: JSON.stringify([
+        { id: 'only', token: TOKEN_A, chatId: '-1', maxInflight: 2 },
+      ]),
+    });
+
+    const a = pool.admit({ accountId: 'only' });
+    const b = pool.admit({ accountId: 'only' });
+    expect(a.granted).toBe(true);
+    expect(b.granted).toBe(true);
+    expect(pool.snapshot().accounts[0].inflight).toBe(2);
+
+    a.admission!.finish({ ok: true });
+    // 回归点：一次 finish 只归还一次额度（修复前此处会变成 0，在飞上限失效）
+    expect(pool.snapshot().accounts[0].inflight).toBe(1);
+
+    const c = pool.admit({ accountId: 'only' });
+    expect(c.granted).toBe(true);
+    const d = pool.admit({ accountId: 'only' });
+    expect(d.granted).toBe(false);
+    expect(d.reason).toBe('inflight_full');
+  });
+
+  it('release 路径同样只归还一次：A.release 后 inflight=1，C 放行、D 拒绝', () => {
+    const pool = makePool({
+      TELEGRAM_ACCOUNT_POOL_ENABLED: 'true',
+      TELEGRAM_ACCOUNT_POOL: JSON.stringify([
+        { id: 'only', token: TOKEN_A, chatId: '-1', maxInflight: 2 },
+      ]),
+    });
+
+    const a = pool.admit({ accountId: 'only' });
+    const b = pool.admit({ accountId: 'only' });
+    expect(a.granted).toBe(true);
+    expect(b.granted).toBe(true);
+    expect(pool.snapshot().accounts[0].inflight).toBe(2);
+
+    a.admission!.release();
+    expect(pool.snapshot().accounts[0].inflight).toBe(1);
+
+    const c = pool.admit({ accountId: 'only' });
+    expect(c.granted).toBe(true);
+    const d = pool.admit({ accountId: 'only' });
+    expect(d.granted).toBe(false);
+    expect(d.reason).toBe('inflight_full');
+  });
+
+  it('同一 admission 重复 finish/release 幂等：只结算一次，inflight 不为负', () => {
+    const pool = makePool({
+      TELEGRAM_ACCOUNT_POOL_ENABLED: 'true',
+      TELEGRAM_ACCOUNT_POOL: JSON.stringify([
+        { id: 'only', token: TOKEN_A, chatId: '-1', maxInflight: 2 },
+      ]),
+    });
+
+    const a = pool.admit({ accountId: 'only' });
+    const b = pool.admit({ accountId: 'only' });
+    expect(a.granted).toBe(true);
+    expect(b.granted).toBe(true);
+
+    a.admission!.finish({ ok: true });
+    a.admission!.finish({ ok: true });
+    a.admission!.release();
+    // A 只结算一次：B 的额度不受影响，采样也只记一次
+    expect(pool.snapshot().accounts[0].inflight).toBe(1);
+    expect(pool.snapshot().accounts[0].totalRequests).toBe(1);
+
+    b.admission!.finish({ ok: true });
+    b.admission!.finish({ ok: true });
+    b.admission!.release();
+    expect(pool.snapshot().accounts[0].inflight).toBe(0);
+    expect(pool.snapshot().accounts[0].totalRequests).toBe(2);
+  });
+
+  it('大文件槽位同口径：第二次 large_inflight_full，finish 后槽位归零可再准入', () => {
+    const pool = makePool({
+      TELEGRAM_ACCOUNT_POOL_ENABLED: 'true',
+      TELEGRAM_ACCOUNT_POOL: JSON.stringify([
+        { id: 'only', token: TOKEN_A, chatId: '-1', maxInflight: 8, maxLargeInflight: 1 },
+      ]),
+    });
+
+    const first = pool.admit({ accountId: 'only', bytes: 2 * 1024 ** 3 });
+    expect(first.granted).toBe(true);
+    const second = pool.admit({ accountId: 'only', bytes: 2 * 1024 ** 3 });
+    expect(second.granted).toBe(false);
+    expect(second.reason).toBe('large_inflight_full');
+
+    first.admission!.finish({ ok: true });
+    expect(pool.snapshot().accounts[0].largeInflight).toBe(0);
+
+    const third = pool.admit({ accountId: 'only', bytes: 2 * 1024 ** 3 });
+    expect(third.granted).toBe(true);
+  });
+
+  it('beginAttempt/finishAttempt 旧调用对语义不变：归还一次 + 采样一次', () => {
+    const pool = makePool({
+      TELEGRAM_ACCOUNT_POOL_ENABLED: 'true',
+      TELEGRAM_ACCOUNT_POOL: JSON.stringify([{ id: 'only', token: TOKEN_A, chatId: '-1' }]),
+    });
+
+    expect(pool.beginAttempt('only')).toBe(true);
+    expect(pool.snapshot().accounts[0].inflight).toBe(1);
+
+    pool.finishAttempt('only', { ok: true });
+    expect(pool.snapshot().accounts[0].inflight).toBe(0);
+    expect(pool.snapshot().accounts[0].totalRequests).toBe(1);
+  });
+
+  it('admission.finish 失败仍按账号进入冷却（拆分未丢采样逻辑）', () => {
+    const pool = makePool({
+      TELEGRAM_ACCOUNT_POOL_ENABLED: 'true',
+      TELEGRAM_ACCOUNT_POOL: JSON.stringify([{ id: 'only', token: TOKEN_A, chatId: '-1' }]),
+    });
+
+    const a = pool.admit({ accountId: 'only' });
+    expect(a.granted).toBe(true);
+    a.admission!.finish({ ok: false, failureKind: 'flood' });
+
+    const snapshot = pool.snapshot();
+    expect(snapshot.accounts[0].coolingDown).toBe(true);
+    expect(snapshot.accounts[0].lastErrorKind).toBe('flood');
+    expect(snapshot.accounts[0].inflight).toBe(0);
+  });
+});

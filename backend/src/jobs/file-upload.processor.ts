@@ -136,7 +136,17 @@ export class FileUploadProcessor {
    * 提交阶段必须据此登记主副本归属。
    */
   private async tryPooledUpload(filePath: string, file: File): Promise<UploadReceipt | null> {
-    if (!this.accountUpload?.isActive()) return null;
+    if (!this.accountUpload?.isActive()) {
+      // 诊断：池化未生效必须可归因（未装配 / 已装配但未启用或未解析到账号），
+      // 否则生产只能看到「没有池化上传日志」而无法判断原因。仅加日志，不改回退语义。
+      const reason = this.accountUpload?.inactiveReason?.() ?? null;
+      this.logger.debug(
+        this.accountUpload
+          ? `跳过池化上传：账号池未启用（或未解析到账号）${reason ? `（${reason}）` : ''}`
+          : '跳过池化上传：账号池上传未装配',
+      );
+      return null;
+    }
     try {
       const pooled = await this.accountUpload.upload({
         filename: file.originalName,
@@ -241,6 +251,10 @@ export class FileUploadProcessor {
         if (!result) {
           // 池化优先（仅非严格任务）：按权重/健康/容量选号上传，并记录**实际上传账号**；
           // 严格任务保留单账号链路，以维持 noCache/localCacheReleased/releaseLocalFile 契约。
+          if (strictDiskLease) {
+            // 诊断：严格任务跳过池化是**按设计**（非池化失效），明确记录避免生产误判。
+            this.logger.debug('严格磁盘租约任务按设计跳过池化上传（保留 fork 本地媒体释放契约）');
+          }
           const pooled = strictDiskLease ? null : await this.tryPooledUpload(filePath, file);
           result = pooled ?? await this.telegramService.uploadFile(
             createReadStream(filePath),
@@ -360,6 +374,8 @@ export class FileUploadProcessor {
 
     // 收尾最后一步才置 ready，避免 ThumbnailService 使用旧实体状态覆盖 ready。
     // 条件更新同时保护 uploadVersion 和当前状态，防止并发覆盖写入。
+    // 预热（FileService.startCachePrewarm）不置状态，因此这里的条件更新是唯一置 ready 入口，
+    // 命中后来源登记与镜像触发必然执行。
     //
     // 必须经 `databaseQuery()` + `RETURNING id`：PG 的 UPDATE 返回 `[rows, rowCount]` 元组，
     // 直接读 `rowCount/affected` 在 PG 下两个字段均为 undefined（判断恒假），

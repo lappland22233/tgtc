@@ -52,6 +52,8 @@ export class AccountAwareUploadService {
   private readonly logger = new Logger(AccountAwareUploadService.name);
   /** 「无存储 Chat 账号」告警去重（配置缺失是持续状态，不应每条上传都刷日志） */
   private warnedNoStorageAccount = false;
+  /** 「选号无可用候选」warn 限频时间戳：账号持续冷却时该分支每次上传都会命中，避免刷屏 */
+  private lastNoCandidateLogAt = 0;
 
   constructor(
     private readonly pool: TelegramAccountPoolService,
@@ -97,7 +99,20 @@ export class AccountAwareUploadService {
       if (available.length === 0) break;
 
       const selection = this.pool.select(available);
-      if (!selection) break;
+      if (!selection) {
+        // 候选都存在但当前不可调度（冷却/满载/禁用）：回退单账号链路。
+        this.logger.debug('池化上传选号无可用候选（冷却/满载/禁用），回退单账号链路');
+        // 限频 warn（60s 一次）：账号持续冷却时该分支每次上传都会命中，不设限会刷屏；
+        // 但完全静默会让「池化为何未生效」在生产不可诊断，故保留一条带计数的告警。
+        const now = Date.now();
+        if (now - this.lastNoCandidateLogAt >= 60_000) {
+          this.lastNoCandidateLogAt = now;
+          this.logger.warn(
+            `池化上传选号无可用候选（冷却/满载/禁用），回退单账号链路（候选 ${available.length}，已排除 ${excluded.size}）`,
+          );
+        }
+        break;
+      }
 
       const account = this.pool.getConfig(selection.accountId);
       if (!account || !account.chatId) {

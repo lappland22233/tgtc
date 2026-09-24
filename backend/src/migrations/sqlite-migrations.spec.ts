@@ -97,6 +97,12 @@ describe('SQLite schema migrations（隔离内存库）', () => {
     expect(fileColumns.find((column: { name: string }) => column.name === 'telegramMessageId')).toBeDefined();
     expect(fileColumns.find((column: { name: string }) => column.name === 'telegramSourceAccountId')).toBeDefined();
 
+    // grant 的内容标识列与索引同样由基线按实体元数据建立（与 180370 增量迁移同口径）
+    const grantColumns = await dataSource.query('PRAGMA table_info("telegram_bot_file_grants")');
+    expect(grantColumns.find((column: { name: string }) => column.name === 'fileUniqueId')).toBeDefined();
+    const grantIndexes = await dataSource.query('PRAGMA index_list("telegram_bot_file_grants")');
+    expect(grantIndexes.find((index: { name: string }) => index.name === 'idx_tg_bot_grants_fileUniqueId')).toBeDefined();
+
     const userColumns = await dataSource.query('PRAGMA table_info("users")');
     const isBanned = userColumns.find((column: { name: string }) => column.name === 'isBanned');
     expect(isBanned?.type.toLowerCase()).toBe('boolean');
@@ -667,6 +673,53 @@ describe('SQLite schema migrations（隔离内存库）', () => {
       `SELECT name FROM sqlite_master WHERE type='table' AND name='telegram_replication_attempts'`,
     );
     expect(afterDown).toHaveLength(0);
+
+    const integrity = await dataSource.query('PRAGMA integrity_check');
+    expect(Object.values(integrity[0])).toEqual(['ok']);
+  });
+
+  it('存量库升级：180370 为 grants 补 fileUniqueId 列与索引（可重复执行）', async () => {
+    // 模拟旧基线库存量库：grants 表还没有内容标识列（历史数据保持 NULL）。
+    dataSource = new DataSource({ type: 'sqlite', database: ':memory:', entities: [], synchronize: false });
+    await dataSource.initialize();
+    await dataSource.query(`CREATE TABLE "migrations" (
+      "id" integer PRIMARY KEY AUTOINCREMENT NOT NULL,
+      "timestamp" bigint NOT NULL, "name" varchar NOT NULL
+    )`);
+    await dataSource.query(`CREATE TABLE "telegram_bot_file_grants" (
+      "id" varchar PRIMARY KEY NOT NULL, "telegramUserId" varchar(32) NOT NULL
+    )`);
+
+    const { SqliteAddGrantFileUniqueId1803700000000 } = require('./1803700000000-SqliteAddGrantFileUniqueId') as typeof import('./1803700000000-SqliteAddGrantFileUniqueId');
+    await new SqliteAddGrantFileUniqueId1803700000000().up(dataSource.createQueryRunner());
+
+    const grantColumns = await dataSource.query('PRAGMA table_info("telegram_bot_file_grants")');
+    expect(grantColumns.find((column: { name: string }) => column.name === 'fileUniqueId')).toBeDefined();
+
+    const grantIndexes = await dataSource.query('PRAGMA index_list("telegram_bot_file_grants")');
+    expect(grantIndexes.find((index: { name: string }) => index.name === 'idx_tg_bot_grants_fileUniqueId')).toBeDefined();
+
+    // 历史数据保持 NULL：列必须可空，既有行不因新增列受影响
+    await dataSource.query(
+      `INSERT INTO "telegram_bot_file_grants" ("id","telegramUserId") VALUES ('g1','u1')`,
+    );
+    const rows = await dataSource.query(`SELECT "fileUniqueId" FROM "telegram_bot_file_grants" WHERE "id"='g1'`);
+    expect(rows[0].fileUniqueId).toBeNull();
+
+    // 幂等：重复执行不报错、不重复加列或建索引
+    await new SqliteAddGrantFileUniqueId1803700000000().up(dataSource.createQueryRunner());
+    expect(await dataSource.query('SELECT COUNT(*) AS count FROM "telegram_bot_file_grants"')).toEqual([{ count: 1 }]);
+
+    // down 只删本迁移新增的索引，不动数据与列（SQLite 旧版本不支持 DROP COLUMN，与既有迁移一致）
+    await new SqliteAddGrantFileUniqueId1803700000000().down(dataSource.createQueryRunner());
+    const afterDown = await dataSource.query('PRAGMA index_list("telegram_bot_file_grants")');
+    expect(afterDown.find((index: { name: string }) => index.name === 'idx_tg_bot_grants_fileUniqueId')).toBeUndefined();
+    expect(await dataSource.query('SELECT COUNT(*) AS count FROM "telegram_bot_file_grants"')).toEqual([{ count: 1 }]);
+
+    // down 后可安全重放（重放会重建索引）
+    await new SqliteAddGrantFileUniqueId1803700000000().up(dataSource.createQueryRunner());
+    const replayed = await dataSource.query('PRAGMA index_list("telegram_bot_file_grants")');
+    expect(replayed.find((index: { name: string }) => index.name === 'idx_tg_bot_grants_fileUniqueId')).toBeDefined();
 
     const integrity = await dataSource.query('PRAGMA integrity_check');
     expect(Object.values(integrity[0])).toEqual(['ok']);

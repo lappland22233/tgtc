@@ -7,6 +7,7 @@
  * - 主群未配置、多规则源群不一致、主群是私聊时若「挑一条规则继续跑」，
  *   会把文件扩散到错误的中转落点，且后台看不出原因。
  */
+import { Logger } from '@nestjs/common';
 import { TelegramMainChatAnchorService, PLANT_RESERVATION_LEASE_MS } from './telegram-main-chat-anchor.service';
 import { backoffMsFor } from './telegram-mirror.errors';
 import { MIRROR_MAX_ATTEMPTS } from './telegram-mirror.types';
@@ -416,6 +417,112 @@ describe('TelegramMainChatAnchorService（主群锚点幂等与阻塞口径）',
     });
   });
 
+  it('file 归属同一源消息重复调用：复用既有锚点，forwardMessage 只调用一次', async () => {
+    const { service, client } = setup();
+    const input = {
+      ownerType: 'file' as const,
+      ownerId: 'f1',
+      sourceChatId: '-100555',
+      sourceMessageId: '3',
+      sourceAccountId: '1234567',
+      sourceVersion: 1,
+    };
+
+    const first = await service.ensureAnchor(input);
+    const second = await service.ensureAnchor(input);
+
+    expect(client.forwardMessage).toHaveBeenCalledTimes(1);
+    expect(first.planted).toBe(true);
+    expect(second).toEqual({ chatId: MAIN, messageId: '777', planted: false });
+  });
+
+  it('file 归属源消息变更（覆盖上传）时不再复用旧锚点：重新搬运并更新源指纹', async () => {
+    const { service, client, rows, pool } = setup();
+    const warnSpy = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    try {
+      await service.ensureAnchor({
+        ownerType: 'file', ownerId: 'f1', sourceChatId: '-100555', sourceMessageId: '3',
+        sourceAccountId: '1234567', sourceVersion: 1,
+      });
+
+      const anchor = await service.ensureAnchor({
+        ownerType: 'file', ownerId: 'f1', sourceChatId: '-100555', sourceMessageId: '4',
+        sourceAccountId: '1234567', sourceVersion: 2,
+      });
+
+      // 旧主群消息指向 v1 内容，必须按 v2 的源消息重新搬运一次（forwardMessage 两次），
+      // 否则镜像群会从旧消息中继、拿到旧内容而任务记为成功
+      expect(client.forwardMessage).toHaveBeenCalledTimes(2);
+      expect(anchor).toEqual({ chatId: MAIN, messageId: '777', planted: true });
+      expect(rows.get('file:f1')).toMatchObject({
+        status: 'ready',
+        anchorChatId: MAIN,
+        anchorMessageId: '777',
+        sourceChatId: '-100555',
+        sourceMessageId: '4',
+      });
+      // 日志必须与「主群变更」区分：输出源内容变更专用 warn，便于运维定位重搬原因
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('源消息已变更'));
+      expect(pool.bumpCounter).toHaveBeenCalledWith('mainChatPlantTakeovers');
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('fileUnique 归属源消息变化时仍复用（逻辑主键即内容指纹），不触发无意义重搬', async () => {
+    const { service, client } = setup();
+    await service.ensureAnchor({
+      ownerType: 'fileUnique', ownerId: 'UNIQ-1', sourceChatId: '-100555', sourceMessageId: '3',
+      sourceAccountId: '1234567',
+    });
+
+    const anchor = await service.ensureAnchor({
+      ownerType: 'fileUnique', ownerId: 'UNIQ-1', sourceChatId: '-100555', sourceMessageId: '4',
+      sourceAccountId: '1234567',
+    });
+
+    // 不同副本消息指向同一内容：沿用既有复用语义，避免因副本行顺序变化在主群留下重复消息
+    expect(client.forwardMessage).toHaveBeenCalledTimes(1);
+    expect(anchor).toEqual({ chatId: MAIN, messageId: '777', planted: false });
+  });
+
+  it('传入指纹缺失（sourceMessageId 为空）时判据视为匹配，沿用既有复用语义', () => {
+    const { service } = setup();
+    // `ensureAnchor` 对空源定位有既有的 `source_message_unresolved` 拦截（校验先于复用判定），
+    // 该分支只能从并发接管路径触达，因此这里直接断言判据本身：缺失信息不等于内容变更。
+    const predicate = (service as unknown as {
+      isSourceFingerprintMatch: (input: unknown, row: unknown) => boolean;
+    }).isSourceFingerprintMatch.bind(service);
+    const row = { sourceChatId: '-100555', sourceMessageId: '3' };
+
+    expect(predicate({ ownerType: 'file', ownerId: 'f1', sourceChatId: '-100555', sourceMessageId: null }, row)).toBe(true);
+    expect(predicate({ ownerType: 'file', ownerId: 'f1', sourceChatId: null, sourceMessageId: null }, row)).toBe(true);
+  });
+
+  it('存量锚点缺少源指纹（历史行）时公开入口沿用复用语义：不触发重搬', async () => {
+    const { service, client, rows } = setup();
+    rows.set('file:f1', {
+      id: 'anchor-0',
+      ownerType: 'file',
+      ownerId: 'f1',
+      anchorChatId: MAIN,
+      anchorMessageId: '777',
+      // 历史锚点行没有源指纹（列曾为空）→ 缺失信息不等于内容变更，必须继续复用
+      sourceChatId: null,
+      sourceMessageId: null,
+      status: 'ready',
+      plantedAt: new Date(),
+    });
+
+    const anchor = await service.ensureAnchor({
+      ownerType: 'file', ownerId: 'f1', sourceChatId: '-100555', sourceMessageId: '3',
+      sourceAccountId: '1234567',
+    });
+
+    expect(client.forwardMessage).not.toHaveBeenCalled();
+    expect(anchor).toEqual({ chatId: MAIN, messageId: '777', planted: false });
+  });
+
   it('接管竞态：另一个执行者已抢到预留（唯一键挡住本调用）时不重复搬运', async () => {
     const { service, client, repo, rows } = setup();
     rows.set('file:f1', {
@@ -439,6 +546,37 @@ describe('TelegramMainChatAnchorService（主群锚点幂等与阻塞口径）',
       sourceAccountId: '1234567',
     })).rejects.toMatchObject({ code: 'main_chat_anchor_pending', kind: 'retryable' });
     expect(client.forwardMessage).not.toHaveBeenCalled();
+  });
+
+  it('并发回读的 ready 锚点若指向旧内容（更早版本任务抢先搬运），按可重试收口而非复用', async () => {
+    const { service, client, repo, rows } = setup();
+    // 存量锚点：ready 且已指向主群，但源消息是**旧内容**（sourceMessageId=3）。
+    rows.set('file:f1', {
+      id: 'anchor-0',
+      ownerType: 'file',
+      ownerId: 'f1',
+      anchorChatId: MAIN,
+      anchorMessageId: '999',
+      status: 'ready',
+      sourceChatId: '-100555',
+      sourceMessageId: '3',
+      plantedAt: new Date(Date.now() - 60_000),
+    });
+    // 模拟并发执行者已抢到预留：本调用的删旧行匹配不到（对方行 id 不同），
+    // 插入随即撞唯一键 → 回读到的 ready 行仍指向旧内容。
+    repo.delete.mockResolvedValue(undefined as never);
+
+    await expect(service.ensureAnchor({
+      ownerType: 'file',
+      ownerId: 'f1',
+      sourceChatId: '-100555',
+      sourceMessageId: '4', // 新内容（覆盖上传后的源消息）
+      sourceAccountId: '1234567',
+      sourceVersion: 2,
+    })).rejects.toMatchObject({ code: 'main_chat_anchor_pending', kind: 'retryable' });
+    // 绝不复用指向旧内容的锚点，也不在竞态下贸然再搬一次（下一轮由接管路径重搬）
+    expect(client.forwardMessage).not.toHaveBeenCalled();
+    expect(rows.get('file:f1')).toMatchObject({ anchorMessageId: '999', sourceMessageId: '3' });
   });
 
   it('租约内的 pending 必须把重试排到租约到期之后（否则最后一次重试仍会撞预留）', async () => {

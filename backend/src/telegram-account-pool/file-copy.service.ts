@@ -1,6 +1,6 @@
 import { Injectable, Logger, Optional } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { IsNull, LessThan, Repository } from 'typeorm';
+import { In, IsNull, LessThan, Not, Repository } from 'typeorm';
 import { File } from '../common/entities/file.entity';
 import {
   TelegramCopyOwnerType,
@@ -100,6 +100,40 @@ export class FileCopyService {
 
   async listReady(ownerType: TelegramCopyOwnerType, ownerId: string): Promise<TelegramFileCopy[]> {
     return this.repo.find({ where: { ownerType, ownerId, status: 'ready' } });
+  }
+
+  /**
+   * 批量取多个归属对象的 ready 副本（**一次查询**，供历史补偿等批处理场景使用）。
+   *
+   * 为什么必须批量：历史补偿按批扫描文件，若逐文件查询副本表就是 N+1
+   * （一批 20 个文件 = 20 次查询），批处理的意义被抵消。
+   *
+   * 有界性：`take = ownerIds.length * 8` 是**全局 LIMIT**（不是每归属上限），
+   * 用于避免异常脏数据把一次查询放大成无界扫描。因此极端情况下（单归属 ready
+   * 副本数远超 8）个别归属可能被整体截断——消费方（历史补偿分类）会把这类归属
+   * 判为「缺锚点」并跳过，即**退化方向是保守的**（宁可漏建，也不拿不完整数据建单）。
+   * `ownerIds` 去空去重后为空时直接返回空 Map 且**不查库**。
+   */
+  async listReadyByOwnerIds(
+    ownerType: TelegramCopyOwnerType,
+    ownerIds: string[],
+  ): Promise<Map<string, TelegramFileCopy[]>> {
+    const result = new Map<string, TelegramFileCopy[]>();
+    const uniqueIds = Array.from(
+      new Set(ownerIds.map((id) => (id || '').trim()).filter((id) => id !== '')),
+    );
+    if (uniqueIds.length === 0) return result;
+
+    const rows = await this.repo.find({
+      where: { ownerType, ownerId: In(uniqueIds), status: 'ready' },
+      take: uniqueIds.length * 8,
+    });
+    for (const row of rows) {
+      const bucket = result.get(row.ownerId);
+      if (bucket) bucket.push(row);
+      else result.set(row.ownerId, [row]);
+    }
+    return result;
   }
 
   async readyAccountIds(ownerType: TelegramCopyOwnerType, ownerId: string): Promise<string[]> {
@@ -685,6 +719,46 @@ export class FileCopyService {
       );
     }
     return result;
+  }
+
+  /**
+   * 按归属失效副本（覆盖上传后旧内容副本必须整体作废）。
+   *
+   * 为什么必须存在：副本行只有 `(ownerType, ownerId, accountId)` 唯一键、没有内容版本，
+   * 覆盖上传会换掉 telegramFileId，但其它账号的旧行仍会被 `listReady` 选中并回源，
+   * 表现为「覆盖后下载到旧内容」。清理是唯一能保证内容一致的手段。
+   *
+   * `exceptAccountId`：保留指定账号的既有行（调用方已知该行随后会被
+   * `upsertReady` 用新 file_id 覆盖，避免无谓的删+插）。
+   */
+  async invalidateByOwner(
+    ownerType: TelegramCopyOwnerType,
+    ownerId: string,
+    exceptAccountId?: string | null,
+  ): Promise<number> {
+    try {
+      const result = await this.repo.delete({
+        ownerType,
+        ownerId,
+        ...(exceptAccountId ? { accountId: Not(exceptAccountId) } : {}),
+      });
+      const removed = result.affected ?? 0;
+      if (removed > 0) {
+        this.logger.log(
+          `已失效旧内容副本：${ownerType}:${this.preview(ownerId)}（删除 ${removed} 行`
+          + `${exceptAccountId ? `，保留账号 ${this.preview(exceptAccountId)}` : ''}）`,
+        );
+      }
+      return removed;
+    } catch (error) {
+      // 删除失败不抛错：覆盖上传的主流程绝不能因副本清理失败而回滚（宁可残留旧行，
+      // 由 purgeStale 的时间阈值兜底收敛），只记 warn 供运维定位。
+      this.logger.warn(
+        `副本失效删除失败（${ownerType}:${this.preview(ownerId)}）：`
+        + `${error instanceof Error ? error.message : String(error)}`,
+      );
+      return 0;
+    }
   }
 
   /** 日志用的短前缀（避免把完整 file_unique_id 写进日志） */

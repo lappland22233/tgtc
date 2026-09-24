@@ -69,6 +69,8 @@ describe('TelegramUserCopyService（账号粘性与幂等键）', () => {
       sourceChatId: null,
       sourceMessageId: null,
       sourceAccountId: null,
+      // 源内容版本（镜像任务幂等键的一部分；主群锚点据此识别覆盖上传）
+      sourceVersion: 1,
       ...overrides,
     };
   }
@@ -82,13 +84,15 @@ describe('TelegramUserCopyService（账号粘性与幂等键）', () => {
 
     await ctx.service.execute(task('task-aaa', { sourceAccountId: '1234567' }) as never, rule() as never);
 
-    // 搬运请求携带的是「源事实」与「持有该消息的账号」
+    // 搬运请求携带的是「源事实」、「持有该消息的账号」与「源内容版本」
+    // （版本供锚点识别覆盖上传，不能缺省或放宽）
     expect(ctx.anchors.ensureAnchor).toHaveBeenCalledWith({
       ownerType: 'file',
       ownerId: 'file-1',
       sourceChatId: '7001',
       sourceMessageId: '5',
       sourceAccountId: '1234567',
+      sourceVersion: 1,
     });
     const calls = (ctx.userClient.copyMessage as jest.Mock).mock.calls as unknown as Array<[Record<string, unknown>]>;
     expect(calls[0][0].sourceChatId).toBe('-100999');

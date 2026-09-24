@@ -49,6 +49,11 @@ export interface EnsureMainChatAnchorInput {
   sourceMessageId?: string | null;
   /** **持有该消息**的 Bot 账号（搬运只允许由它执行，绝不跨账号代搬） */
   sourceAccountId?: string | null;
+  /**
+   * 源内容版本（`file` = uploadVersion；`grant`/`fileUnique` 恒为 1）。
+   * 仅用于日志与诊断，不落库（表无该列，避免迁移）。
+   */
+  sourceVersion?: number;
 }
 
 /** 主群锚点（MTProto 中继的源定位） */
@@ -152,7 +157,7 @@ export class TelegramMainChatAnchorService {
       );
     }
 
-    const cached = await this.findReusable(input.ownerType, input.ownerId, mainChatId);
+    const cached = await this.findReusable(input, mainChatId);
     if (cached) return cached;
 
     // 源消息就在主群：无需搬运（这是 Web 上传直接落在主存储群的情形），
@@ -179,17 +184,48 @@ export class TelegramMainChatAnchorService {
 
   /** 已落库且仍指向当前主群的可用锚点（避免重复搬运产生主群重复消息） */
   private async findReusable(
-    ownerType: TelegramCopyOwnerType,
-    ownerId: string,
+    input: EnsureMainChatAnchorInput,
     mainChatId: string,
   ): Promise<MainChatAnchor | null> {
-    const row = await this.readRow(ownerType, ownerId);
+    const row = await this.readRow(input.ownerType, input.ownerId);
     if (!row) return null;
     if (row.status !== 'ready') return null;
     if (String(row.anchorChatId ?? '').trim() !== mainChatId) return null;
     const messageId = String(row.anchorMessageId ?? '').trim();
     if (!messageId) return null;
+    // 源内容指纹校验：`file` 覆盖上传后，旧锚点指向的是**旧内容**的主群消息，
+    // 直接复用会让新版本任务从旧消息中继（镜像群拿到旧内容而任务记为成功）
+    if (!this.isSourceFingerprintMatch(input, row)) return null;
     return { chatId: mainChatId, messageId, planted: false };
+  }
+
+  /**
+   * 源内容指纹是否匹配（决定既有 `ready` 锚点能否复用）。
+   *
+   * 为什么必须存在：`file` 归属的锚点行以 `(ownerType, ownerId)` 为唯一键，
+   * 覆盖上传（同一 `file.id` 换新内容）不会换 `ownerId`——没有指纹校验时，
+   * 新版本任务会从**旧版本**的主群消息中继，镜像群拿到旧内容而任务记为成功。
+   *
+   * 判据与理由：
+   * - 非 `file` 归属一律视为匹配：`grant` 授权记录不可变；`fileUnique` 的逻辑主键
+   *   本身就是内容 `file_unique_id`，不同副本消息指向同一内容，沿用既有复用语义，
+   *   避免因副本行顺序变化触发无意义重搬、在主群留下重复消息；
+   * - 传入的 `sourceChatId`/`sourceMessageId` 任一为空 → 匹配：缺失信息不等于内容变更；
+   * - 存量行的 `sourceChatId`/`sourceMessageId` 任一为空 → 匹配（历史锚点行即如此）；
+   * - 否则要求 `sourceChatId` 与 `sourceMessageId` 都完全相等。
+   */
+  private isSourceFingerprintMatch(
+    input: EnsureMainChatAnchorInput,
+    row: Pick<TelegramMainChatAnchor, 'sourceChatId' | 'sourceMessageId'>,
+  ): boolean {
+    if (input.ownerType !== 'file') return true;
+    const nextChatId = String(input.sourceChatId ?? '').trim();
+    const nextMessageId = String(input.sourceMessageId ?? '').trim();
+    if (!nextChatId || !nextMessageId) return true;
+    const rowChatId = String(row.sourceChatId ?? '').trim();
+    const rowMessageId = String(row.sourceMessageId ?? '').trim();
+    if (!rowChatId || !rowMessageId) return true;
+    return rowChatId === nextChatId && rowMessageId === nextMessageId;
   }
 
   /**
@@ -241,11 +277,12 @@ export class TelegramMainChatAnchorService {
    * - 非 null：无需搬运（并发者/上一次调用已完成），直接复用该锚点。
    *
    * `(ownerType, ownerId)` 唯一键冲突即说明「该归属对象已有锚点行」，按行状态收口：
-   * - `ready` 且仍指向当前主群 → 复用，不重复搬运；
+   * - `ready` 且仍指向当前主群且源内容指纹匹配 → 复用，不重复搬运；
    * - `failed`（上一次转发未成功，无副作用残留）→ 立即接管重搬；
    * - `pending` 且在租约内 → **可重试失败**（等租约到期自动接管，绝不冒险再搬一次）；
    * - `pending` 且超出租约 → 视为上次进程中断的残留，接管重搬并 warn（可能已在主群留下消息）；
-   * - `ready` 但指向旧主群（主群配置变更）→ 接管重搬并 warn（旧主群那条消息作废）。
+   * - `ready` 但指向旧主群（主群配置变更）→ 接管重搬并 warn（旧主群那条消息作废）；
+   * - `ready` 但源内容指纹不匹配（同一 `file.id` 覆盖上传）→ 接管重搬并 warn（按新内容）。
    */
   private async reserve(
     input: EnsureMainChatAnchorInput,
@@ -282,8 +319,16 @@ export class TelegramMainChatAnchorService {
     const row = await this.requireRow(input.ownerType, input.ownerId);
     const anchorChatId = String(row.anchorChatId ?? '').trim();
     const anchorMessageId = String(row.anchorMessageId ?? '').trim();
+    // 复用判据与 `findReusable` 完全一致：主群一致 + 消息 ID 非空 + 源内容指纹匹配。
+    // 指纹不匹配（`file` 覆盖上传）不得复用——否则新版本任务会从旧版本的主群消息中继，
+    // 镜像群拿到旧内容而任务记为成功；不匹配时**不 return**，落到下方「接管重搬」路径
+    // （删旧行 + 重新插入），按新内容重新搬运。
+    const fingerprintMismatch = row.status === 'ready' && anchorChatId === mainChatId && !!anchorMessageId
+      && !this.isSourceFingerprintMatch(input, row);
     if (row.status === 'ready' && anchorChatId === mainChatId) {
-      if (anchorMessageId) return { chatId: mainChatId, messageId: anchorMessageId, planted: false };
+      if (anchorMessageId && !fingerprintMismatch) {
+        return { chatId: mainChatId, messageId: anchorMessageId, planted: false };
+      }
     }
 
     const reservedAtMs = row.plantedAt ? new Date(row.plantedAt).getTime() : 0;
@@ -312,14 +357,24 @@ export class TelegramMainChatAnchorService {
         + '上一次搬运可能已在主群留下一条消息，请人工核对',
       );
     } else if (row.status === 'ready') {
-      // 既有锚点不可再用：主群被改（管理员改了启用规则的源群）或锚点行缺消息 ID。
-      // 这不是「上次中断」而是配置变更，但同样会让主群多出一条消息，必须留痕。
       this.pool?.bumpCounter('mainChatPlantTakeovers');
-      this.logger.warn(
-        `主群锚点不可复用，重新搬运一次（${input.ownerType}:${input.ownerId} / `
-        + `锚点原指向 ${anchorChatId ? maskIdentifier(anchorChatId) : '空'}，现主群 ${maskIdentifier(mainChatId)}）：`
-        + '旧主群中的那条消息不再被使用，可人工清理',
-      );
+      if (fingerprintMismatch) {
+        // 源内容变更（同一 file.id 覆盖上传）：主群那条消息仍指向旧内容，必须按新
+        // source 消息重搬。与「主群变更」分开留痕，便于运维区分两类重搬原因。
+        this.logger.warn(
+          `主群锚点源消息已变更（file:${input.ownerId} / 版本 ${input.sourceVersion ?? '未知'}）：`
+          + `原 source 消息 ${maskIdentifier(row.sourceMessageId)} → 新 source 消息 ${maskIdentifier(input.sourceMessageId)}；`
+          + '按新内容重新搬运，旧主群消息不再被使用，可人工清理',
+        );
+      } else {
+        // 既有锚点不可再用：主群被改（管理员改了启用规则的源群）或锚点行缺消息 ID。
+        // 这不是「上次中断」而是配置变更，但同样会让主群多出一条消息，必须留痕。
+        this.logger.warn(
+          `主群锚点不可复用，重新搬运一次（${input.ownerType}:${input.ownerId} / `
+          + `锚点原指向 ${anchorChatId ? maskIdentifier(anchorChatId) : '空'}，现主群 ${maskIdentifier(mainChatId)}）：`
+          + '旧主群中的那条消息不再被使用，可人工清理',
+        );
+      }
     }
 
     // 接管写入：**删除旧行 + 重新插入**，用唯一键做互斥（CAS），而不是原地更新。
@@ -356,8 +411,25 @@ export class TelegramMainChatAnchorService {
     const current = await this.requireRow(input.ownerType, input.ownerId);
     const currentChatId = String(current.anchorChatId ?? '').trim();
     const currentMessageId = String(current.anchorMessageId ?? '').trim();
-    if (current.status === 'ready' && currentChatId === mainChatId && currentMessageId) {
+    // 回读复用同样必须过源内容指纹：并发执行者可能是**更早版本**的任务（例如覆盖上传后
+    // 仍在收尾的旧任务），它抢到的锚点指向旧内容；此处若直接复用，本轮就会从旧消息中继，
+    // 与「覆盖后镜像必须是新内容」相矛盾。指纹不匹配时按可重试收口——下一轮走到
+    // `reserve()` 的 ready 分支即会接管重搬（删旧行 + 重新插入），收敛到新内容。
+    if (
+      current.status === 'ready'
+      && currentChatId === mainChatId
+      && currentMessageId
+      && this.isSourceFingerprintMatch(input, current)
+    ) {
       return { chatId: mainChatId, messageId: currentMessageId, planted: false };
+    }
+    if (current.status === 'ready' && currentChatId === mainChatId && currentMessageId) {
+      throw new MirrorExecutionError(
+        'main_chat_anchor_pending',
+        '主群锚点已被另一个执行者收口为 ready，但其源消息与本轮源内容不一致'
+        + '（疑似更早版本的任务抢先搬运）：本轮按可重试处理，下一轮将接管重搬以避免中继旧内容',
+        'retryable',
+      );
     }
     throw new MirrorExecutionError(
       'main_chat_anchor_pending',
@@ -373,8 +445,9 @@ export class TelegramMainChatAnchorService {
     sourceChatId: string,
     sourceMessageId: string,
   ): Promise<MainChatAnchor> {
-    // 双检：等待单飞期间可能已有其它调用完成搬运
-    const cached = await this.findReusable(input.ownerType, input.ownerId, mainChatId);
+    // 双检：等待单飞期间可能已有其它调用完成搬运（判据与 ensureAnchor 一致，
+    // 含源内容指纹校验：覆盖上传后的旧锚点不得在此被复用）
+    const cached = await this.findReusable(input, mainChatId);
     if (cached) return cached;
 
     if (!this.client) {

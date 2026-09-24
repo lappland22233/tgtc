@@ -35,6 +35,24 @@ export interface BotUpdateContext {
 }
 
 /**
+ * grant 命名空间认领归因的输入（由 `registerInboundCopyAndForward` 收集）。
+ *
+ * 为什么单独打包：grant 归因只在「消息来自启用中的镜像规则目标群」时执行，
+ * 且需要该账号自己的 `file_id` 与消息锚点；集中传入避免参数继续膨胀。
+ */
+interface GrantClaimAttribution {
+  /** 该账号自己的 file_id（写 grant 副本行用；禁止跨账号借用） */
+  telegramFileId: string;
+  /** 消息 ID（副本行的转发锚点） */
+  messageId: string;
+  fileSize: number | null;
+  /** 消息是否来自启用中的镜像规则目标群（非中继来源不得抬高 grant 命名空间计数） */
+  fromRelayTarget: boolean;
+  /** 桥接是否命中站内逻辑文件（决定 grant 副本行的 source 标注） */
+  bridged: boolean;
+}
+
+/**
  * 入站更新分发：私聊校验、命令路由、document 提取、配额判定与直链签发。
  *
  * 处理顺序（重要）：
@@ -88,7 +106,9 @@ export class TelegramBotDispatchService {
   async handleUpdate(update: TelegramUpdate, context?: BotUpdateContext): Promise<void> {
     const accountId = context?.accountId;
     try {
-      const message = update.message;
+      // 镜像群/主群可能是频道，频道帖以 `channel_post` 到达；仅用于非私聊的副本登记，
+      // 私聊命令与配额一律只处理 `message`（频道帖没有用户身份，绝不允许进入私聊链路）。
+      const message = update.message ?? update.channel_post;
       if (!message) return;
       // D7：仅私聊；群组/频道消息静默忽略，不回复、不扣配额
       if (!message.chat || message.chat.type !== 'private') {
@@ -454,7 +474,15 @@ export class TelegramBotDispatchService {
         // 认领回写：让「中继 → 认领」闭环在后台可查询（找不到进行中轮次时静默返回）。
         // 必须带上「消息来自哪个群」：多镜像群场景下同一文件同时有多条活跃轮次，
         // 不带目标群会把 A 群的认领记到 B 群的轮次上，结算结论直接错。
-        await this.recordRelayClaim(uniqueId, bridged.matchedFileIds, accountId, chatId);
+        // 同时传入 grant 归因所需的信息（file_id / 消息锚点 / 中继来源判定），
+        // 由 recordRelayClaim 统一完成三个命名空间的回写。
+        await this.recordRelayClaim(uniqueId, bridged.matchedFileIds, accountId, chatId, {
+          telegramFileId: doc.file_id,
+          messageId,
+          fileSize,
+          fromRelayTarget,
+          bridged: bridged.bridged,
+        });
       } catch (error) {
         pool.bumpCounter('inboundRegistrationFailures');
         const text = error instanceof Error ? error.message : String(error);
@@ -561,22 +589,36 @@ export class TelegramBotDispatchService {
   }
 
   /**
-   * 把 Bot 认领事件回写到扩散轮次。
+   * 把 Bot 认领事件回写到扩散轮次，并为 grant 命名空间补齐副本归因。
    *
-   * 为什么要写两个命名空间：轮次是按**发起扩散时的 owner** 建的（镜像任务用
+   * 为什么必须覆盖多个命名空间：轮次是按**发起扩散时的 owner** 建的（镜像任务用
    * `file:<站内 id>` 或 `grant:<授权 id>`），而认领天然只知道 `file_unique_id`。
    * 只写一个会让「中继成功」与「Bot 认领」在后台对不上，认领超时会被误判。
+   * 现在覆盖三个命名空间：
+   * - `fileUnique`：跨账号稳定的内容标识（始终回写）；
+   * - `file`：桥接命中的站内逻辑文件（双写）；
+   * - `grant`：Bot 私聊入站签发的授权记录——**只能靠 `file_unique_id` 归因**：
+   *   镜像群里的消息只携带 `file_unique_id`，不含 grant 的私聊锚点
+   *   `(telegramUserId, chatId, messageId)`，因此入站签发时已把 `file_unique_id`
+   *   落库到 grant 上，此处用它反查（`findByFileUniqueId`）。
    *
    * 为什么必须带 `targetChatId`：**每条启用规则一个镜像群、各自一条活跃轮次**，
    * 同一文件在多个群同时中继时，不带目标群的认领会落到别的群的轮次上。
    *
+   * 为什么 grant 归因仅在 `fromRelayTarget === true` 时执行：grant 轮次只对应
+   * 「中继扩散」这一种来源。其它群里的普通文件消息若也回写 grant 命名空间，
+   * 会把 grant 的副本计数抬高（后台把非扩散来源统计成扩散已生效），
+   * 还会给不相关的 grant 凭空制造「认领」事件。
+   *
    * 找不到匹配的进行中轮次时 `recordClaim` 内部静默返回（普通群消息本就没有对应轮次）。
+   * 整段 best-effort：失败只记日志，不得回滚或影响副本登记与直链签发。
    */
   private async recordRelayClaim(
     uniqueId: string,
     matchedFileIds: string[],
     accountId: string,
     targetChatId?: string | null,
+    grantAttribution?: GrantClaimAttribution,
   ): Promise<void> {
     const attempts = this.attempts;
     if (!attempts) return;
@@ -589,6 +631,55 @@ export class TelegramBotDispatchService {
       // 观测写入失败**不得**回滚或污染业务写入（副本已登记成功），也不计入登记失败计数
       this.logger.debug(
         `认领回写失败（忽略，不影响副本登记）：${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    // grant 命名空间归因（独立 best-effort）：失败不得影响上面的观测回写与副本登记。
+    if (grantAttribution?.fromRelayTarget) {
+      await this.attributeGrantClaims(uniqueId, accountId, targetChatId, grantAttribution);
+    }
+  }
+
+  /**
+   * grant 命名空间认领归因（`recordRelayClaim` 内部调用，best-effort）。
+   *
+   * 做法：用内容标识 `file_unique_id` 反查最近签发的 grant（≤5 条），对每条 grant
+   * 写入本账号的副本行并回写「认领」事件——轮次结算（`readyAccountIds('grant', ...)`）
+   * 依赖这两份数据，缺一即把「副本已产生」误判为 `claim_timeout`。
+   *
+   * 为什么必须靠 `file_unique_id`：群内消息不含 grant 的私聊锚点
+   * `(telegramUserId, chatId, messageId)`，`file_unique_id` 是唯一的跨群归因键。
+   *
+   * 失败只记日志（与 `recordRelayClaim` 的失败语义一致），绝不影响副本登记与直链签发。
+   */
+  private async attributeGrantClaims(
+    uniqueId: string,
+    accountId: string,
+    targetChatId: string | null | undefined,
+    attribution: GrantClaimAttribution,
+  ): Promise<void> {
+    const copies = this.copies;
+    const attempts = this.attempts;
+    if (!copies || !attempts) return;
+    try {
+      const grants = await this.grantService.findByFileUniqueId(uniqueId);
+      for (const grant of grants) {
+        await copies.upsertReady({
+          ownerType: 'grant',
+          ownerId: grant.id,
+          accountId,
+          telegramFileId: attribution.telegramFileId,
+          chatId: targetChatId ?? null,
+          messageId: attribution.messageId,
+          fileSize: attribution.fileSize,
+          // 只有「中继来源 + 命中站内逻辑文件」才标注 relayed（与 fileUnique 行同一口径），
+          // 避免把「中继来源但未桥接」统计成扩散已生效。
+          source: attribution.fromRelayTarget && attribution.bridged ? 'relayed' : 'inbound',
+        });
+        await attempts.recordClaim('grant', grant.id, accountId, { targetChatId });
+      }
+    } catch (error) {
+      this.logger.debug(
+        `grant 命名空间认领归因失败（忽略，不影响副本登记）：${error instanceof Error ? error.message : String(error)}`,
       );
     }
   }
@@ -697,9 +788,16 @@ export class TelegramBotDispatchService {
           fileName: this.sanitizePlain(doc.file_name, 255),
           mimeType: this.sanitizePlain(doc.mime_type, 128),
           fileSize: fileSize === null ? null : String(fileSize),
+          // 内容标识（跨账号稳定）：把群内认领归因回该 grant 的键（群内消息不含私聊锚点）
+          fileUniqueId: doc.file_unique_id ?? null,
         },
         config.linkTtlHours,
       );
+
+      // grant 命名空间主副本行（best-effort）：轮次结算按 `grant:<id>` 查 ready 副本，
+      // 源账号收到文件时先写基线行，否则「副本已产生但轮次结算为 claim_timeout」；
+      // 失败只记日志，绝不影响直链签发（与镜像触发同属增强路径）。
+      await this.upsertGrantBaselineCopy(grant, message, fileSize, accountId);
 
       const url = this.grantService.buildUrl(origin, token);
       const fileName = doc.file_name || '(未命名)';
@@ -740,6 +838,54 @@ export class TelegramBotDispatchService {
       const detail = error instanceof Error ? error.message : String(error);
       this.logger.error(`直链签发失败: ${detail}`);
       await this.reply(chatId, '内部错误：生成下载链接失败，请稍后重试。', message.message_id, accountId);
+    }
+  }
+
+  /**
+   * grant 命名空间主副本行（best-effort，Bot 私聊入站签发成功后调用）。
+   *
+   * 为什么需要：轮次结算（`ReplicationClaimSweeperService`）按
+   * `readyAccountIds('grant', grantId)` 判定「副本已产生」；源账号自己收到文件时
+   * 若不在 grant 命名空间登记，轮次就没有基线，「副本已产生但轮次结算为
+   * claim_timeout」会永远复现。
+   *
+   * 可用性判定与 `registerInboundCopyAndForward` 保持一致（账号 + 池化 + 副本服务
+   * 三者齐备才登记）；账号缺失（单账号模式）跳过并记 debug。缺 `file_unique_id`
+   * 的降级路径不登记：该 grant 无法被群内认领归因（`findByFileUniqueId` 查不到），
+   * 主副本行没有结算意义，也不应把「不参与扩散的文件」计入副本统计。
+   *
+   * 失败只记 warn：副本登记属增强链路，**绝不影响直链签发**（签发已成功落库）。
+   */
+  private async upsertGrantBaselineCopy(
+    grant: TelegramBotFileGrant,
+    message: TelegramMessage,
+    fileSize: number | null,
+    accountId?: string,
+  ): Promise<void> {
+    if (!accountId) {
+      this.logger.debug(`未携带账号上下文，跳过 grant 主副本登记（grant=${grant.id}）`);
+      return;
+    }
+    const pool = this.pool;
+    const copies = this.copies;
+    if (!pool?.isActive() || !copies) return;
+    const doc = message.document;
+    if (!doc?.file_id || !doc.file_unique_id) return;
+    try {
+      await copies.upsertReady({
+        ownerType: 'grant',
+        ownerId: grant.id,
+        accountId,
+        telegramFileId: doc.file_id,
+        chatId: String(message.chat.id),
+        messageId: String(message.message_id),
+        fileSize,
+        source: 'inbound',
+      });
+    } catch (error) {
+      this.logger.warn(
+        `grant 主副本登记失败（不影响直链签发）：${error instanceof Error ? error.message : String(error)}`,
+      );
     }
   }
 

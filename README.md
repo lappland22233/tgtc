@@ -73,7 +73,7 @@
 5. 低峰期切换 `bounded_fit`，观察队首等待、绕过次数、小文件 503 与大文件公平等待；
 6. 稳定后扩大副本补齐范围；只有在可承载账号数与 Telegram 限流都允许时才提高期望副本数（4 不是默认值）。
 
-**回滚开关**：队列异常 → 切回 `strict_fifo`（不改预算）；内存异常 → 直通窗口保持/降回 `1 MiB`；扩散异常 → 关闭 `TELEGRAM_USER_RELAY_ENABLED`（重启生效）或把期望副本数降为当前已就绪路数（不删除已有 ready 副本；**绝不启用任何二次上传**）；Telegram 限流异常 → 关闭 `FILE_DOWNLOAD_AUTO_CAPACITY_ENABLED` 并维持当前预算（禁止直接手工翻倍）；配置展示异常 → 回退管理端 GET 变更，保留运行时安全区间与监控。
+**回滚开关**：队列异常 → 切回 `strict_fifo`（不改预算）；内存异常 → 直通窗口保持/降回 `1 MiB`；扩散异常 → **关闭镜像功能运行时开关 `TELEGRAM_MIRROR_FEATURE_ENABLED`（后台热更新：停止新任务与周期对账）或停用具体镜像规则**，必要时把期望副本数降为当前已就绪路数（不删除已有 ready 副本；**绝不启用任何二次上传**）。**注意**：`TELEGRAM_USER_RELAY_ENABLED` 是链路**前置条件**（构造期读取，重启生效），关闭它**不能**阻断已启用规则下的镜像任务执行，**不得**把它当作止血开关；Telegram 限流异常 → 关闭 `FILE_DOWNLOAD_AUTO_CAPACITY_ENABLED` 并维持当前预算（禁止直接手工翻倍）；配置展示异常 → 回退管理端 GET 变更，保留运行时安全区间与监控。
 
 **发布阻塞条件**（任一命中都不得扩大流量或副本目标）：活跃权重超过预算或存在无法释放的租约；大文件在公平阈值内被持续绕过；账号池把没有对应 ready 副本的账号选为回源账号；`file_id` 归属校验失败；RSS/swap 随传输周期持续增长或 glibc `[heap]` 未形成平台；`FLOOD_WAIT`、中继失败（`relayFailed` / `RELAY_FAILURE_BURST`）或上游 503 显著高于基线。
 
@@ -375,7 +375,7 @@ Redis 承载 `metrics-aggregation`、`attack-detection`、`alert-evaluation`、`
 | `TELEGRAM_BOT_TOKENS` | - | 逗号分隔 Token 列表（简化输入；存储 Chat 复用 `TELEGRAM_CHAT_ID`，**归档群不可充当存储目标**） |
 | `TELEGRAM_ARCHIVE_CHAT_ID` | - | 收到的文件由接收账号转发到该群（**仅审计留痕**；严禁作为账号存储 Chat）。**不参与副本扩散**：中继目标群只认「启用中的镜像规则」 |
 | `TELEGRAM_POOL_TARGET_REPLICAS` | `2` | 期望副本数（**范围 1-8**）；已迁移为 SystemConfig 热更新（后台「账号池 → 副本扩散策略」），本环境变量仅作为**初始值/回退**。**审计口径**：有效目标 = `min(配置值, 可承载副本账号数)`，用于覆盖率统计与能力预检展示；扩散本身由「启用中的镜像规则数」驱动，与该值无关 |
-| `TELEGRAM_USER_RELAY_ENABLED` | `false` | 用户账号 MTProto 中继——**副本扩散的唯一执行链路**；构造期读取，变更后需重启后端。链路为「持有源消息的 Bot 转发进**主群** → 用户账号从主群转发到**各镜像群**」。不可用时按标准化原因**明确失败**（`not_configured`/`client_unavailable`/`no_account`/`source_missing`/`target_missing`/`permission_denied`/`auth_invalid`/`rate_limited`/`network`/`unknown`），缺口保留到中继恢复，**绝不退化为「从源 Bot 下载后向目标 Bot 上传」**（启动预检只告警不阻断） |
+| `TELEGRAM_USER_RELAY_ENABLED` | `false` | 用户账号 MTProto 中继——**副本扩散的唯一执行链路**；构造期读取，变更后需重启后端。链路为「持有源消息的 Bot 转发进**主群** → 用户账号从主群转发到**各镜像群**」。不可用时按标准化原因**明确失败**（`not_configured`/`client_unavailable`/`no_account`/`source_missing`/`target_missing`/`permission_denied`/`auth_invalid`/`rate_limited`/`network`/`unknown`），缺口保留到中继恢复，**绝不退化为「从源 Bot 下载后向目标 Bot 上传」**（启动预检只告警不阻断）。**注意**：该开关是链路前置条件，关闭它**不会**停止已启用镜像规则下的镜像任务执行；需要止血时请用镜像功能运行时开关或停用规则 |
 
 **前置条件**（任一不满足时启动预检直接拒绝启用）：显式 `TELEGRAM_FILE_STREAMING_ENABLED=true`、`TELEGRAM_FILE_STREAM_BASE` 为合法 http/https 地址，且自建 Bot API 以 `--enable-file-streaming` 启动。每个账号必须有自己的 Token、自己的存储 Chat（`chatId`）与回源能力。
 
@@ -412,7 +412,7 @@ Redis 承载 `metrics-aggregation`、`attack-detection`、`alert-evaluation`、`
 - `POST /api/admin/telegram-accounts/:id/auth/start|verify|cancel`：用户账号交互式授权（验证码与 2FA 密码**不入库不入日志**）；
 - `GET/PUT /api/admin/telegram-mirror`、`PUT .../feature`、`POST/PUT/DELETE .../rules[/:id]`、`PUT .../rules/:id/enabled`、`POST .../rules/:id/test`：**多规则**配置（每条规则一个镜像群）与权限探测；
 - `GET /api/admin/telegram-mirror/tasks`、`POST .../tasks/:id/retry|cancel`：任务列表与人工干预；
-- `POST/GET /api/admin/telegram-mirror/backfill[/pause|/resume|/cancel]`：历史文件补偿（按批限速、可暂停取消、`dry-run` 只统计）；
+- `POST/GET /api/admin/telegram-mirror/backfill[/pause|/resume|/cancel]`：历史文件补偿（按批限速、可暂停取消、`dry-run` 只统计）。响应中的 `job.classification` 给出**可恢复性分类**：`executable`（可执行）/ `missingAnchor`（缺源锚点）/ `covered`（已有当前版本任务）/ `staleVersion`（存在旧版本任务，将按当前版本补建），`missingAnchorSample` 给出最多 20 条缺锚点文件 id 供人工核查；**缺源锚点的文件在 `apply` 下会被跳过（不建单）**，避免继续产出无意义的阻塞任务；
 - 兼容端点 `GET /api/admin/bot-account-pool` 保持不变（只读脱敏诊断）。
 
 **扩散链路的事实边界（不可含糊）**：
