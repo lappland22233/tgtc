@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, LessThan, MoreThan, Repository } from 'typeorm';
+import { In, IsNull, LessThan, LessThanOrEqual, MoreThan, Repository } from 'typeorm';
 import type { TelegramCopyOwnerType } from '../common/entities/telegram-file-copy.entity';
 import {
   ReplicationAttemptStatus,
@@ -421,7 +421,9 @@ export class ReplicationAttemptService {
   async beginRound(input: BeginRoundInput): Promise<BeginRoundResult> {
     const now = Date.now();
     try {
-      const latest = await this.latestForOwner(input.ownerType, input.ownerId);
+      // 轮次归属必须收敛到「owner + 目标群」：多镜像群各有一条活跃轮次，
+      // 若只按 owner 取最近一条，B 群会复用甚至结算 A 群的轮次（计数与退避全部串味）。
+      const latest = await this.latestScoped(input.ownerType, input.ownerId, input.targetChatId ?? null);
       const previousRelayAccountId = latest?.relayAccountId ?? null;
       if (latest && ATTEMPT_ACTIVE_STATUSES.includes(latest.status)) {
         return { attempt: latest, merged: true, skipped: false, previousRelayAccountId };
@@ -450,7 +452,7 @@ export class ReplicationAttemptService {
           // 合并轮次沿用原触发来源的「人工」标记：管理员显式操作过的轮次不应在时间线里丢失
           triggeredBy: latest.triggeredBy === 'manual' && input.triggeredBy !== 'manual'
             ? 'manual'
-            : (input.triggeredBy ?? 'lazy'),
+            : (input.triggeredBy ?? 'eager'),
           operatorUserId: input.operatorUserId ?? latest.operatorUserId ?? null,
           updatedAt: new Date(now),
         });
@@ -464,7 +466,7 @@ export class ReplicationAttemptService {
       const created = this.repo.create({
         ...this.roundPatch(input, now),
         retryCount: inherited,
-        triggeredBy: input.triggeredBy ?? 'lazy',
+        triggeredBy: input.triggeredBy ?? 'eager',
         operatorUserId: input.operatorUserId ?? null,
         retriedFromId: input.retriedFromId ?? null,
       });
@@ -475,6 +477,27 @@ export class ReplicationAttemptService {
       this.markDegraded('开启扩散轮次', error);
       return { attempt: null, merged: false, skipped: false, previousRelayAccountId: null };
     }
+  }
+
+  /**
+   * 取「owner + 目标群」维度上最近的轮次。
+   *
+   * 精确匹配同一目标群；找不到时只接受 `targetChatId` 为空的历史行（改造前写入的
+   * 轮次没有目标群归属），**绝不**回落到其它群的轮次——那会让两条镜像群链路互相污染
+   * 退避窗口与重试计数。
+   */
+  private async latestScoped(
+    ownerType: TelegramCopyOwnerType,
+    ownerId: string,
+    targetChatId: string | null,
+  ): Promise<TelegramReplicationAttempt | null> {
+    const order = { createdAt: 'DESC' as const };
+    if (targetChatId) {
+      const scoped = await this.repo.findOne({ where: { ownerType, ownerId, targetChatId }, order });
+      if (scoped) return scoped;
+      return this.repo.findOne({ where: { ownerType, ownerId, targetChatId: IsNull() }, order });
+    }
+    return this.repo.findOne({ where: { ownerType, ownerId }, order });
   }
 
   /** 新建/复用轮次时重置为「本轮开始」的字段（不改变 retryCount 与人工标记） */
@@ -633,16 +656,35 @@ export class ReplicationAttemptService {
    * 记录一次 Bot 认领（入站链路调用）。
    *
    * 语义：把账号追加到该 owner **进行中**轮次的 `claimedAccountIds`（去重）。
-   * 找不到进行中轮次时静默返回（普通备份群消息本就没有对应轮次，属正常现象）。
+   * 找不到进行中轮次时静默返回（普通群消息本就没有对应轮次，属正常现象）。
+   *
+   * `options.targetChatId`：消息来自哪个群。**多镜像群场景必须传**——同一文件同时有
+   * 多条活跃轮次（每条启用规则一条），不带目标群会把 A 群的认领写到 B 群的轮次上，
+   * 最终结算结论（succeeded / claim_timeout）直接错。传了但匹配不到同群轮次时静默返回。
    */
-  async recordClaim(ownerType: TelegramCopyOwnerType, ownerId: string, accountId: string): Promise<void> {
+  async recordClaim(
+    ownerType: TelegramCopyOwnerType,
+    ownerId: string,
+    accountId: string,
+    options: { targetChatId?: string | null } = {},
+  ): Promise<void> {
     const account = (accountId || '').trim();
     if (!account) return;
+    const targetChatId = (options.targetChatId ?? '').trim();
     try {
-      const active = await this.repo.findOne({
-        where: { ownerType, ownerId, status: In(ATTEMPT_ACTIVE_STATUSES) },
-        order: { createdAt: 'DESC' },
-      });
+      const active = targetChatId
+        // 精确到群；兼容历史行（无目标群归属）
+        ? (await this.repo.findOne({
+          where: { ownerType, ownerId, targetChatId, status: In(ATTEMPT_ACTIVE_STATUSES) },
+          order: { createdAt: 'DESC' },
+        })) ?? (await this.repo.findOne({
+          where: { ownerType, ownerId, targetChatId: IsNull(), status: In(ATTEMPT_ACTIVE_STATUSES) },
+          order: { createdAt: 'DESC' },
+        }))
+        : await this.repo.findOne({
+          where: { ownerType, ownerId, status: In(ATTEMPT_ACTIVE_STATUSES) },
+          order: { createdAt: 'DESC' },
+        });
       if (!active) return;
       const claimed = new Set(active.claimedAccountIds ?? []);
       if (claimed.has(account)) return;
@@ -658,6 +700,21 @@ export class ReplicationAttemptService {
   }
 
   // ---------------- 查询 ----------------
+
+  /**
+   * 认领窗口已到期、仍停在 `waiting_claims` 的轮次（生命周期清扫入口）。
+   *
+   * 为什么必须由后台清扫而不是等下一次下载：改造后下载路径不再触发扩散，
+   * 若无人结算，`waiting_claims` 会永久停放——后台看到的是「中继成功但永远没有结论」。
+   */
+  async listDueClaimWindows(limit: number, now: Date = new Date()): Promise<TelegramReplicationAttempt[]> {
+    const safeLimit = Math.min(Math.max(1, Math.floor(limit) || 1), 200);
+    return this.repo.find({
+      where: { status: 'waiting_claims', claimDeadlineAt: LessThanOrEqual(now) },
+      order: { claimDeadlineAt: 'ASC' },
+      take: safeLimit,
+    });
+  }
 
   /** 某 owner 最近一轮（任意状态；时间线判定的唯一入口） */
   async latestForOwner(

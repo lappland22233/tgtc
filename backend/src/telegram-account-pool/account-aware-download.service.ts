@@ -11,10 +11,6 @@ import { FileCopyService } from './file-copy.service';
 const MAX_ACCOUNT_ATTEMPTS = 3;
 /** 全部候选都在冷却时的最大等待（超过此值不再等待，交由上层回退判定） */
 const MAX_COOLDOWN_WAIT_MS = 3_000;
-/** 后台扩散失败后的退避窗口（防止持续失败随下载量放大上传请求） */
-const REPLICATION_FAILURE_BACKOFF_MS = 5 * 60 * 1000;
-/** 退避表清理阈值（超过该规模才做一次过期清理，避免每轮遍历） */
-const REPLICATION_BACKOFF_PRUNE_THRESHOLD = 1024;
 /**
  * 源账号兜底的**应急配额**等待上限（毫秒）。
  *
@@ -43,23 +39,15 @@ function isLargeFile(bytes?: number): boolean {
  * 4. 传输结束后把字节数/耗时回报账号池，带宽 EWMA 实时更新。
  *
  * 两条约束（安全与可用性）：
- * - **非阻断懒扩散**：副本不足时只在后台触发复制，不等待复制完成——首个字节不被上传带宽阻塞；
+ * - **下载路径不产生扩散副作用**：副本扩散改为「提交即触发」（入站/上传提交时按启用规则建单），
+ *   本服务只负责在**已有副本**之间按负载选号回源，绝不在下载时补副本
+ *   ——否则「谁下载谁触发」会让扩散时机不可预测、也无法在后台按镜像群统计；
  * - **不替调用方做跨账号兜底**：本服务返回 `null` 表示「本服务无法回源」，是否回退到源账号
  *   或返回可诊断失败由调用方按回退矩阵决定（归属不明时绝不回退默认账号）。
  */
 @Injectable()
 export class AccountAwareDownloadService {
   private readonly logger = new Logger(AccountAwareDownloadService.name);
-  /** 后台扩散去重（同一逻辑文件只保留一个扩散任务） */
-  private readonly replicationInflight = new Set<string>();
-  /**
-   * 扩散失败后的退避截止时间（key=ownerType:ownerId）。
-   *
-   * 为什么需要背压：副本不足时每次下载都会触发一次扩散；若目标账号存储 Chat 无效/无权限，
-   * 持续失败会随下载量线性放大上传请求（每次最多 4 个目标）。失败即进入退避窗口，
-   * 避免无限放大上游请求（与「换号次数有限」同一原则）。
-   */
-  private readonly replicationBackoffUntil = new Map<string, number>();
 
   constructor(
     private readonly pool: TelegramAccountPoolService,
@@ -88,7 +76,9 @@ export class AccountAwareDownloadService {
 
   /**
    * 打开回源流（按负载选号 + 失败换号）。
-   * @param desiredReplicas 期望副本数（不足时**后台**懒扩散，不阻塞本次）
+   *
+   * 只使用**已有**副本：副本扩散由「提交即触发」的镜像任务负责（主群 → userbot → 各镜像群），
+   * 下载路径不再触发任何扩散。
    */
   async openStream(params: {
     ownerType: TelegramCopyOwnerType;
@@ -96,26 +86,11 @@ export class AccountAwareDownloadService {
     expectedSize?: number;
     noCache?: boolean;
     fileName?: string;
-    desiredReplicas?: number;
   }): Promise<AccountAwareStreamResult | null> {
     if (!this.pool.isActive()) return null;
 
-    let ready = await this.copies.listReady(params.ownerType, params.ownerId);
+    const ready = await this.copies.listReady(params.ownerType, params.ownerId);
     if (ready.length === 0) return null;
-
-    // 懒扩散：下载时才补齐副本，但**不等待**——先把现有副本服务出去（非阻断）。
-    if (
-      params.desiredReplicas
-      && ready.length < params.desiredReplicas
-      && params.fileName
-      && params.expectedSize
-    ) {
-      this.scheduleReplication({
-        ownerType: params.ownerType,
-        ownerId: params.ownerId,
-        desiredCount: params.desiredReplicas,
-      });
-    }
 
     const excluded = new Set<string>();
     // 大文件（>1GiB）回源：选号时即排除「已达每账号大文件槽位」的账号，
@@ -275,55 +250,6 @@ export class AccountAwareDownloadService {
         + `${error instanceof Error ? error.message.slice(0, 200) : String(error)}`,
       );
       return null;
-    }
-  }
-
-  /** 后台触发副本扩散（去重 + 失败退避 + 失败不影响当前下载） */
-  private scheduleReplication(params: {
-    ownerType: TelegramCopyOwnerType;
-    ownerId: string;
-    desiredCount: number;
-  }): void {
-    const key = `${params.ownerType}:${params.ownerId}`;
-    const now = Date.now();
-
-    // 熔断窗口内不再触发：中继持续失败时，持续触发会随下载量放大中继请求
-    if ((this.replicationBackoffUntil.get(key) ?? 0) > now) return;
-    if (this.replicationInflight.has(key)) return;
-
-    this.pruneReplicationBackoff(now);
-    this.replicationInflight.add(key);
-    void this.copies.ensureCopies({
-      ownerType: params.ownerType,
-      ownerId: params.ownerId,
-      desiredCount: params.desiredCount,
-    }).then((result) => {
-      if (result.skipped) return;
-      if (result.created.length > 0) return;
-      if (result.status === 'succeeded') return;
-      // 本轮无任何新增副本 → 进入退避窗口。
-      // 这是**观测/持久化不可用时的兜底背压**：主退避由轮次记录的 `nextRetryAt`
-      // 负责（指数退避 + 合并窗口），两层叠加不会互相干扰（本地窗口更粗、只防风暴）。
-      this.replicationBackoffUntil.set(key, Date.now() + REPLICATION_FAILURE_BACKOFF_MS);
-      this.logger.warn(
-        `后台副本扩散未产生新副本（${key} / ${result.status}`
-        + `${result.failureReason ? ` / ${result.failureReason}` : ''}），`
-        + `${REPLICATION_FAILURE_BACKOFF_MS / 60_000} 分钟内暂停该文件的扩散`,
-      );
-    }).catch((error: unknown) => {
-      const message = error instanceof Error ? error.message : String(error);
-      this.replicationBackoffUntil.set(key, Date.now() + REPLICATION_FAILURE_BACKOFF_MS);
-      this.logger.warn(`后台副本扩散异常（不影响当前下载，已退避）: ${message}`);
-    }).finally(() => {
-      this.replicationInflight.delete(key);
-    });
-  }
-
-  /** 清理过期退避记录，避免 Map 无界增长（仅在规模较大时做一次遍历） */
-  private pruneReplicationBackoff(now: number): void {
-    if (this.replicationBackoffUntil.size < REPLICATION_BACKOFF_PRUNE_THRESHOLD) return;
-    for (const [key, until] of this.replicationBackoffUntil) {
-      if (until <= now) this.replicationBackoffUntil.delete(key);
     }
   }
 

@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Get, Param, Post, Put, Query, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, Param, Post, Put, Query, UseGuards } from '@nestjs/common';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -34,61 +34,73 @@ export class TelegramMirrorController {
     private readonly audit: AuditService,
   ) {}
 
-  /** 镜像配置总览：规则、测试结论、任务概览、指标与前置检查 */
+  /** 镜像配置总览：规则列表、任务概览、指标与前置检查 */
   @Get()
   @Roles(UserRole.SUPER_ADMIN)
   async overview() {
-    const [rule, taskSummary, feature, accountOverview, botAccounts] = await Promise.all([
-      this.config.getRule(),
+    const [rules, taskSummary, feature, accountOverview, botAccounts] = await Promise.all([
+      this.config.listRules(),
       this.tasks.summary(),
       this.feature.getState(),
       this.accounts.overview(),
       this.accounts.list({ type: 'bot', pageSize: 100 }),
     ]);
+    const enabledRules = rules.filter((item) => item.enabled);
+    const mainChatIds = Array.from(new Set(
+      enabledRules.map((item) => (item.sourceChatId || '').trim()).filter((id) => id.length > 0),
+    ));
 
-    // 真实校验「备份群不得是任一 Bot 账号的主存储 Chat」——不能只依赖写规则时的校验，
+    // 真实校验「镜像群不得是任一 Bot 账号的主存储 Chat」——不能只依赖写规则时的校验，
     // 否则账号主存储 Chat 后改、规则未改时，面板预检会给出「通过」的假安全感。
-    const targetConflictsStorageChat = Boolean(rule?.targetChatId)
-      && botAccounts.items.some((item) => Boolean(item.primaryChatId) && item.primaryChatId === rule?.targetChatId);
+    const storageChats = new Set(
+      botAccounts.items.map((item) => (item.primaryChatId || '').trim()).filter((id) => id.length > 0),
+    );
+    const conflictingRule = rules.find((item) => storageChats.has((item.targetChatId || '').trim()));
 
     const precheck: Array<{ id: string; ok: boolean; hint: string }> = [
       {
         id: 'rule_configured',
-        ok: Boolean(rule?.sourceChatId && rule?.targetChatId),
-        hint: '必须配置源群（主存储群）与备份群',
+        ok: rules.length > 0 && rules.every((item) => Boolean(item.sourceChatId && item.targetChatId)),
+        hint: '每条规则都必须配置主群（源群，中转落点）与镜像群（备份群）',
       },
       {
         id: 'source_target_distinct',
-        ok: Boolean(rule && rule.sourceChatId && rule.targetChatId && rule.sourceChatId !== rule.targetChatId),
-        hint: '源群与备份群必须不同，主存储与备份必须分离',
+        ok: rules.length > 0 && rules.every((item) => item.sourceChatId !== item.targetChatId),
+        hint: '主群与镜像群必须不同，中转落点与备份必须分离',
+      },
+      {
+        id: 'main_chat_shared',
+        ok: mainChatIds.length <= 1,
+        hint: '所有**启用中**的规则必须共用同一个主群（源群），否则同一文件会被搬运多次',
       },
       {
         id: 'target_not_storage_chat',
-        ok: !targetConflictsStorageChat,
-        hint: '备份群不得是任一 Bot 账号的主存储 Chat（会造成消息归属与清理语义混淆）',
+        ok: !conflictingRule,
+        hint: '镜像群不得是任一 Bot 账号的主存储 Chat（会造成消息归属与清理语义混淆）',
       },
       {
         id: 'permission_tested',
-        ok: rule?.lastTestStatus === 'ok',
-        hint: '启用规则前必须通过一次源/目标权限测试',
+        ok: enabledRules.length > 0 && enabledRules.every((item) => item.lastTestStatus === 'ok'),
+        hint: '启用规则前必须通过一次主群/镜像群权限测试',
       },
       {
         id: 'accounts_available',
         ok: accountOverview.counts.enabled > 0,
-        hint: '至少需要一个已启用账号（Bot 用于二次上传；用户账号用于无源复制）',
+        hint: '至少需要一个已启用账号（Bot 负责搬运到主群与副本认领；用户账号负责中继）',
       },
       {
         id: 'user_client_available',
         ok: accountOverview.userClientAvailable,
-        hint: 'MTProto 客户端不可用时仅 Bot 上传路径可用（用户复制会 fail-closed）',
+        hint: 'MTProto 客户端不可用时用户账号无法中继（扩散会 fail-closed，不降级为二次上传）',
       },
     ];
 
     return {
-      rule,
-      test: rule
-        ? { status: rule.lastTestStatus, summary: rule.lastTestSummary, testedAt: rule.lastTestedAt }
-        : null,
+      rules,
+      // 兼容旧字段：概览页此前只认单条规则
+      rule: rules.find((item) => item.enabled) ?? rules[rules.length - 1] ?? null,
+      enabledRuleCount: enabledRules.length,
+      mainChatId: mainChatIds[0] ?? null,
       tasks: taskSummary,
       metrics: this.metrics.snapshot(),
       feature: {
@@ -98,19 +110,36 @@ export class TelegramMirrorController {
       },
       precheck,
       notes: [
-        'Bot 模式会上传两次（主存储群 + 备份群），备份消息由目标 Bot 产生独立 file_id。',
-        '用户模式要求用户账号可访问源消息，文件字节只上传一次（服务端无源复制）。',
-        '关闭镜像开关只阻止新任务，不中断已开始的传输，也不删除已备份内容。',
+        '扩散链路唯一：持有源消息的 Bot 先转发到主群，再由用户账号从主群服务端转发到各镜像群。',
+        '全程只做服务端转发（零字节重传），不存在「Bot 重新上传到镜像群」的路径，也不作为失败降级。',
+        '转发成功只是中间态：镜像群内每个 Bot 认领到自己的 file_id 副本后，扩散才算完成。',
+        '关闭镜像开关只阻止新任务，不中断已开始的转发，也不删除已备份内容。',
       ],
     };
   }
 
-  /** 更新规则（源群、备份群、模式、账号偏好、事件范围） */
-  @Put()
+  /** 新建规则（初始停用；源/镜像群变更后必须重新通过权限测试才能启用） */
+  @Post('rules')
   @Roles(UserRole.SUPER_ADMIN)
-  async updateRule(@CurrentUser() user: User, @Body() dto: UpdateMirrorRuleDto) {
-    const rule = await this.config.upsert(dto, user.id);
-    return { message: '镜像规则已更新（源/目标变更后需重新执行权限测试才能启用）', rule };
+  async createRule(@CurrentUser() user: User, @Body() dto: UpdateMirrorRuleDto) {
+    const rule = await this.config.create(dto, user.id);
+    return { message: '镜像规则已创建（默认停用，请先执行权限测试再启用）', rule };
+  }
+
+  /** 更新指定规则 */
+  @Put('rules/:id')
+  @Roles(UserRole.SUPER_ADMIN)
+  async updateRule(@CurrentUser() user: User, @Param('id') id: string, @Body() dto: UpdateMirrorRuleDto) {
+    const rule = await this.config.updateRule(id, dto, user.id);
+    return { message: '镜像规则已更新（主群/镜像群变更后需重新执行权限测试才能启用）', rule };
+  }
+
+  /** 删除规则（启用中或有在途任务时拒绝，避免在途扩散静默中断） */
+  @Delete('rules/:id')
+  @Roles(UserRole.SUPER_ADMIN)
+  async removeRule(@CurrentUser() user: User, @Param('id') id: string) {
+    await this.config.removeRule(id, user.id);
+    return { message: '镜像规则已删除' };
   }
 
   /** 镜像功能总开关（关闭只阻止新任务） */
@@ -132,19 +161,19 @@ export class TelegramMirrorController {
     };
   }
 
-  /** 启用/停用规则（启用前必须通过权限测试） */
-  @Put('rule/enabled')
+  /** 启用/停用指定规则（启用前必须通过权限测试，且主群与其它启用规则一致） */
+  @Put('rules/:id/enabled')
   @Roles(UserRole.SUPER_ADMIN)
-  async setRuleEnabled(@CurrentUser() user: User, @Body() dto: SetFeatureSwitchDto) {
-    const rule = await this.config.setEnabled(dto.enabled, user.id);
+  async setRuleEnabled(@CurrentUser() user: User, @Param('id') id: string, @Body() dto: SetFeatureSwitchDto) {
+    const rule = await this.config.setEnabled(id, dto.enabled, user.id);
     return { message: dto.enabled ? '镜像规则已启用' : '镜像规则已停用', rule };
   }
 
-  /** 权限测试（发送/复制一条受控测试并不产生真实镜像任务） */
-  @Post('test')
+  /** 权限测试（真实探测主群/镜像群可达性，不产生真实镜像任务） */
+  @Post('rules/:id/test')
   @Roles(UserRole.SUPER_ADMIN)
-  async testRule(@CurrentUser() user: User) {
-    return this.config.testRule(user.id);
+  async testRule(@CurrentUser() user: User, @Param('id') id: string) {
+    return this.config.testRule(id, user.id);
   }
 
   /** 任务列表（按状态/模式/文件/账号筛选） */

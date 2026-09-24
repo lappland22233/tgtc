@@ -386,12 +386,15 @@ export class TelegramBotDispatchService {
    * 3. 若配置了归档群，则用接收账号把消息转发到归档群（`TELEGRAM_ARCHIVE_CHAT_ID`）。
    *
    * **注意**：转发到群**不会**让其它 bot 拿到该文件（Telegram 规定 bot 看不到其它 bot 的消息）。
-   * 跨账号共享只有一条链路——**用户账号中继**：用户账号把源消息服务端转发进副本可见群后，
-   * 群内每个 Bot（管理员/关闭隐私模式）各自收到更新，在此处登记**自己账号的** `file_id` 副本，
-   * 这就是副本扩散的完成条件（转发成功本身不算）。转发到归档群只是审计/归属留痕。
+   * 跨账号共享只有一条链路——**用户账号中继**：持有源消息的 Bot 先把消息转发进**主群**
+   * （落点持久化在 `telegram_main_chat_anchors`），用户账号再从主群服务端转发到各**镜像群**；
+   * 镜像群内每个 Bot（管理员/关闭隐私模式）各自收到更新，在此处登记**自己账号的**
+   * `file_id` 副本，这就是副本扩散的完成条件（转发成功本身不算）。
+   * 转发到归档群只是审计/归属留痕。
    *
-   * 放大抑制：来自镜像备份群的消息**只登记副本**，不再归档转发——否则群内 N 个 Bot
-   * 会各自转发一次，把归档群消息量按 Bot 数放大（见 `isMirrorTargetChat`）。
+   * 放大抑制：来自**镜像群**或**主群**的消息**只登记副本**，不再归档转发——这两类群都是
+   * 扩散落点，群内 N 个 Bot 会各自转发一次，把归档群消息量按 Bot 数放大（见
+   * `shouldSuppressArchiveForward`）。
    */
   private async registerInboundCopyAndForward(
     message: TelegramMessage,
@@ -448,8 +451,10 @@ export class TelegramBotDispatchService {
         });
         this.logger.log(`已登记入站副本：账号 ${accountId} / fileUnique=${uniqueId.slice(0, 16)}…`);
 
-        // 认领回写：让「中继 → 认领」闭环在后台可查询（找不到进行中轮次时静默返回）
-        await this.recordRelayClaim(uniqueId, bridged.matchedFileIds, accountId);
+        // 认领回写：让「中继 → 认领」闭环在后台可查询（找不到进行中轮次时静默返回）。
+        // 必须带上「消息来自哪个群」：多镜像群场景下同一文件同时有多条活跃轮次，
+        // 不带目标群会把 A 群的认领记到 B 群的轮次上，结算结论直接错。
+        await this.recordRelayClaim(uniqueId, bridged.matchedFileIds, accountId, chatId);
       } catch (error) {
         pool.bumpCounter('inboundRegistrationFailures');
         const text = error instanceof Error ? error.message : String(error);
@@ -463,10 +468,10 @@ export class TelegramBotDispatchService {
     if (!archiveChatId || !account || !this.accountClient || !chatId || !messageId) return;
     if (chatId === archiveChatId) return; // 已在归档群，避免自转发循环
 
-    // 来自「镜像备份群」的消息只登记副本、不再归档转发：副本可见群里的每条消息会被
-    // 群内每个 Bot 各收到一次，逐个转发会让归档群消息量按 Bot 数（N）放大。
-    if (await this.isMirrorTargetChat(chatId)) {
-      this.logger.debug(`来源为镜像备份群（chat=${chatId}），跳过归档转发以避免 N 倍放大`);
+    // 来自「镜像群」或「主群」的消息只登记副本、不再归档转发：这两类群都是扩散落点，
+    // 群内每条消息会被群内每个 Bot 各收到一次，逐个转发会让归档群消息量按 Bot 数（N）放大。
+    if (await this.shouldSuppressArchiveForward(chatId)) {
+      this.logger.debug(`来源为扩散落点（镜像群/主群，chat=${chatId}），跳过归档转发以避免 N 倍放大`);
       return;
     }
     try {
@@ -485,7 +490,34 @@ export class TelegramBotDispatchService {
   }
 
   /**
-   * 判断某个 chat 是否是镜像规则的「备份群」（副本可见群）。
+   * 是否应抑制向归档群转发（扩散落点 = 镜像群 ∪ 主群）。
+   *
+   * 为什么主群也要抑制：主群是副本扩散的中转落点，持有源消息的 Bot 会把消息转发进主群，
+   * 群内每个 Bot 都会收到这条消息；若不抑制，归档群会按 Bot 数（N）被写满重复消息。
+   *
+   * 两段判定都各自兜底（读不到规则时分别返回 false / 沿用上次结果）：
+   * 宁可多发一次归档转发，也不要因为规则暂时不可读而漏掉「副本可见性」这类真实可用性问题。
+   */
+  private async shouldSuppressArchiveForward(chatId: string): Promise<boolean> {
+    return (await this.isMirrorTargetChat(chatId)) || (await this.isMainChat(chatId));
+  }
+
+  /** 判断某个 chat 是否是主群（任一规则的源群；读不到规则时返回 false） */
+  private async isMainChat(chatId: string): Promise<boolean> {
+    if (!this.mirrorConfig || !chatId) return false;
+    try {
+      const sources = await this.mirrorConfig.listSourceChatIds();
+      return sources.includes(chatId);
+    } catch (error) {
+      this.logger.debug(
+        `主群集合读取失败（按「非主群」处理）：${error instanceof Error ? error.message : String(error)}`,
+      );
+      return false;
+    }
+  }
+
+  /**
+   * 判断某个 chat 是否是镜像规则的「镜像群」（副本可见群）。
    *
    * 读不到规则时返回 false：宁可多发一次归档转发，也不要因为规则暂时不可读
    * 而漏掉「副本可见性」这类真实可用性问题。
@@ -531,23 +563,27 @@ export class TelegramBotDispatchService {
   /**
    * 把 Bot 认领事件回写到扩散轮次。
    *
-   * 为什么要写两个命名空间：轮次是按**发起扩散时的 owner** 建的（下载期懒扩散用
-   * `file:<站内 id>`），而认领天然只知道 `file_unique_id`。只写一个会让
-   * 「中继成功」与「Bot 认领」在后台对不上，认领超时会被误判。
+   * 为什么要写两个命名空间：轮次是按**发起扩散时的 owner** 建的（镜像任务用
+   * `file:<站内 id>` 或 `grant:<授权 id>`），而认领天然只知道 `file_unique_id`。
+   * 只写一个会让「中继成功」与「Bot 认领」在后台对不上，认领超时会被误判。
    *
-   * 找不到进行中轮次时 `recordClaim` 内部静默返回（普通备份群消息本就没有对应轮次）。
+   * 为什么必须带 `targetChatId`：**每条启用规则一个镜像群、各自一条活跃轮次**，
+   * 同一文件在多个群同时中继时，不带目标群的认领会落到别的群的轮次上。
+   *
+   * 找不到匹配的进行中轮次时 `recordClaim` 内部静默返回（普通群消息本就没有对应轮次）。
    */
   private async recordRelayClaim(
     uniqueId: string,
     matchedFileIds: string[],
     accountId: string,
+    targetChatId?: string | null,
   ): Promise<void> {
     const attempts = this.attempts;
     if (!attempts) return;
     try {
-      await attempts.recordClaim('fileUnique', uniqueId, accountId);
+      await attempts.recordClaim('fileUnique', uniqueId, accountId, { targetChatId });
       for (const fileId of matchedFileIds) {
-        await attempts.recordClaim('file', fileId, accountId);
+        await attempts.recordClaim('file', fileId, accountId, { targetChatId });
       }
     } catch (error) {
       // 观测写入失败**不得**回滚或污染业务写入（副本已登记成功），也不计入登记失败计数

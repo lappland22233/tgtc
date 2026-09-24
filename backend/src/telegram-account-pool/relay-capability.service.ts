@@ -410,7 +410,9 @@ export class RelayCapabilityService {
     return {
       id: 'bots_can_receive',
       label: 'Bot 可接收中继消息',
-      status: checked > 0 ? 'failed' : 'failed',
+      // 只要有一个 Bot 不满足条件，这条检查就是「不通过」（聚合快照里的 `partial`
+      // 表示「部分检查未通过」，与此处单条检查的取值口径不同）。
+      status: 'failed',
       detail: `${failures.length} 个 Bot 不满足接收条件：${failures.slice(0, 5).join('；')}`,
       advice: '把对应 Bot 加入目标群，并在 BotFather 关闭隐私模式（或将其设为群管理员）',
     };

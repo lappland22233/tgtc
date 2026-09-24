@@ -39,11 +39,18 @@ export type TelegramMirrorTaskStatus =
  * 进程内 Map 一旦重启即丢失，会出现「主文件成功但备份永远缺失且无人知晓」。
  *
  * 幂等键 = `(ruleId, ownerType, ownerId, sourceVersion)`：
+ * - **每条启用规则一行任务**（一个镜像群一行），各自独立重试与计数；
  * - 重复事件、Bull 重试、进程重启都收敛到同一条任务记录；
  * - Bull 侧使用同一字符串生成确定性 jobId 做入队去重。
  *
+ * 执行链路（唯一）：持有源消息的 Bot 先把消息转发进**主群**
+ * （落点持久化在 `telegram_main_chat_anchors`，按 `(ownerType, ownerId)` 共享），
+ * 用户账号再从主群服务端转发到 `targetChatId`。
+ * 因此本表行的 `sourceChatId/sourceMessageId` 是**源事实**（用于搬运），
+ * 真正的中继源锚点由主群锚点表提供。
+ *
  * 覆盖上传：`sourceVersion` 绑定 `File.uploadVersion`，旧任务检测到版本变化后
- * 终止或标记过期，绝不把旧内容写进备份群。
+ * 终止或标记过期，绝不把旧内容写进镜像群。
  */
 @Entity('telegram_mirror_tasks')
 @Index('uq_tg_mirror_tasks_idempotency', ['ruleId', 'ownerType', 'ownerId', 'sourceVersion'], { unique: true })
@@ -71,17 +78,18 @@ export class TelegramMirrorTask {
   @Column({ type: 'varchar', length: 64, nullable: true, comment: '源副本账号 ID' })
   sourceAccountId: string | null;
 
-  @Column({ type: 'varchar', length: 32, nullable: true, comment: '源 Chat' })
+  @Column({ type: 'varchar', length: 32, nullable: true, comment: '源 Chat（搬运到主群前的原始位置）' })
   sourceChatId: string | null;
 
-  @Column({ type: 'varchar', length: 32, nullable: true, comment: '源消息 ID（用户复制依赖）' })
+  @Column({ type: 'varchar', length: 32, nullable: true, comment: '源消息 ID（搬运到主群前的原始位置）' })
   sourceMessageId: string | null;
 
-  /** 实际执行账号（Bot 或用户账号 ID）；失败不得跨账号代发 */
-  @Column({ type: 'varchar', length: 64, nullable: true, comment: '实际执行账号 ID' })
+  /** 实际执行账号（用户账号 ID）；失败不得跨账号代发 */
+  @Column({ type: 'varchar', length: 64, nullable: true, comment: '实际执行账号 ID（用户账号）' })
   targetAccountId: string | null;
 
-  @Column({ type: 'varchar', length: 16, comment: '实际执行模式：bot_upload|user_copy' })
+  /** @deprecated 历史列：新写入恒为 user_copy（列保留不删，回退程序版本时不得缺列） */
+  @Column({ type: 'varchar', length: 16, comment: '[废弃] 历史执行模式列' })
   mode: TelegramMirrorMode;
 
   @Column({ type: 'varchar', length: 16, default: 'queued', comment: '任务状态' })

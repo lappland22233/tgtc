@@ -206,10 +206,11 @@ export class TelegramAccountsController {
   }
 
   /**
-   * 手动重试单轮扩散（**只走用户账号中继**，不提供任何策略选择项）。
+   * 手动重试单轮扩散。
    *
    * 只对「可重试失败」「认领超时」开放；配置类阻塞请先修正配置（重试也不会成功）。
-   * 重试新建一轮并记录操作人，便于审计追溯；幂等键不变，不会在副本群产生重复消息。
+   * 重试**不新建执行路径**：把该文件在该镜像群上的扩散重新交给镜像任务队列
+   * （终态任务重置为排队，缺失任务按当前源事实补建），因此不会产生重复消息。
    * 必须声明在 `:id` 路由之前。
    */
   @Post('replication-attempts/:attemptId/retry')
@@ -226,17 +227,16 @@ export class TelegramAccountsController {
       resourceType: 'telegram_replication_attempt',
       resourceId: validatedId,
       metadata: {
-        status: result.status,
         newAttemptId: result.attemptId,
-        createdCount: result.created.length,
-        missingCount: result.missing.length,
-        failureReason: result.failureReason ?? null,
+        requeuedCount: result.requeued,
+        createdCount: result.created,
+        ruleCount: result.ruleIds.length,
       },
     });
     return {
-      message: result.created.length > 0
-        ? `重试完成：新增 ${result.created.length} 个 ready 副本（状态 ${result.status}）`
-        : `重试完成但未新增副本（状态 ${result.status}）`,
+      message: result.requeued + result.created > 0
+        ? `已重新排队：重置 ${result.requeued} 条任务、补建 ${result.created} 条任务`
+        : '该文件在当前镜像群上已有在途任务，无需重试（可直接观察任务状态）',
       ...result,
     };
   }

@@ -1,6 +1,6 @@
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import { AuditService } from '../common/services/audit.service';
 import { File } from '../common/entities/file.entity';
 import { TelegramMirrorTask } from '../common/entities/telegram-mirror-task.entity';
@@ -37,9 +37,11 @@ export interface BackfillJobState {
  * 历史文件补偿镜像（阶段 3）。
  *
  * 为什么必须显式限速与可暂停：
- * - 镜像会把文件字节再次上传到备份群，历史库全量回填会突然产生巨量出口流量；
+ * - 补偿会为每个文件补齐「主群搬运 + userbot 中继到各镜像群」的任务，历史库全量回填
+ *   会突然产生大量 Telegram 侧 API 调用（**不产生文件字节流量**：全程服务端转发）；
  * - 补偿**不改变**现有下载链接，也不跨账号复用 `file_id`；
- * - 任务全部走同一个幂等键，重复运行不会产生重复备份（可安全重跑）。
+ * - 任务全部走同一个幂等键 `(ruleId, ownerType, ownerId, sourceVersion)`，
+ *   重复运行不会产生重复备份（可安全重跑）。
  *
  * 边界：临时补跑只处理「站内文件」；Bot 私聊入站历史消息无法在不重新拉取
  * Telegram 更新的前提下可靠重建源消息定位，故不纳入本次补偿（会明确跳过并计数）。
@@ -77,9 +79,9 @@ export class TelegramMirrorBackfillService {
     if (!(await this.feature.isMirrorEnabled())) {
       throw new BadRequestException('镜像功能开关未开启，无法执行历史补偿');
     }
-    const rule = await this.config.getRule();
-    if (!rule?.enabled) {
-      throw new BadRequestException('镜像规则未启用（且未通过权限测试），无法执行历史补偿');
+    const rules = await this.config.listEnabledRules();
+    if (rules.length === 0) {
+      throw new BadRequestException('没有启用中的镜像规则（且未通过权限测试），无法执行历史补偿');
     }
 
     const limit = Math.min(Math.max(Number(input.limit) || 200, 1), BACKFILL_MAX_LIMIT);
@@ -105,11 +107,11 @@ export class TelegramMirrorBackfillService {
       userId: actorId,
       resourceType: 'telegram_mirror_backfill',
       resourceId: 'backfill',
-      metadata: { mode: input.mode, limit, ruleId: rule.id },
+      metadata: { mode: input.mode, limit, ruleIds: rules.map((item) => item.id) },
     });
 
     // 后台执行：接口立即返回 job 状态，进度由 GET 轮询
-    void this.run(rule.id).catch((error: unknown) => {
+    void this.run().catch((error: unknown) => {
       this.state.status = 'failed';
       this.state.lastError = error instanceof Error ? error.message : String(error);
       this.state.updatedAt = new Date().toISOString();
@@ -137,7 +139,7 @@ export class TelegramMirrorBackfillService {
       resourceId: 'backfill',
       metadata: { resumed: true, scanned: this.state.scanned, queued: this.state.queued },
     });
-    void this.run(this.currentRuleId ?? '').catch((error: unknown) => {
+    void this.run().catch((error: unknown) => {
       this.state.status = 'failed';
       this.state.lastError = error instanceof Error ? error.message : String(error);
     });
@@ -155,14 +157,21 @@ export class TelegramMirrorBackfillService {
     return this.status();
   }
 
-  private currentRuleId: string | null = null;
-
   /**
    * 补偿主循环：按 `createdAt DESC, id DESC` 游标分页扫描（避免深分页性能陷阱），
    * 每批之间主动让出 1s，保证不抢占正常链路带宽。
+   *
+   * 每条启用规则各建一条任务（一个镜像群一条）；一个文件只有在**全部**启用规则
+   * 都已有任务时才算「已补偿」，否则补齐缺口（建单幂等，重复运行安全）。
    */
-  private async run(ruleId: string): Promise<void> {
-    this.currentRuleId = ruleId;
+  private async run(): Promise<void> {
+    const enabledRuleIds = (await this.config.listEnabledRules()).map((rule) => rule.id);
+    if (enabledRuleIds.length === 0) {
+      this.state.status = 'completed';
+      this.state.finishedAt = new Date().toISOString();
+      this.state.updatedAt = this.state.finishedAt;
+      return;
+    }
     let cursor: { createdAt: Date; id: string } | null = null;
 
     while (this.state.scanned < this.state.limit) {
@@ -212,10 +221,10 @@ export class TelegramMirrorBackfillService {
         this.state.cursor = `${new Date(last.createdAt).toISOString()}/${last.id}`;
 
         const sourceVersion = Number(file.uploadVersion) || 1;
-        const existing = await this.tasks.findOne({
-          where: { ruleId, ownerType: 'file', ownerId: file.id, sourceVersion },
+        const covered = await this.tasks.count({
+          where: { ruleId: In(enabledRuleIds), ownerType: 'file', ownerId: file.id, sourceVersion },
         });
-        if (existing) {
+        if (covered >= enabledRuleIds.length) {
           this.state.skipped += 1;
           continue;
         }

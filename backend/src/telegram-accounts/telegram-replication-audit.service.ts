@@ -7,7 +7,7 @@ import {
   UserRelayFailureReason,
 } from '../common/entities/telegram-replication-attempt.entity';
 import { DownloadCapacityState, DownloadCapacityPolicyService } from '../telegram-account-pool/download-capacity-policy.service';
-import { FileCopyService, ReplicationResult } from '../telegram-account-pool/file-copy.service';
+import { FileCopyService } from '../telegram-account-pool/file-copy.service';
 import {
   RelayCapabilityService,
   RelayCapabilitySnapshot,
@@ -35,6 +35,19 @@ const RECENT_ATTEMPT_LIMIT = 50;
 /** 大文件主视图的分层标签（与 `SIZE_COVERAGE_TIERS` 对齐） */
 const LARGE_FILE_TIER_LABEL = '≥4GiB';
 const LARGE_FILE_SECONDARY_LABEL = '1–4GiB';
+
+/**
+ * 扩散重试处理器（由镜像模块注册）。
+ *
+ * 为什么用回调：镜像模块依赖本模块（账号主数据），反向注入会成环。
+ * 重试只做「把该文件在该镜像群上的扩散重新排队」，不新建任何执行路径。
+ */
+export type DiffusionRetryHandler = (input: {
+  ownerType: TelegramCopyOwnerType;
+  ownerId: string;
+  targetChatId: string | null;
+  operatorUserId: string;
+}) => Promise<{ requeued: number; created: number; ruleIds: string[] }>;
 
 /** 目标解析视图（管理端只读展示） */
 export interface ReplicationTargetView {
@@ -299,6 +312,8 @@ const EMPTY_CAPABILITY_SNAPSHOT: RelayCapabilitySnapshot = {
 @Injectable()
 export class TelegramReplicationAuditService {
   private readonly logger = new Logger(TelegramReplicationAuditService.name);
+  /** 扩散重试处理器（镜像模块启动时注册；未注册 = 镜像模块未装配） */
+  private retryHandler: DiffusionRetryHandler | null = null;
 
   constructor(
     private readonly pool: TelegramAccountPoolService,
@@ -682,25 +697,38 @@ export class TelegramReplicationAuditService {
   }
 
   /**
-   * 手动重试单轮扩散（**只走中继**）。
+   * 注册「扩散重试」处理器（由镜像模块启动时注入）。
+   *
+   * 为什么用回调而不是直接注入镜像服务：镜像模块依赖本模块（账号主数据），
+   * 反向注入会成环（与账号池的探测回调同一处理方式）。未注册时重试入口会
+   * 明确报错「镜像模块未装配」，而不是静默什么都不做。
+   */
+  registerDiffusionRetryHandler(handler: DiffusionRetryHandler): void {
+    this.retryHandler = handler;
+  }
+
+  /**
+   * 手动重试单轮扩散。
    *
    * 前置校验（缺一不可）：
    * 1. 轮次存在；
    * 2. 状态属于可重试集合（`retryable_failed` / `claim_timeout`）——
    *    配置类阻塞与已达标轮次不提供重试入口，否则会让管理员反复点击而问题依旧；
-   * 3. 重新解析当前有效目标数（配置可能已变更）。
+   * 3. 镜像模块已装配（否则无处可投递）。
    *
-   * 重试**新建一轮**并记录操作人与来源轮次，便于审计追溯；
-   * 幂等键沿用同一逻辑操作，因此不会在副本群产生重复消息。
+   * 重试**不新建执行路径**：把该文件在该镜像群上的扩散重新交给镜像任务队列
+   * （终态任务重置为排队、缺失任务按当前源事实补建），因此不会产生重复消息。
    */
   async retryAttempt(id: string, operatorUserId: string): Promise<{
-    attemptId: string | null;
-    status: ReplicationAttemptStatus;
-    created: string[];
-    missing: string[];
-    failureReason?: UserRelayFailureReason;
+    attemptId: string;
+    requeued: number;
+    created: number;
+    ruleIds: string[];
   }> {
     if (!this.attempts) throw new NotFoundException('扩散轮次记录不可用（观测未装配）');
+    if (!this.retryHandler) {
+      throw new BadRequestException('镜像模块未装配，无法重新排队扩散任务（请检查服务启动日志）');
+    }
     const attempt = await this.attempts.findById(id);
     if (!attempt) throw new NotFoundException('扩散轮次不存在或已被保留期清理');
     if (!isAttemptRetryable(attempt.status)) {
@@ -710,26 +738,30 @@ export class TelegramReplicationAuditService {
       );
     }
 
-    const resolution = await this.replicaTargets.resolve();
-    const result: ReplicationResult = await this.copies.ensureCopies({
+    // 目标群必须可定位：轮次记录缺目标群（历史数据）时，若按「全部启用规则」重试，
+    // 会把其它镜像群的在途/终态任务一并重排（旧 mode 任务还会被再次 blocked 空转），
+    // 属于误操作面。这里明确拒绝，并指向「镜像任务列表」的按群重试入口。
+    const targetChatId = (attempt.targetChatId ?? '').trim();
+    if (!targetChatId) {
+      throw new BadRequestException(
+        '该扩散轮次记录缺少镜像群信息（历史数据），无法定位要重试的单个镜像群；'
+        + '请在「镜像任务列表」中按镜像群重试对应任务',
+      );
+    }
+
+    const result = await this.retryHandler({
       ownerType: attempt.ownerType,
       ownerId: attempt.ownerId,
-      desiredCount: Math.max(1, resolution.effectiveTarget),
-      sourceAccountId: attempt.sourceAccountId ?? undefined,
-      manualRetry: { operatorUserId, retriedFromId: attempt.id },
+      targetChatId,
+      operatorUserId,
     });
 
     this.logger.log(
       `管理员 ${operatorUserId} 手动重试扩散轮次 ${attempt.id}`
-      + `（${attempt.ownerType}:${this.maskOwner(attempt.ownerType, attempt.ownerId)}）→ ${result.status}`,
+      + `（${attempt.ownerType}:${this.maskOwner(attempt.ownerType, attempt.ownerId)}）→ `
+      + `重置 ${result.requeued} 条 / 补建 ${result.created} 条`,
     );
-    return {
-      attemptId: result.attemptId ?? null,
-      status: result.status,
-      created: result.created,
-      missing: result.missing,
-      failureReason: result.failureReason,
-    };
+    return { attemptId: attempt.id, ...result };
   }
 
   /**

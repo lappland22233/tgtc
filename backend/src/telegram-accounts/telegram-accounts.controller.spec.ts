@@ -40,9 +40,9 @@ describe('TelegramAccountsController（管理端点契约）', () => {
       getAttemptDetail: jest.fn(async () => options.detail ?? { id: 'att-1', retryable: true }),
       retryAttempt: jest.fn(async () => options.retry ?? {
         attemptId: 'att-2',
-        status: 'partial_success',
-        created: ['a2'],
-        missing: ['a3'],
+        requeued: 2,
+        created: 1,
+        ruleIds: ['rule-1', 'rule-2'],
       }),
       runPreflight: jest.fn(async () => options.preflight ?? {
         dryRun: true,
@@ -140,31 +140,38 @@ describe('TelegramAccountsController（管理端点契约）', () => {
     });
   });
 
-  it('手动重试：写入审计并返回可读结果（只走中继，无策略选择项）', async () => {
+  it('手动重试：委托镜像任务队列重排，审计写明重置与补建数量（无策略选择项）', async () => {
     const ctx = makeController();
 
     const response = await ctx.controller.retryReplicationAttempt(SUPER_ADMIN_USER, ATTEMPT_ID);
 
     expect(ctx.replicationAudit.retryAttempt).toHaveBeenCalledWith(ATTEMPT_ID, 'admin-1');
-    expect(response.message).toContain('新增 1 个 ready 副本');
+    // 重试不新建执行路径：响应必须能看出队列被怎么处理（重置了几条、补建了几条）
+    expect(response).toMatchObject({ attemptId: 'att-2', requeued: 2, created: 1 });
+    expect(response.message).toContain('已重新排队');
     expect(ctx.auditLog).toHaveBeenCalledWith(expect.objectContaining({
       action: 'config_change',
       userId: 'admin-1',
       resourceType: 'telegram_replication_attempt',
       resourceId: ATTEMPT_ID,
-      metadata: expect.objectContaining({ status: 'partial_success', newAttemptId: 'att-2', createdCount: 1 }),
+      metadata: expect.objectContaining({
+        newAttemptId: 'att-2',
+        requeuedCount: 2,
+        createdCount: 1,
+        ruleCount: 2,
+      }),
     }));
   });
 
-  it('手动重试无新增副本时也如实反馈（不粉饰成功）', async () => {
+  it('手动重试无需重排时也如实反馈（不谎报已重试，不粉饰成功）', async () => {
     const ctx = makeController({
-      retry: { attemptId: 'att-2', status: 'claim_timeout', created: [], missing: ['a2'] },
+      retry: { attemptId: 'att-2', requeued: 0, created: 0, ruleIds: [] },
     });
 
     const response = await ctx.controller.retryReplicationAttempt(SUPER_ADMIN_USER, ATTEMPT_ID);
 
-    expect(response.message).toContain('未新增副本');
-    expect(response.message).toContain('claim_timeout');
+    expect(response.message).toContain('无需重试');
+    expect(response.message).toContain('任务状态');
   });
 
   it('轮次 id 格式非法时入口 400（不把数据库方言错误变成观测降级）', async () => {

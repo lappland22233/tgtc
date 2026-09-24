@@ -1,11 +1,16 @@
 /**
- * 回归保护：无源复制的**账号粘性**与**幂等键**。
+ * 回归保护：唯一执行器的**账号粘性**、**幂等键**与**fail-closed**。
  *
- * 事故背景：`pickUser` 原用进程内游标轮转，同一任务每次重试可能换一个用户账号 → 换一个
- * 发送者重新复制一份（MTProto 的 `random_id` 去重是发送者维度的），再叠加「服务端已复制
- * 成功但返回结果里没有消息 ID」被当成可重试失败，最终在备份群留下多份重复消息。
+ * 事故背景：
+ * - `pickUser` 原用进程内游标轮转，同一任务每次重试可能换一个用户账号 → 换一个发送者
+ *   重新复制一份（MTProto 的 `random_id` 去重是发送者维度的），最终在镜像群留下多份重复消息；
+ * - 「转发成功」曾被当成「扩散完成」，因此本链路只允许报告**真实**成功，任何不确定都 blocked；
+ * - 中继必须从**主群**出发（唯一中转落点）：源消息在原位置（私聊 / 账号存储群）时，
+ *   先由持有该消息的 Bot 搬到主群，再从中继——这部分幂等由
+ *   `TelegramMainChatAnchorService` 负责，本类只消费它的结果。
  */
 import { TelegramUserCopyService } from './telegram-user-copy.service';
+import { MirrorExecutionError } from './telegram-mirror.errors';
 
 describe('TelegramUserCopyService（账号粘性与幂等键）', () => {
   const candidates = [
@@ -14,55 +19,46 @@ describe('TelegramUserCopyService（账号粘性与幂等键）', () => {
   ];
 
   function setup(options: {
-    /** 源锚点（默认群消息，即用户账号可直接读取） */
+    /** 源锚点（副本表登记的事实） */
     descriptor?: { chatId: string | null; messageId: string | null; fileSize: number };
-    sourceAccountId?: string | null;
-    archiveChatId?: string;
-    /** 规则里的源群（私聊来源的搬运中转群） */
-    ruleSourceChatId?: string;
-    taskSourceChatId?: string | null;
-    taskSourceMessageId?: string | null;
-    panelAccounts?: Array<{ id: string; accountId: string; token: string }>;
-    /** 账号级 Bot API 客户端是否装配（`false` 模拟未装配的降级路径） */
-    clientWired?: boolean;
+    /** 主群锚点（默认：主群与源不同，说明发生过搬运） */
+    anchor?: { chatId: string; messageId: string; planted: boolean };
+    anchorError?: Error;
+    userAccounts?: Array<{ id: string; apiId: number; apiHash: string; session: string; weight: number }>;
+    copyError?: Error;
+    userClientAvailable?: boolean;
+    userClientReason?: string | null;
   } = {}) {
     const source = {
       describe: jest.fn(async () => options.descriptor
-        ?? { chatId: '-100111', messageId: '5', fileSize: 1024 }),
+        ?? { chatId: '7001', messageId: '5', fileSize: 1024 }),
+    };
+    const anchors = {
+      ensureAnchor: jest.fn(async () => {
+        if (options.anchorError) throw options.anchorError;
+        return options.anchor ?? { chatId: '-100999', messageId: '777', planted: true };
+      }),
     };
     const accounts = {
-      resolveEnabledUserAccounts: jest.fn(async () => candidates),
+      resolveEnabledUserAccounts: jest.fn(async () => options.userAccounts ?? candidates),
       markDegraded: jest.fn(async () => undefined),
-      resolveEnabledBotAccounts: jest.fn(async () => options.panelAccounts ?? []),
     };
     const userClient = {
-      isAvailable: () => true,
-      unavailableReason: () => null,
-      copyMessage: jest.fn(async () => ({ targetChatId: '-100222', targetMessageId: '9201' })),
+      isAvailable: () => options.userClientAvailable !== false,
+      unavailableReason: () => options.userClientReason ?? null,
+      copyMessage: jest.fn(async () => {
+        if (options.copyError) throw options.copyError;
+        return { targetChatId: '-100222', targetMessageId: '9201' };
+      }),
     };
-    const client = {
-      forwardMessage: jest.fn(async () => ({ messageId: '777' })),
-    };
-    const pool = {
-      getConfig: jest.fn((id: string) => (id === '1234567'
-        ? { id, token: '1234567:SECRET', chatId: '-100111', weight: 1, maxInflight: 8, enabled: true }
-        : null)),
-    };
-    const env: Record<string, string> = { TELEGRAM_BOT_TOKEN: '1234567:AAAA' };
-    if (options.archiveChatId) env.TELEGRAM_ARCHIVE_CHAT_ID = options.archiveChatId;
-    const configService = { get: jest.fn((key: string) => env[key]) };
-    const tasks = { update: jest.fn(async () => ({ affected: 1 })) };
 
     const service = new TelegramUserCopyService(
       source as never,
+      anchors as never,
       accounts as never,
       userClient as never,
-      (options.clientWired === false ? null : client) as never,
-      pool as never,
-      configService as never,
-      tasks as never,
     );
-    return { service, userClient, client, pool, configService, tasks, accounts };
+    return { service, source, anchors, accounts, userClient };
   }
 
   function task(id: string, overrides: Record<string, unknown> = {}) {
@@ -77,9 +73,28 @@ describe('TelegramUserCopyService（账号粘性与幂等键）', () => {
     };
   }
 
-  function rule(preferredAccountId: string | null = null, sourceChatId = '') {
-    return { targetChatId: '-100222', preferredAccountId, sourceChatId };
+  function rule(preferredAccountId: string | null = null, targetChatId = '-100222') {
+    return { targetChatId, preferredAccountId };
   }
+
+  it('中继固定从主群锚点出发（而不是源位置）', async () => {
+    const ctx = setup({ descriptor: { chatId: '7001', messageId: '5', fileSize: 1024 } });
+
+    await ctx.service.execute(task('task-aaa', { sourceAccountId: '1234567' }) as never, rule() as never);
+
+    // 搬运请求携带的是「源事实」与「持有该消息的账号」
+    expect(ctx.anchors.ensureAnchor).toHaveBeenCalledWith({
+      ownerType: 'file',
+      ownerId: 'file-1',
+      sourceChatId: '7001',
+      sourceMessageId: '5',
+      sourceAccountId: '1234567',
+    });
+    const calls = (ctx.userClient.copyMessage as jest.Mock).mock.calls as unknown as Array<[Record<string, unknown>]>;
+    expect(calls[0][0].sourceChatId).toBe('-100999');
+    expect(calls[0][0].sourceMessageId).toBe('777');
+    expect(calls[0][0].targetChatId).toBe('-100222');
+  });
 
   it('同一任务多次执行固定使用同一账号，且幂等键完全相同', async () => {
     const { service, userClient } = setup();
@@ -92,9 +107,22 @@ describe('TelegramUserCopyService（账号粘性与幂等键）', () => {
     // 账号粘性：换账号等于换发送者，确定性 random_id 会因此失去去重作用
     expect(calls[0][0].credentials.apiId).toBe(calls[1][0].credentials.apiId);
     expect(calls[0][0].idempotencyKey).toBe(calls[1][0].idempotencyKey);
-    // 幂等键必须包含任务、目标群与执行账号：服务端去重与人工排查都依赖它，
-    // 缺目标群时「规则在重试期间被改」会让同一 random_id 指向旧群的消息
+    // 幂等键必须包含任务、**镜像群**与执行账号：缺镜像群时，多镜像群共用同一
+    // random_id，服务端会按去重返回另一个群的消息 ID，定位与实际位置不一致
     expect(String(calls[0][0].idempotencyKey)).toMatch(/^task-aaa:-100222:(acc-a|acc-b)$/);
+  });
+
+  it('同一文件在不同镜像群的任务幂等键不同（各自独立去重）', async () => {
+    const { service, userClient } = setup();
+
+    await service.execute(task('task-aaa') as never, rule(null, '-100222') as never);
+    await service.execute(task('task-aaa') as never, rule(null, '-100333') as never);
+
+    const keys = ((userClient.copyMessage as jest.Mock).mock.calls as unknown as Array<[Record<string, any>]>)
+      .map((call) => call[0].idempotencyKey);
+    expect(keys[0]).not.toBe(keys[1]);
+    expect(keys[0]).toBe('task-aaa:-100222:acc-a');
+    expect(keys[1]).toBe('task-aaa:-100333:acc-a');
   });
 
   it('不同任务的幂等键不同（不会互相顶掉对方的复制）', async () => {
@@ -119,114 +147,104 @@ describe('TelegramUserCopyService（账号粘性与幂等键）', () => {
     expect(call.idempotencyKey).toBe('task-aaa:-100222:acc-b');
   });
 
-  it('成功结果按目标消息 ID 回填（回执锚点不可为空）', async () => {
+  it('成功结果按目标消息 ID 回填（回执锚点不可为空，且不写副本表用的 file_id）', async () => {
     const { service } = setup();
 
     const result = await service.execute(task('task-aaa') as never, rule() as never);
 
-    expect(result).toMatchObject({ targetChatId: '-100222', targetMessageId: '9201', mode: 'user_copy' });
+    expect(result).toMatchObject({
+      targetChatId: '-100222',
+      targetMessageId: '9201',
+      targetTelegramFileId: '',
+      mode: 'user_copy',
+    });
   });
 
-  /**
-   * Bot 私聊来源的搬运。
-   *
-   * 事故背景：`grant` 类来源的源锚点是「Bot 与用户的私聊」，**用户账号读不到该会话**，
-   * 直接转发必然 permission 失败；而「Bot 收到文件」正是产品要覆盖的入口之一。
-   */
-  describe('Bot 私聊来源的搬运（用户账号不可读的会话）', () => {
-    it('先由接收 Bot 把私聊消息搬到中转群，再用中转消息作为源锚点并写回任务行', async () => {
-      const ctx = setup({
-        descriptor: { chatId: '7001', messageId: '5', fileSize: 1024 },
-        ruleSourceChatId: '-100111',
-      });
-      const mirrorTask = task('task-priv', { sourceAccountId: '1234567' });
+  it('账号凭据失效时标记该账号 degraded 并抛出（让管理员可见）', async () => {
+    const failure = Object.assign(new Error('AUTH_KEY_UNREGISTERED'), { name: 'TelegramUserClientError', kind: 'auth' });
+    const ctx = setup({ copyError: failure, userAccounts: [candidates[0]] });
 
-      await ctx.service.execute(mirrorTask as never, rule(null, '-100111') as never);
+    await expect(ctx.service.execute(task('task-aaa') as never, rule() as never)).rejects.toBe(failure);
 
-      expect(ctx.client.forwardMessage).toHaveBeenCalledWith('1234567', '1234567:SECRET', '-100111', '7001', '5');
-      // 锚点固化：Bot API forwardMessage 没有幂等键，重试必须复用中转消息而不是再搬一次
-      expect(ctx.tasks.update).toHaveBeenCalledWith(
-        { id: 'task-priv' },
-        { sourceChatId: '-100111', sourceMessageId: '777' },
-      );
-      const calls = (ctx.userClient.copyMessage as jest.Mock).mock.calls as unknown as Array<[Record<string, unknown>]>;
-      expect(calls[0][0].sourceChatId).toBe('-100111');
-      expect(calls[0][0].sourceMessageId).toBe('777');
-    });
+    expect(ctx.accounts.markDegraded).toHaveBeenCalledWith('acc-a', 'user_session_invalid', expect.stringContaining('AUTH_KEY'));
+  });
 
-    it('已在群里的源锚点不触发搬运（保持零字节转发语义）', async () => {
-      const ctx = setup({ descriptor: { chatId: '-100111', messageId: '5', fileSize: 1024 } });
+  it('MTProto 客户端不可用时 blocked（不降级、不静默跳过）', async () => {
+    const ctx = setup({ userClientAvailable: false, userClientReason: '未安装依赖' });
 
-      await ctx.service.execute(task('task-group') as never, rule() as never);
+    await expect(ctx.service.execute(task('task-aaa') as never, rule() as never))
+      .rejects.toMatchObject({ code: 'user_client_unavailable', kind: 'blocked' });
+    expect(ctx.userClient.copyMessage).not.toHaveBeenCalled();
+  });
 
-      expect(ctx.client.forwardMessage).not.toHaveBeenCalled();
-      expect(ctx.tasks.update).not.toHaveBeenCalled();
-    });
+  it('没有可用用户账号时 blocked', async () => {
+    const ctx = setup({ userAccounts: [] });
 
-    it('规则未配置源群时回退 TELEGRAM_ARCHIVE_CHAT_ID 作为中转群', async () => {
-      const ctx = setup({
-        descriptor: { chatId: '7001', messageId: '5', fileSize: 1024 },
-        archiveChatId: '-100888',
-      });
+    await expect(ctx.service.execute(task('task-aaa') as never, rule() as never))
+      .rejects.toMatchObject({ code: 'no_user_account', kind: 'blocked' });
+    expect(ctx.userClient.copyMessage).not.toHaveBeenCalled();
+  });
 
-      await ctx.service.execute(task('task-priv') as never, rule() as never);
+  it('镜像群未配置时 blocked（不把空 chat id 交给 MTProto）', async () => {
+    const ctx = setup();
 
-      // sourceAccountId 缺失（单账号部署）时回退默认 Bot 的 Token，不猜测其它账号
-      expect(ctx.client.forwardMessage).toHaveBeenCalledWith(
-        '1234567', '1234567:AAAA', '-100888', '7001', '5',
-      );
-    });
+    await expect(ctx.service.execute(task('task-aaa') as never, rule(null, '') as never))
+      .rejects.toMatchObject({ code: 'target_chat_missing', kind: 'blocked' });
+    expect(ctx.userClient.copyMessage).not.toHaveBeenCalled();
+  });
 
-    it('没有可用中转群时 blocked（明确失败，绝不允许报告成功）', async () => {
-      const ctx = setup({ descriptor: { chatId: '7001', messageId: '5', fileSize: 1024 } });
+  it('主群搬运失败时不执行中继（前置失败直接向上抛）', async () => {
+    const anchorFailure = Object.assign(new Error('CHAT_WRITE_FORBIDDEN'), { name: 'TelegramAccountError', kind: 'unavailable' });
+    const ctx = setup({ anchorError: anchorFailure });
 
-      await expect(ctx.service.execute(task('task-priv') as never, rule() as never))
-        .rejects.toMatchObject({ code: 'relay_staging_chat_missing' });
-      expect(ctx.userClient.copyMessage).not.toHaveBeenCalled();
-    });
+    await expect(ctx.service.execute(task('task-aaa') as never, rule() as never)).rejects.toBe(anchorFailure);
 
-    it('中转群与备份群相同时 blocked（Bot 转发进备份群无法达成副本认领）', async () => {
-      const ctx = setup({
-        descriptor: { chatId: '7001', messageId: '5', fileSize: 1024 },
-        archiveChatId: '-100222',
-      });
+    expect(ctx.userClient.copyMessage).not.toHaveBeenCalled();
+  });
 
-      await expect(ctx.service.execute(task('task-priv') as never, rule() as never))
-        .rejects.toMatchObject({ code: 'relay_staging_chat_conflict' });
-    });
+  it('源事实读取失败时轮次必须收口（否则永久停在「进行中」）', async () => {
+    // 事故形态：轮次先开立，随后 describe() 抛错——若不收口，轮次停在 planned/active，
+    // 后台时间线长期显示「进行中」，且后续 beginRound 会误判为可合并而不再新建。
+    const failure = new MirrorExecutionError('source_file_missing', '站内文件不存在', 'blocked');
+    const attempts = {
+      beginRound: jest.fn(async () => ({ attempt: { id: 'att-1' } })),
+      markRelaySucceeded: jest.fn(),
+      finishBlocked: jest.fn(async () => undefined),
+    };
+    const service = new TelegramUserCopyService(
+      { describe: jest.fn(async () => { throw failure; }) } as never,
+      { ensureAnchor: jest.fn() } as never,
+      { resolveEnabledUserAccounts: jest.fn() } as never,
+      { isAvailable: () => true, unavailableReason: () => null, copyMessage: jest.fn() } as never,
+      attempts as never,
+    );
 
-    it('无法确认接收 Bot 的凭据时 blocked（绝不跨账号代搬）', async () => {
-      const ctx = setup({
-        descriptor: { chatId: '7001', messageId: '5', fileSize: 1024 },
-        ruleSourceChatId: '-100111',
-      });
-      ctx.pool.getConfig.mockReturnValue(null as never);
+    await expect(service.execute(task('task-aaa') as never, rule() as never)).rejects.toBe(failure);
 
-      await expect(
-        ctx.service.execute(
-          task('task-priv', { sourceAccountId: '9999999' }) as never,
-          rule(null, '-100111') as never,
-        ),
-      ).rejects.toMatchObject({ code: 'relay_forward_bot_unresolved' });
-      expect(ctx.client.forwardMessage).not.toHaveBeenCalled();
-    });
+    expect(attempts.finishBlocked).toHaveBeenCalledWith('att-1', expect.objectContaining({
+      status: 'blocked_source_anchor',
+      failureReason: 'source_missing',
+    }));
+  });
 
-    it('账号级 Bot API 客户端未装配时 blocked（可诊断失败，不静默按单账号继续）', async () => {
-      const ctx = setup({
-        descriptor: { chatId: '7001', messageId: '5', fileSize: 1024 },
-        ruleSourceChatId: '-100111',
-        clientWired: false,
-      });
+  it('用户账号列表读取失败时轮次同样收口（异常不允许留在轮次之外）', async () => {
+    const attempts = {
+      beginRound: jest.fn(async () => ({ attempt: { id: 'att-2' } })),
+      markRelaySucceeded: jest.fn(),
+      finishBlocked: jest.fn(async () => undefined),
+    };
+    const service = new TelegramUserCopyService(
+      { describe: jest.fn(async () => ({ chatId: '7001', messageId: '5', fileSize: 1 })) } as never,
+      { ensureAnchor: jest.fn(async () => ({ chatId: '-100999', messageId: '777', planted: true })) } as never,
+      { resolveEnabledUserAccounts: jest.fn(async () => { throw new Error('db down'); }) } as never,
+      { isAvailable: () => true, unavailableReason: () => null, copyMessage: jest.fn() } as never,
+      attempts as never,
+    );
 
-      await expect(
-        ctx.service.execute(
-          task('task-priv', { sourceAccountId: '1234567' }) as never,
-          rule(null, '-100111') as never,
-        ),
-      ).rejects.toMatchObject({ code: 'relay_client_unavailable' });
-      // 未装配时不得改用默认账号代搬（跨账号代搬会错用身份）
-      expect(ctx.client.forwardMessage).not.toHaveBeenCalled();
-      expect(ctx.tasks.update).not.toHaveBeenCalled();
-    });
+    await expect(service.execute(task('task-aaa') as never, rule() as never)).rejects.toThrow('db down');
+
+    expect(attempts.finishBlocked).toHaveBeenCalledWith('att-2', expect.objectContaining({
+      status: 'retryable_failed',
+    }));
   });
 });

@@ -33,8 +33,10 @@ import {
   cancelMirrorTask,
   cancelUserAuth,
   createBotAccount,
+  createMirrorRule,
   createUserAccount,
   deleteAccount,
+  deleteMirrorRule,
   fetchAccount,
   fetchAccountOverview,
   fetchAccounts,
@@ -384,25 +386,67 @@ describe('账号池接口', () => {
 });
 
 describe('镜像接口', () => {
-  it('fetchMirrorOverview 请求总览并透传 signal', async () => {
+  it('fetchMirrorOverview 请求总览并透传 signal（含多规则字段）', async () => {
     const signal = new AbortController().signal;
-    const payload = { rule: null, tasks: { queued: 0 }, precheck: [], notes: [] };
+    const payload = {
+      rules: [{ id: 'r1' }, { id: 'r2' }],
+      rule: { id: 'r1' },
+      enabledRuleCount: 1,
+      mainChatId: '-1001234567890',
+      tasks: { queued: 0 },
+      metrics: { userCopyCount: 3 },
+      precheck: [],
+      notes: [],
+    };
     get.mockResolvedValue(respond(payload));
 
     const result = await fetchMirrorOverview(signal);
 
     expect(get).toHaveBeenCalledWith('/admin/telegram-mirror', { signal });
     expect(result).toBe(payload);
+    expect(result.rules).toHaveLength(2);
+    expect(result.enabledRuleCount).toBe(1);
+    expect(result.mainChatId).toBe('-1001234567890');
   });
 
-  it('updateMirrorRule 用 PUT 提交规则', async () => {
+  it('createMirrorRule 用 POST 新建规则（载荷不含已删除的 mode/fallbackMode）', async () => {
+    post.mockResolvedValue(respond({ message: '镜像规则已创建（默认停用，请先执行权限测试再启用）', rule: { id: 'r1' } }));
+
+    const input = {
+      name: '镜像群 A',
+      sourceChatId: '-100',
+      targetChatId: '-200',
+      preferredAccountId: '',
+      includeWebUploads: true,
+      includeBotInboundFiles: false,
+    };
+    const result = await createMirrorRule(input);
+
+    expect(post).toHaveBeenCalledWith('/admin/telegram-mirror/rules', input);
+    expect(result.rule).toEqual({ id: 'r1' });
+    // 关键：不得出现已删除字段（后端 forbidNonWhitelisted 会直接 400）
+    const sent = post.mock.calls[0][1] as Record<string, unknown>;
+    expect('mode' in sent).toBe(false);
+    expect('fallbackMode' in sent).toBe(false);
+  });
+
+  it('updateMirrorRule 用 PUT 提交指定规则', async () => {
     put.mockResolvedValue(respond({ message: '镜像规则已更新', rule: { id: 'r1' } }));
 
-    const input = { sourceChatId: '-100', targetChatId: '-200', mode: 'auto' as const };
-    const result = await updateMirrorRule(input);
+    const input = { sourceChatId: '-100', targetChatId: '-200' };
+    const result = await updateMirrorRule('r1', input);
 
-    expect(put).toHaveBeenCalledWith('/admin/telegram-mirror', input);
+    expect(put).toHaveBeenCalledWith('/admin/telegram-mirror/rules/r1', input);
     expect(result.rule).toEqual({ id: 'r1' });
+  });
+
+  it('deleteMirrorRule 用 DELETE 删除指定规则', async () => {
+    del.mockResolvedValue(respond({ message: '镜像规则已删除' }));
+
+    const result = await deleteMirrorRule('r1');
+
+    expect(del).toHaveBeenCalledWith('/admin/telegram-mirror/rules/r1');
+    expect(result.message).toBe('镜像规则已删除');
   });
 
   it('setMirrorEnabled 提交 feature 开关', async () => {
@@ -414,25 +458,25 @@ describe('镜像接口', () => {
     expect(result.message).toBe('镜像功能已开启');
   });
 
-  it('setMirrorRuleEnabled 提交规则开关', async () => {
+  it('setMirrorRuleEnabled 提交指定规则的开关', async () => {
     put.mockResolvedValue(respond({ message: '镜像规则已启用', rule: { id: 'r1', enabled: true } }));
 
-    await setMirrorRuleEnabled(true);
+    await setMirrorRuleEnabled('r1', true);
 
-    expect(put).toHaveBeenCalledWith('/admin/telegram-mirror/rule/enabled', { enabled: true });
+    expect(put).toHaveBeenCalledWith('/admin/telegram-mirror/rules/r1/enabled', { enabled: true });
   });
 
-  it('testMirrorRule 请求 test 端点并返回明细', async () => {
+  it('testMirrorRule 请求指定规则的 test 端点并返回明细', async () => {
     const payload = {
       status: 'failed' as const,
-      summary: '备份群不可用',
+      summary: '镜像群不可用',
       details: [{ chat: 'target' as const, ok: false, title: null, type: null, error: 'no rights' }],
     };
     post.mockResolvedValue(respond(payload));
 
-    const result = await testMirrorRule();
+    const result = await testMirrorRule('r1');
 
-    expect(post).toHaveBeenCalledWith('/admin/telegram-mirror/test');
+    expect(post).toHaveBeenCalledWith('/admin/telegram-mirror/rules/r1/test');
     expect(result).toBe(payload);
   });
 
@@ -644,21 +688,36 @@ describe('镜像接口', () => {
     });
   });
 
-  it('retryReplicationAttempt 请求 retry 子端点并返回策略 B 结果', async () => {
+  it('retryReplicationAttempt 请求 retry 子端点并返回重排口径（requeued/created/ruleIds）', async () => {
     post.mockResolvedValue(respond({
-      message: '重试已提交',
-      attemptId: 'att-2',
-      status: 'partial_success',
-      created: ['a1'],
-      missing: ['a2'],
+      message: '已重新排队：重置 2 条任务、补建 1 条任务',
+      attemptId: 'att-1',
+      requeued: 2,
+      created: 1,
+      ruleIds: ['r1', 'r2'],
     }));
 
     const result = await retryReplicationAttempt('att-1');
 
     expect(post).toHaveBeenCalledWith('/admin/telegram-accounts/replication-attempts/att-1/retry');
-    expect(result.status).toBe('partial_success');
-    expect(result.created).toEqual(['a1']);
-    expect(result.missing).toEqual(['a2']);
+    expect(result.requeued).toBe(2);
+    expect(result.created).toBe(1);
+    expect(result.ruleIds).toEqual(['r1', 'r2']);
+  });
+
+  it('retryReplicationAttempt 解析「无需重试」的 0 重排结果（不得据此判定成功）', async () => {
+    post.mockResolvedValue(respond({
+      message: '该文件在当前镜像群上已有在途任务，无需重试（可直接观察任务状态）',
+      attemptId: 'att-1',
+      requeued: 0,
+      created: 0,
+      ruleIds: [],
+    }));
+
+    const result = await retryReplicationAttempt('att-1');
+
+    expect(result.requeued + result.created).toBe(0);
+    expect(result.ruleIds).toEqual([]);
   });
 
   it('runRelayPreflight 默认提交 dryRun=true（不产生 Telegram 消息）', async () => {

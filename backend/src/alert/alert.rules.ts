@@ -278,9 +278,9 @@ export async function createAlertRules(configCache: ConfigCacheService): Promise
       evaluate: async () => null,
     },
     {
-      id: 'MIRROR_FALLBACK_RATE_HIGH',
-      name: '镜像 Bot 降级比例偏高',
-      level: AlertLevel.WARNING,
+      id: 'MIRROR_MAIN_CHAT_UNAVAILABLE',
+      name: '镜像主群搬运不可用',
+      level: AlertLevel.CRITICAL,
       cooldownMinutes: 30,
       evaluate: async () => null,
     },
@@ -296,6 +296,13 @@ export async function createAlertRules(configCache: ConfigCacheService): Promise
       name: '主文件成功但备份长期未完成',
       level: AlertLevel.WARNING,
       cooldownMinutes: 60,
+      evaluate: async () => null,
+    },
+    {
+      id: 'MIRROR_NO_ENABLED_RULES',
+      name: '镜像已开启但没有启用中的规则',
+      level: AlertLevel.CRITICAL,
+      cooldownMinutes: 120,
       evaluate: async () => null,
     },
   ];
@@ -328,8 +335,9 @@ export function getAlertRuleMetadata() {
     { id: 'MIRROR_SUCCESS_RATE_LOW', name: '镜像备份成功率偏低', level: AlertLevel.WARNING },
     { id: 'MIRROR_USER_SESSION_EXPIRED', name: '镜像用户账号 session 失效', level: AlertLevel.WARNING },
     { id: 'MIRROR_TARGET_PERMISSION_LOST', name: '镜像备份群权限丢失', level: AlertLevel.CRITICAL },
-    { id: 'MIRROR_FALLBACK_RATE_HIGH', name: '镜像 Bot 降级比例偏高', level: AlertLevel.WARNING },
+    { id: 'MIRROR_MAIN_CHAT_UNAVAILABLE', name: '镜像主群搬运不可用', level: AlertLevel.CRITICAL },
     { id: 'MIRROR_QUEUE_BACKLOG', name: '镜像任务队列积压', level: AlertLevel.WARNING },
     { id: 'MIRROR_BACKUP_STALLED', name: '主文件成功但备份长期未完成', level: AlertLevel.WARNING },
+    { id: 'MIRROR_NO_ENABLED_RULES', name: '镜像已开启但没有启用中的规则', level: AlertLevel.CRITICAL },
   ];
 }

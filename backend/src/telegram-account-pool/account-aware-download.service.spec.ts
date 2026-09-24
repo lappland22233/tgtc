@@ -186,69 +186,20 @@ describe('AccountAwareDownloadService（选号 / 换号 / 非阻断懒扩散）'
     expect(ctx.client.openRealtimeStream).not.toHaveBeenCalled();
   });
 
-  it('副本不足时后台触发懒扩散，且不阻塞首个字节', async () => {
-    const never = jest.fn((_params: Record<string, unknown>) => new Promise(() => undefined));
-    const ctx = setup({ readyAccounts: ['a1'], ensureCopies: never as unknown as jest.Mock });
+  it('下载路径不产生任何扩散副作用（扩散改为提交即触发）', async () => {
+    // 历史实现：副本不足时在下载路径后台触发扩散。现在扩散只由「提交即触发」的镜像任务负责，
+    // 下载侧必须零副作用——否则「谁下载谁触发」会让扩散时机不可预测、也无法按镜像群统计。
+    const ensureCopies = jest.fn((_params: Record<string, unknown>) => new Promise(() => undefined));
+    const ctx = setup({ readyAccounts: ['a1'], ensureCopies: ensureCopies as unknown as jest.Mock });
 
     const result = await ctx.service.openStream({
       ownerType: 'fileUnique',
       ownerId: 'u1',
       expectedSize: 100,
       fileName: 'report.pdf',
-      desiredReplicas: 2,
     });
 
     expect(result?.accountId).toBe('a1');
-    expect(never).toHaveBeenCalledWith(expect.objectContaining({
-      ownerType: 'fileUnique',
-      ownerId: 'u1',
-      desiredCount: 2,
-    }));
-    // 策略 A 已移除：扩散调用只带归属与期望数，不再携带文件名/大小或逐账号上传目标
-    const call = never.mock.calls[0][0];
-    expect(call).not.toHaveProperty('fileName');
-    expect(call).not.toHaveProperty('expectedSize');
-  });
-
-  it('扩散持续失败时进入退避窗口，不再随每次下载反复触发中继', async () => {
-    const ensureCopies = jest.fn(async () => ({
-      status: 'retryable_failed',
-      created: [],
-      missing: ['a2'],
-      relayed: false,
-      failureReason: 'network',
-    }));
-    const ctx = setup({ readyAccounts: ['a1'], ensureCopies: ensureCopies as unknown as jest.Mock });
-
-    const params = {
-      ownerType: 'fileUnique' as const,
-      ownerId: 'u1',
-      expectedSize: 100,
-      fileName: 'report.pdf',
-      desiredReplicas: 2,
-    };
-
-    await ctx.service.openStream(params);
-    // 等后台扩散的 then 链完成（写入退避窗口）
-    await new Promise((resolve) => setImmediate(resolve));
-    // 第二次下载命中退避窗口 → 不再触发扩散
-    await ctx.service.openStream(params);
-
-    expect(ensureCopies).toHaveBeenCalledTimes(1);
-  });
-
-  it('副本已足够时不触发扩散', async () => {
-    const ensureCopies = jest.fn();
-    const ctx = setup({ readyAccounts: ['a1', 'a2'], ensureCopies: ensureCopies as unknown as jest.Mock });
-
-    await ctx.service.openStream({
-      ownerType: 'fileUnique',
-      ownerId: 'u1',
-      expectedSize: 100,
-      fileName: 'report.pdf',
-      desiredReplicas: 2,
-    });
-
     expect(ensureCopies).not.toHaveBeenCalled();
   });
 
@@ -307,7 +258,6 @@ describe('AccountAwareDownloadService（选号 / 换号 / 非阻断懒扩散）'
       ownerId: 'u1',
       expectedSize: 100,
       fileName: 'report.pdf',
-      desiredReplicas: 2,
     });
 
     // 选号选中 a1（确定性桩），取流用的必须是 a1 自己的副本 file_id
@@ -323,7 +273,6 @@ describe('AccountAwareDownloadService（选号 / 换号 / 非阻断懒扩散）'
       ownerId: 'u1',
       expectedSize: 100,
       fileName: 'report.pdf',
-      desiredReplicas: 2,
     });
 
     // a1 冷却中 → 换到 a2，并计入 failovers

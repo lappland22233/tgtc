@@ -41,7 +41,6 @@ import { v4 as uuidv4 } from 'uuid';
 import { AccountAwareDownloadService } from '../telegram-account-pool/account-aware-download.service';
 import { AccountAwareUploadService } from '../telegram-account-pool/account-aware-upload.service';
 import { FileCopyService } from '../telegram-account-pool/file-copy.service';
-import { ReplicaTargetResolver } from '../telegram-account-pool/replica-target.resolver';
 // 镜像触发（可选依赖：不装配时不产生任何行为变化）
 import { TelegramMirrorTriggerService } from '../telegram-mirror/telegram-mirror-trigger.service';
 
@@ -167,9 +166,6 @@ export class FileService implements OnModuleInit {
     // 镜像触发（可选依赖；关闭时零开销）
     @Optional() @Inject(TelegramMirrorTriggerService)
     private readonly mirrorTrigger: TelegramMirrorTriggerService | null = null,
-    // 统一副本目标解析（可选依赖）：让 Web 下载入口与 Bot 直链/镜像回源使用同一期望副本数
-    @Optional() @Inject(ReplicaTargetResolver)
-    private readonly replicaTargets: ReplicaTargetResolver | null = null,
   ) {
   }
 
@@ -201,9 +197,6 @@ export class FileService implements OnModuleInit {
             expectedSize,
             noCache,
             fileName: file.originalName || file.filename,
-            // 统一副本目标：与 Bot 直链下载、镜像回源使用同一解析结果（非阻断懒扩散）。
-            // 解析器缺失（单账号部署/未装配）时保持既有行为——不触发扩散。
-            desiredReplicas: await this.replicaTargets?.desiredReplicas(),
           });
           if (opened) {
             return {

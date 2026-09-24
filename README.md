@@ -61,7 +61,7 @@
 - **队列等待策略**（`FILE_DOWNLOAD_UPSTREAM_QUEUE_POLICY`，默认 `strict_fifo`）：
   - `strict_fifo`：严格 FIFO，队首权重不足时后续任务也不放行（紧急回退模式）；
   - `bounded_fit`：队首暂时放不下时，仅在队首之后的前 8 个等待项中按 FIFO 顺序放过可适配的任务；单个队首最多被绕过 8 次，或被绕过至等待超过 10 秒后进入「队首保留」，不再发放非队首任务（大文件不会被小任务饿死）。绕过次数、队首等待年龄与保留状态均可在运行快照中观测。
-- **副本目标**（`TELEGRAM_POOL_TARGET_REPLICAS`，SystemConfig 热更新，1-8，默认 2）：有效目标 = `min(配置值, 可承载副本账号数)`，无可承载账号时自动降为 1 并在运行快照中显示降级原因；Web 下载、Bot 公开下载与镜像回源共用同一解析结果。同一逻辑文件的扩散任务使用 single-flight（`ensureCopiesInflight`），幂等键为 `copy:ownerType:ownerId`——重复触发与手动重试都不会在副本群产生重复消息。**扩散只做服务端转发**：不存在跨逻辑文件的字节复制并发闸门，也不存在任何目标账号 claim 排队。
+- **副本目标**（`TELEGRAM_POOL_TARGET_REPLICAS`，SystemConfig 热更新，1-8，默认 2）：**审计口径**——有效目标 = `min(配置值, 可承载副本账号数)`，无可承载账号时自动降为 1 并在运行快照中显示降级原因；Web 下载、Bot 公开下载与镜像回源共用同一解析结果。**扩散不再由下载触发，也不再由这个目标数驱动**：文件一经入库（Web 上传提交 / 主 BOT 收到私聊文件）即对**每条启用中的镜像规则**各建一条扩散任务（幂等键 = `ruleId + 归属对象 + 源版本`），重复触发与手动重试都不会产生重复消息。**扩散只做服务端转发**：不存在跨逻辑文件的字节复制并发闸门，也不存在任何目标账号 claim 排队。
 - **内存治理**：spool/build follower **每块数据独立分配** 256KiB 读缓冲，读取后直接把该块内存的视图交给下游（不再 `Buffer.from(subarray)` 复制），从而去掉「复用缓冲 + 每块一次拷贝」的双重分配。**禁止复用已 push 的缓冲**：经 `pipeline(stream, res)` 消费时，`res.write()` 会把缓冲留在 socket 写队列里（尚未刷入内核），复用同一块内存会造成下载内容被后一块静默覆盖——`readableLength === 0` 只说明数据已离开本流的内部缓冲，**不代表下游已释放**。direct 直通流显式使用**字节模式**（`objectMode:false`），窗口（`FILE_DOWNLOAD_DIRECT_WINDOW_MB`，1-4MiB，默认 1MiB）即单请求预读内存上限，与文件总大小无关。运行快照暴露 `rssBytes`/`heapUsedBytes`/`externalBytes`/`arrayBuffersBytes`、直通流数与窗口总量、follower 缓冲分配次数——`heapUsed` 无法反映 glibc 原生堆的扩张，必须结合这些进程级读数判断。
 
 **发布顺序（手工步骤）**：
@@ -69,7 +69,7 @@
 1. 上线「配置读取修复 + 运行时指标 + direct 字节模式 + follower 回归测试」，队列保持 `strict_fifo`；
 2. 管理后台把直通窗口设为 `1 MiB`，观察 RSS 与吞吐；
 3. 在账号池页「副本扩散策略」卡确认策略状态（仅用户账号中继）、跑一次**只读能力预检**，并观察覆盖率与缺失样例，**不立即提高期望副本数**；
-4. 对少量热门文件触发一次扩散（下载即触发懒扩散，或在事件时间线对可重试轮次手动重试），确认至少两个可承载 Bot 均出现 ready 副本；
+4. 上传一个测试文件（提交即触发扩散，或在事件时间线对可重试轮次手动重试），确认至少两个可承载 Bot 均出现 ready 副本；
 5. 低峰期切换 `bounded_fit`，观察队首等待、绕过次数、小文件 503 与大文件公平等待；
 6. 稳定后扩大副本补齐范围；只有在可承载账号数与 Telegram 限流都允许时才提高期望副本数（4 不是默认值）。
 
@@ -374,20 +374,20 @@ Redis 承载 `metrics-aggregation`、`attack-detection`、`alert-evaluation`、`
 | `TELEGRAM_ACCOUNT_POOL` | - | 账号 JSON 数组：`[{id,token,chatId,weight,maxInflight,enabled,note}]`（推荐，信息最全） |
 | `TELEGRAM_BOT_TOKENS` | - | 逗号分隔 Token 列表（简化输入；存储 Chat 复用 `TELEGRAM_CHAT_ID`，**归档群不可充当存储目标**） |
 | `TELEGRAM_ARCHIVE_CHAT_ID` | - | 收到的文件由接收账号转发到该群（**仅审计留痕**；严禁作为账号存储 Chat）。**不参与副本扩散**：中继目标群只认「启用中的镜像规则」 |
-| `TELEGRAM_POOL_TARGET_REPLICAS` | `2` | 期望副本数（**范围 1-8**）；已迁移为 SystemConfig 热更新（后台「账号池 → 副本扩散策略」），本环境变量仅作为**初始值/回退**。有效目标 = `min(配置值, 可承载副本账号数)`，`1` 表示不主动扩散；Web 下载、Bot 公开下载与镜像回源共用同一解析结果 |
-| `TELEGRAM_USER_RELAY_ENABLED` | `false` | 用户账号 MTProto 中继（策略 B）——**副本扩散的唯一执行链路**；构造期读取，变更后需重启后端。不可用时按标准化原因**明确失败**（`not_configured`/`client_unavailable`/`no_account`/`source_missing`/`target_missing`/`permission_denied`/`auth_invalid`/`rate_limited`/`network`/`unknown`），缺口保留到中继恢复，**绝不退化为「从源 Bot 下载后向目标 Bot 上传」**（启动预检只告警不阻断） |
+| `TELEGRAM_POOL_TARGET_REPLICAS` | `2` | 期望副本数（**范围 1-8**）；已迁移为 SystemConfig 热更新（后台「账号池 → 副本扩散策略」），本环境变量仅作为**初始值/回退**。**审计口径**：有效目标 = `min(配置值, 可承载副本账号数)`，用于覆盖率统计与能力预检展示；扩散本身由「启用中的镜像规则数」驱动，与该值无关 |
+| `TELEGRAM_USER_RELAY_ENABLED` | `false` | 用户账号 MTProto 中继——**副本扩散的唯一执行链路**；构造期读取，变更后需重启后端。链路为「持有源消息的 Bot 转发进**主群** → 用户账号从主群转发到**各镜像群**」。不可用时按标准化原因**明确失败**（`not_configured`/`client_unavailable`/`no_account`/`source_missing`/`target_missing`/`permission_denied`/`auth_invalid`/`rate_limited`/`network`/`unknown`），缺口保留到中继恢复，**绝不退化为「从源 Bot 下载后向目标 Bot 上传」**（启动预检只告警不阻断） |
 
 **前置条件**（任一不满足时启动预检直接拒绝启用）：显式 `TELEGRAM_FILE_STREAMING_ENABLED=true`、`TELEGRAM_FILE_STREAM_BASE` 为合法 http/https 地址，且自建 Bot API 以 `--enable-file-streaming` 启动。每个账号必须有自己的 Token、自己的存储 Chat（`chatId`）与回源能力。
 
 **不可回退约束**：`file_id` 按账号隔离，**不得跨账号复用**；跨账号逻辑聚合只用 `file_unique_id`（缺失时该文件不参与扩散，只能由源账号回源）；回复必须由「收到消息的账号」发出（失败不会改用默认账号代发）；仅支持**单后端实例**（账号画像、在飞计数、复制去重均为进程内状态）。
 
-**只读诊断**：`GET /api/admin/bot-account-pool`（仅超级管理员）返回脱敏快照（账号 `tokenPreview`、在飞/带宽/健康/冷却）与计数（选号/换号/回退/中继尝试 `relayAttempts`/中继成功 `relaySucceeded`/中继失败 `relayFailed`/认领超时 `relayClaimsMissed`/流式失败/回复失败/入站登记失败），用于区分「服务健康」与「账号池已启用但未生效」；`/api/health` 形状保持不变。
+**只读诊断**：`GET /api/admin/bot-account-pool`（仅超级管理员）返回脱敏快照（账号 `tokenPreview`、在飞/带宽/健康/冷却）与计数（选号/换号/回退/主群搬运尝试 `mainChatPlantAttempts`/主群搬运失败 `mainChatPlantFailures`/主群搬运接管 `mainChatPlantTakeovers`/中继尝试 `relayAttempts`/中继成功 `relaySucceeded`/中继失败 `relayFailed`/认领超时 `relayClaimsMissed`/流式失败/回复失败/入站登记失败），用于区分「服务健康」与「账号池已启用但未生效」；`/api/health` 形状保持不变。
 
 **回退**：把 `TELEGRAM_ACCOUNT_POOL_ENABLED` 置回 `false` 即可止血（功能降级，不是数据库回滚）；副本表与 `sourceAccountId` 均为 expand 式增量结构，回退程序版本无需回退数据库。
 
 ### 账号池后台管理 + 文件镜像备份（默认关闭；v1.5.3）
 
-> 超级管理员在后台「Telegram 账号池」（`/admin/telegram-accounts`）管理 Bot 与用户账号，并配置一条镜像备份规则，把进入系统的新文件同步到独立备份群。**三层开关**：全局账号池、镜像功能、单账号与单规则；**关闭只阻止新任务**，不中断已开始的传输，也不删除已备份内容。
+> 超级管理员在后台「Telegram 账号池」（`/admin/telegram-accounts`）管理 Bot 与用户账号，并配置**多条镜像规则**：所有启用规则共用同一个**主群**（`sourceChatId`，硬约束：启用规则的 `sourceChatId` 必须一致），每条规则对应一个**镜像群**（`targetChatId`），进入系统的新文件同步到各镜像群。**三层开关**：全局账号池、镜像功能、单账号与单规则；**关闭只阻止新任务**，不中断已开始的传输，也不删除已备份内容。
 
 | 变量 | 默认值 | 说明 |
 |---|---:|---|
@@ -407,54 +407,56 @@ Redis 承载 `metrics-aggregation`、`attack-detection`、`alert-evaluation`、`
 - `PUT /api/admin/telegram-accounts/replication-target`：期望副本数热更新（1-8，写入 SystemConfig 并审计；有效目标按可承载账号数收敛）；
 - `GET /api/admin/telegram-accounts/replication-attempts`：扩散轮次列表（可按 `status`/`failureReason`/`ownerType`/`ownerId` 与时间窗筛选；返回 `truncated` 与观测降级标记）；
 - `GET /api/admin/telegram-accounts/replication-attempts/:id`：单轮详情（生命周期时间线与「为什么失败 / 影响 / 建议操作 / 是否可重试」四段式，只读）；
-- `POST /api/admin/telegram-accounts/replication-attempts/:id/retry`：**仅策略 B** 的手动重试（新建轮次并记录 `retriedFromId`/`operatorUserId`；幂等键不变，不在副本群产生重复消息；不可重试状态返回 400 并说明应先修正什么）；
+- `POST /api/admin/telegram-accounts/replication-attempts/:id/retry`：手动重试（**不新建执行路径**：把该文件在**该轮次的目标镜像群**上的扩散重新交给镜像任务队列——终态任务重置为排队、缺失任务按当前源事实补建，响应返回 `requeued`/`created`/`ruleIds`；镜像模块未装配或状态不可重试时返回 400 并说明应先修正什么）；
 - `POST /api/admin/telegram-accounts/relay-preflight`：中继能力预检（默认 `dryRun=true` 只做只读检查、**不产生任何 Telegram 消息**；显式 `dryRun=false` 才向目标群发送一条受控测试消息，响应中的 `sentTestMessage` 会如实声明）；
 - `POST /api/admin/telegram-accounts/:id/auth/start|verify|cancel`：用户账号交互式授权（验证码与 2FA 密码**不入库不入日志**）；
-- `GET/PUT /api/admin/telegram-mirror`、`PUT .../feature`、`PUT .../rule/enabled`、`POST .../test`：规则配置与权限探测；
+- `GET/PUT /api/admin/telegram-mirror`、`PUT .../feature`、`POST/PUT/DELETE .../rules[/:id]`、`PUT .../rules/:id/enabled`、`POST .../rules/:id/test`：**多规则**配置（每条规则一个镜像群）与权限探测；
 - `GET /api/admin/telegram-mirror/tasks`、`POST .../tasks/:id/retry|cancel`：任务列表与人工干预；
 - `POST/GET /api/admin/telegram-mirror/backfill[/pause|/resume|/cancel]`：历史文件补偿（按批限速、可暂停取消、`dry-run` 只统计）；
 - 兼容端点 `GET /api/admin/bot-account-pool` 保持不变（只读脱敏诊断）。
 
-**两条镜像路径的事实边界（不可含糊）**：
+**扩散链路的事实边界（不可含糊）**：
 
-1. **Bot 路径 = 目标账号二次上传**：备份群消息由目标 Bot 自己产生，各自持有独立 `file_id`（文件字节上传两次）；不允许把 A 账号的 `file_id` 交给 B 账号；
-2. **用户账号路径 = MTProto 无源复制**（`copyMessages`）：文件字节只上传一次，但**仍需源 `chat_id + message_id` 可访问**，且用户账号必须同时是源群可读成员与备份群可写成员；
-3. 主存储群与备份群**必须分离**，备份群不得是任一账号的主存储 Chat；启用规则前必须通过一次真实权限测试；
-4. 任务幂等键为 `ruleId + 归属对象 + 源版本`：重复事件、重试与重启都收敛为一次有效备份；覆盖上传递增 `uploadVersion` 会让旧任务自动作废；
-5. `429` 尊重 `retry_after` 退避，权限/源消息失效/凭据失效进入 `blocked` 并告警，**不会无限重试**；目标上传成功而状态落库失败时保存回执，重试凭回执确认（不重复上传）。
+1. **唯一链路 = 主群 → 用户账号中继 → 镜像群**：持有源消息的 Bot 先用 Bot API `forwardMessage` 把消息搬进**主群**（服务端复制、零字节），已授权的用户账号再从主群 `copyMessage` 到**每个启用规则的镜像群**（服务端复制、零字节），镜像群内各 Bot 各自收到消息并登记**自己账号的** `file_id` 副本；
+2. **不存在字节二次上传**：原「Bot 重新上传到备份群」（目标账号二次上传）路径已整体删除，也没有任何降级分支会重新上传字节；`file_id` 按账号隔离，不允许把 A 账号的 `file_id` 交给 B 账号；
+3. **主群与镜像群必须分离**，镜像群不得是任一账号的主存储 Chat；所有启用规则的 `sourceChatId` 必须一致（否则一份文件会有多个中转落点）；启用规则前必须通过一次真实权限测试；
+4. **主群锚点必须先落库**（`telegram_main_chat_anchors`，唯一键 `ownerType + ownerId`，跨规则共享一个落点）：`forwardMessage` 没有幂等键，因此顺序固定为「**先写 `status='pending'` 预留 → 再转发 → 成功后收口为 `ready`**」，重试不重复搬运、同一文件不会在主群留下 N 条重复消息；搬运只允许由**持有该消息的那个账号**执行；`pending` 预留带 **5 分钟租约**——租约内重复触发按**可重试**等待（`main_chat_anchor_pending`，绝不冒险再搬一次），超租约视为「上次进程在落库前中断」的残留，由下一次重试**接管重搬**并计数 `mainChatPlantTakeovers`（此时主群可能已多出一条消息，需人工核对）；`failed` 行（上次转发未成功、无副作用残留）可立即接管；锚点指向旧主群（主群配置变更）时同样重搬并计入该计数；**接管用「删旧行 + 重新插入」的唯一键 CAS 完成**——同一时刻只有一个执行者持有预留，并发接管者会撞唯一键并按可重试收口，绝不双搬（不依赖 `affected` 行数，也不依赖日期列精度）；租约必须**短于**任务重试预算（`MIRROR_MAX_ATTEMPTS` 次退避之和，有单元测试断言守护），否则任务会在租约内耗尽重试、锚点长期停在 `pending`；租约内报错会带 `retryAfterMs = 租约剩余 + 15 秒`，把重试**排到租约到期之后**（否则最后一次可重试的尝试仍会撞上未到期的预留）；失败收口写入带 `status != 'ready'` 条件——租约到期后被接管并搬运成功的锚点，绝不会被更早那次超时失败改写成 `failed`（否则下一次重试会「立即接管重搬」再留一条重复消息）；
+5. 任务幂等键为 `ruleId + 归属对象 + 源版本`：重复事件、重试与重启都收敛为一次有效扩散；覆盖上传递增 `uploadVersion` 会让旧任务自动作废；
+6. `429` 尊重 `retry_after` 退避，权限/源消息失效/凭据失效/**主群缺失或与镜像群冲突**/**无可用用户账号**进入 `blocked` 并告警，**不会无限重试**；转发成功而状态落库失败时保存回执，重试凭回执确认（不重复转发）。
 
-**只支持单后端实例**：账号画像、镜像任务对账与补偿进度均为进程内状态；`DEPLOYMENT_MODE=multi` 会被启动预检拒绝。
+**只支持单后端实例**：账号画像、镜像任务对账与补偿进度均为进程内状态；`DEPLOYMENT_MODE=multi` 会被启动预检拒绝。**升级必须原子切换，禁止新旧两个版本并行写锚点表**：旧版本的接管是「原地 `update`」，会覆盖新版执行者刚写入的 `pending` 预留，两边各自搬运一次（`scripts/release/upgrade.sh` 已是原子切换，勿手工并行拉起旧版本）。
 
 **回退**：先停用镜像规则 → 再停用异常账号 → 最后关闭账号池/镜像总开关；已写入备份群的消息不会自动删除；新增表与可空列均为 expand 式增量，回退程序版本无需回退数据库。
 
 ### 副本扩散与下载负载均衡（v1.5.4）
 
-> 目标：**一次转发，多 Bot 共享副本，下载按负载分流**。Web 上传或 Bot 收到文件后，由**用户账号**把源消息服务端转发进「副本可见群」；群内每个 Bot 各自收到该消息、登记**自己账号的** `file_id` 副本；这些副本经桥接写入站内文件的副本记录后，下载回源即可在多个 Bot 之间按权重 × 带宽 × 健康 × 容量选号。
+> 目标：**一次转发，多 Bot 共享副本，下载按负载分流**。Web 上传或 Bot 收到文件后，先把源消息搬进**主群**（Bot API 服务端转发，零字节），再由**用户账号**从主群服务端转发到**每个启用规则的镜像群**；镜像群内每个 Bot 各自收到该消息、登记**自己账号的** `file_id` 副本；这些副本经桥接写入站内文件的副本记录后，下载回源即可在多个 Bot 之间按权重 × 带宽 × 健康 × 容量选号。**入库即触发扩散**（不再等下载时才补副本），因此「收到的每个文件」都会建任务，而不是「下载过的文件」。
 
 **为什么必须用用户账号**：Telegram 规定 bot 永远看不到其它 bot 发送的消息（与隐私模式、管理员身份无关）。因此「接收 Bot 转发到群」不能让其它 Bot 获得该文件；只有**用户账号**发出的消息才能被全群 Bot 看到。详见 `TELEGRAM_USER_RELAY_ENABLED` 的配置说明。
 
 | 环节 | 实现位置 | 关键契约 |
 |---|---|---|
-| 中继 | `telegram-account-pool/user-relay.service.ts`（**唯一执行链路**）、`telegram-mirror/telegram-user-copy.service.ts` | 服务端转发、**零字节重传**；幂等键 = 逻辑操作 + 执行账号（派生确定性 `random_id`，重试不产生重复消息）；失败按标准化原因返回，**不存在任何字节二次传输的降级路径** |
+| 主群搬运 | `telegram-mirror/telegram-main-chat-anchor.service.ts` | 持有源消息的 Bot 用 `forwardMessage` 把消息搬进主群并持久化锚点（`telegram_main_chat_anchors`，唯一键 `ownerType + ownerId`）；**先写 `pending` 预留再执行转发**（租约 5 分钟，超租约接管重搬并计数 `mainChatPlantTakeovers`），重试不重复搬运；失败分类为阻塞并给出可执行提示 |
+| 中继 | `telegram-mirror/telegram-user-copy.service.ts`（**唯一执行链路**）、`telegram-account-pool/user-relay.service.ts`（**只做**能力判定与目标群解析，不执行转发） | 从**主群锚点**服务端转发到 `rule.targetChatId`、**零字节重传**；幂等键 = 逻辑操作 + 执行账号 + **目标群 + 锚点**（派生确定性 `random_id`，重试不产生重复消息）；失败按标准化原因返回，**不存在任何字节二次传输的降级路径** |
 | 副本认领 | `telegram-bot/telegram-bot-dispatch.service.ts` | 各 Bot 长轮询各自收到群消息后登记本账号副本；**缺失 `file_unique_id` 时拒绝登记**（不退化为 `file_id`）；命中目标群的消息标记来源 `relayed` |
 | 桥接 | `telegram-account-pool/file-copy.service.ts` | 按 `file_unique_id` 反查 `files.telegramFileUniqueId`，额外写 `ownerType='file'` 副本；`file_id` 严格归属产生它的账号，**禁止跨账号借用** |
 | 轮次状态 | `telegram-account-pool/replication-attempt.service.ts` | 每轮扩散一行 `telegram_replication_attempts`：前置阻塞 → 中继 → 有界认领等待 → 终态（`succeeded`/`partial_success`/`claim_timeout`/`retryable_failed`/`blocked_*`），退避重试与保留期清理都在这里 |
-| 选号回源 | `telegram-account-pool/account-aware-download.service.ts` | 加权选号 + 失败换号（最多 3 次）+ 副本不足时后台懒扩散（不阻塞首字节） |
+| 选号回源 | `telegram-account-pool/account-aware-download.service.ts` | 加权选号 + 失败换号（最多 3 次）；**下载路径不产生任何扩散副作用**（扩散在入库时即已触发） |
 
 **扩散完成的口径**（不能只看「转发成功」）：中继成功只是中间态；认领窗口内新增 ≥1 个 ready 副本为 `partial_success`，达到有效目标数为 `succeeded`，窗口内零新增记为 `claim_timeout`（说明群里没人拿到 `file_id`）。
 
 **部署前置条件**（缺任一项都不会损坏数据，但副本无法扩散，下载仍集中在单账号）：
 
 1. `TELEGRAM_BOT_UPDATES_ENABLED=true`，且账号池已启用、存在 ≥2 个 Bot 账号；
-2. **副本可见群内每个 Bot 都必须关闭隐私模式（BotFather `/setprivacy` → Disable）或设为管理员**——否则 Bot 收不到用户账号发出的普通群消息；
-3. 至少一个已授权的 `user` 账号，且**同时是源群与副本可见群成员**、对副本可见群有发送权限；
-4. `TELEGRAM_USER_RELAY_ENABLED=true`（构造期读取，需重启后端）；中继目标群**只认「启用中的镜像规则 `targetChatId`」**——没有启用规则时中继返回 `target_missing`（映射为 `blocked_target_chat`），`TELEGRAM_ARCHIVE_CHAT_ID` 仅保留其审计转发用途。
+2. **各镜像群内每个 Bot 都必须关闭隐私模式（BotFather `/setprivacy` → Disable）或设为管理员**——否则 Bot 收不到用户账号发出的普通群消息；
+3. 至少一个已授权的 `user` 账号，且**同时是主群与各镜像群成员**、对各镜像群有发送权限（用户账号读不到 Bot 私聊，也未必是各账号存储 Chat 的成员，所以源消息必须先落到主群）；
+4. `TELEGRAM_USER_RELAY_ENABLED=true`（构造期读取，需重启后端）；中继目标群**只认「启用中的镜像规则 `targetChatId`」**——没有启用规则时中继返回 `target_missing`（映射为 `blocked_target_chat`）；**主群 = 启用规则的 `sourceChatId`**（复用现有配置，不新增开关；所有启用规则必须一致，否则判定为阻塞）；`TELEGRAM_ARCHIVE_CHAT_ID` 仅保留其审计转发用途。
 
-**Bot 私聊来源（Bot 收到用户私聊文件）**：用户账号读不到「Bot 与用户的私聊」，因此这类来源会先由**接收该消息的 Bot** 用 Bot API `forwardMessage`（服务端复制、零字节）搬到中转群（规则源群，未配置时回退 `TELEGRAM_ARCHIVE_CHAT_ID`），再把中转消息作为中继源锚点；锚点写回任务行，重试不会重复搬运。中转群缺失或与备份群相同时任务进入 `blocked` 并给出可执行提示。
+**Bot 私聊来源（主 BOT 收到用户私聊文件）**：用户账号读不到「Bot 与用户的私聊」，因此入站时会先由**接收该消息的 Bot** 用 Bot API `forwardMessage`（服务端复制、零字节）把消息搬进**主群**，并把「主群 chat_id + message_id」作为**主群锚点**持久化（`telegram_main_chat_anchors`，唯一键 `ownerType + ownerId`，跨规则共享一个落点）——**先写 `pending` 预留再转发**（租约 5 分钟；租约内按可重试等待，超租约接管重搬并计数 `mainChatPlantTakeovers`），重试不会重复搬运、同一文件不会在主群留下 N 条重复消息。**Web 上传来源同理**：锚点若在各账号存储 Chat（userbot 未必是成员），同样先搬进主群，保证「唯一源锚点 = 主群」；锚点已在主群则直接使用，不做多余转发。主群缺失、与镜像群相同或搬运账号不是主群成员时任务进入 `blocked` 并给出可执行提示，**不回退归档群，更不回退为字节上传**。
 
-**可见性与放大抑制**：来自备份群的消息只登记副本、**不再向归档群转发**（否则群内 N 个 Bot 会各转发一次，消息量按 Bot 数放大）。
+**可见性与放大抑制**：来自**主群或镜像群**的消息只登记副本、**不再向归档群转发**（否则群内 N 个 Bot 会各转发一次，消息量按 Bot 数放大）。
 
-**排障信号**：`GET /api/admin/bot-account-pool` 的计数提供 `relayAttempts` / `relaySucceeded` / `relayFailed` / `relayClaimsMissed`（三者一起看：只有尝试数增长而成功数为 0 才说明中继真在失败，而不是「本轮没有需要扩散的文件」）与 `inboundBridgeMisses`（群消息与站内文件无关，属正常）。告警规则：`RELAY_NOT_READY`（中继已启用但不可用，CRITICAL）、`RELAY_FAILURE_BURST`（失败激增）、`RELAY_CLAIM_TIMEOUT_BURST`（中继成功但无人认领）、`LARGE_FILE_COVERAGE_DEGRADED`（≥4GiB 分层出现缺口）、`REPLICATION_OBSERVABILITY_GAP`（轮次写入/读取失败，观测数据不完整）。
+**排障信号**：`GET /api/admin/bot-account-pool` 的计数提供 `relayAttempts` / `relaySucceeded` / `relayFailed` / `relayClaimsMissed`（三者一起看：只有尝试数增长而成功数为 0 才说明中继真在失败，而不是「本轮没有需要扩散的文件」）与 `inboundBridgeMisses`（群消息与站内文件无关，属正常）。告警规则：`RELAY_NOT_READY`（中继已启用但不可用，CRITICAL）、`RELAY_FAILURE_BURST`（失败激增）、`RELAY_CLAIM_TIMEOUT_BURST`（中继成功但无人认领）、`LARGE_FILE_COVERAGE_DEGRADED`（≥4GiB 分层出现缺口）、`REPLICATION_OBSERVABILITY_GAP`（轮次写入/读取失败，观测数据不完整）、`MIRROR_NO_ENABLED_RULES`（镜像功能已开启但没有任何启用中的规则，CRITICAL——这是唯一「新文件不会有任何备份且不产生任务记录」的静默状态）。
 
 **运维排障手册（副本扩散）**：
 
@@ -465,7 +467,11 @@ Redis 承载 `metrics-aggregation`、`attack-detection`、`alert-evaluation`、`
 | 中继成功但无人认领（`claim_timeout` / `relayClaimsMissed` 增长） | 目标群内每个 Bot 的成员状态与隐私模式 | 按顺序排查：① Bot 是否都在群内；② 是否关闭隐私模式或设为管理员；③ `TELEGRAM_BOT_UPDATES_ENABLED=true` 且轮询正常；④ 群消息的 `file_unique_id` 能否对上站内文件（对不上只计入 `inboundBridgeMisses`，属正常） |
 | 中继报 `target_missing`（策略卡「未解析到目标群」） | 镜像规则是否启用且配置了 `targetChatId` | 启用镜像规则；`TELEGRAM_ARCHIVE_CHAT_ID` **不再**作为扩散目标群 |
 | 大文件（≥4GiB）覆盖率退化 | 「大文件覆盖率」卡的 ≥4GiB 分层与缺失样例 | 先确认中继正常，再补齐**可调度**账号（已登记但冷却中/未配置存储 Chat 的账号不参与分流）。本期**不做历史自动补偿**，只支持对单个轮次手动重试 |
-| 手动重试的边界 | 事件时间线的「是否可重试」 | 只有 `retryable_failed` / `claim_timeout` 可重试；重试**新建一轮**并记录操作人，幂等键不变（不在副本群产生重复消息）；`blocked_*` 必须先修配置 |
+| 主群缺失 / 主群与镜像群冲突 | 任务失败原因与策略卡提示（`blocked_*`） | 在镜像规则里把 `sourceChatId` 配成同一个独立主群（不得等于任一镜像群、不得是账号存储 Chat），保存后重试任务 |
+| 无可用用户账号 / 搬运账号不是主群成员 | 用户账号页签的授权状态与主群成员身份 | 先完成交互式授权，再把该账号加入主群（可读）与各镜像群（可写）；搬运只能由**持有该消息的账号**执行，不能跨账号代搬 |
+| 手动重试的边界 | 事件时间线的「是否可重试」 | 只有 `retryable_failed` / `claim_timeout` 可重试；重试**不新建执行路径**——把该文件在**该轮次的目标镜像群**上的扩散重新交给镜像任务队列（重置终态任务、按当前源事实补建缺失任务），响应返回 `requeued`/`created`/`ruleIds`；`blocked_*` 必须先修配置。轮次记录缺目标群（历史数据）时**明确拒绝**重试（不按「全部启用规则」误重排其它镜像群），请改用「镜像任务列表」里按镜像群的重试入口 |
+| 任务报 `main_chat_anchor_pending`（主群锚点正在搬运中） | 主群锚点表的 `status`/`plantedAt`（预留时间）与后端日志 | 属**可重试**保护：租约（5 分钟）内不重复搬运，等租约到期后重试会自动接管；若日志出现「接管重搬」告警，请人工核对主群是否多出一条消息（计数 `mainChatPlantTakeovers` 长期 > 0 说明存在崩溃/落库失败窗口）。该计数在**主群配置变更后重搬**时也会增加（日志为「主群锚点不可复用」），属预期的一次性重搬，不是故障信号 |
+| 后台「全绿」但新文件没有备份 | `MIRROR_NO_ENABLED_RULES` 告警与镜像规则列表 | 镜像功能已开启但没有**启用中**的规则：触发层直接跳过（不建单、无 blocked 记录）。启用至少一条镜像规则即可恢复 |
 | 后台显示「观测数据不完整」 | `REPLICATION_OBSERVABILITY_GAP` 告警与后端日志 | 轮次写入失败（磁盘 / 锁等待 / 权限）时指标与事件不完整——**不得**把「看不到失败」当成「没有失败」；先修写入再看扩散健康度 |
 | 需要人工验证目标群可写 | 策略卡「探测目标群可写」 | 默认只读预检**不产生消息**；只有显式确认后才发送一条受控测试消息（会真实出现在群里，可忽略） |
 

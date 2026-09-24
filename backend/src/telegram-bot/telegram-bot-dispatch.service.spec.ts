@@ -358,8 +358,13 @@ describe('TelegramBotDispatchService（多 Bot 身份链路）', () => {
     // 命中站内文件 → 不计入「未命中」
     expect(pool.counters.inboundBridgeMisses).toBe(0);
     // 认领回写：fileUnique 与命中的 file 两个命名空间都要写，否则轮次里的认领对不上
-    expect(ctx.attempts!.recordClaim).toHaveBeenCalledWith('fileUnique', 'UNIQ-1', '1234567');
-    expect(ctx.attempts!.recordClaim).toHaveBeenCalledWith('file', 'file-1', '1234567');
+    // 且必须带上消息所在群：多镜像群下同一文件有多条活跃轮次，不带目标群会串轮次
+    expect(ctx.attempts!.recordClaim).toHaveBeenCalledWith('fileUnique', 'UNIQ-1', '1234567', {
+      targetChatId: '-100777',
+    });
+    expect(ctx.attempts!.recordClaim).toHaveBeenCalledWith('file', 'file-1', '1234567', {
+      targetChatId: '-100777',
+    });
   });
 
   it('来自中继目标群的认领标注 relayed（副本扩散生效的唯一证据）', async () => {
@@ -426,7 +431,10 @@ describe('TelegramBotDispatchService（多 Bot 身份链路）', () => {
     );
 
     expect(copies.upsertReady).toHaveBeenCalledWith(expect.objectContaining({ source: 'inbound' }));
-    expect(ctx.attempts!.recordClaim).toHaveBeenCalledWith('fileUnique', 'UNIQ-1', '1234567');
+    // 未命中站内文件也要回写认领（fileUnique 行本身已产生副本），且同样带目标群
+    expect(ctx.attempts!.recordClaim).toHaveBeenCalledWith('fileUnique', 'UNIQ-1', '1234567', {
+      targetChatId: '-100777',
+    });
   });
 
   it('轮次服务未装配时认领回写静默跳过（观测缺失不得影响入站主链路）', async () => {

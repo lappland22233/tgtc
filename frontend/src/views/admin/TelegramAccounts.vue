@@ -63,9 +63,9 @@
 
       <div class="stat-card">
         <h3>镜像规则</h3>
-        <div class="value">{{ ruleStateText }}</div>
-        <div class="stat-sub">权限测试：{{ testStatusText(mirror?.test?.status ?? mirror?.rule?.lastTestStatus) }}</div>
-        <div class="stat-sub">源群 {{ mirror?.rule?.sourceChatId || '—' }} → 备份群 {{ mirror?.rule?.targetChatId || '—' }}</div>
+        <div class="value">{{ enabledRuleCount }} / {{ mirrorRuleCount }}</div>
+        <div class="stat-sub">启用 {{ enabledRuleCount }} 条 · 共 {{ mirrorRuleCount }} 条（每条启用规则一个镜像群）</div>
+        <div class="stat-sub">当前主群：{{ mirror?.mainChatId || '未配置' }}</div>
       </div>
 
       <div class="stat-card">
@@ -127,9 +127,16 @@
         <div class="strategy-head">
           <t-tag theme="primary" variant="light">当前策略：{{ replication.strategy.label }}</t-tag>
           <span class="strategy-claim">
-            策略 A 已移除：中继失败不会二次下载/上传，缺口会持续到中继恢复。
+            链路：主群 → userbot 中继 → 镜像群 → Bot 认领。策略 A（Bot 重新上传到备份群）已移除：
+            字节二次传输恒为 0，中继失败不会降级为下载/上传，缺口会持续到中继恢复。
           </span>
         </div>
+
+        <p class="strategy-audit-note">
+          扩散由「启用中的镜像规则数」驱动（每条启用规则 = 一个镜像群、各自独立任务/重试/状态）；
+          <code class="cell-mono">TELEGRAM_POOL_TARGET_REPLICAS</code>
+          仅为<strong>审计口径</strong>（用于覆盖率与目标解析展示），<strong>不再作为触发扩散的依据</strong>。
+        </p>
 
         <dl class="strategy-kv">
           <div class="kv-item">
@@ -165,6 +172,13 @@
             <dd>
               <span class="cell-strong">{{ relayCapability.enabledAuthorizedUserCount }}</span>
               <span class="kv-note">中继选号候选池</span>
+            </dd>
+          </div>
+          <div class="kv-item">
+            <dt>用户账号中继成功</dt>
+            <dd>
+              <span class="cell-strong">{{ mirror?.metrics.userCopyCount ?? 0 }}</span>
+              <span class="kv-note">服务端中继计数（进程内，单实例）；字节二次传输恒为 0</span>
             </dd>
           </div>
           <div class="kv-item">
@@ -234,7 +248,7 @@
 
       <div v-if="replication" class="replica-grid">
         <div class="stat-card">
-          <h3>期望副本数</h3>
+          <h3>期望副本数（审计口径）</h3>
           <div class="replica-input">
             <t-input-number
               v-model="replicationForm.desiredReplicas"
@@ -243,6 +257,9 @@
               :step="1"
               size="small"
             />
+          </div>
+          <div class="stat-sub">
+            仅用于覆盖率审计，不再驱动扩散：扩散目标由启用中的镜像规则数决定
           </div>
           <div class="stat-sub">
             来源：{{ targetSourceText(replication.target.configuredSource) }} · 可承载账号 {{ replication.target.eligibleCount }} 个
@@ -334,7 +351,8 @@
             <div v-else class="stat-sub">窗口内没有中继失败记录</div>
 
             <p class="metric-contract">
-              二次传输字节数恒为 0：策略 B 只做用户账号服务端转发，不发生文件字节下载/上传。
+              二次传输字节数恒为 0：扩散只做用户账号服务端中继，不发生文件字节下载/上传
+              （策略 A 的「Bot 重新上传到备份群」路径已彻底移除）。
             </p>
           </template>
           <div v-else class="stat-sub">指标数据不可用（观测未装配）</div>
@@ -440,6 +458,28 @@
             只有「可重试失败」「认领超时」提供重试；重试只走用户账号中继，不提供策略选择。
           </span>
         </div>
+
+        <!-- 重试结果：如实展示后端 requeued/created/ruleIds，0 重排明确写「无需重试」 -->
+        <t-alert
+          v-if="retryResult"
+          :theme="retryResult.requeued + retryResult.created > 0 ? 'info' : 'warning'"
+          :title="retryResult.requeued + retryResult.created > 0 ? '重试已受理' : '无需重试'"
+          class="retry-result"
+        >
+          <p class="retry-result-message">{{ retryResult.message }}</p>
+          <ul class="retry-result-metrics">
+            <li>重排任务 {{ retryResult.requeued }} 条</li>
+            <li>补建任务 {{ retryResult.created }} 条</li>
+            <li>影响镜像规则 {{ retryResult.ruleIds.length }} 条</li>
+          </ul>
+          <p v-if="retryResult.requeued + retryResult.created === 0" class="retry-result-hint">
+            该文件在当前镜像群上已有在途任务，本次未产生任何新的排队或补建：请直接观察下方任务状态，不要重复点击。
+          </p>
+          <p v-else-if="retryResult.ruleIds.length > 0" class="retry-result-hint">
+            影响规则：{{ retryResult.ruleIds.join('、') }}
+          </p>
+          <t-button variant="text" size="small" @click="retryResult = null">关闭</t-button>
+        </t-alert>
 
         <div v-if="recentAttempts.length === 0" class="empty-hint">窗口内没有扩散轮次记录</div>
 
@@ -611,7 +651,7 @@
               </dl>
 
               <p v-if="!account.runtime.storageConfigured" class="env-account-warn">
-                未配置存储 Chat：仅参与下载回源，不会被选为上传/镜像目标。
+                未配置存储 Chat：仅参与下载回源，不会被选为文件存储或镜像目标。
               </p>
             </div>
 
@@ -762,46 +802,107 @@
       </div>
     </section>
 
-    <!-- 镜像配置卡 -->
-    <section class="card" aria-label="镜像配置">
+    <!-- 镜像规则卡：多规则列表 + 新建/编辑 -->
+    <section class="card" aria-label="镜像规则">
       <div class="section-header">
-        <h3>镜像配置</h3>
-        <t-switch
-          :value="mirror?.rule?.enabled ?? false"
-          :disabled="!canEnableRule"
-          @change="(v: boolean) => toggleRuleEnabled(Boolean(v))"
-        />
-      </div>
-      <p v-if="!canEnableRule" class="section-hint">启用规则前请先通过一次「测试权限」。</p>
-
-      <div class="mirror-form">
-        <label class="field">
-          <span class="field-label">源群（主存储群）</span>
-          <t-input v-model="mirrorForm.sourceChatId" placeholder="例如 -1001234567890" autocomplete="off" name="mirror-source" />
-        </label>
-        <label class="field">
-          <span class="field-label">备份群</span>
-          <t-input v-model="mirrorForm.targetChatId" placeholder="例如 -1000987654321" autocomplete="off" name="mirror-target" />
-        </label>
-        <div class="field field-actions">
-          <t-button variant="outline" :loading="testing" @click="runMirrorTest">测试权限</t-button>
-          <t-button theme="primary" :loading="savingMirror" @click="saveMirrorRule">保存配置</t-button>
+        <h3>镜像规则</h3>
+        <div class="section-actions">
+          <span class="section-hint-inline">
+            当前主群：{{ mirror?.mainChatId || '未配置' }}
+          </span>
+          <t-button theme="primary" size="small" @click="openCreateRule">新建规则</t-button>
         </div>
       </div>
 
-      <div class="mirror-mode">
-        <span class="field-label">镜像模式</span>
-        <t-radio-group v-model="mirrorForm.mode" variant="default-filled">
-          <t-radio-button value="auto">自动</t-radio-button>
-          <t-radio-button value="bot_upload">仅 Bot 上传</t-radio-button>
-          <t-radio-button value="user_copy">仅用户复制</t-radio-button>
-        </t-radio-group>
-      </div>
+      <p class="section-hint">
+        扩散链路：持有源消息的 Bot 先转发到「主群」，再由用户账号从主群服务端转发到各「镜像群」，
+        最后由镜像群内的各存储 Bot 认领自己的副本。所有**启用中**的规则必须共用同一个主群；
+        每条启用规则对应一个独立的镜像群，各自独立任务、重试与状态。全程零字节重传，不存在 Bot 重新上传。
+      </p>
 
-      <div class="mirror-events">
-        <span class="field-label">事件范围</span>
-        <t-checkbox v-model="mirrorForm.includeWebUploads">Web 上传</t-checkbox>
-        <t-checkbox v-model="mirrorForm.includeBotInboundFiles">Bot 入站</t-checkbox>
+      <t-alert
+        v-if="mirror && mirror.rules.length > 1 && !mirror.mainChatId"
+        theme="warning"
+        message="启用中的多条规则主群不一致：所有启用规则必须共用同一个主群（源群），否则同一文件会被搬运多次。"
+      />
+
+      <div v-if="mirror && mirror.rules.length > 0" class="mirror-rule-list">
+        <div v-for="rule in mirror.rules" :key="rule.id" class="mirror-rule-row">
+          <div class="mirror-rule-head">
+            <span class="cell-strong">{{ rule.name || '未命名规则' }}</span>
+            <t-tag :theme="rule.enabled ? 'success' : 'default'" variant="light">
+              {{ rule.enabled ? '已启用' : '未启用' }}
+            </t-tag>
+            <t-tag :theme="ruleTestTheme(rule.lastTestStatus)" variant="light">
+              权限测试：{{ testStatusText(rule.lastTestStatus) }}
+            </t-tag>
+          </div>
+          <div class="mirror-rule-meta">
+            主群（源群，副本扩散中转落点）：<span class="cell-mono">{{ rule.sourceChatId || '—' }}</span>
+          </div>
+          <div class="mirror-rule-meta">
+            镜像群（备份群）：<span class="cell-mono">{{ rule.targetChatId || '—' }}</span>
+          </div>
+          <div class="mirror-rule-meta">
+            优先账号：{{ rule.preferredAccountId || '自动选择' }} · 事件范围：{{ ruleEventScopeText(rule) }}
+          </div>
+          <div v-if="rule.lastTestSummary" class="mirror-rule-meta cell-muted">
+            测试摘要：{{ rule.lastTestSummary }}
+          </div>
+          <div class="mirror-rule-actions">
+            <div class="mirror-rule-switch">
+              <span class="field-label">启用该镜像群</span>
+              <t-switch
+                :value="rule.enabled"
+                :loading="togglingRuleId === rule.id"
+                :aria-label="`启用镜像规则 ${rule.name || rule.targetChatId}`"
+                @change="(v: boolean) => toggleRuleEnabled(rule, Boolean(v))"
+              />
+            </div>
+            <div class="mobile-card-actions">
+              <t-button variant="text" size="small" :loading="testingRuleId === rule.id" @click="runMirrorTest(rule)">
+                测试权限
+              </t-button>
+              <t-button variant="text" size="small" @click="openEditRule(rule)">编辑</t-button>
+              <t-button variant="text" size="small" theme="danger" @click="confirmDeleteRule(rule)">删除</t-button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div v-else class="empty-hint">尚未配置镜像规则</div>
+
+      <div class="mirror-form">
+        <div class="mirror-form-head">
+          <span class="field-label">{{ mirrorForm.id ? '编辑规则' : '新建规则' }}</span>
+          <span class="section-hint-inline">主群/镜像群变更后需重新执行权限测试才能启用</span>
+        </div>
+        <label class="field">
+          <span class="field-label">规则名称</span>
+          <t-input v-model="mirrorForm.name" placeholder="便于识别的名称" autocomplete="off" name="mirror-name" />
+        </label>
+        <label class="field">
+          <span class="field-label">主群（源群，副本扩散中转落点）</span>
+          <t-input v-model="mirrorForm.sourceChatId" placeholder="例如 -1001234567890" autocomplete="off" name="mirror-source" />
+        </label>
+        <label class="field">
+          <span class="field-label">镜像群（备份群）</span>
+          <t-input v-model="mirrorForm.targetChatId" placeholder="例如 -1000987654321" autocomplete="off" name="mirror-target" />
+        </label>
+        <label class="field">
+          <span class="field-label">优先账号（可空，留空自动选号）</span>
+          <t-input v-model="mirrorForm.preferredAccountId" placeholder="留空自动选择" autocomplete="off" name="mirror-preferred-account" />
+        </label>
+
+        <div class="mirror-events">
+          <span class="field-label">事件范围</span>
+          <t-checkbox v-model="mirrorForm.includeWebUploads">Web 上传</t-checkbox>
+          <t-checkbox v-model="mirrorForm.includeBotInboundFiles">Bot 入站</t-checkbox>
+        </div>
+
+        <div class="field field-actions">
+          <t-button theme="primary" :loading="savingMirror" @click="saveMirrorRule">保存规则</t-button>
+          <t-button v-if="mirrorForm.id" variant="outline" @click="resetMirrorForm">取消编辑</t-button>
+        </div>
       </div>
 
       <t-alert theme="info" :message="mirrorModeHint" />
@@ -811,11 +912,13 @@
           <t-tag :theme="mirrorTestResult.status === 'ok' ? 'success' : 'danger'" variant="light">
             {{ mirrorTestResult.status === 'ok' ? '测试通过' : '测试失败' }}
           </t-tag>
-          <span class="test-result-summary">{{ mirrorTestResult.summary }}</span>
+          <span class="test-result-summary">
+            {{ mirrorTestResult.ruleName ? `「${mirrorTestResult.ruleName}」` : '' }}{{ mirrorTestResult.summary }}
+          </span>
         </div>
         <ul class="test-details">
           <li v-for="(detail, index) in mirrorTestResult.details" :key="index" class="test-detail">
-            <span class="test-detail-role">{{ detail.chat === 'source' ? '源群' : '备份群' }}</span>
+            <span class="test-detail-role">{{ detail.chat === 'source' ? '主群' : '镜像群' }}</span>
             <t-tag :theme="detail.ok ? 'success' : 'danger'" variant="light">{{ detail.ok ? '可用' : '不可用' }}</t-tag>
             <span class="test-detail-text">{{ detail.title || '—' }}{{ detail.type ? `（${detail.type}）` : '' }}</span>
             <span v-if="!detail.ok && detail.error" class="cell-error">{{ detail.error }}</span>
@@ -881,7 +984,8 @@
       </div>
 
       <p class="section-hint">
-        补偿会把历史文件字节再次上传到备份群：按批扫描（每批 20 个、间隔 1 秒），可随时暂停或取消；
+        补偿会为历史文件补齐「主群搬运 + 用户账号中继到各镜像群」的任务（全程服务端转发，不产生文件字节流量）：
+        按批扫描（每批 20 个、间隔 1 秒），可随时暂停或取消；
         重复运行不会产生重复备份（任务幂等键保证），也不会改变现有下载链接。
       </p>
 
@@ -892,10 +996,15 @@
       </div>
     </section>
 
-    <!-- 任务列表区 -->
+    <!-- 任务列表区：按镜像群（targetChatId）分组，避免多群失败混成一锅 -->
     <section class="card" aria-label="镜像任务">
       <div class="section-header">
         <h3>镜像任务</h3>
+        <div class="section-actions">
+          <span class="section-hint-inline">
+            按镜像群分组：每条启用规则对应一个镜像群，各自独立任务/重试/状态
+          </span>
+        </div>
       </div>
 
       <div class="table-filters">
@@ -908,11 +1017,6 @@
           <t-option value="failed" label="失败" />
           <t-option value="blocked" label="阻塞" />
           <t-option value="cancelled" label="已取消" />
-        </t-select>
-        <t-select v-model="taskFilters.mode" class="filter-select" placeholder="模式">
-          <t-option value="" label="全部模式" />
-          <t-option value="bot_upload" label="Bot 上传" />
-          <t-option value="user_copy" label="用户复制" />
         </t-select>
         <t-input
           v-model="taskFilters.ownerId"
@@ -937,75 +1041,95 @@
         <t-button variant="outline" :loading="tasksLoading" @click="onTaskFilterChange">查询</t-button>
       </div>
 
-      <div v-if="!isMobile" class="table-scroll">
-        <t-table
-          :data="taskRows"
-          :columns="taskColumns"
-          :loading="tasksLoading"
-          row-key="id"
-          table-layout="fixed"
-          :pagination="false"
-          size="small"
-        >
-          <template #ownerId="{ row }">
-            <span class="cell-mono">{{ row.ownerId }}</span>
-          </template>
-          <template #mode="{ row }">{{ modeText(row.mode) }}</template>
-          <template #targetAccountId="{ row }">
-            <span class="cell-mono">{{ row.targetAccountId || '—' }}</span>
-          </template>
-          <template #targetMessageId="{ row }">{{ row.targetMessageId || '—' }}</template>
-          <template #attempts="{ row }">{{ row.attempts }}</template>
-          <template #lastError="{ row }">
-            <span v-if="row.lastErrorSummary" class="cell-error">{{ row.lastErrorSummary }}</span>
-            <span v-else class="cell-muted">—</span>
-          </template>
-          <template #time="{ row }">{{ formatTime(row.updatedAt || row.createdAt) }}</template>
-          <template #operations="{ row }">
-            <div class="row-actions">
-              <t-button
-                v-if="canRetry(row)"
-                variant="text"
-                size="small"
-                @click="doRetryTask(row)"
-              >
-                重试
-              </t-button>
-              <t-button
-                v-if="canCancel(row)"
-                variant="text"
-                theme="danger"
-                size="small"
-                @click="doCancelTask(row)"
-              >
-                取消
-              </t-button>
-              <t-tooltip v-if="isRunning(row)" content="执行中不可取消">
-                <span class="disabled-action">取消</span>
-              </t-tooltip>
-            </div>
-          </template>
-        </t-table>
-      </div>
+      <div v-if="!tasksLoading && taskRows.length === 0" class="empty-hint">暂无镜像任务</div>
 
-      <div v-else class="mobile-card-list">
-        <div v-for="row in taskRows" :key="row.id" class="mobile-task-card">
-          <div class="mobile-card-head">
-            <span class="cell-mono">{{ row.ownerId }}</span>
-            <t-tag :theme="taskStatusTheme(row.status)" variant="light">{{ taskStatusText(row.status) }}</t-tag>
+      <div v-else class="task-groups">
+        <div v-for="group in taskGroups" :key="group.key" class="task-group">
+          <div class="task-group-head">
+            <span class="cell-strong task-group-chat">
+              镜像群：<span class="cell-mono">{{ group.chatId || '未归属（历史任务）' }}</span>
+            </span>
+            <span class="kv-note">{{ group.ruleLabel }}</span>
+            <t-tag :theme="taskGroupTheme(group)" variant="light" size="small">
+              失败 {{ group.failedCount }} · 阻塞 {{ group.blockedCount }} · 进行中 {{ group.pendingCount }}
+            </t-tag>
           </div>
-          <div class="mobile-card-meta">模式：{{ modeText(row.mode) }}</div>
-          <div class="mobile-card-meta">执行账号：{{ row.targetAccountId || '—' }}</div>
-          <div class="mobile-card-meta">目标消息：{{ row.targetMessageId || '—' }} · 重试 {{ row.attempts }}</div>
-          <div v-if="row.lastErrorSummary" class="mobile-card-meta cell-error">错误：{{ row.lastErrorSummary }}</div>
-          <div class="mobile-card-meta">{{ formatTime(row.updatedAt || row.createdAt) }}</div>
-          <div class="mobile-card-actions">
-            <t-button v-if="canRetry(row)" variant="text" size="small" @click="doRetryTask(row)">重试</t-button>
-            <t-button v-if="canCancel(row)" variant="text" theme="danger" size="small" @click="doCancelTask(row)">取消</t-button>
-            <span v-if="isRunning(row)" class="disabled-action">执行中不可取消</span>
+
+          <p v-if="group.lastErrorSummary" class="task-group-error">
+            最近失败原因：{{ group.lastErrorSummary }}
+            <span v-if="group.lastErrorCode" class="cell-mono">（{{ group.lastErrorCode }}）</span>
+            <span v-if="group.lastErrorAt" class="cell-muted"> · {{ formatTime(group.lastErrorAt) }}</span>
+          </p>
+          <p v-else class="kv-note">该镜像群暂无失败记录</p>
+
+          <div v-if="!isMobile" class="table-scroll">
+            <t-table
+              :data="group.items"
+              :columns="taskColumns"
+              :loading="tasksLoading"
+              row-key="id"
+              table-layout="fixed"
+              :pagination="false"
+              size="small"
+            >
+              <template #ownerId="{ row }">
+                <span class="cell-mono">{{ row.ownerId }}</span>
+              </template>
+              <template #targetAccountId="{ row }">
+                <span class="cell-mono">{{ row.targetAccountId || '—' }}</span>
+              </template>
+              <template #targetMessageId="{ row }">{{ row.targetMessageId || '—' }}</template>
+              <template #attempts="{ row }">{{ row.attempts }}</template>
+              <template #lastError="{ row }">
+                <span v-if="row.lastErrorSummary" class="cell-error">{{ row.lastErrorSummary }}</span>
+                <span v-else class="cell-muted">—</span>
+              </template>
+              <template #time="{ row }">{{ formatTime(row.updatedAt || row.createdAt) }}</template>
+              <template #operations="{ row }">
+                <div class="row-actions">
+                  <t-button
+                    v-if="canRetry(row)"
+                    variant="text"
+                    size="small"
+                    @click="doRetryTask(row)"
+                  >
+                    重试
+                  </t-button>
+                  <t-button
+                    v-if="canCancel(row)"
+                    variant="text"
+                    theme="danger"
+                    size="small"
+                    @click="doCancelTask(row)"
+                  >
+                    取消
+                  </t-button>
+                  <t-tooltip v-if="isRunning(row)" content="执行中不可取消">
+                    <span class="disabled-action">取消</span>
+                  </t-tooltip>
+                </div>
+              </template>
+            </t-table>
+          </div>
+
+          <div v-else class="mobile-card-list">
+            <div v-for="row in group.items" :key="row.id" class="mobile-task-card">
+              <div class="mobile-card-head">
+                <span class="cell-mono">{{ row.ownerId }}</span>
+                <t-tag :theme="taskStatusTheme(row.status)" variant="light">{{ taskStatusText(row.status) }}</t-tag>
+              </div>
+              <div class="mobile-card-meta">执行账号：{{ row.targetAccountId || '—' }}</div>
+              <div class="mobile-card-meta">目标消息：{{ row.targetMessageId || '—' }} · 重试 {{ row.attempts }}</div>
+              <div v-if="row.lastErrorSummary" class="mobile-card-meta cell-error">错误：{{ row.lastErrorSummary }}</div>
+              <div class="mobile-card-meta">{{ formatTime(row.updatedAt || row.createdAt) }}</div>
+              <div class="mobile-card-actions">
+                <t-button v-if="canRetry(row)" variant="text" size="small" @click="doRetryTask(row)">重试</t-button>
+                <t-button v-if="canCancel(row)" variant="text" theme="danger" size="small" @click="doCancelTask(row)">取消</t-button>
+                <span v-if="isRunning(row)" class="disabled-action">执行中不可取消</span>
+              </div>
+            </div>
           </div>
         </div>
-        <div v-if="!tasksLoading && taskRows.length === 0" class="empty-hint">暂无镜像任务</div>
       </div>
 
       <div class="pagination-row">
@@ -1193,8 +1317,10 @@ import {
   cancelMirrorBackfill,
   cancelMirrorTask,
   createBotAccount,
+  createMirrorRule,
   createUserAccount,
   deleteAccount,
+  deleteMirrorRule,
   fetchAccountOverview,
   fetchMirrorBackfill,
   fetchAccounts,
@@ -1224,6 +1350,7 @@ import {
   type MirrorBackfillJob,
   type MirrorBackfillStatus,
   type MirrorOverview,
+  type MirrorRule,
   type MirrorRuleTestResult,
   type MirrorTaskListItem,
   type MirrorTaskSummary,
@@ -1234,13 +1361,13 @@ import {
   type ReplicationAttemptStatus,
   type ReplicationAttemptView,
   type ReplicationAuditReport,
+  type ReplicationRetryResult,
   type UserRelayFailureReason,
   type TelegramAccountRuntimeView,
   type TelegramAccountStatus,
   type TelegramAccountType,
   type TelegramAccountView,
   type TelegramEnvAccountView,
-  type TelegramMirrorMode,
   type TelegramMirrorTaskStatus,
   type UpdateTelegramAccountInput,
   type UpdateMirrorRuleInput,
@@ -1295,18 +1422,11 @@ const precheckFailures = computed(() => {
   });
 });
 
-const ruleStateText = computed(() => {
-  if (!mirror.value?.rule) return '未配置';
-  return mirror.value.rule.enabled ? '已启用' : '未启用';
-});
+/** 全部规则数（每条规则对应一个镜像群） */
+const mirrorRuleCount = computed(() => mirror.value?.rules.length ?? 0);
 
-/** 只有通过权限测试且规则已配置时才允许启用 */
-const canEnableRule = computed(() => {
-  const rule = mirror.value?.rule;
-  if (!rule) return false;
-  if (rule.enabled) return true;
-  return rule.lastTestStatus === 'ok';
-});
+/** 启用中的规则数（= 当前扩散目标数；由后端统计） */
+const enabledRuleCount = computed(() => mirror.value?.enabledRuleCount ?? 0);
 
 // ---------------- 账号列表 ----------------
 
@@ -2009,8 +2129,9 @@ async function runBackfill(mode: 'dry-run' | 'apply'): Promise<void> {
   const dialog = DialogPlugin.confirm({
     header: mode === 'dry-run' ? '评估历史补偿影响面' : '开始历史补偿',
     body: mode === 'dry-run'
-      ? '仅统计将被补偿的历史文件数量，不入队、不产生任何上传。'
-      : '补偿会把历史文件字节再次上传到备份群：按批限速执行、可随时暂停或取消；重复运行不会产生重复备份。',
+      ? '仅统计将被补偿的历史文件数量，不入队、不产生任何转发。'
+      : '补偿会为历史文件补建「主群搬运 + 用户账号中继到各镜像群」的任务：按批限速执行、可随时暂停或取消；'
+        + '全程服务端转发，不产生文件字节流量；重复运行不会产生重复备份。',
     onConfirm: async () => {
       dialog.destroy();
       backfillSaving.value = true;
@@ -2047,44 +2168,81 @@ async function controlBackfill(action: 'pause' | 'resume' | 'cancel'): Promise<v
   }
 }
 
-// ---------------- 镜像配置 ----------------
+// ---------------- 镜像规则（多规则） ----------------
 
-const mirrorForm = reactive<{
+interface MirrorRuleFormState {
+  id: string | null;
+  name: string;
   sourceChatId: string;
   targetChatId: string;
-  mode: TelegramMirrorMode;
+  preferredAccountId: string;
   includeWebUploads: boolean;
   includeBotInboundFiles: boolean;
-}>({
-  sourceChatId: '',
-  targetChatId: '',
-  mode: 'bot_upload',
-  includeWebUploads: true,
-  includeBotInboundFiles: false,
-});
+}
 
-const mirrorTestResult = ref<MirrorRuleTestResult | null>(null);
-const testing = ref(false);
+function emptyMirrorForm(): MirrorRuleFormState {
+  return {
+    id: null,
+    name: '',
+    sourceChatId: '',
+    targetChatId: '',
+    preferredAccountId: '',
+    includeWebUploads: true,
+    includeBotInboundFiles: false,
+  };
+}
+
+const mirrorForm = reactive<MirrorRuleFormState>(emptyMirrorForm());
+/** 最近一次权限测试结论（附带规则名，便于在结果区标明属于哪条规则） */
+const mirrorTestResult = ref<(MirrorRuleTestResult & { ruleName: string }) | null>(null);
+const testingRuleId = ref<string | null>(null);
+const togglingRuleId = ref<string | null>(null);
 const savingMirror = ref(false);
 
-const mirrorModeHint = 'Bot 模式会上传两次；用户模式要求用户账号可访问源消息，文件字节只上传一次。';
+const mirrorModeHint =
+  '扩散只有一条链路：持有源消息的 Bot 先转发到主群，再由用户账号从主群服务端转发到各镜像群，'
+  + '最后由镜像群内的 Bot 认领副本；全程零字节重传（字节二次传输恒为 0），'
+  + '不存在 Bot 重新上传，也不作为失败降级手段。';
 
-/** 用服务端规则回填表单；仅在请求成功时调用，避免加载失败覆盖已编辑内容 */
-function applyMirrorRule() {
-  const rule = mirror.value?.rule;
-  if (!rule) return;
+/** 重置为「新建规则」空表单 */
+function resetMirrorForm() {
+  Object.assign(mirrorForm, emptyMirrorForm());
+}
+
+function openCreateRule() {
+  resetMirrorForm();
+}
+
+function openEditRule(rule: MirrorRule) {
+  mirrorForm.id = rule.id;
+  mirrorForm.name = rule.name ?? '';
   mirrorForm.sourceChatId = rule.sourceChatId ?? '';
   mirrorForm.targetChatId = rule.targetChatId ?? '';
-  mirrorForm.mode = rule.mode;
+  mirrorForm.preferredAccountId = rule.preferredAccountId ?? '';
   mirrorForm.includeWebUploads = rule.includeWebUploads;
   mirrorForm.includeBotInboundFiles = rule.includeBotInboundFiles;
 }
 
-async function runMirrorTest() {
-  testing.value = true;
+/** 事件范围文案（未勾选任何事件时不扩散） */
+function ruleEventScopeText(rule: MirrorRule): string {
+  const parts: string[] = [];
+  if (rule.includeWebUploads) parts.push('Web 上传');
+  if (rule.includeBotInboundFiles) parts.push('Bot 入站');
+  return parts.length > 0 ? parts.join(' / ') : '未选择事件';
+}
+
+function ruleTestTheme(status: MirrorRule['lastTestStatus']): 'success' | 'warning' | 'danger' | 'default' {
+  if (status === 'ok') return 'success';
+  if (status === 'failed') return 'danger';
+  return 'default';
+}
+
+/** 权限测试单条规则（探测主群/镜像群可达性，不产生真实镜像任务） */
+async function runMirrorTest(rule: MirrorRule) {
+  testingRuleId.value = rule.id;
   try {
-    const result = await testMirrorRule();
-    mirrorTestResult.value = result;
+    const result = await testMirrorRule(rule.id);
+    mirrorTestResult.value = { ...result, ruleName: rule.name };
     if (result.status === 'ok') {
       MessagePlugin.success(result.summary || '测试通过');
     } else {
@@ -2094,24 +2252,36 @@ async function runMirrorTest() {
   } catch (error) {
     MessagePlugin.error(getErrorMessage(error));
   } finally {
-    testing.value = false;
+    testingRuleId.value = null;
   }
 }
 
+/**
+ * 保存规则：`mirrorForm.id` 为空走新建，否则更新。
+ *
+ * 载荷不含已删除的 `mode` / `fallbackMode`（后端 `forbidNonWhitelisted` 会直接 400）。
+ */
 async function saveMirrorRule() {
+  if (!mirrorForm.sourceChatId.trim() || !mirrorForm.targetChatId.trim()) {
+    MessagePlugin.warning('请填写主群与镜像群');
+    return;
+  }
   savingMirror.value = true;
   try {
     const payload: UpdateMirrorRuleInput = {
+      name: mirrorForm.name.trim() || undefined,
       sourceChatId: mirrorForm.sourceChatId.trim(),
       targetChatId: mirrorForm.targetChatId.trim(),
-      mode: mirrorForm.mode,
+      preferredAccountId: mirrorForm.preferredAccountId.trim(),
       includeWebUploads: mirrorForm.includeWebUploads,
       includeBotInboundFiles: mirrorForm.includeBotInboundFiles,
     };
-    const result = await updateMirrorRule(payload);
+    const result = mirrorForm.id
+      ? await updateMirrorRule(mirrorForm.id, payload)
+      : await createMirrorRule(payload);
     MessagePlugin.success(result.message);
     await loadMirror();
-    applyMirrorRule();
+    resetMirrorForm();
   } catch (error) {
     MessagePlugin.error(getErrorMessage(error));
   } finally {
@@ -2119,19 +2289,50 @@ async function saveMirrorRule() {
   }
 }
 
-async function toggleRuleEnabled(enabled: boolean) {
-  if ((mirror.value?.rule?.enabled ?? false) === enabled) return;
-  if (enabled && !canEnableRule.value) {
-    MessagePlugin.warning('请先通过「测试权限」再启用规则');
+/**
+ * 启用/停用单条规则。
+ *
+ * 启用前必须通过一次权限测试；前端先提示，后端仍会二次校验（主群一致性 / 测试结论）。
+ * 失败原因通过 `getErrorMessage` 展示，不静默吞掉。
+ */
+async function toggleRuleEnabled(rule: MirrorRule, enabled: boolean) {
+  if (enabled && rule.lastTestStatus !== 'ok') {
+    MessagePlugin.warning('启用规则前请先通过「测试权限」');
     return;
   }
+  togglingRuleId.value = rule.id;
   try {
-    const result = await setMirrorRuleEnabled(enabled);
+    const result = await setMirrorRuleEnabled(rule.id, enabled);
     MessagePlugin.success(result.message);
     await loadMirror();
   } catch (error) {
     MessagePlugin.error(getErrorMessage(error));
+    // 失败时以服务端状态为准回填开关，避免开关停留在用户点击后的假状态
+    await loadMirror();
+  } finally {
+    togglingRuleId.value = null;
   }
+}
+
+/** 删除规则（启用中或有在途任务时后端返回 400，错误原因需展示给管理员） */
+function confirmDeleteRule(rule: MirrorRule) {
+  const dialog = DialogPlugin.confirm({
+    header: '删除镜像规则',
+    body: `确定删除规则「${rule.name || '未命名规则'}」吗？删除后该镜像群不再参与副本扩散，已备份内容不会被删除。`,
+    theme: 'danger',
+    onConfirm: async () => {
+      dialog.destroy();
+      try {
+        const result = await deleteMirrorRule(rule.id);
+        MessagePlugin.success(result.message);
+        if (mirrorForm.id === rule.id) resetMirrorForm();
+        await loadMirror();
+      } catch (error) {
+        MessagePlugin.error(getErrorMessage(error));
+      }
+    },
+    onClose: () => dialog.destroy(),
+  });
 }
 
 // ---------------- 任务列表 ----------------
@@ -2140,12 +2341,10 @@ const taskRows = ref<MirrorTaskListItem[]>([]);
 const tasksLoading = ref(false);
 const taskFilters = reactive<{
   status: TelegramMirrorTaskStatus | '';
-  mode: TelegramMirrorMode | '';
   ownerId: string;
   accountId: string;
 }>({
   status: '',
-  mode: '',
   ownerId: '',
   accountId: '',
 });
@@ -2153,7 +2352,6 @@ const taskPagination = reactive({ current: 1, pageSize: 20, total: 0 });
 
 const taskColumns = [
   { colKey: 'ownerId', title: '文件 ID', width: 200 },
-  { colKey: 'mode', title: '模式', width: 100 },
   { colKey: 'targetAccountId', title: '执行账号', width: 150 },
   { colKey: 'targetMessageId', title: '目标消息', width: 120 },
   { colKey: 'attempts', title: '重试', width: 70 },
@@ -2161,6 +2359,82 @@ const taskColumns = [
   { colKey: 'time', title: '时间', width: 160 },
   { colKey: 'operations', title: '操作', width: 140 },
 ];
+
+/**
+ * 单个镜像群分组。
+ *
+ * 分组键是**镜像群**（`targetChatId`）而不是规则 id：同一镜像群可能由规则重建，
+ * 但运维关心的是「哪个群现在有问题」，按群聚合才不会把多群的失败混成一锅。
+ */
+interface TaskGroup {
+  key: string;
+  chatId: string | null;
+  /** 规则名（能解析到时给出，否则退化为规则 id 或「未知规则」） */
+  ruleLabel: string;
+  items: MirrorTaskListItem[];
+  failedCount: number;
+  blockedCount: number;
+  pendingCount: number;
+  lastErrorCode: string | null;
+  lastErrorSummary: string | null;
+  lastErrorAt: string | null;
+}
+
+/** 进行中的任务状态（用于分组标题的「进行中」计数） */
+const PENDING_TASK_STATUSES: TelegramMirrorTaskStatus[] = ['queued', 'running', 'retrying'];
+
+/** 镜像任务按镜像群聚合（同群失败原因只在组头汇总，不跨群混排） */
+const taskGroups = computed<TaskGroup[]>(() => {
+  const ruleNames = new Map<string, string>(
+    (mirror.value?.rules ?? []).map((rule) => [rule.id, rule.name || '未命名规则']),
+  );
+  const groups = new Map<string, TaskGroup>();
+
+  for (const item of taskRows.value) {
+    const chatId = (item.targetChatId || '').trim() || null;
+    const key = chatId ?? '__unassigned__';
+    let group = groups.get(key);
+    if (!group) {
+      group = {
+        key,
+        chatId,
+        ruleLabel: ruleNames.get(item.ruleId) ?? (item.ruleId ? `规则 ${item.ruleId}` : '未知规则'),
+        items: [],
+        failedCount: 0,
+        blockedCount: 0,
+        pendingCount: 0,
+        lastErrorCode: null,
+        lastErrorSummary: null,
+        lastErrorAt: null,
+      };
+      groups.set(key, group);
+    }
+    group.items.push(item);
+    if (item.status === 'failed') group.failedCount += 1;
+    if (item.status === 'blocked') group.blockedCount += 1;
+    if (PENDING_TASK_STATUSES.includes(item.status)) group.pendingCount += 1;
+    // 组内最近一次失败原因：只取时间更新的一条，避免多群/多条互相覆盖
+    if (item.lastErrorSummary && group.lastErrorSummary === null) {
+      group.lastErrorCode = item.lastErrorCode;
+      group.lastErrorSummary = item.lastErrorSummary;
+      group.lastErrorAt = item.updatedAt || item.createdAt;
+    }
+  }
+
+  // 有问题的群排在前面，其余按群 ID 稳定排序
+  return [...groups.values()].sort((left, right) => {
+    const bad = (group: TaskGroup) => group.failedCount + group.blockedCount;
+    if (bad(right) !== bad(left)) return bad(right) - bad(left);
+    return (left.chatId ?? '').localeCompare(right.chatId ?? '');
+  });
+});
+
+/** 分组标题标签主题：有失败/阻塞为 danger，有进行中为 primary，其余 default */
+function taskGroupTheme(group: TaskGroup): TagTheme {
+  if (group.failedCount + group.blockedCount > 0) return 'danger';
+  if (group.pendingCount > 0) return 'primary';
+  return 'default';
+}
 
 const TASK_STATUS_TEXT: Record<TelegramMirrorTaskStatus, string> = {
   queued: '排队中',
@@ -2192,12 +2466,6 @@ function taskStatusTheme(status: TelegramMirrorTaskStatus): TagTheme {
   return TASK_STATUS_THEME[status] ?? 'default';
 }
 
-function modeText(mode: string): string {
-  if (mode === 'bot_upload') return 'Bot 上传';
-  if (mode === 'user_copy') return '用户复制';
-  return mode || '—';
-}
-
 function isRunning(row: MirrorTaskListItem): boolean {
   return row.status === 'running';
 }
@@ -2215,7 +2483,6 @@ async function loadTasks() {
   try {
     const { items, total } = await fetchMirrorTasks({
       status: taskFilters.status || undefined,
-      mode: taskFilters.mode || undefined,
       ownerId: taskFilters.ownerId.trim() || undefined,
       accountId: taskFilters.accountId.trim() || undefined,
       page: taskPagination.current,
@@ -2279,6 +2546,8 @@ const expandedAttemptId = ref<string | null>(null);
 const attemptDetailLoading = ref(false);
 const attemptDetails = reactive<Record<string, ReplicationAttemptDetailView>>({});
 const retryingAttemptId = ref<string | null>(null);
+/** 最近一次手动重试结果（原样展示后端口径，0 重排不粉饰成功） */
+const retryResult = ref<ReplicationRetryResult | null>(null);
 
 const capacity = computed(() => replication.value?.capacity ?? null);
 const coverage = computed(() => replication.value?.coverage ?? {
@@ -2524,7 +2793,8 @@ async function toggleAttempt(row: ReplicationAttemptView) {
 function confirmRetryAttempt(row: ReplicationAttemptView) {
   const dialog = DialogPlugin.confirm({
     header: '重试扩散轮次',
-    body: `将对 ${row.ownerLabel} 重新执行一次「用户账号服务端中继」。幂等键不变，不会在副本群产生重复消息；重试记录会写入审计。是否继续？`,
+    body: `将把 ${row.ownerLabel} 在该镜像群上的扩散重新交给镜像任务队列（重置在途终态任务、补建缺失任务）。`
+      + '不新建执行路径，也不会产生重复群消息；重试记录会写入审计。是否继续？',
     confirmBtn: '重试',
     onConfirm: async () => {
       dialog.destroy();
@@ -2534,14 +2804,21 @@ function confirmRetryAttempt(row: ReplicationAttemptView) {
   });
 }
 
+/**
+ * 手动重试：结果**如实展示**（`requeued`/`created`/`ruleIds`），不粉饰成功。
+ *
+ * 0 重排（`requeued + created === 0`）说明该镜像群上已有在途任务，
+ * 这时必须显示「无需重试」而不是成功提示，否则会误导管理员反复点击。
+ */
 async function doRetryAttempt(row: ReplicationAttemptView) {
   retryingAttemptId.value = row.id;
   try {
     const result = await retryReplicationAttempt(row.id);
-    if (result.status === 'succeeded' || result.status === 'partial_success') {
+    retryResult.value = result;
+    if (result.requeued + result.created > 0) {
       MessagePlugin.success(result.message);
     } else {
-      MessagePlugin.warning(`重试已提交：${result.status}（缺口 ${result.missing.length} 路）`);
+      MessagePlugin.warning('无需重试：该镜像群上已有在途任务，未产生新的排队或补建');
     }
     // 该轮次状态已变化，丢弃详情缓存避免展示过期建议
     delete attemptDetails[row.id];
@@ -2570,10 +2847,8 @@ async function loadMirror() {
   try {
     const data = await fetchMirrorOverview();
     mirror.value = data;
-    // 仅在尚无用户编辑时回填；已有编辑内容不覆盖
-    applyMirrorRule();
   } catch {
-    MessagePlugin.error('镜像配置加载失败，已保留上次数据');
+    MessagePlugin.error('镜像规则加载失败，已保留上次数据');
   }
 }
 
@@ -2758,6 +3033,18 @@ onMounted(() => {
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: var(--space-2) var(--space-4);
   margin: 0;
+}
+
+/* 审计口径说明：目标副本数只用于覆盖率展示，不驱动扩散 */
+.strategy-audit-note {
+  margin: var(--space-3) 0;
+  padding: var(--space-2) var(--space-3);
+  border-left: 3px solid var(--border-accent);
+  background: var(--color-bg-surface);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.7;
 }
 
 .kv-item {
@@ -3087,6 +3374,32 @@ onMounted(() => {
   margin-left: auto;
 }
 
+/* 手动重试结果：0 重排必须显示为「无需重试」而不是成功 */
+.retry-result {
+  margin-bottom: var(--space-3);
+}
+
+.retry-result-message {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.retry-result-metrics {
+  margin: var(--space-2) 0;
+  padding-left: var(--space-4);
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.7;
+}
+
+.retry-result-hint {
+  margin: 0 0 var(--space-2);
+  font-size: 12px;
+  color: var(--color-warning);
+  line-height: 1.7;
+}
+
 .attempt-detail {
   margin-top: var(--space-2);
   padding: var(--space-3);
@@ -3224,13 +3537,67 @@ onMounted(() => {
   margin-top: var(--space-4);
 }
 
-/* ---------- 镜像配置 ---------- */
+/* ---------- 镜像规则 ---------- */
+.mirror-rule-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+.mirror-rule-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-3) var(--space-4);
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+}
+
+.mirror-rule-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.mirror-rule-meta {
+  font-size: 12px;
+  color: var(--text-secondary);
+  word-break: break-all;
+}
+
+/* 规则行的启用开关与操作区（一条规则一个镜像群，独立启停） */
+.mirror-rule-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  margin-top: var(--space-1);
+}
+
+.mirror-rule-switch {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
 .mirror-form {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: var(--space-3);
   align-items: end;
   margin-bottom: var(--space-4);
+}
+
+.mirror-form-head {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  flex-wrap: wrap;
 }
 
 .field {
@@ -3256,7 +3623,6 @@ onMounted(() => {
   gap: var(--space-2);
 }
 
-.mirror-mode,
 .mirror-events {
   display: flex;
   align-items: center;
@@ -3309,6 +3675,40 @@ onMounted(() => {
 
 .test-detail-text {
   color: var(--text-secondary);
+}
+
+/* ---------- 镜像任务：按镜像群分组 ---------- */
+.task-groups {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.task-group {
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-elevated);
+  padding: var(--space-3);
+}
+
+.task-group-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  margin-bottom: var(--space-2);
+}
+
+.task-group-chat {
+  word-break: break-all;
+}
+
+.task-group-error {
+  margin: 0 0 var(--space-2);
+  font-size: 12px;
+  color: var(--color-danger);
+  line-height: 1.7;
+  word-break: break-all;
 }
 
 /* ---------- 移动端卡片 ---------- */

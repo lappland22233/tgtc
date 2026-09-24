@@ -1,9 +1,7 @@
 import { Provider, Type } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Test, TestingModule } from '@nestjs/testing';
-import { getRepositoryToken } from '@nestjs/typeorm';
 import { AlertEngineService } from '../alert/alert-engine.service';
-import { TelegramMirrorTask } from '../common/entities/telegram-mirror-task.entity';
 import { AuditService } from '../common/services/audit.service';
 import { RateLimitService } from '../common/services/rate-limit.service';
 import { StreamResponderService } from '../common/services/stream-responder.service';
@@ -21,6 +19,7 @@ import { TelegramMirrorConfigService } from '../telegram-mirror/telegram-mirror-
 import { TelegramMirrorSourceService } from '../telegram-mirror/telegram-mirror-source.service';
 import { TelegramMirrorTriggerService } from '../telegram-mirror/telegram-mirror-trigger.service';
 import { TelegramUserCopyService } from '../telegram-mirror/telegram-user-copy.service';
+import { TelegramMainChatAnchorService } from '../telegram-mirror/telegram-main-chat-anchor.service';
 import { TelegramUserClientService } from '../telegram-user/telegram-user-client.service';
 import { TelegramService } from '../telegram/telegram.service';
 import { TelegramBotAdminController } from './telegram-bot-admin.controller';
@@ -147,36 +146,40 @@ describe('Bot 账号池副本链：可选依赖的真实装配（容器级）', 
     expect(injected(controller, 'configService')).toBe(deps.configService);
   });
 
-  it('TelegramUserCopyService：3 个私聊搬运依赖 + 仓库 token 注入', async () => {
+  it('TelegramUserCopyService：主群锚点依赖 + 观测依赖按服务类 token 注入', async () => {
     const deps = {
       source: depMock('TelegramMirrorSourceService'),
+      anchors: depMock('TelegramMainChatAnchorService'),
       accounts: depMock('TelegramAccountsService'),
       userClient: depMock('TelegramUserClientService'),
-      client: depMock('TelegramAccountClientService'),
+      attempts: depMock('ReplicationAttemptService'),
+      copies: depMock('FileCopyService'),
+      replicaTargets: depMock('ReplicaTargetResolver'),
       pool: depMock('TelegramAccountPoolService'),
-      configService: depMock('ConfigService'),
-      tasks: depMock('Repository<TelegramMirrorTask>'),
     };
 
     const moduleRef = await compile([
       TelegramUserCopyService,
       { provide: TelegramMirrorSourceService, useValue: deps.source },
+      { provide: TelegramMainChatAnchorService, useValue: deps.anchors },
       { provide: TelegramAccountsService, useValue: deps.accounts },
       { provide: TelegramUserClientService, useValue: deps.userClient },
-      { provide: TelegramAccountClientService, useValue: deps.client },
+      { provide: ReplicationAttemptService, useValue: deps.attempts },
+      { provide: FileCopyService, useValue: deps.copies },
+      { provide: ReplicaTargetResolver, useValue: deps.replicaTargets },
       { provide: TelegramAccountPoolService, useValue: deps.pool },
-      { provide: ConfigService, useValue: deps.configService },
-      { provide: getRepositoryToken(TelegramMirrorTask), useValue: deps.tasks },
     ]);
 
     const service = moduleRef.get(TelegramUserCopyService);
 
-    // 私聊来源搬运到中转群的三个前置能力（缺一即整体 blocked）
-    expect(injected(service, 'client')).toBe(deps.client);
+    // 唯一执行链路的必需依赖：主群锚点（持有源消息的 Bot 先搬进主群）
+    expect(injected(service, 'anchors')).toBe(deps.anchors);
+    // 认领观测（best-effort）：缺失只影响轮次时间线，不影响扩散本身
+    expect(injected(service, 'attempts')).toBe(deps.attempts);
+    expect(injected(service, 'copies')).toBe(deps.copies);
+    expect(injected(service, 'replicaTargets')).toBe(deps.replicaTargets);
+    // 中继健康度计数
     expect(injected(service, 'pool')).toBe(deps.pool);
-    expect(injected(service, 'configService')).toBe(deps.configService);
-    // 锚点写回任务行
-    expect(injected(service, 'tasks')).toBe(deps.tasks);
   });
 
   it('TelegramAccountPoolAlertService：告警引擎与扩散观测依赖按服务类 token 注入', async () => {
@@ -284,20 +287,21 @@ describe('Bot 账号池副本链：依赖确实未注册时仍降级（单账号
     expect(injected(controller, 'configService')).toBeNull();
   });
 
-  it('TelegramUserCopyService：私聊搬运依赖缺失时全部为 null（可诊断 blocked）', async () => {
+  it('TelegramUserCopyService：观测依赖缺失时为 null（扩散照常执行，只是没有时间线）', async () => {
     const moduleRef = await compile([
       TelegramUserCopyService,
       { provide: TelegramMirrorSourceService, useValue: depMock('TelegramMirrorSourceService') },
+      { provide: TelegramMainChatAnchorService, useValue: depMock('TelegramMainChatAnchorService') },
       { provide: TelegramAccountsService, useValue: depMock('TelegramAccountsService') },
       { provide: TelegramUserClientService, useValue: depMock('TelegramUserClientService') },
     ]);
 
     const service = moduleRef.get(TelegramUserCopyService);
 
-    expect(injected(service, 'client')).toBeNull();
+    expect(injected(service, 'attempts')).toBeNull();
+    expect(injected(service, 'copies')).toBeNull();
+    expect(injected(service, 'replicaTargets')).toBeNull();
     expect(injected(service, 'pool')).toBeNull();
-    expect(injected(service, 'configService')).toBeNull();
-    expect(injected(service, 'tasks')).toBeNull();
   });
 
   it('TelegramAccountPoolAlertService：告警引擎与扩散观测依赖缺失时为 null 且不影响主链路', async () => {

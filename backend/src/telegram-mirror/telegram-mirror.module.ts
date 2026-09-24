@@ -6,6 +6,7 @@ import { File } from '../common/entities/file.entity';
 import { TelegramBotFileGrant } from '../common/entities/telegram-bot-file-grant.entity';
 import { TelegramMirrorRule } from '../common/entities/telegram-mirror-rule.entity';
 import { TelegramMirrorTask } from '../common/entities/telegram-mirror-task.entity';
+import { TelegramMainChatAnchor } from '../common/entities/telegram-main-chat-anchor.entity';
 import { TelegramAccountsModule } from '../telegram-accounts/telegram-accounts.module';
 import { TelegramAccountPoolModule } from '../telegram-account-pool/telegram-account-pool.module';
 import { TelegramUserModule } from '../telegram-user/telegram-user.module';
@@ -13,7 +14,7 @@ import { TelegramMirrorController } from './telegram-mirror.controller';
 import { TelegramMirrorConfigService } from './telegram-mirror-config.service';
 import { TelegramMirrorTaskService } from './telegram-mirror-task.service';
 import { TelegramMirrorSourceService } from './telegram-mirror-source.service';
-import { TelegramMirrorBotService } from './telegram-mirror-bot.service';
+import { TelegramMainChatAnchorService } from './telegram-main-chat-anchor.service';
 import { TelegramUserCopyService } from './telegram-user-copy.service';
 import { TelegramMirrorMetricsService } from './telegram-mirror-metrics.service';
 import { TelegramMirrorAlertService } from './telegram-mirror-alert.service';
@@ -37,7 +38,13 @@ const MIRROR_ALERT_INTERVAL_MS = 60_000;
  */
 @Module({
   imports: [
-    TypeOrmModule.forFeature([TelegramMirrorRule, TelegramMirrorTask, File, TelegramBotFileGrant]),
+    TypeOrmModule.forFeature([
+      TelegramMirrorRule,
+      TelegramMirrorTask,
+      File,
+      TelegramBotFileGrant,
+      TelegramMainChatAnchor,
+    ]),
     BullQueueModule,
     AlertModule,
     TelegramAccountsModule,
@@ -49,7 +56,7 @@ const MIRROR_ALERT_INTERVAL_MS = 60_000;
     TelegramMirrorConfigService,
     TelegramMirrorTaskService,
     TelegramMirrorSourceService,
-    TelegramMirrorBotService,
+    TelegramMainChatAnchorService,
     TelegramUserCopyService,
     TelegramMirrorMetricsService,
     TelegramMirrorAlertService,

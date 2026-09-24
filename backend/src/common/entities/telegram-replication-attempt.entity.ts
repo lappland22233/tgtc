@@ -53,16 +53,26 @@ export type UserRelayFailureReason =
   | 'network'
   | 'unknown';
 
-/** 轮次触发来源：lazy=下载期懒扩散；manual=后台手动重试 */
-export type ReplicationAttemptTrigger = 'lazy' | 'manual';
+/**
+ * 轮次触发来源：
+ * - `eager` = **提交即触发**（当前唯一自动来源：镜像任务在建单后立即中继，每条启用规则一个镜像群）；
+ * - `lazy` = 历史值（下载期懒扩散，已删除，仅存在于旧数据）；
+ * - `manual` = 后台手动重试。
+ */
+export type ReplicationAttemptTrigger = 'eager' | 'lazy' | 'manual';
 
 /**
- * 副本扩散轮次（策略 B：用户账号服务端中继 + Bot 入站认领）。
+ * 副本扩散轮次（用户账号服务端中继 + Bot 入站认领）。
+ *
+ * 定位（改造后）：**认领观测层**，不再是执行入口。执行由镜像任务队列负责
+ * （`telegram_mirror_tasks`，每条启用规则一个镜像群），任务中继成功后开立
+ * `waiting_claims` 轮次，认领由入站链路回写、窗口到期由生命週期清扫结算。
  *
  * 设计要点：
- * - **每逻辑文件每轮一行**，生命周期时间戳可重建时间线（startedAt → relayCompletedAt
- *   → claimDeadlineAt → completedAt）；同一 owner 在合并窗口内的重复阻塞/失败轮次
- *   **更新既有行**并累加 `retryCount`，避免懒扩散高频触发把表写爆；
+ * - **每逻辑文件 × 每镜像群每轮一行**（`targetChatId` 参与轮次归属：多镜像群各自独立
+ *   退避与计数，A 群的轮次不得被 B 群复用或结算），生命周期时间戳可重建时间线
+ *   （startedAt → relayCompletedAt → claimDeadlineAt → completedAt）；同一 owner + 目标群
+ *   在合并窗口内的重复阻塞/失败轮次**更新既有行**并累加 `retryCount`，控制行数增长；
  * - **不设 `bytesTransferred` 列**：策略 B 不发生文件字节二次传输，
  *   展示恒为 0 即可，留一列反而会诱导误读为「有字节流动」；
  * - `targetChatId` 内部存储、出参脱敏；`relayAccountId` / `relayMessageId` 仅存内部引用，

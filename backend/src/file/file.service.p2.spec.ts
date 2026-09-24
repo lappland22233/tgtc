@@ -194,11 +194,11 @@ describe('G2-12: batchToMarkdown 转义与直链约束', () => {
 });
 
 /**
- * Web 下载入口的副本目标一致性：
- * 期望副本数必须来自统一的 ReplicaTargetResolver（SystemConfig 热更新 → env → 默认），
- * 与 Bot 公开下载、镜像回源使用同一解析结果；解析器缺失时保持既有行为（不触发懒扩散）。
+ * Web 下载入口不再携带扩散参数：
+ * 副本扩散已改为「提交即触发」（镜像任务队列：主群 → userbot → 各镜像群），
+ * 下载路径必须**零副作用**——不传期望副本数、不触发任何补副本动作。
  */
-describe('Web 下载入口：统一副本目标解析', () => {
+describe('Web 下载入口：不再携带扩散参数', () => {
   function wire(overrides: Record<string, unknown> = {}) {
     const openStream = jest.fn(async (..._args: unknown[]) => ({
       stream: Readable.from([Buffer.from('x')]),
@@ -215,36 +215,24 @@ describe('Web 下载入口：统一副本目标解析', () => {
     return { service, openStream };
   }
 
-  it('把解析器给出的期望副本数透传给账号池（与其它入口一致）', async () => {
-    const desiredReplicas = jest.fn(async () => 3);
-    const { service, openStream } = wire({ replicaTargets: { desiredReplicas } });
+  it('回源参数只含定位与缓存控制，不含任何扩散字段', async () => {
+    const { service, openStream } = wire();
 
     const result = await (service as any).openTelegramSourceStream(
       { id: 'f-1', originalName: 'a.bin', filename: 'a.bin' } as any,
       1024,
     );
 
-    expect(desiredReplicas).toHaveBeenCalledTimes(1);
     expect(openStream).toHaveBeenCalledWith(expect.objectContaining({
       ownerType: 'file',
       ownerId: 'f-1',
       expectedSize: 1024,
       fileName: 'a.bin',
-      desiredReplicas: 3,
     }));
+    const params = openStream.mock.calls[0][0] as Record<string, unknown>;
+    expect(params).not.toHaveProperty('desiredReplicas');
+    expect(params).not.toHaveProperty('fileName_');
     expect(result.info.file_id).toBe('pooled-file-id');
-  });
-
-  it('解析器缺失（单账号部署/未装配）时不传 desiredReplicas，回源行为与改造前一致', async () => {
-    const { service, openStream } = wire();
-
-    await (service as any).openTelegramSourceStream(
-      { id: 'f-1', originalName: 'a.bin', filename: 'a.bin' } as any,
-      8,
-    );
-
-    const params = openStream.mock.calls[0][0] as { desiredReplicas?: number };
-    expect(params.desiredReplicas).toBeUndefined();
   });
 
   it('无可用副本时不进入池化路径（保持单账号链路语义）', async () => {

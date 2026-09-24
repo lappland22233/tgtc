@@ -1,6 +1,5 @@
 import { Type } from 'class-transformer';
 import { IsBoolean, IsIn, IsInt, IsOptional, IsString, Length, Max, MaxLength, Min } from 'class-validator';
-import { TelegramMirrorFallbackMode, TelegramMirrorMode } from '../common/entities/telegram-mirror-rule.entity';
 
 /** 历史文件补偿镜像（dry-run 只评估不入队） */
 export class StartBackfillDto {
@@ -33,17 +32,9 @@ export class UpdateMirrorRuleDto {
   targetChatId?: string;
 
   @IsOptional()
-  @IsIn(['bot_upload', 'user_copy', 'auto'])
-  mode?: TelegramMirrorMode;
-
-  @IsOptional()
   @IsString()
   @MaxLength(64)
   preferredAccountId?: string;
-
-  @IsOptional()
-  @IsIn(['disabled', 'bot_upload'])
-  fallbackMode?: TelegramMirrorFallbackMode;
 
   @IsOptional()
   @IsBoolean()

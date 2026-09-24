@@ -7,17 +7,24 @@ import { FileCopyService } from '../telegram-account-pool/file-copy.service';
 import { TelegramCopyOwnerType } from '../common/entities/telegram-file-copy.entity';
 import { MirrorExecutionError } from './telegram-mirror.errors';
 
-/** 镜像源文件描述：两条执行路径（Bot 二次上传 / 用户无源复制）共用的事实 */
+/**
+ * 镜像源文件描述：副本扩散链路的**源事实**。
+ *
+ * `chatId + messageId` 是「搬运到主群」的输入（持有该消息的 Bot 把消息服务端转发进主群），
+ * 中继本身不再直接使用它们——用户账号只从主群锚点转发。
+ */
 export interface MirrorSourceDescriptor {
   /** 账号级 Telegram file_id（可能为空：仅当存在副本记录时才可知） */
   fileId: string | null;
   fileSize: number;
   fileName: string;
-  /** 源消息定位（用户无源复制必须持有） */
+  /** 源消息定位（搬运到主群必须持有） */
   chatId: string | null;
   messageId: string | null;
-  /** 产生 file_id 的账号（回退安全锚点） */
+  /** 产生 file_id 的账号（搬运只能由它执行，绝不跨账号代搬） */
   sourceAccountId: string | null;
+  /** 任务幂等键的版本分量（file=uploadVersion，其余为 1） */
+  sourceVersion: number;
 }
 
 /**
@@ -61,6 +68,7 @@ export class TelegramMirrorSourceService {
       chatId: file.telegramChatId ?? null,
       messageId: file.telegramMessageId ?? null,
       sourceAccountId: file.telegramSourceAccountId ?? null,
+      sourceVersion: Number(file.uploadVersion) || 1,
     };
     if (descriptor.fileId) return descriptor;
 
@@ -81,6 +89,8 @@ export class TelegramMirrorSourceService {
       chatId: grant.chatId ? String(grant.chatId) : null,
       messageId: grant.messageId ? String(grant.messageId) : null,
       sourceAccountId: grant.sourceAccountId ?? null,
+      // Bot 私聊入站没有「覆盖上传」概念：授权记录不可变，版本恒为 1
+      sourceVersion: 1,
     };
   }
 
@@ -110,6 +120,8 @@ export class TelegramMirrorSourceService {
         chatId: copy.chatId ?? null,
         messageId: copy.messageId ?? null,
         sourceAccountId: copy.accountId,
+        // 只知 file_unique_id 时无从得知覆盖版本：按首发版本处理
+        sourceVersion: 1,
       };
     } catch (error) {
       this.logger.warn(`副本表查询失败（${ownerType}:${ownerId}）：${error instanceof Error ? error.message : String(error)}`);

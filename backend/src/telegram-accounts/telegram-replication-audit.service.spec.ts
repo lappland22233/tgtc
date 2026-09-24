@@ -512,34 +512,58 @@ describe('TelegramReplicationAuditService', () => {
         findById: jest.fn(async () => attemptRow('att-blocked', { status: 'blocked_not_configured' })),
       },
     });
+    const blockedRetry = jest.fn();
+    blocked.service.registerDiffusionRetryHandler(blockedRetry);
     await expect(blocked.service.retryAttempt('att-blocked', 'admin-1'))
       .rejects.toThrow('不支持重试');
-    expect(blocked.copies.ensureCopies).not.toHaveBeenCalled();
+    expect(blockedRetry).not.toHaveBeenCalled();
 
     const missing = setup({ attempts: { findById: jest.fn(async () => null) } });
+    missing.service.registerDiffusionRetryHandler(jest.fn());
     await expect(missing.service.retryAttempt('att-missing', 'admin-1'))
       .rejects.toThrow('不存在或已被保留期清理');
   });
 
-  it('手动重试走中继并新建轮次：记录操作人与来源轮次、沿用当前有效目标', async () => {
-    const ctx = setup({ effectiveTarget: 3 });
-    ctx.copies.ensureCopies.mockResolvedValue({
-      status: 'partial_success',
-      created: ['a2'],
-      missing: ['a3'],
-      relayed: true,
-      attemptId: 'att-2',
-    } as never);
+  it('镜像模块未装配时手动重试明确报错，不静默什么都不做', async () => {
+    const ctx = setup();
+    await expect(ctx.service.retryAttempt('att-1', 'admin-1'))
+      .rejects.toThrow('镜像模块未装配');
+  });
+
+  it('手动重试委托镜像任务队列：按目标群限定范围并记录操作人', async () => {
+    const ctx = setup();
+    const handler = jest.fn(async () => ({ requeued: 2, created: 1, ruleIds: ['rule-1', 'rule-2'] }));
+    ctx.service.registerDiffusionRetryHandler(handler);
 
     const result = await ctx.service.retryAttempt('att-1', 'admin-9');
 
-    expect(result).toMatchObject({ attemptId: 'att-2', status: 'partial_success', created: ['a2'] });
-    expect(ctx.copies.ensureCopies).toHaveBeenCalledWith(expect.objectContaining({
+    expect(result).toEqual({
+      attemptId: 'att-1',
+      requeued: 2,
+      created: 1,
+      ruleIds: ['rule-1', 'rule-2'],
+    });
+    // 必须带上目标群：多镜像群各自独立轮次，不限定目标群会重排其它群的扩散
+    expect(handler).toHaveBeenCalledWith({
       ownerType: 'fileUnique',
       ownerId: 'UNIQ-BIG-ABCDEFGH',
-      desiredCount: 3,
-      manualRetry: { operatorUserId: 'admin-9', retriedFromId: 'att-1' },
-    }));
+      targetChatId: '-100222',
+      operatorUserId: 'admin-9',
+    });
+  });
+
+  it('轮次记录缺目标群（历史数据）时拒绝重试：不按「全部启用规则」误重排其它镜像群', async () => {
+    const ctx = setup({
+      attempts: {
+        findById: jest.fn(async () => attemptRow('att-legacy', { status: 'retryable_failed', targetChatId: null })),
+      },
+    });
+    const handler = jest.fn();
+    ctx.service.registerDiffusionRetryHandler(handler);
+
+    await expect(ctx.service.retryAttempt('att-legacy', 'admin-1'))
+      .rejects.toThrow('缺少镜像群信息');
+    expect(handler).not.toHaveBeenCalled();
   });
 
   it('预检默认 dry-run，未装配能力服务时显式报错而不是返回空报告', async () => {

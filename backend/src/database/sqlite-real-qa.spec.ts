@@ -79,6 +79,8 @@ describe('真实 SQLite 数据源关键业务与并发 QA', () => {
       'SqliteTelegramCopyAnchorGuard1803400000000',
       // 副本扩散改造：中继轮次持久化（策略 B 唯一链路的可观测性底座）
       'SqliteCreateTelegramReplicationAttempts1803500000000',
+      // 副本扩散改造：主群锚点（「Bot 先搬进主群 → userbot 再转发到镜像群」的落点）
+      'SqliteCreateTelegramMainChatAnchors1803600000000',
     ]);
 
     await dataSource.undoLastMigration();
@@ -501,5 +503,62 @@ describe('真实 SQLite 数据源关键业务与并发 QA', () => {
       [randomUUID(), `busy-fail-${randomUUID()}`, '1'], 'sqlite', 2)).rejects.toMatchObject({ code: 'SQLITE_BUSY' });
     expect(Date.now() - startedAt).toBeGreaterThanOrEqual(70);
     await dataSource.query('ROLLBACK');
+  });
+
+  it('主群锚点接管用「删旧行 + 重新插入」的唯一键 CAS：并发接管只有一个赢家', async () => {
+    const anchorModule = require('../common/entities/telegram-main-chat-anchor.entity') as typeof import('../common/entities/telegram-main-chat-anchor.entity');
+    const { TelegramMainChatAnchor } = anchorModule;
+    const repo = dataSource.getRepository(TelegramMainChatAnchor);
+    const ownerId = randomUUID();
+    const reserve = () => repo.insert(repo.create({
+      ownerType: 'file',
+      ownerId,
+      anchorChatId: '-100999',
+      anchorMessageId: null,
+      plantedByAccountId: null,
+      sourceChatId: '-100555',
+      sourceMessageId: '3',
+      status: 'pending',
+      lastError: null,
+      plantedAt: new Date(),
+    }));
+
+    // 首次预留：唯一键保证只有一行
+    await reserve();
+    const [reserved] = await repo.find({ where: { ownerType: 'file', ownerId } });
+    expect(reserved.id).toEqual(expect.any(String));
+
+    // 接管者 A：删旧行（条件带 status）→ 重新插入成功，拿到**新的**行 id（UuidSubscriber）
+    await repo.delete({ id: reserved.id, status: 'pending' });
+    await reserve();
+    const [takenOver] = await repo.find({ where: { ownerType: 'file', ownerId } });
+    expect(takenOver.id).not.toBe(reserved.id);
+
+    // 接管者 B：拿着**过期**的行 id 删（匹配不到）→ 插入撞唯一键：本调用必须被挡住
+    await repo.delete({ id: reserved.id, status: 'pending' });
+    await expect(reserve()).rejects.toThrow(/UNIQUE|constraint/i);
+    expect(await repo.count({ where: { ownerType: 'file', ownerId } })).toBe(1);
+
+    // 行已收口为 ready 时，带 status='pending' 的删除匹配不到（绝不误删可用锚点）
+    await repo.update({ ownerType: 'file', ownerId }, { status: 'ready', anchorMessageId: '777' });
+    await repo.delete({ id: takenOver.id, status: 'pending' });
+    expect(await repo.count({ where: { ownerType: 'file', ownerId } })).toBe(1);
+
+    // 失败收口带 `status: Not('ready')`：已成功的锚点不会被更早那次超时失败改写成 failed
+    const { Not } = require('typeorm') as typeof import('typeorm');
+    await repo.update({ id: takenOver.id, status: Not('ready') }, { status: 'failed', lastError: 'stale timeout' });
+    expect(await repo.findOneByOrFail({ ownerType: 'file', ownerId })).toMatchObject({
+      status: 'ready',
+      anchorMessageId: '777',
+      lastError: null,
+    });
+
+    // 反过来，正常失败路径（行是 pending）必须仍能写入失败状态与原因
+    await repo.update({ id: takenOver.id }, { status: 'pending', anchorMessageId: null });
+    await repo.update({ id: takenOver.id, status: Not('ready') }, { status: 'failed', lastError: 'boom' });
+    expect(await repo.findOneByOrFail({ ownerType: 'file', ownerId })).toMatchObject({
+      status: 'failed',
+      lastError: 'boom',
+    });
   });
 });

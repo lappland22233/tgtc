@@ -549,29 +549,30 @@ export async function fetchReplicationAttemptDetail(
 }
 
 /**
- * 手动重试单轮扩散（**只走用户账号中继**，界面不提供策略选择项）。
+ * 手动重试结果（与后端 `telegram-accounts.controller.ts` 的返回结构一一对应）。
  *
- * 仅「可重试失败」「认领超时」可用；后端会二次校验状态，避免前端状态过期导致误重试。
+ * 语义：重试**不新建执行路径**，只是把该文件在该镜像群上的扩散重新交给镜像任务队列。
+ * - `requeued`：被重置为排队的历史终态任务数；
+ * - `created`：按当前源事实补建的缺失任务数；
+ * - `ruleIds`：本次重排实际影响的镜像规则（= 镜像群）列表。
+ *
+ * `requeued + created === 0` 表示「无需重试」（该镜像群上已有在途任务），
+ * 界面必须如实展示为「无需重试」而**不是**成功态。
  */
-export async function retryReplicationAttempt(attemptId: string): Promise<{
+export interface ReplicationRetryResult {
   message: string;
-  attemptId: string | null;
-  status: ReplicationAttemptStatus;
-  created: string[];
-  missing: string[];
-  failureReason?: UserRelayFailureReason;
-}> {
+  attemptId: string;
+  requeued: number;
+  created: number;
+  ruleIds: string[];
+}
+
+/** 手动重试单轮扩散（**只走用户账号中继**，界面不提供策略选择项） */
+export async function retryReplicationAttempt(attemptId: string): Promise<ReplicationRetryResult> {
   const response = await api.post(
     `/admin/telegram-accounts/replication-attempts/${encodeURIComponent(attemptId)}/retry`,
   );
-  return response.data.data as {
-    message: string;
-    attemptId: string | null;
-    status: ReplicationAttemptStatus;
-    created: string[];
-    missing: string[];
-    failureReason?: UserRelayFailureReason;
-  };
+  return response.data.data as ReplicationRetryResult;
 }
 
 /**
@@ -758,8 +759,6 @@ export async function cancelUserAuth(id: string): Promise<{ ok: boolean }> {
 // 镜像备份
 // ============================================================
 
-export type TelegramMirrorMode = 'bot_upload' | 'user_copy' | 'auto';
-export type TelegramMirrorFallbackMode = 'disabled' | 'bot_upload';
 export type TelegramMirrorTestStatus = 'untested' | 'ok' | 'failed';
 
 export type TelegramMirrorTaskStatus =
@@ -771,15 +770,22 @@ export type TelegramMirrorTaskStatus =
   | 'blocked'
   | 'cancelled';
 
+/**
+ * 镜像规则（**多规则**：每条启用规则对应一个镜像群）。
+ *
+ * 字段语义：
+ * - `sourceChatId` = **主群**（源群、副本扩散唯一中转落点）：所有启用规则必须共用同一个主群；
+ * - `targetChatId` = **镜像群**（备份群）；
+ * - 已删除「上传模式」与「降级策略」：扩散只有「用户账号从主群服务端转发到镜像群」一条链路，
+ *   不存在 Bot 重新上传的路径，也不作为失败降级手段。
+ */
 export interface MirrorRule {
   id: string;
   enabled: boolean;
   name: string;
   sourceChatId: string;
   targetChatId: string;
-  mode: TelegramMirrorMode;
   preferredAccountId: string | null;
-  fallbackMode: TelegramMirrorFallbackMode;
   includeWebUploads: boolean;
   includeBotInboundFiles: boolean;
   lastTestedAt: string | null;
@@ -811,6 +817,11 @@ export interface MirrorTaskListItem {
   ownerType: string;
   ownerId: string;
   sourceVersion: number;
+  /**
+   * @deprecated 执行方式已无选择余地：扩散只有「用户账号从主群服务端转发到镜像群」一条链路，
+   * 该列恒为 `user_copy`（历史行可能残留 `bot_upload` / `auto`）。
+   * 后端为兼容历史行仍返回该字段，**界面不再渲染它**，请勿据此做分支判断。
+   */
   mode: string;
   status: TelegramMirrorTaskStatus;
   attempts: number;
@@ -828,17 +839,20 @@ export interface MirrorTaskListItem {
   updatedAt: string;
 }
 
-/** 镜像运行指标（进程内计数，单实例语义） */
+/**
+ * 镜像运行指标（进程内计数，单实例语义）。
+ *
+ * 只有 `userCopyCount` 一种执行计数：扩散不存在字节二次上传，
+ * 因此没有上传字节 / 上传次数 / 降级比例之类的指标。
+ */
 export interface MirrorMetricsSnapshot {
   tasksQueued: number;
   tasksSucceeded: number;
   tasksFailed: number;
   tasksBlocked: number;
   tasksRetried: number;
-  botUploadBytes: number;
-  botUploadCount: number;
+  /** 用户账号服务端转发成功次数（字节二次传输恒为 0） */
   userCopyCount: number;
-  fallbackCount: number;
 }
 
 export interface MirrorFeatureState {
@@ -862,7 +876,14 @@ export interface MirrorRuleTestResult {
 }
 
 export interface MirrorOverview {
+  /** 全部规则（创建时间升序） */
+  rules: MirrorRule[];
+  /** 兼容旧字段：第一条启用规则或最后一条（新代码请用 `rules`） */
   rule: MirrorRule | null;
+  /** 启用中的规则数（= 当前扩散目标数） */
+  enabledRuleCount: number;
+  /** 当前主群；多条启用规则源群不一致时为 null */
+  mainChatId: string | null;
   test: { status: TelegramMirrorTestStatus; summary: string | null; testedAt: string | null } | null;
   tasks: MirrorTaskSummary;
   metrics: MirrorMetricsSnapshot;
@@ -871,20 +892,24 @@ export interface MirrorOverview {
   notes: string[];
 }
 
+/**
+ * 规则创建/更新载荷。
+ *
+ * 已删除 `mode` / `fallbackMode`：后端全局开启 `forbidNonWhitelisted`，
+ * 继续发送这两个字段会直接 400。
+ */
 export interface UpdateMirrorRuleInput {
   name?: string;
   sourceChatId?: string;
   targetChatId?: string;
-  mode?: TelegramMirrorMode;
+  /** 可空字符串；为空时按能力与健康度自动选号 */
   preferredAccountId?: string;
-  fallbackMode?: TelegramMirrorFallbackMode;
   includeWebUploads?: boolean;
   includeBotInboundFiles?: boolean;
 }
 
 export interface MirrorTaskListQuery {
   status?: TelegramMirrorTaskStatus;
-  mode?: TelegramMirrorMode;
   /** 归属对象 ID（站内文件 ID） */
   ownerId?: string;
   accountId?: string;
@@ -892,16 +917,31 @@ export interface MirrorTaskListQuery {
   pageSize?: number;
 }
 
-/** 镜像配置总览：规则、测试结论、任务概览、指标与前置检查 */
+/** 镜像配置总览：规则列表、任务概览、指标与前置检查 */
 export async function fetchMirrorOverview(signal?: AbortSignal): Promise<MirrorOverview> {
   const response = await api.get('/admin/telegram-mirror', { signal });
   return response.data.data as MirrorOverview;
 }
 
-/** 更新规则（源群、备份群、模式、账号偏好、事件范围） */
-export async function updateMirrorRule(input: UpdateMirrorRuleInput): Promise<{ message: string; rule: MirrorRule }> {
-  const response = await api.put('/admin/telegram-mirror', input);
+/** 新建规则（后端默认停用；源/镜像群变更后必须重新通过权限测试） */
+export async function createMirrorRule(input: UpdateMirrorRuleInput): Promise<{ message: string; rule: MirrorRule }> {
+  const response = await api.post('/admin/telegram-mirror/rules', input);
   return response.data.data as { message: string; rule: MirrorRule };
+}
+
+/** 更新指定规则（主群、镜像群、账号偏好、事件范围） */
+export async function updateMirrorRule(
+  id: string,
+  input: UpdateMirrorRuleInput,
+): Promise<{ message: string; rule: MirrorRule }> {
+  const response = await api.put(`/admin/telegram-mirror/rules/${encodeURIComponent(id)}`, input);
+  return response.data.data as { message: string; rule: MirrorRule };
+}
+
+/** 删除规则（启用中或有在途任务时后端返回 400 与可读原因） */
+export async function deleteMirrorRule(id: string): Promise<{ message: string }> {
+  const response = await api.delete(`/admin/telegram-mirror/rules/${encodeURIComponent(id)}`);
+  return response.data.data as { message: string };
 }
 
 /** 镜像功能总开关（关闭只阻止新任务） */
@@ -910,15 +950,18 @@ export async function setMirrorEnabled(enabled: boolean): Promise<{ message: str
   return response.data.data as { message: string };
 }
 
-/** 启用/停用规则（启用前必须通过权限测试） */
-export async function setMirrorRuleEnabled(enabled: boolean): Promise<{ message: string; rule: MirrorRule }> {
-  const response = await api.put('/admin/telegram-mirror/rule/enabled', { enabled });
+/** 启用/停用指定规则（启用前必须通过权限测试） */
+export async function setMirrorRuleEnabled(
+  id: string,
+  enabled: boolean,
+): Promise<{ message: string; rule: MirrorRule }> {
+  const response = await api.put(`/admin/telegram-mirror/rules/${encodeURIComponent(id)}/enabled`, { enabled });
   return response.data.data as { message: string; rule: MirrorRule };
 }
 
-/** 权限测试（发送/复制一条受控测试并不产生真实镜像任务） */
-export async function testMirrorRule(): Promise<MirrorRuleTestResult> {
-  const response = await api.post('/admin/telegram-mirror/test');
+/** 权限测试指定规则（探测主群/镜像群可达性，不产生真实镜像任务） */
+export async function testMirrorRule(id: string): Promise<MirrorRuleTestResult> {
+  const response = await api.post(`/admin/telegram-mirror/rules/${encodeURIComponent(id)}/test`);
   return response.data.data as MirrorRuleTestResult;
 }
 

@@ -18,6 +18,7 @@ import { TelegramAccountClientService } from './telegram-account-client.service'
 import { TelegramAccountPoolAlertService } from './telegram-account-pool-alert.service';
 import { TelegramAccountPoolService } from './telegram-account-pool.service';
 import { ReplicaTargetResolver } from './replica-target.resolver';
+import { ReplicationClaimSweeperService } from './replication-claim-sweeper.service';
 import { UserAccountDirectoryService } from './user-account-directory.service';
 import { UserRelayService } from './user-relay.service';
 
@@ -82,6 +83,9 @@ const TERMINAL_ATTEMPT_TTL_DAYS = 30;
     ReplicaTargetResolver,
     // 全局权重预算按有效 Bot 数自动扩缩容（带闸门与审计）
     DownloadCapacityPolicyService,
+    // 认领窗口清扫：把「中继成功、等待群内 Bot 认领」的轮次结算到终态
+    // （下载路径不再触发扩散，没有清扫会留下永远停放在 waiting_claims 的轮次）
+    ReplicationClaimSweeperService,
   ],
   exports: [
     TelegramAccountPoolService,

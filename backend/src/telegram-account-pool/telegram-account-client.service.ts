@@ -270,9 +270,10 @@ export class TelegramAccountClientService {
   }
 
   /**
-   * 上传文档（用于 Web 上传与镜像 `bot_upload` 任务）。
+   * 上传文档（**只用于「入库」那一次**：Web 上传与上传任务队列）。
    *
-   * **注意**：副本扩散（策略 B）不使用本方法——它由用户账号做服务端转发，
+   * **注意**：副本扩散**不使用**本方法——扩散只做 Telegram 服务端转发
+   * （持有源消息的 Bot 搬进主群 + 用户账号从主群中继到各镜像群），
    * 不发生文件字节的二次传输。流式上传必须给 knownLength，且流只能消费一次（失败不自动重试）。
    */
   async sendDocumentStream(

@@ -7,11 +7,14 @@ import type {
   AccountPoolOverview,
   MirrorBackfillJob,
   MirrorOverview,
+  MirrorRule,
+  MirrorTaskListItem,
   RelayPreflightReport,
   ReplicationAttemptDetailView,
   ReplicationAuditReport,
   TelegramAccountView,
 } from '@/api/telegram-accounts';
+import MessagePlugin from '@/utils/message';
 import TelegramAccounts from './TelegramAccounts.vue';
 
 vi.mock('@/utils/message', () => ({
@@ -29,7 +32,13 @@ vi.mock('tdesign-vue-next', () => {
     template: '<button class="t-button-stub" :disabled="disabled || loading" @click="$emit(\'click\')"><slot /></button>',
   };
   const Tag = { name: 'TTag', props: ['theme', 'variant'], template: '<span class="t-tag-stub"><slot /></span>' };
-  const Switch = { name: 'TSwitch', props: ['value', 'modelValue'], template: '<span class="t-switch-stub" />' };
+  // 用真实 <button> 渲染并派发 change（取反），用于断言镜像规则的启用开关
+  const Switch = {
+    name: 'TSwitch',
+    props: ['value', 'modelValue', 'loading', 'disabled'],
+    emits: ['change'],
+    template: '<button class="t-switch-stub" :data-value="String(value)" @click="$emit(\'change\', !value)" />',
+  };
   // 渲染 title/message：告警文案（如「观测数据不完整」）必须可被断言
   const Alert = {
     name: 'TAlert',
@@ -40,9 +49,10 @@ vi.mock('tdesign-vue-next', () => {
   const TabPanel = { name: 'TTabPanel', props: ['value', 'label'], template: '<div class="t-tab-panel-stub"><slot /></div>' };
   const Input = {
     name: 'TInput',
-    props: ['modelValue'],
+    props: ['modelValue', 'name', 'placeholder'],
     emits: ['update:modelValue'],
-    template: '<input class="t-input-stub" :value="modelValue ?? \'\'" @input="$emit(\'update:modelValue\', $event.target.value)" />',
+    template:
+      '<input class="t-input-stub" :name="name" :placeholder="placeholder" :value="modelValue ?? \'\'" @input="$emit(\'update:modelValue\', $event.target.value)" />',
   };
   // 用真实 <select>/<option> 渲染，便于测试通过 setValue 触发 v-model 与 @change
   const Select = {
@@ -132,6 +142,8 @@ vi.mock('@/api/telegram-accounts', () => ({
   testMirrorRule: vi.fn(),
   updateAccount: vi.fn(),
   updateMirrorRule: vi.fn(),
+  createMirrorRule: vi.fn(),
+  deleteMirrorRule: vi.fn(),
   updateReplicationTarget: vi.fn(),
   verifyUserAuth: vi.fn(),
 }));
@@ -156,9 +168,33 @@ function overviewFixture(): AccountPoolOverview {
   };
 }
 
-function mirrorFixture(): MirrorOverview {
+function mirrorRuleFixture(overrides: Partial<MirrorRule> = {}): MirrorRule {
   return {
+    id: 'r1',
+    enabled: false,
+    name: '镜像群 A',
+    sourceChatId: '-1001234567890',
+    targetChatId: '-2001234567890',
+    preferredAccountId: null,
+    includeWebUploads: true,
+    includeBotInboundFiles: false,
+    lastTestedAt: null,
+    lastTestStatus: 'untested',
+    lastTestSummary: null,
+    createdBy: null,
+    updatedBy: null,
+    createdAt: '2026-09-24T00:00:00.000Z',
+    updatedAt: '2026-09-24T00:00:00.000Z',
+    ...overrides,
+  };
+}
+
+function mirrorFixture(overrides: Partial<MirrorOverview> = {}): MirrorOverview {
+  return {
+    rules: [],
     rule: null,
+    enabledRuleCount: 0,
+    mainChatId: null,
     test: null,
     tasks: {
       queued: 0,
@@ -179,14 +215,39 @@ function mirrorFixture(): MirrorOverview {
       tasksFailed: 0,
       tasksBlocked: 0,
       tasksRetried: 0,
-      botUploadBytes: 0,
-      botUploadCount: 0,
       userCopyCount: 0,
-      fallbackCount: 0,
     },
     feature: { mirrorEnabled: false, source: 'default', forceDisabled: false },
     precheck: [],
     notes: [],
+    ...overrides,
+  };
+}
+
+/** 镜像任务列表项（`mode` 恒为 user_copy，界面不再渲染） */
+function taskItem(overrides: Partial<MirrorTaskListItem> = {}): MirrorTaskListItem {
+  return {
+    id: 't1',
+    ruleId: 'r1',
+    ownerType: 'file',
+    ownerId: 'f1',
+    sourceVersion: 1,
+    mode: 'user_copy',
+    status: 'queued',
+    attempts: 0,
+    sourceAccountId: null,
+    targetAccountId: null,
+    targetChatId: null,
+    targetMessageId: null,
+    fileName: null,
+    lastErrorCode: null,
+    lastErrorSummary: null,
+    nextRetryAt: null,
+    startedAt: null,
+    completedAt: null,
+    createdAt: '2026-09-24T00:00:00.000Z',
+    updatedAt: '2026-09-24T00:00:00.000Z',
+    ...overrides,
   };
 }
 
@@ -603,13 +664,36 @@ describe('TelegramAccounts.vue 副本扩散策略', () => {
 
     const text = wrapper.text();
     expect(text).toContain('当前策略：仅用户账号中继');
-    expect(text).toContain('策略 A 已移除');
+    expect(text).toContain('策略 A（Bot 重新上传到备份群）已移除');
     expect(text).toContain('构造期读取，变更后需重启后端');
     // 三态必须可区分：通过 / 未检查 / 失败
     expect(text).toContain('源群可读：通过');
     expect(text).toContain('目标群可写：未检查');
     expect(text).toContain('Bot 可接收中继消息：失败');
     expect(text).toContain('隐私模式未关闭');
+  });
+
+  it('策略卡：链路为「主群 → userbot 中继 → 镜像群 → Bot 认领」，字节二次传输恒为 0', async () => {
+    const wrapper = mountView();
+    await settle(wrapper);
+
+    const text = wrapper.text();
+    expect(text).toContain('主群 → userbot 中继 → 镜像群 → Bot 认领');
+    expect(text).toContain('字节二次传输恒为 0');
+    // 旧口径文案必须消失（userbot「服务端转发」的旧描述不再作为主链路表述）
+    expect(text).not.toContain('userbot 服务端转发');
+  });
+
+  it('期望副本数明确标注为审计口径，不再驱动扩散', async () => {
+    const wrapper = mountView();
+    await settle(wrapper);
+
+    const text = wrapper.text();
+    expect(text).toContain('期望副本数（审计口径）');
+    expect(text).toContain('TELEGRAM_POOL_TARGET_REPLICAS');
+    expect(text).toContain('仅为审计口径');
+    expect(text).toContain('扩散由「启用中的镜像规则数」驱动');
+    expect(text).toContain('不再作为触发扩散的依据');
   });
 
   it('指标卡：低样本显示「样本不足」而不是伪造比率，并固定展示零字节契约', async () => {
@@ -681,11 +765,11 @@ describe('TelegramAccounts.vue 副本扩散策略', () => {
 
   it('手动重试：二次确认后只调用中继重试接口并刷新审计', async () => {
     mockedApi.retryReplicationAttempt.mockResolvedValue({
-      message: '重试已提交',
-      attemptId: 'att-2',
-      status: 'succeeded',
-      created: ['a1'],
-      missing: [],
+      message: '已重新排队：重置 2 条任务、补建 1 条任务',
+      attemptId: 'att-1',
+      requeued: 2,
+      created: 1,
+      ruleIds: ['r1'],
     });
     const confirmMock = vi.mocked(DialogPlugin.confirm);
     confirmMock.mockImplementationOnce((options) => {
@@ -709,6 +793,46 @@ describe('TelegramAccounts.vue 副本扩散策略', () => {
 
     expect(mockedApi.retryReplicationAttempt).toHaveBeenCalledWith('att-1');
     expect(mockedApi.fetchReplicationAudit.mock.calls.length).toBeGreaterThan(callsBefore);
+    // 如实展示后端计数口径
+    const text = wrapper.text();
+    expect(text).toContain('重排任务 2 条');
+    expect(text).toContain('补建任务 1 条');
+    expect(text).toContain('影响镜像规则 1 条');
+  });
+
+  it('手动重试 0 重排：显示「无需重试」而非成功，且不写成功提示', async () => {
+    mockedApi.retryReplicationAttempt.mockResolvedValue({
+      message: '该文件在当前镜像群上已有在途任务，无需重试（可直接观察任务状态）',
+      attemptId: 'att-1',
+      requeued: 0,
+      created: 0,
+      ruleIds: [],
+    });
+    const confirmMock = vi.mocked(DialogPlugin.confirm);
+    confirmMock.mockImplementationOnce((options) => {
+      const instance = { destroy: vi.fn() } as unknown as never;
+      Promise.resolve().then(() => options?.onConfirm?.({ e: new MouseEvent('click') }));
+      return instance;
+    });
+
+    const wrapper = mountView();
+    await settle(wrapper);
+
+    await wrapper
+      .findAll('button.t-button-stub')
+      .find((item) => item.text() === '重试')!
+      .trigger('click');
+    await settle(wrapper);
+    await settle(wrapper);
+
+    const text = wrapper.text();
+    expect(text).toContain('无需重试');
+    expect(text).toContain('重排任务 0 条');
+    expect(text).toContain('补建任务 0 条');
+    expect(text).toContain('未产生任何新的排队或补建');
+    // 关键：0 重排不得给出成功提示（不粉饰）
+    expect(vi.mocked(MessagePlugin.success)).not.toHaveBeenCalled();
+    expect(vi.mocked(MessagePlugin.warning)).toHaveBeenCalled();
   });
 
   it('不可重试的轮次不显示「重试」入口（配置类阻塞需先修正配置）', async () => {
@@ -750,5 +874,340 @@ describe('TelegramAccounts.vue 副本扩散策略', () => {
     const text = wrapper.text();
     expect(text).toContain('观测数据不完整');
     expect(text).toContain('轮次写入失败 3 次');
+  });
+});
+
+describe('TelegramAccounts.vue 镜像规则（多规则）', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockedApi.fetchAccountOverview.mockResolvedValue(overviewFixture());
+    mockedApi.fetchMirrorOverview.mockResolvedValue(mirrorFixture());
+    mockedApi.fetchMirrorTasks.mockResolvedValue({ items: [], total: 0 });
+    mockedApi.fetchMirrorBackfill.mockResolvedValue(backfillFixture());
+    mockedApi.fetchAccounts.mockResolvedValue({ items: [], total: 0, envAccounts: [] });
+    mockedApi.fetchReplicationAudit.mockResolvedValue(replicationFixture());
+  });
+
+  function findButton(wrapper: VueWrapper, text: string) {
+    return wrapper.findAll('button.t-button-stub').find((button) => button.text() === text);
+  }
+
+  it('多规则列表：渲染名称、主群/镜像群、启用状态与权限测试结论', async () => {
+    mockedApi.fetchMirrorOverview.mockResolvedValue(
+      mirrorFixture({
+        rules: [
+          mirrorRuleFixture({ id: 'r1', name: '镜像群 A', enabled: true, lastTestStatus: 'ok' }),
+          mirrorRuleFixture({ id: 'r2', name: '镜像群 B', targetChatId: '-2009999999999', lastTestStatus: 'failed' }),
+        ],
+        enabledRuleCount: 1,
+        mainChatId: '-1001234567890',
+      }),
+    );
+    const wrapper = mountView();
+    await settle(wrapper);
+
+    expect(wrapper.findAll('.mirror-rule-row')).toHaveLength(2);
+    const text = wrapper.text();
+    expect(text).toContain('当前主群：-1001234567890');
+    expect(text).toContain('镜像群 A');
+    expect(text).toContain('镜像群 B');
+    expect(text).toContain('主群（源群，副本扩散中转落点）：');
+    expect(text).toContain('-2009999999999');
+    expect(text).toContain('已启用');
+    expect(text).toContain('权限测试：通过');
+    expect(text).toContain('权限测试：失败');
+  });
+
+  it('新建规则：调用 createMirrorRule 且载荷不含已删除的 mode/fallbackMode', async () => {
+    mockedApi.createMirrorRule.mockResolvedValue({ message: '已创建', rule: mirrorRuleFixture() });
+    const wrapper = mountView();
+    await settle(wrapper);
+
+    await wrapper.find('input[name="mirror-name"]').setValue('新镜像群');
+    await wrapper.find('input[name="mirror-source"]').setValue('-1001234567890');
+    await wrapper.find('input[name="mirror-target"]').setValue('-2001234567890');
+    await findButton(wrapper, '保存规则')!.trigger('click');
+    await settle(wrapper);
+
+    expect(mockedApi.createMirrorRule).toHaveBeenCalledTimes(1);
+    const payload = mockedApi.createMirrorRule.mock.calls[0][0] as Record<string, unknown>;
+    expect(payload).toMatchObject({
+      name: '新镜像群',
+      sourceChatId: '-1001234567890',
+      targetChatId: '-2001234567890',
+    });
+    expect('mode' in payload).toBe(false);
+    expect('fallbackMode' in payload).toBe(false);
+    // 新建走 create，不应误触发更新
+    expect(mockedApi.updateMirrorRule).not.toHaveBeenCalled();
+  });
+
+  it('编辑规则：回填表单后用带 id 的更新接口提交，且不带 mode', async () => {
+    mockedApi.fetchMirrorOverview.mockResolvedValue(
+      mirrorFixture({
+        rules: [mirrorRuleFixture({ id: 'r1', name: '旧名', lastTestStatus: 'ok' })],
+        enabledRuleCount: 0,
+        mainChatId: '-1001234567890',
+      }),
+    );
+    mockedApi.updateMirrorRule.mockResolvedValue({ message: '已更新', rule: mirrorRuleFixture() });
+    const wrapper = mountView();
+    await settle(wrapper);
+
+    await findButton(wrapper, '编辑')!.trigger('click');
+    await settle(wrapper);
+    const nameInput = wrapper.find('input[name="mirror-name"]').element as HTMLInputElement;
+    expect(nameInput.value).toBe('旧名');
+
+    await wrapper.find('input[name="mirror-target"]').setValue('-2007777777777');
+    await findButton(wrapper, '保存规则')!.trigger('click');
+    await settle(wrapper);
+
+    expect(mockedApi.updateMirrorRule).toHaveBeenCalledWith(
+      'r1',
+      expect.objectContaining({ targetChatId: '-2007777777777' }),
+    );
+    const payload = mockedApi.updateMirrorRule.mock.calls[0][1] as Record<string, unknown>;
+    expect('mode' in payload).toBe(false);
+    expect('fallbackMode' in payload).toBe(false);
+    expect(mockedApi.createMirrorRule).not.toHaveBeenCalled();
+  });
+
+  it('启用前必须先通过权限测试：前端提示且不调用启用接口', async () => {
+    mockedApi.fetchMirrorOverview.mockResolvedValue(
+      mirrorFixture({
+        rules: [mirrorRuleFixture({ id: 'r1', lastTestStatus: 'untested' })],
+        enabledRuleCount: 0,
+        mainChatId: '-1001234567890',
+      }),
+    );
+    const wrapper = mountView();
+    await settle(wrapper);
+
+    await wrapper.find('.mirror-rule-row button.t-switch-stub').trigger('click');
+    await settle(wrapper);
+
+    expect(vi.mocked(MessagePlugin.warning)).toHaveBeenCalled();
+    expect(mockedApi.setMirrorRuleEnabled).not.toHaveBeenCalled();
+  });
+
+  it('权限测试通过后启用：开关切换调用带 id 的启用接口', async () => {
+    mockedApi.fetchMirrorOverview.mockResolvedValue(
+      mirrorFixture({
+        rules: [mirrorRuleFixture({ id: 'r1', lastTestStatus: 'ok' })],
+        enabledRuleCount: 0,
+        mainChatId: '-1001234567890',
+      }),
+    );
+    mockedApi.setMirrorRuleEnabled.mockResolvedValue({
+      message: '镜像规则已启用',
+      rule: mirrorRuleFixture({ enabled: true, lastTestStatus: 'ok' }),
+    });
+    const wrapper = mountView();
+    await settle(wrapper);
+
+    // 页面顶部还有账号池 / 镜像功能两个开关，必须限定在规则行内取开关
+    const toggle = wrapper.find('.mirror-rule-row button.t-switch-stub');
+    expect(toggle.exists()).toBe(true);
+    await toggle.trigger('click');
+    await settle(wrapper);
+
+    expect(mockedApi.setMirrorRuleEnabled).toHaveBeenCalledWith('r1', true);
+  });
+
+  it('已启用规则：开关切换走停用接口（多规则各自独立启停，无「只允许一条」限制）', async () => {
+    mockedApi.fetchMirrorOverview.mockResolvedValue(
+      mirrorFixture({
+        rules: [
+          mirrorRuleFixture({ id: 'r1', name: '群 A', enabled: true, lastTestStatus: 'ok' }),
+          mirrorRuleFixture({ id: 'r2', name: '群 B', enabled: true, lastTestStatus: 'ok', targetChatId: '-200999' }),
+        ],
+        enabledRuleCount: 2,
+        mainChatId: '-1001234567890',
+      }),
+    );
+    mockedApi.setMirrorRuleEnabled.mockResolvedValue({
+      message: '镜像规则已停用',
+      rule: mirrorRuleFixture({ id: 'r1', enabled: false, lastTestStatus: 'ok' }),
+    });
+    const wrapper = mountView();
+    await settle(wrapper);
+
+    expect(wrapper.findAll('.mirror-rule-row')).toHaveLength(2);
+    const switches = wrapper.findAll('.mirror-rule-row button.t-switch-stub');
+    expect(switches).toHaveLength(2);
+    await switches[0].trigger('click');
+    await settle(wrapper);
+
+    expect(mockedApi.setMirrorRuleEnabled).toHaveBeenCalledWith('r1', false);
+  });
+
+  it('镜像规则区不存在「上传模式 / 降级策略」控件与「只允许一条启用」提示', async () => {
+    mockedApi.fetchMirrorOverview.mockResolvedValue(
+      mirrorFixture({
+        rules: [mirrorRuleFixture({ id: 'r1', lastTestStatus: 'ok' })],
+        enabledRuleCount: 0,
+        mainChatId: '-1001234567890',
+      }),
+    );
+    const wrapper = mountView();
+    await settle(wrapper);
+
+    const text = wrapper.text();
+    expect(text).not.toContain('上传模式');
+    expect(text).not.toContain('降级策略');
+    expect(text).not.toContain('备选模式');
+    expect(text).not.toContain('只允许一条启用');
+    // 页面不得出现单选/模式选择控件
+    expect(wrapper.findAll('.t-radio-group-stub')).toHaveLength(0);
+  });
+
+  it('权限测试：按规则调用 testMirrorRule 并展示主群/镜像群明细', async () => {
+    mockedApi.fetchMirrorOverview.mockResolvedValue(
+      mirrorFixture({
+        rules: [mirrorRuleFixture({ id: 'r1', lastTestStatus: 'untested' })],
+        enabledRuleCount: 0,
+        mainChatId: '-1001234567890',
+      }),
+    );
+    mockedApi.testMirrorRule.mockResolvedValue({
+      status: 'ok',
+      summary: '主群/镜像群均可达',
+      details: [{ chat: 'source', ok: true, title: '主群标题', type: 'supergroup' }],
+    });
+    const wrapper = mountView();
+    await settle(wrapper);
+
+    await findButton(wrapper, '测试权限')!.trigger('click');
+    await settle(wrapper);
+
+    expect(mockedApi.testMirrorRule).toHaveBeenCalledWith('r1');
+    const text = wrapper.text();
+    expect(text).toContain('主群标题');
+    expect(text).toContain('主群');
+  });
+
+  it('删除规则：二次确认后调用删除接口', async () => {
+    mockedApi.fetchMirrorOverview.mockResolvedValue(
+      mirrorFixture({
+        rules: [mirrorRuleFixture({ id: 'r1' })],
+        enabledRuleCount: 0,
+        mainChatId: '-1001234567890',
+      }),
+    );
+    mockedApi.deleteMirrorRule.mockResolvedValue({ message: '镜像规则已删除' });
+    const confirmMock = vi.mocked(DialogPlugin.confirm);
+    confirmMock.mockImplementationOnce((options) => {
+      const instance = { destroy: vi.fn() } as unknown as never;
+      Promise.resolve().then(() => options?.onConfirm?.({ e: new MouseEvent('click') }));
+      return instance;
+    });
+
+    const wrapper = mountView();
+    await settle(wrapper);
+    await findButton(wrapper, '删除')!.trigger('click');
+    await settle(wrapper);
+    await settle(wrapper);
+
+    expect(mockedApi.deleteMirrorRule).toHaveBeenCalledWith('r1');
+  });
+
+  it('删除规则被拒（启用中/有在途任务）：展示后端可读错误', async () => {
+    mockedApi.fetchMirrorOverview.mockResolvedValue(
+      mirrorFixture({
+        rules: [mirrorRuleFixture({ id: 'r1', enabled: true, lastTestStatus: 'ok' })],
+        enabledRuleCount: 1,
+        mainChatId: '-1001234567890',
+      }),
+    );
+    mockedApi.deleteMirrorRule.mockRejectedValueOnce(
+      new Error('该规则还有 2 个在途任务（排队/执行中/重试中），请等待收尾后再删除'),
+    );
+    const confirmMock = vi.mocked(DialogPlugin.confirm);
+    confirmMock.mockImplementationOnce((options) => {
+      const instance = { destroy: vi.fn() } as unknown as never;
+      Promise.resolve().then(() => options?.onConfirm?.({ e: new MouseEvent('click') }));
+      return instance;
+    });
+
+    const wrapper = mountView();
+    await settle(wrapper);
+    await findButton(wrapper, '删除')!.trigger('click');
+    await settle(wrapper);
+    await settle(wrapper);
+
+    expect(mockedApi.deleteMirrorRule).toHaveBeenCalledWith('r1');
+    expect(vi.mocked(MessagePlugin.error)).toHaveBeenCalled();
+  });
+
+  it('任务列表：按镜像群（targetChatId）分组，多群失败原因不混成一锅', async () => {
+    mockedApi.fetchMirrorOverview.mockResolvedValue(
+      mirrorFixture({
+        rules: [
+          mirrorRuleFixture({ id: 'r1', name: '群 A', enabled: true, targetChatId: '-200111', lastTestStatus: 'ok' }),
+          mirrorRuleFixture({ id: 'r2', name: '群 B', enabled: true, targetChatId: '-200222', lastTestStatus: 'ok' }),
+        ],
+        enabledRuleCount: 2,
+        mainChatId: '-1001234567890',
+      }),
+    );
+    mockedApi.fetchMirrorTasks.mockResolvedValue({
+      items: [
+        taskItem({ id: 't1', ruleId: 'r1', ownerId: 'f1', targetChatId: '-200111', status: 'failed', lastErrorCode: 'flood_wait', lastErrorSummary: 'A 群限流', attempts: 2 }),
+        taskItem({ id: 't2', ruleId: 'r2', ownerId: 'f2', targetChatId: '-200222', status: 'blocked', lastErrorCode: 'chat_not_found', lastErrorSummary: 'B 群不可达' }),
+        taskItem({ id: 't3', ruleId: 'r1', ownerId: 'f3', targetChatId: '-200111', status: 'queued' }),
+      ],
+      total: 3,
+    });
+    const wrapper = mountView();
+    await settle(wrapper);
+
+    const groups = wrapper.findAll('.task-group');
+    expect(groups).toHaveLength(2);
+    // 有问题的群排在前面：A 群（1 失败）→ 实际排序按 失败+阻塞 降序，A=1、B=1 同分 → 按 chatId 升序 → -200111 在前
+    const text = wrapper.text();
+    expect(text).toContain('镜像群：-200111');
+    expect(text).toContain('镜像群：-200222');
+    expect(text).toContain('最近失败原因：A 群限流');
+    expect(text).toContain('最近失败原因：B 群不可达');
+    // 分组标题给出各组独立计数
+    expect(text).toContain('失败 1 · 阻塞 0 · 进行中 1');
+    expect(text).toContain('失败 0 · 阻塞 1 · 进行中 0');
+  });
+
+  it('任务列表：无目标群归属的历史任务单独成组并显式标注', async () => {
+    mockedApi.fetchMirrorTasks.mockResolvedValue({
+      items: [taskItem({ id: 't9', ruleId: 'r1', ownerId: 'f9', targetChatId: null, status: 'failed', lastErrorSummary: '历史行无群归属' })],
+      total: 1,
+    });
+    const wrapper = mountView();
+    await settle(wrapper);
+
+    expect(wrapper.findAll('.task-group')).toHaveLength(1);
+    const text = wrapper.text();
+    expect(text).toContain('未归属（历史任务）');
+    expect(text).toContain('历史行无群归属');
+  });
+
+  it('任务列表：空列表给出空状态提示，不渲染分组容器', async () => {
+    const wrapper = mountView();
+    await settle(wrapper);
+
+    expect(wrapper.findAll('.task-group')).toHaveLength(0);
+    expect(wrapper.text()).toContain('暂无镜像任务');
+  });
+
+  it('任务列表不再渲染「执行方式」列与旧模式文案', async () => {
+    mockedApi.fetchMirrorTasks.mockResolvedValue({
+      items: [taskItem({ id: 't1', ruleId: 'r1', ownerId: 'f1', targetChatId: '-200111', status: 'failed' })],
+      total: 1,
+    });
+    const wrapper = mountView();
+    await settle(wrapper);
+
+    const text = wrapper.text();
+    expect(text).not.toContain('执行方式');
+    expect(text).not.toContain('中继（历史行）');
+    expect(text).not.toContain('Bot 上传');
   });
 });

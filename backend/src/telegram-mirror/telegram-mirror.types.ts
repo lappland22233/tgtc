@@ -23,18 +23,19 @@ export interface MirrorErrorClassification {
   retryAfterMs?: number;
 }
 
-/** 一次镜像执行的成功结果 */
+/**
+ * 一次镜像执行的成功结果。
+ *
+ * 执行模式恒为 `user_copy`（用户账号从主群服务端转发到镜像群）：
+ * 不存在「Bot 重新上传」路径，因此没有模式分支，也没有降级字段。
+ */
 export interface MirrorExecutionResult {
   targetAccountId: string;
   targetChatId: string;
   targetMessageId: string;
   targetTelegramFileId: string;
   fileSize: number;
-  /** 实际执行模式（自动模式下可能由 user_copy 降级为 bot_upload） */
-  mode: 'bot_upload' | 'user_copy';
-  /** 是否发生了显式降级（写入审计与任务元数据） */
-  fallbackApplied?: boolean;
-  fallbackReason?: string;
+  mode: 'user_copy';
 }
 
 export interface MirrorTaskSummary {

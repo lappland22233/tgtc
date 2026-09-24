@@ -88,6 +88,9 @@ export class TelegramAccountPoolService implements OnModuleInit, OnApplicationSh
     anchorConflicts: 0,
     fallbackThrottled: 0,
     largeFileSlotThrottled: 0,
+    mainChatPlantAttempts: 0,
+    mainChatPlantFailures: 0,
+    mainChatPlantTakeovers: 0,
   };
 
   /** 供健康探测注入：`(id) => Promise<void>`；由模块装配阶段设置，避免循环依赖 */

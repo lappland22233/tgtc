@@ -88,6 +88,9 @@ const COUNTER_KEYS: Array<keyof AccountPoolCounters> = [
   'anchorConflicts',
   'fallbackThrottled',
   'largeFileSlotThrottled',
+  'mainChatPlantAttempts',
+  'mainChatPlantFailures',
+  'mainChatPlantTakeovers',
 ];
 
 function zeroCounters(): AccountPoolCounters {
@@ -107,6 +110,9 @@ function zeroCounters(): AccountPoolCounters {
     anchorConflicts: 0,
     fallbackThrottled: 0,
     largeFileSlotThrottled: 0,
+    mainChatPlantAttempts: 0,
+    mainChatPlantFailures: 0,
+    mainChatPlantTakeovers: 0,
   };
 }
 

@@ -1,37 +1,57 @@
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
 import { TelegramMirrorRule } from '../common/entities/telegram-mirror-rule.entity';
 import { TelegramMirrorTask } from '../common/entities/telegram-mirror-task.entity';
-import { TelegramAccountClientService } from '../telegram-account-pool/telegram-account-client.service';
-import { TelegramAccountPoolService } from '../telegram-account-pool/telegram-account-pool.service';
+import type { TelegramReplicationAttempt } from '../common/entities/telegram-replication-attempt.entity';
+import type { UserRelayFailureReason } from '../common/entities/telegram-replication-attempt.entity';
 import { pickUserAccount } from '../telegram-account-pool/user-account-picker';
+import { FileCopyService } from '../telegram-account-pool/file-copy.service';
+import { ReplicaTargetResolver } from '../telegram-account-pool/replica-target.resolver';
+import { TelegramAccountPoolService } from '../telegram-account-pool/telegram-account-pool.service';
+import {
+  attemptStatusForRelayFailure,
+  ReplicationAttemptService,
+} from '../telegram-account-pool/replication-attempt.service';
 import { TelegramAccountsService } from '../telegram-accounts/telegram-accounts.service';
+import { maskIdentifier } from '../telegram-accounts/telegram-account-view';
 import { TelegramUserClientService } from '../telegram-user/telegram-user-client.service';
-import { TelegramMirrorSourceService, MirrorSourceDescriptor } from './telegram-mirror-source.service';
-import { MirrorExecutionError, isAccountCredentialError } from './telegram-mirror.errors';
+import { TelegramMirrorSourceService } from './telegram-mirror-source.service';
+import { TelegramMainChatAnchorService } from './telegram-main-chat-anchor.service';
+import {
+  MirrorExecutionError,
+  classifyMirrorError,
+  isAccountCredentialError,
+} from './telegram-mirror.errors';
 import { MirrorExecutionResult } from './telegram-mirror.types';
 
 /**
- * 用户账号镜像路径：MTProto **无源复制**。
+ * 认领窗口：中继成功后等待「镜像群内各 Bot 各自登记副本」的时间。
+ *
+ * 只影响**观测轮次的结算时点**，不占用任何队列并发：窗口到期由后台清扫服务结算
+ * （`waiting_claims` → succeeded / partial_success / claim_timeout）。
+ * 之所以不在 job 里阻塞等待：镜像队列并发仅 2，而提交即触发会让队列量级变为
+ * 「收到的每个文件 × 每条启用规则」，阻塞等待会把队列拖垮。
+ */
+const CLAIM_WINDOW_MS = 12_000;
+
+/**
+ * 副本扩散的**唯一执行器**：用户账号(userbot) 从主群服务端转发到镜像群。
+ *
+ * 链路（不可分割的一步）：
+ * 1. 「持有源消息的 Bot 账号」把源消息服务端转发进**主群**（`TelegramMainChatAnchorService`，
+ *    幂等、零字节、锚点持久化）；
+ * 2. 用户账号从**主群**用 MTProto 服务端转发到 `rule.targetChatId`（本类）。
  *
  * 事实边界（不可含糊）：
- * - 「无源」只表示**不重新下载/上传文件字节**（服务端 `copyMessages`/`forwardMessages`），
- *   实现仍必须依赖源 `chat_id + message_id`；
- * - 用户账号必须同时能读源群、能写备份群；
- * - 权限不足、源消息不可访问、session 失效时**必须明确失败**，绝不允许报告成功；
+ * - 全程**不重新下载/上传文件字节**（服务端 `forwardMessages`），字节二次传输恒为 0；
+ * - 用户账号必须同时是**主群**与镜像群的成员：主群可读、镜像群可写，否则明确失败；
+ * - 权限不足、源消息不可访问、session 失效时**必须明确失败**，绝不允许报告成功，
+ *   也绝不降级为「Bot 重新上传」；
  * - 该路径产生的目标消息没有「Bot 可用的 file_id」，因此**不写入副本表**，
  *   只以 `targetMessageId` 作为定位锚点（备份可用性由群内消息保证）。
  *
- * 副本认领（本路径的完成条件，见 bot 入站链路）：目标群里的消息由**用户账号**发出，
+ * 副本认领（本路径的完成条件，见 bot 入站链路）：镜像群里的消息由**用户账号**发出，
  * 因此群内每个 Bot（管理员/关闭隐私模式）都会各自收到更新，登记**自己账号的**
  * `file_id` 副本；这些副本再经「入站副本 → 站内文件」桥接后即可参与下载负载均衡。
- *
- * Bot 私聊来源的搬运：用户账号**读不到** Bot 与其它用户的私聊，`grant` 类来源直接转发
- * 必然 `permission` 失败。因此这类来源先由**接收该消息的 Bot** 用 Bot API
- * `forwardMessage`（服务端复制、零字节重传）搬到中转群，再用中转消息作为中继源锚点；
- * 锚点会写回任务行，重试时直接复用，不会重复搬运。
  */
 @Injectable()
 export class TelegramUserCopyService {
@@ -39,36 +59,23 @@ export class TelegramUserCopyService {
 
   constructor(
     private readonly source: TelegramMirrorSourceService,
+    private readonly anchors: TelegramMainChatAnchorService,
     private readonly accounts: TelegramAccountsService,
     private readonly userClient: TelegramUserClientService,
-    // 以下为搬运私聊来源所需的可选依赖：未装配时 private-chat 来源会给出可诊断的 blocked 错误。
-    // 必须显式 `@Inject(X)`：`X | null` 联合类型发出的是 `Object`，
-    // 否则 `@Optional()` 会把解析失败静默降级成 `null`（私聊搬运能力整体缺失）。
-    @Optional() @Inject(TelegramAccountClientService)
-    private readonly client: TelegramAccountClientService | null = null,
+    // 以下为**可选**的观测依赖：缺任何一个都只影响「扩散轮次」时间线，
+    // 绝不影响扩散本身（fail-closed 的是扩散能力，不是观测能力）。
+    @Optional() @Inject(ReplicationAttemptService)
+    private readonly attempts: ReplicationAttemptService | null = null,
+    @Optional() @Inject(FileCopyService)
+    private readonly copies: FileCopyService | null = null,
+    @Optional() @Inject(ReplicaTargetResolver)
+    private readonly replicaTargets: ReplicaTargetResolver | null = null,
+    // 账号池计数（中继健康度三元组 relayAttempts/relaySucceeded/relayFailed 的唯一写入方）
     @Optional() @Inject(TelegramAccountPoolService)
     private readonly pool: TelegramAccountPoolService | null = null,
-    @Optional() @Inject(ConfigService)
-    private readonly configService: ConfigService | null = null,
-    @Optional() @InjectRepository(TelegramMirrorTask)
-    private readonly tasks: Repository<TelegramMirrorTask> | null = null,
   ) {}
 
-  /** 自动模式下是否具备走用户复制路径的条件（仅做能力判断，不做真实调用） */
-  async isUserPathViable(): Promise<boolean> {
-    if (!this.userClient.isAvailable()) return false;
-    try {
-      const users = await this.accounts.resolveEnabledUserAccounts();
-      return users.length > 0;
-    } catch {
-      return false;
-    }
-  }
-
   async execute(task: TelegramMirrorTask, rule: TelegramMirrorRule): Promise<MirrorExecutionResult> {
-    const descriptor = await this.source.describe(task.ownerType, task.ownerId);
-    const raw = this.resolveRawAnchor(task, descriptor);
-
     if (!this.userClient.isAvailable()) {
       throw new MirrorExecutionError(
         'user_client_unavailable',
@@ -76,16 +83,53 @@ export class TelegramUserCopyService {
         'blocked',
       );
     }
-    // 私聊来源必须先由接收 Bot 搬运到中转群，否则用户账号必然读不到该会话
-    const anchor = await this.stageIfUnreadable(task, rule, raw.chatId, raw.messageId);
 
-    const candidates = await this.accounts.resolveEnabledUserAccounts();
+    const targetChatId = (rule.targetChatId || '').trim();
+    if (!targetChatId) {
+      throw new MirrorExecutionError('target_chat_missing', '镜像规则未配置镜像群（目标群）', 'blocked');
+    }
+
+    // 观测轮次：先开轮次再中继，`baselineReadyCount` 才能反映**中继前**的副本数，
+    // 否则本轮自己带来的认领会被算成「历史既有」，结算永远看不到新增。
+    const round = await this.openRound(task, targetChatId);
+
+    // 源事实 + 主群锚点：**任何**前置失败都必须收口轮次。
+    // 否则轮次会永久停在 active 态（清扫只结算 `waiting_claims`），
+    // 后台时间线长期显示「进行中」，后续 beginRound 还会误判为可合并。
+    let descriptor: Awaited<ReturnType<TelegramMirrorSourceService['describe']>>;
+    let anchor: { chatId: string; messageId: string };
+    try {
+      descriptor = await this.source.describe(task.ownerType, task.ownerId);
+      // 主群锚点：私聊、账号存储群、镜像群等**任何来源**都先落主群，
+      // 用户账号只从主群中继——这是「单一源锚点」语义的全部意义。
+      anchor = await this.anchors.ensureAnchor({
+        ownerType: task.ownerType,
+        ownerId: task.ownerId,
+        sourceChatId: descriptor.chatId,
+        sourceMessageId: descriptor.messageId,
+        // 归属优先用任务行固化的事实（任务创建时写入），缺失时回落到描述
+        sourceAccountId: task.sourceAccountId ?? descriptor.sourceAccountId,
+      });
+    } catch (error) {
+      await this.closeRoundFailed(round, error);
+      throw error;
+    }
+
+    let candidates: Awaited<ReturnType<TelegramAccountsService['resolveEnabledUserAccounts']>>;
+    try {
+      candidates = await this.accounts.resolveEnabledUserAccounts();
+    } catch (error) {
+      await this.closeRoundFailed(round, error);
+      throw error;
+    }
     if (candidates.length === 0) {
-      throw new MirrorExecutionError(
+      const error = new MirrorExecutionError(
         'no_user_account',
-        '没有可用（已授权且启用）的 Telegram 用户账号，无法执行无源复制',
+        '没有可用（已授权且启用）的 Telegram 用户账号，无法执行服务端转发',
         'blocked',
       );
+      await this.closeRoundFailed(round, error);
+      throw error;
     }
     const chosen = this.pickUser(candidates, rule.preferredAccountId, task.id);
 
@@ -95,37 +139,52 @@ export class TelegramUserCopyService {
         credentials: { apiId: chosen.apiId, apiHash: chosen.apiHash, session: chosen.session },
         sourceChatId: anchor.chatId,
         sourceMessageId: anchor.messageId,
-        targetChatId: rule.targetChatId,
-        // 幂等键 = 任务 + 目标群 + 执行账号。
+        targetChatId,
+        // 幂等键 = 任务 + 镜像群 + 执行账号。
         //
-        // 「账号」必须在键内：账号选择是确定性的（见 pickUser），因此同一任务的所有重试都会
-        // 派生出同一个 random_id，服务端据此去重，不会留下重复副本。
-        // 「目标群」也必须在键内：规则允许在任务重试期间被改动，若只用任务 + 账号，
-        // 同一个 random_id 会被服务端按去重返回**旧目标群**的消息 ID，而结果里的
-        // targetChatId 是新群——定位与实际位置不一致。
-        idempotencyKey: `${task.id}:${rule.targetChatId}:${chosen.id}`,
+        // 「镜像群」必须在键内：多镜像群各自一条任务，若只用任务 + 账号，同一个
+        // random_id 会被服务端按去重返回**另一个镜像群**的消息 ID，而结果里的
+        // targetChatId 是本群——定位与实际位置不一致。
+        // 「账号」也必须在键内：账号选择是确定性的（见 pickUser），因此同一任务的所有
+        // 重试都会派生出同一个 random_id，服务端据此去重，不会在镜像群留下重复副本。
+        idempotencyKey: `${task.id}:${targetChatId}:${chosen.id}`,
       });
     } catch (error) {
-      // 凭据失效必须让管理员可见：把实际使用的账号标记为 degraded（否则账号会一直
-      // 显示 active，任务却持续 blocked，运维无从下手）
+      // 顺序不可交换：先按**原始错误**收口轮次（否则轮次会停在 active，清扫只结算
+      // `waiting_claims`，后台时间线会长期显示「进行中」），再标记账号降级。
+      // 降级标记是附带副作用，其自身失败（如库故障）绝不能顶掉原始错误分类、
+      // 更不能把轮次失败收口一起跳过。
+      await this.closeRoundFailed(round, error);
       if (isAccountCredentialError(error)) {
-        await this.accounts.markDegraded(
-          chosen.id,
-          'user_session_invalid',
-          error instanceof Error ? error.message : String(error),
-        );
+        try {
+          await this.accounts.markDegraded(
+            chosen.id,
+            'user_session_invalid',
+            error instanceof Error ? error.message : String(error),
+          );
+        } catch (degradeError) {
+          this.logger.warn(
+            `用户账号降级标记失败（仅影响后台展示，扩散结论不受影响）：`
+            + `${degradeError instanceof Error ? degradeError.message : String(degradeError)}`,
+          );
+        }
       }
       throw error;
     }
 
+    // 转发成功只是中间态：开立认领等待窗口，由后台清扫按窗口结算
+    await this.markRoundRelayingDone(round, chosen.id, copied.targetMessageId);
+
     this.logger.log(
-      `镜像完成（user_copy / 无源复制）：${task.ownerType}:${task.ownerId} → 账号 ${chosen.id} / chat ${copied.targetChatId}`,
+      `镜像完成（主群 → userbot 服务端转发）：${task.ownerType}:${task.ownerId} → `
+      + `账号 ${maskIdentifier(chosen.id)} / 镜像群 ${maskIdentifier(copied.targetChatId)} / `
+      + `消息 ${maskIdentifier(copied.targetMessageId)}`,
     );
     return {
       targetAccountId: chosen.id,
       targetChatId: copied.targetChatId,
       targetMessageId: copied.targetMessageId,
-      // 用户复制的目标消息没有 Bot API file_id（不登记副本表，避免跨体系误用）；
+      // 用户转发的目标消息没有 Bot API file_id（不登记副本表，避免跨体系误用）；
       // 各 Bot 会在收到群内该消息后登记**各自**的副本。
       targetTelegramFileId: '',
       fileSize: descriptor.fileSize,
@@ -133,147 +192,133 @@ export class TelegramUserCopyService {
     };
   }
 
-  // ---------------- 源锚点解析 ----------------
-
-  /** 任务/描述里已有的源锚点；缺失即 blocked（不允许随机挑账号尝试） */
-  private resolveRawAnchor(
-    task: TelegramMirrorTask,
-    descriptor: MirrorSourceDescriptor,
-  ): { chatId: string; messageId: string } {
-    const chatId = String(task.sourceChatId ?? descriptor.chatId ?? '').trim();
-    const messageId = String(task.sourceMessageId ?? descriptor.messageId ?? '').trim();
-    if (!chatId || !messageId) {
-      throw new MirrorExecutionError(
-        'source_message_unresolved',
-        '缺少源消息定位（chat_id + message_id），无法执行无源复制；'
-        + '该事件应回退 Bot 重新上传，或修复源消息登记后重试',
-        'blocked',
-      );
-    }
-    return { chatId, messageId };
-  }
+  // ---------------- 扩散轮次（认领观测层） ----------------
 
   /**
-   * 若源锚点位于**用户账号不可读**的会话（Bot 与用户的私聊），先由接收该消息的 Bot
-   * 用 Bot API 服务端转发到中转群，并返回中转消息作为新的源锚点。
+   * 开立/复用一条扩散轮次（best-effort）。
    *
-   * 群/频道的 chat id 为负数；正数即私聊的用户 ID。无法判定的标识（非数字）按群处理，
-   * 保持既有行为不变。
+   * 观测不可用（依赖未装配、库写入失败）时返回 `null` 并记日志：**扩散本身继续执行**，
+   * 绝不因为「后台看不到时间线」而阻断真实的文件扩散。
    */
-  private async stageIfUnreadable(
+  private async openRound(
     task: TelegramMirrorTask,
-    rule: TelegramMirrorRule,
-    chatId: string,
-    messageId: string,
-  ): Promise<{ chatId: string; messageId: string }> {
-    if (!this.isPrivateChat(chatId)) return { chatId, messageId };
-
-    const staging = (rule.sourceChatId || '').trim()
-      || (this.configService?.get<string>('TELEGRAM_ARCHIVE_CHAT_ID') || '').trim();
-    if (!staging) {
-      throw new MirrorExecutionError(
-        'relay_staging_chat_missing',
-        '源消息位于 Bot 与用户的私聊（用户账号读不到该会话），但规则未配置源群、'
-        + '也未配置 TELEGRAM_ARCHIVE_CHAT_ID，无法搬运到用户账号可读的群',
-        'blocked',
+    targetChatId: string,
+  ): Promise<TelegramReplicationAttempt | null> {
+    if (!this.attempts) return null;
+    this.pool?.bumpCounter('relayAttempts');
+    try {
+      const ready = this.copies ? await this.copies.readyAccountIds(task.ownerType, task.ownerId) : [];
+      const desiredCount = Math.max(1, (await this.replicaTargets?.desiredReplicas()) ?? 1);
+      const begin = await this.attempts.beginRound({
+        ownerType: task.ownerType,
+        ownerId: task.ownerId,
+        sourceAccountId: task.sourceAccountId ?? null,
+        targetChatId,
+        idempotencyKey: `mirror:${task.id}:${targetChatId}`,
+        desiredCount,
+        baselineReadyCount: ready.length,
+        triggeredBy: 'eager',
+      });
+      return begin.attempt;
+    } catch (error) {
+      this.logger.warn(
+        `扩散轮次开立失败（仅影响观测，扩散继续）：${error instanceof Error ? error.message : String(error)}`,
       );
+      return null;
     }
-    if (this.isPrivateChat(staging)) {
-      throw new MirrorExecutionError(
-        'relay_staging_chat_invalid',
-        `中转群必须是群或频道（chat id 为负数），当前配置为私聊 ${staging}`,
-        'blocked',
-      );
-    }
-    if (staging === rule.targetChatId) {
-      // 搬到备份群本身没有意义：Bot 发出的消息其它 Bot 看不到，副本仍无法被认领；
-      // 且随后「从备份群中继到备份群」会产生语义混乱。明确失败，等运维修正配置。
-      throw new MirrorExecutionError(
-        'relay_staging_chat_conflict',
-        '中转群与备份群相同：Bot 转发进备份群的消息其它 Bot 看不到，无法达成副本认领；'
-        + '请把规则源群或 TELEGRAM_ARCHIVE_CHAT_ID 配置为独立的中转群',
-        'blocked',
-      );
-    }
-    if (!this.client) {
-      throw new MirrorExecutionError(
-        'relay_client_unavailable',
-        '账号级 Bot API 客户端未装配，无法把 Bot 私聊的源消息搬运到中转群',
-        'blocked',
-      );
-    }
-
-    const bot = await this.resolveForwardBot(task.sourceAccountId ?? null);
-    if (!bot) {
-      throw new MirrorExecutionError(
-        'relay_forward_bot_unresolved',
-        `无法确认收到该文件的 Bot 账号（sourceAccountId=${task.sourceAccountId ?? 'null'}）的可用凭据，`
-        + '无法把私聊消息搬运到中转群；请确认该账号仍启用且凭据可解密',
-        'blocked',
-      );
-    }
-
-    const forwarded = await this.client.forwardMessage(bot.accountId, bot.token, staging, chatId, messageId);
-    await this.persistRelayAnchor(task, staging, forwarded.messageId);
-    this.logger.log(
-      `已把 Bot 私聊源消息搬运到中转群（任务 ${task.id} / 账号 ${bot.accountId} / 新消息 ${forwarded.messageId}）`,
-    );
-    return { chatId: staging, messageId: forwarded.messageId };
   }
 
-  /**
-   * 固化中转锚点到任务行。
-   *
-   * 为什么要落库：Bot API 的 `forwardMessage` **没有幂等键**，重试会再搬一次并在中转群
-   * 留下重复消息。写回任务行后，后续所有重试都会命中「源锚点已是群消息 → 无需搬运」。
-   */
-  private async persistRelayAnchor(
-    task: TelegramMirrorTask,
-    chatId: string,
-    messageId: string,
+  /** 中继成功：进入认领等待窗口（异步结算，不阻塞队列） */
+  private async markRoundRelayingDone(
+    round: TelegramReplicationAttempt | null,
+    relayAccountId: string,
+    relayMessageId: string,
   ): Promise<void> {
-    task.sourceChatId = chatId;
-    task.sourceMessageId = messageId;
-    if (!this.tasks) return;
+    if (!round || !this.attempts) return;
     try {
-      await this.tasks.update({ id: task.id }, { sourceChatId: chatId, sourceMessageId: messageId });
+      await this.attempts.markRelaySucceeded(round.id, {
+        relayAccountId,
+        relayMessageId,
+        claimDeadlineAt: new Date(Date.now() + CLAIM_WINDOW_MS),
+      });
+      // 「认领成功率」分母：中继实际完成（转发成功）的轮次
+      this.pool?.bumpCounter('relaySucceeded');
     } catch (error) {
-      // 用 error 级：写回失败意味着重试会**再搬一次**并在中转群留下重复消息，
-      // 属于需要运维关注的状态（消费者通过 claim 原子领取任务，同一任务不会并发执行，
-      // 因此重复搬运只可能由「写库失败后重新载入任务」引起）。
-      this.logger.error(
-        `中转锚点写回任务失败（任务 ${task.id}）：${error instanceof Error ? error.message : String(error)}`
-        + '——该任务重试时会重复搬运一次，请关注中转群消息',
+      this.logger.warn(
+        `扩散轮次结算失败（转发已成功，仅影响观测）：${error instanceof Error ? error.message : String(error)}`,
       );
     }
   }
 
-  /** 解析搬运所需的 Bot 凭据（只使用「收到该消息的那个账号」，绝不跨账号代搬） */
-  private async resolveForwardBot(poolAccountId: string | null): Promise<{ accountId: string; token: string } | null> {
-    const wanted = (poolAccountId || '').trim();
-    if (wanted && this.pool) {
-      const config = this.pool.getConfig(wanted);
-      if (config?.enabled && config.token) return { accountId: config.id, token: config.token };
-    }
-    const envToken = (this.configService?.get<string>('TELEGRAM_BOT_TOKEN') || '').trim();
-    if (envToken.includes(':')) {
-      const envBotId = envToken.split(':')[0];
-      if (!wanted || wanted === envBotId) return { accountId: envBotId, token: envToken };
-    }
+  /** 中继失败/前置阻塞：按统一映射表收口轮次状态（与后台展示、告警口径同源） */
+  private async closeRoundFailed(round: TelegramReplicationAttempt | null, error: unknown): Promise<void> {
+    if (!round || !this.attempts) return;
     try {
-      const panel = await this.accounts.resolveEnabledBotAccounts();
-      const match = panel.find((item) => item.accountId === wanted || item.id === wanted);
-      if (match) return { accountId: match.accountId, token: match.token };
-    } catch (error) {
-      this.logger.warn(`读取面板 Bot 账号失败：${error instanceof Error ? error.message : String(error)}`);
+      const classification = classifyMirrorError(error);
+      const reason = this.relayFailureReason(classification.code);
+      this.pool?.bumpCounter('relayFailed');
+      await this.attempts.finishBlocked(round.id, {
+        status: attemptStatusForRelayFailure(reason),
+        failureReason: reason,
+        failureSummary: classification.summary,
+      });
+    } catch (finishError) {
+      this.logger.warn(
+        `扩散轮次失败收口失败（仅影响观测）：`
+        + `${finishError instanceof Error ? finishError.message : String(finishError)}`,
+      );
     }
-    return null;
   }
 
-  /** 私聊判定：Telegram 群/频道 chat id 恒为负数，用户 ID 为正数 */
-  private isPrivateChat(chatId: string): boolean {
-    const numeric = Number(chatId);
-    return Number.isFinite(numeric) && numeric > 0;
+  /**
+   * 镜像错误码 → 轮次失败原因（`UserRelayFailureReason`）。
+   *
+   * 这张映射是「后台展示 / 告警口径 / 是否可重试」的一致性来源，
+   * 集中在此而不是散落到调用方。
+   */
+  private relayFailureReason(code: string): UserRelayFailureReason {
+    switch (code) {
+      case 'user_client_unavailable':
+        return 'client_unavailable';
+      case 'no_user_account':
+        return 'no_account';
+      case 'target_chat_missing':
+      case 'target_chat_not_configured':
+        return 'target_missing';
+      // 主群相关的全部失败都归为「源锚点不可用」：用户账号的中继源**就是**主群锚点
+      case 'source_message_unresolved':
+      case 'source_message_missing':
+      // 处理器在站内文件行不存在时给出的错误码（文件被删除/被覆盖清理）
+      case 'source_file_missing':
+      case 'source_file_unavailable':
+      case 'main_chat_missing':
+      case 'main_chat_conflict':
+      case 'main_chat_invalid':
+      case 'main_chat_bot_unresolved':
+      case 'main_chat_client_unavailable':
+      case 'main_chat_anchor_unavailable':
+      case 'main_chat_anchor_persist_failed':
+        return 'source_missing';
+      case 'target_permission_denied':
+      case 'permission_denied':
+      case 'user_permission_denied':
+        return 'permission_denied';
+      case 'account_unauthorized':
+      case 'user_session_invalid':
+        return 'auth_invalid';
+      case 'flood_wait':
+        return 'rate_limited';
+      case 'network_error':
+      case 'user_client_network':
+      case 'account_timeout':
+      case 'account_network':
+        return 'network';
+      default:
+        // 未识别错误一律可重试（由最大尝试次数兜底）。
+        // 其中 `main_chat_anchor_pending`（主群锚点在租约内搬运中）刻意走这里：
+        // 它必须落在 `retryable_failed`，等租约到期后重试自动接管重搬。
+        return 'unknown';
+    }
   }
 
   // ---------------- 选号 ----------------

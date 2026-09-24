@@ -18,12 +18,17 @@ export interface MirrorJobData {
   ruleId: string;
 }
 
+/**
+ * 建单参数。
+ *
+ * 没有 `mode`：副本扩散只有「用户账号从主群服务端转发到镜像群」一条链路，
+ * 任务行的 `mode` 恒为 `user_copy`（历史行可能仍是 `bot_upload`，仅用于追溯）。
+ */
 export interface EnqueueMirrorParams {
   ruleId: string;
   ownerType: 'file' | 'grant' | 'fileUnique';
   ownerId: string;
   sourceVersion: number;
-  mode: TelegramMirrorMode;
   sourceAccountId?: string | null;
   sourceChatId?: string | null;
   sourceMessageId?: string | null;
@@ -85,7 +90,8 @@ export class TelegramMirrorTaskService {
       ownerType: params.ownerType,
       ownerId: params.ownerId,
       sourceVersion: params.sourceVersion,
-      mode: params.mode,
+      // 唯一执行链路：主群 → userbot → 镜像群（`mode` 列保留仅为兼容历史行，取值恒定）
+      mode: 'user_copy' as TelegramMirrorMode,
       status: 'queued',
       attempts: 0,
       sourceAccountId: params.sourceAccountId ?? null,
@@ -111,7 +117,7 @@ export class TelegramMirrorTaskService {
     }
     await this.safeAddJob(saved);
     this.logger.log(
-      `镜像任务已入队：${params.ownerType}:${params.ownerId}@v${params.sourceVersion}（mode=${params.mode}，规则 ${params.ruleId}）`,
+      `镜像任务已入队：${params.ownerType}:${params.ownerId}@v${params.sourceVersion}（规则 ${params.ruleId}）`,
     );
     return { task: saved, created: true };
   }
@@ -146,7 +152,6 @@ export class TelegramMirrorTaskService {
       targetChatId: string;
       targetMessageId: string;
       targetTelegramFileId: string;
-      mode: 'bot_upload' | 'user_copy';
     },
   ): Promise<void> {
     await this.repo.update({ id: taskId }, {
@@ -155,7 +160,7 @@ export class TelegramMirrorTaskService {
       targetChatId: result.targetChatId,
       targetMessageId: result.targetMessageId,
       targetTelegramFileId: result.targetTelegramFileId,
-      mode: result.mode,
+      mode: 'user_copy' as TelegramMirrorMode,
       receiptPending: false,
       lastErrorCode: null,
       lastErrorSummary: null,
@@ -435,6 +440,81 @@ export class TelegramMirrorTaskService {
       metadata: { ownerType: task.ownerType, previousStatus: task.status },
     });
     return (await this.repo.findOne({ where: { id } })) as TelegramMirrorTask;
+  }
+
+  /**
+   * 该归属对象在某条规则上**最新版本**的任务（手动重试的定位入口）。
+   *
+   * 按 `sourceVersion DESC` 取一条：文件被覆盖上传后会有多版本任务，
+   * 重试必须落在最新版本上，否则等于把旧内容重新扩散一遍。
+   */
+  async findLatestForOwner(
+    ruleId: string,
+    ownerType: TelegramMirrorTask['ownerType'],
+    ownerId: string,
+  ): Promise<TelegramMirrorTask | null> {
+    return this.repo.findOne({
+      where: { ruleId, ownerType, ownerId },
+      order: { sourceVersion: 'DESC', createdAt: 'DESC' },
+    });
+  }
+
+  /** 终态集合：这些状态的任务可以被「手动重试」重新激活（在途状态不重复投递） */
+  static readonly TERMINAL_STATUSES: TelegramMirrorTask['status'][] = ['succeeded', 'failed', 'blocked', 'cancelled'];
+
+  /**
+   * 把终态任务重置为 `queued` 并重新入队（管理员手动重试的唯一入口）。
+   *
+   * 与「新建任务」的区别：复用同一行（保留幂等键与历史），因此不会产生重复备份；
+   * 回执字段一并清理，避免旧的 `receiptPending` 让消费者误判为「已经转发过」。
+   */
+  async requeueTerminal(task: TelegramMirrorTask, operatorUserId: string): Promise<boolean> {
+    if (!TelegramMirrorTaskService.TERMINAL_STATUSES.includes(task.status)) return false;
+    await this.repo.update({ id: task.id }, {
+      status: 'queued',
+      attempts: 0,
+      lastErrorCode: null,
+      lastErrorSummary: null,
+      nextRetryAt: null,
+      receiptPending: false,
+      targetAccountId: null,
+      targetChatId: null,
+      targetMessageId: null,
+      targetTelegramFileId: null,
+      startedAt: null,
+      completedAt: null,
+    });
+    const fresh: TelegramMirrorTask = {
+      ...task,
+      status: 'queued',
+      attempts: 0,
+      lastErrorCode: null,
+      lastErrorSummary: null,
+      nextRetryAt: null,
+      receiptPending: false,
+      targetAccountId: null,
+      targetChatId: null,
+      targetMessageId: null,
+      targetTelegramFileId: null,
+      startedAt: null,
+      completedAt: null,
+    };
+    await this.safeAddJob(fresh);
+    this.audit.log({
+      action: 'config_change',
+      userId: operatorUserId,
+      resourceType: 'telegram_mirror_task',
+      resourceId: task.id,
+      metadata: {
+        reason: 'manual_retry',
+        previousStatus: task.status,
+        ruleId: task.ruleId,
+        ownerType: task.ownerType,
+        sourceVersion: task.sourceVersion,
+      },
+    });
+    this.logger.log(`镜像任务已按人工重试重新入队（${task.id} / 规则 ${task.ruleId}）`);
+    return true;
   }
 
   /**

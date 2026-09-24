@@ -243,6 +243,23 @@ export interface AccountPoolCounters {
    * 而同一账号同时有多个 4GB 冷流，说明槽位闸门没有命中，需要检查权重计算。
    */
   largeFileSlotThrottled: number;
+  /**
+   * 「搬运到主群」尝试次数（副本扩散链路的第一步：持有源消息的 Bot 把消息服务端转发进主群）。
+   *
+   * 与 `mainChatPlantFailures` 成对观察：只有尝试数持续增长而失败数为 0，才说明
+   * 「主 BOT 收到文件 → 进主群」这一段是健康的；失败数上升通常意味着主群成员/权限
+   * 或 Bot 凭据出了问题（会让后续 userbot 中继全部 blocked）。
+   */
+  mainChatPlantAttempts: number;
+  /** 「搬运到主群」失败次数（权限/凭据/主群配置问题；失败会写入锚点表 `status='failed'`） */
+  mainChatPlantFailures: number;
+  /**
+   * 「搬运到主群」预留超租约后的接管次数（上次搬运在落库前中断的残留）。
+   *
+   * 该计数长期 > 0 说明存在进程崩溃/落库失败窗口，且**可能已在主群留下重复消息**，
+   * 需要人工核对主群；正常情况下应恒为 0。
+   */
+  mainChatPlantTakeovers: number;
 }
 
 export type AccountPoolCounterKey = keyof AccountPoolCounters;

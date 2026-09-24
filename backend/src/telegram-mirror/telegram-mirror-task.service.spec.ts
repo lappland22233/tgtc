@@ -78,7 +78,6 @@ describe('TelegramMirrorTaskService（SQLite 内存库）', () => {
     ownerType: 'file' as const,
     ownerId: 'file-1',
     sourceVersion: 1,
-    mode: 'bot_upload' as const,
     sourceAccountId: '111111',
     sourceChatId: '-100111',
     sourceMessageId: '42',
@@ -133,7 +132,6 @@ describe('TelegramMirrorTaskService（SQLite 内存库）', () => {
       targetChatId: '-100222',
       targetMessageId: '77',
       targetTelegramFileId: 'FILE-BACKUP',
-      mode: 'bot_upload',
     });
     current = await service.findById(task.id);
     expect(current?.status).toBe('succeeded');
@@ -200,7 +198,6 @@ describe('TelegramMirrorTaskService（SQLite 内存库）', () => {
       targetChatId: '-100222',
       targetMessageId: '1',
       targetTelegramFileId: 'F',
-      mode: 'bot_upload',
     });
     await expectHttpStatus(service.retry(task.id, 'admin-1'), 400);
 
@@ -264,7 +261,6 @@ describe('TelegramMirrorTaskService（SQLite 内存库）', () => {
       targetChatId: '-100222',
       targetMessageId: '5',
       targetTelegramFileId: 'F2',
-      mode: 'user_copy',
     });
 
     const summary = await service.summary();

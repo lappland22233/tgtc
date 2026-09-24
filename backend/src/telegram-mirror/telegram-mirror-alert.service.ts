@@ -1,11 +1,12 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { MoreThanOrEqual, Repository } from 'typeorm';
+import { Like, MoreThanOrEqual, Repository } from 'typeorm';
 import { AlertEngineService } from '../alert/alert-engine.service';
 import { AlertRuleEvaluation } from '../alert/alert.rules';
 import { AlertLevel } from '../common/entities/alert.entity';
 import { TelegramMirrorTask } from '../common/entities/telegram-mirror-task.entity';
-import { TelegramMirrorMetricsService } from './telegram-mirror-metrics.service';
+import { TelegramAccountFeatureService } from '../telegram-accounts/telegram-account-feature.service';
+import { TelegramMirrorConfigService } from './telegram-mirror-config.service';
 
 /**
  * 镜像告警阈值（**保守默认值**）。
@@ -22,8 +23,6 @@ export const MIRROR_ALERT_THRESHOLDS = {
   queueBacklog: 50,
   /** 「主文件成功但备份长期未完成」的分钟阈值 */
   stalledMinutes: 30,
-  /** 降级比例上限 */
-  fallbackRateCeiling: 0.2,
 } as const;
 
 /**
@@ -41,7 +40,13 @@ export class TelegramMirrorAlertService {
     @InjectRepository(TelegramMirrorTask)
     private readonly tasks: Repository<TelegramMirrorTask>,
     private readonly engine: AlertEngineService,
-    private readonly metrics: TelegramMirrorMetricsService,
+    // 可选依赖：未装配时只跳过「镜像已开启但无启用规则」这一条判定（其余判定不受影响）。
+    // 必须显式 `@Inject(X)`：`X | null` 联合类型发出的是 `Object`，
+    // 否则 `@Optional()` 会把解析失败静默降级成 `null`。
+    @Optional() @Inject(TelegramMirrorConfigService)
+    private readonly config: TelegramMirrorConfigService | null = null,
+    @Optional() @Inject(TelegramAccountFeatureService)
+    private readonly feature: TelegramAccountFeatureService | null = null,
   ) {}
 
   async runOnce(): Promise<void> {
@@ -159,17 +164,56 @@ export class TelegramMirrorAlertService {
       });
     }
 
-    // 7) 降级比例偏高
-    const fallbackRate = this.metrics.fallbackRate();
-    if (fallbackRate > MIRROR_ALERT_THRESHOLDS.fallbackRateCeiling) {
+    // 7) 主群环节失败（搬运到主群 / 主群配置），链路第一步就断了
+    const anchorFailures = await this.tasks.find({
+      where: [
+        { status: 'blocked', lastErrorCode: Like('main_chat_%'), updatedAt: MoreThanOrEqual(hourAgo) },
+        { status: 'blocked', lastErrorCode: 'source_message_unresolved', updatedAt: MoreThanOrEqual(hourAgo) },
+      ],
+      take: 20,
+    });
+    if (anchorFailures.length > 0) {
       evaluations.push({
-        ruleId: 'MIRROR_FALLBACK_RATE_HIGH',
-        level: AlertLevel.WARNING,
-        title: '镜像 Bot 降级比例偏高',
-        message: `用户账号无源复制失败后降级为 Bot 重新上传的比例为 ${(fallbackRate * 100).toFixed(1)}%`
-          + `（阈值 ${MIRROR_ALERT_THRESHOLDS.fallbackRateCeiling * 100}%）；降级会产生第二次上传`,
-        context: { fallbackRate, metrics: this.metrics.snapshot() },
+        ruleId: 'MIRROR_MAIN_CHAT_UNAVAILABLE',
+        level: AlertLevel.CRITICAL,
+        title: '镜像主群搬运不可用',
+        message: `近 1 小时有 ${anchorFailures.length} 个镜像任务因「主群搬运/主群配置」失败而阻塞，`
+          + '请检查主群（源群）成员与发帖权限、Bot 凭据，以及所有启用规则的源群是否一致',
+        context: {
+          count: anchorFailures.length,
+          lastErrorCode: anchorFailures[0]?.lastErrorCode ?? null,
+          taskIds: anchorFailures.map((task) => task.id).slice(0, 10),
+        },
       });
+    }
+
+    // 8) 镜像已开启但没有任何启用中的规则
+    //    这是唯一一种「新文件不会有任何备份、且不会产生任何任务记录」的状态：
+    //    触发层在没有启用规则时直接跳过（不建单），因此任务事实表里什么都看不到，
+    //    必须由这里兜住，否则表现为「上传成功、后台全绿、实际零备份」。
+    //    依赖故障（库/开关服务抖动）只跳过**这一条**判定：若让它冒泡出去，
+    //    本轮已收集的连续失败、权限丢失、主群不可用等告警会一起被丢弃（静默）。
+    if (this.config && this.feature) {
+      try {
+        if (await this.feature.isMirrorEnabled()) {
+          const enabledRules = await this.config.listEnabledRules();
+          if (enabledRules.length === 0) {
+            evaluations.push({
+              ruleId: 'MIRROR_NO_ENABLED_RULES',
+              level: AlertLevel.CRITICAL,
+              title: '镜像已开启但没有启用中的规则',
+              message: '镜像功能开关已开启，但没有任何启用中的镜像规则：此后收到的文件不会有任何备份'
+                + '（触发层直接跳过，也不会留下 blocked 任务记录），请在后台启用至少一条镜像规则',
+              context: { enabledRules: 0 },
+            });
+          }
+        }
+      } catch (error) {
+        this.logger.warn(
+          `镜像启用规则判定失败（仅跳过本条判定，其余镜像告警照常上报）：`
+          + `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
     }
 
     return evaluations;

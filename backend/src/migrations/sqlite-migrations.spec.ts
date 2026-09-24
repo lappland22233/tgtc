@@ -87,6 +87,12 @@ describe('SQLite schema migrations（隔离内存库）', () => {
     expect(attemptIndexes.find((index: { name: string }) => index.name === 'idx_tg_replication_attempts_reason')).toBeDefined();
     expect(attemptIndexes.find((index: { name: string }) => index.name === 'idx_tg_replication_attempts_updated')).toBeDefined();
 
+    // 主群锚点实体同样由基线建表：唯一键与索引口径必须与 180360 增量迁移一致
+    const anchorIndexes = await dataSource.query('PRAGMA index_list("telegram_main_chat_anchors")');
+    expect(anchorIndexes.find((index: { name: string }) => index.name === 'uq_tg_main_chat_anchors_owner'))
+      .toMatchObject({ unique: 1 });
+    expect(anchorIndexes.find((index: { name: string }) => index.name === 'idx_tg_main_chat_anchors_anchor')).toBeDefined();
+
     const fileColumns = await dataSource.query('PRAGMA table_info("files")');
     expect(fileColumns.find((column: { name: string }) => column.name === 'telegramMessageId')).toBeDefined();
     expect(fileColumns.find((column: { name: string }) => column.name === 'telegramSourceAccountId')).toBeDefined();
@@ -552,6 +558,64 @@ describe('SQLite schema migrations（隔离内存库）', () => {
     await new SqliteAddFileTelegramSourceFields1803200000000().up(dataSource.createQueryRunner());
     expect(await dataSource.query('SELECT COUNT(*) AS count FROM "telegram_accounts"')).toEqual([{ count: 1 }]);
     expect(await dataSource.query('SELECT COUNT(*) AS count FROM "telegram_mirror_tasks"')).toEqual([{ count: 2 }]);
+
+    const integrity = await dataSource.query('PRAGMA integrity_check');
+    expect(Object.values(integrity[0])).toEqual(['ok']);
+  });
+
+  it('存量库升级：180360 自建主群锚点表（唯一键、索引齐全、可写、幂等）', async () => {
+    dataSource = new DataSource({ type: 'sqlite', database: ':memory:', entities: [], synchronize: false });
+    await dataSource.initialize();
+    await dataSource.query(`CREATE TABLE "migrations" (
+      "id" integer PRIMARY KEY AUTOINCREMENT NOT NULL,
+      "timestamp" bigint NOT NULL, "name" varchar NOT NULL
+    )`);
+
+    const { SqliteCreateTelegramMainChatAnchors1803600000000 } = require('./1803600000000-SqliteCreateTelegramMainChatAnchors') as typeof import('./1803600000000-SqliteCreateTelegramMainChatAnchors');
+    await new SqliteCreateTelegramMainChatAnchors1803600000000().up(dataSource.createQueryRunner());
+
+    const tables = await dataSource.query(
+      `SELECT name FROM sqlite_master WHERE type='table' AND name='telegram_main_chat_anchors'`,
+    );
+    expect(tables).toHaveLength(1);
+
+    const indexes = await dataSource.query('PRAGMA index_list("telegram_main_chat_anchors")');
+    expect(indexes.find((index: { name: string }) => index.name === 'uq_tg_main_chat_anchors_owner'))
+      .toMatchObject({ unique: 1 });
+    expect(indexes.find((index: { name: string }) => index.name === 'idx_tg_main_chat_anchors_anchor')).toBeDefined();
+
+    // 同一归属对象只允许一行锚点：多规则共享落点是幂等的前提
+    await dataSource.query(
+      `INSERT INTO "telegram_main_chat_anchors"
+        ("id","ownerType","ownerId","anchorChatId","anchorMessageId","status")
+       VALUES ('a1','grant','g1','-100999','777','ready')`,
+    );
+    await expect(dataSource.query(
+      `INSERT INTO "telegram_main_chat_anchors"
+        ("id","ownerType","ownerId","anchorChatId","anchorMessageId","status")
+       VALUES ('a2','grant','g1','-100999','778','ready')`,
+    )).rejects.toThrow();
+    // 不同归属对象互不影响
+    await dataSource.query(
+      `INSERT INTO "telegram_main_chat_anchors"
+        ("id","ownerType","ownerId","anchorChatId","status","lastError")
+       VALUES ('a3','file','f1','-100999','failed','权限不足')`,
+    );
+
+    // 策略 B 只做服务端转发：没有字节传输列
+    const columns = await dataSource.query('PRAGMA table_info("telegram_main_chat_anchors")');
+    expect(columns.find((column: { name: string }) => column.name === 'bytesTransferred')).toBeUndefined();
+
+    // 幂等：重复执行不报错、不重复建表
+    await new SqliteCreateTelegramMainChatAnchors1803600000000().up(dataSource.createQueryRunner());
+    expect(await dataSource.query('SELECT COUNT(*) AS count FROM "telegram_main_chat_anchors"')).toEqual([{ count: 2 }]);
+
+    // down 只删本迁移新增的表与索引
+    await new SqliteCreateTelegramMainChatAnchors1803600000000().down(dataSource.createQueryRunner());
+    const afterDown = await dataSource.query(
+      `SELECT name FROM sqlite_master WHERE type='table' AND name='telegram_main_chat_anchors'`,
+    );
+    expect(afterDown).toHaveLength(0);
 
     const integrity = await dataSource.query('PRAGMA integrity_check');
     expect(Object.values(integrity[0])).toEqual(['ok']);
