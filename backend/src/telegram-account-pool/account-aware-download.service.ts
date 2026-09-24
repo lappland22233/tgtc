@@ -2,7 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Readable } from 'stream';
 import { TelegramCopyOwnerType } from '../common/entities/telegram-file-copy.entity';
 import { AccountAwareStreamResult } from './account-aware-stream.types';
-import { AccountAttemptSample, AccountPoolCounterKey } from './telegram-account-pool.types';
+import { AccountAttemptAdmission, AccountAttemptSample, AccountPoolCounterKey } from './telegram-account-pool.types';
 import { TelegramAccountClientService, TelegramAccountError } from './telegram-account-client.service';
 import { TelegramAccountPoolService } from './telegram-account-pool.service';
 import { FileCopyService } from './file-copy.service';
@@ -15,6 +15,23 @@ const MAX_COOLDOWN_WAIT_MS = 3_000;
 const REPLICATION_FAILURE_BACKOFF_MS = 5 * 60 * 1000;
 /** 退避表清理阈值（超过该规模才做一次过期清理，避免每轮遍历） */
 const REPLICATION_BACKOFF_PRUNE_THRESHOLD = 1024;
+/**
+ * 源账号兜底的**应急配额**等待上限（毫秒）。
+ *
+ * 语义变化（2026-09 计划 P2）：源账号兜底从「完全不检查冷却/在飞」改为受限应急配额。
+ * 满载（或大文件槽位被占）时先做一次有限等待：等到了就用源账号回源（保住可用性），
+ * 等不到就返回带 `Retry-After` 的可诊断失败——绝不在该账号冷却期间硬打。
+ */
+const SOURCE_FALLBACK_WAIT_MS = 3_000;
+/** 源兜底等待的重试间隔（毫秒）：避免忙等，同时保证有限等待内能抓住释放窗口 */
+const SOURCE_FALLBACK_POLL_MS = 250;
+/** 大文件阈值（字节）：与账号池的每账号大文件回源槽位口径保持一致（>1GiB） */
+const LARGE_FILE_THRESHOLD_BYTES = 1024 ** 3;
+
+/** 是否为大文件（非有限值/非正数一律按小文件处理，避免误占大文件槽位） */
+function isLargeFile(bytes?: number): boolean {
+  return typeof bytes === 'number' && Number.isFinite(bytes) && bytes > LARGE_FILE_THRESHOLD_BYTES;
+}
 
 /**
  * 账号感知的下载（回源）入口。
@@ -103,13 +120,16 @@ export class AccountAwareDownloadService {
     }
 
     const excluded = new Set<string>();
+    // 大文件（>1GiB）回源：选号时即排除「已达每账号大文件槽位」的账号，
+    // 准入再用同一口径复核——两处一致才能既避免无效尝试，又保证不会被并发绕开。
+    const largeFile = isLargeFile(params.expectedSize);
     for (let attempt = 0; attempt < MAX_ACCOUNT_ATTEMPTS; attempt += 1) {
       const candidateIds = ready
         .map((copy) => copy.accountId)
         .filter((accountId) => !excluded.has(accountId));
       if (candidateIds.length === 0) break;
 
-      const selection = this.pool.select(candidateIds);
+      const selection = this.pool.select(candidateIds, Date.now(), { largeFile });
       if (!selection) {
         // 全部候选都在冷却/满载：等待最短冷却后重试一次，仍不可用则交由上层回退
         const waitMs = this.shortestCooldownMs(candidateIds);
@@ -124,8 +144,18 @@ export class AccountAwareDownloadService {
       const copy = ready.find((item) => item.accountId === selection.accountId);
       if (!account || !copy) break;
 
-      if (!this.pool.beginAttempt(account.id)) {
+      // 原子准入（冷却 + 在飞 + 大文件槽位）；被拒时记可诊断计数并按建议间隔决定是否继续换号
+      const admission = this.pool.admit({
+        accountId: account.id,
+        role: 'download',
+        bytes: params.expectedSize,
+      });
+      if (!admission.granted || !admission.admission) {
+        if (admission.reason === 'large_inflight_full') this.pool.bumpCounter('largeFileSlotThrottled');
         excluded.add(account.id);
+        this.logger.debug(
+          `账号 ${account.id} 准入被拒（${admission.reason ?? 'unknown'}），换下一个候选账号`,
+        );
         continue;
       }
 
@@ -140,7 +170,7 @@ export class AccountAwareDownloadService {
           params.expectedSize,
           { noCache: params.noCache },
         );
-        this.attachSampling(account.id, session.stream, session.sample);
+        this.attachSampling(admission.admission, session.stream, session.sample);
         void this.copies.touchUsed(copy);
         this.logger.log(
           `按负载选择账号 ${account.id} 回源（${params.ownerType}:${params.ownerId}，依据 ${selection.reason}）`,
@@ -154,7 +184,9 @@ export class AccountAwareDownloadService {
         };
       } catch (error) {
         this.pool.bumpCounter('streamFailures');
-        this.finishFailed(account.id, error);
+        // 失败样本必须由该次准入归还（禁止同时调用 release，否则在飞额度会被双重扣减，
+        // 让账号看起来比实际空闲——这正是「限流保护被绕过」的一类隐蔽成因）
+        this.finishFailed(admission.admission, error);
         excluded.add(account.id);
         this.logger.warn(
           `账号 ${account.id} 回源失败（${error instanceof TelegramAccountError ? error.kind : 'other'}），尝试换号：`
@@ -185,9 +217,42 @@ export class AccountAwareDownloadService {
       this.logger.warn(`源账号 ${account.id} 已被禁用，跳过源账号回退（将按归属不明处理）`);
       return null;
     }
-    // 说明：本路径是「归属可确认时的最后手段」，因此**不做冷却/在飞上限检查**——
-    // 超额使用同一账号不存在跨账号风险，仅照常计入在飞与采样供观测。
-    if (!this.pool.beginAttempt(account.id)) return null;
+
+    // **受限应急配额**（2026-09 计划 P2 的核心改动）：
+    // 历史实现对本路径完全不检查冷却与在飞上限，理由是「超额使用同一账号没有跨账号风险」。
+    // 生产证明这个理由不成立：源账号正是那个已经独扛全部 4GB 回源的账号，在它被 DC-5
+    // 限流（`flood` 冷却中）时继续硬打，会把冷却窗口不断延长，形成
+    // 「越限流越重试 → 越重试越限流」的正反馈。现在的语义是：
+    // - 冷却期间**一律拒绝**（不再硬打，返回 null 交由上层给可诊断失败/Retry-After）；
+    // - 满载（在飞/大文件槽位）时做一次**有限等待**：等到了仍走源账号（保住可用性），
+    //   等不到同样拒绝——这里绝不阻塞到上层超时。
+    const bytes = params.expectedSize;
+    const deadline = Date.now() + SOURCE_FALLBACK_WAIT_MS;
+    let admission = this.pool.admit({ accountId: account.id, role: 'download', bytes });
+    while (!admission.granted) {
+      // 冷却中只能等冷却结束：这类拒绝是「保护」而非「拥塞」，不做补救性重试
+      if (admission.reason === 'cooling_down') {
+        this.pool.bumpCounter('fallbackThrottled');
+        this.logger.warn(
+          `源账号 ${account.id} 正在限流冷却（剩余 ${Math.round((admission.retryAfterMs ?? 0) / 1000)}s），`
+          + '拒绝源账号兜底以免延长冷却',
+        );
+        return null;
+      }
+      if (admission.reason === 'large_inflight_full') this.pool.bumpCounter('largeFileSlotThrottled');
+      if (Date.now() >= deadline) {
+        this.pool.bumpCounter('fallbackThrottled');
+        this.logger.warn(
+          `源账号 ${account.id} 满载（${admission.reason ?? 'unknown'}），等待 ${SOURCE_FALLBACK_WAIT_MS}ms 后仍无法兜底`,
+        );
+        return null;
+      }
+      await new Promise((resolve) => setTimeout(resolve, SOURCE_FALLBACK_POLL_MS));
+      admission = this.pool.admit({ accountId: account.id, role: 'download', bytes });
+    }
+    const granted = admission.admission;
+    if (!granted) return null;
+
     try {
       const session = await this.client.openRealtimeStream(
         account.id,
@@ -196,7 +261,7 @@ export class AccountAwareDownloadService {
         params.expectedSize,
         { noCache: params.noCache },
       );
-      this.attachSampling(account.id, session.stream, session.sample);
+      this.attachSampling(granted, session.stream, session.sample);
       return {
         stream: session.stream,
         info: session.info,
@@ -206,7 +271,7 @@ export class AccountAwareDownloadService {
       };
     } catch (error) {
       this.pool.bumpCounter('streamFailures');
-      this.finishFailed(account.id, error);
+      this.finishFailed(granted, error);
       this.logger.warn(
         `源账号 ${account.id} 回退回源失败：`
         + `${error instanceof Error ? error.message.slice(0, 200) : String(error)}`,
@@ -264,10 +329,10 @@ export class AccountAwareDownloadService {
     }
   }
 
-  /** 记录一次失败的尝试（按错误分类进入冷却） */
-  private finishFailed(accountId: string, error: unknown): void {
+  /** 记录一次失败的尝试（按错误分类进入冷却），并归还该次准入额度 */
+  private finishFailed(admission: AccountAttemptAdmission, error: unknown): void {
     const accountError = error instanceof TelegramAccountError ? error : null;
-    this.pool.finishAttempt(accountId, {
+    admission.finish({
       ok: false,
       failureKind: accountError?.kind ?? 'other',
       status: accountError?.status,
@@ -278,7 +343,7 @@ export class AccountAwareDownloadService {
 
   /** 把采样回报绑定到流的结束事件上（保证成功与失败都能更新账号画像，且只回报一次） */
   private attachSampling(
-    accountId: string,
+    admission: AccountAttemptAdmission,
     stream: Readable,
     sample: () => AccountAttemptSample,
   ): void {
@@ -286,7 +351,7 @@ export class AccountAwareDownloadService {
     const settle = (): void => {
       if (settled) return;
       settled = true;
-      this.pool.finishAttempt(accountId, sample());
+      admission.finish(sample());
     };
     stream.once('close', settle);
     stream.once('end', settle);

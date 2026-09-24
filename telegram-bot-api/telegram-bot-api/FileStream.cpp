@@ -438,8 +438,10 @@ void FileStreamConnection::tear_down() {
   }
   send_closure(client_manager_, &ClientManager::release_file_stream, stream_id_);
   if (!client_.empty()) {
-    // 仅当带 X-Telegram-No-Cache 标记的流正常完成传输时，才请求删除 TDLib 本地副本；中断路径仍只取消下载
-    send_closure(client_, &Client::remove_file_stream, stream_id_, file_id_, route_.no_cache && completed_ok_);
+    // 两个标志都传下去，由 decide_file_stream_local_copy_action() 决定「删除 / 仅取消下载 /
+    // 因并发 getFile 占用而跳过（记数）」——把「no_cache 且已完成」压成一个布尔在这层判断，
+    // 会丢掉「未完成时仍要取消下载」这条路径，也会让「并发占用导致的跳过」变成不可见的分支。
+    send_closure(client_, &Client::remove_file_stream, stream_id_, file_id_, route_.no_cache, completed_ok_);
   }
   connection_.release();
 }

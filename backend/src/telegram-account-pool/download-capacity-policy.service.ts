@@ -26,6 +26,16 @@ export const CAPACITY_MIN_BUDGET = 8;
 export const CAPACITY_MAX_BUDGET = 64;
 /** 一个评估周期内新增上游失败达到该值时冻结升档 */
 export const CAPACITY_FAILURE_FREEZE_THRESHOLD = 3;
+/**
+ * 「高热大文件副本闸门」的大小阈值（字节）：≥1GiB 的逻辑文件参与闸门判定。
+ *
+ * 为什么与每账号槽位阈值（>1GiB）对齐：两者回答同一个问题——「大文件的回源
+ * 压力是否已经分散到多个账号」。若闸门阈值更宽（只看 4GiB），1–4GiB 段的分卷
+ * 仍可能在单账号上堆积并触发限流。
+ */
+export const CAPACITY_LARGE_FILE_MIN_BYTES = 1024 ** 3;
+/** 大文件副本闸门要求的**最少去重账号数**：低于此值不允许升档 */
+export const CAPACITY_LARGE_FILE_MIN_ACCOUNTS = 2;
 
 /**
  * 「有效 Bot 数 → 全局上游权重预算」的容量映射。
@@ -70,6 +80,27 @@ export interface DownloadCapacityState {
   pendingUpCycles: number;
   pendingDownCycles: number;
   lastChange: CapacityChangeRecord | null;
+  /**
+   * 大文件副本闸门状态（>1GiB 逻辑文件的去重 ready 账号覆盖）。
+   *
+   * 意义：`activeBotCount` 只要求「账号在任意文件上有 ready 副本」，因此三个 Bot
+   * 各持一个 256MiB 小文件就会让预算从 8 升到 16——而 4GB 分卷的副本可能仍然
+   * 全在同一个账号上。这个闸门把「升档」与「大文件副本是否真的分散」绑定。
+   */
+  largeFileGate: {
+    /** 参与判定的逻辑文件数（去重后；≥阈值大小且至少一条 ready 副本） */
+    files: number;
+    /** 覆盖最少的账号数（升档要求 ≥ 目标值） */
+    minReadyAccounts: number;
+    /** 要求的最少账号数 */
+    requiredAccounts: number;
+    /** 各文件的去重 ready 账号数（升序） */
+    readyAccountCounts: number[];
+    /** 统计是否被分组上限截断（true 时不允许升档） */
+    truncated: boolean;
+    /** 是否通过（未通过时不允许升档） */
+    passed: boolean;
+  } | null;
 }
 
 /**
@@ -114,6 +145,8 @@ export class DownloadCapacityPolicyService implements OnApplicationShutdown {
   private frozenReason: string | null = null;
   private activeBotIds: string[] = [];
   private eligibleCount = 0;
+  /** 大文件副本闸门状态（每次评估刷新；`null` 表示尚未评估） */
+  private largeFileGate: DownloadCapacityState['largeFileGate'] = null;
   /** 并发保护：同一时刻只允许一次评估写入 */
   private evaluating = false;
 
@@ -174,6 +207,7 @@ export class DownloadCapacityPolicyService implements OnApplicationShutdown {
       pendingUpCycles: this.pendingUpCycles,
       pendingDownCycles: this.pendingDownCycles,
       lastChange: this.lastChange,
+      largeFileGate: this.largeFileGate ? { ...this.largeFileGate, readyAccountCounts: [...this.largeFileGate.readyAccountCounts] } : null,
     };
   }
 
@@ -234,13 +268,24 @@ export class DownloadCapacityPolicyService implements OnApplicationShutdown {
     }
   }
 
-  /** 升档：稳定周期 + 失败闸门均满足才写入，单次最多 +CAPACITY_STEP_MAX */
+  /** 升档：稳定周期 + 失败闸门 + 大文件副本闸门均满足才写入，单次最多 +CAPACITY_STEP_MAX */
   private async maybeScaleUp(target: number): Promise<void> {
     if (this.frozenReason) {
       this.logger.warn(`自动扩缩容暂不升档：${this.frozenReason}`);
       return;
     }
     if (this.pendingUpCycles < CAPACITY_UP_STABLE_CYCLES) return;
+    // 大文件副本闸门：预算升档意味着允许更多并发冷回源；若大文件副本仍集中在
+    // 单一账号，升档只会让那个账号承受更多并发（本计划要修的就是这件事）。
+    // 降档是安全方向，因此只拦升档。
+    if (this.largeFileGate && !this.largeFileGate.passed) {
+      this.logger.warn(
+        `自动扩缩容暂不升档：大文件副本闸门未通过（${this.largeFileGate.files} 个 ≥1GiB 文件，`
+        + `最少覆盖账号数 ${this.largeFileGate.minReadyAccounts} < 要求 ${this.largeFileGate.requiredAccounts}`
+        + `${this.largeFileGate.truncated ? '，统计被截断' : ''}）`,
+      );
+      return;
+    }
     const next = Math.min(target, this.currentBudget + CAPACITY_STEP_MAX);
     if (next <= this.currentBudget) return;
     await this.applyBudget(
@@ -306,6 +351,7 @@ export class DownloadCapacityPolicyService implements OnApplicationShutdown {
     // 账号池未生效时不做副本查询（避免无意义的全表分组）
     if (!this.pool.isActive()) {
       this.activeBotIds = [];
+      this.largeFileGate = null;
       return;
     }
     const readyCounts = await this.copies.countReadyByAccount();
@@ -313,6 +359,49 @@ export class DownloadCapacityPolicyService implements OnApplicationShutdown {
       .filter((item) => item.eligible)
       .map((item) => item.accountId)
       .filter((accountId) => (readyCounts.get(accountId) ?? 0) > 0);
+    this.largeFileGate = await this.evaluateLargeFileGate();
+  }
+
+  /**
+   * 大文件副本闸门：≥1GiB 的逻辑文件是否已被**多个账号**覆盖。
+   *
+   * 判定口径（保守，宁可拦下升档）：
+   * - 没有任何大文件 → 通过（闸门不适用于「还没有大文件」的部署）；
+   * - 统计被截断 → 不通过（无法确认整体分布，不据此升档）；
+   * - 存在大文件 → 要求「覆盖最少的那个文件」的去重账号数 ≥
+   *   `CAPACITY_LARGE_FILE_MIN_ACCOUNTS`（默认 2）。
+   *
+   * 为什么用「最小值」而不是平均值：只要还有一个大文件只被单个账号持有，
+   * 该文件的每次冷回源都只能压在这一个账号上——平均值会把这个尾部隐藏掉。
+   */
+  private async evaluateLargeFileGate(): Promise<DownloadCapacityState['largeFileGate']> {
+    try {
+      const distribution = await this.copies.largeFileReplicaDistribution({
+        minBytes: CAPACITY_LARGE_FILE_MIN_BYTES,
+      });
+      const required = CAPACITY_LARGE_FILE_MIN_ACCOUNTS;
+      const passed = distribution.files === 0
+        || (!distribution.truncated && distribution.minReadyAccounts >= required);
+      return {
+        files: distribution.files,
+        minReadyAccounts: distribution.minReadyAccounts,
+        requiredAccounts: required,
+        readyAccountCounts: distribution.readyAccountCounts,
+        truncated: distribution.truncated,
+        passed,
+      };
+    } catch (error) {
+      // 统计失败时必须保守：不允许升档（避免「查不到 → 当作达标」的静默放大）
+      this.logger.warn(`大文件副本闸门统计失败（视为未通过）: ${(error as Error).message}`);
+      return {
+        files: 0,
+        minReadyAccounts: 0,
+        requiredAccounts: CAPACITY_LARGE_FILE_MIN_ACCOUNTS,
+        readyAccountCounts: [],
+        truncated: false,
+        passed: false,
+      };
+    }
   }
 
   /**

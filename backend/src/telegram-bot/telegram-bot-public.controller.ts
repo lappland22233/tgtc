@@ -311,8 +311,13 @@ export class TelegramBotPublicController {
       } else {
         // 文件大小未知：无法预测磁盘占用、也无从生成 Content-Length / Content-Range，
         // 走有界滚动缓冲直通（不落盘、受上游并发租约约束），保证文件始终可下载。
+        //
+        // 同样传 noCache=true：本分支**不产生任何本地持久副本**（不落盘、不进正式缓存），
+        // 因此 TDLib workdir 里的本地媒体副本在本次流结束后应立即回收。
+        // 此前该分支漏传该头（与同控制器其余分支不一致），未知大小的文件每下完一次
+        // 就在 workdir 里长期占一份完整副本——而这份副本无人使用、也无缓存可替代它。
         stream = await this.fileCacheService.getDirectOnlyStream(cacheKey, () =>
-          this.acquireUpstreamStream(grant),
+          this.acquireUpstreamStream(grant, undefined, true),
         );
       }
 

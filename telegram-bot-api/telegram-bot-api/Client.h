@@ -54,7 +54,12 @@ class Client final : public WebhookActor::Callback {
   void send(PromisedQueryPtr query) final;
   void start_file_stream(td::ActorId<FileStreamConnection> stream, td::int64 stream_id, td::string file_id,
                          td::int64 expected_size);
-  void remove_file_stream(td::int64 stream_id, td::int32 file_id, bool remove_local_file);
+  // Tears down a file stream registration. Local copy removal is decided by
+  // decide_file_stream_local_copy_action() from (remove_requested, completed, listener state), so
+  // both flags are passed through instead of a single pre-computed "remove" boolean: an aborted
+  // no-cache stream must keep the copy (only cancel the download), while a completed one deletes it
+  // unless another listener still holds a reference.
+  void remove_file_stream(td::int64 stream_id, td::int32 file_id, bool remove_requested, bool completed_ok);
   // Re-requests the download of a file that a streaming connection found locally unusable. TDLib
   // re-validates the local location on every download start, so this restores a workdir copy that
   // was removed behind its back; a file that is already downloading is not downloaded twice.

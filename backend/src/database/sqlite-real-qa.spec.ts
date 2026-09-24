@@ -75,6 +75,8 @@ describe('真实 SQLite 数据源关键业务与并发 QA', () => {
       'SqliteAddFileTelegramSourceFields1803200000000',
       // v1.5.4：入站副本 → 站内文件桥接（files.telegramFileUniqueId 索引）
       'SqliteAddFileTelegramUniqueIdIndex1803300000000',
+      // v1.5.5：副本锚点一致性（按账号维度的部分唯一索引 + 锚点覆盖索引）
+      'SqliteTelegramCopyAnchorGuard1803400000000',
     ]);
 
     await dataSource.undoLastMigration();

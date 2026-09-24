@@ -15,7 +15,11 @@ function counters(overrides: Partial<AccountPoolCounters> = {}): AccountPoolCoun
     inboundRegistrationFailures: 0,
     userRelaysOk: 0,
     userRelaysFailed: 0,
+    relayClaimsMissed: 0,
     inboundBridgeMisses: 0,
+    anchorConflicts: 0,
+    fallbackThrottled: 0,
+    largeFileSlotThrottled: 0,
     ...overrides,
   };
 }
@@ -38,6 +42,9 @@ function snapshot(options: {
         weight: 1,
         maxInflight: 8,
         inflight: 0,
+        largeInflight: 0,
+        maxLargeInflight: 1,
+        replicationInflight: 0,
         bandwidthMbps: 0,
         successRate: 1,
         latencyMs: 0,

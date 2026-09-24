@@ -237,6 +237,75 @@ describe('CacheSessionCoordinator follower 读取器', () => {
     expect((await readAll(coordinator.createFollowerStream(session))).equals(payload)).toBe(true);
   });
 
+  it('会话停顿时（上游无新数据）消费者断开，等待立即结束且不残留监听器', async () => {
+    // 回归背景：`waitForChange` 原先没有取消通道。消费者在「无数据可读」时断开
+    // （会话卡在上游、尚未完成），pump 会一直挂在会话 events 上——它持有流闭包与
+    // session 引用，而监听器要等会话下一次 progress/failed 才清理。
+    // 会话停顿时这就是一段真实的滞留内存（[heap]/堆外都不归还的表象之一）。
+    const payload = makePayload(CHUNK * 2);
+    const tmpPath = path.join(dir, `${FILE_ID}.tmp`);
+    // 会话未完成 → follower 从**临时路径**读取（这正是该分支的读路径）
+    await writeFile(tmpPath, payload);
+    const session = buildSession(tmpPath, payload.length);
+    // 只写入一块且**未完成**：消费者读完该块后必进入等待分支
+    session.bytesWritten = CHUNK;
+    session.completed = false;
+
+    const stream = coordinator.createFollowerStream(session);
+    stream.on('error', () => undefined);
+    // 触发首次 pump（读完后进入等待）
+    await new Promise<void>((resolve) => {
+      stream.once('data', () => resolve());
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(session.events.listenerCount('progress')).toBeGreaterThan(0);
+
+    stream.destroy();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    // 断开后等待必须被取消：否则监听器会一直挂在会话上
+    expect(session.events.listenerCount('progress')).toBe(0);
+    expect(session.events.listenerCount('failed')).toBe(0);
+  });
+
+  it('spool 会话被拆除时，正在等待的消费者收到可诊断失败而非永久悬挂', async () => {
+    // 回归背景：teardownSpoolSession 原先是「unlink → removeAllListeners()」，
+    // 若此刻还有消费者阻塞在 waitForChange，其监听器被直接移除、后续也没人 emit，
+    // pump 会永远停在 await（消费者流悬挂不结束，且一直持有会话引用）。
+    const payload = makePayload(CHUNK);
+    const spoolPath = path.join(dir, `${FILE_ID}.spool`);
+    await writeFile(spoolPath, payload);
+    const session: SpoolSession = {
+      fileId: FILE_ID,
+      expectedSize: payload.length,
+      spoolPath,
+      bytesWritten: 0,
+      completed: false,
+      events: new EventEmitter(),
+      completion: Promise.resolve(),
+      abort: () => undefined,
+      consumerCount: 0,
+    };
+
+    const stream = (coordinator as unknown as {
+      createSpoolFollowerStream: (s: SpoolSession) => Readable;
+    }).createSpoolFollowerStream(session);
+    const outcome = new Promise<Error>((resolve) => {
+      stream.once('error', (error: Error) => resolve(error));
+    });
+    // 必须让流进入 flowing 模式：pump 由 `_read` 触发，只挂 error 监听不会开始读取，
+    // 也就不会进入等待分支（那样本用例什么也证明不了）
+    stream.on('data', () => undefined);
+    // 让 pump 进入等待分支（无数据可读、未完成）
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(session.events.listenerCount('failed')).toBeGreaterThan(0);
+
+    await coordinator.teardownSpoolSession(session);
+
+    const error = await outcome;
+    expect(error.message).toContain('spool 会话已被替换或清理');
+  });
+
   it('spool follower：消费者计数随创建/关闭变化，内容可完整重放', async () => {
     const payload = makePayload(CHUNK + 123);
     const spoolPath = path.join(dir, `${FILE_ID}.spool`);

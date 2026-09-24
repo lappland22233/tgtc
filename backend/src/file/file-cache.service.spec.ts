@@ -899,6 +899,64 @@ describe('FileCacheService 磁盘预约、降级与 pin（下载配额）', () =
     await new Promise(resolve => setTimeout(resolve, 10));
     expect(await service.evictLRU(1024)).toBe(1);
   });
+
+  /**
+   * 无缓存模式的结构性降级（P3 补齐的缺口）。
+   *
+   * 事故背景：无缓存模式下每个冷请求都要完整暂存一份 spool，恰恰最容易撞上
+   * 「单文件超缓存上限 / 卷内可用空间不足」。历史实现直接调
+   * `getNoCacheStream → getSpooledStream`，把 `INSUFFICIENT_STORAGE` 原样抛出——
+   * 同一份文件在普通缓存模式下能降级直通成功，开了无缓存却直接 507。
+   */
+  it('无缓存模式下遇到结构性空间不足时同样降级受限直通（不拒绝下载）', async () => {
+    (service as any).noCacheMode = true;
+    forceInsufficientDisk();
+    const upstream = new PassThrough();
+    const { stream, fromCache } = await service.getOrCacheStream(fileId, 8, async () => ({
+      stream: upstream,
+      info: { file_size: 8 },
+    }));
+    const contentPromise = readStream(stream);
+    upstream.end(Buffer.from('12345678'));
+
+    await expect(contentPromise).resolves.toEqual(Buffer.from('12345678'));
+    expect(fromCache).toBe(false);
+    // 直通不落本地副本（无缓存模式的核心语义）
+    expect(await listCacheDir()).toEqual([]);
+    expect(service.resources.pendingReservedBytes).toBe(0);
+    // 结构性不足计入 direct_degrade，而不是等待超时
+    expect(service.resources.getDiskWaitStats().outcomes.direct_degrade).toBeGreaterThan(0);
+  });
+
+  it('无缓存模式先中止同文件的既有构建会话（不留下半程本地副本）', async () => {
+    // 默认模式起一个半程构建会话
+    const oldUpstream = new PassThrough();
+    const oldPromise = service.getOrCacheStream(fileId, 6, async () => ({
+      stream: oldUpstream,
+      info: { file_size: 6 },
+    }));
+    oldUpstream.write(Buffer.from('abc'));
+    const old = await oldPromise;
+    const oldRead = readStream(old.stream);
+    oldRead.catch(() => {});
+    expect((service as any).buildSessions.size).toBe(1);
+
+    // 翻转无缓存后请求同一文件：旧构建会话必须被中止
+    (service as any).noCacheMode = true;
+    const upstream = new PassThrough();
+    const fetchFn = jest.fn(async () => ({ stream: upstream, info: { file_size: 6 } }));
+    const resultPromise = service.getOrCacheStream(fileId, 6, fetchFn);
+    upstream.write(Buffer.from('xyz'));
+    const { stream } = await resultPromise;
+    const contentPromise = readStream(stream);
+    upstream.end(Buffer.from('def'));
+
+    await expect(contentPromise).resolves.toEqual(Buffer.from('xyzdef'));
+    await expect(oldRead).rejects.toThrow('无缓存模式已启用，缓存构建已中止');
+    await new Promise(resolve => setImmediate(resolve));
+    expect((service as any).buildSessions.size).toBe(0);
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('FileCacheService 下载调度配置规范化', () => {

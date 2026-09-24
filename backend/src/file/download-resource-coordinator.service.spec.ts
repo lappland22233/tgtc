@@ -580,6 +580,171 @@ describe('DownloadResourceCoordinatorService', () => {
     });
   });
 
+  /**
+   * 磁盘等待直方图与终止原因（P3 验收口径）。
+   *
+   * 为什么不能用 `oldestDiskWaitMs` 代替：它是**瞬时值**——一次持续 40 秒的等待，
+   * 若恰好在结束时采样，读数是 0，问题被完全隐藏。验收要求「磁盘等待 P95 < 30s」，
+   * 必须有每次等待的分布。
+   */
+  describe('磁盘等待直方图与终止原因', () => {
+    /** 精确造出「空闲恰好等于一个块」的盘，便于构造真实排队（mockFree 按 4KiB 块量化） */
+    const BLOCK = 4096;
+    /** 先占住一个块，使后续同规模请求必须排队 */
+    async function holdOneBlock() {
+      mockFree(BLOCK);
+      service.configure({ minFreeBytes: 0 });
+      return service.reserve({ sessionKey: 'file:hold', bytes: BLOCK });
+    }
+
+    it('立即授予只计入 outcomes，不进分布（零等待会稀释 P95）', async () => {
+      mockFree(MB);
+      const reservation = await service.reserve({ sessionKey: 'file:a', bytes: BLOCK });
+      reservation.release();
+
+      const stats = service.getDiskWaitStats();
+      expect(stats.outcomes.granted).toBe(1);
+      expect(stats.sampledWaits).toBe(0);
+      expect(stats.p95WaitMs).toBeNull();
+      expect(stats.bucketBoundsMs).toEqual([1000, 5000, 10_000, 30_000, 60_000, 180_000]);
+    });
+
+    it('队列满计入 queue_full 但不污染等待分布（未进入等待）', async () => {
+      // 用**逻辑预约上限**造确定性排队：物理空闲是静态 mock，只有逻辑上限能稳定产生等待
+      mockFree(MB);
+      service.configure({ minFreeBytes: 0, queueCapacity: 1, maxReservedBytes: 2 * BLOCK });
+      const holder = await service.reserve({ sessionKey: 'file:hold', bytes: 2 * BLOCK });
+      // 预约已达上限 2 块 → 该请求必须排队，且占满容量 1
+      const waiting = service.reserve({ sessionKey: 'file:blocked', bytes: BLOCK, waitTimeoutMs: 50 });
+      await expect(service.reserve({ sessionKey: 'file:c', bytes: BLOCK })).rejects.toMatchObject({
+        errorCode: DOWNLOAD_ERROR_CODES.QUEUE_FULL,
+      });
+      const stats = service.getDiskWaitStats();
+      expect(stats.outcomes.queue_full).toBe(1);
+      expect(stats.sampledWaits).toBe(0);
+      expect(stats.p95WaitMs).toBeNull();
+      holder.release();
+      await waiting.catch(() => {});
+    });
+
+    it('结构性不足计入 direct_degrade（调用方降级直通，不等待）', async () => {
+      mockFree(BLOCK);
+      service.configure({ minFreeBytes: 10 * BLOCK });
+      await expect(service.reserve({ sessionKey: 'file:a', bytes: 2 * BLOCK })).rejects.toMatchObject({
+        errorCode: DOWNLOAD_ERROR_CODES.INSUFFICIENT_STORAGE,
+      });
+      const stats = service.getDiskWaitStats();
+      expect(stats.outcomes.direct_degrade).toBe(1);
+      expect(stats.sampledWaits).toBe(0);
+    });
+
+    it('等待超时计入 timeout 且纳入分布（P95 的主要样本来源）', async () => {
+      const holder = await holdOneBlock();
+      await expect(service.reserve({ sessionKey: 'file:a', bytes: BLOCK, waitTimeoutMs: 30 }))
+        .rejects.toMatchObject({ errorCode: DOWNLOAD_ERROR_CODES.QUEUE_TIMEOUT });
+
+      const stats = service.getDiskWaitStats();
+      expect(stats.outcomes.timeout).toBe(1);
+      expect(stats.sampledWaits).toBe(1);
+      // 30ms 落在第一个桶（<1s）
+      expect(stats.histogram[0]).toBe(1);
+      expect(stats.p95WaitMs).toBe(1000);
+      holder.release();
+    });
+
+    it('取消计入 cancelled 且纳入分布（客户端放弃与服务器压力是两件事）', async () => {
+      const holder = await holdOneBlock();
+      const controller = new AbortController();
+      const pending = service.reserve({ sessionKey: 'file:a', bytes: BLOCK, signal: controller.signal });
+      controller.abort();
+      await expect(pending).rejects.toMatchObject({ errorCode: DOWNLOAD_ERROR_CODES.QUEUE_CANCELLED });
+
+      const stats = service.getDiskWaitStats();
+      expect(stats.outcomes.cancelled).toBe(1);
+      expect(stats.sampledWaits).toBe(1);
+      holder.release();
+    });
+
+    it('关闭清空等待项时计入 shutdown 但不污染分布（重启不该抬高磁盘等待 P95）', async () => {
+      const holder = await holdOneBlock();
+      const pending = service.reserve({ sessionKey: 'file:a', bytes: BLOCK, waitTimeoutMs: 5000 });
+      service.shutdown();
+      await expect(pending).rejects.toMatchObject({ errorCode: DOWNLOAD_ERROR_CODES.SHUTTING_DOWN });
+
+      const stats = service.getDiskWaitStats();
+      expect(stats.outcomes.shutdown).toBe(1);
+      expect(stats.sampledWaits).toBe(0);
+      holder.release();
+      service.reset();
+    });
+
+    it('等待后等到空间时计入 granted 且带真实等待时长', async () => {
+      const holder = await holdOneBlock();
+      const pending = service.reserve({ sessionKey: 'file:a', bytes: BLOCK, waitTimeoutMs: 5000 });
+      expect(service.waitingDiskCount).toBe(1);
+      // 释放后泵立即放行，等待时长纳入分布
+      holder.release();
+      const granted = await pending;
+      granted.release();
+
+      const stats = service.getDiskWaitStats();
+      // holder 立即授予（不进分布） + 本请求等待后授予（进分布） = 2 次授予、1 个等待样本
+      expect(stats.outcomes.granted).toBe(2);
+      expect(stats.sampledWaits).toBe(1);
+      expect(stats.histogram[0]).toBe(1);
+    });
+  });
+
+  /**
+   * 同卷邻近目录水位（生产事故场景：`tmp/Cache` 与 `telegram-bot-api/workdir`
+   * 同在 `/dev/vda3`）。两套独立写前 `statfs` 会同时看到同一份空闲并各自放行，
+   * 叠加后写满卷——每一方都「合法」。
+   */
+  describe('同卷邻近目录预留（总水位熔断）', () => {
+    it('预留量从准入可用空间中扣除，展示口径仍为真实空闲', async () => {
+      mockFree(10 * MB);
+      service.configure({ volumePeerReserveBytes: 4 * MB });
+
+      // 申请 7MB：真实空闲 10MB 够、扣掉 4MB 预留后只剩 6MB → 结构性不足
+      await expect(service.reserve({ sessionKey: 'file:big', bytes: 7 * MB })).rejects.toMatchObject({
+        errorCode: DOWNLOAD_ERROR_CODES.INSUFFICIENT_STORAGE,
+      });
+
+      const snapshot = service.getSnapshot();
+      expect(snapshot.freeBytes).toBe(10 * MB);
+      expect(snapshot.admissionFreeBytes).toBe(6 * MB);
+      expect(snapshot.volumePeerReserveBytes).toBe(4 * MB);
+    });
+
+    it('预留为 0（默认）时行为与历史一致', async () => {
+      mockFree(10 * MB);
+      const reservation = await service.reserve({ sessionKey: 'file:a', bytes: 7 * MB });
+      expect(reservation.grantedBytes).toBe(7 * MB);
+      reservation.release();
+      expect(service.getSnapshot().volumePeerReserveBytes).toBe(0);
+    });
+
+    it('预留导致队头不可满足时不放行（队列等待而非越水位写入）', async () => {
+      mockFree(10 * MB);
+      service.configure({ volumePeerReserveBytes: 0 });
+      const holder = await service.reserve({ sessionKey: 'file:hold', bytes: 5 * MB });
+      // 此时剩余 5MB；把预留提到 6MB → 队头（需要 4MB）不可满足
+      service.configure({ volumePeerReserveBytes: 6 * MB });
+      await expect(service.reserve({ sessionKey: 'file:a', bytes: 4 * MB, waitTimeoutMs: 30 }))
+        .rejects.toMatchObject({ errorCode: DOWNLOAD_ERROR_CODES.QUEUE_TIMEOUT });
+      holder.release();
+    });
+
+    it('只读准入探测同样使用扣除预留后的口径（任务状态不能报「可立即开始」）', () => {
+      mockFree(10 * MB);
+      service.configure({ volumePeerReserveBytes: 4 * MB });
+      const probe = service.probeAdmission(7 * MB, true);
+      expect(probe.admitted).toBe(false);
+      expect(probe.structural).toBe(true);
+      expect(probe.freeBytes).toBe(6 * MB);
+    });
+  });
+
   describe('bounded_fit 上游队列公平策略（队首阻塞治理）', () => {
     /** 用 weight=1 的占位租约把预算占满，便于精确制造「剩余预算不足但非零」的场景 */
     async function fillBudget(units: number) {

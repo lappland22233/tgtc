@@ -36,6 +36,45 @@ const MAX_GLOBAL_REPLICATION_CONCURRENCY = 2;
 export const REPLICATION_COVERAGE_MAX_GROUPS = 5000;
 
 /**
+ * 单次锚点解析最多读取的副本行数。
+ *
+ * 同一 `(chatId, messageId)` 命中的行数 = 该消息的逻辑主键数 × 各主键下的账号数；
+ * 正常场景（一条消息、若干 Bot）远小于该上限。上限只用于防御异常脏数据
+ * （例如历史数据把同一消息锚点写进了大量不同逻辑主键）把管理端/下载入口拖垮。
+ */
+export const ANCHOR_RESOLVE_MAX_ROWS = 200;
+
+/** 多义锚点告警日志的最小间隔（毫秒）：避免异常数据把日志刷爆 */
+const ANCHOR_CONFLICT_LOG_INTERVAL_MS = 5 * 60 * 1000;
+
+/** 大文件阈值（字节）：>1GiB 视为大文件，与账号池的每账号回源槽位口径一致 */
+const LARGE_FILE_THRESHOLD_BYTES = 1024 ** 3;
+
+/**
+ * 用户账号中继后的「入站认领」等待窗口与复查间隔（毫秒）。
+ *
+ * 取值依据：群内各 Bot 通过长轮询收 update，典型延迟秒级（轮询周期 + 网络）；
+ * 窗口必须显著短于「下载期懒扩散」的等待容忍度（首个字节不能被复制阻塞）。
+ * 故意不设成长时间等待：窗口之外由下一轮懒扩散继续补齐。
+ */
+const RELAY_CLAIM_WAIT_MS = 12_000;
+const RELAY_CLAIM_POLL_MS = 1_500;
+
+/**
+ * 副本覆盖率的大小分档（从大到小）。
+ *
+ * 为什么以 4GiB 为最高档：生产事故正是「4GB 级分卷的副本全部集中在一个账号」，
+ * 而所有分档按同一目标统计时，大量小文件的达标会把大文件的严重不达标「平均掉」，
+ * 管理端看到的是「覆盖率 90%」——与真实风险完全不符。
+ */
+export const SIZE_COVERAGE_TIERS: Array<{ label: string; minBytes: number }> = [
+  { label: '≥4GiB', minBytes: 4 * 1024 ** 3 },
+  { label: '1–4GiB', minBytes: 1024 ** 3 },
+  { label: '256MiB–1GiB', minBytes: 256 * 1024 ** 2 },
+  { label: '<256MiB', minBytes: 1 },
+];
+
+/**
  * 单次桥接最多关联的逻辑文件数。
  *
  * `file_unique_id` 在站内**不是唯一键**（同一内容被上传两次会形成两条 `files` 记录），
@@ -122,9 +161,88 @@ export class FileCopyService {
    * 按「入站锚点」反查副本：直链记录只存了 (chatId, messageId)（用户的私聊与消息），
    * 而副本的逻辑主键是 `file_unique_id`；同一用户消息只会被**一个** bot 收到，
    * 因此该锚点在库内唯一，可安全反查出逻辑主键与全部副本。
+   *
+   * 语义收紧（2026-09 计划 P1）：返回**唯一逻辑主键**而不是「任意一行」。
+   *
+   * 为什么必须收紧：`bridgeInboundCopyToLogicalFile` 是**双写**（`fileUnique` 记录保留、
+   * 额外写 `file` 记录），因此同一 `(chatId, messageId)` 可以合法地命中多条不同
+   * `ownerType/ownerId` 的行。历史实现在这种情形下取「第一行」，一旦数据库返回顺序变化，
+   * 同一份文件的回源候选集合就会在 `fileUnique` 与 `file` 两个命名空间之间漂移——
+   * 表现正是「副本明明存在，却总压在同一账号」这类无从复现的分布异常。
+   *
+   * 解析优先级（确定性，与双写方向一致）：
+   * 1. `fileUnique`（跨账号稳定的 Telegram 逻辑主键，Bot 直链的真实锚点）；
+   * 2. `file`（站内逻辑文件；由群认领桥接而来，同一 `file_unique_id` 可能对应多条站内文件）；
+   * 3. `grant`（历史/直链锚点）。
+   *
+   * 同优先级内出现多个不同 `ownerId` 时**不做猜测**：按 `ownerId` 升序取第一个并告警，
+   * 使结果稳定可复现（不会随数据库返回顺序漂移），同时把脏数据暴露出来供人工核查。
+   * 全程 fail-closed：命中多行只会选一个逻辑主键，绝不跨账号共享 `file_id`。
    */
   async findByAnchor(chatId: string, messageId: string): Promise<TelegramFileCopy | null> {
-    return this.repo.findOne({ where: { chatId, messageId } });
+    const rows = await this.repo.find({
+      where: { chatId, messageId },
+      take: ANCHOR_RESOLVE_MAX_ROWS,
+    });
+    if (rows.length === 0) return null;
+    return this.pickAnchorWinner(rows, { chatId, messageId });
+  }
+
+  /**
+   * 锚点候选行的确定性收敛（纯函数，便于测试与审计复用）。
+   *
+   * 多义锚点（同一 `(chatId, messageId)` 命中多个逻辑主键）时返回稳定结果并计数：
+   * 计数用于告警/审计，避免只在日志里留下一次性噪声。
+   */
+  private pickAnchorWinner(
+    rows: TelegramFileCopy[],
+    anchor: { chatId: string; messageId: string },
+  ): TelegramFileCopy | null {
+    if (rows.length === 1) return rows[0];
+    const order: Record<TelegramCopyOwnerType, number> = { fileUnique: 0, file: 1, grant: 2 };
+    const sorted = [...rows].sort((left, right) => {
+      const byType = order[left.ownerType] - order[right.ownerType];
+      if (byType !== 0) return byType;
+      const byOwner = String(left.ownerId).localeCompare(String(right.ownerId));
+      if (byOwner !== 0) return byOwner;
+      return String(left.accountId).localeCompare(String(right.accountId));
+    });
+    const winner = sorted[0];
+    const distinctKeys = new Set(sorted.map((row) => `${row.ownerType}:${row.ownerId}`));
+    if (distinctKeys.size > 1) {
+      this.bumpAnchorConflict();
+      this.warnAnchorConflictOnce(
+        `同一入站锚点命中 ${distinctKeys.size} 个逻辑主键（chat=${anchor.chatId} message=${anchor.messageId}），`
+        + `已按确定性优先级解析为 ${winner.ownerType}:${this.preview(winner.ownerId)}；`
+        + '若该文件确有多个站内副本，请核查副本归属是否需要人工合并',
+      );
+    }
+    return winner;
+  }
+
+  /** 多义锚点累计次数（进程内，供审计与告警判定） */
+  private anchorConflicts = 0;
+  private lastAnchorConflictLogAt = 0;
+
+  get anchorConflictCount(): number {
+    return this.anchorConflicts;
+  }
+
+  /** 多义锚点告警：计数 + 限频日志（异常数据不得把日志刷爆） */
+  private warnAnchorConflictOnce(message: string): void {
+    const now = Date.now();
+    if (now - this.lastAnchorConflictLogAt < ANCHOR_CONFLICT_LOG_INTERVAL_MS) return;
+    this.lastAnchorConflictLogAt = now;
+    this.logger.warn(message);
+  }
+
+  private bumpAnchorConflict(): void {
+    this.anchorConflicts += 1;
+    try {
+      this.pool.bumpCounter('anchorConflicts');
+    } catch {
+      // 账号池未装配（单测）时忽略：锚点冲突计数是诊断量，不得影响回源
+    }
   }
 
   // ---------------- 入站副本 → 站内文件桥接（副本扩散的「最后一公里」） ----------------
@@ -459,6 +577,163 @@ export class FileCopyService {
   }
 
   /**
+   * 副本覆盖率概览（按**文件大小分层**，管理端审计用）。
+   *
+   * 为什么需要单独一层：`replicationCoverage` 只回答「达标/未达标」，
+   * 而生产的核心问题是**大文件**的副本分布（4GB+ 分卷全部集中在单一账号，
+   * 该账号独扛 DC-5 回源）。按大小分层后，才能直接读出
+   * 「≥4GiB 的逻辑文件有多少个、其中有多少达到目标副本数」。
+   *
+   * 口径说明：
+   * - 分组键是「逻辑主键（`ownerType:ownerId`）+ 大小分档」，跨命名空间不合并；
+   * - `fileSize` 为空的副本不计入任何分档（缺大小无法判定，宁可少算不可错算）；
+   * - 分组按 `fileSize` 取最大值（同一逻辑主键的副本大小应当一致，取最大值偏保守）；
+   * - 扫描有界：`LIMIT maxGroups + 1`，并返回 `truncated` 提示统计不完整。
+   */
+  async replicationCoverageBySize(params: {
+    ownerType: TelegramCopyOwnerType;
+    /** 目标副本数 */
+    target: number;
+    /** 分档下界（字节，含），按从大到小排列 */
+    tiers?: Array<{ label: string; minBytes: number }>;
+    maxGroups?: number;
+    sampleLimit?: number;
+  }): Promise<{
+    scannedFiles: number;
+    truncated: boolean;
+    tiers: Array<{
+      label: string;
+      minBytes: number;
+      files: number;
+      satisfied: number;
+      unsatisfied: number;
+      /** 该档内「持有副本的去重账号数」分布（用于验证压力是否已分散） */
+      readyAccountCounts: number[];
+      missingSamples: Array<{ ownerId: string; readyAccountCount: number; missing: number }>;
+    }>;
+  }> {
+    const target = Math.max(1, Math.floor(params.target) || 1);
+    const maxGroups = Math.max(1, Math.floor(params.maxGroups ?? REPLICATION_COVERAGE_MAX_GROUPS));
+    const sampleLimit = Math.max(1, Math.floor(params.sampleLimit ?? 20));
+    const tiers = params.tiers ?? SIZE_COVERAGE_TIERS;
+
+    // 按「逻辑主键」分组取最大已知大小与去重账号数。
+    // 用 MAX(fileSize) 而非 AVG：分档边界必须确定性可复现。
+    const rows = await this.repo
+      .createQueryBuilder('copy')
+      .select('copy.ownerId', 'ownerId')
+      .addSelect('MAX(copy.fileSize)', 'maxSize')
+      .addSelect('COUNT(DISTINCT copy.accountId)', 'readyAccountCount')
+      .where('copy.ownerType = :ownerType', { ownerType: params.ownerType })
+      .andWhere('copy.status = :status', { status: 'ready' })
+      .andWhere('copy.fileSize IS NOT NULL')
+      .groupBy('copy.ownerId')
+      .orderBy('copy.ownerId', 'ASC')
+      .limit(maxGroups + 1)
+      .getRawMany<{ ownerId: string; maxSize: string | null; readyAccountCount: string }>();
+
+    const truncated = rows.length > maxGroups;
+    const result = tiers.map((tier) => ({
+      label: tier.label,
+      minBytes: tier.minBytes,
+      files: 0,
+      satisfied: 0,
+      unsatisfied: 0,
+      readyAccountCounts: [] as number[],
+      missingSamples: [] as Array<{ ownerId: string; readyAccountCount: number; missing: number }>,
+    }));
+
+    let scannedFiles = 0;
+    for (const row of rows.slice(0, maxGroups)) {
+      const size = Number(row.maxSize);
+      if (!Number.isFinite(size) || size <= 0) continue;
+      const index = tiers.findIndex((tier) => size >= tier.minBytes);
+      if (index < 0) continue;
+      const readyAccountCount = Number(row.readyAccountCount) || 0;
+      scannedFiles += 1;
+      const bucket = result[index];
+      bucket.files += 1;
+      bucket.readyAccountCounts.push(readyAccountCount);
+      if (readyAccountCount >= target) {
+        bucket.satisfied += 1;
+      } else {
+        bucket.unsatisfied += 1;
+        bucket.missingSamples.push({
+          ownerId: row.ownerId,
+          readyAccountCount,
+          missing: target - readyAccountCount,
+        });
+      }
+    }
+    for (const bucket of result) {
+      bucket.readyAccountCounts.sort((left, right) => left - right);
+      bucket.missingSamples = bucket.missingSamples
+        .sort((left, right) => left.readyAccountCount - right.readyAccountCount)
+        .slice(0, sampleLimit);
+    }
+    return { scannedFiles, truncated, tiers: result };
+  }
+
+  /**
+   * **高热大文件**（≥`minBytes`）的可用账号分布（容量策略闸门用）。
+   *
+   * 与 `countReadyByAccount()` 的区别（这是「单账号独扛」问题的核心）：
+   * 后者统计「某账号在**任意**文件上存在一条 ready 副本」——一个账号只要随便
+   * 持有一个小文件副本就会被算作「有效 Bot」，于是自动预算会在大文件副本仍
+   * 全部集中在一个账号时照样从 8 升到 16，把 DC-5 压力继续堆到同一个账号。
+   *
+   * 本方法只看**达到大小阈值**的逻辑文件：返回这些文件的去重账号覆盖情况。
+   * 判据（调用方使用）：`files` 数量 > 0 时，要求
+   * `minReadyAccounts`（该批文件里覆盖最少的账号数）达到目标，才允许升档。
+   *
+   * 有界：按 `LIMIT maxGroups + 1` 截断，返回 `truncated` 表示统计不完整
+   * （调用方应保守处理，不据此升档）。
+   */
+  async largeFileReplicaDistribution(params: {
+    ownerType?: TelegramCopyOwnerType;
+    minBytes: number;
+    maxGroups?: number;
+  }): Promise<{
+    files: number;
+    truncated: boolean;
+    /** 每个逻辑文件的去重 ready 账号数（升序，便于直接读最小值/中位数） */
+    readyAccountCounts: number[];
+    /** 覆盖最少的账号数（无大文件时为 0） */
+    minReadyAccounts: number;
+  }> {
+    const maxGroups = Math.max(1, Math.floor(params.maxGroups ?? REPLICATION_COVERAGE_MAX_GROUPS));
+    const qb = this.repo
+      .createQueryBuilder('copy')
+      .select('copy.ownerType', 'ownerType')
+      .addSelect('copy.ownerId', 'ownerId')
+      .addSelect('MAX(copy.fileSize)', 'maxSize')
+      .addSelect('COUNT(DISTINCT copy.accountId)', 'readyAccountCount')
+      .where('copy.status = :status', { status: 'ready' })
+      .andWhere('copy.fileSize IS NOT NULL');
+    if (params.ownerType) qb.andWhere('copy.ownerType = :ownerType', { ownerType: params.ownerType });
+    const rows = await qb
+      .groupBy('copy.ownerType')
+      .addGroupBy('copy.ownerId')
+      .orderBy('copy.ownerId', 'ASC')
+      .limit(maxGroups + 1)
+      .getRawMany<{ ownerType: string; ownerId: string; maxSize: string | null; readyAccountCount: string }>();
+
+    const counts: number[] = [];
+    for (const row of rows.slice(0, maxGroups)) {
+      const size = Number(row.maxSize);
+      if (!Number.isFinite(size) || size < params.minBytes) continue;
+      counts.push(Number(row.readyAccountCount) || 0);
+    }
+    counts.sort((left, right) => left - right);
+    return {
+      files: counts.length,
+      truncated: rows.length > maxGroups,
+      readyAccountCounts: counts,
+      minReadyAccounts: counts.length > 0 ? counts[0] : 0,
+    };
+  }
+
+  /**
    * 各账号持有的 ready 副本数（按 `ownerType` 可选过滤）。
    *
    * 供两处使用：
@@ -553,8 +828,19 @@ export class FileCopyService {
     const sourceCopy = params.sourceAccountId && params.sourceAccountId !== params.targetAccountId
       ? sources.find((item) => item.accountId === params.sourceAccountId) ?? null
       : null;
+    // 大小必须在选源之前解析：档位（大文件槽位）与复制权重都依赖它
+    const size = Number(sourceCopy?.fileSize ?? sources[0]?.fileSize ?? params.expectedSize);
+    if (!Number.isSafeInteger(size) || size <= 0) {
+      this.logger.warn(`副本扩散缺少有效大小（${params.ownerType}:${params.ownerId}）`);
+      return null;
+    }
     const sourceCandidates = sources.filter((item) => item.accountId !== params.targetAccountId);
-    const fallbackSelection = this.pool.select(sourceCandidates.map((item) => item.accountId));
+    // 复制选源同样按复制角色选号：已有复制流的账号被排除（下载优先，复制不与之争同一账号额度）
+    const fallbackSelection = this.pool.select(
+      sourceCandidates.map((item) => item.accountId),
+      Date.now(),
+      { role: 'replication', largeFile: size > LARGE_FILE_THRESHOLD_BYTES },
+    );
     const chosenSource = sourceCopy
       ?? (fallbackSelection ? sourceCandidates.find((item) => item.accountId === fallbackSelection.accountId) ?? null : null);
     if (!chosenSource) {
@@ -567,19 +853,27 @@ export class FileCopyService {
     const sourceAccount = this.pool.getConfig(chosenSource.accountId);
     if (!sourceAccount) return null;
 
-    const size = Number(chosenSource.fileSize ?? params.expectedSize);
-    if (!Number.isSafeInteger(size) || size <= 0) {
-      this.logger.warn(`副本扩散缺少有效大小（${params.ownerType}:${params.ownerId}）`);
+    // 2) 源账号取流：走**复制专属**原子准入（冷却 + 在飞 + 复制并发），
+    //    与下载共享同一账号计数，保证「两条复制流偷占唯一源账号的下载额度」不再发生。
+    const sourceAdmission = this.pool.admit({
+      accountId: sourceAccount.id,
+      role: 'replication',
+      bytes: size,
+    });
+    if (!sourceAdmission.granted || !sourceAdmission.admission) {
+      // 复制是「副产品」：拿不到额度就本轮不做，绝不排队占用下载资源
+      this.pool.bumpCounter('replicationsFailed');
+      this.logger.debug(
+        `副本扩散跳过（源账号 ${sourceAccount.id} 无复制额度：${sourceAdmission.reason ?? 'unknown'}）`,
+      );
       return null;
     }
-
-    // 2) 源账号取流（计入在飞；结束回报采样 → 带宽 EWMA 会随真实传输更新）
-    if (!this.pool.beginAttempt(sourceAccount.id)) return null;
+    const sourceSlot = sourceAdmission.admission;
     let session: Awaited<ReturnType<TelegramAccountClientService['openRealtimeStream']>>;
     try {
       session = await this.client.openRealtimeStream(sourceAccount.id, sourceAccount.token, chosenSource.telegramFileId, size);
     } catch (error) {
-      this.pool.releaseAttempt(sourceAccount.id);
+      sourceSlot.release();
       const message = error instanceof Error ? error.message : String(error);
       this.logger.warn(`副本扩散取源失败（${sourceAccount.id}）：${message}`);
       return null;
@@ -591,19 +885,29 @@ export class FileCopyService {
     const settleSource = (): void => {
       if (sourceSettled) return;
       sourceSettled = true;
-      this.pool.finishAttempt(sourceAccount.id, session.sample());
+      sourceSlot.finish(session.sample());
     };
     session.stream.once('close', settleSource);
     session.stream.once('error', settleSource);
 
-    // 3) 目标账号上传（同一时刻只占一个在飞额度）
-    if (!this.pool.beginAttempt(target.id)) {
+    // 3) 目标账号上传：同样按复制角色准入（目标账号也算一条复制流）
+    const targetAdmission = this.pool.admit({
+      accountId: target.id,
+      role: 'replication',
+      bytes: size,
+    });
+    if (!targetAdmission.granted || !targetAdmission.admission) {
       // 只销毁源流，并由 settleSource 释放且仅释放一次额度
       // （destroy 触发的 close 会再次回调同一守卫，不会重复释放）
       session.stream.destroy();
       settleSource();
+      this.pool.bumpCounter('replicationsFailed');
+      this.logger.debug(
+        `副本扩散跳过（目标账号 ${target.id} 无复制额度：${targetAdmission.reason ?? 'unknown'}）`,
+      );
       return null;
     }
+    const targetSlot = targetAdmission.admission;
     try {
       const uploaded = await this.client.sendDocumentStream(
         target.id,
@@ -613,7 +917,7 @@ export class FileCopyService {
         params.fileName,
         size,
       );
-      this.pool.finishAttempt(target.id, uploaded.sample);
+      targetSlot.finish(uploaded.sample);
       const copy = await this.upsertReady({
         ownerType: params.ownerType,
         ownerId: params.ownerId,
@@ -631,7 +935,7 @@ export class FileCopyService {
       return copy;
     } catch (error) {
       const accountError = error instanceof TelegramAccountError ? error : null;
-      this.pool.finishAttempt(target.id, {
+      targetSlot.finish({
         ok: false,
         failureKind: accountError?.kind ?? 'other',
         status: accountError?.status,
@@ -733,17 +1037,39 @@ export class FileCopyService {
       return result;
     }
 
-    // 策略 B：用户账号中继（一次转发 → 各 bot 由入站链路自行登记副本）
+    // 策略 B：用户账号中继（一次转发 → 各 bot 由入站链路自行登记副本）。
+    // **中继成功 ≠ 副本 ready**：群内 Bot 未加入/隐私模式/轮询未开时，
+    // 转发出去的消息无人认领。因此中继成功后必须先等一个**认领窗口**，
+    // 只有确实新增了 ready 副本才算完成；否则回退策略 A，绝不静默跳过扩散。
     const relayed = await this.tryRelayViaUser(params.ownerType, params.ownerId, params.sourceAccountId);
     if (relayed.ok) {
-      result.relayed = true;
-      this.logger.log(`已通过用户账号中继文件（${params.ownerType}:${params.ownerId}），等待各账号入站登记副本`);
-      return result;
+      const claimed = await this.waitForRelayClaims(
+        params.ownerType,
+        params.ownerId,
+        held.length,
+        params.desiredCount,
+      );
+      if (claimed.length > held.length) {
+        result.relayed = true;
+        result.created = claimed.filter((accountId) => !held.includes(accountId));
+        this.logger.log(
+          `用户账号中继已生效：${params.ownerType}:${params.ownerId} 新增 ${result.created.length} 个认领账号`
+          + `（${result.created.join(', ')}）`,
+        );
+        return result;
+      }
+      this.pool.bumpCounter('relayClaimsMissed');
+      this.logger.warn(
+        `用户账号中继转发成功但无人认领（${params.ownerType}:${params.ownerId}，`
+        + `等待 ${RELAY_CLAIM_WAIT_MS}ms 内 ready 副本数未增加）：`
+        + '请核查群内 Bot 是否已加入、隐私模式是否已关闭、入站轮询是否开启；本次回退逐账号副本扩散',
+      );
+    } else {
+      this.logger.log(
+        `用户账号中继未生效（${params.ownerType}:${params.ownerId} / ${relayed.reason ?? 'unknown'}），`
+        + '回退逐账号副本扩散',
+      );
     }
-    this.logger.log(
-      `用户账号中继未生效（${params.ownerType}:${params.ownerId} / ${relayed.reason ?? 'unknown'}），`
-      + '回退逐账号副本扩散',
-    );
 
     // 目标数量在规划阶段就收敛到单次上限：避免为「不会被处理」的目标留下 claim
     // （claim 要等 5min TTL 或进程重启才消失，会让这些账号在窗口内无法被其它请求选中）
@@ -766,6 +1092,32 @@ export class FileCopyService {
       else result.failed.push({ accountId, error: 'replication_failed_or_unavailable' });
     }
     return result;
+  }
+
+  /**
+   * 等待用户账号中继后的「入站认领」（有界轮询，绝不无限等）。
+   *
+   * 中继是服务端转发，群内各 Bot 通过**长轮询**收到 update 后才登记自己的 `file_id`；
+   * 这个延迟取决于轮询周期与网络，典型在秒级。这里按固定间隔复查 ready 账号集合，
+   * 达到期望数或超出窗口即返回当前集合。
+   *
+   * 为什么必须有界：`ensureCopies` 在下载期被懒触发（`scheduleReplication`），
+   * 若在这里长时间阻塞，会把「首个字节」拖到复制之后，违背「非阻断懒扩散」的约束。
+   * 窗口之外由下一轮懒扩散继续补齐（扩散是持续过程，不追求单次到齐）。
+   */
+  private async waitForRelayClaims(
+    ownerType: TelegramCopyOwnerType,
+    ownerId: string,
+    baselineCount: number,
+    desiredCount: number,
+  ): Promise<string[]> {
+    const deadline = Date.now() + RELAY_CLAIM_WAIT_MS;
+    let accounts = await this.readyAccountIds(ownerType, ownerId);
+    while (accounts.length <= baselineCount && accounts.length < desiredCount && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, RELAY_CLAIM_POLL_MS));
+      accounts = await this.readyAccountIds(ownerType, ownerId);
+    }
+    return accounts;
   }
 
   /** 策略 B：尝试用用户账号把源消息转发进群（未配置时返回可诊断原因，绝不伪装成功） */

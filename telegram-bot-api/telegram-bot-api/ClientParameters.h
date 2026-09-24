@@ -53,6 +53,11 @@ struct SharedData {
   std::atomic<td::int64> file_delete_attempts_{0};
   std::atomic<td::int64> file_delete_successes_{0};
   std::atomic<td::int64> file_delete_failures_{0};
+  // Number of no-cache deletions that had to be skipped because a standard getFile download was
+  // still holding a reference to the same local copy at that moment. Such a copy stays in the
+  // workdir even though nobody needs it any more, so it must be visible instead of silently
+  // disappearing (the responsible file is picked up later by the workdir TTL cleanup).
+  std::atomic<td::int64> file_delete_skipped_busy_{0};
   td::ActorId<WorkdirCleanupManager> workdir_cleanup_manager_;
 
   // not thread-safe, must be used from a single thread

@@ -407,6 +407,10 @@ void ClientManager::get_stats(td::Promise<td::BufferSlice> promise,
        << parameters_->shared_data_->file_delete_successes_.load(std::memory_order_relaxed) << '\n';
     sb << "file_delete_failures\t"
        << parameters_->shared_data_->file_delete_failures_.load(std::memory_order_relaxed) << '\n';
+    // no-cache 删除因并发 getFile 占用而跳过的次数：这些副本最终由 workdir TTL 清理，
+    // 计数可见才能把「workdir 占用高于预期」归因到真实的并发窗口，而非猜测。
+    sb << "file_delete_skipped_busy\t"
+       << parameters_->shared_data_->file_delete_skipped_busy_.load(std::memory_order_relaxed) << '\n';
     auto stats = stat_.as_vector(now);
     for (auto &stat : stats) {
       sb << stat.key_ << "\t" << stat.value_ << '\n';

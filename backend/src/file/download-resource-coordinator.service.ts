@@ -43,6 +43,18 @@ export const DOWNLOAD_CONFIG_KEYS = {
   UPSTREAM_QUEUE_POLICY: 'FILE_DOWNLOAD_UPSTREAM_QUEUE_POLICY',
   /** 全局权重预算自动扩缩容开关（kill switch） */
   AUTO_CAPACITY_ENABLED: 'FILE_DOWNLOAD_AUTO_CAPACITY_ENABLED',
+  /**
+   * 与缓存卷**同一物理卷**的邻近目录（TDLib workdir）预留余量（GB）。
+   *
+   * 为什么需要：生产上 `backend/tmp/Cache` 与 `telegram-bot-api/workdir` 同在 `/dev/vda3`。
+   * 两套独立写前 `statfs` 会**同时**看到同一份空闲空间并各自放行，于是
+   * 「2 个 4GB 冷分卷 + TDLib 新本地媒体副本」叠加后把卷写满——而每一方都以为自己合法。
+   * 该值表示「必须留给邻近目录（含 TDLib 媒体副本增长）的空间」，从缓存侧可用空间里扣除，
+   * 使两侧的峰值占用之和受一个总水位约束。
+   *
+   * 默认 0（不扣除）：只有确认同卷部署且 0 会掩盖问题时才应显式配置。
+   */
+  VOLUME_PEER_RESERVE_GB: 'FILE_DOWNLOAD_VOLUME_PEER_RESERVE_GB',
 } as const;
 
 export const DOWNLOAD_CONFIG_DEFAULTS: Record<string, string> = {
@@ -57,6 +69,7 @@ export const DOWNLOAD_CONFIG_DEFAULTS: Record<string, string> = {
   [DOWNLOAD_CONFIG_KEYS.TASK_RETENTION_SECONDS]: '900',
   [DOWNLOAD_CONFIG_KEYS.UPSTREAM_QUEUE_POLICY]: 'strict_fifo',
   [DOWNLOAD_CONFIG_KEYS.AUTO_CAPACITY_ENABLED]: 'true',
+  [DOWNLOAD_CONFIG_KEYS.VOLUME_PEER_RESERVE_GB]: '0',
 };
 
 /**
@@ -76,6 +89,7 @@ export const DOWNLOAD_CONFIG_RANGES: Record<string, { min: number; max: number }
   [DOWNLOAD_CONFIG_KEYS.DIRECT_WINDOW_MB]: { min: 1, max: 4 },
   [DOWNLOAD_CONFIG_KEYS.DIRECT_WAIT_SECONDS]: { min: 0, max: 600 },
   [DOWNLOAD_CONFIG_KEYS.TASK_RETENTION_SECONDS]: { min: 60, max: 86_400 },
+  [DOWNLOAD_CONFIG_KEYS.VOLUME_PEER_RESERVE_GB]: { min: 0, max: 10_000 },
 };
 
 /** 上游等待项选择策略取值 */
@@ -219,6 +233,13 @@ export interface DownloadResourceConfig {
   taskRetentionMs: number;
   /** 上游等待项选择策略（默认 strict_fifo，保持既有行为） */
   upstreamQueuePolicy: UpstreamQueuePolicy;
+  /**
+   * 与缓存卷同一物理卷的邻近目录（TDLib workdir）预留量（字节，0 表示不扣除）。
+   *
+   * 生效位置：`probeFreeBytes()` 的**有效可用空间**判定。用于防止两套独立
+   * 写前探测同时放行、叠加写满同一块盘（生产事故场景：Cache 与 workdir 同卷）。
+   */
+  volumePeerReserveBytes: number;
 }
 
 export const DOWNLOAD_RESOURCE_DEFAULTS = {
@@ -336,9 +357,73 @@ export interface AcquireUpstreamOptions {
   weight?: number;
 }
 
+/**
+ * 磁盘等待时长直方图分桶上界（毫秒，左闭右开，最后一桶为「≥ 末位」）。
+ *
+ * 为什么需要直方图而不是只有 `oldestDiskWaitMs`：后者是**瞬时值**，
+ * 只在采样那一刻有意义——一次持续 40 秒的磁盘等待，如果恰好在它结束时采样，
+ * 看到的 `oldestDiskWaitMs` 是 0，问题被完全隐藏。P3 的验收口径是
+ * 「磁盘等待 P95 < 30s」，必须有每次等待的分布才能算。
+ */
+export const DISK_WAIT_HISTOGRAM_BUCKETS_MS = [1_000, 5_000, 10_000, 30_000, 60_000, 180_000] as const;
+
+/** 每次磁盘等待的**终止原因**（用于区分「等到了」与「等超时/被取消/队满」） */
+export type DiskWaitOutcome =
+  /** 等到空间并授予预约 */
+  | 'granted'
+  /** 等待超时（503 DOWNLOAD_QUEUE_TIMEOUT / DOWNLOAD_SERVER_BUSY） */
+  | 'timeout'
+  /** 客户端/任务取消（499，不计入容量问题） */
+  | 'cancelled'
+  /** 队列已满，未进入等待（429 DOWNLOAD_QUEUE_FULL） */
+  | 'queue_full'
+  /** 结构性不足，直接降级直通（不等待） */
+  | 'direct_degrade'
+  /** 服务关闭 */
+  | 'shutdown';
+
+/** 磁盘等待统计（累计值，进程内自启动） */
+export interface DiskWaitStats {
+  /** 各分桶的样本数（长度 = DISK_WAIT_HISTOGRAM_BUCKETS_MS.length + 1，最后一桶为 ≥ 最大值） */
+  histogram: number[];
+  /** 分桶上界（毫秒），与 histogram 前 N 项一一对应 */
+  bucketBoundsMs: number[];
+  /** 各终止原因的累计次数 */
+  outcomes: Record<DiskWaitOutcome, number>;
+  /**
+   * 已计入直方图的样本总数。
+   *
+   * 口径：只有**真正进入等待队列并结束**的样本（授予 / 超时 / 取消）。
+   * 立即授予（零等待）与「未进入等待」的终止（队满 / 结构性降级 / 关闭）只计入
+   * `outcomes`，以免稀释 P95。
+   */
+  sampledWaits: number;
+  /** 等待总时长（毫秒，用于算平均值；与 sampledWaits 配套） */
+  totalWaitMs: number;
+  /**
+   * 等待时长 P95（毫秒；样本不足时为 null）。
+   *
+   * 用桶上界近似：命中的是「该样本落在哪个桶」，因此 P95 只会**偏大**，
+   * 作为验收阈值（< 30s）的判定是保守的——不会因为近似而误判达标。
+   */
+  p95WaitMs: number | null;
+  /** 等待时长 P50（毫秒；样本不足时为 null） */
+  p50WaitMs: number | null;
+}
+
 /** 运行状态快照（管理后台观测） */
 export interface DownloadResourceSnapshot {
+  /** 卷真实可用空间（展示口径） */
   freeBytes: number;
+  /**
+   * 准入用的有效可用空间 = `freeBytes − volumePeerReserveBytes`。
+   *
+   * 与 `freeBytes` 并列展示：两者差异即「为同卷邻近目录（TDLib workdir）预留的量」。
+   * 排查「磁盘明明有余量却一直排队」时，先看这两个值的差。
+   */
+  admissionFreeBytes: number;
+  /** 为同卷邻近目录（TDLib workdir）预留的字节数 */
+  volumePeerReserveBytes: number;
   minimumFreeBytes: number;
   reservedRemainingBytes: number;
   cacheReservedBytes: number;
@@ -351,6 +436,8 @@ export interface DownloadResourceSnapshot {
   maxConcurrentUpstreams: number;
   queueCapacity: number;
   oldestDiskWaitMs: number;
+  /** 磁盘等待时长分布与终止原因（瞬时值之外的分布口径，P3 验收依据） */
+  diskWait: DiskWaitStats;
   /** 队首上游等待项的等待年龄（毫秒）：503 归因与「队首保留」判定依据 */
   oldestUpstreamWaitMs: number;
   /** 当前上游等待项选择策略 */
@@ -454,6 +541,22 @@ export class DownloadResourceCoordinatorService {
   private pollTimer: NodeJS.Timeout | null = null;
   private shuttingDown = false;
 
+  /** 磁盘等待时长直方图（长度 = 分桶数 + 1，末桶为 ≥ 最大上界） */
+  private readonly diskWaitHistogram = new Array<number>(DISK_WAIT_HISTOGRAM_BUCKETS_MS.length + 1).fill(0);
+  /** 各终止原因的累计计数 */
+  private readonly diskWaitOutcomes: Record<DiskWaitOutcome, number> = {
+    granted: 0,
+    timeout: 0,
+    cancelled: 0,
+    queue_full: 0,
+    direct_degrade: 0,
+    shutdown: 0,
+  };
+  /** 已纳入分布的等待样本数 */
+  private diskWaitSampled = 0;
+  /** 等待总时长（毫秒） */
+  private diskWaitTotalMs = 0;
+
   private config: DownloadResourceConfig = {
     minFreeBytes: 0,
     maxReservedBytes: 0,
@@ -465,6 +568,7 @@ export class DownloadResourceCoordinatorService {
     directWaitMs: 60_000,
     taskRetentionMs: 900_000,
     upstreamQueuePolicy: 'strict_fifo',
+    volumePeerReserveBytes: 0,
   };
 
   // ---------- 依赖注入（由 FileCacheService 在启动/热更新时配置） ----------
@@ -573,6 +677,8 @@ export class DownloadResourceCoordinatorService {
   getSnapshot(): DownloadResourceSnapshot {
     return {
       freeBytes: this.probeFreeBytes(),
+      admissionFreeBytes: this.probeAdmissionFreeBytes(),
+      volumePeerReserveBytes: Math.max(0, Math.floor(this.config.volumePeerReserveBytes) || 0),
       minimumFreeBytes: this.config.minFreeBytes,
       reservedRemainingBytes: this.reservedPendingBytes,
       cacheReservedBytes: this.cacheReservedBytes,
@@ -584,6 +690,7 @@ export class DownloadResourceCoordinatorService {
       maxConcurrentUpstreams: this.config.maxConcurrentUpstreams,
       queueCapacity: this.config.queueCapacity,
       oldestDiskWaitMs: this.waitingDisk.length > 0 ? Date.now() - this.waitingDisk[0].enqueuedAt : 0,
+      diskWait: this.getDiskWaitStats(),
       oldestUpstreamWaitMs: this.oldestUpstreamWaitMs,
       upstreamQueuePolicy: this.config.upstreamQueuePolicy,
       upstreamHeadReserved: this.upstreamHeadReserved,
@@ -593,11 +700,87 @@ export class DownloadResourceCoordinatorService {
     };
   }
 
+  /**
+   * 磁盘等待统计快照（分位数用分桶上界近似，偏大不偏小）。
+   *
+   * 采样范围：只有**真正进入等待队列并结束**的样本（granted/timeout/cancelled）计入
+   * 直方图与分位数；queue_full / direct_degrade 属于「没有等待」，只计入 outcomes。
+   * 这样 P95 不会被大量「瞬间授予」稀释成无意义的小值。
+   */
+  getDiskWaitStats(): DiskWaitStats {
+    const bucketCount = DISK_WAIT_HISTOGRAM_BUCKETS_MS.length + 1;
+    const histogram = [...this.diskWaitHistogram];
+    const sampled = this.diskWaitSampled;
+    const quantile = (ratio: number): number | null => {
+      if (sampled <= 0) return null;
+      const target = Math.ceil(sampled * ratio);
+      let cumulative = 0;
+      for (let i = 0; i < histogram.length; i += 1) {
+        cumulative += histogram[i];
+        if (cumulative >= target) {
+          // 最后一桶（≥ 最大上界）用配置最大上界作为代表值（保守低估，避免虚高）
+          return i < DISK_WAIT_HISTOGRAM_BUCKETS_MS.length
+            ? DISK_WAIT_HISTOGRAM_BUCKETS_MS[i]
+            : DISK_WAIT_HISTOGRAM_BUCKETS_MS[DISK_WAIT_HISTOGRAM_BUCKETS_MS.length - 1];
+        }
+      }
+      return null;
+    };
+    return {
+      histogram: histogram.slice(0, bucketCount),
+      bucketBoundsMs: [...DISK_WAIT_HISTOGRAM_BUCKETS_MS],
+      outcomes: { ...this.diskWaitOutcomes },
+      sampledWaits: sampled,
+      totalWaitMs: this.diskWaitTotalMs,
+      p95WaitMs: quantile(0.95),
+      p50WaitMs: quantile(0.5),
+    };
+  }
+
+  /**
+   * 记录一次磁盘等待的终止结果。
+   *
+   * `waitMs` **只在真正进过等待队列时**传入（进入队列后：授予 / 超时 / 取消）。
+   * 未传时只累计终止原因，不进入分布——原因有两类，都不能混进分位数：
+   * - 立即授予（零等待）与 queue_full / direct_degrade / shutdown：
+   *   它们不是「等待」样本，混入后会把 P95 稀释成无意义的小值，
+   *   使「磁盘等待是否变短」这个验收问题失去意义；
+   * - shutdown 属系统级终止，重启不该抬高等待 P95。
+   */
+  private recordDiskWaitOutcome(outcome: DiskWaitOutcome, waitMs?: number): void {
+    this.diskWaitOutcomes[outcome] += 1;
+    if (waitMs === undefined) return;
+    const duration = Math.max(0, Math.floor(waitMs));
+    this.diskWaitSampled += 1;
+    this.diskWaitTotalMs += duration;
+    const index = DISK_WAIT_HISTOGRAM_BUCKETS_MS.findIndex((bound) => duration < bound);
+    const bucket = index >= 0 ? index : DISK_WAIT_HISTOGRAM_BUCKETS_MS.length;
+    this.diskWaitHistogram[bucket] += 1;
+  }
+
   // ---------- 物理空间探测 ----------
+
+  /**
+   * **准入用**的有效可用空间：物理可用 − 同卷邻近目录（TDLib workdir）预留量。
+   *
+   * 为什么必须与展示用的 `probeFreeBytes()` 分开：Cache 与 workdir 同卷时，
+   * 两套独立写前探测会各自看到同一份空闲并同时放行，叠加后写满卷——每一方都「合法」。
+   * 从缓存侧扣掉留给 workdir 的余量后，两侧峰值占用之和才受一个总水位约束。
+   * 结果可能为负（表示已越过水位），调用方按不足处理。
+   */
+  private probeAdmissionFreeBytes(): number {
+    const raw = this.probeFreeBytes();
+    if (raw < 0) return raw;
+    const reserve = Math.max(0, Math.floor(this.config.volumePeerReserveBytes) || 0);
+    return raw - reserve;
+  }
 
   /**
    * 探测物理可用空间（bavail，无特权可用块）。
    * 失败返回 -1（保守按不可用处理，fail-closed）。
+   *
+   * 注意：本方法是**展示口径**（真实空闲），准入判定必须用 `probeAdmissionFreeBytes()`，
+   * 否则同卷邻近目录的预留量不生效。
    */
   probeFreeBytes(): number {
     try {
@@ -637,16 +820,26 @@ export class DownloadResourceCoordinatorService {
       handedOff.release();
     }
 
-    const freeBytes = this.probeFreeBytes();
+    const freeBytes = this.probeAdmissionFreeBytes();
     if (freeBytes < 0) {
       throw this.probeUnavailableError();
     }
 
     const result = this.tryGrant({ sessionKey, bytes, countsTowardCache, freeBytes });
-    if (result.granted) return result.reservation;
-    if (result.structural) throw this.insufficientStorageError(result.reason, bytes, freeBytes);
+    if (result.granted) {
+      // 立即授予（未进队列）：只累计“授予”次数，不带等待时长——零等待样本若进入
+      // 分布会把 P95 稀释成无意义的小值
+      this.recordDiskWaitOutcome('granted');
+      return result.reservation;
+    }
+    if (result.structural) {
+      // 结构性不足：调用方会降级受限直通（不写本地副本），不计入等待分布
+      this.recordDiskWaitOutcome('direct_degrade');
+      throw this.insufficientStorageError(result.reason, bytes, freeBytes);
+    }
 
     if (this.waitingDisk.length >= this.config.queueCapacity) {
+      this.recordDiskWaitOutcome('queue_full');
       throw this.queueFullError();
     }
 
@@ -686,7 +879,7 @@ export class DownloadResourceCoordinatorService {
       return null;
     }
 
-    const freeBytes = this.probeFreeBytes();
+    const freeBytes = this.probeAdmissionFreeBytes();
     if (freeBytes < 0) return null;
     const result = this.tryGrant({ sessionKey, bytes, countsTowardCache, freeBytes });
     return result.granted ? result.reservation : null;
@@ -760,6 +953,8 @@ export class DownloadResourceCoordinatorService {
       const timer = setTimeout(() => {
         if (!this.removeDiskWaiter(waiter)) return;
         waiter.settled = true;
+        // 超时是「容量问题」的直接证据：必须计入分布（这是 P95 判定的主要样本来源）
+        this.recordDiskWaitOutcome('timeout', Date.now() - waiter.enqueuedAt);
         waiter.reject(this.queueTimeoutError(waiter));
         // 队首被移除后其后继可能已可准入：显式唤醒（与上游队列同一处理）
         this.pumpDisk();
@@ -770,6 +965,9 @@ export class DownloadResourceCoordinatorService {
         waiter.abortHandler = () => {
           if (!this.removeDiskWaiter(waiter)) return;
           waiter.settled = true;
+          // 取消不计入「容量问题」：客户端主动放弃与服务器磁盘压力是两件事，
+          // 但等待时长本身仍是真实发生的排队（纳入分布，用于观察排队时长的尾部）
+          this.recordDiskWaitOutcome('cancelled', Date.now() - waiter.enqueuedAt);
           waiter.reject(this.cancelledError('下载任务已取消'));
           this.pumpDisk();
         };
@@ -875,7 +1073,7 @@ export class DownloadResourceCoordinatorService {
     if (this.shuttingDown) {
       return { admitted: false, structural: false, reason: 'server_load', scope: 'system', freeBytes: -1, ...base };
     }
-    const freeBytes = this.probeFreeBytes();
+    const freeBytes = this.probeAdmissionFreeBytes();
     if (freeBytes < 0) {
       return {
         ...base,
@@ -1107,7 +1305,9 @@ export class DownloadResourceCoordinatorService {
       this.stopPollTimer();
       return;
     }
-    const freeBytes = this.probeFreeBytes();
+    // 必须用准入口径（扣除同卷邻近目录预留），否则队头会在「展示空闲充足、
+    // 实际已越总水位」时被放行，两个大分卷叠加写满卷
+    const freeBytes = this.probeAdmissionFreeBytes();
     if (freeBytes < 0) {
       return;
     }
@@ -1127,6 +1327,8 @@ export class DownloadResourceCoordinatorService {
       }
       this.removeDiskWaiter(head);
       head.settled = true;
+      // 授予样本：等待时长即入队到授予的真实间隔（P95 的另一个样本来源）
+      this.recordDiskWaitOutcome('granted', Date.now() - head.enqueuedAt);
       head.resolve(result.reservation);
     }
     this.stopPollTimer();
@@ -1291,6 +1493,8 @@ export class DownloadResourceCoordinatorService {
       this.detachWaiter(waiter);
       if (waiter.settled) continue;
       waiter.settled = true;
+      // 关闭属系统级终止，不计入等待分布（否则重启会污染 P95），只累计次数
+      this.recordDiskWaitOutcome('shutdown');
       waiter.reject(this.shuttingDownError());
     }
     for (const waiter of this.waitingUpstream.splice(0)) {

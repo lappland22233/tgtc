@@ -1,6 +1,10 @@
 import { Injectable, Logger, OnApplicationShutdown, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
+  AccountAdmissionRequest,
+  AccountAdmissionResult,
+  AccountAttemptAdmission,
+  AccountAttemptRole,
   AccountAttemptSample,
   AccountFailureKind,
   AccountPoolAccountSnapshot,
@@ -29,6 +33,26 @@ const COOLDOWN_MAX_MS = 10 * 60 * 1000;
 const HEALTH_PROBE_INTERVAL_MS = 60_000;
 /** 探测失败也计入健康度的失败分类判定阈值 */
 const PROBE_FAILURE_KIND: AccountFailureKind = 'network';
+
+/** 大文件阈值（字节）：超过即占用「每账号大文件回源槽位」（与资源协调器的权重口径一致） */
+const LARGE_FILE_THRESHOLD_BYTES = 1024 ** 3;
+/** 每账号大文件回源槽位默认值（未显式配置时）：同一账号同时只跑 1 个大文件冷回源 */
+const LARGE_INFLIGHT_DEFAULT = 1;
+/**
+ * 每账号复制（副本扩散）并发上限。
+ *
+ * 复制与下载共享同一账号的上游额度，且复制本身就是「用下载带宽换副本分布」，
+ * 因此按 1 严格限制：任何时刻同一账号最多一条复制流，且它必须先通过
+ * `admit({role:'replication'})`——下载优先由调用方在准入前判断系统负载。
+ */
+const REPLICATION_INFLIGHT_MAX = 1;
+/** 准入被拒（非冷却）时的建议重试间隔（毫秒） */
+const ADMISSION_RETRY_AFTER_MS = 5_000;
+
+/** 是否为大文件（非有限值/非正数按小文件处理，避免误占用大文件槽位） */
+function isLargeFileBytes(bytes?: number): boolean {
+  return typeof bytes === 'number' && Number.isFinite(bytes) && bytes > LARGE_FILE_THRESHOLD_BYTES;
+}
 
 /**
  * Bot 账号池：多账号注册表 + 加权负载选择 + 失败冷却 + 在线健康探测。
@@ -68,7 +92,11 @@ export class TelegramAccountPoolService implements OnModuleInit, OnApplicationSh
     inboundRegistrationFailures: 0,
     userRelaysOk: 0,
     userRelaysFailed: 0,
+    relayClaimsMissed: 0,
     inboundBridgeMisses: 0,
+    anchorConflicts: 0,
+    fallbackThrottled: 0,
+    largeFileSlotThrottled: 0,
   };
 
   /** 供健康探测注入：`(id) => Promise<void>`；由模块装配阶段设置，避免循环依赖 */
@@ -532,6 +560,10 @@ export class TelegramAccountPoolService implements OnModuleInit, OnApplicationSh
       chatId,
       weight: Number.isFinite(weightRaw) && weightRaw > 0 ? weightRaw : 1,
       maxInflight: Number.isSafeInteger(maxInflightRaw) && maxInflightRaw > 0 ? maxInflightRaw : 8,
+      maxLargeInflight: Number.isSafeInteger(Number(raw.maxLargeInflight ?? raw.max_large_inflight))
+        && Number(raw.maxLargeInflight ?? raw.max_large_inflight) > 0
+        ? Number(raw.maxLargeInflight ?? raw.max_large_inflight)
+        : undefined,
       enabled: raw.enabled === undefined ? true : raw.enabled !== false,
       // note 为运维自由文本，仅用于报告/排障：去控制字符并截断；
       // 约定**不得填写敏感信息**（该字段会出现在只读诊断快照中）。
@@ -562,6 +594,8 @@ export class TelegramAccountPoolService implements OnModuleInit, OnApplicationSh
     return {
       config,
       inflight: 0,
+      largeInflight: 0,
+      replicationInflight: 0,
       bandwidthEwmaBps: 0,
       successEwma: 1,
       latencyEwmaMs: 0,
@@ -585,8 +619,17 @@ export class TelegramAccountPoolService implements OnModuleInit, OnApplicationSh
    * 也会被均匀分流——否则「严格大于才替换」会让全部流量落到第一个账号，突发压测时严重失真。
    *
    * @param candidateIds 限定候选（例如「持有该文件副本的账号」）；为空表示全池
+   * @param options.largeFile 本次回源是否为大文件（>1GiB）：为 true 时把
+   *   「已达每账号大文件槽位」的账号排除在候选之外，避免选出一个立刻会被准入拒绝的账号；
+   *   同时把大文件在飞数与复制在飞数计入容量分，使多账号下的分流更均匀。
+   * @param options.role 用途：复制（replication）时把「已有复制流」的账号降权
+   *   （下载优先：复制不与下载争抢同一账号的瞬时额度）。
    */
-  select(candidateIds?: string[], nowMs: number = Date.now()): AccountSelection | null {
+  select(
+    candidateIds?: string[],
+    nowMs: number = Date.now(),
+    options?: { largeFile?: boolean; role?: AccountAttemptRole },
+  ): AccountSelection | null {
     // 开关兜底（防御纵深）：未启用池化时任何路径都不得选中账号，
     // 保证「关闭开关 = 原单账号行为」不依赖调用方是否记得检查 isActive()。
     //
@@ -598,7 +641,7 @@ export class TelegramAccountPoolService implements OnModuleInit, OnApplicationSh
     const schedulable = (candidateIds && candidateIds.length > 0
       ? candidateIds.map((id) => this.runtimes.get(id)).filter((item): item is TelegramAccountRuntime => Boolean(item))
       : Array.from(this.runtimes.values()))
-      .filter((runtime) => this.isSchedulable(runtime, nowMs));
+      .filter((runtime) => this.isSchedulable(runtime, nowMs, options));
 
     if (schedulable.length === 0) return null;
     this.rotateCursor = (this.rotateCursor + 1) % Math.max(1, schedulable.length);
@@ -619,10 +662,19 @@ export class TelegramAccountPoolService implements OnModuleInit, OnApplicationSh
         : NEUTRAL_BANDWIDTH_SCORE;
       const healthScore = Math.min(1, Math.max(0.05, runtime.successEwma));
       const capacityScore = Math.max(0, 1 - runtime.inflight / runtime.config.maxInflight);
-      const score = runtime.config.weight * (0.5 * bandwidthScore + 0.5 * healthScore) * capacityScore;
+      // 大文件槽位的额外容量惩罚：已占用大文件槽位的账号在同分时排在后面，
+      // 使「多账号各有副本」的文件天然把两个大流分到不同账号，而不是都压到带宽最高的那个。
+      const largePenalty = options?.largeFile
+        ? Math.max(0, 1 - runtime.largeInflight / this.maxLargeInflightOf(runtime))
+        : 1;
+      const score = runtime.config.weight
+        * (0.5 * bandwidthScore + 0.5 * healthScore)
+        * capacityScore
+        * (0.5 + 0.5 * largePenalty);
       const reason = `bw=${(runtime.bandwidthEwmaBps / 1024 / 1024).toFixed(2)}MB/s `
         + `health=${healthScore.toFixed(2)} inflight=${runtime.inflight}/${runtime.config.maxInflight} `
-        + `weight=${runtime.config.weight}`;
+        + `large=${runtime.largeInflight}/${this.maxLargeInflightOf(runtime)} `
+        + `replication=${runtime.replicationInflight} weight=${runtime.config.weight}`;
       if (!best || score > best.score) {
         best = { accountId: runtime.config.id, score, reason };
       }
@@ -630,10 +682,19 @@ export class TelegramAccountPoolService implements OnModuleInit, OnApplicationSh
     return best;
   }
 
-  private isSchedulable(runtime: TelegramAccountRuntime, nowMs: number): boolean {
+  private isSchedulable(
+    runtime: TelegramAccountRuntime,
+    nowMs: number,
+    options?: { largeFile?: boolean; role?: AccountAttemptRole },
+  ): boolean {
     if (!runtime.config.enabled) return false;
     if (runtime.inflight >= runtime.config.maxInflight) return false;
-    return runtime.cooldownUntilMs <= nowMs;
+    if (runtime.cooldownUntilMs > nowMs) return false;
+    // 大文件回源：已达每账号槽位的账号不再作为候选（否则会被 admit 立刻拒绝，白白消耗一次尝试）
+    if (options?.largeFile && runtime.largeInflight >= this.maxLargeInflightOf(runtime)) return false;
+    // 复制：同一账号已有复制流时不再被选为复制源/目标（下载优先）
+    if (options?.role === 'replication' && runtime.replicationInflight >= REPLICATION_INFLIGHT_MAX) return false;
+    return true;
   }
 
   // ---------------- 记账 ----------------
@@ -651,6 +712,100 @@ export class TelegramAccountPoolService implements OnModuleInit, OnApplicationSh
     const runtime = this.runtimes.get(accountId);
     if (!runtime) return;
     runtime.inflight = Math.max(0, runtime.inflight - 1);
+  }
+
+  /**
+   * **原子准入**：一次判定并占用「冷却 + 在飞上限 + 大文件槽位 + 复制并发」。
+   *
+   * 为什么必须原子：历史实现里 `openSourceStream` 完全不检查冷却与在飞上限，
+   * `beginAttempt` 只做 `inflight += 1`。于是「源账号兜底」会在该账号已被
+   * DC-5 限流（冷却中）时继续硬打，把冷却窗口不断延长——生产现象就是
+   * 单一账号独扛全部 4GB 回源并持续 FLOOD_WAIT。判定与占用必须在一个同步块内完成，
+   * 否则并发请求会各自通过校验再超额占用（`await` 之后判定即失效）。
+   *
+   * 与 `beginAttempt` 的关系：后者保留为**向后兼容**的纯记账入口（上传/镜像等
+   * 既有调用点），新代码一律走本方法。二者共享同一 `inflight` 计数，
+   * 因此旧调用点占用的额度同样会被新准入看见。
+   */
+  admit(request: AccountAdmissionRequest): AccountAdmissionResult {
+    const runtime = this.runtimes.get((request.accountId || '').trim());
+    if (!runtime) return { granted: false, reason: 'unknown_account' };
+    if (request.shuttingDown) return { granted: false, reason: 'unknown_account' };
+
+    const now = Date.now();
+    if (!runtime.config.enabled) return { granted: false, reason: 'disabled' };
+    if (runtime.cooldownUntilMs > now) {
+      return {
+        granted: false,
+        reason: 'cooling_down',
+        retryAfterMs: Math.max(0, runtime.cooldownUntilMs - now),
+      };
+    }
+    if (runtime.inflight >= runtime.config.maxInflight) {
+      return { granted: false, reason: 'inflight_full', retryAfterMs: ADMISSION_RETRY_AFTER_MS };
+    }
+
+    const role: AccountAttemptRole = request.role ?? 'download';
+    const largeFile = isLargeFileBytes(request.bytes);
+    if (largeFile && role !== 'replication') {
+      if (runtime.largeInflight >= this.maxLargeInflightOf(runtime)) {
+        return { granted: false, reason: 'large_inflight_full', retryAfterMs: ADMISSION_RETRY_AFTER_MS };
+      }
+    }
+    if (role === 'replication' && runtime.replicationInflight >= REPLICATION_INFLIGHT_MAX) {
+      return { granted: false, reason: 'replication_full', retryAfterMs: ADMISSION_RETRY_AFTER_MS };
+    }
+
+    // 同步占用（本方法内无 await，判定与占用不可被拆分）
+    runtime.inflight += 1;
+    if (largeFile && role !== 'replication') runtime.largeInflight += 1;
+    if (role === 'replication') runtime.replicationInflight += 1;
+
+    return {
+      granted: true,
+      admission: this.buildAdmission(runtime, role, largeFile),
+    };
+  }
+
+  /** 每账号大文件回源槽位（未配置时为默认值 1） */
+  private maxLargeInflightOf(runtime: TelegramAccountRuntime): number {
+    const configured = runtime.config.maxLargeInflight;
+    if (Number.isSafeInteger(configured) && (configured as number) > 0) return configured as number;
+    return LARGE_INFLIGHT_DEFAULT;
+  }
+
+  /** 构造幂等归还句柄：finish 产生采样，release 不产生采样（客户端取消不计 flood） */
+  private buildAdmission(
+    runtime: TelegramAccountRuntime,
+    role: AccountAttemptRole,
+    largeFile: boolean,
+  ): AccountAttemptAdmission {
+    let settled: 'finish' | 'release' | null = null;
+    const releaseCounters = (): void => {
+      runtime.inflight = Math.max(0, runtime.inflight - 1);
+      if (largeFile && role !== 'replication') {
+        runtime.largeInflight = Math.max(0, runtime.largeInflight - 1);
+      }
+      if (role === 'replication') {
+        runtime.replicationInflight = Math.max(0, runtime.replicationInflight - 1);
+      }
+    };
+    return {
+      accountId: runtime.config.id,
+      role,
+      largeFile,
+      finish: (sample?: AccountAttemptSample): void => {
+        if (settled) return;
+        settled = 'finish';
+        releaseCounters();
+        this.finishAttempt(runtime.config.id, sample ?? { ok: true });
+      },
+      release: (): void => {
+        if (settled) return;
+        settled = 'release';
+        releaseCounters();
+      },
+    };
   }
 
   /** 请求结束：释放额度 + 更新带宽/健康 EWMA + 必要时进入冷却 */
@@ -765,6 +920,9 @@ export class TelegramAccountPoolService implements OnModuleInit, OnApplicationSh
       weight: runtime.config.weight,
       maxInflight: runtime.config.maxInflight,
       inflight: runtime.inflight,
+      largeInflight: runtime.largeInflight,
+      maxLargeInflight: this.maxLargeInflightOf(runtime),
+      replicationInflight: runtime.replicationInflight,
       bandwidthMbps: Number((runtime.bandwidthEwmaBps / 1024 / 1024).toFixed(3)),
       successRate: Number(runtime.successEwma.toFixed(4)),
       latencyMs: Math.round(runtime.latencyEwmaMs),

@@ -214,11 +214,18 @@ describe('TelegramBotPublicController 匿名直链', () => {
     expect(ctx.getCapturedError()).toBeInstanceOf(RangeNotSatisfiableException);
   });
 
-  it('总长未知时退化为完整直连传输，不声明 Accept-Ranges', async () => {
+  it('总长未知时退化为完整直连传输，不声明 Accept-Ranges，且同样要求回收 workdir 本地副本', async () => {
     const ctx = makeController({ fileSize: null });
     await ctx.controller.download(VALID_TOKEN, makeRequest({ headers: { range: 'bytes=0-99' } }), res);
 
-    expect(ctx.telegramService.getRealtimeFileStream).toHaveBeenCalledWith(TELEGRAM_FILE_ID);
+    // 未知大小分支同样传 noCache：本分支不产生任何本地持久副本（不落盘、不进正式缓存），
+    // 因此 TDLib workdir 里的本地媒体副本应在本次流结束后立即回收。
+    // 漏传会导致未知大小的文件每下载一次就在 workdir 长期占一份完整副本。
+    expect(ctx.telegramService.getRealtimeFileStream).toHaveBeenCalledWith(
+      TELEGRAM_FILE_ID,
+      undefined,
+      { noCache: true },
+    );
     expect(ctx.fileCacheService.getOrCacheRangeStream).not.toHaveBeenCalled();
     expect(ctx.fileCacheService.getOrCacheStream).not.toHaveBeenCalled();
 

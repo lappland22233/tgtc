@@ -44,26 +44,78 @@ export interface ReplicationAccountView {
   reasons: string[];
 }
 
+/** 单一命名空间的覆盖率统计（站内文件 / Bot 直链的 fileUnique 各一份） */
+export interface ReplicationCoverageView {
+  /** 本次扫描到的「有 ready 副本的逻辑文件」数 */
+  scannedFiles: number;
+  satisfied: number;
+  unsatisfied: number;
+  /** 分组扫描是否被上限截断（true 表示统计只覆盖前 N 个文件） */
+  truncated: boolean;
+  missingSamples: Array<{ ownerId: string; readyAccountCount: number; missing: number }>;
+}
+
+/**
+ * 按**文件大小分层**的覆盖率（与 `ReplicationCoverageView` 同口径，但分组更细）。
+ *
+ * 为什么两份都要：总覆盖率会被大量小文件「平均」得好看，而生产风险集中在
+ * 4GB 级分卷——它们是唯一能把单个账号打到 DC-5 限流的体量。分层后
+ * 「≥4GiB 一行全是 1」会直接暴露在管理端。
+ */
+export interface ReplicationSizeCoverageView {
+  scannedFiles: number;
+  truncated: boolean;
+  tiers: Array<{
+    label: string;
+    minBytes: number;
+    files: number;
+    satisfied: number;
+    unsatisfied: number;
+    minReadyAccounts: number;
+    readyAccountCounts: number[];
+    missingSamples: Array<{ ownerId: string; readyAccountCount: number; missing: number }>;
+  }>;
+}
+
 export interface ReplicationAuditReport {
   generatedAt: string;
   target: ReplicationTargetView;
   /** 账号池是否生效（未生效时下列数据仅作诊断） */
   poolActive: boolean;
   accounts: ReplicationAccountView[];
-  coverage: {
-    /** 本次扫描到的「有 ready 副本的逻辑文件」数 */
-    scannedFiles: number;
-    satisfied: number;
-    unsatisfied: number;
-    /** 分组扫描是否被上限截断（true 表示统计只覆盖前 N 个文件） */
-    truncated: boolean;
-    missingSamples: Array<{ ownerId: string; readyAccountCount: number; missing: number }>;
-  };
+  /** 站内逻辑文件（`ownerType='file'`）的覆盖率 */
+  coverage: ReplicationCoverageView;
+  /**
+   * Bot 直链命名空间（`ownerType='fileUnique'`）的覆盖率。
+   *
+   * 历史实现只统计 `file`，于是「Bot 直链的大分卷副本全在一个账号上」
+   * 在管理端**完全不可见**——而那正是生产事故的位置。
+   */
+  botCoverage: ReplicationCoverageView;
+  /** 站内逻辑文件按大小分层（`ownerType='file'`） */
+  sizeCoverage: ReplicationSizeCoverageView;
+  /** Bot 直链命名空间按大小分层（`ownerType='fileUnique'`）：4GB 分卷分布的主视图 */
+  botSizeCoverage: ReplicationSizeCoverageView;
   /** 容量策略状态（自动扩缩容）；未装配时为 null */
   capacity: DownloadCapacityState | null;
   /** 口径说明（避免把「账号数」误读成「可用容量」） */
   notes: string[];
 }
+
+/** 空覆盖率（统计失败或账号池未生效时的占位，保持字段形状一致） */
+const EMPTY_COVERAGE: ReplicationCoverageView = {
+  scannedFiles: 0,
+  satisfied: 0,
+  unsatisfied: 0,
+  truncated: false,
+  missingSamples: [],
+};
+
+const EMPTY_SIZE_COVERAGE: ReplicationSizeCoverageView = {
+  scannedFiles: 0,
+  truncated: false,
+  tiers: [],
+};
 
 /**
  * 副本扩散资格审计。
@@ -120,17 +172,31 @@ export class TelegramReplicationAuditService {
       };
     });
 
-    // 覆盖率：只按站内逻辑文件（ownerType='file'）统计，Bot 直链的 fileUnique 命名空间不计入
+    // 覆盖率：站内逻辑文件（ownerType='file'）与 Bot 直链（ownerType='fileUnique'）**各统计一份**。
+    // 历史实现只统计 file，导致「Bot 直链的大分卷副本全在一个账号上」在管理端不可见。
+    const target = Math.max(1, resolution.effectiveTarget);
     const coverage = poolActive
       ? await this.copies.replicationCoverage({
         ownerType: 'file',
-        target: Math.max(1, resolution.effectiveTarget),
+        target,
         sampleLimit: MISSING_SAMPLE_LIMIT,
       }).catch((error: unknown) => {
-        this.logger.warn(`副本覆盖率统计失败（返回空统计）: ${(error as Error).message}`);
-        return { scannedFiles: 0, satisfied: 0, unsatisfied: 0, truncated: false, missingSamples: [] };
+        this.logger.warn(`站内副本覆盖率统计失败（返回空统计）: ${(error as Error).message}`);
+        return { ...EMPTY_COVERAGE };
       })
-      : { scannedFiles: 0, satisfied: 0, unsatisfied: 0, truncated: false, missingSamples: [] };
+      : { ...EMPTY_COVERAGE };
+    const botCoverage = poolActive
+      ? await this.copies.replicationCoverage({
+        ownerType: 'fileUnique',
+        target,
+        sampleLimit: MISSING_SAMPLE_LIMIT,
+      }).catch((error: unknown) => {
+        this.logger.warn(`Bot 直链副本覆盖率统计失败（返回空统计）: ${(error as Error).message}`);
+        return { ...EMPTY_COVERAGE };
+      })
+      : { ...EMPTY_COVERAGE };
+    const sizeCoverage = await this.loadSizeCoverage('file', target);
+    const botSizeCoverage = await this.loadSizeCoverage('fileUnique', target);
 
     return {
       generatedAt: new Date().toISOString(),
@@ -145,14 +211,44 @@ export class TelegramReplicationAuditService {
       poolActive,
       accounts,
       coverage,
+      botCoverage,
+      sizeCoverage,
+      botSizeCoverage,
       capacity: this.capacity?.getState() ?? null,
       notes: [
         '只统计「已启用 + 已配置存储 Chat + 健康」的 Bot 账号；USERbot 中继不计入 Bot ready 副本覆盖。',
         '无存储 Chat 的账号上传必然失败，不会作为扩散目标；如需纳入请先补齐存储 Chat 并启用。',
         '有效目标 = min(配置值, 可承载副本账号数)，因此「配置 4」在只有 2 个可承载账号时显示为 2。',
         '全局权重预算按有效 Bot 数自动扩缩容，与账号 maxInflight 不是同一个概念。',
+        'botCoverage / botSizeCoverage 对应 Bot 直链（file_unique_id）命名空间：4GB 分卷的副本分布以这两项为准。',
+        '大小分层统计按「逻辑文件 + 已知 fileSize」分组，扫描有界（truncated=true 表示未覆盖全部文件）。',
       ],
     };
+  }
+
+  /** 加载并按大小分层的覆盖率（统计失败返回空结构，绝不抛给管理端） */
+  private async loadSizeCoverage(
+    ownerType: 'file' | 'fileUnique',
+    target: number,
+  ): Promise<ReplicationSizeCoverageView> {
+    if (!this.pool.isActive()) return { ...EMPTY_SIZE_COVERAGE, tiers: [] };
+    try {
+      const result = await this.copies.replicationCoverageBySize({
+        ownerType,
+        target,
+        sampleLimit: MISSING_SAMPLE_LIMIT,
+      });
+      const tiers = result.tiers.map((tier) => ({
+        ...tier,
+        minReadyAccounts: tier.readyAccountCounts.length > 0
+          ? tier.readyAccountCounts[0]
+          : 0,
+      }));
+      return { scannedFiles: result.scannedFiles, truncated: result.truncated, tiers };
+    } catch (error) {
+      this.logger.warn(`分层覆盖率统计失败（${ownerType}，返回空统计）: ${(error as Error).message}`);
+      return { ...EMPTY_SIZE_COVERAGE, tiers: [] };
+    }
   }
 
   /** 期望副本数热更新（写入 SystemConfig，立即生效于后续扩散目标解析） */

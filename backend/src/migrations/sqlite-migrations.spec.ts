@@ -420,6 +420,61 @@ describe('SQLite schema migrations（隔离内存库）', () => {
     expect(Object.values(integrity[0])).toEqual(['ok']);
   });
 
+  it('存量库升级：180340 建立锚点一致性部分唯一索引且不误伤合法多账号副本', async () => {
+    dataSource = new DataSource({ type: 'sqlite', database: ':memory:', entities: [], synchronize: false });
+    await dataSource.initialize();
+    await dataSource.query(`CREATE TABLE "migrations" (
+      "id" integer PRIMARY KEY AUTOINCREMENT NOT NULL,
+      "timestamp" bigint NOT NULL, "name" varchar NOT NULL
+    )`);
+    await dataSource.query(`CREATE TABLE "telegram_file_copies" (
+      "id" varchar PRIMARY KEY NOT NULL, "ownerType" varchar NOT NULL, "ownerId" varchar NOT NULL,
+      "accountId" varchar NOT NULL, "telegramFileId" varchar NOT NULL,
+      "chatId" varchar, "messageId" varchar, "fileSize" bigint, "status" varchar NOT NULL DEFAULT 'ready'
+    )`);
+
+    const { SqliteTelegramCopyAnchorGuard1803400000000 } = require('./1803400000000-SqliteTelegramCopyAnchorGuard') as typeof import('./1803400000000-SqliteTelegramCopyAnchorGuard');
+    await new SqliteTelegramCopyAnchorGuard1803400000000().up(dataSource.createQueryRunner());
+
+    const indexes = await dataSource.query('PRAGMA index_list("telegram_file_copies")');
+    expect(indexes.find((index: { name: string }) => index.name === 'uq_tg_file_copies_anchor_account'))
+      .toMatchObject({ unique: 1, partial: 1 });
+    expect(indexes.find((index: { name: string }) => index.name === 'idx_tg_file_copies_anchor_owner')).toBeDefined();
+
+    // 合法场景一：同一备份群里多个 Bot 各持同一条消息的副本（同锚点、不同账号）必须允许
+    await dataSource.query(
+      `INSERT INTO "telegram_file_copies" ("id","ownerType","ownerId","accountId","telegramFileId","chatId","messageId")
+       VALUES ('c1','fileUnique','UNIQ-1','bot1','file-1','group','55')`,
+    );
+    await dataSource.query(
+      `INSERT INTO "telegram_file_copies" ("id","ownerType","ownerId","accountId","telegramFileId","chatId","messageId")
+       VALUES ('c2','fileUnique','UNIQ-1','bot2','file-2','group','55')`,
+    );
+
+    // 合法场景二：桥接双写（同一锚点额外写 file 命名空间、不同逻辑主键）必须允许
+    await dataSource.query(
+      `INSERT INTO "telegram_file_copies" ("id","ownerType","ownerId","accountId","telegramFileId","chatId","messageId")
+       VALUES ('c3','file','file-1','bot1','file-1','group','55')`,
+    );
+
+    // 脏数据：同一账号在同一条消息上登记互相矛盾的逻辑主键必须被拦截
+    await expect(dataSource.query(
+      `INSERT INTO "telegram_file_copies" ("id","ownerType","ownerId","accountId","telegramFileId","chatId","messageId")
+       VALUES ('c4','fileUnique','UNIQ-OTHER','bot1','file-9','group','55')`,
+    )).rejects.toThrow();
+
+    // 幂等：重复执行不报错
+    await new SqliteTelegramCopyAnchorGuard1803400000000().up(dataSource.createQueryRunner());
+    const count = await dataSource.query('SELECT COUNT(*) AS count FROM "telegram_file_copies"');
+    expect(count[0].count).toBe(3);
+
+    // down 只删本迁移新增的索引，不动数据
+    await new SqliteTelegramCopyAnchorGuard1803400000000().down(dataSource.createQueryRunner());
+    const afterDown = await dataSource.query('PRAGMA index_list("telegram_file_copies")');
+    expect(afterDown.find((index: { name: string }) => index.name === 'uq_tg_file_copies_anchor_account')).toBeUndefined();
+    expect(await dataSource.query('SELECT COUNT(*) AS count FROM "telegram_file_copies"')).toEqual([{ count: 3 }]);
+  });
+
   it('存量库升级：180300/180310/180320 自建账号与镜像表并补 files 定位列', async () => {
     // 模拟旧基线库存量库：账号与镜像表尚不存在，files 也没有主副本定位列。
     dataSource = new DataSource({ type: 'sqlite', database: ':memory:', entities: [], synchronize: false });

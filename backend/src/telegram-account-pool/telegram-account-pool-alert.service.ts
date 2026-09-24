@@ -28,7 +28,11 @@ const COUNTER_KEYS: Array<keyof AccountPoolCounters> = [
   'inboundRegistrationFailures',
   'userRelaysOk',
   'userRelaysFailed',
+  'relayClaimsMissed',
   'inboundBridgeMisses',
+  'anchorConflicts',
+  'fallbackThrottled',
+  'largeFileSlotThrottled',
 ];
 
 function zeroCounters(): AccountPoolCounters {
@@ -44,7 +48,11 @@ function zeroCounters(): AccountPoolCounters {
     inboundRegistrationFailures: 0,
     userRelaysOk: 0,
     userRelaysFailed: 0,
+    relayClaimsMissed: 0,
     inboundBridgeMisses: 0,
+    anchorConflicts: 0,
+    fallbackThrottled: 0,
+    largeFileSlotThrottled: 0,
   };
 }
 

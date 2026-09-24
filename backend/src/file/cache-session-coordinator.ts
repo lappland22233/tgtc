@@ -137,8 +137,13 @@ interface FollowerReadSource {
   isTerminal: (offset: number) => boolean;
   /** 读取 `bytes` 字节到 `buffer` 的 `fileOffset` 位置，返回实际读取字节数 */
   readInto: (buffer: Buffer, fileOffset: number, bytes: number) => Promise<number>;
-  /** 等待会话产生新数据（progress / complete / failed），禁止忙轮询 */
-  waitForChange: (offset: number) => Promise<void>;
+  /**
+   * 等待会话产生新数据（progress / complete / failed），禁止忙轮询。
+   *
+   * `signal` 由消费者流在 `destroy` 时中止：等待必须在流销毁后立即结束，
+   * 否则闭包与监听器会滞留在会话上（详见 `waitForSessionChange`）。
+   */
+  waitForChange: (offset: number, signal?: AbortSignal) => Promise<void>;
 }
 
 export class CacheSessionCoordinator {
@@ -1052,9 +1057,10 @@ export class CacheSessionCoordinator {
         fileOffset,
         bytes,
       ),
-      waitForChange: (offset) => coordinator.waitForSessionChange(
+      waitForChange: (offset, signal) => coordinator.waitForSessionChange(
         session,
         () => offset < session.bytesWritten || session.completed || Boolean(session.error),
+        signal,
       ),
     });
 
@@ -1097,6 +1103,13 @@ export class CacheSessionCoordinator {
     session.upstream?.destroy();
     session.output?.destroy();
     await fsp.unlink(session.spoolPath).catch(() => {});
+    // 拆除会话前必须先让等待者醒来：等待者监听在本会话 events 上，
+    // 直接 removeAllListeners() 会让它们的 waitForChange 永远等不到任何通知
+    // （既没有 progress 也没有 failed），pump 卡在 await、消费者流悬挂不结束。
+    // 这种场景真实存在：同一文件并发请求且 expectedSize/contentVersion 不一致
+    // （覆盖上传期间），旧会话被替换时其既有消费者正好在等待。
+    // 统一用 failed 通知（带可诊断原因），等待者的 onFailed 会得到明确错误。
+    session.events.emit('failed', new Error('spool 会话已被替换或清理，请重新发起请求'));
     session.events.removeAllListeners();
   }
 
@@ -1124,14 +1137,25 @@ export class CacheSessionCoordinator {
 
   // ---------- follower / 等待 ----------
 
+  /**
+   * 等待会话产生新数据（progress / complete / failed）。
+   *
+   * `signal` 是**取消通道**，不可省略：消费者流被销毁（客户端断开、超时、
+   * 调用方主动 destroy）时，若不从这里撤出，本 Promise 会一直挂着——
+   * 它保留着 `pump()` 的闭包与 `session` 引用，且注册在会话 events 上的监听器
+   * 只能等下一条 progress/failed 才能清理。会话停顿时（例如上游卡住）
+   * 这就是一段真实的滞留内存。取消后由 `pump()` 在循环入口检查 `destroyed` 退出。
+   */
   private waitForSessionChange(
     session: Pick<CacheBuildSession, 'events'> | Pick<SpoolSession, 'events'>,
     isReady?: () => boolean,
+    signal?: AbortSignal,
   ): Promise<void> {
     return new Promise((resolve, reject) => {
       const cleanup = () => {
         session.events.off('progress', onProgress);
         session.events.off('failed', onFailed);
+        signal?.removeEventListener('abort', onAbort);
       };
       const onProgress = () => {
         cleanup();
@@ -1141,8 +1165,19 @@ export class CacheSessionCoordinator {
         cleanup();
         reject(error);
       };
+      // 取消不是错误：以 resolve 结束，由调用方在循环中依据自身的 destroyed 标记退出，
+      // 避免把「客户端主动断开」污染成会话失败
+      const onAbort = () => {
+        cleanup();
+        resolve();
+      };
+      if (signal?.aborted) {
+        resolve();
+        return;
+      }
       session.events.once('progress', onProgress);
       session.events.once('failed', onFailed);
+      signal?.addEventListener('abort', onAbort, { once: true });
       // 注册监听后再次检查状态，封闭“先检查、后监听”窗口，避免错过唯一一次进度通知。
       if (isReady?.()) {
         cleanup();
@@ -1179,6 +1214,15 @@ export class CacheSessionCoordinator {
     let pumping = false;
     let finished = false;
     let destroyed = false;
+    /**
+     * 取消通道：流销毁时中止 `waitForChange` 的等待。
+     *
+     * 为什么必须有：等待是唯一的「无数据可读」出口，若不取消，
+     * 消费者断开后 `pump()` 会一直挂在会话 events 上——它持有本流闭包与 session 引用，
+     * 而注册的监听器只能等会话下一次 progress/failed 才清理。会话卡住时这段内存
+     * 会一直保留到会话被拆除，属于「流已经没了、等待还在」的滞留。
+     */
+    const waiterAbort = new AbortController();
 
     const readable = new Readable({
       // 显式字节模式：highWaterMark 是字节上限（不是对象个数）
@@ -1189,6 +1233,8 @@ export class CacheSessionCoordinator {
       },
       destroy: (error, callback) => {
         destroyed = true;
+        // 先解除等待再回调：否则 destroy 完成后仍有一次 waitForChange 处于挂起状态
+        waiterAbort.abort();
         callback(error ?? null);
       },
     });
@@ -1230,8 +1276,11 @@ export class CacheSessionCoordinator {
             finish();
             return;
           }
-          // 没有新数据可用：等待 progress/complete/failed 事件，绝不忙轮询
-          await source.waitForChange(offset);
+          // 没有新数据可用：等待 progress/complete/failed 事件，绝不忙轮询。
+          // 传取消信号：流销毁后立即结束等待，不留悬挂的闭包与监听器
+          await source.waitForChange(offset, waiterAbort.signal);
+          // 取消（或已销毁）后不再循环：直接退出，由 destroy 路径负责收尾
+          if (destroyed || finished) return;
         }
       } catch (error) {
         finished = true;
@@ -1307,9 +1356,10 @@ export class CacheSessionCoordinator {
         fileOffset,
         bytes,
       ),
-      waitForChange: (offset) => coordinator.waitForSessionChange(
+      waitForChange: (offset, signal) => coordinator.waitForSessionChange(
         session,
         () => offset < session.bytesWritten || session.completed || Boolean(session.error),
+        signal,
       ),
     });
   }
@@ -1335,9 +1385,17 @@ export class CacheSessionCoordinator {
       await new Promise(resolve => setTimeout(resolve, 50));
     }
     for (const session of this.spoolSessions.values()) {
+      if (session.teardownTimer) {
+        clearTimeout(session.teardownTimer);
+        session.teardownTimer = undefined;
+      }
       session.upstream?.destroy();
       session.output?.destroy();
       await fsp.unlink(session.spoolPath).catch(() => {});
+      // 与 teardownSpoolSession 同一理由：先唤醒等待者再移除监听，
+      // 否则关闭期间正阻塞在 waitForChange 的消费者既收不到 failed 也不会被清理
+      session.events.emit('failed', new Error('应用关闭，spool 会话已清理'));
+      session.events.removeAllListeners();
     }
     this.spoolSessions.clear();
     this.logger.log('缓存服务关闭完成');

@@ -32,6 +32,7 @@ function setup(options: {
   effectiveTarget?: number;
   poolActive?: boolean;
   coverage?: unknown;
+  sizeCoverage?: unknown;
   capacity?: unknown;
 } = {}) {
   const accounts = options.accounts ?? [account('a1'), account('a2')];
@@ -54,6 +55,34 @@ function setup(options: {
       unsatisfied: 1,
       truncated: false,
       missingSamples: [{ ownerId: 'file-9', readyAccountCount: 0, missing: 2 }],
+    }),
+    /**
+     * 按大小分层的覆盖率：默认返回「有一个 ≥4GiB 分卷仅被 1 个账号持有」，
+     * 这正是生产事故的形状（4GB 分卷副本集中，单账号独扛 DC-5 回源）。
+     */
+    replicationCoverageBySize: jest.fn(async () => options.sizeCoverage ?? {
+      scannedFiles: 2,
+      truncated: false,
+      tiers: [
+        {
+          label: '≥4GiB',
+          minBytes: 4 * 1024 ** 3,
+          files: 1,
+          satisfied: 0,
+          unsatisfied: 1,
+          readyAccountCounts: [1],
+          missingSamples: [{ ownerId: 'UNIQ-BIG', readyAccountCount: 1, missing: 1 }],
+        },
+        {
+          label: '1–4GiB',
+          minBytes: 1024 ** 3,
+          files: 1,
+          satisfied: 1,
+          unsatisfied: 0,
+          readyAccountCounts: [2],
+          missingSamples: [],
+        },
+      ],
     }),
   };
   const replicaTargets = {
@@ -119,6 +148,33 @@ describe('TelegramReplicationAuditService', () => {
     expect(report.notes.join()).toContain('USERbot');
     // 覆盖率按 effectiveTarget 作为比较目标
     expect(ctx.copies.replicationCoverage).toHaveBeenCalledWith(expect.objectContaining({ ownerType: 'file', target: 2 }));
+
+    // Bot 直链命名空间（fileUnique）必须**单独统计**：
+    // 生产事故正发生在该命名空间（4GB 分卷副本集中在单一账号），
+    // 历史实现只统计 file，导致问题在管理端完全不可见。
+    expect(ctx.copies.replicationCoverage).toHaveBeenCalledWith(
+      expect.objectContaining({ ownerType: 'fileUnique', target: 2 }),
+    );
+    expect(report.botCoverage).toMatchObject({ scannedFiles: 3, satisfied: 2 });
+
+    // 按大小分层：≥4GiB 档必须能读出「仅 1 个账号持有」这一关键事实
+    const bigTier = report.botSizeCoverage.tiers.find((tier) => tier.label === '≥4GiB');
+    expect(bigTier).toMatchObject({ files: 1, satisfied: 0, unsatisfied: 1, minReadyAccounts: 1 });
+    expect(bigTier?.readyAccountCounts).toEqual([1]);
+    expect(report.sizeCoverage.tiers.length).toBeGreaterThan(0);
+    expect(ctx.service.getReport()).resolves.toBeDefined();
+  });
+
+  it('分层覆盖率统计失败时返回空结构且报告仍可用（绝不抛给管理端）', async () => {
+    const ctx = setup();
+    ctx.copies.replicationCoverageBySize.mockRejectedValue(new Error('db down') as never);
+
+    const report = await ctx.service.getReport();
+
+    expect(report.botSizeCoverage).toMatchObject({ scannedFiles: 0, tiers: [] });
+    expect(report.sizeCoverage.tiers).toEqual([]);
+    // 总覆盖率不受分层统计失败影响（两者独立降级）
+    expect(report.botCoverage.scannedFiles).toBe(3);
   });
 
   it('账号池未生效时不查询副本表，只返回诊断数据', async () => {
@@ -129,7 +185,10 @@ describe('TelegramReplicationAuditService', () => {
     expect(report.poolActive).toBe(false);
     expect(ctx.copies.countReadyByAccount).not.toHaveBeenCalled();
     expect(ctx.copies.replicationCoverage).not.toHaveBeenCalled();
+    expect(ctx.copies.replicationCoverageBySize).not.toHaveBeenCalled();
     expect(report.coverage.scannedFiles).toBe(0);
+    expect(report.botCoverage.scannedFiles).toBe(0);
+    expect(report.botSizeCoverage.tiers).toEqual([]);
     expect(report.accounts.every((item) => item.readyCopies === 0)).toBe(true);
   });
 

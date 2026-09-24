@@ -8824,7 +8824,7 @@ void Client::start_file_stream(td::ActorId<FileStreamConnection> stream, int64 s
                td::make_unique<TdOnFileStreamRemoteFileCallback>(this, stream, stream_id, expected_size));
 }
 
-void Client::remove_file_stream(int64 stream_id, int32 file_id, bool remove_local_file) {
+void Client::remove_file_stream(int64 stream_id, int32 file_id, bool remove_requested, bool completed_ok) {
   active_file_streams_.erase(stream_id);
   for (auto it = pending_file_streams_.begin(); it != pending_file_streams_.end();) {
     if (it->stream.id == stream_id) {
@@ -8843,27 +8843,48 @@ void Client::remove_file_stream(int64 stream_id, int32 file_id, bool remove_loca
   it->second.erase(std::remove_if(it->second.begin(), it->second.end(),
                                   [stream_id](const FileStreamRef &stream) { return stream.id == stream_id; }),
                    it->second.end());
-  if (it->second.empty()) {
-    // Reference counting handshake: the local copy is deleted only when this file has neither a
-    // remaining stream listener (file_stream_listeners_) nor a standard getFile download listener
-    // (file_download_listeners_). A normal getFile download IS covered here: do_get_file() inserts
-    // into file_download_listeners_ before it asks TDLib to download and on_file_download() removes
-    // the entry only after the download settles, so a no-cache stream cannot delete a copy that is
-    // being written for a concurrent getFile. The window after a getFile response has been produced
-    // (the caller still reading the returned local path) is intentionally not tracked: TDLib is free
-    // to evict local cache at any moment, so the returned path is never guaranteed to stay valid.
-    file_stream_listeners_.erase(it);
-    if (file_download_listeners_.count(file_id) == 0) {
-      if (remove_local_file) {
-        // 带 X-Telegram-No-Cache 标记的流正常完成且已无其他监听者：删除 TDLib 本地副本，不影响 Telegram 云端文件
-        on_local_file_delete_attempt();
-        send_request(make_object<td_api::deleteFile>(file_id),
-                     td::make_unique<TdOnDeleteFileCallback>(this, file_id));
-      } else {
-        send_request(make_object<td_api::cancelDownloadFile>(file_id, false),
-                     td::make_unique<TdOnCancelDownloadFileCallback>());
-      }
-    }
+  if (!it->second.empty()) {
+    return;
+  }
+
+  // Reference counting handshake: the local copy may be deleted only when this file has neither a
+  // remaining stream listener (file_stream_listeners_) nor a standard getFile download listener
+  // (file_download_listeners_). A normal getFile download IS covered here: do_get_file() inserts
+  // into file_download_listeners_ before it asks TDLib to download and on_file_download() removes
+  // the entry only after the download settles, so a no-cache stream cannot delete a copy that is
+  // being written for a concurrent getFile. The window after a getFile response has been produced
+  // (the caller still reading the returned local path) is intentionally not tracked: TDLib is free
+  // to evict local cache at any moment, so the returned path is never guaranteed to stay valid.
+  const bool download_listener_active = file_download_listeners_.count(file_id) != 0;
+  file_stream_listeners_.erase(it);
+
+  // The decision itself is a pure function (unit-tested in FileStream.test.cpp) so that the four
+  // outcomes stay distinguishable here: delete / cancel only / skip-busy / nothing.
+  const auto action = decide_file_stream_local_copy_action(
+      FileStreamLocalCopyDecisionInput{remove_requested, completed_ok, false, download_listener_active});
+  switch (action) {
+    case FileStreamLocalCopyAction::delete_local_copy:
+      on_local_file_delete_attempt();
+      send_request(make_object<td_api::deleteFile>(file_id),
+                   td::make_unique<TdOnDeleteFileCallback>(this, file_id));
+      break;
+    case FileStreamLocalCopyAction::cancel_download:
+      send_request(make_object<td_api::cancelDownloadFile>(file_id, false),
+                   td::make_unique<TdOnCancelDownloadFileCallback>());
+      break;
+    case FileStreamLocalCopyAction::skip_busy:
+      // 并发 getFile 仍持有同一份本地副本：此刻不能删除（会把正在写的文件抽走）。
+      // 但必须**显式记录**这次跳过——历史上这里是静默分支：no-cache 请求正常完成、
+      // 却因为一个短暂窗口而永久留下整份 workdir 副本，而统计里既没有 attempts
+      // 也没有 failures，运维只能看到 workdir 占用莫名偏高，无从归因。
+      // 现在计入 file_delete_skipped_busy（/getStats 可见），该副本最终由 workdir TTL 清理收敛。
+      parameters_->shared_data_->file_delete_skipped_busy_.fetch_add(1, std::memory_order_relaxed);
+      LOG(INFO) << "Skipped no-cache local copy deletion: a getFile download still holds a reference"
+                << td::tag("file_id", file_id);
+      break;
+    case FileStreamLocalCopyAction::none:
+    default:
+      break;
   }
 }
 

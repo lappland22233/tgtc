@@ -350,7 +350,7 @@ export class FileCacheService implements OnApplicationShutdown {
         maxSizeStr, minFreeStr, ttlStr, noCacheStr,
         maxReservedStr, upstreamsStr, queueCapacityStr, queueTimeoutStr,
         spoolGraceStr, directWindowStr, directWaitStr, taskRetentionStr,
-        upstreamQueuePolicyStr,
+        upstreamQueuePolicyStr, volumePeerReserveStr,
       ] = await Promise.all([
         this.configCache.get(CACHE_CONFIG_KEYS.MAX_SIZE_GB, CACHE_CONFIG_DEFAULTS[CACHE_CONFIG_KEYS.MAX_SIZE_GB]),
         this.configCache.get(CACHE_CONFIG_KEYS.MIN_FREE_DISK_GB, CACHE_CONFIG_DEFAULTS[CACHE_CONFIG_KEYS.MIN_FREE_DISK_GB]),
@@ -365,6 +365,7 @@ export class FileCacheService implements OnApplicationShutdown {
         this.configCache.get(d.DIRECT_WAIT_SECONDS, dd[d.DIRECT_WAIT_SECONDS]),
         this.configCache.get(d.TASK_RETENTION_SECONDS, dd[d.TASK_RETENTION_SECONDS]),
         this.configCache.get(d.UPSTREAM_QUEUE_POLICY, dd[d.UPSTREAM_QUEUE_POLICY]),
+        this.configCache.get(d.VOLUME_PEER_RESERVE_GB, dd[d.VOLUME_PEER_RESERVE_GB]),
       ]);
       this.maxCacheSizeBytes = Math.max(1, parseInt(maxSizeStr) || 10) * 1024 * 1024 * 1024;
       this.minFreeDiskBytes = Math.max(0.5, parseFloat(minFreeStr) || 1) * 1024 * 1024 * 1024;
@@ -383,10 +384,14 @@ export class FileCacheService implements OnApplicationShutdown {
       const upstreamQueuePolicy: UpstreamQueuePolicy = normalizeUpstreamQueuePolicy(upstreamQueuePolicyStr);
       this.directWaitMs = normalizeDownloadConfigNumber(d.DIRECT_WAIT_SECONDS, directWaitStr) * 1000;
       this.taskRetentionMs = normalizeDownloadConfigNumber(d.TASK_RETENTION_SECONDS, taskRetentionStr) * 1000;
+      // 同卷邻近目录预留：Cache 与 TDLib workdir 同卷时，从缓存侧可用空间扣除该量，
+      // 使两侧峰值占用之和受一个总水位约束（默认 0 = 不扣除，需显式配置）
+      const volumePeerReserveGb = normalizeDownloadConfigNumber(d.VOLUME_PEER_RESERVE_GB, volumePeerReserveStr);
       this.resources.configure({
         minFreeBytes: this.minFreeDiskBytes,
         maxReservedBytes: maxReservedGb > 0 ? maxReservedGb * 1024 * 1024 * 1024 : 0,
         maxConcurrentUpstreams: upstreams,
+        volumePeerReserveBytes: Math.max(0, volumePeerReserveGb) * 1024 * 1024 * 1024,
         queueCapacity,
         queueTimeoutMs,
         spoolGraceMs,
@@ -409,7 +414,10 @@ export class FileCacheService implements OnApplicationShutdown {
         `下载调度配置: 预约上限 ${maxReservedGb > 0 ? `${maxReservedGb}GB` : '不限'}, ` +
         `上游权重预算 ${upstreams}, 队列策略 ${upstreamQueuePolicy}, 队列容量 ${queueCapacity}, ` +
         `排队超时 ${queueTimeoutMs / 1000}s, spool 宽限期 ${spoolGraceMs / 1000}s, ` +
-        `直通窗口 ${directWindowMb}MB`,
+        `直通窗口 ${directWindowMb}MB` +
+        // 同卷部署时该值决定「缓存侧给 workdir 留多少余量」，是磁盘叠加风险的唯一闸门，
+        // 必须出现在启动日志里（默认为 0 时明确标注，避免被当成已配置）
+        `, 同卷邻近目录预留 ${volumePeerReserveGb > 0 ? `${volumePeerReserveGb}GB` : '未配置(0)'}`,
       );
       if (!prevNoCacheMode && this.noCacheMode) {
         this.logger.warn('无缓存模式已启用：中止所有进行中的缓存构建，后续下载实时回源直通');
@@ -504,16 +512,22 @@ export class FileCacheService implements OnApplicationShutdown {
     }
     this.assertNotShuttingDown();
 
-    // 无缓存模式：不读缓存、不发布正式缓存，走可重放 spool / 有界直通
+    // 无缓存模式：不读缓存、不发布正式缓存，走可重放 spool / 有界直通。
+    //
+    // 必须走 `getDegradableSpooledStream`（而非直接调协调器的 `getNoCacheStream`）：
+    // 无缓存模式下每个冷请求都要完整暂存一份 spool 文件，是最容易撞上
+    // 「单文件超过缓存上限 / 卷内可用空间不足」的路径。历史实现直接调 `getNoCacheStream`
+    // → `getSpooledStream`，把 `INSUFFICIENT_STORAGE` 原样抛出，于是**无缓存模式下的
+    // 结构性问题被当成硬失败返回 507/503**，而同样的文件在普通缓存模式下却能正常降级直通——
+    // 同一份文件「开无缓存就不能下载」是不可接受的。
+    // 现在统一走可降级路径：结构性不足 → 有界滚动缓冲直通；暂时性拥堵仍排队等待。
     if (this.noCacheMode) {
-      return this.sessionCoordinator.getNoCacheStream(
+      return this.getDegradableNoCacheStream(
         fileId,
         expectedSize,
         fetchFn,
-        0,
-        expectedSize - 1,
         contentVersion,
-        { waitTimeoutMs: this.resolveWaitTimeout(options?.waitTimeoutMs) },
+        this.resolveWaitTimeout(options?.waitTimeoutMs),
       );
     }
 
@@ -556,19 +570,27 @@ export class FileCacheService implements OnApplicationShutdown {
     if (!(await this.prepareCacheCapacity(expectedSize))) {
       // 容量/磁盘不足：改用可重放 spool（C-04 修复），迟到消费者从 offset 0 完整重放
       this.logger.warn(`缓存容量或磁盘余量不足，文件 ${fileId} 走可重放 spool`);
-      return this.getDegradableSpooledStream(fileId, expectedSize, fetchFn, 0, expectedSize - 1, contentVersion);
-    }
-
-    // 容量准备期间模式可能已翻转，复查避免在无缓存模式下新建构建会话
-    if (this.noCacheMode) {
-      return this.sessionCoordinator.getNoCacheStream(
+      return this.getDegradableSpooledStream(
         fileId,
         expectedSize,
         fetchFn,
         0,
         expectedSize - 1,
         contentVersion,
-        { waitTimeoutMs: this.resolveWaitTimeout(waitTimeoutMs) },
+        this.resolveWaitTimeout(waitTimeoutMs),
+      );
+    }
+
+    // 容量准备期间模式可能已翻转，复查避免在无缓存模式下新建构建会话
+    if (this.noCacheMode) {
+      // 与入口同一口径：模式翻转后同样要保留「结构性不足 → 受限直通」的降级能力，
+      // 否则翻转瞬间的请求会绕过降级直接失败（与入口行为不一致、难以复现）
+      return this.getDegradableNoCacheStream(
+        fileId,
+        expectedSize,
+        fetchFn,
+        contentVersion,
+        this.resolveWaitTimeout(waitTimeoutMs),
       );
     }
 
@@ -584,7 +606,15 @@ export class FileCacheService implements OnApplicationShutdown {
       if (isInsufficientStorage(error)) {
         // 单文件超过缓存容量上限：降级 spool/直通，绝不因此拒绝下载（网盘文件必须可下载）
         this.logger.warn(`文件 ${fileId} 超过缓存容量上限，降级为 spool/直通`);
-        return this.getDegradableSpooledStream(fileId, expectedSize, fetchFn, 0, expectedSize - 1, contentVersion);
+        return this.getDegradableSpooledStream(
+          fileId,
+          expectedSize,
+          fetchFn,
+          0,
+          expectedSize - 1,
+          contentVersion,
+          this.resolveWaitTimeout(waitTimeoutMs),
+        );
       }
       throw error;
     }
@@ -601,8 +631,50 @@ export class FileCacheService implements OnApplicationShutdown {
   }
 
   /**
+   * 无缓存模式的可降级路径。
+   *
+   * 与普通缓存模式的**唯一语义差异**：进入前必须先中止该文件的既有构建会话——
+   * 无缓存模式的定义就是「不读缓存、不发布缓存」，若留着一个半程的默认模式构建会话
+   * 继续写 `.tmp`，该文件在磁盘上就又有了本地副本（违背无缓存语义），
+   * 且它的 follower 会一直等在旧会话上。
+   *
+   * 历史实现通过协调器的 `getNoCacheStream` 完成中止 + spool，但那条路径**没有**
+   * 「结构性不足 → 受限直通」的降级：无缓存模式下每个冷请求都要完整暂存一份 spool，
+   * 恰恰最容易撞上单文件超缓存上限 / 卷内空间不足，于是同一份文件在普通缓存模式下
+   * 能下载、开了无缓存却直接 507。这里统一为：中止旧会话 → spool（可降级）→ 直通。
+   */
+  private async getDegradableNoCacheStream(
+    fileId: string,
+    expectedSize: number,
+    fetchFn: () => Promise<{ stream: Readable; info: { file_size: number } }>,
+    contentVersion?: string | number,
+    waitTimeoutMs: number = this.directWaitMs,
+  ): Promise<{ stream: Readable; fromCache: boolean }> {
+    await this.sessionCoordinator.abortBuildSession(fileId);
+    return this.getDegradableSpooledStream(
+      fileId,
+      expectedSize,
+      fetchFn,
+      0,
+      expectedSize - 1,
+      contentVersion,
+      waitTimeoutMs,
+    );
+  }
+
+  /**
    * 可降级 spool：完整暂存无法满足（空间/缓存上限）时自动改用有界滚动缓冲直通，
    * 保证任何已上传文件都能下载，只损失整文件缓存发布与 follower 重放能力。
+   *
+   * 两级降级语义（缺一不可）：
+   * 1. **暂时性不足**（磁盘/上游队列拥堵）→ 在 `waitTimeoutMs` 内排队等待，
+   *    等到了就正常暂存；**不得**把它误判为结构性不足而退化成直通
+   *    （直通不落本地副本，会把「本可缓存的请求」永久降级）。
+   * 2. **结构性不足**（单文件超缓存上限、卷内可用空间不足 → `INSUFFICIENT_STORAGE`）
+   *    → 立即降级有界滚动缓冲直通（1MiB 起步、1–4MiB 硬上限），不落本地副本。
+   *
+   * `waitTimeoutMs` 由调用方按路径传入：入口请求用 `FILE_DOWNLOAD_DIRECT_WAIT_SECONDS`，
+   * 与不带降级的路径保持同一等待口径，避免「同一请求因走哪条分支而等待时长不同」。
    */
   private async getDegradableSpooledStream(
     fileId: string,
@@ -611,6 +683,7 @@ export class FileCacheService implements OnApplicationShutdown {
     start = 0,
     end = expectedSize - 1,
     contentVersion?: string | number,
+    waitTimeoutMs: number = this.directWaitMs,
   ): Promise<{ stream: Readable; fromCache: boolean }> {
     try {
       return await this.sessionCoordinator.getSpooledStream(
@@ -620,13 +693,13 @@ export class FileCacheService implements OnApplicationShutdown {
         start,
         end,
         contentVersion,
-        { waitTimeoutMs: this.directWaitMs },
+        { waitTimeoutMs },
       );
     } catch (error) {
       if (!isInsufficientStorage(error)) throw error;
       this.logger.warn(`文件 ${fileId} 无法完整暂存，降级有界滚动缓冲直通（不写本地副本）`);
       const direct = await this.sessionCoordinator.getDirectStream(fileId, fetchFn, start, end, {
-        waitTimeoutMs: this.directWaitMs,
+        waitTimeoutMs,
         // 已知大小：大文件按体量占用并发权重，避免多个大文件同时回源
         expectedSize,
       });

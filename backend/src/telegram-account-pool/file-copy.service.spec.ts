@@ -39,7 +39,25 @@ function accountSnapshot(id: string, overrides: Record<string, unknown> = {}) {
 }
 
 function makePool() {
-  return {
+  /** 构造一次已授予的准入（幂等归还；finish 会转调 finishAttempt 便于断言） */
+  function grant(accountId: string, role = 'replication') {
+    let settled = false;
+    return {
+      granted: true,
+      admission: {
+        accountId,
+        role,
+        largeFile: false,
+        finish: jest.fn((sample?: unknown) => {
+          if (settled) return;
+          settled = true;
+          (pool.finishAttempt as jest.Mock)(accountId, sample ?? { ok: true });
+        }),
+        release: jest.fn(() => { settled = true; }),
+      },
+    };
+  }
+  const pool = {
     ids: jest.fn(() => ['a1', 'a2']),
     storageAccountIds: jest.fn(() => ['a1', 'a2']),
     snapshot: jest.fn(() => ({
@@ -55,8 +73,11 @@ function makePool() {
     beginAttempt: jest.fn(() => true),
     releaseAttempt: jest.fn(),
     finishAttempt: jest.fn(),
+    /** 原子准入替身：默认全部授予（单测关注的是调用方的归还与计数语义） */
+    admit: jest.fn((request: { accountId: string; role?: string }): Record<string, unknown> => grant(request.accountId, request.role)),
     bumpCounter: jest.fn(),
   };
+  return pool;
 }
 
 function makeClient() {
@@ -149,11 +170,62 @@ describe('FileCopyService（副本登记 / 去重 / 生命周期清理）', () =
     }));
   });
 
-  it('findByAnchor 按 (chatId, messageId) 反查逻辑主键', async () => {
+  it('findByAnchor 按 (chatId, messageId) 反查逻辑主键（读取多条以支持双写）', async () => {
     const ctx = setup();
     await ctx.service.findByAnchor('7001', '100');
 
-    expect(ctx.repo.findOne).toHaveBeenCalledWith({ where: { chatId: '7001', messageId: '100' } });
+    // 必须读取**多行**：桥接双写下同一锚点会同时存在 fileUnique 与 file 两种记录，
+    // 只取一行会让候选集合随数据库返回顺序漂移
+    expect(ctx.repo.find).toHaveBeenCalledWith(expect.objectContaining({
+      where: { chatId: '7001', messageId: '100' },
+    }));
+  });
+
+  it('findByAnchor 多义锚点：优先 fileUnique，结果稳定不随返回顺序漂移', async () => {
+    const ctx = setup();
+    // 桥接双写：同一锚点同时存在 file 与 fileUnique 两种记录（顺序刻意打乱）
+    const fileRow = {
+      id: 'c-file', ownerType: 'file' as const, ownerId: 'file-1', accountId: 'a1',
+      telegramFileId: 'a1-file', chatId: '7001', messageId: '100',
+    };
+    const uniqueRow = {
+      id: 'c-uniq', ownerType: 'fileUnique' as const, ownerId: 'UNIQ-1', accountId: 'a1',
+      telegramFileId: 'a1-file', chatId: '7001', messageId: '100',
+    };
+    ctx.repo.find.mockResolvedValue([fileRow, uniqueRow] as never);
+
+    const picked = await ctx.service.findByAnchor('7001', '100');
+    expect(picked?.ownerType).toBe('fileUnique');
+    expect(picked?.ownerId).toBe('UNIQ-1');
+
+    // 数据库返回顺序颠倒时结果必须一致（否则回源候选集合会在命名空间之间漂移）
+    ctx.repo.find.mockResolvedValue([uniqueRow, fileRow] as never);
+    const pickedAgain = await ctx.service.findByAnchor('7001', '100');
+    expect(pickedAgain?.ownerType).toBe('fileUnique');
+    expect(pickedAgain?.ownerId).toBe('UNIQ-1');
+    // 多义锚点被计数（供审计发现归属歧义）
+    expect(ctx.service.anchorConflictCount).toBeGreaterThan(0);
+  });
+
+  it('findByAnchor 同优先级多义：按 ownerId 升序收敛（确定性）', async () => {
+    const ctx = setup();
+    ctx.repo.find.mockResolvedValue([
+      { id: 'b', ownerType: 'fileUnique', ownerId: 'UNIQ-Z', accountId: 'a1', telegramFileId: 'f1' },
+      { id: 'a', ownerType: 'fileUnique', ownerId: 'UNIQ-A', accountId: 'a2', telegramFileId: 'f2' },
+    ] as never);
+
+    const picked = await ctx.service.findByAnchor('7001', '100');
+    expect(picked?.ownerId).toBe('UNIQ-A');
+  });
+
+  it('findByAnchor 单行命中时不产生冲突计数（正常路径无噪声）', async () => {
+    const ctx = setup();
+    ctx.repo.find.mockResolvedValue([
+      { id: 'c1', ownerType: 'fileUnique', ownerId: 'UNIQ-1', accountId: 'a1', telegramFileId: 'f1' },
+    ] as never);
+
+    await ctx.service.findByAnchor('7001', '100');
+    expect(ctx.service.anchorConflictCount).toBe(0);
   });
 
   it('同一 (owner, account) 的并发复制只执行一次（进程内去重）', async () => {
@@ -204,8 +276,21 @@ describe('FileCopyService（副本登记 / 去重 / 生命周期清理）', () =
       info: { file_id: 'a1-file', file_size: 100 },
       sample: () => ({ ok: true, bytes: 1, durationMs: 1 }),
     } as never);
-    // 第一次（源账号）成功占用，第二次（目标账号）额度不足
-    ctx.pool.beginAttempt.mockReturnValueOnce(true).mockReturnValueOnce(false);
+    // 第一次（源账号 a1）准入成功，第二次（目标账号 a2）复制额度不足
+    const grantedSource = {
+      granted: true as const,
+      admission: {
+        accountId: 'a1',
+        role: 'replication' as const,
+        largeFile: false,
+        finish: jest.fn((sample?: unknown) => { (ctx.pool.finishAttempt as jest.Mock)('a1', sample ?? { ok: true }); }),
+        release: jest.fn(),
+      },
+    };
+    ctx.pool.admit
+      .mockImplementationOnce(() => grantedSource)
+      .mockImplementationOnce(() => ({ granted: false, reason: 'replication_full', admission: undefined }));
+    const finishSpy = grantedSource.admission.finish as jest.Mock;
 
     const result = await ctx.service.ensureCopy({
       ownerType: 'fileUnique',
@@ -216,8 +301,69 @@ describe('FileCopyService（副本登记 / 去重 / 生命周期清理）', () =
     });
 
     expect(result).toBeNull();
+    // 源额度只能归还一次：destroy 触发的 close 与显式 settle 必须去重，
+    // 否则在飞额度被双重扣减，账号看起来比实际空闲（限流保护被静默绕开）
+    expect(finishSpy).toHaveBeenCalledTimes(1);
     const sourceFinishes = ctx.pool.finishAttempt.mock.calls.filter((call) => call[0] === 'a1');
     expect(sourceFinishes).toHaveLength(1);
+  });
+
+  it('源账号复制额度不足时不做复制（不排队占用下载资源）', async () => {
+    const ctx = setup();
+    ctx.repo.find.mockResolvedValue([
+      { id: 'c1', accountId: 'a1', telegramFileId: 'a1-file', fileSize: '100' },
+    ] as never);
+    ctx.pool.admit.mockImplementation(() => ({ granted: false, reason: 'replication_full', admission: undefined }));
+
+    const result = await ctx.service.ensureCopy({
+      ownerType: 'fileUnique',
+      ownerId: 'u1',
+      targetAccountId: 'a2',
+      fileName: 'f.bin',
+      expectedSize: 100,
+    });
+
+    expect(result).toBeNull();
+    // 复制是副产品：拿不到额度就本轮放弃，绝不发起上游取流
+    expect(ctx.client.openRealtimeStream).not.toHaveBeenCalled();
+    expect(ctx.client.sendDocumentStream).not.toHaveBeenCalled();
+    expect(ctx.pool.bumpCounter).toHaveBeenCalledWith('replicationsFailed');
+  });
+
+  it('复制选源时排除已有复制流的账号（下载优先，不与下载争同一账号额度）', async () => {
+    const ctx = setup();
+    // 源副本只有 a1（不能被选为目标），目标 a2 → 选源候选恰好是 ['a1']
+    ctx.repo.find.mockResolvedValue([
+      { id: 'c1', accountId: 'a1', telegramFileId: 'a1-file', fileSize: '100' },
+    ] as never);
+    ctx.client.openRealtimeStream.mockResolvedValue({
+      stream: { once: jest.fn(), destroy: jest.fn() },
+      info: { file_id: 'a1-file', file_size: 100 },
+      sample: () => ({ ok: true, bytes: 100, durationMs: 10 }),
+    } as never);
+    ctx.client.sendDocumentStream.mockResolvedValue({
+      fileId: 'a2-file',
+      fileSize: 100,
+      chatId: '-1001',
+      messageId: '9',
+      fileUniqueId: 'UQ-a2',
+      sample: { ok: true, bytes: 100, durationMs: 10 },
+    } as never);
+
+    await ctx.service.ensureCopy({
+      ownerType: 'fileUnique',
+      ownerId: 'u1',
+      targetAccountId: 'a2',
+      fileName: 'f.bin',
+      expectedSize: 100,
+    });
+
+    // 复制选源必须声明复制角色（账号池据此排除已有复制流的账号）
+    expect(ctx.pool.select).toHaveBeenCalledWith(
+      ['a1'],
+      expect.any(Number),
+      expect.objectContaining({ role: 'replication' }),
+    );
   });
 
   it('purgeStale 按阈值分类清理并返回各类计数', async () => {
