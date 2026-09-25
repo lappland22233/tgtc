@@ -1,0 +1,94 @@
+# ---------------------------------------------------------------------------
+# TGTC 下载端点反向代理模板（生产 Nginx）
+#
+# 背景：text.lappland.top 4GiB 分卷下载事件中，代理侧隐藏占用了约 3G 临时文件，
+# 并且 Range/If-Range 与 206 语义缺乏保障。本模板的目标是让下载响应**直通**：
+#   - 不缓冲、不缓存、不落盘（proxy_max_temp_file_size 0）；
+#   - 不改写、不剥离 ETag / Accept-Ranges / Content-Range；
+#   - 超时层级大于后端 Node 空闲超时，且**不设置固定总时长**（否则长传输必被截断）；
+#   - 访问日志不落完整下载 Token（应用侧已脱敏，代理侧用下面的 map 兜底）。
+#
+# 用法：
+#   1) 把 `http 段` 片段放到 http{} 内（map 只允许在 http 上下文）；
+#   2) 把 `server 段` 片段放到目标站点的 server{} 内；
+#   3) 替换 __UPSTREAM__ / __LOG_DIR__（其余保持默认）；
+#   4) 部署后执行 scripts/release/check-download-proxy.sh 做自检。
+#
+# 注意：本仓库不包含生产 Nginx 配置，本文件只是模板；实际应用由运维执行。
+# ---------------------------------------------------------------------------
+
+
+# ============================ http 段（放在 http{} 内） ============================
+# 凭据路径脱敏：/api/bot-dl/<token> 与 /api/s/<分享token> 的路径段本身就是凭据，
+# 不得以明文进入 Nginx 访问日志。
+map $uri $tgtc_redacted_uri {
+    default                     $uri;
+    "~^/api/bot-dl/"            "/api/bot-dl/[REDACTED]";
+    "~^/api/s/"                 "/api/s/[REDACTED]";
+}
+
+log_format tgtc_download '$remote_addr - $remote_user [$time_local] '
+                         '"$request_method $scheme://$host$tgtc_redacted_uri $server_protocol" '
+                         '$status $body_bytes_sent "$http_referer" "$http_user_agent" '
+                         'rt=$request_time urt=$upstream_response_time';
+
+# 显式声明代理临时目录，便于监控其所在卷（即使本端点为直通，仍需可见性）。
+# proxy_temp_path /var/lib/nginx/tmp/proxy 1 2;
+# client_body_temp_path /var/lib/nginx/tmp/client_body 1 2;
+
+
+# ========================== server 段（放在 server{} 内） ==========================
+# Bot 匿名直链：下载响应的唯一正确姿势是「直通」
+location ^~ /api/bot-dl/ {
+    proxy_pass __UPSTREAM__;
+    proxy_http_version 1.1;
+
+    # 关键三项：关闭响应缓冲、关闭代理缓存、禁止完整响应落临时文件
+    proxy_buffering off;
+    proxy_request_buffering off;
+    proxy_cache off;
+    proxy_max_temp_file_size 0;
+
+    # 不要改写或剥离断点续传相关头：
+    #   - Range / If-Range 默认整包透传，**禁止**写 `proxy_set_header Range "";`
+    #   - ETag / Accept-Ranges / Content-Range 默认透传，**禁止**用 proxy_hide_header 隐藏
+    #   - gzip 会移除 ETag，此处显式关闭
+    gzip off;
+    proxy_redirect off;
+
+    # 超时分层：必须大于后端 Node 空闲超时（HTTP_IDLE_TIMEOUT_SECONDS，默认 180s）。
+    # 不要设置固定总时长（如 proxy_read_timeout 过小会把 4GiB 长传输直接截断）。
+    proxy_connect_timeout 10s;
+    proxy_send_timeout 180s;
+    proxy_read_timeout 210s;
+
+    # 下载端点是 GET，无请求体；保持极小上限避免被当作上传通道
+    client_max_body_size 1m;
+
+    access_log __LOG_DIR__/bot-dl.access.log tgtc_download;
+}
+
+# 分享下载路径同样需要直通与脱敏（如站点启用了 /api/s/ 下载）
+location ^~ /api/s/ {
+    proxy_pass __UPSTREAM__;
+    proxy_http_version 1.1;
+    proxy_buffering off;
+    proxy_request_buffering off;
+    proxy_cache off;
+    proxy_max_temp_file_size 0;
+    gzip off;
+    proxy_connect_timeout 10s;
+    proxy_send_timeout 180s;
+    proxy_read_timeout 210s;
+    access_log __LOG_DIR__/share.access.log tgtc_download;
+}
+
+# 反向检查清单（部署后由 check-download-proxy.sh 自动校验）：
+#   [ ] /api/bot-dl/ 内存在 `proxy_buffering off`
+#   [ ] 存在 `proxy_max_temp_file_size 0`
+#   [ ] 未启用 `proxy_cache <zone>`（仅允许 `proxy_cache off`）
+#   [ ] `proxy_read_timeout` >= 200s 且未设置固定总时长
+#   [ ] Range 请求返回 206 且带 Content-Range / Accept-Ranges / ETag
+#   [ ] If-Range 不匹配时返回完整 200（不返回 206）
+#   [ ] 访问日志使用 $tgtc_redacted_uri（不落完整下载 Token）
+#   [ ] proxy_temp_path 所在卷有容量告警（空闲 < 10GiB 告警）

@@ -90,6 +90,46 @@ describe('validateEnv', () => {
     expect(() => validateEnv(env)).toThrow(/DB_POOL_SIZE[\s\S]*DB_QUERY_TIMEOUT_MS[\s\S]*DB_LOCK_TIMEOUT_MS/);
   });
 
+  it('接受下载超时分层的 0=禁用语义', () => {
+    const env: NodeJS.ProcessEnv = {
+      ...valid,
+      FILE_CACHE_BUILD_FIRST_BYTE_TIMEOUT_MS: '210000',
+      FILE_CACHE_BUILD_IDLE_TIMEOUT_MS: '150000',
+      // 历史实现只接受正数，0 会被静默回退成默认值，使固定总时限无法关闭
+      FILE_CACHE_BUILD_TOTAL_TIMEOUT_MS: '0',
+      TELEGRAM_FILE_STREAM_TIMEOUT_SECONDS: '180',
+    };
+    expect(() => validateEnv(env)).not.toThrow();
+  });
+
+  it('拒绝非法超时数值，但层级冲突只告警不阻断启动', () => {
+    const malformed: NodeJS.ProcessEnv = {
+      ...valid,
+      FILE_CACHE_BUILD_IDLE_TIMEOUT_MS: '-1',
+      FILE_CACHE_BUILD_TOTAL_TIMEOUT_MS: 'abc',
+      TELEGRAM_FILE_STREAM_TIMEOUT_SECONDS: '0',
+    };
+    expect(() => validateEnv(malformed)).toThrow(
+      /FILE_CACHE_BUILD_IDLE_TIMEOUT_MS[\s\S]*FILE_CACHE_BUILD_TOTAL_TIMEOUT_MS[\s\S]*TELEGRAM_FILE_STREAM_TIMEOUT_SECONDS/,
+    );
+
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      // 总时限小于首字节：外层会先于内层断开，但既有部署可能已自定义其中一项，
+      // 因此只高可见度告警，不阻断升级。
+      const conflicting: NodeJS.ProcessEnv = {
+        ...valid,
+        FILE_CACHE_BUILD_FIRST_BYTE_TIMEOUT_MS: '210000',
+        FILE_CACHE_BUILD_IDLE_TIMEOUT_MS: '150000',
+        FILE_CACHE_BUILD_TOTAL_TIMEOUT_MS: '60000',
+      };
+      expect(() => validateEnv(conflicting)).not.toThrow();
+      expect(warn.mock.calls.flat().join('\n')).toContain('下载超时层级存在冲突');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it('validates complete SMTP configuration', () => {
     const invalid: NodeJS.ProcessEnv = { ...valid, SMTP_HOST: 'smtp', SMTP_PORT: 'bad', SMTP_SECURE: 'yes' };
     expect(() => validateEnv(invalid)).toThrow(
@@ -140,6 +180,89 @@ describe('validateEnv', () => {
     } finally {
       warn.mockRestore();
     }
+  });
+
+  it('validates Telegram Bot inbound configuration', () => {
+    // 入站启用但未配置初始管理员 → 拒绝（否则无人可维护白名单）
+    const missingAdmin: NodeJS.ProcessEnv = { ...valid, TELEGRAM_BOT_UPDATES_ENABLED: 'true' };
+    expect(() => validateEnv(missingAdmin)).toThrow(/TELEGRAM_BOT_ADMIN_IDS/);
+
+    const badValues: NodeJS.ProcessEnv = {
+      ...valid,
+      TELEGRAM_BOT_UPDATES_ENABLED: 'yes',
+      TELEGRAM_BOT_ADMIN_IDS: 'abc',
+      TELEGRAM_BOT_DAILY_LIMIT: '0',
+      TELEGRAM_BOT_LINK_TTL_HOURS: '900',
+      TELEGRAM_BOT_QUOTA_TIMEZONE: 'Not/AZone',
+      TELEGRAM_BOT_LINK_DOMAIN_MODE: 'random',
+      TELEGRAM_BOT_LINK_DOMAIN: 'https://example.com/path',
+      TELEGRAM_BOT_ENCRYPTION_KEY: 'short',
+      TELEGRAM_BOT_POLL_TIMEOUT_SECONDS: '0',
+    };
+    expect(() => validateEnv(badValues)).toThrow(
+      /TELEGRAM_BOT_UPDATES_ENABLED[\s\S]*TELEGRAM_BOT_ADMIN_IDS[\s\S]*TELEGRAM_BOT_DAILY_LIMIT[\s\S]*TELEGRAM_BOT_LINK_TTL_HOURS[\s\S]*TELEGRAM_BOT_QUOTA_TIMEZONE[\s\S]*TELEGRAM_BOT_LINK_DOMAIN_MODE[\s\S]*TELEGRAM_BOT_LINK_DOMAIN[\s\S]*TELEGRAM_BOT_ENCRYPTION_KEY[\s\S]*TELEGRAM_BOT_POLL_TIMEOUT_SECONDS/,
+    );
+
+    const ok: NodeJS.ProcessEnv = {
+      ...valid,
+      TELEGRAM_BOT_UPDATES_ENABLED: 'true',
+      TELEGRAM_BOT_ADMIN_IDS: '123456, 789012',
+      TELEGRAM_BOT_DAILY_LIMIT: '10',
+      TELEGRAM_BOT_LINK_TTL_HOURS: '24',
+      TELEGRAM_BOT_QUOTA_TIMEZONE: 'Asia/Shanghai',
+      TELEGRAM_BOT_LINK_DOMAIN_MODE: 'manual',
+      TELEGRAM_BOT_LINK_DOMAIN: 'https://text.lappland.top',
+      TELEGRAM_BOT_ENCRYPTION_KEY: 'a'.repeat(64),
+      TELEGRAM_BOT_POLL_TIMEOUT_SECONDS: '30',
+    };
+    expect(() => validateEnv(ok)).not.toThrow();
+  });
+
+  it('validates Bot 账号池配置，并允许池化模式下省略单账号 Token/Chat', () => {
+    // 池化模式：单账号 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID 降级为可选，
+    // 由账号池配置提供账号来源（否则「不配单账号 Token 也能入站/回复」无法落地）。
+    const poolOnly: NodeJS.ProcessEnv = {
+      ...valid,
+      TELEGRAM_BOT_TOKEN: undefined,
+      TELEGRAM_CHAT_ID: undefined,
+      TELEGRAM_ACCOUNT_POOL_ENABLED: 'true',
+      TELEGRAM_ACCOUNT_POOL: JSON.stringify([
+        { id: 'bot1', token: '123456:AAA', chatId: '-1001234567890' },
+      ]),
+    };
+    expect(() => validateEnv(poolOnly)).not.toThrow();
+
+    const badPool: NodeJS.ProcessEnv = {
+      ...valid,
+      TELEGRAM_ACCOUNT_POOL_ENABLED: 'yes',
+      TELEGRAM_ACCOUNT_POOL: JSON.stringify([{ token: 'not-a-token', chatId: '' }]),
+      TELEGRAM_BOT_TOKENS: 'nope',
+      TELEGRAM_ARCHIVE_CHAT_ID: 'group',
+      TELEGRAM_USER_RELAY_ENABLED: 'maybe',
+    };
+    expect(() => validateEnv(badPool)).toThrow(
+      /TELEGRAM_ACCOUNT_POOL_ENABLED[\s\S]*token 格式错误[\s\S]*chatId 未设置[\s\S]*TELEGRAM_BOT_TOKENS[\s\S]*TELEGRAM_ARCHIVE_CHAT_ID[\s\S]*TELEGRAM_USER_RELAY_ENABLED/,
+    );
+
+    // 简化输入（TELEGRAM_BOT_TOKENS）必须显式提供存储 Chat；归档群不能充当存储目标
+    const tokensWithoutStorage: NodeJS.ProcessEnv = {
+      ...valid,
+      TELEGRAM_ACCOUNT_POOL_ENABLED: 'true',
+      TELEGRAM_BOT_TOKENS: '123456:AAA',
+      TELEGRAM_CHAT_ID: undefined,
+      TELEGRAM_ARCHIVE_CHAT_ID: '-100999',
+    };
+    expect(() => validateEnv(tokensWithoutStorage)).toThrow(
+      /TELEGRAM_BOT_TOKENS 作为账号池来源时必须设置 TELEGRAM_CHAT_ID/,
+    );
+
+    // 非法 JSON 必须被拒绝（否则账号池会静默退化为「无账号」）。
+    const malformed: NodeJS.ProcessEnv = {
+      ...valid,
+      TELEGRAM_ACCOUNT_POOL_ENABLED: 'true',
+      TELEGRAM_ACCOUNT_POOL: '[{"token":]',
+    };
+    expect(() => validateEnv(malformed)).toThrow(/TELEGRAM_ACCOUNT_POOL 不是合法 JSON/);
   });
 
   it('reads process.env by default when called without arguments', () => {

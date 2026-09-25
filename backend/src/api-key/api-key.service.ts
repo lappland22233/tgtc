@@ -225,12 +225,12 @@ export class ApiKeyService {
       await manager.update(ApiKey, id, { revokedAt: new Date() });
 
       this.auditService.log({
-        action: 'api_key_rotate' as never,
+        action: 'api_key_rotate',
         userId: user.id,
         resourceType: 'api_key',
         resourceId: entity.id,
         metadata: { prefix: entity.prefix, rotatedFrom: id, inheritedAllowlistRules: rules.length },
-      } as never);
+      });
 
       return {
         id: entity.id,

@@ -53,8 +53,30 @@ const SENSITIVE_QUERY_PARAMS = new Set([
 const MAX_QUERY_VALUE_LENGTH = 200;
 
 /**
+ * 需要脱敏的路径凭据规则（凭据位于 path 段，而非 query）。
+ *
+ * `/api/bot-dl/<下载Token>` 与 `/api/s/<分享Token>/...` 的路径段本身就是可直接
+ * 换取文件内容的凭据：一旦被持久化到访问日志、5xx 日志或导出文件，任何能读到
+ * 日志的人都能重放。清洗时保留路由模板（含后续资源 ID 段），只把凭据段替换为
+ * `[REDACTED]`，使统计仍能按路由聚合。
+ */
+const SENSITIVE_PATH_SEGMENT_RULES: ReadonlyArray<{ match: RegExp; replacement: string }> = [
+  { match: /^\/api\/bot-dl\/[^/]+/i, replacement: '/api/bot-dl/[REDACTED]' },
+  { match: /^\/api\/s\/[^/]+/i, replacement: '/api/s/[REDACTED]' },
+];
+
+/** 把路径中的凭据段替换为 [REDACTED]（无匹配时原样返回） */
+function redactSensitivePath(pathname: string): string {
+  for (const rule of SENSITIVE_PATH_SEGMENT_RULES) {
+    if (rule.match.test(pathname)) return pathname.replace(rule.match, rule.replacement);
+  }
+  return pathname;
+}
+
+/**
  * 清洗用于日志的请求 URL：
  * - 剥离 hash 片段；
+ * - 路径中的凭据段（bot-dl Token / 分享 Token）替换为 [REDACTED]；
  * - 移除敏感 query 参数（access/token/code/password/...），其余参数保留；
  * - 超长 query 值截断。
  *
@@ -63,7 +85,7 @@ const MAX_QUERY_VALUE_LENGTH = 200;
 export function sanitizeUrlForLog(rawUrl: string | undefined | null): string {
   if (!rawUrl) return '/';
   const [pathPart, queryPart] = rawUrl.split('?');
-  const pathname = (pathPart || '/').split('#')[0] || '/';
+  const pathname = redactSensitivePath((pathPart || '/').split('#')[0] || '/');
   if (queryPart === undefined) return pathname;
 
   try {
@@ -91,16 +113,16 @@ export function sanitizeUrlForLog(rawUrl: string | undefined | null): string {
 
 /**
  * 清洗 Referer：仅保留 origin + pathname，剥离 query 与 hash，
- * 防止访问凭据经 Referer 进入访问日志。
+ * 并同样脱敏路径中的凭据段，防止访问凭据经 Referer 进入访问日志。
  */
 export function sanitizeRefererForLog(referer: string | null | undefined): string | null {
   if (!referer) return null;
   try {
     const url = new URL(referer);
-    return url.origin + url.pathname;
+    return url.origin + redactSensitivePath(url.pathname);
   } catch {
     const cleaned = referer.split('?')[0].split('#')[0].trim();
-    return cleaned ? cleaned.substring(0, 300) : null;
+    return cleaned ? redactSensitivePath(cleaned).substring(0, 300) : null;
   }
 }
 
@@ -116,4 +138,29 @@ export function isLikelyCredential(value: string): boolean {
   // 高熵 base64url / hex 长串
   if (/^[A-Za-z0-9_-]{32,}$/.test(value)) return true;
   return false;
+}
+
+/** Bot Token 的替换标记（与 TelegramService / TelegramAccountClientService 一致） */
+export const BOT_TOKEN_REDACTION = '[REDACTED]';
+
+/**
+ * 从任意文本中移除 Bot Token。
+ *
+ * 策略与 `TelegramService.redactToken`、`TelegramAccountClientService.redact` 完全一致，
+ * 保证已经写入这些链路的内容与新增的诊断快照使用同一套规则：
+ * 1. URL 形态 `.../bot<token>/...` → `.../bot[REDACTED]/...`；
+ * 2. 已知字面 Token 全局替换（覆盖网络层错误把 token 塞进 message / url 的场景）。
+ *
+ * 为什么集中到公共工具：入站轮询快照会经管理端接口对外暴露，任何一处漏脱敏
+ * 都会把凭据直接送出进程；把规则收敛到单点便于审计与回归。
+ *
+ * @param text 待脱敏文本（null/undefined 返回空串）
+ * @param token 可选的已知 Token 字面值（为空时只做 URL 形态替换）
+ */
+export function redactBotToken(text: string | null | undefined, token?: string | null): string {
+  if (!text) return '';
+  let out = String(text).replace(/\/bot[^/]+\//g, `/bot${BOT_TOKEN_REDACTION}/`);
+  const literal = (token || '').trim();
+  if (literal) out = out.split(literal).join(BOT_TOKEN_REDACTION);
+  return out;
 }

@@ -81,3 +81,9 @@ DEADLOCK_STATIC_REVIEW.md
 # 本地正式发行产物（按 .Releases/v<版本>/ 独立存放）
 .Releases/
 docs/
+
+# 独立实验副本（账号池验证等，见 beta/account-pool-lab/README.md）
+# 仅用于隔离实验，避免副本污染 git status；如需把实验台纳入版本管理，请删除本行并在 beta/ 内自行 git init。
+# 发布构建脚本已显式排除 beta/（scripts/build-linux-x64-release.sh 的 rsync --exclude 'beta'），
+# 发行包不会包含实验副本；validate-release.sh 亦会断言包内不含 beta/ 路径。
+beta/

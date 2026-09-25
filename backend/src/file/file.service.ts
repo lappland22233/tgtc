@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, ForbiddenException, BadRequestException, ConflictException, GoneException, HttpException, OnModuleInit, Logger } from '@nestjs/common';
+import { Injectable, NotFoundException, ForbiddenException, BadRequestException, ConflictException, GoneException, HttpException, HttpStatus, OnModuleInit, Logger, Optional, Inject } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, In, IsNull, EntityManager } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
@@ -25,7 +25,13 @@ import { ConfigCacheService } from '../common/services/config-cache.service';
 import { User } from '../common/entities/user.entity';
 import { hasAdminPrivileges } from '../common/auth-context';
 // M6 拆分：BannedIP / RateLimitService / bcrypt 随访问控制域迁移至 FileAccessControlService
-import { databaseForUpdate, databaseQuery, getDatabaseType, isDatabaseUniqueViolation } from '../database/database-types';
+import {
+  databaseForUpdate,
+  databasePessimisticWriteLock,
+  databaseQuery,
+  getDatabaseType,
+  isDatabaseUniqueViolation,
+} from '../database/database-types';
 import { ShareAudit } from '../common/entities/share-audit.entity';
 
 import { AuditService } from '../common/services/audit.service';
@@ -37,6 +43,16 @@ import { FileAccessControlService } from './file-access-control.service';
 import { FileUploadConfigService } from './file-upload-config.service';
 import { assertFileReadable, assertFileWritable } from '../common/utils/file-permissions';
 import { v4 as uuidv4 } from 'uuid';
+// 阶段 4：普通 Web 上传文件的回源接入账号池（可选依赖，未装配/未启用时保持原单账号链路）
+import { AccountAwareDownloadService } from '../telegram-account-pool/account-aware-download.service';
+import { AccountAwareUploadService } from '../telegram-account-pool/account-aware-upload.service';
+import { FileCopyService } from '../telegram-account-pool/file-copy.service';
+// 镜像触发（可选依赖：不装配时不产生任何行为变化）
+import { TelegramMirrorTriggerService } from '../telegram-mirror/telegram-mirror-trigger.service';
+// 5a fail-closed：跨账号回退拒绝复用下载调度层的结构化异常与错误码（与全局过滤器/流式响应透传口径一致）
+import { DownloadResourceException, DOWNLOAD_ERROR_CODES, DOWNLOAD_RESOURCE_DEFAULTS } from './download-resource-coordinator.service';
+// 账号标识脱敏（日志只允许输出末 4 位，绝不打印完整标识与 file_id）
+import { maskIdentifier } from '../telegram-accounts/telegram-account-view';
 
 import { FILE_DELETE_GRACE_MS, FILE_DELETE_COOLDOWN_MS, FILE_FORCE_DELETE_WAIT_MS, MS_PER_SECOND } from '../common/constants/durations';
 import { isSafePublicInlineContentType } from '../common/utils/preview-content-type';
@@ -69,6 +85,24 @@ export interface BatchUploadFailedItem {
 export interface BatchUploadResult {
   success: File[];
   failed: BatchUploadFailedItem[];
+}
+
+/**
+ * 统一的上传结果（账号池与单账号链路共用形状）。
+ *
+ * `accountId` 是**实际上传账号**：主副本定位（`File.telegramSourceAccountId`）与副本表
+ * 必须用它。池化上传后若仍写默认 Bot，后续回源会用错账号取 `file_id`（跨账号 502）。
+ */
+export interface UploadedTelegramFile {
+  file_id: string;
+  file_path: string;
+  message_id: string | null;
+  chat_id: string | null;
+  file_unique_id: string | null;
+  /** 实际上传账号 id（池化上传为该账号；单账号链路为默认 Bot） */
+  accountId: string | null;
+  /** 严格无缓存上传时由 fork 明确确认本地媒体已释放（仅单账号链路返回） */
+  localCacheReleased?: boolean;
 }
 
 // 复合扩展名与 magic bytes 采样逻辑随类型校验迁移至 FileUploadConfigService
@@ -130,7 +164,308 @@ export class FileService implements OnModuleInit {
     private readonly accessControl: FileAccessControlService,
     // M6 拆分：上传配置与类型/大小校验域（见 file-upload-config.service.ts）
     private readonly uploadConfig: FileUploadConfigService,
+    // 阶段 4（P2）可选依赖：账号池回源与副本表。均为 @Optional：
+    // 模块未装配或账号池未启用时，回源行为与改造前逐字节一致。
+    @Optional() @Inject(AccountAwareDownloadService)
+    private readonly accountAwareDownload: AccountAwareDownloadService | null = null,
+    // 上传选号（新文件写入的多账号入口；未装配/未启用时逐字节等价于原单账号链路）
+    @Optional() @Inject(AccountAwareUploadService)
+    private readonly accountAwareUpload: AccountAwareUploadService | null = null,
+    @Optional() @Inject(FileCopyService)
+    private readonly fileCopies: FileCopyService | null = null,
+    // 镜像触发（可选依赖；关闭时零开销）
+    @Optional() @Inject(TelegramMirrorTriggerService)
+    private readonly mirrorTrigger: TelegramMirrorTriggerService | null = null,
   ) {
+  }
+
+  /**
+   * 统一的 Telegram 回源入口（阶段 4：Web 上传文件接入账号池）。
+   *
+   * 行为约定：
+   * - 账号池可用且该文件已有副本记录 → 按负载选号回源（失败自动换号，账号级冷却）；
+   * - 池化失败但来源账号可确认（非默认 Bot 的池内账号）→ 先用该账号自己的 `file_id` 兜底；
+   * - 来源账号兜底也失败且来源是**非默认 Bot** → fail-closed：拒绝跨账号回退，返回可诊断
+   *   503（`file_id` 按账号隔离，用默认 Bot 去取是跨账号误用）；
+   * - 其他任何情况（未装配 / 未启用 / 无副本 / 来源为空或即默认 Bot）→ **原单账号链路**，
+   *   不改变返回结构与 Range/缓存语义。
+   *
+   * 安全：这里只做「取流」选择，绝不把 A 账号的 `file_id` 交给 B 账号——
+   * 每个候选副本都带有它自己的 `file_id`（副本表事实）。
+   */
+  private async openTelegramSourceStream(
+    file: File,
+    expectedSize: number,
+    options?: { noCache?: boolean },
+  ): Promise<{ stream: Readable; info: { file_id: string; file_path: string; file_size: number } }> {
+    const noCache = options?.noCache === true;
+    const poolDownload = this.accountAwareDownload;
+    if (poolDownload?.isActive() && this.fileCopies) {
+      try {
+        const copies = await this.fileCopies.listReady('file', file.id);
+        if (copies.length > 0) {
+          const opened = await poolDownload.openStream({
+            ownerType: 'file',
+            ownerId: file.id,
+            expectedSize,
+            noCache,
+            fileName: file.originalName || file.filename,
+          });
+          if (opened) {
+            return {
+              stream: opened.stream,
+              // 池化副本的 file_path 属于该账号的 Bot API 实例，不回写主副本路径
+              info: { file_id: opened.info.file_id, file_path: '', file_size: opened.info.file_size },
+            };
+          }
+          this.logger.warn(`账号池回源未取得流，回退单账号链路（file=${file.id}）`);
+        }
+      } catch (error) {
+        this.logger.warn(
+          `账号池回源异常，回退单账号链路（file=${file.id}）：${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    // 单账号兜底必须**归属正确**：池化上传产生的 `file_id` 只属于当时的上传账号，
+    // 用默认 Bot 去取会得到 502/无效 file_id。记录来源账号且它不是默认 Bot 时，
+    // 先用该账号自己的 `file_id` 回源（这正是「不把 A 的 file_id 交给 B」的落点）。
+    const sourceAccountId = (file.telegramSourceAccountId || '').trim();
+    const defaultAccountId = this.defaultBotAccountId();
+    if (poolDownload?.isActive() && sourceAccountId && sourceAccountId !== defaultAccountId) {
+      try {
+        const opened = await poolDownload.openSourceStream({
+          accountId: sourceAccountId,
+          fileId: file.telegramFileId || file.filename,
+          expectedSize,
+          noCache,
+        });
+        if (opened) {
+          return {
+            stream: opened.stream,
+            info: { file_id: opened.info.file_id, file_path: '', file_size: opened.info.file_size },
+          };
+        }
+        this.logger.warn(
+          `来源账号 ${maskIdentifier(sourceAccountId)} 回源未取得流（file=${file.id}）：账号可能已禁用或不在池内`,
+        );
+      } catch (error) {
+        this.logger.warn(
+          `来源账号 ${sourceAccountId} 回源异常（file=${file.id}）：${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+
+    // 5a fail-closed（安全对齐 Bot 直链路径的回退矩阵）：池化取流与源账号兜底都已失败。
+    // 为什么不能无条件落入默认链路：`file_id` 按账号隔离——来源账号是**非默认 Bot 的
+    // 池内账号**时，它的 `file_id` 只对该账号有效，用默认 Bot 去取会得到上游错误/无效引用
+    // （归属可确认 ≠ 身份一致）。这里宁可返回可诊断 503，也绝不跨账号误用；与
+    // telegram-bot-public.controller 的 acquireUpstreamStream 同一安全矩阵与计数口径。
+    if (poolDownload?.isActive() && sourceAccountId && sourceAccountId !== defaultAccountId) {
+      // 脱敏输出：只保留账号 id 末 4 位，不打印 file_id（与账号池日志规范一致）
+      this.logger.error(
+        `来源账号 ${maskIdentifier(sourceAccountId)} 回源不可用，按安全策略拒绝跨账号回退默认 Bot（file=${file.id}）`,
+      );
+      // 与直链路径同口径计数（unresolved）：供告警识别「归属不可确认」的影响面
+      poolDownload.bumpCounter('unresolved');
+      throw new DownloadResourceException({
+        status: HttpStatus.SERVICE_UNAVAILABLE,
+        errorCode: DOWNLOAD_ERROR_CODES.SERVER_BUSY,
+        message: '文件暂不可用：来源账号当前不可用（限流或满载），请稍后重试',
+        scope: 'upstream',
+        queueReason: 'upstream',
+        retryAfterMs: DOWNLOAD_RESOURCE_DEFAULTS.RETRY_AFTER_MS,
+      });
+    }
+
+    // 其余情况（来源账号为空 = 历史单账号数据；来源账号即默认 Bot = 身份一致）回退安全，
+    // 保持既有默认链路不变。
+    return this.telegramService.getRealtimeFileStream(
+      file.telegramFileId || file.filename,
+      expectedSize,
+      { noCache },
+    );
+  }
+
+  /**
+   * 统一的上传入口（账号池上传选号接入点）。
+   *
+   * 行为约定：
+   * - 账号池可用、存在「已配置存储 Chat」的候选、且字节长度已知 → 按负载选号上传
+   *   （失败自动换号 + 账号级冷却），成功后返回**实际上传账号**；
+   * - 其他任何情况（未装配 / 未启用 / 无候选 / 换号耗尽 / 长度未知 / 严格无缓存）→
+   *   **原单账号链路**，返回默认 Bot 作为账号归属（历史语义不变）。
+   *
+   * 为什么这里的回退不违反 `file_id` 隔离：新上传不存在「别人的 file_id」——
+   * 回退产生的 `file_id` 属于默认 Bot，返回值会如实告知调用方，归属始终正确。
+   * 真正的 fail-closed 红线在**回源**侧（归属不明的 `file_id` 绝不用默认账号去猜）。
+   */
+  private async uploadTelegramObject(params: {
+    filename: string;
+    /** 池化路径的字节数；未提供则不池化（流式上传必须显式给出长度） */
+    pooledLength?: number;
+    /** 池化路径的流工厂：每次尝试必须新开一个流（流只能消费一次） */
+    openPoolStream?: () => Readable;
+    /** 单账号链路的上传源（保持既有形状：Buffer 或 Readable） */
+    openLegacySource: () => Buffer | Readable;
+    /** 单账号链路的 knownLength（既有行为：流式给长度，Buffer 不给） */
+    legacyKnownLength?: number;
+    signal?: AbortSignal;
+    /** 严格无缓存上传必须走单账号链路，以保留 fork 的本地媒体释放语义 */
+    noCache?: boolean;
+  }): Promise<UploadedTelegramFile> {
+    const poolUpload = this.accountAwareUpload;
+    if (
+      poolUpload?.isActive()
+      && params.noCache !== true
+      && params.pooledLength !== undefined
+      && params.openPoolStream
+    ) {
+      try {
+        const pooled = await poolUpload.upload({
+          filename: params.filename,
+          knownLength: params.pooledLength,
+          openStream: params.openPoolStream,
+          signal: params.signal,
+        });
+        if (pooled) {
+          return {
+            file_id: pooled.fileId,
+            // 池化上传不调用普通 getFile（会把刚上传的媒体完整下载进 workdir），路径留空
+            file_path: '',
+            message_id: pooled.messageId || null,
+            chat_id: pooled.chatId || null,
+            file_unique_id: pooled.fileUniqueId,
+            accountId: pooled.accountId,
+          };
+        }
+        this.logger.warn('账号池上传未成功（无可用候选或换号耗尽），回退单账号链路');
+      } catch (error) {
+        this.logger.warn(
+          `账号池上传异常，回退单账号链路：${error instanceof Error ? error.message.slice(0, 200) : String(error)}`,
+        );
+      }
+    }
+
+    const uploaded = await this.telegramService.uploadFile(
+      params.openLegacySource(),
+      params.filename,
+      params.signal,
+      params.legacyKnownLength,
+      params.noCache === true ? { noCache: true } : undefined,
+    );
+    return { ...uploaded, accountId: this.defaultBotAccountId() };
+  }
+
+  /**
+   * 记录主副本定位信息并登记副本（best-effort，绝不影响上传结果）。
+   *
+   * 为什么必须记录：用户账号无源复制需要源 `chat_id + message_id`；
+   * 副本表需要 `file_unique_id`（跨账号稳定）或站内文件 ID 作为逻辑主键。
+   * 任何字段缺失（旧 fork 不回 message_id）都只跳过对应能力，不回滚上传。
+   */
+  async registerPrimaryTelegramSource(
+    file: File,
+    uploaded: {
+      file_id: string;
+      chat_id?: string | null;
+      message_id?: string | null;
+      file_unique_id?: string | null;
+    },
+    /**
+     * 实际产生该 `file_id` 的账号。
+     *
+     * 池化上传后必须传入真实的池内账号，否则会把「别的账号的 file_id」记成默认 Bot 的归属，
+     * 后续回源/镜像/副本扩散全部取错账号（跨账号 502）。
+     * 缺省（单账号链路）保持原行为：默认 Bot 的 token 前缀。
+     */
+    sourceAccountId?: string | null,
+  ): Promise<void> {
+    const accountId = (sourceAccountId ?? '').trim() || this.defaultBotAccountId();
+    try {
+      await this.fileRepository.update({ id: file.id }, {
+        telegramChatId: uploaded.chat_id ?? null,
+        telegramMessageId: uploaded.message_id ?? null,
+        telegramFileUniqueId: uploaded.file_unique_id ?? null,
+        telegramSourceAccountId: accountId,
+      });
+
+      if (this.fileCopies && uploaded.chat_id && uploaded.message_id) {
+        await this.fileCopies.upsertReady({
+          ownerType: 'file',
+          ownerId: file.id,
+          // 副本行账号取值统一走 copyAccountIdOf：与覆盖失效的 exceptAccountId 同一口径，
+          // 避免「删了刚写的主副本行 / 漏删旧行」两类不一致
+          accountId: this.copyAccountIdOf(sourceAccountId),
+          telegramFileId: uploaded.file_id,
+          chatId: uploaded.chat_id,
+          messageId: uploaded.message_id,
+          fileSize: Number(file.size) || null,
+          source: 'inbound',
+        });
+      }
+    } catch (error) {
+      this.logger.warn(
+        `主副本定位信息记录失败（file=${file.id}，不影响上传结果）：${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  /**
+   * 副本行的账号取值口径（唯一实现，主副本登记与覆盖失效共用）。
+   *
+   * 为什么抽出来：覆盖上传失效旧副本时要排除「本次上传账号」——若这里的口径与
+   * `registerPrimaryTelegramSource` 写副本行时不一致，就会误删刚写入的主副本行或
+   * 漏删其它账号的旧行，两边必须严格同源。`'default'` 兜底与既有 upsertReady 调用一致。
+   */
+  private copyAccountIdOf(sourceAccountId?: string | null): string {
+    return (sourceAccountId ?? '').trim() || this.defaultBotAccountId() || 'default';
+  }
+
+  /** Web 上传单账号链路的产生账号（默认 Bot 的 token 前缀） */
+  private defaultBotAccountId(): string | null {
+    // 防御式读取：部分单测以 `Object.create(FileService.prototype)` 构造，不装配 ConfigService；
+    // 该路径是「单账号兜底」的归属判定，缺配置时返回 null（归属未知）而不是抛错。
+    const raw = this.configService ? this.configService.get<string>('TELEGRAM_BOT_TOKEN') : undefined;
+    const token = (raw || '').trim();
+    const prefix = token.split(':')[0];
+    return prefix && token.includes(':') ? prefix : null;
+  }
+
+  /**
+   * 主文件远端提交成功后触发镜像（fire-and-forget）。
+   *
+   * 时机契约：站内状态已提交后调用；镜像失败**不回滚**主上传，
+   * 主文件可用性与备份状态在后台分开展示。
+   */
+  async triggerMirrorForFile(
+    file: File,
+    uploaded: { chat_id?: string | null; message_id?: string | null },
+    /**
+     * 实际产生该 `file_id` 的账号（池化上传必须传入真实账号）。
+     *
+     * 镜像任务优先用 `task.sourceAccountId` 锚定取源：写错会把「别人的 file_id」
+     * 交给默认 Bot 去取，得到上游 502 或不可校验的备份。
+     */
+    sourceAccountId?: string | null,
+  ): Promise<void> {
+    if (!this.mirrorTrigger) return;
+    try {
+      await this.mirrorTrigger.onFileCommitted(
+        {
+          ownerType: 'file',
+          ownerId: file.id,
+          sourceVersion: Number(file.uploadVersion) || 1,
+          sourceAccountId: (sourceAccountId ?? '').trim() || this.defaultBotAccountId(),
+          sourceChatId: uploaded.chat_id ?? null,
+          sourceMessageId: uploaded.message_id ?? null,
+        },
+        'web_upload',
+      );
+    } catch (error) {
+      this.logger.warn(
+        `镜像触发失败（file=${file.id}，不影响上传结果）：${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   async onModuleInit() {
@@ -224,11 +559,18 @@ export class FileService implements OnModuleInit {
   ): Promise<File> {
     const expectFolderId = target.folderId ?? null;
     let oldTelegramFileId: string | null = null;
+    // 覆盖上传递增 uploadVersion：镜像任务幂等键 = (ruleId, ownerType, ownerId, sourceVersion)，
+    // sourceVersion 取 File.uploadVersion——不递增会让覆盖后的新内容撞旧任务的幂等键、
+    // 不产生新镜像任务，镜像群与下载长期停在旧内容上（与 uploadToTelegram 覆盖分支注释
+    // 「覆盖上传递增 uploadVersion」对齐）。与 createProcessingFile 的 G2-05 修复同款：
+    // 读-改-写必须在事务 + 悲观行锁内原子执行，防止并发覆盖各自基于旧版本递增导致版本丢失。
+    // 事务内计算、事务外用于返回值回填（校验失败时函数已抛出，不会用到该值）。
+    let nextVersion = 0;
 
     await this.fileRepository.manager.transaction(async (manager) => {
       const locked = await manager.getRepository(File).findOne({
         where: { id: target.id },
-        lock: { mode: 'pessimistic_write' },
+        ...databasePessimisticWriteLock(),
       });
       if (!locked || locked.isDeleted) {
         throw new NotFoundException('覆盖目标文件不存在或已被删除');
@@ -242,6 +584,7 @@ export class FileService implements OnModuleInit {
       if (locked.status === 'processing') {
         throw new BadRequestException('覆盖目标文件正在处理中，请稍后重试');
       }
+      nextVersion = (locked.uploadVersion || 1) + 1;
       oldTelegramFileId = locked.telegramFileId;
       await manager.getRepository(File).update(target.id, {
         filename: params.filename,
@@ -251,6 +594,7 @@ export class FileService implements OnModuleInit {
         telegramFileId: params.telegramFileId,
         telegramFilePath: params.telegramFilePath,
         thumbnailPath: null,
+        uploadVersion: nextVersion,
       } as any);
       // N1：覆盖会改 originalName，名称表必须同步更新——否则旧名残留占用
       // （此后同名新建被误 409）且新名不受唯一保护。新名撞其他活跃实体时整体回滚。
@@ -290,6 +634,9 @@ export class FileService implements OnModuleInit {
       telegramFileId: params.telegramFileId,
       telegramFilePath: params.telegramFilePath,
       thumbnailPath: null,
+      // 返回值必须同步新版本：调用方（registerPrimaryTelegramSource / 镜像触发）
+      // 直接读它作为 sourceVersion，否则新内容仍按旧版本登记
+      uploadVersion: nextVersion,
     });
   }
 
@@ -410,13 +757,24 @@ export class FileService implements OnModuleInit {
           // 完全失效，避免覆盖上传期间旧缓存与新元数据错配。
           await this.fileCacheService.invalidate(target.id);
           await this.thumbnailService.deleteThumbnailsForFileId(target.id);
+          // 覆盖上传：其它账号指向旧内容的副本行必须整体作废（副本行没有版本维度，
+          // 旧行会被 listReady 选中并回源，表现为「覆盖后下载到旧内容」）。
+          // 这里**不带 except**：此刻还不知道将来由哪个账号上传，新主副本行由后续
+          // Worker 的 registerPrimaryTelegramSource 重新写入。失败只告警，不影响上传。
+          try {
+            await this.fileCopies?.invalidateByOwner('file', target.id);
+          } catch (error) {
+            this.logger.warn(
+              `覆盖上传旧副本失效失败（file=${target.id}，不影响上传结果）：${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
           // G2-05 修复：uploadVersion+1 是读-改-写，必须放入事务 + 悲观行锁原子执行，
           // 防止并发覆盖时两个事务各自基于旧版本递增导致版本丢失、内容不一致。
           const updated = await this.fileRepository.manager.transaction(async (manager) => {
             const repo = manager.getRepository(File);
             const locked = await repo.findOne({
               where: { id: target.id },
-              lock: { mode: 'pessimistic_write' },
+              ...databasePessimisticWriteLock(),
             });
             if (!locked || locked.isDeleted) {
               throw new NotFoundException('覆盖目标文件不存在或已被删除');
@@ -523,25 +881,25 @@ export class FileService implements OnModuleInit {
     return finalFile;
   }
 
-  /** 分片上传在原子交接后调用，普通上传仍由 createProcessingFile 直接触发。 */
+  /**
+   * 分片上传在原子交接后调用，普通上传仍由 createProcessingFile 直接触发。
+   *
+   * 预热只负责把字节写入缓存目录，**不得写任何数据库状态**：状态一律由
+   * `FileUploadProcessor` 收尾统一置位，预热不得抢先置 ready——否则 Worker 收尾的
+   * 条件更新（要求 status IN ('processing','error')）会 0 行命中而跳过来源定位登记
+   * 与镜像触发，且文件会在远端提交前就变为可下载（可能命中无效引用）。
+   */
   startCachePrewarm(file: Pick<File, 'id' | 'uploadVersion'>, sourcePath?: string, expectedSize?: number): Promise<void> {
     if (this.fileCacheService.isNoCacheMode() || !sourcePath || !fs.existsSync(sourcePath)) {
       return Promise.resolve();
     }
     return this.fileCacheService.cacheFileFromPath(file.id, sourcePath, expectedSize ?? 0)
       .then(() => {
-        const criteria: Record<string, unknown> = { id: file.id, status: 'processing' };
-        if (file.uploadVersion) criteria.uploadVersion = file.uploadVersion;
-        return this.fileRepository.update(criteria as any, { status: 'ready', uploadFailureReason: null } as any);
-      })
-      .then((res) => {
-        if (res && res.affected === 0) {
-          this.logger.warn(`缓存就绪条件更新未命中（疑似并发覆盖），跳过置 ready: ${file.id} (v${file.uploadVersion})`);
-        } else {
-          this.logger.log(`文件缓存就绪: ${file.id}`);
-        }
+        // 只记可观测性日志（运维需要知道缓存是否已热）；状态置位一律留给 Worker 收尾。
+        this.logger.log(`文件缓存就绪: ${file.id}`);
       })
       .catch((err: Error) => {
+        // 预热失败不抛错：缓存未热只影响首次下载速度，不应阻断上传链路。
         this.logger.warn(`缓存预热失败 (${file.id}): ${err.message}`);
       });
   }
@@ -618,13 +976,14 @@ export class FileService implements OnModuleInit {
     const uploadName = file.mimetype === 'image/gif' ? originalName + '.bin' : originalName;
 
     const useStream = file.path && fs.existsSync(file.path);
-    const uploadSource = useStream ? createReadStream(file.path) : file.buffer;
-    const telegramFile = await this.telegramService.uploadFile(
-      uploadSource,
-      uploadName,
-      undefined,
-      useStream ? file.size : undefined,
-    );
+    const telegramFile = await this.uploadTelegramObject({
+      filename: uploadName,
+      // 池化路径需要确定长度；磁盘与内存两种 multer 存储都能给出 file.size
+      pooledLength: file.size,
+      openPoolStream: () => (useStream ? createReadStream(file.path) : Readable.from([file.buffer])),
+      openLegacySource: () => (useStream ? createReadStream(file.path) : file.buffer),
+      legacyKnownLength: useStream ? file.size : undefined,
+    });
 
     const newFile = this.fileRepository.create({
       filename: telegramFile.file_id,
@@ -667,6 +1026,10 @@ export class FileService implements OnModuleInit {
       resourceId: savedFile.id,
       metadata: { filename: originalName, size: file.size, mimeType: file.mimetype },
     });
+
+    // 站内状态已提交：记录主副本定位并触发镜像（best-effort，失败不影响上传结果）
+    await this.registerPrimaryTelegramSource(savedFile, telegramFile, telegramFile.accountId);
+    void this.triggerMirrorForFile(savedFile, telegramFile, telegramFile.accountId);
 
     if (file.mimetype.startsWith('video/')) {
       await this.generateAndSaveVideoCover(savedFile, { sourcePath: file.path, sourceBuffer: file.buffer });
@@ -1094,7 +1457,7 @@ export class FileService implements OnModuleInit {
       await this.fileRepository.manager.transaction(async (manager) => {
         const locked = await manager.getRepository(File).findOne({
           where: { id, isDeleted: true },
-          lock: { mode: 'pessimistic_write' },
+          ...databasePessimisticWriteLock(),
         });
         if (!locked) {
           throw new BadRequestException('删除等待期已过，文件已永久删除');
@@ -1197,7 +1560,7 @@ export class FileService implements OnModuleInit {
     await this.fileRepository.manager.transaction(async (manager) => {
       const lockedFile = await manager.getRepository(File).findOne({
         where: { id },
-        lock: { mode: 'pessimistic_write' },
+        ...databasePessimisticWriteLock(),
       });
       if (!lockedFile) {
         throw new NotFoundException('文件不存在');
@@ -1281,7 +1644,7 @@ export class FileService implements OnModuleInit {
           const removed = await this.fileRepository.manager.transaction(async (manager) => {
             const lockedFile = await manager.getRepository(File).findOne({
               where: { id: fileId },
-              lock: { mode: 'pessimistic_write' },
+              ...databasePessimisticWriteLock(),
             });
             if (
               !lockedFile ||
@@ -1632,22 +1995,35 @@ export class FileService implements OnModuleInit {
       // 否则动态跟随全局配置（默认构建缓存路径不带头，容量准备期间翻转进入无缓存早退分支则带头）。
       const forceNoCache = noCache && !this.fileCacheService.isNoCacheMode();
       const fetch = async () => {
-        const result = await this.telegramService.getRealtimeFileStream(
-          file.telegramFileId || file.filename,
-          expectedSize,
-          { noCache: this.fileCacheService.isNoCacheMode() || forceNoCache },
-        );
+        const result = await this.openTelegramSourceStream(file, expectedSize, {
+          noCache: this.fileCacheService.isNoCacheMode() || forceNoCache,
+        });
         recoveredInfo = result.info;
         return result;
       };
 
       if (noCache) {
-        const result = await this.fileCacheService.getNoCacheStream(file.id, expectedSize, fetch);
+        const result = await this.fileCacheService.getNoCacheStream(
+          file.id,
+          expectedSize,
+          fetch,
+          0,
+          expectedSize - 1,
+          file.uploadVersion,
+        );
         this.attachDownloadInvalidHandler(file, result.stream);
         await this.maybeWriteBackRecoveredPath(file, recoveredInfo);
         return { stream: result.stream, actualSize: expectedSize };
       }
-      const result = await this.fileCacheService.getOrCacheStream(file.id, expectedSize, fetch);
+      const result = await this.fileCacheService.getOrCacheStream(
+        file.id,
+        expectedSize,
+        fetch,
+        file.uploadVersion,
+        // 直接下载端点（非任务化）只做有限等待：超时返回结构化 429/503 + Retry-After，
+        // 而不是让浏览器长时间悬挂。前端应先用下载任务 API 观察排队状态。
+        { waitTimeoutMs: this.fileCacheService.directDownloadWaitMs },
+      );
       this.attachDownloadInvalidHandler(file, result.stream);
       await this.maybeWriteBackRecoveredPath(file, recoveredInfo);
       return { stream: result.stream, actualSize: expectedSize };
@@ -1731,6 +2107,7 @@ export class FileService implements OnModuleInit {
     filename: string;
     size: number;
     accessLogId?: string;
+    etag?: string;
   }> {
     const file = await this.fileRepository.findOne({
       where: { id, isDeleted: false },
@@ -1788,14 +2165,12 @@ export class FileService implements OnModuleInit {
   ): Promise<Readable | null> {
     const expectedSize = Number(file.size);
     const forceNoCache = noCache && !this.fileCacheService.isNoCacheMode();
-    const fetchFn = async () => this.telegramService.getRealtimeFileStream(
-      file.telegramFileId || file.filename,
-      expectedSize,
-      { noCache: this.fileCacheService.isNoCacheMode() || forceNoCache },
-    );
+    const fetchFn = async () => this.openTelegramSourceStream(file, expectedSize, {
+      noCache: this.fileCacheService.isNoCacheMode() || forceNoCache,
+    });
     const stream = await this.fileCacheService.getOrCacheRangeStream(
       file.id, expectedSize, start, end, fetchFn,
-      { noCache: forceNoCache },
+      { noCache: forceNoCache, contentVersion: file.uploadVersion },
     );
     if (stream) this.attachDownloadInvalidHandler(file, stream);
     return stream;
@@ -2297,12 +2672,12 @@ export class FileService implements OnModuleInit {
     const { start, end } = parsed.range;
 
     const expectedSize = Number(file.size);
-    const fetchFn = () => this.telegramService.getRealtimeFileStream(
-      file.telegramFileId || file.filename,
-      expectedSize,
-      { noCache: this.fileCacheService.isNoCacheMode() },
-    );
-    const stream = await this.fileCacheService.getOrCacheRangeStream(file.id, expectedSize, start, end, fetchFn);
+    const fetchFn = () => this.openTelegramSourceStream(file, expectedSize, {
+      noCache: this.fileCacheService.isNoCacheMode(),
+    });
+    const stream = await this.fileCacheService.getOrCacheRangeStream(file.id, expectedSize, start, end, fetchFn, {
+      contentVersion: file.uploadVersion,
+    });
     if (!stream) throw new BadRequestException('文件暂不可提供范围预览');
 
     return {
@@ -2598,13 +2973,14 @@ export class FileService implements OnModuleInit {
     // GIF 文件加 .bin 后缀防止 Telegram 转码为 MP4
     const uploadName = file.mimetype === 'image/gif' ? originalName + '.bin' : originalName;
     const useStream = file.path && fs.existsSync(file.path);
-    const uploadSource = useStream ? createReadStream(file.path) : file.buffer;
-    const telegramFile = await this.telegramService.uploadFile(
-      uploadSource,
-      uploadName,
-      abortSignal,
-      useStream ? file.size : undefined,
-    );
+    const telegramFile = await this.uploadTelegramObject({
+      filename: uploadName,
+      pooledLength: file.size,
+      openPoolStream: () => (useStream ? createReadStream(file.path) : Readable.from([file.buffer])),
+      openLegacySource: () => (useStream ? createReadStream(file.path) : file.buffer),
+      legacyKnownLength: useStream ? file.size : undefined,
+      signal: abortSignal,
+    });
 
     // 覆盖分支：TG 上传成功后优先 in-place 覆盖目标记录（保留原 id），目标失效则降级新建
     if (overwriteFileId) {
@@ -2624,6 +3000,21 @@ export class FileService implements OnModuleInit {
         'uploadToTelegram',
       );
       if (overwritten) {
+        // 覆盖上传：其它账号指向旧内容的副本行必须整体作废——副本行没有版本维度，
+        // 旧行会被 listReady 选中并回源，表现为「覆盖后下载到旧内容」。
+        // 保留本次上传账号的行（exceptAccountId，口径与 registerPrimaryTelegramSource
+        // 写副本行时一致），它随后会被 upsertReady 用新 file_id 覆盖，避免无谓的删+插。
+        // 失败只告警：副本清理绝不能阻断上传主流程（残留旧行由 purgeStale 兜底收敛）。
+        try {
+          await this.fileCopies?.invalidateByOwner('file', overwritten.id, this.copyAccountIdOf(telegramFile.accountId));
+        } catch (error) {
+          this.logger.warn(
+            `覆盖上传旧副本失效失败（file=${overwritten.id}，不影响上传结果）：${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+        // 覆盖上传递增 uploadVersion：定位信息按新版本重写，旧镜像任务会自动作废
+        await this.registerPrimaryTelegramSource(overwritten, telegramFile, telegramFile.accountId);
+        void this.triggerMirrorForFile(overwritten, telegramFile, telegramFile.accountId);
         await this.generateUploadedMediaThumbnail(overwritten, file);
         this.cleanupTempFile(file);
         return overwritten;
@@ -2672,6 +3063,10 @@ export class FileService implements OnModuleInit {
       }
       throw error;
     });
+    // 非覆盖新建分支：必须与覆盖分支、同步上传分支保持同一收尾（定位登记 + 镜像触发），
+    // 否则批量上传/分片合并后的文件会「有主文件、无定位、无备份」。
+    await this.registerPrimaryTelegramSource(savedFile, telegramFile, telegramFile.accountId);
+    void this.triggerMirrorForFile(savedFile, telegramFile, telegramFile.accountId);
     await this.generateUploadedMediaThumbnail(savedFile, file);
     this.cleanupTempFile(file);
     return savedFile;
@@ -3022,12 +3417,12 @@ export class FileService implements OnModuleInit {
     // 冷资源（无正式缓存）不支持真实分片：返回 null 交由控制器回退全量预览，
     // 由 getPreviewStream → getOrCacheStream 复用同一缓存构建会话，保证单连接加载；
     // 前端在冷资源阶段钳制 seek，拖动进度条不再触发新的动态分段回源。
-    const fetchFn = () => this.telegramService.getRealtimeFileStream(
-      file.telegramFileId || file.filename,
-      total,
-      { noCache: this.fileCacheService.isNoCacheMode() },
-    );
-    const readStream = await this.fileCacheService.getOrCacheRangeStream(file.id, total, start, actualEnd, fetchFn);
+    const fetchFn = () => this.openTelegramSourceStream(file, total, {
+      noCache: this.fileCacheService.isNoCacheMode(),
+    });
+    const readStream = await this.fileCacheService.getOrCacheRangeStream(file.id, total, start, actualEnd, fetchFn, {
+      contentVersion: file.uploadVersion,
+    });
     if (!readStream) {
       throw new BadRequestException('文件暂不可提供范围预览');
     }
@@ -3103,12 +3498,12 @@ export class FileService implements OnModuleInit {
     const start = parsed.range.start;
     const end = parsed.range.end;
 
-    const fetchFn = () => this.telegramService.getRealtimeFileStream(
-      file.telegramFileId || file.filename,
-      total,
-      { noCache: this.fileCacheService.isNoCacheMode() },
-    );
-    const stream = await this.fileCacheService.getOrCacheRangeStream(file.id, total, start, end, fetchFn);
+    const fetchFn = () => this.openTelegramSourceStream(file, total, {
+      noCache: this.fileCacheService.isNoCacheMode(),
+    });
+    const stream = await this.fileCacheService.getOrCacheRangeStream(file.id, total, start, end, fetchFn, {
+      contentVersion: file.uploadVersion,
+    });
     if (!stream) {
       throw new BadRequestException('文件暂不可提供范围预览');
     }

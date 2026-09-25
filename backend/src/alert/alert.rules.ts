@@ -180,6 +180,131 @@ export async function createAlertRules(configCache: ConfigCacheService): Promise
       cooldownMinutes: 30,
       evaluate: async () => null,
     },
+
+    // ===== Bot 账号池告警（由 TelegramAccountPoolAlertService 按运行状态触发，非流量指标驱动） =====
+    // 这些规则的 evaluate 恒为 null：触发条件依赖账号池运行态（冷却/回退率/复制失败），
+    // 由池模块周期性采集后走 `AlertEngineService.createAlerts()`；此处仅声明级别与冷却。
+    {
+      id: 'BOT_POOL_ALL_UNAVAILABLE',
+      name: 'Bot 账号池全部不可用',
+      level: AlertLevel.CRITICAL,
+      cooldownMinutes: 5,
+      evaluate: async () => null,
+    },
+    {
+      id: 'BOT_POOL_FALLBACK_RATE',
+      name: 'Bot 账号池回退率偏高',
+      level: AlertLevel.WARNING,
+      cooldownMinutes: 15,
+      evaluate: async () => null,
+    },
+    {
+      id: 'BOT_REPLY_FAILING',
+      name: 'Bot 入站回复失败',
+      level: AlertLevel.WARNING,
+      cooldownMinutes: 15,
+      evaluate: async () => null,
+    },
+
+    // ===== 副本扩散（策略 B：用户账号中继）告警 =====
+    // 与账号池同构：evaluate 恒为 null，触发条件由 `TelegramAccountPoolAlertService`
+    // 采集「中继能力快照 / 轮次增量 / 观测降级标记 / 大文件覆盖率」后走 createAlerts 触发；
+    // 此处只声明级别与冷却（冷却值是运维排障节奏的下限，不是可调阈值）。
+    {
+      id: 'RELAY_NOT_READY',
+      name: '用户账号中继未就绪',
+      level: AlertLevel.CRITICAL,
+      cooldownMinutes: 60,
+      evaluate: async () => null,
+    },
+    {
+      id: 'RELAY_FAILURE_BURST',
+      name: '用户账号中继持续失败',
+      level: AlertLevel.WARNING,
+      cooldownMinutes: 15,
+      evaluate: async () => null,
+    },
+    {
+      id: 'RELAY_CLAIM_TIMEOUT_BURST',
+      name: '中继成功但无人认领副本',
+      level: AlertLevel.WARNING,
+      cooldownMinutes: 15,
+      evaluate: async () => null,
+    },
+    {
+      id: 'LARGE_FILE_COVERAGE_DEGRADED',
+      name: '大文件副本覆盖率退化',
+      level: AlertLevel.WARNING,
+      cooldownMinutes: 360,
+      evaluate: async () => null,
+    },
+    {
+      id: 'REPLICATION_OBSERVABILITY_GAP',
+      name: '副本扩散观测数据缺失',
+      level: AlertLevel.WARNING,
+      cooldownMinutes: 120,
+      evaluate: async () => null,
+    },
+
+    // ===== 文件镜像备份告警（由 TelegramMirrorAlertService 按任务状态触发） =====
+    // 与账号池同构：evaluate 恒为 null，触发条件由镜像模块周期采集后走 createAlerts。
+    // 阈值为保守默认值，必须在预发布基线测试后冻结并写入灰度记录。
+    {
+      id: 'MIRROR_FAILURE_STREAK',
+      name: '镜像连续失败',
+      level: AlertLevel.CRITICAL,
+      cooldownMinutes: 15,
+      evaluate: async () => null,
+    },
+    {
+      id: 'MIRROR_SUCCESS_RATE_LOW',
+      name: '镜像备份成功率偏低',
+      level: AlertLevel.WARNING,
+      cooldownMinutes: 30,
+      evaluate: async () => null,
+    },
+    {
+      id: 'MIRROR_USER_SESSION_EXPIRED',
+      name: '镜像用户账号 session 失效',
+      level: AlertLevel.WARNING,
+      cooldownMinutes: 60,
+      evaluate: async () => null,
+    },
+    {
+      id: 'MIRROR_TARGET_PERMISSION_LOST',
+      name: '镜像备份群权限丢失',
+      level: AlertLevel.CRITICAL,
+      cooldownMinutes: 30,
+      evaluate: async () => null,
+    },
+    {
+      id: 'MIRROR_MAIN_CHAT_UNAVAILABLE',
+      name: '镜像主群搬运不可用',
+      level: AlertLevel.CRITICAL,
+      cooldownMinutes: 30,
+      evaluate: async () => null,
+    },
+    {
+      id: 'MIRROR_QUEUE_BACKLOG',
+      name: '镜像任务队列积压',
+      level: AlertLevel.WARNING,
+      cooldownMinutes: 30,
+      evaluate: async () => null,
+    },
+    {
+      id: 'MIRROR_BACKUP_STALLED',
+      name: '主文件成功但备份长期未完成',
+      level: AlertLevel.WARNING,
+      cooldownMinutes: 60,
+      evaluate: async () => null,
+    },
+    {
+      id: 'MIRROR_NO_ENABLED_RULES',
+      name: '镜像已开启但没有启用中的规则',
+      level: AlertLevel.CRITICAL,
+      cooldownMinutes: 120,
+      evaluate: async () => null,
+    },
   ];
 }
 
@@ -198,5 +323,21 @@ export function getAlertRuleMetadata() {
     { id: 'SEC_IP_FLOOD', name: '单IP高频访问', level: AlertLevel.CRITICAL },
     { id: 'SEC_BRUTE_FORCE', name: '登录爆破', level: AlertLevel.CRITICAL },
     { id: 'SEC_ABNORMAL_DOWNLOAD', name: '异常下载', level: AlertLevel.WARNING },
+    { id: 'BOT_POOL_ALL_UNAVAILABLE', name: 'Bot 账号池全部不可用', level: AlertLevel.CRITICAL },
+    { id: 'BOT_POOL_FALLBACK_RATE', name: 'Bot 账号池回退率偏高', level: AlertLevel.WARNING },
+    { id: 'BOT_REPLY_FAILING', name: 'Bot 入站回复失败', level: AlertLevel.WARNING },
+    { id: 'RELAY_NOT_READY', name: '用户账号中继未就绪', level: AlertLevel.CRITICAL },
+    { id: 'RELAY_FAILURE_BURST', name: '用户账号中继持续失败', level: AlertLevel.WARNING },
+    { id: 'RELAY_CLAIM_TIMEOUT_BURST', name: '中继成功但无人认领副本', level: AlertLevel.WARNING },
+    { id: 'LARGE_FILE_COVERAGE_DEGRADED', name: '大文件副本覆盖率退化', level: AlertLevel.WARNING },
+    { id: 'REPLICATION_OBSERVABILITY_GAP', name: '副本扩散观测数据缺失', level: AlertLevel.WARNING },
+    { id: 'MIRROR_FAILURE_STREAK', name: '镜像连续失败', level: AlertLevel.CRITICAL },
+    { id: 'MIRROR_SUCCESS_RATE_LOW', name: '镜像备份成功率偏低', level: AlertLevel.WARNING },
+    { id: 'MIRROR_USER_SESSION_EXPIRED', name: '镜像用户账号 session 失效', level: AlertLevel.WARNING },
+    { id: 'MIRROR_TARGET_PERMISSION_LOST', name: '镜像备份群权限丢失', level: AlertLevel.CRITICAL },
+    { id: 'MIRROR_MAIN_CHAT_UNAVAILABLE', name: '镜像主群搬运不可用', level: AlertLevel.CRITICAL },
+    { id: 'MIRROR_QUEUE_BACKLOG', name: '镜像任务队列积压', level: AlertLevel.WARNING },
+    { id: 'MIRROR_BACKUP_STALLED', name: '主文件成功但备份长期未完成', level: AlertLevel.WARNING },
+    { id: 'MIRROR_NO_ENABLED_RULES', name: '镜像已开启但没有启用中的规则', level: AlertLevel.CRITICAL },
   ];
 }

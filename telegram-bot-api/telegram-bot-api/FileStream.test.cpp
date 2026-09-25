@@ -5,6 +5,7 @@
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 //
 #include "telegram-bot-api/FileStreamCore.h"
+#include "telegram-bot-api/FileStreamRecovery.h"
 
 #include "td/utils/tests.h"
 
@@ -52,6 +53,48 @@ TEST(FileStream, NoCacheHeader) {
   ASSERT_FALSE(telegram_bot_api::parse_file_stream_no_cache("0"));
   ASSERT_FALSE(telegram_bot_api::parse_file_stream_no_cache("false"));
   ASSERT_FALSE(telegram_bot_api::parse_file_stream_no_cache("yes"));
+}
+
+TEST(FileStream, LocalCopyDecision) {
+  using telegram_bot_api::decide_file_stream_local_copy_action;
+  using telegram_bot_api::FileStreamLocalCopyAction;
+  using telegram_bot_api::FileStreamLocalCopyDecisionInput;
+
+  // ASSERT_EQ 需要可比较且可打印的类型，枚举转成 int 断言（值本身固定，见 FileStreamCore.h）
+  const auto none = static_cast<int>(FileStreamLocalCopyAction::none);
+  const auto del = static_cast<int>(FileStreamLocalCopyAction::delete_local_copy);
+  const auto cancel = static_cast<int>(FileStreamLocalCopyAction::cancel_download);
+  const auto skip = static_cast<int>(FileStreamLocalCopyAction::skip_busy);
+
+  const auto decide = [](bool remove_requested, bool completed_ok, bool other_stream_listeners,
+                         bool download_listener_active) {
+    return static_cast<int>(decide_file_stream_local_copy_action(
+        FileStreamLocalCopyDecisionInput{remove_requested, completed_ok, other_stream_listeners,
+                                         download_listener_active}));
+  };
+
+  // No header, untouched local copy: nothing to do once the stream completed normally.
+  ASSERT_EQ(none, decide(false, true, false, false));
+
+  // No header but the stream did not complete: stop the pending download, keep the copy because a
+  // Range retry may still need it.
+  ASSERT_EQ(cancel, decide(false, false, false, false));
+
+  // The core of the no-cache contract: delete only when the stream completed AND nobody else holds
+  // a reference to the local copy.
+  ASSERT_EQ(del, decide(true, true, false, false));
+
+  // An aborted no-cache stream must never delete the copy (it may be resumed).
+  ASSERT_EQ(cancel, decide(true, false, false, false));
+
+  // Another stream still reads the same copy: leave it alone, without counting it as a failure.
+  ASSERT_EQ(none, decide(true, true, true, false));
+  // Other stream listeners take precedence over the concurrent-download case (no spurious skip).
+  ASSERT_EQ(none, decide(true, true, true, true));
+
+  // A concurrent getFile download holds the copy: the deletion must be skipped AND reported
+  // (file_delete_skipped_busy), otherwise workdir usage grows with no explanation.
+  ASSERT_EQ(skip, decide(true, true, false, true));
 }
 
 TEST(FileStream, ResolvesExactSize) {
@@ -113,6 +156,24 @@ TEST(FileStream, CursorChunkBoundaries) {
     }
     ASSERT_EQ(total_size, cursor.next_offset);
   }
+}
+
+TEST(FileStream, LocalFileRecoveryPolicy) {
+  using telegram_bot_api::file_stream_fails_on_stopped_download;
+  using telegram_bot_api::file_stream_waits_for_redownload;
+
+  // TDLib claims the file is downloaded, but its local copy is unusable.
+  ASSERT_TRUE(file_stream_waits_for_redownload(true, false));
+  ASSERT_FALSE(file_stream_waits_for_redownload(true, true));
+  ASSERT_FALSE(file_stream_waits_for_redownload(false, false));
+  ASSERT_FALSE(file_stream_waits_for_redownload(false, true));
+
+  // "Not completed and not downloading": fatal only once data has been streamed, because a cold
+  // file that has not started downloading yet and a re-check of a stale local copy look the same.
+  ASSERT_TRUE(file_stream_fails_on_stopped_download(false, true));
+  ASSERT_FALSE(file_stream_fails_on_stopped_download(false, false));
+  ASSERT_FALSE(file_stream_fails_on_stopped_download(true, false));
+  ASSERT_FALSE(file_stream_fails_on_stopped_download(true, true));
 }
 
 TEST(FileStream, ReassemblesExactBytes) {

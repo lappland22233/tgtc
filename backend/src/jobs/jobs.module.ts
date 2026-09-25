@@ -22,6 +22,8 @@ import { Alert } from '../common/entities/alert.entity';
 import { File } from '../common/entities/file.entity';
 import { AlertModule } from '../alert/alert.module';
 import { FileModule } from '../file/file.module';
+// 账号池上传选号（异步/分片/批量上传的远端写入点）；未启用时行为与原链路一致
+import { TelegramAccountPoolModule } from '../telegram-account-pool/telegram-account-pool.module';
 
 @Module({
   imports: [
@@ -30,6 +32,7 @@ import { FileModule } from '../file/file.module';
     AlertModule,
     SecurityModule,
     FileModule,
+    TelegramAccountPoolModule,
     AdminModule,
   ],
   providers: [

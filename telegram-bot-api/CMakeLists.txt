@@ -66,6 +66,7 @@ set(TELEGRAM_BOT_API_SOURCE
   telegram-bot-api/ClientManager.cpp
   telegram-bot-api/FileStream.cpp
   telegram-bot-api/FileStreamCursor.cpp
+  telegram-bot-api/FileStreamRecovery.cpp
   telegram-bot-api/FileStreamRoute.cpp
   telegram-bot-api/HttpConnection.cpp
   telegram-bot-api/HttpStatConnection.cpp
@@ -80,6 +81,7 @@ set(TELEGRAM_BOT_API_SOURCE
   telegram-bot-api/ClientParameters.h
   telegram-bot-api/FileStream.h
   telegram-bot-api/FileStreamCore.h
+  telegram-bot-api/FileStreamRecovery.h
   telegram-bot-api/HttpConnection.h
   telegram-bot-api/HttpServer.h
   telegram-bot-api/HttpStatConnection.h
@@ -99,6 +101,7 @@ if (BUILD_TESTING)
   add_executable(test-file-stream
     telegram-bot-api/TestMain.cpp
     telegram-bot-api/FileStreamCursor.cpp
+    telegram-bot-api/FileStreamRecovery.cpp
     telegram-bot-api/FileStreamRoute.cpp
     telegram-bot-api/FileStream.test.cpp
   )

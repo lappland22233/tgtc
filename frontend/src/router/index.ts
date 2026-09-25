@@ -142,6 +142,12 @@ const routes: RouteRecordRaw[] = [
         meta: { superAdmin: true },
       },
       {
+        path: 'admin/telegram-accounts',
+        name: 'AdminTelegramAccounts',
+        component: () => import('../views/admin/TelegramAccounts.vue'),
+        meta: { superAdmin: true },
+      },
+      {
         path: 'admin/update',
         name: 'AdminSystemUpdate',
         component: () => import('../views/admin/SystemUpdate.vue'),

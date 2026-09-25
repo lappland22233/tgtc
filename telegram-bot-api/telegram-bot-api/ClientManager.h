@@ -50,6 +50,9 @@ class ClientManager final : public td::Actor {
   void send_file_stream(td::ActorId<FileStreamConnection> stream, td::int64 stream_id, td::string token,
                         bool is_test_dc, td::string file_id, td::int64 expected_size, td::string peer_ip_address);
   void release_file_stream(td::int64 stream_id);
+  // Records that a file stream ended by the first-byte timeout (first_byte_timeout=true) or by the
+  // idle/stall timeout (first_byte_timeout=false) for the /getStats counters.
+  void on_file_stream_timeout(bool first_byte_timeout);
 
   void get_stats(td::Promise<td::BufferSlice> promise, td::vector<std::pair<td::string, td::string>> args);
 

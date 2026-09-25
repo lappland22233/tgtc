@@ -27,6 +27,10 @@ import { HealthModule } from './health/health.module';
 import { VersionModule } from './version/version.module';
 import { UpdateModule } from './update/update.module';
 import { ApiKeyModule } from './api-key/api-key.module';
+import { TelegramBotModule } from './telegram-bot/telegram-bot.module';
+import { TelegramAccountPoolModule } from './telegram-account-pool/telegram-account-pool.module';
+import { TelegramAccountsModule } from './telegram-accounts/telegram-accounts.module';
+import { TelegramMirrorModule } from './telegram-mirror/telegram-mirror.module';
 
 @Module({
   imports: [
@@ -60,6 +64,11 @@ import { ApiKeyModule } from './api-key/api-key.module';
     UpdateModule,
     TelegramModule,
     ApiKeyModule,
+    TelegramBotModule,
+    TelegramAccountPoolModule,
+    // 账号池后台管理（账号 CRUD、凭据加密托管、三层开关）与镜像规则/任务
+    TelegramAccountsModule,
+    TelegramMirrorModule,
   ],
 })
 export class AppModule {}

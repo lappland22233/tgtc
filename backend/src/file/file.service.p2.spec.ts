@@ -192,3 +192,66 @@ describe('G2-12: batchToMarkdown 转义与直链约束', () => {
     expect(results[0]).toBe('![a\\[1\\]\\(x\\).png](https://cdn.example.com/media/f-1)');
   });
 });
+
+/**
+ * Web 下载入口不再携带扩散参数：
+ * 副本扩散已改为「提交即触发」（镜像任务队列：主群 → userbot → 各镜像群），
+ * 下载路径必须**零副作用**——不传期望副本数、不触发任何补副本动作。
+ */
+describe('Web 下载入口：不再携带扩散参数', () => {
+  function wire(overrides: Record<string, unknown> = {}) {
+    const openStream = jest.fn(async (..._args: unknown[]) => ({
+      stream: Readable.from([Buffer.from('x')]),
+      info: { file_id: 'pooled-file-id', file_size: 1 },
+      accountId: 'bot-a',
+      copy: null,
+      selectionReason: 'weighted',
+    }));
+    const service = createService({
+      accountAwareDownload: { isActive: () => true, openStream },
+      fileCopies: { listReady: jest.fn(async () => [{ accountId: 'bot-a', telegramFileId: 'x' }]) },
+      ...overrides,
+    });
+    return { service, openStream };
+  }
+
+  it('回源参数只含定位与缓存控制，不含任何扩散字段', async () => {
+    const { service, openStream } = wire();
+
+    const result = await (service as any).openTelegramSourceStream(
+      { id: 'f-1', originalName: 'a.bin', filename: 'a.bin' } as any,
+      1024,
+    );
+
+    expect(openStream).toHaveBeenCalledWith(expect.objectContaining({
+      ownerType: 'file',
+      ownerId: 'f-1',
+      expectedSize: 1024,
+      fileName: 'a.bin',
+    }));
+    const params = openStream.mock.calls[0][0] as Record<string, unknown>;
+    expect(params).not.toHaveProperty('desiredReplicas');
+    expect(params).not.toHaveProperty('fileName_');
+    expect(result.info.file_id).toBe('pooled-file-id');
+  });
+
+  it('无可用副本时不进入池化路径（保持单账号链路语义）', async () => {
+    const getRealtimeFileStream = jest.fn(async () => ({
+      stream: Readable.from([Buffer.from('y')]),
+      info: { file_id: 'legacy-file-id', file_path: 'p', file_size: 1 },
+    }));
+    const { service, openStream } = wire({
+      fileCopies: { listReady: jest.fn(async () => []) },
+      telegramService: { getRealtimeFileStream },
+    });
+
+    const result = await (service as any).openTelegramSourceStream(
+      { id: 'f-2', originalName: 'a.bin', filename: 'a.bin' } as any,
+      8,
+    );
+
+    expect(openStream).not.toHaveBeenCalled();
+    expect(getRealtimeFileStream).toHaveBeenCalledWith('a.bin', 8, { noCache: false });
+    expect(result.info.file_id).toBe('legacy-file-id');
+  });
+});

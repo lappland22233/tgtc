@@ -9,6 +9,8 @@ export const QUEUE_NAMES = {
   DATA_ARCHIVAL: 'data-archival',
   FILE_UPLOAD: 'file-upload',
   FILE_VERIFY: 'file-verify',
+  // 镜像备份任务（持久化 + 幂等 + 重启恢复；消费者见 telegram-mirror/telegram-mirror.processor.ts）
+  TELEGRAM_MIRROR: 'telegram-mirror',
 } as const;
 
 @Module({
@@ -43,6 +45,7 @@ export const QUEUE_NAMES = {
       { name: QUEUE_NAMES.DATA_ARCHIVAL },
       { name: QUEUE_NAMES.FILE_UPLOAD },
       { name: QUEUE_NAMES.FILE_VERIFY },
+      { name: QUEUE_NAMES.TELEGRAM_MIRROR },
     ),
   ],
   exports: [BullModule],

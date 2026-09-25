@@ -107,6 +107,7 @@ const icons = {
   security: svg('<path d="M10 2L3 5.5v4.5c0 4.5 3 8 7 9.5 4-1.5 7-5 7-9.5V5.5L10 2z"/><path d="M7 10l2 2 4-4"/>'),
   userActivity: svg('<polyline points="2 10 5 10 7 4 10 16 13 8 15 10 18 10"/>'),
   auditLogs: svg('<rect x="4" y="2" width="12" height="16" rx="2"/><line x1="7" y1="7" x2="13" y2="7"/><line x1="7" y1="10" x2="13" y2="10"/><line x1="7" y1="13" x2="10" y2="13"/>'),
+  telegramAccounts: svg('<path d="M18 3L2 9.4l5.8 2.1L10 18l3-4.1L18 3z"/><path d="M7.8 11.5L18 3"/>'),
   systemUpdate: svg('<path d="M10 2L17 6v8l-7 4-7-4V6l7-4z"/><path d="M7 10l2 2 4-4"/><path d="M6 14a6 6 0 008 2"/><path d="M14 6a6 6 0 00-8-2"/>'),
 };
 
@@ -131,6 +132,7 @@ const adminNav: NavItem[] = [
   { to: '/admin/security', label: '安全监控', icon: icons.security, roles: PAGE_ROLES['/admin/security'] },
   { to: '/admin/user-activity', label: '用户活跃', icon: icons.userActivity, roles: PAGE_ROLES['/admin/user-activity'] },
   { to: '/admin/audit-logs', label: '操作审计', icon: icons.auditLogs, roles: PAGE_ROLES['/admin/audit-logs'] },
+  { to: '/admin/telegram-accounts', label: 'Telegram 账号池', icon: icons.telegramAccounts, roles: PAGE_ROLES['/admin/telegram-accounts'] },
   // 系统配置包含仅超级管理员可读取的缓存配置和仅超级管理员可保存的全局配置，
   // 因此按“拥有完整页面权限”原则只向超级管理员展示。
   { to: '/admin/config', label: '系统配置', icon: icons.config, roles: PAGE_ROLES['/admin/config'] },

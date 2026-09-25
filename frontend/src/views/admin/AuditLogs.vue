@@ -48,40 +48,12 @@
         style="width: 200px;"
         @change="onFilterChange"
       >
-        <t-option value="" label="全部操作" />
-        <t-option value="login" label="登录" />
-        <t-option value="login_failed" label="登录失败" />
-        <t-option value="register" label="注册" />
-        <t-option value="email_verification_send" label="发送验证邮件" />
-        <t-option value="password_reset" label="密码重置" />
-        <t-option value="role_change" label="角色变更" />
-        <t-option value="user_create" label="创建用户" />
-        <t-option value="user_delete" label="删除用户" />
-        <t-option value="user_ban" label="封禁用户" />
-        <t-option value="user_unban" label="解封用户" />
-        <t-option value="file_upload" label="文件上传" />
-        <t-option value="file_delete" label="文件删除" />
-        <t-option value="file_delete_request" label="请求删除" />
-        <t-option value="file_delete_by_admin" label="管理员删除" />
-        <t-option value="file_restore" label="文件恢复" />
-        <t-option value="file_share" label="生成分享" />
-        <t-option value="file_password_set" label="设置密码" />
-        <t-option value="file_access_change" label="访问变更" />
-        <t-option value="file_expiry_set" label="有效期设置" />
-        <t-option value="share_link_create" label="创建分享链接" />
-        <t-option value="share_link_update" label="更新分享链接" />
-        <t-option value="share_link_delete" label="取消分享链接" />
-        <t-option value="share_link_access" label="访问分享链接" />
-        <t-option value="share_link_password_failed" label="分享密码错误" />
-        <t-option value="share_link_download" label="分享链接下载" />
-        <t-option value="config_change" label="配置变更" />
-        <t-option value="smtp_config_change" label="SMTP变更" />
-        <t-option value="upload_config_change" label="上传配置" />
-        <t-option value="auth_config_change" label="认证配置" />
-        <t-option value="ip_ban" label="IP封禁" />
-        <t-option value="ip_unban" label="IP解封" />
-        <t-option value="batch_delete_files" label="批量删除" />
-        <t-option value="batch_delete_files_by_admin" label="管理员批量删" />
+        <t-option
+          v-for="opt in actionOptions"
+          :key="opt.value || 'all'"
+          :value="opt.value"
+          :label="opt.label"
+        />
       </t-select>
       <t-input
         v-model="filterUser"
@@ -192,8 +164,123 @@
   </div>
 </template>
 
+<script lang="ts">
+/**
+ * 审计动作 / 资源类型的中文显示名与主题归类。
+ *
+ * 独立于 <script setup> 并导出，供轻量单测直接断言映射完整性而无需挂载组件；
+ * `actionLabels` 同时是「操作类型」筛选下拉的唯一数据源（见下 actionOptions），
+ * 因此新增审计动作只需在此补一处映射，即可同时修好「显示未知」与「筛选不到」。
+ */
+export const actionLabels: Record<string, string> = {
+  login: '登录', login_failed: '登录失败', logout: '登出',   register: '注册', email_verification_send: '发送验证邮件',
+  password_reset: '密码重置', email_verify: '邮箱验证', role_change: '角色变更',
+  user_create: '创建用户', user_delete: '删除用户', user_ban: '封禁用户', user_unban: '解封用户',
+  file_upload: '文件上传', file_download: '文件下载', file_delete: '文件删除',
+  file_delete_request: '请求删除', file_delete_by_admin: '管理员删除', file_force_delete: '强制删除文件',
+  file_restore: '文件恢复',
+  file_share: '生成分享', file_password_set: '设置密码', file_password_remove: '移除密码',
+  file_access_change: '访问变更', file_expiry_set: '有效期设置', file_verify: '文件校验',
+  file_stale_path_cleanup: '清理失效路径', file_move: '移动文件', file_rename: '重命名文件',
+  file_copy: '复制文件', file_overwrite: '覆盖文件', file_overwrite_fallback: '覆盖回退',
+  config_change: '配置变更', smtp_config_change: 'SMTP变更', smtp_test_mail: 'SMTP测试邮件', upload_config_change: '上传配置',
+  auth_config_change: '认证配置', cache_config_change: '缓存配置',
+  download_config_change: '下载调度配置',
+  ip_ban: 'IP封禁', ip_unban: 'IP解封',
+  batch_delete_files: '批量删除', batch_delete_files_by_admin: '管理员批量删',
+  update_check: '版本检查', update_install: '触发系统更新', update_cancel: '取消系统更新',
+  update_succeeded: '系统更新成功', update_failed: '系统更新失败', update_rollback: '系统更新回退', batch_markdown: '批量Markdown',
+  tag_create: '创建标签', tag_update: '更新标签', tag_delete: '删除标签', tag_set_file: '设置文件标签',
+  folder_create: '创建文件夹', folder_rename: '重命名文件夹', folder_move: '移动文件夹',
+  folder_delete: '删除文件夹', folder_delete_by_admin: '管理员删除文件夹', folder_restore: '恢复文件夹',
+  share_link_create: '创建分享链接', share_link_update: '更新分享链接', share_link_delete: '取消分享链接',
+  share_link_access: '访问分享链接', share_link_password_failed: '分享密码错误', share_link_download: '分享链接下载',
+  share_link_preview: '分享预览',
+  api_key_create: '创建API密钥', api_key_revoke: '撤销API密钥', api_key_reveal: '查看API密钥',
+  api_key_allowlist_update: '更新密钥IP白名单', api_key_rotate: '轮换API密钥',
+  data_export: '导出数据',
+  // Telegram Bot 文件直链（v1.3.1 新增审计动作，缺失会显示为“未知操作”）
+  telegram_bot_file_received: 'Bot 收到文件',
+  telegram_bot_link_issued: 'Bot 签发直链',
+  telegram_bot_link_accessed: 'Bot 直链访问',
+  telegram_bot_link_revoked: 'Bot 撤销直链',
+  telegram_bot_link_queried: 'Bot 查询直链',
+  telegram_bot_quota_denied: 'Bot 额度拒绝',
+  telegram_bot_whitelist_add: 'Bot 白名单加入',
+  telegram_bot_whitelist_remove: 'Bot 白名单移除',
+  telegram_bot_command_denied: 'Bot 越权命令',
+  // Telegram 账号池管理 + 文件镜像备份（v1.5.3 新增审计动作，缺失会显示为“未知操作”）
+  telegram_account_created: '账号池创建账号',
+  telegram_account_updated: '账号池更新账号',
+  telegram_account_enabled: '账号池启用账号',
+  telegram_account_disabled: '账号池停用账号',
+  telegram_account_deleted: '账号池删除账号',
+  telegram_account_credential_rotated: '账号池轮换凭据',
+  telegram_account_tested: '账号池连接测试',
+  telegram_account_auth_started: '账号池授权发起',
+  telegram_account_auth_succeeded: '账号池授权成功',
+  telegram_account_auth_failed: '账号池授权失败',
+  telegram_mirror_feature_enabled: '镜像开关开启',
+  telegram_mirror_feature_disabled: '镜像开关关闭',
+  telegram_mirror_config_changed: '镜像规则变更',
+  telegram_mirror_rule_tested: '镜像规则测试',
+  telegram_mirror_task_retried: '镜像任务重试',
+  telegram_mirror_task_cancelled: '镜像任务取消',
+  telegram_mirror_fallback_applied: '镜像降级回退',
+  telegram_mirror_backfill_started: '镜像补偿启动',
+  telegram_mirror_backfill_resumed: '镜像补偿恢复',
+};
+
+/** 资源类型中文名；取值以各模块实际写入的 resourceType 为准（后端 grep 核实）。 */
+const resourceTypeLabels: Record<string, string> = {
+  user: '用户', file: '文件', folder: '文件夹', share_link: '分享链接',
+  tag: '标签', config: '配置', security_config: '安全配置', ip: 'IP', export: '数据导出',
+  api_key: 'API密钥', email: '邮件', update: '系统更新', update_task: '更新任务',
+  ip_ban: 'IP封禁', rate_limit: '限流', system: '系统',
+  bot_config: 'Bot 配置', telegram_bot_grant: 'Bot 直链', telegram_bot_quota: 'Bot 额度',
+  telegram_bot_file: 'Bot 文件', telegram_bot_whitelist: 'Bot 白名单', telegram_bot_command: 'Bot 命令',
+  // v1.5.3 新引入的资源类型
+  telegram_account: '账号池账号', telegram_account_pool: '账号池开关',
+  telegram_mirror_rule: '镜像规则', telegram_mirror_task: '镜像任务',
+  telegram_mirror_feature: '镜像开关', telegram_mirror_backfill: '镜像补偿',
+};
+
+export function actionLabel(action: string): string {
+  return actionLabels[action] || (action ? `未知操作（${action}）` : '未知操作');
+}
+
+export function resourceTypeLabel(type: string): string {
+  return resourceTypeLabels[type] || (type ? `未知资源（${type}）` : '未知资源');
+}
+
+export function actionTheme(action: string): string {
+  // 新增前缀必须先于通用规则显式归类：telegram_account_* / telegram_mirror_*
+  // 否则会被 includes('delete') / includes('file') 等通用规则误判主题。
+  if (action.startsWith('telegram_account_')) {
+    if (action.includes('deleted')) return 'danger';
+    if (action.includes('disabled') || action.includes('failed')) return 'warning';
+    if (action.includes('created') || action.includes('enabled') || action.includes('succeeded')) return 'success';
+    return 'primary';
+  }
+  if (action.startsWith('telegram_mirror_')) {
+    if (action.includes('disabled') || action.includes('cancelled') || action.includes('fallback')) return 'warning';
+    if (action.includes('enabled')) return 'success';
+    return 'primary';
+  }
+  // Bot 动作需先于通用规则判定：telegram_bot_file_* 会被 includes('file') 误判为成功
+  if (action.startsWith('telegram_bot_')) {
+    return action.includes('denied') || action.includes('revoked') ? 'warning' : 'primary';
+  }
+  if (action.includes('login') || action === 'register') return 'primary';
+  if (action.includes('delete') || action.includes('ban')) return 'danger';
+  if (action.includes('config') || action.includes('role') || action.includes('password_failed')) return 'warning';
+  if (action.includes('upload') || action.includes('file') || action.includes('share_link')) return 'success';
+  return 'default';
+}
+</script>
+
 <script setup lang="ts">
-import { ref, reactive, onMounted } from 'vue';
+import { ref, reactive, computed, onMounted } from 'vue';
 import MessagePlugin from '@/utils/message';
 import client from '../../api/client';
 import { useMobile } from '../../composables/useMobile';
@@ -245,33 +332,14 @@ const columns = [
   { colKey: 'createdAt', title: '时间', width: 170 },
 ];
 
-const actionLabels: Record<string, string> = {
-  login: '登录', login_failed: '登录失败', logout: '登出',   register: '注册', email_verification_send: '发送验证邮件',
-  password_reset: '密码重置', email_verify: '邮箱验证', role_change: '角色变更',
-  user_create: '创建用户', user_delete: '删除用户', user_ban: '封禁用户', user_unban: '解封用户',
-  file_upload: '文件上传', file_download: '文件下载', file_delete: '文件删除',
-  file_delete_request: '请求删除', file_delete_by_admin: '管理员删除', file_force_delete: '强制删除文件',
-  file_restore: '文件恢复',
-  file_share: '生成分享', file_password_set: '设置密码', file_password_remove: '移除密码',
-  file_access_change: '访问变更', file_expiry_set: '有效期设置', file_verify: '文件校验',
-  file_stale_path_cleanup: '清理失效路径', file_move: '移动文件', file_rename: '重命名文件',
-  file_copy: '复制文件', file_overwrite: '覆盖文件', file_overwrite_fallback: '覆盖回退',
-  config_change: '配置变更', smtp_config_change: 'SMTP变更', smtp_test_mail: 'SMTP测试邮件', upload_config_change: '上传配置',
-  auth_config_change: '认证配置', cache_config_change: '缓存配置',
-  ip_ban: 'IP封禁', ip_unban: 'IP解封',
-  batch_delete_files: '批量删除', batch_delete_files_by_admin: '管理员批量删',
-  update_check: '版本检查', update_install: '触发系统更新', update_cancel: '取消系统更新',
-  update_succeeded: '系统更新成功', update_failed: '系统更新失败', update_rollback: '系统更新回退', batch_markdown: '批量Markdown',
-  tag_create: '创建标签', tag_update: '更新标签', tag_delete: '删除标签', tag_set_file: '设置文件标签',
-  folder_create: '创建文件夹', folder_rename: '重命名文件夹', folder_move: '移动文件夹',
-  folder_delete: '删除文件夹', folder_delete_by_admin: '管理员删除文件夹', folder_restore: '恢复文件夹',
-  share_link_create: '创建分享链接', share_link_update: '更新分享链接', share_link_delete: '取消分享链接',
-  share_link_access: '访问分享链接', share_link_password_failed: '分享密码错误', share_link_download: '分享链接下载',
-  share_link_preview: '分享预览',
-  api_key_create: '创建API密钥', api_key_revoke: '撤销API密钥', api_key_reveal: '查看API密钥',
-  api_key_allowlist_update: '更新密钥IP白名单',
-  data_export: '导出数据',
-};
+/**
+ * 操作类型筛选项由 actionLabels 派生：新增审计动作只需补一处映射，
+ * 避免下拉选项与标签表脱节，导致新动作无法筛选、只能看到原始英文名。
+ */
+const actionOptions = computed(() => [
+  { value: '', label: '全部操作' },
+  ...Object.entries(actionLabels).map(([value, label]) => ({ value, label })),
+]);
 
 function updateEmailResultLabel(result: string) {
   emailResultLabel.value = result === 'success' ? '当前时间范围内全部成功'
@@ -279,28 +347,6 @@ function updateEmailResultLabel(result: string) {
       : result === 'mixed' ? '当前时间范围内存在失败'
         : result === 'unknown' ? '当前时间范围内存在未知结果'
           : '暂无验证邮件发送记录';
-}
-
-function actionLabel(action: string): string {
-  return actionLabels[action] || (action ? `未知操作（${action}）` : '未知操作');
-}
-
-function actionTheme(action: string): string {
-  if (action.includes('login') || action === 'register') return 'primary';
-  if (action.includes('delete') || action.includes('ban')) return 'danger';
-  if (action.includes('config') || action.includes('role') || action.includes('password_failed')) return 'warning';
-  if (action.includes('upload') || action.includes('file') || action.includes('share_link')) return 'success';
-  return 'default';
-}
-
-function resourceTypeLabel(type: string): string {
-  const map: Record<string, string> = {
-    user: '用户', file: '文件', folder: '文件夹', share_link: '分享链接',
-    tag: '标签', config: '配置', security_config: '安全配置', ip: 'IP', export: '数据导出',
-    api_key: 'API密钥', email: '邮件', update: '系统更新', update_task: '更新任务',
-    ip_ban: 'IP封禁', rate_limit: '限流', system: '系统',
-  };
-  return map[type] || (type ? `未知资源（${type}）` : '未知资源');
 }
 
 function formatMetadata(meta: unknown): string {
