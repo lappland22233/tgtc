@@ -390,6 +390,51 @@ describe('FileCacheService no-cache mode', () => {
     expect(fetchFn).toHaveBeenCalledTimes(1);
   });
 
+  it('同文件并发 spool leader 选举在受限上游槽位下先合流，不让 follower 排队等待资源', async () => {
+    service.maxConcurrentUpstreams = 1;
+    const resources = service.resources;
+    const acquireUpstreamSlot = resources.acquireUpstreamSlot.bind(resources);
+    let enteredResolve!: () => void;
+    let releaseResolve!: () => void;
+    const entered = new Promise<void>((resolve) => { enteredResolve = resolve; });
+    const gate = new Promise<void>((resolve) => { releaseResolve = resolve; });
+    let firstAcquire = true;
+    jest.spyOn(resources, 'acquireUpstreamSlot').mockImplementation(async (options) => {
+      if (firstAcquire) {
+        firstAcquire = false;
+        enteredResolve();
+        await gate;
+      }
+      return acquireUpstreamSlot(options);
+    });
+
+    const upstream = new PassThrough();
+    const fetchFn = jest.fn(async () => ({ stream: upstream, info: { file_size: 6 } }));
+    const firstPromise = service.getOrCacheStream(fileId, 6, fetchFn);
+    await entered;
+    const secondPromise = service.getOrCacheStream(fileId, 6, fetchFn);
+    releaseResolve();
+
+    const first = await firstPromise;
+    const second = await Promise.race([
+      secondPromise,
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('follower 等待了 leader 的上游租约')), 250)),
+    ]);
+    for (let i = 0; i < 400 && fetchFn.mock.calls.length === 0; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect((service as any).activeUpstreams).toBe(1);
+
+    const firstRead = readStream(first.stream);
+    const secondRead = readStream(second.stream);
+    upstream.end(Buffer.from('abcdef'));
+    await expect(Promise.all([firstRead, secondRead])).resolves.toEqual([
+      Buffer.from('abcdef'),
+      Buffer.from('abcdef'),
+    ]);
+  });
+
   it('propagates a spool upstream failure without an unhandled output error', async () => {
     const upstream = new PassThrough();
     const { stream } = await service.getOrCacheStream(fileId, 6, async () => ({
@@ -587,8 +632,11 @@ describe('FileCacheService no-cache mode', () => {
     upstream.end(Buffer.from('data'));
     await expect(contentPromise).resolves.toEqual(Buffer.from('data'));
 
-    // 消费者关闭后 teardown 异步清理 spool
-    await new Promise(resolve => setTimeout(resolve, 30));
+    // 消费者关闭后 teardown 异步清理 spool（Windows 文件句柄释放有调度抖动）
+    const deadline = Date.now() + 1_000;
+    while ((await listCacheDir()).length > 0 && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
     expect(await listCacheDir()).toEqual([]);
     expect(service.getCachedPath(fileId)).toBeNull();
   });

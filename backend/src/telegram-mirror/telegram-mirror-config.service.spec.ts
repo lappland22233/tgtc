@@ -27,7 +27,7 @@ describe('TelegramMirrorConfigService（备份群集合与缓存）', () => {
     const service = new TelegramMirrorConfigService(
       repo as never,
       { count: jest.fn(async () => 0), findOne: jest.fn(async () => null) } as never,
-      {} as never,
+      { list: jest.fn(async () => ({ items: [] })) } as never,
       {} as never,
       {} as never,
       { log: jest.fn() } as never,
@@ -84,6 +84,18 @@ describe('TelegramMirrorConfigService（备份群集合与缓存）', () => {
     const ctx = setup({ find: jest.fn(async () => []) });
 
     await expect(ctx.service.listTargetChatIds()).resolves.toEqual([]);
+  });
+
+  it('新建镜像规则默认覆盖 Bot 私聊入站文件', async () => {
+    const ctx = setup({ find: jest.fn(async () => []) });
+    const created = await ctx.service.create({ sourceChatId: '-100source', targetChatId: '-100target' }, 'admin-1');
+
+    expect(created.includeBotInboundFiles).toBe(true);
+    expect(ctx.repo.save).toHaveBeenCalledWith(expect.objectContaining({
+      includeWebUploads: true,
+      includeBotInboundFiles: true,
+      enabled: false,
+    }));
   });
 });
 

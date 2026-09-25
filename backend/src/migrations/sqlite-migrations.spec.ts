@@ -678,6 +678,38 @@ describe('SQLite schema migrations（隔离内存库）', () => {
     expect(Object.values(integrity[0])).toEqual(['ok']);
   });
 
+  it('180380 将已启用的通用镜像规则加入 Bot 入站事件范围，保留显式关闭与停用规则', async () => {
+    dataSource = new DataSource({ type: 'sqlite', database: ':memory:', entities: [], synchronize: false });
+    await dataSource.initialize();
+    await dataSource.query(`CREATE TABLE "telegram_mirror_rules" (
+      "id" varchar PRIMARY KEY, "enabled" boolean NOT NULL,
+      "includeWebUploads" boolean NOT NULL, "includeBotInboundFiles" boolean NOT NULL,
+      "updatedAt" datetime
+    )`);
+    await dataSource.query(`INSERT INTO "telegram_mirror_rules" ("id", "enabled", "includeWebUploads", "includeBotInboundFiles") VALUES
+      ('enabled-default-off',1,1,0),
+      ('enabled-web-off',1,0,0),
+      ('disabled-default-off',0,1,0),
+      ('enabled-explicit-on',1,1,1)`);
+
+    const { SqliteEnableBotInboundMirrorForEnabledRules1803800000000 } = require('./1803800000000-SqliteEnableBotInboundMirrorForEnabledRules') as typeof import('./1803800000000-SqliteEnableBotInboundMirrorForEnabledRules');
+    const migration = new SqliteEnableBotInboundMirrorForEnabledRules1803800000000();
+    const runner = dataSource.createQueryRunner();
+    await migration.up(runner);
+
+    const rows = await dataSource.query(`SELECT "id", "includeBotInboundFiles" FROM "telegram_mirror_rules" ORDER BY "id"`);
+    expect(rows).toEqual([
+      { id: 'disabled-default-off', includeBotInboundFiles: 0 },
+      { id: 'enabled-default-off', includeBotInboundFiles: 1 },
+      { id: 'enabled-explicit-on', includeBotInboundFiles: 1 },
+      { id: 'enabled-web-off', includeBotInboundFiles: 0 },
+    ]);
+    const updated = await dataSource.query(`SELECT "updatedAt" FROM "telegram_mirror_rules" WHERE "id" = 'enabled-default-off'`);
+    expect(updated[0].updatedAt).not.toBeNull();
+    await migration.up(runner);
+    expect(await dataSource.query('SELECT COUNT(*) AS count FROM "telegram_mirror_rules"')).toHaveLength(1);
+  });
+
   it('存量库升级：180370 为 grants 补 fileUniqueId 列与索引（可重复执行）', async () => {
     // 模拟旧基线库存量库：grants 表还没有内容标识列（历史数据保持 NULL）。
     dataSource = new DataSource({ type: 'sqlite', database: ':memory:', entities: [], synchronize: false });

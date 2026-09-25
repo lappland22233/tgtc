@@ -2188,7 +2188,7 @@ function emptyMirrorForm(): MirrorRuleFormState {
     targetChatId: '',
     preferredAccountId: '',
     includeWebUploads: true,
-    includeBotInboundFiles: false,
+    includeBotInboundFiles: true,
   };
 }
 

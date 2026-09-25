@@ -133,7 +133,8 @@ export class TelegramMirrorTriggerService implements OnModuleInit, OnApplication
    * 管理员手动重试某个归属对象的扩散（后台「扩散轮次」页的重试入口）。
    *
    * 语义：**不产生新的执行路径**，而是把该文件在各镜像群上的扩散重新交给镜像任务队列 ——
-   * - 已有任务且处于终态（succeeded/failed/blocked/cancelled）→ 重置为 queued 并重新入队；
+   * - grant 已有 succeeded 任务 → 保持成功终态并跳过，避免清理回执后向目标群重复转发；
+   * - 其它已有终态（failed/blocked/cancelled）→ 重置为 queued 并重新入队；
    * - 已有任务仍在途（queued/running/retrying）→ 跳过（重复投递没有意义）；
    * - 没有任何任务（改造前的老文件）→ 按当前源事实**补建**任务。
    *
@@ -144,10 +145,11 @@ export class TelegramMirrorTriggerService implements OnModuleInit, OnApplication
     ownerId: string;
     targetChatId?: string | null;
     operatorUserId: string;
-  }): Promise<{ requeued: number; created: number; ruleIds: string[] }> {
+  }): Promise<{ requeued: number; created: number; skippedSucceeded: number; ruleIds: string[] }> {
     const targetChatId = (params.targetChatId ?? '').trim();
     const rules = (await this.config.listEnabledRules())
-      .filter((rule) => !targetChatId || rule.targetChatId === targetChatId);
+      .filter((rule) => (!targetChatId || rule.targetChatId === targetChatId)
+        && (params.ownerType !== 'grant' || rule.includeBotInboundFiles));
     if (rules.length === 0) {
       throw new BadRequestException(
         targetChatId
@@ -158,11 +160,18 @@ export class TelegramMirrorTriggerService implements OnModuleInit, OnApplication
 
     let requeued = 0;
     let created = 0;
+    let skippedSucceeded = 0;
     const ruleIds: string[] = [];
     for (const rule of rules) {
       ruleIds.push(rule.id);
       const existing = await this.tasks.findLatestForOwner(rule.id, params.ownerType, params.ownerId);
       if (existing) {
+        // 补触发 grant 时成功任务是幂等终态：清空 receipt 后重排会再次向目标群转发，
+        // 故成功任务必须保持终态。其它失败/阻塞/取消任务可沿用镜像任务服务的受控重排。
+        if (params.ownerType === 'grant' && existing.status === 'succeeded') {
+          skippedSucceeded += 1;
+          continue;
+        }
         const done = await this.tasks.requeueTerminal(existing, params.operatorUserId);
         if (done) requeued += 1;
         continue;
@@ -187,9 +196,10 @@ export class TelegramMirrorTriggerService implements OnModuleInit, OnApplication
 
     this.logger.log(
       `管理员 ${params.operatorUserId} 手动重试扩散（${params.ownerType}:${params.ownerId}`
-      + `${targetChatId ? ` / 目标镜像群 ${maskIdentifier(targetChatId)}` : ''}）：重置 ${requeued} 条、补建 ${created} 条`,
+      + `${targetChatId ? ` / 目标镜像群 ${maskIdentifier(targetChatId)}` : ''}）：重置 ${requeued} 条、补建 ${created} 条`
+      + `${skippedSucceeded ? `、跳过已成功 ${skippedSucceeded} 条` : ''}`,
     );
-    return { requeued, created, ruleIds };
+    return { requeued, created, skippedSucceeded, ruleIds };
   }
 
   /**

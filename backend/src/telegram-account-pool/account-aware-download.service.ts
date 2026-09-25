@@ -1,16 +1,21 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Readable } from 'stream';
 import { TelegramCopyOwnerType } from '../common/entities/telegram-file-copy.entity';
-import { AccountAwareStreamResult } from './account-aware-stream.types';
+import { AccountAwareDownloadFailure, AccountAwareStreamResult } from './account-aware-stream.types';
 import { AccountAttemptAdmission, AccountAttemptSample, AccountPoolCounterKey } from './telegram-account-pool.types';
 import { TelegramAccountClientService, TelegramAccountError } from './telegram-account-client.service';
 import { TelegramAccountPoolService } from './telegram-account-pool.service';
 import { FileCopyService } from './file-copy.service';
 
-/** 单次下载最多尝试的账号数（失败换号），避免长尾把请求拖死 */
-const MAX_ACCOUNT_ATTEMPTS = 3;
-/** 全部候选都在冷却时的最大等待（超过此值不再等待，交由上层回退判定） */
-const MAX_COOLDOWN_WAIT_MS = 3_000;
+/** 单次下载最多尝试的 ready 副本账号数；副本表正常情况下每逻辑文件最多 8 个账号 */
+const MAX_ACCOUNT_ATTEMPTS = 8;
+/** 账号容量满载时向客户端建议的最小重试间隔 */
+const CAPACITY_RETRY_AFTER_MS = 5_000;
+/** 候选冷却或账号槽位短暂繁忙时的总等待上限 */
+const MAX_CAPACITY_WAIT_MS = 3_000;
+/** 账号槽位释放轮询间隔；只轮询持有该文件副本的账号，不占用上游租约 */
+const CAPACITY_POLL_MS = 250;
+const MAX_CAPACITY_WAIT_ROUNDS = Math.ceil(MAX_CAPACITY_WAIT_MS / CAPACITY_POLL_MS) + 1;
 /**
  * 源账号兜底的**应急配额**等待上限（毫秒）。
  *
@@ -86,28 +91,57 @@ export class AccountAwareDownloadService {
     expectedSize?: number;
     noCache?: boolean;
     fileName?: string;
+    onUnavailable?: (failure: AccountAwareDownloadFailure) => void;
   }): Promise<AccountAwareStreamResult | null> {
-    if (!this.pool.isActive()) return null;
+    if (!this.pool.isActive()) {
+      params.onUnavailable?.({ reason: 'pool_inactive', retryAfterMs: 5_000 });
+      return null;
+    }
 
     const ready = await this.copies.listReady(params.ownerType, params.ownerId);
-    if (ready.length === 0) return null;
+    const readyAccountIds = Array.from(new Set(ready.map((copy) => copy.accountId)));
+    if (readyAccountIds.length === 0) {
+      params.onUnavailable?.({ reason: 'no_ready_copies', retryAfterMs: 5_000, readyAccountCount: 0 });
+      return null;
+    }
 
     const excluded = new Set<string>();
-    // 大文件（>1GiB）回源：选号时即排除「已达每账号大文件槽位」的账号，
-    // 准入再用同一口径复核——两处一致才能既避免无效尝试，又保证不会被并发绕开。
+    let lastFailure: AccountAwareDownloadFailure = { reason: 'all_candidates_busy', retryAfterMs: 5_000 };
+    let attempts = 0;
+    let selectionRounds = 0;
+    let capacityWaitRounds = 0;
+    const capacityDeadline = Date.now() + MAX_CAPACITY_WAIT_MS;
+    // 多副本时覆盖所有可用副本账号（上限 8）；短暂准入竞争不消耗上游尝试次数。
+    const maxAttempts = Math.min(MAX_ACCOUNT_ATTEMPTS, readyAccountIds.length);
+    // 大文件（>1GiB）回源：选号时排除已达槽位的账号，原子准入时再复核。
     const largeFile = isLargeFile(params.expectedSize);
-    for (let attempt = 0; attempt < MAX_ACCOUNT_ATTEMPTS; attempt += 1) {
-      const candidateIds = ready
-        .map((copy) => copy.accountId)
-        .filter((accountId) => !excluded.has(accountId));
-      if (candidateIds.length === 0) break;
+    while (
+      attempts < maxAttempts
+      && selectionRounds < maxAttempts + MAX_CAPACITY_WAIT_ROUNDS + 1
+    ) {
+      selectionRounds += 1;
+      let candidateIds = readyAccountIds.filter((accountId) => !excluded.has(accountId));
+      if (candidateIds.length === 0) {
+        if (capacityWaitRounds > 0 && Date.now() < capacityDeadline) {
+          excluded.clear();
+          candidateIds = readyAccountIds;
+        } else {
+          break;
+        }
+      }
 
       const selection = this.pool.select(candidateIds, Date.now(), { largeFile });
       if (!selection) {
-        // 全部候选都在冷却/满载：等待最短冷却后重试一次，仍不可用则交由上层回退
-        const waitMs = this.shortestCooldownMs(candidateIds);
-        if (waitMs > 0 && waitMs <= MAX_COOLDOWN_WAIT_MS && attempt < MAX_ACCOUNT_ATTEMPTS - 1) {
+        lastFailure = this.describeUnavailableCandidates(candidateIds);
+        const waitMs = this.capacityPollDelay(candidateIds, capacityDeadline, largeFile);
+        if (waitMs > 0 && capacityWaitRounds < MAX_CAPACITY_WAIT_ROUNDS) {
+          capacityWaitRounds += 1;
           await new Promise((resolve) => setTimeout(resolve, waitMs));
+          continue;
+        }
+        // 若上一次等待后候选刚释放槽位，先重跑 select，让账号池重新负载均衡选路。
+        if (capacityWaitRounds > 0 && Date.now() < capacityDeadline) {
+          excluded.clear();
           continue;
         }
         break;
@@ -115,9 +149,13 @@ export class AccountAwareDownloadService {
 
       const account = this.pool.getConfig(selection.accountId);
       const copy = ready.find((item) => item.accountId === selection.accountId);
-      if (!account || !copy) break;
+      if (!account || !copy) {
+        excluded.add(selection.accountId);
+        lastFailure = { reason: 'all_candidates_busy', retryAfterMs: 5_000 };
+        continue;
+      }
 
-      // 原子准入（冷却 + 在飞 + 大文件槽位）；被拒时记可诊断计数并按建议间隔决定是否继续换号
+      attempts += 1;
       const admission = this.pool.admit({
         accountId: account.id,
         role: 'download',
@@ -125,6 +163,22 @@ export class AccountAwareDownloadService {
       });
       if (!admission.granted || !admission.admission) {
         if (admission.reason === 'large_inflight_full') this.pool.bumpCounter('largeFileSlotThrottled');
+        if (admission.reason === 'cooling_down' || admission.reason === 'inflight_full' || admission.reason === 'large_inflight_full') {
+          lastFailure = { reason: 'all_candidates_busy', retryAfterMs: admission.retryAfterMs ?? CAPACITY_RETRY_AFTER_MS };
+          const waitMs = this.capacityPollDelay(candidateIds, capacityDeadline, largeFile, true);
+          if (waitMs > 0 && capacityWaitRounds < MAX_CAPACITY_WAIT_ROUNDS) {
+            attempts -= 1;
+            capacityWaitRounds += 1;
+            await new Promise((resolve) => setTimeout(resolve, waitMs));
+            continue;
+          }
+          if (capacityWaitRounds > 0 && Date.now() < capacityDeadline) {
+            excluded.clear();
+            continue;
+          }
+        } else {
+          lastFailure = { reason: 'all_candidates_busy', retryAfterMs: admission.retryAfterMs ?? CAPACITY_RETRY_AFTER_MS };
+        }
         excluded.add(account.id);
         this.logger.debug(
           `账号 ${account.id} 准入被拒（${admission.reason ?? 'unknown'}），换下一个候选账号`,
@@ -132,7 +186,7 @@ export class AccountAwareDownloadService {
         continue;
       }
 
-      if (attempt > 0) this.pool.bumpCounter('failovers');
+      if (attempts > 1) this.pool.bumpCounter('failovers');
       this.pool.bumpCounter('selections');
 
       try {
@@ -157,10 +211,14 @@ export class AccountAwareDownloadService {
         };
       } catch (error) {
         this.pool.bumpCounter('streamFailures');
-        // 失败样本必须由该次准入归还（禁止同时调用 release，否则在飞额度会被双重扣减，
-        // 让账号看起来比实际空闲——这正是「限流保护被绕过」的一类隐蔽成因）
         this.finishFailed(admission.admission, error);
         excluded.add(account.id);
+        lastFailure = {
+          reason: 'upstream_attempts_failed',
+          retryAfterMs: error instanceof TelegramAccountError && error.retryAfterSeconds
+            ? error.retryAfterSeconds * 1000
+            : 5_000,
+        };
         this.logger.warn(
           `账号 ${account.id} 回源失败（${error instanceof TelegramAccountError ? error.kind : 'other'}），尝试换号：`
           + `${error instanceof Error ? error.message.slice(0, 200) : String(error)}`,
@@ -168,6 +226,11 @@ export class AccountAwareDownloadService {
       }
     }
 
+    params.onUnavailable?.({
+      ...lastFailure,
+      readyAccountCount: readyAccountIds.length,
+      attemptedAccountCount: attempts,
+    });
     return null;
   }
 
@@ -182,12 +245,17 @@ export class AccountAwareDownloadService {
     fileId: string;
     expectedSize?: number;
     noCache?: boolean;
+    onUnavailable?: (failure: AccountAwareDownloadFailure) => void;
   }): Promise<AccountAwareStreamResult | null> {
     const account = this.pool.getConfig(params.accountId);
-    if (!account) return null;
-    // 尊重运维的下线意图：被禁用的账号不再用于回源（fail-closed，宁可返回可诊断失败）。
+    if (!account) {
+      params.onUnavailable?.({ reason: 'source_account_unknown', retryAfterMs: 5_000 });
+      return null;
+    }
+    // 尊重运维的下线意图：被禁用的账号不再用于回源，不误报为归属未知。
     if (!account.enabled) {
-      this.logger.warn(`源账号 ${account.id} 已被禁用，跳过源账号回退（将按归属不明处理）`);
+      this.logger.warn(`源账号 ${account.id} 已被禁用，跳过源账号回退`);
+      params.onUnavailable?.({ reason: 'source_account_disabled', retryAfterMs: 5_000 });
       return null;
     }
 
@@ -210,6 +278,10 @@ export class AccountAwareDownloadService {
           `源账号 ${account.id} 正在限流冷却（剩余 ${Math.round((admission.retryAfterMs ?? 0) / 1000)}s），`
           + '拒绝源账号兜底以免延长冷却',
         );
+        params.onUnavailable?.({
+          reason: 'source_cooling_down',
+          retryAfterMs: Math.max(5_000, admission.retryAfterMs ?? 0),
+        });
         return null;
       }
       if (admission.reason === 'large_inflight_full') this.pool.bumpCounter('largeFileSlotThrottled');
@@ -218,6 +290,10 @@ export class AccountAwareDownloadService {
         this.logger.warn(
           `源账号 ${account.id} 满载（${admission.reason ?? 'unknown'}），等待 ${SOURCE_FALLBACK_WAIT_MS}ms 后仍无法兜底`,
         );
+        params.onUnavailable?.({
+          reason: 'source_capacity_busy',
+          retryAfterMs: Math.max(CAPACITY_RETRY_AFTER_MS, admission.retryAfterMs ?? 0),
+        });
         return null;
       }
       await new Promise((resolve) => setTimeout(resolve, SOURCE_FALLBACK_POLL_MS));
@@ -249,6 +325,12 @@ export class AccountAwareDownloadService {
         `源账号 ${account.id} 回退回源失败：`
         + `${error instanceof Error ? error.message.slice(0, 200) : String(error)}`,
       );
+      params.onUnavailable?.({
+        reason: 'source_stream_failed',
+        retryAfterMs: error instanceof TelegramAccountError && error.retryAfterSeconds
+          ? error.retryAfterSeconds * 1000
+          : CAPACITY_RETRY_AFTER_MS,
+      });
       return null;
     }
   }
@@ -282,10 +364,37 @@ export class AccountAwareDownloadService {
     stream.once('error', settle);
   }
 
-  private shortestCooldownMs(accountIds: string[]): number {
+  private capacityPollDelay(accountIds: string[], deadline: number, largeFile: boolean, forceBusy = false): number {
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) return 0;
     const snapshot = this.pool.snapshot();
-    const relevant = snapshot.accounts.filter((item) => accountIds.includes(item.id) && item.coolingDown);
-    if (relevant.length === 0) return 0;
-    return Math.min(...relevant.map((item) => item.cooldownRemainingMs));
+    const candidates = snapshot.accounts.filter((account) => accountIds.includes(account.id) && account.enabled);
+    if (candidates.length === 0) return 0;
+    const cooling = candidates.filter((account) => account.coolingDown);
+    if (cooling.length === candidates.length) {
+      const earliest = Math.min(...cooling.map((account) => account.cooldownRemainingMs));
+      if (!Number.isFinite(earliest) || earliest <= 0 || earliest > remainingMs) return 0;
+      return earliest;
+    }
+    const hasEligibleSlot = candidates.some((account) => !account.coolingDown
+      && account.inflight < account.maxInflight
+      && (!largeFile || account.largeInflight < account.maxLargeInflight));
+    if (hasEligibleSlot && !forceBusy) return 0;
+    return Math.min(CAPACITY_POLL_MS, remainingMs);
   }
+
+  private describeUnavailableCandidates(accountIds: string[]): AccountAwareDownloadFailure {
+    const relevant = this.pool.snapshot().accounts.filter((item) => accountIds.includes(item.id));
+    const enabled = relevant.filter((item) => item.enabled);
+    const cooling = enabled.filter((item) => item.coolingDown);
+    const retryAfterMs = cooling.length > 0 && cooling.length === enabled.length
+      ? Math.max(CAPACITY_RETRY_AFTER_MS, Math.min(...cooling.map((item) => item.cooldownRemainingMs)))
+      : CAPACITY_RETRY_AFTER_MS;
+    return {
+      reason: 'all_candidates_busy',
+      retryAfterMs,
+      readyAccountCount: accountIds.length,
+    };
+  }
+
 }

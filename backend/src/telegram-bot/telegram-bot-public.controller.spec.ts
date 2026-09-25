@@ -442,6 +442,8 @@ describe('TelegramBotPublicController 账号池回退矩阵（fail-closed）', (
     poolActive?: boolean;
     sourceAccountId?: string | null;
     anchor?: { ownerType: string; ownerId: string } | null;
+    poolFailureReason?: 'all_candidates_busy' | 'upstream_attempts_failed';
+    sourceFailureReason?: 'source_capacity_busy' | 'source_cooling_down';
     openStreamResult?: 'ok' | 'null';
     sourceStreamResult?: 'ok' | 'null';
     anchorThrows?: boolean;
@@ -450,6 +452,7 @@ describe('TelegramBotPublicController 账号池回退矩阵（fail-closed）', (
     desiredReplicas?: number | null;
   } = {}) {
     let capturedError: unknown = null;
+    let capturedRequestId: string | null = null;
     const counters: Record<string, number> = { unresolved: 0, fallbacks: 0 };
 
     const grantService = {
@@ -488,7 +491,10 @@ describe('TelegramBotPublicController 账号池回退矩阵（fail-closed）', (
     const rateLimitService = { checkAndIncrement: jest.fn(async () => ({ allowed: true })) };
     const streamResponder = {
       send: jest.fn(async () => undefined),
-      handleError: jest.fn((_res: Response, error: unknown) => { capturedError = error; }),
+      handleError: jest.fn((_res: Response, error: unknown, _fallbackMessage?: string, _req?: Request, requestId?: string) => {
+        capturedError = error;
+        capturedRequestId = requestId ?? null;
+      }),
     };
     const auditService = { log: jest.fn() };
     const fileCopies = {
@@ -501,12 +507,22 @@ describe('TelegramBotPublicController 账号池回退矩阵（fail-closed）', (
       inactiveReason: jest.fn(() => null),
       hasAccount: jest.fn(() => options.hasSourceAccount ?? true),
       bumpCounter: jest.fn((key: string, delta = 1) => { counters[key] = (counters[key] ?? 0) + delta; }),
-      openStream: jest.fn(async () => (options.openStreamResult === 'ok'
-        ? { stream: makeReadable(), info: { file_id: 'pooled', file_size: TOTAL_SIZE }, accountId: '2222222', copy: null, selectionReason: 'weighted' }
-        : null)),
-      openSourceStream: jest.fn(async () => (options.sourceStreamResult === 'ok'
-        ? { stream: makeReadable(), info: { file_id: 'source', file_size: TOTAL_SIZE }, accountId: '9999999', copy: null, selectionReason: 'source-account-fallback' }
-        : null)),
+      openStream: jest.fn(async (params: { onUnavailable?: (failure: { reason: string; retryAfterMs?: number; readyAccountCount?: number; attemptedAccountCount?: number }) => void }) => {
+        if (options.openStreamResult === 'ok') {
+          return { stream: makeReadable(), info: { file_id: 'pooled', file_size: TOTAL_SIZE }, accountId: '2222222', copy: null, selectionReason: 'weighted' };
+        }
+        if (options.poolFailureReason) {
+          params.onUnavailable?.({ reason: options.poolFailureReason, retryAfterMs: 5_000, readyAccountCount: 1, attemptedAccountCount: 1 });
+        }
+        return null;
+      }),
+      openSourceStream: jest.fn(async (params: { onUnavailable?: (failure: { reason: string; retryAfterMs?: number }) => void }) => {
+        if (options.sourceStreamResult === 'ok') {
+          return { stream: makeReadable(), info: { file_id: 'source', file_size: TOTAL_SIZE }, accountId: '9999999', copy: null, selectionReason: 'source-account-fallback' };
+        }
+        if (options.sourceFailureReason) params.onUnavailable?.({ reason: options.sourceFailureReason, retryAfterMs: 5_000 });
+        return null;
+      }),
     };
     const configService = {
       get: jest.fn((key: string) => {
@@ -535,7 +551,9 @@ describe('TelegramBotPublicController 账号池回退矩阵（fail-closed）', (
       accountPoolDownload,
       fileCopies,
       configService,
+      auditService,
       getCapturedError: () => capturedError,
+      getCapturedRequestId: () => capturedRequestId,
     };
   }
 
@@ -560,12 +578,12 @@ describe('TelegramBotPublicController 账号池回退矩阵（fail-closed）', (
     const ctx = makePoolController({ openStreamResult: 'null', sourceStreamResult: 'ok', sourceAccountId: '9999999' });
     await ctx.controller.download(VALID_TOKEN, makeRequest(), res);
 
-    expect(ctx.accountPoolDownload.openSourceStream).toHaveBeenCalledWith({
+    expect(ctx.accountPoolDownload.openSourceStream).toHaveBeenCalledWith(expect.objectContaining({
       accountId: '9999999',
       fileId: TELEGRAM_FILE_ID,
       expectedSize: TOTAL_SIZE,
       noCache: true,
-    });
+    }));
     expect(ctx.counters.fallbacks).toBe(1);
     expect(ctx.telegramService.getRealtimeFileStream).not.toHaveBeenCalled();
     expect(ctx.getCapturedError()).toBeNull();
@@ -589,6 +607,31 @@ describe('TelegramBotPublicController 账号池回退矩阵（fail-closed）', (
     const error = ctx.getCapturedError();
     expect(error).toBeInstanceOf(HttpException);
     expect((error as HttpException).getStatus()).toBe(503);
+  });
+
+  it('来源已知但大文件槽位满：不再错误计为 unresolved，并返回限流业务码和退避时间', async () => {
+    const ctx = makePoolController({
+      openStreamResult: 'null',
+      sourceStreamResult: 'null',
+      sourceAccountId: '9999999',
+      poolFailureReason: 'all_candidates_busy',
+      sourceFailureReason: 'source_capacity_busy',
+    });
+    await ctx.controller.download(VALID_TOKEN, makeRequest(), res);
+
+    expect(ctx.counters.unresolved).toBe(0);
+    expect(ctx.telegramService.getRealtimeFileStream).not.toHaveBeenCalled();
+    const error = ctx.getCapturedError() as HttpException;
+    expect(error.getStatus()).toBe(503);
+    expect(ctx.getCapturedRequestId()).toMatch(/^[0-9a-f-]{36}$/);
+    expect(ctx.auditService.log).toHaveBeenCalledWith(expect.objectContaining({
+      metadata: expect.objectContaining({ requestId: ctx.getCapturedRequestId() }),
+    }));
+    expect(error.getResponse()).toMatchObject({
+      errorCode: 'DOWNLOAD_ACCOUNT_POOL_BUSY',
+      retryAfterMs: 5_000,
+      message: expect.stringContaining('繁忙'),
+    });
   });
 
   it('源账号不在池内且与默认账号不一致：同样拒绝回退默认账号', async () => {

@@ -83,6 +83,8 @@ describe('真实 SQLite 数据源关键业务与并发 QA', () => {
       'SqliteCreateTelegramMainChatAnchors1803600000000',
       // 副本扩散改造：grant 内容标识（群内认领归因回 grant，修正轮次结算）
       'SqliteAddGrantFileUniqueId1803700000000',
+      // 启用的通用镜像规则默认覆盖 Bot 入站文件，避免大文件长期只有来源账号单份副本
+      'SqliteEnableBotInboundMirrorForEnabledRules1803800000000',
     ]);
 
     await dataSource.undoLastMigration();

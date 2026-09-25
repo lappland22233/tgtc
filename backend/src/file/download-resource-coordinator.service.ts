@@ -148,6 +148,10 @@ export const DOWNLOAD_ERROR_CODES = {
   QUEUE_CANCELLED: 'DOWNLOAD_QUEUE_CANCELLED',
   /** 上游并发或服务器综合负载过高 */
   SERVER_BUSY: 'DOWNLOAD_SERVER_BUSY',
+  /** Telegram file_id 来源账号未知或不再可用；禁止跨账号猜测 */
+  SOURCE_ACCOUNT_UNAVAILABLE: 'DOWNLOAD_SOURCE_ACCOUNT_UNAVAILABLE',
+  /** 来源账号已知，但当前账号池回源容量暂满 */
+  ACCOUNT_POOL_BUSY: 'DOWNLOAD_ACCOUNT_POOL_BUSY',
   /** 磁盘空间探测失败 */
   STORAGE_PROBE_UNAVAILABLE: 'DOWNLOAD_STORAGE_PROBE_UNAVAILABLE',
   /** 结构上无法满足（完整暂存不可行 / 单文件超过缓存上限），调用方应降级直通 */

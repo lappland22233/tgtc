@@ -21,6 +21,7 @@ function setup(options: {
   readyAccounts?: string[];
   failAccounts?: string[];
   coolingDownAccounts?: string[];
+  busyOnceAccounts?: string[];
   openStreamReturnsNull?: boolean;
   ensureCopies?: jest.Mock;
 } = {}) {
@@ -41,8 +42,10 @@ function setup(options: {
     fallbackThrottled: 0,
     largeFileSlotThrottled: 0,
   };
-  const available = new Set(['a1', 'a2', 'a3']);
+  const available = new Set(['a1', 'a2', 'a3', ...(options.readyAccounts ?? [])]);
   const failAccounts = new Set(options.failAccounts ?? []);
+  const busyOnceAccounts = new Set(options.busyOnceAccounts ?? []);
+  const busySnapshotAccounts = new Set(options.busyOnceAccounts ?? []);
 
   /** 在飞计数（让准入与释放能被断言） */
   const inflight = new Map<string, number>();
@@ -65,6 +68,11 @@ function setup(options: {
       if (!available.has(request.accountId)) return { granted: false, reason: 'unknown_account' as const };
       if ((options.coolingDownAccounts ?? []).includes(request.accountId)) {
         return { granted: false, reason: 'cooling_down' as const, retryAfterMs: 1_000 };
+      }
+      if (busyOnceAccounts.has(request.accountId)) {
+        busyOnceAccounts.delete(request.accountId);
+        busySnapshotAccounts.delete(request.accountId);
+        return { granted: false, reason: 'large_inflight_full' as const, retryAfterMs: 500 };
       }
       const current = inflight.get(request.accountId) ?? 0;
       inflight.set(request.accountId, current + 1);
@@ -93,7 +101,16 @@ function setup(options: {
       enabled: true,
       inactiveReason: null,
       counters: { ...counters },
-      accounts: [],
+      accounts: Array.from(available).map((id) => ({
+        id,
+        enabled: true,
+        coolingDown: (options.coolingDownAccounts ?? []).includes(id),
+        cooldownRemainingMs: 1_000,
+        inflight: inflight.get(id) ?? 0,
+        maxInflight: 8,
+        largeInflight: busySnapshotAccounts.has(id) ? 1 : 0,
+        maxLargeInflight: 1,
+      })),
     })),
     bumpCounter: jest.fn((key: string, delta = 1) => { counters[key] += delta; }),
   };
@@ -166,24 +183,44 @@ describe('AccountAwareDownloadService（选号 / 换号 / 非阻断懒扩散）'
     }));
   });
 
-  it('全部候选失败时返回 null（换号次数受限，不无限放大上游请求）', async () => {
-    const ctx = setup({ readyAccounts: ['a1', 'a2', 'a3'], failAccounts: ['a1', 'a2', 'a3'] });
+  it('三个账号回源失败后继续尝试第四个 ready 副本', async () => {
+    const ctx = setup({ readyAccounts: ['a1', 'a2', 'a3', 'a4'], failAccounts: ['a1', 'a2', 'a3'] });
     const result = await ctx.service.openStream({ ownerType: 'fileUnique', ownerId: 'u1' });
 
-    expect(result).toBeNull();
-    // 最多尝试 3 个账号：成功选号 3 次、换号 2 次、流式失败 3 次
-    expect(ctx.client.openRealtimeStream).toHaveBeenCalledTimes(3);
-    expect(ctx.counters.selections).toBe(3);
-    expect(ctx.counters.failovers).toBe(2);
+    expect(result?.accountId).toBe('a4');
+    expect(ctx.client.openRealtimeStream).toHaveBeenCalledTimes(4);
+    expect(ctx.counters.selections).toBe(4);
+    expect(ctx.counters.failovers).toBe(3);
     expect(ctx.counters.streamFailures).toBe(3);
   });
 
-  it('全部候选都不可调度（冷却/满载）时不等待过久，直接返回 null 交给回退矩阵', async () => {
-    const ctx = setup({ readyAccounts: ['a1'], openStreamReturnsNull: true });
-    const result = await ctx.service.openStream({ ownerType: 'fileUnique', ownerId: 'u1' });
+  it('全部 ready 候选失败时返回可诊断摘要', async () => {
+    const ctx = setup({ readyAccounts: ['a1', 'a2', 'a3'], failAccounts: ['a1', 'a2', 'a3'] });
+    const onUnavailable = jest.fn();
+    const result = await ctx.service.openStream({ ownerType: 'fileUnique', ownerId: 'u1', onUnavailable });
 
     expect(result).toBeNull();
-    expect(ctx.client.openRealtimeStream).not.toHaveBeenCalled();
+    expect(ctx.client.openRealtimeStream).toHaveBeenCalledTimes(3);
+    expect(onUnavailable).toHaveBeenCalledWith(expect.objectContaining({
+      reason: 'upstream_attempts_failed',
+      readyAccountCount: 3,
+      attemptedAccountCount: 3,
+    }));
+  });
+
+  it('唯一 ready 副本短暂大文件满载时等待槽位释放后回源，不立即 503', async () => {
+    const ctx = setup({ readyAccounts: ['a1'], busyOnceAccounts: ['a1'] });
+    const onUnavailable = jest.fn();
+    const result = await ctx.service.openStream({
+      ownerType: 'fileUnique',
+      ownerId: 'u1',
+      expectedSize: 2 * 1024 ** 3,
+      onUnavailable,
+    });
+
+    expect(result?.accountId).toBe('a1');
+    expect(ctx.client.openRealtimeStream).toHaveBeenCalledTimes(1);
+    expect(onUnavailable).not.toHaveBeenCalled();
   });
 
   it('下载路径不产生任何扩散副作用（扩散改为提交即触发）', async () => {

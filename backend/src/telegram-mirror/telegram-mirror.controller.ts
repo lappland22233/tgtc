@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Delete, Get, Param, Post, Put, Query, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, Param, ParseUUIDPipe, Post, Put, Query, UseGuards } from '@nestjs/common';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -13,6 +13,7 @@ import { SetFeatureSwitchDto } from '../telegram-accounts/telegram-account.dto';
 import { TelegramMirrorConfigService } from './telegram-mirror-config.service';
 import { TelegramMirrorTaskService } from './telegram-mirror-task.service';
 import { TelegramMirrorMetricsService } from './telegram-mirror-metrics.service';
+import { TelegramMirrorTriggerService } from './telegram-mirror-trigger.service';
 import { MirrorTaskListItem } from './telegram-mirror.types';
 
 /**
@@ -32,6 +33,7 @@ export class TelegramMirrorController {
     private readonly accounts: TelegramAccountsService,
     private readonly backfill: TelegramMirrorBackfillService,
     private readonly audit: AuditService,
+    private readonly trigger: TelegramMirrorTriggerService,
   ) {}
 
   /** 镜像配置总览：规则列表、任务概览、指标与前置检查 */
@@ -174,6 +176,32 @@ export class TelegramMirrorController {
   @Roles(UserRole.SUPER_ADMIN)
   async testRule(@CurrentUser() user: User, @Param('id') id: string) {
     return this.config.testRule(id, user.id);
+  }
+
+  /**
+   * 对指定 Bot 直链 grant 补触发镜像任务。
+   * 用途：规则此前关闭 Bot 入站、grant 已存在但未建任务；由管理员在部署/规则修复后
+   * 对受控 canary grant 调用，不批量扫描或重放全部历史私聊文件。
+   */
+  @Post('grants/:id/retry')
+  @Roles(UserRole.SUPER_ADMIN)
+  async retryGrant(@CurrentUser() user: User, @Param('id', new ParseUUIDPipe()) id: string) {
+    const result = await this.trigger.retryForOwner({
+      ownerType: 'grant',
+      ownerId: id,
+      operatorUserId: user.id,
+    });
+    this.audit.log({
+      action: 'telegram_mirror_task_retried',
+      userId: user.id,
+      resourceType: 'telegram_bot_grant',
+      resourceId: id,
+      metadata: result,
+    });
+    return {
+      message: `Bot 直链扩散任务处理完成（补建 ${result.created}，重排 ${result.requeued}，跳过已成功 ${result.skippedSucceeded}）`,
+      ...result,
+    };
   }
 
   /** 任务列表（按状态/模式/文件/账号筛选） */

@@ -82,7 +82,7 @@ export class StreamResponderService {
    * - 头部已发送：无法再改状态码，中断连接让客户端感知截断。
    * - 5xx：生成 requestId 记录服务端日志（URL 脱敏），并回传 X-Request-Id。
    */
-  handleError(res: Response, error: unknown, fallbackMessage: string, req?: Request): void {
+  handleError(res: Response, error: unknown, fallbackMessage: string, req?: Request, requestId?: string): void {
     const status = (error as { status?: number }).status || 500;
     const isServerError = status >= 500;
     // 服务端日志用原始错误信息（不脱敏内部细节，仅供排查）
@@ -113,14 +113,14 @@ export class StreamResponderService {
         ...(structured?.retryAfterMs !== undefined ? { retryAfterMs: structured.retryAfterMs } : {}),
       };
       if (isServerError) {
-        const requestId = randomUUID();
+        const resolvedRequestId = requestId || randomUUID();
         const safeUrl = sanitizeUrlForLog((req?.originalUrl || req?.url || '/').split('#')[0]);
         this.logger.error(
-          `HTTP ${status} [requestId=${requestId}] ${req?.method ?? ''} ${safeUrl}: ${detailMessage}`,
+          `HTTP ${status} [requestId=${resolvedRequestId}] ${req?.method ?? ''} ${safeUrl}: ${detailMessage}`,
           error instanceof Error ? error.stack : undefined,
         );
-        res.setHeader('X-Request-Id', requestId);
-        payload.requestId = requestId;
+        res.setHeader('X-Request-Id', resolvedRequestId);
+        payload.requestId = resolvedRequestId;
       }
       res.status(status).json(payload);
     } else if (!res.destroyed) {

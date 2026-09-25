@@ -260,7 +260,7 @@ export class TelegramMirrorConfigService {
       targetChatId: '',
       preferredAccountId: null,
       includeWebUploads: true,
-      includeBotInboundFiles: false,
+      includeBotInboundFiles: true,
       lastTestStatus: 'untested',
     });
     return this.applyAndSave(next, input, actorId, false);

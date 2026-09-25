@@ -71,7 +71,7 @@ export class TelegramMirrorRule {
   @Column({ type: 'boolean', default: true, comment: '是否镜像普通 Web 新上传' })
   includeWebUploads: boolean;
 
-  @Column({ type: 'boolean', default: false, comment: '是否镜像 Bot 私聊入站文件' })
+  @Column({ type: 'boolean', default: true, comment: '是否镜像 Bot 私聊入站文件' })
   includeBotInboundFiles: boolean;
 
   @Column({ type: databaseColumnType('timestamptz') as 'timestamptz', nullable: true, comment: '最近一次权限测试时间' })

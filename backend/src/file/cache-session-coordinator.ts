@@ -715,27 +715,34 @@ export class CacheSessionCoordinator {
     if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end < start || end >= expectedSize) {
       throw new Error(`非法的 Range: ${start}-${end}`);
     }
-    const existing = this.spoolSessions.get(fileId);
-    if (
-      existing
-      && existing.expectedSize === expectedSize
-      && this.sameContentVersion(existing, contentVersion)
-    ) {
-      return { stream: this.createSpoolFollowerStream(existing, start, end), fromCache: false };
-    }
-    // leader：先申请磁盘预约与上游租约（等待期间不写盘、不占用 Telegram 连接）
-    const lease = await this.acquireSessionResources(fileId, expectedSize, {
-      countsTowardCache: false,
-      contentVersion,
-      waitTimeoutMs: options?.waitTimeoutMs,
+
+    // 必须在资源预约前串行化 spool leader 选举。此前并发消费者都可能先看见
+    // 「没有 session」，然后各自排队申请完整磁盘与上游租约；队列满/等待超时会在
+    // 后到者来得及复查 spoolSessions 之前直接失败。leader 持锁只到 session 建立，
+    // 后续消费者因此能立刻成为 follower，不会重复占用一个 4GB 上游名额。
+    return this.withSessionLock(`spool:${fileId}`, async () => {
+      const existing = this.spoolSessions.get(fileId);
+      if (
+        existing
+        && existing.expectedSize === expectedSize
+        && this.sameContentVersion(existing, contentVersion)
+      ) {
+        return { stream: this.createSpoolFollowerStream(existing, start, end), fromCache: false };
+      }
+
+      const lease = await this.acquireSessionResources(fileId, expectedSize, {
+        countsTowardCache: false,
+        contentVersion,
+        waitTimeoutMs: options?.waitTimeoutMs,
+      });
+      try {
+        const session = await this.getOrCreateSpoolSession(fileId, expectedSize, fetchFn, lease, contentVersion);
+        return { stream: this.createSpoolFollowerStream(session, start, end), fromCache: false };
+      } catch (error) {
+        lease.release();
+        throw error;
+      }
     });
-    try {
-      const session = await this.getOrCreateSpoolSession(fileId, expectedSize, fetchFn, lease, contentVersion);
-      return { stream: this.createSpoolFollowerStream(session, start, end), fromCache: false };
-    } catch (error) {
-      lease.release();
-      throw error;
-    }
   }
 
   /** 创建 spool 会话；若等待期间已有其他请求建立同文件会话则释放本次资源并复用。 */
