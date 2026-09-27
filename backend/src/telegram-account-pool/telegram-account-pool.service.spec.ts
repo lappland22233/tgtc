@@ -29,6 +29,15 @@ describe('TelegramAccountPoolService（选号 / 冷却 / 快照）', () => {
     expect(pool.inactiveReason()).toContain('未解析到任何账号');
   });
 
+  it('未显式指定时每个 Bot 的 maxInflight 默认 16，且与权重预算常量分离', () => {
+    const pool = makePool({
+      TELEGRAM_ACCOUNT_POOL_ENABLED: 'true',
+      TELEGRAM_ACCOUNT_POOL: JSON.stringify([{ id: 'default', token: TOKEN_A, chatId: '-1001' }]),
+    });
+
+    expect(pool.getConfig('default')?.maxInflight).toBe(16);
+  });
+
   it('解析 TELEGRAM_ACCOUNT_POOL JSON（含权重/在飞上限）并启用', () => {
     const pool = makePool({
       TELEGRAM_ACCOUNT_POOL_ENABLED: 'true',
@@ -41,8 +50,8 @@ describe('TelegramAccountPoolService（选号 / 冷却 / 快照）', () => {
     expect(pool.isActive()).toBe(true);
     expect(pool.ids()).toEqual(['bot1', 'bot2']);
     expect(pool.getConfig('bot1')).toMatchObject({ weight: 3, maxInflight: 2, chatId: '-1001' });
-    // 默认值：weight=1、maxInflight=8
-    expect(pool.getConfig('bot2')).toMatchObject({ weight: 1, maxInflight: 8 });
+    // 默认值：weight=1、maxInflight=16
+    expect(pool.getConfig('bot2')).toMatchObject({ weight: 1, maxInflight: 16 });
   });
 
   it('简化输入只复用 TELEGRAM_CHAT_ID，归档群不得充当存储 Chat', () => {
@@ -79,7 +88,7 @@ describe('TelegramAccountPoolService（选号 / 冷却 / 快照）', () => {
     expect(note.length).toBeLessThanOrEqual(120);
   });
 
-  it('加权选号：同等条件下权重高的账号被选中', () => {
+  it('评分选号：同等其它条件下静态得分系数更高的账号胜出（非概率轮询）', () => {
     const pool = makePool({
       TELEGRAM_ACCOUNT_POOL_ENABLED: 'true',
       TELEGRAM_ACCOUNT_POOL: JSON.stringify([
@@ -92,7 +101,7 @@ describe('TelegramAccountPoolService（选号 / 冷却 / 快照）', () => {
     expect(selection?.accountId).toBe('high');
   });
 
-  it('平局轮转：完全等价的账号被均匀分流（不会全压到第一个）', () => {
+  it('稳定候选排序 + 平局轮转：完全等价账号不受输入顺序影响且可被均匀选中', () => {
     const pool = makePool({
       TELEGRAM_ACCOUNT_POOL_ENABLED: 'true',
       TELEGRAM_ACCOUNT_POOL: JSON.stringify([
@@ -102,13 +111,20 @@ describe('TelegramAccountPoolService（选号 / 冷却 / 快照）', () => {
       ]),
     });
 
+    const expectedFirstRound = ['bot2', 'bot3', 'bot1'];
     const picked = new Set<string>();
-    for (let index = 0; index < 3; index += 1) {
+    for (const expected of expectedFirstRound) {
       const selection = pool.select();
       expect(selection).not.toBeNull();
+      expect(selection!.accountId).toBe(expected);
       picked.add(selection!.accountId);
     }
-    expect(picked.size).toBe(3);
+    expect(picked).toEqual(new Set(['bot1', 'bot2', 'bot3']));
+
+    // 相同的可调度集合以不同 repository 顺序传入时，下一轮选择仍遵循稳定的轮转顺序。
+    const reordered = ['bot3', 'bot1', 'bot2'];
+    const secondRound = reordered.map(() => pool.select(reordered)?.accountId);
+    expect(secondRound).toEqual(['bot2', 'bot3', 'bot1']);
   });
 
   it('在飞上限：满载账号不再被选中', () => {

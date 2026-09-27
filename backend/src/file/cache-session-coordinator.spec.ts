@@ -279,6 +279,7 @@ describe('CacheSessionCoordinator follower 读取器', () => {
       fileId: FILE_ID,
       expectedSize: payload.length,
       spoolPath,
+      fileReady: true,
       bytesWritten: 0,
       completed: false,
       events: new EventEmitter(),
@@ -306,6 +307,47 @@ describe('CacheSessionCoordinator follower 读取器', () => {
     expect(error.message).toContain('spool 会话已被替换或清理');
   });
 
+  it('缺失的 stale spool 不复用：旧 follower 收到错误，新请求创建新 leader', async () => {
+    const spoolPath = path.join(dir, `${FILE_ID}.stale-session.spool`);
+    const stale: SpoolSession = {
+      fileId: FILE_ID,
+      expectedSize: 4,
+      spoolPath,
+      fileReady: true,
+      bytesWritten: 4,
+      completed: true,
+      events: new EventEmitter(),
+      completion: Promise.resolve(),
+      abort: () => undefined,
+      consumerCount: 0,
+    };
+    coordinator.spoolSessions.set(FILE_ID, stale);
+
+    const oldFollower = (coordinator as unknown as {
+      createSpoolFollowerStream: (session: SpoolSession) => Readable;
+    }).createSpoolFollowerStream(stale);
+    const oldFailure = new Promise<Error>((resolve) => oldFollower.once('error', resolve));
+    oldFollower.on('data', () => undefined);
+
+    const upstream = new Readable({
+      read() {
+        this.push(Buffer.from('data'));
+        this.push(null);
+      },
+    });
+    const fetchFn = jest.fn(async () => ({ stream: upstream, info: { file_size: 4 } }));
+    const reopened = await coordinator.getSpooledStream(FILE_ID, 4, fetchFn);
+    const nextContent = readAll(reopened.stream);
+
+    await expect(oldFailure).resolves.toMatchObject({
+      message: expect.stringMatching(/spool 会话已被替换或清理|ENOENT/),
+    });
+    await expect(nextContent).resolves.toEqual(Buffer.from('data'));
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect(coordinator.spoolSessions.get(FILE_ID)).not.toBe(stale);
+    await coordinator.teardownSpoolSession(coordinator.spoolSessions.get(FILE_ID)!);
+  });
+
   it('spool follower：消费者计数随创建/关闭变化，内容可完整重放', async () => {
     const payload = makePayload(CHUNK + 123);
     const spoolPath = path.join(dir, `${FILE_ID}.spool`);
@@ -314,6 +356,7 @@ describe('CacheSessionCoordinator follower 读取器', () => {
       fileId: FILE_ID,
       expectedSize: payload.length,
       spoolPath,
+      fileReady: true,
       bytesWritten: payload.length,
       completed: true,
       events: new EventEmitter(),

@@ -43,7 +43,7 @@ function setup(options: {
   poolActive?: boolean;
   streamFailures?: number;
   /**
-   * 大文件副本分布（闸门输入）：默认「无 ≥1GiB 文件」（闸门不适用 → 通过），
+   * 大文件副本分布（闸门输入）：默认「无 >1GiB 文件」（闸门不适用 → 通过），
    * 使既有用例只聚焦原本的稳定周期/步长语义。
    */
   largeFileDistribution?: {
@@ -112,57 +112,62 @@ async function evaluateTimes(service: DownloadCapacityPolicyService, n: number) 
 }
 
 describe('targetUpstreamBudget（容量映射）', () => {
-  it('min(64, max(8, n×8))：1 个 → 8，2 个 → 16，4 个 → 32，超过 8 封顶 64', () => {
+  it('min(64, max(8, n×16))：1 个 → 16，2 个 → 32，4 个及以上封顶 64', () => {
     expect(targetUpstreamBudget(0)).toBe(8);
-    expect(targetUpstreamBudget(1)).toBe(8);
-    expect(targetUpstreamBudget(2)).toBe(16);
-    expect(targetUpstreamBudget(3)).toBe(24);
-    expect(targetUpstreamBudget(4)).toBe(32);
+    expect(targetUpstreamBudget(1)).toBe(16);
+    expect(targetUpstreamBudget(2)).toBe(32);
+    expect(targetUpstreamBudget(3)).toBe(48);
+    expect(targetUpstreamBudget(4)).toBe(64);
     expect(targetUpstreamBudget(8)).toBe(64);
     expect(targetUpstreamBudget(20)).toBe(64);
   });
 });
 
 describe('DownloadCapacityPolicyService（自动扩缩容闸门）', () => {
-  it('升档需目标稳定 2 个周期，且每次最多 +8（灰度）', async () => {
+  it('升档需目标稳定 2 个周期，且每次最多 +8（灰度至 4 Bot 目标 64）', async () => {
     const ctx = setup({
-      currentBudget: '16',
+      currentBudget: '32',
       accounts: [account('a1'), account('a2'), account('a3'), account('a4')],
     });
 
     const first = await ctx.service.evaluate();
-    expect(first.targetBudget).toBe(32);
+    expect(first.targetBudget).toBe(64);
     expect(first.pendingUpCycles).toBe(CAPACITY_UP_STABLE_CYCLES - 1);
     expect(ctx.configCache.set).not.toHaveBeenCalled();
 
     await ctx.service.evaluate();
     expect(ctx.configCache.set).toHaveBeenCalledWith(
       'FILE_DOWNLOAD_MAX_CONCURRENT_UPSTREAMS',
-      String(16 + CAPACITY_STEP_MAX),
+      String(32 + CAPACITY_STEP_MAX),
       expect.any(String),
     );
+    expect(ctx.service.getState().currentBudget).toBe(40);
+    expect(ctx.service.getState().lastChange).toMatchObject({ from: 32, to: 40, activeBotCount: 4 });
 
-    // 灰度：下一次仍只允许 +8，直到抵达目标 32
-    await evaluateTimes(ctx.service, 2);
-    expect(ctx.service.getState().currentBudget).toBe(32);
-    expect(ctx.service.getState().lastChange).toMatchObject({ from: 24, to: 32, activeBotCount: 4 });
+    // 每次仍只允许 +8，连续稳定评估后到达 4 Bot 目标 64
+    await evaluateTimes(ctx.service, 6);
+    expect(ctx.service.getState().currentBudget).toBe(64);
+    expect(ctx.service.getState().targetBudget).toBe(64);
 
-    // 审计记录必须包含旧值/新值/有效 Bot 数/来源
+    // 审计记录必须包含最近一次旧值/新值/有效 Bot 数/来源
     expect(ctx.audit.log).toHaveBeenCalledWith(expect.objectContaining({
       resourceId: 'FILE_DOWNLOAD_MAX_CONCURRENT_UPSTREAMS',
-      metadata: expect.objectContaining({ oldValue: 24, newValue: 32, activeBotCount: 4, source: 'auto-capacity-policy' }),
+      metadata: expect.objectContaining({ oldValue: 56, newValue: 64, activeBotCount: 4, source: 'auto-capacity-policy' }),
     }));
   });
 
   it('采样窗口内新增上游失败达到阈值时冻结升档（即时评估不稀释窗口）', async () => {
     jest.useFakeTimers();
     try {
+      const accounts = [account('a1')];
       const ctx = setup({
         currentBudget: '16',
-        accounts: [account('a1'), account('a2')],
+        accounts,
         streamFailures: 0,
       });
       await ctx.service.evaluate();
+      // 账号刚变为有效时，新目标高于当前值，但本次只是第一个升档候选周期。
+      accounts.push(account('a2'));
 
       // 窗口未推进时的即时评估（例如配置变更触发）不应消费掉失败增量
       ctx.countersSnapshot.mockReturnValue({ streamFailures: CAPACITY_FAILURE_FREEZE_THRESHOLD } as never);
@@ -192,11 +197,11 @@ describe('DownloadCapacityPolicyService（自动扩缩容闸门）', () => {
     expect(ctx.configCache.set).not.toHaveBeenCalled();
   });
 
-  it('降档需持续 10 个周期、每次最多 -8、永不低于 8', async () => {
+  it('降档需持续 10 个周期、每次最多 -8、永不低于单 Bot 目标 16', async () => {
     const ctx = setup({ currentBudget: '64', accounts: [account('a1')] });
 
     const early = await evaluateTimes(ctx.service, CAPACITY_DOWN_STABLE_CYCLES - 1);
-    expect(early.targetBudget).toBe(8);
+    expect(early.targetBudget).toBe(16);
     expect(ctx.configCache.set).not.toHaveBeenCalled();
 
     await ctx.service.evaluate();
@@ -210,7 +215,7 @@ describe('DownloadCapacityPolicyService（自动扩缩容闸门）', () => {
 
     // 继续降到下限后不再下降
     await evaluateTimes(ctx.service, CAPACITY_DOWN_STABLE_CYCLES * 12);
-    expect(ctx.service.getState().currentBudget).toBe(8);
+    expect(ctx.service.getState().currentBudget).toBe(16);
   });
 
   it('没有可实际回源的有效 Bot 时挂起自动调整（无依据不缩容）', async () => {
@@ -241,20 +246,20 @@ describe('DownloadCapacityPolicyService（自动扩缩容闸门）', () => {
   });
 
   it('目标等于当前预算时不写入（快照仍反映目标与有效 Bot 数）', async () => {
-    const ctx = setup({ currentBudget: '16', accounts: [account('a1'), account('a2')] });
+    const ctx = setup({ currentBudget: '32', accounts: [account('a1'), account('a2')] });
 
     const state = await evaluateTimes(ctx.service, 3);
 
-    expect(state.currentBudget).toBe(16);
-    expect(state.targetBudget).toBe(16);
+    expect(state.currentBudget).toBe(32);
+    expect(state.targetBudget).toBe(32);
     expect(state.activeBotCount).toBe(2);
     expect(ctx.configCache.set).not.toHaveBeenCalled();
     expect(state.lastChange).toBeNull();
   });
 
   it('大文件副本集中在单一账号时冻结升档（单账号独扛的根因闸门）', async () => {
-    // 三个账号在“任意文件”上都有 ready 副本（activeBotCount=3，原本会按 8→24 升档），
-    // 但 ≥1GiB 的分卷只被一个账号持有——此时升档只会让那一个账号承受更多并发冷回源。
+    // 三个账号在“任意文件”上都有 ready 副本（activeBotCount=3，目标预算为 48），
+    // 但 >1GiB 的分卷只被一个账号持有——此时升档只会让那一个账号承受更多并发冷回源。
     const ctx = setup({
       currentBudget: '16',
       accounts: [account('a1'), account('a2'), account('a3')],
@@ -264,7 +269,11 @@ describe('DownloadCapacityPolicyService（自动扩缩容闸门）', () => {
     await ctx.service.evaluate();
     const state = await ctx.service.evaluate();
 
-    expect(state.targetBudget).toBe(24);
+    expect(state.targetBudget).toBe(48);
+    expect(ctx.copies.largeFileReplicaDistribution).toHaveBeenCalledWith({
+      minBytes: 1024 ** 3 + 1,
+      accountIds: ['a1', 'a2', 'a3'],
+    });
     expect(ctx.configCache.set).not.toHaveBeenCalled();
     expect(state.largeFileGate).toMatchObject({
       files: 2,

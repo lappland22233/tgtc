@@ -10,7 +10,8 @@ import {
 } from '../file/download-resource-coordinator.service';
 import { FileCopyService } from './file-copy.service';
 import { ReplicaTargetResolver } from './replica-target.resolver';
-import { TelegramAccountPoolService } from './telegram-account-pool.service';
+import { SMALL_FILE_UPSTREAM_BUDGET_PER_ACCOUNT } from './telegram-account-pool.service';
+import type { TelegramAccountPoolService } from './telegram-account-pool.service';
 
 /** 评估周期（毫秒）：与告警采集同量级，避免对数据库产生压力 */
 export const CAPACITY_EVAL_INTERVAL_MS = 60_000;
@@ -27,27 +28,30 @@ export const CAPACITY_MAX_BUDGET = 64;
 /** 一个评估周期内新增上游失败达到该值时冻结升档 */
 export const CAPACITY_FAILURE_FREEZE_THRESHOLD = 3;
 /**
- * 「高热大文件副本闸门」的大小阈值（字节）：≥1GiB 的逻辑文件参与闸门判定。
+ * 「高热大文件副本闸门」的大小阈值（字节）：严格大于 1GiB，与账号池大文件槽位口径一致。
  *
- * 为什么与每账号槽位阈值（>1GiB）对齐：两者回答同一个问题——「大文件的回源
- * 压力是否已经分散到多个账号」。若闸门阈值更宽（只看 4GiB），1–4GiB 段的分卷
- * 仍可能在单账号上堆积并触发限流。
+ * 两个机制回答同一个问题——「大文件的回源压力是否已经分散到多个账号」。若闸门阈值更宽
+ * （只看 4GiB），1–4GiB 段的分卷仍可能在单账号上堆积并触发限流。
  */
-export const CAPACITY_LARGE_FILE_MIN_BYTES = 1024 ** 3;
+export const CAPACITY_LARGE_FILE_MIN_BYTES = 1024 ** 3 + 1;
 /** 大文件副本闸门要求的**最少去重账号数**：低于此值不允许升档 */
 export const CAPACITY_LARGE_FILE_MIN_ACCOUNTS = 2;
 
 /**
  * 「有效 Bot 数 → 全局上游权重预算」的容量映射。
  *
- * `min(64, max(8, activeBotCount × 8))`：1 个有效 Bot → 8；2 个 → 16；4 个 → 32。
- * 这只是容量映射，不改变 `telegram_accounts.weight` 的选号概率，
- * 也不把账号 `maxInflight` 合并成全局预算。
+ * `min(64, max(8, activeBotCount × SMALL_FILE_UPSTREAM_BUDGET_PER_ACCOUNT))`：
+ * 每个有效 Bot 贡献 16 权重，4 个 → 64，上限 64。
+ * 这只是容量映射，不改变选号算法，也不把账号 `maxInflight` 合并成全局预算。
+ * 升档仍受稳定周期、失败冻结和大文件副本闸门保护。
  */
 export function targetUpstreamBudget(activeBotCount: number): number {
   const count = Number.isFinite(activeBotCount) ? Math.max(0, Math.floor(activeBotCount)) : 0;
   if (count <= 0) return CAPACITY_MIN_BUDGET;
-  return Math.min(CAPACITY_MAX_BUDGET, Math.max(CAPACITY_MIN_BUDGET, count * 8));
+  return Math.min(
+    CAPACITY_MAX_BUDGET,
+    Math.max(CAPACITY_MIN_BUDGET, count * SMALL_FILE_UPSTREAM_BUDGET_PER_ACCOUNT),
+  );
 }
 
 /** 最近一次自动调整记录（供管理端与日志解释「预算为什么变了」） */
@@ -280,7 +284,7 @@ export class DownloadCapacityPolicyService implements OnApplicationShutdown {
     // 降档是安全方向，因此只拦升档。
     if (this.largeFileGate && !this.largeFileGate.passed) {
       this.logger.warn(
-        `自动扩缩容暂不升档：大文件副本闸门未通过（${this.largeFileGate.files} 个 ≥1GiB 文件，`
+        `自动扩缩容暂不升档：大文件副本闸门未通过（${this.largeFileGate.files} 个 >1GiB 文件，`
         + `最少覆盖账号数 ${this.largeFileGate.minReadyAccounts} < 要求 ${this.largeFileGate.requiredAccounts}`
         + `${this.largeFileGate.truncated ? '，统计被截断' : ''}）`,
       );
@@ -359,11 +363,11 @@ export class DownloadCapacityPolicyService implements OnApplicationShutdown {
       .filter((item) => item.eligible)
       .map((item) => item.accountId)
       .filter((accountId) => (readyCounts.get(accountId) ?? 0) > 0);
-    this.largeFileGate = await this.evaluateLargeFileGate();
+    this.largeFileGate = await this.evaluateLargeFileGate(this.activeBotIds);
   }
 
   /**
-   * 大文件副本闸门：≥1GiB 的逻辑文件是否已被**多个账号**覆盖。
+   * 大文件副本闸门：>1GiB 的逻辑文件是否已被**多个账号**覆盖。
    *
    * 判定口径（保守，宁可拦下升档）：
    * - 没有任何大文件 → 通过（闸门不适用于「还没有大文件」的部署）；
@@ -374,10 +378,11 @@ export class DownloadCapacityPolicyService implements OnApplicationShutdown {
    * 为什么用「最小值」而不是平均值：只要还有一个大文件只被单个账号持有，
    * 该文件的每次冷回源都只能压在这一个账号上——平均值会把这个尾部隐藏掉。
    */
-  private async evaluateLargeFileGate(): Promise<DownloadCapacityState['largeFileGate']> {
+  private async evaluateLargeFileGate(accountIds: string[]): Promise<DownloadCapacityState['largeFileGate']> {
     try {
       const distribution = await this.copies.largeFileReplicaDistribution({
         minBytes: CAPACITY_LARGE_FILE_MIN_BYTES,
+        accountIds,
       });
       const required = CAPACITY_LARGE_FILE_MIN_ACCOUNTS;
       const passed = distribution.files === 0

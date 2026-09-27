@@ -34,10 +34,14 @@ const HEALTH_PROBE_INTERVAL_MS = 60_000;
 /** 探测失败也计入健康度的失败分类判定阈值 */
 const PROBE_FAILURE_KIND: AccountFailureKind = 'network';
 
+/** Bot 账号未显式配置 maxInflight 时的单账号在飞上限。 */
+export const TELEGRAM_ACCOUNT_DEFAULT_MAX_INFLIGHT = 16;
 /** 大文件阈值（字节）：超过即占用「每账号大文件回源槽位」（与资源协调器的权重口径一致） */
 const LARGE_FILE_THRESHOLD_BYTES = 1024 ** 3;
 /** 每账号大文件回源槽位默认值（未显式配置时）：同一账号同时只跑 1 个大文件冷回源 */
 const LARGE_INFLIGHT_DEFAULT = 1;
+/** 每个有效账号承载的全局小文件权重预算（4 个账号 → 64；容量上限仍由下载配置裁剪）。 */
+export const SMALL_FILE_UPSTREAM_BUDGET_PER_ACCOUNT = 16;
 /** 准入被拒（非冷却）时的建议重试间隔（毫秒） */
 const ADMISSION_RETRY_AFTER_MS = 5_000;
 
@@ -57,8 +61,7 @@ function isLargeFileBytes(bytes?: number): boolean {
  * 容量分   = 1 - inflight / maxInflight          （满载 → 0，天然平滑分流）
  * 得分     = weight × (0.5×带宽分 + 0.5×健康分) × 容量分
  * ```
- * 与实验结论一致：**每账号在飞上限**（默认 8，建议 8–16）比单纯轮询更能压低 stall；
- * 而权重/带宽分让优质线路（如本实验的直连机房）承担更多流量。
+ * 每账号在飞上限默认 16，可由账号配置覆盖；权重/带宽分让健康且空闲的线路承担更多流量。
  *
  * 该服务只做「选择与记账」，不发请求：实际 HTTP 由 `TelegramAccountClientService` 执行，
  * 完成后由调用方回报采样，避免服务间循环依赖。
@@ -69,7 +72,7 @@ export class TelegramAccountPoolService implements OnModuleInit, OnApplicationSh
   private readonly runtimes = new Map<string, TelegramAccountRuntime>();
   private readonly enabled: boolean;
   private probeTimer: NodeJS.Timeout | null = null;
-  /** 平局轮转游标：让得分相同的账号也能被均匀分流（见 select 注释） */
+  /** 轮转起点：提供相同得分候选的确定性均衡，候选按 account id 规范排序 */
   private rotateCursor = 0;
   /** 进程内计数（选择/换号/回退/中继/回复失败），供诊断与告警判定 */
   private readonly counters: AccountPoolCounters = {
@@ -553,7 +556,9 @@ export class TelegramAccountPoolService implements OnModuleInit, OnApplicationSh
       token,
       chatId,
       weight: Number.isFinite(weightRaw) && weightRaw > 0 ? weightRaw : 1,
-      maxInflight: Number.isSafeInteger(maxInflightRaw) && maxInflightRaw > 0 ? maxInflightRaw : 8,
+      maxInflight: Number.isSafeInteger(maxInflightRaw) && maxInflightRaw > 0
+        ? maxInflightRaw
+        : TELEGRAM_ACCOUNT_DEFAULT_MAX_INFLIGHT,
       maxLargeInflight: Number.isSafeInteger(Number(raw.maxLargeInflight ?? raw.max_large_inflight))
         && Number(raw.maxLargeInflight ?? raw.max_large_inflight) > 0
         ? Number(raw.maxLargeInflight ?? raw.max_large_inflight)
@@ -608,8 +613,9 @@ export class TelegramAccountPoolService implements OnModuleInit, OnApplicationSh
   /**
    * 按加权得分选择一个账号。
    *
-   * 平局处理：候选集按游标**轮转起点**，使得得分相同的账号（例如三个配置完全一致的空闲账号）
-   * 也会被均匀分流——否则「严格大于才替换」会让全部流量落到第一个账号，突发压测时严重失真。
+   * 平局处理：候选集先按稳定的 account id 排序，再按游标轮转起点；只有得分完全相同的账号
+   * 才按该顺序均匀分流。不同带宽、健康、容量或静态 weight 得分会确定性选择最高分候选，
+   * 因此 weight 是得分系数，不表示长期概率占比。
    *
    * @param candidateIds 限定候选（例如「持有该文件副本的账号」）；为空表示全池
    * @param options.largeFile 本次回源是否为大文件（>1GiB）：为 true 时把
@@ -634,7 +640,8 @@ export class TelegramAccountPoolService implements OnModuleInit, OnApplicationSh
     const schedulable = (candidateIds && candidateIds.length > 0
       ? candidateIds.map((id) => this.runtimes.get(id)).filter((item): item is TelegramAccountRuntime => Boolean(item))
       : Array.from(this.runtimes.values()))
-      .filter((runtime) => this.isSchedulable(runtime, nowMs, options));
+      .filter((runtime) => this.isSchedulable(runtime, nowMs, options))
+      .sort((a, b) => a.config.id.localeCompare(b.config.id));
 
     if (schedulable.length === 0) return null;
     this.rotateCursor = (this.rotateCursor + 1) % Math.max(1, schedulable.length);

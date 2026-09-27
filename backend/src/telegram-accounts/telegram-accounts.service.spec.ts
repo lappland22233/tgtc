@@ -1,5 +1,6 @@
 import { ConfigService } from '@nestjs/config';
 import { DataSource } from 'typeorm';
+import { ACCOUNT_LIMITS } from './telegram-account.dto';
 // 每个用例都会新建 SQLite 内存库并跑基线迁移；满负载串行执行时会超过 jest 默认 5s
 jest.setTimeout(30_000);
 import type { BotProbeResult } from './telegram-account-probe.service';
@@ -102,7 +103,7 @@ describe('TelegramAccountsService（SQLite 内存库）', () => {
           token: `${id}:SECRET-VALUE-NEVER-EXPOSED`,
           chatId: (snapshot.chatId as string) ?? '',
           weight: 1,
-          maxInflight: 8,
+          maxInflight: 16,
           enabled: true,
           source: (snapshot.source as 'env' | 'panel') ?? 'env',
           primary: snapshot.primary === true,
@@ -149,7 +150,7 @@ describe('TelegramAccountsService（SQLite 内存库）', () => {
       chatId: '-1001234567890',
       enabled: true,
       weight: 1,
-      maxInflight: 8,
+      maxInflight: 16,
       inflight: 2,
       bandwidthMbps: 1.5,
       successRate: 0.98,
@@ -179,6 +180,8 @@ describe('TelegramAccountsService（SQLite 内存库）', () => {
 
     expect(view.status).toBe('active');
     expect(view.enabled).toBe(true);
+    expect(view.maxInflight).toBe(ACCOUNT_LIMITS.defaultMaxInflight);
+    expect(view.maxInflight).toBe(16);
     expect(view.externalId).toBe('***3456');
     expect(view.credentialConfigured).toBe(true);
     expect(JSON.stringify(view)).not.toContain('AAF-DEMO-TOKEN-VALUE');
@@ -408,7 +411,7 @@ describe('TelegramAccountsService（SQLite 内存库）', () => {
 
     const env = overview.envAccounts[0];
     expect(env).toMatchObject({ id: '123456', primary: true, source: 'env', readOnly: true, enabled: true });
-    expect(env.runtime).toMatchObject({ inflight: 2, maxInflight: 8, storageConfigured: true });
+    expect(env.runtime).toMatchObject({ inflight: 2, maxInflight: 16, storageConfigured: true });
     expect(overview.precheck.find((item) => item.id === 'primary_bot')?.ok).toBe(true);
     expect(overview.precheck.find((item) => item.id === 'env_storage_chat')?.ok).toBe(true);
     // 脱敏：环境变量账号视图不得出现完整 Token

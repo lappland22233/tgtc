@@ -52,12 +52,12 @@
 
 | 配置/字段 | 层级 | 语义 |
 |---|---|---|
-| `telegram_accounts.weight` | 账号池 | 账号**选号**的加权概率（不影响全局预算） |
-| `telegram_accounts.maxInflight` | 账号池 | 单账号在飞请求上限 |
+| `telegram_accounts.weight` | 账号池 | 账号**选号**的静态得分系数（按最高分确定性选取，不是概率轮询；不影响全局预算） |
+| `telegram_accounts.maxInflight` | 账号池 | 单 Bot 账号在飞请求上限（后台新建默认 16，可配置为 1-64）；环境变量 Bot 未显式配置时默认 16 |
 | `FILE_DOWNLOAD_MAX_CONCURRENT_UPSTREAMS` | 下载资源协调器 | **全局上游回源权重预算**（不是连接数，也不是「账号数 × maxInflight」） |
 
-- **权重映射**：`>1GiB` → 8、`256MiB–1GiB` → 2、其余 → 1；权重超过预算时按预算裁剪。
-- **预算自动扩缩容**（`FILE_DOWNLOAD_AUTO_CAPACITY_ENABLED=true`，默认开启）：按**有效 Bot 数**映射 `min(64, max(8, n×8))`（1 个 → 8、2 个 → 16、4 个 → 32，上限 64）。「有效 Bot」= 同时满足 `enabled` + 已配置存储 Chat + 健康（未冷却、连续失败低于阈值）+ **该账号存在自己的 `status=ready` 副本**。闸门：升档需目标值连续 2 个评估周期稳定（60s/次）且窗口内无新增回源失败、无账号处于限流冷却；每次最多 `+8`；降档需目标持续偏低 10 个周期，每次最多 `-8`、永不低于 `8`；`有效 Bot = 0` 时挂起自动调整（无依据不缩容）。每次写入都会同时落审计日志（旧值/新值/有效 Bot 数/原因/来源）与运行日志。**任何调整都不撤销已授予的租约**，只影响后续准入。
+- **权重映射**：`>1GiB` → 8、`256MiB–1GiB` → 2、其余小文件 → 1；权重超过预算时按预算裁剪。图床小文件严格 `<20,000,000 bytes` 不占每 IP 4 个公开媒体并发槽，但仍受 30 req/s 速率、全局预算、账号准入、队列和磁盘保护。
+- **预算自动扩缩容**（`FILE_DOWNLOAD_AUTO_CAPACITY_ENABLED=true`，默认开启）：按**有效 Bot 数**映射 `min(64, max(8, n×16))`（1 个 → 16、2 个 → 32、4 个 → 64，上限 64）。升档仍需目标稳定 2 个周期、通过失败/冷却和 ≥1GiB 多账号副本闸门，每次最多 `+8`；降档仍有滞后和步长保护。「有效 Bot」= 同时满足 `enabled` + 已配置存储 Chat + 健康（未冷却、连续失败低于阈值）+ **该账号存在自己的 `status=ready` 副本**。闸门：升档需目标值连续 2 个评估周期稳定（60s/次）且窗口内无新增回源失败、无账号处于限流冷却；每次最多 `+8`；降档需目标持续偏低 10 个周期，每次最多 `-8`、永不低于 `8`；`有效 Bot = 0` 时挂起自动调整（无依据不缩容）。每次写入都会同时落审计日志（旧值/新值/有效 Bot 数/原因/来源）与运行日志。**任何调整都不撤销已授予的租约**，只影响后续准入。
 - **队列等待策略**（`FILE_DOWNLOAD_UPSTREAM_QUEUE_POLICY`，默认 `strict_fifo`）：
   - `strict_fifo`：严格 FIFO，队首权重不足时后续任务也不放行（紧急回退模式）；
   - `bounded_fit`：队首暂时放不下时，仅在队首之后的前 8 个等待项中按 FIFO 顺序放过可适配的任务；单个队首最多被绕过 8 次，或被绕过至等待超过 10 秒后进入「队首保留」，不再发放非队首任务（大文件不会被小任务饿死）。绕过次数、队首等待年龄与保留状态均可在运行快照中观测。
@@ -295,7 +295,7 @@ Redis 承载 `metrics-aggregation`、`attack-detection`、`alert-evaluation`、`
 | `FILE_CACHE_BUILD_IDLE_TIMEOUT_MS` | `150000` | 缓存构建**无进展**超时（毫秒），每收到数据即刷新 |
 | `FILE_CACHE_BUILD_TOTAL_TIMEOUT_MS` | `0` | 单次缓存构建**总时限**（毫秒）；`0` = 禁用（默认），固定总时限会误杀长传输 |
 | `FILE_DOWNLOAD_MAX_RESERVED_GB` | `0` | 在途下载任务「未写入预约」总上限（GB），0 表示仅受物理空间约束（SystemConfig 热更新） |
-| `FILE_DOWNLOAD_MAX_CONCURRENT_UPSTREAMS` | `8` | 上游冷回源**权重预算**（非连接数）：`>1GiB` 权重 8、`256MiB–1GiB` 权重 2、其余 1；自动扩缩容开启时按有效 Bot 数映射 `min(64, max(8, n×8))`（1→8、2→16、4→32），范围 1-64（SystemConfig 热更新） |
+| `FILE_DOWNLOAD_MAX_CONCURRENT_UPSTREAMS` | `8` | 上游冷回源**权重预算**（非连接数）：`>1GiB` 权重 8、`256MiB–1GiB` 权重 2、其余 1；自动扩缩容开启时按有效 Bot 数映射 `min(64, max(8, n×16))`（1→16、2→32、4→64），范围 1-64（SystemConfig 热更新） |
 | `FILE_DOWNLOAD_UPSTREAM_QUEUE_POLICY` | `strict_fifo` | 上游等待项选择策略：`strict_fifo`（严格 FIFO，回退模式）/ `bounded_fit`（前 8 个等待项内适配优先，队首最多被绕过 8 次或等待 10 秒后进入队首保留）（SystemConfig 热更新） |
 | `FILE_DOWNLOAD_AUTO_CAPACITY_ENABLED` | `true` | 全局权重预算是否按有效 Bot 数自动扩缩容（关闭后只保留人工设置）（SystemConfig 热更新） |
 | `FILE_DOWNLOAD_QUEUE_CAPACITY` | `128` | 磁盘/上游等待队列容量，超过后直接返回「服务器繁忙」（`429`）（SystemConfig 热更新） |

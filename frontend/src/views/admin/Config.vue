@@ -291,7 +291,7 @@
         <t-form-item label="上游权重预算">
           <t-input-number v-model="downloadConfig.maxConcurrentUpstreams" :min="1" :max="64" :step="1" />
           <span style="margin-left: 8px; font-size: 12px; color: var(--td-text-color-secondary);">
-            冷回源的全局「权重预算」：大文件占 8、中等文件占 2、小文件占 1；自动扩缩容开启时会按有效 Bot 数调整（1 个 → 8，2 个 → 16，4 个 → 32，上限 64）
+            冷回源的全局「权重预算」：大文件占 8、中等文件占 2、小文件占 1；自动扩缩容开启时按有效 Bot 数映射 min(64, max(8, n×16))（1 个 → 16，2 个 → 32，4 个 → 64，上限 64）
           </span>
         </t-form-item>
         <t-form-item label="队列等待策略">

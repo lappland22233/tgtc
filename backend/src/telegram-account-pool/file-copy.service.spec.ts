@@ -299,6 +299,49 @@ describe('FileCopyService（副本登记 / 去重 / 生命周期清理）', () =
     expect(qb.where).toHaveBeenCalledWith('copy.status = :status', { status: 'ready' });
     expect(qb.andWhere).toHaveBeenCalledWith('copy.ownerType = :ownerType', { ownerType: 'file' });
   });
+
+  it('大文件副本闸门仅统计有效账号并仅对大文件分组，截断按大文件组数计算', async () => {
+    const ctx = setup();
+    const qb = {
+      select: jest.fn().mockReturnThis(),
+      addSelect: jest.fn().mockReturnThis(),
+      setParameter: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      andWhere: jest.fn().mockReturnThis(),
+      groupBy: jest.fn().mockReturnThis(),
+      addGroupBy: jest.fn().mockReturnThis(),
+      orderBy: jest.fn().mockReturnThis(),
+      limit: jest.fn().mockReturnThis(),
+      getRawMany: jest.fn(async () => [
+        { ownerType: 'file', ownerId: 'large-1', maxSize: '2000000000', readyAccountCount: '2' },
+        { ownerType: 'file', ownerId: 'large-2', maxSize: '3000000000', readyAccountCount: '1' },
+      ]),
+    };
+    ctx.repo.createQueryBuilder.mockReturnValue(qb as never);
+
+    const distribution = await ctx.service.largeFileReplicaDistribution({
+      minBytes: 1024 ** 3,
+      maxGroups: 1,
+      accountIds: ['healthy-a', 'healthy-b', 'healthy-a'],
+    });
+
+    expect(qb.andWhere).toHaveBeenCalledWith('copy.fileSize >= :minBytes', { minBytes: 1024 ** 3 });
+    expect(qb.addSelect).toHaveBeenCalledWith(
+      'COUNT(DISTINCT CASE WHEN copy.accountId IN (:...eligibleAccountIds) THEN copy.accountId END)',
+      'readyAccountCount',
+    );
+    expect(qb.setParameter).toHaveBeenCalledWith('eligibleAccountIds', ['healthy-a', 'healthy-b']);
+    expect(qb.limit).toHaveBeenCalledWith(2);
+    expect(distribution).toMatchObject({ files: 1, truncated: true, minReadyAccounts: 2 });
+
+    qb.getRawMany.mockResolvedValue([
+      { ownerType: 'file', ownerId: 'large-1', maxSize: '2000000000', readyAccountCount: '0' },
+      { ownerType: 'file', ownerId: 'large-2', maxSize: '3000000000', readyAccountCount: '0' },
+    ]);
+    const noEligibleAccounts = await ctx.service.largeFileReplicaDistribution({ minBytes: 1024, accountIds: [] });
+    expect(qb.addSelect).toHaveBeenLastCalledWith('0', 'readyAccountCount');
+    expect(noEligibleAccounts).toMatchObject({ files: 2, minReadyAccounts: 0, readyAccountCounts: [0, 0] });
+  });
 });
 
 /**

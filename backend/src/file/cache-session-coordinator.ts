@@ -61,6 +61,8 @@ export interface SpoolSession {
   /** 内容版本（覆盖上传时递增）：用于避免复用过期内容的会话 */
   contentVersion?: string | number;
   spoolPath: string;
+  /** 初始空 spool 文件已创建；false 期间 leader 正在完成文件初始化，不应误判为 stale。 */
+  fileReady?: boolean;
   bytesWritten: number;
   completed: boolean;
   error?: Error;
@@ -170,6 +172,12 @@ export class CacheSessionCoordinator {
   private spoolGraceOverrideMs: number | null = null;
   /** 领导者选举串行化锁（会话键 → 排队链尾） */
   private readonly sessionLocks = new Map<string, Promise<void>>();
+  /** 正在执行 fileId 级缓存失效的 key，阻止新请求在旧文件批量删除期间创建会话。 */
+  private readonly invalidatingFileIds = new Set<string>();
+  /** 同一 fileId 的多次 invalidate 串行化，避免并发清理互相拒绝或越过失效栅栏。 */
+  private readonly fileInvalidationLocks = new Map<string, Promise<void>>();
+  /** 各 fileId 正在等待磁盘/上游资源的准入控制器；invalidate 会立即取消这些队列项。 */
+  private readonly pendingAdmissions = new Map<string, Set<AbortController>>();
   /** 未知大小直通的每文件互斥锁 */
   private readonly directLocks = new Map<string, Promise<void>>();
 
@@ -197,6 +205,33 @@ export class CacheSessionCoordinator {
 
   private get fileAccessMap(): Map<string, number> {
     return this.deps.fileAccessMap;
+  }
+
+  private combineAbortSignals(...signals: Array<AbortSignal | undefined>): {
+    signal?: AbortSignal;
+    dispose(): void;
+  } {
+    const active = signals.filter((signal): signal is AbortSignal => Boolean(signal));
+    if (active.length <= 1) return { signal: active[0], dispose: () => undefined };
+
+    const controller = new AbortController();
+    const listeners: Array<{ signal: AbortSignal; listener: () => void }> = [];
+    const dispose = () => {
+      for (const item of listeners.splice(0)) {
+        item.signal.removeEventListener('abort', item.listener);
+      }
+    };
+    for (const signal of active) {
+      if (signal.aborted) {
+        controller.abort();
+        break;
+      }
+      const listener = () => controller.abort();
+      signal.addEventListener('abort', listener, { once: true });
+      listeners.push({ signal, listener });
+    }
+    if (controller.signal.aborted) dispose();
+    return { signal: controller.signal, dispose };
   }
 
   /** 活跃 direct 直通流数（观测） */
@@ -339,36 +374,48 @@ export class CacheSessionCoordinator {
       contentVersion?: string | number;
     },
   ): Promise<SessionResourceLease> {
-    const reservation = await this.resources.reserve({
-      sessionKey: this.buildSessionKey(fileId, options?.contentVersion),
-      bytes: expectedSize,
-      countsTowardCache: options?.countsTowardCache ?? false,
-      signal: options?.signal,
-      waitTimeoutMs: options?.waitTimeoutMs,
-    });
-    let upstream: DownloadUpstreamLease;
+    this.assertFileNotInvalidating(fileId);
+    const controller = new AbortController();
+    const pending = this.pendingAdmissions.get(fileId) ?? new Set<AbortController>();
+    pending.add(controller);
+    this.pendingAdmissions.set(fileId, pending);
+    const combinedSignal = this.combineAbortSignals(options?.signal, controller.signal);
+    let reservation: DownloadReservation | undefined;
     try {
-      upstream = await this.resources.acquireUpstreamSlot({
-        signal: options?.signal,
+      reservation = await this.resources.reserve({
+        sessionKey: this.buildSessionKey(fileId, options?.contentVersion),
+        bytes: expectedSize,
+        countsTowardCache: options?.countsTowardCache ?? false,
+        signal: combinedSignal.signal,
+        waitTimeoutMs: options?.waitTimeoutMs,
+      });
+      const upstream = await this.resources.acquireUpstreamSlot({
+        signal: combinedSignal.signal,
         waitTimeoutMs: options?.waitTimeoutMs,
         // 大文件按体量占用更多并发预算，避免 3×4GiB 冷分卷同秒全部回源
         bytes: expectedSize,
       });
+      let released = false;
+      return {
+        reservation,
+        upstream,
+        release: () => {
+          if (released) return;
+          released = true;
+          reservation!.release();
+          upstream.release();
+        },
+      };
     } catch (error) {
-      reservation.release();
+      reservation?.release();
       throw error;
+    } finally {
+      combinedSignal.dispose();
+      pending.delete(controller);
+      if (pending.size === 0 && this.pendingAdmissions.get(fileId) === pending) {
+        this.pendingAdmissions.delete(fileId);
+      }
     }
-    let released = false;
-    return {
-      reservation,
-      upstream,
-      release: () => {
-        if (released) return;
-        released = true;
-        reservation.release();
-        upstream.release();
-      },
-    };
   }
 
   /** 预约会话键：fileId + 内容版本（覆盖上传后不与旧会话共用预算） */
@@ -391,6 +438,10 @@ export class CacheSessionCoordinator {
    * 串行化后，第二个请求在锁内复查会话并直接合流为 follower。
    */
   async withSessionLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+    const fileId = this.fileIdForSessionLockKey(key);
+    if (fileId && this.invalidatingFileIds.has(fileId)) {
+      throw new ServiceUnavailableException('文件缓存正在失效，请稍后重试');
+    }
     const previous = this.sessionLocks.get(key) ?? Promise.resolve();
     let release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
@@ -398,11 +449,64 @@ export class CacheSessionCoordinator {
     this.sessionLocks.set(key, queued);
     await previous.catch(() => {});
     try {
+      // 锁等待期间可能开始了 fileId 级失效；重新检查以免排队请求越过失效栅栏。
+      if (fileId && this.invalidatingFileIds.has(fileId)) {
+        throw new ServiceUnavailableException('文件缓存正在失效，请稍后重试');
+      }
       return await fn();
     } finally {
       release();
       // 队列已空则清理，避免 Map 按会话键无界增长
       if (this.sessionLocks.get(key) === queued) this.sessionLocks.delete(key);
+    }
+  }
+
+  private fileIdForSessionLockKey(key: string): string | undefined {
+    if (key.startsWith('spool:')) return key.slice('spool:'.length);
+    if (key.startsWith('file:')) {
+      const separator = key.indexOf(':v', 'file:'.length);
+      return separator < 0 ? key.slice('file:'.length) : key.slice('file:'.length, separator);
+    }
+    return undefined;
+  }
+
+  /**
+   * 串行化删除/更新与 build/spool 会话创建。
+   * 先立失效栅栏并取消资源队列准入，拆除已有会话，再排空各版本 session lock，最后执行磁盘删除。
+   * 栅栏期间的新请求快速返回可重试错误；已获准的会话由 beforeDrain 收尾。
+   */
+  async withFileInvalidation<T>(
+    fileId: string,
+    beforeDrain: () => Promise<void> | void,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    const previous = this.fileInvalidationLocks.get(fileId) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const queued = previous.then(() => gate, () => gate);
+    this.fileInvalidationLocks.set(fileId, queued);
+    await previous.catch(() => {});
+    try {
+      this.invalidatingFileIds.add(fileId);
+      // 先取消等待资源的 leader，再拆除已有会话并排空锁尾。
+      for (const controller of this.pendingAdmissions.get(fileId) ?? []) controller.abort();
+      await beforeDrain();
+      const fileSessionTails = [...this.sessionLocks.entries()]
+        .filter(([key]) => this.fileIdForSessionLockKey(key) === fileId)
+        .map(([, tail]) => tail.catch(() => {}));
+      await Promise.all(fileSessionTails);
+      return await fn();
+    } finally {
+      this.invalidatingFileIds.delete(fileId);
+      this.pendingAdmissions.delete(fileId);
+      release();
+      if (this.fileInvalidationLocks.get(fileId) === queued) this.fileInvalidationLocks.delete(fileId);
+    }
+  }
+
+  assertFileNotInvalidating(fileId: string): void {
+    if (this.invalidatingFileIds.has(fileId)) {
+      throw new ServiceUnavailableException('文件缓存正在失效，请稍后重试');
     }
   }
 
@@ -450,6 +554,30 @@ export class CacheSessionCoordinator {
     return String(session.contentVersion) === String(contentVersion);
   }
 
+  /** 在 spool 复用前确认映射仍指向完整、可打开的文件。 */
+  private async isReusableSpoolSession(
+    session: SpoolSession,
+    expectedSize: number,
+    contentVersion?: string | number,
+  ): Promise<boolean> {
+    if (
+      session.error
+      || session.expectedSize !== expectedSize
+      || !this.sameContentVersion(session, contentVersion)
+    ) {
+      return false;
+    }
+    try {
+      if (session.fileReady === false) return true;
+      const stat = await fsp.stat(session.spoolPath);
+      if (!stat.isFile()) return false;
+      // 活动 leader 正在逐步写入，尚未达到 expectedSize 是正常状态；完成会话必须精确完整。
+      return !session.completed || stat.size === expectedSize;
+    } catch {
+      return false;
+    }
+  }
+
   // ---------- build 会话 ----------
 
   /**
@@ -481,9 +609,11 @@ export class CacheSessionCoordinator {
     // 关闭中拒绝新建。并发预算**不在此判断**：上游名额已由 acquireSessionResources 通过
     // 权重预算（acquireUpstreamSlot）唯一把关；此处再判会因为「连接数 vs 权重预算」单位不一致
     // 而误拒刚拿到租约的 leader（maxConcurrentUpstreams=1 时每个 leader 都会失败）。
-    if (this.shuttingDown) {
+    if (this.shuttingDown || this.invalidatingFileIds.has(fileId)) {
       lease.release();
-      throw new ServiceUnavailableException('系统回源繁忙，请稍后重试');
+      throw new ServiceUnavailableException(
+        this.shuttingDown ? '系统回源繁忙，请稍后重试' : '文件缓存正在失效，请稍后重试',
+      );
     }
 
     const events = new EventEmitter();
@@ -525,6 +655,7 @@ export class CacheSessionCoordinator {
     contentVersion?: string | number,
     options?: { waitTimeoutMs?: number },
   ): Promise<{ stream: Readable; fromCache: boolean }> {
+    this.assertFileNotInvalidating(fileId);
     await this.abortBuildSession(fileId);
     return this.getSpooledStream(fileId, expectedSize, fetchFn, start, end, contentVersion, options);
   }
@@ -712,6 +843,7 @@ export class CacheSessionCoordinator {
     contentVersion?: string | number,
     options?: { waitTimeoutMs?: number },
   ): Promise<{ stream: Readable; fromCache: boolean }> {
+    this.assertFileNotInvalidating(fileId);
     if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end < start || end >= expectedSize) {
       throw new Error(`非法的 Range: ${start}-${end}`);
     }
@@ -721,12 +853,15 @@ export class CacheSessionCoordinator {
     // 后到者来得及复查 spoolSessions 之前直接失败。leader 持锁只到 session 建立，
     // 后续消费者因此能立刻成为 follower，不会重复占用一个 4GB 上游名额。
     return this.withSessionLock(`spool:${fileId}`, async () => {
-      const existing = this.spoolSessions.get(fileId);
-      if (
-        existing
-        && existing.expectedSize === expectedSize
-        && this.sameContentVersion(existing, contentVersion)
-      ) {
+      let existing = this.spoolSessions.get(fileId);
+      if (existing && !(await this.isReusableSpoolSession(existing, expectedSize, contentVersion))) {
+        // 映射里可能残留已被 TTL/外部清理删除的 session；旧 follower 收到失败信号后，
+        // 当前请求继续走新 leader 路径，避免后续请求无限复用一个不存在的 spoolPath。
+        this.logger.warn(`发现不可复用的 spool 会话，准备重建: ${fileId}`);
+        await this.teardownSpoolSession(existing);
+        existing = undefined;
+      }
+      if (existing) {
         return { stream: this.createSpoolFollowerStream(existing, start, end), fromCache: false };
       }
 
@@ -753,6 +888,7 @@ export class CacheSessionCoordinator {
     lease: SessionResourceLease,
     contentVersion?: string | number,
   ): Promise<SpoolSession> {
+    this.assertFileNotInvalidating(fileId);
     const current = this.spoolSessions.get(fileId);
     if (current) {
       if (current.expectedSize === expectedSize && this.sameContentVersion(current, contentVersion)) {
@@ -762,10 +898,12 @@ export class CacheSessionCoordinator {
       // 大小不一致（覆盖 / 数据异常）或内容版本已更新：先清理旧 spool 再重建，避免串流过期内容
       await this.teardownSpoolSession(current);
     }
-    // 冷回源并发预算（H-06）：关闭中拒绝新建（资源申请已在调用方完成）
-    if (this.shuttingDown) {
+    // 冷回源并发预算（H-06）：关闭中或 fileId 失效期间拒绝新建（租约已在调用方完成）
+    if (this.shuttingDown || this.invalidatingFileIds.has(fileId)) {
       lease.release();
-      throw new ServiceUnavailableException('系统回源繁忙，请稍后重试');
+      throw new ServiceUnavailableException(
+        this.shuttingDown ? '系统回源繁忙，请稍后重试' : '文件缓存正在失效，请稍后重试',
+      );
     }
 
     const events = new EventEmitter();
@@ -775,6 +913,7 @@ export class CacheSessionCoordinator {
       expectedSize,
       contentVersion,
       spoolPath: `${this.diskManager.getCachePath(fileId)}.${randomUUID()}.spool`,
+      fileReady: false,
       bytesWritten: 0,
       completed: false,
       events,
@@ -832,9 +971,11 @@ export class CacheSessionCoordinator {
 
     let upstreamPromise: Promise<{ stream: Readable; info: { file_size: number } }> | undefined;
     try {
-      await fsp.unlink(session.spoolPath).catch(() => {});
+      this.assertFileNotInvalidating(session.fileId);
       // 在请求上游前先创建 spool 文件，保证首个进度事件到达时跟随者可安全打开。
+      // 路径带随机 session ID 且由协调器登记；无需先 unlink，避免覆盖清理器可能观察到的文件。
       await fsp.writeFile(session.spoolPath, Buffer.alloc(0), { flag: 'wx' });
+      session.fileReady = true;
       // 与 build 路径一致的竞速保护：上游无响应时按总超时失败，
       // 避免会话永久卡在 fetchFn 导致租约永不归零。
       upstreamPromise = fetchFn();
@@ -1104,19 +1245,20 @@ export class CacheSessionCoordinator {
       clearTimeout(session.teardownTimer);
       session.teardownTimer = undefined;
     }
-    if (this.spoolSessions.get(session.fileId) === session) {
-      this.spoolSessions.delete(session.fileId);
-    }
+    const current = this.spoolSessions.get(session.fileId);
+    if (current === session) this.spoolSessions.delete(session.fileId);
+    // UUID spool 路径不复用；若外部错误地把相同路径赋给新 session，不能删它的文件。
+    else if (current?.spoolPath === session.spoolPath) return;
+    session.error ??= new Error('spool 会话已被替换或清理，请重新发起请求');
     session.upstream?.destroy();
     session.output?.destroy();
     await fsp.unlink(session.spoolPath).catch(() => {});
     // 拆除会话前必须先让等待者醒来：等待者监听在本会话 events 上，
     // 直接 removeAllListeners() 会让它们的 waitForChange 永远等不到任何通知
     // （既没有 progress 也没有 failed），pump 卡在 await、消费者流悬挂不结束。
-    // 这种场景真实存在：同一文件并发请求且 expectedSize/contentVersion 不一致
-    // （覆盖上传期间），旧会话被替换时其既有消费者正好在等待。
-    // 统一用 failed 通知（带可诊断原因），等待者的 onFailed 会得到明确错误。
-    session.events.emit('failed', new Error('spool 会话已被替换或清理，请重新发起请求'));
+    // 将错误存入 session 并发出 failed：已有等待者会被唤醒，迟到的旧 follower
+    // 也会在 pump/read 之前观察到同一失败，而不是继续打开已清理路径。
+    session.events.emit('failed', session.error);
     session.events.removeAllListeners();
   }
 
@@ -1257,6 +1399,8 @@ export class CacheSessionCoordinator {
       pumping = true;
       try {
         while (!finished && !destroyed) {
+          const terminalError = source.getError();
+          if (terminalError) throw terminalError;
           if (offset > source.end) {
             finish();
             return;

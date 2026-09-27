@@ -236,6 +236,7 @@ export class CacheDiskManager {
     fileAccessMap: Map<string, number>,
     isBuilding: (fileId: string) => boolean,
     isPinned?: (fileId: string) => boolean,
+    isActiveTemporaryFile?: (fullPath: string) => boolean,
   ): Promise<number> {
     const files = await fsp.readdir(this.cacheDir);
     const now = Date.now();
@@ -245,12 +246,22 @@ export class CacheDiskManager {
       const fullPath = path.join(this.cacheDir, f);
       try {
         const stat = await fsp.stat(fullPath);
-        if (f.endsWith('.tmp') && isBuilding(f.slice(0, -4))) {
+        if ((f.endsWith('.tmp') && isBuilding(f.slice(0, -4))) || isActiveTemporaryFile?.(fullPath)) {
+          // 活动 spool/build 临时文件以随机后缀命名；按协调器登记的绝对路径保护，不能按 TTL 删除。
           surviving.add(f);
         } else if (isPinned?.(f)) {
           // 正在被读取的缓存：即使过期也保留，避免中断在途下载（下一轮清理再处理）
           surviving.add(f);
         } else if (now - stat.mtimeMs > cacheTtlMs) {
+          // stat 之后可能有新 build/spool 或缓存读者登记；unlink 前再次确认保护状态。
+          if (
+            (f.endsWith('.tmp') && isBuilding(f.slice(0, -4)))
+            || isActiveTemporaryFile?.(fullPath)
+            || isPinned?.(f)
+          ) {
+            surviving.add(f);
+            continue;
+          }
           await fsp.unlink(fullPath);
           fileAccessMap.delete(f); // 同步清理 LRU 记录，防止 Map 泄漏
           if (!f.endsWith('.tmp') && !f.endsWith('.spool')) {

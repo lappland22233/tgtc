@@ -33,7 +33,9 @@ export function pickUserAccount<T extends WeightedUserAccount>(
     if (preferred) return { account: preferred, fallbackFromPreferred: false };
   }
   const expanded: T[] = [];
-  for (const item of candidates) {
+  // DB 查询未承诺排序；同一幂等任务必须先规范化候选顺序，避免重试因行顺序变化而换发送账号。
+  const stableCandidates = [...candidates].sort((left, right) => left.id.localeCompare(right.id));
+  for (const item of stableCandidates) {
     const weight = Math.max(1, Math.min(Math.floor(item.weight) || 1, 10));
     for (let index = 0; index < weight; index += 1) expanded.push(item);
   }

@@ -146,9 +146,20 @@ export class FileCacheService implements OnApplicationShutdown {
     else this.pinnedCacheRefs.set(fileId, next);
   }
 
-  /** 该 fileId 的缓存当前是否不可淘汰（正在被读取或正在构建/发布中） */
+  /** 该 fileId 的正式缓存当前是否不可淘汰（正在被读取或正在构建/发布中） */
   private isPinnedCache(fileId: string): boolean {
     return this.pinnedCacheRefs.has(fileId) || this.buildSessions.has(fileId);
+  }
+
+  /** 活动临时文件使用带随机 session id 的绝对路径，必须精确匹配而不能从文件名猜测 fileId。 */
+  private isActiveTemporaryCacheFile(fullPath: string): boolean {
+    for (const session of this.buildSessions.values()) {
+      if (session.tmpPath === fullPath) return true;
+    }
+    for (const session of this.spoolSessions.values()) {
+      if (session.spoolPath === fullPath) return true;
+    }
+    return false;
   }
 
   /** 会话状态委托（供测试 / 外部检查，保持既有 spec 兼容） */
@@ -460,6 +471,7 @@ export class FileCacheService implements OnApplicationShutdown {
    */
   getCachedReadStream(fileId: string, expectedSize: number): Readable | null {
     this.validateFileId(fileId);
+    this.sessionCoordinator.assertFileNotInvalidating(fileId);
     if (this.noCacheMode) return null;
     const cachePath = this.getCachePath(fileId);
 
@@ -511,6 +523,7 @@ export class FileCacheService implements OnApplicationShutdown {
       throw new Error(`非法的文件大小: ${expectedSize}`);
     }
     this.assertNotShuttingDown();
+    this.sessionCoordinator.assertFileNotInvalidating(fileId);
 
     // 无缓存模式：不读缓存、不发布正式缓存，走可重放 spool / 有界直通。
     //
@@ -729,6 +742,7 @@ export class FileCacheService implements OnApplicationShutdown {
     this.validateFileId(fileId);
     if (start < 0 || end < start || end >= expectedSize) return null;
     this.assertNotShuttingDown();
+    this.sessionCoordinator.assertFileNotInvalidating(fileId);
     const contentVersion = options?.contentVersion;
     const waitTimeoutMs = this.resolveWaitTimeout(options?.waitTimeoutMs);
     // 请求级无缓存必须与全局无缓存使用同一 spool 语义，绝不发布正式缓存。
@@ -925,6 +939,8 @@ export class FileCacheService implements OnApplicationShutdown {
     contentVersion?: string | number,
     options?: { waitTimeoutMs?: number },
   ): Promise<{ stream: Readable; fromCache: boolean }> {
+    this.validateFileId(fileId);
+    this.sessionCoordinator.assertFileNotInvalidating(fileId);
     return this.sessionCoordinator.getNoCacheStream(
       fileId,
       expectedSize,
@@ -950,6 +966,7 @@ export class FileCacheService implements OnApplicationShutdown {
         this.fileAccessMap,
         fileId => this.buildSessions.has(fileId),
         fileId => this.isPinnedCache(fileId),
+        fullPath => this.isActiveTemporaryCacheFile(fullPath),
       );
       this.diskManager.pruneAccessMap(this.fileAccessMap);
       if (cleaned > 0) {
@@ -1020,7 +1037,7 @@ export class FileCacheService implements OnApplicationShutdown {
       if (!isTmp && !isSpool) continue;
       const full = path.join(this.cacheDir, entry.name);
       const size = await fsp.stat(full).then(stat => stat.size).catch(() => 0);
-      if (active.has(full)) {
+      if (active.has(full) || this.isActiveTemporaryCacheFile(full)) {
         if (isTmp) usage.buildBytes += size;
         else usage.spoolBytes += size;
       } else {
@@ -1036,8 +1053,8 @@ export class FileCacheService implements OnApplicationShutdown {
   /**
    * 清理崩溃残留的临时文件。
    *
-   * 双重保护，避免误删活动文件：
-   * - 跳过当前 build/spool 会话的真实路径；
+   * 多重保护，避免误删活动文件：
+   * - 按初始快照和 unlink 前的实时会话映射跳过 build/spool 路径；
    * - 只删除 mtime 早于 `minAgeMs` 的文件（启动瞬间新建立的会话不会被删）。
    */
   async sweepOrphanTempFiles(minAgeMs = 60_000): Promise<number> {
@@ -1059,10 +1076,13 @@ export class FileCacheService implements OnApplicationShutdown {
       if (!entry.isFile()) continue;
       if (!entry.name.endsWith('.tmp') && !entry.name.endsWith('.spool')) continue;
       const full = path.join(this.cacheDir, entry.name);
-      if (active.has(full)) continue;
+      if (active.has(full) || this.isActiveTemporaryCacheFile(full)) continue;
       const stat = await fsp.stat(full).catch(() => null);
-      if (!stat || stat.mtimeMs > cutoff) continue;
+      if (!stat || stat.mtimeMs > cutoff || this.isActiveTemporaryCacheFile(full)) continue;
       try {
+        // Recheck immediately before unlink: the initial active-set snapshot may predate
+        // a session created while readdir/stat were pending.
+        if (this.isActiveTemporaryCacheFile(full)) continue;
         await fsp.unlink(full);
         removed++;
         reclaimedBytes += stat.size;
@@ -1271,33 +1291,30 @@ export class FileCacheService implements OnApplicationShutdown {
    */
   async invalidate(fileId: string): Promise<void> {
     this.validateFileId(fileId);
-    const session = this.buildSessions.get(fileId);
-    if (session) {
-      session.abort(new Error('缓存构建已失效'));
-      await Promise.race([
-        session.completion.catch(() => {}),
-        new Promise<void>(resolve => {
-          const timer = setTimeout(resolve, 5000);
-          timer.unref?.();
-        }),
-      ]);
-      // 等 runBuildSession 的 finally 中 setImmediate 从 map 移除已失效会话，
-      // 以便下方能区分"旧会话收尾"与"新会话已创建"。
-      await new Promise<void>(resolve => setImmediate(resolve));
-    }
-    // 可重放 spool 会话一并销毁（文件删除 / 覆盖更新时终止在途上游）
-    const spool = this.spoolSessions.get(fileId);
-    if (spool) await this.sessionCoordinator.teardownSpoolSession(spool);
-
-    // G4-05：abort/teardown 等待期间可能已有新会话（新请求/覆盖上传）为该 fileId 建立。
-    // 复查活动会话后再 unlink，避免无条件删除新会话的 .tmp/.spool 导致新构建被破坏。
-    const hasActiveSession =
-      this.buildSessions.has(fileId) || this.spoolSessions.has(fileId);
-    if (!hasActiveSession) {
-      await this.diskManager.unlinkAllCacheFiles(fileId);
-    }
-    this.fileAccessMap.delete(fileId);
-    this.logger.debug(`缓存失效: ${fileId}${hasActiveSession ? '（存在新活动会话，跳过 unlink）' : ''}`);
+    await this.sessionCoordinator.withFileInvalidation(fileId, async () => {
+      const session = this.buildSessions.get(fileId);
+      if (session) {
+        session.abort(new Error('缓存构建已失效'));
+        await Promise.race([
+          session.completion.catch(() => {}),
+          new Promise<void>(resolve => {
+            const timer = setTimeout(resolve, 5000);
+            timer.unref?.();
+          }),
+        ]);
+        await new Promise<void>(resolve => setImmediate(resolve));
+      }
+      const spool = this.spoolSessions.get(fileId);
+      if (spool) await this.sessionCoordinator.teardownSpoolSession(spool);
+    }, async () => {
+      const hasActiveSession = this.buildSessions.has(fileId) || this.spoolSessions.has(fileId);
+      if (!hasActiveSession) {
+        // 失效栅栏阻止新的 build/spool 会话登记，直到固定缓存和所有临时兄弟文件删完。
+        await this.diskManager.unlinkAllCacheFiles(fileId);
+      }
+      this.fileAccessMap.delete(fileId);
+      this.logger.debug(`缓存失效: ${fileId}${hasActiveSession ? '（存在活动会话，跳过 unlink）' : ''}`);
+    });
   }
 
   /**

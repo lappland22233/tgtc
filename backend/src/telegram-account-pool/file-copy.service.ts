@@ -605,7 +605,7 @@ export class FileCopyService {
    * 全部集中在一个账号时照样从 8 升到 16，把 DC-5 压力继续堆到同一个账号。
    *
    * 本方法只看**达到大小阈值**的逻辑文件：返回这些文件的去重账号覆盖情况。
-   * 判据（调用方使用）：`files` 数量 > 0 时，要求
+   * 判据（调用方使用）：仅统计当前有效 Bot ID 持有的副本；`files` 数量 > 0 时，要求
    * `minReadyAccounts`（该批文件里覆盖最少的账号数）达到目标，才允许升档。
    *
    * 有界：按 `LIMIT maxGroups + 1` 截断，返回 `truncated` 表示统计不完整
@@ -615,6 +615,7 @@ export class FileCopyService {
     ownerType?: TelegramCopyOwnerType;
     minBytes: number;
     maxGroups?: number;
+    accountIds?: string[];
   }): Promise<{
     files: number;
     truncated: boolean;
@@ -624,14 +625,21 @@ export class FileCopyService {
     minReadyAccounts: number;
   }> {
     const maxGroups = Math.max(1, Math.floor(params.maxGroups ?? REPLICATION_COVERAGE_MAX_GROUPS));
+    const accountIds = params.accountIds === undefined ? undefined : [...new Set(params.accountIds)];
+    const readyAccountCount = accountIds === undefined
+      ? 'COUNT(DISTINCT copy.accountId)'
+      : accountIds.length === 0
+        ? '0'
+        : 'COUNT(DISTINCT CASE WHEN copy.accountId IN (:...eligibleAccountIds) THEN copy.accountId END)';
     const qb = this.repo
       .createQueryBuilder('copy')
       .select('copy.ownerType', 'ownerType')
       .addSelect('copy.ownerId', 'ownerId')
       .addSelect('MAX(copy.fileSize)', 'maxSize')
-      .addSelect('COUNT(DISTINCT copy.accountId)', 'readyAccountCount')
+      .addSelect(readyAccountCount, 'readyAccountCount')
       .where('copy.status = :status', { status: 'ready' })
-      .andWhere('copy.fileSize IS NOT NULL');
+      .andWhere('copy.fileSize >= :minBytes', { minBytes: params.minBytes });
+    if (accountIds?.length) qb.setParameter('eligibleAccountIds', accountIds);
     if (params.ownerType) qb.andWhere('copy.ownerType = :ownerType', { ownerType: params.ownerType });
     const rows = await qb
       .groupBy('copy.ownerType')

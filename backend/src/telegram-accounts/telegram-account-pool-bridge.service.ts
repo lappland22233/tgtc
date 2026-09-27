@@ -1,7 +1,7 @@
 import { Injectable, Logger, OnApplicationShutdown, OnModuleInit } from '@nestjs/common';
 import { OnEvent } from '@nestjs/event-emitter';
-import { TelegramAccountPoolService } from '../telegram-account-pool/telegram-account-pool.service';
-import { TelegramAccountConfig } from '../telegram-account-pool/telegram-account-pool.types';
+import { TELEGRAM_ACCOUNT_DEFAULT_MAX_INFLIGHT, TelegramAccountPoolService } from '../telegram-account-pool/telegram-account-pool.service';
+import type { TelegramAccountConfig } from '../telegram-account-pool/telegram-account-pool.types';
 import { ACCOUNT_FEATURE_KEYS, TelegramAccountFeatureService } from './telegram-account-feature.service';
 import { TelegramAccountsService } from './telegram-accounts.service';
 
@@ -71,7 +71,7 @@ export class TelegramAccountPoolBridgeService implements OnModuleInit, OnApplica
         token: row.token,
         chatId: row.chatId,
         weight: row.weight,
-        maxInflight: row.maxInflight,
+        maxInflight: row.maxInflight || TELEGRAM_ACCOUNT_DEFAULT_MAX_INFLIGHT,
         enabled: true,
         note: '后台账号',
         source: 'panel' as const,

@@ -1568,7 +1568,7 @@ const accountForm = reactive({
   token: '',
   primaryChatId: '',
   weight: 1,
-  maxInflight: 8,
+  maxInflight: 16,
   apiId: 1,
   apiHash: '',
   phoneNumber: '',
@@ -1586,7 +1586,7 @@ function resetAccountForm() {
   accountForm.token = '';
   accountForm.primaryChatId = '';
   accountForm.weight = 1;
-  accountForm.maxInflight = 8;
+  accountForm.maxInflight = 16;
   accountForm.apiId = 1;
   accountForm.apiHash = '';
   accountForm.phoneNumber = '';

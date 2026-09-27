@@ -2693,6 +2693,19 @@ export class FileService implements OnModuleInit {
     };
   }
 
+  /**
+   * 公开媒体的授权 metadata 预检：仅用于访问槽位准入，不读取文件流、不写访问日志。
+   * 返回最小字段，避免控制器为 size-aware 限流获取并持有整个 ORM 实体。
+   */
+  async getPublicMediaMetadata(id: string): Promise<{ size: number }> {
+    const file = await this.getPublicMediaFile(id);
+    const size = Number(file.size);
+    if (!Number.isSafeInteger(size) || size <= 0) {
+      throw new BadRequestException('文件大小无效');
+    }
+    return { size };
+  }
+
   private async getPublicMediaFile(id: string): Promise<File> {
     const file = await this.fileRepository.findOne({ where: { id, isDeleted: false } });
     if (!file) throw new NotFoundException('媒体文件不存在');

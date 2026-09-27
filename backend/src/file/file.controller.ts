@@ -67,7 +67,8 @@ const activeUploadsByUser = new Map<string, number>();
 // 保守方案：IP 维度限流（复用 RateLimitService）+ 简单并发连接计数，防刷带宽。
 const MEDIA_RATE_LIMIT_PER_SEC = 30;              // 同 IP 每秒最多 30 次媒体请求
 const MEDIA_RATE_BAN_MS = 60 * 1000;              // 超限封禁 1 分钟
-const MEDIA_CONCURRENCY_PER_IP = 4;               // 同 IP 最大并发媒体连接数
+export const PUBLIC_MEDIA_SMALL_FILE_THRESHOLD_BYTES = 20_000_000; // 严格小于 20MB 的图床资源不占 per-IP 并发槽
+const MEDIA_CONCURRENCY_PER_IP = 4;               // 同 IP 最大并发媒体连接数（20MB 及以上）
 const activeMediaByIp = new Map<string, number>();
 
 // G2-07 修复：Multer 默认 memoryStorage 会把大文件整体驻留内存，多文件并发可 OOM。
@@ -352,24 +353,30 @@ export class FileController {
       if (!rateResult.allowed) {
         throw new HttpException('媒体访问过于频繁，请稍后再试', HttpStatus.TOO_MANY_REQUESTS);
       }
+      // 权限检查先于 size-aware 豁免：私有、危险 MIME 或受约束资源仍走原授权拒绝路径，
+      // 且 metadata 预检不启动上游流、不写媒体访问日志。
+      const mediaMetadata = await this.fileService.getPublicMediaMetadata(id);
+      if (res.destroyed) return;
+      const enforceIpConcurrency = mediaMetadata.size >= PUBLIC_MEDIA_SMALL_FILE_THRESHOLD_BYTES;
       const currentConcurrency = activeMediaByIp.get(clientIp) || 0;
-      if (currentConcurrency >= MEDIA_CONCURRENCY_PER_IP) {
+      if (enforceIpConcurrency && currentConcurrency >= MEDIA_CONCURRENCY_PER_IP) {
         throw new HttpException('媒体并发连接过多，请稍后再试', HttpStatus.TOO_MANY_REQUESTS);
       }
-      // 限流 await 期间客户端断开：close 已错过，直接放弃，不占槽
-      if (res.destroyed) return;
+      // 小于 20MB 的媒体免 per-IP 连接槽；大文件继续占用同一组幂等槽位。
       let slotHeld = false;
       releaseMediaSlot = () => {
         if (!slotHeld) return;
         slotHeld = false;
-        const remaining = (activeMediaByIp.get(clientIp) || 1) - 1;
+        const remaining = Math.max(0, (activeMediaByIp.get(clientIp) || 0) - 1);
         if (remaining > 0) activeMediaByIp.set(clientIp, remaining);
         else activeMediaByIp.delete(clientIp);
       };
-      activeMediaByIp.set(clientIp, currentConcurrency + 1);
-      slotHeld = true;
+      if (enforceIpConcurrency) {
+        activeMediaByIp.set(clientIp, currentConcurrency + 1);
+        slotHeld = true;
+      }
       // 流响应结束/客户端断开时释放并发槽位
-      res.on('close', releaseMediaSlot);
+      if (slotHeld) res.on('close', releaseMediaSlot);
       const rangeHeader = req.headers.range;
       if (rangeHeader) {
         const rangeResult = await this.fileService.getPublicMediaStreamWithRange(id, rangeHeader, clientIp, typeof req.headers['if-range'] === 'string' ? req.headers['if-range'] : undefined);
@@ -419,10 +426,12 @@ export class FileController {
         updateAccessLog: (id, bytes) => this.fileService.updateAccessLogResponseSize(id, bytes),
       });
     } catch (error) {
-      this.streamResponder.handleError(res, error, '媒体文件访问失败', req);
-      // R8：异常路径兜底释放（幂等）。close 正常触发时 slotHeld 已为 false，无副作用；
-      // close 在监听器注册前已错过时，这里防止槽位泄漏。
-      releaseMediaSlot();
+      try {
+        this.streamResponder.handleError(res, error, '媒体文件访问失败', req);
+      } finally {
+        // R8：异常处理本身失败时也必须归还槽位，且 close/错误路径可重复安全释放。
+        releaseMediaSlot();
+      }
     }
   }
 

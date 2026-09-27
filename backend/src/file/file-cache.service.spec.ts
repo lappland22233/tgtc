@@ -286,6 +286,37 @@ describe('FileCacheService realtime build session', () => {
     expect(upstream.destroyed).toBe(true);
     expect((service as any).buildSessions.size).toBe(0);
   });
+
+  it('invalidate cancels a spool leader waiting for disk admission before deleting temporary files', async () => {
+    (service as any).noCacheMode = true;
+    let enteredResolve!: () => void;
+    let aborted = false;
+    const entered = new Promise<void>(resolve => { enteredResolve = resolve; });
+    const reserveSpy = jest.spyOn(service.resources, 'reserve').mockImplementation((options: any) => {
+      enteredResolve();
+      return new Promise((_, reject) => {
+        const fail = () => {
+          aborted = true;
+          reject(new Error('admission cancelled'));
+        };
+        if (options.signal?.aborted) fail();
+        else options.signal?.addEventListener('abort', fail, { once: true });
+      }) as never;
+    });
+    const fetchFn = jest.fn(async () => ({ stream: new PassThrough(), info: { file_size: 4 } }));
+    const pending = service.getOrCacheStream(fileId, 4, fetchFn);
+    const pendingExpectation = expect(pending).rejects.toThrow('admission cancelled');
+    await entered;
+
+    await service.invalidate(fileId);
+    await pendingExpectation;
+
+    expect(aborted).toBe(true);
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect((service as any).sessionCoordinator.pendingAdmissions.size).toBe(0);
+    expect(await readdir(path.join(cwd, 'tmp', 'Cache')).catch(() => [])).toEqual([]);
+    reserveSpy.mockRestore();
+  });
 });
 
 describe('FileCacheService no-cache mode', () => {
@@ -929,6 +960,46 @@ describe('FileCacheService 磁盘预约、降级与 pin（下载配额）', () =
     await expect(firstRead).rejects.toThrow();
     await expect(secondRead).resolves.toEqual(Buffer.from('bbbb'));
     expect(fetchNew).toHaveBeenCalledTimes(1);
+  });
+
+  it('TTL 清理跳过活动 spool；teardown 会自行删除 spool 并注销 session', async () => {
+    (service as any).noCacheMode = true;
+    (service as any).sessionCoordinator.spoolConsumerGracePeriodMs = 120_000;
+    const upstream = new PassThrough();
+    const { stream } = await service.getNoCacheStream(fileId, 4, async () => ({
+      stream: upstream,
+      info: { file_size: 4 },
+    }));
+    upstream.end(Buffer.from('data'));
+    await expect(readStream(stream)).resolves.toEqual(Buffer.from('data'));
+
+    const session = service.spoolSessions.get(fileId)!;
+    const oldDate = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+    const { utimes } = await import('fs/promises');
+    await utimes(session.spoolPath, oldDate, oldDate);
+
+    const diskManager = (service as any).diskManager;
+    const cleanedWhileActive = await diskManager.cleanupExpiredCache(
+      24 * 60 * 60 * 1000,
+      new Map(),
+      () => false,
+      () => false,
+      (fullPath: string) => (service as any).isActiveTemporaryCacheFile(fullPath),
+    );
+    expect(cleanedWhileActive).toBe(0);
+    await expect(readFile(session.spoolPath)).resolves.toEqual(Buffer.from('data'));
+
+    await (service as any).sessionCoordinator.teardownSpoolSession(session);
+    const cleanedAfterTeardown = await diskManager.cleanupExpiredCache(
+      24 * 60 * 60 * 1000,
+      new Map(),
+      () => false,
+      () => false,
+      (fullPath: string) => (service as any).isActiveTemporaryCacheFile(fullPath),
+    );
+    expect(cleanedAfterTeardown).toBe(0);
+    await expect(readFile(session.spoolPath)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(service.spoolSessions.has(fileId)).toBe(false);
   });
 
   it('LRU 淘汰跳过正在读取的缓存（pin 保护），读者释放后可淘汰', async () => {

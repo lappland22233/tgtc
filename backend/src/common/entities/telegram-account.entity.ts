@@ -77,7 +77,7 @@ export class TelegramAccount {
   @Column({ type: 'int', default: 1, comment: '调度静态权重' })
   weight: number;
 
-  @Column({ type: 'int', default: 8, comment: '每账号在飞上限' })
+  @Column({ type: 'int', default: 16, comment: '每账号在飞上限' })
   maxInflight: number;
 
   /** Bot 主存储 Chat；用户账号为可选源 Chat 权限配置 */

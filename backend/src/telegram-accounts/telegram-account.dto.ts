@@ -11,6 +11,7 @@ import {
   Min,
 } from 'class-validator';
 import { REPLICA_TARGET_RANGE } from '../telegram-account-pool/replica-target.resolver';
+import { TELEGRAM_ACCOUNT_DEFAULT_MAX_INFLIGHT } from '../telegram-account-pool/telegram-account-pool.service';
 
 /** 账号调度参数上限（防止一次配置把单实例打进限流） */
 export const ACCOUNT_LIMITS = {
@@ -18,6 +19,7 @@ export const ACCOUNT_LIMITS = {
   maxWeight: 100,
   minInflight: 1,
   maxInflight: 64,
+  defaultMaxInflight: TELEGRAM_ACCOUNT_DEFAULT_MAX_INFLIGHT,
   maxNameLength: 64,
   maxNoteLength: 255,
   maxChatIdLength: 32,

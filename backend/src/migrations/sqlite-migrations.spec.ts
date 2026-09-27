@@ -533,6 +533,16 @@ describe('SQLite schema migrations（隔离内存库）', () => {
       `INSERT INTO "telegram_accounts" ("id","type","name","externalId","status","enabled","weight","maxInflight")
        VALUES ('a1','bot','主存储 Bot','123456','active',1,1,8)`,
     );
+
+    // SQLite 兼容迁移不推断旧默认值来源，不应改写管理员可能显式设置的 8 或 16。
+    const { SqliteSetTelegramAccountDefaultInflight1803900000000 } = require('./1803900000000-SqliteSetTelegramAccountDefaultInflight') as typeof import('./1803900000000-SqliteSetTelegramAccountDefaultInflight');
+    const inflightMigration = new SqliteSetTelegramAccountDefaultInflight1803900000000();
+    const migrationRunner = dataSource.createQueryRunner();
+    await inflightMigration.up(migrationRunner);
+    expect(await dataSource.query(`SELECT "maxInflight" FROM "telegram_accounts" WHERE "id" = 'a1'`)).toEqual([{ maxInflight: 8 }]);
+    await dataSource.query(`UPDATE "telegram_accounts" SET "maxInflight" = 16 WHERE "id" = 'a1'`);
+    await inflightMigration.down(migrationRunner);
+    expect(await dataSource.query(`SELECT "maxInflight" FROM "telegram_accounts" WHERE "id" = 'a1'`)).toEqual([{ maxInflight: 16 }]);
     await expect(dataSource.query(
       `INSERT INTO "telegram_accounts" ("id","type","name","externalId","status","enabled","weight","maxInflight")
        VALUES ('a2','bot','重复 Bot','123456','active',1,1,8)`,

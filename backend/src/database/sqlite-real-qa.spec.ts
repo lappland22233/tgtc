@@ -85,6 +85,8 @@ describe('真实 SQLite 数据源关键业务与并发 QA', () => {
       'SqliteAddGrantFileUniqueId1803700000000',
       // 启用的通用镜像规则默认覆盖 Bot 入站文件，避免大文件长期只有来源账号单份副本
       'SqliteEnableBotInboundMirrorForEnabledRules1803800000000',
+      // maxInflight 只更新应用层新建默认，不对无法区分来源的存量账号值回填
+      'SqliteSetTelegramAccountDefaultInflight1803900000000',
     ]);
 
     await dataSource.undoLastMigration();

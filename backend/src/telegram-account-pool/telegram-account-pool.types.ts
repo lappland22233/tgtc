@@ -8,7 +8,7 @@
  * - **严禁把 token 写进日志/错误信息**：对外只暴露 `id` 与 `tokenPreview`。
  */
 
-/** 单个账号的静态配置（来自 TELEGRAM_ACCOUNT_POOL / TELEGRAM_BOT_TOKENS） */
+/** 单个账号的静态配置（来自 TELEGRAM_ACCOUNT_POOL / TELEGRAM_BOT_TOKENS）；未指定时默认 `TELEGRAM_ACCOUNT_DEFAULT_MAX_INFLIGHT` 个在飞请求。 */
 export interface TelegramAccountConfig {
   /** 稳定标识：默认 token 前缀（botId），也可显式指定 */
   id: string;
@@ -16,9 +16,9 @@ export interface TelegramAccountConfig {
   token: string;
   /** 该账号上传/接收的目标 chat（通常为归档群或与用户的私聊） */
   chatId: string;
-  /** 静态权重（默认 1；可按机房/线路质量调大） */
+  /** 静态得分系数（默认 1；参与确定性评分，不表示概率轮询比例） */
   weight: number;
-  /** 每账号在飞上限（默认 8；实验结论：8–16 区间成功率最佳） */
+  /** 每账号在飞上限（默认 16；需结合 Telegram 限流表现配置） */
   maxInflight: number;
   /** 是否参与调度（默认 true；运维可临时摘除某账号） */
   enabled: boolean;

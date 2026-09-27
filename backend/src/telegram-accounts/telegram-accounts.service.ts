@@ -20,6 +20,7 @@ import { TelegramAccountFeatureService, TelegramAccountFeatureState } from './te
 import { TelegramAccountProbeService } from './telegram-account-probe.service';
 import { TelegramUserClientService } from '../telegram-user/telegram-user-client.service';
 import {
+  ACCOUNT_LIMITS,
   CreateBotAccountDto,
   CreateUserAccountDto,
   RotateBotCredentialDto,
@@ -365,7 +366,7 @@ export class TelegramAccountsService {
       status: 'active',
       enabled: true,
       weight: dto.weight ?? 1,
-      maxInflight: dto.maxInflight ?? 8,
+      maxInflight: dto.maxInflight ?? ACCOUNT_LIMITS.defaultMaxInflight,
       primaryChatId: dto.primaryChatId?.trim() || null,
       credentialCiphertext: ciphertext,
       credentialVersion: this.credentials.cipherVersion(),
@@ -780,7 +781,7 @@ export class TelegramAccountsService {
         token: payload.token,
         chatId: account.primaryChatId ?? '',
         weight: Number(account.weight) || 1,
-        maxInflight: Number(account.maxInflight) || 8,
+        maxInflight: Number(account.maxInflight) || ACCOUNT_LIMITS.defaultMaxInflight,
       });
     }
     return result;

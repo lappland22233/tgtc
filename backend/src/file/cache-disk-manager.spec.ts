@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from 'fs/promises';
+import { access, mkdtemp, readFile, rm, utimes, writeFile } from 'fs/promises';
 import { tmpdir } from 'os';
 import * as path from 'path';
 import { CacheDiskManager } from './cache-disk-manager';
@@ -50,6 +50,59 @@ describe('CacheDiskManager hasEnoughDiskSpace (G4-07)', () => {
     });
 
     expect(manager.hasEnoughDiskSpace(1024 * 1024)).toBe(false);
+  });
+});
+
+describe('CacheDiskManager TTL 清理活动临时文件保护', () => {
+  let cwd: string;
+  let manager: CacheDiskManager;
+  const fileId = '33333333-3333-4333-8333-333333333333';
+
+  beforeEach(async () => {
+    cwd = await mkdtemp(path.join(tmpdir(), 'cache-disk-ttl-test-'));
+    manager = new CacheDiskManager(cwd);
+  });
+
+  afterEach(async () => {
+    await rm(cwd, { recursive: true, force: true });
+  });
+
+  it('TTL sweep 保留活动 spool，但清除已过期的 orphan spool', async () => {
+    const activeSpool = path.join(cwd, `${fileId}.active-session.spool`);
+    const orphanSpool = path.join(cwd, `${fileId}.orphan-session.spool`);
+    await writeFile(activeSpool, Buffer.from('active'));
+    await writeFile(orphanSpool, Buffer.from('orphan'));
+
+    const now = Date.now();
+    const oldDate = new Date(now - 60_000);
+    await utimes(activeSpool, oldDate, oldDate);
+    await utimes(orphanSpool, oldDate, oldDate);
+
+    const cleaned = await manager.cleanupExpiredCache(
+      1_000,
+      new Map(),
+      () => false,
+      () => false,
+      fullPath => fullPath === activeSpool,
+    );
+
+    expect((await readFile(activeSpool)).toString()).toBe('active');
+    await expect(access(orphanSpool)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(cleaned).toBe(1);
+  });
+
+  it('TTL unlink 前会二次检查活动会话，清理期间刚建立的 spool 不会被删除', async () => {
+    const spool = path.join(cwd, `${fileId}.late-session.spool`);
+    await writeFile(spool, Buffer.from('new session'));
+    const oldDate = new Date(Date.now() - 60_000);
+    await utimes(spool, oldDate, oldDate);
+    const isActive = jest.fn().mockReturnValueOnce(false).mockReturnValueOnce(true);
+
+    const cleaned = await manager.cleanupExpiredCache(1_000, new Map(), () => false, () => false, isActive);
+
+    expect(isActive).toHaveBeenCalledTimes(2);
+    expect(cleaned).toBe(0);
+    await expect(readFile(spool)).resolves.toEqual(Buffer.from('new session'));
   });
 });
 
