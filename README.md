@@ -130,7 +130,7 @@
 
 ## 环境要求
 
-- Node.js 18+
+- Node.js 20+（NestJS 11 运行时要求；发行包使用随包提供的 Node runtime）
 - npm（项目未使用 yarn 或 pnpm）
 - PostgreSQL 14+（默认、推荐用于多实例和较高写并发），或 SQLite 3（仅单实例/低写并发，必须设置 `DB_TYPE=sqlite`）
 - Redis（两种数据库模式均必需，Bull 队列不由 SQLite 替代）

@@ -1,4 +1,11 @@
+import { Test } from '@nestjs/testing';
+import { ConfigCacheService } from '../common/services/config-cache.service';
+import { AuditService } from '../common/services/audit.service';
+import { ReplicaTargetResolver } from './replica-target.resolver';
 import { TelegramAccountPoolModule } from './telegram-account-pool.module';
+import { TelegramAccountPoolService } from './telegram-account-pool.service';
+import { FileCopyService } from './file-copy.service';
+import { DownloadCapacityPolicyService } from './download-capacity-policy.service';
 
 /**
  * 模块级后台定时器的装配契约。
@@ -53,6 +60,32 @@ function spyIntervals() {
 
 /** 让 `void this.xxx()` 这类 fire-and-forget 的微任务落地 */
 const flushMicrotasks = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
+
+describe('TelegramAccountPoolModule（Nest DI 装配）', () => {
+  it('通过 Nest TestingModule 解析容量策略并共享账号池 provider', async () => {
+    const pool = {
+      isActive: () => false,
+      snapshot: () => ({ accounts: [] }),
+      countersSnapshot: () => ({ streamFailures: 0 }),
+    };
+    const moduleRef = await Test.createTestingModule({
+      providers: [
+        DownloadCapacityPolicyService,
+        { provide: TelegramAccountPoolService, useValue: pool },
+        { provide: FileCopyService, useValue: {} },
+        { provide: ReplicaTargetResolver, useValue: {} },
+        { provide: ConfigCacheService, useValue: {} },
+        { provide: AuditService, useValue: {} },
+      ],
+    })
+      .compile();
+
+    expect(moduleRef.get(DownloadCapacityPolicyService)).toBeDefined();
+    expect(Reflect.getMetadata('design:paramtypes', DownloadCapacityPolicyService)[0])
+      .toBe(TelegramAccountPoolService);
+    await moduleRef.close();
+  });
+});
 
 describe('TelegramAccountPoolModule（后台定时器装配）', () => {
   afterEach(() => {

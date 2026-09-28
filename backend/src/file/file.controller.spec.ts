@@ -3,6 +3,7 @@ import { ForbiddenException, HttpException, RequestMethod } from '@nestjs/common
 import { EventEmitter } from 'events';
 import { Request, Response } from 'express';
 import { FileController, assertSameOriginWrite, PUBLIC_MEDIA_SMALL_FILE_THRESHOLD_BYTES } from './file.controller';
+import { PublicMediaAdmissionService } from '../common/services/public-media-admission.service';
 
 /**
  * P1-10 回归：download-link 为写语义端点（permanent 会将私有文件转公开），
@@ -52,7 +53,11 @@ describe('FileController download-link 路由（P1-10 CSRF 回归）', () => {
   });
 });
 
-function buildMediaController(fileSize: number, ip = '198.51.100.42') {
+function buildMediaController(
+  fileSize: number,
+  ip = '198.51.100.42',
+  sharedAdmission?: PublicMediaAdmissionService,
+) {
   let finishSend!: () => void;
   const sendFinished = new Promise<void>((resolve) => { finishSend = resolve; });
   const service = Object.create(FileController.prototype) as any;
@@ -68,6 +73,8 @@ function buildMediaController(fileSize: number, ip = '198.51.100.42') {
     getPublicMediaStreamWithRange: jest.fn().mockResolvedValue(null),
   };
   service.rateLimitService = { checkAndIncrement: jest.fn().mockResolvedValue({ allowed: true }) };
+  const admission = new PublicMediaAdmissionService();
+  service.publicMediaAdmission = sharedAdmission ?? new PublicMediaAdmissionService();
   service.streamResponder = { send: jest.fn().mockReturnValue(sendFinished), handleError: jest.fn() };
   const req = {
     headers: {},
@@ -97,6 +104,7 @@ function buildMediaController(fileSize: number, ip = '198.51.100.42') {
     fileService: service.fileService,
     rateLimitService: service.rateLimitService,
     streamResponder: service.streamResponder,
+    admission,
     req,
     res,
     complete,
@@ -200,6 +208,42 @@ describe('FileController public media size-aware IP concurrency', () => {
     expect(context.service.streamResponder.send).toHaveBeenCalledWith(expect.objectContaining({ status: 206 }));
     await context.complete();
     await request;
+  });
+
+  it('进程级媒体并发达到上限时拒绝新响应，并在既有响应结束后释放名额', async () => {
+    const admission = new PublicMediaAdmissionService();
+    const occupied = Array.from({ length: 128 }, () => buildMediaController(
+      PUBLIC_MEDIA_SMALL_FILE_THRESHOLD_BYTES - 1,
+      sameIp,
+      admission,
+    ));
+    const requests = occupied.map((context) => context.request('small-id'));
+    await Promise.all(occupied.map(() => flushMediaRequestStart()));
+    expect(admission.getActiveResponses()).toBe(128);
+
+    const overloaded = buildMediaController(PUBLIC_MEDIA_SMALL_FILE_THRESHOLD_BYTES - 1, '203.0.113.7', admission);
+    await overloaded.request('small-id');
+    expect(overloaded.service.fileService.getPublicMediaMetadata).not.toHaveBeenCalled();
+    expect(overloaded.streamResponder.handleError).toHaveBeenCalledWith(
+      overloaded.res,
+      expect.objectContaining({ status: 503 }),
+      '媒体文件访问失败',
+      overloaded.req,
+    );
+
+    await occupied[0].complete();
+    await requests[0];
+    const released = buildMediaController(PUBLIC_MEDIA_SMALL_FILE_THRESHOLD_BYTES - 1, '203.0.113.8', admission);
+    const releasedRequest = released.request('small-id');
+    await flushMediaRequestStart();
+    expect(released.streamResponder.send).toHaveBeenCalledTimes(1);
+
+    await Promise.all(occupied.slice(1).map(async (context, index) => {
+      await context.complete();
+      await requests[index + 1];
+    }));
+    await released.complete();
+    await releasedRequest;
   });
 
   it('metadata 后发现客户端已断开时不继续取流', async () => {

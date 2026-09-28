@@ -18,7 +18,8 @@ lerna-debug.log*
 
 # IDE
 .vscode/
-.codebuddy/
+.codebuddy/*
+
 .idea/
 *.swp
 *.swo
@@ -38,6 +39,8 @@ backend/tmp/
 # Build outputs
 build/
 dist/
+telegram-bot-api/build-review/
+backend/.tmp-meta-check/
 *.tsbuildinfo
 *.js.map
 *.map

@@ -33,6 +33,7 @@ import { StrictUploadModeGuard } from './strict-upload-mode.guard';
 import { ConfigCacheModule } from '../common/services/config-cache.module';
 import { RateLimitModule } from '../common/services/rate-limit.module';
 import { MediaTicketModule } from '../common/services/media-ticket.module';
+import { PublicMediaAdmissionService } from '../common/services/public-media-admission.service';
 import { TagModule } from '../tag/tag.module';
 import { ApiKeyModule } from '../api-key/api-key.module';
 // 阶段 4：文件回源接入账号池 + 上传成功后触发镜像（均为可选增强，关闭时行为不变）
@@ -86,6 +87,7 @@ import { TelegramMirrorModule } from '../telegram-mirror/telegram-mirror.module'
     DownloadResourceCoordinatorService,
     // 下载任务：排队状态上报与取消（两阶段下载的第一阶段）
     DownloadTaskService,
+    PublicMediaAdmissionService,
   ],
   // FileCacheService 供 Bot 直链匿名下载复用（同一实例，保证会话/缓存目录唯一）
   exports: [FileService, UploadDiskBudgetService, FileCacheService, DownloadResourceCoordinatorService],

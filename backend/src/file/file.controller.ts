@@ -52,6 +52,7 @@ import { MediaTicketService } from '../common/services/media-ticket.service';
 import { DownloadTaskService } from './download-task.service';
 import { FileCacheService } from './file-cache.service';
 import { CreateDownloadTaskDto } from './dto/create-download-task.dto';
+import { PublicMediaAdmissionService } from '../common/services/public-media-admission.service';
 
 // Multer 层硬上限（600MB，仅防止极端 DoS；精确的动态限制由 FileService.upload() 业务层负责）
 const multerFileSize = 600 * 1024 * 1024; // 600MB
@@ -98,6 +99,7 @@ export class FileController {
     private uploadDiskBudget: UploadDiskBudgetService,
     private downloadTasks: DownloadTaskService,
     private fileCacheService: FileCacheService,
+    private readonly publicMediaAdmission: PublicMediaAdmissionService,
   ) {}
 
   /**
@@ -338,10 +340,24 @@ export class FileController {
     // 期间客户端可能已断开（close 事件先于监听器注册触发），
     // 此时若照常占槽将永久泄漏该 IP 的并发额度。
     let releaseMediaSlot = () => {};
+    let releaseGlobalMediaSlot = () => {};
     try {
+      // 独立全局上限覆盖小媒体豁免 per-IP 槽后的慢连接与多 IP 并发。
+      const globalAdmission = this.publicMediaAdmission.acquire();
+      let globalReleased = false;
+      releaseGlobalMediaSlot = () => {
+        if (globalReleased) return;
+        globalReleased = true;
+        globalAdmission.release();
+      };
+      res.once('close', releaseGlobalMediaSlot);
+
       const clientIp = getClientIp(req);
-      // 客户端已断开：无需占槽也无需继续取流
-      if (res.destroyed) return;
+      // 客户端已断开：无需保留全局/每 IP 槽，也无需继续取流
+      if (res.destroyed) {
+        releaseGlobalMediaSlot();
+        return;
+      }
       // G2-17/G5-14：匿名媒体端点限流 —— 同 IP 速率限制 + 并发连接数上限（防刷带宽/击穿）
       const rateResult = await this.rateLimitService.checkAndIncrement(
         `media:${clientIp}`,
@@ -356,7 +372,10 @@ export class FileController {
       // 权限检查先于 size-aware 豁免：私有、危险 MIME 或受约束资源仍走原授权拒绝路径，
       // 且 metadata 预检不启动上游流、不写媒体访问日志。
       const mediaMetadata = await this.fileService.getPublicMediaMetadata(id);
-      if (res.destroyed) return;
+      if (res.destroyed) {
+        releaseGlobalMediaSlot();
+        return;
+      }
       const enforceIpConcurrency = mediaMetadata.size >= PUBLIC_MEDIA_SMALL_FILE_THRESHOLD_BYTES;
       const currentConcurrency = activeMediaByIp.get(clientIp) || 0;
       if (enforceIpConcurrency && currentConcurrency >= MEDIA_CONCURRENCY_PER_IP) {
@@ -375,7 +394,7 @@ export class FileController {
         activeMediaByIp.set(clientIp, currentConcurrency + 1);
         slotHeld = true;
       }
-      // 流响应结束/客户端断开时释放并发槽位
+      // 流响应结束/客户端断开时释放并发槽位。close 监听同时兜底释放全局 admission。
       if (slotHeld) res.on('close', releaseMediaSlot);
       const rangeHeader = req.headers.range;
       if (rangeHeader) {
@@ -431,6 +450,7 @@ export class FileController {
       } finally {
         // R8：异常处理本身失败时也必须归还槽位，且 close/错误路径可重复安全释放。
         releaseMediaSlot();
+        releaseGlobalMediaSlot();
       }
     }
   }

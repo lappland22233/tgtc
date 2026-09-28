@@ -1,3 +1,4 @@
+import { Test } from '@nestjs/testing';
 import {
   CAPACITY_DOWN_STABLE_CYCLES,
   CAPACITY_EVAL_INTERVAL_MS,
@@ -7,6 +8,11 @@ import {
   DownloadCapacityPolicyService,
   targetUpstreamBudget,
 } from './download-capacity-policy.service';
+import { TelegramAccountPoolService } from './telegram-account-pool.service';
+import { FileCopyService } from './file-copy.service';
+import { ReplicaTargetResolver } from './replica-target.resolver';
+import { ConfigCacheService } from '../common/services/config-cache.service';
+import { AuditService } from '../common/services/audit.service';
 
 /** 构造账号池账号快照条目（只填预算策略关心的字段） */
 function account(id: string, overrides: Record<string, unknown> = {}) {
@@ -110,6 +116,31 @@ async function evaluateTimes(service: DownloadCapacityPolicyService, n: number) 
   for (let i = 0; i < n; i += 1) state = await service.evaluate();
   return state;
 }
+
+describe('DownloadCapacityPolicyService Nest DI token', () => {
+  it('uses the concrete TelegramAccountPoolService runtime token in reflected constructor metadata', async () => {
+    const pool = {
+      isActive: () => false,
+      snapshot: () => ({ accounts: [] }),
+      countersSnapshot: () => ({ streamFailures: 0 }),
+    };
+    const moduleRef = await Test.createTestingModule({
+      providers: [
+        DownloadCapacityPolicyService,
+        { provide: TelegramAccountPoolService, useValue: pool },
+        { provide: FileCopyService, useValue: {} },
+        { provide: ReplicaTargetResolver, useValue: {} },
+        { provide: ConfigCacheService, useValue: {} },
+        { provide: AuditService, useValue: {} },
+      ],
+    }).compile();
+
+    expect(moduleRef.get(DownloadCapacityPolicyService)).toBeDefined();
+    expect(Reflect.getMetadata('design:paramtypes', DownloadCapacityPolicyService)[0])
+      .toBe(TelegramAccountPoolService);
+    await moduleRef.close();
+  });
+});
 
 describe('targetUpstreamBudget（容量映射）', () => {
   it('min(64, max(8, n×16))：1 个 → 16，2 个 → 32，4 个及以上封顶 64', () => {

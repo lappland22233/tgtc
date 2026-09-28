@@ -10,8 +10,10 @@ import {
 } from '../file/download-resource-coordinator.service';
 import { FileCopyService } from './file-copy.service';
 import { ReplicaTargetResolver } from './replica-target.resolver';
-import { SMALL_FILE_UPSTREAM_BUDGET_PER_ACCOUNT } from './telegram-account-pool.service';
-import type { TelegramAccountPoolService } from './telegram-account-pool.service';
+import {
+  SMALL_FILE_UPSTREAM_BUDGET_PER_ACCOUNT,
+  TelegramAccountPoolService,
+} from './telegram-account-pool.service';
 
 /** 评估周期（毫秒）：与告警采集同量级，避免对数据库产生压力 */
 export const CAPACITY_EVAL_INTERVAL_MS = 60_000;

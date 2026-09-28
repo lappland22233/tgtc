@@ -1,4 +1,4 @@
-# FileCloud 前端样式开发规范
+﻿# FileCloud 前端样式开发规范
 
 > 基于 Cloudscape 设计语言 · Seed Token 架构 · Light/Dark 双主题
 > 适用于本项目所有前端页面的新增与修改
@@ -89,9 +89,17 @@ var(--font-display)  /* 同 body，标题使用 */
 var(--font-mono)     /* ui-monospace, "Cascadia Code", ... */
 ```
 
+实际字体加载须遵循 `frontend/index.html` 与样式入口一致的策略：当前仅使用系统字体栈，不允许从 Google Fonts 等外站请求字体资源。
+
 字号规范：正文 14px，辅助 12px，标签 11px（大写标签需 `letter-spacing: 0.06em` 以上），标题 18-22px（`letter-spacing: -0.01em ~ -0.02em`）。
 
 ---
+
+## 内容安全策略与开发 HMR
+
+- 生产 HTML/CSP 不允许任意 `ws:`/`wss:` 连接；只允许同源与明确列出的第三方端点。
+- Vite 开发 HMR 的 localhost WebSocket 仅通过开发服务器 response header 配置，不得写进生产 CSP。
+- CSP 端点变更应同时验证开发环境 HMR 与生产构建/响应头，不得因单一服务临时故障而放开通配来源。
 
 ## 3. 主题切换规则
 

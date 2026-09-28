@@ -132,6 +132,29 @@ export class RateLimitService {
   }
 
   /**
+   * 登录预校验：在昂贵的 bcrypt compare 前，对 IP 和 IP+账号两个范围做原子预算准入。
+   * 两个计数器各自有独立键；无效登录继续通过 checkAndIncrement 累计细粒度锁，
+   * 此方法只作为额外的短窗口 CPU 保护，不复用/重复递增失败锁计数。
+   */
+  async checkLoginPreflight(ip: string, normalizedEmail: string): Promise<RateLimitResult> {
+    const ipLimit = await this.checkAndIncrement(
+      `login-preflight:ip:${ip}`,
+      'login_preflight_ip',
+      30,
+      60_000,
+      60_000,
+    );
+    if (!ipLimit.allowed) return ipLimit;
+    return this.checkAndIncrement(
+      `login-preflight:account:${ip}:${normalizedEmail}`,
+      'login_preflight_account',
+      10,
+      60_000,
+      60_000,
+    );
+  }
+
+  /**
    * 原子递增短窗口计数，但不创建 lockedUntil。
    * 用于“达到阈值后由业务层执行封禁”等场景，避免以 lockDurationMs=0
    * 滥用 checkAndIncrement。返回递增后的准确计数，并发请求共享数据库状态。

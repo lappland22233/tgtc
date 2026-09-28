@@ -25,6 +25,28 @@ check() {
   fi
 }
 
+# ---- backup path containment helper: lexical traversal and symlink parents are rejected ----
+backup_path_gate() {
+  local install_root=$1 backup_root=$2 install_root_real backup_parent backup_parent_real
+  [[ "$backup_root" = /* ]] || return 3
+  case "$backup_root" in *"/../"*|*/..|*"/./"*|*/.) return 3 ;; esac
+  [[ ! -L "$install_root" ]] || return 3
+  install_root_real=$(realpath -e -- "$install_root") || return 3
+  backup_parent=$(dirname -- "$backup_root")
+  [[ ! -L "$backup_parent" ]] || return 3
+  backup_parent_real=$(realpath -e -- "$backup_parent") || return 3
+  case "$backup_parent_real" in "$install_root_real"|"$install_root_real"/*) ;; *) return 3 ;; esac
+  [[ ! -L "$backup_parent_real/$(basename -- "$backup_root")" ]] || return 3
+  return 0
+}
+
+backup_test_root="$TMP/install"
+mkdir -p "$backup_test_root/backups" "$TMP/external"
+check 'backup path within install root → allowed' 0 "$(backup_path_gate "$backup_test_root" "$backup_test_root/backups"; printf '%s' "$?")"
+check 'backup path traversal → rejected' 3 "$(backup_path_gate "$backup_test_root" "$backup_test_root/backups/../..//outside"; printf '%s' "$?")"
+ln -s "$TMP/external" "$backup_test_root/linked"
+check 'backup symlink parent → rejected' 3 "$(backup_path_gate "$backup_test_root" "$backup_test_root/linked/backups"; printf '%s' "$?")"
+
 # ---- release_rollback_safe_flag：缺失/合法/非法/符号链接均 fail-closed ----
 check 'manifest 缺失 → unknown' unknown "$(release_rollback_safe_flag "$REL")"
 printf '%s\n' '{"programRollbackSafe": true}' > "$REL/release-manifest.json"
