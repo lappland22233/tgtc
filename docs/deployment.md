@@ -1,6 +1,6 @@
 # 部署与运维
 
-> 本文档由原 README 拆分而来；文中路径均相对仓库根。下载链路的超时分层与反向代理要求见 [download-and-cache.md](download-and-cache.md)，生产环境变量见 [configuration.md](configuration.md)，多实例约束见 [CODEBUDDY.md](../CODEBUDDY.md)。总索引见 [README](../README.md)。
+> 本文档由原 README 拆分而来；文中路径均相对仓库根。下载链路的超时分层与反向代理要求见 [download-and-cache.md](download-and-cache.md)，生产环境变量见 [configuration.md](configuration.md)，多实例约束见本文档「部署注意事项」。总索引见 [README](../README.md)。
 
 ---
 

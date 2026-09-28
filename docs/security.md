@@ -1,6 +1,6 @@
 # 安全说明
 
-> 本文档由原 README 拆分而来。架构层面的安全契约（CSRF、启动顺序、部署预检、审计）见 [CODEBUDDY.md](../CODEBUDDY.md)。总索引见 [README](../README.md)。
+> 本文档由原 README 拆分而来。启动顺序、CSRF 与部署预检等实现级契约见 `backend/src/main.ts`、`backend/src/common/guards/csrf.guard.ts` 与 `backend/src/config/deployment-preflight.ts`。总索引见 [README](../README.md)。
 
 ---
 
