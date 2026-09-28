@@ -11,21 +11,6 @@ import { FileCopyService } from './file-copy.service';
 const MAX_ACCOUNT_ATTEMPTS = 8;
 /** 账号容量满载时向客户端建议的最小重试间隔 */
 const CAPACITY_RETRY_AFTER_MS = 5_000;
-/** 候选冷却或账号槽位短暂繁忙时的总等待上限 */
-const MAX_CAPACITY_WAIT_MS = 3_000;
-/** 账号槽位释放轮询间隔；只轮询持有该文件副本的账号，不占用上游租约 */
-const CAPACITY_POLL_MS = 250;
-const MAX_CAPACITY_WAIT_ROUNDS = Math.ceil(MAX_CAPACITY_WAIT_MS / CAPACITY_POLL_MS) + 1;
-/**
- * 源账号兜底的**应急配额**等待上限（毫秒）。
- *
- * 语义变化（2026-09 计划 P2）：源账号兜底从「完全不检查冷却/在飞」改为受限应急配额。
- * 满载（或大文件槽位被占）时先做一次有限等待：等到了就用源账号回源（保住可用性），
- * 等不到就返回带 `Retry-After` 的可诊断失败——绝不在该账号冷却期间硬打。
- */
-const SOURCE_FALLBACK_WAIT_MS = 3_000;
-/** 源兜底等待的重试间隔（毫秒）：避免忙等，同时保证有限等待内能抓住释放窗口 */
-const SOURCE_FALLBACK_POLL_MS = 250;
 /** 大文件阈值（字节）：与账号池的每账号大文件回源槽位口径保持一致（>1GiB） */
 const LARGE_FILE_THRESHOLD_BYTES = 1024 ** 3;
 
@@ -108,42 +93,17 @@ export class AccountAwareDownloadService {
     const excluded = new Set<string>();
     let lastFailure: AccountAwareDownloadFailure = { reason: 'all_candidates_busy', retryAfterMs: 5_000 };
     let attempts = 0;
-    let selectionRounds = 0;
-    let capacityWaitRounds = 0;
-    const capacityDeadline = Date.now() + MAX_CAPACITY_WAIT_MS;
-    // 多副本时覆盖所有可用副本账号（上限 8）；短暂准入竞争不消耗上游尝试次数。
+    // 每个持有 ready 副本的账号最多尝试一次；容量拒绝时立即切下一个，不等待槽位释放。
     const maxAttempts = Math.min(MAX_ACCOUNT_ATTEMPTS, readyAccountIds.length);
     // 大文件（>1GiB）回源：选号时排除已达槽位的账号，原子准入时再复核。
     const largeFile = isLargeFile(params.expectedSize);
-    while (
-      attempts < maxAttempts
-      && selectionRounds < maxAttempts + MAX_CAPACITY_WAIT_ROUNDS + 1
-    ) {
-      selectionRounds += 1;
-      let candidateIds = readyAccountIds.filter((accountId) => !excluded.has(accountId));
-      if (candidateIds.length === 0) {
-        if (capacityWaitRounds > 0 && Date.now() < capacityDeadline) {
-          excluded.clear();
-          candidateIds = readyAccountIds;
-        } else {
-          break;
-        }
-      }
+    while (attempts < maxAttempts) {
+      const candidateIds = readyAccountIds.filter((accountId) => !excluded.has(accountId));
+      if (candidateIds.length === 0) break;
 
       const selection = this.pool.select(candidateIds, Date.now(), { largeFile });
       if (!selection) {
         lastFailure = this.describeUnavailableCandidates(candidateIds);
-        const waitMs = this.capacityPollDelay(candidateIds, capacityDeadline, largeFile);
-        if (waitMs > 0 && capacityWaitRounds < MAX_CAPACITY_WAIT_ROUNDS) {
-          capacityWaitRounds += 1;
-          await new Promise((resolve) => setTimeout(resolve, waitMs));
-          continue;
-        }
-        // 若上一次等待后候选刚释放槽位，先重跑 select，让账号池重新负载均衡选路。
-        if (capacityWaitRounds > 0 && Date.now() < capacityDeadline) {
-          excluded.clear();
-          continue;
-        }
         break;
       }
 
@@ -163,22 +123,7 @@ export class AccountAwareDownloadService {
       });
       if (!admission.granted || !admission.admission) {
         if (admission.reason === 'large_inflight_full') this.pool.bumpCounter('largeFileSlotThrottled');
-        if (admission.reason === 'cooling_down' || admission.reason === 'inflight_full' || admission.reason === 'large_inflight_full') {
-          lastFailure = { reason: 'all_candidates_busy', retryAfterMs: admission.retryAfterMs ?? CAPACITY_RETRY_AFTER_MS };
-          const waitMs = this.capacityPollDelay(candidateIds, capacityDeadline, largeFile, true);
-          if (waitMs > 0 && capacityWaitRounds < MAX_CAPACITY_WAIT_ROUNDS) {
-            attempts -= 1;
-            capacityWaitRounds += 1;
-            await new Promise((resolve) => setTimeout(resolve, waitMs));
-            continue;
-          }
-          if (capacityWaitRounds > 0 && Date.now() < capacityDeadline) {
-            excluded.clear();
-            continue;
-          }
-        } else {
-          lastFailure = { reason: 'all_candidates_busy', retryAfterMs: admission.retryAfterMs ?? CAPACITY_RETRY_AFTER_MS };
-        }
+        lastFailure = { reason: 'all_candidates_busy', retryAfterMs: admission.retryAfterMs ?? CAPACITY_RETRY_AFTER_MS };
         excluded.add(account.id);
         this.logger.debug(
           `账号 ${account.id} 准入被拒（${admission.reason ?? 'unknown'}），换下一个候选账号`,
@@ -259,19 +204,10 @@ export class AccountAwareDownloadService {
       return null;
     }
 
-    // **受限应急配额**（2026-09 计划 P2 的核心改动）：
-    // 历史实现对本路径完全不检查冷却与在飞上限，理由是「超额使用同一账号没有跨账号风险」。
-    // 生产证明这个理由不成立：源账号正是那个已经独扛全部 4GB 回源的账号，在它被 DC-5
-    // 限流（`flood` 冷却中）时继续硬打，会把冷却窗口不断延长，形成
-    // 「越限流越重试 → 越重试越限流」的正反馈。现在的语义是：
-    // - 冷却期间**一律拒绝**（不再硬打，返回 null 交由上层给可诊断失败/Retry-After）；
-    // - 满载（在飞/大文件槽位）时做一次**有限等待**：等到了仍走源账号（保住可用性），
-    //   等不到同样拒绝——这里绝不阻塞到上层超时。
+    // 源账号兜底也遵守硬限制：冷却或满载立即拒绝；不等待，不绕过配额。
     const bytes = params.expectedSize;
-    const deadline = Date.now() + SOURCE_FALLBACK_WAIT_MS;
-    let admission = this.pool.admit({ accountId: account.id, role: 'download', bytes });
-    while (!admission.granted) {
-      // 冷却中只能等冷却结束：这类拒绝是「保护」而非「拥塞」，不做补救性重试
+    const admission = this.pool.admit({ accountId: account.id, role: 'download', bytes });
+    if (!admission.granted) {
       if (admission.reason === 'cooling_down') {
         this.pool.bumpCounter('fallbackThrottled');
         this.logger.warn(
@@ -285,19 +221,13 @@ export class AccountAwareDownloadService {
         return null;
       }
       if (admission.reason === 'large_inflight_full') this.pool.bumpCounter('largeFileSlotThrottled');
-      if (Date.now() >= deadline) {
-        this.pool.bumpCounter('fallbackThrottled');
-        this.logger.warn(
-          `源账号 ${account.id} 满载（${admission.reason ?? 'unknown'}），等待 ${SOURCE_FALLBACK_WAIT_MS}ms 后仍无法兜底`,
-        );
-        params.onUnavailable?.({
-          reason: 'source_capacity_busy',
-          retryAfterMs: Math.max(CAPACITY_RETRY_AFTER_MS, admission.retryAfterMs ?? 0),
-        });
-        return null;
-      }
-      await new Promise((resolve) => setTimeout(resolve, SOURCE_FALLBACK_POLL_MS));
-      admission = this.pool.admit({ accountId: account.id, role: 'download', bytes });
+      this.pool.bumpCounter('fallbackThrottled');
+      this.logger.warn(`源账号 ${account.id} 满载（${admission.reason ?? 'unknown'}），立即拒绝兜底`);
+      params.onUnavailable?.({
+        reason: 'source_capacity_busy',
+        retryAfterMs: Math.max(CAPACITY_RETRY_AFTER_MS, admission.retryAfterMs ?? 0),
+      });
+      return null;
     }
     const granted = admission.admission;
     if (!granted) return null;
@@ -362,25 +292,6 @@ export class AccountAwareDownloadService {
     stream.once('close', settle);
     stream.once('end', settle);
     stream.once('error', settle);
-  }
-
-  private capacityPollDelay(accountIds: string[], deadline: number, largeFile: boolean, forceBusy = false): number {
-    const remainingMs = deadline - Date.now();
-    if (remainingMs <= 0) return 0;
-    const snapshot = this.pool.snapshot();
-    const candidates = snapshot.accounts.filter((account) => accountIds.includes(account.id) && account.enabled);
-    if (candidates.length === 0) return 0;
-    const cooling = candidates.filter((account) => account.coolingDown);
-    if (cooling.length === candidates.length) {
-      const earliest = Math.min(...cooling.map((account) => account.cooldownRemainingMs));
-      if (!Number.isFinite(earliest) || earliest <= 0 || earliest > remainingMs) return 0;
-      return earliest;
-    }
-    const hasEligibleSlot = candidates.some((account) => !account.coolingDown
-      && account.inflight < account.maxInflight
-      && (!largeFile || account.largeInflight < account.maxLargeInflight));
-    if (hasEligibleSlot && !forceBusy) return 0;
-    return Math.min(CAPACITY_POLL_MS, remainingMs);
   }
 
   private describeUnavailableCandidates(accountIds: string[]): AccountAwareDownloadFailure {

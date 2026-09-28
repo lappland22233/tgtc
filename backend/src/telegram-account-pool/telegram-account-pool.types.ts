@@ -20,8 +20,6 @@ export interface TelegramAccountConfig {
   weight: number;
   /** 每账号在飞上限（默认 16；需结合 Telegram 限流表现配置） */
   maxInflight: number;
-  /** 是否参与调度（默认 true；运维可临时摘除某账号） */
-  enabled: boolean;
   /**
    * 每账号**大文件**（>1GiB）回源并发槽位（默认 1）。
    *
@@ -35,6 +33,8 @@ export interface TelegramAccountConfig {
    * ≈ 持份账号数，而不是全局权重预算数。
    */
   maxLargeInflight?: number;
+  /** 是否参与调度（默认 true；运维可临时摘除某账号） */
+  enabled: boolean;
   /** 备注（如机房/线路，便于报告与排障；不含敏感信息） */
   note?: string;
   /**

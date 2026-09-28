@@ -22,6 +22,7 @@ function setup(options: {
   failAccounts?: string[];
   coolingDownAccounts?: string[];
   busyOnceAccounts?: string[];
+  busyAccounts?: string[];
   openStreamReturnsNull?: boolean;
   ensureCopies?: jest.Mock;
 } = {}) {
@@ -73,6 +74,9 @@ function setup(options: {
         busyOnceAccounts.delete(request.accountId);
         busySnapshotAccounts.delete(request.accountId);
         return { granted: false, reason: 'large_inflight_full' as const, retryAfterMs: 500 };
+      }
+      if ((options.busyAccounts ?? []).includes(request.accountId)) {
+        return { granted: false, reason: 'inflight_full' as const, retryAfterMs: 500 };
       }
       const current = inflight.get(request.accountId) ?? 0;
       inflight.set(request.accountId, current + 1);
@@ -208,8 +212,8 @@ describe('AccountAwareDownloadService（选号 / 换号 / 非阻断懒扩散）'
     }));
   });
 
-  it('唯一 ready 副本短暂大文件满载时等待槽位释放后回源，不立即 503', async () => {
-    const ctx = setup({ readyAccounts: ['a1'], busyOnceAccounts: ['a1'] });
+  it('首个 Bot 大文件槽位满时立即切到下一个持有 ready 副本的 Bot', async () => {
+    const ctx = setup({ readyAccounts: ['a1', 'a2'], busyOnceAccounts: ['a1'] });
     const onUnavailable = jest.fn();
     const result = await ctx.service.openStream({
       ownerType: 'fileUnique',
@@ -218,9 +222,34 @@ describe('AccountAwareDownloadService（选号 / 换号 / 非阻断懒扩散）'
       onUnavailable,
     });
 
-    expect(result?.accountId).toBe('a1');
-    expect(ctx.client.openRealtimeStream).toHaveBeenCalledTimes(1);
+    expect(result?.accountId).toBe('a2');
+    expect(ctx.pool.admit).toHaveBeenCalledTimes(2);
+    expect(ctx.client.openRealtimeStream).toHaveBeenCalledWith(
+      'a2', 'a2-token:SECRET', 'a2-file', 2 * 1024 ** 3, { noCache: undefined },
+    );
     expect(onUnavailable).not.toHaveBeenCalled();
+  });
+
+  it('所有持有副本的 Bot 都触发并发硬限制时立即返回，不等待槽位释放', async () => {
+    const ctx = setup({ readyAccounts: ['a1', 'a2'], busyAccounts: ['a1', 'a2'] });
+    const onUnavailable = jest.fn();
+    const startedAt = Date.now();
+    const result = await ctx.service.openStream({
+      ownerType: 'fileUnique',
+      ownerId: 'u1',
+      expectedSize: 2 * 1024 ** 3,
+      onUnavailable,
+    });
+
+    expect(result).toBeNull();
+    expect(Date.now() - startedAt).toBeLessThan(250);
+    expect(ctx.pool.admit).toHaveBeenCalledTimes(2);
+    expect(ctx.client.openRealtimeStream).not.toHaveBeenCalled();
+    expect(onUnavailable).toHaveBeenCalledWith(expect.objectContaining({
+      reason: 'all_candidates_busy',
+      readyAccountCount: 2,
+      attemptedAccountCount: 2,
+    }));
   });
 
   it('下载路径不产生任何扩散副作用（扩散改为提交即触发）', async () => {
