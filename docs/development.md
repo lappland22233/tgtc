@@ -1,6 +1,6 @@
 # 开发与项目结构
 
-> 本文档由原 README 拆分而来；文中路径均相对仓库根。架构与质量门禁说明见 [CODEBUDDY.md](../CODEBUDDY.md)。总索引见 [README](../README.md)。
+> 本文档由原 README 拆分而来；文中路径均相对仓库根。总索引见 [README](../README.md)。
 
 ---
 

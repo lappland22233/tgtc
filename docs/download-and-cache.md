@@ -1,6 +1,6 @@
 # 下载与缓存
 
-> 本文档由原 README 拆分而来；文中路径均相对仓库根。下载任务、排队与 Range 的对外契约见 [API.md](../API.md)，部署侧超时与反代要求见 [deployment.md](deployment.md)。总索引见 [README](../README.md)。
+> 本文档由原 README 拆分而来；文中路径均相对仓库根。下载任务、排队与 Range 的对外契约见 [API.md](API.md)，部署侧超时与反代要求见 [deployment.md](deployment.md)。总索引见 [README](../README.md)。
 
 ---
 
@@ -131,7 +131,7 @@
 curl -C - -OJ "https://your-domain.example/api/bot-dl/<token>"
 ```
 
-完整的 200/206/416 响应头契约、`If-Range` 语义表与显式续传示例见 [API.md](../API.md)。
+完整的 200/206/416 响应头契约、`If-Range` 语义表与显式续传示例见 [API.md](API.md)。
 
 
 ## 下载端点反向代理要求
