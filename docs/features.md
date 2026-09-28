@@ -1,6 +1,6 @@
 # 核心能力
 
-> 本文档由原 README 拆分而来；文中路径均相对仓库根。下载与缓存的调度细节见 [download-and-cache.md](download-and-cache.md)，Telegram 集成见 [telegram.md](telegram.md)，配置项见 [configuration.md](configuration.md)。总索引见 [README](../README.md)。
+> 本文档由原 README 拆分而来；文中路径均相对仓库根，省略前缀的源码路径（如 `file/file-cache.service.ts`、`telegram-mirror/*`）相对 `backend/src/`。下载与缓存的调度细节见 [download-and-cache.md](download-and-cache.md)，Telegram 集成见 [telegram.md](telegram.md)，配置项见 [configuration.md](configuration.md)。总索引见 [README](../README.md)。
 
 ---
 

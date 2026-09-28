@@ -1,6 +1,6 @@
 # 下载与缓存
 
-> 本文档由原 README 拆分而来；文中路径均相对仓库根。下载任务、排队与 Range 的对外契约见 [API.md](API.md)，部署侧超时与反代要求见 [deployment.md](deployment.md)。总索引见 [README](../README.md)。
+> 本文档由原 README 拆分而来；文中路径均相对仓库根，省略前缀的源码路径（如 `file/file-cache.service.ts`、`telegram-mirror/*`）相对 `backend/src/`。下载任务、排队与 Range 的对外契约见 [API.md](API.md)，部署侧超时与反代要求见 [deployment.md](deployment.md)。总索引见 [README](../README.md)。
 
 ---
 

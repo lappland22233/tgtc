@@ -1,6 +1,6 @@
 # 环境变量与配置
 
-> 本文档由原 README 拆分而来；完整示例见 `backend/.env.example`。标注 **SystemConfig 热更新** 的项以管理后台配置为准，环境变量只是初始值/回退；文中路径均相对仓库根。总索引见 [README](../README.md)。
+> 本文档由原 README 拆分而来；完整示例见 `backend/.env.example`。标注 **SystemConfig 热更新** 的项以管理后台配置为准，环境变量只是初始值/回退；文中路径均相对仓库根，省略前缀的源码路径（如 `file/file-cache.service.ts`、`telegram-mirror/*`）相对 `backend/src/`。总索引见 [README](../README.md)。
 
 ---
 
@@ -15,7 +15,7 @@
 | `DB_PASSWORD` | - | 数据库密码，仅 PostgreSQL 必需 |
 | `DB_DATABASE` | PG: `test` / SQLite: `data/tgtc.sqlite` | PostgreSQL 数据库名或 SQLite 文件路径；相对路径基于进程工作目录 |
 | `DB_SQLITE_BUSY_TIMEOUT_MS` | `5000` | SQLite 写锁等待上限；超时仍会失败，不等于提高写并发能力 |
-| `DB_SYNCHRONIZE` | `false` | 兼容项；实现始终关闭，表结构只能由迁移管理 |
+| `DB_SYNCHRONIZE` | `false` | 兼容项；实现始终关闭（代码中无读取点，设置它不产生行为变化），表结构只能由迁移管理 |
 | `DB_MIGRATIONS_RUN` | `false` | 启动时自动执行迁移；生产推荐部署前显式运行 |
 | `DB_POOL_SIZE` | `20` | PostgreSQL 连接池上限，最大允许 200；SQLite 不适用 |
 | `DB_CONNECTION_TIMEOUT_MS` | `5000` | 获取数据库连接超时 |
@@ -66,6 +66,33 @@ SQLite 备份前应停止应用或使用 SQLite 在线备份能力取得一致�
 生产环境启动预检（`backend/src/config/deployment-preflight.ts`）会在以下情况输出高可见度告警：既未设置 `SECURE_COOKIE=true` 也未设置 `TRUST_PROXY_HOPS`（Cookie 可能失去 `Secure`）、监听 `0.0.0.0`。若设置 `DEPLOYMENT_MODE=multi`，预检将**直接拒绝启动**（当前版本不支持多实例）。
 
 
+## 上传与日志
+
+上传限制（`MAX_FILE_SIZE`、`FILE_TYPE_MODE` / `FILE_TYPE_FILTER` 亦可在管理后台「上传配置」中热更新）：
+
+| 变量 | 默认值 | 说明 |
+|---|---:|---|
+| `MAX_FILE_SIZE` | `83886080`（80 MB） | 单文件上限（字节）；保留 Cloudflare 代理层安全余量，实际业务上限以本变量或管理后台动态配置为准 |
+| `FILE_TYPE_MODE` | `blacklist` | 类型过滤模式：`blacklist`（黑名单）或 `whitelist`（白名单） |
+| `FILE_TYPE_FILTER` | 空 | 逗号分隔的扩展名列表（如 `.zip,.exe,.sh`），空值 = 不限制 |
+| `CHUNK_UPLOAD_USER_CONCURRENCY` | `3` | 分片上传：单用户同时接收的分片会话数 |
+| `CHUNK_UPLOAD_GLOBAL_CONCURRENCY` | `24` | 分片上传：全局同时接收的分片会话数 |
+| `CHUNK_UPLOAD_INFLIGHT_BYTES` | `268435456`（256 MiB） | 分片上传：全局在途字节预算 |
+| `CHUNK_UPLOAD_MIN_FREE_DISK_BYTES` | `1073741824`（1 GiB） | 分片上传：临时分区最小预留空间 |
+| `STRICT_UPLOAD_SINGLE_PROCESS` | `false` | 严格小盘模式：仅在「单后端进程 + `FILE_CACHE_NO_CACHE_MODE=true`」时设为 `true`；启用后所有上传统一走分片链路，并以最大文件两倍空间为预算串行接收，启用前须先排空既有 `processing`/`pending` 任务 |
+
+日志保留与轮转（应用日志由 FileLogger 写入，默认 `<cwd>/tmp/logs`）：
+
+| 变量 | 默认值 | 说明 |
+|---|---:|---|
+| `ACCESS_LOG_RETENTION_DAYS` | `30` | 访问日志保留天数 |
+| `AUDIT_LOG_RETENTION_DAYS` | `90` | 审计日志保留天数 |
+| `LOG_DIR` | `tmp/logs` | 应用日志目录（相对路径基于进程工作目录解析） |
+| `LOG_ROTATION_INTERVAL` | `daily` | 分片粒度：`daily`（按天）或 `hourly`（按小时） |
+| `LOG_MAX_FILE_SIZE` | `20971520`（20 MB） | 单个日志文件上限，超出后归档为 `app-YYYY-MM-DD.log.1` / `.2` … |
+| `LOG_RETENTION_DAYS` | `7` | 日志文件保留天数，超期按修改时间自动清理 |
+
+
 ## SMTP
 
 | 变量 | 说明 |
@@ -89,7 +116,7 @@ SQLite 备份前应停止应用或使用 SQLite 在线备份能力取得一致�
 | `REDIS_TLS` | `false` | 是否启用 TLS |
 | `REDIS_TLS_REJECT_UNAUTHORIZED` | `true` | 是否校验 Redis TLS 证书 |
 
-Redis 承载 `metrics-aggregation`、`attack-detection`、`alert-evaluation`、`baseline-calculation`、`data-archival` 和 `file-upload` 六个队列。Redis 不可用会影响异步上传和后台任务。
+Redis 承载 8 个 Bull 队列：`metrics-aggregation`、`attack-detection`、`alert-evaluation`、`baseline-calculation`、`data-archival`、`file-upload`、`file-verify` 与 `telegram-mirror`（镜像任务的持久化队列），注册处见 `backend/src/jobs/bull-queue.module.ts`。Redis 不可用会影响异步上传和后台任务。
 
 
 ## Telegram 与本地缓存
@@ -99,9 +126,9 @@ Redis 承载 `metrics-aggregation`、`attack-detection`、`alert-evaluation`、`
 | `TELEGRAM_BOT_TOKEN` | - | Bot Token，启动必检 |
 | `TELEGRAM_CHAT_ID` | - | 文件存储 Chat ID，启动必检 |
 | `TELEGRAM_API_BASE` | `https://api.telegram.org` | 官方或自建 Bot API 地址 |
-| `TELEGRAM_MAX_UPLOAD_SIZE` | `2147483648` | Telegram 服务层上传上限 |
+| `TELEGRAM_MAX_UPLOAD_SIZE` | `2147483648` | Telegram 服务层上传上限（2 GiB）；**仅单账号上传路径读取**，账号池上传不套用该上限 |
 | `TELEGRAM_LOCAL_FILE_DIR` | - | 自建 Bot API 本地文件目录白名单 |
-| `TELEGRAM_FILE_STREAMING_ENABLED` | `false` | 是否使用二次开发实时流端点 |
+| `TELEGRAM_FILE_STREAMING_ENABLED` | `false` | 是否使用二次开发实时流端点；未显式设置时**只要配置了 `TELEGRAM_FILE_STREAM_BASE` 即视为启用**，显式设为 `false` 才能强制关闭 |
 | `TELEGRAM_FILE_STREAM_BASE` | `TELEGRAM_API_BASE` | 实时流服务地址 |
 | `TELEGRAM_FILE_STREAM_TIMEOUT_SECONDS` | `180` | 后端请求实时流端点的读超时（秒）；须**小于**首字节超时，并大于 Bot API `--file-stream-first-byte-timeout` |
 | `HTTP_IDLE_TIMEOUT_SECONDS` | `180` | Node HTTP 空闲超时（秒）；须**大于**缓存空闲超时、**小于**外层 Nginx `proxy_read_timeout` |
@@ -121,7 +148,7 @@ Redis 承载 `metrics-aggregation`、`attack-detection`、`alert-evaluation`、`
 | `THUMBNAIL_DIR` | `tmp/thumbnails` | 缩略图目录 |
 | `FILE_PROCESSING_STALE_MINUTES` | `60` | 上传队列僵尸任务恢复阈值（分钟） |
 
-> **配置来源**：`FILE_CACHE_BUILD_*` 三层超时、`HTTP_IDLE_TIMEOUT_SECONDS`、`TELEGRAM_FILE_STREAM_TIMEOUT_SECONDS` 与 `FILE_CACHE_NO_CACHE_MODE`（初始值）为**真实环境变量**，`.env` 生效；而 `FILE_DOWNLOAD_*` 及 `FILE_CACHE_MAX_SIZE_GB` / `FILE_CACHE_MIN_FREE_DISK_GB` / `FILE_CACHE_TTL_DAYS` 由管理后台「下载资源调度 / 缓存配置」以 **SystemConfig 热更新**为来源——**环境变量不是它们的来源**，上表默认值仅为参考。
+> **配置来源**：`FILE_CACHE_BUILD_*` 三层超时、`HTTP_IDLE_TIMEOUT_SECONDS`、`TELEGRAM_FILE_STREAM_TIMEOUT_SECONDS` 为**真实环境变量**，`.env` 生效；`FILE_CACHE_NO_CACHE_MODE` 的环境变量**只作为构造期初始值**——启动时 `reloadConfig()` 会立即从 SystemConfig 重读并覆盖（DB 无记录时回退硬编码 `false`，见 `backend/src/file/file-cache.service.ts`），因此**仅设 `.env` 不能保证无缓存模式生效**，需在管理后台保存配置。而 `FILE_DOWNLOAD_*` 及 `FILE_CACHE_MAX_SIZE_GB` / `FILE_CACHE_MIN_FREE_DISK_GB` / `FILE_CACHE_TTL_DAYS` 同样由管理后台「下载资源调度 / 缓存配置」以 **SystemConfig 热更新**为来源——**环境变量不是它们的来源**，上表默认值仅为参考。
 
 实时流要求二次开发 Bot API 使用 `--enable-file-streaming` 启动，后端访问：
 
@@ -145,6 +172,7 @@ Redis 承载 `metrics-aggregation`、`attack-detection`、`alert-evaluation`、`
 | `TELEGRAM_BOT_UPDATES_ENABLED` | `false` | 入站消费总开关；仅显式 `true` 时启用，**不支持热更新**（安全边界） |
 | `TELEGRAM_BOT_ADMIN_IDS` | - | 初始管理员 TG 用户 ID，逗号分隔；开启入站时必填 |
 | `TELEGRAM_BOT_POLL_TIMEOUT_SECONDS` | `30` | 长轮询超时（1–120 秒） |
+| `TELEGRAM_BOT_INBOUND_SELF_CHECK_SECONDS` | `20` | 入站启动自检延迟（1–300 秒，显式 `0` 关闭）；发现「已启用入站但启动后没有任何一次成功 `getUpdates`」时输出 error 级日志与只读诊断结论，用于发现循环空转类静默失效 |
 | `TELEGRAM_BOT_ENCRYPTION_KEY` | - | 直链 Token 可逆加密根密钥（32 字节 base64/64 位 hex）；缺失时 `/link_query` 只能返回前缀 |
 | `TELEGRAM_BOT_DAILY_LIMIT` | `5` | 非白名单用户每日直链额度（env 兜底，面板可调） |
 | `TELEGRAM_BOT_LINK_TTL_HOURS` | `4` | 直链有效期（小时，env 兜底，面板可调） |

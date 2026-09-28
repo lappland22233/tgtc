@@ -1,6 +1,6 @@
 # 部署与运维
 
-> 本文档由原 README 拆分而来；文中路径均相对仓库根。下载链路的超时分层与反向代理要求见 [download-and-cache.md](download-and-cache.md)，生产环境变量见 [configuration.md](configuration.md)，多实例约束见本文档「部署注意事项」。总索引见 [README](../README.md)。
+> 本文档由原 README 拆分而来；文中路径均相对仓库根，省略前缀的源码路径（如 `file/file-cache.service.ts`、`telegram-mirror/*`）相对 `backend/src/`。下载链路的超时分层与反向代理要求见 [download-and-cache.md](download-and-cache.md)，生产环境变量见 [configuration.md](configuration.md)，多实例约束见本文档「部署注意事项」。总索引见 [README](../README.md)。
 
 ---
 
@@ -172,7 +172,7 @@ NODE_ENV=production npm run start:prod
    - 缩略图构建去重（`thumbnail.service.ts` 的 `thumbnailBuilds`）及其他进程内 Map；
    - 文件缓存 `tmp/Cache`、缩略图 `tmp/thumbnails` 与冷回源 spool 均为**实例本地磁盘**。
 
-   `FILE_CACHE_NO_CACHE_MODE=true` 可跳过磁盘缓存，但**不能**解决上述会话/任务/单飞的内存态问题。需要多实例前必须先完成 Redis 外置专项（会议纪要见 `docs/multi-instance-redis-design.md`）。若误配多实例，启动预检会输出高可见度错误（`CLUSTER_MODE` 相关校验）。
+   `FILE_CACHE_NO_CACHE_MODE=true` 可跳过磁盘缓存，但**不能**解决上述会话/任务/单飞的内存态问题。需要多实例前必须先完成 Redis 外置专项（把分片上传会话、上传任务态、缓存冷回源 single-flight 与缩略图构建去重外置到 Redis 等共享存储）。若误配多实例，启动预检会输出高可见度错误（`CLUSTER_MODE` 相关校验）。
 7. **优雅退出**：应用已启用 Nest shutdown hooks；进程管理器应发送可处理的终止信号并给予日志 flush 时间。
 
 HTTP 服务器参数：活动连接空闲超时默认 `180` 秒（`HTTP_IDLE_TIMEOUT_SECONDS`，需大于缓存空闲超时且小于外层 Nginx `proxy_read_timeout`）、Keep-Alive 65 秒、请求头超时 66 秒；上传端点另行禁用请求超时。

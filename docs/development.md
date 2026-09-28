@@ -1,6 +1,6 @@
 # 开发与项目结构
 
-> 本文档由原 README 拆分而来；文中路径均相对仓库根。总索引见 [README](../README.md)。
+> 本文档由原 README 拆分而来；文中路径均相对仓库根，省略前缀的源码路径（如 `file/file-cache.service.ts`、`telegram-mirror/*`）相对 `backend/src/`。总索引见 [README](../README.md)。
 
 ---
 

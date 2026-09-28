@@ -43,7 +43,7 @@
 | [docs/download-and-cache.md](docs/download-and-cache.md) | 下载与缓存：磁盘配额与排队、回源权重预算与内存治理、下载超时分层、磁盘占用与清理、Bot 直链断点续传、反向代理要求 |
 | [docs/telegram.md](docs/telegram.md) | Telegram 集成：Bot 文件直链、文件引用完整性、workdir 持久性、僵尸上传恢复、管理后台文件体检 |
 | [docs/deployment.md](docs/deployment.md) | 部署与运维：环境要求、快速开始、Linux x64 预编译发行版、发行包升级与回退、手工生产部署、部署注意事项 |
-| [docs/api-routes.md](docs/api-routes.md) | API 路由概览（公开接口 / 登录用户接口 / 管理员接口） |
+| [docs/api-routes.md](docs/api-routes.md) | API 路由清单（公开 / 登录用户 / 管理员，含系统更新、Telegram 账号池与镜像、运维告警） |
 | [docs/API.md](docs/API.md) | API Key 编程调用说明：认证、文件 / 文件夹 / 分享接口与三种下载链接模式 |
 | [docs/development.md](docs/development.md) | 项目结构与后端 / 前端常用命令 |
 | [docs/security.md](docs/security.md) | 安全说明 |
