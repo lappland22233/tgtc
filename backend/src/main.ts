@@ -243,7 +243,7 @@ async function bootstrap() {
     },
   );
 
-  // 默认端口与 .env.example / README 保持一致（3000）
+  // 默认端口与 .env.example / docs/deployment.md 保持一致（3000）
   const port = process.env.APP_PORT || 3000;
   const host = process.env.APP_HOST || '127.0.0.1';
   const httpServer = await app.listen(port, host);
