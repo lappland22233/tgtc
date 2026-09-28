@@ -577,7 +577,7 @@ install_services() {
   bot_env_q=$(unit_escape "$BOT_ENV")
   bot_temp_q=$(unit_escape "$BOT_TEMP_DIR")
 
-  # Bot API 统计端口默认关闭：开启后需自行保证仅本机可访问（见 README 运维章节）。
+  # Bot API 统计端口默认关闭：开启后需自行保证仅本机可访问（见 docs/download-and-cache.md 的反向代理要求）。
   local bot_stats_args=''
   if [[ -n "${TGTC_BOT_STATS_PORT:-}" ]]; then
     bot_stats_args="--http-stat-port=${TGTC_BOT_STATS_PORT}"
