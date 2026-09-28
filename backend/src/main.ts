@@ -251,9 +251,16 @@ async function bootstrap() {
   // HTTP 服务器超时配置（基于活动连接）：
   // - server.timeout 在有数据传输时自动重置，空闲后断开
   // - 大文件上传/分片上传时持续有数据流入，计时器不断重置，不会超时
-  // - 设为 120s 为慢速网络留足安全余量（略大于 Cloudflare 100s 代理超时）
+  // - **分层约束**：Node 空闲超时必须大于缓存/上游的空闲超时
+  //   （FILE_CACHE_BUILD_IDLE_TIMEOUT_MS 默认 150s），否则 Node 会先于缓存 watchdog
+  //   断开 socket，长传输表现为「无原因中断」而不是可分类的超时。
+  //   4GiB 分卷事件中该关系未对齐（120s < 150s）是长传输被截断的成因之一。
   // - 上传端点额外通过 req.setTimeout(0) 兜底
-  httpServer.timeout = 120 * 1000;               // 空闲 120 秒超时，数据传输中不超时
+  const httpIdleSeconds = Number(process.env.HTTP_IDLE_TIMEOUT_SECONDS);
+  const httpIdleTimeoutMs = Number.isSafeInteger(httpIdleSeconds) && httpIdleSeconds > 0
+    ? httpIdleSeconds * 1000
+    : 180 * 1000;
+  httpServer.timeout = httpIdleTimeoutMs;        // 空闲超时，数据传输中不超时
   httpServer.keepAliveTimeout = 65 * 1000;       // Keep-Alive 连接空闲超时（略大于 LB 60s）
   httpServer.headersTimeout = 66 * 1000;          // 请求头超时（需大于 keepAliveTimeout）
 

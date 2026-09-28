@@ -30,6 +30,7 @@ mkdir -p "$WORK_DIR/source" "$OUTPUT_DIR"
 rsync -a --delete \
   --exclude '.git' --exclude '.codebuddy' --exclude '.Releases' \
   --exclude 'node_modules' --exclude 'dist' --exclude 'build' --exclude 'tmp' \
+  --exclude 'beta' \
   "$ROOT_DIR/" "$WORK_DIR/source/"
 
 pushd "$WORK_DIR/source/frontend" >/dev/null

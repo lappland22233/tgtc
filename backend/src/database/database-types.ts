@@ -43,6 +43,21 @@ export function databaseForUpdate(dataSourceType: string, lock: 'update' | 'key-
   return lock === 'key-share' ? ' FOR KEY SHARE' : ' FOR UPDATE';
 }
 
+/**
+ * TypeORM `findOne` 的行锁选项：**仅 PostgreSQL 可用**。
+ *
+ * 为什么必须按方言省略：SQLite 驱动不支持行锁，传入 `pessimistic_write` 会直接抛
+ * `LockNotSupportedOnGivenDriverError`——这不是「少一层保护」，而是整条路径 500
+ * （覆盖上传、删除/恢复等）。SQLite 的写事务本身已串行化，省略该选项即语义等价。
+ *
+ * 用法：`repo.findOne({ where, ...databasePessimisticWriteLock() })`。
+ */
+export function databasePessimisticWriteLock(
+  env: NodeJS.ProcessEnv = process.env,
+): { lock?: { mode: 'pessimistic_write' } } {
+  return getDatabaseType(env) === 'postgres' ? { lock: { mode: 'pessimistic_write' } } : {};
+}
+
 /** 将 PostgreSQL $n 占位符转换为 SQLite 编号占位符 ?n，保留重复参数的索引语义。 */
 export function databaseQueryText(sql: string, type: DatabaseType): string {
   if (type !== 'sqlite') return sql;
@@ -91,7 +106,7 @@ export async function databaseQuery<T = unknown>(
           return await sqliteAll<T>(connection, queryText, queryParameters);
         }
       }
-      return await runner.query(queryText, queryParameters);
+      return normalizePostgresQueryResult(await runner.query(queryText, queryParameters), type);
     } catch (error) {
       if (type !== 'sqlite' || !isSqliteBusy(error) || attempt === attempts - 1) throw error;
       await new Promise((resolve) => setTimeout(resolve, 25 * (attempt + 1)));
@@ -103,6 +118,37 @@ export async function databaseQuery<T = unknown>(
 type SqliteAllConnection = {
   all: (sql: string, parameters: unknown[], callback: (error: Error | null, rows: unknown[]) => void) => void;
 };
+
+/**
+ * PostgreSQL 归一化：TypeORM 的 `PostgresQueryRunner.query()` 对 `UPDATE`/`DELETE`
+ * 返回 `[rows, affectedCount]` 元组——
+ *
+ * ```js
+ * switch (raw.command) {
+ *   case "DELETE":
+ *   case "UPDATE":
+ *     // for UPDATE and DELETE query additionally return number of affected rows
+ *     result.raw = [raw.rows, raw.rowCount];
+ * ```
+ *
+ * 而 `SELECT`/`INSERT ... RETURNING` 返回纯 rows 数组。若不解包，调用方拿到的
+ * `rows.length` 对 UPDATE 恒为 2（0 行时形如 `[[], 0]`），使所有「按行数判断
+ * 是否命中 / 是否达上限」的逻辑静默失效：已实际导致 Bot 每日配额永不生效
+ * （`rows.length > 0` 恒真）、告警一键确认只处理首批且数量错报为 2。
+ * SQLite 的 RETURNING 路径已由 `sqliteAll()` 解包，故仅需处理 PG。
+ *
+ * 判定条件（PG 行集只可能是对象数组，故无歧义）：
+ * 长度恰为 2、首元素是数组、次元素是数字。据此不会误伤「恰好返回 2 行」的 SELECT。
+ */
+function normalizePostgresQueryResult<T>(result: T, type: DatabaseType): T {
+  if (type !== 'postgres') return result;
+  if (!Array.isArray(result) || result.length !== 2) return result;
+  const [rows, affected] = result as [unknown, unknown];
+  if (Array.isArray(rows) && typeof affected === 'number') {
+    return rows as T;
+  }
+  return result;
+}
 
 function sqliteDateParameter(value: Date): string {
   return value.toISOString().replace('T', ' ').replace('Z', '');

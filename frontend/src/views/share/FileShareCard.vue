@@ -48,7 +48,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
 import MessagePlugin from '@/utils/message';
-import { triggerBrowserDownload } from '@/utils/download';
+import { triggerBrowserDownload, LARGE_FILE_DOWNLOAD_TIP, isLargeFile } from '@/utils/download';
 import { getPreviewKind, buildSharePreviewUrl, buildShareThumbnailUrl } from '@/utils/preview';
 import ThumbnailImg from '@/components/ThumbnailImg.vue';
 import { useMediaPlaybackStore } from '../../stores/mediaPlayback';
@@ -115,11 +115,23 @@ function formatDateTime(dateStr: string): string {
 
 const downloading = ref(false);
 
+/**
+ * 分享域下载。
+ *
+ * 说明（为何不走两阶段「下载任务」流程）：
+ * 后端暂未提供分享域（`/api/s/:token`）的下载任务创建端点（任务化创建入口仅存在于
+ * 需登录的 `POST /api/files/:id/download-tasks`）。因此这里不伪造接口，改为复用既有
+ * 同源下载 URL 直接触发浏览器原生下载，并对大文件提示使用支持断点续传的下载器。
+ *
+ * 浏览器原生下载器不回传完成状态，故只提示「已开始下载」；不使用 fetch + blob。
+ */
 function handleDownload() {
   if (downloading.value) return;
   downloading.value = true;
   triggerBrowserDownload(downloadUrl.value, props.info.name);
-  MessagePlugin.success('已开始下载，请查看浏览器下载进度');
+  MessagePlugin.success(
+    isLargeFile(props.info.size) ? LARGE_FILE_DOWNLOAD_TIP : '已开始下载，请查看浏览器下载进度',
+  );
   window.setTimeout(() => { downloading.value = false; }, 1000);
 }
 </script>

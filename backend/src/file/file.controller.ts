@@ -49,6 +49,10 @@ import { ConfigCacheService } from '../common/services/config-cache.service';
 import { StreamResponderService } from '../common/services/stream-responder.service';
 import { TagService } from '../tag/tag.service';
 import { MediaTicketService } from '../common/services/media-ticket.service';
+import { DownloadTaskService } from './download-task.service';
+import { FileCacheService } from './file-cache.service';
+import { CreateDownloadTaskDto } from './dto/create-download-task.dto';
+import { PublicMediaAdmissionService } from '../common/services/public-media-admission.service';
 
 // Multer 层硬上限（600MB，仅防止极端 DoS；精确的动态限制由 FileService.upload() 业务层负责）
 const multerFileSize = 600 * 1024 * 1024; // 600MB
@@ -64,7 +68,8 @@ const activeUploadsByUser = new Map<string, number>();
 // 保守方案：IP 维度限流（复用 RateLimitService）+ 简单并发连接计数，防刷带宽。
 const MEDIA_RATE_LIMIT_PER_SEC = 30;              // 同 IP 每秒最多 30 次媒体请求
 const MEDIA_RATE_BAN_MS = 60 * 1000;              // 超限封禁 1 分钟
-const MEDIA_CONCURRENCY_PER_IP = 4;               // 同 IP 最大并发媒体连接数
+export const PUBLIC_MEDIA_SMALL_FILE_THRESHOLD_BYTES = 20_000_000; // 严格小于 20MB 的图床资源不占 per-IP 并发槽
+const MEDIA_CONCURRENCY_PER_IP = 4;               // 同 IP 最大并发媒体连接数（20MB 及以上）
 const activeMediaByIp = new Map<string, number>();
 
 // G2-07 修复：Multer 默认 memoryStorage 会把大文件整体驻留内存，多文件并发可 OOM。
@@ -92,6 +97,9 @@ export class FileController {
     private folderService: FolderService,
     private mediaTicketService: MediaTicketService,
     private uploadDiskBudget: UploadDiskBudgetService,
+    private downloadTasks: DownloadTaskService,
+    private fileCacheService: FileCacheService,
+    private readonly publicMediaAdmission: PublicMediaAdmissionService,
   ) {}
 
   /**
@@ -332,10 +340,24 @@ export class FileController {
     // 期间客户端可能已断开（close 事件先于监听器注册触发），
     // 此时若照常占槽将永久泄漏该 IP 的并发额度。
     let releaseMediaSlot = () => {};
+    let releaseGlobalMediaSlot = () => {};
     try {
+      // 独立全局上限覆盖小媒体豁免 per-IP 槽后的慢连接与多 IP 并发。
+      const globalAdmission = this.publicMediaAdmission.acquire();
+      let globalReleased = false;
+      releaseGlobalMediaSlot = () => {
+        if (globalReleased) return;
+        globalReleased = true;
+        globalAdmission.release();
+      };
+      res.once('close', releaseGlobalMediaSlot);
+
       const clientIp = getClientIp(req);
-      // 客户端已断开：无需占槽也无需继续取流
-      if (res.destroyed) return;
+      // 客户端已断开：无需保留全局/每 IP 槽，也无需继续取流
+      if (res.destroyed) {
+        releaseGlobalMediaSlot();
+        return;
+      }
       // G2-17/G5-14：匿名媒体端点限流 —— 同 IP 速率限制 + 并发连接数上限（防刷带宽/击穿）
       const rateResult = await this.rateLimitService.checkAndIncrement(
         `media:${clientIp}`,
@@ -347,24 +369,33 @@ export class FileController {
       if (!rateResult.allowed) {
         throw new HttpException('媒体访问过于频繁，请稍后再试', HttpStatus.TOO_MANY_REQUESTS);
       }
+      // 权限检查先于 size-aware 豁免：私有、危险 MIME 或受约束资源仍走原授权拒绝路径，
+      // 且 metadata 预检不启动上游流、不写媒体访问日志。
+      const mediaMetadata = await this.fileService.getPublicMediaMetadata(id);
+      if (res.destroyed) {
+        releaseGlobalMediaSlot();
+        return;
+      }
+      const enforceIpConcurrency = mediaMetadata.size >= PUBLIC_MEDIA_SMALL_FILE_THRESHOLD_BYTES;
       const currentConcurrency = activeMediaByIp.get(clientIp) || 0;
-      if (currentConcurrency >= MEDIA_CONCURRENCY_PER_IP) {
+      if (enforceIpConcurrency && currentConcurrency >= MEDIA_CONCURRENCY_PER_IP) {
         throw new HttpException('媒体并发连接过多，请稍后再试', HttpStatus.TOO_MANY_REQUESTS);
       }
-      // 限流 await 期间客户端断开：close 已错过，直接放弃，不占槽
-      if (res.destroyed) return;
+      // 小于 20MB 的媒体免 per-IP 连接槽；大文件继续占用同一组幂等槽位。
       let slotHeld = false;
       releaseMediaSlot = () => {
         if (!slotHeld) return;
         slotHeld = false;
-        const remaining = (activeMediaByIp.get(clientIp) || 1) - 1;
+        const remaining = Math.max(0, (activeMediaByIp.get(clientIp) || 0) - 1);
         if (remaining > 0) activeMediaByIp.set(clientIp, remaining);
         else activeMediaByIp.delete(clientIp);
       };
-      activeMediaByIp.set(clientIp, currentConcurrency + 1);
-      slotHeld = true;
-      // 流响应结束/客户端断开时释放并发槽位
-      res.on('close', releaseMediaSlot);
+      if (enforceIpConcurrency) {
+        activeMediaByIp.set(clientIp, currentConcurrency + 1);
+        slotHeld = true;
+      }
+      // 流响应结束/客户端断开时释放并发槽位。close 监听同时兜底释放全局 admission。
+      if (slotHeld) res.on('close', releaseMediaSlot);
       const rangeHeader = req.headers.range;
       if (rangeHeader) {
         const rangeResult = await this.fileService.getPublicMediaStreamWithRange(id, rangeHeader, clientIp, typeof req.headers['if-range'] === 'string' ? req.headers['if-range'] : undefined);
@@ -414,10 +445,13 @@ export class FileController {
         updateAccessLog: (id, bytes) => this.fileService.updateAccessLogResponseSize(id, bytes),
       });
     } catch (error) {
-      this.streamResponder.handleError(res, error, '媒体文件访问失败', req);
-      // R8：异常路径兜底释放（幂等）。close 正常触发时 slotHeld 已为 false，无副作用；
-      // close 在监听器注册前已错过时，这里防止槽位泄漏。
-      releaseMediaSlot();
+      try {
+        this.streamResponder.handleError(res, error, '媒体文件访问失败', req);
+      } finally {
+        // R8：异常处理本身失败时也必须归还槽位，且 close/错误路径可重复安全释放。
+        releaseMediaSlot();
+        releaseGlobalMediaSlot();
+      }
     }
   }
 
@@ -645,6 +679,36 @@ export class FileController {
     return this.fileService.getCacheStatus(id, user);
   }
 
+  /**
+   * 创建下载任务（两阶段下载的第一阶段）。
+   *
+   * 返回能否立即开始下载，或"排队原因 + 近似队列位置 + 建议重试间隔"。
+   * 任务本身不持有流：前端拿到 streamable 后仍触发浏览器原生下载（同源 cookie 鉴权），
+   * 从而在不引入第二套取流路径的前提下把服务器负载与排队状态暴露给用户。
+   */
+  @Post(':id/download-tasks')
+  @UseGuards(JwtOrApiKeyAuthGuard)
+  async createDownloadTask(
+    @Param('id') id: string,
+    @CurrentUser() user: User,
+    @Body() dto: CreateDownloadTaskDto,
+  ) {
+    const file = await this.fileService.findOne(id, user);
+    const expectedSize = Number(file.size);
+    if (!Number.isSafeInteger(expectedSize) || expectedSize <= 0) {
+      throw new BadRequestException('文件大小无效，暂时无法创建下载任务');
+    }
+    const nocache = Boolean(dto?.nocache);
+    return this.downloadTasks.create({
+      ownerKey: `user:${user.id}`,
+      fileId: file.id,
+      contentVersion: file.uploadVersion,
+      expectedSize,
+      downloadUrl: `/api/files/${file.id}/download${nocache ? '?nocache=1' : ''}`,
+      countsTowardCache: !nocache && !this.fileCacheService.isNoCacheMode(),
+    });
+  }
+
   @Get(':id/download')
   @UseGuards(JwtOrApiKeyAuthGuard)
   async download(
@@ -678,6 +742,14 @@ export class FileController {
       // 请求级无缓存：仅管理员可通过 ?nocache=1|true 强制实时回源直通，普通用户/API Key 传参忽略
       const isAdmin = hasAdminPrivileges(user);
       const noCacheRequested = isAdmin && (req.query.nocache === '1' || req.query.nocache === 'true');
+
+      // 两阶段下载第二阶段：任务票据原子消费（单次有效）。
+      // 命中时把任务已持有的磁盘预约交接给本次正文请求，使其不再重新排队；
+      // 无效/已消费/归属或文件不匹配则静默忽略，走常规准入路径（不影响旧前端与直接下载）。
+      const taskTicket = typeof req.query.taskTicket === 'string' ? req.query.taskTicket : undefined;
+      if (taskTicket) {
+        this.downloadTasks.consumeTicket(taskTicket, `user:${user.id}`, id);
+      }
 
       // Range 请求支持（仅缓存命中时可用）
       const rangeHeader = req.headers.range;
@@ -724,6 +796,8 @@ export class FileController {
           'Cache-Control': 'private, no-cache',
           'X-Content-Type-Options': 'nosniff',
           'Referrer-Policy': 'no-referrer',
+          // 完整 200 与分段 206 使用同一版本标识，客户端续传语义一致
+          ...(result.etag ? { ETag: result.etag, 'Accept-Ranges': 'bytes' } : {}),
         },
         stream: result.stream,
         accessLogId: result.accessLogId,

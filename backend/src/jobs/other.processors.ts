@@ -9,6 +9,14 @@ import { AlertGateway } from '../alert/alert.gateway';
 import { BehaviorAnalyzer } from '../security/behavior-analyzer.service';
 import { databaseCast, databaseQuery, getDatabaseType } from '../database/database-types';
 
+/**
+ * 预聚合追赶期：`aggregate-1min` 与 `evaluate-alerts` 都是每分钟触发、都按
+ * `(now - 60s)` 截断到分钟取同一个窗口，因此评估可能先于聚合并发完成。
+ * 窗口年龄不超过该阈值时视为「聚合还在追赶」，保留重试；
+ * 超过后仍无预聚合行，则需按 access_logs 判定是真空闲还是聚合缺口。
+ */
+const AGGREGATION_CATCHUP_MS = 5 * 60 * 1000;
+
 @Injectable()
 @Processor(QUEUE_NAMES.ALERT_EVALUATION)
 export class AlertEvaluationProcessor {
@@ -52,9 +60,37 @@ export class AlertEvaluationProcessor {
       );
 
       if (!metrics) {
-        // G3-16：预聚合缺失时静默 return 会漏报告警。改为记录 warn 并 throw，
-        // 触发 Bull 重试（与下方 L64-68 的 DB 故障处理一致），待聚合延迟追上后补上评估。
-        this.logger.warn(`告警评估缺失预聚合窗口 ${windowTime.toISOString()}，触发重试`);
+        // G3-16：预聚合缺失时静默 return 会漏报告警，因此保留 warn + throw 触发 Bull 重试。
+        // 但聚合只在「该分钟有请求」时落行（见 MetricsAggregationProcessor），
+        // 无流量分钟必然查不到窗口；原实现对此同样 warn + 重试（attempts=3），
+        // 生产上日均产生近万条「触发重试 / 评估失败」WARN。故按窗口年龄区分两种情况：
+        //   - 年龄 ≤ AGGREGATION_CATCHUP_MS：聚合任务与评估并发执行且取同一窗口，
+        //     属正常追赶，保留 warn + 重试；
+        //   - 超过追赶期：需再区分「该分钟确实无流量」（无规则可评估，静默跳过）
+        //     与「聚合漏落/失败」（必须继续告警并重试，避免静默丢告警）。
+        const ageMs = Date.now() - windowTime.getTime();
+        if (ageMs <= AGGREGATION_CATCHUP_MS) {
+          this.logger.warn(`告警评估缺失预聚合窗口 ${windowTime.toISOString()}，触发重试`);
+          throw new Error(`预聚合窗口 ${windowTime.toISOString()} 缺失`);
+        }
+
+        const windowStart = new Date(windowTime.getTime() - 60 * 1000);
+        const logRows = await databaseQuery<Array<{ cnt: number | string }>>(
+          this.dataSource,
+          `SELECT ${databaseCast('COUNT(*)', 'int')} AS cnt
+           FROM "access_logs"
+           WHERE "createdAt" >= $1 AND "createdAt" < $2`,
+          [windowStart, windowTime],
+          getDatabaseType(),
+        );
+        const logCount = Number(logRows?.[0]?.cnt ?? 0);
+        if (logCount === 0) {
+          this.logger.debug(`预聚合窗口 ${windowTime.toISOString()} 无请求，跳过告警评估`);
+          return;
+        }
+        this.logger.warn(
+          `预聚合窗口 ${windowTime.toISOString()} 缺失，但该分钟存在 ${logCount} 条访问日志，触发重试`,
+        );
         throw new Error(`预聚合窗口 ${windowTime.toISOString()} 缺失`);
       }
 

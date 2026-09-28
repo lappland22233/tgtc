@@ -21,6 +21,16 @@ import { ApiKey } from '../common/entities/api-key.entity';
 import { DirectoryName } from '../common/entities/directory-name.entity';
 import { ApiKeyIpAllowlist } from '../common/entities/api-key-ip-allowlist.entity';
 import { ApiKeyUsageLog } from '../common/entities/api-key-usage-log.entity';
+import { TelegramBotFileGrant } from '../common/entities/telegram-bot-file-grant.entity';
+import { TelegramBotDailyUsage } from '../common/entities/telegram-bot-daily-usage.entity';
+import { TelegramBotWhitelist } from '../common/entities/telegram-bot-whitelist.entity';
+import { DownloadTask } from '../common/entities/download-task.entity';
+import { TelegramFileCopy } from '../common/entities/telegram-file-copy.entity';
+import { TelegramAccount } from '../common/entities/telegram-account.entity';
+import { TelegramMirrorRule } from '../common/entities/telegram-mirror-rule.entity';
+import { TelegramMirrorTask } from '../common/entities/telegram-mirror-task.entity';
+import { TelegramReplicationAttempt } from '../common/entities/telegram-replication-attempt.entity';
+import { TelegramMainChatAnchor } from '../common/entities/telegram-main-chat-anchor.entity';
 
 /** 单一实体清单：Nest 运行时与 TypeORM CLI 必须共用，避免漏表。 */
 export const databaseEntities = [
@@ -28,4 +38,7 @@ export const databaseEntities = [
   ShareAudit, FileAccessLog, RateLimit, AuditLog, AccessLog, Alert, UploadTask,
   Tag, JwtRevokedToken, SharePreviewSession, FileVerifyTask, UpdateTask, ApiKey,
   DirectoryName, ApiKeyIpAllowlist, ApiKeyUsageLog,
+  TelegramBotFileGrant, TelegramBotDailyUsage, TelegramBotWhitelist,
+  DownloadTask, TelegramFileCopy, TelegramAccount, TelegramMirrorRule, TelegramMirrorTask,
+  TelegramReplicationAttempt, TelegramMainChatAnchor,
 ] as const;

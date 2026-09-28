@@ -11,55 +11,19 @@
     <title>文件分发系统</title>
 
     <!--
-      Content-Security-Policy（XSS 兜底防护）：
-      - default-src 'self'：默认仅允许同源资源
-      - script-src 'self' + Turnstile / Cloudflare Insights 外部脚本（不允许任意内联脚本）
-      - style-src 'unsafe-inline'：TDesign 与运行时主题大量使用内联 style，必须放行；
-        额外允许 fonts.googleapis.com 的字体样式表
-      - font-src：允许 fonts.gstatic.com 字体文件与 data: 内联字体/图标
-      - img-src：允许 data:（favicon/占位图）与 blob:（上传预览 ObjectURL）
-      - media-src：允许 blob:（FilePreviewDialog 用 URL.createObjectURL(MediaSource) 做 MSE 播放）
-      - connect-src：同源 API + ws:/wss:（Vite HMR WebSocket）
-      - object-src 'none' / base-uri 'self'：关闭插件嵌入与 base 注入面
-      注意：生产环境若启用 Cloudflare Web Analytics，需在 Cloudflare 控制台确认其注入脚本兼容当前 CSP；不要为此全局开启 unsafe-inline。
-
-      ⚠️ G10-07 安全说明（connect-src ws:/wss:）：
-      本地 index.html 的 CSP 由浏览器强制（HTML meta），而 Vite 开发态 HMR 依赖
-      WebSocket 连接（默认 ws://localhost:<port>），若此处移除 ws:/wss: 将导致
-      dev 模式下热更新失效。因此该 meta 中保留 ws:/wss: 仅服务于开发环境。
-      生产环境（部署）由服务端下发 CSP 响应头（Helmet / nginx）覆盖并收紧为
-      connect-src 'self'（不含任意主机 WS），杜绝任意主机 WebSocket 出口。
-      如需在生产打包产物（dist/index.html）中彻底移除 ws:/wss:，请同步服务端
-      CSP 头并确认无 HMR 依赖后再删除。
+      Content-Security-Policy（XSS 纵深防护）：
+      - default-src 'self'，脚本仅允许同源及 Turnstile / Cloudflare Insights
+      - style-src 保留 unsafe-inline 以支持 TDesign 与运行时主题
+      - connect-src 限定同源与明确列出的 Cloudflare/Turnstile 端点，不允许任意 WebSocket host
+      - Vite 开发 HMR 的 ws localhost 规则仅由开发服务器响应头注入，不进入生产 HTML
+      - 对生产 Cloudflare Analytics 的额外端点须在部署配置中按需明确加入，不放开通配来源
     -->
+    <!-- 基础 CSP 由受版本控制的 response header 下发（详见 frontend CSP 配置）；
+         meta 仅作为静态/开发服务器场景的收紧兜底，不覆盖该 response header。 -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self' https://challenges.cloudflare.com https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self' ws: wss: https://challenges.cloudflare.com https://cloudflareinsights.com https://*.cloudflareinsights.com; frame-src 'self' https://challenges.cloudflare.com; media-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'"
+      content="default-src 'self'; script-src 'self' https://challenges.cloudflare.com https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: blob:; connect-src 'self' https://challenges.cloudflare.com https://cloudflareinsights.com https://*.cloudflareinsights.com; frame-src 'self' https://challenges.cloudflare.com; media-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'"
     />
-
-    <!-- Preconnect to critical third-party origins（非阻塞资源提示，不可达时快速失败不影响首屏） -->
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-
-    <!--
-      字体直接加载，避免 CSP 阻止内联 onload 事件处理器。
-      国内部署提示：Google Fonts 在国内常不可达。该加载方式为非阻塞，不可达时仅回退系统字体，
-      不会卡首屏；如需完整字体体验，建议：
-        1) 将字体文件本地化到 public/fonts 并改用本地 @font-face；或
-        2) 替换为国内可达镜像（如 https://fonts.loli.net，需同步调整 CSP 白名单）。
-      已移除原先硬编码版本的 woff2 preload（Google 更新版本后会 404，且阻塞性预取浪费带宽）。
-    -->
-    <link
-      rel="stylesheet"
-      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Noto+Sans+SC:wght@300;400;500;700&family=JetBrains+Mono:wght@400;500;600&display=swap"
-    />
-    <!-- Fallback for browsers that don't fire onload on link -->
-    <noscript>
-      <link
-        rel="stylesheet"
-        href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Noto+Sans+SC:wght@300;400;500;700&family=JetBrains+Mono:wght@400;500;600&display=swap"
-      />
-    </noscript>
 
     <!-- 首屏深色背景，避免白屏闪烁；使用静态文件以避免 Vite HTML 内联 CSS 代理问题。 -->
     <link rel="stylesheet" href="/critical.css" />

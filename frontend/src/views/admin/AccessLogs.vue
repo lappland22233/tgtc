@@ -2,7 +2,7 @@
   <div class="access-logs-page">
     <div class="page-header">
       <h1>访问统计</h1>
-      <p>网站请求量、带宽消耗、独立访客、流量峰值、来源分析与文件类型统计</p>
+      <p>网站请求量、带宽消耗、独立访客、流量峰值、来源分析、文件类型统计与 Bot 使用情况</p>
     </div>
 
     <!-- Top-level Tabs -->
@@ -329,6 +329,10 @@
       <t-tab-panel value="filetypes" label="文件类型">
         <FileTypeAnalysis ref="fileTypeRef" />
       </t-tab-panel>
+
+      <t-tab-panel value="bot" label="Bot 使用">
+        <BotUsageAnalysis ref="botUsageRef" />
+      </t-tab-panel>
     </t-tabs>
 
     <!-- 异常 IP 封禁对话框（原因 + 时长，G15-08） -->
@@ -376,6 +380,7 @@ import FileTypeIcon from '@/components/FileTypeIcon.vue';
 import SourceAnalysis from './SourceAnalysis.vue';
 import BandwidthAnalysis from './BandwidthAnalysis.vue';
 import FileTypeAnalysis from './FileTypeAnalysis.vue';
+import BotUsageAnalysis from './BotUsageAnalysis.vue';
 import { useMobile } from '../../composables/useMobile';
 import { CHART_COLORS, STATUS_COLORS, tooltipBase, legendBase, areaGradient, ensureCyberTheme } from '../../utils/echarts-theme';
 
@@ -998,6 +1003,7 @@ async function refreshAll() {
 const sourceAnalysisRef = ref<InstanceType<typeof SourceAnalysis> | null>(null);
 const bandwidthRef = ref<InstanceType<typeof BandwidthAnalysis> | null>(null);
 const fileTypeRef = ref<InstanceType<typeof FileTypeAnalysis> | null>(null);
+const botUsageRef = ref<InstanceType<typeof BotUsageAnalysis> | null>(null);
 
 watch(accessTab, (tab, prev) => {
   // 离开 overview 时其容器被 t-tabs 移除（destroyOnHide），主动 dispose 并置空实例，
@@ -1016,6 +1022,8 @@ watch(accessTab, (tab, prev) => {
         bandwidthRef.value?.refreshChart();
       } else if (tab === 'filetypes') {
         fileTypeRef.value?.refreshChart();
+      } else if (tab === 'bot') {
+        botUsageRef.value?.refreshChart();
       } else if (tab === 'overview') {
         if (trendData.value.length) await updateTrendChart(trendData.value);
         await updatePieChart();

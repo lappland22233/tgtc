@@ -5,10 +5,24 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/common.sh"
 # Exit codes: 0 success; 2 usage; 3 precheck; 4 verification; 5 operation failure.
 BACKUP_ROOT="${TGTC_BACKUP_DIR:-$INSTALL_ROOT/backups}"
 KEEP_DAYS="${TGTC_BACKUP_KEEP_DAYS:-14}"
+# Canonicalize and reject symlinked paths before creating backups or pruning directories.
+[[ "$BACKUP_ROOT" = /* ]] || die "$EXIT_PRECHECK" "备份目录必须是绝对路径：$BACKUP_ROOT"
 case "$BACKUP_ROOT" in
-  "$INSTALL_ROOT"/*) ;;
-  *) die "$EXIT_PRECHECK" "备份目录必须位于安装根目录内：$BACKUP_ROOT" ;;
+  *"/../"*|*/..|*"/./"*|*/.) die "$EXIT_PRECHECK" "备份目录不得包含 . 或 .. 路径分量：$BACKUP_ROOT" ;;
 esac
+[[ ! -L "$INSTALL_ROOT" ]] || die "$EXIT_PRECHECK" "安装根目录不得为符号链接：$INSTALL_ROOT"
+install_root_real=$(realpath -e -- "$INSTALL_ROOT") || die "$EXIT_PRECHECK" '无法规范化安装根目录。'
+backup_parent=$(dirname -- "$BACKUP_ROOT")
+mkdir -p -- "$backup_parent"
+[[ ! -L "$backup_parent" ]] || die "$EXIT_PRECHECK" "备份父目录不得为符号链接：$backup_parent"
+backup_parent_real=$(realpath -e -- "$backup_parent") || die "$EXIT_PRECHECK" '无法规范化备份父目录。'
+case "$backup_parent_real" in
+  "$install_root_real"|"$install_root_real"/*) ;;
+  *) die "$EXIT_PRECHECK" "规范化后的备份目录必须位于安装根目录内：$BACKUP_ROOT" ;;
+esac
+BACKUP_ROOT="$backup_parent_real/$(basename -- "$BACKUP_ROOT")"
+[[ ! -L "$BACKUP_ROOT" ]] || die "$EXIT_PRECHECK" "备份目录不得为符号链接：$BACKUP_ROOT"
+[[ ! -e "$BACKUP_ROOT" || -d "$BACKUP_ROOT" ]] || die "$EXIT_PRECHECK" "备份路径已存在但不是目录：$BACKUP_ROOT"
 ENV_FILE="${TGTC_ENV_FILE:-$RUNTIME_DIR/backend/.env}"
 SERVICE="${TGTC_SERVICE:-tgtc.service}"
 [[ "$KEEP_DAYS" =~ ^[0-9]+$ ]] || die "$EXIT_USAGE" 'TGTC_BACKUP_KEEP_DAYS 必须是非负整数。'

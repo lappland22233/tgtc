@@ -118,6 +118,9 @@ jobs:
       - name: Run tests and enforce configured coverage thresholds
         run: npm run test:cov -- --runInBand
 
+      - name: Require Nest dependency-injection smoke coverage for enabled account-pool module
+        run: npx jest --runInBand src/telegram-account-pool/telegram-account-pool.module.spec.ts src/telegram-account-pool/download-capacity-policy.service.spec.ts
+
       - name: Upload backend coverage report
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v7

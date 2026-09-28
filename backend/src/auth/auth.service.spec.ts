@@ -65,6 +65,7 @@ describe('AuthService - validateVerificationCode', () => {
 
   const mockRateLimitService = {
     checkAndIncrement: jest.fn().mockResolvedValue({ allowed: true }),
+    checkLoginPreflight: jest.fn().mockResolvedValue({ allowed: true }),
     reset: jest.fn().mockResolvedValue(undefined),
     getAttemptCount: jest.fn().mockResolvedValue(0),
   };
@@ -257,6 +258,7 @@ describe('AuthService - 邮箱验证开关与登录拦截', () => {
 
   const mockRateLimitService = {
     checkAndIncrement: jest.fn().mockResolvedValue({ allowed: true }),
+    checkLoginPreflight: jest.fn().mockResolvedValue({ allowed: true }),
     reset: jest.fn().mockResolvedValue(undefined),
   };
 
@@ -453,7 +455,23 @@ describe('AuthService - 邮箱验证开关与登录拦截', () => {
       emailVerified,
     });
 
+    it('预校验限制达到上限时，在用户查询和 bcrypt 前拒绝', async () => {
+      mockRateLimitService.checkLoginPreflight.mockResolvedValue({ allowed: true });
+      wireNoBannedIP();
+      mockRateLimitService.checkLoginPreflight.mockResolvedValue({ allowed: false, waitMinutes: 1 });
+
+      await expect(service.login(
+        { email: 'USER@example.com', password: 'Correct#123' } as any,
+        '127.0.0.1',
+      )).rejects.toThrow('登录请求过于频繁');
+
+      expect(mockRateLimitService.checkLoginPreflight).toHaveBeenCalledWith('127.0.0.1', 'user@example.com');
+      expect(mockUserRepo.createQueryBuilder).not.toHaveBeenCalled();
+      expect(mockRateLimitService.checkAndIncrement).not.toHaveBeenCalled();
+    });
+
     it('开关开启时：未验证账号被拦截', async () => {
+      mockRateLimitService.checkLoginPreflight.mockResolvedValue({ allowed: true });
       mockConfigCacheService.get.mockImplementation(async (key: string) =>
         key === 'EMAIL_VERIFICATION_ENABLED' ? 'true' : 'false',
       );
@@ -469,6 +487,7 @@ describe('AuthService - 邮箱验证开关与登录拦截', () => {
     });
 
     it('开关开启时：已验证账号放行', async () => {
+      mockRateLimitService.checkLoginPreflight.mockResolvedValue({ allowed: true });
       mockConfigCacheService.get.mockImplementation(async (key: string) =>
         key === 'EMAIL_VERIFICATION_ENABLED' ? 'true' : 'false',
       );
@@ -481,6 +500,7 @@ describe('AuthService - 邮箱验证开关与登录拦截', () => {
         '127.0.0.1',
       );
 
+      expect(mockRateLimitService.checkLoginPreflight).toHaveBeenCalledWith('127.0.0.1', 'user@example.com');
       expect(result.accessToken).toBe('mock-token');
       expect(result.user.emailVerified).toBe(true);
       expect(result.user.lastLoginAt).toBeInstanceOf(Date);
@@ -491,6 +511,7 @@ describe('AuthService - 邮箱验证开关与登录拦截', () => {
     });
 
     it('开关关闭时：未验证账号也放行（拦截仅在开关开启时生效）', async () => {
+      mockRateLimitService.checkLoginPreflight.mockResolvedValue({ allowed: true });
       mockConfigCacheService.get.mockResolvedValue('false');
       wireNoBannedIP();
       mockUserQuery(buildUser(false));

@@ -51,6 +51,9 @@ class FileStreamConnection final : public td::Actor {
   void on_file_ready(td::int32 file_id, td::int64 total_size, td::string local_path,
                      td::int64 download_offset, td::int64 downloaded_prefix_size,
                      bool is_completed, bool is_downloading_active);
+  // Asks TDLib to (re)check the local location and download the file again; used when the local
+  // copy TDLib reported as downloaded turns out to be unusable.
+  void request_file_redownload();
   void on_file_progress(td::int64 reported_total_size, td::string local_path,
                         td::int64 download_offset, td::int64 downloaded_prefix_size,
                         bool is_completed, bool is_downloading_active);
@@ -81,6 +84,9 @@ class FileStreamConnection final : public td::Actor {
   bool download_completed_ = false;
   bool first_byte_sent_ = false;
   bool completed_ok_ = false;
+  // Set once this stream has asked TDLib to re-download its file, so a file that can never become
+  // available does not make the stream re-request the download over and over again.
+  bool redownload_requested_ = false;
   td::int64 pending_write_offset_ = -1;
   td::int64 pending_write_size_ = 0;
   bool finished_ = false;
@@ -89,9 +95,15 @@ class FileStreamConnection final : public td::Actor {
   void timeout_expired() final;
   void tear_down() final;
   void try_read();
+  // Forgets a "downloaded" state that TDLib has revoked or that does not match the disk, so the
+  // following progress reports are used to rebuild the stream position from scratch.
+  void drop_stale_download_state();
   void on_chunk_flushed(td::Result<td::Unit> result);
   void on_headers_flushed(td::Result<td::Unit> result);
-  void send_headers();
+  // Queues the response headers if they have not been written yet; returns false when they could
+  // not be created (the stream has been terminated with a JSON error in that case), so the caller
+  // must not try to write a body any more.
+  bool send_headers();
   void finish();
   void fail(int http_status_code, td::Slice message);
   void abort(td::Status error);

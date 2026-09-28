@@ -8,6 +8,7 @@
 
 #include "telegram-bot-api/ClientParameters.h"
 #include "telegram-bot-api/FileStream.h"
+#include "telegram-bot-api/WorkdirCleanupManager.h"
 
 #include "td/db/TQueue.h"
 
@@ -20,6 +21,7 @@
 #include "td/utils/base64.h"
 #include "td/utils/emoji.h"
 #include "td/utils/filesystem.h"
+#include "td/utils/format.h"
 #include "td/utils/HttpUrl.h"
 #include "td/utils/JsonBuilder.h"
 #include "td/utils/logging.h"
@@ -7646,8 +7648,20 @@ void Client::TdOnFileStreamRemoteFileCallback::on_result(object_ptr<td_api::Obje
     return send_closure(stream_, &FileStreamConnection::on_file_error, total_size.move_as_error());
   }
   auto resolved_size = total_size.move_as_ok();
+  auto existing_it = client_->file_stream_listeners_.find(file_id);
+  auto need_start_download = existing_it == client_->file_stream_listeners_.end() || existing_it->second.empty();
+  if (need_start_download) {
+    // Pre-write workdir space admission (see check_workdir_space). This runs before the stream is
+    // registered as a listener and before any response header is written, so a rejection is still
+    // delivered to the caller as a JSON error carrying HTTP 507 (file stream rule: never drop the
+    // connection before the first byte). A stream that joins an already-started download is not
+    // checked again, because that download was admitted when it started.
+    if (!client_->check_workdir_space_for_download(resolved_size, file->local_->downloaded_size_)) {
+      return send_closure(stream_, &FileStreamConnection::on_file_error,
+                          td::Status::Error(507, "Telegram workdir has insufficient free space to start a new download"));
+    }
+  }
   auto &listeners = client_->file_stream_listeners_[file_id];
-  auto need_start_download = listeners.empty();
   listeners.push_back({stream_id_, stream_});
   send_closure(stream_, &FileStreamConnection::on_file_ready, file_id, resolved_size, file->local_->path_,
                file->local_->download_offset_, file->local_->downloaded_prefix_size_,
@@ -7671,29 +7685,33 @@ class Client::TdOnCancelDownloadFileCallback final : public TdQueryCallback {
 
 class Client::TdOnDeleteFileCallback final : public TdQueryCallback {
  public:
-  explicit TdOnDeleteFileCallback(int32 file_id) : file_id_(file_id) {
+  TdOnDeleteFileCallback(Client *client, int32 file_id) : client_(client), file_id_(file_id) {
   }
 
   void on_result(object_ptr<td_api::Object> result) final {
     // 删除仅清理本地缓存副本，失败不影响已完成的 HTTP 响应，静默记录日志即可
     if (result->get_id() == td_api::error::ID) {
       auto error = move_object_as<td_api::error>(result);
+      client_->on_local_file_delete_finished(false);
       LOG(WARNING) << "Failed to delete cached file " << file_id_ << ": " << error->message_;
       return;
     }
     CHECK(result->get_id() == td_api::ok::ID);
+    client_->on_local_file_delete_finished(true);
     LOG(DEBUG) << "Deleted local copy of file " << file_id_ << " after a completed no-cache file stream";
   }
 
  private:
+  Client *client_;
   int32 file_id_;
 };
 
 class Client::TdOnDeleteFileAndAnswerCallback final : public TdQueryCallback {
  public:
-  TdOnDeleteFileAndAnswerCallback(int32 file_id, td::BufferSlice released_answer,
+  TdOnDeleteFileAndAnswerCallback(Client *client, int32 file_id, td::BufferSlice released_answer,
                                   td::BufferSlice pending_release_answer, PromisedQueryPtr query)
-      : file_id_(file_id)
+      : client_(client)
+      , file_id_(file_id)
       , released_answer_(std::move(released_answer))
       , pending_release_answer_(std::move(pending_release_answer))
       , query_(std::move(query)) {
@@ -7704,10 +7722,13 @@ class Client::TdOnDeleteFileAndAnswerCallback final : public TdQueryCallback {
       auto error = move_object_as<td_api::error>(result);
       // 远端消息已经成功，不能以 HTTP 失败诱使 Worker 重发 sendDocument。明确回传
       // local_cache_released=false，后端会只调用 releaseLocalFile 重试本地释放并继续占用预算。
+      // 待释放（pending）也计入删除失败，保证它在下一次重试成功前持续可见。
+      client_->on_local_file_delete_finished(false);
       LOG(WARNING) << "Failed to delete strict no-cache upload file " << file_id_ << ": " << error->message_;
       query_->set_ok(std::move(pending_release_answer_));
     } else {
       CHECK(result->get_id() == td_api::ok::ID);
+      client_->on_local_file_delete_finished(true);
       LOG(DEBUG) << "Deleted local copy of strict no-cache upload file " << file_id_;
       query_->set_ok(std::move(released_answer_));
     }
@@ -7715,9 +7736,31 @@ class Client::TdOnDeleteFileAndAnswerCallback final : public TdQueryCallback {
   }
 
  private:
+  Client *client_;
   int32 file_id_;
   td::BufferSlice released_answer_;
   td::BufferSlice pending_release_answer_;
+  PromisedQueryPtr query_;
+};
+
+class Client::TdOnDeleteFileQueryCallback final : public TdQueryCallback {
+ public:
+  TdOnDeleteFileQueryCallback(Client *client, PromisedQueryPtr query)
+      : client_(client), query_(std::move(query)) {
+  }
+
+  void on_result(object_ptr<td_api::Object> result) final {
+    if (result->get_id() == td_api::error::ID) {
+      client_->on_local_file_delete_finished(false);
+      return fail_query_with_error(std::move(query_), move_object_as<td_api::error>(result));
+    }
+    CHECK(result->get_id() == td_api::ok::ID);
+    client_->on_local_file_delete_finished(true);
+    answer_query(td::JsonTrue(), std::move(query_));
+  }
+
+ private:
+  Client *client_;
   PromisedQueryPtr query_;
 };
 
@@ -8781,7 +8824,7 @@ void Client::start_file_stream(td::ActorId<FileStreamConnection> stream, int64 s
                td::make_unique<TdOnFileStreamRemoteFileCallback>(this, stream, stream_id, expected_size));
 }
 
-void Client::remove_file_stream(int64 stream_id, int32 file_id, bool remove_local_file) {
+void Client::remove_file_stream(int64 stream_id, int32 file_id, bool remove_requested, bool completed_ok) {
   active_file_streams_.erase(stream_id);
   for (auto it = pending_file_streams_.begin(); it != pending_file_streams_.end();) {
     if (it->stream.id == stream_id) {
@@ -8800,18 +8843,62 @@ void Client::remove_file_stream(int64 stream_id, int32 file_id, bool remove_loca
   it->second.erase(std::remove_if(it->second.begin(), it->second.end(),
                                   [stream_id](const FileStreamRef &stream) { return stream.id == stream_id; }),
                    it->second.end());
-  if (it->second.empty()) {
-    file_stream_listeners_.erase(it);
-    if (file_download_listeners_.count(file_id) == 0) {
-      if (remove_local_file) {
-        // 带 X-Telegram-No-Cache 标记的流正常完成且已无其他监听者：删除 TDLib 本地副本，不影响 Telegram 云端文件
-        send_request(make_object<td_api::deleteFile>(file_id), td::make_unique<TdOnDeleteFileCallback>(file_id));
-      } else {
-        send_request(make_object<td_api::cancelDownloadFile>(file_id, false),
-                     td::make_unique<TdOnCancelDownloadFileCallback>());
-      }
-    }
+  if (!it->second.empty()) {
+    return;
   }
+
+  // Reference counting handshake: the local copy may be deleted only when this file has neither a
+  // remaining stream listener (file_stream_listeners_) nor a standard getFile download listener
+  // (file_download_listeners_). A normal getFile download IS covered here: do_get_file() inserts
+  // into file_download_listeners_ before it asks TDLib to download and on_file_download() removes
+  // the entry only after the download settles, so a no-cache stream cannot delete a copy that is
+  // being written for a concurrent getFile. The window after a getFile response has been produced
+  // (the caller still reading the returned local path) is intentionally not tracked: TDLib is free
+  // to evict local cache at any moment, so the returned path is never guaranteed to stay valid.
+  const bool download_listener_active = file_download_listeners_.count(file_id) != 0;
+  file_stream_listeners_.erase(it);
+
+  // The decision itself is a pure function (unit-tested in FileStream.test.cpp) so that the four
+  // outcomes stay distinguishable here: delete / cancel only / skip-busy / nothing.
+  const auto action = decide_file_stream_local_copy_action(
+      FileStreamLocalCopyDecisionInput{remove_requested, completed_ok, false, download_listener_active});
+  switch (action) {
+    case FileStreamLocalCopyAction::delete_local_copy:
+      on_local_file_delete_attempt();
+      send_request(make_object<td_api::deleteFile>(file_id),
+                   td::make_unique<TdOnDeleteFileCallback>(this, file_id));
+      break;
+    case FileStreamLocalCopyAction::cancel_download:
+      send_request(make_object<td_api::cancelDownloadFile>(file_id, false),
+                   td::make_unique<TdOnCancelDownloadFileCallback>());
+      break;
+    case FileStreamLocalCopyAction::skip_busy:
+      // 并发 getFile 仍持有同一份本地副本：此刻不能删除（会把正在写的文件抽走）。
+      // 但必须**显式记录**这次跳过——历史上这里是静默分支：no-cache 请求正常完成、
+      // 却因为一个短暂窗口而永久留下整份 workdir 副本，而统计里既没有 attempts
+      // 也没有 failures，运维只能看到 workdir 占用莫名偏高，无从归因。
+      // 现在计入 file_delete_skipped_busy（/getStats 可见），该副本最终由 workdir TTL 清理收敛。
+      parameters_->shared_data_->file_delete_skipped_busy_.fetch_add(1, std::memory_order_relaxed);
+      LOG(INFO) << "Skipped no-cache local copy deletion: a getFile download still holds a reference"
+                << td::tag("file_id", file_id);
+      break;
+    case FileStreamLocalCopyAction::none:
+    default:
+      break;
+  }
+}
+
+void Client::request_file_redownload(int32 file_id) {
+  if (closing_ || logging_out_) {
+    return;
+  }
+  if (file_id <= 0 || file_stream_listeners_.count(file_id) == 0) {
+    // No streaming connection is waiting for this file any more.
+    return;
+  }
+  LOG(INFO) << "Request re-download of file " << file_id << " for file streaming";
+  send_request(make_object<td_api::downloadFile>(file_id, 1, 0, 0, false),
+               td::make_unique<TdOnFileStreamDownloadCallback>(this, file_id));
 }
 
 void Client::send(PromisedQueryPtr query) {
@@ -13795,9 +13882,10 @@ void Client::on_message_send_succeeded(object_ptr<td_api::message> &&message, in
           JsonMessage(message_info, true, "sent message", this, false, true), td::Slice()));
       auto pending_query = std::move(query.query);
       pending_send_message_queries_.erase(query_id);
+      on_local_file_delete_attempt();
       send_request(make_object<td_api::deleteFile>(local_file_id),
                    td::make_unique<TdOnDeleteFileAndAnswerCallback>(
-                       local_file_id, std::move(released_answer), std::move(pending_release_answer),
+                       this, local_file_id, std::move(released_answer), std::move(pending_release_answer),
                        std::move(pending_query)));
       return;
     }
@@ -17167,6 +17255,10 @@ td::Status Client::process_get_file_query(PromisedQueryPtr &query) {
 td::Status Client::process_release_local_file_query(PromisedQueryPtr &query) {
   td::string file_id = query->arg("file_id").str();
   // 仅接受有效的远端 file_id，并拒绝正在下载或被流式端点使用的媒体，避免释放活跃数据。
+  // The in-use test covers both listener sets that can own a local copy: is_file_being_downloaded()
+  // checks file_download_listeners_ (standard getFile downloads, inserted by do_get_file()) and
+  // file_stream_listeners_ covers the streaming endpoint. Only when neither holds a reference is the
+  // copy safe to delete; otherwise the backend is told to retry later through a 409.
   check_remote_file_id(file_id, std::move(query),
                        [this](object_ptr<td_api::file> file, PromisedQueryPtr query) {
     auto local_file_id = file->id_;
@@ -17174,8 +17266,9 @@ td::Status Client::process_release_local_file_query(PromisedQueryPtr &query) {
         || file_stream_listeners_.count(local_file_id) != 0) {
       return fail_query(409, "Conflict: file is currently in use", std::move(query));
     }
+    on_local_file_delete_attempt();
     send_request(make_object<td_api::deleteFile>(local_file_id),
-                 td::make_unique<TdOnOkQueryCallback>(std::move(query)));
+                 td::make_unique<TdOnDeleteFileQueryCallback>(this, std::move(query)));
   });
   return td::Status::OK();
 }
@@ -17187,9 +17280,50 @@ void Client::do_get_file(object_ptr<td_api::file> file, PromisedQueryPtr query) 
   }
 
   auto file_id = file->id_;
+  // Pre-write workdir space admission (see check_workdir_space): reject before the download
+  // listener is registered and before any local copy is written. The caller receives a single JSON
+  // error with HTTP 507 and no side effects, so a too-tight workdir never fills up from concurrent
+  // multi-GiB getFile downloads that all looked affordable at start time.
+  auto known_size = file->size_ > 0 ? file->size_
+                                    : (file->expected_size_ > 0 ? file->expected_size_ : static_cast<int64>(-1));
+  if (!check_workdir_space_for_download(known_size, td::max<int64>(0, file->local_->downloaded_size_))) {
+    return fail_query(507, "Telegram workdir has insufficient free space to start a new download", std::move(query));
+  }
   file_download_listeners_[file_id].push_back(std::move(query));
   send_request(make_object<td_api::downloadFile>(file_id, 1, 0, 0, false),
                td::make_unique<TdOnDownloadFileCallback>(this, file_id));
+}
+
+bool Client::check_workdir_space_for_download(int64 file_size, int64 existing_local_size) {
+  auto free_bytes = get_workdir_free_bytes(parameters_->working_directory_);
+  auto check = check_workdir_space(free_bytes, parameters_->workdir_min_free_bytes_, file_size, existing_local_size,
+                                   parameters_->workdir_unknown_file_min_free_bytes_);
+  if (!check.allowed) {
+    parameters_->shared_data_->workdir_space_rejections_.fetch_add(1, std::memory_order_relaxed);
+    LOG(WARNING) << "Rejected a new file download: insufficient free space in Telegram workdir"
+                 << td::tag("free_bytes", check.free_bytes) << td::tag("min_free_bytes", check.min_free_bytes)
+                 << td::tag("required_bytes", check.required_bytes) << td::tag("file_size", file_size)
+                 << td::tag("unknown_size", check.unknown_size) << td::tag("free_space_known", check.free_space_known);
+  }
+  return check.allowed;
+}
+
+void Client::on_local_file_delete_attempt() {
+  parameters_->shared_data_->file_delete_attempts_.fetch_add(1, std::memory_order_relaxed);
+}
+
+void Client::on_local_file_delete_finished(bool success) {
+  auto &counter = success ? parameters_->shared_data_->file_delete_successes_
+                          : parameters_->shared_data_->file_delete_failures_;
+  counter.fetch_add(1, std::memory_order_relaxed);
+}
+
+td::int64 Client::get_active_file_stream_listener_count() const {
+  td::int64 result = 0;
+  for (const auto &entry : file_stream_listeners_) {
+    result += static_cast<td::int64>(entry.second.size());
+  }
+  return result;
 }
 
 bool Client::is_file_being_downloaded(int32 file_id) const {

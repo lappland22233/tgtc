@@ -403,7 +403,10 @@ import {
   issueFileMediaTicket,
   issueShareMediaTicket,
 } from '../../utils/preview';
-import { triggerBrowserDownload } from '../../utils/download';
+import { triggerBrowserDownload, LARGE_FILE_DOWNLOAD_TIP, isLargeFile } from '../../utils/download';
+import { getDownloadErrorMessage, getErrorMessage } from '../../utils/error';
+import MessagePlugin from '../../utils/message';
+import { useDownloadsStore } from '../../stores/downloads';
 import { formatSizeCompact as formatSize } from '../../utils/format';
 import CustomVideoPlayer from './CustomVideoPlayer.vue';
 import PreviewHeader from './PreviewHeader.vue';
@@ -422,6 +425,7 @@ import { useImageViewer } from '../../composables/useImageViewer';
 import { useAudioPlayer } from '../../composables/useAudioPlayer';
 
 const mediaStore = useMediaPlaybackStore();
+const downloads = useDownloadsStore();
 
 /** 打开时快照：收起/切换后遮罩淡出期间内容不闪变 */
 const snap = reactive({
@@ -1215,11 +1219,36 @@ onBeforeUnmount(() => {
   mediaStore.unregisterBridge();
 });
 
-/** 底部下载：优先使用会话中的 downloadUrl，否则用预览地址兜底 */
-function handleDownload() {
+/**
+ * 底部 / 工具栏下载。
+ *
+ * - 登录态（`context.type === 'user'`）：接入两阶段下载任务流程（创建任务 → 就绪后触发），
+ *   与 FileList 一致——服务器繁忙时可排队，并由全局下载指示器展示进度与取消入口；
+ * - 分享域（`context.type === 'share'`）：后端暂无分享域任务创建端点（入口仅存在于需登录的
+ *   `POST /api/files/:id/download-tasks`），故不伪造接口，复用同源下载 URL 直接触发，
+ *   并对大文件提示使用支持断点续传的下载器（详见 FolderShareBrowser.vue 注释）；
+ * - 浏览器原生下载器不回传完成状态，统一只提示「已开始下载」，不使用 fetch + blob。
+ */
+async function handleDownload() {
+  const session = mediaStore.session;
   const url = snap.downloadUrl || snap.src;
   if (!url) return;
+  if (session?.context.type === 'user') {
+    try {
+      await downloads.requestDownload({
+        fileId: session.item.id,
+        fileName: snap.name || session.item.name,
+      });
+      return;
+    } catch (error: unknown) {
+      MessagePlugin.error(getDownloadErrorMessage(error) ?? getErrorMessage(error));
+      return;
+    }
+  }
   triggerBrowserDownload(url, snap.name || undefined);
+  MessagePlugin.success(
+    isLargeFile(snap.size ?? undefined) ? LARGE_FILE_DOWNLOAD_TIP : '已开始下载，请查看浏览器下载进度',
+  );
 }
 
 // 文件大小格式化已上移到 utils/format.ts（formatSizeCompact），

@@ -124,7 +124,7 @@
 <script setup lang="ts">
 import { ref, reactive, onUnmounted, watch } from 'vue';
 import MessagePlugin from '@/utils/message';
-import { triggerBrowserDownload } from '@/utils/download';
+import { triggerBrowserDownload, LARGE_FILE_DOWNLOAD_TIP, isLargeFile } from '@/utils/download';
 import { isPreviewable, getPreviewKind, buildSharePreviewUrl, buildShareThumbnailUrl } from '@/utils/preview';
 import ThumbnailImg from '@/components/ThumbnailImg.vue';
 import { useMediaPlaybackStore, type MediaSessionItem } from '../../stores/mediaPlayback';
@@ -241,16 +241,26 @@ function buildShareDownloadUrl(fileId: string): string {
 }
 
 /**
- * 直接调用浏览器原生下载。
- * 后端返回 Content-Disposition: attachment，浏览器下载器自带进度条、暂停/恢复、
- * 保存对话框，无需前端 fetch 预校验（旧实现的 GET 兜底会把整个文件先读进内存，
- * 相当于下载两次，已移除）。
+ * 分享域下载。
+ *
+ * 说明（为何不走两阶段「下载任务」流程）：
+ * 后端暂未提供**分享域**（`/api/s/:token`）的下载任务创建端点——任务化创建入口
+ * 仅存在于需登录的 `POST /api/files/:id/download-tasks`（见 backend/file/file.controller.ts），
+ * 分享域只有同源下载入口 `GET /api/s/:token/download/:fileId`（见 backend/share/share.controller.ts）。
+ * 因此这里**不伪造不存在的接口**，改为复用既有同源下载 URL 直接触发浏览器原生下载，
+ * 并对大文件提示「使用支持断点续传的下载器」。待后端补齐分享域任务端点后再接入。
+ *
+ * 浏览器原生下载器不回传完成状态，故只提示「已开始下载」，不写「下载成功」。
+ * 后端返回 Content-Disposition: attachment，浏览器下载器自带进度条/暂停/恢复/保存对话框，
+ * 不在此使用 fetch + blob（会把整个文件读进内存，大文件会挂起）。
  */
 function downloadFile(file: FileSummary) {
   if (downloadingId.value) return;
   downloadingId.value = file.id;
   triggerBrowserDownload(buildShareDownloadUrl(file.id), file.name);
-  MessagePlugin.success('已开始下载，请查看浏览器下载进度');
+  MessagePlugin.success(
+    isLargeFile(file.size) ? LARGE_FILE_DOWNLOAD_TIP : '已开始下载，请查看浏览器下载进度',
+  );
   // 短暂禁用避免重复点击；浏览器接管后无需等待前端异步完成
   window.setTimeout(() => { downloadingId.value = null; }, 1000);
 }

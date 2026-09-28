@@ -221,8 +221,16 @@ export class AuthService {
       throw new UnauthorizedException('邮箱或密码错误');
     }
 
-    // 登录失败限流检查（IP + email 维度，email 小写规范化防绕过）
-    const loginLimitKey = `login:${ip}:${loginDto.email.toLowerCase().trim()}`;
+    // 在查用户及执行 bcrypt 前先施加数据库共享的 IP 与 IP+email 短窗口预算，
+    // 防止轮换邮箱绕过细粒度失败锁时仍可无限消耗纯 JS bcrypt CPU。
+    const normalizedEmail = loginDto.email.toLowerCase().trim();
+    const preflight = await this.rateLimitService.checkLoginPreflight(ip, normalizedEmail);
+    if (!preflight.allowed) {
+      throw new UnauthorizedException(`登录请求过于频繁，请 ${preflight.waitMinutes ?? 1} 分钟后重试`);
+    }
+
+    // 登录失败锁使用 IP + email 维度；成功登录时只重置此失败锁，预校验窗口自然过期。
+    const loginLimitKey = `login:${ip}:${normalizedEmail}`;
 
     const user = await this.userRepository
       .createQueryBuilder('user')

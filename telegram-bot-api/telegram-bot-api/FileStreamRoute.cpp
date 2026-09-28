@@ -209,6 +209,29 @@ bool parse_file_stream_no_cache(td::Slice value) {
   return value == "1" || td::to_lower(value) == "true";
 }
 
+FileStreamLocalCopyAction decide_file_stream_local_copy_action(const FileStreamLocalCopyDecisionInput &input) {
+  if (!input.remove_requested) {
+    // No removal was requested. Still cancel a pending download for an unfinished stream so TDLib
+    // does not keep downloading a file nobody is reading.
+    return input.completed_ok ? FileStreamLocalCopyAction::none : FileStreamLocalCopyAction::cancel_download;
+  }
+  if (!input.completed_ok) {
+    // Aborted/timed-out stream: the local copy may still be needed (for example by a Range retry
+    // from the same client), so keep it and only stop the download.
+    return FileStreamLocalCopyAction::cancel_download;
+  }
+  if (input.other_stream_listeners) {
+    // Another stream is still reading the very same local copy.
+    return FileStreamLocalCopyAction::none;
+  }
+  if (input.download_listener_active) {
+    // A concurrent getFile download is writing the same copy: deleting now would pull the file out
+    // from under it. Defer to the workdir TTL cleanup, but report the skip.
+    return FileStreamLocalCopyAction::skip_busy;
+  }
+  return FileStreamLocalCopyAction::delete_local_copy;
+}
+
 td::Result<td::int64> resolve_file_stream_size(td::int64 tdlib_size, td::int64 expected_size) {
   if (tdlib_size > 0 && expected_size > 0) {
     if (tdlib_size != expected_size) {

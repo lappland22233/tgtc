@@ -31,6 +31,40 @@ struct FileStreamRoute {
   bool no_cache = false;
 };
 
+/**
+ * What to do with the TDLib local copy after a file stream ends.
+ *
+ * Pure decision (no side effects) so that it can be unit-tested directly; the caller performs the
+ * action and records the matching counter.
+ */
+enum class FileStreamLocalCopyAction {
+  /** Nothing to do: the caller did not ask for removal, or the file is already gone. */
+  none,
+  /** Issue deleteFile: no other listener holds a reference to the local copy. */
+  delete_local_copy,
+  /** The stream did not complete, so the copy must be kept: only cancel the pending download. */
+  cancel_download,
+  /**
+   * A concurrent getFile download still holds the copy, so it cannot be deleted now; the copy is
+   * left to the workdir TTL cleanup. Reported explicitly so the skip is observable instead of
+   * silently inflating workdir usage.
+   */
+  skip_busy,
+};
+
+struct FileStreamLocalCopyDecisionInput {
+  /** The caller passed X-Telegram-No-Cache. */
+  bool remove_requested = false;
+  /** The stream finished normally (no abort/timeout). */
+  bool completed_ok = false;
+  /** Another file stream still listens to the same file. */
+  bool other_stream_listeners = false;
+  /** A standard getFile download is currently using the same local copy. */
+  bool download_listener_active = false;
+};
+
+FileStreamLocalCopyAction decide_file_stream_local_copy_action(const FileStreamLocalCopyDecisionInput &input);
+
 td::Result<FileStreamRoute> parse_file_stream_route(td::Slice path);
 td::Result<td::int64> parse_file_stream_size_hint(td::Slice value);
 bool parse_file_stream_no_cache(td::Slice value);

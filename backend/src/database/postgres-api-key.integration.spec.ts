@@ -5,14 +5,22 @@ import { User } from '../common/entities/user.entity';
 import { ApiKey } from '../common/entities/api-key.entity';
 import { ApiKeyIpAllowlist } from '../common/entities/api-key-ip-allowlist.entity';
 import { ApiKeyService } from '../api-key/api-key.service';
+import { TelegramBotDailyUsage } from '../common/entities/telegram-bot-daily-usage.entity';
+import { TelegramBotWhitelist } from '../common/entities/telegram-bot-whitelist.entity';
+import { TelegramBotQuotaService } from '../telegram-bot/telegram-bot-quota.service';
 
 /**
- * PostgreSQL 真库回归：api_keys.id 默认值修复（FixApiKeysIdDefault1801000000001）。
+ * PostgreSQL 真库回归。
  *
- * 背景：上游 4e0da52 的 CreateApiKeys 建表遗漏 id DEFAULT，PG 下
- * @PrimaryGeneratedColumn('uuid') 依赖数据库端默认值，INSERT 省略 id
- * 直接触发非空约束（生产 23502）。服务单测的 mock save 自动补 id，
- * 完全掩盖该缺陷，因此必须用真实 PG + 正式迁移链验证插入路径。
+ * 1) api_keys.id 默认值修复（FixApiKeysIdDefault1801000000001）：
+ *    上游 4e0da52 的 CreateApiKeys 建表遗漏 id DEFAULT，PG 下
+ *    @PrimaryGeneratedColumn('uuid') 依赖数据库端默认值，INSERT 省略 id
+ *    直接触发非空约束（生产 23502）。服务单测的 mock save 自动补 id，
+ *    完全掩盖该缺陷，因此必须用真实 PG + 正式迁移链验证插入路径。
+ * 2) Telegram Bot 三表：同类 id DEFAULT 缺陷（FixTelegramBotIdDefault1802400000000）
+ *    以及 `databaseQuery` 的 PG `[rows, affected]` 元组归一化——后者曾导致
+ *    每日配额判定恒真（BTW：SQLite 路径经 sqliteAll 解包，测试全绿无法覆盖）。
+ *    这两类缺陷都只在 PG 上出现，必须真库验证。
  *
  * 运行方式：需要真实 PostgreSQL（CI 由 quality-gates.yml 的 PG16 服务提供）。
  * - CI / 本地启用：`npm run test:integration:pg`（注入 PG_API_KEY_IT=1）；
@@ -156,5 +164,136 @@ describePg('PG 真库回归：api_keys.id 默认值修复', () => {
     await dataSource.runMigrations();
     expect(await columnDefault()).toMatch(/gen_random_uuid\(\)/);
     await expect(apiKeyService.create(owner)).resolves.toMatchObject({ id: expect.stringMatching(UUID_RE) });
+  });
+});
+
+/** Telegram Bot 三表：uuid 主键默认值 + 原子配额判定（PG 真库） */
+const BOT_TABLES = [
+  'telegram_bot_file_grants',
+  'telegram_bot_daily_usage',
+  'telegram_bot_whitelist',
+] as const;
+const BOT_FIX_MIGRATION_NAME = 'FixTelegramBotIdDefault1802400000000';
+const ISOLATED_DB_BOT = `tgtc_pgbotit_${process.pid}_${Date.now()}`;
+const BOT_TG_USER = '900000999';
+const BOT_USAGE_DATE = '2026-09-15';
+
+/** Bot 用例独立的管理连接（前一个 describe 的 admin 已在其 afterAll 销毁） */
+const botAdmin = new DataSource({
+  type: 'postgres',
+  host: process.env.DB_HOST || '127.0.0.1',
+  port: Number(process.env.DB_PORT || 5432),
+  username: process.env.DB_USERNAME || 'postgres',
+  password: process.env.DB_PASSWORD || 'postgres',
+  database: process.env.DB_DATABASE || 'file_distribution_ci',
+});
+
+describePg('PG 真库回归：Telegram Bot 表 uuid 默认值与每日配额', () => {
+  let dataSource: DataSource;
+  let quotaService: TelegramBotQuotaService;
+
+  const columnDefaultOf = async (table: string): Promise<string | null> => {
+    const rows: Array<{ column_default: string | null }> = await dataSource.query(
+      `SELECT column_default FROM information_schema.columns
+       WHERE table_name = $1 AND column_name = 'id'`,
+      [table],
+    );
+    return rows[0]?.column_default ?? null;
+  };
+
+  /** 不显式提供 id 的插入：只有库端 DEFAULT 存在时才会成功 */
+  const insertUsageWithoutId = (telegramUserId: string) => dataSource.query(
+    `INSERT INTO "telegram_bot_daily_usage" ("telegramUserId", "usageDate", "issuedCount", "createdAt", "updatedAt")
+     VALUES ($1, $2, 0, now(), now())
+     RETURNING id`,
+    [telegramUserId, BOT_USAGE_DATE],
+  );
+
+  beforeAll(async () => {
+    await botAdmin.initialize();
+    await botAdmin.query(`CREATE DATABASE "${ISOLATED_DB_BOT}"`);
+
+    dataSource = new DataSource(createDatabaseOptions({
+      ...process.env,
+      DB_TYPE: 'postgres',
+      DB_DATABASE: ISOLATED_DB_BOT,
+      DB_MIGRATIONS_RUN: 'false',
+    }));
+    await dataSource.initialize();
+    await dataSource.runMigrations();
+
+    quotaService = new TelegramBotQuotaService(
+      dataSource.getRepository(TelegramBotDailyUsage),
+      dataSource.getRepository(TelegramBotWhitelist),
+      dataSource,
+    );
+  }, 120_000);
+
+  afterAll(async () => {
+    if (dataSource?.isInitialized) await dataSource.destroy();
+    await botAdmin.query(`DROP DATABASE IF EXISTS "${ISOLATED_DB_BOT}" WITH (FORCE)`).catch(() => undefined);
+    await botAdmin.destroy().catch(() => undefined);
+  });
+
+  it('空库完整迁移链后三张表 id 均有 gen_random_uuid() 默认值，省略 id 可插入', async () => {
+    for (const table of BOT_TABLES) {
+      expect(await columnDefaultOf(table)).toMatch(/gen_random_uuid\(\)/);
+    }
+
+    const inserted = await insertUsageWithoutId(`${BOT_TG_USER}1`);
+    expect(inserted[0].id).toMatch(UUID_RE);
+  });
+
+  it('每日配额在真库上真正生效：limit=5 时第 6 个被拒绝（元组归一化回归）', async () => {
+    const results = [];
+    for (let index = 0; index < 7; index += 1) {
+      results.push(await quotaService.consume(BOT_TG_USER, BOT_USAGE_DATE, 5));
+    }
+
+    expect(results.filter((result) => result.allowed)).toHaveLength(5);
+    expect(results.filter((result) => !result.allowed)).toHaveLength(2);
+    // 被拒绝时 used 必须反映真实已用量（未归一化时会因元组长度错判）
+    expect(results[5]).toEqual({ allowed: false, used: 5 });
+    expect(await quotaService.getUsed(BOT_TG_USER, BOT_USAGE_DATE)).toBe(5);
+  });
+
+  it('并发扣减不超发：20 路并发下恰好放行剩余额度', async () => {
+    const userId = `${BOT_TG_USER}2`;
+    const results = await Promise.all(
+      Array.from({ length: 20 }, () => quotaService.consume(userId, BOT_USAGE_DATE, 3)),
+    );
+
+    expect(results.filter((result) => result.allowed)).toHaveLength(3);
+    expect(await quotaService.getUsed(userId, BOT_USAGE_DATE)).toBe(3);
+  });
+
+  it('白名单豁免配额，且 refund 归还后可再次使用', async () => {
+    const userId = `${BOT_TG_USER}3`;
+    expect(await quotaService.isWhitelisted(userId)).toBe(false);
+    await quotaService.addToWhitelist(userId, '9001', 'admin');
+    expect(await quotaService.isWhitelisted(userId)).toBe(true);
+
+    const used = `${BOT_TG_USER}4`;
+    await quotaService.consume(used, BOT_USAGE_DATE, 5);
+    expect(await quotaService.getUsed(used, BOT_USAGE_DATE)).toBe(1);
+    await quotaService.refund(used, BOT_USAGE_DATE);
+    expect(await quotaService.getUsed(used, BOT_USAGE_DATE)).toBe(0);
+  });
+
+  it('存量缺陷库升级：缺 DEFAULT 时插入复现 23502，补迁移后恢复', async () => {
+    for (const table of BOT_TABLES) {
+      await dataSource.query(`ALTER TABLE "${table}" ALTER COLUMN "id" DROP DEFAULT`);
+    }
+    await dataSource.query(`DELETE FROM migrations WHERE name = $1`, [BOT_FIX_MIGRATION_NAME]);
+
+    expect(await columnDefaultOf('telegram_bot_daily_usage')).toBeNull();
+    await expect(insertUsageWithoutId(`${BOT_TG_USER}5`)).rejects.toMatchObject({ code: '23502' });
+
+    // 与升级流程一致：应用启动迁移补齐缺口
+    await dataSource.runMigrations();
+    for (const table of BOT_TABLES) {
+      expect(await columnDefaultOf(table)).toMatch(/gen_random_uuid\(\)/);
+    }
+    await expect(insertUsageWithoutId(`${BOT_TG_USER}6`)).resolves.toBeDefined();
   });
 });

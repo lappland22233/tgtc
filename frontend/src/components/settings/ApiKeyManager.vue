@@ -70,7 +70,7 @@
       width="480px"
     >
       <t-alert theme="warning" class="secret-alert">
-        请立即保存此密钥，关闭本窗口后将无法再次查看，只能撤销重建。
+        请妥善保存此密钥；你也可稍后在密钥列表点击「查看」重新回显（历史密钥与已撤销密钥除外）。
       </t-alert>
       <div class="secret-row">
         <t-input :value="createdKey?.key" readonly class="secret-input" />

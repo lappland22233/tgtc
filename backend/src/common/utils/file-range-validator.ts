@@ -22,3 +22,21 @@ export function matchesIfRange(ifRange: string | undefined, etag: string): boole
   if (!ifRange) return true;
   return ifRange.trim() === etag;
 }
+
+/**
+ * 生成不透明资源版本 ETag，用于没有 `uploadVersion` 的来源（如 Bot 匿名直链）。
+ *
+ * 只输出摘要，不回显 identity 原文（可能是 Telegram `file_id` 等内部标识）；
+ * 同一 namespace + identity + size 必然得到同一 ETag，因此同一 Telegram 文件
+ * 跨不同下载授权（grant）保持稳定，客户端可据此判断「续传的是同一版本」。
+ */
+export function buildOpaqueETag(
+  namespace: string,
+  identity: string,
+  size?: number | string | null,
+): string {
+  const digest = createHash('sha256')
+    .update(`${namespace}:${identity}:${size ?? '0'}`)
+    .digest('hex');
+  return `"${digest}"`;
+}

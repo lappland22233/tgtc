@@ -9,6 +9,7 @@ import { User, UserRole } from '../common/entities/user.entity';
 import { BanIPDto, UnbanIPDto, BatchDeleteFilesDto, ConfigDto, BatchConfigDto, SmtpConfigDto, SmtpTestDto, UploadConfigDto, AuthConfigDto, AccessLogQueryDto, SecurityConfigBatchDto, FileVerifyDto, StalePathCleanupDto, AdminFilesQueryDto } from './admin.dto';
 import { TopFilesQueryDto, TopPathsQueryDto, StatusByPathQueryDto, AbnormalIpsQueryDto, DateRangeQueryDto, RefererAnalysisQueryDto, UserAgentAnalysisQueryDto, BandwidthQueryDto, FileTypeQueryDto } from './admin-stats.dto';
 import { CacheConfigDto } from './dto/cache-config.dto';
+import { DownloadConfigDto } from './dto/download-config.dto';
 
 @Controller('admin')
 @UseGuards(JwtAuthGuard, RolesGuard)
@@ -234,6 +235,30 @@ export class AdminController {
   ) {
     await this.adminService.updateCacheConfig(user, dto);
     return { message: '缓存配置已更新' };
+  }
+
+  // 下载资源调度配置与运行状态
+  @Get('download-config')
+  @Roles(UserRole.SUPER_ADMIN)
+  async getDownloadConfig() {
+    return this.adminService.getDownloadConfig();
+  }
+
+  @Put('download-config')
+  @Roles(UserRole.SUPER_ADMIN)
+  async updateDownloadConfig(
+    @CurrentUser() user: User,
+    @Body() dto: DownloadConfigDto,
+  ) {
+    await this.adminService.updateDownloadConfig(user, dto);
+    return { message: '下载调度配置已更新' };
+  }
+
+  /** 运行状态快照：磁盘余量、预约量、队列长度、活跃回源与缓存占用 */
+  @Get('download-runtime')
+  @Roles(UserRole.SUPER_ADMIN)
+  async getDownloadRuntime() {
+    return this.adminService.getDownloadRuntimeStatus();
   }
 
   // Auth Config

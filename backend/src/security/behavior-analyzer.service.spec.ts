@@ -1,4 +1,27 @@
-import { BehaviorAnalyzer } from './behavior-analyzer.service';
+import { BehaviorAnalyzer, buildPostgresBaselineSql } from './behavior-analyzer.service';
+
+// 静态守卫：无 PG 实例也要守住「不得对 ordered-set 聚合叠加窗口函数」。
+// 生产事故：`PERCENTILE_CONT(0.99) WITHIN GROUP (...) OVER ()` 在 PostgreSQL 上
+// 直接报错，导致 5 个指标的基线计算连续约 30 天 100% 失败。
+describe('buildPostgresBaselineSql', () => {
+  const sql = buildPostgresBaselineSql('"totalBandwidth"');
+
+  it('P99 截断使用标量子查询，不含 OVER ()', () => {
+    expect(sql).not.toMatch(/OVER\s*\(/i);
+    expect(sql).toContain('SELECT PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY "totalBandwidth")');
+  });
+
+  it('保持抗投毒与原子 UPSERT 语义：两处过滤条件一致 + ON CONFLICT 更新', () => {
+    const occurrences = (needle: string) => sql.split(needle).length - 1;
+    // 主查询与标量子查询必须使用完全相同的 7 天 / 有流量过滤条件
+    expect(occurrences(`"windowTime" >= NOW() - INTERVAL '7 days'`)).toBe(2);
+    expect(occurrences(`"totalRequests" > 0`)).toBe(2);
+    expect(occurrences('PERCENTILE_CONT(0.99)')).toBe(1);
+    expect(sql).toContain('AVG("totalBandwidth") AS mean');
+    expect(sql).toContain('COALESCE(STDDEV("totalBandwidth"), 0) AS stddev');
+    expect(sql).toContain('ON CONFLICT ("metricName", "hourBucket", "dayOfWeek") DO UPDATE');
+  });
+});
 
 describe('BehaviorAnalyzer',()=>{
  const ds:any={query:jest.fn()}; const cache:any={get:jest.fn().mockImplementation((_k:string,d:string)=>d)}; const s=new BehaviorAnalyzer(ds,cache);

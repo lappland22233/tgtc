@@ -33,7 +33,7 @@ function buildAdminService() {
     {} as any, // exportService
     {} as any, // mailerService
   );
-  return { service, fileRepository, auditService };
+  return { service, fileRepository, auditService, configCacheService };
 }
 
 describe('AdminService.getTopFiles 带宽排序契约', () => {
@@ -212,7 +212,7 @@ describe('AdminService 通用配置写入白名单 (G7-01)', () => {
     const svc = new AdminService(
       repoMock(), repoMock(), fileRepository as any, repoMock(), repoMock(),
       repoMock(), repoMock(), {} as any, configCache as any,
-      auditService as any, {} as any, {} as any,
+      auditService as any, {} as any, {} as any, {} as any,
     );
 
     await svc.updateConfig(user, 'MAX_FILE_SIZE', '20971520');
@@ -319,7 +319,7 @@ describe('AdminService.updateSecurityConfig 归一化 (G7-06)', () => {
     const svc = new AdminService(
       repoMock(), repoMock(), fileRepository as any, repoMock(), repoMock(),
       repoMock(), repoMock(), {} as any, configCache as any,
-      auditService as any, {} as any, {} as any,
+      auditService as any, {} as any, {} as any, {} as any,
     );
 
     // 使用 scan 请求阈值键，'1e3' -> Number('1e3')=1000 -> String(1000)='1000'
@@ -341,7 +341,7 @@ describe('AdminService.updateSecurityConfig 归一化 (G7-06)', () => {
     const svc = new AdminService(
       repoMock(), repoMock(), fileRepository as any, repoMock(), repoMock(),
       repoMock(), repoMock(), {} as any, configCache as any,
-      auditService as any, {} as any, {} as any,
+      auditService as any, {} as any, {} as any, {} as any,
     );
 
     await expect(
@@ -350,5 +350,62 @@ describe('AdminService.updateSecurityConfig 归一化 (G7-06)', () => {
       ]),
     ).rejects.toThrow('必须为有效数值');
     expect(configCache.setBatch).not.toHaveBeenCalled();
+  });
+});
+
+describe('AdminService 下载调度配置（与运行时共用同一套规范化规则）', () => {
+  const user = { id: 'user-1' } as any;
+
+  it('缺失配置回退仓库默认值，而不是把空值展示成 0', async () => {
+    const { service } = buildAdminService();
+    const cfg = await service.getDownloadConfig();
+    expect(cfg.maxReservedGB).toBe(0);
+    expect(cfg.maxConcurrentUpstreams).toBe(8);
+    expect(cfg.queueCapacity).toBe(128);
+    expect(cfg.queueTimeoutSeconds).toBe(1800);
+    expect(cfg.spoolGraceSeconds).toBe(120);
+    expect(cfg.directWindowMB).toBe(1);
+    expect(cfg.directWaitSeconds).toBe(60);
+    expect(cfg.taskRetentionSeconds).toBe(900);
+    expect(cfg.upstreamQueuePolicy).toBe('strict_fifo');
+    expect(cfg.autoCapacityEnabled).toBe(true);
+  });
+
+  it('越界配置按统一区间裁剪后展示（直通窗口 <= 4MiB、权重预算 <= 64）', async () => {
+    const { service, configCacheService } = buildAdminService();
+    configCacheService.get.mockImplementation(async (key: string, fallback: string) => {
+      if (key === 'FILE_DOWNLOAD_DIRECT_WINDOW_MB') return '1024';
+      if (key === 'FILE_DOWNLOAD_MAX_CONCURRENT_UPSTREAMS') return '999';
+      return fallback;
+    });
+    const cfg = await service.getDownloadConfig();
+    expect(cfg.directWindowMB).toBe(4);
+    expect(cfg.maxConcurrentUpstreams).toBe(64);
+  });
+
+  it('写入校验使用与运行时相同的区间，越界值一律拒绝', async () => {
+    const { service, configCacheService } = buildAdminService();
+    await expect(service.updateDownloadConfig(user, { directWindowMB: 5 }))
+      .rejects.toThrow('直通缓冲窗口（MB）应在 1-4 之间');
+    await expect(service.updateDownloadConfig(user, { maxConcurrentUpstreams: 65 }))
+      .rejects.toThrow('上游权重预算应在 1-64 之间');
+    await expect(service.updateDownloadConfig(user, { upstreamQueuePolicy: 'fast' as any }))
+      .rejects.toThrow('上游队列策略');
+    expect(configCacheService.set).not.toHaveBeenCalled();
+  });
+
+  it('合法写入落到 SystemConfig 并覆盖策略与自动扩缩容开关', async () => {
+    const { service, configCacheService, auditService } = buildAdminService();
+    await service.updateDownloadConfig(user, {
+      maxConcurrentUpstreams: 32,
+      directWindowMB: 4,
+      upstreamQueuePolicy: 'bounded_fit',
+      autoCapacityEnabled: false,
+    });
+    expect(configCacheService.set).toHaveBeenCalledWith('FILE_DOWNLOAD_MAX_CONCURRENT_UPSTREAMS', '32', expect.any(String));
+    expect(configCacheService.set).toHaveBeenCalledWith('FILE_DOWNLOAD_DIRECT_WINDOW_MB', '4', expect.any(String));
+    expect(configCacheService.set).toHaveBeenCalledWith('FILE_DOWNLOAD_UPSTREAM_QUEUE_POLICY', 'bounded_fit', expect.any(String));
+    expect(configCacheService.set).toHaveBeenCalledWith('FILE_DOWNLOAD_AUTO_CAPACITY_ENABLED', 'false', expect.any(String));
+    expect(auditService.log).toHaveBeenCalled();
   });
 });

@@ -8,6 +8,7 @@
 
 #include "telegram-bot-api/Client.h"
 #include "telegram-bot-api/ClientManager.h"
+#include "telegram-bot-api/FileStreamRecovery.h"
 #include "telegram-bot-api/Query.h"
 #include "telegram-bot-api/WorkdirCleanupManager.h"
 
@@ -93,7 +94,10 @@ void FileStreamConnection::on_file_ready(td::int32 file_id, td::int64 total_size
   if (download_completed_ && cursor_.contiguous_end < cursor_.total_size) {
     return fail(502, "Telegram download completed with an incomplete file");
   }
-  send_headers();
+  // G17-02: the response headers are written together with the first chunk (see on_file_data)
+  // instead of here. As long as no part of the response exists, the request can still be answered
+  // with a JSON error carrying a real HTTP status, which allows the caller to classify (and retry)
+  // the failure instead of observing a connection that died without sending anything.
   try_read();
 }
 
@@ -116,18 +120,52 @@ void FileStreamConnection::on_file_progress(td::int64 reported_total_size, td::s
       send_closure(cleanup_manager_, &WorkdirCleanupManager::retain_file, local_path_);
     }
   }
+  if (download_completed_ && !is_completed) {
+    // G17-01: TDLib revoked the completion it had reported before, because its local copy is gone
+    // (workdir cleanup, workdir change, ...). The prefix reported earlier describes a file that no
+    // longer exists, so it must not be used to serve bytes. TDLib re-validates the local location
+    // while (re)starting a download, hence wait for that download instead of failing the request.
+    LOG(WARNING) << "TDLib revoked the completed state of file " << file_id_ << " at offset " << cursor_.next_offset
+                 << "; waiting for it to be downloaded again";
+    drop_stale_download_state();
+    request_file_redownload();
+  }
   auto status = cursor_.update_progress(download_offset, downloaded_prefix_size, is_completed);
   if (status.is_error()) {
     return abort(std::move(status));
   }
   download_completed_ = download_completed_ || is_completed;
-  if (!download_completed_ && !is_downloading_active) {
+  if (!is_downloading_active && file_stream_fails_on_stopped_download(download_completed_, first_byte_sent_)) {
+    // G17-01: never treat "not completed and not downloading" as fatal before the first byte is
+    // sent. A cold file whose download has not started yet, and the re-check of a stale local
+    // location, both look exactly like this; the download errors are reported through
+    // on_file_error and the stream-level first-byte timeout remains the final safety net.
     return abort(td::Status::Error(502, "Telegram file download stopped before completion"));
   }
   if (download_completed_ && cursor_.contiguous_end < cursor_.total_size) {
     return abort(td::Status::Error(502, "Telegram download completed with an incomplete file"));
   }
   try_read();
+}
+
+void FileStreamConnection::drop_stale_download_state() {
+  download_completed_ = false;
+  local_file_.close();
+  if (cursor_.next_offset == 0) {
+    // Nothing has been read yet, so the whole file is read again once TDLib restores it.
+    cursor_.contiguous_end = 0;
+  }
+  // Give TDLib a fresh window to restore the file; if it never becomes available the stream-level
+  // first-byte timeout ends the request with a 504 instead of leaving it hanging forever.
+  set_timeout_in(config_.first_byte_timeout);
+}
+
+void FileStreamConnection::request_file_redownload() {
+  if (redownload_requested_ || file_id_ <= 0 || client_.empty()) {
+    return;
+  }
+  redownload_requested_ = true;
+  send_closure(client_, &Client::request_file_redownload, file_id_);
 }
 
 void FileStreamConnection::try_read() {
@@ -152,10 +190,24 @@ void FileStreamConnection::try_read() {
     auto file = td::FileFd::open(local_path_, td::FileFd::Read);
     if (file.is_error()) {
       if (!download_completed_) {
+        // The download is still running: the file appears as soon as TDLib starts writing it.
         return;
       }
-      return abort(td::Status::Error(500, PSTRING() << "Failed to open TDLib local file: "
-                                                     << file.error().public_message()));
+      if (!file_stream_waits_for_redownload(download_completed_, first_byte_sent_)) {
+        return abort(td::Status::Error(500, PSTRING() << "Failed to open TDLib local file: "
+                                                      << file.error().public_message()));
+      }
+      // G17-01: TDLib reported this file as downloaded, but its local copy cannot be opened. Such
+      // a stale "downloaded" state appears whenever the workdir copy was removed behind TDLib's
+      // back (cleanup, workdir change, ...); TDLib only notices while (re)starting a download, so
+      // the previous behaviour made the first request of every cold file fail with a 500 while the
+      // very next one succeeded. Forget the stale state, ask TDLib for the file again and keep
+      // this response open for it.
+      LOG(WARNING) << "TDLib local file is missing for file " << file_id_ << " although it was reported as downloaded; "
+                   << "waiting for it to be downloaded again: " << file.error();
+      drop_stale_download_state();
+      request_file_redownload();
+      return;
     }
     local_file_ = file.move_as_ok();
   }
@@ -202,6 +254,12 @@ void FileStreamConnection::on_file_data(td::int64 offset, td::Result<td::BufferS
   write_in_flight_ = true;
   pending_write_offset_ = offset;
   pending_write_size_ = data.size();
+  // G17-02: the response headers are written here, right before the first chunk, so that headers
+  // and body are still flushed in order by the connection while a request that never produces a
+  // byte can be answered with a JSON error instead of a truncated 200 response.
+  if (!send_headers()) {
+    return;
+  }
   auto promise = td::PromiseCreator::lambda(
       [actor_id = actor_id(this)](td::Result<td::Unit> result) mutable {
         send_closure(actor_id, &FileStreamConnection::on_chunk_flushed, std::move(result));
@@ -247,9 +305,9 @@ void FileStreamConnection::on_headers_flushed(td::Result<td::Unit> result) {
   // Headers reached the socket; normal streaming continues from try_read().
 }
 
-void FileStreamConnection::send_headers() {
+bool FileStreamConnection::send_headers() {
   if (headers_sent_) {
-    return;
+    return true;
   }
   td::HttpHeaderCreator hc;
   hc.init_status_line(200);
@@ -260,7 +318,8 @@ void FileStreamConnection::send_headers() {
   hc.add_header("Cache-Control", "private");
   auto header = hc.finish();
   if (header.is_error()) {
-    return fail(500, "Failed to create streaming response headers");
+    fail(500, "Failed to create streaming response headers");
+    return false;
   }
   headers_sent_ = true;
   // G16-03: write the response headers with a promise so that a client disconnect before the
@@ -273,6 +332,7 @@ void FileStreamConnection::send_headers() {
       });
   send_closure(connection_, &td::HttpInboundConnection::write_next_with_promise, td::BufferSlice(header.ok()),
                std::move(promise));
+  return true;
 }
 
 void FileStreamConnection::finish() {
@@ -281,6 +341,10 @@ void FileStreamConnection::finish() {
   }
   if (!cursor_.is_complete() || read_in_flight_ || write_in_flight_) {
     return abort(td::Status::Error(500, "Attempted to finish an incomplete stream"));
+  }
+  // A zero-length file produces no chunk at all, so make sure a response is sent for it as well.
+  if (!send_headers()) {
+    return;
   }
   finished_ = true;
   completed_ok_ = true;
@@ -335,10 +399,22 @@ void FileStreamConnection::abort(td::Status error) {
   if (finished_) {
     return;
   }
-  finished_ = true;
-  cancel_timeout();
+  auto code = error.code();
+  if (code < 400 || code > 599) {
+    code = 502;
+  }
   LOG(WARNING) << "Abort file stream at offset " << cursor_.next_offset << " of " << cursor_.total_size << ": "
                << error;
+  if (!headers_sent_) {
+    // G17-02: nothing of the response exists yet, so the request can still be answered with a JSON
+    // error carrying a real HTTP status. Dropping the connection instead would make the caller see
+    // a socket abort without any status — which is how the 2026-09-17 cold-file incident reached
+    // nginx ("upstream prematurely closed connection while reading response header") — leaving it
+    // unable to classify or recover from the failure.
+    return fail(code, error.public_message());
+  }
+  finished_ = true;
+  cancel_timeout();
   if (!connection_.empty()) {
     send_closure(std::move(connection_), &td::HttpInboundConnection::write_error, std::move(error));
   }
@@ -346,7 +422,12 @@ void FileStreamConnection::abort(td::Status error) {
 }
 
 void FileStreamConnection::timeout_expired() {
-  auto message = first_byte_sent_ ? td::Slice("File stream stalled") : td::Slice("File stream first byte timeout");
+  auto first_byte_timeout = !first_byte_sent_;
+  // Record the timeout for the /getStats counters before the stream is torn down.
+  if (!client_manager_.empty()) {
+    send_closure(client_manager_, &ClientManager::on_file_stream_timeout, first_byte_timeout);
+  }
+  auto message = first_byte_timeout ? td::Slice("File stream first byte timeout") : td::Slice("File stream stalled");
   on_file_error(td::Status::Error(504, message));
 }
 
@@ -357,8 +438,10 @@ void FileStreamConnection::tear_down() {
   }
   send_closure(client_manager_, &ClientManager::release_file_stream, stream_id_);
   if (!client_.empty()) {
-    // 仅当带 X-Telegram-No-Cache 标记的流正常完成传输时，才请求删除 TDLib 本地副本；中断路径仍只取消下载
-    send_closure(client_, &Client::remove_file_stream, stream_id_, file_id_, route_.no_cache && completed_ok_);
+    // 两个标志都传下去，由 decide_file_stream_local_copy_action() 决定「删除 / 仅取消下载 /
+    // 因并发 getFile 占用而跳过（记数）」——把「no_cache 且已完成」压成一个布尔在这层判断，
+    // 会丢掉「未完成时仍要取消下载」这条路径，也会让「并发占用导致的跳过」变成不可见的分支。
+    send_closure(client_, &Client::remove_file_stream, stream_id_, file_id_, route_.no_cache, completed_ok_);
   }
   connection_.release();
 }

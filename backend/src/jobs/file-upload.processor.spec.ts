@@ -1,5 +1,5 @@
 import { existsSync, createReadStream } from 'fs';
-import { readFile } from 'fs/promises';
+import { readFile, writeFile } from 'fs/promises';
 import { FileUploadProcessor } from './file-upload.processor';
 
 jest.mock('file-type', () => ({
@@ -47,20 +47,45 @@ function makeFile(overrides: Record<string, unknown> = {}) {
 }
 
 function makeRepo() {
+  // ready 置位经 `databaseQuery(repo.manager, ... RETURNING id)`：PG 下 UPDATE 返回
+  // `[rows, rowCount]` 元组，必须走归一化路径才能正确判断「0 行命中」。
+  const query = jest.fn().mockResolvedValue([{ id: fileId }]);
   return {
     findOne: jest.fn(),
     findOneOrFail: jest.fn(),
     update: jest.fn().mockResolvedValue({ affected: 1 }),
-    query: jest.fn().mockResolvedValue([]),
+    query,
+    manager: { query },
   };
 }
 
-function makeProcessor(repo: ReturnType<typeof makeRepo>, telegram?: any, fileService?: any) {
+function makeProcessor(
+  repo: ReturnType<typeof makeRepo>,
+  telegram?: any,
+  fileService?: any,
+  accountUpload?: any,
+) {
   return new FileUploadProcessor(
     repo as any,
     telegram || { uploadFile: jest.fn() } as any,
-    fileService || { generateAndSaveThumbnail: jest.fn(), generateAndSaveVideoCover: jest.fn() } as any,
+    fileService || {
+      generateAndSaveThumbnail: jest.fn(),
+      generateAndSaveVideoCover: jest.fn(),
+      registerPrimaryTelegramSource: jest.fn(),
+      triggerMirrorForFile: jest.fn(),
+    } as any,
+    undefined,
+    accountUpload,
   );
+}
+
+function makeFileService() {
+  return {
+    generateAndSaveThumbnail: jest.fn(),
+    generateAndSaveVideoCover: jest.fn(),
+    registerPrimaryTelegramSource: jest.fn(),
+    triggerMirrorForFile: jest.fn(),
+  };
 }
 
 describe('FileUploadProcessor failure persistence', () => {
@@ -184,7 +209,7 @@ describe('FileUploadProcessor failure persistence', () => {
     );
     // ready 原生 SQL 再次清空，覆盖任务恢复/旧数据边界；status IN 允许覆盖僵尸任务误标的 error
     expect(repo.query).toHaveBeenCalledWith(
-      'UPDATE files SET status = $1, "uploadFailureReason" = NULL WHERE id = $2 AND status IN ($3, $4) AND "uploadVersion" = $5',
+      'UPDATE files SET status = $1, "uploadFailureReason" = NULL WHERE id = $2 AND status IN ($3, $4) AND "uploadVersion" = $5 RETURNING id',
       ['ready', fileId, 'processing', 'error', uploadVersion],
     );
   });
@@ -200,9 +225,80 @@ describe('FileUploadProcessor failure persistence', () => {
     await processor.uploadToTelegram(makeJob(0));
 
     expect(repo.query).toHaveBeenCalledWith(
-      'UPDATE files SET status = $1, "uploadFailureReason" = NULL WHERE id = $2 AND status IN ($3, $4) AND "uploadVersion" = $5',
+      'UPDATE files SET status = $1, "uploadFailureReason" = NULL WHERE id = $2 AND status IN ($3, $4) AND "uploadVersion" = $5 RETURNING id',
       ['ready', fileId, 'processing', 'error', uploadVersion],
     );
+  });
+
+  it('ready 条件未命中（0 行）时跳过收尾，不做定位登记与镜像触发', async () => {
+    mockedExistsSync.mockReturnValue(true);
+    const repo = makeRepo();
+    // 0 行命中：并发覆盖导致 uploadVersion 已变
+    repo.query.mockResolvedValueOnce([]);
+    const fileService = {
+      generateAndSaveThumbnail: jest.fn(),
+      generateAndSaveVideoCover: jest.fn(),
+      registerPrimaryTelegramSource: jest.fn(),
+      triggerMirrorForFile: jest.fn(),
+    };
+    repo.findOne.mockResolvedValue(makeFile({ uploadStage: 'remote_committed', telegramFileId: 'tg-id' }));
+    repo.findOneOrFail.mockResolvedValue(makeFile({ uploadStage: 'remote_committed', telegramFileId: 'tg-id' }));
+    const processor = makeProcessor(repo, { uploadFile: jest.fn() }, fileService);
+
+    await processor.uploadToTelegram(makeJob(0));
+
+    expect(repo.update).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ status: 'ready' }),
+    );
+    expect(fileService.registerPrimaryTelegramSource).not.toHaveBeenCalled();
+    expect(fileService.triggerMirrorForFile).not.toHaveBeenCalled();
+  });
+
+  it('正常成功路径：置 ready 条件 SQL 命中后必然登记主副本定位并触发镜像（收尾顺序回归）', async () => {
+    mockedExistsSync.mockReturnValue(true);
+    const repo = makeRepo();
+    repo.findOne.mockResolvedValue(makeFile());
+    repo.findOneOrFail
+      .mockResolvedValueOnce(makeFile({ uploadStage: 'uploading' }))
+      .mockResolvedValueOnce(makeFile({ uploadStage: 'remote_committed', telegramFileId: 'tg-id' }));
+    // 首次 loadReceipt 无回执 → 走真实上传；收尾阶段能读到带回执的定位信息
+    mockedReadFile
+      .mockRejectedValueOnce(new Error('ENOENT'))
+      .mockResolvedValue(JSON.stringify({
+        file_id: 'tg-id',
+        chat_id: '-100',
+        message_id: '77',
+        file_unique_id: 'UNIQ',
+        uploadVersion,
+      }));
+    const telegram = { uploadFile: jest.fn().mockResolvedValue({ file_id: 'tg-id', file_path: '', file_size: 5 }) };
+    const fileService = makeFileService();
+    const processor = makeProcessor(repo, telegram, fileService);
+
+    await processor.uploadToTelegram(makeJob(0));
+
+    // 置 ready 条件 SQL 必须执行且命中（query 返回 1 行）
+    expect(repo.query).toHaveBeenCalledWith(
+      'UPDATE files SET status = $1, "uploadFailureReason" = NULL WHERE id = $2 AND status IN ($3, $4) AND "uploadVersion" = $5 RETURNING id',
+      ['ready', fileId, 'processing', 'error', uploadVersion],
+    );
+    // 预热不再置状态后，这里是唯一置 ready 入口：命中后来源登记与镜像触发必然执行
+    expect(fileService.registerPrimaryTelegramSource).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ file_id: 'tg-id', chat_id: '-100', message_id: '77' }),
+      null,
+    );
+    expect(fileService.triggerMirrorForFile).toHaveBeenCalledWith(
+      expect.anything(),
+      { chat_id: '-100', message_id: '77' },
+      null,
+    );
+    // 顺序红线：先置 ready（SQL 命中），再登记来源，最后触发镜像
+    expect(repo.query.mock.invocationCallOrder[0])
+      .toBeLessThan(fileService.registerPrimaryTelegramSource.mock.invocationCallOrder[0]);
+    expect(fileService.registerPrimaryTelegramSource.mock.invocationCallOrder[0])
+      .toBeLessThan(fileService.triggerMirrorForFile.mock.invocationCallOrder[0]);
   });
 
   it('marks error instead of ready when the committed record lacks a telegramFileId', async () => {
@@ -291,5 +387,165 @@ describe('FileUploadProcessor failure persistence', () => {
     const recoverableUpdate = repo.update.mock.calls.find((c) => (c[1] as any)?.uploadStage === 'recoverable');
     expect(recoverableUpdate).toBeDefined();
     expect((recoverableUpdate![1] as any).status).not.toBe('error');
+  });
+});
+
+describe('FileUploadProcessor 账号池上传选号', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockedCreateReadStream.mockReturnValue({} as any);
+    mockedExistsSync.mockReturnValue(true);
+    mockedReadFile.mockRejectedValue(new Error('ENOENT'));
+  });
+
+  it('非严格任务：池化上传优先，并把实际上传账号写入回执与定位登记', async () => {
+    const repo = makeRepo();
+    repo.findOne
+      .mockResolvedValueOnce(makeFile())
+      .mockResolvedValueOnce(makeFile({ uploadStage: 'remote_committed', telegramFileId: 'tg-pooled' }));
+    repo.findOneOrFail
+      .mockResolvedValueOnce(makeFile({ uploadStage: 'uploading' }))
+      .mockResolvedValueOnce(makeFile({ uploadStage: 'remote_committed', telegramFileId: 'tg-pooled' }));
+    // 首次 loadReceipt 无回执（触发上传）；提交阶段能读到池化回执
+    mockedReadFile
+      .mockRejectedValueOnce(new Error('ENOENT'))
+      .mockResolvedValue(JSON.stringify({
+        file_id: 'tg-pooled',
+        chat_id: '-100',
+        message_id: '77',
+        file_unique_id: 'UNIQ',
+        sourceAccountId: 'acct-2',
+        uploadVersion,
+      }));
+    const telegram = { uploadFile: jest.fn() };
+    const accountUpload = {
+      isActive: () => true,
+      upload: jest.fn().mockResolvedValue({
+        fileId: 'tg-pooled',
+        fileSize: 5,
+        chatId: '-100',
+        messageId: '77',
+        fileUniqueId: 'UNIQ',
+        accountId: 'acct-2',
+        selectionReason: 'stub',
+      }),
+    };
+    const fileService = makeFileService();
+    const processor = makeProcessor(repo, telegram, fileService, accountUpload);
+
+    await processor.uploadToTelegram(makeJob(0));
+
+    expect(accountUpload.upload).toHaveBeenCalledTimes(1);
+    // 池化成功即不得再走默认单账号链路
+    expect(telegram.uploadFile).not.toHaveBeenCalled();
+    // 回执必须绑定实际上传账号（重启恢复提交时只有回执可依）
+    const persisted = String((writeFile as jest.Mock).mock.calls.at(-1)?.[1] ?? '');
+    expect(JSON.parse(persisted).sourceAccountId).toBe('acct-2');
+    // 主副本定位登记必须传实际上传账号，否则回源会取错账号
+    expect(fileService.registerPrimaryTelegramSource).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ file_id: 'tg-pooled', chat_id: '-100', message_id: '77' }),
+      'acct-2',
+    );
+  });
+
+  it('池化未成功（返回 null）时回退单账号链路', async () => {
+    const repo = makeRepo();
+    repo.findOne
+      .mockResolvedValueOnce(makeFile())
+      .mockResolvedValueOnce(makeFile({ uploadStage: 'remote_committed', telegramFileId: 'tg-default' }));
+    repo.findOneOrFail
+      .mockResolvedValueOnce(makeFile({ uploadStage: 'uploading' }))
+      .mockResolvedValueOnce(makeFile({ uploadStage: 'remote_committed', telegramFileId: 'tg-default' }));
+    const telegram = {
+      uploadFile: jest.fn().mockResolvedValue({ file_id: 'tg-default', file_path: '', file_size: 5 }),
+    };
+    const accountUpload = { isActive: () => true, upload: jest.fn().mockResolvedValue(null) };
+    const processor = makeProcessor(repo, telegram, makeFileService(), accountUpload);
+
+    await processor.uploadToTelegram(makeJob(0));
+
+    expect(accountUpload.upload).toHaveBeenCalledTimes(1);
+    expect(telegram.uploadFile).toHaveBeenCalledTimes(1);
+  });
+
+  it('严格无缓存任务：不走池化，保持单账号链路与本地媒体释放契约', async () => {
+    const repo = makeRepo();
+    repo.findOne
+      .mockResolvedValueOnce(makeFile())
+      .mockResolvedValueOnce(makeFile({ uploadStage: 'remote_committed', telegramFileId: 'tg-strict' }));
+    repo.findOneOrFail
+      .mockResolvedValueOnce(makeFile({ uploadStage: 'uploading' }))
+      .mockResolvedValueOnce(makeFile({ uploadStage: 'remote_committed', telegramFileId: 'tg-strict' }));
+    const telegram = {
+      uploadFile: jest.fn().mockResolvedValue({
+        file_id: 'tg-strict',
+        file_path: '',
+        file_size: 5,
+        localCacheReleased: true,
+      }),
+      releaseLocalFile: jest.fn(),
+    };
+    const accountUpload = { isActive: () => true, upload: jest.fn() };
+    const processor = makeProcessor(repo, telegram, makeFileService(), accountUpload);
+
+    await processor.uploadToTelegram({
+      data: { fileId, filePath, uploadVersion, strictDiskLease: true },
+      attemptsMade: 0,
+    } as any);
+
+    // 严格任务必须保留 noCache 语义：既不池化，也不误触发 releaseLocalFile
+    expect(accountUpload.upload).not.toHaveBeenCalled();
+    expect(telegram.uploadFile).toHaveBeenCalledTimes(1);
+    expect(telegram.uploadFile.mock.calls[0][4]).toMatchObject({ noCache: true });
+    expect(telegram.releaseLocalFile).not.toHaveBeenCalled();
+  });
+
+  it('strictDiskLease=true：跳过池化（accountUpload.upload 不调用）且仍完成上传与来源登记', async () => {
+    const repo = makeRepo();
+    repo.findOne.mockResolvedValue(makeFile());
+    repo.findOneOrFail
+      .mockResolvedValueOnce(makeFile({ uploadStage: 'uploading' }))
+      .mockResolvedValueOnce(makeFile({ uploadStage: 'remote_committed', telegramFileId: 'tg-strict' }));
+    // 首次 loadReceipt 无回执 → 真实走单账号上传；收尾阶段能读到带回执的定位信息
+    mockedReadFile
+      .mockRejectedValueOnce(new Error('ENOENT'))
+      .mockResolvedValue(JSON.stringify({
+        file_id: 'tg-strict',
+        chat_id: '-200',
+        message_id: '88',
+        file_unique_id: 'UNIQ-S',
+        localCacheReleased: true,
+        uploadVersion,
+      }));
+    const telegram = {
+      uploadFile: jest.fn().mockResolvedValue({
+        file_id: 'tg-strict',
+        file_path: '',
+        file_size: 5,
+        localCacheReleased: true,
+      }),
+      releaseLocalFile: jest.fn(),
+    };
+    const accountUpload = { isActive: () => true, upload: jest.fn() };
+    const fileService = makeFileService();
+    const processor = makeProcessor(repo, telegram, fileService, accountUpload);
+
+    await processor.uploadToTelegram({
+      data: { fileId, filePath, uploadVersion, strictDiskLease: true },
+      attemptsMade: 0,
+    } as any);
+
+    // 严格任务按设计不池化：选号入口零调用
+    expect(accountUpload.upload).not.toHaveBeenCalled();
+    // 仍完成单账号上传（noCache 契约）
+    expect(telegram.uploadFile).toHaveBeenCalledTimes(1);
+    expect(telegram.uploadFile.mock.calls[0][4]).toMatchObject({ noCache: true });
+    // 且收尾的置 ready → 来源登记照常执行（严格模式同样需要主副本定位）
+    expect(fileService.registerPrimaryTelegramSource).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ file_id: 'tg-strict', chat_id: '-200', message_id: '88' }),
+      null,
+    );
   });
 });

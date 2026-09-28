@@ -8,8 +8,10 @@ import { File } from '../common/entities/file.entity';
 import { TelegramService } from '../telegram/telegram.service';
 import { FileService } from '../file/file.service';
 import { UploadDiskBudgetService } from '../file/upload-disk-budget.service';
+import { AccountAwareUploadService } from '../telegram-account-pool/account-aware-upload.service';
 import { createReadStream, existsSync } from 'fs';
 import { readFile, rename, unlink, writeFile } from 'fs/promises';
+import { databaseQuery, getDatabaseType } from '../database/database-types';
 
 interface FileUploadJobData {
   fileId: string;
@@ -23,11 +25,21 @@ interface UploadReceipt {
   file_id: string;
   file_path?: string;
   file_size?: number;
+  /** 主副本远端定位（镜像备份与用户账号无源复制依赖；旧版回执可能没有） */
+  message_id?: string | null;
+  chat_id?: string | null;
+  file_unique_id?: string | null;
   uploadVersion?: number;
   /** 严格模式中必须显式为 true 后才可删除 pending 并释放磁盘租约。 */
   localCacheReleased?: boolean;
   /** 任务创建时冻结的严格磁盘策略，供重启恢复任务保持相同的空间语义。 */
   strictDiskLease?: boolean;
+  /**
+   * 实际产生该 `file_id` 的账号（池化上传写入）。
+   * 必须随回执持久化：重启恢复提交时只有回执可依，否则会把池内账号的 `file_id`
+   * 记成默认 Bot 的归属，导致后续回源/镜像取错账号。
+   */
+  sourceAccountId?: string | null;
 }
 
 @Injectable()
@@ -41,6 +53,12 @@ export class FileUploadProcessor {
     private telegramService: TelegramService,
     private fileService: FileService,
     @Optional() private readonly uploadDiskBudget?: UploadDiskBudgetService,
+    /**
+     * 账号池上传选号（可选依赖）：未启用账号池时逐字节等价于原单账号链路。
+     * 严格无缓存任务（`strictDiskLease`）永远不走池化——它依赖 fork 的
+     * `local_cache_released` / `releaseLocalFile` 语义，池化客户端不提供该契约。
+     */
+    @Optional() private readonly accountUpload?: AccountAwareUploadService,
   ) {}
 
   private async removeTempFile(filePath: string): Promise<boolean> {
@@ -108,6 +126,49 @@ export class FileUploadProcessor {
     const released = { ...receipt, localCacheReleased: true };
     await this.persistReceipt(filePath, released, uploadVersion);
     return released;
+  }
+
+  /**
+   * 账号池上传（仅非严格任务）。
+   *
+   * 返回 null 表示本次未使用池化（未装配 / 未启用 / 无可用候选 / 换号耗尽 / 异常），
+   * 调用方据此回退单账号链路；回执中的 `sourceAccountId` 是**实际上传账号**，
+   * 提交阶段必须据此登记主副本归属。
+   */
+  private async tryPooledUpload(filePath: string, file: File): Promise<UploadReceipt | null> {
+    if (!this.accountUpload?.isActive()) {
+      // 诊断：池化未生效必须可归因（未装配 / 已装配但未启用或未解析到账号），
+      // 否则生产只能看到「没有池化上传日志」而无法判断原因。仅加日志，不改回退语义。
+      const reason = this.accountUpload?.inactiveReason?.() ?? null;
+      this.logger.debug(
+        this.accountUpload
+          ? `跳过池化上传：账号池未启用（或未解析到账号）${reason ? `（${reason}）` : ''}`
+          : '跳过池化上传：账号池上传未装配',
+      );
+      return null;
+    }
+    try {
+      const pooled = await this.accountUpload.upload({
+        filename: file.originalName,
+        knownLength: file.size,
+        // 换号重试必须新开流：流只能被消费一次
+        openStream: () => createReadStream(filePath),
+      });
+      if (!pooled) return null;
+      return {
+        file_id: pooled.fileId,
+        // 池化上传不调用普通 getFile（会触发完整回源下载），路径留空
+        file_path: '',
+        file_size: pooled.fileSize,
+        message_id: pooled.messageId || null,
+        chat_id: pooled.chatId || null,
+        file_unique_id: pooled.fileUniqueId,
+        sourceAccountId: pooled.accountId,
+      };
+    } catch (error) {
+      this.logger.warn(`账号池上传异常，回退单账号链路: ${(error as Error).message}`);
+      return null;
+    }
   }
 
   private async removeUploadArtifacts(
@@ -188,7 +249,14 @@ export class FileUploadProcessor {
       try {
         let result = await this.loadReceipt(filePath, uploadVersion);
         if (!result) {
-          result = await this.telegramService.uploadFile(
+          // 池化优先（仅非严格任务）：按权重/健康/容量选号上传，并记录**实际上传账号**；
+          // 严格任务保留单账号链路，以维持 noCache/localCacheReleased/releaseLocalFile 契约。
+          if (strictDiskLease) {
+            // 诊断：严格任务跳过池化是**按设计**（非池化失效），明确记录避免生产误判。
+            this.logger.debug('严格磁盘租约任务按设计跳过池化上传（保留 fork 本地媒体释放契约）');
+          }
+          const pooled = strictDiskLease ? null : await this.tryPooledUpload(filePath, file);
+          result = pooled ?? await this.telegramService.uploadFile(
             createReadStream(filePath),
             file.originalName,
             undefined,
@@ -306,13 +374,43 @@ export class FileUploadProcessor {
 
     // 收尾最后一步才置 ready，避免 ThumbnailService 使用旧实体状态覆盖 ready。
     // 条件更新同时保护 uploadVersion 和当前状态，防止并发覆盖写入。
-    const readyUpdate = await this.fileRepository.query(
-      'UPDATE files SET status = $1, "uploadFailureReason" = NULL WHERE id = $2 AND status IN ($3, $4) AND "uploadVersion" = $5',
+    // 预热（FileService.startCachePrewarm）不置状态，因此这里的条件更新是唯一置 ready 入口，
+    // 命中后来源登记与镜像触发必然执行。
+    //
+    // 必须经 `databaseQuery()` + `RETURNING id`：PG 的 UPDATE 返回 `[rows, rowCount]` 元组，
+    // 直接读 `rowCount/affected` 在 PG 下两个字段均为 undefined（判断恒假），
+    // 0 行命中时不会跳过收尾——这正是团队历史上两起静默失效的同一根因。
+    const readyRows = await databaseQuery<Array<{ id: string }>>(
+      this.fileRepository.manager,
+      'UPDATE files SET status = $1, "uploadFailureReason" = NULL WHERE id = $2 AND status IN ($3, $4) AND "uploadVersion" = $5 RETURNING id',
       ['ready', fileId, 'processing', 'error', uploadVersion],
+      getDatabaseType(),
     );
-    if (readyUpdate?.rowCount === 0 || readyUpdate?.affected === 0) {
+    if (!Array.isArray(readyRows) || readyRows.length === 0) {
       this.logger.warn(`文件 ${fileId} 置 ready 条件未命中（状态或版本已变化），跳过本轮收尾`);
       return;
+    }
+
+    // 主副本远端定位登记 + 镜像触发（best-effort；失败只告警，不影响上传结论）。
+    // 回执在远端提交时已原子落盘，重启恢复路径同样能取到定位信息。
+    try {
+      const receipt = await this.loadReceipt(filePath, uploadVersion);
+      if (receipt?.chat_id && receipt.message_id) {
+        await this.fileService.registerPrimaryTelegramSource(file, {
+          file_id: receipt.file_id,
+          chat_id: receipt.chat_id,
+          message_id: receipt.message_id,
+          file_unique_id: receipt.file_unique_id ?? null,
+        }, receipt.sourceAccountId ?? null);
+        void this.fileService.triggerMirrorForFile(file, {
+          chat_id: receipt.chat_id,
+          message_id: receipt.message_id,
+        }, receipt.sourceAccountId ?? null);
+      }
+    } catch (error) {
+      this.logger.warn(
+        `文件 ${fileId} 主副本定位登记/镜像触发失败（不影响上传结果）：${(error as Error).message}`,
+      );
     }
 
     await this.removeUploadArtifacts(filePath, fileId, uploadVersion);

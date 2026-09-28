@@ -43,6 +43,17 @@ describe('FileService public media validation', () => {
     await expect((service as any).getPublicMediaFile(publicImage.id)).resolves.toEqual(publicImage);
   });
 
+  it('公开媒体 metadata 预检复用授权校验并只返回合法 size', async () => {
+    const service = createService(publicImage);
+    await expect(service.getPublicMediaMetadata(publicImage.id)).resolves.toEqual({ size: 128 });
+    expect((service as any).fileCacheService.getOrCacheStream).toBeUndefined();
+  });
+
+  it('拒绝非正整数 metadata size，避免 size-aware 槽位绕过校验', async () => {
+    const service = createService({ ...publicImage, size: Number.MAX_SAFE_INTEGER + 1 });
+    await expect(service.getPublicMediaMetadata(publicImage.id)).rejects.toBeInstanceOf(BadRequestException);
+  });
+
   it('rejects non-media files', async () => {
     const service = createService({ ...publicImage, mimeType: 'application/pdf' });
     await expect((service as any).getPublicMediaFile(publicImage.id)).rejects.toBeInstanceOf(BadRequestException);

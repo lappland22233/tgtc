@@ -13,8 +13,11 @@ namespace telegram_bot_api {
 
 void Watchdog::kick() {
   auto now = td::Time::now();
-  if (now >= last_kick_time_ + timeout_ && last_kick_time_ > 0 && GET_VERBOSITY_LEVEL() >= VERBOSITY_NAME(ERROR)) {
-    LOG(ERROR) << get_name() << " timeout expired after " << now - last_kick_time_ << " seconds";
+  if (now >= last_kick_time_ + timeout_ && last_kick_time_ > 0) {
+    if (GET_VERBOSITY_LEVEL() >= VERBOSITY_NAME(ERROR)) {
+      LOG(ERROR) << get_name() << " timeout expired after " << now - last_kick_time_ << " seconds";
+    }
+    // A diagnostic verbosity setting may suppress the message, never the watchdog action.
     td::thread::send_real_time_signal(main_thread_id_, 2);
   }
   last_kick_time_ = now;

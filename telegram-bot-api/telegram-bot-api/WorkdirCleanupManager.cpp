@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
+#include <limits>
 #include <system_error>
 
 namespace telegram_bot_api {
@@ -66,6 +67,38 @@ bool is_tdlib_persistent_file(td::Slice path) {
 }
 
 }  // namespace
+
+td::int64 get_workdir_free_bytes(td::Slice workdir) {
+  return get_free_space(workdir);
+}
+
+WorkdirSpaceCheck check_workdir_space(td::int64 free_bytes, td::int64 min_free_bytes, td::int64 file_size,
+                                      td::int64 existing_local_size, td::int64 unknown_size_margin) {
+  WorkdirSpaceCheck result;
+  result.min_free_bytes = td::max<td::int64>(0, min_free_bytes);
+  // Fail closed: without trustworthy disk information a new download must not be started, so that a
+  // transient statvfs failure can never cause the workdir to be written past --workdir-min-free-bytes.
+  if (free_bytes < 0) {
+    return result;
+  }
+  result.free_space_known = true;
+  result.free_bytes = free_bytes;
+  if (file_size >= 0) {
+    // A partially present local copy only needs its missing tail, so only that increment is charged.
+    result.increment_bytes = td::max<td::int64>(0, file_size - td::max<td::int64>(0, existing_local_size));
+  } else {
+    result.unknown_size = true;
+    result.increment_bytes = td::max<td::int64>(0, unknown_size_margin);
+  }
+  // required_bytes = min_free_bytes + increment_bytes, saturating instead of overflowing.
+  if (result.increment_bytes > std::numeric_limits<td::int64>::max() - result.min_free_bytes) {
+    result.required_bytes = std::numeric_limits<td::int64>::max();
+  } else {
+    result.required_bytes = result.min_free_bytes + result.increment_bytes;
+  }
+  result.allowed = result.free_bytes >= result.required_bytes;
+  return result;
+}
 
 bool is_workdir_cleanup_candidate(td::Slice workdir, td::Slice path) {
   if (workdir.empty() || path.empty()) {
