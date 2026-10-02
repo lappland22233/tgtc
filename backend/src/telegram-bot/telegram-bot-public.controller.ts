@@ -4,6 +4,7 @@ import { Request, Response } from 'express';
 import { createHash, randomUUID } from 'crypto';
 import { Readable } from 'stream';
 import { TelegramBotFileGrant } from '../common/entities/telegram-bot-file-grant.entity';
+import { TelegramCopyOwnerType } from '../common/entities/telegram-file-copy.entity';
 import { AccountAwareDownloadService } from '../telegram-account-pool/account-aware-download.service';
 import { AccountAwareDownloadFailure } from '../telegram-account-pool/account-aware-stream.types';
 import { FileCopyService } from '../telegram-account-pool/file-copy.service';
@@ -168,7 +169,7 @@ export class TelegramBotPublicController {
     return this.singleAccountStream(grant, expectedSize, noCache);
   }
 
-  /** 池化回源：锚点定位副本集合 → 加权选号；任何异常都记录后返回 null，交由回退矩阵处理。 */
+  /** 池化回源：解析副本归属 → 加权选号；任何异常都记录后返回 null，交由回退矩阵处理。 */
   private async tryPooledStream(
     pool: AccountAwareDownloadService,
     grant: TelegramBotFileGrant,
@@ -176,21 +177,20 @@ export class TelegramBotPublicController {
     noCache = false,
     onUnavailable?: (failure: AccountAwareDownloadFailure) => void,
   ): Promise<{ stream: Readable; info: { file_id: string; file_size: number } } | null> {
-    if (!this.fileCopies || !grant.chatId || !grant.messageId) {
+    const copies = this.fileCopies;
+    if (!copies) {
       onUnavailable?.({ reason: 'copy_lookup_failed', retryAfterMs: 5_000 });
       return null;
     }
     try {
-      // 入站时以 file_unique_id 为主键登记副本，这里用「用户私聊 chat + 消息 id」反查主键。
-      // findByAnchor 定位逻辑归属，openStream 会读取该归属下的全部 ready 账号副本。
-      const anchor = await this.fileCopies.findByAnchor(String(grant.chatId), String(grant.messageId));
-      if (!anchor) {
+      const owner = await this.resolveCopyOwner(copies, grant);
+      if (!owner) {
         onUnavailable?.({ reason: 'no_ready_copies', retryAfterMs: 5_000, readyAccountCount: 0 });
         return null;
       }
       const opened = await pool.openStream({
-        ownerType: anchor.ownerType,
-        ownerId: anchor.ownerId,
+        ownerType: owner.ownerType,
+        ownerId: owner.ownerId,
         expectedSize,
         noCache,
         fileName: grant.fileName || 'download',
@@ -203,6 +203,42 @@ export class TelegramBotPublicController {
       this.logger.warn(`账号池回源异常，进入源账号回退（grant=${grant.id}）：${message}`);
       return null;
     }
+  }
+
+  /**
+   * 解析 grant 对应的副本归属（逻辑主键）。
+   *
+   * 优先级：
+   * 1. `grant.fileUniqueId`（正常路径）：它既是入站登记 `ownerType='fileUnique'` 行的 ownerId，
+   *    也是跨账号稳定的内容标识，解析**无需任何查询**（比按锚点反查少一次 DB 查询）；
+   * 2. 私聊入站锚点 `(grant.chatId, grant.messageId)`（历史兜底）：早期签发的 grant 可能没有
+   *    `file_unique_id`，只能按锚点反查。
+   *
+   * 为什么正常路径不再按锚点反查：副本行的 `(chatId, messageId)` 语义是「产生该 file_id 的
+   * **可变**转发定位」——镜像扩散跑通后，镜像群内每个 Bot 的登记会覆盖同一
+   * `(ownerType, ownerId, accountId)` 行的锚点（镜像搬运依赖该锚点定位源消息，
+   * 见 `TelegramMirrorSourceService`），私聊锚点因此永久失配，反查恒空、池化退化为恒压源账号。
+   * 锚点反查只保留给 `fileUniqueId` 为空的历史 grant；命中多行时的确定性收敛逻辑不变。
+   *
+   * 解析不出归属（fileUniqueId 为空且没有可用锚点）时返回 null，调用方按 `no_ready_copies`
+   * 收口——与「归属存在但无 ready 副本」同一失败口径，交由回退矩阵处理。
+   */
+  private async resolveCopyOwner(
+    copies: FileCopyService,
+    grant: TelegramBotFileGrant,
+  ): Promise<{ ownerType: TelegramCopyOwnerType; ownerId: string } | null> {
+    const fileUniqueId = (grant.fileUniqueId || '').trim();
+    if (fileUniqueId) return { ownerType: 'fileUnique', ownerId: fileUniqueId };
+
+    const chatId = grant.chatId == null ? '' : String(grant.chatId).trim();
+    const messageId = grant.messageId == null ? '' : String(grant.messageId).trim();
+    if (!chatId || !messageId) return null;
+
+    this.logger.debug(
+      `grant ${grant.id} 缺少 file_unique_id，回退按私聊入站锚点反查副本归属（该锚点可能已被镜像群登记覆盖）`,
+    );
+    const anchor = await copies.findByAnchor(chatId, messageId);
+    return anchor ? { ownerType: anchor.ownerType, ownerId: anchor.ownerId } : null;
   }
 
   /**

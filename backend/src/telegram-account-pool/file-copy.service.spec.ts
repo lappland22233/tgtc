@@ -238,6 +238,72 @@ describe('FileCopyService（副本登记 / 去重 / 生命周期清理）', () =
     expect(ctx.service.anchorConflictCount).toBe(0);
   });
 
+  it('跨方法一致性：私聊锚点被镜像群登记覆盖后，fileUnique 归属仍可取到 ready 副本', async () => {
+    const ctx = setup();
+    // 本用例改为「按 where 精确匹配」的内存仓库：upsertReady 的写入结果必须能被
+    // findByAnchor / listReady 真实读到，否则又回到「各自单测、链路不通」的盲区。
+    const store: Array<Record<string, unknown>> = [{
+      id: 'copy-a1',
+      ownerType: 'fileUnique',
+      ownerId: 'UNIQ-1',
+      accountId: 'a1',
+      telegramFileId: 'a1-file',
+      chatId: '5648985656',
+      messageId: '665',
+      fileSize: '100',
+      source: 'inbound',
+      status: 'ready',
+      lastError: null,
+    }];
+    const whereMatches = (row: Record<string, unknown>, where: Record<string, unknown>) =>
+      Object.entries(where).every(([key, value]) => row[key] === value);
+    // 与真实 TypeORM 同语义：查询返回**游离副本**（不是库内行对象的引用），写入必须经 save 落库，
+    // 否则断言会依赖对象引用突变而假通过（save 被误删也照样绿）。
+    const clone = (row: Record<string, unknown>) => ({ ...row });
+    ctx.repo.find.mockImplementation(async (options?: unknown) => {
+      const where = (options as { where?: Record<string, unknown> } | undefined)?.where ?? {};
+      return store.filter((row) => whereMatches(row, where)).map(clone) as never;
+    });
+    ctx.repo.findOne.mockImplementation(async (options?: unknown) => {
+      const where = (options as { where?: Record<string, unknown> } | undefined)?.where ?? {};
+      const found = store.find((row) => whereMatches(row, where));
+      return (found ? clone(found) : null) as never;
+    });
+    ctx.repo.save.mockImplementation(async (value?: unknown) => {
+      const row = clone(value as Record<string, unknown>);
+      const id = typeof row.id === 'string' ? row.id : '';
+      if (!id) {
+        row.id = `copy-${store.length + 1}`;
+        store.push(row);
+        return row as never;
+      }
+      const index = store.findIndex((item) => item.id === id);
+      if (index >= 0) store[index] = row;
+      else store.push(row);
+      return row as never;
+    });
+
+    // 镜像群内同一账号再次登记：锚点被覆盖成镜像群锚点（写端行为有意为之，本次不改）
+    await ctx.service.upsertReady({
+      ownerType: 'fileUnique',
+      ownerId: 'UNIQ-1',
+      accountId: 'a1',
+      telegramFileId: 'a1-file',
+      chatId: '-1004381979533',
+      messageId: '4242',
+      fileSize: 100,
+      source: 'relayed',
+    });
+    expect(ctx.repo.save).toHaveBeenCalledTimes(1);
+    expect(store[0].chatId).toBe('-1004381979533');
+
+    // 旧读端语义（按私聊入站锚点反查）此刻恒空——Bot 直链读端不得再依赖它
+    expect(await ctx.service.findByAnchor('5648985656', '665')).toBeNull();
+    // 修复后读端语义（按 file_unique_id 归属）不受锚点覆盖影响
+    const ready = await ctx.service.listReady('fileUnique', 'UNIQ-1');
+    expect(ready.map((row) => row.accountId)).toEqual(['a1']);
+  });
+
   it('purgeStale 按阈值分类清理并返回各类计数', async () => {
     const ctx = setup();
     ctx.repo.delete

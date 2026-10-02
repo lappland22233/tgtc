@@ -72,7 +72,7 @@ export class TelegramFileCopy {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
-  @Column({ type: 'varchar', length: 16, comment: '归属对象类型：file|grant' })
+  @Column({ type: 'varchar', length: 16, comment: '归属对象类型：fileUnique|file|grant' })
   ownerType: TelegramCopyOwnerType;
 
   @Column({ type: 'varchar', length: 64, comment: '归属对象 ID（files.id 或 grant.id）' })
@@ -86,11 +86,18 @@ export class TelegramFileCopy {
   @Column({ type: 'varchar', length: 512, comment: '该账号的 Telegram file_id' })
   telegramFileId: string;
 
-  /** 产生该 file_id 的 chat（用于中继/转发定位） */
+  /**
+   * 产生该 file_id 的 chat（用于中继/转发定位）。
+   *
+   * **可变**：同一 `(ownerType, ownerId, accountId)` 行会被后到的登记覆盖（镜像群内每个 Bot
+   * 登记自己副本时，锚点即是该群消息）。因此它**不保证**是用户私聊入站锚点——
+   * Bot 直链解析已改为用 `grant.fileUniqueId`（`ownerType='fileUnique'` 的 ownerId）定位归属，
+   * 按锚点反查仅作历史兜底，详见 `FileCopyService.findByAnchor` 文档。
+   */
   @Column({ type: 'varchar', length: 32, nullable: true, comment: '产生 file_id 的 chat id' })
   chatId: string | null;
 
-  /** 产生该 file_id 的消息 ID（转发/中继用） */
+  /** 产生该 file_id 的消息 ID（转发/中继用；随 `chatId` 一起被后到的登记覆盖，同样不是入站锚点） */
   @Column({ type: 'varchar', length: 32, nullable: true, comment: '消息 ID（转发锚点）' })
   messageId: string | null;
 
