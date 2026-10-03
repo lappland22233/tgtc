@@ -210,6 +210,7 @@ import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue';
 import * as echarts from '@/utils/echarts';
 import { api } from '@/stores/auth';
 import { useMobile } from '../../composables/useMobile';
+import { useChartResize } from '../../composables/useChartResize';
 import { CHART_COLORS, tooltipBase, legendBase, ensureCyberTheme } from '../../utils/echarts-theme';
 
 // Theme-aware chart colors
@@ -510,15 +511,16 @@ watch(isMobile, () => {
   nextTick(() => setTimeout(handleResize, 100));
 });
 
+// PERF-F-106：帧级节流 + 卸载解绑（原为裸 addEventListener，拖拽窗口时每像素重排）
+useChartResize(handleResize);
+
 onMounted(() => {
   fetchAll();
-  window.addEventListener('resize', handleResize);
 });
 
 onUnmounted(() => {
   refererCategoryChart?.dispose();
   deviceChart?.dispose();
-  window.removeEventListener('resize', handleResize);
 });
 
 defineExpose({ resizeAllCharts });

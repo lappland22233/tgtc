@@ -28,10 +28,11 @@ function makeLink(overrides: Record<string, unknown> = {}) {
  * 每个用途独立返回 execute 结果，避免深层嵌套导致语法错误。
  */
 function makeService() {
-  // 会话仓库的 createQueryBuilder 分发到不同用途
+  // 会话仓库的 createQueryBuilder 分发到不同用途；
+  // pruneExpired 经 databaseQuery(sessionRepo.manager, ...) 执行 DELETE ... RETURNING
   const sessionRepo: any = {
     createQueryBuilder: jest.fn(),
-    query: jest.fn(),
+    manager: { query: jest.fn() },
   };
   // 数据源的 createQueryBuilder 仅用于扣减 ShareLink 额度
   const dataSource: any = {
@@ -153,20 +154,95 @@ describe('SharePreviewSessionService', () => {
     expect(result).toBe('consumed');
   });
 
-  it('pruneExpired 按索引分批删除过期会话', async () => {
-    const { service, sessionRepo, mkSelect } = makeService();
-    sessionRepo.query.mockResolvedValue([[], 3]);
-    sessionRepo.createQueryBuilder.mockReturnValueOnce(
-      mkSelect('SELECT "id" FROM "share_preview_sessions" WHERE "expiresAt" < $1'),
-    );
+  /**
+   * PERF-B-102：pruneExpired 的删除计数必须兼容双方言真实返回形状——
+   * PG 的 DELETE ... RETURNING 经 TypeORM 返回 [rows, count] 元组（databaseQuery 归一化解包后按行数判定）；
+   * SQLite 的 RETURNING 走 sqliteAll() 返回行数组。旧写法 result[1] 在 SQLite 下恒为 undefined →
+   * 清理计数恒为 0（不可观测），本组用例按两方言真实形状断言计数一致。
+   */
+  describe('pruneExpired 删除计数（PERF-B-102）', () => {
+    const originalDbType = process.env.DB_TYPE;
 
-    const count = await service.pruneExpired();
-    expect(count).toBe(3);
-    // G5-05：query 必须同时携带参数数组（含 $1 占位符的 DELETE IN 子查询需要 now 参数），
-    // 否则参数缺失报错被吞 → 过期会话永不清理。
-    expect(sessionRepo.query).toHaveBeenCalledWith(
-      expect.stringContaining('DELETE FROM "share_preview_sessions"'),
-      expect.any(Array),
-    );
+    afterEach(() => {
+      if (originalDbType === undefined) delete process.env.DB_TYPE;
+      else process.env.DB_TYPE = originalDbType;
+    });
+
+    const wireSubQuery = (sessionRepo: any, mkSelect: any) => {
+      sessionRepo.createQueryBuilder.mockReturnValueOnce(
+        mkSelect('SELECT "id" FROM "share_preview_sessions" WHERE "expiresAt" < $1'),
+      );
+    };
+
+    it('PostgreSQL 命中：元组 [[3 行], 3] 归一化后按真实删除行数返回 3', async () => {
+      process.env.DB_TYPE = 'postgres';
+      const { service, sessionRepo, mkSelect } = makeService();
+      wireSubQuery(sessionRepo, mkSelect);
+      sessionRepo.manager.query.mockResolvedValue(
+        [[{ id: 's-1' }, { id: 's-2' }, { id: 's-3' }], 3], // TypeORM PostgresQueryRunner DELETE 元组形状
+      );
+
+      await expect(service.pruneExpired()).resolves.toBe(3);
+      // G5-05：DELETE IN 子查询含 $1 占位符，必须携带参数数组，且语句须带 RETURNING 才能统计行数。
+      expect(sessionRepo.manager.query).toHaveBeenCalledWith(
+        expect.stringContaining('DELETE FROM "share_preview_sessions"'),
+        expect.any(Array),
+      );
+      expect(sessionRepo.manager.query).toHaveBeenCalledWith(
+        expect.stringContaining('RETURNING "id"'),
+        expect.any(Array),
+      );
+    });
+
+    it('PostgreSQL 未命中：元组 [[], 0] 归一化为空 → 返回 0', async () => {
+      process.env.DB_TYPE = 'postgres';
+      const { service, sessionRepo, mkSelect } = makeService();
+      wireSubQuery(sessionRepo, mkSelect);
+      sessionRepo.manager.query.mockResolvedValue([[], 0]);
+
+      await expect(service.pruneExpired()).resolves.toBe(0);
+    });
+
+    it('SQLite 命中：返回行数组 [{id}×2] → 按真实删除行数返回 2（旧写法恒 0）', async () => {
+      process.env.DB_TYPE = 'sqlite';
+      const { service, sessionRepo, mkSelect } = makeService();
+      wireSubQuery(sessionRepo, mkSelect);
+      // SQLite RETURNING 无 connection 时兜底走 query()，返回纯行数组
+      sessionRepo.manager.query.mockResolvedValue([{ id: 's-1' }, { id: 's-2' }]);
+
+      await expect(service.pruneExpired()).resolves.toBe(2);
+      // SQLite 占位符翻译：$1 → ?1
+      expect(sessionRepo.manager.query).toHaveBeenCalledWith(
+        expect.stringContaining('?1'),
+        expect.any(Array),
+      );
+    });
+
+    it('SQLite 未命中：空数组 [] → 返回 0', async () => {
+      process.env.DB_TYPE = 'sqlite';
+      const { service, sessionRepo, mkSelect } = makeService();
+      wireSubQuery(sessionRepo, mkSelect);
+      sessionRepo.manager.query.mockResolvedValue([]);
+
+      await expect(service.pruneExpired()).resolves.toBe(0);
+    });
+
+    it('SQLite 真实 RETURNING 路径（sqliteAll）：按 all() 回调行数返回 1', async () => {
+      process.env.DB_TYPE = 'sqlite';
+      const { service, sessionRepo, mkSelect } = makeService();
+      wireSubQuery(sessionRepo, mkSelect);
+      const all = jest.fn(
+        (_sql: string, _params: unknown[], callback: (error: Error | null, rows: unknown[]) => void) =>
+          callback(null, [{ id: 's-9' }]),
+      );
+      sessionRepo.manager.connection = { driver: { databaseConnection: { all } } };
+
+      await expect(service.pruneExpired()).resolves.toBe(1);
+      expect(all).toHaveBeenCalledWith(
+        expect.stringMatching(/DELETE[\s\S]*RETURNING "id"/),
+        [expect.any(String)], // 参数 now 在 SQLite 下转换为可比较的 UTC 文本
+        expect.any(Function),
+      );
+    });
   });
 });

@@ -5,7 +5,7 @@ import { JwtService } from '@nestjs/jwt';
 import { DataSource } from 'typeorm';
 import * as bcrypt from 'bcryptjs';
 import { AuthService } from './auth.service';
-import { User } from '../common/entities/user.entity';
+import { User, UserRole } from '../common/entities/user.entity';
 import { VerificationCode } from '../common/entities/verification-code.entity';
 import { BannedIP } from '../common/entities/banned-ip.entity';
 import { JwtRevokedToken } from '../common/entities/jwt-revoked-token.entity';
@@ -15,6 +15,14 @@ import { ConfigCacheService } from '../common/services/config-cache.service';
 import { RateLimitService } from '../common/services/rate-limit.service';
 import { AuditService } from '../common/services/audit.service';
 import { TurnstileService } from '../common/services/turnstile.service';
+
+// PERF-B-104：注册路径 COUNT 经 getDatabaseType() 分方言执行，用例需要切换 DB_TYPE
+const originalDbType = process.env.DB_TYPE;
+
+afterEach(() => {
+  if (originalDbType === undefined) delete process.env.DB_TYPE;
+  else process.env.DB_TYPE = originalDbType;
+});
 
 describe('AuthService - validateVerificationCode', () => {
   let service: AuthService;
@@ -377,6 +385,111 @@ describe('AuthService - 邮箱验证开关与登录拦截', () => {
         expect.objectContaining({ emailVerified: true }),
       );
       expect(result.user?.emailVerified).toBe(true);
+    });
+
+    /**
+     * PERF-B-104：注册路径的「首位用户」COUNT 必须经统一入口 databaseQuery 执行——
+     * 旧实现绕过该入口直调 queryRunner.query()，SQLite 高并发下失去 SQLITE_BUSY 退避。
+     * 以下用例按双方言真实返回形状断言角色判定不变：
+     * - PG：SELECT 返回纯 rows 数组 [{ count: '0' | '5' }]，count 为字符串；
+     * - SQLite：COUNT 返回 [{ count: 0|3 }]，count 为数字；且写锁冲突（SQLITE_BUSY）自动退避重试。
+     */
+    it('PERF-B-104/PG 未命中（空表 count="0"）：COUNT 经 databaseQuery 执行，首位用户为 SUPER_ADMIN', async () => {
+      process.env.DB_TYPE = 'postgres';
+      mockConfigCacheService.get.mockResolvedValue('false');
+      mockUserRepo.findOne.mockResolvedValue(null);
+      mockUserRepo.count.mockResolvedValue(0);
+      mockQueryRunner.query.mockResolvedValueOnce([{ count: '0' }]); // PG：SELECT 返回纯 rows 数组
+      wireRegisterTransaction();
+
+      const result = await service.register(
+        { email: 'first@example.com', password: 'password123' } as any,
+        '127.0.0.1',
+      );
+
+      expect(mockQueryRunnerManager.create).toHaveBeenCalledWith(
+        User,
+        expect.objectContaining({ role: UserRole.SUPER_ADMIN }),
+      );
+      expect(result.user?.role).toBe(UserRole.SUPER_ADMIN);
+      // 统一入口：COUNT 由 databaseQuery 在同一 queryRunner 上执行（空参数数组）
+      expect(mockQueryRunner.query).toHaveBeenCalledWith(
+        expect.stringContaining('SELECT COUNT(*) as count FROM "users"'),
+        [],
+      );
+      expect(mockQueryRunner.commitTransaction).toHaveBeenCalled();
+    });
+
+    it('PERF-B-104/PG 命中（count="5"）：锁后复查到既有用户 → 注册被拒（TOCTOU 防护不变）', async () => {
+      process.env.DB_TYPE = 'postgres';
+      mockConfigCacheService.get.mockResolvedValue('false');
+      mockUserRepo.findOne.mockResolvedValue(null);
+      mockUserRepo.count.mockResolvedValue(0); // 事务前预检通过：模拟并发抢跑
+      mockQueryRunner.query.mockResolvedValueOnce([{ count: '5' }]);
+      wireRegisterTransaction();
+
+      await expect(
+        service.register({ email: 'late@example.com', password: 'password123' } as any, '127.0.0.1'),
+      ).rejects.toThrow('注册功能已关闭，请联系管理员');
+      expect(mockQueryRunnerManager.create).not.toHaveBeenCalled();
+    });
+
+    it('PERF-B-104/SQLite 未命中（count=0 数字）：首位用户为 SUPER_ADMIN', async () => {
+      process.env.DB_TYPE = 'sqlite';
+      mockConfigCacheService.get.mockResolvedValue('false');
+      mockUserRepo.findOne.mockResolvedValue(null);
+      mockUserRepo.count.mockResolvedValue(0);
+      mockQueryRunner.query.mockResolvedValueOnce([{ count: 0 }]); // SQLite：COUNT 返回数字
+      wireRegisterTransaction();
+
+      const result = await service.register(
+        { email: 'first-sqlite@example.com', password: 'password123' } as any,
+        '127.0.0.1',
+      );
+
+      expect(result.user?.role).toBe(UserRole.SUPER_ADMIN);
+    });
+
+    it('PERF-B-104/SQLite 命中（count=3 数字）：既有用户 → 角色为 USER', async () => {
+      process.env.DB_TYPE = 'sqlite';
+      mockConfigCacheService.get.mockImplementation(async (key: string) =>
+        key === 'REGISTRATION_ENABLED' ? 'true' : 'false',
+      );
+      mockUserRepo.findOne.mockResolvedValue(null);
+      mockQueryRunner.query.mockResolvedValueOnce([{ count: 3 }]);
+      wireRegisterTransaction();
+
+      const result = await service.register(
+        { email: 'second@example.com', password: 'password123' } as any,
+        '127.0.0.1',
+      );
+
+      expect(mockQueryRunnerManager.create).toHaveBeenCalledWith(
+        User,
+        expect.objectContaining({ role: UserRole.USER }),
+      );
+      expect(result.user?.role).toBe(UserRole.USER);
+    });
+
+    it('PERF-B-104/SQLite 写锁冲突（SQLITE_BUSY）：经 databaseQuery 退避后重试成功', async () => {
+      process.env.DB_TYPE = 'sqlite';
+      mockConfigCacheService.get.mockResolvedValue('false');
+      mockUserRepo.findOne.mockResolvedValue(null);
+      mockUserRepo.count.mockResolvedValue(0);
+      const busy = Object.assign(new Error('database is locked'), { code: 'SQLITE_BUSY' });
+      mockQueryRunner.query
+        .mockRejectedValueOnce(busy)
+        .mockResolvedValueOnce([{ count: 0 }]);
+      wireRegisterTransaction();
+
+      const result = await service.register(
+        { email: 'retry@example.com', password: 'password123' } as any,
+        '127.0.0.1',
+      );
+
+      expect(result.user?.role).toBe(UserRole.SUPER_ADMIN);
+      // 第一次 SQLITE_BUSY 被退避重试（共 2 次查询）；旧实现绕过 databaseQuery 会直接失败
+      expect(mockQueryRunner.query).toHaveBeenCalledTimes(2);
     });
   });
 

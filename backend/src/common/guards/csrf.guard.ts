@@ -11,7 +11,10 @@ const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
  *
  * - login/register/send-code/verify-email/reset-password：在会话建立之前调用，
  *   此时不可能携带 XSRF Cookie；
- * - logout：仅强制登出（低风险），豁免可兼容升级前已建立、尚未拿到 XSRF Cookie 的存量会话。
+ * - logout **不再豁免**（SEC-102）：登出会吊销服务端会话并清除 Cookie，属于状态
+ *   变更操作，携带会话 Cookie 时必须通过双重提交校验。存量会话若尚未签发
+ *   XSRF Cookie，由 main.ts 的补发中间件在响应中补发，前端登出请求收到 403
+ *   后自动重试一次即可完成登出（不使用豁免兜底）。
  *
  * 注意：这不是「认证端点无条件放行」——所有非安全方法仍先经过 Origin/Referer 同源校验，
  * 且这些端点在已有 XSRF Cookie 时依然执行双重提交比对（不一致即拒绝）。
@@ -22,7 +25,6 @@ const DOUBLE_SUBMIT_EXEMPT_PATHS = new Set([
   'auth/send-code',
   'auth/verify-email',
   'auth/reset-password',
-  'auth/logout',
 ]);
 
 /**

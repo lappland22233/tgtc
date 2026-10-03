@@ -126,7 +126,8 @@
 
 <script setup lang="ts">
 import { ref, onMounted } from 'vue';
-import { MessagePlugin, DialogPlugin } from 'tdesign-vue-next';
+import { DialogPlugin } from 'tdesign-vue-next/es/dialog';
+import { MessagePlugin } from 'tdesign-vue-next/es/message';
 import { api } from '../../stores/auth';
 import { useFileStore } from '../../stores/files';
 import { useFolderStore, type Folder } from '../../stores/folders';

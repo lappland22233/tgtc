@@ -1308,7 +1308,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue';
-import { DialogPlugin } from 'tdesign-vue-next';
+import { DialogPlugin } from 'tdesign-vue-next/es/dialog';
 import MessagePlugin from '@/utils/message';
 import { getErrorMessage } from '@/utils/error';
 import { useMobile } from '@/composables/useMobile';

@@ -1,6 +1,7 @@
 import axios, { type AxiosInstance, type AxiosError, type InternalAxiosRequestConfig } from 'axios';
 import MessagePlugin from '../utils/message';
 import { classifyServiceAvailabilityError } from '../utils/error';
+import { readCookie, XSRF_COOKIE_NAME, XSRF_HEADER_NAME } from '../utils/xsrf';
 
 // ---- 状态机：防止并发 401 重定向 ----
 let isRedirecting = false;
@@ -116,24 +117,12 @@ const client: AxiosInstance = axios.create({
   // 后端已在登录/注册会话建立时下发非 httpOnly 的 XSRF-TOKEN Cookie，并由全局 CsrfGuard
   // 对所有状态变更方法校验「同源 + 请求头与 Cookie 一致」。
   // 容错：cookie 不存在时（如匿名公开分享页、Bearer/API Key 调用）不注入请求头、也不报错。
-  xsrfCookieName: 'XSRF-TOKEN',
-  xsrfHeaderName: 'X-XSRF-TOKEN',
+  xsrfCookieName: XSRF_COOKIE_NAME,
+  xsrfHeaderName: XSRF_HEADER_NAME,
   // 不设置 Content-Type，由 axios 根据请求数据类型自动推断：
   // - 普通对象 → application/json
   // - FormData → multipart/form-data（浏览器自动设置 boundary）
 });
-
-/**
- * 读取指定名称的 cookie 值；不存在时返回空字符串（容错，不抛错）。
- * 用于 CSRF 双重提交 Cookie 方案。
- */
-function readCookie(name: string): string {
-  if (typeof document === 'undefined') return '';
-  // 转义 cookie 名中的正则特殊字符，避免构造非法正则
-  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const match = document.cookie.match(new RegExp('(?:^|;\\s*)' + escaped + '=([^;]*)'));
-  return match && match[1] ? decodeURIComponent(match[1]) : '';
-}
 
 // ---- 请求拦截器 ----
 client.interceptors.request.use(
@@ -141,11 +130,12 @@ client.interceptors.request.use(
     // Cookie 由 axios withCredentials 自动携带，无需手动添加 Authorization header。
     // CSRF 防护（双重提交 Cookie）：读取后端下发的 XSRF-TOKEN cookie 并注入 X-XSRF-TOKEN 请求头。
     // 容错——cookie 不存在时不注入请求头、也不报错（公开分享页/非浏览器调用场景）。
+    // 原生 fetch 调用点（不经过本实例）复用 `utils/xsrf.ts` 的同一份读取逻辑，避免两处实现漂移。
     const headers = config.headers;
-    if (headers && !headers.has('X-XSRF-TOKEN')) {
-      const xsrfToken = readCookie('XSRF-TOKEN');
+    if (headers && !headers.has(XSRF_HEADER_NAME)) {
+      const xsrfToken = readCookie(XSRF_COOKIE_NAME);
       if (xsrfToken) {
-        headers.set('X-XSRF-TOKEN', xsrfToken);
+        headers.set(XSRF_HEADER_NAME, xsrfToken);
       }
     }
     return config;

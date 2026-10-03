@@ -1,0 +1,88 @@
+{
+  "$schema": "internal://frontend-bundle-baseline",
+  "updatedAt": "2026-10-03",
+  "note": "由 `npm run check:bundle -- --write` 生成。阈值含义：jsTotal/cssTotal 为产物总量，maxJsChunk/maxCssChunk 为单文件上限，entryCssTotal 为入口 index.html 加载的 CSS 总量（TDesign 按需化后应显著小于 cssTotal）。",
+  "toleranceRatio": 0.05,
+  "entryToleranceRatio": 0.02,
+  "thresholds": {
+    "jsTotal": 2621288,
+    "jsGzipTotal": 816302,
+    "cssTotal": 374443,
+    "cssGzipTotal": 63358,
+    "maxJsChunk": 568068,
+    "maxCssChunk": 128844,
+    "entryJsTotal": 367790
+  },
+  "largest": {
+    "maxJsChunk": {
+      "path": "assets/echarts-C1oem3EO.js",
+      "bytes": 568068
+    },
+    "maxCssChunk": {
+      "path": "assets/index-BZye8Jbu.css",
+      "bytes": 128844
+    }
+  },
+  "topChunks": [
+    {
+      "path": "assets/echarts-C1oem3EO.js",
+      "bytes": 568068,
+      "gzip": 195137
+    },
+    {
+      "path": "assets/../fonts/tdesign-icons-sprite.js",
+      "bytes": 516439,
+      "gzip": 139533
+    },
+    {
+      "path": "assets/index-D2yqM6OS.js",
+      "bytes": 266218,
+      "gzip": 92994
+    },
+    {
+      "path": "assets/index-CJv3S8cJ.js",
+      "bytes": 199525,
+      "gzip": 59083
+    },
+    {
+      "path": "assets/FileList-BtOp8ghf.js",
+      "bytes": 166983,
+      "gzip": 48663
+    },
+    {
+      "path": "assets/index-BZye8Jbu.css",
+      "bytes": 128844,
+      "gzip": 17187
+    },
+    {
+      "path": "assets/tdesign-icons-CH1WXp2q.js",
+      "bytes": 127668,
+      "gzip": 10937
+    },
+    {
+      "path": "assets/index-MCzixgWS.js",
+      "bytes": 122959,
+      "gzip": 36698
+    },
+    {
+      "path": "assets/vue-vendor-CBAykkJw.js",
+      "bytes": 110895,
+      "gzip": 43361
+    },
+    {
+      "path": "assets/TelegramAccounts-B62KLmoR.js",
+      "bytes": 76482,
+      "gzip": 22198
+    },
+    {
+      "path": "assets/index-A35QuThs.css",
+      "bytes": 42105,
+      "gzip": 5315
+    },
+    {
+      "path": "assets/Config-Drc3OjHF.js",
+      "bytes": 41167,
+      "gzip": 12234
+    }
+  ]
+}

@@ -14,7 +14,12 @@ vi.mock('../api/client', () => ({
   },
   clearRedirectState: vi.fn(),
 }));
+vi.mock('../utils/message', () => ({
+  default: { error: vi.fn(), success: vi.fn(), warning: vi.fn(), info: vi.fn() },
+}));
 
+import client from '../api/client';
+import MessagePlugin from '../utils/message';
 import { useAuthStore } from './auth';
 import { useFileStore } from './files';
 import { useFolderStore } from './folders';
@@ -91,5 +96,59 @@ describe('登出清理业务 store（M7）', () => {
 
     expect(auth.user).toBeNull();
     filesStore.reset = original;
+  });
+});
+
+/**
+ * SEC-102 回归：logout 退出 CSRF 双重提交豁免后，升级窗口（存量会话尚未签发
+ * XSRF-TOKEN Cookie）的首次登出请求会 403；前端自动重试一次补齐凭据。
+ */
+describe('登出 CSRF 重试兜底（SEC-102）', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    vi.clearAllMocks();
+  });
+
+  it('首次 403 时自动重试一次并完成登出', async () => {
+    const post = vi.mocked(client.post);
+    post.mockRejectedValueOnce({ response: { status: 403 } });
+
+    const auth = useAuthStore();
+    auth.user = { id: 'u1' } as any;
+
+    await expect(auth.logout()).resolves.toBeUndefined();
+
+    expect(post).toHaveBeenCalledTimes(2);
+    expect(post.mock.calls[0][0]).toBe('/auth/logout');
+    expect(post.mock.calls[1][0]).toBe('/auth/logout');
+    expect(auth.user).toBeNull();
+  });
+
+  it('非 403 失败不重试，本地登出照旧完成', async () => {
+    const post = vi.mocked(client.post);
+    post.mockRejectedValueOnce(new Error('network down'));
+
+    const auth = useAuthStore();
+    auth.user = { id: 'u1' } as any;
+
+    await expect(auth.logout()).resolves.toBeUndefined();
+
+    expect(post).toHaveBeenCalledTimes(1);
+    expect(auth.user).toBeNull();
+  });
+
+  it('重试仍 403 时提示刷新页面，本地登出照旧完成', async () => {
+    const post = vi.mocked(client.post);
+    post.mockRejectedValueOnce({ response: { status: 403 } });
+    post.mockRejectedValueOnce({ response: { status: 403 } });
+
+    const auth = useAuthStore();
+    auth.user = { id: 'u1' } as any;
+
+    await expect(auth.logout()).resolves.toBeUndefined();
+
+    expect(post).toHaveBeenCalledTimes(2);
+    expect(MessagePlugin.warning).toHaveBeenCalledWith('登出确认失败，请刷新页面后重试');
+    expect(auth.user).toBeNull();
   });
 });

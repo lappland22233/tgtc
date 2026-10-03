@@ -15,6 +15,13 @@ vi.mock('@/utils/message', () => ({
   default: { success: vi.fn(), error: vi.fn(), info: vi.fn(), warning: vi.fn() },
 }));
 
+// PERF-F-101：运行时代码已改为从 `tdesign-vue-next/es/dialog` 子路径导入 DialogPlugin
+// （包根 es/index.mjs 自带全量 style/css.mjs，会让 518 KB 全量 CSS 进入产物）。
+// es/* 子路径的样式是裸 .css，Node 侧不可直接加载，故在此打桩。
+vi.mock('tdesign-vue-next/es/dialog', () => ({
+  DialogPlugin: { confirm: vi.fn(), alert: vi.fn(), info: vi.fn(), warning: vi.fn() },
+}));
+
 // Config.vue 模板中的 t-* 组件经 unplugin-vue-components 自动导入为
 // tdesign-vue-next 的具名导出，因此 stub 必须放在该 mock 内（含 v-model 事件）。
 vi.mock('tdesign-vue-next', () => ({

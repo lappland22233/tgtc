@@ -59,7 +59,7 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref, watch } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
-import { DialogPlugin } from 'tdesign-vue-next';
+import { DialogPlugin } from 'tdesign-vue-next/es/dialog';
 import { useUploadStore } from '../stores/upload';
 import { useMediaPlaybackStore } from '../stores/mediaPlayback';
 

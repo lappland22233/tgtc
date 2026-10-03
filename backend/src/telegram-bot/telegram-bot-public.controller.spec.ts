@@ -442,6 +442,11 @@ describe('TelegramBotPublicController 账号池回退矩阵（fail-closed）', (
     poolActive?: boolean;
     sourceAccountId?: string | null;
     anchor?: { ownerType: string; ownerId: string } | null;
+    /** grant 的内容标识（默认 'UNIQ-1'）；传 null 模拟缺 file_unique_id 的历史 grant */
+    fileUniqueId?: string | null;
+    /** grant 的私聊锚点（默认 '7001'/'100'）；置空模拟历史缺锚点数据 */
+    grantChatId?: string;
+    grantMessageId?: string;
     poolFailureReason?: 'all_candidates_busy' | 'upstream_attempts_failed';
     sourceFailureReason?: 'source_capacity_busy' | 'source_cooling_down';
     openStreamResult?: 'ok' | 'null';
@@ -462,8 +467,9 @@ describe('TelegramBotPublicController 账号池回退矩阵（fail-closed）', (
         telegramUserId: '7001',
         telegramFileId: TELEGRAM_FILE_ID,
         sourceAccountId: options.sourceAccountId === undefined ? '9999999' : options.sourceAccountId,
-        chatId: '7001',
-        messageId: '100',
+        chatId: options.grantChatId ?? '7001',
+        messageId: options.grantMessageId ?? '100',
+        fileUniqueId: options.fileUniqueId === undefined ? 'UNIQ-1' : options.fileUniqueId,
         fileName: 'report.pdf',
         mimeType: 'application/pdf',
         fileSize: String(TOTAL_SIZE),
@@ -497,6 +503,7 @@ describe('TelegramBotPublicController 账号池回退矩阵（fail-closed）', (
       }),
     };
     const auditService = { log: jest.fn() };
+    // 锚点反查替身只服务「历史兜底」路径：正常路径由 file_unique_id 直接解析归属，不再触达锚点。
     const fileCopies = {
       findByAnchor: options.anchorThrows
         ? jest.fn(async () => { throw new Error('副本表不可用'); })
@@ -571,6 +578,67 @@ describe('TelegramBotPublicController 账号池回退矩阵（fail-closed）', (
     );
     // 池化成功：不得再调用默认账号
     expect(ctx.telegramService.getRealtimeFileStream).not.toHaveBeenCalled();
+    // 正常路径不再依赖会被镜像群登记覆盖的锚点（连查都不查）
+    expect(ctx.fileCopies.findByAnchor).not.toHaveBeenCalled();
+    expect(ctx.getCapturedError()).toBeNull();
+  });
+
+  it('锚点被镜像群登记覆盖（findByAnchor 恒空）：仍以 file_unique_id 解析并成功池化回源', async () => {
+    // 复现线上形态：副本行的 (chatId, messageId) 已被镜像群登记覆盖成群锚点，私聊锚点反查恒空。
+    // 旧实现由此退化为「恒压源账号」，本用例锁死修复后的解析口径。
+    const ctx = makePoolController({ openStreamResult: 'ok', anchor: null });
+    await ctx.controller.download(VALID_TOKEN, makeRequest(), res);
+
+    expect(ctx.accountPoolDownload.openStream).toHaveBeenCalledWith(expect.objectContaining({
+      ownerType: 'fileUnique',
+      ownerId: 'UNIQ-1',
+    }));
+    expect(ctx.accountPoolDownload.openSourceStream).not.toHaveBeenCalled();
+    expect(ctx.telegramService.getRealtimeFileStream).not.toHaveBeenCalled();
+    expect(ctx.getCapturedError()).toBeNull();
+  });
+
+  it('历史 grant 缺 file_unique_id：回退按私聊入站锚点反查并采用其归属', async () => {
+    const ctx = makePoolController({
+      openStreamResult: 'ok',
+      fileUniqueId: null,
+      anchor: { ownerType: 'file', ownerId: 'FILE-9' },
+    });
+    await ctx.controller.download(VALID_TOKEN, makeRequest(), res);
+
+    expect(ctx.fileCopies.findByAnchor).toHaveBeenCalledWith('7001', '100');
+    expect(ctx.accountPoolDownload.openStream).toHaveBeenCalledWith(expect.objectContaining({
+      ownerType: 'file',
+      ownerId: 'FILE-9',
+    }));
+  });
+
+  it('grant 缺私聊锚点但带 file_unique_id：不判为 copy_lookup_failed，仍走池化', async () => {
+    const ctx = makePoolController({
+      openStreamResult: 'ok',
+      grantChatId: '',
+      grantMessageId: '',
+    });
+    await ctx.controller.download(VALID_TOKEN, makeRequest(), res);
+
+    expect(ctx.accountPoolDownload.openStream).toHaveBeenCalledWith(expect.objectContaining({
+      ownerType: 'fileUnique',
+      ownerId: 'UNIQ-1',
+    }));
+    expect(ctx.getCapturedError()).toBeNull();
+  });
+
+  it('file_unique_id 与锚点都无法解析归属：不查询副本集合，按回退矩阵回退源账号', async () => {
+    const ctx = makePoolController({
+      fileUniqueId: null,
+      anchor: null,
+      sourceStreamResult: 'ok',
+      sourceAccountId: '9999999',
+    });
+    await ctx.controller.download(VALID_TOKEN, makeRequest(), res);
+
+    expect(ctx.accountPoolDownload.openStream).not.toHaveBeenCalled();
+    expect(ctx.accountPoolDownload.openSourceStream).toHaveBeenCalledTimes(1);
     expect(ctx.getCapturedError()).toBeNull();
   });
 
@@ -590,9 +658,16 @@ describe('TelegramBotPublicController 账号池回退矩阵（fail-closed）', (
   });
 
   it('副本表暂时不可用但源账号可确认：仍回退源账号（不阻断可用性）', async () => {
-    const ctx = makePoolController({ anchorThrows: true, sourceStreamResult: 'ok', sourceAccountId: '9999999' });
+    // 只有历史 grant（缺 file_unique_id）才会触达副本表；抛错按 copy_lookup_failed 收口后回退
+    const ctx = makePoolController({
+      fileUniqueId: null,
+      anchorThrows: true,
+      sourceStreamResult: 'ok',
+      sourceAccountId: '9999999',
+    });
     await ctx.controller.download(VALID_TOKEN, makeRequest(), res);
 
+    expect(ctx.fileCopies.findByAnchor).toHaveBeenCalledTimes(1);
     expect(ctx.accountPoolDownload.openSourceStream).toHaveBeenCalledTimes(1);
     expect(ctx.telegramService.getRealtimeFileStream).not.toHaveBeenCalled();
   });

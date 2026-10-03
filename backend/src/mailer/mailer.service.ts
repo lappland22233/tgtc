@@ -15,6 +15,29 @@ function escapeHtml(str: string): string {
     .replace(/'/g, '&#039;');
 }
 
+/** 错误摘要长度上限：超长 message 截断，控制日志体积与潜在敏感残留面 */
+const SMTP_ERROR_SUMMARY_MAX_LENGTH = 300;
+
+/**
+ * 生成单行错误摘要（SEC-104）。
+ *
+ * 不再输出 error.stack，避免 SMTP 会话细节、内部路径等随堆栈进入日志；
+ * 保留 message（单行化 + 长度截断）与 code/responseCode 错误码，
+ * 与 classifySmtpError 的排障分类维度一致。
+ */
+function summarizeSmtpError(error: unknown): string {
+  const err = error as { code?: unknown; responseCode?: unknown; message?: unknown };
+  const rawMessage = typeof err?.message === 'string' && err.message ? err.message : String(error);
+  const oneLine = rawMessage.replace(/\s+/g, ' ').trim();
+  const message = oneLine.length > SMTP_ERROR_SUMMARY_MAX_LENGTH
+    ? `${oneLine.slice(0, SMTP_ERROR_SUMMARY_MAX_LENGTH)}...`
+    : oneLine;
+  const codes: string[] = [];
+  if (typeof err?.code === 'string' && err.code) codes.push(`code=${err.code}`);
+  if (typeof err?.responseCode === 'number') codes.push(`responseCode=${err.responseCode}`);
+  return codes.length > 0 ? `${message} (${codes.join(', ')})` : message;
+}
+
 export interface SmtpConfig {
   host: string;
   port: number;
@@ -193,8 +216,7 @@ export class MailerService {
     try {
       await transporter.sendMail(mailOptions);
     } catch (error) {
-      const detail = error instanceof Error ? error.stack || error.message : String(error);
-      this.logger.error(`邮件发送失败: ${detail}`);
+      this.logger.error(`邮件发送失败: ${summarizeSmtpError(error)}`);
       throw new ServiceUnavailableException(this.classifySmtpError(error));
     }
   }
@@ -274,8 +296,7 @@ export class MailerService {
     try {
       await transporter.verify();
     } catch (error) {
-      const detail = error instanceof Error ? error.stack || error.message : String(error);
-      this.logger.error(`SMTP 连通性自检失败: ${detail}`);
+      this.logger.error(`SMTP 连通性自检失败: ${summarizeSmtpError(error)}`);
       throw new ServiceUnavailableException(this.classifySmtpError(error));
     }
 

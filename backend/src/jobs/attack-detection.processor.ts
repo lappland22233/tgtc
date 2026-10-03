@@ -136,7 +136,8 @@ export class AttackDetectionProcessor {
   }
 
   /** 每 5 分钟并行执行 4 条攻击检测规则，同步生成告警记录 */
-  @Process('detect-attacks')
+  // PERF-B-107：显式 concurrency:1（与 Bull 隐式默认一致，仅显性化，行为不变）
+  @Process({ name: 'detect-attacks', concurrency: 1 })
   async detectAttacks(_job: Job): Promise<void> {
     // 4 条检测规则相互独立，并行执行以缩短整体耗时（原为串行）
     const [scanners, bruteForce, crawlers, abnormalDownloads] = await Promise.all([

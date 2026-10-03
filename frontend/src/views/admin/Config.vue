@@ -549,7 +549,7 @@
 <script setup lang="ts">
 import { ref, reactive, onMounted, onBeforeUnmount, watch } from 'vue';
 import { onBeforeRouteLeave } from 'vue-router';
-import { DialogPlugin } from 'tdesign-vue-next';
+import { DialogPlugin } from 'tdesign-vue-next/es/dialog';
 import MessagePlugin from '@/utils/message';
 import { useMobile } from '../../composables/useMobile';
 import { api } from '../../stores/auth';

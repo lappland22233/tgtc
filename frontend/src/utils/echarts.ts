@@ -9,8 +9,10 @@
 //   import { init } from '@/utils/echarts';
 //   import type { ECharts } from '@/utils/echarts';
 //
-// The 'cyber' theme is registered separately via ensureCyberTheme()
-// in echarts-theme.ts (called lazily from main.ts).
+// PERF-F-104：本模块（含 echarts 依赖图）只应被图表页面 import。
+// 应用入口不再预载 echarts —— 每个图表组件在 init 之前调用
+// ensureCyberTheme()（幂等）自行完成主题注册，因此非图表用户
+// （游客分享页、登录页、普通文件列表）不再为 echarts 付出任何体积。
 // ============================================================
 
 import * as echarts from 'echarts/core';

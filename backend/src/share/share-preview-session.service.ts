@@ -3,6 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
 import { SharePreviewSession } from '../common/entities/share-preview-session.entity';
 import { ShareLink } from '../common/entities/share-link.entity';
+import { databaseQuery, getDatabaseType } from '../database/database-types';
 
 /** 预览会话窗口：与 access JWT 5 分钟有效期对齐 */
 const PREVIEW_SESSION_WINDOW_MS = 5 * 60 * 1000;
@@ -162,12 +163,17 @@ export class SharePreviewSessionService {
       .orderBy('"expiresAt"', 'ASC')
       .limit(limit)
       .getQuery();
-    // G5-05：sub 查询含 $1 占位符，必须把参数一并传给 query()，
+    // G5-05：sub 查询含 $1 占位符，必须把参数一并传入，
     // 否则 PostgreSQL 会因参数缺失报错，被 catch 吞掉后过期会话永不清理。
-    const result = await this.sessionRepo.query(
-      `DELETE FROM "share_preview_sessions" WHERE "id" IN (${sub})`,
+    // PERF-B-102：删除计数必须经 databaseQuery + RETURNING 按返回行数统计——
+    // PG 的 DELETE 返回 [rows, count] 元组，affected 归一化后被丢弃；SQLite 下原
+    // result[1] 恒为 undefined → 清理计数恒为 0（不可观测）。两方言统一按返回行数统计。
+    const prunedRows = await databaseQuery<Array<{ id: string }>>(
+      this.sessionRepo.manager,
+      `DELETE FROM "share_preview_sessions" WHERE "id" IN (${sub}) RETURNING "id"`,
       [now],
+      getDatabaseType(),
     );
-    return Array.isArray(result) ? (result[1] as number) ?? 0 : 0;
+    return Array.isArray(prunedRows) ? prunedRows.length : 0;
   }
 }

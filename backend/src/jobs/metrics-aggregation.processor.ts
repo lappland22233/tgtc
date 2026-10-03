@@ -25,7 +25,8 @@ export class MetricsAggregationProcessor {
    * 的日志可能尚未落库，导致该窗口系统性漏计。滞后一个窗口（-60s）后，
    * 聚合的是已完全结束的上一分钟，配合 5s 缓冲日志窗口的写入延迟，指标不再低估。
    */
-  @Process('aggregate-1min')
+  // PERF-B-107：显式 concurrency:1（与 Bull 隐式默认一致，仅显性化，行为不变）
+  @Process({ name: 'aggregate-1min', concurrency: 1 })
   async aggregate1Min(job: Job<{ windowTime?: string }>): Promise<void> {
     // 滞后一个窗口：聚合「上一分钟」而非当前分钟，避免 N:00 立即统计时 N-1 分钟尾部日志
     // 尚未落库导致漏计。窗口时间 = (now - 60s) 截断到分钟。

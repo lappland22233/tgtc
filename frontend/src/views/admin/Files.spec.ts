@@ -47,6 +47,12 @@ vi.mock('../../components/ThumbnailImg.vue', () => ({
   default: { name: 'ThumbnailImg', template: '<div class="thumbnail-img-stub" />' },
 }));
 
+// PERF-F-101：运行时代码从 `tdesign-vue-next/es/dialog` 子路径导入 DialogPlugin，
+// 其样式是裸 .css，Node 侧不可直接加载，故在此打桩（与既有包根 mock 并存）。
+vi.mock('tdesign-vue-next/es/dialog', () => ({
+  DialogPlugin: { confirm: vi.fn(), alert: vi.fn(), info: vi.fn(), warning: vi.fn() },
+}));
+
 // TDesign 组件按需 stub，仅保留体检流程所需的渲染与事件
 vi.mock('tdesign-vue-next', () => {
   const Dialog = {
@@ -429,7 +435,7 @@ describe('Files.vue 存量旧路径清理', () => {
 
   it('apply：二次确认后调用 cleanupStalePaths(mode apply)，展示结果并刷新列表', async () => {
     // 二次确认弹窗自动确认：延迟到 confirmDialog 初始化后再触发 onConfirm
-    const mockedDialog = await import('tdesign-vue-next');
+    const mockedDialog = await import('tdesign-vue-next/es/dialog');
     vi.mocked(mockedDialog.DialogPlugin.confirm).mockImplementation(((options: any) => {
       queueMicrotask(() => options.onConfirm?.());
       return { destroy: vi.fn() };

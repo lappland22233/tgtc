@@ -119,6 +119,7 @@ import { api } from '@/stores/auth';
 import { formatSize } from '@/utils/format';
 import FileTypeIcon from '@/components/FileTypeIcon.vue';
 import { useMobile } from '../../composables/useMobile';
+import { useChartResize } from '../../composables/useChartResize';
 import { CHART_COLORS, tooltipBase, areaGradient, ensureCyberTheme } from '../../utils/echarts-theme';
 
 // Theme-aware chart colors
@@ -158,6 +159,9 @@ const ipColumns = [
 const handleResize = () => {
   chart?.resize();
 };
+
+// PERF-F-106：帧级节流 + 卸载解绑（原为裸 addEventListener，拖拽窗口时每像素重排）
+useChartResize(handleResize);
 
 watch(isMobile, () => {
   nextTick(() => setTimeout(handleResize, 100));
@@ -243,13 +247,11 @@ async function fetchData() {
 
 onMounted(() => {
   fetchData();
-  window.addEventListener('resize', handleResize);
 });
 
 onUnmounted(() => {
   chart?.dispose();
   chart = null;
-  window.removeEventListener('resize', handleResize);
 });
 
 function refreshChart() {

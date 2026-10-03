@@ -16,6 +16,7 @@ import { RegisterDto, LoginDto, VerifyEmailDto, SendCodeDto, ResetPasswordDto } 
 import { RateLimitService } from '../common/services/rate-limit.service';
 import { BCRYPT_ROUNDS } from '../common/constants/bcrypt';
 import { TurnstileService } from '../common/services/turnstile.service';
+import { databaseQuery, getDatabaseType } from '../database/database-types';
 
 /**
  * 占位 bcrypt 哈希：用户不存在时执行一次 dummy compare，
@@ -129,9 +130,15 @@ export class AuthService {
       // 取得锁后再统计用户数，保证"空表→首位超管"判定的串行化
       // G1-02：与 ORM count() 口径一致，排除软删用户（deletedAt IS NULL），
       // 避免"已软删用户仍占用首位超管名额"导致注册被误判关闭。
-      const [{ count }] = await queryRunner.query(
+      // PERF-B-104：经统一入口 databaseQuery 执行（同一 queryRunner，不提交/回滚事务），
+      // 以获得 SQLite 写锁冲突（SQLITE_BUSY）的有界退避；PG 路径行为不变。
+      const countRows = await databaseQuery<Array<{ count: string | number }>>(
+        queryRunner,
         'SELECT COUNT(*) as count FROM "users" WHERE "deletedAt" IS NULL',
+        [],
+        getDatabaseType(),
       );
+      const count = countRows?.[0]?.count ?? 0;
       // TOCTOU 修复：锁表后再检查注册开关，防止并发请求绕过"首位用户"限制
       if (registrationEnabled !== 'true' && Number(count) > 0) {
         throw new BadRequestException('注册功能已关闭，请联系管理员');

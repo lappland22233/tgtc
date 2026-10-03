@@ -150,7 +150,7 @@
 
 <script setup lang="ts">
 import { ref, onMounted } from 'vue';
-import { DialogPlugin } from 'tdesign-vue-next';
+import { DialogPlugin } from 'tdesign-vue-next/es/dialog';
 import MessagePlugin from '@/utils/message';
 import { useMobile } from '../../composables/useMobile';
 import { api, useAuthStore } from '../../stores/auth';

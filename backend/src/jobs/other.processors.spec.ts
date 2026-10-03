@@ -32,15 +32,19 @@ describe('other processors', () => {
     analyzer.detectAnomalies.mockRejectedValueOnce(new Error('x')); await expect(p.detectAnomalies(job)).rejects.toThrow('x');
   });
 
-  it('archives data in batches for both access_logs and file_access_logs (G8-13), supports both driver result shapes', async () => {
+  it('archives data in batches for both access_logs and file_access_logs (G8-13)（经 databaseQuery + RETURNING 按返回行数计数）', async () => {
     // G8-13：归档同时清理 access_logs 与 file_access_logs。
-    // 每个表各执行 2 次查询（首批发 1000 条继续，末批发 2 条结束）。
+    // 每个表各执行 2 次查询（首批发 1000 行继续，末批发 2 行结束）。
+    // v1.6.0 防退化：DELETE 统一经 databaseQuery() + RETURNING 执行，计数只认归一化后的
+    // 行数组长度（PG 元组/SQLite result[1] 形状不再被兼容——那正是错误计数的来源）。
+    const batch1000 = Array.from({ length: 1000 }, (_, i) => ({ id: `id-${i}` }));
+    const batch2 = [{ id: 'a' }, { id: 'b' }];
     const ds: any = { query: jest.fn()
-      .mockResolvedValueOnce([{rowCount:1000}]).mockResolvedValueOnce([{rowCount:2}])   // access_logs
-      .mockResolvedValueOnce([{rowCount:1000}]).mockResolvedValueOnce([{rowCount:2}])   // file_access_logs
+      .mockResolvedValueOnce(batch1000).mockResolvedValueOnce(batch2)   // access_logs
+      .mockResolvedValueOnce(batch1000).mockResolvedValueOnce(batch2)   // file_access_logs
     };
     await new DataArchivalProcessor(ds).archiveData(job); expect(ds.query).toHaveBeenCalledTimes(4);
-    const ds2: any = { query: jest.fn().mockResolvedValue([[],3]) }; await new DataArchivalProcessor(ds2).archiveData(job);
+    const ds2: any = { query: jest.fn().mockResolvedValue([]) }; await new DataArchivalProcessor(ds2).archiveData(job);
     ds2.query.mockRejectedValueOnce(new Error('db')); await expect(new DataArchivalProcessor(ds2).archiveData(job)).rejects.toThrow('db');
   });
 

@@ -325,7 +325,7 @@
 <script setup lang="ts">
 import { ref, reactive, onMounted, computed, watch, defineAsyncComponent } from 'vue';
 import axios from 'axios';
-import { DialogPlugin } from 'tdesign-vue-next';
+import { DialogPlugin } from 'tdesign-vue-next/es/dialog';
 import MessagePlugin from '@/utils/message';
 import { api, useAuthStore } from '@/stores/auth';
 import { storeToRefs } from 'pinia';

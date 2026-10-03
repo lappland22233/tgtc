@@ -319,19 +319,23 @@
       </t-tab-panel>
 
       <t-tab-panel value="source" label="来源分析">
-        <SourceAnalysis ref="sourceAnalysisRef" />
+        <SourceAnalysis v-if="isTabMounted('source')" ref="sourceAnalysisRef" />
+        <div v-else class="analysis-placeholder" :style="ANALYSIS_PLACEHOLDER_STYLE" />
       </t-tab-panel>
 
       <t-tab-panel value="bandwidth" label="带宽分析">
-        <BandwidthAnalysis ref="bandwidthRef" />
+        <BandwidthAnalysis v-if="isTabMounted('bandwidth')" ref="bandwidthRef" />
+        <div v-else class="analysis-placeholder" :style="ANALYSIS_PLACEHOLDER_STYLE" />
       </t-tab-panel>
 
       <t-tab-panel value="filetypes" label="文件类型">
-        <FileTypeAnalysis ref="fileTypeRef" />
+        <FileTypeAnalysis v-if="isTabMounted('filetypes')" ref="fileTypeRef" />
+        <div v-else class="analysis-placeholder" :style="ANALYSIS_PLACEHOLDER_STYLE" />
       </t-tab-panel>
 
       <t-tab-panel value="bot" label="Bot 使用">
-        <BotUsageAnalysis ref="botUsageRef" />
+        <BotUsageAnalysis v-if="isTabMounted('bot')" ref="botUsageRef" />
+        <div v-else class="analysis-placeholder" :style="ANALYSIS_PLACEHOLDER_STYLE" />
       </t-tab-panel>
     </t-tabs>
 
@@ -371,18 +375,40 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, onUnmounted, watch, nextTick } from 'vue';
+import { ref, reactive, computed, onMounted, onUnmounted, watch, nextTick, defineAsyncComponent } from 'vue';
 import MessagePlugin from '@/utils/message';
 import * as echarts from '@/utils/echarts';
 import client from '../../api/client';
 import { formatSize as formatSizeUtil } from '@/utils/format';
 import FileTypeIcon from '@/components/FileTypeIcon.vue';
-import SourceAnalysis from './SourceAnalysis.vue';
-import BandwidthAnalysis from './BandwidthAnalysis.vue';
-import FileTypeAnalysis from './FileTypeAnalysis.vue';
-import BotUsageAnalysis from './BotUsageAnalysis.vue';
 import { useMobile } from '../../composables/useMobile';
+import { useChartResize } from '../../composables/useChartResize';
 import { CHART_COLORS, STATUS_COLORS, tooltipBase, legendBase, areaGradient, ensureCyberTheme } from '../../utils/echarts-theme';
+
+// PERF-F-105：4 个分析组件合计约 2300 行且各自持有 echarts 实例，
+// 静态导入会让「访问日志」页首屏就为不可见的 tab 付出全部代码与图表库体积。
+// 与 SecurityMonitor 的 AlertManagement 同一模式：切到对应 tab 才加载。
+const SourceAnalysis = defineAsyncComponent(() => import('./SourceAnalysis.vue'));
+const BandwidthAnalysis = defineAsyncComponent(() => import('./BandwidthAnalysis.vue'));
+const FileTypeAnalysis = defineAsyncComponent(() => import('./FileTypeAnalysis.vue'));
+const BotUsageAnalysis = defineAsyncComponent(() => import('./BotUsageAnalysis.vue'));
+
+// 懒加载期间的分析面板占位：高度贴近真实图表容器，避免切 tab 时布局跳动。
+const ANALYSIS_PLACEHOLDER_STYLE = { minHeight: '320px' };
+
+// 4 个懒加载分析 tab 的取值集合（与 t-tab-panel 的 value 一一对应）。
+const ANALYSIS_TABS = new Set(['source', 'bandwidth', 'filetypes', 'bot']);
+
+// 「已访问过的分析 tab」闩锁。
+// TDesign 的 t-tab-panel 在 destroy-on-hide=false 时会**立即挂载**全部面板内容
+// （node_modules 内 tab-panel.mjs: isMount = ref(props.lazy ? isActive : true)），
+// 因此这里不能用 accessTab 直接 v-if —— 那会在切换 tab 时销毁并重建子组件，
+// 与既有「保持挂载避免重复拉数据」（G14-05/11/13/15）的设计冲突。
+// 用闩锁保证：首次进入才加载，之后与改造前完全一致（一直挂载）。
+const visitedTabs = reactive(new Set<string>());
+function isTabMounted(tab: string): boolean {
+  return visitedTabs.has(tab);
+}
 
 // Theme-aware chart colors
 const isDark = () => document.documentElement.getAttribute('data-theme') === 'dark';
@@ -1006,6 +1032,9 @@ const fileTypeRef = ref<InstanceType<typeof FileTypeAnalysis> | null>(null);
 const botUsageRef = ref<InstanceType<typeof BotUsageAnalysis> | null>(null);
 
 watch(accessTab, (tab, prev) => {
+  // 首次进入某个分析 tab 时打开闩锁，触发对应组件的懒加载（PERF-F-105）。
+  // 标记放在 resize 之前，保证 resize 回调执行时子组件已挂载。
+  if (ANALYSIS_TABS.has(tab)) visitedTabs.add(tab);
   // 离开 overview 时其容器被 t-tabs 移除（destroyOnHide），主动 dispose 并置空实例，
   // 避免切回时复用写入已移除 DOM 的旧实例；getInstanceByDom 作为双保险。
   if (prev === 'overview' && tab !== 'overview') {
@@ -1046,8 +1075,8 @@ onUnmounted(() => {
 });
 
 // Resize handler for ECharts on mobile
-onMounted(() => window.addEventListener('resize', handleResize));
-onUnmounted(() => window.removeEventListener('resize', handleResize));
+// PERF-F-106：改用 useChartResize（rAF 帧级节流 + 卸载解绑），避免拖拽窗口时每像素重排
+useChartResize(handleResize);
 </script>
 
 <style scoped>
@@ -1255,6 +1284,20 @@ onUnmounted(() => window.removeEventListener('resize', handleResize));
   padding: 24px 0;
   color: var(--text-secondary);
   font-size: 13px;
+}
+
+/* PERF-F-105：分析 tab 懒加载期间的占位块。
+   高度由内联 min-height 提供（贴近真实图表容器），此处只做居中提示，
+   避免切换 tab 时出现空白闪烁与布局跳动。 */
+.analysis-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+.analysis-placeholder::after {
+  content: '加载中...';
 }
 
 /* Responsive */

@@ -240,8 +240,8 @@ export class ShareController {
 
   /**
    * 密码验证入口：提交明文密码，验证通过后由服务端下发短期 HttpOnly Cookie。
-   * 前端不再持有或拼接 access JWT（C-02 修复）；兼容期内响应体仍带 accessJwt，
-   * 供旧前端/紧急回滚使用，新流程只依赖 Cookie。
+   * 前端不再持有或拼接 access JWT（C-02 修复）；兼容期已结束（SEC-103），
+   * 响应体不再返回 accessJwt，访问凭据仅通过 HttpOnly `share_access` Cookie 下发。
    */
   @Post('s/:token/verify')
   async verifyPassword(
@@ -253,7 +253,7 @@ export class ShareController {
     const ip = getClientIp(req);
     const { accessJwt } = await this.shareService.verifyPassword(token, dto.password, ip);
     res.cookie(SHARE_ACCESS_COOKIE, accessJwt, shareAccessCookieOptions(req));
-    return { accessJwt };
+    return { verified: true };
   }
 
   /** 公开媒体缩略图：鉴权但不计入分享访问/下载次数。 */

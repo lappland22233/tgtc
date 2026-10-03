@@ -29,7 +29,8 @@ export class AlertEvaluationProcessor {
   ) {}
 
   /** 每 1 分钟评估告警规则 */
-  @Process('evaluate-alerts')
+  // PERF-B-107：显式 concurrency:1（与 Bull 隐式默认一致，仅显性化，行为不变）
+  @Process({ name: 'evaluate-alerts', concurrency: 1 })
   async evaluateAlerts(job: Job<{ windowTime?: string }>): Promise<void> {
     try {
       // 从预聚合表读取最近 1 分钟的指标
@@ -122,7 +123,8 @@ export class BaselineCalculationProcessor {
   constructor(private behaviorAnalyzer: BehaviorAnalyzer) {}
 
   /** 每日 04:00 计算过去 7 天基线 */
-  @Process('calculate-baseline')
+  // PERF-B-107：显式 concurrency:1（与 Bull 隐式默认一致，仅显性化，行为不变）
+  @Process({ name: 'calculate-baseline', concurrency: 1 })
   async calculateBaseline(_job: Job): Promise<void> {
     try {
       await this.behaviorAnalyzer.calculateBaselines();
@@ -146,7 +148,8 @@ export class AnomalyDetectionProcessor {
     private alertGateway: AlertGateway,
   ) {}
 
-  @Process('detect-anomalies')
+  // PERF-B-107：显式 concurrency:1（与 Bull 隐式默认一致，仅显性化，行为不变）
+  @Process({ name: 'detect-anomalies', concurrency: 1 })
   async detectAnomalies(_job: Job): Promise<void> {
     try {
       const anomalies = await this.behaviorAnalyzer.detectAnomalies();
@@ -188,7 +191,8 @@ export class DataArchivalProcessor {
   constructor(private _dataSource: DataSource) {}
 
   /** 每日 02:00 归档超过保留期的日志 */
-  @Process('archive-data')
+  // PERF-B-107：显式 concurrency:1（与 Bull 隐式默认一致，仅显性化，行为不变）
+  @Process({ name: 'archive-data', concurrency: 1 })
   async archiveData(_job: Job): Promise<void> {
     // 校验保留期：防止误设为 0/负数/NaN 导致删除全部日志
     const retentionDays = Math.max(
@@ -203,13 +207,19 @@ export class DataArchivalProcessor {
     try {
       let deleted = 0;
       let batches = 0;
-      // 分批删除（每批 1000 条），防止大表一次性删除导致长事务
+      // 分批删除（每批 1000 条），防止大表一次性删除导致长事务。
+      // 删除计数必须经 databaseQuery() + RETURNING 按返回行数判定：
+      // PG 的 DELETE 返回 [rows, count] 元组，旧写法 result[0]?.rowCount / result[1]
+      // 在 PG 下恒为 0 / 恒为 2，SQLite 下 result[1] 恒为 undefined → 归档计数不可观测
+      // （历史静默失效同一根因）。两方言统一按归一化后的返回行数组长度统计。
       while (batches < MAX_BATCHES) {
-        const result = await this._dataSource.query(
-          `DELETE FROM "access_logs" WHERE "createdAt" < $1 AND "id" IN (SELECT "id" FROM "access_logs" WHERE "createdAt" < $1 LIMIT $2)`,
+        const deletedRows = await databaseQuery<Array<{ id: string }>>(
+          this._dataSource,
+          `DELETE FROM "access_logs" WHERE "createdAt" < $1 AND "id" IN (SELECT "id" FROM "access_logs" WHERE "createdAt" < $1 LIMIT $2) RETURNING "id"`,
           [cutoff, BATCH_SIZE],
+          getDatabaseType(),
         );
-        const count = Array.isArray(result) ? result[0]?.rowCount ?? 0 : (result[1] ?? 0);
+        const count = Array.isArray(deletedRows) ? deletedRows.length : 0;
         deleted += count;
         batches++;
         if (count < BATCH_SIZE) break;
@@ -220,11 +230,14 @@ export class DataArchivalProcessor {
       let fileAccessDeleted = 0;
       let fileAccessBatches = 0;
       while (fileAccessBatches < MAX_BATCHES) {
-        const result = await this._dataSource.query(
-          `DELETE FROM "file_access_logs" WHERE "createdAt" < $1 AND "id" IN (SELECT "id" FROM "file_access_logs" WHERE "createdAt" < $1 LIMIT $2)`,
+        // 同 access_logs：经 databaseQuery() + RETURNING 按返回行数统计（方言差异见上）。
+        const deletedRows = await databaseQuery<Array<{ id: string }>>(
+          this._dataSource,
+          `DELETE FROM "file_access_logs" WHERE "createdAt" < $1 AND "id" IN (SELECT "id" FROM "file_access_logs" WHERE "createdAt" < $1 LIMIT $2) RETURNING "id"`,
           [cutoff, BATCH_SIZE],
+          getDatabaseType(),
         );
-        const count = Array.isArray(result) ? result[0]?.rowCount ?? 0 : (result[1] ?? 0);
+        const count = Array.isArray(deletedRows) ? deletedRows.length : 0;
         fileAccessDeleted += count;
         fileAccessBatches++;
         if (count < BATCH_SIZE) break;
@@ -252,7 +265,8 @@ export class WeeklyReportProcessor {
 
   constructor(private dataSource: DataSource) {}
 
-  @Process('weekly-report')
+  // PERF-B-107：显式 concurrency:1（与 Bull 隐式默认一致，仅显性化，行为不变）
+  @Process({ name: 'weekly-report', concurrency: 1 })
   async generateWeeklyReport(_job: Job): Promise<void> {
     const since = new Date(Date.now() - 7 * 24 * 3600 * 1000);
     const dbType = getDatabaseType();

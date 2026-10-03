@@ -58,6 +58,8 @@ function makeMulterFile(): Express.Multer.File {
 
 describe('FileService 上传标签事务（M2/N1）', () => {
   let service: FileService;
+  let fileRepo: any;
+  let auditServiceMock: { log: jest.Mock; logAwait: jest.Mock };
   let transactionQuery: jest.Mock;
   let transactionSave: jest.Mock;
   let nonTransactionalSave: jest.Mock;
@@ -67,12 +69,13 @@ describe('FileService 上传标签事务（M2/N1）', () => {
     transactionQuery = jest.fn().mockResolvedValue(undefined);
     transactionSave = jest.fn(async (entity: File) => entity);
     nonTransactionalSave = jest.fn(async (entity: File) => entity);
+    auditServiceMock = { log: jest.fn(), logAwait: jest.fn() };
 
     const txManager = {
       getRepository: jest.fn(() => ({ save: transactionSave })),
       query: transactionQuery,
     };
-    const fileRepo = {
+    fileRepo = {
       findOne: jest.fn(),
       // File.id 由数据库生成；模拟仓储时补一个稳定 id 以便断言 file_tags 写入。
       create: jest.fn((data: Partial<File>) => Object.assign(new File(), { id: createdFileId }, data)),
@@ -105,7 +108,7 @@ describe('FileService 上传标签事务（M2/N1）', () => {
         { provide: ConfigCacheService, useValue: { get: jest.fn(async (_k: string, fb: string) => fb) } },
         { provide: RateLimitService, useValue: {} },
         { provide: UploadJobService, useValue: {} },
-        { provide: AuditService, useValue: { log: jest.fn(), logAwait: jest.fn() } },
+        { provide: AuditService, useValue: auditServiceMock },
         {
           provide: DirectoryNamespaceService,
           useValue: { acquire: jest.fn(async () => undefined), release: jest.fn(async () => undefined) },
@@ -157,5 +160,78 @@ describe('FileService 上传标签事务（M2/N1）', () => {
     expect(telegramUploadFile).toHaveBeenCalledTimes(1);
     expect(warn.mock.calls.flat().join('\n')).toContain('tg-1');
     warn.mockRestore();
+  });
+
+  /**
+   * PERF-B-101：removeFileTag 的删除命中判定必须兼容双方言真实返回形状——
+   * PG：DELETE ... RETURNING 经 TypeORM 返回 [rows, count] 元组，databaseQuery 归一化后按行数判定；
+   * SQLite：RETURNING 走 sqliteAll() 返回行数组。旧写法 `result[1] === 0` 在 SQLite 下
+   * （result[1] 恒为 undefined）判定恒假 → 「标签关联不存在」永不抛出（假成功）。
+   */
+  describe('removeFileTag 删除命中判定（PERF-B-101）', () => {
+    const originalDbType = process.env.DB_TYPE;
+    const owner = makeUser(userId);
+
+    beforeEach(() => {
+      fileRepo.findOne.mockResolvedValue({ id: createdFileId, uploaderId: userId });
+    });
+
+    afterEach(() => {
+      if (originalDbType === undefined) delete process.env.DB_TYPE;
+      else process.env.DB_TYPE = originalDbType;
+    });
+
+    it('PG 命中：元组 [[{tagId}], 1] 归一化后按行数判定成功，记录审计', async () => {
+      process.env.DB_TYPE = 'postgres';
+      fileRepo.manager.query.mockResolvedValue([[{ tagId: validTagId }], 1]);
+
+      await expect(service.removeFileTag(createdFileId, owner, validTagId)).resolves.toBeUndefined();
+
+      expect(fileRepo.manager.query).toHaveBeenCalledWith(
+        expect.stringContaining('RETURNING "tagId"'),
+        [createdFileId, validTagId],
+      );
+      expect(auditServiceMock.log).toHaveBeenCalledWith(
+        expect.objectContaining({ action: 'tag_set_file', metadata: { removedTagId: validTagId } }),
+      );
+    });
+
+    it('PG 未命中：元组 [[], 0] 归一化为空 → 抛 NotFound「标签关联不存在」', async () => {
+      process.env.DB_TYPE = 'postgres';
+      fileRepo.manager.query.mockResolvedValue([[], 0]);
+
+      await expect(service.removeFileTag(createdFileId, owner, validTagId)).rejects.toThrow('标签关联不存在');
+      expect(auditServiceMock.log).not.toHaveBeenCalled();
+    });
+
+    it('SQLite 命中：RETURNING 经 sqliteAll 返回行数组 → 判定成功', async () => {
+      process.env.DB_TYPE = 'sqlite';
+      const all = jest.fn(
+        (_sql: string, _params: unknown[], callback: (error: Error | null, rows: unknown[]) => void) =>
+          callback(null, [{ tagId: validTagId }]),
+      );
+      fileRepo.manager.connection = { driver: { databaseConnection: { all } } };
+
+      await expect(service.removeFileTag(createdFileId, owner, validTagId)).resolves.toBeUndefined();
+
+      expect(all).toHaveBeenCalledWith(
+        expect.stringMatching(/DELETE FROM file_tags[\s\S]*RETURNING "tagId"/),
+        [createdFileId, validTagId],
+        expect.any(Function),
+      );
+      expect(auditServiceMock.log).toHaveBeenCalledTimes(1);
+    });
+
+    it('SQLite 未命中：空行数组 [] → 抛 NotFound（旧写法 result[1] 恒 undefined 会假成功）', async () => {
+      process.env.DB_TYPE = 'sqlite';
+      const all = jest.fn(
+        (_sql: string, _params: unknown[], callback: (error: Error | null, rows: unknown[]) => void) =>
+          callback(null, []),
+      );
+      fileRepo.manager.connection = { driver: { databaseConnection: { all } } };
+
+      await expect(service.removeFileTag(createdFileId, owner, validTagId)).rejects.toThrow('标签关联不存在');
+      expect(auditServiceMock.log).not.toHaveBeenCalled();
+    });
   });
 });
