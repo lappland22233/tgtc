@@ -30,7 +30,7 @@
 | 图片处理 | sharp |
 | 状态与路由 | Pinia、Vue Router 4 |
 
-> `frontend` 依赖 `grid-layout-plus`，当前仪表盘主要使用原生 CSS Grid 布局。
+> `frontend` 不依赖任何网格布局库，仪表盘使用原生 CSS Grid；组件库样式按需引入（见 `frontend/bundle-baseline.json` 与 `npm run check:bundle` 体积门禁）。
 
 > **最低配置**：2 核 CPU、4 GB 内存；磁盘可用空间 ≥ 最大并发数 × 4 GiB × 2（默认并发 8 时约 64 GiB）。详见 [docs/deployment.md](docs/deployment.md) 的环境要求。
 

@@ -177,7 +177,8 @@ export class ShareService {
   /**
    * 验证分享链接密码，签发 5 分钟 access JWT。
    * - IP 失败 5 次触发封禁（复用 BannedIP 表，与 file.service 共享）
-   * - 成功后返回 accessJwt，前端保存到内存，后续调用 /s/:token/download 时附带
+   * - 成功后返回 accessJwt，仅供控制器写入 HttpOnly `share_access` Cookie，
+   *   不进入响应体（SEC-103）；后续 /s/:token/* 请求由浏览器自动携带该 Cookie
    */
   async verifyPassword(token: string, password: string, ip: string | null): Promise<{ accessJwt: string }> {
     const precheckAllowed = await this.passwordService.checkPasswordAttemptAllowed(ip, token);

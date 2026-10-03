@@ -250,6 +250,7 @@ import * as echarts from '@/utils/echarts';
 import client from '../../api/client';
 import { formatSize } from '@/utils/format';
 import { useMobile } from '../../composables/useMobile';
+import { useChartResize } from '../../composables/useChartResize';
 import {
   CHART_COLORS,
   tooltipBase,
@@ -428,6 +429,9 @@ const handleResize = () => {
   volumeChart?.resize();
   bandwidthChart?.resize();
 };
+
+// PERF-F-106：帧级节流 + 卸载解绑（原为裸 addEventListener，拖拽窗口时每像素重排）
+useChartResize(handleResize);
 
 // 移动端会改用更少的桶（见 chartRows），因此不能只 resize，必须整图重绘
 watch(isMobile, () => {
@@ -648,7 +652,6 @@ defineExpose({ refreshChart });
 onMounted(() => {
   fetchData();
   fetchUsers();
-  window.addEventListener('resize', handleResize);
 });
 
 onUnmounted(() => {
@@ -656,7 +659,6 @@ onUnmounted(() => {
   volumeChart = null;
   bandwidthChart?.dispose();
   bandwidthChart = null;
-  window.removeEventListener('resize', handleResize);
 });
 </script>
 

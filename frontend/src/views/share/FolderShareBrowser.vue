@@ -110,6 +110,20 @@
           </button>
         </span>
       </div>
+
+      <!-- 分页提示与「加载更多」：仅当仍有未加载文件时显示 -->
+      <div v-if="hasUnloadedFiles" class="load-more-row">
+        <span class="load-more-hint">已加载 {{ currentContents.files.length }} / 共 {{ filesTotal }} 个文件</span>
+        <t-button
+          v-if="filesHasMore"
+          theme="default"
+          variant="text"
+          :disabled="loadingMore"
+          @click="loadMoreFiles"
+        >
+          {{ loadingMore ? '加载中...' : '加载更多' }}
+        </t-button>
+      </div>
     </div>
 
     <!-- 返回上级 -->
@@ -122,7 +136,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onUnmounted, watch } from 'vue';
+import { ref, reactive, computed, onUnmounted, watch } from 'vue';
 import MessagePlugin from '@/utils/message';
 import { triggerBrowserDownload, LARGE_FILE_DOWNLOAD_TIP, isLargeFile } from '@/utils/download';
 import { isPreviewable, getPreviewKind, buildSharePreviewUrl, buildShareThumbnailUrl } from '@/utils/preview';
@@ -149,7 +163,12 @@ interface FileSummary {
 interface FolderContents {
   subfolders: FolderSummary[];
   files: FileSummary[];
+  /** 文件分页信息（后端目录内容接口返回；缺省时不展示分页提示） */
+  pagination?: unknown;
 }
+
+/** 目录内容每页条数：与后端 limit 上限（100）一致 */
+const CONTENTS_PAGE_LIMIT = 100;
 
 const props = defineProps<{
   token: string;
@@ -166,6 +185,8 @@ const emit = defineEmits<{
 }>();
 
 const loading = ref(false);
+/** 「加载更多」进行中（用于禁用重复点击） */
+const loadingMore = ref(false);
 const downloadingId = ref<string | null>(null);
 const currentFolderId = ref<string>(props.rootFolder.id);
 const currentContents = reactive<FolderContents>({
@@ -179,20 +200,70 @@ const verifiedPath = ref<FolderSummary[]>([...props.initialBreadcrumb]);
 const mediaPlaybackStore = useMediaPlaybackStore();
 let loadGeneration = 0;
 
+// ============ 文件列表分页 ============
+// 后端目录内容接口按 page/limit 分页（limit 上限 100）。目录切换/子目录导航
+// 时整个分页状态与目录内容一起重置，避免残留上一个目录的分页结果。
+
+interface FilePagination {
+  page: number;
+  total: number;
+  hasMore: boolean;
+}
+
+/** 当前目录已加载到的页码（「加载更多」请求 page + 1） */
+const filesPage = ref(1);
+/** 当前目录文件总数（响应 pagination.total；缺省回退为已加载数） */
+const filesTotal = ref(props.initialContents.files.length);
+/** 是否还有下一页（响应 pagination.hasMore；缺省时用「已加载数 < total」推导） */
+const filesHasMore = ref(false);
+
+/**
+ * 规范化后端分页信息：契约形如 { page, limit, total, hasMore }。
+ * 结构无效时返回 null，由调用方按「没有更多」保守处理，避免误发请求。
+ */
+function normalizePagination(value: unknown, loadedCount: number): FilePagination | null {
+  if (!value || typeof value !== 'object') return null;
+  const raw = value as { page?: unknown; total?: unknown; hasMore?: unknown };
+  if (typeof raw.total !== 'number' || !Number.isFinite(raw.total) || raw.total < 0) return null;
+  const total = Math.floor(raw.total);
+  const page = typeof raw.page === 'number' && Number.isFinite(raw.page) && raw.page >= 1
+    ? Math.floor(raw.page)
+    : 1;
+  const hasMore = typeof raw.hasMore === 'boolean' ? raw.hasMore : loadedCount < total;
+  return { page, total, hasMore };
+}
+
+/** 用目录内容同步分页状态（首屏/目录切换均为第一页语义） */
+function syncPaginationFrom(contents: FolderContents): void {
+  const resolved = normalizePagination(contents.pagination, contents.files.length);
+  filesPage.value = resolved?.page ?? 1;
+  filesTotal.value = resolved?.total ?? contents.files.length;
+  filesHasMore.value = resolved?.hasMore ?? false;
+}
+
+syncPaginationFrom(props.initialContents);
+
+/** 是否仍有未加载文件：用于截断提示与「加载更多」按钮的显示条件 */
+const hasUnloadedFiles = computed(() => filesHasMore.value || filesTotal.value > currentContents.files.length);
+
 watch(
   () => [props.token, props.rootFolder.id, props.initialContents, props.initialBreadcrumb] as const,
   () => {
     loadGeneration++;
     loadController?.abort();
+    loadMoreController?.abort();
+    loadingMore.value = false;
     currentFolderId.value = props.rootFolder.id;
     currentContents.subfolders = [...props.initialContents.subfolders];
     currentContents.files = [...props.initialContents.files];
+    syncPaginationFrom(props.initialContents);
     breadcrumb.value = [...props.initialBreadcrumb];
     verifiedPath.value = [...props.initialBreadcrumb];
     loading.value = false;
   },
 );
 let loadController: AbortController | null = null;
+let loadMoreController: AbortController | null = null;
 
 /** 打开全局预览会话（分享上下文；跨路由/收起不中断播放）。仅 ready 文件可预览（H-12）。 */
 function openPreview(file: FileSummary) {
@@ -315,16 +386,25 @@ function isBreadcrumb(value: unknown): value is FolderSummary[] {
   ));
 }
 
+/** 构造目录内容请求 URL：显式携带 page/limit（目录切换固定第一页，加载更多请求后续页） */
+function buildFolderContentsUrl(folderId: string, page: number): string {
+  return `/api/s/${encodeURIComponent(props.token)}/folder/${encodeURIComponent(folderId)}/contents`
+    + `?page=${page}&limit=${CONTENTS_PAGE_LIMIT}`;
+}
+
 async function loadFolderContents(folderId: string) {
   const generation = ++loadGeneration;
   loadController?.abort();
+  loadMoreController?.abort();
+  loadingMore.value = false;
   loadController = new AbortController();
   const { signal } = loadController;
   loading.value = true;
   try {
     // 两个请求必须同时成功且数据结构有效，之后才一次性提交目录状态。
+    // 目录内容固定从第一页请求，切换目录会整体替换已加载条目并重置分页状态。
     const [contentsRes, bcRes] = await Promise.all([
-      fetch(`/api/s/${encodeURIComponent(props.token)}/folder/${encodeURIComponent(folderId)}/contents`, { signal }),
+      fetch(buildFolderContentsUrl(folderId, 1), { signal }),
       fetch(`/api/s/${encodeURIComponent(props.token)}/folder/${encodeURIComponent(folderId)}/breadcrumb`, { signal }),
     ]);
     if (isCredentialExpiredResponse(contentsRes) || isCredentialExpiredResponse(bcRes)) {
@@ -357,6 +437,7 @@ async function loadFolderContents(folderId: string) {
     currentFolderId.value = folderId;
     currentContents.subfolders = [...nextContents.subfolders];
     currentContents.files = [...nextContents.files];
+    syncPaginationFrom(nextContents);
     breadcrumb.value = [...nextBreadcrumb];
     verifiedPath.value = [...nextBreadcrumb];
   } catch (err) {
@@ -373,9 +454,68 @@ async function loadFolderContents(folderId: string) {
   }
 }
 
+/**
+ * 加载当前目录的下一页文件（「加载更多」）。
+ * - 追加而非替换已加载条目（按 id 去重，防止分页边界重叠产生重复 key）；
+ * - 加载中禁用重复触发；目录切换（loadGeneration 变化）后丢弃迟到响应。
+ */
+async function loadMoreFiles() {
+  if (loading.value || loadingMore.value || !filesHasMore.value) return;
+  const generation = loadGeneration;
+  const nextPage = filesPage.value + 1;
+  loadMoreController?.abort();
+  loadMoreController = new AbortController();
+  const { signal } = loadMoreController;
+  loadingMore.value = true;
+  try {
+    const response = await fetch(buildFolderContentsUrl(currentFolderId.value, nextPage), { signal });
+    if (generation !== loadGeneration) return;
+    if (isCredentialExpiredResponse(response)) {
+      throw new CredentialExpiredError('分享凭据已过期，请重新验证');
+    }
+    if (!response.ok) {
+      throw await createHttpError(response, `目录内容加载失败（HTTP ${response.status}）`);
+    }
+    const data = await response.json();
+    if (generation !== loadGeneration) return;
+    if (data?.data?.requiresPassword) {
+      throw new CredentialExpiredError('分享凭据已过期，请重新验证');
+    }
+    if (data?.code !== 0) throw new Error(data?.message || '目录内容加载失败');
+    const nextContents = data.data;
+    if (!isFolderContents(nextContents)) throw new Error('目录内容响应无效');
+
+    const loadedIds = new Set(currentContents.files.map((f) => f.id));
+    const appended = nextContents.files.filter((f) => !loadedIds.has(f.id));
+    currentContents.files = [...currentContents.files, ...appended];
+    filesPage.value = nextPage;
+    const resolved = normalizePagination(nextContents.pagination, currentContents.files.length);
+    if (resolved) {
+      filesPage.value = Math.max(nextPage, resolved.page);
+      filesTotal.value = resolved.total;
+      filesHasMore.value = resolved.hasMore;
+    } else {
+      // 响应未携带分页信息：保守标记为无更多，避免无终止的重复请求
+      filesHasMore.value = false;
+    }
+  } catch (err) {
+    if (err instanceof DOMException && err.name === 'AbortError') return;
+    if (generation !== loadGeneration) return;
+    if (err instanceof CredentialExpiredError) {
+      emit('credential-expired');
+      return;
+    }
+    console.error('加载更多失败:', err);
+    MessagePlugin.error(err instanceof Error ? err.message : '加载失败，请稍后重试');
+  } finally {
+    if (generation === loadGeneration) loadingMore.value = false;
+  }
+}
+
 onUnmounted(() => {
   loadGeneration++;
   loadController?.abort();
+  loadMoreController?.abort();
 });
 
 function formatSize(bytes: number): string {
@@ -576,6 +716,21 @@ function formatRelativeDate(dateStr: string): string {
 .op-link:hover { color: var(--seed-accent); }
 .op-link:disabled { color: var(--text-disabled); cursor: not-allowed; }
 
+/* ===== 分页提示与「加载更多」 ===== */
+.load-more-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 12px 16px 4px;
+}
+
+.load-more-hint {
+  font-size: 13px;
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
 .empty-state {
   padding: 48px 0;
   text-align: center;
@@ -618,6 +773,7 @@ function formatRelativeDate(dateStr: string): string {
   .row-name { font-size: 13px; }
   .col-size { font-size: 12px; }
   .back-to-parent { padding: 0 12px; }
+  .load-more-row { padding: 12px 12px 4px; }
 }
 
 /* 超窄屏（≤480px）：操作按钮压缩间距，避免挤占名称列导致横滚 */

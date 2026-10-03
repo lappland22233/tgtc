@@ -165,6 +165,11 @@ jobs:
       - name: Build from a clean checkout
         run: npm run build
 
+      # PERF-F-101 配套门禁：防止「重新全量引入 tdesign CSS / 从包根导入 / 取消懒加载」
+      # 这类体积回退再次发生（首基线审查记录该回退会让首屏 CSS 从 125.8 KB 涨回 500 KB）。
+      - name: Enforce frontend bundle-size budget
+        run: npm run check:bundle
+
       - name: Require a frontend coverage test command
         run: node -e "const scripts=require('./package.json').scripts||{}; if (!scripts['test:cov']) throw new Error('frontend package.json must define a blocking test:cov script')"
 

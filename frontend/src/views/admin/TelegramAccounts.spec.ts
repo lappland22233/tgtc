@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { mount, flushPromises, type VueWrapper } from '@vue/test-utils';
-import { DialogPlugin } from 'tdesign-vue-next';
+// PERF-F-101：与运行时代码一致，从子路径导入 DialogPlugin（避免包根带入全量 CSS）。
+import { DialogPlugin } from 'tdesign-vue-next/es/dialog';
 import * as accountsApi from '@/api/telegram-accounts';
 import type {
   AccountPoolOverview,
@@ -19,6 +20,13 @@ import TelegramAccounts from './TelegramAccounts.vue';
 
 vi.mock('@/utils/message', () => ({
   default: { success: vi.fn(), error: vi.fn(), info: vi.fn(), warning: vi.fn() },
+}));
+
+// PERF-F-101：运行时代码从 `tdesign-vue-next/es/dialog` 子路径导入 DialogPlugin，
+// 其样式是裸 .css，Node 侧不可直接加载，故在此打桩（与下方包根 mock 并存：
+// 包根 mock 仍服务于自动导入的 t-* 模板组件与 spec 自身的 import）。
+vi.mock('tdesign-vue-next/es/dialog', () => ({
+  DialogPlugin: { confirm: vi.fn(), alert: vi.fn(), info: vi.fn(), warning: vi.fn() },
 }));
 
 // TDesign 组件按需 stub：保留渲染与事件，避免 jsdom 下加载完整组件库。

@@ -4,6 +4,11 @@ vi.mock('../api/client', () => ({
   default: {},
   clearRedirectState: vi.fn(),
 }));
+// auth store 的登出兜底会使用 MessagePlugin（SEC-102），与其它 store spec 一致地
+// mock 掉，避免测试环境加载 tdesign 样式模块。
+vi.mock('../utils/message', () => ({
+  default: { error: vi.fn(), success: vi.fn(), warning: vi.fn(), info: vi.fn() },
+}));
 
 import { getAuthResponseData } from './auth';
 

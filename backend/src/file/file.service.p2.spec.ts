@@ -168,14 +168,20 @@ describe('G2-15: Range 配额扣次 30s 幂等去重', () => {
 });
 
 describe('G2-12: batchToMarkdown 转义与直链约束', () => {
-  function wireMarkdown(files: any[]) {
-    const isUnrestricted = jest.fn().mockResolvedValue(false);
+  /**
+   * PERF-B-103 后 batchToMarkdown 共查询 2 次：
+   * 1) 主查询（按 ids + uploaderId 取文件）；2) 一次性批量查询公开候选（PUBLIC 且未删除）。
+   * 用 mockResolvedValueOnce 按调用顺序模拟；publicCandidates 为空即等价于「无约束公开判定为 false」。
+   */
+  function wireMarkdown(files: any[], publicCandidates: any[] = []) {
+    const find = jest.fn()
+      .mockResolvedValueOnce(files)
+      .mockResolvedValueOnce(publicCandidates);
     const service = createService({
-      fileRepository: { find: jest.fn().mockResolvedValue(files) },
+      fileRepository: { find },
       configService: { get: jest.fn().mockReturnValue('https://cdn.example.com') },
     });
-    (service as any).isUnrestrictedPublic = isUnrestricted;
-    return { service, isUnrestricted };
+    return { service, find };
   }
 
   it('文件名中的 Markdown 特殊字符被转义，含约束文件生成分享链接', async () => {
@@ -186,10 +192,33 @@ describe('G2-12: batchToMarkdown 转义与直链约束', () => {
   });
 
   it('无约束公开文件生成 /media/ 直链', async () => {
-    const { service, isUnrestricted } = wireMarkdown([readyFile]);
-    isUnrestricted.mockResolvedValue(true);
+    const { service } = wireMarkdown([readyFile], [readyFile]);
     const results = await (service as any).batchToMarkdown(['f-1'], user);
     expect(results[0]).toBe('![a\\[1\\]\\(x\\).png](https://cdn.example.com/media/f-1)');
+  });
+
+  it('批量判定与单文件判定语义一致：带密码约束的公开文件仍生成分享链接', async () => {
+    const { service } = wireMarkdown([readyFile], [{ ...readyFile, password: 'has-password' }]);
+    const results = await (service as any).batchToMarkdown(['f-1'], user);
+    expect(results[0]).toBe('[a\\[1\\]\\(x\\).png](https://cdn.example.com/s/f-1)');
+  });
+
+  it('输出数量与顺序不变：非图片文件跳过，其余按原顺序输出', async () => {
+    const textFile = { ...readyFile, id: 'f-txt', originalName: 'note.txt', mimeType: 'text/plain' };
+    const restricted = { ...readyFile, id: 'f-2', originalName: 'b.png' };
+    const { service, find } = wireMarkdown([readyFile, textFile, restricted], [readyFile]);
+
+    const results = await (service as any).batchToMarkdown(['f-1', 'f-txt', 'f-2'], user);
+    expect(results).toEqual([
+      '![a\\[1\\]\\(x\\).png](https://cdn.example.com/media/f-1)',
+      '[b.png](https://cdn.example.com/s/f-2)',
+    ]);
+    // 公开候选为一次批量查询（不再是逐文件 findOne）
+    expect(find).toHaveBeenCalledTimes(2);
+    const publicQueryArg = find.mock.calls[1][0];
+    expect(publicQueryArg.where.isDeleted).toBe(false);
+    expect(publicQueryArg.where.accessType).toBe(FileAccessType.PUBLIC);
+    expect(publicQueryArg.select).toEqual(['id', 'password', 'maxAccessCount', 'expiresIn', 'expiresStartAt']);
   });
 });
 

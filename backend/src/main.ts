@@ -151,6 +151,12 @@ async function bootstrap() {
     frontendCandidates.find((dir) => existsSync(join(dir, 'index.html'))) ?? frontendCandidates[0];
   app.useStaticAssets(frontendDist, { prefix: '/' });
 
+  // PERF-B-110：SPA 回退目标 index.html 的存在性在启动期检查一次并缓存为布尔值，
+  // 避免每个 HTML 导航请求都执行同步文件系统调用（existsSync）。
+  // 前提：前端产物在进程运行期间不变——升级/切换程序目录都会重启进程，缓存随之刷新。
+  const spaIndexFile = join(frontendDist, 'index.html');
+  const spaIndexExists = existsSync(spaIndexFile);
+
   const expressApp = app.getHttpAdapter().getInstance();
 
   // M1：为已存在会话（升级前登录、或未经过登录接口拿到的会话）补发非 httpOnly 的
@@ -208,10 +214,10 @@ async function bootstrap() {
       // 仅对浏览器导航请求回退 SPA
       const accept = req.headers.accept || '';
       if (accept.includes('text/html')) {
-        const indexFile = join(frontendDist, 'index.html');
-        // dist 缺失时直接 sendFile 会 ENOENT 致所有 HTML 导航 500，此处降级为 404
-        if (existsSync(indexFile)) {
-          return res.sendFile(indexFile);
+        // dist 缺失时直接 sendFile 会 ENOENT 致所有 HTML 导航 500，此处降级为 404。
+        // 存在性取自启动期缓存（PERF-B-110），不再每请求 existsSync。
+        if (spaIndexExists) {
+          return res.sendFile(spaIndexFile);
         }
       }
       return next();

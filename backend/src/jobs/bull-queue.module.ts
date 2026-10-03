@@ -1,5 +1,10 @@
 import { Module } from '@nestjs/common';
-import { BullModule } from '@nestjs/bull';
+import { BullModule, getQueueToken } from '@nestjs/bull';
+import { Queue } from 'bull';
+import {
+  QUEUE_FAILURE_HOOK_QUEUES,
+  QueueFailureHookService,
+} from './queue-failure-hook.service';
 
 export const QUEUE_NAMES = {
   METRICS_AGGREGATION: 'metrics-aggregation',
@@ -48,6 +53,17 @@ export const QUEUE_NAMES = {
       { name: QUEUE_NAMES.TELEGRAM_MIRROR },
     ),
   ],
-  exports: [BullModule],
+  providers: [
+    // PERF-B-105 / OPS-006：统一失败事件钩子。
+    // 遍历 QUEUE_NAMES（队列注册的单一事实来源，不硬编码重复清单）收集全部队列实例，
+    // 由 QueueFailureHookService 逐个注册 failed 监听（只观测，不介入重试/失败决策）。
+    {
+      provide: QUEUE_FAILURE_HOOK_QUEUES,
+      useFactory: (...queues: Queue[]) => queues,
+      inject: Object.values(QUEUE_NAMES).map((name) => getQueueToken(name)),
+    },
+    QueueFailureHookService,
+  ],
+  exports: [BullModule, QueueFailureHookService],
 })
 export class BullQueueModule {}

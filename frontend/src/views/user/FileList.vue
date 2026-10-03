@@ -308,7 +308,7 @@ import { ref, onMounted, computed, reactive, watch, onUnmounted } from 'vue';
 import { usePageVisibility } from '@/composables/usePageVisibility';
 import { useRouter, useRoute } from 'vue-router';
 import MessagePlugin from '@/utils/message';
-import { DialogPlugin } from 'tdesign-vue-next';
+import { DialogPlugin } from 'tdesign-vue-next/es/dialog';
 import { useFileStore } from '../../stores/files';
 import { useAuthStore, api } from '../../stores/auth';
 import { getErrorMessage, getDownloadErrorMessage } from '../../utils/error';

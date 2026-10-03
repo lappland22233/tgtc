@@ -106,9 +106,58 @@ describe('CsrfGuard（M1）', () => {
   it('认证入口存在双提交凭据时仍比对，错配即拒绝', () => {
     expect(() => guard.canActivate(makeContext({
       method: 'POST',
-      path: '/api/auth/logout',
+      path: '/api/auth/login',
       cookies: { access_token: 'session', [XSRF_COOKIE_NAME]: 'token-abc' },
       headers: { 'x-xsrf-token': 'token-xyz' },
+    }))).toThrow(ForbiddenException);
+  });
+
+  // ---- SEC-102：logout 退出双重提交豁免，与其它写请求同等校验 ----
+
+  it('auth/logout 携带会话 Cookie 但缺 X-XSRF-TOKEN 请求头时拒绝', () => {
+    expect(() => guard.canActivate(makeContext({
+      method: 'POST',
+      path: '/api/auth/logout',
+      cookies: { access_token: 'session', [XSRF_COOKIE_NAME]: 'token-abc' },
+      headers: {},
+    }))).toThrow(ForbiddenException);
+  });
+
+  it('auth/logout 携带会话 Cookie 但缺 XSRF Cookie 时拒绝', () => {
+    expect(() => guard.canActivate(makeContext({
+      method: 'POST',
+      path: '/api/auth/logout',
+      cookies: { access_token: 'session' },
+      headers: { 'x-xsrf-token': 'token-abc' },
+    }))).toThrow(ForbiddenException);
+  });
+
+  it('auth/logout 携带匹配的双提交凭据时放行', () => {
+    expect(guard.canActivate(makeContext({
+      method: 'POST',
+      path: '/api/auth/logout',
+      cookies: { access_token: 'session', [XSRF_COOKIE_NAME]: 'token-abc' },
+      headers: { 'x-xsrf-token': 'token-abc' },
+    }))).toBe(true);
+  });
+
+  it('auth/logout 无会话 Cookie（Bearer/API Key）不受双重提交影响', () => {
+    expect(guard.canActivate(makeContext({
+      method: 'POST',
+      path: '/api/auth/logout',
+      headers: { authorization: 'Bearer x' },
+    }))).toBe(true);
+  });
+
+  it('auth/logout 跨站 Origin 仍优先拒绝', () => {
+    expect(() => guard.canActivate(makeContext({
+      method: 'POST',
+      path: '/api/auth/logout',
+      headers: {
+        origin: 'https://evil.example',
+        'x-xsrf-token': 'token-abc',
+      },
+      cookies: { access_token: 'session', [XSRF_COOKIE_NAME]: 'token-abc' },
     }))).toThrow(ForbiddenException);
   });
 

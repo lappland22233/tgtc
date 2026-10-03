@@ -89,6 +89,7 @@
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
 import { useRoute } from 'vue-router';
 import { useMediaPlaybackStore } from '../../stores/mediaPlayback';
+import { withXsrfHeader } from '../../utils/xsrf';
 import PasswordPrompt from './PasswordPrompt.vue';
 import FileShareCard from './FileShareCard.vue';
 import FolderShareBrowser from './FolderShareBrowser.vue';
@@ -279,7 +280,10 @@ async function onPasswordSubmit(pwd: string) {
     const res = await fetch(`/api/s/${encodeURIComponent(token.value)}/verify`, {
       signal: activeRequest?.signal,
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      // CSRF 双重提交：已登录访客（浏览器持有 access_token Cookie）必须携带
+      // 与 XSRF-TOKEN Cookie 一致的 X-XSRF-TOKEN 头，否则被全局 CsrfGuard 拒绝（403）。
+      // 匿名访客没有该 Cookie，withXsrfHeader 不会注入头（后端放行）。
+      headers: withXsrfHeader({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ password: pwd }),
       // 需要接收后端设置的 HttpOnly Cookie
       credentials: 'same-origin',

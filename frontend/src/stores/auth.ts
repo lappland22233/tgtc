@@ -2,6 +2,7 @@ import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
 import api from '../api/client';
 import { clearRedirectState } from '../api/client';
+import MessagePlugin from '../utils/message';
 import type { User } from '../types/user';
 import type { AuthStatus } from '../types/config';
 
@@ -67,9 +68,25 @@ export const useAuthStore = defineStore('auth', () => {
     });
   }
 
-  if (typeof document !== 'undefined') {
-    document.addEventListener('visibilitychange', refreshIfStale);
+  // PERF-F-108：应用级监听器提供显式释放路径。
+  // 这是页面生命周期级监听（不随组件卸载解绑），报告判定仅 dev HMR 受影响，
+  // 因此**不改变**其常驻行为，只补一个幂等的释放入口供应用销毁时调用。
+  // 注册同样幂等：重复调用不会重复 addEventListener。
+  let visibilityListener: (() => void) | null = null;
+
+  function ensureVisibilityListener(): void {
+    if (visibilityListener || typeof document === 'undefined') return;
+    visibilityListener = () => refreshIfStale();
+    document.addEventListener('visibilitychange', visibilityListener);
   }
+
+  function disposeAuthListeners(): void {
+    if (!visibilityListener || typeof document === 'undefined') return;
+    document.removeEventListener('visibilitychange', visibilityListener);
+    visibilityListener = null;
+  }
+
+  ensureVisibilityListener();
 
   // 跨标签页登出同步 — 惰性初始化（HMR 安全）
   let authChannel: BroadcastChannel | null = null;
@@ -98,15 +115,22 @@ export const useAuthStore = defineStore('auth', () => {
   // Vite HMR 安全：热更新时关闭旧 channel
   const viteHot = (import.meta as any).hot;
   if (viteHot) {
-    viteHot.dispose(() => { authChannel?.close(); authChannel = null; });
+    viteHot.dispose(() => {
+      authChannel?.close();
+      authChannel = null;
+      // PERF-F-108：HMR 重载时同步释放页面级监听，否则每次热更新都会残留一份
+      disposeAuthListeners();
+    });
   }
 
   /**
-   * 关闭 BroadcastChannel，应在应用销毁时调用（如路由/App 组件中）
+   * 释放应用级监听器（BroadcastChannel + visibilitychange）。
+   * 应在应用销毁时调用（如 App 组件卸载）；幂等，可重复调用。
    */
   function closeAuthChannel() {
     authChannel?.close();
     authChannel = null;
+    disposeAuthListeners();
   }
 
   async function login(email: string, password: string) {
@@ -234,12 +258,39 @@ export const useAuthStore = defineStore('auth', () => {
     ]);
   }
 
-  async function logout() {
+  /** 提取 axios 错误中的 HTTP 状态码（无响应/网络错误返回 undefined） */
+  function getErrorStatus(err: unknown): number | undefined {
+    return (err as { response?: { status?: number } })?.response?.status;
+  }
+
+  /**
+   * 提交登出请求。
+   *
+   * SEC-102：logout 已退出 CSRF 双重提交豁免，服务端要求携带会话 Cookie 的登出
+   * 请求附带与 XSRF-TOKEN Cookie 一致的 X-XSRF-TOKEN 头（axios 实例已统一注入）。
+   *
+   * 升级窗口兜底：升级前已建立、尚未签发 XSRF Cookie 的存量会话，首个登出请求
+   * 会因缺少双提交凭据返回 403；但该响应已由服务端补发 XSRF-TOKEN Cookie
+   * （backend main.ts），自动重试一次即可完成登出。重试仍失败时提示刷新页面，
+   * 不以放宽豁免兜底；无论请求结果如何都会继续清理本地会话状态。
+   */
+  async function requestLogout(): Promise<void> {
     try {
       await api.post('/auth/logout');
-    } catch {
-      // 即使请求失败也清除本地状态
+    } catch (err) {
+      if (getErrorStatus(err) !== 403) return;
+      try {
+        await api.post('/auth/logout');
+      } catch (retryErr) {
+        if (getErrorStatus(retryErr) === 403) {
+          MessagePlugin.warning('登出确认失败，请刷新页面后重试');
+        }
+      }
     }
+  }
+
+  async function logout() {
+    await requestLogout();
     // M7：先清理业务缓存与副作用，再清空 auth 自身状态（顺序不可颠倒，
     // 否则清理过程中若有请求携带旧 Cookie 会与已清空的 user 状态不一致）。
     await resetSessionStores();
@@ -265,6 +316,7 @@ export const useAuthStore = defineStore('auth', () => {
     fetchUser,
     logout,
     closeAuthChannel,
+    disposeAuthListeners,
     refreshIfStale,
     isSessionStale,
   };

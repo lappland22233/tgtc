@@ -33,7 +33,9 @@
 
 ### 僵尸上传自动恢复
 
-上传通过 Bull 队列异步提交到 Telegram。若进程异常退出或队列任务丢失，文件会长期停留在 `processing`。后端定时任务（每 30 分钟）会自动将 `status=processing` 且超过 `FILE_PROCESSING_STALE_MINUTES`（默认 60 分钟）未更新的记录标记为 `error`，前端显示"上传失败"，用户可重新上传。
+上传通过 Bull 队列异步提交到 Telegram。若进程异常退出或队列任务丢失，文件会长期停留在 `processing`。恢复逻辑实现于**定时任务** `tasks/tasks.service.ts` 的 `recoverStaleProcessingFiles()`（每 30 分钟执行；**不在** `file/file.service.ts`），阈值 `FILE_PROCESSING_STALE_MINUTES`（默认 60 分钟）：任务分批扫描 `status=processing` 的超时记录，只处理未提交（`uploadStage` 为 `pending`/`uploading` 且未回填 `telegramFilePath`）的文件并标记为 `error`（已提交记录由同一任务的恢复分支先处理，不受影响），前端显示"上传失败"，用户可重新上传。
+
+镜像链路中与 Telegram 引用完整性相关的主群锚点（`telegram_main_chat_anchors`，租约/接管语义）见 [configuration.md](configuration.md) 的「账号池后台管理 + 文件镜像备份」小节。
 
 ### 管理后台文件体检
 

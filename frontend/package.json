@@ -10,12 +10,13 @@
     "test": "vitest run",
     "test:cov": "vitest run --coverage",
     "typecheck": "vue-tsc --noEmit",
-    "lint": "vue-tsc --noEmit"
+    "lint": "vue-tsc --noEmit",
+    "check:bundle": "node scripts/check-bundle-size.mjs",
+    "check:bundle:update": "node scripts/check-bundle-size.mjs --write"
   },
   "dependencies": {
-    "axios": "1.19.0",
+    "axios": "1.20.0",
     "echarts": "^6.1.0",
-    "grid-layout-plus": "^1.1.1",
     "pinia": "^2.1.7",
     "tdesign-icons-vue-next": "^0.2.0",
     "tdesign-vue-next": "1.20.5",

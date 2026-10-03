@@ -7,7 +7,7 @@ jest.mock('nodemailer', () => ({
 }));
 
 import * as nodemailer from 'nodemailer';
-import { ServiceUnavailableException } from '@nestjs/common';
+import { Logger, ServiceUnavailableException } from '@nestjs/common';
 import { MailerService } from './mailer.service';
 import { encryptPassword } from '../common/utils/crypto.util';
 
@@ -179,6 +179,70 @@ describe('MailerService', () => {
           socketTimeout: 15000,
         }),
       );
+    });
+  });
+
+  describe('错误日志降级（SEC-104）', () => {
+    let logSpy: jest.SpyInstance;
+
+    beforeEach(() => {
+      logSpy = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    });
+
+    afterEach(() => {
+      logSpy.mockRestore();
+    });
+
+    it('发信失败日志为单行摘要：保留错误码，不含 stack 与堆栈行', async () => {
+      const boom = Object.assign(new Error('Invalid login: 535\nAuthentication failed for user smtp-user'), {
+        code: 'EAUTH',
+        responseCode: 535,
+      });
+      boom.stack = 'Error: Invalid login\n    at SMTPConnection.send (/srv/app/nodemailer/lib/smtp-connection.js:1:1)';
+      const mockTransporter = buildMockTransporter({ sendMail: jest.fn().mockRejectedValue(boom) });
+      (nodemailer.createTransport as jest.Mock).mockReturnValue(mockTransporter);
+      const { service } = buildService({ SMTP_HOST: 'smtp.db.com', SMTP_USER: 'u', SMTP_PASSWORD: encryptPassword('p') });
+
+      await expect(service.sendVerificationCode('a@b.com', '123456')).rejects.toThrow('SMTP 认证失败');
+
+      const logged = logSpy.mock.calls.map((call) => String(call[0])).join('\n');
+      expect(logged).toContain('Invalid login: 535 Authentication failed for user smtp-user');
+      expect(logged).toContain('code=EAUTH');
+      expect(logged).toContain('responseCode=535');
+      expect(logged).not.toContain('smtp-connection');
+      expect(logged).not.toContain('    at ');
+      for (const call of logSpy.mock.calls) {
+        expect(String(call[0])).not.toContain('\n');
+      }
+    });
+
+    it('verify 自检失败日志同样只输出摘要，不含 stack', async () => {
+      const boom = Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:25'), { code: 'ECONNREFUSED' });
+      boom.stack = 'Error: connect ECONNREFUSED\n    at TCPConnectWrap.afterConnect (node:net:1:1)';
+      const mockTransporter = buildMockTransporter({ verify: jest.fn().mockRejectedValue(boom) });
+      (nodemailer.createTransport as jest.Mock).mockReturnValue(mockTransporter);
+      const { service } = buildService({ SMTP_HOST: 'smtp.db.com', SMTP_USER: 'u' });
+
+      await expect(service.sendTestEmail('admin@example.com')).rejects.toThrow('拒绝连接');
+
+      const logged = logSpy.mock.calls.map((call) => String(call[0])).join('\n');
+      expect(logged).toContain('connect ECONNREFUSED 127.0.0.1:25');
+      expect(logged).toContain('code=ECONNREFUSED');
+      expect(logged).not.toContain('afterConnect');
+    });
+
+    it('超长错误 message 单行化并截断到 300 字符', async () => {
+      const boom = Object.assign(new Error(`${'x'.repeat(500)}\n${'y'.repeat(500)}`), { code: 'ESOCKET' });
+      const mockTransporter = buildMockTransporter({ sendMail: jest.fn().mockRejectedValue(boom) });
+      (nodemailer.createTransport as jest.Mock).mockReturnValue(mockTransporter);
+      const { service } = buildService({ SMTP_HOST: 'smtp.db.com', SMTP_USER: 'u', SMTP_PASSWORD: encryptPassword('p') });
+
+      await expect(service.sendVerificationCode('a@b.com', '123456')).rejects.toThrow('连接 SMTP 服务器超时');
+
+      const logged = logSpy.mock.calls.map((call) => String(call[0])).join('\n');
+      expect(logged).toContain(`${'x'.repeat(300)}...`);
+      expect(logged).not.toContain('x'.repeat(301));
+      expect(logged).not.toContain('y'.repeat(300));
     });
   });
 

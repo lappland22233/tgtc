@@ -235,8 +235,3 @@ function hexAlpha(a: number): string {
   const v = Math.round(Math.max(0, Math.min(1, a)) * 255);
   return v.toString(16).padStart(2, '0');
 }
-
-// Legacy export for backward compat (used in main.ts deferred init)
-export function registerCyberTheme() {
-  ensureCyberTheme();
-}

@@ -28,7 +28,11 @@ export default defineConfig(({ mode }) => {
         resolvers: [
           TDesignResolver({
             library: 'vue-next',
-            importStyle: false,
+            // PERF-F-101：按需引入每个组件的样式（es/<comp>/style/css.mjs）。
+            // 组件级样式**不含** :root tokens 与 theme-mode 暗色变量（已在 node_modules 内
+            // 实测确认 button/table 等组件 CSS 中 :root 与 theme-mode 均为 0 处匹配），
+            // 因此基础层必须在入口单独引入 es/style/css.mjs，否则全站会失去设计变量。
+            importStyle: 'css',
             exclude: [/^TIcon$/],
           }),
         ],
@@ -59,8 +63,7 @@ export default defineConfig(({ mode }) => {
           manualChunks(id) {
             if (!id.includes('/node_modules/')) return;
             if (id.includes('/node_modules/echarts') || id.includes('/node_modules/zrender')) return 'echarts';
-            if (id.includes('/node_modules/tdesign')) return 'tdesign';
-            if (id.includes('/node_modules/grid-layout-plus') || id.includes('/node_modules/vue-grid-layout')) return 'grid-layout';
+            if (id.includes('/node_modules/tdesign-icons')) return 'tdesign-icons';
             if (
               id.includes('/node_modules/vue/') ||
               id.includes('/node_modules/@vue/') ||

@@ -66,13 +66,43 @@ function resetRetryBreaker() {
 // G11-27：断网恢复后自动重置熔断器，使队列可继续重试 / 重新上传。
 // 熔断在连续瞬时失败 ≥ BREAKER_TRIP_THRESHOLD 次后触发并暂停自动重试；
 // 网络恢复（online）视为故障已消除，重置计数以允许后续条目正常重试。
-if (typeof window !== 'undefined') {
-  window.addEventListener('online', () => {
+//
+// PERF-F-108：这是应用级监听（模块作用域注册，不随组件卸载解绑）。
+// 行为保持不变，仅补「注册 / 释放」两条幂等路径，便于测试与 HMR / 应用销毁时清理。
+let onlineListener: (() => void) | null = null;
+
+function ensureOnlineListener(): void {
+  if (onlineListener || typeof window === 'undefined') return;
+  onlineListener = () => {
     if (retryBreakerTripped) {
       console.info('[上传队列] 网络已恢复，重置重试熔断器');
       resetRetryBreaker();
     }
-  });
+  };
+  window.addEventListener('online', onlineListener);
+}
+
+function disposeUploadListeners(): void {
+  if (!onlineListener || typeof window === 'undefined') return;
+  window.removeEventListener('online', onlineListener);
+  onlineListener = null;
+}
+
+ensureOnlineListener();
+
+// Vite HMR 安全：热更新时释放旧的 online 监听，避免每次热更新都多挂一份。
+// 与 auth store 的 visibilitychange 同一处理方式（PERF-F-108）。
+const viteHotUpload = (import.meta as any).hot;
+if (viteHotUpload) {
+  viteHotUpload.dispose(() => disposeUploadListeners());
+}
+
+/**
+ * 重新注册应用级监听（正常情况下无需调用；仅供测试与 HMR 后自愈使用）。
+ * 注册幂等：已有监听时直接返回，不会重复 addEventListener。
+ */
+function ensureUploadListeners(): void {
+  ensureOnlineListener();
 }
 
 function genUid(): string {
@@ -580,5 +610,8 @@ export const useUploadStore = defineStore('upload', () => {
     setFileConcurrency,
     setStrictSerialUpload,
     flushProgress,
+    // PERF-F-108：应用级监听的显式释放 / 重新注册路径（均为幂等）
+    disposeUploadListeners,
+    ensureUploadListeners,
   };
 });

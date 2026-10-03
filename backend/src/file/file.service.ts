@@ -1155,6 +1155,10 @@ export class FileService implements OnModuleInit {
       .where(where);
 
     if (keyword) {
+      // PERF-B-106（已评估，不改 SQL）：`LOWER(originalName) LIKE '%kw%'` 带前导通配符，
+      // 普通 B-tree 索引无法命中；文件名基数受限、搜索为低频操作，无前索引可接受。
+      // 如数据量增长需改 trigram/GIN，仓库已有 `1798100000000-AddFileNameTrigramIndex` 迁移
+      // （pg_trgm + GIN (LOWER("originalName") gin_trgm_ops)）可参考。
       qb.andWhere('LOWER(file.originalName) LIKE :keyword', { keyword: `%${escapeLike(keyword.toLowerCase())}%` });
     }
 
@@ -2440,15 +2444,15 @@ export class FileService implements OnModuleInit {
 
 
   /**
-   * 检查文件是否为无约束公开文件（无需任何凭证即可访问）
-   * PUBLIC + 无密码 + 无访问次数限制 + 未过期
+   * 无约束公开文件的纯判定（PUBLIC + 无密码 + 无访问次数限制 + 未过期）。
+   * 调用方需保证记录存在且 accessType === PUBLIC；不存在/非 PUBLIC 的记录由调用方按 false 处理。
+   * PERF-B-103：拆出纯函数供 isUnrestrictedPublic 与 batchToMarkdown 批量判定共用，
+   * 避免批量场景逐文件查询（N+1）。
    */
-  async isUnrestrictedPublic(id: string): Promise<boolean> {
-    const file = await this.fileRepository.findOne({
-      where: { id, isDeleted: false, accessType: FileAccessType.PUBLIC },
-      select: ['password', 'maxAccessCount', 'expiresIn', 'expiresStartAt'],
-    });
-    if (!file || file.password || file.maxAccessCount > 0) {
+  private computeIsUnrestrictedPublic(
+    file: Pick<File, 'password' | 'maxAccessCount' | 'expiresIn' | 'expiresStartAt'>,
+  ): boolean {
+    if (file.password || file.maxAccessCount > 0) {
       return false;
     }
     // 检查是否设置了有效期且已过期
@@ -2459,6 +2463,21 @@ export class FileService implements OnModuleInit {
       }
     }
     return true;
+  }
+
+  /**
+   * 检查文件是否为无约束公开文件（无需任何凭证即可访问）
+   * PUBLIC + 无密码 + 无访问次数限制 + 未过期
+   */
+  async isUnrestrictedPublic(id: string): Promise<boolean> {
+    const file = await this.fileRepository.findOne({
+      where: { id, isDeleted: false, accessType: FileAccessType.PUBLIC },
+      select: ['password', 'maxAccessCount', 'expiresIn', 'expiresStartAt'],
+    });
+    if (!file) {
+      return false;
+    }
+    return this.computeIsUnrestrictedPublic(file);
   }
 
   /**
@@ -2761,11 +2780,30 @@ export class FileService implements OnModuleInit {
    * - originalName 中的 Markdown 特殊字符（[]()\ 等）会被转义，防止文件名注入链接结构；
    * - 仅对无约束公开文件生成 /media/ 直链；含密码/次数/时效约束的文件改用分享链接 /s/:id，
    *   避免生成不可访问或绕过约束的裸文件链接。
+   *
+   * PERF-B-103：原实现逐文件调用 isUnrestrictedPublic（1+N 次查询）改为一次批量查询
+   * 公开候选文件后在内存中判定（与 isUnrestrictedPublic 共用 computeIsUnrestrictedPublic），
+   * 查询数降为固定 2 次（主查询 + 公开候选批查询）；输出内容与顺序保持不变。
    */
   async batchToMarkdown(ids: string[], user: User): Promise<string[]> {
     const files = await this.fileRepository.find({
       where: { id: In(ids), isDeleted: false, uploaderId: user.id },
     });
+
+    // 批量判定「无约束公开」：id 去重后只做一次 IN 查询，避免 N+1。
+    // 语义与 isUnrestrictedPublic 一致：查询不命中（不存在/已删除/非 PUBLIC）一律按 false 处理。
+    const candidateIds = [...new Set(files.map((file) => file.id))];
+    const publicCandidates = candidateIds.length > 0
+      ? await this.fileRepository.find({
+          where: { id: In(candidateIds), isDeleted: false, accessType: FileAccessType.PUBLIC },
+          select: ['id', 'password', 'maxAccessCount', 'expiresIn', 'expiresStartAt'],
+        })
+      : [];
+    const unrestrictedIds = new Set(
+      publicCandidates
+        .filter((file) => this.computeIsUnrestrictedPublic(file))
+        .map((file) => file.id),
+    );
 
     const results: string[] = [];
     const baseUrl = this.configService.get<string>('APP_URL') || 'http://localhost:3000';
@@ -2773,7 +2811,7 @@ export class FileService implements OnModuleInit {
     for (const file of files) {
       if (!file.mimeType.startsWith('image/')) continue;
       const safeName = escapeMarkdownAlt(file.originalName);
-      if (await this.isUnrestrictedPublic(file.id)) {
+      if (unrestrictedIds.has(file.id)) {
         const appUrl = `${baseUrl}/media/${file.id}`;
         results.push(`![${safeName}](${appUrl})`);
       } else {
@@ -3152,12 +3190,17 @@ export class FileService implements OnModuleInit {
       throw new ForbiddenException('无权操作此文件');
     }
 
-    const result = await this.fileRepository.manager.query(
-      'DELETE FROM file_tags WHERE "fileId" = $1 AND "tagId" = $2',
+    // PERF-B-101：必须经 databaseQuery + RETURNING 判定删除是否命中：
+    // PG 的 DELETE 返回 [rows, count] 元组，affected 归一化后被丢弃；SQLite 下 result[1] 恒为
+    // undefined（旧写法判定恒假 → 「关联不存在」永不抛出，假成功）。两方言统一按返回行数判定。
+    const deletedRows = await databaseQuery<Array<{ tagId: string }>>(
+      this.fileRepository.manager,
+      'DELETE FROM file_tags WHERE "fileId" = $1 AND "tagId" = $2 RETURNING "tagId"',
       [fileId, tagId],
+      getDatabaseType(),
     );
 
-    if (result[1] === 0) { // affected rows = 0
+    if (deletedRows.length === 0) {
       throw new NotFoundException('标签关联不存在');
     }
 
