@@ -25,6 +25,14 @@ if [[ "$VERSION" != "$CANONICAL_VERSION" ]]; then
   exit 1
 fi
 
+# 版本发布说明必须随包交付：RELEASE.txt 会附带给发布与运维查阅（变更内容、兼容边界、
+# 备份与回退要求）。缺失时立即失败，避免先花掉整轮构建再产出无说明的制品。
+RELEASE_NOTES="$ROOT_DIR/docs/release-notes/v${VERSION}.md"
+if [[ ! -f "$RELEASE_NOTES" ]]; then
+  echo "错误：缺少版本发布说明 $RELEASE_NOTES；拒绝生成发行材料。" >&2
+  exit 1
+fi
+
 rm -rf "$WORK_DIR"
 mkdir -p "$WORK_DIR/source" "$OUTPUT_DIR"
 rsync -a --delete \
@@ -154,16 +162,11 @@ else
   printf '警告：未设置 RELEASE_SIGNING_KEY_PATH，跳过 SHA256SUMS 签名（正式发布必须签名）。\n' >&2
 fi
 bash "$ROOT_DIR/scripts/release/validate-release.sh" "$OUTPUT_DIR/$ARCHIVE_NAME" "$OUTPUT_DIR/SHA256SUMS"
-# RELEASE.txt 附带本次版本的更新内容（docs/release-notes/v<版本>.md），供发布与运维查阅。
-RELEASE_NOTES="$ROOT_DIR/docs/release-notes/v${VERSION}.md"
+# RELEASE.txt 附带本次版本的更新内容（RELEASE_NOTES 已在构建前校验存在），供发布与运维查阅。
 {
   printf 'TGTC v%s\nTarget: Linux x86_64\nNode.js: %s\nBundled Telegram Bot API: 10.2-tgtc.1\n\n' \
     "$VERSION" "$NODE_VERSION"
-  if [[ -f "$RELEASE_NOTES" ]]; then
-    cat "$RELEASE_NOTES"
-  else
-    printf '（未找到 docs/release-notes/v%s.md，缺少本版本更新内容。）\n' "$VERSION" >&2
-  fi
+  cat "$RELEASE_NOTES"
 } > "$OUTPUT_DIR/RELEASE.txt"
 
 echo "发布完成：$OUTPUT_DIR"
