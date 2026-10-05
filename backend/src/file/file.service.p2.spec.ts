@@ -1,4 +1,5 @@
 import 'reflect-metadata';
+import { Logger } from '@nestjs/common';
 import { Readable } from 'stream';
 
 jest.mock('file-type', () => ({ fileTypeFromBuffer: jest.fn() }), { virtual: true });
@@ -24,6 +25,8 @@ import { UserRole } from '../common/entities/user.entity';
 function createService(overrides: Record<string, unknown> = {}): FileService {
   const service = Object.create(FileService.prototype) as FileService;
   Object.assign(service, {
+    // Object.create 不会执行字段初始化器：补上 logger，保证告警分支（如懒触发 fail-open）可断言
+    logger: new Logger('FileService'),
     fileRepository: { findOne: jest.fn(), createQueryBuilder: jest.fn(), manager: { query: jest.fn() } },
     fileCacheService: {
       getCachedPath: jest.fn(),
@@ -223,11 +226,12 @@ describe('G2-12: batchToMarkdown 转义与直链约束', () => {
 });
 
 /**
- * Web 下载入口不再携带扩散参数：
- * 副本扩散已改为「提交即触发」（镜像任务队列：主群 → userbot → 各镜像群），
- * 下载路径必须**零副作用**——不传期望副本数、不触发任何补副本动作。
+ * Web 下载入口的扩散契约（受控懒触发）：
+ * - 取流参数必须**只含定位与缓存控制**：不传期望副本数，下载路径不执行任何扩散动作；
+ * - 老文件补扩散由 `TelegramMirrorLazyTriggerService` 在账号池分支「问一声」完成：
+ *   fire-and-forget、零字节（只建镜像任务）、不参与取流决策、失败不影响下载。
  */
-describe('Web 下载入口：不再携带扩散参数', () => {
+describe('Web 下载入口：不携带扩散参数，仅受控懒触发建单', () => {
   function wire(overrides: Record<string, unknown> = {}) {
     const openStream = jest.fn(async (..._args: unknown[]) => ({
       stream: Readable.from([Buffer.from('x')]),
@@ -236,12 +240,14 @@ describe('Web 下载入口：不再携带扩散参数', () => {
       copy: null,
       selectionReason: 'weighted',
     }));
+    const lazyMirrorTrigger = { maybeTrigger: jest.fn() };
     const service = createService({
       accountAwareDownload: { isActive: () => true, openStream },
       fileCopies: { listReady: jest.fn(async () => [{ accountId: 'bot-a', telegramFileId: 'x' }]) },
+      lazyMirrorTrigger,
       ...overrides,
     });
-    return { service, openStream };
+    return { service, openStream, lazyMirrorTrigger };
   }
 
   it('回源参数只含定位与缓存控制，不含任何扩散字段', async () => {
@@ -282,5 +288,52 @@ describe('Web 下载入口：不再携带扩散参数', () => {
     expect(openStream).not.toHaveBeenCalled();
     expect(getRealtimeFileStream).toHaveBeenCalledWith('a.bin', 8, { noCache: false });
     expect(result.info.file_id).toBe('legacy-file-id');
+  });
+
+  it('账号池分支内懒触发「问一声」，且不等待其完成、不影响取流结果', async () => {
+    const { service, openStream, lazyMirrorTrigger } = wire();
+
+    const result = await (service as any).openTelegramSourceStream(
+      { id: 'f-3', originalName: 'a.bin', filename: 'a.bin' } as any,
+      1024,
+    );
+
+    expect(lazyMirrorTrigger.maybeTrigger).toHaveBeenCalledWith('file', 'f-3');
+    // 懒触发不是取流参数：openStream 仍只收到定位与缓存控制
+    expect(openStream).toHaveBeenCalledTimes(1);
+    expect(result.info.file_id).toBe('pooled-file-id');
+  });
+
+  it('懒触发同步抛错不影响下载结果（fail-open）', async () => {
+    const warnSpy = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const { service, openStream } = wire({
+      lazyMirrorTrigger: {
+        maybeTrigger: jest.fn(() => {
+          throw new Error('lazy trigger exploded');
+        }),
+      },
+    });
+
+    const result = await (service as any).openTelegramSourceStream(
+      { id: 'f-4', originalName: 'a.bin', filename: 'a.bin' } as any,
+      1024,
+    );
+
+    // 补扩散失败只告警：取流仍走池化路径，绝不因此降级或抛错
+    expect(openStream).toHaveBeenCalledTimes(1);
+    expect(result.info.file_id).toBe('pooled-file-id');
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('老文件补扩散懒触发失败'));
+  });
+
+  it('未装配懒触发（可选依赖缺失）→ 零行为，下载链路逐字节等价', async () => {
+    const { service, openStream } = wire({ lazyMirrorTrigger: undefined });
+
+    const result = await (service as any).openTelegramSourceStream(
+      { id: 'f-5', originalName: 'a.bin', filename: 'a.bin' } as any,
+      1024,
+    );
+
+    expect(openStream).toHaveBeenCalledTimes(1);
+    expect(result.info.file_id).toBe('pooled-file-id');
   });
 });

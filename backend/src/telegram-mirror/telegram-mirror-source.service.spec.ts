@@ -120,4 +120,33 @@ describe('TelegramMirrorSourceService.describeFile（源锚点补齐）', () => 
     expect(descriptor.chatId).toBeNull();
     expect(descriptor.messageId).toBeNull();
   });
+
+  it('主记录缺 fileId、副本大小与文件一致 → 用副本兜底（fileId/锚点/账号取副本，版本取主记录）', async () => {
+    const ctx = setup({
+      file: makeFile({ telegramFileId: null, uploadVersion: 3 }),
+      ready: [{ accountId: '888', chatId: '-100888', messageId: '66', fileSize: '100', telegramFileId: 'tg-888' }],
+    });
+
+    const descriptor = await ctx.service.describe('file', 'f-1');
+
+    expect(descriptor.fileId).toBe('tg-888');
+    expect(descriptor.chatId).toBe('-100888');
+    expect(descriptor.sourceAccountId).toBe('888');
+    // 副本行没有版本列：版本必须取主记录事实，否则幂等键会落在旧版本上
+    expect(descriptor.sourceVersion).toBe(3);
+  });
+
+  it('主记录缺 fileId、副本是旧版本（大小不一致）→ 不兜底，绝不中继旧内容', async () => {
+    const ctx = setup({
+      file: makeFile({ telegramFileId: null }),
+      ready: [{ accountId: '888', chatId: '-100888', messageId: '66', fileSize: '200', telegramFileId: 'tg-stale' }],
+    });
+
+    const descriptor = await ctx.service.describe('file', 'f-1');
+
+    // 兜底被拒：保留主记录事实（无 fileId、保留主记录锚点），下游按 blocked 收口
+    expect(descriptor.fileId).toBeNull();
+    expect(descriptor.chatId).toBe('-100777');
+    expect(descriptor.sourceAccountId).toBe('777');
+  });
 });

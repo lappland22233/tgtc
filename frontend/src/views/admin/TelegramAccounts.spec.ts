@@ -12,6 +12,7 @@ import type {
   MirrorTaskListItem,
   RelayPreflightReport,
   ReplicationAttemptDetailView,
+  ReplicationAttemptView,
   ReplicationAuditReport,
   TelegramAccountView,
 } from '@/api/telegram-accounts';
@@ -122,6 +123,19 @@ vi.mock('@/api/telegram-accounts', () => ({
     network: '网络异常',
     unknown: '未知错误',
   },
+  // 事件区筛选用的状态集合（与真实模块同口径：此处只需可透传，断言在后端契约测试里）
+  RETRYABLE_ATTEMPT_STATUSES: ['retryable_failed', 'claim_timeout'],
+  FAILED_ATTEMPT_STATUSES: [
+    'retryable_failed',
+    'claim_timeout',
+    'partial_success',
+    'blocked_not_configured',
+    'blocked_user_client',
+    'blocked_no_user_account',
+    'blocked_source_anchor',
+    'blocked_target_chat',
+    'blocked_manual',
+  ],
   cancelMirrorBackfill: vi.fn(),
   cancelMirrorTask: vi.fn(),
   createBotAccount: vi.fn(),
@@ -133,6 +147,7 @@ vi.mock('@/api/telegram-accounts', () => ({
   fetchMirrorOverview: vi.fn(),
   fetchMirrorTasks: vi.fn(),
   fetchReplicationAttemptDetail: vi.fn(),
+  fetchReplicationAttempts: vi.fn(),
   fetchReplicationAudit: vi.fn(),
   pauseMirrorBackfill: vi.fn(),
   probeEnvAccount: vi.fn(),
@@ -566,8 +581,8 @@ describe('TelegramAccounts.vue 账号状态筛选', () => {
     await settle(wrapper);
     const callsBefore = mockedApi.fetchAccounts.mock.calls.length;
 
-    // 账号状态下拉位于筛选区，DOM 顺序在镜像任务筛选之前 → 取第一个 select
-    const statusSelect = wrapper.findAll('select.t-select-stub')[0];
+    // 页面上有多个筛选下拉（副本扩散事件、镜像任务、账号状态…），必须按容器定位而不是按 DOM 顺序
+    const statusSelect = wrapper.find('section[aria-label="账号管理"] select.t-select-stub');
     await statusSelect.setValue('revoked');
     await settle(wrapper);
 
@@ -882,6 +897,213 @@ describe('TelegramAccounts.vue 副本扩散策略', () => {
     const text = wrapper.text();
     expect(text).toContain('观测数据不完整');
     expect(text).toContain('轮次写入失败 3 次');
+  });
+});
+
+describe('TelegramAccounts.vue 事件区折叠与筛选', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockedApi.fetchAccountOverview.mockResolvedValue(overviewFixture());
+    mockedApi.fetchMirrorOverview.mockResolvedValue(mirrorFixture());
+    mockedApi.fetchMirrorTasks.mockResolvedValue({ items: [], total: 0 });
+    mockedApi.fetchMirrorBackfill.mockResolvedValue(backfillFixture());
+    mockedApi.fetchAccounts.mockResolvedValue({ items: [], total: 0, envAccounts: [] });
+    mockedApi.fetchReplicationAudit.mockResolvedValue(replicationFixture());
+  });
+
+  function attemptItem(id: string, overrides: Partial<ReplicationAttemptView> = {}): ReplicationAttemptView {
+    return { ...replicationFixture().recentAttempts[0], id, ownerLabel: `${id}…`, ...overrides };
+  }
+
+  function attemptListView(items: ReplicationAttemptView[], truncated = false) {
+    return {
+      generatedAt: '2026-09-24T03:00:00.000Z',
+      items,
+      truncated,
+      observability: { degraded: false, reason: null, since: null, writeFailures: 0 },
+    };
+  }
+
+  function attemptFilterSelect(wrapper: VueWrapper) {
+    return wrapper.find('.attempts-filters select.t-select-stub');
+  }
+
+  it('默认只渲染最近 5 条，提供「展开全部 / 收起」，展开不产生新请求', async () => {
+    mockedApi.fetchReplicationAudit.mockResolvedValue(replicationFixture({
+      recentAttempts: Array.from({ length: 12 }, (_, index) => attemptItem(`att-${index}`)),
+    }));
+    const wrapper = mountView();
+    await settle(wrapper);
+
+    expect(wrapper.findAll('li.timeline-item')).toHaveLength(5);
+    const expand = wrapper.findAll('button.t-button-stub').find((item) => item.text().includes('展开全部'))!;
+    expect(expand.text()).toContain('另有 7 条');
+
+    await expand.trigger('click');
+    await settle(wrapper);
+
+    expect(wrapper.findAll('li.timeline-item')).toHaveLength(12);
+    const collapse = wrapper.findAll('button.t-button-stub').find((item) => item.text().includes('收起'))!;
+    expect(collapse.text()).toContain('只显示最近 5 条');
+    // 展开/收起是同一份快照，不得产生新请求
+    expect(mockedApi.fetchReplicationAttempts).not.toHaveBeenCalled();
+  });
+
+  it('筛选「只看失败」走整表查询（多状态）并替换列表，不受报告窗口限制', async () => {
+    mockedApi.fetchReplicationAudit.mockResolvedValue(replicationFixture({
+      recentAttempts: Array.from({ length: 12 }, (_, index) => attemptItem(`att-${index}`)),
+    }));
+    mockedApi.fetchReplicationAttempts.mockResolvedValue(attemptListView([attemptItem('att-blocked')]));
+    const wrapper = mountView();
+    await settle(wrapper);
+
+    await attemptFilterSelect(wrapper).setValue('failed');
+    await settle(wrapper);
+
+    // 精确比对状态集合（子集断言会放过误混入的 succeeded 之类状态）
+    expect(mockedApi.fetchReplicationAttempts).toHaveBeenCalledWith({
+      status: mockedApi.FAILED_ATTEMPT_STATUSES,
+      limit: 50,
+    });
+    const rows = wrapper.findAll('li.timeline-item');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].text()).toContain('att-blocked…');
+  });
+
+  it('窗口内 0 条时显示窗口空态（不显示筛选空态、不显示折叠控制）', async () => {
+    mockedApi.fetchReplicationAudit.mockResolvedValue(replicationFixture({ recentAttempts: [] }));
+    const wrapper = mountView();
+    await settle(wrapper);
+
+    const text = wrapper.text();
+    expect(text).toContain('窗口内没有扩散轮次记录');
+    expect(text).not.toContain('当前筛选下没有记录');
+    expect(wrapper.findAll('li.timeline-item')).toHaveLength(0);
+    expect(wrapper.findAll('button.t-button-stub').some((item) => item.text().includes('展开全部'))).toBe(false);
+  });
+
+  it('恰好 5 条时不出现折叠控制（未超过阈值就不给多余入口）', async () => {
+    mockedApi.fetchReplicationAudit.mockResolvedValue(replicationFixture({
+      recentAttempts: Array.from({ length: 5 }, (_, index) => attemptItem(`att-${index}`)),
+    }));
+    const wrapper = mountView();
+    await settle(wrapper);
+
+    expect(wrapper.findAll('li.timeline-item')).toHaveLength(5);
+    expect(wrapper.findAll('button.t-button-stub').some((item) => item.text().includes('展开全部'))).toBe(false);
+  });
+
+  it('筛选「只看可重试」只传两个可重试状态，并在截断时如实提示', async () => {
+    mockedApi.fetchReplicationAttempts.mockResolvedValue(attemptListView([attemptItem('att-r')], true));
+    const wrapper = mountView();
+    await settle(wrapper);
+
+    await attemptFilterSelect(wrapper).setValue('retryable');
+    await settle(wrapper);
+
+    expect(mockedApi.fetchReplicationAttempts).toHaveBeenCalledWith({
+      status: ['retryable_failed', 'claim_timeout'],
+      limit: 50,
+    });
+    expect(wrapper.text()).toContain('筛选结果已截断');
+  });
+
+  it('筛选无结果显示「当前筛选下没有记录」，与窗口空态区分', async () => {
+    mockedApi.fetchReplicationAttempts.mockResolvedValue(attemptListView([]));
+    const wrapper = mountView();
+    await settle(wrapper);
+
+    await attemptFilterSelect(wrapper).setValue('claim_timeout');
+    await settle(wrapper);
+
+    expect(mockedApi.fetchReplicationAttempts).toHaveBeenCalledWith({ status: 'claim_timeout', limit: 50 });
+    expect(wrapper.text()).toContain('当前筛选下没有记录');
+    expect(wrapper.text()).not.toContain('窗口内没有扩散轮次记录');
+  });
+
+  it('筛选查询失败：显式报错，且不得声称「没有记录」（查询失败 ≠ 无数据）', async () => {
+    mockedApi.fetchReplicationAttempts.mockRejectedValue(new Error('network down'));
+    const wrapper = mountView();
+    await settle(wrapper);
+
+    await attemptFilterSelect(wrapper).setValue('failed');
+    await settle(wrapper);
+
+    expect(wrapper.text()).toContain('筛选查询未完整返回');
+    expect(wrapper.text()).not.toContain('当前筛选下没有记录');
+    expect(vi.mocked(MessagePlugin.error)).toHaveBeenCalled();
+  });
+
+  it('后端降级（HTTP 200 但观测不完整）：不得渲染成「当前筛选下没有记录」', async () => {
+    mockedApi.fetchReplicationAttempts.mockResolvedValue({
+      generatedAt: '2026-09-24T03:00:00.000Z',
+      items: [],
+      truncated: false,
+      observability: { degraded: true, reason: '轮次查询失败', since: null, writeFailures: 0 },
+    });
+    const wrapper = mountView();
+    await settle(wrapper);
+
+    await attemptFilterSelect(wrapper).setValue('failed');
+    await settle(wrapper);
+
+    const text = wrapper.text();
+    expect(text).toContain('筛选查询未完整返回');
+    expect(text).toContain('轮次查询失败');
+    expect(text).not.toContain('当前筛选下没有记录');
+  });
+
+  it('请求失败时保留上一次筛选结果（查询失败 ≠ 清空列表）', async () => {
+    mockedApi.fetchReplicationAttempts.mockResolvedValueOnce(attemptListView([attemptItem('att-kept')]));
+    const wrapper = mountView();
+    await settle(wrapper);
+
+    await attemptFilterSelect(wrapper).setValue('failed');
+    await settle(wrapper);
+    expect(wrapper.text()).toContain('att-kept…');
+
+    mockedApi.fetchReplicationAttempts.mockRejectedValueOnce(new Error('network down'));
+    await attemptFilterSelect(wrapper).setValue('retryable');
+    await settle(wrapper);
+
+    const rows = wrapper.findAll('li.timeline-item');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].text()).toContain('att-kept…');
+    expect(wrapper.text()).toContain('筛选查询未完整返回');
+    expect(wrapper.text()).toContain('上一次成功查询的结果');
+  });
+
+  it('筛选态下「刷新审计」会一并重取筛选视图（刷新对可见列表生效）', async () => {
+    mockedApi.fetchReplicationAttempts.mockResolvedValue(attemptListView([attemptItem('att-refresh')]));
+    const wrapper = mountView();
+    await settle(wrapper);
+
+    await attemptFilterSelect(wrapper).setValue('claim_timeout');
+    await settle(wrapper);
+    expect(mockedApi.fetchReplicationAttempts).toHaveBeenCalledTimes(1);
+
+    const refresh = wrapper.findAll('button.t-button-stub').find((item) => item.text().includes('刷新审计'))!;
+    await refresh.trigger('click');
+    await settle(wrapper);
+
+    expect(mockedApi.fetchReplicationAttempts).toHaveBeenCalledTimes(2);
+  });
+
+  it('事件行展示触发来源：手动重试 / 入库或补建 / 历史下载期', async () => {
+    mockedApi.fetchReplicationAudit.mockResolvedValue(replicationFixture({
+      recentAttempts: [
+        attemptItem('a-manual', { triggeredBy: 'manual' }),
+        attemptItem('a-eager', { triggeredBy: 'eager' }),
+        attemptItem('a-legacy', { triggeredBy: 'lazy' }),
+      ],
+    }));
+    const wrapper = mountView();
+    await settle(wrapper);
+
+    const text = wrapper.text();
+    expect(text).toContain('触发：手动重试');
+    expect(text).toContain('触发：入库或补建');
+    expect(text).toContain('触发：下载期（历史）');
   });
 });
 

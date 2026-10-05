@@ -29,6 +29,7 @@ import type {
 
 import {
   RELAY_FAILURE_REASON_LABELS,
+  RETRYABLE_ATTEMPT_STATUSES,
   cancelMirrorBackfill,
   cancelMirrorTask,
   cancelUserAuth,
@@ -676,6 +677,31 @@ describe('镜像接口', () => {
     expect(result.items[0]).toMatchObject({ id: 'att-1', retryable: true });
     expect(result.truncated).toBe(true);
     expect(result.observability.degraded).toBe(true);
+  });
+
+  it('fetchReplicationAttempts 的 status 数组序列化为逗号分隔多值（跨状态筛选作用于整表）', async () => {
+    get.mockResolvedValue(respond({ generatedAt: '', items: [], truncated: false, observability: {} }));
+
+    await fetchReplicationAttempts({ status: RETRYABLE_ATTEMPT_STATUSES, limit: 50 });
+
+    expect(get).toHaveBeenCalledWith('/admin/telegram-accounts/replication-attempts', {
+      params: { status: 'retryable_failed,claim_timeout', limit: 50 },
+      signal: undefined,
+    });
+
+    // 未提供 status 时不得出现空 status 参数
+    await fetchReplicationAttempts({ limit: 5 });
+    expect(get).toHaveBeenLastCalledWith('/admin/telegram-accounts/replication-attempts', {
+      params: { limit: 5 },
+      signal: undefined,
+    });
+
+    // 空数组同样省略参数：空串会被后端按「不筛选」静默处理，把「无匹配」放大成「全表」
+    await fetchReplicationAttempts({ status: [], limit: 5 });
+    expect(get).toHaveBeenLastCalledWith('/admin/telegram-accounts/replication-attempts', {
+      params: { limit: 5 },
+      signal: undefined,
+    });
   });
 
   it('fetchReplicationAttemptDetail 对 id 做 URL 编码', async () => {

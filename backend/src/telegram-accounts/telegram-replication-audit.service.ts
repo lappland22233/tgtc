@@ -655,10 +655,12 @@ export class TelegramReplicationAuditService {
    * 最近扩散轮次（可按状态/原因/owner/时间筛选）。
    *
    * 与 `getReport().recentAttempts` 的区别：这是可筛选、可指定条数的独立查询，
-   * 供后台「只看认领超时」「只看某个文件」这类排障场景使用。
+   * 供后台「只看认领超时」「只看某个文件」这类排障场景使用；
+   * `status` 支持数组（「只看失败」「只看可重试」在数据上对应多个状态），
+   * 筛选作用于整表而非报告里的最近 N 条窗口。
    */
   async listAttempts(params: {
-    status?: ReplicationAttemptStatus;
+    status?: ReplicationAttemptStatus | ReplicationAttemptStatus[];
     failureReason?: UserRelayFailureReason;
     ownerType?: TelegramCopyOwnerType;
     ownerId?: string;

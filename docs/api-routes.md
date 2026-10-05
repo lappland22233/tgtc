@@ -166,7 +166,7 @@
 | `GET` | `/api/admin/telegram-accounts` | 账号列表（分页筛选） |
 | `GET` | `/api/admin/telegram-accounts/replication-audit` | 副本资格审计报告 |
 | `PUT` | `/api/admin/telegram-accounts/replication-target` | 期望副本数热更新 |
-| `GET` | `/api/admin/telegram-accounts/replication-attempts` | 扩散轮次时间线查询 |
+| `GET` | `/api/admin/telegram-accounts/replication-attempts` | 扩散轮次时间线查询（筛选参数 `status` 支持英文逗号分隔多值，如 `retryable_failed,claim_timeout`；非法值 400，不静默忽略） |
 | `GET` | `/api/admin/telegram-accounts/replication-attempts/:attemptId` | 单轮扩散详情与建议 |
 | `POST` | `/api/admin/telegram-accounts/replication-attempts/:attemptId/retry` | 手动重试单轮扩散 |
 | `POST` | `/api/admin/telegram-accounts/relay-preflight` | 中继能力预检（默认演练） |
