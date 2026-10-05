@@ -970,6 +970,54 @@ describe('TelegramAccounts.vue 事件区折叠与筛选', () => {
     expect(rows[0].text()).toContain('att-blocked…');
   });
 
+  it('筛选加载期间切回「全部」立即恢复窗口结果，旧响应不覆盖新请求或提前结束 loading', async () => {
+    mockedApi.fetchReplicationAudit.mockResolvedValue(replicationFixture({
+      recentAttempts: [attemptItem('att-window')],
+    }));
+
+    let resolveOldRequest!: (value: ReturnType<typeof attemptListView>) => void;
+    const oldRequest = new Promise<ReturnType<typeof attemptListView>>((resolve) => {
+      resolveOldRequest = resolve;
+    });
+    let resolveCurrentRequest!: (value: ReturnType<typeof attemptListView>) => void;
+    const currentRequest = new Promise<ReturnType<typeof attemptListView>>((resolve) => {
+      resolveCurrentRequest = resolve;
+    });
+    mockedApi.fetchReplicationAttempts
+      .mockReturnValueOnce(oldRequest)
+      .mockReturnValueOnce(currentRequest);
+
+    const wrapper = mountView();
+    await settle(wrapper);
+
+    await attemptFilterSelect(wrapper).setValue('failed');
+    await settle(wrapper);
+    expect(wrapper.text()).toContain('筛选结果加载中…');
+
+    await attemptFilterSelect(wrapper).setValue('');
+    await settle(wrapper);
+    expect(wrapper.text()).not.toContain('筛选结果加载中…');
+    expect(wrapper.findAll('li.timeline-item').map((row) => row.text()).join('\n')).toContain('att-window…');
+
+    // 再次选择相同筛选键，确保旧请求不能利用「failed === failed」的键值相等误覆盖新请求。
+    await attemptFilterSelect(wrapper).setValue('failed');
+    await settle(wrapper);
+    expect(mockedApi.fetchReplicationAttempts).toHaveBeenCalledTimes(2);
+    expect(wrapper.text()).toContain('筛选结果加载中…');
+
+    resolveOldRequest(attemptListView([attemptItem('att-stale')]));
+    await settle(wrapper);
+    expect(wrapper.text()).toContain('筛选结果加载中…');
+    expect(wrapper.text()).not.toContain('att-stale…');
+
+    resolveCurrentRequest(attemptListView([attemptItem('att-current')]));
+    await settle(wrapper);
+    expect(wrapper.text()).not.toContain('筛选结果加载中…');
+    expect(wrapper.findAll('li.timeline-item').map((row) => row.text())).toEqual([
+      expect.stringContaining('att-current…'),
+    ]);
+  });
+
   it('窗口内 0 条时显示窗口空态（不显示筛选空态、不显示折叠控制）', async () => {
     mockedApi.fetchReplicationAudit.mockResolvedValue(replicationFixture({ recentAttempts: [] }));
     const wrapper = mountView();

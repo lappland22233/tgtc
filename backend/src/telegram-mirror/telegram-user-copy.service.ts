@@ -107,8 +107,9 @@ export class TelegramUserCopyService {
         ownerId: task.ownerId,
         sourceChatId: descriptor.chatId,
         sourceMessageId: descriptor.messageId,
-        // 归属优先用任务行固化的事实（任务创建时写入），缺失时回落到描述
-        sourceAccountId: task.sourceAccountId ?? descriptor.sourceAccountId,
+        // 源描述是当前 file_unique_id 回退后验证过的权威事实；历史任务快照可能指向另一账号。
+        // 只有旧任务/描述未保存来源账号时才回落到任务行，绝不把 A 账号消息交给 B 账号取用。
+        sourceAccountId: descriptor.sourceAccountId ?? task.sourceAccountId,
         // 源内容版本（仅日志/诊断用）：主群锚点据此识别「同一 file.id 覆盖上传」并重搬，
         // 避免新版本任务从旧版本的主群消息中继（镜像群停在旧内容）
         sourceVersion: task.sourceVersion,

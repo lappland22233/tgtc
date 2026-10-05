@@ -19,8 +19,13 @@ describe('TelegramUserCopyService（账号粘性与幂等键）', () => {
   ];
 
   function setup(options: {
-    /** 源锚点（副本表登记的事实） */
-    descriptor?: { chatId: string | null; messageId: string | null; fileSize: number };
+    /** 源描述（包含当前 fileUnique 身份解析出的持有账号） */
+    descriptor?: {
+      chatId: string | null;
+      messageId: string | null;
+      fileSize: number;
+      sourceAccountId?: string | null;
+    };
     /** 主群锚点（默认：主群与源不同，说明发生过搬运） */
     anchor?: { chatId: string; messageId: string; planted: boolean };
     anchorError?: Error;
@@ -98,6 +103,28 @@ describe('TelegramUserCopyService（账号粘性与幂等键）', () => {
     expect(calls[0][0].sourceChatId).toBe('-100999');
     expect(calls[0][0].sourceMessageId).toBe('777');
     expect(calls[0][0].targetChatId).toBe('-100222');
+  });
+
+  it('fileUnique 回退解析出的持有账号优先于任务快照，避免跨账号转发 file_id', async () => {
+    const ctx = setup({
+      descriptor: {
+        chatId: '7001',
+        messageId: '5',
+        fileSize: 1024,
+        sourceAccountId: 'copy-owner',
+      },
+    });
+
+    await ctx.service.execute(task('task-fallback', { sourceAccountId: 'stale-task-owner' }) as never, rule() as never);
+
+    expect(ctx.anchors.ensureAnchor).toHaveBeenCalledWith(expect.objectContaining({
+      sourceChatId: '7001',
+      sourceMessageId: '5',
+      sourceAccountId: 'copy-owner',
+    }));
+    expect(ctx.anchors.ensureAnchor).not.toHaveBeenCalledWith(expect.objectContaining({
+      sourceAccountId: 'stale-task-owner',
+    }));
   });
 
   it('同一任务多次执行固定使用同一账号，且幂等键完全相同', async () => {
