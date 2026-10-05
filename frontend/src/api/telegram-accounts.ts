@@ -309,6 +309,36 @@ export type ReplicationAttemptStatus =
   | 'claim_timeout'
   | 'retryable_failed';
 
+/**
+ * 可重试轮次状态（与后端 `ATTEMPT_RETRYABLE_STATUSES` 同口径）。
+ *
+ * 为什么后端不提供 `retryable=true` 这种派生筛选：状态是权威事实，
+ * 「可重试」只是它的一个视图口径；由状态集合表达，后端与前端不会各维护一套判定。
+ */
+export const RETRYABLE_ATTEMPT_STATUSES: ReplicationAttemptStatus[] = [
+  'retryable_failed',
+  'claim_timeout',
+];
+
+/**
+ * 「只看失败」覆盖的状态（非干净成功态）。
+ *
+ * 包含：可重试失败、认领超时、部分成功（中继成功但认领不足）与全部阻塞态
+ * （含 `blocked_manual`：需人工处理，不会自动重开）。
+ * 不含 `planned` / `relay_running` / `waiting_claims`（在途）与 `succeeded`。
+ */
+export const FAILED_ATTEMPT_STATUSES: ReplicationAttemptStatus[] = [
+  'retryable_failed',
+  'claim_timeout',
+  'partial_success',
+  'blocked_not_configured',
+  'blocked_user_client',
+  'blocked_no_user_account',
+  'blocked_source_anchor',
+  'blocked_target_chat',
+  'blocked_manual',
+];
+
 /** 标准化中继失败原因（与后端 `UserRelayFailureReason` 一一对应） */
 export type UserRelayFailureReason =
   | 'not_configured'
@@ -406,7 +436,11 @@ export interface ReplicationAttemptView {
   claimedAccountIds: string[];
   relayAccountId: string | null;
   targetChatPreview: string | null;
-  triggeredBy: 'lazy' | 'manual';
+  /**
+   * 轮次触发来源：`eager` = 任务执行时开立（入库触发与下载期懒触发补建的任务都走这里）；
+   * `lazy` = 历史「下载期懒扩散」旧实现留下的事实（仅旧数据）；`manual` = 后台手动重试。
+   */
+  triggeredBy: 'eager' | 'lazy' | 'manual';
   createdAt: string;
   relayCompletedAt: string | null;
   completedAt: string | null;
@@ -460,7 +494,7 @@ export interface ReplicationAttemptDetailView {
   relayAccountId: string | null;
   relayMessageId: string | null;
   targetChatPreview: string | null;
-  triggeredBy: 'lazy' | 'manual';
+  triggeredBy: 'eager' | 'lazy' | 'manual';
   startedAt: string | null;
   relayCompletedAt: string | null;
   claimDeadlineAt: string | null;
@@ -517,10 +551,15 @@ export async function updateReplicationTarget(
   return response.data.data as { message: string; target: ReplicationTargetView };
 }
 
-/** 扩散轮次时间线（可按状态 / 失败原因 / 归属对象 / 时间窗口筛选） */
+/**
+ * 扩散轮次时间线（可按状态 / 失败原因 / 归属对象 / 时间窗口筛选）。
+ *
+ * `status` 支持数组：数组会序列化为英文逗号分隔的多值（后端支持 `a,b`），
+ * 用于「只看失败」「只看可重试」这类跨多状态、且必须作用于整表（而非报告窗口）的筛选。
+ */
 export async function fetchReplicationAttempts(
   params: {
-    status?: string;
+    status?: ReplicationAttemptStatus | ReplicationAttemptStatus[];
     failureReason?: string;
     ownerType?: string;
     ownerId?: string;
@@ -529,8 +568,17 @@ export async function fetchReplicationAttempts(
   } = {},
   signal?: AbortSignal,
 ): Promise<ReplicationAttemptListView> {
+  const { status, ...rest } = params;
+  // 空数组 / undefined 都视为「不筛选」并省略参数：空串发给后端会被按「不筛选」处理，
+  // 从而把调用方预期的「无匹配」静默放大成「全表」
+  const serializedStatus = Array.isArray(status)
+    ? (status.length > 0 ? status.join(',') : undefined)
+    : status;
   const response = await api.get('/admin/telegram-accounts/replication-attempts', {
-    params,
+    params: {
+      ...rest,
+      ...(serializedStatus === undefined ? {} : { status: serializedStatus }),
+    },
     signal,
   });
   return response.data.data as ReplicationAttemptListView;

@@ -111,9 +111,14 @@ export class TelegramMirrorSourceService {
 
     if (descriptor.fileId) return descriptor;
 
-    // 主副本 file_id 缺失（历史数据/异常状态）：尝试用副本表兜底
-    const fromCopies = await this.describeFromCopies('file', ownerId, descriptor.fileName);
-    return fromCopies ?? descriptor;
+    // 主副本 file_id 缺失（历史数据/异常状态）：尝试用副本表兜底。
+    // 必须与 `completeAnchorFromCopies` 同一口径（同归属 + 当前版本）：
+    // 否则会选中「同归属但旧版本」的残留副本行，把旧内容当成源继续扩散
+    // （与历史补偿的 `missingAnchor` 判定同口径）。
+    const fromCopies = await this.describeFromCopies('file', ownerId, descriptor.fileName, file.size);
+    // 版本只能取主记录事实（副本行没有版本列）：否则幂等键会落到旧版本上，
+    // 覆盖上传后的新内容会被当成旧版本重复扩散。
+    return fromCopies ? { ...fromCopies, sourceVersion: descriptor.sourceVersion } : descriptor;
   }
 
   /**
@@ -182,11 +187,19 @@ export class TelegramMirrorSourceService {
     ownerType: TelegramCopyOwnerType,
     ownerId: string,
     fallbackName: string,
+    /**
+     * 已知的文件大小（只有 `file` 归属可知），用于过滤旧版本残留副本；
+     * `undefined` = 无从比对（`fileUnique` 只知 `file_unique_id`），保持原行为。
+     */
+    knownFileSize?: number | null,
   ): Promise<MirrorSourceDescriptor | null> {
     try {
       const ready = await this.copies.listReady(ownerType, ownerId);
       if (ready.length === 0) return null;
-      const copy = ready[0];
+      const copy = knownFileSize === undefined
+        ? ready[0]
+        : ready.find((item) => isUsableSourceCopyAnchor(knownFileSize, item)) ?? null;
+      if (!copy) return null;
       return {
         fileId: copy.telegramFileId,
         fileSize: Number(copy.fileSize ?? 0) || 0,

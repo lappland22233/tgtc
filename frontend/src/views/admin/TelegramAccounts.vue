@@ -459,6 +459,24 @@
           </span>
         </div>
 
+        <!-- 筛选：全部=报告窗口；其余走整表查询（避免把「窗口内没有」误读成「整表没有」） -->
+        <div class="attempts-filters">
+          <t-select
+            v-model="attemptFilter"
+            class="filter-select"
+            aria-label="扩散轮次筛选"
+            @change="onAttemptFilterChange"
+          >
+            <t-option value="" :label="`全部（最近 ${ATTEMPT_WINDOW_LIMIT} 条）`" />
+            <t-option value="failed" label="未完成（含阻塞）" />
+            <t-option value="claim_timeout" label="认领超时" />
+            <t-option value="retryable" label="只看可重试" />
+          </t-select>
+          <span class="section-hint">
+            「未完成」= 失败 / 阻塞 / 部分成功（认领不足）；筛选作用于整表最近记录，不受上方窗口限制。
+          </span>
+        </div>
+
         <!-- 重试结果：如实展示后端 requeued/created/ruleIds，0 重排明确写「无需重试」 -->
         <t-alert
           v-if="retryResult"
@@ -481,10 +499,9 @@
           <t-button variant="text" size="small" @click="retryResult = null">关闭</t-button>
         </t-alert>
 
-        <div v-if="recentAttempts.length === 0" class="empty-hint">窗口内没有扩散轮次记录</div>
-
-        <ul v-else class="timeline">
-          <li v-for="attempt in recentAttempts" :key="attempt.id" class="timeline-item">
+        <div v-if="attemptsLoading" class="empty-hint">筛选结果加载中…</div>
+        <ul v-else-if="attemptSource.length > 0" id="replica-attempt-timeline" class="timeline">
+          <li v-for="attempt in visibleAttempts" :key="attempt.id" class="timeline-item">
             <span class="timeline-dot" :class="attemptDotClass(attempt.status)" />
             <div class="timeline-body">
               <div class="timeline-row">
@@ -493,6 +510,7 @@
                   {{ attempt.statusLabel }}
                 </t-tag>
                 <span class="timeline-meta">{{ formatTime(attempt.createdAt) }}</span>
+                <span class="timeline-meta">{{ attemptTriggerText(attempt.triggeredBy) }}</span>
                 <span class="timeline-meta">
                   中继 {{ formatDuration(attempt.relayDurationMs) }} · 认领 {{ formatDuration(attempt.claimDurationMs) }}
                 </span>
@@ -555,6 +573,35 @@
             </div>
           </li>
         </ul>
+
+        <div v-else-if="!attemptsError" class="empty-hint">
+          {{ attemptFilter === '' ? '窗口内没有扩散轮次记录' : '当前筛选下没有记录' }}
+        </div>
+
+        <!-- 查询失败 / 后端降级都必须显式提示：静默空列表会被误读成「没有记录」 -->
+        <div v-if="attemptsError" class="stat-sub replica-warn">
+          筛选查询未完整返回：{{ attemptsError }}。请修正筛选条件或稍后重试，不要据此判断「没有记录」；
+          {{ attemptsFiltered.length > 0 ? '下方列表为上一次成功查询的结果。' : '' }}
+        </div>
+
+        <!-- 折叠控制：默认只看最近 N 条，展开不额外请求（同一份快照） -->
+        <div v-if="!attemptsLoading && attemptSource.length > ATTEMPT_COLLAPSE_LIMIT" class="attempts-footer">
+          <t-button
+            variant="text"
+            size="small"
+            :aria-expanded="attemptsExpanded"
+            aria-controls="replica-attempt-timeline"
+            @click="attemptsExpanded = !attemptsExpanded"
+          >
+            {{ attemptsExpanded
+              ? `收起（只显示最近 ${ATTEMPT_COLLAPSE_LIMIT} 条）`
+              : `展开全部（共 ${attemptSource.length} 条，另有 ${hiddenAttemptCount} 条）` }}
+          </t-button>
+        </div>
+
+        <div v-if="attemptsTruncated && attemptFilter !== ''" class="stat-sub replica-warn">
+          筛选结果已截断：仅显示最近 {{ ATTEMPT_FILTER_LIMIT }} 条，请在下方「镜像任务」按文件 ID 定位，或用更窄的筛选继续排查。
+        </div>
       </div>
 
       <ul v-if="replication" class="replica-notes">
@@ -1313,7 +1360,9 @@ import MessagePlugin from '@/utils/message';
 import { getErrorMessage } from '@/utils/error';
 import { useMobile } from '@/composables/useMobile';
 import {
+  FAILED_ATTEMPT_STATUSES,
   RELAY_FAILURE_REASON_LABELS,
+  RETRYABLE_ATTEMPT_STATUSES,
   cancelMirrorBackfill,
   cancelMirrorTask,
   createBotAccount,
@@ -1327,6 +1376,7 @@ import {
   fetchMirrorOverview,
   fetchMirrorTasks,
   fetchReplicationAttemptDetail,
+  fetchReplicationAttempts,
   fetchReplicationAudit,
   pauseMirrorBackfill,
   probeEnvAccount,
@@ -2549,6 +2599,28 @@ const retryingAttemptId = ref<string | null>(null);
 /** 最近一次手动重试结果（原样展示后端口径，0 重排不粉饰成功） */
 const retryResult = ref<ReplicationRetryResult | null>(null);
 
+/**
+ * 事件区默认折叠条数。
+ *
+ * 为什么必须折叠：报告一次返回最近 50 条，全量铺开会让「扩散」这一节在页面上
+ * 长达数十行，真正需要处置的失败反而被淹没；折叠后仍保留「展开全部」入口。
+ */
+const ATTEMPT_COLLAPSE_LIMIT = 5;
+/** 报告窗口条数（与后端 `RECENT_ATTEMPT_LIMIT` 对齐，仅用于文案与提示） */
+const ATTEMPT_WINDOW_LIMIT = 50;
+/** 筛选查询条数（与窗口同量级；超出由后端 `truncated` 如实提示） */
+const ATTEMPT_FILTER_LIMIT = 50;
+
+/** 事件区筛选键：空串=全部（用报告窗口），其余走服务端整表查询 */
+type AttemptFilterKey = '' | 'failed' | 'claim_timeout' | 'retryable';
+const attemptFilter = ref<AttemptFilterKey>('');
+const attemptsFiltered = ref<ReplicationAttemptView[]>([]);
+const attemptsLoading = ref(false);
+const attemptsTruncated = ref(false);
+/** 筛选查询失败原因（非空时必须提示，避免空列表被误读成「没有记录」） */
+const attemptsError = ref<string | null>(null);
+const attemptsExpanded = ref(false);
+
 const capacity = computed(() => replication.value?.capacity ?? null);
 const coverage = computed(() => replication.value?.coverage ?? {
   scannedFiles: 0,
@@ -2577,6 +2649,24 @@ const relayCapability = computed<RelayCapabilitySnapshot>(() => replication.valu
 const relayMetricsView = computed(() => replication.value?.relayMetrics ?? null);
 const largeFileCoverage = computed(() => replication.value?.largeFileCoverage ?? null);
 const recentAttempts = computed(() => replication.value?.recentAttempts ?? []);
+
+/**
+ * 事件区数据源：全部=报告窗口（不额外请求）；筛选=服务端整表查询结果。
+ *
+ * 为什么筛选不本地做：报告只回最近 50 条，本地过滤会把「窗口内没有失败」
+ * 显示成「没有失败」，与排障结论完全相反。
+ */
+const attemptSource = computed<ReplicationAttemptView[]>(() => (
+  attemptFilter.value === '' ? recentAttempts.value : attemptsFiltered.value
+));
+const visibleAttempts = computed<ReplicationAttemptView[]>(() => (
+  attemptsExpanded.value
+    ? attemptSource.value
+    : attemptSource.value.slice(0, ATTEMPT_COLLAPSE_LIMIT)
+));
+const hiddenAttemptCount = computed(() => (
+  Math.max(0, attemptSource.value.length - ATTEMPT_COLLAPSE_LIMIT)
+));
 const observability = computed(() => replication.value?.observability ?? {
   degraded: false,
   reason: null,
@@ -2656,6 +2746,91 @@ function attemptDotClass(status: ReplicationAttemptStatus): string {
   return 'dot-muted';
 }
 
+/**
+ * 触发来源文案。
+ *
+ * `eager` 覆盖「入库即触发」与「下载期懒触发补建」两类任务：两者都只建单，
+ * 轮次在镜像任务执行时开立，因此无法（也不需要）在轮次里区分；
+ * `lazy` 是旧「下载期懒扩散」实现留下的历史值，只出现在旧数据里。
+ */
+function attemptTriggerText(triggeredBy: ReplicationAttemptView['triggeredBy']): string {
+  if (triggeredBy === 'manual') return '触发：手动重试';
+  if (triggeredBy === 'lazy') return '触发：下载期（历史）';
+  return '触发：入库或补建';
+}
+
+/**
+ * 筛选切换：重置折叠状态并按需拉取整表筛选结果。
+ *
+ * 拉取失败时保留上一次的结果（不清空），并在消息里如实报错——
+ * 静默清空会让「查询失败」看起来像「没有记录」。
+ */
+async function onAttemptFilterChange() {
+  attemptsExpanded.value = false;
+  attemptsTruncated.value = false;
+  attemptsError.value = null;
+  if (attemptFilter.value === '') {
+    attemptsFiltered.value = [];
+    return;
+  }
+  await loadFilteredAttempts();
+}
+
+/**
+ * 按当前筛选拉取轮次（整表筛选，非报告窗口）。
+ *
+ * 两类「不能当作没有记录」都要显式提示：
+ * - 请求失败（HTTP 层）→ 保留上一次结果并报错；
+ * - 后端降级（HTTP 200 但 `observability.degraded`，仓储读取失败会返回空列表）→ 同样必须提示，
+ *   否则「读不到」会被渲染成「没有记录」，正是本筛选要消灭的误导。
+ *
+ * 竞态：切换筛选后旧响应一律丢弃（否则晚到的旧结果会覆盖新筛选）。
+ */
+async function loadFilteredAttempts() {
+  const filterKey = attemptFilter.value;
+  // 「全部」用报告窗口，不发筛选请求（防御式：调用方已保证，但类型上必须收窄）
+  if (filterKey === '') return;
+  attemptsLoading.value = true;
+  try {
+    const result = await fetchReplicationAttempts({
+      status: attemptFilterStatuses(filterKey),
+      limit: ATTEMPT_FILTER_LIMIT,
+    });
+    if (attemptFilter.value !== filterKey) return;
+    attemptsFiltered.value = result.items;
+    attemptsTruncated.value = result.truncated;
+    attemptsError.value = result.observability.degraded
+      ? `观测数据不完整${result.observability.reason ? `：${result.observability.reason}` : ''}`
+      : null;
+  } catch (error) {
+    if (attemptFilter.value !== filterKey) return;
+    attemptsError.value = getErrorMessage(error);
+    MessagePlugin.error(getErrorMessage(error));
+  } finally {
+    // 仅当前筛选的请求负责收尾加载态：被丢弃的旧响应不得关掉新请求的加载状态
+    if (attemptFilter.value === filterKey) attemptsLoading.value = false;
+  }
+}
+
+/**
+ * 筛选键 → 后端状态集合（与后端 `retryable` 派生口径一致）。
+ *
+ * 入参已排除「全部」，分支**穷举且无默认兜底**：将来新增筛选键时
+ * 这里会因缺少返回值而编译失败，而不是静默错筛。
+ */
+function attemptFilterStatuses(
+  filter: Exclude<AttemptFilterKey, ''>,
+): ReplicationAttemptStatus | ReplicationAttemptStatus[] {
+  switch (filter) {
+    case 'retryable':
+      return RETRYABLE_ATTEMPT_STATUSES;
+    case 'failed':
+      return FAILED_ATTEMPT_STATUSES;
+    case 'claim_timeout':
+      return 'claim_timeout';
+  }
+}
+
 /** 失败原因键 → 中文文案（未知键原样展示，避免静默丢信息） */
 function failureReasonText(reason: UserRelayFailureReason): string {
   return RELAY_FAILURE_REASON_LABELS[reason] ?? reason;
@@ -2709,6 +2884,8 @@ async function loadReplicationAudit() {
     replicationStale.value = false;
     // 仅在加载成功时回填表单，避免失败时把输入框重置成空值
     replicationForm.desiredReplicas = data.target.configured;
+    // 筛选视图来自整表查询，不随报告刷新：这里一并重取，否则「刷新」对可见列表无效
+    if (attemptFilter.value !== '') await loadFilteredAttempts();
   } catch {
     // 失败时保留上次数据并显式标记过期，不渲染伪造的全零健康态
     replicationStale.value = replication.value !== null;
@@ -2823,6 +3000,7 @@ async function doRetryAttempt(row: ReplicationAttemptView) {
     // 该轮次状态已变化，丢弃详情缓存避免展示过期建议
     delete attemptDetails[row.id];
     expandedAttemptId.value = null;
+    // loadReplicationAudit 内部会按当前筛选一并重取筛选视图（见该函数）
     await loadReplicationAudit();
   } catch (error) {
     MessagePlugin.error(getErrorMessage(error));
@@ -3296,6 +3474,26 @@ onMounted(() => {
   font-family: var(--font-display);
   font-size: 14px;
   font-weight: 600;
+}
+
+/* 事件区筛选行：与表格筛选同节奏，但独立命名避免相互影响 */
+.attempts-filters {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  margin: var(--space-3) 0 0;
+}
+
+.attempts-filters .section-hint {
+  margin: 0;
+}
+
+/* 折叠控制：默认只看最近 N 条；展开/收起复用同一份快照，不产生新请求 */
+.attempts-footer {
+  display: flex;
+  justify-content: center;
+  margin-top: var(--space-2);
 }
 
 .timeline {

@@ -125,6 +125,28 @@ describe('TelegramAccountsController（管理端点契约）', () => {
       .rejects.toThrow('limit 不能超过 200');
   });
 
+  it('status 支持逗号分隔多值：跨状态筛选一次查全整表，空片段与非法片段仍 400', async () => {
+    const ctx = makeController();
+
+    await ctx.controller.listReplicationAttempts('retryable_failed,claim_timeout');
+
+    expect(ctx.replicationAudit.listAttempts).toHaveBeenCalledWith(expect.objectContaining({
+      status: ['retryable_failed', 'claim_timeout'],
+    }));
+
+    // 去重：同一状态重复出现不应产生重复的 IN 参数（单值退化为字符串，保持既有契约）
+    await ctx.controller.listReplicationAttempts('claim_timeout, claim_timeout');
+
+    expect(ctx.replicationAudit.listAttempts).toHaveBeenLastCalledWith(expect.objectContaining({
+      status: 'claim_timeout',
+    }));
+
+    await expect(ctx.controller.listReplicationAttempts('claim_timeout,'))
+      .rejects.toThrow('存在空状态片段');
+    await expect(ctx.controller.listReplicationAttempts('claim_timeout,not-a-status'))
+      .rejects.toThrow('status 取值非法：not-a-status');
+  });
+
   it('空筛选值不下传（undefined 表示不筛选，而不是空字符串匹配）', async () => {
     const ctx = makeController();
 

@@ -49,6 +49,8 @@ import { AccountAwareUploadService } from '../telegram-account-pool/account-awar
 import { FileCopyService } from '../telegram-account-pool/file-copy.service';
 // 镜像触发（可选依赖：不装配时不产生任何行为变化）
 import { TelegramMirrorTriggerService } from '../telegram-mirror/telegram-mirror-trigger.service';
+// 下载期懒触发补扩散（可选依赖：老文件副本不足时补建镜像任务，零字节、不阻塞下载）
+import { TelegramMirrorLazyTriggerService } from '../telegram-mirror/telegram-mirror-lazy-trigger.service';
 // 5a fail-closed：跨账号回退拒绝复用下载调度层的结构化异常与错误码（与全局过滤器/流式响应透传口径一致）
 import { DownloadResourceException, DOWNLOAD_ERROR_CODES, DOWNLOAD_RESOURCE_DEFAULTS } from './download-resource-coordinator.service';
 // 账号标识脱敏（日志只允许输出末 4 位，绝不打印完整标识与 file_id）
@@ -176,6 +178,9 @@ export class FileService implements OnModuleInit {
     // 镜像触发（可选依赖；关闭时零开销）
     @Optional() @Inject(TelegramMirrorTriggerService)
     private readonly mirrorTrigger: TelegramMirrorTriggerService | null = null,
+    // 下载期懒触发补扩散（可选依赖；镜像未启用 / 副本已达标时零行为）
+    @Optional() @Inject(TelegramMirrorLazyTriggerService)
+    private readonly lazyMirrorTrigger: TelegramMirrorLazyTriggerService | null = null,
   ) {
   }
 
@@ -190,6 +195,10 @@ export class FileService implements OnModuleInit {
    * - 其他任何情况（未装配 / 未启用 / 无副本 / 来源为空或即默认 Bot）→ **原单账号链路**，
    *   不改变返回结构与 Range/缓存语义。
    *
+   * 老文件补扩散（受控懒触发）：进入账号池分支时向懒触发服务「问一声」——副本不足则
+   * 补建镜像任务（零字节，执行仍由镜像任务队列承担）。该调用 fire-and-forget、
+   * **不参与本次取流决策**，也不改变 Range/缓存/准入语义。
+   *
    * 安全：这里只做「取流」选择，绝不把 A 账号的 `file_id` 交给 B 账号——
    * 每个候选副本都带有它自己的 `file_id`（副本表事实）。
    */
@@ -201,6 +210,16 @@ export class FileService implements OnModuleInit {
     const noCache = options?.noCache === true;
     const poolDownload = this.accountAwareDownload;
     if (poolDownload?.isActive() && this.fileCopies) {
+      // 下载冷路径上的老文件补扩散：是否建单由懒触发服务按「冷却窗口 + 副本缺口 + 源锚点」
+      // 自行判定。这里再兜一层 try/catch：补扩散的任何失败都不得改变下载行为（fail-open）。
+      try {
+        this.lazyMirrorTrigger?.maybeTrigger('file', file.id);
+      } catch (error) {
+        this.logger.warn(
+          `老文件补扩散懒触发失败（file=${file.id}，不影响下载）：`
+          + `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
       try {
         const copies = await this.fileCopies.listReady('file', file.id);
         if (copies.length > 0) {

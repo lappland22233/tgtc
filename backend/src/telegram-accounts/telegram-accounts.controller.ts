@@ -17,6 +17,7 @@ import { Roles } from '../common/decorators/roles.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { User, UserRole } from '../common/entities/user.entity';
 import type { TelegramCopyOwnerType } from '../common/entities/telegram-file-copy.entity';
+import type { ReplicationAttemptStatus } from '../common/entities/telegram-replication-attempt.entity';
 import { AuditService } from '../common/services/audit.service';
 import { REPLICA_TARGET_CONFIG_KEY } from '../telegram-account-pool/replica-target.resolver';
 import {
@@ -384,18 +385,29 @@ export class TelegramAccountsController {
   }
 
   /**
-   * 解析轮次状态查询参数。
+   * 解析轮次状态查询参数（**支持英文逗号分隔多值**）。
+   *
+   * 为什么需要多值：「只看失败」「只看可重试」这类后台筛选在数据上对应多个状态
+   * （可重试 = `retryable_failed` + `claim_timeout`），必须一次查全整表；
+   * 否则前端只能拿「最近 N 条窗口」做本地过滤，会把「窗口内没有」误读成「整表没有」。
    *
    * 非法值直接 400 而不是静默忽略：静默忽略会让「筛选了但看到全部」被误读成
    * 「该状态没有任何记录」，排障时得出完全相反的结论。
    */
-  private parseAttemptStatus(value?: string) {
+  private parseAttemptStatus(value?: string): ReplicationAttemptStatus | ReplicationAttemptStatus[] | undefined {
     const trimmed = (value || '').trim();
     if (!trimmed) return undefined;
-    if (!isReplicationAttemptStatus(trimmed)) {
-      throw new BadRequestException(`status 取值非法：${trimmed}`);
+    const parts = trimmed.split(',').map((item) => item.trim());
+    if (parts.some((item) => item === '')) {
+      throw new BadRequestException('status 取值非法：存在空状态片段（多值请用英文逗号分隔）');
     }
-    return trimmed;
+    const unique = Array.from(new Set(parts));
+    const invalid = unique.find((item) => !isReplicationAttemptStatus(item));
+    if (invalid) {
+      throw new BadRequestException(`status 取值非法：${invalid}`);
+    }
+    const statuses = unique as ReplicationAttemptStatus[];
+    return statuses.length === 1 ? statuses[0] : statuses;
   }
 
   /** 解析失败原因查询参数（同上：非法值 400） */

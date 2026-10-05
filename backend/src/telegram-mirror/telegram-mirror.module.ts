@@ -20,6 +20,7 @@ import { TelegramMirrorMetricsService } from './telegram-mirror-metrics.service'
 import { TelegramMirrorAlertService } from './telegram-mirror-alert.service';
 import { TelegramMirrorTriggerService } from './telegram-mirror-trigger.service';
 import { TelegramMirrorBackfillService } from './telegram-mirror-backfill.service';
+import { TelegramMirrorLazyTriggerService } from './telegram-mirror-lazy-trigger.service';
 import { TelegramMirrorProcessor } from './telegram-mirror.processor';
 
 /** 镜像告警采集间隔（毫秒） */
@@ -62,12 +63,16 @@ const MIRROR_ALERT_INTERVAL_MS = 60_000;
     TelegramMirrorAlertService,
     TelegramMirrorTriggerService,
     TelegramMirrorBackfillService,
+    // 下载期懒触发补扩散（老文件副本补齐）：只建单、零字节、fail-open
+    TelegramMirrorLazyTriggerService,
     TelegramMirrorProcessor,
   ],
   exports: [
     TelegramMirrorConfigService,
     TelegramMirrorTriggerService,
     TelegramMirrorMetricsService,
+    // 供 file 模块在站内下载回源时调用（下载仅「问一声」，不等待结果）
+    TelegramMirrorLazyTriggerService,
   ],
 })
 export class TelegramMirrorModule implements OnModuleInit, OnApplicationShutdown {

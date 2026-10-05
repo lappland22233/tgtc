@@ -278,7 +278,7 @@ Redis 承载 8 个 Bull 队列：`metrics-aggregation`、`attack-detection`、`a
 
 ## 副本扩散与下载负载均衡（v1.6.0）
 
-> 目标：**一次转发，多 Bot 共享副本，下载按负载分流**。Web 上传或 Bot 收到文件后，只有匹配对应范围开关的启用规则会建任务（`includeWebUploads` / `includeBotInboundFiles`）；源消息先搬进**主群**（Bot API 服务端转发，零字节），再由**用户账号**从主群服务端转发到对应**镜像群**；镜像群内每个 Bot 各自收到该消息、登记**自己账号的** `file_id` 副本；这些副本经桥接写入站内文件的副本记录后，下载回源即可在多个 Bot 之间按权重 × 带宽 × 健康 × 容量选号。**入库即触发扩散**（不再等下载时才补副本），但管理员可显式关闭任一来源范围，因此不是所有入库文件都会建镜像任务。
+> 目标：**一次转发，多 Bot 共享副本，下载按负载分流**。Web 上传或 Bot 收到文件后，只有匹配对应范围开关的启用规则会建任务（`includeWebUploads` / `includeBotInboundFiles`）；源消息先搬进**主群**（Bot API 服务端转发，零字节），再由**用户账号**从主群服务端转发到对应**镜像群**；镜像群内每个 Bot 各自收到该消息、登记**自己账号的** `file_id` 副本；这些副本经桥接写入站内文件的副本记录后，下载回源即可在多个 Bot 之间按权重 × 带宽 × 健康 × 容量选号。**入库即触发扩散**，并保留**下载期懒触发补齐**：站内下载发现某文件的 ready 副本少于有效目标（老文件、规则启用前入库的文件）时补建一次镜像任务（幂等 + 15 分钟冷却，**只建单、零字节**，不重开失败/阻塞终态任务，见 `telegram-mirror/telegram-mirror-lazy-trigger.service.ts`）；管理员可显式关闭任一来源范围，因此不是所有入库文件都会建镜像任务。
 
 **为什么必须用用户账号**：Telegram 规定 bot 永远看不到其它 bot 发送的消息（与隐私模式、管理员身份无关）。因此「接收 Bot 转发到群」不能让其它 Bot 获得该文件；只有**用户账号**发出的消息才能被全群 Bot 看到。详见 `TELEGRAM_USER_RELAY_ENABLED` 的配置说明。
 
@@ -290,7 +290,7 @@ Redis 承载 8 个 Bull 队列：`metrics-aggregation`、`attack-detection`、`a
 | 回源并发与失败分类 | `telegram-account-pool/account-aware-download.service.ts`、`telegram-bot/telegram-bot-public.controller.ts` | 仅尝试同一逻辑文件的 ready 副本账号，最多 8 个且不超过副本数；源账号冷却/满载返回结构化 `503` + `Retry-After`，日志/响应/失败审计共用 `requestId`；来源身份未知与容量不足分开计数，**禁止跨账号借用 `file_id`** |
 | 桥接 | `telegram-account-pool/file-copy.service.ts` | 按 `file_unique_id` 反查 `files.telegramFileUniqueId`，额外写 `ownerType='file'` 副本；`file_id` 严格归属产生它的账号，**禁止跨账号借用** |
 | 轮次状态 | `telegram-account-pool/replication-attempt.service.ts` | 每轮扩散一行 `telegram_replication_attempts`：前置阻塞 → 中继 → 有界认领等待 → 终态（`succeeded`/`partial_success`/`claim_timeout`/`retryable_failed`/`blocked_*`），退避重试与保留期清理都在这里 |
-| 选号回源 | `telegram-account-pool/account-aware-download.service.ts` | 只在同一归属的 ready 副本账号间加权选号，最多尝试 8 个（不超过该文件持有副本数）；已知来源但无容量返回带 `Retry-After` 的 `DOWNLOAD_ACCOUNT_POOL_BUSY`，绝不跨账号复用 `file_id`；**下载路径不产生任何扩散副作用**（扩散在入库时即已触发） |
+| 选号回源 | `telegram-account-pool/account-aware-download.service.ts` | 只在同一归属的 ready 副本账号间加权选号，最多尝试 8 个（不超过该文件持有副本数）；已知来源但无容量返回带 `Retry-After` 的 `DOWNLOAD_ACCOUNT_POOL_BUSY`，绝不跨账号复用 `file_id`；**下载路径不执行扩散、不搬字节**——它只在副本不足时补建镜像任务（`telegram-mirror/telegram-mirror-lazy-trigger.service.ts`，幂等 + 冷却），真正的扩散始终由镜像任务队列承担 |
 
 **扩散完成的口径**（不能只看「转发成功」）：中继成功只是中间态；认领窗口内新增 ≥1 个 ready 副本为 `partial_success`，达到有效目标数为 `succeeded`，窗口内零新增记为 `claim_timeout`（说明群里没人拿到 `file_id`）。
 
@@ -323,8 +323,9 @@ Redis 承载 8 个 Bull 队列：`metrics-aggregation`、`attack-detection`、`a
 | 后台「全绿」但新文件没有备份 | `MIRROR_NO_ENABLED_RULES` 告警与镜像规则列表 | 镜像功能已开启但没有**启用中**的规则：触发层直接跳过（不建单、无 blocked 记录）。启用至少一条镜像规则即可恢复 |
 | 后台显示「观测数据不完整」 | `REPLICATION_OBSERVABILITY_GAP` 告警与后端日志 | 轮次写入失败（磁盘 / 锁等待 / 权限）时指标与事件不完整——**不得**把「看不到失败」当成「没有失败」；先修写入再看扩散健康度 |
 | 需要人工验证目标群可写 | 策略卡「探测目标群可写」 | 默认只读预检**不产生消息**；只有显式确认后才发送一条受控测试消息（会真实出现在群里，可忽略） |
+| 老文件（规则启用前入库）下载后仍只有 1 路副本 | 「事件时间线」与「镜像任务列表」中是否出现该文件的补建任务 | 下载期懒触发只在**副本不足**时建单，且同一文件 15 分钟内只触发一次；镜像开关关闭、无启用规则、账号池未生效或源锚点不可定位时都不建单。仍缺副本时用「历史补偿」批量补齐，或对单文件手动重试 |
 
-**限速原则（大文件缺口补偿）**：每次重试都会真实向目标群发一条消息，用户账号受 Telegram Flood 限制；`rate_limited`/`network`/`unknown` 类失败按指数退避自动重试（基数 30s、倍率 2、上限 15min，最多 5 次后升级为 `blocked_manual`）。因此**不要一次点多个重试**：优先处理 `claim_timeout`（通常是群权限问题，改完配置一次就够），大文件缺口按分钟级节奏逐个补。
+**限速原则（大文件缺口补偿）**：每次重试都会真实向目标群发一条消息，用户账号受 Telegram Flood 限制；`rate_limited`/`network`/`unknown` 类失败按指数退避自动重试（基数 30s、倍率 2、上限 15min，最多 5 次后升级为 `blocked_manual`）。因此**不要一次点多个重试**：优先处理 `claim_timeout`（通常是群权限问题，改完配置一次就够），大文件缺口按分钟级节奏逐个补。下载期懒触发同样受限速保护：同一文件在 15 分钟冷却窗口内只补建一次，且不重开 `failed`/`blocked` 终态任务（需人工处理的阻塞态只能由管理员显式重试）。
 
 
 ## 环境变量主 Bot 与统一选号（v1.5.3）
