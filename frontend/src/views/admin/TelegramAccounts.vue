@@ -2616,6 +2616,8 @@ type AttemptFilterKey = '' | 'failed' | 'claim_timeout' | 'retryable';
 const attemptFilter = ref<AttemptFilterKey>('');
 const attemptsFiltered = ref<ReplicationAttemptView[]>([]);
 const attemptsLoading = ref(false);
+/** 请求代次：筛选往返后仍能识别旧请求，避免旧响应覆盖新结果或关闭新 loading。 */
+let attemptsRequestVersion = 0;
 const attemptsTruncated = ref(false);
 /** 筛选查询失败原因（非空时必须提示，避免空列表被误读成「没有记录」） */
 const attemptsError = ref<string | null>(null);
@@ -2770,7 +2772,10 @@ async function onAttemptFilterChange() {
   attemptsTruncated.value = false;
   attemptsError.value = null;
   if (attemptFilter.value === '') {
+    // 「全部」不发筛选请求，但必须使仍在途的旧请求失效并结束其 loading 状态。
+    attemptsRequestVersion += 1;
     attemptsFiltered.value = [];
+    attemptsLoading.value = false;
     return;
   }
   await loadFilteredAttempts();
@@ -2790,25 +2795,28 @@ async function loadFilteredAttempts() {
   const filterKey = attemptFilter.value;
   // 「全部」用报告窗口，不发筛选请求（防御式：调用方已保证，但类型上必须收窄）
   if (filterKey === '') return;
+  const requestVersion = ++attemptsRequestVersion;
   attemptsLoading.value = true;
   try {
     const result = await fetchReplicationAttempts({
       status: attemptFilterStatuses(filterKey),
       limit: ATTEMPT_FILTER_LIMIT,
     });
-    if (attemptFilter.value !== filterKey) return;
+    if (requestVersion !== attemptsRequestVersion || attemptFilter.value !== filterKey) return;
     attemptsFiltered.value = result.items;
     attemptsTruncated.value = result.truncated;
     attemptsError.value = result.observability.degraded
       ? `观测数据不完整${result.observability.reason ? `：${result.observability.reason}` : ''}`
       : null;
   } catch (error) {
-    if (attemptFilter.value !== filterKey) return;
+    if (requestVersion !== attemptsRequestVersion || attemptFilter.value !== filterKey) return;
     attemptsError.value = getErrorMessage(error);
     MessagePlugin.error(getErrorMessage(error));
   } finally {
-    // 仅当前筛选的请求负责收尾加载态：被丢弃的旧响应不得关掉新请求的加载状态
-    if (attemptFilter.value === filterKey) attemptsLoading.value = false;
+    // 只有仍然有效的当前请求负责收尾，切换筛选（包括切回后又选回相同值）时旧请求不得关闭新 loading
+    if (requestVersion === attemptsRequestVersion && attemptFilter.value === filterKey) {
+      attemptsLoading.value = false;
+    }
   }
 }
 
