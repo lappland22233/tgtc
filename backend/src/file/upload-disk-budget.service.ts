@@ -168,9 +168,11 @@ export class UploadDiskBudgetService {
     return new HttpException(
       {
         statusCode: HttpStatus.TOO_MANY_REQUESTS,
+        // 业务码：全局过滤器与前端错误映射读取该字段（保持与下载资源协调器一致的结构）。
         code: 'UPLOAD_DISK_BUDGET_BUSY',
+        errorCode: 'UPLOAD_DISK_BUDGET_BUSY',
         retryAfterMs: 5000,
-        message: '服务器正在为另一份大文件保留磁盘空间，请保持本页打开后稍候重试',
+        message: '服务器正在依次处理另一份大文件，本文件已自动排队，请保持页面打开',
       },
       HttpStatus.TOO_MANY_REQUESTS,
     );

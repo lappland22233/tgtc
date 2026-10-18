@@ -373,7 +373,7 @@ export class ChunkUploadService implements OnModuleInit {
       || (session.strictDiskLease && sessionRequests >= 1)) {
       throw new HttpException(
         session.strictDiskLease
-          ? { statusCode: HttpStatus.TOO_MANY_REQUESTS, code: 'UPLOAD_DISK_BUDGET_BUSY', retryAfterMs: 5000, message: '正在按小盘模式接收上一分片，请稍候' }
+          ? { statusCode: HttpStatus.TOO_MANY_REQUESTS, code: 'UPLOAD_DISK_BUDGET_BUSY', errorCode: 'UPLOAD_DISK_BUDGET_BUSY', retryAfterMs: 5000, message: '服务器正在接收上一分片，请稍候' }
           : '上传请求过多，请稍后重试',
         HttpStatus.TOO_MANY_REQUESTS,
       );

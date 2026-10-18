@@ -1,4 +1,4 @@
-import { BadRequestException, HttpStatus } from '@nestjs/common';
+import { BadRequestException, HttpException, HttpStatus } from '@nestjs/common';
 import * as fs from 'fs';
 import { promises as fsp } from 'fs';
 import * as path from 'path';
@@ -63,6 +63,37 @@ describe('ChunkUploadService session quota', () => {
     await Promise.all(Array.from({ length: 10 }, () => init()));
 
     await expect(init()).rejects.toThrow('上传会话过多');
+  });
+
+  it('returns a structured 429 body for the strict single-chunk lease without disk wording', async () => {
+    uploadDiskBudget.isStrictMode.mockReturnValue(true);
+    const { uploadId } = await init();
+
+    const release = await service.acquireChunkRequest(uploadId, userId, MB);
+    let caught: unknown;
+    try {
+      await service.acquireChunkRequest(uploadId, userId, MB);
+    } catch (error) {
+      caught = error;
+    } finally {
+      release();
+    }
+
+    expect(caught).toBeInstanceOf(HttpException);
+    const exception = caught as HttpException;
+    expect(exception.getStatus()).toBe(HttpStatus.TOO_MANY_REQUESTS);
+    const response = exception.getResponse() as {
+      code?: unknown;
+      errorCode?: unknown;
+      retryAfterMs?: unknown;
+      message?: unknown;
+    };
+    // 与 UploadDiskBudgetService 结构一致：旧前端读 code，新前端读 errorCode。
+    expect(response.code).toBe('UPLOAD_DISK_BUDGET_BUSY');
+    expect(response.errorCode).toBe('UPLOAD_DISK_BUDGET_BUSY');
+    expect(response.retryAfterMs).toBe(5000);
+    // 该码只表示进程内租约排队，文案不得含磁盘/空间不足，否则会被前端误归入存储告警。
+    expect(String(response.message)).toBe('服务器正在接收上一分片，请稍候');
   });
 
   it.each(['done', 'error'] as const)('does not count %s sessions against the active quota', async (status) => {

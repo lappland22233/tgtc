@@ -79,7 +79,7 @@ SQLite 备份前应停止应用或使用 SQLite 在线备份能力取得一致�
 | `CHUNK_UPLOAD_GLOBAL_CONCURRENCY` | `24` | 分片上传：全局同时接收的分片会话数 |
 | `CHUNK_UPLOAD_INFLIGHT_BYTES` | `268435456`（256 MiB） | 分片上传：全局在途字节预算 |
 | `CHUNK_UPLOAD_MIN_FREE_DISK_BYTES` | `1073741824`（1 GiB） | 分片上传：临时分区最小预留空间 |
-| `STRICT_UPLOAD_SINGLE_PROCESS` | `false` | 严格小盘模式：仅在「单后端进程 + `FILE_CACHE_NO_CACHE_MODE=true`」时设为 `true`；启用后所有上传统一走分片链路，并以最大文件两倍空间为预算串行接收，启用前须先排空既有 `processing`/`pending` 任务 |
+| `STRICT_UPLOAD_SINGLE_PROCESS` | 未设置（即启用） | 严格小盘模式：**未设置时默认启用，只有显式设为 `false` 才关闭**；实际生效条件为「单后端进程 + `FILE_CACHE_NO_CACHE_MODE=true`」。启用后所有上传统一走分片链路，并以最大文件两倍空间为预算串行接收——同一时刻只允许一份文件占用上传通道，其余文件在客户端排队等待（服务端对并发 `init` 返回 `429` + `errorCode=UPLOAD_DISK_BUDGET_BUSY`，前端按 `Retry-After` 自动等待重试）；启用前须先排空既有 `processing`/`pending` 任务 |
 
 日志保留与轮转（应用日志由 FileLogger 写入，默认 `<cwd>/tmp/logs`）：
 

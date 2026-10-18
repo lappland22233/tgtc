@@ -44,6 +44,33 @@ describe('UploadDiskBudgetService', () => {
     expect(service.hasActiveLease()).toBe(false);
   });
 
+  it('returns a queue-oriented 429 body that distinguishes queuing from disk exhaustion', async () => {
+    const service = createService();
+    await service.acquireSession('session-a', 1024);
+
+    let caught: unknown;
+    try {
+      await service.acquireSession('session-b', 1024);
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(HttpException);
+    const exception = caught as HttpException;
+    expect(exception.getStatus()).toBe(429);
+    const response = exception.getResponse() as {
+      code?: unknown;
+      errorCode?: unknown;
+      retryAfterMs?: unknown;
+      message?: unknown;
+    };
+    // 前端错误映射读取 errorCode：排队必须与「存储空间不足」区分开，不能被归入磁盘告警。
+    expect(response.errorCode).toBe('UPLOAD_DISK_BUDGET_BUSY');
+    expect(response.code).toBe('UPLOAD_DISK_BUDGET_BUSY');
+    expect(response.retryAfterMs).toBe(5000);
+    expect(String(response.message)).not.toContain('磁盘');
+  });
+
   it('removes terminal UUID artifacts but blocks unknown pending sources', async () => {
     const pendingDir = path.join(cwd, 'tmp', 'uploads', 'pending');
     await mkdir(pendingDir, { recursive: true });

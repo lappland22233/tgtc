@@ -65,13 +65,15 @@ describe('GlobalExceptionFilter', () => {
     expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ message: 'bad input', data: null }));
   });
 
-  it('preserves strict upload budget retry metadata in response headers', () => {
+  it('preserves strict upload budget retry metadata in response headers and body', () => {
     const ex = new HttpException(
       {
         statusCode: HttpStatus.TOO_MANY_REQUESTS,
+        // 上传磁盘预算同时写 code 与 errorCode，两者同值：业务码不得依赖顶层数字 code
         code: 'UPLOAD_DISK_BUDGET_BUSY',
+        errorCode: 'UPLOAD_DISK_BUDGET_BUSY',
         retryAfterMs: 5000,
-        message: '服务器正在为另一份大文件保留磁盘空间，请稍候',
+        message: '服务器正在依次处理另一份大文件，本文件已自动排队，请保持页面打开',
       },
       HttpStatus.TOO_MANY_REQUESTS,
     );
@@ -80,7 +82,31 @@ describe('GlobalExceptionFilter', () => {
     expect(res.status).toHaveBeenCalledWith(HttpStatus.TOO_MANY_REQUESTS);
     expect(res.setHeader).toHaveBeenCalledWith('X-Tgtc-Error-Code', 'UPLOAD_DISK_BUDGET_BUSY');
     expect(res.setHeader).toHaveBeenCalledWith('Retry-After', '5');
-    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ code: 429, data: null }));
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
+      code: 429,
+      data: null,
+      errorCode: 'UPLOAD_DISK_BUDGET_BUSY',
+      retryAfterMs: 5000,
+      message: '服务器正在依次处理另一份大文件，本文件已自动排队，请保持页面打开',
+    }));
+  });
+
+  it('prefers errorCode over legacy code when both are present', () => {
+    const ex = new HttpException(
+      {
+        statusCode: HttpStatus.TOO_MANY_REQUESTS,
+        code: 'LEGACY_BUSINESS_CODE',
+        errorCode: 'PRIMARY_BUSINESS_CODE',
+        retryAfterMs: 3000,
+        message: '双写优先级',
+      },
+      HttpStatus.TOO_MANY_REQUESTS,
+    );
+    filter.catch(ex, host);
+
+    expect(res.setHeader).toHaveBeenCalledWith('X-Tgtc-Error-Code', 'PRIMARY_BUSINESS_CODE');
+    expect(res.setHeader).toHaveBeenCalledWith('Retry-After', '3');
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ errorCode: 'PRIMARY_BUSINESS_CODE' }));
   });
 
   it('returns generic 500 + requestId for 5xx HttpException without leaking message', () => {
