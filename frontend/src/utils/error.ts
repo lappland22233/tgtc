@@ -34,6 +34,20 @@ const DOWNLOAD_SCHEDULE_ERROR_CODES = new Set([
   'DOWNLOAD_TASK_EXPIRED',
 ]);
 
+/**
+ * 上传调度业务码：严格小盘模式下「整文件上传通道被上一份文件占用」的排队信号。
+ * 它与磁盘余量无关（后端只做进程内租约判断），因此绝不能被归类为存储空间不足，
+ * 也不能被 client.ts 的全局可用性告警消费——等待与重试由上传层自己负责。
+ */
+export const UPLOAD_DISK_BUDGET_BUSY_CODE = 'UPLOAD_DISK_BUDGET_BUSY';
+
+const UPLOAD_SCHEDULE_ERROR_CODES = new Set<string>([UPLOAD_DISK_BUDGET_BUSY_CODE]);
+
+/** 排队等待间隔的默认值与合法区间（ms），与后端 retryAfterMs 契约一致 */
+const DEFAULT_UPLOAD_BUDGET_RETRY_AFTER_MS = 5000;
+const MIN_UPLOAD_BUDGET_RETRY_AFTER_MS = 1000;
+const MAX_UPLOAD_BUDGET_RETRY_AFTER_MS = 60_000;
+
 /** 下载调度业务码 → 用户可读文案 */
 export const DOWNLOAD_ERROR_MESSAGES: Record<string, string> = {
   DOWNLOAD_QUEUE_FULL: '服务器当前下载任务较多，请稍后重试',
@@ -67,6 +81,19 @@ export function getDownloadErrorMessage(error: unknown): string | undefined {
   return undefined;
 }
 
+/**
+ * 提取业务码：全局过滤器的出参里顶层 `code` 恒为数字 HTTP 状态，业务码只落在 `errorCode`
+ * （见 common/filters/http-exception.filter.ts）；历史响应可能把字符串业务码放在 `code`。
+ * 因此优先取字符串业务码，两者都非字符串时才回退原始 `code`。
+ */
+function pickBusinessCode(
+  data: { code?: string | number; errorCode?: string | number } | undefined,
+): string | number | undefined {
+  if (typeof data?.errorCode === 'string' && data.errorCode) return data.errorCode;
+  if (typeof data?.code === 'string' && data.code) return data.code;
+  return data?.code ?? data?.errorCode;
+}
+
 /** 从 Axios/NestJS 统一错误响应中提取状态、业务码和消息。 */
 export function getApiErrorDetails(error: unknown): ApiErrorDetails {
   const axiosErr = error as {
@@ -79,7 +106,7 @@ export function getApiErrorDetails(error: unknown): ApiErrorDetails {
   const rawMessage = data?.message;
   return {
     status: axiosErr?.response?.status,
-    code: data?.code ?? data?.errorCode,
+    code: pickBusinessCode(data),
     message: Array.isArray(rawMessage) ? rawMessage.join('；') : rawMessage,
   };
 }
@@ -93,6 +120,9 @@ export function classifyServiceAvailabilityError(error: unknown): ServiceAvailab
   const normalizedCode = String(code ?? '').toUpperCase();
   // 下载调度类错误有独立的排队/重试文案，不做通用基础设施故障归类
   if (DOWNLOAD_SCHEDULE_ERROR_CODES.has(normalizedCode)) return null;
+  // 上传调度类错误（严格小盘模式的串行上传名额被占用）同理：其文案常含「磁盘」字样，
+  // 若落进下面的 mentionsStorage 分支会把排队误报成「存储空间不足」。
+  if (UPLOAD_SCHEDULE_ERROR_CODES.has(normalizedCode) || isUploadBudgetBusy(error)) return null;
   const normalizedMessage = (message ?? '').toLowerCase();
   const mentionsStorage = /磁盘|空间不足|存储空间|disk\s*(?:full|space)|no space left|insufficient storage/.test(normalizedMessage);
 
@@ -119,6 +149,103 @@ export function classifyServiceAvailabilityError(error: unknown): ServiceAvailab
   }
 
   return null;
+}
+
+// ---- 上传磁盘预算（严格小盘模式排队）识别 ----
+
+interface BudgetErrorNode {
+  response?: {
+    status?: unknown;
+    data?: { code?: unknown; errorCode?: unknown; retryAfterMs?: unknown };
+    headers?: unknown;
+  };
+  cause?: unknown;
+}
+
+/**
+ * 错误对象及其 cause 链（最多 5 层）。
+ * client.ts 的拦截器会把部分 AxiosError 包装成普通 Error 并保留 cause，
+ * 沿链回溯才能在后端响应被包装后仍识别出排队信号。
+ */
+function collectErrorChain(error: unknown): BudgetErrorNode[] {
+  const chain: BudgetErrorNode[] = [];
+  let current: unknown = error;
+  for (let depth = 0; depth < 5 && current && typeof current === 'object'; depth++) {
+    chain.push(current as BudgetErrorNode);
+    current = (current as BudgetErrorNode).cause;
+  }
+  return chain;
+}
+
+/** 大小写不敏感地读取响应头（兼容普通对象与 AxiosHeaders），取不到返回 undefined。 */
+function readResponseHeader(headers: unknown, name: string): string | undefined {
+  if (!headers || typeof headers !== 'object') return undefined;
+  const record = headers as Record<string, unknown> & { get?: (key: string) => unknown };
+  const direct = record[name];
+  if (typeof direct === 'string' && direct) return direct;
+  if (typeof direct === 'number') return String(direct);
+  const target = name.toLowerCase();
+  for (const key of Object.keys(record)) {
+    if (key.toLowerCase() !== target) continue;
+    const value = record[key];
+    if (typeof value === 'string' && value) return value;
+    if (typeof value === 'number') return String(value);
+  }
+  if (typeof record.get === 'function') {
+    const viaGetter = record.get(target);
+    if (typeof viaGetter === 'string' && viaGetter) return viaGetter;
+  }
+  return undefined;
+}
+
+/**
+ * 单层错误节点是否携带上传排队业务码（响应体 errorCode/code 或 X-Tgtc-Error-Code 头）。
+ * 仅接受 429（或缺省状态，兼容 cause 包装层）：若某 5xx 也带该码，说明是我们的服务端/代理出问题，
+ * 不能当作排队去 5s×N 等待。
+ */
+function isUploadBudgetBusyNode(node: BudgetErrorNode): boolean {
+  const status = node.response?.status;
+  if (status !== undefined && status !== 429) return false;
+  const data = node.response?.data;
+  const bodyCode = typeof data?.errorCode === 'string' && data.errorCode
+    ? data.errorCode
+    : typeof data?.code === 'string' && data.code
+      ? data.code
+      : undefined;
+  if (bodyCode === UPLOAD_DISK_BUDGET_BUSY_CODE) return true;
+  return readResponseHeader(node.response?.headers, 'x-tgtc-error-code') === UPLOAD_DISK_BUDGET_BUSY_CODE;
+}
+
+/**
+ * 当前错误是否表示「服务器正在依次处理另一份大文件，本文件需要排队」。
+ * 后端只把该业务码放在 errorCode（顶层 code 是数字 429），历史写法可能放在 code。
+ */
+export function isUploadBudgetBusy(error: unknown): boolean {
+  return collectErrorChain(error).some(isUploadBudgetBusyNode);
+}
+
+/**
+ * 排队等待间隔（ms）：响应体 retryAfterMs → Retry-After 头 → 默认 5000。
+ * 非排队类错误返回 null，调用方据此回退到常规瞬时错误处理。
+ * 服务端给出的间隔只做上限收敛（夹到 60s）；过小或非法值丢弃并回退默认值，
+ * 避免把明显异常的间隔当作真实排队节奏。
+ */
+export function getUploadBudgetRetryAfterMs(error: unknown): number | null {
+  let busy = false;
+  for (const node of collectErrorChain(error)) {
+    if (!isUploadBudgetBusyNode(node)) continue;
+    busy = true;
+    const bodyRetryAfterMs = Number(node.response?.data?.retryAfterMs);
+    if (Number.isSafeInteger(bodyRetryAfterMs) && bodyRetryAfterMs >= MIN_UPLOAD_BUDGET_RETRY_AFTER_MS) {
+      return Math.min(bodyRetryAfterMs, MAX_UPLOAD_BUDGET_RETRY_AFTER_MS);
+    }
+    const retryAfterSeconds = Number(readResponseHeader(node.response?.headers, 'retry-after'));
+    if (Number.isFinite(retryAfterSeconds) && retryAfterSeconds >= 1) {
+      return Math.min(retryAfterSeconds * 1000, MAX_UPLOAD_BUDGET_RETRY_AFTER_MS);
+    }
+    // 本节点未给出可用间隔（如响应体只有业务码）：继续沿 cause 链寻找更深层的响应
+  }
+  return busy ? DEFAULT_UPLOAD_BUDGET_RETRY_AFTER_MS : null;
 }
 
 /**

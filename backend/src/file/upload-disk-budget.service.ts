@@ -15,6 +15,11 @@ interface UploadDiskLease {
 
 const RECOVERABLE_UPLOAD_STAGES = ['pending', 'uploading', 'remote_committed', 'recoverable'] as const;
 
+/** 租约被占导致的 429：只有持有超过该时长才值得记录（正常排队是秒级）。 */
+const LEASE_BUSY_LOG_MIN_HOLD_MS = 60 * 1000;
+/** 同一租约 key 的阻塞日志限频间隔，避免前端排队轮询把日志刷满。 */
+const LEASE_BUSY_LOG_INTERVAL_MS = 60 * 1000;
+
 /**
  * 无缓存／小盘严格模式的进程内磁盘占用闸门。
  *
@@ -26,6 +31,9 @@ const RECOVERABLE_UPLOAD_STAGES = ['pending', 'uploading', 'remote_committed', '
 export class UploadDiskBudgetService {
   private readonly logger = new Logger(UploadDiskBudgetService.name);
   private activeLease: UploadDiskLease | null = null;
+  /** 阻塞日志限频状态：单槽租约只需记住上一次的 key 与时间，避免长期运行的 Map 增长。 */
+  private lastBusyLogKey: string | null = null;
+  private lastBusyLogAt = 0;
 
   private readonly pendingDir = path.resolve(process.cwd(), 'tmp', 'uploads', 'pending');
   private readonly singleProcess: boolean;
@@ -50,7 +58,7 @@ export class UploadDiskBudgetService {
     if (!Number.isSafeInteger(fileSize) || fileSize <= 0) {
       throw new HttpException('无法为非法文件大小分配上传磁盘预算', HttpStatus.BAD_REQUEST);
     }
-    if (this.activeLease) throw this.createBusyException();
+    if (this.activeLease) this.throwBusyForLease();
 
     let persistedActive: File | null;
     try {
@@ -67,7 +75,7 @@ export class UploadDiskBudgetService {
     }
 
     // await 数据库查询期间可能已有另一请求取得内存租约，重新检查避免竞争放行。
-    if (this.activeLease) throw this.createBusyException();
+    if (this.activeLease) this.throwBusyForLease();
     if (persistedActive) {
       this.logger.warn(
         `严格上传预算等待恢复任务: fileId=${persistedActive.id} version=${persistedActive.uploadVersion}`,
@@ -115,7 +123,7 @@ export class UploadDiskBudgetService {
       }
     }
 
-    if (this.activeLease) throw this.createBusyException();
+    if (this.activeLease) this.throwBusyForLease();
     this.activeLease = {
       key: this.sessionKey(uploadId),
       fileSize,
@@ -139,21 +147,55 @@ export class UploadDiskBudgetService {
     if (this.activeLease?.key === jobKey) this.activeLease.key = this.sessionKey(uploadId);
   }
 
-  releaseSession(uploadId: string): void {
-    this.release(this.sessionKey(uploadId));
+  /** 释放会话租约；返回是否真正命中（key 不匹配或已释放时为 false，幂等）。 */
+  releaseSession(uploadId: string): boolean {
+    return this.release(this.sessionKey(uploadId));
   }
 
-  releaseJob(fileId: string, uploadVersion: number): void {
-    this.release(this.jobKey(fileId, uploadVersion));
+  /** 释放 Worker 任务租约；返回是否真正命中（key 不匹配或已释放时为 false，幂等）。 */
+  releaseJob(fileId: string, uploadVersion: number): boolean {
+    return this.release(this.jobKey(fileId, uploadVersion));
   }
 
   hasActiveLease(): boolean {
     return this.activeLease !== null;
   }
 
-  private release(key: string): void {
-    if (!this.activeLease || this.activeLease.key !== key) return;
+  /** 只读租约快照：供日志与测试定位「谁占着上传通道、占了多久」。 */
+  describeActiveLease(): { key: string; fileSize: number; heldMs: number } | null {
+    if (!this.activeLease) return null;
+    return {
+      key: this.activeLease.key,
+      fileSize: this.activeLease.fileSize,
+      heldMs: Math.max(0, Date.now() - this.activeLease.acquiredAt),
+    };
+  }
+
+  private release(key: string): boolean {
+    if (!this.activeLease || this.activeLease.key !== key) return false;
     this.activeLease = null;
+    return true;
+  }
+
+  /**
+   * 租约被占：按需记录持有者与持有时间后再抛 429。
+   *
+   * 正常排队只有秒级，只有长时间占用才值得告警；同一 key 每 60s 最多一条，
+   * 避免前端 5s 一次的排队轮询把日志刷满。
+   */
+  private throwBusyForLease(): never {
+    const lease = this.describeActiveLease();
+    if (lease && lease.heldMs >= LEASE_BUSY_LOG_MIN_HOLD_MS) {
+      const now = Date.now();
+      if (this.lastBusyLogKey !== lease.key || now - this.lastBusyLogAt >= LEASE_BUSY_LOG_INTERVAL_MS) {
+        this.lastBusyLogKey = lease.key;
+        this.lastBusyLogAt = now;
+        this.logger.warn(
+          `严格上传预算被占用: key=${lease.key}, fileSize=${lease.fileSize}, heldMs=${lease.heldMs}`,
+        );
+      }
+    }
+    throw this.createBusyException();
   }
 
   private sessionKey(uploadId: string): string {
@@ -168,9 +210,11 @@ export class UploadDiskBudgetService {
     return new HttpException(
       {
         statusCode: HttpStatus.TOO_MANY_REQUESTS,
+        // 业务码：全局过滤器与前端错误映射读取该字段（保持与下载资源协调器一致的结构）。
         code: 'UPLOAD_DISK_BUDGET_BUSY',
+        errorCode: 'UPLOAD_DISK_BUDGET_BUSY',
         retryAfterMs: 5000,
-        message: '服务器正在为另一份大文件保留磁盘空间，请保持本页打开后稍候重试',
+        message: '服务器正在依次处理另一份大文件，本文件已自动排队，请保持页面打开',
       },
       HttpStatus.TOO_MANY_REQUESTS,
     );

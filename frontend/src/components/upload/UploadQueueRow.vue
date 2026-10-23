@@ -11,6 +11,7 @@
           <t-tag v-if="entry.status === 'success'" theme="success" size="small" variant="light">成功</t-tag>
           <t-tag v-else-if="entry.status === 'error'" theme="danger" size="small" variant="light">失败</t-tag>
           <t-tag v-else-if="entry.status === 'cancelled'" theme="default" size="small" variant="light">已取消</t-tag>
+          <t-tag v-else-if="entry.status === 'processing' && entry.waitingForSlot" theme="primary" size="small" variant="light">等待服务器空闲</t-tag>
           <t-tag v-else-if="entry.status === 'processing' && (entry.retryCount ?? 0) > 0" theme="warning" size="small" variant="light">重试 {{ entry.retryCount }}/2</t-tag>
           <t-tag v-else-if="entry.status === 'processing'" theme="warning" size="small" variant="light">处理中</t-tag>
           <t-tag v-else theme="primary" size="small" variant="light">{{ entry.progress > 0 ? `${entry.progress}%` : '等待' }}</t-tag>
@@ -20,7 +21,10 @@
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12" /></svg>
       </t-button>
     </div>
-    <div v-if="entry.progress > 0 && entry.status === 'processing'" class="upload-queue-row__progress">
+    <div v-if="entry.status === 'processing' && entry.waitingForSlot" class="upload-queue-row__waiting">
+      服务器正在依次处理上传任务，本文件排队等待中，无需重新上传…
+    </div>
+    <div v-else-if="entry.progress > 0 && entry.status === 'processing'" class="upload-queue-row__progress">
       <t-progress :percentage="entry.progress" size="small" />
       <span>{{ entry.speed }} · 剩余 {{ entry.eta }}</span>
     </div>
@@ -57,5 +61,8 @@ onBeforeUnmount(() => {
 .upload-queue-row__path { margin-top: 2px; font-size: 12px; color: var(--text-tertiary); }
 .upload-queue-row__meta { margin-top: 2px; font-size: 12px; color: var(--text-secondary); }
 .upload-queue-row__progress { margin-top: 6px; display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; font-size: 11px; color: var(--text-secondary); }
+/* 等待行与进度行共用同一行高槽位（行盒高度固定，内容溢出会被裁切），
+   故行高与进度行一致取 1.5，不能比它更高 */
+.upload-queue-row__waiting { margin-top: 6px; font-size: 11px; line-height: 1.5; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .upload-queue-row__error { margin-top: 5px; font-size: 12px; color: var(--error); }
 </style>

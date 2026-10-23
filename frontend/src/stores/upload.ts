@@ -31,6 +31,8 @@ export interface QueueEntry {
   batchId?: string;
   overwriteFileId?: string;
   retryCount?: number;
+  /** 严格小盘模式：服务器正为另一份大文件保留上传名额，本文件排队等待中 */
+  waitingForSlot?: boolean;
 }
 
 interface ProgressSnapshot {
@@ -38,6 +40,7 @@ interface ProgressSnapshot {
   progress: number;
   speed?: string;
   eta?: string;
+  waitingForSlot?: boolean;
 }
 
 const CHUNK_THRESHOLD = 5 * 1024 * 1024;
@@ -188,6 +191,7 @@ export const useUploadStore = defineStore('upload', () => {
       entry.progress = snapshot.progress;
       if (snapshot.speed !== undefined) entry.speed = snapshot.speed;
       if (snapshot.eta !== undefined) entry.eta = snapshot.eta;
+      if (snapshot.waitingForSlot !== undefined) entry.waitingForSlot = snapshot.waitingForSlot;
       if (entry.checkpointTime === 0 && snapshot.loadedBytes > 0) entry.checkpointTime = Date.now();
     }
     pendingProgress.clear();
@@ -266,6 +270,8 @@ export const useUploadStore = defineStore('upload', () => {
 
   function finalizeEntry(entry: QueueEntry) {
     if (!isTerminal(entry.status)) return;
+    // 终态（成功/失败/取消）不再处于服务器排队状态，避免行内残留「等待服务器空闲」。
+    entry.waitingForSlot = false;
     pendingProgress.delete(entry.uid);
     // G10-06：终态条目从 knownFiles 移除其 File 引用，使同一 File 可被重新拖拽上传。
     // （WeakSet 不支持遍历删除，故在置空 file 前显式 delete。）
@@ -289,6 +295,7 @@ export const useUploadStore = defineStore('upload', () => {
         loadedBytes: p.loadedBytes,
         speed: p.speed,
         eta: p.eta,
+        waitingForSlot: p.waitingForSlot === true,
       }),
       controller.signal,
       undefined,
@@ -359,6 +366,8 @@ export const useUploadStore = defineStore('upload', () => {
             entry.speed = '-';
             entry.eta = '-';
             entry.errorReason = undefined;
+            // 条目级重试会重新 init，等待态由新一轮上传自行上报，先清干净避免残留
+            entry.waitingForSlot = false;
             try {
               await abortableBackoff(getRetryDelay(entry.retryCount), controller.signal);
             } catch {
@@ -448,6 +457,7 @@ export const useUploadStore = defineStore('upload', () => {
       folderId,
       tagIds: [...tagIds],
       retryCount: 0,
+      waitingForSlot: false,
     });
   }
 

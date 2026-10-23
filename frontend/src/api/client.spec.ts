@@ -23,6 +23,8 @@ vi.mock('../utils/message', () => ({
 }));
 
 import client, { clearRedirectState, isRedirectInProgress } from './client';
+import MessagePlugin from '../utils/message';
+import { getUploadBudgetRetryAfterMs, isUploadBudgetBusy } from '../utils/error';
 
 function clearCookies() {
   for (const entry of document.cookie.split(';')) {
@@ -48,7 +50,7 @@ function mockAdapter(handler: (config: InternalAxiosRequestConfig) => void = () 
   };
 }
 
-function mockAdapterRejecting(status: number, data: unknown) {
+function mockAdapterRejecting(status: number, data: unknown, contentType = 'application/json') {
   client.defaults.adapter = async (config) => {
     capturedConfig = config as InternalAxiosRequestConfig;
     const error = Object.assign(new Error(`Request failed with status code ${status}`), {
@@ -56,7 +58,7 @@ function mockAdapterRejecting(status: number, data: unknown) {
       config,
       // 必须声明 JSON content-type：拦截器会把非 JSON 的 4xx/5xx 误判为 CDN 错误页文案
       // （Cloudflare HTML 错误页识别路径），真实 axios 响应同样带该头。
-      response: { status, statusText: 'ERR', data, headers: { 'content-type': 'application/json' }, config },
+      response: { status, statusText: 'ERR', data, headers: { 'content-type': contentType }, config },
     });
     throw error;
   };
@@ -179,6 +181,55 @@ describe('api/client 拦截器', () => {
 
       const response = await client.get('/x');
       expect(response.data).toEqual({ raw: true });
+    });
+  });
+
+  describe('严格小盘上传名额 429（UPLOAD_DISK_BUDGET_BUSY）', () => {
+    it('不弹全局磁盘告警，且保留 response 供上传层排队等待', async () => {
+      mockAdapterRejecting(429, {
+        code: 429,
+        errorCode: 'UPLOAD_DISK_BUDGET_BUSY',
+        retryAfterMs: 5000,
+        message: '服务器正在依次处理另一份大文件，本文件已自动排队，请保持页面打开',
+      });
+
+      const error = await client.post('/files/chunk/init', {}).catch((err: unknown) => err);
+
+      // 排队不是基础设施故障：不得出现「存储空间不足」类全局提示
+      expect(vi.mocked(MessagePlugin.error)).not.toHaveBeenCalled();
+      expect((error as { response?: { status?: number } }).response?.status).toBe(429);
+      expect(isUploadBudgetBusy(error)).toBe(true);
+      expect(getUploadBudgetRetryAfterMs(error)).toBe(5000);
+    });
+
+    it('真实 507 磁盘不足仍弹全局告警', async () => {
+      mockAdapterRejecting(507, { code: 507, message: '上传临时磁盘空间不足，请稍后重试' });
+
+      await expect(client.get('/files')).rejects.toThrow('存储空间不足');
+
+      expect(vi.mocked(MessagePlugin.error)).toHaveBeenCalled();
+    });
+
+    it('代理改写 content-type 时仍保留带业务码的排队响应（不得退化为 CDN 裸 Error）', async () => {
+      mockAdapterRejecting(429, {
+        code: 429,
+        errorCode: 'UPLOAD_DISK_BUDGET_BUSY',
+        retryAfterMs: 5000,
+        message: '服务器正在依次处理另一份大文件，本文件已自动排队，请保持页面打开',
+      }, 'text/html');
+
+      const error = await client.post('/files/chunk/init', {}).catch((err: unknown) => err);
+
+      expect(isUploadBudgetBusy(error)).toBe(true);
+      expect(getUploadBudgetRetryAfterMs(error)).toBe(5000);
+      expect((error as Error).message).not.toContain('CDN');
+    });
+
+    it('无业务码的非 JSON 错误页仍按 CDN 代理层文案转换', async () => {
+      // 520 不在可用性归类（507/502/503/410）内，用于验证 CDN 转换分支未被上面的保留逻辑削掉
+      mockAdapterRejecting(520, '<html><body>Unknown Error</body></html>', 'text/html');
+
+      await expect(client.get('/files')).rejects.toThrow('源站暂时不可用');
     });
   });
 });

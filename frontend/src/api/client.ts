@@ -1,6 +1,6 @@
 import axios, { type AxiosInstance, type AxiosError, type InternalAxiosRequestConfig } from 'axios';
 import MessagePlugin from '../utils/message';
-import { classifyServiceAvailabilityError } from '../utils/error';
+import { classifyServiceAvailabilityError, getApiErrorDetails } from '../utils/error';
 import { readCookie, XSRF_COOKIE_NAME, XSRF_HEADER_NAME } from '../utils/xsrf';
 
 // ---- 状态机：防止并发 401 重定向 ----
@@ -175,9 +175,16 @@ client.interceptors.response.use(
       return Promise.reject(Object.assign(new Error(availabilityError.message), { cause: error }));
     }
 
+    // 携带结构化业务码的响应（例如上传排队 429）必须保留原 AxiosError：少数代理会改写
+    // content-type，若被下面的 CDN 分支转成裸 Error，调用方就再也拿不到 response/errorCode，
+    // 排队等待会退化为普通瞬时重试。无业务码的 CDN 错误页仍照旧转换。
+    const structuredCode = getApiErrorDetails(error).code;
+    const hasStructuredCode = (typeof structuredCode === 'string' && structuredCode.length > 0)
+      || !!error.response?.headers?.['x-tgtc-error-code'];
+
     // Cloudflare 代理层错误（413 请求体过大 / 502 网关不可用 / 5xx 源站错误）
     // 检测非 JSON 响应（Cloudflare HTML 错误页）
-    if (status && status >= 400 && error.response?.data) {
+    if (status && status >= 400 && error.response?.data && !hasStructuredCode) {
       const contentType = error.response.headers?.['content-type']?.toString() || '';
       if (!contentType.includes('application/json')) {
         // 注意：此处仅识别 Cloudflare 非 JSON 错误页并给出友好提示，并未实现自动重试，
