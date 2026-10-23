@@ -98,4 +98,65 @@ describe('UploadDiskBudgetService', () => {
     await service.acquireSession('session-b', 1024);
     expect(service.hasActiveLease()).toBe(false);
   });
+
+  it('exposes the lease holder for diagnostics', async () => {
+    const service = createService();
+    expect(service.describeActiveLease()).toBeNull();
+
+    await service.acquireSession('session-a', 2048);
+    const lease = service.describeActiveLease();
+
+    expect(lease?.key).toBe('session:session-a');
+    expect(lease?.fileSize).toBe(2048);
+    expect(lease?.heldMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it('reports whether a release actually matched the held lease', async () => {
+    const service = createService();
+    await service.acquireSession('session-a', 1024);
+
+    // key 不匹配（例如 done 会话的租约已转交 Worker job）时绝不误释放
+    expect(service.releaseSession('session-b')).toBe(false);
+    expect(service.hasActiveLease()).toBe(true);
+    expect(service.releaseSession('session-a')).toBe(true);
+    expect(service.releaseSession('session-a')).toBe(false);
+  });
+
+  it('warns once per minute when a stale lease keeps rejecting new sessions', async () => {
+    const service = createService();
+    const warn = jest.spyOn((service as any).logger, 'warn');
+    await service.acquireSession('session-a', 1024);
+
+    // 正常排队是秒级，持有不足 60s 不告警
+    await expect(service.acquireSession('session-b', 1024)).rejects.toMatchObject({ status: 429 });
+    expect(warn).not.toHaveBeenCalled();
+
+    // 僵尸租约：持有超过 60s 才告警，且同一 key 每 60s 最多一条，避免 5s 轮询刷屏
+    (service as any).activeLease.acquiredAt = Date.now() - 120_000;
+    await expect(service.acquireSession('session-b', 1024)).rejects.toMatchObject({ status: 429 });
+    await expect(service.acquireSession('session-c', 1024)).rejects.toMatchObject({ status: 429 });
+
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0][0])).toContain('session:session-a');
+    warn.mockRestore();
+  });
+
+  it('keeps the 429 contract unchanged when logging a blocking lease', async () => {
+    const service = createService();
+    await service.acquireSession('session-a', 1024);
+    (service as any).activeLease.acquiredAt = Date.now() - 120_000;
+
+    let caught: unknown;
+    try {
+      await service.acquireSession('session-b', 1024);
+    } catch (error) {
+      caught = error;
+    }
+
+    const response = (caught as HttpException).getResponse() as Record<string, unknown>;
+    expect(response.code).toBe('UPLOAD_DISK_BUDGET_BUSY');
+    expect(response.errorCode).toBe('UPLOAD_DISK_BUDGET_BUSY');
+    expect(response.retryAfterMs).toBe(5000);
+    expect(String(response.message)).toBe('服务器正在依次处理另一份大文件，本文件已自动排队，请保持页面打开');
+  });
 });

@@ -1,11 +1,13 @@
 import { BadRequestException, HttpException, HttpStatus } from '@nestjs/common';
 import * as fs from 'fs';
 import { promises as fsp } from 'fs';
+import { tmpdir } from 'os';
 import * as path from 'path';
 
 jest.mock('./file.service', () => ({ FileService: class FileService {} }));
 
 import { ChunkUploadService } from './chunk-upload.service';
+import { UploadDiskBudgetService } from './upload-disk-budget.service';
 
 const MB = 1024 * 1024;
 
@@ -467,5 +469,267 @@ describe('ChunkUploadService session quota', () => {
       expect((service as any).getMergeSemaphoreStats().activeUsers).toBe(0);
       expect((service as any).getMergeSemaphoreStats().trackedRefs).toBe(0);
     });
+  });
+});
+
+// 僵尸会话：init 成功后客户端断连，既无 complete 也无 abort。
+// 旧实现把 mergeStatus='pending' 当作活跃会话永久跳过清理，且过期清理路径不释放
+// UploadDiskBudgetService 的 session 租约，导致严格模式此后所有上传永远 429。
+describe('ChunkUploadService 空闲会话回收', () => {
+  const userId = 'user-reclaim';
+  const fileService = {
+    getMaxFileSize: jest.fn().mockResolvedValue(100 * MB),
+    assertOverwriteTarget: jest.fn().mockResolvedValue(undefined),
+    softDeleteProcessingFile: jest.fn().mockResolvedValue(undefined),
+  };
+  const fileUploadQueue = {
+    add: jest.fn().mockResolvedValue({}),
+    getJob: jest.fn().mockResolvedValue(undefined),
+  };
+  const configService = { get: jest.fn() };
+  const uploadDiskBudget = {
+    isStrictMode: jest.fn().mockReturnValue(true),
+    acquireSession: jest.fn().mockResolvedValue(undefined),
+    transferSessionToJob: jest.fn().mockReturnValue(true),
+    transferJobToSession: jest.fn(),
+    releaseSession: jest.fn().mockReturnValue(true),
+    releaseJob: jest.fn().mockReturnValue(true),
+    describeActiveLease: jest.fn().mockReturnValue(null),
+  };
+  let service: ChunkUploadService;
+  let tempRoot: string;
+
+  const sessions = () => (service as any).sessions as Map<string, any>;
+  const initSession = (fileName = 'file.bin') =>
+    service.init(fileName, MB, 'application/octet-stream', 1, MB, userId);
+  const ageSession = (uploadId: string, minutes: number) => {
+    const session = sessions().get(uploadId);
+    session.lastActivityAt = new Date(Date.now() - minutes * 60 * 1000);
+    return session;
+  };
+
+  beforeEach(async () => {
+    jest.clearAllMocks();
+    // 隔离到临时工作目录，避免每个用例在仓库 tmp/uploads 留下 UUID 空目录。
+    tempRoot = await fsp.mkdtemp(path.join(tmpdir(), 'chunk-reclaim-'));
+    jest.spyOn(process, 'cwd').mockReturnValue(tempRoot);
+    service = new ChunkUploadService(fileService as any, fileUploadQueue as any, configService as any, uploadDiskBudget as any);
+  });
+
+  afterEach(async () => {
+    (service as any).inFlightRequestsBySession?.clear?.();
+    await fsp.rm(tempRoot, { recursive: true, force: true }).catch(() => {});
+    jest.restoreAllMocks();
+  });
+
+  it('pending 会话空闲超过 10 分钟：删除分片目录并释放严格模式租约', async () => {
+    const { uploadId } = await initSession();
+    const dir = (service as any).getChunkDir(uploadId);
+    await fsp.writeFile(path.join(dir, '0'), Buffer.alloc(2048));
+    ageSession(uploadId, 11);
+
+    await expect(service.cleanupExpiredSessions()).resolves.toEqual({ cleaned: 1, releasedLeases: 1 });
+
+    expect(sessions().has(uploadId)).toBe(false);
+    await expect(fsp.stat(dir)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(uploadDiskBudget.releaseSession).toHaveBeenCalledWith(uploadId);
+  });
+
+  it('pending 会话空闲不足 10 分钟：保留会话与租约', async () => {
+    const { uploadId } = await initSession();
+    ageSession(uploadId, 5);
+
+    await expect(service.cleanupExpiredSessions()).resolves.toEqual({ cleaned: 0, releasedLeases: 0 });
+
+    expect(sessions().has(uploadId)).toBe(true);
+    expect(uploadDiskBudget.releaseSession).not.toHaveBeenCalled();
+  });
+
+  it('仍有分片请求体在接收时不回收（落盘后才刷新 lastActivityAt）', async () => {
+    const { uploadId } = await initSession();
+    ageSession(uploadId, 30);
+    (service as any).inFlightRequestsBySession.set(uploadId, 1);
+
+    await expect(service.cleanupExpiredSessions()).resolves.toEqual({ cleaned: 0, releasedLeases: 0 });
+
+    expect(sessions().has(uploadId)).toBe(true);
+    expect(uploadDiskBudget.releaseSession).not.toHaveBeenCalled();
+  });
+
+  it('合并中的会话不受 10 分钟规则影响，超过 35 分钟只告警一次且不删除', async () => {
+    const { uploadId } = await initSession();
+    const session = ageSession(uploadId, 40);
+    session.mergeStatus = 'merging';
+    const warn = jest.spyOn((service as any).logger, 'warn');
+
+    await service.cleanupExpiredSessions();
+    const warnCount = warn.mock.calls.length;
+    await service.cleanupExpiredSessions();
+
+    expect(sessions().has(uploadId)).toBe(true);
+    expect(uploadDiskBudget.releaseSession).not.toHaveBeenCalled();
+    expect(warnCount).toBe(1);
+    expect(warn.mock.calls.length).toBe(1);
+    expect(String(warn.mock.calls[0][0])).toContain('未收敛');
+    warn.mockRestore();
+  });
+
+  it('目录删除失败时回滚 reclaiming、重建目录并保留租约，下一轮再试', async () => {
+    const { uploadId } = await initSession();
+    const dir = (service as any).getChunkDir(uploadId);
+    ageSession(uploadId, 11);
+    const rmSpy = jest.spyOn(fsp, 'rm').mockRejectedValueOnce(new Error('EBUSY'));
+    try {
+      await expect(service.cleanupExpiredSessions()).resolves.toEqual({ cleaned: 0, releasedLeases: 0 });
+    } finally {
+      rmSpy.mockRestore();
+    }
+
+    const session = sessions().get(uploadId);
+    expect(session.reclaiming).toBe(false);
+    expect(session.reclaimFailures).toBe(1);
+    expect(uploadDiskBudget.releaseSession).not.toHaveBeenCalled();
+    // 会话恢复可用（不是永久 404），且目录已重建，续传不会因父目录缺失 500
+    await expect(service.getStatus(uploadId, userId)).resolves.toMatchObject({ mergeStatus: 'pending' });
+    await expect(fsp.stat(dir)).resolves.toBeTruthy();
+  });
+
+  it('并发回收单飞：同一批目录只删一次', async () => {
+    const { uploadId } = await initSession();
+    ageSession(uploadId, 11);
+    const rmSpy = jest.spyOn(fsp, 'rm');
+
+    const [first, second] = await Promise.all([
+      service.cleanupExpiredSessions(),
+      service.cleanupExpiredSessions(),
+    ]);
+
+    expect(rmSpy).toHaveBeenCalledTimes(1);
+    expect(second).toBe(first);
+    expect(first).toEqual({ cleaned: 1, releasedLeases: 1 });
+    rmSpy.mockRestore();
+  });
+
+  it('init 前主动回收：过期会话不再占用配额，且租约在申请前已释放', async () => {
+    const staleIds: string[] = [];
+    for (let i = 0; i < 10; i++) {
+      const { uploadId } = await initSession(`stale-${i}.bin`);
+      staleIds.push(uploadId);
+    }
+    // 全部建好后再统一老化：init 会主动回收，逐条老化会被后续 init 提前清掉。
+    for (const staleId of staleIds) ageSession(staleId, 11);
+    uploadDiskBudget.releaseSession.mockClear();
+    uploadDiskBudget.acquireSession.mockClear();
+
+    // 不做主动回收时这里会以「上传会话过多」拒绝
+    const { uploadId: freshId } = await initSession('fresh.bin');
+
+    for (const staleId of staleIds) {
+      expect(sessions().has(staleId)).toBe(false);
+      expect(uploadDiskBudget.releaseSession).toHaveBeenCalledWith(staleId);
+    }
+    expect(sessions().has(freshId)).toBe(true);
+    // 先释放旧租约，再为新会话申请，严格模式不会在同一份闭包内自我阻塞
+    const releaseOrder = uploadDiskBudget.releaseSession.mock.invocationCallOrder[0];
+    const acquireOrder = uploadDiskBudget.acquireSession.mock.invocationCallOrder[0];
+    expect(releaseOrder).toBeLessThan(acquireOrder);
+  });
+
+  it('缺少 lastActivityAt 的历史/注入条目不会被误删', async () => {
+    sessions().set('legacy-session', { uploadedBy: userId, mergeStatus: 'pending' });
+
+    await expect(service.cleanupExpiredSessions()).resolves.toEqual({ cleaned: 0, releasedLeases: 0 });
+
+    expect(sessions().has('legacy-session')).toBe(true);
+  });
+
+  it('回收中的会话对所有入口一律按过期处理，避免与目录删除竞态', async () => {
+    const { uploadId } = await initSession();
+    sessions().get(uploadId).reclaiming = true;
+
+    await expect(service.getStatus(uploadId, userId)).rejects.toThrow('上传会话不存在或已过期');
+    await expect(service.abort(uploadId, userId)).resolves.toBeUndefined();
+    expect(() => service.triggerMerge(uploadId, userId, jest.fn())).toThrow('上传会话不存在或已过期');
+  });
+
+  it('回收异常不阻断 init，且单飞状态不会卡死', async () => {
+    const spy = jest
+      .spyOn(service as any, 'doReclaimExpiredSessions')
+      .mockRejectedValueOnce(new Error('scan failed'));
+
+    await expect(initSession('tolerant.bin')).resolves.toEqual({ uploadId: expect.any(String) });
+    expect(spy).toHaveBeenCalled();
+    expect((service as any).reclaimInFlight).toBeNull();
+    await expect(initSession('tolerant-2.bin')).resolves.toEqual({ uploadId: expect.any(String) });
+  });
+
+  it('done 会话的 job 租约不被虚报释放：clean 成功但 releasedLeases=0', async () => {
+    const { uploadId } = await initSession();
+    ageSession(uploadId, 11).mergeStatus = 'done';
+    // done 会话的租约已转交 Worker，releaseSession 按 key 匹配返回 false
+    uploadDiskBudget.releaseSession.mockReturnValueOnce(false);
+
+    await expect(service.cleanupExpiredSessions()).resolves.toEqual({ cleaned: 1, releasedLeases: 0 });
+
+    expect(sessions().has(uploadId)).toBe(false);
+    uploadDiskBudget.releaseSession.mockReturnValue(true);
+  });
+
+  it('孤儿对账：租约指向已不存在的会话时直接释放', async () => {
+    await initSession();
+    uploadDiskBudget.describeActiveLease.mockReturnValue({
+      key: 'session:99999999-9999-4999-8999-999999999999',
+      fileSize: 1024,
+      heldMs: 120_000,
+    });
+
+    await expect(service.cleanupExpiredSessions()).resolves.toEqual({ cleaned: 0, releasedLeases: 1 });
+
+    expect(uploadDiskBudget.releaseSession).toHaveBeenCalledWith('99999999-9999-4999-8999-999999999999');
+    uploadDiskBudget.describeActiveLease.mockReturnValue(null);
+  });
+
+  it('孤儿对账不碰现存会话的租约与 job: 租约', async () => {
+    const { uploadId } = await initSession();
+
+    uploadDiskBudget.describeActiveLease.mockReturnValue({ key: `session:${uploadId}`, fileSize: 1024, heldMs: 120_000 });
+    await expect(service.cleanupExpiredSessions()).resolves.toEqual({ cleaned: 0, releasedLeases: 0 });
+
+    uploadDiskBudget.describeActiveLease.mockReturnValue({ key: 'job:file-1:1', fileSize: 1024, heldMs: 120_000 });
+    await expect(service.cleanupExpiredSessions()).resolves.toEqual({ cleaned: 0, releasedLeases: 0 });
+
+    expect(uploadDiskBudget.releaseSession).not.toHaveBeenCalled();
+    uploadDiskBudget.describeActiveLease.mockReturnValue(null);
+  });
+
+  it('联调真实 UploadDiskBudgetService：僵尸会话不再阻塞下一次 init', async () => {
+    const repository = { findOne: jest.fn().mockResolvedValue(null) };
+    const budget = new UploadDiskBudgetService(
+      repository as any,
+      { isNoCacheMode: () => true } as any,
+      { get: () => undefined } as any,
+    );
+    const realService = new ChunkUploadService(
+      fileService as any,
+      fileUploadQueue as any,
+      configService as any,
+      budget,
+    );
+
+    const { uploadId: zombieId } = await realService.init('zombie.mp4', MB, 'video/mp4', 1, MB, userId);
+    expect(budget.describeActiveLease()?.key).toBe(`session:${zombieId}`);
+    (realService as any).sessions.get(zombieId).lastActivityAt = new Date(Date.now() - 11 * 60 * 1000);
+
+    try {
+      const { uploadId: freshId } = await realService.init('fresh.mp4', MB, 'video/mp4', 1, MB, userId);
+
+      expect((realService as any).sessions.has(zombieId)).toBe(false);
+      expect(budget.describeActiveLease()?.key).toBe(`session:${freshId}`);
+    } finally {
+      const lease = budget.describeActiveLease();
+      if (lease?.key.startsWith('session:')) {
+        budget.releaseSession(lease.key.slice('session:'.length));
+      }
+    }
   });
 });

@@ -10,7 +10,11 @@ import { createWriteStream, createReadStream, WriteStream } from 'fs';
 import { pipeline } from 'stream';
 import { promisify } from 'util';
 import { v4 as uuidv4 } from 'uuid';
-import { CHUNK_CLEANUP_DELAY_MS, CHUNK_SESSION_MAX_IDLE_MS } from '../common/constants/durations';
+import {
+  CHUNK_CLEANUP_DELAY_MS,
+  CHUNK_SESSION_MAX_IDLE_MS,
+  CHUNK_SESSION_PENDING_MAX_IDLE_MS,
+} from '../common/constants/durations';
 import { QUEUE_NAMES } from '../jobs/bull-queue.module';
 import { FileService } from './file.service';
 import { UploadDiskBudgetService } from './upload-disk-budget.service';
@@ -46,6 +50,12 @@ interface ChunkSession {
   mergeResult?: { id: string; originalName: string };
   /** 合并错误信息 */
   mergeError?: string;
+  /** 合并态长期未收敛的一次性告警标记，避免每轮回收重复刷日志 */
+  mergeStuckWarned?: boolean;
+  /** 回收中：置位后所有会话入口按「已过期」处理，避免与 complete/分片请求竞态 */
+  reclaiming?: boolean;
+  /** 连续回收失败次数（目录删除失败时累加），用于升级告警 */
+  reclaimFailures?: number;
   mergeAbortController?: AbortController;
   mergePromise?: Promise<void>;
 }
@@ -83,6 +93,8 @@ class MergeSemaphore {
 export class ChunkUploadService implements OnModuleInit {
   private readonly logger = new Logger(ChunkUploadService.name);
   private readonly sessions = new Map<string, ChunkSession>();
+  /** 回收单飞：init 重试轮询与定时任务共用同一次回收，避免重复删除同一批目录。 */
+  private reclaimInFlight: Promise<{ cleaned: number; releasedLeases: number }> | null = null;
   private readonly baseDir: string;
   private readonly incomingDir: string;
   private readonly maxConcurrentRequestsPerUser: number;
@@ -152,8 +164,10 @@ export class ChunkUploadService implements OnModuleInit {
 
   /** 每用户最大并发会话数 */
   private static readonly MAX_SESSIONS_PER_USER = 10;
-  /** 会话最大空闲时间 (ms) — 超过此时间无活动则清理 */
-  private static readonly SESSION_MAX_IDLE = CHUNK_SESSION_MAX_IDLE_MS;
+  /** 合并/入队中会话的滞留告警阈值，必须大于合并超时；达到后只告警不删除 */
+  private static readonly MERGE_STUCK_WARN = CHUNK_SESSION_MAX_IDLE_MS;
+  /** pending 会话（init 后未合并）的空闲上限，超时即回收并释放严格模式磁盘租约 */
+  private static readonly SESSION_PENDING_MAX_IDLE = CHUNK_SESSION_PENDING_MAX_IDLE_MS;
   private static readonly MERGE_TIMEOUT_MS = 30 * 60 * 1000;
   private static readonly MERGE_ABORT_GRACE_MS = 5000;
 
@@ -300,6 +314,15 @@ export class ChunkUploadService implements OnModuleInit {
       } catch (err) {
         throw new BadRequestException(`覆盖目标无效: ${(err as Error).message}`);
       }
+    }
+
+    // 主动回收：客户端断连后既不 complete 也不 abort 的会话会同时占住配额名额与严格模式
+    // 磁盘租约（后者会让所有新上传永远 429）。必须先于配额检查与租约申请收敛，使租约到期
+    // 后的下一次重试即可成功；维护逻辑自身的失败绝不能阻断本次上传。
+    try {
+      await this.reclaimExpiredSessions();
+    } catch (error) {
+      this.logger.warn(`[分片上传] 初始化前回收过期会话失败: ${(error as Error).message}`);
     }
 
     // 仅活动状态占用配额。终态会话会短期保留供客户端查询，但不能阻塞后续批量上传。
@@ -508,6 +531,8 @@ export class ChunkUploadService implements OnModuleInit {
 
     session.lastActivityAt = new Date();
     session.mergeStatus = 'merging';
+    // 重新进入合并即重置滞留告警，避免一次卡死后永久静音。
+    session.mergeStuckWarned = false;
     session.mergeAbortController = new AbortController();
 
     // G3-04：合并受全局 + 用户级信号量约束，防止多账号并发大文件合并造成 OOM/磁盘放大。
@@ -921,6 +946,15 @@ export class ChunkUploadService implements OnModuleInit {
       || session.mergeStatus === 'uploading';
   }
 
+  /**
+   * 合并/入队中：有真正的长任务在跑，不能按 pending 的 10 分钟规则回收。
+   * 这两态由 MERGE_TIMEOUT_MS（30min）兜底，最终会落 error 并释放租约；
+   * uploading 时租约已转交 Worker job，不构成会话租约泄漏。
+   */
+  private isMergeInFlight(session: ChunkSession): boolean {
+    return session.mergeStatus === 'merging' || session.mergeStatus === 'uploading';
+  }
+
   /** 延迟清理会话查询状态；错误会话的分片与严格预算在此收敛。 */
   private scheduleCleanup(uploadId: string): void {
     setTimeout(() => {
@@ -938,9 +972,11 @@ export class ChunkUploadService implements OnModuleInit {
     const session = this.sessions.get(uploadId);
     if (!session) return; // 已清理，幂等
 
+    // 归属校验先于回收短路，避免非属主从「回收中直接返回」推断出 uploadId 存在。
     if (session.uploadedBy !== userId) {
       throw new ForbiddenException('无权操作此上传会话');
     }
+    if (session.reclaiming) return; // 已进入回收，幂等
 
     await this.cancelMerge(session);
 
@@ -998,26 +1034,166 @@ export class ChunkUploadService implements OnModuleInit {
     return sourceRemoved;
   }
 
-  /** 定时清理空闲过久的会话（基于 lastActivityAt） */
-  @Cron(CronExpression.EVERY_HOUR)
-  async cleanupExpiredSessions(): Promise<void> {
-    const now = Date.now();
+  /**
+   * 兜底回收：主恢复路径是 init 前的主动回收；此处保证长时间没有新上传时也会收敛。
+   *
+   * 10 分钟一次只做内存遍历，仅在存在过期会话时才发生文件系统操作。
+   */
+  @Cron(CronExpression.EVERY_10_MINUTES)
+  async cleanupExpiredSessions(): Promise<{ cleaned: number; releasedLeases: number }> {
+    return this.reclaimExpiredSessions();
+  }
+
+  /**
+   * 回收入口：init 重试风暴（前端每 5s 轮询）共用同一次回收，避免并发删除同一批目录。
+   */
+  private reclaimExpiredSessions(
+    now = Date.now(),
+  ): Promise<{ cleaned: number; releasedLeases: number }> {
+    if (this.reclaimInFlight) return this.reclaimInFlight;
+    const task = this.doReclaimExpiredSessions(now);
+    this.reclaimInFlight = task;
+    void task
+      .finally(() => {
+        if (this.reclaimInFlight === task) this.reclaimInFlight = null;
+      })
+      .catch(() => {});
+    return task;
+  }
+
+  /**
+   * 回收空闲过期会话：先删分片目录、再释放会话租约。
+   *
+   * 顺序不可交换：只有确认磁盘上不再有该会话的残留，才能让严格模式放行下一份大文件；
+   * 目录删除失败时保留会话与租约留待下一轮重试，绝不允许「放行新上传但旧数据仍占盘」。
+   *
+   * 僵尸会话（init 成功后客户端断连，既无 complete 也无 abort）会永久占住
+   * UploadDiskBudgetService 的 session 租约，进而让所有新上传返回 429，因此 pending
+   * 会话空闲超过 10 分钟即回收；合并/入队中会话不按空闲时间删除（见 isMergeInFlight）。
+   */
+  private async doReclaimExpiredSessions(
+    now = Date.now(),
+  ): Promise<{ cleaned: number; releasedLeases: number }> {
     let cleaned = 0;
-    for (const [uploadId, session] of this.sessions) {
-      // G3-01：跳过进行中的活跃会话（pending/merging/uploading），
-      // 避免慢合并（最长 MERGE_TIMEOUT=30min）被本清理任务按 lastActivityAt 误中断。
-      if (this.isActiveSession(session)) continue;
-      if (now - session.lastActivityAt.getTime() > ChunkUploadService.SESSION_MAX_IDLE) {
-        await this.cancelMerge(session);
-        this.sessions.delete(uploadId);
-        const dir = this.getChunkDir(uploadId);
-        await fsp.rm(dir, { recursive: true, force: true }).catch(() => {});
-        cleaned++;
+    let releasedLeases = 0;
+
+    // 快照迭代：await 期间 Map 可能因 abort/合并收尾变化，删除前逐条复核。
+    for (const [uploadId, session] of [...this.sessions]) {
+      if (this.sessions.get(uploadId) !== session) continue;
+
+      // 缺少合法活动时间的条目无法判断空闲（测试注入或历史数据），保守保留。
+      const lastActivityAt = session.lastActivityAt?.getTime?.();
+      if (typeof lastActivityAt !== 'number' || !Number.isFinite(lastActivityAt)) continue;
+
+      const idleMs = now - lastActivityAt;
+      const mergeInFlight = this.isMergeInFlight(session);
+      const threshold = mergeInFlight
+        ? ChunkUploadService.MERGE_STUCK_WARN
+        : ChunkUploadService.SESSION_PENDING_MAX_IDLE;
+      if (idleMs <= threshold) continue;
+
+      if (mergeInFlight) {
+        // G3-01：不按空闲时间强删正在合并/入队的会话，避免写盘中途被删目录；
+        // 其收敛由 withDeadline(MERGE_TIMEOUT_MS) 保证。超过阈值只提示一次。
+        if (!session.mergeStuckWarned) {
+          session.mergeStuckWarned = true;
+          this.logger.warn(
+            `[分片上传] 会话 ${uploadId} 处于 ${session.mergeStatus} 已 ${(idleMs / 60000).toFixed(1)} 分钟未收敛，`
+            + '保留至合并超时收尾',
+          );
+        }
+        continue;
       }
+
+      // 仍有分片请求体在接收：lastActivityAt 要等分片落盘后才刷新，此刻不能当作空闲。
+      if ((this.inFlightRequestsBySession.get(uploadId) ?? 0) > 0) continue;
+
+      // 路径解析必须在置位 reclaiming 之前完成：一旦抛错，置位后的会话将永久 404 且永不释放租约。
+      const dir = this.getChunkDir(uploadId);
+
+      // 与上面的判定在同一同步片段内置位：此后 getSession() 一律 404，
+      // complete/分片/status/abort 都无法在删除目录期间插入。
+      session.reclaiming = true;
+      await this.cancelMerge(session).catch(() => {});
+
+      // 目录统计只为日志；重试轮次不再重复 O(分片数) 次 stat。
+      const chunkBytes = session.reclaimFailures ? 0 : await this.measureDirectoryBytes(dir);
+      try {
+        // force: 目录已不存在也视为删除成功，避免残留会话条目永远清不掉。
+        await fsp.rm(dir, { recursive: true, force: true });
+      } catch (error) {
+        const failures = (session.reclaimFailures ?? 0) + 1;
+        session.reclaimFailures = failures;
+        session.reclaiming = false;
+        // 递归删除可能已删掉部分分片，重建目录让会话说「可续传」而非后续 rename 触发 500。
+        await fsp.mkdir(dir, { recursive: true }).catch(() => {});
+        // 失败会被每一次排队 init（约 5s 一次）重试，首轮用 WARN、之后按次数升级，避免刷 ERROR。
+        if (failures === 1) {
+          this.logger.warn(
+            `[分片上传] 回收过期会话 ${uploadId} 失败（连续第 ${failures} 次），保留会话与磁盘租约待下一轮重试: ${(error as Error).message}`,
+          );
+        } else if (failures === 6 || failures % 20 === 0) {
+          this.logger.error(
+            `[分片上传] 会话 ${uploadId} 已连续 ${failures} 次回收失败，严格模式上传通道可能持续返回 429；`
+            + `请检查 ${dir} 是否被占用或权限不足: ${(error as Error).message}`,
+          );
+        }
+        continue;
+      }
+
+      this.sessions.delete(uploadId);
+      // 释放按 key 精确匹配：done 会话的租约已转交 Worker job，绝不会被这里误释放。
+      const leaseReleased = session.strictDiskLease
+        ? this.uploadDiskBudget?.releaseSession(uploadId) === true
+        : false;
+      if (leaseReleased) releasedLeases++;
+      cleaned++;
+      this.logger.warn(
+        `[分片上传] 回收空闲过期会话 uploadId=${uploadId} user=${session.uploadedBy} `
+        + `status=${session.mergeStatus} idleMin=${(idleMs / 60000).toFixed(1)} `
+        + `chunkBytes=${chunkBytes} leaseReleased=${leaseReleased} dir=${dir}`,
+      );
     }
+
+    // 兜底对账：租约指向的会话已不存在（历史竞态或异常顺序）时直接释放，避免同类僵尸租约。
+    releasedLeases += this.releaseOrphanSessionLease();
+
     if (cleaned > 0) {
-      this.logger.log(`[分片上传] 清理 ${cleaned} 个空闲过期会话`);
+      this.logger.log(`[分片上传] 回收 ${cleaned} 个空闲过期会话，释放磁盘租约 ${releasedLeases} 个`);
     }
+    return { cleaned, releasedLeases };
+  }
+
+  /**
+   * 释放「租约还在、会话已不在 Map」的孤儿 session 租约。
+   * 只处理 `session:` 前缀；`job:` 租约属于 Worker 生命周期，不能在此猜测释放。
+   */
+  private releaseOrphanSessionLease(): number {
+    const lease = this.uploadDiskBudget?.describeActiveLease?.();
+    if (!lease || !lease.key.startsWith('session:')) return 0;
+    // 刚申请的租约不下结论：acquireSession 与 sessions.set 之间不允许有 await（init 约定），
+    // 这条时间守卫让后续有人插入 await 时也不会把新会话的租约误判为孤儿。
+    if (lease.heldMs < 5_000) return 0;
+    const leaseUploadId = lease.key.slice('session:'.length);
+    if (this.sessions.has(leaseUploadId)) return 0;
+    const released = this.uploadDiskBudget?.releaseSession(leaseUploadId) === true;
+    if (released) {
+      this.logger.warn(
+        `[分片上传] 释放无对应会话的孤儿磁盘租约 key=${lease.key} heldMs=${lease.heldMs}`,
+      );
+    }
+    return released ? 1 : 0;
+  }
+
+  /** 分片目录占用字节数（best-effort，仅用于回收日志；目录为扁平结构）。 */
+  private async measureDirectoryBytes(dir: string): Promise<number> {
+    const entries = await fsp.readdir(dir).catch(() => [] as string[]);
+    let total = 0;
+    for (const name of entries) {
+      const stat = await fsp.stat(path.join(dir, name)).catch(() => undefined);
+      if (stat?.isFile()) total += stat.size;
+    }
+    return total;
   }
 
   /** 获取会话并校验归属 */
@@ -1028,7 +1204,8 @@ export class ChunkUploadService implements OnModuleInit {
     }
 
     const session = this.sessions.get(uploadId);
-    if (!session) {
+    // 回收中的会话按已过期处理：否则删除目录期间到达的 complete/分片请求会与回收互相破坏。
+    if (!session || session.reclaiming) {
       throw new NotFoundException('上传会话不存在或已过期');
     }
 
