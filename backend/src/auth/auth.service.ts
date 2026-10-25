@@ -498,6 +498,16 @@ export class AuthService {
   }
 
   protected async validateVerificationCode(email: string, code: string, type: string): Promise<void> {
+    // 准入必须在验证码匹配前完成；否则锁定期间的每次猜测仍能命中并消费验证码。
+    const codeLimitKey = `code:${email}:${type}`;
+    const codeMaxErrors = await this.getCodeMaxErrors();
+    // checkAndIncrement 在达到阈值时拒绝，+1 允许恰好 codeMaxErrors 次尝试。
+    const admission = await this.rateLimitService.checkAndIncrement(
+      codeLimitKey, 'code_error', codeMaxErrors + 1, 5 * 60 * 1000, 10 * 60 * 1000,
+    );
+    if (!admission.allowed) {
+      throw new BadRequestException(`验证码错误次数过多，请 ${admission.waitMinutes} 分钟后重试`);
+    }
     const now = new Date();
     const codeHash = this.hashCode(code);
 
@@ -514,21 +524,10 @@ export class AuthService {
       .execute();
 
     if (!result.affected || result.affected === 0) {
-      // 验证码无效时才进行限流检查（避免攻击者耗尽正常用户配额）
-      const codeLimitKey = `code:${email}:${type}`;
-      const codeMaxErrors = await this.getCodeMaxErrors();
-      const limitResult = await this.rateLimitService.checkAndIncrement(
-        codeLimitKey, 'code_error',
-        codeMaxErrors, 5 * 60 * 1000, 10 * 60 * 1000,
-      );
-      if (!limitResult.allowed) {
-        throw new BadRequestException(`验证码错误次数过多，请 ${limitResult.waitMinutes} 分钟后重试`);
-      }
       throw new BadRequestException('验证码无效或已过期');
     }
 
     // 验证成功，清除错误计数
-    const codeLimitKey = `code:${email}:${type}`;
     await this.rateLimitService.reset(codeLimitKey);
   }
 

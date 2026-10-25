@@ -3,10 +3,11 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, TreeRepository, Not, IsNull, In } from 'typeorm';
 import { Folder } from '../common/entities/folder.entity';
 import { File } from '../common/entities/file.entity';
+import { TelegramFileCopy } from '../common/entities/telegram-file-copy.entity';
 import { AuditService } from '../common/services/audit.service';
 import { AuditAction } from '../common/entities/audit-log.entity';
 import { CreateFolderDto, RenameFolderDto, MoveFolderDto, MoveFileDto, RenameFileDto, CopyFileDto } from './folder.dto';
-import { databaseCast, databaseForUpdate, databaseQuery, getDatabaseType, isDatabaseUniqueViolation } from '../database/database-types';
+import { databaseCast, databaseForUpdate, databasePessimisticWriteLock, databaseQuery, getDatabaseType, isDatabaseUniqueViolation } from '../database/database-types';
 import { DirectoryNamespaceService } from '../common/services/directory-namespace.service';
 
 const SOFT_DELETE_GRACE_DAYS = 7;
@@ -594,6 +595,10 @@ export class FolderService {
       size: source.size,
       telegramFileId: source.telegramFileId,
       telegramFilePath: source.telegramFilePath,
+      telegramSourceAccountId: source.telegramSourceAccountId,
+      telegramFileUniqueId: source.telegramFileUniqueId,
+      telegramChatId: source.telegramChatId,
+      telegramMessageId: source.telegramMessageId,
       thumbnailPath: source.thumbnailPath,
       folderId: dto.folderId ?? null,
       accessType: source.accessType,
@@ -608,7 +613,24 @@ export class FolderService {
     });
     // v1.2.6：副本记录与名称占用同事务（副本名已按跨表命名空间探测，并发时由唯一索引兜底）
     const saved = await this.fileRepo.manager.transaction(async (manager) => {
+      const current = await manager.getRepository(File).findOne({
+        where: { id: source.id, uploaderId: ownerId, isDeleted: false },
+        ...databasePessimisticWriteLock(),
+      });
+      if (!current || current.status !== 'ready' || current.uploadVersion !== source.uploadVersion) {
+        throw new ConflictException('源文件已变化，请重试复制');
+      }
       const created = await manager.getRepository(File).save(copy);
+      // 新逻辑文件沿用每个 Bot 自己的 file_id，保留已有副本的负载均衡/故障切换能力。
+      const copies = manager.getRepository(TelegramFileCopy);
+      const ready = await copies.find({ where: { ownerType: 'file', ownerId: source.id, status: 'ready' } });
+      if (ready.length) {
+        await copies.insert(ready.map((row) => ({
+          ownerType: 'file' as const, ownerId: created.id, accountId: row.accountId,
+          telegramFileId: row.telegramFileId, chatId: row.chatId, messageId: row.messageId,
+          fileSize: row.fileSize, source: row.source, status: 'ready' as const,
+        })));
+      }
       await this.namespace.acquire(manager, {
         ownerId,
         folderId: dto.folderId ?? null,

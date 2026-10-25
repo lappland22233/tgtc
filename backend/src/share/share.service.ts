@@ -320,7 +320,7 @@ export class ShareService {
     const link = await this.shareLinkRepo.findOne({ where: { token, isDeleted: false } });
     if (!link) throw new NotFoundException('分享不存在');
 
-    await this.assertShareUsable(link);
+    await this.assertShareUsable(link, true);
 
     // 严格模式：密码校验
     if (link.password) {
@@ -372,7 +372,7 @@ export class ShareService {
   ) {
     const link = await this.shareLinkRepo.findOne({ where: { id: shareId, isDeleted: false } });
     if (!link) throw new NotFoundException('分享不存在');
-    await this.assertShareUsable(link);
+    await this.assertShareUsable(link, true);
     await this.folderBrowse.assertFileInShare(link, fileId);
     const file = await this.fileRepo.findOne({ where: { id: fileId, isDeleted: false } });
     if (!file || file.uploadVersion !== uploadVersion) {
@@ -595,7 +595,7 @@ export class ShareService {
    *
    * 过期/耗尽会同步更新 status 字段（弱一致，可接受）。
    */
-  private async assertShareUsable(link: ShareLink): Promise<void> {
+  private async assertShareUsable(link: ShareLink, allowExistingPreview = false): Promise<void> {
     if (link.isDeleted || link.status === ShareLinkStatus.DISABLED) {
       throw new NotFoundException('分享已取消或不可用');
     }
@@ -615,7 +615,7 @@ export class ShareService {
     // 次数耗尽的读侧快速拦截（仅用于下载等不递增计数的路径）。
     // 真正的原子强制在 tryIncrementAccessCount 中完成；此处只读不写，
     // 即便并发下偶发漏判，也会由递增路径的原子 UPDATE 兜底，不构成超发。
-    if (link.maxAccessCount >= 0 && link.currentAccessCount >= link.maxAccessCount) {
+    if (!allowExistingPreview && link.maxAccessCount >= 0 && link.currentAccessCount >= link.maxAccessCount) {
       if (link.status !== ShareLinkStatus.EXHAUSTED) {
         link.status = ShareLinkStatus.EXHAUSTED;
         await this.shareLinkRepo.save(link).catch(() => {});
