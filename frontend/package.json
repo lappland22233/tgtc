@@ -1,6 +1,6 @@
 {
   "name": "file-distribution-system-frontend",
-  "version": "1.6.2",
+  "version": "1.6.3",
   "private": true,
   "type": "module",
   "scripts": {
@@ -12,15 +12,16 @@
     "typecheck": "vue-tsc --noEmit",
     "lint": "vue-tsc --noEmit",
     "check:bundle": "node scripts/check-bundle-size.mjs",
-    "check:bundle:update": "node scripts/check-bundle-size.mjs --write"
+    "check:bundle:update": "node scripts/check-bundle-size.mjs --write",
+    "check:ci": "npm ls --all && npm audit --omit=dev --audit-level=high && npm run typecheck && npm run build && npm run check:bundle && npm run test:cov"
   },
   "dependencies": {
     "axios": "1.20.0",
     "echarts": "^6.1.0",
     "pinia": "^2.1.7",
     "tdesign-icons-vue-next": "^0.2.0",
-    "tdesign-vue-next": "1.20.5",
-    "vue": "3.5.41",
+    "tdesign-vue-next": "1.20.10",
+    "vue": "3.5.44",
     "vue-router": "^4.2.5"
   },
   "devDependencies": {
@@ -33,5 +34,9 @@
     "vite": "6.1.0",
     "vitest": "3.2.4",
     "vue-tsc": "2.2.12"
+  },
+  "overrides": {
+    "follow-redirects": "1.16.1",
+    "source-map-js": "1.2.2"
   }
 }

@@ -45,6 +45,14 @@ frontend/src/
 
 ## 常用命令
 
+提交前分别在 `backend`、`frontend` 执行 `npm ci` 和 `npm run check:ci`。GitHub Actions 调用相同的 `check:ci` 脚本，检查依赖树、生产依赖审计（high/critical 阻断）、类型、构建及覆盖率；后端还执行 SQLite 和真实 Redis 队列门禁，前端还执行产物体积门禁。后端需先启动测试用 Redis（默认 127.0.0.1:6379，数据库 15；可用 REDIS_HOST、REDIS_PORT、REDIS_PASSWORD、REDIS_TEST_DB 覆盖），测试仅操作本次生成的唯一队列，不清空 Redis 数据库。不要只用 `npm test` 代替该命令，也不要用 `npm audit fix --force` 绕过兼容性验证。
+
+覆盖率下限（语句/分支/函数/行）：后端为 60%/45%/55%/60%，前端为 40%/70%/50%/40%。后端在原先四项 30% 基础上提高要求，前端从仅报告覆盖率改为阻断退化。
+
+PostgreSQL 专项需要独立测试服务：设置 `DB_TYPE=postgres` 及 `DB_HOST`、`DB_PORT`、`DB_USERNAME`、`DB_PASSWORD`、`DB_DATABASE`，执行 `npm run migration:run`、检查无待执行迁移、再次执行确认幂等，然后执行 `npm run test:integration:pg`。测试账号需要创建/删除隔离测试数据库的权限；业务回归本身只写入按次创建的隔离库。该命令同时执行 SQLite 与 PostgreSQL 的安全审查回归，不能用跳过 PG 的普通测试运行替代。
+
+原生和发行检查仍是独立 CI 作业：`scripts/release/tests/*.test.sh`、ShellCheck、CMake/CTest 和 Linux ZIP 构建验签。前后端质量检查通过不代表这些平台相关作业已执行。覆盖率报告输出到各组件的 `coverage/`，CI 保留报告供评审。
+
 ### 后端
 
 ```bash

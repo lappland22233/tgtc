@@ -42,6 +42,6 @@ import { TurnstileService } from '../common/services/turnstile.service';
   ],
   controllers: [AuthController],
   providers: [AuthService, JwtStrategy, TurnstileService],
-  exports: [AuthService, JwtModule],
+  exports: [AuthService, JwtModule, JwtStrategy],
 })
 export class AuthModule {}
