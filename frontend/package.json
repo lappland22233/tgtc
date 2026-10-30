@@ -20,7 +20,7 @@
     "pinia": "^2.1.7",
     "tdesign-icons-vue-next": "^0.2.0",
     "tdesign-vue-next": "1.20.5",
-    "vue": "3.5.41",
+    "vue": "3.5.44",
     "vue-router": "^4.2.5"
   },
   "devDependencies": {
