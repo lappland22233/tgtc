@@ -1,6 +1,7 @@
 import { ref } from 'vue';
 import type { AxiosResponse } from 'axios';
 import api from '../api/client';
+import { getUploadBudgetRetryAfterMs, isUploadBudgetBusy } from '../utils/error';
 import { uploadScheduler } from '../utils/upload-scheduler';
 import { classifyUploadError, createMergeBusinessError } from '../utils/upload-retry';
 
@@ -12,6 +13,8 @@ export interface ChunkUploadProgress {
   speed: string;
   eta: string;
   retrying?: boolean;
+  /** 严格小盘模式：正在等待服务器释放串行上传名额（排队中，非故障） */
+  waitingForSlot?: boolean;
 }
 
 export interface ChunkUploadResult {
@@ -46,34 +49,14 @@ const COMPLETE_TIMEOUT = 30 * 1000;
 
 /** 常规网络／代理故障最大重试次数 */
 const MAX_RETRIES = 3;
-/** 严格小盘模式等待服务器磁盘名额的最大次数（5 秒间隔，最多约 30 分钟，可随时取消）。 */
+/**
+ * 严格小盘模式等待服务器上传名额的最大次数（间隔取服务端 retryAfterMs，默认 5s、最长 60s；
+ * 即最多约 30 分钟～6 小时，可随时取消）。
+ */
 const MAX_DISK_BUDGET_RETRIES = 360;
 
 /** 重试退避基数 (ms) */
 const RETRY_BASE_DELAY = 2000;
-const DISK_BUDGET_RETRY_DELAY = 5000;
-
-function getDiskBudgetRetryDelay(error: unknown): number | null {
-  const response = (error as {
-    response?: {
-      data?: { code?: unknown; retryAfterMs?: unknown };
-      headers?: Record<string, unknown>;
-    };
-  })?.response;
-  const headerCode = String(response?.headers?.['x-tgtc-error-code'] || '');
-  const isBudgetBusy = response?.data?.code === 'UPLOAD_DISK_BUDGET_BUSY'
-    || headerCode === 'UPLOAD_DISK_BUDGET_BUSY';
-  if (!isBudgetBusy) return null;
-
-  const bodyRetryAfterMs = Number(response?.data?.retryAfterMs);
-  if (Number.isSafeInteger(bodyRetryAfterMs) && bodyRetryAfterMs >= 1000 && bodyRetryAfterMs <= 60_000) {
-    return bodyRetryAfterMs;
-  }
-  const retryAfterSeconds = Number(response?.headers?.['retry-after']);
-  return Number.isFinite(retryAfterSeconds) && retryAfterSeconds >= 1 && retryAfterSeconds <= 60
-    ? retryAfterSeconds * 1000
-    : DISK_BUDGET_RETRY_DELAY;
-}
 
 async function waitForRetry(ms: number, signal?: AbortSignal): Promise<void> {
   await new Promise<void>((resolve, reject) => {
@@ -138,9 +121,16 @@ export function useChunkedUpload(concurrency = 2) {
       : optimalChunkSize;
     const totalChunks = Math.ceil(file.size / chunkSize);
 
+    /** 上报「等待服务器空出上传名额」的排队态；init 与分片阶段共用，传入 false 即清除。 */
+    const reportWaiting = (waiting: boolean) => {
+      if (progress.value.waitingForSlot === waiting) return;
+      progress.value.waitingForSlot = waiting;
+      onProgress?.(progress.value);
+    };
+
     try {
-      // 1. Init（独立 30s 超时 + 与外部取消信号合并）。严格模式的磁盘名额忙碌
-      // 不消耗常规网络重试次数，保持浏览器文件在队列中等待服务器释放空间。
+      // 1. Init（独立 30s 超时 + 与外部取消信号合并）。严格模式的串行上传名额被上一份
+      // 文件占用时属于排队而非故障：不消耗常规网络重试次数，按服务器给的间隔继续等待。
       let initRes: AxiosResponse;
       let diskBudgetAttempts = 0;
       for (let attempt = 0; ; attempt++) {
@@ -156,17 +146,24 @@ export function useChunkedUpload(concurrency = 2) {
               overwriteFileId: overwriteFileId || undefined,
             }, { signal: s, timeout: 0 }),
           );
+          reportWaiting(false);
           break;
         } catch (err: any) {
           if (signal?.aborted) throw err;
-          const diskBudgetDelay = getDiskBudgetRetryDelay(err);
+          const diskBudgetDelay = getUploadBudgetRetryAfterMs(err);
           if (diskBudgetDelay !== null) {
             diskBudgetAttempts++;
             if (diskBudgetAttempts > MAX_DISK_BUDGET_RETRIES) {
-              throw new Error('服务器磁盘空间长时间被其他上传占用，请稍后重新上传');
+              reportWaiting(false);
+              throw new Error('排队等待时间过长：服务器长时间被其他上传占用，请稍后重新上传');
             }
-            console.info(`[分片上传] 等待服务器磁盘名额，${(diskBudgetDelay / 1000).toFixed(1)}s 后重试 (${diskBudgetAttempts}/${MAX_DISK_BUDGET_RETRIES})`);
-            await waitForRetry(diskBudgetDelay, signal);
+            console.info(`[分片上传] 等待服务器空闲（另一份大文件正在处理），${(diskBudgetDelay / 1000).toFixed(1)}s 后重试 (${diskBudgetAttempts}/${MAX_DISK_BUDGET_RETRIES})`);
+            reportWaiting(true);
+            try {
+              await waitForRetry(diskBudgetDelay, signal);
+            } finally {
+              reportWaiting(false);
+            }
             attempt--;
             continue;
           }
@@ -231,6 +228,9 @@ export function useChunkedUpload(concurrency = 2) {
           // 获取全局上传令牌；等待超过 180s 会 reject（防止无限排队）
           await uploadScheduler.acquire();
           let retryDelay = 0;
+          // 该分片是否因服务器的串行上传名额被占用而重试（严格小盘模式）：
+          // 属排队语义，退避等待期间同样上报等待态，避免用户只看到「重试」。
+          let budgetBusy = false;
           try {
             if (signal?.aborted) return;
       
@@ -261,6 +261,7 @@ export function useChunkedUpload(concurrency = 2) {
               // 带 response 的 5xx 不再重试（服务器内部错误，重试可能产生重复文件），
               // 413/400/401 等业务 4xx 不可重试，CDN“代理层”消息型裸 Error 保持可重试。
               const isRetryable = classifyUploadError(err).retryable;
+              budgetBusy = isUploadBudgetBusy(err);
       
               if (isRetryable && retryCount < MAX_RETRIES) {
                 // 指数退避 + 随机抖动，避免雷群效应
@@ -298,7 +299,12 @@ export function useChunkedUpload(concurrency = 2) {
           if (retryDelay === 0) break; // 上传成功（取消路径已在上方 return）
       
           // 不持有令牌的情况下退避等待，避免长时间占用并发槽位
-          await new Promise(resolve => setTimeout(resolve, retryDelay));
+          if (budgetBusy) reportWaiting(true);
+          try {
+            await new Promise(resolve => setTimeout(resolve, retryDelay));
+          } finally {
+            if (budgetBusy) reportWaiting(false);
+          }
           progress.value.retrying = false;
           onProgress?.(progress.value);
           // 继续循环：重新获取令牌后重试

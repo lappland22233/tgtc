@@ -79,7 +79,7 @@ SQLite 备份前应停止应用或使用 SQLite 在线备份能力取得一致�
 | `CHUNK_UPLOAD_GLOBAL_CONCURRENCY` | `24` | 分片上传：全局同时接收的分片会话数 |
 | `CHUNK_UPLOAD_INFLIGHT_BYTES` | `268435456`（256 MiB） | 分片上传：全局在途字节预算 |
 | `CHUNK_UPLOAD_MIN_FREE_DISK_BYTES` | `1073741824`（1 GiB） | 分片上传：临时分区最小预留空间 |
-| `STRICT_UPLOAD_SINGLE_PROCESS` | `false` | 严格小盘模式：仅在「单后端进程 + `FILE_CACHE_NO_CACHE_MODE=true`」时设为 `true`；启用后所有上传统一走分片链路，并以最大文件两倍空间为预算串行接收，启用前须先排空既有 `processing`/`pending` 任务 |
+| `STRICT_UPLOAD_SINGLE_PROCESS` | 未设置（即启用） | 严格小盘模式：**未设置时默认启用，只有显式设为 `false` 才关闭**；实际生效条件为「单后端进程 + `FILE_CACHE_NO_CACHE_MODE=true`」。启用后所有上传统一走分片链路，并以最大文件两倍空间为预算串行接收——同一时刻只允许一份文件占用上传通道，其余文件在客户端排队等待（服务端对并发 `init` 返回 `429` + `errorCode=UPLOAD_DISK_BUDGET_BUSY`，前端按 `Retry-After` 自动等待重试）；启用前须先排空既有 `processing`/`pending` 任务。**会话空闲回收**：分片会话只存在于进程内，`init` 成功后客户端断连（既不 `complete` 也不 `abort`）的会话会在空闲 10 分钟后被回收——删除分片目录、释放严格模式磁盘租约，且每次 `init` 前与每 10 分钟的定时任务都会执行一次，因此不会出现「上传通道被僵尸会话永久占用」。这里的「空闲」指既没有分片写入、也没有状态查询；**上传中途暂停超过 10 分钟，该会话的分片会被清空，需要重新上传**。合并/入队中的会话不受 10 分钟规则影响，由 30 分钟合并超时兜底；回收后会写入 `回收空闲过期会话 … leaseReleased=…` 的 WARN 日志，目录删除连续失败会升级告警，长时间占用租约也会按分钟限频告警。无缓存严格模式下会话不落库，进程重启即清空全部在途会话与租约，遗留分片目录在启动清理时删除 |
 
 日志保留与轮转（应用日志由 FileLogger 写入，默认 `<cwd>/tmp/logs`）：
 
