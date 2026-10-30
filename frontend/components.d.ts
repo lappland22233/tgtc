@@ -40,6 +40,8 @@ declare module 'vue' {
     SideNav: typeof import('./src/components/SideNav.vue')['default']
     TagManager: typeof import('./src/components/TagManager.vue')['default']
     TAlert: typeof import('tdesign-vue-next')['Alert']
+    TBreadcrumb: typeof import('tdesign-vue-next')['Breadcrumb']
+    TBreadcrumbItem: typeof import('tdesign-vue-next')['BreadcrumbItem']
     TButton: typeof import('tdesign-vue-next')['Button']
     TCard: typeof import('tdesign-vue-next')['Card']
     TCheckbox: typeof import('tdesign-vue-next')['Checkbox']

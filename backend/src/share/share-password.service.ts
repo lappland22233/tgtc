@@ -59,6 +59,7 @@ export class SharePasswordService {
     const ban = await this.bannedIPRepository
       .createQueryBuilder('bannedIP')
       .where('bannedIP.ip = :ip', { ip })
+      .andWhere('bannedIP.unbannedAt IS NULL')
       .andWhere(
         '(bannedIP.isPermanent = true OR (bannedIP.isPermanent = false AND bannedIP.expiresAt > :now))',
         { now },
@@ -153,7 +154,7 @@ export class SharePasswordService {
       const expiresAt = new Date(now + this.BAN_6H);
       const reason = `分享密码错误${pwdErrorLimit}次，1小时内第${currentBanCount}次触发封禁，升级为6小时`;
       await this.bannedIPRepository.upsert(
-        { ip, reason, isPermanent: false, expiresAt } as BannedIP,
+        { ip, reason, isPermanent: false, expiresAt, unbannedAt: null } as BannedIP,
         ['ip'],
       );
       await this.rateLimitService.reset(banLimitKey);
@@ -161,7 +162,7 @@ export class SharePasswordService {
       const expiresAt = new Date(now + pwdBanDuration);
       const reason = `分享密码错误${pwdErrorLimit}次，1小时内第${currentBanCount}次触发封禁`;
       await this.bannedIPRepository.upsert(
-        { ip, reason, isPermanent: false, expiresAt } as BannedIP,
+        { ip, reason, isPermanent: false, expiresAt, unbannedAt: null } as BannedIP,
         ['ip'],
       );
     }

@@ -1,8 +1,8 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
 import { SharePreviewSession } from '../common/entities/share-preview-session.entity';
-import { ShareLink } from '../common/entities/share-link.entity';
+import { ShareLink, ShareLinkStatus } from '../common/entities/share-link.entity';
 import { databaseQuery, getDatabaseType } from '../database/database-types';
 
 /** 预览会话窗口：与 access JWT 5 分钟有效期对齐 */
@@ -17,8 +17,8 @@ const PRUNE_BATCH_LIMIT = 200;
  *
  * 替代 ShareService 内进程级 `previewSessions` Map：
  * - 会话外置到 PostgreSQL，唯一约束 (shareLinkId, fileId, visitorHash) 保证多实例原子性；
- * - 「创建/续期会话」与「额度消费」按顺序执行，借助唯一约束天然并发安全：
- *   并发首访只有一条 INSERT 成功（另一条 ON CONFLICT 幂等），杜绝重复扣次；
+ * - 分享行锁与事务串行化「会话确认 + 额度消费」：
+ *   并发首访在同一分享行上排队，后续请求读取已提交会话后幂等免扣；
  * - 首次成功返回文件字节前必须完成会话确认，同会话后续 Range / 重连幂等免扣；
  * - 会话过期后再次预览视为新会话，重新扣次。
  */
@@ -26,6 +26,7 @@ const PRUNE_BATCH_LIMIT = 200;
 export class SharePreviewSessionService {
   private readonly logger = new Logger(SharePreviewSessionService.name);
   private sinceLastPrune = 0;
+  private sqliteChain: Promise<void> = Promise.resolve();
 
   constructor(
     @InjectRepository(SharePreviewSession)
@@ -50,9 +51,6 @@ export class SharePreviewSessionService {
     fileId: string,
     visitorHash: string,
   ): Promise<'consumed' | 'idempotent' | 'exhausted'> {
-    const now = Date.now();
-    const expiresAt = new Date(now + PREVIEW_SESSION_WINDOW_MS);
-
     // 低频触发过期清理（走 expiresAt 索引，分批删除，禁止请求路径全表扫描）
     if (++this.sinceLastPrune >= PRUNE_CHANCE) {
       this.sinceLastPrune = 0;
@@ -61,93 +59,53 @@ export class SharePreviewSessionService {
       );
     }
 
-    // 第一步：续期已过期会话（过期后再次预览视为新会话）。
-    // 受行锁保护：并发下只有一条 UPDATE 成功，其余 affected=0 落到幂等分支。
-    const renewed = await this.sessionRepo
-      .createQueryBuilder()
-      .update()
-      .set({ expiresAt })
-      .where('"shareLinkId" = :linkId', { linkId: link.id })
-      .andWhere('"fileId" = :fileId', { fileId })
-      .andWhere('"visitorHash" = :visitorHash', { visitorHash })
-      .andWhere('"expiresAt" <= :now', { now: new Date(now) })
-      .execute();
-
-    if (renewed.affected) {
-      return this.consumeOrCompensate(link, fileId, visitorHash);
-    }
-
-    // 第二步：尝试插入新会话；唯一冲突表示已有未过期会话 → 幂等免扣。
-    // G5-06：用 INSERT ... ON CONFLICT DO NOTHING RETURNING id，通过 result.raw 判断
-    // 是否真正插入，避免依赖 identifiers 在 ON CONFLICT 下行为不一致的隐患。
-    // 仅唯一约束冲突（PostgreSQL 23505）按幂等处理，其余异常一律向上抛，
-    // 不再把一切异常都静默当作幂等（会掩盖真实的 DB/约束错误）。
-    let inserted = false;
-    try {
-      const result = await this.sessionRepo
-        .createQueryBuilder()
-        .insert()
-        .values({ shareLinkId: link.id, fileId, visitorHash, consumed: true, expiresAt })
-        .orIgnore()
-        .returning('id')
-        .execute();
-      const raw = (result?.raw ?? []) as Array<{ id: string }>;
-      inserted = raw.length > 0;
-    } catch (error) {
-      if ((error as { code?: string })?.code === '23505') {
-        // 唯一约束冲突：并发下另一请求已插入同一会话 → 幂等免扣
-        return 'idempotent';
+    const consume = () => this.dataSource.transaction(async (manager) => {
+      const links = manager.getRepository(ShareLink);
+      // 锁住分享行后，再确认会话与扣次。并发重试不得看到“会话已建但尚未扣次”。
+      const current = await links.findOne({
+        where: { id: link.id, isDeleted: false },
+        ...(this.dataSource.options.type === 'postgres'
+          ? { lock: { mode: 'pessimistic_write' as const } } : {}),
+      });
+      const now = Date.now();
+      const expiresAt = new Date(now + PREVIEW_SESSION_WINDOW_MS);
+      if (!current || current.status === ShareLinkStatus.DISABLED) {
+        throw new NotFoundException('分享已取消或不可用');
       }
-      throw error;
-    }
+      if (current.expiresIn && current.expiresStartAt
+        && current.expiresStartAt.getTime() + current.expiresIn * 3600000 <= now) {
+        throw new NotFoundException('分享已过期');
+      }
+      const sessions = manager.getRepository(SharePreviewSession);
+      const identity = { shareLinkId: link.id, fileId, visitorHash };
+      const existing = await sessions.findOne({ where: identity });
+      if (existing?.consumed && existing.expiresAt.getTime() > now) return 'idempotent' as const;
 
-    if (!inserted) return 'idempotent';
-    return this.consumeOrCompensate(link, fileId, visitorHash);
-  }
-
-  /**
-   * 扣减一次额度；失败（耗尽）时补偿删除刚创建/续期的会话，保证不残留占用。
-   * 补偿删除只作用于「本方法本次建立的会话」：续期分支影响的是已存在行，
-   * 删除后该行消失，下次访问会重新创建并扣次，与「耗尽拒绝」语义一致。
-   */
-  private async consumeOrCompensate(
-    link: ShareLink,
-    fileId: string,
-    visitorHash: string,
-  ): Promise<'consumed' | 'exhausted'> {
-    // 复用 ShareService 的原子扣次语义：maxAccessCount < 0 不限；否则仅当未达上限才 +1。
-    if (link.maxAccessCount < 0) {
-      await this.dataSource
-        .createQueryBuilder()
+      const updated = await links.createQueryBuilder()
         .update(ShareLink)
         .set({ currentAccessCount: () => '"currentAccessCount" + 1' })
         .where('id = :id', { id: link.id })
         .andWhere('"isDeleted" = false')
+        .andWhere('("maxAccessCount" < 0 OR "currentAccessCount" < "maxAccessCount")')
         .execute();
-      return 'consumed';
-    }
+      if (!updated.affected) return 'exhausted' as const;
 
-    const result = await this.dataSource
-      .createQueryBuilder()
-      .update(ShareLink)
-      .set({ currentAccessCount: () => '"currentAccessCount" + 1' })
-      .where('id = :id', { id: link.id })
-      .andWhere('"isDeleted" = false')
-      .andWhere('"currentAccessCount" < "maxAccessCount"')
-      .execute();
+      // save 不依赖驱动特定的 QueryBuilder.returning；失败时额度与会话一并回滚。
+      await sessions.save(sessions.create({ ...existing, ...identity, consumed: true, expiresAt }));
+      return 'consumed' as const;
+    });
+    if (this.dataSource.options.type !== 'sqlite') return consume();
 
-    if (!result.affected) {
-      // 额度耗尽：补偿删除本次会话记录（保持无残留），返回 exhausted。
-      await this.sessionRepo
-        .createQueryBuilder()
-        .delete()
-        .where('"shareLinkId" = :linkId', { linkId: link.id })
-        .andWhere('"fileId" = :fileId', { fileId })
-        .andWhere('"visitorHash" = :visitorHash', { visitorHash })
-        .execute().catch(() => {});
-      return 'exhausted';
+    // sqlite3 共用单连接，禁止本服务并发开启嵌套事务；跨进程仍由 SQLite 写锁保护。
+    const previous = this.sqliteChain;
+    let release!: () => void;
+    this.sqliteChain = new Promise<void>((resolve) => { release = resolve; });
+    await previous;
+    try {
+      return await consume();
+    } finally {
+      release();
     }
-    return 'consumed';
   }
 
   /**

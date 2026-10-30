@@ -9,9 +9,8 @@ import {
 import { Server, Socket } from 'socket.io';
 import { Logger } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
-import { Repository } from 'typeorm';
-import { InjectRepository } from '@nestjs/typeorm';
 import { User, UserRole } from '../common/entities/user.entity';
+import { JwtStrategy } from '../auth/jwt.strategy';
 import { RateLimitService } from '../common/services/rate-limit.service';
 
 @WebSocketGateway({
@@ -75,8 +74,7 @@ export class AlertGateway
 
   constructor(
     private readonly jwtService: JwtService,
-    @InjectRepository(User)
-    private readonly userRepository: Repository<User>,
+    private readonly jwtStrategy: JwtStrategy,
     private readonly rateLimitService: RateLimitService,
   ) {}
 
@@ -123,7 +121,7 @@ export class AlertGateway
         return;
       }
 
-      let payload: { sub: string; email: string; role: string };
+      let payload: Parameters<JwtStrategy['validate']>[0];
       try {
         // 显式限定算法为 HS256，与签发算法一致，防止 alg=none / 算法混淆攻击
         payload = this.jwtService.verify(token, { algorithms: ['HS256'] });
@@ -134,7 +132,7 @@ export class AlertGateway
         return;
       }
 
-      const user = await this.userRepository.findOne({ where: { id: payload.sub } });
+      const user = await this.jwtStrategy.validate(payload);
       if (!user || user.isBanned) {
         this.logger.warn(`连接拒绝: ${client.id} 用户不存在或已封禁`);
         client.disconnect();
@@ -209,9 +207,9 @@ export class AlertGateway
           }
           try {
             // 重新验签：登出（吊销）后 token 失效即断开
-            const payload = this.jwtService.verify(token, { algorithms: ['HS256'] }) as { sub: string };
+            const payload = this.jwtService.verify(token, { algorithms: ['HS256'] });
             // 查询最新用户状态：封禁 / 删除 / 角色降级均断开
-            const fresh = await this.userRepository.findOne({ where: { id: payload.sub } });
+            const fresh = await this.jwtStrategy.validate(payload);
             if (!fresh || fresh.isBanned || fresh.role !== UserRole.SUPER_ADMIN) {
               this.logger.warn(`管理员连接复核未通过，断开: ${client.id} (user: ${fresh?.email ?? 'unknown'})`);
               client.disconnect();

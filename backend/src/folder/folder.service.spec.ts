@@ -594,7 +594,7 @@ describe('FolderService - copyFile（G6-07 源文件状态校验）', () => {
       // v1.2.6：copyFile 在事务内完成副本保存 + 名称占用
       manager: {
         transaction: jest.fn(async (cb: (m: unknown) => Promise<unknown>) =>
-          cb({ getRepository: () => ({ save: fileRepo.save }) })),
+          cb({ getRepository: () => ({ save: fileRepo.save, findOne: fileRepo.findOne, find: jest.fn(async () => []) }) })),
       },
     };
     audit = { log: jest.fn(), logAwait: jest.fn() };
@@ -636,13 +636,12 @@ describe('FolderService - copyFile（G6-07 源文件状态校验）', () => {
 
   it('ready 状态的源文件正常复制', async () => {
     fileRepo.findOne
-      .mockResolvedValueOnce({
+      .mockResolvedValue({
         id: fileId, uploaderId: ownerId, isDeleted: false, status: 'ready',
         filename: 'x', originalName: 'a.mp4', mimeType: 'video/mp4', size: 100,
         telegramFileId: 'tg-1', telegramFilePath: '', thumbnailPath: null, folderId: null,
         accessType: 'public', password: null, maxAccessCount: -1, expiresIn: null, expiresStartAt: null,
-      })
-      .mockResolvedValueOnce(null); // buildCopyName 无同名
+      });
     const saved = await service.copyFile(ownerId, fileId, {});
     expect(saved.id).toBeDefined();
     expect(audit.log).toHaveBeenCalledWith(expect.objectContaining({ action: 'file_copy' }));

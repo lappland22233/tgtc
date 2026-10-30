@@ -35,6 +35,7 @@ check() {
 }
 
 # 仅加载纯函数（不执行 main）
+# shellcheck source=scripts/release/check-download-proxy.sh
 TGTC_SOURCE_ONLY=1 source "$SCRIPT"
 
 # ---------------- 1) 静态配置校验 ----------------

@@ -75,17 +75,8 @@ jobs:
       - name: Install locked dependencies
         run: npm ci
 
-      - name: Validate dependency tree
-        run: npm ls --all
-
-      - name: Block high and critical production advisories
-        run: npm audit --omit=dev --audit-level=high
-
-      - name: Type-check
-        run: npm run typecheck
-
-      - name: Build
-        run: npm run build
+      - name: Run shared backend quality gate
+        run: npm run check:ci
 
       - name: Smoke-test the complete forward migration chain on an empty database
         run: npm run migration:run
@@ -111,12 +102,6 @@ jobs:
         run: |
           test -f src/database/postgres-api-key.integration.spec.ts
           npm run test:integration:pg
-
-      - name: Run SQLite migration and real-file integration release gate
-        run: npm run gate:sqlite
-
-      - name: Run tests and enforce configured coverage thresholds
-        run: npm run test:cov -- --runInBand
 
       - name: Require Nest dependency-injection smoke coverage for enabled account-pool module
         run: npx jest --runInBand src/telegram-account-pool/telegram-account-pool.module.spec.ts src/telegram-account-pool/download-capacity-policy.service.spec.ts
@@ -153,28 +138,17 @@ jobs:
       - name: Install locked dependencies
         run: npm ci
 
-      - name: Validate dependency tree
-        run: npm ls --all
+      - name: Run shared frontend quality gate
+        run: npm run check:ci
 
-      - name: Block high and critical production advisories
-        run: npm audit --omit=dev --audit-level=high
-
-      - name: Type-check
-        run: npm run typecheck
-
-      - name: Build from a clean checkout
-        run: npm run build
-
-      # PERF-F-101 配套门禁：防止「重新全量引入 tdesign CSS / 从包根导入 / 取消懒加载」
-      # 这类体积回退再次发生（首基线审查记录该回退会让首屏 CSS 从 125.8 KB 涨回 500 KB）。
-      - name: Enforce frontend bundle-size budget
-        run: npm run check:bundle
-
-      - name: Require a frontend coverage test command
-        run: node -e "const scripts=require('./package.json').scripts||{}; if (!scripts['test:cov']) throw new Error('frontend package.json must define a blocking test:cov script')"
-
-      - name: Run frontend tests and publish baseline coverage
-        run: npm run test:cov
+      - name: Upload frontend coverage report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: frontend-coverage
+          path: frontend/coverage
+          if-no-files-found: warn
+          retention-days: 14
 
   release-scripts:
     name: Release scripts / static safety gates
