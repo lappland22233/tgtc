@@ -168,6 +168,22 @@ describe('TelegramMirrorTaskService（SQLite 内存库）', () => {
     expect(retryOptions?.delay).toBe(500);
   });
 
+  it('对账恢复重试入队失败的到期任务，使用稳定 jobId', async () => {
+    const { service, queue } = await setup();
+    const { task } = await service.enqueue(baseParams);
+    const claimed = await service.claim(task.id);
+    expect(claimed).toBeTruthy();
+    await service.markRetrying(task.id, { code: 'network', summary: 'down', delayMs: 0, attempts: claimed!.attempts });
+    queue.add.mockRejectedValueOnce(new Error('redis unavailable'));
+    await service.scheduleRetry(claimed!, 0);
+    queue.add.mockClear();
+    expect(await service.reconcileQueued()).toBe(1);
+    const first = queue.add.mock.calls[0][2] as { jobId: string };
+    await service.reconcileQueued();
+    const second = queue.add.mock.calls[1][2] as { jobId: string };
+    expect(first.jobId).toBe(second.jobId);
+  });
+
   it('回执保存与退回排队：不重复上传、开关关闭不丢任务', async () => {
     const { service } = await setup();
     const { task } = await service.enqueue(baseParams);

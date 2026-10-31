@@ -291,7 +291,12 @@ export class AccountAwareDownloadService {
       settled = true;
       admission.finish(sample());
     };
-    stream.once('close', settle);
+    stream.once('close', () => {
+      if (settled) return;
+      // 主动结束 Range 或消费者取消并不代表账号故障；错误事件仍由 settle 记录。
+      settled = true;
+      admission.release();
+    });
     stream.once('end', settle);
     stream.once('error', settle);
   }

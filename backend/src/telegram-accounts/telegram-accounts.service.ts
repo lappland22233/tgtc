@@ -837,6 +837,7 @@ export class TelegramAccountsService {
       capabilities: TelegramAccountCapabilities | null;
     }> = [];
     for (const account of rows) {
+      if (account.lastFailureCode === 'user_session_invalid') continue;
       const payload = this.decryptPayload(account);
       if (!payload?.apiId || !payload.apiHash || !payload.session || !account.externalId) {
         this.logger.warn(`用户账号 ${account.id} 凭据不完整或不可解密，已跳过镜像调度`);

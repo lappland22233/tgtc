@@ -45,7 +45,7 @@ import { assertFileReadable, assertFileWritable } from '../common/utils/file-per
 import { v4 as uuidv4 } from 'uuid';
 // 阶段 4：普通 Web 上传文件的回源接入账号池（可选依赖，未装配/未启用时保持原单账号链路）
 import { AccountAwareDownloadService } from '../telegram-account-pool/account-aware-download.service';
-import { AccountAwareUploadService } from '../telegram-account-pool/account-aware-upload.service';
+import { AccountAwareUploadService, AccountUploadUnavailableError } from '../telegram-account-pool/account-aware-upload.service';
 import { FileCopyService } from '../telegram-account-pool/file-copy.service';
 // 镜像触发（可选依赖：不装配时不产生任何行为变化）
 import { TelegramMirrorTriggerService } from '../telegram-mirror/telegram-mirror-trigger.service';
@@ -221,11 +221,13 @@ export class FileService implements OnModuleInit {
         );
       }
       try {
-        const copies = await this.fileCopies.listReady('file', file.id);
+        // 按不可变的 Telegram 内容标识选号；file.id 在覆盖上传时不变，旧副本不能按它分流。
+        const uniqueId = (file.telegramFileUniqueId || '').trim();
+        const copies = uniqueId ? await this.fileCopies.listReady('fileUnique', uniqueId) : [];
         if (copies.length > 0) {
           const opened = await poolDownload.openStream({
-            ownerType: 'file',
-            ownerId: file.id,
+            ownerType: 'fileUnique',
+            ownerId: uniqueId,
             expectedSize,
             noCache,
             fileName: file.originalName || file.filename,
@@ -250,10 +252,14 @@ export class FileService implements OnModuleInit {
     // 先用该账号自己的 `file_id` 回源（这正是「不把 A 的 file_id 交给 B」的落点）。
     const sourceAccountId = (file.telegramSourceAccountId || '').trim();
     const defaultAccountId = this.defaultBotAccountId();
-    if (poolDownload?.isActive() && sourceAccountId && sourceAccountId !== defaultAccountId) {
+    const fallbackAccountId = sourceAccountId || defaultAccountId;
+    const requiresSourceAccount = Boolean(sourceAccountId && sourceAccountId !== defaultAccountId);
+    const usePoolFallback = Boolean(poolDownload?.isActive() && fallbackAccountId &&
+      (requiresSourceAccount || poolDownload.hasAccount?.(fallbackAccountId)));
+    if (usePoolFallback && poolDownload && fallbackAccountId) {
       try {
         const opened = await poolDownload.openSourceStream({
-          accountId: sourceAccountId,
+          accountId: fallbackAccountId,
           fileId: file.telegramFileId || file.filename,
           expectedSize,
           noCache,
@@ -265,7 +271,7 @@ export class FileService implements OnModuleInit {
           };
         }
         this.logger.warn(
-          `来源账号 ${maskIdentifier(sourceAccountId)} 回源未取得流（file=${file.id}）：账号可能已禁用或不在池内`,
+          `来源账号 ${maskIdentifier(fallbackAccountId)} 回源未取得流（file=${file.id}）：账号可能已禁用或不在池内`,
         );
       } catch (error) {
         this.logger.warn(
@@ -279,13 +285,13 @@ export class FileService implements OnModuleInit {
     // 池内账号**时，它的 `file_id` 只对该账号有效，用默认 Bot 去取会得到上游错误/无效引用
     // （归属可确认 ≠ 身份一致）。这里宁可返回可诊断 503，也绝不跨账号误用；与
     // telegram-bot-public.controller 的 acquireUpstreamStream 同一安全矩阵与计数口径。
-    if (poolDownload?.isActive() && sourceAccountId && sourceAccountId !== defaultAccountId) {
+    if (usePoolFallback || requiresSourceAccount) {
       // 脱敏输出：只保留账号 id 末 4 位，不打印 file_id（与账号池日志规范一致）
       this.logger.error(
-        `来源账号 ${maskIdentifier(sourceAccountId)} 回源不可用，按安全策略拒绝跨账号回退默认 Bot（file=${file.id}）`,
+        `来源账号 ${maskIdentifier(fallbackAccountId || '')} 回源不可用，按安全策略拒绝跨账号回退默认 Bot（file=${file.id}）`,
       );
       // 与直链路径同口径计数（unresolved）：供告警识别「归属不可确认」的影响面
-      poolDownload.bumpCounter('unresolved');
+      poolDownload?.bumpCounter('unresolved');
       throw new DownloadResourceException({
         status: HttpStatus.SERVICE_UNAVAILABLE,
         errorCode: DOWNLOAD_ERROR_CODES.SERVER_BUSY,
@@ -359,12 +365,14 @@ export class FileService implements OnModuleInit {
         }
         this.logger.warn('账号池上传未成功（无可用候选或换号耗尽），回退单账号链路');
       } catch (error) {
+        if (params.signal?.aborted || error instanceof AccountUploadUnavailableError) throw error;
         this.logger.warn(
           `账号池上传异常，回退单账号链路：${error instanceof Error ? error.message.slice(0, 200) : String(error)}`,
         );
       }
     }
 
+    if (params.signal?.aborted) throw new Error('上传已取消');
     const uploaded = await this.telegramService.uploadFile(
       params.openLegacySource(),
       params.filename,
@@ -401,12 +409,13 @@ export class FileService implements OnModuleInit {
   ): Promise<void> {
     const accountId = (sourceAccountId ?? '').trim() || this.defaultBotAccountId();
     try {
-      await this.fileRepository.update({ id: file.id }, {
+      const sourceUpdate = await this.fileRepository.update({ id: file.id, uploadVersion: file.uploadVersion }, {
         telegramChatId: uploaded.chat_id ?? null,
         telegramMessageId: uploaded.message_id ?? null,
         telegramFileUniqueId: uploaded.file_unique_id ?? null,
         telegramSourceAccountId: accountId,
       });
+      if (sourceUpdate.affected === 0) return;
 
       if (this.fileCopies && uploaded.chat_id && uploaded.message_id) {
         await this.fileCopies.upsertReady({
@@ -569,6 +578,10 @@ export class FileService implements OnModuleInit {
     params: {
       telegramFileId: string;
       telegramFilePath: string;
+      telegramFileUniqueId?: string | null;
+      telegramSourceAccountId?: string | null;
+      telegramChatId?: string | null;
+      telegramMessageId?: string | null;
       filename: string;
       originalName: string;
       size: number;
@@ -612,6 +625,10 @@ export class FileService implements OnModuleInit {
         mimeType: params.mimeType,
         telegramFileId: params.telegramFileId,
         telegramFilePath: params.telegramFilePath,
+        telegramFileUniqueId: params.telegramFileUniqueId ?? null,
+        telegramSourceAccountId: params.telegramSourceAccountId ?? null,
+        telegramChatId: params.telegramChatId ?? null,
+        telegramMessageId: params.telegramMessageId ?? null,
         thumbnailPath: null,
         uploadVersion: nextVersion,
       } as any);
@@ -652,6 +669,10 @@ export class FileService implements OnModuleInit {
       mimeType: params.mimeType,
       telegramFileId: params.telegramFileId,
       telegramFilePath: params.telegramFilePath,
+      telegramFileUniqueId: params.telegramFileUniqueId ?? null,
+      telegramSourceAccountId: params.telegramSourceAccountId ?? null,
+      telegramChatId: params.telegramChatId ?? null,
+      telegramMessageId: params.telegramMessageId ?? null,
       thumbnailPath: null,
       // 返回值必须同步新版本：调用方（registerPrimaryTelegramSource / 镜像触发）
       // 直接读它作为 sourceVersion，否则新内容仍按旧版本登记
@@ -3061,6 +3082,10 @@ export class FileService implements OnModuleInit {
         (target) => this.applyOverwrite(target, {
           telegramFileId: telegramFile.file_id,
           telegramFilePath: telegramFile.file_path || '',
+          telegramFileUniqueId: telegramFile.file_unique_id ?? null,
+          telegramSourceAccountId: telegramFile.accountId ?? null,
+          telegramChatId: telegramFile.chat_id ?? null,
+          telegramMessageId: telegramFile.message_id ?? null,
           filename: telegramFile.file_id,
           originalName,
           size: file.size,

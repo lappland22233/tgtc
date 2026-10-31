@@ -153,6 +153,16 @@ function setup(options: {
 }
 
 describe('AccountAwareDownloadService（选号 / 换号 / 非阻断懒扩散）', () => {
+  it('提前关闭流时释放准入但不记录账号失败', async () => {
+    const ctx = setup({ readyAccounts: ['a1'] });
+    const result = await ctx.service.openStream({ ownerType: 'file', ownerId: 'u1' });
+    expect(result).not.toBeNull();
+    const closed = new Promise<void>(resolve => result!.stream.once('close', resolve));
+    result!.stream.destroy();
+    await closed;
+    expect(ctx.pool.finishAttempt).not.toHaveBeenCalled();
+  });
+
   it('未启用账号池时直接返回 null（交由调用方走原单账号链路）', async () => {
     const ctx = setup({ active: false, readyAccounts: ['a1'] });
     const result = await ctx.service.openStream({ ownerType: 'fileUnique', ownerId: 'u1' });

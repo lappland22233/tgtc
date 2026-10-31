@@ -859,7 +859,7 @@ export class TelegramAccountPoolService implements OnModuleInit, OnApplicationSh
     const retryAfterMs = sample.retryAfterSeconds && sample.retryAfterSeconds > 0
       ? sample.retryAfterSeconds * 1000
       : 0;
-    runtime.cooldownUntilMs = now + Math.max(escalated, retryAfterMs);
+    runtime.cooldownUntilMs = Math.max(runtime.cooldownUntilMs, now + Math.max(escalated, retryAfterMs));
     this.logger.warn(
       `账号 ${accountId} 失败（${kind}${sample.status ? `/${sample.status}` : ''}），冷却 `
       + `${(Math.max(escalated, retryAfterMs) / 1000).toFixed(0)}s`
@@ -889,7 +889,7 @@ export class TelegramAccountPoolService implements OnModuleInit, OnApplicationSh
     runtime.lastErrorKind = kind;
     runtime.lastErrorAtMs = Date.now();
     const escalated = Math.min(COOLDOWN_BASE_MS[kind] * 2 ** (runtime.consecutiveFailures - 1), COOLDOWN_MAX_MS);
-    runtime.cooldownUntilMs = Date.now() + escalated;
+    runtime.cooldownUntilMs = Math.max(runtime.cooldownUntilMs, Date.now() + escalated);
     if (error) {
       this.logger.warn(`账号 ${accountId} 健康探测失败：${error.slice(0, 200)}`);
     }

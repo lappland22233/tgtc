@@ -2,7 +2,7 @@ import { BadRequestException, Injectable, Logger, NotFoundException } from '@nes
 import { InjectQueue } from '@nestjs/bull';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Queue } from 'bull';
-import { Repository } from 'typeorm';
+import { LessThanOrEqual, Repository } from 'typeorm';
 import { databaseQuery, getDatabaseType } from '../database/database-types';
 import {
   TelegramMirrorTask,
@@ -277,7 +277,7 @@ export class TelegramMirrorTaskService {
   }
 
   /**
-   * 对账：把队列中缺失的 `queued` 任务重新入队（有界批量）。
+   * 对账：重新入队排队任务和已到期的重试任务（有界批量）。
    *
    * 为什么需要：Bull 入队失败、Redis 重启丢队列、镜像开关关闭期间退回排队的任务，
    * 都会导致「任务已持久化但永远不会被执行」。周期对账保证最终一致，
@@ -288,7 +288,12 @@ export class TelegramMirrorTaskService {
     for (const task of queued) {
       await this.safeAddJob(task);
     }
-    return queued.length;
+    const retrying = await this.repo.find({
+      where: { status: 'retrying', nextRetryAt: LessThanOrEqual(new Date()) },
+      order: { nextRetryAt: 'ASC' }, take: limit,
+    });
+    for (const task of retrying) await this.scheduleRetry(task, 0);
+    return queued.length + retrying.length;
   }
 
   /** 过期任务清理：retrying 但重试时间已过很久（例如规则被禁用）时标记 failed，避免无限悬挂 */
@@ -522,11 +527,13 @@ export class TelegramMirrorTaskService {
    *
    * 为什么 jobId 要带后缀：首次入队用确定性 jobId 去重（同一任务不重复入队），
    * 而 Bull 会**拒绝复用已存在的 jobId**——重试若沿用同一个 jobId，job 会被静默丢弃。
-   * 因此重试使用「幂等键 + 尝试次数 + 时间」的唯一 jobId；重复投递由状态机
+   * 因此重试使用「幂等键 + 尝试次数」的稳定 jobId；重复投递由状态机
    * 的原子领取（claim）兜底，不会重复备份。
    */
   async scheduleRetry(task: TelegramMirrorTask, delayMs: number): Promise<void> {
-    const jobId = `${this.buildJobId(task)}#r${task.attempts}-${Date.now()}`;
+    // 同一轮重试使用稳定 jobId，让周期对账与正常入队并发时由 Bull 去重。
+    const jobId = `${this.buildJobId(task)}#r${task.attempts}-retry`;
+    await this.releaseTerminalJob(jobId);
     try {
       await this.queue.add(
         'mirror',

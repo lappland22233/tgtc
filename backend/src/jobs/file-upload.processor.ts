@@ -8,7 +8,7 @@ import { File } from '../common/entities/file.entity';
 import { TelegramService } from '../telegram/telegram.service';
 import { FileService } from '../file/file.service';
 import { UploadDiskBudgetService } from '../file/upload-disk-budget.service';
-import { AccountAwareUploadService } from '../telegram-account-pool/account-aware-upload.service';
+import { AccountAwareUploadService, AccountUploadUnavailableError } from '../telegram-account-pool/account-aware-upload.service';
 import { createReadStream, existsSync } from 'fs';
 import { readFile, rename, unlink, writeFile } from 'fs/promises';
 import { databaseQuery, getDatabaseType } from '../database/database-types';
@@ -166,6 +166,7 @@ export class FileUploadProcessor {
         sourceAccountId: pooled.accountId,
       };
     } catch (error) {
+      if (error instanceof AccountUploadUnavailableError) throw error;
       this.logger.warn(`账号池上传异常，回退单账号链路: ${(error as Error).message}`);
       return null;
     }
@@ -281,6 +282,10 @@ export class FileUploadProcessor {
             filename: result.file_id,
             telegramFileId: result.file_id,
             telegramFilePath: result.file_path || '',
+            telegramSourceAccountId: result.sourceAccountId ?? null,
+            telegramChatId: result.chat_id ?? null,
+            telegramMessageId: result.message_id ?? null,
+            telegramFileUniqueId: result.file_unique_id ?? null,
             uploadStage: 'remote_committed',
             uploadFailureReason: null,
           } as Partial<File>,

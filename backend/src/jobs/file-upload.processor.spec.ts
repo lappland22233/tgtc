@@ -441,6 +441,7 @@ describe('FileUploadProcessor 账号池上传选号', () => {
     // 回执必须绑定实际上传账号（重启恢复提交时只有回执可依）
     const persisted = String((writeFile as jest.Mock).mock.calls.at(-1)?.[1] ?? '');
     expect(JSON.parse(persisted).sourceAccountId).toBe('acct-2');
+    expect(repo.update).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ uploadStage: 'remote_committed', telegramSourceAccountId: 'acct-2', telegramChatId: '-100', telegramMessageId: '77' }));
     // 主副本定位登记必须传实际上传账号，否则回源会取错账号
     expect(fileService.registerPrimaryTelegramSource).toHaveBeenCalledWith(
       expect.anything(),

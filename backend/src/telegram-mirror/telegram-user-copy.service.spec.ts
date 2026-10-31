@@ -200,6 +200,16 @@ describe('TelegramUserCopyService（账号粘性与幂等键）', () => {
     expect(ctx.accounts.markDegraded).toHaveBeenCalledWith('acc-a', 'user_session_invalid', expect.stringContaining('AUTH_KEY'));
   });
 
+  it('认证明确失败时切换到其他可用账号', async () => {
+    const ctx = setup({ userAccounts: candidates });
+    const failure = Object.assign(new Error('AUTH_KEY_UNREGISTERED'), { name: 'TelegramUserClientError', kind: 'auth' });
+    ctx.userClient.copyMessage.mockRejectedValueOnce(failure).mockResolvedValueOnce({ targetChatId: '-100222', targetMessageId: '9201' });
+    const result = await ctx.service.execute(task('task-aaa') as never, rule('acc-a') as never);
+    expect(ctx.userClient.copyMessage).toHaveBeenCalledTimes(2);
+    expect(ctx.accounts.markDegraded).toHaveBeenCalledWith('acc-a', 'user_session_invalid', expect.any(String));
+    expect(result.targetAccountId).not.toBe('acc-a');
+  });
+
   it('MTProto 客户端不可用时 blocked（不降级、不静默跳过）', async () => {
     const ctx = setup({ userClientAvailable: false, userClientReason: '未安装依赖' });
 

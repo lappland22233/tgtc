@@ -1,8 +1,12 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
 import { Readable } from 'stream';
 import { AccountPoolCounterKey } from './telegram-account-pool.types';
 import { TelegramAccountClientService, TelegramAccountError } from './telegram-account-client.service';
 import { TelegramAccountPoolService } from './telegram-account-pool.service';
+
+export class AccountUploadUnavailableError extends ServiceUnavailableException {
+  constructor() { super('上传账号当前繁忙或不可用，请稍后重试'); }
+}
 
 /** 单次上传最多尝试的账号数（首次选择 + 2 次换号），避免长尾把上传拖死 */
 const MAX_ACCOUNT_ATTEMPTS = 3;
@@ -42,7 +46,7 @@ export interface AccountUploadParams {
  * - 由账号池按「带宽 × 健康度 × 容量 × 权重」选号，失败（限流/网络/权限）→ 冷却 → 换号；
  * - 传输结束把结果回报账号池，带宽 EWMA 与健康度实时更新。
  *
- * 返回 `null` 表示「本服务无法完成上传」，由调用方回退**默认单账号链路**。
+ * 未启用或无配置的存储账号时返回 null；已配置但暂不可用时返回 503，避免绕过限额。
  * 这不是 fail-open 风险：回退后产生的 `file_id` 属于默认 Bot，调用方按返回的账号登记即可，
  * 不会出现「A 的 file_id 记成 B 的归属」。真正的 fail-closed 约束在**回源**侧
  * （归属不明的 file_id 绝不用默认账号去猜）。
@@ -75,9 +79,10 @@ export class AccountAwareUploadService {
   }
 
   /**
-   * 按负载选号上传；全部候选失败时返回 null（交由调用方回退默认链路）。
+   * 按负载选号上传；全部候选暂不可用时返回可重试错误。
    */
   async upload(params: AccountUploadParams): Promise<AccountUploadResult | null> {
+    if (params.signal?.aborted) throw new Error('上传已取消');
     if (!this.pool.isActive()) return null;
 
     const candidates = this.pool.storageAccountIds();
@@ -101,14 +106,14 @@ export class AccountAwareUploadService {
       const selection = this.pool.select(available);
       if (!selection) {
         // 候选都存在但当前不可调度（冷却/满载/禁用）：回退单账号链路。
-        this.logger.debug('池化上传选号无可用候选（冷却/满载/禁用），回退单账号链路');
+        this.logger.debug('池化上传选号无可用候选（冷却/满载/禁用），等待重试');
         // 限频 warn（60s 一次）：账号持续冷却时该分支每次上传都会命中，不设限会刷屏；
         // 但完全静默会让「池化为何未生效」在生产不可诊断，故保留一条带计数的告警。
         const now = Date.now();
         if (now - this.lastNoCandidateLogAt >= 60_000) {
           this.lastNoCandidateLogAt = now;
           this.logger.warn(
-            `池化上传选号无可用候选（冷却/满载/禁用），回退单账号链路（候选 ${available.length}，已排除 ${excluded.size}）`,
+            `池化上传选号无可用候选（冷却/满载/禁用），等待重试（候选 ${available.length}，已排除 ${excluded.size}）`,
           );
         }
         break;
@@ -153,6 +158,10 @@ export class AccountAwareUploadService {
           selectionReason: selection.reason,
         };
       } catch (error) {
+        if (params.signal?.aborted) {
+          this.pool.releaseAttempt(account.id);
+          throw error;
+        }
         this.finishFailed(account.id, error);
         excluded.add(account.id);
         this.logger.warn(
@@ -171,7 +180,7 @@ export class AccountAwareUploadService {
       }
     }
 
-    return null;
+    throw new AccountUploadUnavailableError();
   }
 
   /** 记录一次失败的尝试（按错误分类进入冷却） */

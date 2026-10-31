@@ -31,6 +31,7 @@ interface SetupOptions {
   mirrorEnabled?: boolean;
   target?: number | undefined;
   readyAccountIds?: string[];
+  eligibleAccountIds?: string[];
   descriptor?: Record<string, unknown>;
   created?: boolean;
   describeError?: Error;
@@ -54,6 +55,7 @@ function setup(options: SetupOptions = {}) {
   };
   const replicaTargets = {
     desiredReplicas: jest.fn(async () => ('target' in options ? options.target : 2)),
+    evaluateEligibility: jest.fn(() => (options.eligibleAccountIds ?? ['bot-a', 'bot-b', 'bot-c']).map(accountId => ({ accountId, eligible: true }))),
   };
 
   const service = new TelegramMirrorLazyTriggerService(
@@ -76,6 +78,13 @@ describe('TelegramMirrorLazyTriggerService（下载期懒触发补扩散）', ()
 
   afterEach(() => {
     jest.restoreAllMocks();
+  });
+
+  it('停用账号的副本不掩盖可用账号的缺口', async () => {
+    const ctx = setup({ target: 2, readyAccountIds: ['disabled', 'bot-a'], eligibleAccountIds: ['bot-a', 'bot-b'] });
+    ctx.service.maybeTrigger('file', 'f-1');
+    await flush();
+    expect(ctx.trigger.onFileCommitted).toHaveBeenCalledTimes(1);
   });
 
   it('副本不足 → 按源事实建单一次（web_upload 语义、只建单不搬字节）', async () => {
