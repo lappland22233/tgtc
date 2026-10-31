@@ -110,6 +110,7 @@ export function useChunkedUpload(concurrency = 2) {
     uploading.value = true;
     uploadId.value = null;
     let mergeTriggered = false;
+    let heartbeat: ReturnType<typeof setInterval> | undefined;
 
     // 自适应分片大小：根据文件大小动态计算，可被调用方传入的 hint 覆盖。
     // 【重要】分片大小在 init 时即固定，整个上传过程中绝不改变。
@@ -178,11 +179,30 @@ export function useChunkedUpload(concurrency = 2) {
       uploadId.value = initRes.data.data.uploadId;
 
       // 2. Get uploaded status（15s 独立超时）
-      const statusRes = await withTimeoutSignal(STATUS_TIMEOUT, signal, (s) =>
-        api.get(`/files/chunk/${uploadId.value}/status`, { signal: s, timeout: 0 }),
-      );
+      let statusRes: AxiosResponse | undefined;
+      for (let attempt = 0; ; attempt++) {
+        try {
+          statusRes = await withTimeoutSignal(STATUS_TIMEOUT, signal, (s) =>
+            api.get(`/files/chunk/${uploadId.value}/status`, { signal: s, timeout: 0 }),
+          );
+          break;
+        } catch (err: any) {
+          if (signal?.aborted || attempt >= MAX_RETRIES || !isSafeRequestRetryable(err)) throw err;
+          await waitForRetry(RETRY_BASE_DELAY * 2 ** attempt + Math.floor(Math.random() * 1000), signal);
+        }
+      }
       // 以“已成功索引集合”作为续传/进度判定的唯一依据（并发下完成顺序非连续，不能用计数假定前 N 个已完成）
-      const uploadedIndices = new Set<number>(statusRes.data.data.uploaded);
+      const uploadedIndices = new Set<number>(statusRes!.data.data.uploaded);
+      // 大批量时分片可能长时间等待全局令牌；保持服务端会话活跃，避免被空闲回收。
+      const sessionId = uploadId.value;
+      let heartbeatPending = false;
+      heartbeat = setInterval(() => {
+        if (heartbeatPending || signal?.aborted) return;
+        heartbeatPending = true;
+        void withTimeoutSignal(STATUS_TIMEOUT, signal, (s) =>
+          api.get(`/files/chunk/${sessionId}/status`, { signal: s, timeout: 0 }),
+        ).catch(() => {}).finally(() => { heartbeatPending = false; });
+      }, 60_000);
 
       // 3. 仅保存待上传分片索引；Blob 在 worker 取得槽位后即时切片，避免预创建全部 wrapper。
       const pendingIndices: number[] = [];
@@ -222,11 +242,12 @@ export function useChunkedUpload(concurrency = 2) {
         const end = Math.min(start + chunkSize, file.size);
         const blob = file.slice(start, end);
         let retryCount = 0;
+        let budgetRetryCount = 0;
         for (;;) {
           if (signal?.aborted) return;
       
-          // 获取全局上传令牌；等待超过 180s 会 reject（防止无限排队）
-          await uploadScheduler.acquire();
+          // 获取全局上传令牌；排队可由用户取消，不将拥塞误判为失败
+          await uploadScheduler.acquire(signal);
           let retryDelay = 0;
           // 该分片是否因服务器的串行上传名额被占用而重试（严格小盘模式）：
           // 属排队语义，退避等待期间同样上报等待态，避免用户只看到「重试」。
@@ -258,12 +279,16 @@ export function useChunkedUpload(concurrency = 2) {
               }
       
               // 统一由 classifyUploadError 判定可重试性（与队列层同一套语义）：
-              // 带 response 的 5xx 不再重试（服务器内部错误，重试可能产生重复文件），
-              // 413/400/401 等业务 4xx 不可重试，CDN“代理层”消息型裸 Error 保持可重试。
-              const isRetryable = classifyUploadError(err).retryable;
+              // 分片按索引原子替换，可安全重试传输错误和 5xx；业务 4xx 不重试。
+              const isRetryable = controller.signal.aborted || isSafeRequestRetryable(err);
               budgetBusy = isUploadBudgetBusy(err);
       
-              if (isRetryable && retryCount < MAX_RETRIES) {
+              if (budgetBusy && budgetRetryCount < MAX_DISK_BUDGET_RETRIES) {
+                budgetRetryCount++;
+                retryDelay = getUploadBudgetRetryAfterMs(err) ?? 5000;
+                progress.value.retrying = true;
+                onProgress?.(progress.value);
+              } else if (!budgetBusy && isRetryable && retryCount < MAX_RETRIES) {
                 // 指数退避 + 随机抖动，避免雷群效应
                 retryDelay = RETRY_BASE_DELAY * Math.pow(2, retryCount) + Math.floor(Math.random() * 1000);
                 progress.value.retrying = true;
@@ -301,7 +326,7 @@ export function useChunkedUpload(concurrency = 2) {
           // 不持有令牌的情况下退避等待，避免长时间占用并发槽位
           if (budgetBusy) reportWaiting(true);
           try {
-            await new Promise(resolve => setTimeout(resolve, retryDelay));
+            await waitForRetry(retryDelay, signal);
           } finally {
             if (budgetBusy) reportWaiting(false);
           }
@@ -338,21 +363,33 @@ export function useChunkedUpload(concurrency = 2) {
 
       // 并发上传（滑动窗口，while 循环消费队列，替代尾递归避免超大批量栈溢出）
       let nextIdx = 0;
+      let workerFailed = false;
       const runWorker = async (): Promise<void> => {
         while (true) {
+          if (workerFailed) return;
           const idx = nextIdx++;
           if (idx >= pendingIndices.length) return;
-          await uploadChunk(pendingIndices[idx]);
+          try {
+            await uploadChunk(pendingIndices[idx]);
+          } catch (err) {
+            workerFailed = true;
+            throw err;
+          }
         }
       };
 
-      await Promise.all(
+      const workers = await Promise.allSettled(
         Array.from({ length: Math.min(concurrency, pendingIndices.length) }, () => runWorker()),
       );
+      const failedWorker = workers.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+      if (failedWorker) throw failedWorker.reason;
+      if (signal?.aborted) throw new Error('上传已取消');
 
       // 5. Trigger async merge (immediate return, non-blocking), with retry on CDN 502
       for (let retry = 0; retry < MAX_RETRIES; retry++) {
         try {
+          // 请求一旦发出，服务端可能已经接管，后续失败不能清理其工作目录。
+          mergeTriggered = true;
           await withTimeoutSignal(COMPLETE_TIMEOUT, signal, (s) =>
             api.post(`/files/chunk/${uploadId.value}/complete`, {}, { signal: s, timeout: 0 }),
           );
@@ -363,9 +400,12 @@ export function useChunkedUpload(concurrency = 2) {
           // 仅 transient 类（无 response 的传输层/CDN 代理层错误）触发重试；
           // 带 response 的 5xx 不再重试（后端已受理，重试可能重复触发合并）。
           const isRetryable = classifyUploadError(err).retryable;
-          if (!isRetryable || retry >= MAX_RETRIES - 1) throw err;
+          if (!isRetryable || retry >= MAX_RETRIES - 1) {
+            if (isRetryable) throw new Error('服务暂时不可用，合并仍在后台进行，请稍后刷新文件列表查看');
+            throw err;
+          }
           console.warn(`[分片上传] 合并触发失败，${RETRY_BASE_DELAY / 1000}s 后重试 (${retry + 1}/${MAX_RETRIES})`);
-          await new Promise(resolve => setTimeout(resolve, RETRY_BASE_DELAY));
+          await waitForRetry(RETRY_BASE_DELAY, signal);
         }
       }
       if (!mergeTriggered) {
@@ -391,6 +431,8 @@ export function useChunkedUpload(concurrency = 2) {
         uploadId.value = null;
       }
       throw err;
+    } finally {
+      if (heartbeat) clearInterval(heartbeat);
     }
   }
 
@@ -421,6 +463,11 @@ async function withTimeoutSignal<T>(
     : { signal: controller.signal, dispose: () => {} };
   try {
     return await run(merged.signal);
+  } catch (err) {
+    if (controller.signal.aborted && !externalSignal?.aborted) {
+      throw Object.assign(new Error('请求超时'), { code: 'ETIMEDOUT' });
+    }
+    throw err;
   } finally {
     clearTimeout(timeoutId);
     merged.dispose();
@@ -449,6 +496,11 @@ function combineSignals(a: AbortSignal, b: AbortSignal): { signal: AbortSignal; 
   return { signal: controller.signal, dispose };
 }
 
+// 分片写入按索引原子替换、状态查询为只读，服务端 5xx 也可安全重试。
+function isSafeRequestRetryable(err: any): boolean {
+  return classifyUploadError(err).retryable || (err?.response?.status >= 500 && err?.response?.status <= 599);
+}
+
 /** 轮询合并状态，避免长时间同步等待触发 CDN 502 */
 async function pollMergeResult(
   uploadId: string,
@@ -460,7 +512,7 @@ async function pollMergeResult(
 
   for (let i = 0; i < maxAttempts; i++) {
     if (signal?.aborted) throw new Error('上传已取消');
-    await new Promise(resolve => setTimeout(resolve, 5000));
+    await waitForRetry(5000, signal);
 
     let businessError: Error | null = null;
     try {
@@ -476,6 +528,8 @@ async function pollMergeResult(
       if (mergeStatus === 'error') {
         // 后端明确合并失败：打上业务标记，防止任意 mergeError 文案被队列误判为可重试
         businessError = createMergeBusinessError(mergeError || '合并失败');
+      } else {
+        continue;
       }
     } catch (err: any) {
       // Cancel/Abort — 直接抛出
@@ -503,7 +557,7 @@ async function pollMergeResult(
 
     // 退避重试：2s, 4s, 8s
     const delay = 2000 * Math.pow(2, consecutiveFailures - 1);
-    await new Promise(resolve => setTimeout(resolve, delay));
+    await waitForRetry(delay, signal);
   }
   throw new Error('合并处理中，请稍后刷新文件列表查看；如文件未出现，请重新上传');
 }

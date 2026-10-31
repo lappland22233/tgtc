@@ -325,4 +325,51 @@ describe('downloads store', () => {
       expect(label).not.toContain('下载成功');
     }
   });
+
+  it('并发请求同一文件只创建一次下载任务', async () => {
+    let resolve!: (view: unknown) => void;
+    createDownloadTask.mockReturnValue(new Promise(r => { resolve = r; }));
+    const store = useDownloadsStore();
+    const first = store.requestDownload({ fileId: 'f1', fileName: 'a' });
+    const second = store.requestDownload({ fileId: 'f1', fileName: 'a' });
+    expect(createDownloadTask).toHaveBeenCalledTimes(1);
+    resolve(queuedView());
+    await Promise.all([first, second]);
+    expect(store.jobs).toHaveLength(1);
+    store.stopAll();
+  });
+
+  it('可见性刷新与定时轮询重叠时只触发一次下载', async () => {
+    vi.useFakeTimers();
+    createDownloadTask.mockResolvedValueOnce(queuedView());
+    let resolve!: (view: unknown) => void;
+    fetchDownloadTask.mockReturnValue(new Promise(r => { resolve = r; }));
+    const store = useDownloadsStore();
+    await store.requestDownload({ fileId: 'f1', fileName: 'a' });
+    store.refreshOnVisible();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(fetchDownloadTask).toHaveBeenCalledTimes(1);
+    resolve(queuedView({ status: 'streamable' }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(triggerBrowserDownload).toHaveBeenCalledTimes(1);
+    store.stopAll();
+  });
+
+  it('取消完成后忽略先前在途轮询的旧结果', async () => {
+    vi.useFakeTimers();
+    createDownloadTask.mockResolvedValueOnce(queuedView());
+    let resolve!: (view: unknown) => void;
+    fetchDownloadTask.mockReturnValue(new Promise(r => { resolve = r; }));
+    cancelDownloadTask.mockResolvedValueOnce(queuedView({ status: 'cancelled' }));
+    const store = useDownloadsStore();
+    await store.requestDownload({ fileId: 'f1', fileName: 'a' });
+    await vi.advanceTimersByTimeAsync(1000);
+    await store.cancel('task-1');
+    resolve(queuedView({ status: 'streamable' }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(triggerBrowserDownload).not.toHaveBeenCalled();
+    expect(store.jobs).toHaveLength(0);
+    store.stopAll();
+  });
+
 });

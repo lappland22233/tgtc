@@ -341,6 +341,11 @@ export class ChunkUploadService implements OnModuleInit {
     if (strictDiskLease) {
       await this.ensureDiskSpace(2 * fileSize);
       await this.uploadDiskBudget!.acquireSession(uploadId, fileSize);
+      // 等待磁盘租约期间其他 init 可能已占满配额。
+      if ([...this.sessions.values()].filter(s => s.uploadedBy === userId && this.isActiveSession(s)).length >= ChunkUploadService.MAX_SESSIONS_PER_USER) {
+        this.uploadDiskBudget!.releaseSession(uploadId);
+        throw new BadRequestException('上传会话过多，请完成或取消现有上传');
+      }
     }
     const now = new Date();
     const session: ChunkSession = {
@@ -388,6 +393,8 @@ export class ChunkUploadService implements OnModuleInit {
     if (reservedBytes > session.chunkSize + 1024 * 1024) {
       throw new BadRequestException('请求体超过声明的分片大小');
     }
+    await this.ensureDiskSpace(reservedBytes);
+    // 磁盘检查会让出事件循环，必须在检查完成后读取和更新并发计数。
     const userRequests = this.inFlightRequestsByUser.get(userId) || 0;
     const sessionRequests = this.inFlightRequestsBySession.get(uploadId) || 0;
     if (userRequests >= this.maxConcurrentRequestsPerUser
@@ -401,8 +408,6 @@ export class ChunkUploadService implements OnModuleInit {
         HttpStatus.TOO_MANY_REQUESTS,
       );
     }
-    await this.ensureDiskSpace(reservedBytes);
-
     this.inFlightRequests++;
     this.inFlightBytes += reservedBytes;
     this.inFlightRequestsByUser.set(userId, userRequests + 1);
@@ -524,8 +529,8 @@ export class ChunkUploadService implements OnModuleInit {
       this.logger.warn(`[分片上传] ${uploadId} 已在合并中`);
       return;
     }
-    if (session.mergeStatus === 'done') {
-      this.logger.warn(`[分片上传] ${uploadId} 已完成合并`);
+    if (session.mergeStatus === 'done' || session.mergeStatus === 'error') {
+      this.logger.warn(`[分片上传] ${uploadId} 合并已结束: ${session.mergeStatus}`);
       return;
     }
 

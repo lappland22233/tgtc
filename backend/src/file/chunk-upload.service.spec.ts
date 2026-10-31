@@ -98,6 +98,30 @@ describe('ChunkUploadService session quota', () => {
     expect(String(response.message)).toBe('服务器正在接收上一分片，请稍候');
   });
 
+  it('enforces strict chunk concurrency when disk checks finish together', async () => {
+    uploadDiskBudget.isStrictMode.mockReturnValue(true);
+    const { uploadId } = await init();
+    const results = await Promise.allSettled([
+      service.acquireChunkRequest(uploadId, userId, MB),
+      service.acquireChunkRequest(uploadId, userId, MB),
+    ]);
+    const success = results.filter((r): r is PromiseFulfilledResult<() => void> => r.status === 'fulfilled');
+    expect(success).toHaveLength(1);
+    expect(results.filter(r => r.status === 'rejected')).toHaveLength(1);
+    success[0].value();
+  });
+
+  it('does not restart a failed merge when complete is retried', async () => {
+    const { uploadId } = await init();
+    const session = (service as any).sessions.get(uploadId);
+    session.mergeStatus = 'error';
+    session.mergeError = 'failed';
+    const upload = jest.fn();
+    service.triggerMerge(uploadId, userId, upload);
+    expect(session.mergeStatus).toBe('error');
+    expect(upload).not.toHaveBeenCalled();
+  });
+
   it.each(['done', 'error'] as const)('does not count %s sessions against the active quota', async (status) => {
     await Promise.all(Array.from({ length: 10 }, () => init()));
     const sessions = (service as any).sessions as Map<string, any>;
