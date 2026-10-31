@@ -167,6 +167,36 @@ describe('AccountAwareDownloadService（选号 / 换号 / 非阻断懒扩散）'
     expect(ctx.pool.finishAttempt).toHaveBeenCalledWith('a1', expect.objectContaining({ ok: true }));
   });
 
+  it('流端点开启时源账号仍使用已有的失效路径恢复实现', async () => {
+    const ctx = setup({ readyAccounts: ['a1'] });
+    const standard = jest.fn(async () => ({ stream: Readable.from(['x']), info: { file_id: 'f', file_size: 1 } }));
+    const result = await ctx.service.openSourceStream({ accountId: 'a1', fileId: 'f', openStandard: standard });
+    expect(result).not.toBeNull();
+    expect(standard).toHaveBeenCalledTimes(1);
+    expect(ctx.client.openRealtimeStream).not.toHaveBeenCalled();
+    for await (const _chunk of result!.stream) { /* 准入随流完成释放 */ }
+    expect(ctx.pool.finishAttempt).toHaveBeenCalledWith('a1', expect.objectContaining({ ok: true }));
+  });
+
+  it('选号命中默认账号时使用对应副本 ID 执行恢复，并受准入限制', async () => {
+    const ctx = setup({ readyAccounts: ['a1'] });
+    const openDefault = jest.fn(async (id: string) => ({ stream: Readable.from(['x']), info: { file_id: id, file_size: 1 } }));
+    const result = await ctx.service.openStream({ ownerType: 'fileUnique', ownerId: 'u', defaultAccountId: 'a1', openDefault });
+    expect(ctx.pool.admit).toHaveBeenCalledWith(expect.objectContaining({ accountId: 'a1' }));
+    expect(openDefault).toHaveBeenCalledWith('a1-file');
+    expect(ctx.client.openRealtimeStream).not.toHaveBeenCalled();
+    for await (const _chunk of result!.stream) { /* 准入随流完成释放 */ }
+  });
+
+  it('选号命中其他账号时不调用默认 Bot 的恢复实现', async () => {
+    const ctx = setup({ readyAccounts: ['a2'] });
+    const openDefault = jest.fn();
+    const result = await ctx.service.openStream({ ownerType: 'fileUnique', ownerId: 'u', defaultAccountId: 'a1', openDefault });
+    expect(openDefault).not.toHaveBeenCalled();
+    expect(ctx.client.openRealtimeStream).toHaveBeenCalledWith('a2', expect.anything(), 'a2-file', undefined, expect.anything());
+    result!.stream.destroy();
+  });
+
   it('流端点关闭且账号满载时不使用标准 Bot API 绕过准入', async () => {
     const ctx = setup({ readyAccounts: ['a1'], busyAccounts: ['a1'] });
     ctx.client.isStreamingEnabled.mockReturnValue(false);

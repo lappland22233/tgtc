@@ -209,6 +209,7 @@ export class FileService implements OnModuleInit {
   ): Promise<{ stream: Readable; info: { file_id: string; file_path: string; file_size: number } }> {
     const noCache = options?.noCache === true;
     const poolDownload = this.accountAwareDownload;
+    const defaultAccountId = this.defaultBotAccountId();
     if (poolDownload?.isActive() && this.fileCopies) {
       // 下载冷路径上的老文件补扩散：是否建单由懒触发服务按「冷却窗口 + 副本缺口 + 源锚点」
       // 自行判定。这里再兜一层 try/catch：补扩散的任何失败都不得改变下载行为（fail-open）。
@@ -231,6 +232,8 @@ export class FileService implements OnModuleInit {
             expectedSize,
             noCache,
             fileName: file.originalName || file.filename,
+            defaultAccountId,
+            openDefault: (fileId: string) => this.telegramService.getRealtimeFileStream(fileId, expectedSize, { noCache }),
           });
           if (opened) {
             return {
@@ -251,7 +254,6 @@ export class FileService implements OnModuleInit {
     // 用默认 Bot 去取会得到 502/无效 file_id。记录来源账号且它不是默认 Bot 时，
     // 先用该账号自己的 `file_id` 回源（这正是「不把 A 的 file_id 交给 B」的落点）。
     const sourceAccountId = (file.telegramSourceAccountId || '').trim();
-    const defaultAccountId = this.defaultBotAccountId();
     const fallbackAccountId = sourceAccountId || defaultAccountId;
     const requiresSourceAccount = Boolean(sourceAccountId && sourceAccountId !== defaultAccountId);
     const usePoolFallback = Boolean(poolDownload?.isActive() && fallbackAccountId &&
