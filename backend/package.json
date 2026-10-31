@@ -93,7 +93,7 @@
   "_overridesNote": "Pinned security patches for HTTP/upload parsers, redirects and transitive IP/UUID handling. Bull UUID compatibility is exercised against real Redis; multipart limits and interrupted uploads use real HTTP tests.",
   "overrides": {
     "multer": "2.5.0",
-    "follow-redirects": "1.16.1",
+    "follow-redirects": "1.16.2",
     "proxy-addr": "2.0.8",
     "body-parser": "2.4.0",
     "undici": "6.29.1",
