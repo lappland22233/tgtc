@@ -29,6 +29,7 @@ function makeFile(overrides: Record<string, unknown> = {}): Record<string, unkno
     originalName: 'a.bin',
     filename: 'a.bin',
     telegramFileId: 'tg-1',
+    telegramFileUniqueId: 'unique-1',
     telegramSourceAccountId: null,
     size: 1024,
     ...overrides,
@@ -43,6 +44,8 @@ function setup(options: {
   copies?: Array<Record<string, unknown>>;
   openStreamResult?: Record<string, unknown> | null;
   openSourceStreamResult?: Record<string, unknown> | null;
+  defaultRegistered?: boolean;
+  active?: boolean;
 } = {}) {
   const getRealtimeFileStream = jest.fn(async () => ({
     stream: makeStream(),
@@ -52,7 +55,8 @@ function setup(options: {
   const openSourceStream = jest.fn(async () => options.openSourceStreamResult ?? null);
   const bumpCounter = jest.fn();
   const accountAwareDownload = {
-    isActive: () => true,
+    isActive: () => options.active ?? true,
+    hasAccount: (id: string) => id === DEFAULT_ACCOUNT_ID && !!options.defaultRegistered,
     openStream,
     openSourceStream,
     bumpCounter,
@@ -161,6 +165,34 @@ describe('FileService.openTelegramSourceStream（回源归属 fail-closed）', (
     expect(ctx.getRealtimeFileStream).toHaveBeenCalledTimes(1);
     expect(ctx.getRealtimeFileStream).toHaveBeenCalledWith('tg-1', 1024, { noCache: false });
     expect(result.info.file_id).toBe('legacy-file-id');
+  });
+
+  it('缺少内容唯一标识时不会使用可能属于旧版本的副本', async () => {
+    const ctx = setup({ copies: [{ accountId: '777', telegramFileId: 'old-file' }] });
+    await (ctx.service as any).openTelegramSourceStream(makeFile({ telegramFileUniqueId: null }), 1024);
+    expect(ctx.openStream).not.toHaveBeenCalled();
+    expect(ctx.getRealtimeFileStream).toHaveBeenCalledTimes(1);
+  });
+
+  it('默认账号允许在账号准入内部使用标准回源', async () => {
+    const ctx = setup({ defaultRegistered: true });
+    (ctx.openSourceStream as jest.Mock).mockImplementation(async (params: any) => params.openStandard());
+    const result = await (ctx.service as any).openTelegramSourceStream(makeFile(), 1024);
+    expect(result.info.file_id).toBe('legacy-file-id');
+    expect(ctx.getRealtimeFileStream).toHaveBeenCalledTimes(1);
+  });
+
+  it('默认账号在池内且满载时，不绕过准入回退', async () => {
+    const ctx = setup({ defaultRegistered: true });
+    await expect((ctx.service as any).openTelegramSourceStream(makeFile(), 1024)).rejects.toBeInstanceOf(DownloadResourceException);
+    expect(ctx.openSourceStream).toHaveBeenCalledWith(expect.objectContaining({ accountId: DEFAULT_ACCOUNT_ID }));
+    expect(ctx.getRealtimeFileStream).not.toHaveBeenCalled();
+  });
+
+  it('关闭账号池后非默认来源不使用错误账号回源', async () => {
+    const ctx = setup({ active: false });
+    await expect((ctx.service as any).openTelegramSourceStream(makeFile({ telegramSourceAccountId: '777' }), 1024)).rejects.toBeInstanceOf(DownloadResourceException);
+    expect(ctx.getRealtimeFileStream).not.toHaveBeenCalled();
   });
 
   it('池化取流成功 → 直接返回池化流，不触碰源账号兜底与默认链路', async () => {

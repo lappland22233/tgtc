@@ -120,6 +120,7 @@ function setup(options: {
   };
 
   const client = {
+    isStreamingEnabled: jest.fn(() => true),
     openRealtimeStream: jest.fn(async (accountId: string) => {
       if (failAccounts.has(accountId)) {
         throw new TelegramAccountError('429 Too Many Requests', accountId, 'flood', 429, 30);
@@ -153,6 +154,67 @@ function setup(options: {
 }
 
 describe('AccountAwareDownloadService（选号 / 换号 / 非阻断懒扩散）', () => {
+  it('流端点关闭时在准入后使用标准 Bot API', async () => {
+    const ctx = setup({ readyAccounts: ['a1'] });
+    ctx.client.isStreamingEnabled.mockReturnValue(false);
+    const standard = jest.fn(async () => ({ stream: Readable.from(['x']), info: { file_id: 'f', file_size: 1 } }));
+    const pooled = await ctx.service.openStream({ ownerType: 'fileUnique', ownerId: 'u' });
+    expect(pooled).toBeNull();
+    const result = await ctx.service.openSourceStream({ accountId: 'a1', fileId: 'f', openStandard: standard });
+    expect(standard).toHaveBeenCalledTimes(1);
+    expect(ctx.client.openRealtimeStream).not.toHaveBeenCalled();
+    for await (const _chunk of result!.stream) { /* 消费完成，归还准入 */ }
+    expect(ctx.pool.finishAttempt).toHaveBeenCalledWith('a1', expect.objectContaining({ ok: true }));
+  });
+
+  it('流端点开启时源账号仍使用已有的失效路径恢复实现', async () => {
+    const ctx = setup({ readyAccounts: ['a1'] });
+    const standard = jest.fn(async () => ({ stream: Readable.from(['x']), info: { file_id: 'f', file_size: 1 } }));
+    const result = await ctx.service.openSourceStream({ accountId: 'a1', fileId: 'f', openStandard: standard });
+    expect(result).not.toBeNull();
+    expect(standard).toHaveBeenCalledTimes(1);
+    expect(ctx.client.openRealtimeStream).not.toHaveBeenCalled();
+    for await (const _chunk of result!.stream) { /* 准入随流完成释放 */ }
+    expect(ctx.pool.finishAttempt).toHaveBeenCalledWith('a1', expect.objectContaining({ ok: true }));
+  });
+
+  it('选号命中默认账号时使用对应副本 ID 执行恢复，并受准入限制', async () => {
+    const ctx = setup({ readyAccounts: ['a1'] });
+    const openDefault = jest.fn(async (id: string) => ({ stream: Readable.from(['x']), info: { file_id: id, file_size: 1 } }));
+    const result = await ctx.service.openStream({ ownerType: 'fileUnique', ownerId: 'u', defaultAccountId: 'a1', openDefault });
+    expect(ctx.pool.admit).toHaveBeenCalledWith(expect.objectContaining({ accountId: 'a1' }));
+    expect(openDefault).toHaveBeenCalledWith('a1-file');
+    expect(ctx.client.openRealtimeStream).not.toHaveBeenCalled();
+    for await (const _chunk of result!.stream) { /* 准入随流完成释放 */ }
+  });
+
+  it('选号命中其他账号时不调用默认 Bot 的恢复实现', async () => {
+    const ctx = setup({ readyAccounts: ['a2'] });
+    const openDefault = jest.fn();
+    const result = await ctx.service.openStream({ ownerType: 'fileUnique', ownerId: 'u', defaultAccountId: 'a1', openDefault });
+    expect(openDefault).not.toHaveBeenCalled();
+    expect(ctx.client.openRealtimeStream).toHaveBeenCalledWith('a2', expect.anything(), 'a2-file', undefined, expect.anything());
+    result!.stream.destroy();
+  });
+
+  it('流端点关闭且账号满载时不使用标准 Bot API 绕过准入', async () => {
+    const ctx = setup({ readyAccounts: ['a1'], busyAccounts: ['a1'] });
+    ctx.client.isStreamingEnabled.mockReturnValue(false);
+    const standard = jest.fn();
+    expect(await ctx.service.openSourceStream({ accountId: 'a1', fileId: 'f', openStandard: standard })).toBeNull();
+    expect(standard).not.toHaveBeenCalled();
+  });
+
+  it('提前关闭流时释放准入但不记录账号失败', async () => {
+    const ctx = setup({ readyAccounts: ['a1'] });
+    const result = await ctx.service.openStream({ ownerType: 'file', ownerId: 'u1' });
+    expect(result).not.toBeNull();
+    const closed = new Promise<void>(resolve => result!.stream.once('close', resolve));
+    result!.stream.destroy();
+    await closed;
+    expect(ctx.pool.finishAttempt).not.toHaveBeenCalled();
+  });
+
   it('未启用账号池时直接返回 null（交由调用方走原单账号链路）', async () => {
     const ctx = setup({ active: false, readyAccounts: ['a1'] });
     const result = await ctx.service.openStream({ ownerType: 'fileUnique', ownerId: 'u1' });

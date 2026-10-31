@@ -13,6 +13,18 @@ const TOKEN_B = '2222222:BBBB-secret-value-bbbbbbbbbbbbbbbb';
 const TOKEN_C = '3333333:CCCC-secret-value-cccccccccccccccc';
 
 describe('TelegramAccountPoolService（选号 / 冷却 / 快照）', () => {
+  it('does not shorten an existing flood cooldown after a probe failure', () => {
+    const config = { get: (key: string) => ({
+      TELEGRAM_ACCOUNT_POOL_ENABLED: 'true',
+      TELEGRAM_ACCOUNT_POOL: JSON.stringify([{ id: 'flood', token: '1:test', chatId: '1' }]),
+    } as Record<string, string>)[key] };
+    const pool = new TelegramAccountPoolService(config as any);
+    pool.beginAttempt('flood');
+    pool.finishAttempt('flood', { ok: false, failureKind: 'flood', retryAfterSeconds: 3600 });
+    pool.recordProbe('flood', false, undefined, 'network');
+    expect(pool.runtimeView('flood')!.cooldownRemainingMs).toBeGreaterThan(3_500_000);
+  });
+
   it('未启用时 isActive=false 且给出可诊断的未生效原因，选号一律返回 null', () => {
     const pool = makePool({
       TELEGRAM_ACCOUNT_POOL: JSON.stringify([{ token: TOKEN_A, chatId: '-1001' }]),

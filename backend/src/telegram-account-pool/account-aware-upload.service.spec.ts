@@ -51,6 +51,7 @@ function makePool(accounts: StubAccount[], options: { active?: boolean } = {}) {
       state.inflight += 1;
       return true;
     },
+    releaseAttempt: (id: string) => { const state = states.get(id); if (state) state.inflight = Math.max(0, state.inflight - 1); },
     finishAttempt: (id: string, sample: { ok: boolean }) => {
       const state = states.get(id);
       if (!state) return;
@@ -97,6 +98,16 @@ function streamFactory() {
 }
 
 describe('AccountAwareUploadService（上传选号 / 换号 / 回退）', () => {
+  it('用户取消不会换号或冷却账号', async () => {
+    const controller = new AbortController();
+    const send = jest.fn(async () => { controller.abort(); throw new Error('cancelled'); });
+    const { service, pool } = makeService({ accounts: [{ id: 'a1', chatId: '1' }, { id: 'a2', chatId: '2' }], send });
+    await expect(service.upload({ filename: 'a', knownLength: 10, openStream: streamFactory().factory, signal: controller.signal })).rejects.toThrow('cancelled');
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(pool.inflightOf('a1')).toBe(0);
+    expect(pool.coolingDown('a1')).toBe(false);
+  });
+
   it('池未启用：返回 null 交由调用方回退默认链路，且不发起任何上传', async () => {
     const { service, send } = makeService({ active: false });
 
@@ -161,7 +172,7 @@ describe('AccountAwareUploadService（上传选号 / 换号 / 回退）', () => 
     expect(pool.inflightOf('a2')).toBe(0);
   });
 
-  it('全部候选失败：返回 null（调用方回退默认链路），尝试次数有硬上限', async () => {
+  it('全部候选失败：返回可重试错误，尝试次数有硬上限', async () => {
     const send = jest.fn().mockRejectedValue(new TelegramAccountError('boom', 'a1', 'network', 500));
     const { service, pool } = makeService({
       accounts: [
@@ -173,8 +184,7 @@ describe('AccountAwareUploadService（上传选号 / 换号 / 回退）', () => 
       send,
     });
 
-    const result = await service.upload({ filename: 'a.bin', knownLength: 10, openStream: streamFactory().factory });
-    expect(result).toBeNull();
+    await expect(service.upload({ filename: 'a.bin', knownLength: 10, openStream: streamFactory().factory })).rejects.toThrow('上传账号当前繁忙或不可用');
     // 首次 + 最多 2 次换号 = 3 次尝试（不得无限重试）
     expect(send).toHaveBeenCalledTimes(3);
     expect(pool.counters.selections).toBe(3);
@@ -192,7 +202,7 @@ describe('AccountAwareUploadService（上传选号 / 换号 / 回退）', () => 
     expect(send.mock.calls[0][0]).toBe('with-chat');
   });
 
-  it('候选存在但全部不可调度（冷却/满载/禁用）：返回 null 不抛出、记录限频 warn、不发起上传', async () => {
+  it('候选均不可调度时返回可重试错误并限频告警', async () => {
     const warnSpy = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
     const debugSpy = jest.spyOn(Logger.prototype, 'debug').mockImplementation(() => undefined);
     try {
@@ -200,14 +210,10 @@ describe('AccountAwareUploadService（上传选号 / 换号 / 回退）', () => 
       // 唯一候选进入冷却（持续不可调度）→ select 无可用候选 → 回退单账号链路
       pool.finishAttempt('a1', { ok: false });
 
-      const first = await service.upload({ filename: 'a.bin', knownLength: 10, openStream: streamFactory().factory });
-      const second = await service.upload({ filename: 'a.bin', knownLength: 10, openStream: streamFactory().factory });
-
-      // 不抛出：调用方据此回退默认单账号链路
-      expect(first).toBeNull();
-      expect(second).toBeNull();
+      await expect(service.upload({ filename: 'a.bin', knownLength: 10, openStream: streamFactory().factory })).rejects.toThrow('上传账号当前繁忙或不可用');
+      await expect(service.upload({ filename: 'a.bin', knownLength: 10, openStream: streamFactory().factory })).rejects.toThrow('上传账号当前繁忙或不可用');
       expect(send).not.toHaveBeenCalled();
-      expect(debugSpy).toHaveBeenCalledWith('池化上传选号无可用候选（冷却/满载/禁用），回退单账号链路');
+      expect(debugSpy).toHaveBeenCalledWith('池化上传选号无可用候选（冷却/满载/禁用），等待重试');
       // 60s 限频：账号持续冷却时第二次上传不再重复 warn，避免刷屏
       expect(warnSpy).toHaveBeenCalledTimes(1);
       expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('无可用候选'));

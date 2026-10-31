@@ -1,6 +1,7 @@
 import { existsSync, createReadStream } from 'fs';
 import { readFile, writeFile } from 'fs/promises';
 import { FileUploadProcessor } from './file-upload.processor';
+import { AccountUploadUnavailableError } from '../telegram-account-pool/account-aware-upload.service';
 
 jest.mock('file-type', () => ({
   fileTypeFromBuffer: jest.fn(),
@@ -398,6 +399,29 @@ describe('FileUploadProcessor 账号池上传选号', () => {
     mockedReadFile.mockRejectedValue(new Error('ENOENT'));
   });
 
+  it('账号繁忙超过普通重试窗口仍保留源文件并等待名额', async () => {
+    jest.useFakeTimers();
+    try {
+      const repo = makeRepo();
+      repo.findOne.mockResolvedValue(makeFile());
+      repo.findOneOrFail.mockResolvedValueOnce(makeFile({ uploadStage: 'uploading' }))
+        .mockResolvedValue(makeFile({ uploadStage: 'remote_committed', telegramFileId: 'tg' }));
+      const accountUpload = { isActive: () => true, upload: jest.fn()
+        .mockRejectedValueOnce(new AccountUploadUnavailableError(true, 120_000))
+        .mockResolvedValue({ fileId: 'tg', fileSize: 5, chatId: '', messageId: '', accountId: 'a' }) };
+      const telegram = { uploadFile: jest.fn() };
+      const processor = makeProcessor(repo, telegram, makeFileService(), accountUpload);
+      const pending = processor.uploadToTelegram(makeJob(2));
+      await jest.advanceTimersByTimeAsync(0);
+      expect(accountUpload.upload).toHaveBeenCalledTimes(1);
+      expect(repo.update.mock.calls.some(c => (c[1] as any).uploadStage === 'failed')).toBe(false);
+      await jest.advanceTimersByTimeAsync(60_000);
+      await pending;
+      expect(accountUpload.upload).toHaveBeenCalledTimes(2);
+      expect(telegram.uploadFile).not.toHaveBeenCalled();
+    } finally { jest.useRealTimers(); }
+  });
+
   it('非严格任务：池化上传优先，并把实际上传账号写入回执与定位登记', async () => {
     const repo = makeRepo();
     repo.findOne
@@ -441,6 +465,7 @@ describe('FileUploadProcessor 账号池上传选号', () => {
     // 回执必须绑定实际上传账号（重启恢复提交时只有回执可依）
     const persisted = String((writeFile as jest.Mock).mock.calls.at(-1)?.[1] ?? '');
     expect(JSON.parse(persisted).sourceAccountId).toBe('acct-2');
+    expect(repo.update).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ uploadStage: 'remote_committed', telegramSourceAccountId: 'acct-2', telegramChatId: '-100', telegramMessageId: '77' }));
     // 主副本定位登记必须传实际上传账号，否则回源会取错账号
     expect(fileService.registerPrimaryTelegramSource).toHaveBeenCalledWith(
       expect.anything(),

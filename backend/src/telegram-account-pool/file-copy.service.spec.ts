@@ -304,30 +304,14 @@ describe('FileCopyService（副本登记 / 去重 / 生命周期清理）', () =
     expect(ready.map((row) => row.accountId)).toEqual(['a1']);
   });
 
-  it('purgeStale 按阈值分类清理并返回各类计数', async () => {
+  it('purgeStale 保留 ready 副本，只清理失败和悬挂记录', async () => {
     const ctx = setup();
-    ctx.repo.delete
-      .mockResolvedValueOnce({ affected: 2 } as never)  // failed
-      .mockResolvedValueOnce({ affected: 1 } as never)  // pending
-      .mockResolvedValueOnce({ affected: 3 } as never)  // ready 已使用
-      .mockResolvedValueOnce({ affected: 4 } as never); // ready 从未使用
-
-    const result = await ctx.service.purgeStale({
-      failedBefore: new Date('2026-09-20T00:00:00Z'),
-      pendingBefore: new Date('2026-09-21T00:00:00Z'),
-      staleReadyBefore: new Date('2026-08-22T00:00:00Z'),
-    });
-
-    expect(result).toEqual({ failed: 2, pending: 1, staleReadyUsed: 3, staleReadyUnused: 4 });
-    expect(ctx.repo.delete).toHaveBeenCalledTimes(4);
+    ctx.repo.delete.mockResolvedValueOnce({ affected: 2 } as never).mockResolvedValueOnce({ affected: 1 } as never);
+    const result = await ctx.service.purgeStale({ failedBefore: new Date(), pendingBefore: new Date(), staleReadyBefore: new Date() });
+    expect(result).toEqual({ failed: 2, pending: 1, staleReadyUsed: 0, staleReadyUnused: 0 });
+    expect(ctx.repo.delete).toHaveBeenCalledTimes(2);
     expect(ctx.repo.delete).toHaveBeenNthCalledWith(1, expect.objectContaining({ status: 'failed' }));
     expect(ctx.repo.delete).toHaveBeenNthCalledWith(2, expect.objectContaining({ status: 'pending' }));
-    expect(ctx.repo.delete).toHaveBeenNthCalledWith(3, expect.objectContaining({ status: 'ready' }));
-    // 第 4 条必须同时限定「从未使用」（lastUsedAt 为空），避免删掉近期活跃副本
-    const unusedFilter = ctx.repo.delete.mock.calls[3][0]! as Record<string, unknown>;
-    expect(unusedFilter.status).toBe('ready');
-    expect(unusedFilter.createdAt).toBeDefined();
-    expect(unusedFilter.lastUsedAt).toBeDefined();
   });
 
   it('无记录可清理时返回全 0（不误报）', async () => {
@@ -448,6 +432,15 @@ describe('FileCopyService（入站副本桥接到站内逻辑文件）', () => {
       fileSize: '4096',
       source: 'inbound',
     }));
+  });
+
+  it('同一内容关联超过一页文件时全部桥接', async () => {
+    const ctx = setup({ files: [] });
+    ctx.filesRepo!.find.mockResolvedValueOnce(Array.from({ length: 8 }, (_, i) => ({ id: `f-${i}` })) as never)
+      .mockResolvedValueOnce([{ id: 'f-8' }, { id: 'f-9' }] as never);
+    const result = await ctx.service.bridgeInboundCopyToLogicalFile({ fileUniqueId: 'UNIQ', accountId: 'a', telegramFileId: 'f', chatId: 'c', messageId: 'm' });
+    expect(result.matchedFileIds).toHaveLength(10);
+    expect(ctx.filesRepo!.find).toHaveBeenNthCalledWith(2, expect.objectContaining({ skip: 8, take: 8 }));
   });
 
   it('来自中继目标群的认领标注 source=relayed（副本扩散生效的证据）', async () => {

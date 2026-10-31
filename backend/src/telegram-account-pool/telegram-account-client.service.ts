@@ -2,7 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import axios, { AxiosError } from 'axios';
 import FormData from 'form-data';
-import { Readable } from 'stream';
+import { Readable, Transform } from 'stream';
 import { AccountAttemptSample, AccountFailureKind } from './telegram-account-pool.types';
 
 /**
@@ -303,6 +303,7 @@ export class TelegramAccountClientService {
         timeout: 15 * 60 * 1000,
         maxBodyLength: Infinity,
         maxContentLength: Infinity,
+        maxRedirects: 0,
         signal: opts?.signal,
       });
       const result = response.data?.result ?? {};
@@ -387,9 +388,14 @@ export class TelegramAccountClientService {
       const rawLength = response.headers['content-length'];
       const fileSize = Number(Array.isArray(rawLength) ? rawLength[0] : rawLength);
       const upstream = response.data as Readable;
-      upstream.on('data', (chunk: Buffer) => {
-        transferred += chunk.length;
+      const measured = new Transform({
+        transform(chunk: Buffer, _encoding, callback) {
+          transferred += chunk.length;
+          callback(null, chunk);
+        },
       });
+      upstream.pipe(measured);
+      measured.once('close', () => upstream.destroy());
       upstream.on('end', () => {
         settled = { ok: true, bytes: transferred, durationMs: Date.now() - started };
       });
@@ -401,9 +407,10 @@ export class TelegramAccountClientService {
           failureKind: 'network',
           errorMessage: this.redact(error.message, token),
         };
+        measured.destroy(error);
       });
       return {
-        stream: upstream,
+        stream: measured,
         info: { file_id: fileId, file_size: Number.isSafeInteger(fileSize) && fileSize > 0 ? fileSize : 0 },
         sample: () => settled ?? {
           ok: false,

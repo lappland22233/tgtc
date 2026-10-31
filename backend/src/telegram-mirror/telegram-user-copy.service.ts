@@ -19,7 +19,6 @@ import { TelegramMainChatAnchorService } from './telegram-main-chat-anchor.servi
 import {
   MirrorExecutionError,
   classifyMirrorError,
-  isAccountCredentialError,
 } from './telegram-mirror.errors';
 import { MirrorExecutionResult } from './telegram-mirror.types';
 
@@ -135,45 +134,36 @@ export class TelegramUserCopyService {
       await this.closeRoundFailed(round, error);
       throw error;
     }
-    const chosen = this.pickUser(candidates, rule.preferredAccountId, task.id);
-
+    // 仅在明确认证失败时换账号；结果未知的错误必须保持原账号幂等键。
+    const remaining = [...candidates];
+    let chosen = this.pickUser(remaining, rule.preferredAccountId, task.id);
     let copied: { targetChatId: string; targetMessageId: string };
-    try {
-      copied = await this.userClient.copyMessage({
-        credentials: { apiId: chosen.apiId, apiHash: chosen.apiHash, session: chosen.session },
-        sourceChatId: anchor.chatId,
-        sourceMessageId: anchor.messageId,
-        targetChatId,
-        // 幂等键 = 任务 + 镜像群 + 执行账号。
-        //
-        // 「镜像群」必须在键内：多镜像群各自一条任务，若只用任务 + 账号，同一个
-        // random_id 会被服务端按去重返回**另一个镜像群**的消息 ID，而结果里的
-        // targetChatId 是本群——定位与实际位置不一致。
-        // 「账号」也必须在键内：账号选择是确定性的（见 pickUser），因此同一任务的所有
-        // 重试都会派生出同一个 random_id，服务端据此去重，不会在镜像群留下重复副本。
-        idempotencyKey: `${task.id}:${targetChatId}:${chosen.id}`,
-      });
-    } catch (error) {
-      // 顺序不可交换：先按**原始错误**收口轮次（否则轮次会停在 active，清扫只结算
-      // `waiting_claims`，后台时间线会长期显示「进行中」），再标记账号降级。
-      // 降级标记是附带副作用，其自身失败（如库故障）绝不能顶掉原始错误分类、
-      // 更不能把轮次失败收口一起跳过。
-      await this.closeRoundFailed(round, error);
-      if (isAccountCredentialError(error)) {
-        try {
-          await this.accounts.markDegraded(
-            chosen.id,
-            'user_session_invalid',
-            error instanceof Error ? error.message : String(error),
-          );
-        } catch (degradeError) {
-          this.logger.warn(
-            `用户账号降级标记失败（仅影响后台展示，扩散结论不受影响）：`
-            + `${degradeError instanceof Error ? degradeError.message : String(degradeError)}`,
-          );
+    for (;;) {
+      chosen = this.pickUser(remaining, rule.preferredAccountId, task.id);
+      try {
+        copied = await this.userClient.copyMessage({
+          credentials: { apiId: chosen.apiId, apiHash: chosen.apiHash, session: chosen.session },
+          sourceChatId: anchor.chatId,
+          sourceMessageId: anchor.messageId,
+          targetChatId,
+          idempotencyKey: `${task.id}:${targetChatId}:${chosen.id}`,
+        });
+        break;
+      } catch (error) {
+        const authFailure = classifyMirrorError(error).code === 'user_session_invalid';
+        if (authFailure) {
+          try {
+            await this.accounts.markDegraded(chosen.id, 'user_session_invalid', error instanceof Error ? error.message : String(error));
+          } catch (degradeError) {
+            this.logger.warn(`用户账号降级标记失败：${degradeError instanceof Error ? degradeError.message : String(degradeError)}`);
+          }
         }
+        const index = remaining.findIndex(account => account.id === chosen.id);
+        if (index >= 0) remaining.splice(index, 1);
+        if (authFailure && remaining.length > 0) continue;
+        await this.closeRoundFailed(round, error);
+        throw error;
       }
-      throw error;
     }
 
     // 转发成功只是中间态：开立认领等待窗口，由后台清扫按窗口结算

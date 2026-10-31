@@ -1,6 +1,6 @@
 import { Injectable, Logger, Optional } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, IsNull, LessThan, Not, Repository } from 'typeorm';
+import { In, LessThan, Not, Repository } from 'typeorm';
 import { File } from '../common/entities/file.entity';
 import {
   TelegramCopyOwnerType,
@@ -39,7 +39,7 @@ export const SIZE_COVERAGE_TIERS: Array<{ label: string; minBytes: number }> = [
 ];
 
 /**
- * 单次桥接最多关联的逻辑文件数。
+ * 单次查询桥接的逻辑文件数（逐页处理全部匹配项）。
  *
  * `file_unique_id` 在站内**不是唯一键**（同一内容被上传两次会形成两条 `files` 记录），
  * 因此桥接是一对多。历史上传数据可能出现极端重复，这里设上限避免单条群消息触发大量写库。
@@ -280,11 +280,18 @@ export class FileCopyService {
 
     let matches: Array<{ id: string }>;
     try {
-      matches = await this.files.find({
-        where: { telegramFileUniqueId: fileUniqueId },
-        select: ['id'],
-        take: MAX_BRIDGE_FILES,
-      });
+      matches = [];
+      for (let offset = 0; ; offset += MAX_BRIDGE_FILES) {
+        const page = await this.files.find({
+          where: { telegramFileUniqueId: fileUniqueId },
+          select: ['id'],
+          order: { id: 'ASC' },
+          skip: offset,
+          take: MAX_BRIDGE_FILES,
+        });
+        matches.push(...page);
+        if (page.length < MAX_BRIDGE_FILES) break;
+      }
     } catch (error) {
       this.logger.warn(
         `入站副本桥接反查失败（fileUnique=${this.preview(fileUniqueId)}）：`
@@ -697,8 +704,7 @@ export class FileCopyService {
    * 清理规则（全部按「超过阈值」判定，绝不删除近期记录）：
    * - `failed` 且超过 `failedBefore` 未更新：重试窗口已过；
    * - `pending` 且超过 `pendingBefore` 未更新：复制中断留下的悬挂记录；
-   * - `ready` 且 `lastUsedAt` 早于 `staleReadyBefore`：长期未被回源使用的陈旧副本；
-   * - `ready` 且从未使用、`createdAt` 早于 `staleReadyBefore`：入站登记后从未被下载。
+   * - `ready` 是可用的远端副本索引，不按访问时间删除。
    *
    * 说明：本表与站内文件体系解耦（不建外键），因此不做「删文件即删副本」的联动，
    * 统一由时间阈值收敛；需要更快收敛时缩短阈值即可，无需改代码。
@@ -710,15 +716,10 @@ export class FileCopyService {
   }): Promise<{ failed: number; pending: number; staleReadyUsed: number; staleReadyUnused: number }> {
     const failed = await this.repo.delete({ status: 'failed', updatedAt: LessThan(params.failedBefore) });
     const pending = await this.repo.delete({ status: 'pending', updatedAt: LessThan(params.pendingBefore) });
-    const staleReadyUsed = await this.repo.delete({
-      status: 'ready',
-      lastUsedAt: LessThan(params.staleReadyBefore),
-    });
-    const staleReadyUnused = await this.repo.delete({
-      status: 'ready',
-      lastUsedAt: IsNull(),
-      createdAt: LessThan(params.staleReadyBefore),
-    });
+    // ready 行是远端副本的持久索引，不是可按访问时间淘汰的缓存。
+    // 即使长期未访问，主账号故障时仍需要这些 file_id 回源。
+    const staleReadyUsed = { affected: 0 };
+    const staleReadyUnused = { affected: 0 };
     const result = {
       failed: failed.affected ?? 0,
       pending: pending.affected ?? 0,

@@ -78,10 +78,18 @@ export class AccountAwareDownloadService {
     expectedSize?: number;
     noCache?: boolean;
     fileName?: string;
+    defaultAccountId?: string | null;
+    openDefault?: (fileId: string) => Promise<{ stream: Readable; info: { file_id: string; file_size: number } }>;
     onUnavailable?: (failure: AccountAwareDownloadFailure) => void;
   }): Promise<AccountAwareStreamResult | null> {
     if (!this.pool.isActive()) {
       params.onUnavailable?.({ reason: 'pool_inactive', retryAfterMs: 5_000 });
+      return null;
+    }
+
+    // 非流式配置无法使用多账号流端点；交由调用方经源账号准入后使用标准 Bot API。
+    if (this.client.isStreamingEnabled?.() === false) {
+      params.onUnavailable?.({ reason: 'upstream_attempts_failed', retryAfterMs: 5000 });
       return null;
     }
 
@@ -137,13 +145,18 @@ export class AccountAwareDownloadService {
       this.pool.bumpCounter('selections');
 
       try {
-        const session = await this.client.openRealtimeStream(
-          account.id,
-          account.token,
-          copy.telegramFileId,
-          params.expectedSize,
-          { noCache: params.noCache },
-        );
+        const fallback = params.openDefault && account.id === params.defaultAccountId
+          ? await params.openDefault(copy.telegramFileId)
+          : null;
+        const session = fallback
+          ? { ...fallback, sample: () => ({ ok: !fallback.stream.errored, failureKind: 'network' as const }) }
+          : await this.client.openRealtimeStream(
+            account.id,
+            account.token,
+            copy.telegramFileId,
+            params.expectedSize,
+            { noCache: params.noCache },
+          );
         this.attachSampling(admission.admission, session.stream, session.sample);
         void this.copies.touchUsed(copy);
         this.logger.log(
@@ -193,6 +206,7 @@ export class AccountAwareDownloadService {
     expectedSize?: number;
     noCache?: boolean;
     onUnavailable?: (failure: AccountAwareDownloadFailure) => void;
+    openStandard?: () => Promise<{ stream: Readable; info: { file_id: string; file_size: number } }>;
   }): Promise<AccountAwareStreamResult | null> {
     const account = this.pool.getConfig(params.accountId);
     if (!account) {
@@ -235,13 +249,16 @@ export class AccountAwareDownloadService {
     if (!granted) return null;
 
     try {
-      const session = await this.client.openRealtimeStream(
-        account.id,
-        account.token,
-        params.fileId,
-        params.expectedSize,
-        { noCache: params.noCache },
-      );
+      const standard = params.openStandard ? await params.openStandard() : null;
+      const session = standard
+        ? { ...standard, sample: () => ({ ok: !standard.stream.errored, failureKind: 'network' as const }) }
+        : await this.client.openRealtimeStream(
+          account.id,
+          account.token,
+          params.fileId,
+          params.expectedSize,
+          { noCache: params.noCache },
+        );
       this.attachSampling(granted, session.stream, session.sample);
       return {
         stream: session.stream,
@@ -291,7 +308,12 @@ export class AccountAwareDownloadService {
       settled = true;
       admission.finish(sample());
     };
-    stream.once('close', settle);
+    stream.once('close', () => {
+      if (settled) return;
+      // 主动结束 Range 或消费者取消并不代表账号故障；错误事件仍由 settle 记录。
+      settled = true;
+      admission.release();
+    });
     stream.once('end', settle);
     stream.once('error', settle);
   }

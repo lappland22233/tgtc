@@ -115,10 +115,9 @@ export class TelegramMirrorLazyTriggerService {
     // 打冷却：冷却窗口内的后续下载直接短路（并发收敛由 maybeTrigger 的 pending 占位保证）
     this.markCoolingDown(ownerId, Date.now());
 
-    // 计数口径 = ready 副本账号数（与后台「副本覆盖率」审计同口径）：
-    // 不按「当前是否可调度」过滤——冷却/停用账号持有的副本仍是既有事实，
-    // 覆盖率与补建判定必须看同一个数，否则界面显示缺口而触发层认为已达标。
-    const readyAccountIds = new Set(await this.copies.readyAccountIds('file', ownerId));
+    // 只统计当前可承载副本的账号，避免停用账号的旧副本掩盖缺口。
+    const eligibleIds = new Set(this.replicaTargets.evaluateEligibility().filter(item => item.eligible).map(item => item.accountId));
+    const readyAccountIds = new Set((await this.copies.readyAccountIds('file', ownerId)).filter(id => eligibleIds.has(id)));
     if (readyAccountIds.size >= target) {
       this.logger.debug(
         `下载期懒触发跳过：副本已达标（file=${ownerId}，ready=${readyAccountIds.size}/${target}）`,

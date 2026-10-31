@@ -254,13 +254,13 @@ describe('Web 下载入口：不携带扩散参数，仅受控懒触发建单', 
     const { service, openStream } = wire();
 
     const result = await (service as any).openTelegramSourceStream(
-      { id: 'f-1', originalName: 'a.bin', filename: 'a.bin' } as any,
+      { id: 'f-1', originalName: 'a.bin', filename: 'a.bin', telegramFileUniqueId: 'unique-1' } as any,
       1024,
     );
 
     expect(openStream).toHaveBeenCalledWith(expect.objectContaining({
-      ownerType: 'file',
-      ownerId: 'f-1',
+      ownerType: 'fileUnique',
+      ownerId: 'unique-1',
       expectedSize: 1024,
       fileName: 'a.bin',
     }));
@@ -281,7 +281,7 @@ describe('Web 下载入口：不携带扩散参数，仅受控懒触发建单', 
     });
 
     const result = await (service as any).openTelegramSourceStream(
-      { id: 'f-2', originalName: 'a.bin', filename: 'a.bin' } as any,
+      { id: 'f-2', originalName: 'a.bin', filename: 'a.bin', telegramFileUniqueId: 'unique-1' } as any,
       8,
     );
 
@@ -294,7 +294,7 @@ describe('Web 下载入口：不携带扩散参数，仅受控懒触发建单', 
     const { service, openStream, lazyMirrorTrigger } = wire();
 
     const result = await (service as any).openTelegramSourceStream(
-      { id: 'f-3', originalName: 'a.bin', filename: 'a.bin' } as any,
+      { id: 'f-3', originalName: 'a.bin', filename: 'a.bin', telegramFileUniqueId: 'unique-1' } as any,
       1024,
     );
 
@@ -315,7 +315,7 @@ describe('Web 下载入口：不携带扩散参数，仅受控懒触发建单', 
     });
 
     const result = await (service as any).openTelegramSourceStream(
-      { id: 'f-4', originalName: 'a.bin', filename: 'a.bin' } as any,
+      { id: 'f-4', originalName: 'a.bin', filename: 'a.bin', telegramFileUniqueId: 'unique-1' } as any,
       1024,
     );
 
@@ -329,7 +329,7 @@ describe('Web 下载入口：不携带扩散参数，仅受控懒触发建单', 
     const { service, openStream } = wire({ lazyMirrorTrigger: undefined });
 
     const result = await (service as any).openTelegramSourceStream(
-      { id: 'f-5', originalName: 'a.bin', filename: 'a.bin' } as any,
+      { id: 'f-5', originalName: 'a.bin', filename: 'a.bin', telegramFileUniqueId: 'unique-1' } as any,
       1024,
     );
 
