@@ -497,8 +497,22 @@ function combineSignals(a: AbortSignal, b: AbortSignal): { signal: AbortSignal; 
 }
 
 // 分片写入按索引原子替换、状态查询为只读，服务端 5xx 也可安全重试。
-function isSafeRequestRetryable(err: any): boolean {
-  return classifyUploadError(err).retryable || (err?.response?.status >= 500 && err?.response?.status <= 599);
+function isSafeRequestRetryable(err: unknown): boolean {
+  const classification = classifyUploadError(err);
+  if (classification.kind === 'cancelled' || classification.kind === 'business') return false;
+
+  // client 拦截器会包装可用性错误，原始 HTTP 状态保留在 cause 中。
+  // 优先遵守最外层明确状态，并防止异常的循环 cause 造成死循环。
+  const seen = new Set<object>();
+  let current: unknown = err;
+  while (current && typeof current === 'object' && !seen.has(current)) {
+    seen.add(current);
+    const value = current as { response?: { status?: unknown }; cause?: unknown };
+    const status = value.response?.status;
+    if (typeof status === 'number') return status === 429 || (status >= 500 && status <= 599);
+    current = value.cause;
+  }
+  return classification.retryable;
 }
 
 /** 轮询合并状态，避免长时间同步等待触发 CDN 502 */
