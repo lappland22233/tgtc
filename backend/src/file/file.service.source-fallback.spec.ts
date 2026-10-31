@@ -174,6 +174,14 @@ describe('FileService.openTelegramSourceStream（回源归属 fail-closed）', (
     expect(ctx.getRealtimeFileStream).toHaveBeenCalledTimes(1);
   });
 
+  it('默认账号允许在账号准入内部使用标准回源', async () => {
+    const ctx = setup({ defaultRegistered: true });
+    (ctx.openSourceStream as jest.Mock).mockImplementation(async (params: any) => params.openStandard());
+    const result = await (ctx.service as any).openTelegramSourceStream(makeFile(), 1024);
+    expect(result.info.file_id).toBe('legacy-file-id');
+    expect(ctx.getRealtimeFileStream).toHaveBeenCalledTimes(1);
+  });
+
   it('默认账号在池内且满载时，不绕过准入回退', async () => {
     const ctx = setup({ defaultRegistered: true });
     await expect((ctx.service as any).openTelegramSourceStream(makeFile(), 1024)).rejects.toBeInstanceOf(DownloadResourceException);

@@ -85,6 +85,12 @@ export class AccountAwareDownloadService {
       return null;
     }
 
+    // 非流式配置无法使用多账号流端点；交由调用方经源账号准入后使用标准 Bot API。
+    if (this.client.isStreamingEnabled?.() === false) {
+      params.onUnavailable?.({ reason: 'upstream_attempts_failed', retryAfterMs: 5000 });
+      return null;
+    }
+
     const ready = await this.copies.listReady(params.ownerType, params.ownerId);
     const readyAccountIds = Array.from(new Set(ready.map((copy) => copy.accountId)));
     if (readyAccountIds.length === 0) {
@@ -193,6 +199,7 @@ export class AccountAwareDownloadService {
     expectedSize?: number;
     noCache?: boolean;
     onUnavailable?: (failure: AccountAwareDownloadFailure) => void;
+    openStandard?: () => Promise<{ stream: Readable; info: { file_id: string; file_size: number } }>;
   }): Promise<AccountAwareStreamResult | null> {
     const account = this.pool.getConfig(params.accountId);
     if (!account) {
@@ -235,13 +242,18 @@ export class AccountAwareDownloadService {
     if (!granted) return null;
 
     try {
-      const session = await this.client.openRealtimeStream(
-        account.id,
-        account.token,
-        params.fileId,
-        params.expectedSize,
-        { noCache: params.noCache },
-      );
+      const standard = this.client.isStreamingEnabled?.() === false && params.openStandard
+        ? await params.openStandard()
+        : null;
+      const session = standard
+        ? { ...standard, sample: () => ({ ok: !standard.stream.errored, failureKind: 'network' as const }) }
+        : await this.client.openRealtimeStream(
+          account.id,
+          account.token,
+          params.fileId,
+          params.expectedSize,
+          { noCache: params.noCache },
+        );
       this.attachSampling(granted, session.stream, session.sample);
       return {
         stream: session.stream,

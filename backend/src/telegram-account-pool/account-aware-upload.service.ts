@@ -5,7 +5,7 @@ import { TelegramAccountClientService, TelegramAccountError } from './telegram-a
 import { TelegramAccountPoolService } from './telegram-account-pool.service';
 
 export class AccountUploadUnavailableError extends ServiceUnavailableException {
-  constructor() { super('上传账号当前繁忙或不可用，请稍后重试'); }
+  constructor(readonly admissionOnly = false, readonly retryAfterMs = 5000) { super('上传账号当前繁忙或不可用，请稍后重试'); }
 }
 
 /** 单次上传最多尝试的账号数（首次选择 + 2 次换号），避免长尾把上传拖死 */
@@ -116,6 +116,7 @@ export class AccountAwareUploadService {
             `池化上传选号无可用候选（冷却/满载/禁用），等待重试（候选 ${available.length}，已排除 ${excluded.size}）`,
           );
         }
+        if (excluded.size === 0) throw new AccountUploadUnavailableError(true);
         break;
       }
 

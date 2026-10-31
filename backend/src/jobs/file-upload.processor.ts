@@ -256,7 +256,19 @@ export class FileUploadProcessor {
             // 诊断：严格任务跳过池化是**按设计**（非池化失效），明确记录避免生产误判。
             this.logger.debug('严格磁盘租约任务按设计跳过池化上传（保留 fork 本地媒体释放契约）');
           }
-          const pooled = strictDiskLease ? null : await this.tryPooledUpload(filePath, file);
+          let pooled: UploadReceipt | null;
+          for (;;) {
+            try {
+              pooled = strictDiskLease ? null : await this.tryPooledUpload(filePath, file);
+              break;
+            } catch (error) {
+              // 没有任何远端请求被发出：等待名额，不消耗 Bull 的失败次数或删除源文件。
+              if (!(error instanceof AccountUploadUnavailableError) || !error.admissionOnly) throw error;
+              await new Promise<void>(resolve => setTimeout(resolve, Math.min(60_000, Math.max(1000, error.retryAfterMs))));
+              const current = await this.fileRepository.findOne({ where: { id: fileId } });
+              if (!current || current.uploadVersion !== uploadVersion || current.isDeleted) return;
+            }
+          }
           result = pooled ?? await this.telegramService.uploadFile(
             createReadStream(filePath),
             file.originalName,

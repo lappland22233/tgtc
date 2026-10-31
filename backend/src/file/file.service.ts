@@ -263,6 +263,11 @@ export class FileService implements OnModuleInit {
           fileId: file.telegramFileId || file.filename,
           expectedSize,
           noCache,
+          ...(fallbackAccountId === defaultAccountId ? {
+            openStandard: () => this.telegramService.getRealtimeFileStream(
+              file.telegramFileId || file.filename, expectedSize, { noCache },
+            ),
+          } : {}),
         });
         if (opened) {
           return {
