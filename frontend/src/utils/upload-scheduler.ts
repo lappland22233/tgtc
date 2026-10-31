@@ -15,18 +15,15 @@
  */
 export const UPLOAD_CONCURRENCY_DEFAULT = 4;
 
-/** 等待令牌的最长时间 (ms)：超过则 reject，防止任务无限排队挂起 */
-const ACQUIRE_TIMEOUT = 180 * 1000;
-
 const MIN_CONCURRENCY = 1;
 const MAX_CONCURRENCY = 8;
 
 interface Waiter {
   resolve: () => void;
   reject: (err: Error) => void;
-  timer: ReturnType<typeof setTimeout>;
-  /** 已被授予令牌或已超时（防止重复结算） */
+  /** 已被授予令牌或已取消（防止重复结算） */
   settled: boolean;
+  cleanup: () => void;
 }
 
 class UploadScheduler {
@@ -35,33 +32,37 @@ class UploadScheduler {
   /** FIFO 等待队列 */
   private queue: Waiter[] = [];
 
-  /** 获取一个上传令牌；并发已满时进入 FIFO 队列等待，等待超过 180s 则 reject */
-  acquire(): Promise<void> {
+  /** 获取一个上传令牌；并发已满时进入可取消的 FIFO 队列 */
+  acquire(signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) return Promise.reject(new Error('上传已取消'));
     if (this.active < this.concurrency) {
       this.active++;
       return Promise.resolve();
     }
     return new Promise<void>((resolve, reject) => {
+      const onAbort = () => {
+        waiter.settled = true;
+        waiter.cleanup();
+        this.removeWaiter(waiter);
+        reject(new Error('上传已取消'));
+      };
       const waiter: Waiter = {
         resolve,
         reject,
         settled: false,
-        timer: setTimeout(() => {
-          waiter.settled = true;
-          this.removeWaiter(waiter);
-          reject(new Error('UPLOAD_TOKEN_TIMEOUT: 等待上传令牌超过 180 秒，已放弃排队'));
-        }, ACQUIRE_TIMEOUT),
+        cleanup: () => signal?.removeEventListener('abort', onAbort),
       };
       this.queue.push(waiter);
+      signal?.addEventListener('abort', onAbort, { once: true });
     });
   }
 
   /** 归还令牌：直接移交给 FIFO 队首等待者（active 不变），无等待者时计数减一 */
   release(): void {
-    const waiter = this.shiftNextWaiter();
+    const waiter = this.active <= this.concurrency ? this.shiftNextWaiter() : undefined;
     if (waiter) {
       waiter.settled = true;
-      clearTimeout(waiter.timer);
+      waiter.cleanup();
       waiter.resolve();
     } else {
       this.active = Math.max(0, this.active - 1);
@@ -71,14 +72,13 @@ class UploadScheduler {
   /** 运行时调整并发上限（clamp 到 1-8）；上调时立即把新增槽位授予等待者 */
   setConcurrency(n: number): void {
     const next = Math.min(MAX_CONCURRENCY, Math.max(MIN_CONCURRENCY, Math.floor(n)));
-    const delta = next - this.concurrency;
     this.concurrency = next;
-    for (let i = 0; i < delta; i++) {
+    while (this.active < this.concurrency) {
       const waiter = this.shiftNextWaiter();
       if (!waiter) break;
       this.active++;
       waiter.settled = true;
-      clearTimeout(waiter.timer);
+      waiter.cleanup();
       waiter.resolve();
     }
   }
@@ -95,7 +95,7 @@ class UploadScheduler {
     return this.active;
   }
 
-  /** 取出第一个未结算的等待者（跳过已超时的） */
+  /** 取出第一个未结算的等待者 */
   private shiftNextWaiter(): Waiter | undefined {
     while (this.queue.length > 0) {
       const waiter = this.queue.shift()!;

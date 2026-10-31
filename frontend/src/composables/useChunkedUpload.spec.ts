@@ -171,7 +171,7 @@ describe('useChunkedUpload 严格小盘排队等待', () => {
     // （init 成功时会先上报一次 false，故此处只断言出现过等待态）
     expect(snapshots).toContain(true);
 
-    await vi.advanceTimersByTimeAsync(3_500);
+    await vi.advanceTimersByTimeAsync(5_000);
     expect(chunkCalls).toBe(2);
     expect(snapshots[snapshots.length - 1]).toBe(false);
 
@@ -180,4 +180,52 @@ describe('useChunkedUpload 严格小盘排队等待', () => {
     await expect(settled).resolves.toEqual({ id: 'file-1', originalName: '排队测试.mp4' });
     expect(snapshots[snapshots.length - 1]).toBe(false);
   });
+
+  it('合并长期处理中不会被误判为状态查询失败', async () => {
+    postMock.mockImplementation((url: string) => Promise.resolve({ data: { data: url.endsWith('/init') ? { uploadId: 'u' } : {} } }));
+    getMock.mockResolvedValueOnce({ data: { data: { uploaded: [] } } });
+    for (let i = 0; i < 5; i++) getMock.mockResolvedValueOnce({ data: { data: { mergeStatus: 'uploading' } } });
+    getMock.mockResolvedValueOnce({ data: { data: { mergeStatus: 'done', mergeResult: { id: 'f', originalName: 'a' } } } });
+    const result = useChunkedUpload(1).uploadFile(createFile());
+    await vi.advanceTimersByTimeAsync(31_000);
+    await expect(result).resolves.toEqual({ id: 'f', originalName: 'a' });
+  });
+
+  it('分片请求超时后重试，不当作用户取消', async () => {
+    let chunks = 0;
+    postMock.mockImplementation((url: string, _body: unknown, config: any) => {
+      if (url.endsWith('/init')) return Promise.resolve({ data: { data: { uploadId: 'u' } } });
+      if (url === '/files/chunk/u') {
+        chunks++;
+        if (chunks === 1) return new Promise((_resolve, reject) => config.signal.addEventListener('abort', () => reject({ code: 'ERR_CANCELED' })));
+      }
+      return Promise.resolve({ data: { data: {} } });
+    });
+    getMock.mockResolvedValueOnce({ data: { data: { uploaded: [] } } })
+      .mockResolvedValue({ data: { data: { mergeStatus: 'done', mergeResult: { id: 'f', originalName: 'a' } } } });
+    const result = useChunkedUpload(1).uploadFile(createFile());
+    await vi.advanceTimersByTimeAsync(100_000);
+    await expect(result).resolves.toEqual({ id: 'f', originalName: 'a' });
+    expect(chunks).toBe(2);
+  });
+
+  it('失败分片等待其他在途分片结束后才清理会话', async () => {
+    let finishSecond!: () => void;
+    postMock.mockImplementation((url: string, body: unknown) => {
+      if (url.endsWith('/init')) return Promise.resolve({ data: { data: { uploadId: 'u' } } });
+      if (url === '/files/chunk/u' && body instanceof FormData) {
+        if (body.get('index') === '0') return Promise.reject({ response: { status: 400 } });
+        return new Promise(resolve => { finishSecond = () => resolve({ data: {} }); });
+      }
+      return Promise.resolve({ data: {} });
+    });
+    getMock.mockResolvedValueOnce({ data: { data: { uploaded: [] } } });
+    const result = useChunkedUpload(2).uploadFile(createFile(3 * 1024 * 1024)).catch(e => e);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(postMock.mock.calls.some(call => call[0] === '/files/chunk/u/abort')).toBe(false);
+    finishSecond();
+    await result;
+    expect(postMock.mock.calls.some(call => call[0] === '/files/chunk/u/abort')).toBe(true);
+  });
+
 });

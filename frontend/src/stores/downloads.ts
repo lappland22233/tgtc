@@ -40,6 +40,9 @@ export const useDownloadsStore = defineStore('downloads', () => {
   /** 进行中与排队中的任务（完成/取消后自动移除） */
   const jobs = ref<DownloadJob[]>([]);
   const timers = new Map<string, ReturnType<typeof setTimeout>>();
+  const polling = new Set<string>();
+  const generations = new Map<string, number>();
+  const creating = new Map<string, Promise<DownloadJob | null>>();
 
   const activeJobs = computed(() => jobs.value);
   const queuedJobs = computed(() => jobs.value.filter(job => job.status === 'queued'));
@@ -49,6 +52,7 @@ export const useDownloadsStore = defineStore('downloads', () => {
 
   function removeJob(taskId: string, delayMs = 0): void {
     const apply = () => {
+      generations.set(taskId, (generations.get(taskId) ?? 0) + 1);
       jobs.value = jobs.value.filter(job => job.taskId !== taskId);
       const timer = timers.get(taskId);
       if (timer) {
@@ -60,6 +64,8 @@ export const useDownloadsStore = defineStore('downloads', () => {
       apply();
       return;
     }
+    const existing = timers.get(taskId);
+    if (existing) clearTimeout(existing);
     const timer = setTimeout(apply, delayMs);
     timers.set(taskId, timer);
   }
@@ -105,9 +111,16 @@ export const useDownloadsStore = defineStore('downloads', () => {
    */
   async function poll(taskId: string): Promise<void> {
     const job = jobs.value.find(item => item.taskId === taskId);
-    if (!job) return;
+    if (!job || job.status !== 'queued') return;
+    if (polling.has(taskId)) {
+      schedulePoll(taskId, MAX_POLL_MS);
+      return;
+    }
+    const generation = generations.get(taskId) ?? 0;
+    polling.add(taskId);
     try {
       const view = await fetchDownloadTask(taskId);
+      if ((generations.get(taskId) ?? 0) !== generation || !jobs.value.includes(job)) return;
       applyView(job, view);
       if (view.status === 'queued') {
         schedulePoll(taskId, view.retryAfterMs);
@@ -134,8 +147,11 @@ export const useDownloadsStore = defineStore('downloads', () => {
       removeJob(taskId);
     } catch (error) {
       // 轮询失败（网络抖动/服务重启）：保留任务并退避重试一次，避免静默丢失
+      if ((generations.get(taskId) ?? 0) !== generation || !jobs.value.includes(job)) return;
       job.message = getDownloadErrorMessage(error) ?? '下载状态查询失败，正在重试';
       schedulePoll(taskId, MAX_POLL_MS);
+    } finally {
+      polling.delete(taskId);
     }
   }
 
@@ -161,11 +177,19 @@ export const useDownloadsStore = defineStore('downloads', () => {
    * 发起下载：先创建任务，资源可用时立即触发原生下载；
    * 服务器繁忙时进入排队并返回排队说明，由全局指示器持续展示与取消。
    */
-  async function requestDownload(input: {
+  function requestDownload(input: {
     fileId: string;
     fileName: string;
     nocache?: boolean;
   }): Promise<DownloadJob | null> {
+    const pending = creating.get(input.fileId);
+    if (pending) return pending;
+    const request = createRequest(input).finally(() => creating.delete(input.fileId));
+    creating.set(input.fileId, request);
+    return request;
+  }
+
+  async function createRequest(input: { fileId: string; fileName: string; nocache?: boolean }): Promise<DownloadJob | null> {
     const duplicated = jobs.value.find(
       job => job.fileId === input.fileId && job.status === 'queued',
     );
@@ -220,6 +244,10 @@ export const useDownloadsStore = defineStore('downloads', () => {
    */
   async function cancel(taskId: string): Promise<void> {
     const job = jobs.value.find(item => item.taskId === taskId);
+    generations.set(taskId, (generations.get(taskId) ?? 0) + 1);
+    const timer = timers.get(taskId);
+    if (timer) clearTimeout(timer);
+    timers.delete(taskId);
     try {
       const view = await cancelDownloadTask(taskId);
       if (job) applyView(job, view);
@@ -259,6 +287,7 @@ export const useDownloadsStore = defineStore('downloads', () => {
 
   /** 停止全部轮询（登出/离开页面时调用） */
   function stopAll(): void {
+    for (const job of jobs.value) generations.set(job.taskId, (generations.get(job.taskId) ?? 0) + 1);
     for (const timer of timers.values()) clearTimeout(timer);
     timers.clear();
     jobs.value = [];
