@@ -31,6 +31,8 @@
     "test:integration:redis": "cross-env REDIS_IT=1 jest --runInBand src/jobs/bull-real.integration.spec.ts"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1161.0",
+    "@aws-sdk/lib-storage": "^3.1161.0",
     "@nestjs/bull": "11.0.5",
     "@nestjs/common": "11.2.8",
     "@nestjs/config": "4.0.4",
@@ -53,6 +55,7 @@
     "dotenv": "^17.4.2",
     "file-type": "^21.3.4",
     "form-data": "4.0.6",
+    "google-auth-library": "^11.3.3",
     "helmet": "^8.3.0",
     "multer": "2.5.0",
     "nodemailer": "10.1.4",
@@ -67,7 +70,8 @@
     "teleproto": "1.229.0",
     "typeorm": "0.3.31",
     "ua-parser-js": "^2.0.10",
-    "uuid": "11.1.1"
+    "uuid": "11.1.1",
+    "webdav": "^5.11.0"
   },
   "devDependencies": {
     "@nestjs/cli": "11.0.24",

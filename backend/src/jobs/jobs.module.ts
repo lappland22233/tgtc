@@ -24,6 +24,8 @@ import { AlertModule } from '../alert/alert.module';
 import { FileModule } from '../file/file.module';
 // 账号池上传选号（异步/分片/批量上传的远端写入点）；未启用时行为与原链路一致
 import { TelegramAccountPoolModule } from '../telegram-account-pool/telegram-account-pool.module';
+// 可插拔存储后端：FileUploadProcessor 的非 TG 上传入口
+import { StorageModule } from '../storage/storage.module';
 
 @Module({
   imports: [
@@ -33,6 +35,7 @@ import { TelegramAccountPoolModule } from '../telegram-account-pool/telegram-acc
     SecurityModule,
     FileModule,
     TelegramAccountPoolModule,
+    StorageModule,
     AdminModule,
   ],
   providers: [

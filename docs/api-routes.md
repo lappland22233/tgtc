@@ -198,6 +198,25 @@
 | `POST` | `/api/admin/telegram-mirror/backfill/resume` | 恢复历史补偿 |
 | `POST` | `/api/admin/telegram-mirror/backfill/cancel` | 取消历史补偿 |
 
+#### 可插拔存储后端（S3 / WebDAV / Google Drive 账号池，仅 `super_admin`）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `GET` | `/api/admin/storage-backends/overview` | 总览：账号列表 + 调度快照 + 默认后端 + 凭据加密可用性 |
+| `GET` | `/api/admin/storage-backends` | 账号列表（可按 `type=s3\|webdav\|gdrive` 筛选） |
+| `PUT` | `/api/admin/storage-backends/default-backend` | 默认上传后端热更新（仅影响新上传会话） |
+| `GET` | `/api/admin/storage-backends/gdrive/oauth-client` | GDrive OAuth Client 配置状态（不回显 secret） |
+| `PUT` | `/api/admin/storage-backends/gdrive/oauth-client` | 配置 GDrive OAuth Client（secret 加密落库） |
+| `POST` | `/api/admin/storage-backends/gdrive/auth-url` | 生成 GDrive 授权 URL |
+| `POST` | `/api/admin/storage-backends/gdrive/complete-auth` | 提交授权码，创建 GDrive 存储账号并入池 |
+| `POST` | `/api/admin/storage-backends` | 添加存储账号（创建即连通性测试，失败不落库） |
+| `GET` | `/api/admin/storage-backends/:id` | 账号详情（脱敏） |
+| `PATCH` | `/api/admin/storage-backends/:id` | 更新账号（启停/权重/并发/配置/备注） |
+| `DELETE` | `/api/admin/storage-backends/:id` | 撤销账号（清凭据停任务，保留行与远端对象） |
+| `POST` | `/api/admin/storage-backends/:id/test` | 连通性测试（GDrive 顺带刷新配额） |
+| `POST` | `/api/admin/storage-backends/:id/rotate` | 轮换凭据（先测试后落库） |
+| `POST` | `/api/admin/storage-backends/:id/refresh-quota` | 手动刷新配额 |
+
 #### 运维告警（仅 `super_admin`）
 
 | 方法 | 路径 | 说明 |
