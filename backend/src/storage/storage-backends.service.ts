@@ -255,7 +255,12 @@ export class StorageBackendsService implements OnModuleInit {
       if (this.storageLocationChanged(row.type, row.config ?? {}, nextConfig)) {
         throw new BadRequestException('不能在现有账号上更改存储位置；请新建存储账号并迁移对象');
       }
-      row.config = nextConfig;
+      row.config = row.type === 'gdrive'
+        ? {
+          ...((row.config as GDriveBackendConfig | null) ?? {}),
+          ...(nextConfig as GDriveBackendConfig),
+        }
+        : nextConfig;
     }
     if (input.weight !== undefined) row.weight = Math.max(1, Math.floor(input.weight));
     if (input.maxInflight !== undefined) row.maxInflight = Math.max(1, Math.floor(input.maxInflight));

@@ -197,11 +197,15 @@ export class FileUploadProcessor {
       throw new Error('存储后端未装配，无法上传非 TG 文件');
     }
     const backendType = file.storageBackend;
+    const knownLength = Number(file.size);
+    if (!Number.isSafeInteger(knownLength) || knownLength < 0) {
+      throw new Error('文件大小无效，无法上传存储后端');
+    }
     try {
       const receipt = await this.storageRouter.upload({
         backendType,
         objectName: file.originalName,
-        knownLength: file.size,
+        knownLength,
         // 换号重试必须新开流：流只能被消费一次
         openStream: () => createReadStream(filePath),
       });

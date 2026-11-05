@@ -1,5 +1,4 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { Readable } from 'stream';
 import { ConfigCacheService } from '../common/services/config-cache.service';
 import type { RemoteStorageBackendType, StorageBackendType } from '../common/entities/storage-backend.entity';
 import { maskIdentifier } from '../telegram-accounts/telegram-account-view';
@@ -105,7 +104,6 @@ export class StorageRouterService {
         continue;
       }
 
-      let stream: Readable | null = null;
       const startedAt = Date.now();
       try {
         // 上下文解析也属于本次 admission：即使数据库读取抛错，也必须在 catch 中释放 inflight。
@@ -116,7 +114,6 @@ export class StorageRouterService {
           excluded.add(selection.accountId);
           continue;
         }
-        stream = params.openStream();
         const result = await driver.upload(ctx, params);
         const durationMs = Date.now() - startedAt;
         this.scheduler.finishAttempt(selection.accountId, { ok: true, bytes: result.size, durationMs });
@@ -158,15 +155,6 @@ export class StorageRouterService {
           `存储账号 ${maskIdentifier(selection.accountId)} 上传失败（${kind}），尝试换号：`
           + `${error instanceof Error ? error.message.slice(0, 200) : String(error)}`,
         );
-      } finally {
-        // 失败换号必须销毁上一个流，避免句柄泄漏（与 TG 池化上传同一契约）
-        if (stream && !stream.destroyed && !stream.readableEnded) {
-          try {
-            stream.destroy();
-          } catch {
-            // 忽略清理异常
-          }
-        }
       }
     }
     this.maybeAlertCapacityExhausted(params.backendType, params.knownLength);

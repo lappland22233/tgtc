@@ -524,7 +524,7 @@ async function saveAccount() {
     if (editingId.value) {
       const result = await updateStorageBackend(editingId.value, {
         name: form.name,
-        config: buildConfig(),
+        ...(form.type === 'gdrive' ? {} : { config: buildConfig() }),
         weight: form.weight,
         maxInflight: form.maxInflight,
         note: form.note,
