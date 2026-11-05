@@ -342,6 +342,7 @@ export class StorageBackendsService implements OnModuleInit {
     row.updatedBy = adminId;
     const saved = await this.repo.save(row);
     await this.refresh();
+    this.scheduler.clearCooldown(id);
     return this.toView(saved);
   }
 
@@ -383,6 +384,7 @@ export class StorageBackendsService implements OnModuleInit {
     }
     await this.repo.save(row);
     await this.refresh();
+    if (probe.ok) this.scheduler.clearCooldown(id);
     if (probe.ok && row.type === 'gdrive') {
       await this.refreshQuota(id).catch(() => {});
     }

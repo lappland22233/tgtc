@@ -228,6 +228,14 @@ export class StorageAccountSchedulerService {
     if (rt) rt.inflight = Math.max(0, rt.inflight - 1);
   }
 
+  /** 成功轮换凭据或探测恢复后清除旧失败冷却，不影响启用状态与在途任务。 */
+  clearCooldown(accountId: string): void {
+    const rt = this.runtimes.get(accountId);
+    if (!rt) return;
+    rt.cooldownUntil = 0;
+    rt.consecutiveFailures = 0;
+  }
+
   /** 配额刷新（驱动 getQuota 成功后调用） */
   updateQuota(accountId: string, quota: StorageQuota, now = Date.now()): void {
     const rt = this.runtimes.get(accountId);
