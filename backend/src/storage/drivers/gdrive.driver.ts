@@ -28,6 +28,8 @@ const MULTIPART_THRESHOLD_BYTES = 5 * 1024 * 1024;
 const RESUMABLE_CHUNK_BYTES = 8 * 1024 * 1024;
 /** 单块网络/5xx 重试次数（resumable 会话内重试不重传整个文件） */
 const CHUNK_RETRY_LIMIT = 3;
+/** 流式上游错误体只读取有限字节，足以解析 Google API 的限流 reason。 */
+const MAX_STREAMED_ERROR_BODY_BYTES = 64 * 1024;
 /** 应用根文件夹名（drive.file scope 下仅本应用可见/可管） */
 const ROOT_FOLDER_NAME = 'TGTC';
 
@@ -99,7 +101,7 @@ export class GDriveStorageDriver implements StorageBackendDriver {
       }
       return { stream: response.data, size };
     } catch (error) {
-      throw this.classify(error, 'GDrive 取流失败');
+      throw await this.classifyDownloadError(error, 'GDrive 取流失败');
     }
   }
 
@@ -370,6 +372,32 @@ export class GDriveStorageDriver implements StorageBackendDriver {
     const client = await this.oauth.createAuthorizedClient(refreshToken);
     this.clients.set(ctx.accountId, { fingerprint, client });
     return client;
+  }
+
+  /** Axios 的 responseType=stream 会把非 2xx 错误体留作 Readable，分类前解析有限大小的 JSON。 */
+  private async classifyDownloadError(error: unknown, fallback: string): Promise<StorageAccountError> {
+    const response = (error as AxiosError)?.response;
+    const body = response?.data;
+    if (response && body && typeof (body as Readable).pipe === 'function') {
+      try {
+        const chunks: Buffer[] = [];
+        let size = 0;
+        for await (const rawChunk of body as Readable) {
+          const chunk = Buffer.isBuffer(rawChunk) ? rawChunk : Buffer.from(rawChunk);
+          const remaining = MAX_STREAMED_ERROR_BODY_BYTES - size;
+          if (remaining <= 0) break;
+          const boundedChunk = chunk.length > remaining ? chunk.subarray(0, remaining) : chunk;
+          chunks.push(boundedChunk);
+          size += boundedChunk.length;
+          if (size >= MAX_STREAMED_ERROR_BODY_BYTES) break;
+        }
+        response.data = JSON.parse(Buffer.concat(chunks, size).toString('utf8'));
+      } catch {
+        // Keep status-based classification when the body is empty, malformed, or unreadable.
+        response.data = undefined;
+      }
+    }
+    return this.classify(error, fallback);
   }
 
   /** GDrive 错误分类：优先解析 reason（quota/flood/auth），再按 HTTP 状态码 */

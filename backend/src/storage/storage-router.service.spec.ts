@@ -183,10 +183,11 @@ describe('StorageRouterService（路由 / 换号 / fail-closed）', () => {
     expect(await router.deleteRemoteObject('s3', 'ghost', 'ref')).toBe(false);
   });
 
-  it('headObject 账号不可用时返回 exists=false（校验侧不误标）', async () => {
+  it('headObject 凭据不可用时抛出异常（不伪装成对象缺失）', async () => {
     const resolveContext = jest.fn().mockResolvedValue(null);
     const { router } = makeRouter({ resolveContext });
-    expect(await router.headObject('s3', 'a', 'ref')).toEqual({ exists: false });
+    await expect(router.headObject('s3', 'a', 'ref'))
+      .rejects.toBeInstanceOf(StorageDownloadUnavailableError);
   });
 
   it('abort 信号：上传立即取消且不消耗失败冷却', async () => {
