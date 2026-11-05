@@ -196,6 +196,7 @@ export async function completeGDriveAuth(input: {
   code: string;
   redirectUri: string;
   name: string;
+  accountId?: string;
 }): Promise<{ message: string; account: StorageBackendView }> {
   const response = await api.post('/admin/storage-backends/gdrive/complete-auth', input);
   return response.data.data as { message: string; account: StorageBackendView };

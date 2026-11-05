@@ -224,7 +224,7 @@
       :confirm-btn="{ content: '轮换', loading: saving }"
       @confirm="saveRotate"
     >
-      <t-alert v-if="rotateTarget?.type === 'gdrive'" theme="info" message="GDrive 凭据轮换即重新授权：请关闭本对话框后使用「添加 GDrive 账号」向导重新授权同一 Google 账号，再撤销旧账号行。" />
+      <t-alert v-if="rotateTarget?.type === 'gdrive'" theme="info" message="继续后会为当前账号重新授权并更新凭据；请使用原 Google 账号，现有文件会继续引用此账号。" />
       <t-form v-else label-align="top">
         <template v-if="rotateTarget?.type === 's3'">
           <t-form-item label="新 Access Key ID">
@@ -248,14 +248,16 @@
     <!-- GDrive 授权向导 -->
     <t-dialog
       v-model:visible="gdriveVisible"
-      header="添加 Google Drive 账号"
+      :header="gdrive.accountId ? '重新授权 Google Drive 账号' : '添加 Google Drive 账号'"
       width="680px"
       :footer="false"
     >
       <div class="gdrive-wizard">
         <t-alert
           theme="info"
-          message="每个普通 Google 账号提供 15GB 免费空间。授权多个账号即可池化扩容：上传按剩余配额自动选号，写满自动换下一个账号。应用仅访问自己创建的文件（drive.file scope）。"
+          :message="gdrive.accountId
+            ? '请使用原 Google 账号重新授权；凭据将更新到当前账号，现有文件引用保持不变。'
+            : '每个普通 Google 账号提供 15GB 免费空间。授权多个账号即可池化扩容：上传按剩余配额自动选号，写满自动换下一个账号。应用仅访问自己创建的文件（drive.file scope）。'"
         />
 
         <!-- 步骤 1：OAuth Client -->
@@ -276,7 +278,8 @@
           <h4>2. 生成授权链接</h4>
           <div class="wizard-row">
             <t-input v-model="gdrive.redirectUri" placeholder="回调地址（须与 Console 登记一致）" style="flex: 1" />
-            <t-input v-model="gdrive.name" placeholder="账号名称" style="width: 160px" />
+            <t-input v-if="!gdrive.accountId" v-model="gdrive.name" placeholder="账号名称" style="width: 160px" />
+            <span v-else class="wizard-hint">当前账号：{{ gdrive.name }}</span>
             <t-button size="small" :loading="gdriveSaving" @click="buildAuthUrl">生成链接</t-button>
           </div>
           <div v-if="gdrive.authUrl" class="wizard-row">
@@ -291,7 +294,9 @@
           <h4>3. 提交授权码</h4>
           <div class="wizard-row">
             <t-input v-model="gdrive.code" placeholder="粘贴授权码（code）" style="flex: 1" />
-            <t-button size="small" theme="primary" :loading="gdriveSaving" @click="completeAuth">完成授权并入池</t-button>
+            <t-button size="small" theme="primary" :loading="gdriveSaving" @click="completeAuth">
+              {{ gdrive.accountId ? '更新此账号授权' : '完成授权并入池' }}
+            </t-button>
           </div>
         </div>
       </div>
@@ -623,8 +628,11 @@ function openRotate(row: StorageBackendView) {
 }
 
 async function saveRotate() {
-  if (!rotateTarget.value || rotateTarget.value.type === 'gdrive') {
+  if (!rotateTarget.value) return;
+  if (rotateTarget.value.type === 'gdrive') {
+    const target = rotateTarget.value;
     rotateVisible.value = false;
+    openGDriveWizard(target);
     return;
   }
   saving.value = true;
@@ -645,9 +653,11 @@ async function saveRotate() {
 
 // ---------- GDrive 授权向导 ----------
 const gdriveVisible = ref(false);
-const gdrive = reactive({ clientId: '', clientSecret: '', redirectUri: '', name: '', code: '', authUrl: '' });
+const gdrive = reactive({ accountId: null as string | null, clientId: '', clientSecret: '', redirectUri: '', name: '', code: '', authUrl: '' });
 
-function openGDriveWizard() {
+function openGDriveWizard(account?: StorageBackendView) {
+  gdrive.accountId = account?.id ?? null;
+  gdrive.name = account?.name ?? '';
   gdrive.code = '';
   gdrive.authUrl = '';
   gdriveVisible.value = true;
@@ -690,6 +700,7 @@ async function completeAuth() {
       code: gdrive.code,
       redirectUri: gdrive.redirectUri,
       name: gdrive.name,
+      accountId: gdrive.accountId ?? undefined,
     });
     MessagePlugin.success(result.message);
     gdriveVisible.value = false;

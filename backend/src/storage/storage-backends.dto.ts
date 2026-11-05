@@ -110,6 +110,11 @@ export class GDriveAuthUrlDto {
 }
 
 export class GDriveCompleteAuthDto {
+  @IsOptional()
+  @IsString()
+  @Length(1, 64)
+  accountId?: string;
+
   @IsString()
   @Length(1, 512)
   code: string;

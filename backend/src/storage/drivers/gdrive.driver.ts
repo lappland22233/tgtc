@@ -355,7 +355,16 @@ export class GDriveStorageDriver implements StorageBackendDriver {
 
   private async authorizedClient(ctx: StorageAccountContext): Promise<OAuth2Client> {
     const refreshToken = String(ctx.credential.refreshToken ?? '');
-    const fingerprint = createHash('sha256').update(refreshToken).digest('hex').slice(0, 16);
+    const oauthConfig = await this.oauth.getClientConfig();
+    if (!oauthConfig) throw new StorageAccountError('GDrive OAuth Client 未配置', 'auth');
+    const fingerprint = createHash('sha256')
+      .update(refreshToken)
+      .update('\0')
+      .update(oauthConfig.clientId)
+      .update('\0')
+      .update(oauthConfig.clientSecret)
+      .digest('hex')
+      .slice(0, 16);
     const cached = this.clients.get(ctx.accountId);
     if (cached && cached.fingerprint === fingerprint) return cached.client;
     const client = await this.oauth.createAuthorizedClient(refreshToken);
