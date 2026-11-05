@@ -17,6 +17,8 @@ import { BullQueueModule } from '../jobs/bull-queue.module';
 import { FileModule } from '../file/file.module';
 import { MailerModule } from '../mailer/mailer.module';
 import { AlertModule } from '../alert/alert.module';
+// 可插拔存储后端：FileVerifyService 的非 TG 对象校验入口
+import { StorageModule } from '../storage/storage.module';
 
 @Module({
   imports: [
@@ -24,6 +26,7 @@ import { AlertModule } from '../alert/alert.module';
     BullQueueModule,
     FileModule,
     MailerModule,
+    StorageModule,
     forwardRef(() => AlertModule),
   ],
   controllers: [AdminController],

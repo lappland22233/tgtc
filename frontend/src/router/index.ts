@@ -148,6 +148,12 @@ const routes: RouteRecordRaw[] = [
         meta: { superAdmin: true },
       },
       {
+        path: 'admin/storage-backends',
+        name: 'AdminStorageBackends',
+        component: () => import('../views/admin/StorageBackends.vue'),
+        meta: { superAdmin: true },
+      },
+      {
         path: 'admin/update',
         name: 'AdminSystemUpdate',
         component: () => import('../views/admin/SystemUpdate.vue'),

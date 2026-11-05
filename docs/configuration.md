@@ -347,4 +347,33 @@ Redis 承载 8 个 Bull 队列：`metrics-aggregation`、`attack-detection`、`a
 1. 缩略图/衍生媒体链路仍走单账号回源（一次性小体量生成，不参与用户面向的下载/预览路径）；如需池化应抽 `TelegramSourceStreamResolver` 共用，而不是复制回退逻辑；
 2. 下载回源在「来源账号已不在池内/被禁用且无任何副本」时会退回默认账号尝试（该 `file_id` 属于其它账号，**预期失败**，日志会给出原因）；彻底 fail-closed 需按上一条抽出统一源解析器后实施。
 
+## 可插拔存储后端（S3 / WebDAV / Google Drive 账号池）
+
+文件存储不再限于 Telegram：上传默认后端可在后台「存储后端」页热切换（SystemConfig：`STORAGE_DEFAULT_BACKEND`，取值 `telegram|s3|webdav|gdrive`，缺省 `telegram`）。后端类型在上传会话创建时冻结到文件记录，配置切换不影响在途任务；存量 Telegram 文件零迁移、行为不变。配置的后端无可用账号时自动安全回退 Telegram。
+
+| 环境变量 | 说明 |
+| --- | --- |
+| `STORAGE_ENCRYPTION_KEY` | 存储账号凭据加密根密钥（32 字节 base64 或 64 位 hex）。**必填才允许新增/轮换存储账号**；缺失时创建被拒绝（绝不以明文落库）。与 TG 账号的 `TELEGRAM_ACCOUNT_ENCRYPTION_KEY` 相互独立 |
+
+**账号管理**（后台「存储后端」页，仅超级管理员）：
+
+- **S3 兼容**：一套 AK/SK 一行账号，支持自定义 endpoint（MinIO/Cloudflare R2/阿里 OSS）、path-style、bucket 内根前缀；大文件自动分片上传，失败自动清理残留分片；可配多行实现池化。
+- **WebDAV**：一个端点一行账号（Nextcloud/Alist/坚果云等），PUT 流式上传 + 原生 Range 下载；423/507 归类为可换号失败。
+- **Google Drive**：个人账号 OAuth（`drive.file` scope，仅访问本应用创建的文件，规避受限 scope 审核），每账号 15GB 免费空间。先配置 OAuth Client（client_id/secret，secret 加密落库），再走授权向导（生成授权链接 → 浏览器授权 → 粘贴 code）入池。**多账号即扩容**：上传按「带宽×健康×容量×权重×剩余配额」选号，剩余配额不足（文件×1.2+256MB）的账号自动跳过，写满换下一个；配额每 30 分钟自动刷新。
+
+**安全与一致性口径**（与 TG 账号池同源）：
+
+- 凭据只存 AES-256-GCM 密文，接口/日志/审计永不回显；创建即连通性测试，失败不落库；
+- 对象引用与账号强绑定（S3 key 属于特定 bucket、GDrive fileId 属于特定账号），回源 fail-closed：账号撤销/凭据失效/限流时返回可诊断 503，绝不跨账号猜测；
+- 撤销账号只清凭据停任务，保留账号行（存量文件引用可诊断）；远端对象不会被误删；
+- 覆盖上传/永久删除后的远端对象清理均经**共享引用检查**（无其他文件行引用同一对象才删），best-effort 失败只告警；Telegram 对象维持不删现状；
+- 镜像扩散/副本表/Bot 直链授权/严格磁盘租约为 TG 专属能力，非 TG 文件一律跳过；非 TG 文件的缩略图/预览/分享/Range 下载复用同一缓存层，语义不变；
+- GDrive 存储池全部账号配额耗尽时，上传返回可重试 503 并触发全站告警 `STORAGE_CAPACITY_EXHAUSTED`（CRITICAL，30 分钟冷却去重，配额刷新 cron 与上传选号失败路径双触发）。
+
+**真实端点验证清单**（单测/回归已全覆盖 mock 路径，以下项需真实凭据手动执行）：
+
+- S3/MinIO：可直接跑 gated e2e（`backend/test/s3-storage.e2e-spec.ts`，配置 `S3_E2E_ENDPOINT/BUCKET/ACCESS_KEY_ID/SECRET_ACCESS_KEY` 后 `npx jest --maxWorkers=2 s3-storage.e2e`，覆盖上传/Range/覆盖/删除）；或后台添加账号后：上传小文件→下载字节一致→视频拖动进度条（Range）→覆盖上传→旧对象清理→删除文件→桶内对象消失。
+- WebDAV：后台添加账号（创建即连通性测试）→上传/下载/预览→覆盖→删除；坚果云等限流端点观察换号日志。
+- GDrive：① Google Cloud Console 建 OAuth 客户端（登记回调地址、启用 Drive API）；② 后台配置 Client 并走授权向导入池第 1 个账号，确认配额进度条显示 15GB；③ 上传/下载/预览/覆盖/删除各一次，Drive 网盘 TGTC/ 文件夹内对象与站内行为一致；④ 再授权第 2 个账号，确认池剩余容量叠加；⑤ （可选）把某账号写满后上传，观察自动换号与容量告警；⑥ 撤销某账号后下载其存量文件，确认返回可诊断 503 而非跨账号误读。
+
 

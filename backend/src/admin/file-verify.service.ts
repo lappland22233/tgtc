@@ -1,4 +1,4 @@
-import { Injectable, Logger, ServiceUnavailableException, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, ServiceUnavailableException, OnModuleInit, Optional, Inject } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { InjectQueue } from '@nestjs/bull';
 import { Repository, In } from 'typeorm';
@@ -12,6 +12,9 @@ import { TelegramFileNotFoundError } from '../telegram/telegram.errors';
 import { AuditService } from '../common/services/audit.service';
 import { QUEUE_NAMES } from '../jobs/bull-queue.module';
 import { databaseCurrentTimestamp } from '../database/database-types';
+// 可插拔存储后端：非 TG 文件按对象 head 校验（可选依赖）
+import { StorageRouterService } from '../storage/storage-router.service';
+import { isRemoteStorageBackend } from '../storage/storage.types';
 
 interface FileVerifyStats {
   totalCandidates: number;
@@ -38,6 +41,8 @@ export class FileVerifyService implements OnModuleInit {
     private auditService: AuditService,
     @InjectQueue(QUEUE_NAMES.FILE_VERIFY)
     private fileVerifyQueue: Queue,
+    @Optional() @Inject(StorageRouterService)
+    private storageRouter: StorageRouterService | null = null,
   ) {}
 
   /**
@@ -249,7 +254,7 @@ export class FileVerifyService implements OnModuleInit {
 
     const qb = this.fileRepository
       .createQueryBuilder('file')
-      .select(['file.id', 'file.originalName', 'file.size', 'file.telegramFileId', 'file.telegramFilePath', 'file.uploadVersion'])
+      .select(['file.id', 'file.originalName', 'file.size', 'file.telegramFileId', 'file.telegramFilePath', 'file.uploadVersion', 'file.storageBackend', 'file.storageAccountId', 'file.storageObjectRef'])
       .where('file.isDeleted = false')
       .andWhere("file.status = 'ready'");
 
@@ -278,6 +283,11 @@ export class FileVerifyService implements OnModuleInit {
       await Promise.all(
         batch.map(async (file) => {
           stats.checked++;
+          // 非 TG 后端：按对象 head 校验（不走 Telegram getFile，也不做路径回填）
+          if (isRemoteStorageBackend(file.storageBackend)) {
+            await this.verifyNonTelegramFile(file, task.mode, stats);
+            return;
+          }
           const remoteFileId = file.telegramFileId?.trim?.();
           if (!remoteFileId) {
             // 无 file_id 必然不可下载，apply 时标记 error（条件更新）
@@ -382,6 +392,56 @@ export class FileVerifyService implements OnModuleInit {
       `文件体检完成 taskId=${taskId} checked=${stats.checked} valid=${stats.valid} invalid=${stats.invalid} ` +
         `emptyFileId=${stats.emptyFileId} temporaryFailure=${stats.temporaryFailure} markedError=${stats.markedError} backfilled=${stats.backfilled}`,
     );
+  }
+
+  /**
+   * 非 TG 文件校验（可插拔存储）：head 对象存在性与大小。
+   * 驱动确认的 404 计为 invalid（apply 标记 error）；临时网络、数据库或凭据错误
+   * 只计 temporaryFailure，绝不误标文件。
+   */
+  private async verifyNonTelegramFile(
+    file: File,
+    mode: string,
+    stats: FileVerifyStats,
+  ): Promise<void> {
+    if (!this.storageRouter || !file.storageAccountId || !file.storageObjectRef) {
+      stats.temporaryFailure++;
+      return;
+    }
+    let head: { exists: boolean; size?: number };
+    try {
+      head = await this.storageRouter.headObject(
+        file.storageBackend as 's3' | 'webdav' | 'gdrive',
+        file.storageAccountId,
+        file.storageObjectRef,
+      );
+    } catch {
+      stats.temporaryFailure++;
+      return;
+    }
+    if (head.exists) {
+      if (typeof head.size === 'number' && head.size > 0 && Number(file.size) !== head.size) {
+        stats.sizeMismatch++;
+      }
+      stats.valid++;
+      return;
+    }
+    if (mode === 'apply') {
+      await this.fileRepository
+        .createQueryBuilder()
+        .update(File)
+        .set({
+          status: 'error' as const,
+          uploadStage: 'failed' as const,
+          uploadFailureReason: '存储对象不存在，已标记上传失败',
+        })
+        .where('id = :id', { id: file.id })
+        .andWhere("status = 'ready'")
+        .andWhere('uploadVersion = :version', { version: file.uploadVersion })
+        .execute();
+      stats.markedError++;
+    }
+    stats.invalid++;
   }
 
   /**

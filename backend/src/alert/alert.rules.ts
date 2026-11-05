@@ -305,6 +305,17 @@ export async function createAlertRules(configCache: ConfigCacheService): Promise
       cooldownMinutes: 120,
       evaluate: async () => null,
     },
+
+    // ===== 可插拔存储后端告警（由 StorageBackendsService 按容量状态触发） =====
+    // 与账号池同构：evaluate 恒为 null，GDrive 存储池全部账号配额耗尽/不可调度时
+    // 由配额刷新 cron 与上传选号失败路径走 createAlerts 触发；此处只声明级别与冷却。
+    {
+      id: 'STORAGE_CAPACITY_EXHAUSTED',
+      name: '存储池容量耗尽',
+      level: AlertLevel.CRITICAL,
+      cooldownMinutes: 30,
+      evaluate: async () => null,
+    },
   ];
 }
 
@@ -339,5 +350,6 @@ export function getAlertRuleMetadata() {
     { id: 'MIRROR_QUEUE_BACKLOG', name: '镜像任务队列积压', level: AlertLevel.WARNING },
     { id: 'MIRROR_BACKUP_STALLED', name: '主文件成功但备份长期未完成', level: AlertLevel.WARNING },
     { id: 'MIRROR_NO_ENABLED_RULES', name: '镜像已开启但没有启用中的规则', level: AlertLevel.CRITICAL },
+    { id: 'STORAGE_CAPACITY_EXHAUSTED', name: '存储池容量耗尽', level: AlertLevel.CRITICAL },
   ];
 }

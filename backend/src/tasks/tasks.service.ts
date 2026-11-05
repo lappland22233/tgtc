@@ -13,9 +13,18 @@ import { AuditLog } from '../common/entities/audit-log.entity';
 import { JwtRevokedToken } from '../common/entities/jwt-revoked-token.entity';
 import { File } from '../common/entities/file.entity';
 import { QUEUE_NAMES } from '../jobs/bull-queue.module';
+import { isRemoteStorageBackend } from '../storage/storage.types';
 
 /** 僵尸 processing 自动恢复的固定失败原因（不复用可能失效的旧 Telegram 引用） */
 export const STALE_PROCESSING_FAILURE_REASON = '上传任务超时，已自动标记失败，请重新上传';
+
+/** 远端引用是否有效（TG 校验 file_id；非 TG 校验对象引用，可插拔存储恢复口径） */
+function hasValidRemoteRef(file: File): boolean {
+  if (isRemoteStorageBackend(file.storageBackend)) {
+    return Boolean(file.storageObjectRef?.trim());
+  }
+  return Boolean(file.telegramFileId?.trim());
+}
 
 @Injectable()
 export class TasksService {
@@ -271,7 +280,7 @@ export class TasksService {
     let markedReady = 0;
     let requeued = 0;
     for (const file of batch) {
-      if (file.telegramFileId?.trim()) {
+      if (hasValidRemoteRef(file)) {
         const result = await this.fileRepository
           .createQueryBuilder()
           .update(File)
@@ -289,7 +298,7 @@ export class TasksService {
       take: 200,
     });
     for (const file of remoteBatch) {
-      if (!file.telegramFileId?.trim()) continue;
+      if (!hasValidRemoteRef(file)) continue;
       try {
         const pendingPath = path.join(process.cwd(), 'tmp', 'uploads', 'pending', file.id);
         const strictDiskLease = await this.getRecoveredStrictDiskLease(file.id, file.uploadVersion);

@@ -55,6 +55,13 @@ import { TelegramMirrorLazyTriggerService } from '../telegram-mirror/telegram-mi
 import { DownloadResourceException, DOWNLOAD_ERROR_CODES, DOWNLOAD_RESOURCE_DEFAULTS } from './download-resource-coordinator.service';
 // 账号标识脱敏（日志只允许输出末 4 位，绝不打印完整标识与 file_id）
 import { maskIdentifier } from '../telegram-accounts/telegram-account-view';
+// 可插拔存储后端（S3 / WebDAV / GDrive 账号池）：可选依赖，未装配时逐字节等价于原 TG 链路
+import { StorageRouterService } from '../storage/storage-router.service';
+import {
+  isRemoteStorageBackend,
+  StorageDownloadUnavailableError,
+} from '../storage/storage.types';
+import type { StorageBackendType } from '../storage/storage.types';
 
 import { FILE_DELETE_GRACE_MS, FILE_DELETE_COOLDOWN_MS, FILE_FORCE_DELETE_WAIT_MS, MS_PER_SECOND } from '../common/constants/durations';
 import { isSafePublicInlineContentType } from '../common/utils/preview-content-type';
@@ -105,6 +112,12 @@ export interface UploadedTelegramFile {
   accountId: string | null;
   /** 严格无缓存上传时由 fork 明确确认本地媒体已释放（仅单账号链路返回） */
   localCacheReleased?: boolean;
+  /** 存储后端判别（可插拔存储改造）；缺省 'telegram'，TG 链路不写该字段 */
+  backendType?: StorageBackendType;
+  /** 非 TG 后端的存储账号 ID（storage_backends.id） */
+  storageAccountId?: string | null;
+  /** 非 TG 后端的对象引用（S3 key / WebDAV 路径 / GDrive fileId） */
+  storageObjectRef?: string | null;
 }
 
 // 复合扩展名与 magic bytes 采样逻辑随类型校验迁移至 FileUploadConfigService
@@ -181,7 +194,69 @@ export class FileService implements OnModuleInit {
     // 下载期懒触发补扩散（可选依赖；镜像未启用 / 副本已达标时零行为）
     @Optional() @Inject(TelegramMirrorLazyTriggerService)
     private readonly lazyMirrorTrigger: TelegramMirrorLazyTriggerService | null = null,
+    // 可插拔存储路由（可选依赖；未装配时所有上传/回源逐字节等价于原 TG 链路）
+    @Optional() @Inject(StorageRouterService)
+    private readonly storageRouter: StorageRouterService | null = null,
   ) {
+  }
+
+  /**
+   * 统一的存储回源分发器（可插拔存储改造）。
+   *
+   * 非 TG 文件（s3/webdav/gdrive）经存储路由取流：对象引用与账号强绑定，
+   * 账号不可用时 fail-closed 返回可诊断 503（绝不跨账号猜测）；
+   * TG 文件原样走 openTelegramSourceStream（池化副本 + 回退矩阵逐字节不变）。
+   * 缓存/Range/预览/分享层对本分发器透明，语义零改动。
+   */
+  private async openSourceStream(
+    file: File,
+    expectedSize: number,
+    options?: { noCache?: boolean },
+  ): Promise<{ stream: Readable; info: { file_id: string; file_path: string; file_size: number } }> {
+    if (!isRemoteStorageBackend(file.storageBackend)) {
+      return this.openTelegramSourceStream(file, expectedSize, options);
+    }
+    const accountId = (file.storageAccountId || '').trim();
+    const objectRef = (file.storageObjectRef || '').trim();
+    if (!this.storageRouter || !accountId || !objectRef) {
+      this.logger.error(`非 TG 文件存储引用缺失或路由未装配（file=${file.id}，backend=${file.storageBackend}）`);
+      throw new DownloadResourceException({
+        status: HttpStatus.SERVICE_UNAVAILABLE,
+        errorCode: DOWNLOAD_ERROR_CODES.SERVER_BUSY,
+        message: '文件暂不可用：存储引用缺失，请联系管理员',
+        scope: 'upstream',
+        queueReason: 'upstream',
+        retryAfterMs: DOWNLOAD_RESOURCE_DEFAULTS.RETRY_AFTER_MS,
+      });
+    }
+    try {
+      const opened = await this.storageRouter.openDownloadStream({
+        backendType: file.storageBackend,
+        accountId,
+        objectRef,
+        expectedSize,
+      });
+      return {
+        stream: opened.stream,
+        // file_path 留空：非 TG 后端无「路径恢复」概念，maybeWriteBackRecoveredPath 自然跳过
+        info: { file_id: objectRef, file_path: '', file_size: opened.size || expectedSize },
+      };
+    } catch (error) {
+      if (error instanceof StorageDownloadUnavailableError) {
+        this.logger.warn(
+          `存储后端回源不可用（file=${file.id}，backend=${file.storageBackend}，原因=${error.reason}）`,
+        );
+        throw new DownloadResourceException({
+          status: HttpStatus.SERVICE_UNAVAILABLE,
+          errorCode: DOWNLOAD_ERROR_CODES.SERVER_BUSY,
+          message: error.message,
+          scope: 'upstream',
+          queueReason: 'upstream',
+          retryAfterMs: DOWNLOAD_RESOURCE_DEFAULTS.RETRY_AFTER_MS,
+        });
+      }
+      throw error;
+    }
   }
 
   /**
@@ -316,6 +391,85 @@ export class FileService implements OnModuleInit {
       expectedSize,
       { noCache },
     );
+  }
+
+  /**
+   * 统一上传分发器（可插拔存储改造）：按默认后端配置路由。
+   *
+   * 非 TG 后端：经存储路由选号上传（带宽×健康×容量×权重×配额，失败换号），
+   * 返回 backendType/storageAccountId/storageObjectRef；TG 后端：原
+   * uploadTelegramObject 链路逐字节不变（池化 → 单账号回退）。
+   * 未装配存储路由时恒走 TG（可选依赖语义，与账号池一致）。
+   */
+  private async uploadStorageObject(params: {
+    filename: string;
+    /** 非 TG 后端的对象展示名（不带 GIF .bin 等 TG 专属 hack） */
+    displayName?: string;
+    pooledLength?: number;
+    openPoolStream?: () => Readable;
+    openLegacySource: () => Buffer | Readable;
+    legacyKnownLength?: number;
+    signal?: AbortSignal;
+    noCache?: boolean;
+  }): Promise<UploadedTelegramFile> {
+    if (this.storageRouter && params.pooledLength !== undefined && params.openPoolStream) {
+      const backend = await this.storageRouter.getDefaultBackendType();
+      if (isRemoteStorageBackend(backend)) {
+        const receipt = await this.storageRouter.upload({
+          backendType: backend,
+          objectName: params.displayName ?? params.filename,
+          openStream: params.openPoolStream,
+          knownLength: params.pooledLength,
+          signal: params.signal,
+        });
+        return {
+          // 非 TG 文件无 Telegram 引用：file_id 留空，权威引用是 storageObjectRef
+          file_id: '',
+          file_path: '',
+          message_id: null,
+          chat_id: null,
+          file_unique_id: null,
+          accountId: null,
+          backendType: receipt.backendType,
+          storageAccountId: receipt.accountId,
+          storageObjectRef: receipt.objectRef,
+        };
+      }
+    }
+    return this.uploadTelegramObject(params);
+  }
+
+  /**
+   * 非 TG 远端对象的共享安全清理（覆盖提交后 / 永久删除后调用）。
+   *
+   * 红线：仅当无其他 File 行引用同一 (storageAccountId, storageObjectRef) 时才删除
+   * （引用复制可能共享远端对象）；best-effort，失败只告警绝不影响主流程结论。
+   * TG 对象维持不删现状（telegramFileId 可能被多条记录共享）。
+   * 公开给 FileUploadProcessor：异步覆盖提交后清理旧对象复用同一共享检查口径。
+   */
+  async cleanupNonTelegramObject(ref: {
+    storageBackend?: string | null;
+    storageAccountId?: string | null;
+    storageObjectRef?: string | null;
+  }): Promise<void> {
+    if (!this.storageRouter || !isRemoteStorageBackend(ref.storageBackend)) return;
+    const accountId = (ref.storageAccountId || '').trim();
+    const objectRef = (ref.storageObjectRef || '').trim();
+    if (!accountId || !objectRef) return;
+    try {
+      const shared = await this.fileRepository.count({
+        where: { storageAccountId: accountId, storageObjectRef: objectRef },
+      });
+      if (shared > 0) {
+        this.logger.debug(`远端对象仍被 ${shared} 条记录引用，跳过删除（backend=${ref.storageBackend}）`);
+        return;
+      }
+      await this.storageRouter.deleteRemoteObject(ref.storageBackend, accountId, objectRef);
+    } catch (error) {
+      this.logger.warn(
+        `远端对象清理失败（不影响主流程，对象残留）：${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   /**
@@ -589,6 +743,10 @@ export class FileService implements OnModuleInit {
       telegramSourceAccountId?: string | null;
       telegramChatId?: string | null;
       telegramMessageId?: string | null;
+      /** 存储后端判别（可插拔存储）；缺省 'telegram' 保持旧调用方语义 */
+      storageBackend?: string;
+      storageAccountId?: string | null;
+      storageObjectRef?: string | null;
       filename: string;
       originalName: string;
       size: number;
@@ -598,6 +756,8 @@ export class FileService implements OnModuleInit {
   ): Promise<File> {
     const expectFolderId = target.folderId ?? null;
     let oldTelegramFileId: string | null = null;
+    // 旧存储引用（事务内捕获）：提交成功后用于非 TG 旧对象的共享安全清理
+    let oldStorageRef: { storageBackend: string; storageAccountId: string | null; storageObjectRef: string | null } | null = null;
     // 覆盖上传递增 uploadVersion：镜像任务幂等键 = (ruleId, ownerType, ownerId, sourceVersion)，
     // sourceVersion 取 File.uploadVersion——不递增会让覆盖后的新内容撞旧任务的幂等键、
     // 不产生新镜像任务，镜像群与下载长期停在旧内容上（与 uploadToTelegram 覆盖分支注释
@@ -625,6 +785,11 @@ export class FileService implements OnModuleInit {
       }
       nextVersion = (locked.uploadVersion || 1) + 1;
       oldTelegramFileId = locked.telegramFileId;
+      oldStorageRef = {
+        storageBackend: locked.storageBackend ?? 'telegram',
+        storageAccountId: locked.storageAccountId ?? null,
+        storageObjectRef: locked.storageObjectRef ?? null,
+      };
       await manager.getRepository(File).update(target.id, {
         filename: params.filename,
         originalName: params.originalName,
@@ -636,6 +801,9 @@ export class FileService implements OnModuleInit {
         telegramSourceAccountId: params.telegramSourceAccountId ?? null,
         telegramChatId: params.telegramChatId ?? null,
         telegramMessageId: params.telegramMessageId ?? null,
+        storageBackend: params.storageBackend ?? 'telegram',
+        storageAccountId: params.storageAccountId ?? null,
+        storageObjectRef: params.storageObjectRef ?? null,
         thumbnailPath: null,
         uploadVersion: nextVersion,
       } as any);
@@ -655,6 +823,24 @@ export class FileService implements OnModuleInit {
     // 禁止 fire-and-forget——否则旧缓存可能在新元数据生效后仍被读取，造成「旧内容配新元数据」。
     await this.fileCacheService.invalidate(target.id);
     await this.thumbnailService.deleteThumbnailsForFileId(target.id);
+
+    // 非 TG 旧对象清理：仅在新引用确实替换了旧引用时触发（同引用重写不删）；
+    // 共享检查在 cleanupNonTelegramObject 内完成，此时本行已指向新引用，
+    // 旧引用计数天然排除自身。best-effort，绝不影响覆盖结论。
+    // （赋值发生在事务回调内，TS 控制流分析无法追踪，显式断言回声明类型）
+    const capturedStorageRef = oldStorageRef as {
+      storageBackend: string;
+      storageAccountId: string | null;
+      storageObjectRef: string | null;
+    } | null;
+    if (
+      capturedStorageRef
+      && isRemoteStorageBackend(capturedStorageRef.storageBackend)
+      && (capturedStorageRef.storageObjectRef !== (params.storageObjectRef ?? null)
+        || capturedStorageRef.storageAccountId !== (params.storageAccountId ?? null))
+    ) {
+      void this.cleanupNonTelegramObject(capturedStorageRef);
+    }
 
     this.auditService.log({
       action: 'file_overwrite',
@@ -680,6 +866,9 @@ export class FileService implements OnModuleInit {
       telegramSourceAccountId: params.telegramSourceAccountId ?? null,
       telegramChatId: params.telegramChatId ?? null,
       telegramMessageId: params.telegramMessageId ?? null,
+      storageBackend: params.storageBackend ?? 'telegram',
+      storageAccountId: params.storageAccountId ?? null,
+      storageObjectRef: params.storageObjectRef ?? null,
       thumbnailPath: null,
       // 返回值必须同步新版本：调用方（registerPrimaryTelegramSource / 镜像触发）
       // 直接读它作为 sourceVersion，否则新内容仍按旧版本登记
@@ -790,6 +979,11 @@ export class FileService implements OnModuleInit {
 
     const tempId = uuidv4();
     const resolvedFolderId = folderId ?? null;
+    // 会话创建时冻结存储后端（与 strictDiskLease 同一冻结语义）：
+    // 配置热切换不影响在途任务，Worker 按 File.storageBackend 路由。
+    const frozenBackend = this.storageRouter
+      ? await this.storageRouter.getDefaultBackendType()
+      : 'telegram';
     let savedFile: File | undefined;
 
     if (overwriteFileId) {
@@ -835,7 +1029,10 @@ export class FileService implements OnModuleInit {
             if (locked.status === 'processing') {
               throw new BadRequestException('覆盖目标文件正在处理中，请稍后重试');
             }
-            // tempId 占位语义与新记录一致，由 FileUploadProcessor 按 fileId 更新为真实 TG 引用
+            // tempId 占位语义与新记录一致，由 FileUploadProcessor 按 fileId 更新为真实远端引用。
+            // 覆盖分支保持原存储后端不变（storageBackend 不改写）：异步覆盖的新内容
+            // 仍落原后端，避免旧引用后端类型丢失导致提交后无法清理旧对象；
+            // 跨后端覆盖仅发生在同步路径（applyOverwrite，旧引用完整可知）。
             locked.status = 'processing';
             locked.uploadVersion = (locked.uploadVersion || 1) + 1;
             locked.uploadStage = 'pending';
@@ -875,6 +1072,7 @@ export class FileService implements OnModuleInit {
         size: file.size,
         telegramFileId: tempId,
         telegramFilePath: '',
+        storageBackend: frozenBackend,
         uploaderId: user.id,
         folderId: resolvedFolderId,
         accessType: FileAccessType.PUBLIC,
@@ -1019,12 +1217,13 @@ export class FileService implements OnModuleInit {
       throw new BadRequestException(typeCheck.reason || '不允许上传此类型的文件');
     }
 
-    // GIF 文件加 .bin 后缀防止 Telegram 转码为 MP4
+    // GIF 文件加 .bin 后缀防止 Telegram 转码为 MP4（仅 TG 后端需要；非 TG 用 displayName 保留原名）
     const uploadName = file.mimetype === 'image/gif' ? originalName + '.bin' : originalName;
 
     const useStream = file.path && fs.existsSync(file.path);
-    const telegramFile = await this.uploadTelegramObject({
+    const telegramFile = await this.uploadStorageObject({
       filename: uploadName,
+      displayName: originalName,
       // 池化路径需要确定长度；磁盘与内存两种 multer 存储都能给出 file.size
       pooledLength: file.size,
       openPoolStream: () => (useStream ? createReadStream(file.path) : Readable.from([file.buffer])),
@@ -1032,13 +1231,17 @@ export class FileService implements OnModuleInit {
       legacyKnownLength: useStream ? file.size : undefined,
     });
 
+    const isNonTelegram = isRemoteStorageBackend(telegramFile.backendType);
     const newFile = this.fileRepository.create({
-      filename: telegramFile.file_id,
+      filename: isNonTelegram ? originalName : telegramFile.file_id,
       originalName: originalName,
       mimeType: file.mimetype,
       size: file.size,
       telegramFileId: telegramFile.file_id,
       telegramFilePath: telegramFile.file_path || '',
+      storageBackend: telegramFile.backendType ?? 'telegram',
+      storageAccountId: telegramFile.storageAccountId ?? null,
+      storageObjectRef: telegramFile.storageObjectRef ?? null,
       uploaderId: user.id,
       accessType: FileAccessType.PUBLIC,
       maxAccessCount: this.accessCountDefault,
@@ -1074,9 +1277,12 @@ export class FileService implements OnModuleInit {
       metadata: { filename: originalName, size: file.size, mimeType: file.mimetype },
     });
 
-    // 站内状态已提交：记录主副本定位并触发镜像（best-effort，失败不影响上传结果）
-    await this.registerPrimaryTelegramSource(savedFile, telegramFile, telegramFile.accountId);
-    void this.triggerMirrorForFile(savedFile, telegramFile, telegramFile.accountId);
+    // 站内状态已提交：记录主副本定位并触发镜像（best-effort，失败不影响上传结果）。
+    // 非 TG 后端无主副本定位/镜像扩散概念，一律跳过。
+    if (!isNonTelegram) {
+      await this.registerPrimaryTelegramSource(savedFile, telegramFile, telegramFile.accountId);
+      void this.triggerMirrorForFile(savedFile, telegramFile, telegramFile.accountId);
+    }
 
     if (file.mimetype.startsWith('video/')) {
       await this.generateAndSaveVideoCover(savedFile, { sourcePath: file.path, sourceBuffer: file.buffer });
@@ -1627,6 +1833,9 @@ export class FileService implements OnModuleInit {
     this.deleteLocalThumbnail(file);
     this.fileCacheService.invalidate(id);
 
+    // 非 TG 后端：DB 删除成功后经共享引用检查 best-effort 清理远端对象（TG 维持不删现状）
+    void this.cleanupNonTelegramObject(file);
+
     // 审计日志：按实际操作者区分管理员强删与用户自助强删
     await this.auditService.logAwait({
       action: isAdmin ? 'file_delete_by_admin' : 'file_force_delete',
@@ -1718,6 +1927,8 @@ export class FileService implements OnModuleInit {
           }
           this.deleteLocalThumbnail(file);
           this.fileCacheService.invalidate(fileId);
+          // 非 TG 后端：经共享引用检查 best-effort 清理远端对象（失败只告警，不影响删除结论）
+          void this.cleanupNonTelegramObject(file);
           deletedCount++;
           await this.auditService.logAwait({
             action: 'file_delete',
@@ -2046,7 +2257,7 @@ export class FileService implements OnModuleInit {
       // 否则动态跟随全局配置（默认构建缓存路径不带头，容量准备期间翻转进入无缓存早退分支则带头）。
       const forceNoCache = noCache && !this.fileCacheService.isNoCacheMode();
       const fetch = async () => {
-        const result = await this.openTelegramSourceStream(file, expectedSize, {
+        const result = await this.openSourceStream(file, expectedSize, {
           noCache: this.fileCacheService.isNoCacheMode() || forceNoCache,
         });
         recoveredInfo = result.info;
@@ -2216,7 +2427,7 @@ export class FileService implements OnModuleInit {
   ): Promise<Readable | null> {
     const expectedSize = Number(file.size);
     const forceNoCache = noCache && !this.fileCacheService.isNoCacheMode();
-    const fetchFn = async () => this.openTelegramSourceStream(file, expectedSize, {
+    const fetchFn = async () => this.openSourceStream(file, expectedSize, {
       noCache: this.fileCacheService.isNoCacheMode() || forceNoCache,
     });
     const stream = await this.fileCacheService.getOrCacheRangeStream(
@@ -2738,7 +2949,7 @@ export class FileService implements OnModuleInit {
     const { start, end } = parsed.range;
 
     const expectedSize = Number(file.size);
-    const fetchFn = () => this.openTelegramSourceStream(file, expectedSize, {
+    const fetchFn = () => this.openSourceStream(file, expectedSize, {
       noCache: this.fileCacheService.isNoCacheMode(),
     });
     const stream = await this.fileCacheService.getOrCacheRangeStream(file.id, expectedSize, start, end, fetchFn, {
@@ -3068,19 +3279,21 @@ export class FileService implements OnModuleInit {
     overwriteFileId?: string,
     tagIds?: string[],
   ): Promise<File> {
-    // GIF 文件加 .bin 后缀防止 Telegram 转码为 MP4
+    // GIF 文件加 .bin 后缀防止 Telegram 转码为 MP4（仅 TG 后端需要；非 TG 用 displayName 保留原名）
     const uploadName = file.mimetype === 'image/gif' ? originalName + '.bin' : originalName;
     const useStream = file.path && fs.existsSync(file.path);
-    const telegramFile = await this.uploadTelegramObject({
+    const telegramFile = await this.uploadStorageObject({
       filename: uploadName,
+      displayName: originalName,
       pooledLength: file.size,
       openPoolStream: () => (useStream ? createReadStream(file.path) : Readable.from([file.buffer])),
       openLegacySource: () => (useStream ? createReadStream(file.path) : file.buffer),
       legacyKnownLength: useStream ? file.size : undefined,
       signal: abortSignal,
     });
-
-    // 覆盖分支：TG 上传成功后优先 in-place 覆盖目标记录（保留原 id），目标失效则降级新建
+    const isNonTelegram = isRemoteStorageBackend(telegramFile.backendType);
+    
+    // 覆盖分支：上传成功后优先 in-place 覆盖目标记录（保留原 id），目标失效则降级新建
     if (overwriteFileId) {
       const overwritten = await this.tryApplyOverwriteOrNull(
         overwriteFileId,
@@ -3093,7 +3306,10 @@ export class FileService implements OnModuleInit {
           telegramSourceAccountId: telegramFile.accountId ?? null,
           telegramChatId: telegramFile.chat_id ?? null,
           telegramMessageId: telegramFile.message_id ?? null,
-          filename: telegramFile.file_id,
+          storageBackend: telegramFile.backendType ?? 'telegram',
+          storageAccountId: telegramFile.storageAccountId ?? null,
+          storageObjectRef: telegramFile.storageObjectRef ?? null,
+          filename: isNonTelegram ? originalName : telegramFile.file_id,
           originalName,
           size: file.size,
           mimeType: file.mimetype,
@@ -3107,6 +3323,7 @@ export class FileService implements OnModuleInit {
         // 保留本次上传账号的行（exceptAccountId，口径与 registerPrimaryTelegramSource
         // 写副本行时一致），它随后会被 upsertReady 用新 file_id 覆盖，避免无谓的删+插。
         // 失败只告警：副本清理绝不能阻断上传主流程（残留旧行由 purgeStale 兜底收敛）。
+        // 跨后端覆盖（TG→非 TG）时旧 TG 副本同样必须作废，故无条件执行。
         try {
           await this.fileCopies?.invalidateByOwner('file', overwritten.id, this.copyAccountIdOf(telegramFile.accountId));
         } catch (error) {
@@ -3114,22 +3331,28 @@ export class FileService implements OnModuleInit {
             `覆盖上传旧副本失效失败（file=${overwritten.id}，不影响上传结果）：${error instanceof Error ? error.message : String(error)}`,
           );
         }
-        // 覆盖上传递增 uploadVersion：定位信息按新版本重写，旧镜像任务会自动作废
-        await this.registerPrimaryTelegramSource(overwritten, telegramFile, telegramFile.accountId);
-        void this.triggerMirrorForFile(overwritten, telegramFile, telegramFile.accountId);
+        // 覆盖上传递增 uploadVersion：定位信息按新版本重写，旧镜像任务会自动作废。
+        // 非 TG 后端无主副本定位/镜像概念，跳过。
+        if (!isNonTelegram) {
+          await this.registerPrimaryTelegramSource(overwritten, telegramFile, telegramFile.accountId);
+          void this.triggerMirrorForFile(overwritten, telegramFile, telegramFile.accountId);
+        }
         await this.generateUploadedMediaThumbnail(overwritten, file);
         this.cleanupTempFile(file);
         return overwritten;
       }
     }
-
+    
     const newFile = this.fileRepository.create({
-      filename: telegramFile.file_id,
+      filename: isNonTelegram ? originalName : telegramFile.file_id,
       originalName: originalName,
       mimeType: file.mimetype,
       size: file.size,
       telegramFileId: telegramFile.file_id,
       telegramFilePath: telegramFile.file_path || '',
+      storageBackend: telegramFile.backendType ?? 'telegram',
+      storageAccountId: telegramFile.storageAccountId ?? null,
+      storageObjectRef: telegramFile.storageObjectRef ?? null,
       uploaderId: user.id,
       folderId: folderId ?? null,
       accessType: FileAccessType.PUBLIC,
@@ -3157,7 +3380,7 @@ export class FileService implements OnModuleInit {
       // 补偿策略：Telegram 上传无法参与数据库事务，DB 事务失败即产生一个无 DB 引用的
       // 孤儿远端文件。记录 file_id 供运维清理；用户侧返回失败且库中无记录，可安全重试。
       this.logger.warn(
-        `[上传补偿] 数据库事务失败，Telegram 已上传文件成为孤儿（file_id=${telegramFile.file_id}，name=${originalName}）：` +
+        `[上传补偿] 数据库事务失败，远端已上传文件成为孤儿（ref=${telegramFile.storageObjectRef || telegramFile.file_id}，backend=${telegramFile.backendType ?? 'telegram'}，name=${originalName}）：` +
           `${error instanceof Error ? error.message : String(error)}`,
       );
       if (isDatabaseUniqueViolation(error)) {
@@ -3166,9 +3389,11 @@ export class FileService implements OnModuleInit {
       throw error;
     });
     // 非覆盖新建分支：必须与覆盖分支、同步上传分支保持同一收尾（定位登记 + 镜像触发），
-    // 否则批量上传/分片合并后的文件会「有主文件、无定位、无备份」。
-    await this.registerPrimaryTelegramSource(savedFile, telegramFile, telegramFile.accountId);
-    void this.triggerMirrorForFile(savedFile, telegramFile, telegramFile.accountId);
+    // 否则批量上传/分片合并后的文件会「有主文件、无定位、无备份」。非 TG 后端跳过。
+    if (!isNonTelegram) {
+      await this.registerPrimaryTelegramSource(savedFile, telegramFile, telegramFile.accountId);
+      void this.triggerMirrorForFile(savedFile, telegramFile, telegramFile.accountId);
+    }
     await this.generateUploadedMediaThumbnail(savedFile, file);
     this.cleanupTempFile(file);
     return savedFile;
@@ -3524,7 +3749,7 @@ export class FileService implements OnModuleInit {
     // 冷资源（无正式缓存）不支持真实分片：返回 null 交由控制器回退全量预览，
     // 由 getPreviewStream → getOrCacheStream 复用同一缓存构建会话，保证单连接加载；
     // 前端在冷资源阶段钳制 seek，拖动进度条不再触发新的动态分段回源。
-    const fetchFn = () => this.openTelegramSourceStream(file, total, {
+    const fetchFn = () => this.openSourceStream(file, total, {
       noCache: this.fileCacheService.isNoCacheMode(),
     });
     const readStream = await this.fileCacheService.getOrCacheRangeStream(file.id, total, start, actualEnd, fetchFn, {
@@ -3605,7 +3830,7 @@ export class FileService implements OnModuleInit {
     const start = parsed.range.start;
     const end = parsed.range.end;
 
-    const fetchFn = () => this.openTelegramSourceStream(file, total, {
+    const fetchFn = () => this.openSourceStream(file, total, {
       noCache: this.fileCacheService.isNoCacheMode(),
     });
     const stream = await this.fileCacheService.getOrCacheRangeStream(file.id, total, start, end, fetchFn, {

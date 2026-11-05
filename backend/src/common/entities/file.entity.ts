@@ -68,6 +68,24 @@ export class File {
   @Column({ type: 'varchar', length: 64, nullable: true, comment: '主副本所属账号 ID' })
   telegramSourceAccountId: string | null;
 
+  /**
+   * 存储后端判别字段（可插拔存储改造）。
+   * 存量数据缺省 'telegram'，零迁移兼容；上传会话创建时冻结，
+   * 配置热切换不影响在途任务（与 strictDiskLease 冻结语义一致）。
+   * 非 TG 文件的权威引用是 storageAccountId + storageObjectRef，
+   * telegram* 字段全部为空（telegramFileId=''，filename=originalName）。
+   */
+  @Column({ type: 'varchar', length: 16, default: 'telegram', comment: '存储后端：telegram|s3|webdav|gdrive' })
+  storageBackend: string;
+
+  /** 非 TG 后端的存储账号 ID（storage_backends.id）；TG 文件为 null */
+  @Column({ type: 'varchar', length: 64, nullable: true, comment: '存储账号 ID（非 TG 后端）' })
+  storageAccountId: string | null;
+
+  /** 不透明对象引用：S3 key / WebDAV 路径 / GDrive fileId；TG 文件为 null */
+  @Column({ type: 'varchar', length: 1024, nullable: true, comment: '对象引用（非 TG 后端）' })
+  storageObjectRef: string | null;
+
   /** 本地缩略图路径（相对于 THUMBNAIL_DIR，如 {id}.webp） */
   @Column({ type: 'varchar', length: 512, nullable: true, default: null })
   thumbnailPath: string | null;

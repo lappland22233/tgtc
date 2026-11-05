@@ -31,6 +31,7 @@ import { TelegramBotModule } from './telegram-bot/telegram-bot.module';
 import { TelegramAccountPoolModule } from './telegram-account-pool/telegram-account-pool.module';
 import { TelegramAccountsModule } from './telegram-accounts/telegram-accounts.module';
 import { TelegramMirrorModule } from './telegram-mirror/telegram-mirror.module';
+import { StorageModule } from './storage/storage.module';
 
 @Module({
   imports: [
@@ -69,6 +70,8 @@ import { TelegramMirrorModule } from './telegram-mirror/telegram-mirror.module';
     // 账号池后台管理（账号 CRUD、凭据加密托管、三层开关）与镜像规则/任务
     TelegramAccountsModule,
     TelegramMirrorModule,
+    // 可插拔存储后端（S3 / WebDAV / Google Drive 账号池）；TG 链路不受影响
+    StorageModule,
   ],
 })
 export class AppModule {}

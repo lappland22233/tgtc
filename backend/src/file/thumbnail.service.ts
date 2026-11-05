@@ -13,7 +13,7 @@
  * - 不涉及文件业务权限校验（由 FileService 的 getThumbnailStream 等负责）。
  * - 目录路径由 THUMBNAIL_DIR 配置决定，与 FileCacheService 的缓存目录独立。
  */
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional, Inject } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
@@ -27,6 +27,9 @@ import { File } from '../common/entities/file.entity';
 import { TelegramService } from '../telegram/telegram.service';
 import { TelegramStreamPathError } from '../telegram/telegram.errors';
 import { FileCacheService } from './file-cache.service';
+// 可插拔存储后端：非 TG 文件的缩略图回源经存储路由（可选依赖）
+import { StorageRouterService } from '../storage/storage-router.service';
+import { isRemoteStorageBackend } from '../storage/storage.types';
 
 /** 视频标准封面最大宽度（FFmpeg scale 上限） */
 const VIDEO_COVER_MAX_WIDTH = 480;
@@ -67,6 +70,8 @@ export class ThumbnailService {
     private readonly telegramService: TelegramService,
     private readonly fileCacheService: FileCacheService,
     configService: ConfigService,
+    @Optional() @Inject(StorageRouterService)
+    private readonly storageRouter: StorageRouterService | null = null,
   ) {
     this.thumbnailDir = configService.get<string>('THUMBNAIL_DIR') || path.join(process.cwd(), 'tmp', 'thumbnails');
   }
@@ -98,7 +103,7 @@ export class ThumbnailService {
     while (true) {
       const query = this.fileRepository
         .createQueryBuilder('file')
-        .select(['file.id', 'file.mimeType', 'file.telegramFileId', 'file.filename', 'file.thumbnailPath'])
+        .select(['file.id', 'file.mimeType', 'file.telegramFileId', 'file.filename', 'file.thumbnailPath', 'file.storageBackend', 'file.storageAccountId', 'file.storageObjectRef', 'file.size'])
         .where('file.isDeleted = false')
         .andWhere('(file.mimeType LIKE :imagePrefix OR file.mimeType LIKE :videoPrefix)', {
           imagePrefix: 'image/%',
@@ -143,6 +148,19 @@ export class ThumbnailService {
    * 仍失败则抛出，由调用方按原 catch 记日志即可——缩略图缺失不应把原文件标 error。
    */
   private async fetchRemoteSource(file: File): Promise<Readable> {
+    // 非 TG 后端：经存储路由取流（对象引用与账号强绑定，fail-closed）
+    if (isRemoteStorageBackend(file.storageBackend)) {
+      if (!this.storageRouter || !file.storageAccountId || !file.storageObjectRef) {
+        throw new Error('存储引用缺失或存储路由未装配，无法回源生成缩略图');
+      }
+      const opened = await this.storageRouter.openDownloadStream({
+        backendType: file.storageBackend,
+        accountId: file.storageAccountId,
+        objectRef: file.storageObjectRef,
+        expectedSize: Number(file.size) || undefined,
+      });
+      return opened.stream;
+    }
     try {
       const { stream } = await this.telegramService.getFileStream(file.telegramFileId || file.filename);
       return stream;

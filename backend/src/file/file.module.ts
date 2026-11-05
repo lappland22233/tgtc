@@ -39,6 +39,8 @@ import { ApiKeyModule } from '../api-key/api-key.module';
 // 阶段 4：文件回源接入账号池 + 上传成功后触发镜像（均为可选增强，关闭时行为不变）
 import { TelegramAccountPoolModule } from '../telegram-account-pool/telegram-account-pool.module';
 import { TelegramMirrorModule } from '../telegram-mirror/telegram-mirror.module';
+// 可插拔存储后端（S3 / WebDAV / GDrive 账号池）；未配置时行为与原 TG 链路一致
+import { StorageModule } from '../storage/storage.module';
 
 @Module({
   imports: [
@@ -53,6 +55,7 @@ import { TelegramMirrorModule } from '../telegram-mirror/telegram-mirror.module'
     // 账号池（副本表 + 账号感知回源）与镜像模块（触发入口）；未启用时不影响原链路
     TelegramAccountPoolModule,
     TelegramMirrorModule,
+    StorageModule,
     BullModule.registerQueue({ name: QUEUE_NAMES.FILE_UPLOAD }),
     JwtModule.registerAsync({
       imports: [ConfigModule],

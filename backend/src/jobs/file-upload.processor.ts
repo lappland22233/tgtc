@@ -1,14 +1,17 @@
-import { Injectable, Logger, Optional } from '@nestjs/common';
+import { Injectable, Logger, Optional, Inject } from '@nestjs/common';
 import { Process, Processor } from '@nestjs/bull';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { Job } from 'bull';
+import { DelayedError, Job } from 'bull';
 import { QUEUE_NAMES } from './bull-queue.module';
 import { File } from '../common/entities/file.entity';
 import { TelegramService } from '../telegram/telegram.service';
 import { FileService } from '../file/file.service';
 import { UploadDiskBudgetService } from '../file/upload-disk-budget.service';
 import { AccountAwareUploadService, AccountUploadUnavailableError } from '../telegram-account-pool/account-aware-upload.service';
+// 可插拔存储后端（S3 / WebDAV / GDrive）：可选依赖，未装配时非 TG 文件无法上传（诊断性失败）
+import { StorageRouterService } from '../storage/storage-router.service';
+import { isRemoteStorageBackend, StorageUploadUnavailableError } from '../storage/storage.types';
 import { createReadStream, existsSync } from 'fs';
 import { readFile, rename, unlink, writeFile } from 'fs/promises';
 import { databaseQuery, getDatabaseType } from '../database/database-types';
@@ -40,6 +43,10 @@ interface UploadReceipt {
    * 记成默认 Bot 的归属，导致后续回源/镜像取错账号。
    */
   sourceAccountId?: string | null;
+  /** 非 TG 后端的存储账号 ID（storage_backends.id）；重启恢复提交的归属事实 */
+  storageAccountId?: string | null;
+  /** 非 TG 后端的对象引用（S3 key / WebDAV 路径 / GDrive fileId） */
+  storageObjectRef?: string | null;
 }
 
 @Injectable()
@@ -59,6 +66,12 @@ export class FileUploadProcessor {
      * `local_cache_released` / `releaseLocalFile` 语义，池化客户端不提供该契约。
      */
     @Optional() private readonly accountUpload?: AccountAwareUploadService,
+    /**
+     * 可插拔存储路由（可选依赖）：File.storageBackend 为非 TG 时的上传入口。
+     * 会话创建时已冻结后端类型，配置热切换不影响在途任务。
+     */
+    @Optional() @Inject(StorageRouterService)
+    private readonly storageRouter?: StorageRouterService,
   ) {}
 
   private async removeTempFile(filePath: string): Promise<boolean> {
@@ -172,6 +185,53 @@ export class FileUploadProcessor {
     }
   }
 
+  /**
+   * 非 TG 后端上传（S3 / WebDAV / GDrive，按 File.storageBackend 冻结值路由）。
+   *
+   * 回执/版本 CAS/recoverable 恢复语义与 TG 链路完全复用；admissionOnly 任务
+   * 放入 Bull 延迟队列后释放处理槽，不消耗失败次数。返回 null 表示任务已失效
+   * （版本变更/已删除），调用方直接放弃本轮。
+   */
+  private async uploadViaStorageBackend(filePath: string, file: File, job: Job<FileUploadJobData>): Promise<UploadReceipt | null> {
+    if (!this.storageRouter || !isRemoteStorageBackend(file.storageBackend)) {
+      throw new Error('存储后端未装配，无法上传非 TG 文件');
+    }
+    const backendType = file.storageBackend;
+    const knownLength = Number(file.size);
+    if (!Number.isSafeInteger(knownLength) || knownLength < 0) {
+      throw new Error('文件大小无效，无法上传存储后端');
+    }
+    try {
+      const receipt = await this.storageRouter.upload({
+        backendType,
+        objectName: file.originalName,
+        knownLength,
+        // 换号重试必须新开流：流只能被消费一次
+        openStream: () => createReadStream(filePath),
+      });
+      return {
+        file_id: '',
+        file_path: '',
+        file_size: receipt.size,
+        message_id: null,
+        chat_id: null,
+        file_unique_id: null,
+        storageAccountId: receipt.accountId,
+        storageObjectRef: receipt.objectRef,
+        // 非 TG 后端无 fork 本地媒体缓存，严格任务同样视为已释放
+        localCacheReleased: true,
+      };
+    } catch (error) {
+      // 尚未发出远端请求时，把任务延迟重试并退出 processor，避免容量不足占满并发槽。
+      if (!(error instanceof StorageUploadUnavailableError) || !error.admissionOnly) throw error;
+      const current = await this.fileRepository.findOne({ where: { id: file.id } });
+      if (!current || current.uploadVersion !== file.uploadVersion || current.isDeleted) return null;
+      const delayMs = Math.min(60_000, Math.max(1000, error.retryAfterMs));
+      await job.moveToDelayed(Date.now() + delayMs);
+      throw new DelayedError();
+    }
+  }
+
   private async removeUploadArtifacts(
     filePath: string,
     fileId?: string,
@@ -214,6 +274,8 @@ export class FileUploadProcessor {
       this.logger.warn(`忽略文件 ${fileId} 的陈旧上传任务 version=${uploadVersion}`);
       return;
     }
+    // 存储后端判别（会话创建时冻结）：非 TG 走存储路由，TG 链路逐字节不变
+    const isNonTelegram = isRemoteStorageBackend(file.storageBackend);
 
     if (!this.isCommitted(file)) {
       if (!existsSync(filePath)) {
@@ -248,49 +310,81 @@ export class FileUploadProcessor {
       file = await this.fileRepository.findOneOrFail({ where: { id: fileId } });
 
       try {
+        // 提交前捕获旧存储引用（异步覆盖场景仍指向旧对象），提交成功后共享安全清理
+        const oldStorageRef = {
+          storageBackend: file.storageBackend,
+          storageAccountId: file.storageAccountId,
+          storageObjectRef: file.storageObjectRef,
+        };
         let result = await this.loadReceipt(filePath, uploadVersion);
         if (!result) {
-          // 池化优先（仅非严格任务）：按权重/健康/容量选号上传，并记录**实际上传账号**；
-          // 严格任务保留单账号链路，以维持 noCache/localCacheReleased/releaseLocalFile 契约。
-          if (strictDiskLease) {
-            // 诊断：严格任务跳过池化是**按设计**（非池化失效），明确记录避免生产误判。
-            this.logger.debug('严格磁盘租约任务按设计跳过池化上传（保留 fork 本地媒体释放契约）');
-          }
-          let pooled: UploadReceipt | null;
-          for (;;) {
-            try {
-              pooled = strictDiskLease ? null : await this.tryPooledUpload(filePath, file);
-              break;
-            } catch (error) {
-              // 没有任何远端请求被发出：等待名额，不消耗 Bull 的失败次数或删除源文件。
-              if (!(error instanceof AccountUploadUnavailableError) || !error.admissionOnly) throw error;
-              await new Promise<void>(resolve => setTimeout(resolve, Math.min(60_000, Math.max(1000, error.retryAfterMs))));
-              const current = await this.fileRepository.findOne({ where: { id: fileId } });
-              if (!current || current.uploadVersion !== uploadVersion || current.isDeleted) return;
+          if (isNonTelegram) {
+            // 非 TG 后端：按冻结的 storageBackend 选号上传（配额/健康/带宽感知）
+            result = await this.uploadViaStorageBackend(filePath, file, job);
+            if (!result) return;
+          } else {
+            // 池化优先（仅非严格任务）：按权重/健康/容量选号上传，并记录**实际上传账号**；
+            // 严格任务保留单账号链路，以维持 noCache/localCacheReleased/releaseLocalFile 契约。
+            if (strictDiskLease) {
+              // 诊断：严格任务跳过池化是**按设计**（非池化失效），明确记录避免生产误判。
+              this.logger.debug('严格磁盘租约任务按设计跳过池化上传（保留 fork 本地媒体释放契约）');
             }
+            let pooled: UploadReceipt | null;
+            for (;;) {
+              try {
+                pooled = strictDiskLease ? null : await this.tryPooledUpload(filePath, file);
+                break;
+              } catch (error) {
+                // 没有任何远端请求被发出：等待名额，不消耗 Bull 的失败次数或删除源文件。
+                if (!(error instanceof AccountUploadUnavailableError) || !error.admissionOnly) throw error;
+                await new Promise<void>(resolve => setTimeout(resolve, Math.min(60_000, Math.max(1000, error.retryAfterMs))));
+                const current = await this.fileRepository.findOne({ where: { id: fileId } });
+                if (!current || current.uploadVersion !== uploadVersion || current.isDeleted) return;
+              }
+            }
+            result = pooled ?? await this.telegramService.uploadFile(
+              createReadStream(filePath),
+              file.originalName,
+              undefined,
+              file.size,
+              { noCache: strictDiskLease },
+            );
           }
-          result = pooled ?? await this.telegramService.uploadFile(
-            createReadStream(filePath),
-            file.originalName,
-            undefined,
-            file.size,
-            { noCache: strictDiskLease },
-          );
           // DB 提交失败前先原子保存回执，Bull 重试/进程重启可直接恢复提交。
           // 严格策略一并冻结，避免重启后配置热切换让旧任务重新生成缓存或漏做本地媒体释放。
           await this.persistReceipt(filePath, { ...result, strictDiskLease }, uploadVersion);
         }
-        result = await this.ensureLocalCacheReleased(result, filePath, uploadVersion, strictDiskLease);
-        // 回执（含历史/陈旧回执）必须包含非空 file_id，否则视为提交失败，
-        // 避免把空引用写入 DB 造成“假成功”。
-        if (!result?.file_id || !String(result.file_id).trim()) {
+        // 严格磁盘租约的本地媒体释放是 TG fork 专属契约，非 TG 后端跳过
+        if (!isNonTelegram) {
+          result = await this.ensureLocalCacheReleased(result, filePath, uploadVersion, strictDiskLease);
+        }
+        // 回执（含历史/陈旧回执）必须包含有效远端引用，否则视为提交失败，
+        // 避免把空引用写入 DB 造成“假成功”。TG 校验 file_id；非 TG 校验对象引用。
+        if (isNonTelegram) {
+          if (!result?.storageObjectRef || !String(result.storageObjectRef).trim()) {
+            throw new Error('存储远端回执缺少有效对象引用，无法完成提交');
+          }
+        } else if (!result?.file_id || !String(result.file_id).trim()) {
           throw new Error('Telegram 远端回执缺少有效 file_id，无法完成提交');
         }
-        // 远端结果是幂等提交点：一次原子更新同时写入 TG 引用、清空历史失败原因并置 remote_committed。
+        // 远端结果是幂等提交点：一次原子更新同时写入远端引用、清空历史失败原因并置 remote_committed。
         // G3-13：校验 affected，若 0 行命中（并发覆盖导致 uploadVersion 已变），不得把旧版本内容覆盖到新记录上。
         const commitUpdate = await this.fileRepository.update(
           { id: fileId, uploadVersion },
-          {
+          (isNonTelegram ? {
+            filename: file.originalName,
+            telegramFileId: '',
+            telegramFilePath: '',
+            telegramSourceAccountId: null,
+            telegramChatId: null,
+            telegramMessageId: null,
+            telegramFileUniqueId: null,
+            storageBackend: file.storageBackend,
+            storageAccountId: result.storageAccountId ?? null,
+            storageObjectRef: result.storageObjectRef ?? null,
+            uploadStage: 'remote_committed',
+            uploadFailureReason: null,
+          } : {
             filename: result.file_id,
             telegramFileId: result.file_id,
             telegramFilePath: result.file_path || '',
@@ -300,13 +394,23 @@ export class FileUploadProcessor {
             telegramFileUniqueId: result.file_unique_id ?? null,
             uploadStage: 'remote_committed',
             uploadFailureReason: null,
-          } as Partial<File>,
+          }) as Partial<File>,
         );
         if (commitUpdate.affected === 0) {
           this.logger.warn(`文件 ${fileId} 远端提交条件未命中（版本已变更），放弃本轮提交`);
           throw new Error('远端提交条件未命中（uploadVersion 已变更）');
         }
+        // 非 TG 覆盖：新引用已提交，旧对象经共享检查 best-effort 清理（绝不影响提交结论）
+        if (
+          isNonTelegram
+          && oldStorageRef.storageObjectRef
+          && (oldStorageRef.storageObjectRef !== result.storageObjectRef
+            || oldStorageRef.storageAccountId !== result.storageAccountId)
+        ) {
+          void this.fileService.cleanupNonTelegramObject(oldStorageRef);
+        }
       } catch (error) {
+        if (error instanceof DelayedError) throw error;
         this.logger.warn(`文件远端上传或提交失败 (fileId=${fileId}, 第 ${attempt} 次): ${(error as Error).message}`);
         const remoteReceipt = await this.loadReceipt(filePath, uploadVersion);
         if (job.attemptsMade >= 2 && !remoteReceipt) {
@@ -346,20 +450,25 @@ export class FileUploadProcessor {
     file = await this.fileRepository.findOneOrFail({ where: { id: fileId } });
     if (file.uploadVersion !== uploadVersion || !this.isCommitted(file)) return;
 
-    // 收紧 ready 置位：必须有非空 telegramFileId，防止“假成功”死链进入 ready。
+    // 收紧 ready 置位：必须有有效远端引用，防止“假成功”死链进入 ready。
+    // TG 校验 telegramFileId；非 TG 校验 storageObjectRef。
     // 缺少有效远端引用时不得置 ready，而是条件更新标记 error（不覆盖并发新上传）。
-    const remoteFileId = file.telegramFileId?.trim?.();
+    const remoteFileId = isNonTelegram
+      ? file.storageObjectRef?.trim?.()
+      : file.telegramFileId?.trim?.();
     if (!remoteFileId) {
       await this.fileRepository.update(
         { id: fileId, uploadVersion },
         {
           status: 'error',
           uploadStage: 'failed',
-          uploadFailureReason: 'Telegram 远端提交缺少有效 file_id，已标记上传失败',
+          uploadFailureReason: isNonTelegram
+            ? '存储远端提交缺少有效对象引用，已标记上传失败'
+            : 'Telegram 远端提交缺少有效 file_id，已标记上传失败',
         } as Partial<File>,
       );
       this.logger.warn(
-        `文件 ${fileId} 置 ready 前缺少 telegramFileId，已标记 error（禁止假成功）`,
+        `文件 ${fileId} 置 ready 前缺少有效远端引用（backend=${file.storageBackend}），已标记 error（禁止假成功）`,
       );
       await this.removeUploadArtifacts(filePath, fileId, uploadVersion);
       return;
@@ -410,9 +519,10 @@ export class FileUploadProcessor {
 
     // 主副本远端定位登记 + 镜像触发（best-effort；失败只告警，不影响上传结论）。
     // 回执在远端提交时已原子落盘，重启恢复路径同样能取到定位信息。
+    // 非 TG 后端无主副本定位/镜像扩散概念，显式跳过。
     try {
       const receipt = await this.loadReceipt(filePath, uploadVersion);
-      if (receipt?.chat_id && receipt.message_id) {
+      if (!isNonTelegram && receipt?.chat_id && receipt.message_id) {
         await this.fileService.registerPrimaryTelegramSource(file, {
           file_id: receipt.file_id,
           chat_id: receipt.chat_id,
