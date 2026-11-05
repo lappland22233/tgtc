@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { OAuth2Client } from 'google-auth-library';
-import axios, { AxiosError } from 'axios';
+import axios, { AxiosError, AxiosResponse } from 'axios';
 import { createHash, randomUUID } from 'crypto';
 import { Readable } from 'stream';
 import type { GDriveBackendConfig } from '../../common/entities/storage-backend.entity';
@@ -232,15 +232,19 @@ export class GDriveStorageDriver implements StorageBackendDriver {
       const total = params.knownLength;
       for await (const chunk of this.chunked(params.openStream(), RESUMABLE_CHUNK_BYTES)) {
         if (params.signal?.aborted) throw new StorageAccountError('上传已取消', 'other');
-        const start = offset;
-        const end = offset + chunk.length - 1;
+        let chunkOffset = 0;
         let attempt = 0;
-        for (;;) {
+        let noProgress = 0;
+        while (chunkOffset < chunk.length) {
+          const start = offset;
+          const remaining = chunk.subarray(chunkOffset);
+          const end = start + remaining.length - 1;
+          let response: AxiosResponse<{ id?: string; size?: string }>;
           try {
-            const response = await axios.put<{ id?: string; size?: string }>(sessionUri, chunk, {
+            response = await axios.put<{ id?: string; size?: string }>(sessionUri, remaining, {
               headers: {
                 Authorization: `Bearer ${token}`,
-                'Content-Length': String(chunk.length),
+                'Content-Length': String(remaining.length),
                 'Content-Range': `bytes ${start}-${end}/${total}`,
               },
               // 308 = 块已接收继续下一块；200/201 = 完成
@@ -249,17 +253,6 @@ export class GDriveStorageDriver implements StorageBackendDriver {
               maxBodyLength: Infinity,
               signal: params.signal,
             });
-            if (response.status === 308) {
-              // 以服务端 Range 头为准同步偏移（可能少于本块字节数）
-              const rangeHeader = response.headers.range as string | undefined;
-              const received = rangeHeader ? Number(rangeHeader.split('-')[1]) + 1 : end + 1;
-              offset = Number.isFinite(received) ? received : end + 1;
-              break;
-            }
-            if (!response.data?.id) {
-              throw new StorageAccountError('GDrive resumable 完成响应缺少 fileId', 'other');
-            }
-            return { objectRef: response.data.id, size: Number(response.data.size ?? total) };
           } catch (error) {
             if (params.signal?.aborted) throw error;
             const status = (error as AxiosError)?.response?.status;
@@ -267,7 +260,39 @@ export class GDriveStorageDriver implements StorageBackendDriver {
             attempt += 1;
             if (!retryable || attempt >= CHUNK_RETRY_LIMIT) throw error;
             await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
+            continue;
           }
+          if (response.status === 308) {
+            // Range 缺失代表该请求尚未确认任何新字节；重复发送当前未确认后缀。
+            const rangeHeader = response.headers.range as string | undefined;
+            let received = start;
+            if (rangeHeader) {
+              const match = /^bytes=0-(\d+)$/.exec(rangeHeader.trim());
+              if (!match) throw new StorageAccountError('GDrive resumable Range 响应无效', 'other');
+              received = Number(match[1]) + 1;
+            }
+            if (!Number.isSafeInteger(received) || received < start || received > end + 1) {
+              throw new StorageAccountError('GDrive resumable Range 偏移越界', 'other');
+            }
+            if (received === start) {
+              noProgress += 1;
+              if (noProgress >= CHUNK_RETRY_LIMIT) {
+                throw new StorageAccountError('GDrive resumable 上传未确认任何字节', 'other');
+              }
+              await new Promise((resolve) => setTimeout(resolve, 1000 * noProgress));
+              continue;
+            }
+            const acknowledged = received - start;
+            offset = received;
+            chunkOffset += acknowledged;
+            noProgress = 0;
+            attempt = 0;
+            continue;
+          }
+          if (!response.data?.id) {
+            throw new StorageAccountError('GDrive resumable 完成响应缺少 fileId', 'other');
+          }
+          return { objectRef: response.data.id, size: Number(response.data.size ?? total) };
         }
       }
       throw new StorageAccountError('GDrive resumable 流提前结束（字节数不足）', 'other');

@@ -2,7 +2,7 @@ import { Injectable, Logger, Optional, Inject } from '@nestjs/common';
 import { Process, Processor } from '@nestjs/bull';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { Job } from 'bull';
+import { DelayedError, Job } from 'bull';
 import { QUEUE_NAMES } from './bull-queue.module';
 import { File } from '../common/entities/file.entity';
 import { TelegramService } from '../telegram/telegram.service';
@@ -188,43 +188,43 @@ export class FileUploadProcessor {
   /**
    * 非 TG 后端上传（S3 / WebDAV / GDrive，按 File.storageBackend 冻结值路由）。
    *
-   * 回执/版本 CAS/recoverable 恢复语义与 TG 链路完全复用；admissionOnly 等待
-   * 名额时不消耗 Bull 失败次数（与 TG 池化同口径）。返回 null 表示任务已失效
+   * 回执/版本 CAS/recoverable 恢复语义与 TG 链路完全复用；admissionOnly 任务
+   * 放入 Bull 延迟队列后释放处理槽，不消耗失败次数。返回 null 表示任务已失效
    * （版本变更/已删除），调用方直接放弃本轮。
    */
-  private async uploadViaStorageBackend(filePath: string, file: File): Promise<UploadReceipt | null> {
+  private async uploadViaStorageBackend(filePath: string, file: File, job: Job<FileUploadJobData>): Promise<UploadReceipt | null> {
     if (!this.storageRouter || !isRemoteStorageBackend(file.storageBackend)) {
       throw new Error('存储后端未装配，无法上传非 TG 文件');
     }
     const backendType = file.storageBackend;
-    for (;;) {
-      try {
-        const receipt = await this.storageRouter.upload({
-          backendType,
-          objectName: file.originalName,
-          knownLength: file.size,
-          // 换号重试必须新开流：流只能被消费一次
-          openStream: () => createReadStream(filePath),
-        });
-        return {
-          file_id: '',
-          file_path: '',
-          file_size: receipt.size,
-          message_id: null,
-          chat_id: null,
-          file_unique_id: null,
-          storageAccountId: receipt.accountId,
-          storageObjectRef: receipt.objectRef,
-          // 非 TG 后端无 fork 本地媒体缓存，严格任务同样视为已释放
-          localCacheReleased: true,
-        };
-      } catch (error) {
-        // 没有任何远端请求被发出：等待名额，不消耗 Bull 的失败次数或删除源文件
-        if (!(error instanceof StorageUploadUnavailableError) || !error.admissionOnly) throw error;
-        await new Promise<void>(resolve => setTimeout(resolve, Math.min(60_000, Math.max(1000, error.retryAfterMs))));
-        const current = await this.fileRepository.findOne({ where: { id: file.id } });
-        if (!current || current.uploadVersion !== file.uploadVersion || current.isDeleted) return null;
-      }
+    try {
+      const receipt = await this.storageRouter.upload({
+        backendType,
+        objectName: file.originalName,
+        knownLength: file.size,
+        // 换号重试必须新开流：流只能被消费一次
+        openStream: () => createReadStream(filePath),
+      });
+      return {
+        file_id: '',
+        file_path: '',
+        file_size: receipt.size,
+        message_id: null,
+        chat_id: null,
+        file_unique_id: null,
+        storageAccountId: receipt.accountId,
+        storageObjectRef: receipt.objectRef,
+        // 非 TG 后端无 fork 本地媒体缓存，严格任务同样视为已释放
+        localCacheReleased: true,
+      };
+    } catch (error) {
+      // 尚未发出远端请求时，把任务延迟重试并退出 processor，避免容量不足占满并发槽。
+      if (!(error instanceof StorageUploadUnavailableError) || !error.admissionOnly) throw error;
+      const current = await this.fileRepository.findOne({ where: { id: file.id } });
+      if (!current || current.uploadVersion !== file.uploadVersion || current.isDeleted) return null;
+      const delayMs = Math.min(60_000, Math.max(1000, error.retryAfterMs));
+      await job.moveToDelayed(Date.now() + delayMs);
+      throw new DelayedError();
     }
   }
 
@@ -316,7 +316,7 @@ export class FileUploadProcessor {
         if (!result) {
           if (isNonTelegram) {
             // 非 TG 后端：按冻结的 storageBackend 选号上传（配额/健康/带宽感知）
-            result = await this.uploadViaStorageBackend(filePath, file);
+            result = await this.uploadViaStorageBackend(filePath, file, job);
             if (!result) return;
           } else {
             // 池化优先（仅非严格任务）：按权重/健康/容量选号上传，并记录**实际上传账号**；
@@ -406,6 +406,7 @@ export class FileUploadProcessor {
           void this.fileService.cleanupNonTelegramObject(oldStorageRef);
         }
       } catch (error) {
+        if (error instanceof DelayedError) throw error;
         this.logger.warn(`文件远端上传或提交失败 (fileId=${fileId}, 第 ${attempt} 次): ${(error as Error).message}`);
         const remoteReceipt = await this.loadReceipt(filePath, uploadVersion);
         if (job.attemptsMade >= 2 && !remoteReceipt) {

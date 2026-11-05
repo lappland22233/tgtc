@@ -251,7 +251,11 @@ export class StorageBackendsService implements OnModuleInit {
       row.name = name;
     }
     if (input.config !== undefined) {
-      row.config = validateBackendConfig(row.type, input.config);
+      const nextConfig = validateBackendConfig(row.type, input.config);
+      if (this.storageLocationChanged(row.type, row.config ?? {}, nextConfig)) {
+        throw new BadRequestException('不能在现有账号上更改存储位置；请新建存储账号并迁移对象');
+      }
+      row.config = nextConfig;
     }
     if (input.weight !== undefined) row.weight = Math.max(1, Math.floor(input.weight));
     if (input.maxInflight !== undefined) row.maxInflight = Math.max(1, Math.floor(input.maxInflight));
@@ -275,6 +279,30 @@ export class StorageBackendsService implements OnModuleInit {
     }
   }
 
+  /** 已有文件只保存账号 ID 和相对对象引用，不能在原账号上改变实际存储位置。 */
+  private storageLocationChanged(
+    type: RemoteStorageBackendType,
+    previousConfig: StorageBackendConfigPayload | Record<string, unknown>,
+    nextConfig: StorageBackendConfigPayload,
+  ): boolean {
+    if (type === 's3') {
+      const previous = previousConfig as Partial<S3BackendConfig>;
+      const next = nextConfig as S3BackendConfig;
+      const normalizeEndpoint = (value?: string) => (value ?? '').trim().replace(/\/+$/, '');
+      const normalizePrefix = (value?: string) => (value ?? '').replace(/^\/+|\/+$/g, '');
+      return previous.bucket !== next.bucket
+        || previous.region !== next.region
+        || normalizeEndpoint(previous.endpoint) !== normalizeEndpoint(next.endpoint)
+        || normalizePrefix(previous.prefix) !== normalizePrefix(next.prefix);
+    }
+    if (type === 'webdav') {
+      const previous = previousConfig as Partial<WebDavBackendConfig>;
+      const next = nextConfig as WebDavBackendConfig;
+      return previous.url !== next.url || (previous.rootPath ?? '') !== (next.rootPath ?? '');
+    }
+    return false;
+  }
+
   /** 轮换凭据（撤销账号凭此重新启用）；同样先测试后落库 */
   async rotateCredential(id: string, credentialPayload: Record<string, unknown>, adminId: string): Promise<StorageBackendView> {
     if (!this.credential.isAvailable()) {
@@ -295,7 +323,15 @@ export class StorageBackendsService implements OnModuleInit {
     if (!ciphertext) throw new BadRequestException('凭据加密失败，拒绝轮换');
     row.credentialCiphertext = ciphertext;
     row.credentialVersion = this.credential.cipherVersion();
-    row.status = 'active';
+    if (row.status === 'revoked') {
+      row.enabled = true;
+      row.status = 'active';
+    } else if (row.status === 'disabled' || !row.enabled) {
+      row.enabled = false;
+      row.status = 'disabled';
+    } else {
+      row.status = 'active';
+    }
     row.lastFailureCode = null;
     row.lastFailureSummary = null;
     row.updatedBy = adminId;

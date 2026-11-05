@@ -9,6 +9,7 @@ import { StorageDriverRegistry } from './storage-driver.registry';
 import {
   isRemoteStorageBackend,
   StorageAccountError,
+  StorageAccountContext,
   StorageDownloadResult,
   StorageDownloadUnavailableError,
   StorageFailureKind,
@@ -104,17 +105,17 @@ export class StorageRouterService {
         continue;
       }
 
-      const ctx = await this.backends.resolveContext(selection.accountId);
-      if (!ctx) {
-        this.scheduler.finishAttempt(selection.accountId, { ok: false, failureKind: 'auth' });
-        void this.backends.recordOutcome(selection.accountId, { ok: false, failureKind: 'auth', errorMessage: '凭据不可用' });
-        excluded.add(selection.accountId);
-        continue;
-      }
-
       let stream: Readable | null = null;
       const startedAt = Date.now();
       try {
+        // 上下文解析也属于本次 admission：即使数据库读取抛错，也必须在 catch 中释放 inflight。
+        const ctx = await this.backends.resolveContext(selection.accountId);
+        if (!ctx) {
+          this.scheduler.finishAttempt(selection.accountId, { ok: false, failureKind: 'auth' });
+          void this.backends.recordOutcome(selection.accountId, { ok: false, failureKind: 'auth', errorMessage: '凭据不可用' });
+          excluded.add(selection.accountId);
+          continue;
+        }
         stream = params.openStream();
         const result = await driver.upload(ctx, params);
         const durationMs = Date.now() - startedAt;
@@ -212,7 +213,23 @@ export class StorageRouterService {
     if (!selection || !this.scheduler.beginAttempt(params.accountId)) {
       throw new StorageDownloadUnavailableError('account_busy');
     }
-    const ctx = await this.backends.resolveContext(params.accountId);
+    let ctx: StorageAccountContext | null;
+    try {
+      ctx = await this.backends.resolveContext(params.accountId);
+    } catch (error) {
+      const kind = error instanceof StorageAccountError ? error.kind : 'other';
+      this.scheduler.finishAttempt(params.accountId, {
+        ok: false,
+        failureKind: kind,
+        errorMessage: error instanceof Error ? error.message : String(error),
+      });
+      void this.backends.recordOutcome(params.accountId, {
+        ok: false,
+        failureKind: kind,
+        errorMessage: error instanceof Error ? error.message : String(error),
+      });
+      throw new StorageDownloadUnavailableError('upstream_failed');
+    }
     if (!ctx) {
       this.scheduler.finishAttempt(params.accountId, { ok: false, failureKind: 'auth' });
       void this.backends.recordOutcome(params.accountId, { ok: false, failureKind: 'auth', errorMessage: '凭据不可用' });
@@ -264,21 +281,21 @@ export class StorageRouterService {
     return result;
   }
 
-  /** 文件校验用：对象存在性与大小（账号不可用时返回 exists=false，由校验侧记录） */
+  /** 文件校验用：只有驱动确认的缺失对象返回 exists=false；暂时不可用会抛错供校验侧计为临时失败。 */
   async headObject(
     backendType: RemoteStorageBackendType,
     accountId: string,
     objectRef: string,
   ): Promise<{ exists: boolean; size?: number }> {
     const driver = this.registry.get(backendType);
-    if (!driver) return { exists: false };
-    const ctx = await this.backends.resolveContext(accountId);
-    if (!ctx) return { exists: false };
+    if (!driver) throw new StorageDownloadUnavailableError('driver_missing');
     try {
+      const ctx = await this.backends.resolveContext(accountId);
+      if (!ctx) throw new StorageDownloadUnavailableError('credential_unavailable');
       return await driver.headObject(ctx, objectRef);
     } catch (error) {
       this.logger.debug(`对象 head 失败（${backendType}/${maskIdentifier(accountId)}）：${error instanceof Error ? error.message : String(error)}`);
-      return { exists: false };
+      throw error;
     }
   }
 

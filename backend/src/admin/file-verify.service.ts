@@ -396,8 +396,8 @@ export class FileVerifyService implements OnModuleInit {
 
   /**
    * 非 TG 文件校验（可插拔存储）：head 对象存在性与大小。
-   * 账号不可用/凭据失效时 head 返回 exists=false——与 TG 「文件不存在」同口径
-   * 计为 invalid（apply 标记 error）；路由未装配时仅计临时失败，绝不误标。
+   * 驱动确认的 404 计为 invalid（apply 标记 error）；临时网络、数据库或凭据错误
+   * 只计 temporaryFailure，绝不误标文件。
    */
   private async verifyNonTelegramFile(
     file: File,
@@ -408,11 +408,17 @@ export class FileVerifyService implements OnModuleInit {
       stats.temporaryFailure++;
       return;
     }
-    const head = await this.storageRouter.headObject(
-      file.storageBackend as 's3' | 'webdav' | 'gdrive',
-      file.storageAccountId,
-      file.storageObjectRef,
-    );
+    let head: { exists: boolean; size?: number };
+    try {
+      head = await this.storageRouter.headObject(
+        file.storageBackend as 's3' | 'webdav' | 'gdrive',
+        file.storageAccountId,
+        file.storageObjectRef,
+      );
+    } catch {
+      stats.temporaryFailure++;
+      return;
+    }
     if (head.exists) {
       if (typeof head.size === 'number' && head.size > 0 && Number(file.size) !== head.size) {
         stats.sizeMismatch++;
@@ -427,7 +433,7 @@ export class FileVerifyService implements OnModuleInit {
         .set({
           status: 'error' as const,
           uploadStage: 'failed' as const,
-          uploadFailureReason: '存储对象不存在或账号不可用，已标记上传失败',
+          uploadFailureReason: '存储对象不存在，已标记上传失败',
         })
         .where('id = :id', { id: file.id })
         .andWhere("status = 'ready'")

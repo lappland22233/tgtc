@@ -565,8 +565,8 @@ export class FolderService {
   /**
    * 复制文件（生成独立副本）。
    *
-   * 副本复用源文件的 Telegram 存储引用（telegramFileId / telegramFilePath /
-   * thumbnailPath / mimeType / size / filename），不重新上传字节，属于轻量级
+   * 副本复用源文件的存储引用（Telegram 字段或非 TG 的存储账号与对象引用），
+   * 以及 thumbnailPath / mimeType / size / filename，不重新上传字节，属于轻量级
    * 引用复制。副本是独立的 File 记录，可单独重命名、移动、删除。
    * originalName 追加 " - 副本" 后缀；若已存在同名副本则累加计数。
    */
@@ -599,6 +599,9 @@ export class FolderService {
       telegramFileUniqueId: source.telegramFileUniqueId,
       telegramChatId: source.telegramChatId,
       telegramMessageId: source.telegramMessageId,
+      storageBackend: source.storageBackend,
+      storageAccountId: source.storageAccountId,
+      storageObjectRef: source.storageObjectRef,
       thumbnailPath: source.thumbnailPath,
       folderId: dto.folderId ?? null,
       accessType: source.accessType,
