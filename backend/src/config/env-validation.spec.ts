@@ -265,6 +265,23 @@ describe('validateEnv', () => {
     expect(() => validateEnv(malformed)).toThrow(/TELEGRAM_ACCOUNT_POOL 不是合法 JSON/);
   });
 
+  it('allows single-bot deployment with TELEGRAM_BOT_STORAGE_MODE=gdrive and no TELEGRAM_CHAT_ID', () => {
+    const gdriveBotOnly: NodeJS.ProcessEnv = {
+      ...valid,
+      TELEGRAM_CHAT_ID: undefined,
+      TELEGRAM_BOT_STORAGE_MODE: 'gdrive',
+    };
+    expect(() => validateEnv(gdriveBotOnly)).not.toThrow();
+
+    // 未配置 gdrive 模式时，缺失 TELEGRAM_CHAT_ID 仍必须报错
+    const missingChatId: NodeJS.ProcessEnv = {
+      ...valid,
+      TELEGRAM_CHAT_ID: undefined,
+      TELEGRAM_BOT_STORAGE_MODE: 'telegram',
+    };
+    expect(() => validateEnv(missingChatId)).toThrow(/TELEGRAM_CHAT_ID 未设置/);
+  });
+
   it('reads process.env by default when called without arguments', () => {
     // 默认参数契约：无参调用读取当前 process.env（仅此用例替换环境，afterEach 恢复）。
     process.env = { ...valid };

@@ -223,7 +223,7 @@ export class TelegramAccountClientService {
     chatId: string,
     text: string,
     options?: { replyToMessageId?: number; disableNotification?: boolean },
-  ): Promise<void> {
+  ): Promise<{ messageId?: number }> {
     try {
       const payload: Record<string, unknown> = {
         chat_id: String(chatId),
@@ -236,6 +236,31 @@ export class TelegramAccountClientService {
       if (response.data?.ok !== true) {
         throw new TelegramAccountError('sendMessage 返回 ok!=true', accountId, 'other');
       }
+      return { messageId: response.data.result?.message_id };
+    } catch (error) {
+      throw this.toAccountError(error, token, accountId);
+    }
+  }
+
+  /**
+   * 编辑已有消息文本（账号池客户端）。
+   */
+  async editMessageText(
+    accountId: string,
+    token: string,
+    chatId: string,
+    messageId: number,
+    text: string,
+  ): Promise<boolean> {
+    try {
+      const payload: Record<string, unknown> = {
+        chat_id: String(chatId),
+        message_id: messageId,
+        text,
+        disable_web_page_preview: false,
+      };
+      const response = await axios.post(`${this.apiBase}${token}/editMessageText`, payload, { timeout: 20_000 });
+      return response.data?.ok === true;
     } catch (error) {
       throw this.toAccountError(error, token, accountId);
     }

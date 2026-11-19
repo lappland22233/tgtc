@@ -79,8 +79,8 @@ export class GDriveOAuthService {
     return (await this.getClientConfig()) !== null;
   }
 
-  /** 生成授权 URL（redirectUri 必须已在 Google Console 登记） */
-  async buildAuthUrl(redirectUri: string): Promise<string> {
+  /** 生成授权 URL（redirectUri 必须已在 Google Console 登记，可带 state 防御 CSRF） */
+  async buildAuthUrl(redirectUri: string, state?: string): Promise<string> {
     const config = await this.getClientConfig();
     if (!config) throw new BadRequestException('请先配置 Google Drive OAuth Client（client_id / client_secret）');
     const trimmed = redirectUri.trim();
@@ -91,6 +91,7 @@ export class GDriveOAuthService {
       // 强制 consent：重复授权也能拿到 refresh_token（否则 Google 只在首次授权下发）
       prompt: 'consent',
       scope: GDRIVE_SCOPES,
+      ...(state ? { state: state.trim() } : {}),
     });
   }
 

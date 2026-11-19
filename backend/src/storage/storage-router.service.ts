@@ -84,6 +84,32 @@ export class StorageRouterService {
     const candidates = this.scheduler.activeAccountIds(params.backendType);
     if (candidates.length === 0) throw new StorageUploadUnavailableError(false);
 
+    // [P0-04 Fix]: 若文件大小超出该后端所有账号的单账号绝对容量上限（如 GDrive 15GB），
+    // 根本不可能有任何账号能接纳，立即抛出 admissionOnly: false 的不可用错误，防止 processor 无限死循环饥饿；
+    // 若候选账号中存在无限容量（Google Workspace，quotaTotalBytes === null），则不设上限。
+    if (params.backendType === 'gdrive') {
+      let maxAccountCapacity = 0;
+      let hasUnlimited = false;
+      for (const id of candidates) {
+        const rt = this.scheduler.getRuntime(id);
+        if (rt?.quotaTotalBytes === null) {
+          hasUnlimited = true;
+          break;
+        }
+        const total = typeof rt?.quotaTotalBytes === 'number'
+          ? rt.quotaTotalBytes
+          : (15 * 1024 * 1024 * 1024);
+        if (total > maxAccountCapacity) maxAccountCapacity = total;
+      }
+      if (!hasUnlimited && maxAccountCapacity > 0 && params.knownLength * QUOTA_SIZE_FACTOR + QUOTA_HEADROOM_BYTES > maxAccountCapacity) {
+        throw new StorageUploadUnavailableError(
+          false,
+          0,
+          `文件大小（${(params.knownLength / (1024 * 1024 * 1024)).toFixed(2)}GB）超出单 GDrive 账号最大存储上限，无法上传`,
+        );
+      }
+    }
+
     const excluded = new Set<string>();
     for (let attempt = 0; attempt < MAX_ACCOUNT_ATTEMPTS; attempt += 1) {
       const available = candidates.filter((id) => !excluded.has(id));
@@ -99,7 +125,7 @@ export class StorageRouterService {
         if (excluded.size === 0) throw new StorageUploadUnavailableError(true);
         break;
       }
-      if (!this.scheduler.beginAttempt(selection.accountId, Date.now(), params.knownLength)) {
+      if (!this.scheduler.beginAttempt(selection.accountId, Date.now(), params.knownLength, 'write')) {
         excluded.add(selection.accountId);
         continue;
       }
@@ -109,14 +135,14 @@ export class StorageRouterService {
         // 上下文解析也属于本次 admission：即使数据库读取抛错，也必须在 catch 中释放 inflight。
         const ctx = await this.backends.resolveContext(selection.accountId);
         if (!ctx) {
-          this.scheduler.finishAttempt(selection.accountId, { ok: false, failureKind: 'auth' });
+          this.scheduler.finishAttempt(selection.accountId, { ok: false, failureKind: 'auth' }, Date.now(), params.knownLength, 'write');
           void this.backends.recordOutcome(selection.accountId, { ok: false, failureKind: 'auth', errorMessage: '凭据不可用' });
           excluded.add(selection.accountId);
           continue;
         }
         const result = await driver.upload(ctx, params);
         const durationMs = Date.now() - startedAt;
-        this.scheduler.finishAttempt(selection.accountId, { ok: true, bytes: result.size, durationMs });
+        this.scheduler.finishAttempt(selection.accountId, { ok: true, bytes: result.size, durationMs }, Date.now(), params.knownLength);
         void this.backends.recordOutcome(selection.accountId, { ok: true });
         // GDrive 上传成功后异步刷新配额（调度硬准入依赖最新剩余空间）
         if (params.backendType === 'gdrive') {
@@ -134,17 +160,22 @@ export class StorageRouterService {
         };
       } catch (error) {
         if (params.signal?.aborted) {
-          this.scheduler.releaseAttempt(selection.accountId);
+          this.scheduler.releaseAttempt(selection.accountId, params.knownLength);
           throw error;
         }
         const kind = error instanceof StorageAccountError ? error.kind : 'other';
         const retryAfterSeconds = error instanceof StorageAccountError ? error.retryAfterSeconds : undefined;
-        this.scheduler.finishAttempt(selection.accountId, {
-          ok: false,
-          failureKind: kind,
-          retryAfterSeconds,
-          errorMessage: error instanceof Error ? error.message : String(error),
-        });
+        this.scheduler.finishAttempt(
+          selection.accountId,
+          {
+            ok: false,
+            failureKind: kind,
+            retryAfterSeconds,
+            errorMessage: error instanceof Error ? error.message : String(error),
+          },
+          Date.now(),
+          params.knownLength,
+        );
         void this.backends.recordOutcome(selection.accountId, {
           ok: false,
           failureKind: kind,
@@ -197,8 +228,11 @@ export class StorageRouterService {
     if (!this.scheduler.hasAccount(params.accountId)) {
       throw new StorageDownloadUnavailableError('account_unknown', '文件暂不可用：存储账号不存在或已被移除，请联系管理员');
     }
-    const selection = this.scheduler.select(params.backendType, Date.now(), { candidateIds: [params.accountId] });
-    if (!selection || !this.scheduler.beginAttempt(params.accountId)) {
+    const selection = this.scheduler.select(params.backendType, Date.now(), {
+      candidateIds: [params.accountId],
+      operation: 'read',
+    });
+    if (!selection || !this.scheduler.beginAttempt(params.accountId, Date.now(), undefined, 'read')) {
       throw new StorageDownloadUnavailableError('account_busy');
     }
     let ctx: StorageAccountContext | null;
@@ -233,12 +267,22 @@ export class StorageRouterService {
         signal: params.signal,
       });
     } catch (error) {
+      if (params.signal?.aborted) {
+        this.scheduler.releaseAttempt(params.accountId);
+        throw new StorageDownloadUnavailableError('upstream_failed', '客户端已取消请求');
+      }
       const kind = error instanceof StorageAccountError ? error.kind : 'other';
-      this.scheduler.finishAttempt(params.accountId, {
-        ok: false,
-        failureKind: kind,
-        errorMessage: error instanceof Error ? error.message : String(error),
-      });
+      this.scheduler.finishAttempt(
+        params.accountId,
+        {
+          ok: false,
+          failureKind: kind,
+          errorMessage: error instanceof Error ? error.message : String(error),
+        },
+        Date.now(),
+        undefined,
+        'read',
+      );
       void this.backends.recordOutcome(params.accountId, {
         ok: false,
         failureKind: kind,
@@ -254,17 +298,31 @@ export class StorageRouterService {
       settled = true;
       const durationMs = Date.now() - startedAt;
       if (ok) {
-        this.scheduler.finishAttempt(params.accountId, { ok: true, bytes: params.expectedSize, durationMs });
+        this.scheduler.finishAttempt(params.accountId, { ok: true, bytes: params.expectedSize, durationMs }, Date.now(), undefined, 'read');
         void this.backends.recordOutcome(params.accountId, { ok: true });
       } else if (failureKind) {
-        this.scheduler.finishAttempt(params.accountId, { ok: false, failureKind });
+        this.scheduler.finishAttempt(params.accountId, { ok: false, failureKind }, Date.now(), undefined, 'read');
         void this.backends.recordOutcome(params.accountId, { ok: false, failureKind });
       } else {
         this.scheduler.releaseAttempt(params.accountId);
       }
     };
     result.stream.once('end', () => settle(true));
-    result.stream.once('error', () => settle(false, 'network'));
+    result.stream.once('error', (err: any) => {
+      // [P1-01 Fix]: 客户端主动中止/断开连接触发的流错误（ERR_STREAM_PREMATURE_CLOSE / AbortError / params.signal?.aborted）
+      // 归为正常取消，归还在飞名额，绝不惩罚账号进入 cooldown！
+      const isClientAbort =
+        params.signal?.aborted ||
+        err?.name === 'AbortError' ||
+        err?.code === 'ERR_STREAM_PREMATURE_CLOSE' ||
+        err?.message?.includes?.('premature close') ||
+        err?.message?.includes?.('aborted');
+      if (isClientAbort) {
+        settle(false);
+      } else {
+        settle(false, 'network');
+      }
+    });
     result.stream.once('close', () => settle(false));
     return result;
   }

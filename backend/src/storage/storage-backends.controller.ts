@@ -28,6 +28,7 @@ import {
   GDriveAuthUrlDto,
   GDriveCompleteAuthDto,
   GDriveOAuthClientDto,
+  GDriveRotateAuthDto,
   RotateStorageCredentialDto,
   SetDefaultStorageBackendDto,
   UpdateStorageBackendDto,
@@ -43,6 +44,7 @@ import {
  */
 @Controller('admin/storage-backends')
 @UseGuards(JwtAuthGuard, RolesGuard)
+@Roles(UserRole.SUPER_ADMIN)
 export class StorageBackendsController {
   constructor(
     private readonly backends: StorageBackendsService,
@@ -126,7 +128,7 @@ export class StorageBackendsController {
   @Post('gdrive/auth-url')
   @Roles(UserRole.SUPER_ADMIN)
   async gdriveAuthUrl(@Body() dto: GDriveAuthUrlDto) {
-    const url = await this.gdriveOAuth.buildAuthUrl(dto.redirectUri);
+    const url = await this.gdriveOAuth.buildAuthUrl(dto.redirectUri, dto.state);
     return { url };
   }
 
@@ -269,6 +271,40 @@ export class StorageBackendsController {
       metadata: { operation: 'rotate' },
     });
     return { message: '凭据已轮换并通过连通性测试', account };
+  }
+
+  /** GDrive 账号重新授权/轮换凭据（code 换取新 refreshToken 原地更新，保全历史文件） */
+  @Post(':id/gdrive/rotate-auth')
+  @Roles(UserRole.SUPER_ADMIN)
+  async gdriveRotateAuth(
+    @CurrentUser() user: User,
+    @Param('id') id: string,
+    @Body() dto: GDriveRotateAuthDto,
+  ) {
+    const existing = await this.backends.findById(id);
+    if (!existing) throw new NotFoundException('存储账号不存在');
+    if (existing.type !== 'gdrive') throw new BadRequestException('只能为 Google Drive 账号重新授权');
+
+    const exchanged = await this.gdriveOAuth.exchangeCode(dto.code, dto.redirectUri);
+    const currentEmail = (existing.config as GDriveBackendConfig | null)?.email?.trim().toLowerCase() ?? '';
+    const authorizedEmail = exchanged.email?.trim().toLowerCase() ?? '';
+    if (currentEmail && currentEmail !== authorizedEmail) {
+      throw new BadRequestException('授权邮箱与当前账号不一致，请使用原 Google 账号重新授权');
+    }
+
+    const account = await this.backends.rotateCredential(id, { refreshToken: exchanged.refreshToken }, user.id);
+    if (exchanged.email && !currentEmail) {
+      await this.backends.patchConfig(id, { email: exchanged.email });
+    }
+    await this.backends.refreshQuota(id).catch(() => {});
+    this.audit.log({
+      action: 'config_change',
+      userId: user.id,
+      resourceType: 'storage_backend',
+      resourceId: id,
+      metadata: { type: 'gdrive', operation: 'rotate_auth' },
+    });
+    return { message: 'Google Drive 账号已重新授权并通过连通性测试', account };
   }
 
   /** 手动刷新配额（GDrive 等有配额概念的后端） */

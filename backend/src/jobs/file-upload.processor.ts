@@ -2,7 +2,7 @@ import { Injectable, Logger, Optional, Inject } from '@nestjs/common';
 import { Process, Processor } from '@nestjs/bull';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { DelayedError, Job } from 'bull';
+import { Job } from 'bull';
 import { QUEUE_NAMES } from './bull-queue.module';
 import { File } from '../common/entities/file.entity';
 import { TelegramService } from '../telegram/telegram.service';
@@ -22,6 +22,8 @@ interface FileUploadJobData {
   uploadVersion: number;
   /** 会话创建时已启用严格 2S 策略；避免配置热切换改变该任务的衍生媒体行为。 */
   strictDiskLease?: boolean;
+  /** 准入容量排队重试次数（延迟重新入队时递增，防止无限重试） */
+  admissionAttempt?: number;
 }
 
 interface UploadReceipt {
@@ -192,7 +194,11 @@ export class FileUploadProcessor {
    * 放入 Bull 延迟队列后释放处理槽，不消耗失败次数。返回 null 表示任务已失效
    * （版本变更/已删除），调用方直接放弃本轮。
    */
-  private async uploadViaStorageBackend(filePath: string, file: File, job: Job<FileUploadJobData>): Promise<UploadReceipt | null> {
+  private async uploadViaStorageBackend(
+    filePath: string,
+    file: File,
+    job: Job<FileUploadJobData>,
+  ): Promise<UploadReceipt | null> {
     if (!this.storageRouter || !isRemoteStorageBackend(file.storageBackend)) {
       throw new Error('存储后端未装配，无法上传非 TG 文件');
     }
@@ -222,13 +228,38 @@ export class FileUploadProcessor {
         localCacheReleased: true,
       };
     } catch (error) {
-      // 尚未发出远端请求时，把任务延迟重试并退出 processor，避免容量不足占满并发槽。
+      // 尚未发出远端请求时（如账号额度不足/冷却中），把任务延迟重试并退出 processor，释放并发工作槽位
       if (!(error instanceof StorageUploadUnavailableError) || !error.admissionOnly) throw error;
       const current = await this.fileRepository.findOne({ where: { id: file.id } });
       if (!current || current.uploadVersion !== file.uploadVersion || current.isDeleted) return null;
+
       const delayMs = Math.min(60_000, Math.max(1000, error.retryAfterMs));
-      await job.moveToDelayed(Date.now() + delayMs);
-      throw new DelayedError();
+      const admissionAttempt = ((job.data as any).admissionAttempt || 0) + 1;
+      if (admissionAttempt > 120) {
+        throw new Error(`存储后端容量持续不足，已等待超过重试上限 (backend=${backendType})`);
+      }
+
+      this.logger.warn(
+        `存储后端账号容量暂不可用 (backend=${backendType})，将在 ${Math.round(delayMs / 1000)}s 后重试，立即释放处理槽位 (fileId=${file.id}, retry=${admissionAttempt})`,
+      );
+
+      if (job?.queue) {
+        await job.queue.add(
+          'upload',
+          {
+            ...job.data,
+            admissionAttempt,
+          },
+          {
+            delay: delayMs,
+            attempts: 3,
+            backoff: { type: 'exponential', delay: 10000 },
+            removeOnComplete: 100,
+            removeOnFail: 50,
+          },
+        );
+      }
+      return null;
     }
   }
 
@@ -410,7 +441,6 @@ export class FileUploadProcessor {
           void this.fileService.cleanupNonTelegramObject(oldStorageRef);
         }
       } catch (error) {
-        if (error instanceof DelayedError) throw error;
         this.logger.warn(`文件远端上传或提交失败 (fileId=${fileId}, 第 ${attempt} 次): ${(error as Error).message}`);
         const remoteReceipt = await this.loadReceipt(filePath, uploadVersion);
         if (job.attemptsMade >= 2 && !remoteReceipt) {

@@ -1023,6 +1023,37 @@ export class TelegramService {
   }
 
   /**
+   * 编辑已有消息文本（editMessageText）。
+   * 原地更新消息内容，若失败由调用方降级为追发新消息。
+   */
+  async editMessageText(
+    chatId: string | number,
+    messageId: number,
+    text: string,
+  ): Promise<boolean> {
+    if (!this.botToken) {
+      throw new Error('TELEGRAM_BOT_TOKEN 未配置，无法编辑消息');
+    }
+    const payload = {
+      chat_id: String(chatId),
+      message_id: messageId,
+      text,
+      disable_web_page_preview: false,
+    };
+
+    const response = await this.telegramRequest(
+      () => axios.post<{ ok: boolean; result?: unknown; description?: string }>(
+        `${this.getBaseUrl()}/editMessageText`,
+        payload,
+        { timeout: 30 * 1000 },
+      ),
+      'editMessageText',
+    );
+
+    return Boolean(response.data?.ok);
+  }
+
+  /**
    * 长轮询获取更新（getUpdates）。
    *
    * - `offset` 为上一次 update_id + 1；返回空数组表示本次超时无更新；

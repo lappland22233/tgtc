@@ -93,14 +93,18 @@ export function validateEnv(env: NodeJS.ProcessEnv = process.env): void {
     .filter(Boolean);
   const poolConfigured = poolEnabled && (poolRaw.length > 0 || multiTokens.length > 0);
 
+  const botStorageMode = (env.TELEGRAM_BOT_STORAGE_MODE || '').trim().toLowerCase();
+  const isGDriveBotMode = botStorageMode === 'gdrive';
+
   if (!poolConfigured) {
     if (!env.TELEGRAM_BOT_TOKEN) {
       errors.push('TELEGRAM_BOT_TOKEN 未设置');
     } else if (!/^\d+:[\w-]+$/.test(env.TELEGRAM_BOT_TOKEN)) {
       errors.push('TELEGRAM_BOT_TOKEN 格式错误（应为 <bot_id>:<token>）');
     }
-    // TELEGRAM_CHAT_ID 为上传必需项，缺失时上传会在运行期才失败，故列为启动必检
-    if (!env.TELEGRAM_CHAT_ID) {
+    // TELEGRAM_CHAT_ID 为 Telegram 原生存储必需项；当显式配置 TELEGRAM_BOT_STORAGE_MODE=gdrive
+    // （纯 Google 存储模式）时，Bot 不依赖 Telegram 存储群，放行启动校验
+    if (!env.TELEGRAM_CHAT_ID && !isGDriveBotMode) {
       errors.push('TELEGRAM_CHAT_ID 未设置');
     }
   }

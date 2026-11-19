@@ -4,6 +4,7 @@ import { TelegramMirrorModule } from '../telegram-mirror/telegram-mirror.module'
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { TelegramModule } from '../telegram/telegram.module';
 import { FileModule } from '../file/file.module';
+import { StorageModule } from '../storage/storage.module';
 import { TelegramBotFileGrant } from '../common/entities/telegram-bot-file-grant.entity';
 import { TelegramBotDailyUsage } from '../common/entities/telegram-bot-daily-usage.entity';
 import { TelegramBotWhitelist } from '../common/entities/telegram-bot-whitelist.entity';
@@ -16,6 +17,7 @@ import { TelegramBotDispatchService } from './telegram-bot-dispatch.service';
 import { TelegramBotPollingService } from './telegram-bot-polling.service';
 import { TelegramBotPublicController } from './telegram-bot-public.controller';
 import { TelegramBotAdminController } from './telegram-bot-admin.controller';
+import { BotTransferTrackerService } from './bot-transfer-tracker.service';
 
 /**
  * Telegram Bot 文件直链模块。
@@ -33,6 +35,8 @@ import { TelegramBotAdminController } from './telegram-bot-admin.controller';
     TelegramAccountPoolModule,
     // 镜像备份触发（入站文件在 grant 持久化后入队；未启用时零开销）
     TelegramMirrorModule,
+    // 可插拔存储路由（纯 Google 存储模式直传与直读回源）
+    StorageModule,
   ],
   controllers: [TelegramBotPublicController, TelegramBotAdminController],
   providers: [
@@ -43,7 +47,8 @@ import { TelegramBotAdminController } from './telegram-bot-admin.controller';
     TelegramBotAdminService,
     TelegramBotDispatchService,
     TelegramBotPollingService,
+    BotTransferTrackerService,
   ],
-  exports: [TelegramBotConfigService, TelegramBotGrantService],
+  exports: [TelegramBotConfigService, TelegramBotGrantService, BotTransferTrackerService],
 })
 export class TelegramBotModule {}

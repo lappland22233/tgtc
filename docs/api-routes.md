@@ -138,7 +138,7 @@
 | `GET` | `/api/admin/bot-inbound-status` | Bot 入站轮询诊断，仅 `super_admin` |
 | `GET` | `/api/admin/access-logs*` | 访问日志及聚合分析（含 Top 文件/路径、延迟、状态码、下载量、异常 IP、趋势等子路径） |
 | `GET` | `/api/admin/audit-logs` | 操作审计 |
-| `GET/PUT` | `/api/admin/bot-config` | Telegram Bot 配置（有效期/额度/时区/站点域名，仅 `super_admin`） |
+| `GET/PUT` | `/api/admin/bot-config` | Telegram Bot 配置（有效期/额度/时区/站点域名/存储模式，仅 `super_admin`） |
 | `GET` | `/api/admin/bot-config/detected-domain` | 探测可信站点域名候选值（仅 `super_admin`） |
 | `GET` | `/api/admin/bot-usage` | Bot 使用情况汇总（收到文件/下载次数/去重用户/带宽/趋势，仅 `super_admin`） |
 | `GET` | `/api/admin/bot-usage/users` | Bot 用户明细（TG 用户 ID + @用户名，支持关键字/时间筛选与分页，仅 `super_admin`） |

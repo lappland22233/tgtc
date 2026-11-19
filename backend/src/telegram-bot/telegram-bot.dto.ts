@@ -34,4 +34,8 @@ export class UpdateBotConfigDto {
   @IsString()
   @MaxLength(BOT_CONFIG_LIMITS.maxDomainLength)
   linkDomain?: string;
+
+  @IsOptional()
+  @IsIn(['telegram', 'gdrive'])
+  storageMode?: 'telegram' | 'gdrive';
 }

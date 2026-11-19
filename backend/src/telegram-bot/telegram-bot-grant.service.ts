@@ -28,6 +28,12 @@ export interface IssueGrantInput {
    * 用它反查 grant（群内消息不含私聊锚点）；历史/降级路径允许缺省。
    */
   fileUniqueId?: string | null;
+  /** 存储后端：telegram (默认) | gdrive */
+  storageBackend?: string;
+  /** 存储账号 ID（非 TG 后端） */
+  storageAccountId?: string | null;
+  /** 远端对象引用（如 GDrive fileId） */
+  storageObjectRef?: string | null;
 }
 
 export interface IssuedGrant {
@@ -115,6 +121,10 @@ export class TelegramBotGrantService {
       fileName: input.fileName,
       mimeType: input.mimeType,
       fileSize: input.fileSize,
+      storageBackend: input.storageBackend ?? 'telegram',
+      storageAccountId: input.storageAccountId ?? null,
+      storageObjectRef: input.storageObjectRef ?? null,
+      storagePurgedAt: null,
       tokenHash,
       tokenCipher,
       tokenPrefix: this.tokenPrefixOf(token),

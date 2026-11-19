@@ -449,6 +449,25 @@
         </t-form-item>
       </t-form>
 
+      <h4 class="bot-group-title">存储后端模式</h4>
+      <div v-if="!botConfig.telegramStorageChatConfigured" class="bot-warning-banner" style="margin-bottom: 12px; padding: 10px 14px; background: var(--td-warning-color-1, #fffbe6); border: 1px solid var(--td-warning-color-4, #ffe58f); border-radius: 6px; font-size: 13px; color: var(--td-warning-color-8, #d48806);">
+        ⚠️ 检测到系统未配置 Telegram 存储群组（<code>TELEGRAM_CHAT_ID</code> 或账号池存储群）。建议开启<strong>「纯 Google 存储模式」</strong>，Bot 收到的文件将直接转存至 Google 云端硬盘并生成直链，无需依赖 Telegram 存储群。
+      </div>
+      <t-form layout="vertical">
+        <t-form-item label="Bot 文件存储模式">
+          <t-radio-group v-model="botConfig.storageMode">
+            <t-radio value="telegram" :disabled="!botConfig.telegramStorageChatConfigured">
+              原生 Telegram 存储模式
+              <span v-if="!botConfig.telegramStorageChatConfigured" style="color: var(--td-text-color-placeholder); font-size: 12px;">（未配置存储群）</span>
+            </t-radio>
+            <t-radio value="gdrive">纯 Google 存储模式</t-radio>
+          </t-radio-group>
+          <div class="bot-hint">
+            {{ botConfig.storageMode === 'gdrive' ? '纯 Google 模式：文件入站时自动转存至 Google 云端硬盘并生成下载直链，直链到期后自动从云端硬盘中永久删除。' : '原生模式：文件留存在 Telegram 官方服务器，通过本地回源流式提供下载。' }}
+          </div>
+        </t-form-item>
+      </t-form>
+
       <h4 class="bot-group-title">站点链接设置</h4>
       <t-form layout="vertical">
         <t-form-item label="域名模式">
@@ -483,7 +502,7 @@
         </t-form-item>
         <t-form-item>
           <div style="display: flex; align-items: center; gap: 8px;">
-            <t-button theme="primary" :disabled="!blockLoadState.bot" @click="saveBotConfig">保存 Bot 配置</t-button>
+            <t-button theme="primary" :loading="savingBotConfig" :disabled="!blockLoadState.bot" @click="saveBotConfig">保存 Bot 配置</t-button>
             <t-button v-if="!blockLoadState.bot" variant="outline" @click="fetchBotConfig">重新加载</t-button>
           </div>
           <div v-if="!blockLoadState.bot" style="color: var(--color-warning); font-size: 12px; margin-top: 4px;">
@@ -707,10 +726,13 @@ const botConfig = ref({
   quotaTimezone: 'Asia/Shanghai',
   linkDomainMode: 'auto' as 'auto' | 'manual',
   linkDomain: '',
+  storageMode: 'telegram' as 'telegram' | 'gdrive',
+  telegramStorageChatConfigured: true,
 });
 const botEffectiveDomain = ref('');
 const botCryptoAvailable = ref(false);
 const detectingDomain = ref(false);
+const savingBotConfig = ref(false);
 
 // 未保存离开防护（G15-17）：任一配置表单被修改且未保存时置脏，
 // 触发 beforeunload / 路由离开确认，避免误操作丢失修改。
@@ -1192,8 +1214,13 @@ async function detectBotDomain() {
 }
 
 async function saveBotConfig() {
+  if (savingBotConfig.value) return;
   if (!blockLoadState.bot) {
     MessagePlugin.warning('Bot 配置加载失败，无法保存。请先点击"重新加载"');
+    return;
+  }
+  if (botConfig.value.storageMode === 'telegram' && !botConfig.value.telegramStorageChatConfigured) {
+    MessagePlugin.warning('未配置 Telegram 存储群组（TELEGRAM_CHAT_ID 或账号池存储群），无法开启原生 Telegram 存储模式，请使用纯 Google 存储模式');
     return;
   }
   const ttl = Number(botConfig.value.linkTtlHours);
@@ -1222,6 +1249,7 @@ async function saveBotConfig() {
       return;
     }
   }
+  savingBotConfig.value = true;
   try {
     await api.put('/admin/bot-config', {
       linkTtlHours: ttl,
@@ -1229,12 +1257,15 @@ async function saveBotConfig() {
       quotaTimezone: timezone,
       linkDomainMode: botConfig.value.linkDomainMode,
       linkDomain: domain,
+      storageMode: botConfig.value.storageMode,
     });
     await fetchBotConfig();
     MessagePlugin.success('Bot 配置已保存');
     markClean();
   } catch (error: unknown) {
     MessagePlugin.error(getErrorMessage(error));
+  } finally {
+    savingBotConfig.value = false;
   }
 }
 

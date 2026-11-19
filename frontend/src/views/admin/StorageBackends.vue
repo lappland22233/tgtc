@@ -132,7 +132,7 @@
             <t-button variant="text" size="small" :loading="rowBusy === row.id" @click="testAccount(row)">测试</t-button>
             <t-button variant="text" size="small" :disabled="row.status === 'revoked'" @click="openEdit(row)">编辑</t-button>
             <t-button variant="text" size="small" @click="openRotate(row)">轮换</t-button>
-            <t-button v-if="row.type === 'gdrive'" variant="text" size="small" @click="refreshQuota(row)">配额</t-button>
+            <t-button v-if="row.type === 'gdrive'" variant="text" size="small" :loading="rowBusy === row.id" @click="refreshQuota(row)">配额</t-button>
             <t-button variant="text" size="small" theme="danger" :disabled="row.status === 'revoked'" @click="revokeAccount(row)">撤销</t-button>
           </div>
         </template>
@@ -220,8 +220,8 @@
     <t-dialog
       v-model:visible="rotateVisible"
       header="轮换凭据"
-      width="520px"
-      :confirm-btn="{ content: '轮换', loading: saving }"
+      width="560px"
+      :confirm-btn="{ content: '完成轮换', loading: saving }"
       @confirm="saveRotate"
     >
       <t-alert v-if="rotateTarget?.type === 'gdrive'" theme="info" message="继续后会为当前账号重新授权并更新凭据；请使用原 Google 账号，现有文件会继续引用此账号。" />
@@ -313,6 +313,7 @@ import {
   completeGDriveAuth,
   createStorageBackend,
   fetchGDriveAuthUrl,
+  fetchGDriveOAuthClient,
   fetchStorageOverview,
   refreshStorageQuota,
   revokeStorageBackend,
@@ -655,11 +656,19 @@ async function saveRotate() {
 const gdriveVisible = ref(false);
 const gdrive = reactive({ accountId: null as string | null, clientId: '', clientSecret: '', redirectUri: '', name: '', code: '', authUrl: '' });
 
-function openGDriveWizard(account?: StorageBackendView) {
+async function openGDriveWizard(account?: StorageBackendView) {
   gdrive.accountId = account?.id ?? null;
   gdrive.name = account?.name ?? '';
   gdrive.code = '';
   gdrive.authUrl = '';
+  try {
+    const client = await fetchGDriveOAuthClient();
+    if (client.configured && client.clientId) {
+      gdrive.clientId = client.clientId;
+    }
+  } catch {
+    // 忽略预填错误
+  }
   gdriveVisible.value = true;
 }
 
