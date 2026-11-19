@@ -1,8 +1,8 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Inject, Logger, Optional } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, LessThan, IsNull, Brackets } from 'typeorm';
 import { Cron, CronExpression } from '@nestjs/schedule';
-import { readFile } from 'fs/promises';
+import { readFile, readdir, stat, unlink } from 'fs/promises';
 import * as path from 'path';
 import { InjectQueue } from '@nestjs/bull';
 import { Queue } from 'bull';
@@ -12,6 +12,8 @@ import { RateLimit } from '../common/entities/rate-limit.entity';
 import { AuditLog } from '../common/entities/audit-log.entity';
 import { JwtRevokedToken } from '../common/entities/jwt-revoked-token.entity';
 import { File } from '../common/entities/file.entity';
+import { TelegramBotFileGrant } from '../common/entities/telegram-bot-file-grant.entity';
+import { StorageRouterService } from '../storage/storage-router.service';
 import { QUEUE_NAMES } from '../jobs/bull-queue.module';
 import { isRemoteStorageBackend } from '../storage/storage.types';
 
@@ -45,7 +47,92 @@ export class TasksService {
     private fileRepository: Repository<File>,
     @InjectQueue(QUEUE_NAMES.FILE_UPLOAD)
     private fileUploadQueue: Queue,
+    @Optional() @InjectRepository(TelegramBotFileGrant)
+    private grantRepository?: Repository<TelegramBotFileGrant>,
+    @Optional() @Inject(StorageRouterService)
+    private storageRouter: StorageRouterService | null = null,
   ) {}
+
+  /**
+   * 定时清理已过期的 Bot 远端文件（Google 云端硬盘），并打上清理时间戳。
+   * 每 10 分钟执行一次。
+   */
+  @Cron(CronExpression.EVERY_10_MINUTES)
+  async cleanupExpiredBotRemoteFiles() {
+    if (!this.storageRouter || !this.grantRepository) return;
+    try {
+      const now = new Date();
+      // 查询到期或已撤销、属于 gdrive、且尚未物理删除的记录
+      const expiredGrants = await this.grantRepository
+        .createQueryBuilder('grant')
+        .where('grant.storageBackend = :backend', { backend: 'gdrive' })
+        .andWhere('grant.storagePurgedAt IS NULL')
+        .andWhere('grant.storageObjectRef IS NOT NULL')
+        .andWhere('(grant.expiresAt < :now OR grant.revokedAt IS NOT NULL)', { now })
+        .orderBy('grant.expiresAt', 'ASC')
+        .limit(100)
+        .getMany();
+
+      if (expiredGrants.length === 0) return;
+
+      let deletedCount = 0;
+      for (const grant of expiredGrants) {
+        if (!grant.storageAccountId || !grant.storageObjectRef) continue;
+        try {
+          const success = await this.storageRouter.deleteRemoteObject('gdrive', grant.storageAccountId, grant.storageObjectRef);
+          // [P0-06 Fix]: 校验 deleteRemoteObject 返回值，仅当删除确认成功时才置 storagePurgedAt
+          if (success) {
+            grant.storagePurgedAt = new Date();
+            await this.grantRepository.save(grant);
+            deletedCount += 1;
+          } else {
+            this.logger.warn(
+              `清理过期 Bot GDrive 文件未确认成功，保留记录等待下次定时重试（grant=${grant.id}, objectRef=${grant.storageObjectRef}）`,
+            );
+          }
+        } catch (error) {
+          this.logger.warn(
+            `清理过期 Bot GDrive 文件失败（grant=${grant.id}, objectRef=${grant.storageObjectRef}）: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
+
+      if (deletedCount > 0) {
+        this.logger.log(`已成功从 Google 云端硬盘彻底删除 ${deletedCount} 个到期的 Bot 临时文件`);
+      }
+
+      // 顺带清理 tmp/bot-transfers/ 下残留超过 2 小时的本地孤儿文件（进程异常重启产生）
+      await this.cleanupOrphanBotTransferFiles();
+    } catch (error) {
+      this.logger.error('执行到期 Bot 远端文件自动清理任务失败', error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  /**
+   * 定期清理本地缓冲目录 tmp/bot-transfers/ 中残留超过 2 小时的孤儿临时文件
+   */
+  private async cleanupOrphanBotTransferFiles(): Promise<void> {
+    try {
+      const tempDir = path.join(process.cwd(), 'tmp', 'bot-transfers');
+      const files = await readdir(tempDir).catch(() => []);
+      const now = Date.now();
+      const MAX_ORPHAN_AGE_MS = 2 * 60 * 60 * 1000; // 2 小时
+      for (const file of files) {
+        const fullPath = path.join(tempDir, file);
+        try {
+          const fileStat = await stat(fullPath);
+          if (now - fileStat.mtimeMs > MAX_ORPHAN_AGE_MS) {
+            await unlink(fullPath).catch(() => {});
+            this.logger.debug(`已清理残留超过 2 小时的本地临时转存文件: ${file}`);
+          }
+        } catch {
+          // ignore individual file stat/unlink errors
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
 
   @Cron(CronExpression.EVERY_30_MINUTES)
   async cleanupExpiredRateLimits() {

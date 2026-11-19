@@ -107,6 +107,11 @@ export class GDriveAuthUrlDto {
   @IsString()
   @Length(1, 512)
   redirectUri: string;
+
+  @IsOptional()
+  @IsString()
+  @Length(1, 256)
+  state?: string;
 }
 
 export class GDriveCompleteAuthDto {
@@ -126,4 +131,19 @@ export class GDriveCompleteAuthDto {
   @IsString()
   @Length(1, 64)
   name: string;
+
+  @IsOptional()
+  @IsString()
+  @Length(1, 256)
+  state?: string;
+}
+
+export class GDriveRotateAuthDto {
+  @IsString()
+  @Length(1, 512)
+  code: string;
+
+  @IsString()
+  @Length(1, 512)
+  redirectUri: string;
 }

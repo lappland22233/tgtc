@@ -84,4 +84,63 @@ describe('TasksService', () => {
     const svc = new TasksService(repo(), repo(), repo(), repo(), repo(), failingRepo, makeQueue() as any);
     await expect(svc.recoverStaleProcessingFiles()).resolves.toBeUndefined();
   });
+
+  it('cleans expired bot gdrive files and records purged timestamp', async () => {
+    const grantRepo: any = {
+      createQueryBuilder: jest.fn(() => ({
+        where: jest.fn().mockReturnThis(),
+        andWhere: jest.fn().mockReturnThis(),
+        orderBy: jest.fn().mockReturnThis(),
+        limit: jest.fn().mockReturnThis(),
+        getMany: jest.fn().mockResolvedValue([
+          {
+            id: 'grant-exp-1',
+            storageBackend: 'gdrive',
+            storageAccountId: 'acc-1',
+            storageObjectRef: 'gdrive-file-123',
+            storagePurgedAt: null,
+          },
+        ]),
+      })),
+      save: jest.fn().mockResolvedValue(true),
+    };
+    const storageRouter: any = {
+      deleteRemoteObject: jest.fn().mockResolvedValue(true),
+    };
+    const svc = new TasksService(repo(), repo(), repo(), repo(), repo(), makeFileRepo([], 0) as any, makeQueue() as any, grantRepo, storageRouter);
+    await svc.cleanupExpiredBotRemoteFiles();
+    expect(storageRouter.deleteRemoteObject).toHaveBeenCalledWith('gdrive', 'acc-1', 'gdrive-file-123');
+    expect(grantRepo.save).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'grant-exp-1',
+      storagePurgedAt: expect.any(Date),
+    }));
+  });
+
+  it('cleanupExpiredBotRemoteFiles 在 deleteRemoteObject 返回 false 时不应打上 storagePurgedAt', async () => {
+    const grantRepo: any = {
+      createQueryBuilder: jest.fn(() => ({
+        where: jest.fn().mockReturnThis(),
+        andWhere: jest.fn().mockReturnThis(),
+        orderBy: jest.fn().mockReturnThis(),
+        limit: jest.fn().mockReturnThis(),
+        getMany: jest.fn().mockResolvedValue([
+          {
+            id: 'grant-exp-failed',
+            storageBackend: 'gdrive',
+            storageAccountId: 'acc-1',
+            storageObjectRef: 'gdrive-file-failed',
+            storagePurgedAt: null,
+          },
+        ]),
+      })),
+      save: jest.fn(),
+    };
+    const storageRouter: any = {
+      deleteRemoteObject: jest.fn().mockResolvedValue(false),
+    };
+    const svc = new TasksService(repo(), repo(), repo(), repo(), repo(), makeFileRepo([], 0) as any, makeQueue() as any, grantRepo, storageRouter);
+    await svc.cleanupExpiredBotRemoteFiles();
+    expect(storageRouter.deleteRemoteObject).toHaveBeenCalledWith('gdrive', 'acc-1', 'gdrive-file-failed');
+    expect(grantRepo.save).not.toHaveBeenCalled();
+  });
 });

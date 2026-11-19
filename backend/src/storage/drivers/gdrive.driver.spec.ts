@@ -19,6 +19,7 @@ const GB = 1024 * MB;
 
 function makeOAuth(): GDriveOAuthService {
   return {
+    getClientConfig: jest.fn(async () => ({ clientId: 'cid-mock', clientSecret: 'csec-mock' })),
     createAuthorizedClient: jest.fn(async () => ({
       getAccessToken: async () => ({ token: 'access-token' }),
     })),
@@ -99,6 +100,7 @@ describe('GDriveStorageDriver（mock Drive v3 REST）', () => {
     expect(sessionUri).toBe('https://session.example/upload');
     expect((chunk as Buffer).length).toBe(6 * MB);
     expect(options.headers['Content-Range']).toBe(`bytes 0-${6 * MB - 1}/${6 * MB}`);
+    expect(options.headers['Authorization']).toBeUndefined();
   });
 
   it('resumable 308 续传：按服务端 Range 头同步偏移，多块顺序上传', async () => {
@@ -118,10 +120,12 @@ describe('GDriveStorageDriver（mock Drive v3 REST）', () => {
     expect(api.put.mock.calls[1][2].headers['Content-Range']).toBe(`bytes ${8 * MB}-${16 * MB - 1}/${16 * MB}`);
   });
 
-  it('resumable 块级重试：5xx 重试同一块（不重传整个文件）', async () => {
+  it('resumable 块级重试：5xx 重试同一块（先探测进度确认未接收，再重发同一块）', async () => {
     api.post.mockResolvedValue({ headers: { location: 'https://session/3' } });
     api.put
       .mockRejectedValueOnce(driveError(503))
+      // queryResumableStatus 探测远端接收进度：308 Range bytes=0--1 表示尚未接收任何字节
+      .mockResolvedValueOnce({ status: 308, headers: {}, data: {} })
       .mockResolvedValueOnce({ status: 200, data: { id: 'file-retry', size: String(6 * MB) } });
     const result = await driver.upload(makeCtx(), {
       objectName: 'retry.bin',
@@ -129,9 +133,9 @@ describe('GDriveStorageDriver（mock Drive v3 REST）', () => {
       knownLength: 6 * MB,
     });
     expect(result.objectRef).toBe('file-retry');
-    expect(api.put).toHaveBeenCalledTimes(2);
-    // 重试的是同一块（相同 Content-Range）
-    expect(api.put.mock.calls[0][2].headers['Content-Range']).toEqual(api.put.mock.calls[1][2].headers['Content-Range']);
+    expect(api.put).toHaveBeenCalledTimes(3);
+    // 第一次尝试与最后一次重试的是同一块（相同 Content-Range）
+    expect(api.put.mock.calls[0][2].headers['Content-Range']).toEqual(api.put.mock.calls[2][2].headers['Content-Range']);
   }, 15_000);
 
   it('错误分类：storageQuotaExceeded→quota，rateLimitExceeded→flood（带 Retry-After）', async () => {
@@ -145,6 +149,40 @@ describe('GDriveStorageDriver（mock Drive v3 REST）', () => {
     await expect(driver.upload(makeCtx(), {
       objectName: 'f', openStream: () => Readable.from([Buffer.alloc(6 * MB)]), knownLength: 6 * MB,
     })).rejects.toMatchObject({ kind: 'flood', retryAfterSeconds: 60 });
+
+    // quotaExceeded / dailyLimitExceeded 必须被归为 flood（非 auth）
+    api.put.mockRejectedValue(driveError(403, 'quotaExceeded'));
+    await expect(driver.upload(makeCtx(), {
+      objectName: 'f', openStream: () => Readable.from([Buffer.alloc(6 * MB)]), knownLength: 6 * MB,
+    })).rejects.toMatchObject({ kind: 'flood' });
+
+    // 无法识别的 403 兜底为 other，绝不可归为 auth
+    api.put.mockRejectedValue(driveError(403, 'unknownPermissionRestriction'));
+    await expect(driver.upload(makeCtx(), {
+      objectName: 'f', openStream: () => Readable.from([Buffer.alloc(6 * MB)]), knownLength: 6 * MB,
+    })).rejects.toMatchObject({ kind: 'other' });
+  });
+
+  it('resumable 尾块 ACK 丢失但 Google 已成功入库：probe 返回 200 + id，直接返回成功', async () => {
+    api.post.mockResolvedValue({ headers: { location: 'https://session/tail-ack' } });
+    api.put
+      .mockRejectedValueOnce(new Error('ECONNRESET')) // 尾块 PUT 请求发送后响应丢失
+      // 探活请求：Google 返回 200 OK 且带 fileId
+      .mockResolvedValueOnce({ status: 200, data: { id: 'file-tail-recovered', size: String(6 * MB) } });
+
+    const result = await driver.upload(makeCtx(), {
+      objectName: 'tail.bin',
+      openStream: () => Readable.from([Buffer.alloc(6 * MB)]),
+      knownLength: 6 * MB,
+    });
+
+    expect(result).toEqual({ objectRef: 'file-tail-recovered', size: 6 * MB });
+    // 验证 probe 请求带 Content-Length: 0 和 Content-Range: bytes */total
+    expect(api.put).toHaveBeenCalledTimes(2);
+    expect(api.put.mock.calls[1][2].headers).toMatchObject({
+      'Content-Length': '0',
+      'Content-Range': `bytes */${6 * MB}`,
+    });
   });
 
   it('invalid_grant（refresh_token 失效）→ auth 类失败', async () => {
@@ -204,6 +242,60 @@ describe('GDriveStorageDriver（mock Drive v3 REST）', () => {
     expect(options.params).toMatchObject({ alt: 'media' });
     expect(options.headers.Range).toBe('bytes=100-199');
     expect(options.responseType).toBe('stream');
+  });
+
+  it('下载：服务端返回 200 时 size 正确取 contentLength', async () => {
+    const stream = Readable.from(['full']);
+    api.get.mockResolvedValue({
+      status: 200,
+      data: stream,
+      headers: { 'content-length': '5000' },
+    });
+    const result = await driver.openDownloadStream(makeCtx(), { objectRef: 'file-1', range: { start: 100 } });
+    expect(result.size).toBe(5000);
+  });
+
+  it('下载流 403 限流：响应体为 Stream 时正确提取 userRateLimitExceeded 归为 flood（非 auth）', async () => {
+    const errorJson = JSON.stringify({
+      error: {
+        errors: [{ reason: 'userRateLimitExceeded', message: 'User Rate Limit Exceeded' }],
+        status: 'RESOURCE_EXHAUSTED',
+      },
+    });
+    const errorStream = Readable.from([Buffer.from(errorJson)]);
+    const err = {
+      response: {
+        status: 403,
+        data: errorStream,
+      },
+      message: 'Request failed with status code 403',
+    };
+    api.get.mockRejectedValue(err);
+
+    await expect(driver.openDownloadStream(makeCtx(), { objectRef: 'file-flood' })).rejects.toMatchObject({
+      kind: 'flood',
+      retryAfterSeconds: 60,
+    });
+  });
+
+  it('ensureRootFolder 单飞锁：并发多次调用只创建一次目录', async () => {
+    api.get.mockResolvedValue({ data: { files: [] } }); // 目录未找到
+    api.post
+      .mockResolvedValueOnce({ data: { id: 'single-folder' } })
+      .mockResolvedValue({ data: { id: 'file-x', size: '1' } });
+    const ctx = makeCtx({ config: {} });
+
+    // 并发发起两次上传
+    const [p1, p2] = await Promise.all([
+      driver.upload(ctx, { objectName: 'f1', openStream: () => Readable.from([Buffer.from('1')]), knownLength: 1 }),
+      driver.upload(ctx, { objectName: 'f2', openStream: () => Readable.from([Buffer.from('2')]), knownLength: 1 }),
+    ]);
+
+    expect(p1.objectRef).toBe('file-x');
+    expect(p2.objectRef).toBe('file-x');
+    // 创建目录 POST 请求仅触发了一次（单飞锁去重生效）
+    const folderCreations = api.post.mock.calls.filter((c: unknown[]) => (c[1] as { name?: string })?.name === 'TGTC');
+    expect(folderCreations.length).toBe(1);
   });
 
   it('head：trashed/404 → exists=false；正常返回大小', async () => {

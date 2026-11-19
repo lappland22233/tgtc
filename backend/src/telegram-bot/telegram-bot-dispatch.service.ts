@@ -1,5 +1,11 @@
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { createReadStream, createWriteStream } from 'fs';
+import { mkdir, stat, unlink } from 'fs/promises';
+import { pipeline } from 'stream/promises';
+import { Readable } from 'stream';
+import * as path from 'path';
+import { randomUUID } from 'crypto';
 import { TelegramService } from '../telegram/telegram.service';
 import { AuditService } from '../common/services/audit.service';
 import { AuditStatus } from '../common/entities/audit-log.entity';
@@ -8,6 +14,9 @@ import { FileCopyService } from '../telegram-account-pool/file-copy.service';
 import { ReplicationAttemptService } from '../telegram-account-pool/replication-attempt.service';
 import { TelegramAccountClientService } from '../telegram-account-pool/telegram-account-client.service';
 import { TelegramAccountPoolService } from '../telegram-account-pool/telegram-account-pool.service';
+import { AccountAwareDownloadService } from '../telegram-account-pool/account-aware-download.service';
+import { StorageRouterService } from '../storage/storage-router.service';
+import type { StorageUploadReceipt } from '../storage/storage.types';
 import { TelegramBotFileGrant } from '../common/entities/telegram-bot-file-grant.entity';
 import { TelegramMirrorConfigService } from '../telegram-mirror/telegram-mirror-config.service';
 import { TelegramMirrorTriggerService } from '../telegram-mirror/telegram-mirror-trigger.service';
@@ -70,6 +79,8 @@ interface GrantClaimAttribution {
 @Injectable()
 export class TelegramBotDispatchService {
   private readonly logger = new Logger(TelegramBotDispatchService.name);
+  /** 正在执行异步 Google Drive 转存的消息去重集 (chatId:messageId) */
+  private readonly processingMessages = new Set<string>();
 
   constructor(
     private readonly telegramService: TelegramService,
@@ -100,6 +111,12 @@ export class TelegramBotDispatchService {
     // 扩散轮次回写（可选依赖）：把 Bot 认领事件落到轮次记录，让「中继 → 认领」闭环可查询
     @Optional() @Inject(ReplicationAttemptService)
     private readonly attempts: ReplicationAttemptService | null = null,
+    // 账号池回源拉流（可选依赖，纯 Google 存储模式转存取源时复用）
+    @Optional() @Inject(AccountAwareDownloadService)
+    private readonly accountPoolDownload: AccountAwareDownloadService | null = null,
+    // 可插拔存储路由（纯 Google 存储模式直传 GDrive 驱动池）
+    @Optional() @Inject(StorageRouterService)
+    private readonly storageRouter: StorageRouterService | null = null,
   ) {}
 
   /** 处理单条更新（异常不外抛，避免中断轮询循环） */
@@ -720,6 +737,15 @@ export class TelegramBotDispatchService {
       return;
     }
 
+    // 正在转存同一消息时，提示用户等待，防止并发重复转存与额度误扣
+    const msgKey = `${chatId}:${messageId}`;
+    if (this.processingMessages.has(msgKey)) {
+      await this.reply(chatId, '⏳ 该文件正在创建链接中，请稍候...', message.message_id, accountId);
+      return;
+    }
+    // [P1-04 Fix]: 立即在此加锁，彻底消除配额检查与域名解析异步窗口期的并发重复请求竞争
+    this.processingMessages.add(msgKey);
+
     // 不设文件大小上限（含 `MAX_FILE_SIZE`）：
     // - Bot 文件不经过本站上传链路，`MAX_FILE_SIZE` 是「后台上传配置」的上传策略，与下载无关；
     // - 本地 Bot API 以 `--local` 运行时跳过 `MAX_DOWNLOAD_FILE_SIZE`（20MB）检查，
@@ -732,6 +758,7 @@ export class TelegramBotDispatchService {
     // 域名解析（fail-closed）：无可用可信域名时拒绝签发，且不消耗配额
     const origin = await this.botConfigService.resolveSiteOriginAsync();
     if (!origin) {
+      this.processingMessages.delete(msgKey);
       await this.reply(
         chatId,
         '服务暂不可用：管理员尚未配置站点域名（直链域名）。请联系管理员在后台「Telegram Bot 设置」中配置。',
@@ -749,6 +776,7 @@ export class TelegramBotDispatchService {
     if (!whitelisted) {
       const quota = await this.quotaService.consume(identity.telegramUserId, usageDate, config.dailyLimit);
       if (!quota.allowed) {
+        this.processingMessages.delete(msgKey);
         this.auditService.log({
           action: 'telegram_bot_quota_denied',
           resourceType: 'telegram_bot_quota',
@@ -773,6 +801,37 @@ export class TelegramBotDispatchService {
       quotaConsumed = true;
     }
     const quotaUsed = await this.quotaService.getUsed(identity.telegramUserId, usageDate);
+
+    // 纯 Google 存储模式：先回复等待提示，后台异步拉流并直传 Google 云端硬盘
+    if (config.storageMode === 'gdrive') {
+      let waitingMsgId: number | null = null;
+      try {
+        waitingMsgId = await this.reply(
+          chatId,
+          '⏳ 正在创建下载链接，请稍候...',
+          message.message_id,
+          accountId,
+        );
+      } catch (replyErr) {
+        this.logger.warn(`发送等待提示失败（继续转存）: ${replyErr instanceof Error ? replyErr.message : String(replyErr)}`);
+      }
+      void this.executeGDriveTransfer({
+        message,
+        identity,
+        chatId,
+        messageId,
+        fileSize,
+        usageDate,
+        whitelisted,
+        quotaConsumed,
+        quotaUsed,
+        origin,
+        config,
+        waitingMsgId,
+        accountId,
+      });
+      return;
+    }
 
     try {
       const { grant, token } = await this.grantService.issue(
@@ -838,6 +897,8 @@ export class TelegramBotDispatchService {
       const detail = error instanceof Error ? error.message : String(error);
       this.logger.error(`直链签发失败: ${detail}`);
       await this.reply(chatId, '内部错误：生成下载链接失败，请稍后重试。', message.message_id, accountId);
+    } finally {
+      this.processingMessages.delete(msgKey);
     }
   }
 
@@ -982,18 +1043,221 @@ export class TelegramBotDispatchService {
   }
 
   /**
+   * 纯 Google 存储模式后台异步转存管线。
+   */
+  private async executeGDriveTransfer(params: {
+    message: TelegramMessage;
+    identity: TelegramBotIdentity;
+    chatId: string;
+    messageId: string;
+    fileSize: number | null;
+    usageDate: string;
+    whitelisted: boolean;
+    quotaConsumed: boolean;
+    quotaUsed: number;
+    origin: string;
+    config: any;
+    waitingMsgId: number | null;
+    accountId?: string;
+  }): Promise<void> {
+    const {
+      message,
+      identity,
+      chatId,
+      messageId,
+      fileSize,
+      usageDate,
+      whitelisted,
+      quotaConsumed,
+      quotaUsed,
+      origin,
+      config,
+      waitingMsgId,
+      accountId,
+    } = params;
+    const doc = message.document!;
+    const tempDir = path.join(process.cwd(), 'tmp', 'bot-transfers');
+    const tempFilePath = path.join(tempDir, `${randomUUID()}.tmp`);
+    let uploadReceipt: StorageUploadReceipt | null = null;
+
+    try {
+      if (!this.storageRouter || !this.storageRouter.availableBackendTypes().includes('gdrive')) {
+        throw new Error('Google 云端硬盘存储池暂不可用');
+      }
+
+      await mkdir(tempDir, { recursive: true });
+
+      // 1. 从 Telegram 拉取流并写入本地临时缓冲文件
+      const upstreamStream = await this.getTelegramSourceStream(doc.file_id, fileSize ?? undefined, accountId);
+      await pipeline(upstreamStream, createWriteStream(tempFilePath));
+
+      const fileStats = await stat(tempFilePath);
+      const actualSize = fileStats.size;
+
+      // 2. 上传至 Google 云端硬盘
+      uploadReceipt = await this.storageRouter.upload({
+        backendType: 'gdrive',
+        objectName: doc.file_name || `tg_${doc.file_id}`,
+        knownLength: actualSize,
+        mimeType: doc.mime_type || undefined,
+        openStream: () => createReadStream(tempFilePath),
+      });
+
+      // 3. 上传完成，立即清理本地临时文件
+      await unlink(tempFilePath).catch(() => {});
+
+      // 4. 签发直链授权记录
+      const { grant, token } = await this.grantService.issue(
+        {
+          telegramUserId: identity.telegramUserId,
+          username: identity.username,
+          displayName: identity.displayName,
+          chatId,
+          messageId,
+          telegramFileId: doc.file_id,
+          sourceAccountId: accountId ?? this.defaultSourceAccountId(),
+          fileName: this.sanitizePlain(doc.file_name, 255),
+          mimeType: this.sanitizePlain(doc.mime_type, 128),
+          fileSize: String(actualSize),
+          fileUniqueId: doc.file_unique_id ?? null,
+          storageBackend: 'gdrive',
+          storageAccountId: uploadReceipt.accountId,
+          storageObjectRef: uploadReceipt.objectRef,
+        },
+        config.linkTtlHours,
+      );
+
+      const url = this.grantService.buildUrl(origin, token);
+      const fileName = doc.file_name || '(未命名)';
+
+      this.auditService.log({
+        action: 'telegram_bot_link_issued',
+        resourceType: 'telegram_bot_grant',
+        resourceId: grant.id,
+        metadata: {
+          telegramUserId: identity.telegramUserId,
+          telegramUsername: identity.username,
+          grantId: grant.id,
+          tokenPrefix: grant.tokenPrefix,
+          expiresAt: grant.expiresAt,
+          quotaDate: usageDate,
+          quotaUsed,
+          viaWhitelist: whitelisted,
+          domainMode: config.linkDomainMode,
+          sourceAccountId: grant.sourceAccountId,
+          storageBackend: 'gdrive',
+          fileName,
+        },
+      });
+
+      const successText = `文件已就绪！\n文件名：${fileName}\n下载直链（${config.linkTtlHours} 小时内有效）：\n${url}\n⚠️ 链接到期后文件将自动失效并删除。`;
+      await this.updateOrReply(chatId, waitingMsgId, successText, message.message_id, accountId);
+    } catch (error) {
+      await unlink(tempFilePath).catch(() => {});
+      // [P0-05 Fix]: Saga 补偿：若 GDrive 已经上传入库但后续签发直链或通知失败，必须补偿删除远端对象防幽灵孤儿文件
+      if (uploadReceipt?.accountId && uploadReceipt?.objectRef && this.storageRouter) {
+        this.logger.warn(`Saga 补偿：签发直链失败，正在清理远端 GDrive 孤儿文件 ${uploadReceipt.objectRef}`);
+        await this.storageRouter
+          .deleteRemoteObject('gdrive', uploadReceipt.accountId, uploadReceipt.objectRef)
+          .catch((delErr) => {
+            this.logger.error(`Saga 补偿清理 GDrive 孤儿文件失败: ${delErr?.message || String(delErr)}`);
+          });
+      }
+      if (quotaConsumed) {
+        await this.quotaService.refund(identity.telegramUserId, usageDate);
+      }
+      const detail = error instanceof Error ? error.message : String(error);
+      this.logger.error(`纯 Google 存储模式转存并签发直链失败: ${detail}`);
+      const failText = '创建下载链接失败，请稍后重试。';
+      await this.updateOrReply(chatId, waitingMsgId, failText, message.message_id, accountId);
+    } finally {
+      this.processingMessages.delete(`${chatId}:${messageId}`);
+    }
+  }
+
+  /**
+   * 从 Telegram 上游获取实时流（支持账号池感知与单账号兜底）。
+   */
+  private async getTelegramSourceStream(
+    fileId: string,
+    fileSize?: number,
+    accountId?: string,
+  ): Promise<Readable> {
+    const pool = this.accountPoolDownload;
+    if (accountId && pool?.isActive() && pool.hasAccount(accountId)) {
+      const opened = await pool.openSourceStream({
+        accountId,
+        fileId,
+        expectedSize: fileSize,
+        noCache: true,
+      });
+      if (opened) return opened.stream;
+    }
+    const realtime = await this.telegramService.getRealtimeFileStream(fileId, fileSize, { noCache: true });
+    return realtime.stream;
+  }
+
+  /**
+   * 编辑已有消息，若失败自动降级为回复新消息。
+   */
+  private async updateOrReply(
+    chatId: string,
+    waitingMessageId: number | null,
+    text: string,
+    replyToMessageId?: number,
+    accountId?: string,
+  ): Promise<void> {
+    if (waitingMessageId) {
+      const edited = await this.editMessage(chatId, waitingMessageId, text, accountId);
+      if (edited) return;
+    }
+    await this.reply(chatId, text, replyToMessageId, accountId);
+  }
+
+  /**
+   * 编辑已有消息文本。
+   */
+  private async editMessage(
+    chatId: string,
+    messageId: number,
+    text: string,
+    accountId?: string,
+  ): Promise<boolean> {
+    const content = text.length > MAX_MESSAGE_LENGTH ? `${text.slice(0, MAX_MESSAGE_LENGTH)}…` : text;
+    const pool = this.pool;
+    const client = this.accountClient;
+
+    if (accountId && pool?.isActive()) {
+      const account = client ? pool.getConfig(accountId) : null;
+      if (account && client) {
+        try {
+          return await client.editMessageText(accountId, account.token, chatId, messageId, content);
+        } catch (error) {
+          this.logger.debug(`账号池编辑消息失败，将降级回复: ${error instanceof Error ? error.message : String(error)}`);
+          return false;
+        }
+      }
+      return false;
+    }
+
+    try {
+      return await this.telegramService.editMessageText(chatId, messageId, content);
+    } catch (error) {
+      this.logger.debug(`单账号编辑消息失败，将降级回复: ${error instanceof Error ? error.message : String(error)}`);
+      return false;
+    }
+  }
+
+  /**
    * 回复消息：**必须由收到消息的账号发送**（池化模式），未启用池化时保持原单账号链路。
-   *
-   * 安全约束：按账号发送失败时**不得**改用默认账号代发——那会让用户从另一个 Bot 收到
-   * 本账号的回复（身份错用），且与 Grant 的 `sourceAccountId` 记录不一致。
-   * 失败只记录结构化日志与计数，便于在「池化已启用但回复总失败」时被发现。
+   * 返回 sent message_id 供原地更新使用。
    */
   private async reply(
     chatId: string,
     text: string,
     replyToMessageId?: number,
     accountId?: string,
-  ): Promise<void> {
+  ): Promise<number | null> {
     const content = text.length > MAX_MESSAGE_LENGTH ? `${text.slice(0, MAX_MESSAGE_LENGTH)}…` : text;
     const pool = this.pool;
     const client = this.accountClient;
@@ -1008,27 +1272,30 @@ export class TelegramBotDispatchService {
         this.logger.error(
           `账号 ${accountId} 未解析到可用配置，已放弃回复（不跨账号代发，chat=${chatId}）`,
         );
-        return;
+        return null;
       }
       try {
-        await client.sendMessage(accountId, account.token, chatId, content, { replyToMessageId });
+        const sent = await client.sendMessage(accountId, account.token, chatId, content, { replyToMessageId });
+        return sent?.messageId ?? null;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         pool.bumpCounter('replyFailures');
         this.logger.error(
           `账号 ${accountId} 回复失败（不跨账号代发，chat=${chatId}）: ${message}`,
         );
+        return null;
       }
-      return;
     }
 
     // 未启用池化：保持原单账号链路
     try {
-      await this.telegramService.sendMessage(chatId, content, { replyToMessageId });
+      const sent = await this.telegramService.sendMessage(chatId, content, { replyToMessageId });
+      return sent?.message_id ?? null;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       pool?.bumpCounter('replyFailures');
       this.logger.warn(`Bot 回复失败（忽略）: ${message}`);
+      return null;
     }
   }
 }

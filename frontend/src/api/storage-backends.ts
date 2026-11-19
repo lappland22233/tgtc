@@ -201,3 +201,15 @@ export async function completeGDriveAuth(input: {
   const response = await api.post('/admin/storage-backends/gdrive/complete-auth', input);
   return response.data.data as { message: string; account: StorageBackendView };
 }
+
+/** 提交授权码：换取 refresh_token 并原地轮换指定 GDrive 存储账号凭据（保全存量历史文件） */
+export async function rotateGDriveStorageBackend(
+  id: string,
+  input: {
+    code: string;
+    redirectUri: string;
+  },
+): Promise<{ message: string; account: StorageBackendView }> {
+  const response = await api.post(`/admin/storage-backends/${encodeURIComponent(id)}/gdrive/rotate-auth`, input);
+  return response.data.data as { message: string; account: StorageBackendView };
+}

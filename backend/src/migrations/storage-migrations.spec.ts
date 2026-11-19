@@ -1,8 +1,10 @@
 import { DataSource } from 'typeorm';
 import { SqliteCreateStorageBackends1804000000000 } from './1804000000000-SqliteCreateStorageBackends';
 import { SqliteAddFileStorageColumns1804100000000 } from './1804100000000-SqliteAddFileStorageColumns';
+import { SqliteAddGrantStorageColumns1804200000000 } from './1804200000000-SqliteAddGrantStorageColumns';
 import { CreateStorageBackends1804000000000 } from './1804000000000-CreateStorageBackends';
 import { AddFileStorageColumns1804100000000 } from './1804100000000-AddFileStorageColumns';
+import { AddGrantStorageColumns1804200000000 } from './1804200000000-AddGrantStorageColumns';
 
 jest.setTimeout(30_000);
 
@@ -35,6 +37,7 @@ describe('存储后端迁移（SQLite 隔离内存库）', () => {
         SqliteSchemaAlignment1800000000000,
         SqliteCreateStorageBackends1804000000000,
         SqliteAddFileStorageColumns1804100000000,
+        SqliteAddGrantStorageColumns1804200000000,
       ],
       migrationsRun: true,
       synchronize: false,
@@ -57,6 +60,17 @@ describe('存储后端迁移（SQLite 隔离内存库）', () => {
     expect(columns.find((c: { name: string }) => c.name === 'storageObjectRef')).toBeDefined();
     const fileIndexes = await dataSource.query('PRAGMA index_list("files")');
     expect(fileIndexes.find((i: { name: string }) => i.name === 'idx_files_storage_ref')).toBeDefined();
+
+    // telegram_bot_file_grants 存储四列 + 过期清理索引
+    const grantColumns = await dataSource.query('PRAGMA table_info("telegram_bot_file_grants")');
+    const grantBackendCol = grantColumns.find((c: { name: string }) => c.name === 'storageBackend');
+    expect(grantBackendCol).toBeDefined();
+    expect(grantBackendCol.dflt_value).toContain('telegram');
+    expect(grantColumns.find((c: { name: string }) => c.name === 'storageAccountId')).toBeDefined();
+    expect(grantColumns.find((c: { name: string }) => c.name === 'storageObjectRef')).toBeDefined();
+    expect(grantColumns.find((c: { name: string }) => c.name === 'storagePurgedAt')).toBeDefined();
+    const grantIndexes = await dataSource.query('PRAGMA index_list("telegram_bot_file_grants")');
+    expect(grantIndexes.find((i: { name: string }) => i.name === 'idx_tg_bot_grants_purge_sweep')).toBeDefined();
   });
 
   it('存量库（无新列）经增量迁移补齐，默认值 telegram 兼容历史数据', async () => {
@@ -106,6 +120,7 @@ describe('存储后端迁移（SQLite 隔离内存库）', () => {
     const runner = dataSource.createQueryRunner();
     await new CreateStorageBackends1804000000000().up(runner);
     await new AddFileStorageColumns1804100000000().up(runner);
+    await new AddGrantStorageColumns1804200000000().up(runner);
     await runner.release();
     const tables = await dataSource.query(`SELECT name FROM sqlite_master WHERE type='table' AND name='storage_backends'`);
     expect(tables.length).toBe(0);

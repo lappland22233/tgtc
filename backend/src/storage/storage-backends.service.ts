@@ -24,7 +24,7 @@ import { maskIdentifier } from '../telegram-accounts/telegram-account-view';
 import { StorageAccountSchedulerService, StorageAttemptSample } from './storage-account-scheduler.service';
 import { StorageCredentialService } from './storage-credential.service';
 import { StorageDriverRegistry } from './storage-driver.registry';
-import { StorageAccountContext, StorageQuota } from './storage.types';
+import { StorageAccountContext, StorageAccountError, StorageQuota } from './storage.types';
 
 /** 健康字段持久化节流：同一账号最多 30s 写一次（状态迁移除外，必须立即落库） */
 const HEALTH_PERSIST_THROTTLE_MS = 30_000;
@@ -496,9 +496,20 @@ export class StorageBackendsService implements OnModuleInit {
       try {
         await this.refreshQuota(row.id);
       } catch (error) {
-        this.logger.warn(
-          `GDrive 账号 ${maskIdentifier(row.id)} 配额刷新失败：${error instanceof Error ? error.message.slice(0, 120) : String(error)}`,
-        );
+        const isAuth = (error instanceof StorageAccountError && error.kind === 'auth')
+          || /invalid_grant/i.test(error instanceof Error ? error.message : String(error));
+        if (isAuth) {
+          this.logger.warn(`GDrive 账号 ${maskIdentifier(row.id)} 巡检凭据失效，转 degraded 状态`);
+          await this.recordOutcome(row.id, {
+            ok: false,
+            failureKind: 'auth',
+            errorMessage: '巡检凭据失效（需重新授权）',
+          });
+        } else {
+          this.logger.warn(
+            `GDrive 账号 ${maskIdentifier(row.id)} 配额刷新失败：${error instanceof Error ? error.message.slice(0, 120) : String(error)}`,
+          );
+        }
       }
     }
     // 全部可用账号配额耗尽告警（上传侧会返回可重试 503，这里保证管理端可感知）

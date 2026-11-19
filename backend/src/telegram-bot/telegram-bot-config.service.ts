@@ -1,8 +1,9 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import { BadRequestException, Inject, Injectable, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Request } from 'express';
 import { ConfigCacheService } from '../common/services/config-cache.service';
 import { isValidSiteOrigin, isValidTimeZone } from '../config/env-validation';
+import { StorageRouterService } from '../storage/storage-router.service';
 import {
   BOT_CONFIG_DEFAULTS,
   BOT_CONFIG_KEYS,
@@ -24,11 +25,13 @@ export class TelegramBotConfigService {
   constructor(
     private readonly configCacheService: ConfigCacheService,
     private readonly configService: ConfigService,
+    @Optional() @Inject(StorageRouterService)
+    private readonly storageRouter: StorageRouterService | null = null,
   ) {}
 
   /** 读取运行时配置（面板值优先，缺失时用 env 兜底） */
   async getConfig(): Promise<TelegramBotRuntimeConfig> {
-    const [ttlRaw, limitRaw, tzRaw, modeRaw, domainRaw] = await Promise.all([
+    const [ttlRaw, limitRaw, tzRaw, modeRaw, domainRaw, storageModeRaw] = await Promise.all([
       this.configCacheService.get(
         BOT_CONFIG_KEYS.linkTtlHours,
         this.configService.get<string>('TELEGRAM_BOT_LINK_TTL_HOURS') || String(BOT_CONFIG_DEFAULTS.linkTtlHours),
@@ -49,10 +52,17 @@ export class TelegramBotConfigService {
         BOT_CONFIG_KEYS.linkDomain,
         this.configService.get<string>('TELEGRAM_BOT_LINK_DOMAIN') || '',
       ),
+      this.configCacheService.get(
+        BOT_CONFIG_KEYS.storageMode,
+        this.configService.get<string>('TELEGRAM_BOT_STORAGE_MODE') || BOT_CONFIG_DEFAULTS.storageMode,
+      ),
     ]);
 
     const ttl = Number(ttlRaw);
     const limit = Number(limitRaw);
+    const telegramChatId = (this.configService.get<string>('TELEGRAM_CHAT_ID') || '').trim();
+    const telegramStorageChatConfigured = Boolean(telegramChatId);
+
     return {
       linkTtlHours: Number.isSafeInteger(ttl) && ttl >= BOT_CONFIG_LIMITS.minTtlHours && ttl <= BOT_CONFIG_LIMITS.maxTtlHours
         ? ttl
@@ -63,6 +73,8 @@ export class TelegramBotConfigService {
       quotaTimezone: isValidTimeZone(tzRaw) ? tzRaw.trim() : BOT_CONFIG_DEFAULTS.quotaTimezone,
       linkDomainMode: modeRaw.trim() === 'manual' ? 'manual' : 'auto',
       linkDomain: domainRaw.trim(),
+      storageMode: storageModeRaw.trim() === 'gdrive' ? 'gdrive' : 'telegram',
+      telegramStorageChatConfigured,
     };
   }
 
@@ -125,6 +137,29 @@ export class TelegramBotConfigService {
       }
       next.linkDomain = domain;
       writes.push({ key: BOT_CONFIG_KEYS.linkDomain, value: domain, description: 'Bot 直链站点域名（手动模式）' });
+    }
+
+    if (patch.storageMode !== undefined) {
+      const mode = String(patch.storageMode).trim();
+      if (mode !== 'telegram' && mode !== 'gdrive') {
+        throw new BadRequestException('存储模式必须为 telegram 或 gdrive');
+      }
+      if (mode === 'telegram') {
+        const telegramChatId = (this.configService.get<string>('TELEGRAM_CHAT_ID') || '').trim();
+        if (!telegramChatId) {
+          throw new BadRequestException('未配置 TELEGRAM_CHAT_ID，无法切换为 Telegram 存储模式（强制使用纯 Google 存储模式）');
+        }
+      }
+      if (mode === 'gdrive' && this.storageRouter) {
+        const available = this.storageRouter.availableBackendTypes();
+        if (!available.includes('gdrive')) {
+          throw new BadRequestException(
+            '开启纯 Google 存储模式失败：系统中未找到可用且已启用的 Google 云端硬盘存储账号，请先在「存储配置」中添加并启用。',
+          );
+        }
+      }
+      next.storageMode = mode;
+      writes.push({ key: BOT_CONFIG_KEYS.storageMode, value: mode, description: 'Bot 存储模式（telegram|gdrive）' });
     }
 
     if (writes.length > 0) {

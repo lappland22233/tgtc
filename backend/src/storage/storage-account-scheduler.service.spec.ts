@@ -122,6 +122,72 @@ describe('StorageAccountSchedulerService（选号 / 冷却 / 配额准入）', (
       expect(scheduler.beginAttempt('a', Date.now(), 10 * 1024 * 1024)).toBe(false);
     });
 
+    it('在飞字节（inflightBytes）硬准入：并发在飞大文件占满剩余空间时后续上传被阻断', () => {
+      scheduler.syncAccounts([
+        makeAccount({ id: 'a', type: 'gdrive', maxInflight: 4, quotaTotalBytes: 15 * GB, quotaUsedBytes: 13 * GB, lastQuotaCheckAt: new Date() }),
+      ]);
+      // 剩余 2GB 空间。第一次上传 1GB：准入通过并累加 inflightBytes
+      expect(scheduler.beginAttempt('a', Date.now(), 1 * GB, 'write')).toBe(true);
+      // 第二次并发尝试上传 1GB：剩余空间不足（扣除在飞 1GB 后不足 1GB * 1.2 + 256MB）
+      expect(scheduler.select('gdrive', Date.now(), { requiredBytes: 1 * GB, operation: 'write' })).toBeNull();
+      // 第一次传输完成释放名额与字节
+      scheduler.finishAttempt('a', { ok: true, bytes: 1 * GB, durationMs: 1000 }, Date.now(), 1 * GB, 'write');
+      expect(scheduler.getRuntime('a')!.inflightBytes).toBe(0);
+    });
+
+    it('读操作结束不应扣减写操作的在飞配额（P0-03 漏洞防护）', () => {
+      scheduler.syncAccounts([
+        makeAccount({ id: 'a', type: 'gdrive', maxInflight: 4, quotaTotalBytes: 15 * GB, quotaUsedBytes: 10 * GB }),
+      ]);
+      // 发起一次写操作（占用 2GB 在飞）
+      expect(scheduler.beginAttempt('a', Date.now(), 2 * GB, 'write')).toBe(true);
+      expect(scheduler.getRuntime('a')!.inflightBytes).toBe(2 * GB);
+
+      // 并发发起一次读操作并结束（传输了 500MB）
+      expect(scheduler.beginAttempt('a', Date.now(), undefined, 'read')).toBe(true);
+      scheduler.finishAttempt('a', { ok: true, bytes: 500 * 1024 * 1024, durationMs: 500 }, Date.now(), undefined, 'read');
+
+      // 验证：读操作完成不得扣减写操作的 2GB 在飞字节！
+      expect(scheduler.getRuntime('a')!.inflightBytes).toBe(2 * GB);
+    });
+
+    it('updateQuota 刷新仅解除 quota 导致的冷却，不应冲掉 flood 限流冷却（P1-02 防护）', () => {
+      scheduler.syncAccounts([
+        makeAccount({ id: 'a', type: 'gdrive', quotaTotalBytes: 15 * GB, quotaUsedBytes: 10 * GB }),
+      ]);
+      const now = 1_000_000;
+      scheduler.beginAttempt('a', now);
+      // 上游 429 限流失败
+      scheduler.finishAttempt('a', { ok: false, failureKind: 'flood', retryAfterSeconds: 60 }, now);
+      expect(scheduler.getRuntime('a')!.cooldownUntil).toBeGreaterThan(now);
+
+      // 配额刷新（即使空间充裕）
+      scheduler.updateQuota('a', { totalBytes: 15 * GB, usedBytes: 5 * GB }, now + 1000);
+
+      // 验证：flood 冷却依然保持生效，不被配额刷新意外抹平
+      expect(scheduler.getRuntime('a')!.cooldownUntil).toBeGreaterThan(now + 1000);
+      expect(scheduler.select('gdrive', now + 2000, { requiredBytes: 1024 })).toBeNull();
+    });
+
+    it('读写分离准入：draining 与 degraded 账号读操作允许准入，写操作拒绝', () => {
+      scheduler.syncAccounts([
+        makeAccount({ id: 'drain', type: 'gdrive', status: 'draining', quotaTotalBytes: 15 * GB, quotaUsedBytes: 1 * GB, lastQuotaCheckAt: new Date() }),
+        makeAccount({ id: 'degraded', type: 'gdrive', status: 'degraded', quotaTotalBytes: 15 * GB, quotaUsedBytes: 1 * GB, lastQuotaCheckAt: new Date() }),
+        makeAccount({ id: 'revoked', type: 'gdrive', status: 'revoked', quotaTotalBytes: 15 * GB, quotaUsedBytes: 1 * GB, lastQuotaCheckAt: new Date() }),
+      ]);
+      // 写操作：三者均不能参与新文件写入
+      expect(scheduler.select('gdrive', Date.now(), { requiredBytes: 1024, operation: 'write' })).toBeNull();
+
+      // 读操作：draining 与 degraded 账号均可参与下载回源
+      const readDrain = scheduler.select('gdrive', Date.now(), { candidateIds: ['drain'], operation: 'read' });
+      expect(readDrain?.accountId).toBe('drain');
+      const readDegraded = scheduler.select('gdrive', Date.now(), { candidateIds: ['degraded'], operation: 'read' });
+      expect(readDegraded?.accountId).toBe('degraded');
+
+      // revoked 账号凭据彻底失效，读写均拒绝
+      expect(scheduler.select('gdrive', Date.now(), { candidateIds: ['revoked'], operation: 'read' })).toBeNull();
+    });
+
     it('剩余配额比例影响得分（空间多的账号优先）', () => {
       scheduler.syncAccounts([
         makeAccount({ id: 'nearly-full', type: 'gdrive', quotaTotalBytes: 15 * GB, quotaUsedBytes: 13 * GB, lastQuotaCheckAt: new Date() }),

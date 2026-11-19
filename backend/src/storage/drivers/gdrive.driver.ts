@@ -33,6 +33,12 @@ const MAX_STREAMED_ERROR_BODY_BYTES = 64 * 1024;
 /** 应用根文件夹名（drive.file scope 下仅本应用可见/可管） */
 const ROOT_FOLDER_NAME = 'TGTC';
 
+/** Resumable session 探测结果 */
+interface ResumableProbeResult {
+  offset: number;
+  completedResult?: StorageUploadResult;
+}
+
 /**
  * Google Drive 驱动（个人账号 OAuth，drive.file scope）。
  *
@@ -49,6 +55,7 @@ const ROOT_FOLDER_NAME = 'TGTC';
 export class GDriveStorageDriver implements StorageBackendDriver {
   readonly type = 'gdrive' as const;
   private readonly clients = new Map<string, { fingerprint: string; client: OAuth2Client }>();
+  private readonly rootFolderLocks = new Map<string, Promise<string>>();
 
   constructor(
     private readonly oauth: GDriveOAuthService,
@@ -96,7 +103,7 @@ export class GDriveStorageDriver implements StorageBackendDriver {
       if (contentRange) {
         const total = Number(contentRange.split('/')[1]);
         if (Number.isFinite(total)) size = total;
-      } else if (params.range) {
+      } else if (params.range && response.status === 206) {
         size = params.range.start + contentLength;
       }
       return { stream: response.data, size };
@@ -200,6 +207,46 @@ export class GDriveStorageDriver implements StorageBackendDriver {
     return { objectRef: response.data.id, size: Number(response.data.size ?? params.knownLength) };
   }
 
+  /** 查询 resumable 会话当前实际已接收的字节偏移（空 PUT bytes asterisk/total） */
+  private async queryResumableStatus(
+    sessionUri: string,
+    total: number,
+    signal?: AbortSignal,
+  ): Promise<ResumableProbeResult> {
+    try {
+      const response = await axios.put<{ id?: string; size?: string }>(sessionUri, null, {
+        headers: {
+          'Content-Length': '0',
+          'Content-Range': `bytes */${total}`,
+        },
+        validateStatus: (status) => status === 308 || (status >= 200 && status < 300),
+        timeout: 15_000,
+        signal,
+      });
+      if (response.status === 308) {
+        const rangeHeader = response.headers.range as string | undefined;
+        if (!rangeHeader) {
+          return { offset: 0 };
+        }
+        const match = rangeHeader.match(/-(\d+)(?:\/|$)/);
+        const received = match ? Number(match[1]) + 1 : 0;
+        return { offset: Number.isFinite(received) ? received : 0 };
+      }
+      if (response.status >= 200 && response.status < 300 && response.data?.id) {
+        return {
+          offset: total,
+          completedResult: {
+            objectRef: response.data.id,
+            size: Number(response.data.size ?? total),
+          },
+        };
+      }
+      return { offset: total };
+    } catch {
+      return { offset: -1 };
+    }
+  }
+
   /** 大文件 resumable session：initiate → 分块 PUT（308 续传 + 块级重试） */
   private async resumableUpload(
     token: string,
@@ -215,6 +262,7 @@ export class GDriveStorageDriver implements StorageBackendDriver {
         'X-Upload-Content-Type': mimeType,
         'X-Upload-Content-Length': String(params.knownLength),
       },
+      signal: params.signal,
       timeout: 30_000,
     });
     const sessionUri = init.headers.location as string | undefined;
@@ -245,7 +293,6 @@ export class GDriveStorageDriver implements StorageBackendDriver {
           try {
             response = await axios.put<{ id?: string; size?: string }>(sessionUri, remaining, {
               headers: {
-                Authorization: `Bearer ${token}`,
                 'Content-Length': String(remaining.length),
                 'Content-Range': `bytes ${start}-${end}/${total}`,
               },
@@ -257,11 +304,26 @@ export class GDriveStorageDriver implements StorageBackendDriver {
             });
           } catch (error) {
             if (params.signal?.aborted) throw error;
+            if (error instanceof StorageAccountError) throw error;
             const status = (error as AxiosError)?.response?.status;
             const retryable = status === undefined || status >= 500 || status === 429;
             attempt += 1;
             if (!retryable || attempt >= CHUNK_RETRY_LIMIT) throw error;
-            await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
+            // 遇重试先探测 session 真实接收进度
+            const probe = await this.queryResumableStatus(sessionUri, total, params.signal);
+            if (probe.completedResult) {
+              // 尾块 ACK 丢失但远端已成功入库生成 fileId
+              return probe.completedResult;
+            }
+            if (probe.offset === end + 1) {
+              // 远端实际已经完整接收本块（ACK 丢失场景）：直接视为本块完成
+              offset = end + 1;
+              break;
+            } else if (probe.offset !== -1 && probe.offset !== start) {
+              // 远端进度既不是本块开头也不是本块末尾，流无法回退：抛出网络异常由上层开新流
+              throw new StorageAccountError('GDrive resumable 断点偏移不匹配，需重新开流', 'network');
+            }
+            await new Promise((resolve) => setTimeout(resolve, Math.min(10_000, 1000 * 2 ** (attempt - 1) + Math.random() * 500)));
             continue;
           }
           if (response.status === 308) {
@@ -316,32 +378,45 @@ export class GDriveStorageDriver implements StorageBackendDriver {
     if (pending.length > 0) yield pending;
   }
 
-  /** 根文件夹：config 回填优先；否则查找/创建 TGTC/（drive.file 下仅本应用可见） */
+  /** 根文件夹：config 回填优先；否则查找/创建 TGTC/（含 In-flight 单飞锁防并发创建） */
   private async ensureRootFolder(ctx: StorageAccountContext, token: string): Promise<string> {
     const config = ctx.config as GDriveBackendConfig;
     if (config.rootFolderId) return config.rootFolderId;
-    const headers = { Authorization: `Bearer ${token}` };
-    const query = await axios.get<{ files?: Array<{ id: string }> }>(`${DRIVE_API}/files`, {
-      params: {
-        q: `name = '${ROOT_FOLDER_NAME}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
-        fields: 'files(id)',
-        pageSize: 1,
-      },
-      headers,
-      timeout: 15_000,
-    });
-    let folderId = query.data?.files?.[0]?.id;
-    if (!folderId) {
-      const created = await axios.post<{ id: string }>(`${DRIVE_API}/files`, {
-        name: ROOT_FOLDER_NAME,
-        mimeType: 'application/vnd.google-apps.folder',
-      }, { headers, timeout: 15_000 });
-      folderId = created.data.id;
-    }
-    // 回填 DB + 内存上下文（best-effort；失败时下次上传重新查找，幂等）
-    await this.backends.patchConfig(ctx.accountId, { rootFolderId: folderId });
-    (ctx.config as GDriveBackendConfig).rootFolderId = folderId;
-    return folderId;
+
+    const existingLock = this.rootFolderLocks.get(ctx.accountId);
+    if (existingLock) return existingLock;
+
+    const lockPromise = (async () => {
+      try {
+        const headers = { Authorization: `Bearer ${token}` };
+        const query = await axios.get<{ files?: Array<{ id: string }> }>(`${DRIVE_API}/files`, {
+          params: {
+            q: `name = '${ROOT_FOLDER_NAME}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
+            fields: 'files(id)',
+            pageSize: 1,
+          },
+          headers,
+          timeout: 15_000,
+        });
+        let folderId = query.data?.files?.[0]?.id;
+        if (!folderId) {
+          const created = await axios.post<{ id: string }>(`${DRIVE_API}/files`, {
+            name: ROOT_FOLDER_NAME,
+            mimeType: 'application/vnd.google-apps.folder',
+          }, { headers, timeout: 15_000 });
+          folderId = created.data.id;
+        }
+        // 回填 DB + 内存上下文（best-effort；失败时下次上传重新查找，幂等）
+        await this.backends.patchConfig(ctx.accountId, { rootFolderId: folderId });
+        (ctx.config as GDriveBackendConfig).rootFolderId = folderId;
+        return folderId;
+      } finally {
+        this.rootFolderLocks.delete(ctx.accountId);
+      }
+    })();
+
+    this.rootFolderLocks.set(ctx.accountId, lockPromise);
+    return lockPromise;
   }
 
   private async accessToken(ctx: StorageAccountContext): Promise<string> {
@@ -395,6 +470,10 @@ export class GDriveStorageDriver implements StorageBackendDriver {
       } catch {
         // Keep status-based classification when the body is empty, malformed, or unreadable.
         response.data = undefined;
+      } finally {
+        if (typeof (body as any).destroy === 'function') {
+          (body as any).destroy();
+        }
       }
     }
     return this.classify(error, fallback);
@@ -408,14 +487,47 @@ export class GDriveStorageDriver implements StorageBackendDriver {
       return new StorageAccountError(`${fallback}（refresh_token 失效，需重新授权）`, 'auth', 401);
     }
     const response = (error as AxiosError)?.response;
-    const reasons = ((response?.data as { error?: { errors?: Array<{ reason?: string }> } })?.error?.errors ?? [])
-      .map((item) => item.reason ?? '');
-    if (reasons.some((reason) => /storageQuotaExceeded/i.test(reason))) {
+    const data = response?.data as any;
+    const errorsList: Array<{ reason?: string; message?: string }> =
+      Array.isArray(data?.error?.errors) ? data.error.errors : [];
+    const detailsList: Array<{ '@type'?: string; reason?: string; domain?: string }> =
+      Array.isArray(data?.error?.details) ? data.error.details : [];
+    const reasons = [
+      ...errorsList.map((item) => item.reason ?? ''),
+      ...detailsList.map((item) => item.reason ?? ''),
+    ];
+    const errorText = `${message} ${data?.error?.message ?? ''} ${reasons.join(' ')}`;
+
+    // 1. 配额耗尽 (quota)
+    if (reasons.some((r) => /storageQuotaExceeded/i.test(r)) || /storageQuotaExceeded/i.test(errorText)) {
       return new StorageAccountError(`${fallback}（账号配额已满）`, 'quota', 403);
     }
-    if (reasons.some((reason) => /rateLimitExceeded|userRateLimitExceeded|sharingRateLimitExceeded/i.test(reason))) {
+
+    // 2. 流量/速率限制 (flood)
+    // 包含 Google Drive 403 限流原因：rateLimitExceeded, userRateLimitExceeded, sharingRateLimitExceeded, dailyLimitExceeded, quotaExceeded, RESOURCE_EXHAUSTED
+    if (
+      reasons.some((r) => /rateLimitExceeded|userRateLimitExceeded|sharingRateLimitExceeded|dailyLimitExceeded|quotaExceeded|RESOURCE_EXHAUSTED/i.test(r)) ||
+      /rateLimitExceeded|userRateLimitExceeded|sharingRateLimitExceeded|dailyLimitExceeded|quotaExceeded|RESOURCE_EXHAUSTED/i.test(errorText)
+    ) {
       return new StorageAccountError(`${fallback}（上游限流）`, 'flood', 403, 60);
     }
+
+    // 3. 明确凭据/权限失效 (auth)
+    // 仅当明确出现 authError, insufficientPermissions, invalidToken 时标记为 auth
+    if (
+      reasons.some((r) => /authError|insufficientPermissions|invalidToken/i.test(r)) ||
+      /authError|insufficientPermissions|invalidToken/i.test(errorText) ||
+      response?.status === 401
+    ) {
+      return new StorageAccountError(`${fallback}（认证失败或权限不足）`, 'auth', response?.status ?? 401);
+    }
+
+    // 4. HTTP 403 兜底保护：绝不可误判为 auth（避免健康账号被误置 degraded）！
+    if (response?.status === 403) {
+      return new StorageAccountError(`${fallback}（HTTP 403 访问受限）`, 'other', 403);
+    }
+
+    // 5. 其余按 HTTP 状态码
     if (typeof response?.status === 'number') {
       const kind = classifyHttpStatus(response.status);
       return new StorageAccountError(`${fallback}（HTTP ${response.status}）`, kind, response.status);

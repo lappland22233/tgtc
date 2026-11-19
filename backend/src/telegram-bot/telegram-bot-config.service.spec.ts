@@ -1,13 +1,17 @@
 import { BadRequestException } from '@nestjs/common';
 import { TelegramBotConfigService } from './telegram-bot-config.service';
 
-function makeService(envValues: Record<string, string | undefined>, cacheValues: Record<string, string> = {}) {
+function makeService(
+  envValues: Record<string, string | undefined>,
+  cacheValues: Record<string, string> = {},
+  storageRouter: any = null,
+) {
   const configCacheService = {
     get: jest.fn(async (key: string, fallback: string) => cacheValues[key] ?? fallback),
     setBatch: jest.fn(async (_configs: { key: string; value: string; description?: string }[]) => undefined),
   };
   const configService = { get: jest.fn((key: string) => envValues[key]) };
-  const service = new TelegramBotConfigService(configCacheService as never, configService as never);
+  const service = new TelegramBotConfigService(configCacheService as never, configService as never, storageRouter);
   return { service, configCacheService };
 }
 
@@ -28,6 +32,8 @@ describe('TelegramBotConfigService', () => {
       quotaTimezone: 'Asia/Shanghai',
       linkDomainMode: 'auto',
       linkDomain: '',
+      storageMode: 'telegram',
+      telegramStorageChatConfigured: false,
     });
   });
 
@@ -71,6 +77,21 @@ describe('TelegramBotConfigService', () => {
     const writtenKeys = configCacheService.setBatch.mock.calls[0][0].map((item) => item.key);
     expect(writtenKeys).toContain('TELEGRAM_BOT_LINK_TTL_HOURS');
     expect(writtenKeys).toContain('TELEGRAM_BOT_LINK_DOMAIN');
+  });
+
+  it('支持切换存储模式并在无可用 GDrive 账号时拒绝切换', async () => {
+    const mockRouter: any = {
+      availableBackendTypes: jest.fn(() => ['telegram']),
+    };
+    const { service } = makeService({}, {}, mockRouter);
+    await expect(service.updateConfig({ storageMode: 'gdrive' })).rejects.toThrow('未找到可用且已启用');
+
+    mockRouter.availableBackendTypes.mockReturnValue(['telegram', 'gdrive']);
+    const updated = await service.updateConfig({ storageMode: 'gdrive' });
+    expect(updated.storageMode).toBe('gdrive');
+
+    // 未配置 TELEGRAM_CHAT_ID 时拒绝切换回 telegram 模式
+    await expect(service.updateConfig({ storageMode: 'telegram' })).rejects.toThrow('未配置 TELEGRAM_CHAT_ID');
   });
 
   it('手动模式使用面板域名，非法值 fail-closed', async () => {

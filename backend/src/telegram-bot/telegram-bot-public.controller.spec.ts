@@ -42,7 +42,12 @@ function makeGrantRow(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function makeController(overrides: Record<string, unknown> | null = {}) {
+function makeController(
+  overrides: Record<string, unknown> | null = {},
+  options?: {
+    storageRouter?: { openDownloadStream: jest.Mock } | null;
+  },
+) {
   let capturedError: unknown = null;
   const row = overrides === null ? null : makeGrantRow(overrides);
 
@@ -93,6 +98,13 @@ function makeController(overrides: Record<string, unknown> | null = {}) {
   };
   const auditService = { log: jest.fn((_payload: Record<string, unknown>) => undefined) };
 
+  const storageRouter = options?.storageRouter === undefined ? {
+    openDownloadStream: jest.fn(async () => ({
+      stream: makeReadable(),
+      size: TOTAL_SIZE,
+    })),
+  } : options.storageRouter;
+
   const controller = new TelegramBotPublicController(
     grantService as never,
     telegramService as never,
@@ -100,6 +112,10 @@ function makeController(overrides: Record<string, unknown> | null = {}) {
     rateLimitService as never,
     streamResponder as never,
     auditService as never,
+    null,
+    null,
+    null,
+    storageRouter as never,
   );
 
   /** 取最近一次 send 的参数（未调用时直接失败，避免误判） */
@@ -117,6 +133,7 @@ function makeController(overrides: Record<string, unknown> | null = {}) {
     rateLimitService,
     streamResponder,
     auditService,
+    storageRouter,
     lastSend,
     getCapturedError: () => capturedError,
     clearCapturedError: () => { capturedError = null; },
@@ -748,5 +765,111 @@ describe('TelegramBotPublicController 账号池回退矩阵（fail-closed）', (
       TOTAL_SIZE,
       { noCache: true },
     );
+  });
+});
+
+describe('TelegramBotPublicController 纯 Google 存储模式直链下载', () => {
+  const GDRIVE_GRANT = {
+    storageBackend: 'gdrive' as const,
+    storageAccountId: 'gdrive-acc-1',
+    storageObjectRef: 'gdrive-file-id-123',
+    fileName: 'gdrive-test.zip',
+    mimeType: 'application/zip',
+    fileSize: String(TOTAL_SIZE),
+  };
+
+  it('全量下载：直接委托 StorageRouter.openDownloadStream，返回 200 + Content-Length + ETag', async () => {
+    const ctx = makeController(GDRIVE_GRANT);
+    await ctx.controller.download(VALID_TOKEN, makeRequest(), res);
+
+    expect(ctx.storageRouter!.openDownloadStream).toHaveBeenCalledWith({
+      backendType: 'gdrive',
+      accountId: 'gdrive-acc-1',
+      objectRef: 'gdrive-file-id-123',
+      range: undefined,
+      expectedSize: TOTAL_SIZE,
+      signal: expect.any(Object),
+    });
+    // 不经 Telegram 或本地 TDLib 缓存
+    expect(ctx.telegramService.getRealtimeFileStream).not.toHaveBeenCalled();
+    expect(ctx.fileCacheService.getOrCacheStream).not.toHaveBeenCalled();
+
+    const sendArgs = ctx.lastSend();
+    expect(sendArgs.status).toBe(200);
+    expect(sendArgs.range).toBeUndefined();
+    expect(sendArgs.headers?.['Content-Length']).toBe(String(TOTAL_SIZE));
+    expect(sendArgs.headers?.['Accept-Ranges']).toBe('bytes');
+    expect(sendArgs.headers?.['Content-Type']).toBe('application/zip');
+    expect(sendArgs.headers?.['Content-Disposition']).toContain('gdrive-test.zip');
+    expect(sendArgs.headers?.['ETag']).toBeDefined();
+    expect(ctx.grantService.recordAccess).toHaveBeenCalledWith('grant-1');
+    expect(ctx.auditService.log).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'telegram_bot_link_accessed',
+      metadata: expect.objectContaining({ storageBackend: 'gdrive' }),
+    }));
+  });
+
+  it('单区间 Range：委托 StorageRouter.openDownloadStream(range)，返回 206 Partial Content + Content-Range', async () => {
+    const ctx = makeController(GDRIVE_GRANT);
+    await ctx.controller.download(VALID_TOKEN, makeRequest({ headers: { range: 'bytes=100-299' } }), res);
+
+    expect(ctx.storageRouter!.openDownloadStream).toHaveBeenCalledWith({
+      backendType: 'gdrive',
+      accountId: 'gdrive-acc-1',
+      objectRef: 'gdrive-file-id-123',
+      range: { start: 100, end: 299 },
+      expectedSize: TOTAL_SIZE,
+      signal: expect.any(Object),
+    });
+
+    const sendArgs = ctx.lastSend();
+    expect(sendArgs.status).toBe(206);
+    expect(sendArgs.range).toEqual({ start: 100, end: 299, total: TOTAL_SIZE });
+    expect(sendArgs.headers?.['Content-Length']).toBe('200');
+    expect(sendArgs.headers?.['Accept-Ranges']).toBe('bytes');
+  });
+
+  it('If-Range 校验失败时忽略 Range：回退为 200 全量流', async () => {
+    const ctx = makeController(GDRIVE_GRANT);
+    await ctx.controller.download(
+      VALID_TOKEN,
+      makeRequest({ headers: { range: 'bytes=100-299', 'if-range': '"outdated-etag"' } }),
+      res,
+    );
+
+    expect(ctx.storageRouter!.openDownloadStream).toHaveBeenCalledWith({
+      backendType: 'gdrive',
+      accountId: 'gdrive-acc-1',
+      objectRef: 'gdrive-file-id-123',
+      range: undefined,
+      expectedSize: TOTAL_SIZE,
+      signal: expect.any(Object),
+    });
+
+    const sendArgs = ctx.lastSend();
+    expect(sendArgs.status).toBe(200);
+    expect(sendArgs.range).toBeUndefined();
+    expect(sendArgs.headers?.['Content-Length']).toBe(String(TOTAL_SIZE));
+  });
+
+  it('越界 Range：抛出 RangeNotSatisfiableException (416)', async () => {
+    const ctx = makeController(GDRIVE_GRANT);
+    await ctx.controller.download(VALID_TOKEN, makeRequest({ headers: { range: 'bytes=5000-' } }), res);
+
+    const error = ctx.getCapturedError();
+    expect(error).toBeInstanceOf(RangeNotSatisfiableException);
+    expect((error as RangeNotSatisfiableException).total).toBe(TOTAL_SIZE);
+    expect(ctx.storageRouter?.openDownloadStream).not.toHaveBeenCalled();
+    expect(ctx.streamResponder.send).not.toHaveBeenCalled();
+  });
+
+  it('存储路由未配置时：返回 503 服务不可用', async () => {
+    const ctx = makeController(GDRIVE_GRANT, { storageRouter: null });
+    await ctx.controller.download(VALID_TOKEN, makeRequest(), res);
+
+    const error = ctx.getCapturedError() as HttpException;
+    expect(error).toBeInstanceOf(HttpException);
+    expect(error.getStatus()).toBe(503);
+    expect(error.message).toContain('Google 云端硬盘存储后端暂不可用');
   });
 });

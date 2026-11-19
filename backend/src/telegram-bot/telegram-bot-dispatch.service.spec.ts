@@ -1,3 +1,4 @@
+import { Readable } from 'stream';
 import { TelegramBotDispatchService } from './telegram-bot-dispatch.service';
 import type { TelegramUpdate } from '../telegram/telegram.types';
 
@@ -105,7 +106,7 @@ function makeService(options: {
     upsertReady: jest.Mock;
     bridgeInboundCopyToLogicalFile?: jest.Mock;
   } | null;
-  accountClient?: { sendMessage: jest.Mock; forwardMessage: jest.Mock } | null;
+  accountClient?: { sendMessage: jest.Mock; forwardMessage: jest.Mock; editMessageText?: jest.Mock } | null;
   archiveChatId?: string;
   defaultBotToken?: string;
   issueMock?: jest.Mock;
@@ -117,6 +118,16 @@ function makeService(options: {
   attempts?: { recordClaim: jest.Mock } | null;
   /** `findByFileUniqueId` 的命中结果（grant 命名空间归因用） */
   grantMatches?: Array<{ id: string }>;
+  botConfig?: Record<string, unknown>;
+  storageRouter?: {
+    availableBackendTypes: jest.Mock;
+    upload: jest.Mock;
+  } | null;
+  accountPoolDownload?: {
+    isActive: jest.Mock;
+    hasAccount: jest.Mock;
+    openSourceStream: jest.Mock;
+  } | null;
 }) {
   const counters = makeCounters();
   const pool = options.pool === undefined ? null : options.pool;
@@ -135,7 +146,14 @@ function makeService(options: {
   const attempts = options.attempts === undefined
     ? { recordClaim: jest.fn(async () => undefined) }
     : options.attempts;
-  const telegramService = { sendMessage: jest.fn(async () => ({ message_id: 1, chat: { id: 7001 } })) };
+  const telegramService = {
+    sendMessage: jest.fn(async () => ({ message_id: 1, chat: { id: 7001 } })),
+    editMessageText: jest.fn(async () => true),
+    getRealtimeFileStream: jest.fn(async () => ({
+      stream: Readable.from([Buffer.from('hello world test data')]),
+      info: { file_id: 'FILE-1', file_path: '/tmp/f', file_size: 21 },
+    })),
+  };
   const botConfigService = {
     getConfig: jest.fn(async () => ({
       linkTtlHours: 4,
@@ -143,6 +161,8 @@ function makeService(options: {
       quotaTimezone: 'Asia/Shanghai',
       linkDomainMode: 'manual',
       linkDomain: 'https://files.example.com',
+      storageMode: 'telegram',
+      ...options.botConfig,
     })),
     resolveSiteOriginAsync: jest.fn(async () => 'https://files.example.com'),
   };
@@ -204,6 +224,8 @@ function makeService(options: {
     null,
     mirrorConfig as never,
     attempts as never,
+    (options.accountPoolDownload ?? null) as never,
+    (options.storageRouter ?? null) as never,
   );
 
   return {
@@ -220,6 +242,7 @@ function makeService(options: {
     copies,
     mirrorConfig,
     attempts,
+    storageRouter: options.storageRouter ?? null,
   };
 }
 
@@ -699,5 +722,188 @@ describe('TelegramBotDispatchService（多 Bot 身份链路）', () => {
     expect(ctx.attempts!.recordClaim).toHaveBeenCalledWith('file', 'file-1', '1234567', {
       targetChatId: '-100777',
     });
+  });
+});
+
+describe('TelegramBotDispatchService（纯 Google 存储模式）', () => {
+  async function waitFor(predicate: () => boolean | Promise<boolean>, timeout = 2000) {
+    const start = Date.now();
+    while (Date.now() - start < timeout) {
+      if (await predicate()) return;
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    throw new Error('waitFor timeout');
+  }
+
+  it('私聊发送文件：先回复等待提示，后台转存 Google 云端硬盘并原地编辑为成功提示（不泄漏存储后端）', async () => {
+    const pool = makePool(true);
+    const accountClient = {
+      sendMessage: jest.fn(async () => ({ messageId: 888 })),
+      editMessageText: jest.fn(async () => true),
+      forwardMessage: jest.fn(),
+    };
+    const storageRouter = {
+      availableBackendTypes: jest.fn(() => ['gdrive']),
+      upload: jest.fn(async () => ({
+        backendType: 'gdrive',
+        accountId: 'gdrive-acc-1',
+        objectRef: 'gdrive-file-id-123',
+      })),
+    };
+    const ctx = makeService({
+      pool,
+      accountClient,
+      storageRouter,
+      botConfig: { storageMode: 'gdrive' },
+    });
+
+    await ctx.service.handleUpdate(makeMessageUpdate(), { accountId: '1234567' });
+
+    // 1. 立即回复等待提示，且绝不泄漏 Google 云端硬盘等后端词汇
+    expect(accountClient.sendMessage).toHaveBeenCalledWith(
+      '1234567',
+      '1234567:SECRET',
+      '7001',
+      '⏳ 正在创建下载链接，请稍候...',
+      { replyToMessageId: 100 },
+    );
+
+    // 2. 等待后台转存完成
+    await waitFor(() => storageRouter.upload.mock.calls.length > 0);
+
+    expect(storageRouter.upload).toHaveBeenCalledWith(expect.objectContaining({
+      backendType: 'gdrive',
+      objectName: 'report.pdf',
+      knownLength: 21,
+      mimeType: 'application/pdf',
+      openStream: expect.any(Function),
+    }));
+
+    // 3. 签发 grant，绑定 gdrive 存储后端
+    expect(ctx.grantService.issue).toHaveBeenCalledWith(
+      expect.objectContaining({
+        storageBackend: 'gdrive',
+        storageAccountId: 'gdrive-acc-1',
+        storageObjectRef: 'gdrive-file-id-123',
+      }),
+      4,
+    );
+
+    // 4. 原地编辑消息为就绪提示，包含有效直链和自动删除提醒，且不展示存储后端
+    await waitFor(() => accountClient.editMessageText.mock.calls.length > 0);
+    expect(accountClient.editMessageText).toHaveBeenCalledWith(
+      '1234567',
+      '1234567:SECRET',
+      '7001',
+      888,
+      expect.stringContaining('文件已就绪！'),
+    );
+    const finalContent = (accountClient.editMessageText.mock.calls as any)[0][4] as string;
+    expect(finalContent).toContain('下载直链（4 小时内有效）：');
+    expect(finalContent).toContain('https://files.example.com/api/bot-dl/TOKEN');
+    expect(finalContent).toContain('⚠️ 链接到期后文件将自动失效并删除。');
+    expect(finalContent).not.toMatch(/google|gdrive/i);
+  });
+
+  it('单账号模式下编辑消息失败时自动降级为回复新消息', async () => {
+    const storageRouter = {
+      availableBackendTypes: jest.fn(() => ['gdrive']),
+      upload: jest.fn(async () => ({
+        backendType: 'gdrive',
+        accountId: 'gdrive-acc-1',
+        objectRef: 'gdrive-file-id-123',
+      })),
+    };
+    const ctx = makeService({
+      storageRouter,
+      botConfig: { storageMode: 'gdrive' },
+    });
+    ctx.telegramService.sendMessage.mockResolvedValueOnce({ message_id: 666, chat: { id: 7001 } });
+    ctx.telegramService.editMessageText.mockResolvedValueOnce(false); // 编辑失败降级
+
+    await ctx.service.handleUpdate(makeMessageUpdate());
+
+    await waitFor(() => storageRouter.upload.mock.calls.length > 0);
+    await waitFor(() => ctx.telegramService.sendMessage.mock.calls.length >= 2);
+
+    expect(ctx.telegramService.sendMessage).toHaveBeenLastCalledWith(
+      '7001',
+      expect.stringContaining('文件已就绪！'),
+      { replyToMessageId: 100 },
+    );
+  });
+
+  it('转存失败时归还配额并提示失败（不泄漏敏感内部错误）', async () => {
+    const pool = makePool(true);
+    const accountClient = {
+      sendMessage: jest.fn(async () => ({ messageId: 999 })),
+      editMessageText: jest.fn(async () => true),
+      forwardMessage: jest.fn(),
+    };
+    const storageRouter = {
+      availableBackendTypes: jest.fn(() => ['gdrive']),
+      upload: jest.fn(async () => {
+        throw new Error('GDrive upstream error 500');
+      }),
+    };
+    const ctx = makeService({
+      pool,
+      accountClient,
+      storageRouter,
+      botConfig: { storageMode: 'gdrive' },
+    });
+
+    await ctx.service.handleUpdate(makeMessageUpdate(), { accountId: '1234567' });
+
+    await waitFor(() => accountClient.editMessageText.mock.calls.length > 0);
+
+    // 配额被归还
+    expect(ctx.quotaService.refund).toHaveBeenCalledWith('7001', '2026-09-21');
+    // 编辑消息为友好失败提示
+    expect(accountClient.editMessageText).toHaveBeenCalledWith(
+      '1234567',
+      '1234567:SECRET',
+      '7001',
+      999,
+      '创建下载链接失败，请稍后重试。',
+    );
+  });
+
+  it('GDrive 转存中若上传成功但 issue 失败，应触发 Saga 补偿删除远端孤儿对象', async () => {
+    const pool = makePool(true);
+    const accountClient = {
+      sendMessage: jest.fn(async () => ({ messageId: 999 })),
+      forwardMessage: jest.fn(async () => ({ messageId: 1000 })),
+      editMessageText: jest.fn(async () => true),
+    };
+    const storageRouter = {
+      availableBackendTypes: jest.fn(() => ['gdrive']),
+      upload: jest.fn(async () => ({
+        backendType: 'gdrive',
+        accountId: 'gdrive-acc-saga',
+        objectRef: 'gdrive-orphan-file-999',
+      })),
+      deleteRemoteObject: jest.fn(async () => true),
+    };
+    const ctx = makeService({
+      pool,
+      accountClient,
+      storageRouter,
+      botConfig: { storageMode: 'gdrive' },
+    });
+    ctx.grantService.issue.mockRejectedValueOnce(new Error('Database deadlock on grant issue'));
+
+    await ctx.service.handleUpdate(makeMessageUpdate(), { accountId: '1234567' });
+
+    await waitFor(() => storageRouter.deleteRemoteObject.mock.calls.length > 0);
+
+    // 验证：Saga 补偿已触发删除远端孤儿对象
+    expect(storageRouter.deleteRemoteObject).toHaveBeenCalledWith(
+      'gdrive',
+      'gdrive-acc-saga',
+      'gdrive-orphan-file-999',
+    );
+    // 配额被归还
+    expect(ctx.quotaService.refund).toHaveBeenCalledWith('7001', '2026-09-21');
   });
 });

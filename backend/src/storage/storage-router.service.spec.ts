@@ -252,4 +252,48 @@ describe('StorageRouterService（路由 / 换号 / fail-closed）', () => {
     })).rejects.toMatchObject({ admissionOnly: true });
     expect(backends.raiseCapacityExhaustedAlert).not.toHaveBeenCalled();
   });
+  it('GDrive 单文件超出单账号最大可用容量上限时 fail-fast（admissionOnly 为 false，防止 worker 饥饿死循环）', async () => {
+    const GB = 1024 ** 3;
+    const accounts = [
+      { ...makeAccount('a', 'gdrive'), quotaTotalBytes: 15 * GB, quotaUsedBytes: 0, lastQuotaCheckAt: new Date() },
+    ];
+    const { router } = makeRouter({ accounts, driver: makeDriver('gdrive') });
+
+    // 14GB 文件：需要 14 * 1.2 + 0.25GB = 17.05GB > 15GB，即使账号 100% 空闲也装不下
+    await expect(router.upload({
+      backendType: 'gdrive',
+      objectName: 'massive.iso',
+      knownLength: 14 * GB,
+      openStream: () => Readable.from([]),
+    })).rejects.toMatchObject({
+      admissionOnly: false,
+      message: expect.stringContaining('超出单 GDrive 账号最大存储上限'),
+    });
+  });
+
+  it('客户端主动中止取流（AbortError）时不惩罚健康账号进入 cooldown（P1-01 防护）', async () => {
+    const stream = new Readable({ read() {} });
+    const driver = makeDriver('s3', {
+      openDownloadStream: jest.fn().mockResolvedValue({ stream, size: 1024 }),
+    });
+    const { router, scheduler, backends } = makeRouter({ driver });
+
+    const download = await router.openDownloadStream({
+      backendType: 's3',
+      accountId: 'a',
+      objectRef: 'ref',
+      expectedSize: 1024,
+    });
+
+    // 模拟客户端主动断开连接触发 AbortError
+    const abortErr: any = new Error('The user aborted a request.');
+    abortErr.name = 'AbortError';
+    download.stream.emit('error', abortErr);
+
+    // 账号名额已释放
+    expect(scheduler.getRuntime('a')!.inflight).toBe(0);
+    // 账号未进入 cooldown，也未被记录为失败
+    expect(scheduler.getRuntime('a')!.cooldownUntil).toBe(0);
+    expect(backends.recordOutcome).not.toHaveBeenCalledWith('a', expect.objectContaining({ ok: false }));
+  });
 });

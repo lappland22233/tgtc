@@ -25,6 +25,7 @@ import {
 @Index('uq_tg_bot_grants_tokenHash', ['tokenHash'], { unique: true })
 @Index('uq_tg_bot_grants_message', ['telegramUserId', 'chatId', 'messageId'], { unique: true })
 @Index('idx_tg_bot_grants_fileUniqueId', ['fileUniqueId'])
+@Index('idx_tg_bot_grants_purge_sweep', ['storageBackend', 'storagePurgedAt', 'expiresAt'])
 export class TelegramBotFileGrant {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -84,6 +85,25 @@ export class TelegramBotFileGrant {
 
   @Column({ type: 'bigint', nullable: true, comment: '文件大小（字节）' })
   fileSize: string | null;
+
+  /**
+   * 存储后端判别字段：telegram | gdrive
+   * 存量数据缺省 'telegram'，纯 Google 存储模式下写入 'gdrive'
+   */
+  @Column({ type: 'varchar', length: 16, default: 'telegram', comment: '存储后端：telegram|gdrive' })
+  storageBackend: string;
+
+  /** 存储账号 ID（非 TG 后端） */
+  @Column({ type: 'varchar', length: 64, nullable: true, comment: '存储账号 ID（非 TG 后端）' })
+  storageAccountId: string | null;
+
+  /** 远端对象引用（如 GDrive fileId） */
+  @Column({ type: 'varchar', length: 1024, nullable: true, comment: '对象引用（非 TG 后端）' })
+  storageObjectRef: string | null;
+
+  /** 远端对象删除时间戳（已到期自动清理后打标） */
+  @Column({ type: databaseColumnType('timestamptz') as 'timestamptz', nullable: true, comment: '远端对象删除时间戳' })
+  storagePurgedAt: Date | null;
 
   /** SHA-256(token) 十六进制摘要，校验用 */
   @Column({ type: 'varchar', length: 64, comment: 'SHA-256(token)' })

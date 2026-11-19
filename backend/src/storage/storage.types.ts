@@ -42,8 +42,12 @@ export class StorageAccountError extends Error {
 
 /** 上传选号全部候选暂不可用（可重试 503；admissionOnly=尚未发出任何远端请求） */
 export class StorageUploadUnavailableError extends ServiceUnavailableException {
-  constructor(readonly admissionOnly: boolean = false, readonly retryAfterMs: number = 5000) {
-    super('存储账号当前繁忙或不可用，请稍后重试');
+  constructor(
+    readonly admissionOnly: boolean = false,
+    readonly retryAfterMs: number = 5000,
+    message?: string,
+  ) {
+    super(message || '存储账号当前繁忙或不可用，请稍后重试');
   }
 }
 

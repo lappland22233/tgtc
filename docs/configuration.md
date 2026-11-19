@@ -179,6 +179,7 @@ Redis 承载 8 个 Bull 队列：`metrics-aggregation`、`attack-detection`、`a
 | `TELEGRAM_BOT_QUOTA_TIMEZONE` | `Asia/Shanghai` | 每日额度切日时区（env 兜底，面板可调） |
 | `TELEGRAM_BOT_LINK_DOMAIN_MODE` | `auto` | `auto` 自动获取 / `manual` 手动设置（env 兜底，面板可调） |
 | `TELEGRAM_BOT_LINK_DOMAIN` | - | 手动模式下的站点域名，如 `https://text.lappland.top`（env 兜底，面板可调） |
+| `TELEGRAM_BOT_STORAGE_MODE` | `telegram` | Bot 文件存储模式（`telegram` 原生模式 / `gdrive` 纯 Google 存储模式，env 兜底，面板可调）；未配置 `TELEGRAM_CHAT_ID` 或存储群失效时强制/首选 `gdrive` 模式 |
 
 **站点域名解析优先级（防 Host 伪造）**：手动模式配置 > `APP_URL` > 受信代理头（仅 `TRUST_PROXY_HOPS` 正确配置时）> **fail-closed**。系统**绝不**回退到 `localhost` 或裸 `Host` 头；无可信来源时会拒绝签发并提示管理员在后台配置。
 
@@ -359,15 +360,17 @@ Redis 承载 8 个 Bull 队列：`metrics-aggregation`、`attack-detection`、`a
 
 - **S3 兼容**：一套 AK/SK 一行账号，支持自定义 endpoint（MinIO/Cloudflare R2/阿里 OSS）、path-style、bucket 内根前缀；大文件自动分片上传，失败自动清理残留分片；可配多行实现池化。
 - **WebDAV**：一个端点一行账号（Nextcloud/Alist/坚果云等），PUT 流式上传 + 原生 Range 下载；423/507 归类为可换号失败。
-- **Google Drive**：个人账号 OAuth（`drive.file` scope，仅访问本应用创建的文件，规避受限 scope 审核），每账号 15GB 免费空间。先配置 OAuth Client（client_id/secret，secret 加密落库），再走授权向导（生成授权链接 → 浏览器授权 → 粘贴 code）入池。**多账号即扩容**：上传按「带宽×健康×容量×权重×剩余配额」选号，剩余配额不足（文件×1.2+256MB）的账号自动跳过，写满换下一个；配额每 30 分钟自动刷新。
+- **Google Drive**：个人账号 OAuth（`drive.file` scope，仅访问本应用创建的文件，规避受限 scope 审核），每账号 15GB 免费空间。先配置 OAuth Client（client_id/secret，secret 加密落库），再走授权向导（生成授权链接 → 浏览器授权 → 粘贴 code）入池。**多账号即扩容**：上传按「带宽×健康×容量×权重×剩余配额」选号，剩余配额不足（文件×1.2+256MB）的账号自动跳过，写满换下一个；配额每 30 分钟自动刷新。驱动原生集成 Resumable 分块上传尾包 ACK 丢失自愈、API 403 细分（`quotaExceeded`/`dailyLimitExceeded`/`RESOURCE_EXHAUSTED` 归入 `flood` 60 秒冷却，其他 403 归入 `other` 绝不误报凭据失效）与 >12.3GB 超大文件快速保护拒绝。
 
 **安全与一致性口径**（与 TG 账号池同源）：
 
 - 凭据只存 AES-256-GCM 密文，接口/日志/审计永不回显；创建即连通性测试，失败不落库；
 - 对象引用与账号强绑定（S3 key 属于特定 bucket、GDrive fileId 属于特定账号），回源 fail-closed：账号撤销/凭据失效/限流时返回可诊断 503，绝不跨账号猜测；
+- 读写负载与配额解耦：下载流回源不占用写入配额，客户端 Seek / 断开连接主动传递 abort 信号释放槽位，且健康账号不计入失败冷却；
 - 撤销账号只清凭据停任务，保留账号行（存量文件引用可诊断）；远端对象不会被误删；
 - 覆盖上传/永久删除后的远端对象清理均经**共享引用检查**（无其他文件行引用同一对象才删），best-effort 失败只告警；Telegram 对象维持不删现状；
-- 镜像扩散/副本表/Bot 直链授权/严格磁盘租约为 TG 专属能力，非 TG 文件一律跳过；非 TG 文件的缩略图/预览/分享/Range 下载复用同一缓存层，语义不变；
+- 镜像扩散/副本表/严格磁盘租约为 TG 专属能力，非 TG 站内文件一律跳过；非 TG 文件的缩略图/预览/分享/Range 下载复用同一缓存层，语义不变；
+- Bot 纯 Google 模式集成 Saga 事务补偿回滚（建链失败物理删除远端对象并返还用户额度）与生命周期硬删除（Lifecycle Purge Cron 扫描已撤销/过期授权彻底物理删除远端对象并释放云端配额）；
 - GDrive 存储池全部账号配额耗尽时，上传返回可重试 503 并触发全站告警 `STORAGE_CAPACITY_EXHAUSTED`（CRITICAL，30 分钟冷却去重，配额刷新 cron 与上传选号失败路径双触发）。
 
 **真实端点验证清单**（单测/回归已全覆盖 mock 路径，以下项需真实凭据手动执行）：

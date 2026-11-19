@@ -10,6 +10,8 @@ export interface TelegramBotIdentity {
   displayName: string | null;
 }
 
+export type TelegramBotStorageMode = 'telegram' | 'gdrive';
+
 /** 运行时配置（面板可热更新，env 兜底） */
 export interface TelegramBotRuntimeConfig {
   /** 直链有效期（小时） */
@@ -22,6 +24,10 @@ export interface TelegramBotRuntimeConfig {
   linkDomainMode: 'auto' | 'manual';
   /** 手动模式下的站点域名（如 https://text.lappland.top） */
   linkDomain: string;
+  /** 存储模式：telegram (原生模式) | gdrive (纯 Google 存储模式) */
+  storageMode: TelegramBotStorageMode;
+  /** 系统是否已配置 Telegram 存储群组（只读透传给前端诊断） */
+  telegramStorageChatConfigured?: boolean;
 }
 
 /** 面板可调配置的存储键（SystemConfig.key） */
@@ -31,6 +37,7 @@ export const BOT_CONFIG_KEYS = {
   quotaTimezone: 'TELEGRAM_BOT_QUOTA_TIMEZONE',
   linkDomainMode: 'TELEGRAM_BOT_LINK_DOMAIN_MODE',
   linkDomain: 'TELEGRAM_BOT_LINK_DOMAIN',
+  storageMode: 'TELEGRAM_BOT_STORAGE_MODE',
 } as const;
 
 /** 长轮询 offset 的持久化键（重启不丢更新） */
@@ -52,6 +59,7 @@ export const BOT_CONFIG_DEFAULTS = {
   linkTtlHours: 4,
   dailyLimit: 5,
   quotaTimezone: 'Asia/Shanghai',
+  storageMode: 'telegram' as TelegramBotStorageMode,
 } as const;
 
 export const BOT_CONFIG_LIMITS = {

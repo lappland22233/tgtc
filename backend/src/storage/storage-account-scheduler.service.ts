@@ -48,6 +48,7 @@ interface StorageAccountRuntime {
   weight: number;
   maxInflight: number;
   inflight: number;
+  inflightBytes: number;
   ewmaBandwidthMbps: number | null;
   ewmaSuccess: number;
   consecutiveFailures: number;
@@ -55,6 +56,7 @@ interface StorageAccountRuntime {
   quotaTotalBytes: number | null;
   quotaUsedBytes: number;
   quotaCheckedAt: number;
+  lastFailureKind?: StorageFailureKind;
 }
 
 /**
@@ -106,6 +108,7 @@ export class StorageAccountSchedulerService {
           weight: Math.max(1, row.weight || 1),
           maxInflight: Math.max(1, row.maxInflight || 8),
           inflight: 0,
+          inflightBytes: 0,
           ewmaBandwidthMbps: null,
           ewmaSuccess: 1,
           consecutiveFailures: 0,
@@ -140,18 +143,25 @@ export class StorageAccountSchedulerService {
 
   /**
    * 按负载选号。`requiredBytes` 提供时启用 GDrive 配额硬准入；
-   * `candidateIds` 限定候选（回源侧只允许对象所属账号）。
+   * `candidateIds` 限定候选（回源侧只允许对象所属账号）；
+   * `operation` 区分读写：'read' 允许 draining 与 degraded 账号准入（保障历史文件可下载）。
    */
   select(
     type: RemoteStorageBackendType,
     now = Date.now(),
-    opts?: { requiredBytes?: number; exclude?: Set<string>; candidateIds?: string[] },
+    opts?: {
+      requiredBytes?: number;
+      exclude?: Set<string>;
+      candidateIds?: string[];
+      operation?: 'read' | 'write';
+    },
   ): StorageSelection | null {
+    const operation = opts?.operation ?? 'write';
     const candidates = Array.from(this.runtimes.values())
       .filter((rt) => rt.type === type)
       .filter((rt) => !opts?.candidateIds || opts.candidateIds.includes(rt.accountId))
       .filter((rt) => !opts?.exclude?.has(rt.accountId))
-      .filter((rt) => this.schedulable(rt, now, opts?.requiredBytes))
+      .filter((rt) => this.schedulable(rt, now, opts?.requiredBytes, operation))
       .sort((a, b) => a.accountId.localeCompare(b.accountId));
     if (candidates.length === 0) return null;
 
@@ -180,22 +190,46 @@ export class StorageAccountSchedulerService {
     };
   }
 
-  /** 原子准入：占一个在飞名额；冷却/满载/禁用时拒绝 */
-  beginAttempt(accountId: string, now = Date.now(), requiredBytes?: number): boolean {
+  /** 原子准入：占一个在飞名额与字节量；冷却/满载/禁用时拒绝 */
+  beginAttempt(
+    accountId: string,
+    now = Date.now(),
+    requiredBytes?: number,
+    operation: 'read' | 'write' = 'write',
+  ): boolean {
     const rt = this.runtimes.get(accountId);
-    if (!rt || !this.schedulable(rt, now, requiredBytes)) return false;
+    if (!rt || !this.schedulable(rt, now, requiredBytes, operation)) return false;
     rt.inflight += 1;
+    if (operation === 'write' && typeof requiredBytes === 'number' && requiredBytes > 0) {
+      rt.inflightBytes += requiredBytes;
+    }
     return true;
   }
 
-  /** 传输结束回报采样：更新带宽 EWMA / 健康度 / 冷却 */
-  finishAttempt(accountId: string, sample: StorageAttemptSample, now = Date.now()): void {
+  /** 传输结束回报采样：更新带宽 EWMA / 健康度 / 冷却，并释放在飞字节 */
+  finishAttempt(
+    accountId: string,
+    sample: StorageAttemptSample,
+    now = Date.now(),
+    attemptedBytes?: number,
+    operation: 'read' | 'write' = 'write',
+  ): void {
     const rt = this.runtimes.get(accountId);
     if (!rt) return;
     rt.inflight = Math.max(0, rt.inflight - 1);
+    // [P0-03 Fix]: 仅写操作扣减 inflightBytes！读操作绝不扣减写在飞配额
+    if (operation === 'write') {
+      const bytesToDeduct = typeof attemptedBytes === 'number' && attemptedBytes > 0
+        ? attemptedBytes
+        : (typeof sample.bytes === 'number' && sample.bytes > 0 ? sample.bytes : 0);
+      rt.inflightBytes = Math.max(0, rt.inflightBytes - bytesToDeduct);
+    }
+    if (rt.inflight === 0) rt.inflightBytes = 0;
+
     if (sample.ok) {
       rt.consecutiveFailures = 0;
       rt.cooldownUntil = 0;
+      rt.lastFailureKind = undefined;
       rt.ewmaSuccess = EWMA_ALPHA + (1 - EWMA_ALPHA) * rt.ewmaSuccess;
       if (
         typeof sample.bytes === 'number' && sample.bytes > 0
@@ -211,6 +245,7 @@ export class StorageAccountSchedulerService {
     rt.consecutiveFailures += 1;
     rt.ewmaSuccess = (1 - EWMA_ALPHA) * rt.ewmaSuccess;
     const kind = sample.failureKind ?? 'other';
+    rt.lastFailureKind = kind;
     const base = COOLDOWN_BASE_MS[kind];
     const backoff = Math.min(COOLDOWN_MAX_MS, base * 2 ** Math.min(6, rt.consecutiveFailures - 1));
     const retryAfterMs = typeof sample.retryAfterSeconds === 'number' && sample.retryAfterSeconds > 0
@@ -223,9 +258,15 @@ export class StorageAccountSchedulerService {
   }
 
   /** 未发出远端请求即放弃时归还名额（不计失败） */
-  releaseAttempt(accountId: string): void {
+  releaseAttempt(accountId: string, bytes?: number): void {
     const rt = this.runtimes.get(accountId);
-    if (rt) rt.inflight = Math.max(0, rt.inflight - 1);
+    if (rt) {
+      rt.inflight = Math.max(0, rt.inflight - 1);
+      if (typeof bytes === 'number' && bytes > 0) {
+        rt.inflightBytes = Math.max(0, rt.inflightBytes - bytes);
+      }
+      if (rt.inflight === 0) rt.inflightBytes = 0;
+    }
   }
 
   /** 成功轮换凭据或探测恢复后清除旧失败冷却，不影响启用状态与在途任务。 */
@@ -243,11 +284,11 @@ export class StorageAccountSchedulerService {
     rt.quotaTotalBytes = quota.totalBytes;
     rt.quotaUsedBytes = quota.usedBytes;
     rt.quotaCheckedAt = now;
-    // 配额刷新发现仍有空间时立即解除 quota 冷却（其它账号删除文件可释放空间）
+    // [P1-02 Fix]: 配额刷新发现仍有空间时，仅解除因 quota 导致的冷却！绝不可误解除 flood/network 等限流冷却
     if (quota.totalBytes === null || quota.totalBytes - quota.usedBytes > QUOTA_HEADROOM_BYTES) {
-      if (rt.cooldownUntil > now && rt.consecutiveFailures > 0) {
-        // 只清 quota 类冷却无法从分类回溯，保守做法：有空间即整体解除冷却
+      if (rt.cooldownUntil > now && rt.lastFailureKind === 'quota') {
         rt.cooldownUntil = 0;
+        rt.lastFailureKind = undefined;
       }
     }
   }
@@ -271,13 +312,27 @@ export class StorageAccountSchedulerService {
       }));
   }
 
-  private schedulable(rt: StorageAccountRuntime, now: number, requiredBytes?: number): boolean {
-    if (!rt.enabled || rt.status !== 'active') return false;
+  private schedulable(
+    rt: StorageAccountRuntime,
+    now: number,
+    requiredBytes?: number,
+    operation: 'read' | 'write' = 'write',
+  ): boolean {
+    // 读写分离准入：
+    // 读操作允许 draining 与 degraded 账号（存量文件持续可用），且允许管理员关闭新上传（enabled=false）的账号回源下载，
+    // 但拒绝 revoked 或因 auth 错误而 degraded 的账号
+    if (operation === 'read') {
+      if (rt.status === 'revoked') return false;
+      if (rt.status === 'degraded' && rt.lastFailureKind === 'auth') return false;
+    } else {
+      if (!rt.enabled) return false;
+      if (rt.status !== 'active') return false;
+    }
     if (rt.cooldownUntil > now) return false;
     if (rt.inflight >= rt.maxInflight) return false;
-    // GDrive 配额硬准入：剩余空间必须容纳本次上传（含安全余量）
-    if (rt.type === 'gdrive' && rt.quotaTotalBytes !== null && typeof requiredBytes === 'number' && requiredBytes > 0) {
-      const remaining = rt.quotaTotalBytes - rt.quotaUsedBytes;
+    // GDrive 配额硬准入：仅写操作生效，且扣减当前在飞字节数
+    if (operation === 'write' && rt.type === 'gdrive' && rt.quotaTotalBytes !== null && typeof requiredBytes === 'number' && requiredBytes > 0) {
+      const remaining = rt.quotaTotalBytes - (rt.quotaUsedBytes + rt.inflightBytes);
       if (remaining <= requiredBytes * QUOTA_SIZE_FACTOR + QUOTA_HEADROOM_BYTES) return false;
     }
     return true;
