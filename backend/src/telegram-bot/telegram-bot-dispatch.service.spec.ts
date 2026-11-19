@@ -122,11 +122,20 @@ function makeService(options: {
   storageRouter?: {
     availableBackendTypes: jest.Mock;
     upload: jest.Mock;
+    deleteRemoteObject?: jest.Mock;
   } | null;
   accountPoolDownload?: {
     isActive: jest.Mock;
     hasAccount: jest.Mock;
     openSourceStream: jest.Mock;
+  } | null;
+  downloadResources?: {
+    reserve: jest.Mock;
+  } | null;
+  uploadDiskBudget?: {
+    isStrictMode: jest.Mock;
+    acquireSession: jest.Mock;
+    releaseSession: jest.Mock;
   } | null;
 }) {
   const counters = makeCounters();
@@ -226,6 +235,8 @@ function makeService(options: {
     attempts as never,
     (options.accountPoolDownload ?? null) as never,
     (options.storageRouter ?? null) as never,
+    (options.downloadResources ?? null) as never,
+    (options.uploadDiskBudget ?? null) as never,
   );
 
   return {
@@ -242,6 +253,8 @@ function makeService(options: {
     copies,
     mirrorConfig,
     attempts,
+    downloadResources: options.downloadResources ?? null,
+    uploadDiskBudget: options.uploadDiskBudget ?? null,
     storageRouter: options.storageRouter ?? null,
   };
 }
@@ -905,5 +918,167 @@ describe('TelegramBotDispatchService（纯 Google 存储模式）', () => {
     );
     // 配额被归还
     expect(ctx.quotaService.refund).toHaveBeenCalledWith('7001', '2026-09-21');
+  });
+
+  it('Finding 8: 转存前预约磁盘容量与严格上传预算，并在完成后或异常时释放', async () => {
+    const pool = makePool(true);
+    const accountClient = {
+      sendMessage: jest.fn(async () => ({ messageId: 999 })),
+      forwardMessage: jest.fn(),
+      editMessageText: jest.fn(async () => true),
+    };
+    const storageRouter = {
+      availableBackendTypes: jest.fn(() => ['gdrive']),
+      upload: jest.fn(async () => ({
+        backendType: 'gdrive',
+        accountId: 'gdrive-acc-1',
+        objectRef: 'gdrive-file-id-123',
+      })),
+    };
+    const mockReservation = {
+      id: 'res-1',
+      grantedBytes: 1024,
+      remainingBytes: 1024,
+      countsTowardCache: false,
+      active: true,
+      consume: jest.fn(),
+      release: jest.fn(),
+    };
+    const downloadResources = {
+      reserve: jest.fn(async () => mockReservation),
+    };
+    const uploadDiskBudget = {
+      isStrictMode: jest.fn(() => true),
+      acquireSession: jest.fn(async () => undefined),
+      releaseSession: jest.fn(() => true),
+    };
+
+    const ctx = makeService({
+      pool,
+      accountClient,
+      storageRouter,
+      downloadResources,
+      uploadDiskBudget,
+      botConfig: { storageMode: 'gdrive' },
+    });
+
+    await ctx.service.handleUpdate(makeMessageUpdate(), { accountId: '1234567' });
+
+    await waitFor(() => storageRouter.upload.mock.calls.length > 0);
+    await waitFor(() => accountClient.editMessageText.mock.calls.length > 0);
+
+    // 验证：严格上传模式会话已申请并在完成时释放
+    expect(uploadDiskBudget.acquireSession).toHaveBeenCalledWith(expect.any(String), expect.any(Number));
+    expect(uploadDiskBudget.releaseSession).toHaveBeenCalled();
+
+    // 验证：磁盘容量已预约并在流式写入时核销、最终释放
+    expect(downloadResources.reserve).toHaveBeenCalledWith(expect.objectContaining({
+      countsTowardCache: false,
+      waitTimeoutMs: 30_000,
+    }));
+    expect(mockReservation.consume).toHaveBeenCalled();
+    expect(mockReservation.release).toHaveBeenCalled();
+  });
+
+  it('Finding 8: 磁盘容量不足时拒绝转存并友好提示用户、退还配额', async () => {
+    const pool = makePool(true);
+    const accountClient = {
+      sendMessage: jest.fn(async () => ({ messageId: 999 })),
+      forwardMessage: jest.fn(),
+      editMessageText: jest.fn(async () => true),
+    };
+    const storageRouter = {
+      availableBackendTypes: jest.fn(() => ['gdrive']),
+      upload: jest.fn(),
+    };
+    const downloadResources = {
+      reserve: jest.fn(async () => {
+        throw new Error('磁盘空间不足');
+      }),
+    };
+
+    const ctx = makeService({
+      pool,
+      accountClient,
+      storageRouter,
+      downloadResources,
+      botConfig: { storageMode: 'gdrive' },
+    });
+
+    await ctx.service.handleUpdate(makeMessageUpdate(), { accountId: '1234567' });
+
+    await waitFor(() => accountClient.editMessageText.mock.calls.length > 0);
+
+    // 验证：没有调用上传，提示友好错误，配额退还
+    expect(storageRouter.upload).not.toHaveBeenCalled();
+    expect(accountClient.editMessageText).toHaveBeenCalledWith(
+      '1234567',
+      '1234567:SECRET',
+      '7001',
+      999,
+      '服务器临时磁盘空间不足，无法转存文件，请稍后重试。',
+    );
+    expect(ctx.quotaService.refund).toHaveBeenCalledWith('7001', '2026-09-21');
+  });
+
+  it('Finding 2: 池化账号拉流失败时 fail-closed，绝不降级回退至默认单账号', async () => {
+    const pool = makePool(true);
+    const accountClient = {
+      sendMessage: jest.fn(async () => ({ messageId: 999 })),
+      forwardMessage: jest.fn(),
+      editMessageText: jest.fn(async () => true),
+    };
+    const storageRouter = {
+      availableBackendTypes: jest.fn(() => ['gdrive']),
+      upload: jest.fn(),
+    };
+    const accountPoolDownload = {
+      isActive: jest.fn(() => true),
+      hasAccount: jest.fn(() => true),
+      openSourceStream: jest.fn(async () => null), // 模拟拉流失败
+    };
+
+    const ctx = makeService({
+      pool,
+      accountClient,
+      storageRouter,
+      accountPoolDownload,
+      botConfig: { storageMode: 'gdrive' },
+    });
+
+    await ctx.service.handleUpdate(makeMessageUpdate(), { accountId: '1234567' });
+
+    await waitFor(() => accountClient.editMessageText.mock.calls.length > 0);
+
+    // 验证：绝没有调用 telegramService.getRealtimeFileStream（单账号回源）
+    expect(ctx.telegramService.getRealtimeFileStream).not.toHaveBeenCalled();
+    expect(accountClient.editMessageText).toHaveBeenCalledWith(
+      '1234567',
+      '1234567:SECRET',
+      '7001',
+      999,
+      '创建下载链接失败，请稍后重试。',
+    );
+    expect(ctx.quotaService.refund).toHaveBeenCalledWith('7001', '2026-09-21');
+  });
+
+  it('Finding 7: 前置条件异常或失败时释放消息锁，允许后续重试', async () => {
+    const ctx = makeService({
+      botConfig: { storageMode: 'gdrive' },
+    });
+    // 模拟域名解析抛出异常
+    ctx.botConfigService.resolveSiteOriginAsync.mockRejectedValueOnce(new Error('DNS lookup failure'));
+
+    await ctx.service.handleUpdate(makeMessageUpdate());
+
+    // 再次发送同一消息：若前一次未释放锁，此处会回复“正在创建链接中”；若已释放，会正常进入流程
+    ctx.botConfigService.resolveSiteOriginAsync.mockResolvedValueOnce('https://files.example.com');
+    ctx.telegramService.sendMessage.mockClear();
+
+    await ctx.service.handleUpdate(makeMessageUpdate());
+
+    // 验证第二次没有被 msgKey 锁拦截为等待中
+    const sentTexts = ctx.telegramService.sendMessage.mock.calls.map((call: any[]) => call[1]);
+    expect(sentTexts).not.toContain('⏳ 该文件正在创建链接中，请稍候...');
   });
 });

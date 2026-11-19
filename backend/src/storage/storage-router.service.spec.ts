@@ -271,6 +271,24 @@ describe('StorageRouterService（路由 / 换号 / fail-closed）', () => {
     });
   });
 
+  it('GDrive 拥有无限容量账号（Workspace，quotaTotalBytes === null）时不施加单账号上限', async () => {
+    const GB = 1024 ** 3;
+    const accounts = [
+      { ...makeAccount('ws', 'gdrive'), quotaTotalBytes: null, quotaUsedBytes: 0, lastQuotaCheckAt: new Date() },
+    ];
+    const uploadMock = jest.fn().mockResolvedValue({ objectRef: 'obj-large', size: 20 * GB });
+    const { router } = makeRouter({ accounts, driver: makeDriver('gdrive', { upload: uploadMock }) });
+
+    const result = await router.upload({
+      backendType: 'gdrive',
+      objectName: 'huge-20gb.iso',
+      knownLength: 20 * GB,
+      openStream: () => Readable.from([]),
+    });
+    expect(result.objectRef).toBe('obj-large');
+    expect(uploadMock).toHaveBeenCalled();
+  });
+
   it('客户端主动中止取流（AbortError）时不惩罚健康账号进入 cooldown（P1-01 防护）', async () => {
     const stream = new Readable({ read() {} });
     const driver = makeDriver('s3', {

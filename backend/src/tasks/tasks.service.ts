@@ -53,30 +53,62 @@ export class TasksService {
     private storageRouter: StorageRouterService | null = null,
   ) {}
 
+  /** 失败的远端清理记录重试调度（grantId -> { attempts, nextRetry }），防止失败记录饥饿后续正常文件 */
+  private readonly purgeRetrySchedule = new Map<string, { attempts: number; nextRetry: number }>();
+
   /**
    * 定时清理已过期的 Bot 远端文件（Google 云端硬盘），并打上清理时间戳。
    * 每 10 分钟执行一次。
    */
   @Cron(CronExpression.EVERY_10_MINUTES)
   async cleanupExpiredBotRemoteFiles() {
+    // 独立清理 tmp/bot-transfers/ 下残留超过 2 小时的本地孤儿文件（进程异常重启产生），
+    // 绝不因远端 grant 数量为 0 或存储模块未装配而跳过
+    await this.cleanupOrphanBotTransferFiles();
+
     if (!this.storageRouter || !this.grantRepository) return;
     try {
       const now = new Date();
-      // 查询到期或已撤销、属于 gdrive、且尚未物理删除的记录
-      const expiredGrants = await this.grantRepository
-        .createQueryBuilder('grant')
-        .where('grant.storageBackend = :backend', { backend: 'gdrive' })
-        .andWhere('grant.storagePurgedAt IS NULL')
-        .andWhere('grant.storageObjectRef IS NOT NULL')
-        .andWhere('(grant.expiresAt < :now OR grant.revokedAt IS NOT NULL)', { now })
-        .orderBy('grant.expiresAt', 'ASC')
-        .limit(100)
-        .getMany();
+      const nowMs = now.getTime();
 
-      if (expiredGrants.length === 0) return;
+      // 分页扫描待清理记录，跳过重试冷却中的记录，防止失败记录（如凭据已吊销的账号）饥饿阻塞后续正常文件
+      const BATCH_SIZE = 100;
+      const MAX_SCAN_PAGES = 5;
+      const eligibleGrants: TelegramBotFileGrant[] = [];
+
+      for (let page = 0; page < MAX_SCAN_PAGES; page += 1) {
+        const qb = this.grantRepository
+          .createQueryBuilder('grant')
+          .where('grant.storageBackend = :backend', { backend: 'gdrive' })
+          .andWhere('grant.storagePurgedAt IS NULL')
+          .andWhere('grant.storageObjectRef IS NOT NULL')
+          .andWhere('(grant.expiresAt < :now OR grant.revokedAt IS NOT NULL)', { now })
+          .orderBy('grant.expiresAt', 'ASC');
+
+        if (typeof (qb as any).offset === 'function') {
+          (qb as any).offset(page * BATCH_SIZE);
+        } else if (typeof (qb as any).skip === 'function') {
+          (qb as any).skip(page * BATCH_SIZE);
+        }
+
+        const grants = await qb.limit(BATCH_SIZE).getMany();
+        if (!grants || grants.length === 0) break;
+
+        for (const grant of grants) {
+          const retry = this.purgeRetrySchedule.get(grant.id);
+          if (!retry || nowMs >= retry.nextRetry) {
+            eligibleGrants.push(grant);
+            if (eligibleGrants.length >= BATCH_SIZE) break;
+          }
+        }
+
+        if (eligibleGrants.length >= BATCH_SIZE) break;
+      }
+
+      if (eligibleGrants.length === 0) return;
 
       let deletedCount = 0;
-      for (const grant of expiredGrants) {
+      for (const grant of eligibleGrants) {
         if (!grant.storageAccountId || !grant.storageObjectRef) continue;
         try {
           const success = await this.storageRouter.deleteRemoteObject('gdrive', grant.storageAccountId, grant.storageObjectRef);
@@ -84,13 +116,20 @@ export class TasksService {
           if (success) {
             grant.storagePurgedAt = new Date();
             await this.grantRepository.save(grant);
+            this.purgeRetrySchedule.delete(grant.id);
             deletedCount += 1;
           } else {
+            const attempts = (this.purgeRetrySchedule.get(grant.id)?.attempts ?? 0) + 1;
+            const backoffMs = Math.min(24 * 60 * 60 * 1000, 10 * 60 * 1000 * Math.pow(2, attempts - 1));
+            this.purgeRetrySchedule.set(grant.id, { attempts, nextRetry: nowMs + backoffMs });
             this.logger.warn(
-              `清理过期 Bot GDrive 文件未确认成功，保留记录等待下次定时重试（grant=${grant.id}, objectRef=${grant.storageObjectRef}）`,
+              `清理过期 Bot GDrive 文件未确认成功（连续失败 ${attempts} 次），将在 ${Math.round(backoffMs / 60000)} 分钟后重试（grant=${grant.id}, objectRef=${grant.storageObjectRef}）`,
             );
           }
         } catch (error) {
+          const attempts = (this.purgeRetrySchedule.get(grant.id)?.attempts ?? 0) + 1;
+          const backoffMs = Math.min(24 * 60 * 60 * 1000, 10 * 60 * 1000 * Math.pow(2, attempts - 1));
+          this.purgeRetrySchedule.set(grant.id, { attempts, nextRetry: nowMs + backoffMs });
           this.logger.warn(
             `清理过期 Bot GDrive 文件失败（grant=${grant.id}, objectRef=${grant.storageObjectRef}）: ${error instanceof Error ? error.message : String(error)}`,
           );
@@ -100,9 +139,6 @@ export class TasksService {
       if (deletedCount > 0) {
         this.logger.log(`已成功从 Google 云端硬盘彻底删除 ${deletedCount} 个到期的 Bot 临时文件`);
       }
-
-      // 顺带清理 tmp/bot-transfers/ 下残留超过 2 小时的本地孤儿文件（进程异常重启产生）
-      await this.cleanupOrphanBotTransferFiles();
     } catch (error) {
       this.logger.error('执行到期 Bot 远端文件自动清理任务失败', error instanceof Error ? error.message : String(error));
     }

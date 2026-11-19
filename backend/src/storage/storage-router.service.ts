@@ -85,15 +85,23 @@ export class StorageRouterService {
     if (candidates.length === 0) throw new StorageUploadUnavailableError(false);
 
     // [P0-04 Fix]: 若文件大小超出该后端所有账号的单账号绝对容量上限（如 GDrive 15GB），
-    // 根本不可能有任何账号能接纳，立即抛出 admissionOnly: false 的不可用错误，防止 processor 无限死循环饥饿
+    // 根本不可能有任何账号能接纳，立即抛出 admissionOnly: false 的不可用错误，防止 processor 无限死循环饥饿；
+    // 若候选账号中存在无限容量（Google Workspace，quotaTotalBytes === null），则不设上限。
     if (params.backendType === 'gdrive') {
       let maxAccountCapacity = 0;
+      let hasUnlimited = false;
       for (const id of candidates) {
         const rt = this.scheduler.getRuntime(id);
-        const total = rt?.quotaTotalBytes ?? (15 * 1024 * 1024 * 1024);
+        if (rt?.quotaTotalBytes === null) {
+          hasUnlimited = true;
+          break;
+        }
+        const total = typeof rt?.quotaTotalBytes === 'number'
+          ? rt.quotaTotalBytes
+          : (15 * 1024 * 1024 * 1024);
         if (total > maxAccountCapacity) maxAccountCapacity = total;
       }
-      if (maxAccountCapacity > 0 && params.knownLength * QUOTA_SIZE_FACTOR + QUOTA_HEADROOM_BYTES > maxAccountCapacity) {
+      if (!hasUnlimited && maxAccountCapacity > 0 && params.knownLength * QUOTA_SIZE_FACTOR + QUOTA_HEADROOM_BYTES > maxAccountCapacity) {
         throw new StorageUploadUnavailableError(
           false,
           0,

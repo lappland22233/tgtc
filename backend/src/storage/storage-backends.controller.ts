@@ -281,11 +281,22 @@ export class StorageBackendsController {
     @Param('id') id: string,
     @Body() dto: GDriveRotateAuthDto,
   ) {
+    const existing = await this.backends.findById(id);
+    if (!existing) throw new NotFoundException('存储账号不存在');
+    if (existing.type !== 'gdrive') throw new BadRequestException('只能为 Google Drive 账号重新授权');
+
     const exchanged = await this.gdriveOAuth.exchangeCode(dto.code, dto.redirectUri);
+    const currentEmail = (existing.config as GDriveBackendConfig | null)?.email?.trim().toLowerCase() ?? '';
+    const authorizedEmail = exchanged.email?.trim().toLowerCase() ?? '';
+    if (currentEmail && currentEmail !== authorizedEmail) {
+      throw new BadRequestException('授权邮箱与当前账号不一致，请使用原 Google 账号重新授权');
+    }
+
     const account = await this.backends.rotateCredential(id, { refreshToken: exchanged.refreshToken }, user.id);
-    if (exchanged.email) {
+    if (exchanged.email && !currentEmail) {
       await this.backends.patchConfig(id, { email: exchanged.email });
     }
+    await this.backends.refreshQuota(id).catch(() => {});
     this.audit.log({
       action: 'config_change',
       userId: user.id,

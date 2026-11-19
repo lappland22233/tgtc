@@ -91,8 +91,10 @@ describe('TasksService', () => {
         where: jest.fn().mockReturnThis(),
         andWhere: jest.fn().mockReturnThis(),
         orderBy: jest.fn().mockReturnThis(),
+        offset: jest.fn().mockReturnThis(),
+        skip: jest.fn().mockReturnThis(),
         limit: jest.fn().mockReturnThis(),
-        getMany: jest.fn().mockResolvedValue([
+        getMany: jest.fn().mockResolvedValueOnce([
           {
             id: 'grant-exp-1',
             storageBackend: 'gdrive',
@@ -100,7 +102,7 @@ describe('TasksService', () => {
             storageObjectRef: 'gdrive-file-123',
             storagePurgedAt: null,
           },
-        ]),
+        ]).mockResolvedValue([]),
       })),
       save: jest.fn().mockResolvedValue(true),
     };
@@ -116,31 +118,68 @@ describe('TasksService', () => {
     }));
   });
 
-  it('cleanupExpiredBotRemoteFiles 在 deleteRemoteObject 返回 false 时不应打上 storagePurgedAt', async () => {
+  it('cleanupExpiredBotRemoteFiles 在 deleteRemoteObject 返回 false 时不应打上 storagePurgedAt，且重试退避不饥饿后续正常文件', async () => {
+    const getMany = jest.fn()
+      // 第一次调用：返回失败的记录
+      .mockResolvedValueOnce([
+        {
+          id: 'grant-exp-failed',
+          storageBackend: 'gdrive',
+          storageAccountId: 'acc-1',
+          storageObjectRef: 'gdrive-file-failed',
+          storagePurgedAt: null,
+        },
+      ])
+      .mockResolvedValueOnce([])
+      // 第二次调用：第一个记录仍返回但已进入冷却退避，后续分页返回健康记录
+      .mockResolvedValueOnce([
+        {
+          id: 'grant-exp-failed',
+          storageBackend: 'gdrive',
+          storageAccountId: 'acc-1',
+          storageObjectRef: 'gdrive-file-failed',
+          storagePurgedAt: null,
+        },
+      ])
+      .mockResolvedValueOnce([
+        {
+          id: 'grant-exp-healthy',
+          storageBackend: 'gdrive',
+          storageAccountId: 'acc-2',
+          storageObjectRef: 'gdrive-file-healthy',
+          storagePurgedAt: null,
+        },
+      ])
+      .mockResolvedValue([]);
+
     const grantRepo: any = {
       createQueryBuilder: jest.fn(() => ({
         where: jest.fn().mockReturnThis(),
         andWhere: jest.fn().mockReturnThis(),
         orderBy: jest.fn().mockReturnThis(),
+        offset: jest.fn().mockReturnThis(),
+        skip: jest.fn().mockReturnThis(),
         limit: jest.fn().mockReturnThis(),
-        getMany: jest.fn().mockResolvedValue([
-          {
-            id: 'grant-exp-failed',
-            storageBackend: 'gdrive',
-            storageAccountId: 'acc-1',
-            storageObjectRef: 'gdrive-file-failed',
-            storagePurgedAt: null,
-          },
-        ]),
+        getMany,
       })),
-      save: jest.fn(),
+      save: jest.fn().mockResolvedValue(true),
     };
     const storageRouter: any = {
-      deleteRemoteObject: jest.fn().mockResolvedValue(false),
+      deleteRemoteObject: jest.fn((_backend, accId) => Promise.resolve(accId !== 'acc-1')),
     };
     const svc = new TasksService(repo(), repo(), repo(), repo(), repo(), makeFileRepo([], 0) as any, makeQueue() as any, grantRepo, storageRouter);
+
+    // 第 1 轮：失败
     await svc.cleanupExpiredBotRemoteFiles();
     expect(storageRouter.deleteRemoteObject).toHaveBeenCalledWith('gdrive', 'acc-1', 'gdrive-file-failed');
     expect(grantRepo.save).not.toHaveBeenCalled();
+
+    // 第 2 轮：grant-exp-failed 冷却中被跳过，成功处理 grant-exp-healthy
+    await svc.cleanupExpiredBotRemoteFiles();
+    expect(storageRouter.deleteRemoteObject).toHaveBeenCalledWith('gdrive', 'acc-2', 'gdrive-file-healthy');
+    expect(grantRepo.save).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'grant-exp-healthy',
+      storagePurgedAt: expect.any(Date),
+    }));
   });
 });
