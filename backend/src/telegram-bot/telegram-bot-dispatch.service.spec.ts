@@ -137,6 +137,10 @@ function makeService(options: {
     acquireSession: jest.Mock;
     releaseSession: jest.Mock;
   } | null;
+  transferTracker?: {
+    register: jest.Mock;
+    isTransferActive?: jest.Mock;
+  } | null;
 }) {
   const counters = makeCounters();
   const pool = options.pool === undefined ? null : options.pool;
@@ -237,6 +241,7 @@ function makeService(options: {
     (options.storageRouter ?? null) as never,
     (options.downloadResources ?? null) as never,
     (options.uploadDiskBudget ?? null) as never,
+    (options.transferTracker ?? null) as never,
   );
 
   return {
@@ -1080,5 +1085,43 @@ describe('TelegramBotDispatchService（纯 Google 存储模式）', () => {
     // 验证第二次没有被 msgKey 锁拦截为等待中
     const sentTexts = ctx.telegramService.sendMessage.mock.calls.map((call: any[]) => call[1]);
     expect(sentTexts).not.toContain('⏳ 该文件正在创建链接中，请稍候...');
+  });
+
+  it('转存期间注册临时文件租约并在转存完成后释放租约（防止被孤儿清理误删）', async () => {
+    const pool = makePool(true);
+    const accountClient = {
+      sendMessage: jest.fn(async () => ({ messageId: 999 })),
+      forwardMessage: jest.fn(),
+      editMessageText: jest.fn(async () => true),
+    };
+    const storageRouter = {
+      availableBackendTypes: jest.fn(() => ['gdrive']),
+      upload: jest.fn(async () => ({
+        backendType: 'gdrive',
+        accountId: 'gdrive-acc-1',
+        objectRef: 'gdrive-file-id-123',
+      })),
+    };
+    const releaseMock = jest.fn();
+    const transferTracker = {
+      register: jest.fn(() => releaseMock),
+    };
+
+    const ctx = makeService({
+      pool,
+      accountClient,
+      storageRouter,
+      transferTracker,
+      botConfig: { storageMode: 'gdrive' },
+    });
+
+    await ctx.service.handleUpdate(makeMessageUpdate(), { accountId: '1234567' });
+
+    await waitFor(() => storageRouter.upload.mock.calls.length > 0);
+    await waitFor(() => accountClient.editMessageText.mock.calls.length > 0);
+
+    // 验证：已注册临时文件租约并在完成后释放
+    expect(transferTracker.register).toHaveBeenCalledWith(expect.stringMatching(/bot-transfers.*\.tmp$/));
+    expect(releaseMock).toHaveBeenCalled();
   });
 });

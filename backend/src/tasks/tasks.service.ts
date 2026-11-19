@@ -14,6 +14,7 @@ import { JwtRevokedToken } from '../common/entities/jwt-revoked-token.entity';
 import { File } from '../common/entities/file.entity';
 import { TelegramBotFileGrant } from '../common/entities/telegram-bot-file-grant.entity';
 import { StorageRouterService } from '../storage/storage-router.service';
+import { BotTransferTrackerService } from '../telegram-bot/bot-transfer-tracker.service';
 import { QUEUE_NAMES } from '../jobs/bull-queue.module';
 import { isRemoteStorageBackend } from '../storage/storage.types';
 
@@ -51,6 +52,8 @@ export class TasksService {
     private grantRepository?: Repository<TelegramBotFileGrant>,
     @Optional() @Inject(StorageRouterService)
     private storageRouter: StorageRouterService | null = null,
+    @Optional() @Inject(BotTransferTrackerService)
+    private transferTracker?: BotTransferTrackerService,
   ) {}
 
   /** 失败的远端清理记录重试调度（grantId -> { attempts, nextRetry }），防止失败记录饥饿后续正常文件 */
@@ -155,6 +158,10 @@ export class TasksService {
       const MAX_ORPHAN_AGE_MS = 2 * 60 * 60 * 1000; // 2 小时
       for (const file of files) {
         const fullPath = path.join(tempDir, file);
+        // 若该临时文件正属于活跃转存传输任务，绝不清理（防止大文件长耗时上传被误删导致 failover 失败）
+        if (this.transferTracker?.isTransferActive(fullPath)) {
+          continue;
+        }
         try {
           const fileStat = await stat(fullPath);
           if (now - fileStat.mtimeMs > MAX_ORPHAN_AGE_MS) {

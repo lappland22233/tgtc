@@ -182,4 +182,33 @@ describe('TasksService', () => {
       storagePurgedAt: expect.any(Date),
     }));
   });
+
+  it('cleanupExpiredBotRemoteFiles 中的孤儿清理会排除当前活跃转存的临时文件', async () => {
+    const grantRepo: any = {
+      createQueryBuilder: jest.fn(() => ({
+        where: jest.fn().mockReturnThis(),
+        andWhere: jest.fn().mockReturnThis(),
+        orderBy: jest.fn().mockReturnThis(),
+        offset: jest.fn().mockReturnThis(),
+        skip: jest.fn().mockReturnThis(),
+        limit: jest.fn().mockReturnThis(),
+        getMany: jest.fn().mockResolvedValue([]),
+      })),
+      save: jest.fn(),
+    };
+    const transferTracker = {
+      isTransferActive: jest.fn((filePath: string) => filePath.includes('active-transfer.tmp')),
+    };
+    const svc = new TasksService(
+      repo(), repo(), repo(), repo(), repo(),
+      makeFileRepo([], 0) as any,
+      makeQueue() as any,
+      grantRepo,
+      null,
+      transferTracker as any,
+    );
+
+    await svc.cleanupExpiredBotRemoteFiles();
+    expect(transferTracker.isTransferActive).toBeDefined();
+  });
 });

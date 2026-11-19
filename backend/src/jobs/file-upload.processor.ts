@@ -22,6 +22,8 @@ interface FileUploadJobData {
   uploadVersion: number;
   /** 会话创建时已启用严格 2S 策略；避免配置热切换改变该任务的衍生媒体行为。 */
   strictDiskLease?: boolean;
+  /** 准入容量排队重试次数（延迟重新入队时递增，防止无限重试） */
+  admissionAttempt?: number;
 }
 
 interface UploadReceipt {
@@ -192,7 +194,11 @@ export class FileUploadProcessor {
    * 放入 Bull 延迟队列后释放处理槽，不消耗失败次数。返回 null 表示任务已失效
    * （版本变更/已删除），调用方直接放弃本轮。
    */
-  private async uploadViaStorageBackend(filePath: string, file: File): Promise<UploadReceipt | null> {
+  private async uploadViaStorageBackend(
+    filePath: string,
+    file: File,
+    job: Job<FileUploadJobData>,
+  ): Promise<UploadReceipt | null> {
     if (!this.storageRouter || !isRemoteStorageBackend(file.storageBackend)) {
       throw new Error('存储后端未装配，无法上传非 TG 文件');
     }
@@ -201,35 +207,59 @@ export class FileUploadProcessor {
     if (!Number.isSafeInteger(knownLength) || knownLength < 0) {
       throw new Error('文件大小无效，无法上传存储后端');
     }
-    for (;;) {
-      try {
-        const receipt = await this.storageRouter.upload({
-          backendType,
-          objectName: file.originalName,
-          knownLength,
-          // 换号重试必须新开流：流只能被消费一次
-          openStream: () => createReadStream(filePath),
-        });
-        return {
-          file_id: '',
-          file_path: '',
-          file_size: receipt.size,
-          message_id: null,
-          chat_id: null,
-          file_unique_id: null,
-          storageAccountId: receipt.accountId,
-          storageObjectRef: receipt.objectRef,
-          // 非 TG 后端无 fork 本地媒体缓存，严格任务同样视为已释放
-          localCacheReleased: true,
-        };
-      } catch (error) {
-        // 尚未发出远端请求时，等待名额后重试，避免任务失败或删除源文件
-        if (!(error instanceof StorageUploadUnavailableError) || !error.admissionOnly) throw error;
-        const current = await this.fileRepository.findOne({ where: { id: file.id } });
-        if (!current || current.uploadVersion !== file.uploadVersion || current.isDeleted) return null;
-        const delayMs = Math.min(60_000, Math.max(1000, error.retryAfterMs));
-        await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+    try {
+      const receipt = await this.storageRouter.upload({
+        backendType,
+        objectName: file.originalName,
+        knownLength,
+        // 换号重试必须新开流：流只能被消费一次
+        openStream: () => createReadStream(filePath),
+      });
+      return {
+        file_id: '',
+        file_path: '',
+        file_size: receipt.size,
+        message_id: null,
+        chat_id: null,
+        file_unique_id: null,
+        storageAccountId: receipt.accountId,
+        storageObjectRef: receipt.objectRef,
+        // 非 TG 后端无 fork 本地媒体缓存，严格任务同样视为已释放
+        localCacheReleased: true,
+      };
+    } catch (error) {
+      // 尚未发出远端请求时（如账号额度不足/冷却中），把任务延迟重试并退出 processor，释放并发工作槽位
+      if (!(error instanceof StorageUploadUnavailableError) || !error.admissionOnly) throw error;
+      const current = await this.fileRepository.findOne({ where: { id: file.id } });
+      if (!current || current.uploadVersion !== file.uploadVersion || current.isDeleted) return null;
+
+      const delayMs = Math.min(60_000, Math.max(1000, error.retryAfterMs));
+      const admissionAttempt = ((job.data as any).admissionAttempt || 0) + 1;
+      if (admissionAttempt > 120) {
+        throw new Error(`存储后端容量持续不足，已等待超过重试上限 (backend=${backendType})`);
       }
+
+      this.logger.warn(
+        `存储后端账号容量暂不可用 (backend=${backendType})，将在 ${Math.round(delayMs / 1000)}s 后重试，立即释放处理槽位 (fileId=${file.id}, retry=${admissionAttempt})`,
+      );
+
+      if (job?.queue) {
+        await job.queue.add(
+          'upload',
+          {
+            ...job.data,
+            admissionAttempt,
+          },
+          {
+            delay: delayMs,
+            attempts: 3,
+            backoff: { type: 'exponential', delay: 10000 },
+            removeOnComplete: 100,
+            removeOnFail: 50,
+          },
+        );
+      }
+      return null;
     }
   }
 
@@ -321,7 +351,7 @@ export class FileUploadProcessor {
         if (!result) {
           if (isNonTelegram) {
             // 非 TG 后端：按冻结的 storageBackend 选号上传（配额/健康/带宽感知）
-            result = await this.uploadViaStorageBackend(filePath, file);
+            result = await this.uploadViaStorageBackend(filePath, file, job);
             if (!result) return;
           } else {
             // 池化优先（仅非严格任务）：按权重/健康/容量选号上传，并记录**实际上传账号**；

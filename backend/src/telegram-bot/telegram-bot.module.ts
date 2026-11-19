@@ -17,6 +17,7 @@ import { TelegramBotDispatchService } from './telegram-bot-dispatch.service';
 import { TelegramBotPollingService } from './telegram-bot-polling.service';
 import { TelegramBotPublicController } from './telegram-bot-public.controller';
 import { TelegramBotAdminController } from './telegram-bot-admin.controller';
+import { BotTransferTrackerService } from './bot-transfer-tracker.service';
 
 /**
  * Telegram Bot 文件直链模块。
@@ -46,7 +47,8 @@ import { TelegramBotAdminController } from './telegram-bot-admin.controller';
     TelegramBotAdminService,
     TelegramBotDispatchService,
     TelegramBotPollingService,
+    BotTransferTrackerService,
   ],
-  exports: [TelegramBotConfigService, TelegramBotGrantService],
+  exports: [TelegramBotConfigService, TelegramBotGrantService, BotTransferTrackerService],
 })
 export class TelegramBotModule {}

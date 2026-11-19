@@ -22,6 +22,7 @@ import { TelegramMirrorConfigService } from '../telegram-mirror/telegram-mirror-
 import { TelegramMirrorTriggerService } from '../telegram-mirror/telegram-mirror-trigger.service';
 import { DownloadResourceCoordinatorService, DownloadReservation } from '../file/download-resource-coordinator.service';
 import { UploadDiskBudgetService } from '../file/upload-disk-budget.service';
+import { BotTransferTrackerService } from './bot-transfer-tracker.service';
 import { TelegramBotConfigService } from './telegram-bot-config.service';
 import { TelegramBotGrantService } from './telegram-bot-grant.service';
 import { TelegramBotQuotaService } from './telegram-bot-quota.service';
@@ -125,6 +126,9 @@ export class TelegramBotDispatchService {
     // 严格上传磁盘预算服务（严格无缓存模式防超卖）
     @Optional() @Inject(UploadDiskBudgetService)
     private readonly uploadDiskBudget: UploadDiskBudgetService | null = null,
+    // 活跃转存临时文件租约追踪（防止长耗时大文件转存被定时清理误删）
+    @Optional() @Inject(BotTransferTrackerService)
+    private readonly transferTracker: BotTransferTrackerService | null = null,
   ) {}
 
   /** 处理单条更新（异常不外抛，避免中断轮询循环） */
@@ -1090,6 +1094,7 @@ export class TelegramBotDispatchService {
     const doc = message.document!;
     const tempDir = path.join(process.cwd(), 'tmp', 'bot-transfers');
     const tempFilePath = path.join(tempDir, `${randomUUID()}.tmp`);
+    const releaseTransferLease = this.transferTracker?.register(tempFilePath);
     let uploadReceipt: StorageUploadReceipt | null = null;
     let diskReservation: DownloadReservation | null = null;
     let uploadSessionId: string | null = null;
@@ -1222,6 +1227,7 @@ export class TelegramBotDispatchService {
         : '创建下载链接失败，请稍后重试。';
       await this.updateOrReply(chatId, waitingMsgId, failText, message.message_id, accountId);
     } finally {
+      releaseTransferLease?.();
       await unlink(tempFilePath).catch(() => {});
       if (diskReservation) {
         diskReservation.release();

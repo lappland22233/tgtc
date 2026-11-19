@@ -225,6 +225,30 @@ describe('FileUploadProcessor 非 TG 存储后端分支', () => {
     await expect(processor.uploadToTelegram(makeJob(0))).rejects.toBeInstanceOf(StorageUploadUnavailableError);
   });
 
+  it('admissionOnly 的存储不可用错误释放 worker 槽位并延期重新入队', async () => {
+    const repo = makeRepo();
+    repo.findOne.mockResolvedValue(makeFile());
+    repo.findOneOrFail.mockResolvedValue(makeFile({ uploadStage: 'uploading' }));
+    const storageRouter = { upload: jest.fn().mockRejectedValue(new StorageUploadUnavailableError(true, 5000)) };
+    const processor = makeProcessor(repo, makeFileService(), storageRouter as any);
+
+    const queueMock = { add: jest.fn() };
+    const job = { ...makeJob(0), queue: queueMock };
+
+    await processor.uploadToTelegram(job as any);
+
+    // 验证：任务已延迟 5s 重新入队，释放当前并发槽位，且未抛出异常
+    expect(queueMock.add).toHaveBeenCalledWith(
+      'upload',
+      expect.objectContaining({ admissionAttempt: 1 }),
+      expect.objectContaining({ delay: 5000 }),
+    );
+    expect(repo.update).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ status: 'error' }),
+    );
+  });
+
   it('TG 文件（storageBackend=telegram）不受存储分支影响', async () => {
     const repo = makeRepo();
     repo.findOne.mockResolvedValue(makeFile({ storageBackend: 'telegram', telegramFileId: 'tg-file-id' }));

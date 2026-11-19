@@ -11,6 +11,7 @@ import { JwtRevokedToken } from '../common/entities/jwt-revoked-token.entity';
 import { File } from '../common/entities/file.entity';
 import { TelegramBotFileGrant } from '../common/entities/telegram-bot-file-grant.entity';
 import { StorageModule } from '../storage/storage.module';
+import { TelegramBotModule } from '../telegram-bot/telegram-bot.module';
 import { QUEUE_NAMES } from '../jobs/bull-queue.module';
 
 @Module({
@@ -18,6 +19,7 @@ import { QUEUE_NAMES } from '../jobs/bull-queue.module';
     TypeOrmModule.forFeature([BannedIP, ShareAudit, RateLimit, AccessLog, AuditLog, JwtRevokedToken, File, TelegramBotFileGrant]),
     BullModule.registerQueue({ name: QUEUE_NAMES.FILE_UPLOAD }),
     StorageModule,
+    TelegramBotModule,
   ],
   providers: [TasksService],
   // TasksService 仅为内部 @Cron 定时调度使用，无需 exports
