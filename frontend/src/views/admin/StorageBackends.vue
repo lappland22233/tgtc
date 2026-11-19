@@ -25,12 +25,47 @@
         </div>
         <div class="status-switch">
           <div class="status-switch-text">
-            <span class="status-switch-label">Google Drive 授权</span>
+            <span class="status-switch-label">Google Drive 授权状态</span>
             <span class="status-switch-meta">
-              {{ overview?.gdriveOAuthConfigured ? 'OAuth Client 已配置' : '未配置 OAuth Client' }}
+              {{ overview?.gdriveOAuthConfigured ? 'OAuth 客户端已就绪（点击设置查看或修改）' : '未配置 OAuth 客户端' }}
             </span>
           </div>
-          <t-button size="small" variant="outline" @click="openGDriveWizard">添加 GDrive 账号</t-button>
+          <div class="status-switch-btns">
+            <t-button size="small" variant="outline" @click="openOAuthClientDialog">OAuth 客户端设置</t-button>
+            <t-button size="small" theme="primary" @click="openGDriveWizard()">添加 GDrive 账号</t-button>
+          </div>
+        </div>
+        <div class="status-switch">
+          <div class="status-switch-text">
+            <span class="status-switch-label">Google 缓存模式 (免本地硬盘)</span>
+            <span class="status-switch-meta">
+              主存储为 TG 时异步镜像至 Google 账号池，客户端下载直链中转，零硬盘缓存
+            </span>
+          </div>
+          <div class="status-switch-control">
+            <t-switch
+              v-model="gdriveCacheModeDraft"
+              :loading="gdriveCacheModeSaving"
+              @change="onGDriveCacheModeChange"
+            />
+          </div>
+        </div>
+        <div class="status-switch">
+          <div class="status-switch-text">
+            <span class="status-switch-label">GDrive 分块上传大小</span>
+            <span class="status-switch-meta">
+              单块分片体积，增大可减少网络往返并大幅提升上传速度（推荐 16MB 或 32MB）
+            </span>
+          </div>
+          <div class="chunk-size-picker">
+            <t-select
+              v-model="gdriveChunkSizeDraft"
+              :options="chunkSizeOptions"
+              size="small"
+              style="width: 170px"
+            />
+            <t-button size="small" :loading="chunkSizeSaving" @click="saveGDriveChunkSize">保存</t-button>
+          </div>
         </div>
       </div>
       <t-alert
@@ -96,6 +131,14 @@
         :loading="loading"
         hover
       >
+        <template #name="{ row }">
+          <div class="name-cell">
+            <span class="account-name">{{ row.name }}</span>
+            <div v-if="row.type === 'gdrive' && (row.config as any)?.email" class="account-email">
+              {{ (row.config as any).email }}
+            </div>
+          </div>
+        </template>
         <template #type="{ row }">
           <t-tag theme="primary" variant="light">{{ typeLabel(row.type) }}</t-tag>
         </template>
@@ -131,7 +174,14 @@
           <div class="row-actions">
             <t-button variant="text" size="small" :loading="rowBusy === row.id" @click="testAccount(row)">测试</t-button>
             <t-button variant="text" size="small" :disabled="row.status === 'revoked'" @click="openEdit(row)">编辑</t-button>
-            <t-button variant="text" size="small" @click="openRotate(row)">轮换</t-button>
+            <t-button
+              variant="text"
+              size="small"
+              :theme="row.type === 'gdrive' ? 'primary' : 'default'"
+              @click="openRotate(row)"
+            >
+              {{ row.type === 'gdrive' ? '重新授权' : '轮换' }}
+            </t-button>
             <t-button v-if="row.type === 'gdrive'" variant="text" size="small" :loading="rowBusy === row.id" @click="refreshQuota(row)">配额</t-button>
             <t-button variant="text" size="small" theme="danger" :disabled="row.status === 'revoked'" @click="revokeAccount(row)">撤销</t-button>
           </div>
@@ -251,6 +301,7 @@
       :header="gdrive.accountId ? '重新授权 Google Drive 账号' : '添加 Google Drive 账号'"
       width="680px"
       :footer="false"
+      @close="cleanupOAuthListeners"
     >
       <div class="gdrive-wizard">
         <t-alert
@@ -260,44 +311,206 @@
             : '每个普通 Google 账号提供 15GB 免费空间。授权多个账号即可池化扩容：上传按剩余配额自动选号，写满自动换下一个账号。应用仅访问自己创建的文件（drive.file scope）。'"
         />
 
-        <!-- 步骤 1：OAuth Client -->
-        <div class="wizard-step">
-          <h4>1. 配置 OAuth Client{{ overview?.gdriveOAuthConfigured ? '（已配置）' : '' }}</h4>
-          <p class="wizard-hint">
-            在 Google Cloud Console 创建 OAuth 客户端（桌面/网页应用），登记回调地址（如 http://localhost），启用 Google Drive API。
-          </p>
-          <div class="wizard-row">
-            <t-input v-model="gdrive.clientId" placeholder="Client ID" style="flex: 1" />
-            <t-input v-model="gdrive.clientSecret" placeholder="Client Secret" type="password" style="flex: 1" />
-            <t-button size="small" :loading="gdriveSaving" @click="saveOAuthClient">保存</t-button>
-          </div>
-        </div>
-
-        <!-- 步骤 2：生成授权链接 -->
-        <div class="wizard-step">
-          <h4>2. 生成授权链接</h4>
-          <div class="wizard-row">
-            <t-input v-model="gdrive.redirectUri" placeholder="回调地址（须与 Console 登记一致）" style="flex: 1" />
-            <t-input v-if="!gdrive.accountId" v-model="gdrive.name" placeholder="账号名称" style="width: 160px" />
-            <span v-else class="wizard-hint">当前账号：{{ gdrive.name }}</span>
-            <t-button size="small" :loading="gdriveSaving" @click="buildAuthUrl">生成链接</t-button>
-          </div>
-          <div v-if="gdrive.authUrl" class="wizard-row">
-            <t-input :value="gdrive.authUrl" readonly style="flex: 1" />
-            <t-button size="small" variant="outline" @click="openAuthUrl">打开授权页</t-button>
-          </div>
-          <p class="wizard-hint">在浏览器完成授权后，从回调地址栏复制 code 参数值粘贴到下方。</p>
-        </div>
-
-        <!-- 步骤 3：提交授权码 -->
-        <div class="wizard-step">
-          <h4>3. 提交授权码</h4>
-          <div class="wizard-row">
-            <t-input v-model="gdrive.code" placeholder="粘贴授权码（code）" style="flex: 1" />
-            <t-button size="small" theme="primary" :loading="gdriveSaving" @click="completeAuth">
-              {{ gdrive.accountId ? '更新此账号授权' : '完成授权并入池' }}
+        <!-- 步骤 1：OAuth Client 配置 -->
+        <div class="wizard-card" :class="{ 'is-collapsed': overview?.gdriveOAuthConfigured && !showClientConfig }">
+          <div class="wizard-card-header">
+            <div class="wizard-card-title">
+              <span class="step-num">1</span>
+              <span class="step-title">Google OAuth 客户端配置</span>
+              <t-tag v-if="overview?.gdriveOAuthConfigured" theme="success" variant="light" size="small">已配置</t-tag>
+              <t-tag v-else theme="warning" variant="light" size="small">未配置</t-tag>
+            </div>
+            <t-button
+              v-if="overview?.gdriveOAuthConfigured"
+              variant="text"
+              size="small"
+              theme="primary"
+              @click="showClientConfig = !showClientConfig"
+            >
+              {{ showClientConfig ? '收起配置' : '修改配置' }}
             </t-button>
           </div>
+
+          <div v-show="!overview?.gdriveOAuthConfigured || showClientConfig" class="wizard-card-body">
+            <div class="redirect-uri-box">
+              <div class="redirect-uri-header">
+                <span class="redirect-uri-label">已获授权的重定向 URI（在 Google Console 登记）</span>
+                <t-button variant="text" size="small" theme="primary" @click="copyRedirectUri">
+                  复制地址
+                </t-button>
+              </div>
+              <t-input :value="gdrive.redirectUri" readonly size="small" />
+              <p class="wizard-hint">
+                在 Google Cloud Console 创建 OAuth 客户端（Web 应用程序），将上方地址添加到「已获授权的重定向 URI」，并启用 Google Drive API。
+              </p>
+            </div>
+
+            <div class="wizard-row">
+              <t-input v-model="gdrive.clientId" placeholder="Client ID" style="flex: 1" />
+              <t-input v-model="gdrive.clientSecret" placeholder="Client Secret" type="password" style="flex: 1" />
+              <t-button size="small" :loading="gdriveSaving" @click="saveOAuthClient">保存配置</t-button>
+            </div>
+          </div>
+        </div>
+
+        <!-- 步骤 2：账号授权（核心自动化流程） -->
+        <div class="wizard-card">
+          <div class="wizard-card-header">
+            <div class="wizard-card-title">
+              <span class="step-num">2</span>
+              <span class="step-title">{{ gdrive.accountId ? '重新授权凭据' : '一键授权添加账号' }}</span>
+            </div>
+          </div>
+
+          <div class="wizard-card-body">
+            <div class="name-row">
+              <label class="form-label">账号名称</label>
+              <t-input
+                v-if="!gdrive.accountId"
+                v-model="gdrive.name"
+                placeholder="留空自动使用 Google 账号邮箱命名"
+                style="flex: 1"
+              />
+              <span v-else class="existing-name">{{ gdrive.name }}</span>
+            </div>
+
+            <div class="auth-action-area">
+              <div v-if="authStatus === 'authorizing' || authStatus === 'exchanging'" class="auth-status-box">
+                <div class="auth-spinner" />
+                <div class="auth-status-info">
+                  <div class="auth-status-main">{{ authStatusMessage }}</div>
+                  <div class="auth-status-sub">
+                    若未自动弹出窗口，<a href="javascript:void(0)" class="link-btn" @click="openAuthUrl">点击此处手动打开</a>
+                  </div>
+                </div>
+              </div>
+
+              <div v-else class="auth-btn-area">
+                <t-button
+                  theme="primary"
+                  size="large"
+                  :disabled="!overview?.gdriveOAuthConfigured"
+                  :loading="gdriveSaving"
+                  block
+                  @click="startOAuth"
+                >
+                  {{ gdrive.accountId ? '一键重新授权当前账号' : '一键连接 Google 账号' }}
+                </t-button>
+                <div v-if="!overview?.gdriveOAuthConfigured" class="disabled-tip">
+                  请先在步骤 1 中保存 OAuth Client 配置
+                </div>
+              </div>
+            </div>
+
+            <!-- 手动模式备用折叠入口 -->
+            <div class="fallback-accordion">
+              <div class="fallback-toggle" @click="showManualMode = !showManualMode">
+                <span>{{ showManualMode ? '▼ 收起手动备用模式' : '▶ 遇到问题？使用手动粘贴授权码' }}</span>
+              </div>
+
+              <div v-show="showManualMode" class="fallback-body">
+                <div class="wizard-row">
+                  <t-input
+                    v-model="gdrive.redirectUri"
+                    placeholder="回调地址（默认自动填充当前站点回调）"
+                    style="flex: 1"
+                    size="small"
+                  />
+                  <t-button size="small" variant="outline" :loading="gdriveSaving" @click="buildManualAuthUrl">
+                    生成链接
+                  </t-button>
+                </div>
+                <div v-if="gdrive.authUrl" class="wizard-row">
+                  <t-input :value="gdrive.authUrl" readonly size="small" style="flex: 1" />
+                  <t-button size="small" variant="outline" @click="openAuthUrl">打开授权页</t-button>
+                </div>
+                <div class="wizard-row">
+                  <t-input
+                    v-model="gdrive.code"
+                    placeholder="粘贴授权码（code）或重定向后的完整地址"
+                    style="flex: 1"
+                    @change="onManualCodeChange"
+                  />
+                  <t-button
+                    size="small"
+                    theme="primary"
+                    :loading="gdriveSaving"
+                    :disabled="!gdrive.code"
+                    @click="completeAuth()"
+                  >
+                    提交入池
+                  </t-button>
+                </div>
+                <p class="wizard-hint">
+                  提示：支持直接将浏览器地址栏中的完整重定向 URL（如 http://localhost/?code=...）直接粘贴到输入框中，系统将自动解析真正的授权码。
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </t-dialog>
+
+    <!-- Google OAuth 客户端与凭据配置专属对话框 -->
+    <t-dialog
+      v-model:visible="oauthClientModalVisible"
+      header="Google Drive OAuth 客户端配置"
+      width="620px"
+      :footer="false"
+    >
+      <div class="oauth-client-dialog">
+        <t-alert
+          theme="info"
+          message="配置在 Google Cloud Console 创建的 OAuth 2.0 Web 应用程序客户端（Client ID 与 Client Secret）。此凭据用于为个人 Google Drive 账号签发离线访问令牌。"
+          style="margin-bottom: 16px;"
+        />
+
+        <div class="redirect-uri-box">
+          <div class="redirect-uri-header">
+            <span class="redirect-uri-label">已获授权的重定向 URI（在 Google Console 登记）</span>
+            <t-button variant="text" size="small" theme="primary" @click="copyRedirectUri">
+              复制地址
+            </t-button>
+          </div>
+          <t-input :value="gdrive.redirectUri" readonly size="small" />
+          <p class="wizard-hint">
+            在 Google Cloud Console 创建 OAuth 客户端（Web 应用程序），将上方地址添加到「已获授权的重定向 URI」，并启用 Google Drive API。
+          </p>
+        </div>
+
+        <t-form label-align="top">
+          <t-form-item label="Client ID">
+            <t-input v-model="gdrive.clientId" placeholder="例如：xxxx.apps.googleusercontent.com" />
+          </t-form-item>
+          <t-form-item label="Client Secret">
+            <t-input
+              v-model="gdrive.clientSecret"
+              type="password"
+              :placeholder="overview?.gdriveOAuthConfigured ? '已加密配置（留空保持不变）' : '请输入 Client Secret'"
+              autocomplete="new-password"
+            />
+            <div class="wizard-hint">密钥在服务端使用 AES-256-GCM 加密落库，绝不在接口回显。</div>
+          </t-form-item>
+          <t-form-item label="默认重定向地址（可选）">
+            <t-input v-model="gdrive.redirectUri" placeholder="默认使用当前站点的回调地址" />
+          </t-form-item>
+        </t-form>
+
+        <div class="dialog-footer-actions">
+          <t-button
+            v-if="overview?.gdriveOAuthConfigured"
+            theme="danger"
+            variant="outline"
+            :loading="gdriveSaving"
+            @click="handleClearOAuthClient"
+          >
+            清空配置
+          </t-button>
+          <div style="flex: 1;" />
+          <t-button variant="outline" @click="oauthClientModalVisible = false">取消</t-button>
+          <t-button theme="primary" :loading="gdriveSaving" @click="saveOAuthClientFromDialog">
+            保存配置
+          </t-button>
         </div>
       </div>
     </t-dialog>
@@ -305,11 +518,12 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue';
 import { DialogPlugin } from 'tdesign-vue-next/es/dialog';
 import MessagePlugin from '@/utils/message';
 import { getErrorMessage } from '@/utils/error';
 import {
+  clearGDriveOAuthClient,
   completeGDriveAuth,
   createStorageBackend,
   fetchGDriveAuthUrl,
@@ -322,6 +536,7 @@ import {
   setGDriveOAuthClient,
   testStorageBackend,
   updateStorageBackend,
+  updateStorageSettings,
   type RemoteStorageBackendType,
   type StorageBackendType,
   type StorageBackendView,
@@ -336,6 +551,17 @@ const rowBusy = ref<string | null>(null);
 const overview = ref<StorageOverview | null>(null);
 const typeFilter = ref<RemoteStorageBackendType | undefined>(undefined);
 const defaultBackendDraft = ref<StorageBackendType>('telegram');
+const gdriveCacheModeDraft = ref(false);
+const gdriveCacheModeSaving = ref(false);
+const gdriveChunkSizeDraft = ref(16);
+const chunkSizeSaving = ref(false);
+
+const chunkSizeOptions = [
+  { label: '8 MB (低内存/保守)', value: 8 },
+  { label: '16 MB (推荐标准)', value: 16 },
+  { label: '32 MB (高速宽带推荐)', value: 32 },
+  { label: '64 MB (超大吞吐)', value: 64 },
+];
 
 const accounts = computed(() => overview.value?.accounts ?? []);
 const filteredAccounts = computed(() =>
@@ -425,6 +651,8 @@ async function loadOverview() {
   try {
     overview.value = await fetchStorageOverview();
     defaultBackendDraft.value = overview.value.defaultBackend;
+    gdriveCacheModeDraft.value = Boolean(overview.value.gdriveCacheMode);
+    gdriveChunkSizeDraft.value = overview.value.gdriveChunkSizeMb ?? 16;
   } catch (error) {
     MessagePlugin.error(getErrorMessage(error));
   } finally {
@@ -433,15 +661,50 @@ async function loadOverview() {
 }
 
 async function saveDefaultBackend() {
+  if (defaultSaving.value) return;
   defaultSaving.value = true;
   try {
     const result = await setDefaultStorageBackend(defaultBackendDraft.value);
-    MessagePlugin.success(result.message);
+    MessagePlugin.success(result.message || '默认存储后端已更新');
     await loadOverview();
   } catch (error) {
     MessagePlugin.error(getErrorMessage(error));
   } finally {
     defaultSaving.value = false;
+  }
+}
+
+async function onGDriveCacheModeChange(val: boolean) {
+  if (gdriveCacheModeSaving.value) return;
+  gdriveCacheModeSaving.value = true;
+  try {
+    const res = await updateStorageSettings({ gdriveCacheMode: val });
+    gdriveCacheModeDraft.value = res.gdriveCacheMode;
+    MessagePlugin.success(res.message || 'Google 缓存模式已更新');
+    if (overview.value) {
+      overview.value.gdriveCacheMode = res.gdriveCacheMode;
+    }
+  } catch (error) {
+    gdriveCacheModeDraft.value = !val;
+    MessagePlugin.error(getErrorMessage(error));
+  } finally {
+    gdriveCacheModeSaving.value = false;
+  }
+}
+
+async function saveGDriveChunkSize() {
+  if (chunkSizeSaving.value) return;
+  chunkSizeSaving.value = true;
+  try {
+    const res = await updateStorageSettings({ gdriveChunkSizeMb: gdriveChunkSizeDraft.value });
+    MessagePlugin.success(res.message || 'GDrive 分块大小已更新');
+    if (overview.value) {
+      overview.value.gdriveChunkSizeMb = res.gdriveChunkSizeMb;
+    }
+  } catch (error) {
+    MessagePlugin.error(getErrorMessage(error));
+  } finally {
+    chunkSizeSaving.value = false;
   }
 }
 
@@ -654,30 +917,86 @@ async function saveRotate() {
 
 // ---------- GDrive 授权向导 ----------
 const gdriveVisible = ref(false);
-const gdrive = reactive({ accountId: null as string | null, clientId: '', clientSecret: '', redirectUri: '', name: '', code: '', authUrl: '' });
+const oauthClientModalVisible = ref(false);
+const showClientConfig = ref(false);
+const showManualMode = ref(false);
+const authStatus = ref<'idle' | 'authorizing' | 'exchanging' | 'success'>('idle');
+const authStatusMessage = ref('');
+const currentNonce = ref('');
+const popupRef = ref<Window | null>(null);
 
-async function openGDriveWizard(account?: StorageBackendView) {
-  gdrive.accountId = account?.id ?? null;
-  gdrive.name = account?.name ?? '';
-  gdrive.code = '';
-  gdrive.authUrl = '';
-  try {
-    const client = await fetchGDriveOAuthClient();
-    if (client.configured && client.clientId) {
-      gdrive.clientId = client.clientId;
-    }
-  } catch {
-    // 忽略预填错误
-  }
-  gdriveVisible.value = true;
+let bcChannel: BroadcastChannel | null = null;
+
+const gdrive = reactive({
+  accountId: null as string | null,
+  clientId: '',
+  clientSecret: '',
+  redirectUri: '',
+  name: '',
+  code: '',
+  authUrl: '',
+});
+
+function getDefaultRedirectUri(): string {
+  return `${window.location.origin}/admin/storage-backends/gdrive-callback`;
 }
 
-async function saveOAuthClient() {
+function extractOAuthCode(input: string): string {
+  const trimmed = input.trim();
+  if (trimmed.includes('code=')) {
+    try {
+      const url = trimmed.startsWith('http://') || trimmed.startsWith('https://')
+        ? new URL(trimmed)
+        : new URL(`http://localhost/?${trimmed}`);
+      const code = url.searchParams.get('code');
+      if (code) return code.trim();
+    } catch {
+      const match = trimmed.match(/[?&]code=([^&#]+)/);
+      if (match && match[1]) return decodeURIComponent(match[1]).trim();
+    }
+  }
+  return trimmed;
+}
+
+async function copyRedirectUri() {
+  const uri = gdrive.redirectUri || getDefaultRedirectUri();
+  try {
+    await navigator.clipboard.writeText(uri);
+    MessagePlugin.success('已复制回调地址到剪贴板，请在 Google Cloud Console 中填入');
+  } catch {
+    MessagePlugin.warning('复制失败，请手动选中复制');
+  }
+}
+
+async function openOAuthClientDialog() {
+  gdrive.clientSecret = '';
+  try {
+    const client = await fetchGDriveOAuthClient();
+    if (client.clientId) {
+      gdrive.clientId = client.clientId;
+    }
+    gdrive.redirectUri = client.redirectUri || getDefaultRedirectUri();
+  } catch {
+    gdrive.redirectUri = getDefaultRedirectUri();
+  }
+  oauthClientModalVisible.value = true;
+}
+
+async function saveOAuthClientFromDialog() {
+  if (!gdrive.clientId?.trim()) {
+    MessagePlugin.warning('Client ID 不能为空');
+    return;
+  }
   gdriveSaving.value = true;
   try {
-    const result = await setGDriveOAuthClient(gdrive.clientId, gdrive.clientSecret);
+    const result = await setGDriveOAuthClient(
+      gdrive.clientId,
+      gdrive.clientSecret || undefined,
+      gdrive.redirectUri,
+    );
     MessagePlugin.success(result.message);
     gdrive.clientSecret = '';
+    oauthClientModalVisible.value = false;
     await loadOverview();
   } catch (error) {
     MessagePlugin.error(getErrorMessage(error));
@@ -686,7 +1005,223 @@ async function saveOAuthClient() {
   }
 }
 
-async function buildAuthUrl() {
+function handleClearOAuthClient() {
+  const dialog = DialogPlugin.confirm({
+    header: '清空 Google OAuth 客户端配置',
+    body: '清空后将无法使用 Google Drive 授权添加新账号（现有已入池的账号仍可继续使用已保存的 refreshToken）。确认清空？',
+    theme: 'warning',
+    onConfirm: async () => {
+      gdriveSaving.value = true;
+      try {
+        const result = await clearGDriveOAuthClient();
+        MessagePlugin.success(result.message);
+        gdrive.clientId = '';
+        gdrive.clientSecret = '';
+        oauthClientModalVisible.value = false;
+        await loadOverview();
+      } catch (error) {
+        MessagePlugin.error(getErrorMessage(error));
+      } finally {
+        gdriveSaving.value = false;
+        dialog.destroy();
+      }
+    },
+  });
+}
+
+async function openGDriveWizard(account?: StorageBackendView) {
+  gdrive.accountId = account?.id ?? null;
+  gdrive.name = account?.name ?? '';
+  gdrive.code = '';
+  gdrive.authUrl = '';
+  authStatus.value = 'idle';
+  authStatusMessage.value = '';
+  showManualMode.value = false;
+
+  try {
+    const client = await fetchGDriveOAuthClient();
+    if (client.clientId) {
+      gdrive.clientId = client.clientId;
+    }
+    gdrive.redirectUri = client.redirectUri || getDefaultRedirectUri();
+    showClientConfig.value = !client.configured;
+  } catch {
+    gdrive.redirectUri = getDefaultRedirectUri();
+    showClientConfig.value = true;
+  }
+  gdriveVisible.value = true;
+}
+
+async function saveOAuthClient() {
+  gdriveSaving.value = true;
+  try {
+    const result = await setGDriveOAuthClient(gdrive.clientId, gdrive.clientSecret, gdrive.redirectUri);
+    MessagePlugin.success(result.message);
+    gdrive.clientSecret = '';
+    showClientConfig.value = false;
+    await loadOverview();
+  } catch (error) {
+    MessagePlugin.error(getErrorMessage(error));
+  } finally {
+    gdriveSaving.value = false;
+  }
+}
+
+function setupOAuthListeners() {
+  cleanupOAuthListeners();
+
+  // 1. postMessage 监听（弹窗直接跨窗口通讯）
+  window.addEventListener('message', onMessageReceived);
+
+  // 2. BroadcastChannel 监听（跨标签页/跨窗口即时广播）
+  try {
+    bcChannel = new BroadcastChannel('tgtc_gdrive_oauth_channel');
+    bcChannel.onmessage = (event) => {
+      if (event.data?.type === 'TGTC_GDRIVE_OAUTH_RESULT') {
+        handleOAuthCallbackResult(event.data);
+      }
+    };
+  } catch (e) {
+    console.warn('BroadcastChannel not supported:', e);
+  }
+
+  // 3. localStorage 事件监听（环境兼容兜底）
+  window.addEventListener('storage', onStorageEvent);
+}
+
+let popupPollTimer: ReturnType<typeof setInterval> | null = null;
+let popupTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
+
+function stopPopupWatcher() {
+  if (popupPollTimer) {
+    clearInterval(popupPollTimer);
+    popupPollTimer = null;
+  }
+  if (popupTimeoutTimer) {
+    clearTimeout(popupTimeoutTimer);
+    popupTimeoutTimer = null;
+  }
+}
+
+function startPopupWatcher(popup: Window | null) {
+  stopPopupWatcher();
+  if (popup) {
+    popupPollTimer = setInterval(() => {
+      try {
+        if (popup.closed) {
+          stopPopupWatcher();
+          if (authStatus.value === 'authorizing') {
+            authStatus.value = 'idle';
+            MessagePlugin.info('授权窗口已关闭');
+          }
+        }
+      } catch {}
+    }, 1000);
+  }
+  popupTimeoutTimer = setTimeout(() => {
+    stopPopupWatcher();
+    if (authStatus.value === 'authorizing') {
+      authStatus.value = 'idle';
+      MessagePlugin.warning('授权等待超时，请重试');
+    }
+  }, 180_000);
+}
+
+function cleanupOAuthListeners() {
+  stopPopupWatcher();
+  window.removeEventListener('message', onMessageReceived);
+  window.removeEventListener('storage', onStorageEvent);
+  if (bcChannel) {
+    bcChannel.close();
+    bcChannel = null;
+  }
+}
+
+function onMessageReceived(event: MessageEvent) {
+  if (event.origin !== window.location.origin) return;
+  if (event.data?.type === 'TGTC_GDRIVE_OAUTH_RESULT') {
+    handleOAuthCallbackResult(event.data);
+  }
+}
+
+function onStorageEvent(event: StorageEvent) {
+  if (event.key !== 'tgtc_gdrive_oauth_event' || !event.newValue) return;
+  try {
+    const data = JSON.parse(event.newValue);
+    try {
+      localStorage.removeItem('tgtc_gdrive_oauth_event');
+    } catch {}
+    if (data?.type === 'TGTC_GDRIVE_OAUTH_RESULT') {
+      handleOAuthCallbackResult(data);
+    }
+  } catch {}
+}
+
+function handleOAuthCallbackResult(data: { status: string; code?: string; state?: string; error?: string }) {
+  if (authStatus.value === 'exchanging' || authStatus.value === 'success') return;
+  if (currentNonce.value && data.state !== currentNonce.value) {
+    console.warn('[GDriveOAuth] state mismatch:', data.state, currentNonce.value);
+    MessagePlugin.error('授权状态校验失败（state 不匹配或已过期）');
+    return;
+  }
+  stopPopupWatcher();
+
+  if (data.status === 'error') {
+    authStatus.value = 'idle';
+    MessagePlugin.error('Google 授权失败: ' + (data.error || '用户取消授权'));
+    return;
+  }
+
+  if (data.status === 'success' && data.code) {
+    const cleanCode = extractOAuthCode(data.code);
+    gdrive.code = cleanCode;
+    authStatus.value = 'exchanging';
+    authStatusMessage.value = '已捕获授权码，正在完成凭据兑换与入池...';
+    completeAuth(cleanCode);
+  }
+}
+
+async function startOAuth() {
+  if (!gdrive.redirectUri) {
+    gdrive.redirectUri = getDefaultRedirectUri();
+  }
+  const nonce = typeof crypto?.randomUUID === 'function' ? crypto.randomUUID() : Math.random().toString(36).slice(2);
+  const state = `gdrive_${Date.now()}_${nonce}`;
+  currentNonce.value = state;
+  authStatus.value = 'authorizing';
+  authStatusMessage.value = '正在拉取 Google 授权链接...';
+  gdriveSaving.value = true;
+
+  try {
+    const result = await fetchGDriveAuthUrl(gdrive.redirectUri, state);
+    gdrive.authUrl = result.url;
+    setupOAuthListeners();
+
+    // 呼出居中授权弹窗
+    const width = 600;
+    const height = 700;
+    const left = Math.max(0, Math.round(window.screenX + (window.outerWidth - width) / 2));
+    const top = Math.max(0, Math.round(window.screenY + (window.outerHeight - height) / 2));
+    const popup = window.open(
+      result.url,
+      'tgtc_gdrive_oauth',
+      `width=${width},height=${height},left=${left},top=${top},status=no,resizable=yes,scrollbars=yes`,
+    );
+    popupRef.value = popup;
+    startPopupWatcher(popup);
+    if (!popup || popup.closed || typeof popup.closed === 'undefined') {
+      MessagePlugin.warning('浏览器拦截了弹窗，请在下方点击手动打开授权页');
+    }
+    authStatusMessage.value = '已打开授权窗口，请在弹窗中选择 Google 账号并确认授权...';
+  } catch (error) {
+    authStatus.value = 'idle';
+    MessagePlugin.error(getErrorMessage(error));
+  } finally {
+    gdriveSaving.value = false;
+  }
+}
+
+async function buildManualAuthUrl() {
   gdriveSaving.value = true;
   try {
     const result = await fetchGDriveAuthUrl(gdrive.redirectUri);
@@ -699,27 +1234,52 @@ async function buildAuthUrl() {
 }
 
 function openAuthUrl() {
-  window.open(gdrive.authUrl, '_blank', 'noopener');
+  const popup = window.open(gdrive.authUrl, 'tgtc_gdrive_oauth');
+  popupRef.value = popup;
+  startPopupWatcher(popup);
 }
 
-async function completeAuth() {
+function onManualCodeChange(value: string) {
+  const clean = extractOAuthCode(value);
+  if (clean !== value) {
+    gdrive.code = clean;
+    MessagePlugin.info('已自动从完整地址中提取授权码');
+  }
+}
+
+async function completeAuth(codeOverride?: string) {
+  const codeToSubmit = codeOverride || extractOAuthCode(gdrive.code);
+  if (!codeToSubmit) {
+    MessagePlugin.warning('授权码不能为空');
+    return;
+  }
   gdriveSaving.value = true;
   try {
     const result = await completeGDriveAuth({
-      code: gdrive.code,
+      code: codeToSubmit,
       redirectUri: gdrive.redirectUri,
-      name: gdrive.name,
+      name: gdrive.name || undefined,
       accountId: gdrive.accountId ?? undefined,
     });
+    authStatus.value = 'success';
     MessagePlugin.success(result.message);
+    if (popupRef.value && !popupRef.value.closed) {
+      try {
+        popupRef.value.close();
+      } catch {}
+    }
+    cleanupOAuthListeners();
     gdriveVisible.value = false;
     await loadOverview();
   } catch (error) {
+    authStatus.value = 'idle';
     MessagePlugin.error(getErrorMessage(error));
   } finally {
     gdriveSaving.value = false;
   }
 }
+
+onBeforeUnmount(cleanupOAuthListeners);
 
 onMounted(loadOverview);
 </script>
@@ -768,9 +1328,14 @@ onMounted(loadOverview);
   font-size: 12px;
   color: var(--td-text-color-secondary, #888);
 }
-.default-backend-picker {
+.default-backend-picker,
+.chunk-size-picker {
   display: flex;
   gap: 8px;
+  align-items: center;
+}
+.status-switch-control {
+  display: flex;
   align-items: center;
 }
 .overview-grid {
@@ -851,9 +1416,161 @@ onMounted(loadOverview);
   flex-direction: column;
   gap: 16px;
 }
-.wizard-step h4 {
-  margin: 0 0 6px;
+.wizard-card {
+  border: 1px solid var(--td-border-level-1-color, #e7e7e7);
+  border-radius: 8px;
+  background: var(--td-bg-color-container, #ffffff);
+  overflow: hidden;
+  transition: all 0.2s ease;
+}
+.wizard-card.is-collapsed {
+  background: var(--td-bg-color-secondarycontainer, #f9f9f9);
+}
+.wizard-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 16px;
+  background: var(--td-bg-color-secondarycontainer, #fafafa);
+  border-bottom: 1px solid var(--td-border-level-1-color, #f0f0f0);
+}
+.wizard-card.is-collapsed .wizard-card-header {
+  border-bottom: none;
+}
+.wizard-card-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.step-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--td-brand-color, #0052d9);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+}
+.step-title {
   font-size: 14px;
+  font-weight: 600;
+  color: var(--td-text-color-primary, #333);
+}
+.wizard-card-body {
+  padding: 16px;
+}
+.redirect-uri-box {
+  background: var(--td-bg-color-page, #f3f5f8);
+  padding: 12px;
+  border-radius: 6px;
+  margin-bottom: 14px;
+}
+.redirect-uri-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+.redirect-uri-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--td-text-color-secondary, #666);
+}
+.name-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.form-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--td-text-color-primary, #333);
+  white-space: nowrap;
+}
+.existing-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--td-brand-color, #0052d9);
+}
+.auth-action-area {
+  margin-bottom: 16px;
+}
+.auth-status-box {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 16px;
+  background: var(--td-brand-color-light, #f2f5fd);
+  border-radius: 8px;
+  border: 1px solid var(--td-brand-color-focus, #d4e3fc);
+}
+.auth-spinner {
+  width: 32px;
+  height: 32px;
+  border: 3px solid var(--td-brand-color-light, #d4e3fc);
+  border-top-color: var(--td-brand-color, #0052d9);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.auth-status-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.auth-status-main {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--td-brand-color, #0052d9);
+}
+.auth-status-sub {
+  font-size: 12px;
+  color: var(--td-text-color-secondary, #666);
+}
+.link-btn {
+  color: var(--td-brand-color, #0052d9);
+  text-decoration: underline;
+  cursor: pointer;
+}
+.auth-btn-area {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.disabled-tip {
+  font-size: 12px;
+  color: var(--td-error-color, #e34d59);
+  text-align: center;
+}
+.fallback-accordion {
+  margin-top: 12px;
+  border-top: 1px dashed var(--td-border-level-1-color, #e7e7e7);
+  padding-top: 12px;
+}
+.fallback-toggle {
+  font-size: 12px;
+  color: var(--td-text-color-secondary, #888);
+  cursor: pointer;
+  user-select: none;
+  transition: color 0.2s;
+}
+.fallback-toggle:hover {
+  color: var(--td-brand-color, #0052d9);
+}
+.fallback-body {
+  margin-top: 12px;
+  padding: 12px;
+  background: var(--td-bg-color-page, #f8f9fb);
+  border-radius: 6px;
 }
 .wizard-hint {
   margin: 4px 0 8px;
@@ -866,5 +1583,39 @@ onMounted(loadOverview);
   align-items: center;
   margin-bottom: 8px;
   flex-wrap: wrap;
+}
+.status-switch-btns {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.name-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.account-name {
+  font-weight: 500;
+}
+.account-email {
+  font-size: 11px;
+  color: var(--td-brand-color, #0052d9);
+  background: var(--td-brand-color-light, #f2f5fd);
+  padding: 1px 6px;
+  border-radius: 4px;
+  width: fit-content;
+}
+.oauth-client-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.dialog-footer-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--td-border-level-1-color, #f0f0f0);
 }
 </style>

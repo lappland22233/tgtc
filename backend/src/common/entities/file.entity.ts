@@ -19,6 +19,7 @@ export enum FileAccessType {
 
 @Entity('files')
 @Index('idx_files_uploader_folder_deleted', ['uploaderId', 'folderId', 'isDeleted'])
+@Index('idx_files_gdrive_cache_ref', ['gdriveCacheAccountId', 'gdriveCacheObjectRef'])
 export class File {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -85,6 +86,18 @@ export class File {
   /** 不透明对象引用：S3 key / WebDAV 路径 / GDrive fileId；TG 文件为 null */
   @Column({ type: 'varchar', length: 1024, nullable: true, comment: '对象引用（非 TG 后端）' })
   storageObjectRef: string | null;
+
+  /** Google 缓存模式：缓存所在的 GDrive 账号 ID */
+  @Column({ type: 'varchar', length: 64, nullable: true, comment: 'Google 缓存账号 ID' })
+  gdriveCacheAccountId: string | null;
+
+  /** Google 缓存模式：缓存所在的 GDrive 对象引用（fileId） */
+  @Column({ type: 'varchar', length: 1024, nullable: true, comment: 'Google 缓存对象引用' })
+  gdriveCacheObjectRef: string | null;
+
+  /** Google 缓存模式：缓存状态（none | pending | ready | failed） */
+  @Column({ type: 'varchar', length: 16, nullable: true, default: 'none', comment: 'Google 缓存状态' })
+  gdriveCacheStatus: 'none' | 'pending' | 'ready' | 'failed' | null;
 
   /** 本地缩略图路径（相对于 THUMBNAIL_DIR，如 {id}.webp） */
   @Column({ type: 'varchar', length: 512, nullable: true, default: null })

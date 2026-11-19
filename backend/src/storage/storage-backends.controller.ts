@@ -22,7 +22,12 @@ import { AuditService } from '../common/services/audit.service';
 import { ConfigCacheService } from '../common/services/config-cache.service';
 import { GDriveOAuthService } from './gdrive-oauth.service';
 import { StorageBackendsService } from './storage-backends.service';
-import { STORAGE_DEFAULT_BACKEND_KEY, StorageRouterService } from './storage-router.service';
+import {
+  STORAGE_DEFAULT_BACKEND_KEY,
+  STORAGE_GDRIVE_CACHE_MODE_KEY,
+  STORAGE_GDRIVE_CHUNK_SIZE_MB_KEY,
+  StorageRouterService,
+} from './storage-router.service';
 import {
   CreateStorageBackendDto,
   GDriveAuthUrlDto,
@@ -32,6 +37,7 @@ import {
   RotateStorageCredentialDto,
   SetDefaultStorageBackendDto,
   UpdateStorageBackendDto,
+  UpdateStorageSettingsDto,
 } from './storage-backends.dto';
 
 /**
@@ -54,16 +60,58 @@ export class StorageBackendsController {
     private readonly audit: AuditService,
   ) {}
 
-  /** 总览：账号列表 + 调度快照 + 默认后端 + 凭据加密可用性 */
+  /** 总览：账号列表 + 调度快照 + 默认后端 + 凭据加密可用性 + Google 缓存设置 */
   @Get('overview')
   @Roles(UserRole.SUPER_ADMIN)
   async overview() {
     const base = await this.backends.overview();
+    const gdriveCacheModeRaw = (await this.configCache.get(STORAGE_GDRIVE_CACHE_MODE_KEY, 'false')).trim().toLowerCase();
+    const gdriveChunkSizeMb = Number(await this.configCache.get(STORAGE_GDRIVE_CHUNK_SIZE_MB_KEY, '16')) || 16;
     return {
       ...base,
       defaultBackend: await this.router.getDefaultBackendType(),
       availableBackends: this.router.availableBackendTypes(),
       gdriveOAuthConfigured: await this.gdriveOAuth.isConfigured(),
+      gdriveCacheMode: gdriveCacheModeRaw === 'true' || gdriveCacheModeRaw === '1',
+      gdriveChunkSizeMb,
+    };
+  }
+
+  /** 存储全局设置更新（默认后端、Google 缓存模式、分块上传大小） */
+  @Put('settings')
+  @Roles(UserRole.SUPER_ADMIN)
+  async updateSettings(@CurrentUser() user: User, @Body() dto: UpdateStorageSettingsDto) {
+    if (dto.backend) {
+      await this.configCache.set(STORAGE_DEFAULT_BACKEND_KEY, dto.backend, '默认存储后端（新上传会话生效）');
+    }
+    if (dto.gdriveCacheMode !== undefined) {
+      await this.configCache.set(
+        STORAGE_GDRIVE_CACHE_MODE_KEY,
+        dto.gdriveCacheMode ? 'true' : 'false',
+        'Google 云端硬盘缓存模式（TG 主存储时镜像至 GDrive 直链免盘下载）',
+      );
+    }
+    if (dto.gdriveChunkSizeMb !== undefined) {
+      await this.configCache.set(
+        STORAGE_GDRIVE_CHUNK_SIZE_MB_KEY,
+        String(dto.gdriveChunkSizeMb),
+        'Google Drive 分块上传大小（MB）',
+      );
+    }
+    this.audit.log({
+      action: 'config_change',
+      userId: user.id,
+      resourceType: 'storage_backend',
+      resourceId: 'storage_settings',
+      metadata: { ...dto },
+    });
+    const gdriveCacheModeRaw = (await this.configCache.get(STORAGE_GDRIVE_CACHE_MODE_KEY, 'false')).trim().toLowerCase();
+    return {
+      success: true,
+      message: '存储全局设置已更新',
+      defaultBackend: await this.router.getDefaultBackendType(),
+      gdriveCacheMode: gdriveCacheModeRaw === 'true' || gdriveCacheModeRaw === '1',
+      gdriveChunkSizeMb: Number(await this.configCache.get(STORAGE_GDRIVE_CHUNK_SIZE_MB_KEY, '16')) || 16,
     };
   }
 
@@ -101,41 +149,64 @@ export class StorageBackendsController {
 
   // ---------- GDrive OAuth（声明在 :id 路由之前，避免被吞掉） ----------
 
-  /** OAuth Client 配置状态（绝不回显 secret） */
+  /** OAuth Client 配置状态（绝不回显 secret，包含常用 redirectUri） */
   @Get('gdrive/oauth-client')
   @Roles(UserRole.SUPER_ADMIN)
   async getGDriveOAuthClient() {
     const config = await this.gdriveOAuth.getClientConfig();
-    return { configured: config !== null, clientId: config?.clientId ?? null };
+    return {
+      configured: config !== null,
+      clientId: config?.clientId ?? null,
+      redirectUri: config?.redirectUri ?? null,
+    };
   }
 
   /** 配置 OAuth Client（secret 加密落库） */
   @Put('gdrive/oauth-client')
   @Roles(UserRole.SUPER_ADMIN)
   async setGDriveOAuthClient(@CurrentUser() user: User, @Body() dto: GDriveOAuthClientDto) {
-    await this.gdriveOAuth.setClientConfig(dto.clientId, dto.clientSecret);
+    await this.gdriveOAuth.setClientConfig(dto.clientId, dto.clientSecret, dto.redirectUri);
     this.audit.log({
       action: 'config_change',
       userId: user.id,
       resourceType: 'storage_backend',
       resourceId: 'gdrive_oauth_client',
-      metadata: { clientIdSuffix: dto.clientId.slice(-6) },
+      metadata: { clientIdSuffix: dto.clientId.slice(-6), hasRedirectUri: Boolean(dto.redirectUri) },
     });
     return { message: 'Google Drive OAuth Client 已保存（secret 加密存储）' };
+  }
+
+  /** 清空 OAuth Client 配置 */
+  @Delete('gdrive/oauth-client')
+  @Roles(UserRole.SUPER_ADMIN)
+  async clearGDriveOAuthClient(@CurrentUser() user: User) {
+    await this.gdriveOAuth.clearClientConfig();
+    this.audit.log({
+      action: 'config_change',
+      userId: user.id,
+      resourceType: 'storage_backend',
+      resourceId: 'gdrive_oauth_client',
+      metadata: { operation: 'clear' },
+    });
+    return { message: 'Google Drive OAuth Client 配置已清除' };
   }
 
   /** 生成授权 URL（管理员浏览器打开，授权后从回调 URL 复制 code） */
   @Post('gdrive/auth-url')
   @Roles(UserRole.SUPER_ADMIN)
-  async gdriveAuthUrl(@Body() dto: GDriveAuthUrlDto) {
-    const url = await this.gdriveOAuth.buildAuthUrl(dto.redirectUri, dto.state);
-    return { url };
+  async gdriveAuthUrl(@CurrentUser() user: User, @Body() dto: GDriveAuthUrlDto) {
+    const state = dto.state || this.gdriveOAuth.generateState(user.id);
+    const url = await this.gdriveOAuth.buildAuthUrl(dto.redirectUri, state);
+    return { url, state };
   }
 
   /** 提交授权码：创建账号，或在重新授权时更新选中的 GDrive 账号凭据。 */
   @Post('gdrive/complete-auth')
   @Roles(UserRole.SUPER_ADMIN)
   async gdriveCompleteAuth(@CurrentUser() user: User, @Body() dto: GDriveCompleteAuthDto) {
+    if (dto.state && !this.gdriveOAuth.verifyState(dto.state, user.id)) {
+      throw new BadRequestException('OAuth 状态校验失败或已过期 (CSRF Protection)');
+    }
     const exchanged = await this.gdriveOAuth.exchangeCode(dto.code, dto.redirectUri);
     if (dto.accountId) {
       const existing = await this.backends.findById(dto.accountId);
@@ -160,9 +231,12 @@ export class StorageBackendsController {
       return { message: 'Google Drive 账号已重新授权，原有文件引用保持不变', account };
     }
 
+    const rawName = (dto.name ?? '').trim();
+    const finalName = rawName || (exchanged.email ? `GDrive (${exchanged.email})` : `GDrive-${Date.now().toString(36)}`);
+
     const account = await this.backends.create({
       type: 'gdrive',
-      name: dto.name,
+      name: finalName,
       config: exchanged.email ? { email: exchanged.email } : {},
       credential: { refreshToken: exchanged.refreshToken },
     }, user.id);

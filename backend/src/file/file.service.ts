@@ -473,6 +473,33 @@ export class FileService implements OnModuleInit {
   }
 
   /**
+   * Google 缓存副本清理：删除文件时若含有 GDrive 缓存副本，通过 StorageRouter 删除远端对象以释放 Google 盘容量。
+   */
+  async cleanupGDriveCacheObject(ref: {
+    gdriveCacheAccountId?: string | null;
+    gdriveCacheObjectRef?: string | null;
+  }): Promise<void> {
+    if (!this.storageRouter) return;
+    const accountId = (ref.gdriveCacheAccountId || '').trim();
+    const objectRef = (ref.gdriveCacheObjectRef || '').trim();
+    if (!accountId || !objectRef) return;
+    try {
+      const shared = await this.fileRepository.count({
+        where: { gdriveCacheAccountId: accountId, gdriveCacheObjectRef: objectRef },
+      });
+      if (shared > 0) {
+        this.logger.debug(`Google 缓存对象仍被 ${shared} 条记录引用，跳过删除`);
+        return;
+      }
+      await this.storageRouter.deleteRemoteObject('gdrive', accountId, objectRef);
+    } catch (error) {
+      this.logger.warn(
+        `Google 缓存对象清理失败（不影响主流程，对象残留）：${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  /**
    * 统一的上传入口（账号池上传选号接入点）。
    *
    * 行为约定：
@@ -758,6 +785,7 @@ export class FileService implements OnModuleInit {
     let oldTelegramFileId: string | null = null;
     // 旧存储引用（事务内捕获）：提交成功后用于非 TG 旧对象的共享安全清理
     let oldStorageRef: { storageBackend: string; storageAccountId: string | null; storageObjectRef: string | null } | null = null;
+    let oldGDriveCacheRef: { gdriveCacheAccountId: string | null; gdriveCacheObjectRef: string | null } | null = null;
     // 覆盖上传递增 uploadVersion：镜像任务幂等键 = (ruleId, ownerType, ownerId, sourceVersion)，
     // sourceVersion 取 File.uploadVersion——不递增会让覆盖后的新内容撞旧任务的幂等键、
     // 不产生新镜像任务，镜像群与下载长期停在旧内容上（与 uploadToTelegram 覆盖分支注释
@@ -790,6 +818,10 @@ export class FileService implements OnModuleInit {
         storageAccountId: locked.storageAccountId ?? null,
         storageObjectRef: locked.storageObjectRef ?? null,
       };
+      oldGDriveCacheRef = {
+        gdriveCacheAccountId: locked.gdriveCacheAccountId ?? null,
+        gdriveCacheObjectRef: locked.gdriveCacheObjectRef ?? null,
+      };
       await manager.getRepository(File).update(target.id, {
         filename: params.filename,
         originalName: params.originalName,
@@ -806,6 +838,9 @@ export class FileService implements OnModuleInit {
         storageObjectRef: params.storageObjectRef ?? null,
         thumbnailPath: null,
         uploadVersion: nextVersion,
+        gdriveCacheStatus: 'none',
+        gdriveCacheAccountId: null,
+        gdriveCacheObjectRef: null,
       } as any);
       // N1：覆盖会改 originalName，名称表必须同步更新——否则旧名残留占用
       // （此后同名新建被误 409）且新名不受唯一保护。新名撞其他活跃实体时整体回滚。
@@ -840,6 +875,14 @@ export class FileService implements OnModuleInit {
         || capturedStorageRef.storageAccountId !== (params.storageAccountId ?? null))
     ) {
       void this.cleanupNonTelegramObject(capturedStorageRef);
+    }
+
+    const capturedGDriveRef = oldGDriveCacheRef as {
+      gdriveCacheAccountId: string | null;
+      gdriveCacheObjectRef: string | null;
+    } | null;
+    if (capturedGDriveRef?.gdriveCacheObjectRef) {
+      void this.cleanupGDriveCacheObject(capturedGDriveRef);
     }
 
     this.auditService.log({
@@ -1009,6 +1052,7 @@ export class FileService implements OnModuleInit {
               `覆盖上传旧副本失效失败（file=${target.id}，不影响上传结果）：${error instanceof Error ? error.message : String(error)}`,
             );
           }
+          let oldGDriveRef: { gdriveCacheAccountId: string | null; gdriveCacheObjectRef: string | null } | null = null;
           // G2-05 修复：uploadVersion+1 是读-改-写，必须放入事务 + 悲观行锁原子执行，
           // 防止并发覆盖时两个事务各自基于旧版本递增导致版本丢失、内容不一致。
           const updated = await this.fileRepository.manager.transaction(async (manager) => {
@@ -1029,6 +1073,10 @@ export class FileService implements OnModuleInit {
             if (locked.status === 'processing') {
               throw new BadRequestException('覆盖目标文件正在处理中，请稍后重试');
             }
+            oldGDriveRef = {
+              gdriveCacheAccountId: locked.gdriveCacheAccountId ?? null,
+              gdriveCacheObjectRef: locked.gdriveCacheObjectRef ?? null,
+            };
             // tempId 占位语义与新记录一致，由 FileUploadProcessor 按 fileId 更新为真实远端引用。
             // 覆盖分支保持原存储后端不变（storageBackend 不改写）：异步覆盖的新内容
             // 仍落原后端，避免旧引用后端类型丢失导致提交后无法清理旧对象；
@@ -1044,9 +1092,19 @@ export class FileService implements OnModuleInit {
             locked.telegramFileId = tempId;
             locked.telegramFilePath = '';
             locked.thumbnailPath = null;
+            locked.gdriveCacheStatus = 'none';
+            locked.gdriveCacheAccountId = null;
+            locked.gdriveCacheObjectRef = null;
             await repo.save(locked);
             return locked;
           });
+          const capturedGDriveRef = oldGDriveRef as {
+            gdriveCacheAccountId: string | null;
+            gdriveCacheObjectRef: string | null;
+          } | null;
+          if (capturedGDriveRef?.gdriveCacheObjectRef) {
+            void this.cleanupGDriveCacheObject(capturedGDriveRef);
+          }
           // 审计覆盖意图（status=processing，真实引用由 processor 落库后另有流程记录）
           this.auditService.log({
             action: 'file_overwrite',
@@ -1835,6 +1893,7 @@ export class FileService implements OnModuleInit {
 
     // 非 TG 后端：DB 删除成功后经共享引用检查 best-effort 清理远端对象（TG 维持不删现状）
     void this.cleanupNonTelegramObject(file);
+    void this.cleanupGDriveCacheObject(file);
 
     // 审计日志：按实际操作者区分管理员强删与用户自助强删
     await this.auditService.logAwait({
@@ -1929,6 +1988,7 @@ export class FileService implements OnModuleInit {
           this.fileCacheService.invalidate(fileId);
           // 非 TG 后端：经共享引用检查 best-effort 清理远端对象（失败只告警，不影响删除结论）
           void this.cleanupNonTelegramObject(file);
+          void this.cleanupGDriveCacheObject(file);
           deletedCount++;
           await this.auditService.logAwait({
             action: 'file_delete',
@@ -2248,6 +2308,29 @@ export class FileService implements OnModuleInit {
     if (file.status === 'processing' && !this.fileCacheService.getCachedPath(file.id)) {
       throw new BadRequestException('文件正在处理中，请稍后刷新重试');
     }
+
+    // Google 缓存模式直链中转：若持有 ready 的 GDrive 缓存副本，直接中转远端流，免本地硬盘缓存
+    if (
+      this.storageRouter
+      && file.gdriveCacheStatus === 'ready'
+      && file.gdriveCacheAccountId
+      && file.gdriveCacheObjectRef
+    ) {
+      try {
+        const opened = await this.storageRouter.openDownloadStream({
+          backendType: 'gdrive',
+          accountId: file.gdriveCacheAccountId,
+          objectRef: file.gdriveCacheObjectRef,
+          expectedSize,
+        });
+        return { stream: opened.stream, actualSize: opened.size || expectedSize };
+      } catch (err) {
+        this.logger.warn(
+          `文件 ${file.id} 命中 Google 缓存但取流失败，平滑降级至 Telegram 回源: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+
     // 请求级强制无缓存优先，其次跟随全局配置
     const noCache = opts?.noCache ?? this.fileCacheService.isNoCacheMode();
     try {
@@ -2426,6 +2509,30 @@ export class FileService implements OnModuleInit {
     noCache = false,
   ): Promise<Readable | null> {
     const expectedSize = Number(file.size);
+
+    // Google 缓存模式 Range 直链中转：若持有 ready 的 GDrive 缓存副本，直接中转 Range 流，免本地磁盘缓存
+    if (
+      this.storageRouter
+      && file.gdriveCacheStatus === 'ready'
+      && file.gdriveCacheAccountId
+      && file.gdriveCacheObjectRef
+    ) {
+      try {
+        const opened = await this.storageRouter.openDownloadStream({
+          backendType: 'gdrive',
+          accountId: file.gdriveCacheAccountId,
+          objectRef: file.gdriveCacheObjectRef,
+          range: { start, end },
+          expectedSize,
+        });
+        return opened.stream;
+      } catch (err) {
+        this.logger.warn(
+          `文件 ${file.id} 命中 Google 缓存但 Range 取流失败，平滑降级至本地回源: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+
     const forceNoCache = noCache && !this.fileCacheService.isNoCacheMode();
     const fetchFn = async () => this.openSourceStream(file, expectedSize, {
       noCache: this.fileCacheService.isNoCacheMode() || forceNoCache,

@@ -98,9 +98,15 @@ export class GDriveOAuthClientDto {
   @Length(1, 256)
   clientId: string;
 
+  @IsOptional()
   @IsString()
-  @Length(1, 256)
-  clientSecret: string;
+  @Length(0, 256)
+  clientSecret?: string;
+
+  @IsOptional()
+  @IsString()
+  @Length(1, 512)
+  redirectUri?: string;
 }
 
 export class GDriveAuthUrlDto {
@@ -128,9 +134,10 @@ export class GDriveCompleteAuthDto {
   @Length(1, 512)
   redirectUri: string;
 
+  @IsOptional()
   @IsString()
-  @Length(1, 64)
-  name: string;
+  @Length(0, 64)
+  name?: string;
 
   @IsOptional()
   @IsString()
@@ -146,4 +153,19 @@ export class GDriveRotateAuthDto {
   @IsString()
   @Length(1, 512)
   redirectUri: string;
+}
+
+export class UpdateStorageSettingsDto {
+  @IsOptional()
+  @IsIn(['telegram', 's3', 'webdav', 'gdrive'])
+  backend?: 'telegram' | 's3' | 'webdav' | 'gdrive';
+
+  @IsOptional()
+  @IsBoolean()
+  gdriveCacheMode?: boolean;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsIn([8, 16, 32, 64])
+  gdriveChunkSizeMb?: number;
 }

@@ -342,108 +342,119 @@ export class TelegramBotPublicController {
     botContext.botTelegramUserId = grant.telegramUserId;
 
     try {
-      // 纯 Google 存储模式直读端点：直接委托 StorageRouterService 获取 GDrive 流与分段
-      if (grant.storageBackend === 'gdrive' && grant.storageAccountId && grant.storageObjectRef) {
-        if (!this.storageRouter) {
-          throw new HttpException('Google 云端硬盘存储后端暂不可用', HttpStatus.SERVICE_UNAVAILABLE);
+      // Google 存储或 Google 缓存命中直读端点：直接委托 StorageRouterService 获取 GDrive 流与分段（免本地硬盘缓存）
+      const useGDriveDirect = (grant.storageBackend === 'gdrive' && grant.storageAccountId && grant.storageObjectRef)
+        || (grant.gdriveCacheStatus === 'ready' && grant.gdriveCacheAccountId && grant.gdriveCacheObjectRef);
+
+      if (useGDriveDirect && this.storageRouter) {
+        try {
+          const targetAccountId = grant.storageBackend === 'gdrive' ? grant.storageAccountId! : grant.gdriveCacheAccountId!;
+          const targetObjectRef = grant.storageBackend === 'gdrive' ? grant.storageObjectRef! : grant.gdriveCacheObjectRef!;
+          const reported = Number(grant.fileSize);
+          const expectedSize = grant.fileSize && Number.isSafeInteger(reported) && reported > 0
+            ? reported
+            : undefined;
+
+          const etag = expectedSize !== undefined
+            ? buildOpaqueETag('gdrive-bot', targetObjectRef, expectedSize)
+            : undefined;
+          if (etag) res.set('ETag', etag);
+
+          const rangeHeader = req.headers.range;
+          const ifRange = typeof req.headers['if-range'] === 'string' ? req.headers['if-range'] : undefined;
+          const ifRangeMismatch = Boolean(
+            rangeHeader && expectedSize !== undefined && etag && !matchesIfRange(ifRange, etag),
+          );
+
+          let requestedRange: { start: number; end: number } | undefined;
+          if (rangeHeader && expectedSize !== undefined && !ifRangeMismatch) {
+            const parsed = parseByteRange(rangeHeader, expectedSize);
+            if (!parsed.ok) {
+              throw new RangeNotSatisfiableException(expectedSize);
+            }
+            requestedRange = { start: parsed.range.start, end: parsed.range.end };
+          }
+
+          // 客户端连接中断联动：支持 req.signal 或连接提前 close 触发上游中断
+          const abortController = new AbortController();
+          if ((req as any).signal?.addEventListener) {
+            (req as any).signal.addEventListener('abort', () => abortController.abort(), { once: true });
+          }
+          if (typeof res?.once === 'function') {
+            res.once('close', () => {
+              if (!res.writableEnded) abortController.abort();
+            });
+          }
+
+          const opened = await this.storageRouter.openDownloadStream({
+            backendType: 'gdrive',
+            accountId: targetAccountId,
+            objectRef: targetObjectRef,
+            range: requestedRange,
+            expectedSize,
+            signal: abortController.signal,
+          });
+
+          const isRanged = Boolean(requestedRange && expectedSize !== undefined);
+          const contentLength = isRanged && requestedRange
+            ? requestedRange.end - requestedRange.start + 1
+            : (expectedSize ?? (opened.size > 0 ? opened.size : undefined));
+
+          botContext.transferTracked = true;
+          botContext.ranged = isRanged;
+          this.trackTermination(opened.stream, botContext);
+
+          const headers: Record<string, string> = {
+            'Content-Type': this.resolveContentType(grant.mimeType),
+            'Content-Disposition': buildContentDisposition('attachment', grant.fileName || 'download'),
+            'Cache-Control': 'no-store, no-cache, must-revalidate',
+            'X-Content-Type-Options': 'nosniff',
+            'Referrer-Policy': 'no-referrer',
+            'Accept-Ranges': 'bytes',
+          };
+          if (contentLength !== undefined) {
+            headers['Content-Length'] = String(contentLength);
+          }
+          if (etag) {
+            headers['ETag'] = etag;
+          }
+
+          await this.streamResponder.send({
+            res,
+            status: isRanged ? 206 : 200,
+            range: isRanged && requestedRange ? {
+              start: requestedRange.start,
+              end: requestedRange.end,
+              total: expectedSize!,
+            } : undefined,
+            headers,
+            stream: opened.stream,
+          });
+
+          void this.grantService.recordAccess(grant.id);
+          this.auditService.log({
+            action: 'telegram_bot_link_accessed',
+            resourceType: 'telegram_bot_grant',
+            resourceId: grant.id,
+            metadata: {
+              grantId: grant.id,
+              telegramUserId: grant.telegramUserId,
+              tokenPrefix: grant.tokenPrefix,
+              ip,
+              storageBackend: grant.storageBackend === 'gdrive' ? 'gdrive' : 'telegram_gdrive_cache',
+              fileName: grant.fileName,
+            },
+          });
+          return;
+        } catch (gdriveErr) {
+          if (grant.storageBackend === 'gdrive' || res.headersSent) {
+            throw gdriveErr;
+          }
+          this.logger.warn(`Bot 直链建连阶段命中 Google 缓存失败（grant=${grant.id}），平滑降级至 Telegram 回源: ${gdriveErr instanceof Error ? gdriveErr.message : String(gdriveErr)}`);
         }
-      const reported = Number(grant.fileSize);
-      const expectedSize = grant.fileSize && Number.isSafeInteger(reported) && reported > 0
-        ? reported
-        : undefined;
-
-      const etag = expectedSize !== undefined
-        ? buildOpaqueETag('gdrive-bot', grant.storageObjectRef, expectedSize)
-        : undefined;
-      if (etag) res.set('ETag', etag);
-
-      const rangeHeader = req.headers.range;
-      const ifRange = typeof req.headers['if-range'] === 'string' ? req.headers['if-range'] : undefined;
-      const ifRangeMismatch = Boolean(
-        rangeHeader && expectedSize !== undefined && etag && !matchesIfRange(ifRange, etag),
-      );
-
-      let requestedRange: { start: number; end: number } | undefined;
-      if (rangeHeader && expectedSize !== undefined && !ifRangeMismatch) {
-        const parsed = parseByteRange(rangeHeader, expectedSize);
-        if (!parsed.ok) {
-          throw new RangeNotSatisfiableException(expectedSize);
-        }
-        requestedRange = { start: parsed.range.start, end: parsed.range.end };
+      } else if (grant.storageBackend === 'gdrive') {
+        throw new HttpException('Google 云端硬盘存储后端暂不可用', HttpStatus.SERVICE_UNAVAILABLE);
       }
-
-      // 客户端连接中断联动：支持 req.signal 或连接提前 close 触发上游中断
-      const abortController = new AbortController();
-      if ((req as any).signal?.addEventListener) {
-        (req as any).signal.addEventListener('abort', () => abortController.abort(), { once: true });
-      }
-      if (typeof res?.once === 'function') {
-        res.once('close', () => {
-          if (!res.writableEnded) abortController.abort();
-        });
-      }
-
-      const opened = await this.storageRouter.openDownloadStream({
-        backendType: 'gdrive',
-        accountId: grant.storageAccountId,
-        objectRef: grant.storageObjectRef,
-        range: requestedRange,
-        expectedSize,
-        signal: abortController.signal,
-      });
-
-      const isRanged = Boolean(requestedRange && expectedSize !== undefined);
-      const contentLength = isRanged && requestedRange
-        ? requestedRange.end - requestedRange.start + 1
-        : (expectedSize ?? (opened.size > 0 ? opened.size : undefined));
-
-      botContext.transferTracked = true;
-      botContext.ranged = isRanged;
-      this.trackTermination(opened.stream, botContext);
-
-      const headers: Record<string, string> = {
-        'Content-Type': this.resolveContentType(grant.mimeType),
-        'Content-Disposition': buildContentDisposition('attachment', grant.fileName || 'download'),
-        'Cache-Control': 'no-store, no-cache, must-revalidate',
-        'X-Content-Type-Options': 'nosniff',
-        'Referrer-Policy': 'no-referrer',
-        'Accept-Ranges': 'bytes',
-      };
-      if (contentLength !== undefined) {
-        headers['Content-Length'] = String(contentLength);
-      }
-      if (etag) {
-        headers['ETag'] = etag;
-      }
-
-      await this.streamResponder.send({
-        res,
-        status: isRanged ? 206 : 200,
-        range: isRanged && requestedRange ? {
-          start: requestedRange.start,
-          end: requestedRange.end,
-          total: expectedSize!,
-        } : undefined,
-        headers,
-        stream: opened.stream,
-      });
-
-      void this.grantService.recordAccess(grant.id);
-      this.auditService.log({
-        action: 'telegram_bot_link_accessed',
-        resourceType: 'telegram_bot_grant',
-        resourceId: grant.id,
-        metadata: {
-          grantId: grant.id,
-          telegramUserId: grant.telegramUserId,
-          tokenPrefix: grant.tokenPrefix,
-          ip,
-          storageBackend: 'gdrive',
-          fileName: grant.fileName,
-        },
-      });
-      return;
-    }
 
     // Telegram 上报的 file_size 决定能否生成 Content-Range/Content-Length
       const reported = Number(grant.fileSize);

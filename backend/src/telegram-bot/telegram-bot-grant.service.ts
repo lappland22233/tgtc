@@ -193,6 +193,23 @@ export class TelegramBotGrantService {
     }
   }
 
+  /** 更新 Google 缓存副本信息 */
+  async attachGDriveCache(grantId: string, accountId: string | null | undefined, objectRef: string): Promise<boolean> {
+    const updateResult = await this.grantRepository.update(
+      {
+        id: grantId,
+        revokedAt: IsNull(),
+        storagePurgedAt: IsNull(),
+      },
+      {
+        gdriveCacheAccountId: accountId ?? null,
+        gdriveCacheObjectRef: objectRef,
+        gdriveCacheStatus: 'ready',
+      },
+    );
+    return (updateResult.affected ?? 0) > 0;
+  }
+
   /** 清理过期授权记录（保留已撤销记录用于审计追溯） */
   async purgeExpired(before: Date): Promise<number> {
     const result = await this.grantRepository.delete({ expiresAt: LessThan(before) });

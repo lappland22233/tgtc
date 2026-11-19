@@ -61,6 +61,8 @@ export interface StorageOverview {
   defaultBackend: StorageBackendType;
   availableBackends: StorageBackendType[];
   gdriveOAuthConfigured: boolean;
+  gdriveCacheMode?: boolean;
+  gdriveChunkSizeMb?: number;
 }
 
 export interface CreateStorageBackendInput {
@@ -107,6 +109,27 @@ export async function setDefaultStorageBackend(
 ): Promise<{ message: string; defaultBackend: StorageBackendType }> {
   const response = await api.put('/admin/storage-backends/default-backend', { backend });
   return response.data.data as { message: string; defaultBackend: StorageBackendType };
+}
+
+export interface UpdateStorageSettingsInput {
+  backend?: StorageBackendType;
+  gdriveCacheMode?: boolean;
+  gdriveChunkSizeMb?: number;
+}
+
+export interface UpdateStorageSettingsResult {
+  message: string;
+  defaultBackend: StorageBackendType;
+  gdriveCacheMode: boolean;
+  gdriveChunkSizeMb: number;
+}
+
+/** 存储全局设置更新（默认存储后端、Google 缓存模式、GDrive 分块大小） */
+export async function updateStorageSettings(
+  input: UpdateStorageSettingsInput,
+): Promise<UpdateStorageSettingsResult> {
+  const response = await api.put('/admin/storage-backends/settings', input);
+  return response.data.data as UpdateStorageSettingsResult;
 }
 
 /** 添加存储账号（创建即连通性测试，失败不落库） */
@@ -170,33 +193,49 @@ export async function refreshStorageQuota(
 // Google Drive OAuth
 // ============================================================
 
-/** OAuth Client 配置状态（绝不回显 secret） */
-export async function fetchGDriveOAuthClient(): Promise<{ configured: boolean; clientId: string | null }> {
+/** OAuth Client 配置状态（绝不回显 secret，包含常用 redirectUri） */
+export async function fetchGDriveOAuthClient(): Promise<{
+  configured: boolean;
+  clientId: string | null;
+  redirectUri: string | null;
+}> {
   const response = await api.get('/admin/storage-backends/gdrive/oauth-client');
-  return response.data.data as { configured: boolean; clientId: string | null };
+  return response.data.data as { configured: boolean; clientId: string | null; redirectUri: string | null };
 }
 
-/** 配置 OAuth Client（secret 加密落库） */
+/** 配置 OAuth Client（secret 加密落库，支持保存常用 redirectUri，留空保持原 secret） */
 export async function setGDriveOAuthClient(
   clientId: string,
-  clientSecret: string,
+  clientSecret?: string,
+  redirectUri?: string,
 ): Promise<{ message: string }> {
-  const response = await api.put('/admin/storage-backends/gdrive/oauth-client', { clientId, clientSecret });
+  const response = await api.put('/admin/storage-backends/gdrive/oauth-client', {
+    clientId,
+    ...(clientSecret ? { clientSecret } : {}),
+    redirectUri,
+  });
   return response.data.data as { message: string };
 }
 
-/** 生成授权 URL（管理员浏览器打开，授权后从回调 URL 复制 code） */
-export async function fetchGDriveAuthUrl(redirectUri: string): Promise<{ url: string }> {
-  const response = await api.post('/admin/storage-backends/gdrive/auth-url', { redirectUri });
+/** 清除 OAuth Client 配置 */
+export async function clearGDriveOAuthClient(): Promise<{ message: string }> {
+  const response = await api.delete('/admin/storage-backends/gdrive/oauth-client');
+  return response.data.data as { message: string };
+}
+
+/** 生成授权 URL（管理员浏览器打开，支持 state 防御 CSRF） */
+export async function fetchGDriveAuthUrl(redirectUri: string, state?: string): Promise<{ url: string }> {
+  const response = await api.post('/admin/storage-backends/gdrive/auth-url', { redirectUri, state });
   return response.data.data as { url: string };
 }
 
-/** 提交授权码：换取 refresh_token 并创建 GDrive 存储账号 */
+/** 提交授权码：换取 refresh_token 并创建 GDrive 存储账号（name 可选，留空自动以邮箱命名） */
 export async function completeGDriveAuth(input: {
   code: string;
   redirectUri: string;
-  name: string;
+  name?: string;
   accountId?: string;
+  state?: string;
 }): Promise<{ message: string; account: StorageBackendView }> {
   const response = await api.post('/admin/storage-backends/gdrive/complete-auth', input);
   return response.data.data as { message: string; account: StorageBackendView };

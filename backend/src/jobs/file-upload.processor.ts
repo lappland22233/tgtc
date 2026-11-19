@@ -213,7 +213,7 @@ export class FileUploadProcessor {
         objectName: file.originalName,
         knownLength,
         // 换号重试必须新开流：流只能被消费一次
-        openStream: () => createReadStream(filePath),
+        openStream: () => createReadStream(filePath, { highWaterMark: 1024 * 1024 }),
       });
       return {
         file_id: '',
@@ -568,6 +568,33 @@ export class FileUploadProcessor {
       this.logger.warn(
         `文件 ${fileId} 主副本定位登记/镜像触发失败（不影响上传结果）：${(error as Error).message}`,
       );
+    }
+
+    // Google 缓存模式异步双写（主存储为 Telegram 时镜像一份至 GDrive 账号池）
+    if (!isNonTelegram && this.storageRouter) {
+      try {
+        if (await this.storageRouter.isGDriveCacheModeEnabled()) {
+          const knownLength = Number(file.size);
+          const gdriveReceipt = await this.storageRouter.upload({
+            backendType: 'gdrive',
+            objectName: file.originalName,
+            knownLength,
+            mimeType: file.mimeType || undefined,
+            openStream: () => createReadStream(filePath, { highWaterMark: 1024 * 1024 }),
+          });
+          await this.fileRepository.update(
+            { id: fileId, uploadVersion },
+            {
+              gdriveCacheAccountId: gdriveReceipt.accountId,
+              gdriveCacheObjectRef: gdriveReceipt.objectRef,
+              gdriveCacheStatus: 'ready',
+            } as Partial<File>,
+          );
+          this.logger.log(`文件 ${fileId} 已成功同步至 Google 缓存（账号: ${gdriveReceipt.accountId}）`);
+        }
+      } catch (cacheErr) {
+        this.logger.warn(`文件 ${fileId} Google 缓存同步失败（不影响主存储）：${(cacheErr as Error).message}`);
+      }
     }
 
     await this.removeUploadArtifacts(filePath, fileId, uploadVersion);

@@ -19,6 +19,20 @@ export function retryAfterSecondsOf(headers: Record<string, unknown> | undefined
   return undefined;
 }
 
+function sanitizeErrorSummary(msg: string): string {
+  return msg.replace(/https?:\/\/[^\s]+/g, (url) => {
+    try {
+      const parsed = new URL(url);
+      if (parsed.search) {
+        parsed.search = '?redacted';
+      }
+      return parsed.toString();
+    } catch {
+      return url.split('?')[0];
+    }
+  });
+}
+
 /** axios 风格错误 → 统一 StorageAccountError（脱敏：只保留状态码与分类，不回显凭据） */
 export function toStorageAccountError(error: unknown, fallbackMessage: string): StorageAccountError {
   if (error instanceof StorageAccountError) return error;
@@ -49,8 +63,9 @@ export function toStorageAccountError(error: unknown, fallbackMessage: string): 
   if (/ECONNREFUSED|ECONNRESET|ENOTFOUND|EAI_AGAIN|EPIPE|network/i.test(code)) {
     return new StorageAccountError(fallbackMessage, 'network');
   }
+  const rawMsg = candidate?.message || String(error);
   return new StorageAccountError(
-    `${fallbackMessage}：${(candidate?.message || String(error)).slice(0, 200)}`,
+    `${fallbackMessage}：${sanitizeErrorSummary(rawMsg).slice(0, 200)}`,
     'other',
   );
 }

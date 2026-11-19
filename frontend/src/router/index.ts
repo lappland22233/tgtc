@@ -58,6 +58,13 @@ const routes: RouteRecordRaw[] = [
     component: () => import('../views/auth/Register.vue'),
     meta: { guest: true },
   },
+  // Google Drive OAuth 弹窗/重定向回调页（独立于 Layout，免登录阻断）
+  {
+    path: '/admin/storage-backends/gdrive-callback',
+    name: 'GDriveOAuthCallback',
+    component: () => import('../views/admin/GDriveOAuthCallback.vue'),
+    meta: { public: true },
+  },
   {
     path: '/',
     component: () => import('../views/layout/Layout.vue'),

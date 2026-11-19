@@ -966,6 +966,7 @@ export class TelegramBotDispatchService implements OnApplicationShutdown {
 
         // 镜像备份（Bot 入站）：grant 已持久化后才触发；镜像失败不回滚签发与配额
         void this.triggerInboundMirror(grant, accountId);
+        void this.triggerGDriveCacheMirror(grant, doc, fileSize, accountId);
       } catch (error) {
         // 签发失败：归还已消耗的配额，避免用户白白损失额度
         if (quotaConsumed) {
@@ -1241,7 +1242,7 @@ export class TelegramBotDispatchService implements OnApplicationShutdown {
         objectName: doc.file_name || `tg_${doc.file_id}`,
         knownLength: actualSize,
         mimeType: doc.mime_type || undefined,
-        openStream: () => createReadStream(tempFilePath),
+        openStream: () => createReadStream(tempFilePath, { highWaterMark: 1024 * 1024 }),
         signal: controller.signal,
       });
 
@@ -1341,6 +1342,84 @@ export class TelegramBotDispatchService implements OnApplicationShutdown {
         uploadSessionId = null;
       }
       this.processingMessages.delete(`${chatId}:${messageId}`);
+    }
+  }
+
+  /**
+   * Google 缓存模式：异步将 Bot 接收的文件镜像到 Google 云端硬盘账号池。
+   * 不阻塞 Bot 的主流程和直链回复；失败仅记录告警。
+   */
+  private async triggerGDriveCacheMirror(
+    grant: TelegramBotFileGrant,
+    doc: { file_id: string; file_name?: string; mime_type?: string },
+    fileSize: number | null,
+    accountId?: string,
+  ): Promise<void> {
+    if (!this.storageRouter || this.isShuttingDown) return;
+    try {
+      if (!(await this.storageRouter.isGDriveCacheModeEnabled())) return;
+    } catch {
+      return;
+    }
+
+    const estimatedBytes = fileSize && fileSize > 0 ? fileSize : 50 * 1024 * 1024;
+    const tempDir = path.join(process.cwd(), 'tmp', 'bot-transfers');
+    await mkdir(tempDir, { recursive: true });
+    const tempFilePath = path.join(tempDir, `gdrive_cache_${randomUUID()}.tmp`);
+    const releaseTransferLease = this.transferTracker?.register(tempFilePath);
+    let diskReservation: DownloadReservation | null = null;
+
+    try {
+      if (this.downloadResources) {
+        try {
+          diskReservation = await this.downloadResources.reserve({
+            sessionKey: `bot-cache-mirror:${grant.id}`,
+            bytes: estimatedBytes,
+            countsTowardCache: false,
+            waitTimeoutMs: 10_000,
+          });
+        } catch {
+          return;
+        }
+      }
+
+      const upstreamStream = await this.getTelegramSourceStream(doc.file_id, fileSize ?? undefined, accountId);
+      const meteringPassThrough = new Transform({
+        transform(chunk: Buffer, _encoding, callback) {
+          diskReservation?.consume(chunk.length);
+          callback(null, chunk);
+        },
+      });
+      await pipeline(upstreamStream, meteringPassThrough, createWriteStream(tempFilePath));
+
+      const fileStats = await stat(tempFilePath);
+      const actualSize = fileStats.size;
+
+      const receipt = await this.storageRouter.upload({
+        backendType: 'gdrive',
+        objectName: doc.file_name || `tg_${doc.file_id}`,
+        knownLength: actualSize,
+        mimeType: doc.mime_type || undefined,
+        openStream: () => createReadStream(tempFilePath, { highWaterMark: 1024 * 1024 }),
+      });
+
+      if (receipt?.objectRef) {
+        const attached = await this.grantService.attachGDriveCache(grant.id, receipt.accountId, receipt.objectRef);
+        if (!attached && receipt.accountId) {
+          this.logger.warn(`Bot 直链 ${grant.id} 在同步 Google 缓存期间已失效/撤销，回滚删除缓存对象`);
+          await this.storageRouter.deleteRemoteObject('gdrive', receipt.accountId, receipt.objectRef).catch(() => {});
+        } else {
+          this.logger.log(`Bot 直链 ${grant.id} 已同步至 Google 缓存 (accountId=${receipt.accountId})`);
+        }
+      }
+    } catch (err) {
+      this.logger.warn(`Bot 直链 ${grant.id} 同步 Google 缓存失败（不影响主存储）：${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      await unlink(tempFilePath).catch(() => {});
+      releaseTransferLease?.();
+      if (diskReservation) {
+        diskReservation.release();
+      }
     }
   }
 
