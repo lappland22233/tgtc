@@ -451,7 +451,7 @@
 
       <h4 class="bot-group-title">存储后端模式</h4>
       <div v-if="!botConfig.telegramStorageChatConfigured" class="bot-warning-banner" style="margin-bottom: 12px; padding: 10px 14px; background: var(--td-warning-color-1, #fffbe6); border: 1px solid var(--td-warning-color-4, #ffe58f); border-radius: 6px; font-size: 13px; color: var(--td-warning-color-8, #d48806);">
-        ⚠️ 检测到系统未配置 Telegram 存储群组（<code>TELEGRAM_CHAT_ID</code>）。建议开启<strong>「纯 Google 存储模式」</strong>，Bot 收到的文件将直接转存至 Google 云端硬盘并生成直链，无需依赖 Telegram 存储群。
+        ⚠️ 检测到系统未配置 Telegram 存储群组（<code>TELEGRAM_CHAT_ID</code> 或账号池存储群）。建议开启<strong>「纯 Google 存储模式」</strong>，Bot 收到的文件将直接转存至 Google 云端硬盘并生成直链，无需依赖 Telegram 存储群。
       </div>
       <t-form layout="vertical">
         <t-form-item label="Bot 文件存储模式">
@@ -1220,7 +1220,7 @@ async function saveBotConfig() {
     return;
   }
   if (botConfig.value.storageMode === 'telegram' && !botConfig.value.telegramStorageChatConfigured) {
-    MessagePlugin.warning('未配置 Telegram 存储群组（TELEGRAM_CHAT_ID），无法开启原生 Telegram 存储模式，请使用纯 Google 存储模式');
+    MessagePlugin.warning('未配置 Telegram 存储群组（TELEGRAM_CHAT_ID 或账号池存储群），无法开启原生 Telegram 存储模式，请使用纯 Google 存储模式');
     return;
   }
   const ttl = Number(botConfig.value.linkTtlHours);

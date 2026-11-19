@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
+import { Inject, Injectable, Logger, OnApplicationShutdown, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createReadStream, createWriteStream } from 'fs';
 import { mkdir, stat, unlink } from 'fs/promises';
@@ -80,10 +80,60 @@ interface GrantClaimAttribution {
  * 本地 Bot API（`--local` + 流式端点）对可服务的文件大小无上限。
  */
 @Injectable()
-export class TelegramBotDispatchService {
+export class TelegramBotDispatchService implements OnApplicationShutdown {
   private readonly logger = new Logger(TelegramBotDispatchService.name);
   /** 正在执行异步 Google Drive 转存的消息去重集 (chatId:messageId) */
   private readonly processingMessages = new Set<string>();
+  /** 停机排空追踪：在途后台 GDrive 转存任务 (chatId:messageId -> { abortController, promise }) */
+  private readonly activeTransfers = new Map<string, { abortController: AbortController; promise: Promise<void> }>();
+  private isShuttingDown = false;
+  private shutdownDrainTimeoutMs = 10_000;
+
+  getActiveTransferCount(): number {
+    return this.activeTransfers.size;
+  }
+
+  setShutdownDrainTimeoutMs(ms: number): void {
+    this.shutdownDrainTimeoutMs = ms;
+  }
+
+  async onApplicationShutdown(): Promise<void> {
+    this.isShuttingDown = true;
+    if (this.activeTransfers.size === 0) return;
+
+    const count = this.activeTransfers.size;
+    this.logger.log(`正在等待 ${count} 个后台转存任务排空（最多 ${this.shutdownDrainTimeoutMs / 1000} 秒）...`);
+
+    const allPromises = Array.from(this.activeTransfers.values()).map((t) => t.promise);
+    let timer: NodeJS.Timeout | null = null;
+    const timeoutPromise = new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => resolve(false), this.shutdownDrainTimeoutMs);
+    });
+    const drained = await Promise.race([
+      Promise.allSettled(allPromises).then(() => true),
+      timeoutPromise,
+    ]);
+    if (timer) clearTimeout(timer);
+
+    if (!drained && this.activeTransfers.size > 0) {
+      this.logger.warn(
+        `后台转存任务未在规定时间内完成，正在中止剩余 ${this.activeTransfers.size} 个任务并退还配额...`,
+      );
+      for (const transfer of this.activeTransfers.values()) {
+        transfer.abortController.abort();
+      }
+      const remainingPromises = Array.from(this.activeTransfers.values()).map((t) => t.promise);
+      let abortTimer: NodeJS.Timeout | null = null;
+      const abortTimeoutPromise = new Promise<void>((resolve) => {
+        abortTimer = setTimeout(resolve, 3_000);
+      });
+      await Promise.race([
+        Promise.allSettled(remainingPromises),
+        abortTimeoutPromise,
+      ]);
+      if (abortTimer) clearTimeout(abortTimer);
+    }
+  }
 
   constructor(
     private readonly telegramService: TelegramService,
@@ -749,6 +799,12 @@ export class TelegramBotDispatchService {
       return;
     }
 
+    if (this.isShuttingDown) {
+      this.logger.warn(`服务正在停机重启，拒绝处理新文档 (chat=${chatId}, message=${messageId})`);
+      await this.reply(chatId, '服务正在维护重启中，请稍后重新发送文件。', message.message_id, accountId);
+      return;
+    }
+
     // 正在转存同一消息时，提示用户等待，防止并发重复转存与额度误扣
     const msgKey = `${chatId}:${messageId}`;
     if (this.processingMessages.has(msgKey)) {
@@ -816,6 +872,14 @@ export class TelegramBotDispatchService {
 
       // 纯 Google 存储模式：先回复等待提示，后台异步拉流并直传 Google 云端硬盘
       if (config.storageMode === 'gdrive') {
+        if (this.isShuttingDown) {
+          if (quotaConsumed) {
+            await this.quotaService.refund(identity.telegramUserId, usageDate);
+          }
+          await this.reply(chatId, '服务正在维护重启中，请稍后重新发送文件。', message.message_id, accountId);
+          return;
+        }
+
         let waitingMsgId: number | null = null;
         try {
           waitingMsgId = await this.reply(
@@ -828,7 +892,7 @@ export class TelegramBotDispatchService {
           this.logger.warn(`发送等待提示失败（继续转存）: ${replyErr instanceof Error ? replyErr.message : String(replyErr)}`);
         }
         transferStarted = true;
-        void this.executeGDriveTransfer({
+        this.startGDriveTransfer({
           message,
           identity,
           chatId,
@@ -1059,23 +1123,40 @@ export class TelegramBotDispatchService {
   }
 
   /**
+   * 启动纯 Google 存储模式后台异步转存，并将其纳入停机排空跟踪表。
+   */
+  private startGDriveTransfer(params: Parameters<TelegramBotDispatchService['executeGDriveTransfer']>[0]): void {
+    const key = `${params.chatId}:${params.messageId}`;
+    const abortController = new AbortController();
+    const promise = this.executeGDriveTransfer(params, abortController);
+    this.activeTransfers.set(key, { abortController, promise });
+    promise.finally(() => {
+      this.activeTransfers.delete(key);
+    });
+  }
+
+  /**
    * 纯 Google 存储模式后台异步转存管线。
    */
-  private async executeGDriveTransfer(params: {
-    message: TelegramMessage;
-    identity: TelegramBotIdentity;
-    chatId: string;
-    messageId: string;
-    fileSize: number | null;
-    usageDate: string;
-    whitelisted: boolean;
-    quotaConsumed: boolean;
-    quotaUsed: number;
-    origin: string;
-    config: any;
-    waitingMsgId: number | null;
-    accountId?: string;
-  }): Promise<void> {
+  private async executeGDriveTransfer(
+    params: {
+      message: TelegramMessage;
+      identity: TelegramBotIdentity;
+      chatId: string;
+      messageId: string;
+      fileSize: number | null;
+      usageDate: string;
+      whitelisted: boolean;
+      quotaConsumed: boolean;
+      quotaUsed: number;
+      origin: string;
+      config: any;
+      waitingMsgId: number | null;
+      accountId?: string;
+    },
+    abortController?: AbortController,
+  ): Promise<void> {
+    const controller = abortController ?? new AbortController();
     const {
       message,
       identity,
@@ -1100,6 +1181,10 @@ export class TelegramBotDispatchService {
     let uploadSessionId: string | null = null;
 
     try {
+      if (controller.signal.aborted) {
+        throw new Error('服务正在维护重启，已取消转存');
+      }
+
       if (!this.storageRouter || !this.storageRouter.availableBackendTypes().includes('gdrive')) {
         throw new Error('Google 云端硬盘存储池暂不可用');
       }
@@ -1127,6 +1212,10 @@ export class TelegramBotDispatchService {
         }
       }
 
+      if (controller.signal.aborted) {
+        throw new Error('服务正在维护重启，已取消转存');
+      }
+
       // 1. 从 Telegram 拉取流并写入本地临时缓冲文件
       const upstreamStream = await this.getTelegramSourceStream(doc.file_id, fileSize ?? undefined, accountId);
       const meteringPassThrough = new Transform({
@@ -1135,7 +1224,13 @@ export class TelegramBotDispatchService {
           callback(null, chunk);
         },
       });
-      await pipeline(upstreamStream, meteringPassThrough, createWriteStream(tempFilePath));
+      await pipeline(upstreamStream, meteringPassThrough, createWriteStream(tempFilePath), {
+        signal: controller.signal,
+      });
+
+      if (controller.signal.aborted) {
+        throw new Error('服务正在维护重启，已取消转存');
+      }
 
       const fileStats = await stat(tempFilePath);
       const actualSize = fileStats.size;
@@ -1147,6 +1242,7 @@ export class TelegramBotDispatchService {
         knownLength: actualSize,
         mimeType: doc.mime_type || undefined,
         openStream: () => createReadStream(tempFilePath),
+        signal: controller.signal,
       });
 
       // 3. 上传完成，立即清理本地临时文件并释放磁盘租约
@@ -1158,6 +1254,10 @@ export class TelegramBotDispatchService {
       if (uploadSessionId && this.uploadDiskBudget) {
         this.uploadDiskBudget.releaseSession(uploadSessionId);
         uploadSessionId = null;
+      }
+
+      if (controller.signal.aborted) {
+        throw new Error('服务正在维护重启，已取消转存');
       }
 
       // 4. 签发直链授权记录
@@ -1220,12 +1320,15 @@ export class TelegramBotDispatchService {
       if (quotaConsumed) {
         await this.quotaService.refund(identity.telegramUserId, usageDate);
       }
+      const isAborted = controller.signal.aborted;
       const detail = error instanceof Error ? error.message : String(error);
-      this.logger.error(`纯 Google 存储模式转存并签发直链失败: ${detail}`);
-      const failText = error instanceof Error && error.message.includes('服务器临时磁盘空间不足')
-        ? error.message
-        : '创建下载链接失败，请稍后重试。';
-      await this.updateOrReply(chatId, waitingMsgId, failText, message.message_id, accountId);
+      this.logger.error(`纯 Google 存储模式转存并签发直链失败${isAborted ? '（服务停机中止）' : ''}: ${detail}`);
+      const failText = isAborted
+        ? '服务正在维护重启，请稍后重新发送文件。'
+        : (error instanceof Error && error.message.includes('服务器临时磁盘空间不足')
+          ? error.message
+          : '创建下载链接失败，请稍后重试。');
+      await this.updateOrReply(chatId, waitingMsgId, failText, message.message_id, accountId).catch(() => {});
     } finally {
       releaseTransferLease?.();
       await unlink(tempFilePath).catch(() => {});

@@ -744,6 +744,8 @@ describe('TelegramBotDispatchService（多 Bot 身份链路）', () => {
 });
 
 describe('TelegramBotDispatchService（纯 Google 存储模式）', () => {
+  const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
   async function waitFor(predicate: () => boolean | Promise<boolean>, timeout = 2000) {
     const start = Date.now();
     while (Date.now() - start < timeout) {
@@ -1123,5 +1125,112 @@ describe('TelegramBotDispatchService（纯 Google 存储模式）', () => {
     // 验证：已注册临时文件租约并在完成后释放
     expect(transferTracker.register).toHaveBeenCalledWith(expect.stringMatching(/bot-transfers.*\.tmp$/));
     expect(releaseMock).toHaveBeenCalled();
+  });
+
+  it('Finding 12: 停机时等待后台转存排空（自然完成）', async () => {
+    const pool = makePool(true);
+    const accountClient = {
+      sendMessage: jest.fn(async () => ({ messageId: 999 })),
+      forwardMessage: jest.fn(),
+      editMessageText: jest.fn(async () => true),
+    };
+    const storageRouter = {
+      availableBackendTypes: jest.fn(() => ['gdrive']),
+      upload: jest.fn(async () => {
+        await sleep(50);
+        return {
+          backendType: 'gdrive',
+          accountId: 'gdrive-acc-1',
+          objectRef: 'gdrive-file-id-123',
+        };
+      }),
+    };
+
+    const ctx = makeService({
+      pool,
+      accountClient,
+      storageRouter,
+      botConfig: { storageMode: 'gdrive' },
+    });
+    ctx.service.setShutdownDrainTimeoutMs(1000);
+
+    // 触发转存
+    await ctx.service.handleUpdate(makeMessageUpdate(), { accountId: '1234567' });
+    expect(ctx.service.getActiveTransferCount()).toBe(1);
+
+    // 触发停机排空
+    await ctx.service.onApplicationShutdown();
+
+    // 验证：后台转存已成功排空，直链正常签发，活跃计数归零
+    expect(ctx.service.getActiveTransferCount()).toBe(0);
+    expect(accountClient.editMessageText).toHaveBeenCalledWith(
+      '1234567',
+      '1234567:SECRET',
+      '7001',
+      999,
+      expect.stringContaining('文件已就绪！'),
+    );
+  });
+
+  it('Finding 12: 停机超时未排空的任务被主动中止并退还配额，提示用户重启', async () => {
+    const pool = makePool(true);
+    const accountClient = {
+      sendMessage: jest.fn(async () => ({ messageId: 999 })),
+      forwardMessage: jest.fn(),
+      editMessageText: jest.fn(async () => true),
+    };
+    const storageRouter = {
+      availableBackendTypes: jest.fn(() => ['gdrive']),
+      upload: jest.fn(async (params: any) => {
+        // 模拟长耗时上传，直到 signal abort
+        return new Promise((_resolve, reject) => {
+          params.signal?.addEventListener('abort', () => {
+            reject(new Error('上传已取消'));
+          });
+        });
+      }),
+    };
+
+    const ctx = makeService({
+      pool,
+      accountClient,
+      storageRouter,
+      botConfig: { storageMode: 'gdrive' },
+    });
+    // 设置很短的超时以测试 abort
+    ctx.service.setShutdownDrainTimeoutMs(50);
+
+    await ctx.service.handleUpdate(makeMessageUpdate(), { accountId: '1234567' });
+    expect(ctx.service.getActiveTransferCount()).toBe(1);
+
+    // 触发停机
+    await ctx.service.onApplicationShutdown();
+
+    // 验证：任务已排空，配额已退还，提示用户维护重启
+    expect(ctx.service.getActiveTransferCount()).toBe(0);
+    expect(ctx.quotaService.refund).toHaveBeenCalledWith('7001', '2026-09-21');
+    expect(accountClient.editMessageText).toHaveBeenCalledWith(
+      '1234567',
+      '1234567:SECRET',
+      '7001',
+      999,
+      '服务正在维护重启，请稍后重新发送文件。',
+    );
+  });
+
+  it('Finding 12: 停机过程中到来的新消息被直接拒绝且不扣配额', async () => {
+    const ctx = makeService({
+      botConfig: { storageMode: 'gdrive' },
+    });
+    // 触发停机
+    await ctx.service.onApplicationShutdown();
+
+    ctx.telegramService.sendMessage.mockClear();
+    await ctx.service.handleUpdate(makeMessageUpdate());
+
+    // 验证：没有消耗配额，直接提示维护重启
+    expect(ctx.quotaService.consume).not.toHaveBeenCalled();
+    const sentTexts = ctx.telegramService.sendMessage.mock.calls.map((call: any[]) => call[1]);
+    expect(sentTexts).toContain('服务正在维护重启中，请稍后重新发送文件。');
   });
 });

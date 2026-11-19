@@ -5,13 +5,14 @@ function makeService(
   envValues: Record<string, string | undefined>,
   cacheValues: Record<string, string> = {},
   storageRouter: any = null,
+  pool: any = null,
 ) {
   const configCacheService = {
     get: jest.fn(async (key: string, fallback: string) => cacheValues[key] ?? fallback),
     setBatch: jest.fn(async (_configs: { key: string; value: string; description?: string }[]) => undefined),
   };
   const configService = { get: jest.fn((key: string) => envValues[key]) };
-  const service = new TelegramBotConfigService(configCacheService as never, configService as never, storageRouter);
+  const service = new TelegramBotConfigService(configCacheService as never, configService as never, storageRouter, pool);
   return { service, configCacheService };
 }
 
@@ -92,6 +93,30 @@ describe('TelegramBotConfigService', () => {
 
     // 未配置 TELEGRAM_CHAT_ID 时拒绝切换回 telegram 模式
     await expect(service.updateConfig({ storageMode: 'telegram' })).rejects.toThrow('未配置 TELEGRAM_CHAT_ID');
+  });
+
+  it('Finding 11: 仅配置账号池存储群（无全局 TELEGRAM_CHAT_ID）时，允许切换为 Telegram 存储模式', async () => {
+    const mockPool: any = {
+      storageAccountIds: jest.fn(() => ['pool-account-1']),
+    };
+    const { service } = makeService({}, {}, null, mockPool);
+    const config = await service.getConfig();
+    expect(config.telegramStorageChatConfigured).toBe(true);
+
+    const updated = await service.updateConfig({ storageMode: 'telegram' });
+    expect(updated.storageMode).toBe('telegram');
+  });
+
+  it('Finding 11: 环境变量通过 TELEGRAM_ACCOUNT_POOL 配置存储群时，识别为已配置并放行', async () => {
+    const { service } = makeService({
+      TELEGRAM_ACCOUNT_POOL_ENABLED: 'true',
+      TELEGRAM_ACCOUNT_POOL: JSON.stringify([{ token: '123:ABC', chatId: '-100999888' }]),
+    });
+    const config = await service.getConfig();
+    expect(config.telegramStorageChatConfigured).toBe(true);
+
+    const updated = await service.updateConfig({ storageMode: 'telegram' });
+    expect(updated.storageMode).toBe('telegram');
   });
 
   it('手动模式使用面板域名，非法值 fail-closed', async () => {

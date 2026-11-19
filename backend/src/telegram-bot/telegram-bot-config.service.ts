@@ -4,6 +4,7 @@ import { Request } from 'express';
 import { ConfigCacheService } from '../common/services/config-cache.service';
 import { isValidSiteOrigin, isValidTimeZone } from '../config/env-validation';
 import { StorageRouterService } from '../storage/storage-router.service';
+import { TelegramAccountPoolService } from '../telegram-account-pool/telegram-account-pool.service';
 import {
   BOT_CONFIG_DEFAULTS,
   BOT_CONFIG_KEYS,
@@ -27,7 +28,48 @@ export class TelegramBotConfigService {
     private readonly configService: ConfigService,
     @Optional() @Inject(StorageRouterService)
     private readonly storageRouter: StorageRouterService | null = null,
+    @Optional() @Inject(TelegramAccountPoolService)
+    private readonly pool: TelegramAccountPoolService | null = null,
   ) {}
+
+  /**
+   * 是否配置了有效的 Telegram 存储 Chat（全局 TELEGRAM_CHAT_ID 或账号池各账号的 chatId）。
+   */
+  isTelegramStorageChatConfigured(): boolean {
+    const telegramChatId = (this.configService.get<string>('TELEGRAM_CHAT_ID') || '').trim();
+    if (telegramChatId) {
+      return true;
+    }
+
+    if (this.pool && this.pool.storageAccountIds().length > 0) {
+      return true;
+    }
+
+    const poolEnabled = (this.configService.get<string>('TELEGRAM_ACCOUNT_POOL_ENABLED') || '')
+      .trim()
+      .toLowerCase() === 'true';
+    if (poolEnabled) {
+      const poolRaw = (this.configService.get<string>('TELEGRAM_ACCOUNT_POOL') || '').trim();
+      if (poolRaw) {
+        try {
+          const parsed = JSON.parse(poolRaw);
+          if (Array.isArray(parsed)) {
+            const hasChat = parsed.some((item) => {
+              const entry = item as Record<string, unknown>;
+              return Boolean(String(entry?.chatId ?? entry?.chat_id ?? '').trim());
+            });
+            if (hasChat) {
+              return true;
+            }
+          }
+        } catch {
+          // 忽略非法 JSON，由启动期 env-validation 兜底拦截
+        }
+      }
+    }
+
+    return false;
+  }
 
   /** 读取运行时配置（面板值优先，缺失时用 env 兜底） */
   async getConfig(): Promise<TelegramBotRuntimeConfig> {
@@ -60,8 +102,7 @@ export class TelegramBotConfigService {
 
     const ttl = Number(ttlRaw);
     const limit = Number(limitRaw);
-    const telegramChatId = (this.configService.get<string>('TELEGRAM_CHAT_ID') || '').trim();
-    const telegramStorageChatConfigured = Boolean(telegramChatId);
+    const telegramStorageChatConfigured = this.isTelegramStorageChatConfigured();
 
     return {
       linkTtlHours: Number.isSafeInteger(ttl) && ttl >= BOT_CONFIG_LIMITS.minTtlHours && ttl <= BOT_CONFIG_LIMITS.maxTtlHours
@@ -145,9 +186,8 @@ export class TelegramBotConfigService {
         throw new BadRequestException('存储模式必须为 telegram 或 gdrive');
       }
       if (mode === 'telegram') {
-        const telegramChatId = (this.configService.get<string>('TELEGRAM_CHAT_ID') || '').trim();
-        if (!telegramChatId) {
-          throw new BadRequestException('未配置 TELEGRAM_CHAT_ID，无法切换为 Telegram 存储模式（强制使用纯 Google 存储模式）');
+        if (!this.isTelegramStorageChatConfigured()) {
+          throw new BadRequestException('未配置 TELEGRAM_CHAT_ID 或账号池存储群组，无法切换为 Telegram 存储模式（强制使用纯 Google 存储模式）');
         }
       }
       if (mode === 'gdrive' && this.storageRouter) {
