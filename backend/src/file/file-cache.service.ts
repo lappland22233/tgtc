@@ -912,6 +912,16 @@ export class FileCacheService implements OnApplicationShutdown {
     );
   }
 
+  /** 释放指定文件与版本的交接预约（免本地硬盘缓存分支调用） */
+  releaseHandedOffDownloadReservation(
+    fileId: string,
+    contentVersion: string | number | undefined,
+  ): boolean {
+    return this.resources.releaseHandedOffReservation(
+      this.sessionCoordinator.sessionKeyFor(fileId, contentVersion),
+    );
+  }
+
   /** 回收超时未被采用的交接预约（由下载任务服务的定时清扫调用） */
   purgeExpiredDownloadReservations(): void {
     this.resources.purgeExpiredHandOffs();

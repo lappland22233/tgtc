@@ -26,6 +26,7 @@ import {
 @Index('uq_tg_bot_grants_message', ['telegramUserId', 'chatId', 'messageId'], { unique: true })
 @Index('idx_tg_bot_grants_fileUniqueId', ['fileUniqueId'])
 @Index('idx_tg_bot_grants_purge_sweep', ['storageBackend', 'storagePurgedAt', 'expiresAt'])
+@Index('idx_tg_bot_grants_gdrive_cache_ref', ['gdriveCacheAccountId', 'gdriveCacheObjectRef'])
 export class TelegramBotFileGrant {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -104,6 +105,18 @@ export class TelegramBotFileGrant {
   /** 远端对象删除时间戳（已到期自动清理后打标） */
   @Column({ type: databaseColumnType('timestamptz') as 'timestamptz', nullable: true, comment: '远端对象删除时间戳' })
   storagePurgedAt: Date | null;
+
+  /** Google 缓存模式：缓存所在的 GDrive 账号 ID */
+  @Column({ type: 'varchar', length: 64, nullable: true, comment: 'Google 缓存账号 ID' })
+  gdriveCacheAccountId: string | null;
+
+  /** Google 缓存模式：缓存所在的 GDrive 对象引用（fileId） */
+  @Column({ type: 'varchar', length: 1024, nullable: true, comment: 'Google 缓存对象引用' })
+  gdriveCacheObjectRef: string | null;
+
+  /** Google 缓存模式：缓存状态（none | pending | ready | failed） */
+  @Column({ type: 'varchar', length: 16, nullable: true, default: 'none', comment: 'Google 缓存状态' })
+  gdriveCacheStatus: 'none' | 'pending' | 'ready' | 'failed' | null;
 
   /** SHA-256(token) 十六进制摘要，校验用 */
   @Column({ type: 'varchar', length: 64, comment: 'SHA-256(token)' })

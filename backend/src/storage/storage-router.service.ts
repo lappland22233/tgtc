@@ -21,6 +21,10 @@ import {
 const MAX_ACCOUNT_ATTEMPTS = 3;
 /** 默认存储后端配置键（SystemConfig，热更新；会话创建时冻结到 File 记录） */
 export const STORAGE_DEFAULT_BACKEND_KEY = 'STORAGE_DEFAULT_BACKEND';
+/** Google 云端硬盘缓存模式配置键（'true' | 'false'，开启后 Telegram 存储文件镜像到 GDrive 账号池，下载免本地硬盘缓存） */
+export const STORAGE_GDRIVE_CACHE_MODE_KEY = 'STORAGE_GDRIVE_CACHE_MODE';
+/** Google Drive 分块大小（MB，可选 8/16/32/64，默认 16） */
+export const STORAGE_GDRIVE_CHUNK_SIZE_MB_KEY = 'STORAGE_GDRIVE_CHUNK_SIZE_MB';
 
 /**
  * 存储路由编排：上传选号换号 + 回源 fail-closed + 对象生命周期。
@@ -65,6 +69,25 @@ export class StorageRouterService {
     }
     this.warnedFallback = false;
     return raw;
+  }
+
+  /**
+   * Google 云端硬盘缓存模式是否启用。
+   * 需同时满足：配置开启 + GDrive 至少有 1 个可用账号。
+   */
+  async isGDriveCacheModeEnabled(): Promise<boolean> {
+    const raw = (await this.configCache.get(STORAGE_GDRIVE_CACHE_MODE_KEY, 'false')).trim().toLowerCase();
+    if (raw !== 'true' && raw !== '1') return false;
+    return this.scheduler.activeAccountIds('gdrive').length > 0;
+  }
+
+  /**
+   * 获取配置的 GDrive 分块上传大小（字节），缺省 16MB，有效值 8/16/32/64 MB。
+   */
+  async getGDriveChunkSizeBytes(): Promise<number> {
+    const raw = Number(await this.configCache.get(STORAGE_GDRIVE_CHUNK_SIZE_MB_KEY, '16'));
+    const mb = [8, 16, 32, 64].includes(raw) ? raw : 16;
+    return mb * 1024 * 1024;
   }
 
   /** 管理端可选后端列表（telegram 恒在；其余仅列出有 active 账号的类型） */
@@ -140,7 +163,10 @@ export class StorageRouterService {
           excluded.add(selection.accountId);
           continue;
         }
-        const result = await driver.upload(ctx, params);
+        const uploadParams = params.backendType === 'gdrive' && !params.chunkSize
+          ? { ...params, chunkSize: await this.getGDriveChunkSizeBytes() }
+          : params;
+        const result = await driver.upload(ctx, uploadParams);
         const durationMs = Date.now() - startedAt;
         this.scheduler.finishAttempt(selection.accountId, { ok: true, bytes: result.size, durationMs }, Date.now(), params.knownLength);
         void this.backends.recordOutcome(selection.accountId, { ok: true });
@@ -239,6 +265,11 @@ export class StorageRouterService {
     try {
       ctx = await this.backends.resolveContext(params.accountId);
     } catch (error) {
+      const is404 = (error as any)?.statusCode === 404 || (error as any)?.response?.status === 404;
+      if (is404) {
+        this.scheduler.releaseAttempt(params.accountId);
+        throw new StorageDownloadUnavailableError('upstream_failed');
+      }
       const kind = error instanceof StorageAccountError ? error.kind : 'other';
       this.scheduler.finishAttempt(params.accountId, {
         ok: false,

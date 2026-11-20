@@ -79,14 +79,26 @@ export class TasksService {
       const MAX_SCAN_PAGES = 5;
       const eligibleGrants: TelegramBotFileGrant[] = [];
 
+      const inCoolingIds = Array.from(this.purgeRetrySchedule.entries())
+        .filter(([_, r]) => nowMs < r.nextRetry)
+        .map(([id]) => id)
+        .slice(0, 500);
+
       for (let page = 0; page < MAX_SCAN_PAGES; page += 1) {
         const qb = this.grantRepository
           .createQueryBuilder('grant')
-          .where('grant.storageBackend = :backend', { backend: 'gdrive' })
+          .where(
+            '((grant.storageBackend = :backend AND grant.storageObjectRef IS NOT NULL) OR (grant.gdriveCacheObjectRef IS NOT NULL))',
+            { backend: 'gdrive' },
+          )
           .andWhere('grant.storagePurgedAt IS NULL')
-          .andWhere('grant.storageObjectRef IS NOT NULL')
-          .andWhere('(grant.expiresAt < :now OR grant.revokedAt IS NOT NULL)', { now })
-          .orderBy('grant.expiresAt', 'ASC');
+          .andWhere('(grant.expiresAt < :now OR grant.revokedAt IS NOT NULL)', { now });
+
+        if (inCoolingIds.length > 0) {
+          qb.andWhere('grant.id NOT IN (:...inCoolingIds)', { inCoolingIds });
+        }
+
+        qb.orderBy('grant.expiresAt', 'ASC');
 
         if (typeof (qb as any).offset === 'function') {
           (qb as any).offset(page * BATCH_SIZE);
@@ -112,9 +124,11 @@ export class TasksService {
 
       let deletedCount = 0;
       for (const grant of eligibleGrants) {
-        if (!grant.storageAccountId || !grant.storageObjectRef) continue;
+        const accountId = grant.storageBackend === 'gdrive' ? grant.storageAccountId : grant.gdriveCacheAccountId;
+        const objectRef = grant.storageBackend === 'gdrive' ? grant.storageObjectRef : grant.gdriveCacheObjectRef;
+        if (!accountId || !objectRef) continue;
         try {
-          const success = await this.storageRouter.deleteRemoteObject('gdrive', grant.storageAccountId, grant.storageObjectRef);
+          const success = await this.storageRouter.deleteRemoteObject('gdrive', accountId, objectRef);
           // [P0-06 Fix]: 校验 deleteRemoteObject 返回值，仅当删除确认成功时才置 storagePurgedAt
           if (success) {
             grant.storagePurgedAt = new Date();

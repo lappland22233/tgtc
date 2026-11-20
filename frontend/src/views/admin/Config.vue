@@ -465,6 +465,14 @@
           <div class="bot-hint">
             {{ botConfig.storageMode === 'gdrive' ? '纯 Google 模式：文件入站时自动转存至 Google 云端硬盘并生成下载直链，直链到期后自动从云端硬盘中永久删除。' : '原生模式：文件留存在 Telegram 官方服务器，通过本地回源流式提供下载。' }}
           </div>
+          <div v-if="botConfig.storageMode === 'gdrive'" style="margin-top: 8px; padding: 10px 12px; background: var(--td-bg-color-page, #f3f5f8); border-radius: 6px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
+            <span style="font-size: 12px; color: var(--td-text-color-secondary);">
+              Google Drive 存储依赖 OAuth 客户端凭据与存储账号池授权。
+            </span>
+            <t-button size="small" variant="text" theme="primary" @click="$router.push('/admin/storage-backends')">
+              前往配置 OAuth 客户端与账号池 →
+            </t-button>
+          </div>
         </t-form-item>
       </t-form>
 

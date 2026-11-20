@@ -5,7 +5,9 @@ import {
   GDriveOAuthService,
   GDRIVE_OAUTH_CLIENT_ID_KEY,
   GDRIVE_OAUTH_CLIENT_SECRET_KEY,
+  GDRIVE_OAUTH_REDIRECT_URI_KEY,
   GDRIVE_SCOPES,
+  extractOAuthCode,
 } from './gdrive-oauth.service';
 import { StorageCredentialService } from './storage-credential.service';
 
@@ -72,16 +74,59 @@ describe('GDriveOAuthService（mock OAuth + 录制响应）', () => {
     expect(await configured.getClientConfig()).toEqual({
       clientId: 'client-123.apps.googleusercontent.com',
       clientSecret: 'super-secret',
+      redirectUri: null,
     });
   });
 
-  it('setClientConfig：secret 加密落库（明文不出现在存储值中）', async () => {
+  it('setClientConfig：secret 加密落库，且可选持久化常用 redirectUri', async () => {
     const { service, store } = makeService();
-    await service.setClientConfig('client-abc', 'plain-secret-value');
+    await service.setClientConfig('client-abc', 'plain-secret-value', 'https://example.com/callback');
     expect(store.get(GDRIVE_OAUTH_CLIENT_ID_KEY)).toBe('client-abc');
     const stored = store.get(GDRIVE_OAUTH_CLIENT_SECRET_KEY)!;
     expect(stored.startsWith('v1:')).toBe(true);
     expect(stored).not.toContain('plain-secret-value');
+    expect(store.get(GDRIVE_OAUTH_REDIRECT_URI_KEY)).toBe('https://example.com/callback');
+
+    expect(await service.getClientConfig()).toEqual({
+      clientId: 'client-abc',
+      clientSecret: 'plain-secret-value',
+      redirectUri: 'https://example.com/callback',
+    });
+
+    // 留空 secret 修改 client_id / redirectUri 时保留原 secret
+    await service.setClientConfig('new-client-id', '', 'https://new.example.com');
+    const updated = await service.getClientConfig();
+    expect(updated).toEqual({
+      clientId: 'new-client-id',
+      clientSecret: 'plain-secret-value',
+      redirectUri: 'https://new.example.com',
+    });
+  });
+
+  it('setClientConfig：首次配置留空 secret 时抛出 400', async () => {
+    const { service } = makeService();
+    await expect(service.setClientConfig('client-abc', '')).rejects.toThrow('首次配置必须提供 client_secret');
+  });
+
+  it('clearClientConfig：清除 OAuth Client 配置与重定向地址', async () => {
+    const { service } = makeService({ clientId: 'id', secretCipher: encryptedSecret('sec') });
+    expect(await service.isConfigured()).toBe(true);
+    await service.clearClientConfig();
+    expect(await service.isConfigured()).toBe(false);
+  });
+
+  it('extractOAuthCode：智能解析纯 code、完整重定向 URL 及 query 串', () => {
+    // 纯 code
+    expect(extractOAuthCode('4/0AcvXYZ123')).toBe('4/0AcvXYZ123');
+    // 带空格的纯 code
+    expect(extractOAuthCode('  4/0AcvXYZ123  ')).toBe('4/0AcvXYZ123');
+    // 完整重定向 URL (带其他参数)
+    expect(extractOAuthCode('http://localhost:5173/admin/storage-backends/gdrive-callback?state=xyz&code=4/0AcvXYZ123&scope=email'))
+      .toBe('4/0AcvXYZ123');
+    // 裸 query 字符串
+    expect(extractOAuthCode('code=4/0AcvXYZ123&scope=email')).toBe('4/0AcvXYZ123');
+    // URL 编码的 code 参数
+    expect(extractOAuthCode('https://example.com/cb?code=4%2F0AcvXYZ123')).toBe('4/0AcvXYZ123');
   });
 
   it('setClientConfig：根密钥缺失时拒绝（fail-closed）', async () => {
@@ -108,13 +153,13 @@ describe('GDriveOAuthService（mock OAuth + 录制响应）', () => {
     await expect(configured.buildAuthUrl('  ')).rejects.toThrow('redirectUri');
   });
 
-  it('exchangeCode 成功：refresh_token + 邮箱 + 配额（录制响应）', async () => {
+  it('exchangeCode 成功：refresh_token + 邮箱 + 配额（录制响应，支持全 URL 自动解析 code）', async () => {
     mockGetToken.mockResolvedValue({ tokens: { refresh_token: 'rt-1', access_token: 'at-1' } });
     api.get
       .mockResolvedValueOnce({ data: { email: 'user@gmail.com' } }) // userinfo
       .mockResolvedValueOnce({ data: { storageQuota: { limit: String(15 * 1024 ** 3), usage: '1024' } } }); // about
     const { service } = makeService({ clientId: 'cid', secretCipher: encryptedSecret('sec') });
-    const result = await service.exchangeCode('auth-code', 'http://localhost/callback');
+    const result = await service.exchangeCode('https://example.com/callback?code=auth-code&state=123', 'http://localhost/callback');
     expect(result.refreshToken).toBe('rt-1');
     expect(result.email).toBe('user@gmail.com');
     expect(result.quota).toEqual({ totalBytes: 15 * 1024 ** 3, usedBytes: 1024 });
@@ -154,5 +199,20 @@ describe('GDriveOAuthService（mock OAuth + 录制响应）', () => {
   it('createAuthorizedClient：未配置 OAuth Client 时抛 auth 类错误', async () => {
     const { service } = makeService();
     await expect(service.createAuthorizedClient('rt')).rejects.toMatchObject({ kind: 'auth' });
+  });
+
+  it('generateState & verifyState：紧凑 signed state 校验有效性、归属及防篡改', () => {
+    const { service } = makeService();
+    const state = service.generateState('admin-1');
+    expect(state).toBeDefined();
+    expect(service.verifyState(state, 'admin-1')).toBe(true);
+    expect(service.verifyState(state, 'admin-2')).toBe(false);
+    expect(service.verifyState('invalid-state', 'admin-1')).toBe(false);
+
+    // 兼容历史长键名格式
+    const legacyPayload = { userId: 'admin-1', timestamp: Date.now(), nonce: '123' };
+    const legacyEncoded = Buffer.from(JSON.stringify(legacyPayload)).toString('base64url');
+    expect(service.verifyState(legacyEncoded, 'admin-1')).toBe(true);
+    expect(service.verifyState(legacyEncoded, 'admin-2')).toBe(false);
   });
 });

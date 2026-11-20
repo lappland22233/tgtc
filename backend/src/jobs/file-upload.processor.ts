@@ -11,7 +11,7 @@ import { UploadDiskBudgetService } from '../file/upload-disk-budget.service';
 import { AccountAwareUploadService, AccountUploadUnavailableError } from '../telegram-account-pool/account-aware-upload.service';
 // 可插拔存储后端（S3 / WebDAV / GDrive）：可选依赖，未装配时非 TG 文件无法上传（诊断性失败）
 import { StorageRouterService } from '../storage/storage-router.service';
-import { isRemoteStorageBackend, StorageUploadUnavailableError } from '../storage/storage.types';
+import { isRemoteStorageBackend, StorageUploadReceipt, StorageUploadUnavailableError } from '../storage/storage.types';
 import { createReadStream, existsSync } from 'fs';
 import { readFile, rename, unlink, writeFile } from 'fs/promises';
 import { databaseQuery, getDatabaseType } from '../database/database-types';
@@ -213,7 +213,7 @@ export class FileUploadProcessor {
         objectName: file.originalName,
         knownLength,
         // 换号重试必须新开流：流只能被消费一次
-        openStream: () => createReadStream(filePath),
+        openStream: () => createReadStream(filePath, { highWaterMark: 1024 * 1024 }),
       });
       return {
         file_id: '',
@@ -568,6 +568,49 @@ export class FileUploadProcessor {
       this.logger.warn(
         `文件 ${fileId} 主副本定位登记/镜像触发失败（不影响上传结果）：${(error as Error).message}`,
       );
+    }
+
+    // Google 缓存模式异步双写（主存储为 Telegram 时镜像一份至 GDrive 账号池）
+    if (!isNonTelegram && this.storageRouter) {
+      let gdriveReceipt: StorageUploadReceipt | null = null;
+      try {
+        if (await this.storageRouter.isGDriveCacheModeEnabled()) {
+          const knownLength = Number(file.size);
+          const receipt = await this.storageRouter.upload({
+            backendType: 'gdrive',
+            objectName: file.originalName,
+            knownLength,
+            mimeType: file.mimeType || undefined,
+            openStream: () => createReadStream(filePath, { highWaterMark: 1024 * 1024 }),
+          });
+          gdriveReceipt = receipt;
+          const updateResult = await this.fileRepository.update(
+            { id: fileId, uploadVersion },
+            {
+              gdriveCacheAccountId: receipt.accountId,
+              gdriveCacheObjectRef: receipt.objectRef,
+              gdriveCacheStatus: 'ready',
+            } as Partial<File>,
+          );
+          if (updateResult.affected === 0) {
+            this.logger.warn(`文件 ${fileId} 版本已变更或记录已删除，清理孤立的 Google 缓存副本`);
+            if (receipt.accountId) {
+              await this.storageRouter.deleteRemoteObject('gdrive', receipt.accountId, receipt.objectRef).catch((delErr) => {
+                this.logger.warn(`清理孤立 Google 缓存失败: ${(delErr as Error).message}`);
+              });
+            }
+          } else {
+            this.logger.log(`文件 ${fileId} 已成功同步至 Google 缓存（账号: ${receipt.accountId}）`);
+          }
+        }
+      } catch (cacheErr) {
+        if (gdriveReceipt?.accountId) {
+          await this.storageRouter.deleteRemoteObject('gdrive', gdriveReceipt.accountId, gdriveReceipt.objectRef).catch((delErr) => {
+            this.logger.warn(`异常分支清理 Google 缓存失败: ${(delErr as Error).message}`);
+          });
+        }
+        this.logger.warn(`文件 ${fileId} Google 缓存同步失败（不影响主存储）：${(cacheErr as Error).message}`);
+      }
     }
 
     await this.removeUploadArtifacts(filePath, fileId, uploadVersion);

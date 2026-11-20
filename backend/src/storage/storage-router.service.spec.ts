@@ -314,4 +314,31 @@ describe('StorageRouterService（路由 / 换号 / fail-closed）', () => {
     expect(scheduler.getRuntime('a')!.cooldownUntil).toBe(0);
     expect(backends.recordOutcome).not.toHaveBeenCalledWith('a', expect.objectContaining({ ok: false }));
   });
+
+  it('isGDriveCacheModeEnabled 必须配置开启且 GDrive 有可用账号', async () => {
+    const { router, configCache, scheduler } = makeRouter({ accounts: [] });
+    expect(await router.isGDriveCacheModeEnabled()).toBe(false);
+
+    configCache.get.mockImplementation(async (key: string, fallback: string) => {
+      if (key === 'STORAGE_GDRIVE_CACHE_MODE') return 'true';
+      return fallback;
+    });
+    // 无 GDrive 账号仍返回 false
+    expect(await router.isGDriveCacheModeEnabled()).toBe(false);
+
+    // 同步 1 个 active GDrive 账号后变为 true
+    scheduler.syncAccounts([makeAccount('gd-1', 'gdrive')]);
+    expect(await router.isGDriveCacheModeEnabled()).toBe(true);
+  });
+
+  it('getGDriveChunkSizeBytes 返回合法分块大小（默认 16MB，有效 8/16/32/64）', async () => {
+    const { router, configCache } = makeRouter();
+    expect(await router.getGDriveChunkSizeBytes()).toBe(16 * 1024 * 1024);
+
+    configCache.get.mockImplementation(async (key: string, fallback: string) => {
+      if (key === 'STORAGE_GDRIVE_CHUNK_SIZE_MB') return '32';
+      return fallback;
+    });
+    expect(await router.getGDriveChunkSizeBytes()).toBe(32 * 1024 * 1024);
+  });
 });

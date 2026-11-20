@@ -264,14 +264,23 @@ export class ShareController {
     @Req() req: Request,
     @Res() res: Response,
   ) {
-    await this.assertShareRateLimit(token, req);
-    const accessJwt = this.getAccessJwt(req);
-    const result = await this.shareService.getShareThumbnailStream(token, fileId, accessJwt);
-    res.setHeader('Content-Type', result.contentType);
-    res.setHeader('Cache-Control', accessJwt ? 'private, max-age=300' : 'public, max-age=300');
-    res.setHeader('Referrer-Policy', 'no-referrer');
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-    result.stream.pipe(res);
+    try {
+      await this.assertShareRateLimit(token, req);
+      const accessJwt = this.getAccessJwt(req);
+      const result = await this.shareService.getShareThumbnailStream(token, fileId, accessJwt);
+      await this.streamResponder.send({
+        res,
+        headers: {
+          'Content-Type': result.contentType,
+          'Cache-Control': accessJwt ? 'private, max-age=300' : 'public, max-age=300',
+          'Referrer-Policy': 'no-referrer',
+          'X-Content-Type-Options': 'nosniff',
+        },
+        stream: result.stream,
+      });
+    } catch (error) {
+      this.streamResponder.handleError(res, error, '获取缩略图失败', req);
+    }
   }
 
   /** 公开高清封面：鉴权但不计入分享访问/下载次数。 */
@@ -282,14 +291,23 @@ export class ShareController {
     @Req() req: Request,
     @Res() res: Response,
   ) {
-    await this.assertShareRateLimit(token, req);
-    const accessJwt = this.getAccessJwt(req);
-    const result = await this.shareService.getShareHdThumbnailStream(token, fileId, accessJwt);
-    res.setHeader('Content-Type', result.contentType);
-    res.setHeader('Cache-Control', accessJwt ? 'private, max-age=300' : 'public, max-age=300');
-    res.setHeader('Referrer-Policy', 'no-referrer');
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-    result.stream.pipe(res);
+    try {
+      await this.assertShareRateLimit(token, req);
+      const accessJwt = this.getAccessJwt(req);
+      const result = await this.shareService.getShareHdThumbnailStream(token, fileId, accessJwt);
+      await this.streamResponder.send({
+        res,
+        headers: {
+          'Content-Type': result.contentType,
+          'Cache-Control': accessJwt ? 'private, max-age=300' : 'public, max-age=300',
+          'Referrer-Policy': 'no-referrer',
+          'X-Content-Type-Options': 'nosniff',
+        },
+        stream: result.stream,
+      });
+    } catch (error) {
+      this.streamResponder.handleError(res, error, '获取高清缩略图失败', req);
+    }
   }
 
   /** 分享文件缓存状态：供前端判断冷资源单连接策略，不消费访问次数。 */

@@ -1153,4 +1153,24 @@ describe('FileCacheService 下载调度配置规范化', () => {
     expect(snapshot.oldestUpstreamWaitMs).toBe(0);
     expect(snapshot.activeUpstreamWeight).toBe(0);
   });
+
+  it('handOffDownloadReservation 与 releaseHandedOffDownloadReservation 正确交接与释放预约', async () => {
+    const svc = await buildService();
+    const reservation = {
+      active: true,
+      grantedBytes: 1024,
+      remainingBytes: 1024,
+      countsTowardCache: false,
+      consume: jest.fn(),
+      release: jest.fn(),
+    } as any;
+
+    svc.handOffDownloadReservation('file-123', 1, reservation);
+    expect(svc.resources.handedOffReservationCount).toBe(1);
+
+    const released = svc.releaseHandedOffDownloadReservation('file-123', 1);
+    expect(released).toBe(true);
+    expect(svc.resources.handedOffReservationCount).toBe(0);
+    expect(reservation.release).toHaveBeenCalled();
+  });
 });

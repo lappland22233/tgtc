@@ -75,6 +75,8 @@ export interface StorageUploadParams {
   knownLength: number;
   mimeType?: string;
   signal?: AbortSignal;
+  /** 可选分块大小（如 GDrive 允许指定 16MB/32MB/64MB 等，必须是 256KB 的倍数） */
+  chunkSize?: number;
 }
 
 export interface StorageUploadResult {

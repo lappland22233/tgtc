@@ -915,6 +915,18 @@ export class DownloadResourceCoordinatorService {
     return entry.reservation;
   }
 
+  /**
+   * 释放并清除同会话暂存的交接预约（例如取流决定直接走免本地缓存的远端中转时）。
+   * 返回是否实际找到并释放了预约。
+   */
+  releaseHandedOffReservation(sessionKey: string): boolean {
+    const entry = this.handedOffReservations.get(sessionKey);
+    if (!entry) return false;
+    this.handedOffReservations.delete(sessionKey);
+    entry.reservation.release();
+    return true;
+  }
+
   /** 回收超时未采用的交接预约（返回回收数量） */
   purgeExpiredHandOffs(): number {
     const now = Date.now();

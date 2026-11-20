@@ -76,6 +76,7 @@ describe('GDriveStorageDriver（mock Drive v3 REST）', () => {
     expect(url).toContain('/upload/drive/v3/files');
     expect(options.params).toMatchObject({ uploadType: 'multipart' });
     expect(options.headers.Authorization).toBe('Bearer access-token');
+    expect(options.httpsAgent).toBeDefined();
     const body = (payload as Buffer).toString('utf8');
     expect(body).toContain('"parents":["root-folder-1"]');
     expect(body).toContain('image/jpeg');
@@ -113,11 +114,13 @@ describe('GDriveStorageDriver（mock Drive v3 REST）', () => {
       objectName: 'multi.bin',
       openStream: () => Readable.from([bytes]),
       knownLength: 16 * MB,
+      chunkSize: 8 * MB,
     });
     expect(result.objectRef).toBe('file-multi');
     expect(api.put).toHaveBeenCalledTimes(2);
     expect(api.put.mock.calls[0][2].headers['Content-Range']).toBe(`bytes 0-${8 * MB - 1}/${16 * MB}`);
     expect(api.put.mock.calls[1][2].headers['Content-Range']).toBe(`bytes ${8 * MB}-${16 * MB - 1}/${16 * MB}`);
+    expect(api.put.mock.calls[0][2].httpsAgent).toBeDefined();
   });
 
   it('resumable 块级重试：5xx 重试同一块（先探测进度确认未接收，再重发同一块）', async () => {

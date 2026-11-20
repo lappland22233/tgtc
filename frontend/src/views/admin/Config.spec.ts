@@ -243,6 +243,7 @@ describe('Config.vue Telegram Bot 设置', () => {
       quotaTimezone: 'Asia/Shanghai',
       linkDomainMode: 'manual',
       linkDomain: 'https://text.lappland.top',
+      storageMode: 'telegram',
     });
     expect(MessagePlugin.success).toHaveBeenCalledWith('Bot 配置已保存');
   });

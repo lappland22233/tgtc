@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { OAuth2Client } from 'google-auth-library';
 import axios, { AxiosError, AxiosResponse } from 'axios';
+import https from 'https';
 import { createHash, randomUUID } from 'crypto';
 import { Readable } from 'stream';
 import type { GDriveBackendConfig } from '../../common/entities/storage-backend.entity';
@@ -24,8 +25,8 @@ const DRIVE_API = 'https://www.googleapis.com/drive/v3';
 const DRIVE_UPLOAD = 'https://www.googleapis.com/upload/drive/v3/files';
 /** 小文件 multipart 阈值（Google 建议 <=5MB 走 multipart） */
 const MULTIPART_THRESHOLD_BYTES = 5 * 1024 * 1024;
-/** resumable 分块大小：8MB（Google 要求 256KB 的倍数） */
-const RESUMABLE_CHUNK_BYTES = 8 * 1024 * 1024;
+/** 默认 resumable 分块大小：16MB（Google 要求 256KB 的倍数，官方建议高吞吐环境使用 16MB/32MB） */
+export const DEFAULT_RESUMABLE_CHUNK_BYTES = 16 * 1024 * 1024;
 /** 单块网络/5xx 重试次数（resumable 会话内重试不重传整个文件） */
 const CHUNK_RETRY_LIMIT = 3;
 /** 流式上游错误体只读取有限字节，足以解析 Google API 的限流 reason。 */
@@ -56,6 +57,12 @@ export class GDriveStorageDriver implements StorageBackendDriver {
   readonly type = 'gdrive' as const;
   private readonly clients = new Map<string, { fingerprint: string; client: OAuth2Client }>();
   private readonly rootFolderLocks = new Map<string, Promise<string>>();
+  private readonly httpsAgent = new https.Agent({
+    keepAlive: true,
+    keepAliveMsecs: 60_000,
+    maxSockets: 64,
+    maxFreeSockets: 16,
+  });
 
   constructor(
     private readonly oauth: GDriveOAuthService,
@@ -95,6 +102,7 @@ export class GDriveStorageDriver implements StorageBackendDriver {
           timeout: 60_000,
           maxContentLength: Infinity,
           maxBodyLength: Infinity,
+          httpsAgent: this.httpsAgent,
         },
       );
       const contentRange = response.headers['content-range'] as string | undefined;
@@ -121,6 +129,7 @@ export class GDriveStorageDriver implements StorageBackendDriver {
           params: { fields: 'id,size,trashed' },
           headers: { Authorization: `Bearer ${token}` },
           timeout: 15_000,
+          httpsAgent: this.httpsAgent,
         },
       );
       if (response.data?.trashed) return { exists: false };
@@ -139,6 +148,7 @@ export class GDriveStorageDriver implements StorageBackendDriver {
       await axios.delete(`${DRIVE_API}/files/${encodeURIComponent(objectRef)}`, {
         headers: { Authorization: `Bearer ${token}` },
         timeout: 15_000,
+        httpsAgent: this.httpsAgent,
       });
     } catch (error) {
       const status = (error as AxiosError)?.response?.status;
@@ -155,6 +165,7 @@ export class GDriveStorageDriver implements StorageBackendDriver {
         params: { fields: 'storageQuota' },
         headers: { Authorization: `Bearer ${token}` },
         timeout: 15_000,
+        httpsAgent: this.httpsAgent,
       });
       return { ok: true, latencyMs: Date.now() - startedAt };
     } catch (error) {
@@ -202,6 +213,7 @@ export class GDriveStorageDriver implements StorageBackendDriver {
         signal: params.signal,
         timeout: 120_000,
         maxBodyLength: Infinity,
+        httpsAgent: this.httpsAgent,
       },
     );
     return { objectRef: response.data.id, size: Number(response.data.size ?? params.knownLength) };
@@ -222,6 +234,7 @@ export class GDriveStorageDriver implements StorageBackendDriver {
         validateStatus: (status) => status === 308 || (status >= 200 && status < 300),
         timeout: 15_000,
         signal,
+        httpsAgent: this.httpsAgent,
       });
       if (response.status === 308) {
         const rangeHeader = response.headers.range as string | undefined;
@@ -264,12 +277,13 @@ export class GDriveStorageDriver implements StorageBackendDriver {
       },
       signal: params.signal,
       timeout: 30_000,
+      httpsAgent: this.httpsAgent,
     });
     const sessionUri = init.headers.location as string | undefined;
     if (!sessionUri) throw new StorageAccountError('GDrive resumable 会话未返回上传地址', 'other');
 
     const abortSession = () => {
-      void axios.delete(sessionUri, { timeout: 10_000 }).catch(() => {});
+      void axios.delete(sessionUri, { timeout: 10_000, httpsAgent: this.httpsAgent }).catch(() => {});
     };
     if (params.signal?.aborted) {
       abortSession();
@@ -280,7 +294,10 @@ export class GDriveStorageDriver implements StorageBackendDriver {
     try {
       let offset = 0;
       const total = params.knownLength;
-      for await (const chunk of this.chunked(params.openStream(), RESUMABLE_CHUNK_BYTES)) {
+      const chunkSize = params.chunkSize && params.chunkSize >= 256 * 1024 && params.chunkSize % (256 * 1024) === 0
+        ? params.chunkSize
+        : DEFAULT_RESUMABLE_CHUNK_BYTES;
+      for await (const chunk of this.chunked(params.openStream(), chunkSize)) {
         if (params.signal?.aborted) throw new StorageAccountError('上传已取消', 'other');
         let chunkOffset = 0;
         let attempt = 0;
@@ -301,6 +318,7 @@ export class GDriveStorageDriver implements StorageBackendDriver {
               timeout: 300_000,
               maxBodyLength: Infinity,
               signal: params.signal,
+              httpsAgent: this.httpsAgent,
             });
           } catch (error) {
             if (params.signal?.aborted) throw error;
@@ -397,13 +415,14 @@ export class GDriveStorageDriver implements StorageBackendDriver {
           },
           headers,
           timeout: 15_000,
+          httpsAgent: this.httpsAgent,
         });
         let folderId = query.data?.files?.[0]?.id;
         if (!folderId) {
           const created = await axios.post<{ id: string }>(`${DRIVE_API}/files`, {
             name: ROOT_FOLDER_NAME,
             mimeType: 'application/vnd.google-apps.folder',
-          }, { headers, timeout: 15_000 });
+          }, { headers, timeout: 15_000, httpsAgent: this.httpsAgent });
           folderId = created.data.id;
         }
         // 回填 DB + 内存上下文（best-effort；失败时下次上传重新查找，幂等）
