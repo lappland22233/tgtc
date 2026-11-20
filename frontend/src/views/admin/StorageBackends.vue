@@ -1008,7 +1008,7 @@ async function saveOAuthClientFromDialog() {
 function handleClearOAuthClient() {
   const dialog = DialogPlugin.confirm({
     header: '清空 Google OAuth 客户端配置',
-    body: '清空 OAuth Client 配置后将无法添加新账号或使用依赖该 Client 的已入池 Google Drive 账号。若系统内已有 GDrive 账号，必须先删除相关账号后方可清空。确认清空？',
+    body: '清空 OAuth Client 配置后将无法添加新账号或使用依赖该 Client 的已入池 Google Drive 账号。若系统内已有未撤销的 GDrive 账号，必须先删除/撤销相关账号后方可清空。确认清空？',
     theme: 'warning',
     onConfirm: async () => {
       gdriveSaving.value = true;

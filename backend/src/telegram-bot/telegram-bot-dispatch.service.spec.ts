@@ -201,6 +201,7 @@ function makeService(options: {
     // 跨群认领归因：默认无命中；用例可经 grantMatches 注入命中结果
     findByFileUniqueId: jest.fn(async () => options.grantMatches ?? []),
     issue: issueMock,
+    attachGDriveCache: jest.fn(async () => true),
     buildUrl: jest.fn((origin: string, token: string) => `${origin}/api/bot-dl/${token}`),
     isActive: jest.fn(() => true),
     replayToken: jest.fn(() => 'TOKEN'),
@@ -1232,5 +1233,82 @@ describe('TelegramBotDispatchService（纯 Google 存储模式）', () => {
     expect(ctx.quotaService.consume).not.toHaveBeenCalled();
     const sentTexts = ctx.telegramService.sendMessage.mock.calls.map((call: any[]) => call[1]);
     expect(sentTexts).toContain('服务正在维护重启中，请稍后重新发送文件。');
+  });
+
+  describe('Google 缓存模式异步镜像（triggerGDriveCacheMirror）', () => {
+    it('attachGDriveCache 抛出异常时回滚删除远端 GDrive 对象（防孤儿泄漏）', async () => {
+      const storageRouter = {
+        availableBackendTypes: jest.fn(() => ['gdrive']),
+        isGDriveCacheModeEnabled: jest.fn(async () => true),
+        upload: jest.fn(async () => ({
+          backendType: 'gdrive',
+          accountId: 'acc-gd-1',
+          objectRef: 'gdrive-mirror-file-123',
+        })),
+        deleteRemoteObject: jest.fn(async () => true),
+      };
+      const ctx = makeService({ storageRouter: storageRouter as any });
+      ctx.grantService.attachGDriveCache = jest.fn(async () => {
+        throw new Error('Database connection lost');
+      });
+
+      await (ctx.service as any).triggerGDriveCacheMirror(
+        { id: 'grant-mirror-1' },
+        { file_id: 'tg-file-123', file_name: 'test.mp4' },
+        1024,
+      );
+
+      expect(storageRouter.upload).toHaveBeenCalled();
+      expect(storageRouter.deleteRemoteObject).toHaveBeenCalledWith(
+        'gdrive',
+        'acc-gd-1',
+        'gdrive-mirror-file-123',
+      );
+    });
+
+    it('严格无缓存模式下先申请单生命周期租约并在完成后释放；租约被占时跳过镜像', async () => {
+      const storageRouter = {
+        availableBackendTypes: jest.fn(() => ['gdrive']),
+        isGDriveCacheModeEnabled: jest.fn(async () => true),
+        upload: jest.fn(async () => ({
+          backendType: 'gdrive',
+          accountId: 'acc-gd-1',
+          objectRef: 'gdrive-mirror-file-456',
+        })),
+        deleteRemoteObject: jest.fn(async () => true),
+      };
+      const uploadDiskBudget = {
+        isStrictMode: jest.fn(() => true),
+        acquireSession: jest.fn(async () => undefined),
+        releaseSession: jest.fn(),
+      };
+      const ctx = makeService({
+        storageRouter: storageRouter as any,
+        uploadDiskBudget: uploadDiskBudget as any,
+      });
+
+      await (ctx.service as any).triggerGDriveCacheMirror(
+        { id: 'grant-mirror-2' },
+        { file_id: 'tg-file-456', file_name: 'test.mp4' },
+        2048,
+      );
+
+      expect(uploadDiskBudget.acquireSession).toHaveBeenCalledWith(expect.any(String), 2048);
+      expect(uploadDiskBudget.releaseSession).toHaveBeenCalledWith(expect.any(String));
+
+      // 模拟租约已被其他任务占有时跳过，不触发上传
+      storageRouter.upload.mockClear();
+      uploadDiskBudget.acquireSession = jest.fn(async () => {
+        throw new Error('Upload session budget occupied');
+      });
+
+      await (ctx.service as any).triggerGDriveCacheMirror(
+        { id: 'grant-mirror-3' },
+        { file_id: 'tg-file-789', file_name: 'test.mp4' },
+        2048,
+      );
+
+      expect(storageRouter.upload).not.toHaveBeenCalled();
+    });
   });
 });

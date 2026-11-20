@@ -187,19 +187,24 @@ describe('StorageBackendsController - GDrive 凭据轮换与邮箱一致性校�
     }));
   });
 
-  it('clearGDriveOAuthClient：存在依赖的 GDrive 账号时拒绝清空', async () => {
+  it('clearGDriveOAuthClient：存在未撤销的活跃 GDrive 账号时拒绝清空', async () => {
     const { controller, backends, gdriveOAuth } = makeController();
-    backends.list = jest.fn().mockResolvedValue([{ id: 'gd-1', type: 'gdrive' }]);
+    backends.list = jest.fn().mockResolvedValue([
+      { id: 'gd-1', type: 'gdrive', status: 'active', hasCredential: true },
+    ]);
 
     await expect(controller.clearGDriveOAuthClient(user)).rejects.toThrow(
-      '当前仍有 1 个 Google Drive 存储账号依赖此 OAuth Client 配置，无法清空',
+      '当前仍有 1 个未撤销的 Google Drive 存储账号依赖此 OAuth Client 配置，无法清空',
     );
     expect(gdriveOAuth.clearClientConfig).not.toHaveBeenCalled();
   });
 
-  it('clearGDriveOAuthClient：无依赖账号时允许清空并记录审计日志', async () => {
+  it('clearGDriveOAuthClient：账号已全部撤销（无凭据残留）或无账号时允许清空', async () => {
     const { controller, backends, gdriveOAuth, audit } = makeController();
-    backends.list = jest.fn().mockResolvedValue([]);
+    // 模拟仅存在被管理员撤销软删除的 GDrive 账号
+    backends.list = jest.fn().mockResolvedValue([
+      { id: 'gd-revoked', type: 'gdrive', status: 'revoked', hasCredential: false },
+    ]);
 
     const result = await controller.clearGDriveOAuthClient(user);
     expect(result.message).toContain('已清除');

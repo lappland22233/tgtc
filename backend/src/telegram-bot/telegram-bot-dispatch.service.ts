@@ -1363,11 +1363,23 @@ export class TelegramBotDispatchService implements OnApplicationShutdown {
     }
 
     const estimatedBytes = fileSize && fileSize > 0 ? fileSize : 50 * 1024 * 1024;
+    let uploadSessionId: string | null = null;
     let tempFilePath: string | null = null;
     let releaseTransferLease: (() => void) | undefined = undefined;
     let diskReservation: DownloadReservation | null = null;
+    let uploadedReceipt: StorageUploadReceipt | null = null;
 
     try {
+      if (this.uploadDiskBudget?.isStrictMode()) {
+        try {
+          uploadSessionId = randomUUID();
+          await this.uploadDiskBudget.acquireSession(uploadSessionId, estimatedBytes);
+        } catch {
+          // 严格无缓存模式下磁盘上传租约已被占用，作为 best-effort 缓存镜像，直接放弃本次同步，避免打乱小盘串行化保证
+          return;
+        }
+      }
+
       const tempDir = path.join(process.cwd(), 'tmp', 'bot-transfers');
       await mkdir(tempDir, { recursive: true });
       const localTempPath = path.join(tempDir, `gdrive_cache_${randomUUID()}.tmp`);
@@ -1406,17 +1418,27 @@ export class TelegramBotDispatchService implements OnApplicationShutdown {
         mimeType: doc.mime_type || undefined,
         openStream: () => createReadStream(localTempPath, { highWaterMark: 1024 * 1024 }),
       });
+      uploadedReceipt = receipt;
 
       if (receipt?.objectRef) {
         const attached = await this.grantService.attachGDriveCache(grant.id, receipt.accountId, receipt.objectRef);
-        if (!attached && receipt.accountId) {
+        if (!attached) {
           this.logger.warn(`Bot 直链 ${grant.id} 在同步 Google 缓存期间已失效/撤销，回滚删除缓存对象`);
-          await this.storageRouter.deleteRemoteObject('gdrive', receipt.accountId, receipt.objectRef).catch(() => {});
+          if (receipt.accountId) {
+            await this.storageRouter.deleteRemoteObject('gdrive', receipt.accountId, receipt.objectRef).catch(() => {});
+          }
+          uploadedReceipt = null;
         } else {
+          uploadedReceipt = null;
           this.logger.log(`Bot 直链 ${grant.id} 已同步至 Google 缓存 (accountId=${receipt.accountId})`);
         }
       }
     } catch (err) {
+      if (uploadedReceipt?.accountId && uploadedReceipt.objectRef) {
+        await this.storageRouter.deleteRemoteObject('gdrive', uploadedReceipt.accountId, uploadedReceipt.objectRef).catch((delErr) => {
+          this.logger.warn(`异常分支清理 Google 缓存失败: ${(delErr as Error).message}`);
+        });
+      }
       this.logger.warn(`Bot 直链 ${grant.id} 同步 Google 缓存失败（不影响主存储）：${err instanceof Error ? err.message : String(err)}`);
     } finally {
       if (tempFilePath) {
@@ -1425,6 +1447,11 @@ export class TelegramBotDispatchService implements OnApplicationShutdown {
       releaseTransferLease?.();
       if (diskReservation) {
         diskReservation.release();
+        diskReservation = null;
+      }
+      if (uploadSessionId && this.uploadDiskBudget) {
+        this.uploadDiskBudget.releaseSession(uploadSessionId);
+        uploadSessionId = null;
       }
     }
   }
