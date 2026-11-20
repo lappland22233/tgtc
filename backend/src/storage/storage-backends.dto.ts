@@ -116,7 +116,7 @@ export class GDriveAuthUrlDto {
 
   @IsOptional()
   @IsString()
-  @Length(1, 256)
+  @Length(1, 1024)
   state?: string;
 }
 
@@ -141,7 +141,7 @@ export class GDriveCompleteAuthDto {
 
   @IsOptional()
   @IsString()
-  @Length(1, 256)
+  @Length(1, 1024)
   state?: string;
 }
 

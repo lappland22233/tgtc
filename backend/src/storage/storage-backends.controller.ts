@@ -180,6 +180,12 @@ export class StorageBackendsController {
   @Delete('gdrive/oauth-client')
   @Roles(UserRole.SUPER_ADMIN)
   async clearGDriveOAuthClient(@CurrentUser() user: User) {
+    const existing = await this.backends.list('gdrive');
+    if (existing.length > 0) {
+      throw new BadRequestException(
+        `当前仍有 ${existing.length} 个 Google Drive 存储账号依赖此 OAuth Client 配置，无法清空。请先删除或解绑相关账号。`,
+      );
+    }
     await this.gdriveOAuth.clearClientConfig();
     this.audit.log({
       action: 'config_change',

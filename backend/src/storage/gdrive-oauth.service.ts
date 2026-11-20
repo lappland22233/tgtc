@@ -142,7 +142,7 @@ export class GDriveOAuthService {
   generateState(userId: string): string {
     const nonce = randomBytes(16).toString('hex');
     const timestamp = Date.now();
-    const payload = { userId, timestamp, nonce };
+    const payload = { u: userId, t: timestamp, n: nonce };
     const encrypted = this.credential.encryptCredential(payload);
     if (!encrypted) {
       return Buffer.from(JSON.stringify(payload)).toString('base64url');
@@ -155,14 +155,17 @@ export class GDriveOAuthService {
     if (!state || typeof state !== 'string') return false;
     try {
       const decoded = Buffer.from(state.trim(), 'base64url').toString('utf8');
-      let payload: { userId?: string; timestamp?: number } | null = null;
+      let payload: { u?: string; t?: number; userId?: string; timestamp?: number } | null = null;
       if (decoded.startsWith('v1:')) {
-        payload = this.credential.decryptCredential<{ userId?: string; timestamp?: number }>(decoded);
+        payload = this.credential.decryptCredential<{ u?: string; t?: number; userId?: string; timestamp?: number }>(decoded);
       } else {
         payload = JSON.parse(decoded);
       }
-      if (!payload || payload.userId !== userId) return false;
-      if (!payload.timestamp || Date.now() - payload.timestamp > 15 * 60 * 1000) return false;
+      if (!payload) return false;
+      const targetUserId = payload.u ?? payload.userId;
+      const targetTimestamp = payload.t ?? payload.timestamp;
+      if (!targetUserId || targetUserId !== userId) return false;
+      if (!targetTimestamp || Date.now() - targetTimestamp > 15 * 60 * 1000) return false;
       return true;
     } catch {
       return false;

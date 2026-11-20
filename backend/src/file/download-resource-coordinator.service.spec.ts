@@ -908,6 +908,24 @@ describe('DownloadResourceCoordinatorService', () => {
     });
   });
 
+  describe('交接预约（两阶段下载）', () => {
+    it('handOffToSession 暂存预约并在 releaseHandedOffReservation 时正确释放', async () => {
+      mockFree(10 * MB);
+      const reservation = await service.reserve({ sessionKey: 'task:1', bytes: 4 * MB });
+      service.handOffToSession('session:file-1', reservation);
+      expect(service.handedOffReservationCount).toBe(1);
+
+      // 释放交接预约
+      const released = service.releaseHandedOffReservation('session:file-1');
+      expect(released).toBe(true);
+      expect(service.handedOffReservationCount).toBe(0);
+      expect(reservation.active).toBe(false);
+
+      // 重复释放返回 false
+      expect(service.releaseHandedOffReservation('session:file-1')).toBe(false);
+    });
+  });
+
   describe('下载调度配置规范化（管理端校验、展示与运行时同一套规则）', () => {
     it('缺失、空串与非数值一律回退仓库默认值（不再被 Number(\'\') 误判为 0）', () => {
       expect(normalizeDownloadConfigNumber(DOWNLOAD_CONFIG_KEYS.MAX_CONCURRENT_UPSTREAMS, null)).toBe(8);

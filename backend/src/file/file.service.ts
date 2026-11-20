@@ -2323,6 +2323,8 @@ export class FileService implements OnModuleInit {
           objectRef: file.gdriveCacheObjectRef,
           expectedSize,
         });
+        // 成功取得免本地缓存的远端流：立即释放可能由两阶段下载任务票据交接给本会话的磁盘预约
+        this.fileCacheService.releaseHandedOffDownloadReservation(file.id, file.uploadVersion);
         return { stream: opened.stream, actualSize: opened.size || expectedSize };
       } catch (err) {
         this.logger.warn(
@@ -2525,6 +2527,8 @@ export class FileService implements OnModuleInit {
           range: { start, end },
           expectedSize,
         });
+        // 成功取得免本地缓存的远端 Range 流：立即释放可能由两阶段下载任务票据交接给本会话的磁盘预约
+        this.fileCacheService.releaseHandedOffDownloadReservation(file.id, file.uploadVersion);
         return opened.stream;
       } catch (err) {
         this.logger.warn(

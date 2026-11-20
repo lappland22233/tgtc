@@ -270,4 +270,46 @@ describe('FileUploadProcessor 非 TG 存储后端分支', () => {
     expect(storageRouter.upload).not.toHaveBeenCalled();
     expect(telegram.uploadFile).toHaveBeenCalled();
   });
+
+  it('Google 缓存模式：数据库更新受影响行为 0 时清理已上传的孤立 GDrive 远端文件', async () => {
+    const repo = makeRepo();
+    repo.findOne.mockResolvedValue(makeFile({ storageBackend: 'telegram', telegramFileId: 'tg-file-id' }));
+    repo.findOneOrFail.mockResolvedValue(makeFile({
+      storageBackend: 'telegram',
+      uploadStage: 'remote_committed',
+      telegramFileId: 'tg-file-id',
+    }));
+    // 模拟常规阶段更新成功，但在 Google 缓存更新时版本已变化（affected: 0）
+    repo.update.mockImplementation(async (_criteria: any, updateData: any) => {
+      if (updateData.gdriveCacheStatus === 'ready') {
+        return { affected: 0 };
+      }
+      return { affected: 1 };
+    });
+
+    const telegram = {
+      uploadFile: jest.fn().mockResolvedValue({ file_id: 'tg-file-id', file_path: '', file_size: 2048 }),
+      releaseLocalFile: jest.fn(),
+    };
+    const fileService = makeFileService();
+    const storageRouter = {
+      isGDriveCacheModeEnabled: jest.fn().mockResolvedValue(true),
+      upload: jest.fn().mockResolvedValue({
+        backendType: 'gdrive',
+        accountId: 'acc-gdrive-1',
+        objectRef: 'remote-cache-file',
+      }),
+      deleteRemoteObject: jest.fn().mockResolvedValue(undefined),
+    };
+    const processor = makeProcessor(repo, fileService, storageRouter as any, telegram);
+
+    await processor.uploadToTelegram(makeJob(0));
+
+    expect(storageRouter.upload).toHaveBeenCalledWith(expect.objectContaining({ backendType: 'gdrive' }));
+    expect(storageRouter.deleteRemoteObject).toHaveBeenCalledWith(
+      'gdrive',
+      'acc-gdrive-1',
+      'remote-cache-file',
+    );
+  });
 });

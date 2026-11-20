@@ -11,6 +11,7 @@ describe('StorageBackendsController - GDrive 凭据轮换与邮箱一致性校�
   } = {}) {
     const backends: any = {
       findById: jest.fn().mockResolvedValue(opts.existingAccount ?? null),
+      list: jest.fn().mockResolvedValue([]),
       rotateCredential: jest.fn().mockResolvedValue({ id: opts.existingAccount?.id, name: opts.existingAccount?.name }),
       patchConfig: jest.fn().mockResolvedValue({}),
       refreshQuota: jest.fn().mockResolvedValue({ totalBytes: 100, usedBytes: 50 }),
@@ -21,6 +22,7 @@ describe('StorageBackendsController - GDrive 凭据轮换与邮箱一致性校�
       exchangeCode: jest.fn().mockResolvedValue(opts.exchanged ?? { refreshToken: 'new-token', email: 'test@example.com' }),
       getClientConfig: jest.fn().mockResolvedValue(null),
       setClientConfig: jest.fn().mockResolvedValue(undefined),
+      clearClientConfig: jest.fn().mockResolvedValue(undefined),
     };
     const configCache: any = { get: jest.fn(), set: jest.fn() };
     const audit: any = { log: jest.fn() };
@@ -182,6 +184,30 @@ describe('StorageBackendsController - GDrive 凭据轮换与邮箱一致性校�
     expect(audit.log).toHaveBeenCalledWith(expect.objectContaining({
       action: 'config_change',
       resourceId: 'storage_settings',
+    }));
+  });
+
+  it('clearGDriveOAuthClient：存在依赖的 GDrive 账号时拒绝清空', async () => {
+    const { controller, backends, gdriveOAuth } = makeController();
+    backends.list = jest.fn().mockResolvedValue([{ id: 'gd-1', type: 'gdrive' }]);
+
+    await expect(controller.clearGDriveOAuthClient(user)).rejects.toThrow(
+      '当前仍有 1 个 Google Drive 存储账号依赖此 OAuth Client 配置，无法清空',
+    );
+    expect(gdriveOAuth.clearClientConfig).not.toHaveBeenCalled();
+  });
+
+  it('clearGDriveOAuthClient：无依赖账号时允许清空并记录审计日志', async () => {
+    const { controller, backends, gdriveOAuth, audit } = makeController();
+    backends.list = jest.fn().mockResolvedValue([]);
+
+    const result = await controller.clearGDriveOAuthClient(user);
+    expect(result.message).toContain('已清除');
+    expect(gdriveOAuth.clearClientConfig).toHaveBeenCalledTimes(1);
+    expect(audit.log).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'config_change',
+      resourceId: 'gdrive_oauth_client',
+      metadata: { operation: 'clear' },
     }));
   });
 });

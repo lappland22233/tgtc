@@ -1363,13 +1363,17 @@ export class TelegramBotDispatchService implements OnApplicationShutdown {
     }
 
     const estimatedBytes = fileSize && fileSize > 0 ? fileSize : 50 * 1024 * 1024;
-    const tempDir = path.join(process.cwd(), 'tmp', 'bot-transfers');
-    await mkdir(tempDir, { recursive: true });
-    const tempFilePath = path.join(tempDir, `gdrive_cache_${randomUUID()}.tmp`);
-    const releaseTransferLease = this.transferTracker?.register(tempFilePath);
+    let tempFilePath: string | null = null;
+    let releaseTransferLease: (() => void) | undefined = undefined;
     let diskReservation: DownloadReservation | null = null;
 
     try {
+      const tempDir = path.join(process.cwd(), 'tmp', 'bot-transfers');
+      await mkdir(tempDir, { recursive: true });
+      const localTempPath = path.join(tempDir, `gdrive_cache_${randomUUID()}.tmp`);
+      tempFilePath = localTempPath;
+      releaseTransferLease = this.transferTracker?.register(localTempPath);
+
       if (this.downloadResources) {
         try {
           diskReservation = await this.downloadResources.reserve({
@@ -1390,9 +1394,9 @@ export class TelegramBotDispatchService implements OnApplicationShutdown {
           callback(null, chunk);
         },
       });
-      await pipeline(upstreamStream, meteringPassThrough, createWriteStream(tempFilePath));
+      await pipeline(upstreamStream, meteringPassThrough, createWriteStream(localTempPath));
 
-      const fileStats = await stat(tempFilePath);
+      const fileStats = await stat(localTempPath);
       const actualSize = fileStats.size;
 
       const receipt = await this.storageRouter.upload({
@@ -1400,7 +1404,7 @@ export class TelegramBotDispatchService implements OnApplicationShutdown {
         objectName: doc.file_name || `tg_${doc.file_id}`,
         knownLength: actualSize,
         mimeType: doc.mime_type || undefined,
-        openStream: () => createReadStream(tempFilePath, { highWaterMark: 1024 * 1024 }),
+        openStream: () => createReadStream(localTempPath, { highWaterMark: 1024 * 1024 }),
       });
 
       if (receipt?.objectRef) {
@@ -1415,7 +1419,9 @@ export class TelegramBotDispatchService implements OnApplicationShutdown {
     } catch (err) {
       this.logger.warn(`Bot 直链 ${grant.id} 同步 Google 缓存失败（不影响主存储）：${err instanceof Error ? err.message : String(err)}`);
     } finally {
-      await unlink(tempFilePath).catch(() => {});
+      if (tempFilePath) {
+        await unlink(tempFilePath).catch(() => {});
+      }
       releaseTransferLease?.();
       if (diskReservation) {
         diskReservation.release();

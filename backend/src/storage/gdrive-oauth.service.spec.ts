@@ -200,4 +200,19 @@ describe('GDriveOAuthService（mock OAuth + 录制响应）', () => {
     const { service } = makeService();
     await expect(service.createAuthorizedClient('rt')).rejects.toMatchObject({ kind: 'auth' });
   });
+
+  it('generateState & verifyState：紧凑 signed state 校验有效性、归属及防篡改', () => {
+    const { service } = makeService();
+    const state = service.generateState('admin-1');
+    expect(state).toBeDefined();
+    expect(service.verifyState(state, 'admin-1')).toBe(true);
+    expect(service.verifyState(state, 'admin-2')).toBe(false);
+    expect(service.verifyState('invalid-state', 'admin-1')).toBe(false);
+
+    // 兼容历史长键名格式
+    const legacyPayload = { userId: 'admin-1', timestamp: Date.now(), nonce: '123' };
+    const legacyEncoded = Buffer.from(JSON.stringify(legacyPayload)).toString('base64url');
+    expect(service.verifyState(legacyEncoded, 'admin-1')).toBe(true);
+    expect(service.verifyState(legacyEncoded, 'admin-2')).toBe(false);
+  });
 });
