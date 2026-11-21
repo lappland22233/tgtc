@@ -2,8 +2,8 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
 import { Readable } from 'stream';
-import { createReadStream } from 'fs';
-import { promises as fs } from 'fs';
+import { constants, promises as fs } from 'fs';
+import type { FileHandle } from 'fs/promises';
 import * as path from 'path';
 import FormData from 'form-data';
 import { TelegramFileNotFoundError, TelegramStreamPathError } from './telegram.errors';
@@ -26,6 +26,13 @@ interface TelegramMediaResult {
   chat?: { id?: number };
   /** 自建 Bot API 严格无缓存扩展：false 表示远端消息成功但 TDLib 本地副本待释放。 */
   local_cache_released?: boolean;
+}
+
+class LocalPathDeniedError extends Error {}
+
+function isChildPath(root: string, candidate: string): boolean {
+  const relative = path.relative(root, candidate);
+  return relative !== '' && relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative);
 }
 
 @Injectable()
@@ -63,6 +70,7 @@ export class TelegramService {
    * 仅允许读取此目录内的文件；未配置时本地读取将被拒绝（fail-closed）。
    */
   private readonly localFileBase: string;
+  private localRoot?: Promise<string>;
   /**
    * 进程内恢复去重表（R9）：按 fileId 合并单次强制回源 Promise，
    * 避免共享同一 file_id 的复制记录并发触发重复回源。完成后立即删除。
@@ -631,62 +639,54 @@ export class TelegramService {
     return /^[a-zA-Z]:[\\/]/.test(file_path) || file_path.startsWith('\\\\');
   }
 
-  /** 安全解析本地文件路径，防止路径穿越攻击 */
-  private resolveLocalPath(filePath: string): string {
-    // 1. 先在“原始”路径上检查 '..'。
-    //    注意：绝不能先 normalize 再检查——normalize 会消除 '..' 段使检查形同虚设。
-    if (filePath.includes('..')) {
-      throw new Error('非法的本地文件路径');
-    }
-
-    // 2. 必须配置允许的本地文件根目录（白名单），否则拒绝（fail-closed）。
+  /** 按已验证的句柄读取，缓冲下载和流式下载共用同一目录边界。 */
+  private async openLocalFile(filePath: string): Promise<FileHandle> {
     if (!this.localFileBase) {
       this.logger.warn('收到本地文件路径请求，但未配置 TELEGRAM_LOCAL_FILE_DIR，已拒绝访问');
-      throw new Error('本地文件访问未启用');
+      throw new LocalPathDeniedError('本地文件访问未启用');
+    }
+    if (!path.isAbsolute(filePath) || filePath.includes('..') || filePath.includes('\0')) {
+      throw new LocalPathDeniedError('非法的本地文件路径');
     }
 
-    // 3. 解析为绝对路径并校验位于白名单目录内。
-    //    对绝对 filePath，path.resolve(base, filePath) 返回 filePath 本身；
-    //    对相对路径则基于 base 解析。校验时附带分隔符，防止 /base-evil 这类兄弟目录绕过。
-    const allowlistedBase = path.resolve(this.localFileBase);
-    const resolved = path.resolve(allowlistedBase, filePath);
-    if (resolved !== allowlistedBase && !resolved.startsWith(allowlistedBase + path.sep)) {
-      throw new Error('非法的本地文件路径');
-    }
-
-    return resolved;
-  }
-
-  /**
-   * 安全打开本地文件流（R3）：在 createReadStream 前先 fs.promises.open/stat
-   * 确认路径存在且为文件，将 ENOENT/无法打开 同步转为可恢复的
-   * TelegramStreamPathError，避免延迟的 stream error 越过恢复边界。
-   * 打开成功后由调用方通过返回的句柄建立流（句柄由流关闭时释放）。
-   */
-  private async openLocalStream(filePath: string): Promise<{ stream: Readable; release: () => void }> {
-    const safePath = this.resolveLocalPath(filePath);
-    let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
+    const base = path.resolve(this.localFileBase);
+    const candidate = path.resolve(filePath);
+    let handle: FileHandle | undefined;
     try {
-      handle = await fs.open(safePath, 'r');
-      const stat = await handle.stat();
-      if (!stat.isFile()) {
-        await handle.close();
-        handle = undefined; // 已关闭，避免 catch 分支二次 close
-        this.logger.warn('Telegram 本地路径不是常规文件，拒绝打开（路径类别: 本地文件）');
-        throw new TelegramStreamPathError('Telegram 文件本地路径不是常规文件');
+      // 配置根可位于挂载点或符号链接上。首次解析成功后固定边界，挂载尚未就绪时允许重试。
+      this.localRoot ??= fs.realpath(base).catch(error => {
+        this.localRoot = undefined;
+        throw error;
+      });
+      const realBase = await this.localRoot;
+      if (path.dirname(realBase) === realBase) throw new LocalPathDeniedError('本地文件根目录不能是文件系统根目录');
+      if (!isChildPath(base, candidate) && !isChildPath(realBase, candidate)) {
+        throw new LocalPathDeniedError('非法的本地文件路径');
       }
-      // 以打开的句柄建立流，避免 open→createReadStream 之间的 TOCTOU；
-      // 句柄由流的 close 事件自动释放。
-      const stream = createReadStream(safePath, { fd: handle });
-      handle = undefined; // 所有权已转移给流
-      return { stream, release: () => { /* fd 由流持有并自动关闭 */ } };
-    } catch (error: unknown) {
-      if (handle) {
-        try { await handle.close(); } catch { /* 忽略关闭失败 */ }
+      const target = await fs.realpath(candidate);
+      if (!isChildPath(realBase, target)) throw new LocalPathDeniedError('非法的本地文件路径');
+
+      const entry = await fs.lstat(target, { bigint: true });
+      if (!entry.isFile()) throw new TelegramStreamPathError('Telegram 文件本地路径不是常规文件');
+      handle = await fs.open(target, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
+      const opened = await handle.stat({ bigint: true });
+      if (!opened.isFile() || opened.dev !== entry.dev || opened.ino !== entry.ino) {
+        throw new TelegramStreamPathError('Telegram 文件本地路径已变更');
       }
-      // ENOENT / 无法打开 → 可恢复路径失效错误
-      if (error instanceof TelegramStreamPathError) throw error;
-      this.logger.warn(`Telegram 本地文件无法打开（类别: 本地路径失效）`);
+
+      // Linux 可直接核对已打开的对象。其他平台重新核对目标的真实路径与文件标识。
+      const openedPath = await fs.realpath(process.platform === 'linux' ? `/proc/self/fd/${handle.fd}` : target);
+      if (!isChildPath(realBase, openedPath)) throw new LocalPathDeniedError('非法的本地文件路径');
+      if (process.platform !== 'linux') {
+        const current = await fs.lstat(openedPath, { bigint: true });
+        if (!opened.ino || !current.isFile() || current.dev !== opened.dev || current.ino !== opened.ino) {
+          throw new TelegramStreamPathError('Telegram 文件本地路径已变更');
+        }
+      }
+      return handle;
+    } catch (error) {
+      await handle?.close();
+      if (error instanceof LocalPathDeniedError || error instanceof TelegramStreamPathError) throw error;
       throw new TelegramStreamPathError('Telegram 文件本地路径失效，无法打开');
     }
   }
@@ -702,13 +702,13 @@ export class TelegramService {
 
     // 本地绝对路径：安全解析后从文件系统异步读取
     if (this.isLocalPath(filePath)) {
-      const safePath = this.resolveLocalPath(filePath);
+      const handle = await this.openLocalFile(filePath);
       try {
-        // 直接读取并在失败时统一处理，避免 access→read 之间的 TOCTOU；
-        // 错误信息不回显内部文件系统路径。
-        return await fs.readFile(safePath);
+        return await handle.readFile();
       } catch {
         throw new Error('本地文件读取失败');
+      } finally {
+        await handle.close();
       }
     }
 
@@ -905,8 +905,8 @@ export class TelegramService {
     let stream: Readable;
     if (this.isLocalPath(filePath)) {
       // R3：先安全打开确认存在再建立流，ENOENT 转为可恢复错误
-      const opened = await this.openLocalStream(filePath);
-      stream = opened.stream;
+      const handle = await this.openLocalFile(filePath);
+      stream = handle.createReadStream();
     } else {
       // 远程下载经 telegramRequest 包装，统一脱敏 bot token 并处理 429 重试
       const response = await this.telegramRequest(

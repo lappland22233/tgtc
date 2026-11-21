@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { ConfigService } from '@nestjs/config';
 import { once } from 'node:events';
 import { buffer } from 'node:stream/consumers';
 import { Readable } from 'stream';
@@ -353,6 +354,111 @@ describe('TelegramService realtime stream', () => {
       await expect(service.verifyFileExists('')).rejects.toBeInstanceOf(TelegramFileNotFoundError);
       await expect(service.verifyFileExists('x'.repeat(5000))).rejects.toBeInstanceOf(TelegramFileNotFoundError);
       expect(mockedAxios.get).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('configured local file boundary', () => {
+    let temporary: string;
+    let root: string;
+    let sibling: string;
+    let service: TelegramService;
+    const bytes = Buffer.from('local fixture');
+
+    const pointAt = (filePath: string) => {
+      mockedAxios.get.mockResolvedValue({ data: { ok: true, result: { file_id: 'file-id', file_size: bytes.length, file_path: filePath } } });
+    };
+
+    beforeEach(async () => {
+      temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'telegram-file-root-'));
+      root = path.join(temporary, 'media');
+      sibling = path.join(temporary, 'media-other');
+      await fs.mkdir(root);
+      await fs.mkdir(sibling);
+      service = new TelegramService(new ConfigService({ ...config, TELEGRAM_LOCAL_FILE_DIR: root }));
+    });
+    afterEach(async () => { await fs.rm(temporary, { recursive: true, force: true }); });
+
+    it('reads ordinary files and in-root links, and keeps the stream on the validated handle', async () => {
+      const nested = path.join(root, 'nested');
+      const alias = path.join(root, 'alias');
+      await fs.mkdir(nested);
+      const target = path.join(nested, 'fixture.bin');
+      await fs.writeFile(target, bytes);
+      pointAt(target);
+      await expect(service.getFile('file-id')).resolves.toEqual(bytes);
+
+      await fs.symlink(nested, alias, 'junction');
+      pointAt(path.join(alias, 'fixture.bin'));
+      const { stream } = await service.getFileStream('file-id');
+      try {
+        await fs.rename(target, path.join(nested, 'previous.bin'));
+        await fs.writeFile(target, Buffer.from('replacement'));
+        expect(await buffer(stream)).toEqual(bytes);
+      } finally {
+        stream.destroy();
+      }
+    });
+
+    it('rejects siblings and out-of-root file and directory links for both download modes', async () => {
+      const outside = path.join(sibling, 'fixture.bin');
+      await fs.writeFile(outside, bytes);
+      const leaf = path.join(root, 'linked-file');
+      await fs.symlink(outside, leaf, 'file');
+      const parent = path.join(root, 'linked-directory');
+      await fs.symlink(sibling, parent, 'junction');
+      for (const candidate of [outside, leaf, path.join(parent, 'fixture.bin')]) {
+        pointAt(candidate);
+        await expect(service.getFile('file-id')).rejects.toThrow('非法的本地文件路径');
+        await expect(service.getFileStream('file-id')).rejects.toThrow('非法的本地文件路径');
+      }
+    });
+
+    it('closes a handle when an in-root cache file is replaced while it is being opened', async () => {
+      const target = path.join(root, 'fixture.bin');
+      const incoming = path.join(root, 'next.bin');
+      await fs.writeFile(target, bytes);
+      await fs.writeFile(incoming, Buffer.from('next version'));
+      pointAt(target);
+
+      const open = fs.open.bind(fs);
+      let opened: Awaited<ReturnType<typeof open>> | undefined;
+      const spy = jest.spyOn(fs, 'open').mockImplementationOnce(async (file, flags, mode) => {
+        await fs.rename(incoming, target);
+        opened = await open(file, flags, mode);
+        return opened;
+      });
+      try {
+        await expect(service.getFileStream('file-id')).rejects.toBeInstanceOf(TelegramStreamPathError);
+        expect(opened?.fd).toBe(-1);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it('recovers after the configured directory becomes available and only streams regular files', async () => {
+      await fs.rmdir(root);
+      pointAt(path.join(root, 'fixture.bin'));
+      await expect(service.getFileStream('file-id')).rejects.toBeInstanceOf(TelegramStreamPathError);
+      await fs.mkdir(root);
+      await fs.writeFile(path.join(root, 'fixture.bin'), bytes);
+      expect(await buffer((await service.getFileStream('file-id')).stream)).toEqual(bytes);
+      const nested = path.join(root, 'directory');
+      await fs.mkdir(nested);
+      pointAt(nested);
+      await expect(service.getFileStream('file-id')).rejects.toBeInstanceOf(TelegramStreamPathError);
+    });
+
+    it('accepts a configured root alias and refuses a later redirect to a different directory', async () => {
+      const originalRoot = path.join(temporary, 'original');
+      await fs.rename(root, originalRoot);
+      await fs.symlink(originalRoot, root, 'junction');
+      await fs.writeFile(path.join(originalRoot, 'fixture.bin'), bytes);
+      pointAt(path.join(root, 'fixture.bin'));
+      await expect(service.getFile('file-id')).resolves.toEqual(bytes);
+      await fs.unlink(root);
+      await fs.symlink(sibling, root, 'junction');
+      await fs.writeFile(path.join(sibling, 'fixture.bin'), bytes);
+      await expect(service.getFileStream('file-id')).rejects.toThrow('非法的本地文件路径');
     });
   });
 
