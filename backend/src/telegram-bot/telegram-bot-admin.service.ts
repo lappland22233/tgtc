@@ -5,6 +5,7 @@ import { AuditService } from '../common/services/audit.service';
 import { AuditStatus } from '../common/entities/audit-log.entity';
 import {
   databaseCast,
+  databaseRawQuery,
   databaseDateBucket,
   getDatabaseType,
   type DatabaseType,
@@ -337,7 +338,7 @@ export class TelegramBotAdminService {
     const bucket = databaseDateBucket('"createdAt"', bucketUnit);
 
     const [totals, trendRows, reasonRows, receivedTotals, receivedTrendRows] = await Promise.all([
-      this.dataSource.query(
+      databaseRawQuery(this.dataSource,
         `SELECT COUNT(*) AS "requests",
                 COUNT(DISTINCT "botTelegramUserId") AS "uniqueUsers",
                 ${sumFlag('"ranged"')} AS "rangedRequests",
@@ -348,7 +349,7 @@ export class TelegramBotAdminService {
           WHERE ${where}`,
         [sinceParam],
       ),
-      this.dataSource.query(
+      databaseRawQuery(this.dataSource,
         `SELECT ${bucket} AS "bucket",
                 COUNT(*) AS "requests",
                 ${sumFlag('"ranged"')} AS "ranged",
@@ -362,7 +363,7 @@ export class TelegramBotAdminService {
         [sinceParam],
       ),
       // 中断原因分布：用于区分「客户端主动断开」与「上游失败 / 超时 / 服务关闭」
-      this.dataSource.query(
+      databaseRawQuery(this.dataSource,
         `SELECT "terminationReason" AS "reason", COUNT(*) AS "count"
            FROM "access_logs"
           WHERE ${where}
@@ -371,14 +372,14 @@ export class TelegramBotAdminService {
           GROUP BY "terminationReason"`,
         [sinceParam],
       ),
-      this.dataSource.query(
+      databaseRawQuery(this.dataSource,
         `SELECT COUNT(*) AS "filesReceived",
                 ${databaseCast('COALESCE(SUM("fileSize"), 0)', 'bigint')} AS "receivedBytes"
            FROM "telegram_bot_file_grants"
           WHERE ${receivedWhere}`,
         [sinceParam],
       ),
-      this.dataSource.query(
+      databaseRawQuery(this.dataSource,
         `SELECT ${bucket} AS "bucket",
                 COUNT(*) AS "files",
                 ${databaseCast('COALESCE(SUM("fileSize"), 0)', 'bigint')} AS "fileBytes"
@@ -509,7 +510,7 @@ export class TelegramBotAdminService {
     const limitParam = `$${params.length + 1}`;
     const offsetParam = `$${params.length + 2}`;
 
-    const rows = await this.dataSource.query(
+    const rows = await databaseRawQuery(this.dataSource,
       `SELECT g."telegramUserId" AS "telegramUserId",
               COUNT(*) AS "filesReceived",
               ${databaseCast('COALESCE(SUM(g."fileSize"), 0)', 'bigint')} AS "receivedBytes",
@@ -530,7 +531,7 @@ export class TelegramBotAdminService {
       [...params, pageSize, offset],
     );
 
-    const countRows = await this.dataSource.query(
+    const countRows = await databaseRawQuery(this.dataSource,
       `SELECT COUNT(DISTINCT g."telegramUserId") AS "total"
          FROM "telegram_bot_file_grants" g
         WHERE ${where}`,

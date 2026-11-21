@@ -8,12 +8,12 @@ export class SqliteSetTelegramAccountDefaultInflight1803900000000 implements Mig
   name = 'SqliteSetTelegramAccountDefaultInflight1803900000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'sqlite') return;
+    if (queryRunner.dataSource.options.type !== 'better-sqlite3') return;
     await queryRunner.query('PRAGMA table_info("telegram_accounts")');
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'sqlite') return;
+    if (queryRunner.dataSource.options.type !== 'better-sqlite3') return;
     // 应用层默认值及账号数据不由此迁移管理；无可安全逆转的 schema 变更。
   }
 }

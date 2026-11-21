@@ -94,7 +94,7 @@ export class SharePreviewSessionService {
       await sessions.save(sessions.create({ ...existing, ...identity, consumed: true, expiresAt }));
       return 'consumed' as const;
     });
-    if (this.dataSource.options.type !== 'sqlite') return consume();
+    if (this.dataSource.options.type !== 'better-sqlite3') return consume();
 
     // sqlite3 共用单连接，禁止本服务并发开启嵌套事务；跨进程仍由 SQLite 写锁保护。
     const previous = this.sqliteChain;

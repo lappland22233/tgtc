@@ -35,7 +35,7 @@ describe('SQLite schema migrations（隔离内存库）', () => {
     const { SqliteSchemaAlignment1800000000000 } = require('./1800000000000-SqliteSchemaAlignment') as typeof import('./1800000000000-SqliteSchemaAlignment');
 
     dataSource = new DataSource({
-      type: 'sqlite',
+      type: 'better-sqlite3',
       database: ':memory:',
       entities: [...databaseEntities],
       migrations: [SqliteEntitySchema1700000000000, SqliteSchemaAlignment1800000000000],
@@ -136,7 +136,7 @@ describe('SQLite schema migrations（隔离内存库）', () => {
   it('为存量 folders 回填自环与完整祖先关系', async () => {
     const { databaseEntities } = require('../database/entities') as typeof import('../database/entities');
     const { SqliteSchemaAlignment1800000000000 } = require('./1800000000000-SqliteSchemaAlignment') as typeof import('./1800000000000-SqliteSchemaAlignment');
-    dataSource = new DataSource({ type: 'sqlite', database: ':memory:', entities: [...databaseEntities], synchronize: false });
+    dataSource = new DataSource({ type: 'better-sqlite3', database: ':memory:', entities: [...databaseEntities], synchronize: false });
     await dataSource.initialize();
     await dataSource.query(`CREATE TABLE "folders" (
       "id" varchar PRIMARY KEY NOT NULL, "name" varchar NOT NULL, "ownerId" varchar NOT NULL,
@@ -173,7 +173,7 @@ describe('SQLite schema migrations（隔离内存库）', () => {
       uniques: [{ name: 'uq_legacy_tenant_code', columns: ['tenant', 'code'] }],
     });
     const { SqliteSchemaAlignment1800000000000 } = require('./1800000000000-SqliteSchemaAlignment') as typeof import('./1800000000000-SqliteSchemaAlignment');
-    dataSource = new DataSource({ type: 'sqlite', database: ':memory:', entities: [LegacyEntity], synchronize: false });
+    dataSource = new DataSource({ type: 'better-sqlite3', database: ':memory:', entities: [LegacyEntity], synchronize: false });
     await dataSource.initialize();
     await dataSource.query(`CREATE TABLE "legacy_unique_entities" (
       "id" varchar PRIMARY KEY NOT NULL, "tenant" varchar NOT NULL, "code" varchar NOT NULL, "token" varchar NOT NULL
@@ -198,7 +198,7 @@ describe('SQLite schema migrations（隔离内存库）', () => {
       uniques: [{ name: 'uq_legacy_duplicate', columns: ['tenant', 'code'] }],
     });
     const { SqliteSchemaAlignment1800000000000 } = require('./1800000000000-SqliteSchemaAlignment') as typeof import('./1800000000000-SqliteSchemaAlignment');
-    dataSource = new DataSource({ type: 'sqlite', database: ':memory:', entities: [LegacyEntity], synchronize: false });
+    dataSource = new DataSource({ type: 'better-sqlite3', database: ':memory:', entities: [LegacyEntity], synchronize: false });
     await dataSource.initialize();
     await dataSource.query(`CREATE TABLE "legacy_duplicate_entities" (
       "id" varchar PRIMARY KEY NOT NULL, "tenant" varchar NOT NULL, "code" varchar NOT NULL
@@ -212,7 +212,7 @@ describe('SQLite schema migrations（隔离内存库）', () => {
   it('存量 folders 根目录重名时在创建 COALESCE 唯一索引前明确失败', async () => {
     const { databaseEntities } = require('../database/entities') as typeof import('../database/entities');
     const { SqliteSchemaAlignment1800000000000 } = require('./1800000000000-SqliteSchemaAlignment') as typeof import('./1800000000000-SqliteSchemaAlignment');
-    dataSource = new DataSource({ type: 'sqlite', database: ':memory:', entities: [...databaseEntities], synchronize: false });
+    dataSource = new DataSource({ type: 'better-sqlite3', database: ':memory:', entities: [...databaseEntities], synchronize: false });
     await dataSource.initialize();
     await dataSource.query(`CREATE TABLE "folders" (
       "id" varchar PRIMARY KEY NOT NULL, "name" varchar NOT NULL, "ownerId" varchar NOT NULL,
@@ -237,7 +237,7 @@ describe('SQLite schema migrations（隔离内存库）', () => {
       },
     });
     const { SqliteSchemaAlignment1800000000000 } = require('./1800000000000-SqliteSchemaAlignment') as typeof import('./1800000000000-SqliteSchemaAlignment');
-    dataSource = new DataSource({ type: 'sqlite', database: ':memory:', entities: [RequiredEntity], synchronize: false });
+    dataSource = new DataSource({ type: 'better-sqlite3', database: ':memory:', entities: [RequiredEntity], synchronize: false });
     await dataSource.initialize();
     await dataSource.query('CREATE TABLE "required_entities" ("id" varchar PRIMARY KEY NOT NULL)');
     await dataSource.query('INSERT INTO "required_entities" ("id") VALUES (?)', ['existing']);
@@ -248,7 +248,7 @@ describe('SQLite schema migrations（隔离内存库）', () => {
 
   it('存量库升级：180210 自建 directory_names 并回填历史活跃实体', async () => {
     // 模拟旧基线（基线已执行、directory_names 尚不存在）的存量库。
-    dataSource = new DataSource({ type: 'sqlite', database: ':memory:', entities: [], synchronize: false });
+    dataSource = new DataSource({ type: 'better-sqlite3', database: ':memory:', entities: [], synchronize: false });
     await dataSource.initialize();
     await dataSource.query(`CREATE TABLE "migrations" (
       "id" integer PRIMARY KEY AUTOINCREMENT NOT NULL,
@@ -298,7 +298,7 @@ describe('SQLite schema migrations（隔离内存库）', () => {
   });
 
   it('存量库升级：180220 自建 API Key 治理两表并补密文列', async () => {
-    dataSource = new DataSource({ type: 'sqlite', database: ':memory:', entities: [], synchronize: false });
+    dataSource = new DataSource({ type: 'better-sqlite3', database: ':memory:', entities: [], synchronize: false });
     await dataSource.initialize();
     await dataSource.query(`CREATE TABLE "migrations" (
       "id" integer PRIMARY KEY AUTOINCREMENT NOT NULL,
@@ -337,7 +337,7 @@ describe('SQLite schema migrations（隔离内存库）', () => {
   });
 
   it('存量库升级：180230 自建 Bot 三表并为 access_logs 补 Bot 标识列', async () => {
-    dataSource = new DataSource({ type: 'sqlite', database: ':memory:', entities: [], synchronize: false });
+    dataSource = new DataSource({ type: 'better-sqlite3', database: ':memory:', entities: [], synchronize: false });
     await dataSource.initialize();
     await dataSource.query(`CREATE TABLE "migrations" (
       "id" integer PRIMARY KEY AUTOINCREMENT NOT NULL,
@@ -385,7 +385,7 @@ describe('SQLite schema migrations（隔离内存库）', () => {
   });
 
   it('存量库升级：180290 自建副本表并为 grants 补源账号列', async () => {
-    dataSource = new DataSource({ type: 'sqlite', database: ':memory:', entities: [], synchronize: false });
+    dataSource = new DataSource({ type: 'better-sqlite3', database: ':memory:', entities: [], synchronize: false });
     await dataSource.initialize();
     await dataSource.query(`CREATE TABLE "migrations" (
       "id" integer PRIMARY KEY AUTOINCREMENT NOT NULL,
@@ -440,7 +440,7 @@ describe('SQLite schema migrations（隔离内存库）', () => {
   });
 
   it('存量库升级：180340 建立锚点一致性部分唯一索引且不误伤合法多账号副本', async () => {
-    dataSource = new DataSource({ type: 'sqlite', database: ':memory:', entities: [], synchronize: false });
+    dataSource = new DataSource({ type: 'better-sqlite3', database: ':memory:', entities: [], synchronize: false });
     await dataSource.initialize();
     await dataSource.query(`CREATE TABLE "migrations" (
       "id" integer PRIMARY KEY AUTOINCREMENT NOT NULL,
@@ -496,7 +496,7 @@ describe('SQLite schema migrations（隔离内存库）', () => {
 
   it('存量库升级：180300/180310/180320 自建账号与镜像表并补 files 定位列', async () => {
     // 模拟旧基线库存量库：账号与镜像表尚不存在，files 也没有主副本定位列。
-    dataSource = new DataSource({ type: 'sqlite', database: ':memory:', entities: [], synchronize: false });
+    dataSource = new DataSource({ type: 'better-sqlite3', database: ':memory:', entities: [], synchronize: false });
     await dataSource.initialize();
     await dataSource.query(`CREATE TABLE "migrations" (
       "id" integer PRIMARY KEY AUTOINCREMENT NOT NULL,
@@ -580,7 +580,7 @@ describe('SQLite schema migrations（隔离内存库）', () => {
   });
 
   it('存量库升级：180360 自建主群锚点表（唯一键、索引齐全、可写、幂等）', async () => {
-    dataSource = new DataSource({ type: 'sqlite', database: ':memory:', entities: [], synchronize: false });
+    dataSource = new DataSource({ type: 'better-sqlite3', database: ':memory:', entities: [], synchronize: false });
     await dataSource.initialize();
     await dataSource.query(`CREATE TABLE "migrations" (
       "id" integer PRIMARY KEY AUTOINCREMENT NOT NULL,
@@ -638,7 +638,7 @@ describe('SQLite schema migrations（隔离内存库）', () => {
   });
 
   it('存量库升级：180350 自建扩散轮次表（索引齐全、可写、幂等）', async () => {
-    dataSource = new DataSource({ type: 'sqlite', database: ':memory:', entities: [], synchronize: false });
+    dataSource = new DataSource({ type: 'better-sqlite3', database: ':memory:', entities: [], synchronize: false });
     await dataSource.initialize();
     await dataSource.query(`CREATE TABLE "migrations" (
       "id" integer PRIMARY KEY AUTOINCREMENT NOT NULL,
@@ -689,7 +689,7 @@ describe('SQLite schema migrations（隔离内存库）', () => {
   });
 
   it('180380 将已启用的通用镜像规则加入 Bot 入站事件范围，保留显式关闭与停用规则', async () => {
-    dataSource = new DataSource({ type: 'sqlite', database: ':memory:', entities: [], synchronize: false });
+    dataSource = new DataSource({ type: 'better-sqlite3', database: ':memory:', entities: [], synchronize: false });
     await dataSource.initialize();
     await dataSource.query(`CREATE TABLE "telegram_mirror_rules" (
       "id" varchar PRIMARY KEY, "enabled" boolean NOT NULL,
@@ -722,7 +722,7 @@ describe('SQLite schema migrations（隔离内存库）', () => {
 
   it('存量库升级：180370 为 grants 补 fileUniqueId 列与索引（可重复执行）', async () => {
     // 模拟旧基线库存量库：grants 表还没有内容标识列（历史数据保持 NULL）。
-    dataSource = new DataSource({ type: 'sqlite', database: ':memory:', entities: [], synchronize: false });
+    dataSource = new DataSource({ type: 'better-sqlite3', database: ':memory:', entities: [], synchronize: false });
     await dataSource.initialize();
     await dataSource.query(`CREATE TABLE "migrations" (
       "id" integer PRIMARY KEY AUTOINCREMENT NOT NULL,

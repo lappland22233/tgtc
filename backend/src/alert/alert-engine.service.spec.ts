@@ -79,7 +79,7 @@ describe('AlertEngineService', () => {
     }])).resolves.toEqual([]);
 
     expect(query).toHaveBeenCalledTimes(1);
-    expect(query.mock.calls[0][0]).toContain('SELECT ?7, ?1, ?2');
+    expect(query.mock.calls[0][0]).toContain('SELECT ?, ?, ?');
     expect(query.mock.calls[0][0]).not.toContain('::varchar');
   });
 });

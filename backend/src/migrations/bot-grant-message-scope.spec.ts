@@ -2,7 +2,7 @@ import { DataSource } from 'typeorm';
 import { SqliteScopeBotGrantMessage1804400000000 } from './1804400000000-SqliteScopeBotGrantMessage';
 
 it('保留旧授权，并允许不同接收 Bot 各自签发相同消息号', async () => {
-  const db = await new DataSource({ type: 'sqlite', database: ':memory:' }).initialize();
+  const db = await new DataSource({ type: 'better-sqlite3', database: ':memory:' }).initialize();
   const runner = db.createQueryRunner();
   const migration = new SqliteScopeBotGrantMessage1804400000000();
   try {

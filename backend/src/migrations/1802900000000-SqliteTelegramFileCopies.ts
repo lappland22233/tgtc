@@ -14,7 +14,7 @@ export class SqliteTelegramFileCopies1802900000000 implements MigrationInterface
   name = 'SqliteTelegramFileCopies1802900000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'sqlite') return;
+    if (queryRunner.dataSource.options.type !== 'better-sqlite3') return;
 
     await queryRunner.query(`
       CREATE TABLE IF NOT EXISTS "telegram_file_copies" (
@@ -60,7 +60,7 @@ export class SqliteTelegramFileCopies1802900000000 implements MigrationInterface
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'sqlite') return;
+    if (queryRunner.dataSource.options.type !== 'better-sqlite3') return;
     // SQLite 旧版本不支持 DROP COLUMN；保留列无数据风险（与既有迁移一致）。
     await queryRunner.query(`DROP TABLE IF EXISTS "telegram_file_copies"`);
   }

@@ -7,7 +7,7 @@ import { TelegramFileCopy } from '../common/entities/telegram-file-copy.entity';
 import { AuditService } from '../common/services/audit.service';
 import { AuditAction } from '../common/entities/audit-log.entity';
 import { CreateFolderDto, RenameFolderDto, MoveFolderDto, MoveFileDto, RenameFileDto, CopyFileDto } from './folder.dto';
-import { databaseCast, databaseForUpdate, databasePessimisticWriteLock, databaseQuery, getDatabaseType, isDatabaseUniqueViolation } from '../database/database-types';
+import { databaseCast, databaseForUpdate, databasePessimisticWriteLock, databaseQuery, databaseRawQuery, getDatabaseType, isDatabaseUniqueViolation } from '../database/database-types';
 import { DirectoryNamespaceService } from '../common/services/directory-namespace.service';
 
 const SOFT_DELETE_GRACE_DAYS = 7;
@@ -367,7 +367,7 @@ export class FolderService {
       const affectedFileIds = (
         await manager.getRepository(File).find({
           where: { folderId: In(folderIds), deleteRequestedAt: now },
-          select: ['id'],
+          select: { id: true },
         })
       ).map((f) => f.id);
       await this.namespace.releaseMany(manager, [
@@ -446,8 +446,8 @@ export class FolderService {
         // UPDATE 命中 0 行且静默成功，恢复后会出现重名（唯一约束失效）。
         // acquire 对有名称行的实体原位重激活，对无名称行的实体补建并与活跃名称冲突校验。
         const restoredFolders = await manager.getRepository(Folder).find({
-          where: { id: In(folderIds), isDeleted: false, deleteRequestedAt: null } as any,
-          select: ['id', 'ownerId', 'parentId', 'name'],
+          where: { id: In(folderIds), isDeleted: false, deleteRequestedAt: IsNull() },
+          select: { id: true, ownerId: true, parentId: true, name: true },
         });
         for (const f of restoredFolders) {
           await this.namespace.acquire(manager, {
@@ -459,8 +459,8 @@ export class FolderService {
           });
         }
         const restoredFiles = await manager.getRepository(File).find({
-          where: { folderId: In(folderIds), isDeleted: false, deleteRequestedAt: null } as any,
-          select: ['id', 'uploaderId', 'folderId', 'originalName'],
+          where: { folderId: In(folderIds), isDeleted: false, deleteRequestedAt: IsNull() },
+          select: { id: true, uploaderId: true, folderId: true, originalName: true },
         });
         for (const f of restoredFiles) {
           await this.namespace.acquire(manager, {
@@ -712,7 +712,7 @@ export class FolderService {
    * 结果含自身，供级联软删 / 恢复复用。
    */
   private async collectSubtreeIds(rootId: string): Promise<string[]> {
-    const rows = await this.folderRepo.manager.query(
+    const rows = await databaseRawQuery(this.folderRepo.manager,
       `WITH RECURSIVE subtree AS (
          SELECT id FROM folders WHERE id = $1
          UNION ALL
@@ -740,7 +740,7 @@ export class FolderService {
       if (currentId === ancestorId) return true;
       if (seen.has(currentId)) return false;
       seen.add(currentId);
-      const rows: Array<{ parentId: string | null }> = await manager.query(
+      const rows: Array<{ parentId: string | null }> = await databaseRawQuery(manager,
         `SELECT "parentId" FROM folders WHERE id = $1`,
         [currentId],
       );
@@ -763,7 +763,7 @@ export class FolderService {
     while (currentId) {
       if (seen.has(currentId)) return depth; // 成环防御
       seen.add(currentId);
-      const rows: Array<{ parentId: string | null }> = await manager.query(
+      const rows: Array<{ parentId: string | null }> = await databaseRawQuery(manager,
         `SELECT "parentId" FROM folders WHERE id = $1`,
         [currentId],
       );
@@ -783,7 +783,7 @@ export class FolderService {
     manager: import('typeorm').EntityManager,
     folderId: string,
   ): Promise<number> {
-    const rows: Array<{ h: number }> = await manager.query(
+    const rows: Array<{ h: number }> = await databaseRawQuery(manager,
       `WITH RECURSIVE subtree AS (
          SELECT id, 0 AS depth FROM folders WHERE id = $1
          UNION ALL
@@ -812,7 +812,7 @@ export class FolderService {
     while (currentId) {
       if (seen.has(currentId)) break; // 成环防御
       seen.add(currentId);
-      const rows: Array<{ parentId: string | null }> = await this.folderRepo.manager.query(
+      const rows: Array<{ parentId: string | null }> = await databaseRawQuery(this.folderRepo.manager,
         `SELECT "parentId" FROM ${tableName} WHERE id = $1`,
         [currentId],
       );

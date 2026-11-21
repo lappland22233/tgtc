@@ -13,7 +13,7 @@ export class AddGrantStorageColumns1804200000000 implements MigrationInterface {
   name = 'AddGrantStorageColumns1804200000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'postgres') return;
+    if (queryRunner.dataSource.options.type !== 'postgres') return;
 
     await queryRunner.query(
       `ALTER TABLE "telegram_bot_file_grants" ADD COLUMN IF NOT EXISTS "storageBackend" varchar(16) NOT NULL DEFAULT 'telegram'`,
@@ -36,7 +36,7 @@ export class AddGrantStorageColumns1804200000000 implements MigrationInterface {
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'postgres') return;
+    if (queryRunner.dataSource.options.type !== 'postgres') return;
     await queryRunner.query(`DROP INDEX IF EXISTS "idx_tg_bot_grants_purge_sweep"`);
     await queryRunner.query(`ALTER TABLE "telegram_bot_file_grants" DROP COLUMN IF EXISTS "storagePurgedAt"`);
     await queryRunner.query(`ALTER TABLE "telegram_bot_file_grants" DROP COLUMN IF EXISTS "storageObjectRef"`);

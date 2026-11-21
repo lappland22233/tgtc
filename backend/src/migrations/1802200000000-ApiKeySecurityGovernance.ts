@@ -10,7 +10,7 @@ export class ApiKeySecurityGovernance1802200000000 implements MigrationInterface
   name = 'ApiKeySecurityGovernance1802200000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'postgres') return;
+    if (queryRunner.dataSource.options.type !== 'postgres') return;
 
     await queryRunner.query(`
       ALTER TABLE "api_keys"
@@ -59,7 +59,7 @@ export class ApiKeySecurityGovernance1802200000000 implements MigrationInterface
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'postgres') return;
+    if (queryRunner.dataSource.options.type !== 'postgres') return;
     await queryRunner.query(`DROP TABLE IF EXISTS "api_key_usage_logs"`);
     await queryRunner.query(`DROP TABLE IF EXISTS "api_key_ip_allowlist"`);
     await queryRunner.query(`

@@ -3,7 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { InjectQueue } from '@nestjs/bull';
 import { Repository, In } from 'typeorm';
 import { Queue } from 'bull';
-import { v4 as uuidv4 } from 'uuid';
+import { randomUUID } from 'node:crypto';
 import { FileVerifyTask, FILE_VERIFY_ACTIVE_STATUSES } from '../common/entities/file-verify-task.entity';
 import { File } from '../common/entities/file.entity';
 import { User } from '../common/entities/user.entity';
@@ -102,7 +102,7 @@ export class FileVerifyService implements OnModuleInit {
     const limit = Math.max(1, Math.min(2000, dto.limit ?? 500));
     const concurrency = Math.max(1, Math.min(8, dto.concurrency ?? 4));
 
-    const taskId = uuidv4();
+    const taskId = randomUUID();
     const task = this.fileVerifyTaskRepository.create({
       taskId,
       createdBy: user.id,

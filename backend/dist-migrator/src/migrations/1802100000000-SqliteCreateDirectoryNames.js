@@ -14,7 +14,7 @@ class SqliteCreateDirectoryNames1802100000000 {
         this.name = 'SqliteCreateDirectoryNames1802100000000';
     }
     async up(queryRunner) {
-        if (queryRunner.connection.options.type !== 'sqlite')
+        if (queryRunner.dataSource.options.type !== 'better-sqlite3')
             return;
         // 存量库基线已执行不会重跑，必须在此补齐表（对全新库幂等）。
         await queryRunner.query(`
@@ -83,7 +83,7 @@ class SqliteCreateDirectoryNames1802100000000 {
     `);
     }
     async down(queryRunner) {
-        if (queryRunner.connection.options.type !== 'sqlite')
+        if (queryRunner.dataSource.options.type !== 'better-sqlite3')
             return;
         await queryRunner.query(`DROP INDEX IF EXISTS "idx_directory_names_entity"`);
         await queryRunner.query(`DROP INDEX IF EXISTS "uq_directory_names_active"`);

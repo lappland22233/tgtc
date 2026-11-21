@@ -806,10 +806,15 @@ export class ReplicationAttemptService {
     try {
       rows = await this.repo.find({
         where: { createdAt: MoreThan(since) },
-        select: [
-          'id', 'status', 'failureReason', 'startedAt', 'relayCompletedAt',
-          'completedAt', 'createdAt',
-        ],
+        select: {
+          id: true,
+          status: true,
+          failureReason: true,
+          startedAt: true,
+          relayCompletedAt: true,
+          completedAt: true,
+          createdAt: true,
+        },
         order: { createdAt: 'DESC' },
         take: METRICS_MAX_ROWS + 1,
       });
@@ -918,7 +923,7 @@ export class ReplicationAttemptService {
 
       const removable = await this.repo.find({
         where: { status: In(ATTEMPT_TERMINAL_STATUSES), updatedAt: LessThan(params.terminalBefore) },
-        select: ['id', 'nextRetryAt'],
+        select: { id: true, nextRetryAt: true },
         take: 5000,
       });
       const now = Date.now();

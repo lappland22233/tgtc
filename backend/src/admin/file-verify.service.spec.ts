@@ -4,7 +4,7 @@ import 'reflect-metadata';
 jest.mock('../file/file.service', () => ({ FileService: class FileService {} }));
 
 // uuid v4 生成固定值，便于断言 queue.add 的 jobId / taskId
-jest.mock('uuid', () => ({ v4: jest.fn(() => 'uuid') }));
+jest.mock('node:crypto', () => ({ ...jest.requireActual('node:crypto'), randomUUID: jest.fn(() => 'uuid') }));
 
 import { ServiceUnavailableException } from '@nestjs/common';
 import { In } from 'typeorm';

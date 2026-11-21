@@ -31,7 +31,7 @@ export class CreateTelegramReplicationAttempts1803500000000 implements Migration
   name = 'CreateTelegramReplicationAttempts1803500000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'postgres') return;
+    if (queryRunner.dataSource.options.type !== 'postgres') return;
 
     await queryRunner.query(`
       CREATE TABLE IF NOT EXISTS "telegram_replication_attempts" (
@@ -84,7 +84,7 @@ export class CreateTelegramReplicationAttempts1803500000000 implements Migration
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'postgres') return;
+    if (queryRunner.dataSource.options.type !== 'postgres') return;
     // 轮次表是可审计证据：down 只在本迁移自身回滚时删除，生产禁止直接回滚破坏历史事件
     await queryRunner.query(`DROP INDEX IF EXISTS "idx_tg_replication_attempts_updated"`);
     await queryRunner.query(`DROP INDEX IF EXISTS "idx_tg_replication_attempts_reason"`);

@@ -410,7 +410,7 @@ async function main(): Promise<void> {
   const source = new DataSource(sourceOptions);
   const targetModules = loadDatabaseModules('sqlite');
   const targetOptions = targetModules.createDatabaseOptions({ ...process.env, DB_TYPE: 'sqlite', DB_DATABASE: tempPath, DB_MIGRATIONS_RUN: 'true' });
-  if (targetOptions.type !== 'sqlite') throw new Error('迁移目标配置必须为 SQLite');
+  if (targetOptions.type !== 'better-sqlite3') throw new Error('迁移目标配置必须为 SQLite');
   const target = new DataSource({
     ...targetOptions,
     database: tempPath,

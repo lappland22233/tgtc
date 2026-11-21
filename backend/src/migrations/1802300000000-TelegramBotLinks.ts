@@ -13,7 +13,7 @@ export class TelegramBotLinks1802300000000 implements MigrationInterface {
   name = 'TelegramBotLinks1802300000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'postgres') return;
+    if (queryRunner.dataSource.options.type !== 'postgres') return;
 
     await queryRunner.query(`
       CREATE TABLE IF NOT EXISTS "telegram_bot_file_grants" (
@@ -95,7 +95,7 @@ export class TelegramBotLinks1802300000000 implements MigrationInterface {
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'postgres') return;
+    if (queryRunner.dataSource.options.type !== 'postgres') return;
     await queryRunner.query(`DROP INDEX IF EXISTS "IDX_access_logs_botGrantId"`);
     await queryRunner.query(`
       ALTER TABLE "access_logs"

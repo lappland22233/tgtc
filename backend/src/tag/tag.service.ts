@@ -151,7 +151,7 @@ export class TagService {
 
     await this.dataSource.transaction(async (manager) => {
       // 与文件标签替换保持一致：先锁 tags 父行，再由级联删除 file_tags。
-      const lockedTags = await databaseQuery<Array<{ id: string }>>(manager, `SELECT id FROM tags WHERE id = $1${databaseForUpdate(manager.connection.options.type)}`, [id], getDatabaseType());
+      const lockedTags = await databaseQuery<Array<{ id: string }>>(manager, `SELECT id FROM tags WHERE id = $1${databaseForUpdate(manager.dataSource.options.type)}`, [id], getDatabaseType());
       if (lockedTags.length === 0) {
         throw new NotFoundException('标签不存在');
       }

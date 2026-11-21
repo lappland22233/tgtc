@@ -13,7 +13,7 @@ class SqliteAddAccessLogTransferFields1802600000000 {
         this.name = 'SqliteAddAccessLogTransferFields1802600000000';
     }
     async up(queryRunner) {
-        if (queryRunner.connection.options.type !== 'sqlite')
+        if (queryRunner.dataSource.options.type !== 'better-sqlite3')
             return;
         const table = await queryRunner.getTable('access_logs');
         if (!table)
@@ -32,7 +32,7 @@ class SqliteAddAccessLogTransferFields1802600000000 {
         }
     }
     async down(queryRunner) {
-        if (queryRunner.connection.options.type !== 'sqlite')
+        if (queryRunner.dataSource.options.type !== 'better-sqlite3')
             return;
         // SQLite 旧版本不支持 DROP COLUMN；保留列无数据风险，与既有迁移保持一致。
     }

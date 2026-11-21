@@ -12,7 +12,7 @@ export class AddGDriveCacheColumns1804300000000 implements MigrationInterface {
   name = 'AddGDriveCacheColumns1804300000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'postgres') return;
+    if (queryRunner.dataSource.options.type !== 'postgres') return;
 
     // files 表增加 Google 缓存列
     await queryRunner.query(
@@ -46,7 +46,7 @@ export class AddGDriveCacheColumns1804300000000 implements MigrationInterface {
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'postgres') return;
+    if (queryRunner.dataSource.options.type !== 'postgres') return;
 
     await queryRunner.query(`DROP INDEX IF EXISTS "idx_tg_bot_grants_gdrive_cache_ref"`);
     await queryRunner.query(`ALTER TABLE "telegram_bot_file_grants" DROP COLUMN IF EXISTS "gdriveCacheStatus"`);

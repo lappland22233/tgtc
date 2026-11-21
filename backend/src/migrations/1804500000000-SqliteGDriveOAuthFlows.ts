@@ -2,7 +2,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
 
 export class SqliteGDriveOAuthFlows1804500000000 implements MigrationInterface {
   async up(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'sqlite') return;
+    if (queryRunner.dataSource.options.type !== 'better-sqlite3') return;
     await queryRunner.query(`CREATE TABLE IF NOT EXISTS "gdrive_oauth_flows" (
       "stateHash" varchar(64) PRIMARY KEY NOT NULL,
       "bindingHash" varchar(64) NOT NULL,
@@ -12,7 +12,7 @@ export class SqliteGDriveOAuthFlows1804500000000 implements MigrationInterface {
   }
 
   async down(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'sqlite') return;
+    if (queryRunner.dataSource.options.type !== 'better-sqlite3') return;
     await queryRunner.query('DROP TABLE IF EXISTS "gdrive_oauth_flows"');
   }
 }

@@ -10,7 +10,7 @@ class SqliteRevokePrivateLegacyShares1802000000000 {
         this.name = 'SqliteRevokePrivateLegacyShares1802000000000';
     }
     async up(queryRunner) {
-        if (queryRunner.connection.options.type !== 'sqlite')
+        if (queryRunner.dataSource.options.type !== 'better-sqlite3')
             return;
         await queryRunner.query(`
       UPDATE "share_links"

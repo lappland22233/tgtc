@@ -18,7 +18,7 @@ export class CreateTelegramMirror1803100000000 implements MigrationInterface {
   name = 'CreateTelegramMirror1803100000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'postgres') return;
+    if (queryRunner.dataSource.options.type !== 'postgres') return;
 
     await queryRunner.query(`
       CREATE TABLE IF NOT EXISTS "telegram_mirror_rules" (
@@ -94,7 +94,7 @@ export class CreateTelegramMirror1803100000000 implements MigrationInterface {
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'postgres') return;
+    if (queryRunner.dataSource.options.type !== 'postgres') return;
     await queryRunner.query(`DROP INDEX IF EXISTS "idx_tg_mirror_tasks_next_retry"`);
     await queryRunner.query(`DROP INDEX IF EXISTS "idx_tg_mirror_tasks_rule_status"`);
     await queryRunner.query(`DROP INDEX IF EXISTS "idx_tg_mirror_tasks_status"`);

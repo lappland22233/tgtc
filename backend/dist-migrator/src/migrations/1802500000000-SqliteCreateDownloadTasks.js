@@ -10,7 +10,7 @@ class SqliteCreateDownloadTasks1802500000000 {
         this.name = 'SqliteCreateDownloadTasks1802500000000';
     }
     async up(queryRunner) {
-        if (queryRunner.connection.options.type !== 'sqlite')
+        if (queryRunner.dataSource.options.type !== 'better-sqlite3')
             return;
         await queryRunner.query(`
       CREATE TABLE IF NOT EXISTS "download_tasks" (

@@ -58,13 +58,7 @@ export function databasePessimisticWriteLock(
   return getDatabaseType(env) === 'postgres' ? { lock: { mode: 'pessimistic_write' } } : {};
 }
 
-/** 将 PostgreSQL $n 占位符转换为 SQLite 编号占位符 ?n，保留重复参数的索引语义。 */
-export function databaseQueryText(sql: string, type: DatabaseType): string {
-  if (type !== 'sqlite') return sql;
-  return sql.replace(/\$(\d+)/g, '?$1');
-}
-
-function isSqliteBusy(error: unknown): boolean {
+export function isSqliteBusy(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   const code = (error as { code?: string } | null)?.code;
   return code === 'SQLITE_BUSY' || code === 'SQLITE_LOCKED' || /database is locked|database is busy/i.test(message);
@@ -74,7 +68,30 @@ function isSqliteBusy(error: unknown): boolean {
 export function isDatabaseUniqueViolation(error: unknown): boolean {
   const candidate = error as { code?: string; driverError?: { code?: string } } | null;
   const code = candidate?.code ?? candidate?.driverError?.code;
-  return code === '23505' || code === 'SQLITE_CONSTRAINT' || code === 'SQLITE_CONSTRAINT_UNIQUE';
+  return code === '23505' || code === 'SQLITE_CONSTRAINT' || code === 'SQLITE_CONSTRAINT_UNIQUE' || code === 'SQLITE_CONSTRAINT_PRIMARYKEY';
+}
+
+/** Preserve the driver's raw result shape while binding cross-dialect SQL parameters. */
+export function databaseRawQuery<T = any>(
+  runner: { query: (sql: string, parameters?: unknown[]) => Promise<any> },
+  sql: string,
+  parameters: unknown[],
+  type: DatabaseType = getDatabaseType(),
+): Promise<T> {
+  // better-sqlite3 binds positional ? parameters in appearance order. Expand
+  // repeated or reordered PostgreSQL $n references without changing their values.
+  let queryText = sql;
+  let queryParameters = parameters;
+  if (type === 'sqlite') {
+    queryParameters = parameters.map(value => value instanceof Date ? sqliteDateParameter(value) : value);
+    const positional: unknown[] = [];
+    queryText = sql.replace(/\$(\d+)/g, (_, index: string) => {
+      positional.push(queryParameters[Number(index) - 1]);
+      return '?';
+    });
+    if (positional.length) queryParameters = positional;
+  }
+  return runner.query(queryText, queryParameters);
 }
 
 /** SQLite 写锁冲突的有限退避；PostgreSQL 路径完全不改变。 */
@@ -86,27 +103,9 @@ export async function databaseQuery<T = unknown>(
   retries = 2,
 ): Promise<T> {
   const attempts = type === 'sqlite' ? Math.max(0, retries) + 1 : 1;
-  const queryText = databaseQueryText(sql, type);
-  // sqlite3 裸查询不接受 Date 对象；统一转为与 TypeORM datetime 持久化格式可比较的 UTC 文本。
-  // PostgreSQL 继续接收原始 Date，由 pg 驱动按 timestamptz/timestamp 语义编码。
-  const queryParameters = type === 'sqlite'
-    ? parameters.map((value) => value instanceof Date ? sqliteDateParameter(value) : value)
-    : parameters;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
-      // TypeORM sqlite3 对 INSERT/UPDATE ... RETURNING 使用 run()，会丢弃返回行；
-      // 直接调用 sqlite3 all() 才能取得原子 UPSERT 的 RETURNING 结果。
-      if (type === 'sqlite' && /\bRETURNING\b/i.test(queryText)) {
-        const holder = runner as unknown as {
-          connection?: { driver?: { databaseConnection?: SqliteAllConnection } };
-          driver?: { databaseConnection?: SqliteAllConnection };
-        };
-        const connection = holder.connection?.driver?.databaseConnection ?? holder.driver?.databaseConnection;
-        if (connection?.all) {
-          return await sqliteAll<T>(connection, queryText, queryParameters);
-        }
-      }
-      return normalizePostgresQueryResult(await runner.query(queryText, queryParameters), type);
+      return normalizePostgresQueryResult(await databaseRawQuery<T>(runner, sql, parameters, type), type);
     } catch (error) {
       if (type !== 'sqlite' || !isSqliteBusy(error) || attempt === attempts - 1) throw error;
       await new Promise((resolve) => setTimeout(resolve, 25 * (attempt + 1)));
@@ -114,10 +113,6 @@ export async function databaseQuery<T = unknown>(
   }
   throw new Error('数据库查询未执行');
 }
-
-type SqliteAllConnection = {
-  all: (sql: string, parameters: unknown[], callback: (error: Error | null, rows: unknown[]) => void) => void;
-};
 
 /**
  * PostgreSQL 归一化：TypeORM 的 `PostgresQueryRunner.query()` 对 `UPDATE`/`DELETE`
@@ -135,7 +130,7 @@ type SqliteAllConnection = {
  * `rows.length` 对 UPDATE 恒为 2（0 行时形如 `[[], 0]`），使所有「按行数判断
  * 是否命中 / 是否达上限」的逻辑静默失效：已实际导致 Bot 每日配额永不生效
  * （`rows.length > 0` 恒真）、告警一键确认只处理首批且数量错报为 2。
- * SQLite 的 RETURNING 路径已由 `sqliteAll()` 解包，故仅需处理 PG。
+ * SQLite 驱动原生返回 RETURNING 行集。
  *
  * 判定条件（PG 行集只可能是对象数组，故无歧义）：
  * 长度恰为 2、首元素是数组、次元素是数字。据此不会误伤「恰好返回 2 行」的 SELECT。
@@ -152,13 +147,4 @@ function normalizePostgresQueryResult<T>(result: T, type: DatabaseType): T {
 
 export function sqliteDateParameter(value: Date): string {
   return value.toISOString().replace('T', ' ').replace('Z', '');
-}
-
-function sqliteAll<T>(connection: SqliteAllConnection, sql: string, parameters: unknown[]): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    connection.all(sql, parameters, (error, rows) => {
-      if (error) reject(error);
-      else resolve(rows as T);
-    });
-  });
 }

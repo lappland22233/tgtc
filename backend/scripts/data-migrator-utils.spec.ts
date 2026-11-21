@@ -20,7 +20,7 @@ describe('NON_ENTITY_TABLE_DEFINITIONS', () => {
   });
 
   it('SQLite DDL 可建表，并支持 baseline_stats 不传 id 的运行时 upsert', async () => {
-    const dataSource = new DataSource({ type: 'sqlite', database: ':memory:' });
+    const dataSource = new DataSource({ type: 'better-sqlite3', database: ':memory:' });
     await dataSource.initialize();
     try {
       for (const definition of NON_ENTITY_TABLE_DEFINITIONS.filter((item) => [

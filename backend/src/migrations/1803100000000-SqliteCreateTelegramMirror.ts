@@ -12,7 +12,7 @@ export class SqliteCreateTelegramMirror1803100000000 implements MigrationInterfa
   name = 'SqliteCreateTelegramMirror1803100000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'sqlite') return;
+    if (queryRunner.dataSource.options.type !== 'better-sqlite3') return;
 
     await queryRunner.query(`
       CREATE TABLE IF NOT EXISTS "telegram_mirror_rules" (
@@ -86,7 +86,7 @@ export class SqliteCreateTelegramMirror1803100000000 implements MigrationInterfa
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'sqlite') return;
+    if (queryRunner.dataSource.options.type !== 'better-sqlite3') return;
     await queryRunner.query(`DROP INDEX IF EXISTS "idx_tg_mirror_tasks_next_retry"`);
     await queryRunner.query(`DROP INDEX IF EXISTS "idx_tg_mirror_tasks_rule_status"`);
     await queryRunner.query(`DROP INDEX IF EXISTS "idx_tg_mirror_tasks_status"`);

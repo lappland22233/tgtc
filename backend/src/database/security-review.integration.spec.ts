@@ -155,7 +155,7 @@ describe.each(dialects)('security review regressions / %s', (dialect) => {
             await new MetricsAggregationProcessor(db.getRepository(AccessLog)).aggregate1Min(following);
             await evaluator.evaluateAlerts(following);
             const updates = await db.getRepository(require('./src/common/entities/update-task.entity').UpdateTask).find({
-              select: ['taskId', 'status', 'isActive', 'progress', 'metadata', 'heartbeatAt'],
+              select: { taskId: true, status: true, isActive: true, progress: true, metadata: true, heartbeatAt: true },
             });
             console.log(JSON.stringify({pending: await db.showMigrations(), counts, updates,
               timestamps: await db.query('SELECT "createdAt" AS stamp FROM access_logs WHERE path = ?', ['/converted-minute']),

@@ -33,7 +33,7 @@ function createDatabaseOptions(env = process.env) {
     const type = (0, database_types_1.getDatabaseType)(env);
     if (type === 'sqlite') {
         return {
-            type: 'sqlite',
+            type: 'better-sqlite3',
             database: env.DB_DATABASE || 'data/tgtc.sqlite',
             entities: [...entities_1.databaseEntities],
             subscribers: [uuid_subscriber_1.UuidSubscriber],
@@ -41,7 +41,7 @@ function createDatabaseOptions(env = process.env) {
             synchronize: false,
             migrationsRun: env.DB_MIGRATIONS_RUN === 'true',
             logging: env.NODE_ENV === 'development',
-            busyTimeout: positiveInt(env, 'DB_SQLITE_BUSY_TIMEOUT_MS', 5000),
+            timeout: positiveInt(env, 'DB_SQLITE_BUSY_TIMEOUT_MS', 5000),
         };
     }
     return {

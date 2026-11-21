@@ -17,7 +17,7 @@ export class AddFileTelegramUniqueIdIndex1803300000000 implements MigrationInter
   name = 'AddFileTelegramUniqueIdIndex1803300000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'postgres') return;
+    if (queryRunner.dataSource.options.type !== 'postgres') return;
     await queryRunner.query(
       `CREATE INDEX IF NOT EXISTS "idx_files_telegram_file_unique_id"`
       + ` ON "files" ("telegramFileUniqueId")`,
@@ -25,7 +25,7 @@ export class AddFileTelegramUniqueIdIndex1803300000000 implements MigrationInter
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'postgres') return;
+    if (queryRunner.dataSource.options.type !== 'postgres') return;
     await queryRunner.query(`DROP INDEX IF EXISTS "idx_files_telegram_file_unique_id"`);
   }
 }

@@ -13,7 +13,7 @@ export class SqliteAddFileTelegramSourceFields1803200000000 implements Migration
   name = 'SqliteAddFileTelegramSourceFields1803200000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'sqlite') return;
+    if (queryRunner.dataSource.options.type !== 'better-sqlite3') return;
 
     const table = await queryRunner.getTable('files');
     if (!table) return;
@@ -34,7 +34,7 @@ export class SqliteAddFileTelegramSourceFields1803200000000 implements Migration
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'sqlite') return;
+    if (queryRunner.dataSource.options.type !== 'better-sqlite3') return;
     // SQLite 旧版本不支持 DROP COLUMN；保留可空列无数据风险，与既有迁移保持一致。
   }
 }

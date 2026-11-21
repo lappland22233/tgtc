@@ -480,7 +480,7 @@ export class AuthService {
     );
 
     // 审计日志：密码重置
-    const user = await this.userRepository.findOne({ where: { email }, select: ['id'] });
+    const user = await this.userRepository.findOne({ where: { email }, select: { id: true } });
     if (user) {
       this.auditService.log({
         action: 'password_reset',

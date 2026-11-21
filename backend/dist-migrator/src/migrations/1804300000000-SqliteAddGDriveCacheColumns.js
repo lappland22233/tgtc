@@ -14,7 +14,7 @@ class SqliteAddGDriveCacheColumns1804300000000 {
         this.name = 'SqliteAddGDriveCacheColumns1804300000000';
     }
     async up(queryRunner) {
-        if (queryRunner.connection.options.type !== 'sqlite')
+        if (queryRunner.dataSource.options.type !== 'better-sqlite3')
             return;
         const filesTable = await queryRunner.getTable('files');
         if (filesTable) {
@@ -46,7 +46,7 @@ class SqliteAddGDriveCacheColumns1804300000000 {
         }
     }
     async down(queryRunner) {
-        if (queryRunner.connection.options.type !== 'sqlite')
+        if (queryRunner.dataSource.options.type !== 'better-sqlite3')
             return;
         await queryRunner.query(`DROP INDEX IF EXISTS "idx_tg_bot_grants_gdrive_cache_ref"`);
         await queryRunner.query(`DROP INDEX IF EXISTS "idx_files_gdrive_cache_ref"`);

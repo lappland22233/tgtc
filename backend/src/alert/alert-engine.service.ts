@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { IsNull, Repository } from 'typeorm';
 import { Alert } from '../common/entities/alert.entity';
 import { ConfigCacheService } from '../common/services/config-cache.service';
 import { randomUUID } from 'crypto';
@@ -142,6 +142,6 @@ export class AlertEngineService {
 
   /** 获取未确认告警数量 */
   async getUnacknowledgedCount(): Promise<number> {
-    return this.alertRepo.count({ where: { acknowledgedAt: null } as any });
+    return this.alertRepo.count({ where: { acknowledgedAt: IsNull() } });
   }
 }

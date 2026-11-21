@@ -11,7 +11,7 @@ export class SqliteAddAccessLogTransferFields1802600000000 implements MigrationI
   name = 'SqliteAddAccessLogTransferFields1802600000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'sqlite') return;
+    if (queryRunner.dataSource.options.type !== 'better-sqlite3') return;
 
     const table = await queryRunner.getTable('access_logs');
     if (!table) return;
@@ -33,7 +33,7 @@ export class SqliteAddAccessLogTransferFields1802600000000 implements MigrationI
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'sqlite') return;
+    if (queryRunner.dataSource.options.type !== 'better-sqlite3') return;
     // SQLite 旧版本不支持 DROP COLUMN；保留列无数据风险，与既有迁移保持一致。
   }
 }

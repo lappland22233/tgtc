@@ -12,7 +12,7 @@ class SqliteAddGrantStorageColumns1804200000000 {
         this.name = 'SqliteAddGrantStorageColumns1804200000000';
     }
     async up(queryRunner) {
-        if (queryRunner.connection.options.type !== 'sqlite')
+        if (queryRunner.dataSource.options.type !== 'better-sqlite3')
             return;
         const table = await queryRunner.getTable('telegram_bot_file_grants');
         if (!table)
@@ -33,7 +33,7 @@ class SqliteAddGrantStorageColumns1804200000000 {
             + ` ON "telegram_bot_file_grants" ("storageBackend", "storagePurgedAt", "expiresAt")`);
     }
     async down(queryRunner) {
-        if (queryRunner.connection.options.type !== 'sqlite')
+        if (queryRunner.dataSource.options.type !== 'better-sqlite3')
             return;
         await queryRunner.query(`DROP INDEX IF EXISTS "idx_tg_bot_grants_purge_sweep"`);
     }

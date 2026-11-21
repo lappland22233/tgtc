@@ -17,7 +17,7 @@ export class CreateDirectoryNames1802100000000 implements MigrationInterface {
   name = 'CreateDirectoryNames1802100000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'postgres') return;
+    if (queryRunner.dataSource.options.type !== 'postgres') return;
 
     await queryRunner.query(`
       CREATE TABLE IF NOT EXISTS "directory_names" (
@@ -76,7 +76,7 @@ export class CreateDirectoryNames1802100000000 implements MigrationInterface {
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'postgres') return;
+    if (queryRunner.dataSource.options.type !== 'postgres') return;
     await queryRunner.query(`DROP INDEX IF EXISTS "idx_directory_names_entity"`);
     await queryRunner.query(`DROP INDEX IF EXISTS "uq_directory_names_active"`);
     await queryRunner.query(`DROP TABLE IF EXISTS "directory_names"`);

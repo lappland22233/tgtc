@@ -43,7 +43,13 @@ describe('databaseQuery 返回值归一化（PG UPDATE/DELETE 元组）', () => 
     ).resolves.toBe(7);
   });
 
-  it('SQLite 方言不做元组解包（其 RETURNING 路径由 sqliteAll 单独处理）', async () => {
+  it('binds repeated and reordered SQLite parameters in query order', async () => {
+    const runner = pgRunner([]);
+    await databaseQuery(runner, 'SELECT $2, $1, $2', [new Date('2026-01-01T12:00:00Z'), 7], 'sqlite');
+    expect(runner.query).toHaveBeenCalledWith('SELECT ?, ?, ?', [7, '2026-01-01 12:00:00.000', 7]);
+  });
+
+  it('SQLite 方言不做元组解包（其驱动直接返回 RETURNING 行集）', async () => {
     const runner = pgRunner([[], 0]);
     await expect(databaseQuery(runner, 'UPDATE "t" SET x = 1', [], 'sqlite')).resolves.toEqual([[], 0]);
   });

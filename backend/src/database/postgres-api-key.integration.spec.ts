@@ -19,7 +19,7 @@ import { TelegramBotQuotaService } from '../telegram-bot/telegram-bot-quota.serv
  *    完全掩盖该缺陷，因此必须用真实 PG + 正式迁移链验证插入路径。
  * 2) Telegram Bot 三表：同类 id DEFAULT 缺陷（FixTelegramBotIdDefault1802400000000）
  *    以及 `databaseQuery` 的 PG `[rows, affected]` 元组归一化——后者曾导致
- *    每日配额判定恒真（BTW：SQLite 路径经 sqliteAll 解包，测试全绿无法覆盖）。
+ *    每日配额判定恒真（BTW：SQLite 驱动直接返回行集，测试全绿无法覆盖）。
  *    这两类缺陷都只在 PG 上出现，必须真库验证。
  *
  * 运行方式：需要真实 PostgreSQL（CI 由 quality-gates.yml 的 PG16 服务提供）。

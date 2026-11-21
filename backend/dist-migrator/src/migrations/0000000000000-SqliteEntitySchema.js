@@ -38,9 +38,9 @@ class SqliteEntitySchema1700000000000 {
         this.name = 'SqliteEntitySchema1700000000000';
     }
     async up(queryRunner) {
-        if (queryRunner.connection.options.type !== 'sqlite')
+        if (queryRunner.dataSource.options.type !== 'better-sqlite3')
             return;
-        const metadatas = queryRunner.connection.entityMetadatas;
+        const metadatas = queryRunner.dataSource.entityMetadatas;
         const partialUniqueColumns = new Set(metadatas.flatMap((metadata) => metadata.indices
             .filter((index) => index.isUnique && Boolean(index.where))
             .flatMap((index) => index.columns.map((column) => `${metadata.tableName}.${typeof column === 'string' ? column : column.databaseName}`))));
@@ -109,7 +109,7 @@ class SqliteEntitySchema1700000000000 {
         }
     }
     async down(queryRunner) {
-        if (queryRunner.connection.options.type !== 'sqlite')
+        if (queryRunner.dataSource.options.type !== 'better-sqlite3')
             return;
         // SQLite 基线可能已经承载业务数据；revert 不得静默删表或删数据。
         // 如需回退，请使用备份恢复，或编写经过审查的前向修复迁移。

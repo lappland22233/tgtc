@@ -11,7 +11,7 @@ class SqliteTelegramBotLinks1802300000000 {
         this.name = 'SqliteTelegramBotLinks1802300000000';
     }
     async up(queryRunner) {
-        if (queryRunner.connection.options.type !== 'sqlite')
+        if (queryRunner.dataSource.options.type !== 'better-sqlite3')
             return;
         await queryRunner.query(`
       CREATE TABLE IF NOT EXISTS "telegram_bot_file_grants" (
@@ -74,7 +74,7 @@ class SqliteTelegramBotLinks1802300000000 {
         await queryRunner.query(`CREATE INDEX IF NOT EXISTS "IDX_access_logs_botGrantId" ON "access_logs" ("botGrantId")`);
     }
     async down(queryRunner) {
-        if (queryRunner.connection.options.type !== 'sqlite')
+        if (queryRunner.dataSource.options.type !== 'better-sqlite3')
             return;
         // SQLite 不支持 DROP COLUMN（旧版）；保留列即可，无数据风险。
         await queryRunner.query(`DROP TABLE IF EXISTS "telegram_bot_whitelist"`);

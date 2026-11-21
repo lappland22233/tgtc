@@ -14,7 +14,7 @@ class SqliteCreateTelegramAccounts1803000000000 {
         this.name = 'SqliteCreateTelegramAccounts1803000000000';
     }
     async up(queryRunner) {
-        if (queryRunner.connection.options.type !== 'sqlite')
+        if (queryRunner.dataSource.options.type !== 'better-sqlite3')
             return;
         await queryRunner.query(`
       CREATE TABLE IF NOT EXISTS "telegram_accounts" (
@@ -51,7 +51,7 @@ class SqliteCreateTelegramAccounts1803000000000 {
             + ` ON "telegram_accounts" ("enabled")`);
     }
     async down(queryRunner) {
-        if (queryRunner.connection.options.type !== 'sqlite')
+        if (queryRunner.dataSource.options.type !== 'better-sqlite3')
             return;
         // SQLite 旧版本不支持 DROP COLUMN；删表不自动删索引，显式清理后再删表。
         await queryRunner.query(`DROP INDEX IF EXISTS "idx_tg_accounts_enabled"`);

@@ -12,7 +12,7 @@ export class SqliteAddGDriveCacheColumns1804300000000 implements MigrationInterf
   name = 'SqliteAddGDriveCacheColumns1804300000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'sqlite') return;
+    if (queryRunner.dataSource.options.type !== 'better-sqlite3') return;
 
     const filesTable = await queryRunner.getTable('files');
     if (filesTable) {
@@ -50,7 +50,7 @@ export class SqliteAddGDriveCacheColumns1804300000000 implements MigrationInterf
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'sqlite') return;
+    if (queryRunner.dataSource.options.type !== 'better-sqlite3') return;
     await queryRunner.query(`DROP INDEX IF EXISTS "idx_tg_bot_grants_gdrive_cache_ref"`);
     await queryRunner.query(`DROP INDEX IF EXISTS "idx_files_gdrive_cache_ref"`);
   }

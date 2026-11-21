@@ -3,7 +3,7 @@ import { sqliteDateParameter } from '../database/database-types';
 import { SqliteCreateMinuteMetrics1804600000000 } from './1804600000000-SqliteCreateMinuteMetrics';
 
 it('normalizes converted UTC timestamps and preserves the canonical aggregate on a key collision', async () => {
-  const db = await new DataSource({ type: 'sqlite', database: ':memory:' }).initialize();
+  const db = await new DataSource({ type: 'better-sqlite3', database: ':memory:' }).initialize();
   const runner = db.createQueryRunner();
   try {
     const migration = new SqliteCreateMinuteMetrics1804600000000();

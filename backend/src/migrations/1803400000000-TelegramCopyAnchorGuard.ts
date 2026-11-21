@@ -40,7 +40,7 @@ export class TelegramCopyAnchorGuard1803400000000 implements MigrationInterface 
   name = 'TelegramCopyAnchorGuard1803400000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'postgres') return;
+    if (queryRunner.dataSource.options.type !== 'postgres') return;
 
     // 1) 只读盘点：同一账号在同一条入站消息上登记了多个逻辑主键的冲突数量
     const conflicts = await queryRunner.query(`
@@ -103,7 +103,7 @@ export class TelegramCopyAnchorGuard1803400000000 implements MigrationInterface 
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'postgres') return;
+    if (queryRunner.dataSource.options.type !== 'postgres') return;
     // 只删除本迁移新增的索引；不改数据、不动既有索引
     await queryRunner.query(`DROP INDEX IF EXISTS "idx_tg_file_copies_anchor_owner"`);
     await queryRunner.query(`DROP INDEX IF EXISTS "uq_tg_file_copies_anchor_account"`);

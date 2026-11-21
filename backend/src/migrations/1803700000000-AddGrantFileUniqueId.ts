@@ -15,7 +15,7 @@ export class AddGrantFileUniqueId1803700000000 implements MigrationInterface {
   name = 'AddGrantFileUniqueId1803700000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'postgres') return;
+    if (queryRunner.dataSource.options.type !== 'postgres') return;
 
     await queryRunner.query(
       `ALTER TABLE "telegram_bot_file_grants" ADD COLUMN IF NOT EXISTS "fileUniqueId" varchar(128)`,
@@ -27,7 +27,7 @@ export class AddGrantFileUniqueId1803700000000 implements MigrationInterface {
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'postgres') return;
+    if (queryRunner.dataSource.options.type !== 'postgres') return;
     // 逆序：先删索引，再删列
     await queryRunner.query(`DROP INDEX IF EXISTS "idx_tg_bot_grants_fileUniqueId"`);
     await queryRunner.query(`ALTER TABLE "telegram_bot_file_grants" DROP COLUMN IF EXISTS "fileUniqueId"`);

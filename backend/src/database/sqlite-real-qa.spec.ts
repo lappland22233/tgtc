@@ -225,7 +225,7 @@ describe('真实 SQLite 数据源关键业务与并发 QA', () => {
     await repo.save(repo.create(base));
     await expect(
       repo.save(repo.create({ ...base, tokenHash: 'b'.repeat(64) })),
-    ).rejects.toMatchObject({ code: 'SQLITE_CONSTRAINT' });
+    ).rejects.toMatchObject({ code: 'SQLITE_CONSTRAINT_UNIQUE' });
 
     const accessLogColumns = await dataSource.query(`PRAGMA table_info('access_logs')`);
     const names = accessLogColumns.map((column: { name: string }) => column.name);
@@ -248,48 +248,50 @@ describe('真实 SQLite 数据源关键业务与并发 QA', () => {
       botGrantId: '11111111-1111-1111-1111-111111111111',
       botTelegramUserId: '80000000000000001',
     });
-    const botRows = await accessRepo.count({ where: { botTelegramUserId: '80000000000000001' } });
-    expect(botRows).toBe(1);
+    try {
+      const botRows = await accessRepo.count({ where: { botTelegramUserId: '80000000000000001' } });
+      expect(botRows).toBe(1);
 
-    // bot-usage 汇总必须在 SQL 侧聚合且与 access_logs 一致（D13）
-    const { TelegramBotAdminService } = require('../telegram-bot/telegram-bot-admin.service') as typeof import('../telegram-bot/telegram-bot-admin.service');
-    const adminService = new TelegramBotAdminService(
-      { get: jest.fn() } as any,
-      { log: jest.fn() } as any,
-      { tokenPrefixOf: (t: string) => `tgl_${t.slice(0, 8)}` } as any,
-      { listWhitelist: jest.fn(), addToWhitelist: jest.fn(), removeFromWhitelist: jest.fn() } as any,
-      { resolveSiteOriginAsync: jest.fn() } as any,
-      dataSource,
-    );
-    const usage = await adminService.getUsageSummary('24h');
-    expect(usage).toMatchObject({ timeRange: '24h', downloads: 1, uniqueUsers: 1, totalBytes: '2048' });
-    expect(usage.trend).toHaveLength(1);
-    expect(usage.trend[0].bytes).toBe('2048');
+      // bot-usage 汇总必须在 SQL 侧聚合且与 access_logs 一致（D13）
+      const { TelegramBotAdminService } = require('../telegram-bot/telegram-bot-admin.service') as typeof import('../telegram-bot/telegram-bot-admin.service');
+      const adminService = new TelegramBotAdminService(
+        { get: jest.fn() } as any,
+        { log: jest.fn() } as any,
+        { tokenPrefixOf: (t: string) => `tgl_${t.slice(0, 8)}` } as any,
+        { listWhitelist: jest.fn(), addToWhitelist: jest.fn(), removeFromWhitelist: jest.fn() } as any,
+        { resolveSiteOriginAsync: jest.fn() } as any,
+        dataSource,
+      );
+      const usage = await adminService.getUsageSummary('24h');
+      expect(usage).toMatchObject({ timeRange: '24h', downloads: 1, uniqueUsers: 1, totalBytes: '2048' });
+      expect(usage.trend).toHaveLength(1);
+      expect(usage.trend[0].bytes).toBe('2048');
 
-    // 收到文件统计来自 telegram_bot_file_grants（同窗口），并与下载趋势按时间桶合并
-    expect(usage).toMatchObject({ filesReceived: 1, receivedBytes: '1024' });
-    expect(usage.trend[0]).toMatchObject({ downloads: 1, files: 1, fileBytes: '1024' });
+      // 收到文件统计来自 telegram_bot_file_grants（同窗口），并与下载趋势按时间桶合并
+      expect(usage).toMatchObject({ filesReceived: 1, receivedBytes: '1024' });
+      expect(usage.trend[0]).toMatchObject({ downloads: 1, files: 1, fileBytes: '1024' });
 
-    // 用户明细：SQL 侧聚合，直接给出 TG 用户 ID 与 @用户名（不含昵称），支持关键字筛选
-    const breakdown = await adminService.getUserBreakdown({});
-    expect(breakdown).toMatchObject({ total: 1, page: 1, pageSize: 20 });
-    expect(breakdown.rows[0]).toMatchObject({
-      telegramUserId: '80000000000000001',
-      telegramUsername: '@qa',
-      filesReceived: 1,
-      receivedBytes: '1024',
-      downloads: 0,
-    });
-    expect(breakdown.rows[0]).not.toHaveProperty('telegramDisplayName');
-    expect((await adminService.getUserBreakdown({ keyword: '@QA' })).total).toBe(1);
-    expect((await adminService.getUserBreakdown({ keyword: '80000000000000001' })).total).toBe(1);
-    // LIKE 通配符已转义：未转义时 '8_0' 会命中 '80000000000000001'
-    expect((await adminService.getUserBreakdown({ keyword: '8_0' })).total).toBe(0);
-    expect((await adminService.getUserBreakdown({ timeRange: '24h' })).total).toBe(1);
-    expect((await adminService.getUserBreakdown({ pageSize: 500 })).pageSize).toBe(100);
-
-    // 清理：后续用例的访问日志统计断言基于全表，避免本用例污染计数
-    await accessRepo.delete({ botTelegramUserId: '80000000000000001' });
+      // 用户明细：SQL 侧聚合，直接给出 TG 用户 ID 与 @用户名（不含昵称），支持关键字筛选
+      const breakdown = await adminService.getUserBreakdown({});
+      expect(breakdown).toMatchObject({ total: 1, page: 1, pageSize: 20 });
+      expect(breakdown.rows[0]).toMatchObject({
+        telegramUserId: '80000000000000001',
+        telegramUsername: '@qa',
+        filesReceived: 1,
+        receivedBytes: '1024',
+        downloads: 0,
+      });
+      expect(breakdown.rows[0]).not.toHaveProperty('telegramDisplayName');
+      expect((await adminService.getUserBreakdown({ keyword: '@QA' })).total).toBe(1);
+      expect((await adminService.getUserBreakdown({ keyword: '80000000000000001' })).total).toBe(1);
+      // LIKE 通配符已转义：未转义时 '8_0' 会命中 '80000000000000001'
+      expect((await adminService.getUserBreakdown({ keyword: '8_0' })).total).toBe(0);
+      expect((await adminService.getUserBreakdown({ timeRange: '24h' })).total).toBe(1);
+      expect((await adminService.getUserBreakdown({ pageSize: 500 })).pageSize).toBe(100);
+    } finally {
+      // 后续用例的访问日志统计基于全表，即使本用例失败也要清理夹具。
+      await accessRepo.delete({ botTelegramUserId: '80000000000000001' });
+    }
   });
 
   it('文件夹、标签并发重名由唯一约束兜底，且外键拒绝孤儿记录', async () => {
@@ -333,9 +335,9 @@ describe('真实 SQLite 数据源关键业务与并发 QA', () => {
       .toMatchObject({ status: 409, message: '标签名称已存在' });
 
     await expect(dataSource.query(
-      'INSERT INTO folders (id, name, "ownerId", "isDeleted") VALUES (?, ?, ?, 0)',
+      'INSERT INTO folders (id, name, "ownerId", "isDeleted", "createdAt", "updatedAt") VALUES (?, ?, ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)',
       [randomUUID(), '孤儿目录', randomUUID()],
-    )).rejects.toMatchObject({ code: 'SQLITE_CONSTRAINT' });
+    )).rejects.toMatchObject({ code: 'SQLITE_CONSTRAINT_FOREIGNKEY' });
   });
 
   it('分享、告警、管理员封禁、统计与后台清理在真实仓储上闭环', async () => {

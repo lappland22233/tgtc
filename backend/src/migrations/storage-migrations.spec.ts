@@ -31,7 +31,7 @@ describe('存储后端迁移（SQLite 隔离内存库）', () => {
     const { SqliteSchemaAlignment1800000000000 } = require('./1800000000000-SqliteSchemaAlignment') as typeof import('./1800000000000-SqliteSchemaAlignment');
 
     dataSource = new DataSource({
-      type: 'sqlite',
+      type: 'better-sqlite3',
       database: ':memory:',
       entities: [...databaseEntities],
       migrations: [
@@ -86,7 +86,7 @@ describe('存储后端迁移（SQLite 隔离内存库）', () => {
 
   it('存量库（无新列）经增量迁移补齐，默认值 telegram 兼容历史数据', async () => {
     dataSource = new DataSource({
-      type: 'sqlite',
+      type: 'better-sqlite3',
       database: ':memory:',
       entities: [],
       migrations: [],
@@ -130,7 +130,7 @@ describe('存储后端迁移（SQLite 隔离内存库）', () => {
 
   it('PG 迁移在 SQLite 连接上安全跳过（方言守卫）', async () => {
     dataSource = new DataSource({
-      type: 'sqlite',
+      type: 'better-sqlite3',
       database: ':memory:',
       entities: [],
       migrations: [],

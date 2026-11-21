@@ -65,13 +65,13 @@ describe('SharePreviewSessionService', () => {
       process.env.DB_TYPE = 'sqlite';
       const { service, sessionRepo, mkSelect } = makeService();
       wireSubQuery(sessionRepo, mkSelect);
-      // SQLite RETURNING 无 connection 时兜底走 query()，返回纯行数组
+      // SQLite 驱动返回行数组
       sessionRepo.manager.query.mockResolvedValue([{ id: 's-1' }, { id: 's-2' }]);
 
       await expect(service.pruneExpired()).resolves.toBe(2);
-      // SQLite 占位符翻译：$1 → ?1
+      // SQLite 占位符翻译：$1 → ?
       expect(sessionRepo.manager.query).toHaveBeenCalledWith(
-        expect.stringContaining('?1'),
+        expect.stringContaining('?'),
         expect.any(Array),
       );
     });
@@ -85,21 +85,16 @@ describe('SharePreviewSessionService', () => {
       await expect(service.pruneExpired()).resolves.toBe(0);
     });
 
-    it('SQLite 真实 RETURNING 路径（sqliteAll）：按 all() 回调行数返回 1', async () => {
+    it('SQLite RETURNING：按驱动返回行数返回 1', async () => {
       process.env.DB_TYPE = 'sqlite';
       const { service, sessionRepo, mkSelect } = makeService();
       wireSubQuery(sessionRepo, mkSelect);
-      const all = jest.fn(
-        (_sql: string, _params: unknown[], callback: (error: Error | null, rows: unknown[]) => void) =>
-          callback(null, [{ id: 's-9' }]),
-      );
-      sessionRepo.manager.connection = { driver: { databaseConnection: { all } } };
+      sessionRepo.manager.query.mockResolvedValue([{ id: 's-9' }]);
 
       await expect(service.pruneExpired()).resolves.toBe(1);
-      expect(all).toHaveBeenCalledWith(
+      expect(sessionRepo.manager.query).toHaveBeenCalledWith(
         expect.stringMatching(/DELETE[\s\S]*RETURNING "id"/),
         [expect.any(String)], // 参数 now 在 SQLite 下转换为可比较的 UTC 文本
-        expect.any(Function),
       );
     });
   });

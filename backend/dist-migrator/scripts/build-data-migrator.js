@@ -368,7 +368,7 @@ async function main() {
     const source = new typeorm_1.DataSource(sourceOptions);
     const targetModules = loadDatabaseModules('sqlite');
     const targetOptions = targetModules.createDatabaseOptions({ ...process.env, DB_TYPE: 'sqlite', DB_DATABASE: tempPath, DB_MIGRATIONS_RUN: 'true' });
-    if (targetOptions.type !== 'sqlite')
+    if (targetOptions.type !== 'better-sqlite3')
         throw new Error('迁移目标配置必须为 SQLite');
     const target = new typeorm_1.DataSource({
         ...targetOptions,

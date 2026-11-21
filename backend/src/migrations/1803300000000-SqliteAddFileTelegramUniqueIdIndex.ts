@@ -16,7 +16,7 @@ export class SqliteAddFileTelegramUniqueIdIndex1803300000000 implements Migratio
   name = 'SqliteAddFileTelegramUniqueIdIndex1803300000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'sqlite') return;
+    if (queryRunner.dataSource.options.type !== 'better-sqlite3') return;
 
     const table = await queryRunner.getTable('files');
     if (!table) return;
@@ -29,7 +29,7 @@ export class SqliteAddFileTelegramUniqueIdIndex1803300000000 implements Migratio
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'sqlite') return;
+    if (queryRunner.dataSource.options.type !== 'better-sqlite3') return;
     await queryRunner.query(`DROP INDEX IF EXISTS "idx_files_telegram_file_unique_id"`);
   }
 }

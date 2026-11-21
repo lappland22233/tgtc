@@ -12,7 +12,7 @@ export class SqliteCreateTelegramAccounts1803000000000 implements MigrationInter
   name = 'SqliteCreateTelegramAccounts1803000000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'sqlite') return;
+    if (queryRunner.dataSource.options.type !== 'better-sqlite3') return;
 
     await queryRunner.query(`
       CREATE TABLE IF NOT EXISTS "telegram_accounts" (
@@ -56,7 +56,7 @@ export class SqliteCreateTelegramAccounts1803000000000 implements MigrationInter
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'sqlite') return;
+    if (queryRunner.dataSource.options.type !== 'better-sqlite3') return;
     // SQLite 旧版本不支持 DROP COLUMN；删表不自动删索引，显式清理后再删表。
     await queryRunner.query(`DROP INDEX IF EXISTS "idx_tg_accounts_enabled"`);
     await queryRunner.query(`DROP INDEX IF EXISTS "idx_tg_accounts_status"`);

@@ -8,7 +8,7 @@ export class SqliteRevokePrivateLegacyShares1802000000000 implements MigrationIn
   name = 'SqliteRevokePrivateLegacyShares1802000000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'sqlite') return;
+    if (queryRunner.dataSource.options.type !== 'better-sqlite3') return;
     await queryRunner.query(`
       UPDATE "share_links"
       SET "isDeleted" = 1, "updatedAt" = datetime('now')

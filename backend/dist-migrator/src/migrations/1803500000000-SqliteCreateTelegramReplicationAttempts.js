@@ -18,7 +18,7 @@ class SqliteCreateTelegramReplicationAttempts1803500000000 {
         this.name = 'SqliteCreateTelegramReplicationAttempts1803500000000';
     }
     async up(queryRunner) {
-        if (queryRunner.connection.options.type !== 'sqlite')
+        if (queryRunner.dataSource.options.type !== 'better-sqlite3')
             return;
         await queryRunner.query(`
       CREATE TABLE IF NOT EXISTS "telegram_replication_attempts" (
@@ -60,7 +60,7 @@ class SqliteCreateTelegramReplicationAttempts1803500000000 {
             + ` ON "telegram_replication_attempts" ("updatedAt")`);
     }
     async down(queryRunner) {
-        if (queryRunner.connection.options.type !== 'sqlite')
+        if (queryRunner.dataSource.options.type !== 'better-sqlite3')
             return;
         await queryRunner.query(`DROP INDEX IF EXISTS "idx_tg_replication_attempts_updated"`);
         await queryRunner.query(`DROP INDEX IF EXISTS "idx_tg_replication_attempts_reason"`);

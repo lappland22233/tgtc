@@ -16,7 +16,7 @@ export class SqliteAddFileStorageColumns1804100000000 implements MigrationInterf
   name = 'SqliteAddFileStorageColumns1804100000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'sqlite') return;
+    if (queryRunner.dataSource.options.type !== 'better-sqlite3') return;
 
     const table = await queryRunner.getTable('files');
     if (!table) return;
@@ -43,7 +43,7 @@ export class SqliteAddFileStorageColumns1804100000000 implements MigrationInterf
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'sqlite') return;
+    if (queryRunner.dataSource.options.type !== 'better-sqlite3') return;
     // SQLite 旧版本不支持 DROP COLUMN；保留可空列无数据风险，与既有迁移（180370）保持一致。
     await queryRunner.query(`DROP INDEX IF EXISTS "idx_files_storage_ref"`);
   }
