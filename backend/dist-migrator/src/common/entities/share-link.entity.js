@@ -71,11 +71,11 @@ __decorate([
 ], ShareLink.prototype, "targetType", void 0);
 __decorate([
     (0, typeorm_1.Index)(),
-    (0, typeorm_1.Column)({ type: 'uuid' }),
+    (0, typeorm_1.Column)({ type: (0, database_types_1.databaseColumnType)('uuid') }),
     __metadata("design:type", String)
 ], ShareLink.prototype, "targetId", void 0);
 __decorate([
-    (0, typeorm_1.Column)({ type: 'uuid' }),
+    (0, typeorm_1.Column)({ type: (0, database_types_1.databaseColumnType)('uuid') }),
     __metadata("design:type", String)
 ], ShareLink.prototype, "creatorId", void 0);
 __decorate([

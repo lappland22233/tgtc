@@ -82,21 +82,15 @@ export class SharePasswordService {
    * 在昂贵的 bcrypt 前按 IP 与分享 token 双维度限流。
    * 任一维度达到阈值即拒绝；数据库 UPSERT 保证多实例和并发下不能绕过。
    *
-   * G5-08：额外检查 token 的 24h 累计失败锁定。用 checkAndIncrement 对
-   * token-lock 键调用超大 maxAttempts（正常永不触发锁定），以复用其「锁定记录
-   * 被 WHERE 过滤 → allowed=false」的语义：token 一旦被 recordTokenFailedAttempt
-   * 锁定 24h，此处即返回 false，任何 IP 都无法继续验证。
    */
   async checkPasswordAttemptAllowed(ip: string | null, shareToken: string): Promise<boolean> {
+    if (await this.rateLimitService.isLocked('share-password:token-lock:' + shareToken)) return false;
     const keys = [`share-password:token:${shareToken}`];
     if (ip) keys.push(`share-password:ip:${ip}`);
-    // token 24h 累计失败锁定检查（maxAttempts 取极大值，仅作为锁定探针）
-    keys.push(`share-password:token-lock:${shareToken}`);
-
     const results = await Promise.all(keys.map((key) => this.rateLimitService.checkAndIncrement(
       key,
       'share_password_precheck',
-      key.includes('share-password:token-lock') ? Number.MAX_SAFE_INTEGER : this.PRECHECK_MAX_ATTEMPTS,
+      this.PRECHECK_MAX_ATTEMPTS,
       this.PRECHECK_LOCK_DURATION,
       this.PRECHECK_WINDOW,
     )));

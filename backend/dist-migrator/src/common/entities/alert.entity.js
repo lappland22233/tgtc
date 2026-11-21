@@ -50,7 +50,7 @@ __decorate([
     __metadata("design:type", Date)
 ], Alert.prototype, "acknowledgedAt", void 0);
 __decorate([
-    (0, typeorm_1.Column)({ nullable: true, type: 'uuid' }),
+    (0, typeorm_1.Column)({ nullable: true, type: (0, database_types_1.databaseColumnType)('uuid') }),
     __metadata("design:type", String)
 ], Alert.prototype, "acknowledgedBy", void 0);
 __decorate([

@@ -10,7 +10,7 @@ function makeService() {
       where: jest.fn().mockReturnThis(),
       orderBy: jest.fn().mockReturnThis(),
       limit: jest.fn().mockReturnThis(),
-      getQuery: jest.fn().mockReturnValue(getQuery),
+      getQueryAndParameters: jest.fn().mockReturnValue([getQuery, [new Date()]]),
     };
     return builder;
   };

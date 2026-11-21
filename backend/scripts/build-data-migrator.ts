@@ -2,8 +2,6 @@ import 'dotenv/config';
 import { existsSync, mkdirSync, writeFileSync } from 'fs';
 import { dirname, resolve } from 'path';
 import { DataSource, DataSourceOptions, EntityMetadata, QueryRunner } from 'typeorm';
-import { SqliteEntitySchema1700000000000 } from '../src/migrations/0000000000000-SqliteEntitySchema';
-import { SqliteSchemaAlignment1800000000000 } from '../src/migrations/1800000000000-SqliteSchemaAlignment';
 import {
   beginPostgresReadOnlySnapshot,
   NON_ENTITY_TABLE_DEFINITIONS,
@@ -159,17 +157,34 @@ function keysetPredicate(primaryColumns: readonly string[], operator: '>' | '<='
 }
 
 async function buildPlans(source: DataSource, sourceSnapshot: QueryExecutor, target: DataSource): Promise<TablePlan[]> {
-  const plans: TablePlan[] = sourceModules.databaseEntities.map((entity) => {
+  const catalog: { table_name: string; column_name: string }[] = await sourceSnapshot.query(
+    'SELECT table_name, column_name FROM information_schema.columns WHERE table_schema = current_schema()',
+  );
+  const sourceColumns = new Map<string, Set<string>>();
+  for (const column of catalog) {
+    let columns = sourceColumns.get(column.table_name);
+    if (!columns) sourceColumns.set(column.table_name, columns = new Set());
+    columns.add(column.column_name);
+  }
+  const plans: TablePlan[] = [];
+  for (const entity of sourceModules.databaseEntities) {
     const sourceMetadata = source.getMetadata(entity);
-    const targetMetadata = target.getMetadata(sourceMetadata.targetName);
-    return {
-      table: sourceMetadata.tableName,
-      columns: sourceMetadata.columns.map((column) => column.databaseName),
+    const table = sourceMetadata.tableName;
+    const actual = sourceColumns.get(table);
+    // This short-lived table and the nullable Bot identity were introduced after 1.6.3.
+    if (!actual && table === 'gdrive_oauth_flows') continue;
+    if (!actual) throw new Error(`源库缺少业务表 ${table}，请先完成源库迁移`);
+    const columns = sourceMetadata.columns.map((column) => column.databaseName).filter((name) => {
+      if (actual.has(name)) return true;
+      if (table === 'telegram_bot_file_grants' && name === 'receiverBotId') return false;
+      throw new Error(`源库缺少 ${table}.${name}，请先完成源库迁移`);
+    });
+    plans.push({
+      table, columns, sourceMetadata,
       primaryColumns: sourceMetadata.primaryColumns.map((column) => column.databaseName),
-      sourceMetadata,
-      targetMetadata,
-    };
-  });
+      targetMetadata: target.getMetadata(sourceMetadata.targetName),
+    });
+  }
   for (const definition of NON_ENTITY_TABLE_DEFINITIONS) {
     if (!(await postgresTableExists(sourceSnapshot, definition.table))) continue;
     plans.push({
@@ -177,6 +192,20 @@ async function buildPlans(source: DataSource, sourceSnapshot: QueryExecutor, tar
       columns: definition.columns.map((column) => column.name),
       primaryColumns: definition.primaryColumns,
     });
+  }
+  const covered = new Set(plans.map((plan) => plan.table));
+  const businessTables: { name: string }[] = await sourceSnapshot.query(
+    `SELECT c.relname AS name
+       FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = current_schema() AND c.relkind IN ('r','p') AND NOT c.relispartition
+        AND c.relname NOT IN ('migrations', 'typeorm_metadata')
+        AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d
+          WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e')`,
+  );
+  for (const { name } of businessTables) {
+    if (!covered.has(name) && (await sourceSnapshot.query(`SELECT 1 FROM ${quote(name)} LIMIT 1`)).length) {
+      throw new Error(`迁移计划未覆盖非空业务表 ${name}，目标数据库未替换`);
+    }
   }
   return plans;
 }
@@ -381,7 +410,6 @@ async function main(): Promise<void> {
     ...targetOptions,
     database: tempPath,
     migrationsRun: true,
-    migrations: [SqliteEntitySchema1700000000000, SqliteSchemaAlignment1800000000000],
   });
   const report: MigrationReport = {
     summary: {
@@ -392,7 +420,6 @@ async function main(): Promise<void> {
       temporaryTarget: tempPath,
       batchSize: BATCH_SIZE,
       sqliteParameterLimit: SQLITE_PARAMETER_LIMIT,
-      schemaMigrations: ['SqliteEntitySchema1700000000000', 'SqliteSchemaAlignment1800000000000'],
     },
     migration: { tables: [] },
     validation: {},
@@ -406,6 +433,7 @@ async function main(): Promise<void> {
     await beginPostgresReadOnlySnapshot(sourceSnapshot);
     sourceTransactionStarted = true;
     await target.initialize();
+    report.summary.schemaMigrations = target.migrations.map((migration) => migration.name ?? migration.constructor.name);
     const plans = await buildPlans(source, sourceSnapshot, target);
     await ensureNonEntityTables(target, plans);
     const expectations = [
