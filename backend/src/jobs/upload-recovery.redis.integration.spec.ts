@@ -27,7 +27,7 @@ describeRedis('真实 Redis 上传恢复与并发准入', () => {
   beforeAll(async () => {
     process.env.DB_TYPE = 'sqlite';
     // Entity column decorators use the selected dialect when the modules are loaded.
-    const { createDatabaseOptions } = await import('../database/database.config');
+    const { createDatabaseOptions } = jest.requireActual<typeof import('../database/database.config')>('../database/database.config');
     const options = createDatabaseOptions({ ...process.env, DB_DATABASE: ':memory:' });
     db = await new DataSource({ ...options, migrationsRun: false, synchronize: true }).initialize();
     await db.getRepository('User').insert({ id: userId, email: 'queue-test@example.invalid', password: 'unused' });
@@ -54,9 +54,9 @@ describeRedis('真实 Redis 上传恢复与并发准入', () => {
       },
     });
     await queue.isReady();
-    const { AccountUploadUnavailableError } = await import('../telegram-account-pool/account-aware-upload.service');
-    const { FileUploadProcessor } = await import('./file-upload.processor');
-    const { TasksService } = await import('../tasks/tasks.service');
+    const { AccountUploadUnavailableError } = jest.requireActual<typeof import('../telegram-account-pool/account-aware-upload.service')>('../telegram-account-pool/account-aware-upload.service');
+    const { FileUploadProcessor } = jest.requireActual<typeof import('./file-upload.processor')>('./file-upload.processor');
+    const { TasksService } = jest.requireActual<typeof import('../tasks/tasks.service')>('../tasks/tasks.service');
     processor = new FileUploadProcessor(
       files, { uploadFile: uploadToTelegram } as never, {} as never, undefined,
       {

@@ -52,7 +52,7 @@ describe('TelegramAccountsService（SQLite 内存库）', () => {
     /* eslint-enable @typescript-eslint/no-var-requires */
 
     dataSource = new DataSource({
-      type: 'sqlite',
+      type: 'better-sqlite3',
       database: ':memory:',
       entities: [...databaseEntities],
       migrations: [SqliteEntitySchema1700000000000],

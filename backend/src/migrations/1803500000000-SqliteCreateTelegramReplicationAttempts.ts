@@ -16,7 +16,7 @@ export class SqliteCreateTelegramReplicationAttempts1803500000000 implements Mig
   name = 'SqliteCreateTelegramReplicationAttempts1803500000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'sqlite') return;
+    if (queryRunner.dataSource.options.type !== 'better-sqlite3') return;
 
     await queryRunner.query(`
       CREATE TABLE IF NOT EXISTS "telegram_replication_attempts" (
@@ -68,7 +68,7 @@ export class SqliteCreateTelegramReplicationAttempts1803500000000 implements Mig
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'sqlite') return;
+    if (queryRunner.dataSource.options.type !== 'better-sqlite3') return;
     await queryRunner.query(`DROP INDEX IF EXISTS "idx_tg_replication_attempts_updated"`);
     await queryRunner.query(`DROP INDEX IF EXISTS "idx_tg_replication_attempts_reason"`);
     await queryRunner.query(`DROP INDEX IF EXISTS "idx_tg_replication_attempts_status"`);

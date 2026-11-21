@@ -17,7 +17,7 @@ class SqliteCreateTelegramMainChatAnchors1803600000000 {
         this.name = 'SqliteCreateTelegramMainChatAnchors1803600000000';
     }
     async up(queryRunner) {
-        if (queryRunner.connection.options.type !== 'sqlite')
+        if (queryRunner.dataSource.options.type !== 'better-sqlite3')
             return;
         await queryRunner.query(`
       CREATE TABLE IF NOT EXISTS "telegram_main_chat_anchors" (
@@ -42,7 +42,7 @@ class SqliteCreateTelegramMainChatAnchors1803600000000 {
             + ` ON "telegram_main_chat_anchors" ("anchorChatId", "anchorMessageId")`);
     }
     async down(queryRunner) {
-        if (queryRunner.connection.options.type !== 'sqlite')
+        if (queryRunner.dataSource.options.type !== 'better-sqlite3')
             return;
         await queryRunner.query(`DROP INDEX IF EXISTS "idx_tg_main_chat_anchors_anchor"`);
         await queryRunner.query(`DROP INDEX IF EXISTS "uq_tg_main_chat_anchors_owner"`);

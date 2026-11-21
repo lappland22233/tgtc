@@ -404,7 +404,7 @@ export class StorageBackendsService implements OnModuleInit {
     if (cached) return cached;
     const row = await this.repo.findOne({
       where: { id: accountId },
-      select: ['id', 'type', 'config', 'status', 'credentialCiphertext'],
+      select: { id: true, type: true, config: true, status: true, credentialCiphertext: true },
     });
     if (!row || row.status === 'revoked' || !row.credentialCiphertext) return null;
     const credential = this.credential.decryptCredential<Record<string, unknown>>(row.credentialCiphertext);

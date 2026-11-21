@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mount } from '@vue/test-utils';
 import GDriveOAuthCallback from './GDriveOAuthCallback.vue';
 
@@ -18,13 +18,15 @@ describe('GDriveOAuthCallback.vue', () => {
     (window as any).opener = mockOpener;
 
     mockBroadcastChannelPost = vi.fn();
-    (globalThis as any).BroadcastChannel = vi.fn().mockImplementation(() => ({
-      postMessage: mockBroadcastChannelPost,
-      close: vi.fn(),
-    }));
+    vi.stubGlobal('BroadcastChannel', class {
+      postMessage = mockBroadcastChannelPost;
+      close = vi.fn();
+    });
 
     localStorage.clear();
   });
+
+  afterEach(() => vi.unstubAllGlobals());
 
   it('URL 包含 code 时成功提取并广播通知，状态展示为成功', async () => {
     window.history.pushState({}, '', '/admin/storage-backends/gdrive-callback?code=mock_code_123&state=nonce_456');

@@ -169,7 +169,7 @@ export class TelegramMirrorConfigService {
     // 判据写反会退化成「永远返回空数组 + 永不查库」，让放大抑制静默失效。
     if (this.targetChatsFresh()) return this.cachedTargetChats;
     try {
-      const rows = await this.repo.find({ select: ['targetChatId'] });
+      const rows = await this.repo.find({ select: { targetChatId: true } });
       this.cachedTargetChats = Array.from(
         new Set(rows.map((row) => (row.targetChatId || '').trim()).filter((id) => id.length > 0)),
       );
@@ -212,7 +212,7 @@ export class TelegramMirrorConfigService {
     // 让「规则还没配置」时的下一次调用仍然真实查库。
     if (this.sourceChatsFresh()) return this.cachedSourceChats;
     try {
-      const rows = await this.repo.find({ select: ['sourceChatId'] });
+      const rows = await this.repo.find({ select: { sourceChatId: true } });
       this.cachedSourceChats = Array.from(new Set(
         rows.map((row) => (row.sourceChatId || '').trim()).filter((id) => id.length > 0),
       ));
@@ -233,7 +233,7 @@ export class TelegramMirrorConfigService {
 
   async listEnabledTargetChatIds(): Promise<string[]> {
     try {
-      const rows = await this.repo.find({ where: { enabled: true }, select: ['targetChatId'] });
+      const rows = await this.repo.find({ where: { enabled: true }, select: { targetChatId: true } });
       return Array.from(
         new Set(rows.map((row) => (row.targetChatId || '').trim()).filter((id) => id.length > 0)),
       );
@@ -509,7 +509,7 @@ export class TelegramMirrorConfigService {
    */
   private async assertMainChatShared(rule: TelegramMirrorRule): Promise<void> {
     const source = (rule.sourceChatId || '').trim();
-    const others = (await this.repo.find({ where: { enabled: true }, select: ['id', 'sourceChatId'] }))
+    const others = (await this.repo.find({ where: { enabled: true }, select: { id: true, sourceChatId: true } }))
       .filter((item) => item.id !== rule.id)
       .map((item) => (item.sourceChatId || '').trim())
       .filter((id) => id.length > 0);

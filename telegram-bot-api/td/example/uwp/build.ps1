@@ -1,7 +1,7 @@
 param (
   [string]$vcpkg_root = $(throw "-vcpkg_root=<path to vcpkg> is required"),
-  [ValidateSet('x86', 'x64', 'ARM', 'ARM64', IgnoreCase = $false)]
-  [string[]]$arch = @( "x86", "x64", "ARM", "ARM64" ),
+  [ValidateSet('x86', 'x64', 'ARM64', IgnoreCase = $false)]
+  [string[]]$arch = @( "x86", "x64", "ARM64" ),
   [string]$mode = "all",
   [string]$compress = "7z",
   [switch]$release_only = $false,
@@ -61,7 +61,7 @@ function config {
     if ($arch -eq "x86") {
       $fixed_arch = "win32"
     }
-    cmake -A $fixed_arch -DCMAKE_SYSTEM_VERSION="10.0" -DCMAKE_SYSTEM_NAME="WindowsStore" -DCMAKE_TOOLCHAIN_FILE="$vcpkg_cmake" -DTD_ENABLE_DOTNET=CX "$td_root"
+    cmake -A $fixed_arch -DCMAKE_SYSTEM_VERSION="10.0" -DCMAKE_SYSTEM_NAME="WindowsStore" -DCMAKE_TOOLCHAIN_FILE="$vcpkg_cmake" -DTD_ENABLE_PCH:BOOL=ON -DTD_ENABLE_DOTNET=CX "$td_root"
     CheckLastExitCode
     cd ..
   }

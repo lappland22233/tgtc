@@ -10,7 +10,7 @@ export class SqliteCreateUpdateTasks1798400000000 implements MigrationInterface 
   name = 'SqliteCreateUpdateTasks1798400000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'sqlite') return;
+    if (queryRunner.dataSource.options.type !== 'better-sqlite3') return;
     await queryRunner.query(`
       CREATE TABLE IF NOT EXISTS "update_tasks" (
         "taskId" varchar NOT NULL,

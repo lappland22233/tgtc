@@ -2,6 +2,7 @@
   <div class="bot-usage-page">
     <div class="page-header">
       <h1>Bot 使用</h1>
+      <router-link to="/admin/bot-operations">打开 Bot 收件管理</router-link>
       <p>Telegram Bot 收到文件、直链下载量、去重用户与带宽消耗（收到文件来自直链签发记录，下载来自访问日志）</p>
     </div>
 
@@ -193,7 +194,7 @@
           @page-change="onUserPageChange"
         >
           <template #telegramUserId="{ row }">
-            <code class="user-id-cell">{{ row.telegramUserId }}</code>
+            <router-link :to="{ path: '/admin/bot-operations', query: { tab: 'user', telegramUserId: row.telegramUserId } }" class="user-id-cell">{{ row.telegramUserId }}</router-link>
           </template>
           <template #telegramUsername="{ row }">
             <span v-if="row.telegramUsername" class="username-cell">{{ row.telegramUsername }}</span>
@@ -216,7 +217,7 @@
         <div v-else class="mobile-card-list">
           <div v-for="row in users" :key="row.telegramUserId" class="mobile-user-card">
             <div class="mobile-user-header">
-              <code class="user-id-cell">{{ row.telegramUserId }}</code>
+              <router-link :to="{ path: '/admin/bot-operations', query: { tab: 'user', telegramUserId: row.telegramUserId } }" class="user-id-cell">{{ row.telegramUserId }}</router-link>
               <span v-if="row.telegramUsername" class="username-cell">{{ row.telegramUsername }}</span>
               <span v-else class="muted-cell">未设置用户名</span>
             </div>
@@ -245,6 +246,7 @@
 </template>
 
 <script setup lang="ts">
+import { formatDateTime } from '@/utils/format';
 import { ref, reactive, computed, watch, onMounted, onUnmounted, nextTick } from 'vue';
 import * as echarts from '@/utils/echarts';
 import client from '../../api/client';
@@ -397,19 +399,6 @@ function formatNumber(n: number): string {
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
   if (n >= 1_000) return (n / 1_000).toFixed(1) + 'K';
   return String(n);
-}
-
-/** 用户明细的时间列：空值显示占位符 */
-function formatDateTime(value: string | null): string {
-  if (!value) return '—';
-  const d = new Date(value);
-  if (Number.isNaN(d.getTime())) return '—';
-  return d.toLocaleString('zh-CN', {
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-  });
 }
 
 /** 按时间范围选择刻度格式：短范围到分钟，长范围带日期 */

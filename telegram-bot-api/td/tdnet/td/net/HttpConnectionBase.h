@@ -29,9 +29,11 @@ namespace detail {
 class HttpConnectionBase : public Actor {
  public:
   void write_next_noflush(BufferSlice buffer);
+
   void write_next(BufferSlice buffer);
   void write_next_with_promise(BufferSlice buffer, Promise<Unit> promise);
   void write_ok();
+
   void write_error(Status error);
   // Refresh the connection-layer idle timeout without changing the current read/write state.
   // Used by long-lived streaming responses (e.g. the file streaming endpoint) so that a stream
@@ -40,10 +42,13 @@ class HttpConnectionBase : public Actor {
 
  protected:
   enum class State { Read, Write, Close };
+
   HttpConnectionBase(State state, BufferedFd<SocketFd> fd, SslStream ssl_stream, size_t max_post_size, size_t max_files,
                      int32 idle_timeout, int32 slow_scheduler_id);
 
  private:
+  static constexpr size_t MAX_READ_SIZE = 1100 << 10;
+
   State state_;
 
   BufferedFd<SocketFd> fd_;

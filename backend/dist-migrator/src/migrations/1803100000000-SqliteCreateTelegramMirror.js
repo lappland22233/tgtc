@@ -14,7 +14,7 @@ class SqliteCreateTelegramMirror1803100000000 {
         this.name = 'SqliteCreateTelegramMirror1803100000000';
     }
     async up(queryRunner) {
-        if (queryRunner.connection.options.type !== 'sqlite')
+        if (queryRunner.dataSource.options.type !== 'better-sqlite3')
             return;
         await queryRunner.query(`
       CREATE TABLE IF NOT EXISTS "telegram_mirror_rules" (
@@ -76,7 +76,7 @@ class SqliteCreateTelegramMirror1803100000000 {
             + ` ON "telegram_mirror_tasks" ("nextRetryAt")`);
     }
     async down(queryRunner) {
-        if (queryRunner.connection.options.type !== 'sqlite')
+        if (queryRunner.dataSource.options.type !== 'better-sqlite3')
             return;
         await queryRunner.query(`DROP INDEX IF EXISTS "idx_tg_mirror_tasks_next_retry"`);
         await queryRunner.query(`DROP INDEX IF EXISTS "idx_tg_mirror_tasks_rule_status"`);

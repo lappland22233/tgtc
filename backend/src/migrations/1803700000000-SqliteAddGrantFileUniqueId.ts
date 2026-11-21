@@ -18,7 +18,7 @@ export class SqliteAddGrantFileUniqueId1803700000000 implements MigrationInterfa
   name = 'SqliteAddGrantFileUniqueId1803700000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'sqlite') return;
+    if (queryRunner.dataSource.options.type !== 'better-sqlite3') return;
 
     const table = await queryRunner.getTable('telegram_bot_file_grants');
     if (!table) return;
@@ -35,7 +35,7 @@ export class SqliteAddGrantFileUniqueId1803700000000 implements MigrationInterfa
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'sqlite') return;
+    if (queryRunner.dataSource.options.type !== 'better-sqlite3') return;
     // SQLite 旧版本不支持 DROP COLUMN；保留可空列无数据风险，与既有迁移（180320）保持一致。
     await queryRunner.query(`DROP INDEX IF EXISTS "idx_tg_bot_grants_fileUniqueId"`);
   }

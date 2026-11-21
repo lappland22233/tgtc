@@ -10,7 +10,7 @@ import * as path from 'path';
 import { createWriteStream, createReadStream, WriteStream } from 'fs';
 import { pipeline } from 'stream';
 import { promisify } from 'util';
-import { v4 as uuidv4 } from 'uuid';
+import { randomUUID } from 'node:crypto';
 import {
   CHUNK_CLEANUP_DELAY_MS,
   CHUNK_SESSION_MAX_IDLE_MS,
@@ -336,7 +336,7 @@ export class ChunkUploadService implements OnModuleInit {
       throw new BadRequestException('上传会话过多，请完成或取消现有上传');
     }
 
-    const uploadId = uuidv4();
+    const uploadId = randomUUID();
     // 严格模式的峰值由“已接收分片 S + 合并输出 S”或“上传源 S + Bot API 媒体 S”组成。
     // 在正文落盘前一次性核验 2S，后续阶段不再额外要求一份完整文件的可用空间。
     const strictDiskLease = this.isStrictDiskMode();

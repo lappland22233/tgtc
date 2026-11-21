@@ -5,13 +5,6 @@ import { createClient, type FileStat } from 'webdav';
 import { WebDavStorageDriver } from './webdav.driver';
 import type { StorageAccountContext } from '../storage.types';
 
-// Jest 29's CJS loader cannot load webdav's ESM distribution. Use Node's native loader
-// for this dependency so the actual locked client and its minimatch implementation run.
-jest.mock('webdav', () => {
-  const loader = process.getBuiltinModule('module') as typeof import('node:module');
-  return loader.createRequire(__filename)('webdav');
-});
-
 describe('WebDAV 本地 HTTP 协议', () => {
   const contents = new Map<string, Buffer>([
     ['/docs/readme.txt', Buffer.from('lower')],

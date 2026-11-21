@@ -1,4 +1,7 @@
 import axios from 'axios';
+import { ConfigService } from '@nestjs/config';
+import { once } from 'node:events';
+import { buffer } from 'node:stream/consumers';
 import { Readable } from 'stream';
 import { promises as fs } from 'fs';
 import * as os from 'os';
@@ -24,6 +27,15 @@ describe('TelegramService realtime stream', () => {
   } as any);
 
   beforeEach(() => jest.clearAllMocks());
+
+  it('passes streamed Telegram 429 retry_after to the durable queue after one attempt', async () => {
+    const body = Readable.from(['{"parameters":', '{"retry_after":9}}']);
+    mockedAxios.get.mockRejectedValueOnce({ response: { status: 429, data: body } });
+    await expect(createService().getRealtimeFileStream('file-id', 5, { deferRateLimit: true }))
+      .rejects.toMatchObject({ retryAfterSeconds: 9 });
+    expect(mockedAxios.get).toHaveBeenCalledTimes(1);
+    expect(body.destroyed).toBe(true);
+  });
 
   it('enables the streaming route when only the streaming base is configured', async () => {
     const stream = Readable.from(Buffer.from('hello'));
@@ -354,7 +366,113 @@ describe('TelegramService realtime stream', () => {
     });
   });
 
+  describe('configured local file boundary', () => {
+    let temporary: string;
+    let root: string;
+    let sibling: string;
+    let service: TelegramService;
+    const bytes = Buffer.from('local fixture');
+
+    const pointAt = (filePath: string) => {
+      mockedAxios.get.mockResolvedValue({ data: { ok: true, result: { file_id: 'file-id', file_size: bytes.length, file_path: filePath } } });
+    };
+
+    beforeEach(async () => {
+      temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'telegram-file-root-'));
+      root = path.join(temporary, 'media');
+      sibling = path.join(temporary, 'media-other');
+      await fs.mkdir(root);
+      await fs.mkdir(sibling);
+      service = new TelegramService(new ConfigService({ ...config, TELEGRAM_LOCAL_FILE_DIR: root }));
+    });
+    afterEach(async () => { await fs.rm(temporary, { recursive: true, force: true }); });
+
+    it('reads ordinary files and in-root links, and keeps the stream on the validated handle', async () => {
+      const nested = path.join(root, 'nested');
+      const alias = path.join(root, 'alias');
+      await fs.mkdir(nested);
+      const target = path.join(nested, 'fixture.bin');
+      await fs.writeFile(target, bytes);
+      pointAt(target);
+      await expect(service.getFile('file-id')).resolves.toEqual(bytes);
+
+      await fs.symlink(nested, alias, 'junction');
+      pointAt(path.join(alias, 'fixture.bin'));
+      const { stream } = await service.getFileStream('file-id');
+      try {
+        await fs.rename(target, path.join(nested, 'previous.bin'));
+        await fs.writeFile(target, Buffer.from('replacement'));
+        expect(await buffer(stream)).toEqual(bytes);
+      } finally {
+        stream.destroy();
+      }
+    });
+
+    it('rejects siblings and out-of-root file and directory links for both download modes', async () => {
+      const outside = path.join(sibling, 'fixture.bin');
+      await fs.writeFile(outside, bytes);
+      const leaf = path.join(root, 'linked-file');
+      await fs.symlink(outside, leaf, 'file');
+      const parent = path.join(root, 'linked-directory');
+      await fs.symlink(sibling, parent, 'junction');
+      for (const candidate of [outside, leaf, path.join(parent, 'fixture.bin')]) {
+        pointAt(candidate);
+        await expect(service.getFile('file-id')).rejects.toThrow('非法的本地文件路径');
+        await expect(service.getFileStream('file-id')).rejects.toThrow('非法的本地文件路径');
+      }
+    });
+
+    it('closes a handle when an in-root cache file is replaced while it is being opened', async () => {
+      const target = path.join(root, 'fixture.bin');
+      const incoming = path.join(root, 'next.bin');
+      await fs.writeFile(target, bytes);
+      await fs.writeFile(incoming, Buffer.from('next version'));
+      pointAt(target);
+
+      const open = fs.open.bind(fs);
+      let opened: Awaited<ReturnType<typeof open>> | undefined;
+      const spy = jest.spyOn(fs, 'open').mockImplementationOnce(async (file, flags, mode) => {
+        await fs.rename(incoming, target);
+        opened = await open(file, flags, mode);
+        return opened;
+      });
+      try {
+        await expect(service.getFileStream('file-id')).rejects.toBeInstanceOf(TelegramStreamPathError);
+        expect(opened?.fd).toBe(-1);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it('recovers after the configured directory becomes available and only streams regular files', async () => {
+      await fs.rmdir(root);
+      pointAt(path.join(root, 'fixture.bin'));
+      await expect(service.getFileStream('file-id')).rejects.toBeInstanceOf(TelegramStreamPathError);
+      await fs.mkdir(root);
+      await fs.writeFile(path.join(root, 'fixture.bin'), bytes);
+      expect(await buffer((await service.getFileStream('file-id')).stream)).toEqual(bytes);
+      const nested = path.join(root, 'directory');
+      await fs.mkdir(nested);
+      pointAt(nested);
+      await expect(service.getFileStream('file-id')).rejects.toBeInstanceOf(TelegramStreamPathError);
+    });
+
+    it('accepts a configured root alias and refuses a later redirect to a different directory', async () => {
+      const originalRoot = path.join(temporary, 'original');
+      await fs.rename(root, originalRoot);
+      await fs.symlink(originalRoot, root, 'junction');
+      await fs.writeFile(path.join(originalRoot, 'fixture.bin'), bytes);
+      pointAt(path.join(root, 'fixture.bin'));
+      await expect(service.getFile('file-id')).resolves.toEqual(bytes);
+      await fs.unlink(root);
+      await fs.symlink(sibling, root, 'junction');
+      await fs.writeFile(path.join(sibling, 'fixture.bin'), bytes);
+      await expect(service.getFileStream('file-id')).rejects.toThrow('非法的本地文件路径');
+    });
+  });
+
   describe('realtime stream stale-path recovery', () => {
+    const recoveryDirectories: string[] = [];
     const streamPath502 = {
       response: {
         status: 502,
@@ -364,6 +482,7 @@ describe('TelegramService realtime stream', () => {
 
     const createRecoveryService = async () => {
       const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'tg-recovery-'));
+      recoveryDirectories.push(tmpDir);
       const cfg = {
         ...config,
         TELEGRAM_LOCAL_FILE_DIR: tmpDir,
@@ -375,6 +494,115 @@ describe('TelegramService realtime stream', () => {
         tmpDir,
       };
     };
+
+    afterEach(async () => {
+      for (const directory of recoveryDirectories.splice(0)) {
+        await fs.rm(directory, { recursive: true, force: true });
+      }
+    });
+
+    describe('queue recovery controls', () => {
+      afterEach(() => { mockedAxios.get.mockReset(); });
+
+      it('cancels the in-progress recovery getFile when the worker stops', async () => {
+        const controller = new AbortController();
+        const reason = new Error('worker stopped');
+        mockedAxios.get.mockRejectedValueOnce(streamPath502);
+        mockedAxios.get.mockImplementationOnce((_url, request) => new Promise((_resolve, reject) => {
+          request?.signal?.addEventListener?.('abort', () => reject(new Error('transport cancelled')), { once: true });
+          controller.abort(reason);
+          reject(new Error('recovery request did not observe cancellation'));
+        }));
+
+        await expect(createService().getRealtimeFileStream('file-id', 5, { signal: controller.signal }))
+          .rejects.toBe(reason);
+        expect(mockedAxios.get).toHaveBeenNthCalledWith(2, expect.stringMatching(/\/getFile$/),
+          expect.objectContaining({ signal: controller.signal }));
+        expect(mockedAxios.get).toHaveBeenCalledTimes(2);
+      });
+
+      it.each([
+        { filePath: '', target: '/stream/file/', calls: 3 },
+        { filePath: 'documents/sample.bin', target: '/file/bot', calls: 4 },
+      ])('hands a 429 from the recovered $target download back to the worker', async ({ filePath, target, calls }) => {
+        const controller = new AbortController();
+        const metadata = { data: { result: { file_id: 'file-id', file_path: filePath, file_size: 5 } } };
+        const body = Readable.from(['{"parameters":', '{"retry_after":1}}']);
+        mockedAxios.get.mockRejectedValueOnce(streamPath502).mockResolvedValueOnce(metadata);
+        if (filePath) mockedAxios.get.mockResolvedValueOnce(metadata);
+        mockedAxios.get.mockRejectedValueOnce({ response: { status: 429, data: body } });
+        mockedAxios.get.mockRejectedValue(new Error('inline retry after deferred 429'));
+
+        await expect(createService().getRealtimeFileStream('file-id', 5, { signal: controller.signal, deferRateLimit: true }))
+          .rejects.toMatchObject({ retryAfterSeconds: 1 });
+        expect(mockedAxios.get).toHaveBeenCalledTimes(calls);
+        expect(mockedAxios.get).toHaveBeenLastCalledWith(expect.stringContaining(target),
+          expect.objectContaining({ signal: controller.signal }));
+        expect(mockedAxios.get.mock.calls.every(([, request]) => request?.signal === controller.signal)).toBe(true);
+        expect(body.destroyed).toBe(true);
+      });
+
+      it.each([429, 503])('interrupts a recovered download waiting to retry HTTP %i', async status => {
+        const controller = new AbortController();
+        const reason = new Error('transfer cancelled during backoff');
+        mockedAxios.get.mockRejectedValueOnce(streamPath502);
+        mockedAxios.get.mockResolvedValueOnce({ data: { result: { file_id: 'file-id', file_path: '', file_size: 5 } } });
+        mockedAxios.get.mockRejectedValueOnce({ response: { status, data: { parameters: { retry_after: 1 } } } });
+        mockedAxios.get.mockRejectedValue(new Error('unexpected request after cancellation'));
+
+        const result = createService().getRealtimeFileStream('file-id', 5, { signal: controller.signal })
+          .catch(error => error);
+        await new Promise<void>(resolve => setImmediate(resolve));
+        expect(mockedAxios.get).toHaveBeenCalledTimes(3);
+        controller.abort(reason);
+        const stillWaiting = Symbol('retry timer still pending');
+        const nextTurn = await Promise.race([result, new Promise(resolve => setImmediate(() => resolve(stillWaiting)))]);
+        await result;
+        expect(nextTurn).toBe(reason);
+        expect(mockedAxios.get).toHaveBeenCalledTimes(3);
+      });
+
+      it.each(['cancel', 'defer'] as const)('keeps a held legacy recovery independent of a caller asking to %s', async policy => {
+        const service = createService();
+        const controller = new AbortController();
+        const reason = new Error('queued download cancelled');
+        const metadata = { data: { result: { file_id: 'same-file', file_path: '', file_size: 5 } } };
+        let release!: (response: typeof metadata) => void;
+        const held = new Promise<typeof metadata>(resolve => { release = resolve; });
+        let started!: () => void;
+        const legacyStarted = new Promise<void>(resolve => { started = resolve; });
+        let streams = 0;
+        let recoveries = 0;
+        mockedAxios.get.mockImplementation(async (url, request) => {
+          if (url.endsWith('/getFile')) {
+            if (++recoveries === 1) {
+              started();
+              return held;
+            }
+            if (policy === 'defer') throw { response: { status: 429, data: { parameters: { retry_after: 1 } } } };
+            return new Promise((_resolve, reject) => {
+              request?.signal?.addEventListener?.('abort', () => reject(new Error('transport cancelled')), { once: true });
+            });
+          }
+          if (++streams <= 2) throw streamPath502;
+          return { data: Readable.from(['hello']), headers: { 'content-length': '5' } };
+        });
+
+        const legacy = service.getRealtimeFileStream('same-file', 5);
+        await legacyStarted;
+        const options = policy === 'cancel' ? { signal: controller.signal } : { deferRateLimit: true };
+        const bounded = service.getRealtimeFileStream('same-file', 5, options)
+          .then(result => buffer(result.stream), error => error);
+        await new Promise<void>(resolve => setImmediate(resolve));
+        controller.abort(reason);
+        release(metadata);
+
+        expect(await buffer((await legacy).stream)).toEqual(Buffer.from('hello'));
+        if (policy === 'cancel') expect(await bounded).toBe(reason);
+        else expect(await bounded).toMatchObject({ retryAfterSeconds: 1 });
+        expect(recoveries).toBe(2);
+      });
+    });
 
     it('classifies the 502 "Exact file size" as a recoverable stream-path error', async () => {
       const { service, tmpDir } = await createRecoveryService();
@@ -393,6 +621,7 @@ describe('TelegramService realtime stream', () => {
       } as any);
 
       const result = await service.getRealtimeFileStream('file-id', 5);
+      expect(await buffer(result.stream)).toEqual(Buffer.from('hello'));
 
       // 回源成功：返回的 file_path 为有效本地路径
       expect(result.info.file_path).toBe(localPath);
@@ -424,6 +653,7 @@ describe('TelegramService realtime stream', () => {
       } as any);
 
       const result = await service.getRealtimeFileStream('file-id', 5);
+      expect(await buffer(result.stream)).toEqual(Buffer.from('hello'));
 
       expect(result.info.file_path).toBe(localPath);
       expect(mockedAxios.get.mock.calls.some(([url]) => String(url).includes('/getFile'))).toBe(true);
@@ -443,7 +673,11 @@ describe('TelegramService realtime stream', () => {
         data: { result: { file_id: 'file-id', file_path: localPath, file_size: 5 } },
       } as any);
 
-      await expect(service.getRealtimeFileStream('file-id', 5)).resolves.toMatchObject({
+      const result = await service.getRealtimeFileStream('file-id', 5);
+      const closed = once(result.stream, 'close');
+      result.stream.destroy();
+      await closed;
+      expect(result).toMatchObject({
         info: { file_path: localPath, file_size: 5 },
       });
       expect(mockedAxios.get.mock.calls.some(([url]) => String(url).includes('/getFile'))).toBe(true);
@@ -473,7 +707,9 @@ describe('TelegramService realtime stream', () => {
         data: { result: { file_id: 'file-id', file_path: localPath, file_size: 5 } },
       } as any);
 
-      await expect(service.getRealtimeFileStream('file-id', 5)).resolves.toMatchObject({
+      const result = await service.getRealtimeFileStream('file-id', 5);
+      expect(await buffer(result.stream)).toEqual(Buffer.from('hello'));
+      expect(result).toMatchObject({
         info: { file_path: localPath, file_size: 5 },
       });
       expect(mockedAxios.get.mock.calls.some(([url]) => String(url).includes('/getFile'))).toBe(true);
@@ -642,7 +878,9 @@ describe('TelegramService realtime stream', () => {
         service.getRealtimeFileStream('file-id', 5),
         service.getRealtimeFileStream('file-id', 5),
       ]);
+      const payloads = await Promise.all([buffer(r1.stream), buffer(r2.stream)]);
 
+      expect(payloads).toEqual([Buffer.from('hello'), Buffer.from('hello')]);
       expect(r1.info.file_path).toBe(localPath);
       expect(r2.info.file_path).toBe(localPath);
 

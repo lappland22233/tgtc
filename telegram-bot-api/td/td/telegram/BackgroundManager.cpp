@@ -129,12 +129,6 @@ class SetChatWallPaperQuery final : public Td::ResultHandler {
     if (input_peer == nullptr) {
       return on_error(Status::Error(400, "Can't access the chat"));
     }
-    if (input_wallpaper != nullptr) {
-      flags |= telegram_api::messages_setChatWallPaper::WALLPAPER_MASK;
-    }
-    if (settings != nullptr) {
-      flags |= telegram_api::messages_setChatWallPaper::SETTINGS_MASK;
-    }
     if (old_message_id.is_valid()) {
       flags |= telegram_api::messages_setChatWallPaper::ID_MASK;
     }
@@ -354,8 +348,6 @@ void BackgroundManager::Background::parse(ParserT &parser) {
   td::parse(name, parser);
   if (has_file_id) {
     file_id = parser.context()->td().get_actor_unsafe()->documents_manager_->parse_document(parser);
-  } else {
-    file_id = FileId();
   }
   td::parse(type, parser);
 }

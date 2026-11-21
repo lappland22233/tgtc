@@ -144,8 +144,8 @@ export class TelegramBotFileGrant {
   @Column({ type: databaseColumnType('timestamptz') as 'timestamptz', nullable: true, comment: '软撤销时间' })
   revokedAt: Date | null;
 
-  /** 撤销者 TG 用户 ID（管理员撤销时记录） */
-  @Column({ type: 'varchar', length: 32, nullable: true, comment: '撤销者 TG 用户 ID' })
+  /** TG 管理员的数字 ID 或后台管理员的用户 UUID */
+  @Column({ type: 'varchar', length: 64, nullable: true, comment: '撤销者 ID' })
   revokedBy: string | null;
 
   /** 访问计数（仅供统计，不用于拦截） */

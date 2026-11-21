@@ -81,6 +81,7 @@ RichMessage::RichMessage(Td *td, telegram_api::object_ptr<telegram_api::richMess
 
   blocks_ = get_web_page_blocks(td, std::move(rich_message->blocks_), animations, audios, documents, photos, videos,
                                 voice_notes);
+  remove_empty_media_page_blocks(blocks_);
   is_rtl_ = rich_message->rtl_;
   is_full_ = !rich_message->part_;
   media_ = get_page_blocks_rich_message_media(blocks_);
@@ -134,19 +135,6 @@ Result<RichMessage> RichMessage::get_rich_message(Td *td, DialogId dialog_id,
   return std::move(rich_message);
 }
 
-Result<RichMessage> RichMessage::get_rich_message(Td *td, DialogId dialog_id,
-                                                  td_api::object_ptr<td_api::richMessage> &&message, bool is_bot) {
-  if (message == nullptr) {
-    return Status::Error(400, "Rich message must be non-empty");
-  }
-  RichMessage rich_message;
-  // rich_message.blocks_ = std::move(blocks);
-  rich_message.is_rtl_ = message->is_rtl_;
-  rich_message.is_full_ = true;
-  rich_message.media_ = get_page_blocks_rich_message_media(rich_message.blocks_);
-  return std::move(rich_message);
-}
-
 vector<FileId> RichMessage::get_any_file_ids() const {
   return transform(get_individual_message_content_refs(), get_message_content_any_file_id);
 }
@@ -171,6 +159,10 @@ void RichMessage::for_each_text(const std::function<void(Slice text)> &callback)
   for (const auto &block : blocks_) {
     block->for_each_text(callback);
   }
+}
+
+void RichMessage::for_each_quote_text(const std::function<void(const RichText &text)> &callback) const {
+  for_each_web_page_blocks_quote_text(blocks_, callback);
 }
 
 vector<UserId> RichMessage::get_user_ids() const {
@@ -218,6 +210,15 @@ bool RichMessage::can_send(const RestrictedRights &rights) const {
   return true;
 }
 
+bool RichMessage::need_reget() const {
+  for (const auto &block : blocks_) {
+    if (block->need_reget()) {
+      return true;
+    }
+  }
+  return false;
+}
+
 int32 RichMessage::get_index_mask() const {
   return get_web_page_blocks_index_mask(blocks_);
 }
@@ -241,7 +242,6 @@ telegram_api::object_ptr<telegram_api::InputRichMessage> RichMessage::get_input_
   }
   switch (input_type_) {
     case InputType::None: {
-      int32 flags = 0;
       vector<telegram_api::object_ptr<telegram_api::PageBlock>> blocks;
       GetInputPageBlockContext context;
       context.td_ = td;
@@ -276,44 +276,26 @@ telegram_api::object_ptr<telegram_api::InputRichMessage> RichMessage::get_input_
         CHECK(!with_input_media);
         return nullptr;
       }
-      if (!photos.empty()) {
-        flags |= telegram_api::inputRichMessage::PHOTOS_MASK;
-      }
-      if (!documents.empty()) {
-        flags |= telegram_api::inputRichMessage::DOCUMENTS_MASK;
-      }
       auto input_users = td->user_manager_->get_input_users_force(get_user_ids());
-      if (!input_users.empty()) {
-        flags |= telegram_api::inputRichMessage::USERS_MASK;
-      }
-      return telegram_api::make_object<telegram_api::inputRichMessage>(flags, is_rtl_, noautolink_, std::move(blocks),
-                                                                       std::move(photos), std::move(documents),
-                                                                       std::move(input_users));
+      return telegram_api::make_object<telegram_api::inputRichMessage>(
+          0, is_rtl_, noautolink_, std::move(blocks), std::move(photos), std::move(documents), std::move(input_users));
     }
     case InputType::Markdown: {
-      int32 flags = 0;
       auto files = get_input_rich_files(td, with_input_media, std::move(input_media));
       if (files.size() != media_.size()) {
         CHECK(!with_input_media);
         return nullptr;
       }
-      if (!files.empty()) {
-        flags |= telegram_api::inputRichMessageMarkdown::FILES_MASK;
-      }
-      return telegram_api::make_object<telegram_api::inputRichMessageMarkdown>(flags, is_rtl_, noautolink_, source_,
+      return telegram_api::make_object<telegram_api::inputRichMessageMarkdown>(0, is_rtl_, noautolink_, source_,
                                                                                std::move(files));
     }
     case InputType::Html: {
-      int32 flags = 0;
       auto files = get_input_rich_files(td, with_input_media, std::move(input_media));
       if (files.size() != media_.size()) {
         CHECK(!with_input_media);
         return nullptr;
       }
-      if (!files.empty()) {
-        flags |= telegram_api::inputRichMessageHTML::FILES_MASK;
-      }
-      return telegram_api::make_object<telegram_api::inputRichMessageHTML>(flags, is_rtl_, noautolink_, source_,
+      return telegram_api::make_object<telegram_api::inputRichMessageHTML>(0, is_rtl_, noautolink_, source_,
                                                                            std::move(files));
     }
     default:
@@ -327,17 +309,22 @@ td_api::object_ptr<td_api::richMessage> RichMessage::get_rich_message_object(Td 
       get_page_blocks_object(blocks_, td, string(), string(), skip_bot_commands), is_rtl_, is_full_);
 }
 
-RichMessage RichMessage::clone(Td *td, DialogId dialog_id, const MessageContentDupType &type) const {
+RichMessage RichMessage::clone(Td *td, DialogId dialog_id, const MessageContentDupType &type, bool is_via_bot) const {
   RichMessage result;
-  result.blocks_ = clone_web_page_blocks(blocks_);
+  CloneWebPageBlockContext context;
+  context.td_ = td;
+  context.dialog_id_ = dialog_id;
+  context.dup_type_ = type;
+  context.is_via_bot_ = is_via_bot;
+  result.blocks_ = clone_web_page_blocks(blocks_, context);
   result.is_rtl_ = is_rtl_;
   result.is_full_ = is_full_;
   result.noautolink_ = noautolink_;
   result.input_type_ = input_type_;
   if (!media_.empty()) {
     if (td != nullptr) {
-      result.media_ =
-          transform(media_, [&](const RichMessageMedia &media) { return media.clone(td, dialog_id, type); });
+      result.media_ = transform(
+          media_, [&](const RichMessageMedia &media) { return media.clone(td, dialog_id, type, is_via_bot); });
     } else {
       LOG(ERROR) << "Have no Td to clone RichMessage media";
       result.media_ = get_page_blocks_rich_message_media(result.blocks_);

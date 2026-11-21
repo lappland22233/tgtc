@@ -10,7 +10,7 @@ class SqliteCreateApiKeys1801000000000 {
         this.name = 'SqliteCreateApiKeys1801000000000';
     }
     async up(queryRunner) {
-        if (queryRunner.connection.options.type !== 'sqlite')
+        if (queryRunner.dataSource.options.type !== 'better-sqlite3')
             return;
         await queryRunner.query(`
       CREATE TABLE IF NOT EXISTS "api_keys" (
@@ -31,7 +31,7 @@ class SqliteCreateApiKeys1801000000000 {
         await queryRunner.query(`CREATE INDEX IF NOT EXISTS "idx_api_keys_userId_revokedAt" ON "api_keys" ("userId", "revokedAt")`);
     }
     async down(queryRunner) {
-        if (queryRunner.connection.options.type !== 'sqlite')
+        if (queryRunner.dataSource.options.type !== 'better-sqlite3')
             return;
         await queryRunner.query(`DROP INDEX IF EXISTS "idx_api_keys_userId_revokedAt"`);
         await queryRunner.query(`DROP INDEX IF EXISTS "idx_api_keys_userId"`);

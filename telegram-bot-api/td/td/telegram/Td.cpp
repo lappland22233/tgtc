@@ -64,6 +64,7 @@
 #include "td/telegram/net/Proxy.h"
 #include "td/telegram/net/ProxyChecker.h"
 #include "td/telegram/net/TempAuthKeyWatchdog.h"
+#include "td/telegram/net/WebProxyManager.h"
 #include "td/telegram/NotificationManager.h"
 #include "td/telegram/NotificationSettingsManager.h"
 #include "td/telegram/OnlineManager.h"
@@ -97,6 +98,7 @@
 #include "td/telegram/TermsOfServiceManager.h"
 #include "td/telegram/ThemeManager.h"
 #include "td/telegram/TimeZoneManager.h"
+#include "td/telegram/TonWalletManager.h"
 #include "td/telegram/TopDialogManager.h"
 #include "td/telegram/TranscriptionManager.h"
 #include "td/telegram/TranslationManager.h"
@@ -109,6 +111,8 @@
 #include "td/telegram/WebAppManager.h"
 #include "td/telegram/WebBrowserManager.h"
 #include "td/telegram/WebPagesManager.h"
+#include "td/telegram/WelcomeMessageManager.h"
+#include "td/telegram/WidgetManager.h"
 
 #include "td/db/binlog/BinlogEvent.h"
 
@@ -198,6 +202,8 @@ bool Td::is_preinitialization_request(int32 id) {
     case td_api::testCallVectorString::ID:
     case td_api::testCallVectorStringObject::ID:
     case td_api::testProxy::ID:
+    case td_api::processWebProxyCarrierMessage::ID:
+    case td_api::reportWebProxyCarrierError::ID:
       return true;
     default:
       return false;
@@ -452,6 +458,9 @@ void Td::start_up() {
 
   alarm_manager_ = create_actor<AlarmManager>("AlarmManager", create_reference());
   proxy_checker_ = create_actor<ProxyChecker>("ProxyChecker", create_reference());
+  // testProxy can be used before setTdlibParameters, so web proxies must be available from the start
+  web_proxy_manager_ = create_actor<WebProxyManager>("WebProxyManager", create_reference());
+  G()->set_web_proxy_manager(web_proxy_manager_.get());
 
   CHECK(state_ == State::WaitParameters);
   for (auto &update : get_fake_current_state()) {
@@ -569,6 +578,7 @@ void Td::dec_actor_refcnt() {
       reset_manager(terms_of_service_manager_, "TermsOfServiceManager");
       reset_manager(theme_manager_, "ThemeManager");
       reset_manager(time_zone_manager_, "TimeZoneManager");
+      reset_manager(ton_wallet_manager_, "TonWalletManager");
       reset_manager(top_dialog_manager_, "TopDialogManager");
       reset_manager(transcription_manager_, "TranscriptionManager");
       reset_manager(translation_manager_, "TranslationManager");
@@ -580,6 +590,8 @@ void Td::dec_actor_refcnt() {
       reset_manager(web_app_manager_, "WebAppManager");
       reset_manager(web_browser_manager_, "WebBrowserManager");
       reset_manager(web_pages_manager_, "WebPagesManager");
+      reset_manager(welcome_message_manager_, "WelcomeMessageManager");
+      reset_manager(widget_manager_, "WidgetManager");
 
       G()->set_option_manager(nullptr);
       option_manager_.reset();
@@ -684,6 +696,7 @@ void Td::clear() {
   reset_actor(ActorOwn<Actor>(std::move(secure_manager_)));
   reset_actor(ActorOwn<Actor>(std::move(secret_chats_manager_)));
   reset_actor(ActorOwn<Actor>(std::move(storage_manager_)));
+  reset_actor(ActorOwn<Actor>(std::move(web_proxy_manager_)));
 
   G()->set_connection_creator(ActorOwn<ConnectionCreator>());
   LOG(DEBUG) << "ConnectionCreator was cleared" << timer;
@@ -694,6 +707,7 @@ void Td::clear() {
   reset_actor(ActorOwn<Actor>(std::move(account_manager_actor_)));
   reset_actor(ActorOwn<Actor>(std::move(animations_manager_actor_)));
   reset_actor(ActorOwn<Actor>(std::move(attach_menu_manager_actor_)));
+  reset_actor(ActorOwn<Actor>(std::move(audios_manager_actor_)));
   reset_actor(ActorOwn<Actor>(std::move(auth_manager_actor_)));
   reset_actor(ActorOwn<Actor>(std::move(autosave_manager_actor_)));
   reset_actor(ActorOwn<Actor>(std::move(background_manager_actor_)));
@@ -749,6 +763,7 @@ void Td::clear() {
   reset_actor(ActorOwn<Actor>(std::move(terms_of_service_manager_actor_)));
   reset_actor(ActorOwn<Actor>(std::move(theme_manager_actor_)));
   reset_actor(ActorOwn<Actor>(std::move(time_zone_manager_actor_)));
+  reset_actor(ActorOwn<Actor>(std::move(ton_wallet_manager_actor_)));
   reset_actor(ActorOwn<Actor>(std::move(top_dialog_manager_actor_)));
   reset_actor(ActorOwn<Actor>(std::move(transcription_manager_actor_)));
   reset_actor(ActorOwn<Actor>(std::move(translation_manager_actor_)));
@@ -759,6 +774,8 @@ void Td::clear() {
   reset_actor(ActorOwn<Actor>(std::move(web_app_manager_actor_)));
   reset_actor(ActorOwn<Actor>(std::move(web_browser_manager_actor_)));
   reset_actor(ActorOwn<Actor>(std::move(web_pages_manager_actor_)));
+  reset_actor(ActorOwn<Actor>(std::move(welcome_message_manager_actor_)));
+  reset_actor(ActorOwn<Actor>(std::move(widget_manager_actor_)));
   LOG(DEBUG) << "All actors were cleared" << timer;
 }
 
@@ -784,6 +801,7 @@ void Td::close_impl(bool destroy_flag) {
     clear_requests();
     alarm_manager_.reset();
     proxy_checker_.reset();
+    web_proxy_manager_.reset();
     send_update(td_api::make_object<td_api::updateAuthorizationState>(
         td_api::make_object<td_api::authorizationStateClosing>()));
 
@@ -1144,7 +1162,6 @@ void Td::init_file_manager() {
 
 void Td::init_non_actor_managers() {
   VLOG(td_init) << "Create Managers";
-  audios_manager_ = make_unique<AudiosManager>(this);
   callback_queries_manager_ = make_unique<CallbackQueriesManager>(this);
   documents_manager_ = make_unique<DocumentsManager>(this);
   videos_manager_ = make_unique<VideosManager>(this);
@@ -1160,6 +1177,9 @@ void Td::init_managers() {
   attach_menu_manager_ = make_unique<AttachMenuManager>(this, create_reference());
   attach_menu_manager_actor_ = register_actor("AttachMenuManager", attach_menu_manager_.get());
   G()->set_attach_menu_manager(attach_menu_manager_actor_.get());
+  audios_manager_ = make_unique<AudiosManager>(this, create_reference());
+  audios_manager_actor_ = register_actor("AudiosManager", audios_manager_.get());
+  G()->set_audios_manager(audios_manager_actor_.get());
   autosave_manager_ = make_unique<AutosaveManager>(this, create_reference());
   autosave_manager_actor_ = register_actor("AutosaveManager", autosave_manager_.get());
   G()->set_autosave_manager(autosave_manager_actor_.get());
@@ -1259,6 +1279,7 @@ void Td::init_managers() {
   phone_number_manager_actor_ = register_actor("PhoneNumberManager", phone_number_manager_.get());
   poll_manager_ = make_unique<PollManager>(this, create_reference());
   poll_manager_actor_ = register_actor("PollManager", poll_manager_.get());
+  G()->set_poll_manager(poll_manager_actor_.get());
   privacy_manager_ = make_unique<PrivacyManager>(this, create_reference());
   privacy_manager_actor_ = register_actor("PrivacyManager", privacy_manager_.get());
   promo_data_manager_ = make_unique<PromoDataManager>(this, create_reference());
@@ -1303,6 +1324,9 @@ void Td::init_managers() {
   time_zone_manager_ = make_unique<TimeZoneManager>(this, create_reference());
   time_zone_manager_actor_ = register_actor("TimeZoneManager", time_zone_manager_.get());
   G()->set_time_zone_manager(time_zone_manager_actor_.get());
+  ton_wallet_manager_ = make_unique<TonWalletManager>(this, create_reference());
+  ton_wallet_manager_actor_ = register_actor("TonWalletManager", ton_wallet_manager_.get());
+  G()->set_ton_wallet_manager(ton_wallet_manager_actor_.get());
   top_dialog_manager_ = make_unique<TopDialogManager>(this, create_reference());
   top_dialog_manager_actor_ = register_actor("TopDialogManager", top_dialog_manager_.get());
   G()->set_top_dialog_manager(top_dialog_manager_actor_.get());
@@ -1331,6 +1355,12 @@ void Td::init_managers() {
   web_pages_manager_ = make_unique<WebPagesManager>(this, create_reference());
   web_pages_manager_actor_ = register_actor("WebPagesManager", web_pages_manager_.get());
   G()->set_web_pages_manager(web_pages_manager_actor_.get());
+  welcome_message_manager_ = make_unique<WelcomeMessageManager>(this, create_reference());
+  welcome_message_manager_actor_ = register_actor("WelcomeMessageManager", welcome_message_manager_.get());
+  G()->set_welcome_message_manager(welcome_message_manager_actor_.get());
+  widget_manager_ = make_unique<WidgetManager>(this, create_reference());
+  widget_manager_actor_ = register_actor("WidgetManager", widget_manager_.get());
+  G()->set_widget_manager(widget_manager_actor_.get());
 }
 
 void Td::init_pure_actor_managers(const Parameters &parameters) {
@@ -1381,6 +1411,15 @@ void Td::send_update(tl_object_ptr<td_api::Update> &&object) {
       break;
     case td_api::updateDefaultReactionType::ID / 2:
       LOG(ERROR) << "Sending update: " << oneline(to_string(object));
+      break;
+    case td_api::updateWebProxyCarrierOpened::ID:
+      // the carrier URL contains the proxy capability, and the data is relay traffic
+      VLOG(td_requests) << "Sending update: updateWebProxyCarrierOpened "
+                        << static_cast<const td_api::updateWebProxyCarrierOpened *>(object.get())->carrier_->id_;
+      break;
+    case td_api::updateWebProxyCarrierData::ID:
+      VLOG(td_requests) << "Sending update: updateWebProxyCarrierData "
+                        << static_cast<const td_api::updateWebProxyCarrierData *>(object.get())->carrier_id_;
       break;
     default:
       VLOG(td_requests) << "Sending update: " << to_string(object);

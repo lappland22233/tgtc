@@ -127,7 +127,7 @@ Redis 承载 8 个 Bull 队列：`metrics-aggregation`、`attack-detection`、`a
 | `TELEGRAM_CHAT_ID` | - | 文件存储 Chat ID，启动必检 |
 | `TELEGRAM_API_BASE` | `https://api.telegram.org` | 官方或自建 Bot API 地址 |
 | `TELEGRAM_MAX_UPLOAD_SIZE` | `2147483648` | Telegram 服务层上传上限（2 GiB）；**仅单账号上传路径读取**，账号池上传不套用该上限 |
-| `TELEGRAM_LOCAL_FILE_DIR` | - | 自建 Bot API 本地文件目录白名单 |
+| `TELEGRAM_LOCAL_FILE_DIR` | - | 自建 Bot API 本地文件目录白名单。配置具体目录，文件必须位于解析后的根内。Linux 本地读取需要可访问 `/proc/self/fd` |
 | `TELEGRAM_FILE_STREAMING_ENABLED` | `false` | 是否使用二次开发实时流端点；未显式设置时**只要配置了 `TELEGRAM_FILE_STREAM_BASE` 即视为启用**，显式设为 `false` 才能强制关闭 |
 | `TELEGRAM_FILE_STREAM_BASE` | `TELEGRAM_API_BASE` | 实时流服务地址 |
 | `TELEGRAM_FILE_STREAM_TIMEOUT_SECONDS` | `180` | 后端请求实时流端点的读超时（秒）；须**小于**首字节超时，并大于 Bot API `--file-stream-first-byte-timeout` |
@@ -367,7 +367,7 @@ Redis 承载 8 个 Bull 队列：`metrics-aggregation`、`attack-detection`、`a
 - 凭据只存 AES-256-GCM 密文，接口/日志/审计永不回显；创建即连通性测试，失败不落库；
 - 对象引用与账号强绑定（S3 key 属于特定 bucket、GDrive fileId 属于特定账号），回源 fail-closed：账号撤销/凭据失效/限流时返回可诊断 503，绝不跨账号猜测；
 - 读写负载与配额解耦：下载流回源不占用写入配额，客户端 Seek / 断开连接主动传递 abort 信号释放槽位，且健康账号不计入失败冷却；
-- 撤销账号只清凭据停任务，保留账号行（存量文件引用可诊断）；远端对象不会被误删；
+- 撤销账号会清除凭据并停用账号，保留历史记录和存量文件引用。存储账号列表默认隐藏已撤销账号，可通过「显示已撤销账号」查看历史记录或重新授权。
 - 覆盖上传/永久删除后的远端对象清理均经**共享引用检查**（无其他文件行引用同一对象才删），best-effort 失败只告警；Telegram 对象维持不删现状；
 - 镜像扩散/副本表/严格磁盘租约为 TG 专属能力，非 TG 站内文件一律跳过；非 TG 文件的缩略图/预览/分享/Range 下载复用同一缓存层，语义不变；
 - Bot 纯 Google 模式集成 Saga 事务补偿回滚（建链失败物理删除远端对象并返还用户额度）与生命周期硬删除（Lifecycle Purge Cron 扫描已撤销/过期授权彻底物理删除远端对象并释放云端配额）；
@@ -375,8 +375,8 @@ Redis 承载 8 个 Bull 队列：`metrics-aggregation`、`attack-detection`、`a
 
 **真实端点验证清单**（单测/回归已全覆盖 mock 路径，以下项需真实凭据手动执行）：
 
-- S3/MinIO：可直接跑 gated e2e（`backend/test/s3-storage.e2e-spec.ts`，配置 `S3_E2E_ENDPOINT/BUCKET/ACCESS_KEY_ID/SECRET_ACCESS_KEY` 后 `npx jest --maxWorkers=2 s3-storage.e2e`，覆盖上传/Range/覆盖/删除）；或后台添加账号后：上传小文件→下载字节一致→视频拖动进度条（Range）→覆盖上传→旧对象清理→删除文件→桶内对象消失。
+- S3/MinIO：配置 `S3_E2E_ENDPOINT`、`S3_E2E_BUCKET`、`S3_E2E_ACCESS_KEY_ID`、`S3_E2E_SECRET_ACCESS_KEY`，然后在 `backend` 目录运行 `npm test -- --runInBand test/s3-storage.e2e-spec.ts`，覆盖上传、Range 下载、覆盖写入和删除。也可在后台添加账号后上传小文件，核对下载字节与视频进度条，验证覆盖和删除后的对象清理。
 - WebDAV：后台添加账号（创建即连通性测试）→上传/下载/预览→覆盖→删除；坚果云等限流端点观察换号日志。
-- GDrive：① Google Cloud Console 建 OAuth 客户端（登记回调地址、启用 Drive API）；② 后台配置 Client 并走授权向导入池第 1 个账号，确认配额进度条显示 15GB；③ 上传/下载/预览/覆盖/删除各一次，Drive 网盘 TGTC/ 文件夹内对象与站内行为一致；④ 再授权第 2 个账号，确认池剩余容量叠加；⑤ （可选）把某账号写满后上传，观察自动换号与容量告警；⑥ 撤销某账号后下载其存量文件，确认返回可诊断 503 而非跨账号误读。
+- GDrive：在 Google Cloud Console 登记 OAuth 回调地址并启用 Drive API，在后台配置客户端。添加或重新授权账号时，在 Google 同意页勾选应用所用云端硬盘文件的访问权限。授权成功后核对配额，并验证上传、下载、预览、覆盖和删除。可添加第二个账号核对容量汇总。撤销账号后，检查其存量文件下载返回可诊断的 503。
 
 

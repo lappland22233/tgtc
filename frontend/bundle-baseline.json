@@ -1,12 +1,12 @@
 {
   "$schema": "internal://frontend-bundle-baseline",
-  "updatedAt": "2026-11-21",
+  "updatedAt": "2026-11-22",
   "note": "jsTotal/cssTotal 为产物总量，maxJsChunk/maxCssChunk 为单文件上限。entryJsTotal 按构建 HTML 直接引用的本地 JS 和 CSS 去重计量。",
   "toleranceRatio": 0.05,
   "entryToleranceRatio": 0.02,
   "thresholds": {
-    "jsTotal": 2621288,
-    "jsGzipTotal": 816302,
+    "jsTotal": 2142429,
+    "jsGzipTotal": 681417,
     "cssTotal": 374443,
     "cssGzipTotal": 63358,
     "maxJsChunk": 568068,
@@ -15,74 +15,74 @@
   },
   "largest": {
     "maxJsChunk": {
-      "path": "assets/echarts-C1oem3EO.js",
-      "bytes": 568068
+      "path": "assets/echarts-hcI7sM2p.js",
+      "bytes": 566168
     },
     "maxCssChunk": {
-      "path": "assets/index-BZye8Jbu.css",
-      "bytes": 128844
+      "path": "assets/index-CPJVR354.css",
+      "bytes": 126825
     }
   },
   "topChunks": [
     {
-      "path": "assets/echarts-C1oem3EO.js",
-      "bytes": 568068,
-      "gzip": 195137
+      "path": "assets/echarts-hcI7sM2p.js",
+      "bytes": 566168,
+      "gzip": 190502
     },
     {
-      "path": "assets/../fonts/tdesign-icons-sprite.js",
-      "bytes": 516439,
-      "gzip": 139533
+      "path": "assets/table-ceFkMKn3.js",
+      "bytes": 186064,
+      "gzip": 54266
     },
     {
-      "path": "assets/index-D2yqM6OS.js",
-      "bytes": 266218,
-      "gzip": 92994
+      "path": "assets/FileList-CUkS2Da-.js",
+      "bytes": 163110,
+      "gzip": 46538
     },
     {
-      "path": "assets/index-CJv3S8cJ.js",
-      "bytes": 199525,
-      "gzip": 59083
+      "path": "assets/client-dv6DcFQc.js",
+      "bytes": 159976,
+      "gzip": 56923
     },
     {
-      "path": "assets/FileList-BtOp8ghf.js",
-      "bytes": 166983,
-      "gzip": 48663
+      "path": "assets/index-CPJVR354.css",
+      "bytes": 126825,
+      "gzip": 16381
     },
     {
-      "path": "assets/index-BZye8Jbu.css",
-      "bytes": 128844,
-      "gzip": 17187
+      "path": "assets/radio-Cx_y6J5f.js",
+      "bytes": 114492,
+      "gzip": 34396
     },
     {
-      "path": "assets/tdesign-icons-CH1WXp2q.js",
-      "bytes": 127668,
-      "gzip": 10937
+      "path": "assets/vue-vendor-C-EgtMUJ.js",
+      "bytes": 112700,
+      "gzip": 43054
     },
     {
-      "path": "assets/index-MCzixgWS.js",
-      "bytes": 122959,
-      "gzip": 36698
+      "path": "assets/index-B0__tA-d.js",
+      "bytes": 111693,
+      "gzip": 37709
     },
     {
-      "path": "assets/vue-vendor-CBAykkJw.js",
-      "bytes": 110895,
-      "gzip": 43361
+      "path": "assets/tdesign-icons~index-Z3X9ZNgG.js",
+      "bytes": 86472,
+      "gzip": 6284
     },
     {
-      "path": "assets/TelegramAccounts-B62KLmoR.js",
-      "bytes": 76482,
-      "gzip": 22198
+      "path": "assets/TelegramAccounts-BtYyKJMF.js",
+      "bytes": 79055,
+      "gzip": 22955
     },
     {
-      "path": "assets/index-A35QuThs.css",
-      "bytes": 42105,
-      "gzip": 5315
+      "path": "assets/Config-IrTNt203.js",
+      "bytes": 44123,
+      "gzip": 12945
     },
     {
-      "path": "assets/Config-Drc3OjHF.js",
-      "bytes": 41167,
-      "gzip": 12234
+      "path": "assets/radio-fQ8TJv1o.css",
+      "bytes": 42284,
+      "gzip": 5335
     }
   ]
 }

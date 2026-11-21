@@ -18,7 +18,7 @@ class SqliteAddFileTelegramUniqueIdIndex1803300000000 {
         this.name = 'SqliteAddFileTelegramUniqueIdIndex1803300000000';
     }
     async up(queryRunner) {
-        if (queryRunner.connection.options.type !== 'sqlite')
+        if (queryRunner.dataSource.options.type !== 'better-sqlite3')
             return;
         const table = await queryRunner.getTable('files');
         if (!table)
@@ -29,7 +29,7 @@ class SqliteAddFileTelegramUniqueIdIndex1803300000000 {
             + ` ON "files" ("telegramFileUniqueId")`);
     }
     async down(queryRunner) {
-        if (queryRunner.connection.options.type !== 'sqlite')
+        if (queryRunner.dataSource.options.type !== 'better-sqlite3')
             return;
         await queryRunner.query(`DROP INDEX IF EXISTS "idx_files_telegram_file_unique_id"`);
     }

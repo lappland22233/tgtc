@@ -24,7 +24,7 @@ export class TelegramFileCopies1802900000000 implements MigrationInterface {
   name = 'TelegramFileCopies1802900000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'postgres') return;
+    if (queryRunner.dataSource.options.type !== 'postgres') return;
 
     await queryRunner.query(`
       CREATE TABLE IF NOT EXISTS "telegram_file_copies" (
@@ -70,7 +70,7 @@ export class TelegramFileCopies1802900000000 implements MigrationInterface {
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'postgres') return;
+    if (queryRunner.dataSource.options.type !== 'postgres') return;
     await queryRunner.query(
       `ALTER TABLE "telegram_bot_file_grants" DROP COLUMN IF EXISTS "sourceAccountId"`,
     );

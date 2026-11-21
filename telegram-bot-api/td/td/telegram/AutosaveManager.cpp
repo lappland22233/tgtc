@@ -66,17 +66,15 @@ class SaveAutoSaveSettingsQuery final : public Td::ResultHandler {
 
   void send(bool users, bool chats, bool broadcasts, DialogId dialog_id,
             telegram_api::object_ptr<telegram_api::autoSaveSettings> settings) {
-    int32 flags = 0;
     telegram_api::object_ptr<telegram_api::InputPeer> input_peer;
     if (!users && !chats && !broadcasts) {
-      flags |= telegram_api::account_saveAutoSaveSettings::PEER_MASK;
       input_peer = td_->dialog_manager_->get_input_peer(dialog_id, AccessRights::Read);
       CHECK(input_peer != nullptr);
     }
-    send_query(G()->net_query_creator().create(
-        telegram_api::account_saveAutoSaveSettings(flags, users, chats, broadcasts, std::move(input_peer),
-                                                   std::move(settings)),
-        {{"me"}}));
+    send_query(
+        G()->net_query_creator().create(telegram_api::account_saveAutoSaveSettings(
+                                            0, users, chats, broadcasts, std::move(input_peer), std::move(settings)),
+                                        {{"me"}}));
   }
 
   void on_result(BufferSlice packet) final {
@@ -310,7 +308,7 @@ void AutosaveManager::on_load_autosave_settings_from_database(string value) {
   for (auto &exception : settings_.exceptions_) {
     dependencies.add_dialog_and_dependencies(exception.first);
   }
-  if (!dependencies.resolve_force(td_, "on_load_autosave_settings_from_database")) {
+  if (!dependencies.resolve_force(td_, "on_load_autosave_settings_from_database", true)) {
     G()->td_db()->get_binlog_pmc()->erase(get_autosave_settings_database_key());
     settings_ = {};
     return reload_autosave_settings();

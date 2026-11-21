@@ -373,6 +373,7 @@ function split_file($file, $chunks, $undo) {
             'GroupCallMessage[^A-Z]' => 'GroupCallMessage',
             'GroupCallMessageLimit' => 'GroupCallMessageLimit',
             'hashtag_hints[_(-](?![.]get[(][)])|HashtagHints' => 'HashtagHints',
+            'InlineMessageContent' => 'InlineMessageContent',
             'inline_message_manager[_(-](?![.]get[(][)])|InlineMessageManager' => 'InlineMessageManager',
             'inline_queries_manager[_(-](?![.]get[(][)])|InlineQueriesManager' => 'InlineQueriesManager',
             'InputBusinessChatLink' => 'InputBusinessChatLink',
@@ -381,6 +382,7 @@ function split_file($file, $chunks, $undo) {
             'language_pack_manager[_(-]|LanguagePackManager' => 'LanguagePackManager',
             'link_manager[_(-](?![.]get[(][)])|LinkManager' => 'LinkManager',
             'LogeventIdWithGeneration|add_log_event|delete_log_event|get_erase_log_event_promise|parse_time|store_time' => 'logevent/LogEventHelper',
+            'MessageContentUploadId' => 'MessageContentUploadId',
             'MessageCopyOptions' => 'MessageCopyOptions',
             'MessageCover' => 'MessageCover',
             'MessageEffectId' => 'MessageEffectId',
@@ -429,6 +431,7 @@ function split_file($file, $chunks, $undo) {
             'referral_program_manager[_(-](?![.]get[(][)])|ReferralProgramManager' => 'ReferralProgramManager',
             'ReferralProgramParameters' => 'ReferralProgramParameters',
             'RequestActor|RequestOnceActor' => 'RequestActor',
+            'RichButtonStyle' => 'RuchButtonStyle',
             'RichMessage[^M]' => 'RichMessage',
             'RichMessageMedia' => 'RichMessageMedia',
             'saved_messages_manager[_(-](?![.]get[(][)])|SavedMessagesManager' => 'SavedMessagesManager',
@@ -487,6 +490,7 @@ function split_file($file, $chunks, $undo) {
             'ToDoItem' => 'ToDoItem',
             'ToDoList' => 'ToDoList',
             'TonAmount' => 'TonAmount',
+            'ton_wallet_manager[_(-](?![.]get[(][)])|TonWalletManager' => 'TonWalletManager',
             'TopDialogCategory|get_top_dialog_category' => 'TopDialogCategory',
             'top_dialog_manager[_(-](?![.]get[(][)])|TopDialogManager' => 'TopDialogManager',
             'translation_manager[_(-](?![.]get[(][)])|TranslationManager' => 'TranslationManager',
@@ -504,7 +508,9 @@ function split_file($file, $chunks, $undo) {
             'WebBrowserSettings' => 'WebBrowserSettings',
             'WebDomainException' => 'WebDomainException',
             'WebPageId(Hash)?' => 'WebPageId',
-            'web_pages_manager[_(-](?![.]get[(][)])|WebPagesManager' => 'WebPagesManager');
+            'web_pages_manager[_(-](?![.]get[(][)])|WebPagesManager' => 'WebPagesManager',
+            'welcome_message_manager[_(-](?![.]get[(][)])|WelcomeMessageManager' => 'WelcomeMessageManager',
+            'widget_manager[_(-](?![.]get[(][)])|WidgetManager' => 'WidgetManager');
 
         foreach ($td_methods as $pattern => $header) {
             if (strpos($cpp_name, $header) !== false) {

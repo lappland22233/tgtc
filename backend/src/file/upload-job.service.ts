@@ -1,7 +1,7 @@
 import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, Brackets } from 'typeorm';
-import { v4 as uuidv4 } from 'uuid';
+import { randomUUID } from 'node:crypto';
 import { User } from '../common/entities/user.entity';
 import { File } from '../common/entities/file.entity';
 import { UploadTask } from '../common/entities/upload-task.entity';
@@ -91,7 +91,7 @@ export class UploadJobService implements OnModuleInit, OnModuleDestroy {
 
   createJob(user: User, filename: string, fileCount: number = 1): UploadJob {
     const job: UploadJob = {
-      jobId: uuidv4(),
+      jobId: randomUUID(),
       userId: user.id,
       filename: fileCount > 1 ? `${fileCount} 个文件` : filename,
       status: 'pending',

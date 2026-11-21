@@ -8,7 +8,7 @@ export class SqliteCreateDownloadTasks1802500000000 implements MigrationInterfac
   name = 'SqliteCreateDownloadTasks1802500000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'sqlite') return;
+    if (queryRunner.dataSource.options.type !== 'better-sqlite3') return;
 
     await queryRunner.query(`
       CREATE TABLE IF NOT EXISTS "download_tasks" (

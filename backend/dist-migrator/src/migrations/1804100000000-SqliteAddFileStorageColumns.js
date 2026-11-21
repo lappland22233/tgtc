@@ -18,7 +18,7 @@ class SqliteAddFileStorageColumns1804100000000 {
         this.name = 'SqliteAddFileStorageColumns1804100000000';
     }
     async up(queryRunner) {
-        if (queryRunner.connection.options.type !== 'sqlite')
+        if (queryRunner.dataSource.options.type !== 'better-sqlite3')
             return;
         const table = await queryRunner.getTable('files');
         if (!table)
@@ -36,7 +36,7 @@ class SqliteAddFileStorageColumns1804100000000 {
             + ` ON "files" ("storageAccountId", "storageObjectRef")`);
     }
     async down(queryRunner) {
-        if (queryRunner.connection.options.type !== 'sqlite')
+        if (queryRunner.dataSource.options.type !== 'better-sqlite3')
             return;
         // SQLite 旧版本不支持 DROP COLUMN；保留可空列无数据风险，与既有迁移（180370）保持一致。
         await queryRunner.query(`DROP INDEX IF EXISTS "idx_files_storage_ref"`);

@@ -167,7 +167,18 @@ WorkdirCleanupResult run_workdir_cleanup(const WorkdirCleanupConfig &config,
   auto now_nsec = static_cast<td::uint64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
                                               std::chrono::system_clock::now().time_since_epoch())
                                               .count());
+  // Both paths from the startup options are canonical and have a trailing separator.
+  const bool nested_database = config.database_dir.size() > config.workdir.size() &&
+                               td::begins_with(config.database_dir, config.workdir);
+  auto database_path = td::Slice(config.database_dir);
+  if (nested_database) {
+    database_path.remove_suffix(1);
+  }
   auto status = td::walk_path(config.workdir, [&](td::CSlice path, td::WalkPath::Type type) {
+    if (type == td::WalkPath::Type::EnterDir && nested_database &&
+        (path == database_path || path == config.database_dir)) {
+      return td::WalkPath::Action::SkipDir;
+    }
     if (type != td::WalkPath::Type::RegularFile || !is_workdir_cleanup_candidate(config.workdir, path)) {
       return td::WalkPath::Action::Continue;
     }
@@ -213,7 +224,12 @@ WorkdirCleanupResult run_workdir_cleanup(const WorkdirCleanupConfig &config,
     remaining -= candidate.size;
   }
   result.free_bytes = get_free_space(config.workdir);
-  result.disk_emergency = config.min_free_bytes > 0 && result.free_bytes >= 0 && result.free_bytes < config.min_free_bytes;
+  const auto database_free_bytes = config.database_dir.empty() || config.database_dir == config.workdir
+                                       ? result.free_bytes
+                                       : get_free_space(config.database_dir);
+  result.disk_emergency = config.min_free_bytes > 0 &&
+                          ((result.free_bytes >= 0 && result.free_bytes < config.min_free_bytes) ||
+                           (database_free_bytes >= 0 && database_free_bytes < config.min_free_bytes));
   return result;
 }
 

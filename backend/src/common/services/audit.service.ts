@@ -1,6 +1,6 @@
 import { Injectable, Logger, OnApplicationShutdown } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { EntityManager, Repository } from 'typeorm';
 import * as fs from 'fs';
 import * as path from 'path';
 import { AuditLog, AuditAction, AuditStatus } from '../entities/audit-log.entity';
@@ -116,7 +116,12 @@ export class AuditService implements OnApplicationShutdown {
     }
   }
 
-  private async writeLogAsync(entry: AuditEntry): Promise<void> {
+  /** Record the audit entry using the same transaction as the action. */
+  logInTransaction(manager: EntityManager, entry: AuditEntry): Promise<void> {
+    return this.writeLogAsync(entry, manager.getRepository(AuditLog));
+  }
+
+  private async writeLogAsync(entry: AuditEntry, repository = this.auditLogRepository): Promise<void> {
     // AuditLog entity has nullable: true for user/id/ip/resource fields,
     // but TypeScript type inference doesn't reflect this; cast accordingly
     const logData: Record<string, unknown> = {
@@ -129,8 +134,8 @@ export class AuditService implements OnApplicationShutdown {
     if (entry.resourceId !== undefined) logData.resourceId = entry.resourceId ?? null;
     if (entry.metadata !== undefined) logData.metadata = entry.metadata ?? null;
 
-    const auditLog = this.auditLogRepository.create(logData as unknown as AuditLog);
-    await this.auditLogRepository.save(auditLog);
+    const auditLog = repository.create(logData as unknown as AuditLog);
+    await repository.save(auditLog);
   }
 
   /**

@@ -1,0 +1,140 @@
+.bot-operations, .bot-operations .ops-user, .bot-operations .ops-list {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+
+.bot-operations {
+  color: var(--text-primary);
+}
+
+.bot-operations h1, .bot-operations h2, .bot-operations h3, .bot-operations p, .bot-operations dl, .bot-operations dd {
+  margin: 0;
+}
+
+.bot-operations h2 {
+  font-size: 18px;
+}
+
+.bot-operations h3 {
+  font-size: 16px;
+  overflow-wrap: anywhere;
+}
+
+.bot-operations .ops-tabs, .bot-operations .ops-actions, .bot-operations .ops-list-head, .bot-operations .ops-pages, .bot-operations .ops-row header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.bot-operations .ops-list-head, .bot-operations .ops-pages, .bot-operations .ops-row header {
+  justify-content: space-between;
+}
+
+.bot-operations .ops-btn, .bot-operations .ops-tabs :is(a,button) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  padding: 6px 12px;
+  font: inherit;
+  color: var(--text-primary);
+  background: var(--color-bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.bot-operations .ops-tabs [aria-current="page"], .bot-operations .ops-tabs [aria-pressed="true"], .bot-operations .ops-btn.primary {
+  color: var(--seed-primary);
+  border-color: var(--border-accent);
+  background: var(--color-bg-selected);
+}
+
+.bot-operations .ops-btn.danger, .bot-operations .ops-error {
+  color: var(--color-danger);
+}
+
+.bot-operations button:disabled {
+  color: var(--text-disabled);
+  cursor: default;
+}
+
+.bot-operations .ops-form, .bot-operations .ops-row, .bot-operations .ops-confirm, .bot-operations .ops-summary {
+  background: var(--color-bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  padding: 16px;
+  min-width: 0;
+}
+
+.bot-operations .ops-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 150px), 1fr));
+  gap: 12px;
+  align-items: end;
+}
+
+.bot-operations label {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  color: var(--text-secondary);
+}
+
+.bot-operations :is(input,select,textarea) {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  min-height: 44px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg);
+  color: var(--text-primary);
+  font: inherit;
+  padding: 6px 8px;
+}
+
+.bot-operations .ops-row, .bot-operations .ops-confirm {
+  display: grid;
+  gap: 12px;
+  overflow-wrap: anywhere;
+}
+
+.bot-operations .ops-details, .bot-operations .ops-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 160px), 1fr));
+  gap: 8px 16px;
+}
+
+.bot-operations .ops-details div, .bot-operations .ops-summary div {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.bot-operations dt, .bot-operations .ops-empty, .bot-operations .ops-pages {
+  color: var(--text-secondary);
+}
+
+.bot-operations dd {
+  margin-top: 3px;
+}
+
+.bot-operations dd a {
+  color: var(--seed-primary);
+  text-decoration: underline;
+}
+
+.bot-operations .ops-status {
+  padding: 3px 8px;
+  color: var(--color-success);
+  background: var(--color-success-soft);
+  border-radius: var(--radius-sm);
+}
+
+.bot-operations .ops-status.muted {
+  color: var(--text-secondary);
+  background: var(--color-bg-elevated);
+}

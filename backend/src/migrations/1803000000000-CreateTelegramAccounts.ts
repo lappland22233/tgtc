@@ -20,7 +20,7 @@ export class CreateTelegramAccounts1803000000000 implements MigrationInterface {
   name = 'CreateTelegramAccounts1803000000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'postgres') return;
+    if (queryRunner.dataSource.options.type !== 'postgres') return;
 
     await queryRunner.query(`
       CREATE TABLE IF NOT EXISTS "telegram_accounts" (
@@ -65,7 +65,7 @@ export class CreateTelegramAccounts1803000000000 implements MigrationInterface {
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'postgres') return;
+    if (queryRunner.dataSource.options.type !== 'postgres') return;
     await queryRunner.query(`DROP INDEX IF EXISTS "idx_tg_accounts_enabled"`);
     await queryRunner.query(`DROP INDEX IF EXISTS "idx_tg_accounts_status"`);
     await queryRunner.query(`DROP INDEX IF EXISTS "uq_tg_accounts_type_external"`);

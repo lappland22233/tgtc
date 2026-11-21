@@ -30,7 +30,7 @@ export class CreateTelegramMainChatAnchors1803600000000 implements MigrationInte
   name = 'CreateTelegramMainChatAnchors1803600000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'postgres') return;
+    if (queryRunner.dataSource.options.type !== 'postgres') return;
 
     await queryRunner.query(`
       CREATE TABLE IF NOT EXISTS "telegram_main_chat_anchors" (
@@ -62,7 +62,7 @@ export class CreateTelegramMainChatAnchors1803600000000 implements MigrationInte
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'postgres') return;
+    if (queryRunner.dataSource.options.type !== 'postgres') return;
     // 锚点行指向 Telegram 上真实存在的消息，是可审计证据：down 只在本迁移自身回滚时删除
     await queryRunner.query(`DROP INDEX IF EXISTS "idx_tg_main_chat_anchors_anchor"`);
     await queryRunner.query(`DROP INDEX IF EXISTS "uq_tg_main_chat_anchors_owner"`);

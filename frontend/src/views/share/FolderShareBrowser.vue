@@ -776,16 +776,47 @@ function formatRelativeDate(dateStr: string): string {
   .load-more-row { padding: 12px 12px 4px; }
 }
 
-/* 超窄屏（≤480px）：操作按钮压缩间距，避免挤占名称列导致横滚 */
+/* 窄屏将大小置于文件名下方，给操作保留独立的触控区域。 */
 @media (max-width: 480px) {
+  .folder-title { min-width: 0; overflow-wrap: anywhere; }
+
   .share-table-head,
   .share-row {
-    grid-template-columns: minmax(140px, 1fr) 72px minmax(84px, auto);
-    gap: 6px;
-    padding: 0 10px;
+    grid-template-columns: minmax(0, 1fr) max-content;
+    gap: var(--space-1) var(--space-2);
+    padding-inline: var(--space-2);
   }
-  .col-ops { gap: 10px; }
-  .op-link { font-size: 12px; }
-  .col-size { font-size: 11px; }
+
+  .share-row {
+    padding-block: var(--space-2);
+  }
+
+  .share-table-head .col-size,
+  .folder-row .col-size {
+    display: none;
+  }
+
+  .col-name { gap: var(--space-2); }
+  .file-row .col-size {
+    grid-column: 1;
+    grid-row: 2;
+    padding-inline-start: calc(40px + var(--space-2));
+    font-size: 11px;
+  }
+
+  .col-ops { gap: var(--space-1); }
+  .file-row .col-ops {
+    grid-column: 2;
+    grid-row: 1 / 3;
+  }
+
+  .op-link {
+    display: inline-flex;
+    justify-content: center;
+    align-items: center;
+    min-inline-size: 44px;
+    min-block-size: 44px;
+    font-size: 12px;
+  }
 }
 </style>

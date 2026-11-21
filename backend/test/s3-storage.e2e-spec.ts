@@ -8,7 +8,7 @@
  *   3. 设置环境变量后运行：
  *        S3_E2E_ENDPOINT=http://127.0.0.1:9000 S3_E2E_BUCKET=tgtc-e2e \
  *        S3_E2E_ACCESS_KEY_ID=minioadmin S3_E2E_SECRET_ACCESS_KEY=minioadmin \
- *        npx jest --maxWorkers=2 s3-storage.e2e
+ *        npm test -- --runInBand test/s3-storage.e2e-spec.ts
  *
  * 覆盖：真实分片上传（>8MB 触发 multipart）、head、全量/Range 下载字节一致性、
  * 覆盖上传对象键不冲突、删除幂等。全部使用真实 AWS SDK（不 mock）。

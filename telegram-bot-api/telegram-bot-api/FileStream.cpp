@@ -370,7 +370,7 @@ void FileStreamConnection::on_file_error(td::Status error) {
   }
 }
 
-void FileStreamConnection::fail(int http_status_code, td::Slice message) {
+void FileStreamConnection::fail(int http_status_code, td::CSlice message) {
   if (finished_) {
     return;
   }

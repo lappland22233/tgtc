@@ -1,5 +1,5 @@
-import { BadRequestException, Injectable, Logger } from '@nestjs/common';
-import { CodeChallengeMethod, OAuth2Client } from 'google-auth-library';
+import { BadRequestException, Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
+import { CodeChallengeMethod, type Credentials, OAuth2Client } from 'google-auth-library';
 import axios from 'axios';
 import https from 'https';
 import { createHash, createHmac } from 'crypto';
@@ -35,8 +35,9 @@ export function extractOAuthCode(input: string): string {
  * 授权 scope：drive.file 仅访问本应用创建的文件（规避 Google 受限 scope 审核），
  * openid+email 为非敏感身份 scope（仅用于管理端展示授权账号邮箱）。
  */
+const DRIVE_FILE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
 export const GDRIVE_SCOPES = [
-  'https://www.googleapis.com/auth/drive.file',
+  DRIVE_FILE_SCOPE,
   'openid',
   'email',
 ];
@@ -179,10 +180,11 @@ export class GDriveOAuthService {
       if (/invalid_grant/i.test(message)) {
         throw new BadRequestException('授权码无效或已过期（请重新授权，并确认 redirectUri 与授权时一致）');
       }
-      throw new BadRequestException(`Google 授权码交换失败：${message.slice(0, 200)}`);
+      throw new BadRequestException('Google 授权码交换失败，请重新发起授权；如持续失败，请检查 OAuth Client 配置');
     }
+    await this.requireDriveFileScope(client, tokens);
     if (!tokens.refresh_token) {
-      throw new BadRequestException('Google 未下发 refresh_token（请撤销本应用授权后重新授权）');
+      throw new BadRequestException('Google 未下发 refresh_token，请重新发起授权并完成 Google 同意流程');
     }
     client.setCredentials(tokens);
 
@@ -205,6 +207,29 @@ export class GDriveOAuthService {
       this.logger.warn(`GDrive 授权配额拉取失败（不影响授权）：${error instanceof Error ? error.message.slice(0, 120) : String(error)}`);
     }
     return { refreshToken: tokens.refresh_token, email, quota };
+  }
+
+  private async requireDriveFileScope(client: OAuth2Client, tokens: Credentials): Promise<void> {
+    let scopes = tokens.scope?.split(/\s+/);
+    if (!scopes) {
+      // Google may omit scope in a token response. Verify the exchanged access
+      // token itself before using the candidate credentials for any Drive call.
+      if (!tokens.access_token) {
+        throw new BadRequestException('Google 未返回可供验证的访问令牌，请重新发起授权');
+      }
+      try {
+        scopes = (await client.getTokenInfo(tokens.access_token)).scopes;
+      } catch {
+        // SDK errors can contain the bearer token in their request details.
+        throw new ServiceUnavailableException({
+          errorCode: 'GDRIVE_SCOPE_VERIFICATION_UNAVAILABLE',
+          message: '暂时无法向 Google 确认授权范围，请稍后重新发起授权',
+        });
+      }
+    }
+    if (!scopes.includes(DRIVE_FILE_SCOPE)) {
+      throw new BadRequestException('未授予 Google Drive 文件访问权限（drive.file）。请重新发起授权，并在 Google 同意页面勾选允许本应用访问其使用的云端硬盘文件。');
+    }
   }
 
   /** 构造已装载 refresh_token 的 OAuth2Client（自动刷新 access_token） */

@@ -4,7 +4,7 @@ exports.SqliteCreateMinuteMetrics1804600000000 = void 0;
 const sqlite_minute_metrics_1 = require("../database/sqlite-minute-metrics");
 class SqliteCreateMinuteMetrics1804600000000 {
     async up(runner) {
-        if (runner.connection.options.type !== 'sqlite')
+        if (runner.dataSource.options.type !== 'better-sqlite3')
             return;
         await runner.query(sqlite_minute_metrics_1.sqliteMinuteMetricsTable);
         // Earlier PG conversions emitted Date.toISOString(). SQLite compares these columns as text.

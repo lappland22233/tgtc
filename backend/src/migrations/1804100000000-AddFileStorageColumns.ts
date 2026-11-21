@@ -15,7 +15,7 @@ export class AddFileStorageColumns1804100000000 implements MigrationInterface {
   name = 'AddFileStorageColumns1804100000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'postgres') return;
+    if (queryRunner.dataSource.options.type !== 'postgres') return;
 
     await queryRunner.query(
       `ALTER TABLE "files" ADD COLUMN IF NOT EXISTS "storageBackend" varchar(16) NOT NULL DEFAULT 'telegram'`,
@@ -34,7 +34,7 @@ export class AddFileStorageColumns1804100000000 implements MigrationInterface {
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'postgres') return;
+    if (queryRunner.dataSource.options.type !== 'postgres') return;
     await queryRunner.query(`DROP INDEX IF EXISTS "idx_files_storage_ref"`);
     await queryRunner.query(`ALTER TABLE "files" DROP COLUMN IF EXISTS "storageObjectRef"`);
     await queryRunner.query(`ALTER TABLE "files" DROP COLUMN IF EXISTS "storageAccountId"`);

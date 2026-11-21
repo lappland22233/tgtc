@@ -3,6 +3,8 @@ import { createHash, randomBytes } from 'crypto';
 import { DataSource, EntityManager, In, IsNull, LessThanOrEqual, MoreThan, Not } from 'typeorm';
 import { GDriveOAuthFlow } from '../common/entities/gdrive-oauth-flow.entity';
 import { GDriveBackendConfig, StorageBackend } from '../common/entities/storage-backend.entity';
+import { isSqliteBusy } from '../database/database-types';
+import { setTimeout as delay } from 'node:timers/promises';
 import { SystemConfig } from '../common/entities/system-config.entity';
 
 export const GDRIVE_OAUTH_CLIENT_ID_KEY = 'GDRIVE_OAUTH_CLIENT_ID';
@@ -99,7 +101,7 @@ export class GDriveOAuthStore implements OnModuleDestroy {
 
   private locked<T>(action: (manager: EntityManager) => Promise<T>): Promise<T> {
     return this.withConnection(db => db.transaction(async manager => {
-      if (db.options.type === 'sqlite') {
+      if (db.options.type === 'better-sqlite3') {
         await manager.query('UPDATE system_configs SET value = value WHERE key = ?', [GDRIVE_OAUTH_CLIENT_ID_KEY]);
       } else {
         await manager.query('SELECT pg_advisory_xact_lock(hashtext($1))', ['tgtc:gdrive-oauth-config']);
@@ -115,17 +117,29 @@ export class GDriveOAuthStore implements OnModuleDestroy {
 
   private withConnection<T>(action: (db: DataSource) => Promise<T>): Promise<T> {
     const options = this.db.options;
-    if (options.type !== 'sqlite') return action(this.db);
+    if (options.type !== 'better-sqlite3') return action(this.db);
     const run = async () => {
       if (options.database === ':memory:') return action(this.db);
       this.sqliteConnection ??= new DataSource({
-        ...options, entities: [SystemConfig, StorageBackend, GDriveOAuthFlow],
+        ...options, timeout: 0, entities: [SystemConfig, StorageBackend, GDriveOAuthFlow],
         synchronize: false, migrationsRun: false, dropSchema: false,
       }).initialize().catch(error => {
         this.sqliteConnection = undefined;
         throw error;
       });
-      return action(await this.sqliteConnection);
+      const connection = await this.sqliteConnection;
+      const deadline = Date.now() + (options.timeout ?? 5000);
+      // A synchronous SQLite busy handler would prevent the primary connection
+      // from committing on this event loop. Retry whole rolled-back transactions.
+      for (;;) {
+        try {
+          return await action(connection);
+        } catch (error) {
+          const remaining = deadline - Date.now();
+          if (!isSqliteBusy(error) || remaining <= 0) throw error;
+          await delay(Math.min(25, remaining));
+        }
+      }
     };
     const writing = this.sqliteWriter.then(run);
     this.sqliteWriter = writing.then(() => {}, () => {});

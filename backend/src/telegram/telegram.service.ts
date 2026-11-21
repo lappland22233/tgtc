@@ -2,11 +2,12 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
 import { Readable } from 'stream';
-import { createReadStream } from 'fs';
-import { promises as fs } from 'fs';
+import { setTimeout as sleep } from 'node:timers/promises';
+import { constants, promises as fs } from 'fs';
+import type { FileHandle } from 'fs/promises';
 import * as path from 'path';
 import FormData from 'form-data';
-import { TelegramFileNotFoundError, TelegramStreamPathError } from './telegram.errors';
+import { readTelegramRetryAfter, TelegramFileNotFoundError, TelegramRateLimitError, TelegramStreamPathError } from './telegram.errors';
 import type { TelegramSendMessageResult, TelegramUpdate } from './telegram.types';
 
 interface TelegramMedia {
@@ -26,6 +27,18 @@ interface TelegramMediaResult {
   chat?: { id?: number };
   /** 自建 Bot API 严格无缓存扩展：false 表示远端消息成功但 TDLib 本地副本待释放。 */
   local_cache_released?: boolean;
+}
+
+interface TelegramStreamRequestOptions {
+  signal?: AbortSignal;
+  deferRateLimit?: boolean;
+}
+
+class LocalPathDeniedError extends Error {}
+
+function isChildPath(root: string, candidate: string): boolean {
+  const relative = path.relative(root, candidate);
+  return relative !== '' && relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative);
 }
 
 @Injectable()
@@ -63,6 +76,7 @@ export class TelegramService {
    * 仅允许读取此目录内的文件；未配置时本地读取将被拒绝（fail-closed）。
    */
   private readonly localFileBase: string;
+  private localRoot?: Promise<string>;
   /**
    * 进程内恢复去重表（R9）：按 fileId 合并单次强制回源 Promise，
    * 避免共享同一 file_id 的复制记录并发触发重复回源。完成后立即删除。
@@ -200,7 +214,7 @@ export class TelegramService {
   /**
    * 包装 axios 请求，统一处理 Telegram API 错误，提供更友好的错误消息。
    *
-   * - 429 限流：按 Telegram 返回的 retry_after 退避重试（始终启用）。
+   * - 429 限流：按 Telegram 返回的 retry_after 退避重试，或交给持久化队列。
    * - `retryTransient=true`（仅供幂等 GET 调用方）：首字节前的 502/503/504 与网络层
    *   错误（ECONNRESET/ECONNREFUSED/EPIPE 等）追加最多 2 次 1s/3s 退避重试。
    *   超时不重试：超时由首字节/空闲超时兜底，重试只会把等待时间翻倍。
@@ -209,13 +223,15 @@ export class TelegramService {
     fn: () => Promise<T>,
     label: string,
     retries = 3,
-    options?: { retryTransient?: boolean },
+    options?: TelegramStreamRequestOptions & { retryTransient?: boolean },
   ): Promise<T> {
     for (let attempt = 1; attempt <= retries; attempt++) {
+      options?.signal?.throwIfAborted();
       const startedAt = Date.now();
       try {
         return await fn();
       } catch (error: unknown) {
+        options?.signal?.throwIfAborted();
         // 网络层错误通常没有 response，原先会直接静默上抛，导致只能看到“上传失败”。
         // 在所有分支前记录安全摘要，便于区分 ECONNREFUSED、超时、连接重置和 HTTP 错误。
         this.redactError(error);
@@ -235,16 +251,18 @@ export class TelegramService {
         );
 
         if (error && typeof error === 'object' && 'response' in error) {
-          const responseError = error as { response?: { status?: number; data?: { description?: string; parameters?: { retry_after?: number } } }; message?: string; config?: { url?: string } };
+          const responseError = error as { response?: { status?: number; headers?: Record<string, unknown>; data?: { description?: string } } };
           const status = responseError.response?.status;
           const description = responseError.response?.data?.description || '';
 
           // 429 限流 — 使用 Telegram 返回的 retry_after 秒数等待后重试
-          if (status === 429 && attempt < retries) {
-            const retryAfter = responseError.response?.data?.parameters?.retry_after || 3;
-            const delay = Math.max(retryAfter * 1000, 1000);
+          if (status === 429 && responseError.response) {
+            const retryAfter = await readTelegramRetryAfter(responseError.response);
+            options?.signal?.throwIfAborted();
+            if (options?.deferRateLimit || attempt === retries) throw new TelegramRateLimitError(retryAfter);
+            const delay = retryAfter * 1000;
             this.logger.warn(`${label} 触发限流 (429)，${attempt}/${retries} 次重试，等待 ${delay}ms...`);
-            await new Promise(resolve => setTimeout(resolve, delay));
+            await sleep(delay, undefined, { signal: options?.signal });
             continue;
           }
           if (status === 401) {
@@ -309,7 +327,7 @@ export class TelegramService {
             && typeof status === 'number'
             && TelegramService.TRANSIENT_RETRY_STATUSES.has(status)
           ) {
-            await this.sleepBeforeTransientRetry(label, attempt, `HTTP ${status}`);
+            await this.sleepBeforeTransientRetry(label, attempt, `HTTP ${status}`, options.signal);
             continue;
           }
         }
@@ -320,7 +338,7 @@ export class TelegramService {
           && attempt < retries
           && TelegramService.RETRYABLE_TRANSPORT_CODES.has(errorCode)
         ) {
-          await this.sleepBeforeTransientRetry(label, attempt, `transport ${transport}`);
+          await this.sleepBeforeTransientRetry(label, attempt, `transport ${transport}`, options.signal);
           continue;
         }
         // G4-11：脱敏移到 response 分支之外——网络层错误（无 response，
@@ -336,12 +354,12 @@ export class TelegramService {
    * 瞬时错误的有界退避等待（1s / 3s + 抖动）。
    * 抖动用于打散同一时刻并发发起的重试，避免多客户端同时重试形成重试风暴。
    */
-  private async sleepBeforeTransientRetry(label: string, attempt: number, reason: string): Promise<void> {
+  private async sleepBeforeTransientRetry(label: string, attempt: number, reason: string, signal?: AbortSignal): Promise<void> {
     const delays = TelegramService.TRANSIENT_RETRY_DELAYS_MS;
     const base = delays[Math.min(attempt - 1, delays.length - 1)];
     const delay = base + Math.floor(Math.random() * 250);
     this.logger.warn(`${label} 首字节前瞬时失败（${reason}），第 ${attempt} 次重试前等待 ${delay}ms`);
-    await new Promise(resolve => setTimeout(resolve, delay));
+    await sleep(delay, undefined, { signal });
   }
 
   private getBaseUrl() {
@@ -427,6 +445,7 @@ export class TelegramService {
     timeoutMs = 5 * 60 * 1000,
     label = 'getFileInfo',
     metadataOnly = false,
+    options?: TelegramStreamRequestOptions,
   ): Promise<{
     file_id: string;
     file_path: string;
@@ -436,6 +455,7 @@ export class TelegramService {
       const response = await axios.get(`${this.getBaseUrl()}/getFile`, {
         params: { file_id, ...(metadataOnly ? { metadata_only: true } : {}) },
         timeout: timeoutMs,
+        ...(options?.signal && { signal: options.signal }),
       });
       const result = response.data.result;
       return {
@@ -444,7 +464,7 @@ export class TelegramService {
         file_path: result.file_path || '',
         file_size: result.file_size || 0,
       };
-    }, label);
+    }, label, 3, options);
   }
 
   /**
@@ -631,62 +651,54 @@ export class TelegramService {
     return /^[a-zA-Z]:[\\/]/.test(file_path) || file_path.startsWith('\\\\');
   }
 
-  /** 安全解析本地文件路径，防止路径穿越攻击 */
-  private resolveLocalPath(filePath: string): string {
-    // 1. 先在“原始”路径上检查 '..'。
-    //    注意：绝不能先 normalize 再检查——normalize 会消除 '..' 段使检查形同虚设。
-    if (filePath.includes('..')) {
-      throw new Error('非法的本地文件路径');
-    }
-
-    // 2. 必须配置允许的本地文件根目录（白名单），否则拒绝（fail-closed）。
+  /** 按已验证的句柄读取，缓冲下载和流式下载共用同一目录边界。 */
+  private async openLocalFile(filePath: string): Promise<FileHandle> {
     if (!this.localFileBase) {
       this.logger.warn('收到本地文件路径请求，但未配置 TELEGRAM_LOCAL_FILE_DIR，已拒绝访问');
-      throw new Error('本地文件访问未启用');
+      throw new LocalPathDeniedError('本地文件访问未启用');
+    }
+    if (!path.isAbsolute(filePath) || filePath.includes('..') || filePath.includes('\0')) {
+      throw new LocalPathDeniedError('非法的本地文件路径');
     }
 
-    // 3. 解析为绝对路径并校验位于白名单目录内。
-    //    对绝对 filePath，path.resolve(base, filePath) 返回 filePath 本身；
-    //    对相对路径则基于 base 解析。校验时附带分隔符，防止 /base-evil 这类兄弟目录绕过。
-    const allowlistedBase = path.resolve(this.localFileBase);
-    const resolved = path.resolve(allowlistedBase, filePath);
-    if (resolved !== allowlistedBase && !resolved.startsWith(allowlistedBase + path.sep)) {
-      throw new Error('非法的本地文件路径');
-    }
-
-    return resolved;
-  }
-
-  /**
-   * 安全打开本地文件流（R3）：在 createReadStream 前先 fs.promises.open/stat
-   * 确认路径存在且为文件，将 ENOENT/无法打开 同步转为可恢复的
-   * TelegramStreamPathError，避免延迟的 stream error 越过恢复边界。
-   * 打开成功后由调用方通过返回的句柄建立流（句柄由流关闭时释放）。
-   */
-  private async openLocalStream(filePath: string): Promise<{ stream: Readable; release: () => void }> {
-    const safePath = this.resolveLocalPath(filePath);
-    let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
+    const base = path.resolve(this.localFileBase);
+    const candidate = path.resolve(filePath);
+    let handle: FileHandle | undefined;
     try {
-      handle = await fs.open(safePath, 'r');
-      const stat = await handle.stat();
-      if (!stat.isFile()) {
-        await handle.close();
-        handle = undefined; // 已关闭，避免 catch 分支二次 close
-        this.logger.warn('Telegram 本地路径不是常规文件，拒绝打开（路径类别: 本地文件）');
-        throw new TelegramStreamPathError('Telegram 文件本地路径不是常规文件');
+      // 配置根可位于挂载点或符号链接上。首次解析成功后固定边界，挂载尚未就绪时允许重试。
+      this.localRoot ??= fs.realpath(base).catch(error => {
+        this.localRoot = undefined;
+        throw error;
+      });
+      const realBase = await this.localRoot;
+      if (path.dirname(realBase) === realBase) throw new LocalPathDeniedError('本地文件根目录不能是文件系统根目录');
+      if (!isChildPath(base, candidate) && !isChildPath(realBase, candidate)) {
+        throw new LocalPathDeniedError('非法的本地文件路径');
       }
-      // 以打开的句柄建立流，避免 open→createReadStream 之间的 TOCTOU；
-      // 句柄由流的 close 事件自动释放。
-      const stream = createReadStream(safePath, { fd: handle });
-      handle = undefined; // 所有权已转移给流
-      return { stream, release: () => { /* fd 由流持有并自动关闭 */ } };
-    } catch (error: unknown) {
-      if (handle) {
-        try { await handle.close(); } catch { /* 忽略关闭失败 */ }
+      const target = await fs.realpath(candidate);
+      if (!isChildPath(realBase, target)) throw new LocalPathDeniedError('非法的本地文件路径');
+
+      const entry = await fs.lstat(target, { bigint: true });
+      if (!entry.isFile()) throw new TelegramStreamPathError('Telegram 文件本地路径不是常规文件');
+      handle = await fs.open(target, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
+      const opened = await handle.stat({ bigint: true });
+      if (!opened.isFile() || opened.dev !== entry.dev || opened.ino !== entry.ino) {
+        throw new TelegramStreamPathError('Telegram 文件本地路径已变更');
       }
-      // ENOENT / 无法打开 → 可恢复路径失效错误
-      if (error instanceof TelegramStreamPathError) throw error;
-      this.logger.warn(`Telegram 本地文件无法打开（类别: 本地路径失效）`);
+
+      // Linux 可直接核对已打开的对象。其他平台重新核对目标的真实路径与文件标识。
+      const openedPath = await fs.realpath(process.platform === 'linux' ? `/proc/self/fd/${handle.fd}` : target);
+      if (!isChildPath(realBase, openedPath)) throw new LocalPathDeniedError('非法的本地文件路径');
+      if (process.platform !== 'linux') {
+        const current = await fs.lstat(openedPath, { bigint: true });
+        if (!opened.ino || !current.isFile() || current.dev !== opened.dev || current.ino !== opened.ino) {
+          throw new TelegramStreamPathError('Telegram 文件本地路径已变更');
+        }
+      }
+      return handle;
+    } catch (error) {
+      await handle?.close();
+      if (error instanceof LocalPathDeniedError || error instanceof TelegramStreamPathError) throw error;
       throw new TelegramStreamPathError('Telegram 文件本地路径失效，无法打开');
     }
   }
@@ -702,13 +714,13 @@ export class TelegramService {
 
     // 本地绝对路径：安全解析后从文件系统异步读取
     if (this.isLocalPath(filePath)) {
-      const safePath = this.resolveLocalPath(filePath);
+      const handle = await this.openLocalFile(filePath);
       try {
-        // 直接读取并在失败时统一处理，避免 access→read 之间的 TOCTOU；
-        // 错误信息不回显内部文件系统路径。
-        return await fs.readFile(safePath);
+        return await handle.readFile();
       } catch {
         throw new Error('本地文件读取失败');
+      } finally {
+        await handle.close();
       }
     }
 
@@ -731,13 +743,12 @@ export class TelegramService {
    * opts.noCache：无缓存直通时携带 X-Telegram-No-Cache 头，
    * Bot API 完整传输后会删除 TDLib workdir 中的本地副本（仅流式端点路径支持）。
    */
-  async getRealtimeFileStream(fileId: string, expectedSize?: number, opts?: { noCache?: boolean }): Promise<{
+  async getRealtimeFileStream(fileId: string, expectedSize?: number, opts?: TelegramStreamRequestOptions & { noCache?: boolean }): Promise<{
     stream: Readable;
     info: { file_id: string; file_path: string; file_size: number };
   }> {
     if (!this.fileStreamingEnabled) {
-      // getFileStream 回退路径不支持 no-cache 清理，忽略 opts
-      return this.getFileStream(fileId);
+      return this.getFileStream(fileId, opts);
     }
     if (!fileId || fileId.length > 4096) {
       throw new Error('非法的 Telegram file_id');
@@ -751,10 +762,9 @@ export class TelegramService {
     if (expectedSize !== undefined) headers['X-Telegram-File-Size'] = String(expectedSize);
     if (opts?.noCache) headers['X-Telegram-No-Cache'] = '1';
 
-    // 首次 streaming 请求（retries=1）。若命中 R1 路径失效型 502 抛
-    // TelegramStreamPathError，则进入单次强制回源恢复路径。
+    // 流式端点报告路径失效时，进入单次强制回源。
     try {
-      return await this.requestRealtimeStream(fileId, expectedSize, headers);
+      return await this.requestRealtimeStream(fileId, expectedSize, headers, opts);
     } catch (error: unknown) {
       // R2：仅对"路径失效型 502"执行单次强制回源，其余错误原样抛出
       if (!(error instanceof TelegramStreamPathError)) {
@@ -763,7 +773,7 @@ export class TelegramService {
       this.logger.warn(
         `Telegram 实时流因本地路径失效触发回源（类别: 路径失效型 502）`,
       );
-      return await this.recoverRealtimeStream(fileId, expectedSize, headers);
+      return await this.recoverRealtimeStream(fileId, expectedSize, headers, opts);
     }
   }
 
@@ -774,6 +784,7 @@ export class TelegramService {
     fileId: string,
     expectedSize: number | undefined,
     headers: Record<string, string>,
+    options?: TelegramStreamRequestOptions,
   ): Promise<{ stream: Readable; info: { file_id: string; file_path: string; file_size: number } }> {
     const url = `${this.fileStreamingBase}/stream/file/bot${this.botToken}/${encodeURIComponent(fileId)}`;
     const response = await this.telegramRequest(
@@ -782,12 +793,13 @@ export class TelegramService {
         timeout: this.fileStreamingTimeoutMs,
         maxRedirects: 0,
         headers: Object.keys(headers).length > 0 ? headers : undefined,
+        ...(options?.signal && { signal: options.signal }),
       }),
       'getRealtimeFileStream',
       3,
       // 首字节前允许对网络抖动 / 503 做有限重试；502/504/本地副本型 500 已在上方
       // 归类为可恢复的流路径错误，交由 getRealtimeFileStream 的单次强制回源处理。
-      { retryTransient: true },
+      { retryTransient: true, ...options },
     );
     const rawLength = response.headers['content-length'];
     const fileSize = Number(Array.isArray(rawLength) ? rawLength[0] : rawLength);
@@ -810,69 +822,35 @@ export class TelegramService {
    * 单次强制回源（R2）：对"路径失效型 502"执行一次非 metadata_only 的
    * getFile（触发 Bot API 实际下载），成功后用新 file_path 安全打开本地流返回。
    *
-   * 流程约束（禁止递归/无限重试）：
-   *   - 整体最多 streaming 1 次（已发生）+ getFile 1 次 + streaming 1 次（恢复路径）。
-   *   - 回源成功且返回非空 file_path → 返回 getFileStream 风格结果（本地安全打开）。
-   *   - 回源成功但 file_path 为空 → 再次尝试 streaming 一次并返回其结果；
-   *     仍失败则抛永久错误。
-   *   - 回源失败（TelegramFileNotFoundError 等）→ 抛永久不可用错误。
+   * 只尝试一轮强制回源。返回 file_path 时转入标准读取，无路径时再走一次流式端点。
+   * Telegram 确认文件已失效时返回永久错误，瞬时错误与取消透传给调用方。
    *
-   * R9：按 fileId 在进程内合并回源 Promise，避免共享 file_id 的复制记录
-   * 并发重复回源；完成后立即释放。
+   * 普通下载按 fileId 共享恢复请求。带取消信号或独立限流策略的恢复各用一次请求，
+   * 避免影响同一文件的其他调用方。
    */
   private async recoverRealtimeStream(
     fileId: string,
     expectedSize: number | undefined,
     headers: Record<string, string>,
+    options?: TelegramStreamRequestOptions,
   ): Promise<{ stream: Readable; info: { file_id: string; file_path: string; file_size: number } }> {
-    // R9：复用进程内进行中的回源 Promise（key = fileId），避免重复回源
-    const inFlight = this.recoveryInFlight.get(fileId);
-    if (inFlight) {
-      try {
-        const info = await inFlight;
-        return await this.openRecoveredStream(fileId, expectedSize, headers, info);
-      } catch (error) {
-        // 复用到的回源失败：与自身回源失败同等处理，抛永久错误
-        throw this.toPermanentRecoveryError(error);
+    const shareRecovery = !options?.signal && !options?.deferRateLimit;
+    let recovery = shareRecovery ? this.recoveryInFlight.get(fileId) : undefined;
+    if (!recovery) {
+      recovery = this.getFileInfo(fileId, 60_000, 'recoverRealtimeStream', false, options);
+      if (shareRecovery) {
+        recovery = recovery.finally(() => { this.recoveryInFlight.delete(fileId); });
+        this.recoveryInFlight.set(fileId, recovery);
       }
     }
-
-    // 发起一次真正触发 Bot API 下载的 getFile（metadataOnly=false，短超时 60s）
-    const recovery = this.getFileInfo(fileId, 60 * 1000, 'recoverRealtimeStream', false)
-      .finally(() => {
-        // 完成后立即释放，避免长期占用
-        this.recoveryInFlight.delete(fileId);
-      });
-    this.recoveryInFlight.set(fileId, recovery);
-
     try {
       const info = await recovery;
-      return await this.openRecoveredStream(fileId, expectedSize, headers, info);
+      options?.signal?.throwIfAborted();
+      return info.file_path
+        ? await this.getFileStream(fileId, options)
+        : await this.requestRealtimeStream(fileId, expectedSize, headers, options);
     } catch (error) {
-      throw this.toPermanentRecoveryError(error);
-    }
-  }
-
-  /**
-   * 根据回源后的 file_info 建立流：
-   * - 非空 file_path → 走 getFileStream 风格（本地安全打开 / 远程流）。
-   * - 空 file_path（Bot API 无本地路径）→ 再尝试 streaming 一次并返回其结果；
-   *   仍失败则抛永久错误。
-   */
-  private async openRecoveredStream(
-    fileId: string,
-    expectedSize: number | undefined,
-    headers: Record<string, string>,
-    info: { file_id: string; file_path: string; file_size: number },
-  ): Promise<{ stream: Readable; info: { file_id: string; file_path: string; file_size: number } }> {
-    if (info.file_path) {
-      // 回源成功且返回有效本地路径 → 传统 getFileStream 风格结果（安全打开）
-      return this.getFileStream(fileId);
-    }
-    // file_path 为空：Bot API 无本地路径，再次尝试 streaming 一次
-    try {
-      return await this.requestRealtimeStream(fileId, expectedSize, headers);
-    } catch (error) {
+      options?.signal?.throwIfAborted();
       throw this.toPermanentRecoveryError(error);
     }
   }
@@ -889,35 +867,36 @@ export class TelegramService {
       return new TelegramFileNotFoundError(`Telegram 文件恢复失败，判定永久不可用：${cause.message}`);
     }
     if (cause instanceof Error) {
-      // 暂时性错误：保持原类型抛出，不包装成永久错误
-      throw cause;
+      return cause;
     }
-    throw new Error('Telegram 文件恢复失败');
+    return new Error('Telegram 文件恢复失败');
   }
 
   /**
    * 流式获取文件（避免大文件全部加载到内存）
    */
-  async getFileStream(file_id: string): Promise<{ stream: Readable; info: { file_id: string; file_path: string; file_size: number } }> {
-    const fileInfo = await this.getFileInfo(file_id);
+  async getFileStream(file_id: string, options?: TelegramStreamRequestOptions): Promise<{ stream: Readable; info: { file_id: string; file_path: string; file_size: number } }> {
+    const fileInfo = await this.getFileInfo(file_id, undefined, undefined, false, options);
+    options?.signal?.throwIfAborted();
     const filePath = fileInfo.file_path;
 
     let stream: Readable;
     if (this.isLocalPath(filePath)) {
       // R3：先安全打开确认存在再建立流，ENOENT 转为可恢复错误
-      const opened = await this.openLocalStream(filePath);
-      stream = opened.stream;
+      const handle = await this.openLocalFile(filePath);
+      stream = handle.createReadStream({ signal: options?.signal });
     } else {
       // 远程下载经 telegramRequest 包装，统一脱敏 bot token 并处理 429 重试
       const response = await this.telegramRequest(
         () => axios.get<Readable>(this.getFileUrl(filePath), {
           responseType: 'stream',
           timeout: 5 * 60 * 1000,
+          ...(options?.signal && { signal: options.signal }),
         }),
         'getFileStream',
         3,
         // 幂等 GET：冷回源前的网络抖动与网关 5xx 允许有限重试
-        { retryTransient: true },
+        { retryTransient: true, ...options },
       );
       stream = response.data as Readable;
     }
@@ -990,7 +969,7 @@ export class TelegramService {
   async sendMessage(
     chatId: string | number,
     text: string,
-    options?: { replyToMessageId?: number; disableNotification?: boolean },
+    options?: { replyToMessageId?: number; disableNotification?: boolean; deferRateLimit?: boolean },
   ): Promise<TelegramSendMessageResult> {
     if (!this.botToken) {
       throw new Error('TELEGRAM_BOT_TOKEN 未配置，无法发送消息');
@@ -1014,6 +993,8 @@ export class TelegramService {
         { timeout: 30 * 1000 },
       ),
       'sendMessage',
+      3,
+      { deferRateLimit: options?.deferRateLimit },
     );
 
     if (!response.data?.ok || !response.data.result) {
@@ -1030,6 +1011,7 @@ export class TelegramService {
     chatId: string | number,
     messageId: number,
     text: string,
+    options?: { deferRateLimit?: boolean },
   ): Promise<boolean> {
     if (!this.botToken) {
       throw new Error('TELEGRAM_BOT_TOKEN 未配置，无法编辑消息');
@@ -1048,6 +1030,8 @@ export class TelegramService {
         { timeout: 30 * 1000 },
       ),
       'editMessageText',
+      3,
+      { deferRateLimit: options?.deferRateLimit },
     );
 
     return Boolean(response.data?.ok);

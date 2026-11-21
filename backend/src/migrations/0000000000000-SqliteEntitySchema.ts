@@ -35,8 +35,8 @@ export class SqliteEntitySchema1700000000000 implements MigrationInterface {
   name = 'SqliteEntitySchema1700000000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'sqlite') return;
-    const metadatas = queryRunner.connection.entityMetadatas;
+    if (queryRunner.dataSource.options.type !== 'better-sqlite3') return;
+    const metadatas = queryRunner.dataSource.entityMetadatas;
     const partialUniqueColumns = new Set(
       metadatas.flatMap((metadata) => metadata.indices
         .filter((index) => index.isUnique && Boolean(index.where))
@@ -101,7 +101,7 @@ export class SqliteEntitySchema1700000000000 implements MigrationInterface {
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'sqlite') return;
+    if (queryRunner.dataSource.options.type !== 'better-sqlite3') return;
     // SQLite 基线可能已经承载业务数据；revert 不得静默删表或删数据。
     // 如需回退，请使用备份恢复，或编写经过审查的前向修复迁移。
   }

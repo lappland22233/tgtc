@@ -23,20 +23,6 @@ struct IpPrefix {
   int prefix_len = 0;
 };
 
-bool parse_ipv6_prefix(td::Slice text, unsigned char out[16]) {
-  td::IPAddress addr;
-  if (addr.init_ipv6_port(td::CSlice(text.begin(), text.end()), 0).is_error()) {
-    return false;
-  }
-  // IPAddress does not expose the raw 16-byte v6 address, so fall back to get_ipv6() string form.
-  auto v6 = addr.get_ipv6();
-  if (v6.size() != 16) {
-    return false;
-  }
-  std::memcpy(out, v6.data(), 16);
-  return true;
-}
-
 bool parse_allow_ip_entry(td::Slice entry, IpPrefix &result) {
   entry = td::trim(entry);
   if (entry.empty()) {
@@ -62,27 +48,31 @@ bool parse_allow_ip_entry(td::Slice entry, IpPrefix &result) {
     }
     prefix_len = r_len.ok();
   }
-  // IPv4 (with optional /prefix)
-  {
-    td::IPAddress addr;
-    if (addr.init_ipv4_port(td::CSlice(addr_part.begin(), addr_part.end()), 0).is_ok()) {
-      result.is_ipv4 = true;
-      result.ipv4 = addr.get_ipv4();
-      result.prefix_len = prefix_len < 0 ? 32 : prefix_len;
-      return result.prefix_len >= 0 && result.prefix_len <= 32;
-    }
+  if (addr_part.empty() || addr_part.find('\0') != td::Slice::npos) {
+    return false;
   }
-  // IPv6 (with optional /prefix)
-  {
-    unsigned char v6[16];
-    if (parse_ipv6_prefix(addr_part, v6)) {
-      result.is_ipv4 = false;
-      std::memcpy(result.ipv6, v6, 16);
-      result.prefix_len = prefix_len < 0 ? 128 : prefix_len;
-      return result.prefix_len >= 0 && result.prefix_len <= 128;
+
+  // List entries and CIDR addresses may end before the end of the original string.
+  // TDLib requires a NUL-terminated address and a valid port even for address-only comparisons.
+  auto host = addr_part.str();
+  td::IPAddress addr;
+  if (addr_part.find(':') == td::Slice::npos) {
+    if (addr.init_ipv4_port(host, 1).is_error()) {
+      return false;
     }
+    result.is_ipv4 = true;
+    result.ipv4 = addr.get_ipv4();
+    result.prefix_len = prefix_len < 0 ? 32 : prefix_len;
+    return result.prefix_len <= 32;
   }
-  return false;
+  if (addr.init_ipv6_port(host, 1).is_error()) {
+    return false;
+  }
+  result.is_ipv4 = false;
+  auto bytes = addr.get_ipv6();
+  std::memcpy(result.ipv6, bytes.data(), sizeof(result.ipv6));
+  result.prefix_len = prefix_len < 0 ? 128 : prefix_len;
+  return result.prefix_len <= 128;
 }
 
 bool is_private_or_loopback(const td::IPAddress &addr) {

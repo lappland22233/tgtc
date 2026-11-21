@@ -18,7 +18,7 @@ class SqliteTelegramCopyAnchorGuard1803400000000 {
         this.name = 'SqliteTelegramCopyAnchorGuard1803400000000';
     }
     async up(queryRunner) {
-        if (queryRunner.connection.options.type !== 'sqlite')
+        if (queryRunner.dataSource.options.type !== 'better-sqlite3')
             return;
         const table = await queryRunner.getTable('telegram_file_copies');
         // 旧基线（尚未包含副本表）下无事可做：表与索引由基线/180290 增量补建
@@ -68,7 +68,7 @@ class SqliteTelegramCopyAnchorGuard1803400000000 {
             + ` ON "telegram_file_copies" ("chatId", "messageId", "ownerType", "ownerId")`);
     }
     async down(queryRunner) {
-        if (queryRunner.connection.options.type !== 'sqlite')
+        if (queryRunner.dataSource.options.type !== 'better-sqlite3')
             return;
         await queryRunner.query(`DROP INDEX IF EXISTS "idx_tg_file_copies_anchor_owner"`);
         await queryRunner.query(`DROP INDEX IF EXISTS "uq_tg_file_copies_anchor_account"`);

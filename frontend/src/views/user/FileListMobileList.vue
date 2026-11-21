@@ -306,4 +306,9 @@ const emit = defineEmits<{
   border-top: 1px solid var(--border-default);
   padding-top: 8px;
 }
+
+.mobile-file-card-actions :deep(.t-button.t-size-s) {
+  min-inline-size: 44px;
+  min-block-size: 44px;
+}
 </style>

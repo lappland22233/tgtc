@@ -12,7 +12,7 @@ export class EnableBotInboundMirrorForEnabledRules1803800000000 implements Migra
   name = 'EnableBotInboundMirrorForEnabledRules1803800000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'postgres') return;
+    if (queryRunner.dataSource.options.type !== 'postgres') return;
     await queryRunner.query(`
       UPDATE "telegram_mirror_rules"
       SET "includeBotInboundFiles" = true, "updatedAt" = now()

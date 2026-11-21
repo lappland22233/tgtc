@@ -3,7 +3,7 @@ import { sqliteMinuteMetricsTable } from '../database/sqlite-minute-metrics';
 
 export class SqliteCreateMinuteMetrics1804600000000 implements MigrationInterface {
   async up(runner: QueryRunner): Promise<void> {
-    if (runner.connection.options.type !== 'sqlite') return;
+    if (runner.dataSource.options.type !== 'better-sqlite3') return;
     await runner.query(sqliteMinuteMetricsTable);
     // Earlier PG conversions emitted Date.toISOString(). SQLite compares these columns as text.
     const isoPattern = '????-??-??T??:??:??.???Z';

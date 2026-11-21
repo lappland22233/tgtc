@@ -17,7 +17,7 @@ class SqliteCreateStorageBackends1804000000000 {
         this.name = 'SqliteCreateStorageBackends1804000000000';
     }
     async up(queryRunner) {
-        if (queryRunner.connection.options.type !== 'sqlite')
+        if (queryRunner.dataSource.options.type !== 'better-sqlite3')
             return;
         await queryRunner.query(`
       CREATE TABLE IF NOT EXISTS "storage_backends" (
@@ -52,7 +52,7 @@ class SqliteCreateStorageBackends1804000000000 {
         await queryRunner.query(`CREATE INDEX IF NOT EXISTS "idx_storage_backends_enabled" ON "storage_backends" ("enabled")`);
     }
     async down(queryRunner) {
-        if (queryRunner.connection.options.type !== 'sqlite')
+        if (queryRunner.dataSource.options.type !== 'better-sqlite3')
             return;
         await queryRunner.query(`DROP INDEX IF EXISTS "idx_storage_backends_enabled"`);
         await queryRunner.query(`DROP INDEX IF EXISTS "idx_storage_backends_status"`);

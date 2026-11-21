@@ -54,7 +54,16 @@ export class UserService {
   async findOne(id: string): Promise<Partial<User>> {
     const user = await this.userRepository.findOne({
       where: { id },
-      select: ['id', 'email', 'role', 'isBanned', 'emailVerified', 'lastLoginIP', 'lastLoginAt', 'createdAt'],
+      select: {
+        id: true,
+        email: true,
+        role: true,
+        isBanned: true,
+        emailVerified: true,
+        lastLoginIP: true,
+        lastLoginAt: true,
+        createdAt: true,
+      },
     });
 
     if (!user) {

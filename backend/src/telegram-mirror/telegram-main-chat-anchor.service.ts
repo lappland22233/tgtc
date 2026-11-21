@@ -598,7 +598,7 @@ export class TelegramMainChatAnchorService {
         payload,
       );
     };
-    const existing = await this.repo.findOne({ where, select: ['id'] });
+    const existing = await this.repo.findOne({ where, select: { id: true } });
     if (existing) {
       await write(existing.id);
       return;
@@ -609,7 +609,7 @@ export class TelegramMainChatAnchorService {
       const message = error instanceof Error ? error.message : String(error);
       if (!isUniqueViolation(message)) throw error;
       // 并发插入：锚点已由另一方写入，目标已达成
-      const row = await this.repo.findOne({ where, select: ['id'] });
+      const row = await this.repo.findOne({ where, select: { id: true } });
       if (!row) throw error;
       await write(row.id);
     }

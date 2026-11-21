@@ -22,7 +22,7 @@ import * as path from 'path';
 import sharp from 'sharp';
 import { spawn } from 'child_process';
 import { Readable } from 'stream';
-import { v4 as uuidv4 } from 'uuid';
+import { randomUUID } from 'node:crypto';
 import { File } from '../common/entities/file.entity';
 import { TelegramService } from '../telegram/telegram.service';
 import { TelegramStreamPathError } from '../telegram/telegram.errors';
@@ -242,7 +242,7 @@ export class ThumbnailService {
       return;
     }
 
-    const buildId = uuidv4();
+    const buildId = randomUUID();
     const tmpSource = path.join(this.thumbnailDir, `${file.id}.${buildId}.video.tmp`);
     const tmpCover = path.join(this.thumbnailDir, `${file.id}.${buildId}.cover.tmp.webp`);
     let sourcePath = options.sourcePath && fs.existsSync(options.sourcePath)
@@ -348,7 +348,7 @@ export class ThumbnailService {
     const sourcePath = this.fileCacheService.getCachedPath(file.id);
     if (!sourcePath) return; // 冷资源不生成高清封面（避免整视频回源）
 
-    const buildId = uuidv4();
+    const buildId = randomUUID();
     const tmpCover = path.join(this.thumbnailDir, `${file.id}.${buildId}.hd-cover.tmp.webp`);
     try {
       await this.extractVideoFrame(sourcePath, tmpCover, VIDEO_HD_COVER_MAX_WIDTH, VIDEO_HD_COVER_QUALITY);
@@ -386,7 +386,7 @@ export class ThumbnailService {
     }
 
     // 唯一临时文件 + 原子发布，避免并发任务或异常退出留下半成品。
-    const buildId = uuidv4();
+    const buildId = randomUUID();
     const tmpSource = path.join(this.thumbnailDir, `${file.id}.${buildId}.src.tmp`);
     const tmpThumbnail = path.join(this.thumbnailDir, `${file.id}.${buildId}.webp.tmp`);
     const thumbFilename = `${file.id}.webp`;

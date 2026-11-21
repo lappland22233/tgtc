@@ -205,7 +205,7 @@ export class FileAccessControlService {
   async checkAndIncrementAccess(id: string): Promise<{ allowed: boolean; reason?: string }> {
     const file = await this.fileRepository.findOne({
       where: { id, isDeleted: false },
-      select: ['maxAccessCount', 'currentAccessCount', 'expiresIn', 'expiresStartAt'],
+      select: { maxAccessCount: true, currentAccessCount: true, expiresIn: true, expiresStartAt: true },
     });
 
     if (!file) return { allowed: false, reason: '文件不存在' };
@@ -240,7 +240,7 @@ export class FileAccessControlService {
   async hasPassword(id: string): Promise<boolean> {
     const file = await this.fileRepository.findOne({
       where: { id, isDeleted: false },
-      select: ['password'],
+      select: { password: true },
     });
     return !!(file && file.password);
   }
@@ -248,7 +248,7 @@ export class FileAccessControlService {
   async isPrivateFile(id: string): Promise<boolean> {
     const file = await this.fileRepository.findOne({
       where: { id, isDeleted: false },
-      select: ['accessType'],
+      select: { accessType: true },
     });
     return !!(file && file.accessType === FileAccessType.PRIVATE);
   }

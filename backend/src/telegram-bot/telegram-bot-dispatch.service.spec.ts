@@ -2,6 +2,11 @@ import { Readable } from 'stream';
 import { existsSync } from 'fs';
 import { TelegramBotDispatchService } from './telegram-bot-dispatch.service';
 import type { TelegramUpdate } from '../telegram/telegram.types';
+import type { TelegramBotInboundTask } from '../common/entities/telegram-bot-inbound-task.entity';
+import type { EnqueueInboundTask, InboundNotice, TelegramBotInboundQueueService } from './telegram-bot-inbound-queue.service';
+import type { IssuedGrant } from './telegram-bot-grant.service';
+import type { EntityManager } from 'typeorm';
+import { TelegramAccountError } from '../telegram-account-pool/telegram-account-client.service';
 
 type Counters = {
   selections: number;
@@ -101,6 +106,18 @@ function makeChannelPostUpdate(overrides: {
   }
   return { update_id: 2, channel_post: message } as unknown as TelegramUpdate;
 }
+
+async function waitFor(predicate: () => boolean | Promise<boolean>, timeout = 2_000) {
+  const start = Date.now();
+  while (Date.now() - start < timeout) {
+    if (await predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error('waitFor timeout');
+}
+
+const queueTimers: NodeJS.Timeout[] = [];
+afterEach(() => { queueTimers.splice(0).forEach(clearInterval); });
 
 function makeService(options: {
   pool?: ReturnType<typeof makePool> | null;
@@ -218,7 +235,7 @@ function makeService(options: {
     queryLinks: jest.fn(async () => []),
     revokeByToken: jest.fn(async () => ({ ok: true })),
   };
-  const auditService = { log: jest.fn() };
+  const auditService = { log: jest.fn(), logInTransaction: jest.fn(async () => undefined) };
   const configService = {
     get: jest.fn((key: string) => {
       if (key === 'TELEGRAM_ARCHIVE_CHAT_ID') return options.archiveChatId ?? '';
@@ -227,6 +244,82 @@ function makeService(options: {
     }),
   };
 
+  const tasks: TelegramBotInboundTask[] = [];
+  const queuedGrants = new Map<string, IssuedGrant>();
+  const findByMessage = (botId: string, chatId: string, messageId: string) =>
+    tasks.find((task) => task.receiverBotId === botId && task.chatId === chatId && task.messageId === messageId) ?? null;
+  const inboundQueue = {
+    tasks,
+    findByMessage: jest.fn(async (...args: Parameters<typeof findByMessage>) => findByMessage(...args)),
+    isBanned: jest.fn(async () => false),
+    withUnbannedUser: jest.fn(async (_id: string, action: (manager?: EntityManager) => Promise<unknown>) => action()),
+    enqueue: jest.fn(async (input: EnqueueInboundTask, onQueued?: (manager: EntityManager, task: TelegramBotInboundTask) => Promise<void>) => {
+      const found = findByMessage(input.receiverBotId, input.chatId, input.messageId);
+      if (found) return { status: 'duplicate', task: found, used: found.quotaUsed };
+      const quota = await quotaService.consume();
+      const now = new Date();
+      const task: TelegramBotInboundTask = {
+        ...input, id: String(tasks.length + 1), sequence: tasks.length + 1, status: 'queued',
+        waitingMsgId: null, noticeStatus: null, noticePosition: null, nextNoticeAt: null,
+        noticeLeaseUntil: null, botCooldownUntil: null, availableAt: null, failureReason: null,
+        quotaUsed: quota.used, quotaConsumed: true, leaseToken: null, leaseExpiresAt: null, grantId: null,
+        createdAt: now, updatedAt: now, startedAt: null, finishedAt: null,
+      };
+      await onQueued?.(undefined as unknown as EntityManager, task);
+      tasks.push(task);
+      return { status: 'queued', task, used: quota.used };
+    }),
+    claimNext: jest.fn(async (botId: string) => {
+      if (tasks.some((task) => task.receiverBotId === botId && task.leaseToken)) return null;
+      const head = tasks.find((task) => task.receiverBotId === botId && task.status === 'queued');
+      if (!head || (head.availableAt && head.availableAt > new Date())) return null;
+      Object.assign(head, { status: 'running', leaseToken: 'lease' });
+      return { ...head };
+    }),
+    renew: jest.fn(async (task: TelegramBotInboundTask) =>
+      tasks.some((row) => row.id === task.id && row.status === 'running')),
+    complete: jest.fn(async (task: TelegramBotInboundTask, action: (manager?: EntityManager) => Promise<IssuedGrant>) => {
+      const row = tasks.find((entry) => entry.id === task.id)!;
+      if (row.status !== 'running') return null;
+      const issued = await action();
+      queuedGrants.set(issued.grant.id, issued);
+      Object.assign(row, { status: 'completed', grantId: issued.grant.id, leaseToken: null });
+      return issued;
+    }),
+    fail: jest.fn(async (task: TelegramBotInboundTask, failureReason: string) => {
+      const row = tasks.find((entry) => entry.id === task.id)!;
+      await (quotaService.refund as jest.Mock)(row.telegramUserId, row.usageDate);
+      Object.assign(row, { status: 'failed', failureReason, leaseToken: null });
+    }),
+    release: jest.fn(async (task: TelegramBotInboundTask) => {
+      const row = tasks.find((entry) => entry.id === task.id)!;
+      if (row.status === 'running') row.status = 'queued';
+      row.leaseToken = null;
+    }),
+    retry: jest.fn(async (task: TelegramBotInboundTask, delay: number) => {
+      const row = tasks.find((entry) => entry.id === task.id)!;
+      Object.assign(row, { status: 'queued', leaseToken: null, availableAt: new Date(Date.now() + delay) });
+    }),
+    nextNotice: jest.fn(async (botId: string) => {
+      const rows = tasks.filter((task) => task.receiverBotId === botId);
+      const active = rows.filter((task) => task.status === 'queued' || task.status === 'running');
+      for (const row of rows) {
+        const position = row.status === 'queued' ? active.indexOf(row) + 1 : 0;
+        if (row.status !== row.noticeStatus || position !== row.noticePosition) return { task: { ...row }, position };
+      }
+      return null;
+    }),
+    markNotice: jest.fn(async ({ task, position }: InboundNotice, messageId: number | null) => {
+      const row = tasks.find((entry) => entry.id === task.id)!;
+      Object.assign(row, { noticeStatus: task.status, noticePosition: position, waitingMsgId: messageId });
+    }),
+    deferNotice: jest.fn(async () => {}),
+  };
+  Object.assign(grantService, {
+    findById: jest.fn(async (id: string) => queuedGrants.get(id)?.grant ?? null),
+    tokenForQueuedNotice: jest.fn((grant: IssuedGrant['grant']) => queuedGrants.get(grant.id)?.token ?? null),
+  });
+
   const service = new TelegramBotDispatchService(
     telegramService as never,
     botConfigService as never,
@@ -234,6 +327,7 @@ function makeService(options: {
     grantService as never,
     adminService as never,
     auditService as never,
+    inboundQueue as unknown as TelegramBotInboundQueueService,
     pool as never,
     copies as never,
     (options.accountClient ?? null) as never,
@@ -248,8 +342,15 @@ function makeService(options: {
     (options.transferTracker ?? null) as never,
   );
 
+  if (options.botConfig?.storageMode === 'gdrive') {
+    const runner = service as unknown as { pollQueue(): void; nextNoticeAt: Map<string, number> };
+    jest.spyOn(runner.nextNoticeAt, 'get').mockReturnValue(undefined);
+    queueTimers.push(setInterval(() => runner.pollQueue(), 10).unref());
+  }
+
   return {
     service,
+    inboundQueue,
     counters,
     telegramService,
     botConfigService,
@@ -344,6 +445,7 @@ describe('TelegramBotDispatchService（多 Bot 身份链路）', () => {
     expect(ctx.grantService.issue).toHaveBeenCalledWith(
       expect.objectContaining({ sourceAccountId: '1234567', telegramFileId: 'FILE-1' }),
       4,
+      undefined,
     );
   });
 
@@ -355,6 +457,7 @@ describe('TelegramBotDispatchService（多 Bot 身份链路）', () => {
     expect(ctx.grantService.issue).toHaveBeenCalledWith(
       expect.objectContaining({ sourceAccountId: '9876543' }),
       4,
+      undefined,
     );
   });
 
@@ -665,6 +768,7 @@ describe('TelegramBotDispatchService（多 Bot 身份链路）', () => {
     expect(ctx.grantService.issue).toHaveBeenCalledWith(
       expect.objectContaining({ fileUniqueId: 'UNIQ-1', sourceAccountId: '1234567' }),
       4,
+      undefined,
     );
     // grant 命名空间主副本行：轮次结算的基线（source=inbound，账号为该消息的接收账号）
     expect(copies.upsertReady).toHaveBeenCalledWith(expect.objectContaining({
@@ -750,15 +854,6 @@ describe('TelegramBotDispatchService（多 Bot 身份链路）', () => {
 describe('TelegramBotDispatchService（纯 Google 存储模式）', () => {
   const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-  async function waitFor(predicate: () => boolean | Promise<boolean>, timeout = 2000) {
-    const start = Date.now();
-    while (Date.now() - start < timeout) {
-      if (await predicate()) return;
-      await new Promise((r) => setTimeout(r, 20));
-    }
-    throw new Error('waitFor timeout');
-  }
-
   it('私聊发送文件：先回复等待提示，后台转存 Google 云端硬盘并原地编辑为成功提示（不泄漏存储后端）', async () => {
     const pool = makePool(true);
     const accountClient = {
@@ -783,12 +878,13 @@ describe('TelegramBotDispatchService（纯 Google 存储模式）', () => {
 
     await ctx.service.handleUpdate(makeMessageUpdate(), { accountId: '1234567' });
 
-    // 1. 立即回复等待提示，且绝不泄漏 Google 云端硬盘等后端词汇
+    await waitFor(() => accountClient.sendMessage.mock.calls.length > 0);
+    // 1. 收件完成后通知排队位置
     expect(accountClient.sendMessage).toHaveBeenCalledWith(
       '1234567',
       '1234567:SECRET',
       '7001',
-      '⏳ 正在创建下载链接，请稍候...',
+      expect.stringContaining('已加入队列，当前排第 1 位'),
       { replyToMessageId: 100 },
     );
 
@@ -812,10 +908,12 @@ describe('TelegramBotDispatchService（纯 Google 存储模式）', () => {
         storageObjectRef: 'gdrive-file-id-123',
       }),
       4,
+      undefined,
+      expect.any(String),
     );
 
     // 4. 原地编辑消息为就绪提示，包含有效直链和自动删除提醒，且不展示存储后端
-    await waitFor(() => accountClient.editMessageText.mock.calls.length > 0);
+    await waitFor(() => ctx.inboundQueue.tasks.some((task) => task.noticeStatus === 'completed' || task.noticeStatus === 'failed'));
     expect(accountClient.editMessageText).toHaveBeenCalledWith(
       '1234567',
       '1234567:SECRET',
@@ -823,11 +921,15 @@ describe('TelegramBotDispatchService（纯 Google 存储模式）', () => {
       888,
       expect.stringContaining('文件已就绪！'),
     );
-    const finalContent = (accountClient.editMessageText.mock.calls as any)[0][4] as string;
-    expect(finalContent).toContain('下载直链（4 小时内有效）：');
+    const finalContent = (accountClient.editMessageText.mock.calls as any).at(-1)[4] as string;
+    expect(finalContent).toContain('下载直链（有效期至');
     expect(finalContent).toContain('https://files.example.com/api/bot-dl/TOKEN');
     expect(finalContent).toContain('⚠️ 链接到期后文件将自动失效并删除。');
     expect(finalContent).not.toMatch(/google|gdrive/i);
+    expect(ctx.auditService.logInTransaction.mock.calls).toEqual([
+      [undefined, expect.objectContaining({ action: 'telegram_bot_file_received', resourceId: '1' })],
+      [undefined, expect.objectContaining({ action: 'telegram_bot_link_issued', resourceId: 'grant-1' })],
+    ]);
   });
 
   it('单账号模式下编辑消息失败时自动降级为回复新消息', async () => {
@@ -844,17 +946,19 @@ describe('TelegramBotDispatchService（纯 Google 存储模式）', () => {
       botConfig: { storageMode: 'gdrive' },
     });
     ctx.telegramService.sendMessage.mockResolvedValueOnce({ message_id: 666, chat: { id: 7001 } });
-    ctx.telegramService.editMessageText.mockResolvedValueOnce(false); // 编辑失败降级
+    (ctx.telegramService.editMessageText as jest.Mock).mockImplementation(
+      async (_chat: string, _messageId: number, text: string) => !text.includes('文件已就绪！'),
+    );
 
     await ctx.service.handleUpdate(makeMessageUpdate());
 
     await waitFor(() => storageRouter.upload.mock.calls.length > 0);
-    await waitFor(() => ctx.telegramService.sendMessage.mock.calls.length >= 2);
+    await waitFor(() => ctx.inboundQueue.tasks[0].noticeStatus === 'completed');
 
     expect(ctx.telegramService.sendMessage).toHaveBeenLastCalledWith(
       '7001',
       expect.stringContaining('文件已就绪！'),
-      { replyToMessageId: 100 },
+      { replyToMessageId: 100, deferRateLimit: true },
     );
   });
 
@@ -880,7 +984,7 @@ describe('TelegramBotDispatchService（纯 Google 存储模式）', () => {
 
     await ctx.service.handleUpdate(makeMessageUpdate(), { accountId: '1234567' });
 
-    await waitFor(() => accountClient.editMessageText.mock.calls.length > 0);
+    await waitFor(() => ctx.inboundQueue.tasks.some((task) => task.noticeStatus === 'completed' || task.noticeStatus === 'failed'));
 
     // 配额被归还
     expect(ctx.quotaService.refund).toHaveBeenCalledWith('7001', '2026-09-21');
@@ -920,7 +1024,7 @@ describe('TelegramBotDispatchService（纯 Google 存储模式）', () => {
 
     await ctx.service.handleUpdate(makeMessageUpdate(), { accountId: '1234567' });
 
-    await waitFor(() => storageRouter.deleteRemoteObject.mock.calls.length > 0);
+    await waitFor(() => ctx.service.getActiveTransferCount() === 0 && storageRouter.deleteRemoteObject.mock.calls.length > 0);
 
     // 验证：Saga 补偿已触发删除远端孤儿对象
     expect(storageRouter.deleteRemoteObject).toHaveBeenCalledWith(
@@ -977,7 +1081,7 @@ describe('TelegramBotDispatchService（纯 Google 存储模式）', () => {
     await ctx.service.handleUpdate(makeMessageUpdate(), { accountId: '1234567' });
 
     await waitFor(() => storageRouter.upload.mock.calls.length > 0);
-    await waitFor(() => accountClient.editMessageText.mock.calls.length > 0);
+    await waitFor(() => ctx.inboundQueue.tasks.some((task) => task.noticeStatus === 'completed' || task.noticeStatus === 'failed'));
 
     // 验证：严格上传模式会话已申请并在完成时释放
     expect(uploadDiskBudget.acquireSession).toHaveBeenCalledWith(expect.any(String), expect.any(Number));
@@ -1019,7 +1123,7 @@ describe('TelegramBotDispatchService（纯 Google 存储模式）', () => {
 
     await ctx.service.handleUpdate(makeMessageUpdate(), { accountId: '1234567' });
 
-    await waitFor(() => accountClient.editMessageText.mock.calls.length > 0);
+    await waitFor(() => ctx.inboundQueue.tasks.some((task) => task.noticeStatus === 'completed' || task.noticeStatus === 'failed'));
 
     // 验证：没有调用上传，提示友好错误，配额退还
     expect(storageRouter.upload).not.toHaveBeenCalled();
@@ -1060,7 +1164,7 @@ describe('TelegramBotDispatchService（纯 Google 存储模式）', () => {
 
     await ctx.service.handleUpdate(makeMessageUpdate(), { accountId: '1234567' });
 
-    await waitFor(() => accountClient.editMessageText.mock.calls.length > 0);
+    await waitFor(() => ctx.inboundQueue.tasks.some((task) => task.noticeStatus === 'completed' || task.noticeStatus === 'failed'));
 
     // 验证：绝没有调用 telegramService.getRealtimeFileStream（单账号回源）
     expect(ctx.telegramService.getRealtimeFileStream).not.toHaveBeenCalled();
@@ -1081,7 +1185,7 @@ describe('TelegramBotDispatchService（纯 Google 存储模式）', () => {
     // 模拟域名解析抛出异常
     ctx.botConfigService.resolveSiteOriginAsync.mockRejectedValueOnce(new Error('DNS lookup failure'));
 
-    await ctx.service.handleUpdate(makeMessageUpdate());
+    await expect(ctx.service.handleUpdate(makeMessageUpdate())).rejects.toThrow('Bot 收件队列写入失败');
 
     // 再次发送同一消息：若前一次未释放锁，此处会回复“正在创建链接中”；若已释放，会正常进入流程
     ctx.botConfigService.resolveSiteOriginAsync.mockResolvedValueOnce('https://files.example.com');
@@ -1125,7 +1229,7 @@ describe('TelegramBotDispatchService（纯 Google 存储模式）', () => {
     await ctx.service.handleUpdate(makeMessageUpdate(), { accountId: '1234567' });
 
     await waitFor(() => storageRouter.upload.mock.calls.length > 0);
-    await waitFor(() => accountClient.editMessageText.mock.calls.length > 0);
+    await waitFor(() => ctx.inboundQueue.tasks.some((task) => task.noticeStatus === 'completed' || task.noticeStatus === 'failed'));
 
     // 验证：已注册临时文件租约并在完成后释放
     expect(transferTracker.register).toHaveBeenCalledWith(expect.stringMatching(/bot-transfers.*\.tmp$/));
@@ -1161,23 +1265,17 @@ describe('TelegramBotDispatchService（纯 Google 存储模式）', () => {
 
     // 触发转存
     await ctx.service.handleUpdate(makeMessageUpdate(), { accountId: '1234567' });
-    expect(ctx.service.getActiveTransferCount()).toBe(1);
+    await waitFor(() => ctx.service.getActiveTransferCount() === 1);
 
     // 触发停机排空
-    await ctx.service.onApplicationShutdown();
+    await ctx.service.beforeApplicationShutdown();
 
-    // 验证：后台转存已成功排空，直链正常签发，活跃计数归零
     expect(ctx.service.getActiveTransferCount()).toBe(0);
-    expect(accountClient.editMessageText).toHaveBeenCalledWith(
-      '1234567',
-      '1234567:SECRET',
-      '7001',
-      999,
-      expect.stringContaining('文件已就绪！'),
-    );
+    expect(ctx.inboundQueue.tasks[0].status).toBe('completed');
+    expect(ctx.grantService.issue).toHaveBeenCalledTimes(1);
   });
 
-  it('Finding 12: 停机超时未排空的任务被主动中止并退还配额，提示用户重启', async () => {
+  it('停机超时中止转存并保留队列和配额，供重启恢复', async () => {
     const pool = makePool(true);
     const accountClient = {
       sendMessage: jest.fn(async () => ({ messageId: 999 })),
@@ -1206,21 +1304,14 @@ describe('TelegramBotDispatchService（纯 Google 存储模式）', () => {
     ctx.service.setShutdownDrainTimeoutMs(50);
 
     await ctx.service.handleUpdate(makeMessageUpdate(), { accountId: '1234567' });
-    expect(ctx.service.getActiveTransferCount()).toBe(1);
+    await waitFor(() => ctx.service.getActiveTransferCount() === 1);
 
     // 触发停机
-    await ctx.service.onApplicationShutdown();
+    await ctx.service.beforeApplicationShutdown();
 
-    // 验证：任务已排空，配额已退还，提示用户维护重启
     expect(ctx.service.getActiveTransferCount()).toBe(0);
-    expect(ctx.quotaService.refund).toHaveBeenCalledWith('7001', '2026-09-21');
-    expect(accountClient.editMessageText).toHaveBeenCalledWith(
-      '1234567',
-      '1234567:SECRET',
-      '7001',
-      999,
-      '服务正在维护重启，请稍后重新发送文件。',
-    );
+    expect(ctx.quotaService.refund).not.toHaveBeenCalled();
+    expect(ctx.inboundQueue.tasks[0]).toMatchObject({ status: 'queued', leaseToken: null });
   });
 
   it('Finding 12: 停机过程中到来的新消息被直接拒绝且不扣配额', async () => {
@@ -1228,7 +1319,7 @@ describe('TelegramBotDispatchService（纯 Google 存储模式）', () => {
       botConfig: { storageMode: 'gdrive' },
     });
     // 触发停机
-    await ctx.service.onApplicationShutdown();
+    await ctx.service.beforeApplicationShutdown();
 
     ctx.telegramService.sendMessage.mockClear();
     await ctx.service.handleUpdate(makeMessageUpdate());
@@ -1261,11 +1352,12 @@ describe('TelegramBotDispatchService（纯 Google 存储模式）', () => {
 
     // 第一次收到文件消息：进入转存并发送一次等待提示
     await ctx.service.handleUpdate(makeMessageUpdate({ messageId: 301 }));
+    await waitFor(() => ctx.telegramService.sendMessage.mock.calls.length === 1);
     expect(ctx.telegramService.sendMessage).toHaveBeenCalledTimes(1);
     expect(ctx.telegramService.sendMessage).toHaveBeenCalledWith(
       '7001',
-      '⏳ 正在创建下载链接，请稍候...',
-      { replyToMessageId: 301 },
+      expect.stringContaining('已加入队列，当前排第 1 位'),
+      { replyToMessageId: 301, deferRateLimit: true },
     );
 
     // 同一消息因重试/长轮询重复到达：静默去重，绝不重复发送消息轰炸用户
@@ -1274,7 +1366,7 @@ describe('TelegramBotDispatchService（纯 Google 存储模式）', () => {
 
     // 完成转存
     completeUpload();
-    await waitFor(() => ctx.telegramService.editMessageText.mock.calls.length > 0);
+    await waitFor(() => ctx.inboundQueue.tasks.some((task) => task.noticeStatus === 'completed'));
   });
 
   it('在途转存期间用户发送普通文本或提问，Bot 回复轻量提示且在冷却期内防刷静默，不倾倒 /help 帮助菜单', async () => {
@@ -1299,6 +1391,7 @@ describe('TelegramBotDispatchService（纯 Google 存储模式）', () => {
 
     // 触发转存
     await ctx.service.handleUpdate(makeMessageUpdate({ messageId: 401 }));
+    await waitFor(() => ctx.service.getActiveTransferCount() === 1 && ctx.telegramService.sendMessage.mock.calls.length === 1);
     expect(ctx.telegramService.sendMessage).toHaveBeenCalledTimes(1);
     ctx.telegramService.sendMessage.mockClear();
 
@@ -1333,7 +1426,7 @@ describe('TelegramBotDispatchService（纯 Google 存储模式）', () => {
 
     // 完成转存
     completeUpload();
-    await waitFor(() => ctx.telegramService.editMessageText.mock.calls.length > 0);
+    await waitFor(() => ctx.inboundQueue.tasks.some((task) => task.noticeStatus === 'completed'));
 
     // 转存完成后，在途状态解除，后续普通文本恢复常规帮助提示
     ctx.telegramService.sendMessage.mockClear();
@@ -1481,7 +1574,7 @@ function pendingTransfers() {
     finish: (bot: string) => uploads.get(bot)!.open(),
     drain: async () => {
       for (const upload of uploads.values()) upload.open();
-      await service.onApplicationShutdown();
+      await service.beforeApplicationShutdown();
     },
   };
 }
@@ -1614,44 +1707,36 @@ describe('PR #63 等待提示', () => {
       }), { accountId: id });
     }
     uploads.open();
-    await ctx.service.onApplicationShutdown();
+    await waitFor(() => ctx.inboundQueue.tasks.every((task) => task.status === 'completed'));
+    await ctx.service.beforeApplicationShutdown();
     expect((ctx.grantService.issue as jest.Mock).mock.calls.map(([grant]) => [grant.sourceAccountId, grant.telegramFileId]).sort())
       .toEqual(accounts.map((id) => [id, 'file-' + id]));
   });
 
-  it('停机返回后等待回复才到达，不应再启动已经扣额的转存', async () => {
+  it('Telegram 通知暂未返回时文件仍可持久化和转存，重投不会重复签发', async () => {
     const waitingReply = gate();
-    const enteredReply = gate();
-    const uploads = gate();
-    const storageRouter = {
+    const router = {
       availableBackendTypes: jest.fn(() => ['gdrive']),
-      upload: jest.fn(async () => {
-        await uploads.waiting;
-        return { backendType: 'gdrive', accountId: 'cloud', objectRef: 'test-object' };
-      }),
+      upload: jest.fn(async () => ({ backendType: 'gdrive', accountId: 'cloud', objectRef: 'test-object' })),
     };
-    const ctx = makeService({ storageRouter, botConfig: { storageMode: 'gdrive' } });
+    const ctx = makeService({ storageRouter: router, botConfig: { storageMode: 'gdrive' } });
     ctx.telegramService.sendMessage.mockImplementationOnce(async () => {
-      enteredReply.open();
       await waitingReply.waiting;
       return { message_id: 99, chat: { id: 7001 } };
     });
-    const handled = ctx.service.handleUpdate(makeMessageUpdate({ messageId: 555 }));
-    await enteredReply.waiting;
-    let shutdownReturned = false;
-    const shutdown = ctx.service.onApplicationShutdown().then(() => { shutdownReturned = true; });
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    const shutdownReturnedBeforeReply = shutdownReturned;
-    waitingReply.open();
-    await handled;
-    const activeAfterReply = ctx.service.getActiveTransferCount();
-    uploads.open();
-    await shutdown;
-    await ctx.service.onApplicationShutdown();
-    expect(ctx.quotaService.consume).toHaveBeenCalledTimes(1);
-    expect(shutdownReturnedBeforeReply ? activeAfterReply : 0).toBe(0);
-    expect(ctx.grantService.issue.mock.calls.length + ctx.quotaService.refund.mock.calls.length).toBe(1);
+    const update = makeMessageUpdate({ messageId: 555 });
+    await ctx.service.handleUpdate(update);
+    try {
+      await waitFor(() => ctx.inboundQueue.tasks[0]?.status === 'completed');
+      await ctx.service.handleUpdate(update);
+      expect(ctx.grantService.issue).toHaveBeenCalledTimes(1);
+      expect(ctx.inboundQueue.tasks).toHaveLength(1);
+    } finally {
+      waitingReply.open();
+      await ctx.service.beforeApplicationShutdown();
+    }
   });
+
 });
 
 describe('Bot 磁盘预算与停机补偿', () => {
@@ -1675,7 +1760,8 @@ describe('Bot 磁盘预算与停机补偿', () => {
     await ctx.service.handleUpdate(makeMessageUpdate({
       document: { file_id: 'unknown-length', file_name: 'unknown' },
     }));
-    await ctx.service.onApplicationShutdown();
+    await waitFor(() => funds.reserve.mock.calls.length > 0);
+    await ctx.service.beforeApplicationShutdown();
     expect(funds.reserve).toHaveBeenCalledWith(expect.objectContaining({ bytes: 50 * 1024 * 1024 }));
     expect(funds.extendDiskReservation).toHaveBeenCalledWith(reservation, 20);
     expect(reservation.consume).not.toHaveBeenCalled();
@@ -1686,27 +1772,68 @@ describe('Bot 磁盘预算与停机补偿', () => {
     expect(ctx.quotaService.refund).toHaveBeenCalledTimes(storageMode === 'gdrive' ? 1 : 0);
   });
 
-  it('等待回复一直未返回时，排空超时会退款并阻止将来启动上传', async () => {
-    const entered = gate();
-    const releaseReply = gate();
-    const router = { availableBackendTypes: jest.fn(() => ['gdrive']), upload: jest.fn() };
+  it('正在转存的任务被取消后，不签发链接并清理已上传对象', async () => {
+    const upload = gate();
+    const router = {
+      availableBackendTypes: jest.fn(() => ['gdrive']),
+      upload: jest.fn(async () => {
+        await upload.waiting;
+        return { backendType: 'gdrive', accountId: 'cloud', objectRef: 'cancelled-object' };
+      }),
+      deleteRemoteObject: jest.fn(async () => true),
+    };
     const ctx = makeService({ storageRouter: router, botConfig: { storageMode: 'gdrive' } });
-    ctx.service.setShutdownDrainTimeoutMs(5);
-    ctx.telegramService.sendMessage.mockImplementationOnce(async () => {
-      entered.open();
-      await releaseReply.waiting;
-      return { message_id: 5, chat: { id: 7001 } };
-    });
-    const accepted = ctx.service.handleUpdate(makeMessageUpdate());
+    await ctx.service.handleUpdate(makeMessageUpdate());
     try {
-      await entered.waiting;
-      await ctx.service.onApplicationShutdown();
-      expect(ctx.service.getActiveTransferCount()).toBe(0);
-      expect(ctx.quotaService.refund).toHaveBeenCalledTimes(1);
+      await waitFor(() => router.upload.mock.calls.length === 1);
+      ctx.inboundQueue.tasks[0].status = 'cancelled';
+      upload.open();
+      await waitFor(() => ctx.inboundQueue.tasks[0].noticeStatus === 'cancelled' && !ctx.inboundQueue.tasks[0].leaseToken);
+      expect(ctx.grantService.issue).not.toHaveBeenCalled();
+      expect(router.deleteRemoteObject).toHaveBeenCalledWith('gdrive', 'cloud', 'cancelled-object');
+      expect(ctx.quotaService.refund).not.toHaveBeenCalled();
     } finally {
-      releaseReply.open();
-      await accepted;
+      upload.open();
+      await ctx.service.beforeApplicationShutdown();
     }
-    expect(router.upload).not.toHaveBeenCalled();
   });
+
+  it('同一 Bot 串行且尊重 Telegram 429，首个文件保持队首', async () => {
+    const firstUpload = gate();
+    const router = {
+      availableBackendTypes: jest.fn(() => ['gdrive']),
+      upload: jest.fn(async ({ objectName }: { objectName: string }) => {
+        if (objectName === 'first') await firstUpload.waiting;
+        return { backendType: 'gdrive', accountId: 'cloud', objectRef: objectName };
+      }),
+    };
+    const ctx = makeService({ storageRouter: router, botConfig: { storageMode: 'gdrive' } });
+    ctx.telegramService.getRealtimeFileStream.mockRejectedValueOnce(
+      new TelegramAccountError('rate limited', botA, 'flood', 429, 1),
+    );
+    const file = (messageId: number, name: string) => makeMessageUpdate({
+      messageId, document: { file_id: name, file_name: name, file_size: 21 },
+    });
+    await ctx.service.handleUpdate(file(100, 'first'));
+    await ctx.service.handleUpdate(file(101, 'second'));
+    try {
+      await waitFor(() => ctx.inboundQueue.retry.mock.calls.length === 1);
+      expect(ctx.inboundQueue.retry).toHaveBeenCalledWith(expect.objectContaining({ messageId: '100' }), 1_000);
+      expect(router.upload).not.toHaveBeenCalled();
+      await waitFor(() => router.upload.mock.calls.length === 1);
+      expect(router.upload.mock.calls[0][0].objectName).toBe('first');
+      expect(ctx.inboundQueue.tasks.map((task) => task.status)).toEqual(['running', 'queued']);
+      await waitFor(() => ctx.inboundQueue.tasks[1].noticePosition === 2);
+      expect(ctx.telegramService.sendMessage).toHaveBeenCalledWith(
+        '7001', expect.stringContaining('当前排第 2 位'), { replyToMessageId: 101, deferRateLimit: true },
+      );
+      firstUpload.open();
+      await waitFor(() => ctx.inboundQueue.tasks.every((task) => task.status === 'completed'));
+      expect(router.upload.mock.calls.map(([input]) => input.objectName)).toEqual(['first', 'second']);
+    } finally {
+      firstUpload.open();
+      await ctx.service.beforeApplicationShutdown();
+    }
+  });
+
 });

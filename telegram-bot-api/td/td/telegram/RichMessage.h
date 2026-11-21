@@ -27,6 +27,7 @@ namespace td {
 
 class Dependencies;
 class MessageContent;
+class RichText;
 class Td;
 
 class RichMessage {
@@ -60,9 +61,6 @@ class RichMessage {
   static Result<RichMessage> get_rich_message(Td *td, DialogId dialog_id,
                                               td_api::object_ptr<td_api::inputRichMessage> &&message, bool is_bot);
 
-  static Result<RichMessage> get_rich_message(Td *td, DialogId dialog_id,
-                                              td_api::object_ptr<td_api::richMessage> &&message, bool is_bot);
-
   bool is_full() const {
     return is_full_;
   }
@@ -77,6 +75,8 @@ class RichMessage {
 
   void for_each_text(const std::function<void(Slice text)> &callback) const;
 
+  void for_each_quote_text(const std::function<void(const RichText &text)> &callback) const;
+
   vector<UserId> get_user_ids() const;
 
   bool has_bot_commands() const;
@@ -87,6 +87,8 @@ class RichMessage {
 
   bool can_send(const RestrictedRights &rights) const;
 
+  bool need_reget() const;
+
   int32 get_index_mask() const;
 
   telegram_api::object_ptr<telegram_api::InputRichMessage> get_input_rich_message(
@@ -95,7 +97,7 @@ class RichMessage {
 
   td_api::object_ptr<td_api::richMessage> get_rich_message_object(Td *td, bool skip_bot_commands) const;
 
-  RichMessage clone(Td *td, DialogId dialog_id, const MessageContentDupType &type) const;
+  RichMessage clone(Td *td, DialogId dialog_id, const MessageContentDupType &type, bool is_via_bot) const;
 
   vector<unique_ptr<MessageContent>> get_individual_message_contents(Td *td) const;
 

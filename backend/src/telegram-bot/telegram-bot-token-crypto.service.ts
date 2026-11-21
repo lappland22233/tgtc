@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { createCipheriv, createDecipheriv, randomBytes } from 'crypto';
+import { createCipheriv, createDecipheriv, createHmac, randomBytes } from 'crypto';
 
 const CIPHER_VERSION = 'v1';
 const ALGORITHM = 'aes-256-gcm';
@@ -39,6 +39,12 @@ export class TelegramBotTokenCryptoService {
   /** 当前是否可加密保存（决定 /link_query 是否可回放完整链接） */
   isAvailable(): boolean {
     return this.available;
+  }
+
+  /** 无专用加密密钥时，仅供队列恢复尚未送出的首次通知。 */
+  deriveQueuedToken(taskId: string): string {
+    const key = this.configService.getOrThrow<string>('JWT_SECRET');
+    return createHmac('sha256', key).update(`tgtc:telegram-bot-queued-token:${taskId}`).digest('base64url');
   }
 
   private parseRootKey(raw: string | undefined): Buffer | null {

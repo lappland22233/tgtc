@@ -14,13 +14,15 @@
 
 **软件要求**：
 
-- Node.js 22。开发、CI 和生产均使用仓库根目录 `.node-version` 指定的补丁版本。
-- npm（项目未使用 yarn 或 pnpm）
-- PostgreSQL 14+（默认，推荐用于较高写并发），或 SQLite 3（仅单实例/低写并发，必须设置 `DB_TYPE=sqlite`）
-- Redis（两种数据库模式均必需，Bull 队列不由 SQLite 替代）
+- Node.js 26 LTS。开发、CI 和生产使用仓库根目录 `.node-version` 指定的 26.13.1。
+- npm 12.2.3。安装 Node.js 后，在所选 Node 环境中运行 `npm install --global npm@12.2.3`。
+- PostgreSQL（默认，CI 使用 19.0），或 SQLite 3（单实例，须设置 `DB_TYPE=sqlite`）
+- Redis（两种数据库模式均需要，CI 使用 8.10.3）
 - Telegram Bot Token 与用于存储文件的 Chat ID（两种数据库模式均必需，SQLite 只保存元数据）
 - 可选：SMTP 服务
 - 可选：自建或本项目二次开发的 `telegram-bot-api`
+
+没有 `better-sqlite3` 预编译二进制的平台需要安装 Python 3、make 和 C/C++ 编译器，以便 `npm ci` 构建驱动。
 
 
 ## 快速开始
@@ -29,12 +31,17 @@
 
 ```sql
 CREATE DATABASE file_distribution;
+\connect file_distribution
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 ```
 
-迁移会尝试创建 `uuid-ossp`。如果数据库账号没有创建扩展的权限，请先使用 PostgreSQL 超级用户执行第二条语句。
+上述命令在 `psql` 中运行。迁移会尝试创建 `uuid-ossp`。如果运行账号没有创建扩展的权限，请在应用数据库中用有权限的账号预先创建扩展。
 
-SQLite 无需创建数据库服务，但不会被默认启用。SQLite 单机首次部署示例：
+PostgreSQL 跨主版本升级时使用 `pg_upgrade`，或先用适配新服务器的客户端导出再恢复到新建数据库。[PostgreSQL 升级说明](https://www.postgresql.org/support/versioning/#upgrading)
+
+给 PostgreSQL 19 实例运行备份和恢复前，确认 `pg_dump --version` 和 `pg_restore --version` 均为 19.x。备份脚本通过 `PATH` 查找这些工具。
+
+SQLite 由应用内的驱动读取数据文件。更换驱动后的第一次启动可以沿用原 `DB_TYPE=sqlite` 和数据文件路径。SQLite 单机首次部署示例：
 
 ```env
 DB_TYPE=sqlite
@@ -50,7 +57,7 @@ DB_MIGRATIONS_RUN=false
 ```bash
 cd backend
 cp .env.example .env
-npm install
+npm ci
 npm run migration:run
 npm run start:dev
 ```
@@ -72,7 +79,7 @@ npm run start:dev
 
 ```bash
 cd frontend
-npm install
+npm ci
 npm run dev
 ```
 
@@ -95,16 +102,21 @@ VITE_API_PROXY_TARGET=http://localhost:3000
 SOURCE=/srv/tgtc-2.0.1
 cd "$SOURCE"
 test "$(node --version)" = "v$(cat .node-version)"
+test "$(npm --version)" = "12.2.3"
 bash scripts/release/check-version.sh
 (cd frontend && npm ci --include=dev && npm run build)
 (cd backend && npm ci --include=dev && npm run build && npm run build:data-migrator)
 ```
 
-使用自建 Bot API 的实例还需构建本仓库的 C++ 服务。安装 CMake、C++ 编译器、gperf、OpenSSL 和 zlib 开发文件后运行：
+使用自建 Bot API 的实例还需构建本仓库的 C++ 服务。以下 Linux x86_64 示例与 CI 使用相同的 CMake 4.5.1、OpenSSL 4.1.0 和 zlib 1.4。安装 C/C++ 编译器、make、gperf、Perl、curl、pkg-config 和系统 CA 证书后运行。依赖会构建到独立目录，二进制运行时须保留该目录。[原生构建依赖脚本](../scripts/setup-bot-api-build-deps.sh)
 
 ```bash
-cmake -S "$SOURCE/telegram-bot-api" -B "$SOURCE/telegram-bot-api/build" -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
-cmake --build "$SOURCE/telegram-bot-api/build" --target telegram-bot-api --parallel 1
+NATIVE_DEPS="$SOURCE/telegram-bot-api/build/native-deps"
+bash "$SOURCE/scripts/setup-bot-api-build-deps.sh" "$NATIVE_DEPS"
+"$NATIVE_DEPS/cmake/bin/cmake" -S "$SOURCE/telegram-bot-api" -B "$SOURCE/telegram-bot-api/build" \
+  -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
+  -DOPENSSL_ROOT_DIR="$NATIVE_DEPS/libs" -DZLIB_ROOT="$NATIVE_DEPS/libs"
+"$NATIVE_DEPS/cmake/bin/cmake" --build "$SOURCE/telegram-bot-api/build" --target telegram-bot-api --parallel 1
 ```
 
 后端服务工作目录决定相对 SQLite 路径和 `tmp/` 的位置。首次部署可将 `backend/.env.example` 复制到工作目录的 `.env` 后填写。设置 `NODE_ENV=production`、`DB_SYNCHRONIZE=false`，用下面的命令手工迁移时可设置 `DB_MIGRATIONS_RUN=false`。从既有实例升级时应保留原配置与工作目录。
@@ -135,7 +147,7 @@ DOTENV_CONFIG_PATH="$APP_ENV" "$NODE" -r "$SOURCE/backend/node_modules/dotenv/co
    ```
 
 4. 在同一停写窗口内，按上节命令对实际数据库运行新源码迁移。旧 `/opt` 实例通常使用 `APP_WORKDIR=/opt/tgtc/runtime/backend`，并保留其中的 `.env` 与 SQLite 文件。先确认迁移命令成功，再调整服务。
-5. 对旧预编译部署用 `systemctl edit tgtc.service` 指向源码的后端入口，保留原运行账号和工作路径。示例中的 Node 路径须以现场实际安装的 22.x 路径替换。
+5. 对旧预编译部署用 `systemctl edit tgtc.service` 指向源码的后端入口，保留原运行账号和工作路径。示例中的 Node 路径须指向已安装的 Node.js 26。
 
    ```ini
    [Service]

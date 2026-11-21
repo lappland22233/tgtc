@@ -33,6 +33,8 @@ vi.mock('@/utils/message', () => ({ default: { success: vi.fn(), error: vi.fn(),
 describe('Google OAuth popup exchange', () => {
   it.each(['manual', 'automatic'])('uses the server-issued state once on the %s path', async mode => {
     vi.clearAllMocks();
+    const consentUrl = 'https://accounts.google.com/o/oauth2/v2/auth?scope=openid+https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fdrive.file&state=issued-state';
+    api.fetchGDriveAuthUrl.mockResolvedValueOnce({ url: consentUrl, state: 'issued-state' });
     vi.useFakeTimers({toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval']});
     const opener = Object.getOwnPropertyDescriptor(window, 'opener');
     const originalPath = location.href;
@@ -61,16 +63,18 @@ describe('Google OAuth popup exchange', () => {
         wizard.openAuthUrl();
       }
       const redirectUri = location.origin + '/admin/storage-backends/gdrive-callback';
+      expect(openSpy.mock.lastCall?.[0]).toBe(consentUrl);
       expect(wizard.currentNonce).toBe('issued-state');
       expect(api.fetchGDriveAuthUrl).toHaveBeenCalledWith(redirectUri, undefined);
       window.dispatchEvent(new MessageEvent('message', {
         origin: location.origin, data: {type: 'TGTC_GDRIVE_OAUTH_RESULT', status: 'success', code: 'other', state: 'other'},
       }));
       expect(api.completeGDriveAuth).not.toHaveBeenCalled();
-      history.replaceState({}, '', redirectUri + '?code=local-code&state=issued-state');
+      history.replaceState({}, '', redirectUri + '?code=local-code&state=issued-state&scope=openid%20email');
       callback = shallowMount(GDriveOAuthCallback);
       await flushPromises();
       expect(api.completeGDriveAuth).toHaveBeenCalledTimes(1);
+      expect(api.completeGDriveAuth.mock.calls[0][0]).not.toHaveProperty('scope');
       expect(api.completeGDriveAuth).toHaveBeenCalledWith(expect.objectContaining({
         code: 'local-code', state: 'issued-state', redirectUri,
       }));
@@ -95,6 +99,93 @@ describe('storage administration contracts', () => {
     const wrapper = shallowMount(StorageBackends);
     return { wrapper, ui: (wrapper.vm as any).$.setupState };
   }
+
+  const drive = { id: 'drive', type: 'gdrive', name: 'Drive', status: 'active', enabled: true };
+  const oldDrive = { ...drive, id: 'old-drive', name: 'Old Drive', status: 'revoked', enabled: false };
+  const oldDav = { ...oldDrive, id: 'old-dav', type: 'webdav' };
+  const paused = { ...drive, id: 'paused', type: 's3', enabled: false };
+  const snapshot = (accounts: typeof drive[]) => ({
+    accounts, scheduler: [], driverTypes: [], defaultBackend: 'telegram', gdriveOAuthConfigured: true,
+  });
+
+  it('combines the revoked toggle with the type filter, preserves reauthorization, and updates counts on refresh', async () => {
+    api.fetchStorageOverview.mockResolvedValueOnce(snapshot([drive, oldDrive, oldDav, paused]));
+    const wrapper = shallowMount(StorageBackends, { global: { stubs: {
+      TCheckbox: {
+        props: ['modelValue'],
+        template: `<label>
+          <input type="checkbox" :checked="modelValue" @change="$emit('update:modelValue', $event.target.checked)">
+          <slot />
+        </label>`,
+      },
+      TSelect: {
+        props: ['modelValue', 'options'],
+        template: `<select :value="modelValue" @change="$emit('update:modelValue', $event.target.value)">
+          <option value="">全部</option>
+          <option v-for="option in options" :key="option.value" :value="option.value">{{ option.label }}</option>
+        </select>`,
+      },
+      TPrimaryTable: {
+        props: ['data'],
+        template: `<div>
+          <div v-for="row in data" :key="row.id" :data-account="row.id"><slot name="operation" :row="row"/></div>
+        </div>`,
+      },
+      TButton: { template: '<button><slot /></button>' },
+    } } });
+    try {
+      await flushPromises();
+      const list = wrapper.get('section[aria-label="存储账号列表"]');
+      const toggle = list.get('input[type="checkbox"]');
+      const ids = () => list.findAll('[data-account]').map(row => row.attributes('data-account'));
+      expect(ids()).toEqual(['drive', 'paused']);
+      expect(list.get('label').text()).toBe('显示已撤销账号（2）');
+      await toggle.setValue(true);
+      expect(ids()).toEqual(['drive', 'old-drive', 'old-dav', 'paused']);
+      await list.get('select').setValue('gdrive');
+      expect(ids()).toEqual(['drive', 'old-drive']);
+      expect(list.get('label').text()).toBe('显示已撤销账号（1）');
+      const reauthorize = list.get('[data-account="old-drive"]').findAll('button').find(button => button.text() === '重新授权')!;
+      await reauthorize.trigger('click');
+      expect((wrapper.vm as any).$.setupState.rotateTarget.id).toBe('old-drive');
+      await toggle.setValue(false);
+      expect(ids()).toEqual(['drive']);
+      api.fetchStorageOverview.mockResolvedValueOnce(snapshot([oldDrive, oldDav, paused]));
+      await list.findAll('button').find(button => button.text() === '刷新')!.trigger('click');
+      await flushPromises();
+      expect(ids()).toEqual([]);
+      await list.get('select').setValue('');
+      expect(ids()).toEqual(['paused']);
+      expect(list.get('label').text()).toBe('显示已撤销账号（2）');
+    } finally { wrapper.unmount(); }
+  });
+
+  it('hides a confirmed revocation while the overview reloads and ignores stale refresh results', async () => {
+    api.fetchStorageOverview.mockResolvedValueOnce(snapshot([{ ...drive }]));
+    const { wrapper, ui } = mountAdmin();
+    try {
+      await flushPromises();
+      let finishOld!: (value: ReturnType<typeof snapshot>) => void;
+      api.fetchStorageOverview.mockImplementationOnce(() => new Promise(resolve => { finishOld = resolve; }));
+      const staleRefresh = ui.loadOverview();
+      let finishFresh!: (value: ReturnType<typeof snapshot>) => void;
+      api.fetchStorageOverview.mockImplementationOnce(() => new Promise(resolve => { finishFresh = resolve; }));
+      const revoked = { ...drive, status: 'revoked', enabled: false };
+      api.revokeStorageBackend.mockResolvedValueOnce({ message: 'revoked', account: revoked });
+      ui.revokeAccount(ui.filteredAccounts[0]);
+      const confirmed = confirmDialog.mock.lastCall![0].onConfirm();
+      await flushPromises();
+      expect(ui.filteredAccounts).toEqual([]);
+      expect(ui.revokedAccountCount).toBe(1);
+      finishOld(snapshot([{ ...drive }]));
+      await staleRefresh;
+      expect(ui.filteredAccounts).toEqual([]);
+      finishFresh(snapshot([revoked]));
+      await confirmed;
+      ui.showRevoked = true;
+      expect(ui.filteredAccounts).toEqual([revoked]);
+    } finally { wrapper.unmount(); }
+  });
 
   it('keeps a stored client secret on metadata edits and preserves the form when a dependency prevents clearing', async () => {
     const { wrapper, ui } = mountAdmin();
@@ -149,6 +240,33 @@ describe('storage administration contracts', () => {
         accountId: account.id, name: account.name, redirectUri: redirect, code: 'match', state: 'issued-state',
       });
       expect(api.rotateStorageCredential).not.toHaveBeenCalled();
+    } finally { wrapper.unmount(); }
+  });
+
+  it('shows the server permission error and retries a rejected Drive grant with fresh state', async () => {
+    const { wrapper, ui } = mountAdmin();
+    const message = 'Google 未授予云端硬盘文件访问权限，请重新授权并勾选文件权限。';
+    try {
+      await ui.openGDriveWizard();
+      await ui.buildManualAuthUrl();
+      const redirectUri = ui.gdrive.redirectUri;
+      api.completeGDriveAuth.mockRejectedValueOnce({ response: { status: 400, data: { message } } });
+      ui.gdrive.code = redirectUri + '?code=first&state=issued-state&scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fdrive.file';
+      await ui.completeAuth();
+      expect(MessagePlugin.error).toHaveBeenCalledWith(message);
+      expect(ui.gdriveVisible).toBe(true);
+      expect(ui.currentNonce).toBe('');
+      expect(ui.gdrive.code).toBe('');
+      expect(ui.gdrive.authUrl).toBe('');
+      expect(api.completeGDriveAuth.mock.calls[0][0]).not.toHaveProperty('scope');
+
+      api.fetchGDriveAuthUrl.mockResolvedValueOnce({ url: 'https://example.invalid/retry', state: 'retry-state' });
+      await ui.buildManualAuthUrl();
+      ui.gdrive.code = redirectUri + '?state=retry-state&code=second';
+      await ui.completeAuth();
+      expect(api.completeGDriveAuth).toHaveBeenCalledTimes(2);
+      expect(api.completeGDriveAuth).toHaveBeenLastCalledWith(expect.objectContaining({ state: 'retry-state', code: 'second' }));
+      expect(ui.gdriveVisible).toBe(false);
     } finally { wrapper.unmount(); }
   });
 

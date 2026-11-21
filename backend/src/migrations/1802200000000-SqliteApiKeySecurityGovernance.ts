@@ -10,7 +10,7 @@ export class SqliteApiKeySecurityGovernance1802200000000 implements MigrationInt
   name = 'SqliteApiKeySecurityGovernance1802200000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'sqlite') return;
+    if (queryRunner.dataSource.options.type !== 'better-sqlite3') return;
 
     // 存量库基线已执行不会重跑，必须在此补齐两张治理表（对全新库幂等）。
     await queryRunner.query(`
@@ -62,7 +62,7 @@ export class SqliteApiKeySecurityGovernance1802200000000 implements MigrationInt
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'sqlite') return;
+    if (queryRunner.dataSource.options.type !== 'better-sqlite3') return;
     // SQLite 不支持 DROP COLUMN（旧版）；保留列即可，无数据风险。
   }
 }

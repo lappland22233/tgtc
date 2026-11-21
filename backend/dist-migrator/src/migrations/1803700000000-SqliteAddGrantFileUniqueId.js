@@ -20,7 +20,7 @@ class SqliteAddGrantFileUniqueId1803700000000 {
         this.name = 'SqliteAddGrantFileUniqueId1803700000000';
     }
     async up(queryRunner) {
-        if (queryRunner.connection.options.type !== 'sqlite')
+        if (queryRunner.dataSource.options.type !== 'better-sqlite3')
             return;
         const table = await queryRunner.getTable('telegram_bot_file_grants');
         if (!table)
@@ -32,7 +32,7 @@ class SqliteAddGrantFileUniqueId1803700000000 {
             + ` ON "telegram_bot_file_grants" ("fileUniqueId")`);
     }
     async down(queryRunner) {
-        if (queryRunner.connection.options.type !== 'sqlite')
+        if (queryRunner.dataSource.options.type !== 'better-sqlite3')
             return;
         // SQLite 旧版本不支持 DROP COLUMN；保留可空列无数据风险，与既有迁移（180320）保持一致。
         await queryRunner.query(`DROP INDEX IF EXISTS "idx_tg_bot_grants_fileUniqueId"`);

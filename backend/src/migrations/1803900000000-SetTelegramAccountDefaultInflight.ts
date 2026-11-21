@@ -8,7 +8,7 @@ export class SetTelegramAccountDefaultInflight1803900000000 implements Migration
   name = 'SetTelegramAccountDefaultInflight1803900000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'postgres') return;
+    if (queryRunner.dataSource.options.type !== 'postgres') return;
     await queryRunner.query(`
       ALTER TABLE "telegram_accounts"
       ALTER COLUMN "maxInflight" SET DEFAULT 16
@@ -16,7 +16,7 @@ export class SetTelegramAccountDefaultInflight1803900000000 implements Migration
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'postgres') return;
+    if (queryRunner.dataSource.options.type !== 'postgres') return;
     await queryRunner.query(`
       ALTER TABLE "telegram_accounts"
       ALTER COLUMN "maxInflight" SET DEFAULT 8

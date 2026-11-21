@@ -36,7 +36,7 @@ export function createDatabaseOptions(env: NodeJS.ProcessEnv = process.env): Dat
 
   if (type === 'sqlite') {
     return {
-      type: 'sqlite',
+      type: 'better-sqlite3',
       database: env.DB_DATABASE || 'data/tgtc.sqlite',
       entities: [...databaseEntities],
       subscribers: [UuidSubscriber],
@@ -44,7 +44,7 @@ export function createDatabaseOptions(env: NodeJS.ProcessEnv = process.env): Dat
       synchronize: false,
       migrationsRun: env.DB_MIGRATIONS_RUN === 'true',
       logging: env.NODE_ENV === 'development',
-      busyTimeout: positiveInt(env, 'DB_SQLITE_BUSY_TIMEOUT_MS', 5000),
+      timeout: positiveInt(env, 'DB_SQLITE_BUSY_TIMEOUT_MS', 5000),
     };
   }
 

@@ -32,13 +32,14 @@ export interface ImageViewerOptions {
    * 用于让在途的尺寸探测与降采样任务失效，避免旧结果覆盖新图片。
    */
   epoch: Ref<number>;
+  imageStageRef?: Ref<HTMLElement | null>;
 }
 
 export function useImageViewer(options: ImageViewerOptions) {
   const { epoch } = options;
 
   /** 图片舞台元素（模板 ref） */
-  const imageStageRef = ref<HTMLElement | null>(null);
+  const imageStageRef = options.imageStageRef ?? ref<HTMLElement | null>(null);
   const imageScale = ref(1);
   const imageRotation = ref(0);
   /** 视图模式：contain = 适应窗口；manual = 手动缩放（含 100% 实际尺寸） */

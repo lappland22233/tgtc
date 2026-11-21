@@ -395,7 +395,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, watch, nextTick, computed, onMounted, onBeforeUnmount } from 'vue';
+import { useTemplateRef, ref, reactive, watch, nextTick, computed, onMounted, onBeforeUnmount } from 'vue';
 import type { PreviewKind } from '../../utils/preview';
 import {
   buildFileMediaTicketUrl,
@@ -754,10 +754,10 @@ function classifyMediaErrorCode(code?: number): string {
 // ============ 图片查看器（缩放 / 旋转 / 适应 / 拖拽） ============
 // M6 拆分：状态、异步探测/降采样与全部交互已下沉到 composables/useImageViewer.ts。
 // 此处仅保留绑定（模板 ref / 计算属性）与键盘快捷键转发；行为与拆分前一致。
+const imageStageRef = useTemplateRef<HTMLElement>('imageStageRef');
 const {
   IMAGE_SCALE_MIN,
   IMAGE_SCALE_MAX,
-  imageStageRef,
   imageScale,
   imageStyle,
   imageScaleText,
@@ -776,7 +776,7 @@ const {
   onImagePointerDown,
   onImagePointerMove,
   onImagePointerUp,
-} = useImageViewer({ epoch: sessionEpoch });
+} = useImageViewer({ epoch: sessionEpoch, imageStageRef });
 
 /* 图片视图的计算属性（适配比例 / 当前缩放 / transform / 文案）已随 useImageViewer 下沉 */
 

@@ -12,7 +12,7 @@ class SqliteCreateUpdateTasks1798400000000 {
         this.name = 'SqliteCreateUpdateTasks1798400000000';
     }
     async up(queryRunner) {
-        if (queryRunner.connection.options.type !== 'sqlite')
+        if (queryRunner.dataSource.options.type !== 'better-sqlite3')
             return;
         await queryRunner.query(`
       CREATE TABLE IF NOT EXISTS "update_tasks" (

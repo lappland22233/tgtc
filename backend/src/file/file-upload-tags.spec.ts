@@ -165,7 +165,7 @@ describe('FileService 上传标签事务（M2/N1）', () => {
   /**
    * PERF-B-101：removeFileTag 的删除命中判定必须兼容双方言真实返回形状——
    * PG：DELETE ... RETURNING 经 TypeORM 返回 [rows, count] 元组，databaseQuery 归一化后按行数判定；
-   * SQLite：RETURNING 走 sqliteAll() 返回行数组。旧写法 `result[1] === 0` 在 SQLite 下
+   * SQLite：RETURNING 走 驱动返回行数组。旧写法 `result[1] === 0` 在 SQLite 下
    * （result[1] 恒为 undefined）判定恒假 → 「标签关联不存在」永不抛出（假成功）。
    */
   describe('removeFileTag 删除命中判定（PERF-B-101）', () => {
@@ -204,31 +204,22 @@ describe('FileService 上传标签事务（M2/N1）', () => {
       expect(auditServiceMock.log).not.toHaveBeenCalled();
     });
 
-    it('SQLite 命中：RETURNING 经 sqliteAll 返回行数组 → 判定成功', async () => {
+    it('SQLite 命中：RETURNING 经驱动 返回行数组 → 判定成功', async () => {
       process.env.DB_TYPE = 'sqlite';
-      const all = jest.fn(
-        (_sql: string, _params: unknown[], callback: (error: Error | null, rows: unknown[]) => void) =>
-          callback(null, [{ tagId: validTagId }]),
-      );
-      fileRepo.manager.connection = { driver: { databaseConnection: { all } } };
+      fileRepo.manager.query.mockResolvedValue([{ tagId: validTagId }]);
 
       await expect(service.removeFileTag(createdFileId, owner, validTagId)).resolves.toBeUndefined();
 
-      expect(all).toHaveBeenCalledWith(
+      expect(fileRepo.manager.query).toHaveBeenCalledWith(
         expect.stringMatching(/DELETE FROM file_tags[\s\S]*RETURNING "tagId"/),
         [createdFileId, validTagId],
-        expect.any(Function),
       );
       expect(auditServiceMock.log).toHaveBeenCalledTimes(1);
     });
 
     it('SQLite 未命中：空行数组 [] → 抛 NotFound（旧写法 result[1] 恒 undefined 会假成功）', async () => {
       process.env.DB_TYPE = 'sqlite';
-      const all = jest.fn(
-        (_sql: string, _params: unknown[], callback: (error: Error | null, rows: unknown[]) => void) =>
-          callback(null, []),
-      );
-      fileRepo.manager.connection = { driver: { databaseConnection: { all } } };
+      fileRepo.manager.query.mockResolvedValue([]);
 
       await expect(service.removeFileTag(createdFileId, owner, validTagId)).rejects.toThrow('标签关联不存在');
       expect(auditServiceMock.log).not.toHaveBeenCalled();

@@ -2,7 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import { ConfigCacheService } from '../common/services/config-cache.service';
 import { SEC_CONFIG_KEYS } from '../admin/security-config.defaults';
-import { databaseCast, databaseCurrentTimestamp, databaseQuery, getDatabaseType } from '../database/database-types';
+import { databaseCast, databaseCurrentTimestamp, databaseQuery, databaseRawQuery, getDatabaseType } from '../database/database-types';
 
 export interface AnomalyDetectionResult {
   type: string;
@@ -109,7 +109,7 @@ export class BehaviorAnalyzer {
           await this.dataSource.query(buildPostgresBaselineSql(column), [metric]);
         }
 
-        const countResult = await this.dataSource.query(
+        const countResult = await databaseRawQuery(this.dataSource,
           `SELECT COUNT(*) as cnt FROM "baseline_stats" WHERE "metricName" = $1`,
           [metric],
         );
@@ -209,7 +209,7 @@ export class BehaviorAnalyzer {
     const filesThreshold = Number(
       await this.configCache.get(SEC_CONFIG_KEYS.DOWNLOAD_FILES_THRESHOLD, '50'),
     ) || 50;
-    const rows = await this.dataSource.query(
+    const rows = await databaseRawQuery(this.dataSource,
       `SELECT fal.ip,
               ${databaseCast('COUNT(DISTINCT fal."fileId")', 'int')} as unique_files,
               ${databaseCast('COUNT(DISTINCT fal."uploaderId")', 'int')} as distinct_users,
@@ -244,7 +244,7 @@ export class BehaviorAnalyzer {
   /** 模式 2: 异常上传 — 单用户 1h 内上传 > 100 个文件 */
   private async detectAbnormalUploads(): Promise<AnomalyDetectionResult[]> {
     const cutoff = new Date(Date.now() - 60 * 60 * 1000);
-    const rows = await this.dataSource.query(
+    const rows = await databaseRawQuery(this.dataSource,
       `SELECT f."uploaderId", ${databaseCast('COUNT(*)', 'int')} as upload_count
        FROM "files" f
        WHERE f."createdAt" >= $1 AND f."isDeleted" = false
@@ -265,7 +265,7 @@ export class BehaviorAnalyzer {
   /** 模式 3: 异常分享 — 单文件 1h 内不同 IP 访问 > 200 */
   private async detectAbnormalSharing(): Promise<AnomalyDetectionResult[]> {
     const cutoff = new Date(Date.now() - 60 * 60 * 1000);
-    const rows = await this.dataSource.query(
+    const rows = await databaseRawQuery(this.dataSource,
       `SELECT fal."fileId", ${databaseCast('COUNT(DISTINCT fal.ip)', 'int')} as unique_ips, ${databaseCast('COUNT(*)', 'int')} as total_access
        FROM "file_access_logs" fal
        WHERE fal."createdAt" >= $1 AND (fal.action = 'public_share' OR fal.action = 'public_direct')
@@ -486,7 +486,7 @@ export class BehaviorAnalyzer {
       const dayOfWeek = now.getUTCDay();
 
       // 获取过去 5 分钟的实际指标
-      const [currentMetrics] = await this.dataSource.query(
+      const [currentMetrics] = await databaseRawQuery(this.dataSource,
         `SELECT "qpsAvg", "totalRequests", "error5xxCount", "totalBandwidth"
          FROM "access_log_metrics_1min"
          WHERE "windowTime" >= $1
@@ -497,7 +497,7 @@ export class BehaviorAnalyzer {
       if (!currentMetrics) return results;
 
       // 获取对应时段的基线（样本数门槛可配置）
-      const baselines = await this.dataSource.query(
+      const baselines = await databaseRawQuery(this.dataSource,
         `SELECT "metricName", "mean", "stddev"
          FROM "baseline_stats"
          WHERE "hourBucket" = $1 AND "dayOfWeek" = $2 AND "sampleCount" >= $3`,

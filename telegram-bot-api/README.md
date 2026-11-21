@@ -1,5 +1,7 @@
 # Telegram Bot API
 
+This fork is based on [Telegram Bot API 10.4](https://github.com/tdlib/telegram-bot-api/commit/7232881b39dfcd048a0d569f1983c5184249ee05) and its pinned [TDLib 1.8.70 revision](https://github.com/tdlib/td/commit/c8828d50f5eac2fc7089ce1089d7ce9095c61b5e).
+
 The Telegram Bot API provides an HTTP API for creating [Telegram Bots](https://core.telegram.org/bots).
 
 If you've got any questions about bots or would like to report an issue with your bot, kindly contact us at [@BotSupport](https://t.me/BotSupport) in Telegram.
@@ -7,6 +9,8 @@ If you've got any questions about bots or would like to report an issue with you
 Please note that only global Bot API issues that affect all bots are suitable for this repository.
 
 ## Table of Contents
+
+- [TDLib source selection](#tdlib-source-selection)
 - [Installation](#installation)
 - [Dependencies](#dependencies)
 - [Usage](#usage)
@@ -14,6 +18,10 @@ Please note that only global Bot API issues that affect all bots are suitable fo
 - [Moving a bot to a local server](#switching)
 - [Moving a bot from one local server to another](#moving)
 - [License](#license)
+
+## TDLib source selection
+
+TGTC ships the native Bot API server. When updating the vendored TDLib sources, omit the standalone `example/web` directory. The browser client and its npm build instructions are available in the [upstream example at the pinned TDLib revision](https://github.com/tdlib/td/tree/c8828d50f5eac2fc7089ce1089d7ce9095c61b5e/example/web).
 
 <a name="installation"></a>
 ## Installation
@@ -63,13 +71,15 @@ To enable Bot API features not available at `https://api.telegram.org`, specify 
 
 The Telegram Bot API server accepts only HTTP requests, so a TLS termination proxy needs to be used to handle remote HTTPS requests.
 
-By default the Telegram Bot API server is launched on the port 8081, which can be changed using the option `--http-port`.
+The Bot API and the optional streaming route share a listener at `127.0.0.1:8081` by default. Set `--http-port` to change its port. The HTTP statistics listener uses `--http-stat-port`.
 
 ### Streaming file endpoint
 
 A complete Chinese integration guide is available in [流式文件端点调用指南.md](流式文件端点调用指南.md).
 
 This fork can stream a Telegram file to an HTTP client before TDLib finishes downloading the whole file. The feature is disabled by default and doesn't change the standard `getFile` method.
+
+The 10.4 server supports a separate `--files-dir` for media. When set, use that directory as the TGTC local-media root. The fork measures download space and cleans idle media there. TDLib state and webhook certificates remain under `--dir`.
 
 Enable it with:
 
@@ -93,7 +103,7 @@ curl --fail --header "X-Telegram-File-Size: 10485760" --output file.bin \
 
 `X-Telegram-File-Size` is an optional positive decimal byte count. It is required when a fresh TDLib work directory has never seen an older `file_id` and TDLib therefore can't provide `file.size`. When TDLib knows the size, the server cross-checks the header and rejects mismatches; without the header, existing behavior remains unchanged. Only a trusted backend should supply this value from persisted upload metadata, and the streaming endpoint should remain private.
 
-The response uses `200 OK`, `application/octet-stream`, and an exact `Content-Length`. TDLib issues exactly one normal whole-file `downloadFile(file_id, 1, 0, 0, false)` request per active file. The HTTP stream reads only the continuously available prefix from TDLib's local cache file with local `pread`; it never calls `readFilePart` and therefore never turns HTTP chunks into extra MTProto `upload.getFile` requests. Multiple HTTP consumers share the same TDLib download. A successful HTTP completion guarantees that the emitted byte count equals the exact file size. If an upstream error happens after response headers have been sent, the connection is aborted; clients must reject responses shorter than `Content-Length`.
+The response uses `200 OK`, `application/octet-stream`, and an exact `Content-Length`. Consumers share a single TDLib download per active file. If the exact size is unknown, the fork reserves disk space and advances the same file download in bounded steps. The HTTP stream reads only the continuously available prefix from TDLib's local cache file with local `pread`; it never calls `readFilePart` and therefore never turns HTTP chunks into extra MTProto `upload.getFile` requests. A successful HTTP completion guarantees that the emitted byte count equals the exact file size. If an upstream error happens after response headers have been sent, the connection is aborted; clients must reject responses shorter than `Content-Length`.
 
 Configuration options:
 

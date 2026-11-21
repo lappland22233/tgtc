@@ -8,7 +8,7 @@ export class SqliteCreateApiKeys1801000000000 implements MigrationInterface {
   name = 'SqliteCreateApiKeys1801000000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'sqlite') return;
+    if (queryRunner.dataSource.options.type !== 'better-sqlite3') return;
     await queryRunner.query(`
       CREATE TABLE IF NOT EXISTS "api_keys" (
         "id" varchar NOT NULL,
@@ -35,7 +35,7 @@ export class SqliteCreateApiKeys1801000000000 implements MigrationInterface {
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'sqlite') return;
+    if (queryRunner.dataSource.options.type !== 'better-sqlite3') return;
     await queryRunner.query(`DROP INDEX IF EXISTS "idx_api_keys_userId_revokedAt"`);
     await queryRunner.query(`DROP INDEX IF EXISTS "idx_api_keys_userId"`);
     await queryRunner.query(`DROP INDEX IF EXISTS "uq_api_keys_keyHash"`);

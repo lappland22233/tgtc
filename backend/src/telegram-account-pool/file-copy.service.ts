@@ -284,7 +284,7 @@ export class FileCopyService {
       for (let offset = 0; ; offset += MAX_BRIDGE_FILES) {
         const page = await this.files.find({
           where: { telegramFileUniqueId: fileUniqueId },
-          select: ['id'],
+          select: { id: true },
           order: { id: 'ASC' },
           skip: offset,
           take: MAX_BRIDGE_FILES,

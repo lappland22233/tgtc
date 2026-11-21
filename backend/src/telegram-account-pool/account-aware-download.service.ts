@@ -205,6 +205,7 @@ export class AccountAwareDownloadService {
     fileId: string;
     expectedSize?: number;
     noCache?: boolean;
+    signal?: AbortSignal;
     onUnavailable?: (failure: AccountAwareDownloadFailure) => void;
     openStandard?: () => Promise<{ stream: Readable; info: { file_id: string; file_size: number } }>;
   }): Promise<AccountAwareStreamResult | null> {
@@ -257,7 +258,7 @@ export class AccountAwareDownloadService {
           account.token,
           params.fileId,
           params.expectedSize,
-          { noCache: params.noCache },
+          { noCache: params.noCache, ...(params.signal && { signal: params.signal }) },
         );
       this.attachSampling(granted, session.stream, session.sample);
       return {
@@ -268,6 +269,10 @@ export class AccountAwareDownloadService {
         selectionReason: 'source-account-fallback',
       };
     } catch (error) {
+      if (params.signal?.aborted) {
+        granted.release();
+        throw error;
+      }
       this.pool.bumpCounter('streamFailures');
       this.finishFailed(granted, error);
       this.logger.warn(
@@ -276,6 +281,7 @@ export class AccountAwareDownloadService {
       );
       params.onUnavailable?.({
         reason: 'source_stream_failed',
+        ...(error instanceof TelegramAccountError && error.kind === 'flood' ? { rateLimited: true } : {}),
         retryAfterMs: error instanceof TelegramAccountError && error.retryAfterSeconds
           ? error.retryAfterSeconds * 1000
           : CAPACITY_RETRY_AFTER_MS,

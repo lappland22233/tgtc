@@ -159,12 +159,20 @@ export class ShareFolderBrowseService {
       this.folderRepo.find({
         where: { ownerId: link.creatorId, parentId: folderId, isDeleted: false },
         order: { name: 'ASC' },
-        select: ['id', 'name', 'createdAt', 'parentId'],
+        select: { id: true, name: true, createdAt: true, parentId: true },
       }),
       this.fileRepo.find({
         where: { uploaderId: link.creatorId, folderId, isDeleted: false },
         order: { originalName: 'ASC' },
-        select: ['id', 'originalName', 'mimeType', 'size', 'createdAt', 'uploadVersion', 'status'],
+        select: {
+          id: true,
+          originalName: true,
+          mimeType: true,
+          size: true,
+          createdAt: true,
+          uploadVersion: true,
+          status: true,
+        },
         skip: (page - 1) * limit,
         take: limit,
       }),

@@ -13,7 +13,7 @@ export class ChunkUploadResourceInterceptor implements NestInterceptor {
   constructor(private readonly chunkUploadService: ChunkUploadService) {}
 
   async intercept(context: ExecutionContext, next: CallHandler): Promise<Observable<unknown>> {
-    const request = context.switchToHttp().getRequest<Request & { user?: { id?: string } }>();
+    const request = context.switchToHttp().getRequest<Request<{ uploadId: string }> & { user?: { id?: string } }>();
     const contentLength = Number(request.headers['content-length'] || 0);
     const release = await this.chunkUploadService.acquireChunkRequest(
       request.params.uploadId,

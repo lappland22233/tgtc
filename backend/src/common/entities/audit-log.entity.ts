@@ -85,6 +85,8 @@ export type AuditAction =
   | 'telegram_bot_file_received'
   | 'telegram_bot_link_issued'
   | 'telegram_bot_link_accessed'
+  | 'telegram_bot_task_cancelled'
+  | 'telegram_bot_user_banned'
   | 'telegram_bot_link_revoked'
   | 'telegram_bot_link_queried'
   | 'telegram_bot_quota_denied'

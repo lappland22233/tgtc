@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2025
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2026
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -52,7 +52,7 @@ class HttpConnection final : public td::HttpInboundConnection::Callback {
   void send_response(int http_status_code, td::BufferSlice &&content, int retry_after,
                      td::Slice allow = td::Slice());
 
-  void send_http_error(int http_status_code, td::Slice description, td::Slice allow = td::Slice());
+  void send_http_error(int http_status_code, td::CSlice description, td::Slice allow = td::Slice());
 };
 
 }  // namespace telegram_bot_api

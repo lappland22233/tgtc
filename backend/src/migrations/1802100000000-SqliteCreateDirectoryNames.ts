@@ -12,7 +12,7 @@ export class SqliteCreateDirectoryNames1802100000000 implements MigrationInterfa
   name = 'SqliteCreateDirectoryNames1802100000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'sqlite') return;
+    if (queryRunner.dataSource.options.type !== 'better-sqlite3') return;
 
     // 存量库基线已执行不会重跑，必须在此补齐表（对全新库幂等）。
     await queryRunner.query(`
@@ -86,7 +86,7 @@ export class SqliteCreateDirectoryNames1802100000000 implements MigrationInterfa
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'sqlite') return;
+    if (queryRunner.dataSource.options.type !== 'better-sqlite3') return;
     await queryRunner.query(`DROP INDEX IF EXISTS "idx_directory_names_entity"`);
     await queryRunner.query(`DROP INDEX IF EXISTS "uq_directory_names_active"`);
     await queryRunner.query(`DELETE FROM "directory_names"`);

@@ -24,7 +24,7 @@ export class CreateStorageBackends1804000000000 implements MigrationInterface {
   name = 'CreateStorageBackends1804000000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'postgres') return;
+    if (queryRunner.dataSource.options.type !== 'postgres') return;
 
     await queryRunner.query(`
       CREATE TABLE IF NOT EXISTS "storage_backends" (
@@ -68,7 +68,7 @@ export class CreateStorageBackends1804000000000 implements MigrationInterface {
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'postgres') return;
+    if (queryRunner.dataSource.options.type !== 'postgres') return;
     await queryRunner.query(`DROP INDEX IF EXISTS "idx_storage_backends_enabled"`);
     await queryRunner.query(`DROP INDEX IF EXISTS "idx_storage_backends_status"`);
     await queryRunner.query(`DROP INDEX IF EXISTS "uq_storage_backends_type_name"`);

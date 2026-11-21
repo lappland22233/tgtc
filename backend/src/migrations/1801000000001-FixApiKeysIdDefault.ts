@@ -17,14 +17,14 @@ export class FixApiKeysIdDefault1801000000001 implements MigrationInterface {
   name = 'FixApiKeysIdDefault1801000000001';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'postgres') return;
+    if (queryRunner.dataSource.options.type !== 'postgres') return;
     await queryRunner.query(
       `ALTER TABLE "api_keys" ALTER COLUMN "id" SET DEFAULT gen_random_uuid()`,
     );
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'postgres') return;
+    if (queryRunner.dataSource.options.type !== 'postgres') return;
     await queryRunner.query(`ALTER TABLE "api_keys" ALTER COLUMN "id" DROP DEFAULT`);
   }
 }

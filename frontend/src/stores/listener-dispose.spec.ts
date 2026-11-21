@@ -59,7 +59,7 @@ describe('PERF-F-108 应用级监听器释放路径', () => {
     vi.restoreAllMocks();
   });
 
-  const countFor = (spy: ReturnType<typeof vi.spyOn>, type: string) =>
+  const countFor = (spy: { mock: { calls: ReadonlyArray<ReadonlyArray<unknown>> } }, type: string) =>
     spy.mock.calls.filter((call) => call[0] === type).length;
 
   describe('auth store：visibilitychange', () => {

@@ -2,7 +2,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
 
 export class ScopeBotGrantMessage1804400000000 implements MigrationInterface {
   async up(runner: QueryRunner): Promise<void> {
-    if (runner.connection.options.type !== 'postgres') return;
+    if (runner.dataSource.options.type !== 'postgres') return;
     if (!(await runner.hasColumn('telegram_bot_file_grants', 'receiverBotId'))) {
       await runner.query('ALTER TABLE "telegram_bot_file_grants" ADD COLUMN "receiverBotId" varchar(32)');
     }
@@ -12,7 +12,7 @@ export class ScopeBotGrantMessage1804400000000 implements MigrationInterface {
   }
 
   async down(runner: QueryRunner): Promise<void> {
-    if (runner.connection.options.type !== 'postgres') return;
+    if (runner.dataSource.options.type !== 'postgres') return;
     // Recreate the old uniqueness rule first. If two bots now share a message number,
     // reverting would lose data and must fail before changing the current schema.
     await runner.query('CREATE UNIQUE INDEX "uq_tg_bot_grants_revert_guard" ON "telegram_bot_file_grants" ("telegramUserId", "chatId", "messageId")');

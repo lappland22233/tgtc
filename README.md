@@ -19,10 +19,10 @@
 
 | 层级 | 技术 |
 |---|---|
-| 后端 | NestJS 11、TypeScript、TypeORM 0.3 |
-| 前端 | Vue 3.5、TypeScript、Vite 6、TDesign Vue Next |
-| 数据库 | PostgreSQL 14+（默认）/ SQLite 3（单机显式 opt-in） |
-| 队列 | Bull 4、Redis |
+| 后端 | Node.js 26 LTS、NestJS 12、TypeScript、TypeORM 1 |
+| 前端 | Vue 3.5、TypeScript、Vite 8、TDesign Vue Next |
+| 数据库 | PostgreSQL（默认，CI 使用 19.0）/ SQLite 3（单机显式启用） |
+| 队列 | Bull 4、Redis（CI 使用 8.10.3） |
 | 文件存储 | Telegram Bot API / 本地 Bot API / S3 / WebDAV / Google Drive |
 | 认证 | Passport JWT、bcryptjs、HttpOnly Cookie |
 | 邮件 | Nodemailer、SMTP |

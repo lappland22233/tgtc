@@ -133,8 +133,8 @@ async function buildPlans(source, sourceSnapshot, target) {
         const sourceMetadata = source.getMetadata(entity);
         const table = sourceMetadata.tableName;
         const actual = sourceColumns.get(table);
-        // This short-lived table and the nullable Bot identity were introduced after 1.6.3.
-        if (!actual && table === 'gdrive_oauth_flows')
+        // Older source versions can predate OAuth flows and Bot intake management.
+        if (!actual && ['gdrive_oauth_flows', 'telegram_bot_inbound_tasks', 'telegram_bot_user_bans'].includes(table))
             continue;
         if (!actual)
             throw new Error(`源库缺少业务表 ${table}，请先完成源库迁移`);
@@ -368,7 +368,7 @@ async function main() {
     const source = new typeorm_1.DataSource(sourceOptions);
     const targetModules = loadDatabaseModules('sqlite');
     const targetOptions = targetModules.createDatabaseOptions({ ...process.env, DB_TYPE: 'sqlite', DB_DATABASE: tempPath, DB_MIGRATIONS_RUN: 'true' });
-    if (targetOptions.type !== 'sqlite')
+    if (targetOptions.type !== 'better-sqlite3')
         throw new Error('迁移目标配置必须为 SQLite');
     const target = new typeorm_1.DataSource({
         ...targetOptions,

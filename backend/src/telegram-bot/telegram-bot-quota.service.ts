@@ -4,7 +4,7 @@ import { DataSource, Repository } from 'typeorm';
 import { randomUUID } from 'crypto';
 import { TelegramBotDailyUsage } from '../common/entities/telegram-bot-daily-usage.entity';
 import { TelegramBotWhitelist } from '../common/entities/telegram-bot-whitelist.entity';
-import { databaseQuery, getDatabaseType } from '../database/database-types';
+import { databaseQuery, databaseRawQuery, getDatabaseType } from '../database/database-types';
 
 export interface QuotaConsumeResult {
   allowed: boolean;
@@ -119,7 +119,7 @@ export class TelegramBotQuotaService {
   ): Promise<void> {
     const id = randomUUID();
     if (type === 'sqlite') {
-      await this.dataSource.query(
+      await databaseRawQuery(this.dataSource,
         `INSERT OR IGNORE INTO "telegram_bot_daily_usage"
            ("id","telegramUserId","usageDate","issuedCount","createdAt","updatedAt")
          VALUES ($1,$2,$3,0,datetime('now'),datetime('now'))`,

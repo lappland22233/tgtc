@@ -1,5 +1,8 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from 'vitest';
+import { DOMWrapper, flushPromises, mount } from '@vue/test-utils';
+import { createPinia } from 'pinia';
+import { useMediaPlaybackStore, type MediaSessionItem } from '@/stores/mediaPlayback';
 
 vi.mock('tdesign-vue-next/es/message', () => ({
   MessagePlugin: { success: vi.fn(), error: vi.fn(), info: vi.fn(), warning: vi.fn() },
@@ -12,17 +15,7 @@ import FilePreviewDialog from './FilePreviewDialog.vue';
 import PreviewPlaylistPanel from './PreviewPlaylistPanel.vue';
 import PreviewTextPanel from './PreviewTextPanel.vue';
 
-/**
- * M6 拆分专项的编译守卫。
- *
- * FilePreviewDialog 体量大、无独立单测（真实挂载依赖活跃媒体会话），
- * 拆分过程中最容易出问题的是 SFC 编译本身（模板绑定、<style src> 共享样式块、
- * 拆出组件的 props/emits 契约）。本用例通过真实 import 触发完整的 SFC 编译，
- * 保证上述问题在测试阶段就暴露，而不是等到 vite build。
- *
- * 注意：这里只做编译与静态断言，不挂载（挂载需构造完整媒体会话，
- * 行为契约由 PreviewPlaylistPanel.spec.ts / PreviewTextPanel.spec.ts 覆盖）。
- */
+/** 预览宿主与展示组件的编译契约，以及真实图片会话中的容器绑定。 */
 describe('FilePreviewDialog 拆分编译守卫', () => {
   it('宿主与拆出的展示组件均可正常编译加载', () => {
     expect(FilePreviewDialog).toBeTruthy();
@@ -34,5 +27,40 @@ describe('FilePreviewDialog 拆分编译守卫', () => {
     expect((FilePreviewDialog as { __name?: string }).__name).toBe('FilePreviewDialog');
     expect((PreviewPlaylistPanel as { __name?: string }).__name).toBe('PreviewPlaylistPanel');
     expect((PreviewTextPanel as { __name?: string }).__name).toBe('PreviewTextPanel');
+  });
+
+  it('sizes an image using its mounted preview stage and restores full size on double click', async () => {
+    vi.stubGlobal('Image', class {
+      naturalWidth = 800;
+      naturalHeight = 600;
+      onload?: () => void;
+      set src(_url: string) { queueMicrotask(() => this.onload?.()); }
+    });
+    vi.spyOn(Element.prototype, 'clientWidth', 'get').mockImplementation(function (this: Element) {
+      return this.matches('.fpv-image-stage') ? 400 : 0;
+    });
+    vi.spyOn(Element.prototype, 'clientHeight', 'get').mockImplementation(function (this: Element) {
+      return this.matches('.fpv-image-stage') ? 300 : 0;
+    });
+    const pinia = createPinia();
+    const media = useMediaPlaybackStore(pinia);
+    const item: MediaSessionItem = { id: 'photo', name: 'photo.jpg', mimeType: 'image/jpeg', kind: 'image', src: '/photos/photo.jpg' };
+    media.open({ item, context: { type: 'user', userId: 'owner' }, playlist: [item], playlistIndex: 0 });
+    const wrapper = mount(FilePreviewDialog, { global: { plugins: [pinia] } });
+    const page = new DOMWrapper(document.body);
+    try {
+      await flushPromises();
+      const stage = page.get('.fpv-image-stage');
+      const img = stage.get('img');
+      Object.defineProperties(img.element, { naturalWidth: { value: 800 }, naturalHeight: { value: 600 } });
+      await img.trigger('load');
+      expect(page.get('.fpv-image').attributes('style')).toContain('scale(0.5)');
+      await page.get('.fpv-image-stage').trigger('dblclick');
+      expect(page.get('.fpv-image').attributes('style')).toContain('scale(1)');
+    } finally {
+      wrapper.unmount();
+      vi.unstubAllGlobals();
+      vi.restoreAllMocks();
+    }
   });
 });

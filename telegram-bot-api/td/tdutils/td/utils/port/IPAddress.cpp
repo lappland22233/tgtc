@@ -8,9 +8,11 @@
 
 #include "td/utils/port/IPAddress.h"
 
+#include "td/utils/as.h"
 #include "td/utils/format.h"
 #include "td/utils/logging.h"
 #include "td/utils/misc.h"
+#include "td/utils/port/ServerSocketFd.h"
 #include "td/utils/port/SocketFd.h"
 #include "td/utils/port/thread_local.h"
 #include "td/utils/ScopeGuard.h"
@@ -127,7 +129,7 @@ static void punycode(string &result, Slice part) {
 }
 #endif
 
-Result<string> idn_to_ascii(CSlice host) {
+Result<string> idn_to_ascii(Slice host) {
   if (is_ascii_host(host)) {
     return to_lower(host);
   }
@@ -152,7 +154,7 @@ Result<string> idn_to_ascii(CSlice host) {
   TRY_RESULT(idn_host, from_wstring(punycode, result_length));
   return idn_host;
 #else
-  auto parts = full_split(Slice(host), '.');
+  auto parts = full_split(host, '.');
   bool is_first = true;
   string result;
   result.reserve(host.size());
@@ -193,6 +195,20 @@ static CSlice get_ip_str(int family, const void *addr) {
   }
 }
 
+static bool begins_with_bits(const unsigned char addr[16], const unsigned char *prefix, size_t bit_count) {
+  auto byte_count = bit_count >> 3;
+  if (std::memcmp(addr, prefix, byte_count) != 0) {
+    return false;
+  }
+
+  auto remaining_bit_count = bit_count & 7;
+  if (remaining_bit_count > 0) {
+    unsigned char mask = (0xff << (8 - remaining_bit_count)) & 0xff;
+    return ((addr[byte_count] ^ prefix[byte_count]) & mask) == 0;
+  }
+  return true;
+}
+
 IPAddress::IPAddress() : is_valid_(false) {
 }
 
@@ -200,32 +216,107 @@ bool IPAddress::is_valid() const {
   return is_valid_;
 }
 
-bool IPAddress::is_reserved() const {
-  CHECK(is_valid());
+static bool is_reserved_ipv4(uint32 ip) {
+  // https://www.iana.org/assignments/iana-ipv4-special-registry
+  // an aggregate, so that the tables below are constant-initialized: with a constructor,
+  // MSVC 14.51 crashes compiling this function at /Ob1
+  struct IpBlock {
+    const char *ip;
+    int mask;
+  };
+  struct IpRange {
+    uint32 range;
+    uint32 mask;
+  };
+  auto get_ranges = [](const auto &blocks) {
+    vector<IpRange> ranges;
+    for (auto &block : blocks) {
+      IPAddress block_ip_address;
+      block_ip_address.init_ipv4_port(CSlice(block.ip), 80).ensure();
+      CHECK(block.mask != 0);
+      uint32 mask = std::numeric_limits<uint32>::max() >> (32 - block.mask) << (32 - block.mask);
+      ranges.push_back(IpRange{block_ip_address.get_ipv4() & mask, mask});
+    }
+    return ranges;
+  };
+  auto is_in_range = [ip](const IpRange &range) {
+    return (ip & range.mask) == range.range;
+  };
 
-  if (is_ipv6()) {
-    // TODO proper check for reserved IPv6 addresses
-    return true;
+  // globally reachable addresses from reserved blocks
+  static const IpBlock global_blocks[] = {{"192.0.0.9", 32}, {"192.0.0.10", 32}};
+  static const vector<IpRange> global_ranges = get_ranges(global_blocks);
+  for (auto &range : global_ranges) {
+    if (is_in_range(range)) {
+      return false;
+    }
   }
 
-  uint32 ip = get_ipv4();
-  struct IpBlock {
-    CSlice ip;
-    int mask;
-    IpBlock(CSlice ip, int mask) : ip(ip), mask(mask) {
-    }
-  };
   static const IpBlock blocks[] = {{"0.0.0.0", 8},      {"10.0.0.0", 8},     {"100.64.0.0", 10}, {"127.0.0.0", 8},
                                    {"169.254.0.0", 16}, {"172.16.0.0", 12},  {"192.0.0.0", 24},  {"192.0.2.0", 24},
                                    {"192.88.99.0", 24}, {"192.168.0.0", 16}, {"198.18.0.0", 15}, {"198.51.100.0", 24},
                                    {"203.0.113.0", 24}, {"224.0.0.0", 3}};
+  static const vector<IpRange> ranges = get_ranges(blocks);
+  for (auto &range : ranges) {
+    if (is_in_range(range)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool IPAddress::is_reserved() const {
+  CHECK(is_valid());
+
+  if (is_ipv4()) {
+    return is_reserved_ipv4(get_ipv4());
+  }
+
+  // https://www.iana.org/assignments/iana-ipv6-special-registry
+  const auto &addr = ipv6_addr_.sin6_addr.s6_addr;
+
+  // IPv4-mapped addresses
+  const unsigned char ipv4_prefix[12] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff};
+  if (begins_with_bits(addr, ipv4_prefix, 96)) {
+    return is_reserved_ipv4(ntohl(as<uint32>(addr + 12)));
+  }
+
+  // IPv4-IPv6 translation addresses are globally reachable if the embedded IPv4 address is
+  const unsigned char translate_prefix[12] = {0x00, 0x64, 0xff, 0x9b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+  if (begins_with_bits(addr, translate_prefix, 96)) {
+    return is_reserved_ipv4(ntohl(as<uint32>(addr + 12)));
+  }
+
+  // all addresses outside of 2000::/3 aren't global unicast addresses;
+  // this includes ::/128, ::1/128, 64:ff9b:1::/48, 100::/64, 100:0:0:1::/64, 5f00::/16, fc00::/7, fe80::/10 and ff00::/8
+  const unsigned char global_unicast_prefix[1] = {0x20};
+  if (!begins_with_bits(addr, global_unicast_prefix, 3)) {
+    return true;
+  }
+
+  struct Ipv6Block {
+    unsigned char prefix[16];
+    size_t bit_count;
+  };
+
+  // globally reachable addresses from reserved blocks;
+  // 2001:1::2/127 combines 2001:1::2/128 and 2001:1::3/128, 2001:20::/27 combines 2001:20::/28 and 2001:30::/28
+  static const Ipv6Block global_blocks[] = {
+      {{0x20, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01}, 128},
+      {{0x20, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02}, 127},
+      {{0x20, 0x01, 0x00, 0x03}, 32},
+      {{0x20, 0x01, 0x00, 0x04, 0x01, 0x12}, 48},
+      {{0x20, 0x01, 0x00, 0x20}, 27}};
+  for (auto &block : global_blocks) {
+    if (begins_with_bits(addr, block.prefix, block.bit_count)) {
+      return false;
+    }
+  }
+
+  static const Ipv6Block blocks[] = {
+      {{0x20, 0x01, 0x00}, 23}, {{0x20, 0x01, 0x0d, 0xb8}, 32}, {{0x20, 0x02}, 16}, {{0x3f, 0xff, 0x00}, 20}};
   for (auto &block : blocks) {
-    IPAddress block_ip_address;
-    block_ip_address.init_ipv4_port(block.ip, 80).ensure();
-    uint32 range = block_ip_address.get_ipv4();
-    CHECK(block.mask != 0);
-    uint32 mask = std::numeric_limits<uint32>::max() >> (32 - block.mask) << (32 - block.mask);
-    if ((ip & mask) == (range & mask)) {
+    if (begins_with_bits(addr, block.prefix, block.bit_count)) {
       return true;
     }
   }
@@ -265,7 +356,7 @@ bool IPAddress::is_ipv6() const {
 uint32 IPAddress::get_ipv4() const {
   CHECK(is_valid());
   CHECK(is_ipv4());
-  return htonl(ipv4_addr_.sin_addr.s_addr);
+  return ntohl(ipv4_addr_.sin_addr.s_addr);
 }
 
 string IPAddress::get_ipv6() const {
@@ -465,7 +556,7 @@ Status IPAddress::init_host_port(CSlice host, CSlice port, bool prefer_ipv6) {
   return init_sockaddr(best_info->ai_addr, narrow_cast<socklen_t>(best_info->ai_addrlen));
 }
 
-Status IPAddress::init_host_port(CSlice host_port) {
+Status IPAddress::init_host_port(Slice host_port) {
   auto pos = host_port.rfind(':');
   if (pos == static_cast<size_t>(-1)) {
     return Status::Error("Can't split string into host and port");
@@ -495,6 +586,26 @@ Status IPAddress::init_sockaddr(sockaddr *addr, socklen_t len) {
 
   is_valid_ = true;
   LOG(DEBUG + 10) << "Have address " << get_ip_str() << " with port " << get_port();
+  return Status::OK();
+}
+
+Status IPAddress::init_socket_address(const ServerSocketFd &server_socket_fd) {
+  is_valid_ = false;
+  if (server_socket_fd.empty()) {
+    return Status::Error("Socket is empty");
+  }
+  auto socket = server_socket_fd.get_native_fd().socket();
+  socklen_t len = storage_size();
+  int ret = getsockname(socket, &sockaddr_, &len);
+  if (ret != 0) {
+    return OS_SOCKET_ERROR("Failed to get socket address");
+  }
+  is_valid_ = true;
+  auto address_family = get_address_family();
+  if (address_family != AF_INET && address_family != AF_INET6) {
+    is_valid_ = false;
+    return Status::Error("Receive unsupported IP address");
+  }
   return Status::OK();
 }
 
@@ -550,7 +661,7 @@ void IPAddress::clear_ipv6_interface() {
 }
 
 string IPAddress::ipv4_to_str(uint32 ipv4) {
-  ipv4 = ntohl(ipv4);
+  ipv4 = htonl(ipv4);
   return ::td::get_ip_str(AF_INET, &ipv4).str();
 }
 

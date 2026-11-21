@@ -14,9 +14,9 @@ class SqliteSchemaAlignment1800000000000 {
         this.name = 'SqliteSchemaAlignment1800000000000';
     }
     async up(queryRunner) {
-        if (queryRunner.connection.options.type !== 'sqlite')
+        if (queryRunner.dataSource.options.type !== 'better-sqlite3')
             return;
-        for (const metadata of queryRunner.connection.entityMetadatas) {
+        for (const metadata of queryRunner.dataSource.entityMetadatas) {
             if (!(await queryRunner.hasTable(metadata.tableName)))
                 continue;
             const table = await queryRunner.getTable(metadata.tableName);

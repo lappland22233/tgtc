@@ -26,7 +26,7 @@ export class FixTelegramBotIdDefault1802400000000 implements MigrationInterface 
   name = 'FixTelegramBotIdDefault1802400000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'postgres') return;
+    if (queryRunner.dataSource.options.type !== 'postgres') return;
 
     await queryRunner.query(
       `ALTER TABLE IF EXISTS "telegram_bot_file_grants" ALTER COLUMN "id" SET DEFAULT gen_random_uuid()`,
@@ -40,7 +40,7 @@ export class FixTelegramBotIdDefault1802400000000 implements MigrationInterface 
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'postgres') return;
+    if (queryRunner.dataSource.options.type !== 'postgres') return;
 
     await queryRunner.query(
       `ALTER TABLE IF EXISTS "telegram_bot_file_grants" ALTER COLUMN "id" DROP DEFAULT`,

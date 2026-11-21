@@ -27,7 +27,7 @@ import { ConfigCacheService } from '../common/services/config-cache.service';
 import { AuditService } from '../common/services/audit.service';
 import { encryptPassword } from '../common/utils/crypto.util';
 import { FILE_DELETE_GRACE_MS, FILE_DELETE_COOLDOWN_MS, MS_PER_DAY } from '../common/constants/durations';
-import { databaseCast, databaseCurrentTimestamp, databaseDateBucket, databaseQuery, getDatabaseType } from '../database/database-types';
+import { databaseCast, databaseCurrentTimestamp, databaseDateBucket, databaseQuery, databaseRawQuery, getDatabaseType } from '../database/database-types';
 import { ExportService, ExportOptions } from './export.service';
 import { SEC_CONFIG_META, SEC_CONFIG_DEFAULTS } from './security-config.defaults';
 import {
@@ -441,7 +441,7 @@ export class AdminService {
     // 先查询存在的、未删除的文件
     const existingFiles = await this.fileRepository.find({
       where: { id: In(ids), isDeleted: false },
-      select: ['id', 'originalName'],
+      select: { id: true, originalName: true },
     });
 
     if (existingFiles.length === 0) {
@@ -1606,7 +1606,7 @@ export class AdminService {
   async getRefererAnalysis(query: RefererAnalysisQueryDto) {
     const since = this.parseTimeRange(query.timeRange || '7d');
 
-    const raw = await this.accessLogRepo.manager.query(
+    const raw = await databaseRawQuery(this.accessLogRepo.manager,
       `SELECT referer, ${databaseCast('COUNT(*)', 'int')} as count
        FROM access_logs
        WHERE "createdAt" >= $1 AND referer IS NOT NULL AND referer != ''
@@ -1631,7 +1631,7 @@ export class AdminService {
     categories.set('外部网站', 0);
 
     // Add direct access count
-    const directResult = await this.accessLogRepo.manager.query(
+    const directResult = await databaseRawQuery(this.accessLogRepo.manager,
       `SELECT ${databaseCast('COUNT(*)', 'int')} as count FROM access_logs
        WHERE "createdAt" >= $1 AND (referer IS NULL OR referer = '')`,
       [since],
@@ -1702,7 +1702,7 @@ export class AdminService {
     const since = this.parseTimeRange(query.timeRange || '7d');
     const topN = query.topN || 500;
 
-    const raw = await this.accessLogRepo.manager.query(
+    const raw = await databaseRawQuery(this.accessLogRepo.manager,
       `SELECT "userAgent", ${databaseCast('COUNT(*)', 'int')} as count
        FROM access_logs
        WHERE "createdAt" >= $1 AND "userAgent" IS NOT NULL AND "userAgent" != ''

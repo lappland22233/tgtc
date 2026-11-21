@@ -8,7 +8,7 @@ import { OnEvent } from '@nestjs/event-emitter';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { Readable } from 'stream';
 import { Request } from 'express';
-import { randomBytes } from 'crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import * as fs from 'fs';
 import { createReadStream, writeFileSync } from 'fs';
 import * as path from 'path';
@@ -30,6 +30,7 @@ import {
   databaseForUpdate,
   databasePessimisticWriteLock,
   databaseQuery,
+  databaseRawQuery,
   getDatabaseType,
   isDatabaseUniqueViolation,
 } from '../database/database-types';
@@ -43,7 +44,6 @@ import { ThumbnailService } from './thumbnail.service';
 import { FileAccessControlService } from './file-access-control.service';
 import { FileUploadConfigService } from './file-upload-config.service';
 import { assertFileReadable, assertFileWritable } from '../common/utils/file-permissions';
-import { v4 as uuidv4 } from 'uuid';
 // 阶段 4：普通 Web 上传文件的回源接入账号池（可选依赖，未装配/未启用时保持原单账号链路）
 import { AccountAwareDownloadService } from '../telegram-account-pool/account-aware-download.service';
 import { AccountAwareUploadService, AccountUploadUnavailableError } from '../telegram-account-pool/account-aware-upload.service';
@@ -726,7 +726,7 @@ export class FileService implements OnModuleInit {
     if (!folderId) return;
     const folder = await this.folderRepository.findOne({
       where: { id: folderId, ownerId: userId, isDeleted: false },
-      select: ['id'],
+      select: { id: true },
     });
     if (!folder) {
       throw new NotFoundException('目标文件夹不存在或无权访问');
@@ -1021,7 +1021,7 @@ export class FileService implements OnModuleInit {
       }
     }
 
-    const tempId = uuidv4();
+    const tempId = randomUUID();
     const resolvedFolderId = folderId ?? null;
     // 会话创建时冻结存储后端（与 strictDiskLease 同一冻结语义）：
     // 配置热切换不影响在途任务，Worker 按 File.storageBackend 路由。
@@ -1547,7 +1547,7 @@ export class FileService implements OnModuleInit {
 
       if (tagIds.length > 1) {
         tagParams.push(tagIds.length);
-        const res = await this.fileRepository.manager.query(
+        const res = await databaseRawQuery(this.fileRepository.manager,
           `SELECT COUNT(*) AS cnt FROM (
             SELECT 1 FROM files file
             INNER JOIN file_tags ft ON ft."fileId" = file.id
@@ -1558,7 +1558,7 @@ export class FileService implements OnModuleInit {
         );
         total = parseInt(res[0]?.cnt || '0', 10);
       } else {
-        const res = await this.fileRepository.manager.query(
+        const res = await databaseRawQuery(this.fileRepository.manager,
           `SELECT COUNT(*) AS cnt FROM files file
           INNER JOIN file_tags ft ON ft."fileId" = file.id
           WHERE ${tagWhere}`,
@@ -1582,7 +1582,7 @@ export class FileService implements OnModuleInit {
     // 批量加载所有文件的标签
     const fileIds = files.map(f => f.id);
     if (fileIds.length > 0) {
-      const tagRows = await this.fileRepository.manager.query(
+      const tagRows = await databaseRawQuery(this.fileRepository.manager,
         `SELECT ft."fileId", t.id, t.name, t.color, t."userId", t."createdAt"
          FROM file_tags ft
          INNER JOIN tags t ON t.id = ft."tagId"
@@ -1632,7 +1632,7 @@ export class FileService implements OnModuleInit {
   async findOne(id: string, user: User): Promise<File> {
     const file = await this.fileRepository.findOne({
       where: { id, isDeleted: false },
-      relations: ['uploader'],
+      relations: { uploader: true },
     });
 
     if (!file) {
@@ -2753,7 +2753,7 @@ export class FileService implements OnModuleInit {
     let token = '';
     for (let attempt = 0; attempt < 5; attempt += 1) {
       token = randomBytes(9).toString('base64url');
-      const exists = await this.shareLinkRepository.findOne({ where: { token }, select: ['id'] });
+      const exists = await this.shareLinkRepository.findOne({ where: { token }, select: { id: true } });
       if (!exists) break;
       if (attempt === 4) throw new BadRequestException('分享链接生成失败，请重试');
     }
@@ -2826,7 +2826,7 @@ export class FileService implements OnModuleInit {
   async isUnrestrictedPublic(id: string): Promise<boolean> {
     const file = await this.fileRepository.findOne({
       where: { id, isDeleted: false, accessType: FileAccessType.PUBLIC },
-      select: ['password', 'maxAccessCount', 'expiresIn', 'expiresStartAt'],
+      select: { password: true, maxAccessCount: true, expiresIn: true, expiresStartAt: true },
     });
     if (!file) {
       return false;
@@ -2838,7 +2838,7 @@ export class FileService implements OnModuleInit {
    * 生成短效访问 token（30 秒有效期，jti 防重放攻击）
    */
   generateAccessToken(fileId: string): string {
-    const jti = uuidv4();
+    const jti = randomUUID();
     return this.jwtService.sign(
       { sub: fileId, purpose: 'stream', jti },
       { expiresIn: '30s' },
@@ -2949,7 +2949,16 @@ export class FileService implements OnModuleInit {
     // 1. 查找文件，校验存在且未删除（select 包含遗留约束字段，用于懒创建 ShareLink）
     const file = await this.fileRepository.findOne({
       where: { id, isDeleted: false },
-      select: ['id', 'accessType', 'uploaderId', 'originalName', 'password', 'maxAccessCount', 'expiresIn', 'expiresStartAt'],
+      select: {
+        id: true,
+        accessType: true,
+        uploaderId: true,
+        originalName: true,
+        password: true,
+        maxAccessCount: true,
+        expiresIn: true,
+        expiresStartAt: true,
+      },
     });
     if (!file) {
       throw new NotFoundException('文件不存在');
@@ -3150,7 +3159,7 @@ export class FileService implements OnModuleInit {
     const publicCandidates = candidateIds.length > 0
       ? await this.fileRepository.find({
           where: { id: In(candidateIds), isDeleted: false, accessType: FileAccessType.PUBLIC },
-          select: ['id', 'password', 'maxAccessCount', 'expiresIn', 'expiresStartAt'],
+          select: { id: true, password: true, maxAccessCount: true, expiresIn: true, expiresStartAt: true },
         })
       : [];
     const unrestrictedIds = new Set(
@@ -3526,15 +3535,15 @@ export class FileService implements OnModuleInit {
     // 固定锁顺序：files → 排序后的 tags → file_tags，避免与父表级联删除形成环形等待。
     await this.fileRepository.manager.transaction(async (manager) => {
       const dbType = getDatabaseType();
-      const lockedFiles = await databaseQuery<Array<{ id: string }>>(manager, `SELECT id FROM files WHERE id = $1${databaseForUpdate(manager.connection.options.type)}`, [fileId], dbType);
+      const lockedFiles = await databaseQuery<Array<{ id: string }>>(manager, `SELECT id FROM files WHERE id = $1${databaseForUpdate(manager.dataSource.options.type)}`, [fileId], dbType);
       if (lockedFiles.length === 0) {
         throw new NotFoundException('文件不存在');
       }
       if (uniqueTagIds.length > 0) {
         const tagPlaceholders = uniqueTagIds.map((_, index) => `$${index + 1}`).join(', ');
-        await databaseQuery(manager, `SELECT id FROM tags WHERE id IN (${tagPlaceholders}) ORDER BY id${databaseForUpdate(manager.connection.options.type, 'key-share')}`, uniqueTagIds, dbType);
+        await databaseQuery(manager, `SELECT id FROM tags WHERE id IN (${tagPlaceholders}) ORDER BY id${databaseForUpdate(manager.dataSource.options.type, 'key-share')}`, uniqueTagIds, dbType);
       }
-      await manager.query('DELETE FROM file_tags WHERE "fileId" = $1', [fileId]);
+      await databaseRawQuery(manager, 'DELETE FROM file_tags WHERE "fileId" = $1', [fileId]);
       if (uniqueTagIds.length > 0) {
         await this.insertFileTags(manager, fileId, uniqueTagIds);
       }
@@ -3606,7 +3615,7 @@ export class FileService implements OnModuleInit {
     const placeholders = tagIds.map((_, i) => `($${i * 2 + 1}, $${i * 2 + 2})`).join(', ');
     const params: any[] = [];
     tagIds.forEach((tagId) => { params.push(fileId, tagId); });
-    await manager.query(
+    await databaseRawQuery(manager,
       `INSERT INTO file_tags ("fileId", "tagId") VALUES ${placeholders}`,
       params,
     );

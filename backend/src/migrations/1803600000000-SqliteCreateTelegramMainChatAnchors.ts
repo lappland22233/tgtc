@@ -15,7 +15,7 @@ export class SqliteCreateTelegramMainChatAnchors1803600000000 implements Migrati
   name = 'SqliteCreateTelegramMainChatAnchors1803600000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'sqlite') return;
+    if (queryRunner.dataSource.options.type !== 'better-sqlite3') return;
 
     await queryRunner.query(`
       CREATE TABLE IF NOT EXISTS "telegram_main_chat_anchors" (
@@ -46,7 +46,7 @@ export class SqliteCreateTelegramMainChatAnchors1803600000000 implements Migrati
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'sqlite') return;
+    if (queryRunner.dataSource.options.type !== 'better-sqlite3') return;
     await queryRunner.query(`DROP INDEX IF EXISTS "idx_tg_main_chat_anchors_anchor"`);
     await queryRunner.query(`DROP INDEX IF EXISTS "uq_tg_main_chat_anchors_owner"`);
     await queryRunner.query(`DROP TABLE IF EXISTS "telegram_main_chat_anchors"`);

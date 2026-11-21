@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger, OnApplicationShutdown, Optional } from '@nestjs/common';
+import { BeforeApplicationShutdown, Inject, Injectable, Logger, OnApplicationBootstrap, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createReadStream } from 'fs';
 import { mkdir, open, stat, unlink } from 'fs/promises';
@@ -7,32 +7,65 @@ import { Readable } from 'stream';
 import * as path from 'path';
 import { randomUUID } from 'crypto';
 import { TelegramService } from '../telegram/telegram.service';
+import { TelegramRateLimitError } from '../telegram/telegram.errors';
 import { AuditService } from '../common/services/audit.service';
 import { AuditStatus } from '../common/entities/audit-log.entity';
 import type { TelegramMessage, TelegramUpdate, TelegramUser } from '../telegram/telegram.types';
 import { FileCopyService } from '../telegram-account-pool/file-copy.service';
 import { ReplicationAttemptService } from '../telegram-account-pool/replication-attempt.service';
-import { TelegramAccountClientService } from '../telegram-account-pool/telegram-account-client.service';
+import { TelegramAccountClientService, TelegramAccountError } from '../telegram-account-pool/telegram-account-client.service';
 import { TelegramAccountPoolService } from '../telegram-account-pool/telegram-account-pool.service';
 import { AccountAwareDownloadService } from '../telegram-account-pool/account-aware-download.service';
+import type { AccountAwareDownloadFailure } from '../telegram-account-pool/account-aware-stream.types';
 import { StorageRouterService } from '../storage/storage-router.service';
 import type { StorageUploadReceipt } from '../storage/storage.types';
 import { TelegramBotFileGrant } from '../common/entities/telegram-bot-file-grant.entity';
+import { TelegramBotInboundTask } from '../common/entities/telegram-bot-inbound-task.entity';
+import { redactBotToken } from '../common/utils/sensitive-data';
 import { TelegramMirrorConfigService } from '../telegram-mirror/telegram-mirror-config.service';
 import { TelegramMirrorTriggerService } from '../telegram-mirror/telegram-mirror-trigger.service';
 import { DownloadResourceCoordinatorService, DownloadReservation } from '../file/download-resource-coordinator.service';
 import { UploadDiskBudgetService } from '../file/upload-disk-budget.service';
 import { BotTransferTrackerService } from './bot-transfer-tracker.service';
 import { TelegramBotConfigService } from './telegram-bot-config.service';
-import { TelegramBotGrantService } from './telegram-bot-grant.service';
+import { IssueGrantInput, TelegramBotGrantService } from './telegram-bot-grant.service';
+import { TelegramBotInboundQueueService } from './telegram-bot-inbound-queue.service';
 import { TelegramBotQuotaService } from './telegram-bot-quota.service';
 import { TelegramBotAdminService } from './telegram-bot-admin.service';
-import { TelegramBotIdentity, TelegramBotRuntimeConfig } from './telegram-bot.types';
+import { TelegramBotIdentity } from './telegram-bot.types';
 
 /** Telegram 单条消息文本上限（预留截断余量） */
 const MAX_MESSAGE_LENGTH = 3800;
 /** /link_query 结果最多展示条数（避免刷屏与超长消息） */
 const MAX_LINK_QUERY_RESULTS = 20;
+const QUEUE_POLL_MS = 500;
+const LEASE_RENEWAL_MS = 1_000;
+const NOTICE_INTERVAL_MS = 1_100;
+const NOTICE_RETRY_MS = 5_000;
+const BANNED_TEXT = '此 Telegram 账号已被停用，无法创建下载链接。';
+const TRANSFER_FAILED_TEXT = '创建下载链接失败，请稍后重试。';
+const DISK_UNAVAILABLE_TEXT = '服务器临时磁盘空间不足，无法转存文件，请稍后重试。';
+
+class InboundPersistenceError extends Error {
+  constructor(cause: unknown) {
+    super('Bot 收件队列写入失败', { cause });
+  }
+}
+
+class TelegramTransferBackoff extends Error {
+  constructor(readonly delayMs: number) { super('Telegram 回源暂时受限'); }
+}
+
+function telegramBackoffMs(error: unknown): number | null {
+  if (error instanceof TelegramTransferBackoff) return error.delayMs;
+  if (error instanceof TelegramRateLimitError) return error.retryAfterSeconds * 1_000;
+  if (error instanceof TelegramAccountError && error.kind === 'flood') {
+    return Math.max(1, error.retryAfterSeconds ?? 3) * 1_000;
+  }
+  const response = (error as { response?: { status?: number; data?: { parameters?: { retry_after?: number } } } })?.response;
+  if (response?.status !== 429) return null;
+  return Math.max(1, Number(response.data?.parameters?.retry_after) || 3) * 1_000;
+}
 
 /**
  * 单条更新的上下文。
@@ -81,7 +114,7 @@ interface GrantClaimAttribution {
  * 本地 Bot API（`--local` + 流式端点）对可服务的文件大小无上限。
  */
 @Injectable()
-export class TelegramBotDispatchService implements OnApplicationShutdown {
+export class TelegramBotDispatchService implements OnApplicationBootstrap, BeforeApplicationShutdown {
   private readonly logger = new Logger(TelegramBotDispatchService.name);
   /** 首个异步操作之前登记，在文档处理及其后台转存结束后释放。 */
   private readonly activeTransfers = new Map<string, { abortController: AbortController; promise: Promise<void> }>();
@@ -93,6 +126,20 @@ export class TelegramBotDispatchService implements OnApplicationShutdown {
   private readonly inFlightNoticeCooldownMs = 15_000;
   private isShuttingDown = false;
   private shutdownDrainTimeoutMs = 10_000;
+  private queueTimer?: NodeJS.Timeout;
+  private readonly queueWorkers = new Map<string, Promise<void>>();
+  private readonly noticeWorkers = new Map<string, Promise<void>>();
+  private readonly nextNoticeAt = new Map<string, number>();
+  private readonly telegramCooldownUntil = new Map<string, number>();
+
+  onApplicationBootstrap(): void {
+    const enabled = this.configService?.get<string>('TELEGRAM_BOT_UPDATES_ENABLED');
+    if (enabled?.trim().toLowerCase() === 'true') {
+      this.queueTimer = setInterval(() => this.pollQueue(), QUEUE_POLL_MS);
+      this.queueTimer.unref();
+      this.pollQueue();
+    }
+  }
 
   getActiveTransferCount(): number {
     return this.activeTransfers.size;
@@ -102,14 +149,16 @@ export class TelegramBotDispatchService implements OnApplicationShutdown {
     this.shutdownDrainTimeoutMs = ms;
   }
 
-  async onApplicationShutdown(): Promise<void> {
+  async beforeApplicationShutdown(): Promise<void> {
     this.isShuttingDown = true;
-    if (this.activeTransfers.size === 0) return;
+    clearInterval(this.queueTimer);
+    const workers = [...this.queueWorkers.values(), ...this.noticeWorkers.values()];
+    if (this.activeTransfers.size === 0 && workers.length === 0) return;
 
     const count = this.activeTransfers.size;
     this.logger.log(`正在等待 ${count} 个后台转存任务排空（最多 ${this.shutdownDrainTimeoutMs / 1000} 秒）...`);
 
-    const allPromises = Array.from(this.activeTransfers.values()).map((t) => t.promise);
+    const allPromises = [...workers, ...Array.from(this.activeTransfers.values()).map((t) => t.promise)];
     let timer: NodeJS.Timeout | null = null;
     const timeoutPromise = new Promise<boolean>((resolve) => {
       timer = setTimeout(() => resolve(false), this.shutdownDrainTimeoutMs);
@@ -122,7 +171,7 @@ export class TelegramBotDispatchService implements OnApplicationShutdown {
 
     if (!drained && this.activeTransfers.size > 0) {
       this.logger.warn(
-        `后台转存任务未在规定时间内完成，正在中止剩余 ${this.activeTransfers.size} 个任务并退还配额...`,
+        `后台转存任务未在规定时间内完成，正在中止剩余 ${this.activeTransfers.size} 个任务...`,
       );
       for (const transfer of this.activeTransfers.values()) {
         transfer.abortController.abort();
@@ -147,6 +196,7 @@ export class TelegramBotDispatchService implements OnApplicationShutdown {
     private readonly grantService: TelegramBotGrantService,
     private readonly adminService: TelegramBotAdminService,
     private readonly auditService: AuditService,
+    private readonly inboundQueue: TelegramBotInboundQueueService,
     // 以下参数仅用于「账号池」增强路径；未启用时全部为可选依赖（保持原单账号行为）。
     //
     // 必须显式 `@Inject(X)`：`X | null` 联合类型在运行时只会发出 `Object`，
@@ -240,6 +290,7 @@ export class TelegramBotDispatchService implements OnApplicationShutdown {
       }
       await this.reply(chatId, this.buildHelpText(), message.message_id, accountId);
     } catch (error) {
+      if (error instanceof InboundPersistenceError) throw error;
       const message = error instanceof Error ? error.message : String(error);
       this.logger.error(`处理 Bot 更新失败（已忽略）: ${message}`);
     }
@@ -802,17 +853,24 @@ export class TelegramBotDispatchService implements OnApplicationShutdown {
     let drained!: () => void;
     const promise = new Promise<void>((resolve) => { drained = resolve; });
     this.activeTransfers.set(msgKey, { abortController, promise });
-    let waitingForLink = false;
     const finish = () => {
-      if (waitingForLink) this.decrementChatActiveTransfer(conversationKey);
-      this.activeTransfers.delete(msgKey);
+      if (this.activeTransfers.get(msgKey)?.abortController === abortController) this.activeTransfers.delete(msgKey);
       drained();
     };
     let background: Promise<void> | undefined;
     try {
+      const queueState = await this.inboundQueue.findByMessage(receiverBotId, chatId, messageId)
+        .catch((error: unknown) => { throw new InboundPersistenceError(error); });
+      if (queueState) return;
+
+      if (await this.inboundQueue.isBanned(identity.telegramUserId)
+        .catch((error: unknown) => { throw new InboundPersistenceError(error); })) {
+        await this.reply(chatId, BANNED_TEXT, message.message_id, accountId);
+        return;
+      }
       const existing = await this.grantService.findByMessage(
         identity.telegramUserId, chatId, messageId, receiverBotId, doc.file_id,
-      );
+      ).catch((error: unknown) => { throw new InboundPersistenceError(error); });
       if (existing) {
         const token = this.grantService.replayToken(existing);
         const origin = await this.botConfigService.resolveSiteOriginAsync();
@@ -833,8 +891,6 @@ export class TelegramBotDispatchService implements OnApplicationShutdown {
         }
         return;
       }
-      await this.registerInboundCopyAndForward(message, accountId);
-
       // 不设文件大小上限（含 `MAX_FILE_SIZE`）：
       // - Bot 文件不经过本站上传链路，`MAX_FILE_SIZE` 是「后台上传配置」的上传策略，与下载无关；
       // - 本地 Bot API 以 `--local` 运行时跳过 `MAX_DOWNLOAD_FILE_SIZE`（20MB）检查，
@@ -842,10 +898,13 @@ export class TelegramBotDispatchService implements OnApplicationShutdown {
       // - 是否可播放/下载由客户端与磁盘决定，服务端不再提前拒绝。
       const fileSize = typeof doc.file_size === 'number' && doc.file_size > 0 ? doc.file_size : null;
 
-      await this.auditDocumentReceived(identity, message, fileSize);
-
       // 域名解析（fail-closed）：无可用可信域名时拒绝签发，且不消耗配额
-      const origin = await this.botConfigService.resolveSiteOriginAsync();
+      const config = await this.botConfigService.getConfig()
+        .catch((error: unknown) => { throw new InboundPersistenceError(error); });
+      const origin = await this.botConfigService.resolveSiteOriginAsync().catch((error: unknown) => {
+        if (config.storageMode === 'gdrive') throw new InboundPersistenceError(error);
+        throw error;
+      });
       if (!origin) {
         await this.reply(
           chatId,
@@ -856,38 +915,69 @@ export class TelegramBotDispatchService implements OnApplicationShutdown {
         return;
       }
 
-      const config = await this.botConfigService.getConfig();
       const usageDate = this.quotaService.getBusinessDate(config.quotaTimezone);
-      const whitelisted = await this.quotaService.isWhitelisted(identity.telegramUserId);
 
       if (this.isShuttingDown) {
         await this.reply(chatId, '服务正在维护重启中，请稍后重新发送文件。', message.message_id, accountId);
         return;
       }
+      const grantInput: IssueGrantInput = {
+        ...identity,
+        chatId,
+        messageId,
+        telegramFileId: doc.file_id,
+        sourceAccountId: accountId ?? receiverBotId,
+        receiverBotId,
+        fileName: this.sanitizePlain(doc.file_name, 255),
+        mimeType: this.sanitizePlain(doc.mime_type, 128),
+        fileSize: fileSize === null ? null : String(fileSize),
+        fileUniqueId: doc.file_unique_id ?? null,
+      };
+      if (config.storageMode === 'gdrive') {
+        const { username, displayName, ...fields } = grantInput;
+        const result = await this.inboundQueue.enqueue({
+          ...fields,
+          sourceAccountId: accountId ?? null,
+          fileUniqueId: fields.fileUniqueId ?? null,
+          telegramUsername: username,
+          telegramDisplayName: displayName,
+          usageDate,
+          dailyLimit: config.dailyLimit,
+        }, (manager, task) => this.auditService.logInTransaction(manager, {
+          action: 'telegram_bot_file_received',
+          resourceType: 'telegram_bot_file',
+          resourceId: task.id,
+          metadata: {
+            telegramUserId: task.telegramUserId,
+            telegramUsername: task.telegramUsername,
+            chatId: task.chatId,
+            chatType: 'private',
+            messageId: task.messageId,
+            fileName: task.fileName,
+            fileSize,
+            mimeType: task.mimeType,
+            viaWhitelist: !task.quotaConsumed,
+          },
+        })).catch((error: unknown) => { throw new InboundPersistenceError(error); });
+        if (result.status === 'queued') {
+          this.pollQueue();
+        } else if (result.status === 'banned') {
+          await this.reply(chatId, BANNED_TEXT, message.message_id, accountId);
+        } else if (result.status === 'quota_denied') {
+          await this.replyQuotaDenied(identity, usageDate, result.used, config.dailyLimit, chatId, message.message_id, accountId);
+        }
+        return;
+      }
+
+      await this.registerInboundCopyAndForward(message, accountId);
+      await this.auditDocumentReceived(identity, message, fileSize);
+      const whitelisted = await this.quotaService.isWhitelisted(identity.telegramUserId);
       let quotaConsumed = false;
       let quotaUsed = 0;
       if (!whitelisted) {
         const quota = await this.quotaService.consume(identity.telegramUserId, usageDate, config.dailyLimit);
         if (!quota.allowed) {
-          this.auditService.log({
-            action: 'telegram_bot_quota_denied',
-            resourceType: 'telegram_bot_quota',
-            resourceId: identity.telegramUserId,
-            status: AuditStatus.FAILURE,
-            metadata: {
-              telegramUserId: identity.telegramUserId,
-              telegramUsername: identity.username,
-              quotaDate: usageDate,
-              quotaUsed: quota.used,
-              quotaLimit: config.dailyLimit,
-            },
-          });
-          await this.reply(
-            chatId,
-            `今日额度已用完（${config.dailyLimit} 个文件/天）。明日将自动重置，或联系管理员加入白名单。`,
-            message.message_id,
-            accountId,
-          );
+          await this.replyQuotaDenied(identity, usageDate, quota.used, config.dailyLimit, chatId, message.message_id, accountId);
           return;
         }
         quotaConsumed = true;
@@ -896,66 +986,16 @@ export class TelegramBotDispatchService implements OnApplicationShutdown {
         quotaUsed = await this.quotaService.getUsed(identity.telegramUserId, usageDate);
       }
 
-      // 纯 Google 存储模式：先回复等待提示，后台异步拉流并直传 Google 云端硬盘
-      if (config.storageMode === 'gdrive') {
-        if (this.isShuttingDown) {
-          if (quotaConsumed) {
-            await this.quotaService.refund(identity.telegramUserId, usageDate);
-          }
-          await this.reply(chatId, '服务正在维护重启中，请稍后重新发送文件。', message.message_id, accountId);
-          return;
-        }
-
-        this.incrementChatActiveTransfer(conversationKey);
-        waitingForLink = true;
-        const waitingMsgId = await this.sendWaitingNotice(message, accountId, abortController.signal);
-        // Telegram 确认等待提示期间，服务仍可能进入停机排空。
-        if (this.isShuttingDown) {
-          if (quotaConsumed) await this.quotaService.refund(identity.telegramUserId, usageDate);
-          if (!abortController.signal.aborted) {
-            await this.updateOrReply(chatId, waitingMsgId, '服务正在维护重启中，请稍后重新发送文件。', message.message_id, accountId);
-          }
-          return;
-        }
-        background = this.executeGDriveTransfer({
-          message,
-          identity,
-          chatId,
-          messageId,
-          fileSize,
-          usageDate,
-          whitelisted,
-          quotaConsumed,
-          quotaUsed,
-          origin,
-          config,
-          waitingMsgId,
-          accountId,
-          receiverBotId,
-        }, abortController);
-        return;
-      }
-
       try {
-        const { grant, token } = await this.grantService.issue(
-          {
-            telegramUserId: identity.telegramUserId,
-            username: identity.username,
-            displayName: identity.displayName,
-            chatId,
-            messageId,
-            telegramFileId: doc.file_id,
-            // 回退安全锚点：池化模式=收到消息的账号；单账号模式=默认 Token 的 botId
-            sourceAccountId: accountId ?? receiverBotId,
-            receiverBotId,
-            fileName: this.sanitizePlain(doc.file_name, 255),
-            mimeType: this.sanitizePlain(doc.mime_type, 128),
-            fileSize: fileSize === null ? null : String(fileSize),
-            // 内容标识（跨账号稳定）：把群内认领归因回该 grant 的键（群内消息不含私聊锚点）
-            fileUniqueId: doc.file_unique_id ?? null,
-          },
-          config.linkTtlHours,
+        const issued = await this.inboundQueue.withUnbannedUser(identity.telegramUserId, (manager) =>
+          this.grantService.issue(grantInput, config.linkTtlHours, manager),
         );
+        if (!issued) {
+          if (quotaConsumed) await this.quotaService.refund(identity.telegramUserId, usageDate);
+          await this.reply(chatId, BANNED_TEXT, message.message_id, accountId);
+          return;
+        }
+        const { grant, token } = issued;
 
         // grant 命名空间主副本行（best-effort）：轮次结算按 `grant:<id>` 查 ready 副本，
         // 源账号收到文件时先写基线行，否则「副本已产生但轮次结算为 claim_timeout」；
@@ -1013,6 +1053,28 @@ export class TelegramBotDispatchService implements OnApplicationShutdown {
         finish();
       }
     }
+  }
+
+  private async replyQuotaDenied(
+    identity: TelegramBotIdentity, usageDate: string, used: number, limit: number,
+    chatId: string, messageId: number, accountId?: string,
+  ): Promise<void> {
+    this.auditService.log({
+      action: 'telegram_bot_quota_denied',
+      resourceType: 'telegram_bot_quota',
+      resourceId: identity.telegramUserId,
+      status: AuditStatus.FAILURE,
+      metadata: {
+        telegramUserId: identity.telegramUserId,
+        telegramUsername: identity.username,
+        quotaDate: usageDate,
+        quotaUsed: used,
+        quotaLimit: limit,
+      },
+    });
+    await this.reply(
+      chatId, `今日额度已用完（${limit} 个文件/天）。明日将自动重置，或联系管理员加入白名单。`, messageId, accountId,
+    );
   }
 
   /**
@@ -1155,23 +1217,129 @@ export class TelegramBotDispatchService implements OnApplicationShutdown {
     ].join('\n');
   }
 
-  private async sendWaitingNotice(
-    message: TelegramMessage,
-    accountId: string | undefined,
-    signal: AbortSignal,
-  ): Promise<number | null> {
-    if (signal.aborted) return null;
-    let cancel!: () => void;
-    const cancelled = new Promise<null>((resolve) => { cancel = () => resolve(null); });
-    signal.addEventListener('abort', cancel, { once: true });
-    try {
-      return await Promise.race([
-        this.reply(String(message.chat.id), '⏳ 正在创建下载链接，请稍候...', message.message_id, accountId),
-        cancelled,
-      ]);
-    } finally {
-      signal.removeEventListener('abort', cancel);
+  private pollQueue(): void {
+    if (this.isShuttingDown) return;
+    const accounts = new Map<string, string | undefined>();
+    if (this.pool?.isActive()) {
+      for (const accountId of this.pool.ids()) {
+        const botId = this.pool.getConfig(accountId)?.token.split(':')[0];
+        if (botId && /^\d+$/.test(botId)) accounts.set(botId, accountId);
+      }
+    } else {
+      const botId = this.defaultSourceAccountId();
+      if (botId) accounts.set(botId, undefined);
     }
+
+    const now = Date.now();
+    for (const [botId, accountId] of accounts) {
+      if ((this.telegramCooldownUntil.get(botId) ?? 0) > now) continue;
+      if ((this.nextNoticeAt.get(botId) ?? 0) <= now) {
+        this.startQueueWorker(this.noticeWorkers, botId, () => this.deliverQueueNotice(botId, accountId));
+      }
+      this.startQueueWorker(this.queueWorkers, botId, () => this.processQueuedFile(botId, accountId));
+    }
+  }
+
+  private startQueueWorker(workers: Map<string, Promise<void>>, botId: string, run: () => Promise<void>): void {
+    if (workers.has(botId)) return;
+    const pending = run().catch((error: unknown) => {
+      this.logger.error(`Bot ${botId} 队列处理失败: ${redactBotToken(error instanceof Error ? error.message : String(error))}`);
+    }).finally(() => { workers.delete(botId); });
+    workers.set(botId, pending);
+  }
+
+  private async processQueuedFile(botId: string, accountId?: string): Promise<void> {
+    const task = await this.inboundQueue.claimNext(botId);
+    if (!task) return;
+    if (this.isShuttingDown) {
+      await this.inboundQueue.release(task);
+      return;
+    }
+    const controller = new AbortController();
+    const conversationKey = `${botId}:${task.chatId}`;
+    const taskKey = `${conversationKey}:${task.messageId}`;
+    this.incrementChatActiveTransfer(conversationKey);
+    const pending = this.executeGDriveTransfer(task, controller, accountId).finally(() => {
+      this.decrementChatActiveTransfer(conversationKey);
+      if (this.activeTransfers.get(taskKey)?.abortController === controller) this.activeTransfers.delete(taskKey);
+    });
+    this.activeTransfers.set(taskKey, { abortController: controller, promise: pending });
+    await pending;
+  }
+
+  private async deliverQueueNotice(botId: string, accountId?: string): Promise<void> {
+    const notice = await this.inboundQueue.nextNotice(botId);
+    if (!notice) return;
+    if (this.isShuttingDown) {
+      await this.inboundQueue.deferNotice(notice, 0);
+      return;
+    }
+    const { task, position } = notice;
+    let messageId: number | null;
+    try {
+      const text = await this.queueNoticeText(task, position);
+      this.nextNoticeAt.set(botId, Date.now() + NOTICE_INTERVAL_MS);
+      messageId = await this.sendQueueNotice(task, text, accountId);
+    } catch (error) {
+      const wait = telegramBackoffMs(error);
+      if (wait) this.telegramCooldownUntil.set(botId, Date.now() + wait);
+      const status = error instanceof TelegramAccountError ? error.status : (error as { response?: { status?: number } })?.response?.status;
+      if (status === 403 || /bot was blocked|chat not found|user is deactivated/i.test((error as Error)?.message ?? '')) {
+        await this.inboundQueue.markNotice(notice, task.waitingMsgId);
+      } else {
+        await this.inboundQueue.deferNotice(notice, wait ?? NOTICE_RETRY_MS, Boolean(wait));
+      }
+      return;
+    }
+    await this.inboundQueue.markNotice(notice, messageId);
+  }
+
+  private async queueNoticeText(task: TelegramBotInboundTask, position: number): Promise<string> {
+    const fileName = task.fileName ?? '(未命名)';
+    if (task.status === 'queued') return `⏳ 已加入队列，当前排第 ${position} 位。\n文件名：${fileName}`;
+    if (task.status === 'running') return `⏳ 正在创建下载链接，请稍候…\n文件名：${fileName}`;
+    if (task.status === 'cancelled') return `管理员已取消文件处理。\n文件名：${fileName}`;
+    if (task.status === 'failed') return task.failureReason === 'disk_unavailable' ? DISK_UNAVAILABLE_TEXT : TRANSFER_FAILED_TEXT;
+
+    const grant = task.grantId ? await this.grantService.findById(task.grantId) : null;
+    if (!grant || !this.grantService.isActive(grant)) return `文件的下载链接已失效。\n文件名：${fileName}`;
+    const token = this.grantService.tokenForQueuedNotice(grant, task.id);
+    const origin = await this.botConfigService.resolveSiteOriginAsync();
+    if (!origin) throw new Error('站点域名暂不可用，稍后重试发送直链');
+    if (!token) return `无法恢复此文件的下载链接，请重新发送文件。\n文件名：${fileName}`;
+    const url = this.grantService.buildUrl(origin, token);
+    const expiry = new Date(grant.expiresAt).toISOString();
+    return `文件已就绪！\n文件名：${fileName}\n下载直链（有效期至 ${expiry}）：\n${url}\n⚠️ 链接到期后文件将自动失效并删除。`;
+  }
+
+  private async sendQueueNotice(task: TelegramBotInboundTask, text: string, accountId?: string): Promise<number | null> {
+    const account = accountId && this.pool?.getConfig(accountId);
+    if (accountId && (!account || !this.accountClient || account.token.split(':')[0] !== task.receiverBotId)) {
+      throw new Error('接收 Bot 的账号配置暂不可用');
+    }
+    if (!accountId && this.defaultSourceAccountId() !== task.receiverBotId) {
+      throw new Error('默认 Bot 已变更，无法发送收件通知');
+    }
+    const existingId = task.waitingMsgId;
+    if (existingId) {
+      try {
+        const edited = account && this.accountClient
+          ? await this.accountClient.editMessageText(account.id, account.token, task.chatId, existingId, text)
+          : await this.telegramService.editMessageText(task.chatId, existingId, text, { deferRateLimit: true });
+        if (edited) return existingId;
+      } catch (error) {
+        const message = (error as Error)?.message ?? '';
+        if (/message is not modified/i.test(message)) return existingId;
+        if (!/message to edit not found|message can.t be edited/i.test(message)) throw error;
+      }
+    }
+    const options = { replyToMessageId: Number(task.messageId) };
+    if (account && this.accountClient) {
+      const sent = await this.accountClient.sendMessage(account.id, account.token, task.chatId, text, options);
+      return sent.messageId ?? null;
+    }
+    const sent = await this.telegramService.sendMessage(task.chatId, text, { ...options, deferRateLimit: true });
+    return sent.message_id ?? null;
   }
 
   private incrementChatActiveTransfer(conversationKey: string): void {
@@ -1218,41 +1386,21 @@ export class TelegramBotDispatchService implements OnApplicationShutdown {
    * 纯 Google 存储模式后台异步转存管线。
    */
   private async executeGDriveTransfer(
-    params: {
-      message: TelegramMessage;
-      identity: TelegramBotIdentity;
-      chatId: string;
-      messageId: string;
-      fileSize: number | null;
-      usageDate: string;
-      whitelisted: boolean;
-      quotaConsumed: boolean;
-      quotaUsed: number;
-      origin: string;
-      config: TelegramBotRuntimeConfig;
-      waitingMsgId: number | null;
-      accountId?: string;
-      receiverBotId: string;
-    },
+    task: TelegramBotInboundTask,
     controller: AbortController,
+    accountId?: string,
   ): Promise<void> {
-    const {
-      message,
-      identity,
-      chatId,
-      messageId,
-      fileSize,
-      usageDate,
-      whitelisted,
-      quotaConsumed,
-      quotaUsed,
-      origin,
-      config,
-      waitingMsgId,
-      accountId,
-      receiverBotId,
-    } = params;
-    const doc = message.document!;
+    const { signal } = controller;
+    const reportedSize = Number(task.fileSize);
+    const fileSize = Number.isSafeInteger(reportedSize) && reportedSize > 0 ? reportedSize : undefined;
+    let renewing: Promise<void> | undefined;
+    const heartbeat = setInterval(() => {
+      if (renewing || signal.aborted) return;
+      renewing = this.inboundQueue.renew(task).then((owned) => {
+        if (!owned) controller.abort();
+      }).catch(() => { controller.abort(); }).finally(() => { renewing = undefined; });
+    }, LEASE_RENEWAL_MS);
+    heartbeat.unref();
     const tempDir = path.join(process.cwd(), 'tmp', 'bot-transfers');
     const tempFilePath = path.join(tempDir, `${randomUUID()}.tmp`);
     const releaseTransferLease = this.transferTracker?.register(tempFilePath);
@@ -1261,159 +1409,140 @@ export class TelegramBotDispatchService implements OnApplicationShutdown {
     let uploadSessionId: string | null = null;
 
     try {
-      if (controller.signal.aborted) {
-        throw new Error('服务正在维护重启，已取消转存');
-      }
-
-      if (!this.storageRouter || !this.storageRouter.availableBackendTypes().includes('gdrive')) {
+      signal.throwIfAborted();
+      const config = await this.botConfigService.getConfig();
+      if (!this.storageRouter?.availableBackendTypes().includes('gdrive')) {
         throw new Error('Google 云端硬盘存储池暂不可用');
       }
 
       await mkdir(tempDir, { recursive: true });
 
-      // 预算与磁盘容量预约（防止并发打满磁盘或突破严格无缓存模式预算）
-      const estimatedBytes = fileSize && fileSize > 0 ? fileSize : 50 * 1024 * 1024;
+      const estimatedBytes = fileSize ?? 50 * 1024 * 1024;
       if (this.uploadDiskBudget?.isStrictMode()) {
-        uploadSessionId = randomUUID();
-        await this.uploadDiskBudget.acquireSession(uploadSessionId, estimatedBytes);
+        const sessionId = randomUUID();
+        await this.uploadDiskBudget.acquireSession(sessionId, estimatedBytes);
+        uploadSessionId = sessionId;
       }
 
       if (this.downloadResources) {
         try {
           diskReservation = await this.downloadResources.reserve({
-            sessionKey: `bot-transfer:${randomUUID()}`,
+            sessionKey: `bot-transfer:${task.id}`,
             bytes: estimatedBytes,
             countsTowardCache: false,
             waitTimeoutMs: 30_000,
-            signal: controller.signal,
+            signal,
           });
-        } catch (resErr) {
-          this.logger.warn(`本地磁盘预约不足，拒绝 Bot 转存任务: ${resErr instanceof Error ? resErr.message : String(resErr)}`);
-          throw new Error('服务器临时磁盘空间不足，无法转存文件，请稍后重试。');
+        } catch (error) {
+          signal.throwIfAborted();
+          this.logger.warn(`本地磁盘预约不足，拒绝 Bot 转存任务: ${error instanceof Error ? error.message : String(error)}`);
+          throw new Error(DISK_UNAVAILABLE_TEXT);
         }
       }
 
-      if (controller.signal.aborted) {
-        throw new Error('服务正在维护重启，已取消转存');
+      signal.throwIfAborted();
+      const configuredBotId = accountId ? this.pool?.getConfig(accountId)?.token.split(':')[0] : this.defaultSourceAccountId();
+      if (configuredBotId !== task.receiverBotId) {
+        throw new Error('Bot 来源账号已变更，无法安全回源');
       }
+      const upstreamStream = await this.getTelegramSourceStream(task.telegramFileId, fileSize, accountId, signal);
+      await this.writeTransferFile(upstreamStream, tempFilePath, diskReservation, signal);
 
-      // 1. 从 Telegram 拉取流并写入本地临时缓冲文件
-      const upstreamStream = await this.getTelegramSourceStream(doc.file_id, fileSize ?? undefined, accountId);
-      await this.writeTransferFile(upstreamStream, tempFilePath, diskReservation, controller.signal);
-
-      if (controller.signal.aborted) {
-        throw new Error('服务正在维护重启，已取消转存');
-      }
-
-      const fileStats = await stat(tempFilePath);
-      const actualSize = fileStats.size;
-
-      // 2. 上传至 Google 云端硬盘
-      uploadReceipt = await this.storageRouter.upload({
+      signal.throwIfAborted();
+      const { size } = await stat(tempFilePath);
+      const receipt = await this.storageRouter.upload({
         backendType: 'gdrive',
-        objectName: doc.file_name || `tg_${doc.file_id}`,
-        knownLength: actualSize,
-        mimeType: doc.mime_type || undefined,
+        objectName: task.fileName ?? `tg_${task.telegramFileId}`,
+        knownLength: size,
+        mimeType: task.mimeType ?? undefined,
         openStream: () => createReadStream(tempFilePath, { highWaterMark: 1024 * 1024 }),
-        signal: controller.signal,
+        signal,
       });
+      uploadReceipt = receipt;
+      signal.throwIfAborted();
 
-      // 3. 上传完成，立即清理本地临时文件并释放磁盘租约
-      await unlink(tempFilePath).catch(() => {});
-      if (diskReservation) {
-        diskReservation.release();
-        diskReservation = null;
-      }
-      if (uploadSessionId && this.uploadDiskBudget) {
-        this.uploadDiskBudget.releaseSession(uploadSessionId);
-        uploadSessionId = null;
-      }
-
-      if (controller.signal.aborted) {
-        throw new Error('服务正在维护重启，已取消转存');
-      }
-
-      // 4. 签发直链授权记录
-      const { grant, token } = await this.grantService.issue(
-        {
-          telegramUserId: identity.telegramUserId,
-          username: identity.username,
-          displayName: identity.displayName,
-          chatId,
-          messageId,
-          telegramFileId: doc.file_id,
-          sourceAccountId: accountId ?? receiverBotId,
-          receiverBotId,
-          fileName: this.sanitizePlain(doc.file_name, 255),
-          mimeType: this.sanitizePlain(doc.mime_type, 128),
-          fileSize: String(actualSize),
-          fileUniqueId: doc.file_unique_id ?? null,
+      const issued = await this.inboundQueue.complete(task, async (manager) => {
+        const result = await this.grantService.issue({
+          telegramUserId: task.telegramUserId,
+          username: task.telegramUsername,
+          displayName: task.telegramDisplayName,
+          chatId: task.chatId,
+          messageId: task.messageId,
+          telegramFileId: task.telegramFileId,
+          sourceAccountId: accountId ?? task.receiverBotId,
+          receiverBotId: task.receiverBotId,
+          fileName: task.fileName,
+          mimeType: task.mimeType,
+          fileSize: String(size),
+          fileUniqueId: task.fileUniqueId,
           storageBackend: 'gdrive',
-          storageAccountId: uploadReceipt.accountId,
-          storageObjectRef: uploadReceipt.objectRef,
-        },
-        config.linkTtlHours,
-      );
-
-      const url = this.grantService.buildUrl(origin, token);
-      const fileName = doc.file_name || '(未命名)';
-
-      this.auditService.log({
-        action: 'telegram_bot_link_issued',
-        resourceType: 'telegram_bot_grant',
-        resourceId: grant.id,
-        metadata: {
-          telegramUserId: identity.telegramUserId,
-          telegramUsername: identity.username,
-          grantId: grant.id,
-          tokenPrefix: grant.tokenPrefix,
-          expiresAt: grant.expiresAt,
-          quotaDate: usageDate,
-          quotaUsed,
-          viaWhitelist: whitelisted,
-          domainMode: config.linkDomainMode,
-          sourceAccountId: grant.sourceAccountId,
-          storageBackend: 'gdrive',
-          fileName,
-        },
+          storageAccountId: receipt.accountId,
+          storageObjectRef: receipt.objectRef,
+        }, config.linkTtlHours, manager, task.id);
+        await this.auditService.logInTransaction(manager, {
+          action: 'telegram_bot_link_issued',
+          resourceType: 'telegram_bot_grant',
+          resourceId: result.grant.id,
+          metadata: {
+            telegramUserId: task.telegramUserId,
+            telegramUsername: task.telegramUsername,
+            grantId: result.grant.id,
+            tokenPrefix: result.grant.tokenPrefix,
+            expiresAt: result.grant.expiresAt,
+            quotaDate: task.usageDate,
+            quotaUsed: task.quotaUsed,
+            viaWhitelist: !task.quotaConsumed,
+            domainMode: config.linkDomainMode,
+            sourceAccountId: result.grant.sourceAccountId,
+            storageBackend: 'gdrive',
+            fileName: task.fileName,
+          },
+        });
+        return result;
       });
-
-      const successText = `文件已就绪！\n文件名：${fileName}\n下载直链（${config.linkTtlHours} 小时内有效）：\n${url}\n⚠️ 链接到期后文件将自动失效并删除。`;
-      await this.updateOrReply(chatId, waitingMsgId, successText, message.message_id, accountId);
+      if (!issued) return;
+      // 事务提交后，上传对象归授权记录所有。通知失败时由通知队列重试。
+      uploadReceipt = null;
+      if (accountId && this.pool?.getConfig(accountId)?.token.split(':')[0] === task.receiverBotId) {
+        await this.registerInboundCopyAndForward({
+          chat: { id: Number(task.chatId), type: 'private' },
+          message_id: Number(task.messageId),
+          document: { file_id: task.telegramFileId, file_unique_id: task.fileUniqueId ?? undefined, file_size: size },
+        }, accountId).catch(() => { this.logger.warn(`Bot 收件任务 ${task.id} 的副本登记或归档失败`); });
+      }
     } catch (error) {
-      await unlink(tempFilePath).catch(() => {});
-      // [P0-05 Fix]: Saga 补偿：若 GDrive 已经上传入库但后续签发直链或通知失败，必须补偿删除远端对象防幽灵孤儿文件
-      if (uploadReceipt?.accountId && uploadReceipt?.objectRef && this.storageRouter) {
-        this.logger.warn(`Saga 补偿：签发直链失败，正在清理远端 GDrive 孤儿文件 ${uploadReceipt.objectRef}`);
-        await this.storageRouter
-          .deleteRemoteObject('gdrive', uploadReceipt.accountId, uploadReceipt.objectRef)
-          .catch((delErr) => {
-            this.logger.error(`Saga 补偿清理 GDrive 孤儿文件失败: ${delErr?.message || String(delErr)}`);
-          });
+      if (!signal.aborted) {
+        const wait = telegramBackoffMs(error);
+        if (wait) {
+          this.telegramCooldownUntil.set(task.receiverBotId, Date.now() + wait);
+          await this.inboundQueue.retry(task, wait);
+        } else {
+          const detail = error instanceof Error ? error.message : String(error);
+          this.logger.error(`Bot 转存失败: ${redactBotToken(detail)}`);
+          await this.inboundQueue.fail(task, detail === DISK_UNAVAILABLE_TEXT ? 'disk_unavailable' : 'transfer_failed');
+        }
       }
-      if (quotaConsumed) {
-        await this.quotaService.refund(identity.telegramUserId, usageDate);
-      }
-      const isAborted = controller.signal.aborted;
-      const detail = error instanceof Error ? error.message : String(error);
-      this.logger.error(`纯 Google 存储模式转存并签发直链失败${isAborted ? '（服务停机中止）' : ''}: ${detail}`);
-      const failText = isAborted
-        ? '服务正在维护重启，请稍后重新发送文件。'
-        : (error instanceof Error && error.message.includes('服务器临时磁盘空间不足')
-          ? error.message
-          : '创建下载链接失败，请稍后重试。');
-      await this.updateOrReply(chatId, waitingMsgId, failText, message.message_id, accountId).catch(() => {});
     } finally {
+      clearInterval(heartbeat);
       releaseTransferLease?.();
       await unlink(tempFilePath).catch(() => {});
-      if (diskReservation) {
-        diskReservation.release();
-        diskReservation = null;
+      diskReservation?.release();
+      if (uploadSessionId) this.uploadDiskBudget?.releaseSession(uploadSessionId);
+      if (uploadReceipt?.accountId && uploadReceipt.objectRef && this.storageRouter) {
+        const { accountId: uploadedAccountId, objectRef } = uploadReceipt;
+        // 若数据库在提交确认时断开，先核对授权拥有权再删除对象，避免已签发链接丢失文件。
+        try {
+          const recorded = await this.grantService.findByMessage(
+            task.telegramUserId, task.chatId, task.messageId, task.receiverBotId, task.telegramFileId,
+          );
+          if (recorded?.storageObjectRef !== objectRef || recorded.storageAccountId !== uploadedAccountId) {
+            await this.storageRouter.deleteRemoteObject('gdrive', uploadedAccountId, objectRef);
+          }
+        } catch {
+          this.logger.error(`Bot 转存任务 ${task.id} 的远端对象清理失败`);
+        }
       }
-      if (uploadSessionId && this.uploadDiskBudget) {
-        this.uploadDiskBudget.releaseSession(uploadSessionId);
-        uploadSessionId = null;
-      }
+      await this.inboundQueue.release(task);
     }
   }
 
@@ -1556,17 +1685,28 @@ export class TelegramBotDispatchService implements OnApplicationShutdown {
     fileId: string,
     fileSize?: number,
     accountId?: string,
+    signal?: AbortSignal,
   ): Promise<Readable> {
     const pool = this.accountPoolDownload;
     if (accountId && pool?.isActive()) {
       if (pool.hasAccount(accountId)) {
+        let retryAfterMs: number | undefined;
         const opened = await pool.openSourceStream({
           accountId,
           fileId,
           expectedSize: fileSize,
           noCache: true,
+          ...(signal ? {
+            signal,
+            onUnavailable: (failure: AccountAwareDownloadFailure) => {
+              if (failure.rateLimited || failure.reason === 'source_cooling_down' || failure.reason === 'source_capacity_busy') {
+                retryAfterMs = failure.retryAfterMs ?? 3_000;
+              }
+            },
+          } : {}),
         });
         if (opened) return opened.stream;
+        if (retryAfterMs) throw new TelegramTransferBackoff(retryAfterMs);
         throw new Error(`未能从指定的 Bot 账号 (${accountId}) 获取文件流`);
       }
       // 账号未在活跃账号池中：仅当匹配默认账号时才允许回退，否则 fail closed
@@ -1579,59 +1719,11 @@ export class TelegramBotDispatchService implements OnApplicationShutdown {
       throw new Error(`账号池未就绪且指定的 Bot 账号 (${accountId}) 与默认账号不匹配，拒绝跨账号回源`);
     }
 
-    const realtime = await this.telegramService.getRealtimeFileStream(fileId, fileSize, { noCache: true });
+    const realtime = await this.telegramService.getRealtimeFileStream(fileId, fileSize, {
+      noCache: true,
+      ...(signal && { signal, deferRateLimit: true }),
+    });
     return realtime.stream;
-  }
-
-  /**
-   * 编辑已有消息，若失败自动降级为回复新消息。
-   */
-  private async updateOrReply(
-    chatId: string,
-    waitingMessageId: number | null,
-    text: string,
-    replyToMessageId?: number,
-    accountId?: string,
-  ): Promise<void> {
-    if (waitingMessageId) {
-      const edited = await this.editMessage(chatId, waitingMessageId, text, accountId);
-      if (edited) return;
-    }
-    await this.reply(chatId, text, replyToMessageId, accountId);
-  }
-
-  /**
-   * 编辑已有消息文本。
-   */
-  private async editMessage(
-    chatId: string,
-    messageId: number,
-    text: string,
-    accountId?: string,
-  ): Promise<boolean> {
-    const content = text.length > MAX_MESSAGE_LENGTH ? `${text.slice(0, MAX_MESSAGE_LENGTH)}…` : text;
-    const pool = this.pool;
-    const client = this.accountClient;
-
-    if (accountId && pool?.isActive()) {
-      const account = client ? pool.getConfig(accountId) : null;
-      if (account && client) {
-        try {
-          return await client.editMessageText(accountId, account.token, chatId, messageId, content);
-        } catch (error) {
-          this.logger.debug(`账号池编辑消息失败，将降级回复: ${error instanceof Error ? error.message : String(error)}`);
-          return false;
-        }
-      }
-      return false;
-    }
-
-    try {
-      return await this.telegramService.editMessageText(chatId, messageId, content);
-    } catch (error) {
-      this.logger.debug(`单账号编辑消息失败，将降级回复: ${error instanceof Error ? error.message : String(error)}`);
-      return false;
-    }
   }
 
   /**

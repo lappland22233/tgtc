@@ -155,6 +155,12 @@ const routes: RouteRecordRaw[] = [
         meta: { superAdmin: true },
       },
       {
+        path: 'admin/bot-operations',
+        name: 'AdminBotOperations',
+        component: () => import('../views/admin/BotOperations.vue'),
+        meta: { superAdmin: true },
+      },
+      {
         path: 'admin/storage-backends',
         name: 'AdminStorageBackends',
         component: () => import('../views/admin/StorageBackends.vue'),

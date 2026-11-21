@@ -13,7 +13,7 @@ export class AddFileTelegramSourceFields1803200000000 implements MigrationInterf
   name = 'AddFileTelegramSourceFields1803200000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'postgres') return;
+    if (queryRunner.dataSource.options.type !== 'postgres') return;
 
     await queryRunner.query(
       `ALTER TABLE "files" ADD COLUMN IF NOT EXISTS "telegramChatId" varchar(32)`,
@@ -30,7 +30,7 @@ export class AddFileTelegramSourceFields1803200000000 implements MigrationInterf
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'postgres') return;
+    if (queryRunner.dataSource.options.type !== 'postgres') return;
     await queryRunner.query(`ALTER TABLE "files" DROP COLUMN IF EXISTS "telegramSourceAccountId"`);
     await queryRunner.query(`ALTER TABLE "files" DROP COLUMN IF EXISTS "telegramFileUniqueId"`);
     await queryRunner.query(`ALTER TABLE "files" DROP COLUMN IF EXISTS "telegramMessageId"`);

@@ -11,18 +11,23 @@ on:
 permissions:
   contents: read
 
+env:
+  NPM_VERSION: "12.2.3"
+  UV_THREADPOOL_SIZE: "1"
+  GOMAXPROCS: "1"
+
 concurrency:
   group: quality-gates-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   backend:
-    name: Backend / Node 22 / PostgreSQL 16 / Redis 7
-    runs-on: ubuntu-24.04
+    name: Backend / Node 26 / PostgreSQL 19 / Redis 8
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     services:
       postgres:
-        image: postgres:16-alpine
+        image: postgres:19.0-alpine
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -35,7 +40,7 @@ jobs:
           --health-timeout 5s
           --health-retries 5
       redis:
-        image: redis:7-alpine
+        image: redis:8.10.3-alpine
         ports:
           - 6379:6379
         options: >-
@@ -62,17 +67,29 @@ jobs:
       TELEGRAM_CHAT_ID: "0"
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .node-version
           cache: npm
           cache-dependency-path: backend/package-lock.json
 
+      - name: Set up npm
+        run: npm install --global "npm@$NPM_VERSION"
+
       - name: Install locked dependencies
         run: npm ci
+
+      - name: Verify running database service versions
+        shell: bash
+        run: |
+          pg_version=$(docker exec "${{ job.services.postgres.id }}" psql -U postgres -d file_distribution_ci -Atc 'SHOW server_version_num')
+          redis_version=$(docker exec "${{ job.services.redis.id }}" redis-cli --raw INFO server | tr -d '\r' | sed -n 's/^redis_version://p')
+          echo "PostgreSQL server_version_num=$pg_version, Redis server version=$redis_version"
+          test "$pg_version" = 190000
+          test "$redis_version" = 8.10.3
 
       - name: Verify the offline database migration tool builds from current sources
         run: |
@@ -108,11 +125,11 @@ jobs:
           npm run test:integration:pg
 
       - name: Require Nest dependency-injection smoke coverage for enabled account-pool module
-        run: npx jest --runInBand src/telegram-account-pool/telegram-account-pool.module.spec.ts src/telegram-account-pool/download-capacity-policy.service.spec.ts
+        run: npm test -- --runInBand src/telegram-account-pool/telegram-account-pool.module.spec.ts src/telegram-account-pool/download-capacity-policy.service.spec.ts
 
       - name: Upload backend coverage report
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: backend-coverage
           path: backend/coverage
@@ -120,24 +137,29 @@ jobs:
           retention-days: 14
 
   frontend:
-    name: Frontend / Node 22
-    runs-on: ubuntu-24.04
+    name: Frontend / Node 26
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     defaults:
       run:
         working-directory: frontend
     env:
       CI: true
+      VITEST_MAX_WORKERS: "1"
+      RAYON_NUM_THREADS: "1"
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .node-version
           cache: npm
           cache-dependency-path: frontend/package-lock.json
+
+      - name: Set up npm
+        run: npm install --global "npm@$NPM_VERSION"
 
       - name: Install locked dependencies
         run: npm ci
@@ -147,7 +169,7 @@ jobs:
 
       - name: Upload frontend coverage report
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: frontend-coverage
           path: frontend/coverage
@@ -156,11 +178,11 @@ jobs:
 
   operations:
     name: Source deployment tools
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .node-version
       - name: Install script test dependencies
@@ -169,7 +191,7 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          scripts=(scripts/release/*.sh scripts/release/tests/*.test.sh)
+          scripts=(scripts/setup-bot-api-build-deps.sh scripts/release/*.sh scripts/release/tests/*.test.sh)
           for script in "${scripts[@]}"; do bash -n "$script"; done
           shellcheck --severity=warning "${scripts[@]}"
           bash scripts/release/check-version.sh
@@ -177,32 +199,48 @@ jobs:
 
   telegram-bot-api:
     name: C++ / GCC / CMake / CTest
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    runs-on: ubuntu-26.04
+    timeout-minutes: 180
     defaults:
       run:
         working-directory: telegram-bot-api
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: recursive
 
       - name: Install native build dependencies
-        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends build-essential cmake gperf libssl-dev zlib1g-dev
+        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends build-essential ca-certificates curl gperf perl pkg-config
 
-      - name: Configure
-        run: cmake -S . -B build-ci -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+      - name: Prepare pinned CMake, OpenSSL and zlib
+        run: bash ../scripts/setup-bot-api-build-deps.sh "$RUNNER_TEMP/tgtc-native"
+
+      - name: Configure and verify selected libraries
+        shell: bash
+        run: |
+          prefix="$RUNNER_TEMP/tgtc-native"
+          "$prefix/cmake/bin/cmake" -S . -B build-ci -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
+            -DOPENSSL_ROOT_DIR="$prefix/libs" -DZLIB_ROOT="$prefix/libs"
+          for key in OPENSSL_SSL_LIBRARY OPENSSL_CRYPTO_LIBRARY ZLIB_LIBRARY_RELEASE; do
+            library=$(sed -n "s|^${key}:FILEPATH=||p" build-ci/CMakeCache.txt)
+            echo "$key=$library"
+            [[ $library == "$prefix/libs/"* && -f $library ]]
+          done
 
       - name: Build server and tests
-        run: cmake --build build-ci --config Release --parallel 1
+        run: |
+          "$RUNNER_TEMP/tgtc-native/cmake/bin/cmake" --build build-ci --config Release --parallel 1
+          ldd build-ci/telegram-bot-api
+          build-ci/telegram-bot-api --version
 
-      # 阻塞门禁仅覆盖 fork 自有的确定性测试；TDLib 上游 run_all_tests 套件
-      # 含线程/时序敏感用例，在本 job 首跑即失败，不作为 fork 的阻塞门禁，
-      # 降级为 continue-on-error 信息性步骤保留信号。
+      # Fork 的确定性测试为阻塞门禁。上游 TDLib 的线程和时序测试单独记录结果。
       - name: Run fork-owned CTest tests (blocking gate)
-        run: ctest --test-dir build-ci --build-config Release --output-on-failure --no-tests=error -R 'test-(file-stream|workdir-cleanup)'
+        run: |
+          "$RUNNER_TEMP/tgtc-native/cmake/bin/ctest" --test-dir build-ci --parallel 1 --build-config Release --output-on-failure --no-tests=error -R 'test-(file-stream|workdir-cleanup)'
 
       - name: Run upstream TDLib test suite (informational, non-blocking)
         continue-on-error: true
-        run: ctest --test-dir build-ci --build-config Release --output-on-failure -R 'run_all_tests'
+        run: |
+          "$RUNNER_TEMP/tgtc-native/cmake/bin/cmake" --build build-ci --config Release --target run_all_tests --parallel 1
+          "$RUNNER_TEMP/tgtc-native/cmake/bin/ctest" --test-dir build-ci --parallel 1 --build-config Release --output-on-failure --no-tests=error -R '^run_all_tests$'

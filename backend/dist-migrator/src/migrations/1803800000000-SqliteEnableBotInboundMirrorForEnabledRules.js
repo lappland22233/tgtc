@@ -10,7 +10,7 @@ class SqliteEnableBotInboundMirrorForEnabledRules1803800000000 {
         this.name = 'SqliteEnableBotInboundMirrorForEnabledRules1803800000000';
     }
     async up(queryRunner) {
-        if (queryRunner.connection.options.type !== 'sqlite')
+        if (queryRunner.dataSource.options.type !== 'better-sqlite3')
             return;
         const table = await queryRunner.getTable('telegram_mirror_rules');
         if (!table?.columns.some((column) => column.name === 'includeBotInboundFiles'))

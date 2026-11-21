@@ -69,7 +69,6 @@ class CreateForumTopicQuery final : public Td::ResultHandler {
     if (as_dialog_id.is_valid()) {
       as_input_peer = td_->dialog_manager_->get_input_peer(as_dialog_id, AccessRights::Write);
       if (as_input_peer != nullptr) {
-        flags |= telegram_api::messages_createForumTopic::SEND_AS_MASK;
         creator_dialog_id_ = as_dialog_id;
       }
     }
@@ -142,8 +141,8 @@ class EditForumTopicQuery final : public Td::ResultHandler {
   explicit EditForumTopicQuery(Promise<Unit> &&promise) : promise_(std::move(promise)) {
   }
 
-  void send(DialogId dialog_id, ForumTopicId forum_topic_id, bool edit_title, const string &title,
-            bool edit_custom_emoji_id, CustomEmojiId icon_custom_emoji_id) {
+  void send(DialogId dialog_id, ForumTopicId forum_topic_id, const string &title, bool edit_custom_emoji_id,
+            CustomEmojiId icon_custom_emoji_id) {
     dialog_id_ = dialog_id;
     forum_topic_id_ = forum_topic_id;
 
@@ -153,9 +152,6 @@ class EditForumTopicQuery final : public Td::ResultHandler {
     }
 
     int32 flags = 0;
-    if (edit_title) {
-      flags |= telegram_api::messages_editForumTopic::TITLE_MASK;
-    }
     if (edit_custom_emoji_id) {
       flags |= telegram_api::messages_editForumTopic::ICON_EMOJI_ID_MASK;
     }
@@ -384,12 +380,8 @@ class GetForumTopicsQuery final : public Td::ResultHandler {
       return on_error(Status::Error(400, "Can't access the chat"));
     }
 
-    int32 flags = 0;
-    if (!query.empty()) {
-      flags |= telegram_api::messages_getForumTopics::Q_MASK;
-    }
     send_query(G()->net_query_creator().create(
-        telegram_api::messages_getForumTopics(flags, std::move(input_peer), query, offset_date,
+        telegram_api::messages_getForumTopics(0, std::move(input_peer), query, offset_date,
                                               offset_message_id.get_server_message_id().get(),
                                               offset_forum_topic_id.get(), limit),
         {{dialog_id}}));
@@ -588,7 +580,7 @@ void ForumTopicManager::edit_forum_topic(DialogId dialog_id, ForumTopicId forum_
   }
 
   td_->create_handler<EditForumTopicQuery>(std::move(promise))
-      ->send(dialog_id, forum_topic_id, edit_title, new_title, edit_icon_custom_emoji, icon_custom_emoji_id);
+      ->send(dialog_id, forum_topic_id, new_title, edit_icon_custom_emoji, icon_custom_emoji_id);
 }
 
 void ForumTopicManager::read_forum_topic_messages(DialogId dialog_id, ForumTopicId forum_topic_id,
@@ -714,11 +706,9 @@ void ForumTopicManager::clear_forum_topic_draft_by_sent_message(DialogId dialog_
       return;
     }
   }
-  auto old_file_ids = get_topic_file_ids(topic);
   if (topic->topic_->set_draft_message(nullptr, false)) {
     on_forum_topic_changed(dialog_id, topic);
-    td_->draft_message_manager_->change_draft_message_files(dialog_id, MessageTopic::forum(dialog_id, forum_topic_id),
-                                                            old_file_ids, get_topic_file_ids(topic), false);
+    // do not call change_draft_message_files to keep file source identifiers
   }
 }
 
@@ -771,6 +761,19 @@ void ForumTopicManager::on_update_pinned_forum_topics(DialogId dialog_id, vector
       on_forum_topic_changed(dialog_id, topic.get());
     }
   });
+}
+
+void ForumTopicManager::on_update_forum_topic_edited(DialogId dialog_id, ForumTopicId forum_topic_id,
+                                                     const ForumTopicEditedData &edited_data) {
+  if (!td_->dialog_manager_->have_dialog_force(dialog_id, "on_update_forum_topic_edited")) {
+    return;
+  }
+  if (!can_be_forum(dialog_id) || can_be_forum_topic_id(forum_topic_id).is_error()) {
+    LOG(ERROR) << "Receive edited " << forum_topic_id << " in " << dialog_id;
+    return;
+  }
+
+  on_forum_topic_edited(dialog_id, forum_topic_id, edited_data);
 }
 
 Status ForumTopicManager::set_forum_topic_notification_settings(
@@ -882,20 +885,30 @@ void ForumTopicManager::on_get_forum_topic(DialogId dialog_id, ForumTopicId expe
 
 void ForumTopicManager::get_forum_topic_link(DialogId dialog_id, ForumTopicId forum_topic_id,
                                              Promise<td_api::object_ptr<td_api::messageLink>> &&promise) {
-  TRY_STATUS_PROMISE(promise, is_forum(dialog_id));
+  TRY_STATUS_PROMISE(promise, is_forum(dialog_id, true));
   TRY_STATUS_PROMISE(promise, can_be_forum_topic_id(forum_topic_id));
-  auto channel_id = dialog_id.get_channel_id();
 
   SliceBuilder sb;
   sb << LinkManager::get_t_me_url();
 
   bool is_public = false;
-  auto dialog_username = td_->chat_manager_->get_channel_first_username(channel_id);
-  if (!dialog_username.empty()) {
-    sb << dialog_username;
-    is_public = true;
+  if (dialog_id.get_type() == DialogType::User) {
+    // the topic exists only in the chat between the user and the bot, so the link isn't public
+    auto bot_user_id = td_->auth_manager_->is_bot() ? td_->user_manager_->get_my_id() : dialog_id.get_user_id();
+    auto bot_username = td_->user_manager_->get_user_first_username(bot_user_id);
+    if (bot_username.empty()) {
+      return promise.set_error(400, "The bot has no username");
+    }
+    sb << bot_username;
   } else {
-    sb << "c/" << channel_id.get();
+    auto channel_id = dialog_id.get_channel_id();
+    auto dialog_username = td_->chat_manager_->get_channel_first_username(channel_id);
+    if (!dialog_username.empty()) {
+      sb << dialog_username;
+      is_public = true;
+    } else {
+      sb << "c/" << channel_id.get();
+    }
   }
   sb << '/' << forum_topic_id.get();
 

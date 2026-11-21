@@ -9,7 +9,7 @@ export class SqliteTelegramBotLinks1802300000000 implements MigrationInterface {
   name = 'SqliteTelegramBotLinks1802300000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'sqlite') return;
+    if (queryRunner.dataSource.options.type !== 'better-sqlite3') return;
 
     await queryRunner.query(`
       CREATE TABLE IF NOT EXISTS "telegram_bot_file_grants" (
@@ -90,7 +90,7 @@ export class SqliteTelegramBotLinks1802300000000 implements MigrationInterface {
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
-    if (queryRunner.connection.options.type !== 'sqlite') return;
+    if (queryRunner.dataSource.options.type !== 'better-sqlite3') return;
     // SQLite 不支持 DROP COLUMN（旧版）；保留列即可，无数据风险。
     await queryRunner.query(`DROP TABLE IF EXISTS "telegram_bot_whitelist"`);
     await queryRunner.query(`DROP TABLE IF EXISTS "telegram_bot_daily_usage"`);
