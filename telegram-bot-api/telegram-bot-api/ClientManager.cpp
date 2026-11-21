@@ -110,7 +110,7 @@ void ClientManager::send_file_stream(td::ActorId<FileStreamConnection> stream, t
     auto count_it = active_file_streams_by_token_.find(token_key);
     auto count = count_it == active_file_streams_by_token_.end() ? 0 : count_it->second;
     if (count >= per_bot_limit) {
-      LOG(INFO) << "Reject file stream for " << token_key << ": per-bot limit " << per_bot_limit
+      LOG(INFO) << "Reject file stream for bot " << r_user_id.ok() << ": per-bot limit " << per_bot_limit
                 << " reached";
       return fail(429, "Too many active file streams for this token");
     }
