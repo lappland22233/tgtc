@@ -257,7 +257,7 @@ export class FileUploadProcessor {
     fileId?: string,
     uploadVersion?: number,
   ): Promise<boolean> {
-    // Unversioned sources are shared by releases prior to 1.6.3.
+    // Older jobs can share the same unversioned source path.
     if (fileId && basename(filePath) === fileId) {
       const current = await this.fileRepository.findOne({ where: { id: fileId } });
       if (current && current.uploadVersion !== uploadVersion) return false;
