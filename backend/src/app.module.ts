@@ -24,8 +24,6 @@ import { SecurityModule } from './security/security.module';
 import { TagModule } from './tag/tag.module';
 import { PublicConfigModule } from './public-config/public-config.module';
 import { HealthModule } from './health/health.module';
-import { VersionModule } from './version/version.module';
-import { UpdateModule } from './update/update.module';
 import { ApiKeyModule } from './api-key/api-key.module';
 import { TelegramBotModule } from './telegram-bot/telegram-bot.module';
 import { TelegramAccountPoolModule } from './telegram-account-pool/telegram-account-pool.module';
@@ -61,8 +59,6 @@ import { StorageModule } from './storage/storage.module';
     TagModule,
     PublicConfigModule,
     HealthModule,
-    VersionModule,
-    UpdateModule,
     TelegramModule,
     ApiKeyModule,
     TelegramBotModule,

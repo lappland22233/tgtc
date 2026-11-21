@@ -146,17 +146,6 @@
 
 多数分析、审计、缓存和安全配置接口仅允许 `super_admin`；管理员接口一律只接受 JWT 会话（不接受 API Key）。
 
-#### 系统更新（仅 `super_admin`）
-
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| `GET` | `/api/admin/update/status` | 更新状态与当前版本 |
-| `POST` | `/api/admin/update/check` | 检查 GitHub 可用更新 |
-| `POST` | `/api/admin/update/install` | 安装更新（创建任务） |
-| `GET` | `/api/admin/update/tasks` | 更新任务列表 |
-| `GET` | `/api/admin/update/tasks/:taskId` | 单个更新任务详情 |
-| `POST` | `/api/admin/update/tasks/:taskId/cancel` | 取消更新任务 |
-
 #### Telegram 账号池与镜像（仅 `super_admin`）
 
 | 方法 | 路径 | 说明 |
