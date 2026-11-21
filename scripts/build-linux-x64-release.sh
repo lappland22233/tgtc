@@ -75,6 +75,7 @@ pushd "$WORK_DIR/source/backend" >/dev/null
 npm ci --no-audit --no-fund
 npm run typecheck
 npm run build
+npm run build:data-migrator
 rm -rf node_modules
 npm ci --omit=dev --no-audit --no-fund
 popd >/dev/null
@@ -94,7 +95,7 @@ fi
 # 发行包只包含不可变程序；Telegram workdir、数据库和 .env 必须位于发行目录之外。
 mkdir -p "$STAGE_DIR/backend" "$STAGE_DIR/frontend" "$STAGE_DIR/telegram-bot-api/bin" \
   "$STAGE_DIR/runtime" "$STAGE_DIR/bin" "$STAGE_DIR/scripts/release"
-cp -a "$WORK_DIR/source/backend/dist" "$STAGE_DIR/backend/"
+cp -a "$WORK_DIR/source/backend/dist" "$WORK_DIR/source/backend/dist-migrator" "$STAGE_DIR/backend/"
 cp -a "$WORK_DIR/source/backend/node_modules" "$STAGE_DIR/backend/"
 cp "$WORK_DIR/source/backend/package.json" "$WORK_DIR/source/backend/package-lock.json" "$STAGE_DIR/backend/"
 cp "$WORK_DIR/source/backend/.env.example" "$STAGE_DIR/backend/.env.example"
@@ -132,7 +133,14 @@ find "$STAGE_DIR" -type f \( -name '*.ts' -o -name '*.map' -o -name '*.spec.js' 
 find "$STAGE_DIR/backend/node_modules" -type d \( -name test -o -name tests -o -name __tests__ \) -prune -exec rm -rf {} +
 rm -rf "$STAGE_DIR/backend/node_modules/@types"
 
-for required_path in backend/dist/main.js backend/dist/database/data-source.js frontend/index.html telegram-bot-api/bin/telegram-bot-api runtime/bin/node bin/tgtc start.sh scripts/release/common.sh scripts/release/health-check.sh scripts/release/backup.sh scripts/release/upgrade.sh scripts/release/rollback.sh scripts/release/validate-release.sh scripts/release/updater.sh scripts/release/download-release.sh scripts/release/systemd/tgtc-update@.service scripts/release/systemd/tgtc-update.sudoers scripts/release/update-public-key.pem VERSION; do
+for migration in "$WORK_DIR/source/backend/src/migrations/"*-Sqlite*.ts; do
+  name=$(basename "$migration" .ts).js
+  [[ -f "$STAGE_DIR/backend/dist/migrations/$name" && -f "$STAGE_DIR/backend/dist-migrator/src/migrations/$name" ]] || {
+    echo "错误：发行包的运行时或迁移工具缺少 SQLite 迁移 $name" >&2
+    exit 1
+  }
+done
+for required_path in backend/dist-migrator/build-data-migrator.js backend/dist-migrator/scripts/build-data-migrator.js backend/dist-migrator/scripts/data-migrator-utils.js backend/dist-migrator/src/database/entities.js backend/dist/main.js backend/dist/database/data-source.js frontend/index.html telegram-bot-api/bin/telegram-bot-api runtime/bin/node bin/tgtc start.sh scripts/release/common.sh scripts/release/health-check.sh scripts/release/backup.sh scripts/release/upgrade.sh scripts/release/rollback.sh scripts/release/validate-release.sh scripts/release/updater.sh scripts/release/download-release.sh scripts/release/systemd/tgtc-update@.service scripts/release/systemd/tgtc-update.sudoers scripts/release/update-public-key.pem VERSION; do
   [[ -e "$STAGE_DIR/$required_path" ]] || { echo "错误：发布包缺少 $required_path" >&2; exit 1; }
 done
 if find "$STAGE_DIR" -type f \( -name '*.ts' -o -name '*.spec.js' -o -name '*.map' \) -print -quit | grep -q .; then

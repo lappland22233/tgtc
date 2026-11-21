@@ -112,6 +112,21 @@ with zipfile.ZipFile(archive) as package:
         relative = name[len(root) + 1:]
         if relative in forbidden_files or relative.startswith(forbidden_parts) or relative.endswith(('.sqlite', '.sqlite3', '.db', '.map', '.ts')) or relative.endswith('.spec.js') or relative.startswith('td.binlog') or relative.startswith('db.sqlite') or '/test/' in relative or '/tests/' in relative or '/__tests__/' in relative:
             raise SystemExit(f'发行 ZIP 包含禁止内容：{name!r}')
+    # Earlier signed releases shipped only the application migrations. New packages also
+    # provide the offline PostgreSQL-to-SQLite CLI and must use the same forward migration chain.
+    if tuple(map(int, match.groups())) >= (1, 6, 3):
+        required.update(f'{root}/backend/dist-migrator/{path}' for path in (
+            'build-data-migrator.js', 'scripts/build-data-migrator.js', 'scripts/data-migrator-utils.js',
+            'src/database/entities.js', 'src/database/database.config.js',
+            'src/migrations/0000000000000-SqliteEntitySchema.js',
+            'src/migrations/1803100000000-SqliteCreateTelegramMirror.js',
+        ))
+        def sqlite_migrations(directory):
+            prefix = f'{root}/backend/{directory}/'
+            return {name[len(prefix):] for name in names if name.startswith(prefix)
+                    and re.fullmatch(r'[0-9]+-Sqlite[^/]+\.js', name[len(prefix):])}
+        if sqlite_migrations('dist/migrations') != sqlite_migrations('dist-migrator/src/migrations'):
+            raise SystemExit('数据库迁移工具与应用的 SQLite 迁移清单不一致。')
     missing = required.difference(names)
     if missing:
         raise SystemExit(f'发行 ZIP 缺少必需文件：{sorted(missing)[0]}')

@@ -101,6 +101,15 @@ VITE_API_PROXY_TARGET=http://localhost:3000
 
 `ZIP` 是唯一支持的发行压缩格式。归档必须且只能含 `tgtc-vX.Y.Z-linux-x64/` 顶层目录，且包内 `VERSION`、顶层目录、ZIP 文件名及 `SHA256SUMS` 的资产名必须为同一版本。归档至少包含 `backend/`、`frontend/index.html`、`runtime/bin/node`、`telegram-bot-api/bin/telegram-bot-api`、`bin/tgtc`、`start.sh` 和完整的 `scripts/release/` 运维脚本。
 
+Linux ZIP 随附 PostgreSQL 转 SQLite 的离线工具。停止应用写入后，从现有 PostgreSQL 配置所在目录运行以下命令；`RELEASE` 指向已验签、已解压的发行目录，`MIGRATION_TARGET` 指向新的 SQLite 文件。工具按当前实体和迁移集建库，校验后写入目标文件以及旁边的 `.migration-report.json`。核对报告后再将应用的 DB_TYPE 和 DB_DATABASE 指向目标数据库。
+
+```bash
+cd /opt/tgtc/runtime/backend
+RELEASE=/opt/tgtc/current
+MIGRATION_TARGET=/opt/tgtc/runtime/backend/data/converted.sqlite \
+  "$RELEASE/runtime/bin/node" "$RELEASE/backend/dist-migrator/build-data-migrator.js"
+```
+
 发行包不包含 TypeScript 源码、测试、source map、开发依赖、`.env`、数据库、Redis 持久化、Telegram Bot API workdir、上传分片、日志、缓存或用户数据。`start.sh`、运行二进制和可执行运维脚本必须保留 Unix 可执行权限。数据库结构仍由包内编译后的正式运行时迁移维护；这些迁移不是开发文件，新库初始化和后续升级均依赖它们。
 
 
