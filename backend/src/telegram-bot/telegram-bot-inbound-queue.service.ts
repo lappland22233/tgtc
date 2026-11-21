@@ -96,7 +96,10 @@ export class TelegramBotInboundQueueService implements OnApplicationShutdown {
     return this.db.manager.findOneBy(Task, { receiverBotId, chatId, messageId });
   }
 
-  enqueue(input: EnqueueInboundTask): Promise<EnqueueInboundResult> {
+  enqueue(
+    input: EnqueueInboundTask,
+    onQueued?: (manager: EntityManager, task: Task) => Promise<void>,
+  ): Promise<EnqueueInboundResult> {
     const { dailyLimit, ...source } = input;
     const { receiverBotId, telegramUserId, chatId, messageId, usageDate } = source;
     return this.withUserLock(telegramUserId, async manager => {
@@ -126,6 +129,7 @@ export class TelegramBotInboundQueueService implements OnApplicationShutdown {
         ...source, id: randomUUID(), status: 'queued', quotaConsumed: !whitelisted, quotaUsed: used,
         createdAt: now, updatedAt: now,
       }));
+      await onQueued?.(manager, task);
       return { status: 'queued', task, used };
     });
   }

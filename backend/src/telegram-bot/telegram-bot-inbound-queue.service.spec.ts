@@ -116,6 +116,30 @@ describe.each(dialects)('persistent inbound queue on %s', dialect => {
     expect(await used('21')).toBe(1);
   });
 
+  it('commits the receipt audit exactly once with its job and quota reservation, or rolls all three back', async () => {
+    const { AuditLog } = require('../common/entities/audit-log.entity') as typeof import('../common/entities/audit-log.entity');
+    const input = { ...inputs('701', '91', '1'), dailyLimit: 1 };
+    const write = jest.fn(async (manager: EntityManager, task: TelegramBotInboundTask) => {
+      await manager.save(AuditLog, { action: 'telegram_bot_file_received', resourceId: task.id,
+        metadata: { telegramUserId: task.telegramUserId }, createdAt: new Date() });
+    });
+    await expect(queue.enqueue(input, async (manager, task) => {
+      await write(manager, task);
+      throw new Error('audit write did not finish');
+    })).rejects.toThrow('audit write did not finish');
+    expect(await db.manager.countBy(Task, { receiverBotId: '701' })).toBe(0);
+    expect(await db.manager.countBy(Usage, { telegramUserId: '91' })).toBe(0);
+    expect(await db.manager.countBy(AuditLog, { action: 'telegram_bot_file_received' })).toBe(0);
+    write.mockClear();
+    const results = await Promise.all([queue.enqueue(input, write), other.enqueue(input, write)]);
+    expect(results.map(row => row.status).sort()).toEqual(['duplicate', 'queued']);
+    expect(await queue.enqueue({ ...input, messageId: '2' }, write)).toEqual({ status: 'quota_denied', used: 1 });
+    expect(write).toHaveBeenCalledTimes(1);
+    expect(await used('91')).toBe(1);
+    const task = await queue.findByMessage('701', '91', '1');
+    expect(await db.manager.countBy(AuditLog, { action: 'telegram_bot_file_received', resourceId: task!.id })).toBe(1);
+  });
+
   it('keeps the delayed FIFO head, isolates Bots, and fences lease takeover after a worker restart', async () => {
     await queue.enqueue(inputs('201', '31', '1'));
     await queue.enqueue(inputs('201', '32', '2'));
