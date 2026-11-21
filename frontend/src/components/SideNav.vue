@@ -109,7 +109,6 @@ const icons = {
   auditLogs: svg('<rect x="4" y="2" width="12" height="16" rx="2"/><line x1="7" y1="7" x2="13" y2="7"/><line x1="7" y1="10" x2="13" y2="10"/><line x1="7" y1="13" x2="10" y2="13"/>'),
   telegramAccounts: svg('<path d="M18 3L2 9.4l5.8 2.1L10 18l3-4.1L18 3z"/><path d="M7.8 11.5L18 3"/>'),
   storageBackends: svg('<ellipse cx="10" cy="4.5" rx="7" ry="2.5"/><path d="M3 4.5v5c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5v-5"/><path d="M3 9.5v5c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5v-5"/>'),
-  systemUpdate: svg('<path d="M10 2L17 6v8l-7 4-7-4V6l7-4z"/><path d="M7 10l2 2 4-4"/><path d="M6 14a6 6 0 008 2"/><path d="M14 6a6 6 0 00-8-2"/>'),
 };
 
 interface NavItem {
@@ -138,7 +137,6 @@ const adminNav: NavItem[] = [
   // 系统配置包含仅超级管理员可读取的缓存配置和仅超级管理员可保存的全局配置，
   // 因此按“拥有完整页面权限”原则只向超级管理员展示。
   { to: '/admin/config', label: '系统配置', icon: icons.config, roles: PAGE_ROLES['/admin/config'] },
-  { to: '/admin/update', label: '系统更新', icon: icons.systemUpdate, roles: PAGE_ROLES['/admin/update'] },
 ];
 
 const visibleAdminNav = computed(() => adminNav.filter((item) => hasAnyRole(props.role, item.roles)));

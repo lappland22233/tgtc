@@ -188,8 +188,7 @@ export const actionLabels: Record<string, string> = {
   download_config_change: '下载调度配置',
   ip_ban: 'IP封禁', ip_unban: 'IP解封',
   batch_delete_files: '批量删除', batch_delete_files_by_admin: '管理员批量删',
-  update_check: '版本检查', update_install: '触发系统更新', update_cancel: '取消系统更新',
-  update_succeeded: '系统更新成功', update_failed: '系统更新失败', update_rollback: '系统更新回退', batch_markdown: '批量Markdown',
+  batch_markdown: '批量Markdown',
   tag_create: '创建标签', tag_update: '更新标签', tag_delete: '删除标签', tag_set_file: '设置文件标签',
   folder_create: '创建文件夹', folder_rename: '重命名文件夹', folder_move: '移动文件夹',
   folder_delete: '删除文件夹', folder_delete_by_admin: '管理员删除文件夹', folder_restore: '恢复文件夹',
@@ -245,8 +244,14 @@ const resourceTypeLabels: Record<string, string> = {
   telegram_mirror_feature: '镜像开关', telegram_mirror_backfill: '镜像补偿',
 };
 
+// 已归档的更新动作只用于解读历史记录。
+const historicalActions: Record<string, string> = {
+  update_check: '版本检查', update_install: '触发系统更新', update_cancel: '取消系统更新',
+  update_succeeded: '系统更新成功', update_failed: '系统更新失败', update_rollback: '系统更新回退',
+};
+
 export function actionLabel(action: string): string {
-  return actionLabels[action] || (action ? `未知操作（${action}）` : '未知操作');
+  return actionLabels[action] || historicalActions[action] || (action ? `未知操作（${action}）` : '未知操作');
 }
 
 export function resourceTypeLabel(type: string): string {

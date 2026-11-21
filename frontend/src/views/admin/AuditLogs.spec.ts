@@ -133,6 +133,11 @@ describe('AuditLogs.vue 审计动作中文标签', () => {
     vi.mocked(apiClient.get).mockImplementation((url: string) => mockLogsResponse(url) as any);
   });
 
+  it('保留旧安装事件的审计记录名称', () => {
+    expect(actionLabel('update_install')).toBe('触发系统更新');
+    expect(actionLabels).not.toHaveProperty('update_install');
+  });
+
   it('v1.5.3 的 19 个动作与 api_key_rotate 均有中文标签，不落「未知操作」兜底', () => {
     for (const action of NEW_ACTIONS) {
       const label = actionLabel(action);
