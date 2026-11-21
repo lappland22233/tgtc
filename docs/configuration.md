@@ -127,7 +127,7 @@ Redis 承载 8 个 Bull 队列：`metrics-aggregation`、`attack-detection`、`a
 | `TELEGRAM_CHAT_ID` | - | 文件存储 Chat ID，启动必检 |
 | `TELEGRAM_API_BASE` | `https://api.telegram.org` | 官方或自建 Bot API 地址 |
 | `TELEGRAM_MAX_UPLOAD_SIZE` | `2147483648` | Telegram 服务层上传上限（2 GiB）；**仅单账号上传路径读取**，账号池上传不套用该上限 |
-| `TELEGRAM_LOCAL_FILE_DIR` | - | 自建 Bot API 本地文件目录白名单 |
+| `TELEGRAM_LOCAL_FILE_DIR` | - | 自建 Bot API 本地文件目录白名单。配置具体目录，文件必须位于解析后的根内。Linux 本地读取需要可访问 `/proc/self/fd` |
 | `TELEGRAM_FILE_STREAMING_ENABLED` | `false` | 是否使用二次开发实时流端点；未显式设置时**只要配置了 `TELEGRAM_FILE_STREAM_BASE` 即视为启用**，显式设为 `false` 才能强制关闭 |
 | `TELEGRAM_FILE_STREAM_BASE` | `TELEGRAM_API_BASE` | 实时流服务地址 |
 | `TELEGRAM_FILE_STREAM_TIMEOUT_SECONDS` | `180` | 后端请求实时流端点的读超时（秒）；须**小于**首字节超时，并大于 Bot API `--file-stream-first-byte-timeout` |
