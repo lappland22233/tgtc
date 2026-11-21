@@ -1,4 +1,5 @@
 import { Readable } from 'stream';
+import { existsSync } from 'fs';
 import { TelegramBotDispatchService } from './telegram-bot-dispatch.service';
 import type { TelegramUpdate } from '../telegram/telegram.types';
 
@@ -132,6 +133,7 @@ function makeService(options: {
   } | null;
   downloadResources?: {
     reserve: jest.Mock;
+    extendDiskReservation?: jest.Mock;
   } | null;
   uploadDiskBudget?: {
     isStrictMode: jest.Mock;
@@ -802,6 +804,7 @@ describe('TelegramBotDispatchService（纯 Google 存储模式）', () => {
     }));
 
     // 3. 签发 grant，绑定 gdrive 存储后端
+    await waitFor(() => ctx.grantService.issue.mock.calls.length > 0);
     expect(ctx.grantService.issue).toHaveBeenCalledWith(
       expect.objectContaining({
         storageBackend: 'gdrive',
@@ -1417,5 +1420,293 @@ describe('TelegramBotDispatchService（纯 Google 存储模式）', () => {
 
       expect(storageRouter.upload).not.toHaveBeenCalled();
     });
+  });
+});
+
+function gate() {
+  let open!: () => void;
+  const waiting = new Promise<void>((resolve) => { open = resolve; });
+  return { open, waiting };
+}
+
+const botA = '1234567';
+const botB = '7654321';
+
+function pendingTransfers() {
+  const uploads = new Map([[botA, gate()], [botB, gate()]]);
+  const replies: { bot: string; id: number; kind: string }[] = [];
+  const accountClient = {
+    sendMessage: jest.fn(async (bot: string, _token: string, _chat: string, text: string, options: { replyToMessageId: number }) => {
+      const kind = text.startsWith('请以「文件」方式发送') ? 'media-guidance'
+        : text.includes('可用命令') ? 'help'
+        : text.includes('无需重复发送消息') ? 'in-flight' : 'other';
+      replies.push({ bot, id: options.replyToMessageId, kind });
+      return { messageId: 99 };
+    }),
+    editMessageText: jest.fn(async () => true),
+    forwardMessage: jest.fn(),
+  };
+  const { service } = makeService({
+    pool: makePool(true),
+    accountClient,
+    accountPoolDownload: {
+      isActive: jest.fn(() => true),
+      hasAccount: jest.fn(() => true),
+      openSourceStream: jest.fn(async () => ({ stream: Readable.from(['x']) })),
+    },
+    storageRouter: {
+      availableBackendTypes: jest.fn(() => ['gdrive']),
+      upload: jest.fn(async (input: { objectName: string }) => {
+        await uploads.get(input.objectName)!.waiting;
+        return { backendType: 'gdrive', accountId: 'cloud', objectRef: input.objectName };
+      }),
+    },
+    botConfig: { storageMode: 'gdrive' },
+  });
+
+  return {
+    service, replies,
+    start: (bot: string, messageId: number) => service.handleUpdate(makeMessageUpdate({
+      messageId, document: { file_id: bot, file_unique_id: bot, file_name: bot, file_size: 1 },
+    }), { accountId: bot }),
+    ask: (bot: string, messageId: number) => service.handleUpdate(makeMessageUpdate({
+      messageId, text: '进度如何？', document: null,
+    }), { accountId: bot }),
+    media: (kind: 'photo' | 'video', messageId: number) => {
+      const update = makeMessageUpdate({ messageId, document: null });
+      const file = { file_id: 'attachment', file_unique_id: 'unique', width: 1, height: 1 };
+      Object.assign(update.message!, kind === 'photo' ? { photo: [file] } : { video: { ...file, duration: 1 } });
+      return service.handleUpdate(update, { accountId: botA });
+    },
+    finish: (bot: string) => uploads.get(bot)!.open(),
+    drain: async () => {
+      for (const upload of uploads.values()) upload.open();
+      await service.onApplicationShutdown();
+    },
+  };
+}
+
+describe('PR #63 等待提示', () => {
+  it.each(['photo', 'video'] as const)('%s 在等待提示冷却期内仍应得到媒体格式指导', async (mediaType) => {
+    const run = pendingTransfers();
+    try {
+      await run.start(botA, 10);
+      run.replies.length = 0;
+      await run.ask(botA, 11);
+      await run.media(mediaType, 12);
+      expect(run.replies).toEqual([
+        { bot: botA, id: 11, kind: 'in-flight' },
+        { bot: botA, id: 12, kind: 'media-guidance' },
+      ]);
+    } finally {
+      await run.drain();
+    }
+  });
+
+  it('尚无人发等待提示时，新的照片也应优先得到格式指导', async () => {
+    const run = pendingTransfers();
+    try {
+      await run.start(botA, 20);
+      run.replies.length = 0;
+      await run.media('photo', 21);
+      expect(run.replies).toEqual([{ bot: botA, id: 21, kind: 'media-guidance' }]);
+    } finally {
+      await run.drain();
+    }
+  });
+
+  it('同一用户只有 A 在途时，B 的普通对话应照常显示帮助', async () => {
+    const run = pendingTransfers();
+    try {
+      await run.start(botA, 30);
+      run.replies.length = 0;
+      await run.ask(botB, 31);
+      expect(run.replies).toEqual([{ bot: botB, id: 31, kind: 'help' }]);
+    } finally {
+      await run.drain();
+    }
+  });
+
+  it('A 与 B 都在途时，各自第一次发言和各自 15 秒边界互不占用', async () => {
+    const run = pendingTransfers();
+    const startTime = Date.now();
+    let elapsed = 0;
+    const clock = jest.spyOn(Date, 'now').mockImplementation(() => startTime + elapsed);
+    try {
+      await run.start(botA, 40);
+      await run.start(botB, 41);
+      run.replies.length = 0;
+      await run.ask(botA, 42);
+      elapsed = 6000;
+      await run.ask(botB, 43);
+      elapsed = 14999;
+      await run.ask(botA, 44);
+      elapsed = 15000;
+      await run.ask(botB, 45);
+      await run.ask(botA, 46);
+      elapsed = 20999;
+      await run.ask(botB, 47);
+      elapsed = 21000;
+      await run.ask(botB, 48);
+      expect(run.replies).toEqual([
+        { bot: botA, id: 42, kind: 'in-flight' },
+        { bot: botB, id: 43, kind: 'in-flight' },
+        { bot: botA, id: 46, kind: 'in-flight' },
+        { bot: botB, id: 48, kind: 'in-flight' },
+      ]);
+    } finally {
+      clock.mockRestore();
+      await run.drain();
+    }
+  });
+
+  it('A 完成后 A 恢复帮助，仍在转存中的 B 继续回复等待提示', async () => {
+    const run = pendingTransfers();
+    try {
+      await run.start(botA, 50);
+      await run.start(botB, 51);
+      expect(run.service.getActiveTransferCount()).toBe(2);
+      run.finish(botA);
+      for (let i = 0; i < 250 && run.service.getActiveTransferCount() !== 1; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(run.service.getActiveTransferCount()).toBe(1);
+      run.replies.length = 0;
+      await run.ask(botA, 52);
+      await run.ask(botB, 53);
+      expect(run.replies).toEqual([
+        { bot: botA, id: 52, kind: 'help' },
+        { bot: botB, id: 53, kind: 'in-flight' },
+      ]);
+    } finally {
+      await run.drain();
+    }
+  });
+  it('同一用户给两个 Bot 发送不同文件，消息号相同也应签发两个正确授权', async () => {
+    const uploads = gate();
+    const accountClient = {
+      sendMessage: jest.fn(async () => ({ messageId: 99 })),
+      editMessageText: jest.fn(async () => true),
+      forwardMessage: jest.fn(),
+    };
+    const ctx = makeService({
+      pool: makePool(true),
+      accountClient,
+      accountPoolDownload: {
+        isActive: jest.fn(() => true),
+        hasAccount: jest.fn(() => true),
+        openSourceStream: jest.fn(async () => ({ stream: Readable.from(['x']) })),
+      },
+      storageRouter: {
+        availableBackendTypes: jest.fn(() => ['gdrive']),
+        upload: jest.fn(async (input: { objectName: string }) => {
+          await uploads.waiting;
+          return { backendType: 'gdrive', accountId: 'cloud', objectRef: input.objectName };
+        }),
+      },
+      botConfig: { storageMode: 'gdrive' },
+    });
+    const accounts = ['1234567', '7654321'];
+    for (const id of accounts) {
+      await ctx.service.handleUpdate(makeMessageUpdate({
+        chatId: 7001, messageId: 123,
+        document: { file_id: 'file-' + id, file_unique_id: 'unique-' + id, file_name: id, file_size: 1 },
+      }), { accountId: id });
+    }
+    uploads.open();
+    await ctx.service.onApplicationShutdown();
+    expect((ctx.grantService.issue as jest.Mock).mock.calls.map(([grant]) => [grant.sourceAccountId, grant.telegramFileId]).sort())
+      .toEqual(accounts.map((id) => [id, 'file-' + id]));
+  });
+
+  it('停机返回后等待回复才到达，不应再启动已经扣额的转存', async () => {
+    const waitingReply = gate();
+    const enteredReply = gate();
+    const uploads = gate();
+    const storageRouter = {
+      availableBackendTypes: jest.fn(() => ['gdrive']),
+      upload: jest.fn(async () => {
+        await uploads.waiting;
+        return { backendType: 'gdrive', accountId: 'cloud', objectRef: 'test-object' };
+      }),
+    };
+    const ctx = makeService({ storageRouter, botConfig: { storageMode: 'gdrive' } });
+    ctx.telegramService.sendMessage.mockImplementationOnce(async () => {
+      enteredReply.open();
+      await waitingReply.waiting;
+      return { message_id: 99, chat: { id: 7001 } };
+    });
+    const handled = ctx.service.handleUpdate(makeMessageUpdate({ messageId: 555 }));
+    await enteredReply.waiting;
+    let shutdownReturned = false;
+    const shutdown = ctx.service.onApplicationShutdown().then(() => { shutdownReturned = true; });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const shutdownReturnedBeforeReply = shutdownReturned;
+    waitingReply.open();
+    await handled;
+    const activeAfterReply = ctx.service.getActiveTransferCount();
+    uploads.open();
+    await shutdown;
+    await ctx.service.onApplicationShutdown();
+    expect(ctx.quotaService.consume).toHaveBeenCalledTimes(1);
+    expect(shutdownReturnedBeforeReply ? activeAfterReply : 0).toBe(0);
+    expect(ctx.grantService.issue.mock.calls.length + ctx.quotaService.refund.mock.calls.length).toBe(1);
+  });
+});
+
+describe('Bot 磁盘预算与停机补偿', () => {
+  it.each(['gdrive', 'telegram'])('未知长度 %s 转存无法扩容时在落盘前失败并清理', async (storageMode) => {
+    const releaseLease = jest.fn();
+    const register = jest.fn((_file: string) => releaseLease);
+    const reservation = { remainingBytes: 1, consume: jest.fn(), release: jest.fn() };
+    const funds = {
+      reserve: jest.fn(async () => reservation),
+      extendDiskReservation: jest.fn(() => { throw new Error('磁盘额度耗尽'); }),
+    };
+    const router = {
+      availableBackendTypes: jest.fn(() => ['gdrive']),
+      isGDriveCacheModeEnabled: jest.fn(async () => true),
+      upload: jest.fn(),
+    };
+    const ctx = makeService({
+      storageRouter: router, downloadResources: funds,
+      transferTracker: { register }, botConfig: { storageMode },
+    });
+    await ctx.service.handleUpdate(makeMessageUpdate({
+      document: { file_id: 'unknown-length', file_name: 'unknown' },
+    }));
+    await ctx.service.onApplicationShutdown();
+    expect(funds.reserve).toHaveBeenCalledWith(expect.objectContaining({ bytes: 50 * 1024 * 1024 }));
+    expect(funds.extendDiskReservation).toHaveBeenCalledWith(reservation, 20);
+    expect(reservation.consume).not.toHaveBeenCalled();
+    expect(router.upload).not.toHaveBeenCalled();
+    expect(reservation.release).toHaveBeenCalledTimes(1);
+    expect(releaseLease).toHaveBeenCalledTimes(1);
+    expect(existsSync(register.mock.calls[0][0])).toBe(false);
+    expect(ctx.quotaService.refund).toHaveBeenCalledTimes(storageMode === 'gdrive' ? 1 : 0);
+  });
+
+  it('等待回复一直未返回时，排空超时会退款并阻止将来启动上传', async () => {
+    const entered = gate();
+    const releaseReply = gate();
+    const router = { availableBackendTypes: jest.fn(() => ['gdrive']), upload: jest.fn() };
+    const ctx = makeService({ storageRouter: router, botConfig: { storageMode: 'gdrive' } });
+    ctx.service.setShutdownDrainTimeoutMs(5);
+    ctx.telegramService.sendMessage.mockImplementationOnce(async () => {
+      entered.open();
+      await releaseReply.waiting;
+      return { message_id: 5, chat: { id: 7001 } };
+    });
+    const accepted = ctx.service.handleUpdate(makeMessageUpdate());
+    try {
+      await entered.waiting;
+      await ctx.service.onApplicationShutdown();
+      expect(ctx.service.getActiveTransferCount()).toBe(0);
+      expect(ctx.quotaService.refund).toHaveBeenCalledTimes(1);
+    } finally {
+      releaseReply.open();
+      await accepted;
+    }
+    expect(router.upload).not.toHaveBeenCalled();
   });
 });

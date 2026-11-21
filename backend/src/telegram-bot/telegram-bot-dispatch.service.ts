@@ -1,9 +1,9 @@
 import { Inject, Injectable, Logger, OnApplicationShutdown, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { createReadStream, createWriteStream } from 'fs';
-import { mkdir, stat, unlink } from 'fs/promises';
+import { createReadStream } from 'fs';
+import { mkdir, open, stat, unlink } from 'fs/promises';
 import { pipeline } from 'stream/promises';
-import { Readable, Transform } from 'stream';
+import { Readable } from 'stream';
 import * as path from 'path';
 import { randomUUID } from 'crypto';
 import { TelegramService } from '../telegram/telegram.service';
@@ -27,7 +27,7 @@ import { TelegramBotConfigService } from './telegram-bot-config.service';
 import { TelegramBotGrantService } from './telegram-bot-grant.service';
 import { TelegramBotQuotaService } from './telegram-bot-quota.service';
 import { TelegramBotAdminService } from './telegram-bot-admin.service';
-import { TelegramBotIdentity } from './telegram-bot.types';
+import { TelegramBotIdentity, TelegramBotRuntimeConfig } from './telegram-bot.types';
 
 /** Telegram 单条消息文本上限（预留截断余量） */
 const MAX_MESSAGE_LENGTH = 3800;
@@ -44,6 +44,7 @@ const MAX_LINK_QUERY_RESULTS = 20;
  */
 export interface BotUpdateContext {
   accountId?: string;
+  receiverBotId?: string;
 }
 
 /**
@@ -82,13 +83,11 @@ interface GrantClaimAttribution {
 @Injectable()
 export class TelegramBotDispatchService implements OnApplicationShutdown {
   private readonly logger = new Logger(TelegramBotDispatchService.name);
-  /** 正在执行异步 Google Drive 转存的消息去重集 (chatId:messageId) */
-  private readonly processingMessages = new Set<string>();
-  /** 停机排空追踪：在途后台 GDrive 转存任务 (chatId:messageId -> { abortController, promise }) */
+  /** 首个异步操作之前登记，在文档处理及其后台转存结束后释放。 */
   private readonly activeTransfers = new Map<string, { abortController: AbortController; promise: Promise<void> }>();
-  /** 会话级在途转存计数 (chatId -> 活跃转存数)，用于感知用户当前是否有正在处理的直链生成 */
+  /** 会话级在途转存计数 (Bot ID + chatId -> 活跃转存数)，用于感知用户当前是否有正在处理的直链生成 */
   private readonly activeTransfersByChat = new Map<string, number>();
-  /** 会话级等待提示回复冷却时间戳 (chatId -> 最近一次发送轻量提示的毫秒时间戳)，防止用户刷屏 */
+  /** 会话级等待提示回复冷却时间戳 (Bot ID + chatId -> 最近提示时间戳)，防止用户刷屏 */
   private readonly chatNoticeCooldowns = new Map<string, number>();
   /** 等待期间用户发言提示防刷冷却时间（15 秒） */
   private readonly inFlightNoticeCooldownMs = 15_000;
@@ -214,14 +213,15 @@ export class TelegramBotDispatchService implements OnApplicationShutdown {
         await this.handleCommand(message, identity, text, accountId);
         return;
       }
+      const receiverBotId = context?.receiverBotId ?? (accountId
+        ? this.pool?.getConfig(accountId)?.token.split(':')[0]
+        : this.defaultSourceAccountId());
       if (message.document) {
-        await this.handleDocument(message, identity, accountId);
-        return;
-      }
-      // 在途转存等待状态保护：若当前私聊有正在处理的文件直链生成，优先拦截普通非命令发言并节流，
-      // 避免向用户倾泻冗长的 /help 菜单形成消息轰炸
-      if (this.hasActiveTransferForChat(chatId)) {
-        await this.handleInFlightChatNotice(chatId, message.message_id, accountId);
+        if (!receiverBotId || !/^\d+$/.test(receiverBotId)) {
+          this.logger.warn('无法确认接收文件的 Bot 身份，跳过签发');
+          return;
+        }
+        await this.handleDocument(message, identity, receiverBotId, accountId);
         return;
       }
       if (this.isNonDocumentMedia(message)) {
@@ -231,6 +231,11 @@ export class TelegramBotDispatchService implements OnApplicationShutdown {
           message.message_id,
           accountId,
         );
+        return;
+      }
+      const conversationKey = `${receiverBotId}:${chatId}`;
+      if (text && this.hasActiveTransferForChat(conversationKey)) {
+        await this.handleInFlightChatNotice(conversationKey, chatId, message.message_id, accountId);
         return;
       }
       await this.reply(chatId, this.buildHelpText(), message.message_id, accountId);
@@ -778,56 +783,58 @@ export class TelegramBotDispatchService implements OnApplicationShutdown {
   private async handleDocument(
     message: TelegramMessage,
     identity: TelegramBotIdentity,
+    receiverBotId: string,
     accountId?: string,
   ): Promise<void> {
     const doc = message.document;
-    if (!doc || !doc.file_id) return;
+    if (!doc?.file_id) return;
     const chatId = String(message.chat.id);
     const messageId = String(message.message_id);
-
-    // 池化模式：先把「哪个账号收到了这个文件」落库（幂等），再走原有直链签发流程
-    await this.registerInboundCopyAndForward(message, accountId);
-
-    // 幂等：同一条消息只签发一次、只扣一次配额
-    const existing = await this.grantService.findByMessage(identity.telegramUserId, chatId, messageId);
-    if (existing) {
-      const token = this.grantService.replayToken(existing);
-      const origin = await this.botConfigService.resolveSiteOriginAsync();
-      if (this.grantService.isActive(existing) && token && origin) {
-        await this.reply(
-          chatId,
-          `该文件的下载链接：\n${this.grantService.buildUrl(origin, token)}\n（有效期至 ${new Date(existing.expiresAt).toISOString()}）`,
-          message.message_id,
-          accountId,
-        );
-      } else {
-        await this.reply(
-          chatId,
-          '该文件的链接已失效（过期或已撤销），请重新发送文件以获取新链接。',
-          message.message_id,
-          accountId,
-        );
-      }
-      return;
-    }
-
+    const conversationKey = `${receiverBotId}:${chatId}`;
+    const msgKey = `${conversationKey}:${messageId}`;
+    if (this.activeTransfers.has(msgKey)) return;
     if (this.isShuttingDown) {
-      this.logger.warn(`服务正在停机重启，拒绝处理新文档 (chat=${chatId}, message=${messageId})`);
       await this.reply(chatId, '服务正在维护重启中，请稍后重新发送文件。', message.message_id, accountId);
       return;
     }
 
-    // 正在转存同一消息时，静默去重跳过，防止并发重复转存与重复消息轰炸
-    const msgKey = `${chatId}:${messageId}`;
-    if (this.processingMessages.has(msgKey)) {
-      this.logger.debug(`文件消息 ${msgKey} 正在处理中，静默跳过重复更新`);
-      return;
-    }
-    // [P1-04 Fix]: 立即在此加锁，彻底消除配额检查与域名解析异步窗口期的并发重复请求竞争
-    this.processingMessages.add(msgKey);
-    let transferStarted = false;
-
+    const abortController = new AbortController();
+    let drained!: () => void;
+    const promise = new Promise<void>((resolve) => { drained = resolve; });
+    this.activeTransfers.set(msgKey, { abortController, promise });
+    let waitingForLink = false;
+    const finish = () => {
+      if (waitingForLink) this.decrementChatActiveTransfer(conversationKey);
+      this.activeTransfers.delete(msgKey);
+      drained();
+    };
+    let background: Promise<void> | undefined;
     try {
+      const existing = await this.grantService.findByMessage(
+        identity.telegramUserId, chatId, messageId, receiverBotId, doc.file_id,
+      );
+      if (existing) {
+        const token = this.grantService.replayToken(existing);
+        const origin = await this.botConfigService.resolveSiteOriginAsync();
+        if (this.grantService.isActive(existing) && token && origin) {
+          await this.reply(
+            chatId,
+            `该文件的下载链接：\n${this.grantService.buildUrl(origin, token)}\n（有效期至 ${new Date(existing.expiresAt).toISOString()}）`,
+            message.message_id,
+            accountId,
+          );
+        } else {
+          await this.reply(
+            chatId,
+            '该文件的链接已失效（过期或已撤销），请重新发送文件以获取新链接。',
+            message.message_id,
+            accountId,
+          );
+        }
+        return;
+      }
+      await this.registerInboundCopyAndForward(message, accountId);
+
       // 不设文件大小上限（含 `MAX_FILE_SIZE`）：
       // - Bot 文件不经过本站上传链路，`MAX_FILE_SIZE` 是「后台上传配置」的上传策略，与下载无关；
       // - 本地 Bot API 以 `--local` 运行时跳过 `MAX_DOWNLOAD_FILE_SIZE`（20MB）检查，
@@ -853,7 +860,12 @@ export class TelegramBotDispatchService implements OnApplicationShutdown {
       const usageDate = this.quotaService.getBusinessDate(config.quotaTimezone);
       const whitelisted = await this.quotaService.isWhitelisted(identity.telegramUserId);
 
+      if (this.isShuttingDown) {
+        await this.reply(chatId, '服务正在维护重启中，请稍后重新发送文件。', message.message_id, accountId);
+        return;
+      }
       let quotaConsumed = false;
+      let quotaUsed = 0;
       if (!whitelisted) {
         const quota = await this.quotaService.consume(identity.telegramUserId, usageDate, config.dailyLimit);
         if (!quota.allowed) {
@@ -879,8 +891,10 @@ export class TelegramBotDispatchService implements OnApplicationShutdown {
           return;
         }
         quotaConsumed = true;
+        quotaUsed = quota.used;
+      } else {
+        quotaUsed = await this.quotaService.getUsed(identity.telegramUserId, usageDate);
       }
-      const quotaUsed = await this.quotaService.getUsed(identity.telegramUserId, usageDate);
 
       // 纯 Google 存储模式：先回复等待提示，后台异步拉流并直传 Google 云端硬盘
       if (config.storageMode === 'gdrive') {
@@ -892,19 +906,18 @@ export class TelegramBotDispatchService implements OnApplicationShutdown {
           return;
         }
 
-        let waitingMsgId: number | null = null;
-        try {
-          waitingMsgId = await this.reply(
-            chatId,
-            '⏳ 正在创建下载链接，请稍候...',
-            message.message_id,
-            accountId,
-          );
-        } catch (replyErr) {
-          this.logger.warn(`发送等待提示失败（继续转存）: ${replyErr instanceof Error ? replyErr.message : String(replyErr)}`);
+        this.incrementChatActiveTransfer(conversationKey);
+        waitingForLink = true;
+        const waitingMsgId = await this.sendWaitingNotice(message, accountId, abortController.signal);
+        // Telegram 确认等待提示期间，服务仍可能进入停机排空。
+        if (this.isShuttingDown) {
+          if (quotaConsumed) await this.quotaService.refund(identity.telegramUserId, usageDate);
+          if (!abortController.signal.aborted) {
+            await this.updateOrReply(chatId, waitingMsgId, '服务正在维护重启中，请稍后重新发送文件。', message.message_id, accountId);
+          }
+          return;
         }
-        transferStarted = true;
-        this.startGDriveTransfer({
+        background = this.executeGDriveTransfer({
           message,
           identity,
           chatId,
@@ -918,7 +931,8 @@ export class TelegramBotDispatchService implements OnApplicationShutdown {
           config,
           waitingMsgId,
           accountId,
-        });
+          receiverBotId,
+        }, abortController);
         return;
       }
 
@@ -932,7 +946,8 @@ export class TelegramBotDispatchService implements OnApplicationShutdown {
             messageId,
             telegramFileId: doc.file_id,
             // 回退安全锚点：池化模式=收到消息的账号；单账号模式=默认 Token 的 botId
-            sourceAccountId: accountId ?? this.defaultSourceAccountId(),
+            sourceAccountId: accountId ?? receiverBotId,
+            receiverBotId,
             fileName: this.sanitizePlain(doc.file_name, 255),
             mimeType: this.sanitizePlain(doc.mime_type, 128),
             fileSize: fileSize === null ? null : String(fileSize),
@@ -978,7 +993,7 @@ export class TelegramBotDispatchService implements OnApplicationShutdown {
 
         // 镜像备份（Bot 入站）：grant 已持久化后才触发；镜像失败不回滚签发与配额
         void this.triggerInboundMirror(grant, accountId);
-        void this.triggerGDriveCacheMirror(grant, doc, fileSize, accountId);
+        background = this.triggerGDriveCacheMirror(grant, doc, fileSize, accountId, abortController.signal);
       } catch (error) {
         // 签发失败：归还已消耗的配额，避免用户白白损失额度
         if (quotaConsumed) {
@@ -989,8 +1004,13 @@ export class TelegramBotDispatchService implements OnApplicationShutdown {
         await this.reply(chatId, '内部错误：生成下载链接失败，请稍后重试。', message.message_id, accountId);
       }
     } finally {
-      if (!transferStarted) {
-        this.processingMessages.delete(msgKey);
+      if (background) {
+        void background.then(finish, (err: unknown) => {
+          this.logger.error(`后台转存失败: ${err instanceof Error ? err.message : String(err)}`);
+          finish();
+        });
+      } else {
+        finish();
       }
     }
   }
@@ -1135,58 +1155,63 @@ export class TelegramBotDispatchService implements OnApplicationShutdown {
     ].join('\n');
   }
 
-  private incrementChatActiveTransfer(chatId: string): void {
-    const current = this.activeTransfersByChat.get(chatId) ?? 0;
-    this.activeTransfersByChat.set(chatId, current + 1);
-  }
-
-  private decrementChatActiveTransfer(chatId: string): void {
-    const current = this.activeTransfersByChat.get(chatId) ?? 0;
-    if (current <= 1) {
-      this.activeTransfersByChat.delete(chatId);
-      this.chatNoticeCooldowns.delete(chatId);
-    } else {
-      this.activeTransfersByChat.set(chatId, current - 1);
+  private async sendWaitingNotice(
+    message: TelegramMessage,
+    accountId: string | undefined,
+    signal: AbortSignal,
+  ): Promise<number | null> {
+    if (signal.aborted) return null;
+    let cancel!: () => void;
+    const cancelled = new Promise<null>((resolve) => { cancel = () => resolve(null); });
+    signal.addEventListener('abort', cancel, { once: true });
+    try {
+      return await Promise.race([
+        this.reply(String(message.chat.id), '⏳ 正在创建下载链接，请稍候...', message.message_id, accountId),
+        cancelled,
+      ]);
+    } finally {
+      signal.removeEventListener('abort', cancel);
     }
   }
 
-  private hasActiveTransferForChat(chatId: string): boolean {
-    return (this.activeTransfersByChat.get(chatId) ?? 0) > 0;
+  private incrementChatActiveTransfer(conversationKey: string): void {
+    const current = this.activeTransfersByChat.get(conversationKey) ?? 0;
+    this.activeTransfersByChat.set(conversationKey, current + 1);
+  }
+
+  private decrementChatActiveTransfer(conversationKey: string): void {
+    const current = this.activeTransfersByChat.get(conversationKey) ?? 0;
+    if (current <= 1) {
+      this.activeTransfersByChat.delete(conversationKey);
+      this.chatNoticeCooldowns.delete(conversationKey);
+    } else {
+      this.activeTransfersByChat.set(conversationKey, current - 1);
+    }
+  }
+
+  private hasActiveTransferForChat(conversationKey: string): boolean {
+    return (this.activeTransfersByChat.get(conversationKey) ?? 0) > 0;
   }
 
   private async handleInFlightChatNotice(
+    conversationKey: string,
     chatId: string,
     replyToMessageId: number,
     accountId?: string,
   ): Promise<void> {
     const now = Date.now();
-    const lastNoticeAt = this.chatNoticeCooldowns.get(chatId) ?? 0;
-    if (now - lastNoticeAt < this.inFlightNoticeCooldownMs) {
+    const lastNoticeAt = this.chatNoticeCooldowns.get(conversationKey);
+    if (lastNoticeAt !== undefined && now - lastNoticeAt < this.inFlightNoticeCooldownMs) {
       this.logger.debug(`私聊 ${chatId} 处于在途转存提示冷却中，静默丢弃多余发言回复`);
       return;
     }
-    this.chatNoticeCooldowns.set(chatId, now);
+    this.chatNoticeCooldowns.set(conversationKey, now);
     await this.reply(
       chatId,
       '⏳ 您的文件正在创建直链中，请耐心等待完成通知，无需重复发送消息。',
       replyToMessageId,
       accountId,
     );
-  }
-
-  /**
-   * 启动纯 Google 存储模式后台异步转存，并将其纳入停机排空跟踪表。
-   */
-  private startGDriveTransfer(params: Parameters<TelegramBotDispatchService['executeGDriveTransfer']>[0]): void {
-    const key = `${params.chatId}:${params.messageId}`;
-    const abortController = new AbortController();
-    this.incrementChatActiveTransfer(params.chatId);
-    const promise = this.executeGDriveTransfer(params, abortController);
-    this.activeTransfers.set(key, { abortController, promise });
-    promise.finally(() => {
-      this.activeTransfers.delete(key);
-      this.decrementChatActiveTransfer(params.chatId);
-    });
   }
 
   /**
@@ -1204,13 +1229,13 @@ export class TelegramBotDispatchService implements OnApplicationShutdown {
       quotaConsumed: boolean;
       quotaUsed: number;
       origin: string;
-      config: any;
+      config: TelegramBotRuntimeConfig;
       waitingMsgId: number | null;
       accountId?: string;
+      receiverBotId: string;
     },
-    abortController?: AbortController,
+    controller: AbortController,
   ): Promise<void> {
-    const controller = abortController ?? new AbortController();
     const {
       message,
       identity,
@@ -1225,6 +1250,7 @@ export class TelegramBotDispatchService implements OnApplicationShutdown {
       config,
       waitingMsgId,
       accountId,
+      receiverBotId,
     } = params;
     const doc = message.document!;
     const tempDir = path.join(process.cwd(), 'tmp', 'bot-transfers');
@@ -1259,6 +1285,7 @@ export class TelegramBotDispatchService implements OnApplicationShutdown {
             bytes: estimatedBytes,
             countsTowardCache: false,
             waitTimeoutMs: 30_000,
+            signal: controller.signal,
           });
         } catch (resErr) {
           this.logger.warn(`本地磁盘预约不足，拒绝 Bot 转存任务: ${resErr instanceof Error ? resErr.message : String(resErr)}`);
@@ -1272,15 +1299,7 @@ export class TelegramBotDispatchService implements OnApplicationShutdown {
 
       // 1. 从 Telegram 拉取流并写入本地临时缓冲文件
       const upstreamStream = await this.getTelegramSourceStream(doc.file_id, fileSize ?? undefined, accountId);
-      const meteringPassThrough = new Transform({
-        transform(chunk: Buffer, _encoding, callback) {
-          diskReservation?.consume(chunk.length);
-          callback(null, chunk);
-        },
-      });
-      await pipeline(upstreamStream, meteringPassThrough, createWriteStream(tempFilePath), {
-        signal: controller.signal,
-      });
+      await this.writeTransferFile(upstreamStream, tempFilePath, diskReservation, controller.signal);
 
       if (controller.signal.aborted) {
         throw new Error('服务正在维护重启，已取消转存');
@@ -1323,7 +1342,8 @@ export class TelegramBotDispatchService implements OnApplicationShutdown {
           chatId,
           messageId,
           telegramFileId: doc.file_id,
-          sourceAccountId: accountId ?? this.defaultSourceAccountId(),
+          sourceAccountId: accountId ?? receiverBotId,
+          receiverBotId,
           fileName: this.sanitizePlain(doc.file_name, 255),
           mimeType: this.sanitizePlain(doc.mime_type, 128),
           fileSize: String(actualSize),
@@ -1394,7 +1414,6 @@ export class TelegramBotDispatchService implements OnApplicationShutdown {
         this.uploadDiskBudget.releaseSession(uploadSessionId);
         uploadSessionId = null;
       }
-      this.processingMessages.delete(`${chatId}:${messageId}`);
     }
   }
 
@@ -1407,6 +1426,7 @@ export class TelegramBotDispatchService implements OnApplicationShutdown {
     doc: { file_id: string; file_name?: string; mime_type?: string },
     fileSize: number | null,
     accountId?: string,
+    signal?: AbortSignal,
   ): Promise<void> {
     if (!this.storageRouter || this.isShuttingDown) return;
     try {
@@ -1446,6 +1466,7 @@ export class TelegramBotDispatchService implements OnApplicationShutdown {
             bytes: estimatedBytes,
             countsTowardCache: false,
             waitTimeoutMs: 10_000,
+            signal,
           });
         } catch {
           return;
@@ -1453,13 +1474,7 @@ export class TelegramBotDispatchService implements OnApplicationShutdown {
       }
 
       const upstreamStream = await this.getTelegramSourceStream(doc.file_id, fileSize ?? undefined, accountId);
-      const meteringPassThrough = new Transform({
-        transform(chunk: Buffer, _encoding, callback) {
-          diskReservation?.consume(chunk.length);
-          callback(null, chunk);
-        },
-      });
-      await pipeline(upstreamStream, meteringPassThrough, createWriteStream(localTempPath));
+      await this.writeTransferFile(upstreamStream, localTempPath, diskReservation, signal);
 
       const fileStats = await stat(localTempPath);
       const actualSize = fileStats.size;
@@ -1467,11 +1482,13 @@ export class TelegramBotDispatchService implements OnApplicationShutdown {
       const receipt = await this.storageRouter.upload({
         backendType: 'gdrive',
         objectName: doc.file_name || `tg_${doc.file_id}`,
+        signal,
         knownLength: actualSize,
         mimeType: doc.mime_type || undefined,
         openStream: () => createReadStream(localTempPath, { highWaterMark: 1024 * 1024 }),
       });
       uploadedReceipt = receipt;
+      signal?.throwIfAborted();
 
       if (receipt?.objectRef) {
         const attached = await this.grantService.attachGDriveCache(grant.id, receipt.accountId, receipt.objectRef);
@@ -1507,6 +1524,29 @@ export class TelegramBotDispatchService implements OnApplicationShutdown {
         uploadSessionId = null;
       }
     }
+  }
+
+  private async writeTransferFile(
+    source: Readable,
+    tempPath: string,
+    reservation: DownloadReservation | null,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    await pipeline(source, async (chunks) => {
+      const file = await open(tempPath, 'wx');
+      try {
+        for await (const chunk of chunks) {
+          const data = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          if (reservation && data.length > reservation.remainingBytes) {
+            this.downloadResources!.extendDiskReservation(reservation, data.length - reservation.remainingBytes);
+          }
+          await file.writeFile(data);
+          reservation?.consume(data.length);
+        }
+      } finally {
+        await file.close();
+      }
+    }, { signal });
   }
 
   /**

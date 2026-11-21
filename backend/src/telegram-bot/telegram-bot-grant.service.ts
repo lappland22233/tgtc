@@ -21,6 +21,7 @@ export interface IssueGrantInput {
    * 池化模式为「收到消息的账号」；单账号模式为默认 Token 的 botId；无法确定时为 null。
    */
   sourceAccountId?: string | null;
+  receiverBotId: string;
   /**
    * 内容标识 `file_unique_id`（可空）。
    *
@@ -76,8 +77,21 @@ export class TelegramBotGrantService {
     telegramUserId: string,
     chatId: string,
     messageId: string,
+    receiverBotId: string,
+    telegramFileId: string,
   ): Promise<TelegramBotFileGrant | null> {
-    return this.grantRepository.findOne({ where: { telegramUserId, chatId, messageId } });
+    const anchor = { telegramUserId, chatId, messageId };
+    const scoped = await this.grantRepository.findOne({ where: { ...anchor, receiverBotId } });
+    if (scoped) return scoped;
+    // Historical sourceAccountId may be a reconfigured pool alias. A file_id is
+    // scoped to its issuing Telegram bot and confirms ownership on redelivery.
+    const legacy = await this.grantRepository.findOne({
+      where: { ...anchor, receiverBotId: IsNull(), telegramFileId },
+    });
+    if (!legacy) return null;
+    const claimed = await this.grantRepository.update({ id: legacy.id, receiverBotId: IsNull() }, { receiverBotId });
+    if (claimed.affected) return Object.assign(legacy, { receiverBotId });
+    return this.grantRepository.findOne({ where: { ...anchor, receiverBotId } });
   }
 
   /** 按 Token 查授权记录（含已过期/已撤销，供校验链判定） */
@@ -113,6 +127,7 @@ export class TelegramBotGrantService {
       telegramUsername: input.username,
       telegramDisplayName: input.displayName,
       chatId: input.chatId,
+      receiverBotId: input.receiverBotId,
       messageId: input.messageId,
       telegramFileId: input.telegramFileId,
       // 内容标识（可空）：把群内认领归因回该 grant 的索引键；缺省时保持 NULL（向后兼容）
@@ -173,9 +188,10 @@ export class TelegramBotGrantService {
   /** 软撤销（立即失效）；已撤销时返回 false（幂等） */
   async revoke(grant: TelegramBotFileGrant, revokedBy: string): Promise<boolean> {
     if (grant.revokedAt) return false;
-    grant.revokedAt = new Date();
-    grant.revokedBy = revokedBy;
-    await this.grantRepository.save(grant);
+    const fields = { revokedAt: new Date(), revokedBy };
+    const result = await this.grantRepository.update({ id: grant.id, revokedAt: IsNull() }, fields);
+    if (!result.affected) return false;
+    Object.assign(grant, fields);
     return true;
   }
 

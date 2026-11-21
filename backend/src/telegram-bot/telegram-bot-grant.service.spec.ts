@@ -11,7 +11,8 @@ function makeContext() {
     create: jest.fn((input: Partial<TelegramBotFileGrant>) => input),
     save: jest.fn(async (input: Partial<TelegramBotFileGrant>) => ({ ...input, id: input.id ?? 'grant-1' })),
     find: jest.fn(async (_options?: { take?: number }) => [] as unknown[]),
-    findOne: jest.fn(async () => null),
+    findOne: jest.fn<Promise<Partial<TelegramBotFileGrant> | null>, [unknown]>(async () => null),
+    update: jest.fn(async () => ({ affected: 1 })),
   };
   const tokenCrypto = {
     // 根密钥缺失的降级路径（tokenCipher=null）即可满足落库断言
@@ -35,11 +36,28 @@ function makeIssueInput(overrides: Partial<Parameters<TelegramBotGrantService['i
     mimeType: null,
     fileSize: null,
     sourceAccountId: '1234567',
+    receiverBotId: '1234567',
     ...overrides,
   };
 }
 
 describe('TelegramBotGrantService（grant 内容标识与归因查询）', () => {
+  it('历史消息仅凭匹配的 Bot 专属 file_id 登记接收身份', async () => {
+    const { service, repository } = makeContext();
+    repository.findOne.mockResolvedValueOnce(null).mockResolvedValueOnce({ id: 'old' });
+    await expect(service.findByMessage('u', 'c', 'm', '45', 'file-45')).resolves.toMatchObject({ id: 'old' });
+    expect(repository.findOne.mock.calls[0][0]).toEqual({ where: { telegramUserId: 'u', chatId: 'c', messageId: 'm', receiverBotId: '45' } });
+    expect(repository.findOne.mock.calls[1][0]).toMatchObject({ where: { telegramFileId: 'file-45' } });
+    expect(repository.update).toHaveBeenCalledWith(expect.objectContaining({ id: 'old' }), { receiverBotId: '45' });
+  });
+
+  it('撤销只更新仍有效授权的撤销字段，保留并发写入的缓存引用', async () => {
+    const { service, repository } = makeContext();
+    expect(await service.revoke({ id: 'old', revokedAt: null } as TelegramBotFileGrant, 'admin')).toBe(true);
+    expect(repository.update).toHaveBeenCalledWith(expect.objectContaining({ id: 'old' }), { revokedAt: expect.any(Date), revokedBy: 'admin' });
+    expect(repository.save).not.toHaveBeenCalled();
+  });
+
   describe('findByFileUniqueId（跨群认领归因）', () => {
     it('空串/空白串直接返回空数组且不查库（不得用空串查库）', async () => {
       const { service, repository } = makeContext();
