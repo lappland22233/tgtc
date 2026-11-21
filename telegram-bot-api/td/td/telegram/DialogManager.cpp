@@ -14,7 +14,10 @@
 #include "td/telegram/ChatId.h"
 #include "td/telegram/ChatManager.h"
 #include "td/telegram/ChatReactions.h"
+#include "td/telegram/CommunityId.h"
+#include "td/telegram/CommunityManager.h"
 #include "td/telegram/Dependencies.h"
+#include "td/telegram/EphemeralMessageId.h"
 #include "td/telegram/FileReferenceManager.h"
 #include "td/telegram/files/FileManager.h"
 #include "td/telegram/files/FileType.h"
@@ -91,10 +94,11 @@ class CheckChannelUsernameQuery final : public Td::ResultHandler {
   explicit CheckChannelUsernameQuery(Promise<bool> &&promise) : promise_(std::move(promise)) {
   }
 
-  void send(ChannelId channel_id, const string &username, bool is_bot) {
+  void send(ChannelId channel_id, const string &username, bool is_bot, bool is_additional) {
     if (is_bot) {
       CHECK(channel_id == ChannelId());
-      send_query(G()->net_query_creator().create(telegram_api::bots_checkUsername(username), {{"me"}}));
+      send_query(
+          G()->net_query_creator().create(telegram_api::bots_checkUsername(0, is_additional, username), {{"me"}}));
       return;
     }
     channel_id_ = channel_id;
@@ -304,7 +308,9 @@ class EditDialogPhotoQuery final : public Td::ResultHandler {
         break;
       case DialogType::Channel: {
         auto channel_id = dialog_id.get_channel_id();
-        auto input_channel = td_->chat_manager_->get_input_channel(channel_id);
+        auto input_channel = channel_id.is_regular_channel()
+                                 ? td_->chat_manager_->get_input_channel(channel_id)
+                                 : td_->community_manager_->get_input_community(CommunityId(channel_id.get()));
         CHECK(input_channel != nullptr);
         send_query(G()->net_query_creator().create(
             telegram_api::channels_editPhoto(std::move(input_channel), std::move(input_chat_photo)), {{dialog_id_}}));
@@ -504,30 +510,7 @@ class ReportPeerQuery final : public Td::ResultHandler {
 
     auto ptr = result_ptr.move_as_ok();
     LOG(INFO) << "Receive result for ReportPeerQuery: " << to_string(ptr);
-    switch (ptr->get_id()) {
-      case telegram_api::reportResultReported::ID:
-        return promise_.set_value(td_api::make_object<td_api::reportChatResultOk>());
-      case telegram_api::reportResultChooseOption::ID: {
-        auto options = telegram_api::move_object_as<telegram_api::reportResultChooseOption>(ptr);
-        if (options->options_.empty()) {
-          return promise_.set_value(td_api::make_object<td_api::reportChatResultOk>());
-        }
-        vector<td_api::object_ptr<td_api::reportOption>> report_options;
-        for (auto &option : options->options_) {
-          report_options.push_back(
-              td_api::make_object<td_api::reportOption>(option->option_.as_slice().str(), option->text_));
-        }
-        return promise_.set_value(
-            td_api::make_object<td_api::reportChatResultOptionRequired>(options->title_, std::move(report_options)));
-      }
-      case telegram_api::reportResultAddComment::ID: {
-        auto option = telegram_api::move_object_as<telegram_api::reportResultAddComment>(ptr);
-        return promise_.set_value(td_api::make_object<td_api::reportChatResultTextRequired>(
-            option->option_.as_slice().str(), option->optional_));
-      }
-      default:
-        UNREACHABLE();
-    }
+    promise_.set_value(DialogManager::get_report_chat_result_object(std::move(ptr)));
   }
 
   void on_error(Status status) final {
@@ -535,7 +518,45 @@ class ReportPeerQuery final : public Td::ResultHandler {
       return promise_.set_value(td_api::make_object<td_api::reportChatResultMessagesRequired>());
     }
     td_->dialog_manager_->on_get_dialog_error(dialog_id_, status, "ReportPeerQuery");
-    td_->messages_manager_->reget_dialog_action_bar(dialog_id_, "ReportPeerQuery");
+    td_->messages_manager_->reload_dialog_action_bar(dialog_id_, "ReportPeerQuery");
+    promise_.set_error(std::move(status));
+  }
+};
+
+class ReportEphemeralMessageQuery final : public Td::ResultHandler {
+  Promise<td_api::object_ptr<td_api::ReportChatResult>> promise_;
+  DialogId dialog_id_;
+
+ public:
+  explicit ReportEphemeralMessageQuery(Promise<td_api::object_ptr<td_api::ReportChatResult>> &&promise)
+      : promise_(std::move(promise)) {
+  }
+
+  void send(DialogId dialog_id, EphemeralMessageId ephemeral_message_id, const string &option_id, const string &text) {
+    dialog_id_ = dialog_id;
+
+    auto input_peer = td_->dialog_manager_->get_input_peer(dialog_id, AccessRights::Read);
+    CHECK(input_peer != nullptr);
+
+    send_query(G()->net_query_creator().create(
+        telegram_api::ephemeral_reportMessage(std::move(input_peer), ephemeral_message_id.get(), BufferSlice(option_id),
+                                              text),
+        {{dialog_id_}}));
+  }
+
+  void on_result(BufferSlice packet) final {
+    auto result_ptr = fetch_result<telegram_api::ephemeral_reportMessage>(packet);
+    if (result_ptr.is_error()) {
+      return on_error(result_ptr.move_as_error());
+    }
+
+    auto ptr = result_ptr.move_as_ok();
+    LOG(INFO) << "Receive result for ReportEphemeralMessageQuery: " << to_string(ptr);
+    promise_.set_value(DialogManager::get_report_chat_result_object(std::move(ptr)));
+  }
+
+  void on_error(Status status) final {
+    td_->dialog_manager_->on_get_dialog_error(dialog_id_, status, "ReportEphemeralMessageQuery");
     promise_.set_error(std::move(status));
   }
 };
@@ -680,7 +701,7 @@ class UpdatePeerSettingsQuery final : public Td::ResultHandler {
   void on_error(Status status) final {
     LOG(INFO) << "Receive error for update peer settings: " << status;
     td_->dialog_manager_->on_get_dialog_error(dialog_id_, status, "UpdatePeerSettingsQuery");
-    td_->messages_manager_->reget_dialog_action_bar(dialog_id_, "UpdatePeerSettingsQuery");
+    td_->messages_manager_->reload_dialog_action_bar(dialog_id_, "UpdatePeerSettingsQuery");
     promise_.set_error(std::move(status));
   }
 };
@@ -718,7 +739,7 @@ class ReportEncryptedSpamQuery final : public Td::ResultHandler {
   void on_error(Status status) final {
     LOG(INFO) << "Receive error for report encrypted spam: " << status;
     td_->dialog_manager_->on_get_dialog_error(dialog_id_, status, "ReportEncryptedSpamQuery");
-    td_->messages_manager_->reget_dialog_action_bar(
+    td_->messages_manager_->reload_dialog_action_bar(
         DialogId(td_->user_manager_->get_secret_chat_user_id(dialog_id_.get_secret_chat_id())),
         "ReportEncryptedSpamQuery");
     promise_.set_error(std::move(status));
@@ -1085,7 +1106,7 @@ class ToggleDialogIsBlockedQuery final : public Td::ResultHandler {
     }
     if (!G()->close_flag()) {
       td_->dialog_manager_->get_dialog_info_full(dialog_id_, Auto(), "ToggleDialogIsBlockedQuery");
-      td_->messages_manager_->reget_dialog_action_bar(dialog_id_, "ToggleDialogIsBlockedQuery");
+      td_->messages_manager_->reload_dialog_action_bar(dialog_id_, "ToggleDialogIsBlockedQuery");
     }
     promise_.set_error(std::move(status));
   }
@@ -1106,7 +1127,6 @@ class ToggleDialogUnreadMarkQuery final : public Td::ResultHandler {
     saved_messages_topic_id_ = saved_messages_topic_id;
     is_marked_as_unread_ = is_marked_as_unread;
 
-    int32 flags = 0;
     telegram_api::object_ptr<telegram_api::InputPeer> parent_input_peer;
     telegram_api::object_ptr<telegram_api::InputDialogPeer> input_peer;
     if (saved_messages_topic_id.is_valid()) {
@@ -1114,7 +1134,6 @@ class ToggleDialogUnreadMarkQuery final : public Td::ResultHandler {
       if (parent_input_peer == nullptr) {
         return on_error(Status::Error(400, "Can't access the chat"));
       }
-      flags |= telegram_api::messages_markDialogUnread::PARENT_PEER_MASK;
       input_peer = saved_messages_topic_id.get_input_dialog_peer(td_);
       if (input_peer == nullptr) {
         return on_error(Status::Error(400, "Can't access the topic"));
@@ -1127,7 +1146,7 @@ class ToggleDialogUnreadMarkQuery final : public Td::ResultHandler {
     }
 
     send_query(G()->net_query_creator().create(
-        telegram_api::messages_markDialogUnread(flags, is_marked_as_unread, std::move(parent_input_peer),
+        telegram_api::messages_markDialogUnread(0, is_marked_as_unread, std::move(parent_input_peer),
                                                 std::move(input_peer)),
         {{dialog_id}}));
   }
@@ -1752,6 +1771,20 @@ NotificationSettingsScope DialogManager::get_dialog_notification_setting_scope(D
   }
 }
 
+CommunityId DialogManager::get_dialog_linked_community_id(DialogId dialog_id) const {
+  switch (dialog_id.get_type()) {
+    case DialogType::User:
+      return td_->user_manager_->get_user_linked_community_id(dialog_id.get_user_id());
+    case DialogType::Channel:
+      return td_->chat_manager_->get_channel_linked_community_id(dialog_id.get_channel_id());
+    case DialogType::Chat:
+    case DialogType::SecretChat:
+    case DialogType::None:
+    default:
+      return CommunityId();
+  }
+}
+
 void DialogManager::migrate_dialog_to_megagroup(DialogId dialog_id,
                                                 Promise<td_api::object_ptr<td_api::chat>> &&promise) {
   if (!have_dialog_force(dialog_id, "migrate_dialog_to_megagroup")) {
@@ -1995,17 +2028,17 @@ bool DialogManager::can_dialog_have_threads(DialogId dialog_id) const {
 
 bool DialogManager::on_get_dialog_error(DialogId dialog_id, const Status &status, const char *source) {
   auto message = status.message();
-  if (message == CSlice("BOT_METHOD_INVALID")) {
+  if (message == Slice("BOT_METHOD_INVALID")) {
     return true;
   }
   if (G()->is_expected_error(status)) {
     return true;
   }
-  if (message == CSlice("SEND_AS_PEER_INVALID")) {
+  if (message == Slice("SEND_AS_PEER_INVALID")) {
     reload_dialog_info_full(dialog_id, "SEND_AS_PEER_INVALID");
     return true;
   }
-  if (message == CSlice("QUOTE_TEXT_INVALID") || message == CSlice("REPLY_MESSAGE_ID_INVALID") ||
+  if (message == Slice("QUOTE_TEXT_INVALID") || message == Slice("REPLY_MESSAGE_ID_INVALID") ||
       begins_with(message, "ALLOW_PAYMENT_REQUIRED_")) {
     return true;
   }
@@ -2016,8 +2049,13 @@ bool DialogManager::on_get_dialog_error(DialogId dialog_id, const Status &status
     case DialogType::SecretChat:
       // to be implemented if necessary
       break;
-    case DialogType::Channel:
-      return td_->chat_manager_->on_get_channel_error(dialog_id.get_channel_id(), status, source);
+    case DialogType::Channel: {
+      auto channel_id = dialog_id.get_channel_id();
+      if (channel_id.is_regular_channel()) {
+        return td_->chat_manager_->on_get_channel_error(dialog_id.get_channel_id(), status, source);
+      }
+      break;
+    }
     case DialogType::None:
       // to be implemented if necessary
       break;
@@ -2401,9 +2439,13 @@ void DialogManager::set_dialog_photo(DialogId dialog_id, const td_api::object_pt
       break;
     }
     case DialogType::Channel: {
-      auto status = td_->chat_manager_->get_channel_permissions(dialog_id.get_channel_id());
+      auto channel_id = dialog_id.get_channel_id();
+      auto status = td_->chat_manager_->get_channel_permissions(channel_id);
       if (!status.can_change_info_and_settings()) {
         return promise.set_error(400, "Not enough rights to change chat photo");
+      }
+      if (!channel_id.is_regular_channel()) {
+        return promise.set_error(400, "Can't change chat photo");
       }
       break;
     }
@@ -2414,6 +2456,12 @@ void DialogManager::set_dialog_photo(DialogId dialog_id, const td_api::object_pt
       UNREACHABLE();
   }
 
+  do_set_dialog_photo(dialog_id, dialog_id, input_photo, std::move(promise));
+}
+
+void DialogManager::do_set_dialog_photo(DialogId dialog_id, DialogId owner_dialog_id,
+                                        const td_api::object_ptr<td_api::InputChatPhoto> &input_photo,
+                                        Promise<Unit> &&promise) {
   const td_api::object_ptr<td_api::InputFile> *input_file = nullptr;
   double main_frame_timestamp = 0.0;
   bool is_animation = false;
@@ -2452,9 +2500,8 @@ void DialogManager::set_dialog_photo(DialogId dialog_id, const td_api::object_pt
         auto photo = static_cast<const td_api::inputChatPhotoSticker *>(input_photo.get());
         TRY_RESULT_PROMISE(promise, sticker_photo_size, StickerPhotoSize::get_sticker_photo_size(td_, photo->sticker_));
 
-        int32 flags = telegram_api::inputChatUploadedPhoto::VIDEO_EMOJI_MARKUP_MASK;
         auto input_chat_photo = telegram_api::make_object<telegram_api::inputChatUploadedPhoto>(
-            flags, nullptr, nullptr, 0.0, sticker_photo_size->get_input_video_size_object(td_));
+            0, nullptr, nullptr, 0.0, sticker_photo_size->get_input_video_size_object(td_));
         return send_edit_dialog_photo_query(dialog_id, FileUploadId(), std::move(input_chat_photo), std::move(promise));
       }
       default:
@@ -2475,7 +2522,8 @@ void DialogManager::set_dialog_photo(DialogId dialog_id, const td_api::object_pt
 
   auto file_type = is_animation ? FileType::Animation : FileType::Photo;
   TRY_RESULT_PROMISE(promise, file_id,
-                     td_->file_manager_->get_input_file_id(file_type, *input_file, dialog_id, true, false));
+                     td_->file_manager_->get_input_file_id(file_type, *input_file, owner_dialog_id, true, false, false,
+                                                           false, false, true));
   if (!file_id.is_valid()) {
     send_edit_dialog_photo_query(dialog_id, FileUploadId(),
                                  telegram_api::make_object<telegram_api::inputChatPhotoEmpty>(), std::move(promise));
@@ -2539,7 +2587,7 @@ void DialogManager::on_upload_dialog_photo(FileUploadId file_upload_id,
 
     if (is_animation) {
       CHECK(file_view.get_type() == FileType::Animation);
-      // delete file reference and forcely reupload the file
+      // delete file reference and forcibly reupload the file
       auto file_reference = FileManager::extract_file_reference(main_remote_location->as_input_document());
       td_->file_manager_->delete_file_reference(file_upload_id.get_file_id(), file_reference);
       upload_dialog_photo(dialog_id, file_upload_id, is_animation, main_frame_timestamp, true, std::move(promise),
@@ -2558,14 +2606,12 @@ void DialogManager::on_upload_dialog_photo(FileUploadId file_upload_id,
   telegram_api::object_ptr<telegram_api::InputFile> photo_input_file;
   telegram_api::object_ptr<telegram_api::InputFile> video_input_file;
   if (is_animation) {
-    flags |= telegram_api::inputChatUploadedPhoto::VIDEO_MASK;
     video_input_file = std::move(input_file);
 
     if (main_frame_timestamp != 0.0) {
       flags |= telegram_api::inputChatUploadedPhoto::VIDEO_START_TS_MASK;
     }
   } else {
-    flags |= telegram_api::inputChatUploadedPhoto::FILE_MASK;
     photo_input_file = std::move(input_file);
   }
 
@@ -2820,9 +2866,51 @@ bool DialogManager::can_report_dialog(DialogId dialog_id) const {
   }
 }
 
+td_api::object_ptr<td_api::ReportChatResult> DialogManager::get_report_chat_result_object(
+    telegram_api::object_ptr<telegram_api::ReportResult> &&result) {
+  switch (result->get_id()) {
+    case telegram_api::reportResultReported::ID:
+      return td_api::make_object<td_api::reportChatResultOk>();
+    case telegram_api::reportResultChooseOption::ID: {
+      auto options = telegram_api::move_object_as<telegram_api::reportResultChooseOption>(result);
+      if (options->options_.empty()) {
+        return td_api::make_object<td_api::reportChatResultOk>();
+      }
+      vector<td_api::object_ptr<td_api::reportOption>> report_options;
+      for (auto &option : options->options_) {
+        report_options.push_back(
+            td_api::make_object<td_api::reportOption>(option->option_.as_slice().str(), option->text_));
+      }
+      return td_api::make_object<td_api::reportChatResultOptionRequired>(options->title_, std::move(report_options));
+    }
+    case telegram_api::reportResultAddComment::ID: {
+      auto option = telegram_api::move_object_as<telegram_api::reportResultAddComment>(result);
+      return td_api::make_object<td_api::reportChatResultTextRequired>(option->option_.as_slice().str(),
+                                                                       option->optional_);
+    }
+    default:
+      UNREACHABLE();
+      return nullptr;
+  }
+}
+
 void DialogManager::report_dialog(DialogId dialog_id, const string &option_id, const vector<MessageId> &message_ids,
                                   const string &text, Promise<td_api::object_ptr<td_api::ReportChatResult>> &&promise) {
   TRY_STATUS_PROMISE(promise, check_dialog_access(dialog_id, true, AccessRights::Read, "report_dialog"));
+
+  for (auto message_id : message_ids) {
+    if (!message_id.is_valid()) {
+      continue;
+    }
+    auto ephemeral_message_id = td_->messages_manager_->get_ephemeral_message_id_of_message_id({dialog_id, message_id});
+    if (ephemeral_message_id.is_valid()) {
+      if (message_ids.size() != 1) {
+        return promise.set_error(400, "Ephemeral messages must be reported separately");
+      }
+      return td_->create_handler<ReportEphemeralMessageQuery>(std::move(promise))
+          ->send(dialog_id, ephemeral_message_id, option_id, text);
+    }
+  }
 
   MessagesManager::ReportDialogFromActionBar report_from_action_bar;
   if (option_id.empty() && message_ids.empty() && text.empty()) {
@@ -3024,7 +3112,7 @@ void DialogManager::on_dialog_usernames_received(DialogId dialog_id, const Usern
   }
 }
 
-void DialogManager::check_dialog_username(DialogId dialog_id, const string &username, bool is_bot,
+void DialogManager::check_dialog_username(DialogId dialog_id, const string &username, bool is_bot, bool is_additional,
                                           Promise<CheckDialogUsernameResult> &&promise) {
   if (dialog_id != DialogId() && dialog_id.get_type() != DialogType::User &&
       !have_dialog_force(dialog_id, "check_dialog_username")) {
@@ -3062,7 +3150,8 @@ void DialogManager::check_dialog_username(DialogId dialog_id, const string &user
   }
 
   if (username.empty()) {
-    return promise.set_value(is_bot ? CheckDialogUsernameResult::Invalid : CheckDialogUsernameResult::Ok);
+    return promise.set_value(is_bot && !is_additional ? CheckDialogUsernameResult::Invalid
+                                                      : CheckDialogUsernameResult::Ok);
   }
 
   if (!is_allowed_username(username) && username.size() != 4) {
@@ -3098,10 +3187,10 @@ void DialogManager::check_dialog_username(DialogId dialog_id, const string &user
       return td_->create_handler<CheckUsernameQuery>(std::move(request_promise))->send(username);
     case DialogType::Channel:
       return td_->create_handler<CheckChannelUsernameQuery>(std::move(request_promise))
-          ->send(dialog_id.get_channel_id(), username, is_bot);
+          ->send(dialog_id.get_channel_id(), username, is_bot, is_additional);
     case DialogType::None:
       return td_->create_handler<CheckChannelUsernameQuery>(std::move(request_promise))
-          ->send(ChannelId(), username, is_bot);
+          ->send(ChannelId(), username, is_bot, is_additional);
     case DialogType::Chat:
     case DialogType::SecretChat:
     default:
@@ -3392,10 +3481,10 @@ vector<DialogId> DialogManager::search_public_dialogs(
   }
 
   auto type_num = static_cast<int32>(type_filter);
-  auto it = found_public_dialogs_[type_num].find(query);
-  if (it != found_public_dialogs_[type_num].end()) {
+  auto *dialog_ids = found_public_dialogs_[type_num].get(query);
+  if (dialog_ids != nullptr) {
     promise.set_value(Unit());
-    return it->second;
+    return *dialog_ids;
   }
 
   send_search_public_dialogs_query(query, type_filter, std::move(promise));
@@ -3422,10 +3511,10 @@ vector<DialogId> DialogManager::search_dialogs_on_server(
   }
 
   auto type_num = static_cast<int32>(type_filter);
-  auto it = found_on_server_dialogs_[type_num].find(query);
-  if (it != found_on_server_dialogs_[type_num].end()) {
+  auto *dialog_ids = found_on_server_dialogs_[type_num].get(query);
+  if (dialog_ids != nullptr) {
     promise.set_value(Unit());
-    return td_->messages_manager_->sort_dialogs_by_order(it->second, limit);
+    return td_->messages_manager_->sort_dialogs_by_order(*dialog_ids, limit);
   }
 
   send_search_public_dialogs_query(query, type_filter, std::move(promise));
@@ -3499,8 +3588,6 @@ class DialogManager::ReorderPinnedDialogsOnServerLogEvent {
   void parse(ParserT &parser) {
     if (parser.version() >= static_cast<int32>(Version::AddFolders)) {
       td::parse(folder_id_, parser);
-    } else {
-      folder_id_ = FolderId();
     }
     td::parse(dialog_ids_, parser);
   }

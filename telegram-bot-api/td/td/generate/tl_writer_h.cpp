@@ -178,7 +178,7 @@ std::string TD_TL_writer_h::gen_function_vars(const tl::tl_combinator *t,
   return res;
 }
 
-bool TD_TL_writer_h::need_arg_mask(const tl::arg &a, bool can_be_stored) const {
+bool TD_TL_writer_h::need_arg_mask(const tl::tl_combinator *t, const tl::arg &a) const {
   if (a.exist_var_num == -1) {
     return false;
   }
@@ -189,14 +189,28 @@ bool TD_TL_writer_h::need_arg_mask(const tl::arg &a, bool can_be_stored) const {
   const tl::tl_tree_type *tree_type = static_cast<tl::tl_tree_type *>(a.type);
   const std::string &name = tree_type->type->name;
 
-  if (name == "True") {
+  if (name == "True" || name == "Bytes") {
     return false;
   }
-  if (can_be_stored) {
-    return true;
+  if (name == "String") {
+    // flags for non-empty strings are set automatically; masks are needed only to send or check empty strings
+    const std::string &type_name = t->name;
+    return ((type_name == "messages.editMessage" || type_name == "messages.editInlineBotMessage" ||
+             type_name == "ephemeral.editMessage") &&
+            a.name == "message") ||
+           (type_name == "stories.editStory" && a.name == "caption") ||
+           ((type_name == "messages.editExportedChatInvite" || type_name == "chatlists.editExportedInvite") &&
+            a.name == "title") ||
+           (type_name == "account.passwordInputSettings" && a.name == "email") ||
+           (type_name == "user" && (a.name == "phone" || a.name == "bot_inline_placeholder")) ||
+           type_name == "account.updateProfile" || type_name == "bots.setBotInfo" ||
+           type_name == "stickers.changeSticker" || type_name == "messages.editMessageWidgetData" ||
+           type_name == "messages.editInlineBotMessageWidgetData";
   }
-  if (a.name == "albums") {
-    return true;
+  if (is_built_in_complex_type(name)) {
+    // flags for non-empty vectors are set automatically; masks are needed only to send or check empty vectors
+    const std::string &type_name = t->name;
+    return type_name == "stories.editStory" && (a.name == "media_areas" || a.name == "privacy_rules");
   }
   if (!is_built_in_simple_type(name)) {
     return false;
@@ -205,13 +219,13 @@ bool TD_TL_writer_h::need_arg_mask(const tl::arg &a, bool can_be_stored) const {
   return true;
 }
 
-std::string TD_TL_writer_h::gen_flags_definitions(const tl::tl_combinator *t, bool can_be_stored) const {
+std::string TD_TL_writer_h::gen_flags_definitions(const tl::tl_combinator *t) const {
   std::vector<std::pair<std::string, std::int32_t>> flags;
 
   for (std::size_t i = 0; i < t->args.size(); i++) {
     const tl::arg &a = t->args[i];
 
-    if (need_arg_mask(a, can_be_stored)) {
+    if (need_arg_mask(t, a)) {
       auto name = a.name;
       for (auto &c : name) {
         c = to_upper(c);

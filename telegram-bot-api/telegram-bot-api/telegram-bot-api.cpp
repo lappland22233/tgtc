@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2025
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2026
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -167,7 +167,7 @@ int main(int argc, char *argv[]) {
   auto start_time = td::Time::now();
   auto shared_data = std::make_shared<SharedData>();
   auto parameters = std::make_unique<ClientParameters>();
-  parameters->version_ = "10.2";
+  parameters->version_ = "10.4";
   parameters->shared_data_ = shared_data;
   parameters->start_time_ = start_time;
   auto net_query_stats = td::create_net_query_stats();
@@ -189,6 +189,7 @@ int main(int argc, char *argv[]) {
   int memory_verbosity_level = VERBOSITY_NAME(INFO);
   td::int64 log_max_file_size = 2000000000;
   td::string working_directory = PSTRING() << "." << TD_DIR_SLASH;
+  td::string files_directory;
   td::string temporary_directory;
   td::string username;
   td::string groupname;
@@ -266,6 +267,8 @@ int main(int argc, char *argv[]) {
   options.add_checked_option('s', "http-stat-port", "HTTP statistics port",
                              td::OptionParser::parse_integer(http_stat_port));
   options.add_option('d', "dir", "server working directory", td::OptionParser::parse_string(working_directory));
+  options.add_option('f', "files-dir", "directory for storing auxiliary files (defaults to the working directory)",
+                     td::OptionParser::parse_string(files_directory));
   options.add_option('t', "temp-dir", "directory for storing HTTP server temporary files",
                      td::OptionParser::parse_string(temporary_directory));
   options.add_checked_option('\0', "filter",
@@ -286,16 +289,14 @@ int main(int argc, char *argv[]) {
                              "default value of the maximum webhook connections per bot",
                              td::OptionParser::parse_integer(parameters->default_max_webhook_connections_));
   options.add_checked_option('\0', "http-ip-address",
-                             "local IP address, HTTP connections to which will be accepted. By default, connections to "
-                             "any local IPv4 address are accepted",
+                             "local IP address for the Bot API and stream listener. Defaults to 127.0.0.1",
                              [&](td::Slice ip_address) {
                                TRY_STATUS(td::IPAddress::get_ip_address(ip_address.str()));
                                http_ip_address = ip_address.str();
                                return td::Status::OK();
                              });
   options.add_checked_option('\0', "http-stat-ip-address",
-                             "local IP address, HTTP statistics connections to which will be accepted. By default, "
-                             "statistics connections to any local IPv4 address are accepted",
+                             "local IP address for the HTTP statistics listener. Defaults to 127.0.0.1",
                              [&](td::Slice ip_address) {
                                TRY_STATUS(td::IPAddress::get_ip_address(ip_address.str()));
                                http_stat_ip_address = ip_address.str();
@@ -474,9 +475,43 @@ int main(int argc, char *argv[]) {
       td::rmdir(r_temp_dir.ok()).ensure();
     }
 
+    if (files_directory.empty()) {
+      files_directory = working_directory;
+    } else {
+      TRY_RESULT_PREFIX_ASSIGN(files_directory, td::realpath(files_directory, true),
+                               "Invalid files directory specified: ");
+      if (files_directory.empty()) {
+        return td::Status::Error("Empty path specified as files directory");
+      }
+      if (files_directory.back() != TD_DIR_SLASH) {
+        files_directory += TD_DIR_SLASH;
+      }
+
+      TRY_STATUS_PREFIX(td::mkpath(files_directory, 0750), "Failed to create files directory: ");
+
+      auto r_temp_file = td::mkstemp(files_directory);
+      if (r_temp_file.is_error()) {
+        return td::Status::Error(PSLICE() << "Can't create files in the directory \"" << files_directory
+                                          << "\". Use --files-dir option to specify a writable files directory");
+      }
+      r_temp_file.ok_ref().first.close();
+      td::unlink(r_temp_file.ok().second).ensure();
+
+      auto r_temp_dir = td::mkdtemp(files_directory, "1:a");
+      if (r_temp_dir.is_error()) {
+        parameters->allow_colon_in_filenames_ = false;
+        r_temp_dir = td::mkdtemp(files_directory, "1~a");
+        if (r_temp_dir.is_error()) {
+          return td::Status::Error(PSLICE() << "Can't create directories in the directory \"" << files_directory
+                                            << "\". Use --files-dir option to specify a writable files directory");
+        }
+      }
+      td::rmdir(r_temp_dir.ok()).ensure();
+    }
+
     if (!temporary_directory.empty()) {
       if (td::PathView(temporary_directory).is_relative()) {
-        temporary_directory = working_directory + temporary_directory;
+        temporary_directory = files_directory + temporary_directory;
       }
       TRY_STATUS_PREFIX(td::set_temporary_dir(temporary_directory), "Can't set temporary directory: ");
     }
@@ -499,7 +534,7 @@ int main(int argc, char *argv[]) {
 
     if (!log_file_path.empty()) {
       if (td::PathView(log_file_path).is_relative()) {
-        log_file_path = working_directory + log_file_path;
+        log_file_path = files_directory + log_file_path;
       }
       TRY_STATUS_PREFIX(file_log.init(log_file_path, log_max_file_size), "Can't open log file: ");
       log.set_first(&file_log);
@@ -514,6 +549,7 @@ int main(int argc, char *argv[]) {
   }
 
   parameters->working_directory_ = std::move(working_directory);
+  parameters->files_directory_ = std::move(files_directory);
 
   if (parameters->default_max_webhook_connections_ <= 0) {
     parameters->default_max_webhook_connections_ = parameters->local_mode_ ? 100 : 40;
@@ -542,7 +578,8 @@ int main(int argc, char *argv[]) {
           .release();
 
   WorkdirCleanupConfig cleanup_config;
-  cleanup_config.workdir = parameters->working_directory_;
+  cleanup_config.workdir = parameters->files_directory_;
+  cleanup_config.database_dir = parameters->working_directory_;
   cleanup_config.threshold_bytes = parameters->workdir_cleanup_threshold_bytes_;
   cleanup_config.target_bytes = parameters->workdir_cleanup_target_bytes_;
   cleanup_config.interval = parameters->workdir_cleanup_interval_;

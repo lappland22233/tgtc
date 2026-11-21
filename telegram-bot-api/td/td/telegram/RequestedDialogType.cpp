@@ -167,12 +167,6 @@ telegram_api::object_ptr<telegram_api::RequestPeerType> RequestedDialogType::get
       if (restrict_has_username_) {
         flags |= telegram_api::requestPeerTypeChat::HAS_USERNAME_MASK;
       }
-      if (restrict_user_administrator_rights_) {
-        flags |= telegram_api::requestPeerTypeChat::USER_ADMIN_RIGHTS_MASK;
-      }
-      if (restrict_bot_administrator_rights_) {
-        flags |= telegram_api::requestPeerTypeChat::BOT_ADMIN_RIGHTS_MASK;
-      }
       auto user_admin_rights =
           restrict_user_administrator_rights_ ? user_administrator_rights_.get_chat_admin_rights() : nullptr;
       auto bot_admin_rights =
@@ -186,12 +180,6 @@ telegram_api::object_ptr<telegram_api::RequestPeerType> RequestedDialogType::get
       if (restrict_has_username_) {
         flags |= telegram_api::requestPeerTypeBroadcast::HAS_USERNAME_MASK;
       }
-      if (restrict_user_administrator_rights_) {
-        flags |= telegram_api::requestPeerTypeBroadcast::USER_ADMIN_RIGHTS_MASK;
-      }
-      if (restrict_bot_administrator_rights_) {
-        flags |= telegram_api::requestPeerTypeBroadcast::BOT_ADMIN_RIGHTS_MASK;
-      }
       auto user_admin_rights =
           restrict_user_administrator_rights_ ? user_administrator_rights_.get_chat_admin_rights() : nullptr;
       auto bot_admin_rights =
@@ -200,14 +188,7 @@ telegram_api::object_ptr<telegram_api::RequestPeerType> RequestedDialogType::get
           flags, is_created_, has_username_, std::move(user_admin_rights), std::move(bot_admin_rights));
     }
     case Type::CreateBot: {
-      int32 flags = 0;
-      if (!suggested_name_.empty()) {
-        flags |= telegram_api::requestPeerTypeCreateBot::SUGGESTED_NAME_MASK;
-      }
-      if (!suggested_username_.empty()) {
-        flags |= telegram_api::requestPeerTypeCreateBot::SUGGESTED_USERNAME_MASK;
-      }
-      return telegram_api::make_object<telegram_api::requestPeerTypeCreateBot>(flags, true, suggested_name_,
+      return telegram_api::make_object<telegram_api::requestPeerTypeCreateBot>(0, true, suggested_name_,
                                                                                suggested_username_);
     }
     default:
@@ -216,12 +197,11 @@ telegram_api::object_ptr<telegram_api::RequestPeerType> RequestedDialogType::get
   }
 }
 
-telegram_api::object_ptr<telegram_api::inputKeyboardButtonRequestPeer>
-RequestedDialogType::get_input_keyboard_button_request_peer(
-    int32 flags, telegram_api::object_ptr<telegram_api::keyboardButtonStyle> style, const string &text) const {
-  return telegram_api::make_object<telegram_api::inputKeyboardButtonRequestPeer>(
-      flags, request_name_, request_username_, request_photo_, std::move(style), text, button_id_,
-      get_input_request_peer_type_object(), max_quantity_);
+telegram_api::object_ptr<telegram_api::inputButtonTypeRequestPeer>
+RequestedDialogType::get_input_button_type_request_peer() const {
+  return telegram_api::make_object<telegram_api::inputButtonTypeRequestPeer>(
+      0, request_name_, request_username_, request_photo_, button_id_, get_input_request_peer_type_object(),
+      max_quantity_);
 }
 
 int32 RequestedDialogType::get_button_id() const {
@@ -231,16 +211,9 @@ int32 RequestedDialogType::get_button_id() const {
 Status RequestedDialogType::check_shared_dialog(Td *td, DialogId dialog_id) const {
   switch (dialog_id.get_type()) {
     case DialogType::User: {
-      if (type_ != Type::User) {
-        return Status::Error(400, "Wrong chat type");
-      }
       auto user_id = dialog_id.get_user_id();
-      if (restrict_is_bot_ && td->user_manager_->is_user_bot(user_id) != is_bot_) {
-        return Status::Error(400, "Wrong is_bot value");
-      }
-      if (restrict_is_premium_ && td->user_manager_->is_user_premium(user_id) != is_premium_) {
-        return Status::Error(400, "Wrong is_premium value");
-      }
+      TRY_STATUS(
+          check_shared_user(td->user_manager_->is_user_bot(user_id), td->user_manager_->is_user_premium(user_id)));
       break;
     }
     case DialogType::Chat: {
@@ -325,14 +298,45 @@ Status RequestedDialogType::check_shared_dialog(Td *td, DialogId dialog_id) cons
   return Status::OK();
 }
 
+Status RequestedDialogType::check_shared_user(bool is_bot, bool is_premium) const {
+  if (type_ != Type::User && type_ != Type::CreateBot) {
+    return Status::Error(400, "Wrong chat type");
+  }
+  // The server verifies ownership and the manager of a newly created bot.
+  // Locally, never accept an ordinary user for a managed-bot request.
+  if ((type_ == Type::CreateBot && !is_bot) || (restrict_is_bot_ && is_bot != is_bot_)) {
+    return Status::Error(400, "Wrong is_bot value");
+  }
+  if (restrict_is_premium_ && is_premium != is_premium_) {
+    return Status::Error(400, "Wrong is_premium value");
+  }
+  return Status::OK();
+}
+
 Status RequestedDialogType::check_shared_dialog_count(size_t count) const {
   if (count == 0) {
     return Status::Error(400, "Too few chats are chosen");
   }
-  if (count > static_cast<size_t>(max_quantity_)) {
+  if (count > static_cast<size_t>(type_ == Type::CreateBot ? 1 : max_quantity_)) {
     return Status::Error(400, "Too many chats are chosen");
   }
   return Status::OK();
+}
+
+bool operator==(const RequestedDialogType &lhs, const RequestedDialogType &rhs) {
+  return lhs.type_ == rhs.type_ && lhs.button_id_ == rhs.button_id_ && lhs.max_quantity_ == rhs.max_quantity_ &&
+         lhs.restrict_is_bot_ == rhs.restrict_is_bot_ && lhs.is_bot_ == rhs.is_bot_ &&
+         lhs.restrict_is_premium_ == rhs.restrict_is_premium_ && lhs.is_premium_ == rhs.is_premium_ &&
+         lhs.request_name_ == rhs.request_name_ && lhs.request_username_ == rhs.request_username_ &&
+         lhs.request_photo_ == rhs.request_photo_ && lhs.restrict_is_forum_ == rhs.restrict_is_forum_ &&
+         lhs.is_forum_ == rhs.is_forum_ && lhs.bot_is_participant_ == rhs.bot_is_participant_ &&
+         lhs.restrict_has_username_ == rhs.restrict_has_username_ && lhs.has_username_ == rhs.has_username_ &&
+         lhs.is_created_ == rhs.is_created_ &&
+         lhs.restrict_user_administrator_rights_ == rhs.restrict_user_administrator_rights_ &&
+         lhs.restrict_bot_administrator_rights_ == rhs.restrict_bot_administrator_rights_ &&
+         lhs.user_administrator_rights_ == rhs.user_administrator_rights_ &&
+         lhs.bot_administrator_rights_ == rhs.bot_administrator_rights_ && lhs.suggested_name_ == rhs.suggested_name_ &&
+         lhs.suggested_username_ == rhs.suggested_username_;
 }
 
 }  // namespace td

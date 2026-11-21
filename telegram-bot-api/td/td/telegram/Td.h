@@ -106,6 +106,7 @@ class SuggestedActionManager;
 class TermsOfServiceManager;
 class ThemeManager;
 class TimeZoneManager;
+class TonWalletManager;
 class TopDialogManager;
 class TranscriptionManager;
 class TranslationManager;
@@ -117,6 +118,9 @@ class VoiceNotesManager;
 class WebAppManager;
 class WebBrowserManager;
 class WebPagesManager;
+class WebProxyManager;
+class WelcomeMessageManager;
+class WidgetManager;
 
 extern int VERBOSITY_NAME(td_init);
 extern int VERBOSITY_NAME(td_requests);
@@ -158,7 +162,6 @@ class Td final : public Actor {
 
   bool ignore_background_updates() const;
 
-  unique_ptr<AudiosManager> audios_manager_;
   unique_ptr<CallbackQueriesManager> callback_queries_manager_;
   unique_ptr<DocumentsManager> documents_manager_;
   unique_ptr<OptionManager> option_manager_;
@@ -170,6 +173,8 @@ class Td final : public Actor {
   ActorOwn<AnimationsManager> animations_manager_actor_;
   unique_ptr<AttachMenuManager> attach_menu_manager_;
   ActorOwn<AttachMenuManager> attach_menu_manager_actor_;
+  unique_ptr<AudiosManager> audios_manager_;
+  ActorOwn<AudiosManager> audios_manager_actor_;
   unique_ptr<AuthManager> auth_manager_;
   ActorOwn<AuthManager> auth_manager_actor_;
   unique_ptr<AutosaveManager> autosave_manager_;
@@ -280,6 +285,8 @@ class Td final : public Actor {
   ActorOwn<ThemeManager> theme_manager_actor_;
   unique_ptr<TimeZoneManager> time_zone_manager_;
   ActorOwn<TimeZoneManager> time_zone_manager_actor_;
+  unique_ptr<TonWalletManager> ton_wallet_manager_;
+  ActorOwn<TonWalletManager> ton_wallet_manager_actor_;
   unique_ptr<TopDialogManager> top_dialog_manager_;
   ActorOwn<TopDialogManager> top_dialog_manager_actor_;
   unique_ptr<TranscriptionManager> transcription_manager_;
@@ -300,6 +307,10 @@ class Td final : public Actor {
   ActorOwn<WebBrowserManager> web_browser_manager_actor_;
   unique_ptr<WebPagesManager> web_pages_manager_;
   ActorOwn<WebPagesManager> web_pages_manager_actor_;
+  unique_ptr<WelcomeMessageManager> welcome_message_manager_;
+  ActorOwn<WelcomeMessageManager> welcome_message_manager_actor_;
+  unique_ptr<WidgetManager> widget_manager_;
+  ActorOwn<WidgetManager> widget_manager_actor_;
 
   ActorOwn<AlarmManager> alarm_manager_;
   ActorOwn<HashtagHints> cashtag_search_hints_;
@@ -315,6 +326,7 @@ class Td final : public Actor {
   ActorOwn<SecureManager> secure_manager_;
   ActorOwn<StateManager> state_manager_;
   ActorOwn<StorageManager> storage_manager_;
+  ActorOwn<WebProxyManager> web_proxy_manager_;
 
   class ResultHandler : public std::enable_shared_from_this<ResultHandler> {
    public:
@@ -463,7 +475,7 @@ class Td final : public Actor {
   Result<std::pair<Parameters, TdDb::Parameters>> get_parameters(
       td_api::object_ptr<td_api::setTdlibParameters> parameters) TD_WARN_UNUSED_RESULT;
 
-  static td_api::object_ptr<td_api::error> make_error(int32 code, CSlice error) {
+  static td_api::object_ptr<td_api::error> make_error(int32 code, Slice error) {
     return td_api::make_object<td_api::error>(code, error.str());
   }
 

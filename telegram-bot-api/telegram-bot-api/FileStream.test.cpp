@@ -7,10 +7,40 @@
 #include "telegram-bot-api/FileStreamCore.h"
 #include "telegram-bot-api/FileStreamRecovery.h"
 
+#include "td/utils/port/IPAddress.h"
 #include "td/utils/tests.h"
 
 #include <algorithm>
 #include <cstdint>
+
+TEST(FileStream, AllowIp) {
+  using telegram_bot_api::is_file_stream_ip_allowed;
+  auto ipv4 = td::IPAddress::get_ipv4_address("127.0.0.3").move_as_ok();
+  ASSERT_TRUE(is_file_stream_ip_allowed(ipv4, ""));
+  ASSERT_TRUE(is_file_stream_ip_allowed(ipv4, "127.0.0.3"));
+  ASSERT_TRUE(is_file_stream_ip_allowed(ipv4, "127.0.0.3/32"));
+  ASSERT_FALSE(is_file_stream_ip_allowed(ipv4, "127.0.0.2/32"));
+  ASSERT_TRUE(is_file_stream_ip_allowed(ipv4, "127.0.0.2/31"));
+  ASSERT_FALSE(is_file_stream_ip_allowed(ipv4, "127.0.0.0/31"));
+  ASSERT_TRUE(is_file_stream_ip_allowed(ipv4, "0.0.0.0/0"));
+  ASSERT_FALSE(is_file_stream_ip_allowed(ipv4, "127.0.0.3/33"));
+  ASSERT_FALSE(is_file_stream_ip_allowed(ipv4, "127.0.0.3/-1"));
+  ASSERT_TRUE(is_file_stream_ip_allowed(ipv4, " 127.0.0.3 , 192.0.2.1 "));
+  ASSERT_TRUE(is_file_stream_ip_allowed(ipv4, "192.0.2.1, 127.0.0.2/31"));
+  ASSERT_FALSE(is_file_stream_ip_allowed(ipv4, "::/0"));
+
+  auto ipv6 = td::IPAddress::get_ipv6_address("2001:db8::3").move_as_ok();
+  ASSERT_FALSE(is_file_stream_ip_allowed(ipv6, ""));
+  ASSERT_TRUE(is_file_stream_ip_allowed(ipv6, "2001:db8::3"));
+  ASSERT_TRUE(is_file_stream_ip_allowed(ipv6, "2001:db8::3/128"));
+  ASSERT_FALSE(is_file_stream_ip_allowed(ipv6, "2001:db8::2/128"));
+  ASSERT_TRUE(is_file_stream_ip_allowed(ipv6, "2001:db8::2/127"));
+  ASSERT_FALSE(is_file_stream_ip_allowed(ipv6, "2001:db8::/127"));
+  ASSERT_TRUE(is_file_stream_ip_allowed(ipv6, "::/0"));
+  ASSERT_FALSE(is_file_stream_ip_allowed(ipv6, "2001:db8::3/129"));
+  ASSERT_FALSE(is_file_stream_ip_allowed(ipv6, "0.0.0.0/0"));
+  ASSERT_TRUE(is_file_stream_ip_allowed(ipv6, "2001:db8::/64, 192.0.2.1"));
+}
 
 TEST(FileStream, Route) {
   auto route = telegram_bot_api::parse_file_stream_route("/stream/file/bot123:token/abc%2Ddef").move_as_ok();

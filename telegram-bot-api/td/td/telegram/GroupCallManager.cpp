@@ -326,9 +326,6 @@ class CreateGroupCallQuery final : public Td::ResultHandler {
     CHECK(input_peer != nullptr);
 
     int32 flags = 0;
-    if (!title.empty()) {
-      flags |= telegram_api::phone_createGroupCall::TITLE_MASK;
-    }
     if (start_date > 0) {
       flags |= telegram_api::phone_createGroupCall::SCHEDULE_DATE_MASK;
     }
@@ -373,9 +370,8 @@ class CreateConferenceCallQuery final : public Td::ResultHandler {
 
   void send(int32 random_id, bool is_join, const GroupCallJoinParameters &join_parameters,
             tde2e_api::PrivateKeyId private_key_id, tde2e_api::PublicKeyId public_key_id) {
-    UInt256 public_key{};
-    BufferSlice block;
     if (is_join) {
+      UInt256 public_key{};
       auto public_key_string = tde2e_move_as_ok(tde2e_api::key_to_public_key(private_key_id));
       CHECK(public_key_string.size() == public_key.as_slice().size());
       public_key.as_mutable_slice().copy_from(public_key_string);
@@ -388,11 +384,14 @@ class CreateConferenceCallQuery final : public Td::ResultHandler {
       tde2e_api::CallState state;
       state.participants.push_back(std::move(participant));
 
-      block = BufferSlice(tde2e_move_as_ok(tde2e_api::call_create_zero_block(private_key_id, state)));
+      auto block = BufferSlice(tde2e_move_as_ok(tde2e_api::call_create_zero_block(private_key_id, state)));
+      send_query(G()->net_query_creator().create(telegram_api::phone_createConferenceCall(
+          0, join_parameters.is_muted_, !join_parameters.is_my_video_enabled_, true, random_id, public_key,
+          std::move(block), telegram_api::make_object<telegram_api::dataJSON>(join_parameters.payload_))));
+    } else {
+      send_query(G()->net_query_creator().create(telegram_api::phone_createConferenceCall(
+          0, false, true, false, random_id, UInt256(), BufferSlice(), nullptr)));
     }
-    send_query(G()->net_query_creator().create(telegram_api::phone_createConferenceCall(
-        0, join_parameters.is_muted_, !join_parameters.is_my_video_enabled_, is_join, random_id, public_key,
-        std::move(block), telegram_api::make_object<telegram_api::dataJSON>(join_parameters.payload_))));
   }
 
   void on_result(BufferSlice packet) final {
@@ -811,7 +810,7 @@ class JoinGroupCallQuery final : public Td::ResultHandler {
     CHECK(public_key_string.size() == public_key.as_slice().size());
     public_key.as_mutable_slice().copy_from(public_key_string);
 
-    int32 flags = telegram_api::phone_joinGroupCall::PUBLIC_KEY_MASK | telegram_api::phone_joinGroupCall::BLOCK_MASK;
+    int32 flags = telegram_api::phone_joinGroupCall::PUBLIC_KEY_MASK;
     send_query(G()->net_query_creator().create(telegram_api::phone_joinGroupCall(
         flags, parameters.is_muted_, !parameters.is_my_video_enabled_, input_group_call.get_input_group_call(),
         telegram_api::make_object<telegram_api::inputPeerSelf>(), string(), public_key, std::move(block),
@@ -858,12 +857,8 @@ class JoinVideoChatQuery final : public Td::ResultHandler {
     }
     CHECK(join_as_input_peer != nullptr);
 
-    int32 flags = 0;
-    if (!invite_hash.empty()) {
-      flags |= telegram_api::phone_joinGroupCall::INVITE_HASH_MASK;
-    }
     auto query = G()->net_query_creator().create(telegram_api::phone_joinGroupCall(
-        flags, parameters.is_muted_, !parameters.is_my_video_enabled_, input_group_call_id.get_input_group_call(),
+        0, parameters.is_muted_, !parameters.is_my_video_enabled_, input_group_call_id.get_input_group_call(),
         std::move(join_as_input_peer), invite_hash, UInt256(), BufferSlice(),
         telegram_api::make_object<telegram_api::dataJSON>(parameters.payload_)));
     auto join_query_ref = query.get_weak();
@@ -937,7 +932,7 @@ class LeaveGroupCallPresentationQuery final : public Td::ResultHandler {
   }
 
   void on_result(BufferSlice packet) final {
-    auto result_ptr = fetch_result<telegram_api::phone_editGroupCallTitle>(packet);
+    auto result_ptr = fetch_result<telegram_api::phone_leaveGroupCallPresentation>(packet);
     if (result_ptr.is_error()) {
       return on_error(result_ptr.move_as_error());
     }
@@ -1094,10 +1089,9 @@ class SendGroupCallMessageQuery final : public Td::ResultHandler {
       if (send_as_input_peer == nullptr) {
         return on_error(Status::Error(400, "Can't access sender chat"));
       }
-      flags |= telegram_api::phone_sendGroupCallMessage::SEND_AS_MASK;
     }
     if (paid_message_star_count > 0) {
-      if (!text.text.empty()) {
+      if (!text.is_empty()) {
         td_->star_manager_->add_pending_owned_star_count(-paid_message_star_count, false);
       }
       flags |= telegram_api::phone_sendGroupCallMessage::ALLOW_PAID_STARS_MASK;
@@ -1448,14 +1442,9 @@ class ToggleGroupCallRecordQuery final : public Td::ResultHandler {
 
   void send(InputGroupCallId input_group_call_id, bool is_enabled, const string &title, bool record_video,
             bool use_portrait_orientation) {
-    int32 flags = 0;
-    if (!title.empty()) {
-      flags |= telegram_api::phone_toggleGroupCallRecord::TITLE_MASK;
-    }
     send_query(G()->net_query_creator().create(
-        telegram_api::phone_toggleGroupCallRecord(flags, is_enabled, record_video,
-                                                  input_group_call_id.get_input_group_call(), title,
-                                                  use_portrait_orientation),
+        telegram_api::phone_toggleGroupCallRecord(
+            0, is_enabled, record_video, input_group_call_id.get_input_group_call(), title, use_portrait_orientation),
         {{input_group_call_id}}));
   }
 
@@ -3696,7 +3685,7 @@ void GroupCallManager::on_group_call_message_sending_failed(InputGroupCallId inp
                      group_call->group_call_id.get(), message_id,
                      td_api::make_object<td_api::error>(status.code(), status.message().str())));
   }
-  if (group_call->is_live_story && status.code() == 400 && status.message() == CSlice("SEND_AS_PEER_INVALID")) {
+  if (group_call->is_live_story && status.code() == 400 && status.message() == Slice("SEND_AS_PEER_INVALID")) {
     reload_group_call(input_group_call_id, Auto());
   }
 }
@@ -4999,11 +4988,10 @@ void GroupCallManager::process_join_video_chat_response(InputGroupCallId input_g
   if (!new_message_updates.empty()) {
     td_->updates_manager_->process_updates_users_and_chats(updates.get());
 
-    std::reverse(new_message_updates.begin(), new_message_updates.end());
     auto group_call = get_group_call(input_group_call_id);
     CHECK(group_call != nullptr);
     group_call->old_messages.clear();
-    for (auto &update : new_message_updates) {
+    for (auto &update : reversed(new_message_updates)) {
       if (input_group_call_id != InputGroupCallId(update->call_)) {
         LOG(ERROR) << "Receive message in " << InputGroupCallId(update->call_) << " instead of " << input_group_call_id;
         continue;
@@ -5949,8 +5937,9 @@ void GroupCallManager::send_group_call_message(GroupCallId group_call_id,
     if (static_cast<int64>(utf8_length(message.text)) > G()->get_option_integer("group_call_message_text_length_max")) {
       return promise.set_error(400, "Message is too long");
     }
-    td::remove_if(message.entities,
-                  [](const MessageEntity &entity) { return entity.type == MessageEntity::Type::FormattedDate; });
+    td::remove_if(message.entities, [](const MessageEntity &entity) {
+      return entity.type == MessageEntity::Type::FormattedDate || entity.type == MessageEntity::Type::TonAddress;
+    });
   }
 
   auto as_dialog_id =
@@ -5970,7 +5959,7 @@ void GroupCallManager::send_group_call_message(GroupCallId group_call_id,
     td_->create_handler<SendGroupCallEncryptedMessageQuery>(std::move(promise))
         ->send(input_group_call_id, r_data.value());
   } else {
-    CHECK(is_reaction == message.text.empty());
+    CHECK(is_reaction == message.is_empty());
     td_->create_handler<SendGroupCallMessageQuery>(std::move(promise))
         ->send(input_group_call_id, message_id, message, group_call->is_live_story ? as_dialog_id : DialogId(),
                paid_message_star_count, group_call->is_live_story);
@@ -6537,13 +6526,21 @@ void GroupCallManager::do_delete_group_call_participants(InputGroupCallId input_
     }
     return promise.set_error(400, "GROUPCALL_JOIN_MISSING");
   }
+  td::remove(user_ids, td_->user_manager_->get_my_id().get());
+  if (user_ids.empty()) {
+    return promise.set_value(Unit());
+  }
   auto state = tde2e_move_as_ok(tde2e_api::call_get_state(group_call->call_id));
   if (!td::remove_if(state.participants,
                      [&user_ids](const auto &participant) { return td::contains(user_ids, participant.user_id); }) &&
       !is_ban) {
     return promise.set_value(Unit());
   }
-  auto block = tde2e_move_as_ok(tde2e_api::call_create_change_state_block(group_call->call_id, state));
+  auto r_block = tde2e_api::call_create_change_state_block(group_call->call_id, state);
+  if (r_block.is_error()) {
+    return promise.set_error(400, "Not enough rights to delete participants");
+  }
+  auto block = std::move(r_block.value());
 
   td_->create_handler<DeleteConferenceCallParticipantsQuery>(std::move(promise))
       ->send(input_group_call_id, std::move(user_ids), is_ban, BufferSlice(block));
@@ -7136,7 +7133,7 @@ void GroupCallManager::leave_group_call(GroupCallId group_call_id, Promise<Unit>
       bool old_is_joined = get_group_call_is_joined(group_call);
       if (cancel_join_group_call_request(input_group_call_id, group_call) != 0) {
         if (try_clear_group_call_participants(input_group_call_id) ||
-            old_is_joined != get_group_call_is_joined(group_call)) {
+            (old_is_joined != get_group_call_is_joined(group_call) && group_call->is_inited)) {
           send_update_group_call(group_call, "leave_group_call 1");
         }
         process_group_call_after_join_requests(input_group_call_id, "leave_group_call 1");
@@ -8051,13 +8048,7 @@ bool GroupCallManager::set_group_call_unmuted_video_count(GroupCall *group_call,
 
 void GroupCallManager::update_group_call_dialog(const GroupCall *group_call, const char *source, bool force) {
   CHECK(group_call != nullptr);
-  if (!group_call->dialog_id.is_valid()) {
-    return;
-  }
-  if (group_call->is_live_story) {
-    if (group_call->is_active) {
-      dialog_live_stories_[group_call->dialog_id] = get_input_group_call_id(group_call->group_call_id).ok();
-    }
+  if (!group_call->dialog_id.is_valid() || group_call->is_live_story) {
     return;
   }
 

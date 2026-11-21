@@ -233,10 +233,20 @@ td::StringBuilder &operator<<(td::StringBuilder &sb, const Block &block) {
             << "\tsignature_key=" << block.o_signature_public_key_ << ")";
 }
 
-td::Result<BitString> key_to_bitstring(td::Slice key) {
+static td::Result<td::UInt256> as_key(td::Slice key) {
   if (key.size() != 32) {
     return td::Status::Error("Invalid key size");
   }
+  td::UInt256 key_int256;
+  key_int256.as_mutable_slice().copy_from(key);
+  if (key_int256.is_zero()) {
+    return td::Status::Error("Invalid zero key");
+  }
+  return key_int256;
+}
+
+static td::Result<BitString> key_to_bitstring(td::Slice key) {
+  TRY_STATUS(as_key(key));
   return BitString(key);
 }
 
@@ -287,19 +297,16 @@ StateProof StateProof::from_tl(const td::e2e_api::e2e_chain_stateProof &proof) {
 }
 
 e2e::object_ptr<e2e::e2e_chain_stateProof> StateProof::to_tl() const {
-  td::int32 flags{};
   e2e::object_ptr<e2e::e2e_chain_groupState> o_group_state_tl;
   if (o_group_state) {
     o_group_state_tl = o_group_state.value()->to_tl();
-    flags |= td::e2e_api::e2e_chain_stateProof::GROUP_STATE_MASK;
   }
   e2e::object_ptr<e2e::e2e_chain_sharedKey> o_shared_key_tl;
   if (o_shared_key) {
     o_shared_key_tl = o_shared_key.value()->to_tl();
-    flags |= td::e2e_api::e2e_chain_stateProof::SHARED_KEY_MASK;
   }
 
-  return e2e::make_object<e2e::e2e_chain_stateProof>(flags, kv_hash.hash, std::move(o_group_state_tl),
+  return e2e::make_object<e2e::e2e_chain_stateProof>(0, kv_hash.hash, std::move(o_group_state_tl),
                                                      std::move(o_shared_key_tl));
 }
 
@@ -693,18 +700,6 @@ td::int64 Blockchain::get_height() const {
   return last_block_.height_;
 }
 
-td::Result<td::UInt256> as_key(td::Slice key) {
-  if (key.size() != 32) {
-    return td::Status::Error("Invalid key size");
-  }
-  td::UInt256 key_int256;
-  key_int256.as_mutable_slice().copy_from(key);
-  if (key_int256.is_zero()) {
-    return td::Status::Error("Invalid zero key");
-  }
-  return key_int256;
-}
-
 td::Result<Blockchain> Blockchain::create_from_block(Block block, td::optional<td::Slice> o_snapshot) {
   if (block.height_ < 0) {
     return Error(E::InvalidBlock, "negative height");
@@ -761,7 +756,7 @@ td::Result<std::string> Blockchain::from_local_to_server(std::string block) {
   return block;
 }
 
-td::Result<ClientBlockchain> ClientBlockchain::create_from_block(td::Slice block_slice, const PublicKey &public_key) {
+td::Result<ClientBlockchain> ClientBlockchain::create_from_block(td::Slice block_slice) {
   TRY_RESULT(block, Block::from_tl_serialized(block_slice));
   TRY_RESULT(blockchain, Blockchain::create_from_block(std::move(block)));
   ClientBlockchain res;
@@ -785,7 +780,7 @@ td::Result<std::vector<Change>> ClientBlockchain::try_apply_block(td::Slice bloc
   for (auto &change : block.changes_) {
     if (std::holds_alternative<ChangeSetValue>(change.value)) {
       auto &change_value = std::get<ChangeSetValue>(change.value);
-      auto key = as_key(change_value.key).move_as_ok();  // already verified in try_apply_block
+      TRY_RESULT(key, as_key(change_value.key));
       map_[key] = Entry{block.height_, change_value.value};
     }
   }

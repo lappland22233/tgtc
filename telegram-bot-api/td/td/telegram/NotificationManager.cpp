@@ -357,7 +357,7 @@ td_api::object_ptr<td_api::updateActiveNotifications> NotificationManager::get_u
       }
     }
     if (!notifications.empty()) {
-      std::reverse(notifications.begin(), notifications.end());
+      td::reverse(notifications);
       groups.push_back(td_api::make_object<td_api::notificationGroup>(
           group.first.group_id.get(), get_notification_group_type_object(group.second.type),
           td_->dialog_manager_->get_chat_id_object(group.first.dialog_id, "updateActiveNotifications"),
@@ -1855,7 +1855,7 @@ void NotificationManager::remove_added_notifications_from_pending_updates(
       auto update_ptr = static_cast<td_api::updateNotification *>(update.get());
       if (is_removed(update_ptr->notification_)) {
         CHECK(update_ptr->notification_->id_ != 0);
-        removed_notification_ids.insert(update_ptr->notification_->id_);
+        // An edit doesn't make a notification new. Keep its later removal unless an addition was cancelled too.
         VLOG(notifications) << "Remove " << NotificationId(update_ptr->notification_->id_) << " in " << group_id;
         update = nullptr;
       }
@@ -2238,7 +2238,7 @@ void NotificationManager::remove_temporary_notifications(NotificationGroupId gro
         max_notification_group_size_ > group.notifications.size()) {
       load_notifications_from_database(group_it->first, group, keep_notification_group_size_);
     }
-    std::reverse(added_notifications.begin(), added_notifications.end());
+    td::reverse(added_notifications);
   }
   CHECK(get_temporary_notification_total_count(group_it->second) == 0);
 
@@ -2852,6 +2852,10 @@ string NotificationManager::convert_loc_key(const string &loc_key) {
       {"MESSAGE_GIFT_THEME", "MESSAGE_CHAT_CHANGE_THEME"},
       {"MESSAGE_GIVEAWAY", "MESSAGE_GIVEAWAY"},
       {"MESSAGE_GIVEAWAY_STARS", "MESSAGE_GIVEAWAY_STARS"},
+      {"MESSAGE_GRAM_TRANSFER", "MESSAGE_GRAM_TRANSFER"},
+      {"MESSAGE_GRAM_TRANSFER_COMMENT", "MESSAGE_GRAM_TRANSFER"},
+      {"MESSAGE_GRAM_TRANSFER_UNKNOWN", "MESSAGE_GRAM_TRANSFER"},
+      {"MESSAGE_GRAM_TRANSFER_UNKNOWN_COMMENT", "MESSAGE_GRAM_TRANSFER"},
       {"MESSAGE_INVOICE", "MESSAGE_INVOICE"},
       {"MESSAGE_NOTEXT", "MESSAGE"},
       {"MESSAGE_NOTHEME", "MESSAGE_CHAT_CHANGE_THEME"},
@@ -2886,6 +2890,8 @@ string NotificationManager::convert_loc_key(const string &loc_key) {
       {"MESSAGE_VIDEO", "MESSAGE_VIDEO"},
       {"MESSAGE_VIDEOS", "MESSAGE_VIDEOS"},
       {"MESSAGE_VIDEO_SECRET", "MESSAGE_SECRET_VIDEO"},
+      {"MESSAGE_WALLET_TONCONNECT_REQUEST", "MESSAGE_WALLET_TONCONNECT_REQUEST"},
+      {"MESSAGE_WALLET_TONCONNECT_REQUEST_DAPP", "MESSAGE_WALLET_TONCONNECT_REQUEST"},
       {"MESSAGE_WALLPAPER", "MESSAGE_WALLPAPER"},
       {"PINNED_AUDIO", "PINNED_MESSAGE_VOICE_NOTE"},
       {"PINNED_CONTACT", "PINNED_MESSAGE_CONTACT"},
@@ -2930,7 +2936,7 @@ void NotificationManager::add_push_notification_user(
   auto user = telegram_api::make_object<telegram_api::user>(
       flags, false, false, false, false, false, false, false, false, false, true /*min*/, false, false, false, false,
       false, false, false, false, 0, false, false, false, false, false, false, false, false, false, false, false, false,
-      sender_user_id.get(), sender_access_hash, user_name, string(), string(), string(), std::move(sender_photo),
+      false, sender_user_id.get(), sender_access_hash, user_name, string(), string(), string(), std::move(sender_photo),
       nullptr, 0, Auto(), string(), string(), nullptr, vector<telegram_api::object_ptr<telegram_api::username>>(),
       nullptr, nullptr, nullptr, 0, 0, 0, 0);
   td_->user_manager_->on_get_user(std::move(user), "add_push_notification_user");
@@ -3388,6 +3394,7 @@ Status NotificationManager::process_push_notification_payload(string payload, bo
     return Status::Error(406, "Story notifications are unsupported");
   }
 
+  auto original_loc_key = loc_key;
   loc_key = convert_loc_key(loc_key);
   if (loc_key.empty()) {
     return Status::Error("Push type is unknown");
@@ -3447,6 +3454,22 @@ Status NotificationManager::process_push_notification_payload(string payload, bo
     arg = PSTRING() << user_count << ' ' << StarManager::get_star_count(star_count);
     loc_args.clear();
   }
+  if (loc_key == "MESSAGE_GRAM_TRANSFER") {
+    string comment;
+    if (original_loc_key == "MESSAGE_GRAM_TRANSFER_COMMENT" ||
+        original_loc_key == "MESSAGE_GRAM_TRANSFER_UNKNOWN_COMMENT") {
+      if (loc_args.size() != 2) {
+        return Status::Error("Expected 2 arguments for MESSAGE_GRAM_TRANSFER_COMMENT");
+      }
+      comment = std::move(loc_args[1]);
+      loc_args.pop_back();
+    }
+    if (loc_args.size() != 1) {
+      return Status::Error("Expected 1 argument for MESSAGE_GRAM_TRANSFER");
+    }
+    arg = PSTRING() << loc_args[0] << '\xFF' << comment;
+    loc_args.clear();
+  }
   if (loc_key == "MESSAGE_PAID_MEDIA") {
     if (loc_args.size() != 1) {
       return Status::Error("Expected 1 argument for MESSAGE_PAID_MEDIA");
@@ -3455,6 +3478,18 @@ Status NotificationManager::process_push_notification_payload(string payload, bo
     star_count = StarManager::get_star_count(star_count);
     arg = to_string(star_count);
     loc_args.clear();
+  }
+  if (loc_key == "MESSAGE_WALLET_TONCONNECT_REQUEST") {
+    if (original_loc_key == "MESSAGE_WALLET_TONCONNECT_REQUEST_DAPP") {
+      if (loc_args.size() != 1) {
+        return Status::Error("Expected 1 argument for MESSAGE_WALLET_TONCONNECT_REQUEST_DAPP");
+      }
+      arg = std::move(loc_args[0]);
+      loc_args.pop_back();
+    }
+    if (!loc_args.empty()) {
+      return Status::Error("Expected no arguments for MESSAGE_WALLET_TONCONNECT_REQUEST");
+    }
   }
   if (loc_args.size() > 1) {
     return Status::Error("Receive too many arguments");

@@ -189,15 +189,13 @@ class GetSavedReactionTagsQuery final : public Td::ResultHandler {
   }
 
   void send(SavedMessagesTopicId saved_messages_topic_id, int64 hash) {
-    int32 flags = 0;
     telegram_api::object_ptr<telegram_api::InputPeer> saved_input_peer;
     if (saved_messages_topic_id.is_valid()) {
-      flags |= telegram_api::messages_getSavedReactionTags::PEER_MASK;
       saved_input_peer = saved_messages_topic_id.get_input_peer(td_);
       CHECK(saved_input_peer != nullptr);
     }
     send_query(G()->net_query_creator().create(
-        telegram_api::messages_getSavedReactionTags(flags, std::move(saved_input_peer), hash),
+        telegram_api::messages_getSavedReactionTags(0, std::move(saved_input_peer), hash),
         {td_->dialog_manager_->get_my_dialog_id()}));
   }
 
@@ -225,12 +223,8 @@ class UpdateSavedReactionTagQuery final : public Td::ResultHandler {
   }
 
   void send(const ReactionType &reaction_type, const string &title) {
-    int32 flags = 0;
-    if (!title.empty()) {
-      flags |= telegram_api::messages_updateSavedReactionTag::TITLE_MASK;
-    }
     send_query(G()->net_query_creator().create(
-        telegram_api::messages_updateSavedReactionTag(flags, reaction_type.get_input_reaction(), title)));
+        telegram_api::messages_updateSavedReactionTag(0, reaction_type.get_input_reaction(), title)));
   }
 
   void on_result(BufferSlice packet) final {
@@ -1499,7 +1493,7 @@ void ReactionManager::load_default_paid_reaction_type() {
       Dependencies dependencies;
       default_paid_reaction_type_.add_dependencies(dependencies);
       if (!default_paid_reaction_type_.is_valid() ||
-          !dependencies.resolve_force(td_, "load_default_paid_reaction_type")) {
+          !dependencies.resolve_force(td_, "load_default_paid_reaction_type", true)) {
         default_paid_reaction_type_ = {};
         save_default_paid_reaction_type();
       }

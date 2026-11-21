@@ -1,5 +1,5 @@
 //
-// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2025
+// Copyright Aliaksei Levin (levlam@telegram.org), Arseny Smirnov (arseny30@gmail.com) 2014-2026
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -117,27 +117,9 @@ void ClientManager::send_file_stream(td::ActorId<FileStreamConnection> stream, t
   }
   auto id_it = token_to_id_.find(token_key);
   if (id_it == token_to_id_.end()) {
-    td::string ip_address = std::move(peer_ip_address);
-    if (!ip_address.empty()) {
-      td::IPAddress tmp;
-      tmp.init_host_port(ip_address, 0).ignore();
-      tmp.clear_ipv6_interface();
-      if (tmp.is_valid()) {
-        ip_address = tmp.get_ip_str().str();
-      }
-      auto res = flood_controls_.emplace(ip_address, td::FloodControlFast());
-      auto &flood_control = res.first->second;
-      if (res.second) {
-        flood_control.add_limit(60, 20);
-        flood_control.add_limit(60 * 60, 600);
-      }
-      auto now = td::Time::now();
-      auto wakeup_at = flood_control.get_wakeup_at();
-      if (wakeup_at > now) {
-        LOG(INFO) << "Reject file stream Client creation from rate-limited IP " << ip_address;
-        return fail(429, "Too many authentication attempts");
-      }
-      flood_control.add_event(now);
+    if (get_client_ip_retry_after(peer_ip_address) > 0) {
+      LOG(INFO) << "Reject file stream Client creation from rate-limited IP " << peer_ip_address;
+      return fail(429, "Too many authentication attempts");
     }
     if (is_global_flood_control_enabled_) {
       auto now = td::Time::now();
@@ -185,6 +167,33 @@ void ClientManager::on_file_stream_timeout(bool first_byte_timeout) {
   counter.fetch_add(1, std::memory_order_relaxed);
 }
 
+int ClientManager::get_client_ip_retry_after(td::string ip_address) {
+  if (ip_address.empty()) {
+    return 0;
+  }
+  auto parsed = td::IPAddress::get_ip_address(ip_address);
+  if (parsed.is_ok()) {
+    parsed.ok_ref().clear_ipv6_interface();
+    ip_address = parsed.ok_ref().get_ip_str().str();
+  }
+  auto *flood_control = flood_controls_.access(ip_address);
+  if (flood_control == nullptr) {
+    td::FloodControlFast initial;
+    initial.add_limit(60, 20);
+    initial.add_limit(3600, 600);
+    flood_controls_.set(ip_address, std::move(initial));
+    flood_control = flood_controls_.access(ip_address);
+    CHECK(flood_control != nullptr);
+  }
+  const auto now = td::Time::now();
+  const auto wakeup_at = flood_control->get_wakeup_at();
+  if (wakeup_at > now) {
+    return static_cast<int>(wakeup_at - now) + 1;
+  }
+  flood_control->add_event(now);
+  return 0;
+}
+
 void ClientManager::send(PromisedQueryPtr query) {
   if (close_flag_) {
     // automatically send 429
@@ -198,7 +207,7 @@ void ClientManager::send(PromisedQueryPtr query) {
   }
   auto r_user_id = td::to_integer_safe<td::int64>(query->token().substr(0, token.find(':')));
   if (r_user_id.is_error() || !token_range_(r_user_id.ok())) {
-    return fail_query(421, "Misdirected Request: unallowed token specified", std::move(query));
+    return fail_query(421, "Misdirected Request: forbidden token specified", std::move(query));
   }
   auto user_id = r_user_id.ok();
   if (user_id <= 0 || user_id >= (static_cast<td::int64>(1) << 54)) {
@@ -217,30 +226,11 @@ void ClientManager::send(PromisedQueryPtr query) {
     }
 
     td::string ip_address = query->get_peer_ip_address();
-    if (!ip_address.empty()) {
-      td::IPAddress tmp;
-      tmp.init_host_port(ip_address, 0).ignore();
-      tmp.clear_ipv6_interface();
-      if (tmp.is_valid()) {
-        ip_address = tmp.get_ip_str().str();
-      }
-    }
     LOG(DEBUG) << "Receive incoming query for new bot " << token << " from " << ip_address;
-    if (!ip_address.empty()) {
-      LOG(DEBUG) << "Check Client creation flood control for IP address " << ip_address;
-      auto res = flood_controls_.emplace(std::move(ip_address), td::FloodControlFast());
-      auto &flood_control = res.first->second;
-      if (res.second) {
-        flood_control.add_limit(60, 20);        // 20 in a minute
-        flood_control.add_limit(60 * 60, 600);  // 600 in an hour
-      }
-      auto now = td::Time::now();
-      auto wakeup_at = flood_control.get_wakeup_at();
-      if (wakeup_at > now) {
-        LOG(INFO) << "Failed to create Client from IP address " << ip_address << " with token";
-        return query->set_retry_after_error(static_cast<int>(wakeup_at - now) + 1);
-      }
-      flood_control.add_event(now);
+    const auto retry_after = get_client_ip_retry_after(ip_address);
+    if (retry_after > 0) {
+      LOG(INFO) << "Failed to create Client from IP address " << ip_address << " with token";
+      return query->set_retry_after_error(retry_after);
     }
     if (is_global_flood_control_enabled_) {
       auto now = td::Time::now();
@@ -381,7 +371,7 @@ void ClientManager::get_stats(td::Promise<td::BufferSlice> promise,
        << parameters_->shared_data_->workdir_deleted_bytes_.load(std::memory_order_relaxed) << '\n';
     sb << "workdir_disk_emergency\t"
        << parameters_->shared_data_->workdir_disk_emergency_.load(std::memory_order_acquire) << '\n';
-    sb << "workdir_free_bytes\t" << get_workdir_free_bytes(parameters_->working_directory_) << '\n';
+    sb << "workdir_free_bytes\t" << get_workdir_free_bytes(parameters_->files_directory_) << '\n';
     sb << "workdir_min_free_bytes\t" << parameters_->workdir_min_free_bytes_ << '\n';
     sb << "workdir_space_rejections\t"
        << parameters_->shared_data_->workdir_space_rejections_.load(std::memory_order_relaxed) << '\n';

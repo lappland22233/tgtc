@@ -27,6 +27,7 @@ constexpr td::int64 DEFAULT_WORKDIR_UNKNOWN_FILE_MIN_FREE_BYTES = 512LL << 20;
 
 struct WorkdirCleanupConfig {
   td::string workdir;
+  td::string database_dir;
   td::int64 threshold_bytes = 20LL << 30;
   td::int64 target_bytes = 15LL << 30;
   double interval = 3600.0;

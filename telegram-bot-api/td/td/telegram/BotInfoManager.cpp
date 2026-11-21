@@ -15,6 +15,7 @@
 #include "td/telegram/files/FileManager.h"
 #include "td/telegram/files/FileType.h"
 #include "td/telegram/Global.h"
+#include "td/telegram/MessageEntity.h"
 #include "td/telegram/misc.h"
 #include "td/telegram/net/NetQueryCreator.h"
 #include "td/telegram/StoryContent.h"
@@ -143,12 +144,8 @@ class EditAccessSettingsQuery final : public Td::ResultHandler {
       return on_error(r_input_user.move_as_error());
     }
 
-    int32 flags = 0;
-    if (!input_users.empty()) {
-      flags |= telegram_api::bots_editAccessSettings::ADD_USERS_MASK;
-    }
     send_query(G()->net_query_creator().create(telegram_api::bots_editAccessSettings(
-        flags, settings.is_restricted(), r_input_user.move_as_ok(), std::move(input_users))));
+        0, settings.is_restricted(), r_input_user.move_as_ok(), std::move(input_users))));
   }
 
   void on_result(BufferSlice packet) final {
@@ -620,7 +617,6 @@ class SetBotInfoQuery final : public Td::ResultHandler {
       return on_error(r_input_user.move_as_error());
     }
     if (r_input_user.ok() != nullptr) {
-      flags |= telegram_api::bots_setBotInfo::BOT_MASK;
       bot_user_id_ = bot_user_id;
     } else {
       bot_user_id_ = td_->user_manager_->get_my_id();
@@ -674,16 +670,12 @@ class GetBotInfoQuery final : public Td::ResultHandler {
   }
 
   void send(UserId bot_user_id, const string &language_code) {
-    int32 flags = 0;
     auto r_input_user = get_bot_input_user(td_, bot_user_id);
     if (r_input_user.is_error()) {
       return on_error(r_input_user.move_as_error());
     }
-    if (r_input_user.ok() != nullptr) {
-      flags |= telegram_api::bots_getBotInfo::BOT_MASK;
-    }
     send_query(G()->net_query_creator().create(
-        telegram_api::bots_getBotInfo(flags, r_input_user.move_as_ok(), language_code), {{bot_user_id}}));
+        telegram_api::bots_getBotInfo(0, r_input_user.move_as_ok(), language_code), {{bot_user_id}}));
   }
 
   void on_result(BufferSlice packet) final {
@@ -721,22 +713,20 @@ class SetCustomVerificationQuery final : public Td::ResultHandler {
   }
 
   void send(telegram_api::object_ptr<telegram_api::InputUser> input_user, DialogId dialog_id, bool is_verified,
-            const string &custom_description) {
+            const FormattedText &custom_description) {
     dialog_id_ = dialog_id;
     auto input_peer =
         td_->dialog_manager_->get_input_peer(dialog_id, is_verified ? AccessRights::Read : AccessRights::Know);
     CHECK(input_peer != nullptr);
 
-    int32 flags = 0;
-    if (input_user != nullptr) {
-      flags |= telegram_api::bots_setCustomVerification::BOT_MASK;
-    }
-    if (!custom_description.empty()) {
-      flags |= telegram_api::bots_setCustomVerification::CUSTOM_DESCRIPTION_MASK;
+    telegram_api::object_ptr<telegram_api::textWithEntities> description;
+    if (!custom_description.is_empty()) {
+      description =
+          get_input_text_with_entities(td_->user_manager_.get(), custom_description, "SetCustomVerificationQuery");
     }
     send_query(G()->net_query_creator().create(
-        telegram_api::bots_setCustomVerification(flags, is_verified, std::move(input_user), std::move(input_peer),
-                                                 custom_description),
+        telegram_api::bots_setCustomVerification(0, is_verified, std::move(input_user), std::move(input_peer),
+                                                 std::move(description)),
         {{dialog_id}}));
   }
 
@@ -1079,7 +1069,7 @@ void BotInfoManager::on_upload_bot_media_preview(FileUploadId file_upload_id,
     }
     pending_preview->was_reuploaded_ = true;
 
-    // delete file reference and forcely reupload the file
+    // delete file reference and forcibly reupload the file
     td_->file_manager_->delete_file_reference(file_upload_id.get_file_id(), main_remote_location->get_file_reference());
     return do_add_bot_media_preview(std::move(pending_preview), {-1});
   }
@@ -1219,7 +1209,8 @@ void BotInfoManager::get_bot_info_about(UserId bot_user_id, const string &langua
 }
 
 void BotInfoManager::set_custom_bot_verification(UserId bot_user_id, DialogId dialog_id, bool is_verified,
-                                                 const string &custom_description, Promise<Unit> &&promise) {
+                                                 td_api::object_ptr<td_api::formattedText> &&custom_description,
+                                                 Promise<Unit> &&promise) {
   telegram_api::object_ptr<telegram_api::InputUser> bot_input_user;
   if (bot_user_id != UserId()) {
     TRY_RESULT_PROMISE_ASSIGN(promise, bot_input_user, td_->user_manager_->get_input_user(bot_user_id));
@@ -1227,8 +1218,12 @@ void BotInfoManager::set_custom_bot_verification(UserId bot_user_id, DialogId di
   if (!td_->dialog_manager_->have_input_peer(dialog_id, false, is_verified ? AccessRights::Read : AccessRights::Know)) {
     return promise.set_error(400, "Can't access the verified entity");
   }
+  TRY_RESULT_PROMISE(promise, description,
+                     get_formatted_text(td_, td_->dialog_manager_->get_my_dialog_id(), std::move(custom_description),
+                                        td_->auth_manager_->is_bot(), true, true, true));
+  keep_only_text_url(description);
   td_->create_handler<SetCustomVerificationQuery>(std::move(promise))
-      ->send(std::move(bot_input_user), dialog_id, is_verified, custom_description);
+      ->send(std::move(bot_input_user), dialog_id, is_verified, description);
 }
 
 }  // namespace td

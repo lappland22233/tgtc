@@ -44,6 +44,12 @@ static bool has_qts_messages(const Td *td, DialogId dialog_id) {
   }
 }
 
+RepliedMessageInfo::RepliedMessageInfo() = default;
+
+RepliedMessageInfo::RepliedMessageInfo(RepliedMessageInfo &&) noexcept = default;
+
+RepliedMessageInfo &RepliedMessageInfo::operator=(RepliedMessageInfo &&) noexcept = default;
+
 RepliedMessageInfo::~RepliedMessageInfo() = default;
 
 RepliedMessageInfo::RepliedMessageInfo(Td *td, tl_object_ptr<telegram_api::messageReplyHeader> &&reply_header,
@@ -149,7 +155,7 @@ RepliedMessageInfo::RepliedMessageInfo(Td *td, const MessageInputReplyTo &input_
     return;
   }
   message_id_ = input_reply_to.message_id_;
-  quote_ = input_reply_to.quote_.clone();
+  quote_ = input_reply_to.quote_.clone(td, dialog_id, MessageContentDupType::Send);
   todo_item_id_ = input_reply_to.todo_item_id_;
   poll_option_id_ = input_reply_to.poll_option_id_;
   if (input_reply_to.dialog_id_ != DialogId() && input_reply_to.message_id_.is_valid()) {
@@ -181,6 +187,11 @@ RepliedMessageInfo::RepliedMessageInfo(Td *td, const MessageInputReplyTo &input_
         }
       }
     } else if (content_->get_type() == MessageContentType::RichText) {
+      if (quote_.is_empty()) {
+        const auto *rich_message = get_message_content_rich_message(content_.get());
+        CHECK(rich_message != nullptr);
+        quote_ = MessageQuote::create_automatic_quote(td, *rich_message);
+      }
       content_ = nullptr;
     }
     auto origin_message_full_id = origin_.get_message_full_id();
@@ -199,6 +210,13 @@ RepliedMessageInfo::RepliedMessageInfo(Td *td, const MessageInputReplyTo &input_
   }
 }
 
+RepliedMessageInfo RepliedMessageInfo::legacy(MessageId reply_to_message_id, DialogId reply_in_dialog_id) {
+  RepliedMessageInfo result;
+  result.message_id_ = reply_to_message_id;
+  result.dialog_id_ = reply_in_dialog_id;
+  return result;
+}
+
 RepliedMessageInfo RepliedMessageInfo::clone(Td *td) const {
   RepliedMessageInfo result;
   result.message_id_ = message_id_;
@@ -207,9 +225,9 @@ RepliedMessageInfo RepliedMessageInfo::clone(Td *td) const {
   result.origin_ = origin_;
   if (content_ != nullptr) {
     result.content_ = dup_message_content(td, td->dialog_manager_->get_my_dialog_id(), content_.get(),
-                                          MessageContentDupType::Forward, MessageCopyOptions());
+                                          MessageContentDupType::Forward, false, MessageCopyOptions());
   }
-  result.quote_ = quote_.clone();
+  result.quote_ = quote_.clone(td, td->dialog_manager_->get_my_dialog_id(), MessageContentDupType::Forward);
   result.todo_item_id_ = todo_item_id_;
   result.poll_option_id_ = poll_option_id_;
   return result;
@@ -384,14 +402,15 @@ td_api::object_ptr<td_api::messageReplyToMessage> RepliedMessageInfo::get_messag
   }
 
   return td_api::make_object<td_api::messageReplyToMessage>(
-      chat_id, message_id_.get(), quote_.get_text_quote_object(td->user_manager_.get()), todo_item_id_, poll_option_id_,
-      std::move(origin), origin_date_, std::move(content));
+      chat_id, message_id_.get(), quote_.get_text_quote_object(td), todo_item_id_, poll_option_id_, std::move(origin),
+      origin_date_, std::move(content));
 }
 
-MessageInputReplyTo RepliedMessageInfo::get_message_input_reply_to() const {
+MessageInputReplyTo RepliedMessageInfo::get_message_input_reply_to(Td *td) const {
   CHECK(!is_external());
   if (message_id_.is_valid() || message_id_.is_valid_scheduled()) {
-    return MessageInputReplyTo{message_id_,         {}, dialog_id_, quote_.clone(true), todo_item_id_, poll_option_id_,
+    auto quote = quote_.clone(td, td->dialog_manager_->get_my_dialog_id(), MessageContentDupType::Forward, true);
+    return MessageInputReplyTo{message_id_,         {}, dialog_id_, std::move(quote), todo_item_id_, poll_option_id_,
                                "RepliedMessageInfo"};
   }
   return {};

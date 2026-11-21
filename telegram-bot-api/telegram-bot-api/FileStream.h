@@ -105,7 +105,7 @@ class FileStreamConnection final : public td::Actor {
   // must not try to write a body any more.
   bool send_headers();
   void finish();
-  void fail(int http_status_code, td::Slice message);
+  void fail(int http_status_code, td::CSlice message);
   void abort(td::Status error);
 };
 

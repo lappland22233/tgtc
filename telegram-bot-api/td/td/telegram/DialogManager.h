@@ -10,6 +10,7 @@
 #include "td/telegram/AccessRights.h"
 #include "td/telegram/ChannelId.h"
 #include "td/telegram/ChatId.h"
+#include "td/telegram/CommunityId.h"
 #include "td/telegram/CustomEmojiId.h"
 #include "td/telegram/DialogId.h"
 #include "td/telegram/DialogLocation.h"
@@ -30,6 +31,7 @@
 #include "td/actor/actor.h"
 
 #include "td/utils/common.h"
+#include "td/utils/ExpiringFlatHashMap.h"
 #include "td/utils/FlatHashMap.h"
 #include "td/utils/FlatHashSet.h"
 #include "td/utils/Hints.h"
@@ -123,6 +125,8 @@ class DialogManager final : public Actor {
 
   NotificationSettingsScope get_dialog_notification_setting_scope(DialogId dialog_id) const;
 
+  CommunityId get_dialog_linked_community_id(DialogId dialog_id) const;
+
   void migrate_dialog_to_megagroup(DialogId dialog_id, Promise<td_api::object_ptr<td_api::chat>> &&promise);
 
   void on_dialog_opened(DialogId dialog_id);
@@ -198,6 +202,9 @@ class DialogManager final : public Actor {
   void set_dialog_photo(DialogId dialog_id, const td_api::object_ptr<td_api::InputChatPhoto> &input_photo,
                         Promise<Unit> &&promise);
 
+  void do_set_dialog_photo(DialogId dialog_id, DialogId owner_dialog_id,
+                           const td_api::object_ptr<td_api::InputChatPhoto> &input_photo, Promise<Unit> &&promise);
+
   void set_dialog_accent_color(DialogId dialog_id, AccentColorId accent_color_id,
                                CustomEmojiId background_custom_emoji_id, Promise<Unit> &&promise);
 
@@ -220,6 +227,9 @@ class DialogManager final : public Actor {
   void load_dialog_marks_as_unread();
 
   bool can_report_dialog(DialogId dialog_id) const;
+
+  static td_api::object_ptr<td_api::ReportChatResult> get_report_chat_result_object(
+      telegram_api::object_ptr<telegram_api::ReportResult> &&result);
 
   void report_dialog(DialogId dialog_id, const string &option_id, const vector<MessageId> &message_ids,
                      const string &text, Promise<td_api::object_ptr<td_api::ReportChatResult>> &&promise);
@@ -253,7 +263,7 @@ class DialogManager final : public Actor {
     PublicDialogsTooMany,
     PublicGroupsUnavailable
   };
-  void check_dialog_username(DialogId dialog_id, const string &username, bool is_bot,
+  void check_dialog_username(DialogId dialog_id, const string &username, bool is_bot, bool is_additional,
                              Promise<CheckDialogUsernameResult> &&promise);
 
   static td_api::object_ptr<td_api::CheckChatUsernameResult> get_check_chat_username_result_object(
@@ -339,6 +349,7 @@ class DialogManager final : public Actor {
   static constexpr int32 MAX_RECENT_DIALOGS = 50;                  // some reasonable value
 
   static constexpr int32 USERNAME_CACHE_EXPIRE_TIME = 86400;
+  static constexpr int32 SEARCH_PUBLIC_DIALOGS_CACHE_TIME = 3600;  // some reasonable value
 
   void hangup() final;
 
@@ -428,8 +439,13 @@ class DialogManager final : public Actor {
   FlatHashMap<string, vector<Promise<Unit>>> resolve_dialog_username_queries_;
 
   FlatHashMap<string, vector<Promise<Unit>>> search_public_dialogs_queries_[3];
-  FlatHashMap<string, vector<DialogId>> found_public_dialogs_[3];     // TODO time bound cache
-  FlatHashMap<string, vector<DialogId>> found_on_server_dialogs_[3];  // TODO time bound cache
+  using FoundDialogs = ExpiringFlatHashMap<string, vector<DialogId>>;
+  FoundDialogs found_public_dialogs_[3]{FoundDialogs(SEARCH_PUBLIC_DIALOGS_CACHE_TIME),
+                                        FoundDialogs(SEARCH_PUBLIC_DIALOGS_CACHE_TIME),
+                                        FoundDialogs(SEARCH_PUBLIC_DIALOGS_CACHE_TIME)};
+  FoundDialogs found_on_server_dialogs_[3]{FoundDialogs(SEARCH_PUBLIC_DIALOGS_CACHE_TIME),
+                                           FoundDialogs(SEARCH_PUBLIC_DIALOGS_CACHE_TIME),
+                                           FoundDialogs(SEARCH_PUBLIC_DIALOGS_CACHE_TIME)};
 
   Hints dialog_hints_;  // search dialogs by title and usernames
 

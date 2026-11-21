@@ -252,6 +252,9 @@ void AnimationsManager::merge_animations(FileId new_id, FileId old_id) {
     if (new_->file_name.size() == old_->file_name.size() + 4 && new_->file_name == old_->file_name + ".mp4") {
       need_merge = false;
     }
+    if (new_->file_name.size() == old_->file_name.size() + 5 && new_->file_name == old_->file_name + ".webm") {
+      need_merge = false;
+    }
   }
   if (need_merge) {
     LOG_STATUS(td_->file_manager_->merge(new_id, old_id));
@@ -315,17 +318,9 @@ tl_object_ptr<telegram_api::InputMedia> AnimationsManager::get_input_media(
       attributes.push_back(telegram_api::make_object<telegram_api::documentAttributeImageSize>(
           animation->dimensions.width, animation->dimensions.height));
     }
-    int32 flags = 0;
-    vector<tl_object_ptr<telegram_api::InputDocument>> added_stickers;
-    if (animation->has_stickers) {
-      flags |= telegram_api::inputMediaUploadedDocument::STICKERS_MASK;
-      added_stickers = td_->file_manager_->get_input_documents(animation->sticker_file_ids);
-    }
-    if (input_thumbnail != nullptr) {
-      flags |= telegram_api::inputMediaUploadedDocument::THUMB_MASK;
-    }
+    auto added_stickers = td_->file_manager_->get_input_documents(animation->sticker_file_ids);
     return telegram_api::make_object<telegram_api::inputMediaUploadedDocument>(
-        flags, false, false, has_spoiler, std::move(input_file), std::move(input_thumbnail), mime_type,
+        0, false, false, has_spoiler, std::move(input_file), std::move(input_thumbnail), mime_type,
         std::move(attributes), std::move(added_stickers), nullptr, 0, 0);
   } else {
     CHECK(main_remote_location == nullptr);

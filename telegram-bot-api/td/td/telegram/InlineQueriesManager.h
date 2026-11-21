@@ -8,8 +8,8 @@
 
 #include "td/telegram/DialogId.h"
 #include "td/telegram/files/FileId.h"
+#include "td/telegram/InlineMessageContent.h"
 #include "td/telegram/Location.h"
-#include "td/telegram/MessageContent.h"
 #include "td/telegram/MessageEntity.h"
 #include "td/telegram/net/NetQuery.h"
 #include "td/telegram/Photo.h"
@@ -38,6 +38,11 @@ class WebAppOpenParameters;
 class InlineQueriesManager final : public Actor {
  public:
   InlineQueriesManager(Td *td, ActorShared<> parent);
+  InlineQueriesManager(const InlineQueriesManager &) = delete;
+  InlineQueriesManager &operator=(const InlineQueriesManager &) = delete;
+  InlineQueriesManager(InlineQueriesManager &&) = delete;
+  InlineQueriesManager &operator=(InlineQueriesManager &&) = delete;
+  ~InlineQueriesManager() final;
 
   void after_get_difference();
 
@@ -80,7 +85,8 @@ class InlineQueriesManager final : public Actor {
 
   void remove_recent_inline_bot(UserId bot_user_id, Promise<Unit> &&promise);
 
-  const InlineMessageContent *get_inline_message_content(int64 query_id, const string &result_id);
+  const InlineMessageContent *get_inline_message_content(int64 query_id, const string &result_id,
+                                                         bool update_recent_bots = true);
 
   UserId get_inline_bot_user_id(int64 query_id) const;
 

@@ -96,6 +96,23 @@ TEST(WorkdirCleanup, SkipsActiveFileUntilNextRound) {
   ASSERT_TRUE(td::stat(active).is_error());
 }
 
+TEST(WorkdirCleanup, SeparateMediaRootSkipsNestedDatabaseDirectory) {
+  TempWorkdir media;
+  auto config = config_for(media);
+  config.database_dir = media.path + "state" + TD_DIR_SLASH;
+  td::mkpath(config.database_dir, 0700).ensure();
+  auto state = media.file("state/tdlib-state", "keep private bot state");
+  auto idle = media.file("expired-photo", "drop cached media");
+  auto active = media.file("active-video", "retain active stream");
+
+  auto result = telegram_bot_api::run_workdir_cleanup(config, {{active, 1}});
+  ASSERT_EQ(2, result.scanned_files);
+  ASSERT_EQ(1, result.deleted_files);
+  ASSERT_TRUE(td::stat(state).is_ok());
+  ASSERT_TRUE(td::stat(active).is_ok());
+  ASSERT_TRUE(td::stat(idle).is_error());
+}
+
 TEST(WorkdirCleanup, ThresholdDoesNotRejectOrDeleteActiveFile) {
   TempWorkdir dir;
   auto active = dir.file("active", "0123456789");

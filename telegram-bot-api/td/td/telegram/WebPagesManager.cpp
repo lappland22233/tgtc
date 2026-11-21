@@ -50,6 +50,7 @@
 #include "td/telegram/VideosManager.h"
 #include "td/telegram/VoiceNotesManager.h"
 #include "td/telegram/WebPageBlock.h"
+#include "td/telegram/WelcomeMessageManager.h"
 
 #include "td/db/binlog/BinlogEvent.h"
 #include "td/db/binlog/BinlogHelper.h"
@@ -85,13 +86,9 @@ class GetWebPagePreviewQuery final : public Td::ResultHandler {
   void send(const FormattedText &text, unique_ptr<WebPagesManager::GetWebPagePreviewOptions> &&options) {
     options_ = std::move(options);
 
-    int32 flags = 0;
     auto entities = get_input_message_entities(td_->user_manager_.get(), text.entities, "GetWebPagePreviewQuery");
-    if (!entities.empty()) {
-      flags |= telegram_api::messages_getWebPagePreview::ENTITIES_MASK;
-    }
-    send_query(G()->net_query_creator().create(
-        telegram_api::messages_getWebPagePreview(flags, text.text, std::move(entities))));
+    send_query(
+        G()->net_query_creator().create(telegram_api::messages_getWebPagePreview(0, text.text, std::move(entities))));
   }
 
   void on_result(BufferSlice packet) final {
@@ -524,17 +521,16 @@ class WebPagesManager::WebPage {
   friend bool operator==(const WebPage &lhs, const WebPage &rhs) {
     return lhs.url_ == rhs.url_ && lhs.display_url_ == rhs.display_url_ && lhs.type_ == rhs.type_ &&
            lhs.site_name_ == rhs.site_name_ && lhs.title_ == rhs.title_ && lhs.description_ == rhs.description_ &&
-           lhs.photo_ == rhs.photo_ && lhs.type_ == rhs.type_ && lhs.embed_url_ == rhs.embed_url_ &&
-           lhs.embed_type_ == rhs.embed_type_ && lhs.embed_dimensions_ == rhs.embed_dimensions_ &&
-           lhs.duration_ == rhs.duration_ && lhs.author_ == rhs.author_ &&
-           lhs.has_large_media_ == rhs.has_large_media_ && lhs.video_cover_photo_ == rhs.video_cover_photo_ &&
-           lhs.document_ == rhs.document_ && lhs.documents_ == rhs.documents_ &&
-           lhs.theme_settings_ == rhs.theme_settings_ && lhs.story_full_ids_ == rhs.story_full_ids_ &&
-           lhs.sticker_ids_ == rhs.sticker_ids_ && lhs.star_gifts_ == rhs.star_gifts_ &&
-           lhs.auction_end_date_ == rhs.auction_end_date_ && lhs.gift_background_ == rhs.gift_background_ &&
-           lhs.custom_emoji_ids_ == rhs.custom_emoji_ids_ &&
+           lhs.photo_ == rhs.photo_ && lhs.embed_url_ == rhs.embed_url_ && lhs.embed_type_ == rhs.embed_type_ &&
+           lhs.embed_dimensions_ == rhs.embed_dimensions_ && lhs.duration_ == rhs.duration_ &&
+           lhs.author_ == rhs.author_ && lhs.has_large_media_ == rhs.has_large_media_ &&
+           lhs.video_cover_photo_ == rhs.video_cover_photo_ && lhs.document_ == rhs.document_ &&
+           lhs.documents_ == rhs.documents_ && lhs.theme_settings_ == rhs.theme_settings_ &&
+           lhs.story_full_ids_ == rhs.story_full_ids_ && lhs.sticker_ids_ == rhs.sticker_ids_ &&
+           lhs.star_gifts_ == rhs.star_gifts_ && lhs.custom_emoji_ids_ == rhs.custom_emoji_ids_ &&
            lhs.instant_view_.is_empty_ == rhs.instant_view_.is_empty_ &&
-           lhs.instant_view_.is_v2_ == rhs.instant_view_.is_v2_;
+           lhs.instant_view_.is_v2_ == rhs.instant_view_.is_v2_ && lhs.auction_end_date_ == rhs.auction_end_date_ &&
+           lhs.gift_background_ == rhs.gift_background_;
   }
 };
 
@@ -551,8 +547,8 @@ void WebPagesManager::tear_down() {
 
 WebPagesManager::~WebPagesManager() {
   Scheduler::instance()->destroy_on_scheduler(G()->get_gc_scheduler_id(), web_pages_, web_page_messages_,
-                                              web_page_quick_reply_messages_, web_page_polls_, url_to_web_page_id_,
-                                              url_to_file_source_id_);
+                                              web_page_quick_reply_messages_, web_page_welcome_messages_,
+                                              web_page_polls_, url_to_web_page_id_, url_to_file_source_id_);
 }
 
 string WebPagesManager::get_web_page_url(const tl_object_ptr<telegram_api::WebPage> &web_page_ptr) {
@@ -1080,6 +1076,38 @@ void WebPagesManager::unregister_quick_reply_web_page(WebPageId web_page_id, Qui
 
   if (message_ids.empty()) {
     web_page_quick_reply_messages_.erase(web_page_id);
+  }
+}
+
+void WebPagesManager::register_welcome_message_web_page(WebPageId web_page_id, EphemeralMessageFullId message_full_id,
+                                                        const char *source) {
+  if (!web_page_id.is_valid()) {
+    return;
+  }
+
+  LOG(INFO) << "Register " << web_page_id << " from " << message_full_id << " from " << source;
+  bool is_inserted = web_page_welcome_messages_[web_page_id].insert(message_full_id).second;
+  LOG_CHECK(is_inserted) << source << " " << web_page_id << " " << message_full_id;
+
+  if (!have_web_page_force(web_page_id)) {
+    LOG(INFO) << "Waiting for " << web_page_id << " needed in " << message_full_id;
+    pending_web_pages_timeout_.add_timeout_in(web_page_id.get(), 1.0);
+  }
+}
+
+void WebPagesManager::unregister_welcome_message_web_page(WebPageId web_page_id, EphemeralMessageFullId message_full_id,
+                                                          const char *source) {
+  if (!web_page_id.is_valid()) {
+    return;
+  }
+
+  LOG(INFO) << "Unregister " << web_page_id << " from " << message_full_id << " from " << source;
+  auto &message_ids = web_page_welcome_messages_[web_page_id];
+  auto is_deleted = message_ids.erase(message_full_id) > 0;
+  LOG_CHECK(is_deleted) << source << " " << web_page_id << " " << message_full_id;
+
+  if (message_ids.empty()) {
+    web_page_welcome_messages_.erase(web_page_id);
   }
 }
 
@@ -2244,6 +2272,32 @@ void WebPagesManager::on_web_page_changed(WebPageId web_page_id, bool have_web_p
     }
   }
   {
+    auto it = web_page_welcome_messages_.find(web_page_id);
+    if (it != web_page_welcome_messages_.end()) {
+      vector<EphemeralMessageFullId> message_full_ids;
+      for (const auto &message_full_id : it->second) {
+        message_full_ids.push_back(message_full_id);
+      }
+      CHECK(!message_full_ids.empty());
+      for (const auto &message_full_id : message_full_ids) {
+        if (!have_web_page) {
+          td_->welcome_message_manager_->delete_pending_message_web_page(message_full_id);
+        } else {
+          td_->welcome_message_manager_->on_external_update_message_content(message_full_id, "on_web_page_changed");
+        }
+      }
+
+      // don't check that on_external_update_message_content doesn't load new messages
+      if (!have_web_page && web_page_welcome_messages_.count(web_page_id) != 0) {
+        vector<EphemeralMessageFullId> new_message_full_ids;
+        for (const auto &message_full_id : web_page_welcome_messages_[web_page_id]) {
+          new_message_full_ids.push_back(message_full_id);
+        }
+        LOG(FATAL) << message_full_ids << ' ' << new_message_full_ids;
+      }
+    }
+  }
+  {
     auto it = web_page_polls_.find(web_page_id);
     if (it != web_page_polls_.end()) {
       vector<PollId> poll_ids;
@@ -2350,6 +2404,16 @@ void WebPagesManager::on_pending_web_page_timeout(WebPageId web_page_id) {
         send_closure_later(G()->quick_reply_manager(), &QuickReplyManager::reload_quick_reply_message,
                            message_full_id.get_quick_reply_shortcut_id(), message_full_id.get_message_id(),
                            Promise<Unit>());
+        count++;
+      }
+    }
+  }
+  {
+    auto it = web_page_welcome_messages_.find(web_page_id);
+    if (it != web_page_welcome_messages_.end()) {
+      for (const auto &message_full_id : it->second) {
+        send_closure_later(G()->welcome_message_manager(), &WelcomeMessageManager::reload_welcome_messages,
+                           message_full_id.get_dialog_id(), Promise<Unit>());
         count++;
       }
     }
@@ -2636,7 +2700,7 @@ void WebPagesManager::on_load_web_page_from_database(WebPageId web_page_id, stri
         const WebPage *web_page = get_web_page(web_page_id);
         if (web_page != nullptr && can_web_page_be_album(web_page) && !web_page->instant_view_.is_empty_ &&
             !web_page->instant_view_.is_loaded_) {
-          LOG(INFO) << "Forcely load instant view of " << web_page_id;
+          LOG(INFO) << "Forcibly load instant view of " << web_page_id;
           on_load_web_page_instant_view_from_database(
               web_page_id,
               G()->td_db()->get_sqlite_sync_pmc()->get(get_web_page_instant_view_database_key(web_page_id)));

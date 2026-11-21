@@ -29,8 +29,6 @@ class DialogNotificationSettings {
   bool use_default_show_preview = true;
   bool use_default_mute_stories = true;
   bool use_default_hide_story_sender = true;
-  bool is_use_default_fixed = true;
-  bool is_secret_chat_show_preview_fixed = false;
   bool is_synchronized = false;
 
   // local settings
@@ -68,7 +66,11 @@ class DialogNotificationSettings {
 
   telegram_api::object_ptr<telegram_api::inputPeerNotifySettings> get_input_peer_notify_settings() const;
 
+  DialogNotificationSettings clone() const;
+
   DialogNotificationSettings clone_for_secret_chat() const;
+
+  void fix_mute_until(bool is_bot);
 };
 
 StringBuilder &operator<<(StringBuilder &string_builder, const DialogNotificationSettings &notification_settings);

@@ -147,13 +147,6 @@ class ExportChatInviteQuery final : public Td::ResultHandler {
     if (usage_limit > 0) {
       flags |= telegram_api::messages_exportChatInvite::USAGE_LIMIT_MASK;
     }
-    if (!title.empty()) {
-      flags |= telegram_api::messages_exportChatInvite::TITLE_MASK;
-    }
-    if (!subscription_pricing.is_empty()) {
-      flags |= telegram_api::messages_exportChatInvite::SUBSCRIPTION_PRICING_MASK;
-    }
-
     send_query(G()->net_query_creator().create(telegram_api::messages_exportChatInvite(
         flags, is_permanent, creates_join_request, std::move(input_peer), expire_date, usage_limit, title,
         subscription_pricing.get_input_stars_subscription_pricing())));
@@ -308,7 +301,6 @@ class GetExportedChatInvitesQuery final : public Td::ResultHandler {
     int32 flags = 0;
     if (!offset_invite_link.empty() || offset_date != 0) {
       flags |= telegram_api::messages_getExportedChatInvites::OFFSET_DATE_MASK;
-      flags |= telegram_api::messages_getExportedChatInvites::OFFSET_LINK_MASK;
     }
     send_query(G()->net_query_creator().create(telegram_api::messages_getExportedChatInvites(
         flags, is_revoked, std::move(input_peer), std::move(input_user), offset_date, offset_invite_link, limit)));
@@ -417,9 +409,8 @@ class GetChatInviteImportersQuery final : public Td::ResultHandler {
       r_input_user = make_tl_object<telegram_api::inputUserEmpty>();
     }
 
-    int32 flags = telegram_api::messages_getChatInviteImporters::LINK_MASK;
     send_query(G()->net_query_creator().create(telegram_api::messages_getChatInviteImporters(
-        flags, false, subscription_expired, std::move(input_peer), invite_link, string(), offset_date,
+        0, false, subscription_expired, std::move(input_peer), invite_link, string(), offset_date,
         r_input_user.move_as_ok(), limit)));
   }
 
@@ -643,12 +634,12 @@ void DialogInviteLinkManager::on_invite_link_info_expire_timeout(DialogId dialog
 }
 
 void DialogInviteLinkManager::check_dialog_invite_link(const string &invite_link, bool force, Promise<Unit> &&promise) {
-  auto it = invite_link_infos_.find(invite_link);
-  if (it != invite_link_infos_.end()) {
-    auto dialog_id = it->second->dialog_id;
+  auto *invite_link_info = invite_link_infos_.get(invite_link);
+  if (invite_link_info != nullptr) {
+    auto dialog_id = invite_link_info->dialog_id;
     if (!force && dialog_id.get_type() == DialogType::Chat &&
         !td_->chat_manager_->get_chat_is_active(dialog_id.get_chat_id())) {
-      invite_link_infos_.erase(it);
+      invite_link_infos_.erase(invite_link);
     } else {
       return promise.set_value(Unit());
     }
@@ -707,10 +698,7 @@ void DialogInviteLinkManager::on_get_dialog_invite_link_info(
         return;
       }
 
-      auto &invite_link_info = invite_link_infos_[invite_link];
-      if (invite_link_info == nullptr) {
-        invite_link_info = make_unique<InviteLinkInfo>();
-      }
+      auto *invite_link_info = &invite_link_infos_[invite_link];
       invite_link_info->dialog_id = dialog_id;
       if (accessible_before_date != 0 && dialog_id.is_valid()) {
         add_dialog_access_by_invite_link(dialog_id, invite_link, accessible_before_date);
@@ -719,10 +707,7 @@ void DialogInviteLinkManager::on_get_dialog_invite_link_info(
     }
     case telegram_api::chatInvite::ID: {
       auto chat_invite = telegram_api::move_object_as<telegram_api::chatInvite>(chat_invite_ptr);
-      auto &invite_link_info = invite_link_infos_[invite_link];
-      if (invite_link_info == nullptr) {
-        invite_link_info = make_unique<InviteLinkInfo>();
-      }
+      auto *invite_link_info = &invite_link_infos_[invite_link];
       invite_link_info->dialog_id = DialogId();
       invite_link_info->title = chat_invite->title_;
       invite_link_info->photo = get_photo(td_, std::move(chat_invite->photo_), DialogId());
@@ -774,13 +759,10 @@ void DialogInviteLinkManager::invalidate_invite_link_info(const string &invite_l
 
 td_api::object_ptr<td_api::chatInviteLinkInfo> DialogInviteLinkManager::get_chat_invite_link_info_object(
     const string &invite_link) {
-  auto it = invite_link_infos_.find(invite_link);
-  if (it == invite_link_infos_.end()) {
+  const auto *invite_link_info = invite_link_infos_.get(invite_link);
+  if (invite_link_info == nullptr) {
     return nullptr;
   }
-
-  const auto *invite_link_info = it->second.get();
-  CHECK(invite_link_info != nullptr);
 
   DialogId dialog_id = invite_link_info->dialog_id;
   bool is_chat = false;

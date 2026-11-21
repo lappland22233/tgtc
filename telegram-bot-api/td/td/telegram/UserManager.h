@@ -47,6 +47,8 @@
 #include "td/actor/MultiTimeout.h"
 
 #include "td/utils/common.h"
+#include "td/utils/ExpiringFlatHashMap.h"
+#include "td/utils/ExpiringWaitFreeHashMap.h"
 #include "td/utils/FlatHashMap.h"
 #include "td/utils/FlatHashSet.h"
 #include "td/utils/HashTableUtils.h"
@@ -74,8 +76,10 @@ class BusinessIntro;
 class BusinessWorkHours;
 class EmojiStatus;
 class PeerColorCollectible;
+class ProfileShareTheme;
 class StarRating;
 class Td;
+class TonWalletCard;
 
 class UserManager final : public Actor {
  public:
@@ -135,6 +139,8 @@ class UserManager final : public Actor {
   void on_update_user_phone_number(UserId user_id, string &&phone_number);
 
   void register_suggested_profile_photo(const Photo &photo);
+
+  void on_update_user_linked_community_id(UserId user_id, CommunityId linked_community_id);
 
   void on_update_user_emoji_status(UserId user_id, telegram_api::object_ptr<telegram_api::EmojiStatus> &&emoji_status);
 
@@ -211,6 +217,8 @@ class UserManager final : public Actor {
 
   void invalidate_user_full(UserId user_id);
 
+  void on_update_my_ton_wallet_card(unique_ptr<TonWalletCard> &&ton_wallet_card);
+
   bool have_accessible_user(UserId user_id) const;
 
   bool have_min_user(UserId user_id) const;
@@ -255,6 +263,8 @@ class UserManager final : public Actor {
   bool is_user_bot(UserId user_id) const;
 
   bool is_user_forum_bot(UserId user_id) const;
+
+  CommunityId get_user_linked_community_id(UserId user_id) const;
 
   struct BotData {
     string username;
@@ -415,6 +425,10 @@ class UserManager final : public Actor {
 
   void reorder_usernames(vector<string> &&usernames, Promise<Unit> &&promise);
 
+  void add_bot_username(UserId bot_user_id, string &&username, Promise<Unit> &&promise);
+
+  void delete_bot_username(UserId bot_user_id, Promise<Unit> &&promise);
+
   void toggle_bot_username_is_active(UserId bot_user_id, string &&username, bool is_active, Promise<Unit> &&promise);
 
   void reorder_bot_usernames(UserId bot_user_id, vector<string> &&usernames, Promise<Unit> &&promise);
@@ -459,10 +473,6 @@ class UserManager final : public Actor {
   void is_saved_music(FileId file_id, Promise<Unit> &&promise);
 
   void add_new_saved_music(td_api::object_ptr<td_api::inputAudio> &&input_audio, Promise<Unit> &&promise);
-
-  void on_uploaded_saved_music_file(FileUploadId file_upload_id, bool is_url,
-                                    telegram_api::object_ptr<telegram_api::MessageMedia> media,
-                                    Promise<Unit> &&promise);
 
   void add_saved_music(FileId file_id, FileId after_file_id, Promise<Unit> &&promise);
 
@@ -643,6 +653,7 @@ class UserManager final : public Actor {
     bool can_be_edited_bot = false;
     bool has_main_app = false;
     bool has_bot_forum_view = false;
+    bool has_bot_forum_sidebar = false;
     bool can_bot_create_topics = false;
     bool can_manage_bots = false;
     bool is_inline_bot = false;
@@ -661,6 +672,9 @@ class UserManager final : public Actor {
     bool stories_hidden = false;
     bool contact_require_premium = false;
     bool has_live_story = false;
+    bool is_noforwards_inited = false;
+    bool noforwards_my_enabled = false;
+    bool noforwards_peer_enabled = false;
 
     bool is_photo_inited = false;
 
@@ -755,6 +769,10 @@ class UserManager final : public Actor {
     int64 send_paid_message_stars = 0;
 
     FormattedText note;
+
+    unique_ptr<TonWalletCard> ton_wallet_card;
+
+    unique_ptr<ProfileShareTheme> share_theme;
 
     bool is_blocked = false;
     bool is_blocked_for_stories = false;
@@ -872,6 +890,9 @@ class UserManager final : public Actor {
   static constexpr int32 MAX_ACTIVE_STORY_ID_RELOAD_TIME = 3600;  // some reasonable limit
 
   static constexpr int32 USER_FULL_EXPIRE_TIME = 60;
+  static constexpr int32 USER_FULL_CONTACT_PRICE_CACHE_TIME = 3600;  // some reasonable value
+  static constexpr int32 USER_PHOTOS_CACHE_TIME = 3600;              // some reasonable value
+  static constexpr int32 USER_SAVED_MUSIC_CACHE_TIME = 3600;         // some reasonable value
 
   static constexpr int32 ACCOUNT_UPDATE_FIRST_NAME = 1 << 0;
   static constexpr int32 ACCOUNT_UPDATE_LAST_NAME = 1 << 1;
@@ -1022,8 +1043,8 @@ class UserManager final : public Actor {
 
   void on_update_user_full_wallpaper_overridden(UserFull *user_full, bool wallpaper_overridden) const;
 
-  void on_update_user_full_noforwards(UserFull *user_full, bool update_my, bool noforwards_my_enabled, bool update_peer,
-                                      bool noforwards_peer_enabled) const;
+  void on_update_user_full_noforwards(UserFull *user_full, User *u, UserId user_id, bool update_my,
+                                      bool noforwards_my_enabled, bool update_peer, bool noforwards_peer_enabled);
 
   static void on_update_user_full_menu_button(UserFull *user_full,
                                               telegram_api::object_ptr<telegram_api::BotMenuButton> &&bot_menu_button);
@@ -1037,6 +1058,10 @@ class UserManager final : public Actor {
   static void on_update_user_full_first_saved_music_file_id(UserFull *user_full, FileId first_saved_music_file_id);
 
   static void on_update_user_full_note(UserFull *user_full, FormattedText &&note);
+
+  static void on_update_user_full_ton_wallet_card(UserFull *user_full, unique_ptr<TonWalletCard> &&ton_wallet_card);
+
+  static void on_update_user_full_share_theme(UserFull *user_full, unique_ptr<ProfileShareTheme> &&share_theme);
 
   std::pair<int64, int64> get_saved_music_document_id(FileId saved_music_file_id, bool from_server = true) const;
 
@@ -1094,15 +1119,6 @@ class UserManager final : public Actor {
   UserPhotos *add_user_photos(UserId user_id);
 
   void apply_pending_user_photo(User *u, UserId user_id, const char *source);
-
-  void upload_saved_music(FileId file_id, Promise<Unit> &&promise);
-
-  void on_upload_saved_music(FileUploadId file_upload_id, telegram_api::object_ptr<telegram_api::InputFile> input_file);
-
-  void on_upload_saved_music_error(FileUploadId file_upload_id, Status status);
-
-  void do_upload_saved_music(FileUploadId file_upload_id,
-                             telegram_api::object_ptr<telegram_api::InputFile> &&input_file, Promise<Unit> &&promise);
 
   void send_get_user_saved_music_query(UserId user_id, const UserSavedMusic *user_saved_music,
                                        const vector<PendingGetSavedMusicRequest> &requests);
@@ -1253,7 +1269,7 @@ class UserManager final : public Actor {
 
   WaitFreeHashMap<UserId, unique_ptr<User>, UserIdHash> users_;
   WaitFreeHashMap<UserId, unique_ptr<UserFull>, UserIdHash> users_full_;
-  WaitFreeHashMap<UserId, unique_ptr<UserPhotos>, UserIdHash> user_photos_;
+  ExpiringWaitFreeHashMap<UserId, UserPhotos, UserIdHash> user_photos_{USER_PHOTOS_CACHE_TIME};
   WaitFreeHashMap<UserId, vector<PendingGetPhotoRequest>, UserIdHash> pending_get_user_photos_requests_;
 
   mutable FlatHashSet<UserId, UserIdHash> unknown_users_;
@@ -1286,7 +1302,7 @@ class UserManager final : public Actor {
     }
   };
   WaitFreeHashMap<UserSavedMusicId, FileSourceId, UserSavedMusicIdHash> user_saved_music_file_source_ids_;
-  WaitFreeHashMap<UserId, unique_ptr<UserSavedMusic>, UserIdHash> user_saved_music_;
+  ExpiringWaitFreeHashMap<UserId, UserSavedMusic, UserIdHash> user_saved_music_{USER_SAVED_MUSIC_CACHE_TIME};
   WaitFreeHashMap<UserId, vector<PendingGetSavedMusicRequest>, UserIdHash> pending_get_user_saved_music_requests_;
 
   bool are_my_saved_music_ids_inited_ = false;
@@ -1336,11 +1352,6 @@ class UserManager final : public Actor {
   };
   FlatHashMap<FileUploadId, UploadedProfilePhoto, FileUploadIdHash> being_uploaded_profile_photos_;
 
-  class UploadSavedMusicCallback;
-  std::shared_ptr<UploadSavedMusicCallback> upload_saved_music_callback_;
-
-  FlatHashMap<FileUploadId, Promise<Unit>, FileUploadIdHash> being_uploaded_saved_music_files_;
-
   struct ImportContactsTask {
     Promise<Unit> promise_;
     vector<Contact> input_contacts_;
@@ -1372,7 +1383,8 @@ class UserManager final : public Actor {
   bool are_imported_contacts_changing_ = false;
   bool need_clear_imported_contacts_ = false;
 
-  FlatHashMap<UserId, int64, UserIdHash> user_full_contact_price_;  // -1 - premium required
+  // -1 - premium required
+  ExpiringFlatHashMap<UserId, int64, UserIdHash> user_full_contact_price_{USER_FULL_CONTACT_PRICE_CACHE_TIME};
 
   FlatHashMap<MessageFullId, int32, MessageFullIdHash> noforwards_request_ids_;
   FlatHashMap<int32, MessageFullId> noforwards_request_message_full_ids_;
