@@ -39,6 +39,8 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
 PostgreSQL 跨主版本升级时使用 `pg_upgrade`，或先用适配新服务器的客户端导出再恢复到新建数据库。[PostgreSQL 升级说明](https://www.postgresql.org/support/versioning/#upgrading)
 
+给 PostgreSQL 19 实例运行备份和恢复前，确认 `pg_dump --version` 和 `pg_restore --version` 均为 19.x。备份脚本通过 `PATH` 查找这些工具。
+
 SQLite 由应用内的驱动读取数据文件。更换驱动后的第一次启动可以沿用原 `DB_TYPE=sqlite` 和数据文件路径。SQLite 单机首次部署示例：
 
 ```env
