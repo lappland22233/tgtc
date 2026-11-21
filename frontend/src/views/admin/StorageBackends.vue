@@ -118,6 +118,7 @@
             placeholder="全部类型"
             clearable
           />
+          <t-checkbox v-model="showRevoked">显示已撤销账号（{{ revokedAccountCount }}）</t-checkbox>
           <t-button variant="outline" size="small" :loading="loading" @click="loadOverview">刷新</t-button>
           <t-button size="small" @click="openCreate">添加账号</t-button>
         </div>
@@ -553,6 +554,7 @@ const gdriveSaving = ref(false);
 const rowBusy = ref<string | null>(null);
 const overview = ref<StorageOverview | null>(null);
 const typeFilter = ref<RemoteStorageBackendType | undefined>(undefined);
+const showRevoked = ref(false);
 const defaultBackendDraft = ref<StorageBackendType>('telegram');
 const gdriveCacheModeDraft = ref(false);
 const gdriveCacheModeSaving = ref(false);
@@ -567,9 +569,13 @@ const chunkSizeOptions = [
 ];
 
 const accounts = computed(() => overview.value?.accounts ?? []);
-const filteredAccounts = computed(() =>
+const accountsOfSelectedType = computed(() =>
   typeFilter.value ? accounts.value.filter((a) => a.type === typeFilter.value) : accounts.value,
 );
+const revokedAccountCount = computed(() => accountsOfSelectedType.value.filter((a) => a.status === 'revoked').length);
+const filteredAccounts = computed(() => showRevoked.value
+  ? accountsOfSelectedType.value
+  : accountsOfSelectedType.value.filter((a) => a.status !== 'revoked'));
 
 const backendOptions = computed(() => {
   const available = overview.value?.availableBackends ?? ['telegram'];
@@ -649,17 +655,21 @@ function formatTime(value: string | null | undefined): string {
   return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString();
 }
 
+let latestOverviewRequest = 0;
 async function loadOverview() {
+  const request = ++latestOverviewRequest;
   loading.value = true;
   try {
-    overview.value = await fetchStorageOverview();
+    const result = await fetchStorageOverview();
+    if (request !== latestOverviewRequest) return;
+    overview.value = result;
     defaultBackendDraft.value = overview.value.defaultBackend;
     gdriveCacheModeDraft.value = Boolean(overview.value.gdriveCacheMode);
     gdriveChunkSizeDraft.value = overview.value.gdriveChunkSizeMb ?? 16;
   } catch (error) {
-    MessagePlugin.error(getErrorMessage(error));
+    if (request === latestOverviewRequest) MessagePlugin.error(getErrorMessage(error));
   } finally {
-    loading.value = false;
+    if (request === latestOverviewRequest) loading.value = false;
   }
 }
 
@@ -869,6 +879,8 @@ function revokeAccount(row: StorageBackendView) {
     onConfirm: async () => {
       try {
         const result = await revokeStorageBackend(row.id);
+        const account = accounts.value.find((item) => item.id === row.id);
+        if (account) Object.assign(account, result.account);
         MessagePlugin.success(result.message);
         await loadOverview();
       } catch (error) {
@@ -1415,6 +1427,7 @@ onMounted(loadOverview);
 }
 .section-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   align-items: center;
 }

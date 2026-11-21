@@ -100,6 +100,93 @@ describe('storage administration contracts', () => {
     return { wrapper, ui: (wrapper.vm as any).$.setupState };
   }
 
+  const drive = { id: 'drive', type: 'gdrive', name: 'Drive', status: 'active', enabled: true };
+  const oldDrive = { ...drive, id: 'old-drive', name: 'Old Drive', status: 'revoked', enabled: false };
+  const oldDav = { ...oldDrive, id: 'old-dav', type: 'webdav' };
+  const paused = { ...drive, id: 'paused', type: 's3', enabled: false };
+  const snapshot = (accounts: typeof drive[]) => ({
+    accounts, scheduler: [], driverTypes: [], defaultBackend: 'telegram', gdriveOAuthConfigured: true,
+  });
+
+  it('combines the revoked toggle with the type filter, preserves reauthorization, and updates counts on refresh', async () => {
+    api.fetchStorageOverview.mockResolvedValueOnce(snapshot([drive, oldDrive, oldDav, paused]));
+    const wrapper = shallowMount(StorageBackends, { global: { stubs: {
+      TCheckbox: {
+        props: ['modelValue'],
+        template: `<label>
+          <input type="checkbox" :checked="modelValue" @change="$emit('update:modelValue', $event.target.checked)">
+          <slot />
+        </label>`,
+      },
+      TSelect: {
+        props: ['modelValue', 'options'],
+        template: `<select :value="modelValue" @change="$emit('update:modelValue', $event.target.value)">
+          <option value="">全部</option>
+          <option v-for="option in options" :key="option.value" :value="option.value">{{ option.label }}</option>
+        </select>`,
+      },
+      TPrimaryTable: {
+        props: ['data'],
+        template: `<div>
+          <div v-for="row in data" :key="row.id" :data-account="row.id"><slot name="operation" :row="row"/></div>
+        </div>`,
+      },
+      TButton: { template: '<button><slot /></button>' },
+    } } });
+    try {
+      await flushPromises();
+      const list = wrapper.get('section[aria-label="存储账号列表"]');
+      const toggle = list.get('input[type="checkbox"]');
+      const ids = () => list.findAll('[data-account]').map(row => row.attributes('data-account'));
+      expect(ids()).toEqual(['drive', 'paused']);
+      expect(list.get('label').text()).toBe('显示已撤销账号（2）');
+      await toggle.setValue(true);
+      expect(ids()).toEqual(['drive', 'old-drive', 'old-dav', 'paused']);
+      await list.get('select').setValue('gdrive');
+      expect(ids()).toEqual(['drive', 'old-drive']);
+      expect(list.get('label').text()).toBe('显示已撤销账号（1）');
+      const reauthorize = list.get('[data-account="old-drive"]').findAll('button').find(button => button.text() === '重新授权')!;
+      await reauthorize.trigger('click');
+      expect((wrapper.vm as any).$.setupState.rotateTarget.id).toBe('old-drive');
+      await toggle.setValue(false);
+      expect(ids()).toEqual(['drive']);
+      api.fetchStorageOverview.mockResolvedValueOnce(snapshot([oldDrive, oldDav, paused]));
+      await list.findAll('button').find(button => button.text() === '刷新')!.trigger('click');
+      await flushPromises();
+      expect(ids()).toEqual([]);
+      await list.get('select').setValue('');
+      expect(ids()).toEqual(['paused']);
+      expect(list.get('label').text()).toBe('显示已撤销账号（2）');
+    } finally { wrapper.unmount(); }
+  });
+
+  it('hides a confirmed revocation while the overview reloads and ignores stale refresh results', async () => {
+    api.fetchStorageOverview.mockResolvedValueOnce(snapshot([{ ...drive }]));
+    const { wrapper, ui } = mountAdmin();
+    try {
+      await flushPromises();
+      let finishOld!: (value: ReturnType<typeof snapshot>) => void;
+      api.fetchStorageOverview.mockImplementationOnce(() => new Promise(resolve => { finishOld = resolve; }));
+      const staleRefresh = ui.loadOverview();
+      let finishFresh!: (value: ReturnType<typeof snapshot>) => void;
+      api.fetchStorageOverview.mockImplementationOnce(() => new Promise(resolve => { finishFresh = resolve; }));
+      const revoked = { ...drive, status: 'revoked', enabled: false };
+      api.revokeStorageBackend.mockResolvedValueOnce({ message: 'revoked', account: revoked });
+      ui.revokeAccount(ui.filteredAccounts[0]);
+      const confirmed = confirmDialog.mock.lastCall![0].onConfirm();
+      await flushPromises();
+      expect(ui.filteredAccounts).toEqual([]);
+      expect(ui.revokedAccountCount).toBe(1);
+      finishOld(snapshot([{ ...drive }]));
+      await staleRefresh;
+      expect(ui.filteredAccounts).toEqual([]);
+      finishFresh(snapshot([revoked]));
+      await confirmed;
+      ui.showRevoked = true;
+      expect(ui.filteredAccounts).toEqual([revoked]);
+    } finally { wrapper.unmount(); }
+  });
+
   it('keeps a stored client secret on metadata edits and preserves the form when a dependency prevents clearing', async () => {
     const { wrapper, ui } = mountAdmin();
     try {
