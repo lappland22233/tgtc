@@ -51,6 +51,10 @@ backend/.tmp-meta-check/
 *.temp
 .cache/
 
+# Local state created by the source-deployment backup and health scripts
+/.tgtc-ops/
+/backups/
+
 # Database
 *.sqlite
 *.sqlite3
