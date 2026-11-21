@@ -10,6 +10,7 @@ exports.databasePessimisticWriteLock = databasePessimisticWriteLock;
 exports.databaseQueryText = databaseQueryText;
 exports.isDatabaseUniqueViolation = isDatabaseUniqueViolation;
 exports.databaseQuery = databaseQuery;
+exports.sqliteDateParameter = sqliteDateParameter;
 /** 从同一份配置解析数据库类型，避免各调用点对 process.env 的不一致判断。 */
 function getDatabaseType(env = process.env) {
     const value = (env.DB_TYPE || 'postgres').trim().toLowerCase();

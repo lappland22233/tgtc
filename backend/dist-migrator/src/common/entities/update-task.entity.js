@@ -12,12 +12,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.UpdateTask = void 0;
 const database_types_1 = require("../../database/database-types");
 const typeorm_1 = require("typeorm");
-/**
- * 系统更新任务持久化实体。
- *
- * 同一时间全局最多 1 个活动任务（非终态），由 isActive 部分唯一索引保证；
- * API 对外绝不返回 metadata 中的内部路径（备份位置、旧发行目录等）。
- */
+/** 保留 1.x 历史记录的表结构，供 PostgreSQL 到 SQLite 的离线迁移使用。 */
 let UpdateTask = class UpdateTask {
 };
 exports.UpdateTask = UpdateTask;

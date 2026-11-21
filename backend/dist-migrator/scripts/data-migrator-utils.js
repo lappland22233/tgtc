@@ -7,6 +7,7 @@ exports.sqliteIndexMatches = sqliteIndexMatches;
 exports.beginPostgresReadOnlySnapshot = beginPostgresReadOnlySnapshot;
 exports.publishMigratedFile = publishMigratedFile;
 exports.publishMigrationArtifacts = publishMigrationArtifacts;
+const sqlite_minute_metrics_1 = require("../src/database/sqlite-minute-metrics");
 const fs_1 = require("fs");
 /**
  * 无 TypeORM 实体的运行时表必须在同一处声明迁移计划、SQLite DDL 与校验契约，
@@ -76,16 +77,7 @@ exports.NON_ENTITY_TABLE_DEFINITIONS = [
         primaryColumns: ['windowTime'],
         foreignKeys: [],
         indexes: [],
-        createSql: `CREATE TABLE IF NOT EXISTS "access_log_metrics_1min" (
-      "windowTime" datetime NOT NULL PRIMARY KEY,
-      "totalRequests" integer NOT NULL DEFAULT 0,
-      "qpsAvg" real NOT NULL DEFAULT 0,
-      "error5xxCount" integer NOT NULL DEFAULT 0,
-      "error4xxCount" integer NOT NULL DEFAULT 0,
-      "totalBandwidth" bigint NOT NULL DEFAULT 0,
-      "p95Duration" real NOT NULL DEFAULT 0,
-      "uniqueIps" integer NOT NULL DEFAULT 0
-    )`,
+        createSql: sqlite_minute_metrics_1.sqliteMinuteMetricsTable,
         indexSql: [],
     },
     {
