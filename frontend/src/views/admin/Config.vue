@@ -1,5 +1,5 @@
 <template>
-  <div>
+  <div class="system-config-page">
     <div class="page-header">
       <h1>系统配置</h1>
       <p>配置SMTP邮箱、文件上传限制和IP封禁</p>
@@ -7,7 +7,7 @@
 
     <div class="card" style="margin-bottom: 20px;">
       <h3 style="margin-bottom: 16px;">网站标题</h3>
-      <t-form layout="vertical">
+      <t-form layout="vertical" :label-align="mobileLabelAlign">
         <t-form-item label="浏览器标题">
           <t-input v-model="siteConfig.title" :maxlength="200" placeholder="请输入网站标题" autocomplete="off" name="site-title" />
           <div style="color: var(--text-secondary); font-size: 12px; margin-top: 4px;">
@@ -15,7 +15,7 @@
           </div>
         </t-form-item>
         <t-form-item>
-          <div style="display: flex; align-items: center; gap: 8px;">
+          <div class="config-actions">
             <t-button theme="primary" :disabled="!blockLoadState.site" @click="saveSiteConfig">保存网站标题</t-button>
             <t-button v-if="!blockLoadState.site" variant="outline" @click="fetchSiteConfig">重新加载</t-button>
           </div>
@@ -30,7 +30,7 @@
       <!-- 认证配置 -->
       <div class="card">
         <h3 style="margin-bottom: 16px;">🔐 认证配置</h3>
-        <t-form layout="vertical">
+        <t-form layout="vertical" :label-align="mobileLabelAlign">
           <t-form-item label="允许新用户注册">
             <t-switch v-model="authConfig.registrationEnabled" />
             <div style="color: var(--text-secondary); font-size: 12px; margin-top: 4px;">
@@ -65,7 +65,7 @@
             </div>
           </t-form-item>
           <t-form-item>
-            <div style="display: flex; align-items: center; gap: 8px;">
+            <div class="config-actions">
               <t-button theme="primary" :disabled="!blockLoadState.auth" @click="saveAuthConfig">保存认证配置</t-button>
               <t-button v-if="!blockLoadState.auth" variant="outline" @click="fetchAuthConfig">重新加载</t-button>
             </div>
@@ -79,7 +79,7 @@
       <!-- SMTP配置 -->
       <div class="card">
         <h3 style="margin-bottom: 16px;">📧 SMTP邮箱配置</h3>
-        <t-form layout="vertical">
+        <t-form layout="vertical" :label-align="mobileLabelAlign">
           <t-form-item label="SMTP服务器">
             <t-input v-model="smtpConfig.host" placeholder="smtp.example.com" autocomplete="off" name="smtp-host" />
           </t-form-item>
@@ -99,7 +99,7 @@
             <t-input v-model="smtpConfig.from" placeholder="显示名称" autocomplete="off" name="smtp-from" />
           </t-form-item>
           <t-form-item>
-            <div style="display: flex; align-items: center; gap: 8px;">
+            <div class="config-actions">
               <t-button theme="primary" :disabled="!blockLoadState.smtp" @click="saveSMTPConfig">保存SMTP配置</t-button>
               <t-button v-if="!blockLoadState.smtp" variant="outline" @click="fetchSMTPConfig">重新加载</t-button>
             </div>
@@ -137,7 +137,7 @@
         </svg>
         文件上传配置
       </h3>
-      <t-form layout="vertical">
+      <t-form layout="vertical" :label-align="mobileLabelAlign">
 
         <!-- 最大文件大小 -->
         <t-form-item label="最大文件大小 (MB)">
@@ -162,7 +162,7 @@
 
         <!-- 模式切换 -->
         <t-form-item label="过滤模式">
-          <t-radio-group v-model="uploadConfig.fileTypeMode">
+          <t-radio-group v-model="uploadConfig.fileTypeMode" class="upload-filter-options">
             <t-radio value="blacklist">黑名单模式（默认允许所有，禁止选中的类型）</t-radio>
             <t-radio value="whitelist">白名单模式（默认拒绝所有，仅允许选中的类型）</t-radio>
           </t-radio-group>
@@ -228,7 +228,7 @@
         </t-form-item>
 
         <t-form-item>
-          <div style="display: flex; align-items: center; gap: 8px;">
+          <div class="config-actions">
             <t-button theme="primary" :disabled="!blockLoadState.upload" @click="saveUploadConfig">保存上传配置</t-button>
             <t-button v-if="!blockLoadState.upload" variant="outline" @click="fetchUploadConfig">重新加载</t-button>
           </div>
@@ -242,7 +242,7 @@
     <!-- 文件缓存配置 -->
     <div class="card" style="margin-top: 20px;">
       <h3>文件缓存</h3>
-      <t-form label-width="160px">
+      <t-form label-width="160px" :label-align="mobileLabelAlign">
         <t-form-item label="缓存总大小上限 (GB)">
           <t-input-number v-model="cacheConfig.maxSizeGB" :min="1" :max="1000" :step="1" />
           <span style="margin-left: 8px; font-size: 12px; color: var(--td-text-color-secondary);">超过此值先按最近最少使用淘汰旧缓存，仍不足则改走临时中转</span>
@@ -265,7 +265,7 @@
           <span style="margin-left: 8px; font-size: 12px; color: var(--td-text-color-secondary);">开启后不发布正式缓存，下载仍会写入临时中转文件（可重放给同一文件的并发下载）；Range 请求保持 206，但冷文件仍会完整回源，上游带宽压力增大</span>
         </t-form-item>
         <t-form-item>
-          <div style="display: flex; align-items: center; gap: 8px;">
+          <div class="config-actions">
             <t-button theme="primary" :disabled="!blockLoadState.cache" @click="saveCacheConfig">保存缓存配置</t-button>
             <t-button v-if="!blockLoadState.cache" variant="outline" @click="fetchCacheConfig">重新加载</t-button>
           </div>
@@ -283,7 +283,7 @@
         下载按「预测占用 → 预约 → 排队」调度：已获得资源的下裁任务不会被新任务抢占，
         空间紧张时新任务排队等待。任何已上传文件都可以下载，完整暂存不可行时会自动改用受限缓冲直通。
       </p>
-      <t-form label-width="160px">
+      <t-form label-width="160px" :label-align="mobileLabelAlign">
         <t-form-item label="总预约上限 (GB)">
           <t-input-number v-model="downloadConfig.maxReservedGB" :min="0" :max="10000" :step="1" />
           <span style="margin-left: 8px; font-size: 12px; color: var(--td-text-color-secondary);">所有在途任务未写入预约之和的上限，0 表示只受物理空间约束</span>
@@ -333,7 +333,7 @@
           <span style="margin-left: 8px; font-size: 12px; color: var(--td-text-color-secondary);">下载任务状态（排队/可下载）的保留时间</span>
         </t-form-item>
         <t-form-item>
-          <div style="display: flex; align-items: center; gap: 8px;">
+          <div class="config-actions">
             <t-button theme="primary" :disabled="!blockLoadState.download" @click="saveDownloadConfig">保存调度配置</t-button>
             <t-button variant="outline" @click="fetchDownloadRuntime">刷新运行状态</t-button>
             <t-button v-if="!blockLoadState.download" variant="outline" @click="fetchDownloadConfig">重新加载</t-button>
@@ -429,7 +429,7 @@
       </p>
 
       <h4 class="bot-group-title">基础配置</h4>
-      <t-form layout="vertical">
+      <t-form layout="vertical" label-width="144px" :label-align="mobileLabelAlign">
         <t-form-item label="直链有效期（小时）">
           <t-input-number v-model="botConfig.linkTtlHours" :min="1" :max="720" :step="1" />
           <div class="bot-hint">1–720 小时</div>
@@ -449,35 +449,42 @@
         </t-form-item>
       </t-form>
 
-      <h4 class="bot-group-title">存储后端模式</h4>
-      <div v-if="!botConfig.telegramStorageChatConfigured" class="bot-warning-banner" style="margin-bottom: 12px; padding: 10px 14px; background: var(--td-warning-color-1, #fffbe6); border: 1px solid var(--td-warning-color-4, #ffe58f); border-radius: 6px; font-size: 13px; color: var(--td-warning-color-8, #d48806);">
-        ⚠️ 检测到系统未配置 Telegram 存储群组（<code>TELEGRAM_CHAT_ID</code> 或账号池存储群）。建议开启<strong>「纯 Google 存储模式」</strong>，Bot 收到的文件将直接转存至 Google 云端硬盘并生成直链，无需依赖 Telegram 存储群。
-      </div>
-      <t-form layout="vertical">
-        <t-form-item label="Bot 文件存储模式">
-          <t-radio-group v-model="botConfig.storageMode">
-            <t-radio value="telegram" :disabled="!botConfig.telegramStorageChatConfigured">
-              原生 Telegram 存储模式
-              <span v-if="!botConfig.telegramStorageChatConfigured" style="color: var(--td-text-color-placeholder); font-size: 12px;">（未配置存储群）</span>
-            </t-radio>
-            <t-radio value="gdrive">纯 Google 存储模式</t-radio>
-          </t-radio-group>
-          <div class="bot-hint">
-            {{ botConfig.storageMode === 'gdrive' ? '纯 Google 模式：文件入站时自动转存至 Google 云端硬盘并生成下载直链，直链到期后自动从云端硬盘中永久删除。' : '原生模式：文件留存在 Telegram 官方服务器，通过本地回源流式提供下载。' }}
-          </div>
-          <div v-if="botConfig.storageMode === 'gdrive'" style="margin-top: 8px; padding: 10px 12px; background: var(--td-bg-color-page, #f3f5f8); border-radius: 6px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
-            <span style="font-size: 12px; color: var(--td-text-color-secondary);">
-              Google Drive 存储依赖 OAuth 客户端凭据与存储账号池授权。
-            </span>
-            <t-button size="small" variant="text" theme="primary" @click="$router.push('/admin/storage-backends')">
-              前往配置 OAuth 客户端与账号池 →
-            </t-button>
-          </div>
-        </t-form-item>
-      </t-form>
+      <section class="bot-storage-mode" aria-labelledby="bot-storage-mode-title">
+        <h4 id="bot-storage-mode-title" class="bot-group-title">存储后端模式</h4>
+        <t-alert v-if="!botConfig.telegramStorageChatConfigured" class="bot-storage-mode__warning" theme="warning">
+          <template #message>
+            尚未配置 Telegram 存储群组（<code>TELEGRAM_CHAT_ID</code> 或账号池存储群）。可选用纯 Google 存储模式，直接转存 Bot 收到的文件。
+          </template>
+        </t-alert>
+        <t-form label-align="top">
+          <t-form-item label="Bot 文件存储模式">
+            <div class="bot-storage-mode__field">
+              <t-radio-group
+                v-model="botConfig.storageMode"
+                class="bot-storage-mode__choices"
+                aria-label="Bot 文件存储模式"
+                aria-describedby="bot-storage-mode-description"
+              >
+                <t-radio value="telegram" :disabled="!botConfig.telegramStorageChatConfigured">
+                  原生 Telegram 存储模式
+                  <span v-if="!botConfig.telegramStorageChatConfigured" class="bot-storage-mode__unavailable">（未配置存储群）</span>
+                </t-radio>
+                <t-radio value="gdrive">纯 Google 存储模式</t-radio>
+              </t-radio-group>
+              <p id="bot-storage-mode-description" class="bot-storage-mode__description">
+                {{ botConfig.storageMode === 'gdrive' ? '文件入站时自动转存至 Google 云端硬盘并生成下载直链。直链到期后，云端硬盘中的副本将永久删除。' : '文件保存在 Telegram 官方服务器，通过本地回源流式提供下载。' }}
+              </p>
+              <div v-if="botConfig.storageMode === 'gdrive'" class="bot-storage-mode__oauth">
+                <p>Google Drive 存储需要 OAuth 客户端凭据和存储账号池授权。</p>
+                <router-link :to="{ name: 'AdminStorageBackends' }">配置 OAuth 客户端与账号池</router-link>
+              </div>
+            </div>
+          </t-form-item>
+        </t-form>
+      </section>
 
       <h4 class="bot-group-title">站点链接设置</h4>
-      <t-form layout="vertical">
+      <t-form layout="vertical" label-width="144px" :label-align="mobileLabelAlign">
         <t-form-item label="域名模式">
           <t-radio-group v-model="botConfig.linkDomainMode">
             <t-radio value="auto">自动获取</t-radio>
@@ -509,7 +516,7 @@
           </div>
         </t-form-item>
         <t-form-item>
-          <div style="display: flex; align-items: center; gap: 8px;">
+          <div class="config-actions">
             <t-button theme="primary" :loading="savingBotConfig" :disabled="!blockLoadState.bot" @click="saveBotConfig">保存 Bot 配置</t-button>
             <t-button v-if="!blockLoadState.bot" variant="outline" @click="fetchBotConfig">重新加载</t-button>
           </div>
@@ -546,7 +553,7 @@
     </div>
 
     <t-dialog v-model:visible="showBanDialog" header="封禁IP" @confirm="banIP">
-      <t-form layout="vertical">
+      <t-form layout="vertical" :label-align="mobileLabelAlign">
         <t-form-item label="IP地址" name="ip">
           <t-input v-model="banForm.ip" placeholder="请输入要封禁的IP地址" autocomplete="off" name="config-ban-ip" />
         </t-form-item>
@@ -574,7 +581,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onBeforeUnmount, watch } from 'vue';
+import { computed, ref, onMounted, onBeforeUnmount, watch } from 'vue';
 import { onBeforeRouteLeave } from 'vue-router';
 import { DialogPlugin } from 'tdesign-vue-next/es/dialog';
 import MessagePlugin from '@/utils/message';
@@ -588,6 +595,7 @@ import { isValidIP } from '../../utils/ip';
 import { fetchReplicationAudit } from '../../api/telegram-accounts';
 
 const isMobile = useMobile();
+const mobileLabelAlign = computed(() => isMobile.value ? 'top' : undefined);
 const publicConfigStore = usePublicConfigStore();
 const uploadConfigStore = useUploadConfigStore();
 
@@ -1378,6 +1386,12 @@ onMounted(() => {
   gap: 20px;
 }
 
+.config-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
 .smtp-test {
   margin-top: var(--space-4);
   padding-top: var(--space-4);
@@ -1455,6 +1469,68 @@ onMounted(() => {
   margin-top: 4px;
 }
 
+.bot-storage-mode {
+  margin-block: var(--space-5);
+  max-inline-size: 42rem;
+}
+
+.bot-storage-mode__warning {
+  margin-block-end: var(--space-3);
+  overflow-wrap: anywhere;
+}
+
+.bot-storage-mode__field,
+.bot-storage-mode__choices {
+  display: grid;
+  min-inline-size: 0;
+  gap: var(--space-2);
+}
+
+.bot-storage-mode__choices :deep(.t-radio) {
+  margin-inline-end: 0;
+  min-block-size: 28px;
+}
+
+.bot-storage-mode__choices :deep(.t-radio__label) {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.bot-storage-mode__unavailable,
+.bot-storage-mode__description,
+.bot-storage-mode__oauth {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.bot-storage-mode__description,
+.bot-storage-mode__oauth p {
+  margin: 0;
+}
+
+.bot-storage-mode__oauth {
+  padding: var(--space-2) var(--space-3);
+  background: var(--color-bg-overlay);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+}
+
+.bot-storage-mode__oauth a {
+  display: inline-flex;
+  align-items: center;
+  min-block-size: 32px;
+  color: var(--text-accent);
+  font-weight: 500;
+}
+
+@media (pointer: coarse) {
+  .bot-storage-mode__choices :deep(.t-radio),
+  .bot-storage-mode__oauth a {
+    min-block-size: 44px;
+  }
+}
+
 .bot-effective-domain {
   font-family: var(--font-mono);
   font-size: 13px;
@@ -1464,7 +1540,33 @@ onMounted(() => {
 
 @media (max-width: 768px) {
   .config-grid.mobile-single-col {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .system-config-page :deep(.t-form__controls-content),
+  .config-actions,
+  .smtp-test__row {
+    min-inline-size: 0;
+    flex-wrap: wrap;
+    overflow-wrap: anywhere;
+  }
+}
+
+@media (max-width: 480px) {
+  .upload-filter-options {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-2);
+  }
+
+  .upload-filter-options :deep(.t-radio) {
+    margin-inline-end: 0;
+    min-block-size: 44px;
+  }
+
+  .upload-filter-options :deep(.t-radio__label) {
+    white-space: normal;
+    overflow-wrap: anywhere;
   }
 }
 </style>
