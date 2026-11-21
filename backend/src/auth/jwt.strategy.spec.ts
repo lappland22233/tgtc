@@ -26,27 +26,27 @@ describe('JwtStrategy', () => {
     [{ ...payload, role: '' }, '角色'], [{ ...payload, jti: undefined }, '唯一标识'],
     [{ ...payload, role: 'root' }, '无效的角色'],
   ])('rejects malformed payload %#', async (bad, message) => {
-    await expect(make().validate(bad as any)).rejects.toThrow(message);
+    await expect(make().validate({} as any, bad as any)).rejects.toThrow(message);
   });
 
   it('rejects revoked, missing, stale, banned and changed users', async () => {
     auth.isTokenRevoked.mockResolvedValueOnce(true);
-    await expect(make().validate(payload)).rejects.toThrow('已吊销');
+    await expect(make().validate({} as any, payload)).rejects.toThrow('已吊销');
     auth.validateUser.mockResolvedValueOnce(null);
-    await expect(make().validate(payload)).rejects.toThrow('不存在');
+    await expect(make().validate({} as any, payload)).rejects.toThrow('不存在');
     auth.validateUser.mockResolvedValueOnce({ ...user, passwordUpdatedAt: new Date(101000) });
-    await expect(make().validate(payload)).rejects.toThrow('密码已变更');
+    await expect(make().validate({} as any, payload)).rejects.toThrow('密码已变更');
     auth.validateUser.mockResolvedValueOnce({ ...user, isBanned: true });
-    await expect(make().validate(payload)).rejects.toThrow('封禁');
+    await expect(make().validate({} as any, payload)).rejects.toThrow('封禁');
     auth.validateUser.mockResolvedValueOnce({ ...user, email: 'other@example.com' });
-    await expect(make().validate(payload)).rejects.toThrow('Token 已失效');
+    await expect(make().validate({} as any, payload)).rejects.toThrow('Token 已失效');
   });
 
   it('enforces optional email verification and returns valid user', async () => {
     cache.get.mockResolvedValue('true');
     auth.validateUser.mockResolvedValueOnce({ ...user, emailVerified: false });
-    await expect(make().validate(payload)).rejects.toThrow('验证邮箱');
+    await expect(make().validate({} as any, payload)).rejects.toThrow('验证邮箱');
     cache.get.mockResolvedValue('false');
-    await expect(make().validate(payload)).resolves.toBe(user);
+    await expect(make().validate({} as any, payload)).resolves.toBe(user);
   });
 });

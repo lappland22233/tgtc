@@ -301,7 +301,7 @@
       :header="gdrive.accountId ? '重新授权 Google Drive 账号' : '添加 Google Drive 账号'"
       width="680px"
       :footer="false"
-      @close="cleanupOAuthListeners"
+      @close="cancelOAuth"
     >
       <div class="gdrive-wizard">
         <t-alert
@@ -435,7 +435,7 @@
                     size="small"
                     theme="primary"
                     :loading="gdriveSaving"
-                    :disabled="!gdrive.code"
+                    :disabled="!gdrive.code || !currentNonce || authStatus === 'exchanging'"
                     @click="completeAuth()"
                   >
                     提交入池
@@ -923,6 +923,8 @@ const showManualMode = ref(false);
 const authStatus = ref<'idle' | 'authorizing' | 'exchanging' | 'success'>('idle');
 const authStatusMessage = ref('');
 const currentNonce = ref('');
+let oauthGeneration = 0;
+let authorizedRedirect = '';
 const popupRef = ref<Window | null>(null);
 
 let bcChannel: BroadcastChannel | null = null;
@@ -1030,6 +1032,7 @@ function handleClearOAuthClient() {
 }
 
 async function openGDriveWizard(account?: StorageBackendView) {
+  cancelOAuth();
   gdrive.accountId = account?.id ?? null;
   gdrive.name = account?.name ?? '';
   gdrive.code = '';
@@ -1108,9 +1111,12 @@ function startPopupWatcher(popup: Window | null) {
   if (popup) {
     popupPollTimer = setInterval(() => {
       try {
-        if (popup.closed) {
-          stopPopupWatcher();
+        if (popup.closed && popupPollTimer) {
+          clearInterval(popupPollTimer);
+          popupPollTimer = null;
           if (authStatus.value === 'authorizing') {
+            // Some browsers detach the opener during Google's redirect. Keep
+            // listening until the state expires or the user starts another flow.
             authStatus.value = 'idle';
             MessagePlugin.info('授权窗口已关闭');
           }
@@ -1120,11 +1126,22 @@ function startPopupWatcher(popup: Window | null) {
   }
   popupTimeoutTimer = setTimeout(() => {
     stopPopupWatcher();
-    if (authStatus.value === 'authorizing') {
-      authStatus.value = 'idle';
+    if (authStatus.value === 'authorizing' || currentNonce.value) {
+      cancelOAuth();
       MessagePlugin.warning('授权等待超时，请重试');
     }
-  }, 180_000);
+  }, 15 * 60_000);
+}
+
+function cancelOAuth() {
+  oauthGeneration++;
+  currentNonce.value = '';
+  authorizedRedirect = '';
+  gdrive.authUrl = '';
+  gdrive.code = '';
+  authStatus.value = 'idle';
+  gdriveSaving.value = false;
+  cleanupOAuthListeners();
 }
 
 function cleanupOAuthListeners() {
@@ -1148,9 +1165,6 @@ function onStorageEvent(event: StorageEvent) {
   if (event.key !== 'tgtc_gdrive_oauth_event' || !event.newValue) return;
   try {
     const data = JSON.parse(event.newValue);
-    try {
-      localStorage.removeItem('tgtc_gdrive_oauth_event');
-    } catch {}
     if (data?.type === 'TGTC_GDRIVE_OAUTH_RESULT') {
       handleOAuthCallbackResult(data);
     }
@@ -1159,15 +1173,11 @@ function onStorageEvent(event: StorageEvent) {
 
 function handleOAuthCallbackResult(data: { status: string; code?: string; state?: string; error?: string }) {
   if (authStatus.value === 'exchanging' || authStatus.value === 'success') return;
-  if (currentNonce.value && data.state !== currentNonce.value) {
-    console.warn('[GDriveOAuth] state mismatch:', data.state, currentNonce.value);
-    MessagePlugin.error('授权状态校验失败（state 不匹配或已过期）');
-    return;
-  }
+  if (!currentNonce.value || currentNonce.value !== data.state) return;
   stopPopupWatcher();
 
   if (data.status === 'error') {
-    authStatus.value = 'idle';
+    cancelOAuth();
     MessagePlugin.error('Google 授权失败: ' + (data.error || '用户取消授权'));
     return;
   }
@@ -1175,27 +1185,33 @@ function handleOAuthCallbackResult(data: { status: string; code?: string; state?
   if (data.status === 'success' && data.code) {
     const cleanCode = extractOAuthCode(data.code);
     gdrive.code = cleanCode;
-    authStatus.value = 'exchanging';
-    authStatusMessage.value = '已捕获授权码，正在完成凭据兑换与入池...';
-    completeAuth(cleanCode);
+    void completeAuth(cleanCode);
   }
 }
 
-async function startOAuth() {
-  if (!gdrive.redirectUri) {
-    gdrive.redirectUri = getDefaultRedirectUri();
-  }
-  const nonce = typeof crypto?.randomUUID === 'function' ? crypto.randomUUID() : Math.random().toString(36).slice(2);
-  const state = `gdrive_${Date.now()}_${nonce}`;
-  currentNonce.value = state;
-  authStatus.value = 'authorizing';
+async function prepareAuthUrl(openPopup: boolean) {
+  cancelOAuth();
+  const generation = oauthGeneration;
+  gdrive.redirectUri = gdrive.redirectUri.trim() || getDefaultRedirectUri();
+  gdrive.authUrl = '';
+  gdrive.code = '';
+  const redirectUri = gdrive.redirectUri;
+  authStatus.value = openPopup ? 'authorizing' : 'idle';
   authStatusMessage.value = '正在拉取 Google 授权链接...';
   gdriveSaving.value = true;
 
   try {
-    const result = await fetchGDriveAuthUrl(gdrive.redirectUri, state);
+    const result = await fetchGDriveAuthUrl(redirectUri, gdrive.accountId ?? undefined);
+    if (generation !== oauthGeneration) return;
+    if (!result.state) throw new Error('请更新后端后重新生成授权链接');
+    currentNonce.value = result.state;
+    authorizedRedirect = redirectUri;
     gdrive.authUrl = result.url;
     setupOAuthListeners();
+    if (!openPopup) {
+      startPopupWatcher(null);
+      return;
+    }
 
     // 呼出居中授权弹窗
     const width = 600;
@@ -1214,53 +1230,62 @@ async function startOAuth() {
     }
     authStatusMessage.value = '已打开授权窗口，请在弹窗中选择 Google 账号并确认授权...';
   } catch (error) {
-    authStatus.value = 'idle';
-    MessagePlugin.error(getErrorMessage(error));
+    if (generation === oauthGeneration) {
+      cancelOAuth();
+      MessagePlugin.error(getErrorMessage(error));
+    }
   } finally {
-    gdriveSaving.value = false;
+    if (generation === oauthGeneration) gdriveSaving.value = false;
   }
 }
 
-async function buildManualAuthUrl() {
-  gdriveSaving.value = true;
-  try {
-    const result = await fetchGDriveAuthUrl(gdrive.redirectUri);
-    gdrive.authUrl = result.url;
-  } catch (error) {
-    MessagePlugin.error(getErrorMessage(error));
-  } finally {
-    gdriveSaving.value = false;
-  }
+function startOAuth() {
+  return prepareAuthUrl(true);
+}
+
+function buildManualAuthUrl() {
+  return prepareAuthUrl(false);
 }
 
 function openAuthUrl() {
+  if (!currentNonce.value || !gdrive.authUrl || authStatus.value === 'exchanging') return;
   const popup = window.open(gdrive.authUrl, 'tgtc_gdrive_oauth');
   popupRef.value = popup;
   startPopupWatcher(popup);
 }
 
 function onManualCodeChange(value: string) {
-  const clean = extractOAuthCode(value);
-  if (clean !== value) {
-    gdrive.code = clean;
-    MessagePlugin.info('已自动从完整地址中提取授权码');
+  if (!/^https?:\/\//i.test(value.trim())) return;
+  try {
+    const url = new URL(value.trim());
+    if (!currentNonce.value || url.searchParams.get('state') !== currentNonce.value) {
+      throw new Error('回调地址与当前授权不匹配，请重新发起授权');
+    }
+    gdrive.code = url.searchParams.get('code') || '';
+  } catch {
+    gdrive.code = '';
+    MessagePlugin.error('回调地址与当前授权不匹配，请重新发起授权');
   }
 }
 
 async function completeAuth(codeOverride?: string) {
-  const codeToSubmit = codeOverride || extractOAuthCode(gdrive.code);
-  if (!codeToSubmit) {
-    MessagePlugin.warning('授权码不能为空');
-    return;
-  }
+  if (!currentNonce.value || authStatus.value === 'exchanging') return;
+  if (!codeOverride) onManualCodeChange(gdrive.code);
+  const codeToSubmit = (codeOverride || gdrive.code).trim();
+  if (!codeToSubmit) return;
+  const generation = oauthGeneration;
+  authStatus.value = 'exchanging';
+  authStatusMessage.value = '正在兑换授权码...';
+  stopPopupWatcher();
   gdriveSaving.value = true;
   try {
     const result = await completeGDriveAuth({
-      code: codeToSubmit,
-      redirectUri: gdrive.redirectUri,
+      code: codeToSubmit, state: currentNonce.value,
+      redirectUri: authorizedRedirect,
       name: gdrive.name || undefined,
       accountId: gdrive.accountId ?? undefined,
     });
+    if (generation !== oauthGeneration) return;
     authStatus.value = 'success';
     MessagePlugin.success(result.message);
     if (popupRef.value && !popupRef.value.closed) {
@@ -1268,18 +1293,20 @@ async function completeAuth(codeOverride?: string) {
         popupRef.value.close();
       } catch {}
     }
-    cleanupOAuthListeners();
+    cancelOAuth();
     gdriveVisible.value = false;
     await loadOverview();
   } catch (error) {
-    authStatus.value = 'idle';
-    MessagePlugin.error(getErrorMessage(error));
+    if (generation === oauthGeneration) {
+      cancelOAuth();
+      MessagePlugin.error(getErrorMessage(error));
+    }
   } finally {
-    gdriveSaving.value = false;
+    if (generation === oauthGeneration) gdriveSaving.value = false;
   }
 }
 
-onBeforeUnmount(cleanupOAuthListeners);
+onBeforeUnmount(cancelOAuth);
 
 onMounted(loadOverview);
 </script>

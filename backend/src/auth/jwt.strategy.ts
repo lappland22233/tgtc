@@ -3,6 +3,7 @@ import { PassportStrategy } from '@nestjs/passport';
 import { ExtractJwt, Strategy } from 'passport-jwt';
 import { ConfigService } from '@nestjs/config';
 import { Request } from 'express';
+import { AuthenticatedRequest, verifiedSessionId } from '../common/decorators/current-session.decorator';
 import { AuthService } from './auth.service';
 import { UserRole } from '../common/entities/user.entity';
 import { ConfigCacheService } from '../common/services/config-cache.service';
@@ -43,6 +44,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       : [cookieExtractor, ExtractJwt.fromAuthHeaderAsBearerToken()];
 
     super({
+      passReqToCallback: true,
       jwtFromRequest: ExtractJwt.fromExtractors(extractors),
       ignoreExpiration: false,
       // 仅接受 HS256，与签发算法一致，防止 alg=none / 算法混淆攻击
@@ -57,7 +59,13 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     });
   }
 
-  async validate(payload: JwtPayload) {
+  async validate(request: AuthenticatedRequest, payload: JwtPayload) {
+    const user = await this.validatePayload(payload);
+    request[verifiedSessionId] = payload.jti;
+    return user;
+  }
+
+  async validatePayload(payload: JwtPayload) {
     if (!payload || typeof payload !== 'object') {
       throw new UnauthorizedException('无效的 token 载荷');
     }

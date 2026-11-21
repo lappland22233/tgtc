@@ -31,6 +31,7 @@ import { TelegramMirrorRule } from '../common/entities/telegram-mirror-rule.enti
 import { TelegramMirrorTask } from '../common/entities/telegram-mirror-task.entity';
 import { TelegramReplicationAttempt } from '../common/entities/telegram-replication-attempt.entity';
 import { TelegramMainChatAnchor } from '../common/entities/telegram-main-chat-anchor.entity';
+import { GDriveOAuthFlow } from '../common/entities/gdrive-oauth-flow.entity';
 import { StorageBackend } from '../common/entities/storage-backend.entity';
 
 /** 单一实体清单：Nest 运行时与 TypeORM CLI 必须共用，避免漏表。 */
@@ -41,5 +42,5 @@ export const databaseEntities = [
   DirectoryName, ApiKeyIpAllowlist, ApiKeyUsageLog,
   TelegramBotFileGrant, TelegramBotDailyUsage, TelegramBotWhitelist,
   DownloadTask, TelegramFileCopy, TelegramAccount, TelegramMirrorRule, TelegramMirrorTask,
-  TelegramReplicationAttempt, TelegramMainChatAnchor, StorageBackend,
+  TelegramReplicationAttempt, TelegramMainChatAnchor, StorageBackend, GDriveOAuthFlow,
 ] as const;

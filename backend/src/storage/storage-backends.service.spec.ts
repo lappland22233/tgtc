@@ -74,7 +74,7 @@ function makeService(opts: {
     probeAccount: jest.fn().mockResolvedValue({ ok: opts.probeOk !== false, error: opts.probeOk === false ? '连接被拒绝' : undefined }),
   };
   registry.register(driver);
-  const service = new StorageBackendsService(repo as never, credential, scheduler, registry);
+  const service = new StorageBackendsService(repo as never, credential, scheduler, registry, {} as never);
   return { service, repo, credential, scheduler, registry, driver, saved };
 }
 
@@ -165,7 +165,7 @@ describe('StorageBackendsService（创建即测试 / fail-closed / 撤销语义�
     const { service, repo, credential, scheduler, registry } = makeService();
     const createAlerts = jest.fn().mockResolvedValue([]);
     const withEngine = new StorageBackendsService(
-      repo as never, credential, scheduler, registry, { createAlerts } as never,
+      repo as never, credential, scheduler, registry, {} as never, { createAlerts } as never,
     );
     await withEngine.raiseCapacityExhaustedAlert('gdrive', 3);
     expect(createAlerts).toHaveBeenCalledWith([
@@ -181,7 +181,7 @@ describe('StorageBackendsService（创建即测试 / fail-closed / 撤销语义�
 
     // 引擎异常：吞掉不阻断（best-effort）
     const failing = new StorageBackendsService(
-      repo as never, credential, scheduler, registry,
+      repo as never, credential, scheduler, registry, {} as never,
       { createAlerts: jest.fn().mockRejectedValue(new Error('db down')) } as never,
     );
     await expect(failing.raiseCapacityExhaustedAlert('gdrive', 1)).resolves.toBeUndefined();

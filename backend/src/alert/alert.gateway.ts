@@ -121,7 +121,7 @@ export class AlertGateway
         return;
       }
 
-      let payload: Parameters<JwtStrategy['validate']>[0];
+      let payload: Parameters<JwtStrategy['validatePayload']>[0];
       try {
         // 显式限定算法为 HS256，与签发算法一致，防止 alg=none / 算法混淆攻击
         payload = this.jwtService.verify(token, { algorithms: ['HS256'] });
@@ -132,7 +132,7 @@ export class AlertGateway
         return;
       }
 
-      const user = await this.jwtStrategy.validate(payload);
+      const user = await this.jwtStrategy.validatePayload(payload);
       if (!user || user.isBanned) {
         this.logger.warn(`连接拒绝: ${client.id} 用户不存在或已封禁`);
         client.disconnect();
@@ -209,7 +209,7 @@ export class AlertGateway
             // 重新验签：登出（吊销）后 token 失效即断开
             const payload = this.jwtService.verify(token, { algorithms: ['HS256'] });
             // 查询最新用户状态：封禁 / 删除 / 角色降级均断开
-            const fresh = await this.jwtStrategy.validate(payload);
+            const fresh = await this.jwtStrategy.validatePayload(payload);
             if (!fresh || fresh.isBanned || fresh.role !== UserRole.SUPER_ADMIN) {
               this.logger.warn(`管理员连接复核未通过，断开: ${client.id} (user: ${fresh?.email ?? 'unknown'})`);
               client.disconnect();

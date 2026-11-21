@@ -93,6 +93,7 @@ describe('真实 SQLite 数据源关键业务与并发 QA', () => {
       'SqliteAddGrantStorageColumns1804200000000',
       'SqliteAddGDriveCacheColumns1804300000000',
       'SqliteScopeBotGrantMessage1804400000000',
+      'SqliteGDriveOAuthFlows1804500000000',
     ]);
 
     await dataSource.undoLastMigration();

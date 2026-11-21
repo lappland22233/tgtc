@@ -224,9 +224,9 @@ export async function clearGDriveOAuthClient(): Promise<{ message: string }> {
 }
 
 /** 生成授权 URL（管理员浏览器打开，支持 state 防御 CSRF） */
-export async function fetchGDriveAuthUrl(redirectUri: string, state?: string): Promise<{ url: string }> {
-  const response = await api.post('/admin/storage-backends/gdrive/auth-url', { redirectUri, state });
-  return response.data.data as { url: string };
+export async function fetchGDriveAuthUrl(redirectUri: string, accountId?: string): Promise<{ url: string; state: string }> {
+  const response = await api.post('/admin/storage-backends/gdrive/auth-url', { redirectUri, accountId });
+  return response.data.data as { url: string; state: string };
 }
 
 /** 提交授权码：换取 refresh_token 并创建 GDrive 存储账号（name 可选，留空自动以邮箱命名） */
@@ -235,7 +235,7 @@ export async function completeGDriveAuth(input: {
   redirectUri: string;
   name?: string;
   accountId?: string;
-  state?: string;
+  state: string;
 }): Promise<{ message: string; account: StorageBackendView }> {
   const response = await api.post('/admin/storage-backends/gdrive/complete-auth', input);
   return response.data.data as { message: string; account: StorageBackendView };
@@ -245,6 +245,7 @@ export async function completeGDriveAuth(input: {
 export async function rotateGDriveStorageBackend(
   id: string,
   input: {
+    state: string;
     code: string;
     redirectUri: string;
   },

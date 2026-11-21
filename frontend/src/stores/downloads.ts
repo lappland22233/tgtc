@@ -42,6 +42,7 @@ export const useDownloadsStore = defineStore('downloads', () => {
   const timers = new Map<string, ReturnType<typeof setTimeout>>();
   const polling = new Set<string>();
   const generations = new Map<string, number>();
+  let sessionGeneration = 0;
   const creating = new Map<string, Promise<DownloadJob | null>>();
 
   const activeJobs = computed(() => jobs.value);
@@ -148,11 +149,22 @@ export const useDownloadsStore = defineStore('downloads', () => {
     } catch (error) {
       // 轮询失败（网络抖动/服务重启）：保留任务并退避重试一次，避免静默丢失
       if ((generations.get(taskId) ?? 0) !== generation || !jobs.value.includes(job)) return;
+      if (taskGone(error)) {
+        MessagePlugin.info('下载任务不存在或已过期，请重新发起下载');
+        removeJob(taskId);
+        return;
+      }
       job.message = getDownloadErrorMessage(error) ?? '下载状态查询失败，正在重试';
       schedulePoll(taskId, MAX_POLL_MS);
     } finally {
       polling.delete(taskId);
     }
+  }
+
+  function taskGone(error: unknown): boolean {
+    const status = (error as { response?: { status?: number }; cause?: { response?: { status?: number } } })?.response?.status
+      ?? (error as { cause?: { response?: { status?: number } } })?.cause?.response?.status;
+    return status === 404 || status === 410;
   }
 
   function applyView(job: DownloadJob, view: {
@@ -184,7 +196,9 @@ export const useDownloadsStore = defineStore('downloads', () => {
   }): Promise<DownloadJob | null> {
     const pending = creating.get(input.fileId);
     if (pending) return pending;
-    const request = createRequest(input).finally(() => creating.delete(input.fileId));
+    const request = createRequest(input).finally(() => {
+      if (creating.get(input.fileId) === request) creating.delete(input.fileId);
+    });
     creating.set(input.fileId, request);
     return request;
   }
@@ -203,7 +217,15 @@ export const useDownloadsStore = defineStore('downloads', () => {
       return existingJob;
     }
 
-    const view = await createDownloadTask(input.fileId, { nocache: input.nocache });
+    const generation = sessionGeneration;
+    let view: Awaited<ReturnType<typeof createDownloadTask>>;
+    try {
+      view = await createDownloadTask(input.fileId, { nocache: input.nocache });
+    } catch (error) {
+      if (generation !== sessionGeneration) return null;
+      throw error;
+    }
+    if (generation !== sessionGeneration) return null;
     const job: DownloadJob = {
       taskId: view.taskId,
       fileId: input.fileId,
@@ -243,6 +265,7 @@ export const useDownloadsStore = defineStore('downloads', () => {
    * - 仍为 queued 或请求失败：保留任务并按服务端节奏恢复轮询，不误报「已取消」。
    */
   async function cancel(taskId: string): Promise<void> {
+    const session = sessionGeneration;
     const job = jobs.value.find(item => item.taskId === taskId);
     generations.set(taskId, (generations.get(taskId) ?? 0) + 1);
     const timer = timers.get(taskId);
@@ -250,6 +273,7 @@ export const useDownloadsStore = defineStore('downloads', () => {
     timers.delete(taskId);
     try {
       const view = await cancelDownloadTask(taskId);
+      if (session !== sessionGeneration) return;
       if (job) applyView(job, view);
       if (view.status === 'cancelled') {
         if (job) MessagePlugin.info(`已取消「${job.fileName}」的下载排队`);
@@ -270,6 +294,11 @@ export const useDownloadsStore = defineStore('downloads', () => {
       // 仍为 queued（取消失败但未报错）：保持任务并继续轮询
       if (job) schedulePoll(taskId, view.retryAfterMs);
     } catch (error) {
+      if (session !== sessionGeneration) return;
+      if (taskGone(error)) {
+        removeJob(taskId);
+        return;
+      }
       MessagePlugin.error(getDownloadErrorMessage(error) ?? '取消失败，请稍后重试');
       // 取消失败不乐观改状态：保留任务并按既有退避继续轮询
       if (job) schedulePoll(taskId, job.retryAfterMs);
@@ -287,7 +316,10 @@ export const useDownloadsStore = defineStore('downloads', () => {
 
   /** 停止全部轮询（登出/离开页面时调用） */
   function stopAll(): void {
-    for (const job of jobs.value) generations.set(job.taskId, (generations.get(job.taskId) ?? 0) + 1);
+    sessionGeneration++;
+    creating.clear();
+    generations.clear();
+    polling.clear();
     for (const timer of timers.values()) clearTimeout(timer);
     timers.clear();
     jobs.value = [];

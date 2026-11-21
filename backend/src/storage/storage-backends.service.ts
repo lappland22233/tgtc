@@ -23,6 +23,7 @@ import { isDatabaseUniqueViolation } from '../database/database-types';
 import { maskIdentifier } from '../telegram-accounts/telegram-account-view';
 import { StorageAccountSchedulerService, StorageAttemptSample } from './storage-account-scheduler.service';
 import { StorageCredentialService } from './storage-credential.service';
+import { GDriveOAuthStore } from './gdrive-oauth-store.service';
 import { StorageDriverRegistry } from './storage-driver.registry';
 import { StorageAccountContext, StorageAccountError, StorageQuota } from './storage.types';
 
@@ -150,6 +151,7 @@ export class StorageBackendsService implements OnModuleInit {
     private readonly credential: StorageCredentialService,
     private readonly scheduler: StorageAccountSchedulerService,
     private readonly registry: StorageDriverRegistry,
+    private readonly oauthStore: GDriveOAuthStore,
     // 告警引擎（可选依赖）：存储池容量耗尽时复用全站告警体系（与 BOT_POOL_* 同一模式）
     @Optional() private readonly alertEngine?: AlertEngineService,
   ) {}
@@ -182,7 +184,7 @@ export class StorageBackendsService implements OnModuleInit {
   }
 
   /** 创建即连通性测试（与 TG 账号「创建即 getMe，失败不落库」同口径） */
-  async create(input: CreateStorageBackendInput, adminId: string): Promise<StorageBackendView> {
+  async create(input: CreateStorageBackendInput, adminId: string, oauthRevision?: string): Promise<StorageBackendView> {
     if (!this.credential.isAvailable()) {
       throw new BadRequestException(
         '未配置 STORAGE_ENCRYPTION_KEY（32 字节 base64/hex），无法加密保存凭据，拒绝创建存储账号',
@@ -205,6 +207,7 @@ export class StorageBackendsService implements OnModuleInit {
       config,
       credential: credentialPayload,
     };
+    const revision = input.type === 'gdrive' ? oauthRevision ?? (await this.oauthStore.settings()).revision : null;
     const probe = await driver.probeAccount(probeCtx);
     if (!probe.ok) {
       throw new BadRequestException(`存储端点连通性测试失败：${probe.error || '未知错误'}`);
@@ -227,7 +230,7 @@ export class StorageBackendsService implements OnModuleInit {
       updatedBy: adminId,
     });
     try {
-      const saved = await this.repo.save(row);
+      const saved = revision ? await this.oauthStore.saveAccount(row, revision) : await this.repo.save(row);
       await this.refresh();
       // GDrive 创建成功后立即拉一次配额（个人账号 15GB，调度硬准入依赖它）
       if (input.type === 'gdrive') {
@@ -309,7 +312,7 @@ export class StorageBackendsService implements OnModuleInit {
   }
 
   /** 轮换凭据（撤销账号凭此重新启用）；同样先测试后落库 */
-  async rotateCredential(id: string, credentialPayload: Record<string, unknown>, adminId: string): Promise<StorageBackendView> {
+  async rotateCredential(id: string, credentialPayload: Record<string, unknown>, adminId: string, oauthRevision?: string, email?: string): Promise<StorageBackendView> {
     if (!this.credential.isAvailable()) {
       throw new BadRequestException('未配置 STORAGE_ENCRYPTION_KEY，无法加密保存凭据，拒绝轮换');
     }
@@ -317,6 +320,7 @@ export class StorageBackendsService implements OnModuleInit {
     const driver = this.registry.get(row.type);
     if (!driver) throw new BadRequestException(`存储驱动未装配: ${row.type}`);
     const validated = validateBackendCredential(row.type, credentialPayload);
+    const revision = row.type === 'gdrive' ? oauthRevision ?? (await this.oauthStore.settings()).revision : null;
     const probe = await driver.probeAccount({
       accountId: row.id,
       type: row.type,
@@ -340,7 +344,7 @@ export class StorageBackendsService implements OnModuleInit {
     row.lastFailureCode = null;
     row.lastFailureSummary = null;
     row.updatedBy = adminId;
-    const saved = await this.repo.save(row);
+    const saved = revision ? await this.oauthStore.saveAccount(row, revision, email) : await this.repo.save(row);
     await this.refresh();
     this.scheduler.clearCooldown(id);
     return this.toView(saved);

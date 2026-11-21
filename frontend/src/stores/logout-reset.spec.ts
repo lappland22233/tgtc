@@ -20,6 +20,7 @@ vi.mock('../utils/message', () => ({
 
 import client from '../api/client';
 import MessagePlugin from '../utils/message';
+import { useDownloadsStore } from './downloads';
 import { useAuthStore } from './auth';
 import { useFileStore } from './files';
 import { useFolderStore } from './folders';
@@ -49,8 +50,11 @@ describe('登出清理业务 store（M7）', () => {
     uploadConfig.loaded = true;
     uploadConfig.config = { maxFileSize: 1024, fileTypeMode: 'whitelist', fileTypeFilter: ['.zip'], strictSerialUpload: true };
 
+    const downloads = useDownloadsStore();
+    downloads.jobs = [{ taskId: 'job', fileName: 'previous.bin', status: 'queued' } as any];
     await auth.logout();
 
+    expect(downloads.jobs).toEqual([]);
     expect(auth.user).toBeNull();
     expect(files.files).toEqual([]);
     expect(files.total).toBe(0);

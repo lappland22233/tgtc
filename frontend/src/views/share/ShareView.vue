@@ -314,9 +314,9 @@ async function onPasswordSubmit(pwd: string) {
 }
 
 /** H-02：停止当前分享上下文下的媒体会话（仅当会话来自分享且 token 匹配当前页面） */
-function stopCurrentShareMedia() {
+function stopCurrentShareMedia(shareToken = token.value) {
   const s = mediaStore.session;
-  if (s?.context.type === 'share' && s.context.token === token.value) {
+  if (s?.context.type === 'share' && s.context.token === shareToken) {
     mediaStore.requestStop();
   }
 }
@@ -331,7 +331,7 @@ watch(token, async (newToken, oldToken) => {
   // H-02 修复：分享 token 改变 = 离开原分享授权域，
   // 必须停止仍在播放的旧分享媒体会话并销毁授权状态，禁止跨分享继续播放。
   if (oldToken && oldToken !== newToken) {
-    stopCurrentShareMedia();
+    stopCurrentShareMedia(oldToken);
   }
   isEncrypted.value = false;
   passwordError.value = '';

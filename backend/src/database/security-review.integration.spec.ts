@@ -178,7 +178,7 @@ describe.each(dialects)('security review regressions / %s', (dialect) => {
     const payload = { sub: owner.id, email: owner.email, role: owner.role, jti: randomUUID(), iat: Math.floor(Date.now() / 1000) };
     const token = jwt.sign(payload);
     await auth.revokeToken(payload.jti, owner.id, new Date(Date.now() + 3600000));
-    await expect(strategy.validate(payload)).rejects.toThrow('吊销');
+    await expect(strategy.validatePayload(payload)).rejects.toThrow('吊销');
     const gateway = new services.AlertGateway(jwt, strategy, { checkAndIncrement: async () => ({ allowed: true }) });
     gateways.push(gateway);
     const client = { id: 'test', data: {}, handshake: { auth: { token }, headers: {}, address: '192.0.2.1' },
