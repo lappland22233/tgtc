@@ -234,9 +234,7 @@ jobs:
           ldd build-ci/telegram-bot-api
           build-ci/telegram-bot-api --version
 
-      # 阻塞门禁仅覆盖 fork 自有的确定性测试；TDLib 上游 run_all_tests 套件
-      # 含线程/时序敏感用例，在本 job 首跑即失败，不作为 fork 的阻塞门禁，
-      # 降级为 continue-on-error 信息性步骤保留信号。
+      # Fork 的确定性测试为阻塞门禁。上游 TDLib 的线程和时序测试单独记录结果。
       - name: Run fork-owned CTest tests (blocking gate)
         run: |
           "$RUNNER_TEMP/tgtc-native/cmake/bin/ctest" --test-dir build-ci --parallel 1 --build-config Release --output-on-failure --no-tests=error -R 'test-(file-stream|workdir-cleanup)'
@@ -244,4 +242,5 @@ jobs:
       - name: Run upstream TDLib test suite (informational, non-blocking)
         continue-on-error: true
         run: |
-          "$RUNNER_TEMP/tgtc-native/cmake/bin/ctest" --test-dir build-ci --parallel 1 --build-config Release --output-on-failure -R 'run_all_tests'
+          "$RUNNER_TEMP/tgtc-native/cmake/bin/cmake" --build build-ci --config Release --target run_all_tests --parallel 1
+          "$RUNNER_TEMP/tgtc-native/cmake/bin/ctest" --test-dir build-ci --parallel 1 --build-config Release --output-on-failure --no-tests=error -R '^run_all_tests$'
