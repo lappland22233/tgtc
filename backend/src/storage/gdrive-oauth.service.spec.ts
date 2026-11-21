@@ -1,5 +1,5 @@
 import { BadRequestException } from '@nestjs/common';
-import { OAuth2Client } from 'google-auth-library';
+import { type GenerateAuthUrlOpts, OAuth2Client } from 'google-auth-library';
 import axios from 'axios';
 import {
   GDriveOAuthService,
@@ -9,6 +9,7 @@ import {
   GDRIVE_SCOPES,
   extractOAuthCode,
 } from './gdrive-oauth.service';
+import { StorageBackendsController } from './storage-backends.controller';
 import { StorageCredentialService } from './storage-credential.service';
 
 jest.mock('axios', () => ({
@@ -16,8 +17,9 @@ jest.mock('axios', () => ({
   default: { get: jest.fn() },
 }));
 
-const mockGenerateAuthUrl = jest.fn((_options: Record<string, unknown>) => 'https://accounts.google.com/o/oauth2/v2/auth?mock=1');
+const mockGenerateAuthUrl = jest.fn((_options: GenerateAuthUrlOpts) => 'https://accounts.google.com/o/oauth2/v2/auth?mock=1');
 const mockGetToken = jest.fn();
+const mockGetTokenInfo = jest.fn();
 const mockSetCredentials = jest.fn();
 const mockGetAccessToken = jest.fn(async () => ({ token: 'access-token' }));
 
@@ -26,6 +28,7 @@ jest.mock('google-auth-library', () => ({
   OAuth2Client: jest.fn().mockImplementation(() => ({
     generateAuthUrl: mockGenerateAuthUrl,
     getToken: mockGetToken,
+    getTokenInfo: mockGetTokenInfo,
     setCredentials: mockSetCredentials,
     getAccessToken: mockGetAccessToken,
   })),
@@ -75,6 +78,8 @@ function encryptedSecret(value: string): string {
 describe('GDriveOAuthService（mock OAuth + 录制响应）', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    api.get.mockReset();
+    mockGetTokenInfo.mockReset();
     mockGetAccessToken.mockResolvedValue({ token: 'access-token' });
   });
 
@@ -140,16 +145,17 @@ describe('GDriveOAuthService（mock OAuth + 录制响应）', () => {
   });
 
   it('buildAuthUrl：offline + consent + drive.file scope（规避受限 scope 审核）', async () => {
+    const { OAuth2Client: RealOAuth2Client } = jest.requireActual<typeof import('google-auth-library')>('google-auth-library');
+    mockGenerateAuthUrl.mockImplementationOnce(options => new RealOAuth2Client('cid', 'sec', 'http://localhost/callback').generateAuthUrl(options));
     const { service } = makeService({ clientId: 'cid', secretCipher: encryptedSecret('sec') });
     const {url} = await service.beginFlow('admin', 'session', 'http://localhost/callback');
-    expect(url).toContain('accounts.google.com');
+    expect(new URL(url).searchParams.get('scope')?.split(' ')).toEqual(GDRIVE_SCOPES);
     expect(OAuth2Client).toHaveBeenCalledWith('cid', 'sec', 'http://localhost/callback');
-    const options = mockGenerateAuthUrl.mock.calls[0][0] as Record<string, unknown>;
+    const options = mockGenerateAuthUrl.mock.calls[0][0];
     expect(options.code_challenge_method).toBe('S256');
     expect(options.code_challenge).toEqual(expect.any(String));
     expect(options.access_type).toBe('offline');
     expect(options.prompt).toBe('consent');
-    expect(options.scope).toEqual(GDRIVE_SCOPES);
     expect(GDRIVE_SCOPES).toContain('https://www.googleapis.com/auth/drive.file');
   });
 
@@ -161,17 +167,81 @@ describe('GDriveOAuthService（mock OAuth + 录制响应）', () => {
   });
 
   it('exchangeCode 成功：refresh_token + 邮箱 + 配额（录制响应，支持全 URL 自动解析 code）', async () => {
-    mockGetToken.mockResolvedValue({ tokens: { refresh_token: 'rt-1', access_token: 'at-1' } });
+    mockGetToken.mockResolvedValue({ tokens: { refresh_token: 'rt-1', access_token: 'at-1', scope: GDRIVE_SCOPES.join(' ') } });
     api.get
       .mockResolvedValueOnce({ data: { email: 'user@gmail.com' } }) // userinfo
       .mockResolvedValueOnce({ data: { storageQuota: { limit: String(15 * 1024 ** 3), usage: '1024' } } }); // about
     const { service } = makeService({ clientId: 'cid', secretCipher: encryptedSecret('sec') });
     const result = await complete(service, 'https://example.com/callback?code=auth-code&state=123', 'http://localhost/callback');
     expect(result.refreshToken).toBe('rt-1');
+    expect(mockGetTokenInfo).not.toHaveBeenCalled();
     expect(result.email).toBe('user@gmail.com');
     expect(result.quota).toEqual({ totalBytes: 15 * 1024 ** 3, usedBytes: 1024 });
     expect(mockGetToken).toHaveBeenCalledWith({ code: 'auth-code', codeVerifier: expect.any(String) });
-    expect(mockSetCredentials).toHaveBeenCalledWith({ refresh_token: 'rt-1', access_token: 'at-1' });
+    expect(mockSetCredentials).toHaveBeenCalledWith({ refresh_token: 'rt-1', access_token: 'at-1', scope: GDRIVE_SCOPES.join(' ') });
+  });
+
+  it.each(['create', 'rotate'] as const)('rejects identity-only Google grants before %s probes or writes', async mode => {
+    const { service } = makeService({ clientId: 'cid', secretCipher: encryptedSecret('sec') });
+    const existing = { id: 'account', type: 'gdrive', config: { email: 'person@example.invalid' } };
+    const backends = {
+      findById: jest.fn().mockResolvedValue(existing),
+      create: jest.fn().mockRejectedValue(new BadRequestException('存储端点连通性测试失败：403')),
+      rotateCredential: jest.fn().mockRejectedValue(new BadRequestException('新凭据连通性测试失败：403')),
+      refreshQuota: jest.fn().mockResolvedValue(null),
+    };
+    const audit = { log: jest.fn() };
+    const controller = new StorageBackendsController(backends as never, {} as never, service, {} as never, audit as never);
+    const user = { id: 'admin' } as never;
+    const redirectUri = 'https://example.invalid/callback';
+    const { state } = await service.beginFlow('admin', 'session', redirectUri, mode === 'rotate' ? existing.id : undefined);
+    const input = { code: redirectUri + '?code=code&scope=https://www.googleapis.com/auth/drive.file', state, redirectUri };
+    mockGetToken.mockResolvedValue({ tokens: { access_token: 'access', refresh_token: 'candidate',
+      scope: 'email https://www.googleapis.com/auth/userinfo.email openid' } });
+    api.get.mockResolvedValueOnce({ data: { email: existing.config.email } }).mockRejectedValueOnce(new Error('403'));
+
+    const result = mode === 'rotate'
+      ? controller.gdriveRotateAuth(user, existing.id, input, 'session')
+      : controller.gdriveCompleteAuth(user, input, 'session');
+    await expect(result).rejects.toMatchObject({ status: 400, message: expect.stringContaining('drive.file') });
+    expect(mockGetTokenInfo).not.toHaveBeenCalled();
+    expect(api.get).not.toHaveBeenCalled();
+    expect(backends.create).not.toHaveBeenCalled();
+    expect(backends.rotateCredential).not.toHaveBeenCalled();
+    expect(backends.refreshQuota).not.toHaveBeenCalled();
+    expect(audit.log).not.toHaveBeenCalled();
+  });
+
+  it('accepts an omitted scope when Google confirms the exchanged access token can use Drive files', async () => {
+    mockGetToken.mockResolvedValue({ tokens: { access_token: 'access-from-exchange', refresh_token: 'candidate' } });
+    mockGetTokenInfo.mockResolvedValue({ scopes: ['https://www.googleapis.com/auth/drive.file'] });
+    api.get.mockResolvedValueOnce({ data: { email: 'person@example.invalid' } })
+      .mockResolvedValueOnce({ data: { storageQuota: { usage: '32' } } });
+    const { service } = makeService({ clientId: 'cid', secretCipher: encryptedSecret('sec') });
+    await expect(complete(service, 'code', 'http://localhost/callback')).resolves.toMatchObject({
+      refreshToken: 'candidate', email: 'person@example.invalid', quota: { usedBytes: 32 },
+    });
+    expect(mockGetTokenInfo).toHaveBeenCalledWith('access-from-exchange');
+  });
+
+  it('rejects a missing scope when Google confirms only identity or a similarly named scope', async () => {
+    mockGetToken.mockResolvedValue({ tokens: { access_token: 'access-from-exchange', refresh_token: 'candidate' } });
+    mockGetTokenInfo.mockResolvedValue({ scopes: ['openid', 'https://www.googleapis.com/auth/drive.file.other'] });
+    const { service } = makeService({ clientId: 'cid', secretCipher: encryptedSecret('sec') });
+    await expect(complete(service, 'code', 'http://localhost/callback')).rejects.toMatchObject({
+      status: 400, message: expect.stringContaining('drive.file'),
+    });
+    expect(api.get).not.toHaveBeenCalled();
+  });
+
+  it('reports an unavailable scope check separately and keeps the upstream credential out of the error', async () => {
+    mockGetToken.mockResolvedValue({ tokens: { access_token: 'access-from-exchange', refresh_token: 'candidate' } });
+    mockGetTokenInfo.mockRejectedValue(new Error('Authorization: Bearer access-from-exchange'));
+    const { service } = makeService({ clientId: 'cid', secretCipher: encryptedSecret('sec') });
+    await expect(complete(service, 'code', 'http://localhost/callback')).rejects.toMatchObject({
+      status: 503, response: { errorCode: 'GDRIVE_SCOPE_VERIFICATION_UNAVAILABLE', message: '暂时无法向 Google 确认授权范围，请稍后重新发起授权' },
+    });
+    expect(api.get).not.toHaveBeenCalled();
   });
 
   it('exchangeCode：invalid_grant → 可操作 400（不回显凭据）', async () => {
@@ -180,14 +250,22 @@ describe('GDriveOAuthService（mock OAuth + 录制响应）', () => {
     await expect(complete(service, 'bad-code', 'http://x')).rejects.toThrow('授权码无效或已过期');
   });
 
+  it('does not echo a failed token exchange response', async () => {
+    mockGetToken.mockRejectedValue(new Error('sensitive-code-or-token'));
+    const { service } = makeService({ clientId: 'cid', secretCipher: encryptedSecret('sec') });
+    await expect(complete(service, 'code', 'http://localhost/callback')).rejects.toMatchObject({
+      status: 400, message: 'Google 授权码交换失败，请重新发起授权；如持续失败，请检查 OAuth Client 配置',
+    });
+  });
+
   it('exchangeCode：Google 未下发 refresh_token → 提示重新授权', async () => {
-    mockGetToken.mockResolvedValue({ tokens: { access_token: 'at-only' } });
+    mockGetToken.mockResolvedValue({ tokens: { access_token: 'at-only', scope: GDRIVE_SCOPES.join(' ') } });
     const { service } = makeService({ clientId: 'cid', secretCipher: encryptedSecret('sec') });
     await expect(complete(service, 'code', 'http://x')).rejects.toThrow('refresh_token');
   });
 
   it('exchangeCode：邮箱/配额拉取失败不影响授权主结论', async () => {
-    mockGetToken.mockResolvedValue({ tokens: { refresh_token: 'rt-2' } });
+    mockGetToken.mockResolvedValue({ tokens: { refresh_token: 'rt-2', scope: GDRIVE_SCOPES.join(' ') } });
     api.get.mockRejectedValue(new Error('network down'));
     const { service } = makeService({ clientId: 'cid', secretCipher: encryptedSecret('sec') });
     const result = await complete(service, 'code', 'http://x');
@@ -219,7 +297,7 @@ describe('GDriveOAuthService（mock OAuth + 录制响应）', () => {
       await expect(service.completeFlow(user, session, {...input, ...change})).rejects.toThrow('授权状态');
     }
     expect(mockGetToken).not.toHaveBeenCalled();
-    mockGetToken.mockResolvedValue({tokens: {refresh_token: 'rt'}});
+    mockGetToken.mockResolvedValue({tokens: {refresh_token: 'rt', scope: GDRIVE_SCOPES.join(' ')}});
     await service.completeFlow('admin', 's1', input);
     await expect(service.completeFlow('admin', 's1', input)).rejects.toThrow('授权状态');
   });
