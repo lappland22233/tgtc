@@ -40,9 +40,7 @@ const manifests = [
 for (const file of manifests) {
   const manifest = JSON.parse(read(file));
   // lockfile 有**两处**根包版本：顶层 version 与 packages[""].version。
-  // 只校验其一会漏掉「手工改版本只改一处」的半改状态（例如 package.json 与
-  // packages[""] 都是新版本、顶层还是旧版本），而该不一致会一路带到打包与
-  // validate-release.sh 才暴露。因此两处都必须与 VERSION 严格相等；
+  // 只校验其一会漏掉部分根包版本未同步的状态。两处都必须与 VERSION 严格相等；
   // packages 缺失时取到 undefined，同样按不一致 fail-closed。
   const entries = file.endsWith('package-lock.json')
     ? [['version', manifest.version], ['packages[""].version', manifest.packages?.['']?.version]]

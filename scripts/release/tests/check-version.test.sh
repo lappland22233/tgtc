@@ -4,7 +4,7 @@
 # 为什么必须锁死：VERSION 是全仓唯一的版本事实来源，四个包清单都必须与它一致，
 # 且 **lockfile 有两处根包版本**（顶层 version 与 packages[""].version）。
 # 事故形态：手工升版本只改 package.json 与 packages[""]、漏掉 lockfile 顶层
-# （或反过来），不一致会一路带到打包与 validate-release.sh 才暴露；tag 守卫失效
+# （或反过来），根包版本会与实际运行版本不符；tag 守卫失效
 # 则会让 `v1.6.2` 标签指向声称 1.6.1 的制品。
 #
 # 因此本测试在临时 fixture 仓库上锁定：全一致放行；任一清单/任一字段不一致、

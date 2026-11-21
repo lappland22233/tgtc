@@ -66,7 +66,7 @@
 
 下载链路跨越多层，任何**外层**先于内层断开，都会让客户端只看到「无原因中断」而不是可分类的超时（历史 4GiB 分卷事件即由此放大）。因此各层超时必须满足 **内层 < 外层**。
 
-层级链（与 `scripts/release/start.sh` 写入的 systemd 单元、`.env` 及 `backend/src/config/env-validation.ts` 注释一致）：
+手工部署时，Bot API 服务参数、后端环境变量和 Nginx 应使用同一套超时配置。以下示例把 Bot API 首字节和空闲超时设为 120 秒。
 
 ```text
 首字节链：Bot API 首字节 120s < Nest HTTP 180s < 缓存首字节 210s
@@ -78,7 +78,7 @@
 
 对应的配置项与默认值：
 
-| 层级 | 配置项 / 参数 | 默认值 | 作用 |
+| 层级 | 配置项 / 参数 | 部署示例值 | 作用 |
 |---|---|---|---|
 | 最内层：Bot API 首字节 | `--file-stream-first-byte-timeout` | `120`（秒） | TDLib 回源后首个字节到达上限 |
 | Nest 上游请求 | `TELEGRAM_FILE_STREAM_TIMEOUT_SECONDS` | `180`（秒） | 后端请求实时流端点的读超时 |
@@ -102,7 +102,7 @@
 |---|---|---|---|
 | 后端下载缓存 | `tmp/Cache` | 上限 `10GiB`、TTL `3` 天、LRU 淘汰 | 命中刷新；超上限按 LRU 淘汰；过期清理；管理后台可热更新 |
 | TDLib workdir | `runtime/telegram-bot-api/data` | 清理阈值 `20GiB` / 目标 `15GiB` / 间隔 `3600s` / 文件 TTL `86400s` / 最低余量 `1GiB` | workdir 清理任务 + **写前空间准入** |
-| Bot API 临时目录 | `runtime/telegram-bot-api/tmp` | `start.sh` 以 `--temp-dir` 显式落在受控路径 | 组件自身管理（默认 `/tmp` 会脱离 workdir 配额统计） |
+| Bot API 临时目录 | `runtime/telegram-bot-api/tmp` | 在 Bot API 服务单元中通过 `--temp-dir` 指定受控路径 | 组件自身管理（默认 `/tmp` 会脱离 workdir 配额统计） |
 | Nginx 代理临时卷 | `proxy_temp_path` / `client_body_temp_path` | 下载端点 `proxy_max_temp_file_size 0`（直通不落盘） | 模板声明 + 容量告警清单 |
 
 - **workdir 中不可删除的是控制状态**：`db.sqlite*` 与 `td.binlog*`（以及 session）是 `file_id` 的绑定凭据，删除/清空/重命名会让历史 `file_id` 全部失效；**媒体副本本身可被回收**（可由 `file_id` 重新回源）。
@@ -144,8 +144,8 @@ curl -C - -OJ "https://your-domain.example/api/bot-dl/<token>"
 
 运维要点：
 
-- **`TGTC_BOT_STATS_PORT` 为 opt-in**：`start.sh` 仅在设置了该变量时才给 Bot API 加 `--http-stat-port`（默认关闭）。开启后暴露的 stats 端点**必须自行限制为仅本机可访问**（绑定回环 / 防火墙 / 仅允许受控监控来源），不要直接暴露公网。
+- Bot API 统计端口默认关闭。需要统计时在其服务单元显式添加 `--http-stat-port`。开启后暴露的 stats 端点**必须自行限制为仅本机可访问**（绑定回环 / 防火墙 / 仅允许受控监控来源），不要直接暴露公网。
 - **4GiB 分卷场景**建议将 `FILE_DOWNLOAD_DIRECT_WAIT_SECONDS` 上调到 `180`（仍须小于 Nginx `proxy_read_timeout` `210s`）。
-- `start.sh` 会为 Bot API 生成 systemd 单元并写入 `.env`：显式传入首字节 `120s`、空闲 `120s`、最大连接 `100`、最大文件 `0`（不限）、workdir 清理阈值 `20GiB`/目标 `15GiB`/间隔 `3600s`/TTL `86400s`/最低余量 `1GiB`/未知大小余量 `512MiB` 与 `--temp-dir`。
+- 源码部署请在 Bot API 的 systemd 单元中显式配置首字节 `120s`、空闲 `120s`、最大连接 `100`、最大文件 `0`（不限）、workdir 清理阈值 `20GiB`/目标 `15GiB`/间隔 `3600s`/TTL `86400s`/最低余量 `1GiB`/未知大小余量 `512MiB` 与 `--temp-dir`。
 
 

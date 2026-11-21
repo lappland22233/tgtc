@@ -5,7 +5,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/common.sh"
 # Exit codes: 0 healthy; 2 usage; 3 precheck; 4 one or more health checks failed.
 SERVICE="${TGTC_SERVICE:-tgtc.service}"
 BOT_SERVICE="${TGTC_BOT_SERVICE:-tgtc-telegram-bot-api.service}"
-EXPECTED_VERSION="${TGTC_EXPECTED_VERSION:-$(read_version "$RELEASE_ROOT/VERSION")}" # release may override after an atomic switch
+EXPECTED_VERSION="${TGTC_EXPECTED_VERSION:-$(read_version "$SOURCE_ROOT/VERSION")}"
 FAILURES=0
 fail() { log "FAIL: $*"; FAILURES=1; }
 
