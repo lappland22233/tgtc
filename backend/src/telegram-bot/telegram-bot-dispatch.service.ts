@@ -86,6 +86,12 @@ export class TelegramBotDispatchService implements OnApplicationShutdown {
   private readonly processingMessages = new Set<string>();
   /** 停机排空追踪：在途后台 GDrive 转存任务 (chatId:messageId -> { abortController, promise }) */
   private readonly activeTransfers = new Map<string, { abortController: AbortController; promise: Promise<void> }>();
+  /** 会话级在途转存计数 (chatId -> 活跃转存数)，用于感知用户当前是否有正在处理的直链生成 */
+  private readonly activeTransfersByChat = new Map<string, number>();
+  /** 会话级等待提示回复冷却时间戳 (chatId -> 最近一次发送轻量提示的毫秒时间戳)，防止用户刷屏 */
+  private readonly chatNoticeCooldowns = new Map<string, number>();
+  /** 等待期间用户发言提示防刷冷却时间（15 秒） */
+  private readonly inFlightNoticeCooldownMs = 15_000;
   private isShuttingDown = false;
   private shutdownDrainTimeoutMs = 10_000;
 
@@ -210,6 +216,12 @@ export class TelegramBotDispatchService implements OnApplicationShutdown {
       }
       if (message.document) {
         await this.handleDocument(message, identity, accountId);
+        return;
+      }
+      // 在途转存等待状态保护：若当前私聊有正在处理的文件直链生成，优先拦截普通非命令发言并节流，
+      // 避免向用户倾泻冗长的 /help 菜单形成消息轰炸
+      if (this.hasActiveTransferForChat(chatId)) {
+        await this.handleInFlightChatNotice(chatId, message.message_id, accountId);
         return;
       }
       if (this.isNonDocumentMedia(message)) {
@@ -805,10 +817,10 @@ export class TelegramBotDispatchService implements OnApplicationShutdown {
       return;
     }
 
-    // 正在转存同一消息时，提示用户等待，防止并发重复转存与额度误扣
+    // 正在转存同一消息时，静默去重跳过，防止并发重复转存与重复消息轰炸
     const msgKey = `${chatId}:${messageId}`;
     if (this.processingMessages.has(msgKey)) {
-      await this.reply(chatId, '⏳ 该文件正在创建链接中，请稍候...', message.message_id, accountId);
+      this.logger.debug(`文件消息 ${msgKey} 正在处理中，静默跳过重复更新`);
       return;
     }
     // [P1-04 Fix]: 立即在此加锁，彻底消除配额检查与域名解析异步窗口期的并发重复请求竞争
@@ -1123,16 +1135,57 @@ export class TelegramBotDispatchService implements OnApplicationShutdown {
     ].join('\n');
   }
 
+  private incrementChatActiveTransfer(chatId: string): void {
+    const current = this.activeTransfersByChat.get(chatId) ?? 0;
+    this.activeTransfersByChat.set(chatId, current + 1);
+  }
+
+  private decrementChatActiveTransfer(chatId: string): void {
+    const current = this.activeTransfersByChat.get(chatId) ?? 0;
+    if (current <= 1) {
+      this.activeTransfersByChat.delete(chatId);
+      this.chatNoticeCooldowns.delete(chatId);
+    } else {
+      this.activeTransfersByChat.set(chatId, current - 1);
+    }
+  }
+
+  private hasActiveTransferForChat(chatId: string): boolean {
+    return (this.activeTransfersByChat.get(chatId) ?? 0) > 0;
+  }
+
+  private async handleInFlightChatNotice(
+    chatId: string,
+    replyToMessageId: number,
+    accountId?: string,
+  ): Promise<void> {
+    const now = Date.now();
+    const lastNoticeAt = this.chatNoticeCooldowns.get(chatId) ?? 0;
+    if (now - lastNoticeAt < this.inFlightNoticeCooldownMs) {
+      this.logger.debug(`私聊 ${chatId} 处于在途转存提示冷却中，静默丢弃多余发言回复`);
+      return;
+    }
+    this.chatNoticeCooldowns.set(chatId, now);
+    await this.reply(
+      chatId,
+      '⏳ 您的文件正在创建直链中，请耐心等待完成通知，无需重复发送消息。',
+      replyToMessageId,
+      accountId,
+    );
+  }
+
   /**
    * 启动纯 Google 存储模式后台异步转存，并将其纳入停机排空跟踪表。
    */
   private startGDriveTransfer(params: Parameters<TelegramBotDispatchService['executeGDriveTransfer']>[0]): void {
     const key = `${params.chatId}:${params.messageId}`;
     const abortController = new AbortController();
+    this.incrementChatActiveTransfer(params.chatId);
     const promise = this.executeGDriveTransfer(params, abortController);
     this.activeTransfers.set(key, { abortController, promise });
     promise.finally(() => {
       this.activeTransfers.delete(key);
+      this.decrementChatActiveTransfer(params.chatId);
     });
   }
 

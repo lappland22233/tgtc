@@ -56,13 +56,14 @@ function makePool(active: boolean) {
 }
 
 function makeMessageUpdate(overrides: {
+  messageId?: number;
   text?: string;
   document?: Record<string, unknown> | null;
   chatType?: string;
   chatId?: number;
 } = {}): TelegramUpdate {
   const message: Record<string, unknown> = {
-    message_id: 100,
+    message_id: overrides.messageId ?? 100,
     chat: { id: overrides.chatId ?? 7001, type: overrides.chatType ?? 'private' },
     from: { id: 7001, first_name: 'User', username: 'user' },
   };
@@ -1233,6 +1234,112 @@ describe('TelegramBotDispatchService（纯 Google 存储模式）', () => {
     expect(ctx.quotaService.consume).not.toHaveBeenCalled();
     const sentTexts = ctx.telegramService.sendMessage.mock.calls.map((call: any[]) => call[1]);
     expect(sentTexts).toContain('服务正在维护重启中，请稍后重新发送文件。');
+  });
+
+  it('同一文件在途转存时收到重复更新（网络波动/重复投递），静默忽略而不重复发送等待提示', async () => {
+    let completeUpload!: () => void;
+    const uploadPromise = new Promise<{ backendType: 'gdrive'; accountId: string; objectRef: string }>((resolve) => {
+      completeUpload = () => resolve({
+        backendType: 'gdrive',
+        accountId: 'gdrive-acc-1',
+        objectRef: 'gdrive-file-id-123',
+      });
+    });
+
+    const storageRouter = {
+      availableBackendTypes: jest.fn(() => ['gdrive']),
+      upload: jest.fn(() => uploadPromise),
+    };
+
+    const ctx = makeService({
+      storageRouter,
+      botConfig: { storageMode: 'gdrive' },
+    });
+
+    // 第一次收到文件消息：进入转存并发送一次等待提示
+    await ctx.service.handleUpdate(makeMessageUpdate({ messageId: 301 }));
+    expect(ctx.telegramService.sendMessage).toHaveBeenCalledTimes(1);
+    expect(ctx.telegramService.sendMessage).toHaveBeenCalledWith(
+      '7001',
+      '⏳ 正在创建下载链接，请稍候...',
+      { replyToMessageId: 301 },
+    );
+
+    // 同一消息因重试/长轮询重复到达：静默去重，绝不重复发送消息轰炸用户
+    await ctx.service.handleUpdate(makeMessageUpdate({ messageId: 301 }));
+    expect(ctx.telegramService.sendMessage).toHaveBeenCalledTimes(1);
+
+    // 完成转存
+    completeUpload();
+    await waitFor(() => ctx.telegramService.editMessageText.mock.calls.length > 0);
+  });
+
+  it('在途转存期间用户发送普通文本或提问，Bot 回复轻量提示且在冷却期内防刷静默，不倾倒 /help 帮助菜单', async () => {
+    let completeUpload!: () => void;
+    const uploadPromise = new Promise<{ backendType: 'gdrive'; accountId: string; objectRef: string }>((resolve) => {
+      completeUpload = () => resolve({
+        backendType: 'gdrive',
+        accountId: 'gdrive-acc-1',
+        objectRef: 'gdrive-file-id-123',
+      });
+    });
+
+    const storageRouter = {
+      availableBackendTypes: jest.fn(() => ['gdrive']),
+      upload: jest.fn(() => uploadPromise),
+    };
+
+    const ctx = makeService({
+      storageRouter,
+      botConfig: { storageMode: 'gdrive' },
+    });
+
+    // 触发转存
+    await ctx.service.handleUpdate(makeMessageUpdate({ messageId: 401 }));
+    expect(ctx.telegramService.sendMessage).toHaveBeenCalledTimes(1);
+    ctx.telegramService.sendMessage.mockClear();
+
+    // 用户在等待期间提问："好了吗？"
+    await ctx.service.handleUpdate(makeMessageUpdate({ messageId: 402, text: '好了吗？', document: null }));
+
+    // 验证：回复轻量级等待提示，而非长篇幅的 /help 帮助菜单
+    expect(ctx.telegramService.sendMessage).toHaveBeenCalledTimes(1);
+    expect(ctx.telegramService.sendMessage).toHaveBeenCalledWith(
+      '7001',
+      '⏳ 您的文件正在创建直链中，请耐心等待完成通知，无需重复发送消息。',
+      { replyToMessageId: 402 },
+    );
+    const firstCallText = (ctx.telegramService.sendMessage.mock.calls as any)[0][1];
+    expect(firstCallText).not.toContain('/help');
+
+    // 用户在冷却窗口内继续频繁发言："还要多久？"、"在吗"
+    ctx.telegramService.sendMessage.mockClear();
+    await ctx.service.handleUpdate(makeMessageUpdate({ messageId: 403, text: '还要多久？', document: null }));
+    await ctx.service.handleUpdate(makeMessageUpdate({ messageId: 404, text: '在吗', document: null }));
+
+    // 验证：在冷却期内被静默过滤，不再持续发消息轰炸用户
+    expect(ctx.telegramService.sendMessage).not.toHaveBeenCalled();
+
+    // 验证命令不受在途等待拦截影响（如 /quota）
+    await ctx.service.handleUpdate(makeMessageUpdate({ messageId: 405, text: '/quota', document: null }));
+    expect(ctx.telegramService.sendMessage).toHaveBeenCalledWith(
+      '7001',
+      expect.stringContaining('今日已使用'),
+      { replyToMessageId: 405 },
+    );
+
+    // 完成转存
+    completeUpload();
+    await waitFor(() => ctx.telegramService.editMessageText.mock.calls.length > 0);
+
+    // 转存完成后，在途状态解除，后续普通文本恢复常规帮助提示
+    ctx.telegramService.sendMessage.mockClear();
+    await ctx.service.handleUpdate(makeMessageUpdate({ messageId: 406, text: '你好', document: null }));
+    expect(ctx.telegramService.sendMessage).toHaveBeenCalledWith(
+      '7001',
+      expect.stringContaining('可用命令：'),
+      { replyToMessageId: 406 },
+    );
   });
 
   describe('Google 缓存模式异步镜像（triggerGDriveCacheMirror）', () => {
