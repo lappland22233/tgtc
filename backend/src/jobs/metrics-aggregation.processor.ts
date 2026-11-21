@@ -1,3 +1,4 @@
+import { metricsWindowEnd } from './metrics-window';
 import { Injectable, Logger } from '@nestjs/common';
 import { Process, Processor } from '@nestjs/bull';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -28,21 +29,7 @@ export class MetricsAggregationProcessor {
   // PERF-B-107：显式 concurrency:1（与 Bull 隐式默认一致，仅显性化，行为不变）
   @Process({ name: 'aggregate-1min', concurrency: 1 })
   async aggregate1Min(job: Job<{ windowTime?: string }>): Promise<void> {
-    // 滞后一个窗口：聚合「上一分钟」而非当前分钟，避免 N:00 立即统计时 N-1 分钟尾部日志
-    // 尚未落库导致漏计。窗口时间 = (now - 60s) 截断到分钟。
-    const now = job.data?.windowTime
-      ? new Date(new Date(job.data.windowTime).getTime() - 60 * 1000)
-      : new Date(Date.now() - 60 * 1000);
-    // 使用 UTC 时间截断到分钟，避免跨时区聚合偏差
-    const windowTime = new Date(Date.UTC(
-      now.getUTCFullYear(),
-      now.getUTCMonth(),
-      now.getUTCDate(),
-      now.getUTCHours(),
-      now.getUTCMinutes(),
-      0,
-      0,
-    ));
+    const windowTime = metricsWindowEnd(job);
     // 聚合窗口 = [windowTime - 60s, windowTime)
     const windowStart = new Date(windowTime.getTime() - 60 * 1000);
 
@@ -55,7 +42,7 @@ export class MetricsAggregationProcessor {
         // 原实现按 MAX-MIN 时间跨度做分母（GREATEST 兜底为 1s），仅 1 条记录时跨度为 0，
         // 会把 qpsAvg 错算成原始计数；固定窗口长度作分母语义更准确且稳定。
         .addSelect(
-          'ROUND(CAST(CAST(COUNT(*) AS NUMERIC) / 60 AS NUMERIC), 2)',
+          'ROUND(CAST(CAST(COUNT(*) AS NUMERIC) / 60.0 AS NUMERIC), 2)',
           'qpsAvg',
         )
         .addSelect(

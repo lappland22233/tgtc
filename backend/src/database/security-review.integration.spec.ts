@@ -117,6 +117,19 @@ describe.each(dialects)('security review regressions / %s', (dialect) => {
         id: ruleId, name: 'migration-audit', enabled: true, sourceChatId: '-11', targetChatId: '-12',
         includeBotInboundFiles: false,
       });
+      const taskId = randomUUID();
+      const { UpdateTask } = require('../common/entities/update-task.entity');
+      await db.getRepository(UpdateTask).save({
+        taskId, requestedBy: owner.id, currentVersion: '1.6.2', targetVersion: '1.6.3', releaseId: 163,
+        releaseTag: 'v1.6.3', status: 'migrating', isActive: true, progress: 42,
+        metadata: { fixture: 'historical-update' }, heartbeatAt: new Date('2002-03-04T15:01:02.345Z'),
+      });
+      const metricEnd = new Date('2002-03-04T15:00:00.000Z');
+      const { AccessLog } = require('../common/entities/access-log.entity');
+      await db.query('INSERT INTO "access_log_metrics_1min" ("windowTime", "totalRequests") VALUES ($1, 7)', [metricEnd]);
+      await db.getRepository(AccessLog).save({ ip: '192.0.2.5', method: 'GET', path: '/converted-minute',
+        statusCode: 200, duration: 12, createdAt: new Date(metricEnd.getTime() + 17_456) });
+      await db.query('INSERT INTO "daily_active_users" ("date", "dauCount") VALUES ($1, 3)', ['2002-03-04']);
       const env = { ...process.env, DB_DATABASE: database, MIGRATION_TARGET: target };
       const run = () => promisify(execFile)(process.execPath, ['dist-migrator/build-data-migrator.js'], { env });
       try {
@@ -128,12 +141,35 @@ describe.each(dialects)('security review regressions / %s', (dialect) => {
           const {createDatabaseOptions} = require('./src/database/database.config');
           (async () => {
             const db = await new DataSource(createDatabaseOptions()).initialize();
-            console.log(JSON.stringify({pending: await db.showMigrations(),
+            const {AlertEvaluationProcessor} = require('./src/jobs/other.processors');
+            const {MetricsAggregationProcessor} = require('./src/jobs/metrics-aggregation.processor');
+            const {AccessLog} = require('./src/common/entities/access-log.entity');
+            const counts = [];
+            const evaluator = new AlertEvaluationProcessor(db, {
+              evaluateAndCreateAlerts: async (metrics) => { counts.push(metrics.totalRequests); return []; },
+            }, {});
+            const due = Date.parse('${metricEnd.toISOString()}') + 60_000;
+            const job = {data: {}, timestamp: due};
+            await evaluator.evaluateAlerts(job);
+            const following = {data: {}, timestamp: due + 60_000};
+            await new MetricsAggregationProcessor(db.getRepository(AccessLog)).aggregate1Min(following);
+            await evaluator.evaluateAlerts(following);
+            const updates = await db.getRepository(require('./src/common/entities/update-task.entity').UpdateTask).find({
+              select: ['taskId', 'status', 'isActive', 'progress', 'metadata', 'heartbeatAt'],
+            });
+            console.log(JSON.stringify({pending: await db.showMigrations(), counts, updates,
+              timestamps: await db.query('SELECT "createdAt" AS stamp FROM access_logs WHERE path = ?', ['/converted-minute']),
+              days: await db.query('SELECT date FROM daily_active_users WHERE "dauCount" = 3'),
               rows: await db.query('SELECT id, "includeBotInboundFiles" AS inbound FROM telegram_mirror_rules')}));
             await db.destroy();
           })().catch(e => {console.error(e); process.exitCode=1});
         `], { env: { ...env, DB_TYPE: 'sqlite', DB_DATABASE: target, DB_MIGRATIONS_RUN: 'true' } });
-        expect(JSON.parse(startup.stdout)).toEqual({ pending: false, rows: [{ id: ruleId, inbound: 0 }] });
+        expect(JSON.parse(startup.stdout)).toEqual({ pending: false, counts: [7, 1],
+          updates: [{ taskId, status: 'migrating', isActive: true, progress: 42,
+            metadata: { fixture: 'historical-update' }, heartbeatAt: '2002-03-04T15:01:02.345Z' }],
+          timestamps: [{ stamp: '2002-03-04 15:00:17.456' }], days: [{ date: '2002-03-04' }],
+          rows: [{ id: ruleId, inbound: 0 }],
+        });
         const original = await readFile(target);
         await db.query('CREATE TABLE migration_future_business (id integer primary key)');
         await db.query('INSERT INTO migration_future_business VALUES (1)');
@@ -147,14 +183,47 @@ describe.each(dialects)('security review regressions / %s', (dialect) => {
   }
 
   it('checks password lock state without mutating its counter', async () => {
-    const token = randomUUID();
-    expect(await passwords.checkPasswordAttemptAllowed('127.0.0.1', token)).toBe(true);
+    const link = await makeLink();
+    const token = link.token;
+    const password = 'fixture-password';
+    await db.getRepository(models.ShareLink).update(link.id, { password: await require('bcryptjs').hash(password, 4) });
+    const { accessJwt } = await shares.verifyPassword(token, password, '127.0.0.1');
+    expect(jwt.verify(accessJwt).sid).toBe(link.id);
     const rates = db.getRepository(models.RateLimit);
     expect(await rates.countBy({ key: `share-password:token-lock:${token}` })).toBe(0);
     await new services.RateLimitService(rates).checkAndIncrement(
       `share-password:token-lock:${token}`, 'share_password_token_lock', 1, 60000, 60000,
     );
-    expect(await passwords.checkPasswordAttemptAllowed(null, token)).toBe(false);
+    await expect(shares.verifyPassword(token, password, null)).rejects.toThrow();
+  });
+
+  it('completes quiet alert windows and evaluates a busy window when its aggregate arrives', async () => {
+    const { MetricsAggregationProcessor } = require('../jobs/metrics-aggregation.processor');
+    const { AlertEvaluationProcessor } = require('../jobs/other.processors');
+    const { AccessLog } = require('../common/entities/access-log.entity');
+    const due = Math.floor(Date.now() / 60000) * 60000;
+    const job = { data: {}, timestamp: due - 45000, opts: { delay: 45000 } };
+    const engine = { evaluateAndCreateAlerts: jest.fn().mockResolvedValue([]) };
+    const repo = db.getRepository(AccessLog);
+    const evaluator = new AlertEvaluationProcessor(db, engine, { broadcastAlert: jest.fn() });
+    await evaluator.evaluateAlerts(job);
+    expect(engine.evaluateAndCreateAlerts).not.toHaveBeenCalled();
+    await repo.save({ ip: '192.0.2.1', method: 'GET', path: '/minute-test', statusCode: 500, duration: 12,
+      responseSize: 8, createdAt: new Date(due - 90000) });
+    await expect(evaluator.evaluateAlerts(job)).rejects.toThrow('缺失');
+    // Even if the original and retry workers reach the task in different minutes, use the same closed window.
+    const clock = jest.spyOn(Date, 'now').mockReturnValue(due + 180000);
+    try {
+      await new MetricsAggregationProcessor(repo).aggregate1Min(job);
+      await evaluator.evaluateAlerts(job);
+    } finally {
+      clock.mockRestore();
+    }
+    expect(engine.evaluateAndCreateAlerts).toHaveBeenCalledTimes(1);
+    const [metrics] = engine.evaluateAndCreateAlerts.mock.calls[0];
+    expect(Number(metrics.totalRequests)).toBe(1);
+    expect(Number(metrics.qpsAvg)).toBe(0.02);
+    expect(Number(metrics.error5xxCount)).toBe(1);
   });
 
   it('prunes only expired preview sessions and reports the bounded delete count', async () => {

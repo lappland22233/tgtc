@@ -1,3 +1,4 @@
+import { metricsWindowEnd } from './metrics-window';
 import { Injectable, Logger } from '@nestjs/common';
 import { Process, Processor } from '@nestjs/bull';
 import { DataSource } from 'typeorm';
@@ -8,14 +9,6 @@ import { AggregatedMetrics } from '../alert/alert.rules';
 import { AlertGateway } from '../alert/alert.gateway';
 import { BehaviorAnalyzer } from '../security/behavior-analyzer.service';
 import { databaseCast, databaseQuery, getDatabaseType } from '../database/database-types';
-
-/**
- * 预聚合追赶期：`aggregate-1min` 与 `evaluate-alerts` 都是每分钟触发、都按
- * `(now - 60s)` 截断到分钟取同一个窗口，因此评估可能先于聚合并发完成。
- * 窗口年龄不超过该阈值时视为「聚合还在追赶」，保留重试；
- * 超过后仍无预聚合行，则需按 access_logs 判定是真空闲还是聚合缺口。
- */
-const AGGREGATION_CATCHUP_MS = 5 * 60 * 1000;
 
 @Injectable()
 @Processor(QUEUE_NAMES.ALERT_EVALUATION)
@@ -33,23 +26,7 @@ export class AlertEvaluationProcessor {
   @Process({ name: 'evaluate-alerts', concurrency: 1 })
   async evaluateAlerts(job: Job<{ windowTime?: string }>): Promise<void> {
     try {
-      // 从预聚合表读取最近 1 分钟的指标
-      // 使用 UTC 时间截断到分钟，与 metrics-aggregation 处理器写入窗口保持一致；
-      // 若用本地时间截断，非 UTC 部署时永远查不到预聚合窗口，告警系统会静默失效。
-      // 显式窗口锚点与聚合任务语义一致：先减一分钟，再截断到分钟。
-      const now = job.data?.windowTime
-        ? new Date(new Date(job.data.windowTime).getTime() - 60 * 1000)
-        : new Date(Date.now() - 60 * 1000);
-      const windowTime = new Date(Date.UTC(
-        now.getUTCFullYear(),
-        now.getUTCMonth(),
-        now.getUTCDate(),
-        now.getUTCHours(),
-        now.getUTCMinutes(),
-        0,
-        0,
-      ));
-
+      const windowTime = metricsWindowEnd(job);
       const [metrics] = await databaseQuery<AggregatedMetrics[]>(
         this.dataSource,
         `SELECT "totalRequests", "qpsAvg", "error5xxCount", "error4xxCount",
@@ -61,38 +38,16 @@ export class AlertEvaluationProcessor {
       );
 
       if (!metrics) {
-        // G3-16：预聚合缺失时静默 return 会漏报告警，因此保留 warn + throw 触发 Bull 重试。
-        // 但聚合只在「该分钟有请求」时落行（见 MetricsAggregationProcessor），
-        // 无流量分钟必然查不到窗口；原实现对此同样 warn + 重试（attempts=3），
-        // 生产上日均产生近万条「触发重试 / 评估失败」WARN。故按窗口年龄区分两种情况：
-        //   - 年龄 ≤ AGGREGATION_CATCHUP_MS：聚合任务与评估并发执行且取同一窗口，
-        //     属正常追赶，保留 warn + 重试；
-        //   - 超过追赶期：需再区分「该分钟确实无流量」（无规则可评估，静默跳过）
-        //     与「聚合漏落/失败」（必须继续告警并重试，避免静默丢告警）。
-        const ageMs = Date.now() - windowTime.getTime();
-        if (ageMs <= AGGREGATION_CATCHUP_MS) {
-          this.logger.warn(`告警评估缺失预聚合窗口 ${windowTime.toISOString()}，触发重试`);
-          throw new Error(`预聚合窗口 ${windowTime.toISOString()} 缺失`);
-        }
-
-        const windowStart = new Date(windowTime.getTime() - 60 * 1000);
-        const logRows = await databaseQuery<Array<{ cnt: number | string }>>(
+        // Empty minutes have no aggregate row. Probe the same closed interval before retrying.
+        const windowStart = new Date(windowTime.getTime() - 60_000);
+        const rows = await databaseQuery<Array<{ present: number }>>(
           this.dataSource,
-          `SELECT ${databaseCast('COUNT(*)', 'int')} AS cnt
-           FROM "access_logs"
-           WHERE "createdAt" >= $1 AND "createdAt" < $2`,
+          `SELECT 1 AS present FROM "access_logs" WHERE "createdAt" >= $1 AND "createdAt" < $2 LIMIT 1`,
           [windowStart, windowTime],
           getDatabaseType(),
         );
-        const logCount = Number(logRows?.[0]?.cnt ?? 0);
-        if (logCount === 0) {
-          this.logger.debug(`预聚合窗口 ${windowTime.toISOString()} 无请求，跳过告警评估`);
-          return;
-        }
-        this.logger.warn(
-          `预聚合窗口 ${windowTime.toISOString()} 缺失，但该分钟存在 ${logCount} 条访问日志，触发重试`,
-        );
-        throw new Error(`预聚合窗口 ${windowTime.toISOString()} 缺失`);
+        if (!rows.length) return;
+        throw new Error(`预聚合窗口 ${windowTime.toISOString()} 缺失，该分钟有访问记录`);
       }
 
       // 评估 + 创建告警（规则配置仅读取一次，冷却期原子去重）

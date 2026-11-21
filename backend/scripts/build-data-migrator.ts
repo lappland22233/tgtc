@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { sqliteDateParameter } from '../src/database/database-types';
 import { existsSync, mkdirSync, writeFileSync } from 'fs';
 import { dirname, resolve } from 'path';
 import { DataSource, DataSourceOptions, EntityMetadata, QueryRunner } from 'typeorm';
@@ -111,7 +112,7 @@ function isDateColumn(column: ColumnShape): boolean {
 function convertValue(value: unknown, sourceColumn?: ColumnShape, targetColumn?: ColumnShape): unknown {
   if (value === null || value === undefined || Buffer.isBuffer(value)) return value;
   const column = targetColumn || sourceColumn;
-  if (!column) return value instanceof Date ? value.toISOString() : value;
+  if (!column) return value instanceof Date ? sqliteDateParameter(value) : value;
   if (isSimpleJson(column)) {
     if (typeof value === 'string') {
       try { return JSON.stringify(JSON.parse(value)); } catch { throw new Error(`simple-json 值不是合法 JSON: ${column.entityMetadata.tableName}.${column.databaseName}`); }
@@ -126,7 +127,7 @@ function convertValue(value: unknown, sourceColumn?: ColumnShape, targetColumn?:
   if (isDateColumn(column)) {
     const date = value instanceof Date ? value : new Date(String(value));
     if (Number.isNaN(date.getTime())) throw new Error(`datetime 值无法转换: ${column.entityMetadata.tableName}.${column.databaseName}`);
-    return date.toISOString();
+    return column.type === 'date' ? date.toISOString().slice(0, 10) : sqliteDateParameter(date);
   }
   if (column.type === 'bigint') {
     const text = String(value);
@@ -137,7 +138,7 @@ function convertValue(value: unknown, sourceColumn?: ColumnShape, targetColumn?:
     }
     return numeric;
   }
-  return value instanceof Date ? value.toISOString() : value;
+  return value instanceof Date ? sqliteDateParameter(value) : value;
 }
 
 async function tableExists(ds: DataSource, table: string): Promise<boolean> {
@@ -402,6 +403,10 @@ async function validateIntegrity(target: DataSource): Promise<Record<string, unk
 async function main(): Promise<void> {
   if (existsSync(tempPath)) throw new Error(`已有迁移临时文件，拒绝覆盖: ${tempPath}`);
   mkdirSync(dirname(targetPath), { recursive: true });
+  // PostgreSQL DATE is a calendar day. pg's default parser turns it into local midnight,
+  // which can move to the previous UTC day and also corrupt DATE primary-key pagination.
+  const pgTypes = require('pg').types;
+  pgTypes.setTypeParser(pgTypes.builtins.DATE, (day: string) => day);
   const source = new DataSource(sourceOptions);
   const targetModules = loadDatabaseModules('sqlite');
   const targetOptions = targetModules.createDatabaseOptions({ ...process.env, DB_TYPE: 'sqlite', DB_DATABASE: tempPath, DB_MIGRATIONS_RUN: 'true' });

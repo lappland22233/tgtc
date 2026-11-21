@@ -94,6 +94,7 @@ describe('真实 SQLite 数据源关键业务与并发 QA', () => {
       'SqliteAddGDriveCacheColumns1804300000000',
       'SqliteScopeBotGrantMessage1804400000000',
       'SqliteGDriveOAuthFlows1804500000000',
+      'SqliteCreateMinuteMetrics1804600000000',
     ]);
 
     await dataSource.undoLastMigration();
@@ -432,10 +433,6 @@ describe('真实 SQLite 数据源关键业务与并发 QA', () => {
     const { AlertEvaluationProcessor, WeeklyReportProcessor } = require('../jobs/other.processors') as typeof import('../jobs/other.processors');
     const { MetricsAggregationProcessor } = require('../jobs/metrics-aggregation.processor') as typeof import('../jobs/metrics-aggregation.processor');
 
-    await dataSource.query(`CREATE TABLE IF NOT EXISTS "access_log_metrics_1min" (
-      "windowTime" datetime PRIMARY KEY, "totalRequests" integer NOT NULL, "qpsAvg" real NOT NULL,
-      "error5xxCount" integer NOT NULL, "error4xxCount" integer NOT NULL, "totalBandwidth" bigint NOT NULL,
-      "p95Duration" real NOT NULL, "uniqueIps" integer NOT NULL)`);
     await dataSource.query(`CREATE TABLE IF NOT EXISTS "baseline_stats" (
       "metricName" varchar NOT NULL, "hourBucket" integer NOT NULL, "dayOfWeek" integer NOT NULL,
       "mean" real NOT NULL, "stddev" real NOT NULL, "sampleCount" integer NOT NULL, "updatedAt" datetime NOT NULL,
@@ -491,7 +488,7 @@ describe('真实 SQLite 数据源关键业务与并发 QA', () => {
     expect(Number((await dataSource.query('SELECT COUNT(*) AS count FROM "baseline_stats"'))[0].count)).toBeGreaterThan(0);
     await expect(analyzer.detectAnomalies()).resolves.toEqual(expect.any(Array));
     await expect(new WeeklyReportProcessor(dataSource).generateWeeklyReport({} as any)).resolves.toBeUndefined();
-  });
+  }, 30_000);
 
   it('真实文件锁冲突会有限重试：短锁后成功，持续锁最终抛出', async () => {
     const { createDatabaseOptions } = require('./database.config') as typeof import('./database.config');

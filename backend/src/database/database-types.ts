@@ -150,7 +150,7 @@ function normalizePostgresQueryResult<T>(result: T, type: DatabaseType): T {
   return result;
 }
 
-function sqliteDateParameter(value: Date): string {
+export function sqliteDateParameter(value: Date): string {
   return value.toISOString().replace('T', ' ').replace('Z', '');
 }
 
