@@ -375,7 +375,7 @@ Redis 承载 8 个 Bull 队列：`metrics-aggregation`、`attack-detection`、`a
 
 **真实端点验证清单**（单测/回归已全覆盖 mock 路径，以下项需真实凭据手动执行）：
 
-- S3/MinIO：可直接跑 gated e2e（`backend/test/s3-storage.e2e-spec.ts`，配置 `S3_E2E_ENDPOINT/BUCKET/ACCESS_KEY_ID/SECRET_ACCESS_KEY` 后 `npx jest --maxWorkers=2 s3-storage.e2e`，覆盖上传/Range/覆盖/删除）；或后台添加账号后：上传小文件→下载字节一致→视频拖动进度条（Range）→覆盖上传→旧对象清理→删除文件→桶内对象消失。
+- S3/MinIO：配置 `S3_E2E_ENDPOINT`、`S3_E2E_BUCKET`、`S3_E2E_ACCESS_KEY_ID`、`S3_E2E_SECRET_ACCESS_KEY`，然后在 `backend` 目录运行 `npm test -- --runInBand test/s3-storage.e2e-spec.ts`，覆盖上传、Range 下载、覆盖写入和删除。也可在后台添加账号后上传小文件，核对下载字节与视频进度条，验证覆盖和删除后的对象清理。
 - WebDAV：后台添加账号（创建即连通性测试）→上传/下载/预览→覆盖→删除；坚果云等限流端点观察换号日志。
 - GDrive：① Google Cloud Console 建 OAuth 客户端（登记回调地址、启用 Drive API）；② 后台配置 Client 并走授权向导入池第 1 个账号，确认配额进度条显示 15GB；③ 上传/下载/预览/覆盖/删除各一次，Drive 网盘 TGTC/ 文件夹内对象与站内行为一致；④ 再授权第 2 个账号，确认池剩余容量叠加；⑤ （可选）把某账号写满后上传，观察自动换号与容量告警；⑥ 撤销某账号后下载其存量文件，确认返回可诊断 503 而非跨账号误读。
 
