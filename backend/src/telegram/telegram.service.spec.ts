@@ -1,4 +1,6 @@
 import axios from 'axios';
+import { once } from 'node:events';
+import { buffer } from 'node:stream/consumers';
 import { Readable } from 'stream';
 import { promises as fs } from 'fs';
 import * as os from 'os';
@@ -355,6 +357,7 @@ describe('TelegramService realtime stream', () => {
   });
 
   describe('realtime stream stale-path recovery', () => {
+    const recoveryDirectories: string[] = [];
     const streamPath502 = {
       response: {
         status: 502,
@@ -364,6 +367,7 @@ describe('TelegramService realtime stream', () => {
 
     const createRecoveryService = async () => {
       const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'tg-recovery-'));
+      recoveryDirectories.push(tmpDir);
       const cfg = {
         ...config,
         TELEGRAM_LOCAL_FILE_DIR: tmpDir,
@@ -375,6 +379,12 @@ describe('TelegramService realtime stream', () => {
         tmpDir,
       };
     };
+
+    afterEach(async () => {
+      for (const directory of recoveryDirectories.splice(0)) {
+        await fs.rm(directory, { recursive: true, force: true });
+      }
+    });
 
     it('classifies the 502 "Exact file size" as a recoverable stream-path error', async () => {
       const { service, tmpDir } = await createRecoveryService();
@@ -393,6 +403,7 @@ describe('TelegramService realtime stream', () => {
       } as any);
 
       const result = await service.getRealtimeFileStream('file-id', 5);
+      expect(await buffer(result.stream)).toEqual(Buffer.from('hello'));
 
       // 回源成功：返回的 file_path 为有效本地路径
       expect(result.info.file_path).toBe(localPath);
@@ -424,6 +435,7 @@ describe('TelegramService realtime stream', () => {
       } as any);
 
       const result = await service.getRealtimeFileStream('file-id', 5);
+      expect(await buffer(result.stream)).toEqual(Buffer.from('hello'));
 
       expect(result.info.file_path).toBe(localPath);
       expect(mockedAxios.get.mock.calls.some(([url]) => String(url).includes('/getFile'))).toBe(true);
@@ -443,7 +455,11 @@ describe('TelegramService realtime stream', () => {
         data: { result: { file_id: 'file-id', file_path: localPath, file_size: 5 } },
       } as any);
 
-      await expect(service.getRealtimeFileStream('file-id', 5)).resolves.toMatchObject({
+      const result = await service.getRealtimeFileStream('file-id', 5);
+      const closed = once(result.stream, 'close');
+      result.stream.destroy();
+      await closed;
+      expect(result).toMatchObject({
         info: { file_path: localPath, file_size: 5 },
       });
       expect(mockedAxios.get.mock.calls.some(([url]) => String(url).includes('/getFile'))).toBe(true);
@@ -473,7 +489,9 @@ describe('TelegramService realtime stream', () => {
         data: { result: { file_id: 'file-id', file_path: localPath, file_size: 5 } },
       } as any);
 
-      await expect(service.getRealtimeFileStream('file-id', 5)).resolves.toMatchObject({
+      const result = await service.getRealtimeFileStream('file-id', 5);
+      expect(await buffer(result.stream)).toEqual(Buffer.from('hello'));
+      expect(result).toMatchObject({
         info: { file_path: localPath, file_size: 5 },
       });
       expect(mockedAxios.get.mock.calls.some(([url]) => String(url).includes('/getFile'))).toBe(true);
@@ -642,7 +660,9 @@ describe('TelegramService realtime stream', () => {
         service.getRealtimeFileStream('file-id', 5),
         service.getRealtimeFileStream('file-id', 5),
       ]);
+      const payloads = await Promise.all([buffer(r1.stream), buffer(r2.stream)]);
 
+      expect(payloads).toEqual([Buffer.from('hello'), Buffer.from('hello')]);
       expect(r1.info.file_path).toBe(localPath);
       expect(r2.info.file_path).toBe(localPath);
 
