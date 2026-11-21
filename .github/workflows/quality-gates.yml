@@ -18,7 +18,7 @@ concurrency:
 
 jobs:
   backend:
-    name: Backend / Node 20 / PostgreSQL 16 / Redis 7
+    name: Backend / Node 22 / PostgreSQL 16 / Redis 7
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     services:
@@ -68,7 +68,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: 20
+          node-version-file: .node-version
           cache: npm
           cache-dependency-path: backend/package-lock.json
 
@@ -116,7 +116,7 @@ jobs:
           retention-days: 14
 
   frontend:
-    name: Frontend / Node 20
+    name: Frontend / Node 22
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     defaults:
@@ -131,7 +131,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: 20
+          node-version-file: .node-version
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
@@ -158,15 +158,15 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v6
 
-      - name: Install ShellCheck
-        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends shellcheck
+      - name: Install release-script test dependencies
+        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends shellcheck zip unzip
 
       - name: Parse and lint release scripts
         shell: bash
         run: |
           set -Eeuo pipefail
           scripts=(scripts/build-linux-x64-release.sh scripts/release/*.sh)
-          bash -n "${scripts[@]}"
+          for script in "${scripts[@]}"; do bash -n "$script"; done
           shellcheck --severity=warning "${scripts[@]}"
           old_script_path='.codebuddy/'scripts
           ! grep -RIn --exclude-dir=.git --exclude-dir=.codebuddy --exclude='*.md' -- "$old_script_path" scripts .github README.md
@@ -176,7 +176,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           tests=(scripts/release/tests/*.test.sh)
-          bash -n "${tests[@]}"
+          for script in "${tests[@]}"; do bash -n "$script"; done
           shellcheck --severity=warning "${tests[@]}"
           for test_file in "${tests[@]}"; do
             printf '==> %s\n' "$test_file"
@@ -207,6 +207,8 @@ jobs:
           bash scripts/release/check-version.sh
 
   release-package:
+    # Official tags build with the embedded trust root in release.yml.
+    if: ${{ github.ref_type != 'tag' }}
     name: Release package / Linux x64 ZIP
     runs-on: ubuntu-24.04
     timeout-minutes: 75
@@ -219,7 +221,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: 20
+          node-version-file: .node-version
           cache: npm
           cache-dependency-path: |
             backend/package-lock.json
@@ -262,7 +264,7 @@ jobs:
           # 清单版本必须与 VERSION 一致（validate-release.sh 已做全量校验，此处显式保底）。
           node -e 'const fs = require("fs"); const v = process.argv[1]; const m = JSON.parse(fs.readFileSync(process.argv[2], "utf8")); if (m.version !== v) throw new Error(`清单版本 ${m.version} 与 VERSION ${v} 不一致`);' \
             "$version" "$release_dir/release-manifest.json"
-          zipinfo -1 "$archive" | grep -Fqx "tgtc-v${version}-linux-x64/VERSION"
+          zipinfo -1 "$archive" | grep -Fx "tgtc-v${version}-linux-x64/VERSION" >/dev/null
 
   telegram-bot-api:
     name: C++ / GCC / CMake / CTest
@@ -284,7 +286,7 @@ jobs:
         run: cmake -S . -B build-ci -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
 
       - name: Build server and tests
-        run: cmake --build build-ci --config Release --parallel 2
+        run: cmake --build build-ci --config Release --parallel 1
 
       # 阻塞门禁仅覆盖 fork 自有的确定性测试；TDLib 上游 run_all_tests 套件
       # 含线程/时序敏感用例，在本 job 首跑即失败，不作为 fork 的阻塞门禁，

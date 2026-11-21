@@ -38,7 +38,7 @@ env_value() {
   printf '%s' "$value"
 }
 DB_TYPE=$(env_value DB_TYPE); DB_TYPE=${DB_TYPE:-postgres}
-STAMP=$(date -u +%Y%m%dT%H%M%SZ); DEST="$BACKUP_ROOT/$STAMP"; mkdir -p "$DEST"; chmod 0700 "$DEST"
+STAMP=$(date -u +%Y%m%dT%H%M%SZ); mkdir -p "$BACKUP_ROOT"; DEST=$(mktemp -d "$BACKUP_ROOT/$STAMP.XXXXXX")
 
 case "$DB_TYPE" in
   postgres)
@@ -56,23 +56,30 @@ case "$DB_TYPE" in
     # 相对路径必须以 .env 所在目录解析；此前按发行目录解析必然找不到真实库。
     [[ "$DB_DATABASE" = /* ]] || DB_DATABASE="$RUNTIME_DIR/backend/$DB_DATABASE"
     [[ -f "$DB_DATABASE" ]] || die "$EXIT_PRECHECK" "SQLite 数据库不存在：$DB_DATABASE"
-    systemctl is-active --quiet "$SERVICE" && systemctl stop "$SERVICE"
-    stopped=1
-    # TGTC_BACKUP_KEEP_STOPPED=1（升级流程调用）：备份后保持停机进入停写窗口，
-    # 由 upgrade.sh 在迁移+切链完成后统一恢复服务；独立备份仍默认恢复运行。
-    trap 'if [[ ${stopped:-0} == 1 && ${TGTC_BACKUP_KEEP_STOPPED:-0} != 1 ]]; then systemctl start "$SERVICE" >/dev/null 2>&1 || true; fi' EXIT
+    if systemctl is-active --quiet "$SERVICE"; then
+      # A standalone backup restores only a service that it stopped itself.
+      restore_after_backup() {
+        local rc=$?
+        trap - EXIT
+        if (( rc != 0 )) || [[ ${TGTC_BACKUP_KEEP_STOPPED:-0} != 1 ]]; then
+          if ! systemctl start "$SERVICE"; then
+            log "ERROR: 备份后无法恢复 $SERVICE。"
+            rc=$EXIT_OPERATION
+          fi
+        fi
+        exit "$rc"
+      }
+      trap restore_after_backup EXIT
+      systemctl stop "$SERVICE"
+    fi
     sqlite3 "$DB_DATABASE" ".backup '$DEST/database.sqlite'"
     [[ "$(sqlite3 "$DEST/database.sqlite" 'PRAGMA integrity_check;')" == ok ]] || die "$EXIT_VERIFY" 'SQLite 备份完整性检查失败。'
-    if [[ ${TGTC_BACKUP_KEEP_STOPPED:-0} == 1 ]]; then
-      log '按升级流程要求保持服务停止（停写窗口）；服务恢复由调用方负责。'
-    else
-      systemctl start "$SERVICE"; stopped=0
-    fi
     ;;
   *) die "$EXIT_PRECHECK" "不支持的 DB_TYPE：$DB_TYPE" ;;
 esac
 sha256sum "$DEST"/* > "$DEST/SHA256SUMS"
 printf 'version=%s\ndb_type=%s\ncreated_at=%s\n' "$(read_version "$RELEASE_ROOT/VERSION")" "$DB_TYPE" "$STAMP" > "$DEST/metadata"
 find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d -mtime +"$KEEP_DAYS" -exec rm -rf -- {} +
+if [[ -n "${TGTC_BACKUP_RESULT_FILE:-}" ]]; then printf '%s\n' "$DEST" > "$TGTC_BACKUP_RESULT_FILE"; fi
 record_state "backup ok type=$DB_TYPE path=$DEST"
 log "OK: 已创建并验证备份：$DEST"

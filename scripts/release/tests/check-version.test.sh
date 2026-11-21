@@ -58,7 +58,7 @@ write_fixture() { # version
 run_guard() {
   local code=0
   set +e
-  ( while [[ "${1:-}" == *=* ]]; do export "${1?}"; shift; done; bash "$FIXTURE/scripts/release/check-version.sh" ) >/dev/null 2>&1
+  ( unset GITHUB_REF_TYPE GITHUB_REF_NAME CI_TAG; while [[ "${1:-}" == *=* ]]; do export "${1?}"; shift; done; bash "$FIXTURE/scripts/release/check-version.sh" ) >/dev/null 2>&1
   code=$?
   set -e
   printf '%s' "$code"

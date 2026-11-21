@@ -14,7 +14,7 @@
 
 **软件要求**：
 
-- Node.js 20+（NestJS 11 运行时要求；发行包使用随包提供的 Node runtime）
+- Node.js 22（CI 和 Linux 发行包使用仓库根目录 .node-version 指定的补丁版本；生产使用随包运行时）
 - npm（项目未使用 yarn 或 pnpm）
 - PostgreSQL 14+（默认、推荐用于多实例和较高写并发），或 SQLite 3（仅单实例/低写并发，必须设置 `DB_TYPE=sqlite`）
 - Redis（两种数据库模式均必需，Bull 队列不由 SQLite 替代）
@@ -121,12 +121,16 @@ bash scripts/build-linux-x64-release.sh
 # 独立校验 ZIP 的摘要、版本、结构、权限与安全边界
 ./scripts/release/validate-release.sh /absolute/path/tgtc-vX.Y.Z-linux-x64.zip /absolute/path/SHA256SUMS
 
-# 校验 ZIP、备份、迁移、原子切换；失败仅回退程序，不回退不可逆迁移
+# 校验 ZIP、停止应用写入、备份、迁移、原子切换和健康检查
 ./scripts/release/upgrade.sh /absolute/path/tgtc-vX.Y.Z-linux-x64.zip /absolute/path/SHA256SUMS
 
 # 原子回退到上一程序版本或指定版本；不移动数据库、.env 或 Telegram workdir
 ./scripts/release/rollback.sh [X.Y.Z]
 ```
+
+从仍使用旧升级器的部署首次升级时，先用受信任的已安装公钥校验新 ZIP，然后将它解压到安装目录外的临时目录。执行候选包的 `scripts/release/upgrade.sh`，并设置 `TGTC_INSTALL_ROOT` 为现有安装根目录。这样首次迁移也使用下述停写与回退逻辑。
+
+升级在停止后端后备份 PostgreSQL 或 SQLite。迁移开始后若发生故障，只有清单声明 programRollbackSafe=true 才自动切回原版本并检查健康。标志为 false 或缺失时，后端保持停止，日志和 .tgtc-ops/history.log 会记录本次备份和原版本的确切路径。恢复数据库后再启动旧程序。独立 SQLite 备份会恢复备份前的服务状态。
 
 升级会把 `.env`、数据库和 Telegram Bot API workdir 保持在发行目录外。特别是 Bot API 的 `telegram-bot-api/data` 与历史 `file_id` 强绑定，严禁删除、重命名、迁移或由发行包覆盖。备份脚本根据 `DB_TYPE` 使用 PostgreSQL 逻辑备份或停止写入后的 SQLite 一致性备份：
 

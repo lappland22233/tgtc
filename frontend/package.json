@@ -1,6 +1,7 @@
 {
   "name": "file-distribution-system-frontend",
   "version": "1.6.3",
+  "engines": { "node": ">=22.23.5 <23" },
   "private": true,
   "type": "module",
   "scripts": {

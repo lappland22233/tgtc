@@ -31,34 +31,52 @@ restart_bot_if_present() {
   fi
 }
 
-rollback_after_activation_failure() {
-  local reason=$1
-  [[ -n "$PREVIOUS" ]] || die "$EXIT_ROLLBACK" "$reason，且没有可回退版本。"
-  report_phase rolling_back
-  ln -s "$PREVIOUS" "$INSTALL_ROOT/.current.rollback"
-  mv -Tf "$INSTALL_ROOT/.current.rollback" "$CURRENT_LINK"
-  restart_bot_if_present
-  systemctl restart "$SERVICE" || die "$EXIT_ROLLBACK" "$reason，且回退后的服务也无法启动。"
-  WRITE_STOPPED=0
-  # M4：代码已切回，但刚执行的迁移不会自动回退——数据库仍可能是新版本 schema。
-  # 对未声明可安全回退的版本（缺失/false），绝不能报告为「完全成功」：
-  # 以非零退出并给出人工恢复指引，避免 runner 或健康检查误判。
-  if [[ "${ROLLBACK_SAFE:-unknown}" != 'true' ]]; then
-    record_state "rollback code-only version=$(read_version "$PREVIOUS/VERSION") from=$NEW_VERSION rollback_safe=${ROLLBACK_SAFE:-unknown}"
-    die "$EXIT_ROLLBACK" "$reason，已切回旧代码（$(read_version "$PREVIOUS/VERSION")），但本版本声明程序回退不安全（programRollbackSafe=${ROLLBACK_SAFE:-unknown}），数据库仍停留在新版本 schema。
-请人工恢复：1) systemctl stop $SERVICE；2) 从 $INSTALL_ROOT/backups/<时间戳>/ 恢复数据库备份；3) 核对 Telegram Bot API 工作目录（禁止清空/重命名）与 $ENV_FILE；4) 再启动服务并验证健康检查。"
-  fi
-  die "$EXIT_OPERATION" "$reason，已成功回退。"
+# The parent owns the write freeze for both databases and all failure paths.
+freeze_started=0
+was_active=0
+migration_started=0
+backup_path=''
+target_installed=0
+
+check_release_health() {
+  local release=$1 i attempts="${TGTC_READY_WAIT_ATTEMPTS:-15}"
+  for ((i=0; i<attempts; i++)); do
+    api_get health >/dev/null 2>&1 && break
+    sleep 2
+  done
+  TGTC_EXPECTED_VERSION="$(read_version "$release/VERSION")" "$release/scripts/release/health-check.sh"
 }
 
-# P1-06 停写窗口：迁移、切链在服务停止状态下完成，防止窗口期写入遗漏进
-# 备份与迁移回填。WRITE_STOPPED 标记用于失败路径恢复旧版本服务。
-WRITE_STOPPED=0
-restore_service_on_failure() {
-  if [[ "$WRITE_STOPPED" == 1 ]]; then
-    log '升级失败：恢复旧版本服务运行。'
-    systemctl start "$SERVICE" >/dev/null 2>&1 || true
+recover_failed_upgrade() {
+  if (( migration_started )) && [[ "$ROLLBACK_SAFE" != true ]]; then
+    systemctl stop "$SERVICE" || log "ERROR: 停止 $SERVICE 失败，须立即人工停写。"
+    log "禁止自动回退（programRollbackSafe=$ROLLBACK_SAFE）。恢复已验证备份 $backup_path，再核对 current、.env 和 Telegram 工作目录后启动旧版本 $PREVIOUS。"
+    record_state "upgrade recovery_required version=$NEW_VERSION backup=$backup_path previous=$PREVIOUS rollback_safe=$ROLLBACK_SAFE"
+    return "$EXIT_ROLLBACK"
   fi
+  if [[ "$(readlink -f "$CURRENT_LINK")" != "$PREVIOUS" ]]; then
+    report_phase rolling_back
+    systemctl stop "$SERVICE" || return "$EXIT_ROLLBACK"
+    ln -s "$PREVIOUS" "$STAGE/previous" && mv -Tf "$STAGE/previous" "$CURRENT_LINK" || return "$EXIT_ROLLBACK"
+    restart_bot_if_present
+  fi
+  if (( was_active )); then
+    systemctl start "$SERVICE" && check_release_health "$PREVIOUS" || return "$EXIT_ROLLBACK"
+  else
+    systemctl stop "$SERVICE" || return "$EXIT_ROLLBACK"
+  fi
+  if (( target_installed )); then rm -rf -- "$TARGET"; fi
+  record_state "upgrade failed restored_previous=$PREVIOUS active=$was_active backup=$backup_path"
+}
+
+finish_upgrade() {
+  local rc=$?
+  trap - EXIT
+  if (( rc != 0 && freeze_started )); then
+    recover_failed_upgrade || rc=$EXIT_ROLLBACK
+  fi
+  rm -rf -- "$STAGE"
+  exit "$rc"
 }
 
 # P1-05：迁移子进程的工作目录必须是 .env 所在目录（$RUNTIME_DIR/backend）。
@@ -100,7 +118,7 @@ if [[ "$ROLLBACK_SAFE" != 'true' ]]; then
 fi
 
 STAGE=$(mktemp -d "$INSTALL_ROOT/.tgtc-stage.XXXXXX")
-trap 'rm -rf -- "$STAGE"; restore_service_on_failure' EXIT
+trap finish_upgrade EXIT
 unzip -q "$ARCHIVE" -d "$STAGE"
 mapfile -t candidates < <(find "$STAGE" -mindepth 1 -maxdepth 1 -type d)
 [[ ${#candidates[@]} -eq 1 ]] || die "$EXIT_VERIFY" '归档必须恰有一个顶层目录。'
@@ -116,18 +134,17 @@ PREVIOUS=''
 [[ -L "$CURRENT_LINK" ]] && PREVIOUS=$(readlink -f "$CURRENT_LINK")
 [[ -n "$PREVIOUS" && -d "$PREVIOUS" ]] || die "$EXIT_PRECHECK" 'current 必须指向现有发行目录。'
 
-# 备份和迁移都在切换 current 前完成；任一失败都会恢复旧程序运行。
-# P1-06 停写窗口：TGTC_BACKUP_KEEP_STOPPED=1 让 SQLite 备份后保持停机；
-# PostgreSQL 由下方统一停服。迁移与切链全部在停写状态下完成后才重启。
 report_phase backing_up
-TGTC_SKIP_LOCK=1 TGTC_ENV_FILE="$ENV_FILE" TGTC_BACKUP_KEEP_STOPPED=1 bash "$SCRIPT_DIR/backup.sh"
-if systemctl is-active --quiet "$SERVICE"; then
-  systemctl stop "$SERVICE"
-fi
-WRITE_STOPPED=1
+if systemctl is-active --quiet "$SERVICE"; then was_active=1; fi
+freeze_started=1
+systemctl stop "$SERVICE" || die "$EXIT_OPERATION" "无法停止 $SERVICE。"
+TGTC_SKIP_LOCK=1 TGTC_ENV_FILE="$ENV_FILE" TGTC_BACKUP_KEEP_STOPPED=1 TGTC_BACKUP_RESULT_FILE="$STAGE/backup-path" bash "$SCRIPT_DIR/backup.sh" || die "$EXIT_OPERATION" "数据库备份失败。"
+IFS= read -r backup_path < "$STAGE/backup-path"
+[[ -s "$backup_path/SHA256SUMS" ]] || die "$EXIT_VERIFY" '缺少已验证的备份。'
 mkdir -p "$INSTALL_ROOT/releases"
 report_phase extracting
 mv "$CANDIDATE" "$TARGET"
+target_installed=1
 # mv 就位断言：关键运行文件缺失说明移动不完整，立即停止（current 仍未切换）。
 for required in "$TARGET/VERSION" "$TARGET/backend/dist/main.js" "$TARGET/runtime/bin/node" \
   "$TARGET/backend/node_modules/typeorm/cli.js" "$TARGET/backend/node_modules/dotenv/config.js"; do
@@ -142,43 +159,24 @@ else
   log "WARN: 未提供 release-manifest.json；回滚脚本将按 fail-closed 拒绝自动回退。"
 fi
 report_phase migrating
-if ! run_target_migrations; then
-  # 迁移失败：current 未切换，恢复旧版本服务（EXIT trap），
-  # 并清理未激活的 TARGET 目录，避免"目标版本已存在"阻塞重试。
-  rm -rf -- "$TARGET"
-  die "$EXIT_OPERATION" "目标发行版 $NEW_VERSION 的数据库迁移失败；未切换 current，已清理未激活目录。"
-fi
+migration_started=1
+run_target_migrations || die "$EXIT_OPERATION" "版本 $NEW_VERSION 迁移失败。"
 
 # Runtime data remains outside releases. Refuse implicit migration/copying of protected paths.
 for protected in "$INSTALL_ROOT/telegram-bot-api/data" "$INSTALL_ROOT/backend/.env" "$INSTALL_ROOT/.env" "$INSTALL_ROOT/redis" "$INSTALL_ROOT/uploads" "$INSTALL_ROOT/logs" "$INSTALL_ROOT/cache"; do
   [[ -e "$protected" ]] || log "WARN: 受保护状态不存在：$protected（不会创建或复制）"
 done
 report_phase activating
-ln -s "releases/$NEW_VERSION" "$INSTALL_ROOT/.current.new"
-mv -Tf "$INSTALL_ROOT/.current.new" "$CURRENT_LINK"
-report_phase restarting
-# R3：先重启 Bot API（新二进制随发行包交付），再重启后端（单元 Requires 依赖）。
-restart_bot_if_present
-if ! systemctl restart "$SERVICE"; then
-  rollback_after_activation_failure '新程序启动失败'
-fi
-WRITE_STOPPED=0
-# systemctl restart 返回即代表进程已 exec；应用完成 Nest 启动还需要数秒。
-# 在跑严格 health-check 前先等待就绪窗口（轮询 /api/health），避免启动竞态误判。
-wait_app_ready() {
-  local attempts="${TGTC_READY_WAIT_ATTEMPTS:-15}"
-  for _ in $(seq 1 "$attempts"); do
-    api_get health >/dev/null 2>&1 && return 0
-    sleep 2
-  done
-  return 1
-}
-if ! wait_app_ready; then
-  log "WARN: 就绪等待窗口内 /api/health 未恢复，交由 health-check 最终判定。"
-fi
-report_phase health_checking
-if ! TGTC_EXPECTED_VERSION="$NEW_VERSION" TGTC_API_URL="${TGTC_API_URL:-http://127.0.0.1:3000}" "$TARGET/scripts/release/health-check.sh"; then
-  rollback_after_activation_failure '健康检查失败'
+ln -s "releases/$NEW_VERSION" "$STAGE/next"
+mv -Tf "$STAGE/next" "$CURRENT_LINK"
+if (( was_active )); then
+  report_phase restarting
+  restart_bot_if_present
+  systemctl start "$SERVICE" || die "$EXIT_OPERATION" '新程序启动失败。'
+  report_phase health_checking
+  check_release_health "$TARGET" || die "$EXIT_OPERATION" '新程序健康检查失败。'
+else
+  log "$SERVICE 在升级前已停止，已离线切换版本；下次启动后运行 health-check.sh。"
 fi
 record_state "upgrade ok version=$NEW_VERSION previous=$PREVIOUS"
 log "OK: 已备份、迁移并原子切换到 $NEW_VERSION；运行时 Telegram 数据、数据库与 .env 未被移动或覆盖。"

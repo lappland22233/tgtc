@@ -31,7 +31,7 @@ check() {
 run_fn() {
   local code=0 out=''
   set +e
-  out=$( while [[ "${1:-}" == *=* ]]; do export "${1?}"; shift; done; "$@" 2>/dev/null )
+  out=$( unset GITHUB_REF_TYPE RELEASE_VERIFY_PUBLIC_KEY; while [[ "${1:-}" == *=* ]]; do export "${1?}"; shift; done; "$@" 2>/dev/null )
   code=$?
   set -e
   printf '%s|%s' "$code" "$out"

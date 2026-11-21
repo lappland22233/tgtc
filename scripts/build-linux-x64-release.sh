@@ -4,21 +4,20 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd -P)"
 VERSION="${1:-$(tr -d '\r\n' < "$ROOT_DIR/VERSION")}"
-NODE_VERSION="${NODE_VERSION:-20.19.5}"
+NODE_VERSION="$(tr -d '\r\n' < "$ROOT_DIR/.node-version")"
 WORK_DIR="${WORK_DIR:-$HOME/.cache/tgtc-release/v${VERSION}}"
 STAGE_DIR="$WORK_DIR/tgtc-v${VERSION}-linux-x64"
 OUTPUT_DIR="$ROOT_DIR/.Releases/v${VERSION}"
-JOBS="${JOBS:-$(nproc)}"
+JOBS="${JOBS:-1}"
 
 if [[ "$(uname -s)" != "Linux" || "$(uname -m)" != "x86_64" ]]; then
   echo "错误：必须在 Linux x86_64 环境构建。" >&2
   exit 1
 fi
-for command in cmake curl g++ npm rsync tar xz zip sha256sum; do
+for command in cmake curl g++ rsync tar xz zip sha256sum; do
   command -v "$command" >/dev/null || { echo "错误：缺少构建命令 $command" >&2; exit 1; }
 done
 
-bash "$ROOT_DIR/scripts/release/check-version.sh"
 CANONICAL_VERSION="$(tr -d '\r\n' < "$ROOT_DIR/VERSION")"
 if [[ "$VERSION" != "$CANONICAL_VERSION" ]]; then
   echo "错误：发布版本 $VERSION 必须与 VERSION 中的 $CANONICAL_VERSION 一致。" >&2
@@ -41,6 +40,32 @@ rsync -a --delete \
   --exclude 'beta' \
   "$ROOT_DIR/" "$WORK_DIR/source/"
 
+NODE_ARCHIVE="node-v${NODE_VERSION}-linux-x64.tar.xz"
+NODE_SHASUMS="SHASUMS256.txt"
+NODE_BASE_URL="https://nodejs.org/dist/v${NODE_VERSION}"
+# NODE_RUNTIME_CACHE：指向含已缓存的 Node tarball 与 SHASUMS256.txt 的目录
+# （通常是历史构建的工作目录），跳过 nodejs.org 下载，仍执行 SHA-256 校验。
+NODE_RUNTIME_CACHE="${NODE_RUNTIME_CACHE:-}"
+if [[ -n "$NODE_RUNTIME_CACHE" && -f "$NODE_RUNTIME_CACHE/$NODE_ARCHIVE" && -f "$NODE_RUNTIME_CACHE/$NODE_SHASUMS" ]]; then
+  cp "$NODE_RUNTIME_CACHE/$NODE_ARCHIVE" "$NODE_RUNTIME_CACHE/$NODE_SHASUMS" "$WORK_DIR/"
+else
+  curl --fail --location --retry 3 --silent --show-error \
+    "$NODE_BASE_URL/$NODE_SHASUMS" \
+    --output "$WORK_DIR/$NODE_SHASUMS"
+  curl --fail --location --retry 3 --silent --show-error \
+    "$NODE_BASE_URL/$NODE_ARCHIVE" \
+    --output "$WORK_DIR/$NODE_ARCHIVE"
+fi
+(
+  cd "$WORK_DIR"
+  grep -F "  $NODE_ARCHIVE" "$NODE_SHASUMS" | sha256sum --check --strict --status
+) || { echo "错误：Node.js 运行时 SHA-256 校验失败。" >&2; exit 1; }
+tar -xJf "$WORK_DIR/$NODE_ARCHIVE" -C "$WORK_DIR"
+
+export PATH="$WORK_DIR/node-v${NODE_VERSION}-linux-x64/bin:$PATH"
+export npm_config_engine_strict=true
+
+bash "$ROOT_DIR/scripts/release/check-version.sh"
 pushd "$WORK_DIR/source/frontend" >/dev/null
 npm ci --no-audit --no-fund
 npm run build
@@ -64,28 +89,6 @@ else
   cmake --build "$WORK_DIR/bot-build" --target telegram-bot-api --parallel "$JOBS"
   BOT_API_BINARY="$WORK_DIR/bot-build/telegram-bot-api"
 fi
-
-NODE_ARCHIVE="node-v${NODE_VERSION}-linux-x64.tar.xz"
-NODE_SHASUMS="SHASUMS256.txt"
-NODE_BASE_URL="https://nodejs.org/dist/v${NODE_VERSION}"
-# NODE_RUNTIME_CACHE：指向含已缓存的 Node tarball 与 SHASUMS256.txt 的目录
-# （通常是历史构建的工作目录），跳过 nodejs.org 下载，仍执行 SHA-256 校验。
-NODE_RUNTIME_CACHE="${NODE_RUNTIME_CACHE:-}"
-if [[ -n "$NODE_RUNTIME_CACHE" && -f "$NODE_RUNTIME_CACHE/$NODE_ARCHIVE" && -f "$NODE_RUNTIME_CACHE/$NODE_SHASUMS" ]]; then
-  cp "$NODE_RUNTIME_CACHE/$NODE_ARCHIVE" "$NODE_RUNTIME_CACHE/$NODE_SHASUMS" "$WORK_DIR/"
-else
-  curl --fail --location --retry 3 --silent --show-error \
-    "$NODE_BASE_URL/$NODE_SHASUMS" \
-    --output "$WORK_DIR/$NODE_SHASUMS"
-  curl --fail --location --retry 3 --silent --show-error \
-    "$NODE_BASE_URL/$NODE_ARCHIVE" \
-    --output "$WORK_DIR/$NODE_ARCHIVE"
-fi
-(
-  cd "$WORK_DIR"
-  grep -F "  $NODE_ARCHIVE" "$NODE_SHASUMS" | sha256sum --check --strict --status
-) || { echo "错误：Node.js 运行时 SHA-256 校验失败。" >&2; exit 1; }
-tar -xJf "$WORK_DIR/$NODE_ARCHIVE" -C "$WORK_DIR"
 
 # 发行包保持历史可用布局：backend/、frontend/、telegram-bot-api/、runtime/、bin/、start.sh。
 # 发行包只包含不可变程序；Telegram workdir、数据库和 .env 必须位于发行目录之外。

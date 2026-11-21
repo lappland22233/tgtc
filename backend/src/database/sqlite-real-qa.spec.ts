@@ -90,6 +90,8 @@ describe('真实 SQLite 数据源关键业务与并发 QA', () => {
       // 可插拔存储后端：存储账号表 + files 存储判别三列（存量默认 telegram 零迁移兼容）
       'SqliteCreateStorageBackends1804000000000',
       'SqliteAddFileStorageColumns1804100000000',
+      'SqliteAddGrantStorageColumns1804200000000',
+      'SqliteAddGDriveCacheColumns1804300000000',
     ]);
 
     await dataSource.undoLastMigration();

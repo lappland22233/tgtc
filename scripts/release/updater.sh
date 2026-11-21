@@ -222,12 +222,9 @@ TGTC_SKIP_LOCK=1 TGTC_ENV_FILE="$ENV_FILE" TGTC_PROGRESS_FILE="$STATE_FILE" \
 UPGRADE_EXIT=$?
 set -e
 if (( UPGRADE_EXIT != 0 )); then
-  # 失败分类：升级脚本自行回退（切回旧链接）、升级成功但回退失败、或从未切换。
-  STILL_CURRENT=$(readlink -f "$CURRENT_LINK")
-  if [[ "$STILL_CURRENT" != "$PREVIOUS" ]]; then
-    RUNNING_VERSION=$(read_version "$STILL_CURRENT/VERSION")
-    [[ "$RUNNING_VERSION" == "$TASK_VERSION" ]] && FINAL='rollback_failed' || FINAL='rolled_back'
-  else
+  # A symlink alone cannot prove that the previous program is safe or running.
+  FINAL='rollback_failed'
+  if (( UPGRADE_EXIT != EXIT_ROLLBACK )) && [[ "$(readlink -f "$CURRENT_LINK")" == "$PREVIOUS" ]] && systemctl is-active --quiet "$SERVICE"; then
     FINAL='rolled_back'
   fi
   set_state rollback_pending

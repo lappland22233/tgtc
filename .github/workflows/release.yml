@@ -34,7 +34,8 @@ jobs:
   publish:
     name: Build, sign and publish stable release
     needs: quality
-    if: ${{ github.event_name == 'push' || inputs.publish == true }}
+    # Branch dry runs use the candidate built by quality. Tag dry runs verify a real signature.
+    if: ${{ github.ref_type == 'tag' || inputs.publish == true }}
     runs-on: ubuntu-24.04
     timeout-minutes: 75
     steps:
@@ -46,7 +47,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: 20
+          node-version-file: .node-version
           cache: npm
           cache-dependency-path: |
             backend/package-lock.json
@@ -90,6 +91,7 @@ jobs:
           test -s "$release_dir/RELEASE.txt"
 
       - name: Publish stable GitHub release
+        if: ${{ github.event_name == 'push' || inputs.publish == true }}
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -100,6 +102,13 @@ jobs:
           if [[ "$GITHUB_EVENT_NAME" == 'push' && "$GITHUB_REF_TYPE" == 'tag' && "$GITHUB_REF_NAME" != "$tag" ]]; then
             echo "触发标签 ${GITHUB_REF_NAME} 与 VERSION 产出的 ${tag} 不一致；拒绝发布。" >&2
             exit 1
+          fi
+          if [[ "$GITHUB_REF_TYPE" != tag ]]; then
+            git fetch --no-tags --depth=1 origin "refs/tags/$tag"
+            [[ "$(git rev-parse 'FETCH_HEAD^{commit}')" == "$(git rev-parse HEAD)" ]] || {
+              echo "待发布标签 $tag 与构建提交不匹配。" >&2
+              exit 1
+            }
           fi
           release_dir=".Releases/v${version}"
           assets=(

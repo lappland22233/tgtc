@@ -113,8 +113,9 @@ function startUploadServer(mode: UploadMode): Promise<UploadServerHandle> {
         pausedPromise,
         firstChunkPromise,
         close: async () => {
-          await new Promise<void>((r) => server.close(() => r()));
+          const closed = new Promise<void>((resolve) => server.close(() => resolve()));
           server.closeAllConnections();
+          await closed;
         },
       };
       openServers.push(handle);
