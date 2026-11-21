@@ -235,7 +235,7 @@ function makeService(options: {
     queryLinks: jest.fn(async () => []),
     revokeByToken: jest.fn(async () => ({ ok: true })),
   };
-  const auditService = { log: jest.fn() };
+  const auditService = { log: jest.fn(), logInTransaction: jest.fn(async () => undefined) };
   const configService = {
     get: jest.fn((key: string) => {
       if (key === 'TELEGRAM_ARCHIVE_CHAT_ID') return options.archiveChatId ?? '';
@@ -253,7 +253,7 @@ function makeService(options: {
     findByMessage: jest.fn(async (...args: Parameters<typeof findByMessage>) => findByMessage(...args)),
     isBanned: jest.fn(async () => false),
     withUnbannedUser: jest.fn(async (_id: string, action: (manager?: EntityManager) => Promise<unknown>) => action()),
-    enqueue: jest.fn(async (input: EnqueueInboundTask) => {
+    enqueue: jest.fn(async (input: EnqueueInboundTask, onQueued?: (manager: EntityManager, task: TelegramBotInboundTask) => Promise<void>) => {
       const found = findByMessage(input.receiverBotId, input.chatId, input.messageId);
       if (found) return { status: 'duplicate', task: found, used: found.quotaUsed };
       const quota = await quotaService.consume();
@@ -265,6 +265,7 @@ function makeService(options: {
         quotaUsed: quota.used, quotaConsumed: true, leaseToken: null, leaseExpiresAt: null, grantId: null,
         createdAt: now, updatedAt: now, startedAt: null, finishedAt: null,
       };
+      await onQueued?.(undefined as unknown as EntityManager, task);
       tasks.push(task);
       return { status: 'queued', task, used: quota.used };
     }),
@@ -925,6 +926,10 @@ describe('TelegramBotDispatchService（纯 Google 存储模式）', () => {
     expect(finalContent).toContain('https://files.example.com/api/bot-dl/TOKEN');
     expect(finalContent).toContain('⚠️ 链接到期后文件将自动失效并删除。');
     expect(finalContent).not.toMatch(/google|gdrive/i);
+    expect(ctx.auditService.logInTransaction.mock.calls).toEqual([
+      [undefined, expect.objectContaining({ action: 'telegram_bot_file_received', resourceId: '1' })],
+      [undefined, expect.objectContaining({ action: 'telegram_bot_link_issued', resourceId: 'grant-1' })],
+    ]);
   });
 
   it('单账号模式下编辑消息失败时自动降级为回复新消息', async () => {

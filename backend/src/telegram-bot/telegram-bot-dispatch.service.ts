@@ -943,10 +943,24 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
           telegramDisplayName: displayName,
           usageDate,
           dailyLimit: config.dailyLimit,
-        }).catch((error: unknown) => { throw new InboundPersistenceError(error); });
+        }, (manager, task) => this.auditService.logInTransaction(manager, {
+          action: 'telegram_bot_file_received',
+          resourceType: 'telegram_bot_file',
+          resourceId: task.id,
+          metadata: {
+            telegramUserId: task.telegramUserId,
+            telegramUsername: task.telegramUsername,
+            chatId: task.chatId,
+            chatType: 'private',
+            messageId: task.messageId,
+            fileName: task.fileName,
+            fileSize,
+            mimeType: task.mimeType,
+            viaWhitelist: !task.quotaConsumed,
+          },
+        })).catch((error: unknown) => { throw new InboundPersistenceError(error); });
         if (result.status === 'queued') {
           this.pollQueue();
-          await this.auditDocumentReceived(identity, message, fileSize);
         } else if (result.status === 'banned') {
           await this.reply(chatId, BANNED_TEXT, message.message_id, accountId);
         } else if (result.status === 'quota_denied') {
@@ -1447,46 +1461,48 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
       uploadReceipt = receipt;
       signal.throwIfAborted();
 
-      const issued = await this.inboundQueue.complete(task, (manager) => this.grantService.issue({
-        telegramUserId: task.telegramUserId,
-        username: task.telegramUsername,
-        displayName: task.telegramDisplayName,
-        chatId: task.chatId,
-        messageId: task.messageId,
-        telegramFileId: task.telegramFileId,
-        sourceAccountId: accountId ?? task.receiverBotId,
-        receiverBotId: task.receiverBotId,
-        fileName: task.fileName,
-        mimeType: task.mimeType,
-        fileSize: String(size),
-        fileUniqueId: task.fileUniqueId,
-        storageBackend: 'gdrive',
-        storageAccountId: receipt.accountId,
-        storageObjectRef: receipt.objectRef,
-      }, config.linkTtlHours, manager, task.id));
+      const issued = await this.inboundQueue.complete(task, async (manager) => {
+        const result = await this.grantService.issue({
+          telegramUserId: task.telegramUserId,
+          username: task.telegramUsername,
+          displayName: task.telegramDisplayName,
+          chatId: task.chatId,
+          messageId: task.messageId,
+          telegramFileId: task.telegramFileId,
+          sourceAccountId: accountId ?? task.receiverBotId,
+          receiverBotId: task.receiverBotId,
+          fileName: task.fileName,
+          mimeType: task.mimeType,
+          fileSize: String(size),
+          fileUniqueId: task.fileUniqueId,
+          storageBackend: 'gdrive',
+          storageAccountId: receipt.accountId,
+          storageObjectRef: receipt.objectRef,
+        }, config.linkTtlHours, manager, task.id);
+        await this.auditService.logInTransaction(manager, {
+          action: 'telegram_bot_link_issued',
+          resourceType: 'telegram_bot_grant',
+          resourceId: result.grant.id,
+          metadata: {
+            telegramUserId: task.telegramUserId,
+            telegramUsername: task.telegramUsername,
+            grantId: result.grant.id,
+            tokenPrefix: result.grant.tokenPrefix,
+            expiresAt: result.grant.expiresAt,
+            quotaDate: task.usageDate,
+            quotaUsed: task.quotaUsed,
+            viaWhitelist: !task.quotaConsumed,
+            domainMode: config.linkDomainMode,
+            sourceAccountId: result.grant.sourceAccountId,
+            storageBackend: 'gdrive',
+            fileName: task.fileName,
+          },
+        });
+        return result;
+      });
       if (!issued) return;
       // 事务提交后，上传对象归授权记录所有。通知失败时由通知队列重试。
       uploadReceipt = null;
-      const { grant } = issued;
-      this.auditService.log({
-        action: 'telegram_bot_link_issued',
-        resourceType: 'telegram_bot_grant',
-        resourceId: grant.id,
-        metadata: {
-          telegramUserId: task.telegramUserId,
-          telegramUsername: task.telegramUsername,
-          grantId: grant.id,
-          tokenPrefix: grant.tokenPrefix,
-          expiresAt: grant.expiresAt,
-          quotaDate: task.usageDate,
-          quotaUsed: task.quotaUsed,
-          viaWhitelist: !task.quotaConsumed,
-          domainMode: config.linkDomainMode,
-          sourceAccountId: grant.sourceAccountId,
-          storageBackend: 'gdrive',
-          fileName: task.fileName,
-        },
-      });
       if (accountId && this.pool?.getConfig(accountId)?.token.split(':')[0] === task.receiverBotId) {
         await this.registerInboundCopyAndForward({
           chat: { id: Number(task.chatId), type: 'private' },
