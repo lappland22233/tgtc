@@ -15,6 +15,14 @@ describe('Telegram account transfer streams', () => {
     for await (const chunk of session.stream) chunks.push(Buffer.from(chunk));
     expect(Buffer.concat(chunks).toString()).toBe('abcdef');
   });
+  it('reports the wait from a streaming 429 response and closes the body', async () => {
+    const body = Readable.from(['{"parameters":{"retry_after":11}}']);
+    jest.spyOn(axios, 'get').mockRejectedValueOnce({ response: { status: 429, data: body } });
+    const client = new TelegramAccountClientService({ get: (key: string) => key === 'TELEGRAM_FILE_STREAMING_ENABLED' ? 'true' : undefined } as any);
+    await expect(client.openRealtimeStream('a', '1:test', 'file'))
+      .rejects.toMatchObject({ kind: 'flood', retryAfterSeconds: 11 });
+    expect(body.destroyed).toBe(true);
+  });
   it('disables redirects for multipart uploads', async () => {
     const post = jest.spyOn(axios, 'post').mockResolvedValue({ data: { result: { document: { file_id: 'f' } } } });
     const client = new TelegramAccountClientService({ get: () => undefined } as any);

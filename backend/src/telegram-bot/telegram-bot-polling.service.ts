@@ -1,6 +1,7 @@
-import { Injectable, Logger, OnApplicationShutdown, OnModuleInit } from '@nestjs/common';
+import { BeforeApplicationShutdown, Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { TelegramService } from '../telegram/telegram.service';
+import { TelegramRateLimitError } from '../telegram/telegram.errors';
 import { ConfigCacheService } from '../common/services/config-cache.service';
 import { TelegramBotDispatchService } from './telegram-bot-dispatch.service';
 import {
@@ -12,7 +13,7 @@ import {
   TelegramBotPollingSnapshot,
 } from './telegram-bot.types';
 import { redactBotToken } from '../common/utils/sensitive-data';
-import { TelegramAccountClientService } from '../telegram-account-pool/telegram-account-client.service';
+import { TelegramAccountClientService, TelegramAccountError } from '../telegram-account-pool/telegram-account-client.service';
 import { TelegramAccountPoolService } from '../telegram-account-pool/telegram-account-pool.service';
 
 const INITIAL_BACKOFF_MS = 1000;
@@ -73,10 +74,10 @@ interface AccountPollState {
  *   这是「任意一个 bot 收到文件都要能记录归属」的前提。
  *
  * 其它不变量保持不变：仅在 `TELEGRAM_BOT_UPDATES_ENABLED=true` 时启动；异常指数退避；
- * 先推进 offset 再处理（处理失败不重复消费）。
+ * 先完成分发，再推进 offset。持久化收件失败时由 Telegram 重投同一更新。
  */
 @Injectable()
-export class TelegramBotPollingService implements OnModuleInit, OnApplicationShutdown {
+export class TelegramBotPollingService implements OnModuleInit, BeforeApplicationShutdown {
   private readonly logger = new Logger(TelegramBotPollingService.name);
   private readonly enabled: boolean;
   private readonly pollTimeoutSeconds: number;
@@ -309,11 +310,10 @@ export class TelegramBotPollingService implements OnModuleInit, OnApplicationShu
         if (updates.length > 0) {
           for (const update of updates) {
             if (!this.running) break;
-            // 先推进 offset 再处理：处理失败也不会导致重复消费已确认的更新
+            await this.dispatchService.handleUpdate(update);
             if (update.update_id >= this.offset) {
               this.offset = update.update_id + 1;
             }
-            await this.dispatchService.handleUpdate(update);
           }
           // 整批处理完成后持久化 offset（崩溃在持久化前 → 重投 + 幂等兜底）
           await this.persistOffset();
@@ -321,7 +321,8 @@ export class TelegramBotPollingService implements OnModuleInit, OnApplicationShu
       } catch (error) {
         if (!this.running) break;
         const summary = this.summarizeInboundError(error);
-        const wait = this.backoffMs;
+        const wait = error instanceof TelegramRateLimitError
+          ? Math.max(this.backoffMs, error.retryAfterSeconds * 1_000) : this.backoffMs;
         this.backoffMs = Math.min(this.backoffMs * 2, MAX_BACKOFF_MS);
         this.logger.warn(`getUpdates 失败，${wait}ms 后重试: ${summary}`);
         await sleep(wait);
@@ -352,12 +353,12 @@ export class TelegramBotPollingService implements OnModuleInit, OnApplicationShu
           for (const update of updates) {
             if (!this.running || !state.running) break;
             const updateId = Number((update as { update_id?: number }).update_id ?? -1);
-            if (updateId >= state.offset) state.offset = updateId + 1;
-            state.updateCount += 1;
             await this.dispatchService.handleUpdate(
               update as unknown as Parameters<TelegramBotDispatchService['handleUpdate']>[0],
               { accountId: state.accountId, receiverBotId: account.token.split(':')[0] },
             );
+            if (updateId >= state.offset) state.offset = updateId + 1;
+            state.updateCount += 1;
           }
           await this.persistOffset(this.offsetKeyFor(state.accountId), state.offset);
         }
@@ -368,7 +369,8 @@ export class TelegramBotPollingService implements OnModuleInit, OnApplicationShu
         state.consecutiveFailures += 1;
         state.lastErrorAtMs = Date.now();
         state.lastErrorSummary = summary;
-        const wait = state.backoffMs;
+        const wait = error instanceof TelegramAccountError && error.kind === 'flood'
+          ? Math.max(state.backoffMs, (error.retryAfterSeconds ?? 3) * 1_000) : state.backoffMs;
         state.backoffMs = Math.min(state.backoffMs * 2, MAX_BACKOFF_MS);
         this.logger.warn(`账号 ${state.accountId} getUpdates 失败，${wait}ms 后重试: ${summary}`);
         await sleep(wait);
@@ -522,7 +524,7 @@ export class TelegramBotPollingService implements OnModuleInit, OnApplicationShu
       .slice(0, LAST_ERROR_SUMMARY_LIMIT);
   }
 
-  async onApplicationShutdown(): Promise<void> {
+  async beforeApplicationShutdown(): Promise<void> {
     // 自检定时器必须先清掉：否则关闭后仍可能触发一次结论写入
     this.clearSelfCheckTimer();
     if (!this.enabled) return;
@@ -532,14 +534,12 @@ export class TelegramBotPollingService implements OnModuleInit, OnApplicationShu
     }
     const pending = [this.loopPromise, ...Array.from(this.accountStates.values()).map((item) => item.promise)]
       .filter((item): item is Promise<void> => item !== null);
-    for (const promise of pending) {
-      const completed = await Promise.race([
-        promise.then(() => true).catch(() => true),
-        sleep(SHUTDOWN_WAIT_MS).then(() => false),
-      ]);
-      if (!completed) {
-        this.logger.warn('Telegram Bot 长轮询循环未在关闭窗口内退出（将在进程退出时终止）');
-      }
+    const completed = await Promise.race([
+      Promise.allSettled(pending).then(() => true),
+      sleep(SHUTDOWN_WAIT_MS).then(() => false),
+    ]);
+    if (!completed) {
+      this.logger.warn('Telegram Bot 长轮询循环未在关闭窗口内退出（将在进程退出时终止）');
     }
   }
 }

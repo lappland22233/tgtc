@@ -1,3 +1,39 @@
+import { Readable } from 'node:stream';
+
+export class TelegramRateLimitError extends Error {
+  constructor(readonly retryAfterSeconds: number) {
+    super('Telegram API 请求受到限流');
+  }
+}
+
+/** Axios exposes a streaming endpoint's Telegram error body as a Readable. */
+export async function readTelegramRetryAfter(response: { data?: unknown; headers?: Record<string, unknown> }): Promise<number> {
+  const body = response.data;
+  let decoded = body;
+  if (body instanceof Readable) {
+    const timer = setTimeout(() => body.destroy(), 1_000);
+    try {
+      const chunks: Buffer[] = [];
+      let size = 0;
+      for await (const chunk of body) {
+        const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        size += buffer.length;
+        if (size > 8_192) break;
+        chunks.push(buffer);
+      }
+      if (size <= 8_192) decoded = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    } catch {
+      decoded = null;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  const retryAfter = (decoded as { parameters?: { retry_after?: unknown } } | null)?.parameters?.retry_after;
+  const values = [Number(retryAfter), Number(response.headers?.['retry-after'])];
+  const valid = values.filter((value) => Number.isSafeInteger(value) && value > 0 && value <= 2_147_483);
+  return valid.length ? Math.max(...valid) : 3;
+}
+
 /**
  * Telegram 文件引用永久失效错误。
  *

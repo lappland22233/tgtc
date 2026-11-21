@@ -132,7 +132,7 @@ __decorate([
     __metadata("design:type", Date)
 ], TelegramBotFileGrant.prototype, "revokedAt", void 0);
 __decorate([
-    (0, typeorm_1.Column)({ type: 'varchar', length: 32, nullable: true, comment: '撤销者 TG 用户 ID' }),
+    (0, typeorm_1.Column)({ type: 'varchar', length: 64, nullable: true, comment: '撤销者 ID' }),
     __metadata("design:type", String)
 ], TelegramBotFileGrant.prototype, "revokedBy", void 0);
 __decorate([

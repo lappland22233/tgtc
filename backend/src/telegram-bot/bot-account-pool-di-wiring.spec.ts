@@ -27,6 +27,7 @@ import { TelegramBotAdminService } from './telegram-bot-admin.service';
 import { TelegramBotConfigService } from './telegram-bot-config.service';
 import { TelegramBotDispatchService } from './telegram-bot-dispatch.service';
 import { TelegramBotGrantService } from './telegram-bot-grant.service';
+import { TelegramBotInboundQueueService } from './telegram-bot-inbound-queue.service';
 import { TelegramBotPollingService } from './telegram-bot-polling.service';
 import { TelegramBotPublicController } from './telegram-bot-public.controller';
 import { TelegramBotQuotaService } from './telegram-bot-quota.service';
@@ -48,7 +49,7 @@ import { TelegramBotTokenCryptoService } from './telegram-bot-token-crypto.servi
  *    再由容器实例化，逐项断言字段与预期 mock **同一引用**。
  *
  * 边界：只做内存容器装配，不启动应用、不建真实数据库 / Redis / Telegram 连接，
- * 也不改变既有「直接 new 位置构造」的用例（那些用例正是参数顺序未被改动的证据）。
+ * 直接构造的行为用例另有覆盖。
  */
 
 /** 每个依赖一个独立引用：注册后必须按同一引用被注入回来，才能证明 token 命中 */
@@ -75,6 +76,7 @@ describe('Bot 账号池副本链：可选依赖的真实装配（容器级）', 
       grantService: depMock('TelegramBotGrantService'),
       adminService: depMock('TelegramBotAdminService'),
       auditService: depMock('AuditService'),
+      inboundQueue: depMock('TelegramBotInboundQueueService'),
       pool: depMock('TelegramAccountPoolService'),
       copies: depMock('FileCopyService'),
       accountClient: depMock('TelegramAccountClientService'),
@@ -91,6 +93,7 @@ describe('Bot 账号池副本链：可选依赖的真实装配（容器级）', 
       { provide: TelegramBotGrantService, useValue: deps.grantService },
       { provide: TelegramBotAdminService, useValue: deps.adminService },
       { provide: AuditService, useValue: deps.auditService },
+      { provide: TelegramBotInboundQueueService, useValue: deps.inboundQueue },
       { provide: TelegramAccountPoolService, useValue: deps.pool },
       { provide: FileCopyService, useValue: deps.copies },
       { provide: TelegramAccountClientService, useValue: deps.accountClient },
@@ -103,6 +106,7 @@ describe('Bot 账号池副本链：可选依赖的真实装配（容器级）', 
 
     // 入站副本登记与站内桥接、归档转发、镜像触发、备份群转发抑制
     expect(injected(service, 'pool')).toBe(deps.pool);
+    expect(injected(service, 'inboundQueue')).toBe(deps.inboundQueue);
     expect(injected(service, 'copies')).toBe(deps.copies);
     expect(injected(service, 'accountClient')).toBe(deps.accountClient);
     expect(injected(service, 'configService')).toBe(deps.configService);
@@ -255,6 +259,7 @@ describe('Bot 账号池副本链：依赖确实未注册时仍降级（单账号
       { provide: TelegramBotGrantService, useValue: depMock('TelegramBotGrantService') },
       { provide: TelegramBotAdminService, useValue: depMock('TelegramBotAdminService') },
       { provide: AuditService, useValue: depMock('AuditService') },
+      { provide: TelegramBotInboundQueueService, useValue: depMock('TelegramBotInboundQueueService') },
     ]);
 
     const service = moduleRef.get(TelegramBotDispatchService);

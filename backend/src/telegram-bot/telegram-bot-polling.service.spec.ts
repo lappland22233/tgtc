@@ -121,6 +121,31 @@ function makeService(options: {
   };
 }
 
+describe('TelegramBotPollingService 持久化收件', () => {
+  it.each([false, true])('池化=%s 时收件失败的更新须重投，写入成功后才推进 offset', async (pooled) => {
+    const options = { env: { TELEGRAM_BOT_UPDATES_ENABLED: 'true' }, pooled };
+    const { service, dispatch, singleGetUpdates, accountGetUpdates, store } = makeService(options);
+    const update = { update_id: 42, message: { document: { file_id: 'file' } } };
+    const poll = pooled ? accountGetUpdates : singleGetUpdates;
+    poll.mockResolvedValueOnce([update]).mockResolvedValueOnce([update]);
+    dispatch.handleUpdate.mockRejectedValueOnce(new Error('队列暂不可写'));
+    const key = pooled ? `${BOT_UPDATE_OFFSET_KEY}:123456` : BOT_UPDATE_OFFSET_KEY;
+    try {
+      await service.onModuleInit();
+      await tick(20);
+      expect(dispatch.handleUpdate).toHaveBeenCalledTimes(1);
+      expect(store.get(key)).not.toBe('43');
+      await tick(1_030);
+      expect(dispatch.handleUpdate).toHaveBeenCalledTimes(2);
+      const offsets = poll.mock.calls.map((args) => args[pooled ? 2 : 0]);
+      expect(offsets.slice(0, 3)).toEqual([0, 0, 43]);
+      expect(store.get(key)).toBe('43');
+    } finally {
+      await service.beforeApplicationShutdown();
+    }
+  });
+});
+
 describe('TelegramBotPollingService（池化 offset）', () => {
   it('主 Bot 首次进入池化模式时继承历史全局 offset', async () => {
     const { service, store, writes } = makeService({
@@ -133,7 +158,7 @@ describe('TelegramBotPollingService（池化 offset）', () => {
     await service.onModuleInit();
     expect(store.get(`${BOT_UPDATE_OFFSET_KEY}:123456`)).toBe('7788');
     expect(writes).toContainEqual({ key: `${BOT_UPDATE_OFFSET_KEY}:123456`, value: '7788' });
-    await service.onApplicationShutdown();
+    await service.beforeApplicationShutdown();
   });
 
   it('账号级 offset 已有进度时不覆盖（不倒退、不重放）', async () => {
@@ -147,7 +172,7 @@ describe('TelegramBotPollingService（池化 offset）', () => {
 
     await service.onModuleInit();
     expect(store.get(accountKey)).toBe('9000');
-    await service.onApplicationShutdown();
+    await service.beforeApplicationShutdown();
   });
 
   it('非主 Bot 账号不继承全局 offset（每账号 offset 必须独立）', async () => {
@@ -160,7 +185,7 @@ describe('TelegramBotPollingService（池化 offset）', () => {
 
     await service.onModuleInit();
     expect(store.has(`${BOT_UPDATE_OFFSET_KEY}:999`)).toBe(false);
-    await service.onApplicationShutdown();
+    await service.beforeApplicationShutdown();
   });
 
   it('归属标记指向该账号时继承全局 offset（即使它不是主 Bot）', async () => {
@@ -173,7 +198,7 @@ describe('TelegramBotPollingService（池化 offset）', () => {
 
     await service.onModuleInit();
     expect(store.get(`${BOT_UPDATE_OFFSET_KEY}:999`)).toBe('7788');
-    await service.onApplicationShutdown();
+    await service.beforeApplicationShutdown();
   });
 
   it('归属标记指向其它账号时不继承（否则会跳过该账号尚未消费的更新）', async () => {
@@ -186,7 +211,7 @@ describe('TelegramBotPollingService（池化 offset）', () => {
 
     await service.onModuleInit();
     expect(store.has(`${BOT_UPDATE_OFFSET_KEY}:123456`)).toBe(false);
-    await service.onApplicationShutdown();
+    await service.beforeApplicationShutdown();
   });
 });
 
@@ -220,7 +245,7 @@ describe('TelegramBotPollingService（池化入站循环真跑）', () => {
     // 池化模式不得触碰单账号客户端
     expect(singleGetUpdates).not.toHaveBeenCalled();
 
-    await service.onApplicationShutdown();
+    await service.beforeApplicationShutdown();
   });
 
   it('池化模式下每个账号各有独立循环，且各自使用自己的 offset', async () => {
@@ -239,7 +264,7 @@ describe('TelegramBotPollingService（池化入站循环真跑）', () => {
     expect(accountGetUpdates.mock.calls.find((call) => call[0] === '111')?.[2]).toBe(7788);
     expect(accountGetUpdates.mock.calls.find((call) => call[0] === '222')?.[2]).toBe(0);
 
-    await service.onApplicationShutdown();
+    await service.beforeApplicationShutdown();
   });
 
   it('账号池未生效时走单账号轮询，不触碰账号池客户端（防反向回归）', async () => {
@@ -254,7 +279,7 @@ describe('TelegramBotPollingService（池化入站循环真跑）', () => {
     expect(singleGetUpdates.mock.calls[0]).toEqual([42, 9]);
     expect(accountGetUpdates).not.toHaveBeenCalled();
 
-    await service.onApplicationShutdown();
+    await service.beforeApplicationShutdown();
   });
 
   it('入站开关关闭时不启动任何轮询', async () => {
@@ -267,7 +292,7 @@ describe('TelegramBotPollingService（池化入站循环真跑）', () => {
     expect(accountGetUpdates).not.toHaveBeenCalled();
     expect(singleGetUpdates).not.toHaveBeenCalled();
 
-    await service.onApplicationShutdown();
+    await service.beforeApplicationShutdown();
   });
 });
 
@@ -305,7 +330,7 @@ describe('TelegramBotPollingService（入站可观测性）', () => {
     expect(snapshot.lastPollAtMs).not.toBeNull();
     expect(snapshot.modeDrift.restartRequired).toBe(false);
 
-    await service.onApplicationShutdown();
+    await service.beforeApplicationShutdown();
   });
 
   it('轮询失败时记录连续失败次数与已脱敏的失败摘要（不含 Token）', async () => {
@@ -327,7 +352,7 @@ describe('TelegramBotPollingService（入站可观测性）', () => {
     expect(account.lastErrorSummary).not.toContain('123456:TOKEN');
     expect(account.lastPollAtMs).toBeNull();
 
-    await service.onApplicationShutdown();
+    await service.beforeApplicationShutdown();
   });
 
   it('账号池运行期被关闭时给出「需重启」的模式漂移提示', async () => {
@@ -345,7 +370,7 @@ describe('TelegramBotPollingService（入站可观测性）', () => {
     expect(drift.restartRequired).toBe(true);
     expect(drift.reason).toContain('账号池已停用');
 
-    await service.onApplicationShutdown();
+    await service.beforeApplicationShutdown();
   });
 
   it('池化模式运行期账号集合变化时提示需重启（新增账号不会被消费）', async () => {
@@ -370,7 +395,7 @@ describe('TelegramBotPollingService（入站可观测性）', () => {
     expect(removed.restartRequired).toBe(true);
     expect(removed.reason).toContain('111');
 
-    await service.onApplicationShutdown();
+    await service.beforeApplicationShutdown();
   });
 
   it('自检延迟显式设为 0 时不产生自检结论', async () => {
@@ -382,7 +407,7 @@ describe('TelegramBotPollingService（入站可观测性）', () => {
     await tick(30);
 
     expect(service.snapshot().selfCheck).toBeNull();
-    await service.onApplicationShutdown();
+    await service.beforeApplicationShutdown();
   });
 
   it('自检在正常轮询后给出健康结论', async () => {
@@ -398,7 +423,7 @@ describe('TelegramBotPollingService（入站可观测性）', () => {
 
     expect(service.snapshot().selfCheck?.healthy).toBe(true);
 
-    await service.onApplicationShutdown();
+    await service.beforeApplicationShutdown();
   });
 
   it('自检发现「已启用但零成功轮询」时输出 error 级空转提示', async () => {
@@ -422,7 +447,7 @@ describe('TelegramBotPollingService（入站可观测性）', () => {
       expect(selfCheck?.message).toContain('空转');
       expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('空转'));
 
-      await service.onApplicationShutdown();
+      await service.beforeApplicationShutdown();
     } finally {
       errorSpy.mockRestore();
     }

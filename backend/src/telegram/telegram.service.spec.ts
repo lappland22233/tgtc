@@ -28,6 +28,15 @@ describe('TelegramService realtime stream', () => {
 
   beforeEach(() => jest.clearAllMocks());
 
+  it('passes streamed Telegram 429 retry_after to the durable queue after one attempt', async () => {
+    const body = Readable.from(['{"parameters":', '{"retry_after":9}}']);
+    mockedAxios.get.mockRejectedValueOnce({ response: { status: 429, data: body } });
+    await expect(createService().getRealtimeFileStream('file-id', 5, { deferRateLimit: true }))
+      .rejects.toMatchObject({ retryAfterSeconds: 9 });
+    expect(mockedAxios.get).toHaveBeenCalledTimes(1);
+    expect(body.destroyed).toBe(true);
+  });
+
   it('enables the streaming route when only the streaming base is configured', async () => {
     const stream = Readable.from(Buffer.from('hello'));
     mockedAxios.get.mockResolvedValue({ data: stream, headers: { 'content-length': '5' } } as any);

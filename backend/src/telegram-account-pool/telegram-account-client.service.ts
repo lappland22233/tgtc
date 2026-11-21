@@ -4,6 +4,7 @@ import axios, { AxiosError } from 'axios';
 import FormData from 'form-data';
 import { Readable, Transform } from 'stream';
 import { AccountAttemptSample, AccountFailureKind } from './telegram-account-pool.types';
+import { readTelegramRetryAfter } from '../telegram/telegram.errors';
 
 /**
  * 账号级 Telegram 调用错误：携带可供账号池决策的分类信息。
@@ -385,7 +386,7 @@ export class TelegramAccountClientService {
     token: string,
     fileId: string,
     expectedSize?: number,
-    opts?: { noCache?: boolean },
+    opts?: { noCache?: boolean; signal?: AbortSignal },
   ): Promise<AccountStreamSession> {
     if (!this.streamingEnabled) {
       throw new TelegramAccountError(
@@ -409,6 +410,7 @@ export class TelegramAccountClientService {
         timeout: this.streamingTimeoutMs,
         maxRedirects: 0,
         headers: Object.keys(headers).length > 0 ? headers : undefined,
+        ...(opts?.signal && { signal: opts.signal }),
       });
       const rawLength = response.headers['content-length'];
       const fileSize = Number(Array.isArray(rawLength) ? rawLength[0] : rawLength);
@@ -446,6 +448,10 @@ export class TelegramAccountClientService {
         },
       };
     } catch (error) {
+      const response = (error as AxiosError)?.response;
+      if (response?.status === 429) {
+        throw new TelegramAccountError('Telegram 文件流受到限流', accountId, 'flood', 429, await readTelegramRetryAfter(response));
+      }
       throw this.toAccountError(error, token, accountId);
     }
   }

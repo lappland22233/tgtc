@@ -1,4 +1,6 @@
 import { TelegramBotGrantService } from './telegram-bot-grant.service';
+import { TelegramBotTokenCryptoService } from './telegram-bot-token-crypto.service';
+import { ConfigService } from '@nestjs/config';
 import type { TelegramBotFileGrant } from '../common/entities/telegram-bot-file-grant.entity';
 
 /**
@@ -42,6 +44,20 @@ function makeIssueInput(overrides: Partial<Parameters<TelegramBotGrantService['i
 }
 
 describe('TelegramBotGrantService（grant 内容标识与归因查询）', () => {
+  it('无专用加密密钥时重启仍能恢复队列待发送的链接，常规回放仍遵循配置', async () => {
+    const { repository } = makeContext();
+    const crypto = () => new TelegramBotTokenCryptoService(new ConfigService({
+      JWT_SECRET: 'local-test-secret-with-sufficient-length', TELEGRAM_BOT_ENCRYPTION_KEY: '',
+    }));
+    const service = new TelegramBotGrantService(repository as never, crypto());
+    const { grant, token } = await service.issue(makeIssueInput(), 1, undefined, 'task-a');
+    const restarted = new TelegramBotGrantService(repository as never, crypto());
+    expect(grant.tokenCipher).toBeNull();
+    expect(restarted.replayToken(grant)).toBeNull();
+    expect(restarted.tokenForQueuedNotice(grant, 'task-a')).toBe(token);
+    expect(restarted.tokenForQueuedNotice(grant, 'task-b')).toBeNull();
+  });
+
   it('历史消息仅凭匹配的 Bot 专属 file_id 登记接收身份', async () => {
     const { service, repository } = makeContext();
     repository.findOne.mockResolvedValueOnce(null).mockResolvedValueOnce({ id: 'old' });

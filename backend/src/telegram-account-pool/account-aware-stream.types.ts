@@ -17,6 +17,7 @@ export type AccountAwareDownloadFailureReason =
 export interface AccountAwareDownloadFailure {
   reason: AccountAwareDownloadFailureReason;
   retryAfterMs?: number;
+  rateLimited?: boolean;
   readyAccountCount?: number;
   attemptedAccountCount?: number;
 }

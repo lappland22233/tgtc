@@ -6,7 +6,7 @@ import { constants, promises as fs } from 'fs';
 import type { FileHandle } from 'fs/promises';
 import * as path from 'path';
 import FormData from 'form-data';
-import { TelegramFileNotFoundError, TelegramStreamPathError } from './telegram.errors';
+import { readTelegramRetryAfter, TelegramFileNotFoundError, TelegramRateLimitError, TelegramStreamPathError } from './telegram.errors';
 import type { TelegramSendMessageResult, TelegramUpdate } from './telegram.types';
 
 interface TelegramMedia {
@@ -26,6 +26,11 @@ interface TelegramMediaResult {
   chat?: { id?: number };
   /** 自建 Bot API 严格无缓存扩展：false 表示远端消息成功但 TDLib 本地副本待释放。 */
   local_cache_released?: boolean;
+}
+
+interface TelegramStreamRequestOptions {
+  signal?: AbortSignal;
+  deferRateLimit?: boolean;
 }
 
 class LocalPathDeniedError extends Error {}
@@ -208,7 +213,7 @@ export class TelegramService {
   /**
    * 包装 axios 请求，统一处理 Telegram API 错误，提供更友好的错误消息。
    *
-   * - 429 限流：按 Telegram 返回的 retry_after 退避重试（始终启用）。
+   * - 429 限流：按 Telegram 返回的 retry_after 退避重试，或交给持久化队列。
    * - `retryTransient=true`（仅供幂等 GET 调用方）：首字节前的 502/503/504 与网络层
    *   错误（ECONNRESET/ECONNREFUSED/EPIPE 等）追加最多 2 次 1s/3s 退避重试。
    *   超时不重试：超时由首字节/空闲超时兜底，重试只会把等待时间翻倍。
@@ -217,13 +222,14 @@ export class TelegramService {
     fn: () => Promise<T>,
     label: string,
     retries = 3,
-    options?: { retryTransient?: boolean },
+    options?: TelegramStreamRequestOptions & { retryTransient?: boolean },
   ): Promise<T> {
     for (let attempt = 1; attempt <= retries; attempt++) {
       const startedAt = Date.now();
       try {
         return await fn();
       } catch (error: unknown) {
+        options?.signal?.throwIfAborted();
         // 网络层错误通常没有 response，原先会直接静默上抛，导致只能看到“上传失败”。
         // 在所有分支前记录安全摘要，便于区分 ECONNREFUSED、超时、连接重置和 HTTP 错误。
         this.redactError(error);
@@ -243,14 +249,15 @@ export class TelegramService {
         );
 
         if (error && typeof error === 'object' && 'response' in error) {
-          const responseError = error as { response?: { status?: number; data?: { description?: string; parameters?: { retry_after?: number } } }; message?: string; config?: { url?: string } };
+          const responseError = error as { response?: { status?: number; headers?: Record<string, unknown>; data?: { description?: string } } };
           const status = responseError.response?.status;
           const description = responseError.response?.data?.description || '';
 
           // 429 限流 — 使用 Telegram 返回的 retry_after 秒数等待后重试
-          if (status === 429 && attempt < retries) {
-            const retryAfter = responseError.response?.data?.parameters?.retry_after || 3;
-            const delay = Math.max(retryAfter * 1000, 1000);
+          if (status === 429 && responseError.response) {
+            const retryAfter = await readTelegramRetryAfter(responseError.response);
+            if (options?.deferRateLimit || attempt === retries) throw new TelegramRateLimitError(retryAfter);
+            const delay = retryAfter * 1000;
             this.logger.warn(`${label} 触发限流 (429)，${attempt}/${retries} 次重试，等待 ${delay}ms...`);
             await new Promise(resolve => setTimeout(resolve, delay));
             continue;
@@ -435,6 +442,7 @@ export class TelegramService {
     timeoutMs = 5 * 60 * 1000,
     label = 'getFileInfo',
     metadataOnly = false,
+    options?: TelegramStreamRequestOptions,
   ): Promise<{
     file_id: string;
     file_path: string;
@@ -444,6 +452,7 @@ export class TelegramService {
       const response = await axios.get(`${this.getBaseUrl()}/getFile`, {
         params: { file_id, ...(metadataOnly ? { metadata_only: true } : {}) },
         timeout: timeoutMs,
+        ...(options?.signal && { signal: options.signal }),
       });
       const result = response.data.result;
       return {
@@ -452,7 +461,7 @@ export class TelegramService {
         file_path: result.file_path || '',
         file_size: result.file_size || 0,
       };
-    }, label);
+    }, label, 3, options);
   }
 
   /**
@@ -731,13 +740,13 @@ export class TelegramService {
    * opts.noCache：无缓存直通时携带 X-Telegram-No-Cache 头，
    * Bot API 完整传输后会删除 TDLib workdir 中的本地副本（仅流式端点路径支持）。
    */
-  async getRealtimeFileStream(fileId: string, expectedSize?: number, opts?: { noCache?: boolean }): Promise<{
+  async getRealtimeFileStream(fileId: string, expectedSize?: number, opts?: TelegramStreamRequestOptions & { noCache?: boolean }): Promise<{
     stream: Readable;
     info: { file_id: string; file_path: string; file_size: number };
   }> {
     if (!this.fileStreamingEnabled) {
       // getFileStream 回退路径不支持 no-cache 清理，忽略 opts
-      return this.getFileStream(fileId);
+      return opts?.signal || opts?.deferRateLimit ? this.getFileStream(fileId, opts) : this.getFileStream(fileId);
     }
     if (!fileId || fileId.length > 4096) {
       throw new Error('非法的 Telegram file_id');
@@ -754,7 +763,7 @@ export class TelegramService {
     // 首次 streaming 请求（retries=1）。若命中 R1 路径失效型 502 抛
     // TelegramStreamPathError，则进入单次强制回源恢复路径。
     try {
-      return await this.requestRealtimeStream(fileId, expectedSize, headers);
+      return await this.requestRealtimeStream(fileId, expectedSize, headers, opts);
     } catch (error: unknown) {
       // R2：仅对"路径失效型 502"执行单次强制回源，其余错误原样抛出
       if (!(error instanceof TelegramStreamPathError)) {
@@ -774,6 +783,7 @@ export class TelegramService {
     fileId: string,
     expectedSize: number | undefined,
     headers: Record<string, string>,
+    options?: TelegramStreamRequestOptions,
   ): Promise<{ stream: Readable; info: { file_id: string; file_path: string; file_size: number } }> {
     const url = `${this.fileStreamingBase}/stream/file/bot${this.botToken}/${encodeURIComponent(fileId)}`;
     const response = await this.telegramRequest(
@@ -782,12 +792,13 @@ export class TelegramService {
         timeout: this.fileStreamingTimeoutMs,
         maxRedirects: 0,
         headers: Object.keys(headers).length > 0 ? headers : undefined,
+        ...(options?.signal && { signal: options.signal }),
       }),
       'getRealtimeFileStream',
       3,
       // 首字节前允许对网络抖动 / 503 做有限重试；502/504/本地副本型 500 已在上方
       // 归类为可恢复的流路径错误，交由 getRealtimeFileStream 的单次强制回源处理。
-      { retryTransient: true },
+      { retryTransient: true, ...options },
     );
     const rawLength = response.headers['content-length'];
     const fileSize = Number(Array.isArray(rawLength) ? rawLength[0] : rawLength);
@@ -898,8 +909,9 @@ export class TelegramService {
   /**
    * 流式获取文件（避免大文件全部加载到内存）
    */
-  async getFileStream(file_id: string): Promise<{ stream: Readable; info: { file_id: string; file_path: string; file_size: number } }> {
-    const fileInfo = await this.getFileInfo(file_id);
+  async getFileStream(file_id: string, options?: TelegramStreamRequestOptions): Promise<{ stream: Readable; info: { file_id: string; file_path: string; file_size: number } }> {
+    const fileInfo = await this.getFileInfo(file_id, undefined, undefined, false, options);
+    options?.signal?.throwIfAborted();
     const filePath = fileInfo.file_path;
 
     let stream: Readable;
@@ -913,11 +925,12 @@ export class TelegramService {
         () => axios.get<Readable>(this.getFileUrl(filePath), {
           responseType: 'stream',
           timeout: 5 * 60 * 1000,
+          ...(options?.signal && { signal: options.signal }),
         }),
         'getFileStream',
         3,
         // 幂等 GET：冷回源前的网络抖动与网关 5xx 允许有限重试
-        { retryTransient: true },
+        { retryTransient: true, ...options },
       );
       stream = response.data as Readable;
     }
@@ -990,7 +1003,7 @@ export class TelegramService {
   async sendMessage(
     chatId: string | number,
     text: string,
-    options?: { replyToMessageId?: number; disableNotification?: boolean },
+    options?: { replyToMessageId?: number; disableNotification?: boolean; deferRateLimit?: boolean },
   ): Promise<TelegramSendMessageResult> {
     if (!this.botToken) {
       throw new Error('TELEGRAM_BOT_TOKEN 未配置，无法发送消息');
@@ -1014,6 +1027,8 @@ export class TelegramService {
         { timeout: 30 * 1000 },
       ),
       'sendMessage',
+      3,
+      { deferRateLimit: options?.deferRateLimit },
     );
 
     if (!response.data?.ok || !response.data.result) {
@@ -1030,6 +1045,7 @@ export class TelegramService {
     chatId: string | number,
     messageId: number,
     text: string,
+    options?: { deferRateLimit?: boolean },
   ): Promise<boolean> {
     if (!this.botToken) {
       throw new Error('TELEGRAM_BOT_TOKEN 未配置，无法编辑消息');
@@ -1048,6 +1064,8 @@ export class TelegramService {
         { timeout: 30 * 1000 },
       ),
       'editMessageText',
+      3,
+      { deferRateLimit: options?.deferRateLimit },
     );
 
     return Boolean(response.data?.ok);

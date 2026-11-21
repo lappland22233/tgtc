@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { IsNull, LessThan, Repository } from 'typeorm';
+import { EntityManager, IsNull, LessThan, Repository } from 'typeorm';
 import { createHash, randomBytes } from 'crypto';
 import { TelegramBotFileGrant } from '../common/entities/telegram-bot-file-grant.entity';
 import { TelegramBotTokenCryptoService } from './telegram-bot-token-crypto.service';
@@ -100,6 +100,10 @@ export class TelegramBotGrantService {
     return this.grantRepository.findOne({ where: { tokenHash } });
   }
 
+  findById(id: string): Promise<TelegramBotFileGrant | null> {
+    return this.grantRepository.findOneBy({ id });
+  }
+
   /**
    * 按内容标识查 grant（跨群认领归因：群内消息只带 file_unique_id）。
    * 按签发时间倒序取最近若干条。
@@ -116,13 +120,16 @@ export class TelegramBotGrantService {
   }
 
   /** 签发直链授权记录 */
-  async issue(input: IssueGrantInput, ttlHours: number): Promise<IssuedGrant> {
-    const token = this.generateToken();
+  async issue(input: IssueGrantInput, ttlHours: number, manager?: EntityManager, taskId?: string): Promise<IssuedGrant> {
+    const repository = manager?.getRepository(TelegramBotFileGrant) ?? this.grantRepository;
+    const token = taskId && !this.tokenCrypto.isAvailable()
+      ? this.tokenCrypto.deriveQueuedToken(taskId)
+      : this.generateToken();
     const tokenHash = this.hashToken(token);
     const tokenCipher = this.tokenCrypto.encrypt(token);
     const expiresAt = new Date(Date.now() + ttlHours * 60 * 60 * 1000);
 
-    const grant = this.grantRepository.create({
+    const grant = repository.create({
       telegramUserId: input.telegramUserId,
       telegramUsername: input.username,
       telegramDisplayName: input.displayName,
@@ -151,7 +158,7 @@ export class TelegramBotGrantService {
       lastAccessedAt: null,
     });
 
-    const saved = await this.grantRepository.save(grant);
+    const saved = await repository.save(grant);
     return { grant: saved, token };
   }
 
@@ -171,6 +178,12 @@ export class TelegramBotGrantService {
   replayToken(grant: TelegramBotFileGrant): string | null {
     if (!grant.tokenCipher) return null;
     return this.tokenCrypto.decrypt(grant.tokenCipher);
+  }
+
+  tokenForQueuedNotice(grant: TelegramBotFileGrant, taskId: string): string | null {
+    if (grant.tokenCipher) return this.replayToken(grant);
+    const token = this.tokenCrypto.deriveQueuedToken(taskId);
+    return this.hashToken(token) === grant.tokenHash ? token : null;
   }
 
   /** 查询某 TG 用户当前有效的直链（未过期未撤销） */
