@@ -33,6 +33,8 @@ vi.mock('@/utils/message', () => ({ default: { success: vi.fn(), error: vi.fn(),
 describe('Google OAuth popup exchange', () => {
   it.each(['manual', 'automatic'])('uses the server-issued state once on the %s path', async mode => {
     vi.clearAllMocks();
+    const consentUrl = 'https://accounts.google.com/o/oauth2/v2/auth?scope=openid+https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fdrive.file&state=issued-state';
+    api.fetchGDriveAuthUrl.mockResolvedValueOnce({ url: consentUrl, state: 'issued-state' });
     vi.useFakeTimers({toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval']});
     const opener = Object.getOwnPropertyDescriptor(window, 'opener');
     const originalPath = location.href;
@@ -61,16 +63,18 @@ describe('Google OAuth popup exchange', () => {
         wizard.openAuthUrl();
       }
       const redirectUri = location.origin + '/admin/storage-backends/gdrive-callback';
+      expect(openSpy.mock.lastCall?.[0]).toBe(consentUrl);
       expect(wizard.currentNonce).toBe('issued-state');
       expect(api.fetchGDriveAuthUrl).toHaveBeenCalledWith(redirectUri, undefined);
       window.dispatchEvent(new MessageEvent('message', {
         origin: location.origin, data: {type: 'TGTC_GDRIVE_OAUTH_RESULT', status: 'success', code: 'other', state: 'other'},
       }));
       expect(api.completeGDriveAuth).not.toHaveBeenCalled();
-      history.replaceState({}, '', redirectUri + '?code=local-code&state=issued-state');
+      history.replaceState({}, '', redirectUri + '?code=local-code&state=issued-state&scope=openid%20email');
       callback = shallowMount(GDriveOAuthCallback);
       await flushPromises();
       expect(api.completeGDriveAuth).toHaveBeenCalledTimes(1);
+      expect(api.completeGDriveAuth.mock.calls[0][0]).not.toHaveProperty('scope');
       expect(api.completeGDriveAuth).toHaveBeenCalledWith(expect.objectContaining({
         code: 'local-code', state: 'issued-state', redirectUri,
       }));
@@ -149,6 +153,33 @@ describe('storage administration contracts', () => {
         accountId: account.id, name: account.name, redirectUri: redirect, code: 'match', state: 'issued-state',
       });
       expect(api.rotateStorageCredential).not.toHaveBeenCalled();
+    } finally { wrapper.unmount(); }
+  });
+
+  it('shows the server permission error and retries a rejected Drive grant with fresh state', async () => {
+    const { wrapper, ui } = mountAdmin();
+    const message = 'Google 未授予云端硬盘文件访问权限，请重新授权并勾选文件权限。';
+    try {
+      await ui.openGDriveWizard();
+      await ui.buildManualAuthUrl();
+      const redirectUri = ui.gdrive.redirectUri;
+      api.completeGDriveAuth.mockRejectedValueOnce({ response: { status: 400, data: { message } } });
+      ui.gdrive.code = redirectUri + '?code=first&state=issued-state&scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fdrive.file';
+      await ui.completeAuth();
+      expect(MessagePlugin.error).toHaveBeenCalledWith(message);
+      expect(ui.gdriveVisible).toBe(true);
+      expect(ui.currentNonce).toBe('');
+      expect(ui.gdrive.code).toBe('');
+      expect(ui.gdrive.authUrl).toBe('');
+      expect(api.completeGDriveAuth.mock.calls[0][0]).not.toHaveProperty('scope');
+
+      api.fetchGDriveAuthUrl.mockResolvedValueOnce({ url: 'https://example.invalid/retry', state: 'retry-state' });
+      await ui.buildManualAuthUrl();
+      ui.gdrive.code = redirectUri + '?state=retry-state&code=second';
+      await ui.completeAuth();
+      expect(api.completeGDriveAuth).toHaveBeenCalledTimes(2);
+      expect(api.completeGDriveAuth).toHaveBeenLastCalledWith(expect.objectContaining({ state: 'retry-state', code: 'second' }));
+      expect(ui.gdriveVisible).toBe(false);
     } finally { wrapper.unmount(); }
   });
 

@@ -374,6 +374,9 @@
               <span v-else class="existing-name">{{ gdrive.name }}</span>
             </div>
 
+            <p class="wizard-hint">
+              在 Google 授权页勾选允许此应用访问 Google 云端硬盘文件的权限，再点击继续。如果上次漏选，请重新发起授权。
+            </p>
             <div class="auth-action-area">
               <div v-if="authStatus === 'authorizing' || authStatus === 'exchanging'" class="auth-status-box">
                 <div class="auth-spinner" />
