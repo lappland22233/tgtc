@@ -65,6 +65,21 @@ describe('file list session ownership', () => {
     vi.restoreAllMocks();
   });
 
+  it('observes the mounted pagination sentinel and releases it when leaving the list', async () => {
+    const observe = vi.fn();
+    const disconnect = vi.fn();
+    vi.stubGlobal('IntersectionObserver', class {
+      observe = observe;
+      disconnect = disconnect;
+    });
+    wrapper = shallowMount(FileList);
+    await flushPromises();
+    expect(observe).toHaveBeenCalledWith(wrapper.get('.os-sentinel').element);
+    wrapper.unmount();
+    wrapper = undefined;
+    expect(disconnect).toHaveBeenCalled();
+  });
+
   it('drops a pending download from the previous login even when its ticket arrives after the switch', async () => {
     const downloadClick = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
     let finish!: (value: { data: { data: { taskId: string; status: string; downloadUrl: string } } }) => void;

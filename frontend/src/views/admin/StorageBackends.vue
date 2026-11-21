@@ -518,7 +518,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import { DialogPlugin } from 'tdesign-vue-next/es/dialog';
 import MessagePlugin from '@/utils/message';
 import { getErrorMessage } from '@/utils/error';
@@ -711,7 +711,7 @@ async function saveGDriveChunkSize() {
 // ---------- 创建/编辑 ----------
 const editorVisible = ref(false);
 const editingId = ref<string | null>(null);
-const form = reactive({
+const form = ref({
   type: 's3' as RemoteStorageBackendType,
   name: '',
   weight: 1,
@@ -723,14 +723,14 @@ const form = reactive({
 });
 
 function resetForm() {
-  form.type = 's3';
-  form.name = '';
-  form.weight = 1;
-  form.maxInflight = 8;
-  form.note = '';
-  form.s3 = { endpoint: '', region: '', bucket: '', prefix: '', forcePathStyle: false };
-  form.webdav = { url: '', rootPath: '' };
-  form.credential = { accessKeyId: '', secretAccessKey: '', username: '', password: '' };
+  form.value.type = 's3';
+  form.value.name = '';
+  form.value.weight = 1;
+  form.value.maxInflight = 8;
+  form.value.note = '';
+  form.value.s3 = { endpoint: '', region: '', bucket: '', prefix: '', forcePathStyle: false };
+  form.value.webdav = { url: '', rootPath: '' };
+  form.value.credential = { accessKeyId: '', secretAccessKey: '', username: '', password: '' };
 }
 
 function openCreate() {
@@ -742,14 +742,14 @@ function openCreate() {
 function openEdit(row: StorageBackendView) {
   editingId.value = row.id;
   resetForm();
-  form.type = row.type;
-  form.name = row.name;
-  form.weight = row.weight;
-  form.maxInflight = row.maxInflight;
-  form.note = row.note ?? '';
+  form.value.type = row.type;
+  form.value.name = row.name;
+  form.value.weight = row.weight;
+  form.value.maxInflight = row.maxInflight;
+  form.value.note = row.note ?? '';
   const config = (row.config ?? {}) as Record<string, unknown>;
   if (row.type === 's3') {
-    form.s3 = {
+    form.value.s3 = {
       endpoint: String(config.endpoint ?? ''),
       region: String(config.region ?? ''),
       bucket: String(config.bucket ?? ''),
@@ -757,29 +757,29 @@ function openEdit(row: StorageBackendView) {
       forcePathStyle: Boolean(config.forcePathStyle),
     };
   } else if (row.type === 'webdav') {
-    form.webdav = { url: String(config.url ?? ''), rootPath: String(config.rootPath ?? '') };
+    form.value.webdav = { url: String(config.url ?? ''), rootPath: String(config.rootPath ?? '') };
   }
   editorVisible.value = true;
 }
 
 function buildConfig(): Record<string, unknown> {
-  if (form.type === 's3') {
-    const config: Record<string, unknown> = { region: form.s3.region, bucket: form.s3.bucket };
-    if (form.s3.endpoint) config.endpoint = form.s3.endpoint;
-    if (form.s3.prefix) config.prefix = form.s3.prefix;
-    config.forcePathStyle = form.s3.forcePathStyle;
+  if (form.value.type === 's3') {
+    const config: Record<string, unknown> = { region: form.value.s3.region, bucket: form.value.s3.bucket };
+    if (form.value.s3.endpoint) config.endpoint = form.value.s3.endpoint;
+    if (form.value.s3.prefix) config.prefix = form.value.s3.prefix;
+    config.forcePathStyle = form.value.s3.forcePathStyle;
     return config;
   }
-  if (form.type === 'webdav') {
-    const config: Record<string, unknown> = { url: form.webdav.url };
-    if (form.webdav.rootPath) config.rootPath = form.webdav.rootPath;
+  if (form.value.type === 'webdav') {
+    const config: Record<string, unknown> = { url: form.value.webdav.url };
+    if (form.value.webdav.rootPath) config.rootPath = form.value.webdav.rootPath;
     return config;
   }
   return {};
 }
 
 async function saveAccount() {
-  if (form.type === 'gdrive' && !editingId.value) {
+  if (form.value.type === 'gdrive' && !editingId.value) {
     MessagePlugin.warning('请使用「添加 GDrive 账号」授权向导');
     return;
   }
@@ -787,25 +787,25 @@ async function saveAccount() {
   try {
     if (editingId.value) {
       const result = await updateStorageBackend(editingId.value, {
-        name: form.name,
-        ...(form.type === 'gdrive' ? {} : { config: buildConfig() }),
-        weight: form.weight,
-        maxInflight: form.maxInflight,
-        note: form.note,
+        name: form.value.name,
+        ...(form.value.type === 'gdrive' ? {} : { config: buildConfig() }),
+        weight: form.value.weight,
+        maxInflight: form.value.maxInflight,
+        note: form.value.note,
       });
       MessagePlugin.success(result.message);
     } else {
-      const credential = form.type === 's3'
-        ? { accessKeyId: form.credential.accessKeyId, secretAccessKey: form.credential.secretAccessKey }
-        : { username: form.credential.username, password: form.credential.password };
+      const credential = form.value.type === 's3'
+        ? { accessKeyId: form.value.credential.accessKeyId, secretAccessKey: form.value.credential.secretAccessKey }
+        : { username: form.value.credential.username, password: form.value.credential.password };
       const result = await createStorageBackend({
-        type: form.type,
-        name: form.name,
+        type: form.value.type,
+        name: form.value.name,
         config: buildConfig(),
         credential,
-        weight: form.weight,
-        maxInflight: form.maxInflight,
-        note: form.note,
+        weight: form.value.weight,
+        maxInflight: form.value.maxInflight,
+        note: form.value.note,
       });
       MessagePlugin.success(result.message);
     }
@@ -880,14 +880,14 @@ function revokeAccount(row: StorageBackendView) {
 // ---------- 凭据轮换 ----------
 const rotateVisible = ref(false);
 const rotateTarget = ref<StorageBackendView | null>(null);
-const rotateForm = reactive({ accessKeyId: '', secretAccessKey: '', username: '', password: '' });
+const rotateForm = ref({ accessKeyId: '', secretAccessKey: '', username: '', password: '' });
 
 function openRotate(row: StorageBackendView) {
   rotateTarget.value = row;
-  rotateForm.accessKeyId = '';
-  rotateForm.secretAccessKey = '';
-  rotateForm.username = '';
-  rotateForm.password = '';
+  rotateForm.value.accessKeyId = '';
+  rotateForm.value.secretAccessKey = '';
+  rotateForm.value.username = '';
+  rotateForm.value.password = '';
   rotateVisible.value = true;
 }
 
@@ -902,8 +902,8 @@ async function saveRotate() {
   saving.value = true;
   try {
     const credential = rotateTarget.value.type === 's3'
-      ? { accessKeyId: rotateForm.accessKeyId, secretAccessKey: rotateForm.secretAccessKey }
-      : { username: rotateForm.username, password: rotateForm.password };
+      ? { accessKeyId: rotateForm.value.accessKeyId, secretAccessKey: rotateForm.value.secretAccessKey }
+      : { username: rotateForm.value.username, password: rotateForm.value.password };
     const result = await rotateStorageCredential(rotateTarget.value.id, credential);
     MessagePlugin.success(result.message);
     rotateVisible.value = false;
@@ -929,7 +929,7 @@ const popupRef = ref<Window | null>(null);
 
 let bcChannel: BroadcastChannel | null = null;
 
-const gdrive = reactive({
+const gdrive = ref({
   accountId: null as string | null,
   clientId: '',
   clientSecret: '',
@@ -961,7 +961,7 @@ function extractOAuthCode(input: string): string {
 }
 
 async function copyRedirectUri() {
-  const uri = gdrive.redirectUri || getDefaultRedirectUri();
+  const uri = gdrive.value.redirectUri || getDefaultRedirectUri();
   try {
     await navigator.clipboard.writeText(uri);
     MessagePlugin.success('已复制回调地址到剪贴板，请在 Google Cloud Console 中填入');
@@ -971,33 +971,33 @@ async function copyRedirectUri() {
 }
 
 async function openOAuthClientDialog() {
-  gdrive.clientSecret = '';
+  gdrive.value.clientSecret = '';
   try {
     const client = await fetchGDriveOAuthClient();
     if (client.clientId) {
-      gdrive.clientId = client.clientId;
+      gdrive.value.clientId = client.clientId;
     }
-    gdrive.redirectUri = client.redirectUri || getDefaultRedirectUri();
+    gdrive.value.redirectUri = client.redirectUri || getDefaultRedirectUri();
   } catch {
-    gdrive.redirectUri = getDefaultRedirectUri();
+    gdrive.value.redirectUri = getDefaultRedirectUri();
   }
   oauthClientModalVisible.value = true;
 }
 
 async function saveOAuthClientFromDialog() {
-  if (!gdrive.clientId?.trim()) {
+  if (!gdrive.value.clientId?.trim()) {
     MessagePlugin.warning('Client ID 不能为空');
     return;
   }
   gdriveSaving.value = true;
   try {
     const result = await setGDriveOAuthClient(
-      gdrive.clientId,
-      gdrive.clientSecret || undefined,
-      gdrive.redirectUri,
+      gdrive.value.clientId,
+      gdrive.value.clientSecret || undefined,
+      gdrive.value.redirectUri,
     );
     MessagePlugin.success(result.message);
-    gdrive.clientSecret = '';
+    gdrive.value.clientSecret = '';
     oauthClientModalVisible.value = false;
     await loadOverview();
   } catch (error) {
@@ -1017,8 +1017,8 @@ function handleClearOAuthClient() {
       try {
         const result = await clearGDriveOAuthClient();
         MessagePlugin.success(result.message);
-        gdrive.clientId = '';
-        gdrive.clientSecret = '';
+        gdrive.value.clientId = '';
+        gdrive.value.clientSecret = '';
         oauthClientModalVisible.value = false;
         await loadOverview();
       } catch (error) {
@@ -1033,10 +1033,10 @@ function handleClearOAuthClient() {
 
 async function openGDriveWizard(account?: StorageBackendView) {
   cancelOAuth();
-  gdrive.accountId = account?.id ?? null;
-  gdrive.name = account?.name ?? '';
-  gdrive.code = '';
-  gdrive.authUrl = '';
+  gdrive.value.accountId = account?.id ?? null;
+  gdrive.value.name = account?.name ?? '';
+  gdrive.value.code = '';
+  gdrive.value.authUrl = '';
   authStatus.value = 'idle';
   authStatusMessage.value = '';
   showManualMode.value = false;
@@ -1044,12 +1044,12 @@ async function openGDriveWizard(account?: StorageBackendView) {
   try {
     const client = await fetchGDriveOAuthClient();
     if (client.clientId) {
-      gdrive.clientId = client.clientId;
+      gdrive.value.clientId = client.clientId;
     }
-    gdrive.redirectUri = client.redirectUri || getDefaultRedirectUri();
+    gdrive.value.redirectUri = client.redirectUri || getDefaultRedirectUri();
     showClientConfig.value = !client.configured;
   } catch {
-    gdrive.redirectUri = getDefaultRedirectUri();
+    gdrive.value.redirectUri = getDefaultRedirectUri();
     showClientConfig.value = true;
   }
   gdriveVisible.value = true;
@@ -1058,9 +1058,9 @@ async function openGDriveWizard(account?: StorageBackendView) {
 async function saveOAuthClient() {
   gdriveSaving.value = true;
   try {
-    const result = await setGDriveOAuthClient(gdrive.clientId, gdrive.clientSecret, gdrive.redirectUri);
+    const result = await setGDriveOAuthClient(gdrive.value.clientId, gdrive.value.clientSecret, gdrive.value.redirectUri);
     MessagePlugin.success(result.message);
-    gdrive.clientSecret = '';
+    gdrive.value.clientSecret = '';
     showClientConfig.value = false;
     await loadOverview();
   } catch (error) {
@@ -1137,8 +1137,8 @@ function cancelOAuth() {
   oauthGeneration++;
   currentNonce.value = '';
   authorizedRedirect = '';
-  gdrive.authUrl = '';
-  gdrive.code = '';
+  gdrive.value.authUrl = '';
+  gdrive.value.code = '';
   authStatus.value = 'idle';
   gdriveSaving.value = false;
   cleanupOAuthListeners();
@@ -1184,7 +1184,7 @@ function handleOAuthCallbackResult(data: { status: string; code?: string; state?
 
   if (data.status === 'success' && data.code) {
     const cleanCode = extractOAuthCode(data.code);
-    gdrive.code = cleanCode;
+    gdrive.value.code = cleanCode;
     void completeAuth(cleanCode);
   }
 }
@@ -1192,21 +1192,21 @@ function handleOAuthCallbackResult(data: { status: string; code?: string; state?
 async function prepareAuthUrl(openPopup: boolean) {
   cancelOAuth();
   const generation = oauthGeneration;
-  gdrive.redirectUri = gdrive.redirectUri.trim() || getDefaultRedirectUri();
-  gdrive.authUrl = '';
-  gdrive.code = '';
-  const redirectUri = gdrive.redirectUri;
+  gdrive.value.redirectUri = gdrive.value.redirectUri.trim() || getDefaultRedirectUri();
+  gdrive.value.authUrl = '';
+  gdrive.value.code = '';
+  const redirectUri = gdrive.value.redirectUri;
   authStatus.value = openPopup ? 'authorizing' : 'idle';
   authStatusMessage.value = '正在拉取 Google 授权链接...';
   gdriveSaving.value = true;
 
   try {
-    const result = await fetchGDriveAuthUrl(redirectUri, gdrive.accountId ?? undefined);
+    const result = await fetchGDriveAuthUrl(redirectUri, gdrive.value.accountId ?? undefined);
     if (generation !== oauthGeneration) return;
     if (!result.state) throw new Error('请更新后端后重新生成授权链接');
     currentNonce.value = result.state;
     authorizedRedirect = redirectUri;
-    gdrive.authUrl = result.url;
+    gdrive.value.authUrl = result.url;
     setupOAuthListeners();
     if (!openPopup) {
       startPopupWatcher(null);
@@ -1248,8 +1248,8 @@ function buildManualAuthUrl() {
 }
 
 function openAuthUrl() {
-  if (!currentNonce.value || !gdrive.authUrl || authStatus.value === 'exchanging') return;
-  const popup = window.open(gdrive.authUrl, 'tgtc_gdrive_oauth');
+  if (!currentNonce.value || !gdrive.value.authUrl || authStatus.value === 'exchanging') return;
+  const popup = window.open(gdrive.value.authUrl, 'tgtc_gdrive_oauth');
   popupRef.value = popup;
   startPopupWatcher(popup);
 }
@@ -1261,17 +1261,17 @@ function onManualCodeChange(value: string) {
     if (!currentNonce.value || url.searchParams.get('state') !== currentNonce.value) {
       throw new Error('回调地址与当前授权不匹配，请重新发起授权');
     }
-    gdrive.code = url.searchParams.get('code') || '';
+    gdrive.value.code = url.searchParams.get('code') || '';
   } catch {
-    gdrive.code = '';
+    gdrive.value.code = '';
     MessagePlugin.error('回调地址与当前授权不匹配，请重新发起授权');
   }
 }
 
 async function completeAuth(codeOverride?: string) {
   if (!currentNonce.value || authStatus.value === 'exchanging') return;
-  if (!codeOverride) onManualCodeChange(gdrive.code);
-  const codeToSubmit = (codeOverride || gdrive.code).trim();
+  if (!codeOverride) onManualCodeChange(gdrive.value.code);
+  const codeToSubmit = (codeOverride || gdrive.value.code).trim();
   if (!codeToSubmit) return;
   const generation = oauthGeneration;
   authStatus.value = 'exchanging';
@@ -1282,8 +1282,8 @@ async function completeAuth(codeOverride?: string) {
     const result = await completeGDriveAuth({
       code: codeToSubmit, state: currentNonce.value,
       redirectUri: authorizedRedirect,
-      name: gdrive.name || undefined,
-      accountId: gdrive.accountId ?? undefined,
+      name: gdrive.value.name || undefined,
+      accountId: gdrive.value.accountId ?? undefined,
     });
     if (generation !== oauthGeneration) return;
     authStatus.value = 'success';

@@ -574,7 +574,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted, onBeforeUnmount, watch } from 'vue';
+import { ref, onMounted, onBeforeUnmount, watch } from 'vue';
 import { onBeforeRouteLeave } from 'vue-router';
 import { DialogPlugin } from 'tdesign-vue-next/es/dialog';
 import MessagePlugin from '@/utils/message';
@@ -592,7 +592,7 @@ const publicConfigStore = usePublicConfigStore();
 const uploadConfigStore = useUploadConfigStore();
 
 // 各配置区块加载状态：加载失败时禁用对应保存按钮并阻止提交，防止用默认值覆盖服务端真实配置（G15-04）
-const blockLoadState = reactive({
+const blockLoadState = ref({
   site: false as boolean,
   auth: false as boolean,
   smtp: false as boolean,
@@ -808,7 +808,7 @@ const customExtension = ref('');
 
 const bannedIPs = ref<{ id: string; ip: string; reason: string | null; isPermanent: boolean; expiresAt: string | null; createdAt: string }[]>([]);
 const showBanDialog = ref(false);
-const banForm = reactive({ ip: '', reason: '', permanent: true, durationHours: 6 });
+const banForm = ref({ ip: '', reason: '', permanent: true, durationHours: 6 });
 
 const ipColumns = [
   { colKey: 'ip', title: 'IP地址', width: '150' },
@@ -829,15 +829,15 @@ async function fetchSiteConfig(): Promise<boolean> {
   const ok = await publicConfigStore.fetchSiteTitle();
   if (ok) {
     siteConfig.value.title = publicConfigStore.siteTitle;
-    blockLoadState.site = true;
+    blockLoadState.value.site = true;
   } else {
-    blockLoadState.site = false;
+    blockLoadState.value.site = false;
   }
   return ok;
 }
 
 async function saveSiteConfig() {
-  if (!blockLoadState.site) {
+  if (!blockLoadState.value.site) {
     MessagePlugin.warning('网站标题加载失败，无法保存。请先点击"重新加载"');
     return;
   }
@@ -870,18 +870,18 @@ async function fetchAuthConfig(): Promise<boolean> {
       // Secret Key 只返回掩码；重新加载时保留当前输入，避免覆盖用户尚未保存的新密钥。
       authConfig.value = { ...authConfig.value, ...data, secretKey: authConfig.value.secretKey };
     }
-    blockLoadState.auth = true;
+    blockLoadState.value.auth = true;
     return true;
   } catch (err) {
     console.error('获取认证配置失败', err);
-    blockLoadState.auth = false;
+    blockLoadState.value.auth = false;
     return false;
   }
 }
 
 async function saveAuthConfig() {
   // 未成功加载的区块不允许保存，防止默认值覆盖服务端配置（G15-04）
-  if (!blockLoadState.auth) {
+  if (!blockLoadState.value.auth) {
     MessagePlugin.warning('认证配置加载失败，无法保存。请先点击"重新加载"');
     return;
   }
@@ -931,18 +931,18 @@ async function fetchSMTPConfig(): Promise<boolean> {
       // GET /admin/smtp 不返回 password，保留表单中已有的密码值，避免被响应覆盖为空导致无法二次保存
       smtpConfig.value = { ...smtpConfig.value, ...data, password: smtpConfig.value.password };
     }
-    blockLoadState.smtp = true;
+    blockLoadState.value.smtp = true;
     return true;
   } catch (err) {
     console.error('获取SMTP配置失败', err);
-    blockLoadState.smtp = false;
+    blockLoadState.value.smtp = false;
     return false;
   }
 }
 
 async function saveSMTPConfig() {
   // 未成功加载的区块不允许保存（G15-04）
-  if (!blockLoadState.smtp) {
+  if (!blockLoadState.value.smtp) {
     MessagePlugin.warning('SMTP配置加载失败，无法保存。请先点击"重新加载"');
     return;
   }
@@ -1026,18 +1026,18 @@ async function fetchUploadConfig(): Promise<boolean> {
     selectedExtensions.value = data.fileTypeFilter
       ? data.fileTypeFilter.split(',').map((s: string) => s.trim()).filter(Boolean)
       : [];
-    blockLoadState.upload = true;
+    blockLoadState.value.upload = true;
     return true;
   } catch (err) {
     console.error('获取上传配置失败', err);
-    blockLoadState.upload = false;
+    blockLoadState.value.upload = false;
     return false;
   }
 }
 
 async function saveUploadConfig() {
   // 未成功加载的区块不允许保存（G15-04）
-  if (!blockLoadState.upload) {
+  if (!blockLoadState.value.upload) {
     MessagePlugin.warning('上传配置加载失败，无法保存。请先点击"重新加载"');
     return;
   }
@@ -1104,18 +1104,18 @@ async function fetchCacheConfig(): Promise<boolean> {
   try {
     const res = await api.get('/admin/cache-config');
     cacheConfig.value = res.data.data ?? cacheConfig.value;
-    blockLoadState.cache = true;
+    blockLoadState.value.cache = true;
     return true;
   } catch (err) {
     console.error('获取缓存配置失败', err);
-    blockLoadState.cache = false;
+    blockLoadState.value.cache = false;
     return false;
   }
 }
 
 async function saveCacheConfig() {
   // 未成功加载的区块不允许保存（G15-04）
-  if (!blockLoadState.cache) {
+  if (!blockLoadState.value.cache) {
     MessagePlugin.warning('缓存配置加载失败，无法保存。请先点击"重新加载"');
     return;
   }
@@ -1134,18 +1134,18 @@ async function fetchDownloadConfig(): Promise<boolean> {
   try {
     const res = await api.get('/admin/download-config');
     downloadConfig.value = res.data.data ?? downloadConfig.value;
-    blockLoadState.download = true;
+    blockLoadState.value.download = true;
     return true;
   } catch (err) {
     console.error('获取下载调度配置失败', err);
-    blockLoadState.download = false;
+    blockLoadState.value.download = false;
     return false;
   }
 }
 
 async function saveDownloadConfig() {
   // 未成功加载的区块不允许保存（G15-04）
-  if (!blockLoadState.download) {
+  if (!blockLoadState.value.download) {
     MessagePlugin.warning('下载调度配置加载失败，无法保存。请先点击"重新加载"');
     return;
   }
@@ -1191,11 +1191,11 @@ async function fetchBotConfig(): Promise<boolean> {
     }
     botEffectiveDomain.value = data?.effectiveDomain || '';
     botCryptoAvailable.value = Boolean(data?.cryptoAvailable);
-    blockLoadState.bot = true;
+    blockLoadState.value.bot = true;
     return true;
   } catch (err) {
     console.error('获取 Bot 配置失败', err);
-    blockLoadState.bot = false;
+    blockLoadState.value.bot = false;
     return false;
   }
 }
@@ -1223,7 +1223,7 @@ async function detectBotDomain() {
 
 async function saveBotConfig() {
   if (savingBotConfig.value) return;
-  if (!blockLoadState.bot) {
+  if (!blockLoadState.value.bot) {
     MessagePlugin.warning('Bot 配置加载失败，无法保存。请先点击"重新加载"');
     return;
   }
@@ -1289,7 +1289,7 @@ async function fetchBannedIPs(): Promise<boolean> {
 }
 
 async function banIP() {
-  const ip = banForm.ip.trim();
+  const ip = banForm.value.ip.trim();
   if (!ip) {
     MessagePlugin.warning('请输入 IP 地址');
     return;
@@ -1302,19 +1302,19 @@ async function banIP() {
     // 临时封禁：附带到期时间（G15-19），与 SecurityMonitor 封禁行为一致
     const payload: Record<string, unknown> = {
       ip,
-      reason: banForm.reason,
-      permanent: banForm.permanent,
+      reason: banForm.value.reason,
+      permanent: banForm.value.permanent,
     };
-    if (!banForm.permanent) {
-      payload.expiresAt = new Date(Date.now() + banForm.durationHours * 60 * 60 * 1000).toISOString();
+    if (!banForm.value.permanent) {
+      payload.expiresAt = new Date(Date.now() + banForm.value.durationHours * 60 * 60 * 1000).toISOString();
     }
     await api.post('/admin/banned-ips', payload);
     MessagePlugin.success('IP已封禁');
     showBanDialog.value = false;
-    banForm.ip = '';
-    banForm.reason = '';
-    banForm.permanent = true;
-    banForm.durationHours = 6;
+    banForm.value.ip = '';
+    banForm.value.reason = '';
+    banForm.value.permanent = true;
+    banForm.value.durationHours = 6;
     fetchBannedIPs();
   } catch (error: unknown) {
     MessagePlugin.error(getErrorMessage(error));

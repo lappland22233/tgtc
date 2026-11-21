@@ -15,7 +15,7 @@
  *   本模块仅提供 refetchFiles 供其复用。
  * - 选择 / 批量操作 / 弹窗 / 预览等动作域不属于本模块。
  */
-import { ref, computed, watch, onUnmounted } from 'vue';
+import { ref, computed, watch, onUnmounted, type Ref } from 'vue';
 import type { RouteLocationNormalizedLoaded } from 'vue-router';
 import type { Router } from 'vue-router';
 import { useFileStore } from '../stores/files';
@@ -28,6 +28,7 @@ export interface FileListQueryOptions {
   folderStore: ReturnType<typeof useFolderStore>;
   route: RouteLocationNormalizedLoaded;
   router: Router;
+  scrollSentinel?: Ref<HTMLElement | null>;
 }
 
 export function useFileListQuery(options: FileListQueryOptions) {
@@ -77,7 +78,7 @@ export function useFileListQuery(options: FileListQueryOptions) {
   } = useCursorPagination<FileItem>();
 
   /** 滚动哨兵 ref（宿主模板挂载） */
-  const scrollSentinel = ref<HTMLElement | null>(null);
+  const scrollSentinel = options.scrollSentinel ?? ref<HTMLElement | null>(null);
   let scrollObserver: IntersectionObserver | null = null;
   /** 列表代际：筛选 / 目录变化时递增，防止旧请求污染新列表 */
   let fileListGeneration = 0;

@@ -304,7 +304,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, computed, reactive, watch, onUnmounted } from 'vue';
+import { useTemplateRef, ref, onMounted, computed, reactive, watch, onUnmounted } from 'vue';
 import { usePageVisibility } from '@/composables/usePageVisibility';
 import { useRouter, useRoute } from 'vue-router';
 import MessagePlugin from '@/utils/message';
@@ -357,6 +357,7 @@ const route = useRoute();
 const { isPageVisible } = usePageVisibility();
 
 /** 查询域（搜索 / 排序 / 标签筛选 / 游标加载 / URL 同步） */
+const scrollSentinel = useTemplateRef<HTMLElement>('scrollSentinel');
 const {
   search,
   sortBy,
@@ -376,7 +377,6 @@ const {
   beginFolderTransition,
   getFileListGeneration,
   loadInitialFiles,
-  scrollSentinel,
   toggleSort,
   handleSearch,
   handleClearSearch,
@@ -386,7 +386,7 @@ const {
   removeTagFilter,
   clearTagFilters,
   handleTagManagerFilter,
-} = useFileListQuery({ fileStore, folderStore, route, router });
+} = useFileListQuery({ fileStore, folderStore, route, router, scrollSentinel });
 
 const showUploadModal = ref(false);
 const isDraggedOver = ref(false);
