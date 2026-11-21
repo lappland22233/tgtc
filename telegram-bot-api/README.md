@@ -9,6 +9,8 @@ If you've got any questions about bots or would like to report an issue with you
 Please note that only global Bot API issues that affect all bots are suitable for this repository.
 
 ## Table of Contents
+
+- [TDLib source selection](#tdlib-source-selection)
 - [Installation](#installation)
 - [Dependencies](#dependencies)
 - [Usage](#usage)
@@ -16,6 +18,10 @@ Please note that only global Bot API issues that affect all bots are suitable fo
 - [Moving a bot to a local server](#switching)
 - [Moving a bot from one local server to another](#moving)
 - [License](#license)
+
+## TDLib source selection
+
+TGTC ships the native Bot API server. When updating the vendored TDLib sources, omit the standalone `example/web` directory. The browser client and its npm build instructions are available in the [upstream example at the pinned TDLib revision](https://github.com/tdlib/td/tree/c8828d50f5eac2fc7089ce1089d7ce9095c61b5e/example/web).
 
 <a name="installation"></a>
 ## Installation
