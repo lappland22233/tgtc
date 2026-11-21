@@ -211,7 +211,7 @@ jobs:
           submodules: recursive
 
       - name: Install native build dependencies
-        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends build-essential ca-certificates curl gperf perl
+        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends build-essential ca-certificates curl gperf perl pkg-config
 
       - name: Prepare pinned CMake, OpenSSL and zlib
         run: bash ../scripts/setup-bot-api-build-deps.sh "$RUNNER_TEMP/tgtc-native"

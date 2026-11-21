@@ -22,6 +22,8 @@
 - 可选：SMTP 服务
 - 可选：自建或本项目二次开发的 `telegram-bot-api`
 
+没有 `better-sqlite3` 预编译二进制的平台需要安装 Python 3、make 和 C/C++ 编译器，以便 `npm ci` 构建驱动。
+
 
 ## 快速开始
 
@@ -104,11 +106,15 @@ bash scripts/release/check-version.sh
 (cd backend && npm ci --include=dev && npm run build && npm run build:data-migrator)
 ```
 
-使用自建 Bot API 的实例还需构建本仓库的 C++ 服务。安装 CMake、C++ 编译器、gperf、OpenSSL 和 zlib 开发文件后运行。Linux x86_64 的 CI 使用校验过 SHA256 的 CMake 4.5.1、OpenSSL 4.1.0 和 zlib 1.4。[原生构建依赖脚本](../scripts/setup-bot-api-build-deps.sh)
+使用自建 Bot API 的实例还需构建本仓库的 C++ 服务。以下 Linux x86_64 示例与 CI 使用相同的 CMake 4.5.1、OpenSSL 4.1.0 和 zlib 1.4。安装 C/C++ 编译器、make、gperf、Perl、curl、pkg-config 和系统 CA 证书后运行。依赖会构建到独立目录，二进制运行时须保留该目录。[原生构建依赖脚本](../scripts/setup-bot-api-build-deps.sh)
 
 ```bash
-cmake -S "$SOURCE/telegram-bot-api" -B "$SOURCE/telegram-bot-api/build" -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
-cmake --build "$SOURCE/telegram-bot-api/build" --target telegram-bot-api --parallel 1
+NATIVE_DEPS="$SOURCE/telegram-bot-api/build/native-deps"
+bash "$SOURCE/scripts/setup-bot-api-build-deps.sh" "$NATIVE_DEPS"
+"$NATIVE_DEPS/cmake/bin/cmake" -S "$SOURCE/telegram-bot-api" -B "$SOURCE/telegram-bot-api/build" \
+  -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
+  -DOPENSSL_ROOT_DIR="$NATIVE_DEPS/libs" -DZLIB_ROOT="$NATIVE_DEPS/libs"
+"$NATIVE_DEPS/cmake/bin/cmake" --build "$SOURCE/telegram-bot-api/build" --target telegram-bot-api --parallel 1
 ```
 
 后端服务工作目录决定相对 SQLite 路径和 `tmp/` 的位置。首次部署可将 `backend/.env.example` 复制到工作目录的 `.env` 后填写。设置 `NODE_ENV=production`、`DB_SYNCHRONIZE=false`，用下面的命令手工迁移时可设置 `DB_MIGRATIONS_RUN=false`。从既有实例升级时应保留原配置与工作目录。
