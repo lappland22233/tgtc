@@ -501,6 +501,109 @@ describe('TelegramService realtime stream', () => {
       }
     });
 
+    describe('queue recovery controls', () => {
+      afterEach(() => { mockedAxios.get.mockReset(); });
+
+      it('cancels the in-progress recovery getFile when the worker stops', async () => {
+        const controller = new AbortController();
+        const reason = new Error('worker stopped');
+        mockedAxios.get.mockRejectedValueOnce(streamPath502);
+        mockedAxios.get.mockImplementationOnce((_url, request) => new Promise((_resolve, reject) => {
+          request?.signal?.addEventListener?.('abort', () => reject(new Error('transport cancelled')), { once: true });
+          controller.abort(reason);
+          reject(new Error('recovery request did not observe cancellation'));
+        }));
+
+        await expect(createService().getRealtimeFileStream('file-id', 5, { signal: controller.signal }))
+          .rejects.toBe(reason);
+        expect(mockedAxios.get).toHaveBeenNthCalledWith(2, expect.stringMatching(/\/getFile$/),
+          expect.objectContaining({ signal: controller.signal }));
+        expect(mockedAxios.get).toHaveBeenCalledTimes(2);
+      });
+
+      it.each([
+        { filePath: '', target: '/stream/file/', calls: 3 },
+        { filePath: 'documents/sample.bin', target: '/file/bot', calls: 4 },
+      ])('hands a 429 from the recovered $target download back to the worker', async ({ filePath, target, calls }) => {
+        const controller = new AbortController();
+        const metadata = { data: { result: { file_id: 'file-id', file_path: filePath, file_size: 5 } } };
+        const body = Readable.from(['{"parameters":', '{"retry_after":1}}']);
+        mockedAxios.get.mockRejectedValueOnce(streamPath502).mockResolvedValueOnce(metadata);
+        if (filePath) mockedAxios.get.mockResolvedValueOnce(metadata);
+        mockedAxios.get.mockRejectedValueOnce({ response: { status: 429, data: body } });
+        mockedAxios.get.mockRejectedValue(new Error('inline retry after deferred 429'));
+
+        await expect(createService().getRealtimeFileStream('file-id', 5, { signal: controller.signal, deferRateLimit: true }))
+          .rejects.toMatchObject({ retryAfterSeconds: 1 });
+        expect(mockedAxios.get).toHaveBeenCalledTimes(calls);
+        expect(mockedAxios.get).toHaveBeenLastCalledWith(expect.stringContaining(target),
+          expect.objectContaining({ signal: controller.signal }));
+        expect(mockedAxios.get.mock.calls.every(([, request]) => request?.signal === controller.signal)).toBe(true);
+        expect(body.destroyed).toBe(true);
+      });
+
+      it.each([429, 503])('interrupts a recovered download waiting to retry HTTP %i', async status => {
+        const controller = new AbortController();
+        const reason = new Error('transfer cancelled during backoff');
+        mockedAxios.get.mockRejectedValueOnce(streamPath502);
+        mockedAxios.get.mockResolvedValueOnce({ data: { result: { file_id: 'file-id', file_path: '', file_size: 5 } } });
+        mockedAxios.get.mockRejectedValueOnce({ response: { status, data: { parameters: { retry_after: 1 } } } });
+        mockedAxios.get.mockRejectedValue(new Error('unexpected request after cancellation'));
+
+        const result = createService().getRealtimeFileStream('file-id', 5, { signal: controller.signal })
+          .catch(error => error);
+        await new Promise<void>(resolve => setImmediate(resolve));
+        expect(mockedAxios.get).toHaveBeenCalledTimes(3);
+        controller.abort(reason);
+        const stillWaiting = Symbol('retry timer still pending');
+        const nextTurn = await Promise.race([result, new Promise(resolve => setImmediate(() => resolve(stillWaiting)))]);
+        await result;
+        expect(nextTurn).toBe(reason);
+        expect(mockedAxios.get).toHaveBeenCalledTimes(3);
+      });
+
+      it.each(['cancel', 'defer'] as const)('keeps a held legacy recovery independent of a caller asking to %s', async policy => {
+        const service = createService();
+        const controller = new AbortController();
+        const reason = new Error('queued download cancelled');
+        const metadata = { data: { result: { file_id: 'same-file', file_path: '', file_size: 5 } } };
+        let release!: (response: typeof metadata) => void;
+        const held = new Promise<typeof metadata>(resolve => { release = resolve; });
+        let started!: () => void;
+        const legacyStarted = new Promise<void>(resolve => { started = resolve; });
+        let streams = 0;
+        let recoveries = 0;
+        mockedAxios.get.mockImplementation(async (url, request) => {
+          if (url.endsWith('/getFile')) {
+            if (++recoveries === 1) {
+              started();
+              return held;
+            }
+            if (policy === 'defer') throw { response: { status: 429, data: { parameters: { retry_after: 1 } } } };
+            return new Promise((_resolve, reject) => {
+              request?.signal?.addEventListener?.('abort', () => reject(new Error('transport cancelled')), { once: true });
+            });
+          }
+          if (++streams <= 2) throw streamPath502;
+          return { data: Readable.from(['hello']), headers: { 'content-length': '5' } };
+        });
+
+        const legacy = service.getRealtimeFileStream('same-file', 5);
+        await legacyStarted;
+        const options = policy === 'cancel' ? { signal: controller.signal } : { deferRateLimit: true };
+        const bounded = service.getRealtimeFileStream('same-file', 5, options)
+          .then(result => buffer(result.stream), error => error);
+        await new Promise<void>(resolve => setImmediate(resolve));
+        controller.abort(reason);
+        release(metadata);
+
+        expect(await buffer((await legacy).stream)).toEqual(Buffer.from('hello'));
+        if (policy === 'cancel') expect(await bounded).toBe(reason);
+        else expect(await bounded).toMatchObject({ retryAfterSeconds: 1 });
+        expect(recoveries).toBe(2);
+      });
+    });
+
     it('classifies the 502 "Exact file size" as a recoverable stream-path error', async () => {
       const { service, tmpDir } = await createRecoveryService();
       const localPath = path.join(tmpDir, 'file.bin');
