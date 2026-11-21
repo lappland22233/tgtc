@@ -1,3 +1,4 @@
+import { FileUploadProcessor } from '../jobs/file-upload.processor';
 import { BadRequestException, HttpException, HttpStatus } from '@nestjs/common';
 import * as fs from 'fs';
 import { promises as fsp } from 'fs';
@@ -235,10 +236,32 @@ describe('ChunkUploadService session quota', () => {
       statfsSpy.mockRestore();
     });
 
+    it('retains the overwrite source and receipt when the previous worker finishes', async () => {
+      const id = '11111111-1111-4111-8111-111111111111';
+      const signal = new AbortController().signal;
+      const old = await setupSession();
+      await (service as any).finalizeMerge(old.session, old.mergedPath, MB, signal);
+      const next = await setupSession();
+      fileService.createProcessingFile.mockResolvedValueOnce({ id, uploadVersion: 2, originalName: 'new.bin' });
+      await fsp.writeFile(next.mergedPath, Buffer.alloc(MB, 2));
+      await (service as any).finalizeMerge(next.session, next.mergedPath, MB, signal);
+      const nextPath = next.session.handoffPath;
+      await fsp.writeFile(nextPath + '.telegram.json', JSON.stringify({ uploadVersion: 2 }));
+      try {
+        const worker = Object.create(FileUploadProcessor.prototype);
+        await worker.removeUploadArtifacts(old.session.handoffPath, id, 1);
+        expect((await fsp.readFile(nextPath)).equals(Buffer.alloc(MB, 2))).toBe(true);
+        expect(JSON.parse(await fsp.readFile(nextPath + '.telegram.json', 'utf8'))).toEqual({ uploadVersion: 2 });
+      } finally {
+        await fsp.rm(nextPath, { force: true });
+        await fsp.rm(nextPath + '.telegram.json', { force: true });
+      }
+    });
+
     it('严格模式在 Worker 可启动前释放分片，仅保留 pending 上传源', async () => {
       uploadDiskBudget.isStrictMode.mockReturnValue(true);
       const { uploadId, session, mergedPath } = await setupSession();
-      const pendingPath = path.resolve(process.cwd(), 'tmp', 'uploads', 'pending', '11111111-1111-4111-8111-111111111111');
+      const pendingPath = path.resolve(process.cwd(), 'tmp', 'uploads', 'pending', '11111111-1111-4111-8111-111111111111.v1');
       fileUploadQueue.add.mockImplementation(async () => {
         await expect(fsp.stat((service as any).getChunkDir(uploadId))).rejects.toMatchObject({ code: 'ENOENT' });
         await expect(fsp.stat(pendingPath)).resolves.toMatchObject({ size: MB });
@@ -271,7 +294,7 @@ describe('ChunkUploadService session quota', () => {
         1,
       );
       await expect(fsp.stat(mergedPath)).rejects.toMatchObject({ code: 'ENOENT' });
-      await expect(fsp.stat(path.resolve(process.cwd(), 'tmp', 'uploads', 'pending', '11111111-1111-4111-8111-111111111111')))
+      await expect(fsp.stat(path.resolve(process.cwd(), 'tmp', 'uploads', 'pending', '11111111-1111-4111-8111-111111111111.v1')))
         .resolves.toMatchObject({ size: MB });
       expect(session.handoffPath).toContain('tmp');
     });
@@ -309,8 +332,8 @@ describe('ChunkUploadService session quota', () => {
 
     afterEach(async () => {
       statfsSpy.mockRestore();
-      await fsp.rm(path.join(pendingDir, '11111111-1111-4111-8111-111111111111'), { force: true });
-      await fsp.rm(path.join(pendingDir, '11111111-1111-4111-8111-111111111111.telegram.json'), { force: true });
+      await fsp.rm(path.join(pendingDir, '11111111-1111-4111-8111-111111111111.v1'), { force: true });
+      await fsp.rm(path.join(pendingDir, '11111111-1111-4111-8111-111111111111.v1.telegram.json'), { force: true });
     });
 
     it('merges 250 chunks in order via a single pipeline with bounded target-stream listeners', async () => {
@@ -358,7 +381,7 @@ describe('ChunkUploadService session quota', () => {
       const expected = Buffer.concat(
         Array.from({ length: totalChunks }, (_, i) => Buffer.alloc(chunkSize, i % 256)),
       );
-      const pendingPath = path.join(pendingDir, '11111111-1111-4111-8111-111111111111');
+      const pendingPath = path.join(pendingDir, '11111111-1111-4111-8111-111111111111.v1');
       const handedOff = await fsp.readFile(pendingPath);
       expect(handedOff.equals(expected)).toBe(true);
       await expect(fsp.stat((service as any).getChunkDir(uploadId))).rejects.toMatchObject({ code: 'ENOENT' });

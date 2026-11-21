@@ -29,7 +29,7 @@
     "gate:sqlite": "jest --runInBand scripts/data-migrator-utils.spec.ts && npm run test:migrations:sqlite && npm run test:integration:sqlite",
     "build:data-migrator": "tsc --target ES2021 --module commonjs --moduleResolution node --rootDir . --esModuleInterop --experimentalDecorators --emitDecoratorMetadata --skipLibCheck --outDir dist-migrator scripts/build-data-migrator.ts && node -e \"require('fs').writeFileSync('dist-migrator/build-data-migrator.js','\\\"use strict\\\";\\nrequire(\\\"./scripts/build-data-migrator.js\\\");\\n')\"",
     "check:ci": "npm ls --all && npm audit --omit=dev --audit-level=high && npm run typecheck && npm run build && npm run gate:sqlite && npm run test:integration:redis && npm run test:cov -- --runInBand",
-    "test:integration:redis": "cross-env REDIS_IT=1 jest --runInBand src/jobs/bull-real.integration.spec.ts"
+    "test:integration:redis": "cross-env REDIS_IT=1 jest --runInBand src/jobs/bull-real.integration.spec.ts src/jobs/upload-recovery.redis.integration.spec.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1161.0",
