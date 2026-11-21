@@ -124,7 +124,7 @@ if (BUILD_TESTING)
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/td/tdnet>
   )
   target_compile_definitions(test-workdir-cleanup PRIVATE WORKDIR_CLEANUP_CORE_ONLY=1)
-  target_link_libraries(test-workdir-cleanup PRIVATE tdutils)
+  target_link_libraries(test-workdir-cleanup PRIVATE tdnet tdutils)
 
   add_test(NAME test-file-stream COMMAND test-file-stream --filter FileStream)
   add_test(NAME test-workdir-cleanup COMMAND test-workdir-cleanup --filter WorkdirCleanup)

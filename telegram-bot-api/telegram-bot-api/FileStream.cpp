@@ -165,7 +165,7 @@ void FileStreamConnection::request_file_redownload() {
     return;
   }
   redownload_requested_ = true;
-  send_closure(client_, &Client::request_file_redownload, file_id_);
+  send_closure(client_, &Client::request_file_redownload, file_id_, cursor_.total_size);
 }
 
 void FileStreamConnection::try_read() {

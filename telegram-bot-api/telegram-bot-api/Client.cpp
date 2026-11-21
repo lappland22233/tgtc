@@ -28,6 +28,7 @@
 #include "td/utils/misc.h"
 #include "td/utils/PathView.h"
 #include "td/utils/port/path.h"
+#include "td/utils/port/Stat.h"
 #include "td/utils/Slice.h"
 #include "td/utils/SliceBuilder.h"
 #include "td/utils/Span.h"
@@ -7569,24 +7570,29 @@ class Client::TdOnGetChatMemberCallback final : public TdQueryCallback {
 
 class Client::TdOnDownloadFileCallback final : public TdQueryCallback {
  public:
-  TdOnDownloadFileCallback(Client *client, int32 file_id) : client_(client), file_id_(file_id) {
+  TdOnDownloadFileCallback(Client *client, int32 file_id, int64 request_id)
+      : client_(client), file_id_(file_id), request_id_(request_id) {
   }
 
   void on_result(object_ptr<td_api::Object> result) final {
+    auto it = client_->download_reservations_.find(file_id_);
+    if (it == client_->download_reservations_.end() || it->second.request_id != request_id_) {
+      return;
+    }
     if (result->get_id() == td_api::error::ID) {
       auto error = move_object_as<td_api::error>(result);
-      return client_->on_file_download(file_id_, td::Status::Error(error->code_, error->message_));
+      client_->release_download_budget(file_id_);
+      return client_->fail_file_download(file_id_, error->code_, error->message_);
     }
     CHECK(result->get_id() == td_api::file::ID);
-    if (client_->is_file_being_downloaded(file_id_)) {  // if download is yet not finished
-      client_->download_started_file_ids_.insert(file_id_);
-    }
+    it->second.started = true;
     client_->on_update_file(move_object_as<td_api::file>(result));
   }
 
  private:
   Client *client_;
   int32 file_id_;
+  int64 request_id_;
 };
 
 class Client::TdOnFileStreamRemoteFileCallback final : public TdQueryCallback {
@@ -7605,35 +7611,31 @@ class Client::TdOnFileStreamRemoteFileCallback final : public TdQueryCallback {
   int64 expected_size_;
 };
 
-class Client::TdOnFileStreamDownloadCallback final : public TdQueryCallback {
- public:
-  TdOnFileStreamDownloadCallback(Client *client, int32 file_id) : client_(client), file_id_(file_id) {
+// TDLib can retain a completed local location after a cleanup removed its file.
+static td::int64 downloaded_bytes_for_reservation(const td_api::localFile &local, bool bounded) {
+  if (bounded) {
+    // Only bytes in the requested prefix count toward an estimated-size window.
+    return local.download_offset_ == 0 ? td::max<td::int64>(0, local.downloaded_prefix_size_) : 0;
   }
+  return td::max<td::int64>(0, local.downloaded_size_);
+}
 
-  void on_result(object_ptr<td_api::Object> result) final {
-    if (result->get_id() == td_api::error::ID) {
-      auto error = move_object_as<td_api::error>(result);
-      auto it = client_->file_stream_listeners_.find(file_id_);
-      if (it != client_->file_stream_listeners_.end()) {
-        for (auto stream : it->second) {
-          send_closure(stream.actor, &FileStreamConnection::on_file_error,
-                       td::Status::Error(error->code_, error->message_));
-        }
-      }
-      return;
-    }
-    CHECK(result->get_id() == td_api::file::ID);
-    client_->on_update_file(move_object_as<td_api::file>(result));
+static td::int64 existing_download_bytes(const td_api::localFile &local, bool bounded) {
+  if (local.downloaded_size_ <= 0 || local.path_.empty()) {
+    return 0;
   }
-
- private:
-  Client *client_;
-  int32 file_id_;
-};
+  auto info = td::stat(local.path_);
+  return info.is_ok() && info.ok().is_reg_ ? td::min(downloaded_bytes_for_reservation(local, bounded), info.ok().size_)
+                                          : 0;
+}
 
 void Client::TdOnFileStreamRemoteFileCallback::on_result(object_ptr<td_api::Object> result) {
   if (client_->active_file_streams_.count(stream_id_) == 0) {
     return;
+  }
+  if (client_->closing_ || client_->logging_out_) {
+    auto error = client_->get_closing_error();
+    return send_closure(stream_, &FileStreamConnection::on_file_error, td::Status::Error(error.code, error.message));
   }
   if (result->get_id() == td_api::error::ID) {
     auto error = move_object_as<td_api::error>(result);
@@ -7648,39 +7650,40 @@ void Client::TdOnFileStreamRemoteFileCallback::on_result(object_ptr<td_api::Obje
     return send_closure(stream_, &FileStreamConnection::on_file_error, total_size.move_as_error());
   }
   auto resolved_size = total_size.move_as_ok();
-  auto existing_it = client_->file_stream_listeners_.find(file_id);
-  auto need_start_download = existing_it == client_->file_stream_listeners_.end() || existing_it->second.empty();
-  if (need_start_download) {
-    // Pre-write workdir space admission (see check_workdir_space). This runs before the stream is
-    // registered as a listener and before any response header is written, so a rejection is still
-    // delivered to the caller as a JSON error carrying HTTP 507 (file stream rule: never drop the
-    // connection before the first byte). A stream that joins an already-started download is not
-    // checked again, because that download was admitted when it started.
-    if (!client_->check_workdir_space_for_download(resolved_size, file->local_->downloaded_size_)) {
-      return send_closure(stream_, &FileStreamConnection::on_file_error,
-                          td::Status::Error(507, "Telegram workdir has insufficient free space to start a new download"));
-    }
+  if (!client_->start_file_download(file_id, resolved_size, existing_download_bytes(*file->local_, file->size_ <= 0),
+                                    file->size_ > 0)) {
+    return send_closure(stream_, &FileStreamConnection::on_file_error,
+                        td::Status::Error(507, "Telegram workdir has insufficient free space to start a new download"));
   }
   auto &listeners = client_->file_stream_listeners_[file_id];
   listeners.push_back({stream_id_, stream_});
   send_closure(stream_, &FileStreamConnection::on_file_ready, file_id, resolved_size, file->local_->path_,
                file->local_->download_offset_, file->local_->downloaded_prefix_size_,
                file->local_->is_downloading_completed_, file->local_->is_downloading_active_);
-  if (need_start_download) {
-    client_->send_request(make_object<td_api::downloadFile>(file_id, 1, 0, 0, false),
-                          td::make_unique<TdOnFileStreamDownloadCallback>(client_, file_id));
-  }
 }
 
 class Client::TdOnCancelDownloadFileCallback final : public TdQueryCallback {
  public:
+  TdOnCancelDownloadFileCallback(Client *client, int32 file_id, int64 request_id)
+      : client_(client), file_id_(file_id), request_id_(request_id) {
+  }
+
   void on_result(object_ptr<td_api::Object> result) final {
     if (result->get_id() == td_api::error::ID) {
       LOG(ERROR) << "Failed to cancel download file";
       return;
     }
     CHECK(result->get_id() == td_api::ok::ID);
+    auto it = client_->download_reservations_.find(file_id_);
+    if (it != client_->download_reservations_.end() && it->second.request_id == request_id_) {
+      client_->release_download_budget(file_id_);
+    }
   }
+
+ private:
+  Client *client_;
+  int32 file_id_;
+  int64 request_id_;
 };
 
 class Client::TdOnDeleteFileCallback final : public TdQueryCallback {
@@ -8869,8 +8872,7 @@ void Client::remove_file_stream(int64 stream_id, int32 file_id, bool remove_requ
                    td::make_unique<TdOnDeleteFileCallback>(this, file_id));
       break;
     case FileStreamLocalCopyAction::cancel_download:
-      send_request(make_object<td_api::cancelDownloadFile>(file_id, false),
-                   td::make_unique<TdOnCancelDownloadFileCallback>());
+      cancel_file_download(file_id);
       break;
     case FileStreamLocalCopyAction::skip_busy:
       // 并发 getFile 仍持有同一份本地副本：此刻不能删除（会把正在写的文件抽走）。
@@ -8888,7 +8890,7 @@ void Client::remove_file_stream(int64 stream_id, int32 file_id, bool remove_requ
   }
 }
 
-void Client::request_file_redownload(int32 file_id) {
+void Client::request_file_redownload(int32 file_id, int64 file_size) {
   if (closing_ || logging_out_) {
     return;
   }
@@ -8897,8 +8899,10 @@ void Client::request_file_redownload(int32 file_id) {
     return;
   }
   LOG(INFO) << "Request re-download of file " << file_id << " for file streaming";
-  send_request(make_object<td_api::downloadFile>(file_id, 1, 0, 0, false),
-               td::make_unique<TdOnFileStreamDownloadCallback>(this, file_id));
+  if (!start_file_download(file_id, file_size, 0, false, true)) {
+    cancel_file_download(file_id);
+    fail_file_download(file_id, 507, "Telegram workdir has insufficient free space to restore the file");
+  }
 }
 
 void Client::send(PromisedQueryPtr query) {
@@ -9642,6 +9646,48 @@ td_api::object_ptr<td_api::Object> Client::execute(object_ptr<td_api::Function> 
 
 void Client::on_update_file(object_ptr<td_api::file> file) {
   auto file_id = file->id_;
+  auto reservation = download_reservations_.find(file_id);
+  const bool started = reservation != download_reservations_.end() && reservation->second.started;
+  if (reservation != download_reservations_.end() && !started && !file->local_->is_downloading_active_ &&
+      !file->local_->is_downloading_completed_) {
+    return;  // A previous window stopped while its successor is awaiting TDLib's response.
+  }
+  if (started) {
+    auto &lease = reservation->second;
+    const auto downloaded = downloaded_bytes_for_reservation(*file->local_, lease.bounded);
+    const auto remaining = td::max<int64>(0, lease.end - downloaded);
+    auto &budget = parameters_->shared_data_->workdir_download_budget_;
+    if (remaining > lease.held && !lease.cancelling) {
+      // The local copy shrank or disappeared after admission. Reclaim the lost progress
+      // from free space before another client can reserve the same bytes.
+      if (!budget.reserve(lease.held, get_workdir_free_bytes(parameters_->working_directory_),
+                          parameters_->workdir_min_free_bytes_, remaining)) {
+        parameters_->shared_data_->workdir_space_rejections_.fetch_add(1, std::memory_order_relaxed);
+        cancel_file_download(file_id);
+        return fail_file_download(file_id, 507, "Telegram workdir has insufficient free space to restore the file");
+      }
+    } else {
+      budget.reduce(lease.held, remaining);
+    }
+    if (!file->local_->is_downloading_completed_ && lease.bounded && !lease.cancelling && !closing_ &&
+        !logging_out_ && downloaded >= lease.end) {
+      // TDLib limits an estimated/unknown file to the reserved part window. Reserve its next
+      // window (or its exact remaining size) before asking TDLib for more bytes.
+      if (!start_file_download(file_id, file->size_, downloaded, file->size_ > 0, true)) {
+        cancel_file_download(file_id);
+        return fail_file_download(file_id, 507, "Telegram workdir has insufficient free space to continue the download");
+      }
+      return;
+    }
+    // A cold stream can first report inactive before the transfer starts. Its charge stays
+    // live until an actual stop, completion, or acknowledgement of cancellation.
+    if (file->local_->is_downloading_completed_ ||
+        (!file->local_->is_downloading_active_ && (lease.was_active || file_stream_listeners_.count(file_id) == 0))) {
+      release_download_budget(file_id);
+    } else if (file->local_->is_downloading_active_) {
+      lease.was_active = true;
+    }
+  }
   auto stream_it = file_stream_listeners_.find(file_id);
   if (stream_it != file_stream_listeners_.end()) {
     for (auto stream : stream_it->second) {
@@ -9655,15 +9701,14 @@ void Client::on_update_file(object_ptr<td_api::file> file) {
   }
   if (!parameters_->local_mode_ && file->local_->downloaded_size_ > MAX_DOWNLOAD_FILE_SIZE) {
     if (file->local_->is_downloading_active_) {
-      send_request(make_object<td_api::cancelDownloadFile>(file_id, false),
-                   td::make_unique<TdOnCancelDownloadFileCallback>());
+      cancel_file_download(file_id);
     }
     return on_file_download(file_id, td::Status::Error(400, "Bad Request: file is too big"));
   }
   if (file->local_->is_downloading_completed_) {
     return on_file_download(file_id, std::move(file));
   }
-  if (!file->local_->is_downloading_active_ && download_started_file_ids_.count(file_id)) {
+  if (!file->local_->is_downloading_active_ && started) {
     // also includes all 5xx and 429 errors
     if (closing_ || logging_out_) {
       auto error = get_closing_error();
@@ -10283,7 +10328,9 @@ void Client::on_closed() {
   active_file_streams_.clear();
   pending_file_streams_.clear();
   file_stream_listeners_.clear();
-  download_started_file_ids_.clear();
+  while (!download_reservations_.empty()) {
+    release_download_budget(download_reservations_.begin()->first);
+  }
 
   if (logging_out_) {
     parameters_->shared_data_->webhook_db_->erase(bot_token_with_dc_);
@@ -17274,38 +17321,87 @@ td::Status Client::process_release_local_file_query(PromisedQueryPtr &query) {
 }
 
 void Client::do_get_file(object_ptr<td_api::file> file, PromisedQueryPtr query) {
+  if (closing_ || logging_out_) {
+    auto error = get_closing_error();
+    return fail_query_with_error(std::move(query), error.code, error.message);
+  }
   if (!parameters_->local_mode_ &&
       td::max(file->expected_size_, file->local_->downloaded_size_) > MAX_DOWNLOAD_FILE_SIZE) {  // speculative check
     return fail_query(400, "Bad Request: file is too big", std::move(query));
   }
 
   auto file_id = file->id_;
-  // Pre-write workdir space admission (see check_workdir_space): reject before the download
-  // listener is registered and before any local copy is written. The caller receives a single JSON
-  // error with HTTP 507 and no side effects, so a too-tight workdir never fills up from concurrent
-  // multi-GiB getFile downloads that all looked affordable at start time.
-  auto known_size = file->size_ > 0 ? file->size_
-                                    : (file->expected_size_ > 0 ? file->expected_size_ : static_cast<int64>(-1));
-  if (!check_workdir_space_for_download(known_size, td::max<int64>(0, file->local_->downloaded_size_))) {
+  auto size = file->size_ > 0 ? file->size_ : file->expected_size_;
+  if (!start_file_download(file_id, size, existing_download_bytes(*file->local_, file->size_ <= 0), file->size_ > 0)) {
     return fail_query(507, "Telegram workdir has insufficient free space to start a new download", std::move(query));
   }
   file_download_listeners_[file_id].push_back(std::move(query));
-  send_request(make_object<td_api::downloadFile>(file_id, 1, 0, 0, false),
-               td::make_unique<TdOnDownloadFileCallback>(this, file_id));
 }
 
-bool Client::check_workdir_space_for_download(int64 file_size, int64 existing_local_size) {
-  auto free_bytes = get_workdir_free_bytes(parameters_->working_directory_);
-  auto check = check_workdir_space(free_bytes, parameters_->workdir_min_free_bytes_, file_size, existing_local_size,
-                                   parameters_->workdir_unknown_file_min_free_bytes_);
-  if (!check.allowed) {
-    parameters_->shared_data_->workdir_space_rejections_.fetch_add(1, std::memory_order_relaxed);
-    LOG(WARNING) << "Rejected a new file download: insufficient free space in Telegram workdir"
-                 << td::tag("free_bytes", check.free_bytes) << td::tag("min_free_bytes", check.min_free_bytes)
-                 << td::tag("required_bytes", check.required_bytes) << td::tag("file_size", file_size)
-                 << td::tag("unknown_size", check.unknown_size) << td::tag("free_space_known", check.free_space_known);
+bool Client::start_file_download(int32 file_id, int64 file_size, int64 downloaded, bool exact_size, bool refresh) {
+  auto it = download_reservations_.find(file_id);
+  if (it != download_reservations_.end() && !it->second.cancelling && !refresh) {
+    return true;  // Every listener for this TDLib file shares the same request and charge.
   }
-  return check.allowed;
+  auto end = file_size;
+  if (!exact_size) {
+    // TDLib schedules whole parts (at most 512 KiB). Align the request so a partial last part
+    // cannot cross the reservation. A zero configured margin still admits one part at a time.
+    constexpr int64 part = 512 << 10;
+    constexpr int64 max_end = std::numeric_limits<int64>::max() - part;
+    auto step = td::min(max_end - td::min(downloaded, max_end),
+                        td::max(part, parameters_->workdir_unknown_file_min_free_bytes_));
+    auto target = td::min(max_end, file_size > downloaded ? file_size : downloaded + step);
+    end = ((target + part - 1) / part) * part;
+  }
+  const auto free_bytes = get_workdir_free_bytes(parameters_->working_directory_);
+  auto &lease = download_reservations_[file_id];
+  if (!parameters_->shared_data_->workdir_download_budget_.reserve(
+          lease.held, free_bytes, parameters_->workdir_min_free_bytes_, td::max<int64>(0, end - downloaded))) {
+    if (lease.request_id == 0) {
+      download_reservations_.erase(file_id);
+    }
+    parameters_->shared_data_->workdir_space_rejections_.fetch_add(1, std::memory_order_relaxed);
+    LOG(WARNING) << "Insufficient unreserved workdir space" << td::tag("free_bytes", free_bytes)
+                 << td::tag("file_id", file_id) << td::tag("planned_end", end);
+    return false;
+  }
+  lease.end = end;
+  lease.request_id = ++next_download_request_id_;
+  lease.started = false;
+  lease.was_active = false;
+  lease.cancelling = false;
+  lease.bounded = !exact_size;
+  send_request(make_object<td_api::downloadFile>(file_id, 1, 0, lease.bounded ? end : 0, false),
+               td::make_unique<TdOnDownloadFileCallback>(this, file_id, lease.request_id));
+  return true;
+}
+
+void Client::release_download_budget(int32 file_id) {
+  auto it = download_reservations_.find(file_id);
+  if (it != download_reservations_.end()) {
+    parameters_->shared_data_->workdir_download_budget_.reduce(it->second.held, 0);
+    download_reservations_.erase(it);
+  }
+}
+
+void Client::cancel_file_download(int32 file_id) {
+  auto it = download_reservations_.find(file_id);
+  if (it != download_reservations_.end() && !it->second.cancelling) {
+    it->second.cancelling = true;
+    send_request(make_object<td_api::cancelDownloadFile>(file_id, false),
+                 td::make_unique<TdOnCancelDownloadFileCallback>(this, file_id, it->second.request_id));
+  }
+}
+
+void Client::fail_file_download(int32 file_id, int code, const td::string &message) {
+  auto streams = file_stream_listeners_.find(file_id);
+  if (streams != file_stream_listeners_.end()) {
+    for (auto stream : streams->second) {
+      send_closure(stream.actor, &FileStreamConnection::on_file_error, td::Status::Error(code, message));
+    }
+  }
+  on_file_download(file_id, td::Status::Error(code, message));
 }
 
 void Client::on_local_file_delete_attempt() {
@@ -17337,7 +17433,6 @@ void Client::on_file_download(int32 file_id, td::Result<object_ptr<td_api::file>
   }
   auto queries = std::move(it->second);
   file_download_listeners_.erase(it);
-  download_started_file_ids_.erase(file_id);
   for (auto &query : queries) {
     if (r_file.is_error()) {
       const auto &error = r_file.error();

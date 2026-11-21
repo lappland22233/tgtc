@@ -61,6 +61,7 @@ struct SharedData {
   td::ActorId<WorkdirCleanupManager> workdir_cleanup_manager_;
 
   // not thread-safe, must be used from a single thread
+  WorkdirDownloadBudget workdir_download_budget_;
   td::ListNode query_list_;
   td::unique_ptr<td::KeyValueSyncInterface> webhook_db_;
   td::unique_ptr<td::TQueue> tqueue_;

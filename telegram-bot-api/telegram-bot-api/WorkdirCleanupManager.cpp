@@ -96,8 +96,28 @@ WorkdirSpaceCheck check_workdir_space(td::int64 free_bytes, td::int64 min_free_b
   } else {
     result.required_bytes = result.min_free_bytes + result.increment_bytes;
   }
-  result.allowed = result.free_bytes >= result.required_bytes;
+  result.allowed = result.free_bytes >= result.min_free_bytes &&
+                   result.free_bytes - result.min_free_bytes >= result.increment_bytes;
   return result;
+}
+
+bool WorkdirDownloadBudget::reserve(td::int64 &held, td::int64 free_bytes, td::int64 min_free_bytes,
+                                    td::int64 wanted) {
+  const auto other = reserved_ - held;
+  const auto available = free_bytes < other ? -1 : free_bytes - other;
+  if (!check_workdir_space(available, min_free_bytes, wanted, 0, 0).allowed) {
+    return false;
+  }
+  reserved_ = other + wanted;
+  held = wanted;
+  return true;
+}
+
+void WorkdirDownloadBudget::reduce(td::int64 &held, td::int64 remaining) {
+  if (remaining < held) {
+    reserved_ -= held - remaining;
+    held = remaining;
+  }
 }
 
 bool is_workdir_cleanup_candidate(td::Slice workdir, td::Slice path) {
@@ -114,6 +134,11 @@ bool is_workdir_cleanup_candidate(td::Slice workdir, td::Slice path) {
   }
   auto relative = td::Slice(candidate).substr(root.size()).str();
   if (relative.find("..") != td::string::npos) {
+    return false;
+  }
+  // Client stores the uploaded webhook certificate at <workdir>/<bot>/cert.pem.
+  const auto bot_dir_end = relative.find(TD_DIR_SLASH);
+  if (bot_dir_end != td::string::npos && relative.substr(bot_dir_end + 1) == "cert.pem") {
     return false;
   }
   // Never treat live TDLib session/binlog/database files as cache candidates.

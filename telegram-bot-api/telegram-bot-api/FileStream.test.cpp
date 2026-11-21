@@ -86,6 +86,9 @@ TEST(FileStream, LocalCopyDecision) {
 
   // An aborted no-cache stream must never delete the copy (it may be resumed).
   ASSERT_EQ(cancel, decide(true, false, false, false));
+  ASSERT_EQ(none, decide(true, false, false, true));
+  ASSERT_EQ(none, decide(false, false, false, true));
+  ASSERT_EQ(none, decide(false, false, true, false));
 
   // Another stream still reads the same copy: leave it alone, without counting it as a failure.
   ASSERT_EQ(none, decide(true, true, true, false));
