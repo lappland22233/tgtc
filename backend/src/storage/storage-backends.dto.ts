@@ -105,7 +105,7 @@ export class GDriveOAuthClientDto {
 
   @IsOptional()
   @IsString()
-  @Length(1, 512)
+  @Length(0, 512)
   redirectUri?: string;
 }
 
@@ -116,33 +116,8 @@ export class GDriveAuthUrlDto {
 
   @IsOptional()
   @IsString()
-  @Length(1, 1024)
-  state?: string;
-}
-
-export class GDriveCompleteAuthDto {
-  @IsOptional()
-  @IsString()
   @Length(1, 64)
   accountId?: string;
-
-  @IsString()
-  @Length(1, 512)
-  code: string;
-
-  @IsString()
-  @Length(1, 512)
-  redirectUri: string;
-
-  @IsOptional()
-  @IsString()
-  @Length(0, 64)
-  name?: string;
-
-  @IsOptional()
-  @IsString()
-  @Length(1, 1024)
-  state?: string;
 }
 
 export class GDriveRotateAuthDto {
@@ -153,6 +128,22 @@ export class GDriveRotateAuthDto {
   @IsString()
   @Length(1, 512)
   redirectUri: string;
+
+  @IsString()
+  @Length(1, 1024)
+  state: string;
+}
+
+export class GDriveCompleteAuthDto extends GDriveRotateAuthDto {
+  @IsOptional()
+  @IsString()
+  @Length(1, 64)
+  accountId?: string;
+
+  @IsOptional()
+  @IsString()
+  @Length(0, 64)
+  name?: string;
 }
 
 export class UpdateStorageSettingsDto {

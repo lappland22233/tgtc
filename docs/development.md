@@ -51,7 +51,7 @@ frontend/src/
 
 PostgreSQL 专项需要独立测试服务：设置 `DB_TYPE=postgres` 及 `DB_HOST`、`DB_PORT`、`DB_USERNAME`、`DB_PASSWORD`、`DB_DATABASE`，执行 `npm run migration:run`、检查无待执行迁移、再次执行确认幂等，然后执行 `npm run test:integration:pg`。测试账号需要创建/删除隔离测试数据库的权限；业务回归本身只写入按次创建的隔离库。该命令同时执行 SQLite 与 PostgreSQL 的安全审查回归，不能用跳过 PG 的普通测试运行替代。
 
-原生和发行检查仍是独立 CI 作业：`scripts/release/tests/*.test.sh`、ShellCheck、CMake/CTest 和 Linux ZIP 构建验签。前后端质量检查通过不代表这些平台相关作业已执行。覆盖率报告输出到各组件的 `coverage/`，CI 保留报告供评审。
+CI 另有两个独立作业，分别运行源码部署脚本的 ShellCheck 与 `scripts/release/tests/*.test.sh` 回归，以及 CMake 构建与 CTest。后端作业还会重建离线迁移工具并检查与仓库产物一致。覆盖率报告输出到各组件的 `coverage/`，CI 保留报告供评审。
 
 ### 后端
 

@@ -63,6 +63,21 @@ describe('GDriveStorageDriver（mock Drive v3 REST）', () => {
     driver = new GDriveStorageDriver(oauth, backends);
   });
 
+  it('aggregates fragmented input at most once per output block', async () => {
+    const input = Array.from({ length: 11 }, (_, value) => Buffer.alloc(3, value));
+    const expected = Buffer.concat(input);
+    const concat = jest.spyOn(Buffer, 'concat');
+    const output: Buffer[] = [];
+    try {
+      for await (const block of (driver as any).chunked(Readable.from(input), 8)) output.push(block);
+      expect(concat.mock.calls.length).toBeLessThanOrEqual(output.length);
+      expect(output.map(block => block.length)).toEqual([8, 8, 8, 8, 1]);
+    } finally {
+      concat.mockRestore();
+    }
+    expect(Buffer.concat(output)).toEqual(expected);
+  });
+
   it('小文件（<=5MB）走 multipart：元数据+字节一体提交，返回 fileId', async () => {
     api.post.mockResolvedValue({ data: { id: 'file-small', size: '4' } });
     const result = await driver.upload(makeCtx(), {

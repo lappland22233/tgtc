@@ -1,5 +1,5 @@
 import { existsSync, createReadStream } from 'fs';
-import { readFile, writeFile } from 'fs/promises';
+import { readFile, unlink, writeFile } from 'fs/promises';
 import { FileUploadProcessor } from './file-upload.processor';
 import { AccountUploadUnavailableError } from '../telegram-account-pool/account-aware-upload.service';
 
@@ -399,27 +399,22 @@ describe('FileUploadProcessor 账号池上传选号', () => {
     mockedReadFile.mockRejectedValue(new Error('ENOENT'));
   });
 
-  it('账号繁忙超过普通重试窗口仍保留源文件并等待名额', async () => {
-    jest.useFakeTimers();
-    try {
-      const repo = makeRepo();
-      repo.findOne.mockResolvedValue(makeFile());
-      repo.findOneOrFail.mockResolvedValueOnce(makeFile({ uploadStage: 'uploading' }))
-        .mockResolvedValue(makeFile({ uploadStage: 'remote_committed', telegramFileId: 'tg' }));
-      const accountUpload = { isActive: () => true, upload: jest.fn()
-        .mockRejectedValueOnce(new AccountUploadUnavailableError(true, 120_000))
-        .mockResolvedValue({ fileId: 'tg', fileSize: 5, chatId: '', messageId: '', accountId: 'a' }) };
-      const telegram = { uploadFile: jest.fn() };
-      const processor = makeProcessor(repo, telegram, makeFileService(), accountUpload);
-      const pending = processor.uploadToTelegram(makeJob(2));
-      await jest.advanceTimersByTimeAsync(0);
-      expect(accountUpload.upload).toHaveBeenCalledTimes(1);
-      expect(repo.update.mock.calls.some(c => (c[1] as any).uploadStage === 'failed')).toBe(false);
-      await jest.advanceTimersByTimeAsync(60_000);
-      await pending;
-      expect(accountUpload.upload).toHaveBeenCalledTimes(2);
-      expect(telegram.uploadFile).not.toHaveBeenCalled();
-    } finally { jest.useRealTimers(); }
+  it('账号繁忙时释放工作槽并保留最后一次远端重试和上传源', async () => {
+    const repo = makeRepo();
+    repo.findOne.mockResolvedValue(makeFile());
+    repo.findOneOrFail.mockResolvedValue(makeFile({ uploadStage: 'uploading' }));
+    const accountUpload = { isActive: () => true, upload: jest.fn()
+      .mockRejectedValueOnce(new AccountUploadUnavailableError(true, 120_000)) };
+    const processor = makeProcessor(repo, { uploadFile: jest.fn() }, makeFileService(), accountUpload);
+    const queue = { add: jest.fn().mockResolvedValue({}) };
+    const job = Object.assign(makeJob(2), { queue });
+    await processor.uploadToTelegram(job);
+    expect(accountUpload.upload).toHaveBeenCalledTimes(1);
+    expect(queue.add).toHaveBeenCalledWith('upload',
+      { ...job.data, admissionAttempt: 1 },
+      expect.objectContaining({ attempts: 1, delay: 60_000 }));
+    expect(repo.update.mock.calls.some(call => (call[1] as any).uploadStage === 'failed')).toBe(false);
+    expect(unlink).not.toHaveBeenCalled();
   });
 
   it('非严格任务：池化上传优先，并把实际上传账号写入回执与定位登记', async () => {

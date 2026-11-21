@@ -5,11 +5,15 @@
 //
 #include "telegram-bot-api/WorkdirCleanupManager.h"
 
+#include "td/net/SslCtx.h"
 #include "td/utils/filesystem.h"
 #include "td/utils/port/path.h"
 #include "td/utils/tests.h"
 
+#include <chrono>
+#include <filesystem>
 #include <limits>
+#include <thread>
 #include <unordered_map>
 
 namespace {
@@ -175,7 +179,7 @@ TEST(WorkdirCleanup, SpaceCheckClampsAndSaturates) {
   // An overflowing required size saturates instead of wrapping to a small value.
   auto saturated = check_workdir_space(MAX, MAX, MAX, 0, 0);
   ASSERT_EQ(MAX, saturated.required_bytes);
-  ASSERT_TRUE(saturated.allowed);  // free == saturated required_bytes
+  ASSERT_FALSE(saturated.allowed);  // The true requirement exceeds INT64_MAX.
   auto short_free = check_workdir_space(MAX - 1, MAX, MAX, 0, 0);
   ASSERT_EQ(MAX, short_free.required_bytes);
   ASSERT_FALSE(short_free.allowed);
@@ -219,4 +223,60 @@ TEST(WorkdirCleanup, ProtectsTdlibPersistentFilesWhileCleaningMedia) {
   ASSERT_TRUE(td::stat(sqlite).is_ok());
   ASSERT_TRUE(td::stat(sqlite_wal).is_ok());
   ASSERT_TRUE(td::stat(sqlite_shm).is_ok());
+}
+
+TEST(WorkdirCleanup, KeepsPerBotCertificateForBothCleanupPolicies) {
+  // Public, self-signed test certificate. Reopen it with the same TLS loader used by WebhookActor.
+  const td::Slice pem = R"PEM(-----BEGIN CERTIFICATE-----
+MIIBjTCCATOgAwIBAgIUc7BnT6bFKR9pBFZPCU9+jC3wJJkwCgYIKoZIzj0EAwIw
+HDEaMBgGA1UEAwwRdGd0Yy1jbGVhbnVwLXRlc3QwHhcNMjYxMTIxMTE0NTU0WhcN
+MzYxMTE4MTE0NTU0WjAcMRowGAYDVQQDDBF0Z3RjLWNsZWFudXAtdGVzdDBZMBMG
+ByqGSM49AgEGCCqGSM49AwEHA0IABCXYXYLrbBSN8lqTqBygO9MPDUrKMKDJUSAD
+1iTMHmZLnAIcfcK03/vFfsfxrZOj6dKDn5dQUfeUg5ZpAkHUiPWjUzBRMB0GA1Ud
+DgQWBBSDPFXj+u4tyVnINE+kNXBSlImVRzAfBgNVHSMEGDAWgBSDPFXj+u4tyVnI
+NE+kNXBSlImVRzAPBgNVHRMBAf8EBTADAQH/MAoGCCqGSM49BAMCA0gAMEUCIQD3
+QrtX/Lb7M7HHU06cLkXL7cF/jiRPDOOcnVJ7ngMSkwIgBX+Y0ISwnr+905NiVp5r
+JLsZNjMCRDJvsGLLEbhSWIU=
+-----END CERTIFICATE-----
+)PEM";
+  for (bool ttl : {false, true}) {
+    TempWorkdir dir;
+    auto bot = std::filesystem::u8path(dir.path) / "bot";
+    std::filesystem::create_directories(bot / "documents");
+    auto cert = (bot / "cert.pem").string();
+    auto media = (bot / "documents" / "cert.pem").string();
+    td::write_file(cert, pem).ensure();
+    td::write_file(media, "cache").ensure();
+    auto config = config_for(dir);
+    if (ttl) {
+      config.threshold_bytes = 0;
+      config.file_ttl = 1;
+      std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+    }
+    auto result = telegram_bot_api::run_workdir_cleanup(config, {});
+    ASSERT_EQ(1, result.deleted_files);
+    ASSERT_TRUE(td::stat(media).is_error());
+    ASSERT_EQ(pem.str(), td::read_file_str(cert).move_as_ok());
+#if TD_HAVE_OPENSSL
+    ASSERT_TRUE(td::SslCtx::create(cert, td::SslCtx::VerifyPeer::On).is_ok());
+#endif
+  }
+}
+
+TEST(WorkdirCleanup, ReservesRemainingBytesAcrossClientsAndReleasesOnce) {
+  telegram_bot_api::WorkdirDownloadBudget budget;
+  td::int64 first = 0, second = 0;
+  ASSERT_TRUE(budget.reserve(first, 100, 20, 60));
+  ASSERT_TRUE(budget.reserve(first, 100, 20, 60));
+  ASSERT_FALSE(budget.reserve(second, 100, 20, 30));
+  ASSERT_EQ(0, second);
+  budget.reduce(first, 40);  // 20 bytes are now reflected in filesystem free space
+  ASSERT_FALSE(budget.reserve(second, 80, 20, 30));
+  ASSERT_TRUE(budget.reserve(second, 80, 20, 20));
+  ASSERT_FALSE(budget.reserve(first, 80, 20, 41));
+  ASSERT_EQ(40, first);
+  budget.reduce(first, 0);
+  budget.reduce(first, 0);
+  ASSERT_TRUE(budget.reserve(second, 80, 20, 60));
+  ASSERT_FALSE(budget.reserve(first, -1, 20, 1));
 }

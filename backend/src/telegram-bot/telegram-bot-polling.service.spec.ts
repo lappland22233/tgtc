@@ -275,11 +275,11 @@ describe('TelegramBotPollingService（池化入站循环真跑）', () => {
  * 入站可观测性：把「空转」这类无日志、无异常的静默失效变成可见事实。
  */
 describe('TelegramBotPollingService（入站可观测性）', () => {
-  it('池化模式消费更新：推进 offset、把 accountId 传给分派层并计入快照', async () => {
+  it('池化模式消费更新：推进 offset、分派时区分账号别名与实际 Bot 身份', async () => {
     const { service, store, dispatch } = makeService({
       env: { TELEGRAM_BOT_UPDATES_ENABLED: 'true', TELEGRAM_BOT_POLL_TIMEOUT_SECONDS: '5' },
-      accountIds: ['123456'],
-      primaryAccountId: '123456',
+      accountIds: ['primary-alias'],
+      primaryAccountId: 'primary-alias',
       updateBatches: [[{ update_id: 939050190 }]],
     });
 
@@ -288,16 +288,16 @@ describe('TelegramBotPollingService（入站可观测性）', () => {
 
     expect(dispatch.handleUpdate).toHaveBeenCalledWith(
       { update_id: 939050190 },
-      { accountId: '123456' },
+      { accountId: 'primary-alias', receiverBotId: '123456' },
     );
-    expect(store.get(`${BOT_UPDATE_OFFSET_KEY}:123456`)).toBe('939050191');
+    expect(store.get(`${BOT_UPDATE_OFFSET_KEY}:primary-alias`)).toBe('939050191');
 
     const snapshot = service.snapshot();
     expect(snapshot.enabled).toBe(true);
     expect(snapshot.mode).toBe('pooled');
     expect(snapshot.running).toBe(true);
     expect(snapshot.accounts).toHaveLength(1);
-    expect(snapshot.accounts[0].accountId).toBe('123456');
+    expect(snapshot.accounts[0].accountId).toBe('primary-alias');
     expect(snapshot.accounts[0].offset).toBe(939050191);
     expect(snapshot.accounts[0].updateCount).toBe(1);
     expect(snapshot.accounts[0].pollCount).toBeGreaterThanOrEqual(1);

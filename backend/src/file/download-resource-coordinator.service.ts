@@ -1149,6 +1149,28 @@ export class DownloadResourceCoordinatorService {
     return this.buildReservationHandle(record);
   }
 
+  /** Grow a disk-only spool before writing bytes beyond its initial reservation. */
+  extendDiskReservation(reservation: DownloadReservation, additionalBytes: number): void {
+    const record = this.reservations.get(reservation.id);
+    if (!record?.active || record.countsTowardCache || !Number.isSafeInteger(additionalBytes) || additionalBytes <= 0) {
+      throw new Error('无法扩充磁盘预约');
+    }
+    if (this.shuttingDown) throw this.shuttingDownError();
+    const freeBytes = this.probeAdmissionFreeBytes();
+    if (freeBytes < 0) throw this.probeUnavailableError();
+    // Amortize filesystem probes on large streams. Near the limit, reserve only the current write.
+    let bytes = Math.max(additionalBytes, 8 * 1024 * 1024);
+    let verdict = this.evaluateGrant({ bytes, countsTowardCache: false, freeBytes });
+    if (!verdict.ok && bytes > additionalBytes) {
+      bytes = additionalBytes;
+      verdict = this.evaluateGrant({ bytes, countsTowardCache: false, freeBytes });
+    }
+    if (!verdict.ok) throw this.insufficientStorageError(verdict.reason, bytes, freeBytes);
+    record.grantedBytes += bytes;
+    record.remainingBytes += bytes;
+    this.reservedPendingBytes += bytes;
+  }
+
   private buildReservationHandle(record: ReservationRecord): DownloadReservation {
     const service = this;
     return {

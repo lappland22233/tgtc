@@ -221,7 +221,7 @@ client.interceptors.response.use(
       const data = error.response?.data as { message?: string; code?: number } | undefined;
       const msg = data?.message || '此分享链接已失效';
       console.warn('[API] 分享链接已失效:', msg, error.config?.url);
-      return Promise.reject(new Error(msg));
+      return Promise.reject(Object.assign(new Error(msg), { cause: error }));
     }
 
     // 网络错误（无响应）

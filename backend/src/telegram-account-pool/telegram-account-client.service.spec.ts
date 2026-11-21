@@ -21,4 +21,17 @@ describe('Telegram account transfer streams', () => {
     await client.sendDocumentStream('a', '1:test', 'chat', Readable.from(['x']), 'a', 1);
     expect(post.mock.calls[0][2]).toEqual(expect.objectContaining({ maxRedirects: 0 }));
   });
+  it('serializes allowed_updates as a JSON string in getUpdates', async () => {
+    const get = jest.spyOn(axios, 'get').mockResolvedValue({ data: { ok: true, result: [] } });
+    const client = new TelegramAccountClientService({ get: () => undefined } as any);
+    await client.getUpdates('a', '1:test', 10, 30);
+    expect(get).toHaveBeenCalledWith(
+      expect.stringContaining('/getUpdates'),
+      expect.objectContaining({
+        params: expect.objectContaining({
+          allowed_updates: JSON.stringify(['message', 'channel_post']),
+        }),
+      }),
+    );
+  });
 });

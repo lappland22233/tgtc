@@ -90,7 +90,11 @@ const BYTE_UPLOAD = /sendDocument|sendMedia|uploadFile|InputFile|openRealtimeStr
 
 /** 命中任一禁用片段的扩散链路文件（返回可读的相对路径，便于直接定位） */
 function byteUploadOffenders(): string[] {
-  return diffusionSources().filter((rel) => BYTE_UPLOAD.test(read(resolve(BACKEND_SRC, rel))));
+  return diffusionSources().filter((rel) => {
+    // 允许通过可插拔存储路由向远端对象存储（如 Google Drive）直传；禁止向 Telegram 扩散链上传字节
+    const content = read(resolve(BACKEND_SRC, rel)).replace(/storageRouter\.upload\s*\(/g, '');
+    return BYTE_UPLOAD.test(content);
+  });
 }
 
 /** 收集「命中任一禁用片段」的文件（返回可读的相对路径，便于直接定位） */

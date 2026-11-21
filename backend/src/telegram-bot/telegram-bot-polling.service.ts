@@ -356,7 +356,7 @@ export class TelegramBotPollingService implements OnModuleInit, OnApplicationShu
             state.updateCount += 1;
             await this.dispatchService.handleUpdate(
               update as unknown as Parameters<TelegramBotDispatchService['handleUpdate']>[0],
-              { accountId: state.accountId },
+              { accountId: state.accountId, receiverBotId: account.token.split(':')[0] },
             );
           }
           await this.persistOffset(this.offsetKeyFor(state.accountId), state.offset);

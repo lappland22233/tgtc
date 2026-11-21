@@ -5,6 +5,7 @@ import { AuditModule } from '../common/services/audit.module';
 import { ConfigCacheModule } from '../common/services/config-cache.module';
 // 告警引擎：存储池容量耗尽告警复用全站告警体系（与 BOT_POOL_* 同一模式）
 import { AlertModule } from '../alert/alert.module';
+import { GDriveOAuthStore } from './gdrive-oauth-store.service';
 import { GDriveOAuthService } from './gdrive-oauth.service';
 import { S3StorageDriver } from './drivers/s3.driver';
 import { WebDavStorageDriver } from './drivers/webdav.driver';
@@ -38,6 +39,7 @@ import { StorageRouterService } from './storage-router.service';
     StorageDriverRegistry,
     StorageBackendsService,
     StorageRouterService,
+    GDriveOAuthStore,
     GDriveOAuthService,
     S3StorageDriver,
     WebDavStorageDriver,

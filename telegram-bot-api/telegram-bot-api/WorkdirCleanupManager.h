@@ -5,7 +5,9 @@
 //
 #pragma once
 
+#ifndef WORKDIR_CLEANUP_CORE_ONLY
 #include "td/actor/actor.h"
+#endif
 #include "td/utils/common.h"
 #include "td/utils/Slice.h"
 
@@ -74,6 +76,16 @@ td::int64 get_workdir_free_bytes(td::Slice workdir);
 WorkdirSpaceCheck check_workdir_space(td::int64 free_bytes, td::int64 min_free_bytes, td::int64 file_size,
                                       td::int64 existing_local_size, td::int64 unknown_size_margin);
 
+// All Client actors run on the same scheduler. Each file owns a charge for bytes still to write.
+class WorkdirDownloadBudget {
+ public:
+  bool reserve(td::int64 &held, td::int64 free_bytes, td::int64 min_free_bytes, td::int64 wanted);
+  void reduce(td::int64 &held, td::int64 remaining);
+
+ private:
+  td::int64 reserved_ = 0;
+};
+
 bool is_workdir_cleanup_candidate(td::Slice workdir, td::Slice path);
 bool delete_workdir_file_with_retries(const td::string &path, const WorkdirDeleteFunction &delete_file,
                                       td::int32 max_retries = 3);
@@ -81,6 +93,7 @@ WorkdirCleanupResult run_workdir_cleanup(const WorkdirCleanupConfig &config,
                                          const std::unordered_map<td::string, td::int32> &active_files,
                                          const WorkdirDeleteFunction &delete_file = {});
 
+#ifndef WORKDIR_CLEANUP_CORE_ONLY
 class WorkdirCleanupManager final : public td::Actor {
  public:
   WorkdirCleanupManager(WorkdirCleanupConfig config, std::shared_ptr<SharedData> shared_data)
@@ -103,5 +116,7 @@ class WorkdirCleanupManager final : public td::Actor {
   void run_cleanup(bool periodic);
   void schedule_next();
 };
+
+#endif
 
 }  // namespace telegram_bot_api

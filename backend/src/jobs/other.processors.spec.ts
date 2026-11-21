@@ -1,12 +1,19 @@
+import { metricsWindowEnd } from './metrics-window';
 import { AlertEvaluationProcessor, BaselineCalculationProcessor, AnomalyDetectionProcessor, DataArchivalProcessor, WeeklyReportProcessor } from './other.processors';
 
 describe('other processors', () => {
   const job = {} as any;
+  it('retains the cron occurrence when a late enqueue has zero delay', () => {
+    const due = Date.UTC(2026, 0, 1, 0, 10);
+    const queuedLate = { data: {}, timestamp: due + 120_000, opts: { prevMillis: due, delay: 0 } };
+    expect(metricsWindowEnd(queuedLate as any).getTime()).toBe(due - 60_000);
+  });
+
   it('evaluates and broadcasts alerts, handles no metrics and rethrows failures', async () => {
     const ds: any = { query: jest.fn() }; const engine: any = { evaluateAndCreateAlerts: jest.fn() }; const gateway: any = { broadcastAlert: jest.fn() };
     const p = new AlertEvaluationProcessor(ds,engine,gateway);
     // G3-16：预聚合缺失时不再静默 return，而是 throw 触发 Bull 重试
-    ds.query.mockResolvedValueOnce([]); await expect(p.evaluateAlerts(job)).rejects.toThrow('缺失'); expect(engine.evaluateAndCreateAlerts).not.toHaveBeenCalled();
+    ds.query.mockResolvedValueOnce([]).mockResolvedValueOnce([{ present: 1 }]); await expect(p.evaluateAlerts(job)).rejects.toThrow('缺失'); expect(engine.evaluateAndCreateAlerts).not.toHaveBeenCalled();
     const alert = { id:'a',ruleId:'r',level:'warning',title:'t',message:null,createdAt:new Date() };
     ds.query.mockResolvedValueOnce([{}]); engine.evaluateAndCreateAlerts.mockResolvedValue([alert]); await p.evaluateAlerts(job);
     expect(gateway.broadcastAlert).toHaveBeenCalledWith(expect.objectContaining({ id:'a',message:'' }));
@@ -56,22 +63,22 @@ describe('other processors', () => {
 
   // 预聚合只在「该分钟有请求」时落行，无流量分钟必然查不到窗口。
   // 原实现对此同样 warn + throw 触发 Bull 重试，生产上日均刷出近万条 WARN。
-  it('无流量分钟不重试：超过追赶期且该分钟访问日志为 0 时静默跳过评估', async () => {
+  it('无流量分钟不重试：当前窗口的访问日志为空时直接完成', async () => {
     const ds: any = { query: jest.fn() }; const engine: any = { evaluateAndCreateAlerts: jest.fn() }; const gateway: any = { broadcastAlert: jest.fn() };
     const p = new AlertEvaluationProcessor(ds, engine, gateway);
-    // 1 小时前的窗口：已远超追赶期（5 分钟）
-    const staleWindow = new Date(Date.now() - 60 * 60 * 1000).toISOString();
-    ds.query.mockResolvedValueOnce([]).mockResolvedValueOnce([{ cnt: 0 }]);
+    // 模拟每分钟定时作业刚开始执行的时刻。
+    const staleWindow = new Date().toISOString();
+    ds.query.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
     await expect(p.evaluateAlerts({ data: { windowTime: staleWindow } } as any)).resolves.toBeUndefined();
     expect(ds.query).toHaveBeenCalledTimes(2);
     expect(engine.evaluateAndCreateAlerts).not.toHaveBeenCalled();
   });
 
-  it('聚合缺口不被吞掉：超过追赶期但该分钟有访问日志时仍然触发重试', async () => {
+  it('聚合缺口不被吞掉：该分钟有访问日志时仍然触发重试', async () => {
     const ds: any = { query: jest.fn() }; const engine: any = { evaluateAndCreateAlerts: jest.fn() }; const gateway: any = { broadcastAlert: jest.fn() };
     const p = new AlertEvaluationProcessor(ds, engine, gateway);
     const staleWindow = new Date(Date.now() - 60 * 60 * 1000).toISOString();
-    ds.query.mockResolvedValueOnce([]).mockResolvedValueOnce([{ cnt: 12 }]);
+    ds.query.mockResolvedValueOnce([]).mockResolvedValueOnce([{ present: 1 }]);
     await expect(p.evaluateAlerts({ data: { windowTime: staleWindow } } as any)).rejects.toThrow('缺失');
     expect(engine.evaluateAndCreateAlerts).not.toHaveBeenCalled();
   });

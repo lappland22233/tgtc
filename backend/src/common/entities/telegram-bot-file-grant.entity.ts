@@ -14,7 +14,7 @@ import {
  * - TG 用户 ID 可能超出 32 位整数，统一以字符串（varchar）存储（R5）；
  * - Token 双轨存储：`tokenHash`（SHA-256，校验用，不可逆）+
  *   `tokenCipher`（AES-256-GCM，仅管理员查询时解密回放，可缺失）（C-3/R9）；
- * - `(telegramUserId, chatId, messageId)` 唯一：同一条消息重投时幂等命中，
+ * - `(receiverBotId, telegramUserId, chatId, messageId)` 唯一：同一条消息重投时幂等命中，
  *   不重复扣配额、不重复签发（R7）；
  * - 用户名/显示名为签发时刻快照（TG 用户名可随时修改，R6）；
  * - `accessCount` 仅供统计，任何路径不得据此拦截（D2）。
@@ -23,7 +23,8 @@ import {
 @Index('idx_tg_bot_grants_tgUser', ['telegramUserId'])
 @Index('idx_tg_bot_grants_expiresAt', ['expiresAt'])
 @Index('uq_tg_bot_grants_tokenHash', ['tokenHash'], { unique: true })
-@Index('uq_tg_bot_grants_message', ['telegramUserId', 'chatId', 'messageId'], { unique: true })
+@Index('uq_tg_bot_grants_message', ['receiverBotId', 'telegramUserId', 'chatId', 'messageId'], { unique: true })
+@Index('uq_tg_bot_grants_legacy_message', ['telegramUserId', 'chatId', 'messageId'], { unique: true, where: '"receiverBotId" IS NULL' })
 @Index('idx_tg_bot_grants_fileUniqueId', ['fileUniqueId'])
 @Index('idx_tg_bot_grants_purge_sweep', ['storageBackend', 'storagePurgedAt', 'expiresAt'])
 @Index('idx_tg_bot_grants_gdrive_cache_ref', ['gdriveCacheAccountId', 'gdriveCacheObjectRef'])
@@ -48,6 +49,10 @@ export class TelegramBotFileGrant {
 
   @Column({ type: 'varchar', length: 32, comment: '消息 ID（幂等锚点）' })
   messageId: string;
+
+  /** Actual Telegram bot ID; old grants remain nullable until a matching bot-scoped file ID is seen. */
+  @Column({ type: 'varchar', length: 32, nullable: true })
+  receiverBotId: string | null;
 
   /** Telegram 文件标识，用于取流 */
   @Column({ type: 'varchar', length: 512, comment: 'Telegram file_id' })

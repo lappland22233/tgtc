@@ -15,6 +15,7 @@ import {
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
+import { CurrentSession } from '../common/decorators/current-session.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { User, UserRole } from '../common/entities/user.entity';
 import type { GDriveBackendConfig, RemoteStorageBackendType } from '../common/entities/storage-backend.entity';
@@ -180,13 +181,6 @@ export class StorageBackendsController {
   @Delete('gdrive/oauth-client')
   @Roles(UserRole.SUPER_ADMIN)
   async clearGDriveOAuthClient(@CurrentUser() user: User) {
-    const existing = await this.backends.list('gdrive');
-    const dependentAccounts = existing.filter((acc) => acc.status !== 'revoked' && acc.hasCredential);
-    if (dependentAccounts.length > 0) {
-      throw new BadRequestException(
-        `当前仍有 ${dependentAccounts.length} 个未撤销的 Google Drive 存储账号依赖此 OAuth Client 配置，无法清空。请先删除或撤销相关账号。`,
-      );
-    }
     await this.gdriveOAuth.clearClientConfig();
     this.audit.log({
       action: 'config_change',
@@ -201,41 +195,35 @@ export class StorageBackendsController {
   /** 生成授权 URL（管理员浏览器打开，授权后从回调 URL 复制 code） */
   @Post('gdrive/auth-url')
   @Roles(UserRole.SUPER_ADMIN)
-  async gdriveAuthUrl(@CurrentUser() user: User, @Body() dto: GDriveAuthUrlDto) {
-    const state = dto.state || this.gdriveOAuth.generateState(user.id);
-    const url = await this.gdriveOAuth.buildAuthUrl(dto.redirectUri, state);
-    return { url, state };
+  async gdriveAuthUrl(@CurrentUser() user: User, @Body() dto: GDriveAuthUrlDto, @CurrentSession() session: string) {
+    return this.gdriveOAuth.beginFlow(user.id, session, dto.redirectUri, dto.accountId);
   }
 
-  /** 提交授权码：创建账号，或在重新授权时更新选中的 GDrive 账号凭据。 */
   @Post('gdrive/complete-auth')
   @Roles(UserRole.SUPER_ADMIN)
-  async gdriveCompleteAuth(@CurrentUser() user: User, @Body() dto: GDriveCompleteAuthDto) {
-    if (dto.state && !this.gdriveOAuth.verifyState(dto.state, user.id)) {
-      throw new BadRequestException('OAuth 状态校验失败或已过期 (CSRF Protection)');
-    }
-    const exchanged = await this.gdriveOAuth.exchangeCode(dto.code, dto.redirectUri);
-    if (dto.accountId) {
-      const existing = await this.backends.findById(dto.accountId);
-      if (!existing) throw new NotFoundException('存储账号不存在');
-      if (existing.type !== 'gdrive') throw new BadRequestException('只能为 Google Drive 账号重新授权');
-      const currentEmail = (existing.config as GDriveBackendConfig | null)?.email?.trim().toLowerCase() ?? '';
-      const authorizedEmail = exchanged.email?.trim().toLowerCase() ?? '';
-      if (currentEmail && currentEmail !== authorizedEmail) {
+  async gdriveCompleteAuth(@CurrentUser() user: User, @Body() dto: GDriveCompleteAuthDto, @CurrentSession() session: string) {
+    return this.finishGDriveAuth(user, dto, session, 'oauth_rotate');
+  }
+
+  private async finishGDriveAuth(user: User, dto: GDriveCompleteAuthDto, session: string, rotationAction: string) {
+    const existing = dto.accountId ? await this.backends.findById(dto.accountId) : null;
+    if (dto.accountId && !existing) throw new NotFoundException('存储账号不存在');
+    if (existing && existing.type !== 'gdrive') throw new BadRequestException('只能为 Google Drive 账号重新授权');
+    const exchanged = await this.gdriveOAuth.completeFlow(user.id, session, dto);
+    if (existing) {
+      const currentEmail = (existing.config as GDriveBackendConfig | null)?.email?.trim().toLowerCase() || '';
+      if (!exchanged.email || (currentEmail && currentEmail !== exchanged.email.trim().toLowerCase())) {
         throw new BadRequestException('授权邮箱与当前账号不一致，请使用原 Google 账号重新授权');
       }
-      const account = await this.backends.rotateCredential(dto.accountId, {
-        refreshToken: exchanged.refreshToken,
-      }, user.id);
-      await this.backends.refreshQuota(dto.accountId).catch(() => {});
+      const account = await this.backends.rotateCredential(existing.id, { refreshToken: exchanged.refreshToken },
+        user.id, exchanged.revision, exchanged.email,
+      );
+      await this.backends.refreshQuota(existing.id).catch(() => {});
       this.audit.log({
-        action: 'config_change',
-        userId: user.id,
-        resourceType: 'storage_backend',
-        resourceId: dto.accountId,
-        metadata: { type: 'gdrive', operation: 'oauth_rotate' },
+        action: 'config_change', userId: user.id, resourceType: 'storage_backend', resourceId: existing.id,
+        metadata: { type: 'gdrive', operation: rotationAction },
       });
-      return { message: 'Google Drive 账号已重新授权，原有文件引用保持不变', account };
+      return { message: 'Google Drive 账号已重新授权并通过连通性测试', account };
     }
 
     const rawName = (dto.name ?? '').trim();
@@ -246,7 +234,7 @@ export class StorageBackendsController {
       name: finalName,
       config: exchanged.email ? { email: exchanged.email } : {},
       credential: { refreshToken: exchanged.refreshToken },
-    }, user.id);
+    }, user.id, exchanged.revision);
     this.audit.log({
       action: 'config_change',
       userId: user.id,
@@ -361,31 +349,9 @@ export class StorageBackendsController {
     @CurrentUser() user: User,
     @Param('id') id: string,
     @Body() dto: GDriveRotateAuthDto,
+    @CurrentSession() session: string,
   ) {
-    const existing = await this.backends.findById(id);
-    if (!existing) throw new NotFoundException('存储账号不存在');
-    if (existing.type !== 'gdrive') throw new BadRequestException('只能为 Google Drive 账号重新授权');
-
-    const exchanged = await this.gdriveOAuth.exchangeCode(dto.code, dto.redirectUri);
-    const currentEmail = (existing.config as GDriveBackendConfig | null)?.email?.trim().toLowerCase() ?? '';
-    const authorizedEmail = exchanged.email?.trim().toLowerCase() ?? '';
-    if (currentEmail && currentEmail !== authorizedEmail) {
-      throw new BadRequestException('授权邮箱与当前账号不一致，请使用原 Google 账号重新授权');
-    }
-
-    const account = await this.backends.rotateCredential(id, { refreshToken: exchanged.refreshToken }, user.id);
-    if (exchanged.email && !currentEmail) {
-      await this.backends.patchConfig(id, { email: exchanged.email });
-    }
-    await this.backends.refreshQuota(id).catch(() => {});
-    this.audit.log({
-      action: 'config_change',
-      userId: user.id,
-      resourceType: 'storage_backend',
-      resourceId: id,
-      metadata: { type: 'gdrive', operation: 'rotate_auth' },
-    });
-    return { message: 'Google Drive 账号已重新授权并通过连通性测试', account };
+    return this.finishGDriveAuth(user, { ...dto, accountId: id }, session, 'rotate_auth');
   }
 
   /** 手动刷新配额（GDrive 等有配额概念的后端） */

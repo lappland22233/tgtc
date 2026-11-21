@@ -1,3 +1,4 @@
+import { pendingUploadDirectory, pendingUploadName } from './pending-upload';
 import { Injectable, NotFoundException, ForbiddenException, BadRequestException, ConflictException, GoneException, HttpException, HttpStatus, OnModuleInit, Logger, Optional, Inject } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, In, IsNull, EntityManager } from 'typeorm';
@@ -1236,23 +1237,24 @@ export class FileService implements OnModuleInit {
     return !!found;
   }
 
-  async softDeleteProcessingFile(id: string): Promise<void> {
+  async softDeleteProcessingFile(id: string, uploadVersion: number): Promise<void> {
     await this.fileRepository.manager.transaction(async (manager) => {
-      await manager.getRepository(File).update(
-        { id, status: 'processing' },
+      const result = await manager.getRepository(File).update(
+        { id, uploadVersion, status: 'processing' },
         { isDeleted: true, status: 'error', uploadStage: 'failed' } as Partial<File>,
       );
       // N2：取消路径此前只置 isDeleted，未释放名称占用——分片完成后、
       // worker 启动前取消会导致名称残留，同名重传稳定 409。与软删除语义
       // 对齐（软删即释放名称），并在同一事务内保证原子性。
+      if (!result.affected) return;
       await this.namespaceService.release(manager, { entityType: 'file', entityId: id });
     });
   }
 
   /** 覆盖上传失败时保留原记录 id 和审计轨迹，只结束 processing 状态，不软删除用户原文件记录。 */
-  async markProcessingFileFailed(id: string): Promise<void> {
+  async markProcessingFileFailed(id: string, uploadVersion: number): Promise<void> {
     await this.fileRepository.update(
-      { id, status: 'processing' },
+      { id, uploadVersion, status: 'processing' },
       {
         status: 'error',
         uploadStage: 'failed',
@@ -1392,9 +1394,9 @@ export class FileService implements OnModuleInit {
         const originalName = fixFilenameEncoding(file.originalname);
         const savedFile = await this.createProcessingFile(file, originalName, user, tagIds, true);
         // 将文件写入持久化路径供后台 processor 读取
-        const pendingDir = path.join(process.cwd(), 'tmp', 'uploads', 'pending');
+        const pendingDir = pendingUploadDirectory();
         if (!fs.existsSync(pendingDir)) fs.mkdirSync(pendingDir, { recursive: true });
-        const pendingPath = path.join(pendingDir, `${savedFile.id}`);
+        const pendingPath = path.join(pendingDir, pendingUploadName(savedFile.id, savedFile.uploadVersion));
         if (file.path && fs.existsSync(file.path)) {
           await fs.promises.rename(file.path, pendingPath);
         } else if (file.buffer) {
@@ -1832,59 +1834,42 @@ export class FileService implements OnModuleInit {
    * 不调用 Telegram deleteMessage：当前仅保存 file_id，且引用副本可能共享远端对象。
    */
   async forceDelete(id: string, user: User): Promise<void> {
-    const file = await this.fileRepository.findOne({
-      where: { id },
-    });
-
-    if (!file) {
-      throw new NotFoundException('文件不存在');
-    }
-
     const isAdmin = hasAdminPrivileges(user);
-
-    if (isAdmin) {
-      // 管理员强删要求文件已进入待删除状态（两阶段删除第二步）
-      if (!file.isDeleted) {
-        throw new BadRequestException('文件未处于待删除状态，请先执行删除操作');
-      }
-    } else {
-      // 普通用户/API Key：必须已软删且非管理员删除，并等待冷静期满 1 分钟
-      if (!file.isDeleted) {
-        throw new BadRequestException('请先将文件移入回收站，再执行强制删除');
-      }
-      if (file.deletedByAdmin) {
-        throw new ForbiddenException('该文件由管理员删除，请联系管理员处理');
-      }
-      if (file.deleteRequestedAt) {
-        const elapsedMs = Date.now() - file.deleteRequestedAt.getTime();
-        if (elapsedMs < FILE_FORCE_DELETE_WAIT_MS) {
-          const remainingSeconds = Math.ceil((FILE_FORCE_DELETE_WAIT_MS - elapsedMs) / 1000);
-          throw new BadRequestException(
-            `强制删除需等待 ${FILE_FORCE_DELETE_WAIT_MS / MS_PER_SECOND} 秒，请 ${remainingSeconds} 秒后再试`,
-          );
+    const file = await this.fileRepository.manager.transaction(async (manager) => {
+      const repo = manager.getRepository(File);
+      const file = await repo.findOne({ where: { id }, ...databasePessimisticWriteLock() });
+      if (!file) throw new NotFoundException('文件不存在');
+      this.assertFileWritable(file, user);
+      if (isAdmin) {
+        // 管理员强删要求文件已进入待删除状态（两阶段删除第二步）
+        if (!file.isDeleted) {
+          throw new BadRequestException('文件未处于待删除状态，请先执行删除操作');
+        }
+      } else {
+        // 普通用户/API Key：必须已软删且非管理员删除，并等待冷静期满 1 分钟
+        if (!file.isDeleted) {
+          throw new BadRequestException('请先将文件移入回收站，再执行强制删除');
+        }
+        if (file.deletedByAdmin) {
+          throw new ForbiddenException('该文件由管理员删除，请联系管理员处理');
+        }
+        if (file.deleteRequestedAt) {
+          const elapsedMs = Date.now() - file.deleteRequestedAt.getTime();
+          if (elapsedMs < FILE_FORCE_DELETE_WAIT_MS) {
+            const remainingSeconds = Math.ceil((FILE_FORCE_DELETE_WAIT_MS - elapsedMs) / 1000);
+            throw new BadRequestException(
+              `强制删除需等待 ${FILE_FORCE_DELETE_WAIT_MS / MS_PER_SECOND} 秒，请 ${remainingSeconds} 秒后再试`,
+            );
+          }
         }
       }
-    }
 
-    // 安全校验：只能强制删除自己上传的文件或管理员/超级管理员可删所有
-    this.assertFileWritable(file, user);
-
-    // telegramFileId 是 Telegram file_id，并非 deleteMessage 所需的 message_id。
-    // 同一远端对象还可能被“引用复制”的多条 File 记录共享，因此此处禁止误删远端消息。
-    // 数据库元数据与外键关联在事务内删除，行锁避免并发恢复/重复删除竞态。
-    await this.fileRepository.manager.transaction(async (manager) => {
-      const lockedFile = await manager.getRepository(File).findOne({
-        where: { id },
-        ...databasePessimisticWriteLock(),
-      });
-      if (!lockedFile) {
-        throw new NotFoundException('文件不存在');
-      }
-      this.assertFileWritable(lockedFile, user);
       await manager.getRepository(FileAccessLog).delete({ fileId: id });
       // v1.2.6：物理删除同时移除统一命名空间名称行（软删时已释放，此处幂等清理）
       await this.namespaceService.remove(manager, { entityType: 'file', entityId: id });
-      await manager.getRepository(File).remove(lockedFile);
+      const snapshot = { ...file } as File;
+      await repo.remove(file);
+      return snapshot;
     });
 
     // 数据库删除成功后再清理可重建的本地衍生数据。

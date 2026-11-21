@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { MoreThan, Repository } from 'typeorm';
 import { RateLimit } from '../entities/rate-limit.entity';
 import { databaseCurrentTimestamp, databaseQuery, getDatabaseType } from '../../database/database-types';
 
@@ -213,6 +213,10 @@ export class RateLimitService {
       return new Date(`${value.replace(' ', 'T')}Z`);
     }
     return new Date(value as string | number);
+  }
+
+  async isLocked(key: string): Promise<boolean> {
+    return this.rateLimitRepo.existsBy({ key, lockedUntil: MoreThan(new Date()) });
   }
 
   /**

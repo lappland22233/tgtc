@@ -1,4 +1,6 @@
 import { BadRequestException, NotFoundException } from '@nestjs/common';
+import { validate } from 'class-validator';
+import { GDriveOAuthClientDto, GDriveRotateAuthDto, GDriveCompleteAuthDto } from './storage-backends.dto';
 import { StorageBackendsController } from './storage-backends.controller';
 import { UserRole } from '../common/entities/user.entity';
 
@@ -19,7 +21,7 @@ describe('StorageBackendsController - GDrive 凭据轮换与邮箱一致性校�
     };
     const router: any = { getDefaultBackendType: jest.fn().mockResolvedValue('telegram') };
     const gdriveOAuth: any = {
-      exchangeCode: jest.fn().mockResolvedValue(opts.exchanged ?? { refreshToken: 'new-token', email: 'test@example.com' }),
+      completeFlow: jest.fn().mockResolvedValue({ revision: 'revision', ...(opts.exchanged ?? { refreshToken: 'new-token', email: 'test@example.com' }) }),
       getClientConfig: jest.fn().mockResolvedValue(null),
       setClientConfig: jest.fn().mockResolvedValue(undefined),
       clearClientConfig: jest.fn().mockResolvedValue(undefined),
@@ -39,10 +41,18 @@ describe('StorageBackendsController - GDrive 凭据轮换与邮箱一致性校�
     return { controller, backends, gdriveOAuth, configCache, router, audit, user };
   }
 
+  it('accepts an empty saved default URI and requires state on both exchange routes', async () => {
+    expect(await validate(Object.assign(new GDriveOAuthClientDto(), {clientId: 'id', redirectUri: ''}))).toEqual([]);
+    for (const dto of [new GDriveRotateAuthDto(), new GDriveCompleteAuthDto()]) {
+      Object.assign(dto, {code: 'code', redirectUri: 'http://localhost/callback'});
+      expect((await validate(dto)).map(error => error.property)).toContain('state');
+    }
+  });
+
   it('账号不存在时抛出 NotFoundException', async () => {
     const { controller } = makeController({ existingAccount: null });
     await expect(
-      controller.gdriveRotateAuth(user, 'nonexistent', { code: 'c1', redirectUri: 'http://localhost' }),
+      controller.gdriveRotateAuth(user, 'nonexistent', { code: 'c1', redirectUri: 'http://localhost', state: 'flow' }, 'session'),
     ).rejects.toThrow(NotFoundException);
   });
 
@@ -51,7 +61,7 @@ describe('StorageBackendsController - GDrive 凭据轮换与邮箱一致性校�
       existingAccount: { id: 's3-1', type: 's3', name: 'My S3' },
     });
     await expect(
-      controller.gdriveRotateAuth(user, 's3-1', { code: 'c1', redirectUri: 'http://localhost' }),
+      controller.gdriveRotateAuth(user, 's3-1', { code: 'c1', redirectUri: 'http://localhost', state: 'flow' }, 'session'),
     ).rejects.toThrow(BadRequestException);
   });
 
@@ -70,7 +80,7 @@ describe('StorageBackendsController - GDrive 凭据轮换与邮箱一致性校�
     });
 
     await expect(
-      controller.gdriveRotateAuth(user, 'gd-1', { code: 'c1', redirectUri: 'http://localhost' }),
+      controller.gdriveRotateAuth(user, 'gd-1', { code: 'c1', redirectUri: 'http://localhost', state: 'flow' }, 'session'),
     ).rejects.toThrow('授权邮箱与当前账号不一致，请使用原 Google 账号重新授权');
   });
 
@@ -88,9 +98,9 @@ describe('StorageBackendsController - GDrive 凭据轮换与邮箱一致性校�
       },
     });
 
-    const result = await controller.gdriveRotateAuth(user, 'gd-1', { code: 'c1', redirectUri: 'http://localhost' });
+    const result = await controller.gdriveRotateAuth(user, 'gd-1', { code: 'c1', redirectUri: 'http://localhost', state: 'flow' }, 'session');
     expect(result.message).toContain('Google Drive 账号已重新授权并通过连通性测试');
-    expect(backends.rotateCredential).toHaveBeenCalledWith('gd-1', { refreshToken: 'new-refresh' }, 'admin-1');
+    expect(backends.rotateCredential).toHaveBeenCalledWith('gd-1', { refreshToken: 'new-refresh' }, 'admin-1', 'revision', 'original@gmail.com');
     expect(backends.refreshQuota).toHaveBeenCalledWith('gd-1');
     expect(audit.log).toHaveBeenCalledWith(expect.objectContaining({
       action: 'config_change',
@@ -109,7 +119,7 @@ describe('StorageBackendsController - GDrive 凭据轮换与邮箱一致性校�
     const result = await controller.gdriveCompleteAuth(user, {
       code: 'code-1',
       redirectUri: 'http://localhost/callback',
-    } as any);
+    } as any, 'session');
 
     expect(result.message).toContain('Google Drive 账号授权成功');
     expect(backends.create).toHaveBeenCalledWith(
@@ -119,7 +129,7 @@ describe('StorageBackendsController - GDrive 凭据轮换与邮箱一致性校�
         config: { email: 'pool-user@gmail.com' },
         credential: { refreshToken: 'rt-1' },
       }),
-      'admin-1',
+      'admin-1', 'revision',
     );
   });
 
@@ -185,18 +195,6 @@ describe('StorageBackendsController - GDrive 凭据轮换与邮箱一致性校�
       action: 'config_change',
       resourceId: 'storage_settings',
     }));
-  });
-
-  it('clearGDriveOAuthClient：存在未撤销的活跃 GDrive 账号时拒绝清空', async () => {
-    const { controller, backends, gdriveOAuth } = makeController();
-    backends.list = jest.fn().mockResolvedValue([
-      { id: 'gd-1', type: 'gdrive', status: 'active', hasCredential: true },
-    ]);
-
-    await expect(controller.clearGDriveOAuthClient(user)).rejects.toThrow(
-      '当前仍有 1 个未撤销的 Google Drive 存储账号依赖此 OAuth Client 配置，无法清空',
-    );
-    expect(gdriveOAuth.clearClientConfig).not.toHaveBeenCalled();
   });
 
   it('clearGDriveOAuthClient：账号已全部撤销（无凭据残留）或无账号时允许清空', async () => {

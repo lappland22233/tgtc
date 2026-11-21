@@ -32,8 +32,8 @@ describe('GDriveOAuthCallback.vue', () => {
     const wrapper = mount(GDriveOAuthCallback);
     await wrapper.vm.$nextTick();
 
-    expect(wrapper.text()).toContain('Google Drive 授权成功');
-    expect(wrapper.text()).toContain('同步至 TGTC 管理后台');
+    expect(wrapper.text()).toContain('已收到 Google Drive 授权码');
+    expect(wrapper.text()).toContain('以管理后台的兑换结果为准');
 
     // 验证 postMessage 回传
     expect(mockOpener.postMessage).toHaveBeenCalledWith(
@@ -57,10 +57,7 @@ describe('GDriveOAuthCallback.vue', () => {
     );
 
     // 验证 localStorage 写入
-    const stored = JSON.parse(localStorage.getItem('tgtc_gdrive_oauth_event') || '{}');
-    expect(stored.type).toBe('TGTC_GDRIVE_OAUTH_RESULT');
-    expect(stored.status).toBe('success');
-    expect(stored.code).toBe('mock_code_123');
+    expect(localStorage.getItem('tgtc_gdrive_oauth_event')).toBeNull();
   });
 
   it('URL 包含 error 时展示错误信息并广播失败事件', async () => {

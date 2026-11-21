@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia';
-import { ref, computed } from 'vue';
+import { ref, computed, watch } from 'vue';
+import { useDownloadsStore } from './downloads';
 import api from '../api/client';
 import { clearRedirectState } from '../api/client';
 import MessagePlugin from '../utils/message';
@@ -23,6 +24,10 @@ export function getAuthResponseData(response: { data?: { data?: AuthResponseData
 export const useAuthStore = defineStore('auth', () => {
   const user = ref<User | null>(null);
   const initialized = ref(false);
+  const downloads = useDownloadsStore();
+  watch(() => user.value?.id, (_next, previous) => {
+    if (previous) downloads.stopAll();
+  }, { flush: 'sync' });
 
   const isAuthenticated = computed(() => !!user.value);
 

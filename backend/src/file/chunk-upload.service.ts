@@ -1,3 +1,4 @@
+import { parsePendingUploadName, pendingUploadDirectory, pendingUploadName } from './pending-upload';
 import { Injectable, BadRequestException, NotFoundException, ForbiddenException, ConflictException, HttpException, HttpStatus, Logger, OnModuleInit } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { InjectQueue } from '@nestjs/bull';
@@ -225,17 +226,18 @@ export class ChunkUploadService implements OnModuleInit {
 
   /** G3-03：启动扫描 pending 目录，清理 DB 无对应记录（崩溃窗口残留）的孤儿临时文件与回执 */
   private async cleanupOrphanPendingFiles(): Promise<void> {
-    const pendingDir = path.resolve(process.cwd(), 'tmp', 'uploads', 'pending');
+    const pendingDir = pendingUploadDirectory();
     const entries = await fsp.readdir(pendingDir).catch(() => [] as string[]);
-    const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     let cleaned = 0;
     for (const name of entries) {
       // 只处理 UUID 命名的主文件（跳过 .telegram.json 回执伴生文件，随主文件一并删除）
-      if (!uuidRe.test(name)) continue;
-      const exists = await this.fileService.fileRecordExists(name).catch(() => true);
+      const owner = parsePendingUploadName(name);
+      if (!owner) continue;
+      const exists = await this.fileService.fileRecordExists(owner.id).catch(() => true);
       if (exists) continue; // DB 有记录（处理中/待处理/已完成），保留
       await fsp.rm(path.join(pendingDir, name), { force: true }).catch(() => {});
       await fsp.rm(path.join(pendingDir, `${name}.telegram.json`), { force: true }).catch(() => {});
+      await fsp.rm(path.join(pendingDir, `${name}.telegram.json.tmp`), { force: true }).catch(() => {});
       cleaned++;
     }
     if (cleaned > 0) {
@@ -244,7 +246,6 @@ export class ChunkUploadService implements OnModuleInit {
   }
 
   private async cleanupOrphanChunkDirs(): Promise<void> {
-    const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     let entries: string[];
     try {
       entries = await fsp.readdir(this.baseDir);
@@ -255,7 +256,8 @@ export class ChunkUploadService implements OnModuleInit {
     let cleaned = 0;
     for (const name of entries) {
       // 仅处理 UUID 命名的目录（分片会话目录），保留 'pending' 等其他子目录
-      if (!uuidRe.test(name)) continue;
+      const owner = parsePendingUploadName(name);
+      if (!owner) continue;
       if (this.sessions.has(name)) continue; // 活跃会话（启动时通常为空）
       const full = path.join(this.baseDir, name);
       try {
@@ -829,13 +831,11 @@ export class ChunkUploadService implements OnModuleInit {
     }
 
     this.throwIfAborted(signal);
-    const pendingDir = path.resolve(process.cwd(), 'tmp', 'uploads', 'pending');
+    const pendingDir = pendingUploadDirectory();
     await fsp.mkdir(pendingDir, { recursive: true });
-    const pendingPath = path.join(pendingDir, savedFile.id);
+    const pendingPath = session.handoffPath ?? path.join(pendingDir, pendingUploadName(savedFile.id, savedFile.uploadVersion));
     const alreadyHandedOff = session.handoffPath === pendingPath;
     if (!alreadyHandedOff) {
-      // 覆盖上传复用同一 pendingPath：移除陈旧版本回执，避免 v2 读到 v1 的远端结果。
-      await fsp.rm(`${pendingPath}.telegram.json`, { force: true }).catch(() => {});
       try {
         await fsp.rename(mergedPath, pendingPath);
       } catch (error) {
@@ -897,8 +897,6 @@ export class ChunkUploadService implements OnModuleInit {
       this.logger.warn(
         `[分片上传] ${session.uploadId} 入队后检测到中止，移除任务 ${jobId} 并清理记录 ${savedFile.id}`,
       );
-      const queuedJob = await this.fileUploadQueue.getJob(jobId).catch(() => undefined);
-      if (queuedJob) await queuedJob.remove().catch(() => {});
       await this.cleanupUploadingSideEffects(session);
       throw new Error('分片合并已取消');
     }
@@ -1020,19 +1018,27 @@ export class ChunkUploadService implements OnModuleInit {
       // active/failed/remove race：保留上传源和严格预算，由 Worker 的终态清理收尾。
     }
     if (!safelyRemovedBeforeStart) return false;
+    if (session.handoffPath && path.basename(session.handoffPath) === fileId) {
+      // A pre-upgrade job may still reference the shared, unversioned name.
+      try {
+        await this.fileService.getProcessingFileOrThrow(fileId, uploadVersion);
+      } catch {
+        return false;
+      }
+    }
 
     // 只有确认 Worker 尚未取得任务时才结束 processing／删除源；活跃 Worker 可能仍持有打开的
     // 文件描述符，过早改变数据库状态或释放预算会破坏回执恢复与严格空间保证。
     if (session.overwriteFileId) {
-      await this.fileService.markProcessingFileFailed?.(fileId).catch(() => {});
+      await this.fileService.markProcessingFileFailed?.(fileId, uploadVersion).catch(() => {});
     } else {
-      await this.fileService.softDeleteProcessingFile(fileId).catch(() => {});
+      await this.fileService.softDeleteProcessingFile(fileId, uploadVersion).catch(() => {});
     }
 
     // 活跃 Worker 可能仍持有打开的
     // 文件描述符，过早释放会让严格模式在同一物理空间上错误放行下一份大文件。
-    const pendingDir = path.resolve(process.cwd(), 'tmp', 'uploads', 'pending');
-    const pendingPath = path.join(pendingDir, fileId);
+    const pendingDir = pendingUploadDirectory();
+    const pendingPath = session.handoffPath ?? path.join(pendingDir, pendingUploadName(fileId, uploadVersion));
     const sourceRemoved = await fsp.rm(pendingPath, { force: true }).then(() => true).catch(() => false);
     await fsp.rm(`${pendingPath}.telegram.json`, { force: true }).catch(() => {});
     if (sourceRemoved) this.uploadDiskBudget?.releaseJob(fileId, uploadVersion);

@@ -10,6 +10,7 @@ import { SharePasswordService } from './share-password.service';
 describe('SharePasswordService', () => {
   const bannedRepo = { upsert: jest.fn(), createQueryBuilder: jest.fn() };
   const rateLimit = {
+    isLocked: jest.fn().mockResolvedValue(false),
     checkAndIncrement: jest.fn(),
     incrementCounter: jest.fn(),
     reset: jest.fn(),
@@ -35,33 +36,25 @@ describe('SharePasswordService', () => {
     rateLimit.checkAndIncrement.mockResolvedValue({ allowed: true });
     await expect(service.checkPasswordAttemptAllowed('127.0.0.1', 'share-token')).resolves.toBe(true);
     // G5-08：新增 token-lock 键作为 24h 累计失败锁定探针，共 3 个维度
-    expect(rateLimit.checkAndIncrement).toHaveBeenCalledTimes(3);
+    expect(rateLimit.checkAndIncrement).toHaveBeenCalledTimes(2);
     expect(rateLimit.checkAndIncrement).toHaveBeenCalledWith(
       'share-password:token:share-token', 'share_password_precheck', 10, 60000, 60000,
     );
     expect(rateLimit.checkAndIncrement).toHaveBeenCalledWith(
       'share-password:ip:127.0.0.1', 'share_password_precheck', 10, 60000, 60000,
     );
-    // token-lock 用极大 maxAttempts 作为纯锁定探针，正常不触发锁定，仅在被锁定时返回 false
-    expect(rateLimit.checkAndIncrement).toHaveBeenCalledWith(
-      'share-password:token-lock:share-token', 'share_password_precheck', Number.MAX_SAFE_INTEGER, 60000, 60000,
-    );
+    expect(rateLimit.isLocked).toHaveBeenCalledWith('share-password:token-lock:share-token');
   });
 
   it('任一维度锁定时拒绝昂贵密码验证', async () => {
     rateLimit.checkAndIncrement
       .mockResolvedValueOnce({ allowed: true })
-      .mockResolvedValueOnce({ allowed: false, waitMinutes: 1 })
-      .mockResolvedValueOnce({ allowed: true });
+      .mockResolvedValueOnce({ allowed: false, waitMinutes: 1 });
     await expect(service.checkPasswordAttemptAllowed('127.0.0.1', 'share-token')).resolves.toBe(false);
   });
 
   it('token 已被 24h 累计锁定（G5-08）时拒绝验证', async () => {
-    // token-lock 探针返回 allowed=false 表示该 token 已锁定
-    rateLimit.checkAndIncrement
-      .mockResolvedValueOnce({ allowed: true }) // token 短窗
-      .mockResolvedValueOnce({ allowed: true }) // ip 短窗
-      .mockResolvedValueOnce({ allowed: false, waitMinutes: 1440 }); // token-lock 24h
+    rateLimit.isLocked.mockResolvedValueOnce(true);
     await expect(service.checkPasswordAttemptAllowed('127.0.0.1', 'share-token')).resolves.toBe(false);
   });
 

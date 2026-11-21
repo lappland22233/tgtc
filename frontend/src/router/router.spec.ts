@@ -20,6 +20,7 @@ vi.mock('../views/user/FileList.vue', () => ({ default: { template: '<div />' } 
 vi.mock('../views/user/Dashboard.vue', () => ({ default: { template: '<div />' } }));
 vi.mock('../views/share/ShareView.vue', () => ({ default: { template: '<div />' } }));
 vi.mock('../views/layout/Layout.vue', () => ({ default: { template: '<div />' } }));
+vi.mock('../views/admin/Dashboard.vue', () => ({ default: { template: '<div />' } }));
 vi.mock('../views/admin/Config.vue', () => ({ default: { template: '<div />' } }));
 vi.mock('../views/admin/Users.vue', () => ({ default: { template: '<div />' } }));
 
@@ -56,6 +57,14 @@ describe('router 守卫', () => {
     authStore.user = null;
     authStore.initialized = false;
     fetchUser.mockClear();
+  });
+
+  it('已废弃的更新页面将管理员送回管理首页', async () => {
+    authStore.user = { id: 'admin', role: 'super_admin' };
+    authStore.initialized = true;
+    await router.push('/admin/update');
+    expect(router.currentRoute.value.name).toBe('AdminDashboard');
+    expect(router.currentRoute.value.path).toBe('/admin');
   });
 
   it('未登录访问受保护路由时跳转登录页并携带合法 redirect', async () => {

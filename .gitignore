@@ -51,6 +51,10 @@ backend/.tmp-meta-check/
 *.temp
 .cache/
 
+# Local state created by the source-deployment backup and health scripts
+/.tgtc-ops/
+/backups/
+
 # Database
 *.sqlite
 *.sqlite3
@@ -64,9 +68,7 @@ backend/ecosystem.config.js
 .ecosystem.config.js
 
 # Secrets & Certificates
-# 发布验证公钥是唯一例外：必须随仓库与发行包分发（私钥只存在于 CI secret）。
 *.pem
-!scripts/release/update-public-key.pem
 *.key
 *.crt
 *.cert
@@ -77,7 +79,7 @@ secrets/
 STATIC_REVIEW_RETROSPECTIVE.md
 DEADLOCK_STATIC_REVIEW.md
 .qoder/*
-# GitHub 工作流必须入库（Release 流水线依赖）；忽略 .github 其他本地内容
+# 保留 GitHub Actions 工作流
 .github/*
 !.github/workflows/
 .workbuddy/*
@@ -86,6 +88,4 @@ DEADLOCK_STATIC_REVIEW.md
 deliverables/
 # 独立实验副本（账号池验证等，见 beta/account-pool-lab/README.md）
 # 仅用于隔离实验，避免副本污染 git status；如需把实验台纳入版本管理，请删除本行并在 beta/ 内自行 git init。
-# 发布构建脚本已显式排除 beta/（scripts/build-linux-x64-release.sh 的 rsync --exclude 'beta'），
-# 发行包不会包含实验副本；validate-release.sh 亦会断言包内不含 beta/ 路径。
 beta/

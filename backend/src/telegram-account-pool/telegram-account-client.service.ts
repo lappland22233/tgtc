@@ -170,7 +170,7 @@ export class TelegramAccountClientService {
   ): Promise<Array<Record<string, unknown>>> {
     try {
       const response = await axios.get(`${this.apiBase}${token}/getUpdates`, {
-        params: { offset, timeout: timeoutSeconds, allowed_updates: ['message', 'channel_post'] },
+        params: { offset, timeout: timeoutSeconds, allowed_updates: JSON.stringify(['message', 'channel_post']) },
         timeout: (timeoutSeconds + 15) * 1000,
       });
       if (response.data?.ok !== true) {

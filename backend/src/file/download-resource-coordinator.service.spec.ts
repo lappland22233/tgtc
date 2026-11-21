@@ -40,6 +40,22 @@ describe('DownloadResourceCoordinatorService', () => {
   });
 
   describe('预约与消费记账', () => {
+    it('扩容只使用剩余可用空间；释放后其他预约可接管', async () => {
+      mockFree(3 * MB);
+      const first = await service.reserve({ sessionKey: 'first', bytes: MB });
+      const other = await service.reserve({ sessionKey: 'other', bytes: MB });
+      service.extendDiskReservation(first, MB);
+      expect(first.remainingBytes).toBe(2 * MB);
+      expect(service.pendingReservedBytes).toBe(3 * MB);
+      expect(() => service.extendDiskReservation(other, 1)).toThrow();
+      expect(other.remainingBytes).toBe(MB);
+      first.release();
+      service.extendDiskReservation(other, MB);
+      expect(other.grantedBytes).toBe(2 * MB);
+      other.release();
+      expect(service.pendingReservedBytes).toBe(0);
+    });
+
     it('空间充足时立即授予并登记未写入预约', async () => {
       mockFree(MB);
       const reservation = await service.reserve({ sessionKey: 'file:a', bytes: KB });

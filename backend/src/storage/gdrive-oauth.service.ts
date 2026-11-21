@@ -1,17 +1,14 @@
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
-import { OAuth2Client } from 'google-auth-library';
+import { CodeChallengeMethod, OAuth2Client } from 'google-auth-library';
 import axios from 'axios';
 import https from 'https';
-import { randomBytes } from 'crypto';
-import { ConfigCacheService } from '../common/services/config-cache.service';
+import { createHash, createHmac } from 'crypto';
+import { GDriveOAuthStore } from './gdrive-oauth-store.service';
 import { StorageCredentialService } from './storage-credential.service';
 import { StorageAccountError, StorageQuota } from './storage.types';
 import { toStorageAccountError } from './storage-errors.util';
 
-/** OAuth Client 配置键（SystemConfig；secret 以密文存放） */
-export const GDRIVE_OAUTH_CLIENT_ID_KEY = 'GDRIVE_OAUTH_CLIENT_ID';
-export const GDRIVE_OAUTH_CLIENT_SECRET_KEY = 'GDRIVE_OAUTH_CLIENT_SECRET';
-export const GDRIVE_OAUTH_REDIRECT_URI_KEY = 'GDRIVE_OAUTH_REDIRECT_URI';
+export { GDRIVE_OAUTH_CLIENT_ID_KEY, GDRIVE_OAUTH_CLIENT_SECRET_KEY, GDRIVE_OAUTH_REDIRECT_URI_KEY } from './gdrive-oauth-store.service';
 
 /**
  * 智能提取授权码：若传入的是完整回调 URL 或带有 code 的 query 字符串，
@@ -78,15 +75,13 @@ export class GDriveOAuthService {
   });
 
   constructor(
-    private readonly configCache: ConfigCacheService,
+    private readonly store: GDriveOAuthStore,
     private readonly credential: StorageCredentialService,
   ) {}
 
   /** 读取 OAuth Client 配置（secret 解密）；未配置或不可解密返回 null */
   async getClientConfig(): Promise<GDriveOAuthClientConfig | null> {
-    const clientId = (await this.configCache.get(GDRIVE_OAUTH_CLIENT_ID_KEY, '')).trim();
-    const secretCipher = (await this.configCache.get(GDRIVE_OAUTH_CLIENT_SECRET_KEY, '')).trim();
-    const redirectUri = (await this.configCache.get(GDRIVE_OAUTH_REDIRECT_URI_KEY, '')).trim() || null;
+    const { clientId, secretCipher, redirectUri } = await this.store.settings();
     if (!clientId || !secretCipher) return null;
     const payload = this.credential.decryptCredential<{ value: string }>(secretCipher);
     if (!payload?.value) return null;
@@ -99,7 +94,7 @@ export class GDriveOAuthService {
     const trimmedSecret = clientSecret ? clientSecret.trim() : '';
     if (!trimmedId) throw new BadRequestException('client_id 必填');
 
-    let cipher: string;
+    let cipher: string | undefined;
     if (trimmedSecret) {
       if (!this.credential.isAvailable()) {
         throw new BadRequestException('未配置 STORAGE_ENCRYPTION_KEY，无法加密保存 OAuth client_secret');
@@ -107,30 +102,12 @@ export class GDriveOAuthService {
       const encrypted = this.credential.encryptCredential({ value: trimmedSecret });
       if (!encrypted) throw new BadRequestException('client_secret 加密失败');
       cipher = encrypted;
-    } else {
-      const existingCipher = (await this.configCache.get(GDRIVE_OAUTH_CLIENT_SECRET_KEY, '')).trim();
-      if (!existingCipher) {
-        throw new BadRequestException('首次配置必须提供 client_secret');
-      }
-      cipher = existingCipher;
     }
-
-    await this.configCache.set(GDRIVE_OAUTH_CLIENT_ID_KEY, trimmedId, 'Google Drive OAuth Client ID');
-    await this.configCache.set(GDRIVE_OAUTH_CLIENT_SECRET_KEY, cipher, 'Google Drive OAuth Client Secret（AES-256-GCM 密文）');
-    if (redirectUri !== undefined) {
-      await this.configCache.set(
-        GDRIVE_OAUTH_REDIRECT_URI_KEY,
-        redirectUri.trim(),
-        'Google Drive OAuth 常用重定向地址',
-      );
-    }
+    await this.store.writeSettings(trimmedId, cipher, redirectUri?.trim());
   }
 
-  /** 清空 OAuth Client 配置 */
   async clearClientConfig(): Promise<void> {
-    await this.configCache.set(GDRIVE_OAUTH_CLIENT_ID_KEY, '', 'Google Drive OAuth Client ID');
-    await this.configCache.set(GDRIVE_OAUTH_CLIENT_SECRET_KEY, '', 'Google Drive OAuth Client Secret');
-    await this.configCache.set(GDRIVE_OAUTH_REDIRECT_URI_KEY, '', 'Google Drive OAuth 常用重定向地址');
+    await this.store.writeSettings('', undefined, '');
   }
 
   /** 是否已配置可用 OAuth Client（管理端授权向导前置检查） */
@@ -138,44 +115,42 @@ export class GDriveOAuthService {
     return (await this.getClientConfig()) !== null;
   }
 
-  /** 生成防 CSRF 的 signed state */
-  generateState(userId: string): string {
-    const nonce = randomBytes(16).toString('hex');
-    const timestamp = Date.now();
-    const payload = { u: userId, t: timestamp, n: nonce };
-    const encrypted = this.credential.encryptCredential(payload);
-    if (!encrypted) {
-      return Buffer.from(JSON.stringify(payload)).toString('base64url');
-    }
-    return Buffer.from(encrypted).toString('base64url');
+  private async flowContext(adminId: string, session: string, redirectUri: string, accountId?: string) {
+    if (!adminId || !session || !redirectUri?.trim()) throw new BadRequestException('缺少当前会话或 redirectUri');
+    const settings = await this.store.settings();
+    if (!settings.clientId || !settings.secretCipher) throw new BadRequestException('请先配置 Google Drive OAuth Client');
+    const secret = this.credential.decryptCredential<{ value: string }>(settings.secretCipher)?.value;
+    if (!secret) throw new BadRequestException('OAuth Client 凭据无效');
+    const binding = JSON.stringify([adminId, session, redirectUri.trim(), accountId || null, settings.revision]);
+    return { clientId: settings.clientId, secret, binding, revision: settings.revision };
   }
 
-  /** 验证 state 防 CSRF，确保由当前管理员签发且在 15 分钟内 */
-  verifyState(state: string, userId: string): boolean {
-    if (!state || typeof state !== 'string') return false;
-    try {
-      const decoded = Buffer.from(state.trim(), 'base64url').toString('utf8');
-      let payload: { u?: string; t?: number; userId?: string; timestamp?: number } | null = null;
-      if (decoded.startsWith('v1:')) {
-        payload = this.credential.decryptCredential<{ u?: string; t?: number; userId?: string; timestamp?: number }>(decoded);
-      } else {
-        payload = JSON.parse(decoded);
-      }
-      if (!payload) return false;
-      const targetUserId = payload.u ?? payload.userId;
-      const targetTimestamp = payload.t ?? payload.timestamp;
-      if (!targetUserId || targetUserId !== userId) return false;
-      if (!targetTimestamp || Date.now() - targetTimestamp > 15 * 60 * 1000) return false;
-      return true;
-    } catch {
-      return false;
-    }
+  async beginFlow(adminId: string, session: string, redirectUri: string, accountId?: string) {
+    const ctx = await this.flowContext(adminId, session, redirectUri, accountId);
+    const state = await this.store.issue(ctx.binding);
+    const verifier = this.codeVerifier(ctx.secret, state);
+    const challenge = createHash('sha256').update(verifier).digest('base64url');
+    const url = this.buildAuthUrl({ clientId: ctx.clientId, clientSecret: ctx.secret }, redirectUri, state, challenge);
+    return { url, state };
   }
 
-  /** 生成授权 URL（redirectUri 必须已在 Google Console 登记，可带 state 防御 CSRF） */
-  async buildAuthUrl(redirectUri: string, state?: string): Promise<string> {
-    const config = await this.getClientConfig();
-    if (!config) throw new BadRequestException('请先配置 Google Drive OAuth Client（client_id / client_secret）');
+  async completeFlow(adminId: string, session: string, input: { code: string; state: string; redirectUri: string; accountId?: string }) {
+    if (!input.state) throw new BadRequestException('授权已过期，请重新发起');
+    const ctx = await this.flowContext(adminId, session, input.redirectUri, input.accountId);
+    await this.store.consume(input.state, ctx.binding);
+    const result = await this.exchangeCode(
+      { clientId: ctx.clientId, clientSecret: ctx.secret }, input.code, input.redirectUri, this.codeVerifier(ctx.secret, input.state),
+    );
+    return { ...result, revision: ctx.revision };
+  }
+
+  // The random state is unique to this attempt. Derive its secret PKCE verifier
+  // so the database never needs to store a reusable verifier in plaintext.
+  private codeVerifier(secret: string, state: string): string {
+    return createHmac('sha256', secret).update('tgtc:gdrive:pkce:' + state).digest('base64url');
+  }
+
+  private buildAuthUrl(config: GDriveOAuthClientConfig, redirectUri: string, state: string, challenge: string): string {
     const trimmed = redirectUri.trim();
     if (!trimmed) throw new BadRequestException('redirectUri 必填（须与 Google Console 登记一致）');
     const client = new OAuth2Client(config.clientId, config.clientSecret, trimmed);
@@ -184,20 +159,20 @@ export class GDriveOAuthService {
       // 强制 consent：重复授权也能拿到 refresh_token（否则 Google 只在首次授权下发）
       prompt: 'consent',
       scope: GDRIVE_SCOPES,
-      ...(state ? { state: state.trim() } : {}),
+      state,
+      code_challenge: challenge,
+      code_challenge_method: CodeChallengeMethod.S256,
     });
   }
 
   /** code 换取 refresh_token + 邮箱 + 配额（失败抛可诊断错误，绝不回显凭据） */
-  async exchangeCode(code: string, redirectUri: string): Promise<GDriveAuthExchangeResult> {
-    const config = await this.getClientConfig();
-    if (!config) throw new BadRequestException('请先配置 Google Drive OAuth Client');
+  private async exchangeCode(config: GDriveOAuthClientConfig, code: string, redirectUri: string, codeVerifier: string): Promise<GDriveAuthExchangeResult> {
     const cleanCode = extractOAuthCode(code);
     if (!cleanCode) throw new BadRequestException('授权码不能为空');
     const client = new OAuth2Client(config.clientId, config.clientSecret, redirectUri.trim());
     let tokens;
     try {
-      ({ tokens } = await client.getToken(cleanCode));
+      ({ tokens } = await client.getToken({ code: cleanCode, codeVerifier }));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       // invalid_grant：code 过期/已用/redirectUri 不匹配——可操作提示，不含凭据
@@ -233,8 +208,8 @@ export class GDriveOAuthService {
   }
 
   /** 构造已装载 refresh_token 的 OAuth2Client（自动刷新 access_token） */
-  async createAuthorizedClient(refreshToken: string): Promise<OAuth2Client> {
-    const config = await this.getClientConfig();
+  async createAuthorizedClient(refreshToken: string, snapshot?: GDriveOAuthClientConfig): Promise<OAuth2Client> {
+    const config = snapshot ?? await this.getClientConfig();
     if (!config) {
       throw new StorageAccountError('GDrive OAuth Client 未配置', 'auth');
     }

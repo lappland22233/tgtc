@@ -490,20 +490,17 @@ export class FolderService {
   // ---------- 文件移动 ----------
 
   async moveFile(ownerId: string, fileId: string, dto: MoveFileDto): Promise<File> {
-    const file = await this.fileRepo.findOne({
-      where: { id: fileId, uploaderId: ownerId, isDeleted: false },
-    });
-    if (!file) {
-      throw new NotFoundException('文件不存在');
-    }
-    if (dto.folderId) {
-      await this.assertFolderOwned(dto.folderId, ownerId);
-    }
-    const oldFolderId = file.folderId;
-    file.folderId = dto.folderId ?? null;
-    // v1.2.6：移动与统一命名空间 scopeKey 更新同事务；目标目录有同名文件/文件夹时冲突
-    const saved = await this.fileRepo.manager.transaction(async (manager) => {
-      const moved = await manager.getRepository(File).save(file);
+    if (dto.folderId) await this.assertFolderOwned(dto.folderId, ownerId);
+    const { saved, previous } = await this.fileRepo.manager.transaction(async (manager) => {
+      const repo = manager.getRepository(File);
+      const file = await repo.findOne({
+        where: { id: fileId, uploaderId: ownerId, isDeleted: false },
+        ...databasePessimisticWriteLock(),
+      });
+      if (!file) throw new NotFoundException('文件不存在');
+      const previous = file.folderId;
+      file.folderId = dto.folderId ?? null;
+      await repo.update(fileId, { folderId: file.folderId });
       await this.namespace.acquire(manager, {
         ownerId,
         folderId: dto.folderId ?? null,
@@ -511,14 +508,14 @@ export class FolderService {
         entityType: 'file',
         entityId: fileId,
       });
-      return moved;
+      return { saved: file, previous };
     });
     this.audit.log({
       action: 'file_move' as AuditAction,
       userId: ownerId,
       resourceType: 'file',
       resourceId: fileId,
-      metadata: { from: oldFolderId, to: dto.folderId ?? null },
+      metadata: { from: previous, to: dto.folderId ?? null },
     });
     return saved;
   }
@@ -530,17 +527,16 @@ export class FolderService {
    * 仅更新展示用名称，不改动底层存储的 filename / Telegram 引用。
    */
   async renameFile(ownerId: string, fileId: string, dto: RenameFileDto): Promise<File> {
-    const file = await this.fileRepo.findOne({
-      where: { id: fileId, uploaderId: ownerId, isDeleted: false },
-    });
-    if (!file) {
-      throw new NotFoundException('文件不存在');
-    }
-    const oldName = file.originalName;
-    file.originalName = dto.newOriginalName;
-    // v1.2.6：重命名与统一命名空间 nameKey 更新同事务；与同目录文件夹重名同样冲突
-    const saved = await this.fileRepo.manager.transaction(async (manager) => {
-      const renamed = await manager.getRepository(File).save(file);
+    const { saved, previous } = await this.fileRepo.manager.transaction(async (manager) => {
+      const repo = manager.getRepository(File);
+      const file = await repo.findOne({
+        where: { id: fileId, uploaderId: ownerId, isDeleted: false },
+        ...databasePessimisticWriteLock(),
+      });
+      if (!file) throw new NotFoundException('文件不存在');
+      const previous = file.originalName;
+      file.originalName = dto.newOriginalName;
+      await repo.update(fileId, { originalName: file.originalName });
       await this.namespace.acquire(manager, {
         ownerId,
         folderId: file.folderId ?? null,
@@ -548,14 +544,14 @@ export class FolderService {
         entityType: 'file',
         entityId: fileId,
       });
-      return renamed;
+      return { saved: file, previous };
     });
     this.audit.log({
       action: 'file_rename' as AuditAction,
       userId: ownerId,
       resourceType: 'file',
       resourceId: fileId,
-      metadata: { from: oldName, to: dto.newOriginalName },
+      metadata: { from: previous, to: dto.newOriginalName },
     });
     return saved;
   }

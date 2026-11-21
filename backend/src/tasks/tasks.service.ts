@@ -1,3 +1,4 @@
+import { pendingUploadDirectory, pendingUploadName } from '../file/pending-upload';
 import { Injectable, Inject, Logger, Optional } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, LessThan, IsNull, Brackets } from 'typeorm';
@@ -401,18 +402,54 @@ export class TasksService {
     }
   }
 
-  /** 从同版本回执恢复严格磁盘策略；无回执或旧回执按非严格处理。 */
-  private async getRecoveredStrictDiskLease(fileId: string, uploadVersion: number): Promise<boolean> {
+  private async recoveryReceipt(filePath: string, uploadVersion: number): Promise<{ strictDiskLease?: boolean } | undefined> {
     try {
-      const receiptPath = path.join(process.cwd(), 'tmp', 'uploads', 'pending', `${fileId}.telegram.json`);
-      const receipt = JSON.parse(await readFile(receiptPath, 'utf8')) as {
-        uploadVersion?: unknown;
-        strictDiskLease?: unknown;
-      };
-      return receipt.uploadVersion === uploadVersion && receipt.strictDiskLease === true;
+      const receipt = JSON.parse(await readFile(`${filePath}.telegram.json`, 'utf8'));
+      return receipt.uploadVersion === uploadVersion ? receipt : undefined;
     } catch {
-      return false;
+      return undefined;
     }
+  }
+
+  private async recoverUpload(file: File): Promise<boolean> {
+    const originalId = `file-upload:${file.id}:${file.uploadVersion}`;
+    let jobId = originalId;
+    let job = await this.fileUploadQueue.getJob(jobId);
+    const originalData = job?.data;
+    if (job && await job.getState() === 'completed') {
+      // Keep the completed record. Concurrent scans for this DB revision converge on one recovery job.
+      jobId = `${originalId}:resume:${file.updatedAt.getTime()}`;
+      job = await this.fileUploadQueue.getJob(jobId);
+    }
+    if (job) {
+      if (await job.getState() !== 'failed') return false;
+      try {
+        await job.retry();
+      } catch (error) {
+        if (await job.getState() === 'failed') throw error;
+        return false;
+      }
+      return true;
+    }
+    const dir = pendingUploadDirectory();
+    let filePath = path.join(dir, pendingUploadName(file.id, file.uploadVersion));
+    let receipt = await this.recoveryReceipt(filePath, file.uploadVersion);
+    if (!receipt) {
+      const legacy = path.join(dir, file.id);
+      const legacyReceipt = await this.recoveryReceipt(legacy, file.uploadVersion);
+      if (legacyReceipt || (originalData?.filePath === legacy && originalData.uploadVersion === file.uploadVersion)) {
+        filePath = legacy;
+        receipt = legacyReceipt;
+      }
+    }
+    await this.fileUploadQueue.add('upload', {
+      filePath, fileId: file.id, uploadVersion: file.uploadVersion,
+      strictDiskLease: originalData?.strictDiskLease === true || receipt?.strictDiskLease === true,
+    }, {
+      jobId, attempts: 3, backoff: { type: 'exponential', delay: 10000 },
+      removeOnComplete: 100, removeOnFail: false,
+    });
+    return true;
   }
 
   /** 恢复远端已有有效引用但状态仍为 processing 的存量文件。 */
@@ -444,20 +481,7 @@ export class TasksService {
     for (const file of remoteBatch) {
       if (!hasValidRemoteRef(file)) continue;
       try {
-        const pendingPath = path.join(process.cwd(), 'tmp', 'uploads', 'pending', file.id);
-        const strictDiskLease = await this.getRecoveredStrictDiskLease(file.id, file.uploadVersion);
-        await this.fileUploadQueue.add(
-          'upload',
-          { fileId: file.id, filePath: pendingPath, uploadVersion: file.uploadVersion, strictDiskLease },
-          {
-            jobId: `file-upload:${file.id}:${file.uploadVersion}`,
-            attempts: 3,
-            backoff: { type: 'exponential', delay: 10000 },
-            removeOnComplete: 100,
-            removeOnFail: false,
-          },
-        );
-        requeued++;
+        if (await this.recoverUpload(file)) requeued++;
       } catch (error: unknown) {
         this.logger.warn(`恢复 remote_committed 文件入队失败 fileId=${file.id}: ${error instanceof Error ? error.message : String(error)}`);
       }
@@ -484,22 +508,8 @@ export class TasksService {
 
     let requeued = 0;
     for (const file of batch) {
-      const jobId = `file-upload:${file.id}:${file.uploadVersion}`;
-      const pendingPath = `${process.cwd()}/tmp/uploads/pending/${file.id}`;
       try {
-        // removeOnFail:false 保留诊断痕迹；attempts 3 给提交重试机会
-        await this.fileUploadQueue.add(
-          'upload',
-          { fileId: file.id, filePath: pendingPath, uploadVersion: file.uploadVersion },
-          {
-            jobId,
-            attempts: 3,
-            backoff: { type: 'exponential', delay: 10000 },
-            removeOnComplete: 100,
-            removeOnFail: false,
-          },
-        );
-        requeued++;
+        if (await this.recoverUpload(file)) requeued++;
       } catch (error: unknown) {
         this.logger.warn(
           `恢复可提交文件入队失败 fileId=${file.id}: ${error instanceof Error ? error.message : String(error)}`,

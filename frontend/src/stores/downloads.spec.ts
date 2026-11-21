@@ -57,6 +57,34 @@ describe('downloads store', () => {
     messageError.mockReset();
   });
 
+  it.each([404, 410])('clears a permanently missing download task (%s)', async (status) => {
+    vi.useFakeTimers();
+    try {
+      const store = useDownloadsStore();
+      createDownloadTask.mockResolvedValueOnce(queuedView());
+      await store.requestDownload({ fileId: 'f1', fileName: 'old.bin' });
+      fetchDownloadTask.mockRejectedValueOnce({ response: { status } });
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(fetchDownloadTask).toHaveBeenCalledTimes(1);
+      expect(store.jobs).toEqual([]);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('discards a creation response arriving after the account changes', async () => {
+    const store = useDownloadsStore();
+    let finish!: (view: ReturnType<typeof queuedView>) => void;
+    createDownloadTask.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    const oldRequest = store.requestDownload({fileId: 'f1', fileName: 'previous.bin'});
+    store.stopAll();
+    createDownloadTask.mockResolvedValueOnce(queuedView({taskId: 'new'}));
+    await store.requestDownload({fileId: 'f1', fileName: 'current.bin'});
+    finish(queuedView({status: 'streamable'}));
+    expect(await oldRequest).toBeNull();
+    expect(triggerBrowserDownload).not.toHaveBeenCalled();
+    expect(store.jobs.map(job => job.fileName)).toEqual(['current.bin']);
+    store.stopAll();
+  });
+
   it('资源可用时立即触发浏览器原生下载，不进入队列视图', async () => {
     createDownloadTask.mockResolvedValueOnce({
       taskId: 'task-ready',

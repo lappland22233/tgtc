@@ -210,18 +210,13 @@ bool parse_file_stream_no_cache(td::Slice value) {
 }
 
 FileStreamLocalCopyAction decide_file_stream_local_copy_action(const FileStreamLocalCopyDecisionInput &input) {
-  if (!input.remove_requested) {
-    // No removal was requested. Still cancel a pending download for an unfinished stream so TDLib
-    // does not keep downloading a file nobody is reading.
-    return input.completed_ok ? FileStreamLocalCopyAction::none : FileStreamLocalCopyAction::cancel_download;
+  if (input.other_stream_listeners) {
+    return FileStreamLocalCopyAction::none;
   }
   if (!input.completed_ok) {
-    // Aborted/timed-out stream: the local copy may still be needed (for example by a Range retry
-    // from the same client), so keep it and only stop the download.
-    return FileStreamLocalCopyAction::cancel_download;
+    return input.download_listener_active ? FileStreamLocalCopyAction::none : FileStreamLocalCopyAction::cancel_download;
   }
-  if (input.other_stream_listeners) {
-    // Another stream is still reading the very same local copy.
+  if (!input.remove_requested) {
     return FileStreamLocalCopyAction::none;
   }
   if (input.download_listener_active) {

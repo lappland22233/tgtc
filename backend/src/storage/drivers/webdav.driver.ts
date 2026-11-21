@@ -50,7 +50,10 @@ export class WebDavStorageDriver implements StorageBackendDriver {
       }
       try {
         const ok = await client.putFileContents(objectPath, stream, {
-          contentLength: params.knownLength,
+          // webdav skips its contentLength option when the body is a Node Readable.
+          headers: Number.isSafeInteger(params.knownLength) && params.knownLength >= 0
+            ? { 'Content-Length': String(params.knownLength) }
+            : undefined,
           overwrite: false,
         });
         if (!ok) throw new StorageAccountError('WebDAV PUT 未确认成功', 'other');

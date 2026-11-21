@@ -63,7 +63,7 @@ class Client final : public WebhookActor::Callback {
   // Re-requests the download of a file that a streaming connection found locally unusable. TDLib
   // re-validates the local location on every download start, so this restores a workdir copy that
   // was removed behind its back; a file that is already downloading is not downloaded twice.
-  void request_file_redownload(td::int32 file_id);
+  void request_file_redownload(td::int32 file_id, td::int64 file_size);
 
   void close();
 
@@ -346,7 +346,6 @@ class Client final : public WebhookActor::Callback {
   class TdOnGetStickersCallback;
   class TdOnDownloadFileCallback;
   class TdOnFileStreamRemoteFileCallback;
-  class TdOnFileStreamDownloadCallback;
   class TdOnCancelDownloadFileCallback;
   class TdOnDeleteFileCallback;
   class TdOnDeleteFileAndAnswerCallback;
@@ -1071,9 +1070,10 @@ class Client final : public WebhookActor::Callback {
 
   void do_get_file(object_ptr<td_api::file> file, PromisedQueryPtr query);
 
-  // Pre-write workdir space admission check (see check_workdir_space). Returns true when the local
-  // copy may be (re)created; on rejection it records an observable counter and log line.
-  bool check_workdir_space_for_download(int64 file_size, int64 existing_local_size);
+  bool start_file_download(int32 file_id, int64 file_size, int64 downloaded, bool exact_size, bool refresh = false);
+  void release_download_budget(int32 file_id);
+  void cancel_file_download(int32 file_id);
+  void fail_file_download(int32 file_id, int code, const td::string &message);
 
   // Local cache copy deletion handshake counters (see Client::remove_file_stream and
   // Client::process_release_local_file_query).
@@ -1620,7 +1620,17 @@ class Client final : public WebhookActor::Callback {
   td::WaitFreeHashMap<td::string, td::unique_ptr<BusinessConnection>> business_connections_;
 
   td::FlatHashMap<int32, td::vector<PromisedQueryPtr>> file_download_listeners_;
-  td::FlatHashSet<int32> download_started_file_ids_;
+  struct DownloadReservation {
+    int64 held = 0;
+    int64 end = 0;
+    int64 request_id = 0;
+    bool bounded = false;
+    bool started = false;
+    bool was_active = false;
+    bool cancelling = false;
+  };
+  int64 next_download_request_id_ = 0;
+  td::FlatHashMap<int32, DownloadReservation> download_reservations_;
   struct FileStreamRef {
     td::int64 id;
     td::ActorId<FileStreamConnection> actor;

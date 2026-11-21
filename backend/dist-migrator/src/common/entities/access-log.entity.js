@@ -10,6 +10,7 @@ var __metadata = (this && this.__metadata) || function (k, v) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.AccessLog = void 0;
+const database_types_1 = require("../../database/database-types");
 const typeorm_1 = require("typeorm");
 let AccessLog = class AccessLog {
 };
@@ -53,9 +54,38 @@ __decorate([
 ], AccessLog.prototype, "referer", void 0);
 __decorate([
     (0, typeorm_1.Index)(),
-    (0, typeorm_1.Column)({ nullable: true, type: 'uuid', comment: '关联用户 ID（已登录请求）' }),
+    (0, typeorm_1.Column)({ nullable: true, type: (0, database_types_1.databaseColumnType)('uuid'), comment: '关联用户 ID（已登录请求）' }),
     __metadata("design:type", String)
 ], AccessLog.prototype, "userId", void 0);
+__decorate([
+    (0, typeorm_1.Index)('IDX_access_logs_botGrantId'),
+    (0, typeorm_1.Column)({ nullable: true, type: (0, database_types_1.databaseColumnType)('uuid'), comment: 'Bot 直链 grant ID' }),
+    __metadata("design:type", String)
+], AccessLog.prototype, "botGrantId", void 0);
+__decorate([
+    (0, typeorm_1.Column)({ nullable: true, type: 'varchar', length: 32, comment: 'Bot 下载者 TG 用户 ID' }),
+    __metadata("design:type", String)
+], AccessLog.prototype, "botTelegramUserId", void 0);
+__decorate([
+    (0, typeorm_1.Column)({ nullable: true, type: 'boolean', comment: '下载传输是否完整写完响应' }),
+    __metadata("design:type", Boolean)
+], AccessLog.prototype, "transferCompleted", void 0);
+__decorate([
+    (0, typeorm_1.Column)({ nullable: true, type: 'boolean', comment: '下载传输是否被中断' }),
+    __metadata("design:type", Boolean)
+], AccessLog.prototype, "transferAborted", void 0);
+__decorate([
+    (0, typeorm_1.Column)({ nullable: true, type: 'boolean', comment: '是否 Range 分段响应' }),
+    __metadata("design:type", Boolean)
+], AccessLog.prototype, "ranged", void 0);
+__decorate([
+    (0, typeorm_1.Column)({ nullable: true, type: 'varchar', length: 24, comment: '传输结束原因' }),
+    __metadata("design:type", String)
+], AccessLog.prototype, "terminationReason", void 0);
+__decorate([
+    (0, typeorm_1.Column)({ nullable: true, type: 'bigint', comment: '实际响应体字节（bigint 字符串）' }),
+    __metadata("design:type", String)
+], AccessLog.prototype, "responseBodyBytes", void 0);
 __decorate([
     (0, typeorm_1.CreateDateColumn)({ comment: '请求时间' }),
     __metadata("design:type", Date)

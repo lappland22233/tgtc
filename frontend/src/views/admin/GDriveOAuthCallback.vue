@@ -40,7 +40,7 @@ const errorMessage = ref('');
 const isPopup = ref(false);
 
 const titleText = computed(() => {
-  if (status.value === 'success') return 'Google Drive 授权成功';
+  if (status.value === 'success') return '已收到 Google Drive 授权码';
   if (status.value === 'error') return 'Google Drive 授权失败';
   return '正在处理 Google 授权...';
 });
@@ -48,8 +48,8 @@ const titleText = computed(() => {
 const subtitleText = computed(() => {
   if (status.value === 'success') {
     return isPopup.value
-      ? '凭据正在同步至 TGTC 管理后台，此窗口即将自动关闭...'
-      : '凭据已获取，请返回管理后台查看。';
+      ? '授权码已回传，请以管理后台的兑换结果为准。'
+      : '请返回管理后台查看凭据兑换结果。';
   }
   if (status.value === 'error') {
     return '未能完成授权，请检查错误信息或重试。';
@@ -74,86 +74,30 @@ onMounted(() => {
   const error = searchParams.get('error');
   const errorDescription = searchParams.get('error_description');
 
-  if (error || !code) {
-    status.value = 'error';
-    errorMessage.value = errorDescription || error || '未在回调地址中检测到有效的授权码（code）';
-
-    const failPayload = {
-      type: 'TGTC_GDRIVE_OAUTH_RESULT',
-      status: 'error',
-      error: errorMessage.value,
-      state: state || undefined,
-    };
-
-    // 1. postMessage 回传
-    if (window.opener && !window.opener.closed) {
-      try {
-        window.opener.postMessage(failPayload, window.location.origin);
-      } catch (e) {
-        console.warn('[GDriveOAuth] postMessage failed:', e);
-      }
-    }
-
-    // 2. BroadcastChannel 回传
-    try {
-      const bc = new BroadcastChannel('tgtc_gdrive_oauth_channel');
-      bc.postMessage(failPayload);
-      bc.close();
-    } catch {}
-
-    // 3. localStorage 事件回传
-    try {
-      localStorage.setItem('tgtc_gdrive_oauth_event', JSON.stringify({
-        ...failPayload,
-        timestamp: Date.now(),
-      }));
-      setTimeout(() => {
-        try {
-          localStorage.removeItem('tgtc_gdrive_oauth_event');
-        } catch {}
-      }, 3000);
-    } catch {}
-
-    return;
-  }
-
-  // 成功获取 code
-  status.value = 'success';
-  const successPayload = {
+  const ok = Boolean(code?.trim() && state?.trim() && !error);
+  status.value = ok ? 'success' : 'error';
+  errorMessage.value = ok ? '' : errorDescription || error || '授权码或授权状态缺失，请重新发起授权';
+  const payload = {
     type: 'TGTC_GDRIVE_OAUTH_RESULT',
-    status: 'success',
-    code: code.trim(),
-    state: state?.trim() || undefined,
+    status: status.value,
+    state: state?.trim(),
+    ...(ok ? { code: code!.trim() } : { error: errorMessage.value }),
   };
-
-  // 1. postMessage
-  if (window.opener && !window.opener.closed) {
-    try {
-      window.opener.postMessage(successPayload, window.location.origin);
-    } catch (e) {
-      console.warn('[GDriveOAuth] postMessage failed:', e);
-    }
-  }
-
-  // 2. BroadcastChannel
+  try {
+    window.opener?.postMessage(payload, window.location.origin);
+  } catch {}
   try {
     const bc = new BroadcastChannel('tgtc_gdrive_oauth_channel');
-    bc.postMessage(successPayload);
+    bc.postMessage(payload);
     bc.close();
   } catch {}
-
-  // 3. localStorage
   try {
-    localStorage.setItem('tgtc_gdrive_oauth_event', JSON.stringify({
-      ...successPayload,
-      timestamp: Date.now(),
-    }));
-    setTimeout(() => {
-      try {
-        localStorage.removeItem('tgtc_gdrive_oauth_event');
-      } catch {}
-    }, 3000);
+    // Other windows receive the set event's newValue even after immediate removal.
+    // Closing this popup cannot leave an unused code on disk.
+    localStorage.setItem('tgtc_gdrive_oauth_event', JSON.stringify(payload));
+    localStorage.removeItem('tgtc_gdrive_oauth_event');
   } catch {}
+  if (!ok) return;
 
   // 如果是在弹窗中打开的，1.2 秒后自动关闭
   if (isPopup.value) {

@@ -13,6 +13,8 @@ import { AccountAwareUploadService, AccountUploadUnavailableError } from '../tel
 import { StorageRouterService } from '../storage/storage-router.service';
 import { isRemoteStorageBackend, StorageUploadReceipt, StorageUploadUnavailableError } from '../storage/storage.types';
 import { createReadStream, existsSync } from 'fs';
+import { basename } from 'node:path';
+import { pendingUploadName } from '../file/pending-upload';
 import { readFile, rename, unlink, writeFile } from 'fs/promises';
 import { databaseQuery, getDatabaseType } from '../database/database-types';
 
@@ -230,37 +232,24 @@ export class FileUploadProcessor {
     } catch (error) {
       // 尚未发出远端请求时（如账号额度不足/冷却中），把任务延迟重试并退出 processor，释放并发工作槽位
       if (!(error instanceof StorageUploadUnavailableError) || !error.admissionOnly) throw error;
-      const current = await this.fileRepository.findOne({ where: { id: file.id } });
-      if (!current || current.uploadVersion !== file.uploadVersion || current.isDeleted) return null;
-
-      const delayMs = Math.min(60_000, Math.max(1000, error.retryAfterMs));
-      const admissionAttempt = ((job.data as any).admissionAttempt || 0) + 1;
-      if (admissionAttempt > 120) {
-        throw new Error(`存储后端容量持续不足，已等待超过重试上限 (backend=${backendType})`);
-      }
-
-      this.logger.warn(
-        `存储后端账号容量暂不可用 (backend=${backendType})，将在 ${Math.round(delayMs / 1000)}s 后重试，立即释放处理槽位 (fileId=${file.id}, retry=${admissionAttempt})`,
-      );
-
-      if (job?.queue) {
-        await job.queue.add(
-          'upload',
-          {
-            ...job.data,
-            admissionAttempt,
-          },
-          {
-            delay: delayMs,
-            attempts: 3,
-            backoff: { type: 'exponential', delay: 10000 },
-            removeOnComplete: 100,
-            removeOnFail: 50,
-          },
-        );
-      }
+      await this.deferAdmission(file, job, error.retryAfterMs);
       return null;
     }
+  }
+
+  private async deferAdmission(file: File, job: Job<FileUploadJobData>, retryAfterMs: number): Promise<void> {
+    const current = await this.fileRepository.findOne({ where: { id: file.id } });
+    if (!current || current.uploadVersion !== job.data.uploadVersion || current.isDeleted) return;
+    const admissionAttempt = (job.data.admissionAttempt ?? 0) + 1;
+    if (admissionAttempt > 120) throw new Error('存储账号容量持续不足，已达到等待上限');
+    await job.queue.add('upload', { ...job.data, admissionAttempt }, {
+      jobId: `file-upload:${file.id}:${job.data.uploadVersion}:admission:${admissionAttempt}`,
+      delay: Math.min(60_000, Math.max(1000, retryAfterMs)),
+      attempts: Math.max(1, (job.opts?.attempts ?? 3) - job.attemptsMade),
+      backoff: { type: 'exponential', delay: 10000 },
+      removeOnComplete: 100,
+      removeOnFail: 50,
+    });
   }
 
   private async removeUploadArtifacts(
@@ -268,6 +257,11 @@ export class FileUploadProcessor {
     fileId?: string,
     uploadVersion?: number,
   ): Promise<boolean> {
+    // Older jobs can share the same unversioned source path.
+    if (fileId && basename(filePath) === fileId) {
+      const current = await this.fileRepository.findOne({ where: { id: fileId } });
+      if (current && current.uploadVersion !== uploadVersion) return false;
+    }
     const [sourceRemoved] = await Promise.all([
       this.removeTempFile(filePath),
       unlink(this.receiptPath(filePath)).catch(() => {}),
@@ -293,7 +287,17 @@ export class FileUploadProcessor {
 
   @Process({ name: 'upload', concurrency: 2 })
   async uploadToTelegram(job: Job<FileUploadJobData>): Promise<void> {
-    const { fileId, filePath, uploadVersion, strictDiskLease = false } = job.data;
+    const release = this.uploadDiskBudget?.retainWorkerSource?.(job.data.filePath);
+    try {
+      await this.processUpload(job);
+    } finally {
+      release?.();
+    }
+  }
+
+  private async processUpload(job: Job<FileUploadJobData>): Promise<void> {
+    const { fileId, filePath, uploadVersion } = job.data;
+    let strictDiskLease = job.data.strictDiskLease === true;
     const attempt = job.attemptsMade + 1;
     let file = await this.fileRepository.findOne({ where: { id: fileId } });
     if (!file) {
@@ -302,15 +306,20 @@ export class FileUploadProcessor {
       return;
     }
     if (file.uploadVersion !== uploadVersion) {
+      if (basename(filePath) === pendingUploadName(fileId, uploadVersion)) {
+        await this.removeUploadArtifacts(filePath, fileId, uploadVersion);
+      }
       this.logger.warn(`忽略文件 ${fileId} 的陈旧上传任务 version=${uploadVersion}`);
       return;
     }
     // 存储后端判别（会话创建时冻结）：非 TG 走存储路由，TG 链路逐字节不变
     const isNonTelegram = isRemoteStorageBackend(file.storageBackend);
 
+    const savedReceipt = await this.loadReceipt(filePath, uploadVersion);
+    strictDiskLease ||= savedReceipt?.strictDiskLease === true;
     if (!this.isCommitted(file)) {
-      if (!existsSync(filePath)) {
-        if (job.attemptsMade < 2) throw new Error(`临时文件暂不可用: ${filePath}`);
+      if (!savedReceipt && !existsSync(filePath)) {
+        if (attempt < (job.opts?.attempts ?? 3)) throw new Error(`临时文件暂不可用: ${filePath}`);
         await this.fileRepository.update(
           { id: fileId, uploadVersion },
           {
@@ -340,6 +349,7 @@ export class FileUploadProcessor {
       }
       file = await this.fileRepository.findOneOrFail({ where: { id: fileId } });
 
+      if (file.uploadVersion !== uploadVersion || file.isDeleted) return;
       try {
         // 提交前捕获旧存储引用（异步覆盖场景仍指向旧对象），提交成功后共享安全清理
         const oldStorageRef = {
@@ -347,7 +357,7 @@ export class FileUploadProcessor {
           storageAccountId: file.storageAccountId,
           storageObjectRef: file.storageObjectRef,
         };
-        let result = await this.loadReceipt(filePath, uploadVersion);
+        let result = savedReceipt;
         if (!result) {
           if (isNonTelegram) {
             // 非 TG 后端：按冻结的 storageBackend 选号上传（配额/健康/带宽感知）
@@ -361,17 +371,12 @@ export class FileUploadProcessor {
               this.logger.debug('严格磁盘租约任务按设计跳过池化上传（保留 fork 本地媒体释放契约）');
             }
             let pooled: UploadReceipt | null;
-            for (;;) {
-              try {
-                pooled = strictDiskLease ? null : await this.tryPooledUpload(filePath, file);
-                break;
-              } catch (error) {
-                // 没有任何远端请求被发出：等待名额，不消耗 Bull 的失败次数或删除源文件。
-                if (!(error instanceof AccountUploadUnavailableError) || !error.admissionOnly) throw error;
-                await new Promise<void>(resolve => setTimeout(resolve, Math.min(60_000, Math.max(1000, error.retryAfterMs))));
-                const current = await this.fileRepository.findOne({ where: { id: fileId } });
-                if (!current || current.uploadVersion !== uploadVersion || current.isDeleted) return;
-              }
+            try {
+              pooled = strictDiskLease ? null : await this.tryPooledUpload(filePath, file);
+            } catch (error) {
+              if (!(error instanceof AccountUploadUnavailableError) || !error.admissionOnly) throw error;
+              await this.deferAdmission(file, job, error.retryAfterMs);
+              return;
             }
             result = pooled ?? await this.telegramService.uploadFile(
               createReadStream(filePath),
@@ -443,7 +448,7 @@ export class FileUploadProcessor {
       } catch (error) {
         this.logger.warn(`文件远端上传或提交失败 (fileId=${fileId}, 第 ${attempt} 次): ${(error as Error).message}`);
         const remoteReceipt = await this.loadReceipt(filePath, uploadVersion);
-        if (job.attemptsMade >= 2 && !remoteReceipt) {
+        if (attempt >= (job.opts?.attempts ?? 3) && !remoteReceipt) {
           await this.fileRepository.update(
             { id: fileId, uploadVersion },
             {
@@ -456,7 +461,7 @@ export class FileUploadProcessor {
             `文件上传最终失败并标记 error: fileId=${fileId} uploadVersion=${uploadVersion} 原因=远端上传/提交重试耗尽，无远端回执`,
           );
           await this.removeUploadArtifacts(filePath, fileId, uploadVersion);
-        } else if (job.attemptsMade >= 2 && remoteReceipt) {
+        } else if (attempt >= (job.opts?.attempts ?? 3) && remoteReceipt) {
           // G3-14：远端已成功（有回执）但 DB 提交失败且重试耗尽。回执无人消费会导致内容已上传、
           // 引用却写不进 DB。标记 recoverable 状态并保留本地文件/回执，由恢复任务凭回执提交，
           // 避免逼用户整文件重传。

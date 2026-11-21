@@ -8,7 +8,7 @@ import {
   Index,
 } from 'typeorm';
 
-/** 更新任务状态机的全部状态（唯一事实来源见 update/update-state-machine.ts） */
+/** 1.x 存量更新任务的状态值 */
 export type UpdateTaskStatus =
   | 'queued' | 'downloading' | 'verifying' | 'prechecking' | 'backing_up'
   | 'extracting' | 'migrating' | 'activating' | 'restarting' | 'health_checking'
@@ -19,12 +19,7 @@ export type UpdateTaskStatus =
 /** 程序回退状态快照（仅激活后失败时有意义） */
 export type UpdateRollbackStatus = 'not_needed' | 'needed' | 'in_progress' | 'completed' | 'failed';
 
-/**
- * 系统更新任务持久化实体。
- *
- * 同一时间全局最多 1 个活动任务（非终态），由 isActive 部分唯一索引保证；
- * API 对外绝不返回 metadata 中的内部路径（备份位置、旧发行目录等）。
- */
+/** 保留 1.x 历史记录的表结构，供 PostgreSQL 到 SQLite 的离线迁移使用。 */
 @Entity('update_tasks')
 @Index('idx_update_tasks_createdAt', ['createdAt'])
 @Index('uq_update_tasks_active_slot', ['isActive'], { unique: true, where: '"isActive" = true' })

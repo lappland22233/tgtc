@@ -385,15 +385,25 @@ export class GDriveStorageDriver implements StorageBackendDriver {
 
   /** 把任意流切分为固定大小块（最后一块可短） */
   private async *chunked(stream: Readable, size: number): AsyncGenerator<Buffer> {
-    let pending = Buffer.alloc(0);
+    let parts: Buffer[] = [];
+    let length = 0;
     for await (const part of stream) {
-      pending = Buffer.concat([pending, Buffer.isBuffer(part) ? part : Buffer.from(part)]);
-      while (pending.length >= size) {
-        yield pending.subarray(0, size);
-        pending = pending.subarray(size);
+      const input = Buffer.isBuffer(part) ? part : Buffer.from(part);
+      let offset = 0;
+      while (offset < input.length) {
+        const take = Math.min(size - length, input.length - offset);
+        parts.push(input.subarray(offset, offset + take));
+        length += take;
+        offset += take;
+        if (length === size) {
+          const block = parts.length === 1 ? parts[0] : Buffer.concat(parts, length);
+          parts = [];
+          length = 0;
+          yield block;
+        }
       }
     }
-    if (pending.length > 0) yield pending;
+    if (length) yield parts.length === 1 ? parts[0] : Buffer.concat(parts, length);
   }
 
   /** 根文件夹：config 回填优先；否则查找/创建 TGTC/（含 In-flight 单飞锁防并发创建） */
@@ -463,7 +473,7 @@ export class GDriveStorageDriver implements StorageBackendDriver {
       .slice(0, 16);
     const cached = this.clients.get(ctx.accountId);
     if (cached && cached.fingerprint === fingerprint) return cached.client;
-    const client = await this.oauth.createAuthorizedClient(refreshToken);
+    const client = await this.oauth.createAuthorizedClient(refreshToken, oauthConfig);
     this.clients.set(ctx.accountId, { fingerprint, client });
     return client;
   }

@@ -1,3 +1,4 @@
+import { parsePendingUploadName } from './pending-upload';
 import { HttpException, HttpStatus, Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -31,6 +32,17 @@ const LEASE_BUSY_LOG_INTERVAL_MS = 60 * 1000;
 export class UploadDiskBudgetService {
   private readonly logger = new Logger(UploadDiskBudgetService.name);
   private activeLease: UploadDiskLease | null = null;
+  private readonly workerSources = new Map<string, number>();
+
+  retainWorkerSource(source: string): () => void {
+    const key = path.resolve(source);
+    this.workerSources.set(key, (this.workerSources.get(key) ?? 0) + 1);
+    return () => {
+      const remaining = (this.workerSources.get(key) ?? 1) - 1;
+      if (remaining) this.workerSources.set(key, remaining);
+      else this.workerSources.delete(key);
+    };
+  }
   /** 阻塞日志限频状态：单槽租约只需记住上一次的 key 与时间，避免长期运行的 Map 增长。 */
   private lastBusyLogKey: string | null = null;
   private lastBusyLogAt = 0;
@@ -92,20 +104,21 @@ export class UploadDiskBudgetService {
           && !entry.name.endsWith('.telegram.json')
           && !entry.name.endsWith('.telegram.json.tmp'))
         .map((entry) => entry.name);
-      const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
       for (const name of sourceNames) {
-        if (!uuidRe.test(name)) {
+        const owner = parsePendingUploadName(name);
+        if (!owner) {
           this.logger.warn('严格上传预算发现未知 pending 文件，拒绝新会话');
           throw this.createBusyException();
         }
         const file = await this.fileRepository.findOne({
-          where: { id: name },
+          where: { id: owner.id },
           withDeleted: true,
           select: { id: true, status: true, uploadStage: true },
         });
         const required = file?.status === 'processing'
           && RECOVERABLE_UPLOAD_STAGES.includes(file.uploadStage as typeof RECOVERABLE_UPLOAD_STAGES[number]);
-        if (required) {
+        // A published file can still be streaming its source to the cache mirror.
+        if (required || this.workerSources.has(path.join(this.pendingDir, name))) {
           this.logger.warn(`严格上传预算等待 pending 恢复源: fileId=${name}`);
           throw this.createBusyException();
         }

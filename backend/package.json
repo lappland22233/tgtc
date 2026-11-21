@@ -1,6 +1,7 @@
 {
   "name": "file-distribution-system-backend",
-  "version": "1.6.3",
+  "version": "2.0.1",
+  "engines": { "node": ">=22.23.5 <23" },
   "description": "Small file distribution system with Telegram storage",
   "main": "dist/main.js",
   "_cryptoNote": "G9-16(P2): bcryptjs 为纯 JS 实现，其异步 API 内部用 setImmediate 让出事件循环，但哈希/比对仍占用主线程 CPU，登录/注册高峰可能阻塞。替代候选：原生 bcrypt（需 node-gyp 编译，安装风险大，未经确认不擅自切换）或 worker_threads 池。TODO: 评估 worker_threads 迁移方案后落地。",
@@ -23,12 +24,12 @@
     "migration:run:sqlite": "cross-env DB_TYPE=sqlite DB_MIGRATIONS_RUN=false typeorm-ts-node-commonjs migration:run -d src/database/data-source.ts",
     "migration:revert:sqlite": "cross-env DB_TYPE=sqlite DB_MIGRATIONS_RUN=false typeorm-ts-node-commonjs migration:revert -d src/database/data-source.ts",
     "test:integration:sqlite": "cross-env DB_TYPE=sqlite jest --runInBand src/database/sqlite-real-qa.spec.ts",
-    "test:integration:pg": "cross-env PG_API_KEY_IT=1 jest --runInBand src/database/postgres-api-key.integration.spec.ts src/database/security-review.integration.spec.ts",
+    "test:integration:pg": "cross-env PG_API_KEY_IT=1 jest --runInBand src/database/postgres-api-key.integration.spec.ts src/database/security-review.integration.spec.ts src/storage/gdrive-oauth-store.service.spec.ts",
     "test:migrations:sqlite": "cross-env DB_TYPE=sqlite jest --runInBand src/migrations/sqlite-migrations.spec.ts",
     "gate:sqlite": "jest --runInBand scripts/data-migrator-utils.spec.ts && npm run test:migrations:sqlite && npm run test:integration:sqlite",
-    "build:data-migrator": "tsc --target ES2021 --module commonjs --moduleResolution node --rootDir . --esModuleInterop --experimentalDecorators --emitDecoratorMetadata --skipLibCheck --outDir dist-migrator scripts/build-data-migrator.ts && node -e \"require('fs').writeFileSync('dist-migrator/build-data-migrator.js','\\\"use strict\\\";\\nrequire(\\\"./scripts/build-data-migrator.js\\\");\\n')\"",
+    "build:data-migrator": "node -e \"require('node:fs').rmSync('dist-migrator',{recursive:true,force:true})\" && tsc -p tsconfig.migrator.json && node -e \"require('fs').writeFileSync('dist-migrator/build-data-migrator.js','\\\"use strict\\\";\\nrequire(\\\"./scripts/build-data-migrator.js\\\");\\n')\"",
     "check:ci": "npm ls --all && npm audit --omit=dev --audit-level=high && npm run typecheck && npm run build && npm run gate:sqlite && npm run test:integration:redis && npm run test:cov -- --runInBand",
-    "test:integration:redis": "cross-env REDIS_IT=1 jest --runInBand src/jobs/bull-real.integration.spec.ts"
+    "test:integration:redis": "cross-env REDIS_IT=1 jest --runInBand src/jobs/bull-real.integration.spec.ts src/jobs/upload-recovery.redis.integration.spec.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1161.0",
@@ -96,6 +97,8 @@
   },
   "_overridesNote": "Pinned security patches for HTTP/upload parsers, redirects and transitive IP/UUID handling. Bull UUID compatibility is exercised against real Redis; multipart limits and interrupted uploads use real HTTP tests.",
   "overrides": {
+    "typeorm": { "glob": "14.0.6" },
+    "webdav": { "minimatch": "11.0.9" },
     "multer": "2.5.0",
     "follow-redirects": "1.16.2",
     "proxy-addr": "2.0.8",

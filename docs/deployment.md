@@ -14,9 +14,9 @@
 
 **软件要求**：
 
-- Node.js 20+（NestJS 11 运行时要求；发行包使用随包提供的 Node runtime）
+- Node.js 22。开发、CI 和生产均使用仓库根目录 `.node-version` 指定的补丁版本。
 - npm（项目未使用 yarn 或 pnpm）
-- PostgreSQL 14+（默认、推荐用于多实例和较高写并发），或 SQLite 3（仅单实例/低写并发，必须设置 `DB_TYPE=sqlite`）
+- PostgreSQL 14+（默认，推荐用于较高写并发），或 SQLite 3（仅单实例/低写并发，必须设置 `DB_TYPE=sqlite`）
 - Redis（两种数据库模式均必需，Bull 队列不由 SQLite 替代）
 - Telegram Bot Token 与用于存储文件的 Chat ID（两种数据库模式均必需，SQLite 只保存元数据）
 - 可选：SMTP 服务
@@ -66,7 +66,7 @@ npm run start:dev
 
 如果配置了 `SMTP_HOST`，还必须同时配置完整 SMTP 参数以及 `SMTP_ENCRYPTION_KEY`、`SMTP_ENCRYPTION_SALT`；否则启动校验会拒绝启动。暂不使用邮件时，应移除或注释全部 SMTP 配置，并在系统认证配置中关闭依赖邮件的功能。
 
-后端开发服务器默认监听 `http://0.0.0.0:3000`。
+后端默认监听 `http://127.0.0.1:3000`。
 
 ### 3. 启动前端
 
@@ -87,71 +87,84 @@ VITE_API_PROXY_TARGET=http://localhost:3000
 生产前端固定使用同源 `/api`，不读取独立 API 基址。
 
 
-## Linux x64 预编译发行版
+## 从源码部署 2.0.1
 
-正式发行文件按版本存放于 `.Releases/v<版本>/`。完整 Linux x64 包包含已构建前端、后端生产依赖、Node.js 运行时和二次开发 Telegram Bot API 可执行文件：
-
-```text
-.Releases/
-└── vX.Y.Z/
-    ├── tgtc-vX.Y.Z-linux-x64.zip
-    ├── SHA256SUMS
-    └── RELEASE.txt
-```
-
-`ZIP` 是唯一支持的发行压缩格式。归档必须且只能含 `tgtc-vX.Y.Z-linux-x64/` 顶层目录，且包内 `VERSION`、顶层目录、ZIP 文件名及 `SHA256SUMS` 的资产名必须为同一版本。归档至少包含 `backend/`、`frontend/index.html`、`runtime/bin/node`、`telegram-bot-api/bin/telegram-bot-api`、`bin/tgtc`、`start.sh` 和完整的 `scripts/release/` 运维脚本。
-
-发行包不包含 TypeScript 源码、测试、source map、开发依赖、`.env`、数据库、Redis 持久化、Telegram Bot API workdir、上传分片、日志、缓存或用户数据。`start.sh`、运行二进制和可执行运维脚本必须保留 Unix 可执行权限。数据库结构仍由包内编译后的正式运行时迁移维护；这些迁移不是开发文件，新库初始化和后续升级均依赖它们。
-
-
-## 发行包部署、升级与回退
-
-`VERSION` 是唯一的发行版本源，必须与前后端 `package.json` 和 lockfile 根包版本一致。Linux x64 构建在 Linux 环境执行：
+在单独的源码目录构建已经选定的提交。仓库根目录的 `VERSION` 随后端一起部署，`/api/version` 读取该文件。前端产物放在相邻的 `frontend/dist/`。以下示例中的路径需换成实际绝对路径。
 
 ```bash
-bash scripts/build-linux-x64-release.sh
+SOURCE=/srv/tgtc-2.0.1
+cd "$SOURCE"
+test "$(node --version)" = "v$(cat .node-version)"
+bash scripts/release/check-version.sh
+(cd frontend && npm ci --include=dev && npm run build)
+(cd backend && npm ci --include=dev && npm run build && npm run build:data-migrator)
 ```
 
-构建产物包含 `backend/`、`frontend/`、`telegram-bot-api/`、`runtime/`、`bin/`、`start.sh` 和 `scripts/release/`。首次安装使用包根目录的 `./start.sh`；已使用 `current` 符号链接部署的实例可使用：
+使用自建 Bot API 的实例还需构建本仓库的 C++ 服务。安装 CMake、C++ 编译器、gperf、OpenSSL 和 zlib 开发文件后运行：
 
 ```bash
-# 检查真实服务、数据库依赖、前端入口和运行版本
-./scripts/release/health-check.sh
-
-# 独立校验 ZIP 的摘要、版本、结构、权限与安全边界
-./scripts/release/validate-release.sh /absolute/path/tgtc-vX.Y.Z-linux-x64.zip /absolute/path/SHA256SUMS
-
-# 校验 ZIP、备份、迁移、原子切换；失败仅回退程序，不回退不可逆迁移
-./scripts/release/upgrade.sh /absolute/path/tgtc-vX.Y.Z-linux-x64.zip /absolute/path/SHA256SUMS
-
-# 原子回退到上一程序版本或指定版本；不移动数据库、.env 或 Telegram workdir
-./scripts/release/rollback.sh [X.Y.Z]
+cmake -S "$SOURCE/telegram-bot-api" -B "$SOURCE/telegram-bot-api/build" -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
+cmake --build "$SOURCE/telegram-bot-api/build" --target telegram-bot-api --parallel 1
 ```
 
-升级会把 `.env`、数据库和 Telegram Bot API workdir 保持在发行目录外。特别是 Bot API 的 `telegram-bot-api/data` 与历史 `file_id` 强绑定，严禁删除、重命名、迁移或由发行包覆盖。备份脚本根据 `DB_TYPE` 使用 PostgreSQL 逻辑备份或停止写入后的 SQLite 一致性备份：
+后端服务工作目录决定相对 SQLite 路径和 `tmp/` 的位置。首次部署可将 `backend/.env.example` 复制到工作目录的 `.env` 后填写。设置 `NODE_ENV=production`、`DB_SYNCHRONIZE=false`，用下面的命令手工迁移时可设置 `DB_MIGRATIONS_RUN=false`。从既有实例升级时应保留原配置与工作目录。
 
 ```bash
-./scripts/release/backup.sh
+SOURCE=/srv/tgtc-2.0.1
+APP_WORKDIR=/var/lib/tgtc/backend
+APP_ENV="$APP_WORKDIR/.env"
+NODE=$(command -v node)
+cd "$APP_WORKDIR"
+DOTENV_CONFIG_PATH="$APP_ENV" "$NODE" -r "$SOURCE/backend/node_modules/dotenv/config" \
+  "$SOURCE/backend/node_modules/typeorm/cli.js" migration:run -d "$SOURCE/backend/dist/database/data-source.js"
 ```
 
+用系统服务启动 `$NODE $SOURCE/backend/dist/main.js`。服务的 `WorkingDirectory` 和 `EnvironmentFile` 应与迁移使用的实际路径相同。进程默认在 127.0.0.1 监听，并通过同源站点提供前端和 `/api`。systemd 部署可运行 `bash "$SOURCE/scripts/release/health-check.sh"` 检查服务、数据库、前端和版本。非默认监听地址请设置 `TGTC_API_URL` 和 `TGTC_FRONTEND_URL`。
 
-## 手工生产部署
+### 从 1.x 手工升级
+
+1. 在维护窗口前完成新源码构建。记录现有 `systemctl cat tgtc.service`、Node 路径、旧提交和 `VERSION`。源码原地 checkout 常以旧仓库的 `backend/` 为工作目录，先把新提交构建到旁边的目录，避免尚在运行的进程与 `npm ci` 或重编译共用依赖。旧预编译部署通常从 `/opt/tgtc/current/bin/tgtc` 启动，可用 `readlink -f /opt/tgtc/current` 和 `cat /opt/tgtc/current/VERSION` 确认旧版本。
+2. 核对并保留原工作目录、`.env`、上传暂存、缓存、Redis 持久化和 Telegram Bot API 的 `--dir`、`--temp-dir`。历史 `file_id` 依赖原 Bot 工作目录及凭据。先关闭旧更新入口，确认没有进行中的运维任务，再停后端以及其他会写该数据库的进程。
+3. 后端停写后运行备份并验证。以下示例针对旧 `/opt` 布局；原地 checkout 请将 `TGTC_BACKEND_WORKDIR` 改为实际旧工作目录，`TGTC_VERSION_FILE` 改为旧源码的 `VERSION`。备份根目录应位于持久安装根内。脚本会输出本次备份的确切路径。
+
+   ```bash
+   sudo systemctl stop tgtc.service
+   TGTC_INSTALL_ROOT=/opt/tgtc TGTC_BACKEND_WORKDIR=/opt/tgtc/runtime/backend \
+     TGTC_VERSION_FILE=/opt/tgtc/current/VERSION bash "$SOURCE/scripts/release/backup.sh"
+   (cd "/opt/tgtc/backups/本次备份目录" && sha256sum -c SHA256SUMS)
+   ```
+
+4. 在同一停写窗口内，按上节命令对实际数据库运行新源码迁移。旧 `/opt` 实例通常使用 `APP_WORKDIR=/opt/tgtc/runtime/backend`，并保留其中的 `.env` 与 SQLite 文件。先确认迁移命令成功，再调整服务。
+5. 对旧预编译部署用 `systemctl edit tgtc.service` 指向源码的后端入口，保留原运行账号和工作路径。示例中的 Node 路径须以现场实际安装的 22.x 路径替换。
+
+   ```ini
+   [Service]
+   WorkingDirectory=/opt/tgtc/runtime/backend
+   EnvironmentFile=/opt/tgtc/runtime/backend/.env
+   ExecStart=
+   ExecStart=/usr/local/bin/node /srv/tgtc-2.0.1/backend/dist/main.js
+   ```
+
+   使用本仓库 Bot API 的实例应同时把其单元的可执行文件替换为新构建，保留原有启动参数、目录和凭据。执行 `systemctl daemon-reload`，先重启需要更新二进制的本地 Bot 服务，再启动后端，运行健康检查，确认 `/api/version` 为 `2.0.1`。
+6. 迁移、启动或健康检查失败时停止后端并保留日志。2.0.1 调整了授权唯一索引，SQLite 还会归并时间键。恢复到 1.x 时，先从本次备份恢复数据库，再切回原程序及服务配置。PostgreSQL 可在空数据库上运行 `pg_restore --exit-on-error --single-transaction -d 恢复库 database.pg.dump`；SQLite 可用备份文件作新库并运行 `PRAGMA integrity_check`。核对连接配置、数据和版本后再恢复写入。独立 SQLite 备份只会重启它自己停下的服务。
+
+### 退役旧自动更新组件
+
+在已有 1.x 主机上检查 `systemctl list-units --all 'tgtc-update@*.service'` 及相关 timer、cron 和独立更新进程。关闭旧管理入口，确认正在运行的任务已结束并核对当前运行版本，再停用实际存在的专用 timer 或外部调度。保留服务器的历史日志、更新任务记录和备份。
+
+如部署过旧模板，将 `/etc/systemd/system/tgtc-update@.service` 及其专用 drop-in、`/etc/sudoers.d/tgtc-update`、`/etc/polkit-1/rules.d/49-tgtc-update.rules` 移至仅管理员可读的归档目录。若授权规则写在共用 sudoers 文件中，用 `visudo` 仅移除旧更新器的命令授权。随后执行 `visudo -c`、`systemctl daemon-reload` 和 `systemctl mask tgtc-update@.service`，并核对该模板已停用。单独安装过的 updater 脚本可在撤销其调度与权限后归档。数据库中的历史 `update_tasks` 保留供迁移和审计，2.0.1 的服务不会重放这些任务。
+
+### PostgreSQL 转 SQLite
+
+在新源码后端运行 `npm run build:data-migrator`。停止源库业务写入，保留源数据库备份，从旧服务的工作目录运行工具。目标必须是新的 SQLite 文件。
 
 ```bash
-# 前端
-cd frontend
-npm ci
-npm run build
-
-# 后端
-cd ../backend
-npm ci
-npm run migration:run
-npm run build
-NODE_ENV=production npm run start:prod
+cd "$APP_WORKDIR"
+DOTENV_CONFIG_PATH="$APP_WORKDIR/.env" MIGRATION_TARGET="$APP_WORKDIR/data/converted.sqlite" \
+  "$NODE" "$SOURCE/backend/dist-migrator/build-data-migrator.js"
 ```
 
-生产模式由 NestJS 直接服务 `frontend/dist`，API 前缀为 `/api`，SPA 导航回退到 `index.html`。
+核对目标旁边的 `.migration-report.json` 中的逐表行数、结构和完整性检查。将后端的 `DB_TYPE` 与 `DB_DATABASE` 指向已验证的 SQLite，启动后再次检查健康状态、版本和关键业务数据。
 
 
 ## 部署注意事项
