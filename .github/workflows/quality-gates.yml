@@ -125,7 +125,7 @@ jobs:
           npm run test:integration:pg
 
       - name: Require Nest dependency-injection smoke coverage for enabled account-pool module
-        run: npx jest --runInBand src/telegram-account-pool/telegram-account-pool.module.spec.ts src/telegram-account-pool/download-capacity-policy.service.spec.ts
+        run: npm test -- --runInBand src/telegram-account-pool/telegram-account-pool.module.spec.ts src/telegram-account-pool/download-capacity-policy.service.spec.ts
 
       - name: Upload backend coverage report
         if: ${{ !cancelled() }}
