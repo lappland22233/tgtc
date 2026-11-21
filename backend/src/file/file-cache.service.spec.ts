@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'fs/promises';
 import { tmpdir } from 'os';
 import * as path from 'path';
 import { PassThrough, Readable } from 'stream';
@@ -8,6 +8,12 @@ async function readStream(stream: Readable): Promise<Buffer> {
   const chunks: Buffer[] = [];
   for await (const chunk of stream) chunks.push(Buffer.from(chunk));
   return Buffer.concat(chunks);
+}
+
+async function makeCacheTestDir(prefix: string): Promise<string> {
+  const cwd = await mkdtemp(path.join(tmpdir(), prefix));
+  await mkdir(path.join(cwd, 'tmp', 'Cache'), { recursive: true });
+  return cwd;
 }
 
 /**
@@ -42,7 +48,7 @@ describe('FileCacheService realtime build session', () => {
   const fileId = '11111111-1111-4111-8111-111111111111';
 
   beforeEach(async () => {
-    cwd = await mkdtemp(path.join(tmpdir(), 'file-cache-test-'));
+    cwd = await makeCacheTestDir('file-cache-test-');
     jest.spyOn(process, 'cwd').mockReturnValue(cwd);
     service = new FileCacheService({ get: jest.fn((_key: string, fallback: string) => fallback) } as any);
     await new Promise(resolve => setTimeout(resolve, 10));
@@ -346,7 +352,7 @@ describe('FileCacheService no-cache mode', () => {
   };
 
   beforeEach(async () => {
-    cwd = await mkdtemp(path.join(tmpdir(), 'file-cache-nocache-test-'));
+    cwd = await makeCacheTestDir('file-cache-nocache-test-');
     jest.spyOn(process, 'cwd').mockReturnValue(cwd);
     service = createNoCacheService();
     // 测试缩短宽限期；生产默认值固定为 120 秒。
@@ -847,7 +853,7 @@ describe('FileCacheService 磁盘预约、降级与 pin（下载配额）', () =
   };
 
   beforeEach(async () => {
-    cwd = await mkdtemp(path.join(tmpdir(), 'file-cache-quota-test-'));
+    cwd = await makeCacheTestDir('file-cache-quota-test-');
     jest.spyOn(process, 'cwd').mockReturnValue(cwd);
     service = new FileCacheService({ get: jest.fn((_key: string, fallback: string) => fallback) } as any);
     await new Promise(resolve => setTimeout(resolve, 10));
@@ -1082,7 +1088,7 @@ describe('FileCacheService 下载调度配置规范化', () => {
   let cwd: string;
 
   beforeEach(async () => {
-    cwd = await mkdtemp(path.join(tmpdir(), 'file-cache-config-'));
+    cwd = await makeCacheTestDir('file-cache-config-');
     jest.spyOn(process, 'cwd').mockReturnValue(cwd);
   });
 

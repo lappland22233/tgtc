@@ -460,7 +460,8 @@ describe('真实 SQLite 数据源关键业务与并发 QA', () => {
     expect(child.parentId).toBe(root.id);
 
     const accessLogRepo = dataSource.getRepository(AccessLog);
-    const windowTime = new Date();
+    // Keep the aggregation sample out of the window populated by the preceding latency test.
+    const windowTime = new Date(Date.now() - 15 * 60_000);
     windowTime.setUTCSeconds(0, 0);
     const sourceTime = new Date(windowTime.getTime() - 30_000);
     await accessLogRepo.save([10, 20, 30, 40].map((duration, index) => accessLogRepo.create({
