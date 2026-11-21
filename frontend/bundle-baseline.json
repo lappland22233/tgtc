@@ -1,7 +1,7 @@
 {
   "$schema": "internal://frontend-bundle-baseline",
-  "updatedAt": "2026-10-03",
-  "note": "由 `npm run check:bundle -- --write` 生成。阈值含义：jsTotal/cssTotal 为产物总量，maxJsChunk/maxCssChunk 为单文件上限，entryCssTotal 为入口 index.html 加载的 CSS 总量（TDesign 按需化后应显著小于 cssTotal）。",
+  "updatedAt": "2026-11-21",
+  "note": "jsTotal/cssTotal 为产物总量，maxJsChunk/maxCssChunk 为单文件上限。entryJsTotal 按构建 HTML 直接引用的本地 JS 和 CSS 去重计量。",
   "toleranceRatio": 0.05,
   "entryToleranceRatio": 0.02,
   "thresholds": {
@@ -11,7 +11,7 @@
     "cssGzipTotal": 63358,
     "maxJsChunk": 568068,
     "maxCssChunk": 128844,
-    "entryJsTotal": 367790
+    "entryJsTotal": 640588
   },
   "largest": {
     "maxJsChunk": {

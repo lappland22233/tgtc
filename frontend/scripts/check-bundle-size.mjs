@@ -5,7 +5,7 @@
  * （518 KB），且 `vite.config.ts` 的 `manualChunks` 把全部 TDesign 模块强制合并成
  * 单块，导致按需样式失效、首屏 CSS 达 500 KB。本脚本把「不许回退」固化为门禁。
  *
- * 零依赖（仅 node: 内置模块），gzip 体积用 zlib 计算。
+ * HTML 通过 jsdom 解析，gzip 体积用 zlib 计算。
  *
  * 用法：
  *   node scripts/check-bundle-size.mjs            # 按 bundle-baseline.json 校验
@@ -15,9 +15,10 @@
  */
 
 import { readFileSync, readdirSync, statSync, existsSync, writeFileSync } from 'node:fs';
-import { join, relative, extname, sep } from 'node:path';
+import { join, resolve, relative, extname, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gzipSync } from 'node:zlib';
+import { JSDOM } from 'jsdom';
 
 const scriptDir = fileURLToPath(new URL('.', import.meta.url));
 const projectRoot = join(scriptDir, '..');
@@ -84,16 +85,20 @@ function analyze() {
 }
 
 /** 入口 index.html 实际加载的 CSS/JS —— 首屏真实成本，比全量统计更能反映回退。 */
-function analyzeEntry() {
-  const htmlPath = join(distDir, 'index.html');
-  if (!existsSync(htmlPath)) return { critical: [], bytes: 0 };
-  const html = readFileSync(htmlPath, 'utf8');
-  const refs = [...html.matchAll(/(?:modulepreload|stylesheet)[^>]*href="\/([^"]+\.(?:js|css))"/g)]
-    .map((m) => m[1])
-    .filter((p) => p.startsWith('assets/'));
+export function analyzeEntry(buildDir = distDir) {
+  const htmlPath = join(buildDir, 'index.html');
+  if (!existsSync(htmlPath)) fail('缺少构建入口 dist/index.html');
+  const origin = 'https://bundle.invalid';
+  const { window } = new JSDOM(readFileSync(htmlPath, 'utf8'), { url: origin });
+  const refs = new Set();
+  for (const tag of window.document.querySelectorAll('script[src], link[rel~="stylesheet"][href], link[rel~="modulepreload"][href]')) {
+    const url = new URL(tag.src || tag.href);
+    if (url.origin === origin) refs.add(decodeURIComponent(url.pathname.slice(1)));
+  }
+  window.close();
   let bytes = 0;
-  const critical = refs.map((rel) => {
-    const size = statSync(join(distDir, rel)).size;
+  const critical = [...refs].map((rel) => {
+    const size = statSync(join(buildDir, rel)).size;
     bytes += size;
     return { path: rel, bytes: size };
   });
@@ -115,7 +120,7 @@ function main() {
     note:
       '由 `npm run check:bundle -- --write` 生成。阈值含义：' +
       'jsTotal/cssTotal 为产物总量，maxJsChunk/maxCssChunk 为单文件上限，' +
-      'entryCssTotal 为入口 index.html 加载的 CSS 总量（TDesign 按需化后应显著小于 cssTotal）。',
+      'entryJsTotal 为入口 HTML 直接加载的本地 JS 和 CSS 总量。',
     toleranceRatio: TOLERANCE_RATIO,
     entryToleranceRatio: ENTRY_CRITICAL_TOLERANCE_RATIO,
     thresholds: {
@@ -205,4 +210,4 @@ function printTable(result, entry) {
   }
 }
 
-main();
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main();

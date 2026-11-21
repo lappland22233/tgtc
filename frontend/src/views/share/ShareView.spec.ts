@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createPinia, setActivePinia } from 'pinia';
-import { flushPromises, mount } from '@vue/test-utils';
+import { flushPromises, mount, shallowMount } from '@vue/test-utils';
 
 import { reactive } from 'vue';
 import { useMediaPlaybackStore } from '../../stores/mediaPlayback';
@@ -17,6 +17,8 @@ vi.mock('tdesign-vue-next/es/dialog', () => ({
 }));
 
 import ShareView from './ShareView.vue';
+import MiniMediaPlayer from '../../components/file/MiniMediaPlayer.vue';
+import ThumbnailImg from '../../components/ThumbnailImg.vue';
 
 function jsonResponse(body: unknown, ok = true, status = 200): Response {
   return { ok, status, json: vi.fn().mockResolvedValue(body) } as unknown as Response;
@@ -63,11 +65,20 @@ describe('分享页密码校验的 CSRF 双重提交', () => {
     const wrapper = mountShareView();
     await flushPromises();
     const media = useMediaPlaybackStore();
-    media.session = {context: {type: 'share', token: 'A'}, item: {id: 'f', kind: 'video'}} as any;
+    const item = { id: 'f', kind: 'video' as const, name: 'shared.mp4', mimeType: 'video/mp4', src: '/media/f' };
+    media.open({ context: { type: 'share', token: 'A' }, item, playlist: [item], playlistIndex: 0 });
+    media.minimize();
+    const player = shallowMount(MiniMediaPlayer, { global: { stubs: { teleport: true } } });
+    expect(player.getComponent(ThumbnailImg).props('context')).toBe('s:A');
+    expect(player.text()).toContain('shared.mp4');
     const stop = vi.spyOn(media, 'requestStop');
     shareRoute.params.token = 'B';
     await flushPromises();
     expect(stop).toHaveBeenCalledOnce();
+    expect(media.session).toBeNull();
+    expect(player.findComponent(ThumbnailImg).exists()).toBe(false);
+    expect(player.text()).not.toContain('shared.mp4');
+    player.unmount();
     wrapper.unmount();
     shareRoute.params.token = 'share-token';
   });

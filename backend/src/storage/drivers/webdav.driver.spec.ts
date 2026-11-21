@@ -53,7 +53,7 @@ describe('WebDavStorageDriver（mock webdav 客户端）', () => {
     expect(clientMock.createDirectory).toHaveBeenCalledWith('/tgtc/media', { recursive: true });
     const [path, , options] = clientMock.putFileContents.mock.calls[0];
     expect(path).toBe(result.objectRef);
-    expect(options).toMatchObject({ contentLength: 4, overwrite: false });
+    expect(options).toMatchObject({ headers: { 'Content-Length': '4' }, overwrite: false });
   });
 
   it('上传：目录已存在（405）视为成功；PUT 未确认成功抛错', async () => {
