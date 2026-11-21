@@ -470,14 +470,21 @@ function scanSource(label: string, source: string): ScanResult {
     deleteUpdateCalls: 0,
   };
 
-  const callPattern = /\.query\s*(?:<[^()]*>)?\s*\(/g;
+  const callPattern = /(\.query|\bdatabaseRawQuery)\s*(?:<[^()]*>)?\s*\(/g;
   let match: RegExpExecArray | null;
   while ((match = callPattern.exec(codeText)) !== null) {
     stats.queryCalls += 1;
     const callIndex = match.index;
     const openParen = match.index + match[0].length - 1;
 
-    const literal = readFirstArgumentLiteral(semiText, openParen);
+    const closeParen = findMatchingDelimiter(codeText, openParen, '(', ')');
+    const rawHelper = match[1] === 'databaseRawQuery';
+    // Strings are already blanked in codeText, so commas inside the runner
+    // expression (including string literals) do not move the SQL argument.
+    const firstArgLength = rawHelper && closeParen !== -1
+      ? splitTopLevel(codeText.slice(openParen + 1, closeParen))[0].length : 0;
+    const sqlDelimiter = rawHelper ? openParen + 1 + firstArgLength : openParen;
+    const literal = readFirstArgumentLiteral(semiText, sqlDelimiter);
     let statement: { kind: StatementKind; hasReturning: boolean } | null = null;
     if (literal) {
       stats.literalCalls += 1;
@@ -487,14 +494,13 @@ function scanSource(label: string, source: string): ScanResult {
       else if (statement.kind === 'delete' || statement.kind === 'update') stats.deleteUpdateCalls += 1;
     }
 
-    const binding = parseBindingBeforeCall(semiText, callIndex);
+    const binding = parseBindingBeforeCall(semiText, rawHelper ? callIndex + match[1].length : callIndex);
     const found = new Map<ViolationKind, number>();
     const record = (kind: ViolationKind, at: number): void => {
       if (!found.has(kind)) found.set(kind, at);
     };
 
     // A1/A3 链式直读：(await x.query(...)).affected / (await x.query(...))[1]
-    const closeParen = findMatchingDelimiter(codeText, openParen, '(', ')');
     if (closeParen !== -1) {
       const tail = codeText.slice(closeParen + 1);
       const chainAffected = /^\s*\)?\s*\??\.\s*(?:affected|rowCount)\b/.exec(tail);
@@ -769,6 +775,15 @@ describe('运行时代码 .query() 行数/affected 直读静态守卫（v1.6.0 �
       'affected-read',
       'tuple-index',
     ]);
+  });
+
+  it('classifies the SQL argument of raw helpers and flags row-count reads', () => {
+    const result = scanSource('samples/bad-raw-helper.ts', `
+      const rows = await databaseRawQuery(getRunner('first,second'), 'DELETE FROM tasks WHERE id = $1', [id]);
+      if (rows[1] > 0) markComplete();
+    `);
+    expect(result.stats.deleteUpdateCalls).toBe(1);
+    expect(result.violations.map(v => v.kind)).toContain('tuple-index');
   });
 
   it('好样本自测：合规写法零误伤（databaseQuery+RETURNING / 纯 SELECT / INSERT...RETURNING / [0] / 单元素解构）', () => {

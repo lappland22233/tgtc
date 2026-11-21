@@ -11,6 +11,7 @@
     "target": "ES2022",
     "useDefineForClassFields": false,
     "sourceMap": true,
+    "rootDir": ".",
     "outDir": "./dist",
     "incremental": true,
     "skipLibCheck": true,

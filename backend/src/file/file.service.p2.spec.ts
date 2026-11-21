@@ -221,7 +221,7 @@ describe('G2-12: batchToMarkdown 转义与直链约束', () => {
     const publicQueryArg = find.mock.calls[1][0];
     expect(publicQueryArg.where.isDeleted).toBe(false);
     expect(publicQueryArg.where.accessType).toBe(FileAccessType.PUBLIC);
-    expect(publicQueryArg.select).toEqual(['id', 'password', 'maxAccessCount', 'expiresIn', 'expiresStartAt']);
+    expect(publicQueryArg.select).toEqual({ id: true, password: true, maxAccessCount: true, expiresIn: true, expiresStartAt: true });
   });
 });
 

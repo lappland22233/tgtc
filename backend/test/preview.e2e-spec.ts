@@ -18,6 +18,7 @@ import cookieParser from 'cookie-parser';
 import helmet from 'helmet';
 import { Readable } from 'stream';
 
+import { ApiKeyService } from '../src/api-key/api-key.service';
 import { AccessLogMiddleware } from '../src/common/middleware/access-log.middleware';
 import { CsrfGuard } from '../src/common/guards/csrf.guard';
 import { GlobalExceptionFilter } from '../src/common/filters/http-exception.filter';
@@ -168,6 +169,7 @@ describe('分享 Cookie 与媒体安全头（C-01/C-02）', () => {
       controllers: [ShareController, FileController],
       providers: [
         { provide: ShareService, useValue: shareService },
+        { provide: ApiKeyService, useValue: {} },
         { provide: FileService, useValue: fileService },
         {
           provide: RateLimitService,
