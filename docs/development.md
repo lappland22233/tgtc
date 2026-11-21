@@ -47,7 +47,7 @@ frontend/src/
 
 提交前分别在 `backend`、`frontend` 执行 `npm ci` 和 `npm run check:ci`。GitHub Actions 调用相同的 `check:ci` 脚本，检查依赖树、生产依赖审计（high/critical 阻断）、类型、构建及覆盖率；后端还执行 SQLite 和真实 Redis 队列门禁，前端还执行产物体积门禁。后端需先启动测试用 Redis（默认 127.0.0.1:6379，数据库 15；可用 REDIS_HOST、REDIS_PORT、REDIS_PASSWORD、REDIS_TEST_DB 覆盖），测试仅操作本次生成的唯一队列，不清空 Redis 数据库。不要只用 `npm test` 代替该命令，也不要用 `npm audit fix --force` 绕过兼容性验证。
 
-覆盖率下限（语句/分支/函数/行）：后端为 60%/45%/55%/60%，前端为 40%/70%/50%/40%。后端在原先四项 30% 基础上提高要求，前端从仅报告覆盖率改为阻断退化。
+按语句、分支、函数、行计，后端覆盖率下限依次为 60%、45%、55%、60%，前端为 40%、36.58%、33.38%、41.69%。前端升级到 Vitest 5 后使用基于语法树的 V8 计量。在覆盖文件相同的条件下，用新版工具重跑升级前的代码，得到 39.11%、36.58%、33.38%、41.69%。以实测新口径设定门槛，并保留原 40% 的语句下限。[Vitest 覆盖率迁移说明](https://v4.vitest.dev/guide/migration.html#coverage)
 
 PostgreSQL 专项需要独立测试服务：设置 `DB_TYPE=postgres` 及 `DB_HOST`、`DB_PORT`、`DB_USERNAME`、`DB_PASSWORD`、`DB_DATABASE`，执行 `npm run migration:run`、检查无待执行迁移、再次执行确认幂等，然后执行 `npm run test:integration:pg`。测试账号需要创建/删除隔离测试数据库的权限；业务回归本身只写入按次创建的隔离库。该命令同时执行 SQLite 与 PostgreSQL 的安全审查回归，不能用跳过 PG 的普通测试运行替代。
 
