@@ -95,6 +95,7 @@ describe('真实 SQLite 数据源关键业务与并发 QA', () => {
       'SqliteScopeBotGrantMessage1804400000000',
       'SqliteGDriveOAuthFlows1804500000000',
       'SqliteCreateMinuteMetrics1804600000000',
+      'SqliteBotInboundQueue1804700000000',
     ]);
 
     await dataSource.undoLastMigration();
