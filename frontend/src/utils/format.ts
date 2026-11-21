@@ -69,3 +69,17 @@ export function getFileEmoji(_mimeType?: string): string {
 
 // Re-export for convenience: import { getFileIconType } from '@/utils/format'
 export { getFileIconType } from './file-icon-type';
+
+/** 用户明细的时间列：空值显示占位符 */
+export function formatDateTime(value: string | null, includeYear = false): string {
+  if (!value) return '—';
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return '—';
+  return d.toLocaleString('zh-CN', {
+    year: includeYear ? 'numeric' : undefined,
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}

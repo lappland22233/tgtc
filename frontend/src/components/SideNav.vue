@@ -132,6 +132,7 @@ const adminNav: NavItem[] = [
   { to: '/admin/security', label: '安全监控', icon: icons.security, roles: PAGE_ROLES['/admin/security'] },
   { to: '/admin/user-activity', label: '用户活跃', icon: icons.userActivity, roles: PAGE_ROLES['/admin/user-activity'] },
   { to: '/admin/audit-logs', label: '操作审计', icon: icons.auditLogs, roles: PAGE_ROLES['/admin/audit-logs'] },
+  { to: '/admin/bot-operations', label: 'Bot 收件管理', icon: icons.telegramAccounts, roles: PAGE_ROLES['/admin/bot-operations'] },
   { to: '/admin/telegram-accounts', label: 'Telegram 账号池', icon: icons.telegramAccounts, roles: PAGE_ROLES['/admin/telegram-accounts'] },
   { to: '/admin/storage-backends', label: '存储后端', icon: icons.storageBackends, roles: PAGE_ROLES['/admin/storage-backends'] },
   // 系统配置包含仅超级管理员可读取的缓存配置和仅超级管理员可保存的全局配置，

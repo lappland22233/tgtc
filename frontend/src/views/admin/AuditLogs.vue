@@ -204,6 +204,8 @@ export const actionLabels: Record<string, string> = {
   telegram_bot_link_accessed: 'Bot 直链访问',
   telegram_bot_link_revoked: 'Bot 撤销直链',
   telegram_bot_link_queried: 'Bot 查询直链',
+  telegram_bot_task_cancelled: 'Bot 收件任务取消',
+  telegram_bot_user_banned: 'Bot 用户封禁',
   telegram_bot_quota_denied: 'Bot 额度拒绝',
   telegram_bot_whitelist_add: 'Bot 白名单加入',
   telegram_bot_whitelist_remove: 'Bot 白名单移除',
@@ -238,6 +240,7 @@ const resourceTypeLabels: Record<string, string> = {
   ip_ban: 'IP封禁', rate_limit: '限流', system: '系统',
   bot_config: 'Bot 配置', telegram_bot_grant: 'Bot 直链', telegram_bot_quota: 'Bot 额度',
   telegram_bot_file: 'Bot 文件', telegram_bot_whitelist: 'Bot 白名单', telegram_bot_command: 'Bot 命令',
+  telegram_bot_task: 'Bot 收件任务', telegram_bot_user: 'TG 用户',
   // v1.5.3 新引入的资源类型
   telegram_account: '账号池账号', telegram_account_pool: '账号池开关',
   telegram_mirror_rule: '镜像规则', telegram_mirror_task: '镜像任务',
@@ -274,7 +277,8 @@ export function actionTheme(action: string): string {
   }
   // Bot 动作需先于通用规则判定：telegram_bot_file_* 会被 includes('file') 误判为成功
   if (action.startsWith('telegram_bot_')) {
-    return action.includes('denied') || action.includes('revoked') ? 'warning' : 'primary';
+    if (action === 'telegram_bot_user_banned') return 'danger';
+    return action.includes('denied') || action.includes('revoked') || action.includes('cancelled') ? 'warning' : 'primary';
   }
   if (action.includes('login') || action === 'register') return 'primary';
   if (action.includes('delete') || action.includes('ban')) return 'danger';
