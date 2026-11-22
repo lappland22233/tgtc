@@ -7,6 +7,8 @@ import type { EnqueueInboundTask, InboundNotice, TelegramBotInboundQueueService 
 import type { IssuedGrant } from './telegram-bot-grant.service';
 import type { EntityManager } from 'typeorm';
 import { TelegramAccountError } from '../telegram-account-pool/telegram-account-client.service';
+import { TelegramRateLimitError } from '../telegram/telegram.errors';
+import { StorageUploadSourceError } from '../storage/storage.types';
 
 type Counters = {
   selections: number;
@@ -853,6 +855,142 @@ describe('TelegramBotDispatchService（多 Bot 身份链路）', () => {
 
 describe('TelegramBotDispatchService（纯 Google 存储模式）', () => {
   const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  it('单 Bot 大文件在 Telegram 收完前开始上传，Google 确认完整文件后才签发直链', async () => {
+    const blockSize = 8 * 1024 * 1024;
+    const firstBlock = Buffer.alloc(blockSize, 3);
+    const tail = Buffer.from('tail');
+    const size = firstBlock.length + tail.length;
+    const allowTelegramTail = gate();
+    const finishGoogleUpload = gate();
+    const telegramEnded = jest.fn();
+    const receivedChunks: Buffer[] = [];
+    const googleReadAll = jest.fn();
+    const storageRouter = {
+      availableBackendTypes: jest.fn(() => ['gdrive']),
+      getGDriveChunkSizeBytes: jest.fn(async () => blockSize),
+      upload: jest.fn(async ({ openStream }: { openStream: () => Readable }) => {
+        for await (const chunk of openStream()) {
+          receivedChunks.push(chunk);
+          if (receivedChunks.length === 1) await finishGoogleUpload.waiting;
+        }
+        googleReadAll();
+        return { backendType: 'gdrive', accountId: 'google', objectRef: 'remote-id', size };
+      }),
+    };
+    const downloadResources = { reserve: jest.fn() };
+    const transferTracker = { register: jest.fn() };
+    const uploadDiskBudget = {
+      isStrictMode: jest.fn(() => true),
+      acquireSession: jest.fn(async (_id: string, _size: number) => undefined),
+      releaseSession: jest.fn(() => true),
+    };
+    const ctx = makeService({
+      storageRouter, downloadResources, transferTracker, uploadDiskBudget, botConfig: { storageMode: 'gdrive' },
+    });
+    async function* telegramChunks() {
+      yield firstBlock;
+      await allowTelegramTail.waiting;
+      yield tail;
+      telegramEnded();
+    }
+    ctx.telegramService.getRealtimeFileStream.mockResolvedValueOnce({
+      stream: Readable.from(telegramChunks()),
+      info: { file_id: 'telegram-file', file_path: '', file_size: size },
+    });
+
+    try {
+      await ctx.service.handleUpdate(makeMessageUpdate({
+        document: { file_id: 'telegram-file', file_name: 'large.bin', file_size: size },
+      }));
+      await waitFor(() => receivedChunks.length > 0);
+      expect(storageRouter.upload).toHaveBeenCalledWith(expect.objectContaining({ knownLength: size }));
+      expect(receivedChunks[0]).toHaveLength(blockSize);
+      expect(telegramEnded).not.toHaveBeenCalled();
+      expect(ctx.grantService.issue).not.toHaveBeenCalled();
+      expect(downloadResources.reserve).not.toHaveBeenCalled();
+      expect(transferTracker.register).not.toHaveBeenCalled();
+      expect(uploadDiskBudget.acquireSession).toHaveBeenCalledWith(expect.any(String), size);
+
+      allowTelegramTail.open();
+      await waitFor(() => telegramEnded.mock.calls.length > 0);
+      expect(googleReadAll).not.toHaveBeenCalled();
+      expect(ctx.grantService.issue).not.toHaveBeenCalled();
+
+      finishGoogleUpload.open();
+      await waitFor(() => ctx.inboundQueue.tasks[0]?.status === 'completed');
+      expect(googleReadAll).toHaveBeenCalledTimes(1);
+      expect(Buffer.concat(receivedChunks).equals(Buffer.concat([firstBlock, tail]))).toBe(true);
+      expect(ctx.grantService.issue).toHaveBeenCalledWith(expect.objectContaining({
+        fileSize: String(size), storageBackend: 'gdrive', storageAccountId: 'google', storageObjectRef: 'remote-id',
+      }), 4, undefined, expect.any(String));
+      await waitFor(() => uploadDiskBudget.releaseSession.mock.calls.length > 0);
+      expect(uploadDiskBudget.releaseSession).toHaveBeenCalledWith(uploadDiskBudget.acquireSession.mock.calls[0][0]);
+    } finally {
+      allowTelegramTail.open();
+      finishGoogleUpload.open();
+      await ctx.service.beforeApplicationShutdown();
+    }
+  });
+
+  it.each([-1, 1])('Telegram 实际长度与声明相差 %i 字节时拒绝签发直链', async (sizeDelta) => {
+    const size = 6 * 1024 * 1024;
+    const storageRouter = {
+      availableBackendTypes: jest.fn(() => ['gdrive']),
+      getGDriveChunkSizeBytes: jest.fn(async () => 8 * 1024 * 1024),
+      upload: jest.fn(async ({ openStream }: { openStream: () => Readable }) => {
+        let bytes = 0;
+        for await (const chunk of openStream()) bytes += chunk.length;
+        return { backendType: 'gdrive', accountId: 'google', objectRef: 'remote-id', size: bytes };
+      }),
+    };
+    const ctx = makeService({ storageRouter, botConfig: { storageMode: 'gdrive' } });
+    ctx.telegramService.getRealtimeFileStream.mockResolvedValueOnce({
+      stream: Readable.from([Buffer.alloc(size + sizeDelta)]),
+      info: { file_id: 'telegram-file', file_path: '', file_size: size },
+    });
+
+    try {
+      await ctx.service.handleUpdate(makeMessageUpdate({
+        document: { file_id: 'telegram-file', file_name: 'large.bin', file_size: size },
+      }));
+      await waitFor(() => ctx.inboundQueue.tasks[0]?.status === 'failed');
+      expect(storageRouter.upload).toHaveBeenCalledTimes(1);
+      expect(ctx.grantService.issue).not.toHaveBeenCalled();
+    } finally {
+      await ctx.service.beforeApplicationShutdown();
+    }
+  });
+
+  it('流式转存读取 Telegram 遇到 429 时保留原任务并按来源的退避时间重试', async () => {
+    const storageRouter = {
+      availableBackendTypes: jest.fn(() => ['gdrive']),
+      getGDriveChunkSizeBytes: jest.fn(async () => 8 * 1024 * 1024),
+      upload: jest.fn(async ({ openStream }: { openStream: () => Readable }) => {
+        try {
+          await openStream().toArray();
+        } catch (error) {
+          if (error instanceof StorageUploadSourceError) throw error.cause;
+          throw error;
+        }
+        throw new Error('预期 Telegram 回源返回限流错误');
+      }),
+    };
+    const ctx = makeService({ storageRouter, botConfig: { storageMode: 'gdrive' } });
+    ctx.telegramService.getRealtimeFileStream.mockRejectedValueOnce(new TelegramRateLimitError(60));
+
+    try {
+      await ctx.service.handleUpdate(makeMessageUpdate({
+        document: { file_id: 'telegram-file', file_name: 'large.bin', file_size: 6 * 1024 * 1024 },
+      }));
+      await waitFor(() => ctx.inboundQueue.retry.mock.calls.length === 1);
+      expect(ctx.inboundQueue.retry).toHaveBeenCalledWith(expect.objectContaining({ messageId: '100' }), 60_000);
+      expect(ctx.grantService.issue).not.toHaveBeenCalled();
+      expect(ctx.quotaService.refund).not.toHaveBeenCalled();
+    } finally {
+      await ctx.service.beforeApplicationShutdown();
+    }
+  });
 
   it('私聊发送文件：先回复等待提示，后台转存 Google 云端硬盘并原地编辑为成功提示（不泄漏存储后端）', async () => {
     const pool = makePool(true);

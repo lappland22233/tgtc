@@ -24,7 +24,8 @@
    - 强依赖 `TELEGRAM_CHAT_ID` 存储群组（Bot 需将文件转存/留存到该群组以维持持久引用）；**未配置存储群组或存储群配置失效时，原生模式无法正常运作，系统将明确阻止切换为该模式，并在后台给出警示横幅**。
 2. **纯 Google 存储模式（`storageMode: 'gdrive'`）**：
    - **完全摆脱 Telegram 存储群限制（未配置或配置失效时首选且强制开启）**：当系统未配置 `TELEGRAM_CHAT_ID`、或因权限/群组失效无法继续使用 Telegram 存储群时，开启此模式即可让 Bot 恢复正常服务；Bot 接收的文件无需进入 Telegram 群组，而是由后端流式拉取直接转存至绑定的 Google Drive 个人账号池；
-   - **隐私保护与友好状态回显**：用户发送文件后，Bot 立即响应中立等待提示：`⏳ 正在创建下载链接，请稍候...`（绝不向用户透露底层 Google Drive 驱动细节）；后台流式拉取上游文件并直传 GDrive，入库完成后通过 Telegram API 原地编辑为就绪消息与直链（`文件已就绪！...`）；
+   - 已知大小且超过 5 MiB 的文件通过本地 Bot API 的实时端点逐块转存。文件跨多个 Google Drive 分块时，上传当前块的同时会预读下一块。后端无需在 `tmp/bot-transfers/` 再写一份完整文件，Bot API 自己的工作盘仍需容纳完整文件及磁盘预留。使用本项目的 Bot API 并开启 `--enable-file-streaming`，后端通过 `TELEGRAM_FILE_STREAM_BASE` 或 `TELEGRAM_FILE_STREAMING_ENABLED=true` 启用实时流。回退到普通 `getFile` 时可能等 Telegram 下载完才上传，小文件和未知大小文件继续使用暂存流程。
+   - 用户发送文件后，Bot 回复 `⏳ 正在创建下载链接，请稍候...`。Google Drive 确认上传完成、授权记录入库后，Bot 编辑为就绪消息与直链（`文件已就绪！...`）。
    - **Saga 事务补偿回滚**：若 GDrive 上传成功但后续签发直链或通知发送失败，系统立即自动触发 Saga 补偿物理删除远端 GDrive 对象，并全额退还当日用户额度，绝不留存不可见幽灵文件；
    - **到期彻底硬删除（Lifecycle Purge）**：后台定时清理任务（Cron 每 10 分钟）自动扫描到期或已撤销的授权记录，调用 GDrive 驱动硬删除远端物理对象，校验删除确认成功后打上 `storagePurgedAt` 清理时间戳，释放云端存储配额；同时定期自清理本地缓冲目录 `tmp/bot-transfers/` 残留超过 2 小时的孤儿临时文件；
    - **全特性直链下载**：生成的直链直接直通 Google Drive 分段流，完整支持客户端 Range 播放、ETag 缓存与断点续传。客户端主动中断（Seek/断开连接）时自动传递取消信号释放连接槽位，且不将健康账号计入失败冷却。

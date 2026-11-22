@@ -3,12 +3,14 @@ import { OAuth2Client } from 'google-auth-library';
 import axios, { AxiosError, AxiosResponse } from 'axios';
 import https from 'https';
 import { createHash, randomUUID } from 'crypto';
-import { Readable } from 'stream';
+import { addAbortSignal, Readable } from 'stream';
+import { setTimeout as sleep } from 'timers/promises';
 import type { GDriveBackendConfig } from '../../common/entities/storage-backend.entity';
 import { GDriveOAuthService } from '../gdrive-oauth.service';
 import { StorageBackendsService } from '../storage-backends.service';
 import { classifyHttpStatus, toStorageAccountError } from '../storage-errors.util';
 import {
+  GDRIVE_MULTIPART_MAX_BYTES,
   sanitizeObjectName,
   StorageAccountContext,
   StorageAccountError,
@@ -19,12 +21,11 @@ import {
   StorageQuota,
   StorageUploadParams,
   StorageUploadResult,
+  StorageUploadSourceError,
 } from '../storage.types';
 
 const DRIVE_API = 'https://www.googleapis.com/drive/v3';
 const DRIVE_UPLOAD = 'https://www.googleapis.com/upload/drive/v3/files';
-/** 小文件 multipart 阈值（Google 建议 <=5MB 走 multipart） */
-const MULTIPART_THRESHOLD_BYTES = 5 * 1024 * 1024;
 /** 默认 resumable 分块大小：16MB（Google 要求 256KB 的倍数，官方建议高吞吐环境使用 16MB/32MB） */
 export const DEFAULT_RESUMABLE_CHUNK_BYTES = 16 * 1024 * 1024;
 /** 单块网络/5xx 重试次数（resumable 会话内重试不重传整个文件） */
@@ -76,11 +77,12 @@ export class GDriveStorageDriver implements StorageBackendDriver {
     const mimeType = params.mimeType || 'application/octet-stream';
     const metadata = { name, parents: [rootFolderId], mimeType };
     try {
-      if (params.knownLength <= MULTIPART_THRESHOLD_BYTES) {
+      if (params.knownLength <= GDRIVE_MULTIPART_MAX_BYTES) {
         return await this.multipartUpload(token, metadata, mimeType, params);
       }
       return await this.resumableUpload(token, metadata, mimeType, params);
     } catch (error) {
+      if (error instanceof StorageUploadSourceError) throw error;
       throw this.classify(error, 'GDrive 上传失败');
     }
   }
@@ -282,23 +284,25 @@ export class GDriveStorageDriver implements StorageBackendDriver {
     const sessionUri = init.headers.location as string | undefined;
     if (!sessionUri) throw new StorageAccountError('GDrive resumable 会话未返回上传地址', 'other');
 
-    const abortSession = () => {
-      void axios.delete(sessionUri, { timeout: 10_000, httpsAgent: this.httpsAgent }).catch(() => {});
+    const sourceFailure = new AbortController();
+    const requestSignal = params.signal ? AbortSignal.any([params.signal, sourceFailure.signal]) : sourceFailure.signal;
+    const abortOnSourceFailure = (error: Error) => {
+      // 正在等待 Drive 确认时，预读中的源流也可能断开。保留源端错误供调用方处理。
+      if (error instanceof StorageUploadSourceError) sourceFailure.abort(error);
     };
-    if (params.signal?.aborted) {
-      abortSession();
-      throw new StorageAccountError('上传已取消', 'other');
-    }
-    params.signal?.addEventListener('abort', abortSession, { once: true });
-
+    let source: Readable | undefined;
     try {
+      if (params.signal?.aborted) throw new StorageAccountError('上传已取消', 'other');
       let offset = 0;
       const total = params.knownLength;
       const chunkSize = params.chunkSize && params.chunkSize >= 256 * 1024 && params.chunkSize % (256 * 1024) === 0
         ? params.chunkSize
         : DEFAULT_RESUMABLE_CHUNK_BYTES;
-      for await (const chunk of this.chunked(params.openStream(), chunkSize)) {
-        if (params.signal?.aborted) throw new StorageAccountError('上传已取消', 'other');
+      source = params.openStream();
+      source.once('error', abortOnSourceFailure);
+      if (params.signal) addAbortSignal(params.signal, source);
+      for await (const chunk of this.chunked(source, chunkSize)) {
+        requestSignal.throwIfAborted();
         let chunkOffset = 0;
         let attempt = 0;
         let noProgress = 0;
@@ -317,22 +321,23 @@ export class GDriveStorageDriver implements StorageBackendDriver {
               validateStatus: (status) => (status >= 200 && status < 300) || status === 308,
               timeout: 300_000,
               maxBodyLength: Infinity,
-              signal: params.signal,
+              signal: requestSignal,
               httpsAgent: this.httpsAgent,
             });
           } catch (error) {
-            if (params.signal?.aborted) throw error;
+            if (requestSignal.aborted) throw error;
             if (error instanceof StorageAccountError) throw error;
             const status = (error as AxiosError)?.response?.status;
             const retryable = status === undefined || status >= 500 || status === 429;
             attempt += 1;
             if (!retryable || attempt >= CHUNK_RETRY_LIMIT) throw error;
             // 遇重试先探测 session 真实接收进度
-            const probe = await this.queryResumableStatus(sessionUri, total, params.signal);
+            const probe = await this.queryResumableStatus(sessionUri, total, requestSignal);
             if (probe.completedResult) {
               // 尾块 ACK 丢失但远端已成功入库生成 fileId
               return probe.completedResult;
             }
+            requestSignal.throwIfAborted();
             if (probe.offset === end + 1) {
               // 远端实际已经完整接收本块（ACK 丢失场景）：直接视为本块完成
               offset = end + 1;
@@ -341,10 +346,11 @@ export class GDriveStorageDriver implements StorageBackendDriver {
               // 远端进度既不是本块开头也不是本块末尾，流无法回退：抛出网络异常由上层开新流
               throw new StorageAccountError('GDrive resumable 断点偏移不匹配，需重新开流', 'network');
             }
-            await new Promise((resolve) => setTimeout(resolve, Math.min(10_000, 1000 * 2 ** (attempt - 1) + Math.random() * 500)));
+            await sleep(Math.min(10_000, 1000 * 2 ** (attempt - 1) + Math.random() * 500), undefined, { signal: requestSignal });
             continue;
           }
           if (response.status === 308) {
+            requestSignal.throwIfAborted();
             // Range 缺失代表该请求尚未确认任何新字节；重复发送当前未确认后缀。
             const rangeHeader = response.headers.range as string | undefined;
             let received = start;
@@ -361,7 +367,7 @@ export class GDriveStorageDriver implements StorageBackendDriver {
               if (noProgress >= CHUNK_RETRY_LIMIT) {
                 throw new StorageAccountError('GDrive resumable 上传未确认任何字节', 'other');
               }
-              await new Promise((resolve) => setTimeout(resolve, 1000 * noProgress));
+              await sleep(1000 * noProgress, undefined, { signal: requestSignal });
               continue;
             }
             const acknowledged = received - start;
@@ -378,8 +384,13 @@ export class GDriveStorageDriver implements StorageBackendDriver {
         }
       }
       throw new StorageAccountError('GDrive resumable 流提前结束（字节数不足）', 'other');
+    } catch (error) {
+      // 仅终止未完成的上传会话；收到对象回执的分支已直接返回。
+      void axios.delete(sessionUri, { timeout: 10_000, httpsAgent: this.httpsAgent }).catch(() => {});
+      sourceFailure.signal.throwIfAborted();
+      throw error;
     } finally {
-      params.signal?.removeEventListener('abort', abortSession);
+      source?.off('error', abortOnSourceFailure);
     }
   }
 
