@@ -10,6 +10,8 @@ import type {
 
 export type { StorageBackendType, RemoteStorageBackendType };
 
+export const GDRIVE_MULTIPART_MAX_BYTES = 5 * 1024 * 1024;
+
 /**
  * 存储账号失败分类（冷却基数与 TG 账号池同口径，另增 auth/quota 两类）：
  * - `flood`：上游限流（429 / rateLimitExceeded）
@@ -37,6 +39,14 @@ export class StorageAccountError extends Error {
   ) {
     super(message);
     this.name = 'StorageAccountError';
+  }
+}
+
+/** 上传源读取失败时保留原始错误，调用方可沿用源端重试策略。 */
+export class StorageUploadSourceError extends Error {
+  constructor(cause: unknown) {
+    super('无法读取上传源', { cause });
+    this.name = 'StorageUploadSourceError';
   }
 }
 

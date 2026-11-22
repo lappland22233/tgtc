@@ -1,9 +1,9 @@
-import { Readable } from 'stream';
+import { PassThrough, Readable } from 'stream';
 import axios from 'axios';
 import { GDriveStorageDriver } from './gdrive.driver';
 import type { GDriveOAuthService } from '../gdrive-oauth.service';
 import type { StorageBackendsService } from '../storage-backends.service';
-import { StorageAccountContext, StorageAccountError } from '../storage.types';
+import { StorageAccountContext, StorageAccountError, StorageUploadSourceError } from '../storage.types';
 
 jest.mock('axios', () => ({
   __esModule: true,
@@ -58,6 +58,7 @@ describe('GDriveStorageDriver（mock Drive v3 REST）', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    api.delete.mockResolvedValue({});
     oauth = makeOAuth();
     backends = makeBackends();
     driver = new GDriveStorageDriver(oauth, backends);
@@ -195,12 +196,79 @@ describe('GDriveStorageDriver（mock Drive v3 REST）', () => {
     });
 
     expect(result).toEqual({ objectRef: 'file-tail-recovered', size: 6 * MB });
+    expect(api.delete).not.toHaveBeenCalled();
     // 验证 probe 请求带 Content-Length: 0 和 Content-Range: bytes */total
     expect(api.put).toHaveBeenCalledTimes(2);
     expect(api.put.mock.calls[1][2].headers).toMatchObject({
       'Content-Length': '0',
       'Content-Range': `bytes */${6 * MB}`,
     });
+  });
+
+  it('保留取消时已收到的文件回执，供调用方清理已提交的对象', async () => {
+    const controller = new AbortController();
+    api.post.mockResolvedValue({ headers: { location: 'https://session/committed' } });
+    api.put.mockImplementationOnce(async () => {
+      controller.abort();
+      return { status: 201, data: { id: 'committed-file', size: String(6 * MB) } };
+    });
+
+    await expect(driver.upload(makeCtx(), {
+      objectName: 'file.bin',
+      openStream: () => Readable.from([Buffer.alloc(6 * MB)]),
+      knownLength: 6 * MB,
+      signal: controller.signal,
+    })).resolves.toEqual({ objectRef: 'committed-file', size: 6 * MB });
+    expect(api.delete).not.toHaveBeenCalled();
+  });
+
+  it('keeps the original source error and closes the unfinished Drive session', async () => {
+    const error = new StorageUploadSourceError(new Error('Telegram source disconnected'));
+    async function* source() {
+      yield Buffer.alloc(5 * MB);
+      throw error;
+    }
+    const sessionUri = 'https://session/source-failed';
+    api.post.mockResolvedValue({ headers: { location: sessionUri } });
+    api.put.mockResolvedValueOnce({ status: 308, headers: { range: `bytes=0-${5 * MB - 1}` }, data: {} });
+
+    await expect(driver.upload(makeCtx(), {
+      objectName: 'file.bin',
+      openStream: () => Readable.from(source()),
+      knownLength: 6 * MB,
+      chunkSize: 5 * MB,
+    })).rejects.toBe(error);
+
+    expect(api.put).toHaveBeenCalledTimes(1);
+    expect(api.delete).toHaveBeenCalledTimes(1);
+    expect(api.delete).toHaveBeenCalledWith(sessionUri, expect.anything());
+  });
+
+  it('aborts a pending Drive PUT when the prefetched source fails', async () => {
+    const error = new StorageUploadSourceError(new Error('Telegram source disconnected'));
+    const sessionUri = 'https://session/prefetch-failed';
+    const source = new PassThrough();
+    const task = new AbortController();
+    source.write(Buffer.alloc(5 * MB));
+    api.post.mockResolvedValue({ headers: { location: sessionUri } });
+    api.put.mockImplementationOnce((_url, _body, { signal }: { signal: AbortSignal }) => new Promise((_, reject) => {
+      signal.addEventListener('abort', () => reject(new Error('Drive request was canceled')), { once: true });
+      source.destroy(error);
+    }));
+
+    await expect(driver.upload(makeCtx(), {
+      objectName: 'file.bin',
+      openStream: () => source,
+      knownLength: 6 * MB,
+      chunkSize: 5 * MB,
+      signal: task.signal,
+    })).rejects.toBe(error);
+
+    expect(task.signal.aborted).toBe(false);
+    expect(api.put).toHaveBeenCalledTimes(1);
+    expect(api.delete).toHaveBeenCalledTimes(1);
+    expect(api.delete).toHaveBeenCalledWith(sessionUri, expect.anything());
+    expect(api.delete.mock.calls[0][1].signal).toBeUndefined();
   });
 
   it('invalid_grant（refresh_token 失效）→ auth 类失败', async () => {
@@ -214,7 +282,6 @@ describe('GDriveStorageDriver（mock Drive v3 REST）', () => {
 
   it('abort：resumable 会话被 DELETE 清理（不留残留会话）', async () => {
     api.post.mockResolvedValue({ headers: { location: 'https://session/abort' } });
-    api.delete.mockResolvedValue({});
     const controller = new AbortController();
     controller.abort();
     await expect(driver.upload(makeCtx(), {
@@ -225,6 +292,28 @@ describe('GDriveStorageDriver（mock Drive v3 REST）', () => {
     })).rejects.toBeInstanceOf(StorageAccountError);
     expect(api.delete).toHaveBeenCalledWith('https://session/abort', expect.anything());
     expect(api.put).not.toHaveBeenCalled();
+  });
+
+  it('abort closes the source and deletes the resumable session once while waiting for bytes', async () => {
+    const sessionUri = 'https://session/abort-source';
+    api.post.mockResolvedValue({ headers: { location: sessionUri } });
+    const controller = new AbortController();
+    const source = new PassThrough();
+    const upload = driver.upload(makeCtx(), {
+      objectName: 'file.bin',
+      openStream: () => {
+        setImmediate(() => controller.abort());
+        return source;
+      },
+      knownLength: 6 * MB,
+      signal: controller.signal,
+    });
+
+    await expect(upload).rejects.toBeInstanceOf(StorageAccountError);
+    expect(source.destroyed).toBe(true);
+    expect(api.put).not.toHaveBeenCalled();
+    expect(api.delete).toHaveBeenCalledTimes(1);
+    expect(api.delete).toHaveBeenCalledWith(sessionUri, expect.anything());
   });
 
   it('根文件夹：config 缺失时查找/创建 TGTC/ 并回填 patchConfig', async () => {

@@ -6,6 +6,7 @@ import {
   StorageAccountError,
   StorageBackendDriver,
   StorageDownloadUnavailableError,
+  StorageUploadSourceError,
 } from './storage.types';
 import type { StorageBackend } from '../common/entities/storage-backend.entity';
 
@@ -100,6 +101,28 @@ describe('StorageRouterService（路由 / 换号 / fail-closed）', () => {
     expect(driver.upload).toHaveBeenCalledTimes(2);
     const cooled = ['a', 'b'].filter((id) => scheduler.getRuntime(id)!.cooldownUntil > Date.now());
     expect(cooled.length).toBe(1);
+  });
+
+  it('releases the Drive reservation and returns the original source error without trying another account', async () => {
+    const cause = new Error('Telegram source rate limited');
+    const driver = makeDriver('gdrive', {
+      upload: jest.fn().mockRejectedValue(new StorageUploadSourceError(cause)),
+    });
+    const accounts = [makeAccount('a', 'gdrive'), makeAccount('b', 'gdrive')];
+    const { router, scheduler, backends } = makeRouter({ accounts, driver });
+
+    await expect(router.upload({
+      backendType: 'gdrive',
+      objectName: 'file.bin',
+      knownLength: 1024,
+      openStream: () => Readable.from([]),
+    })).rejects.toBe(cause);
+
+    expect(driver.upload).toHaveBeenCalledTimes(1);
+    expect(backends.recordOutcome).not.toHaveBeenCalled();
+    for (const account of accounts) {
+      expect(scheduler.getRuntime(account.id)).toMatchObject({ inflight: 0, inflightBytes: 0, cooldownUntil: 0 });
+    }
   });
 
   it('全部候选不可调度（未发出请求）时抛 admissionOnly 可重试错误', async () => {

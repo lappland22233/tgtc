@@ -14,6 +14,7 @@ import {
   StorageFailureKind,
   StorageUploadParams,
   StorageUploadReceipt,
+  StorageUploadSourceError,
   StorageUploadUnavailableError,
 } from './storage.types';
 
@@ -185,6 +186,10 @@ export class StorageRouterService {
           size: result.size,
         };
       } catch (error) {
+        if (error instanceof StorageUploadSourceError) {
+          this.scheduler.releaseAttempt(selection.accountId, params.knownLength);
+          throw error.cause;
+        }
         if (params.signal?.aborted) {
           this.scheduler.releaseAttempt(selection.accountId, params.knownLength);
           throw error;

@@ -3,7 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { createReadStream } from 'fs';
 import { mkdir, open, stat, unlink } from 'fs/promises';
 import { pipeline } from 'stream/promises';
-import { Readable } from 'stream';
+import { PassThrough, Readable } from 'stream';
 import * as path from 'path';
 import { randomUUID } from 'crypto';
 import { TelegramService } from '../telegram/telegram.service';
@@ -18,7 +18,8 @@ import { TelegramAccountPoolService } from '../telegram-account-pool/telegram-ac
 import { AccountAwareDownloadService } from '../telegram-account-pool/account-aware-download.service';
 import type { AccountAwareDownloadFailure } from '../telegram-account-pool/account-aware-stream.types';
 import { StorageRouterService } from '../storage/storage-router.service';
-import type { StorageUploadReceipt } from '../storage/storage.types';
+import { GDRIVE_MULTIPART_MAX_BYTES, StorageUploadSourceError } from '../storage/storage.types';
+import type { StorageUploadParams, StorageUploadReceipt } from '../storage/storage.types';
 import { TelegramBotFileGrant } from '../common/entities/telegram-bot-file-grant.entity';
 import { TelegramBotInboundTask } from '../common/entities/telegram-bot-inbound-task.entity';
 import { redactBotToken } from '../common/utils/sensitive-data';
@@ -1401,9 +1402,8 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
       }).catch(() => { controller.abort(); }).finally(() => { renewing = undefined; });
     }, LEASE_RENEWAL_MS);
     heartbeat.unref();
-    const tempDir = path.join(process.cwd(), 'tmp', 'bot-transfers');
-    const tempFilePath = path.join(tempDir, `${randomUUID()}.tmp`);
-    const releaseTransferLease = this.transferTracker?.register(tempFilePath);
+    let tempFilePath: string | undefined;
+    let releaseTransferLease: (() => void) | undefined;
     let uploadReceipt: StorageUploadReceipt | null = null;
     let diskReservation: DownloadReservation | null = null;
     let uploadSessionId: string | null = null;
@@ -1415,8 +1415,6 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
         throw new Error('Google 云端硬盘存储池暂不可用');
       }
 
-      await mkdir(tempDir, { recursive: true });
-
       const estimatedBytes = fileSize ?? 50 * 1024 * 1024;
       if (this.uploadDiskBudget?.isStrictMode()) {
         const sessionId = randomUUID();
@@ -1424,41 +1422,63 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
         uploadSessionId = sessionId;
       }
 
-      if (this.downloadResources) {
-        try {
-          diskReservation = await this.downloadResources.reserve({
-            sessionKey: `bot-transfer:${task.id}`,
-            bytes: estimatedBytes,
-            countsTowardCache: false,
-            waitTimeoutMs: 30_000,
-            signal,
-          });
-        } catch (error) {
-          signal.throwIfAborted();
-          this.logger.warn(`本地磁盘预约不足，拒绝 Bot 转存任务: ${error instanceof Error ? error.message : String(error)}`);
-          throw new Error(DISK_UNAVAILABLE_TEXT);
-        }
-      }
-
       signal.throwIfAborted();
       const configuredBotId = accountId ? this.pool?.getConfig(accountId)?.token.split(':')[0] : this.defaultSourceAccountId();
       if (configuredBotId !== task.receiverBotId) {
         throw new Error('Bot 来源账号已变更，无法安全回源');
       }
-      const upstreamStream = await this.getTelegramSourceStream(task.telegramFileId, fileSize, accountId, signal);
-      await this.writeTransferFile(upstreamStream, tempFilePath, diskReservation, signal);
+
+      const streamLargeFile = fileSize !== undefined && fileSize > GDRIVE_MULTIPART_MAX_BYTES;
+      let source: Pick<StorageUploadParams, 'openStream' | 'knownLength' | 'chunkSize'>;
+      if (streamLargeFile) {
+        const chunkSize = await this.storageRouter.getGDriveChunkSizeBytes();
+        source = {
+          knownLength: fileSize,
+          chunkSize,
+          openStream: () => this.openGDriveTransferSource(task.telegramFileId, fileSize, accountId, chunkSize, signal),
+        };
+      } else {
+        const tempDir = path.join(process.cwd(), 'tmp', 'bot-transfers');
+        const stagedPath = path.join(tempDir, `${randomUUID()}.tmp`);
+        tempFilePath = stagedPath;
+        releaseTransferLease = this.transferTracker?.register(stagedPath);
+        await mkdir(tempDir, { recursive: true });
+        if (this.downloadResources) {
+          try {
+            diskReservation = await this.downloadResources.reserve({
+              sessionKey: `bot-transfer:${task.id}`,
+              bytes: estimatedBytes,
+              countsTowardCache: false,
+              waitTimeoutMs: 30_000,
+              signal,
+            });
+          } catch (error) {
+            signal.throwIfAborted();
+            this.logger.warn(`本地磁盘预约不足，拒绝 Bot 转存任务: ${error instanceof Error ? error.message : String(error)}`);
+            throw new Error(DISK_UNAVAILABLE_TEXT);
+          }
+        }
+        const upstreamStream = await this.getTelegramSourceStream(task.telegramFileId, fileSize, accountId, signal);
+        await this.writeTransferFile(upstreamStream, stagedPath, diskReservation, signal);
+        source = {
+          knownLength: (await stat(stagedPath)).size,
+          openStream: () => createReadStream(stagedPath, { highWaterMark: 1024 * 1024 }),
+        };
+      }
 
       signal.throwIfAborted();
-      const { size } = await stat(tempFilePath);
+      const size = source.knownLength;
       const receipt = await this.storageRouter.upload({
+        ...source,
         backendType: 'gdrive',
         objectName: task.fileName ?? `tg_${task.telegramFileId}`,
-        knownLength: size,
         mimeType: task.mimeType ?? undefined,
-        openStream: () => createReadStream(tempFilePath, { highWaterMark: 1024 * 1024 }),
         signal,
       });
       uploadReceipt = receipt;
+      if (streamLargeFile && receipt.size !== size) {
+        throw new Error('Google 云端硬盘返回的文件大小与 Telegram 源不一致');
+      }
       signal.throwIfAborted();
 
       const issued = await this.inboundQueue.complete(task, async (manager) => {
@@ -1525,7 +1545,7 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
     } finally {
       clearInterval(heartbeat);
       releaseTransferLease?.();
-      await unlink(tempFilePath).catch(() => {});
+      if (tempFilePath) await unlink(tempFilePath).catch(() => {});
       diskReservation?.release();
       if (uploadSessionId) this.uploadDiskBudget?.releaseSession(uploadSessionId);
       if (uploadReceipt?.accountId && uploadReceipt.objectRef && this.storageRouter) {
@@ -1543,6 +1563,52 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
         }
       }
       await this.inboundQueue.release(task);
+    }
+  }
+
+  private openGDriveTransferSource(
+    fileId: string,
+    size: number,
+    accountId: string | undefined,
+    chunkSize: number,
+    signal: AbortSignal,
+  ): Readable {
+    // Google 等待当前分块确认时，提前读取下一块；缓冲写满后让 Telegram 流背压。
+    const buffered = new PassThrough({ readableHighWaterMark: chunkSize, writableHighWaterMark: 64 * 1024 });
+    void pipeline(
+      (options?: { signal?: AbortSignal }) =>
+        this.readTelegramTransfer(fileId, size, accountId, options?.signal ?? signal),
+      buffered,
+      { signal },
+    ).catch(() => {
+      // pipeline 已销毁 buffered，读取方会收到同一错误。
+    });
+    return buffered;
+  }
+
+  private async *readTelegramTransfer(
+    fileId: string,
+    size: number,
+    accountId: string | undefined,
+    signal: AbortSignal,
+  ): AsyncGenerator<Buffer> {
+    try {
+      const stream = await this.getTelegramSourceStream(fileId, size, accountId, signal);
+      let received = 0;
+      let tail: Buffer | undefined;
+      for await (const chunk of stream) {
+        const data = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        if (!data.length) continue;
+        received += data.length;
+        if (received > size) throw new Error('Telegram 源流超出预期文件大小');
+        // 尾部等源流正常结束才交给 Google，避免远端先于完整性检查提交对象。
+        if (received === size) tail = data;
+        else yield data;
+      }
+      if (!tail) throw new Error('Telegram 源流提前结束');
+      yield tail;
+    } catch (error) {
+      throw new StorageUploadSourceError(error);
     }
   }
 
