@@ -1,6 +1,6 @@
 <template>
   <!-- 批量操作栏：仅在选中文件时出现 -->
-  <div v-if="selectedCount > 0" class="fl-batchbar">
+  <div v-if="selectedCount > 0" class="fl-batchbar" role="group" aria-label="批量操作">
     <span class="fl-batchbar-count">已选 {{ selectedCount }} 项</span>
     <!-- G11-09：MK 按钮与“复制下载链接”按钮并列显示，不再互斥（避免全选图片时复制入口被挤掉）。
           MK 仅对可直链的图片生成 Markdown；复制链接对全部选中项生成下载链接。 -->
@@ -118,18 +118,18 @@ const emit = defineEmits<{
   align-items: center;
   flex-wrap: wrap;
   gap: 8px;
-  padding: 10px 12px;
-  margin-bottom: 16px;
-  background: var(--color-accent-soft);
-  border: 1px solid var(--border-accent);
-  border-radius: var(--radius-md);
+  padding: 8px;
+  margin-bottom: 10px;
+  background: var(--workspace-selected);
+  border: 1px solid var(--workspace-border);
+  border-radius: 8px;
 }
 
 .fl-batchbar-count {
   font-size: 13px;
-  font-weight: 500;
-  color: var(--color-accent);
-  margin-right: 4px;
+  font-weight: 600;
+  color: var(--workspace-accent);
+  margin-inline: 4px;
 }
 
 /* ============ 标签筛选 ============ */
@@ -145,9 +145,9 @@ const emit = defineEmits<{
 .fl-markdown {
   margin-bottom: 16px;
   padding: 16px;
-  background: var(--color-bg-elevated);
-  border-radius: var(--radius-md);
-  border: 1px solid var(--border-default);
+  background: var(--workspace-canvas);
+  border-radius: 8px;
+  border: 1px solid var(--workspace-border);
 }
 
 .fl-markdown-head {
@@ -164,5 +164,43 @@ const emit = defineEmits<{
 .fl-markdown-actions {
   display: flex;
   gap: 8px;
+}
+
+.fl-batchbar :deep(.t-button--theme-default) {
+  border-color: var(--workspace-border);
+  color: var(--workspace-text);
+}
+
+.fl-batchbar :deep(.t-button--theme-primary) {
+  border-color: var(--workspace-accent);
+  color: var(--workspace-accent);
+}
+
+@media (max-width: 768px) {
+  .fl-batchbar {
+    position: fixed;
+    inset-inline: 0;
+    inset-block-end: calc(var(--workspace-mobile-nav-height, 0px) + env(safe-area-inset-bottom));
+    z-index: 12;
+    min-height: 56px;
+    margin: 0;
+    padding: 4px max(12px, env(safe-area-inset-right)) 4px max(12px, env(safe-area-inset-left));
+    border-inline: 0;
+    border-radius: 0;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overscroll-behavior-inline: contain;
+    scrollbar-width: thin;
+  }
+
+  .fl-batchbar-count,
+  .fl-batchbar :deep(button) {
+    flex: none;
+    white-space: nowrap;
+  }
+
+  .fl-batchbar :deep(button) {
+    min-height: 44px;
+  }
 }
 </style>

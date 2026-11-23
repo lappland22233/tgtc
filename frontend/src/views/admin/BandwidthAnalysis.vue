@@ -222,8 +222,8 @@ async function renderChart() {
         data: values,
         smooth: true,
         symbol: 'none',
-        lineStyle: { color: CHART_COLORS.blue, width: 2 },
-        areaStyle: { color: areaGradient(CHART_COLORS.blue) },
+        lineStyle: { color: CHART_COLORS.primary, width: 2 },
+        areaStyle: { color: areaGradient(CHART_COLORS.primary) },
       },
     ],
   });

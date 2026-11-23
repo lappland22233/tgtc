@@ -29,7 +29,7 @@
     <div class="config-grid" :class="{ 'mobile-single-col': isMobile }">
       <!-- 认证配置 -->
       <div class="card">
-        <h3 style="margin-bottom: 16px;">🔐 认证配置</h3>
+        <h3 style="margin-bottom: 16px;">认证配置</h3>
         <t-form layout="vertical" :label-align="mobileLabelAlign">
           <t-form-item label="允许新用户注册">
             <t-switch v-model="authConfig.registrationEnabled" />
@@ -78,7 +78,7 @@
 
       <!-- SMTP配置 -->
       <div class="card">
-        <h3 style="margin-bottom: 16px;">📧 SMTP邮箱配置</h3>
+        <h3 style="margin-bottom: 16px;">SMTP 邮箱配置</h3>
         <t-form layout="vertical" :label-align="mobileLabelAlign">
           <t-form-item label="SMTP服务器">
             <t-input v-model="smtpConfig.host" placeholder="smtp.example.com" autocomplete="off" name="smtp-host" />
@@ -531,7 +531,7 @@
     <!-- IP封禁管理 -->
     <div class="card" style="margin-top: 20px;">
       <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 12px;">
-        <h3>🚫 IP封禁管理</h3>
+        <h3>IP 封禁管理</h3>
         <t-button theme="danger" @click="showBanDialog = true">+ 封禁IP</t-button>
       </div>
 
@@ -1382,7 +1382,7 @@ onMounted(() => {
 <style scoped>
 .config-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 20px;
 }
 
@@ -1400,7 +1400,7 @@ onMounted(() => {
 
 .download-runtime {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr));
   gap: var(--space-3);
   margin-top: var(--space-4);
   padding-top: var(--space-4);
@@ -1553,6 +1553,10 @@ onMounted(() => {
 }
 
 @media (max-width: 480px) {
+  .smtp-test__row :deep(.t-input__wrap) {
+    flex-basis: 100%;
+  }
+
   .upload-filter-options {
     display: grid;
     grid-template-columns: minmax(0, 1fr);

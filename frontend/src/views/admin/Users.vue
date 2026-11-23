@@ -7,7 +7,7 @@
 
     <div class="card">
       <div style="display: flex; justify-content: space-between; margin-bottom: 16px; flex-wrap: wrap; gap: 12px;">
-        <t-input v-model="searchEmail" placeholder="搜索用户邮箱..." style="width: 300px;" @enter="searchUsers" autocomplete="off" name="admin-search-email" />
+        <t-input v-model="searchEmail" placeholder="搜索用户邮箱..." style="width: min(100%, 300px);" @enter="searchUsers" autocomplete="off" name="admin-search-email" />
         <t-button theme="primary" @click="showCreateDialog = true">+ 创建用户</t-button>
       </div>
 
@@ -423,11 +423,12 @@ onMounted(fetchUsers);
 <style scoped>
 @media (max-width: 768px) {
   .mobile-user-card {
-    background: var(--bg-secondary);
-    border: 1px solid var(--border-color);
+    background: var(--workspace-canvas);
+    border: 1px solid var(--workspace-border);
     border-radius: 8px;
     padding: 12px;
     margin-bottom: 10px;
+    overflow-wrap: anywhere;
   }
 }
 </style>

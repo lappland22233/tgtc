@@ -1,0 +1,22 @@
+.workspace-main--admin :where(.card, .stat-card, .metric-card, .t-tabs, .t-table, .t-form__controls) {
+  min-inline-size: 0;
+  overflow-wrap: anywhere;
+}
+
+.workspace-main--admin .t-table__content {
+  max-inline-size: 100%;
+  overflow-x: auto;
+}
+
+@media (max-width: 768px) {
+  .workspace-main--admin :where(.toolbar, .table-filters, .section-actions, .t-pagination, .t-form__controls-content) {
+    min-inline-size: 0;
+    max-inline-size: 100%;
+    flex-wrap: wrap;
+  }
+
+  .workspace-main--admin :where(.t-input, .t-input-number, .t-select, .t-textarea, .t-date-range-picker, .t-radio-group) {
+    min-inline-size: 0;
+    max-inline-size: 100%;
+  }
+}

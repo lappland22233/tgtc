@@ -3066,7 +3066,7 @@ onMounted(() => {
 
 .status-switches {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr));
   gap: var(--space-4);
 }
 
@@ -3113,7 +3113,7 @@ onMounted(() => {
 /* ---------- 总览卡区 ---------- */
 .overview-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
   gap: var(--space-4);
   margin-bottom: var(--space-4);
 }
@@ -3139,7 +3139,7 @@ onMounted(() => {
 /* ---------- 副本扩散策略 ---------- */
 .replica-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr));
   gap: var(--space-4);
   margin-bottom: var(--space-4);
 }
@@ -3216,7 +3216,7 @@ onMounted(() => {
 
 .strategy-kv {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
   gap: var(--space-2) var(--space-4);
   margin: 0;
 }
@@ -3351,7 +3351,7 @@ onMounted(() => {
 
 .metric-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 110px), 1fr));
   gap: var(--space-2);
   margin: var(--space-2) 0 var(--space-3);
 }
@@ -3616,7 +3616,7 @@ onMounted(() => {
 
 .detail-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
   gap: var(--space-3);
 }
 
@@ -3792,7 +3792,7 @@ onMounted(() => {
 
 .mirror-form {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
   gap: var(--space-3);
   align-items: end;
   margin-bottom: var(--space-4);
@@ -4029,7 +4029,7 @@ onMounted(() => {
 
 .env-account-meta {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 120px), 1fr));
   gap: var(--space-2) var(--space-3);
   margin: 0;
 }
@@ -4099,7 +4099,7 @@ onMounted(() => {
 }
 
 .audit-entry a {
-  color: var(--seed-primary);
+  color: var(--workspace-accent);
   text-decoration: none;
 }
 

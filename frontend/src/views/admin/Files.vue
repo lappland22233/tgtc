@@ -7,9 +7,9 @@
 
     <div class="card">
       <div style="display: flex; justify-content: space-between; margin-bottom: 16px; flex-wrap: wrap; gap: 12px;">
-        <div style="display: flex; gap: 12px; flex-wrap: wrap;">
-          <t-input v-model="searchFile" placeholder="搜索文件名..." style="width: 250px;" @enter="loadInitialFiles" autocomplete="off" name="admin-search-file" />
-          <t-select v-model="filterUploader" placeholder="筛选上传者" clearable style="width: 200px;" @change="loadInitialFiles">
+        <div class="file-admin-filters">
+          <t-input v-model="searchFile" placeholder="搜索文件名..." style="width: min(100%, 250px);" @enter="loadInitialFiles" autocomplete="off" name="admin-search-file" />
+          <t-select v-model="filterUploader" placeholder="筛选上传者" clearable style="width: min(100%, 200px);" @change="loadInitialFiles">
             <t-option v-for="u in uploaders" :key="u.id" :value="u.id" :label="u.email" />
           </t-select>
         </div>
@@ -130,7 +130,7 @@
               </div>
             </div>
           </div>
-          <div style="display: flex; gap: 4px; margin-top: 8px; flex-wrap: wrap; border-top: 1px solid var(--border-color); padding-top: 8px;">
+          <div style="display: flex; gap: 4px; margin-top: 8px; flex-wrap: wrap; border-top: 1px solid var(--workspace-border); padding-top: 8px;">
             <template v-if="file.isDeleted">
               <t-button size="small" theme="success" variant="outline" @click="restoreFile(file.id)">恢复</t-button>
               <t-button size="small" theme="danger" variant="outline" @click="forceDeleteFile(file)">强制删除</t-button>
@@ -231,7 +231,7 @@
       @close="cleanupDialogVisible = false"
     >
       <div style="display: flex; flex-direction: column; gap: 12px; color: var(--text-secondary); font-size: 14px;">
-        <div>将清空数据库中以 <code style="background: var(--bg-secondary); padding: 1px 4px; border-radius: 4px;">/data/cb/tgtc-beta/</code> 开头的旧 telegramFilePath（仅清空路径，不下载、不删除文件、不影响 <code style="background: var(--bg-secondary); padding: 1px 4px; border-radius: 4px;">/root/cb</code> 路径）。</div>
+        <div>将清空数据库中以 <code style="background: var(--workspace-canvas); padding: 1px 4px; border-radius: 4px;">/data/cb/tgtc-beta/</code> 开头的旧 telegramFilePath（仅清空路径，不下载、不删除文件、不影响 <code style="background: var(--workspace-canvas); padding: 1px 4px; border-radius: 4px;">/root/cb</code> 路径）。</div>
         <div style="color: var(--color-warning); font-weight: 500;">⚠ apply 模式会清空匹配记录的路径字段，操作前请先预览统计。</div>
         <div style="display: flex; gap: 8px; margin-top: 8px;">
           <t-button theme="primary" variant="outline" style="flex: 1;" :loading="cleanupRunning" @click="runCleanup('dry-run')">仅预览统计（dry-run）</t-button>
@@ -787,6 +787,14 @@ function closeCleanupResult() {
 </script>
 
 <style scoped>
+.file-admin-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  min-inline-size: 0;
+  max-inline-size: 100%;
+}
+
 .deleted-name {
   text-decoration: line-through;
   opacity: 0.6;
@@ -799,16 +807,17 @@ function closeCleanupResult() {
 
 @media (max-width: 768px) {
   .mobile-file-admin-card {
-    background: var(--bg-secondary);
-    border: 1px solid var(--border-color);
+    background: var(--workspace-canvas);
+    border: 1px solid var(--workspace-border);
     border-radius: 8px;
     padding: 12px;
     margin-bottom: 10px;
+    overflow-wrap: anywhere;
   }
   /* 多选模式下选中态高亮（G14-18） */
   .mobile-file-admin-card.mobile-card-selected {
-    border-color: var(--color-primary, #0052d9);
-    box-shadow: 0 0 0 1px var(--color-primary, #0052d9) inset;
+    border-color: var(--workspace-accent);
+    background: var(--workspace-selected);
   }
 }
 </style>

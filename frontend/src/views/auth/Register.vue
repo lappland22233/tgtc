@@ -1,93 +1,82 @@
 <template>
-  <div class="auth-container">
-    <div class="auth-card">
-      <div class="auth-header">
-        <h1>创建账号</h1>
-        <p>注册文件分发系统账号</p>
-      </div>
+  <AuthGate :title="authStatus.registrationEnabled ? '创建账号' : '注册功能已关闭'">
+    <div v-if="!authStatus.registrationEnabled" class="registration-closed">
+      <p>请联系管理员开启注册功能</p>
+      <t-button class="gate-submit" theme="primary" @click="router.push('/login')">
+        返回登录
+      </t-button>
+    </div>
 
-      <!-- 注册已关闭提示 -->
-      <div v-if="!authStatus.registrationEnabled" class="reg-closed">
-        <div class="reg-closed-icon">
-          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 018 0v4"/></svg>
-        </div>
-        <h3>注册功能已关闭</h3>
-        <p>请联系管理员开启注册功能</p>
-        <t-button theme="primary" class="reg-closed-btn" @click="router.push('/login')">
-          返回登录
-        </t-button>
+    <t-form v-else :aria-busy="loading" ref="formRef" :data="form" :rules="rules" @submit="handleSubmit" label-align="top">
+      <t-form-item label="邮箱" name="email">
+        <t-input
+          v-model="form.email"
+          placeholder="请输入邮箱地址"
+          size="large"
+          type="email"
+          autocomplete="email"
+          name="email"
+          :spellcheck="false"
+        />
+      </t-form-item>
+      <t-form-item label="密码" name="password">
+        <t-input
+          v-model="form.password"
+          type="password"
+          placeholder="至少 6 位"
+          size="large"
+          autocomplete="new-password"
+          name="new-password"
+        />
+      </t-form-item>
+      <t-form-item label="确认密码" name="confirmPassword">
+        <t-input
+          v-model="form.confirmPassword"
+          type="password"
+          placeholder="请再次输入密码"
+          size="large"
+          autocomplete="new-password"
+          name="confirm-password"
+        />
+      </t-form-item>
+      <div v-if="turnstileEnabled" class="turnstile-section">
+        <div ref="turnstileRef" class="turnstile-widget" />
+        <p v-if="turnstileStatus" class="turnstile-status" role="status">{{ turnstileStatus }}</p>
       </div>
-
-      <t-form v-else ref="formRef" :data="form" :rules="rules" @submit="handleSubmit" label-align="top">
-        <t-form-item label="邮箱" name="email">
+      <t-form-item v-if="authStatus.emailVerificationEnabled" label="验证码" name="code">
+        <div class="code-row">
           <t-input
-            v-model="form.email"
-            placeholder="请输入邮箱地址..."
+            v-model="form.code"
+            placeholder="6 位验证码"
             size="large"
-            type="email"
-            autocomplete="email"
-            name="email"
+            class="code-input"
+            autocomplete="off"
+            name="verification-code"
             :spellcheck="false"
           />
-        </t-form-item>
-        <t-form-item label="密码" name="password">
-          <t-input
-            v-model="form.password"
-            type="password"
-            placeholder="请输入密码（至少 6 位）..."
+          <t-button
+            type="button"
+            :disabled="countdown > 0"
+            @click="sendCode"
+            variant="outline"
+            theme="primary"
             size="large"
-            autocomplete="new-password"
-            name="new-password"
-          />
-        </t-form-item>
-        <t-form-item label="确认密码" name="confirmPassword">
-          <t-input
-            v-model="form.confirmPassword"
-            type="password"
-            placeholder="请再次输入密码..."
-            size="large"
-            autocomplete="new-password"
-            name="confirm-password"
-          />
-        </t-form-item>
-        <div v-if="turnstileEnabled" class="turnstile-section">
-          <div ref="turnstileRef" class="turnstile-widget" />
-          <p v-if="turnstileStatus" class="turnstile-status">{{ turnstileStatus }}</p>
-        </div>
-        <t-form-item v-if="authStatus.emailVerificationEnabled" label="验证码" name="code">
-          <div class="code-row">
-            <t-input
-              v-model="form.code"
-              placeholder="请输入 6 位验证码..."
-              size="large"
-              class="code-input"
-              autocomplete="off"
-              name="verification-code"
-              :spellcheck="false"
-            />
-            <t-button
-              :disabled="countdown > 0"
-              @click="sendCode"
-              variant="outline"
-              theme="primary"
-              size="large"
-            >
-              {{ countdown > 0 ? `${countdown}s` : '发送验证码' }}
-            </t-button>
-          </div>
-        </t-form-item>
-        <t-form-item>
-          <t-button type="submit" theme="primary" size="large" block :loading="loading">
-            {{ loading ? '注册中…' : '注册' }}
+          >
+            {{ countdown > 0 ? `${countdown}s` : '发送验证码' }}
           </t-button>
-        </t-form-item>
-      </t-form>
-      <div v-if="authStatus.registrationEnabled" class="auth-footer">
-        已有账号？
-        <router-link to="/login" class="auth-link">立即登录</router-link>
-      </div>
-    </div>
-  </div>
+        </div>
+      </t-form-item>
+      <t-form-item>
+        <t-button class="gate-submit" type="submit" theme="primary" size="large" block :loading="loading">
+          {{ loading ? '注册中…' : '注册' }}
+        </t-button>
+      </t-form-item>
+    </t-form>
+    <template v-if="authStatus.registrationEnabled" #footer>
+      已有账号？
+      <router-link to="/login">立即登录</router-link>
+    </template>
+  </AuthGate>
 </template>
 
 <script setup lang="ts">
@@ -98,6 +87,7 @@ import { useAuthStore } from '../../stores/auth';
 import { api } from '../../stores/auth';
 import { getErrorMessage } from '../../utils/error';
 import type { AuthStatus } from '../../types/config';
+import AuthGate from './AuthGate.vue';
 
 type TurnstileWidgetId = string;
 type TurnstileApi = {
@@ -340,60 +330,50 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-/* .auth-footer / .auth-link 已提取为全局共享类，见 assets/styles.css */
-
 .turnstile-section {
-  margin: 0 0 16px;
+  margin-bottom: 17px;
+  overflow-x: auto;
 }
 
 .turnstile-widget {
   min-height: 65px;
 }
 
+.turnstile-status,
+.registration-closed p {
+  margin: 0;
+  color: var(--workspace-muted);
+}
+
 .turnstile-status {
-  color: var(--text-secondary);
+  margin-top: 4px;
   font-size: 13px;
-  margin: 4px 0 0;
 }
 
 .code-row {
   display: flex;
-  gap: 12px;
   flex-wrap: wrap;
+  gap: 8px;
 }
-.code-row .code-input {
-  flex: 1;
-  min-width: 120px;
+
+.code-input {
+  flex: 1 1 116px;
+  min-width: 0;
 }
+
 .code-row .t-button {
-  flex-shrink: 0;
+  min-height: 44px;
+  flex: none;
   white-space: nowrap;
 }
 
-.reg-closed {
-  text-align: center;
-  padding: 40px 0;
+.registration-closed .gate-submit {
+  margin-top: 20px;
 }
 
-.reg-closed-icon {
-  display: inline-flex;
-  color: var(--text-tertiary);
-  margin-bottom: 16px;
-}
-
-.reg-closed h3 {
-  font-family: var(--font-display);
-  font-size: 18px;
-  font-weight: 600;
-  margin-bottom: 8px;
-}
-
-.reg-closed p {
-  color: var(--text-secondary);
-  font-size: 14px;
-}
-
-.reg-closed-btn {
-  margin-top: 16px;
+@media (max-width: 357px) {
+  .turnstile-widget {
+    zoom: 0.86;
+  }
 }
 </style>

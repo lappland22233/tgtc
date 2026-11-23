@@ -426,6 +426,16 @@ function onProgressClick(e: MouseEvent) {
   border-radius: 999px;
 }
 
+@media (max-width: 768px) {
+  :global(body:has(.workspace-layout) .mmp) {
+    bottom: calc(var(--workspace-mobile-nav-height) + env(safe-area-inset-bottom, 0px));
+  }
+
+  :global(body:has(.workspace-layout .has-batch-selection) .mmp) {
+    bottom: calc(var(--workspace-mobile-nav-height) + env(safe-area-inset-bottom, 0px) + 60px);
+  }
+}
+
 /* ─── 窄屏：底部横向控制条 ─── */
 @media (max-width: 720px) {
   .mmp,

@@ -3,12 +3,12 @@
     <div class="oauth-card">
       <div class="status-icon-wrapper" :class="status">
         <svg v-if="status === 'success'" class="status-svg" viewBox="0 0 48 48" fill="none">
-          <circle cx="24" cy="24" r="22" fill="#E8F8F2" stroke="#00A870" stroke-width="3" />
-          <path d="M15 24.5L21 30.5L33 18" stroke="#00A870" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" />
+          <circle cx="24" cy="24" r="22" fill="var(--color-success-soft)" stroke="var(--color-success)" stroke-width="3" />
+          <path d="M15 24.5L21 30.5L33 18" stroke="var(--color-success)" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" />
         </svg>
         <svg v-else-if="status === 'error'" class="status-svg" viewBox="0 0 48 48" fill="none">
-          <circle cx="24" cy="24" r="22" fill="#FEECEC" stroke="#E34D59" stroke-width="3" />
-          <path d="M17 17L31 31M31 17L17 31" stroke="#E34D59" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" />
+          <circle cx="24" cy="24" r="22" fill="var(--color-danger-soft)" stroke="var(--color-danger)" stroke-width="3" />
+          <path d="M17 17L31 31M31 17L17 31" stroke="var(--color-danger)" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" />
         </svg>
         <div v-else class="status-spinner" />
       </div>
@@ -116,19 +116,20 @@ onMounted(() => {
   align-items: center;
   justify-content: center;
   min-height: 100vh;
-  padding: 24px;
-  background-color: var(--td-bg-color-page, #f3f5f8);
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  min-height: 100dvh;
+  padding: clamp(12px, 4vw, 24px);
+  background: var(--workspace-canvas);
+  color: var(--workspace-text);
 }
 
 .oauth-card {
   width: 100%;
   max-width: 440px;
-  background: var(--td-bg-color-container, #ffffff);
+  background: var(--workspace-surface);
   border-radius: 12px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
-  border: 1px solid var(--td-border-level-1-color, #e7e7e7);
-  padding: 36px 28px;
+  box-shadow: var(--shadow-sm);
+  border: 1px solid var(--workspace-border);
+  padding: 28px clamp(16px, 5vw, 28px);
   text-align: center;
 }
 
@@ -147,8 +148,8 @@ onMounted(() => {
 .status-spinner {
   width: 44px;
   height: 44px;
-  border: 4px solid var(--td-brand-color-light, #e0ebff);
-  border-top-color: var(--td-brand-color, #0052d9);
+  border: 4px solid var(--workspace-selected);
+  border-top-color: var(--workspace-accent);
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
 }
@@ -163,34 +164,37 @@ onMounted(() => {
   margin: 0 0 8px;
   font-size: 20px;
   font-weight: 600;
-  color: var(--td-text-color-primary, #181818);
+  color: var(--workspace-text);
 }
 
 .subtitle {
   margin: 0 0 20px;
   font-size: 14px;
   line-height: 1.5;
-  color: var(--td-text-color-secondary, #666666);
+  color: var(--workspace-muted);
+  overflow-wrap: anywhere;
 }
 
 .error-box {
   margin-bottom: 20px;
   padding: 10px 14px;
   font-size: 13px;
-  color: #d54941;
-  background: #feedec;
+  color: var(--color-danger);
+  background: var(--color-danger-soft);
   border-radius: 6px;
-  word-break: break-all;
+  overflow-wrap: anywhere;
   text-align: left;
 }
 
 .actions {
   display: flex;
   justify-content: center;
-  gap: 12px;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .btn {
+  min-height: 44px;
   padding: 8px 18px;
   border-radius: 6px;
   font-size: 14px;
@@ -201,21 +205,26 @@ onMounted(() => {
 }
 
 .btn-primary {
-  background-color: var(--td-brand-color, #0052d9);
-  color: #ffffff;
+  background: var(--workspace-accent);
+  color: var(--workspace-on-accent);
 }
 
 .btn-primary:hover {
-  background-color: var(--td-brand-color-hover, #266fe8);
+  background: color-mix(in srgb, var(--workspace-accent) 86%, var(--workspace-text));
 }
 
 .btn-secondary {
   background-color: transparent;
-  color: var(--td-text-color-primary, #333333);
-  border-color: var(--td-border-level-2-color, #dcdcdc);
+  color: var(--workspace-text);
+  border-color: var(--workspace-border);
 }
 
 .btn-secondary:hover {
-  background-color: var(--td-bg-color-secondarycontainer, #f3f3f3);
+  background: var(--workspace-selected);
+}
+
+.btn:focus-visible {
+  outline: 2px solid var(--workspace-accent);
+  outline-offset: 2px;
 }
 </style>

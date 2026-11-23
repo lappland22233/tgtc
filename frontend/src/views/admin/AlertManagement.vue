@@ -7,11 +7,11 @@
 
     <!-- 统计卡片与操作 -->
     <div style="display: flex; gap: 16px; align-items: center; margin-bottom: 16px; flex-wrap: wrap;">
-      <t-card style="flex: 0 0 auto; min-width: 200px;">
+      <t-card style="flex: 0 0 auto; min-width: min(100%, 200px);">
         <div style="text-align: center;">
           <div style="font-size: 14px; color: var(--text-secondary); margin-bottom: 8px;">未确认告警</div>
           <div
-            :style="{ fontSize: '28px', fontWeight: '700', color: unacknowledgedCount > 5 ? 'var(--error)' : 'var(--warning)' }"
+            :style="{ fontSize: '28px', fontWeight: '700', color: unacknowledgedCount > 5 ? 'var(--color-danger)' : 'var(--color-warning)' }"
           >
             {{ unacknowledgedCount }}
           </div>
@@ -260,8 +260,8 @@ onUnmounted(() => {
 <style scoped>
 @media (max-width: 768px) {
   .mobile-alert-card {
-    background: var(--bg-secondary);
-    border: 1px solid var(--border-color);
+    background: var(--workspace-canvas);
+    border: 1px solid var(--workspace-border);
     border-radius: 8px;
     padding: 12px;
     margin-bottom: 10px;

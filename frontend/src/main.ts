@@ -16,6 +16,7 @@ import TIcon from './components/TIcon.vue';
 // 不再引入 dist/tdesign.css（518 KB 全量），首屏只承担实际用到的组件样式。
 import 'tdesign-vue-next/es/style/css.mjs';
 import './assets/styles.css';
+import './assets/workspace.css';
 
 // ---- Theme initialization (Light/Dark dual theme) ----
 // Priority: localStorage > system preference > default light
@@ -29,6 +30,8 @@ function initTheme(): string {
 function applyTheme(theme: string) {
   const el = document.documentElement;
   el.setAttribute('data-theme', theme);
+  const canvasColor = getComputedStyle(el).getPropertyValue('--workspace-canvas').trim();
+  if (canvasColor) document.querySelector('meta[name="theme-color"]')?.setAttribute('content', canvasColor);
   // TDesign dark mode compat
   if (theme === 'dark') {
     el.setAttribute('theme-mode', 'dark');

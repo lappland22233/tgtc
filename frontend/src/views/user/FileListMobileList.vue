@@ -15,13 +15,19 @@
       v-for="folder in subfolders"
       :key="`m-folder-${folder.id}`"
       class="mobile-folder-row"
+      role="button"
+      tabindex="0"
+      @keydown.enter.self.prevent="emit('folder-click', folder)"
+      @keydown.space.self.prevent="emit('folder-click', folder)"
       @click="emit('folder-click', folder)"
       @contextmenu.prevent.stop="emit('folder-ctxmenu', $event, folder)"
       @touchstart="emit('touch-start', $event, 'folder', folder)"
       @touchmove="emit('touch-move', $event)"
       @touchend="emit('touch-end', $event)"
     >
-      <t-icon name="folder" class="os-folder-icon" />
+      <span class="workspace-folder-icon" aria-hidden="true">
+        <t-icon name="folder" />
+      </span>
       <div class="mobile-folder-info">
         <div class="mobile-folder-name">{{ folder.name }}</div>
         <div class="mobile-folder-meta">文件夹 · {{ formatDate(folder.createdAt) }}</div>
@@ -33,6 +39,7 @@
       v-for="file in files"
       :key="`m-file-${file.id}`"
       class="mobile-file-card"
+      :class="{ 'is-inspected': inspectedFileId === file.id }"
       @contextmenu.prevent.stop="emit('file-ctxmenu', $event, file)"
       @touchstart="emit('touch-start', $event, 'file', file)"
       @touchmove="emit('touch-move', $event)"
@@ -50,7 +57,17 @@
         />
         <ThumbnailImg :file-id="file.id" :mime-type="file.mimeType" :size="40" :file-name="file.originalName" :context="thumbnailContext" :version="file.uploadVersion" />
         <div class="mobile-file-main">
-          <div class="mobile-file-name" :class="{ 'deleted-name': file.isDeleted }">{{ file.originalName }}</div>
+          <button
+            type="button"
+            class="mobile-file-name workspace-file-name"
+            :class="{ 'deleted-name': file.isDeleted }"
+            aria-controls="file-workspace-detail"
+            :aria-expanded="inspectedFileId === file.id"
+            :aria-label="`查看 ${file.originalName} 的详情`"
+            @click.stop="emit('inspect', file)"
+          >
+            {{ file.originalName }}
+          </button>
           <div class="mobile-file-meta">{{ formatSize(file.size) }} · {{ formatDate(file.createdAt) }}</div>
           <div class="mobile-file-tags">
             <t-tag v-if="file.isDeleted && file.deletedByAdmin" theme="danger" size="small">被管理员删除</t-tag>
@@ -67,7 +84,8 @@
               <t-tag
                 size="small"
                 variant="light"
-                :style="{ background: tag.color + '18', color: tag.color, borderColor: tag.color + '33' }"
+                class="workspace-file-tag"
+                :style="{ '--file-tag-color': tag.color }"
               >
                 {{ tag.name }}
               </t-tag>
@@ -75,37 +93,49 @@
             <span v-if="file.tags && file.tags.length > 2" class="mobile-tag-more">+{{ file.tags.length - 2 }}</span>
           </div>
         </div>
-      </div>
-      <div v-if="!file.isDeleted" class="mobile-file-card-actions">
-        <t-button size="small" theme="primary" variant="text" @click="emit('copy-link', file)">复制</t-button>
-        <t-button v-if="canPreviewFile(file)" size="small" variant="text" @click="emit('preview', file)">预览</t-button>
-        <t-button size="small" variant="text" @click="emit('download', file)">下载</t-button>
-        <t-button size="small" variant="text" @click="emit('tag-editor', file)">标签</t-button>
-        <t-button size="small" theme="danger" variant="text" @click="emit('delete', file)">删除</t-button>
-      </div>
-      <div v-else class="mobile-file-card-actions">
-        <t-button
-          size="small"
-          theme="success"
-          variant="text"
-          :disabled="file.deletedByAdmin && !isAdmin"
-          @click="emit('restore', file.id)"
+        <button
+          type="button"
+          class="mobile-file-more"
+          :aria-label="`${file.originalName} 的更多操作`"
+          :aria-expanded="openedActionsId === file.id"
+          @touchstart.stop
+          @click.stop="openedActionsId = openedActionsId === file.id ? null : file.id"
         >
-          恢复
-        </t-button>
-        <t-button v-if="isAdmin" size="small" theme="danger" variant="text" @click="emit('force-delete', file.id)">
-          强制删除
-        </t-button>
-        <t-button
-          v-else-if="!file.deletedByAdmin && file.deleteRequestedAt && selfForceDeleteReady(file)"
-          size="small"
-          theme="danger"
-          variant="text"
-          @click="emit('force-delete', file.id)"
-        >
-          永久删除
-        </t-button>
+          <span aria-hidden="true">···</span>
+        </button>
       </div>
+      <template v-if="openedActionsId === file.id">
+        <div v-if="!file.isDeleted" class="mobile-file-card-actions">
+          <t-button size="small" theme="primary" variant="text" @click="emit('copy-link', file)">复制</t-button>
+          <t-button v-if="canPreviewFile(file)" size="small" variant="text" @click="emit('preview', file)">预览</t-button>
+          <t-button size="small" variant="text" @click="emit('download', file)">下载</t-button>
+          <t-button size="small" variant="text" @click="emit('tag-editor', file)">标签</t-button>
+          <t-button size="small" theme="danger" variant="text" @click="emit('delete', file)">删除</t-button>
+        </div>
+        <div v-else class="mobile-file-card-actions">
+          <t-button
+            size="small"
+            theme="success"
+            variant="text"
+            :disabled="file.deletedByAdmin && !isAdmin"
+            @click="emit('restore', file.id)"
+          >
+            恢复
+          </t-button>
+          <t-button v-if="isAdmin" size="small" theme="danger" variant="text" @click="emit('force-delete', file.id)">
+            强制删除
+          </t-button>
+          <t-button
+            v-else-if="!file.deletedByAdmin && file.deleteRequestedAt && selfForceDeleteReady(file)"
+            size="small"
+            theme="danger"
+            variant="text"
+            @click="emit('force-delete', file.id)"
+          >
+            永久删除
+          </t-button>
+        </div>
+      </template>
     </div>
   </div>
 </template>
@@ -123,6 +153,7 @@
  * - 行判定（isFileActionable / canPreviewFile / selfForceDeleteReady）统一走
  *   utils/file-row-predicates，与桌面列表共用，避免两处逻辑漂移。
  */
+import { ref } from 'vue';
 import { formatDate, formatSize } from '@/utils/format';
 import ThumbnailImg from '../../components/ThumbnailImg.vue';
 import { canPreviewFile, isFileActionable, selfForceDeleteReady } from '../../utils/file-row-predicates';
@@ -138,6 +169,7 @@ withDefaults(defineProps<{
   selectableCount: number;
   /** 已选文件 ID */
   selectedIds: string[];
+  inspectedFileId?: string | null;
   /** 是否已全选 */
   isAllSelected: boolean;
   /** 是否半选 */
@@ -153,12 +185,15 @@ withDefaults(defineProps<{
   files: () => [],
   selectableCount: 0,
   selectedIds: () => [],
+  inspectedFileId: null,
   isAllSelected: false,
   isIndeterminate: false,
   busy: false,
   isAdmin: false,
   thumbnailContext: '',
 });
+
+const openedActionsId = ref<string | null>(null);
 
 const emit = defineEmits<{
   'toggle-select-all': [];
@@ -169,6 +204,7 @@ const emit = defineEmits<{
   'touch-move': [event: TouchEvent];
   'touch-end': [event: TouchEvent];
   'file-select': [file: FileItem];
+  inspect: [file: FileItem];
   'tag-filter': [tagId: string];
   'copy-link': [file: FileItem];
   preview: [file: FileItem];
@@ -180,28 +216,24 @@ const emit = defineEmits<{
 }>();
 </script>
 
-<style scoped src="./file-list-shared.css"></style>
-
 <style scoped>
-/* ============ 移动端 ============ */
-.os-mobile {
-  padding: 12px;
+.mobile-folder-row,
+.mobile-file-card {
+  border-bottom: 1px solid var(--workspace-border);
 }
 
 .mobile-folder-row {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 12px;
-  border-radius: var(--radius-md);
-  border: 1px solid var(--border-default);
-  margin-bottom: 10px;
+  gap: 9px;
+  min-height: 54px;
+  padding: 6px;
   cursor: pointer;
-  transition: border-color var(--duration-fast);
 }
 
-.mobile-folder-row:hover {
-  border-color: var(--border-accent);
+.mobile-folder-row:hover,
+.mobile-file-more:hover {
+  background: var(--workspace-canvas);
 }
 
 .mobile-folder-info {
@@ -209,64 +241,58 @@ const emit = defineEmits<{
   min-width: 0;
 }
 
-.mobile-folder-name {
-  font-weight: 500;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.mobile-folder-meta {
-  font-size: 12px;
-  color: var(--text-secondary);
+.mobile-folder-info .mobile-folder-meta,
+.mobile-file-main .mobile-file-meta {
   margin-top: 2px;
 }
 
 .mobile-folder-arrow {
-  color: var(--text-tertiary);
-  flex-shrink: 0;
+  flex: none;
+  color: var(--workspace-muted);
 }
 
 .mobile-file-card {
   content-visibility: auto;
-  contain-intrinsic-size: 132px;
-  background: var(--color-bg-elevated);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-md);
-  padding: 14px;
-  margin-bottom: 10px;
-  transition: border-color var(--duration-fast);
-}
-
-.mobile-file-card:hover {
-  border-color: var(--border-accent);
+  contain-intrinsic-size: auto 78px;
+  padding: 5px 0 5px 6px;
 }
 
 .mobile-selection-toolbar {
   display: flex;
-  align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  padding: 4px 2px 12px;
-  color: var(--text-secondary);
+  align-items: center;
+  gap: 6px;
+  min-height: 44px;
+  padding-block: 2px;
+  border-bottom: 1px solid var(--workspace-border);
+  color: var(--workspace-muted);
+  font-size: 12px;
+}
+
+.mobile-selection-toolbar :deep(.t-checkbox) {
+  min-height: 44px;
 }
 
 .mobile-selection-count {
-  color: var(--color-accent);
+  flex: none;
+  color: var(--workspace-accent);
   font-size: 12px;
   font-weight: 600;
 }
 
 .mobile-file-card-header {
   display: flex;
-  align-items: flex-start;
-  gap: 12px;
-  margin-bottom: 10px;
+  align-items: center;
+  gap: 6px;
 }
 
 .mobile-file-select {
-  flex-shrink: 0;
-  margin-top: 4px;
+  display: inline-flex;
+  justify-content: center;
+  align-items: center;
+  flex: none;
+  width: 44px;
+  min-height: 44px;
 }
 
 .mobile-file-main {
@@ -275,36 +301,52 @@ const emit = defineEmits<{
 }
 
 .mobile-file-name {
-  font-weight: 500;
-  word-break: break-all;
-  line-height: 1.4;
-  font-size: 14px;
-}
-
-.mobile-file-meta {
-  font-size: 12px;
-  color: var(--text-secondary);
-  margin-top: 2px;
+  width: 100%;
+  min-height: 44px;
+  margin-bottom: -7px;
+  padding: 4px 0 10px;
 }
 
 .mobile-file-tags {
   display: flex;
-  gap: 4px;
-  margin-top: 4px;
+  align-items: center;
   flex-wrap: wrap;
+  gap: 4px;
+  margin-block: 4px 3px;
 }
 
 .mobile-tag-more {
+  color: var(--workspace-muted);
   font-size: 11px;
-  color: var(--text-secondary);
+}
+
+.mobile-file-more {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 44px;
+  min-height: 44px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--workspace-muted);
+  font-size: 19px;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+}
+
+.mobile-file-more[aria-expanded='true'] {
+  background: var(--workspace-selected);
+  color: var(--workspace-accent);
 }
 
 .mobile-file-card-actions {
   display: flex;
-  gap: 4px;
   flex-wrap: wrap;
-  border-top: 1px solid var(--border-default);
-  padding-top: 8px;
+  gap: 0 4px;
+  margin-top: 5px;
+  padding: 3px;
+  border-top: 1px solid var(--workspace-border);
 }
 
 .mobile-file-card-actions :deep(.t-button.t-size-s) {

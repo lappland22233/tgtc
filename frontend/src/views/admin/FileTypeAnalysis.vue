@@ -17,15 +17,15 @@
 
     <t-loading :loading="loading" size="small">
       <template v-if="data">
-        <div class="charts-row" :class="{ 'mobile-single-col': isMobile }">
+        <div class="charts-row">
           <!-- Pie Chart -->
-          <div class="card" style="flex: 1; min-width: 340px;">
+          <div class="card">
             <h3>文件类型分布</h3>
             <div ref="chartRef" class="chart-container"></div>
           </div>
 
           <!-- File Type Table -->
-          <div class="card" style="flex: 1; min-width: 340px;">
+          <div class="card">
             <h3>类型详情</h3>
             <div v-if="!isMobile">
               <t-table
@@ -233,6 +233,8 @@ defineExpose({ refreshChart });
 
 /* Card */
 .card {
+  flex: 1 1 340px;
+  min-inline-size: 0;
   background: var(--color-bg-surface);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-lg);
@@ -271,9 +273,8 @@ defineExpose({ refreshChart });
     gap: 8px;
   }
 
-  .mobile-single-col {
-    grid-template-columns: 1fr !important;
-    flex-direction: column !important;
+  .charts-row > .card {
+    flex-basis: auto;
   }
 
   .mobile-card {

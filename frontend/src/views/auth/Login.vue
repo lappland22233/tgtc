@@ -1,44 +1,38 @@
 <template>
-  <div class="auth-container">
-    <div class="auth-card">
-      <div class="auth-header">
-        <h1>欢迎回来</h1>
-        <p>登录到文件分发系统</p>
-      </div>
-      <t-form ref="formRef" :data="form" :rules="rules" @submit="handleSubmit" label-align="top">
-        <t-form-item label="邮箱" name="email">
-          <t-input
-            v-model="form.email"
-            placeholder="请输入邮箱地址..."
-            size="large"
-            type="email"
-            autocomplete="email"
-            name="email"
-            :spellcheck="false"
-          />
-        </t-form-item>
-        <t-form-item label="密码" name="password">
-          <t-input
-            v-model="form.password"
-            type="password"
-            placeholder="请输入密码..."
-            size="large"
-            autocomplete="current-password"
-            name="password"
-          />
-        </t-form-item>
-        <t-form-item>
-          <t-button type="submit" theme="primary" size="large" block :loading="loading">
-            {{ loading ? '登录中…' : '登录' }}
-          </t-button>
-        </t-form-item>
-      </t-form>
-      <div class="auth-footer">
-        还没有账号？
-        <router-link to="/register" class="auth-link">立即注册</router-link>
-      </div>
-    </div>
-  </div>
+  <AuthGate title="登录">
+    <t-form :aria-busy="loading" ref="formRef" :data="form" :rules="rules" @submit="handleSubmit" label-align="top">
+      <t-form-item label="邮箱" name="email">
+        <t-input
+          v-model="form.email"
+          placeholder="请输入邮箱地址"
+          size="large"
+          type="email"
+          autocomplete="email"
+          name="email"
+          :spellcheck="false"
+        />
+      </t-form-item>
+      <t-form-item label="密码" name="password">
+        <t-input
+          v-model="form.password"
+          type="password"
+          placeholder="请输入密码"
+          size="large"
+          autocomplete="current-password"
+          name="password"
+        />
+      </t-form-item>
+      <t-form-item>
+        <t-button class="gate-submit" type="submit" theme="primary" size="large" block :loading="loading">
+          {{ loading ? '登录中…' : '登录' }}
+        </t-button>
+      </t-form-item>
+    </t-form>
+    <template #footer>
+      还没有账号？
+      <router-link to="/register">立即注册</router-link>
+    </template>
+  </AuthGate>
 </template>
 
 <script setup lang="ts">
@@ -48,6 +42,7 @@ import MessagePlugin from '@/utils/message';
 import { useAuthStore } from '../../stores/auth';
 import { getErrorMessage } from '../../utils/error';
 import { isValidRedirect } from '../../router';
+import AuthGate from './AuthGate.vue';
 
 const router = useRouter();
 const route = useRoute();
@@ -90,7 +85,3 @@ async function handleSubmit() {
   }
 }
 </script>
-
-<style scoped>
-/* .auth-footer / .auth-link 已提取为全局共享类，见 assets/styles.css */
-</style>

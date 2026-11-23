@@ -1,13 +1,13 @@
 // ============================================================
-// FileCloud ECharts Theme — Cloudscape dual-theme chart system
+// TGTC ECharts 主题
 // Uses tree-shaken echarts core (./echarts) instead of full barrel
 // ============================================================
 
 import echarts from './echarts';
 
-/* ---- Color Palette (Cloudscape-aligned, high readability) ---- */
+/* ---- Color palette ---- */
 export const CHART_COLORS = {
-  primary:    '#0972D3',
+  primary:    '#006B5B',
   success:    '#037F0C',
   warning:    '#8C6A00',
   danger:     '#D13212',
@@ -28,7 +28,7 @@ export const CHART_COLORS = {
 
 /* ---- Dark theme palette (brighter variants for dark surfaces) ---- */
 export const CHART_COLORS_DARK = {
-  primary:    '#539FE5',
+  primary:    '#65DCC5',
   success:    '#53D769',
   warning:    '#C7A830',
   danger:     '#E8604C',
@@ -69,7 +69,7 @@ export const FILETYPE_COLORS: Record<string, string> = {
 /* ---- Device colors ---- */
 export const DEVICE_COLORS: Record<string, string> = {
   desktop: CHART_COLORS.primary,
-  mobile:  CHART_COLORS.teal,
+  mobile:  CHART_COLORS.blue,
   tablet:  CHART_COLORS.orange,
   bot:     CHART_COLORS.slate,
 };
@@ -85,14 +85,14 @@ export const PERF_COLORS: Record<string, string> = {
 
 /* ---- Shared style presets ---- */
 export const tooltipBase = {
-  backgroundColor: 'var(--color-bg-surface, #FFFFFF)',
-  borderColor: 'var(--border-default, #D5DBDB)',
-  textStyle: { color: 'var(--text-primary, #16191F)', fontSize: 12 },
+  backgroundColor: 'var(--workspace-surface, #FFFEFA)',
+  borderColor: 'var(--workspace-border, #E3E6DF)',
+  textStyle: { color: 'var(--workspace-text, #202923)', fontSize: 12 },
   extraCssText: 'border-radius: 4px; box-shadow: 0 2px 8px rgba(0,0,0,0.12);',
 };
 
 export const legendBase = {
-  textStyle: { color: 'var(--text-secondary, #5F6B7A)', fontSize: 11 },
+  textStyle: { color: 'var(--workspace-muted, #59645E)', fontSize: 11 },
   icon: 'roundRect' as const,
   itemWidth: 10,
   itemHeight: 4,
@@ -122,9 +122,14 @@ export function ensureCyberTheme(): void {
   if (!dark && lightRegistered) return;
 
   const colors = dark ? CHART_COLORS_DARK : CHART_COLORS;
-  const themeName = 'cloudscape';
+  const style = getComputedStyle(document.documentElement);
+  const color = (token: string, fallback: string) => style.getPropertyValue(token).trim() || fallback;
+  const surface = color('--workspace-surface', dark ? '#242927' : '#FFFEFA');
+  const text = color('--workspace-text', dark ? '#EDF2EE' : '#202923');
+  const muted = color('--workspace-muted', dark ? '#B2BEB7' : '#59645E');
+  const border = color('--workspace-border', dark ? '#3A463E' : '#E3E6DF');
 
-  echarts.registerTheme(themeName, {
+  const theme = {
     color: [
       colors.primary, colors.success, colors.warning,
       colors.danger, colors.info, colors.purple,
@@ -144,66 +149,36 @@ export function ensureCyberTheme(): void {
       barWidth: '55%',
     },
     pie: {
-      itemStyle: { borderWidth: 2, borderColor: dark ? '#1F242B' : '#FFFFFF' },
+      itemStyle: { borderWidth: 2, borderColor: surface },
     },
     categoryAxis: {
-      axisLine: { lineStyle: { color: dark ? 'rgba(232,237,245,0.12)' : 'rgba(22,25,31,0.12)' } },
+      axisLine: { lineStyle: { color: border } },
       axisTick: { show: false },
-      axisLabel: { color: dark ? '#8895A7' : '#5F6B7A', fontSize: 11 },
+      axisLabel: { color: muted, fontSize: 11 },
       splitLine: { show: false },
     },
     valueAxis: {
-      axisLine: { lineStyle: { color: dark ? 'rgba(232,237,245,0.12)' : 'rgba(22,25,31,0.12)' } },
+      axisLine: { lineStyle: { color: border } },
       axisTick: { show: false },
-      axisLabel: { color: dark ? '#8895A7' : '#5F6B7A', fontSize: 11 },
+      axisLabel: { color: muted, fontSize: 11 },
       splitLine: {
         lineStyle: {
-          color: dark ? 'rgba(232,237,245,0.06)' : 'rgba(22,25,31,0.06)',
+          color: border,
           type: 'dashed',
         },
       },
     },
     tooltip: {
-      backgroundColor: dark ? 'rgba(31, 36, 43, 0.96)' : 'rgba(255, 255, 255, 0.98)',
-      borderColor: dark ? 'rgba(83, 159, 229, 0.25)' : 'rgba(9, 114, 211, 0.2)',
+      backgroundColor: surface,
+      borderColor: border,
       borderWidth: 1,
-      textStyle: { color: dark ? '#E8EDF5' : '#16191F', fontSize: 12 },
+      textStyle: { color: text, fontSize: 12 },
       extraCssText: 'border-radius: 4px; box-shadow: 0 4px 16px rgba(0,0,0,0.15);',
     },
-  });
+  };
 
-  // Also register as 'cyber' for backward compat with existing init calls
-  echarts.registerTheme('cyber', {
-    color: [
-      colors.primary, colors.success, colors.warning,
-      colors.danger, colors.info, colors.purple,
-      colors.orange, colors.teal, colors.blue,
-      colors.pink,
-    ],
-    backgroundColor: 'transparent',
-    line: { itemStyle: { borderWidth: 2 }, lineStyle: { width: 2 }, symbolSize: 5, symbol: 'circle', smooth: false },
-    bar: { itemStyle: { borderRadius: [2, 2, 0, 0], borderWidth: 0 }, barWidth: '55%' },
-    pie: { itemStyle: { borderWidth: 2, borderColor: dark ? '#1F242B' : '#FFFFFF' } },
-    categoryAxis: {
-      axisLine: { lineStyle: { color: dark ? 'rgba(232,237,245,0.12)' : 'rgba(22,25,31,0.12)' } },
-      axisTick: { show: false },
-      axisLabel: { color: dark ? '#8895A7' : '#5F6B7A', fontSize: 11 },
-      splitLine: { show: false },
-    },
-    valueAxis: {
-      axisLine: { lineStyle: { color: dark ? 'rgba(232,237,245,0.12)' : 'rgba(22,25,31,0.12)' } },
-      axisTick: { show: false },
-      axisLabel: { color: dark ? '#8895A7' : '#5F6B7A', fontSize: 11 },
-      splitLine: { lineStyle: { color: dark ? 'rgba(232,237,245,0.06)' : 'rgba(22,25,31,0.06)', type: 'dashed' } },
-    },
-    tooltip: {
-      backgroundColor: dark ? 'rgba(31, 36, 43, 0.96)' : 'rgba(255, 255, 255, 0.98)',
-      borderColor: dark ? 'rgba(83, 159, 229, 0.25)' : 'rgba(9, 114, 211, 0.2)',
-      borderWidth: 1,
-      textStyle: { color: dark ? '#E8EDF5' : '#16191F', fontSize: 12 },
-      extraCssText: 'border-radius: 4px; box-shadow: 0 4px 16px rgba(0,0,0,0.15);',
-    },
-  });
+  echarts.registerTheme('cloudscape', theme);
+  echarts.registerTheme('cyber', theme);
 
   if (dark) darkRegistered = true;
   else lightRegistered = true;

@@ -1,37 +1,36 @@
 <template>
   <div class="shares-page">
-    <div class="page-header">
+    <header class="shares-header">
       <h1>我的分享</h1>
-      <p>管理您创建的所有分享链接</p>
-    </div>
+    </header>
 
-    <div class="card">
+    <div class="shares-content">
       <!-- 筛选栏 -->
       <div class="filter-bar">
-        <t-radio-group v-model="filterType" variant="default-filled" size="medium" @change="fetchShares">
+        <t-radio-group v-model="filterType" aria-label="筛选分享类型" variant="default-filled" size="medium" @change="fetchShares">
           <t-radio-button value="">全部</t-radio-button>
           <t-radio-button value="file">文件</t-radio-button>
           <t-radio-button value="folder">文件夹</t-radio-button>
         </t-radio-group>
-        <t-button theme="primary" variant="outline" @click="fetchShares">
+        <t-button theme="default" variant="outline" @click="fetchShares">
           <template #icon><t-icon name="refresh" /></template>
           刷新
         </t-button>
       </div>
 
       <!-- 加载状态 -->
-      <t-loading v-if="loading" />
+      <div v-if="loading" class="share-feedback" role="status"><t-loading text="加载中..." /></div>
 
       <!-- G11-17：加载失败态 + 重试 -->
-      <div v-else-if="loadError" class="empty-state">
-        <div class="empty-icon" style="color: var(--color-error);">!</div>
+      <div v-else-if="loadError" class="share-feedback" role="alert">
+        <div class="empty-icon feedback-error" aria-hidden="true">!</div>
         <p>{{ loadError }}</p>
         <p class="empty-hint">加载失败，请检查网络后重试</p>
-        <t-button size="small" variant="outline" style="margin-top: 12px;" @click="fetchShares">重试</t-button>
+        <t-button variant="outline" @click="fetchShares">重试</t-button>
       </div>
 
       <!-- 空状态 -->
-      <div v-else-if="shares.length === 0" class="empty-state">
+      <div v-else-if="shares.length === 0" class="share-feedback">
         <div class="empty-icon">
           <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71" />
@@ -43,8 +42,8 @@
       </div>
 
       <!-- 分享列表 -->
-      <div v-else class="share-list">
-        <div v-for="share in shares" :key="share.id" class="share-item" :class="{ disabled: share.isDeleted || share.status !== 'active' }">
+      <ul v-else class="share-list">
+        <li v-for="share in shares" :key="share.id" class="share-item">
           <div class="share-icon">
             <svg v-if="share.targetType === 'folder'" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path d="M3 6a2 2 0 012-2h4l2 2h8a2 2 0 012 2v10a2 2 0 01-2 2H5a2 2 0 01-2-2V6z" />
@@ -60,15 +59,15 @@
               {{ getTargetName(share) }}
             </div>
             <div class="share-meta">
-              <span class="meta-tag" :class="share.targetType">{{ share.targetType === 'folder' ? '文件夹' : '文件' }}</span>
-              <span v-if="isEncrypted(share)" class="meta-tag encrypted" style="display: inline-flex; align-items: center; gap: 3px;">
+              <span class="meta-tag">{{ share.targetType === 'folder' ? '文件夹' : '文件' }}</span>
+              <span v-if="isEncrypted(share)" class="meta-tag share-scope">
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                   <rect x="3" y="11" width="18" height="11" rx="2" />
                   <path d="M7 11V7a5 5 0 0110 0v4" />
                 </svg>
                 加密
               </span>
-              <span v-else class="meta-tag public" style="display: inline-flex; align-items: center; gap: 3px;">
+              <span v-else class="meta-tag share-scope">
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                   <circle cx="12" cy="12" r="10" />
                   <path d="M2 12h20" />
@@ -92,7 +91,7 @@
           </div>
 
           <div class="share-actions">
-            <t-button size="small" theme="primary" variant="outline" @click="copyShareLink(share)">
+            <t-button class="copy-action" size="small" theme="primary" variant="outline" @click="copyShareLink(share)">
               复制链接
             </t-button>
             <t-button
@@ -108,8 +107,8 @@
               {{ getStatusLabel(share) }}
             </t-tag>
           </div>
-        </div>
-      </div>
+        </li>
+      </ul>
 
       <!-- 分页 -->
       <div v-if="total > pageSize" class="pagination">
@@ -279,135 +278,137 @@ onMounted(fetchShares);
 </script>
 
 <style scoped>
-/* .page-header / .card / .empty-state 使用全局定义，见 assets/styles.css */
-
 .shares-page {
-  max-width: 960px;
-  margin: 0 auto;
+  width: min(100%, 1080px);
+  margin-inline: auto;
+  color: var(--workspace-text);
+}
+
+.shares-header h1 {
+  margin: 0 0 16px;
+  font-size: clamp(24px, 4vw, 34px);
+  line-height: 1.25;
+}
+
+.shares-content {
+  border: 1px solid var(--workspace-border);
+  border-radius: 12px;
+  background: var(--workspace-surface);
+  --share-gutter: clamp(10px, 3vw, 20px);
+}
+
+.filter-bar,
+.share-meta,
+.share-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 8px;
 }
 
 .filter-bar {
-  display: flex;
   justify-content: space-between;
-  align-items: center;
-  margin-bottom: 16px;
-  flex-wrap: wrap;
-  gap: 12px;
+  padding: 10px var(--share-gutter);
 }
 
 .share-list {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 
 .share-item {
-  display: flex;
-  align-items: flex-start;
-  gap: 12px;
-  padding: 12px;
-  background: var(--color-bg-surface);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-sm);
-  transition: border-color var(--duration-fast);
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 8px 12px;
+  padding: 12px var(--share-gutter);
+  border-top: 1px solid var(--workspace-border);
 }
 
-.share-item:hover {
-  border-color: var(--border-accent);
-}
-
-.share-item.disabled {
-  opacity: 0.6;
-}
-
-.share-icon {
+.share-icon,
+.empty-icon {
+  display: inline-grid;
+  place-items: center;
   width: 36px;
   height: 36px;
+  border-radius: 8px;
+  background: var(--workspace-selected);
+  color: var(--workspace-accent);
+}
+
+.share-icon svg { width: 20px; height: 20px; }
+.share-info { min-width: 0; }
+.share-name { font-size: 15px; font-weight: 600; overflow-wrap: anywhere; }
+.share-meta { margin-block: 4px; color: var(--workspace-muted); font-size: 12px; }
+
+.share-scope {
   display: inline-flex;
   align-items: center;
-  justify-content: center;
-  color: var(--color-accent);
-  flex-shrink: 0;
-}
-
-.share-info {
-  flex: 1;
-  min-width: 0;
-}
-
-.share-name {
-  font-size: 15px;
-  font-weight: 500;
-  margin-bottom: 6px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.share-meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  align-items: center;
-  margin-bottom: 6px;
-}
-
-.meta-tag {
-  font-size: 12px;
-  padding: 2px 8px;
-  border-radius: var(--radius-sm);
-  background: var(--color-bg-surface);
-  color: var(--text-secondary);
-}
-
-.meta-tag.file { color: var(--color-accent); }
-.meta-tag.folder { color: var(--color-warning); }
-.meta-tag.encrypted { color: var(--color-danger); }
-.meta-tag.public { color: var(--color-success); }
-
-.meta-date {
-  font-size: 12px;
-  color: var(--text-tertiary);
+  gap: 4px;
+  color: var(--workspace-accent);
 }
 
 .share-url {
+  color: var(--workspace-muted);
   font-size: 12px;
-  color: var(--text-secondary);
+  overflow-wrap: anywhere;
 }
 
-.share-url code {
-  font-family: var(--font-mono);
-  background: var(--color-bg-surface);
-  padding: 2px 6px;
-  border-radius: var(--radius-sm);
-  word-break: break-all;
+.share-url code { font-family: var(--font-mono); }
+.share-actions { justify-content: flex-end; }
+.share-actions :deep(.copy-action:hover) { background: var(--workspace-selected); }
+
+.share-feedback {
+  padding: 24px var(--share-gutter);
+  border-top: 1px solid var(--workspace-border);
+  overflow-wrap: anywhere;
 }
 
-.share-actions {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  flex-shrink: 0;
-}
+.share-feedback p { margin: 8px 0; }
+.share-feedback .empty-hint { color: var(--workspace-muted); }
+.feedback-error { background: var(--color-danger-soft); color: var(--color-danger); }
 
 .pagination {
-  margin-top: 20px;
-  display: flex;
-  justify-content: center;
+  padding: 8px var(--share-gutter);
+  border-top: 1px solid var(--workspace-border);
 }
 
-@media (max-width: 768px) {
-  .filter-bar { align-items: stretch; }
-  .filter-bar .t-radio-group { width: 100%; }
-  .filter-bar > .t-button { align-self: flex-end; }
-  .share-item {
-    flex-direction: column;
-    align-items: stretch;
-  }
+.pagination :deep(.t-pagination) { margin: 0; }
 
-  .share-actions {
-    flex-direction: row;
-    justify-content: flex-end;
+@media (max-width: 700px) {
+  .share-item { grid-template-columns: auto minmax(0, 1fr); }
+  .share-actions { grid-column: 2; justify-content: flex-start; }
+  .pagination :deep(.t-pagination) {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    gap: 6px;
   }
+  .pagination :deep(.t-pagination__total) { grid-area: 1 / 1 / 2 / 3; }
+  .pagination :deep(.t-pagination__select) { grid-area: 1 / 3; margin: 0; }
+  .pagination :deep(.t-pagination__btn-prev) { grid-area: 2 / 1; margin: 0; }
+  .pagination :deep(.t-pagination__btn-next) { grid-area: 2 / 3; margin: 0; }
+  .pagination :deep(.t-pagination__pager) {
+    grid-area: 2 / 2;
+    justify-content: center;
+    flex-wrap: wrap;
+    row-gap: 4px;
+  }
+}
+
+@media (max-width: 360px) {
+  .filter-bar :deep(.t-radio-group.t-size-m .t-radio-button) { padding-inline: 10px; }
+}
+
+@media (max-width: 768px), (pointer: coarse) {
+  .shares-content :deep(.t-button),
+  .filter-bar :deep(.t-radio-button),
+  .pagination :deep(.t-pagination__select),
+  .pagination :deep(.t-pagination__select .t-input) { min-height: 44px; }
+  .pagination :deep(:is(.t-pagination__btn, .t-pagination__number)) {
+    min-width: 44px;
+    min-height: 44px;
+  }
+  .pagination :deep(.t-pagination__number) { line-height: 42px; }
 }
 </style>

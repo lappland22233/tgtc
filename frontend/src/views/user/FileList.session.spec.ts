@@ -7,6 +7,8 @@ import FileList from './FileList.vue';
 import FileListBatchActions from './FileListBatchActions.vue';
 import type { Folder } from '@/stores/folders';
 import FileListDesktopRows from './FileListDesktopRows.vue';
+import FileWorkspaceDetails from './FileWorkspaceDetails.vue';
+import FileWorkspaceDirectory from './FileWorkspaceDirectory.vue';
 import { useAuthStore } from '@/stores/auth';
 import { useDownloadsStore } from '@/stores/downloads';
 import { useMediaPlaybackStore } from '@/stores/mediaPlayback';
@@ -65,7 +67,8 @@ describe('file list session ownership', () => {
     vi.restoreAllMocks();
   });
 
-  it('observes the mounted pagination sentinel and releases it when leaving the list', async () => {
+  it.each([1024, 390])('observes pagination and releases the observer at %i px', async (width) => {
+    vi.stubGlobal('innerWidth', width);
     const observe = vi.fn();
     const disconnect = vi.fn();
     vi.stubGlobal('IntersectionObserver', class {
@@ -78,6 +81,24 @@ describe('file list session ownership', () => {
     wrapper.unmount();
     wrapper = undefined;
     expect(disconnect).toHaveBeenCalled();
+  });
+
+  it('keeps details independent of batch selection and clears them on folder navigation', async () => {
+    vi.stubGlobal('innerWidth', 1024);
+    wrapper = shallowMount(FileList);
+    await flushPromises();
+    const rows = wrapper.getComponent(FileListDesktopRows);
+    rows.vm.$emit('file-select', photo);
+    rows.vm.$emit('inspect', video);
+    await flushPromises();
+    expect(rows.props('selectedIds')).toEqual([photo.id]);
+    expect(wrapper.getComponent(FileWorkspaceDetails).props('file')).toMatchObject({ id: video.id });
+
+    wrapper.getComponent(FileWorkspaceDirectory).vm.$emit('navigate', folder.id);
+    await flushPromises();
+    expect(route.query.folder).toBe(folder.id);
+    expect(wrapper.findComponent(FileWorkspaceDetails).exists()).toBe(false);
+    expect(wrapper.getComponent(FileListDesktopRows).props('selectedIds')).toEqual([]);
   });
 
   it('drops a pending download from the previous login even when its ticket arrives after the switch', async () => {

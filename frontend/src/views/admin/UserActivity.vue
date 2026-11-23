@@ -207,7 +207,7 @@ onMounted(() => {
 .error-state {
   text-align: center;
   padding: 32px 0;
-  color: var(--error, #e34d59);
+  color: var(--color-danger);
   font-size: 13px;
   display: flex;
   flex-direction: column;

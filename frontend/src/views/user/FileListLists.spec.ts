@@ -174,6 +174,24 @@ describe('FileListDesktopRows（M6 拆分契约）', () => {
     expect(wrapper.emitted('file-drag-end')).toEqual([[]]);
   });
 
+  it('文件名按钮打开详情，行级回车下载保持可用', async () => {
+    const file = fileItem();
+    const wrapper = mountRows({ files: [file], inspectedFileId: file.id });
+    const row = wrapper.get('.os-file');
+    const name = row.get('button.workspace-file-name');
+
+    expect(name.attributes('aria-expanded')).toBe('true');
+    expect(row.classes()).toContain('is-inspected');
+
+    await name.trigger('click');
+
+    expect(wrapper.emitted('inspect')).toEqual([[file]]);
+    expect(wrapper.emitted('download')).toBeUndefined();
+
+    await row.trigger('keydown.enter');
+    expect(wrapper.emitted('download')).toEqual([[file]]);
+  });
+
   it('不可预览类型不渲染预览热区，缩略图仍展示', () => {
     const wrapper = mountRows({ files: [fileItem({ mimeType: 'application/zip', originalName: 'a.zip' })] });
 
@@ -237,11 +255,22 @@ describe('FileListMobileList（M6 拆分契约）', () => {
     expect(wrapper.emitted('touch-start')?.[1]?.[2]).toEqual(file);
   });
 
-  it('正常文件卡片提供复制/预览/下载/标签/删除五个动作', async () => {
+  it('文件名打开详情，更多操作提供复制/预览/下载/标签/删除五个动作', async () => {
     const file = fileItem();
-    const wrapper = mountMobile({ files: [file], selectedIds: ['f1'] });
-    const buttons = wrapper.findAll('.mobile-file-card-actions .btn-stub');
+    const wrapper = mountMobile({ files: [file], selectedIds: ['f1'], inspectedFileId: file.id });
 
+    const name = wrapper.get('button.workspace-file-name');
+    expect(name.attributes('aria-expanded')).toBe('true');
+    await name.trigger('click');
+    expect(wrapper.emitted('inspect')).toEqual([[file]]);
+
+    const more = wrapper.get('.mobile-file-more');
+    expect(wrapper.find('.mobile-file-card-actions').exists()).toBe(false);
+    await more.trigger('click');
+    expect(more.attributes('aria-expanded')).toBe('true');
+    expect(wrapper.find('.mobile-file-card-actions').exists()).toBe(true);
+
+    const buttons = wrapper.findAll('.mobile-file-card-actions .btn-stub');
     expect(buttons).toHaveLength(5);
 
     await wrapper.get('.mobile-file-select').trigger('click');
@@ -278,6 +307,7 @@ describe('FileListMobileList（M6 拆分契约）', () => {
   it('已删除文件卡片：管理员展示恢复+强制删除', async () => {
     const file = fileItem({ isDeleted: true, deletedByAdmin: true });
     const wrapper = mountMobile({ files: [file], isAdmin: true });
+    await wrapper.get('.mobile-file-more').trigger('click');
     const buttons = wrapper.findAll('.mobile-file-card-actions .btn-stub');
 
     expect(buttons).toHaveLength(2);
@@ -291,11 +321,12 @@ describe('FileListMobileList（M6 拆分契约）', () => {
     expect(wrapper.emitted('force-delete')).toEqual([['f1']]);
   });
 
-  it('已删除文件卡片：非管理员在冷静期未满时不展示永久删除', () => {
+  it('已删除文件卡片：非管理员在冷静期未满时不展示永久删除', async () => {
     const fresh = mountMobile({
       files: [fileItem({ isDeleted: true, deleteRequestedAt: new Date().toISOString() })],
       isAdmin: false,
     });
+    await fresh.get('.mobile-file-more').trigger('click');
     expect(fresh.findAll('.mobile-file-card-actions .btn-stub')).toHaveLength(1);
 
     const ready = mountMobile({
@@ -305,6 +336,7 @@ describe('FileListMobileList（M6 拆分契约）', () => {
       })],
       isAdmin: false,
     });
+    await ready.get('.mobile-file-more').trigger('click');
     const buttons = ready.findAll('.mobile-file-card-actions .btn-stub');
     expect(buttons).toHaveLength(2);
     expect(buttons[1]!.text()).toContain('永久删除');

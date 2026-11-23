@@ -1,6 +1,6 @@
 ﻿# FileCloud 前端样式开发规范
 
-> 基于 Cloudscape 设计语言 · Seed Token 架构 · Light/Dark 双主题
+> TGTC 青绿工作台 · 浅色与深色主题
 > 适用于本项目所有前端页面的新增与修改
 
 ---
@@ -17,16 +17,18 @@
 
 ## 2. Seed Token 体系
 
-### 2.1 种子令牌（仅 6 个，主题切换只改这层）
+### 2.1 工作台令牌与基础别名
 
-| 令牌 | Light | Dark | 用途 |
+配色定义在 `src/assets/workspace.css`。工作台、分享、认证和管理后台共用这些令牌。`styles.css` 将基础别名和 TDesign 变量映射到同一套主题。
+
+| 令牌 | 浅色 | 深色 | 用途 |
 |------|-------|------|------|
-| `--seed-bg` | `#F2F3F3` | `#16191F` | 页面背景 |
-| `--seed-fg` | `#16191F` | `#E8EDF5` | 主文本 |
-| `--seed-primary` | `#0972D3` | `#539FE5` | 主操作色 |
-| `--seed-accent` | `#033160` | `#7DBBEE` | 强调/悬停 |
-| `--seed-surface` | `#FFFFFF` | `#1F242B` | 容器表面 |
-| `--seed-radius` | `4px` | `4px` | 基础圆角 |
+| `--workspace-canvas` / `--seed-bg` | `#F6F5EF` | `#1B211E` | 页面背景 |
+| `--workspace-text` / `--seed-fg` | `#202923` | `#EDF2EE` | 主文本 |
+| `--workspace-accent` / `--seed-primary` | `#006B5B` | `#65DCC5` | 主操作色 |
+| `--workspace-on-accent` | `#FFFFFF` | `#102C25` | 实色主按钮文字 |
+| `--workspace-surface` / `--seed-surface` | `#FFFEFA` | `#242927` | 容器表面 |
+| `--workspace-selected` | `#E6F2EB` | `#223D35` | 选中背景 |
 
 ### 2.2 语义令牌（组件中直接使用的层）
 
@@ -70,7 +72,7 @@ var(--space-5)  /* 20px */   var(--space-6)  /* 24px */
 var(--space-8)  /* 32px */
 ```
 
-圆角从种子派生，保持 Cloudscape 锐利几何：
+圆角从 `--seed-radius` 派生。
 
 ```css
 var(--radius-sm)  /* 4px — 按钮/输入框/标签 */
@@ -106,7 +108,7 @@ var(--font-mono)     /* ui-monospace, "Cascadia Code", ... */
 ### 3.1 工作原理
 
 - `main.ts` 初始化时设置 `document.documentElement[data-theme]`（优先级：localStorage `filecloud-theme` > 系统偏好 > light）
-- 暗色主题仅覆盖 6 个种子令牌 + 语义色，组件样式零改动
+- 暗色主题从 `workspace.css` 读取基础配色，成功、警告和错误色在全局样式中定义
 - TDesign 通过 `theme-mode="dark"` 属性同步（App.vue MutationObserver 自动维护）
 
 ### 3.2 新增组件时的主题检查清单

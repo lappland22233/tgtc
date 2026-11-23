@@ -3,7 +3,8 @@
     <img
       v-if="signed && url"
       :src="url"
-      :style="{ width: size + 'px', height: size + 'px', objectFit: 'cover', borderRadius: 'var(--radius-sm, 4px)' }"
+      alt=""
+      :style="{ width: size + 'px', height: size + 'px', objectFit: fit, borderRadius: 'var(--radius-sm, 4px)' }"
       @load="onLoad"
       @error="onError"
     />
@@ -28,6 +29,7 @@ const props = withDefaults(defineProps<{
   mimeType?: string;
   fileName?: string;
   size?: number;
+  fit?: 'cover' | 'contain';
   src?: string;
   /**
    * 访问上下文标识（登录 `u:<userId>` / 分享 `s:<token>`）。
@@ -42,6 +44,7 @@ const props = withDefaults(defineProps<{
   mimeType: '',
   fileName: '',
   size: 36,
+  fit: 'cover',
   emoji: '',
   src: '',
   context: '',
