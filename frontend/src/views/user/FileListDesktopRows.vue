@@ -72,9 +72,10 @@
   >
     <div class="os-cell os-check"></div>
     <div class="os-cell os-name" :title="folder.name">
-      <t-icon name="folder" class="os-folder-icon" />
+      <span class="workspace-folder-icon" aria-hidden="true">
+        <t-icon name="folder" />
+      </span>
       <span class="os-name-text">{{ folder.name }}</span>
-      <t-tag size="small" theme="warning" variant="light" class="os-kind-tag">文件夹</t-tag>
     </div>
     <div class="os-cell os-size os-muted">{{ folder.children?.length ? `${folder.children.length} 项` : '—' }}</div>
     <div class="os-cell os-date os-muted">{{ formatDate(folder.createdAt) }}</div>
@@ -85,7 +86,7 @@
     v-for="file in files"
     :key="file.id"
     class="os-row os-file"
-    :class="[getFileRowClassName(file), { dragging: draggingFileIds.includes(file.id) }]"
+    :class="[getFileRowClassName(file), { dragging: draggingFileIds.includes(file.id), 'is-inspected': inspectedFileId === file.id }]"
     :draggable="isFileActionable(file)"
     :tabindex="isFileActionable(file) ? 0 : -1"
     :role="isFileActionable(file) ? 'button' : undefined"
@@ -103,6 +104,7 @@
       <t-checkbox
         v-if="!file.isDeleted && file.status !== 'processing'"
         :checked="selectedIds.includes(file.id)"
+        :aria-label="`选择 ${file.originalName}`"
         @change="emit('file-select', file)"
       />
     </div>
@@ -122,9 +124,17 @@
       </span>
       <ThumbnailImg v-else :file-id="file.id" :mime-type="file.mimeType" :size="32" :file-name="file.originalName" :context="thumbnailContext" :version="file.uploadVersion" />
       <div class="os-name-block">
-        <span class="os-name-text" :class="{ 'deleted-name': file.isDeleted }" :title="file.originalName">
+        <button
+          type="button"
+          class="os-name-text workspace-file-name"
+          :class="{ 'deleted-name': file.isDeleted }"
+          :aria-expanded="inspectedFileId === file.id"
+          :aria-label="`查看 ${file.originalName} 的详情`"
+          :title="file.originalName"
+          @click.stop="emit('inspect', file)"
+        >
           {{ file.originalName }}
-        </span>
+        </button>
         <div class="os-name-sub">
           <t-tag v-if="file.status === 'error'" theme="danger" size="small">上传失败</t-tag>
           <t-tag v-else-if="file.status === 'processing'" theme="primary" size="small">处理中</t-tag>
@@ -144,7 +154,8 @@
             <t-tag
               size="small"
               variant="light"
-              :style="{ background: tag.color + '20', color: tag.color, borderColor: tag.color + '40' }"
+              class="workspace-file-tag"
+              :style="{ '--file-tag-color': tag.color }"
             >
               {{ tag.name }}
             </t-tag>
@@ -193,6 +204,7 @@ withDefaults(defineProps<{
   files: FileItem[];
   /** 已选文件 ID */
   selectedIds: string[];
+  inspectedFileId?: string | null;
   /** 是否已全选 */
   isAllSelected: boolean;
   /** 是否半选 */
@@ -213,6 +225,7 @@ withDefaults(defineProps<{
   subfolders: () => [],
   files: () => [],
   selectedIds: () => [],
+  inspectedFileId: null,
   isAllSelected: false,
   isIndeterminate: false,
   busy: false,
@@ -227,6 +240,7 @@ const emit = defineEmits<{
   'toggle-sort': [field: string];
   'toggle-select-all': [];
   'file-select': [file: FileItem];
+  inspect: [file: FileItem];
   'folder-open': [folder: Folder];
   'folder-ctxmenu': [event: MouseEvent, folder: Folder];
   'file-ctxmenu': [event: MouseEvent, file: FileItem];
@@ -244,123 +258,86 @@ const emit = defineEmits<{
 }>();
 </script>
 
-<style scoped src="./file-list-shared.css"></style>
-
 <style scoped>
 .os-row {
   display: grid;
   content-visibility: auto;
-  contain-intrinsic-size: 48px;
-  grid-template-columns:
-    44px
-    minmax(240px, 1fr)
-    96px
-    150px;
+  contain-intrinsic-size: auto 49px;
+  grid-template-columns: 28px minmax(0, 1fr) minmax(64px, 13%) minmax(105px, 22%);
   align-items: center;
   gap: 8px;
-  padding: 0 12px;
-  min-height: 52px;
-  border-bottom: 1px solid var(--border-default);
+  min-height: 49px;
+  padding: 4px 7px;
+  border-bottom: 1px solid var(--workspace-border);
   transition: background var(--duration-fast);
 }
 
-.os-row:last-child {
-  border-bottom: none;
-}
-
-/* 表头 */
 .os-head {
-  min-height: 44px;
-  background: var(--color-bg-elevated);
-  border-bottom: 1px solid var(--border-strong);
-  font-family: var(--font-mono);
-  font-size: 11px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--text-tertiary);
+  min-height: 35px;
+  color: var(--workspace-muted);
+  font-size: 12px;
+  font-weight: 550;
 }
 
-.os-sortable {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  cursor: pointer;
-  user-select: none;
-  transition: color var(--duration-fast);
-}
-
-.os-sortable:hover {
-  color: var(--text-primary);
-}
-
-/* G11-07：排序表头改为可聚焦按钮，重置原生 button 样式并保持原有视觉 */
+.os-sortable,
 .os-sort-btn {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  background: none;
-  border: none;
-  padding: 0;
-  margin: 0;
-  font: inherit;
-  color: inherit;
-  cursor: pointer;
-  user-select: none;
 }
-.os-sort-btn:focus-visible {
-  outline: 2px solid var(--color-accent);
-  outline-offset: 2px;
-  border-radius: 4px;
+
+.os-sort-btn {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.os-sort-btn:hover,
+.os-sort-icon.active {
+  color: var(--workspace-accent);
 }
 
 .os-sort-icon {
-  font-size: 14px;
-  opacity: 0.35;
+  font-size: 13px;
+  opacity: 0.6;
 }
 
 .os-sort-icon.active {
   opacity: 1;
-  color: var(--color-accent);
-}
-
-/* 行 hover */
-.os-folder,
-.os-file {
-  cursor: default;
-}
-
-.os-folder:hover,
-.os-file:hover {
-  background: var(--color-bg-hover);
 }
 
 .os-folder {
   cursor: pointer;
 }
 
-/* ============ 拖拽移动视觉反馈 ============ */
-/* 正在被拖动的文件行：半透明 + 虚线轮廓 */
+.os-folder:hover,
+.os-file:not(.is-inspected):hover {
+  background: var(--workspace-canvas);
+}
+
 .os-file.dragging {
   opacity: 0.4;
-  outline: 1px dashed var(--color-accent);
+  outline: 1px dashed var(--workspace-accent);
   outline-offset: -1px;
 }
-/* 拖拽悬停的文件夹行：高亮提示可放置 */
+
 .os-folder.drag-over {
-  background: var(--color-accent-soft) !important;
-  outline: 2px dashed var(--color-accent);
+  background: var(--workspace-selected);
+  outline: 2px dashed var(--workspace-accent);
   outline-offset: -2px;
 }
-/* 可拖动的文件行使用抓取光标提示 */
+
 .os-file[draggable='true'] {
   cursor: grab;
 }
+
 .os-file[draggable='true']:active {
   cursor: grabbing;
 }
 
-/* 单元格 */
 .os-cell {
   min-width: 0;
 }
@@ -368,29 +345,19 @@ const emit = defineEmits<{
 .os-name {
   display: flex;
   align-items: center;
-  gap: 10px;
-  min-width: 0;
-}
-
-.os-folder-icon {
-  font-size: 22px;
-  color: var(--color-warning);
-  flex-shrink: 0;
+  gap: 8px;
 }
 
 .os-name-block {
-  min-width: 0;
   display: flex;
   flex-direction: column;
+  align-items: start;
   gap: 3px;
+  min-width: 0;
 }
 
 .os-name-text {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-weight: 450;
+  max-width: 100%;
 }
 
 .os-name-sub {
@@ -400,62 +367,39 @@ const emit = defineEmits<{
   flex-wrap: wrap;
 }
 
-.os-kind-tag {
-  flex-shrink: 0;
+.os-name-sub:empty {
+  display: none;
 }
 
 .os-tag-click {
-  cursor: pointer;
   display: inline-flex;
-}
-
-.os-mono {
-  font-family: var(--font-mono);
-  font-size: 13px;
-  font-variant-numeric: tabular-nums;
-}
-
-.os-processing-hint {
-  font-size: 12px;
+  cursor: pointer;
 }
 
 .os-deleted-date {
-  font-size: 11px;
-  color: var(--color-warning);
   margin-top: 2px;
+  color: var(--color-warning);
+  font-size: 11px;
 }
 
-/* 行状态 */
 .os-file.row-deleted {
-  background: var(--color-bg-elevated);
-  opacity: 0.85;
+  background: var(--workspace-canvas);
 }
 
 .os-file.row-processing {
-  background: var(--color-accent-soft);
-  opacity: 0.9;
+  color: var(--workspace-muted);
 }
 
-/* 桌面端缩略图可点击预览 */
 .os-thumb-click {
   display: inline-flex;
+  flex: none;
+  border-radius: 7px;
   cursor: pointer;
-  border-radius: var(--radius-sm);
   transition: opacity var(--duration-fast);
 }
+
 .os-thumb-click:hover {
   opacity: 0.8;
 }
 
-/* R9：键盘焦点可见性 —— 仅 :focus-visible 生效，不影响鼠标点击体验 */
-.os-row:focus-visible {
-  outline: 2px solid var(--color-accent, var(--td-brand-color, #4d7cfe));
-  outline-offset: -2px;
-  border-radius: var(--radius-sm);
-}
-.os-thumb-click:focus-visible,
-.os-tag-click:focus-visible {
-  outline: 2px solid var(--color-accent, var(--td-brand-color, #4d7cfe));
-  outline-offset: 1px;
-}
 </style>

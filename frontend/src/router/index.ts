@@ -72,7 +72,7 @@ const routes: RouteRecordRaw[] = [
     children: [
       {
         path: '',
-        redirect: '/dashboard',
+        redirect: '/files',
       },
       {
         path: 'dashboard',
@@ -252,7 +252,7 @@ router.beforeEach(async (to, _from, next) => {
       return;
     }
 
-    // 步骤 5：页面权限校验（与桌面侧栏、移动抽屉共用唯一权限表）
+    // 步骤 5：页面权限校验（与工作台导航共用唯一权限表）
     const requiredRoles = PAGE_ROLES[to.path]
       ?? (to.meta.superAdmin ? PAGE_ROLES['/admin/config'] : undefined)
       ?? (to.meta.admin ? PAGE_ROLES['/admin'] : undefined);

@@ -1,6 +1,7 @@
 <template>
   <div
     class="filelist-page"
+    :class="{ 'has-inspector': inlinePanels && (inspectedFile || inlineTransfers), 'has-batch-selection': selectedFileIds.length > 0 }"
     @dragenter="handlePageDragEnter"
     @dragover="handlePageDragOver"
     @dragleave="handlePageDragLeave"
@@ -15,167 +16,217 @@
       </div>
     </div>
 
-    <!-- ① 地址栏：文件路径 + 新建文件夹 / 上传（M6 拆出为展示组件） -->
-    <FileListAddressBar
-      :current-folder-id="folderStore.currentFolderId"
-      :breadcrumb="folderStore.breadcrumb"
-      :drag-over-folder-id="dragOverFolderId"
-      :root-drop-target="ROOT_DROP_TARGET"
-      :show-mobile-back="isMobile && folderStore.currentFolderId !== null"
-      :parent-folder-id="parentFolderId"
-      @navigate="onFolderNavigate"
-      @create-folder="openCreateFolderDialog"
-      @upload="showUploadModal = true"
-      @folder-drag-over="onFolderDragOver"
-      @folder-drag-leave="onFolderDragLeave"
-      @drop-on-folder="onDropOnFolder"
-    />
+    <aside v-if="inlinePanels" class="workspace-directory-rail">
+      <FileWorkspaceDirectory v-bind="directoryProps" :dismissible="false" v-on="directoryEvents" />
+    </aside>
 
-    <!-- ② 工具栏：搜索 + 标签（M6 拆出为展示组件） -->
-    <FileListToolbar
-      v-model:search="search"
-      :tag-button-label="tagButtonLabel"
-      @search="handleSearch"
-      @clear="handleClearSearch"
-      @manage-tags="showTagManager = true"
-    />
+    <div class="workspace-files">
+      <!-- ① 地址栏：文件路径 + 新建文件夹 / 上传（M6 拆出为展示组件） -->
+      <FileListAddressBar
+        :current-folder-id="folderStore.currentFolderId"
+        :breadcrumb="folderStore.breadcrumb"
+        :drag-over-folder-id="dragOverFolderId"
+        :root-drop-target="ROOT_DROP_TARGET"
+        :show-mobile-back="isMobile && folderStore.currentFolderId !== null"
+        :parent-folder-id="parentFolderId"
+        :folder-name="folderStore.currentFolderId ? folderStore.currentFolderName : '全部文件'"
+        :folder-count="folderLoading || listError ? undefined : subfoldersInCurrentFolder.length"
+        :file-count="folderLoading || listError ? undefined : fileStore.total"
+        :show-directory-button="!inlinePanels"
+        :directory-open="!inlinePanels && directoryOpen"
+        @navigate="onFolderNavigate"
+        @open-directory="directoryOpen = !directoryOpen"
+        @create-folder="openCreateFolderDialog"
+        @upload="showUploadModal = true"
+        @folder-drag-over="onFolderDragOver"
+        @folder-drag-leave="onFolderDragLeave"
+        @drop-on-folder="onDropOnFolder"
+      />
 
-    <!-- ③④⑤ 批量操作栏 / 已选标签筛选 / Markdown 结果（M6 拆出为展示组件） -->
-    <FileListBatchActions
-      v-model:markdown="markdownResult"
-      :selected-count="selectedFileIds.length"
-      :image-count="selectedImages.length"
-      :busy="isBatchDeleting"
-      :tag-filters="filteredTagItems"
-      @convert-markdown="convertToMarkdown"
-      @copy-links="copyDownloadLinks"
-      @batch-tag="openBatchTagDialog"
-      @move="openMoveDialogForFiles()"
-      @batch-delete="openBatchDeleteDialog"
-      @clear-selection="clearSelection"
-      @remove-tag="removeTagFilter"
-      @clear-tags="clearTagFilters"
-      @copy-markdown="copyMarkdown"
-    />
+      <!-- ② 工具栏：搜索 + 标签（M6 拆出为展示组件） -->
+      <FileListToolbar
+        v-model:search="search"
+        :tag-button-label="tagButtonLabel"
+        @search="handleSearch"
+        @clear="handleClearSearch"
+        @manage-tags="showTagManager = true"
+      />
 
-    <!-- ⑥ 空状态：当前文件夹下既无文件也无子文件夹 -->
-    <div v-if="folderLoading" class="fl-loading-state">
-      <t-loading class="fl-loading" text="加载当前文件夹..." />
-    </div>
-    <div v-else-if="listError" class="fl-error-state">
-      <p>文件列表加载失败，请稍后重试。</p>
-      <t-button size="small" variant="outline" @click="refetchFiles">重试</t-button>
-    </div>
-    <div
-      v-else-if="fileStore.files.length === 0 && subfoldersInCurrentFolder.length === 0 && !fileStore.loading && !cursorLoading"
-      class="upload-zone"
-      @click="!consumeLongPressClick() && (showUploadModal = true)"
-      @contextmenu.prevent="openBlankCtxMenu"
-      @touchstart="handleTouchStart($event, 'blank')"
-      @touchmove="handleTouchMove"
-      @touchend="handleTouchEnd"
-    >
-      <t-icon name="folder-add" class="empty-upload-icon" />
-      <h3>拖拽文件到此处，或点击上传</h3>
-      <p class="empty-upload-hint">支持图片、PDF、ZIP 等格式，单文件最大限制见系统配置</p>
-    </div>
+      <!-- ③④⑤ 批量操作栏 / 已选标签筛选 / Markdown 结果（M6 拆出为展示组件） -->
+      <FileListBatchActions
+        v-model:markdown="markdownResult"
+        :selected-count="selectedFileIds.length"
+        :image-count="selectedImages.length"
+        :busy="isBatchDeleting"
+        :tag-filters="filteredTagItems"
+        @convert-markdown="convertToMarkdown"
+        @copy-links="copyDownloadLinks"
+        @batch-tag="openBatchTagDialog"
+        @move="openMoveDialogForFiles()"
+        @batch-delete="openBatchDeleteDialog"
+        @clear-selection="clearSelection"
+        @remove-tag="removeTagFilter"
+        @clear-tags="clearTagFilters"
+        @copy-markdown="copyMarkdown"
+      />
 
-    <!-- ⑦ OS 风格统一列表：文件夹与文件混排（文件夹在前） -->
-    <t-loading
-      v-if="(fileStore.loading || cursorLoading) && displayFiles.length === 0 && subfoldersInCurrentFolder.length === 0"
-      class="fl-loading"
-    />
-    <div
-      v-else-if="!folderLoading && !listError && (displayFiles.length > 0 || subfoldersInCurrentFolder.length > 0)"
-      class="os-list card"
-      :class="{ 'is-refreshing': refreshing }"
-      @contextmenu.prevent="openBlankCtxMenu"
-    >
-      <!-- G11-12：搜索/排序重拉时保留旧列表并叠加半透明 loading，避免列表闪空 -->
-      <div v-if="refreshing" class="os-refresh-overlay">
-        <t-loading size="small" text="正在刷新..." />
+      <!-- ⑥ 空状态：当前文件夹下既无文件也无子文件夹 -->
+      <div v-if="folderLoading" class="fl-loading-state">
+        <t-loading class="fl-loading" text="加载当前文件夹..." />
       </div>
-      <!-- 桌面端：表格式列表 -->
-      <div v-if="!isMobile" class="os-list-scroll">
-        <div class="os-list-inner">
-          <!-- 表头 + 文件夹行 + 文件行（M6 拆出为展示组件） -->
-          <FileListDesktopRows
-            :subfolders="subfoldersInCurrentFolder"
-            :files="displayFiles"
-            :selected-ids="selectedFileIds"
-            :is-all-selected="isAllSelected"
-            :is-indeterminate="isIndeterminate"
-            :busy="isBatchDeleting"
-            :sort-by="sortBy"
-            :sort-order="sortOrder"
-            :drag-over-folder-id="dragOverFolderId"
-            :dragging-file-ids="draggingFileIds"
-            :thumbnail-context="thumbnailContext"
-            @toggle-sort="toggleSort"
-            @toggle-select-all="toggleSelectAll"
-            @file-select="toggleFileSelect"
-            @folder-open="onFolderOpen"
-            @folder-ctxmenu="openFolderCtxMenu"
-            @file-ctxmenu="openFileCtxMenu"
-            @touch-start="handleTouchStart"
-            @touch-move="handleTouchMove"
-            @touch-end="handleTouchEnd"
-            @folder-drag-over="onFolderDragOver"
-            @folder-drag-leave="onFolderDragLeave"
-            @drop-on-folder="onDropOnFolder"
-            @file-drag-start="onFileDragStart"
-            @file-drag-end="onFileDragEnd"
-            @download="downloadFile"
-            @preview="openPreview"
-            @tag-filter="addTagFilter"
-          />
+      <div v-else-if="listError" class="fl-error-state">
+        <p>文件列表加载失败，请稍后重试。</p>
+        <t-button size="small" variant="outline" @click="refetchFiles">重试</t-button>
+      </div>
+      <div v-else-if="(displayedSearch || selectedTagIds.length) && !displayFiles.length && !subfoldersInCurrentFolder.length && !cursorLoading" class="workspace-empty" role="status">
+        <p>未找到匹配的文件</p>
+      </div>
+      <div
+        v-else-if="fileStore.files.length === 0 && subfoldersInCurrentFolder.length === 0 && !fileStore.loading && !cursorLoading"
+        class="upload-zone"
+        @click="!consumeLongPressClick() && (showUploadModal = true)"
+        @contextmenu.prevent="openBlankCtxMenu"
+        @touchstart="handleTouchStart($event, 'blank')"
+        @touchmove="handleTouchMove"
+        @touchend="handleTouchEnd"
+      >
+        <t-icon name="folder-add" class="empty-upload-icon" />
+        <h3>拖拽文件到此处，或点击上传</h3>
+        <p class="empty-upload-hint">支持图片、PDF、ZIP 等格式，单文件最大限制见系统配置</p>
+      </div>
 
-          <!-- 无限滚动哨兵 -->
-          <div ref="scrollSentinel" class="os-sentinel">
-            <t-loading v-if="cursorLoading" size="small" text="加载中..." />
-            <template v-else-if="loadMoreError">
-              <span class="os-muted">更多文件加载失败</span>
-              <t-button size="small" variant="outline" class="os-sentinel-more" @click="retryLoadMore">重试</t-button>
-            </template>
-            <template v-else-if="loadLimitExceeded">
-              <span class="os-muted">已达加载上限 {{ fileStore.files.length }} 条，仍有更多文件</span>
-              <t-button size="small" variant="outline" class="os-sentinel-more" @click="continueLoadMore">继续加载</t-button>
-            </template>
-            <span v-else-if="!hasMore" class="os-muted">已加载全部 {{ fileStore.total }} 个文件</span>
+      <!-- ⑦ OS 风格统一列表：文件夹与文件混排（文件夹在前） -->
+      <t-loading
+        v-if="(fileStore.loading || cursorLoading) && displayFiles.length === 0 && subfoldersInCurrentFolder.length === 0"
+        class="fl-loading"
+      />
+      <div
+        v-else-if="!folderLoading && !listError && (displayFiles.length > 0 || subfoldersInCurrentFolder.length > 0)"
+        class="os-list"
+        :class="{ 'is-refreshing': refreshing }"
+        @contextmenu.prevent="openBlankCtxMenu"
+      >
+        <!-- G11-12：搜索/排序重拉时保留旧列表并叠加半透明 loading，避免列表闪空 -->
+        <div v-if="refreshing" class="os-refresh-overlay">
+          <t-loading size="small" text="正在刷新..." />
+        </div>
+        <!-- 桌面端：表格式列表 -->
+        <div v-if="!isMobile" class="os-list-scroll">
+          <div class="os-list-inner">
+            <!-- 表头 + 文件夹行 + 文件行（M6 拆出为展示组件） -->
+            <FileListDesktopRows
+              :subfolders="subfoldersInCurrentFolder"
+              :files="displayFiles"
+              :selected-ids="selectedFileIds"
+              :is-all-selected="isAllSelected"
+              :is-indeterminate="isIndeterminate"
+              :busy="isBatchDeleting"
+              :sort-by="sortBy"
+              :sort-order="sortOrder"
+              :drag-over-folder-id="dragOverFolderId"
+              :dragging-file-ids="draggingFileIds"
+              :thumbnail-context="thumbnailContext"
+              :inspected-file-id="inlineTransfers ? null : inspectedFileId"
+              @toggle-sort="toggleSort"
+              @toggle-select-all="toggleSelectAll"
+              @file-select="toggleFileSelect"
+              @folder-open="onFolderOpen"
+              @folder-ctxmenu="openFolderCtxMenu"
+              @file-ctxmenu="openFileCtxMenu"
+              @touch-start="handleTouchStart"
+              @touch-move="handleTouchMove"
+              @touch-end="handleTouchEnd"
+              @folder-drag-over="onFolderDragOver"
+              @folder-drag-leave="onFolderDragLeave"
+              @drop-on-folder="onDropOnFolder"
+              @file-drag-start="onFileDragStart"
+              @file-drag-end="onFileDragEnd"
+              @download="downloadFile"
+              @preview="openPreview"
+              @inspect="inspectFile"
+              @tag-filter="addTagFilter"
+            />
           </div>
         </div>
-      </div>
 
-      <!-- 移动端：文件夹行 + 文件卡片（M6 拆出为展示组件） -->
-      <FileListMobileList
-        v-else
-        :subfolders="subfoldersInCurrentFolder"
-        :files="displayFiles"
-        :selectable-count="selectableFiles.length"
-        :selected-ids="selectedFileIds"
-        :is-all-selected="isAllSelected"
-        :is-indeterminate="isIndeterminate"
-        :busy="isBatchDeleting"
-        :is-admin="isAdmin"
-        :thumbnail-context="thumbnailContext"
-        @toggle-select-all="toggleSelectAll"
-        @folder-click="onMobileFolderClick"
-        @folder-ctxmenu="openFolderCtxMenu"
-        @file-ctxmenu="openFileCtxMenu"
-        @touch-start="handleTouchStart"
-        @touch-move="handleTouchMove"
-        @touch-end="handleTouchEnd"
-        @file-select="toggleFileSelect"
-        @tag-filter="addTagFilter"
-        @copy-link="copyLink"
-        @preview="openPreview"
-        @download="downloadFile"
-        @tag-editor="openTagEditor"
-        @delete="handleDelete"
-        @restore="handleRestore"
-        @force-delete="handleForceDelete"
-      />
+        <!-- 移动端：文件夹行 + 文件卡片（M6 拆出为展示组件） -->
+        <FileListMobileList
+          v-else
+          :subfolders="subfoldersInCurrentFolder"
+          :files="displayFiles"
+          :selectable-count="selectableFiles.length"
+          :selected-ids="selectedFileIds"
+          :is-all-selected="isAllSelected"
+          :is-indeterminate="isIndeterminate"
+          :busy="isBatchDeleting"
+          :is-admin="isAdmin"
+          :thumbnail-context="thumbnailContext"
+          :inspected-file-id="inspectedFileId"
+          @toggle-select-all="toggleSelectAll"
+          @folder-click="onMobileFolderClick"
+          @folder-ctxmenu="openFolderCtxMenu"
+          @file-ctxmenu="openFileCtxMenu"
+          @touch-start="handleTouchStart"
+          @touch-move="handleTouchMove"
+          @touch-end="handleTouchEnd"
+          @file-select="toggleFileSelect"
+          @tag-filter="addTagFilter"
+          @copy-link="copyLink"
+          @preview="openPreview"
+          @inspect="inspectFile"
+          @download="downloadFile"
+          @tag-editor="openTagEditor"
+          @delete="handleDelete"
+          @restore="handleRestore"
+          @force-delete="handleForceDelete"
+        />
+        <div ref="scrollSentinel" class="os-sentinel">
+          <t-loading v-if="cursorLoading" size="small" text="加载中..." />
+          <template v-else-if="loadMoreError">
+            <span class="os-muted">更多文件加载失败</span>
+            <t-button size="small" variant="outline" class="os-sentinel-more" @click="retryLoadMore">重试</t-button>
+          </template>
+          <template v-else-if="loadLimitExceeded">
+            <span class="os-muted">已达加载上限 {{ fileStore.files.length }} 条，仍有更多文件</span>
+            <t-button size="small" variant="outline" class="os-sentinel-more" @click="continueLoadMore">继续加载</t-button>
+          </template>
+        </div>
+      </div>
     </div>
+
+    <aside v-if="inlinePanels && inspectedFile && !inlineTransfers" class="workspace-details-rail">
+      <FileWorkspaceDetails :file="inspectedFile" :thumbnail-context="thumbnailContext" v-on="detailEvents" />
+    </aside>
+    <div v-if="inlinePanels" v-show="inlineTransfers" ref="transferTarget" class="workspace-details-rail" />
+
+    <FileWorkspaceDrawer
+      id="file-workspace-directory"
+      label="文件夹"
+      :open="!inlinePanels && directoryOpen"
+      placement="left"
+      @close="directoryOpen = false"
+    >
+      <FileWorkspaceDirectory
+        v-if="!inlinePanels && directoryOpen"
+        v-bind="directoryProps"
+        dismissible
+        v-on="directoryEvents"
+      />
+    </FileWorkspaceDrawer>
+    <FileWorkspaceDrawer
+      id="file-workspace-detail"
+      label="文件详情"
+      :open="!inlinePanels && Boolean(inspectedFile)"
+      :placement="isMobile ? 'bottom' : 'right'"
+      @close="closeFileDetails"
+    >
+      <FileWorkspaceDetails
+        v-if="!inlinePanels && inspectedFile"
+        :file="inspectedFile"
+        :thumbnail-context="thumbnailContext"
+        v-on="detailEvents"
+      />
+    </FileWorkspaceDrawer>
 
     <!-- 上传弹窗 -->
     <UploadModal :visible="showUploadModal" :initial-files="dropFiles" :initial-drop-result="dropCollected" :folder-id="folderStore.currentFolderId" @close="handleUploadModalClose" @uploaded="onUploaded" @drop-consumed="releaseDropPayload" />
@@ -304,7 +355,7 @@
 </template>
 
 <script setup lang="ts">
-import { useTemplateRef, ref, onMounted, computed, reactive, watch, onUnmounted } from 'vue';
+import { useTemplateRef, ref, onMounted, computed, reactive, watch, onBeforeUnmount, onUnmounted, inject, nextTick } from 'vue';
 import { usePageVisibility } from '@/composables/usePageVisibility';
 import { useRouter, useRoute } from 'vue-router';
 import MessagePlugin from '@/utils/message';
@@ -315,7 +366,8 @@ import { getErrorMessage, getDownloadErrorMessage } from '../../utils/error';
 import { formatDate } from '@/utils/format';
 import { useDownloadsStore } from '../../stores/downloads';
 import { useFileListQuery } from '../../composables/useFileListQuery';
-import { useMobile } from '../../composables/useMobile';
+import { useBreakpoint } from '../../composables/useMobile';
+import { WORKSPACE_TRANSFERS } from '@/composables/workspaceTransfers';
 import UploadModal from '../../components/UploadModal.vue';
 import { collectFromDrop } from '../../utils/folder-traverse';
 import type { DropCollectResult } from '../../utils/folder-traverse';
@@ -327,6 +379,9 @@ import FileListToolbar from './FileListToolbar.vue';
 import FileListBatchActions from './FileListBatchActions.vue';
 import FileListDesktopRows from './FileListDesktopRows.vue';
 import FileListMobileList from './FileListMobileList.vue';
+import FileWorkspaceDirectory from './FileWorkspaceDirectory.vue';
+import FileWorkspaceDetails from './FileWorkspaceDetails.vue';
+import FileWorkspaceDrawer from './FileWorkspaceDrawer.vue';
 // M6 拆分：行判定（可预览 / 可操作 / 行类名 / 冷静期常量）与两个列表组件共用
 import { FORCE_DELETE_WAIT_MS, canPreviewFile, isFileActionable } from '../../utils/file-row-predicates';
 import FolderCreateDialog from '../../components/folder/FolderCreateDialog.vue';
@@ -355,6 +410,28 @@ const thumbnailContext = computed(() => `u:${authStore.user?.id ?? ''}`);
 const router = useRouter();
 const route = useRoute();
 const { isPageVisible } = usePageVisibility();
+const { width, isMobile } = useBreakpoint();
+const inlinePanels = computed(() => width.value >= 960);
+const directoryOpen = ref(false);
+const directoryLoadError = ref(false);
+const inspectedFileId = ref<string | null>(null);
+let detailTrigger: HTMLElement | null = null;
+const transferPlacement = inject(WORKSPACE_TRANSFERS, null);
+const transferTarget = useTemplateRef<HTMLElement>('transferTarget');
+const inlineTransfers = computed(() => inlinePanels.value && transferPlacement?.visible.value === true);
+
+if (transferPlacement) {
+  watch(transferTarget, (element, previous) => {
+    if (element || transferPlacement.target.value === previous) transferPlacement.target.value = element;
+  }, { flush: 'post' });
+  onBeforeUnmount(() => {
+    if (transferPlacement.target.value === transferTarget.value) transferPlacement.target.value = null;
+  });
+}
+
+watch(inlinePanels, (inline) => {
+  if (inline) directoryOpen.value = false;
+});
 
 /** 查询域（搜索 / 排序 / 标签筛选 / 游标加载 / URL 同步） */
 const scrollSentinel = useTemplateRef<HTMLElement>('scrollSentinel');
@@ -365,7 +442,6 @@ const {
   selectedTagIds,
   displayFiles,
   displayedSearch,
-  hasMore,
   cursorLoading,
   folderLoading,
   refreshing,
@@ -387,6 +463,49 @@ const {
   clearTagFilters,
   handleTagManagerFilter,
 } = useFileListQuery({ fileStore, folderStore, route, router, scrollSentinel });
+
+const inspectedFile = computed(() => inspectedFileId.value
+  ? displayFiles.value.find((file) => file.id === inspectedFileId.value) ?? null
+  : null);
+
+watch(inspectedFile, (file) => {
+  if (!file) {
+    inspectedFileId.value = null;
+    detailTrigger = null;
+  }
+});
+
+watch(() => authStore.user?.id, () => {
+  inspectedFileId.value = null;
+  directoryOpen.value = false;
+});
+
+function inspectFile(file: FileItem) {
+  if (isMobile.value && consumeLongPressClick()) return;
+  if (transferPlacement) transferPlacement.visible.value = false;
+  detailTrigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  inspectedFileId.value = file.id;
+}
+
+function closeFileDetails(restoreFocus = true) {
+  const trigger = detailTrigger;
+  inspectedFileId.value = null;
+  detailTrigger = null;
+  if (restoreFocus && trigger?.isConnected) void nextTick(() => trigger.focus());
+}
+
+const detailEvents = {
+  close: () => closeFileDetails(),
+  preview: (file: FileItem) => {
+    if (!inlinePanels.value) closeFileDetails(false);
+    openPreview(file);
+  },
+  download: downloadFile,
+  share: (file: FileItem) => {
+    if (!inlinePanels.value) closeFileDetails(false);
+    onFileShare(file);
+  },
+};
 
 const showUploadModal = ref(false);
 const isDraggedOver = ref(false);
@@ -523,6 +642,8 @@ watch(() => route.query.folder, async (raw) => {
 
   // 必须在 openFolder 前推进代际：目录切换一开始就清空旧列表和选择。
   selectedFileIds.value = [];
+  closeFileDetails(false);
+  directoryOpen.value = false;
   const generation = beginFolderTransition();
   const valid = await folderStore.openFolder(targetId);
   if (generation !== getFileListGeneration()) return;
@@ -877,8 +998,6 @@ const isAdmin = computed(() => {
   const role = authStore.user?.role || fileStore.currentUserRole;
   return role === 'admin' || role === 'super_admin';
 });
-
-const isMobile = useMobile();
 
 watch(() => authStore.user?.role, (role) => {
   if (role) fileStore.setCurrentUserRole(role);
@@ -1487,9 +1606,43 @@ async function confirmBatchTags() {
   applyFilters();
 }
 
-onMounted(async () => {
-  try { await tagStore.fetchTags(); } catch { /* 标签加载失败不阻塞页面 */ }
-  try { await folderStore.fetchTree(); } catch { /* 文件夹树加载失败不阻塞页面 */ }
+const directoryProps = computed(() => ({
+  folders: folderStore.tree,
+  breadcrumb: folderStore.breadcrumb,
+  currentFolderId: folderStore.currentFolderId,
+  dragOverFolderId: dragOverFolderId.value,
+  rootDropTarget: ROOT_DROP_TARGET,
+  loading: folderStore.loading,
+  loadError: directoryLoadError.value,
+}));
+
+const directoryEvents = {
+  navigate: (folderId: string | null) => {
+    directoryOpen.value = false;
+    onFolderNavigate(folderId);
+  },
+  close: () => { directoryOpen.value = false; },
+  retry: loadFolderTree,
+  'folder-ctxmenu': openFolderCtxMenu,
+  'folder-drag-over': onFolderDragOver,
+  'folder-drag-leave': onFolderDragLeave,
+  'drop-on-folder': (event: DragEvent, target: string) => {
+    if (isInternalFileDrag(event)) onDropOnFolder(event, target);
+  },
+};
+
+async function loadFolderTree() {
+  directoryLoadError.value = false;
+  try {
+    await folderStore.fetchTree();
+  } catch {
+    directoryLoadError.value = true;
+  }
+}
+
+onMounted(() => {
+  void tagStore.fetchTags().catch(() => {});
+  void loadFolderTree();
   // 文件列表初始加载由上方 route.query.folder watch（immediate）驱动，此处不重复加载
 });
 
@@ -1507,20 +1660,59 @@ onUnmounted(() => {
 <style scoped>
 .filelist-page {
   position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-height: calc(100vh - var(--workspace-header-height));
+  min-height: calc(100dvh - var(--workspace-header-height));
+  background: var(--workspace-surface);
+  color: var(--workspace-text);
 }
 
-/* 地址栏 / 工具栏 / 批量操作栏 / 标签筛选 / Markdown 结果区样式
-   已随 FileListAddressBar.vue、FileListToolbar.vue、FileListBatchActions.vue 迁移（M6 拆分） */
+.workspace-files { min-width: 0; padding: 16px clamp(12px, 2.5vw, 32px) 20px; }
+.workspace-directory-rail, .workspace-details-rail { min-width: 0; background: var(--workspace-canvas); }
+.workspace-directory-rail { border-inline-end: 1px solid var(--workspace-border); }
+.workspace-details-rail { border-inline-start: 1px solid var(--workspace-border); }
+
+@media (min-width: 960px) {
+  .filelist-page {
+    --directory-width: clamp(160px, 16vw, 216px);
+    grid-template-columns: var(--directory-width) minmax(0, 1fr);
+  }
+
+  .filelist-page.has-inspector {
+    grid-template-columns: var(--directory-width) minmax(0, 1fr) clamp(238px, 25vw, 320px);
+  }
+
+  .workspace-files { padding-top: 24px; }
+
+  .workspace-directory-rail > .workspace-directory,
+  .workspace-details-rail > .workspace-details {
+    position: sticky;
+    top: var(--workspace-header-height);
+    max-height: calc(100dvh - var(--workspace-header-height));
+    overflow-y: auto;
+  }
+}
+
+@media (max-width: 768px) {
+  .filelist-page {
+    min-height: calc(100dvh - var(--workspace-header-height) - var(--workspace-mobile-nav-height) - env(safe-area-inset-bottom, 0px));
+  }
+
+  .has-batch-selection .workspace-files { padding-bottom: 80px; }
+}
 
 /* ============ 空状态 ============ */
+.workspace-empty { padding: 40px 12px; color: var(--workspace-muted); text-align: center; }
+
 .empty-upload-icon {
   font-size: 48px;
-  color: var(--text-tertiary);
+  color: var(--workspace-accent);
   margin-bottom: 16px;
 }
 
 .empty-upload-hint {
-  color: var(--text-secondary);
+  color: var(--workspace-muted);
   margin-top: 8px;
 }
 
@@ -1545,7 +1737,7 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: color-mix(in srgb, var(--bg-container, #0f1420) 72%, transparent);
+  background: color-mix(in srgb, var(--workspace-surface) 72%, transparent);
   backdrop-filter: blur(1px);
   pointer-events: none;
 }
@@ -1572,31 +1764,20 @@ onUnmounted(() => {
   gap: 8px;
 }
 
+.os-sentinel:empty { min-height: 1px; padding: 0; }
+
 .os-sentinel-more {
   margin-left: 4px;
 }
 
 /* 移动端列表（.os-mobile / .mobile-*）样式已随 FileListMobileList.vue 迁移（M6 拆分） */
 
-/* ============ 分页 ============ */
-.fl-pagination {
-  margin-top: 16px;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  gap: 16px;
-}
-
-.fl-pagesize {
-  width: 130px;
-}
-
 /* ============ 拖拽覆盖层 ============ */
 .drop-overlay {
   position: absolute;
   inset: 0;
-  background: var(--color-accent-soft);
-  border: 3px dashed var(--color-accent);
+  background: color-mix(in srgb, var(--workspace-selected) 85%, transparent);
+  border: 3px dashed var(--workspace-accent);
   border-radius: var(--radius-lg);
   z-index: 100;
   display: flex;
@@ -1607,7 +1788,7 @@ onUnmounted(() => {
 
 .drop-overlay-content {
   text-align: center;
-  color: var(--color-accent);
+  color: var(--workspace-accent);
 }
 
 .drop-overlay-icon {

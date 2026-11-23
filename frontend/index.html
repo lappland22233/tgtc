@@ -4,8 +4,8 @@
     <meta charset="UTF-8" />
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📦</text></svg>" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#0A0E17" />
-    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#F6F5EF" />
+    <meta name="color-scheme" content="light dark" />
     <!-- 不向跨源携带 Referer，防止分享 token 等凭证通过 referrer 泄露（G13-05） -->
     <meta name="referrer" content="no-referrer" />
     <title>文件分发系统</title>
@@ -25,7 +25,7 @@
       content="default-src 'self'; script-src 'self' https://challenges.cloudflare.com https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: blob:; connect-src 'self' https://challenges.cloudflare.com https://cloudflareinsights.com https://*.cloudflareinsights.com; frame-src 'self' https://challenges.cloudflare.com; media-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'"
     />
 
-    <!-- 首屏深色背景，避免白屏闪烁；使用静态文件以避免 Vite HTML 内联 CSS 代理问题。 -->
+    <!-- 首屏使用工作台主题底色；静态样式随系统偏好选择亮色或深色。 -->
     <link rel="stylesheet" href="/critical.css" />
   </head>
   <body>

@@ -1,63 +1,87 @@
 <template>
-  <div class="sidenav">
-    <div class="sidebar-logo">
-      <h2>
-        <span class="logo-icon" v-html="icons.logo"></span>
-        <span class="sidebar-title" :title="siteTitle">{{ siteTitle }}</span>
-      </h2>
-    </div>
+  <header class="workspace-appbar">
+    <WorkspaceBrand link="/files" />
 
-    <nav class="sidebar-nav">
-      <div class="nav-section">工作区</div>
+    <nav class="workspace-tabs" aria-label="工作台">
       <router-link
-        v-for="item in workspaceNav"
-        :key="item.to"
-        :to="item.to"
-        class="nav-item"
-        :class="{ active: isActive(item.to) }"
-        @click="emit('navigate')"
+        v-for="tab in workspaceTabs"
+        :key="tab.to"
+        :to="tab.to"
+        class="workspace-tab"
+        exact-active-class="workspace-tab--active"
       >
-        <span class="nav-icon" v-html="item.icon"></span>
-        {{ item.label }}
+        <t-icon :name="tab.icon" class="workspace-tab-icon" size="18px" aria-hidden="true" />
+        <span>{{ tab.label }}</span>
       </router-link>
+    </nav>
 
-      <template v-if="visibleAdminNav.length > 0">
-        <div class="nav-section">管理后台</div>
+    <div class="workspace-app-actions">
+      <slot />
+      <button
+        ref="accountTrigger"
+        class="workspace-account-trigger"
+        type="button"
+        aria-label="账户"
+        aria-haspopup="dialog"
+        aria-controls="workspace-account"
+        :aria-expanded="accountOpen"
+        @click="openAccount"
+      >
+        <span class="workspace-account-avatar" aria-hidden="true">{{ avatarLetter }}</span>
+      </button>
+    </div>
+  </header>
+
+  <dialog
+    id="workspace-account"
+    ref="accountDialog"
+    class="workspace-account"
+    aria-labelledby="workspace-account-title"
+    @click.self="closeAccount"
+    @close="onAccountClose"
+  >
+    <div class="workspace-account-content">
+      <div class="workspace-account-header">
+        <h2 id="workspace-account-title">账户</h2>
+        <button class="workspace-account-close" type="button" aria-label="关闭账户" @click="closeAccount">
+          <t-icon name="close" size="18px" aria-hidden="true" />
+        </button>
+      </div>
+      <div class="workspace-account-profile">
+        <span class="workspace-account-avatar" aria-hidden="true">{{ avatarLetter }}</span>
+        <div class="workspace-account-identity">
+          <p class="workspace-account-email" :title="email">{{ email }}</p>
+          <p class="workspace-account-role">{{ roleText }}</p>
+        </div>
+      </div>
+      <router-link to="/settings" class="workspace-account-item" @click="closeAccount">个人设置</router-link>
+
+      <nav v-if="visibleAdminNav.length" class="workspace-admin-nav" aria-labelledby="workspace-admin-heading">
+        <h3 id="workspace-admin-heading">管理后台</h3>
         <router-link
           v-for="item in visibleAdminNav"
           :key="item.to"
           :to="item.to"
-          class="nav-item"
-          :class="{ active: isActive(item.to) }"
-          @click="emit('navigate')"
+          class="workspace-account-item"
+          @click="closeAccount"
         >
-          <span class="nav-icon" v-html="item.icon"></span>
           {{ item.label }}
         </router-link>
-      </template>
-    </nav>
+      </nav>
 
-    <div class="sidebar-footer">
-      <div class="sidebar-user">
-        <div class="sidebar-user-avatar">{{ avatarLetter }}</div>
-        <div class="sidebar-user-info">
-          <div class="sidebar-user-email" :title="email">{{ email }}</div>
-          <div class="sidebar-user-role">{{ roleText }}</div>
-        </div>
-      </div>
-      <t-button variant="outline" theme="danger" size="small" block @click="emit('logout')">
+      <button class="workspace-account-item workspace-account-logout" type="button" @click="logout">
         退出登录
-      </t-button>
+      </button>
     </div>
-  </div>
+  </dialog>
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { useRoute } from 'vue-router';
 import type { UserRole } from '../types/user';
-import { PAGE_ROLES, hasAnyRole } from '../utils/permissions';
-import { usePublicConfigStore } from '../stores/public-config';
+import { getAdminNavGroups } from '@/utils/admin-navigation';
+import WorkspaceBrand from './WorkspaceBrand.vue';
 
 const props = defineProps<{
   role: UserRole;
@@ -66,88 +90,300 @@ const props = defineProps<{
   avatarLetter: string;
 }>();
 
-const emit = defineEmits<{
-  navigate: [];
-  logout: [];
-}>();
+const emit = defineEmits<{ logout: [] }>();
 
 const route = useRoute();
+const accountTrigger = ref<HTMLButtonElement | null>(null);
+const accountDialog = ref<HTMLDialogElement | null>(null);
+const accountOpen = ref(false);
 
-/** 网站标题来自公共配置 store：启动初始化与设置页保存共同维护，桌面 / 移动侧栏自动共用 */
-const siteTitle = computed(() => usePublicConfigStore().siteTitle);
-
-/**
- * 高亮判断：精确匹配或子路由前缀匹配。
- * 例如 /files 会高亮 /files/:id；普通用户仪表盘不会误高亮管理后台页面。
- */
-function isActive(to: string): boolean {
-  return route.path === to || route.path.startsWith(to + '/');
-}
-
-/**
- * 图标统一为 currentColor 描边 SVG，随 nav-item 状态变色。
- *
- * L4 约束（不可放宽）：`v-html` 仅允许渲染下方代码内常量字符串。
- * 严禁把用户输入、接口返回或远程内容传入 `svg()`/`v-html`——一旦来源动态化即构成 XSS。
- * 需要动态图标时改用组件渲染，不得拼接 HTML 字符串。
- */
-const svg = (inner: string) =>
-  `<svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">${inner}</svg>`;
-
-const icons = {
-  logo: svg('<path d="M10 2L17 6v8l-7 4-7-4V6l7-4z"/><path d="M10 10l7-4M10 10v8M10 10L3 6"/>'),
-  dashboard: svg('<rect x="2" y="2" width="7" height="7" rx="1.5"/><rect x="11" y="2" width="7" height="7" rx="1.5"/><rect x="2" y="11" width="7" height="7" rx="1.5"/><rect x="11" y="11" width="7" height="7" rx="1.5"/>'),
-  files: svg('<path d="M2 5.5A1.5 1.5 0 013.5 4H8l2 2h6.5A1.5 1.5 0 0118 7.5v8a1.5 1.5 0 01-1.5 1.5h-13A1.5 1.5 0 012 15.5v-10z"/>'),
-  shares: svg('<circle cx="14" cy="5" r="2.5"/><circle cx="5" cy="10" r="2.5"/><circle cx="14" cy="15" r="2.5"/><path d="M7.2 8.8l4.6-2.6M7.2 11.2l4.6 2.6"/>'),
-  settings: svg('<circle cx="10" cy="10" r="3"/><path d="M10 2v2m0 12v2M2 10h2m12 0h2M4.2 4.2l1.4 1.4m8.8 8.8l1.4 1.4M15.8 4.2l-1.4 1.4M5.6 14.4l-1.4 1.4"/>'),
-  users: svg('<circle cx="7" cy="7" r="3"/><path d="M1 18v-1a4 4 0 014-4h4a4 4 0 014 4v1"/><circle cx="15" cy="7" r="2.5"/><path d="M15 13a4 4 0 014 4v1"/>'),
-  adminFiles: svg('<path d="M5 2h7l4 4v10a2 2 0 01-2 2H5a2 2 0 01-2-2V4a2 2 0 012-2z"/><path d="M12 2v4h4"/><line x1="7" y1="10" x2="13" y2="10"/><line x1="7" y1="13" x2="11" y2="13"/>'),
-  config: svg('<line x1="3" y1="5" x2="17" y2="5"/><line x1="3" y1="10" x2="17" y2="10"/><line x1="3" y1="15" x2="17" y2="15"/><circle cx="7" cy="5" r="1.5" fill="currentColor"/><circle cx="13" cy="10" r="1.5" fill="currentColor"/><circle cx="9" cy="15" r="1.5" fill="currentColor"/>'),
-  accessLogs: svg('<circle cx="10" cy="10" r="8"/><polyline points="10 5 10 10 14 12"/>'),
-  security: svg('<path d="M10 2L3 5.5v4.5c0 4.5 3 8 7 9.5 4-1.5 7-5 7-9.5V5.5L10 2z"/><path d="M7 10l2 2 4-4"/>'),
-  userActivity: svg('<polyline points="2 10 5 10 7 4 10 16 13 8 15 10 18 10"/>'),
-  auditLogs: svg('<rect x="4" y="2" width="12" height="16" rx="2"/><line x1="7" y1="7" x2="13" y2="7"/><line x1="7" y1="10" x2="13" y2="10"/><line x1="7" y1="13" x2="10" y2="13"/>'),
-  telegramAccounts: svg('<path d="M18 3L2 9.4l5.8 2.1L10 18l3-4.1L18 3z"/><path d="M7.8 11.5L18 3"/>'),
-  storageBackends: svg('<ellipse cx="10" cy="4.5" rx="7" ry="2.5"/><path d="M3 4.5v5c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5v-5"/><path d="M3 9.5v5c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5v-5"/>'),
-};
-
-interface NavItem {
-  to: string;
-  label: string;
-  icon: string;
-  roles: readonly UserRole[];
-}
-
-const workspaceNav: NavItem[] = [
-  { to: '/dashboard', label: '仪表盘', icon: icons.dashboard, roles: PAGE_ROLES['/dashboard'] },
-  { to: '/files', label: '我的文件', icon: icons.files, roles: PAGE_ROLES['/files'] },
-  { to: '/shares', label: '我的分享', icon: icons.shares, roles: PAGE_ROLES['/shares'] },
-  { to: '/settings', label: '个人设置', icon: icons.settings, roles: PAGE_ROLES['/settings'] },
+const workspaceTabs = [
+  { to: '/files', label: '文件', icon: 'folder' },
+  { to: '/shares', label: '分享', icon: 'share' },
+  { to: '/dashboard', label: '概览', icon: 'home' },
 ];
 
-const adminNav: NavItem[] = [
-  { to: '/admin/users', label: '用户管理', icon: icons.users, roles: PAGE_ROLES['/admin/users'] },
-  { to: '/admin/files', label: '文件管理', icon: icons.adminFiles, roles: PAGE_ROLES['/admin/files'] },
-  { to: '/admin/access-logs', label: '访问统计', icon: icons.accessLogs, roles: PAGE_ROLES['/admin/access-logs'] },
-  { to: '/admin/security', label: '安全监控', icon: icons.security, roles: PAGE_ROLES['/admin/security'] },
-  { to: '/admin/user-activity', label: '用户活跃', icon: icons.userActivity, roles: PAGE_ROLES['/admin/user-activity'] },
-  { to: '/admin/audit-logs', label: '操作审计', icon: icons.auditLogs, roles: PAGE_ROLES['/admin/audit-logs'] },
-  { to: '/admin/bot-operations', label: 'Bot 收件管理', icon: icons.telegramAccounts, roles: PAGE_ROLES['/admin/bot-operations'] },
-  { to: '/admin/telegram-accounts', label: 'Telegram 账号池', icon: icons.telegramAccounts, roles: PAGE_ROLES['/admin/telegram-accounts'] },
-  { to: '/admin/storage-backends', label: '存储后端', icon: icons.storageBackends, roles: PAGE_ROLES['/admin/storage-backends'] },
-  // 系统配置包含仅超级管理员可读取的缓存配置和仅超级管理员可保存的全局配置，
-  // 因此按“拥有完整页面权限”原则只向超级管理员展示。
-  { to: '/admin/config', label: '系统配置', icon: icons.config, roles: PAGE_ROLES['/admin/config'] },
-];
+const visibleAdminNav = computed(() => getAdminNavGroups(props.role).flatMap(({ links }) => links));
 
-const visibleAdminNav = computed(() => adminNav.filter((item) => hasAnyRole(props.role, item.roles)));
+function openAccount() {
+  const dialog = accountDialog.value;
+  if (!dialog || dialog.open) return;
+  dialog.showModal();
+  accountOpen.value = true;
+}
+
+function closeAccount() {
+  const dialog = accountDialog.value;
+  if (dialog?.open) dialog.close();
+}
+
+function onAccountClose() {
+  accountOpen.value = false;
+  accountTrigger.value?.focus({ preventScroll: true });
+}
+
+function logout() {
+  closeAccount();
+  emit('logout');
+}
+
+watch(() => route.path, closeAccount);
 </script>
 
-<style scoped>
-.sidenav {
+<style>
+.workspace-appbar {
+  position: sticky;
+  z-index: 20;
+  top: 0;
   display: flex;
-  flex-direction: column;
-  height: 100%;
-  min-height: 0;
+  align-items: center;
+  gap: clamp(16px, 2.3vw, 26px);
+  min-height: var(--workspace-header-height);
+  padding-inline: 20px;
+  border-bottom: 1px solid var(--workspace-border);
+  background: var(--workspace-surface);
+}
+
+.workspace-app-actions,
+.workspace-tabs {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.workspace-appbar .workspace-brand {
+  min-height: 44px;
+  max-width: min(28vw, 236px);
+}
+
+.workspace-tabs {
+  align-self: stretch;
+  align-items: stretch;
+  gap: 22px;
+}
+
+.workspace-tab {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--workspace-muted);
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.workspace-tab:hover,
+.workspace-tab--active {
+  color: var(--workspace-accent);
+}
+
+.workspace-tab--active {
+  box-shadow: inset 0 -2px var(--workspace-accent);
+  font-weight: 650;
+}
+
+.workspace-tab-icon {
+  display: none;
+}
+
+.workspace-app-actions {
+  flex: 0 0 auto;
+  gap: 10px;
+  margin-inline-start: auto;
+}
+
+.workspace-account-trigger,
+.workspace-account-close {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--workspace-text);
+  cursor: pointer;
+}
+
+.workspace-account-trigger:hover,
+.workspace-account-close:hover {
+  background: var(--workspace-selected);
+}
+
+.workspace-account-avatar {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: var(--workspace-selected);
+  color: var(--workspace-accent);
+  font-weight: 650;
+}
+
+.workspace-account {
+  position: fixed;
+  inset: var(--workspace-header-height) 20px auto auto;
+  width: min(320px, calc(100vw - 40px));
+  max-height: calc(100dvh - var(--workspace-header-height) - 20px);
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--workspace-border);
+  border-radius: 12px;
+  background: var(--workspace-surface);
+  color: var(--workspace-text);
+  box-shadow: var(--shadow-lg);
+}
+
+.workspace-account::backdrop {
+  background: color-mix(in srgb, var(--workspace-text) 20%, transparent);
+}
+
+.workspace-account-content {
+  padding: 12px;
+}
+
+.workspace-account-header,
+.workspace-account-profile {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding-inline: 8px;
+}
+
+.workspace-account-header {
+  justify-content: space-between;
+}
+
+.workspace-account-header h2 {
+  font-size: 16px;
+}
+
+.workspace-account-profile {
+  min-height: 52px;
+  margin-bottom: 8px;
+}
+
+.workspace-account-identity {
+  min-width: 0;
+}
+
+.workspace-account-email {
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-account-role,
+.workspace-admin-nav h3 {
+  color: var(--workspace-muted);
+  font-size: 12px;
+}
+
+.workspace-admin-nav {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--workspace-border);
+}
+
+.workspace-admin-nav h3 {
+  padding: 4px 8px;
+  font-weight: 650;
+}
+
+.workspace-account-item {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-height: 44px;
+  padding-inline: 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--workspace-text);
+  font: inherit;
+  text-align: start;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.workspace-account-item:hover,
+.workspace-account-item[aria-current="page"] {
+  background: var(--workspace-selected);
+  color: var(--workspace-accent);
+}
+
+.workspace-account-logout {
+  margin-top: 8px;
+  color: var(--color-danger);
+}
+
+.workspace-account-logout:hover {
+  background: var(--color-danger-soft);
+  color: var(--color-danger);
+}
+
+.workspace-appbar :is(a, button):focus-visible,
+.workspace-account :is(a, button):focus-visible {
+  outline: 2px solid var(--workspace-accent);
+  outline-offset: 2px;
+}
+
+@media (max-width: 768px) {
+  .workspace-appbar {
+    gap: 8px;
+    padding-inline: 12px;
+  }
+
+  .workspace-appbar .workspace-brand {
+    max-width: 48vw;
+  }
+
+  .workspace-app-actions {
+    gap: 4px;
+  }
+
+  .workspace-tabs {
+    position: fixed;
+    inset: auto 0 0;
+    justify-content: space-evenly;
+    min-height: calc(var(--workspace-mobile-nav-height) + env(safe-area-inset-bottom, 0px));
+    padding: 0 8px env(safe-area-inset-bottom, 0px);
+    gap: 0;
+    border-top: 1px solid var(--workspace-border);
+    background: var(--workspace-surface);
+  }
+
+  .workspace-tab {
+    flex: 1;
+    flex-direction: column;
+    min-height: 44px;
+    gap: 3px;
+    font-size: 12px;
+  }
+
+  .workspace-tab--active {
+    box-shadow: inset 0 2px var(--workspace-accent);
+  }
+
+  .workspace-tab-icon {
+    display: inline-flex;
+  }
+
+  .workspace-account {
+    inset: auto 0 0;
+    width: 100%;
+    max-width: none;
+    max-height: min(80dvh, 620px);
+    border-radius: 16px 16px 0 0;
+  }
+
+  .workspace-account-content {
+    padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+  }
 }
 </style>

@@ -112,6 +112,24 @@ describe('FileListAddressBar（M6 拆分契约）', () => {
     expect(wrapper.emitted('upload')).toEqual([[]]);
   });
 
+  it('文件夹标题与条目计数独立显示，并提供可访问的目录入口', async () => {
+    const wrapper = mountBar({
+      folderName: '发布素材',
+      folderCount: 1,
+      fileCount: 3,
+      showDirectoryButton: true,
+      directoryOpen: true,
+    });
+
+    expect(wrapper.get('h1').text()).toBe('发布素材');
+    expect(wrapper.get('.fl-folder-count').text()).toBe('1 个文件夹 · 3 个文件');
+
+    const directory = wrapper.get('.fl-directory-toggle');
+    expect(directory.attributes('aria-expanded')).toBe('true');
+    await directory.trigger('click');
+    expect(wrapper.emitted('open-directory')).toEqual([[]]);
+  });
+
   it('移动端返回按钮按 showMobileBack 显隐，点击回传父级 ID', async () => {
     expect(mountBar().find('.fl-mobile-back').exists()).toBe(false);
 

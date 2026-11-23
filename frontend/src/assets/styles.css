@@ -1,19 +1,17 @@
 /* ============================================================
-   FileCloud Design System — Cloudscape Theme
-   Seed Token Architecture · Light/Dark Dual Theme
-   文件分发系统 · 全量设计重构
+   TGTC — 工作台主题与组件基础样式
+   浅色与深色的调色板定义在 workspace.css
    ============================================================ */
 
 /* ============================================================
-   1. SEED TOKENS — Light Theme (default)
-   切换主题仅修改这 6 个种子值，组件样式零改动。
+   1. SEED TOKENS
    ============================================================ */
 :root {
-  --seed-bg: #F2F3F3;
-  --seed-fg: #16191F;
-  --seed-primary: #0972D3;
-  --seed-accent: #033160;
-  --seed-surface: #FFFFFF;
+  --seed-bg: var(--workspace-canvas);
+  --seed-fg: var(--workspace-text);
+  --seed-primary: var(--workspace-accent);
+  --seed-accent: color-mix(in srgb, var(--workspace-accent) 82%, var(--workspace-text));
+  --seed-surface: var(--workspace-surface);
   --seed-radius: 4px;
 
   /* --- Derived: Backgrounds --- */
@@ -22,7 +20,7 @@
   --color-bg-surface: var(--seed-surface);
   --color-bg-overlay: color-mix(in srgb, var(--seed-surface) 96%, var(--seed-fg));
   --color-bg-hover: color-mix(in srgb, var(--seed-primary) 6%, var(--seed-surface));
-  --color-bg-selected: color-mix(in srgb, var(--seed-primary) 10%, var(--seed-surface));
+  --color-bg-selected: var(--workspace-selected);
 
   /* --- Derived: Accent --- */
   --color-accent: var(--seed-primary);
@@ -39,14 +37,14 @@
 
   /* --- Derived: Text --- */
   --text-primary: var(--seed-fg);
-  --text-secondary: color-mix(in srgb, var(--seed-fg) 62%, var(--seed-bg));
-  --text-tertiary: color-mix(in srgb, var(--seed-fg) 42%, var(--seed-bg));
+  --text-secondary: var(--workspace-muted);
+  --text-tertiary: color-mix(in srgb, var(--workspace-muted) 90%, var(--workspace-canvas));
   --text-accent: var(--seed-primary);
   --text-disabled: color-mix(in srgb, var(--seed-fg) 30%, var(--seed-bg));
   --text-placeholder: color-mix(in srgb, var(--seed-fg) 35%, var(--seed-bg));
 
   /* --- Derived: Borders --- */
-  --border-default: color-mix(in srgb, var(--seed-fg) 12%, var(--seed-bg));
+  --border-default: var(--workspace-border);
   --border-strong: color-mix(in srgb, var(--seed-fg) 22%, var(--seed-bg));
   --border-accent: color-mix(in srgb, var(--seed-primary) 35%, transparent);
 
@@ -61,7 +59,7 @@
   --font-body: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
   --font-mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Menlo, monospace;
 
-  /* --- Radii (Cloudscape: sharp geometry) --- */
+  /* --- Radii --- */
   --radius-sm: var(--seed-radius);
   --radius-md: calc(var(--seed-radius) * 2);
   --radius-lg: calc(var(--seed-radius) * 3);
@@ -73,10 +71,6 @@
   --duration-fast: 120ms;
   --duration-normal: 200ms;
   --duration-slow: 320ms;
-
-  /* --- Layout --- */
-  --sidebar-width: 240px;
-  --header-height: 0px;
 
   /* --- Spacing (8px baseline) --- */
   --space-1: 4px;
@@ -101,15 +95,9 @@
 }
 
 /* ============================================================
-   2. DARK THEME — patches only seed tokens + semantic overrides
+   2. DARK THEME — semantic overrides
    ============================================================ */
 [data-theme="dark"] {
-  --seed-bg: #16191F;
-  --seed-fg: #E8EDF5;
-  --seed-primary: #539FE5;
-  --seed-accent: #7DBBEE;
-  --seed-surface: #1F242B;
-
   --color-success: #53D769;
   --color-success-soft: color-mix(in srgb, #53D769 12%, var(--seed-surface));
   --color-warning: #C7A830;
@@ -184,155 +172,8 @@ body {
 ::selection { background: color-mix(in srgb, var(--seed-primary) 25%, transparent); }
 
 /* ============================================================
-   4. AUTH PAGES
-   ============================================================ */
-.auth-container {
-  min-height: 100vh;
-  min-height: 100dvh;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  position: relative;
-  overflow: hidden;
-  background: var(--color-bg);
-}
-
-.auth-card {
-  background: var(--color-bg-surface);
-  border-radius: var(--radius-lg);
-  padding: 48px 40px;
-  width: 100%;
-  max-width: 420px;
-  border: 1px solid var(--border-default);
-  box-shadow: var(--shadow-md);
-  position: relative;
-  z-index: 1;
-}
-
-.auth-header {
-  text-align: center;
-  margin-bottom: 32px;
-}
-
-.auth-header h1 {
-  font-family: var(--font-display);
-  font-size: 24px;
-  font-weight: 600;
-  letter-spacing: -0.02em;
-  margin-bottom: 8px;
-  color: var(--text-primary);
-}
-
-.auth-header p {
-  color: var(--text-secondary);
-  font-size: 14px;
-}
-
-/* ============================================================
    5. LAYOUT
    ============================================================ */
-.layout-container {
-  display: flex;
-  min-height: 100vh;
-}
-
-.sidebar {
-  width: var(--sidebar-width);
-  background: var(--color-bg-elevated);
-  border-right: 1px solid var(--border-default);
-  display: flex;
-  flex-direction: column;
-  position: sticky;
-  top: 0;
-  height: 100vh;
-  height: 100dvh;
-  overflow-y: auto;
-  z-index: 10;
-  transition: transform var(--duration-normal) var(--ease-out-expo);
-}
-
-.sidebar-logo { padding: 20px 16px 16px; border-bottom: 1px solid var(--border-default); margin-bottom: 8px; }
-
-.sidebar-logo h2 {
-  font-family: var(--font-display);
-  font-size: 15px; font-weight: 600; color: var(--text-primary);
-  letter-spacing: -0.01em; display: flex; align-items: center; gap: 10px;
-}
-
-.sidebar-logo .logo-icon {
-  width: 30px; height: 30px; border-radius: var(--radius-sm);
-  background: var(--seed-primary);
-  display: flex; align-items: center; justify-content: center;
-  font-size: 16px; flex-shrink: 0; color: #fff;
-}
-
-/* 自定义网站标题可能长达 200 字符：文本独立容器可收缩，
-   单行省略避免撑宽 240px 侧栏 / 挤压图标；完整文本经 title 提示查看 */
-.sidebar-logo .sidebar-title {
-  min-width: 0; flex: 1;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-
-.sidebar-nav { flex: 1; padding: 4px 8px; }
-
-.nav-section {
-  padding: 16px 12px 6px;
-  font-size: 11px; font-weight: 600;
-  text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-tertiary);
-}
-
-.nav-item {
-  display: flex; align-items: center; gap: 10px;
-  padding: 8px 12px; margin-bottom: 2px;
-  border-radius: var(--radius-sm);
-  color: var(--text-secondary); text-decoration: none;
-  font-size: 14px; font-weight: 500;
-  transition: background var(--duration-fast) var(--ease-out-expo),
-              color var(--duration-fast) var(--ease-out-expo);
-  cursor: pointer; position: relative; user-select: none;
-  min-height: 36px;
-  border: none; background: transparent; width: 100%;
-  font-family: var(--font-body); text-align: left;
-}
-
-.nav-item:hover { background: var(--color-bg-hover); color: var(--text-primary); }
-
-.nav-item.active { background: var(--color-bg-selected); color: var(--seed-primary); font-weight: 600; }
-
-.nav-item .nav-icon {
-  font-size: 18px; width: 22px; text-align: center; flex-shrink: 0;
-  opacity: 0.7; transition: opacity var(--duration-fast);
-}
-
-.nav-item:hover .nav-icon, .nav-item.active .nav-icon { opacity: 1; }
-
-.sidebar-footer {
-  padding: 12px; border-top: 1px solid var(--border-default); margin-top: auto;
-}
-
-.sidebar-user { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
-
-.sidebar-user-avatar {
-  width: 32px; height: 32px; border-radius: 50%;
-  background: var(--seed-primary);
-  display: flex; align-items: center; justify-content: center;
-  font-size: 13px; font-weight: 600; color: #fff; flex-shrink: 0;
-}
-
-.sidebar-user-info { min-width: 0; flex: 1; }
-
-.sidebar-user-email {
-  font-size: 13px; font-weight: 500; color: var(--text-primary);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-
-.sidebar-user-role { font-size: 11px; color: var(--seed-primary); font-weight: 500; }
-
-.main-content {
-  flex: 1; padding: 28px 32px;
-  overflow-y: auto; min-height: 100vh;
-}
-
 .page-header { margin-bottom: 24px; }
 
 .page-header h1 {
@@ -475,11 +316,6 @@ body {
 .slide-up-leave-to { opacity: 0; transform: translateY(-6px); }
 
 /* ============================================================
-   11. MOBILE MENU BUTTON
-   ============================================================ */
-.mobile-menu-btn { display: none; }
-
-/* ============================================================
    12. REDUCED MOTION
    ============================================================ */
 @media (prefers-reduced-motion: reduce) {
@@ -497,8 +333,6 @@ body {
   .card:hover { border-color: var(--border-default); box-shadow: none; }
   .stat-card:hover { border-color: var(--border-default); box-shadow: none; }
   .file-item:hover { background: var(--color-bg-surface); }
-  .nav-item { min-height: 44px; }
-  .nav-item:active { background: var(--color-bg-selected); }
 
   /* 触屏卡片（FileCard / FolderCard）：勾选框与操作条常驻显示，避免 hover-gated 不可见 */
   .card-checkbox,
@@ -518,26 +352,11 @@ body {
 
 /* --- Tablet (≤ 1024px) --- */
 @media (max-width: 1024px) {
-  .main-content { padding: 24px 20px; }
   .stats-grid { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }
 }
 
 /* --- Small Tablet / Large Phone (≤ 768px) --- */
 @media (max-width: 768px) {
-  .sidebar { display: none; }
-
-  .mobile-menu-btn {
-    display: inline-flex; align-items: center; justify-content: center;
-    width: 44px; height: 44px;
-    background: transparent; border: 1px solid var(--border-default);
-    border-radius: var(--radius-sm); cursor: pointer;
-    font-size: 20px; color: var(--text-primary);
-    margin-bottom: 16px; transition: border-color var(--duration-fast);
-  }
-  .mobile-menu-btn:hover { border-color: var(--border-strong); background: var(--color-bg-hover); }
-
-  .main-content { padding: 16px; }
-
   .page-header { margin-bottom: 16px; }
   .page-header h1 { font-size: 20px; }
   .page-header p { font-size: 13px; }
@@ -549,9 +368,6 @@ body {
   .stat-card .value { font-size: 20px; }
   .stat-card h3 { font-size: 10px; margin-bottom: 6px; }
 
-  .auth-card { padding: 32px 20px; margin: 0 16px; max-width: 100%; }
-  .auth-header { margin-bottom: 24px; }
-  .auth-header h1 { font-size: 22px; }
 
   .upload-zone { padding: 32px 16px; }
 
@@ -573,17 +389,13 @@ body {
 @media (max-width: 480px) {
   .stats-grid { grid-template-columns: 1fr; }
   .card { padding: 12px; }
-  .main-content { padding: 12px 10px; }
   .stat-card .value { font-size: 18px; }
   .page-header h1 { font-size: 18px; }
-  .auth-card { padding: 24px 16px; }
-  .auth-header h1 { font-size: 20px; }
   .upload-zone { padding: 24px 12px; }
 }
 
 /* --- Desktop-Only --- */
 @media (min-width: 769px) {
-  .mobile-menu-btn { display: none; }
   .mobile-card-list { display: none; }
 }
 
@@ -591,7 +403,8 @@ body {
    15. TDESIGN THEME INTEGRATION
    通过 CSS 变量覆盖 + 选择器优先级，不使用 !important（除 TDesign 内部硬编码）
    ============================================================ */
-:root {
+:root,
+:root[theme-mode='dark'] {
   --td-bg-color-container: var(--color-bg-surface);
   --td-bg-color-container-hover: var(--color-bg-hover);
   --td-bg-color-component: var(--color-bg-elevated);
@@ -603,10 +416,12 @@ body {
   --td-text-color-disabled: var(--text-disabled);
   --td-border-level-1-color: var(--border-default);
   --td-border-level-2-color: var(--border-strong);
+  --td-component-border: var(--border-strong);
   --td-brand-color: var(--seed-primary);
   --td-brand-color-hover: color-mix(in srgb, var(--seed-primary) 80%, var(--seed-accent));
   --td-brand-color-active: var(--seed-accent);
   --td-brand-color-focus: var(--seed-primary);
+  --td-brand-color-light: var(--workspace-selected);
   --td-error-color: var(--color-danger);
   --td-success-color: var(--color-success);
   --td-warning-color: var(--color-warning);
@@ -640,6 +455,7 @@ html select {
 /* --- Buttons --- */
 html .t-button--theme-primary.t-button--variant-base {
   background: var(--seed-primary);
+  color: var(--workspace-on-accent);
   border: none;
   border-radius: var(--radius-sm);
   box-shadow: none;
@@ -779,7 +595,11 @@ html .t-pagination .t-is-current {
   background: var(--seed-primary);
   border-color: var(--seed-primary);
   border-radius: var(--radius-sm);
+  color: var(--workspace-on-accent);
 }
+
+html .t-tag--primary.t-tag--dark,
+html .t-pagination__number:active { color: var(--workspace-on-accent); }
 
 /* --- Tags --- */
 html .t-tag {
@@ -827,6 +647,13 @@ html .t-dialog__header {
 html .t-dialog__body { padding: 16px 24px; }
 html .t-dialog__footer { padding: 0 24px 20px; border-top: none; }
 
+@media (max-width: 768px) {
+  html .t-dialog:not(.t-dialog__fullscreen) { max-inline-size: calc(100vw - 24px); }
+  html .t-dialog:not(.t-dialog__fullscreen) :is(.t-dialog__header, .t-dialog__body, .t-dialog__footer) {
+    padding-inline: 12px;
+  }
+}
+
 /* --- Form --- */
 html .t-form__item { margin-bottom: 18px; }
 
@@ -844,7 +671,7 @@ html .t-descriptions .t-descriptions__label { font-weight: 500; color: var(--tex
   top: -100px;
   left: 16px;
   background: var(--seed-primary);
-  color: #fff;
+  color: var(--workspace-on-accent);
   padding: 10px 20px;
   border-radius: 0 0 var(--radius-sm) var(--radius-sm);
   z-index: 9999;
@@ -908,24 +735,8 @@ html .t-descriptions .t-descriptions__label { font-weight: 500; color: var(--tex
 }
 .mobile-card-list .mobile-file-card:hover { border-color: var(--border-strong); }
 
-/* Auth footer */
-.auth-footer {
-  margin-top: 24px;
-  text-align: center;
-  font-size: 14px;
-  color: var(--text-secondary);
-}
-.auth-link {
-  color: var(--seed-primary);
-  font-weight: 500;
-  text-decoration: none;
-  transition: color var(--duration-fast);
-}
-.auth-link:hover { color: var(--seed-accent); }
-
 /* Balanced text wrapping */
 .page-header h1,
-.auth-header h1,
 .card h3,
 .stat-card h3 {
   text-wrap: balance;

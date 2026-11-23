@@ -466,8 +466,8 @@ onMounted(() => {
 
 /* .card 容器使用全局定义，见 assets/styles.css */
 .email-stats-card {
-  background: var(--bg-secondary);
-  border: 1px solid var(--border-color);
+  background: var(--workspace-canvas);
+  border: 1px solid var(--workspace-border);
   border-radius: 8px;
   padding: 14px 16px;
   margin-bottom: 16px;
@@ -495,8 +495,8 @@ onMounted(() => {
 
 /* Mobile audit card */
 .mobile-audit-card {
-  background: var(--bg-secondary);
-  border: 1px solid var(--border-color);
+  background: var(--workspace-canvas);
+  border: 1px solid var(--workspace-border);
   border-radius: 8px;
   padding: 12px;
   margin-bottom: 10px;

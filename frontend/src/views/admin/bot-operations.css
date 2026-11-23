@@ -48,7 +48,7 @@
 }
 
 .bot-operations .ops-tabs [aria-current="page"], .bot-operations .ops-tabs [aria-pressed="true"], .bot-operations .ops-btn.primary {
-  color: var(--seed-primary);
+  color: var(--workspace-accent);
   border-color: var(--border-accent);
   background: var(--color-bg-selected);
 }
@@ -123,7 +123,7 @@
 }
 
 .bot-operations dd a {
-  color: var(--seed-primary);
+  color: var(--workspace-accent);
   text-decoration: underline;
 }
 

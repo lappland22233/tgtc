@@ -23,15 +23,16 @@
     </router-view>
     <!-- 常驻媒体宿主：路由出口之外，保证跨导航/预览收起播放不中断 -->
     <PersistentMediaHost />
-    <!-- 全局下载队列：排队中/准备中的下载任务与取消入口（无任务时自动隐藏） -->
-    <DownloadQueueIndicator />
+    <!-- 分享页独立于工作台，保留下载排队状态及取消入口。 -->
+    <DownloadQueueIndicator v-if="hasError || !isWorkspaceRoute" />
   </t-config-provider>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onErrorCaptured, onUnmounted, watch } from 'vue';
+import { ref, computed, onErrorCaptured, onMounted, onUnmounted, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { useAuthStore } from './stores/auth';
+import { useDownloadsStore } from './stores/downloads';
 import PersistentMediaHost from './components/file/PersistentMediaHost.vue';
 import DownloadQueueIndicator from './components/DownloadQueueIndicator.vue';
 
@@ -53,6 +54,8 @@ const hasError = ref(false);
 const errorMessage = ref('');
 
 const router = useRouter();
+const isWorkspaceRoute = computed(() => router.currentRoute.value.meta.requiresAuth === true);
+const downloadsStore = useDownloadsStore();
 
 // 仅监听路径变化复位错误边界：避免 query/hash 变化也触发复位导致闪烁
 watch(() => router.currentRoute.value.path, () => {
@@ -66,7 +69,13 @@ onErrorCaptured((err) => {
   return false;
 });
 
+// 即使工作台的传输面板关闭，返回标签页时仍需立即刷新下载队列。
+onMounted(() => {
+  document.addEventListener('visibilitychange', downloadsStore.refreshOnVisible);
+});
+
 onUnmounted(() => {
+  document.removeEventListener('visibilitychange', downloadsStore.refreshOnVisible);
   authStore.closeAuthChannel();
   themeObserver.disconnect();
 });

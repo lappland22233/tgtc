@@ -83,6 +83,16 @@ describe('router 守卫', () => {
     expect(fetchUser).not.toHaveBeenCalled();
   });
 
+  it('工作台首页打开文件并保留查询参数', async () => {
+    authStore.user = normalUser;
+    authStore.initialized = true;
+
+    await router.push('/?folder=folder-1&search=example');
+
+    expect(router.currentRoute.value.name).toBe('UserFiles');
+    expect(router.currentRoute.value.query).toEqual({ folder: 'folder-1', search: 'example' });
+  });
+
   it('已登录用户访问游客页被送回首页', async () => {
     authStore.user = normalUser;
     authStore.initialized = true;
@@ -91,8 +101,8 @@ describe('router 守卫', () => {
 
     await router.push('/login').catch(() => undefined);
 
-    // '/' 重定向到 /dashboard
-    expect(router.currentRoute.value.path).toBe('/dashboard');
+    // '/' 重定向到 /files
+    expect(router.currentRoute.value.path).toBe('/files');
   });
 
   it('角色不足访问 admin 页面时回首页', async () => {
@@ -101,7 +111,7 @@ describe('router 守卫', () => {
 
     await router.push('/admin/config').catch(() => undefined);
 
-    expect(router.currentRoute.value.path).toBe('/dashboard');
+    expect(router.currentRoute.value.path).toBe('/files');
   });
 
   it('普通 admin 不能进入 super_admin 专属页面', async () => {
@@ -110,7 +120,7 @@ describe('router 守卫', () => {
 
     await router.push('/admin/config').catch(() => undefined);
 
-    expect(router.currentRoute.value.path).toBe('/dashboard');
+    expect(router.currentRoute.value.path).toBe('/files');
   });
 
   it('具备角色时可进入 admin 页面', async () => {

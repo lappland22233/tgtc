@@ -1,12 +1,12 @@
 <template>
   <div class="share-view">
-    <!-- 全局背景：暗色 + 微光斑，类似百度网盘分享页 -->
-    <div class="bg-gradient" />
+    <header class="share-topbar">
+      <WorkspaceBrand />
+    </header>
 
-    <!-- 状态分支 -->
-    <div class="share-container" :class="{ 'share-container--wide': state.kind === 'folder' }">
+    <main class="share-container" :class="{ 'share-container--wide': state.kind === 'folder' }">
       <!-- 加载中 -->
-      <div v-if="state.kind === 'loading'" class="state-card">
+      <div v-if="state.kind === 'loading'" class="state-card" role="status">
         <t-loading size="large" text="加载中..." />
       </div>
 
@@ -21,7 +21,7 @@
       <!-- IP 被封禁 -->
       <div v-else-if="state.kind === 'banned'" class="state-card banned-card">
         <div class="state-icon">
-          <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <svg width="25" height="25" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
             <circle cx="12" cy="12" r="10"/>
             <path d="m4.9 4.9 14.2 14.2"/>
           </svg>
@@ -34,7 +34,7 @@
       <!-- 分享不存在 / 已取消 / 已过期 -->
       <div v-else-if="state.kind === 'notFound'" class="state-card not-found-card">
         <div class="state-icon">
-          <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <svg width="25" height="25" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
             <circle cx="11" cy="11" r="8"/>
             <path d="m21 21-4.35-4.35"/>
           </svg>
@@ -47,7 +47,7 @@
       <!-- 网络异常（区别于业务 notFound；弱网 / CDN 错误页 / 解析失败，可重试） -->
       <div v-else-if="state.kind === 'networkError'" class="state-card network-error-card">
         <div class="state-icon">
-          <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <svg width="25" height="25" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
             <path d="M1 9c5-4 17-4 22 0"/>
             <path d="M5 13c4-3 10-3 14 0"/>
             <path d="M9 17c2-1.5 4-1.5 6 0"/>
@@ -81,13 +81,14 @@
         :initial-breadcrumb="state.initialBreadcrumb"
         @credential-expired="onCredentialExpired"
       />
-    </div>
+    </main>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
 import { useRoute } from 'vue-router';
+import WorkspaceBrand from '@/components/WorkspaceBrand.vue';
 import { useMediaPlaybackStore } from '../../stores/mediaPlayback';
 import { withXsrfHeader } from '../../utils/xsrf';
 import PasswordPrompt from './PasswordPrompt.vue';
@@ -344,92 +345,67 @@ watch(token, async (newToken, oldToken) => {
 <style scoped>
 .share-view {
   min-height: 100vh;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  position: relative;
-  overflow: hidden;
-  background: var(--color-bg);
+  min-height: 100dvh;
+  background: var(--workspace-canvas);
+  color: var(--workspace-text);
 }
 
-/* 背景保持 FileList 的平面工业基底，避免独立大渐变 */
-.bg-gradient {
-  position: fixed;
-  inset: 0;
-  background: var(--color-bg);
-  z-index: -1;
+.share-topbar {
+  display: flex;
+  align-items: center;
+  min-height: var(--workspace-header-height);
+  padding-inline: clamp(12px, 4vw, 32px);
+  border-bottom: 1px solid var(--workspace-border);
+  background: var(--workspace-surface);
 }
 
 .share-container {
-  width: 100%;
-  max-width: 560px;
-  padding: 24px;
-  position: relative;
-  z-index: 1;
+  width: min(100%, 760px);
+  margin-inline: auto;
+  padding: clamp(16px, 4vw, 40px) clamp(12px, 4vw, 32px) 48px;
 }
 
-/* 文件夹分享：更宽的容器 + 顶部对齐（内容较高，避免居中裁切） */
-.share-container--wide {
-  max-width: 960px;
-}
-
-.share-view:has(.share-container--wide) {
-  align-items: flex-start;
-}
+.share-container--wide { width: min(100%, 1080px); }
 
 .state-card {
-  background: var(--color-bg-surface);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-md);
-  padding: 40px 32px;
-  text-align: center;
-  box-shadow: var(--shadow-sm);
-  color: var(--text-primary);
-  font-family: var(--font-body);
+  max-width: 460px;
+  margin-inline: auto;
+  padding: clamp(16px, 5vw, 32px);
+  border: 1px solid var(--workspace-border);
+  border-radius: 12px;
+  background: var(--workspace-surface);
+  overflow-wrap: anywhere;
 }
 
 .state-icon {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  margin-bottom: 16px;
+  display: inline-grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  margin-bottom: 12px;
+  border-radius: 9px;
+  background: var(--workspace-canvas);
+  color: var(--workspace-muted);
 }
 
 .state-card h1 {
-  font-size: 22px;
-  margin: 0 0 12px;
+  margin: 0 0 8px;
+  font-size: clamp(23px, 4vw, 30px);
+  line-height: 1.25;
 }
 
 .state-card p {
-  color: var(--text-secondary);
-  font-size: 14px;
-  margin: 8px 0;
-  line-height: 1.6;
+  margin: 0;
+  color: var(--workspace-muted);
 }
 
-.state-card .hint {
-  color: var(--text-tertiary);
-  font-size: 13px;
-  margin-top: 16px;
-}
+.state-card .hint { margin-top: 8px; }
+.banned-card .state-icon { color: var(--color-danger); }
+.network-error-card .state-icon { color: var(--color-warning); }
 
-.banned-card {
-  border-color: color-mix(in srgb, var(--color-danger) 30%, transparent);
-}
-
-.banned-card .state-icon {
-  color: var(--color-danger);
-}
-
-.not-found-card .state-icon {
-  color: var(--text-tertiary);
-}
-
-.network-error-card .state-icon {
-  color: var(--color-warning);
-}
-
-.retry-row {
-  margin-top: 20px;
+.retry-row { margin-top: 16px; }
+.retry-row :deep(.t-button) {
+  min-height: 44px;
+  border-radius: 8px;
 }
 </style>

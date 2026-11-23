@@ -1,48 +1,47 @@
 <template>
-  <div class="file-share-card" :class="{ 'file-share-card--encrypted': isEncrypted }">
-    <!-- 预览大区：居中放大缩略图（图片/视频显示缩略图，其余显示大类型图标） -->
+  <article class="file-share-card">
+    <header class="file-share-head">
+      <div class="security-hint">
+        <t-icon :name="isEncrypted ? 'lock-on' : 'link'" aria-hidden="true" />
+        <span>{{ isEncrypted ? '加密分享链接' : '公开分享链接' }}</span>
+      </div>
+      <h1 class="file-share-title" :title="info.name">{{ info.name }}</h1>
+    </header>
+
     <div class="file-share-hero">
       <ThumbnailImg
         :file-id="info.id"
         :mime-type="info.mimeType"
         :file-name="info.name"
-        :size="160"
+        :size="128"
+        fit="contain"
         :src="buildShareThumbnailUrl(props.token, props.info.id)"
         :context="`s:${props.token}`"
         :version="info.uploadVersion"
       />
     </div>
 
-    <!-- 内容区 -->
     <div class="file-share-body">
-      <h1 class="file-name" :title="info.name">{{ info.name }}</h1>
-      <div class="file-share-meta">
-        <span>{{ formatSize(info.size) }}</span>
-        <span class="meta-separator">·</span>
-        <span class="mime-type" :title="info.mimeType">{{ info.mimeType }}</span>
-        <span class="meta-separator">·</span>
-        <span>{{ formatDateTime(info.createdAt) }}</span>
+      <dl class="file-share-meta">
+        <dt>大小</dt><dd>{{ formatSize(info.size) }}</dd>
+        <dt>类型</dt><dd>{{ info.mimeType }}</dd>
+        <dt>上传时间</dt><dd>{{ formatDateTime(info.createdAt) }}</dd>
         <template v-if="info.expiresAt">
-          <span class="meta-separator">·</span>
-          <span class="expiry">有效期至 {{ formatDateTime(info.expiresAt) }}</span>
+          <dt>有效期至</dt><dd>{{ formatDateTime(info.expiresAt) }}</dd>
         </template>
-      </div>
-      <div class="security-hint" :class="{ encrypted: isEncrypted }">
-        <t-icon :name="isEncrypted ? 'lock-on' : 'link'" />
-        <span>{{ isEncrypted ? '加密分享链接' : '公开分享链接' }}</span>
-      </div>
+      </dl>
       <div class="file-share-actions">
         <button v-if="previewKind" type="button" class="preview-btn" @click="openPreview">
-          <t-icon name="browse" />
-          <span>在线预览</span>
+          <t-icon name="browse" aria-hidden="true" />
+          在线预览
         </button>
         <button type="button" class="download-btn" :disabled="downloading" @click="handleDownload">
-          <t-icon name="download" />
-          <span>{{ downloading ? '下载中...' : '下载文件' }}</span>
+          <t-icon name="download" aria-hidden="true" />
+          {{ downloading ? '下载中...' : '下载文件' }}
         </button>
       </div>
     </div>
-  </div>
+  </article>
 </template>
 
 <script setup lang="ts">
@@ -138,115 +137,104 @@ function handleDownload() {
 
 <style scoped>
 .file-share-card {
-  width: 100%;
-  background: var(--color-bg-surface);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-xl);
-  overflow: hidden;
-  box-shadow: var(--shadow-lg);
-  color: var(--text-primary);
-  font-family: var(--font-body);
-  transition: border-color var(--duration-fast), box-shadow var(--duration-fast);
+  display: grid;
+  grid-template-columns: minmax(144px, 31%) minmax(0, 1fr);
+  gap: 16px 20px;
+  padding: clamp(12px, 4vw, 24px);
+  border: 1px solid var(--workspace-border);
+  border-radius: 12px;
+  background: var(--workspace-surface);
 }
 
-.file-share-card:hover {
-  border-color: var(--border-strong);
+.file-share-head {
+  grid-column: 1 / -1;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--workspace-border);
 }
 
-/* 预览大区：顶部极光渐变 + 居中放大缩略图 */
-.file-share-hero {
+.security-hint {
   display: flex;
   align-items: center;
-  justify-content: center;
-  padding: 56px 24px;
-  background:
-    radial-gradient(120% 100% at 50% 0%, color-mix(in srgb, var(--seed-primary) 16%, transparent), transparent 62%),
-    var(--color-bg);
+  gap: 6px;
+  color: var(--workspace-accent);
+  font-size: 13px;
 }
 
-/* 内容区 */
+.file-share-title {
+  margin: 6px 0 0;
+  font-size: clamp(23px, 4vw, 32px);
+  font-weight: 690;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.file-share-hero {
+  display: grid;
+  place-items: center;
+  min-height: 152px;
+  border: 1px solid var(--workspace-border);
+  border-radius: 8px;
+  background: var(--workspace-canvas);
+}
+
 .file-share-body {
-  padding: 28px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
-}
-
-.file-name {
-  margin: 0;
-  overflow: hidden;
-  color: var(--text-primary);
-  font-size: 22px;
-  font-weight: 600;
-  line-height: 1.35;
-  word-break: break-all;
+  justify-content: center;
+  gap: 16px;
+  min-width: 0;
 }
 
 .file-share-meta {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-  color: var(--text-secondary);
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 6px 12px;
+  align-items: baseline;
+  margin: 0;
   font-size: 13px;
-  line-height: 1.5;
 }
-.meta-separator { color: var(--text-tertiary); }
-.mime-type { max-width: 260px; overflow: hidden; font-family: var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
-.expiry { color: var(--color-warning); }
 
-.security-hint {
-  display: inline-flex;
-  align-items: center;
-  align-self: flex-start;
-  gap: 6px;
-  padding: 6px 12px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--color-success) 12%, transparent);
-  color: var(--color-success);
-  font-size: 12px;
-}
-.security-hint.encrypted {
-  background: color-mix(in srgb, var(--seed-primary) 16%, transparent);
-  color: var(--seed-accent);
-}
+.file-share-meta dt { color: var(--workspace-muted); }
+.file-share-meta dd { margin: 0; overflow-wrap: anywhere; }
 
 .file-share-actions {
   display: flex;
-  gap: 12px;
-  margin-top: 4px;
+  flex-wrap: wrap;
+  gap: 8px;
 }
+
 .file-share-actions button {
   display: inline-flex;
-  flex: 1;
-  min-height: 48px;
   align-items: center;
   justify-content: center;
-  gap: 8px;
-  padding: 12px 16px;
-  border-radius: var(--radius-md);
+  gap: 6px;
+  min-height: 44px;
+  padding-inline: 12px;
+  border: 1px solid var(--workspace-border);
+  border-radius: 8px;
+  background: var(--workspace-surface);
+  color: var(--workspace-accent);
   font: inherit;
-  font-size: 14px;
-  font-weight: 500;
+  font-weight: 600;
   cursor: pointer;
-  transition: background var(--duration-fast), border-color var(--duration-fast), color var(--duration-fast);
 }
-.preview-btn {
-  color: var(--seed-primary);
-  background: transparent;
-  border: 1px solid var(--border-strong);
-}
-.preview-btn:hover { background: var(--color-accent-soft); border-color: var(--seed-primary); }
-.download-btn { color: #fff; background: var(--seed-primary); border: 1px solid var(--seed-primary); }
-.download-btn:hover { background: color-mix(in srgb, var(--seed-primary) 85%, #fff); }
-.download-btn:disabled { cursor: not-allowed; opacity: .6; }
 
-@media (max-width: 480px) {
-  .file-share-hero { padding: 24px 16px; }
-  .file-share-hero :deep(img) { max-width: 112px; max-height: 112px; }
-  .file-share-body { padding: 16px; gap: 8px; }
-  .file-name { font-size: 18px; }
-  .file-share-actions { flex-direction: column; }
-  .mime-type { max-width: 160px; }
+.file-share-actions .download-btn {
+  border-color: var(--workspace-accent);
+  background: var(--workspace-accent);
+  color: var(--workspace-on-accent);
+}
+
+.preview-btn:hover { background: var(--workspace-selected); }
+.file-share-actions .download-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--workspace-accent) 90%, var(--workspace-text));
+}
+
+.download-btn:disabled { cursor: not-allowed; opacity: .72; }
+.file-share-actions button:focus-visible { outline-color: var(--workspace-accent); }
+
+@media (max-width: 500px) {
+  .file-share-card { grid-template-columns: minmax(0, 1fr); }
+  .file-share-actions button { flex: 1; }
 }
 </style>

@@ -1,9 +1,9 @@
 <template>
   <div class="folder-share-browser">
     <!-- 顶部：文件夹标题 + 面包屑 -->
-    <div class="browser-header">
+    <header class="browser-header">
       <div class="folder-title-row">
-        <span class="folder-icon-large">
+        <span class="folder-icon-large" aria-hidden="true">
           <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
             <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
           </svg>
@@ -11,7 +11,7 @@
         <h1 class="folder-title">{{ rootFolder.name }}</h1>
       </div>
 
-      <nav class="breadcrumb" v-if="breadcrumb.length > 0">
+      <nav v-if="breadcrumb.length > 0" class="breadcrumb" aria-label="分享文件夹路径">
         <button
           v-for="(item, idx) in breadcrumb"
           :key="item.id"
@@ -26,10 +26,10 @@
           <span class="breadcrumb-label">{{ item.name }}</span>
         </button>
       </nav>
-    </div>
+    </header>
 
     <!-- 加载状态 -->
-    <div v-if="loading" class="loading-state">
+    <div v-if="loading" class="loading-state" role="status">
       <t-loading size="medium" text="加载中..." />
     </div>
 
@@ -44,7 +44,7 @@
 
       <!-- 空状态 -->
       <div v-if="currentContents.subfolders.length === 0 && currentContents.files.length === 0" class="empty-state">
-        <div class="empty-icon">
+        <div class="empty-icon" aria-hidden="true">
           <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
             <path d="M6 14l1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2"/>
           </svg>
@@ -63,7 +63,7 @@
         @click="openSubfolder(sub)"
       >
         <span class="col col-name">
-          <span class="row-icon folder-icon">
+          <span class="row-icon folder-icon" aria-hidden="true">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
               <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
             </svg>
@@ -102,7 +102,7 @@
           </button>
           <button
             type="button"
-            class="op-link"
+            class="op-link download-action"
             :disabled="downloadingId === file.id"
             @click.stop="downloadFile(file)"
           >
@@ -549,274 +549,170 @@ function formatRelativeDate(dateStr: string): string {
 
 <style scoped>
 .folder-share-browser {
-  width: 100%;
-  max-width: 960px;
-  background: var(--color-bg-surface);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-md);
-  padding: 16px 0 20px;
-  box-shadow: var(--shadow-sm);
-  font-family: var(--font-body);
-  color: var(--text-primary);
+  border: 1px solid var(--workspace-border);
+  border-radius: 12px;
+  background: var(--workspace-surface);
+  --share-gutter: clamp(12px, 3vw, 24px);
 }
 
-.browser-header {
-  border-bottom: 1px solid var(--border-default);
-  padding: 0 20px 16px;
-  margin-bottom: 16px;
-}
+.browser-header { padding: 16px var(--share-gutter) 8px; }
 
-.folder-title-row {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 12px;
-}
-
-.folder-icon-large {
-  display: inline-flex;
-  align-items: center;
-  color: var(--seed-primary);
-}
-
-.folder-title {
-  font-size: 22px;
-  font-weight: 600;
-  margin: 0;
-  color: var(--text-primary);
-}
-
-.breadcrumb {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 4px;
-  font-size: 14px;
-}
-
-.breadcrumb-item {
-  display: inline-flex;
-  align-items: center;
-  border: 0;
-  padding: 0;
-  background: transparent;
-  cursor: pointer;
-  color: var(--text-secondary);
-  font: inherit;
-}
-
-.breadcrumb-item:hover:not(:disabled) { color: var(--seed-primary); }
-.breadcrumb-item:focus-visible,
-.share-row:focus-visible {
-  outline: 2px solid var(--color-accent);
-  outline-offset: 2px;
-}
-.breadcrumb-item.active,
-.breadcrumb-item:disabled { color: var(--text-primary); font-weight: 500; cursor: default; }
-.breadcrumb-separator { color: var(--text-tertiary); margin: 0 4px; }
-
-.loading-state { padding: 48px 0; text-align: center; }
-
-/* ===== 表格列表 ===== */
-.share-table {
-  display: flex;
-  flex-direction: column;
-}
-
-/* 列宽：名称弹性 / 大小 / 上传时间 / 操作 */
-.share-table-head,
-.share-row {
-  display: grid;
-  grid-template-columns: minmax(240px, 1fr) 96px 150px 160px;
-  gap: 12px;
-  align-items: center;
-  padding: 0 16px;
-}
-
-.share-table-head {
-  min-height: 40px;
-  background: var(--color-bg-elevated);
-  border-bottom: 1px solid var(--border-strong);
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--text-tertiary);
-}
-
-.share-row {
-  min-height: 52px;
-  width: 100%;
-  border: 0;
-  border-bottom: 1px solid var(--border-default);
-  background: transparent;
-  text-align: left;
-  font: inherit;
-  color: var(--text-primary);
-  cursor: default;
-  transition: background var(--duration-fast);
-}
-
-.share-row:last-child { border-bottom: none; }
-
-.share-row.folder-row { cursor: pointer; }
-.share-row.folder-row:hover:not(:disabled) { background: var(--color-bg-hover); }
-.share-row.folder-row:disabled { cursor: not-allowed; opacity: .6; }
-.share-row.file-row:hover { background: var(--color-bg-hover); }
-
-/* 名称列：图标/缩略图 + 名称 */
-.col-name {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  min-width: 0;
-}
-.row-name {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 14px;
-  font-weight: 500;
-  color: var(--text-primary);
-}
-.row-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 40px;
-  height: 40px;
-  flex-shrink: 0;
-}
-.folder-icon { color: var(--seed-primary); }
-
-.col-size {
-  font-family: var(--font-mono);
-  font-size: 13px;
-  color: var(--text-secondary);
-  font-variant-numeric: tabular-nums;
-}
-.col-date {
-  font-size: 13px;
-  color: var(--text-secondary);
-}
-.col-ops {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-}
-
-.op-link {
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: var(--seed-primary);
-  font: inherit;
-  font-size: 13px;
-  cursor: pointer;
-}
-.op-link:hover { color: var(--seed-accent); }
-.op-link:disabled { color: var(--text-disabled); cursor: not-allowed; }
-
-/* ===== 分页提示与「加载更多」 ===== */
+.folder-title-row,
+.breadcrumb,
+.col-name,
+.col-ops,
 .load-more-row {
   display: flex;
   align-items: center;
-  justify-content: center;
-  gap: 12px;
-  padding: 12px 16px 4px;
+  gap: 8px;
 }
 
-.load-more-hint {
+.folder-icon-large,
+.row-icon {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 40px;
+  height: 40px;
+  border-radius: 8px;
+  background: var(--workspace-selected);
+  color: var(--workspace-accent);
+}
+
+.folder-icon-large svg { width: 24px; height: 24px; }
+.folder-title {
+  min-width: 0;
+  margin: 0;
+  font-size: clamp(23px, 4vw, 32px);
+  font-weight: 690;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.breadcrumb {
+  flex-wrap: wrap;
+  gap: 0 4px;
+  margin-top: 4px;
   font-size: 13px;
-  color: var(--text-tertiary);
-  font-variant-numeric: tabular-nums;
 }
 
-.empty-state {
-  padding: 48px 0;
-  text-align: center;
-  color: var(--text-tertiary);
-}
-
-.empty-icon {
-  display: flex;
+.breadcrumb-item,
+.op-link {
+  display: inline-flex;
   align-items: center;
-  justify-content: center;
-  margin-bottom: 8px;
-  color: var(--text-tertiary);
+  gap: 4px;
+  min-height: 36px;
+  padding: 4px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--workspace-accent);
+  font: inherit;
+  cursor: pointer;
 }
 
+.breadcrumb-item { min-width: 0; text-align: start; }
+.breadcrumb-label { min-width: 0; overflow-wrap: anywhere; }
+.breadcrumb-separator { color: var(--workspace-muted); }
+.breadcrumb-item.active { font-weight: 600; }
+:where(.breadcrumb-item, .op-link):disabled { color: var(--workspace-muted); cursor: default; }
+:where(.breadcrumb-item, .op-link, .folder-row):focus-visible { outline-color: var(--workspace-accent); }
+
+.share-table-head,
+.share-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 84px 112px 120px;
+  gap: 8px;
+  align-items: center;
+  padding: 6px var(--share-gutter);
+  border-top: 1px solid var(--workspace-border);
+}
+
+.share-table-head {
+  background: var(--workspace-canvas);
+  color: var(--workspace-muted);
+  font-size: 12px;
+}
+
+.share-row {
+  width: 100%;
+  min-height: 48px;
+  border-inline: 0;
+  border-bottom: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: start;
+}
+
+.folder-row { cursor: pointer; }
+.folder-row:disabled { cursor: not-allowed; }
+.share-row:hover,
+.breadcrumb-item:hover:not(:disabled),
+.op-link:hover:not(:disabled) { background: var(--workspace-selected); }
+
+.col-name,
+.row-name { min-width: 0; }
+.row-name { font-weight: 550; overflow-wrap: anywhere; }
+
+.col-size,
+.col-date,
+.load-more-hint { color: var(--workspace-muted); font-size: 13px; }
+.col-ops { justify-content: flex-end; }
+.op-link { justify-content: center; padding-inline: 6px; font-size: 13px; white-space: nowrap; }
+.download-action { background: var(--workspace-selected); font-weight: 600; }
+.download-action:hover:not(:disabled) { box-shadow: inset 0 0 0 1px var(--workspace-accent); }
+
+.load-more-row,
 .back-to-parent {
-  margin-top: 16px;
-  padding: 0 20px;
-  text-align: left;
+  padding: 8px var(--share-gutter);
+  border-top: 1px solid var(--workspace-border);
 }
 
-.back-to-parent :deep(.t-button) { color: var(--text-secondary); }
-.back-to-parent :deep(.t-button:hover) { color: var(--seed-primary); }
+.load-more-row { justify-content: center; flex-wrap: wrap; }
 
-@media (max-width: 768px) {
-  .folder-share-browser { padding: 12px 0 16px; border-radius: var(--radius-sm); }
-  .browser-header { padding: 0 12px 12px; }
-  .folder-title { font-size: 18px; }
-  .folder-icon-large svg { width: 24px; height: 24px; }
-  .breadcrumb { font-size: 13px; }
+.loading-state,
+.empty-state {
+  border-top: 1px solid var(--workspace-border);
+  padding: 32px var(--share-gutter);
+  color: var(--workspace-muted);
+  text-align: center;
+}
 
-  /* 移动端隐藏“上传时间”列；操作列改为 minmax 自适应，避免超宽横滚 */
+.empty-icon svg { width: 28px; height: 28px; }
+
+@media (max-width: 680px) {
   .share-table-head,
-  .share-row {
-    grid-template-columns: minmax(160px, 1fr) 88px minmax(96px, auto);
-    gap: 8px;
-    padding: 0 12px;
-  }
+  .share-row { grid-template-columns: minmax(0, 1fr) 70px 112px; }
   .col-date { display: none; }
-
-  .row-name { font-size: 13px; }
-  .col-size { font-size: 12px; }
-  .back-to-parent { padding: 0 12px; }
-  .load-more-row { padding: 12px 12px 4px; }
 }
 
-/* 窄屏将大小置于文件名下方，给操作保留独立的触控区域。 */
 @media (max-width: 480px) {
-  .folder-title { min-width: 0; overflow-wrap: anywhere; }
-
   .share-table-head,
-  .share-row {
-    grid-template-columns: minmax(0, 1fr) max-content;
-    gap: var(--space-1) var(--space-2);
-    padding-inline: var(--space-2);
-  }
-
-  .share-row {
-    padding-block: var(--space-2);
-  }
-
+  .share-row { grid-template-columns: minmax(0, 1fr) max-content; }
   .share-table-head .col-size,
-  .folder-row .col-size {
-    display: none;
-  }
-
-  .col-name { gap: var(--space-2); }
+  .folder-row .col-size { display: none; }
+  .file-row { row-gap: 2px; }
   .file-row .col-size {
-    grid-column: 1;
-    grid-row: 2;
-    padding-inline-start: calc(40px + var(--space-2));
-    font-size: 11px;
-  }
-
-  .col-ops { gap: var(--space-1); }
-  .file-row .col-ops {
-    grid-column: 2;
-    grid-row: 1 / 3;
-  }
-
-  .op-link {
-    display: inline-flex;
-    justify-content: center;
-    align-items: center;
-    min-inline-size: 44px;
-    min-block-size: 44px;
+    grid-area: 2 / 1;
+    padding-inline-start: 48px;
     font-size: 12px;
   }
+  .file-row .col-ops { grid-area: 1 / 2 / 3; }
+  .col-ops { gap: 4px; }
+}
+
+@media (max-width: 360px) {
+  .file-row .col-name { grid-column: 1 / -1; }
+  .file-row .col-ops { grid-area: 2 / 2; }
+}
+
+@media (max-width: 768px), (pointer: coarse) {
+  .breadcrumb-item,
+  .op-link,
+  .load-more-row :deep(.t-button),
+  .back-to-parent :deep(.t-button) { min-height: 44px; }
+  .breadcrumb-item,
+  .op-link { min-width: 44px; }
 }
 </style>

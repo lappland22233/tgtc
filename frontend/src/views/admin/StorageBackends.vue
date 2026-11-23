@@ -158,7 +158,7 @@
           <div v-if="row.type === 'gdrive' && row.quotaTotalBytes" class="quota-cell">
             <t-progress
               :percentage="quotaPercentage(row)"
-              :color="quotaPercentage(row) > 90 ? '#e34d59' : undefined"
+              :color="quotaPercentage(row) > 90 ? 'var(--color-danger)' : undefined"
               size="small"
             />
             <span class="quota-text">{{ formatBytes(row.quotaUsedBytes) }} / {{ formatBytes(row.quotaTotalBytes) }}</span>
@@ -1338,14 +1338,14 @@ onMounted(loadOverview);
 }
 .page-header p {
   margin: 0;
-  color: var(--td-text-color-secondary, #666);
+  color: var(--td-text-color-secondary);
   font-size: 13px;
 }
 .card {
-  background: var(--td-bg-color-container, #fff);
+  background: var(--td-bg-color-container);
   border-radius: 8px;
   padding: 16px;
-  border: 1px solid var(--td-border-level-1-color, #e7e7e7);
+  border: 1px solid var(--td-border-level-1-color);
 }
 .status-switches {
   display: flex;
@@ -1368,7 +1368,7 @@ onMounted(loadOverview);
 }
 .status-switch-meta {
   font-size: 12px;
-  color: var(--td-text-color-secondary, #888);
+  color: var(--td-text-color-secondary);
 }
 .default-backend-picker,
 .chunk-size-picker {
@@ -1382,19 +1382,19 @@ onMounted(loadOverview);
 }
 .overview-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
   gap: 12px;
 }
 .stat-card {
-  background: var(--td-bg-color-container, #fff);
+  background: var(--td-bg-color-container);
   border-radius: 8px;
   padding: 14px 16px;
-  border: 1px solid var(--td-border-level-1-color, #e7e7e7);
+  border: 1px solid var(--td-border-level-1-color);
 }
 .stat-card h3 {
   margin: 0 0 6px;
   font-size: 13px;
-  color: var(--td-text-color-secondary, #666);
+  color: var(--td-text-color-secondary);
   font-weight: 500;
 }
 .stat-card .value {
@@ -1403,15 +1403,15 @@ onMounted(loadOverview);
 }
 .stat-card .error-value {
   font-size: 16px;
-  color: var(--td-error-color, #e34d59);
+  color: var(--td-error-color);
 }
 .stat-sub {
   font-size: 12px;
-  color: var(--td-text-color-secondary, #888);
+  color: var(--td-text-color-secondary);
   margin-top: 4px;
 }
 .error-summary {
-  color: var(--td-error-color, #e34d59);
+  color: var(--td-error-color);
 }
 .section-header {
   display: flex;
@@ -1439,7 +1439,7 @@ onMounted(loadOverview);
 }
 .quota-text {
   font-size: 12px;
-  color: var(--td-text-color-secondary, #888);
+  color: var(--td-text-color-secondary);
 }
 .health-cell {
   display: flex;
@@ -1452,7 +1452,7 @@ onMounted(loadOverview);
   flex-wrap: wrap;
 }
 .muted {
-  color: var(--td-text-color-placeholder, #bbb);
+  color: var(--text-secondary);
 }
 .gdrive-wizard {
   display: flex;
@@ -1460,22 +1460,22 @@ onMounted(loadOverview);
   gap: 16px;
 }
 .wizard-card {
-  border: 1px solid var(--td-border-level-1-color, #e7e7e7);
+  border: 1px solid var(--td-border-level-1-color);
   border-radius: 8px;
-  background: var(--td-bg-color-container, #ffffff);
+  background: var(--td-bg-color-container);
   overflow: hidden;
   transition: all 0.2s ease;
 }
 .wizard-card.is-collapsed {
-  background: var(--td-bg-color-secondarycontainer, #f9f9f9);
+  background: var(--td-bg-color-secondarycontainer);
 }
 .wizard-card-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
   padding: 12px 16px;
-  background: var(--td-bg-color-secondarycontainer, #fafafa);
-  border-bottom: 1px solid var(--td-border-level-1-color, #f0f0f0);
+  background: var(--td-bg-color-secondarycontainer);
+  border-bottom: 1px solid var(--td-border-level-1-color);
 }
 .wizard-card.is-collapsed .wizard-card-header {
   border-bottom: none;
@@ -1492,21 +1492,21 @@ onMounted(loadOverview);
   width: 22px;
   height: 22px;
   border-radius: 50%;
-  background: var(--td-brand-color, #0052d9);
-  color: #fff;
+  background: var(--td-brand-color);
+  color: var(--workspace-on-accent);
   font-size: 12px;
   font-weight: 600;
 }
 .step-title {
   font-size: 14px;
   font-weight: 600;
-  color: var(--td-text-color-primary, #333);
+  color: var(--td-text-color-primary);
 }
 .wizard-card-body {
   padding: 16px;
 }
 .redirect-uri-box {
-  background: var(--td-bg-color-page, #f3f5f8);
+  background: var(--td-bg-color-page);
   padding: 12px;
   border-radius: 6px;
   margin-bottom: 14px;
@@ -1520,7 +1520,7 @@ onMounted(loadOverview);
 .redirect-uri-label {
   font-size: 12px;
   font-weight: 500;
-  color: var(--td-text-color-secondary, #666);
+  color: var(--td-text-color-secondary);
 }
 .name-row {
   display: flex;
@@ -1531,13 +1531,13 @@ onMounted(loadOverview);
 .form-label {
   font-size: 13px;
   font-weight: 500;
-  color: var(--td-text-color-primary, #333);
+  color: var(--td-text-color-primary);
   white-space: nowrap;
 }
 .existing-name {
   font-size: 14px;
   font-weight: 600;
-  color: var(--td-brand-color, #0052d9);
+  color: var(--td-brand-color);
 }
 .auth-action-area {
   margin-bottom: 16px;
@@ -1547,15 +1547,15 @@ onMounted(loadOverview);
   align-items: center;
   gap: 16px;
   padding: 16px;
-  background: var(--td-brand-color-light, #f2f5fd);
+  background: var(--td-brand-color-light);
   border-radius: 8px;
-  border: 1px solid var(--td-brand-color-focus, #d4e3fc);
+  border: 1px solid var(--td-brand-color-focus);
 }
 .auth-spinner {
   width: 32px;
   height: 32px;
-  border: 3px solid var(--td-brand-color-light, #d4e3fc);
-  border-top-color: var(--td-brand-color, #0052d9);
+  border: 3px solid var(--td-brand-color-light);
+  border-top-color: var(--td-brand-color);
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
   flex-shrink: 0;
@@ -1573,14 +1573,14 @@ onMounted(loadOverview);
 .auth-status-main {
   font-size: 14px;
   font-weight: 600;
-  color: var(--td-brand-color, #0052d9);
+  color: var(--td-brand-color);
 }
 .auth-status-sub {
   font-size: 12px;
-  color: var(--td-text-color-secondary, #666);
+  color: var(--td-text-color-secondary);
 }
 .link-btn {
-  color: var(--td-brand-color, #0052d9);
+  color: var(--td-brand-color);
   text-decoration: underline;
   cursor: pointer;
 }
@@ -1591,34 +1591,34 @@ onMounted(loadOverview);
 }
 .disabled-tip {
   font-size: 12px;
-  color: var(--td-error-color, #e34d59);
+  color: var(--td-error-color);
   text-align: center;
 }
 .fallback-accordion {
   margin-top: 12px;
-  border-top: 1px dashed var(--td-border-level-1-color, #e7e7e7);
+  border-top: 1px dashed var(--td-border-level-1-color);
   padding-top: 12px;
 }
 .fallback-toggle {
   font-size: 12px;
-  color: var(--td-text-color-secondary, #888);
+  color: var(--td-text-color-secondary);
   cursor: pointer;
   user-select: none;
   transition: color 0.2s;
 }
 .fallback-toggle:hover {
-  color: var(--td-brand-color, #0052d9);
+  color: var(--td-brand-color);
 }
 .fallback-body {
   margin-top: 12px;
   padding: 12px;
-  background: var(--td-bg-color-page, #f8f9fb);
+  background: var(--td-bg-color-page);
   border-radius: 6px;
 }
 .wizard-hint {
   margin: 4px 0 8px;
   font-size: 12px;
-  color: var(--td-text-color-secondary, #888);
+  color: var(--td-text-color-secondary);
 }
 .wizard-row {
   display: flex;
@@ -1642,8 +1642,8 @@ onMounted(loadOverview);
 }
 .account-email {
   font-size: 11px;
-  color: var(--td-brand-color, #0052d9);
-  background: var(--td-brand-color-light, #f2f5fd);
+  color: var(--td-brand-color);
+  background: var(--td-brand-color-light);
   padding: 1px 6px;
   border-radius: 4px;
   width: fit-content;
@@ -1659,6 +1659,25 @@ onMounted(loadOverview);
   gap: 8px;
   margin-top: 16px;
   padding-top: 12px;
-  border-top: 1px solid var(--td-border-level-1-color, #f0f0f0);
+  border-top: 1px solid var(--td-border-level-1-color);
+}
+
+@media (max-width: 768px) {
+  .status-switches {
+    gap: 16px;
+  }
+
+  .status-switch {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .status-switch-btns,
+  .dialog-footer-actions,
+  .wizard-card-header,
+  .name-row {
+    flex-wrap: wrap;
+  }
 }
 </style>

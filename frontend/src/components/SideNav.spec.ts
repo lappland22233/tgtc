@@ -2,20 +2,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { mount } from '@vue/test-utils';
 import { createPinia, setActivePinia } from 'pinia';
+import type { UserRole } from '../types/user';
 
 vi.mock('vue-router', () => ({
   useRoute: () => ({ path: '/dashboard' }),
-}));
-
-// 阻断 tdesign 真实导入链（含组件内部样式 CSS）：SideNav 经自动导入引用 Button，
-// api client 经 utils/message 引用 MessagePlugin
-vi.mock('tdesign-vue-next', () => ({
-  Button: {
-    props: ['disabled', 'loading'],
-    emits: ['click'],
-    template: '<button class="t-button-stub"><slot /></button>',
-  },
-  DialogPlugin: { confirm: vi.fn(), alert: vi.fn(), info: vi.fn(), warning: vi.fn() },
 }));
 
 vi.mock('tdesign-vue-next/es/message', () => ({
@@ -25,10 +15,10 @@ vi.mock('tdesign-vue-next/es/message', () => ({
 import SideNav from './SideNav.vue';
 import { usePublicConfigStore, DEFAULT_SITE_TITLE } from '../stores/public-config';
 
-function mountSidenav() {
+function mountSidenav(role: UserRole = 'super_admin') {
   return mount(SideNav, {
     props: {
-      role: 'super_admin',
+      role,
       email: 'admin@example.com',
       roleText: '超级管理员',
       avatarLetter: 'A',
@@ -36,31 +26,32 @@ function mountSidenav() {
     global: {
       plugins: [setActivePinia(createPinia())],
       stubs: {
-        'router-link': { props: ['to'], template: '<a><slot /></a>' },
+        'router-link': { props: ['to'], template: '<a :href="to"><slot /></a>' },
+        't-icon': true,
       },
     },
   });
 }
 
-describe('SideNav 侧栏网站标题', () => {
+describe('工作台导航网站标题', () => {
   beforeEach(() => {
     document.title = DEFAULT_SITE_TITLE;
   });
 
   it('默认渲染默认标题，且浏览器标签同源', () => {
     const wrapper = mountSidenav();
-    expect(wrapper.find('.sidebar-title').text()).toBe(DEFAULT_SITE_TITLE);
+    expect(wrapper.find('.workspace-brand-title').text()).toBe(DEFAULT_SITE_TITLE);
     expect(document.title).toBe(DEFAULT_SITE_TITLE);
   });
 
-  it('store 标题更新后侧栏响应式同步（无需重新挂载）', async () => {
+  it('store 标题更新后工作台导航响应式同步（无需重新挂载）', async () => {
     const wrapper = mountSidenav();
     const store = usePublicConfigStore();
 
     store.setSiteTitle('运维知识库');
     await wrapper.vm.$nextTick();
 
-    expect(wrapper.find('.sidebar-title').text()).toBe('运维知识库');
+    expect(wrapper.find('.workspace-brand-title').text()).toBe('运维知识库');
     expect(document.title).toBe('运维知识库');
   });
 
@@ -72,7 +63,7 @@ describe('SideNav 侧栏网站标题', () => {
     store.setSiteTitle(longTitle);
     await wrapper.vm.$nextTick();
 
-    const titleEl = wrapper.find('.sidebar-title');
+    const titleEl = wrapper.find('.workspace-brand-title');
     // 截断由 CSS（text-overflow）实现，DOM 文本必须是完整标题
     expect(titleEl.text()).toBe(longTitle);
     expect(titleEl.attributes('title')).toBe(longTitle);
@@ -80,7 +71,26 @@ describe('SideNav 侧栏网站标题', () => {
     store.setSiteTitle('<b>脚本</b>&标题');
     await wrapper.vm.$nextTick();
     // 文本插值：不产生真实子元素
-    expect(wrapper.find('.sidebar-title b').exists()).toBe(false);
-    expect(wrapper.find('.sidebar-title').text()).toBe('<b>脚本</b>&标题');
+    expect(wrapper.find('.workspace-brand-title b').exists()).toBe(false);
+    expect(wrapper.find('.workspace-brand-title').text()).toBe('<b>脚本</b>&标题');
+  });
+});
+
+describe('工作台导航权限', () => {
+  it('保留三个常用入口和个人设置，管理链接由角色决定', async () => {
+    const wrapper = mountSidenav('user');
+    expect(wrapper.findAll('.workspace-tab').map((tab) => tab.attributes('href')))
+      .toEqual(['/files', '/shares', '/dashboard']);
+    expect(wrapper.find('a[href="/settings"]').exists()).toBe(true);
+    expect(wrapper.find('.workspace-admin-nav').exists()).toBe(false);
+
+    await wrapper.setProps({ role: 'admin' });
+    expect(wrapper.findAll('.workspace-admin-nav a').map((link) => link.attributes('href')))
+      .toEqual(['/admin', '/admin/users', '/admin/files']);
+    expect(wrapper.find('a[href="/admin/config"]').exists()).toBe(false);
+
+    await wrapper.setProps({ role: 'super_admin' });
+    expect(wrapper.find('a[href="/admin/config"]').exists()).toBe(true);
+    expect(wrapper.find('a[href="/admin/storage-backends"]').exists()).toBe(true);
   });
 });

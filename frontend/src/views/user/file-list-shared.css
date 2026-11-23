@@ -1,36 +1,88 @@
-/**
- * FileList 页面跨组件共享样式（M6 拆分专项）。
- *
- * Vue 的 scoped 样式不会作用到子组件内部元素，因此把「同时命中多个组件元素」的
- * 规则集中在此，各组件以 <style scoped src="./file-list-shared.css"> 引入，
- * 保持单一来源；各组件只会命中自己渲染的元素（其余选择器自然不匹配）。
- *
- * 当前命中情况：
- * - 长按抑制：FileList（空状态 .upload-zone）、FileListDesktopRows、FileListMobileList
- * - .deleted-name：桌面文件行与移动文件卡片
- * - .os-muted：桌面行内的弱化文本与宿主列表底部的哨兵提示
- *
- * 新增规则前请确认「确实会被 2 个及以上组件命中」，仅单组件使用的样式留在组件内。
- */
-
-/* 移动端长按弹出菜单：抑制文本选中与系统预览浮层 */
-.os-file,
-.os-folder,
-.mobile-file-card,
-.mobile-folder-row,
-.upload-zone {
+/* Imported once by FileList.vue. The shared rules reach both list renderers. */
+:deep(:is(.os-file, .os-folder, .mobile-file-card, .mobile-folder-row, .upload-zone)) {
   -webkit-touch-callout: none;
   -webkit-user-select: none;
   user-select: none;
 }
 
-/* 已删除文件名：删除线 + 弱化（桌面行与移动卡片共用） */
-.deleted-name {
+:deep(.deleted-name) {
   text-decoration: line-through;
   opacity: 0.6;
 }
 
-/* 弱化文本（桌面行的占位/提示、宿主列表哨兵文案共用） */
-.os-muted {
-  color: var(--text-tertiary);
+:deep(.os-muted) {
+  color: var(--workspace-muted);
+}
+
+:deep(.workspace-folder-icon) {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  background: var(--color-warning-soft);
+  color: var(--color-warning);
+  font-size: 17px;
+}
+
+:deep(:where(.workspace-file-name)) {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+
+:deep(.workspace-file-name:hover) {
+  color: var(--workspace-accent);
+}
+
+:deep(:is(.os-name-text, .mobile-folder-name, .mobile-file-name)) {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 560;
+}
+
+:deep(:is(.os-size, .os-date, .mobile-folder-meta, .mobile-file-meta)) {
+  color: var(--workspace-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+:deep(:is(.fl-path-row, .fl-addressbar-actions, .fl-toolbar) button:focus-visible),
+:deep(.workspace-file-name:focus-visible) {
+  outline: 2px solid var(--workspace-accent);
+  outline-offset: 2px;
+}
+
+:deep(.workspace-file-name:focus-visible) {
+  border-radius: 4px;
+}
+
+:deep(:is(.os-thumb-click, .os-tag-click, .os-sort-btn, .fl-batchbar button):focus-visible) {
+  outline: 2px solid var(--workspace-accent);
+  outline-offset: 1px;
+}
+
+:deep(:is(.os-row, .mobile-folder-row, .mobile-file-more):focus-visible) {
+  outline: 2px solid var(--workspace-accent);
+  outline-offset: -2px;
+}
+
+:deep(.t-tag.workspace-file-tag) {
+  background-color: color-mix(in srgb, var(--file-tag-color) 12%, transparent);
+  border-color: color-mix(in srgb, var(--file-tag-color) 25%, transparent);
+  color: var(--workspace-text);
+}
+
+:deep(:is(.os-file, .mobile-file-card).is-inspected) {
+  background: var(--workspace-selected);
+  border-bottom-color: transparent;
+  border-radius: 8px;
+  box-shadow: inset 2px 0 var(--workspace-accent);
 }

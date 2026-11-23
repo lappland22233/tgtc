@@ -1,14 +1,14 @@
 {
   "$schema": "internal://frontend-bundle-baseline",
-  "updatedAt": "2026-11-22",
+  "updatedAt": "2026-11-23",
   "note": "jsTotal/cssTotal 为产物总量，maxJsChunk/maxCssChunk 为单文件上限。entryJsTotal 按构建 HTML 直接引用的本地 JS 和 CSS 去重计量。",
   "toleranceRatio": 0.05,
   "entryToleranceRatio": 0.02,
   "thresholds": {
     "jsTotal": 2142429,
     "jsGzipTotal": 681417,
-    "cssTotal": 374443,
-    "cssGzipTotal": 63358,
+    "cssTotal": 401774,
+    "cssGzipTotal": 68801,
     "maxJsChunk": 568068,
     "maxCssChunk": 128844,
     "entryJsTotal": 640322

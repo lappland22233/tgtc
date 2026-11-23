@@ -3,7 +3,8 @@
     <form autocomplete="off" class="fl-search-form" @submit.prevent="emit('search')">
       <t-input
         :model-value="search"
-        placeholder="搜索当前文件夹..."
+        placeholder="搜索当前文件夹"
+        aria-label="搜索当前文件夹"
         class="fl-search-input"
         autocomplete="off"
         name="q-file-search"
@@ -12,12 +13,12 @@
         @enter="emit('search')"
         @clear="emit('clear')"
       >
-        <template #prefix-icon><t-icon name="search" /></template>
+        <template #prefix-icon><t-icon name="search" aria-hidden="true" /></template>
       </t-input>
-      <t-button theme="default" @click="emit('search')">搜索</t-button>
+      <t-button class="fl-search-submit" variant="text" @click="emit('search')">搜索</t-button>
     </form>
     <div class="fl-toolbar-right">
-      <t-button size="medium" variant="outline" @click="emit('manage-tags')">
+      <t-button class="fl-tag-button" variant="outline" @click="emit('manage-tags')">
         <template #icon><t-icon name="tag" /></template>
         {{ tagButtonLabel }}
       </t-button>
@@ -51,35 +52,89 @@ const emit = defineEmits<{
 .fl-toolbar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  gap: 8px;
   flex-wrap: wrap;
-  margin-bottom: 16px;
+  margin-bottom: 10px;
 }
 
 .fl-search-form {
   display: flex;
+  flex: 1 1 150px;
+  min-width: 0;
   align-items: center;
-  gap: 8px;
   margin: 0;
-  flex: 1;
-  min-width: 220px;
-  max-width: 420px;
+  border: 1px solid var(--workspace-border);
+  border-radius: 8px;
+  background: var(--workspace-canvas);
+}
+
+.fl-search-form:focus-within {
+  border-color: var(--workspace-accent);
+  box-shadow: 0 0 0 2px var(--workspace-selected);
 }
 
 .fl-search-input {
   flex: 1;
+  min-width: 0;
 }
 
-.fl-toolbar-right {
-  display: flex;
-  align-items: center;
-  gap: 8px;
+.fl-search-form :deep(.t-input) {
+  border: 0;
+  min-height: 34px;
+  background: transparent;
+  box-shadow: none;
+}
+
+.fl-search-form :deep(.t-input__inner) {
+  color: var(--workspace-text);
+}
+
+.fl-search-form :deep(.t-input__inner::placeholder),
+.fl-search-form :deep(.t-input__prefix) {
+  color: var(--workspace-muted);
+}
+
+.fl-search-form .fl-search-submit,
+.fl-toolbar-right .fl-tag-button {
+  min-height: 36px;
+  border-radius: 8px;
+  color: var(--workspace-text);
+}
+
+.fl-search-form .fl-search-submit {
+  margin-inline-end: 2px;
+  min-height: 32px;
+  color: var(--workspace-muted);
+}
+
+.fl-toolbar-right .fl-tag-button {
+  border-color: var(--workspace-border);
+  background: var(--workspace-surface);
+}
+
+.fl-search-form .fl-search-submit:hover,
+.fl-toolbar-right .fl-tag-button:hover {
+  background: var(--workspace-selected);
+  color: var(--workspace-accent);
 }
 
 @media (max-width: 768px) {
+  .fl-search-form :deep(.t-input) {
+    min-height: 42px;
+  }
+
+  .fl-search-form :deep(.t-input__inner) {
+    font-size: 16px;
+  }
+
+  .fl-search-form .fl-search-submit,
+  .fl-toolbar-right .fl-tag-button {
+    min-height: 44px;
+  }
+}
+@media (max-width: 360px) {
   .fl-search-form {
-    max-width: 100%;
+    flex-basis: 100%;
   }
 }
 </style>

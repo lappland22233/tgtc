@@ -21,7 +21,7 @@
           <t-radio-button value="7d">7天</t-radio-button>
           <t-radio-button value="30d">30天</t-radio-button>
         </t-radio-group>
-        <div style="display: flex; gap: 8px; align-items: center; margin-left: auto;">
+        <div class="refresh-controls">
           <label style="font-size: 12px; color: var(--text-secondary); white-space: nowrap;">自动刷新：</label>
           <t-select
             v-model="autoRefreshInterval"
@@ -34,7 +34,7 @@
             <t-option :value="60000" label="1分钟" />
             <t-option :value="300000" label="5分钟" />
           </t-select>
-          <span v-if="lastRefreshTime" style="font-size: 12px; color: var(--text-secondary); white-space: nowrap;">
+          <span v-if="lastRefreshTime" class="refresh-timestamp">
             最后更新：{{ lastRefreshTime }}
           </span>
           <t-button
@@ -73,7 +73,7 @@
       </div>
       <div class="metric-card error-card" v-if="stats.errorRate > 0">
         <div class="metric-label">错误率</div>
-        <div class="metric-value" style="color: var(--error);">{{ stats.errorRate }}%</div>
+        <div class="metric-value" style="color: var(--color-danger);">{{ stats.errorRate }}%</div>
         <div class="metric-sub">4xx/5xx 占比</div>
       </div>
     </div>
@@ -920,8 +920,8 @@ async function updateTrendChart(trendData: TrendItem[]) {
         data: trendData.map((t) => t.requests),
         smooth: true,
         symbol: 'none',
-        lineStyle: { color: CHART_COLORS.blue, width: 2 },
-        areaStyle: { color: areaGradient(CHART_COLORS.blue) },
+        lineStyle: { color: CHART_COLORS.primary, width: 2 },
+        areaStyle: { color: areaGradient(CHART_COLORS.primary) },
       },
       {
         name: '带宽',
@@ -1088,6 +1088,19 @@ useChartResize(handleResize);
   margin-bottom: 20px;
 }
 
+.refresh-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-inline-start: auto;
+}
+
+.refresh-timestamp {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
 /* Metrics grid */
 .metrics-grid {
   display: grid;
@@ -1126,7 +1139,7 @@ useChartResize(handleResize);
 /* Charts grid */
 .charts-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 20px;
   margin-bottom: 20px;
 }
@@ -1228,18 +1241,8 @@ useChartResize(handleResize);
 }
 
 .rank-badge.rank-1 {
-  color: #ffd700;
-  background: rgba(255, 215, 0, 0.15);
-}
-
-.rank-badge.rank-2 {
-  color: #c0c0c0;
-  background: rgba(192, 192, 192, 0.15);
-}
-
-.rank-badge.rank-3 {
-  color: #cd7f32;
-  background: rgba(205, 127, 50, 0.15);
+  color: var(--workspace-accent);
+  background: var(--workspace-selected);
 }
 
 /* File name cell */
@@ -1327,6 +1330,10 @@ useChartResize(handleResize);
     width: 100% !important;
   }
 
+  .refresh-controls {
+    margin-inline-start: 0;
+  }
+
   .section-header {
     flex-direction: column;
     align-items: flex-start;
@@ -1346,8 +1353,8 @@ useChartResize(handleResize);
 }
 
 .mobile-access-card {
-  background: var(--bg-secondary);
-  border: 1px solid var(--border-color);
+  background: var(--workspace-canvas);
+  border: 1px solid var(--workspace-border);
   border-radius: 8px;
   padding: 12px;
   margin-bottom: 10px;

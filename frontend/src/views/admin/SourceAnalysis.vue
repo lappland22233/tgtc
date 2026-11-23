@@ -702,8 +702,8 @@ defineExpose({ resizeAllCharts });
   }
 
   .mobile-card {
-    background: var(--bg-secondary);
-    border: 1px solid var(--border-color);
+    background: var(--workspace-canvas);
+    border: 1px solid var(--workspace-border);
     border-radius: 8px;
     padding: 12px;
     margin-bottom: 10px;
