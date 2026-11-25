@@ -34,6 +34,34 @@ export class BotOperationsTimePage extends BotOperationsPage {
   to?: string;
 }
 
+export const BOT_USER_GROUP_SCOPES = ['queue', 'grants', 'audit'] as const;
+export type BotUserGroupScope = typeof BOT_USER_GROUP_SCOPES[number];
+
+export class BotUserGroupsQuery extends BotOperationsTimePage {
+  @IsOptional()
+  @IsIn([...BOT_USER_GROUP_SCOPES])
+  scope: BotUserGroupScope = 'queue';
+
+  @IsOptional()
+  @Matches(telegramId)
+  receiverBotId?: string;
+
+  @IsOptional()
+  @Transform(({ value }) => typeof value === 'string' ? value.trim() : value)
+  @IsString()
+  @Length(1, 64)
+  keyword?: string;
+}
+
+export const BOT_OVERVIEW_RANGES = ['24h', '7d', '30d'] as const;
+export type BotOverviewRange = typeof BOT_OVERVIEW_RANGES[number];
+
+export class BotOverviewQuery {
+  @IsOptional()
+  @IsIn([...BOT_OVERVIEW_RANGES])
+  timeRange: BotOverviewRange = '7d';
+}
+
 class BotOperationsFilters extends BotOperationsTimePage {
   @IsOptional()
   @Matches(telegramId)

@@ -32,7 +32,7 @@
       <template v-else>
         <header><h3>{{ row.fileName || '未命名文件' }}</h3><span class="ops-status" :class="{ muted: ['failed','cancelled','expired','revoked'].includes(row.status) }">{{ labels[row.status] }}</span></header>
         <dl class="ops-details">
-          <div><dt>TG 用户</dt><dd><router-link :to="{ path:'/admin/bot-operations', query:{ tab:'user', telegramUserId:row.telegramUserId } }">{{ row.telegramUserId }}</router-link><span v-if="row.telegramUsername || row.telegramDisplayName"> · {{ row.telegramUsername ? '@' + row.telegramUsername.replace(/^@/, '') : row.telegramDisplayName }}</span></dd></div>
+          <div><dt>TG 用户</dt><dd><router-link v-if="!userId" :to="{ path:'/admin/bot-operations', query:{ tab:'user', telegramUserId:row.telegramUserId } }">{{ row.telegramUserId }}</router-link><template v-else>{{ row.telegramUserId }}</template><span v-if="row.telegramUsername || row.telegramDisplayName"> · {{ row.telegramUsername ? '@' + row.telegramUsername.replace(/^@/, '') : row.telegramDisplayName }}</span></dd></div>
           <div><dt>收件 Bot</dt><dd>{{ row.receiverBotId || '未记录' }}</dd></div>
           <div><dt>文件大小</dt><dd>{{ row.fileSize === null ? '未记录' : formatSize(row.fileSize) }}</dd></div>
           <div><dt>{{ row.kind === 'queue' ? '接收时间' : '签发时间' }}</dt><dd>{{ formatDateTime(row.createdAt, true) }}</dd></div>

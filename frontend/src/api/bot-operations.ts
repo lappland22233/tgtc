@@ -5,6 +5,67 @@ const base = '/admin/bot-operations';
 export type QueueStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
 export type GrantStatus = 'active' | 'expired' | 'revoked';
 export type BotListKind = 'queue' | 'grants' | 'audit';
+export type OverviewRange = '24h' | '7d' | '30d';
+export type UserGroupScope = 'queue' | 'grants' | 'audit';
+
+export interface UserGroupRow {
+  telegramUserId: string;
+  telegramUsername: string | null;
+  total: number;
+  byStatus: Record<string, number>;
+  bytes: string;
+  downloads: number;
+  lastAt: string | null;
+}
+
+export interface UserGroupPage {
+  scope: UserGroupScope;
+  page: number;
+  pageSize: number;
+  total: number;
+  rows: UserGroupRow[];
+}
+
+export interface UserGroupParams {
+  scope: UserGroupScope;
+  page: number;
+  pageSize: number;
+  keyword?: string;
+  from?: string;
+  to?: string;
+  receiverBotId?: string;
+}
+
+export interface OverviewTrendRow {
+  bucket: string;
+  queued: number;
+  running: number;
+  completed: number;
+  failed: number;
+  cancelled: number;
+  total: number;
+}
+
+export interface BotOperationsOverview {
+  timeRange: OverviewRange;
+  generatedAt: string;
+  queue: {
+    total: number;
+    byStatus: Record<QueueStatus, number>;
+    pending: number;
+    running: number;
+    bytes: string;
+    successRate: number | null;
+  };
+  grants: {
+    total: number;
+    byStatus: Record<GrantStatus, number>;
+    activeNow: number;
+    downloads: number;
+  };
+  trend: OverviewTrendRow[];
+  topBots: { receiverBotId: string; total: number; failed: number; bytes: string }[];
+}
 
 interface ReceivedFile {
   id: string;
@@ -75,11 +136,15 @@ interface Page<T> {
   pageSize: number;
 }
 
-async function get<T>(path: string, signal?: AbortSignal, params?: ListParams): Promise<T> {
+async function get<T>(path: string, signal?: AbortSignal, params?: ListParams | UserGroupParams | Record<string, unknown>): Promise<T> {
   const response = await api.get(base + path, { signal, params });
   return response.data.data;
 }
 
+export const getOverview = (timeRange: OverviewRange, signal: AbortSignal) =>
+  get<BotOperationsOverview>('/overview', signal, { timeRange });
+export const listUserGroups = (params: UserGroupParams, signal: AbortSignal) =>
+  get<UserGroupPage>('/user-groups', signal, params);
 export const listQueue = (params: ListParams, signal: AbortSignal) => get<Page<QueueRow>>('/queue', signal, params);
 export const listGrants = (params: ListParams, signal: AbortSignal) => get<Page<GrantRow>>('/grants', signal, params);
 const userPath = (id: string) => '/users/' + encodeURIComponent(id);
