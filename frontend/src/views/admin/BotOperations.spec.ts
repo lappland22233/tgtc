@@ -120,7 +120,14 @@ describe('Bot 收件管理', () => {
     expect(charts.options).toHaveLength(4);
     const trend = charts.options[0] as { series: { name: string; data: number[] }[] };
     expect(trend.series.map(series => series.name)).toEqual(['已完成', '失败', '已取消', '处理中', '待处理']);
-    expect(trend.series.map(series => series.data)).toEqual([[2], [1], [1], [1], [1]]);
+    const lengths = new Set(trend.series.map(series => series.data.length));
+    expect(lengths.size).toBe(1);
+    const bars = trend.series[0].data.length;
+    expect(bars).toBeGreaterThan(1);
+    // 唯一有数据的桶之前应补成 0，而不是被直接合并到数据桶
+    expect(trend.series[0].data.slice(0, -1).every(value => value === 0)).toBe(true);
+    expect(trend.series[0].data[bars - 1]).toBe(2);
+    expect(trend.series.map(series => series.data.reduce((sum, value) => sum + value, 0))).toEqual([2, 1, 1, 1, 1]);
     const bots = charts.options[3] as { series: { name: string; data: number[] }[] };
     expect(bots.series.map(series => series.data)).toEqual([[4], [1]]);
     await input('统计范围').setValue('30d');

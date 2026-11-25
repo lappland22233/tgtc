@@ -285,6 +285,12 @@ describe.each(dialects)('Telegram Bot 管理与审计 / %s', dialect => {
     });
     const byUsername = await ops.userGroups(Object.assign(new BotUserGroupsQuery(), { scope: 'queue', keyword: 'member' }));
     expect(byUsername.rows.some(row => row.telegramUserId === '911')).toBe(true);
+    // 搜索框按展示习惯输入 @username，快照里存的是不带 @ 的用户名
+    const byAtUsername = await ops.userGroups(Object.assign(new BotUserGroupsQuery(), { scope: 'queue', keyword: '@member' }));
+    expect(byAtUsername.rows.some(row => row.telegramUserId === '911')).toBe(true);
+    const lastAt = queue.rows[0].lastAt ?? '';
+    expect(lastAt).toMatch(/Z$/);
+    expect(new Date(lastAt).toISOString()).toBe(lastAt);
   });
 
   it('概览图表聚合按时间范围统计任务、直链与 Bot 排行', async () => {
@@ -308,6 +314,11 @@ describe.each(dialects)('Telegram Bot 管理与审计 / %s', dialect => {
     expect(overview.topBots).toContainEqual(expect.objectContaining({ receiverBotId: bot, total: 2, failed: 1 }));
     // 趋势与状态汇总必须满足同一口径：所有桶之和 = 范围内任务总数
     expect(overview.queue.total).toBe(overview.trend.reduce((sum, row) => sum + row.total, 0));
+    for (const row of overview.trend) {
+      // SQLite 的桶键不含时区，接口必须统一成 UTC ISO
+      expect(row.bucket).toMatch(/Z$/);
+      expect(new Date(row.bucket).toISOString()).toBe(row.bucket);
+    }
     expect(overview.queue.byStatus.completed).toBeGreaterThanOrEqual(1);
     expect(overview.queue.byStatus.failed).toBeGreaterThanOrEqual(1);
     expect(overview.queue.pending).toBeGreaterThanOrEqual(1);

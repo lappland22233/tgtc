@@ -104,6 +104,20 @@ function pick<T, K extends keyof T>(row: T, fields: readonly K[]): Pick<T, K> {
   return Object.fromEntries(fields.map((key) => [key, row[key]])) as Pick<T, K>;
 }
 
+/**
+ * SQLite 的 datetime 字符串不带时区（实际按 UTC 存储），直接返回给前端会被
+ * `new Date()` 当作浏览器本地时间。统一输出带 Z 的 ISO，与 PostgreSQL 分支一致。
+ */
+function isoTimestamp(value: string | Date | null | undefined): string | null {
+  if (value === null || value === undefined) return null;
+  if (value instanceof Date) return value.toISOString();
+  const text = String(value).trim();
+  if (!text) return null;
+  const hasZone = /(?:[zZ]|[+-]\d{2}:?\d{2})$/.test(text);
+  const parsed = new Date(hasZone ? text : text.replace(' ', 'T') + 'Z');
+  return Number.isNaN(parsed.getTime()) ? text : parsed.toISOString();
+}
+
 /** 管理处置的状态与审计共用事务。一条失败的审计不会留下未记录的撤销或封禁。 */
 async function record(
   manager: EntityManager, action: AuditAction, operator: string, resourceType: string, resourceId: string,
@@ -284,7 +298,8 @@ export class TelegramBotOperationsService {
     if ((from && !Number.isFinite(from.getTime())) || (to && !Number.isFinite(to.getTime())) || (from && to && from > to)) {
       throw new BadRequestException('时间格式无效或开始时间不能晚于结束时间');
     }
-    const keyword = (query.keyword ?? '').trim().toLowerCase();
+    // 展示与搜索提示使用 @username，但快照里存的是不带 @ 的用户名。
+    const keyword = (query.keyword ?? '').trim().toLowerCase().replace(/^@/, '');
     const like = keyword ? `%${keyword.replace(/[\\%_]/g, char => '\\' + char)}%` : null;
     const { page, pageSize } = query;
     const offset = (page - 1) * pageSize;
@@ -461,7 +476,7 @@ export class TelegramBotOperationsService {
           byStatus,
           bytes: String(row.bytes ?? '0'),
           downloads: Number(row.downloads ?? 0),
-          lastAt: row.lastAt instanceof Date ? row.lastAt.toISOString() : row.lastAt ? String(row.lastAt) : null,
+          lastAt: isoTimestamp(row.lastAt as string | Date | null | undefined),
         };
       }),
     };
@@ -535,7 +550,7 @@ export class TelegramBotOperationsService {
 
     const trend = new Map<string, OverviewTrendRow>();
     for (const row of trendRows) {
-      const key = row.bucket instanceof Date ? row.bucket.toISOString() : String(row.bucket);
+      const key = isoTimestamp(row.bucket) ?? String(row.bucket);
       const entry = trend.get(key) ?? { bucket: key, queued: 0, running: 0, completed: 0, failed: 0, cancelled: 0, total: 0 };
       const count = Number(row.count);
       entry[row.status] = count;

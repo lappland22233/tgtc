@@ -241,10 +241,63 @@ function pickCollapseStep(bucketCount: number, maxBuckets: number): number {
   return COLLAPSE_STEPS.find(step => Math.ceil(bucketCount / step) <= maxBuckets) ?? Math.ceil(bucketCount / maxBuckets);
 }
 
-const collapseStep = computed(() => pickCollapseStep(overview.value?.trend.length ?? 0, isMobile.value ? MAX_CHART_BUCKETS_MOBILE : MAX_CHART_BUCKETS_DESKTOP));
+const TREND_RANGE_MS: Record<OverviewRange, number> = {
+  '24h': 24 * 3_600_000,
+  '7d': 7 * 24 * 3_600_000,
+  '30d': 30 * 24 * 3_600_000,
+};
+
+const trendUnitMs = computed(() => overview.value?.timeRange === '30d' ? 86_400_000 : 3_600_000);
+
+/**
+ * 后端只返回有数据的时间桶。先按真实时间戳补齐空桶，再做合并，
+ * 避免空闲时段两侧的桶被误并进同一个「每 N 小时」区间。
+ */
+const filledTrend = computed<OverviewTrendRow[]>(() => {
+  const data = overview.value;
+  if (!data || data.trend.length === 0) return [];
+  const unitMs = trendUnitMs.value;
+  const times = data.trend
+    .map(row => new Date(row.bucket).getTime())
+    .filter(time => Number.isFinite(time))
+    .sort((a, b) => a - b);
+  if (times.length === 0) return data.trend;
+  const origin = times[0];
+  const generatedAt = new Date(data.generatedAt).getTime();
+  const rangeStart = generatedAt - TREND_RANGE_MS[data.timeRange];
+  const leading = Number.isFinite(rangeStart) ? Math.max(0, Math.ceil((origin - rangeStart) / unitMs)) : 0;
+  const lastKnown = times[times.length - 1];
+  const end = Number.isFinite(generatedAt) ? Math.max(generatedAt, lastKnown) : lastKnown;
+  const trailing = Math.max(0, Math.floor((end - origin) / unitMs));
+  const slots: OverviewTrendRow[] = Array.from({ length: leading + trailing + 1 }, (_, index) => ({
+    bucket: new Date(origin + (index - leading) * unitMs).toISOString(),
+    queued: 0,
+    running: 0,
+    completed: 0,
+    failed: 0,
+    cancelled: 0,
+    total: 0,
+  }));
+  for (const row of data.trend) {
+    const time = new Date(row.bucket).getTime();
+    if (!Number.isFinite(time)) continue;
+    const index = Math.round((time - origin) / unitMs) + leading;
+    const slot = slots[index];
+    if (!slot) continue;
+    slot.queued += row.queued;
+    slot.running += row.running;
+    slot.completed += row.completed;
+    slot.failed += row.failed;
+    slot.cancelled += row.cancelled;
+    slot.total += row.total;
+  }
+  return slots;
+});
+
+const collapseStep = computed(() => pickCollapseStep(filledTrend.value.length, isMobile.value ? MAX_CHART_BUCKETS_MOBILE : MAX_CHART_BUCKETS_DESKTOP));
 
 const chartTrend = computed<OverviewTrendRow[]>(() => {
-  const rows = overview.value?.trend ?? [];
+  const rows = filledTrend.value;
   const step = collapseStep.value;
   if (step <= 1) return rows;
   const collapsed: OverviewTrendRow[] = [];
