@@ -8,7 +8,10 @@ import type { TelegramBotOperationsService } from './telegram-bot-operations.ser
 import type { TelegramBotInboundQueueService } from './telegram-bot-inbound-queue.service';
 import type { TelegramBotGrantService } from './telegram-bot-grant.service';
 import type { TelegramBotConfigService } from './telegram-bot-config.service';
-import { BanTelegramUserDto, BotGrantsQuery, BotOperationsPage, BotOperationsUserParams, BotQueueQuery } from './telegram-bot-operations.dto';
+import {
+  BanTelegramUserDto, BotGrantsQuery, BotOperationsPage, BotOperationsUserParams,
+  BotOverviewQuery, BotQueueQuery, BotUserGroupsQuery,
+} from './telegram-bot-operations.dto';
 
 const dialects = ['sqlite', ...(process.env.PG_API_KEY_IT === '1' ? ['postgres'] : [])];
 
@@ -197,6 +200,15 @@ describe.each(dialects)('Telegram Bot 管理与审计 / %s', dialect => {
       expect((await fetch(origin + '/api/admin/bot-operations/grants')).status).toBe(401);
       expect((await manage('/grants', { headers: { authorization: 'Bearer fixture-member' } })).status).toBe(403);
       expect((await manage('/queue?pageSize=101')).status).toBe(400);
+      expect((await manage('/overview?timeRange=90d')).status).toBe(400);
+      expect((await manage('/user-groups?scope=bad')).status).toBe(400);
+      const groups = await manage('/user-groups?scope=queue');
+      expect(groups.status).toBe(200);
+      expect(await groups.json()).toMatchObject({ scope: 'queue', rows: expect.any(Array) });
+      const overview = await manage('/overview?timeRange=24h');
+      expect(overview.status).toBe(200);
+      expect(await overview.json()).toMatchObject({ timeRange: '24h', queue: { byStatus: expect.any(Object) } });
+      expect(await (await manage('/overview')).json()).toMatchObject({ timeRange: '7d' });
       expect((await manage('/users/not-a-number')).status).toBe(400);
       expect((await manage('/users/501/ban', { method: 'POST', body: JSON.stringify({ reason: '   ' }) })).status).toBe(400);
       const first = await issue('5001', '501', 'gdrive');
@@ -239,6 +251,73 @@ describe.each(dialects)('Telegram Bot 管理与审计 / %s', dialect => {
     await expect(ops.userDetails('401')).resolves.toMatchObject({ ban: null, quota: { used: 1 }, grants: { active: 1 } });
     expect((await ops.listQueue(Object.assign(new BotQueueQuery(), { telegramUserId: '401' }))).rows[0]).toMatchObject({ id: task.id, status: 'queued' });
   });
+
+  it('按 TG 用户聚合收件、直链与审计，并支持关键字、Bot 与分页筛选', async () => {
+    await enqueue('9101', '911');
+    await enqueue('9101', '911');
+    await enqueue('9101', '912');
+    await enqueue('9102', '911');
+    const queue = await ops.userGroups(Object.assign(new BotUserGroupsQuery(), { scope: 'queue', keyword: '911' }));
+    expect(queue).toMatchObject({
+      scope: 'queue', total: 1,
+      rows: [{ telegramUserId: '911', total: 3, bytes: '36', byStatus: { queued: 3, running: 0, completed: 0, failed: 0, cancelled: 0 }, lastAt: expect.any(String) }],
+    });
+    expect(queue.rows[0].telegramUsername).toBe('member');
+    const filtered = await ops.userGroups(Object.assign(new BotUserGroupsQuery(), { scope: 'queue', keyword: '911', receiverBotId: '9102' }));
+    expect(filtered.rows[0]).toMatchObject({ telegramUserId: '911', total: 1 });
+    const paged = await ops.userGroups(Object.assign(new BotUserGroupsQuery(), { scope: 'queue', keyword: '91', pageSize: 1 }));
+    expect(paged).toMatchObject({ total: 2, page: 1, pageSize: 1, rows: [expect.objectContaining({ telegramUserId: '911' })] });
+    expect(paged.rows).toHaveLength(1);
+
+    await issue('9201', '921', 'gdrive');
+    await issue('9201', '921', 'telegram', -1);
+    const grants = await ops.userGroups(Object.assign(new BotUserGroupsQuery(), { scope: 'grants', keyword: '921' }));
+    expect(grants).toMatchObject({
+      scope: 'grants', total: 1,
+      rows: [{ telegramUserId: '921', total: 2, byStatus: { active: 1, expired: 1, revoked: 0 }, downloads: 0 }],
+    });
+
+    await expect(ops.ban('911', 'group fixture', operator)).resolves.toMatchObject({ cancelledTasks: 3 });
+    const audit = await ops.userGroups(Object.assign(new BotUserGroupsQuery(), { scope: 'audit', keyword: '911' }));
+    expect(audit).toMatchObject({
+      scope: 'audit', total: 1,
+      rows: [{ telegramUserId: '911', total: 1, byStatus: {}, telegramUsername: 'member', lastAt: expect.any(String) }],
+    });
+    const byUsername = await ops.userGroups(Object.assign(new BotUserGroupsQuery(), { scope: 'queue', keyword: 'member' }));
+    expect(byUsername.rows.some(row => row.telegramUserId === '911')).toBe(true);
+  });
+
+  it('概览图表聚合按时间范围统计任务、直链与 Bot 排行', async () => {
+    const bot = '9001';
+    await enqueue(bot, '901');
+    const first = await queue.claimNext(bot);
+    if (!first) throw new Error('fixture task was not claimed');
+    const issued = await queue.complete(first, manager => grants.issue({
+      receiverBotId: bot, telegramUserId: '901', username: null, displayName: null, chatId: '901',
+      messageId: String(++messageId), telegramFileId: 'private-telegram-file-id', storageBackend: 'telegram',
+      fileName: 'fixture', fileSize: '12', mimeType: null,
+    }, 24, manager));
+    expect(issued).not.toBeNull();
+    await enqueue(bot, '901');
+    const second = await queue.claimNext(bot);
+    if (!second) throw new Error('fixture task was not claimed');
+    await expect(queue.fail(second, 'transfer_failed')).resolves.toBe(true);
+
+    const overview = await ops.overview(Object.assign(new BotOverviewQuery(), { timeRange: '7d' }));
+    expect(overview.timeRange).toBe('7d');
+    expect(overview.topBots).toContainEqual(expect.objectContaining({ receiverBotId: bot, total: 2, failed: 1 }));
+    // 趋势与状态汇总必须满足同一口径：所有桶之和 = 范围内任务总数
+    expect(overview.queue.total).toBe(overview.trend.reduce((sum, row) => sum + row.total, 0));
+    expect(overview.queue.byStatus.completed).toBeGreaterThanOrEqual(1);
+    expect(overview.queue.byStatus.failed).toBeGreaterThanOrEqual(1);
+    expect(overview.queue.pending).toBeGreaterThanOrEqual(1);
+    expect(overview.queue.running).toBeGreaterThanOrEqual(1);
+    expect(overview.queue.successRate).toBeGreaterThan(0);
+    expect(overview.queue.successRate).toBeLessThanOrEqual(1);
+    expect(overview.grants.total).toBe(overview.grants.byStatus.active + overview.grants.byStatus.expired + overview.grants.byStatus.revoked);
+    expect(overview.grants.activeNow).toBeGreaterThanOrEqual(1);
+    expect(overview.grants.downloads).toBeGreaterThanOrEqual(0);
+  });
 });
 
 describe('Bot 运维输入校验', () => {
@@ -246,7 +325,9 @@ describe('Bot 运维输入校验', () => {
   it('身份证明、时间、状态和分页严格校验，原因必须有文字', async () => {
     for (const [input, type] of [
       [{ telegramUserId: '-123' }, BotOperationsUserParams], [{ status: 'active' }, BotQueueQuery],
-      [{ from: 'not-a-date' }, BotGrantsQuery], [{ pageSize: 101 }, BotGrantsQuery], [{ reason: '    ' }, BanTelegramUserDto],
+      [{ from: 'not-a-date' }, BotGrantsQuery], [{ pageSize: 101 }, BotGrantsQuery], [{ timeRange: '90d' }, BotOverviewQuery],
+      [{ scope: 'bad' }, BotUserGroupsQuery], [{ keyword: 'x'.repeat(65) }, BotUserGroupsQuery],
+      [{ reason: '    ' }, BanTelegramUserDto],
       [{ reason: 'x'.repeat(501) }, BanTelegramUserDto],
     ] as const) await expect(pipe.transform(input, { type: 'query', metatype: type })).rejects.toMatchObject({ status: 400 });
     expect(await pipe.transform({ reason: '  incident  ' }, { type: 'body', metatype: BanTelegramUserDto })).toMatchObject({ reason: 'incident' });

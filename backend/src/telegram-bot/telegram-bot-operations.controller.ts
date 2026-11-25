@@ -5,7 +5,10 @@ import { Roles } from '../common/decorators/roles.decorator';
 import { User, UserRole } from '../common/entities/user.entity';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
-import { BanTelegramUserDto, BotGrantsQuery, BotOperationsTimePage, BotOperationsUserParams, BotQueueQuery } from './telegram-bot-operations.dto';
+import {
+  BanTelegramUserDto, BotGrantsQuery, BotOperationsTimePage, BotOperationsUserParams,
+  BotOverviewQuery, BotQueueQuery, BotUserGroupsQuery,
+} from './telegram-bot-operations.dto';
 import { TelegramBotOperationsService } from './telegram-bot-operations.service';
 
 @Controller('admin/bot-operations')
@@ -14,9 +17,19 @@ import { TelegramBotOperationsService } from './telegram-bot-operations.service'
 export class TelegramBotOperationsController {
   constructor(private readonly operations: TelegramBotOperationsService) {}
 
+  @Get('overview')
+  overview(@Query() query: BotOverviewQuery) {
+    return this.operations.overview(query);
+  }
+
   @Get('queue')
   queue(@Query() query: BotQueueQuery) {
     return this.operations.listQueue(query);
+  }
+
+  @Get('user-groups')
+  userGroups(@Query() query: BotUserGroupsQuery) {
+    return this.operations.userGroups(query);
   }
 
   @Post('queue/:id/cancel')

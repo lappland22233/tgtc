@@ -44,9 +44,9 @@ import { formatDateTime, formatSize } from '@/utils/format';
 import { getErrorMessage } from '@/utils/error';
 import BotOperationsList from './BotOperationsList.vue';
 
-const props = defineProps<{ userId: string }>();
+const props = defineProps<{ userId: string; initialKind?: BotListKind }>();
 const historyTabs = [{ kind:'queue', label:'上传历史' },{ kind:'grants', label:'直链历史' },{ kind:'audit', label:'操作审计' }] as const;
-const kind = ref<BotListKind>('queue');
+const kind = ref<BotListKind>(props.initialKind ?? 'queue');
 const revision = ref(0);
 const overview = ref<BotUserOverview | null>(null);
 const error = ref('');
