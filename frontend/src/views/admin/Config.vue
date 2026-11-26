@@ -310,6 +310,12 @@
             按「有效 Bot 数」（已启用 + 存储 Chat + 健康 + 已有 ready 副本）自动调整权重预算；关闭后只保留人工设置
           </span>
         </t-form-item>
+        <t-form-item label="优先用户账号回源">
+          <t-switch v-model="downloadConfig.preferUserAccount" />
+          <span style="margin-left: 8px; font-size: 12px; color: var(--td-text-color-secondary);">
+            开启后下载优先用 Premium 用户账号（MTProto）回源，命中失败自动回退 Bot 链路；关闭即回到纯 Bot 行为（临时能力，约 30 天后关闭回退）
+          </span>
+        </t-form-item>
         <t-form-item label="排队上限 (个)">
           <t-input-number v-model="downloadConfig.queueCapacity" :min="1" :max="10000" :step="1" />
           <span style="margin-left: 8px; font-size: 12px; color: var(--td-text-color-secondary);">等待磁盘或上游的名额上限，超过后下载请求直接返回「服务器繁忙」</span>
@@ -661,6 +667,8 @@ const downloadConfig = ref({
   upstreamQueuePolicy: 'strict_fifo' as 'strict_fifo' | 'bounded_fit',
   // 全局权重预算自动扩缩容开关（按有效 Bot 数）
   autoCapacityEnabled: true,
+  // 下载优先使用 Premium 用户账号（MTProto）回源；关闭即回到纯 Bot 链路
+  preferUserAccount: false,
 });
 
 interface DownloadRuntime {

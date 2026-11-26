@@ -140,6 +140,43 @@ export class TelegramMainChatAnchorService {
   }
 
   /**
+   * 下载路径的**只读**锚点查询：返回主群里的 `(chatId, messageId)`。
+   *
+   * 与 `ensureAnchor` 的区别（必须严格区分）：
+   * - 本方法**绝不搬运、绝不写库、绝不抛错**；任何前置缺失（无启用规则 / 主群冲突 /
+   *   未跑过镜像 / 锚点未 ready）都返回 `null`，由调用方回退到 Bot 链路。
+   *   下载不能被锚点问题阻塞，这与扩散路径的 blocked 语义相反。
+   * - 只接受 `status='ready'` 且 `anchorChatId` 等于**当前**主群的锚点：主群被改配置后
+   *   旧锚点指向的群可能已不是 user 账号的成员，继续用会取流失败。
+   */
+  async findReadyAnchorForDownload(
+    ownerType: TelegramCopyOwnerType,
+    ownerId: string,
+  ): Promise<{ chatId: string; messageId: string } | null> {
+    const id = (ownerId || '').trim();
+    if (!id) return null;
+    try {
+      const resolution = await this.config.resolveMainChatId();
+      if (!resolution.ok) return null;
+      const mainChatId = resolution.chatId.trim();
+      if (!mainChatId || this.isPrivateChat(mainChatId)) return null;
+
+      const row = await this.repo.findOne({ where: { ownerType, ownerId: id } });
+      if (!row || row.status !== 'ready') return null;
+      if (String(row.anchorChatId ?? '').trim() !== mainChatId) return null;
+      const messageId = String(row.anchorMessageId ?? '').trim();
+      if (!messageId) return null;
+      return { chatId: mainChatId, messageId };
+    } catch (error) {
+      this.logger.debug(
+        `下载锚点查询失败（按无锚点处理，回退 Bot 链路）：`
+        + `${ownerType}:${id} ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return null;
+    }
+  }
+
+  /**
    * 确保主群锚点存在（必要时搬运），返回可供 MTProto 中继使用的源定位。
    *
    * 幂等：同一 `(ownerType, ownerId)` 的重复调用只会搬运一次（锚点表 + 进程内单飞双保险）。

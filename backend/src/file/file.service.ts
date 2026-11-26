@@ -59,6 +59,7 @@ import { DownloadResourceException, DOWNLOAD_ERROR_CODES, DOWNLOAD_RESOURCE_DEFA
 import { maskIdentifier } from '../telegram-accounts/telegram-account-view';
 // 可插拔存储后端（S3 / WebDAV / GDrive 账号池）：可选依赖，未装配时逐字节等价于原 TG 链路
 import { StorageRouterService } from '../storage/storage-router.service';
+import { UserPreferredDownloadService } from '../telegram-account-pool/user-preferred-download.service';
 import type { StorageUploadReceipt } from '../storage/storage.types';
 import { GDRIVE_CACHE_LEASE_MS, gdriveCacheBackoffMs } from '../common/utils/gdrive-cache-backoff';
 import {
@@ -201,6 +202,9 @@ export class FileService implements OnModuleInit {
     // 可插拔存储路由（可选依赖；未装配时所有上传/回源逐字节等价于原 TG 链路）
     @Optional() @Inject(StorageRouterService)
     private readonly storageRouter: StorageRouterService | null = null,
+    // 临时能力：下载优先 Premium 用户账号（MTProto）回源；开关关闭时不介入
+    @Optional() @Inject(UserPreferredDownloadService)
+    private readonly userPreferredDownload: UserPreferredDownloadService | null = null,
   ) {
   }
 
@@ -281,6 +285,42 @@ export class FileService implements OnModuleInit {
    * 安全：这里只做「取流」选择，绝不把 A 账号的 `file_id` 交给 B 账号——
    * 每个候选副本都带有它自己的 `file_id`（副本表事实）。
    */
+  /**
+   * 尝试用 user 账号回源站内文件；返回 null 表示未命中（调用方继续 Bot 链路）。
+   *
+   * 锚点归属依次尝试 `file:<id>` 与 `fileUnique:<内容标识>`：镜像任务按这两种归属建锚点，
+   * 老文件可能只有其中之一。
+   */
+  private async tryUserPreferredStream(
+    file: File,
+    expectedSize: number,
+    _noCache: boolean,
+  ): Promise<{ stream: Readable; info: { file_id: string; file_path: string; file_size: number } } | null> {
+    const preferred = this.userPreferredDownload;
+    if (!preferred) return null;
+    const owners: Array<{ ownerType: 'file' | 'fileUnique'; ownerId: string }> = [
+      { ownerType: 'file', ownerId: file.id },
+    ];
+    const uniqueId = (file.telegramFileUniqueId || '').trim();
+    if (uniqueId) owners.push({ ownerType: 'fileUnique', ownerId: uniqueId });
+
+    for (const owner of owners) {
+      const opened = await preferred.tryOpen({
+        ownerType: owner.ownerType,
+        ownerId: owner.ownerId,
+        expectedSize,
+      });
+      if (opened) {
+        return {
+          stream: opened.stream,
+          // user 流没有 Bot API 的 file_path 概念，不回写路径
+          info: { file_id: opened.info.file_id, file_path: '', file_size: opened.info.file_size || expectedSize },
+        };
+      }
+    }
+    return null;
+  }
+
   private async openTelegramSourceStream(
     file: File,
     expectedSize: number,
@@ -289,6 +329,21 @@ export class FileService implements OnModuleInit {
     const noCache = options?.noCache === true;
     const poolDownload = this.accountAwareDownload;
     const defaultAccountId = this.defaultBotAccountId();
+
+    // 临时能力：优先用 Premium 用户账号（MTProto）回源。开关关闭时该方法直接返回 null，
+    // 后续链路与改造前逐字节一致（fail-open：任何失败都继续走 Bot）。
+    if (this.userPreferredDownload?.isEnabled()) {
+      const userIdOpened = await this.tryUserPreferredStream(file, expectedSize, noCache)
+        .catch((error: unknown) => {
+          this.logger.debug(
+            `user 优先回源异常，回退 Bot（file=${file.id}）：`
+            + `${error instanceof Error ? error.message : String(error)}`,
+          );
+          return null;
+        });
+      if (userIdOpened) return userIdOpened;
+    }
+
     if (poolDownload?.isActive() && this.fileCopies) {
       // 下载冷路径上的老文件补扩散：是否建单由懒触发服务按「冷却窗口 + 副本缺口 + 源锚点」
       // 自行判定。这里再兜一层 try/catch：补扩散的任何失败都不得改变下载行为（fail-open）。
@@ -493,9 +548,41 @@ export class FileService implements OnModuleInit {
     options: { localPath?: string; signal?: AbortSignal; knownSize?: number } = {},
   ): Promise<void> {
     if (!this.storageRouter) return;
-    // 进程内互斥：同一文件在本实例内同时只允许一次双写（重试扫描与上传收尾可能并发）
-    if (this.gdriveCacheInflight.has(fileId)) return;
-    this.gdriveCacheInflight.add(fileId);
+    // 进程内互斥：同一文件在本实例内同时只允许一次双写（重试扫描与上传收尾可能并发）。
+    // 但覆盖上传会用新版本再次调用；此时不能直接丢弃——旧版本的上传会因
+    // uploadVersion 校验失败而删掉自己的对象、并把缓存状态重置为 none（重试扫描不扫 none），
+    // 新版本就此永久失去镜像。改为排队：等在飞的那次结束后再跑一遍。
+    const running = this.gdriveCacheInflight.get(fileId);
+    if (running) {
+      this.gdriveCacheRepending.set(fileId, { localPath: options.localPath, knownSize: options.knownSize });
+      await running;
+      const pending = this.gdriveCacheRepending.get(fileId);
+      if (pending) {
+        this.gdriveCacheRepending.delete(fileId);
+        // 用排队时登记的最新参数重跑（覆盖上传的新版本）
+        await this.mirrorGDriveCache(fileId, {
+          localPath: pending.localPath,
+          knownSize: pending.knownSize,
+          signal: options.signal,
+        });
+      }
+      return;
+    }
+    const task = this.runMirrorGDriveCache(fileId, options);
+    this.gdriveCacheInflight.set(fileId, task);
+    try {
+      await task;
+    } finally {
+      this.gdriveCacheInflight.delete(fileId);
+    }
+  }
+
+  private async runMirrorGDriveCache(
+    fileId: string,
+    options: { localPath?: string; signal?: AbortSignal; knownSize?: number } = {},
+  ): Promise<void> {
+    const storageRouter = this.storageRouter;
+    if (!storageRouter) return;
     let leaseTimer: NodeJS.Timeout | null = null;
     let receipt: StorageUploadReceipt | null = null;
     let file: File | null = null;
@@ -508,7 +595,7 @@ export class FileService implements OnModuleInit {
         this.logger.debug(`文件 ${fileId} 大小未知，跳过 Google 双写`);
         return;
       }
-      if (!(await this.storageRouter.isGDriveCacheModeEnabled().catch(() => false))) return;
+      if (!(await storageRouter.isGDriveCacheModeEnabled().catch(() => false))) return;
 
       // 抢占失败（其它执行者持有租约）不是错误，直接退出即可
       if (!(await this.claimGDriveCacheMirror(file))) return;
@@ -517,7 +604,7 @@ export class FileService implements OnModuleInit {
       leaseTimer = this.startGDriveCacheLeaseRenewal(file.id);
       const targetFile = file; // 供闭包捕获（file 在下方可能被重新赋值）
       const localPath = options.localPath && fs.existsSync(options.localPath) ? options.localPath : undefined;
-      receipt = await this.storageRouter.upload({
+      receipt = await storageRouter.upload({
         backendType: 'gdrive',
         objectName: targetFile.originalName,
         mimeType: targetFile.mimeType || undefined,
@@ -542,7 +629,7 @@ export class FileService implements OnModuleInit {
       if (updated.affected === 0) {
         this.logger.warn(`文件 ${file.id} 版本已变更或记录已删除，清理孤立的 Google 副本`);
         if (receipt.accountId) {
-          await this.storageRouter.deleteRemoteObject('gdrive', receipt.accountId, receipt.objectRef).catch(() => {});
+          await storageRouter.deleteRemoteObject('gdrive', receipt.accountId, receipt.objectRef).catch(() => {});
         }
         return;
       }
@@ -550,7 +637,7 @@ export class FileService implements OnModuleInit {
       this.logger.log(`文件 ${file.id} 已同步至 Google 存储（账号: ${uploadedAccountId ?? 'unknown'}）`);
     } catch (error) {
       if (receipt?.accountId) {
-        await this.storageRouter.deleteRemoteObject('gdrive', receipt.accountId, receipt.objectRef).catch(() => {});
+        await storageRouter.deleteRemoteObject('gdrive', receipt.accountId, receipt.objectRef).catch(() => {});
       }
       // 抢占阶段就可能抛错（DB 抖动）：必须落成 failed 才能进入重试扫描。
       // 若让它冒泡出去，processor 的收尾（含临时文件清理）会被跳过，而文件已 ready，
@@ -567,12 +654,13 @@ export class FileService implements OnModuleInit {
       }
     } finally {
       if (leaseTimer) clearInterval(leaseTimer);
-      this.gdriveCacheInflight.delete(fileId);
     }
   }
 
   /** 进程内在飞的双写（同一实例内不会并发上传同一文件） */
-  private readonly gdriveCacheInflight = new Set<string>();
+  private readonly gdriveCacheInflight = new Map<string, Promise<void>>();
+  /** 在飞期间又被触发的文件（覆盖上传的新版本）→ 结束后补跑一次 */
+  private readonly gdriveCacheRepending = new Map<string, { localPath?: string; knownSize?: number }>();
 
   /** 上传期间持续续期，避免长传输被重试扫描重复领取 */
   private startGDriveCacheLeaseRenewal(fileId: string): NodeJS.Timeout {

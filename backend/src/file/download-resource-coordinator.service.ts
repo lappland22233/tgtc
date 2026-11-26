@@ -55,6 +55,13 @@ export const DOWNLOAD_CONFIG_KEYS = {
    * 默认 0（不扣除）：只有确认同卷部署且 0 会掩盖问题时才应显式配置。
    */
   VOLUME_PEER_RESERVE_GB: 'FILE_DOWNLOAD_VOLUME_PEER_RESERVE_GB',
+  /**
+   * 下载是否优先使用 Premium 用户账号（MTProto）回源。
+   *
+   * 临时能力（30 天回退窗口）：置 `false` 即回到纯 Bot 链路，无需改代码/重启。
+   * 布尔键，因此**不加入** `DOWNLOAD_CONFIG_RANGES`（那是数值区间表）。
+   */
+  PREFER_USER_ACCOUNT: 'DOWNLOAD_PREFER_USER_ACCOUNT',
 } as const;
 
 export const DOWNLOAD_CONFIG_DEFAULTS: Record<string, string> = {
@@ -70,6 +77,7 @@ export const DOWNLOAD_CONFIG_DEFAULTS: Record<string, string> = {
   [DOWNLOAD_CONFIG_KEYS.UPSTREAM_QUEUE_POLICY]: 'strict_fifo',
   [DOWNLOAD_CONFIG_KEYS.AUTO_CAPACITY_ENABLED]: 'true',
   [DOWNLOAD_CONFIG_KEYS.VOLUME_PEER_RESERVE_GB]: '0',
+  [DOWNLOAD_CONFIG_KEYS.PREFER_USER_ACCOUNT]: 'false',
 };
 
 /**

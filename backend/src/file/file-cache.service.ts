@@ -104,6 +104,13 @@ export class FileCacheService implements OnApplicationShutdown {
   private taskRetentionMs = parsePositiveNumber(DOWNLOAD_CONFIG_DEFAULTS[DOWNLOAD_CONFIG_KEYS.TASK_RETENTION_SECONDS], 900) * 1000;
   /** 无缓存模式：文件下载实时回源直通，不读写本地缓存（可从管理后台动态调整） */
   private noCacheMode = process.env.FILE_CACHE_NO_CACHE_MODE === 'true';
+  /**
+   * 下载优先使用 Premium 用户账号（MTProto）回源。
+   *
+   * 临时能力：后台置 false 即回到纯 Bot 链路（30 天回退窗口）。
+   * 默认 false —— 未显式开启时下载行为与改造前完全一致。
+   */
+  private preferUserAccount = false;
 
   /** 关闭信号：置位后不再新建 build/spool 会话，正在进行的会话按策略收尾 */
   private shuttingDown = false;
@@ -352,6 +359,11 @@ export class FileCacheService implements OnApplicationShutdown {
     return this.noCacheMode;
   }
 
+  /** 下载是否应优先尝试 Premium 用户账号（MTProto）回源 */
+  isPreferUserAccount(): boolean {
+    return this.preferUserAccount;
+  }
+
   /** 从配置缓存加载阈值 */
   private async reloadConfig(): Promise<void> {
     try {
@@ -361,7 +373,7 @@ export class FileCacheService implements OnApplicationShutdown {
         maxSizeStr, minFreeStr, ttlStr, noCacheStr,
         maxReservedStr, upstreamsStr, queueCapacityStr, queueTimeoutStr,
         spoolGraceStr, directWindowStr, directWaitStr, taskRetentionStr,
-        upstreamQueuePolicyStr, volumePeerReserveStr,
+        upstreamQueuePolicyStr, volumePeerReserveStr, preferUserAccountStr,
       ] = await Promise.all([
         this.configCache.get(CACHE_CONFIG_KEYS.MAX_SIZE_GB, CACHE_CONFIG_DEFAULTS[CACHE_CONFIG_KEYS.MAX_SIZE_GB]),
         this.configCache.get(CACHE_CONFIG_KEYS.MIN_FREE_DISK_GB, CACHE_CONFIG_DEFAULTS[CACHE_CONFIG_KEYS.MIN_FREE_DISK_GB]),
@@ -377,6 +389,7 @@ export class FileCacheService implements OnApplicationShutdown {
         this.configCache.get(d.TASK_RETENTION_SECONDS, dd[d.TASK_RETENTION_SECONDS]),
         this.configCache.get(d.UPSTREAM_QUEUE_POLICY, dd[d.UPSTREAM_QUEUE_POLICY]),
         this.configCache.get(d.VOLUME_PEER_RESERVE_GB, dd[d.VOLUME_PEER_RESERVE_GB]),
+        this.configCache.get(d.PREFER_USER_ACCOUNT, dd[d.PREFER_USER_ACCOUNT]),
       ]);
       this.maxCacheSizeBytes = Math.max(1, parseInt(maxSizeStr) || 10) * 1024 * 1024 * 1024;
       this.minFreeDiskBytes = Math.max(0.5, parseFloat(minFreeStr) || 1) * 1024 * 1024 * 1024;
@@ -415,6 +428,14 @@ export class FileCacheService implements OnApplicationShutdown {
       // 无缓存模式翻转：false → true 时中止所有进行中的缓存构建
       const prevNoCacheMode = this.noCacheMode;
       this.noCacheMode = noCacheStr === 'true';
+      const prevPreferUser = this.preferUserAccount;
+      this.preferUserAccount = (preferUserAccountStr || '').trim().toLowerCase() === 'true';
+      if (prevPreferUser !== this.preferUserAccount) {
+        this.logger.log(
+          `下载回源策略已切换：${this.preferUserAccount ? '优先 Premium 用户账号（MTProto）' : '仅 Bot 账号'}`
+          + '（已开始的下载不受影响）',
+        );
+      }
       this.logger.log(
         `缓存配置: 上限 ${this.maxCacheSizeBytes / 1024 / 1024 / 1024}GB, ` +
         `剩余 ${this.minFreeDiskBytes / 1024 / 1024 / 1024}GB, ` +

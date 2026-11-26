@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createHash } from 'crypto';
+import { Readable } from 'stream';
 
 /** MTProto 客户端模块候选：优先使用维护中的 teleproto，兼容已归档的 gramjs */
 const CLIENT_MODULE_CANDIDATES = ['teleproto', 'telegram'] as const;
@@ -127,6 +128,10 @@ interface MtprotoClient {
   getInputEntity(entity: unknown): Promise<unknown>;
   copyMessages?(entity: unknown, params: Record<string, unknown>): Promise<MtprotoMessage[]>;
   forwardMessages?(entity: unknown, params: Record<string, unknown>): Promise<MtprotoMessage[]>;
+  /** 按 chat + ids 取消息（MTProto 流式下载的入口：需要 Message 才能拿到 media/document） */
+  getMessages?(entity: unknown, params: Record<string, unknown>): Promise<Array<Record<string, unknown>>>;
+  /** 流式下载：接受 Message / Document / InputFileLocation，返回 Buffer 异步迭代器 */
+  iterDownload?(file: unknown, params?: Record<string, unknown>): AsyncGenerator<Buffer, void, unknown>;
   session: MtprotoSession;
 }
 
@@ -279,6 +284,195 @@ export class TelegramUserClientService {
       const identity = me ? this.toIdentity(me) : await this.resolveIdentity(client);
       return { identity, session: client.session.save() };
     });
+  }
+
+  /**
+   * 探测「该用户账号能否真正读到这条群消息」。
+   *
+   * 为什么不用账号的 `capabilities.canReadSource`：那是**授权成功时的硬编码 true**
+   * （见 TelegramAccountsService.verifySession），并不是真实可达性，拿它当门禁会把
+   * 「不在群里的账号」当成可用。这里用 `getMessages` 做一次真实读取。
+   */
+  async probeChatReadable(
+    credentials: TelegramUserCredentials,
+    chatId: string,
+    messageId: string,
+  ): Promise<boolean> {
+    try {
+      return await this.withClient(credentials, async (client) => {
+        const message = await this.fetchMessage(client, chatId, messageId);
+        return Boolean(message);
+      });
+    } catch (error) {
+      const failure = error instanceof TelegramUserClientError ? error : this.classify(error);
+      this.logger.debug(`用户账号读取探测失败（chat=${chatId}）：${failure.kind}`);
+      return false;
+    }
+  }
+
+  /**
+   * 用用户账号（MTProto）流式下载一条群消息里的文件。
+   *
+   * 与其它方法的关键差异：**不能复用 `withClient`** —— 它在 `finally` 里立即
+   * `disconnect()`，而这里要求连接活到流结束。因此自建连接生命周期，把
+   * `disconnect()` 挂在流的 `end`/`error`/`close` 上。
+   *
+   * 背压：手写异步迭代 + `push()` 返回值判断，缓冲满时停止拉取，不做无界缓存。
+   *
+   * `FILE_REFERENCE_EXPIRED`：`iterDownload` **不传 `msgData`**，因此 teleproto
+   * 不会自动刷新 fileReference（只有 `downloadFile` 才有）。这里自行重试一次：
+   * 重新取 Message 拿到新引用后从头重开。
+   */
+  async openUserStream(
+    credentials: TelegramUserCredentials,
+    params: { chatId: string; messageId: string; expectedSize?: number; signal?: AbortSignal },
+  ): Promise<{ stream: Readable; size: number | null }> {
+    const module = this.tryLoad();
+    if (!module) {
+      throw new TelegramUserClientError(this.loadFailure || 'MTProto 客户端模块不可用', 'unavailable');
+    }
+    if (!Number.isSafeInteger(credentials.apiId) || credentials.apiId <= 0 || !credentials.apiHash) {
+      throw new TelegramUserClientError('API ID / API Hash 配置无效', 'auth');
+    }
+
+    let client: MtprotoClient;
+    try {
+      const session = new module.sessions.StringSession(credentials.session || '');
+      client = new module.TelegramClient(session, credentials.apiId, credentials.apiHash, {
+        connectionRetries: 3,
+        useWSS: false,
+        autoReconnect: false,
+        baseLogger: this.createBaseLogger(module),
+      });
+    } catch (error) {
+      const failure = this.classify(error);
+      this.logger.warn(`MTProto 客户端构造失败（下载，${failure.kind}）：${failure.message}`);
+      throw failure;
+    }
+
+    let disconnected = false;
+    const disconnect = async (): Promise<void> => {
+      if (disconnected) return;
+      disconnected = true;
+      try {
+        await client.disconnect();
+      } catch {
+        // 断连失败不影响结果
+      }
+    };
+
+    try {
+      await this.withTimeout(client.connect(), 'connect');
+      const { message, size } = await this.loadDownloadableMessage(client, params);
+      if (params.expectedSize !== undefined && size !== null && size !== params.expectedSize) {
+        throw new TelegramUserClientError(
+          `源文件大小不一致（期望 ${params.expectedSize}，实际 ${size}）`,
+          'not_found',
+        );
+      }
+
+      const iterator = this.iterateDownload(client, message, params.signal);
+      const stream = Readable.from(this.withFileReferenceRetry(client, params, iterator), {
+        objectMode: false,
+      });
+      // 连接生命周期跟随流：正常结束、出错、被 destroy 都要释放
+      const release = (): void => { void disconnect(); };
+      stream.once('end', release);
+      stream.once('error', release);
+      stream.once('close', release);
+      return { stream, size };
+    } catch (error) {
+      await disconnect();
+      throw error instanceof TelegramUserClientError ? error : this.classify(error);
+    }
+  }
+
+  /** 取消息并确认其确实带可下载的 document */
+  private async loadDownloadableMessage(
+    client: MtprotoClient,
+    params: { chatId: string; messageId: string },
+  ): Promise<{ message: Record<string, unknown>; size: number | null }> {
+    const message = await this.fetchMessage(client, params.chatId, params.messageId);
+    if (!message) {
+      throw new TelegramUserClientError(
+        `群消息不可读（chat=${params.chatId}，message=${params.messageId}）：账号可能不在群内`,
+        'not_found',
+      );
+    }
+    const media = message.media as Record<string, unknown> | undefined;
+    const document = media?.document as Record<string, unknown> | undefined;
+    if (!document) {
+      throw new TelegramUserClientError('该消息不包含可下载的文件（document）', 'not_found');
+    }
+    const rawSize = document.size;
+    const size = typeof rawSize === 'number'
+      ? rawSize
+      : (typeof (rawSize as { toJSNumber?: () => number })?.toJSNumber === 'function'
+        ? (rawSize as { toJSNumber: () => number }).toJSNumber()
+        : null);
+    return { message, size };
+  }
+
+  private async fetchMessage(
+    client: MtprotoClient,
+    chatId: string,
+    messageId: string,
+  ): Promise<Record<string, unknown> | null> {
+    if (typeof client.getMessages !== 'function') {
+      throw new TelegramUserClientError('MTProto 客户端不支持 getMessages', 'unsupported');
+    }
+    const numericId = Number(messageId);
+    if (!Number.isSafeInteger(numericId) || numericId <= 0) {
+      throw new TelegramUserClientError('消息 ID 非法', 'not_found');
+    }
+    const entity = await this.resolveChat(client, chatId);
+    const messages = await client.getMessages(entity, { ids: [numericId] });
+    const first = Array.isArray(messages) ? messages[0] : undefined;
+    return (first as Record<string, unknown> | undefined) ?? null;
+  }
+
+  private iterateDownload(
+    client: MtprotoClient,
+    message: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): AsyncGenerator<Buffer, void, unknown> {
+    if (typeof client.iterDownload !== 'function') {
+      throw new TelegramUserClientError('MTProto 客户端不支持 iterDownload', 'unsupported');
+    }
+    return client.iterDownload(message, signal ? { signal } : {});
+  }
+
+  /**
+   * 包一层 fileReference 过期重试：过期后重新取 Message 再从头下。
+   *
+   * 只在**尚未产出任何字节**时重试，避免把重复数据交给上层（上层按总长校验，
+   * 重复会直接判为源异常）。已产出字节后的过期交由调用方整轮重试。
+   */
+  private async *withFileReferenceRetry(
+    client: MtprotoClient,
+    params: { chatId: string; messageId: string; signal?: AbortSignal },
+    firstIterator: AsyncGenerator<Buffer, void, unknown>,
+  ): AsyncGenerator<Buffer, void, unknown> {
+    let iterator = firstIterator;
+    let emitted = false;
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        for await (const chunk of iterator) {
+          emitted = true;
+          yield chunk;
+        }
+        return;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const expired = /FILE_REFERENCE_EXPIRED/i.test(message);
+        if (!expired || emitted || attempt >= 1 || params.signal?.aborted) {
+          throw error instanceof TelegramUserClientError ? error : this.classify(error);
+        }
+        // 重新取消息以刷新 fileReference，然后从头重开
+        const reloaded = await this.loadDownloadableMessage(client, params);
+        iterator = this.iterateDownload(client, reloaded.message, params.signal);
+      }
+    }
   }
 
   /** 校验用户账号对指定 chat 的可见性与写入权限（权限探测） */

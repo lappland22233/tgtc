@@ -84,4 +84,13 @@ export class DownloadConfigDto {
   @IsOptional()
   @IsBoolean()
   autoCapacityEnabled?: boolean;
+
+  /**
+   * 下载优先使用 Premium 用户账号（MTProto）回源。
+   *
+   * 临时能力：关闭即回到纯 Bot 链路，用于 30 天后一键回退。
+   */
+  @IsOptional()
+  @IsBoolean()
+  preferUserAccount?: boolean;
 }

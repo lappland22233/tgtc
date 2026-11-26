@@ -9,6 +9,7 @@ import { TelegramReplicationAttempt } from '../common/entities/telegram-replicat
 import { TelegramAccountCredentialModule } from '../telegram-accounts/telegram-account-credential.module';
 import { TelegramUserModule } from '../telegram-user/telegram-user.module';
 import { AccountAwareDownloadService } from './account-aware-download.service';
+import { UserPreferredDownloadService } from './user-preferred-download.service';
 import { AccountAwareUploadService } from './account-aware-upload.service';
 import { DownloadCapacityPolicyService } from './download-capacity-policy.service';
 import { FileCopyService } from './file-copy.service';
@@ -78,6 +79,8 @@ const TERMINAL_ATTEMPT_TTL_DAYS = 30;
     RelayCapabilityService,
     AccountAwareDownloadService,
     AccountAwareUploadService,
+    // 临时能力：下载优先 Premium 用户账号（MTProto）回源；开关关闭时不介入
+    UserPreferredDownloadService,
     TelegramAccountPoolAlertService,
     // 统一的副本目标解析：全部下载入口（Web / Bot 公开下载 / 镜像回源）共用
     ReplicaTargetResolver,
@@ -97,6 +100,7 @@ const TERMINAL_ATTEMPT_TTL_DAYS = 30;
     RelayCapabilityService,
     AccountAwareDownloadService,
     AccountAwareUploadService,
+    UserPreferredDownloadService,
     TelegramAccountPoolAlertService,
     ReplicaTargetResolver,
     DownloadCapacityPolicyService,
