@@ -25,7 +25,6 @@ defineProps<{ title: string }>();
 .auth-gate {
   --auth-control-radius: 8px;
   --td-border-level-2-color: color-mix(in srgb, var(--workspace-muted) 65%, var(--workspace-border));
-  --td-brand-color-focus: var(--workspace-selected);
   --color-bg-surface: var(--workspace-surface);
   --seed-primary: var(--workspace-accent);
   --seed-accent: color-mix(in srgb, var(--workspace-accent) 85%, var(--workspace-text));

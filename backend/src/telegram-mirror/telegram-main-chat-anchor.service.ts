@@ -140,6 +140,65 @@ export class TelegramMainChatAnchorService {
   }
 
   /**
+   * 下载路径的**只读**锚点查询：返回主群里的 `(chatId, messageId)`。
+   *
+   * 与 `ensureAnchor` 的区别（必须严格区分）：
+   * - 本方法**绝不搬运、绝不写库、绝不抛错**；任何前置缺失（无启用规则 / 主群冲突 /
+   *   未跑过镜像 / 锚点未 ready）都返回 `null`，由调用方回退到 Bot 链路。
+   *   下载不能被锚点问题阻塞，这与扩散路径的 blocked 语义相反。
+   * - 只接受 `status='ready'` 且 `anchorChatId` 等于**当前**主群的锚点：主群被改配置后
+   *   旧锚点指向的群可能已不是 user 账号的成员，继续用会取流失败。
+   */
+  async findReadyAnchorForDownload(
+    ownerType: TelegramCopyOwnerType,
+    ownerId: string,
+    /**
+     * `file` 归属的**当前源消息**（`files.telegramMessageId`）。
+     *
+     * 覆盖上传后 `file:<id>` 锚点仍指向旧版本的主群消息；若新版本尚未跑过镜像
+     * （或规则排除了网页上传），直接用该锚点会**静默返回旧版本的字节**——
+     * 而同尺寸替换还能通过 `openUserStream` 的大小校验。
+     * 传入按与扩散侧相同的指纹口径校验；不传则不做该校验（`grant`/`fileUnique`
+     * 不需要——前者不可变，后者本身就是内容标识）。
+     */
+    expectedSourceMessageId?: string | null,
+  ): Promise<{ chatId: string; messageId: string } | null> {
+    const id = (ownerId || '').trim();
+    if (!id) return null;
+    try {
+      const resolution = await this.config.resolveMainChatId();
+      if (!resolution.ok) return null;
+      const mainChatId = resolution.chatId.trim();
+      if (!mainChatId || this.isPrivateChat(mainChatId)) return null;
+
+      const row = await this.repo.findOne({ where: { ownerType, ownerId: id } });
+      if (!row || row.status !== 'ready') return null;
+      if (String(row.anchorChatId ?? '').trim() !== mainChatId) return null;
+      const messageId = String(row.anchorMessageId ?? '').trim();
+      if (!messageId) return null;
+
+      // 版本核对：与扩散侧 isSourceFingerprintMatch 同口径（双方都已知才比较）
+      if (ownerType === 'file' && expectedSourceMessageId) {
+        const anchorSource = String(row.sourceMessageId ?? '').trim();
+        if (anchorSource && anchorSource !== String(expectedSourceMessageId).trim()) {
+          this.logger.debug(
+            `file 锚点指向旧版本内容（锚点源消息 ${maskIdentifier(anchorSource)} ≠ 当前 `
+            + `${maskIdentifier(expectedSourceMessageId)}），本次不使用（${ownerType}:${id}）`,
+          );
+          return null;
+        }
+      }
+      return { chatId: mainChatId, messageId };
+    } catch (error) {
+      this.logger.debug(
+        `下载锚点查询失败（按无锚点处理，回退 Bot 链路）：`
+        + `${ownerType}:${id} ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return null;
+    }
+  }
+
+  /**
    * 确保主群锚点存在（必要时搬运），返回可供 MTProto 中继使用的源定位。
    *
    * 幂等：同一 `(ownerType, ownerId)` 的重复调用只会搬运一次（锚点表 + 进程内单飞双保险）。

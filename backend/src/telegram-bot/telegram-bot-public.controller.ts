@@ -6,6 +6,7 @@ import { Readable } from 'stream';
 import { TelegramBotFileGrant } from '../common/entities/telegram-bot-file-grant.entity';
 import { TelegramCopyOwnerType } from '../common/entities/telegram-file-copy.entity';
 import { AccountAwareDownloadService } from '../telegram-account-pool/account-aware-download.service';
+import { UserPreferredDownloadService } from '../file/user-preferred-download.service';
 import { AccountAwareDownloadFailure } from '../telegram-account-pool/account-aware-stream.types';
 import { FileCopyService } from '../telegram-account-pool/file-copy.service';
 import { AuditService } from '../common/services/audit.service';
@@ -79,6 +80,10 @@ export class TelegramBotPublicController {
     private readonly configService: ConfigService | null = null,
     @Optional() @Inject(StorageRouterService)
     private readonly storageRouter: StorageRouterService | null = null,
+    // 临时能力：下载优先 Premium 用户账号（MTProto）回源；开关关闭时不介入。
+    // 必须放在最后：既有单测按位置构造该控制器，插在中间会让后续可选依赖整体错位。
+    @Optional() @Inject(UserPreferredDownloadService)
+    private readonly userPreferredDownload: UserPreferredDownloadService | null = null,
   ) {}
 
   /**
@@ -104,6 +109,24 @@ export class TelegramBotPublicController {
     requestId = randomUUID(),
   ): Promise<{ stream: Readable; info: { file_id: string; file_size: number } }> {
     const pool = this.accountPoolDownload;
+
+    // 临时能力：优先用 Premium 用户账号（MTProto）回源。开关关闭时直接跳过，
+    // 后续链路与改造前完全一致；任何失败都继续走 Bot（fail-open）。
+    if (this.userPreferredDownload?.isEnabled()) {
+      const owners: Array<{ ownerType: 'grant' | 'fileUnique'; ownerId: string }> = [
+        { ownerType: 'grant', ownerId: grant.id },
+      ];
+      const unchangedId = (grant.fileUniqueId || '').trim();
+      if (unchangedId) owners.push({ ownerType: 'fileUnique', ownerId: unchangedId });
+      for (const owner of owners) {
+        const opened = await this.userPreferredDownload.tryOpen({
+          ownerType: owner.ownerType,
+          ownerId: owner.ownerId,
+          expectedSize,
+        }).catch(() => null);
+        if (opened) return opened;
+      }
+    }
 
     if (pool?.isActive()) {
       const failures: { pooled?: AccountAwareDownloadFailure; source?: AccountAwareDownloadFailure } = {};

@@ -68,6 +68,13 @@ describe('RelayCapabilityService（能力快照与预检）', () => {
       findOne: jest.fn(async () => (options.sourceChatId === null
         ? null
         : { sourceChatId: options.sourceChatId ?? '-100111', targetChatId: options.targetChatId ?? '-100222' })),
+      // refreshFacts 现在读取全部启用规则，用于判断是否「全部单群模式」
+      find: jest.fn(async () => (options.sourceChatId === null
+        ? []
+        : [{
+          sourceChatId: options.sourceChatId ?? '-100111',
+          targetChatId: options.targetChatId ?? '-100222',
+        }])),
     };
 
     const service = new RelayCapabilityService(
@@ -231,7 +238,7 @@ describe('RelayCapabilityService（能力快照与预检）', () => {
 
   it('refreshFacts 读不到规则时保留上次事实并置空目标群（不抛错）', async () => {
     const ctx = setup({ targetChatId: '' });
-    ctx.rules.findOne.mockRejectedValue(new Error('db down') as never);
+    ctx.rules.find.mockRejectedValue(new Error('db down') as never);
 
     await expect(ctx.service.refreshFacts()).resolves.toBeUndefined();
     expect(ctx.service.snapshot().resolvedTargetChatIdPreview).toBeNull();

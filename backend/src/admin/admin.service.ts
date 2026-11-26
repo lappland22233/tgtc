@@ -765,6 +765,7 @@ export class AdminService {
     taskRetentionSeconds: number;
     upstreamQueuePolicy: UpstreamQueuePolicy;
     autoCapacityEnabled: boolean;
+    preferUserAccount: boolean;
   }> {
     const keys = DOWNLOAD_CONFIG_KEYS;
     const values = await Promise.all([
@@ -778,6 +779,7 @@ export class AdminService {
       this.getConfigByKey(keys.TASK_RETENTION_SECONDS),
       this.getConfigByKey(keys.UPSTREAM_QUEUE_POLICY),
       this.getConfigByKey(keys.AUTO_CAPACITY_ENABLED),
+      this.getConfigByKey(keys.PREFER_USER_ACCOUNT),
     ]);
     const num = (raw: string | null | undefined, key: string) => normalizeDownloadConfigNumber(key, raw);
     return {
@@ -794,6 +796,10 @@ export class AdminService {
         values[9],
         DOWNLOAD_CONFIG_DEFAULTS[keys.AUTO_CAPACITY_ENABLED] === 'true',
       ),
+      preferUserAccount: normalizeBooleanFlag(
+        values[10],
+        DOWNLOAD_CONFIG_DEFAULTS[keys.PREFER_USER_ACCOUNT] === 'true',
+      ),
     };
   }
 
@@ -808,6 +814,7 @@ export class AdminService {
     taskRetentionSeconds?: number;
     upstreamQueuePolicy?: UpstreamQueuePolicy;
     autoCapacityEnabled?: boolean;
+    preferUserAccount?: boolean;
   }): Promise<void> {
     const keys = DOWNLOAD_CONFIG_KEYS;
     const ranges = DOWNLOAD_CONFIG_RANGES;
@@ -870,6 +877,20 @@ export class AdminService {
         DOWNLOAD_CONFIG_DEFAULTS[keys.AUTO_CAPACITY_ENABLED] === 'true',
       );
       await this.setConfigValue(keys.AUTO_CAPACITY_ENABLED, String(normalized), '全局权重预算自动扩缩容开关');
+    }
+    if (config.preferUserAccount !== undefined) {
+      if (typeof config.preferUserAccount !== 'boolean') {
+        throw new BadRequestException('用户账号优先开关必须是布尔值');
+      }
+      const normalized = normalizeBooleanFlag(
+        String(config.preferUserAccount),
+        DOWNLOAD_CONFIG_DEFAULTS[keys.PREFER_USER_ACCOUNT] === 'true',
+      );
+      await this.setConfigValue(
+        keys.PREFER_USER_ACCOUNT,
+        String(normalized),
+        '下载优先使用 Premium 用户账号（MTProto）回源；关闭即回到纯 Bot 链路（临时能力，用于一键回退）',
+      );
     }
 
     this.auditService.log({

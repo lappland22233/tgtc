@@ -18,6 +18,7 @@ export enum FileAccessType {
 }
 
 @Entity('files')
+@Index('idx_files_gdrive_cache_sweep', ['gdriveCacheStatus', 'gdriveCacheNextRetryAt'])
 @Index('idx_files_uploader_folder_deleted', ['uploaderId', 'folderId', 'isDeleted'])
 @Index('idx_files_gdrive_cache_ref', ['gdriveCacheAccountId', 'gdriveCacheObjectRef'])
 export class File {
@@ -98,6 +99,18 @@ export class File {
   /** Google 缓存模式：缓存状态（none | pending | ready | failed） */
   @Column({ type: 'varchar', length: 16, nullable: true, default: 'none', comment: 'Google 缓存状态' })
   gdriveCacheStatus: 'none' | 'pending' | 'ready' | 'failed' | null;
+
+  /** Google 缓存同步已尝试次数（重试退避依据） */
+  @Column({ type: 'int', default: 0, comment: 'Google 缓存同步尝试次数' })
+  gdriveCacheAttempts: number;
+
+  /** Google 缓存最近一次失败原因（截断存储） */
+  @Column({ type: 'varchar', length: 500, nullable: true, comment: 'Google 缓存最近失败原因' })
+  gdriveCacheLastError: string | null;
+
+  /** Google 缓存下次重试时间（pending 时作为租约） */
+  @Column({ type: databaseColumnType('timestamptz') as 'timestamptz', nullable: true, comment: 'Google 缓存下次重试时间' })
+  gdriveCacheNextRetryAt: Date | null;
 
   /** 本地缩略图路径（相对于 THUMBNAIL_DIR，如 {id}.webp） */
   @Column({ type: 'varchar', length: 512, nullable: true, default: null })

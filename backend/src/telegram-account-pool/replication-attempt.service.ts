@@ -330,7 +330,8 @@ const STATUS_GUIDANCE: Record<ReplicationAttemptStatus, { why: string; impact: s
     advice: '若长期停留，检查用户账号是否被限流或进程是否中断。',
   },
   waiting_claims: {
-    why: '转发已成功，正在等待群内 Bot 通过入站轮询认领各自的 file_id。',
+    why: '转发已成功，正在等待群内 Bot 通过入站轮询认领各自的 file_id。'
+      + '（单群模式下由主群内各 Bot 直接认领，没有 userbot 转发记录。）',
     impact: '认领窗口内未新增 ready 副本即记为认领超时。',
     advice: '若反复超时，检查群内 Bot 是否已加入、是否关闭隐私模式或设为管理员、入站轮询是否开启。',
   },
@@ -997,6 +998,9 @@ export class ReplicationAttemptService {
     push(attempt.startedAt, '开始执行');
     if (attempt.relayAccountId) {
       push(attempt.relayCompletedAt, '中继转发成功', `执行账号 ${this.maskInternalId(attempt.relayAccountId) ?? '***'}`);
+    } else if (attempt.relayCompletedAt) {
+      // 单群模式：不经过 userbot 转发，锚点消息本身即认领源
+      push(attempt.relayCompletedAt, '中继转发成功（单群模式）', '主群内各 Bot 直接认领，无执行账号');
     }
     push(attempt.claimDeadlineAt, '认领窗口截止');
     if ((attempt.claimedAccountIds ?? []).length > 0) {

@@ -33,6 +33,12 @@ describe('TelegramUserCopyService（账号粘性与幂等键）', () => {
     copyError?: Error;
     userClientAvailable?: boolean;
     userClientReason?: string | null;
+    /** 观测轮次桩（单群模式需要断言认领窗口是否开立） */
+    attempts?: {
+      beginRound: jest.Mock;
+      markRelaySucceeded: jest.Mock;
+      finishBlocked: jest.Mock;
+    };
   } = {}) {
     const source = {
       describe: jest.fn(async () => options.descriptor
@@ -62,6 +68,7 @@ describe('TelegramUserCopyService（账号粘性与幂等键）', () => {
       anchors as never,
       accounts as never,
       userClient as never,
+      options.attempts as never,
     );
     return { service, source, anchors, accounts, userClient };
   }
@@ -226,12 +233,54 @@ describe('TelegramUserCopyService（账号粘性与幂等键）', () => {
     expect(ctx.userClient.copyMessage).not.toHaveBeenCalled();
   });
 
-  it('镜像群未配置时 blocked（不把空 chat id 交给 MTProto）', async () => {
-    const ctx = setup();
+  it('单群模式：镜像群留空时不做 userbot 转发，直落主群并进入认领窗口', async () => {
+    const attempts = {
+      beginRound: jest.fn(async () => ({ attempt: { id: 'att-single' } })),
+      markRelaySucceeded: jest.fn(async () => undefined),
+      finishBlocked: jest.fn(async () => undefined),
+    };
+    const ctx = setup({ attempts });
 
-    await expect(ctx.service.execute(task('task-aaa') as never, rule(null, '') as never))
-      .rejects.toMatchObject({ code: 'target_chat_missing', kind: 'blocked' });
+    const result = await ctx.service.execute(task('task-aaa') as never, rule(null, '') as never);
+
+    // 不把空 chat id 交给 MTProto，也不调用转发
     expect(ctx.userClient.copyMessage).not.toHaveBeenCalled();
+    // 目标就是主群锚点
+    expect(result.targetChatId).toBe('-100999');
+    expect(result.targetMessageId).toBe('777');
+    expect(result.targetTelegramFileId).toBe('');
+    // 轮次进入认领等待窗口，但没有执行账号
+    expect(attempts.markRelaySucceeded).toHaveBeenCalledWith('att-single', expect.objectContaining({
+      relayAccountId: '',
+    }));
+  });
+
+  it('单群模式不要求 MTProto 可用（无 userbot 也能扩散）', async () => {
+    const ctx = setup({ userClientAvailable: false });
+
+    const result = await ctx.service.execute(task('task-aaa') as never, rule(null, '') as never);
+
+    expect(result.targetChatId).toBe('-100999');
+    expect(ctx.userClient.copyMessage).not.toHaveBeenCalled();
+  });
+
+  it('单群轮次以主群为作用域（避免不同主群的规则合并成同一轮次）', async () => {
+    const attempts = {
+      beginRound: jest.fn(async () => ({ attempt: { id: 'att-scope' } })),
+      markRelaySucceeded: jest.fn(async () => undefined),
+      finishBlocked: jest.fn(async () => undefined),
+    };
+    const ctx = setup({ attempts });
+
+    await ctx.service.execute(
+      task('task-aaa') as never,
+      { targetChatId: '', sourceChatId: '-100main-A', preferredAccountId: null } as never,
+    );
+
+    expect(attempts.beginRound).toHaveBeenCalledWith(expect.objectContaining({
+      targetChatId: '-100main-A',
+      idempotencyKey: expect.stringContaining('-100main-A'),
+    }));
   });
 
   it('主群搬运失败时不执行中继（前置失败直接向上抛）', async () => {

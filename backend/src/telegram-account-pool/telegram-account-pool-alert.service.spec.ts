@@ -32,6 +32,8 @@ function counters(overrides: Partial<AccountPoolCounters> = {}): AccountPoolCoun
     anchorConflicts: 0,
     fallbackThrottled: 0,
     largeFileSlotThrottled: 0,
+    idlePreferred: 0,
+    idleFallback: 0,
     mainChatPlantAttempts: 0,
     mainChatPlantFailures: 0,
     mainChatPlantTakeovers: 0,
@@ -309,6 +311,7 @@ describe('TelegramAccountPoolAlertService（账号池运行态告警）', () => 
         userClientUnavailableReason: null,
         enabledAuthorizedUserCount: 1,
         resolvedTargetChatIdPreview: null,
+        singleGroupOnly: false,
         sourceChatIdPreview: null,
         sourceChatReadable: 'not_checked',
         targetChatWritable: 'not_checked',
@@ -324,6 +327,33 @@ describe('TelegramAccountPoolAlertService（账号池运行态告警）', () => 
 
     const created = ctx.alertEngine.createAlerts.mock.calls[0][0];
     expect(created.map((item) => item.ruleId)).toContain('RELAY_NOT_READY');
+  });
+
+  it('单群规则不需要目标群：不产生中叶中继未就绪告警', async () => {
+    const capability = {
+      refreshFacts: jest.fn(async () => undefined),
+      snapshot: jest.fn(() => ({
+        relayEnabledByConfig: true,
+        userClientAvailable: false,
+        userClientUnavailableReason: 'MTProto 未安装',
+        enabledAuthorizedUserCount: 0,
+        resolvedTargetChatIdPreview: null,
+        singleGroupOnly: true,
+        sourceChatIdPreview: '***1234',
+        sourceChatReadable: 'not_checked',
+        targetChatWritable: 'not_checked',
+        botsCanReceiveRelay: 'not_checked',
+        checkedAt: null,
+        checkStatus: 'not_checked',
+        notes: [],
+      })),
+    };
+    const ctx = makeService(snapshot(), { capability });
+
+    await ctx.service.runOnce();
+
+    const created = ctx.alertEngine.createAlerts.mock.calls.flatMap(([items]) => items);
+    expect(created.map((item) => item.ruleId)).not.toContain('RELAY_NOT_READY');
   });
 
   it('大文件覆盖率按低频节流采集，采集失败不影响其余告警', async () => {

@@ -74,6 +74,7 @@ function makeProcessor(
       generateAndSaveVideoCover: jest.fn(),
       registerPrimaryTelegramSource: jest.fn(),
       triggerMirrorForFile: jest.fn(),
+      mirrorGDriveCache: jest.fn().mockResolvedValue(undefined),
     } as any,
     undefined,
     accountUpload,
@@ -86,6 +87,7 @@ function makeFileService() {
     generateAndSaveVideoCover: jest.fn(),
     registerPrimaryTelegramSource: jest.fn(),
     triggerMirrorForFile: jest.fn(),
+    mirrorGDriveCache: jest.fn().mockResolvedValue(undefined),
   };
 }
 
@@ -241,6 +243,7 @@ describe('FileUploadProcessor failure persistence', () => {
       generateAndSaveVideoCover: jest.fn(),
       registerPrimaryTelegramSource: jest.fn(),
       triggerMirrorForFile: jest.fn(),
+      mirrorGDriveCache: jest.fn().mockResolvedValue(undefined),
     };
     repo.findOne.mockResolvedValue(makeFile({ uploadStage: 'remote_committed', telegramFileId: 'tg-id' }));
     repo.findOneOrFail.mockResolvedValue(makeFile({ uploadStage: 'remote_committed', telegramFileId: 'tg-id' }));

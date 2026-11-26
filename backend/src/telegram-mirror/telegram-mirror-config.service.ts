@@ -1,4 +1,5 @@
-import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, Optional, Inject } from '@nestjs/common';
+import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import {
@@ -10,6 +11,7 @@ import { AuditService } from '../common/services/audit.service';
 import { TelegramAccountsService } from '../telegram-accounts/telegram-accounts.service';
 import { TelegramAccountClientService } from '../telegram-account-pool/telegram-account-client.service';
 import { TelegramUserClientService } from '../telegram-user/telegram-user-client.service';
+import { TelegramAccountPoolService } from '../telegram-account-pool/telegram-account-pool.service';
 
 /**
  * 规则可编辑字段。
@@ -82,6 +84,9 @@ export class TelegramMirrorConfigService {
     private readonly client: TelegramAccountClientService,
     private readonly userClient: TelegramUserClientService,
     private readonly audit: AuditService,
+    /** 账号池快照（单群模式下估算可认领副本的 Bot 上界）；未装配时按 0 处理 */
+    @Optional() @Inject(TelegramAccountPoolService)
+    private readonly pool: TelegramAccountPoolService | null = null,
   ) {}
 
   /**
@@ -231,12 +236,26 @@ export class TelegramMirrorConfigService {
     return this.sourceChatsAtMs > 0 && Date.now() - this.sourceChatsAtMs < TARGET_CHAT_CACHE_TTL_MS;
   }
 
+  /**
+   * 启用中规则的「副本认领群」集合。
+   *
+   * 双群规则取 `targetChatId`（镜像群）；**单群规则（`targetChatId` 为空）取 `sourceChatId`**
+   * ——单群模式下不经过 userbot 转发，锚点直接落在主群，群内各 Bot 就是在这个群里
+   * 收到消息并登记副本的。若这里仍只返回非空的目标群，单群规则的认领会被
+   * `isEnabledMirrorTargetChat` 判为「非中继来源」而跳过归因，grant 轮次必然
+   * 结算成 `claim_timeout`（即使其它 Bot 确实认领了副本）。
+   */
   async listEnabledTargetChatIds(): Promise<string[]> {
     try {
-      const rows = await this.repo.find({ where: { enabled: true }, select: { targetChatId: true } });
-      return Array.from(
-        new Set(rows.map((row) => (row.targetChatId || '').trim()).filter((id) => id.length > 0)),
-      );
+      const rows = await this.repo.find({
+        where: { enabled: true },
+        select: { targetChatId: true, sourceChatId: true },
+      });
+      return Array.from(new Set(
+        rows
+          .map((row) => (row.targetChatId || '').trim() || (row.sourceChatId || '').trim())
+          .filter((id) => id.length > 0),
+      ));
     } catch (error) {
       this.logger.warn(
         `启用中镜像规则目标群读取失败（按「非中继来源」处理）：`
@@ -380,6 +399,29 @@ export class TelegramMirrorConfigService {
     return saved;
   }
 
+  /**
+   * 单群模式判定：镜像群留空，副本靠主群内各 Bot 自行认领。
+   *
+   * 集中在这里而不是各处写 `!rule.targetChatId?.trim()`：触发层、执行器、
+   * 预检与前端展示必须用同一口径，否则会出现「建了单却没执行」这类静默失效。
+   */
+  isSingleGroupRule(rule: Pick<TelegramMirrorRule, 'targetChatId'>): boolean {
+    return !(rule.targetChatId || '').trim();
+  }
+
+  /**
+   * 单群模式的副本达标上界：启用中的 Bot 账号数。
+   *
+   * 为什么不复用 `ReplicaTargetResolver`：它的 eligible 口径是「账号能承载副本」
+   * （enabled + 存储 Chat + 未冷却 + 健康），而单群的达标口径是「主群内真能收到消息
+   * 并登记副本的 Bot」，两者不同。群成员与隐私模式无法在 DB 侧确认，因此这里只给
+   * **上界**；真实结算仍以副本表的新增为准（不会假成功），实际可达数由
+   * `RelayCapabilityService` 的 `botsCanReceiveRelay` 预检在管理端暴露。
+   */
+  countClaimableBots(): number {
+    return this.pool?.snapshot().accounts.filter((account) => account.enabled).length ?? 0;
+  }
+
   /** 真实权限探测：主群可读 + 镜像群可写（Bot 与用户账号分别验证） */
   async testRule(ruleId: string, actorId: string): Promise<MirrorRuleTestResult> {
     const rule = await this.getRuleById(ruleId);
@@ -387,6 +429,7 @@ export class TelegramMirrorConfigService {
     await this.validateShape(rule, {});
 
     const details: MirrorRuleTestResult['details'] = [];
+    const singleGroup = this.isSingleGroupRule(rule);
     const botProbe = await this.pickBotForProbe(rule.preferredAccountId);
     if (!botProbe) {
       const summary = '没有可用的 Bot 账号（请先在账号池中添加并启用至少一个 Bot，或配置 TELEGRAM_BOT_TOKEN）';
@@ -394,7 +437,11 @@ export class TelegramMirrorConfigService {
       return { status: 'failed', summary, details };
     }
 
-    for (const [role, chatId] of [['source', rule.sourceChatId], ['target', rule.targetChatId]] as const) {
+    // 单群模式只有主群可探测：镜像群留空时不产生空的 target 探测项
+    const probes: Array<['source' | 'target', string]> = singleGroup
+      ? [['source', rule.sourceChatId]]
+      : [['source', rule.sourceChatId], ['target', rule.targetChatId]];
+    for (const [role, chatId] of probes) {
       try {
         const chat = await this.client.getChat(botProbe.accountId, botProbe.token, chatId);
         details.push({ chat: role, ok: true, title: chat.title ?? null, type: chat.type ?? null });
@@ -409,16 +456,23 @@ export class TelegramMirrorConfigService {
       }
     }
 
-    // 用户账号路径是**唯一**执行路径，因此必须探测；失败不直接判死，但明确写入结论
+    // 用户账号路径只在双群模式下是必需执行路径；单群模式不做 userbot 转发，
+    // 因此 userbot 不可用不阻断启用（仅提示）
     if (this.userClient.isAvailable()) {
       try {
         const users = await this.accounts.resolveEnabledUserAccounts();
         if (users.length === 0) {
-          details.push({ chat: 'source', ok: false, title: null, type: null, error: '没有可用的用户账号（未授权或未启用）' });
+          details.push({
+            chat: 'source',
+            ok: singleGroup,
+            title: null,
+            type: null,
+            error: '没有可用的用户账号（未授权或未启用）',
+          });
         } else {
           const user = users[0];
           const credentials = { apiId: user.apiId, apiHash: user.apiHash, session: user.session };
-          for (const [role, chatId] of [['source', rule.sourceChatId], ['target', rule.targetChatId]] as const) {
+          for (const [role, chatId] of probes) {
             const access = await this.userClient.checkChatAccess(credentials, chatId);
             details.push({
               chat: role,
@@ -430,13 +484,15 @@ export class TelegramMirrorConfigService {
           }
         }
       } catch (error) {
-        details.push({
-          chat: 'target',
-          ok: false,
-          title: null,
-          type: null,
-          error: `用户账号探测失败：${(error instanceof Error ? error.message : String(error)).slice(0, 160)}`,
-        });
+        if (!singleGroup) {
+          details.push({
+            chat: 'target',
+            ok: false,
+            title: null,
+            type: null,
+            error: `用户账号探测失败：${(error instanceof Error ? error.message : String(error)).slice(0, 160)}`,
+          });
+        }
       }
     }
 
@@ -445,10 +501,15 @@ export class TelegramMirrorConfigService {
     // 用户账号路径的**副本认领**前提无法在服务端验证（取决于群内每个 Bot 的隐私模式设置），
     // 因此在结论里显式提示：这是运维必须在 Telegram 侧完成的动作，漏做时表现为
     // 「镜像成功但副本数不增长、下载仍集中在单账号」。
-    const relayHint = '；副本认领前提：镜像群内**每个 Bot 都需关闭隐私模式或设为管理员**，'
-      + '且中继用户账号需同时是主群与镜像群成员';
+    const relayHint = singleGroup
+      ? '；单群模式：副本由主群内**每个 Bot 关闭隐私模式或设为管理员**后自行认领，'
+        + '不做 userbot 转发'
+      : '；副本认领前提：镜像群内**每个 Bot 都需关闭隐私模式或设为管理员**，'
+        + '且中继用户账号需同时是主群与镜像群成员';
     const base = ok
-      ? `权限测试通过（Bot 账号 ${botProbe.accountId} 可访问主群与镜像群）`
+      ? (singleGroup
+        ? `权限测试通过（Bot 账号 ${botProbe.accountId} 可访问主群）`
+        : `权限测试通过（Bot 账号 ${botProbe.accountId} 可访问主群与镜像群）`)
       : failed
         .map((item) => `${item.chat === 'source' ? '主群' : '镜像群'}不可用：${item.error ?? '未知原因'}`)
         .join('；');
@@ -473,21 +534,33 @@ export class TelegramMirrorConfigService {
     });
   }
 
-  /** 形状校验（不触发任何网络调用） */
+  /**
+   * 形状校验（不触发任何网络调用）。
+   *
+   * `targetChatId` 可空 = **单群模式**：主群同时承担「中转落点」与「副本认领面」，
+   * 群内各 Bot 收到锚点消息后各自登记副本，不做 userbot 转发。
+   * 非空时仍要求与主群分离：两群模式下源=目标会让中继变成同群自转发（重复消息 + 回环抑制），
+   * 备份也失去意义。
+   */
   private async validateShape(rule: TelegramMirrorRule, input: MirrorRuleInput): Promise<void> {
     if (!rule.name?.trim()) throw new BadRequestException('规则名称不能为空');
     if (!rule.sourceChatId?.trim()) throw new BadRequestException('必须配置主群（源群，副本扩散的中转落点）');
-    if (!rule.targetChatId?.trim()) throw new BadRequestException('必须配置镜像群（备份群）');
-    if (rule.sourceChatId === rule.targetChatId) {
-      throw new BadRequestException('镜像群不能与主群相同，中转落点与备份必须分离');
+    const targetChatId = (rule.targetChatId || '').trim();
+    if (targetChatId && rule.sourceChatId === targetChatId) {
+      throw new BadRequestException(
+        '镜像群不能与主群相同：只用一个群时请把镜像群留空（单群模式），'
+        + '两群模式下中转落点与备份必须分离',
+      );
     }
 
-    const botAccounts = await this.accounts.list({ type: 'bot', pageSize: 100 });
-    const conflict = botAccounts.items.find((item) => item.primaryChatId === rule.targetChatId);
-    if (conflict) {
-      throw new BadRequestException(
-        `镜像群不能是 Bot 账号「${conflict.name}」的主存储 Chat（会造成消息归属混淆）`,
-      );
+    if (targetChatId) {
+      const botAccounts = await this.accounts.list({ type: 'bot', pageSize: 100 });
+      const conflict = botAccounts.items.find((item) => item.primaryChatId === targetChatId);
+      if (conflict) {
+        throw new BadRequestException(
+          `镜像群不能是 Bot 账号「${conflict.name}」的主存储 Chat（会造成消息归属混淆）`,
+        );
+      }
     }
 
     if (rule.preferredAccountId) {

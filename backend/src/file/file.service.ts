@@ -6,7 +6,8 @@ import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { OnEvent } from '@nestjs/event-emitter';
 import { Cron, CronExpression } from '@nestjs/schedule';
-import { Readable } from 'stream';
+import { PassThrough, Readable } from 'stream';
+import { pipeline } from 'stream/promises';
 import { Request } from 'express';
 import { randomBytes, randomUUID } from 'node:crypto';
 import * as fs from 'fs';
@@ -58,6 +59,9 @@ import { DownloadResourceException, DOWNLOAD_ERROR_CODES, DOWNLOAD_RESOURCE_DEFA
 import { maskIdentifier } from '../telegram-accounts/telegram-account-view';
 // 可插拔存储后端（S3 / WebDAV / GDrive 账号池）：可选依赖，未装配时逐字节等价于原 TG 链路
 import { StorageRouterService } from '../storage/storage-router.service';
+import { UserPreferredDownloadService } from './user-preferred-download.service';
+import type { StorageUploadReceipt } from '../storage/storage.types';
+import { GDRIVE_CACHE_LEASE_MS, gdriveCacheBackoffMs } from '../common/utils/gdrive-cache-backoff';
 import {
   isRemoteStorageBackend,
   StorageDownloadUnavailableError,
@@ -198,6 +202,9 @@ export class FileService implements OnModuleInit {
     // 可插拔存储路由（可选依赖；未装配时所有上传/回源逐字节等价于原 TG 链路）
     @Optional() @Inject(StorageRouterService)
     private readonly storageRouter: StorageRouterService | null = null,
+    // 临时能力：下载优先 Premium 用户账号（MTProto）回源；开关关闭时不介入
+    @Optional() @Inject(UserPreferredDownloadService)
+    private readonly userPreferredDownload: UserPreferredDownloadService | null = null,
   ) {
   }
 
@@ -212,7 +219,7 @@ export class FileService implements OnModuleInit {
   private async openSourceStream(
     file: File,
     expectedSize: number,
-    options?: { noCache?: boolean },
+    options?: { noCache?: boolean; upstreamLeaseHeld?: boolean },
   ): Promise<{ stream: Readable; info: { file_id: string; file_path: string; file_size: number } }> {
     if (!isRemoteStorageBackend(file.storageBackend)) {
       return this.openTelegramSourceStream(file, expectedSize, options);
@@ -278,14 +285,74 @@ export class FileService implements OnModuleInit {
    * 安全：这里只做「取流」选择，绝不把 A 账号的 `file_id` 交给 B 账号——
    * 每个候选副本都带有它自己的 `file_id`（副本表事实）。
    */
+  /**
+   * 尝试用 user 账号回源站内文件；返回 null 表示未命中（调用方继续 Bot 链路）。
+   *
+   * 锚点归属依次尝试 `file:<id>` 与 `fileUnique:<内容标识>`：镜像任务按这两种归属建锚点，
+   * 老文件可能只有其中之一。
+   */
+  private async tryUserPreferredStream(
+    file: File,
+    expectedSize: number,
+    _noCache: boolean,
+    upstreamLeaseHeld = false,
+  ): Promise<{ stream: Readable; info: { file_id: string; file_path: string; file_size: number } } | null> {
+    const preferred = this.userPreferredDownload;
+    if (!preferred) return null;
+    const owners: Array<{ ownerType: 'file' | 'fileUnique'; ownerId: string }> = [
+      { ownerType: 'file', ownerId: file.id },
+    ];
+    const uniqueId = (file.telegramFileUniqueId || '').trim();
+    if (uniqueId) owners.push({ ownerType: 'fileUnique', ownerId: uniqueId });
+
+    for (const owner of owners) {
+      const opened = await preferred.tryOpen({
+        ownerType: owner.ownerType,
+        ownerId: owner.ownerId,
+        expectedSize,
+        upstreamLeaseHeld,
+        // `file` 归属要核对版本：覆盖上传后该锚点仍指向旧内容，直接用会返回过期字节
+        expectedSourceMessageId: owner.ownerType === 'file' ? file.telegramMessageId : null,
+      });
+      if (opened) {
+        return {
+          stream: opened.stream,
+          // user 流没有 Bot API 的 file_path 概念，不回写路径
+          info: { file_id: opened.info.file_id, file_path: '', file_size: opened.info.file_size || expectedSize },
+        };
+      }
+    }
+    return null;
+  }
+
   private async openTelegramSourceStream(
     file: File,
     expectedSize: number,
-    options?: { noCache?: boolean },
+    options?: { noCache?: boolean; upstreamLeaseHeld?: boolean },
   ): Promise<{ stream: Readable; info: { file_id: string; file_path: string; file_size: number } }> {
     const noCache = options?.noCache === true;
     const poolDownload = this.accountAwareDownload;
     const defaultAccountId = this.defaultBotAccountId();
+
+    // 临时能力：优先用 Premium 用户账号（MTProto）回源。开关关闭时该方法直接返回 null，
+    // 后续链路与改造前逐字节一致（fail-open：任何失败都继续走 Bot）。
+    if (this.userPreferredDownload?.isEnabled()) {
+      const userIdOpened = await this.tryUserPreferredStream(
+        file,
+        expectedSize,
+        noCache,
+        options?.upstreamLeaseHeld === true,
+      )
+        .catch((error: unknown) => {
+          this.logger.debug(
+            `user 优先回源异常，回退 Bot（file=${file.id}）：`
+            + `${error instanceof Error ? error.message : String(error)}`,
+          );
+          return null;
+        });
+      if (userIdOpened) return userIdOpened;
+    }
+
     if (poolDownload?.isActive() && this.fileCopies) {
       // 下载冷路径上的老文件补扩散：是否建单由懒触发服务按「冷却窗口 + 副本缺口 + 源锚点」
       // 自行判定。这里再兜一层 try/catch：补扩散的任何失败都不得改变下载行为（fail-open）。
@@ -470,6 +537,262 @@ export class FileService implements OnModuleInit {
       this.logger.warn(
         `远端对象清理失败（不影响主流程，对象残留）：${error instanceof Error ? error.message : String(error)}`,
       );
+    }
+  }
+
+  /**
+   * Google 双写（网页上传成功后的镜像，以及失败重试）。
+   *
+   * - 传 `localPath`：上传任务内的快路径，直接读本地临时文件，避免再从 Telegram 拉一遍；
+   * - 不传：扫描任务的重试路径（本地临时文件已清理），从 Telegram 账号池回源。
+   *
+   * 状态机：`pending`（租约）→ `ready` / `failed`（指数退避）。
+   * 并发防御分两层：
+   * - 行级 CAS：租约内的重复触发直接丢弃；
+   * - 上传期间**持续续期**：租约短于传输耗时时（大文件常见），不续期会让重试扫描
+   *   抢到仍在跑的行，并发上传同一个文件并在完成后互相覆盖 objectRef、留下孤儿对象。
+   */
+  async mirrorGDriveCache(
+    fileId: string,
+    options: { localPath?: string; signal?: AbortSignal; knownSize?: number } = {},
+  ): Promise<void> {
+    if (!this.storageRouter) return;
+    // 进程内互斥：同一文件在本实例内同时只允许一次双写（重试扫描与上传收尾可能并发）。
+    // 但覆盖上传会用新版本再次调用；此时不能直接丢弃——旧版本的上传会因
+    // uploadVersion 校验失败而删掉自己的对象、并把缓存状态重置为 none（重试扫描不扫 none），
+    // 新版本就此永久失去镜像。改为排队：等在飞的那次结束后再跑一遍。
+    const running = this.gdriveCacheInflight.get(fileId);
+    if (running) {
+      this.gdriveCacheRepending.set(fileId, { localPath: options.localPath, knownSize: options.knownSize });
+      await running;
+      const pending = this.gdriveCacheRepending.get(fileId);
+      if (pending) {
+        this.gdriveCacheRepending.delete(fileId);
+        // 用排队时登记的最新参数重跑（覆盖上传的新版本）
+        await this.mirrorGDriveCache(fileId, {
+          localPath: pending.localPath,
+          knownSize: pending.knownSize,
+          signal: options.signal,
+        });
+      }
+      return;
+    }
+    const task = this.runMirrorGDriveCache(fileId, options);
+    this.gdriveCacheInflight.set(fileId, task);
+    try {
+      await task;
+    } finally {
+      this.gdriveCacheInflight.delete(fileId);
+    }
+  }
+
+  private async runMirrorGDriveCache(
+    fileId: string,
+    options: { localPath?: string; signal?: AbortSignal; knownSize?: number } = {},
+  ): Promise<void> {
+    const storageRouter = this.storageRouter;
+    if (!storageRouter) return;
+    let leaseTimer: NodeJS.Timeout | null = null;
+    let receipt: StorageUploadReceipt | null = null;
+    let file: File | null = null;
+    try {
+      file = await this.fileRepository.findOne({ where: { id: fileId } });
+      if (!file || file.isDeleted) return;
+      if (isRemoteStorageBackend(file.storageBackend)) return;
+      const size = options.knownSize ?? Number(file.size);
+      if (!Number.isSafeInteger(size) || size <= 0) {
+        this.logger.debug(`文件 ${fileId} 大小未知，跳过 Google 双写`);
+        return;
+      }
+      if (!(await storageRouter.isGDriveCacheModeEnabled().catch(() => false))) return;
+
+      // 抢占失败（其它执行者持有租约）不是错误，直接退出即可
+      if (!(await this.claimGDriveCacheMirror(file))) return;
+
+      // 上传可能远超租约时长：定期续期，避免被重试扫描重复领取
+      leaseTimer = this.startGDriveCacheLeaseRenewal(file.id);
+      const targetFile = file; // 供闭包捕获（file 在下方可能被重新赋值）
+      const localPath = options.localPath && fs.existsSync(options.localPath) ? options.localPath : undefined;
+      receipt = await storageRouter.upload({
+        backendType: 'gdrive',
+        objectName: targetFile.originalName,
+        mimeType: targetFile.mimeType || undefined,
+        knownLength: size,
+        signal: options.signal,
+        openStream: localPath
+          ? () => createReadStream(localPath, { highWaterMark: 1024 * 1024 })
+          : () => this.openPooledMirrorStream(targetFile, size, options.signal),
+      });
+      const uploadedAccountId = receipt.accountId;
+      const updated = await this.fileRepository.update(
+        { id: file.id, uploadVersion: file.uploadVersion },
+        {
+          gdriveCacheStatus: 'ready',
+          gdriveCacheAccountId: receipt.accountId,
+          gdriveCacheObjectRef: receipt.objectRef,
+          gdriveCacheAttempts: 0,
+          gdriveCacheLastError: null,
+          gdriveCacheNextRetryAt: null,
+        } as Partial<File>,
+      );
+      if (updated.affected === 0) {
+        this.logger.warn(`文件 ${file.id} 版本已变更或记录已删除，清理孤立的 Google 副本`);
+        if (receipt.accountId) {
+          await storageRouter.deleteRemoteObject('gdrive', receipt.accountId, receipt.objectRef).catch(() => {});
+        }
+        return;
+      }
+      receipt = null;
+      this.logger.log(`文件 ${file.id} 已同步至 Google 存储（账号: ${uploadedAccountId ?? 'unknown'}）`);
+    } catch (error) {
+      if (receipt?.accountId) {
+        await storageRouter.deleteRemoteObject('gdrive', receipt.accountId, receipt.objectRef).catch(() => {});
+      }
+      // 抢占阶段就可能抛错（DB 抖动）：必须落成 failed 才能进入重试扫描。
+      // 若让它冒泡出去，processor 的收尾（含临时文件清理）会被跳过，而文件已 ready，
+      // 重试只会走提交分支、不再经过双写，最终永久停在 none。
+      if (file) {
+        await this.markGDriveCacheMirrorFailed(file.id, error);
+        this.logger.warn(
+          `文件 ${file.id} Google 双写失败（将按退避重试）：${error instanceof Error ? error.message : String(error)}`,
+        );
+      } else {
+        this.logger.warn(
+          `文件 ${fileId} Google 双写失败（获取记录阶段）：${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    } finally {
+      if (leaseTimer) clearInterval(leaseTimer);
+    }
+  }
+
+  /** 进程内在飞的双写（同一实例内不会并发上传同一文件） */
+  private readonly gdriveCacheInflight = new Map<string, Promise<void>>();
+  /** 在飞期间又被触发的文件（覆盖上传的新版本）→ 结束后补跑一次 */
+  private readonly gdriveCacheRepending = new Map<string, { localPath?: string; knownSize?: number }>();
+
+  /** 上传期间持续续期，避免长传输被重试扫描重复领取 */
+  private startGDriveCacheLeaseRenewal(fileId: string): NodeJS.Timeout {
+    const timer = setInterval(() => {
+      void this.renewGDriveCacheLease(fileId).catch(() => undefined);
+    }, Math.max(30_000, Math.floor(GDRIVE_CACHE_LEASE_MS / 2)));
+    timer.unref?.();
+    return timer;
+  }
+
+  /** 仅当仍处于 pending 时把租约推到下一个完整窗口（不复活已 ready/failed 的行） */
+  private async renewGDriveCacheLease(fileId: string): Promise<void> {
+    await this.fileRepository
+      .createQueryBuilder()
+      .update(File)
+      .set({ gdriveCacheNextRetryAt: new Date(Date.now() + GDRIVE_CACHE_LEASE_MS) })
+      .where('id = :id', { id: fileId })
+      .andWhere('"gdriveCacheStatus" = :status', { status: 'pending' })
+      .execute();
+  }
+
+  /**
+   * 到期待重试的网页文件（仅 pending/failed；不回填历史 none）。
+   * 同时带出 `size`：重试方需要按真实体量申请上行权重，缺省会让大文件按权重 1 计入预算。
+   */
+  async findDueGDriveCacheMirrors(limit = 3): Promise<Array<{ id: string; size: number }>> {
+    const now = new Date();
+    const rows = await this.fileRepository
+      .createQueryBuilder('file')
+      .select('file.id', 'id')
+      .addSelect('file.size', 'size')
+      .where('file.isDeleted = :notDeleted', { notDeleted: false })
+      .andWhere('file.storageBackend = :backend', { backend: 'telegram' })
+      .andWhere('file.gdriveCacheStatus IN (:...statuses)', { statuses: ['pending', 'failed'] })
+      .andWhere('(file.gdriveCacheNextRetryAt IS NULL OR file.gdriveCacheNextRetryAt <= :now)', { now })
+      .andWhere('file.telegramFileId <> :empty', { empty: '' })
+      .orderBy('file.gdriveCacheNextRetryAt', 'ASC')
+      .limit(limit)
+      .getRawMany<{ id: string; size: string | number | null }>();
+    return rows.map((row) => ({ id: row.id, size: Number(row.size) }));
+  }
+
+  /** 到期重试积压量（供告警判定） */
+  async countDueGDriveCacheMirrors(): Promise<number> {
+    const now = new Date();
+    return this.fileRepository
+      .createQueryBuilder('file')
+      .where('file.isDeleted = :notDeleted', { notDeleted: false })
+      .andWhere('file.storageBackend = :backend', { backend: 'telegram' })
+      .andWhere('file.gdriveCacheStatus IN (:...statuses)', { statuses: ['pending', 'failed'] })
+      .andWhere('(file.gdriveCacheNextRetryAt IS NULL OR file.gdriveCacheNextRetryAt <= :now)', { now })
+      .andWhere('file.telegramFileId <> :empty', { empty: '' })
+      .getCount();
+  }
+
+  /** CAS 抢占一次双写：租约内不会重复执行 */
+  private async claimGDriveCacheMirror(file: File): Promise<boolean> {
+    const now = new Date();
+    const result = await this.fileRepository
+      .createQueryBuilder()
+      .update(File)
+      .set({
+        gdriveCacheStatus: 'pending',
+        gdriveCacheNextRetryAt: new Date(now.getTime() + GDRIVE_CACHE_LEASE_MS),
+      })
+      .where('id = :id', { id: file.id })
+      .andWhere('"uploadVersion" = :version', { version: file.uploadVersion })
+      .andWhere('"isDeleted" = :notDeleted', { notDeleted: false })
+      .andWhere('("gdriveCacheStatus" IS NULL OR "gdriveCacheStatus" IN (:...statuses))', {
+        statuses: ['none', 'pending', 'failed'],
+      })
+      .andWhere('("gdriveCacheNextRetryAt" IS NULL OR "gdriveCacheNextRetryAt" <= :now)', { now })
+      .execute();
+    return (result.affected ?? 0) > 0;
+  }
+
+  /** 记录一次双写失败：次数自增（原子）+ 原因 + 指数退避 */
+  private async markGDriveCacheMirrorFailed(fileId: string, error: unknown): Promise<void> {
+    const detail = error instanceof Error ? error.message : String(error);
+    try {
+      // 先读当前次数只为算退避；自增本身交给 SQL，避免并发两条失败路径互相覆盖计数
+      const row = await this.fileRepository.findOne({
+        where: { id: fileId },
+        select: { id: true, gdriveCacheAttempts: true },
+      });
+      const attempts = (row?.gdriveCacheAttempts ?? 0) + 1;
+      await this.fileRepository
+        .createQueryBuilder()
+        .update(File)
+        .set({
+          gdriveCacheStatus: 'failed',
+          gdriveCacheLastError: (detail || 'unknown').slice(0, 500),
+          gdriveCacheNextRetryAt: new Date(Date.now() + gdriveCacheBackoffMs(attempts)),
+          gdriveCacheAttempts: () => '"gdriveCacheAttempts" + 1',
+        })
+        .where('id = :id', { id: fileId })
+        .execute();
+    } catch (err) {
+      this.logger.warn(
+        `记录 Google 双写失败状态时出错（忽略）：${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  /** 重试取源：从 Telegram 账号池开一条新流（每次 openStream 调用都重新回源） */
+  private openPooledMirrorStream(file: File, size: number, signal?: AbortSignal): Readable {
+    const buffered = new PassThrough({ readableHighWaterMark: 1024 * 1024, writableHighWaterMark: 64 * 1024 });
+    void pipeline(
+      this.readPooledMirrorSource(file, size),
+      buffered,
+      { signal },
+    ).catch(() => {
+      // pipeline 已销毁 buffered，读取方会收到同一错误
+    });
+    return buffered;
+  }
+
+  private async *readPooledMirrorSource(file: File, size: number): AsyncGenerator<Buffer> {
+    // 重试 cron 已按真实体量持有上行租约：这里必须标记，否则 user 优先会再申请一次，
+    // 两个同权重（>1GiB 时为 8）申请在默认预算下互相等待到超时。
+    const opened = await this.openSourceStream(file, size, { noCache: true, upstreamLeaseHeld: true });
+    for await (const chunk of opened.stream) {
+      yield Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Buffer);
     }
   }
 
@@ -842,6 +1165,9 @@ export class FileService implements OnModuleInit {
         gdriveCacheStatus: 'none',
         gdriveCacheAccountId: null,
         gdriveCacheObjectRef: null,
+        gdriveCacheAttempts: 0,
+        gdriveCacheLastError: null,
+        gdriveCacheNextRetryAt: null,
       } as any);
       // N1：覆盖会改 originalName，名称表必须同步更新——否则旧名残留占用
       // （此后同名新建被误 409）且新名不受唯一保护。新名撞其他活跃实体时整体回滚。

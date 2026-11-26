@@ -96,8 +96,11 @@ export class TelegramMirrorTriggerService implements OnModuleInit, OnApplication
         try {
           if (trigger === 'web_upload' && !rule.includeWebUploads) continue;
           if (trigger === 'bot_inbound' && !rule.includeBotInboundFiles) continue;
-          // 该镜像群自身的消息不得再次触发镜像（按规则精确抑制，防止回环放大）
-          if (input.sourceChatId && rule.targetChatId && String(input.sourceChatId) === String(rule.targetChatId)) {
+          // 该镜像群自身的消息不得再次触发镜像（按规则精确抑制，防止回环放大）。
+          // 单群规则（`targetChatId` 为空）不做 userbot 转发，来源就是主群本身，
+          // 因此不参与该抑制——否则它会被自己永久跳过、一条任务都建不出来。
+          const ruleTarget = (rule.targetChatId || '').trim();
+          if (input.sourceChatId && ruleTarget && String(input.sourceChatId) === ruleTarget) {
             continue;
           }
 

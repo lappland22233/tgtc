@@ -11,7 +11,7 @@ import { UploadDiskBudgetService } from '../file/upload-disk-budget.service';
 import { AccountAwareUploadService, AccountUploadUnavailableError } from '../telegram-account-pool/account-aware-upload.service';
 // 可插拔存储后端（S3 / WebDAV / GDrive）：可选依赖，未装配时非 TG 文件无法上传（诊断性失败）
 import { StorageRouterService } from '../storage/storage-router.service';
-import { isRemoteStorageBackend, StorageUploadReceipt, StorageUploadUnavailableError } from '../storage/storage.types';
+import { isRemoteStorageBackend, StorageUploadUnavailableError } from '../storage/storage.types';
 import { createReadStream, existsSync } from 'fs';
 import { basename } from 'node:path';
 import { pendingUploadName } from '../file/pending-upload';
@@ -541,6 +541,28 @@ export class FileUploadProcessor {
     // 必须经 `databaseQuery()` + `RETURNING id`：PG 的 UPDATE 返回 `[rows, rowCount]` 元组，
     // 直接读 `rowCount/affected` 在 PG 下两个字段均为 undefined（判断恒假），
     // 0 行命中时不会跳过收尾——这正是团队历史上两起静默失效的同一根因。
+    // 置 ready 之前先把双写状态落成 pending：否则「已置 ready、尚未进入双写」之间
+    // 进程退出时，文件会永久停在 none——Bull 重试读到已 ready 就被状态守卫挡回，
+    // 而重试扫描只扫 pending/failed，两条恢复路径都不会再尝试镜像。
+    //
+    // 但**必须先确认缓存模式已开启**：`mirrorGDriveCache` 在模式关闭时会直接返回、
+    // 不改状态；若这里无条件置 pending，模式关闭期间上传的文件会一直挂在 pending 上，
+    // 等缓存模式以后被打开时，重试扫描会把它们当作「待补镜像」全部上传，
+    // 白白消耗 GDrive 空间与带宽（这些文件创建时本就没打算缓存）。
+    if (!isNonTelegram) {
+      const cacheModeEnabled = await this.storageRouter
+        ?.isGDriveCacheModeEnabled()
+        .catch(() => false) ?? false;
+      if (cacheModeEnabled) {
+        await this.fileRepository.update(
+          { id: fileId, uploadVersion, gdriveCacheStatus: 'none' },
+          { gdriveCacheStatus: 'pending' } as Partial<File>,
+        ).catch((error: unknown) => {
+          this.logger.warn(`文件 ${fileId} 预置双写 pending 失败（不影响上传）：${(error as Error).message}`);
+        });
+      }
+    }
+
     const readyRows = await databaseQuery<Array<{ id: string }>>(
       this.fileRepository.manager,
       'UPDATE files SET status = $1, "uploadFailureReason" = NULL WHERE id = $2 AND status IN ($3, $4) AND "uploadVersion" = $5 RETURNING id',
@@ -575,47 +597,11 @@ export class FileUploadProcessor {
       );
     }
 
-    // Google 缓存模式异步双写（主存储为 Telegram 时镜像一份至 GDrive 账号池）
-    if (!isNonTelegram && this.storageRouter) {
-      let gdriveReceipt: StorageUploadReceipt | null = null;
-      try {
-        if (await this.storageRouter.isGDriveCacheModeEnabled()) {
-          const knownLength = Number(file.size);
-          const receipt = await this.storageRouter.upload({
-            backendType: 'gdrive',
-            objectName: file.originalName,
-            knownLength,
-            mimeType: file.mimeType || undefined,
-            openStream: () => createReadStream(filePath, { highWaterMark: 1024 * 1024 }),
-          });
-          gdriveReceipt = receipt;
-          const updateResult = await this.fileRepository.update(
-            { id: fileId, uploadVersion },
-            {
-              gdriveCacheAccountId: receipt.accountId,
-              gdriveCacheObjectRef: receipt.objectRef,
-              gdriveCacheStatus: 'ready',
-            } as Partial<File>,
-          );
-          if (updateResult.affected === 0) {
-            this.logger.warn(`文件 ${fileId} 版本已变更或记录已删除，清理孤立的 Google 缓存副本`);
-            if (receipt.accountId) {
-              await this.storageRouter.deleteRemoteObject('gdrive', receipt.accountId, receipt.objectRef).catch((delErr) => {
-                this.logger.warn(`清理孤立 Google 缓存失败: ${(delErr as Error).message}`);
-              });
-            }
-          } else {
-            this.logger.log(`文件 ${fileId} 已成功同步至 Google 缓存（账号: ${receipt.accountId}）`);
-          }
-        }
-      } catch (cacheErr) {
-        if (gdriveReceipt?.accountId) {
-          await this.storageRouter.deleteRemoteObject('gdrive', gdriveReceipt.accountId, gdriveReceipt.objectRef).catch((delErr) => {
-            this.logger.warn(`异常分支清理 Google 缓存失败: ${(delErr as Error).message}`);
-          });
-        }
-        this.logger.warn(`文件 ${fileId} Google 缓存同步失败（不影响主存储）：${(cacheErr as Error).message}`);
-      }
+    // Google 双写（主存储为 Telegram 时镜像一份至 GDrive 账号池）。
+    // 状态机、失败退避与重试取源统一收口在 FileService：失败会标记 failed，
+    // 由扫描任务从 Telegram 回源重试（本地临时文件随后即被清理）。
+    if (!isNonTelegram) {
+      await this.fileService.mirrorGDriveCache(fileId, { localPath: filePath });
     }
 
     await this.removeUploadArtifacts(filePath, fileId, uploadVersion);

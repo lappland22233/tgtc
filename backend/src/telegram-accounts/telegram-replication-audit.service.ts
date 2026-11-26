@@ -288,6 +288,7 @@ const EMPTY_CAPABILITY_SNAPSHOT: RelayCapabilitySnapshot = {
   userClientUnavailableReason: null,
   enabledAuthorizedUserCount: 0,
   resolvedTargetChatIdPreview: null,
+  singleGroupOnly: false,
   sourceChatIdPreview: null,
   sourceChatReadable: 'not_checked',
   targetChatWritable: 'not_checked',

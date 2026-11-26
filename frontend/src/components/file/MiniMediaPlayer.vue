@@ -383,13 +383,12 @@ function onProgressClick(e: MouseEvent) {
   height: 40px;
   border-radius: 50%;
   background: var(--seed-primary);
-  color: #fff;
+  color: var(--workspace-on-accent);
   box-shadow: var(--shadow-sm);
 }
 
 .mmp__btn--play:hover {
-  background: color-mix(in srgb, var(--seed-primary) 88%, #fff);
-  color: #fff;
+  background: var(--seed-accent);
 }
 
 .mmp__spacer {

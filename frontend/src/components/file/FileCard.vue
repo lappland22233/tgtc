@@ -157,7 +157,7 @@ function onToggleSelect() {
   right: 8px;
   z-index: 3;
   background: var(--td-warning-color);
-  color: #fff;
+  color: var(--text-on-status);
   border-radius: 4px;
   padding: 2px 4px;
   display: flex;

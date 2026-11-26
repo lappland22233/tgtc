@@ -23,6 +23,8 @@ type Counters = {
   relayFailed: number;
   relayClaimsMissed: number;
   inboundBridgeMisses: number;
+  idlePreferred: number;
+  idleFallback: number;
 };
 
 function makeCounters(): Counters {
@@ -39,6 +41,8 @@ function makeCounters(): Counters {
     relayFailed: 0,
     relayClaimsMissed: 0,
     inboundBridgeMisses: 0,
+    idlePreferred: 0,
+    idleFallback: 0,
   };
 }
 
@@ -126,6 +130,7 @@ function makeService(options: {
   copies?: {
     upsertReady: jest.Mock;
     bridgeInboundCopyToLogicalFile?: jest.Mock;
+    listReady?: jest.Mock;
   } | null;
   accountClient?: { sendMessage: jest.Mock; forwardMessage: jest.Mock; editMessageText?: jest.Mock } | null;
   archiveChatId?: string;
@@ -149,6 +154,8 @@ function makeService(options: {
     isActive: jest.Mock;
     hasAccount: jest.Mock;
     openSourceStream: jest.Mock;
+    openStream?: jest.Mock;
+    bumpCounter?: jest.Mock;
   } | null;
   downloadResources?: {
     reserve: jest.Mock;
@@ -224,6 +231,10 @@ function makeService(options: {
     findByFileUniqueId: jest.fn(async () => options.grantMatches ?? []),
     issue: issueMock,
     attachGDriveCache: jest.fn(async () => true),
+    markGDriveCachePending: jest.fn(async () => true),
+    markGDriveCacheFailed: jest.fn(async () => undefined),
+    renewGDriveCacheLease: jest.fn(async () => undefined),
+    findDueGDriveCacheMirrors: jest.fn(async () => []),
     buildUrl: jest.fn((origin: string, token: string) => `${origin}/api/bot-dl/${token}`),
     isActive: jest.fn(() => true),
     replayToken: jest.fn(() => 'TOKEN'),
@@ -496,6 +507,8 @@ describe('TelegramBotDispatchService（多 Bot 身份链路）', () => {
       ownerId: 'UNIQ-1',
       accountId: '1234567',
     }));
+    // 归档转发已移出直链/登记关键路径（fire-and-forget），等待后台完成
+    await waitFor(() => accountClient.forwardMessage.mock.calls.length > 0);
     expect(accountClient.forwardMessage).toHaveBeenCalledWith(
       '1234567',
       '1234567:SECRET',
@@ -1576,7 +1589,7 @@ describe('TelegramBotDispatchService（纯 Google 存储模式）', () => {
     );
   });
 
-  describe('Google 缓存模式异步镜像（triggerGDriveCacheMirror）', () => {
+  describe('Google 缓存模式异步镜像（mirrorGrantToGDriveCache）', () => {
     it('attachGDriveCache 抛出异常时回滚删除远端 GDrive 对象（防孤儿泄漏）', async () => {
       const storageRouter = {
         availableBackendTypes: jest.fn(() => ['gdrive']),
@@ -1585,6 +1598,7 @@ describe('TelegramBotDispatchService（纯 Google 存储模式）', () => {
           backendType: 'gdrive',
           accountId: 'acc-gd-1',
           objectRef: 'gdrive-mirror-file-123',
+          size: 21,
         })),
         deleteRemoteObject: jest.fn(async () => true),
       };
@@ -1593,11 +1607,15 @@ describe('TelegramBotDispatchService（纯 Google 存储模式）', () => {
         throw new Error('Database connection lost');
       });
 
-      await (ctx.service as any).triggerGDriveCacheMirror(
-        { id: 'grant-mirror-1' },
-        { file_id: 'tg-file-123', file_name: 'test.mp4' },
-        1024,
-      );
+      await (ctx.service as any).mirrorGrantToGDriveCache({
+        id: 'grant-mirror-1',
+        telegramFileId: 'tg-file-123',
+        fileName: 'test.mp4',
+        mimeType: 'video/mp4',
+        fileSize: '21',
+        sourceAccountId: null,
+        gdriveCacheAttempts: 0,
+      });
 
       expect(storageRouter.upload).toHaveBeenCalled();
       expect(storageRouter.deleteRemoteObject).toHaveBeenCalledWith(
@@ -1615,6 +1633,7 @@ describe('TelegramBotDispatchService（纯 Google 存储模式）', () => {
           backendType: 'gdrive',
           accountId: 'acc-gd-1',
           objectRef: 'gdrive-mirror-file-456',
+          size: 21,
         })),
         deleteRemoteObject: jest.fn(async () => true),
       };
@@ -1628,13 +1647,17 @@ describe('TelegramBotDispatchService（纯 Google 存储模式）', () => {
         uploadDiskBudget: uploadDiskBudget as any,
       });
 
-      await (ctx.service as any).triggerGDriveCacheMirror(
-        { id: 'grant-mirror-2' },
-        { file_id: 'tg-file-456', file_name: 'test.mp4' },
-        2048,
-      );
+      await (ctx.service as any).mirrorGrantToGDriveCache({
+        id: 'grant-mirror-2',
+        telegramFileId: 'tg-file-456',
+        fileName: 'test.mp4',
+        mimeType: 'video/mp4',
+        fileSize: '21',
+        sourceAccountId: null,
+        gdriveCacheAttempts: 0,
+      });
 
-      expect(uploadDiskBudget.acquireSession).toHaveBeenCalledWith(expect.any(String), 2048);
+      expect(uploadDiskBudget.acquireSession).toHaveBeenCalledWith(expect.any(String), 21);
       expect(uploadDiskBudget.releaseSession).toHaveBeenCalledWith(expect.any(String));
 
       // 模拟租约已被其他任务占有时跳过，不触发上传
@@ -1643,11 +1666,15 @@ describe('TelegramBotDispatchService（纯 Google 存储模式）', () => {
         throw new Error('Upload session budget occupied');
       });
 
-      await (ctx.service as any).triggerGDriveCacheMirror(
-        { id: 'grant-mirror-3' },
-        { file_id: 'tg-file-789', file_name: 'test.mp4' },
-        2048,
-      );
+      await (ctx.service as any).mirrorGrantToGDriveCache({
+        id: 'grant-mirror-3',
+        telegramFileId: 'tg-file-789',
+        fileName: 'test.mp4',
+        mimeType: 'video/mp4',
+        fileSize: '21',
+        sourceAccountId: null,
+        gdriveCacheAttempts: 0,
+      });
 
       expect(storageRouter.upload).not.toHaveBeenCalled();
     });
@@ -1972,6 +1999,162 @@ describe('Bot 磁盘预算与停机补偿', () => {
       firstUpload.open();
       await ctx.service.beforeApplicationShutdown();
     }
+  });
+
+  describe('镜像取源账号池空闲优先（openMirrorSourceStream）', () => {
+    function mirrorGrant(overrides: Record<string, unknown> = {}) {
+      return {
+        id: 'grant-idle-1',
+        telegramFileId: 'tg-file-idle',
+        fileName: 'idle.mp4',
+        mimeType: 'video/mp4',
+        fileSize: '21',
+        sourceAccountId: '1234567',
+        fileUniqueId: 'UNIQ-IDLE',
+        gdriveCacheAttempts: 0,
+        ...overrides,
+      };
+    }
+
+    function router() {
+      return {
+        availableBackendTypes: jest.fn(() => ['gdrive']),
+        isGDriveCacheModeEnabled: jest.fn(async () => true),
+        upload: jest.fn(async () => ({
+          backendType: 'gdrive',
+          accountId: 'acc-gd-1',
+          objectRef: 'gdrive-idle-1',
+          size: 21,
+        })),
+        deleteRemoteObject: jest.fn(async () => true),
+      };
+    }
+
+    it('优先用「完全空闲」账号取源，并计 idlePreferred', async () => {
+      const pool = makePool(true);
+      const accountPoolDownload = {
+        isActive: jest.fn(() => true),
+        hasAccount: jest.fn(() => true),
+        openStream: jest.fn(async () => ({
+          stream: Readable.from([Buffer.from('hello world test data')]),
+          info: { file_id: 'tg-file-idle', file_size: 21 },
+          accountId: '7654321',
+          copy: null,
+          selectionReason: 'idle',
+        })),
+        openSourceStream: jest.fn(async () => null),
+        bumpCounter: pool.bumpCounter,
+      };
+      const ctx = makeService({
+        pool,
+        copies: { upsertReady: jest.fn(async () => ({})), listReady: jest.fn(async () => ([])) },
+        storageRouter: router() as any,
+        accountPoolDownload: accountPoolDownload as any,
+      });
+
+      await (ctx.service as any).mirrorGrantToGDriveCache(mirrorGrant());
+
+      expect(accountPoolDownload.openStream).toHaveBeenCalledWith(expect.objectContaining({
+        ownerType: 'fileUnique',
+        ownerId: 'UNIQ-IDLE',
+        idleOnly: true,
+      }));
+      // 第一次就命中：不再退化普通选号，也不走源账号
+      expect(accountPoolDownload.openStream).toHaveBeenCalledTimes(1);
+      expect(accountPoolDownload.openSourceStream).not.toHaveBeenCalled();
+      expect(pool.counters.idlePreferred).toBe(1);
+    });
+
+    it('没有空闲账号时退化为普通加权选号，并计 idleFallback', async () => {
+      const pool = makePool(true);
+      const accountPoolDownload = {
+        isActive: jest.fn(() => true),
+        hasAccount: jest.fn(() => true),
+        openStream: jest.fn()
+          .mockResolvedValueOnce(null) // idleOnly 未命中
+          .mockResolvedValueOnce({
+            stream: Readable.from([Buffer.from('hello world test data')]),
+            info: { file_id: 'tg-file-idle', file_size: 21 },
+            accountId: '7654321',
+            copy: null,
+            selectionReason: 'weighted',
+          }),
+        openSourceStream: jest.fn(async () => null),
+        bumpCounter: pool.bumpCounter,
+      };
+      const ctx = makeService({
+        pool,
+        copies: { upsertReady: jest.fn(async () => ({})), listReady: jest.fn(async () => ([])) },
+        storageRouter: router() as any,
+        accountPoolDownload: accountPoolDownload as any,
+      });
+
+      await (ctx.service as any).mirrorGrantToGDriveCache(mirrorGrant());
+
+      expect(accountPoolDownload.openStream).toHaveBeenNthCalledWith(1, expect.objectContaining({ idleOnly: true }));
+      expect(accountPoolDownload.openStream).toHaveBeenNthCalledWith(2, expect.objectContaining({ idleOnly: false }));
+      expect(pool.counters.idleFallback).toBe(1);
+    });
+
+    it('池化取源全失败时回退源账号（fail-closed，不跨账号误用 file_id）', async () => {
+      const pool = makePool(true);
+      const accountPoolDownload = {
+        isActive: jest.fn(() => true),
+        hasAccount: jest.fn(() => true),
+        openStream: jest.fn(async () => null),
+        openSourceStream: jest.fn(async () => ({
+          stream: Readable.from([Buffer.from('hello world test data')]),
+          info: { file_id: 'tg-file-idle', file_size: 21 },
+          accountId: '1234567',
+          copy: null,
+          selectionReason: 'source-account-fallback',
+        })),
+        bumpCounter: pool.bumpCounter,
+      };
+      const ctx = makeService({
+        pool,
+        copies: { upsertReady: jest.fn(async () => ({})), listReady: jest.fn(async () => ([])) },
+        storageRouter: router() as any,
+        accountPoolDownload: accountPoolDownload as any,
+      });
+
+      await (ctx.service as any).mirrorGrantToGDriveCache(mirrorGrant());
+
+      expect(accountPoolDownload.openSourceStream).toHaveBeenCalledWith(expect.objectContaining({
+        accountId: '1234567',
+        fileId: 'tg-file-idle',
+      }));
+    });
+
+    it('重试扫描不得被在飞锁挡死（否则该 grant 永远不会被重试）', async () => {
+      const pool = makePool(true);
+      const grant = mirrorGrant({ id: 'grant-retry-1' });
+      const storageRouter = router();
+      const ctx = makeService({
+        pool,
+        copies: { upsertReady: jest.fn(async () => ({})), listReady: jest.fn(async () => ([])) },
+        storageRouter: storageRouter as any,
+        accountPoolDownload: {
+          isActive: jest.fn(() => true),
+          hasAccount: jest.fn(() => true),
+          openStream: jest.fn(async () => ({
+            stream: Readable.from([Buffer.from('hello world test data')]),
+            info: { file_id: 'tg-file-idle', file_size: 21 },
+            accountId: '7654321',
+            copy: null,
+            selectionReason: 'idle',
+          })),
+          openSourceStream: jest.fn(async () => null),
+          bumpCounter: pool.bumpCounter,
+        } as any,
+      });
+      (ctx.grantService as any).findDueGDriveCacheMirrors = jest.fn(async () => [grant]);
+
+      await (ctx.service as any).retryDueGDriveCacheMirrors(5);
+
+      // 锁由 mirrorGrantToGDriveCache 自己持有，扫描侧不能再预先占用
+      expect(storageRouter.upload).toHaveBeenCalledTimes(1);
+    });
   });
 
 });

@@ -19,13 +19,15 @@ import { AccountAwareDownloadService } from '../telegram-account-pool/account-aw
 import type { AccountAwareDownloadFailure } from '../telegram-account-pool/account-aware-stream.types';
 import { StorageRouterService } from '../storage/storage-router.service';
 import { GDRIVE_MULTIPART_MAX_BYTES, StorageUploadSourceError } from '../storage/storage.types';
+import { GDRIVE_CACHE_LEASE_MS } from '../common/utils/gdrive-cache-backoff';
 import type { StorageUploadParams, StorageUploadReceipt } from '../storage/storage.types';
 import { TelegramBotFileGrant } from '../common/entities/telegram-bot-file-grant.entity';
 import { TelegramBotInboundTask } from '../common/entities/telegram-bot-inbound-task.entity';
 import { redactBotToken } from '../common/utils/sensitive-data';
 import { TelegramMirrorConfigService } from '../telegram-mirror/telegram-mirror-config.service';
 import { TelegramMirrorTriggerService } from '../telegram-mirror/telegram-mirror-trigger.service';
-import { DownloadResourceCoordinatorService, DownloadReservation } from '../file/download-resource-coordinator.service';
+import { DownloadResourceCoordinatorService, DownloadReservation, DownloadResourceException } from '../file/download-resource-coordinator.service';
+import type { DownloadUpstreamLease } from '../file/download-resource-coordinator.service';
 import { UploadDiskBudgetService } from '../file/upload-disk-budget.service';
 import { BotTransferTrackerService } from './bot-transfer-tracker.service';
 import { TelegramBotConfigService } from './telegram-bot-config.service';
@@ -638,19 +640,32 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
       }
     }
 
-    // 归档转发与副本登记解耦：即使登记失败也保留审计留痕。
-    const archiveChatId = (this.configService?.get<string>('TELEGRAM_ARCHIVE_CHAT_ID') || '').trim();
-    const account = pool.getConfig(accountId);
-    if (!archiveChatId || !account || !this.accountClient || !chatId || !messageId) return;
-    if (chatId === archiveChatId) return; // 已在归档群，避免自转发循环
+    // 归档转发与副本登记解耦：它是纯审计留痕，必须离开直链回复的关键路径
+    // （forwardMessage 超时 30s，此前会让用户等满超时才收到链接）。
+    void this.forwardArchiveCopy({ chatId, messageId, accountId });
+  }
 
-    // 来自「镜像群」或「主群」的消息只登记副本、不再归档转发：这两类群都是扩散落点，
-    // 群内每条消息会被群内每个 Bot 各收到一次，逐个转发会让归档群消息量按 Bot 数（N）放大。
-    if (await this.shouldSuppressArchiveForward(chatId)) {
-      this.logger.debug(`来源为扩散落点（镜像群/主群，chat=${chatId}），跳过归档转发以避免 N 倍放大`);
-      return;
-    }
+  /** 归档群转发（后台执行，失败只告警） */
+  private async forwardArchiveCopy(input: {
+    chatId: string;
+    messageId: string;
+    accountId?: string;
+  }): Promise<void> {
     try {
+      const archiveChatId = (this.configService?.get<string>('TELEGRAM_ARCHIVE_CHAT_ID') || '').trim();
+      const pool = this.pool;
+      const { chatId, messageId, accountId } = input;
+      if (!archiveChatId || !pool || !accountId || !this.accountClient || !chatId || !messageId) return;
+      if (chatId === archiveChatId) return; // 已在归档群，避免自转发循环
+
+      // 来自「镜像群」或「主群」的消息只登记副本、不再归档转发：这两类群都是扩散落点，
+      // 群内每条消息会被群内每个 Bot 各收到一次，逐个转发会让归档群消息量按 Bot 数（N）放大。
+      if (await this.shouldSuppressArchiveForward(chatId)) {
+        this.logger.debug(`来源为扩散落点（镜像群/主群，chat=${chatId}），跳过归档转发以避免 N 倍放大`);
+        return;
+      }
+      const account = pool.getConfig(accountId);
+      if (!account) return;
       const forwarded = await this.accountClient.forwardMessage(
         accountId,
         account.token,
@@ -922,6 +937,10 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
         await this.reply(chatId, '服务正在维护重启中，请稍后重新发送文件。', message.message_id, accountId);
         return;
       }
+      // Google 缓存模式：签发时即写 pending（同一事务），避免"回复后、触发前崩溃 → 永不重试"
+      const cacheMirrorEnabled = config.storageMode === 'telegram'
+        && Boolean(this.storageRouter?.isGDriveCacheModeEnabled)
+        && await this.storageRouter!.isGDriveCacheModeEnabled().catch(() => false);
       const grantInput: IssueGrantInput = {
         ...identity,
         chatId,
@@ -933,6 +952,7 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
         mimeType: this.sanitizePlain(doc.mime_type, 128),
         fileSize: fileSize === null ? null : String(fileSize),
         fileUniqueId: doc.file_unique_id ?? null,
+        ...(cacheMirrorEnabled ? { gdriveCacheStatus: 'pending' as const, gdriveCacheNextRetryAt: new Date() } : {}),
       };
       if (config.storageMode === 'gdrive') {
         const { username, displayName, ...fields } = grantInput;
@@ -1034,7 +1054,9 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
 
         // 镜像备份（Bot 入站）：grant 已持久化后才触发；镜像失败不回滚签发与配额
         void this.triggerInboundMirror(grant, accountId);
-        background = this.triggerGDriveCacheMirror(grant, doc, fileSize, accountId, abortController.signal);
+        if (cacheMirrorEnabled) {
+          background = this.mirrorGrantToGDriveCache(grant, abortController.signal);
+        }
       } catch (error) {
         // 签发失败：归还已消耗的配额，避免用户白白损失额度
         if (quotaConsumed) {
@@ -1407,6 +1429,7 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
     let uploadReceipt: StorageUploadReceipt | null = null;
     let diskReservation: DownloadReservation | null = null;
     let uploadSessionId: string | null = null;
+    let upstreamLease: DownloadUpstreamLease | null = null;
 
     try {
       signal.throwIfAborted();
@@ -1416,6 +1439,11 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
       }
 
       const estimatedBytes = fileSize ?? 50 * 1024 * 1024;
+      // 后台转存属于"用户不可见"的批处理：必须进入全局上行预算，
+      // 否则大批收件会与前台下载抢同一个 Bot 账号的出口带宽。
+      upstreamLease = this.downloadResources?.acquireUpstreamSlot
+        ? await this.downloadResources.acquireUpstreamSlot({ bytes: estimatedBytes, waitTimeoutMs: 60_000, signal })
+        : null;
       if (this.uploadDiskBudget?.isStrictMode()) {
         const sessionId = randomUUID();
         await this.uploadDiskBudget.acquireSession(sessionId, estimatedBytes);
@@ -1532,6 +1560,10 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
       }
     } catch (error) {
       if (!signal.aborted) {
+        if (error instanceof DownloadResourceException) {
+          await this.inboundQueue.retry(task, error.retryAfterMs ?? 30_000);
+          return;
+        }
         const wait = telegramBackoffMs(error);
         if (wait) {
           this.telegramCooldownUntil.set(task.receiverBotId, Date.now() + wait);
@@ -1547,6 +1579,7 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
       releaseTransferLease?.();
       if (tempFilePath) await unlink(tempFilePath).catch(() => {});
       diskReservation?.release();
+      upstreamLease?.release();
       if (uploadSessionId) this.uploadDiskBudget?.releaseSession(uploadSessionId);
       if (uploadReceipt?.accountId && uploadReceipt.objectRef && this.storageRouter) {
         const { accountId: uploadedAccountId, objectRef } = uploadReceipt;
@@ -1573,11 +1606,40 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
     chunkSize: number,
     signal: AbortSignal,
   ): Readable {
+    return this.openBufferedTransferSource(
+      size,
+      chunkSize,
+      signal,
+      (upstreamSignal) => this.getTelegramSourceStream(fileId, size, accountId, upstreamSignal),
+    );
+  }
+
+  /** 后台镜像取源：同样走缓冲封装，但每次开流都重新过一遍账号池选号 */
+  private openMirrorTransferSource(
+    grant: TelegramBotFileGrant,
+    size: number,
+    chunkSize: number,
+    signal: AbortSignal,
+  ): Readable {
+    return this.openBufferedTransferSource(
+      size,
+      chunkSize,
+      signal,
+      (upstreamSignal) => this.openMirrorSourceStream(grant, size, upstreamSignal),
+    );
+  }
+
+  private openBufferedTransferSource(
+    size: number,
+    chunkSize: number,
+    signal: AbortSignal,
+    openUpstream: (signal: AbortSignal) => Promise<Readable>,
+  ): Readable {
     // Google 等待当前分块确认时，提前读取下一块；缓冲写满后让 Telegram 流背压。
     const buffered = new PassThrough({ readableHighWaterMark: chunkSize, writableHighWaterMark: 64 * 1024 });
     void pipeline(
       (options?: { signal?: AbortSignal }) =>
-        this.readTelegramTransfer(fileId, size, accountId, options?.signal ?? signal),
+        this.readTelegramTransfer(openUpstream, size, options?.signal ?? signal),
       buffered,
       { signal },
     ).catch(() => {
@@ -1586,14 +1648,64 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
     return buffered;
   }
 
+  /**
+   * 后台镜像取源：多 Bot 账号池「严格空闲优先」+ 普通加权 + 源账号 fail-closed 三级回退。
+   *
+   * 为什么不能直接用 `grant.sourceAccountId`：镜像与前台下载共用同一个源账号时，
+   * 大文件会把该账号的出口带宽占满。跨账号复用 `file_id` 是不允许的（按账号隔离），
+   * 所以「换账号」只能换成**持有该文件 ready 副本**的账号，每账号用自己的 file_id ——
+   * 这正是 `openStream` 的语义，因此这里复用而不是新造取流原语。
+   */
+  private async openMirrorSourceStream(
+    grant: TelegramBotFileGrant,
+    expectedSize: number | undefined,
+    signal: AbortSignal,
+  ): Promise<Readable> {
+    const pool = this.accountPoolDownload;
+    const fileUniqueId = (grant.fileUniqueId || '').trim();
+    if (pool?.isActive() && this.copies && fileUniqueId) {
+      const attempts = [
+        { idleOnly: true, counter: 'idlePreferred' as const },
+        { idleOnly: false, counter: 'idleFallback' as const },
+      ];
+      for (const attempt of attempts) {
+        const opened = await pool.openStream({
+          ownerType: 'fileUnique',
+          ownerId: fileUniqueId,
+          expectedSize,
+          noCache: true,
+          idleOnly: attempt.idleOnly,
+          fileName: grant.fileName || 'download',
+          signal,
+        }).catch((error: unknown) => {
+          this.logger.warn(
+            `镜像取源选号异常（grant=${grant.id}，idleOnly=${attempt.idleOnly}）：`
+            + `${error instanceof Error ? error.message : String(error)}`,
+          );
+          return null;
+        });
+        if (opened) {
+          pool.bumpCounter(attempt.counter);
+          return opened.stream;
+        }
+      }
+    }
+
+    return this.getTelegramSourceStream(
+      grant.telegramFileId,
+      expectedSize,
+      grant.sourceAccountId ?? undefined,
+      signal,
+    );
+  }
+
   private async *readTelegramTransfer(
-    fileId: string,
+    openUpstream: (signal: AbortSignal) => Promise<Readable>,
     size: number,
-    accountId: string | undefined,
     signal: AbortSignal,
   ): AsyncGenerator<Buffer> {
     try {
-      const stream = await this.getTelegramSourceStream(fileId, size, accountId, signal);
+      const stream = await openUpstream(signal);
       let received = 0;
       let tail: Buffer | undefined;
       for await (const chunk of stream) {
@@ -1613,98 +1725,149 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
   }
 
   /**
-   * Google 缓存模式：异步将 Bot 接收的文件镜像到 Google 云端硬盘账号池。
-   * 不阻塞 Bot 的主流程和直链回复；失败仅记录告警。
+   * 将 Bot 直链对应的 Telegram 副本镜像到 Google（带状态机与退避重试）。
+   *
+   * 数据源一律取自 grant 行，首次触发与扫描重试共用同一实现：
+   * - 大文件流式直传，小文件落盘后上传，两条路径都做字节数校验；
+   * - 进入全局上行并发预算，避免与前台下载抢同一个 Bot 账号的出口带宽；
+   * - 失败写 `failed` + 退避时间，交给扫描任务重试，绝不影响已发出的直链。
    */
-  private async triggerGDriveCacheMirror(
-    grant: TelegramBotFileGrant,
-    doc: { file_id: string; file_name?: string; mime_type?: string },
-    fileSize: number | null,
-    accountId?: string,
-    signal?: AbortSignal,
-  ): Promise<void> {
+  private async mirrorGrantToGDriveCache(grant: TelegramBotFileGrant, signal?: AbortSignal): Promise<void> {
     if (!this.storageRouter || this.isShuttingDown) return;
+    // 进程内互斥：首投与重试扫描可能同时命中同一 grant
+    if (this.cacheMirrorInflight.has(grant.id)) return;
+    this.cacheMirrorInflight.add(grant.id);
+    let leaseTimer: NodeJS.Timeout | null = null;
     try {
-      if (!(await this.storageRouter.isGDriveCacheModeEnabled())) return;
-    } catch {
-      return;
+      await this.runGrantGDriveCacheMirror(grant, signal, (timer) => { leaseTimer = timer; });
+    } finally {
+      if (leaseTimer) clearInterval(leaseTimer);
+      this.cacheMirrorInflight.delete(grant.id);
     }
+  }
 
-    const estimatedBytes = fileSize && fileSize > 0 ? fileSize : 50 * 1024 * 1024;
+  /** 上传期间续期，避免长传输被重试扫描重复领取（行级 lease 只有 10 分钟） */
+  private startGrantLeaseRenewal(grantId: string): NodeJS.Timeout {
+    const timer = setInterval(() => {
+      void this.grantService.renewGDriveCacheLease(grantId).catch(() => undefined);
+    }, Math.max(30_000, Math.floor(GDRIVE_CACHE_LEASE_MS / 2)));
+    timer.unref?.();
+    return timer;
+  }
+
+  private async runGrantGDriveCacheMirror(
+    grant: TelegramBotFileGrant,
+    signal: AbortSignal | undefined,
+    onLeaseTimer: (timer: NodeJS.Timeout) => void,
+  ): Promise<void> {
+    const config = await this.botConfigService.getConfig().catch(() => null);
+    if (!config || config.storageMode !== 'telegram') return;
+    const storageRouter = this.storageRouter;
+    if (!storageRouter) return;
+    if (!(await storageRouter.isGDriveCacheModeEnabled().catch(() => false))) return;
+    if (!(await this.grantService.markGDriveCachePending(grant.id).catch(() => false))) return;
+    onLeaseTimer(this.startGrantLeaseRenewal(grant.id));
+
+    const mirrorSignal = signal ?? new AbortController().signal;
+    const reported = Number(grant.fileSize);
+    const knownSize = Number.isSafeInteger(reported) && reported > 0 ? reported : undefined;
+    const estimatedBytes = knownSize ?? 50 * 1024 * 1024;
     let uploadSessionId: string | null = null;
     let tempFilePath: string | null = null;
-    let releaseTransferLease: (() => void) | undefined = undefined;
+    let releaseTransferLease: (() => void) | undefined;
     let diskReservation: DownloadReservation | null = null;
+    let upstreamLease: DownloadUpstreamLease | null = null;
     let uploadedReceipt: StorageUploadReceipt | null = null;
 
     try {
+      upstreamLease = this.downloadResources?.acquireUpstreamSlot
+        ? await this.downloadResources.acquireUpstreamSlot({
+          bytes: estimatedBytes,
+          waitTimeoutMs: 60_000,
+          signal: mirrorSignal,
+        })
+        : null;
+
       if (this.uploadDiskBudget?.isStrictMode()) {
-        try {
-          uploadSessionId = randomUUID();
-          await this.uploadDiskBudget.acquireSession(uploadSessionId, estimatedBytes);
-        } catch {
-          // 严格无缓存模式下磁盘上传租约已被占用，作为 best-effort 缓存镜像，直接放弃本次同步，避免打乱小盘串行化保证
-          return;
-        }
+        const sessionId = randomUUID();
+        await this.uploadDiskBudget.acquireSession(sessionId, estimatedBytes);
+        uploadSessionId = sessionId;
       }
 
-      const tempDir = path.join(process.cwd(), 'tmp', 'bot-transfers');
-      await mkdir(tempDir, { recursive: true });
-      const localTempPath = path.join(tempDir, `gdrive_cache_${randomUUID()}.tmp`);
-      tempFilePath = localTempPath;
-      releaseTransferLease = this.transferTracker?.register(localTempPath);
+      const streamLargeFile = knownSize !== undefined && knownSize > GDRIVE_MULTIPART_MAX_BYTES;
+      let receipt: StorageUploadReceipt;
+      if (streamLargeFile) {
+        const chunkSize = await this.storageRouter.getGDriveChunkSizeBytes();
+        receipt = await this.storageRouter.upload({
+          backendType: 'gdrive',
+          objectName: grant.fileName ?? `tg_${grant.telegramFileId}`,
+          mimeType: grant.mimeType ?? undefined,
+          knownLength: knownSize,
+          chunkSize,
+          signal: mirrorSignal,
+          openStream: () => this.openMirrorTransferSource(grant, knownSize, chunkSize, mirrorSignal),
+        });
+        if (receipt.size !== knownSize) {
+          throw new Error('Google 返回的文件大小与 Telegram 源不一致');
+        }
+      } else {
+        const tempDir = path.join(process.cwd(), 'tmp', 'bot-transfers');
+        await mkdir(tempDir, { recursive: true });
+        const localTempPath = path.join(tempDir, `gdrive_cache_${randomUUID()}.tmp`);
+        tempFilePath = localTempPath;
+        releaseTransferLease = this.transferTracker?.register(localTempPath);
 
-      if (this.downloadResources) {
-        try {
+        if (this.downloadResources) {
           diskReservation = await this.downloadResources.reserve({
             sessionKey: `bot-cache-mirror:${grant.id}`,
             bytes: estimatedBytes,
             countsTowardCache: false,
             waitTimeoutMs: 10_000,
-            signal,
+            signal: mirrorSignal,
           });
-        } catch {
-          return;
+        }
+
+        const upstreamStream = await this.openMirrorSourceStream(grant, knownSize, mirrorSignal);
+        await this.writeTransferFile(upstreamStream, localTempPath, diskReservation, mirrorSignal);
+        const actualSize = (await stat(localTempPath)).size;
+        if (knownSize !== undefined && actualSize !== knownSize) {
+          throw new Error(`Telegram 源流不完整（期望 ${knownSize} 字节，实际 ${actualSize} 字节）`);
+        }
+        receipt = await this.storageRouter.upload({
+          backendType: 'gdrive',
+          objectName: grant.fileName ?? `tg_${grant.telegramFileId}`,
+          mimeType: grant.mimeType ?? undefined,
+          knownLength: actualSize,
+          signal: mirrorSignal,
+          openStream: () => createReadStream(localTempPath, { highWaterMark: 1024 * 1024 }),
+        });
+        if (receipt.size !== actualSize) {
+          throw new Error('Google 返回的文件大小与本地暂存不一致');
         }
       }
-
-      const upstreamStream = await this.getTelegramSourceStream(doc.file_id, fileSize ?? undefined, accountId);
-      await this.writeTransferFile(upstreamStream, localTempPath, diskReservation, signal);
-
-      const fileStats = await stat(localTempPath);
-      const actualSize = fileStats.size;
-
-      const receipt = await this.storageRouter.upload({
-        backendType: 'gdrive',
-        objectName: doc.file_name || `tg_${doc.file_id}`,
-        signal,
-        knownLength: actualSize,
-        mimeType: doc.mime_type || undefined,
-        openStream: () => createReadStream(localTempPath, { highWaterMark: 1024 * 1024 }),
-      });
       uploadedReceipt = receipt;
-      signal?.throwIfAborted();
+      mirrorSignal.throwIfAborted();
 
-      if (receipt?.objectRef) {
-        const attached = await this.grantService.attachGDriveCache(grant.id, receipt.accountId, receipt.objectRef);
-        if (!attached) {
-          this.logger.warn(`Bot 直链 ${grant.id} 在同步 Google 缓存期间已失效/撤销，回滚删除缓存对象`);
-          if (receipt.accountId) {
-            await this.storageRouter.deleteRemoteObject('gdrive', receipt.accountId, receipt.objectRef).catch(() => {});
-          }
-          uploadedReceipt = null;
-        } else {
-          uploadedReceipt = null;
-          this.logger.log(`Bot 直链 ${grant.id} 已同步至 Google 缓存 (accountId=${receipt.accountId})`);
+      const attached = await this.grantService.attachGDriveCache(grant.id, receipt.accountId, receipt.objectRef);
+      if (!attached) {
+        this.logger.warn(`Bot 直链 ${grant.id} 在同步 Google 缓存期间已失效/撤销，回滚删除缓存对象`);
+        if (receipt.accountId) {
+          await this.storageRouter.deleteRemoteObject('gdrive', receipt.accountId, receipt.objectRef).catch(() => {});
         }
+        uploadedReceipt = null;
+        return;
       }
+      uploadedReceipt = null;
+      this.logger.log(`Bot 直链 ${grant.id} 已同步至 Google 缓存 (accountId=${receipt.accountId})`);
     } catch (err) {
       if (uploadedReceipt?.accountId && uploadedReceipt.objectRef) {
-        await this.storageRouter.deleteRemoteObject('gdrive', uploadedReceipt.accountId, uploadedReceipt.objectRef).catch((delErr) => {
-          this.logger.warn(`异常分支清理 Google 缓存失败: ${(delErr as Error).message}`);
-        });
+        await this.storageRouter.deleteRemoteObject('gdrive', uploadedReceipt.accountId, uploadedReceipt.objectRef).catch(() => {});
       }
-      this.logger.warn(`Bot 直链 ${grant.id} 同步 Google 缓存失败（不影响主存储）：${err instanceof Error ? err.message : String(err)}`);
+      const attempts = (grant.gdriveCacheAttempts ?? 0) + 1;
+      await this.grantService.markGDriveCacheFailed(grant.id, err, attempts);
+      this.logger.warn(
+        `Bot 直链 ${grant.id} 同步 Google 缓存失败（第 ${attempts} 次，已安排重试）：${err instanceof Error ? err.message : String(err)}`,
+      );
     } finally {
       if (tempFilePath) {
         await unlink(tempFilePath).catch(() => {});
@@ -1714,11 +1877,36 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
         diskReservation.release();
         diskReservation = null;
       }
+      upstreamLease?.release();
       if (uploadSessionId && this.uploadDiskBudget) {
         this.uploadDiskBudget.releaseSession(uploadSessionId);
         uploadSessionId = null;
       }
     }
+  }
+
+  private readonly cacheMirrorInflight = new Set<string>();
+
+  /**
+   * 扫描到期的 Bot 直链缓存同步（由重试 cron 调用）。
+   * 并发 2：重试是后台补课，不能反过来拖慢前台下载。
+   *
+   * 在飞锁由 `mirrorGrantToGDriveCache` 自己持有：这里不能再预先 add，
+   * 否则它会因为「ID 已在集合里」而立刻返回，该 grant 永远不会被重试。
+   */
+  async retryDueGDriveCacheMirrors(limit = 5): Promise<void> {
+    if (this.isShuttingDown) return;
+    const grants = await this.grantService.findDueGDriveCacheMirrors(limit);
+    if (grants.length === 0) return;
+    const queue = [...grants];
+    const worker = async (): Promise<void> => {
+      for (;;) {
+        const next = queue.shift();
+        if (!next) return;
+        await this.mirrorGrantToGDriveCache(next);
+      }
+    };
+    await Promise.all([worker(), worker()]);
   }
 
   private async writeTransferFile(

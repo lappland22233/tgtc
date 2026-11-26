@@ -1708,13 +1708,12 @@ async function handleDownload() {
   width: 48px;
   height: 48px;
   background: var(--seed-primary);
-  color: #fff;
+  color: var(--workspace-on-accent);
   box-shadow: var(--shadow-sm);
 }
 
 .fpv-audio-btn--play:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--seed-primary) 88%, #fff);
-  color: #fff;
+  background: var(--seed-accent);
 }
 
 /* 倍速胶囊 */

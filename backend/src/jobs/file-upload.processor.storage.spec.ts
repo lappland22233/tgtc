@@ -67,10 +67,14 @@ function makeFileService() {
     registerPrimaryTelegramSource: jest.fn(),
     triggerMirrorForFile: jest.fn(),
     cleanupNonTelegramObject: jest.fn().mockResolvedValue(undefined),
+    mirrorGDriveCache: jest.fn().mockResolvedValue(undefined),
   };
 }
 
-function makeStorageRouter(receipt?: { objectRef: string; accountId: string; size: number }) {
+function makeStorageRouter(
+  receipt?: { objectRef: string; accountId: string; size: number },
+  cacheModeEnabled = false,
+) {
   return {
     upload: jest.fn().mockResolvedValue({
       backendType: 's3',
@@ -78,6 +82,7 @@ function makeStorageRouter(receipt?: { objectRef: string; accountId: string; siz
       objectRef: receipt?.objectRef ?? 'prefix/uuid-doc.pdf',
       size: receipt?.size ?? 2048,
     }),
+    isGDriveCacheModeEnabled: jest.fn().mockResolvedValue(cacheModeEnabled),
   };
 }
 
@@ -271,7 +276,7 @@ describe('FileUploadProcessor 非 TG 存储后端分支', () => {
     expect(telegram.uploadFile).toHaveBeenCalled();
   });
 
-  it('Google 缓存模式：数据库更新受影响行为 0 时清理已上传的孤立 GDrive 远端文件', async () => {
+  it('Google 双写委托给 FileService，并使用本地临时文件快路径', async () => {
     const repo = makeRepo();
     repo.findOne.mockResolvedValue(makeFile({ storageBackend: 'telegram', telegramFileId: 'tg-file-id' }));
     repo.findOneOrFail.mockResolvedValue(makeFile({
@@ -279,37 +284,79 @@ describe('FileUploadProcessor 非 TG 存储后端分支', () => {
       uploadStage: 'remote_committed',
       telegramFileId: 'tg-file-id',
     }));
-    // 模拟常规阶段更新成功，但在 Google 缓存更新时版本已变化（affected: 0）
-    repo.update.mockImplementation(async (_criteria: any, updateData: any) => {
-      if (updateData.gdriveCacheStatus === 'ready') {
-        return { affected: 0 };
-      }
-      return { affected: 1 };
-    });
 
     const telegram = {
       uploadFile: jest.fn().mockResolvedValue({ file_id: 'tg-file-id', file_path: '', file_size: 2048 }),
       releaseLocalFile: jest.fn(),
     };
     const fileService = makeFileService();
-    const storageRouter = {
-      isGDriveCacheModeEnabled: jest.fn().mockResolvedValue(true),
-      upload: jest.fn().mockResolvedValue({
-        backendType: 'gdrive',
-        accountId: 'acc-gdrive-1',
-        objectRef: 'remote-cache-file',
-      }),
-      deleteRemoteObject: jest.fn().mockResolvedValue(undefined),
-    };
-    const processor = makeProcessor(repo, fileService, storageRouter as any, telegram);
+    const processor = makeProcessor(repo, fileService, makeStorageRouter(), telegram);
 
     await processor.uploadToTelegram(makeJob(0));
 
-    expect(storageRouter.upload).toHaveBeenCalledWith(expect.objectContaining({ backendType: 'gdrive' }));
-    expect(storageRouter.deleteRemoteObject).toHaveBeenCalledWith(
-      'gdrive',
-      'acc-gdrive-1',
-      'remote-cache-file',
+    expect(fileService.mirrorGDriveCache).toHaveBeenCalledWith(
+      fileId,
+      expect.objectContaining({ localPath: expect.any(String) }),
     );
+  });
+
+  // 回归背景（codex P2）：置 ready 前预置 `gdriveCacheStatus='pending'` 是为了让
+  // 「已置 ready、尚未进入双写」这个崩溃窗口可被重试扫描捞回。但若在缓存模式**关闭**时
+  // 也无条件置 pending，`mirrorGDriveCache` 会在模式检查处直接返回、不改状态，
+  // 这些文件就一直挂在 pending；等以后打开缓存模式，重试扫描会把它们全部补传，
+  // 白白消耗 GDrive 空间与带宽（这些文件创建时本就没打算缓存）。
+  it('缓存模式关闭时不得预置 gdriveCacheStatus=pending（避免以后被误补传）', async () => {
+    const repo = makeRepo();
+    repo.findOne.mockResolvedValue(makeFile({ storageBackend: 'telegram', telegramFileId: 'tg-file-id' }));
+    repo.findOneOrFail.mockResolvedValue(makeFile({
+      storageBackend: 'telegram',
+      uploadStage: 'remote_committed',
+      telegramFileId: 'tg-file-id',
+    }));
+
+    const telegram = {
+      uploadFile: jest.fn().mockResolvedValue({ file_id: 'tg-file-id', file_path: '', file_size: 2048 }),
+      releaseLocalFile: jest.fn(),
+    };
+    const storageRouter = makeStorageRouter(undefined, false);
+    const processor = makeProcessor(repo, makeFileService(), storageRouter, telegram);
+
+    await processor.uploadToTelegram(makeJob(0));
+
+    expect(storageRouter.isGDriveCacheModeEnabled).toHaveBeenCalled();
+    const pendingWrites = repo.update.mock.calls.filter(
+      (call) => (call[1] as Record<string, unknown> | undefined)?.gdriveCacheStatus === 'pending',
+    );
+    expect(pendingWrites).toHaveLength(0);
+  });
+
+  it('缓存模式开启时在置 ready 之前预置 gdriveCacheStatus=pending', async () => {
+    const repo = makeRepo();
+    repo.findOne.mockResolvedValue(makeFile({ storageBackend: 'telegram', telegramFileId: 'tg-file-id' }));
+    repo.findOneOrFail.mockResolvedValue(makeFile({
+      storageBackend: 'telegram',
+      uploadStage: 'remote_committed',
+      telegramFileId: 'tg-file-id',
+    }));
+
+    const telegram = {
+      uploadFile: jest.fn().mockResolvedValue({ file_id: 'tg-file-id', file_path: '', file_size: 2048 }),
+      releaseLocalFile: jest.fn(),
+    };
+    const storageRouter = makeStorageRouter(undefined, true);
+    const processor = makeProcessor(repo, makeFileService(), storageRouter, telegram);
+
+    await processor.uploadToTelegram(makeJob(0));
+
+    const pendingIndex = repo.update.mock.calls.findIndex(
+      (call) => (call[1] as Record<string, unknown> | undefined)?.gdriveCacheStatus === 'pending',
+    );
+    expect(pendingIndex).toBeGreaterThanOrEqual(0);
+    // 条件更新必须锚定当前版本，避免覆盖并发上传写入的状态
+    expect(repo.update.mock.calls[pendingIndex][0]).toMatchObject({
+      id: fileId,
+      uploadVersion,
+      gdriveCacheStatus: 'none',
+    });
   });
 });

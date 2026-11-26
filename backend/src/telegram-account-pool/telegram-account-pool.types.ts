@@ -244,6 +244,15 @@ export interface AccountPoolCounters {
    */
   largeFileSlotThrottled: number;
   /**
+   * 后台镜像取源命中「完全空闲」账号的次数。
+   *
+   * 与 `idleFallback` 成对观察：前者说明多 Bot 分流生效；后者持续增长说明
+   * 收件高峰时全池都有在飞请求，镜像只能退回普通加权（仍然可用，只是不再独占空闲账号）。
+   */
+  idlePreferred: number;
+  /** 后台镜像取源时没有空闲候选、退回普通加权选号的次数 */
+  idleFallback: number;
+  /**
    * 「搬运到主群」尝试次数（副本扩散链路的第一步：持有源消息的 Bot 把消息服务端转发进主群）。
    *
    * 与 `mainChatPlantFailures` 成对观察：只有尝试数持续增长而失败数为 0，才说明

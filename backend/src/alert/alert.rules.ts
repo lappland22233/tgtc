@@ -316,6 +316,15 @@ export async function createAlertRules(configCache: ConfigCacheService): Promise
       cooldownMinutes: 30,
       evaluate: async () => null,
     },
+
+    // ===== Google 双写积压（由 GDriveCacheRetryService 每轮扫描后触发） =====
+    {
+      id: 'GDRIVE_CACHE_BACKLOG',
+      name: 'Google 双写积压',
+      level: AlertLevel.WARNING,
+      cooldownMinutes: 30,
+      evaluate: async () => null,
+    },
   ];
 }
 
@@ -351,5 +360,6 @@ export function getAlertRuleMetadata() {
     { id: 'MIRROR_BACKUP_STALLED', name: '主文件成功但备份长期未完成', level: AlertLevel.WARNING },
     { id: 'MIRROR_NO_ENABLED_RULES', name: '镜像已开启但没有启用中的规则', level: AlertLevel.CRITICAL },
     { id: 'STORAGE_CAPACITY_EXHAUSTED', name: '存储池容量耗尽', level: AlertLevel.CRITICAL },
+    { id: 'GDRIVE_CACHE_BACKLOG', name: 'Google 双写积压', level: AlertLevel.WARNING },
   ];
 }

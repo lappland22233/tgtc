@@ -57,6 +57,7 @@ const queueFields = [
 const grantFields = [
   'id', 'receiverBotId', 'sourceAccountId', 'telegramUserId', 'telegramUsername', 'telegramDisplayName',
   'fileName', 'fileSize', 'storageBackend', 'createdAt', 'expiresAt', 'revokedAt', 'revokedBy', 'accessCount', 'tokenPrefix',
+  'gdriveCacheStatus', 'gdriveCacheAttempts', 'gdriveCacheLastError',
 ] as const satisfies readonly (keyof TelegramBotFileGrant)[];
 const auditActions = [
   'telegram_bot_task_cancelled', 'telegram_bot_user_banned', 'telegram_bot_link_revoked',

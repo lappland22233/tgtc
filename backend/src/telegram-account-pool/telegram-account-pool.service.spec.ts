@@ -113,6 +113,36 @@ describe('TelegramAccountPoolService（选号 / 冷却 / 快照）', () => {
     expect(selection?.accountId).toBe('high');
   });
 
+  it('idleOnly：跳过有在飞请求的账号，即使它权重更高', () => {
+    const pool = makePool({
+      TELEGRAM_ACCOUNT_POOL_ENABLED: 'true',
+      TELEGRAM_ACCOUNT_POOL: JSON.stringify([
+        { id: 'busy-high', token: TOKEN_A, chatId: '-1', weight: 10 },
+        { id: 'idle-low', token: TOKEN_B, chatId: '-2', weight: 1 },
+      ]),
+    });
+    expect(pool.beginAttempt('busy-high')).toBe(true);
+
+    // 普通选号会挑权重更高的忙碌账号
+    expect(pool.select()?.accountId).toBe('busy-high');
+    // 严格空闲优先只接受 inflight === 0
+    expect(pool.select(undefined, Date.now(), { idleOnly: true })?.accountId).toBe('idle-low');
+  });
+
+  it('idleOnly：没有任何空闲账号时返回 null（不自动降级）', () => {
+    const pool = makePool({
+      TELEGRAM_ACCOUNT_POOL_ENABLED: 'true',
+      TELEGRAM_ACCOUNT_POOL: JSON.stringify([
+        { id: 'only', token: TOKEN_A, chatId: '-1' },
+      ]),
+    });
+    expect(pool.beginAttempt('only')).toBe(true);
+
+    expect(pool.select(undefined, Date.now(), { idleOnly: true })).toBeNull();
+    // 非 idleOnly 仍然可用（容量内），用于调用方降级
+    expect(pool.select()?.accountId).toBe('only');
+  });
+
   it('稳定候选排序 + 平局轮转：完全等价账号不受输入顺序影响且可被均匀选中', () => {
     const pool = makePool({
       TELEGRAM_ACCOUNT_POOL_ENABLED: 'true',

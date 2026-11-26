@@ -47,6 +47,7 @@
           </template>
           <template v-else>
             <div><dt>存储后端</dt><dd>{{ row.storageBackend }}</dd></div>
+            <div><dt>Google 双写</dt><dd :title="row.gdriveCacheLastError || ''">{{ gdriveCacheLabel(row) }}</dd></div>
             <div v-if="row.sourceAccountId"><dt>来源账号</dt><dd>{{ row.sourceAccountId }}</dd></div>
             <div><dt>剩余有效期</dt><dd>{{ remainingTime(row) }}</dd></div>
             <div><dt>到期时间</dt><dd>{{ formatDateTime(row.expiresAt, true) }}</dd></div>
@@ -141,6 +142,16 @@ function remainingTime(grant: GrantRow) {
   if (minutes < 60) return minutes + ' 分钟';
   if (minutes < 1440) return Math.floor(minutes / 60) + ' 小时 ' + (minutes % 60) + ' 分钟';
   return Math.floor(minutes / 1440) + ' 天 ' + Math.floor(minutes % 1440 / 60) + ' 小时';
+}
+function gdriveCacheLabel(grant: GrantRow): string {
+  const status = grant.gdriveCacheStatus ?? 'none';
+  if (status === 'ready') return '已同步';
+  if (status === 'pending') return '待同步';
+  if (status === 'failed') {
+    const attempts = grant.gdriveCacheAttempts ?? 0;
+    return '失败' + (attempts > 0 ? '（' + attempts + ' 次）' : '');
+  }
+  return '未同步';
 }
 let listRequest: AbortController | undefined;
 let linkRequest: AbortController | undefined;
