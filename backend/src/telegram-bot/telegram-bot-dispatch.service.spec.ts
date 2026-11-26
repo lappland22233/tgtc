@@ -2222,6 +2222,112 @@ describe('Bot 磁盘预算与停机补偿', () => {
       expect(send).toHaveBeenCalledTimes(1);
     });
 
+    describe('降级门禁（只有 400 才允许重发）', () => {
+      const richMessage = { blocks: [{ type: 'paragraph' as const, text: 'x' }] };
+      const networkErrors = [
+        'timeout of 30000ms exceeded',
+        'read ECONNRESET',
+        'Request failed with status code 502',
+        'socket hang up',
+        'Request failed with status code 500',
+        'connect ETIMEDOUT',
+      ];
+
+      it.each(networkErrors)('网络/5xx 错误（%s）不降级重发，避免重复投递', async (msg) => {
+        const ctx = makeService({});
+        const send = ctx.telegramService.sendMessage as jest.Mock;
+        send.mockReset();
+        send.mockRejectedValue(new Error(msg));
+
+        await (ctx.service as any).reply('7001', { text: 'x', rich: richMessage });
+
+        expect(send).toHaveBeenCalledTimes(1);
+      });
+
+      it('带 status=400 的池化错误才进入降级', async () => {
+        const ctx = makeService({});
+        const send = ctx.telegramService.sendMessage as jest.Mock;
+        send.mockReset();
+        send
+          .mockRejectedValueOnce(Object.assign(new Error('Bad Request: can\'t parse entities'), { status: 400 }))
+          .mockResolvedValue({ message_id: 1, chat: { id: 7001 } });
+
+        await (ctx.service as any).reply('7001', { text: 'x', rich: richMessage });
+
+        expect(send).toHaveBeenCalledTimes(2);
+      });
+
+      it.each([
+        'Bad Request: message is not modified',
+        'Bad Request: message to edit not found',
+        "Bad Request: message can't be edited",
+      ])('语义性 400（%s）不降级，交由 edit 路径兜底', async (msg) => {
+        const ctx = makeService({});
+        const send = ctx.telegramService.sendMessage as jest.Mock;
+        send.mockReset();
+        send.mockRejectedValue(new TelegramRequestRejectedError(msg));
+
+        await (ctx.service as any).reply('7001', { text: 'x', rich: richMessage });
+
+        expect(send).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    it('归因到 reply_markup 时直接跳到无按钮档，不带着致败按钮重发', async () => {
+      const ctx = makeService({});
+      const send = ctx.telegramService.sendMessage as jest.Mock;
+      send.mockReset();
+      const seen: any[] = [];
+      send.mockImplementation(async (_chat: string, _text: string, options: any) => {
+        seen.push(options);
+        if (options?.replyMarkup) {
+          throw new TelegramRequestRejectedError('Bad Request: reply markup is too long', ['reply_markup']);
+        }
+        return { message_id: 55, chat: { id: 7001 } };
+      });
+
+      await (ctx.service as any).reply('7001', {
+        text: 'a.zip',
+        rich: { blocks: [{ type: 'paragraph', text: 'a.zip' }] },
+        rich_fallback_html: 'a.zip',
+        parseMode: 'HTML',
+        messageEffectId: '99',
+        replyMarkup: { inline_keyboard: [[{ text: '打开链接', url: 'https://x/y' }]] },
+      });
+
+      // 第一档带按钮被拒 → 归因 reply_markup → 直接跳到无按钮档（而非先试去特效档）
+      expect(seen.length).toBe(2);
+      expect(seen[0].replyMarkup).toBeDefined();
+      expect(seen[1].replyMarkup).toBeUndefined();
+    });
+
+    it('HTML 档在 renderLinkReady 上真实可用（不再因缺 parseMode 变死代码）', async () => {
+      const ctx = makeService({});
+      const send = ctx.telegramService.sendMessage as jest.Mock;
+      send.mockReset();
+      const seen: any[] = [];
+      send.mockImplementation(async (_chat: string, _text: string, options: any) => {
+        seen.push(options);
+        if (options?.richMessage) {
+          throw new TelegramRequestRejectedError("Bad Request: Can't parse rich message JSON object", ['rich']);
+        }
+        return { message_id: 66, chat: { id: 7001 } };
+      });
+
+      // 用真实渲染层产出，验证 parseMode 被设置
+      const { renderLinkReady } = require('./telegram-bot.message-renderer');
+      const rendered = renderLinkReady({
+        fileName: 'a.zip', url: 'https://x/y', expiresAt: '2026-01-01T00:00:00.000Z', ttlHours: 4,
+      });
+      expect(rendered.parseMode).toBe('HTML');
+
+      await (ctx.service as any).reply('7001', rendered);
+
+      // rich 被拒 → 应走 HTML 档（带 parseMode 且保留按钮），而不是直接掉到纯文本
+      expect(seen[1].parseMode).toBe('HTML');
+      expect(seen[1].replyMarkup).toBeDefined();
+    });
+
     it('无任何可剥离维度时不做重复请求（纯文本只发一次）', async () => {
       const ctx = makeService({});
       const send = ctx.telegramService.sendMessage as jest.Mock;

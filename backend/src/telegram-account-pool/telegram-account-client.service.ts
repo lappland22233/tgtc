@@ -4,7 +4,7 @@ import axios, { AxiosError } from 'axios';
 import FormData from 'form-data';
 import { Readable, Transform } from 'stream';
 import { AccountAttemptSample, AccountFailureKind } from './telegram-account-pool.types';
-import { readTelegramRetryAfter } from '../telegram/telegram.errors';
+import { classifyDegradableFields, readTelegramRetryAfter } from '../telegram/telegram.errors';
 import type { TelegramTextSendOptions } from '../telegram/telegram.types';
 
 /**
@@ -520,20 +520,10 @@ export class TelegramAccountClientService {
 
   /**
    * 是否为「载荷/格式不被接受」类 400（换格式重发即可恢复，与账号健康无关）。
-   * 与 `TelegramRequestRejectedError` 语义一致，此处仅有原始 description 可用。
+   * 判定逻辑与单账号链路共用，避免两处标记表漂移（后者曾漏掉 `reply_markup` 与 rich 结构错误）。
    */
   private isPayloadRejection(lowerDescription: string): boolean {
-    return [
-      'message text is empty',
-      "can't parse entities",
-      'can\'t parse entities',
-      'can\'t find end',
-      'unsupported start tag',
-      'rich message',
-      'message is too long',
-      'text must be non-empty',
-      'reply markup',
-    ].some(marker => lowerDescription.includes(marker));
+    return classifyDegradableFields(lowerDescription).length > 0;
   }
 
   private parseRetryAfter(description: string): number | undefined {

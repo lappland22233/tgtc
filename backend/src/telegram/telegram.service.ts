@@ -7,8 +7,7 @@ import { constants, promises as fs } from 'fs';
 import type { FileHandle } from 'fs/promises';
 import * as path from 'path';
 import FormData from 'form-data';
-import { readTelegramRetryAfter, TelegramFileNotFoundError, TelegramRateLimitError, TelegramRequestRejectedError, TelegramStreamPathError } from './telegram.errors';
-import type { TelegramDegradableField } from './telegram.errors';
+import { readTelegramRetryAfter, TelegramFileNotFoundError, TelegramRateLimitError, TelegramRequestRejectedError, TelegramStreamPathError, classifyDegradableFields } from './telegram.errors';
 import type { TelegramSendMessageResult, TelegramTextSendOptions, TelegramUpdate } from './telegram.types';
 
 interface TelegramMedia {
@@ -160,27 +159,6 @@ export class TelegramService {
    * （拉黑、无写权限）由 {@link isPermanentRejection} 单独识别，因为它们的特征是
    * "换什么格式都会失败"，而不是"归因不到具体字段"。
    */
-  private classifyDegradableFields(description: string): TelegramDegradableField[] {
-    const lower = description.toLowerCase();
-    const fields = new Set<TelegramDegradableField>();
-    if (/can't parse entities|can’t parse entities|can't find end|unsupported start tag|unclosed/.test(lower)) {
-      fields.add('parse_mode');
-      fields.add('rich');
-    }
-    if (lower.includes('rich message')) fields.add('rich');
-    if (lower.includes('message text is empty') || lower.includes('text must be non-empty')) {
-      fields.add('rich');
-      fields.add('parse_mode');
-    }
-    if (lower.includes('reply markup') || lower.includes('reply_markup')) fields.add('reply_markup');
-    if (lower.includes('effect')) fields.add('message_effect');
-    if (lower.includes('message is too long') || lower.includes('message_too_long')) {
-      fields.add('rich');
-      fields.add('parse_mode');
-    }
-    return [...fields];
-  }
-
   private safeTelegramDescription(description: string): string {
     const cleaned = this.redactToken(description)
       .replace(/[\u0000-\u001F\u007F]/g, ' ')
@@ -316,7 +294,7 @@ export class TelegramService {
             // 与格式无关的永久错误，换个格式重发只会再失败一次，还多打一次接口。
             throw new TelegramRequestRejectedError(
               this.safeTelegramDescription(description),
-              this.classifyDegradableFields(description),
+              classifyDegradableFields(description),
             );
           }
           if (status === 404) {

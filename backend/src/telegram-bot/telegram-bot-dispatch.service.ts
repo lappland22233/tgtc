@@ -7,7 +7,7 @@ import { PassThrough, Readable } from 'stream';
 import * as path from 'path';
 import { randomUUID } from 'crypto';
 import { TelegramService } from '../telegram/telegram.service';
-import { TelegramRateLimitError, isPermanentRejection } from '../telegram/telegram.errors';
+import { TelegramRateLimitError, TelegramRequestRejectedError, isNonDegradableBadRequest, isPermanentRejection } from '../telegram/telegram.errors';
 import { AuditService } from '../common/services/audit.service';
 import { AuditStatus } from '../common/entities/audit-log.entity';
 import type { TelegramCallbackQuery, TelegramMessage, TelegramUpdate, TelegramUser } from '../telegram/telegram.types';
@@ -2136,31 +2136,34 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
     const hasEffect = Boolean(rendered.messageEffectId);
 
     /**
-     * 级别 → 载荷。设计原则：**每一级必须与上一级有实质差异**，否则就是无意义的重复请求。
-     * 无按钮/无特效/无 rich 时对应级别直接跳过。
+     * 每一档保留哪些可选项。设计原则：**每档必须与上一档有实质差异**，否则就是无意义请求。
      *
      *   0 富文本 + 按钮 + 特效（保真档）
      *   1 富文本 + 按钮（去特效）
      *   2 HTML + 按钮（去特效）
      *   3 纯文本（去按钮、去特效）
      */
-    const buildAttempt = (level: number): TelegramTextSendOptions => {
-      const keepEffect = level === 0 && hasEffect;
-      const keepMarkup = level <= 2 && hasMarkup;
-      const options: TelegramTextSendOptions = {
-        replyMarkup: keepMarkup ? rendered.replyMarkup : undefined,
-        messageEffectId: keepEffect ? rendered.messageEffectId : undefined,
+    const shapeFor = (level: number) => ({
+      rich: level <= 1 && Boolean(rendered.rich),
+      html: level === 2 && hasHtml,
+      markup: level <= 2 && hasMarkup,
+      effect: level === 0 && hasEffect,
+    });
+    const toOptions = (level: number): TelegramTextSendOptions => {
+      const shape = shapeFor(level);
+      return {
+        richMessage: shape.rich ? rendered.rich : undefined,
+        parseMode: shape.html ? rendered.parseMode : undefined,
+        replyMarkup: shape.markup ? rendered.replyMarkup : undefined,
+        messageEffectId: shape.effect ? rendered.messageEffectId : undefined,
       };
-      if (level <= 1 && rendered.rich) return { ...options, richMessage: rendered.rich };
-      if (level === 2 && hasHtml) return { ...options, parseMode: rendered.parseMode };
-      return options;
     };
     const signature = (level: number) => {
-      const attempt = buildAttempt(level);
-      return `${attempt.richMessage ? 'rich' : attempt.parseMode ?? 'plain'}|${attempt.replyMarkup ? 'm' : '-'}|${attempt.messageEffectId ? 'e' : '-'}`;
+      const s = shapeFor(level);
+      return `${s.rich ? 'rich' : s.html ? 'html' : 'plain'}|${s.markup ? 'm' : '-'}|${s.effect ? 'e' : '-'}`;
     };
 
-    // 只保留真正有差异的级别序列；末档必须是纯文本兜底（若已存在同载荷则复用）
+    // 只保留真正有差异的级别序列；末档必须是纯文本兜底（已存在同载荷则复用）
     const levels: number[] = [];
     let lastSignature = '';
     for (const level of [0, 1, 2, 3]) {
@@ -2171,8 +2174,6 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
         lastSignature = sig;
       }
     }
-    // 兜底档：确保最后一档是纯文本（无 rich / 无 parseMode / 无按钮 / 无特效）。
-    // 若已存在同载荷档位则复用，避免发出两次完全相同的请求。
     if (levels.length === 0 || signature(levels[levels.length - 1]) !== signature(3)) {
       levels.push(3);
     }
@@ -2183,10 +2184,10 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
     while (cursor < levels.length) {
       const level = levels[cursor];
       try {
-        return await send(buildAttempt(level).parseMode ? htmlText : plainText, buildAttempt(level));
+        return await send(toOptions(level).parseMode ? htmlText : plainText, toOptions(level));
       } catch (error) {
         lastError = error;
-        const next = this.nextDegradeLevel(error, cursor, levels.length);
+        const next = this.nextDegradeLevel(error, cursor, levels, shapeFor);
         if (next === null) throw error;
         this.logger.warn(
           `消息被拒，降级到 level ${levels[next]} 重发: ${error instanceof Error ? error.message : String(error)}`,
@@ -2199,19 +2200,60 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
   }
 
   /**
-   * 计算下一档下标；返回 null 表示不该降级（错误不可恢复，或已无可降）。
+   * 计算下一档下标；返回 null 表示不该降级。
    *
-   * 两类判据缺一不可：
-   * - **永久性拒收**（拉黑、无写权限）→ 换任何格式都会失败，直接上报；
-   * - **429 / 网络错误** → 消息可能已投递，重发会产生重复，直接上报。
-   * 其余 400 视为载荷问题，逐档剥可选项重试。
+   * 三道门禁缺一不可：
+   * 1. **必须是 400**。网络超时、ECONNRESET、500/502/503/504 意味着消息**可能已投递**，
+   *    重发会造成用户收到重复消息——这比丢消息更糟，而且无声无息。
+   * 2. **必须不是永久性/语义性拒收**（拉黑、无写权限、message is not modified、
+   *    message to edit not found），这些换格式必然同样失败，且后者要靠异常上抛让
+   *    edit 路径回退到"改发新消息"。
+   * 3. 若错误能归因到具体可选项（如 reply_markup），**直接跳到剥掉该维度的档位**，
+   *    而不是逐档试——否则会带着同一个致败按钮重发两次。
    */
-  private nextDegradeLevel(error: unknown, current: number, total: number): number | null {
+  private nextDegradeLevel(
+    error: unknown,
+    current: number,
+    levels: number[],
+    shapeFor: (level: number) => { rich: boolean; html: boolean; markup: boolean; effect: boolean },
+  ): number | null {
     if (error instanceof TelegramRateLimitError) return null;
     const message = error instanceof Error ? error.message : String(error ?? '');
     if (/429|Too Many Requests|FLOOD_WAIT/i.test(message)) return null;
-    if (isPermanentRejection(message)) return null;
-    return current + 1 < total ? current + 1 : null;
+
+    // 门禁 1：只有 400 才允许重发
+    if (!this.isBadRequestRejection(error)) return null;
+
+    // 门禁 2：语义性/永久性拒收不降级
+    if (isPermanentRejection(message) || isNonDegradableBadRequest(message)) return null;
+
+    // 门禁 3：按归因维度筛档位
+    const blame = error instanceof TelegramRequestRejectedError ? error.degradableFields : [];
+    const drops = (level: number) => {
+      const s = shapeFor(level);
+      return blame.every(field => (
+        field === 'rich' ? !s.rich
+          : field === 'parse_mode' ? !s.html
+            : field === 'reply_markup' ? !s.markup
+              : !s.effect
+      ));
+    };
+    for (let index = current + 1; index < levels.length; index++) {
+      if (blame.length === 0 || drops(levels[index])) return index;
+    }
+    return null;
+  }
+
+  /**
+   * 是否为 HTTP 400 拒收（消息确定未投递，重发安全）。
+   *
+   * 单账号链路抛类型化异常；池化链路抛 TelegramAccountError 并保留 status。
+   * 其余（超时、连接重置、5xx）一律不算——那些场景消息可能已经送达。
+   */
+  private isBadRequestRejection(error: unknown): boolean {
+    if (error instanceof TelegramRequestRejectedError) return true;
+    const status = (error as { status?: unknown } | null)?.status;
+    return status === 400;
   }
 
   /**

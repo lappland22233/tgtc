@@ -143,7 +143,10 @@ export function renderLinkReady(input: LinkReadyInput): RenderedMessage {
   return {
     text,
     rich: { blocks },
-    rich_fallback_html: `${escapeHtml(text)}`,
+    // 必须同时给 parseMode，否则降级链判定 hasHtml=false，HTML 档成为死代码，
+    // 富文本一旦被拒就直接跳纯文本并丢掉「打开链接」按钮。
+    rich_fallback_html: escapeHtml(text),
+    parseMode: 'HTML',
     replyMarkup: openLinkButton(url),
   };
 }
@@ -235,6 +238,7 @@ export function renderQueueNotice(input: QueueNoticeInput): RenderedMessage {
           ],
         },
         rich_fallback_html: escapeHtml(text),
+        parseMode: 'HTML',
         replyMarkup: url ? openLinkButton(url) : undefined,
       };
     }
