@@ -44,6 +44,22 @@ describe('TelegramMirrorConfigService（备份群集合与缓存）', () => {
     expect(ids).toEqual(['-100222', '-100333']);
   });
 
+  it('单群规则的可认领群取主群（否则群内认领无法归因，轮次恒为认领超时）', async () => {
+    const ctx = setup({
+      find: jest.fn(async () => [
+        { targetChatId: '-100222', sourceChatId: '-100main' },
+        { targetChatId: '', sourceChatId: '-100main' },      // 单群规则
+        { targetChatId: null, sourceChatId: '-100other' },    // 单群规则（另一主群）
+        { targetChatId: '  ', sourceChatId: '  ' },           // 忽略空值
+      ]),
+    });
+
+    const ids = await ctx.service.listEnabledTargetChatIds();
+
+    // 双群取镜像群；单群回落主群；同值去重
+    expect(ids.sort()).toEqual(['-100222', '-100main', '-100other']);
+  });
+
   it('TTL 内命中缓存不重复查库（入站判定是热路径）', async () => {
     const ctx = setup();
 

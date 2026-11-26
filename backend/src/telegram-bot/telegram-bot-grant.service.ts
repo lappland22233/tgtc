@@ -279,6 +279,17 @@ export class TelegramBotGrantService {
     return (result.affected ?? 0) > 0;
   }
 
+  /** 上传期间续期：仅当仍在 pending 时把租约推到下一个完整窗口（不复活已 ready/failed 的行） */
+  async renewGDriveCacheLease(grantId: string): Promise<void> {
+    await this.grantRepository
+      .createQueryBuilder()
+      .update(TelegramBotFileGrant)
+      .set({ gdriveCacheNextRetryAt: new Date(Date.now() + GDRIVE_CACHE_LEASE_MS) })
+      .where('id = :id', { id: grantId })
+      .andWhere('"gdriveCacheStatus" = :status', { status: 'pending' })
+      .execute();
+  }
+
   /** 记录一次缓存同步失败：次数 +1、写原因、按指数退避安排下次重试 */
   async markGDriveCacheFailed(grantId: string, error: unknown, attempts = 1): Promise<void> {
     const detail = error instanceof Error ? error.message : String(error);

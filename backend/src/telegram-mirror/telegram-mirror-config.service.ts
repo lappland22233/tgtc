@@ -236,12 +236,26 @@ export class TelegramMirrorConfigService {
     return this.sourceChatsAtMs > 0 && Date.now() - this.sourceChatsAtMs < TARGET_CHAT_CACHE_TTL_MS;
   }
 
+  /**
+   * 启用中规则的「副本认领群」集合。
+   *
+   * 双群规则取 `targetChatId`（镜像群）；**单群规则（`targetChatId` 为空）取 `sourceChatId`**
+   * ——单群模式下不经过 userbot 转发，锚点直接落在主群，群内各 Bot 就是在这个群里
+   * 收到消息并登记副本的。若这里仍只返回非空的目标群，单群规则的认领会被
+   * `isEnabledMirrorTargetChat` 判为「非中继来源」而跳过归因，grant 轮次必然
+   * 结算成 `claim_timeout`（即使其它 Bot 确实认领了副本）。
+   */
   async listEnabledTargetChatIds(): Promise<string[]> {
     try {
-      const rows = await this.repo.find({ where: { enabled: true }, select: { targetChatId: true } });
-      return Array.from(
-        new Set(rows.map((row) => (row.targetChatId || '').trim()).filter((id) => id.length > 0)),
-      );
+      const rows = await this.repo.find({
+        where: { enabled: true },
+        select: { targetChatId: true, sourceChatId: true },
+      });
+      return Array.from(new Set(
+        rows
+          .map((row) => (row.targetChatId || '').trim() || (row.sourceChatId || '').trim())
+          .filter((id) => id.length > 0),
+      ));
     } catch (error) {
       this.logger.warn(
         `启用中镜像规则目标群读取失败（按「非中继来源」处理）：`

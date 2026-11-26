@@ -482,34 +482,50 @@ export class FileService implements OnModuleInit {
    * - 传 `localPath`：上传任务内的快路径，直接读本地临时文件，避免再从 Telegram 拉一遍；
    * - 不传：扫描任务的重试路径（本地临时文件已清理），从 Telegram 账号池回源。
    *
-   * 状态机：`pending`（10 分钟租约）→ `ready` / `failed`（指数退避）。
-   * 并发抢占由行级 CAS 保证：租约内的重复触发会被直接丢弃。
+   * 状态机：`pending`（租约）→ `ready` / `failed`（指数退避）。
+   * 并发防御分两层：
+   * - 行级 CAS：租约内的重复触发直接丢弃；
+   * - 上传期间**持续续期**：租约短于传输耗时时（大文件常见），不续期会让重试扫描
+   *   抢到仍在跑的行，并发上传同一个文件并在完成后互相覆盖 objectRef、留下孤儿对象。
    */
-  async mirrorGDriveCache(fileId: string, options: { localPath?: string; signal?: AbortSignal } = {}): Promise<void> {
+  async mirrorGDriveCache(
+    fileId: string,
+    options: { localPath?: string; signal?: AbortSignal; knownSize?: number } = {},
+  ): Promise<void> {
     if (!this.storageRouter) return;
-    const file = await this.fileRepository.findOne({ where: { id: fileId } });
-    if (!file || file.isDeleted) return;
-    if (isRemoteStorageBackend(file.storageBackend)) return;
-    const size = Number(file.size);
-    if (!Number.isSafeInteger(size) || size <= 0) {
-      this.logger.debug(`文件 ${fileId} 大小未知，跳过 Google 双写`);
-      return;
-    }
-    if (!(await this.storageRouter.isGDriveCacheModeEnabled().catch(() => false))) return;
-    if (!(await this.claimGDriveCacheMirror(file))) return;
-
-    const localPath = options.localPath && fs.existsSync(options.localPath) ? options.localPath : undefined;
+    // 进程内互斥：同一文件在本实例内同时只允许一次双写（重试扫描与上传收尾可能并发）
+    if (this.gdriveCacheInflight.has(fileId)) return;
+    this.gdriveCacheInflight.add(fileId);
+    let leaseTimer: NodeJS.Timeout | null = null;
     let receipt: StorageUploadReceipt | null = null;
+    let file: File | null = null;
     try {
+      file = await this.fileRepository.findOne({ where: { id: fileId } });
+      if (!file || file.isDeleted) return;
+      if (isRemoteStorageBackend(file.storageBackend)) return;
+      const size = options.knownSize ?? Number(file.size);
+      if (!Number.isSafeInteger(size) || size <= 0) {
+        this.logger.debug(`文件 ${fileId} 大小未知，跳过 Google 双写`);
+        return;
+      }
+      if (!(await this.storageRouter.isGDriveCacheModeEnabled().catch(() => false))) return;
+
+      // 抢占失败（其它执行者持有租约）不是错误，直接退出即可
+      if (!(await this.claimGDriveCacheMirror(file))) return;
+
+      // 上传可能远超租约时长：定期续期，避免被重试扫描重复领取
+      leaseTimer = this.startGDriveCacheLeaseRenewal(file.id);
+      const targetFile = file; // 供闭包捕获（file 在下方可能被重新赋值）
+      const localPath = options.localPath && fs.existsSync(options.localPath) ? options.localPath : undefined;
       receipt = await this.storageRouter.upload({
         backendType: 'gdrive',
-        objectName: file.originalName,
-        mimeType: file.mimeType || undefined,
+        objectName: targetFile.originalName,
+        mimeType: targetFile.mimeType || undefined,
         knownLength: size,
         signal: options.signal,
         openStream: localPath
           ? () => createReadStream(localPath, { highWaterMark: 1024 * 1024 })
-          : () => this.openPooledMirrorStream(file, size, options.signal),
+          : () => this.openPooledMirrorStream(targetFile, size, options.signal),
       });
       const uploadedAccountId = receipt.accountId;
       const updated = await this.fileRepository.update(
@@ -536,19 +552,58 @@ export class FileService implements OnModuleInit {
       if (receipt?.accountId) {
         await this.storageRouter.deleteRemoteObject('gdrive', receipt.accountId, receipt.objectRef).catch(() => {});
       }
-      await this.markGDriveCacheMirrorFailed(file.id, error);
-      this.logger.warn(
-        `文件 ${file.id} Google 双写失败（将按退避重试）：${error instanceof Error ? error.message : String(error)}`,
-      );
+      // 抢占阶段就可能抛错（DB 抖动）：必须落成 failed 才能进入重试扫描。
+      // 若让它冒泡出去，processor 的收尾（含临时文件清理）会被跳过，而文件已 ready，
+      // 重试只会走提交分支、不再经过双写，最终永久停在 none。
+      if (file) {
+        await this.markGDriveCacheMirrorFailed(file.id, error);
+        this.logger.warn(
+          `文件 ${file.id} Google 双写失败（将按退避重试）：${error instanceof Error ? error.message : String(error)}`,
+        );
+      } else {
+        this.logger.warn(
+          `文件 ${fileId} Google 双写失败（获取记录阶段）：${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    } finally {
+      if (leaseTimer) clearInterval(leaseTimer);
+      this.gdriveCacheInflight.delete(fileId);
     }
   }
 
-  /** 到期待重试的网页文件 id（仅 pending/failed；不回填历史 none） */
-  async findDueGDriveCacheMirrorIds(limit = 3): Promise<string[]> {
+  /** 进程内在飞的双写（同一实例内不会并发上传同一文件） */
+  private readonly gdriveCacheInflight = new Set<string>();
+
+  /** 上传期间持续续期，避免长传输被重试扫描重复领取 */
+  private startGDriveCacheLeaseRenewal(fileId: string): NodeJS.Timeout {
+    const timer = setInterval(() => {
+      void this.renewGDriveCacheLease(fileId).catch(() => undefined);
+    }, Math.max(30_000, Math.floor(GDRIVE_CACHE_LEASE_MS / 2)));
+    timer.unref?.();
+    return timer;
+  }
+
+  /** 仅当仍处于 pending 时把租约推到下一个完整窗口（不复活已 ready/failed 的行） */
+  private async renewGDriveCacheLease(fileId: string): Promise<void> {
+    await this.fileRepository
+      .createQueryBuilder()
+      .update(File)
+      .set({ gdriveCacheNextRetryAt: new Date(Date.now() + GDRIVE_CACHE_LEASE_MS) })
+      .where('id = :id', { id: fileId })
+      .andWhere('"gdriveCacheStatus" = :status', { status: 'pending' })
+      .execute();
+  }
+
+  /**
+   * 到期待重试的网页文件（仅 pending/failed；不回填历史 none）。
+   * 同时带出 `size`：重试方需要按真实体量申请上行权重，缺省会让大文件按权重 1 计入预算。
+   */
+  async findDueGDriveCacheMirrors(limit = 3): Promise<Array<{ id: string; size: number }>> {
     const now = new Date();
     const rows = await this.fileRepository
       .createQueryBuilder('file')
       .select('file.id', 'id')
+      .addSelect('file.size', 'size')
       .where('file.isDeleted = :notDeleted', { notDeleted: false })
       .andWhere('file.storageBackend = :backend', { backend: 'telegram' })
       .andWhere('file.gdriveCacheStatus IN (:...statuses)', { statuses: ['pending', 'failed'] })
@@ -556,8 +611,8 @@ export class FileService implements OnModuleInit {
       .andWhere('file.telegramFileId <> :empty', { empty: '' })
       .orderBy('file.gdriveCacheNextRetryAt', 'ASC')
       .limit(limit)
-      .getRawMany<{ id: string }>();
-    return rows.map((row) => row.id);
+      .getRawMany<{ id: string; size: string | number | null }>();
+    return rows.map((row) => ({ id: row.id, size: Number(row.size) }));
   }
 
   /** 到期重试积压量（供告警判定） */
@@ -594,21 +649,27 @@ export class FileService implements OnModuleInit {
     return (result.affected ?? 0) > 0;
   }
 
-  /** 记录一次双写失败：次数自增 + 原因 + 指数退避 */
+  /** 记录一次双写失败：次数自增（原子）+ 原因 + 指数退避 */
   private async markGDriveCacheMirrorFailed(fileId: string, error: unknown): Promise<void> {
     const detail = error instanceof Error ? error.message : String(error);
     try {
+      // 先读当前次数只为算退避；自增本身交给 SQL，避免并发两条失败路径互相覆盖计数
       const row = await this.fileRepository.findOne({
         where: { id: fileId },
         select: { id: true, gdriveCacheAttempts: true },
       });
       const attempts = (row?.gdriveCacheAttempts ?? 0) + 1;
-      await this.fileRepository.update({ id: fileId }, {
-        gdriveCacheStatus: 'failed',
-        gdriveCacheLastError: (detail || 'unknown').slice(0, 500),
-        gdriveCacheAttempts: attempts,
-        gdriveCacheNextRetryAt: new Date(Date.now() + gdriveCacheBackoffMs(attempts)),
-      } as Partial<File>);
+      await this.fileRepository
+        .createQueryBuilder()
+        .update(File)
+        .set({
+          gdriveCacheStatus: 'failed',
+          gdriveCacheLastError: (detail || 'unknown').slice(0, 500),
+          gdriveCacheNextRetryAt: new Date(Date.now() + gdriveCacheBackoffMs(attempts)),
+          gdriveCacheAttempts: () => '"gdriveCacheAttempts" + 1',
+        })
+        .where('id = :id', { id: fileId })
+        .execute();
     } catch (err) {
       this.logger.warn(
         `记录 Google 双写失败状态时出错（忽略）：${err instanceof Error ? err.message : String(err)}`,

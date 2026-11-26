@@ -19,6 +19,7 @@ import { AccountAwareDownloadService } from '../telegram-account-pool/account-aw
 import type { AccountAwareDownloadFailure } from '../telegram-account-pool/account-aware-stream.types';
 import { StorageRouterService } from '../storage/storage-router.service';
 import { GDRIVE_MULTIPART_MAX_BYTES, StorageUploadSourceError } from '../storage/storage.types';
+import { GDRIVE_CACHE_LEASE_MS } from '../common/utils/gdrive-cache-backoff';
 import type { StorageUploadParams, StorageUploadReceipt } from '../storage/storage.types';
 import { TelegramBotFileGrant } from '../common/entities/telegram-bot-file-grant.entity';
 import { TelegramBotInboundTask } from '../common/entities/telegram-bot-inbound-task.entity';
@@ -1733,10 +1734,39 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
    */
   private async mirrorGrantToGDriveCache(grant: TelegramBotFileGrant, signal?: AbortSignal): Promise<void> {
     if (!this.storageRouter || this.isShuttingDown) return;
+    // 进程内互斥：首投与重试扫描可能同时命中同一 grant
+    if (this.cacheMirrorInflight.has(grant.id)) return;
+    this.cacheMirrorInflight.add(grant.id);
+    let leaseTimer: NodeJS.Timeout | null = null;
+    try {
+      await this.runGrantGDriveCacheMirror(grant, signal, (timer) => { leaseTimer = timer; });
+    } finally {
+      if (leaseTimer) clearInterval(leaseTimer);
+      this.cacheMirrorInflight.delete(grant.id);
+    }
+  }
+
+  /** 上传期间续期，避免长传输被重试扫描重复领取（行级 lease 只有 10 分钟） */
+  private startGrantLeaseRenewal(grantId: string): NodeJS.Timeout {
+    const timer = setInterval(() => {
+      void this.grantService.renewGDriveCacheLease(grantId).catch(() => undefined);
+    }, Math.max(30_000, Math.floor(GDRIVE_CACHE_LEASE_MS / 2)));
+    timer.unref?.();
+    return timer;
+  }
+
+  private async runGrantGDriveCacheMirror(
+    grant: TelegramBotFileGrant,
+    signal: AbortSignal | undefined,
+    onLeaseTimer: (timer: NodeJS.Timeout) => void,
+  ): Promise<void> {
     const config = await this.botConfigService.getConfig().catch(() => null);
     if (!config || config.storageMode !== 'telegram') return;
-    if (!(await this.storageRouter.isGDriveCacheModeEnabled().catch(() => false))) return;
+    const storageRouter = this.storageRouter;
+    if (!storageRouter) return;
+    if (!(await storageRouter.isGDriveCacheModeEnabled().catch(() => false))) return;
     if (!(await this.grantService.markGDriveCachePending(grant.id).catch(() => false))) return;
+    onLeaseTimer(this.startGrantLeaseRenewal(grant.id));
 
     const mirrorSignal = signal ?? new AbortController().signal;
     const reported = Number(grant.fileSize);

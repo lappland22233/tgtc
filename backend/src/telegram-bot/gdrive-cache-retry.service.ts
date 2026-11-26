@@ -64,15 +64,19 @@ export class GDriveCacheRetryService {
   }
 
   private async retryWebFiles(): Promise<void> {
-    const ids = await this.fileService.findDueGDriveCacheMirrorIds(FILES_PER_RUN);
-    for (const id of ids) {
+    const due = await this.fileService.findDueGDriveCacheMirrors(FILES_PER_RUN);
+    for (const { id, size } of due) {
       let lease: Awaited<ReturnType<DownloadResourceCoordinatorService['acquireUpstreamSlot']>> | null = null;
       try {
-        // 与前台下载共用全局上行预算：重试是后台补课，不得抢占用户带宽
+        // 与前台下载共用全局上行预算：按真实体量申请权重（>1GiB 应为 8），
+        // 缺省 bytes 会让大文件按权重 1 计入，绕过预算保护。
         lease = this.downloadResources
-          ? await this.downloadResources.acquireUpstreamSlot({ waitTimeoutMs: 30_000 })
+          ? await this.downloadResources.acquireUpstreamSlot({
+            bytes: Number.isSafeInteger(size) && size > 0 ? size : undefined,
+            waitTimeoutMs: 30_000,
+          })
           : null;
-        await this.fileService.mirrorGDriveCache(id);
+        await this.fileService.mirrorGDriveCache(id, { knownSize: size });
       } catch (error) {
         // 单个文件失败（上行繁忙/回源失败）不得中断整轮，下轮继续
         this.logger.warn(
