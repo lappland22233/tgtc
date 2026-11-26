@@ -1,10 +1,10 @@
-import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { Readable } from 'stream';
 import { TelegramCopyOwnerType } from '../common/entities/telegram-file-copy.entity';
-import { DownloadResourceCoordinatorService } from '../file/download-resource-coordinator.service';
-import { FileCacheService } from '../file/file-cache.service';
+import { DownloadResourceCoordinatorService } from './download-resource-coordinator.service';
+import { FileCacheService } from './file-cache.service';
 import { TelegramMainChatAnchorService } from '../telegram-mirror/telegram-main-chat-anchor.service';
-import { UserAccountDirectoryService, RelayUserAccount } from './user-account-directory.service';
+import { UserAccountDirectoryService, RelayUserAccount } from '../telegram-account-pool/user-account-directory.service';
 import { TelegramUserClientError, TelegramUserClientService } from '../telegram-user/telegram-user-client.service';
 
 /** 用户账号级冷却的默认时长（无 retry_after 时的保守值） */
@@ -25,6 +25,18 @@ const MAX_CONCURRENT_STREAMS = 2;
  *    由 `TelegramMainChatAnchorService.findReadyAnchorForDownload` 只读提供。
  * 3. **共享上行预算**：取流前必须占 `DownloadResourceCoordinatorService` 的 slot，
  *    否则会与前台下载抢带宽——而本能力的初衷恰恰是改善下载。
+ *
+ * ## 为什么本服务属于 `FileModule`（装配约束，改动前必读）
+ *
+ * 它的依赖是「开关 + 预算 + 锚点 + 用户账号」四件事的组合，只有 `FileModule` 的
+ * 导入图同时闭合这些依赖且不成环：`FileModule` 已导入 `TelegramMirrorModule`（锚点）
+ * 与 `TelegramAccountPoolModule`（账号目录），并自行提供 `FileCacheService` /
+ * `DownloadResourceCoordinatorService`（开关与预算）。反过来把本服务放进上述任一
+ * 模块，都需要该模块反向导入 `FileModule`，直接成环。
+ *
+ * `FileCacheService` / `DownloadResourceCoordinatorService` **不得改成可选**：
+ * 它们是开关与预算的唯一来源，一旦解析失败变成 `null`，`isEnabled()` 恒为 false，
+ * 整个能力会静默失效（比启动崩溃更难发现）。
  */
 @Injectable()
 export class UserPreferredDownloadService {
@@ -38,15 +50,13 @@ export class UserPreferredDownloadService {
     private readonly userClient: TelegramUserClientService,
     private readonly directory: UserAccountDirectoryService,
     private readonly anchors: TelegramMainChatAnchorService,
-    @Optional() @Inject(FileCacheService)
-    private readonly cacheConfig: FileCacheService | null = null,
-    @Optional() @Inject(DownloadResourceCoordinatorService)
-    private readonly resources: DownloadResourceCoordinatorService | null = null,
+    private readonly cacheConfig: FileCacheService,
+    private readonly resources: DownloadResourceCoordinatorService,
   ) {}
 
   /** 开关是否开启（关闭时调用方应直接跳过本服务） */
   isEnabled(): boolean {
-    return this.cacheConfig?.isPreferUserAccount() === true;
+    return this.cacheConfig.isPreferUserAccount() === true;
   }
 
   /**
@@ -74,9 +84,6 @@ export class UserPreferredDownloadService {
     if (!this.isEnabled()) return null;
     if (!this.userClient.isAvailable()) return null;
 
-    const account = await this.pickAccount().catch(() => null);
-    if (!account) return null;
-
     const anchor = await this.anchors.findReadyAnchorForDownload(
       params.ownerType,
       params.ownerId,
@@ -90,28 +97,20 @@ export class UserPreferredDownloadService {
       return null;
     }
 
-    const current = this.inflight.get(account.id) ?? 0;
-    if (current >= MAX_CONCURRENT_STREAMS) {
-      this.logger.debug(`user 账号 ${account.id} 已达并发上限 ${MAX_CONCURRENT_STREAMS}，回退 Bot 链路`);
+    // 先拿到锚点再占槽位：无锚点的文件是多数，不该白白占用账号并发。
+    // 选号与占位在同一个同步段完成（见 acquireAccount），并发下载不会抢到同一名额。
+    const picked = await this.acquireAccount();
+    if (!picked) {
+      this.logger.debug(`无空闲 user 账号（全部冷却或已达并发上限 ${MAX_CONCURRENT_STREAMS}），回退 Bot 链路`);
       return null;
     }
+    const { account, release: releaseSlot } = picked;
 
     let lease: Awaited<ReturnType<DownloadResourceCoordinatorService['acquireUpstreamSlot']>> | null = null;
-    this.inflight.set(account.id, current + 1);
-    // 账号槽位必须活到流结束：`tryOpen` 返回时传输才刚开始，此时释放会让并发下载
-    // 在同一个账号上开出远超上限的 MTProto 流。
-    let slotReleased = false;
-    const releaseSlot = (): void => {
-      if (slotReleased) return;
-      slotReleased = true;
-      const left = (this.inflight.get(account.id) ?? 1) - 1;
-      if (left > 0) this.inflight.set(account.id, left);
-      else this.inflight.delete(account.id);
-    };
     try {
       // 与前台下载共用全局上行预算：按真实体量申请权重。
       // 调用方已持租约时直接复用，避免嵌套申请互相等待。
-      lease = this.resources && !params.upstreamLeaseHeld
+      lease = !params.upstreamLeaseHeld
         ? await this.resources.acquireUpstreamSlot({
           bytes: params.expectedSize,
           waitTimeoutMs: 15_000,
@@ -158,19 +157,46 @@ export class UserPreferredDownloadService {
     }
   }
 
-  /** 选一个可用的用户账号：权重降序、跳过冷却中的 */
-  private async pickAccount(): Promise<RelayUserAccount | null> {
+  /**
+   * 选一个有空闲并发名额的用户账号，并**在同一同步段内占位**。
+   *
+   * 选号与占位必须原子：`listEnabled()` 是异步的，若先选后占，两个并发下载会
+   * 同时选中同一账号并各自把计数读到 1。这里先 await 目录，再在纯同步代码里
+   * 过滤 + 递增，中间没有 await，事件循环不会插入其它下载。
+   *
+   * 选号策略：权重降序，**跳过已达并发上限的账号**——高权重账号占满时应当
+   * 转用次高权重的空闲账号，而不是直接回退 Bot 把用户 session 闲置着。
+   */
+  private async acquireAccount(): Promise<{ account: RelayUserAccount; release: () => void } | null> {
     const accounts = await this.directory.listEnabled();
     if (accounts.length === 0) return null;
+
     const now = Date.now();
     const available = accounts
       .filter((item) => {
         if (!item.session) return false;
         const until = this.cooldownUntil.get(item.id) ?? 0;
-        return until <= now;
+        if (until > now) return false;
+        return (this.inflight.get(item.id) ?? 0) < MAX_CONCURRENT_STREAMS;
       })
       .sort((a, b) => (b.weight ?? 1) - (a.weight ?? 1));
-    return available[0] ?? null;
+
+    const account = available[0];
+    if (!account) return null;
+
+    // ↓ 从这里到 return 全是同步代码：占位不会被并发调用穿插
+    this.inflight.set(account.id, (this.inflight.get(account.id) ?? 0) + 1);
+    // 账号槽位必须活到流结束：`tryOpen` 返回时传输才刚开始，此时释放会让并发下载
+    // 在同一个账号上开出远超上限的 MTProto 流。
+    let released = false;
+    const release = (): void => {
+      if (released) return;
+      released = true;
+      const left = (this.inflight.get(account.id) ?? 1) - 1;
+      if (left > 0) this.inflight.set(account.id, left);
+      else this.inflight.delete(account.id);
+    };
+    return { account, release };
   }
 
   /**

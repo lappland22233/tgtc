@@ -27,6 +27,7 @@ import { DownloadTaskService } from './download-task.service';
 import { ChunkUploadResourceInterceptor } from './chunk-upload-resource.interceptor';
 import { FileCacheService } from './file-cache.service';
 import { DownloadResourceCoordinatorService } from './download-resource-coordinator.service';
+import { UserPreferredDownloadService } from './user-preferred-download.service';
 import { ThumbnailService } from './thumbnail.service';
 import { UploadDiskBudgetService } from './upload-disk-budget.service';
 import { StrictUploadModeGuard } from './strict-upload-mode.guard';
@@ -39,6 +40,8 @@ import { ApiKeyModule } from '../api-key/api-key.module';
 // 阶段 4：文件回源接入账号池 + 上传成功后触发镜像（均为可选增强，关闭时行为不变）
 import { TelegramAccountPoolModule } from '../telegram-account-pool/telegram-account-pool.module';
 import { TelegramMirrorModule } from '../telegram-mirror/telegram-mirror.module';
+// 下载优先 user 账号时的 MTProto 客户端（叶子模块，无环）
+import { TelegramUserModule } from '../telegram-user/telegram-user.module';
 // 可插拔存储后端（S3 / WebDAV / GDrive 账号池）；未配置时行为与原 TG 链路一致
 import { StorageModule } from '../storage/storage.module';
 
@@ -55,6 +58,8 @@ import { StorageModule } from '../storage/storage.module';
     // 账号池（副本表 + 账号感知回源）与镜像模块（触发入口）；未启用时不影响原链路
     TelegramAccountPoolModule,
     TelegramMirrorModule,
+    // 用户账号目录（MTProto 账号来源）：下载优先 user 账号回源需要
+    TelegramUserModule,
     StorageModule,
     BullModule.registerQueue({ name: QUEUE_NAMES.FILE_UPLOAD }),
     JwtModule.registerAsync({
@@ -88,11 +93,21 @@ import { StorageModule } from '../storage/storage.module';
     ThumbnailService,
     // 下载资源协调器：磁盘/缓存逻辑容量预约与上游 FIFO 租约的唯一单例
     DownloadResourceCoordinatorService,
+    // 临时能力：下载优先 Premium 用户账号（MTProto）回源；开关关闭时不介入。
+    // 依赖（开关/预算/锚点/账号目录）在本模块导入图内闭合，见该服务类注释。
+    UserPreferredDownloadService,
     // 下载任务：排队状态上报与取消（两阶段下载的第一阶段）
     DownloadTaskService,
     PublicMediaAdmissionService,
   ],
   // FileCacheService 供 Bot 直链匿名下载复用（同一实例，保证会话/缓存目录唯一）
-  exports: [FileService, UploadDiskBudgetService, FileCacheService, DownloadResourceCoordinatorService],
+  exports: [
+    FileService,
+    UploadDiskBudgetService,
+    FileCacheService,
+    DownloadResourceCoordinatorService,
+    // Bot 直链下载入口在 TelegramBotModule，需要此处装配好的实例
+    UserPreferredDownloadService,
+  ],
 })
 export class FileModule {}

@@ -544,13 +544,23 @@ export class FileUploadProcessor {
     // 置 ready 之前先把双写状态落成 pending：否则「已置 ready、尚未进入双写」之间
     // 进程退出时，文件会永久停在 none——Bull 重试读到已 ready 就被状态守卫挡回，
     // 而重试扫描只扫 pending/failed，两条恢复路径都不会再尝试镜像。
+    //
+    // 但**必须先确认缓存模式已开启**：`mirrorGDriveCache` 在模式关闭时会直接返回、
+    // 不改状态；若这里无条件置 pending，模式关闭期间上传的文件会一直挂在 pending 上，
+    // 等缓存模式以后被打开时，重试扫描会把它们当作「待补镜像」全部上传，
+    // 白白消耗 GDrive 空间与带宽（这些文件创建时本就没打算缓存）。
     if (!isNonTelegram) {
-      await this.fileRepository.update(
-        { id: fileId, uploadVersion, gdriveCacheStatus: 'none' },
-        { gdriveCacheStatus: 'pending' } as Partial<File>,
-      ).catch((error: unknown) => {
-        this.logger.warn(`文件 ${fileId} 预置双写 pending 失败（不影响上传）：${(error as Error).message}`);
-      });
+      const cacheModeEnabled = await this.storageRouter
+        ?.isGDriveCacheModeEnabled()
+        .catch(() => false) ?? false;
+      if (cacheModeEnabled) {
+        await this.fileRepository.update(
+          { id: fileId, uploadVersion, gdriveCacheStatus: 'none' },
+          { gdriveCacheStatus: 'pending' } as Partial<File>,
+        ).catch((error: unknown) => {
+          this.logger.warn(`文件 ${fileId} 预置双写 pending 失败（不影响上传）：${(error as Error).message}`);
+        });
+      }
     }
 
     const readyRows = await databaseQuery<Array<{ id: string }>>(

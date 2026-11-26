@@ -6,7 +6,7 @@ import { Readable } from 'stream';
 import { TelegramBotFileGrant } from '../common/entities/telegram-bot-file-grant.entity';
 import { TelegramCopyOwnerType } from '../common/entities/telegram-file-copy.entity';
 import { AccountAwareDownloadService } from '../telegram-account-pool/account-aware-download.service';
-import { UserPreferredDownloadService } from '../telegram-account-pool/user-preferred-download.service';
+import { UserPreferredDownloadService } from '../file/user-preferred-download.service';
 import { AccountAwareDownloadFailure } from '../telegram-account-pool/account-aware-stream.types';
 import { FileCopyService } from '../telegram-account-pool/file-copy.service';
 import { AuditService } from '../common/services/audit.service';

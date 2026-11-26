@@ -71,6 +71,9 @@ const MIRROR_ALERT_INTERVAL_MS = 60_000;
     TelegramMirrorConfigService,
     TelegramMirrorTriggerService,
     TelegramMirrorMetricsService,
+    // 主群锚点的**只读查询**被下载链路复用（`UserPreferredDownloadService` 需要它
+    // 判定「用户账号能否读到这条消息」）。导出的是服务本身，写路径仍只在本模块内。
+    TelegramMainChatAnchorService,
     // 供 file 模块在站内下载回源时调用（下载仅「问一声」，不等待结果）
     TelegramMirrorLazyTriggerService,
   ],

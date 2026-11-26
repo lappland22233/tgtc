@@ -59,7 +59,7 @@ import { DownloadResourceException, DOWNLOAD_ERROR_CODES, DOWNLOAD_RESOURCE_DEFA
 import { maskIdentifier } from '../telegram-accounts/telegram-account-view';
 // 可插拔存储后端（S3 / WebDAV / GDrive 账号池）：可选依赖，未装配时逐字节等价于原 TG 链路
 import { StorageRouterService } from '../storage/storage-router.service';
-import { UserPreferredDownloadService } from '../telegram-account-pool/user-preferred-download.service';
+import { UserPreferredDownloadService } from './user-preferred-download.service';
 import type { StorageUploadReceipt } from '../storage/storage.types';
 import { GDRIVE_CACHE_LEASE_MS, gdriveCacheBackoffMs } from '../common/utils/gdrive-cache-backoff';
 import {

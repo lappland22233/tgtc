@@ -180,4 +180,65 @@ describe('UserPreferredDownloadService', () => {
 
     expect(ctx.anchors.findReadyAnchorForDownload).toHaveBeenCalledWith('file', 'f1', 'msg-2');
   });
+
+  it('高权重账号占满时不直接回退，改用次高权重的空闲账号', async () => {
+    // 高权重账号已经被占用到并发上限，低权重账号空闲——应当选后者，
+    // 而不是因为「选中的那个满了」白白把用户 session 闲置、退回 Bot 链路。
+    const accounts = [
+      { id: 'user-high', externalId: '1', apiId: 1, apiHash: 'h', session: 's1', primaryChatId: null, weight: 10, capabilities: null },
+      { id: 'user-low', externalId: '2', apiId: 2, apiHash: 'h', session: 's2', primaryChatId: null, weight: 1, capabilities: null },
+    ];
+    const { PassThrough } = require('stream') as typeof import('stream');
+    const ctx = setup({
+      accounts,
+      anchor: { chatId: '-100main', messageId: '777' },
+      openImpl: async () => ({ stream: new PassThrough(), size: 4 }),
+    });
+
+    // 先用高权重账号开满 2 条流
+    await ctx.service.tryOpen({ ownerType: 'file', ownerId: 'f1' });
+    await ctx.service.tryOpen({ ownerType: 'file', ownerId: 'f2' });
+    const openedIds = ctx.userClient.openUserStream.mock.calls.map(
+      (call: unknown[]) => (call[0] as { apiId: number }).apiId,
+    );
+    expect(openedIds).toEqual([1, 1]);
+
+    // 第 3 次：高权重已满，必须切到低权重账号而不是返回 null
+    const third = await ctx.service.tryOpen({ ownerType: 'file', ownerId: 'f3' });
+    expect(third).not.toBeNull();
+    expect(ctx.userClient.openUserStream).toHaveBeenCalledTimes(3);
+    const lastCall = ctx.userClient.openUserStream.mock.calls[2] as unknown[] | undefined;
+    expect((lastCall?.[0] as { apiId: number } | undefined)?.apiId).toBe(2);
+  });
+
+  it('全部账号都占满时才回退 Bot 链路', async () => {
+    // 单账号 + 上限 2：前两条占用，第三条必须返回 null
+    const { PassThrough } = require('stream') as typeof import('stream');
+    const ctx = setup({
+      anchor: { chatId: '-100main', messageId: '777' },
+      openImpl: async () => ({ stream: new PassThrough(), size: 4 }),
+    });
+
+    expect(await ctx.service.tryOpen({ ownerType: 'file', ownerId: 'f1' })).not.toBeNull();
+    expect(await ctx.service.tryOpen({ ownerType: 'file', ownerId: 'f2' })).not.toBeNull();
+    expect(await ctx.service.tryOpen({ ownerType: 'file', ownerId: 'f3' })).toBeNull();
+    expect(ctx.userClient.openUserStream).toHaveBeenCalledTimes(2);
+  });
+
+  it('无锚点时不占用账号并发名额（避免幽灵占位）', async () => {
+    // 无锚点的文件是多数；若先占位再查锚点，两次无锚点调用就会把单账号占满，
+    // 后续真正有锚点的下载反而被拒。
+    let anchorResult: { chatId: string; messageId: string } | null = null;
+    const ctx = setup({ anchor: null });
+    ctx.anchors.findReadyAnchorForDownload.mockImplementation(async () => anchorResult);
+
+    expect(await ctx.service.tryOpen({ ownerType: 'file', ownerId: 'f1' })).toBeNull();
+    expect(await ctx.service.tryOpen({ ownerType: 'file', ownerId: 'f2' })).toBeNull();
+    expect(await ctx.service.tryOpen({ ownerType: 'file', ownerId: 'f3' })).toBeNull();
+
+    // 现在锚点可用：名额没有被前面三次无锚点调用吃掉
+    anchorResult = { chatId: '-100main', messageId: '777' };
+    expect(await ctx.service.tryOpen({ ownerType: 'file', ownerId: 'f4' })).not.toBeNull();
+    expect(ctx.userClient.openUserStream).toHaveBeenCalledTimes(1);
+  });
 });
