@@ -1855,7 +1855,6 @@ void NotificationManager::remove_added_notifications_from_pending_updates(
       auto update_ptr = static_cast<td_api::updateNotification *>(update.get());
       if (is_removed(update_ptr->notification_)) {
         CHECK(update_ptr->notification_->id_ != 0);
-        // An edit doesn't make a notification new. Keep its later removal unless an addition was cancelled too.
         VLOG(notifications) << "Remove " << NotificationId(update_ptr->notification_->id_) << " in " << group_id;
         update = nullptr;
       }
@@ -2753,7 +2752,9 @@ void NotificationManager::process_push_notification(string payload, Promise<Unit
         user_promise.set_error(result.move_as_error());
       }
     } else {
-      create_actor<SleepActor>("FinishProcessPushNotificationActor", 0.01, std::move(user_promise)).release();
+      create_actor<SleepActor>("FinishProcessPushNotificationActor", 0.01,
+                               [user_promise = std::move(user_promise)]() mutable { user_promise.set_value(Unit()); })
+          .release();
     }
   });
 
@@ -3386,12 +3387,12 @@ Status NotificationManager::process_push_notification_payload(string payload, bo
 
   if (begins_with(loc_key, "REACT_") || loc_key == "READ_REACTION") {
     // TODO REACT_* notifications
-    return Status::Error(406, "Reaction notifications are unsupported");
+    return Status::Error(200, "Immediate success");
   }
 
   if (begins_with(loc_key, "STORY_")) {
     // TODO STORY_NOTEXT, STORY_HIDDEN_AUTHOR, STORY_LIVE notifications
-    return Status::Error(406, "Story notifications are unsupported");
+    return Status::Error(200, "Immediate success");
   }
 
   auto original_loc_key = loc_key;

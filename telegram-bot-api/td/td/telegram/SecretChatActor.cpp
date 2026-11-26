@@ -663,6 +663,8 @@ void SecretChatActor::cancel_chat(bool delete_history, bool is_already_discarded
 
   auto event = make_unique<log_event::CloseSecretChat>();
   event->chat_id = auth_state_.id;
+  event->delete_history = delete_history;
+  event->is_already_discarded = is_already_discarded;
   auto log_event_id = binlog_add(context_->binlog(), LogEvent::HandlerType::SecretChats, create_storer(*event));
 
   auto on_sync = PromiseCreator::lambda([actor_id = actor_id(this), delete_history, is_already_discarded, log_event_id,
@@ -1210,8 +1212,10 @@ Status SecretChatActor::do_inbound_message_decrypted(unique_ptr<log_event::Inbou
   update_seq_no_state(*message);
 
   // drop old key
+  // the party that sent CommitKey must keep the old key until the other party confirms that it has received CommitKey,
+  // because all messages created by the other party before that are encrypted with the old key
   if (!pfs_state_.other_auth_key.empty() && message->auth_key_id == pfs_state_.auth_key.id() &&
-      pfs_state_.can_forget_other_key) {
+      pfs_state_.can_forget_other_key && message->his_in_seq_no >= pfs_state_.last_out_seq_no) {
     LOG(INFO) << "Drop old auth key " << tag("auth_key_id", format::as_hex(pfs_state_.other_auth_key.id()));
     pfs_state_.other_auth_key = mtproto::AuthKey();
     on_pfs_state_changed();
@@ -1349,6 +1353,10 @@ void SecretChatActor::on_save_changes_start(ChangesProcessor<StateChange>::Id sa
   // NB: we may not wait till database is flushed, because every other change will be in the same binlog
   for (auto &save_changes_finish : save_changes_finish_promises) {
     save_changes_finish.set_value(Unit());
+  }
+  if (pfs_state_change) {
+    // AcceptKey and CommitKey are sent only after the new key is saved, so send them now
+    loop();
   }
 }
 
@@ -1645,6 +1653,7 @@ void SecretChatActor::on_outbound_send_message_error(uint64 state_id, Status err
         if (result.is_ok()) {
           resend_promise.set_value(std::move(query));
         } else {
+          query->set_error_canceled();
           send_closure(actor_id, &SecretChatActor::on_promise_error, result.move_as_error(), "resend_query");
         }
       });
@@ -2155,7 +2164,7 @@ Status SecretChatActor::on_inbound_action(secret_api::decryptedMessageActionComm
   pfs_state_.state = PfsState::Empty;
   pfs_state_.last_message_id = pfs_state_.message_id;
   pfs_state_.last_timestamp = Time::now();
-  pfs_state_.last_out_seq_no = seq_no_state_.my_out_seq_no;
+  pfs_state_.last_out_seq_no = 0;  // the other party has already switched to the new key, so there is nothing to wait
 
   on_pfs_state_changed();
   return Status::OK();

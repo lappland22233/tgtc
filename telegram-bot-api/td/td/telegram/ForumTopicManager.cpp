@@ -27,6 +27,7 @@
 #include "td/telegram/misc.h"
 #include "td/telegram/NotificationManager.h"
 #include "td/telegram/NotificationSettingsManager.h"
+#include "td/telegram/StickersManager.h"
 #include "td/telegram/Td.h"
 #include "td/telegram/TdDb.h"
 #include "td/telegram/telegram_api.h"
@@ -371,8 +372,9 @@ class GetForumTopicsQuery final : public Td::ResultHandler {
       : promise_(std::move(promise)) {
   }
 
-  void send(DialogId dialog_id, const string &query, int32 offset_date, MessageId offset_message_id,
-            ForumTopicId offset_forum_topic_id, int32 limit) {
+  void send(DialogId dialog_id, const string &query, CustomEmojiId icon_custom_emoji_id, bool exclude_open,
+            bool exclude_closed, int32 offset_date, MessageId offset_message_id, ForumTopicId offset_forum_topic_id,
+            int32 limit) {
     dialog_id_ = dialog_id;
 
     auto input_peer = td_->dialog_manager_->get_input_peer(dialog_id, AccessRights::Read);
@@ -380,10 +382,17 @@ class GetForumTopicsQuery final : public Td::ResultHandler {
       return on_error(Status::Error(400, "Can't access the chat"));
     }
 
+    int32 flags = 0;
+    if (icon_custom_emoji_id.is_valid()) {
+      flags |= telegram_api::messages_getForumTopics::ICON_EMOJI_ID_MASK;
+    }
+    if (exclude_open || exclude_closed) {
+      flags |= telegram_api::messages_getForumTopics::CLOSED_MASK;
+    }
     send_query(G()->net_query_creator().create(
-        telegram_api::messages_getForumTopics(0, std::move(input_peer), query, offset_date,
-                                              offset_message_id.get_server_message_id().get(),
-                                              offset_forum_topic_id.get(), limit),
+        telegram_api::messages_getForumTopics(
+            flags, std::move(input_peer), query, icon_custom_emoji_id.get(), exclude_open, offset_date,
+            offset_message_id.get_server_message_id().get(), offset_forum_topic_id.get(), limit),
         {{dialog_id}}));
   }
 
@@ -423,6 +432,50 @@ class GetForumTopicsQuery final : public Td::ResultHandler {
 
   void on_error(Status status) final {
     td_->dialog_manager_->on_get_dialog_error(dialog_id_, status, "GetForumTopicsQuery");
+    promise_.set_error(std::move(status));
+  }
+};
+
+class GetForumTopicPopularIconsQuery final : public Td::ResultHandler {
+  Promise<td_api::object_ptr<td_api::stickers>> promise_;
+  DialogId dialog_id_;
+
+ public:
+  explicit GetForumTopicPopularIconsQuery(Promise<td_api::object_ptr<td_api::stickers>> &&promise)
+      : promise_(std::move(promise)) {
+  }
+
+  void send(DialogId dialog_id) {
+    dialog_id_ = dialog_id;
+
+    auto input_peer = td_->dialog_manager_->get_input_peer(dialog_id, AccessRights::Read);
+    if (input_peer == nullptr) {
+      return on_error(Status::Error(400, "Can't access the chat"));
+    }
+
+    send_query(G()->net_query_creator().create(
+        telegram_api::messages_getForumTopics(0, std::move(input_peer), string(), 0, false, 0, 0, 0, 1),
+        {{dialog_id}}));
+  }
+
+  void on_result(BufferSlice packet) final {
+    auto result_ptr = fetch_result<telegram_api::messages_getForumTopics>(packet);
+    if (result_ptr.is_error()) {
+      return on_error(result_ptr.move_as_error());
+    }
+
+    auto ptr = result_ptr.move_as_ok();
+    LOG(INFO) << "Receive result for GetForumTopicPopularIconsQuery: " << to_string(ptr);
+
+    td_->user_manager_->on_get_users(std::move(ptr->users_), "GetForumTopicPopularIconsQuery");
+    td_->chat_manager_->on_get_chats(std::move(ptr->chats_), "GetForumTopicPopularIconsQuery");
+
+    td_->stickers_manager_->get_custom_emoji_stickers_unlimited(CustomEmojiId::get_custom_emoji_ids(ptr->top_icons_),
+                                                                std::move(promise_));
+  }
+
+  void on_error(Status status) final {
+    td_->dialog_manager_->on_get_dialog_error(dialog_id_, status, "GetForumTopicPopularIconsQuery");
     promise_.set_error(std::move(status));
   }
 };
@@ -915,7 +968,8 @@ void ForumTopicManager::get_forum_topic_link(DialogId dialog_id, ForumTopicId fo
   promise.set_value(td_api::make_object<td_api::messageLink>(sb.as_cslice().str(), is_public));
 }
 
-void ForumTopicManager::get_forum_topics(DialogId dialog_id, string query, int32 offset_date,
+void ForumTopicManager::get_forum_topics(DialogId dialog_id, string query, CustomEmojiId icon_custom_emoji_id,
+                                         bool exclude_open, bool exclude_closed, int32 offset_date,
                                          MessageId offset_message_id, ForumTopicId offset_forum_topic_id, int32 limit,
                                          Promise<td_api::object_ptr<td_api::forumTopics>> promise) {
   TRY_STATUS_PROMISE(promise, is_forum(dialog_id, true));
@@ -932,8 +986,22 @@ void ForumTopicManager::get_forum_topics(DialogId dialog_id, string query, int32
   if (limit <= 0) {
     return promise.set_error(400, "Invalid limit specified");
   }
+  if ((icon_custom_emoji_id.is_valid() || exclude_open || exclude_closed) &&
+      dialog_id.get_type() != DialogType::Channel) {
+    return promise.set_error(400, "Topic filters can't be used in chats with bots");
+  }
+  if (exclude_open && exclude_closed) {
+    return promise.set_value(td_api::make_object<td_api::forumTopics>(0, Auto(), 0, 0, 0));
+  }
   td_->create_handler<GetForumTopicsQuery>(std::move(promise))
-      ->send(dialog_id, query, offset_date, offset_message_id, offset_forum_topic_id, limit);
+      ->send(dialog_id, query, icon_custom_emoji_id, exclude_open, exclude_closed, offset_date, offset_message_id,
+             offset_forum_topic_id, limit);
+}
+
+void ForumTopicManager::get_forum_topic_popular_icons(DialogId dialog_id,
+                                                      Promise<td_api::object_ptr<td_api::stickers>> &&promise) {
+  TRY_STATUS_PROMISE(promise, is_forum(dialog_id));
+  td_->create_handler<GetForumTopicPopularIconsQuery>(std::move(promise))->send(dialog_id);
 }
 
 void ForumTopicManager::on_get_forum_topics(DialogId dialog_id, bool order_by_creation_date, MessagesInfo &&info,
@@ -1130,7 +1198,7 @@ void ForumTopicManager::on_get_forum_topic_infos(DialogId dialog_id,
       dialog_id = forum_topic_info->get_dialog_id();
       if (!can_be_forum(dialog_id)) {
         LOG(ERROR) << "Receive forum topics in " << dialog_id << " from " << source;
-        return;
+        continue;
       }
       auto *dialog_topics = add_dialog_topics(dialog_id);
       CHECK(dialog_topics != nullptr);

@@ -4,6 +4,7 @@
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 //
+#include "td/utils/Action.h"
 #include "td/utils/algorithm.h"
 #include "td/utils/as.h"
 #include "td/utils/base64.h"
@@ -1591,4 +1592,35 @@ TEST(UniqueValuePtr, Basic) {
   auto d = c;
   ASSERT_TRUE(c == d);
   ASSERT_TRUE(6 == **d);
+}
+
+TEST(Misc, Action) {
+  td::Action<void()> empty_action;
+  ASSERT_TRUE(!empty_action);
+
+  int result = 0;
+  td::Action<int(td::unique_ptr<int>)> action = [value = td::make_unique<int>(5), &result](td::unique_ptr<int> x) {
+    result = *value + *x;
+    return result;
+  };
+  ASSERT_TRUE(static_cast<bool>(action));
+  auto moved_action = std::move(action);
+  ASSERT_TRUE(!action);
+  ASSERT_TRUE(static_cast<bool>(moved_action));
+  ASSERT_EQ(7, moved_action(td::make_unique<int>(2)));
+  ASSERT_EQ(7, result);
+  ASSERT_TRUE(!moved_action);
+
+  td::vector<td::SimpleAction> actions;
+  actions.emplace_back([&result] { result *= 2; });
+  actions.emplace_back([&result, &actions] {
+    result += 1;
+    actions.emplace_back([&result] { result = 0; });
+  });
+  td::run_actions(actions);
+  ASSERT_EQ(15, result);
+  ASSERT_EQ(1u, actions.size());
+  td::run_actions(actions);
+  ASSERT_EQ(0, result);
+  ASSERT_TRUE(actions.empty());
 }

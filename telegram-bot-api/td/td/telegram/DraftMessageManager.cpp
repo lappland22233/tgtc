@@ -7,6 +7,7 @@
 #include "td/telegram/DraftMessageManager.h"
 
 #include "td/telegram/AccessRights.h"
+#include "td/telegram/AuthManager.h"
 #include "td/telegram/DialogManager.h"
 #include "td/telegram/DraftMessage.h"
 #include "td/telegram/FileReferenceManager.h"
@@ -24,12 +25,14 @@
 #include "td/telegram/SuggestedPost.h"
 #include "td/telegram/Td.h"
 #include "td/telegram/td_api.h"
+#include "td/telegram/TdDb.h"
 #include "td/telegram/telegram_api.h"
 #include "td/telegram/UpdatesManager.h"
 
 #include "td/utils/algorithm.h"
 #include "td/utils/buffer.h"
 #include "td/utils/logging.h"
+#include "td/utils/misc.h"
 #include "td/utils/Status.h"
 
 namespace td {
@@ -145,7 +148,12 @@ class SaveDraftMessageQuery final : public Td::ResultHandler {
 };
 
 class GetAllDraftsQuery final : public Td::ResultHandler {
+  Promise<Unit> promise_;
+
  public:
+  explicit GetAllDraftsQuery(Promise<Unit> &&promise) : promise_(std::move(promise)) {
+  }
+
   void send() {
     send_query(G()->net_query_creator().create(telegram_api::messages_getAllDrafts()));
   }
@@ -158,14 +166,14 @@ class GetAllDraftsQuery final : public Td::ResultHandler {
 
     auto ptr = result_ptr.move_as_ok();
     LOG(INFO) << "Receive result for GetAllDraftsQuery: " << to_string(ptr);
-    td_->updates_manager_->on_get_updates(std::move(ptr), Promise<Unit>());
+    td_->updates_manager_->on_get_updates(std::move(ptr), std::move(promise_));
   }
 
   void on_error(Status status) final {
     if (!G()->is_expected_error(status)) {
       LOG(ERROR) << "Receive error for GetAllDraftsQuery: " << status;
     }
-    status.ignore();
+    promise_.set_error(std::move(status));
   }
 };
 
@@ -248,6 +256,10 @@ DraftMessageManager::DraftMessageManager(Td *td, ActorShared<> parent) : td_(td)
 
 void DraftMessageManager::tear_down() {
   parent_.reset();
+}
+
+string DraftMessageManager::get_all_draft_messages_version_key() {
+  return "all_draft_messages_version";
 }
 
 void DraftMessageManager::save_draft_message(DialogId dialog_id, const MessageTopic &message_topic,
@@ -340,7 +352,39 @@ void DraftMessageManager::reload_draft_message(DialogId dialog_id, const Message
 }
 
 void DraftMessageManager::load_all_draft_messages() {
-  td_->create_handler<GetAllDraftsQuery>()->send();
+  if (is_loading_all_draft_messages_) {
+    return;
+  }
+  is_loading_all_draft_messages_ = true;
+
+  auto promise = PromiseCreator::lambda([actor_id = actor_id(this)](Result<Unit> result) {
+    send_closure(actor_id, &DraftMessageManager::on_load_all_draft_messages, std::move(result));
+  });
+  td_->create_handler<GetAllDraftsQuery>(std::move(promise))->send();
+}
+
+void DraftMessageManager::on_load_all_draft_messages(Result<Unit> &&result) {
+  if (G()->close_flag()) {
+    return;
+  }
+  CHECK(is_loading_all_draft_messages_);
+  is_loading_all_draft_messages_ = false;
+  if (result.is_error()) {
+    return;
+  }
+  G()->td_db()->get_binlog_pmc()->set(get_all_draft_messages_version_key(), to_string(ALL_DRAFT_MESSAGES_VERSION));
+}
+
+void DraftMessageManager::after_get_difference() {
+  if (!need_check_all_draft_messages_version_ || td_->auth_manager_->is_bot()) {
+    return;
+  }
+  need_check_all_draft_messages_version_ = false;
+
+  auto version = to_integer<int32>(G()->td_db()->get_binlog_pmc()->get(get_all_draft_messages_version_key()));
+  if (version < ALL_DRAFT_MESSAGES_VERSION) {
+    load_all_draft_messages();
+  }
 }
 
 void DraftMessageManager::clear_all_draft_messages(Promise<Unit> &&promise) {

@@ -1,6 +1,6 @@
 # Telegram Bot API
 
-This fork is based on [Telegram Bot API 10.4](https://github.com/tdlib/telegram-bot-api/commit/7232881b39dfcd048a0d569f1983c5184249ee05) and its pinned [TDLib 1.8.70 revision](https://github.com/tdlib/td/commit/c8828d50f5eac2fc7089ce1089d7ce9095c61b5e).
+This fork is based on [Telegram Bot API 10.5](https://github.com/tdlib/telegram-bot-api/commit/5df614c91dab8662cfbb24a501ec89949fdcfebb) and its pinned [TDLib 1.8.71 revision](https://github.com/tdlib/td/commit/f10611ee1f03f91ddae8185483a1ccfd3d664668).
 
 The Telegram Bot API provides an HTTP API for creating [Telegram Bots](https://core.telegram.org/bots).
 
@@ -21,7 +21,7 @@ Please note that only global Bot API issues that affect all bots are suitable fo
 
 ## TDLib source selection
 
-TGTC ships the native Bot API server. When updating the vendored TDLib sources, omit the standalone `example/web` directory. The browser client and its npm build instructions are available in the [upstream example at the pinned TDLib revision](https://github.com/tdlib/td/tree/c8828d50f5eac2fc7089ce1089d7ce9095c61b5e/example/web).
+TGTC ships the native Bot API server. When updating the vendored TDLib sources, omit the standalone `example/web` directory. The browser client and its npm build instructions are available in the [upstream example at the pinned TDLib revision](https://github.com/tdlib/td/tree/f10611ee1f03f91ddae8185483a1ccfd3d664668/example/web).
 
 <a name="installation"></a>
 ## Installation
@@ -79,7 +79,7 @@ A complete Chinese integration guide is available in [流式文件端点调用�
 
 This fork can stream a Telegram file to an HTTP client before TDLib finishes downloading the whole file. The feature is disabled by default and doesn't change the standard `getFile` method.
 
-The 10.4 server supports a separate `--files-dir` for media. When set, use that directory as the TGTC local-media root. The fork measures download space and cleans idle media there. TDLib state and webhook certificates remain under `--dir`.
+The 10.5 server supports a separate `--files-dir` for media. When set, use that directory as the TGTC local-media root. The fork measures download space and cleans idle media there. TDLib state and webhook certificates remain under `--dir`.
 
 Enable it with:
 

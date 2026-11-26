@@ -1337,6 +1337,8 @@ void ConfigManager::process_app_config(tl_object_ptr<telegram_api::JSONValue> &c
   int32 transcribe_audio_trial_weekly_number = 0;
   int32 transcribe_audio_trial_duration_max = 0;
   int32 transcribe_audio_trial_cooldown_until = 0;
+  bool need_premium_for_speech_recognition = false;
+  bool is_speech_recognition_disabled = false;
   vector<string> business_features;
   bool need_premium_for_new_chat_privacy = true;
   vector<string> starref_start_param_prefixes;
@@ -1354,6 +1356,10 @@ void ConfigManager::process_app_config(tl_object_ptr<telegram_api::JSONValue> &c
   int32 wallet_gasless_daily_transfers = 0;
   vector<string> bot_allowed_suffixes;
   vector<string> wallet_card_background_gifts;
+  bool show_gift_resale_star_filter = true;
+  bool select_gift_resale_star_filter_by_default = true;
+  bool show_gift_resale_gram_filter = true;
+  bool select_gift_resale_gram_filter_by_default = true;
 
   // {"stories_all_hidden", "archive_all_stories"}
   static const FlatHashMap<Slice, Slice, SliceHash> bool_keys = {
@@ -1364,7 +1370,9 @@ void ConfigManager::process_app_config(tl_object_ptr<telegram_api::JSONValue> &c
       {"premium_gift_attach_menu_icon", "gift_premium_from_attachment_menu"},
       {"premium_gift_text_field_icon", "gift_premium_from_input_field"},
       {"settings_display_passkeys", "can_use_login_passkey"},
-      {"stargifts_craft_minted_first_source", "can_craft_from_withdrawn_first_gift"},
+      {"stargifts_craft_minted_first_source", "can_craft_with_minted_first_gift"},
+      {"stargifts_fixed_sale_enabled", "can_buy_on_chain_fixed_price_gifts"},
+      {"stargifts_fragment_resale_enabled", "can_buy_on_chain_gifts"},
       {"stars_gifts_enabled", "can_gift_stars"},
       {"stars_paid_messages_available", "can_enable_paid_messages"},
       {"stars_spend_topup_invoice_disabled", "star_top_up_disabled"},
@@ -1836,6 +1844,17 @@ void ConfigManager::process_app_config(tl_object_ptr<telegram_api::JSONValue> &c
                                 get_json_value_string(std::move(key_value->value_), key) == "premium");
         continue;
       }
+      if (key == "speech_to_text") {
+        auto mode = get_json_value_string(std::move(key_value->value_), key);
+        if (mode == "premium") {
+          need_premium_for_speech_recognition = true;
+        } else if (mode == "disabled") {
+          is_speech_recognition_disabled = true;
+        } else if (mode != "enabled") {
+          LOG(ERROR) << "Receive unsupported speech_to_text = " << mode;
+        }
+        continue;
+      }
       if (key == "transcribe_audio_trial_weekly_number") {
         transcribe_audio_trial_weekly_number = get_json_value_int(std::move(key_value->value_), key);
         continue;
@@ -1932,6 +1951,22 @@ void ConfigManager::process_app_config(tl_object_ptr<telegram_api::JSONValue> &c
       if (key == "ton_stargift_resale_amount_max") {
         G()->set_option_integer("gift_resale_gram_cent_count_max",
                                 get_json_value_long(std::move(key_value->value_), key) / 10000000);
+        continue;
+      }
+      if (key == "stargifts_stars_resale" || key == "stargifts_ton_resale") {
+        auto filter = get_json_value_string(std::move(key_value->value_), key);
+        bool is_shown = filter != "hidden";
+        bool is_selected = filter != "hidden" && filter != "visible";
+        if (is_selected && filter != "default") {
+          LOG(ERROR) << "Receive unsupported " << key << " = " << filter;
+        }
+        if (key == "stargifts_stars_resale") {
+          show_gift_resale_star_filter = is_shown;
+          select_gift_resale_star_filter_by_default = is_selected;
+        } else {
+          show_gift_resale_gram_filter = is_shown;
+          select_gift_resale_gram_filter_by_default = is_selected;
+        }
         continue;
       }
       if (key == "ton_usd_rate") {
@@ -2167,6 +2202,11 @@ void ConfigManager::process_app_config(tl_object_ptr<telegram_api::JSONValue> &c
 
   options.set_option_boolean("can_accept_calls", can_accept_calls);
 
+  options.set_option_boolean("show_gift_resale_star_filter", show_gift_resale_star_filter);
+  options.set_option_boolean("select_gift_resale_star_filter_by_default", select_gift_resale_star_filter_by_default);
+  options.set_option_boolean("show_gift_resale_gram_filter", show_gift_resale_gram_filter);
+  options.set_option_boolean("select_gift_resale_gram_filter_by_default", select_gift_resale_gram_filter_by_default);
+
   if (!is_premium_available) {
     premium_bot_username.clear();  // just in case
     premium_invoice_slug.clear();  // just in case
@@ -2196,6 +2236,8 @@ void ConfigManager::process_app_config(tl_object_ptr<telegram_api::JSONValue> &c
   }
 
   options.set_option_boolean("need_premium_for_new_chat_privacy", need_premium_for_new_chat_privacy);
+  options.set_option_boolean("need_premium_for_speech_recognition", need_premium_for_speech_recognition);
+  options.set_option_boolean("is_speech_recognition_disabled", is_speech_recognition_disabled);
 
   options.set_option_empty("default_ton_blockchain_config");
   options.set_option_empty("default_ton_blockchain_name");

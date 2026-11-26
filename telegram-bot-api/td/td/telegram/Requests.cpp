@@ -2986,6 +2986,12 @@ void Requests::on_request(uint64 id, const td_api::getSpeechRecognitionLanguages
   td_->transcription_manager_->get_speech_recognition_languages(DialogId(request.chat_id_), std::move(promise));
 }
 
+void Requests::on_request(uint64 id, const td_api::getSpeechRecognitionModels &request) {
+  CHECK_IS_USER();
+  CREATE_REQUEST_PROMISE();
+  td_->transcription_manager_->get_speech_recognition_models(request.version_, std::move(promise));
+}
+
 void Requests::on_request(uint64 id, const td_api::getFile &request) {
   auto file_object = td_->file_manager_->get_file_object(FileId(request.file_id_, 0));
   if (file_object->id_ == 0) {
@@ -3998,9 +4004,22 @@ void Requests::on_request(uint64 id, const td_api::getChatMessageCount &request)
   CHECK_IS_USER();
   CREATE_COUNT_REQUEST_PROMISE();
   DialogId dialog_id(request.chat_id_);
-  td_->messages_manager_->get_dialog_message_count(dialog_id, request.topic_id_,
-                                                   get_message_search_filter(request.filter_), request.return_local_,
-                                                   std::move(promise));
+  td_->message_query_manager_->get_dialog_message_count(dialog_id, request.topic_id_,
+                                                        get_message_search_filter(request.filter_),
+                                                        request.return_local_, std::move(promise));
+}
+
+void Requests::on_request(uint64 id, const td_api::getChatMessageCounts &request) {
+  CHECK_IS_USER();
+  CREATE_REQUEST_PROMISE();
+  auto query_promise = PromiseCreator::lambda([promise = std::move(promise)](Result<vector<int32>> r_counts) mutable {
+    TRY_RESULT_PROMISE(promise, counts, std::move(r_counts));
+    promise.set_value(td_api::make_object<td_api::chatMessageCounts>(std::move(counts)));
+  });
+  DialogId dialog_id(request.chat_id_);
+  td_->message_query_manager_->get_dialog_message_counts(dialog_id, request.topic_id_,
+                                                         transform(request.filters_, get_message_search_filter),
+                                                         request.return_local_, std::move(query_promise));
 }
 
 void Requests::on_request(uint64 id, const td_api::getChatMessagePosition &request) {
@@ -5046,10 +5065,16 @@ void Requests::on_request(uint64 id, td_api::getForumTopics &request) {
   CHECK_IS_USER();
   CLEAN_INPUT_STRING(request.query_);
   CREATE_REQUEST_PROMISE();
-  td_->forum_topic_manager_->get_forum_topics(DialogId(request.chat_id_), std::move(request.query_),
-                                              request.offset_date_, MessageId(request.offset_message_id_),
-                                              ForumTopicId(request.offset_forum_topic_id_), request.limit_,
-                                              std::move(promise));
+  td_->forum_topic_manager_->get_forum_topics(
+      DialogId(request.chat_id_), std::move(request.query_), CustomEmojiId(request.icon_custom_emoji_id_),
+      request.exclude_open_, request.exclude_closed_, request.offset_date_, MessageId(request.offset_message_id_),
+      ForumTopicId(request.offset_forum_topic_id_), request.limit_, std::move(promise));
+}
+
+void Requests::on_request(uint64 id, const td_api::getForumTopicPopularIcons &request) {
+  CHECK_IS_USER();
+  CREATE_REQUEST_PROMISE();
+  td_->forum_topic_manager_->get_forum_topic_popular_icons(DialogId(request.chat_id_), std::move(promise));
 }
 
 void Requests::on_request(uint64 id, const td_api::toggleForumTopicIsClosed &request) {
@@ -6031,6 +6056,13 @@ void Requests::on_request(uint64 id, td_api::setChatDraftMessage &request) {
   CHECK_IS_USER();
   answer_ok_query(id, td_->messages_manager_->set_dialog_draft_message(DialogId(request.chat_id_), request.topic_id_,
                                                                        std::move(request.draft_message_)));
+}
+
+void Requests::on_request(uint64 id, td_api::setChatTextCompositionParameters &request) {
+  CHECK_IS_USER();
+  CREATE_OK_REQUEST_PROMISE();
+  td_->message_query_manager_->set_dialog_text_composition_parameters(
+      DialogId(request.chat_id_), std::move(request.text_composition_parameters_), std::move(promise));
 }
 
 void Requests::on_request(uint64 id, const td_api::toggleChatHasProtectedContent &request) {
@@ -7185,6 +7217,19 @@ void Requests::on_request(uint64 id, td_api::setManagedBotAccessSettings &reques
                                                   std::move(promise));
 }
 
+void Requests::on_request(uint64 id, const td_api::inviteUsersToBot &request) {
+  CHECK_IS_USER();
+  CREATE_OK_REQUEST_PROMISE();
+  td_->bot_info_manager_->invite_users_to_bot(UserId(request.bot_user_id_), UserId::get_user_ids(request.user_ids_),
+                                              std::move(promise));
+}
+
+void Requests::on_request(uint64 id, td_api::setBotSettings &request) {
+  CREATE_OK_REQUEST_PROMISE();
+  td_->bot_info_manager_->set_bot_settings(UserId(request.bot_user_id_), std::move(request.settings_),
+                                           std::move(promise));
+}
+
 void Requests::on_request(uint64 id, td_api::setBotName &request) {
   CLEAN_INPUT_STRING(request.name_);
   CREATE_OK_REQUEST_PROMISE();
@@ -8203,6 +8248,13 @@ void Requests::on_request(uint64 id, td_api::sendTonWalletTransfer &request) {
       request.amount_, request.comment_, request.is_comment_encrypted_, request.sending_id_, std::move(promise));
 }
 
+void Requests::on_request(uint64 id, const td_api::sendTonWalletTransaction &request) {
+  CHECK_IS_USER();
+  CREATE_REQUEST_PROMISE();
+  td_->ton_wallet_manager_->send_ton_wallet_transaction(request.regular_transaction_data_,
+                                                        request.gasless_transaction_data_, std::move(promise));
+}
+
 void Requests::on_request(uint64 id, td_api::deleteTonWallet &request) {
   CHECK_IS_USER();
   CLEAN_INPUT_STRING(request.password_);
@@ -8439,6 +8491,12 @@ void Requests::on_request(uint64 id, td_api::getGramWithdrawalUrl &request) {
   CLEAN_INPUT_STRING(request.password_);
   CREATE_HTTP_URL_REQUEST_PROMISE();
   td_->star_manager_->get_ton_withdrawal_url(request.password_, std::move(promise));
+}
+
+void Requests::on_request(uint64 id, const td_api::withdrawGrams &request) {
+  CHECK_IS_USER();
+  CREATE_OK_REQUEST_PROMISE();
+  td_->star_manager_->withdraw_ton_revenue(std::move(promise));
 }
 
 void Requests::on_request(uint64 id, const td_api::getMessageStatistics &request) {
@@ -9155,6 +9213,55 @@ void Requests::on_request(uint64 id, const td_api::processGiftPurchaseOffer &req
   td_->star_gift_manager_->process_gift_offer(MessageId(request.message_id_), !request.accept_, std::move(promise));
 }
 
+void Requests::on_request(uint64 id, td_api::sendGiftOnChainPurchaseOffer &request) {
+  CHECK_IS_USER();
+  CLEAN_INPUT_STRING(request.gift_name_);
+  CREATE_REQUEST_PROMISE();
+  td_->star_gift_manager_->send_gift_onchain_offer(request.gift_name_, request.gram_amount_, request.duration_,
+                                                   std::move(promise));
+}
+
+void Requests::on_request(uint64 id, const td_api::cancelGiftOnChainPurchaseOffer &request) {
+  CHECK_IS_USER();
+  CREATE_REQUEST_PROMISE();
+  td_->star_gift_manager_->cancel_gift_onchain_offer(MessageId(request.message_id_), std::move(promise));
+}
+
+void Requests::on_request(uint64 id, const td_api::acceptGiftOnChainPurchaseOffer &request) {
+  CHECK_IS_USER();
+  CREATE_REQUEST_PROMISE();
+  td_->star_gift_manager_->accept_gift_onchain_offer(MessageId(request.message_id_), std::move(promise));
+}
+
+void Requests::on_request(uint64 id, const td_api::declineGiftOnChainPurchaseOffer &request) {
+  CHECK_IS_USER();
+  CREATE_OK_REQUEST_PROMISE();
+  td_->star_gift_manager_->decline_gift_onchain_offer(MessageId(request.message_id_), std::move(promise));
+}
+
+void Requests::on_request(uint64 id, td_api::getGiftOnChainPurchaseTransaction &request) {
+  CHECK_IS_USER();
+  CLEAN_INPUT_STRING(request.gift_name_);
+  CREATE_REQUEST_PROMISE();
+  TRY_RESULT_PROMISE(promise, owner_dialog_id, get_message_sender_dialog_id(td_, request.owner_id_, true, false));
+  td_->star_gift_manager_->buy_gift_onchain(request.gift_name_, owner_dialog_id, request.gram_amount_,
+                                            std::move(request.text_), request.is_private_, std::move(promise));
+}
+
+void Requests::on_request(uint64 id, td_api::getGiftOnChainListingTransaction &request) {
+  CHECK_IS_USER();
+  CLEAN_INPUT_STRING(request.gift_name_);
+  CREATE_REQUEST_PROMISE();
+  td_->star_gift_manager_->sell_gift_onchain(request.gift_name_, request.gram_amount_, std::move(promise));
+}
+
+void Requests::on_request(uint64 id, td_api::getGiftOnChainDelistingTransaction &request) {
+  CHECK_IS_USER();
+  CLEAN_INPUT_STRING(request.gift_name_);
+  CREATE_REQUEST_PROMISE();
+  td_->star_gift_manager_->cancel_gift_onchain_sale(request.gift_name_, std::move(promise));
+}
+
 void Requests::on_request(uint64 id, td_api::getReceivedGifts &request) {
   CLEAN_INPUT_STRING(request.offset_);
   CREATE_REQUEST_PROMISE();
@@ -9194,13 +9301,13 @@ void Requests::on_request(uint64 id, td_api::getUpgradedGiftValueInfo &request) 
   td_->star_gift_manager_->get_upgraded_gift_value_info(request.name_, std::move(promise));
 }
 
-void Requests::on_request(uint64 id, const td_api::getUpgradedGiftWithdrawalUrl &request) {
+void Requests::on_request(uint64 id, const td_api::getGiftMintingUrl &request) {
   CHECK_IS_USER();
   CREATE_HTTP_URL_REQUEST_PROMISE();
   td_->star_gift_manager_->get_star_gift_withdrawal_url(StarGiftId(request.received_gift_id_), std::move(promise));
 }
 
-void Requests::on_request(uint64 id, const td_api::withdrawUpgradedGift &request) {
+void Requests::on_request(uint64 id, const td_api::mintGift &request) {
   CHECK_IS_USER();
   CREATE_OK_REQUEST_PROMISE();
   td_->star_gift_manager_->withdraw_star_gift(StarGiftId(request.received_gift_id_), request.keep_on_profile_,
@@ -9243,9 +9350,9 @@ void Requests::on_request(uint64 id, td_api::searchGiftsForResale &request) {
   CHECK_IS_USER();
   CLEAN_INPUT_STRING(request.offset_);
   CREATE_REQUEST_PROMISE();
-  td_->star_gift_manager_->get_resale_star_gifts(request.gift_id_, request.order_, request.for_crafting_,
-                                                 request.for_stars_, request.attributes_, request.offset_,
-                                                 request.limit_, std::move(promise));
+  td_->star_gift_manager_->get_resale_star_gifts(
+      request.gift_id_, request.order_, request.for_crafting_, request.for_stars_, request.for_grams_,
+      request.for_fragment_, request.attributes_, request.offset_, request.limit_, std::move(promise));
 }
 
 void Requests::on_request(uint64 id, const td_api::getGiftCollections &request) {

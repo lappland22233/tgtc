@@ -31,6 +31,7 @@
 #include "td/telegram/DialogParticipant.h"
 #include "td/telegram/DialogParticipantManager.h"
 #include "td/telegram/DownloadManager.h"
+#include "td/telegram/DraftMessageManager.h"
 #include "td/telegram/EmojiStatus.h"
 #include "td/telegram/EphemeralMessageId.h"
 #include "td/telegram/FolderId.h"
@@ -1006,6 +1007,7 @@ bool UpdatesManager::is_acceptable_message(const telegram_api::Message *message_
         case telegram_api::messageActionGramTransfer::ID:
         case telegram_api::messageActionWalletTonConnectRequest::ID:
         case telegram_api::messageActionNoPaidMessagesTokenUsed::ID:
+        case telegram_api::messageActionStarGiftOnchainOffer::ID:
           break;
         case telegram_api::messageActionChatCreate::ID: {
           auto action = static_cast<const telegram_api::messageActionChatCreate *>(action_ptr);
@@ -1133,6 +1135,13 @@ bool UpdatesManager::is_acceptable_message(const telegram_api::Message *message_
         case telegram_api::messageActionChatJoinedViaCommunity::ID: {
           auto action = static_cast<const telegram_api::messageActionChatJoinedViaCommunity *>(action_ptr);
           if (action->community_id_ != 0 && !is_acceptable_community(CommunityId(action->community_id_))) {
+            return false;
+          }
+          break;
+        }
+        case telegram_api::messageActionBotInvite::ID: {
+          auto action = static_cast<const telegram_api::messageActionBotInvite *>(action_ptr);
+          if (!is_acceptable_user(UserId(action->inviter_id_))) {
             return false;
           }
           break;
@@ -2101,6 +2110,8 @@ void UpdatesManager::on_get_difference(tl_object_ptr<telegram_api::updates_Diffe
                            << difference->chats_.size() << " chats";
       td_->user_manager_->on_get_users(std::move(difference->users_), "updates.difference");
       td_->chat_manager_->on_get_chats(std::move(difference->chats_), "updates.difference");
+      td_->forum_topic_manager_->on_get_forum_topic_infos(DialogId(), std::move(difference->topics_),
+                                                          "updates.difference");
 
       if (get_difference_retry_count_ <= 5) {
         for (const auto &message : difference->new_messages_) {
@@ -2137,6 +2148,8 @@ void UpdatesManager::on_get_difference(tl_object_ptr<telegram_api::updates_Diffe
                            << difference->chats_.size() << " chats";
       td_->user_manager_->on_get_users(std::move(difference->users_), "updates.differenceSlice");
       td_->chat_manager_->on_get_chats(std::move(difference->chats_), "updates.differenceSlice");
+      td_->forum_topic_manager_->on_get_forum_topic_infos(DialogId(), std::move(difference->topics_),
+                                                          "updates.differenceSlice");
 
       if (get_difference_retry_count_ <= 5) {
         for (const auto &message : difference->new_messages_) {
@@ -2220,9 +2233,9 @@ void UpdatesManager::on_get_pts_update(int32 pts,
     case telegram_api::updates_difference::ID: {
       auto difference = move_tl_object_as<telegram_api::updates_difference>(difference_ptr);
       difference_ptr = telegram_api::make_object<telegram_api::updates_differenceSlice>(
-          std::move(difference->new_messages_), std::move(difference->new_encrypted_messages_),
-          std::move(difference->other_updates_), std::move(difference->chats_), std::move(difference->users_),
-          std::move(difference->state_));
+          difference->flags_, std::move(difference->topics_), std::move(difference->new_messages_),
+          std::move(difference->new_encrypted_messages_), std::move(difference->other_updates_),
+          std::move(difference->chats_), std::move(difference->users_), std::move(difference->state_));
     }
     // fallthrough
     case telegram_api::updates_differenceSlice::ID: {
@@ -2234,6 +2247,8 @@ void UpdatesManager::on_get_pts_update(int32 pts,
 
       td_->user_manager_->on_get_users(std::move(difference->users_), "on_get_pts_update");
       td_->chat_manager_->on_get_chats(std::move(difference->chats_), "on_get_pts_update");
+      td_->forum_topic_manager_->on_get_forum_topic_infos(DialogId(), std::move(difference->topics_),
+                                                          "on_get_pts_update");
 
       for (auto &message : difference->new_messages_) {
         difference->other_updates_.push_back(
@@ -2378,6 +2393,7 @@ void UpdatesManager::after_get_difference() {
   }
 
   send_closure(td_->download_manager_actor_, &DownloadManager::after_get_difference);
+  td_->draft_message_manager_->after_get_difference();
   td_->inline_queries_manager_->after_get_difference();
   td_->messages_manager_->after_get_difference();
   send_closure_later(td_->notification_manager_actor_, &NotificationManager::after_get_difference);
@@ -2634,8 +2650,20 @@ void UpdatesManager::on_pending_updates(vector<tl_object_ptr<telegram_api::Updat
               if ((*message_ptr)->get_id() != telegram_api::messageService::ID) {
                 // don't replace service messages, because they can be about bot's kicking
                 LOG(INFO) << "Replace update about new message with updateChannelTooLong in " << dialog_id;
+                int32 flags = telegram_api::updateChannelTooLong::PTS_MASK;
+                int32 last_message_id = 0;
+                int32 last_message_date = 0;
+                if (id == telegram_api::updateNewChannelMessage::ID) {
+                  auto message_id = MessageId::get_message_id(*message_ptr, false);
+                  auto message_date = MessagesManager::get_message_date(*message_ptr);
+                  if (message_id.is_server() && message_date > 0) {
+                    flags |= telegram_api::updateChannelTooLong::LAST_MSG_ID_MASK;
+                    last_message_id = message_id.get_server_message_id().get();
+                    last_message_date = message_date;
+                  }
+                }
                 update = telegram_api::make_object<telegram_api::updateChannelTooLong>(
-                    telegram_api::updateChannelTooLong::PTS_MASK, channel_id.get(), pts);
+                    flags, channel_id.get(), pts, last_message_id, last_message_date);
                 continue;
               }
             }

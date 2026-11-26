@@ -1121,7 +1121,7 @@ void WebPagesManager::register_poll_web_pages(PollId poll_id, vector<WebPageId> 
     if (it == poll_web_pages_.end()) {
       return;
     }
-    LOG(INFO) << "Unregister " << web_page_ids << " from " << poll_id;
+    LOG(INFO) << "Unregister " << it->second << " from " << poll_id;
     for (auto web_page_id : it->second) {
       CHECK(web_page_id.is_valid());
       auto &poll_ids = web_page_polls_[web_page_id];
@@ -1725,6 +1725,9 @@ td_api::object_ptr<td_api::LinkPreviewType> WebPagesManager::get_link_preview_ty
       return td_api::make_object<td_api::linkPreviewTypeWebApp>(
           get_photo_object(td_->file_manager_.get(), web_page->photo_));
     }
+    if (type == "botinvite") {
+      return td_api::make_object<td_api::linkPreviewTypeBotInvite>();
+    }
     if (type == "call") {
       LOG_IF(ERROR, !web_page->photo_.is_empty()) << "Receive photo for " << web_page->url_;
       LOG_IF(ERROR, !web_page->document_.is_empty()) << "Receive wrong document for " << web_page->url_;
@@ -2091,16 +2094,17 @@ td_api::object_ptr<td_api::linkPreview> WebPagesManager::get_link_preview_object
         }
         return string();
       });
-    } else if (host == "twitter.com" || ends_with(host, ".twitter.com")) {
+    } else if (host == "twitter.com" || ends_with(host, ".twitter.com") || host == "x.com" ||
+               ends_with(host, ".x.com")) {
       replace_entities(description.text, description.entities, [](const MessageEntity &entity, Slice text) {
         if (entity.type == MessageEntity::Type::Mention) {
-          return PSTRING() << "https://twitter.com/" << text.substr(1);
+          return PSTRING() << "https://x.com/" << text.substr(1);
         }
         if (entity.type == MessageEntity::Type::Hashtag) {
-          return PSTRING() << "https://twitter.com/hashtag/" << url_encode(text.substr(1));
+          return PSTRING() << "https://x.com/hashtag/" << url_encode(text.substr(1));
         }
         if (entity.type == MessageEntity::Type::Cashtag) {
-          return PSTRING() << "https://twitter.com/search?q=" << url_encode(text) << "&src=cashtag_click";
+          return PSTRING() << "https://x.com/search?q=" << url_encode(text) << "&src=cashtag_click";
         }
         return string();
       });
@@ -2157,7 +2161,7 @@ td_api::object_ptr<td_api::linkPreview> WebPagesManager::get_link_preview_object
         web_page->author_.empty()) {
       return true;
     }
-    if (web_page->site_name_ == "Twitter" || web_page->site_name_ == "Facebook" ||
+    if (web_page->site_name_ == "Twitter" || web_page->site_name_ == "X" || web_page->site_name_ == "Facebook" ||
         web_page->site_name_ == "Instagram") {
       return true;
     }

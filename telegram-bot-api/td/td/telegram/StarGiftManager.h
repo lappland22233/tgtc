@@ -115,6 +115,34 @@ class StarGiftManager final : public Actor {
 
   void process_gift_offer(MessageId message_id, bool decline, Promise<Unit> &&promise);
 
+  void send_gift_onchain_offer(const string &gift_name, int64 gram_amount, int32 duration,
+                               Promise<td_api::object_ptr<td_api::giftOnChainPurchaseOfferTransaction>> &&promise);
+
+  void cancel_gift_onchain_offer(MessageId message_id,
+                                 Promise<td_api::object_ptr<td_api::giftOnChainPurchaseOfferTransaction>> &&promise);
+
+  void accept_gift_onchain_offer(MessageId message_id,
+                                 Promise<td_api::object_ptr<td_api::giftOnChainPurchaseOfferTransaction>> &&promise);
+
+  void decline_gift_onchain_offer(MessageId message_id, Promise<Unit> &&promise);
+
+  static td_api::object_ptr<td_api::giftOnChainPurchaseOfferTransaction>
+  get_gift_onchain_purchase_offer_transaction_object(
+      telegram_api::object_ptr<telegram_api::payments_starGiftOnchainOfferTx> &&transaction);
+
+  void buy_gift_onchain(const string &gift_name, DialogId owner_dialog_id, int64 gram_amount,
+                        td_api::object_ptr<td_api::formattedText> text, bool is_private,
+                        Promise<td_api::object_ptr<td_api::GiftOnChainSaleTransaction>> &&promise);
+
+  static td_api::object_ptr<td_api::GiftOnChainSaleTransaction> get_gift_onchain_sale_transaction_object(
+      telegram_api::object_ptr<telegram_api::payments_StarGiftOnchainSalePayload> &&payload_ptr);
+
+  void sell_gift_onchain(const string &gift_name, int64 gram_amount,
+                         Promise<td_api::object_ptr<td_api::GiftOnChainSaleTransaction>> &&promise);
+
+  void cancel_gift_onchain_sale(const string &gift_name,
+                                Promise<td_api::object_ptr<td_api::GiftOnChainSaleTransaction>> &&promise);
+
   void get_saved_star_gifts(BusinessConnectionId business_connection_id, DialogId dialog_id,
                             StarGiftCollectionId collection_id, bool exclude_unsaved, bool exclude_saved,
                             bool exclude_unlimited, bool exclude_upgradable, bool exclude_non_upgradable,
@@ -144,7 +172,7 @@ class StarGiftManager final : public Actor {
   void set_star_gift_price(StarGiftId star_gift_id, StarGiftResalePrice price, Promise<Unit> &&promise);
 
   void get_resale_star_gifts(int64 gift_id, const td_api::object_ptr<td_api::GiftForResaleOrder> &order, bool for_craft,
-                             bool for_stars,
+                             bool for_stars, bool for_ton, bool for_fragment,
                              const vector<td_api::object_ptr<td_api::UpgradedGiftAttributeId>> &attributes,
                              const string &offset, int32 limit,
                              Promise<td_api::object_ptr<td_api::giftsForResale>> &&promise);
@@ -214,6 +242,9 @@ class StarGiftManager final : public Actor {
   void on_online();
 
   void on_dialog_gift_transferred(DialogId from_dialog_id, DialogId to_dialog_id, Promise<Unit> &&promise);
+
+  static td_api::object_ptr<td_api::tonWalletMessage> get_ton_wallet_message_object(
+      telegram_api::object_ptr<telegram_api::payments_starGiftOnchainOfferTxMessage> &&message);
 
   const AuctionInfo *get_auction_info(telegram_api::object_ptr<telegram_api::StarGift> &&star_gift,
                                       telegram_api::object_ptr<telegram_api::StarGiftAuctionState> &&state,

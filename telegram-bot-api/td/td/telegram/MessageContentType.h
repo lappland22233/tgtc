@@ -113,7 +113,9 @@ enum class MessageContentType : int32 {
   GramTransfer,
   WalletTonConnectRequest,
   UnpaidMessagesAllowedByLink,
-  Widget
+  Widget,
+  StarGiftOnchainOffer,
+  BotInvite
 };
 // increase MessageUnsupported::CURRENT_VERSION each time a new message content type is added
 
