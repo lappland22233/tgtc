@@ -41,7 +41,8 @@
   --text-tertiary: color-mix(in srgb, var(--workspace-muted) 90%, var(--workspace-canvas));
   --text-accent: var(--seed-primary);
   --text-disabled: color-mix(in srgb, var(--seed-fg) 30%, var(--seed-bg));
-  --text-placeholder: color-mix(in srgb, var(--seed-fg) 35%, var(--seed-bg));
+  --text-placeholder: var(--text-secondary);
+  --text-on-status: var(--workspace-on-accent);
 
   /* --- Derived: Borders --- */
   --border-default: var(--workspace-border);
@@ -104,6 +105,7 @@
   --color-warning-soft: color-mix(in srgb, #C7A830 12%, var(--seed-surface));
   --color-danger: #E8604C;
   --color-danger-soft: color-mix(in srgb, #E8604C 12%, var(--seed-surface));
+  --text-on-status: var(--workspace-canvas);
 
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
   --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.4);
@@ -420,11 +422,16 @@ body {
   --td-brand-color: var(--seed-primary);
   --td-brand-color-hover: color-mix(in srgb, var(--seed-primary) 80%, var(--seed-accent));
   --td-brand-color-active: var(--seed-accent);
-  --td-brand-color-focus: var(--seed-primary);
-  --td-brand-color-light: var(--workspace-selected);
+  /* TDesign 将 focus 用作提示和选中项的底色。 */
+  --td-brand-color-focus: var(--workspace-selected);
+  --td-brand-color-light: var(--color-bg-hover);
+  --td-brand-color-light-hover: var(--td-brand-color-focus);
   --td-error-color: var(--color-danger);
+  --td-error-color-hover: color-mix(in srgb, var(--color-danger) 85%, var(--text-primary));
   --td-success-color: var(--color-success);
+  --td-success-color-hover: color-mix(in srgb, var(--color-success) 85%, var(--text-primary));
   --td-warning-color: var(--color-warning);
+  --td-warning-color-hover: color-mix(in srgb, var(--color-warning) 85%, var(--text-primary));
   --td-radius-default: var(--radius-sm);
   --td-radius-medium: var(--radius-md);
   --td-font-family: var(--font-body);
@@ -521,9 +528,6 @@ html .t-button--theme-danger.t-button--variant-base {
   box-shadow: none;
   font-weight: 500;
 }
-html .t-button--theme-danger.t-button--variant-base:hover {
-  background: color-mix(in srgb, var(--color-danger) 85%, #000);
-}
 html .t-button--theme-danger.t-button--variant-outline,
 html .t-button--theme-danger.t-button--variant-text {
   color: var(--color-danger);
@@ -543,6 +547,16 @@ html .t-button--theme-warning.t-button--variant-base {
   border-radius: var(--radius-sm);
   box-shadow: none;
   font-weight: 500;
+}
+
+html .t-button--variant-base:is(.t-button--theme-danger, .t-button--theme-warning, .t-button--theme-success),
+html .t-tag--dark:is(.t-tag--danger, .t-tag--warning, .t-tag--success) {
+  color: var(--text-on-status);
+}
+
+html .t-button--variant-base.t-is-loading:is(.t-button--theme-primary, .t-button--theme-danger, .t-button--theme-warning, .t-button--theme-success) {
+  background: var(--color-bg-elevated);
+  color: var(--text-secondary);
 }
 
 html .t-button--size-small { border-radius: var(--radius-sm); }
@@ -600,6 +614,26 @@ html .t-pagination .t-is-current {
 
 html .t-tag--primary.t-tag--dark,
 html .t-pagination__number:active { color: var(--workspace-on-accent); }
+
+[data-theme='dark'] .t-tag--danger:is(.t-tag--light, .t-tag--light-outline) {
+  color: color-mix(in srgb, var(--color-danger) 75%, var(--text-primary));
+}
+
+html .t-pagination .t-pagination__number.t-is-current.t-is-disabled { color: var(--text-secondary); }
+
+/* --- Selection controls on the solid accent --- */
+html .t-switch.t-is-checked:not(.t-is-loading, .t-is-disabled) .t-switch__content {
+  color: var(--workspace-on-accent);
+}
+
+html .t-switch.t-is-checked:not(.t-is-loading, .t-is-disabled) .t-switch__handle::before,
+html .t-checkbox.t-is-indeterminate:not(.t-is-disabled) .t-checkbox__input::after {
+  background-color: var(--workspace-on-accent);
+}
+
+html .t-checkbox.t-is-checked:not(.t-is-disabled) .t-checkbox__input::after {
+  border-color: var(--workspace-on-accent);
+}
 
 /* --- Tags --- */
 html .t-tag {

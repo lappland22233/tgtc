@@ -33,7 +33,7 @@
   gap: 6px;
   padding: 7px 18px;
   background: var(--seed-primary);
-  color: #fff;
+  color: var(--workspace-on-accent);
   border: none;
   border-radius: var(--radius-md);
   font-size: 13px;
@@ -41,7 +41,7 @@
   cursor: pointer;
   transition: background 0.2s, transform 0.1s;
 }
-.fpv-btn:hover { background: color-mix(in srgb, var(--seed-primary) 85%, #fff); }
+.fpv-btn:hover { background: var(--seed-accent); }
 .fpv-btn:active { transform: scale(0.98); }
 
 /* 次要按钮（错误态下载） */

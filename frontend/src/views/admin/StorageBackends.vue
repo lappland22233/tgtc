@@ -1549,7 +1549,7 @@ onMounted(loadOverview);
   padding: 16px;
   background: var(--td-brand-color-light);
   border-radius: 8px;
-  border: 1px solid var(--td-brand-color-focus);
+  border: 1px solid var(--border-accent);
 }
 .auth-spinner {
   width: 32px;

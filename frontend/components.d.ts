@@ -47,7 +47,6 @@ declare module 'vue' {
     TDescriptions: typeof import('tdesign-vue-next')['Descriptions']
     TDescriptionsItem: typeof import('tdesign-vue-next')['DescriptionsItem']
     TDialog: typeof import('tdesign-vue-next')['Dialog']
-    TDrawer: typeof import('tdesign-vue-next')['Drawer']
     TForm: typeof import('tdesign-vue-next')['Form']
     TFormItem: typeof import('tdesign-vue-next')['FormItem']
     ThumbnailImg: typeof import('./src/components/ThumbnailImg.vue')['default']
@@ -77,5 +76,8 @@ declare module 'vue' {
     UploadProgressIndicator: typeof import('./src/components/UploadProgressIndicator.vue')['default']
     UploadQueueList: typeof import('./src/components/upload/UploadQueueList.vue')['default']
     UploadQueueRow: typeof import('./src/components/upload/UploadQueueRow.vue')['default']
+    WorkspaceAdminNavigation: typeof import('./src/components/WorkspaceAdminNavigation.vue')['default']
+    WorkspaceBrand: typeof import('./src/components/WorkspaceBrand.vue')['default']
+    WorkspaceTransfers: typeof import('./src/components/WorkspaceTransfers.vue')['default']
   }
 }
