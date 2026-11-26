@@ -28,6 +28,13 @@ export interface RelayCapabilitySnapshot {
   enabledAuthorizedUserCount: number;
   /** 中继目标群（副本可见群）脱敏预览 */
   resolvedTargetChatIdPreview: string | null;
+  /**
+   * 启用中的镜像规则是否**全部**为单群模式（`targetChatId` 为空）。
+   *
+   * 单群模式不做 userbot 转发、也不需要目标群，因此「未解析到目标群」在这个
+   * 状态下是正常配置，不能据此报「中继未就绪」。
+   */
+  singleGroupOnly: boolean;
   /** 源群脱敏预览（来自启用中的镜像规则） */
   sourceChatIdPreview: string | null;
   sourceChatReadable: RelayCheckStatus;
@@ -83,6 +90,8 @@ export class RelayCapabilityService {
   private enabledAuthorizedUserCount = 0;
   private resolvedTargetChatId: string | null = null;
   private sourceChatId: string | null = null;
+  /** 启用规则是否全部为单群模式（决定「无目标群」是否为正常配置） */
+  private singleGroupOnly = false;
   /** 探测结论（由 `preflight()` 刷新） */
   private sourceChatReadable: RelayCheckStatus = 'not_checked';
   private targetChatWritable: RelayCheckStatus = 'not_checked';
@@ -122,8 +131,11 @@ export class RelayCapabilityService {
     }
     if (this.rules) {
       try {
-        const rule = await this.rules.findOne({ where: { enabled: true } });
+        const enabledRules = await this.rules.find({ where: { enabled: true } });
+        const rule = enabledRules[0];
         this.sourceChatId = (rule?.sourceChatId || '').trim() || null;
+        this.singleGroupOnly = enabledRules.length > 0
+          && enabledRules.every((item) => !(item.targetChatId || '').trim());
       } catch (error) {
         this.logger.debug(`镜像规则源群读取失败（沿用上次结果）：${this.describe(error)}`);
       }
@@ -145,6 +157,7 @@ export class RelayCapabilityService {
       userClientUnavailableReason: this.userClient.unavailableReason(),
       enabledAuthorizedUserCount: this.enabledAuthorizedUserCount,
       resolvedTargetChatIdPreview: this.maskChatId(this.resolvedTargetChatId),
+      singleGroupOnly: this.singleGroupOnly,
       sourceChatIdPreview: this.maskChatId(this.sourceChatId),
       sourceChatReadable: this.sourceChatReadable,
       targetChatWritable: this.targetChatWritable,

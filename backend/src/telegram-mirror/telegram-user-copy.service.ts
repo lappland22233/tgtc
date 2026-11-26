@@ -94,8 +94,13 @@ export class TelegramUserCopyService {
 
     // 观测轮次：先开轮次再中继，`baselineReadyCount` 才能反映**中继前**的副本数，
     // 否则本轮自己带来的认领会被算成「历史既有」，结算永远看不到新增。
-    // 单群模式的目标群就是主群，轮次同样需要记录目标群，结算口径才可追溯。
-    const roundTargetHint = singleGroup ? null : targetChatId;
+    // 轮次目标群必须用**本规则自己的群**：
+    // - 双群模式 = 镜像群；
+    // - 单群模式 = 主群（留空会让不同主群的两条单群规则合并成同一轮次，
+    //   各自群里的认领会互相计入对方，跑出「本群没达标却报成功」的假结论）。
+    const roundTargetHint = singleGroup
+      ? (rule.sourceChatId || '').trim() || null
+      : targetChatId;
     const round = await this.openRound(task, roundTargetHint, singleGroup);
 
     // 源事实 + 主群锚点：**任何**前置失败都必须收口轮次。

@@ -233,6 +233,8 @@ function makeService(options: {
     attachGDriveCache: jest.fn(async () => true),
     markGDriveCachePending: jest.fn(async () => true),
     markGDriveCacheFailed: jest.fn(async () => undefined),
+    renewGDriveCacheLease: jest.fn(async () => undefined),
+    findDueGDriveCacheMirrors: jest.fn(async () => []),
     buildUrl: jest.fn((origin: string, token: string) => `${origin}/api/bot-dl/${token}`),
     isActive: jest.fn(() => true),
     replayToken: jest.fn(() => 'TOKEN'),
@@ -2122,6 +2124,36 @@ describe('Bot 磁盘预算与停机补偿', () => {
         accountId: '1234567',
         fileId: 'tg-file-idle',
       }));
+    });
+
+    it('重试扫描不得被在飞锁挡死（否则该 grant 永远不会被重试）', async () => {
+      const pool = makePool(true);
+      const grant = mirrorGrant({ id: 'grant-retry-1' });
+      const storageRouter = router();
+      const ctx = makeService({
+        pool,
+        copies: { upsertReady: jest.fn(async () => ({})), listReady: jest.fn(async () => ([])) },
+        storageRouter: storageRouter as any,
+        accountPoolDownload: {
+          isActive: jest.fn(() => true),
+          hasAccount: jest.fn(() => true),
+          openStream: jest.fn(async () => ({
+            stream: Readable.from([Buffer.from('hello world test data')]),
+            info: { file_id: 'tg-file-idle', file_size: 21 },
+            accountId: '7654321',
+            copy: null,
+            selectionReason: 'idle',
+          })),
+          openSourceStream: jest.fn(async () => null),
+          bumpCounter: pool.bumpCounter,
+        } as any,
+      });
+      (ctx.grantService as any).findDueGDriveCacheMirrors = jest.fn(async () => [grant]);
+
+      await (ctx.service as any).retryDueGDriveCacheMirrors(5);
+
+      // 锁由 mirrorGrantToGDriveCache 自己持有，扫描侧不能再预先占用
+      expect(storageRouter.upload).toHaveBeenCalledTimes(1);
     });
   });
 

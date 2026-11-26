@@ -1890,6 +1890,9 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
   /**
    * 扫描到期的 Bot 直链缓存同步（由重试 cron 调用）。
    * 并发 2：重试是后台补课，不能反过来拖慢前台下载。
+   *
+   * 在飞锁由 `mirrorGrantToGDriveCache` 自己持有：这里不能再预先 add，
+   * 否则它会因为「ID 已在集合里」而立刻返回，该 grant 永远不会被重试。
    */
   async retryDueGDriveCacheMirrors(limit = 5): Promise<void> {
     if (this.isShuttingDown) return;
@@ -1900,13 +1903,7 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
       for (;;) {
         const next = queue.shift();
         if (!next) return;
-        if (this.cacheMirrorInflight.has(next.id)) continue;
-        this.cacheMirrorInflight.add(next.id);
-        try {
-          await this.mirrorGrantToGDriveCache(next);
-        } finally {
-          this.cacheMirrorInflight.delete(next.id);
-        }
+        await this.mirrorGrantToGDriveCache(next);
       }
     };
     await Promise.all([worker(), worker()]);

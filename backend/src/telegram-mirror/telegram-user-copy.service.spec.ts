@@ -264,6 +264,25 @@ describe('TelegramUserCopyService（账号粘性与幂等键）', () => {
     expect(ctx.userClient.copyMessage).not.toHaveBeenCalled();
   });
 
+  it('单群轮次以主群为作用域（避免不同主群的规则合并成同一轮次）', async () => {
+    const attempts = {
+      beginRound: jest.fn(async () => ({ attempt: { id: 'att-scope' } })),
+      markRelaySucceeded: jest.fn(async () => undefined),
+      finishBlocked: jest.fn(async () => undefined),
+    };
+    const ctx = setup({ attempts });
+
+    await ctx.service.execute(
+      task('task-aaa') as never,
+      { targetChatId: '', sourceChatId: '-100main-A', preferredAccountId: null } as never,
+    );
+
+    expect(attempts.beginRound).toHaveBeenCalledWith(expect.objectContaining({
+      targetChatId: '-100main-A',
+      idempotencyKey: expect.stringContaining('-100main-A'),
+    }));
+  });
+
   it('主群搬运失败时不执行中继（前置失败直接向上抛）', async () => {
     const anchorFailure = Object.assign(new Error('CHAT_WRITE_FORBIDDEN'), { name: 'TelegramAccountError', kind: 'unavailable' });
     const ctx = setup({ anchorError: anchorFailure });

@@ -74,7 +74,8 @@ function makeService(options: {
       upload,
       deleteRemoteObject,
     },
-    gdriveCacheInflight: new Set<string>(),
+    gdriveCacheInflight: new Map<string, Promise<void>>(),
+    gdriveCacheRepending: new Map<string, { localPath?: string; knownSize?: number }>(),
   });
   // openPooledMirrorStream 在无 localPath 分支才被调用；桩掉避免真实依赖
   (service as unknown as { openPooledMirrorStream: unknown }).openPooledMirrorStream =
@@ -122,13 +123,21 @@ describe('mirrorGDriveCache 状态机', () => {
     expect(repo.update).not.toHaveBeenCalled();
   });
 
-  it('同一文件并发调用只执行一次（进程内互斥）', async () => {
+  it('同一文件并发调用不会并行上传：后到的那次排队，等前一次结束再补跑', async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
+    let concurrent = 0;
+    let maxConcurrent = 0;
     const { service, upload } = makeService({
       uploadImpl: async () => {
-        await gate;
-        return { backendType: 'gdrive', accountId: 'acc-gd-1', objectRef: 'obj', size: 2048 };
+        concurrent += 1;
+        maxConcurrent = Math.max(maxConcurrent, concurrent);
+        try {
+          await gate;
+          return { backendType: 'gdrive', accountId: 'acc-gd-1', objectRef: 'obj', size: 2048 };
+        } finally {
+          concurrent -= 1;
+        }
       },
     });
 
@@ -137,7 +146,9 @@ describe('mirrorGDriveCache 状态机', () => {
     release();
     await Promise.all([first, second]);
 
-    expect(upload).toHaveBeenCalledTimes(1);
+    // 关键：绝不同时上传；后到的一次在首次结束后补跑（覆盖上传的新版本不会被丢弃）
+    expect(maxConcurrent).toBe(1);
+    expect(upload.mock.calls.length).toBeGreaterThanOrEqual(1);
   });
 
   it('上传失败：落 failed 并清空在飞标记，便于下轮重试', async () => {
@@ -149,7 +160,7 @@ describe('mirrorGDriveCache 状态机', () => {
 
     // 未拿到回执，不应尝试删远端
     expect(deleteRemoteObject).not.toHaveBeenCalled();
-    const inflight = (service as unknown as { gdriveCacheInflight: Set<string> }).gdriveCacheInflight;
+    const inflight = (service as unknown as { gdriveCacheInflight: Map<string, Promise<void>> }).gdriveCacheInflight;
     expect(inflight.has('file-1')).toBe(false);
   });
 

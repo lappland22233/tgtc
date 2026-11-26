@@ -382,6 +382,9 @@ export class TelegramAccountPoolAlertService {
    */
   private describeRelayNotReady(capability: RelayCapabilitySnapshot): string | null {
     if (!capability.relayEnabledByConfig) return null;
+    // 只有单群规则时不存在 userbot 中继：单群模式由主群内各 Bot 直接认领，
+    // 目标群本就为空。此时期望「未解析到目标群」会误报 CRITICAL，掩盖真正的问题。
+    if (capability.singleGroupOnly) return null;
     if (!capability.userClientAvailable) {
       return `MTProto 客户端不可用（${capability.userClientUnavailableReason ?? '未知原因'}）`;
     }
