@@ -8,7 +8,7 @@ import type { FileHandle } from 'fs/promises';
 import * as path from 'path';
 import FormData from 'form-data';
 import { readTelegramRetryAfter, TelegramFileNotFoundError, TelegramRateLimitError, TelegramStreamPathError } from './telegram.errors';
-import type { TelegramSendMessageResult, TelegramUpdate } from './telegram.types';
+import type { TelegramSendMessageResult, TelegramTextSendOptions, TelegramUpdate } from './telegram.types';
 
 interface TelegramMedia {
   file_id?: string;
@@ -963,28 +963,29 @@ export class TelegramService {
    * 发送文本消息（Bot 入站功能的回复通道）。
    *
    * - 复用 telegramRequest 的 429 重试与 Token 脱敏；
-   * - 默认不解析 HTML/Markdown（对用户可控内容不设置 parse_mode，避免注入）；
-   * - URL 会被 Telegram 自动识别为可点击链接。
+   * - `parseMode` 只由调用方显式传入（渲染层已对用户可控内容做转义），默认仍不解析；
+   * - `richMessage` 走自建 Bot API 的 `rich_message` 载荷；与 `parseMode` 互斥，rich 优先；
+   * - URL 会被 Telegram 自动识别为可点击链接，预览由 `linkPreviewOptions` 控制。
    */
   async sendMessage(
     chatId: string | number,
     text: string,
-    options?: { replyToMessageId?: number; disableNotification?: boolean; deferRateLimit?: boolean },
+    options?: TelegramTextSendOptions,
   ): Promise<TelegramSendMessageResult> {
     if (!this.botToken) {
       throw new Error('TELEGRAM_BOT_TOKEN 未配置，无法发送消息');
     }
+    const rich = options?.richMessage;
     const payload: Record<string, unknown> = {
       chat_id: String(chatId),
-      text,
-      disable_web_page_preview: false,
     };
-    if (options?.replyToMessageId) {
-      payload.reply_to_message_id = options.replyToMessageId;
+    if (rich) {
+      payload.rich_message = JSON.stringify(rich);
+    } else {
+      payload.text = text;
+      if (options?.parseMode) payload.parse_mode = options.parseMode;
     }
-    if (options?.disableNotification) {
-      payload.disable_notification = true;
-    }
+    this.applyTextSendOptions(payload, options);
 
     const response = await this.telegramRequest(
       () => axios.post<{ ok: boolean; result: TelegramSendMessageResult; description?: string }>(
@@ -1011,17 +1012,23 @@ export class TelegramService {
     chatId: string | number,
     messageId: number,
     text: string,
-    options?: { deferRateLimit?: boolean },
+    options?: TelegramTextSendOptions,
   ): Promise<boolean> {
     if (!this.botToken) {
       throw new Error('TELEGRAM_BOT_TOKEN 未配置，无法编辑消息');
     }
-    const payload = {
+    const rich = options?.richMessage;
+    const payload: Record<string, unknown> = {
       chat_id: String(chatId),
       message_id: messageId,
-      text,
-      disable_web_page_preview: false,
     };
+    if (rich) {
+      payload.rich_message = JSON.stringify(rich);
+    } else {
+      payload.text = text;
+      if (options?.parseMode) payload.parse_mode = options.parseMode;
+    }
+    this.applyTextSendOptions(payload, options);
 
     const response = await this.telegramRequest(
       () => axios.post<{ ok: boolean; result?: unknown; description?: string }>(
@@ -1032,6 +1039,61 @@ export class TelegramService {
       'editMessageText',
       3,
       { deferRateLimit: options?.deferRateLimit },
+    );
+
+    return Boolean(response.data?.ok);
+  }
+
+  /**
+   * 文本类发送的公共可选参数（sendMessage / editMessageText / answerCallbackQuery 之外的富文本共用）。
+   *
+   * 用 `link_preview_options` 取代已废弃的 `disable_web_page_preview`：
+   * 前者在官方 Bot API 已废弃后者，且自建 10.x 服务端只认新字段。
+   */
+  private applyTextSendOptions(payload: Record<string, unknown>, options?: TelegramTextSendOptions): void {
+    if (options?.replyToMessageId) {
+      payload.reply_to_message_id = options.replyToMessageId;
+    }
+    if (options?.disableNotification) {
+      payload.disable_notification = true;
+    }
+    if (options?.replyMarkup) {
+      payload.reply_markup = options.replyMarkup;
+    }
+    if (options?.messageEffectId) {
+      payload.message_effect_id = options.messageEffectId;
+    }
+    // 仅在显式配置时下发，避免改变既有请求体（链接预览默认行为保持不变）
+    if (options?.linkPreviewOptions) {
+      payload.link_preview_options = options.linkPreviewOptions;
+    }
+  }
+
+  /**
+   * 回应内联按钮回调（answerCallbackQuery）。
+   *
+   * 必须在收到 callback_query 后调用，否则客户端会一直显示加载态。
+   */
+  async answerCallbackQuery(
+    callbackQueryId: string,
+    options?: { text?: string; showAlert?: boolean; cacheTimeSeconds?: number },
+  ): Promise<boolean> {
+    if (!this.botToken) {
+      throw new Error('TELEGRAM_BOT_TOKEN 未配置，无法回应回调');
+    }
+    const payload: Record<string, unknown> = { callback_query_id: callbackQueryId };
+    if (options?.text) payload.text = options.text;
+    if (options?.showAlert) payload.show_alert = true;
+    if (options?.cacheTimeSeconds !== undefined) payload.cache_time = options.cacheTimeSeconds;
+
+    const response = await this.telegramRequest(
+      () => axios.post<{ ok: boolean; description?: string }>(
+        `${this.getBaseUrl()}/answerCallbackQuery`,
+        payload,
+        { timeout: 15 * 1000 },
+      ),
+      'answerCallbackQuery',
+      2,
     );
 
     return Boolean(response.data?.ok);
@@ -1065,7 +1127,7 @@ export class TelegramService {
             offset,
             timeout: timeoutSeconds,
             limit,
-            allowed_updates: JSON.stringify(['message']),
+            allowed_updates: JSON.stringify(['message', 'callback_query']),
           },
         },
       ),

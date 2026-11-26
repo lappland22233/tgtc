@@ -5,6 +5,7 @@ import FormData from 'form-data';
 import { Readable, Transform } from 'stream';
 import { AccountAttemptSample, AccountFailureKind } from './telegram-account-pool.types';
 import { readTelegramRetryAfter } from '../telegram/telegram.errors';
+import type { TelegramTextSendOptions } from '../telegram/telegram.types';
 
 /**
  * 账号级 Telegram 调用错误：携带可供账号池决策的分类信息。
@@ -171,7 +172,7 @@ export class TelegramAccountClientService {
   ): Promise<Array<Record<string, unknown>>> {
     try {
       const response = await axios.get(`${this.apiBase}${token}/getUpdates`, {
-        params: { offset, timeout: timeoutSeconds, allowed_updates: JSON.stringify(['message', 'channel_post']) },
+        params: { offset, timeout: timeoutSeconds, allowed_updates: JSON.stringify(['message', 'channel_post', 'callback_query']) },
         timeout: (timeoutSeconds + 15) * 1000,
       });
       if (response.data?.ok !== true) {
@@ -223,16 +224,18 @@ export class TelegramAccountClientService {
     token: string,
     chatId: string,
     text: string,
-    options?: { replyToMessageId?: number; disableNotification?: boolean },
+    options?: TelegramTextSendOptions,
   ): Promise<{ messageId?: number }> {
     try {
-      const payload: Record<string, unknown> = {
-        chat_id: String(chatId),
-        text,
-        disable_web_page_preview: false,
-      };
-      if (options?.replyToMessageId) payload.reply_to_message_id = options.replyToMessageId;
-      if (options?.disableNotification) payload.disable_notification = true;
+      const payload: Record<string, unknown> = { chat_id: String(chatId) };
+      const rich = options?.richMessage;
+      if (rich) {
+        payload.rich_message = JSON.stringify(rich);
+      } else {
+        payload.text = text;
+        if (options?.parseMode) payload.parse_mode = options.parseMode;
+      }
+      this.applyTextSendOptions(payload, options);
       const response = await axios.post(`${this.apiBase}${token}/sendMessage`, payload, { timeout: 20_000 });
       if (response.data?.ok !== true) {
         throw new TelegramAccountError('sendMessage 返回 ok!=true', accountId, 'other');
@@ -252,15 +255,53 @@ export class TelegramAccountClientService {
     chatId: string,
     messageId: number,
     text: string,
+    options?: TelegramTextSendOptions,
   ): Promise<boolean> {
     try {
       const payload: Record<string, unknown> = {
         chat_id: String(chatId),
         message_id: messageId,
-        text,
-        disable_web_page_preview: false,
       };
+      const rich = options?.richMessage;
+      if (rich) {
+        payload.rich_message = JSON.stringify(rich);
+      } else {
+        payload.text = text;
+        if (options?.parseMode) payload.parse_mode = options.parseMode;
+      }
+      this.applyTextSendOptions(payload, options);
       const response = await axios.post(`${this.apiBase}${token}/editMessageText`, payload, { timeout: 20_000 });
+      return response.data?.ok === true;
+    } catch (error) {
+      throw this.toAccountError(error, token, accountId);
+    }
+  }
+
+  /** 文本类发送的公共可选参数（与 TelegramService.applyTextSendOptions 保持同构） */
+  private applyTextSendOptions(payload: Record<string, unknown>, options?: TelegramTextSendOptions): void {
+    if (options?.replyToMessageId) payload.reply_to_message_id = options.replyToMessageId;
+    if (options?.disableNotification) payload.disable_notification = true;
+    if (options?.replyMarkup) payload.reply_markup = options.replyMarkup;
+    if (options?.messageEffectId) payload.message_effect_id = options.messageEffectId;
+    // 仅在显式配置时下发，避免改变既有请求体
+    if (options?.linkPreviewOptions) payload.link_preview_options = options.linkPreviewOptions;
+  }
+
+  /**
+   * 回应内联按钮回调（answerCallbackQuery）。
+   * 未回应会导致客户端按钮一直转圈。
+   */
+  async answerCallbackQuery(
+    accountId: string,
+    token: string,
+    callbackQueryId: string,
+    options?: { text?: string; showAlert?: boolean },
+  ): Promise<boolean> {
+    try {
+      const payload: Record<string, unknown> = { callback_query_id: callbackQueryId };
+      if (options?.text) payload.text = options.text;
+      if (options?.showAlert) payload.show_alert = true;
+      const response = await axios.post(`${this.apiBase}${token}/answerCallbackQuery`, payload, { timeout: 15_000 });
       return response.data?.ok === true;
     } catch (error) {
       throw this.toAccountError(error, token, accountId);

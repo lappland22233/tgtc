@@ -239,6 +239,10 @@ export class TelegramBotInboundQueueService implements OnApplicationShutdown {
     });
   }
 
+  async findById(id: string): Promise<Task | null> {
+    return this.db.manager.findOneBy(Task, { id });
+  }
+
   async cancelOne(id: string, onCancel?: (manager: EntityManager, task: Task) => Promise<void>) {
     const task = await this.db.manager.findOneBy(Task, { id });
     if (!task) return null;

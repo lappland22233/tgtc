@@ -191,6 +191,7 @@ function makeService(options: {
   const telegramService = {
     sendMessage: jest.fn(async () => ({ message_id: 1, chat: { id: 7001 } })),
     editMessageText: jest.fn(async () => true),
+    answerCallbackQuery: jest.fn(async () => true),
     getRealtimeFileStream: jest.fn(async () => ({
       stream: Readable.from([Buffer.from('hello world test data')]),
       info: { file_id: 'FILE-1', file_path: '/tmp/f', file_size: 21 },
@@ -327,6 +328,14 @@ function makeService(options: {
       Object.assign(row, { noticeStatus: task.status, noticePosition: position, waitingMsgId: messageId });
     }),
     deferNotice: jest.fn(async () => {}),
+    findById: jest.fn(async (id: string) => tasks.find(entry => entry.id === id) ?? null),
+    cancelOne: jest.fn(async (id: string) => {
+      const row = tasks.find(entry => entry.id === id);
+      if (!row) return null;
+      const changed = row.status === 'queued' || row.status === 'running';
+      if (changed) Object.assign(row, { status: 'cancelled' });
+      return { task: row, changed };
+    }),
   };
   Object.assign(grantService, {
     findById: jest.fn(async (id: string) => queuedGrants.get(id)?.grant ?? null),
@@ -395,7 +404,7 @@ describe('TelegramBotDispatchService（多 Bot 身份链路）', () => {
       '1234567:SECRET',
       '7001',
       expect.stringContaining('/help'),
-      { replyToMessageId: 100 },
+      expect.objectContaining({ replyToMessageId: 100 }),
     );
     expect(ctx.telegramService.sendMessage).not.toHaveBeenCalled();
   });
@@ -436,7 +445,7 @@ describe('TelegramBotDispatchService（多 Bot 身份链路）', () => {
     expect(ctx.telegramService.sendMessage).toHaveBeenCalledWith(
       '7001',
       expect.any(String),
-      { replyToMessageId: 100 },
+      expect.objectContaining({ replyToMessageId: 100 }),
     );
   });
 
@@ -731,7 +740,7 @@ describe('TelegramBotDispatchService（多 Bot 身份链路）', () => {
       '1234567:SECRET',
       '7001',
       expect.stringContaining('域名'),
-      { replyToMessageId: 100 },
+      expect.objectContaining({ replyToMessageId: 100 }),
     );
   });
 
@@ -1036,7 +1045,7 @@ describe('TelegramBotDispatchService（纯 Google 存储模式）', () => {
       '1234567:SECRET',
       '7001',
       expect.stringContaining('已加入队列，当前排第 1 位'),
-      { replyToMessageId: 100 },
+      expect.objectContaining({ replyToMessageId: 100 }),
     );
 
     // 2. 等待后台转存完成
@@ -1071,6 +1080,7 @@ describe('TelegramBotDispatchService（纯 Google 存储模式）', () => {
       '7001',
       888,
       expect.stringContaining('文件已就绪！'),
+      expect.objectContaining({ richMessage: expect.anything() }),
     );
     const finalContent = (accountClient.editMessageText.mock.calls as any).at(-1)[4] as string;
     expect(finalContent).toContain('下载直链（有效期至');
@@ -1109,7 +1119,7 @@ describe('TelegramBotDispatchService（纯 Google 存储模式）', () => {
     expect(ctx.telegramService.sendMessage).toHaveBeenLastCalledWith(
       '7001',
       expect.stringContaining('文件已就绪！'),
-      { replyToMessageId: 100, deferRateLimit: true },
+      expect.objectContaining({ replyToMessageId: 100, deferRateLimit: true }),
     );
   });
 
@@ -1146,6 +1156,7 @@ describe('TelegramBotDispatchService（纯 Google 存储模式）', () => {
       '7001',
       999,
       '创建下载链接失败，请稍后重试。',
+      expect.objectContaining({ richMessage: expect.anything() }),
     );
   });
 
@@ -1284,6 +1295,7 @@ describe('TelegramBotDispatchService（纯 Google 存储模式）', () => {
       '7001',
       999,
       '服务器临时磁盘空间不足，无法转存文件，请稍后重试。',
+      expect.objectContaining({ richMessage: expect.anything() }),
     );
     expect(ctx.quotaService.refund).toHaveBeenCalledWith('7001', '2026-09-21');
   });
@@ -1325,6 +1337,7 @@ describe('TelegramBotDispatchService（纯 Google 存储模式）', () => {
       '7001',
       999,
       '创建下载链接失败，请稍后重试。',
+      expect.objectContaining({ richMessage: expect.anything() }),
     );
     expect(ctx.quotaService.refund).toHaveBeenCalledWith('7001', '2026-09-21');
   });
@@ -1508,7 +1521,7 @@ describe('TelegramBotDispatchService（纯 Google 存储模式）', () => {
     expect(ctx.telegramService.sendMessage).toHaveBeenCalledWith(
       '7001',
       expect.stringContaining('已加入队列，当前排第 1 位'),
-      { replyToMessageId: 301, deferRateLimit: true },
+      expect.objectContaining({ replyToMessageId: 301, deferRateLimit: true }),
     );
 
     // 同一消息因重试/长轮询重复到达：静默去重，绝不重复发送消息轰炸用户
@@ -1572,7 +1585,7 @@ describe('TelegramBotDispatchService（纯 Google 存储模式）', () => {
     expect(ctx.telegramService.sendMessage).toHaveBeenCalledWith(
       '7001',
       expect.stringContaining('今日已使用'),
-      { replyToMessageId: 405 },
+      expect.objectContaining({ replyToMessageId: 405 }),
     );
 
     // 完成转存
@@ -1585,7 +1598,7 @@ describe('TelegramBotDispatchService（纯 Google 存储模式）', () => {
     expect(ctx.telegramService.sendMessage).toHaveBeenCalledWith(
       '7001',
       expect.stringContaining('可用命令：'),
-      { replyToMessageId: 406 },
+      expect.objectContaining({ replyToMessageId: 406 }),
     );
   });
 
@@ -1990,7 +2003,7 @@ describe('Bot 磁盘预算与停机补偿', () => {
       expect(ctx.inboundQueue.tasks.map((task) => task.status)).toEqual(['running', 'queued']);
       await waitFor(() => ctx.inboundQueue.tasks[1].noticePosition === 2);
       expect(ctx.telegramService.sendMessage).toHaveBeenCalledWith(
-        '7001', expect.stringContaining('当前排第 2 位'), { replyToMessageId: 101, deferRateLimit: true },
+        '7001', expect.stringContaining('当前排第 2 位'), expect.objectContaining({ replyToMessageId: 101, deferRateLimit: true }),
       );
       firstUpload.open();
       await waitFor(() => ctx.inboundQueue.tasks.every((task) => task.status === 'completed'));
@@ -2154,6 +2167,103 @@ describe('Bot 磁盘预算与停机补偿', () => {
 
       // 锁由 mirrorGrantToGDriveCache 自己持有，扫描侧不能再预先占用
       expect(storageRouter.upload).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('富文本降级与按钮回调', () => {
+    it('富文本被拒时降级重发，消息不丢失', async () => {
+      const ctx = makeService({});
+      const send = ctx.telegramService.sendMessage as jest.Mock;
+      send.mockReset();
+      send
+        .mockRejectedValueOnce(new Error("Bad Request: can't parse entities"))
+        .mockResolvedValue({ message_id: 77, chat: { id: 7001 } });
+
+      await (ctx.service as any).reply('7001', {
+        text: '文件已收到：a.zip',
+        rich: { blocks: [{ type: 'paragraph', text: 'a.zip' }] },
+      });
+
+      // 第一次带 richMessage，第二次不带（降级为纯文本选项）
+      expect(send).toHaveBeenCalledTimes(2);
+      expect(send.mock.calls[0][2].richMessage).toBeDefined();
+      expect(send.mock.calls[1][2].richMessage).toBeUndefined();
+      expect(send.mock.calls[1][1]).toBe('文件已收到：a.zip');
+    });
+
+    it('限流错误不触发降级（避免重复投递），直接失败且不重发', async () => {
+      const ctx = makeService({});
+      const send = ctx.telegramService.sendMessage as jest.Mock;
+      send.mockReset();
+      send.mockRejectedValue(new Error('429 Too Many Requests: retry after 3'));
+
+      await (ctx.service as any).reply('7001', {
+        text: 'x',
+        rich: { blocks: [{ type: 'paragraph', text: 'x' }] },
+      });
+
+      expect(send).toHaveBeenCalledTimes(1);
+    });
+
+    it('超长文本在源文本上截断，不会切坏富文本结构', async () => {
+      const ctx = makeService({});
+      const send = ctx.telegramService.sendMessage as jest.Mock;
+      send.mockReset();
+      send.mockResolvedValue({ message_id: 1, chat: { id: 7001 } });
+
+      await (ctx.service as any).reply('7001', { text: 'a'.repeat(5000) });
+
+      const sentText = send.mock.calls[0][1] as string;
+      expect(sentText.length).toBeLessThanOrEqual(3801);
+      expect(sentText.endsWith('…')).toBe(true);
+    });
+
+    describe('取消按钮回调', () => {
+      const makeCallback = (fromId: number, data: string) => ({
+        update_id: 9,
+        callback_query: {
+          id: 'cb-1',
+          from: { id: fromId, first_name: 'U' },
+          data,
+          message: { message_id: 500, chat: { id: 7001, type: 'private' } },
+        },
+      }) as unknown as TelegramUpdate;
+
+      const seedTask = (ctx: ReturnType<typeof makeService>) => {
+        (ctx.inboundQueue as any).tasks.push({
+          id: 'task-1', telegramUserId: '7001', receiverBotId: '1234567', status: 'queued',
+          chatId: '7001', messageId: 100, fileName: 'a.zip',
+        });
+      };
+
+      it('本人可取消自己的任务，并得到确认', async () => {
+        const ctx = makeService({});
+        seedTask(ctx);
+        await ctx.service.handleUpdate(makeCallback(7001, 'bot_cancel:task-1'));
+
+        expect((ctx.inboundQueue as any).cancelOne).toHaveBeenCalledWith('task-1');
+        expect((ctx.inboundQueue as any).tasks[0].status).toBe('cancelled');
+        expect(ctx.telegramService.answerCallbackQuery).toHaveBeenCalledWith('cb-1', { text: '已取消该文件的处理。', showAlert: false });
+      });
+
+      it('他人无法取消（越权防护），任务保持原状', async () => {
+        const ctx = makeService({});
+        seedTask(ctx);
+        await ctx.service.handleUpdate(makeCallback(9999, 'bot_cancel:task-1'));
+
+        expect((ctx.inboundQueue as any).cancelOne).not.toHaveBeenCalled();
+        expect((ctx.inboundQueue as any).tasks[0].status).toBe('queued');
+        expect(ctx.telegramService.answerCallbackQuery).toHaveBeenCalledWith('cb-1', { text: '无权取消该任务。', showAlert: true });
+      });
+
+      it('未知动作与不存在的任务都被拒绝', async () => {
+        const ctx = makeService({});
+        await ctx.service.handleUpdate(makeCallback(7001, 'bot_cancel:missing'));
+        expect(ctx.telegramService.answerCallbackQuery).toHaveBeenCalledWith('cb-1', { text: '任务不存在或已被清理。', showAlert: false });
+
+        await ctx.service.handleUpdate(makeCallback(7001, 'other_action:task-1'));
+        expect(ctx.telegramService.answerCallbackQuery).toHaveBeenCalledWith('cb-1', { text: '该操作已失效。', showAlert: false });
+      });
     });
   });
 

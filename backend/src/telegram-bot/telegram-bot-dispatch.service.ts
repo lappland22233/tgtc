@@ -10,7 +10,7 @@ import { TelegramService } from '../telegram/telegram.service';
 import { TelegramRateLimitError } from '../telegram/telegram.errors';
 import { AuditService } from '../common/services/audit.service';
 import { AuditStatus } from '../common/entities/audit-log.entity';
-import type { TelegramMessage, TelegramUpdate, TelegramUser } from '../telegram/telegram.types';
+import type { TelegramCallbackQuery, TelegramMessage, TelegramUpdate, TelegramUser } from '../telegram/telegram.types';
 import { FileCopyService } from '../telegram-account-pool/file-copy.service';
 import { ReplicationAttemptService } from '../telegram-account-pool/replication-attempt.service';
 import { TelegramAccountClientService, TelegramAccountError } from '../telegram-account-pool/telegram-account-client.service';
@@ -36,6 +36,9 @@ import { TelegramBotInboundQueueService } from './telegram-bot-inbound-queue.ser
 import { TelegramBotQuotaService } from './telegram-bot-quota.service';
 import { TelegramBotAdminService } from './telegram-bot-admin.service';
 import { TelegramBotIdentity } from './telegram-bot.types';
+import type { RenderedMessage } from './telegram-bot.message-renderer';
+import { renderQueueNotice, renderHelp, renderQuota, renderQuotaDenied, renderLinkQuery, renderLinkReady, renderWhitelist, renderNotice } from './telegram-bot.message-renderer';
+import type { TelegramTextSendOptions } from '../telegram/telegram.types';
 
 /** Telegram 单条消息文本上限（预留截断余量） */
 const MAX_MESSAGE_LENGTH = 3800;
@@ -46,7 +49,6 @@ const LEASE_RENEWAL_MS = 1_000;
 const NOTICE_INTERVAL_MS = 1_100;
 const NOTICE_RETRY_MS = 5_000;
 const BANNED_TEXT = '此 Telegram 账号已被停用，无法创建下载链接。';
-const TRANSFER_FAILED_TEXT = '创建下载链接失败，请稍后重试。';
 const DISK_UNAVAILABLE_TEXT = '服务器临时磁盘空间不足，无法转存文件，请稍后重试。';
 
 class InboundPersistenceError extends Error {
@@ -243,6 +245,11 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
   async handleUpdate(update: TelegramUpdate, context?: BotUpdateContext): Promise<void> {
     const accountId = context?.accountId;
     try {
+      // 回调先于 message 判断：callback_query 没有 message 字段时会在此被正确分流
+      if (update.callback_query) {
+        await this.handleCallbackQuery(update.callback_query, accountId);
+        return;
+      }
       // 镜像群/主群可能是频道，频道帖以 `channel_post` 到达；仅用于非私聊的副本登记，
       // 私聊命令与配额一律只处理 `message`（频道帖没有用户身份，绝不允许进入私聊链路）。
       const message = update.message ?? update.channel_post;
@@ -291,11 +298,86 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
         await this.handleInFlightChatNotice(conversationKey, chatId, message.message_id, accountId);
         return;
       }
-      await this.reply(chatId, this.buildHelpText(), message.message_id, accountId);
+      await this.reply(chatId, this.buildHelpText(identity), message.message_id, accountId);
     } catch (error) {
       if (error instanceof InboundPersistenceError) throw error;
       const message = error instanceof Error ? error.message : String(error);
       this.logger.error(`处理 Bot 更新失败（已忽略）: ${message}`);
+    }
+  }
+
+  /**
+   * 内联按钮回调（当前仅「取消处理」）。
+   *
+   * 安全约束：`callback_data` 完全不可信——只当作任务 ID，**必须**重新从库里取任务并核对
+   * 发起者就是该任务的 telegramUserId，否则任何人都能取消别人的任务。
+   */
+  private async handleCallbackQuery(query: TelegramCallbackQuery, accountId?: string): Promise<void> {
+    const answer = (text: string, showAlert = false) => this.answerCallbackQuery(query.id, accountId, text, showAlert);
+
+    if (!query.from || query.from.is_bot) return;
+    const data = query.data ?? '';
+    const [action, taskId] = data.split(':', 2);
+    if (action !== 'bot_cancel' || !taskId) {
+      await answer('该操作已失效。');
+      return;
+    }
+
+    const task = await this.inboundQueue.findById(taskId);
+    if (!task) {
+      await answer('任务不存在或已被清理。');
+      return;
+    }
+    // 越权防护：以任务归属为准，绝不信任按钮来源
+    if (String(task.telegramUserId) !== String(query.from.id)) {
+      this.logger.warn(`取消回调越权被拒（task=${taskId}, from=${query.from.id}）`);
+      await answer('无权取消该任务。', true);
+      return;
+    }
+    if (task.status !== 'queued' && task.status !== 'running') {
+      await answer('任务已结束，无需取消。');
+      return;
+    }
+
+    const result = await this.inboundQueue.cancelOne(taskId);
+    if (!result?.changed) {
+      await answer('任务已结束，无需取消。');
+      return;
+    }
+    this.auditService.log({
+      action: 'telegram_bot_task_cancelled',
+      resourceType: 'telegram_bot_task',
+      resourceId: taskId,
+      status: AuditStatus.SUCCESS,
+      metadata: {
+        taskId,
+        telegramUserId: task.telegramUserId,
+        receiverBotId: task.receiverBotId,
+        operator: `telegram:${query.from.id}`,
+      },
+    });
+    await answer('已取消该文件的处理。');
+  }
+
+  /** 回应内联按钮回调；池化模式下必须用收到回调的那个 Bot 回应 */
+  private async answerCallbackQuery(
+    callbackQueryId: string,
+    accountId: string | undefined,
+    text: string,
+    showAlert = false,
+  ): Promise<void> {
+    try {
+      const account = accountId && this.pool?.isActive() ? this.pool.getConfig(accountId) : undefined;
+      if (account && this.accountClient) {
+        await this.accountClient.answerCallbackQuery(accountId!, account.token, callbackQueryId, { text, showAlert });
+        return;
+      }
+      await this.telegramService.answerCallbackQuery(callbackQueryId, { text, showAlert });
+    } catch (error) {
+      // 回应失败不影响任务状态，仅记录——用户重新点一次即可
+      this.logger.warn(
+        `回应按钮回调失败: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
   }
 
@@ -344,10 +426,15 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
     switch (command) {
       case '/start':
       case '/help':
-        await this.reply(chatId, this.buildHelpText(), message.message_id, accountId);
+        await this.reply(chatId, this.buildHelpText(identity), message.message_id, accountId);
         return;
       case '/id':
-        await this.reply(chatId, `你的 Telegram 用户 ID：${identity.telegramUserId}`, message.message_id, accountId);
+        await this.reply(
+          chatId,
+          renderNotice(`你的 Telegram 用户 ID：${identity.telegramUserId}`, { emphasize: [identity.telegramUserId] }),
+          message.message_id,
+          accountId,
+        );
         return;
       case '/quota':
         await this.handleQuotaCommand(chatId, identity, message.message_id, accountId);
@@ -368,7 +455,12 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
         );
         return;
       default:
-        await this.reply(chatId, '未知命令，发送 /help 查看可用命令。', message.message_id, accountId);
+        await this.reply(
+          chatId,
+          renderNotice('未知命令，发送 /help 查看可用命令。', { emphasize: ['/help'] }),
+          message.message_id,
+          accountId,
+        );
     }
   }
 
@@ -381,7 +473,7 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
     const config = await this.botConfigService.getConfig();
     const whitelisted = await this.quotaService.isWhitelisted(identity.telegramUserId);
     if (whitelisted) {
-      await this.reply(chatId, '你在白名单中，不限每日文件数。', replyToMessageId, accountId);
+      await this.reply(chatId, renderQuota({ whitelisted: true }), replyToMessageId, accountId);
       return;
     }
     const usageDate = this.quotaService.getBusinessDate(config.quotaTimezone);
@@ -389,7 +481,7 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
     const remaining = Math.max(0, config.dailyLimit - used);
     await this.reply(
       chatId,
-      `今日已使用 ${used} / ${config.dailyLimit}，剩余 ${remaining} 次。\n（切日时区：${config.quotaTimezone}）`,
+      renderQuota({ whitelisted: false, used, limit: config.dailyLimit, remaining, timezone: config.quotaTimezone }),
       replyToMessageId,
       accountId,
     );
@@ -428,7 +520,12 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
         await this.handleLinkRevoke(args, chatId, identity, replyToMessageId, accountId);
         return;
       default:
-        await this.reply(chatId, '未知命令，发送 /help 查看可用命令。', replyToMessageId, accountId);
+        await this.reply(
+          chatId,
+          renderNotice('未知命令，发送 /help 查看可用命令。', { emphasize: ['/help'] }),
+          replyToMessageId,
+          accountId,
+        );
     }
   }
 
@@ -481,13 +578,16 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
   ): Promise<void> {
     const list = await this.adminService.listWhitelist();
     if (list.length === 0) {
-      await this.reply(chatId, '白名单为空。', replyToMessageId, accountId);
+      await this.reply(chatId, renderWhitelist([], 0), replyToMessageId, accountId);
       return;
     }
     const shown = list.slice(0, MAX_LINK_QUERY_RESULTS);
-    const lines = shown.map((item, index) => `${index + 1}. ${item.telegramUserId}`);
-    const suffix = list.length > shown.length ? `\n……共 ${list.length} 个（已截断）` : `\n共 ${list.length} 个`;
-    await this.reply(chatId, `白名单：\n${lines.join('\n')}${suffix}`, replyToMessageId, accountId);
+    await this.reply(
+      chatId,
+      renderWhitelist(shown.map(item => item.telegramUserId), list.length),
+      replyToMessageId,
+      accountId,
+    );
   }
 
   private async handleLinkQuery(
@@ -508,16 +608,23 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
       return;
     }
     const shown = results.slice(0, MAX_LINK_QUERY_RESULTS);
-    const lines = shown.map((item, index) => {
-      const name = item.grant.fileName || '(未命名)';
-      const expires = new Date(item.grant.expiresAt).toISOString();
-      if (item.url) {
-        return `${index + 1}. ${name}\n   过期：${expires}\n   ${item.url}`;
-      }
-      return `${index + 1}. ${name}\n   过期：${expires}\n   前缀：${item.prefix}（未启用加密存储，无法回放完整链接，请重新签发）`;
-    });
-    const suffix = results.length > shown.length ? `\n……共 ${results.length} 条（已截断）` : '';
-    await this.reply(chatId, `直链（${target}）：\n${lines.join('\n')}${suffix}`, replyToMessageId, accountId);
+    await this.reply(
+      chatId,
+      renderLinkQuery(
+        target,
+        shown.map(item => ({
+          fileName: item.grant.fileName || '(未命名)',
+          expiresAt: item.grant.expiresAt instanceof Date
+            ? item.grant.expiresAt.toISOString()
+            : String(item.grant.expiresAt),
+          url: item.url,
+          prefix: item.prefix,
+        })),
+        results.length,
+      ),
+      replyToMessageId,
+      accountId,
+    );
   }
 
   private async handleLinkRevoke(
@@ -542,7 +649,7 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
       );
       return;
     }
-    await this.reply(chatId, '直链已撤销，立即失效。', replyToMessageId, accountId);
+    await this.reply(chatId, renderNotice('直链已撤销，立即失效。', { emphasize: ['已撤销'] }), replyToMessageId, accountId);
   }
 
   // ---------------- 文件处理 ----------------
@@ -1047,7 +1154,15 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
 
         await this.reply(
           chatId,
-          `文件已收到：${fileName}\n下载直链（${config.linkTtlHours} 小时内有效，仅受时间限制）：\n${url}`,
+          {
+            ...renderLinkReady({
+              fileName,
+              url,
+              expiresAt: new Date(grant.expiresAt).toISOString(),
+              ttlHours: config.linkTtlHours,
+            }),
+            messageEffectId: this.messageEffectId(),
+          },
           message.message_id,
           accountId,
         );
@@ -1095,9 +1210,7 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
         quotaLimit: limit,
       },
     });
-    await this.reply(
-      chatId, `今日额度已用完（${limit} 个文件/天）。明日将自动重置，或联系管理员加入白名单。`, messageId, accountId,
-    );
+    await this.reply(chatId, renderQuotaDenied(limit), messageId, accountId);
   }
 
   /**
@@ -1221,23 +1334,9 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
     return botId && /^\d+$/.test(botId) ? botId : null;
   }
 
-  private buildHelpText(): string {
-    return [
-      '发送「文件」（Telegram 附件 → 文件）即可获得下载直链。',
-      '直链仅在有效期内可用，不限下载次数。',
-      '',
-      '可用命令：',
-      '/help — 显示本帮助',
-      '/id — 查看你的 TG 用户 ID',
-      '/quota — 查看今日剩余额度',
-      '',
-      '管理员命令（仅私聊）：',
-      '/wl_add <TG用户ID> — 加入白名单',
-      '/wl_remove <TG用户ID> — 移出白名单',
-      '/wl_list — 列出白名单',
-      '/link_query <TG用户ID> — 查询有效直链',
-      '/link_revoke <直链URL或Token> — 撤销直链',
-    ].join('\n');
+  private buildHelpText(identity?: TelegramBotIdentity): RenderedMessage {
+    const admin = identity ? this.adminService.isAdmin(identity.telegramUserId) : false;
+    return renderHelp({ admin });
   }
 
   private pollQueue(): void {
@@ -1317,25 +1416,39 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
     await this.inboundQueue.markNotice(notice, messageId);
   }
 
-  private async queueNoticeText(task: TelegramBotInboundTask, position: number): Promise<string> {
+  private async queueNoticeText(task: TelegramBotInboundTask, position: number): Promise<RenderedMessage> {
     const fileName = task.fileName ?? '(未命名)';
-    if (task.status === 'queued') return `⏳ 已加入队列，当前排第 ${position} 位。\n文件名：${fileName}`;
-    if (task.status === 'running') return `⏳ 正在创建下载链接，请稍候…\n文件名：${fileName}`;
-    if (task.status === 'cancelled') return `管理员已取消文件处理。\n文件名：${fileName}`;
-    if (task.status === 'failed') return task.failureReason === 'disk_unavailable' ? DISK_UNAVAILABLE_TEXT : TRANSFER_FAILED_TEXT;
+    const cancelCallbackData = task.status === 'queued' || task.status === 'running' ? `bot_cancel:${task.id}` : undefined;
+    if (task.status === 'queued') {
+      return renderQueueNotice({ status: 'queued', position, fileName, cancelCallbackData });
+    }
+    if (task.status === 'running') {
+      return renderQueueNotice({ status: 'running', fileName, cancelCallbackData });
+    }
+    if (task.status === 'cancelled') return renderQueueNotice({ status: 'cancelled', fileName });
+    if (task.status === 'failed') {
+      return renderQueueNotice({
+        status: 'failed',
+        fileName,
+        failureReason: task.failureReason === 'disk_unavailable' ? 'disk_unavailable' : null,
+      });
+    }
 
     const grant = task.grantId ? await this.grantService.findById(task.grantId) : null;
-    if (!grant || !this.grantService.isActive(grant)) return `文件的下载链接已失效。\n文件名：${fileName}`;
+    if (!grant || !this.grantService.isActive(grant)) return renderQueueNotice({ status: 'expired', fileName });
     const token = this.grantService.tokenForQueuedNotice(grant, task.id);
     const origin = await this.botConfigService.resolveSiteOriginAsync();
     if (!origin) throw new Error('站点域名暂不可用，稍后重试发送直链');
-    if (!token) return `无法恢复此文件的下载链接，请重新发送文件。\n文件名：${fileName}`;
+    if (!token) return renderQueueNotice({ status: 'unrecoverable', fileName });
     const url = this.grantService.buildUrl(origin, token);
     const expiry = new Date(grant.expiresAt).toISOString();
-    return `文件已就绪！\n文件名：${fileName}\n下载直链（有效期至 ${expiry}）：\n${url}\n⚠️ 链接到期后文件将自动失效并删除。`;
+    return {
+      ...renderQueueNotice({ status: 'ready', fileName, url, expiresAt: expiry }),
+      messageEffectId: this.messageEffectId(),
+    };
   }
 
-  private async sendQueueNotice(task: TelegramBotInboundTask, text: string, accountId?: string): Promise<number | null> {
+  private async sendQueueNotice(task: TelegramBotInboundTask, text: string | RenderedMessage, accountId?: string): Promise<number | null> {
     const account = accountId && this.pool?.getConfig(accountId);
     if (accountId && (!account || !this.accountClient || account.token.split(':')[0] !== task.receiverBotId)) {
       throw new Error('接收 Bot 的账号配置暂不可用');
@@ -1343,26 +1456,31 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
     if (!accountId && this.defaultSourceAccountId() !== task.receiverBotId) {
       throw new Error('默认 Bot 已变更，无法发送收件通知');
     }
+    const rendered: RenderedMessage = typeof text === 'string' ? { text } : text;
+    // edit 与 send 必须使用同一份降级决策，否则编辑后格式会丢失
+    const send = (payload: string, options: TelegramTextSendOptions) => (account && this.accountClient
+      ? this.accountClient
+        .sendMessage(account.id, account.token, task.chatId, payload, { ...options, replyToMessageId: Number(task.messageId) })
+        .then(sent => sent.messageId ?? null)
+      : this.telegramService
+        .sendMessage(task.chatId, payload, { ...options, replyToMessageId: Number(task.messageId), deferRateLimit: true })
+        .then(sent => sent.message_id ?? null));
+    const edit = (payload: string, options: TelegramTextSendOptions) => (account && this.accountClient
+      ? this.accountClient.editMessageText(account.id, account.token, task.chatId, task.waitingMsgId!, payload, options)
+      : this.telegramService.editMessageText(task.chatId, task.waitingMsgId!, payload, { ...options, deferRateLimit: true }));
+
     const existingId = task.waitingMsgId;
     if (existingId) {
       try {
-        const edited = account && this.accountClient
-          ? await this.accountClient.editMessageText(account.id, account.token, task.chatId, existingId, text)
-          : await this.telegramService.editMessageText(task.chatId, existingId, text, { deferRateLimit: true });
-        if (edited) return existingId;
+        const edited = await this.deliverRendered(rendered, (payload, options) => edit(payload, options).then(ok => (ok ? existingId : null)));
+        if (edited) return edited;
       } catch (error) {
         const message = (error as Error)?.message ?? '';
         if (/message is not modified/i.test(message)) return existingId;
         if (!/message to edit not found|message can.t be edited/i.test(message)) throw error;
       }
     }
-    const options = { replyToMessageId: Number(task.messageId) };
-    if (account && this.accountClient) {
-      const sent = await this.accountClient.sendMessage(account.id, account.token, task.chatId, text, options);
-      return sent.messageId ?? null;
-    }
-    const sent = await this.telegramService.sendMessage(task.chatId, text, { ...options, deferRateLimit: true });
-    return sent.message_id ?? null;
+    return this.deliverRendered(rendered, send);
   }
 
   private incrementChatActiveTransfer(conversationKey: string): void {
@@ -1984,13 +2102,73 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
    * 回复消息：**必须由收到消息的账号发送**（池化模式），未启用池化时保持原单账号链路。
    * 返回 sent message_id 供原地更新使用。
    */
+  /** 消息特效 ID：由运行环境配置（服务端目录下发，不能写死默认值），未配置则不启用 */
+  private messageEffectId(): string | undefined {
+    const raw = (this.configService?.get<string>('TELEGRAM_BOT_MESSAGE_EFFECT_ID') || '').trim();
+    return /^\d{1,19}$/.test(raw) ? raw : undefined;
+  }
+
+  /**
+   * 富文本降级链：rich → HTML → 纯文本。
+   *
+   * 只在**解析类错误**（400：can't parse entities / 不支持该字段 / 块过多）时降级。
+   * 429 与网络错误交给底层重试，不在本层改换格式重发——那会在消息已投递的情况下造成重复。
+   */
+  private async deliverRendered(
+    rendered: RenderedMessage,
+    send: (text: string, options: TelegramTextSendOptions) => Promise<number | null>,
+  ): Promise<number | null> {
+    const attempts: TelegramTextSendOptions[] = [];
+    const effect = rendered.messageEffectId;
+    if (rendered.rich) {
+      attempts.push({ richMessage: rendered.rich, replyMarkup: rendered.replyMarkup, messageEffectId: effect });
+    }
+    if (rendered.parseMode && rendered.rich_fallback_html) {
+      attempts.push({ parseMode: rendered.parseMode, replyMarkup: rendered.replyMarkup, messageEffectId: effect });
+    }
+    attempts.push({ replyMarkup: rendered.replyMarkup, messageEffectId: effect });
+
+    const plainText = this.truncateText(rendered.text);
+    const htmlText = rendered.rich_fallback_html ? this.truncateText(rendered.rich_fallback_html) : plainText;
+
+    let lastError: unknown = null;
+    for (let index = 0; index < attempts.length; index++) {
+      const attempt = attempts[index];
+      const text = attempt.parseMode ? htmlText : plainText;
+      try {
+        return await send(text, attempt);
+      } catch (error) {
+        lastError = error;
+        // 仅在「格式不被接受」时继续降级；其余错误直接上抛，避免重复投递
+        if (!this.isFormatRejection(error) || index === attempts.length - 1) throw error;
+        this.logger.warn(
+          `富文本被拒，降级重发: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    if (lastError) throw lastError;
+    return null;
+  }
+
+  /** 是否为「格式/载荷不被接受」类错误（可安全降级重发） */
+  private isFormatRejection(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error ?? '');
+    return /can't parse entities|can't find end|unsupported start tag|rich_message|rich message|Bad Request: 400|400/i.test(message)
+      && !/429|Too Many Requests|FLOOD/i.test(message);
+  }
+
+  /** 截断在源文本上完成；富文本分支按同一长度约束，避免切坏结构 */
+  private truncateText(text: string): string {
+    return text.length > MAX_MESSAGE_LENGTH ? `${text.slice(0, MAX_MESSAGE_LENGTH)}…` : text;
+  }
+
   private async reply(
     chatId: string,
-    text: string,
+    message: string | RenderedMessage,
     replyToMessageId?: number,
     accountId?: string,
   ): Promise<number | null> {
-    const content = text.length > MAX_MESSAGE_LENGTH ? `${text.slice(0, MAX_MESSAGE_LENGTH)}…` : text;
+    const rendered: RenderedMessage = typeof message === 'string' ? { text: message } : message;
     const pool = this.pool;
     const client = this.accountClient;
 
@@ -2007,8 +2185,10 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
         return null;
       }
       try {
-        const sent = await client.sendMessage(accountId, account.token, chatId, content, { replyToMessageId });
-        return sent?.messageId ?? null;
+        return await this.deliverRendered(rendered, (text, options) =>
+          client.sendMessage(accountId, account.token, chatId, text, { ...options, replyToMessageId })
+            .then(sent => sent?.messageId ?? null),
+        );
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         pool.bumpCounter('replyFailures');
@@ -2021,8 +2201,10 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
 
     // 未启用池化：保持原单账号链路
     try {
-      const sent = await this.telegramService.sendMessage(chatId, content, { replyToMessageId });
-      return sent?.message_id ?? null;
+      return await this.deliverRendered(rendered, (text, options) =>
+        this.telegramService.sendMessage(chatId, text, { ...options, replyToMessageId })
+          .then(sent => sent?.message_id ?? null),
+      );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       pool?.bumpCounter('replyFailures');
