@@ -2197,13 +2197,66 @@ describe('Bot 磁盘预算与停机补偿', () => {
       const send = ctx.telegramService.sendMessage as jest.Mock;
       send.mockReset();
       send
-        .mockRejectedValueOnce(new TelegramRequestRejectedError('Bad Request: Message text is empty'))
+        .mockRejectedValueOnce(new TelegramRequestRejectedError('Bad Request: Message text is empty', ['rich', 'parse_mode']))
         .mockResolvedValue({ message_id: 78, chat: { id: 7001 } });
 
       await (ctx.service as any).reply('7001', { text: '兜底文本', rich: { blocks: [{ type: 'paragraph', text: 'x' }] } });
 
       expect(send).toHaveBeenCalledTimes(2);
       expect(send.mock.calls[1][1]).toBe('兜底文本');
+    });
+
+    it('与格式无关的 400（拉黑/无写权限）不降级，只尝试一次', async () => {
+      const ctx = makeService({});
+      const send = ctx.telegramService.sendMessage as jest.Mock;
+      send.mockReset();
+      send.mockRejectedValue(new TelegramRequestRejectedError('Forbidden: bot was blocked by the user'));
+
+      await (ctx.service as any).reply('7001', {
+        text: 'x',
+        rich: { blocks: [{ type: 'paragraph', text: 'x' }] },
+        replyMarkup: { inline_keyboard: [[{ text: '打开', url: 'https://x/y' }]] },
+      });
+
+      // 永久性拒收 → 换格式重发必然同样失败，不该空转
+      expect(send).toHaveBeenCalledTimes(1);
+    });
+
+    it('无任何可剥离维度时不做重复请求（纯文本只发一次）', async () => {
+      const ctx = makeService({});
+      const send = ctx.telegramService.sendMessage as jest.Mock;
+      send.mockReset();
+      send.mockRejectedValue(new TelegramRequestRejectedError('Bad Request: something odd'));
+
+      await (ctx.service as any).reply('7001', { text: '纯文本' });
+
+      // 只有一档载荷，重发完全相同的内容没有意义
+      expect(send).toHaveBeenCalledTimes(1);
+    });
+
+    it('reply_markup 超长时剥离按钮后重发成功（降级必须剥可选项）', async () => {
+      const ctx = makeService({});
+      const send = ctx.telegramService.sendMessage as jest.Mock;
+      send.mockReset();
+      send.mockImplementation(async (_chat: string, _text: string, options: any) => {
+        // 只要带按钮就拒收：模拟服务端 REPLY_MARKUP_TOO_LONG
+        if (options?.replyMarkup) {
+          throw new TelegramRequestRejectedError('Bad Request: reply markup is too long', ['reply_markup']);
+        }
+        return { message_id: 99, chat: { id: 7001 } };
+      });
+
+      const sentId = await (ctx.service as any).reply('7001', {
+        text: '文件已收到：a.zip',
+        rich: { blocks: [{ type: 'paragraph', text: 'a.zip' }] },
+        replyMarkup: { inline_keyboard: [[{ text: '打开链接', url: 'https://files.example.com/x' }]] },
+      });
+
+      expect(sentId).toBe(99);
+      const lastOptions = send.mock.calls.at(-1)![2];
+      expect(lastOptions.replyMarkup).toBeUndefined();
+      // 正文仍应送达
+      expect(send.mock.calls.at(-1)![1]).toContain('a.zip');
     });
 
     it('限流错误不触发降级（避免重复投递），直接失败且不重发', async () => {

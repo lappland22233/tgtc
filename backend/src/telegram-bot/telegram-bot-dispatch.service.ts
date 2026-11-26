@@ -7,7 +7,7 @@ import { PassThrough, Readable } from 'stream';
 import * as path from 'path';
 import { randomUUID } from 'crypto';
 import { TelegramService } from '../telegram/telegram.service';
-import { TelegramRateLimitError } from '../telegram/telegram.errors';
+import { TelegramRateLimitError, isPermanentRejection } from '../telegram/telegram.errors';
 import { AuditService } from '../common/services/audit.service';
 import { AuditStatus } from '../common/entities/audit-log.entity';
 import type { TelegramCallbackQuery, TelegramMessage, TelegramUpdate, TelegramUser } from '../telegram/telegram.types';
@@ -39,7 +39,6 @@ import { TelegramBotIdentity } from './telegram-bot.types';
 import type { RenderedMessage } from './telegram-bot.message-renderer';
 import { renderQueueNotice, renderHelp, renderQuota, renderQuotaDenied, renderLinkQuery, renderLinkReady, renderWhitelist, renderNotice } from './telegram-bot.message-renderer';
 import type { TelegramTextSendOptions } from '../telegram/telegram.types';
-import { TelegramRequestRejectedError } from '../telegram/telegram.errors';
 
 /** Telegram 单条消息文本上限（预留截断余量） */
 const MAX_MESSAGE_LENGTH = 3800;
@@ -2115,40 +2114,104 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
    * 只在**解析类错误**（400：can't parse entities / 不支持该字段 / 块过多）时降级。
    * 429 与网络错误交给底层重试，不在本层改换格式重发——那会在消息已投递的情况下造成重复。
    */
+  /**
+   * 富文本降级链。
+   *
+   * 关键点：降级不只是「换正文格式」，还要能**剥掉引发拒收的可选项**。
+   * 例如 `reply_markup` 超长会把消息顶成 400，此时保留按钮重发纯文本仍会 400，
+   * 消息照样丢失。因此每次收到 400，按它归因出的维度推进降级级别。
+   *
+   * 级别（逐层剥）：
+   *   0 富文本 + 全部可选项  1 富文本（去 effect）  2 HTML（去按钮/effect）  3 纯文本（去按钮/effect）
+   * 只对**可归因**的 400 降级；无法归因（拉黑、无写权限）或 429/网络错误直接上抛。
+   */
   private async deliverRendered(
     rendered: RenderedMessage,
     send: (text: string, options: TelegramTextSendOptions) => Promise<number | null>,
   ): Promise<number | null> {
-    const attempts: TelegramTextSendOptions[] = [];
-    const effect = rendered.messageEffectId;
-    if (rendered.rich) {
-      attempts.push({ richMessage: rendered.rich, replyMarkup: rendered.replyMarkup, messageEffectId: effect });
-    }
-    if (rendered.parseMode && rendered.rich_fallback_html) {
-      attempts.push({ parseMode: rendered.parseMode, replyMarkup: rendered.replyMarkup, messageEffectId: effect });
-    }
-    attempts.push({ replyMarkup: rendered.replyMarkup, messageEffectId: effect });
-
     const plainText = this.truncateText(rendered.text);
     const htmlText = rendered.rich_fallback_html ? this.truncateText(rendered.rich_fallback_html) : plainText;
+    const hasHtml = Boolean(rendered.parseMode && rendered.rich_fallback_html);
+    const hasMarkup = Boolean(rendered.replyMarkup);
+    const hasEffect = Boolean(rendered.messageEffectId);
 
+    /**
+     * 级别 → 载荷。设计原则：**每一级必须与上一级有实质差异**，否则就是无意义的重复请求。
+     * 无按钮/无特效/无 rich 时对应级别直接跳过。
+     *
+     *   0 富文本 + 按钮 + 特效（保真档）
+     *   1 富文本 + 按钮（去特效）
+     *   2 HTML + 按钮（去特效）
+     *   3 纯文本（去按钮、去特效）
+     */
+    const buildAttempt = (level: number): TelegramTextSendOptions => {
+      const keepEffect = level === 0 && hasEffect;
+      const keepMarkup = level <= 2 && hasMarkup;
+      const options: TelegramTextSendOptions = {
+        replyMarkup: keepMarkup ? rendered.replyMarkup : undefined,
+        messageEffectId: keepEffect ? rendered.messageEffectId : undefined,
+      };
+      if (level <= 1 && rendered.rich) return { ...options, richMessage: rendered.rich };
+      if (level === 2 && hasHtml) return { ...options, parseMode: rendered.parseMode };
+      return options;
+    };
+    const signature = (level: number) => {
+      const attempt = buildAttempt(level);
+      return `${attempt.richMessage ? 'rich' : attempt.parseMode ?? 'plain'}|${attempt.replyMarkup ? 'm' : '-'}|${attempt.messageEffectId ? 'e' : '-'}`;
+    };
+
+    // 只保留真正有差异的级别序列；末档必须是纯文本兜底（若已存在同载荷则复用）
+    const levels: number[] = [];
+    let lastSignature = '';
+    for (const level of [0, 1, 2, 3]) {
+      if (level === 2 && !hasHtml) continue;
+      const sig = signature(level);
+      if (sig !== lastSignature) {
+        levels.push(level);
+        lastSignature = sig;
+      }
+    }
+    // 兜底档：确保最后一档是纯文本（无 rich / 无 parseMode / 无按钮 / 无特效）。
+    // 若已存在同载荷档位则复用，避免发出两次完全相同的请求。
+    if (levels.length === 0 || signature(levels[levels.length - 1]) !== signature(3)) {
+      levels.push(3);
+    }
+
+    let cursor = 0;
     let lastError: unknown = null;
-    for (let index = 0; index < attempts.length; index++) {
-      const attempt = attempts[index];
-      const text = attempt.parseMode ? htmlText : plainText;
+
+    while (cursor < levels.length) {
+      const level = levels[cursor];
       try {
-        return await send(text, attempt);
+        return await send(buildAttempt(level).parseMode ? htmlText : plainText, buildAttempt(level));
       } catch (error) {
         lastError = error;
-        // 仅在「格式不被接受」时继续降级；其余错误直接上抛，避免重复投递
-        if (!this.isFormatRejection(error) || index === attempts.length - 1) throw error;
+        const next = this.nextDegradeLevel(error, cursor, levels.length);
+        if (next === null) throw error;
         this.logger.warn(
-          `富文本被拒，降级重发: ${error instanceof Error ? error.message : String(error)}`,
+          `消息被拒，降级到 level ${levels[next]} 重发: ${error instanceof Error ? error.message : String(error)}`,
         );
+        cursor = next;
       }
     }
     if (lastError) throw lastError;
     return null;
+  }
+
+  /**
+   * 计算下一档下标；返回 null 表示不该降级（错误不可恢复，或已无可降）。
+   *
+   * 两类判据缺一不可：
+   * - **永久性拒收**（拉黑、无写权限）→ 换任何格式都会失败，直接上报；
+   * - **429 / 网络错误** → 消息可能已投递，重发会产生重复，直接上报。
+   * 其余 400 视为载荷问题，逐档剥可选项重试。
+   */
+  private nextDegradeLevel(error: unknown, current: number, total: number): number | null {
+    if (error instanceof TelegramRateLimitError) return null;
+    const message = error instanceof Error ? error.message : String(error ?? '');
+    if (/429|Too Many Requests|FLOOD_WAIT/i.test(message)) return null;
+    if (isPermanentRejection(message)) return null;
+    return current + 1 < total ? current + 1 : null;
   }
 
   /**
@@ -2158,25 +2221,6 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
    * 文案匹配只作兜底（覆盖池化端只带 description 的场景）。
    * 429/限流被显式排除——那种情况消息可能已投递，重发会产生重复。
    */
-  private isFormatRejection(error: unknown): boolean {
-    const message = error instanceof Error ? error.message : String(error ?? '');
-    if (/429|Too Many Requests|FLOOD_WAIT/i.test(message)) return false;
-    // 单账号链路：telegramRequest 在 400 分支抛出的类型化错误
-    if (error instanceof TelegramRequestRejectedError) return true;
-    // 池化链路：TelegramAccountError 保留原始 description，只能按文案兜底
-    return [
-      "can't parse entities",
-      'can\'t find end',
-      'unsupported start tag',
-      'rich message',
-      'message text is empty',
-      'text must be non-empty',
-      'message is too long',
-      'unsupported start tag',
-      'bad request: 400',
-    ].some(marker => message.toLowerCase().includes(marker));
-  }
-
   /** 截断在源文本上完成；富文本分支按同一长度约束，避免切坏结构 */
   private truncateText(text: string): string {
     return text.length > MAX_MESSAGE_LENGTH ? `${text.slice(0, MAX_MESSAGE_LENGTH)}…` : text;

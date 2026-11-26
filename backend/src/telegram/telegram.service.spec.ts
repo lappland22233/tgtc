@@ -7,7 +7,7 @@ import { promises as fs } from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { TelegramService } from './telegram.service';
-import { TelegramFileNotFoundError, TelegramRequestRejectedError, TelegramStreamPathError } from './telegram.errors';
+import { TelegramFileNotFoundError, TelegramRequestRejectedError, TelegramStreamPathError, isPermanentRejection } from './telegram.errors';
 
 jest.mock('axios');
 const mockedAxios = axios as jest.Mocked<typeof axios>;
@@ -298,8 +298,29 @@ describe('TelegramService realtime stream', () => {
         response: { status: 400, data: { ok: false, description: 'Bad Request: Message text is empty' } },
       } as any);
 
-      await expect(createService().sendMessage('7001', '', { richMessage: { blocks: [] } }))
-        .rejects.toBeInstanceOf(TelegramRequestRejectedError);
+      const promise = createService().sendMessage('7001', '', { richMessage: { blocks: [] } });
+      await expect(promise).rejects.toBeInstanceOf(TelegramRequestRejectedError);
+      // 归因信息决定调用方能剥哪一层
+      await expect(promise).rejects.toMatchObject({ degradableFields: expect.arrayContaining(['rich']) });
+    });
+
+    it('与载荷无关的 400 不标记为可降级', async () => {
+      mockedAxios.post.mockRejectedValueOnce({
+        response: { status: 400, data: { ok: false, description: 'Forbidden: bot was blocked by the user' } },
+      } as any);
+
+      await expect(createService().sendMessage('7001', 'hi', {}))
+        .rejects.toMatchObject({ degradableFields: [] });
+      expect(isPermanentRejection('Forbidden: bot was blocked by the user')).toBe(true);
+    });
+
+    it('reply markup 超长归因到 reply_markup 维度', async () => {
+      mockedAxios.post.mockRejectedValueOnce({
+        response: { status: 400, data: { ok: false, description: 'Bad Request: reply markup is too long' } },
+      } as any);
+
+      await expect(createService().sendMessage('7001', 'hi', {}))
+        .rejects.toMatchObject({ degradableFields: ['reply_markup'] });
     });
   });
 

@@ -8,6 +8,7 @@ import type { FileHandle } from 'fs/promises';
 import * as path from 'path';
 import FormData from 'form-data';
 import { readTelegramRetryAfter, TelegramFileNotFoundError, TelegramRateLimitError, TelegramRequestRejectedError, TelegramStreamPathError } from './telegram.errors';
+import type { TelegramDegradableField } from './telegram.errors';
 import type { TelegramSendMessageResult, TelegramTextSendOptions, TelegramUpdate } from './telegram.types';
 
 interface TelegramMedia {
@@ -152,6 +153,34 @@ export class TelegramService {
    * 安全化 Telegram 400 错误描述：脱敏 Bot Token、清理控制字符、
    * 规范化空白并限制长度，避免敏感信息或冗长响应进入日志与持久化字段。
    */
+  /**
+   * 把 400 的 description 归因到「可剥离的可选项」。
+   *
+   * 返回空数组表示无法精确归因。注意这里**不**用于判定"是否该降级"——永久性错误
+   * （拉黑、无写权限）由 {@link isPermanentRejection} 单独识别，因为它们的特征是
+   * "换什么格式都会失败"，而不是"归因不到具体字段"。
+   */
+  private classifyDegradableFields(description: string): TelegramDegradableField[] {
+    const lower = description.toLowerCase();
+    const fields = new Set<TelegramDegradableField>();
+    if (/can't parse entities|can’t parse entities|can't find end|unsupported start tag|unclosed/.test(lower)) {
+      fields.add('parse_mode');
+      fields.add('rich');
+    }
+    if (lower.includes('rich message')) fields.add('rich');
+    if (lower.includes('message text is empty') || lower.includes('text must be non-empty')) {
+      fields.add('rich');
+      fields.add('parse_mode');
+    }
+    if (lower.includes('reply markup') || lower.includes('reply_markup')) fields.add('reply_markup');
+    if (lower.includes('effect')) fields.add('message_effect');
+    if (lower.includes('message is too long') || lower.includes('message_too_long')) {
+      fields.add('rich');
+      fields.add('parse_mode');
+    }
+    return [...fields];
+  }
+
   private safeTelegramDescription(description: string): string {
     const cleaned = this.redactToken(description)
       .replace(/[\u0000-\u001F\u007F]/g, ' ')
@@ -283,8 +312,12 @@ export class TelegramService {
               throw new Error('Telegram 群组未找到，请检查 TELEGRAM_CHAT_ID 配置或确认 Bot 已加入群组');
             }
             // 保留 Telegram 原始 description（安全化后），不再统一归因为 chat_id 配置错误。
-            // 用类型化异常表达「请求被拒、消息未投递」，供富文本降级判断可安全重发。
-            throw new TelegramRequestRejectedError(this.safeTelegramDescription(description));
+            // 只把**可归因于载荷格式或可选项**的 400 标记为可降级：拉黑、无写权限这类
+            // 与格式无关的永久错误，换个格式重发只会再失败一次，还多打一次接口。
+            throw new TelegramRequestRejectedError(
+              this.safeTelegramDescription(description),
+              this.classifyDegradableFields(description),
+            );
           }
           if (status === 404) {
             if (this.isTelegramFileNotFoundError(description)) {
