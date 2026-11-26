@@ -541,6 +541,18 @@ export class FileUploadProcessor {
     // 必须经 `databaseQuery()` + `RETURNING id`：PG 的 UPDATE 返回 `[rows, rowCount]` 元组，
     // 直接读 `rowCount/affected` 在 PG 下两个字段均为 undefined（判断恒假），
     // 0 行命中时不会跳过收尾——这正是团队历史上两起静默失效的同一根因。
+    // 置 ready 之前先把双写状态落成 pending：否则「已置 ready、尚未进入双写」之间
+    // 进程退出时，文件会永久停在 none——Bull 重试读到已 ready 就被状态守卫挡回，
+    // 而重试扫描只扫 pending/failed，两条恢复路径都不会再尝试镜像。
+    if (!isNonTelegram) {
+      await this.fileRepository.update(
+        { id: fileId, uploadVersion, gdriveCacheStatus: 'none' },
+        { gdriveCacheStatus: 'pending' } as Partial<File>,
+      ).catch((error: unknown) => {
+        this.logger.warn(`文件 ${fileId} 预置双写 pending 失败（不影响上传）：${(error as Error).message}`);
+      });
+    }
+
     const readyRows = await databaseQuery<Array<{ id: string }>>(
       this.fileRepository.manager,
       'UPDATE files SET status = $1, "uploadFailureReason" = NULL WHERE id = $2 AND status IN ($3, $4) AND "uploadVersion" = $5 RETURNING id',

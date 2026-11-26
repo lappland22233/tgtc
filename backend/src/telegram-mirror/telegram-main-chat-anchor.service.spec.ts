@@ -661,4 +661,56 @@ describe('TelegramMainChatAnchorService（主群锚点幂等与阻塞口径）',
     }
     expect(retryBudgetMs).toBeGreaterThan(PLANT_RESERVATION_LEASE_MS);
   });
+
+  describe('findReadyAnchorForDownload（下载侧只读查询）', () => {
+    function seedReady(rows: Map<string, Record<string, any>>, overrides: Record<string, any> = {}) {
+      rows.set('file:f1', {
+        id: 'anchor-1',
+        ownerType: 'file',
+        ownerId: 'f1',
+        anchorChatId: MAIN,
+        anchorMessageId: '777',
+        sourceMessageId: 'msg-1',
+        status: 'ready',
+        ...overrides,
+      });
+    }
+
+    it('ready 且主群匹配：返回主群锚点', async () => {
+      const { service, rows } = setup();
+      seedReady(rows);
+
+      expect(await service.findReadyAnchorForDownload('file', 'f1', 'msg-1'))
+        .toEqual({ chatId: MAIN, messageId: '777' });
+    });
+
+    it('file 锚点指向旧版本内容：拒绝使用（否则会静默返回过期字节）', async () => {
+      const { service, rows } = setup();
+      seedReady(rows, { sourceMessageId: 'msg-old' });
+
+      expect(await service.findReadyAnchorForDownload('file', 'f1', 'msg-new')).toBeNull();
+    });
+
+    it('锚点未 ready 或指向别的主群：返回 null 而非抛错', async () => {
+      const { service, rows } = setup();
+      seedReady(rows, { status: 'pending' });
+      expect(await service.findReadyAnchorForDownload('file', 'f1')).toBeNull();
+
+      seedReady(rows, { status: 'ready', anchorChatId: '-100old' });
+      expect(await service.findReadyAnchorForDownload('file', 'f1')).toBeNull();
+    });
+
+    it('锚点读取失败：返回 null（回退 Bot，绝不阻塞下载）', async () => {
+      const { service } = setup({ repoReadError: new Error('db down') });
+
+      await expect(service.findReadyAnchorForDownload('file', 'f1')).resolves.toBeNull();
+    });
+
+    it('主群未配置：返回 null', async () => {
+      const { service, rows } = setup({ noEnabledRule: true });
+      seedReady(rows);
+
+      expect(await service.findReadyAnchorForDownload('file', 'f1')).toBeNull();
+    });
+  });
 });

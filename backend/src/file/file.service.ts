@@ -219,7 +219,7 @@ export class FileService implements OnModuleInit {
   private async openSourceStream(
     file: File,
     expectedSize: number,
-    options?: { noCache?: boolean },
+    options?: { noCache?: boolean; upstreamLeaseHeld?: boolean },
   ): Promise<{ stream: Readable; info: { file_id: string; file_path: string; file_size: number } }> {
     if (!isRemoteStorageBackend(file.storageBackend)) {
       return this.openTelegramSourceStream(file, expectedSize, options);
@@ -295,6 +295,7 @@ export class FileService implements OnModuleInit {
     file: File,
     expectedSize: number,
     _noCache: boolean,
+    upstreamLeaseHeld = false,
   ): Promise<{ stream: Readable; info: { file_id: string; file_path: string; file_size: number } } | null> {
     const preferred = this.userPreferredDownload;
     if (!preferred) return null;
@@ -309,6 +310,9 @@ export class FileService implements OnModuleInit {
         ownerType: owner.ownerType,
         ownerId: owner.ownerId,
         expectedSize,
+        upstreamLeaseHeld,
+        // `file` 归属要核对版本：覆盖上传后该锚点仍指向旧内容，直接用会返回过期字节
+        expectedSourceMessageId: owner.ownerType === 'file' ? file.telegramMessageId : null,
       });
       if (opened) {
         return {
@@ -324,7 +328,7 @@ export class FileService implements OnModuleInit {
   private async openTelegramSourceStream(
     file: File,
     expectedSize: number,
-    options?: { noCache?: boolean },
+    options?: { noCache?: boolean; upstreamLeaseHeld?: boolean },
   ): Promise<{ stream: Readable; info: { file_id: string; file_path: string; file_size: number } }> {
     const noCache = options?.noCache === true;
     const poolDownload = this.accountAwareDownload;
@@ -333,7 +337,12 @@ export class FileService implements OnModuleInit {
     // 临时能力：优先用 Premium 用户账号（MTProto）回源。开关关闭时该方法直接返回 null，
     // 后续链路与改造前逐字节一致（fail-open：任何失败都继续走 Bot）。
     if (this.userPreferredDownload?.isEnabled()) {
-      const userIdOpened = await this.tryUserPreferredStream(file, expectedSize, noCache)
+      const userIdOpened = await this.tryUserPreferredStream(
+        file,
+        expectedSize,
+        noCache,
+        options?.upstreamLeaseHeld === true,
+      )
         .catch((error: unknown) => {
           this.logger.debug(
             `user 优先回源异常，回退 Bot（file=${file.id}）：`
@@ -779,7 +788,9 @@ export class FileService implements OnModuleInit {
   }
 
   private async *readPooledMirrorSource(file: File, size: number): AsyncGenerator<Buffer> {
-    const opened = await this.openSourceStream(file, size, { noCache: true });
+    // 重试 cron 已按真实体量持有上行租约：这里必须标记，否则 user 优先会再申请一次，
+    // 两个同权重（>1GiB 时为 8）申请在默认预算下互相等待到超时。
+    const opened = await this.openSourceStream(file, size, { noCache: true, upstreamLeaseHeld: true });
     for await (const chunk of opened.stream) {
       yield Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Buffer);
     }

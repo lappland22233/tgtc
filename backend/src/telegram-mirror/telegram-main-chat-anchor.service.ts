@@ -152,6 +152,16 @@ export class TelegramMainChatAnchorService {
   async findReadyAnchorForDownload(
     ownerType: TelegramCopyOwnerType,
     ownerId: string,
+    /**
+     * `file` 归属的**当前源消息**（`files.telegramMessageId`）。
+     *
+     * 覆盖上传后 `file:<id>` 锚点仍指向旧版本的主群消息；若新版本尚未跑过镜像
+     * （或规则排除了网页上传），直接用该锚点会**静默返回旧版本的字节**——
+     * 而同尺寸替换还能通过 `openUserStream` 的大小校验。
+     * 传入按与扩散侧相同的指纹口径校验；不传则不做该校验（`grant`/`fileUnique`
+     * 不需要——前者不可变，后者本身就是内容标识）。
+     */
+    expectedSourceMessageId?: string | null,
   ): Promise<{ chatId: string; messageId: string } | null> {
     const id = (ownerId || '').trim();
     if (!id) return null;
@@ -166,6 +176,18 @@ export class TelegramMainChatAnchorService {
       if (String(row.anchorChatId ?? '').trim() !== mainChatId) return null;
       const messageId = String(row.anchorMessageId ?? '').trim();
       if (!messageId) return null;
+
+      // 版本核对：与扩散侧 isSourceFingerprintMatch 同口径（双方都已知才比较）
+      if (ownerType === 'file' && expectedSourceMessageId) {
+        const anchorSource = String(row.sourceMessageId ?? '').trim();
+        if (anchorSource && anchorSource !== String(expectedSourceMessageId).trim()) {
+          this.logger.debug(
+            `file 锚点指向旧版本内容（锚点源消息 ${maskIdentifier(anchorSource)} ≠ 当前 `
+            + `${maskIdentifier(expectedSourceMessageId)}），本次不使用（${ownerType}:${id}）`,
+          );
+          return null;
+        }
+      }
       return { chatId: mainChatId, messageId };
     } catch (error) {
       this.logger.debug(

@@ -62,6 +62,14 @@ export class UserPreferredDownloadService {
     ownerId: string;
     expectedSize?: number;
     signal?: AbortSignal;
+    /**
+     * 调用方**已经持有**上行租约（例如镜像重试路径先申请了预算）。
+     * 此时不得再申请第二次：两次同权重申请会在预算 8 时互相等待到超时，
+     * 白白让本次下载冷却并回退。
+     */
+    upstreamLeaseHeld?: boolean;
+    /** `file` 归属的当前源消息，用于拒绝指向旧版本的锚点 */
+    expectedSourceMessageId?: string | null;
   }): Promise<{ stream: Readable; info: { file_id: string; file_size: number } } | null> {
     if (!this.isEnabled()) return null;
     if (!this.userClient.isAvailable()) return null;
@@ -69,7 +77,11 @@ export class UserPreferredDownloadService {
     const account = await this.pickAccount().catch(() => null);
     if (!account) return null;
 
-    const anchor = await this.anchors.findReadyAnchorForDownload(params.ownerType, params.ownerId);
+    const anchor = await this.anchors.findReadyAnchorForDownload(
+      params.ownerType,
+      params.ownerId,
+      params.expectedSourceMessageId,
+    );
     if (!anchor) {
       // 无锚点是常态（文件没跑过镜像扩散），不记失败、不打 warn，避免刷日志
       this.logger.debug(
@@ -86,9 +98,20 @@ export class UserPreferredDownloadService {
 
     let lease: Awaited<ReturnType<DownloadResourceCoordinatorService['acquireUpstreamSlot']>> | null = null;
     this.inflight.set(account.id, current + 1);
+    // 账号槽位必须活到流结束：`tryOpen` 返回时传输才刚开始，此时释放会让并发下载
+    // 在同一个账号上开出远超上限的 MTProto 流。
+    let slotReleased = false;
+    const releaseSlot = (): void => {
+      if (slotReleased) return;
+      slotReleased = true;
+      const left = (this.inflight.get(account.id) ?? 1) - 1;
+      if (left > 0) this.inflight.set(account.id, left);
+      else this.inflight.delete(account.id);
+    };
     try {
-      // 与前台下载共用全局上行预算：按真实体量申请权重
-      lease = this.resources
+      // 与前台下载共用全局上行预算：按真实体量申请权重。
+      // 调用方已持租约时直接复用，避免嵌套申请互相等待。
+      lease = this.resources && !params.upstreamLeaseHeld
         ? await this.resources.acquireUpstreamSlot({
           bytes: params.expectedSize,
           waitTimeoutMs: 15_000,
@@ -110,14 +133,15 @@ export class UserPreferredDownloadService {
         `user 账号 ${account.id} 回源命中（owner=${params.ownerType}:${params.ownerId}，`
         + `reason=prefer_user_account，chat=${anchor.chatId}）`,
       );
-      // 流结束后释放预算（成功路径不在这里 release，交给流的生命周期）
-      const releaseLease = (): void => {
+      // 成功路径：预算与账号槽位都交给流的生命周期回收
+      const releaseAll = (): void => {
         lease?.release();
         lease = null;
+        releaseSlot();
       };
-      opened.stream.once('end', releaseLease);
-      opened.stream.once('error', releaseLease);
-      opened.stream.once('close', releaseLease);
+      opened.stream.once('end', releaseAll);
+      opened.stream.once('error', releaseAll);
+      opened.stream.once('close', releaseAll);
       return {
         stream: opened.stream,
         info: {
@@ -128,12 +152,9 @@ export class UserPreferredDownloadService {
     } catch (error) {
       lease?.release();
       lease = null;
+      releaseSlot();
       this.recordFailure(account, error);
       return null;
-    } finally {
-      const left = (this.inflight.get(account.id) ?? 1) - 1;
-      if (left > 0) this.inflight.set(account.id, left);
-      else this.inflight.delete(account.id);
     }
   }
 

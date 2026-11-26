@@ -51,7 +51,6 @@ function setup(options: {
   );
   return { service, userClient, directory, anchors, cacheConfig, resources, release };
 }
-
 describe('UserPreferredDownloadService', () => {
   it('开关关闭：不触碰任何依赖，直接返回 null（回退 Bot）', async () => {
     const ctx = setup({ enabled: false });
@@ -79,7 +78,7 @@ describe('UserPreferredDownloadService', () => {
     const result = await ctx.service.tryOpen({ ownerType: 'file', ownerId: 'f1' });
 
     expect(result).toBeNull();
-    expect(ctx.anchors.findReadyAnchorForDownload).toHaveBeenCalledWith('file', 'f1');
+    expect(ctx.anchors.findReadyAnchorForDownload).toHaveBeenCalledWith('file', 'f1', undefined);
     expect(ctx.userClient.openUserStream).not.toHaveBeenCalled();
   });
 
@@ -131,5 +130,54 @@ describe('UserPreferredDownloadService', () => {
 
     expect(second).toBeNull();
     expect(ctx.userClient.openUserStream).not.toHaveBeenCalled();
+  });
+
+  it('账号槽位保持到流关闭：流未结束前不释放并发名额', async () => {
+    // 用一个可控的流：不主动结束，验证第二次调用仍被并发上限拦住
+    const { PassThrough } = require('stream') as typeof import('stream');
+    let streamInstance!: InstanceType<typeof PassThrough>;
+    const ctx = setup({
+      anchor: { chatId: '-100main', messageId: '777' },
+      openImpl: async () => {
+        streamInstance = new PassThrough();
+        return { stream: streamInstance, size: 4 };
+      },
+    });
+
+    const first = await ctx.service.tryOpen({ ownerType: 'file', ownerId: 'f1' });
+    expect(first).not.toBeNull();
+
+    // 流还没结束：同账号的第 3 次（上限 2）必须被拒，说明槽位没被提前释放
+    const second = await ctx.service.tryOpen({ ownerType: 'file', ownerId: 'f1' });
+    const third = await ctx.service.tryOpen({ ownerType: 'file', ownerId: 'f1' });
+    expect(second).not.toBeNull();
+    expect(third).toBeNull();
+
+    // 流结束后名额归还
+    second!.stream.resume();
+    streamInstance.end();
+    await new Promise((resolve) => setImmediate(resolve));
+    const fourth = await ctx.service.tryOpen({ ownerType: 'file', ownerId: 'f1' });
+    expect(fourth).not.toBeNull();
+  });
+
+  it('调用方已持上行租约时不再重复申请（避免同权重互等超时）', async () => {
+    const ctx = setup({ anchor: { chatId: '-100main', messageId: '777' } });
+
+    await ctx.service.tryOpen({ ownerType: 'file', ownerId: 'f1', upstreamLeaseHeld: true });
+
+    expect(ctx.resources.acquireUpstreamSlot).not.toHaveBeenCalled();
+  });
+
+  it('file 归属把当前源消息透传给锚点查询（拒绝旧版锚点）', async () => {
+    const ctx = setup({ anchor: { chatId: '-100main', messageId: '777' } });
+
+    await ctx.service.tryOpen({
+      ownerType: 'file',
+      ownerId: 'f1',
+      expectedSourceMessageId: 'msg-2',
+    });
+
+    expect(ctx.anchors.findReadyAnchorForDownload).toHaveBeenCalledWith('file', 'f1', 'msg-2');
   });
 });

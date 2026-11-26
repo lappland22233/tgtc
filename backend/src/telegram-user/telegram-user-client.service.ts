@@ -443,10 +443,19 @@ export class TelegramUserClientService {
   }
 
   /**
-   * 包一层 fileReference 过期重试：过期后重新取 Message 再从头下。
+   * 流级重试：**在向调用方暴露任何字节之前**，对可恢复失败重开一次。
    *
-   * 只在**尚未产出任何字节**时重试，避免把重复数据交给上层（上层按总长校验，
-   * 重复会直接判为源异常）。已产出字节后的过期交由调用方整轮重试。
+   * 为什么必须在这里做：`openUserStream` 返回流之后，连接/首包阶段的网络抖动会以
+   * `stream error` 的形式抛给上层，而上层没有「换一个来源重来」的语义——一次可恢复的
+   * 抖动就会把整次下载变成失败。在这里重试可以把这类失败消化在「尚未产出字节」阶段。
+   *
+   * 覆盖两类：
+   * - `FILE_REFERENCE_EXPIRED`：重新取 Message 刷新引用后重开（iterDownload 不传
+   *   `msgData`，teleproto 不会自动刷新）；
+   * - 网络/超时：直接重开一次（连接已被销毁，重新走 connect + getMessages）。
+   *
+   * 一旦产出过字节就**不再重试**：重复数据会让上层按总长校验判为源异常。
+   * 限流（flood）与认证类失败也不重试——重试只会加剧冷却。
    */
   private async *withFileReferenceRetry(
     client: MtprotoClient,
@@ -455,7 +464,8 @@ export class TelegramUserClientService {
   ): AsyncGenerator<Buffer, void, unknown> {
     let iterator = firstIterator;
     let emitted = false;
-    for (let attempt = 0; ; attempt += 1) {
+    let reloadCount = 0;
+    for (;;) {
       try {
         for await (const chunk of iterator) {
           emitted = true;
@@ -463,12 +473,19 @@ export class TelegramUserClientService {
         }
         return;
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        const expired = /FILE_REFERENCE_EXPIRED/i.test(message);
-        if (!expired || emitted || attempt >= 1 || params.signal?.aborted) {
+        if (emitted || reloadCount >= 1 || params.signal?.aborted) {
           throw error instanceof TelegramUserClientError ? error : this.classify(error);
         }
-        // 重新取消息以刷新 fileReference，然后从头重开
+        const text = error instanceof Error ? error.message : String(error);
+        const expired = /FILE_REFERENCE_EXPIRED/i.test(text);
+        const failure = error instanceof TelegramUserClientError ? error : this.classify(error);
+        // 网络类失败（含超时，classify 统一归为 network）与引用过期可重开一次
+        const recoverable = expired || failure.kind === 'network';
+        if (!recoverable) {
+          throw failure;
+        }
+        reloadCount += 1;
+        // 重新取消息：既刷新 fileReference，也验证消息仍然可读
         const reloaded = await this.loadDownloadableMessage(client, params);
         iterator = this.iterateDownload(client, reloaded.message, params.signal);
       }
