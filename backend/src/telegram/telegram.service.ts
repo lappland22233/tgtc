@@ -7,7 +7,7 @@ import { constants, promises as fs } from 'fs';
 import type { FileHandle } from 'fs/promises';
 import * as path from 'path';
 import FormData from 'form-data';
-import { readTelegramRetryAfter, TelegramFileNotFoundError, TelegramRateLimitError, TelegramStreamPathError } from './telegram.errors';
+import { readTelegramRetryAfter, TelegramFileNotFoundError, TelegramRateLimitError, TelegramRequestRejectedError, TelegramStreamPathError } from './telegram.errors';
 import type { TelegramSendMessageResult, TelegramTextSendOptions, TelegramUpdate } from './telegram.types';
 
 interface TelegramMedia {
@@ -282,8 +282,9 @@ export class TelegramService {
             if (description.includes('chat not found') || description.includes('PEER_ID_INVALID')) {
               throw new Error('Telegram 群组未找到，请检查 TELEGRAM_CHAT_ID 配置或确认 Bot 已加入群组');
             }
-            // 保留 Telegram 原始 description（安全化后），不再统一归因为 chat_id 配置错误
-            throw new Error(this.safeTelegramDescription(description));
+            // 保留 Telegram 原始 description（安全化后），不再统一归因为 chat_id 配置错误。
+            // 用类型化异常表达「请求被拒、消息未投递」，供富文本降级判断可安全重发。
+            throw new TelegramRequestRejectedError(this.safeTelegramDescription(description));
           }
           if (status === 404) {
             if (this.isTelegramFileNotFoundError(description)) {
@@ -964,8 +965,13 @@ export class TelegramService {
    *
    * - 复用 telegramRequest 的 429 重试与 Token 脱敏；
    * - `parseMode` 只由调用方显式传入（渲染层已对用户可控内容做转义），默认仍不解析；
-   * - `richMessage` 走自建 Bot API 的 `rich_message` 载荷；与 `parseMode` 互斥，rich 优先；
+   * - `richMessage` 走**独立的 `/sendRichMessage` 端点**（见下），与 `parseMode` 互斥；
    * - URL 会被 Telegram 自动识别为可点击链接，预览由 `linkPreviewOptions` 控制。
+   *
+   * 为什么富文本必须换端点：服务端 `process_send_message_query` 无条件走
+   * `get_input_message_text`，只读 `text` 字段，为空即 400 "Message text is empty"；
+   * `rich_message` 只由独立的 `process_send_rich_message_query`（`/sendRichMessage`）解析。
+   * 把 rich_message 发给 `/sendMessage`（或反之塞 text）都会被拒。
    */
   async sendMessage(
     chatId: string | number,
@@ -980,6 +986,7 @@ export class TelegramService {
       chat_id: String(chatId),
     };
     if (rich) {
+      // /sendRichMessage 不接受 text，只解析 rich_message
       payload.rich_message = JSON.stringify(rich);
     } else {
       payload.text = text;
@@ -987,19 +994,20 @@ export class TelegramService {
     }
     this.applyTextSendOptions(payload, options);
 
+    const method = rich ? 'sendRichMessage' : 'sendMessage';
     const response = await this.telegramRequest(
       () => axios.post<{ ok: boolean; result: TelegramSendMessageResult; description?: string }>(
-        `${this.getBaseUrl()}/sendMessage`,
+        `${this.getBaseUrl()}/${method}`,
         payload,
         { timeout: 30 * 1000 },
       ),
-      'sendMessage',
+      method,
       3,
       { deferRateLimit: options?.deferRateLimit },
     );
 
     if (!response.data?.ok || !response.data.result) {
-      throw new Error(`Telegram sendMessage 返回异常: ${this.safeTelegramDescription(response.data?.description || 'unknown')}`);
+      throw new Error(`Telegram ${method} 返回异常: ${this.safeTelegramDescription(response.data?.description || 'unknown')}`);
     }
     return response.data.result;
   }

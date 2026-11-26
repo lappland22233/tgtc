@@ -2,6 +2,7 @@ import { Readable } from 'stream';
 import { existsSync } from 'fs';
 import { TelegramBotDispatchService } from './telegram-bot-dispatch.service';
 import type { TelegramUpdate } from '../telegram/telegram.types';
+import { TelegramRequestRejectedError } from '../telegram/telegram.errors';
 import type { TelegramBotInboundTask } from '../common/entities/telegram-bot-inbound-task.entity';
 import type { EnqueueInboundTask, InboundNotice, TelegramBotInboundQueueService } from './telegram-bot-inbound-queue.service';
 import type { IssuedGrant } from './telegram-bot-grant.service';
@@ -2176,7 +2177,7 @@ describe('Bot 磁盘预算与停机补偿', () => {
       const send = ctx.telegramService.sendMessage as jest.Mock;
       send.mockReset();
       send
-        .mockRejectedValueOnce(new Error("Bad Request: can't parse entities"))
+        .mockRejectedValueOnce(new TelegramRequestRejectedError("Bad Request: Can't parse rich message JSON object"))
         .mockResolvedValue({ message_id: 77, chat: { id: 7001 } });
 
       await (ctx.service as any).reply('7001', {
@@ -2189,6 +2190,20 @@ describe('Bot 磁盘预算与停机补偿', () => {
       expect(send.mock.calls[0][2].richMessage).toBeDefined();
       expect(send.mock.calls[1][2].richMessage).toBeUndefined();
       expect(send.mock.calls[1][1]).toBe('文件已收到：a.zip');
+    });
+
+    it('未列入关键词的 400（如空 text）同样触发降级，不静默丢消息', async () => {
+      const ctx = makeService({});
+      const send = ctx.telegramService.sendMessage as jest.Mock;
+      send.mockReset();
+      send
+        .mockRejectedValueOnce(new TelegramRequestRejectedError('Bad Request: Message text is empty'))
+        .mockResolvedValue({ message_id: 78, chat: { id: 7001 } });
+
+      await (ctx.service as any).reply('7001', { text: '兜底文本', rich: { blocks: [{ type: 'paragraph', text: 'x' }] } });
+
+      expect(send).toHaveBeenCalledTimes(2);
+      expect(send.mock.calls[1][1]).toBe('兜底文本');
     });
 
     it('限流错误不触发降级（避免重复投递），直接失败且不重发', async () => {

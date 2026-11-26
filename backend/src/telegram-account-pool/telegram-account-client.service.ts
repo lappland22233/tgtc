@@ -236,9 +236,11 @@ export class TelegramAccountClientService {
         if (options?.parseMode) payload.parse_mode = options.parseMode;
       }
       this.applyTextSendOptions(payload, options);
-      const response = await axios.post(`${this.apiBase}${token}/sendMessage`, payload, { timeout: 20_000 });
+      // 富文本必须走独立端点：/sendMessage 只解析 text，rich_message 会被忽略并因空 text 被拒
+      const method = rich ? 'sendRichMessage' : 'sendMessage';
+      const response = await axios.post(`${this.apiBase}${token}/${method}`, payload, { timeout: 20_000 });
       if (response.data?.ok !== true) {
-        throw new TelegramAccountError('sendMessage 返回 ok!=true', accountId, 'other');
+        throw new TelegramAccountError(`${method} 返回 ok!=true`, accountId, 'other');
       }
       return { messageId: response.data.result?.message_id };
     } catch (error) {
@@ -516,6 +518,24 @@ export class TelegramAccountClientService {
     );
   }
 
+  /**
+   * 是否为「载荷/格式不被接受」类 400（换格式重发即可恢复，与账号健康无关）。
+   * 与 `TelegramRequestRejectedError` 语义一致，此处仅有原始 description 可用。
+   */
+  private isPayloadRejection(lowerDescription: string): boolean {
+    return [
+      'message text is empty',
+      "can't parse entities",
+      'can\'t parse entities',
+      'can\'t find end',
+      'unsupported start tag',
+      'rich message',
+      'message is too long',
+      'text must be non-empty',
+      'reply markup',
+    ].some(marker => lowerDescription.includes(marker));
+  }
+
   private parseRetryAfter(description: string): number | undefined {
     const match = /retry after (\d+)/i.exec(description) || /FLOOD_WAIT_(\d+)/i.exec(description);
     if (!match) return undefined;
@@ -528,6 +548,11 @@ export class TelegramAccountClientService {
     const lower = description.toLowerCase();
     if (status === 429 || lower.includes('too many requests') || lower.includes('flood_wait')) {
       return 'flood';
+    }
+    // 载荷被拒（400）不代表账号不健康：换格式重发即可，不应让账号进入长冷却。
+    // 放在 unavailable 判定之前，避免格式错误被当成文件/账号不可用。
+    if (status === 400 && this.isPayloadRejection(lower)) {
+      return 'other';
     }
     if (
       lower.includes('exact file size is unavailable')

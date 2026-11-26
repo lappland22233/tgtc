@@ -39,6 +39,7 @@ import { TelegramBotIdentity } from './telegram-bot.types';
 import type { RenderedMessage } from './telegram-bot.message-renderer';
 import { renderQueueNotice, renderHelp, renderQuota, renderQuotaDenied, renderLinkQuery, renderLinkReady, renderWhitelist, renderNotice } from './telegram-bot.message-renderer';
 import type { TelegramTextSendOptions } from '../telegram/telegram.types';
+import { TelegramRequestRejectedError } from '../telegram/telegram.errors';
 
 /** Telegram 单条消息文本上限（预留截断余量） */
 const MAX_MESSAGE_LENGTH = 3800;
@@ -2150,11 +2151,30 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
     return null;
   }
 
-  /** 是否为「格式/载荷不被接受」类错误（可安全降级重发） */
+  /**
+   * 是否为「格式/载荷不被接受」类错误（可安全降级重发）。
+   *
+   * 主路径靠**类型化异常**判定：HTTP 400 意味着请求未被受理、消息未投递，换格式重发安全。
+   * 文案匹配只作兜底（覆盖池化端只带 description 的场景）。
+   * 429/限流被显式排除——那种情况消息可能已投递，重发会产生重复。
+   */
   private isFormatRejection(error: unknown): boolean {
     const message = error instanceof Error ? error.message : String(error ?? '');
-    return /can't parse entities|can't find end|unsupported start tag|rich_message|rich message|Bad Request: 400|400/i.test(message)
-      && !/429|Too Many Requests|FLOOD/i.test(message);
+    if (/429|Too Many Requests|FLOOD_WAIT/i.test(message)) return false;
+    // 单账号链路：telegramRequest 在 400 分支抛出的类型化错误
+    if (error instanceof TelegramRequestRejectedError) return true;
+    // 池化链路：TelegramAccountError 保留原始 description，只能按文案兜底
+    return [
+      "can't parse entities",
+      'can\'t find end',
+      'unsupported start tag',
+      'rich message',
+      'message text is empty',
+      'text must be non-empty',
+      'message is too long',
+      'unsupported start tag',
+      'bad request: 400',
+    ].some(marker => message.toLowerCase().includes(marker));
   }
 
   /** 截断在源文本上完成；富文本分支按同一长度约束，避免切坏结构 */

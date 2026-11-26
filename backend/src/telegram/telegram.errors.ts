@@ -35,6 +35,24 @@ export async function readTelegramRetryAfter(response: { data?: unknown; headers
 }
 
 /**
+ * Telegram 请求被拒绝（HTTP 400 且不属于文件失效/群组缺失等已知语义）。
+ *
+ * 为什么单独建类型：富文本降级需要判断「能否安全地换个格式重发」。靠匹配 description
+ * 文本既脆弱又会漏（如 `Message text is empty`、`Can't parse rich message JSON object`），
+ * 漏判就意味着用户一条消息也收不到。400 表示请求未被受理、消息未投递，重发是安全的；
+ * 429 与网络错误则可能已投递，绝不能重发。用状态码表达这个区别比匹配文案可靠。
+ */
+export class TelegramRequestRejectedError extends Error {
+  readonly code = 'TELEGRAM_REQUEST_REJECTED';
+  readonly status = 400;
+
+  constructor(message?: string) {
+    super(message || 'Telegram API 请求参数错误');
+    this.name = 'TelegramRequestRejectedError';
+  }
+}
+
+/**
  * Telegram 文件引用永久失效错误。
  *
  * 仅当 Telegram Bot API 明确返回资源不存在的错误（如 `invalid file_id`、
