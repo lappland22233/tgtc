@@ -1127,7 +1127,7 @@ describe('FileCacheService 下载调度配置规范化', () => {
     expect(cfg.queueCapacity).toBe(128);
   });
 
-  it('越界值在运行时被裁剪：直通窗口上限 4MiB、权重预算上限 64', async () => {
+  it('越界值在运行时被裁剪：直通窗口上限 4MiB、权重预算上限 128', async () => {
     const svc = await buildService({
       FILE_DOWNLOAD_DIRECT_WINDOW_MB: '16',
       FILE_DOWNLOAD_MAX_CONCURRENT_UPSTREAMS: '999',
@@ -1135,7 +1135,7 @@ describe('FileCacheService 下载调度配置规范化', () => {
     });
     const cfg = svc.resources.getConfig();
     expect(cfg.directWindowBytes).toBe(4 * 1024 * 1024);
-    expect(cfg.maxConcurrentUpstreams).toBe(64);
+    expect(cfg.maxConcurrentUpstreams).toBe(128);
     expect(cfg.upstreamQueuePolicy).toBe('bounded_fit');
   });
 

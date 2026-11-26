@@ -374,6 +374,7 @@ export class FileCacheService implements OnApplicationShutdown {
         maxReservedStr, upstreamsStr, queueCapacityStr, queueTimeoutStr,
         spoolGraceStr, directWindowStr, directWaitStr, taskRetentionStr,
         upstreamQueuePolicyStr, volumePeerReserveStr, preferUserAccountStr,
+        userStreamMaxConcurrencyStr, userFailureCooldownStr,
       ] = await Promise.all([
         this.configCache.get(CACHE_CONFIG_KEYS.MAX_SIZE_GB, CACHE_CONFIG_DEFAULTS[CACHE_CONFIG_KEYS.MAX_SIZE_GB]),
         this.configCache.get(CACHE_CONFIG_KEYS.MIN_FREE_DISK_GB, CACHE_CONFIG_DEFAULTS[CACHE_CONFIG_KEYS.MIN_FREE_DISK_GB]),
@@ -390,6 +391,8 @@ export class FileCacheService implements OnApplicationShutdown {
         this.configCache.get(d.UPSTREAM_QUEUE_POLICY, dd[d.UPSTREAM_QUEUE_POLICY]),
         this.configCache.get(d.VOLUME_PEER_RESERVE_GB, dd[d.VOLUME_PEER_RESERVE_GB]),
         this.configCache.get(d.PREFER_USER_ACCOUNT, dd[d.PREFER_USER_ACCOUNT]),
+        this.configCache.get(d.USER_STREAM_MAX_CONCURRENCY, dd[d.USER_STREAM_MAX_CONCURRENCY]),
+        this.configCache.get(d.USER_FAILURE_COOLDOWN_SECONDS, dd[d.USER_FAILURE_COOLDOWN_SECONDS]),
       ]);
       this.maxCacheSizeBytes = Math.max(1, parseInt(maxSizeStr) || 10) * 1024 * 1024 * 1024;
       this.minFreeDiskBytes = Math.max(0.5, parseFloat(minFreeStr) || 1) * 1024 * 1024 * 1024;
@@ -411,6 +414,15 @@ export class FileCacheService implements OnApplicationShutdown {
       // 同卷邻近目录预留：Cache 与 TDLib workdir 同卷时，从缓存侧可用空间扣除该量，
       // 使两侧峰值占用之和受一个总水位约束（默认 0 = 不扣除，需显式配置）
       const volumePeerReserveGb = normalizeDownloadConfigNumber(d.VOLUME_PEER_RESERVE_GB, volumePeerReserveStr);
+      // user 账号回源（临时能力）：并发上限与瞬时失败冷却走同一套规范化，
+      // 缺省/非法值回退默认值，越界裁剪，保证管理端展示与运行时生效值一致。
+      const userStreamMaxConcurrency = Math.floor(
+        normalizeDownloadConfigNumber(d.USER_STREAM_MAX_CONCURRENCY, userStreamMaxConcurrencyStr),
+      );
+      const userFailureCooldownMs = normalizeDownloadConfigNumber(
+        d.USER_FAILURE_COOLDOWN_SECONDS,
+        userFailureCooldownStr,
+      ) * 1000;
       this.resources.configure({
         minFreeBytes: this.minFreeDiskBytes,
         maxReservedBytes: maxReservedGb > 0 ? maxReservedGb * 1024 * 1024 * 1024 : 0,
@@ -423,6 +435,8 @@ export class FileCacheService implements OnApplicationShutdown {
         directWaitMs: this.directWaitMs,
         taskRetentionMs: this.taskRetentionMs,
         upstreamQueuePolicy,
+        userStreamMaxConcurrency,
+        userFailureCooldownMs,
       });
 
       // 无缓存模式翻转：false → true 时中止所有进行中的缓存构建
@@ -450,6 +464,7 @@ export class FileCacheService implements OnApplicationShutdown {
         // 同卷部署时该值决定「缓存侧给 workdir 留多少余量」，是磁盘叠加风险的唯一闸门，
         // 必须出现在启动日志里（默认为 0 时明确标注，避免被当成已配置）
         `, 同卷邻近目录预留 ${volumePeerReserveGb > 0 ? `${volumePeerReserveGb}GB` : '未配置(0)'}`,
+        `, user 账号并发上限 ${userStreamMaxConcurrency}, 瞬时失败冷却 ${userFailureCooldownMs / 1000}s`,
       );
       if (!prevNoCacheMode && this.noCacheMode) {
         this.logger.warn('无缓存模式已启用：中止所有进行中的缓存构建，后续下载实时回源直通');

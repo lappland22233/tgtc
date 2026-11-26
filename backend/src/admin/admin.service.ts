@@ -766,6 +766,8 @@ export class AdminService {
     upstreamQueuePolicy: UpstreamQueuePolicy;
     autoCapacityEnabled: boolean;
     preferUserAccount: boolean;
+    userStreamMaxConcurrency: number;
+    userFailureCooldownSeconds: number;
   }> {
     const keys = DOWNLOAD_CONFIG_KEYS;
     const values = await Promise.all([
@@ -780,6 +782,8 @@ export class AdminService {
       this.getConfigByKey(keys.UPSTREAM_QUEUE_POLICY),
       this.getConfigByKey(keys.AUTO_CAPACITY_ENABLED),
       this.getConfigByKey(keys.PREFER_USER_ACCOUNT),
+      this.getConfigByKey(keys.USER_STREAM_MAX_CONCURRENCY),
+      this.getConfigByKey(keys.USER_FAILURE_COOLDOWN_SECONDS),
     ]);
     const num = (raw: string | null | undefined, key: string) => normalizeDownloadConfigNumber(key, raw);
     return {
@@ -800,6 +804,8 @@ export class AdminService {
         values[10],
         DOWNLOAD_CONFIG_DEFAULTS[keys.PREFER_USER_ACCOUNT] === 'true',
       ),
+      userStreamMaxConcurrency: num(values[11], keys.USER_STREAM_MAX_CONCURRENCY),
+      userFailureCooldownSeconds: num(values[12], keys.USER_FAILURE_COOLDOWN_SECONDS),
     };
   }
 
@@ -815,6 +821,8 @@ export class AdminService {
     upstreamQueuePolicy?: UpstreamQueuePolicy;
     autoCapacityEnabled?: boolean;
     preferUserAccount?: boolean;
+    userStreamMaxConcurrency?: number;
+    userFailureCooldownSeconds?: number;
   }): Promise<void> {
     const keys = DOWNLOAD_CONFIG_KEYS;
     const ranges = DOWNLOAD_CONFIG_RANGES;
@@ -890,6 +898,22 @@ export class AdminService {
         keys.PREFER_USER_ACCOUNT,
         String(normalized),
         '下载优先使用 Premium 用户账号（MTProto）回源；关闭即回到纯 Bot 链路（临时能力，用于一键回退）',
+      );
+    }
+    if (config.userStreamMaxConcurrency !== undefined) {
+      assertInRange(keys.USER_STREAM_MAX_CONCURRENCY, config.userStreamMaxConcurrency, 'user 账号并发上限');
+      await this.setConfigValue(
+        keys.USER_STREAM_MAX_CONCURRENCY,
+        String(config.userStreamMaxConcurrency),
+        '单 user 账号同时开出的 MTProto 回源流上限',
+      );
+    }
+    if (config.userFailureCooldownSeconds !== undefined) {
+      assertInRange(keys.USER_FAILURE_COOLDOWN_SECONDS, config.userFailureCooldownSeconds, 'user 账号瞬时失败冷却（秒）');
+      await this.setConfigValue(
+        keys.USER_FAILURE_COOLDOWN_SECONDS,
+        String(config.userFailureCooldownSeconds),
+        'user 账号瞬时失败（network / other）的冷却时长 (秒)',
       );
     }
 

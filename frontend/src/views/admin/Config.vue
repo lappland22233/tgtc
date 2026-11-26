@@ -289,9 +289,9 @@
           <span style="margin-left: 8px; font-size: 12px; color: var(--td-text-color-secondary);">所有在途任务未写入预约之和的上限，0 表示只受物理空间约束</span>
         </t-form-item>
         <t-form-item label="上游权重预算">
-          <t-input-number v-model="downloadConfig.maxConcurrentUpstreams" :min="1" :max="64" :step="1" />
+          <t-input-number v-model="downloadConfig.maxConcurrentUpstreams" :min="1" :max="128" :step="1" />
           <span style="margin-left: 8px; font-size: 12px; color: var(--td-text-color-secondary);">
-            冷回源的全局「权重预算」：大文件占 8、中等文件占 2、小文件占 1；自动扩缩容开启时按有效 Bot 数映射 min(64, max(8, n×16))（1 个 → 16，2 个 → 32，4 个 → 64，上限 64）
+            冷回源的全局「权重预算」：大文件占 8、中等文件占 2、小文件占 1；自动扩缩容开启时按有效 Bot 数映射 min(128, max(8, n×16))（1 个 → 16，2 个 → 32，4 个 → 64，8 个 → 128，上限 128）
           </span>
         </t-form-item>
         <t-form-item label="队列等待策略">
@@ -314,6 +314,18 @@
           <t-switch v-model="downloadConfig.preferUserAccount" />
           <span style="margin-left: 8px; font-size: 12px; color: var(--td-text-color-secondary);">
             开启后下载优先用 Premium 用户账号（MTProto）回源，命中失败自动回退 Bot 链路；关闭即回到纯 Bot 行为（临时能力，约 30 天后关闭回退）
+          </span>
+        </t-form-item>
+        <t-form-item label="用户账号并发上限">
+          <t-input-number v-model="downloadConfig.userStreamMaxConcurrency" :min="1" :max="32" :step="1" />
+          <span style="margin-left: 8px; font-size: 12px; color: var(--td-text-color-secondary);">
+            单个 user 账号同时开出的 MTProto 回源流数（1-32）；过高更容易触发 Telegram 限流，过低会让并发下载提前回退 Bot
+          </span>
+        </t-form-item>
+        <t-form-item label="用户账号失败冷却 (秒)">
+          <t-input-number v-model="downloadConfig.userFailureCooldownSeconds" :min="1" :max="600" :step="5" />
+          <span style="margin-left: 8px; font-size: 12px; color: var(--td-text-color-secondary);">
+            仅用于 network / other 类瞬时失败；限流仍按 Telegram 的 retry_after 冷却，认证类 30 分钟、权限类 10 分钟不变
           </span>
         </t-form-item>
         <t-form-item label="排队上限 (个)">
@@ -669,6 +681,9 @@ const downloadConfig = ref({
   autoCapacityEnabled: true,
   // 下载优先使用 Premium 用户账号（MTProto）回源；关闭即回到纯 Bot 链路
   preferUserAccount: false,
+  // user 账号并发上限与瞬时失败冷却（需与后端 DOWNLOAD_CONFIG_DEFAULTS 一致）
+  userStreamMaxConcurrency: 4,
+  userFailureCooldownSeconds: 10,
 });
 
 interface DownloadRuntime {

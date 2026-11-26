@@ -10,7 +10,7 @@
 
 - CPU：2 核
 - 内存：4 GB
-- 磁盘：缓存卷可用空间 ≥ **最大并发数 × 4 GiB × 2**。「最大并发数」取上游冷回源的并发口径 `FILE_DOWNLOAD_MAX_CONCURRENT_UPSTREAMS`（默认 8；开启自动扩缩容时按有效 Bot 数最多映射到 64），单个并发按 4 GiB 大文件/分卷计，×2 为峰值系数（覆盖「后端缓存 + Bot API workdir」两份本地副本并存）——默认并发下需 **≥ 64 GiB** 可用空间。缓存卷与 Bot API workdir 建议分卷部署并分别配置最低余量（`FILE_CACHE_MIN_FREE_DISK_GB` 与 `--workdir-min-free-bytes`）；运行时准入参数见 [configuration.md](configuration.md)，磁盘域说明见 [download-and-cache.md](download-and-cache.md)。
+- 磁盘：缓存卷可用空间 ≥ **最大并发数 × 4 GiB × 2**。「最大并发数」取上游冷回源的并发口径 `FILE_DOWNLOAD_MAX_CONCURRENT_UPSTREAMS`（默认 8；开启自动扩缩容时按有效 Bot 数最多映射到 128），单个并发按 4 GiB 大文件/分卷计，×2 为峰值系数（覆盖「后端缓存 + Bot API workdir」两份本地副本并存）——默认并发下需 **≥ 64 GiB** 可用空间，预算调到 128 时需 **≥ 1024 GiB**。缓存卷与 Bot API workdir 建议分卷部署并分别配置最低余量（`FILE_CACHE_MIN_FREE_DISK_GB` 与 `--workdir-min-free-bytes`）；运行时准入参数见 [configuration.md](configuration.md)，磁盘域说明见 [download-and-cache.md](download-and-cache.md)。
 
 **软件要求**：
 

@@ -119,10 +119,14 @@ export class TelegramBotPublicController {
       const unchangedId = (grant.fileUniqueId || '').trim();
       if (unchangedId) owners.push({ ownerType: 'fileUnique', ownerId: unchangedId });
       for (const owner of owners) {
+        // 本方法只会作为 FileCacheService 的 fetchFn 被调用（getOrCacheStream /
+        // getOrCacheRangeStream / getDirectOnlyStream），三条路径都在调用前取得上行租约：
+        // 传 upstreamLeaseHeld 禁止 user 路径重复占用同权重预算。
         const opened = await this.userPreferredDownload.tryOpen({
           ownerType: owner.ownerType,
           ownerId: owner.ownerId,
           expectedSize,
+          upstreamLeaseHeld: true,
         }).catch(() => null);
         if (opened) return opened;
       }

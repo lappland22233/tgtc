@@ -211,6 +211,12 @@ export class FileService implements OnModuleInit {
   /**
    * 统一的存储回源分发器（可插拔存储改造）。
    *
+   * **租约契约**：当本方法作为 `fetchFn` 交给 `FileCacheService` / `CacheSessionCoordinator`
+   * 调用时，调用方**已经持有**同权重的上行租约（build / spool / direct 三条路径都在
+   * 取到 `lease` 之后才调用 fetchFn）。因此这些调用点必须传 `upstreamLeaseHeld: true`，
+   * 否则 user 账号路径会再申请一次同权重租约：一次 4GiB 传输占 16 权重（而非 8），
+   * 且多余的申请在预算耗尽后会空等到超时，把唯一 user 账号冷却掉。
+   *
    * 非 TG 文件（s3/webdav/gdrive）经存储路由取流：对象引用与账号强绑定，
    * 账号不可用时 fail-closed 返回可诊断 503（绝不跨账号猜测）；
    * TG 文件原样走 openTelegramSourceStream（池化副本 + 回退矩阵逐字节不变）。
@@ -2655,6 +2661,8 @@ export class FileService implements OnModuleInit {
       const fetch = async () => {
         const result = await this.openSourceStream(file, expectedSize, {
           noCache: this.fileCacheService.isNoCacheMode() || forceNoCache,
+          // 协调器已持有同权重租约：禁止 user 路径重复申请（见 openSourceStream 的租约契约）
+          upstreamLeaseHeld: true,
         });
         recoveredInfo = result.info;
         return result;
@@ -2851,6 +2859,8 @@ export class FileService implements OnModuleInit {
     const forceNoCache = noCache && !this.fileCacheService.isNoCacheMode();
     const fetchFn = async () => this.openSourceStream(file, expectedSize, {
       noCache: this.fileCacheService.isNoCacheMode() || forceNoCache,
+      // 协调器已持有同权重租约：禁止 user 路径重复申请（见 openSourceStream 的租约契约）
+      upstreamLeaseHeld: true,
     });
     const stream = await this.fileCacheService.getOrCacheRangeStream(
       file.id, expectedSize, start, end, fetchFn,
@@ -3382,6 +3392,8 @@ export class FileService implements OnModuleInit {
     const expectedSize = Number(file.size);
     const fetchFn = () => this.openSourceStream(file, expectedSize, {
       noCache: this.fileCacheService.isNoCacheMode(),
+      // 协调器已持有同权重租约：禁止 user 路径重复申请（见 openSourceStream 的租约契约）
+      upstreamLeaseHeld: true,
     });
     const stream = await this.fileCacheService.getOrCacheRangeStream(file.id, expectedSize, start, end, fetchFn, {
       contentVersion: file.uploadVersion,
@@ -4182,6 +4194,8 @@ export class FileService implements OnModuleInit {
     // 前端在冷资源阶段钳制 seek，拖动进度条不再触发新的动态分段回源。
     const fetchFn = () => this.openSourceStream(file, total, {
       noCache: this.fileCacheService.isNoCacheMode(),
+      // 协调器已持有同权重租约：禁止 user 路径重复申请（见 openSourceStream 的租约契约）
+      upstreamLeaseHeld: true,
     });
     const readStream = await this.fileCacheService.getOrCacheRangeStream(file.id, total, start, actualEnd, fetchFn, {
       contentVersion: file.uploadVersion,
@@ -4263,6 +4277,8 @@ export class FileService implements OnModuleInit {
 
     const fetchFn = () => this.openSourceStream(file, total, {
       noCache: this.fileCacheService.isNoCacheMode(),
+      // 协调器已持有同权重租约：禁止 user 路径重复申请（见 openSourceStream 的租约契约）
+      upstreamLeaseHeld: true,
     });
     const stream = await this.fileCacheService.getOrCacheRangeStream(file.id, total, start, end, fetchFn, {
       contentVersion: file.uploadVersion,

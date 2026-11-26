@@ -136,7 +136,9 @@ Redis 承载 8 个 Bull 队列：`metrics-aggregation`、`attack-detection`、`a
 | `FILE_CACHE_BUILD_IDLE_TIMEOUT_MS` | `150000` | 缓存构建**无进展**超时（毫秒），每收到数据即刷新 |
 | `FILE_CACHE_BUILD_TOTAL_TIMEOUT_MS` | `0` | 单次缓存构建**总时限**（毫秒）；`0` = 禁用（默认），固定总时限会误杀长传输 |
 | `FILE_DOWNLOAD_MAX_RESERVED_GB` | `0` | 在途下载任务「未写入预约」总上限（GB），0 表示仅受物理空间约束（SystemConfig 热更新） |
-| `FILE_DOWNLOAD_MAX_CONCURRENT_UPSTREAMS` | `8` | 上游冷回源**权重预算**（非连接数）：`>1GiB` 权重 8、`256MiB–1GiB` 权重 2、其余 1；自动扩缩容开启时按有效 Bot 数映射 `min(64, max(8, n×16))`（1→16、2→32、4→64），范围 1-64（SystemConfig 热更新） |
+| `FILE_DOWNLOAD_MAX_CONCURRENT_UPSTREAMS` | `8` | 上游冷回源**权重预算**（非连接数）：`>1GiB` 权重 8、`256MiB–1GiB` 权重 2、其余 1；自动扩缩容开启时按有效 Bot 数映射 `min(128, max(8, n×16))`（1→16、2→32、4→64、8→128），范围 1-128（SystemConfig 热更新） |
+| `FILE_DOWNLOAD_USER_STREAM_MAX_CONCURRENCY` | `4` | 单个 user 账号（MTProto）同时开出的回源流上限，范围 1-32；过高更容易触发 Telegram 限流，过低会让并发下载提前回退 Bot（SystemConfig 热更新） |
+| `FILE_DOWNLOAD_USER_FAILURE_COOLDOWN_SECONDS` | `10` | user 账号**瞬时失败**（network / other）的冷却时长（秒），范围 1-600；限流仍按 `retry_after` 冷却，认证类 30 分钟、权限/不存在类 10 分钟不受该值影响。容量等待超时（等 slot / 队满）**不冷却账号**（SystemConfig 热更新） |
 | `FILE_DOWNLOAD_UPSTREAM_QUEUE_POLICY` | `strict_fifo` | 上游等待项选择策略：`strict_fifo`（严格 FIFO，回退模式）/ `bounded_fit`（前 8 个等待项内适配优先，队首最多被绕过 8 次或等待 10 秒后进入队首保留）（SystemConfig 热更新） |
 | `FILE_DOWNLOAD_AUTO_CAPACITY_ENABLED` | `true` | 全局权重预算是否按有效 Bot 数自动扩缩容（关闭后只保留人工设置）（SystemConfig 热更新） |
 | `FILE_DOWNLOAD_QUEUE_CAPACITY` | `128` | 磁盘/上游等待队列容量，超过后直接返回「服务器繁忙」（`429`）（SystemConfig 热更新） |

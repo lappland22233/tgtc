@@ -62,6 +62,15 @@ export const DOWNLOAD_CONFIG_KEYS = {
    * 布尔键，因此**不加入** `DOWNLOAD_CONFIG_RANGES`（那是数值区间表）。
    */
   PREFER_USER_ACCOUNT: 'DOWNLOAD_PREFER_USER_ACCOUNT',
+  /** 单 user 账号同时开出的 MTProto 回源流上限（每账号独立计数） */
+  USER_STREAM_MAX_CONCURRENCY: 'FILE_DOWNLOAD_USER_STREAM_MAX_CONCURRENCY',
+  /**
+   * user 账号**瞬时失败**（network / other）的冷却时长（秒）。
+   *
+   * 只影响可重试的瞬时错误：flood 仍按 `retry_after`、auth 30 分钟、
+   * permission / not_found 10 分钟，均不读该值。
+   */
+  USER_FAILURE_COOLDOWN_SECONDS: 'FILE_DOWNLOAD_USER_FAILURE_COOLDOWN_SECONDS',
 } as const;
 
 export const DOWNLOAD_CONFIG_DEFAULTS: Record<string, string> = {
@@ -78,6 +87,13 @@ export const DOWNLOAD_CONFIG_DEFAULTS: Record<string, string> = {
   [DOWNLOAD_CONFIG_KEYS.AUTO_CAPACITY_ENABLED]: 'true',
   [DOWNLOAD_CONFIG_KEYS.VOLUME_PEER_RESERVE_GB]: '0',
   [DOWNLOAD_CONFIG_KEYS.PREFER_USER_ACCOUNT]: 'false',
+  /**
+   * 默认 4：MTProto 单 session 并发过高会被限流，但 2 会在仅有一个 user 账号时
+   * 让第 3 个并发下载直接回退 Bot（账号容量被闲置）。4 是两者的折中，可按账号
+   * 实际 Premium 配额上调。
+   */
+  [DOWNLOAD_CONFIG_KEYS.USER_STREAM_MAX_CONCURRENCY]: '4',
+  [DOWNLOAD_CONFIG_KEYS.USER_FAILURE_COOLDOWN_SECONDS]: '10',
 };
 
 /**
@@ -89,7 +105,7 @@ export const DOWNLOAD_CONFIG_DEFAULTS: Record<string, string> = {
  */
 export const DOWNLOAD_CONFIG_RANGES: Record<string, { min: number; max: number }> = {
   [DOWNLOAD_CONFIG_KEYS.MAX_RESERVED_GB]: { min: 0, max: 10_000 },
-  [DOWNLOAD_CONFIG_KEYS.MAX_CONCURRENT_UPSTREAMS]: { min: 1, max: 64 },
+  [DOWNLOAD_CONFIG_KEYS.MAX_CONCURRENT_UPSTREAMS]: { min: 1, max: 128 },
   [DOWNLOAD_CONFIG_KEYS.QUEUE_CAPACITY]: { min: 1, max: 10_000 },
   [DOWNLOAD_CONFIG_KEYS.QUEUE_TIMEOUT_SECONDS]: { min: 5, max: 86_400 },
   [DOWNLOAD_CONFIG_KEYS.SPOOL_GRACE_SECONDS]: { min: 0, max: 3_600 },
@@ -98,6 +114,8 @@ export const DOWNLOAD_CONFIG_RANGES: Record<string, { min: number; max: number }
   [DOWNLOAD_CONFIG_KEYS.DIRECT_WAIT_SECONDS]: { min: 0, max: 600 },
   [DOWNLOAD_CONFIG_KEYS.TASK_RETENTION_SECONDS]: { min: 60, max: 86_400 },
   [DOWNLOAD_CONFIG_KEYS.VOLUME_PEER_RESERVE_GB]: { min: 0, max: 10_000 },
+  [DOWNLOAD_CONFIG_KEYS.USER_STREAM_MAX_CONCURRENCY]: { min: 1, max: 32 },
+  [DOWNLOAD_CONFIG_KEYS.USER_FAILURE_COOLDOWN_SECONDS]: { min: 1, max: 600 },
 };
 
 /** 上游等待项选择策略取值 */
@@ -252,6 +270,10 @@ export interface DownloadResourceConfig {
    * 写前探测同时放行、叠加写满同一块盘（生产事故场景：Cache 与 workdir 同卷）。
    */
   volumePeerReserveBytes: number;
+  /** 单 user 账号同时开出的 MTProto 回源流上限（每账号独立计数） */
+  userStreamMaxConcurrency: number;
+  /** user 账号瞬时失败（network / other）的冷却时长（毫秒） */
+  userFailureCooldownMs: number;
 }
 
 export const DOWNLOAD_RESOURCE_DEFAULTS = {
@@ -581,6 +603,8 @@ export class DownloadResourceCoordinatorService {
     taskRetentionMs: 900_000,
     upstreamQueuePolicy: 'strict_fifo',
     volumePeerReserveBytes: 0,
+    userStreamMaxConcurrency: 4,
+    userFailureCooldownMs: 10_000,
   };
 
   // ---------- 依赖注入（由 FileCacheService 在启动/热更新时配置） ----------

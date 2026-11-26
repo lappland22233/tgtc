@@ -953,8 +953,8 @@ describe('DownloadResourceCoordinatorService', () => {
       expect(normalizeDownloadConfigNumber(DOWNLOAD_CONFIG_KEYS.TASK_RETENTION_SECONDS, '')).toBe(900);
     });
 
-    it('越界值裁剪到统一区间（权重预算 1-64、直通窗口 1-4 MiB）', () => {
-      expect(normalizeDownloadConfigNumber(DOWNLOAD_CONFIG_KEYS.MAX_CONCURRENT_UPSTREAMS, '999')).toBe(64);
+    it('越界值裁剪到统一区间（权重预算 1-128、直通窗口 1-4 MiB）', () => {
+      expect(normalizeDownloadConfigNumber(DOWNLOAD_CONFIG_KEYS.MAX_CONCURRENT_UPSTREAMS, '999')).toBe(128);
       expect(normalizeDownloadConfigNumber(DOWNLOAD_CONFIG_KEYS.MAX_CONCURRENT_UPSTREAMS, '0')).toBe(1);
       expect(normalizeDownloadConfigNumber(DOWNLOAD_CONFIG_KEYS.DIRECT_WINDOW_MB, '1024')).toBe(4);
       expect(normalizeDownloadConfigNumber(DOWNLOAD_CONFIG_KEYS.DIRECT_WINDOW_MB, '0')).toBe(1);
