@@ -91,6 +91,8 @@ export class TelegramAccountPoolService implements OnModuleInit, OnApplicationSh
     anchorConflicts: 0,
     fallbackThrottled: 0,
     largeFileSlotThrottled: 0,
+    idlePreferred: 0,
+    idleFallback: 0,
     mainChatPlantAttempts: 0,
     mainChatPlantFailures: 0,
     mainChatPlantTakeovers: 0,
@@ -623,11 +625,14 @@ export class TelegramAccountPoolService implements OnModuleInit, OnApplicationSh
    *   同时把大文件在飞数计入容量分，使多账号下的分流更均匀。
    * @param options.role 用途（download / upload）。副本扩散不再参与账号选择：
    *   策略 B 由用户账号做服务端转发，不占用 Bot 账号额度。
+   * @param options.idleOnly 只接受 `inflight === 0` 的账号（后台镜像取源用）。
+   *   没有空闲候选时返回 null，**不会**自动降级为普通加权——调用方需要区分
+   *   「真的没有空闲账号」与「池不可用」，以便决定退化策略。
    */
   select(
     candidateIds?: string[],
     nowMs: number = Date.now(),
-    options?: { largeFile?: boolean; role?: AccountAttemptRole },
+    options?: { largeFile?: boolean; role?: AccountAttemptRole; idleOnly?: boolean },
   ): AccountSelection | null {
     // 开关兜底（防御纵深）：未启用池化时任何路径都不得选中账号，
     // 保证「关闭开关 = 原单账号行为」不依赖调用方是否记得检查 isActive()。
@@ -685,10 +690,13 @@ export class TelegramAccountPoolService implements OnModuleInit, OnApplicationSh
   private isSchedulable(
     runtime: TelegramAccountRuntime,
     nowMs: number,
-    options?: { largeFile?: boolean; role?: AccountAttemptRole },
+    options?: { largeFile?: boolean; role?: AccountAttemptRole; idleOnly?: boolean },
   ): boolean {
     if (!runtime.config.enabled) return false;
     if (runtime.inflight >= runtime.config.maxInflight) return false;
+    // 严格空闲优先（后台镜像取源）：只接受完全没有在飞请求的账号。
+    // 评分里的容量分只是"偏向空闲"，忙碌账号仍可能因权重/带宽胜出，这里必须是硬门。
+    if (options?.idleOnly && runtime.inflight > 0) return false;
     if (runtime.cooldownUntilMs > nowMs) return false;
     // 大文件回源：已达每账号槽位的账号不再作为候选（否则会被 admit 立刻拒绝，白白消耗一次尝试）
     if (options?.largeFile && runtime.largeInflight >= this.maxLargeInflightOf(runtime)) return false;

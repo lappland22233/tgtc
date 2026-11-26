@@ -3,10 +3,12 @@ import { SqliteCreateStorageBackends1804000000000 } from './1804000000000-Sqlite
 import { SqliteAddFileStorageColumns1804100000000 } from './1804100000000-SqliteAddFileStorageColumns';
 import { SqliteAddGrantStorageColumns1804200000000 } from './1804200000000-SqliteAddGrantStorageColumns';
 import { SqliteAddGDriveCacheColumns1804300000000 } from './1804300000000-SqliteAddGDriveCacheColumns';
+import { SqliteAddGDriveCacheRetryColumns1804800000000 } from './1804800000000-SqliteAddGDriveCacheRetryColumns';
 import { CreateStorageBackends1804000000000 } from './1804000000000-CreateStorageBackends';
 import { AddFileStorageColumns1804100000000 } from './1804100000000-AddFileStorageColumns';
 import { AddGrantStorageColumns1804200000000 } from './1804200000000-AddGrantStorageColumns';
 import { AddGDriveCacheColumns1804300000000 } from './1804300000000-AddGDriveCacheColumns';
+import { AddGDriveCacheRetryColumns1804800000000 } from './1804800000000-AddGDriveCacheRetryColumns';
 
 jest.setTimeout(30_000);
 
@@ -41,6 +43,7 @@ describe('存储后端迁移（SQLite 隔离内存库）', () => {
         SqliteAddFileStorageColumns1804100000000,
         SqliteAddGrantStorageColumns1804200000000,
         SqliteAddGDriveCacheColumns1804300000000,
+        SqliteAddGDriveCacheRetryColumns1804800000000,
       ],
       migrationsRun: true,
       synchronize: false,
@@ -64,9 +67,13 @@ describe('存储后端迁移（SQLite 隔离内存库）', () => {
     expect(columns.find((c: { name: string }) => c.name === 'gdriveCacheAccountId')).toBeDefined();
     expect(columns.find((c: { name: string }) => c.name === 'gdriveCacheObjectRef')).toBeDefined();
     expect(columns.find((c: { name: string }) => c.name === 'gdriveCacheStatus')).toBeDefined();
+    expect(columns.find((c: { name: string }) => c.name === 'gdriveCacheAttempts')).toBeDefined();
+    expect(columns.find((c: { name: string }) => c.name === 'gdriveCacheLastError')).toBeDefined();
+    expect(columns.find((c: { name: string }) => c.name === 'gdriveCacheNextRetryAt')).toBeDefined();
     const fileIndexes = await dataSource.query('PRAGMA index_list("files")');
     expect(fileIndexes.find((i: { name: string }) => i.name === 'idx_files_storage_ref')).toBeDefined();
     expect(fileIndexes.find((i: { name: string }) => i.name === 'idx_files_gdrive_cache_ref')).toBeDefined();
+    expect(fileIndexes.find((i: { name: string }) => i.name === 'idx_files_gdrive_cache_sweep')).toBeDefined();
 
     // telegram_bot_file_grants 存储列与 GDrive 缓存三列
     const grantColumns = await dataSource.query('PRAGMA table_info("telegram_bot_file_grants")');
@@ -79,9 +86,13 @@ describe('存储后端迁移（SQLite 隔离内存库）', () => {
     expect(grantColumns.find((c: { name: string }) => c.name === 'gdriveCacheAccountId')).toBeDefined();
     expect(grantColumns.find((c: { name: string }) => c.name === 'gdriveCacheObjectRef')).toBeDefined();
     expect(grantColumns.find((c: { name: string }) => c.name === 'gdriveCacheStatus')).toBeDefined();
+    expect(grantColumns.find((c: { name: string }) => c.name === 'gdriveCacheAttempts')).toBeDefined();
+    expect(grantColumns.find((c: { name: string }) => c.name === 'gdriveCacheLastError')).toBeDefined();
+    expect(grantColumns.find((c: { name: string }) => c.name === 'gdriveCacheNextRetryAt')).toBeDefined();
     const grantIndexes = await dataSource.query('PRAGMA index_list("telegram_bot_file_grants")');
     expect(grantIndexes.find((i: { name: string }) => i.name === 'idx_tg_bot_grants_purge_sweep')).toBeDefined();
     expect(grantIndexes.find((i: { name: string }) => i.name === 'idx_tg_bot_grants_gdrive_cache_ref')).toBeDefined();
+    expect(grantIndexes.find((i: { name: string }) => i.name === 'idx_tg_bot_grants_gdrive_cache_sweep')).toBeDefined();
   });
 
   it('存量库（无新列）经增量迁移补齐，默认值 telegram 兼容历史数据', async () => {
@@ -112,6 +123,9 @@ describe('存储后端迁移（SQLite 隔离内存库）', () => {
     await new SqliteAddFileStorageColumns1804100000000().up(runner);
     await new SqliteAddGDriveCacheColumns1804300000000().up(runner);
     await new SqliteAddGDriveCacheColumns1804300000000().up(runner);
+    await new SqliteAddGDriveCacheRetryColumns1804800000000().up(runner);
+    // 幂等：重复执行不报错
+    await new SqliteAddGDriveCacheRetryColumns1804800000000().up(runner);
     await new SqliteCreateStorageBackends1804000000000().up(runner);
     await runner.release();
 
@@ -142,6 +156,7 @@ describe('存储后端迁移（SQLite 隔离内存库）', () => {
     await new AddFileStorageColumns1804100000000().up(runner);
     await new AddGrantStorageColumns1804200000000().up(runner);
     await new AddGDriveCacheColumns1804300000000().up(runner);
+    await new AddGDriveCacheRetryColumns1804800000000().up(runner);
     await runner.release();
     const tables = await dataSource.query(`SELECT name FROM sqlite_master WHERE type='table' AND name='storage_backends'`);
     expect(tables.length).toBe(0);

@@ -96,6 +96,8 @@ describe('真实 SQLite 数据源关键业务与并发 QA', () => {
       'SqliteGDriveOAuthFlows1804500000000',
       'SqliteCreateMinuteMetrics1804600000000',
       'SqliteBotInboundQueue1804700000000',
+      // Google 双写重试状态机：attempts / lastError / nextRetryAt + 扫描索引
+      'SqliteAddGDriveCacheRetryColumns1804800000000',
     ]);
 
     await dataSource.undoLastMigration();

@@ -79,6 +79,10 @@ export class AccountAwareDownloadService {
     noCache?: boolean;
     fileName?: string;
     defaultAccountId?: string | null;
+    /** 只挑完全没有在飞请求的账号（后台镜像取源）；无空闲候选时返回 null 由调用方降级 */
+    idleOnly?: boolean;
+    /** 取消信号（后台转存中断）：透传给上游开流 */
+    signal?: AbortSignal;
     openDefault?: (fileId: string) => Promise<{ stream: Readable; info: { file_id: string; file_size: number } }>;
     onUnavailable?: (failure: AccountAwareDownloadFailure) => void;
   }): Promise<AccountAwareStreamResult | null> {
@@ -111,7 +115,7 @@ export class AccountAwareDownloadService {
       const candidateIds = readyAccountIds.filter((accountId) => !excluded.has(accountId));
       if (candidateIds.length === 0) break;
 
-      const selection = this.pool.select(candidateIds, Date.now(), { largeFile });
+      const selection = this.pool.select(candidateIds, Date.now(), { largeFile, idleOnly: params.idleOnly });
       if (!selection) {
         lastFailure = this.describeUnavailableCandidates(candidateIds);
         break;
@@ -155,7 +159,7 @@ export class AccountAwareDownloadService {
             account.token,
             copy.telegramFileId,
             params.expectedSize,
-            { noCache: params.noCache },
+            { noCache: params.noCache, ...(params.signal && { signal: params.signal }) },
           );
         this.attachSampling(admission.admission, session.stream, session.sample);
         void this.copies.touchUsed(copy);

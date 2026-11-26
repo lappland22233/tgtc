@@ -110,6 +110,8 @@ function zeroCounters(): AccountPoolCounters {
     anchorConflicts: 0,
     fallbackThrottled: 0,
     largeFileSlotThrottled: 0,
+    idlePreferred: 0,
+    idleFallback: 0,
     mainChatPlantAttempts: 0,
     mainChatPlantFailures: 0,
     mainChatPlantTakeovers: 0,

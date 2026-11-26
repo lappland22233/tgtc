@@ -6,6 +6,8 @@ import { TelegramModule } from '../telegram/telegram.module';
 import { FileModule } from '../file/file.module';
 import { StorageModule } from '../storage/storage.module';
 import { TelegramBotFileGrant } from '../common/entities/telegram-bot-file-grant.entity';
+import { File } from '../common/entities/file.entity';
+import { AlertModule } from '../alert/alert.module';
 import { TelegramBotDailyUsage } from '../common/entities/telegram-bot-daily-usage.entity';
 import { TelegramBotWhitelist } from '../common/entities/telegram-bot-whitelist.entity';
 import { TelegramBotInboundTask } from '../common/entities/telegram-bot-inbound-task.entity';
@@ -23,6 +25,7 @@ import { BotTransferTrackerService } from './bot-transfer-tracker.service';
 import { TelegramBotInboundQueueService } from './telegram-bot-inbound-queue.service';
 import { TelegramBotOperationsController } from './telegram-bot-operations.controller';
 import { TelegramBotOperationsService } from './telegram-bot-operations.service';
+import { GDriveCacheRetryService } from './gdrive-cache-retry.service';
 
 /**
  * Telegram Bot 文件直链模块。
@@ -33,7 +36,7 @@ import { TelegramBotOperationsService } from './telegram-bot-operations.service'
 @Module({
   imports: [
     TypeOrmModule.forFeature([
-      TelegramBotFileGrant, TelegramBotDailyUsage, TelegramBotWhitelist, TelegramBotInboundTask, TelegramBotUserBan,
+      TelegramBotFileGrant, TelegramBotDailyUsage, TelegramBotWhitelist, TelegramBotInboundTask, TelegramBotUserBan, File,
     ]),
     TelegramModule,
     // 复用 FileModule 导出的 FileCacheService（Range/断点续传与本地缓存）
@@ -44,6 +47,8 @@ import { TelegramBotOperationsService } from './telegram-bot-operations.service'
     TelegramMirrorModule,
     // 可插拔存储路由（纯 Google 存储模式直传与直读回源）
     StorageModule,
+    // Google 双写积压告警
+    AlertModule,
   ],
   controllers: [TelegramBotPublicController, TelegramBotAdminController, TelegramBotOperationsController],
   providers: [
@@ -57,6 +62,7 @@ import { TelegramBotOperationsService } from './telegram-bot-operations.service'
     TelegramBotDispatchService,
     TelegramBotPollingService,
     BotTransferTrackerService,
+    GDriveCacheRetryService,
   ],
   exports: [TelegramBotConfigService, TelegramBotGrantService, BotTransferTrackerService],
 })

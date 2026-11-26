@@ -97,6 +97,12 @@ export interface GrantRow extends ReceivedFile {
   revokedBy: string | null;
   accessCount: number;
   tokenPrefix: string;
+  /** Google 双写状态（none | pending | ready | failed） */
+  gdriveCacheStatus?: 'none' | 'pending' | 'ready' | 'failed' | null;
+  /** Google 双写已尝试次数 */
+  gdriveCacheAttempts?: number | null;
+  /** Google 双写最近失败原因 */
+  gdriveCacheLastError?: string | null;
 }
 
 export interface AuditRow {

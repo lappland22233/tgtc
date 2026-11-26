@@ -28,6 +28,7 @@ import {
 @Index('idx_tg_bot_grants_fileUniqueId', ['fileUniqueId'])
 @Index('idx_tg_bot_grants_purge_sweep', ['storageBackend', 'storagePurgedAt', 'expiresAt'])
 @Index('idx_tg_bot_grants_gdrive_cache_ref', ['gdriveCacheAccountId', 'gdriveCacheObjectRef'])
+@Index('idx_tg_bot_grants_gdrive_cache_sweep', ['gdriveCacheStatus', 'gdriveCacheNextRetryAt'])
 export class TelegramBotFileGrant {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -122,6 +123,18 @@ export class TelegramBotFileGrant {
   /** Google 缓存模式：缓存状态（none | pending | ready | failed） */
   @Column({ type: 'varchar', length: 16, nullable: true, default: 'none', comment: 'Google 缓存状态' })
   gdriveCacheStatus: 'none' | 'pending' | 'ready' | 'failed' | null;
+
+  /** Google 缓存同步已尝试次数（重试退避依据） */
+  @Column({ type: 'int', default: 0, comment: 'Google 缓存同步尝试次数' })
+  gdriveCacheAttempts: number;
+
+  /** Google 缓存最近一次失败原因（截断存储） */
+  @Column({ type: 'varchar', length: 500, nullable: true, comment: 'Google 缓存最近失败原因' })
+  gdriveCacheLastError: string | null;
+
+  /** Google 缓存下次重试时间（pending 时作为租约） */
+  @Column({ type: databaseColumnType('timestamptz') as 'timestamptz', nullable: true, comment: 'Google 缓存下次重试时间' })
+  gdriveCacheNextRetryAt: Date | null;
 
   /** SHA-256(token) 十六进制摘要，校验用 */
   @Column({ type: 'varchar', length: 64, comment: 'SHA-256(token)' })

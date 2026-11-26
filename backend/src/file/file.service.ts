@@ -6,7 +6,8 @@ import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { OnEvent } from '@nestjs/event-emitter';
 import { Cron, CronExpression } from '@nestjs/schedule';
-import { Readable } from 'stream';
+import { PassThrough, Readable } from 'stream';
+import { pipeline } from 'stream/promises';
 import { Request } from 'express';
 import { randomBytes, randomUUID } from 'node:crypto';
 import * as fs from 'fs';
@@ -58,6 +59,8 @@ import { DownloadResourceException, DOWNLOAD_ERROR_CODES, DOWNLOAD_RESOURCE_DEFA
 import { maskIdentifier } from '../telegram-accounts/telegram-account-view';
 // 可插拔存储后端（S3 / WebDAV / GDrive 账号池）：可选依赖，未装配时逐字节等价于原 TG 链路
 import { StorageRouterService } from '../storage/storage-router.service';
+import type { StorageUploadReceipt } from '../storage/storage.types';
+import { GDRIVE_CACHE_LEASE_MS, gdriveCacheBackoffMs } from '../common/utils/gdrive-cache-backoff';
 import {
   isRemoteStorageBackend,
   StorageDownloadUnavailableError,
@@ -474,6 +477,166 @@ export class FileService implements OnModuleInit {
   }
 
   /**
+   * Google 双写（网页上传成功后的镜像，以及失败重试）。
+   *
+   * - 传 `localPath`：上传任务内的快路径，直接读本地临时文件，避免再从 Telegram 拉一遍；
+   * - 不传：扫描任务的重试路径（本地临时文件已清理），从 Telegram 账号池回源。
+   *
+   * 状态机：`pending`（10 分钟租约）→ `ready` / `failed`（指数退避）。
+   * 并发抢占由行级 CAS 保证：租约内的重复触发会被直接丢弃。
+   */
+  async mirrorGDriveCache(fileId: string, options: { localPath?: string; signal?: AbortSignal } = {}): Promise<void> {
+    if (!this.storageRouter) return;
+    const file = await this.fileRepository.findOne({ where: { id: fileId } });
+    if (!file || file.isDeleted) return;
+    if (isRemoteStorageBackend(file.storageBackend)) return;
+    const size = Number(file.size);
+    if (!Number.isSafeInteger(size) || size <= 0) {
+      this.logger.debug(`文件 ${fileId} 大小未知，跳过 Google 双写`);
+      return;
+    }
+    if (!(await this.storageRouter.isGDriveCacheModeEnabled().catch(() => false))) return;
+    if (!(await this.claimGDriveCacheMirror(file))) return;
+
+    const localPath = options.localPath && fs.existsSync(options.localPath) ? options.localPath : undefined;
+    let receipt: StorageUploadReceipt | null = null;
+    try {
+      receipt = await this.storageRouter.upload({
+        backendType: 'gdrive',
+        objectName: file.originalName,
+        mimeType: file.mimeType || undefined,
+        knownLength: size,
+        signal: options.signal,
+        openStream: localPath
+          ? () => createReadStream(localPath, { highWaterMark: 1024 * 1024 })
+          : () => this.openPooledMirrorStream(file, size, options.signal),
+      });
+      const uploadedAccountId = receipt.accountId;
+      const updated = await this.fileRepository.update(
+        { id: file.id, uploadVersion: file.uploadVersion },
+        {
+          gdriveCacheStatus: 'ready',
+          gdriveCacheAccountId: receipt.accountId,
+          gdriveCacheObjectRef: receipt.objectRef,
+          gdriveCacheAttempts: 0,
+          gdriveCacheLastError: null,
+          gdriveCacheNextRetryAt: null,
+        } as Partial<File>,
+      );
+      if (updated.affected === 0) {
+        this.logger.warn(`文件 ${file.id} 版本已变更或记录已删除，清理孤立的 Google 副本`);
+        if (receipt.accountId) {
+          await this.storageRouter.deleteRemoteObject('gdrive', receipt.accountId, receipt.objectRef).catch(() => {});
+        }
+        return;
+      }
+      receipt = null;
+      this.logger.log(`文件 ${file.id} 已同步至 Google 存储（账号: ${uploadedAccountId ?? 'unknown'}）`);
+    } catch (error) {
+      if (receipt?.accountId) {
+        await this.storageRouter.deleteRemoteObject('gdrive', receipt.accountId, receipt.objectRef).catch(() => {});
+      }
+      await this.markGDriveCacheMirrorFailed(file.id, error);
+      this.logger.warn(
+        `文件 ${file.id} Google 双写失败（将按退避重试）：${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  /** 到期待重试的网页文件 id（仅 pending/failed；不回填历史 none） */
+  async findDueGDriveCacheMirrorIds(limit = 3): Promise<string[]> {
+    const now = new Date();
+    const rows = await this.fileRepository
+      .createQueryBuilder('file')
+      .select('file.id', 'id')
+      .where('file.isDeleted = :notDeleted', { notDeleted: false })
+      .andWhere('file.storageBackend = :backend', { backend: 'telegram' })
+      .andWhere('file.gdriveCacheStatus IN (:...statuses)', { statuses: ['pending', 'failed'] })
+      .andWhere('(file.gdriveCacheNextRetryAt IS NULL OR file.gdriveCacheNextRetryAt <= :now)', { now })
+      .andWhere('file.telegramFileId <> :empty', { empty: '' })
+      .orderBy('file.gdriveCacheNextRetryAt', 'ASC')
+      .limit(limit)
+      .getRawMany<{ id: string }>();
+    return rows.map((row) => row.id);
+  }
+
+  /** 到期重试积压量（供告警判定） */
+  async countDueGDriveCacheMirrors(): Promise<number> {
+    const now = new Date();
+    return this.fileRepository
+      .createQueryBuilder('file')
+      .where('file.isDeleted = :notDeleted', { notDeleted: false })
+      .andWhere('file.storageBackend = :backend', { backend: 'telegram' })
+      .andWhere('file.gdriveCacheStatus IN (:...statuses)', { statuses: ['pending', 'failed'] })
+      .andWhere('(file.gdriveCacheNextRetryAt IS NULL OR file.gdriveCacheNextRetryAt <= :now)', { now })
+      .andWhere('file.telegramFileId <> :empty', { empty: '' })
+      .getCount();
+  }
+
+  /** CAS 抢占一次双写：租约内不会重复执行 */
+  private async claimGDriveCacheMirror(file: File): Promise<boolean> {
+    const now = new Date();
+    const result = await this.fileRepository
+      .createQueryBuilder()
+      .update(File)
+      .set({
+        gdriveCacheStatus: 'pending',
+        gdriveCacheNextRetryAt: new Date(now.getTime() + GDRIVE_CACHE_LEASE_MS),
+      })
+      .where('id = :id', { id: file.id })
+      .andWhere('"uploadVersion" = :version', { version: file.uploadVersion })
+      .andWhere('"isDeleted" = :notDeleted', { notDeleted: false })
+      .andWhere('("gdriveCacheStatus" IS NULL OR "gdriveCacheStatus" IN (:...statuses))', {
+        statuses: ['none', 'pending', 'failed'],
+      })
+      .andWhere('("gdriveCacheNextRetryAt" IS NULL OR "gdriveCacheNextRetryAt" <= :now)', { now })
+      .execute();
+    return (result.affected ?? 0) > 0;
+  }
+
+  /** 记录一次双写失败：次数自增 + 原因 + 指数退避 */
+  private async markGDriveCacheMirrorFailed(fileId: string, error: unknown): Promise<void> {
+    const detail = error instanceof Error ? error.message : String(error);
+    try {
+      const row = await this.fileRepository.findOne({
+        where: { id: fileId },
+        select: { id: true, gdriveCacheAttempts: true },
+      });
+      const attempts = (row?.gdriveCacheAttempts ?? 0) + 1;
+      await this.fileRepository.update({ id: fileId }, {
+        gdriveCacheStatus: 'failed',
+        gdriveCacheLastError: (detail || 'unknown').slice(0, 500),
+        gdriveCacheAttempts: attempts,
+        gdriveCacheNextRetryAt: new Date(Date.now() + gdriveCacheBackoffMs(attempts)),
+      } as Partial<File>);
+    } catch (err) {
+      this.logger.warn(
+        `记录 Google 双写失败状态时出错（忽略）：${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  /** 重试取源：从 Telegram 账号池开一条新流（每次 openStream 调用都重新回源） */
+  private openPooledMirrorStream(file: File, size: number, signal?: AbortSignal): Readable {
+    const buffered = new PassThrough({ readableHighWaterMark: 1024 * 1024, writableHighWaterMark: 64 * 1024 });
+    void pipeline(
+      this.readPooledMirrorSource(file, size),
+      buffered,
+      { signal },
+    ).catch(() => {
+      // pipeline 已销毁 buffered，读取方会收到同一错误
+    });
+    return buffered;
+  }
+
+  private async *readPooledMirrorSource(file: File, size: number): AsyncGenerator<Buffer> {
+    const opened = await this.openSourceStream(file, size, { noCache: true });
+    for await (const chunk of opened.stream) {
+      yield Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Buffer);
+    }
+  }
+
+  /**
    * Google 缓存副本清理：删除文件时若含有 GDrive 缓存副本，通过 StorageRouter 删除远端对象以释放 Google 盘容量。
    */
   async cleanupGDriveCacheObject(ref: {
@@ -842,6 +1005,9 @@ export class FileService implements OnModuleInit {
         gdriveCacheStatus: 'none',
         gdriveCacheAccountId: null,
         gdriveCacheObjectRef: null,
+        gdriveCacheAttempts: 0,
+        gdriveCacheLastError: null,
+        gdriveCacheNextRetryAt: null,
       } as any);
       // N1：覆盖会改 originalName，名称表必须同步更新——否则旧名残留占用
       // （此后同名新建被误 409）且新名不受唯一保护。新名撞其他活跃实体时整体回滚。

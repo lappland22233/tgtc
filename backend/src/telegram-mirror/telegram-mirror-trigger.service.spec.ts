@@ -110,4 +110,14 @@ describe('TelegramMirrorTriggerService Bot 入站扩散', () => {
     await expect(ctx.service.onFileCommitted({ ...input, sourceChatId: '-100target' }, 'bot_inbound')).resolves.toBe(false);
     expect(ctx.tasks.enqueue).not.toHaveBeenCalled();
   });
+
+  it('单群规则（镜像群留空）不被自我抑制，正常建单', async () => {
+    const ctx = setup({ sourceChatId: '-100main', targetChatId: '' });
+
+    await expect(ctx.service.onFileCommitted({ ...input, sourceChatId: '-100main' }, 'bot_inbound')).resolves.toBe(true);
+    expect(ctx.tasks.enqueue).toHaveBeenCalledWith(expect.objectContaining({
+      ruleId: 'rule-1',
+      sourceChatId: '-100main',
+    }));
+  });
 });

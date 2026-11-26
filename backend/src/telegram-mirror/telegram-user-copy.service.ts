@@ -15,6 +15,7 @@ import { TelegramAccountsService } from '../telegram-accounts/telegram-accounts.
 import { maskIdentifier } from '../telegram-accounts/telegram-account-view';
 import { TelegramUserClientService } from '../telegram-user/telegram-user-client.service';
 import { TelegramMirrorSourceService } from './telegram-mirror-source.service';
+import { TelegramMirrorConfigService } from './telegram-mirror-config.service';
 import { TelegramMainChatAnchorService } from './telegram-main-chat-anchor.service';
 import {
   MirrorExecutionError,
@@ -72,10 +73,18 @@ export class TelegramUserCopyService {
     // 账号池计数（中继健康度三元组 relayAttempts/relaySucceeded/relayFailed 的唯一写入方）
     @Optional() @Inject(TelegramAccountPoolService)
     private readonly pool: TelegramAccountPoolService | null = null,
+    // 单群模式的达标上界（启用中的 Bot 账号数）；未装配时按 1 处理
+    @Optional() @Inject(TelegramMirrorConfigService)
+    private readonly config: TelegramMirrorConfigService | null = null,
   ) {}
 
   async execute(task: TelegramMirrorTask, rule: TelegramMirrorRule): Promise<MirrorExecutionResult> {
-    if (!this.userClient.isAvailable()) {
+    const targetChatId = (rule.targetChatId || '').trim();
+    const singleGroup = !targetChatId;
+
+    // 双群模式必须先把源消息搬进主群，再由 userbot 从主群转发到镜像群；
+    // 单群模式同样需要主群锚点（它就是副本认领面），只是不再做第二步转发。
+    if (!singleGroup && !this.userClient.isAvailable()) {
       throw new MirrorExecutionError(
         'user_client_unavailable',
         `MTProto 客户端不可用（${this.userClient.unavailableReason() ?? '依赖未安装'}）`,
@@ -83,14 +92,11 @@ export class TelegramUserCopyService {
       );
     }
 
-    const targetChatId = (rule.targetChatId || '').trim();
-    if (!targetChatId) {
-      throw new MirrorExecutionError('target_chat_missing', '镜像规则未配置镜像群（目标群）', 'blocked');
-    }
-
     // 观测轮次：先开轮次再中继，`baselineReadyCount` 才能反映**中继前**的副本数，
     // 否则本轮自己带来的认领会被算成「历史既有」，结算永远看不到新增。
-    const round = await this.openRound(task, targetChatId);
+    // 单群模式的目标群就是主群，轮次同样需要记录目标群，结算口径才可追溯。
+    const roundTargetHint = singleGroup ? null : targetChatId;
+    const round = await this.openRound(task, roundTargetHint, singleGroup);
 
     // 源事实 + 主群锚点：**任何**前置失败都必须收口轮次。
     // 否则轮次会永久停在 active 态（清扫只结算 `waiting_claims`），
@@ -116,6 +122,26 @@ export class TelegramUserCopyService {
     } catch (error) {
       await this.closeRoundFailed(round, error);
       throw error;
+    }
+
+    // 单群模式：锚点消息本身就是副本认领源，主群内各 Bot 由入站轮询各自登记
+    // 自己账号的 file_id。再转发一次只会产生重复消息（且会命中回环抑制）。
+    if (singleGroup) {
+      await this.markRoundRelayingDone(round, '', anchor.messageId);
+      this.logger.log(
+        `单群副本扩散已就绪（主群 ${maskIdentifier(anchor.chatId)} / 消息 ${maskIdentifier(anchor.messageId)}）：`
+        + `${task.ownerType}:${task.ownerId}，等待群内各 Bot 认领`,
+      );
+      return {
+        targetAccountId: '',
+        targetChatId: anchor.chatId,
+        targetMessageId: anchor.messageId,
+        // 单群模式下没有 userbot 转发消息，也就没有 Bot 可用的 file_id；
+        // 副本由群内各 Bot 收到锚点消息后各自登记。
+        targetTelegramFileId: '',
+        fileSize: descriptor.fileSize,
+        mode: 'user_copy',
+      };
     }
 
     let candidates: Awaited<ReturnType<TelegramAccountsService['resolveEnabledUserAccounts']>>;
@@ -196,13 +222,21 @@ export class TelegramUserCopyService {
    */
   private async openRound(
     task: TelegramMirrorTask,
-    targetChatId: string,
+    targetChatId: string | null,
+    singleGroup = false,
   ): Promise<TelegramReplicationAttempt | null> {
     if (!this.attempts) return null;
     this.pool?.bumpCounter('relayAttempts');
     try {
       const ready = this.copies ? await this.copies.readyAccountIds(task.ownerType, task.ownerId) : [];
-      const desiredCount = Math.max(1, (await this.replicaTargets?.desiredReplicas()) ?? 1);
+      // 单群模式的达标口径是「群内能认领副本的 Bot 数」，与「能承载副本的账号数」不同：
+      // 前者还取决于 Bot 是否在群内、是否关闭隐私模式，无法在 DB 侧确认，
+      // 因此用启用中的 Bot 数作上界，真实结算仍以副本表新增为准。
+      const configuredTarget = Math.max(1, (await this.replicaTargets?.desiredReplicas()) ?? 1);
+      const claimableBots = singleGroup
+        ? Math.max(1, this.config?.countClaimableBots() ?? 0)
+        : Number.MAX_SAFE_INTEGER;
+      const desiredCount = Math.max(1, Math.min(configuredTarget, claimableBots));
       const begin = await this.attempts.beginRound({
         ownerType: task.ownerType,
         ownerId: task.ownerId,

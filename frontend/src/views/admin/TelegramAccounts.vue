@@ -888,7 +888,7 @@
             主群（源群，副本扩散中转落点）：<span class="cell-mono">{{ rule.sourceChatId || '—' }}</span>
           </div>
           <div class="mirror-rule-meta">
-            镜像群（备份群）：<span class="cell-mono">{{ rule.targetChatId || '—' }}</span>
+            镜像群（备份群）：<span class="cell-mono">{{ rule.targetChatId || '单群模式（主群内认领）' }}</span>
           </div>
           <div class="mirror-rule-meta">
             优先账号：{{ rule.preferredAccountId || '自动选择' }} · 事件范围：{{ ruleEventScopeText(rule) }}
@@ -933,7 +933,7 @@
         </label>
         <label class="field">
           <span class="field-label">镜像群（备份群）</span>
-          <t-input v-model="mirrorForm.targetChatId" placeholder="例如 -1000987654321" autocomplete="off" name="mirror-target" />
+          <t-input v-model="mirrorForm.targetChatId" placeholder="留空 = 单群模式（主群内各 Bot 自行认领副本，不做 userbot 转发）" autocomplete="off" name="mirror-target" />
         </label>
         <label class="field">
           <span class="field-label">优先账号（可空，留空自动选号）</span>
@@ -1231,7 +1231,14 @@
         <template v-else-if="accountFormMode === 'create-user'">
           <label class="field">
             <span class="field-label">API ID</span>
-            <t-input-number v-model="accountForm.apiId" :min="1" />
+            <t-input
+              v-model="accountForm.apiId"
+              placeholder="例如 1234567"
+              inputmode="numeric"
+              pattern="[0-9]+"
+              autocomplete="off"
+              name="account-api-id"
+            />
           </label>
           <label class="field">
             <span class="field-label">API Hash</span>
@@ -1331,7 +1338,14 @@
           <p class="dialog-hint">更新凭据后需要重新完成交互式授权。</p>
           <label class="field">
             <span class="field-label">API ID</span>
-            <t-input-number v-model="rotateForm.apiId" :min="1" />
+            <t-input
+              v-model="rotateForm.apiId"
+              placeholder="例如 1234567"
+              inputmode="numeric"
+              pattern="[0-9]+"
+              autocomplete="off"
+              name="rotate-api-id"
+            />
           </label>
           <label class="field">
             <span class="field-label">API Hash</span>
@@ -1619,7 +1633,7 @@ const accountForm = reactive({
   primaryChatId: '',
   weight: 1,
   maxInflight: 16,
-  apiId: 1,
+  apiId: '',
   apiHash: '',
   phoneNumber: '',
   note: '',
@@ -1637,7 +1651,7 @@ function resetAccountForm() {
   accountForm.primaryChatId = '';
   accountForm.weight = 1;
   accountForm.maxInflight = 16;
-  accountForm.apiId = 1;
+  accountForm.apiId = '';
   accountForm.apiHash = '';
   accountForm.phoneNumber = '';
   accountForm.note = '';
@@ -1700,9 +1714,14 @@ async function submitAccountForm() {
         MessagePlugin.warning('请填写名称与 API 凭据');
         return;
       }
+      const apiId = Number(accountForm.apiId.trim());
+      if (!Number.isInteger(apiId) || apiId <= 0) {
+        MessagePlugin.warning('API ID 必须是正整数');
+        return;
+      }
       const created = await createUserAccount({
         name: accountForm.name.trim(),
-        apiId: accountForm.apiId,
+        apiId,
         apiHash: accountForm.apiHash.trim(),
         phoneNumber: accountForm.phoneNumber.trim() || undefined,
         note: accountForm.note.trim() || undefined,
@@ -1939,7 +1958,7 @@ const rotateType = ref<TelegramAccountType>('bot');
 const rotateForm = reactive({
   token: '',
   primaryChatId: '',
-  apiId: 1,
+  apiId: '',
   apiHash: '',
   phoneNumber: '',
 });
@@ -1951,7 +1970,7 @@ function openRotate(account: TelegramAccountView) {
   rotateType.value = account.type;
   rotateForm.token = '';
   rotateForm.primaryChatId = account.primaryChatId ?? '';
-  rotateForm.apiId = 1;
+  rotateForm.apiId = '';
   rotateForm.apiHash = '';
   rotateForm.phoneNumber = '';
   rotateDialogVisible.value = true;
@@ -1972,8 +1991,13 @@ async function submitRotate() {
       });
       MessagePlugin.success('Bot 凭据已轮换');
     } else {
+      const apiId = Number(rotateForm.apiId.trim());
+      if (!Number.isInteger(apiId) || apiId <= 0) {
+        MessagePlugin.warning('API ID 必须是正整数');
+        return;
+      }
       await rotateAccount(rotateAccountId.value, {
-        apiId: rotateForm.apiId,
+        apiId,
         apiHash: rotateForm.apiHash.trim() || undefined,
         phoneNumber: rotateForm.phoneNumber.trim() || undefined,
       });
@@ -2312,8 +2336,12 @@ async function runMirrorTest(rule: MirrorRule) {
  * 载荷不含已删除的 `mode` / `fallbackMode`（后端 `forbidNonWhitelisted` 会直接 400）。
  */
 async function saveMirrorRule() {
-  if (!mirrorForm.sourceChatId.trim() || !mirrorForm.targetChatId.trim()) {
-    MessagePlugin.warning('请填写主群与镜像群');
+  if (!mirrorForm.sourceChatId.trim()) {
+    MessagePlugin.warning('请填写主群');
+    return;
+  }
+  if (mirrorForm.targetChatId.trim() && mirrorForm.targetChatId.trim() === mirrorForm.sourceChatId.trim()) {
+    MessagePlugin.warning('镜像群不能与主群相同：单群请留空镜像群');
     return;
   }
   savingMirror.value = true;

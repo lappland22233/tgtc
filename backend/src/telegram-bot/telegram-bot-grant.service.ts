@@ -5,6 +5,7 @@ import { createHash, randomBytes } from 'crypto';
 import { TelegramBotFileGrant } from '../common/entities/telegram-bot-file-grant.entity';
 import { TelegramBotTokenCryptoService } from './telegram-bot-token-crypto.service';
 import { BOT_TOKEN_PREFIX } from './telegram-bot.types';
+import { GDRIVE_CACHE_LEASE_MS, gdriveCacheBackoffMs } from '../common/utils/gdrive-cache-backoff';
 
 export interface IssueGrantInput {
   telegramUserId: string;
@@ -35,6 +36,13 @@ export interface IssueGrantInput {
   storageAccountId?: string | null;
   /** 远端对象引用（如 GDrive fileId） */
   storageObjectRef?: string | null;
+  /**
+   * Google 缓存状态：缓存模式开启时由签发路径在**同一事务内**写 'pending'。
+   * 若等到回复后再置 pending，进程在两者之间崩溃会让该行永远停在 none、不再重试。
+   */
+  gdriveCacheStatus?: 'pending';
+  /** Google 缓存首次重试时间（pending 时作为租约起点） */
+  gdriveCacheNextRetryAt?: Date;
 }
 
 export interface IssuedGrant {
@@ -147,6 +155,10 @@ export class TelegramBotGrantService {
       storageAccountId: input.storageAccountId ?? null,
       storageObjectRef: input.storageObjectRef ?? null,
       storagePurgedAt: null,
+      gdriveCacheStatus: input.gdriveCacheStatus ?? 'none',
+      gdriveCacheAttempts: 0,
+      gdriveCacheLastError: null,
+      gdriveCacheNextRetryAt: input.gdriveCacheNextRetryAt ?? null,
       tokenHash,
       tokenCipher,
       tokenPrefix: this.tokenPrefixOf(token),
@@ -234,9 +246,79 @@ export class TelegramBotGrantService {
         gdriveCacheAccountId: accountId ?? null,
         gdriveCacheObjectRef: objectRef,
         gdriveCacheStatus: 'ready',
+        gdriveCacheAttempts: 0,
+        gdriveCacheLastError: null,
+        gdriveCacheNextRetryAt: null,
       },
     );
     return (updateResult.affected ?? 0) > 0;
+  }
+
+  /**
+   * 抢占一次 Google 缓存同步（原子 CAS）。
+   *
+   * 命中后写入 10 分钟租约（`gdriveCacheNextRetryAt`）：同一行在租约内不会被
+   * 再次触发；进程崩溃导致租约过期后，扫描任务会重新接管。
+   */
+  async markGDriveCachePending(grantId: string): Promise<boolean> {
+    const now = new Date();
+    const result = await this.grantRepository
+      .createQueryBuilder()
+      .update(TelegramBotFileGrant)
+      .set({
+        gdriveCacheStatus: 'pending',
+        gdriveCacheNextRetryAt: new Date(now.getTime() + GDRIVE_CACHE_LEASE_MS),
+      })
+      .where('id = :id', { id: grantId })
+      .andWhere('"storagePurgedAt" IS NULL')
+      .andWhere('("gdriveCacheStatus" IS NULL OR "gdriveCacheStatus" IN (:...statuses))', {
+        statuses: ['none', 'pending', 'failed'],
+      })
+      .andWhere('("gdriveCacheNextRetryAt" IS NULL OR "gdriveCacheNextRetryAt" <= :now)', { now })
+      .execute();
+    return (result.affected ?? 0) > 0;
+  }
+
+  /** 记录一次缓存同步失败：次数 +1、写原因、按指数退避安排下次重试 */
+  async markGDriveCacheFailed(grantId: string, error: unknown, attempts = 1): Promise<void> {
+    const detail = error instanceof Error ? error.message : String(error);
+    try {
+      await this.grantRepository
+        .createQueryBuilder()
+        .update(TelegramBotFileGrant)
+        .set({
+          gdriveCacheStatus: 'failed',
+          gdriveCacheLastError: (detail || 'unknown').slice(0, 500),
+          gdriveCacheNextRetryAt: new Date(Date.now() + gdriveCacheBackoffMs(attempts)),
+          gdriveCacheAttempts: () => '"gdriveCacheAttempts" + 1',
+        })
+        .where('id = :id', { id: grantId })
+        .execute();
+    } catch (err) {
+      this.logger.warn(`记录 Google 缓存失败状态时出错（忽略）: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /** 到期待重试的 Bot 直链（仅 pending/failed；不回填历史 none） */
+  async findDueGDriveCacheMirrors(limit = 5): Promise<TelegramBotFileGrant[]> {
+    return this.dueGDriveCacheQuery().orderBy('grant.gdriveCacheNextRetryAt', 'ASC').limit(limit).getMany();
+  }
+
+  /** 到期重试积压量（供告警判定） */
+  async countDueGDriveCacheMirrors(): Promise<number> {
+    return this.dueGDriveCacheQuery().getCount();
+  }
+
+  private dueGDriveCacheQuery() {
+    const now = new Date();
+    return this.grantRepository
+      .createQueryBuilder('grant')
+      .where('grant.storageBackend = :backend', { backend: 'telegram' })
+      .andWhere('grant.storagePurgedAt IS NULL')
+      .andWhere('grant.revokedAt IS NULL')
+      .andWhere('grant.expiresAt > :now', { now })
+      .andWhere('grant.gdriveCacheStatus IN (:...statuses)', { statuses: ['pending', 'failed'] })
+      .andWhere('(grant.gdriveCacheNextRetryAt IS NULL OR grant.gdriveCacheNextRetryAt <= :now)', { now });
   }
 
   /** 清理过期授权记录（保留已撤销记录用于审计追溯） */
