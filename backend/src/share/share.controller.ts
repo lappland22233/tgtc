@@ -344,6 +344,8 @@ export class ShareController {
       ip,
       req.headers.range,
       typeof req.headers['if-range'] === 'string' ? req.headers['if-range'] : undefined,
+      // 与预览共用访客标识：多段 Range / 断点续传视为同一次逻辑访问，只扣一次额度
+      this.getOrCreateVisitorHash(req, res),
     );
 
     const isRange = result.start !== undefined && result.end !== undefined && result.total !== undefined;

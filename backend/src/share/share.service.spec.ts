@@ -1,6 +1,7 @@
 import { BadRequestException, ForbiddenException, NotFoundException } from '@nestjs/common';
 import * as bcrypt from 'bcryptjs';
 import { Readable } from 'stream';
+import { RangeNotSatisfiableException } from '../file/file-utils';
 import { ShareService } from './share.service';
 import { ShareLink, ShareLinkStatus, ShareTargetType } from '../common/entities/share-link.entity';
 import { File } from '../common/entities/file.entity';
@@ -182,7 +183,12 @@ describe('ShareService（L6/N2）', () => {
 
       await expect(service.getSharePublicInfo('tok123456789')).rejects.toThrow('分享已过期');
       expect(link.status).toBe(ShareLinkStatus.EXPIRED);
-      expect(shareLinkRepo.save).toHaveBeenCalled();
+      // 必须用字段级 update：整实体 save 会覆盖并发 updateShare 刚改的密码/有效期
+      expect(shareLinkRepo.update).toHaveBeenCalledWith(
+        expect.objectContaining({ id: link.id }),
+        { status: ShareLinkStatus.EXPIRED },
+      );
+      expect(shareLinkRepo.save).not.toHaveBeenCalled();
     });
 
     it('访问次数耗尽返回 404 并将状态落为 EXHAUSTED', async () => {
@@ -291,6 +297,60 @@ describe('ShareService（L6/N2）', () => {
       shareLinkRepo.findOne.mockResolvedValue(null);
       await expect(service.getShareDownloadStream('missing', fileId, undefined, null)).rejects.toThrow(NotFoundException);
     });
+
+    it('取流失败时退还已扣的额度（非法 Range 不应白吃次数）', async () => {
+      shareLinkRepo.findOne.mockResolvedValue(makeLink({ maxAccessCount: 3, currentAccessCount: 0 }));
+      fileService.getShareDownloadStreamWithRange.mockRejectedValue(
+        new RangeNotSatisfiableException(1234),
+      );
+
+      await expect(
+        service.getShareDownloadStream('tok123456789', fileId, undefined, null, 'bytes=999999-'),
+      ).rejects.toThrow();
+
+      // 扣次（原子 +1）与退款（原子 -1）成对出现：createQueryBuilder 被调用两次
+      expect((shareLinkRepo.createQueryBuilder as jest.Mock).mock.calls.length).toBe(2);
+    });
+
+    it('携带 visitorHash 时走会话去重，同会话第二次不再扣次', async () => {
+      shareLinkRepo.findOne.mockResolvedValue(makeLink({ maxAccessCount: 1, currentAccessCount: 0 }));
+      previewSessionService.consumePreviewAccess
+        .mockResolvedValueOnce('consumed')
+        .mockResolvedValueOnce('idempotent');
+
+      await service.getShareDownloadStream('tok123456789', fileId, undefined, null, 'bytes=0-99', undefined, 'vh-1');
+      await service.getShareDownloadStream('tok123456789', fileId, undefined, null, 'bytes=100-199', undefined, 'vh-1');
+
+      expect(previewSessionService.consumePreviewAccess).toHaveBeenCalledTimes(2);
+      expect(previewSessionService.consumePreviewAccess).toHaveBeenCalledWith(
+        expect.objectContaining({ id: expect.any(String) }), fileId, 'vh-1',
+      );
+    });
+
+    it('会话报告耗尽时抛 404 且不打开流', async () => {
+      shareLinkRepo.findOne.mockResolvedValue(makeLink({ maxAccessCount: 1, currentAccessCount: 1 }));
+      previewSessionService.consumePreviewAccess.mockResolvedValue('exhausted');
+
+      await expect(
+        service.getShareDownloadStream('tok123456789', fileId, undefined, null, 'bytes=0-9', undefined, 'vh-2'),
+      ).rejects.toThrow('分享访问次数已耗尽');
+      expect(fileService.getShareDownloadStreamWithRange).not.toHaveBeenCalled();
+    });
+
+    it('会话幂等命中（未新扣次）时取流失败不再退款', async () => {
+      shareLinkRepo.findOne.mockResolvedValue(makeLink({ maxAccessCount: 3, currentAccessCount: 1 }));
+      previewSessionService.consumePreviewAccess.mockResolvedValue('idempotent');
+      fileService.getShareDownloadStreamWithRange.mockRejectedValue(new Error('上游失败'));
+      (shareLinkRepo.createQueryBuilder as jest.Mock).mockClear();
+
+      await expect(
+        service.getShareDownloadStream('tok123456789', fileId, undefined, null, 'bytes=0-9', undefined, 'vh-3'),
+      ).rejects.toThrow('上游失败');
+
+      // 幂等命中说明本次没有新扣次，不得退款（否则会侵蚀其他访问的计数）：
+      // 会话路径完全不经过 createQueryBuilder 的计数 UPDATE
+      expect((shareLinkRepo.createQueryBuilder as jest.Mock).mock.calls.length).toBe(0);
+    });
   });
 
   // ---------- consumeSharePreviewAccess ----------
@@ -316,8 +376,62 @@ describe('ShareService（L6/N2）', () => {
 
   // ---------- createShare / 跨用户隔离 ----------
 
-  describe('createShare', () => {
-    it('目标不属于创建者时拒绝（越权分享负向用例）', async () => {
+  describe('updateShare', () => {
+    it('只写变更字段（字段级 update），不用整实体 save 覆盖并发的访问计数', async () => {
+      const link = makeLink({ maxAccessCount: 10, currentAccessCount: 4 });
+      shareLinkRepo.findOne.mockResolvedValue(link);
+      shareLinkRepo.save.mockClear();
+      (shareLinkRepo.update as jest.Mock).mockClear();
+
+      await service.updateShare(link.id, link.creatorId, { maxAccessCount: 20 });
+
+      expect(shareLinkRepo.save).not.toHaveBeenCalled();
+      const [criteria, patch] = (shareLinkRepo.update as jest.Mock).mock.calls[0];
+      expect(criteria).toMatchObject({ id: link.id, creatorId: link.creatorId, isDeleted: false });
+      expect(patch).toMatchObject({ maxAccessCount: 20 });
+      // 绝不能把 currentAccessCount 写回（那正是丢失更新的来源）
+      expect(patch).not.toHaveProperty('currentAccessCount');
+    });
+
+    it('未变更任何字段时不发 UPDATE', async () => {
+      const link = makeLink();
+      shareLinkRepo.findOne.mockResolvedValue(link);
+      (shareLinkRepo.update as jest.Mock).mockClear();
+
+      await service.updateShare(link.id, link.creatorId, {});
+
+      expect(shareLinkRepo.update).not.toHaveBeenCalled();
+      expect(shareLinkRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('调大上限后按新值判定并复位状态', async () => {
+      const link = makeLink({
+        status: ShareLinkStatus.EXHAUSTED, maxAccessCount: 2, currentAccessCount: 2,
+      });
+      shareLinkRepo.findOne.mockResolvedValue(link);
+      (shareLinkRepo.update as jest.Mock).mockClear();
+
+      await service.updateShare(link.id, link.creatorId, { maxAccessCount: 10 });
+
+      const patch = (shareLinkRepo.update as jest.Mock).mock.calls[0][1];
+      expect(patch).toMatchObject({ maxAccessCount: 10, status: ShareLinkStatus.ACTIVE });
+    });
+
+    it('上限仍不足时不复位状态（避免把耗尽的分享错误放开）', async () => {
+      const link = makeLink({
+        status: ShareLinkStatus.EXHAUSTED, maxAccessCount: 2, currentAccessCount: 5,
+      });
+      shareLinkRepo.findOne.mockResolvedValue(link);
+      (shareLinkRepo.update as jest.Mock).mockClear();
+
+      await service.updateShare(link.id, link.creatorId, { maxAccessCount: 3 });
+
+      const patch = (shareLinkRepo.update as jest.Mock).mock.calls[0][1];
+      expect(patch).not.toHaveProperty('status');
+    });
+  });
+
+  describe('createShare', () => {    it('目标不属于创建者时拒绝（越权分享负向用例）', async () => {
       fileRepo.findOne.mockResolvedValue(null);
 
       await expect(service.createShare(otherUserId, {
