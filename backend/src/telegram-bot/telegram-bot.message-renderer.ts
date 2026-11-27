@@ -247,22 +247,26 @@ export function renderQueueNotice(input: QueueNoticeInput): RenderedMessage {
 
 export interface HelpInput {
   admin: boolean;
+  /** 当前用户可见的命令（由 telegram-bot.commands 按权限过滤，帮助与命令菜单共用同一来源） */
+  commands: readonly HelpCommandRow[];
+}
+
+/** 帮助列表的一行：命令用法 + 说明 + 归属分组 */
+export interface HelpCommandRow {
+  /** 带参数的完整用法，如 `/ttl <1-720>` */
+  usage: string;
+  description: string;
+  scope: 'user' | 'admin';
 }
 
 /** /help /start */
-export function renderHelp(input: HelpInput = { admin: false }): RenderedMessage {
-  const userCommands = [
-    ['/help', '显示本帮助'],
-    ['/id', '查看你的 TG 用户 ID'],
-    ['/quota', '查看今日剩余额度'],
-  ];
-  const adminCommands = [
-    ['/wl_add <TG用户ID>', '加入白名单'],
-    ['/wl_remove <TG用户ID>', '移出白名单'],
-    ['/wl_list', '列出白名单'],
-    ['/link_query <TG用户ID>', '查询有效直链'],
-    ['/link_revoke <直链URL或Token>', '撤销直链'],
-  ];
+export function renderHelp(input: HelpInput): RenderedMessage {
+  // `/start` 与 `/help` 是同一入口，帮助里只列一行，避免重复条目
+  const rows = input.commands.filter(row => row.usage !== '/start');
+  const userCommands = rows
+    .filter(row => row.scope === 'user')
+    .map(row => [row.usage, row.description] as const);
+  const adminRows = input.admin ? rows.filter(row => row.scope === 'admin') : [];
 
   const textLines = [
     '发送「文件」（Telegram 附件 → 文件）即可获得下载直链。',
@@ -271,8 +275,8 @@ export function renderHelp(input: HelpInput = { admin: false }): RenderedMessage
     '可用命令：',
     ...userCommands.map(([cmd, desc]) => `${cmd} — ${desc}`),
   ];
-  if (input.admin) {
-    textLines.push('', '管理员命令（仅私聊）：', ...adminCommands.map(([cmd, desc]) => `${cmd} — ${desc}`));
+  if (adminRows.length > 0) {
+    textLines.push('', '管理员命令（仅私聊）：', ...adminRows.map(row => `${row.usage} — ${row.description}`));
   }
 
   const blocks: BotRichBlock[] = [
@@ -283,15 +287,22 @@ export function renderHelp(input: HelpInput = { admin: false }): RenderedMessage
       paragraph([{ type: 'code', text: cmd }, ' — ', desc]),
     ])),
   ];
-  if (input.admin) {
+  if (adminRows.length > 0) {
     blocks.push(details(
       [{ type: 'bold', text: '管理员命令（仅私聊）' }],
-      [list(adminCommands.map(([cmd, desc]) => [paragraph([{ type: 'code', text: cmd }, ' — ', desc])]))],
+      [list(adminRows.map(row => [paragraph([{ type: 'code', text: row.usage }, ' — ', row.description])]))],
     ));
   }
 
   return { text: textLines.join('\n'), rich: { blocks } };
 }
+
+/** 额度来源的展示文案（与 QuotaSource 一一对应） */
+const QUOTA_SOURCE_LABEL: Record<'whitelist' | 'user' | 'global', string> = {
+  whitelist: '白名单（不限额度）',
+  user: '单独额度',
+  global: '默认额度',
+};
 
 export interface QuotaInput {
   whitelisted: boolean;
@@ -299,6 +310,8 @@ export interface QuotaInput {
   limit?: number;
   remaining?: number;
   timezone?: string;
+  /** 生效额度来源；缺省按默认额度展示（兼容旧调用） */
+  source?: 'whitelist' | 'user' | 'global';
 }
 
 /** /quota */
@@ -310,7 +323,7 @@ export function renderQuota(input: QuotaInput): RenderedMessage {
       rich: { blocks: [paragraph([{ type: 'bold', text: '白名单用户' }, '，不限每日文件数。'])] },
     };
   }
-  const { used = 0, limit = 0, remaining = 0, timezone = '' } = input;
+  const { used = 0, limit = 0, remaining = 0, timezone = '', source = 'global' } = input;
   const text = `今日已使用 ${used} / ${limit}，剩余 ${remaining} 次。\n（切日时区：${timezone}）`;
   return {
     text,
@@ -321,61 +334,336 @@ export function renderQuota(input: QuotaInput): RenderedMessage {
           '已使用 ', { type: 'bold', text: String(used) }, ' / ', String(limit),
           '，剩余 ', { type: 'bold', text: String(remaining) }, ' 次。',
         ]),
-        { type: 'footer', text: [{ type: 'italic', text: `切日时区：${timezone}` }] },
+        { type: 'footer', text: [{ type: 'italic', text: `额度来源：${QUOTA_SOURCE_LABEL[source]} · 切日时区：${timezone}` }] },
       ],
     },
   };
 }
 
+export interface QuotaDeniedInput {
+  limit: number;
+  /** 覆盖额度用尽时提示联系管理员；默认额度用尽时提示明日重置 */
+  source?: 'user' | 'global';
+}
+
 /** /quota 额度耗尽 */
-export function renderQuotaDenied(limit: number): RenderedMessage {
-  const text = `今日额度已用完（${limit} 个文件/天）。明日将自动重置，或联系管理员加入白名单。`;
+export function renderQuotaDenied(input: QuotaDeniedInput | number): RenderedMessage {
+  const { limit, source = 'global' } = typeof input === 'number' ? { limit: input, source: 'global' as const } : input;
+  const action = source === 'user' ? '明日将自动重置，或联系管理员调整额度。' : '明日将自动重置，或联系管理员加入白名单。';
+  const text = `今日额度已用完（${limit} 个文件/天）。${action}`;
   return {
     text,
     rich: {
       blocks: [
         heading([{ type: 'bold', text: '今日额度已用完' }], 2),
         paragraph([`配额上限 `, { type: 'bold', text: `${limit} 个文件/天` }, `。`]),
-        quote([paragraph('明日将自动重置，或联系管理员加入白名单。')]),
+        quote([paragraph(action)]),
       ],
     },
   };
 }
 
-export interface LinkQueryRow {
+export interface AdminLinkRow {
+  grantId: string;
   fileName: string;
   expiresAt: string;
   url?: string | null;
   prefix?: string | null;
+  telegramUserId?: string;
 }
 
-/** /link_query：表格（未启用加密存储时无法回放完整链接，单独标注） */
-export function renderLinkQuery(target: string, rows: LinkQueryRow[], total: number): RenderedMessage {
-  const shown = rows.length;
-  const plainRows = rows.map((row, index) => {
-    const name = row.fileName || '(未命名)';
-    const expires = new Date(row.expiresAt).toISOString();
-    if (row.url) return `${index + 1}. ${name}\n   过期：${expires}\n   ${row.url}`;
-    return `${index + 1}. ${name}\n   过期：${expires}\n   前缀：${row.prefix}（未启用加密存储，无法回放完整链接，请重新签发）`;
-  });
-  const text = `直链（${target}）：\n${plainRows.join('\n')}${total > shown ? `\n……共 ${total} 条（已截断）` : ''}`;
+export interface AdminLinksInput {
+  /** 列表范围描述，如「全部用户」或某个 TG 用户 ID */
+  scopeLabel: string;
+  page: number;
+  pageSize: number;
+  total: number;
+  rows: AdminLinkRow[];
+  /** 是否支持回放完整链接（未配置加密密钥时为 false） */
+  cryptoAvailable?: boolean;
+}
 
-  const tableRows = rows.map((row, index) => {
-    const name = row.fileName || '(未命名)';
-    return [String(index + 1), name, new Date(row.expiresAt).toISOString(), row.url || `前缀 ${row.prefix}（无法回放）`];
+/** 文件名在表格里截断，避免单行撑爆消息长度 */
+function clipFileName(name: string, max = 40): string {
+  const value = name || '(未命名)';
+  return value.length > max ? `${value.slice(0, max)}…` : value;
+}
+
+/** 过期时间只展示到分钟，表格里不塞完整 ISO 串 */
+function shortExpiry(iso: string): string {
+  const parsed = new Date(iso);
+  if (Number.isNaN(parsed.getTime())) return iso;
+  return parsed.toISOString().slice(0, 16).replace('T', ' ');
+}
+
+/**
+ * /links 与面板「有效直链」页共用的列表。
+ *
+ * 与旧 `/link_query` 的区别：分页而非一次 20 条截断；每行带撤销按钮（回调只携带 grantId），
+ * 让管理员不需要复制 URL 就能撤销。
+ */
+/** Telegram 对 callback_data 的硬上限（字节） */
+export const CALLBACK_DATA_MAX = 64;
+
+/**
+ * 撤销确认的回调数据。
+ *
+ * 预算：`ba:rv:`(6) + grantId(36) + `:`(1) + page(≤4) = ≤47，留足余量。
+ * 用户过滤条件（`:u:<tgId>`）只在总长仍 ≤64 时附加，否则退回全量列表——
+ * 宁可返回时少一层过滤，也不能发出超限的按钮（Telegram 会整条消息拒收）。
+ */
+function revokeCallbackData(grantId: string, page: number, scopeSuffix: string): string {
+  const base = `ba:rv:${grantId}:${page}${scopeSuffix}`;
+  return base.length <= CALLBACK_DATA_MAX ? base : `ba:rv:${grantId}:1`;
+}
+
+export function renderAdminLinks(input: AdminLinksInput): RenderedMessage {
+  const { scopeLabel, page, pageSize, total, rows, cryptoAvailable = true } = input;
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const empty = rows.length === 0;
+
+  const plainRows = rows.map((row, index) => {
+    const no = (page - 1) * pageSize + index + 1;
+    const head = `${no}. ${row.fileName || '(未命名)'}\n   过期：${new Date(row.expiresAt).toISOString()}`;
+    if (row.url) return `${head}\n   ${row.url}`;
+    return `${head}\n   前缀：${row.prefix ?? '-'}（未启用加密存储，无法回放完整链接）`;
   });
+
+  const textLines = [
+    `直链（${scopeLabel}）第 ${page}/${totalPages} 页，共 ${total} 条`,
+    ...(empty ? ['当前没有有效的直链。'] : plainRows),
+  ];
 
   const blocks: BotRichBlock[] = [
-    heading([{ type: 'bold', text: '直链查询' }], 2),
-    paragraph([{ type: 'bold', text: '用户：' }, { type: 'code', text: target }]),
-    table(['#', '文件名', '过期时间', '直链'], tableRows),
+    heading([{ type: 'bold', text: '有效直链' }], 2),
+    paragraph([{ type: 'bold', text: '范围：' }, { type: 'code', text: scopeLabel }]),
   ];
-  if (total > shown) blocks.push({ type: 'footer', text: [{ type: 'italic', text: `共 ${total} 条，仅展示前 ${shown} 条` }] });
+  if (empty) {
+    blocks.push(paragraph('当前没有有效的直链。'));
+  } else {
+    const tableRows = rows.map((row, index) => {
+      const no = String((page - 1) * pageSize + index + 1);
+      const link = row.url || `前缀 ${row.prefix ?? '-'}（无法回放）`;
+      return [no, clipFileName(row.fileName), shortExpiry(row.expiresAt), link];
+    });
+    blocks.push(table(['#', '文件名', '过期', '直链'], tableRows));
+    if (!cryptoAvailable) {
+      blocks.push(quote([paragraph('未配置 TELEGRAM_BOT_ENCRYPTION_KEY：无法回放完整链接，只能按前缀核对或重新签发。')]));
+    }
+  }
+  blocks.push({ type: 'footer', text: [{ type: 'italic', text: `第 ${page}/${totalPages} 页 · 共 ${total} 条` }] });
+
+  // 按钮：每行一个撤销（只带 grantId + 返回页码，绝不带 URL/文件名），末行翻页 + 返回面板
+  const scopeSuffix = input.scopeLabel && input.scopeLabel !== '全部用户'
+    ? `:u:${input.scopeLabel}` : '';
+  const keyboard: BotInlineButton[][] = rows.map((row, index) => [{
+    text: `撤销 #${(page - 1) * pageSize + index + 1}`,
+    callback_data: revokeCallbackData(row.grantId, page, scopeSuffix),
+  }]);
+  const navRow: BotInlineButton[] = [];
+  if (page > 1) navRow.push({ text: '上一页', callback_data: `ba:lk:${page - 1}${scopeSuffix}` });
+  if (page < totalPages) navRow.push({ text: '下一页', callback_data: `ba:lk:${page + 1}${scopeSuffix}` });
+  navRow.push({ text: '返回面板', callback_data: 'ba:root' });
+  keyboard.push(navRow);
+
+  return { text: textLines.join('\n'), rich: { blocks }, replyMarkup: { inline_keyboard: keyboard } };
+}
+
+export interface AdminPanelInput {
+  ttlHours: number;
+  ttlPresets: readonly number[];
+  generalLimit: number;
+  limitPresets: readonly number[];
+  whitelistCount: number;
+  overrideCount: number;
+  activeLinkCount: number;
+  usageDate: string;
+  quotaTimezone: string;
+  storageMode: 'telegram' | 'gdrive';
+  /** 站点域名是否可用（不可用时无法签发直链） */
+  domainReady: boolean;
+}
+
+/**
+ * /admin 主面板。
+ *
+ * 设计取舍：**只放预设档位与导航**，精确数值留给命令（`/ttl 6`、`/limit 8`、`/quota_set`），
+ * 因为 Telegram 内联键盘不能收集自由输入；硬塞 1–720 的档位只会变成几十个按钮。
+ */
+export function renderAdminPanel(input: AdminPanelInput): RenderedMessage {
+  const {
+    ttlHours, ttlPresets, generalLimit, limitPresets,
+    whitelistCount, overrideCount, activeLinkCount, usageDate, quotaTimezone, storageMode, domainReady,
+  } = input;
+
+  const text = [
+    '管理面板',
+    `直链有效期：${ttlHours} 小时`,
+    `通用每日额度：${generalLimit} 个/天`,
+    `白名单：${whitelistCount} 人 · 单独额度：${overrideCount} 人`,
+    `有效直链：${activeLinkCount} 条`,
+    `今日（${usageDate}）· 时区 ${quotaTimezone}`,
+    `存储模式：${storageMode === 'gdrive' ? '纯 Google 存储' : '原生 Telegram 存储'}`,
+    domainReady ? '站点域名：已配置' : '站点域名：未配置（无法签发直链）',
+    '',
+    '精确数值请用命令：/ttl 12、/limit 8、/quota_set <TG用户ID> 20',
+  ].join('\n');
+
+  const blocks: BotRichBlock[] = [
+    heading([{ type: 'bold', text: '管理面板' }], 2),
+    table(['项目', '当前值'], [
+      ['直链有效期', `${ttlHours} 小时`],
+      ['通用每日额度', `${generalLimit} 个/天`],
+      ['白名单', `${whitelistCount} 人`],
+      ['单独额度', `${overrideCount} 人`],
+      ['有效直链', `${activeLinkCount} 条`],
+      ['存储模式', storageMode === 'gdrive' ? '纯 Google 存储' : '原生 Telegram 存储'],
+      ['站点域名', domainReady ? '已配置' : '未配置（无法签发直链）'],
+    ]),
+    quote([paragraph(['精确数值请用命令：', { type: 'code', text: '/ttl' }, '、', { type: 'code', text: '/limit' }, '、', { type: 'code', text: '/quota_set' }])]),
+    { type: 'footer', text: [{ type: 'italic', text: `今日 ${usageDate} · 切日时区 ${quotaTimezone}` }] },
+  ];
+  if (!domainReady) {
+    blocks.splice(2, 0, quote([paragraph('⚠️ 站点域名未配置，当前无法签发直链，请在后台「Telegram Bot 设置」中配置。')]));
+  }
+
+  const keyboard: BotInlineButton[][] = [
+    ttlPresets.map(hours => ({ text: `有效期 ${hours}h`, callback_data: `ba:ttl:${hours}` })),
+    limitPresets.map(limit => ({ text: `额度 ${limit}`, callback_data: `ba:lim:${limit}` })),
+    [
+      { text: '有效直链', callback_data: 'ba:lk:1' },
+      { text: '白名单', callback_data: 'ba:wlp:1' },
+    ],
+  ];
+
+  return { text, rich: { blocks }, replyMarkup: { inline_keyboard: keyboard } };
+}
+
+export interface RevokeConfirmInput {
+  grantId: string;
+  fileName: string;
+  telegramUserId: string;
+  expiresAt: string;
+  /** 返回列表时的页码，撤销确认由列表跳转而来 */
+  returnPage: number;
+  scopeLabel?: string;
+}
+
+/** 撤销确认页：撤销不可逆（软撤销立即失效），必须先确认一次 */
+export function renderRevokeConfirm(input: RevokeConfirmInput): RenderedMessage {
+  const { grantId, fileName, telegramUserId, expiresAt, returnPage } = input;
+  const text = [
+    '确认撤销直链？',
+    `文件名：${fileName || '(未命名)'}`,
+    `所属用户：${telegramUserId}`,
+    `过期时间：${new Date(expiresAt).toISOString()}`,
+    '撤销后链接立即失效，且无法恢复。',
+  ].join('\n');
+
+  const scopeSuffix = input.scopeLabel && input.scopeLabel !== '全部用户' ? `:u:${input.scopeLabel}` : '';
+  return {
+    text,
+    rich: {
+      blocks: [
+        heading([{ type: 'bold', text: '确认撤销直链' }], 2),
+        table(['项目', '值'], [
+          ['文件名', clipFileName(fileName)],
+          ['所属用户', telegramUserId],
+          ['过期时间', shortExpiry(expiresAt)],
+        ]),
+        quote([paragraph('撤销后链接立即失效，且无法恢复。')]),
+      ],
+    },
+    replyMarkup: {
+      inline_keyboard: [[
+        { text: '确认撤销', callback_data: `ba:rvy:${grantId}` },
+        { text: '返回列表', callback_data: `ba:rvn:${returnPage}${scopeSuffix}` },
+      ]],
+    },
+  };
+}
+
+export interface WhitelistInput {
+  ids: string[];
+  total: number;
+  page?: number;
+  pageSize?: number;
+}
+
+/** /wl list 与面板「白名单」页共用 */
+export function renderWhitelistInput(input: WhitelistInput): RenderedMessage {
+  const { ids, total, page, pageSize } = input;
+  if (page === undefined || pageSize === undefined) return renderWhitelist(ids, total);
+
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  if (total === 0) {
+    return {
+      text: '白名单为空。',
+      rich: { blocks: [paragraph('白名单为空。')] },
+      replyMarkup: { inline_keyboard: [[{ text: '返回面板', callback_data: 'ba:root' }]] },
+    };
+  }
+
+  const text = `白名单（第 ${page}/${totalPages} 页，共 ${total} 个）：\n${ids.map((id, i) => `${(page - 1) * pageSize + i + 1}. ${id}`).join('\n')}`;
+  const keyboard: BotInlineButton[] = [];
+  if (page > 1) keyboard.push({ text: '上一页', callback_data: `ba:wlp:${page - 1}` });
+  if (page < totalPages) keyboard.push({ text: '下一页', callback_data: `ba:wlp:${page + 1}` });
+  keyboard.push({ text: '返回面板', callback_data: 'ba:root' });
+
+  return {
+    text,
+    rich: {
+      blocks: [
+        heading([{ type: 'bold', text: '白名单' }], 2),
+        list(ids.map(id => [paragraph([{ type: 'code', text: id }])])),
+        { type: 'footer', text: [{ type: 'italic', text: `第 ${page}/${totalPages} 页 · 共 ${total} 个` }] },
+      ],
+    },
+    replyMarkup: { inline_keyboard: [keyboard] },
+  };
+}
+
+export interface SettingChangedInput {
+  label: string;
+  before: string;
+  after: string;
+  hint?: string;
+}
+
+/** /ttl、/limit、/quota_set 的成收回执：前后对比比「已设置」更有信息量 */
+export function renderSettingChanged(input: SettingChangedInput): RenderedMessage {
+  const { label, before, after, hint } = input;
+  const text = [
+    `${label}已更新`,
+    `原值：${before}`,
+    `现值：${after}`,
+    ...(hint ? [hint] : []),
+  ].join('\n');
+
+  const blocks: BotRichBlock[] = [
+    heading([{ type: 'bold', text: `${label}已更新` }], 2),
+    table(['项目', '原值', '现值'], [[label, before, after]]),
+  ];
+  if (hint) blocks.push({ type: 'footer', text: [{ type: 'italic', text: hint }] });
 
   return { text, rich: { blocks } };
 }
 
-/** /wl_list */
+/** 清除单账号额度覆盖的回执 */
+export function renderOverrideCleared(telegramUserId: string, fallbackLimit: number): RenderedMessage {
+  const text = `已清除 ${telegramUserId} 的单独额度，将使用默认额度（${fallbackLimit} 个/天）。`;
+  return {
+    text,
+    rich: {
+      blocks: [
+        heading([{ type: 'bold', text: '已清除单独额度' }], 2),
+        paragraph([{ type: 'code', text: telegramUserId }, ' 将使用默认额度：', { type: 'bold', text: `${fallbackLimit} 个/天` }, '。']),
+      ],
+    },
+  };
+}
+
+/** 白名单列表的非分页形态（`renderWhitelistInput` 在未传分页参数时回退到它） */
 export function renderWhitelist(ids: string[], total: number): RenderedMessage {
   if (total === 0) {
     return { text: '白名单为空。', rich: { blocks: [paragraph('白名单为空。')] } };

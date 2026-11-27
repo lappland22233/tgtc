@@ -93,6 +93,10 @@ export type AuditAction =
   | 'telegram_bot_whitelist_add'
   | 'telegram_bot_whitelist_remove'
   | 'telegram_bot_command_denied'
+  | 'telegram_bot_setting_changed'
+  | 'telegram_bot_quota_override_set'
+  | 'telegram_bot_quota_override_cleared'
+  | 'telegram_bot_admin_panel_opened'
   // ---- Telegram 账号池管理 + 文件镜像备份 ----
   | 'telegram_account_created'
   | 'telegram_account_updated'

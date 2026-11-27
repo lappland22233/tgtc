@@ -210,6 +210,10 @@ export const actionLabels: Record<string, string> = {
   telegram_bot_whitelist_add: 'Bot 白名单加入',
   telegram_bot_whitelist_remove: 'Bot 白名单移除',
   telegram_bot_command_denied: 'Bot 越权命令',
+  telegram_bot_setting_changed: 'Bot 设置变更',
+  telegram_bot_quota_override_set: 'Bot 单账号额度设置',
+  telegram_bot_quota_override_cleared: 'Bot 单账号额度清除',
+  telegram_bot_admin_panel_opened: 'Bot 管理面板打开',
   // Telegram 账号池管理 + 文件镜像备份（v1.5.3 新增审计动作，缺失会显示为“未知操作”）
   telegram_account_created: '账号池创建账号',
   telegram_account_updated: '账号池更新账号',
@@ -241,6 +245,7 @@ const resourceTypeLabels: Record<string, string> = {
   bot_config: 'Bot 配置', telegram_bot_grant: 'Bot 直链', telegram_bot_quota: 'Bot 额度',
   telegram_bot_file: 'Bot 文件', telegram_bot_whitelist: 'Bot 白名单', telegram_bot_command: 'Bot 命令',
   telegram_bot_task: 'Bot 收件任务', telegram_bot_user: 'TG 用户',
+  telegram_bot_user_quota: 'Bot 单账号额度', telegram_bot_panel: 'Bot 管理面板',
   // v1.5.3 新引入的资源类型
   telegram_account: '账号池账号', telegram_account_pool: '账号池开关',
   telegram_mirror_rule: '镜像规则', telegram_mirror_task: '镜像任务',

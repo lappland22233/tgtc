@@ -119,7 +119,18 @@ export interface AuditRow {
 export interface BotUserOverview {
   telegramUserId: string;
   ban: { telegramUserId: string; reason: string; bannedBy: string | null; bannedAt: string } | null;
-  quota: { used: number; limit: number | null; remaining: number | null; usageDate: string; whitelisted: boolean };
+  quota: {
+    used: number;
+    limit: number | null;
+    remaining: number | null;
+    usageDate: string;
+    whitelisted: boolean;
+    /** 生效额度来源：白名单不限 / 单账号覆盖 / 全局默认 */
+    limitSource?: 'whitelist' | 'user' | 'global';
+    /** 单账号覆盖额度（无覆盖为 null） */
+    override?: number | null;
+    globalLimit?: number;
+  };
   downloads: { requests: number; bytes: string };
   uploads: { total: number; byStatus: Record<QueueStatus, number> };
   grants: { total: number; active: number };
@@ -166,4 +177,11 @@ export async function revokeGrant(id: string): Promise<{ changed: boolean }> {
 }
 export async function banBotUser(id: string, reason: string): Promise<{ cancelledTasks: number; revokedGrants: number }> {
   return (await api.post(base + userPath(id) + '/ban', { reason })).data.data;
+}
+/** 设置单账号每日额度；传 null 表示清除覆盖、回落通用额度 */
+export async function setBotUserQuota(
+  id: string,
+  dailyLimit: number | null,
+): Promise<{ changed: boolean; override: number | null; before?: number | null }> {
+  return (await api.put(base + userPath(id) + '/quota', { dailyLimit })).data.data;
 }

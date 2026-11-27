@@ -98,6 +98,8 @@ describe('真实 SQLite 数据源关键业务与并发 QA', () => {
       'SqliteBotInboundQueue1804700000000',
       // Google 双写重试状态机：attempts / lastError / nextRetryAt + 扫描索引
       'SqliteAddGDriveCacheRetryColumns1804800000000',
+      // 单账号每日额度覆盖
+      'SqliteCreateTelegramBotUserQuotas1804900000000',
     ]);
 
     await dataSource.undoLastMigration();
@@ -172,9 +174,11 @@ describe('真实 SQLite 数据源关键业务与并发 QA', () => {
     const { TelegramBotWhitelist } = require('../common/entities/telegram-bot-whitelist.entity') as typeof import('../common/entities/telegram-bot-whitelist.entity');
     const { TelegramBotQuotaService } = require('../telegram-bot/telegram-bot-quota.service') as typeof import('../telegram-bot/telegram-bot-quota.service');
 
+    const { TelegramBotUserQuota } = require('../common/entities/telegram-bot-user-quota.entity') as typeof import('../common/entities/telegram-bot-user-quota.entity');
     const service = new TelegramBotQuotaService(
       dataSource.getRepository(TelegramBotDailyUsage),
       dataSource.getRepository(TelegramBotWhitelist),
+      dataSource.getRepository(TelegramBotUserQuota),
       dataSource,
     );
 
@@ -261,9 +265,10 @@ describe('真实 SQLite 数据源关键业务与并发 QA', () => {
         { get: jest.fn() } as any,
         { log: jest.fn() } as any,
         { tokenPrefixOf: (t: string) => `tgl_${t.slice(0, 8)}` } as any,
-        { listWhitelist: jest.fn(), addToWhitelist: jest.fn(), removeFromWhitelist: jest.fn() } as any,
+        { listWhitelist: jest.fn(), addToWhitelist: jest.fn(), removeFromWhitelist: jest.fn(), listOverrides: jest.fn(async () => []) } as any,
         { resolveSiteOriginAsync: jest.fn() } as any,
         dataSource,
+        { isAvailable: () => true } as any,
       );
       const usage = await adminService.getUsageSummary('24h');
       expect(usage).toMatchObject({ timeRange: '24h', downloads: 1, uniqueUsers: 1, totalBytes: '2048' });

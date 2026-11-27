@@ -1,5 +1,7 @@
 import { Transform, Type } from 'class-transformer';
-import { IsIn, IsInt, IsISO8601, IsOptional, IsString, Length, Matches, Max, Min } from 'class-validator';
+import {
+  IsIn, IsInt, IsISO8601, IsOptional, IsString, Length, Matches, Max, Min, ValidateIf,
+} from 'class-validator';
 
 const telegramId = /^[1-9]\d{0,19}$/;
 
@@ -89,4 +91,20 @@ export class BanTelegramUserDto {
   @IsString()
   @Length(1, 500)
   reason: string;
+}
+
+/**
+ * 设置/清除单账号每日额度。
+ *
+ * `dailyLimit: null` 表示清除覆盖（回落通用额度）——与 Bot 侧
+ * `/quota_set <ID> default` 语义一致，避免面板与命令两套行为。
+ * 字段必填（即使是 null）：缺省会导致「什么都没改」却返回成功。
+ */
+export class SetUserQuotaDto {
+  @ValidateIf((dto: SetUserQuotaDto) => dto.dailyLimit !== null)
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(100000)
+  dailyLimit: number | null;
 }

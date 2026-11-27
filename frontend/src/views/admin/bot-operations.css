@@ -125,10 +125,31 @@
   padding: 6px 8px;
 }
 
-.bot-operations .ops-row, .bot-operations .ops-confirm {
+.bot-operations .ops-row, .bot-operations .ops-confirm, .bot-operations .ops-quota {
   display: grid;
   gap: 12px;
   overflow-wrap: anywhere;
+}
+
+.bot-operations .ops-quota {
+  border: 1px solid var(--color-border, #e5e7eb);
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+
+.bot-operations .ops-quota__title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.bot-operations .ops-quota label {
+  display: grid;
+  gap: 6px;
+}
+
+.bot-operations .ops-quota input {
+  max-width: 220px;
 }
 
 .bot-operations .ops-details, .bot-operations .ops-summary {

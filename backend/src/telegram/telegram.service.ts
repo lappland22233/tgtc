@@ -1119,6 +1119,38 @@ export class TelegramService {
   }
 
   /**
+   * 设置命令菜单（setMyCommands）。
+   *
+   * `scope` 为 Telegram 的 scope 对象（`{ type: 'default' }` / `{ type: 'chat', chat_id }` 等）。
+   * 本地 Bot API fork 已实现该方法（默认 scope 与按 chat 定制均支持）。
+   *
+   * 该方法**不重试**：管理员从未启动过 Bot 时服务端返回 chat not found，属于预期情况，
+   * 由调用方决定忽略；真正的 400（方法不支持）也应由调用方置为永久禁用，而不是反复触发。
+   */
+  async setMyCommands(
+    commands: Array<{ command: string; description: string }>,
+    scope?: Record<string, unknown>,
+  ): Promise<boolean> {
+    if (!this.botToken) {
+      throw new Error('TELEGRAM_BOT_TOKEN 未配置，无法设置命令菜单');
+    }
+    const payload: Record<string, unknown> = { commands: JSON.stringify(commands) };
+    if (scope) payload.scope = JSON.stringify(scope);
+
+    const response = await this.telegramRequest(
+      () => axios.post<{ ok: boolean; description?: string }>(
+        `${this.getBaseUrl()}/setMyCommands`,
+        payload,
+        { timeout: 10 * 1000 },
+      ),
+      'setMyCommands',
+      1,
+    );
+
+    return Boolean(response.data?.ok);
+  }
+
+  /**
    * 长轮询获取更新（getUpdates）。
    *
    * - `offset` 为上一次 update_id + 1；返回空数组表示本次超时无更新；

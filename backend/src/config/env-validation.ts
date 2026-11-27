@@ -202,7 +202,7 @@ export function validateEnv(env: NodeJS.ProcessEnv = process.env): void {
   if (botUpdatesEnabled && !env.TELEGRAM_BOT_ENCRYPTION_KEY) {
     console.warn(
       '[env-validation] TELEGRAM_BOT_ENCRYPTION_KEY 未设置：Bot 直链将以不可回放模式签发，'
-      + '/link_query 仅能返回前缀。建议设置 32 字节 base64/hex 根密钥。',
+      + '/links 仅能返回前缀。建议设置 32 字节 base64/hex 根密钥。',
     );
   }
   if (env.TELEGRAM_BOT_ENCRYPTION_KEY && !isValidEncryptionKey(env.TELEGRAM_BOT_ENCRYPTION_KEY)) {

@@ -4,12 +4,27 @@ import { DataSource, Repository } from 'typeorm';
 import { randomUUID } from 'crypto';
 import { TelegramBotDailyUsage } from '../common/entities/telegram-bot-daily-usage.entity';
 import { TelegramBotWhitelist } from '../common/entities/telegram-bot-whitelist.entity';
+import { TelegramBotUserQuota } from '../common/entities/telegram-bot-user-quota.entity';
 import { databaseQuery, databaseRawQuery, getDatabaseType } from '../database/database-types';
 
 export interface QuotaConsumeResult {
   allowed: boolean;
   /** 扣减后的当日已用量（allowed=false 时为当前已用量） */
   used: number;
+}
+
+/** 生效额度的来源：白名单不限 / 单账号覆盖 / 全局通用 */
+export type QuotaSource = 'whitelist' | 'user' | 'global';
+
+/** 某用户在某业务日的生效额度快照（签发、/quota、后台详情共用同一口径） */
+export interface ResolvedQuota {
+  whitelisted: boolean;
+  /** null 表示不限（白名单） */
+  limit: number | null;
+  source: QuotaSource;
+  used: number;
+  remaining: number | null;
+  usageDate: string;
 }
 
 /**
@@ -27,6 +42,8 @@ export class TelegramBotQuotaService {
     private readonly usageRepository: Repository<TelegramBotDailyUsage>,
     @InjectRepository(TelegramBotWhitelist)
     private readonly whitelistRepository: Repository<TelegramBotWhitelist>,
+    @InjectRepository(TelegramBotUserQuota)
+    private readonly userQuotaRepository: Repository<TelegramBotUserQuota>,
     private readonly dataSource: DataSource,
   ) {}
 
@@ -55,6 +72,75 @@ export class TelegramBotQuotaService {
       where: { telegramUserId },
     });
     return Boolean(record && record.enabled);
+  }
+
+  /**
+   * 解析某用户的生效额度（**签发链路的唯一入口**）。
+   *
+   * 优先级：白名单（不限）> 单账号覆盖 > 全局 dailyLimit。
+   * 白名单分支不查 usage：额度为 null，used/remaining 也无意义。
+   *
+   * 每次签发都重新解析（不做进程内缓存）：管理员改额度或加白名单必须立即生效，
+   * 而这两次查询都很轻（主键 / 唯一索引命中）。
+   */
+  async resolveQuota(
+    telegramUserId: string,
+    globalLimit: number,
+    usageDate: string,
+  ): Promise<ResolvedQuota> {
+    const [whitelisted, override] = await Promise.all([
+      this.isWhitelisted(telegramUserId),
+      this.userQuotaRepository.findOne({ where: { telegramUserId } }),
+    ]);
+
+    if (whitelisted) {
+      return { whitelisted: true, limit: null, source: 'whitelist', used: 0, remaining: null, usageDate };
+    }
+
+    const limit = override ? override.dailyLimit : globalLimit;
+    const used = await this.getUsed(telegramUserId, usageDate);
+    return {
+      whitelisted: false,
+      limit,
+      source: override ? 'user' : 'global',
+      used,
+      remaining: Math.max(0, limit - used),
+      usageDate,
+    };
+  }
+
+  // ---------------- 单账号额度覆盖 ----------------
+
+  async getOverride(telegramUserId: string): Promise<TelegramBotUserQuota | null> {
+    return this.userQuotaRepository.findOne({ where: { telegramUserId } });
+  }
+
+  /** 设置/更新单账号额度；返回变更前的值用于回执与审计（此前无覆盖则为 null） */
+  async setOverride(
+    telegramUserId: string,
+    dailyLimit: number,
+    createdBy: string | null,
+  ): Promise<{ created: boolean; before: number | null }> {
+    const existing = await this.userQuotaRepository.findOne({ where: { telegramUserId } });
+    if (existing) {
+      const before = existing.dailyLimit;
+      existing.dailyLimit = dailyLimit;
+      existing.createdBy = createdBy ?? existing.createdBy;
+      await this.userQuotaRepository.save(existing);
+      return { created: false, before };
+    }
+    await this.userQuotaRepository.insert({ telegramUserId, dailyLimit, createdBy });
+    return { created: true, before: null };
+  }
+
+  /** 清除覆盖（回落全局额度）；原本不存在覆盖时返回 false */
+  async clearOverride(telegramUserId: string): Promise<boolean> {
+    const result = await this.userQuotaRepository.delete({ telegramUserId });
+    return (result.affected ?? 0) > 0;
+  }
+
+  async listOverrides(): Promise<TelegramBotUserQuota[]> {
+    return this.userQuotaRepository.find({ order: { updatedAt: 'DESC' } });
   }
 
   /**

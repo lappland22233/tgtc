@@ -10,6 +10,7 @@ import { File } from '../common/entities/file.entity';
 import { AlertModule } from '../alert/alert.module';
 import { TelegramBotDailyUsage } from '../common/entities/telegram-bot-daily-usage.entity';
 import { TelegramBotWhitelist } from '../common/entities/telegram-bot-whitelist.entity';
+import { TelegramBotUserQuota } from '../common/entities/telegram-bot-user-quota.entity';
 import { TelegramBotInboundTask } from '../common/entities/telegram-bot-inbound-task.entity';
 import { TelegramBotUserBan } from '../common/entities/telegram-bot-user-ban.entity';
 import { TelegramBotTokenCryptoService } from './telegram-bot-token-crypto.service';
@@ -17,6 +18,7 @@ import { TelegramBotConfigService } from './telegram-bot-config.service';
 import { TelegramBotQuotaService } from './telegram-bot-quota.service';
 import { TelegramBotGrantService } from './telegram-bot-grant.service';
 import { TelegramBotAdminService } from './telegram-bot-admin.service';
+import { TelegramBotCommandMenuService } from './telegram-bot-command-menu.service';
 import { TelegramBotDispatchService } from './telegram-bot-dispatch.service';
 import { TelegramBotPollingService } from './telegram-bot-polling.service';
 import { TelegramBotPublicController } from './telegram-bot-public.controller';
@@ -36,7 +38,7 @@ import { GDriveCacheRetryService } from './gdrive-cache-retry.service';
 @Module({
   imports: [
     TypeOrmModule.forFeature([
-      TelegramBotFileGrant, TelegramBotDailyUsage, TelegramBotWhitelist, TelegramBotInboundTask, TelegramBotUserBan, File,
+      TelegramBotFileGrant, TelegramBotDailyUsage, TelegramBotWhitelist, TelegramBotUserQuota, TelegramBotInboundTask, TelegramBotUserBan, File,
     ]),
     TelegramModule,
     // 复用 FileModule 导出的 FileCacheService（Range/断点续传与本地缓存）
@@ -57,6 +59,7 @@ import { GDriveCacheRetryService } from './gdrive-cache-retry.service';
     TelegramBotQuotaService,
     TelegramBotGrantService,
     TelegramBotAdminService,
+    TelegramBotCommandMenuService,
     TelegramBotInboundQueueService,
     TelegramBotOperationsService,
     TelegramBotDispatchService,

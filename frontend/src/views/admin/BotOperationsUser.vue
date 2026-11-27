@@ -11,8 +11,24 @@
         <div><dt>有效 / 全部直链</dt><dd>{{ overview.grants.active }} / {{ overview.grants.total }}</dd></div>
         <div><dt>下载请求 / 流量</dt><dd>{{ overview.downloads.requests }} / {{ formatSize(overview.downloads.bytes) }}</dd></div>
         <div><dt>{{ overview.quota.usageDate }} 已用配额</dt><dd>{{ overview.quota.used }} / {{ overview.quota.limit ?? '不限' }}</dd></div>
-        <div><dt>当日剩余</dt><dd>{{ overview.quota.remaining ?? '不限' }}{{ overview.quota.whitelisted ? '（白名单）' : '' }}</dd></div>
+        <div><dt>当日剩余</dt><dd>{{ overview.quota.remaining ?? '不限' }}<span v-if="quotaSourceLabel">（{{ quotaSourceLabel }}）</span></dd></div>
       </dl>
+      <div v-if="!overview.ban" class="ops-quota">
+        <h3 class="ops-quota__title">每日额度</h3>
+        <label>
+          单独额度
+          <input v-model.number="quotaInput" type="number" min="1" max="100000" step="1" placeholder="留空并保存 = 清除覆盖" />
+        </label>
+        <p>
+          当前来源：{{ quotaSourceLabel || '默认额度' }}。
+          单独额度优先于默认额度，但白名单始终不限；清除后回落到默认
+          {{ overview.quota.globalLimit ?? overview.quota.limit ?? '—' }} 个/天。
+        </p>
+        <div class="ops-actions">
+          <button class="ops-btn" type="button" :disabled="saving || !quotaDirty" @click="saveQuota()">保存额度</button>
+          <button class="ops-btn" type="button" :disabled="saving || overview.quota.override == null" @click="clearQuota">清除覆盖</button>
+        </div>
+      </div>
       <div v-if="overview.ban" class="ops-confirm">
         <strong>已封禁</strong><p>{{ overview.ban.reason }}</p>
         <p>{{ formatDateTime(overview.ban.bannedAt, true) }}<span v-if="overview.ban.bannedBy"> · 操作用户 {{ overview.ban.bannedBy }}</span></p>
@@ -38,8 +54,8 @@
 </template>
 
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref } from 'vue';
-import { banBotUser, getBotUser, type BotListKind, type BotUserOverview } from '@/api/bot-operations';
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
+import { banBotUser, getBotUser, setBotUserQuota, type BotListKind, type BotUserOverview } from '@/api/bot-operations';
 import { formatDateTime, formatSize } from '@/utils/format';
 import { getErrorMessage } from '@/utils/error';
 import BotOperationsList from './BotOperationsList.vue';
@@ -49,11 +65,77 @@ const historyTabs = [{ kind:'queue', label:'上传历史' },{ kind:'grants', lab
 const kind = ref<BotListKind>(props.initialKind ?? 'queue');
 const revision = ref(0);
 const overview = ref<BotUserOverview | null>(null);
+
+const QUOTA_SOURCE_LABEL: Record<string, string> = {
+  whitelist: '白名单，不限额度',
+  user: '单独额度',
+  global: '默认额度',
+};
+const quotaSourceLabel = computed(() => {
+  const quota = overview.value?.quota;
+  if (!quota) return '';
+  // 兼容旧后端响应（没有 limitSource 字段）与白名单优先的实际语义：
+  // whitelisted=true 时来源必然是白名单，不能因为缺字段就显示成「默认额度」。
+  const source = quota.limitSource ?? (quota.whitelisted ? 'whitelist' : 'global');
+  return QUOTA_SOURCE_LABEL[source] ?? '';
+});
 const error = ref('');
 const notice = ref('');
 const reason = ref('');
 const showBan = ref(false);
 const saving = ref(false);
+/** 额度输入框：初始化为当前覆盖值，空串表示「无覆盖」 */
+const quotaInput = ref<number | string>('');
+const quotaDirty = computed(() => {
+  const current = overview.value?.quota.override ?? '';
+  return String(quotaInput.value) !== String(current);
+});
+
+/** 把输入框回填为服务端当前状态（加载/刷新后调用，避免展示过期草稿） */
+function syncQuotaInput() {
+  quotaInput.value = overview.value?.quota.override ?? '';
+}
+
+async function saveQuota() {
+  if (saving.value) return;
+  const raw = quotaInput.value;
+  const value = typeof raw === 'number' ? raw : Number(String(raw).trim());
+  if (!Number.isInteger(value) || value < 1 || value > 100000) {
+    notice.value = '额度需为 1–100000 的整数；如需清除覆盖请点「清除覆盖」。';
+    return;
+  }
+  saving.value = true;
+  notice.value = '';
+  try {
+    await setBotUserQuota(props.userId, value);
+    if (disposed) return;
+    notice.value = `已将 ${props.userId} 的每日额度设为 ${value} 个/天。`;
+    refresh();
+  } catch (err) {
+    if (!disposed) notice.value = getErrorMessage(err);
+  } finally {
+    if (!disposed) saving.value = false;
+  }
+}
+
+async function clearQuota() {
+  if (saving.value) return;
+  saving.value = true;
+  notice.value = '';
+  try {
+    const result = await setBotUserQuota(props.userId, null);
+    if (disposed) return;
+    notice.value = result.changed
+      ? `${props.userId} 的单独额度已清除，将使用默认额度。`
+      : `${props.userId} 原本没有单独额度。`;
+    quotaInput.value = '';
+    refresh();
+  } catch (err) {
+    if (!disposed) notice.value = getErrorMessage(err);
+  } finally {
+    if (!disposed) saving.value = false;
+  }
+}
 let currentRequest: AbortController | undefined;
 let disposed = false;
 async function loadUser() {
@@ -63,7 +145,11 @@ async function loadUser() {
   error.value = '';
   try {
     const result = await getBotUser(props.userId, request.signal);
-    if (!request.signal.aborted) overview.value = result;
+    if (!request.signal.aborted) {
+      overview.value = result;
+      // 仅在首次加载或显式刷新后回填，避免覆盖用户正在输入的草稿
+      if (!quotaDirty.value) syncQuotaInput();
+    }
   } catch (err) {
     if (!request.signal.aborted) { overview.value = null; error.value = getErrorMessage(err); }
   }

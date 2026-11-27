@@ -222,9 +222,11 @@ describePg('PG 真库回归：Telegram Bot 表 uuid 默认值与每日配额', (
     await dataSource.initialize();
     await dataSource.runMigrations();
 
+    const { TelegramBotUserQuota } = require('../common/entities/telegram-bot-user-quota.entity') as typeof import('../common/entities/telegram-bot-user-quota.entity');
     quotaService = new TelegramBotQuotaService(
       dataSource.getRepository(TelegramBotDailyUsage),
       dataSource.getRepository(TelegramBotWhitelist),
+      dataSource.getRepository(TelegramBotUserQuota),
       dataSource,
     );
   }, 120_000);

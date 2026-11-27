@@ -33,23 +33,126 @@ import { BotTransferTrackerService } from './bot-transfer-tracker.service';
 import { TelegramBotConfigService } from './telegram-bot-config.service';
 import { IssueGrantInput, TelegramBotGrantService } from './telegram-bot-grant.service';
 import { TelegramBotInboundQueueService } from './telegram-bot-inbound-queue.service';
-import { TelegramBotQuotaService } from './telegram-bot-quota.service';
+import { ResolvedQuota, TelegramBotQuotaService } from './telegram-bot-quota.service';
 import { TelegramBotAdminService } from './telegram-bot-admin.service';
-import { TelegramBotIdentity } from './telegram-bot.types';
+import { TelegramBotCommandMenuService } from './telegram-bot-command-menu.service';
+import { TelegramBotIdentity, BOT_CONFIG_DEFAULTS, BOT_CONFIG_LIMITS, TelegramBotRuntimeConfig } from './telegram-bot.types';
 import type { RenderedMessage } from './telegram-bot.message-renderer';
-import { renderQueueNotice, renderHelp, renderQuota, renderQuotaDenied, renderLinkQuery, renderLinkReady, renderWhitelist, renderNotice } from './telegram-bot.message-renderer';
+import {
+  renderQueueNotice, renderHelp, renderQuota, renderQuotaDenied, renderLinkReady, renderWhitelistInput,
+  renderNotice, renderAdminPanel, renderAdminLinks, renderRevokeConfirm, renderSettingChanged,
+  renderOverrideCleared, CALLBACK_DATA_MAX,
+} from './telegram-bot.message-renderer';
+import { COMMAND_INDEX, commandsForUser } from './telegram-bot.commands';
 import type { TelegramTextSendOptions } from '../telegram/telegram.types';
 
 /** Telegram 单条消息文本上限（预留截断余量） */
 const MAX_MESSAGE_LENGTH = 3800;
-/** /link_query 结果最多展示条数（避免刷屏与超长消息） */
-const MAX_LINK_QUERY_RESULTS = 20;
+/** 管理面板每页条数（直链/白名单）：5 行表格 + 按钮在消息长度内保持可读 */
+const ADMIN_PAGE_SIZE = 5;
+/** 直链有效期预设档位（面板按钮；精确值用 /ttl 命令） */
+const TTL_PRESETS = [2, 6, 12, 24, 72] as const;
+/** 通用额度预设档位 */
+const LIMIT_PRESETS = [3, 5, 10, 20, 50] as const;
+/** 管理面板按钮的限流：每个管理员窗口内最多这么多次回调 */
+const ADMIN_CALLBACK_BURST = 10;
+const ADMIN_CALLBACK_WINDOW_MS = 5_000;
 const QUEUE_POLL_MS = 500;
 const LEASE_RENEWAL_MS = 1_000;
 const NOTICE_INTERVAL_MS = 1_100;
 const NOTICE_RETRY_MS = 5_000;
 const BANNED_TEXT = '此 Telegram 账号已被停用，无法创建下载链接。';
 const DISK_UNAVAILABLE_TEXT = '服务器临时磁盘空间不足，无法转存文件，请稍后重试。';
+
+/** 管理面板按钮回调的命名空间（与 `bot_cancel` 隔离） */
+const CALLBACK_NAMESPACE_CANCEL = 'bot_cancel';
+const CALLBACK_NAMESPACE_ADMIN = 'ba';
+
+/** 回调 toast 文案：点下按钮立刻有反馈，比长时间转圈可靠 */
+const ADMIN_CALLBACK_ACK: Record<AdminCallback['kind'], string> = {
+  root: '管理面板',
+  ttl: '已更新有效期',
+  limit: '已更新额度',
+  links: '有效直链',
+  whitelist: '白名单',
+  revokeConfirm: '请确认撤销',
+  revokeDo: '已撤销',
+};
+
+export type AdminCallback =
+  | { kind: 'root' }
+  | { kind: 'ttl'; value: number }
+  | { kind: 'limit'; value: number }
+  | { kind: 'links'; page: number; targetUserId?: string }
+  | { kind: 'whitelist'; page: number }
+  | { kind: 'revokeConfirm'; grantId: string; page: number; targetUserId?: string }
+  | { kind: 'revokeDo'; grantId: string; page: number };
+
+/**
+ * 解析 `ba:*` 回调数据。
+ *
+ * 只接受白名单内的形态；任何字段不合法都返回 null（调用方回「该操作已失效」），
+ * 绝不把不可信字符串直接传给数据库或拼进 SQL/URL。
+ */
+export function parseAdminCallbackData(data: string): AdminCallback | null {
+  const parts = data.split(':');
+  if (parts[0] !== CALLBACK_NAMESPACE_ADMIN) return null;
+  const kind = parts[1];
+
+  const toPage = (raw: string | undefined): number | null => {
+    if (raw === undefined) return null;
+    if (!/^\d{1,4}$/.test(raw)) return null;
+    const page = Number(raw);
+    return page >= 1 ? page : null;
+  };
+  const toTarget = (raw: string | undefined): string | undefined | null => {
+    if (raw === undefined) return undefined;
+    return /^\d{1,20}$/.test(raw) ? raw : null;
+  };
+
+  if (kind === 'root') return parts.length === 2 ? { kind: 'root' } : null;
+
+  if (kind === 'ttl' || kind === 'lim') {
+    const raw = parts[2];
+    if (!raw || !/^\d{1,4}$/.test(raw) || parts.length !== 3) return null;
+    const value = Number(raw);
+    if (value < 1) return null;
+    return kind === 'ttl' ? { kind: 'ttl', value } : { kind: 'limit', value };
+  }
+
+  if (kind === 'lk' || kind === 'wlp' || kind === 'rvn') {
+    const page = toPage(parts[2]);
+    if (page === null) return null;
+    // 可选 `:u:<tgId>` 过滤（仅直链与返回列表支持）
+    const target = toTarget(parts[4]);
+    if (target === null || (parts.length !== 3 && parts.length !== 5)) return null;
+    if (parts.length === 5 && parts[3] !== 'u') return null;
+    if (kind === 'wlp') {
+      if (parts.length !== 3) return null;
+      return { kind: 'whitelist', page };
+    }
+    if (kind === 'lk') return { kind: 'links', page, targetUserId: target };
+    // rvn（取消撤销）返回列表，语义与打开列表一致
+    return { kind: 'links', page, targetUserId: target };
+  }
+
+  if (kind === 'rv' || kind === 'rvy') {
+    const grantId = parts[2];
+    if (!grantId || !/^[0-9a-fA-F-]{36}$/.test(grantId)) return null;
+    if (kind === 'rvy') {
+      return parts.length === 3 ? { kind: 'revokeDo', grantId, page: 1 } : null;
+    }
+    const page = toPage(parts[3]);
+    if (page === null) return null;
+    const target = toTarget(parts[5]);
+    if (target === null) return null;
+    if (parts.length === 5 && parts[4] !== 'u') return null;
+    if (parts.length !== 4 && parts.length !== 6) return null;
+    return { kind: 'revokeConfirm', grantId, page, targetUserId: target };
+  }
+
+  return null;
+}
 
 class InboundPersistenceError extends Error {
   constructor(cause: unknown) {
@@ -129,6 +232,8 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
   private readonly chatNoticeCooldowns = new Map<string, number>();
   /** 等待期间用户发言提示防刷冷却时间（15 秒） */
   private readonly inFlightNoticeCooldownMs = 15_000;
+  /** 管理面板回调的固定窗口限流：管理员 TG ID -> 窗口起点与次数 */
+  private readonly adminCallbackBudget = new Map<string, { windowStart: number; count: number }>();
   private isShuttingDown = false;
   private shutdownDrainTimeoutMs = 10_000;
   private queueTimer?: NodeJS.Timeout;
@@ -239,6 +344,9 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
     // 活跃转存临时文件租约追踪（防止长耗时大文件转存被定时清理误删）
     @Optional() @Inject(BotTransferTrackerService)
     private readonly transferTracker: BotTransferTrackerService | null = null,
+    // 命令菜单同步（可选：未装配时帮助与命令路由照常工作，只是 Telegram 的 "/" 弹窗不更新）
+    @Optional() @Inject(TelegramBotCommandMenuService)
+    private readonly commandMenu: TelegramBotCommandMenuService | null = null,
   ) {}
 
   /** 处理单条更新（异常不外抛，避免中断轮询循环） */
@@ -317,6 +425,29 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
 
     if (!query.from || query.from.is_bot) return;
     const data = query.data ?? '';
+    // 超长回调数据一律视为失效：Telegram 不会发出来，但伪造的更新可能带任意长度
+    if (data.length > CALLBACK_DATA_MAX) {
+      await answer('该操作已失效。');
+      return;
+    }
+    const [namespace] = data.split(':', 1);
+    if (namespace === CALLBACK_NAMESPACE_CANCEL) {
+      await this.handleCancelCallback(query, data, answer);
+      return;
+    }
+    if (namespace === CALLBACK_NAMESPACE_ADMIN) {
+      await this.handleAdminCallback(query, data, accountId, answer);
+      return;
+    }
+    await answer('该操作已失效。');
+  }
+
+  /** 「取消处理」回调（既有能力，逐字保留原语义与归属校验） */
+  private async handleCancelCallback(
+    query: TelegramCallbackQuery,
+    data: string,
+    answer: (text: string, showAlert?: boolean) => Promise<void>,
+  ): Promise<void> {
     const [action, taskId] = data.split(':', 2);
     if (action !== 'bot_cancel' || !taskId) {
       await answer('该操作已失效。');
@@ -329,8 +460,8 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
       return;
     }
     // 越权防护：以任务归属为准，绝不信任按钮来源
-    if (String(task.telegramUserId) !== String(query.from.id)) {
-      this.logger.warn(`取消回调越权被拒（task=${taskId}, from=${query.from.id}）`);
+    if (String(task.telegramUserId) !== String(query.from!.id)) {
+      this.logger.warn(`取消回调越权被拒（task=${taskId}, from=${query.from?.id}）`);
       await answer('无权取消该任务。', true);
       return;
     }
@@ -353,10 +484,208 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
         taskId,
         telegramUserId: task.telegramUserId,
         receiverBotId: task.receiverBotId,
-        operator: `telegram:${query.from.id}`,
+        operator: `telegram:${query.from!.id}`,
       },
     });
     await answer('已取消该文件的处理。');
+  }
+
+  /**
+   * 管理面板回调（`ba:*`）。
+   *
+   * 安全模型与 `bot_cancel` 一致但更严格：按钮数据完全不可信，**每次点击都重新做管理员校验**
+   * （`TELEGRAM_BOT_ADMIN_IDS` 不缓存），被移除的管理员下一次点击立即失效。
+   * 面板本身无状态：所有数值都现读库，多个管理员并发操作不会看到过期快照。
+   */
+  private async handleAdminCallback(
+    query: TelegramCallbackQuery,
+    data: string,
+    accountId: string | undefined,
+    answer: (text: string, showAlert?: boolean) => Promise<void>,
+  ): Promise<void> {
+    const identity = this.normalizeIdentity(query.from!);
+
+    if (!this.adminService.isAdmin(identity.telegramUserId)) {
+      this.adminService.auditCommandDenied(identity, `callback:${data.split(':', 2)[1] ?? 'unknown'}`, 'private');
+      await answer('该操作仅限管理员使用。', true);
+      return;
+    }
+    // 面板只能在私聊里编辑（群聊消息不该出现配置与直链）
+    const chat = query.message?.chat;
+    if (!chat || chat.type !== 'private') {
+      await answer('管理面板仅支持私聊。');
+      return;
+    }
+    // 快速翻页是最好的滥用向量：先限流再碰数据库
+    if (!this.takeAdminCallbackToken(identity.telegramUserId)) {
+      await answer('操作过于频繁，请稍后再试。', true);
+      return;
+    }
+
+    const parsed = parseAdminCallbackData(data);
+    if (!parsed) {
+      await answer('该操作已失效。');
+      return;
+    }
+
+    // 先清 spinner，再做耗时操作——否则用户看到按钮一直转圈
+    await answer(ADMIN_CALLBACK_ACK[parsed.kind] ?? '处理中…');
+
+    try {
+      const rendered = await this.resolveAdminCallbackView(parsed, identity);
+      if (!rendered) return;
+      await this.editPanel(query, accountId, rendered);
+    } catch (error) {
+      this.logger.warn(
+        `管理面板回调处理失败（${parsed.kind}）: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  /** 按回调类型渲染对应面板视图；返回 null 表示无需回应（错误已通过 toast 提示） */
+  private async resolveAdminCallbackView(
+    parsed: AdminCallback,
+    identity: TelegramBotIdentity,
+  ): Promise<RenderedMessage | null> {
+    switch (parsed.kind) {
+      case 'root':
+        return this.buildAdminPanel();
+
+      case 'ttl': {
+        await this.applyConfigChange({
+          label: '直链有效期',
+          patch: { linkTtlHours: parsed.value },
+          describe: config => `${config.linkTtlHours} 小时`,
+          identity,
+          chatId: undefined,
+          replyToMessageId: undefined,
+        });
+        return this.buildAdminPanel();
+      }
+
+      case 'limit': {
+        await this.applyConfigChange({
+          label: '通用每日额度',
+          patch: { dailyLimit: parsed.value },
+          describe: config => `${config.dailyLimit} 个/天`,
+          identity,
+          chatId: undefined,
+          replyToMessageId: undefined,
+        });
+        return this.buildAdminPanel();
+      }
+
+      case 'links': {
+        const view = await this.adminService.listActiveLinksPage(parsed.page, ADMIN_PAGE_SIZE);
+        return renderAdminLinks({
+          scopeLabel: parsed.targetUserId ?? '全部用户',
+          page: parsed.page,
+          pageSize: ADMIN_PAGE_SIZE,
+          total: view.total,
+          rows: view.rows,
+          cryptoAvailable: view.cryptoAvailable,
+        });
+      }
+
+      case 'whitelist': {
+        const list = await this.adminService.listWhitelist();
+        const start = (parsed.page - 1) * ADMIN_PAGE_SIZE;
+        return renderWhitelistInput({
+          ids: list.slice(start, start + ADMIN_PAGE_SIZE).map(item => item.telegramUserId),
+          total: list.length,
+          page: parsed.page,
+          pageSize: ADMIN_PAGE_SIZE,
+        });
+      }
+
+      case 'revokeConfirm': {
+        const grant = await this.grantService.findById(parsed.grantId);
+        if (!grant) return renderNotice('该直链不存在或已被清理。');
+        return renderRevokeConfirm({
+          grantId: grant.id,
+          fileName: grant.fileName || '(未命名)',
+          telegramUserId: grant.telegramUserId,
+          expiresAt: grant.expiresAt instanceof Date ? grant.expiresAt.toISOString() : String(grant.expiresAt),
+          returnPage: parsed.page,
+          scopeLabel: parsed.targetUserId ?? '全部用户',
+        });
+      }
+
+      case 'revokeDo': {
+        const result = await this.adminService.revokeByGrantId(identity, parsed.grantId, 'panel');
+        if (!result.ok) {
+          return renderNotice('该直链已不存在（可能已被清理）。');
+        }
+        // 撤销后回到列表：用最新数据重建，撤销的那条自然消失
+        const view = await this.adminService.listActiveLinksPage(parsed.page, ADMIN_PAGE_SIZE);
+        const lastPage = Math.max(1, Math.ceil(view.total / ADMIN_PAGE_SIZE));
+        const page = Math.min(parsed.page, lastPage);
+        const refreshed = page === parsed.page ? view : await this.adminService.listActiveLinksPage(page, ADMIN_PAGE_SIZE);
+        return renderAdminLinks({
+          scopeLabel: '全部用户',
+          page,
+          pageSize: ADMIN_PAGE_SIZE,
+          total: refreshed.total,
+          rows: refreshed.rows,
+          cryptoAvailable: refreshed.cryptoAvailable,
+        });
+      }
+
+      default:
+        return null;
+    }
+  }
+
+  /** 每个管理员的回调令牌桶（固定窗口）：防止快速连点/翻页打爆数据库与 Telegram 限流 */
+  private takeAdminCallbackToken(telegramUserId: string): boolean {
+    const now = Date.now();
+    const entry = this.adminCallbackBudget.get(telegramUserId);
+    if (!entry || now - entry.windowStart >= ADMIN_CALLBACK_WINDOW_MS) {
+      this.adminCallbackBudget.set(telegramUserId, { windowStart: now, count: 1 });
+      return true;
+    }
+    if (entry.count >= ADMIN_CALLBACK_BURST) return false;
+    entry.count += 1;
+    return true;
+  }
+
+  /**
+   * 原地更新面板消息；失败时退回「发新消息」。
+   *
+   * 三分支与 `sendQueueNotice` 保持同一语义：
+   * - `message is not modified` = 内容未变，**视为成功**（用户连点同一按钮）
+   * - `message to edit not found` / `message can't be edited` = 面板已被删除或过期，改发新消息
+   * - 其余错误上抛，由调用方记录
+   */
+  private async editPanel(
+    query: TelegramCallbackQuery,
+    accountId: string | undefined,
+    rendered: RenderedMessage,
+  ): Promise<number | null> {
+    const chatId = String(query.message!.chat.id);
+    const messageId = query.message!.message_id;
+    const pool = this.pool;
+    const client = this.accountClient;
+
+    const edit = (payload: string, options: TelegramTextSendOptions): Promise<boolean> => {
+      if (accountId && pool?.isActive()) {
+        const account = client ? pool.getConfig(accountId) : null;
+        if (!account || !client) return Promise.resolve(false);
+        return client.editMessageText(accountId, account.token, chatId, messageId, payload, options);
+      }
+      return this.telegramService.editMessageText(chatId, messageId, payload, options);
+    };
+
+    try {
+      const edited = await this.deliverRendered(rendered, (payload, options) =>
+        edit(payload, options).then(ok => (ok ? messageId : null)));
+      if (edited) return edited;
+    } catch (error) {
+      const message = (error as Error)?.message ?? '';
+      if (/message is not modified/i.test(message)) return messageId;
+      if (!/message to edit not found|message can.t be edited/i.test(message)) throw error;
+    }
+    return this.reply(chatId, rendered, undefined, accountId);
   }
 
   /** 回应内联按钮回调；池化模式下必须用收到回调的那个 Bot 回应 */
@@ -423,12 +752,28 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
     const [rawCommand, ...args] = rawText.split(/\s+/);
     const command = rawCommand.split('@')[0].toLowerCase();
 
-    switch (command) {
-      case '/start':
-      case '/help':
+    const spec = COMMAND_INDEX.get(command);
+    if (!spec) {
+      await this.replyUnknownCommand(chatId, identity, message.message_id, accountId);
+      return;
+    }
+
+    // 权限门禁在解析参数**之前**：越权用户拿不到用法提示，无法据此推断命令存在
+    if (spec.scope === 'admin' && !this.adminService.isAdmin(identity.telegramUserId)) {
+      this.adminService.auditCommandDenied(identity, command, message.chat.type);
+      await this.reply(chatId, '该命令仅限管理员使用。', message.message_id, accountId);
+      return;
+    }
+
+    switch (spec.handler) {
+      case 'help':
         await this.reply(chatId, this.buildHelpText(identity), message.message_id, accountId);
+        // 管理员执行 /start|/help 时顺带同步其私人命令菜单（去抖 + best-effort）
+        if (this.adminService.isAdmin(identity.telegramUserId)) {
+          void this.commandMenu?.syncAdmin(identity.telegramUserId);
+        }
         return;
-      case '/id':
+      case 'id':
         await this.reply(
           chatId,
           renderNotice(`你的 Telegram 用户 ID：${identity.telegramUserId}`, { emphasize: [identity.telegramUserId] }),
@@ -436,32 +781,53 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
           accountId,
         );
         return;
-      case '/quota':
+      case 'quota':
         await this.handleQuotaCommand(chatId, identity, message.message_id, accountId);
         return;
-      case '/wl_add':
-      case '/wl_remove':
-      case '/wl_list':
-      case '/link_query':
-      case '/link_revoke':
-        await this.handleAdminCommand(
-          command,
-          args,
-          chatId,
-          identity,
-          message.message_id,
-          message.chat.type,
-          accountId,
-        );
+      case 'adminPanel':
+        await this.handleAdminPanel(chatId, identity, message.message_id, accountId);
+        return;
+      case 'setTtl':
+        await this.handleSetTtl(args, chatId, identity, message.message_id, accountId);
+        return;
+      case 'setGeneralLimit':
+        await this.handleSetGeneralLimit(args, chatId, identity, message.message_id, accountId);
+        return;
+      case 'setUserQuota':
+        await this.handleSetUserQuota(args, chatId, identity, message.message_id, accountId);
+        return;
+      case 'whitelist':
+        await this.handleWhitelistCommand(args, chatId, identity, message.message_id, accountId);
+        return;
+      case 'links':
+        await this.handleLinksCommand(args, chatId, identity, message.message_id, accountId);
+        return;
+      case 'revoke':
+        await this.handleRevokeCommand(args, chatId, identity, message.message_id, accountId);
         return;
       default:
-        await this.reply(
-          chatId,
-          renderNotice('未知命令，发送 /help 查看可用命令。', { emphasize: ['/help'] }),
-          message.message_id,
-          accountId,
-        );
+        await this.replyUnknownCommand(chatId, identity, message.message_id, accountId);
     }
+  }
+
+  /**
+   * 未知命令提示按权限分层：普通用户**绝不**看到管理员命令的存在线索。
+   */
+  private async replyUnknownCommand(
+    chatId: string,
+    identity: TelegramBotIdentity,
+    replyToMessageId: number,
+    accountId?: string,
+  ): Promise<void> {
+    const admin = this.adminService.isAdmin(identity.telegramUserId);
+    await this.reply(
+      chatId,
+      admin
+        ? renderNotice('未知命令。发送 /help 查看全部命令，或 /admin 打开管理面板。', { emphasize: ['/admin'] })
+        : renderNotice('未知命令，发送 /help 查看可用命令。', { emphasize: ['/help'] }),
+      replyToMessageId,
+      accountId,
+    );
   }
 
   private async handleQuotaCommand(
@@ -471,65 +837,164 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
     accountId?: string,
   ): Promise<void> {
     const config = await this.botConfigService.getConfig();
-    const whitelisted = await this.quotaService.isWhitelisted(identity.telegramUserId);
-    if (whitelisted) {
-      await this.reply(chatId, renderQuota({ whitelisted: true }), replyToMessageId, accountId);
-      return;
-    }
     const usageDate = this.quotaService.getBusinessDate(config.quotaTimezone);
-    const used = await this.quotaService.getUsed(identity.telegramUserId, usageDate);
-    const remaining = Math.max(0, config.dailyLimit - used);
+    const quota = await this.quotaService.resolveQuota(identity.telegramUserId, config.dailyLimit, usageDate);
     await this.reply(
       chatId,
-      renderQuota({ whitelisted: false, used, limit: config.dailyLimit, remaining, timezone: config.quotaTimezone }),
+      renderQuota({
+        whitelisted: quota.whitelisted,
+        used: quota.used,
+        limit: quota.limit ?? 0,
+        remaining: quota.remaining ?? 0,
+        timezone: config.quotaTimezone,
+        source: quota.source,
+      }),
       replyToMessageId,
       accountId,
     );
   }
 
-  private async handleAdminCommand(
-    command: string,
+  /**
+   * /admin 主面板。
+   *
+   * 打开面板本身也要审计（管理员在看敏感配置），但这是高频动作，
+   * 只在通过 `/admin` 命令打开时记一条，按钮翻页不记。
+   */
+  private async handleAdminPanel(
+    chatId: string,
+    identity: TelegramBotIdentity,
+    replyToMessageId: number,
+    accountId?: string,
+  ): Promise<void> {
+    this.auditService.log({
+      action: 'telegram_bot_admin_panel_opened',
+      resourceType: 'telegram_bot_panel',
+      resourceId: identity.telegramUserId,
+      metadata: { telegramUserId: identity.telegramUserId, via: 'command' },
+    });
+    await this.reply(chatId, await this.buildAdminPanel(), replyToMessageId, accountId);
+  }
+
+  /** 面板数据每次都重新读库：面板本身无状态，多个管理员并发操作不会互相看到旧值 */
+  private async buildAdminPanel(): Promise<RenderedMessage> {
+    const [config, snapshot] = await Promise.all([
+      this.botConfigService.getConfig(),
+      this.adminService.getPanelSnapshot(),
+    ]);
+    const origin = await this.botConfigService.resolveSiteOriginAsync();
+    return renderAdminPanel({
+      ttlHours: config.linkTtlHours,
+      ttlPresets: TTL_PRESETS,
+      generalLimit: config.dailyLimit,
+      limitPresets: LIMIT_PRESETS,
+      whitelistCount: snapshot.whitelistCount,
+      overrideCount: snapshot.overrideCount,
+      activeLinkCount: snapshot.activeLinkCount,
+      usageDate: this.quotaService.getBusinessDate(config.quotaTimezone),
+      quotaTimezone: config.quotaTimezone,
+      storageMode: config.storageMode,
+      domainReady: Boolean(origin),
+    });
+  }
+
+  private async handleSetTtl(
     args: string[],
     chatId: string,
     identity: TelegramBotIdentity,
     replyToMessageId: number,
-    chatType: string,
     accountId?: string,
   ): Promise<void> {
-    if (!this.adminService.isAdmin(identity.telegramUserId)) {
-      // 越权：只回通用拒绝，且不泄露命令内容
-      this.adminService.auditCommandDenied(identity, command, chatType);
-      await this.reply(chatId, '该命令仅限管理员使用。', replyToMessageId, accountId);
+    const raw = (args[0] || '').trim();
+    const ttl = Number(raw);
+    if (!raw || !Number.isSafeInteger(ttl) || ttl < BOT_CONFIG_LIMITS.minTtlHours || ttl > BOT_CONFIG_LIMITS.maxTtlHours) {
+      await this.reply(chatId, `用法：/ttl <${BOT_CONFIG_LIMITS.minTtlHours}-${BOT_CONFIG_LIMITS.maxTtlHours}>`, replyToMessageId, accountId);
       return;
     }
-
-    switch (command) {
-      case '/wl_add':
-        await this.handleWhitelistAdd(args, chatId, identity, replyToMessageId, accountId);
-        return;
-      case '/wl_remove':
-        await this.handleWhitelistRemove(args, chatId, identity, replyToMessageId, accountId);
-        return;
-      case '/wl_list':
-        await this.handleWhitelistList(chatId, replyToMessageId, accountId);
-        return;
-      case '/link_query':
-        await this.handleLinkQuery(args, chatId, identity, replyToMessageId, accountId);
-        return;
-      case '/link_revoke':
-        await this.handleLinkRevoke(args, chatId, identity, replyToMessageId, accountId);
-        return;
-      default:
-        await this.reply(
-          chatId,
-          renderNotice('未知命令，发送 /help 查看可用命令。', { emphasize: ['/help'] }),
-          replyToMessageId,
-          accountId,
-        );
-    }
+    await this.applyConfigChange({
+      label: '直链有效期',
+      patch: { linkTtlHours: ttl },
+      describe: config => `${config.linkTtlHours} 小时`,
+      identity,
+      chatId,
+      replyToMessageId,
+      accountId,
+    });
   }
 
-  private async handleWhitelistAdd(
+  private async handleSetGeneralLimit(
+    args: string[],
+    chatId: string,
+    identity: TelegramBotIdentity,
+    replyToMessageId: number,
+    accountId?: string,
+  ): Promise<void> {
+    const raw = (args[0] || '').trim().toLowerCase();
+    const limit = raw === 'default' ? BOT_CONFIG_DEFAULTS.dailyLimit : Number(raw);
+    if (!raw || (!Number.isSafeInteger(limit)) || limit < BOT_CONFIG_LIMITS.minDailyLimit || limit > BOT_CONFIG_LIMITS.maxDailyLimit) {
+      await this.reply(chatId, '用法：/limit <数量|default>', replyToMessageId, accountId);
+      return;
+    }
+    await this.applyConfigChange({
+      label: '通用每日额度',
+      patch: { dailyLimit: limit },
+      describe: config => `${config.dailyLimit} 个/天`,
+      identity,
+      chatId,
+      replyToMessageId,
+      accountId,
+    });
+  }
+
+  /** /ttl 与 /limit 共用的「校验 → 写入 → 审计 → 回执」链路 */
+  private async applyConfigChange(input: {
+    label: string;
+    patch: Partial<TelegramBotRuntimeConfig>;
+    describe: (config: TelegramBotRuntimeConfig) => string;
+    identity: TelegramBotIdentity;
+    /** 省略时静默执行（面板按钮路径），由调用方负责刷新视图 */
+    chatId?: string;
+    replyToMessageId?: number;
+    accountId?: string;
+  }): Promise<void> {
+    const { label, patch, describe, identity, chatId, replyToMessageId, accountId } = input;
+    const before = await this.botConfigService.getConfig();
+    let next: TelegramBotRuntimeConfig;
+    try {
+      next = await this.botConfigService.updateConfig(patch);
+    } catch (error) {
+      if (chatId === undefined) {
+        // 面板路径：预设档位均已在范围内，走到这里说明配置服务拒绝，只记录
+        this.logger.warn(`面板设置 ${label} 失败: ${error instanceof Error ? error.message : String(error)}`);
+        return;
+      }
+      const detail = error instanceof Error ? error.message : String(error);
+      await this.reply(chatId, renderNotice(`设置失败：${detail}`), replyToMessageId, accountId);
+      return;
+    }
+    this.auditService.log({
+      action: 'telegram_bot_setting_changed',
+      resourceType: 'bot_config',
+      resourceId: label,
+      metadata: {
+        operatorTelegramUserId: identity.telegramUserId,
+        operatorTelegramUsername: identity.username,
+        label,
+        changed: Object.keys(patch),
+        before: describe(before),
+        after: describe(next),
+        via: chatId === undefined ? 'panel_button' : 'bot_command',
+      },
+    });
+    if (chatId === undefined) return;
+    await this.reply(
+      chatId,
+      renderSettingChanged({ label, before: describe(before), after: describe(next), hint: '配置已热更新，立即生效；已签发的直链沿用签发时的有效期。' }),
+      replyToMessageId,
+      accountId,
+    );
+  }
+
+  private async handleSetUserQuota(
     args: string[],
     chatId: string,
     identity: TelegramBotIdentity,
@@ -537,29 +1002,118 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
     accountId?: string,
   ): Promise<void> {
     const target = (args[0] || '').trim();
-    if (!/^\d{1,20}$/.test(target)) {
-      await this.reply(chatId, '用法：/wl_add <TG用户ID>', replyToMessageId, accountId);
+    const raw = (args[1] || '').trim().toLowerCase();
+    if (!/^\d{1,20}$/.test(target) || !raw) {
+      await this.reply(chatId, '用法：/quota_set <TG用户ID> <数量|default>', replyToMessageId, accountId);
       return;
     }
-    const { created } = await this.adminService.addWhitelist(identity, target);
+
+    const config = await this.botConfigService.getConfig();
+    if (raw === 'default') {
+      const cleared = await this.quotaService.clearOverride(target);
+      this.auditService.log({
+        action: 'telegram_bot_quota_override_cleared',
+        resourceType: 'telegram_bot_user_quota',
+        resourceId: target,
+        metadata: {
+          operatorTelegramUserId: identity.telegramUserId,
+          operatorTelegramUsername: identity.username,
+          targetTelegramUserId: target,
+          cleared,
+          fallbackLimit: config.dailyLimit,
+        },
+      });
+      await this.reply(
+        chatId,
+        cleared
+          ? renderOverrideCleared(target, config.dailyLimit)
+          : renderNotice(`${target} 原本没有单独额度，当前使用默认额度（${config.dailyLimit} 个/天）。`),
+        replyToMessageId,
+        accountId,
+      );
+      return;
+    }
+
+    const limit = Number(raw);
+    if (!Number.isSafeInteger(limit) || limit < BOT_CONFIG_LIMITS.minDailyLimit || limit > BOT_CONFIG_LIMITS.maxDailyLimit) {
+      await this.reply(chatId, '用法：/quota_set <TG用户ID> <数量|default>', replyToMessageId, accountId);
+      return;
+    }
+
+    const { created, before } = await this.quotaService.setOverride(target, limit, identity.telegramUserId);
+    this.auditService.log({
+      action: 'telegram_bot_quota_override_set',
+      resourceType: 'telegram_bot_user_quota',
+      resourceId: target,
+      metadata: {
+        operatorTelegramUserId: identity.telegramUserId,
+        operatorTelegramUsername: identity.username,
+        targetTelegramUserId: target,
+        created,
+        before,
+        after: limit,
+      },
+    });
+    const whitelisted = await this.quotaService.isWhitelisted(target);
     await this.reply(
       chatId,
-      created ? `已加入白名单：${target}` : `${target} 已在白名单中。`,
+      renderSettingChanged({
+        label: '单独额度',
+        before: before === null ? '无（使用默认额度）' : `${before} 个/天`,
+        after: `${limit} 个/天`,
+        hint: whitelisted
+          ? '注意：该用户在白名单中，白名单优先，额度设置暂不生效（移出白名单后自动生效）。'
+          : '该设置立即生效；`default` 可清除。',
+      }),
       replyToMessageId,
       accountId,
     );
   }
 
-  private async handleWhitelistRemove(
+  /** /wl add|remove|list */
+  private async handleWhitelistCommand(
     args: string[],
     chatId: string,
     identity: TelegramBotIdentity,
     replyToMessageId: number,
     accountId?: string,
   ): Promise<void> {
-    const target = (args[0] || '').trim();
+    const sub = (args[0] || '').trim().toLowerCase();
+    const target = (args[1] || '').trim();
+
+    if (sub === 'list' || sub === '') {
+      const list = await this.adminService.listWhitelist();
+      await this.reply(
+        chatId,
+        renderWhitelistInput({
+          ids: list.slice(0, ADMIN_PAGE_SIZE).map(item => item.telegramUserId),
+          total: list.length,
+          page: 1,
+          pageSize: ADMIN_PAGE_SIZE,
+        }),
+        replyToMessageId,
+        accountId,
+      );
+      return;
+    }
+
+    if (sub !== 'add' && sub !== 'remove') {
+      await this.reply(chatId, '用法：/wl add <TG用户ID> | /wl remove <TG用户ID> | /wl list', replyToMessageId, accountId);
+      return;
+    }
     if (!/^\d{1,20}$/.test(target)) {
-      await this.reply(chatId, '用法：/wl_remove <TG用户ID>', replyToMessageId, accountId);
+      await this.reply(chatId, `/wl ${sub} <TG用户ID>`, replyToMessageId, accountId);
+      return;
+    }
+
+    if (sub === 'add') {
+      const { created } = await this.adminService.addWhitelist(identity, target);
+      await this.reply(
+        chatId,
+        created ? `已加入白名单：${target}` : `${target} 已在白名单中。`,
+        replyToMessageId,
+        accountId,
+      );
       return;
     }
     const removed = await this.adminService.removeWhitelist(identity, target);
@@ -571,63 +1125,81 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
     );
   }
 
-  private async handleWhitelistList(
-    chatId: string,
-    replyToMessageId: number,
-    accountId?: string,
-  ): Promise<void> {
-    const list = await this.adminService.listWhitelist();
-    if (list.length === 0) {
-      await this.reply(chatId, renderWhitelist([], 0), replyToMessageId, accountId);
-      return;
-    }
-    const shown = list.slice(0, MAX_LINK_QUERY_RESULTS);
-    await this.reply(
-      chatId,
-      renderWhitelist(shown.map(item => item.telegramUserId), list.length),
-      replyToMessageId,
-      accountId,
-    );
-  }
-
-  private async handleLinkQuery(
+  /**
+   * /links [TG用户ID] [页码]
+   *
+   * 不带参数时浏览全库有效直链（分页）；带用户 ID 时只看该用户。
+   * 与 `/link_query` 的差异：分页 + 每行撤销按钮，无需复制 URL。
+   */
+  private async handleLinksCommand(
     args: string[],
     chatId: string,
     identity: TelegramBotIdentity,
     replyToMessageId: number,
     accountId?: string,
   ): Promise<void> {
-    const target = (args[0] || '').trim();
-    if (!/^\d{1,20}$/.test(target)) {
-      await this.reply(chatId, '用法：/link_query <TG用户ID>', replyToMessageId, accountId);
+    let targetUserId: string | undefined;
+    let pageRaw: string | undefined;
+    for (const arg of args) {
+      if (/^\d{1,20}$/.test(arg) && targetUserId === undefined) targetUserId = arg;
+      else if (/^\d{1,4}$/.test(arg)) pageRaw = arg;
+      else break;
+    }
+    // 单个短数字（≤4 位）歧义：TG 用户 ID 实际是 6 位以上，把 `/links 2` 当页码更符合直觉。
+    // 只有出现第二个数字参数时，前一个才确定是用户 ID。
+    if (targetUserId !== undefined && pageRaw === undefined && targetUserId.length <= 4) {
+      pageRaw = targetUserId;
+      targetUserId = undefined;
+    }
+    const page = Math.max(1, Number(pageRaw ?? '1') || 1);
+
+    if (targetUserId) {
+      // 单用户视图复用既有审计方法（记录命中条数，不记完整链接）
+      const results = await this.adminService.queryLinks(identity, targetUserId);
+      const start = (page - 1) * ADMIN_PAGE_SIZE;
+      const slice = results.slice(start, start + ADMIN_PAGE_SIZE);
+      await this.reply(
+        chatId,
+        renderAdminLinks({
+          scopeLabel: targetUserId,
+          page,
+          pageSize: ADMIN_PAGE_SIZE,
+          total: results.length,
+          rows: slice.map(item => ({
+            grantId: item.grant.id,
+            fileName: item.grant.fileName || '(未命名)',
+            expiresAt: item.grant.expiresAt instanceof Date
+              ? item.grant.expiresAt.toISOString()
+              : String(item.grant.expiresAt),
+            url: item.url,
+            prefix: item.prefix,
+            telegramUserId: item.grant.telegramUserId,
+          })),
+          cryptoAvailable: this.adminService.isCryptoAvailable(),
+        }),
+        replyToMessageId,
+        accountId,
+      );
       return;
     }
-    const results = await this.adminService.queryLinks(identity, target);
-    if (results.length === 0) {
-      await this.reply(chatId, `${target} 当前没有有效的直链。`, replyToMessageId, accountId);
-      return;
-    }
-    const shown = results.slice(0, MAX_LINK_QUERY_RESULTS);
+
+    const view = await this.adminService.listActiveLinksPage(page, ADMIN_PAGE_SIZE);
     await this.reply(
       chatId,
-      renderLinkQuery(
-        target,
-        shown.map(item => ({
-          fileName: item.grant.fileName || '(未命名)',
-          expiresAt: item.grant.expiresAt instanceof Date
-            ? item.grant.expiresAt.toISOString()
-            : String(item.grant.expiresAt),
-          url: item.url,
-          prefix: item.prefix,
-        })),
-        results.length,
-      ),
+      renderAdminLinks({
+        scopeLabel: '全部用户',
+        page,
+        pageSize: ADMIN_PAGE_SIZE,
+        total: view.total,
+        rows: view.rows,
+        cryptoAvailable: view.cryptoAvailable,
+      }),
       replyToMessageId,
       accountId,
     );
   }
 
-  private async handleLinkRevoke(
+  private async handleRevokeCommand(
     args: string[],
     chatId: string,
     identity: TelegramBotIdentity,
@@ -636,7 +1208,7 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
   ): Promise<void> {
     const input = (args[0] || '').trim();
     if (!input) {
-      await this.reply(chatId, '用法：/link_revoke <直链URL或Token>', replyToMessageId, accountId);
+      await this.reply(chatId, '用法：/revoke <直链URL或Token>', replyToMessageId, accountId);
       return;
     }
     const result = await this.adminService.revokeByToken(identity, input);
@@ -1039,6 +1611,8 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
       }
 
       const usageDate = this.quotaService.getBusinessDate(config.quotaTimezone);
+      // 生效额度只解析一次，两种存储模式共用同一口径（白名单 > 单账号覆盖 > 全局）
+      const quota = await this.quotaService.resolveQuota(identity.telegramUserId, config.dailyLimit, usageDate);
 
       if (this.isShuttingDown) {
         await this.reply(chatId, '服务正在维护重启中，请稍后重新发送文件。', message.message_id, accountId);
@@ -1070,7 +1644,7 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
           telegramUsername: username,
           telegramDisplayName: displayName,
           usageDate,
-          dailyLimit: config.dailyLimit,
+          dailyLimit: quota.limit ?? config.dailyLimit,
         }, (manager, task) => this.auditService.logInTransaction(manager, {
           action: 'telegram_bot_file_received',
           resourceType: 'telegram_bot_file',
@@ -1092,24 +1666,24 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
         } else if (result.status === 'banned') {
           await this.reply(chatId, BANNED_TEXT, message.message_id, accountId);
         } else if (result.status === 'quota_denied') {
-          await this.replyQuotaDenied(identity, usageDate, result.used, config.dailyLimit, chatId, message.message_id, accountId);
+          await this.replyQuotaDenied(identity, usageDate, result.used, quota, chatId, message.message_id, accountId);
         }
         return;
       }
 
       await this.registerInboundCopyAndForward(message, accountId);
       await this.auditDocumentReceived(identity, message, fileSize);
-      const whitelisted = await this.quotaService.isWhitelisted(identity.telegramUserId);
+      const whitelisted = quota.whitelisted;
       let quotaConsumed = false;
       let quotaUsed = 0;
       if (!whitelisted) {
-        const quota = await this.quotaService.consume(identity.telegramUserId, usageDate, config.dailyLimit);
-        if (!quota.allowed) {
-          await this.replyQuotaDenied(identity, usageDate, quota.used, config.dailyLimit, chatId, message.message_id, accountId);
+        const consumed = await this.quotaService.consume(identity.telegramUserId, usageDate, quota.limit ?? config.dailyLimit);
+        if (!consumed.allowed) {
+          await this.replyQuotaDenied(identity, usageDate, consumed.used, quota, chatId, message.message_id, accountId);
           return;
         }
         quotaConsumed = true;
-        quotaUsed = quota.used;
+        quotaUsed = consumed.used;
       } else {
         quotaUsed = await this.quotaService.getUsed(identity.telegramUserId, usageDate);
       }
@@ -1194,7 +1768,7 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
   }
 
   private async replyQuotaDenied(
-    identity: TelegramBotIdentity, usageDate: string, used: number, limit: number,
+    identity: TelegramBotIdentity, usageDate: string, used: number, quota: ResolvedQuota,
     chatId: string, messageId: number, accountId?: string,
   ): Promise<void> {
     this.auditService.log({
@@ -1207,10 +1781,16 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
         telegramUsername: identity.username,
         quotaDate: usageDate,
         quotaUsed: used,
-        quotaLimit: limit,
+        quotaLimit: quota.limit,
+        quotaSource: quota.source,
       },
     });
-    await this.reply(chatId, renderQuotaDenied(limit), messageId, accountId);
+    await this.reply(
+      chatId,
+      renderQuotaDenied({ limit: quota.limit ?? 0, source: quota.source === 'user' ? 'user' : 'global' }),
+      messageId,
+      accountId,
+    );
   }
 
   /**
@@ -1336,7 +1916,14 @@ export class TelegramBotDispatchService implements OnApplicationBootstrap, Befor
 
   private buildHelpText(identity?: TelegramBotIdentity): RenderedMessage {
     const admin = identity ? this.adminService.isAdmin(identity.telegramUserId) : false;
-    return renderHelp({ admin });
+    return renderHelp({
+      admin,
+      commands: commandsForUser(admin).map(spec => ({
+        usage: spec.usage,
+        description: spec.description,
+        scope: spec.scope,
+      })),
+    });
   }
 
   private pollQueue(): void {

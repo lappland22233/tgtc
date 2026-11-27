@@ -530,7 +530,7 @@
         <t-form-item label="当前生效域名">
           <div class="bot-effective-domain">{{ botEffectiveDomain || '未配置（无法签发直链）' }}</div>
           <div v-if="!botCryptoAvailable" class="bot-hint" style="color: var(--color-warning);">
-            未配置 TELEGRAM_BOT_ENCRYPTION_KEY：Bot 直链无法回放完整链接，/link_query 仅返回前缀
+            未配置 TELEGRAM_BOT_ENCRYPTION_KEY：Bot 直链无法回放完整链接，/links 仅显示前缀
           </div>
         </t-form-item>
         <t-form-item>

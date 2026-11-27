@@ -26,6 +26,7 @@ import { TelegramBotUserBan } from '../common/entities/telegram-bot-user-ban.ent
 import { TelegramBotFileGrant } from '../common/entities/telegram-bot-file-grant.entity';
 import { TelegramBotDailyUsage } from '../common/entities/telegram-bot-daily-usage.entity';
 import { TelegramBotWhitelist } from '../common/entities/telegram-bot-whitelist.entity';
+import { TelegramBotUserQuota } from '../common/entities/telegram-bot-user-quota.entity';
 import { DownloadTask } from '../common/entities/download-task.entity';
 import { TelegramFileCopy } from '../common/entities/telegram-file-copy.entity';
 import { TelegramAccount } from '../common/entities/telegram-account.entity';
@@ -42,7 +43,7 @@ export const databaseEntities = [
   ShareAudit, FileAccessLog, RateLimit, AuditLog, AccessLog, Alert, UploadTask,
   Tag, JwtRevokedToken, SharePreviewSession, FileVerifyTask, UpdateTask, ApiKey,
   DirectoryName, ApiKeyIpAllowlist, ApiKeyUsageLog,
-  TelegramBotFileGrant, TelegramBotDailyUsage, TelegramBotWhitelist, TelegramBotInboundTask, TelegramBotUserBan,
+  TelegramBotFileGrant, TelegramBotDailyUsage, TelegramBotWhitelist, TelegramBotUserQuota, TelegramBotInboundTask, TelegramBotUserBan,
   DownloadTask, TelegramFileCopy, TelegramAccount, TelegramMirrorRule, TelegramMirrorTask,
   TelegramReplicationAttempt, TelegramMainChatAnchor, StorageBackend, GDriveOAuthFlow,
 ] as const;

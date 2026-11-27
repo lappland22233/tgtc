@@ -311,11 +311,31 @@ export class TelegramAccountClientService {
   }
 
   /**
+   * 设置该账号的命令菜单（池化模式下每个 Bot 各有一份菜单）。
+   *
+   * 不重试：管理员未启动过该 Bot 时的 chat not found 属于预期，由调用方忽略。
+   */
+  async setMyCommands(
+    accountId: string,
+    token: string,
+    commands: Array<{ command: string; description: string }>,
+    scope?: Record<string, unknown>,
+  ): Promise<boolean> {
+    try {
+      const payload: Record<string, unknown> = { commands: JSON.stringify(commands) };
+      if (scope) payload.scope = JSON.stringify(scope);
+      const response = await axios.post(`${this.apiBase}${token}/setMyCommands`, payload, { timeout: 10_000 });
+      return response.data?.ok === true;
+    } catch (error) {
+      throw this.toAccountError(error, token, accountId);
+    }
+  }
+
+  /**
    * 查询 chat 元信息：用于启动期校验每个账号的存储 Chat 是否存在、是否可被该账号访问
    * （bot 未被加入群 / chatId 写错时，上传副本会整批失败）。
    */
-  async getChat(
-    accountId: string,
+  async getChat(    accountId: string,
     token: string,
     chatId: string,
   ): Promise<{ id: string; type: string; title?: string }> {

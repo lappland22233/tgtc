@@ -142,6 +142,8 @@
 | `GET` | `/api/admin/bot-config/detected-domain` | 探测可信站点域名候选值（仅 `super_admin`） |
 | `GET` | `/api/admin/bot-usage` | Bot 使用情况汇总（收到文件/下载次数/去重用户/带宽/趋势，仅 `super_admin`） |
 | `GET` | `/api/admin/bot-usage/users` | Bot 用户明细（TG 用户 ID + @用户名，支持关键字/时间筛选与分页，仅 `super_admin`） |
+| `GET` | `/api/admin/bot-operations/users/:telegramUserId` | 单用户详情：配额来源（`whitelist`/`user`/`global`）、单账号覆盖值、全局额度 |
+| `PUT` | `/api/admin/bot-operations/users/:telegramUserId/quota` | 设置单账号每日额度；`{"dailyLimit": null}` 清除覆盖并回落全局（与 Bot 命令 `/quota_set <ID> default` 同语义） |
 | `GET` | `/api/admin/export` | CSV/JSON 数据导出 |
 
 多数分析、审计、缓存和安全配置接口仅允许 `super_admin`；管理员接口一律只接受 JWT 会话（不接受 API Key）。

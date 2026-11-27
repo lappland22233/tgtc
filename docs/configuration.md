@@ -175,7 +175,7 @@ Redis 承载 8 个 Bull 队列：`metrics-aggregation`、`attack-detection`、`a
 | `TELEGRAM_BOT_ADMIN_IDS` | - | 初始管理员 TG 用户 ID，逗号分隔；开启入站时必填 |
 | `TELEGRAM_BOT_POLL_TIMEOUT_SECONDS` | `30` | 长轮询超时（1–120 秒） |
 | `TELEGRAM_BOT_INBOUND_SELF_CHECK_SECONDS` | `20` | 入站启动自检延迟（1–300 秒，显式 `0` 关闭）；发现「已启用入站但启动后没有任何一次成功 `getUpdates`」时输出 error 级日志与只读诊断结论，用于发现循环空转类静默失效 |
-| `TELEGRAM_BOT_ENCRYPTION_KEY` | - | 直链 Token 可逆加密根密钥（32 字节 base64/64 位 hex）；缺失时 `/link_query` 只能返回前缀 |
+| `TELEGRAM_BOT_ENCRYPTION_KEY` | - | 直链 Token 可逆加密根密钥（32 字节 base64/64 位 hex）；缺失时 `/links` 只能返回前缀 |
 | `TELEGRAM_BOT_DAILY_LIMIT` | `5` | 非白名单用户每日直链额度（env 兜底，面板可调） |
 | `TELEGRAM_BOT_LINK_TTL_HOURS` | `4` | 直链有效期（小时，env 兜底，面板可调） |
 | `TELEGRAM_BOT_QUOTA_TIMEZONE` | `Asia/Shanghai` | 每日额度切日时区（env 兜底，面板可调） |
@@ -194,11 +194,17 @@ Redis 承载 8 个 Bull 队列：`metrics-aggregation`、`attack-detection`、`a
 | `/help`、`/start` | 所有用户 | 用法说明 |
 | `/id` | 所有用户 | 返回自己的 TG 用户 ID |
 | `/quota` | 所有用户 | 查询今日剩余额度（白名单提示不限额） |
-| `/wl_add <TG用户ID>` | 管理员 | 永久加入白名单 |
-| `/wl_remove <TG用户ID>` | 管理员 | 移出白名单 |
-| `/wl_list` | 管理员 | 列出白名单（截断） |
-| `/link_query <TG用户ID>` | 管理员 | 按 TG 用户 ID 查询完整有效直链（每次调用全审计） |
-| `/link_revoke <直链URL或Token>` | 管理员 | 按直链撤销，立即失效 |
+| `/admin` | 管理员 | 管理面板：生效配置、预设档位按钮、有效直链与白名单分页 |
+| `/ttl <1-720>` | 管理员 | 设置直链有效期（小时） |
+| `/limit <数量\|default>` | 管理员 | 设置通用每日额度 |
+| `/quota_set <TG用户ID> <数量\|default>` | 管理员 | 设置/清除单账号每日额度 |
+| `/wl add\|remove <TG用户ID>` | 管理员 | 加入/移出白名单 |
+| `/wl list` | 管理员 | 列出白名单（分页） |
+| `/links [TG用户ID] [页码]` | 管理员 | 浏览有效直链（分页、每行可撤销，每次查询全审计） |
+| `/revoke <直链URL或Token>` | 管理员 | 按直链撤销，立即失效 |
+
+额度优先级：**白名单（不限）> 单账号覆盖（`/quota_set`）> 通用额度（`TELEGRAM_BOT_DAILY_LIMIT`）**。
+单账号覆盖存放于 `telegram_bot_user_quotas` 表（一用户一行），加入白名单不会清除该行。
 
 管理员身份仅依据**数字 TG 用户 ID**（`TELEGRAM_BOT_ADMIN_IDS`）；`@username` 属于用户可控字段，仅用于审计展示，绝不参与权限判定。审计记录 TG 用户 ID 与用户名（如有），且**从不记录完整 Token**。
 
@@ -207,7 +213,7 @@ Redis 承载 8 个 Bull 队列：`metrics-aggregation`、`attack-detection`、`a
 1. 在 `.env` 配置 `TELEGRAM_BOT_ADMIN_IDS` 与 `TELEGRAM_BOT_ENCRYPTION_KEY`（并确认 `APP_URL` 为对外真实地址）；
 2. 运行迁移（`npm run migration:run`），确认 `telegram_bot_*` 三张表与 `access_logs` 新列已创建；
 3. 设置 `TELEGRAM_BOT_UPDATES_ENABLED=true` 并重启后端；
-4. 以初始管理员身份私聊 Bot，先执行 `/help` 与 `/wl_add`，再发送一个文件验证直链可用；
+4. 以初始管理员身份私聊 Bot，先执行 `/help` 与 `/admin` 确认面板数据正确，再发送一个文件验证直链可用；
 5. 在后台「Telegram Bot 设置」确认「当前生效域名」正确后再放开给普通用户。
 
 

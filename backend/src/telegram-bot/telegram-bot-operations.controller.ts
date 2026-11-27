@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Header, HttpCode, Param, ParseUUIDPipe, Post, Query, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Header, HttpCode, Param, ParseUUIDPipe, Post, Put, Query, Req, UseGuards } from '@nestjs/common';
 import type { Request } from 'express';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -7,7 +7,7 @@ import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import {
   BanTelegramUserDto, BotGrantsQuery, BotOperationsTimePage, BotOperationsUserParams,
-  BotOverviewQuery, BotQueueQuery, BotUserGroupsQuery,
+  BotOverviewQuery, BotQueueQuery, BotUserGroupsQuery, SetUserQuotaDto,
 } from './telegram-bot-operations.dto';
 import { TelegramBotOperationsService } from './telegram-bot-operations.service';
 
@@ -69,5 +69,16 @@ export class TelegramBotOperationsController {
   @HttpCode(200)
   ban(@Param() params: BotOperationsUserParams, @Body() body: BanTelegramUserDto, @CurrentUser() operator: User) {
     return this.operations.ban(params.telegramUserId, body.reason, operator.id);
+  }
+
+  /** 设置单账号每日额度；`dailyLimit: null` 清除覆盖，回落通用额度 */
+  @Put('users/:telegramUserId/quota')
+  @HttpCode(200)
+  setQuota(
+    @Param() params: BotOperationsUserParams,
+    @Body() body: SetUserQuotaDto,
+    @CurrentUser() operator: User,
+  ) {
+    return this.operations.setUserQuota(params.telegramUserId, body.dailyLimit ?? null, operator.id);
   }
 }
