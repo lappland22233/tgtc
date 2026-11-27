@@ -53,6 +53,8 @@ interface ChunkSession {
   mergeError?: string;
   /** 合并态长期未收敛的一次性告警标记，避免每轮回收重复刷日志 */
   mergeStuckWarned?: boolean;
+  /** 已安排/已执行延迟清理：可恢复错误重试前必须取消，否则会在重试中途删掉会话 */
+  cleanupTimer?: NodeJS.Timeout;
   /** 回收中：置位后所有会话入口按「已过期」处理，避免与 complete/分片请求竞态 */
   reclaiming?: boolean;
   /** 连续回收失败次数（目录删除失败时累加），用于升级告警 */
@@ -458,6 +460,11 @@ export class ChunkUploadService implements OnModuleInit {
     userId: string,
   ): Promise<void> {
     const session = this.getSession(uploadId, userId);
+    // 只有 pending 态才接受新分片：合并中写入会与合并读到的分片集合竞争，
+    // 终态（done/error）写入则是纯垃圾数据，且会让「已结束」的会话看起来还能续传。
+    if (session.mergeStatus !== 'pending') {
+      throw new ConflictException(`上传已进入 ${session.mergeStatus} 阶段，无法继续写入分片`);
+    }
     if (!Number.isSafeInteger(chunkIndex) || chunkIndex < 0 || chunkIndex >= session.totalChunks) {
       throw new BadRequestException(`分片索引 ${chunkIndex} 超出范围 [0, ${session.totalChunks - 1}]`);
     }
@@ -476,7 +483,6 @@ export class ChunkUploadService implements OnModuleInit {
     const filePath = path.join(this.getChunkDir(uploadId), String(chunkIndex));
     await fsp.rename(incomingPath, filePath);
   }
-
   /** 查询已传分片状态（断点续传） */
   async getStatus(uploadId: string, userId: string): Promise<{
     uploadId: string;
@@ -531,13 +537,29 @@ export class ChunkUploadService implements OnModuleInit {
       this.logger.warn(`[分片上传] ${uploadId} 已在合并中`);
       return;
     }
-    if (session.mergeStatus === 'done' || session.mergeStatus === 'error') {
+    if (session.mergeStatus === 'done') {
       this.logger.warn(`[分片上传] ${uploadId} 合并已结束: ${session.mergeStatus}`);
       return;
     }
+    // 可恢复的 error：合并阶段已产生 savedFileId/handoffPath 的失败，实质是「队列入队失败」，
+    // doMerge/finalizeMerge 已实现复用交接源重试入队的恢复路径。若在此直接 return，
+    // 那条恢复链路就是死代码，且 session 会在 CHUNK_CLEANUP_DELAY_MS 后被清掉，
+    // 留下 pending 文件与 processing 记录永久泄漏。
+    if (session.mergeStatus === 'error' && !this.isRecoverableError(session)) {
+      this.logger.warn(`[分片上传] ${uploadId} 合并失败且无可恢复的上传源，需重新上传`);
+      return;
+    }
+    if (session.mergeStatus === 'error') {
+      this.logger.log(`[分片上传] ${uploadId} 从失败态重试合并（复用已交接的上传源）`);
+    }
+
+    // 重入前必须取消已排期的清理：否则重试跑到一半会话被删、handoff 源被清，
+    // 下次重试又会看到「已交接的上传源缺失」。
+    this.cancelScheduledCleanup(session);
 
     session.lastActivityAt = new Date();
     session.mergeStatus = 'merging';
+    session.mergeError = undefined;
     // 重新进入合并即重置滞留告警，避免一次卡死后永久静音。
     session.mergeStuckWarned = false;
     session.mergeAbortController = new AbortController();
@@ -546,6 +568,18 @@ export class ChunkUploadService implements OnModuleInit {
     // 等待信号量不计入合并超时窗口（deadline 从真正开始合并时计时）。
     const mergePromise = this.runMergeWithSemaphore(session, uploadFn, uploadId);
     session.mergePromise = mergePromise;
+  }
+
+  /** 失败态是否仍持有可复用的上传源（交接文件或已落库的 File 记录） */
+  private isRecoverableError(session: ChunkSession): boolean {
+    return Boolean(session.handoffPath || session.savedFileId);
+  }
+
+  /** 取消已排期的延迟清理（幂等） */
+  private cancelScheduledCleanup(session: ChunkSession): void {
+    if (!session.cleanupTimer) return;
+    clearTimeout(session.cleanupTimer);
+    session.cleanupTimer = undefined;
   }
 
   /** G3-04：在全局 + 用户级信号量保护下执行合并，统一结果写入/失败处理/收尾 */
@@ -958,16 +992,56 @@ export class ChunkUploadService implements OnModuleInit {
     return session.mergeStatus === 'merging' || session.mergeStatus === 'uploading';
   }
 
-  /** 延迟清理会话查询状态；错误会话的分片与严格预算在此收敛。 */
+  /**
+   * 延迟清理会话查询状态；错误会话的分片与严格预算在此收敛。
+   *
+   * 错误会话除分片目录外还必须清掉**已交接但未成功入队**的 pending 源：
+   * 那条路径已不在会话目录里，只删分片目录会让它在 `uploads/pending/` 永久残留，
+   * 而启动扫描 `cleanupOrphanPendingFiles` 因 DB 里仍有 processing 记录而跳过它。
+   */
   private scheduleCleanup(uploadId: string): void {
-    setTimeout(() => {
-      const session = this.sessions.get(uploadId);
+    const session = this.sessions.get(uploadId);
+    if (session) this.cancelScheduledCleanup(session);
+
+    const timer = setTimeout(() => {
+      const current = this.sessions.get(uploadId);
       this.sessions.delete(uploadId);
       const dir = this.getChunkDir(uploadId);
       fsp.rm(dir, { recursive: true, force: true }).catch(() => {});
-      // 成功会话的租约已转交给 Worker job；错误会话仍持有 session 租约，清理后归还。
-      if (session?.mergeStatus === 'error') this.uploadDiskBudget?.releaseSession(uploadId);
+      if (current?.mergeStatus === 'error') {
+        // 交接源未成功入队：删文件 + 结束 processing 记录，避免僵尸任务与磁盘泄漏
+        void this.discardHandoffSource(current);
+        this.uploadDiskBudget?.releaseSession(uploadId);
+      }
     }, CHUNK_CLEANUP_DELAY_MS); // 允许客户端查询结果
+    timer.unref?.();
+    if (session) session.cleanupTimer = timer;
+  }
+
+  /**
+   * 丢弃错误会话残留的交接源。
+   *
+   * 只在「任务确实没被 Worker 取走」时删除本地文件；若任务已在跑，源文件归 Worker 收尾，
+   * 这里只负责把仍停在 processing 的记录标记失败（幂等，重复调用无副作用）。
+   */
+  private async discardHandoffSource(session: ChunkSession): Promise<void> {
+    const fileId = session.savedFileId;
+    if (!fileId) return;
+    const uploadVersion = session.savedFileUploadVersion ?? 1;
+    try {
+      if (session.handoffPath) {
+        await fsp.rm(session.handoffPath, { force: true }).catch(() => {});
+        await fsp.rm(`${session.handoffPath}.telegram.json`, { force: true }).catch(() => {});
+      }
+      if (session.overwriteFileId) {
+        await this.fileService.markProcessingFileFailed?.(fileId, uploadVersion).catch(() => {});
+      } else {
+        await this.fileService.softDeleteProcessingFile(fileId, uploadVersion).catch(() => {});
+      }
+      this.logger.warn(`[分片上传] 已清理失败会话的交接源与处理中记录 fileId=${fileId} v=${uploadVersion}`);
+    } catch (error) {
+      this.logger.warn(`[分片上传] 清理失败会话交接源出错（忽略）: ${(error as Error).message}`);
+    }
   }
 
   /** 取消上传并清理 */
@@ -985,13 +1059,18 @@ export class ChunkUploadService implements OnModuleInit {
 
     // 入队任务可能已被 Worker 取得并打开 pending 文件。此时强行取消会破坏回执恢复并让
     // 严格预算错误释放；明确返回冲突，由后台任务安全收尾。尚未开始的 waiting/delayed 任务可取消。
-    if (session.savedFileId && session.handoffPath) {
+    //
+    // 判定用 `savedFileId` 单条件：File 记录一旦落库就已经存在 processing 行，
+    // 若此时因 handoffPath 尚未赋值（rename/赋值窗口）而跳过清理，取消后那条记录
+    // 会永久停在 processing，且没有任何路径会再处理它。
+    if (session.savedFileId) {
       const removedBeforeStart = await this.cleanupUploadingSideEffects(session);
       if (!removedBeforeStart) {
         throw new ConflictException('上传已被后台处理接管，无法安全取消，请等待任务完成');
       }
     }
 
+    this.cancelScheduledCleanup(session);
     this.sessions.delete(uploadId);
     const dir = this.getChunkDir(uploadId);
     await fsp.rm(dir, { recursive: true, force: true }).catch(() => {});
@@ -1229,9 +1308,11 @@ export class ChunkUploadService implements OnModuleInit {
 
   /** 获取分片目录并确保安全 */
   private getChunkDir(uploadId: string): string {
-    // 双重校验防止路径穿越：要求解析结果必须位于 baseDir 之内（含分隔符前缀，防兄弟目录绕过）
+    // 路径穿越防护：解析结果必须严格位于 baseDir 之内。
+    // 必须要求 `baseDir + sep` 前缀 —— 只判断 `!== baseDir` 时，
+    // 兄弟目录（如 `/data/chunks-evil` 对 `/data/chunks`）仍会被误判为合法。
     const resolved = path.resolve(this.baseDir, uploadId);
-    if (resolved !== this.baseDir && !resolved.startsWith(this.baseDir + path.sep)) {
+    if (!resolved.startsWith(this.baseDir + path.sep)) {
       throw new Error('非法的分片目录路径');
     }
     return resolved;

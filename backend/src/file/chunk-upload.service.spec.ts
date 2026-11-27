@@ -8,6 +8,7 @@ import * as path from 'path';
 jest.mock('./file.service', () => ({ FileService: class FileService {} }));
 
 import { ChunkUploadService } from './chunk-upload.service';
+import { pendingUploadDirectory, pendingUploadName } from './pending-upload';
 import { UploadDiskBudgetService } from './upload-disk-budget.service';
 
 const MB = 1024 * 1024;
@@ -121,6 +122,60 @@ describe('ChunkUploadService session quota', () => {
     service.triggerMerge(uploadId, userId, upload);
     expect(session.mergeStatus).toBe('error');
     expect(upload).not.toHaveBeenCalled();
+  });
+
+  it('失败但持有已交接的上传源时允许重试合并（否则恢复链路是死代码）', async () => {
+    const { uploadId } = await init();
+    const session = (service as any).sessions.get(uploadId);
+    // 模拟「文件已落库、已交接 pending 源，但入队失败」：这正是可恢复的 error
+    session.mergeStatus = 'error';
+    session.mergeError = 'Redis 入队失败';
+    session.savedFileId = 'file-1';
+    session.savedFileUploadVersion = 1;
+    session.handoffPath = path.join(pendingUploadDirectory(), pendingUploadName('file-1', 1));
+
+    service.triggerMerge(uploadId, userId, jest.fn());
+
+    // 关键断言：会话被重新接纳进入 merging，而不是停在 error 被清理掉
+    expect(session.mergeStatus).toBe('merging');
+    expect(session.mergeError).toBeUndefined();
+    await session.mergePromise;
+    // 交接源缺失时最终仍会落 error（可继续重试），但绝不能从未进入重试
+    expect(session.mergeStatus).toBe('error');
+    expect(session.mergeError).toContain('已交接的上传源缺失');
+  });
+
+  it('重试合并前取消已排期的清理，避免重试途中会话被删', async () => {
+    const { uploadId } = await init();
+    const session = (service as any).sessions.get(uploadId);
+    session.mergeStatus = 'error';
+    session.savedFileId = 'file-2';
+    session.savedFileUploadVersion = 1;
+    session.handoffPath = path.join(pendingUploadDirectory(), pendingUploadName('file-2', 1));
+
+    const clearSpy = jest.spyOn(global, 'clearTimeout');
+    const timer = setTimeout(() => undefined, 60_000);
+    session.cleanupTimer = timer;
+
+    service.triggerMerge(uploadId, userId, jest.fn().mockResolvedValue({ id: 'file-2', originalName: 'x' }));
+
+    expect(clearSpy).toHaveBeenCalledWith(timer);
+    expect(session.cleanupTimer).toBeUndefined();
+    clearSpy.mockRestore();
+    await session.mergePromise;
+  });
+
+  it('失败会话的无交接源（尚未落库）不重试合并，避免重复扣减磁盘', async () => {
+    const { uploadId } = await init();
+    const session = (service as any).sessions.get(uploadId);
+    session.mergeStatus = 'error';
+    session.mergeError = '合并校验失败';
+    const upload = jest.fn();
+
+    service.triggerMerge(uploadId, userId, upload);
+
+    expect(upload).not.toHaveBeenCalled();
+    expect(session.mergeStatus).toBe('error');
   });
 
   it.each(['done', 'error'] as const)('does not count %s sessions against the active quota', async (status) => {

@@ -349,7 +349,13 @@ export class FileUploadProcessor {
       }
       file = await this.fileRepository.findOneOrFail({ where: { id: fileId } });
 
-      if (file.uploadVersion !== uploadVersion || file.isDeleted) return;
+      if (file.uploadVersion !== uploadVersion) return;
+      if (file.isDeleted) {
+        // 软删发生在处理途中：不再提交内容，但**必须**清掉临时文件与严格磁盘租约，
+        // 否则 pending 目录与 uploadDiskBudget 会在严格模式下永久卡住后续上传（持续 429）。
+        await this.removeUploadArtifacts(filePath, fileId, uploadVersion);
+        return;
+      }
       try {
         // 提交前捕获旧存储引用（异步覆盖场景仍指向旧对象），提交成功后共享安全清理
         const oldStorageRef = {
@@ -570,7 +576,17 @@ export class FileUploadProcessor {
       getDatabaseType(),
     );
     if (!Array.isArray(readyRows) || readyRows.length === 0) {
+      // 条件未命中分两种：版本已变（本轮内容作废，交给新版本任务）与**同版本已 ready**
+      // （上一轮在置 ready 之后、清理产物之前崩溃）。后者必须做幂等收尾——
+      // 否则 pending 临时文件与严格磁盘租约将永久不释放，后续上传持续 429。
+      const current = await this.fileRepository.findOne({ where: { id: fileId } });
+      if (current && current.uploadVersion === uploadVersion && current.status === 'ready') {
+        this.logger.warn(`文件 ${fileId} 已是同版本 ready 态（上次收尾中断），执行幂等收尾`);
+        await this.removeUploadArtifacts(filePath, fileId, uploadVersion);
+        return;
+      }
       this.logger.warn(`文件 ${fileId} 置 ready 条件未命中（状态或版本已变化），跳过本轮收尾`);
+      await this.removeUploadArtifacts(filePath, fileId, uploadVersion);
       return;
     }
 
