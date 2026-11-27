@@ -583,6 +583,28 @@ describe('AuthService - 邮箱验证开关与登录拦截', () => {
       expect(mockRateLimitService.checkAndIncrement).not.toHaveBeenCalled();
     });
 
+    it('预检排在封禁查询之前：被封禁 IP 也先受短窗口预算约束', async () => {
+      // 封禁行存在（正常会走 dummy bcrypt 分支），但预检已超限 →
+      // 必须在查询封禁与执行 bcrypt 之前就被拒，否则封禁 IP 可打满主线程 CPU。
+      mockRateLimitService.checkLoginPreflight.mockResolvedValue({ allowed: false, waitMinutes: 2 });
+      const bannedBuilder = {
+        where: jest.fn().mockReturnThis(),
+        andWhere: jest.fn().mockReturnThis(),
+        getOne: jest.fn(async () => ({ id: 'ban-1', ip: '127.0.0.1', isPermanent: true })),
+      };
+      mockBannedIPRepo.createQueryBuilder.mockReturnValue(bannedBuilder as never);
+
+      await expect(service.login(
+        { email: 'user@example.com', password: 'Correct#123' } as any,
+        '127.0.0.1',
+      )).rejects.toThrow('登录请求过于频繁');
+
+      expect(mockRateLimitService.checkLoginPreflight).toHaveBeenCalled();
+      // 封禁查询未被触碰：预检在它之前短路
+      expect(bannedBuilder.getOne).not.toHaveBeenCalled();
+      expect(mockAuditService.log).not.toHaveBeenCalled();
+    });
+
     it('开关开启时：未验证账号被拦截', async () => {
       mockRateLimitService.checkLoginPreflight.mockResolvedValue({ allowed: true });
       mockConfigCacheService.get.mockImplementation(async (key: string) =>

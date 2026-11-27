@@ -37,7 +37,17 @@ struct Candidate {
 };
 
 bool default_delete_file(const td::string &path) {
-  return td::unlink(path).is_ok();
+  if (td::unlink(path).is_ok()) {
+    return true;
+  }
+  // 删除失败时再看文件是否已经不在了：
+  // TDLib 可能并发移除同一个文件（ENOENT），上一轮重试也可能已经成功。
+  // 这种「目标已消失」必须视为清理成功——否则单个瞬时失败会中止整轮清理，
+  // 磁盘持续增长直至触发 disk_emergency 主动停机。
+  // 用 exists() 而不是解析 errno：td::unlink 在 POSIX 与 Windows 上
+  // 返回的错误码语义不同，跨平台无法可靠匹配。
+  std::error_code error;
+  return !std::filesystem::exists(std::filesystem::u8path(path.str()), error) && !error;
 }
 
 td::int64 get_free_space(td::Slice path) {
@@ -216,8 +226,10 @@ WorkdirCleanupResult run_workdir_cleanup(const WorkdirCleanupConfig &config,
       continue;
     }
     if (!delete_workdir_file_with_retries(candidate.path, delete_file, 3)) {
+      // 单个文件删不掉只跳过它，不能中断整轮：最老的文件正被占用/权限异常时，
+      // break 会让后面所有候选都不被清理，磁盘持续增长直至触发 disk_emergency。
       result.failed_files++;
-      break;
+      continue;
     }
     result.deleted_files++;
     result.deleted_bytes += candidate.size;

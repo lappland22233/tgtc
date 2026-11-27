@@ -15,6 +15,16 @@ function makeContext() {
     find: jest.fn(async (_options?: { take?: number }) => [] as unknown[]),
     findOne: jest.fn<Promise<Partial<TelegramBotFileGrant> | null>, [unknown]>(async () => null),
     update: jest.fn(async () => ({ affected: 1 })),
+    delete: jest.fn(async () => ({ affected: 0 })),
+    createQueryBuilder: jest.fn(() => {
+      const builder: Record<string, jest.Mock> = {} as Record<string, jest.Mock>;
+      builder.update = jest.fn(() => builder);
+      builder.set = jest.fn(() => builder);
+      builder.where = jest.fn(() => builder);
+      builder.andWhere = jest.fn(() => builder);
+      builder.execute = jest.fn(async () => ({ affected: 1 }));
+      return builder;
+    }),
   };
   const tokenCrypto = {
     // 根密钥缺失的降级路径（tokenCipher=null）即可满足落库断言
@@ -142,6 +152,33 @@ describe('TelegramBotGrantService（grant 内容标识与归因查询）', () =>
       await service.issue(makeIssueInput(), 4);
 
       expect(repository.create).toHaveBeenCalledWith(expect.objectContaining({ fileUniqueId: null }));
+    });
+  });
+
+  describe('清理与缓存抢占的撤销/过期守卫', () => {
+    it('purgeExpired 只删除未撤销的过期行（已撤销记录必须留存审计）', async () => {
+      const { service, repository } = makeContext();
+      const before = new Date('2026-01-01T00:00:00Z');
+
+      await service.purgeExpired(before);
+
+      expect(repository.delete).toHaveBeenCalledWith(expect.objectContaining({
+        expiresAt: expect.objectContaining({ _type: 'lessThan', _value: before }),
+        revokedAt: expect.objectContaining({ _type: 'isNull' }),
+      }));
+    });
+
+    it('markGDriveCachePending 的 WHERE 同时排除已撤销与已过期直链', async () => {
+      const { service, repository } = makeContext();
+
+      await service.markGDriveCachePending('grant-1');
+
+      // builder 在调用时才创建，必须取「调用后」的实例
+      const builder = (repository.createQueryBuilder as jest.Mock).mock.results[0].value;
+      // 关键断言：撤销/过期守卫在 SQL 条件里，而不是事后才由 attachGDriveCache 兜底
+      const whereClauses = (builder.andWhere as jest.Mock).mock.calls.map(call => call[0] as string);
+      expect(whereClauses.some(sql => sql.includes('"revokedAt" IS NULL'))).toBe(true);
+      expect(whereClauses.some(sql => sql.includes('"expiresAt" > :now'))).toBe(true);
     });
   });
 });

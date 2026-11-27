@@ -435,8 +435,14 @@ describe('FolderService - moveFolder（G6-02 事务 + FOR UPDATE 锁）', () => 
     // 被移动节点锁定成功
     (folderRepo.manager as any).transaction.mockImplementationOnce(async (cb: any) =>
       cb(makeTransactionManager({
+        // 单条批量加锁（ORDER BY id ASC FOR UPDATE）同时返回两个节点
         query: jest.fn(async (sql: string) =>
-          sql.includes('FOR UPDATE') ? [{ id: movedId, name: 'moved', parentId: null, isDeleted: false }] : [],
+          sql.includes('FOR UPDATE')
+            ? [
+                { id: movedId, name: 'moved', parentId: null, isDeleted: false },
+                { id: parentId, name: 'parent', parentId: null, isDeleted: false },
+              ]
+            : [],
         ),
         getRepository: jest.fn(() => ({
           findOne: jest.fn(async () => null), // 无同名
@@ -473,17 +479,46 @@ describe('FolderService - moveFolder（G6-02 事务 + FOR UPDATE 锁）', () => 
     expect(audit.log).not.toHaveBeenCalled();
   });
 
-  it('循环检测：新父级是自身后代时抛 BadRequestException（沿 parentId 上溯）', async () => {
+  it('按 ID 升序一次性加锁（避免「移 A 入 B」与「移 B 入 A」的死锁）', async () => {
+    const capturedSql: string[] = [];
+    let capturedParams: unknown[] = [];
     (folderRepo.manager as any).transaction.mockImplementationOnce(async (cb: any) =>
       cb(makeTransactionManager({
-        query: jest.fn(async (sql: string) => {
-          // 被移动节点锁定
-          if (sql.includes('FOR UPDATE') && sql.includes('$1') && !sql.includes('"parentId"')) {
-            return [{ id: movedId, name: 'moved', parentId: null, isDeleted: false }];
-          }
-          // 新父级锁定
+        query: jest.fn(async (sql: string, params: unknown[] = []) => {
           if (sql.includes('FOR UPDATE')) {
-            return [{ id: parentId, name: 'parent', parentId: null, isDeleted: false }];
+            capturedSql.push(sql);
+            capturedParams = params;
+            return [
+              { id: movedId, name: 'moved', parentId: null, isDeleted: false },
+              { id: parentId, name: 'parent', parentId: null, isDeleted: false },
+            ].sort((a, b) => a.id.localeCompare(b.id));
+          }
+          return [{ parentId: null }];
+        }),
+        getRepository: jest.fn(() => ({ findOne: jest.fn(async () => null), save: jest.fn() })),
+      })),
+    );
+
+    await service.moveFolder(ownerId, movedId, { parentId });
+
+    // 只发一条加锁查询，且语句里带 ORDER BY id ASC
+    expect(capturedSql).toHaveLength(1);
+    expect(capturedSql[0]).toContain('ORDER BY id ASC');
+    expect(capturedSql[0]).toContain('FOR UPDATE');
+    // 参数按 ID 升序排列，且最后一参是 ownerId
+    expect(capturedParams.slice(0, -1)).toEqual([...capturedParams.slice(0, -1)].sort());
+    expect(capturedParams[capturedParams.length - 1]).toBe(ownerId);
+  });
+
+  it('循环检测：新父级是自身后代时抛 BadRequestException（沿 parentId 上溯）', async () => {    (folderRepo.manager as any).transaction.mockImplementationOnce(async (cb: any) =>
+      cb(makeTransactionManager({
+        query: jest.fn(async (sql: string) => {
+          // 批量加锁：一次返回被移动节点与新父级（按 ID 升序）
+          if (sql.includes('FOR UPDATE')) {
+            return [
+              { id: movedId, name: 'moved', parentId: null, isDeleted: false },
+              { id: parentId, name: 'parent', parentId: null, isDeleted: false },
+            ].sort((a, b) => a.id.localeCompare(b.id));
           }
           // parentId 上溯查询：新父级的父链最终指向 movedId → 说明 moved 是 parent 的祖先
           return [{ parentId: movedId }];
@@ -509,6 +544,8 @@ describe('FolderService - restoreFolder（G6-05 祖先链校验）', () => {
   function makeTransactionManager(overrides: Record<string, unknown> = {}) {
     return {
       update: jest.fn(async () => ({ affected: 1 })),
+      // 子树收集已移入事务（递归 CTE），走 databaseRawQuery → runner.query
+      query: jest.fn(async () => [{ id: folderId }]),
       // v1.2.6：恢复流程在事务内回查还原实体以重新激活名称行；默认空结果
       getRepository: jest.fn(() => ({ find: jest.fn(async () => []) })),
       ...overrides,
@@ -542,7 +579,8 @@ describe('FolderService - restoreFolder（G6-05 祖先链校验）', () => {
 
   it('祖先链完整（父未被删）时正常恢复', async () => {
     // 待恢复 folder：已软删，有父级
-    const folder = Object.assign(new Folder(), { id: folderId, ownerId, parentId, isDeleted: true, deleteScheduledAt: new Date(), deleteRequestedAt: new Date() });
+    // deleteScheduledAt 必须在未来：为过去/当前会被「已超过可恢复期限」拒绝
+    const folder = Object.assign(new Folder(), { id: folderId, ownerId, parentId, isDeleted: true, deleteScheduledAt: new Date(Date.now() + 86400000), deleteRequestedAt: new Date() });
     // 父级未删（恢复父时也需其祖先，这里直接无祖先即返回）
     const parent = Object.assign(new Folder(), { id: parentId, ownerId, parentId: null, isDeleted: false });
     folderRepo.findOne
@@ -557,7 +595,8 @@ describe('FolderService - restoreFolder（G6-05 祖先链校验）', () => {
   });
 
   it('存在被删祖先时拒绝恢复并提示先恢复上级（幻影根防护）', async () => {
-    const folder = Object.assign(new Folder(), { id: folderId, ownerId, parentId, isDeleted: true, deleteScheduledAt: new Date(), deleteRequestedAt: new Date() });
+    // deleteScheduledAt 必须在未来：为过去/当前会被「已超过可恢复期限」拒绝
+    const folder = Object.assign(new Folder(), { id: folderId, ownerId, parentId, isDeleted: true, deleteScheduledAt: new Date(Date.now() + 86400000), deleteRequestedAt: new Date() });
     // 父级仍被软删 → 应拒绝恢复
     const deletedParent = Object.assign(new Folder(), { id: parentId, ownerId, parentId: null, isDeleted: true });
     folderRepo.findOne

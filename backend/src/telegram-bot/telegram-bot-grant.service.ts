@@ -271,6 +271,10 @@ export class TelegramBotGrantService {
       })
       .where('id = :id', { id: grantId })
       .andWhere('"storagePurgedAt" IS NULL')
+      // 已撤销或已过期的直链没有缓存价值：抢占下来会做一整套 GDrive 上传，
+      // 直到 attachGDriveCache 才发现行已失效，白费带宽并留下远端孤儿对象。
+      .andWhere('"revokedAt" IS NULL')
+      .andWhere('"expiresAt" > :now', { now })
       .andWhere('("gdriveCacheStatus" IS NULL OR "gdriveCacheStatus" IN (:...statuses))', {
         statuses: ['none', 'pending', 'failed'],
       })
@@ -332,9 +336,17 @@ export class TelegramBotGrantService {
       .andWhere('(grant.gdriveCacheNextRetryAt IS NULL OR grant.gdriveCacheNextRetryAt <= :now)', { now });
   }
 
-  /** 清理过期授权记录（保留已撤销记录用于审计追溯） */
+  /**
+   * 清理过期授权记录（**保留已撤销记录**用于审计追溯）。
+   *
+   * 必须显式排除 `revokedAt` 非空的行：撤销记录即便早已过期，也是审计链的一环，
+   * 物理删除后无法再回答「谁在何时撤销了哪条链接」。
+   */
   async purgeExpired(before: Date): Promise<number> {
-    const result = await this.grantRepository.delete({ expiresAt: LessThan(before) });
+    const result = await this.grantRepository.delete({
+      expiresAt: LessThan(before),
+      revokedAt: IsNull(),
+    });
     return result.affected ?? 0;
   }
 }

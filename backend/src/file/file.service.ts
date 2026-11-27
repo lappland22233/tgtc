@@ -2046,16 +2046,34 @@ export class FileService implements OnModuleInit {
     }
 
     // 标记删除状态（用户自主删除，非管理员操作）
-    file.isDeleted = true;
-    file.deletedByAdmin = false;
-    file.deleteRequestedAt = now;
-    file.deleteScheduledAt = new Date(now.getTime() + FILE_DELETE_GRACE_MS);
-    file.deleteCooldownUntil = new Date(now.getTime() + FILE_DELETE_COOLDOWN_MS);
+    const deleteRequestedAt = now;
+    const deleteScheduledAt = new Date(now.getTime() + FILE_DELETE_GRACE_MS);
+    const deleteCooldownUntil = new Date(now.getTime() + FILE_DELETE_COOLDOWN_MS);
     // v1.2.6：软删除与统一命名空间名称释放同事务（进入回收站即释放名称）
-    await this.fileRepository.manager.transaction(async (manager) => {
-      await manager.getRepository(File).save(file);
+    //
+    // 写回用**条件 update** 而不是 save(file)：file 是事务外读到的快照，
+    // 若在此期间异步上传刚提交了新引用（storageBackend/fileId 等），
+    // 整实体 save 会用旧字段把它覆盖掉。条件 `isDeleted=false` 同时保证幂等。
+    const changed = await this.fileRepository.manager.transaction(async (manager) => {
+      const result = await manager.getRepository(File).update(
+        { id, isDeleted: false },
+        {
+          isDeleted: true,
+          deletedByAdmin: false,
+          deleteRequestedAt,
+          deleteScheduledAt,
+          deleteCooldownUntil,
+        },
+      );
+      if (!result.affected) return false;
       await this.namespaceService.release(manager, { entityType: 'file', entityId: id });
+      return true;
     });
+    if (!changed) {
+      // 并发删除已经先行完成：返回当前状态而不是伪装成功
+      const current = await this.fileRepository.findOne({ where: { id } });
+      return { status: 'already_deleted', scheduledAt: current?.deleteScheduledAt || undefined };
+    }
 
     // 审计日志：文件请求删除
     this.auditService.log({
@@ -2063,10 +2081,10 @@ export class FileService implements OnModuleInit {
       userId: user.id,
       resourceType: 'file',
       resourceId: id,
-      metadata: { filename: file.originalName, scheduledAt: file.deleteScheduledAt.toISOString() },
+      metadata: { filename: file.originalName, scheduledAt: deleteScheduledAt.toISOString() },
     });
 
-    return { status: 'pending', scheduledAt: file.deleteScheduledAt };
+    return { status: 'pending', scheduledAt: deleteScheduledAt };
   }
 
   /**
@@ -2096,6 +2114,21 @@ export class FileService implements OnModuleInit {
     // 如果已过 scheduledAt，文件已被永久删除
     if (file.deleteScheduledAt && now >= file.deleteScheduledAt) {
       throw new BadRequestException('删除等待期已过，文件已永久删除');
+    }
+
+    // 祖先链校验：父目录仍在回收站时直接恢复文件会得到「活跃文件挂在已删目录下」，
+    // 目录树里看不到它却仍占用命名空间。与 folder.service.ts 的恢复前校验保持一致。
+    if (file.folderId) {
+      let ancestorId: string | null = file.folderId;
+      // 深度护栏：正常树深度受文件夹服务限制，这里只防脏数据造成的环
+      for (let depth = 0; ancestorId && depth < 64; depth++) {
+        const ancestor: Folder | null = await this.folderRepository.findOne({ where: { id: ancestorId } });
+        if (!ancestor) break;
+        if (ancestor.isDeleted) {
+          throw new BadRequestException('该文件所在的目录仍处于回收站中，请先恢复上级目录');
+        }
+        ancestorId = ancestor.parentId ?? null;
+      }
     }
 
     // G2-08：恢复与清扫（sweepPendingDeletions）存在竞态 —— 清扫可能在 restore 的
@@ -2139,8 +2172,10 @@ export class FileService implements OnModuleInit {
         });
       });
     } catch (error: unknown) {
-      if (isDatabaseUniqueViolation(error)) {
-        throw new BadRequestException('恢复失败：当前目录已存在同名文件或文件夹，请先处理重名');
+      // namespaceService.acquire 内部已把唯一约束转成 ConflictException，
+      // 外层判原始数据库错误码永远不成立（不可达）。
+      if (error instanceof ConflictException) {
+        throw new ConflictException('恢复失败：当前目录已存在同名文件或文件夹，请先处理重名');
       }
       throw error;
     }
@@ -2205,8 +2240,10 @@ export class FileService implements OnModuleInit {
     });
 
     // 数据库删除成功后再清理可重建的本地衍生数据。
-    this.deleteLocalThumbnail(file);
-    this.fileCacheService.invalidate(id);
+    // invalidate 必须 await（与 1192 行的覆盖路径一致）：fire-and-forget 会让
+    // 在途 build/spool 会话在行已删除后仍写出旧内容，抛出未捕获的 rejection。
+    await this.deleteLocalThumbnail(file);
+    await this.fileCacheService.invalidate(id);
 
     // 非 TG 后端：DB 删除成功后经共享引用检查 best-effort 清理远端对象（TG 维持不删现状）
     void this.cleanupNonTelegramObject(file);
@@ -2301,8 +2338,8 @@ export class FileService implements OnModuleInit {
             this.logger.warn(`跳过事务复核后不再到期的文件: ${file.originalName} (${fileId})`);
             continue;
           }
-          this.deleteLocalThumbnail(file);
-          this.fileCacheService.invalidate(fileId);
+          await this.deleteLocalThumbnail(file);
+          await this.fileCacheService.invalidate(fileId);
           // 非 TG 后端：经共享引用检查 best-effort 清理远端对象（失败只告警，不影响删除结论）
           void this.cleanupNonTelegramObject(file);
           void this.cleanupGDriveCacheObject(file);
@@ -2332,7 +2369,87 @@ export class FileService implements OnModuleInit {
       if (batch.length < batchSize) break; // 已是最后一批
     }
 
+    // 文件清理完成后回收**文件夹**：此前只有 files 表有清扫任务，
+    // 软删目录及其 directory_names 行永远留在库里，7 天后用户还能恢复出一个空壳目录。
+    // 顺序：先清文件（上面已完成，子项先于父项消失），再按扫描时间出的深度倒序清目录。
+    deletedCount += await this.sweepDeletedFolders(now);
     return deletedCount;
+  }
+
+  /**
+   * 物理清理到期的软删文件夹与统一命名空间名称行。
+   *
+   * 按「子 → 父」顺序：`deleteScheduledAt` 是整批写入的同一时刻，
+   * 因此同批内必须先删深度大的节点，否则先删父目录会让子目录变成孤立行
+   * （parentId 指向已不存在的行），前端回收站里也再看不到它们。
+   */
+  private async sweepDeletedFolders(now: Date): Promise<number> {
+    const repo = this.folderRepository;
+    const batchSize = 100;
+    let deleted = 0;
+
+    const pending = await repo.createQueryBuilder('folder')
+      .where('folder.isDeleted = true')
+      .andWhere('folder.deleteScheduledAt IS NOT NULL')
+      .andWhere('folder.deleteScheduledAt <= :now', { now })
+      .take(batchSize * 10)
+      .getMany();
+    if (pending.length === 0) return 0;
+
+    // 计算深度：沿 parentId 上溯，只用本批数据 + 逐条查询兜底
+    const depthOf = async (folder: Folder): Promise<number> => {
+      let depth = 0;
+      let parentId = folder.parentId;
+      const guard = new Set<string>();
+      while (parentId && depth < 64 && !guard.has(parentId)) {
+        guard.add(parentId);
+        const parent = await repo.findOne({ where: { id: parentId }, select: { id: true, parentId: true } });
+        if (!parent) break;
+        parentId = parent.parentId;
+        depth++;
+      }
+      return depth;
+    };
+
+    const ranked: Array<{ folder: Folder; depth: number }> = [];
+    for (const folder of pending) ranked.push({ folder, depth: await depthOf(folder) });
+    ranked.sort((a, b) => b.depth - a.depth);
+
+    for (const { folder } of ranked) {
+      const folderId = folder.id;
+      try {
+        // 仍有未到期或未删除的子项时跳过：父目录先删会让子项成为孤儿
+        const hasLiveChildren = await repo.count({
+          where: { parentId: folderId, isDeleted: false },
+        });
+        if (hasLiveChildren > 0) continue;
+
+        await repo.manager.transaction(async (manager) => {
+          const locked = await manager.getRepository(Folder).findOne({
+            where: { id: folderId },
+            ...databasePessimisticWriteLock(),
+          });
+          if (!locked || !locked.isDeleted || !locked.deleteScheduledAt) return;
+          if (locked.deleteScheduledAt > now) return;
+          await this.namespaceService.remove(manager, { entityType: 'folder', entityId: folderId });
+          await manager.getRepository(Folder).remove(locked);
+          deleted++;
+        });
+        await this.auditService.logAwait({
+          action: 'folder_delete' as never,
+          userId: folder.ownerId,
+          resourceType: 'folder',
+          resourceId: folderId,
+          metadata: { name: folder.name, source: 'scheduled_sweep', scheduledAt: folder.deleteScheduledAt?.toISOString() },
+        }).catch(() => undefined);
+        this.logger.log(`已永久删除文件夹数据库记录: ${folder.name} (${folderId})`);
+      } catch (error: unknown) {
+        this.logger.warn(
+          `清除文件夹记录失败，保留记录待下次重试: ${folder.name} (${folderId}), 错误: ${(error as Error).message}`,
+        );
+      }
+    }
+    return deleted;
   }
 
   // ---------- 访问策略变更（M6 拆分：实现见 FileAccessControlService） ----------
@@ -2573,8 +2690,8 @@ export class FileService implements OnModuleInit {
   /**
    * 删除本地缩略图文件（委托 ThumbnailService，保持公开 API 不变）。
    */
-  deleteLocalThumbnail(file: File): void {
-    this.thumbnailService.deleteLocalThumbnail(file);
+  deleteLocalThumbnail(file: File): Promise<void> {
+    return this.thumbnailService.deleteLocalThumbnail(file);
   }
 
 

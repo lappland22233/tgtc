@@ -15,7 +15,7 @@
  */
 import { Injectable, Logger, Optional, Inject } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Not, Repository } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -466,9 +466,28 @@ export class ThumbnailService {
     }
   }
 
-  /** 删除本地缩略图文件（含标准与高清封面候选）。 */
-  deleteLocalThumbnail(file: File): void {
+  /**
+   * 删除本地缩略图文件（含标准与高清封面候选）。
+   *
+   * **共享引用检查**：`copyFile` 会让副本与源文件共享同一个 `thumbnailPath`。
+   * 若不做检查，删除源文件（或任一副本）会 unlink 掉另一方仍在使用的缩略图，
+   * 表现为「另一个文件突然没有缩略图」且无法自愈（构建去重缓存认为已生成）。
+   */
+  async deleteLocalThumbnail(file: File): Promise<void> {
     if (!file.thumbnailPath) return;
+    try {
+      const shared = await this.fileRepository.count({
+        where: { thumbnailPath: file.thumbnailPath, id: Not(file.id) },
+      });
+      if (shared > 0) {
+        this.logger.debug(`缩略图仍被 ${shared} 条其他记录引用，跳过删除: ${file.thumbnailPath}`);
+        return;
+      }
+    } catch (error) {
+      // 查询失败时宁可不删（残留可被后续清理），也不要破坏其他文件的缩略图
+      this.logger.warn(`检查缩略图共享引用失败，跳过删除: ${file.thumbnailPath}, ${(error as Error).message}`);
+      return;
+    }
     const fullPath = path.join(this.thumbnailDir, file.thumbnailPath);
     try {
       if (fs.existsSync(fullPath)) fs.unlinkSync(fullPath);

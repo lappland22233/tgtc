@@ -434,6 +434,12 @@ export class FileUploadProcessor {
             telegramChatId: result.chat_id ?? null,
             telegramMessageId: result.message_id ?? null,
             telegramFileUniqueId: result.file_unique_id ?? null,
+            // 跨后端覆盖（S3/WebDAV/GDrive → Telegram）：必须把存储判别字段切回 telegram
+            // 并清空旧远端引用，否则下载链路仍会按旧后端去取一个已被本次覆盖作废的对象。
+            // 非 TG 分支已对称清空 telegram* 字段，这里补齐反方向。
+            storageBackend: 'telegram',
+            storageAccountId: null,
+            storageObjectRef: null,
             uploadStage: 'remote_committed',
             uploadFailureReason: null,
           }) as Partial<File>,
@@ -448,6 +454,16 @@ export class FileUploadProcessor {
           && oldStorageRef.storageObjectRef
           && (oldStorageRef.storageObjectRef !== result.storageObjectRef
             || oldStorageRef.storageAccountId !== result.storageAccountId)
+        ) {
+          void this.fileService.cleanupNonTelegramObject(oldStorageRef);
+        }
+        // TG 覆盖：旧引用若是非 TG 后端（S3/WebDAV/GDrive），同样要清掉那个远端对象，
+        // 否则切换后端后旧对象永久残留（用户已改用 Telegram，不会再有路径去清理它）。
+        if (
+          !isNonTelegram
+          && oldStorageRef.storageBackend
+          && oldStorageRef.storageBackend !== 'telegram'
+          && oldStorageRef.storageObjectRef
         ) {
           void this.fileService.cleanupNonTelegramObject(oldStorageRef);
         }

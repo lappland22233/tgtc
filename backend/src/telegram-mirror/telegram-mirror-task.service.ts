@@ -2,7 +2,7 @@ import { BadRequestException, Injectable, Logger, NotFoundException } from '@nes
 import { InjectQueue } from '@nestjs/bull';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Queue } from 'bull';
-import { LessThanOrEqual, Repository } from 'typeorm';
+import { In, LessThanOrEqual, Repository } from 'typeorm';
 import { databaseQuery, getDatabaseType } from '../database/database-types';
 import {
   TelegramMirrorTask,
@@ -402,13 +402,21 @@ export class TelegramMirrorTaskService {
     if (task.status === 'succeeded') throw new BadRequestException('任务已成功，无需重试');
     if (task.status === 'running') throw new BadRequestException('任务正在执行中');
 
-    await this.repo.update({ id }, {
-      status: 'queued',
-      attempts: 0,
-      receiptPending: task.receiptPending,
-      nextRetryAt: null,
-      completedAt: null,
-    });
+    // 带原状态条件：读与写之间 Worker 可能已 claim 成 running，
+    // 无条件 update 会把它打回 queued，导致同一任务被两个 Worker 同时执行。
+    const updateResult = await this.repo.update(
+      { id, status: In([...TelegramMirrorTaskService.TERMINAL_STATUSES, 'pending'] as TelegramMirrorTask['status'][]) },
+      {
+        status: 'queued',
+        attempts: 0,
+        receiptPending: task.receiptPending,
+        nextRetryAt: null,
+        completedAt: null,
+      },
+    );
+    if (!updateResult.affected) {
+      throw new BadRequestException('任务状态已变化（可能已开始执行），请刷新后重试');
+    }
     const refreshed = (await this.repo.findOne({ where: { id } })) as TelegramMirrorTask;
     await this.safeAddJob(refreshed);
     this.audit.log({
@@ -430,13 +438,20 @@ export class TelegramMirrorTaskService {
     }
     if (task.status === 'succeeded') throw new BadRequestException('任务已成功，无需取消');
 
-    await this.repo.update({ id }, {
-      status: 'cancelled',
-      lastErrorCode: 'cancelled',
-      lastErrorSummary: '管理员取消',
-      nextRetryAt: null,
-      completedAt: new Date(),
-    });
+    // 同 retry：仅当状态仍是读取时的那一版才写入，避免覆盖 Worker 刚 claim 的 running
+    const updateResult = await this.repo.update(
+      { id, status: task.status },
+      {
+        status: 'cancelled',
+        lastErrorCode: 'cancelled',
+        lastErrorSummary: '管理员取消',
+        nextRetryAt: null,
+        completedAt: new Date(),
+      },
+    );
+    if (!updateResult.affected) {
+      throw new BadRequestException('任务状态已变化（可能已开始执行），请刷新后重试');
+    }
     this.audit.log({
       action: 'telegram_mirror_task_cancelled',
       userId: actorId,
@@ -475,7 +490,9 @@ export class TelegramMirrorTaskService {
    */
   async requeueTerminal(task: TelegramMirrorTask, operatorUserId: string): Promise<boolean> {
     if (!TelegramMirrorTaskService.TERMINAL_STATUSES.includes(task.status)) return false;
-    await this.repo.update({ id: task.id }, {
+    // 传入的 task 可能是调用方早先读到的快照：写入前必须以「当前仍处于终态」为条件，
+    // 否则会把已被 Worker claim 成 running 的任务打回 queued（同一任务被两份 Worker 处理）。
+    const updateResult = await this.repo.update({ id: task.id, status: task.status }, {
       status: 'queued',
       attempts: 0,
       lastErrorCode: null,
@@ -489,6 +506,7 @@ export class TelegramMirrorTaskService {
       startedAt: null,
       completedAt: null,
     });
+    if (!updateResult.affected) return false;
     const fresh: TelegramMirrorTask = {
       ...task,
       status: 'queued',
