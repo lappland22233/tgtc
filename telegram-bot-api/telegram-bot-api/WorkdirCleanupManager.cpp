@@ -46,8 +46,10 @@ bool default_delete_file(const td::string &path) {
   // 磁盘持续增长直至触发 disk_emergency 主动停机。
   // 用 exists() 而不是解析 errno：td::unlink 在 POSIX 与 Windows 上
   // 返回的错误码语义不同，跨平台无法可靠匹配。
+  // 注意 path 是 td::string（= std::string），没有 Slice 的 .str()；
+  // u8path 可直接接受 std::string。
   std::error_code error;
-  return !std::filesystem::exists(std::filesystem::u8path(path.str()), error) && !error;
+  return !std::filesystem::exists(std::filesystem::u8path(path), error) && !error;
 }
 
 td::int64 get_free_space(td::Slice path) {
