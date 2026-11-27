@@ -281,7 +281,7 @@ export class ShareService {
     try {
       opened = await this.openDownloadStream(link, fileId, ip, rangeHeader, ifRange);
     } catch (error) {
-      if (consumed.consumed) await this.refundShareAccess(link.id);
+      if (consumed.consumed) await this.refundConsumedAccess(link, fileId, visitorHash);
       throw error;
     }
 
@@ -344,10 +344,35 @@ export class ShareService {
   }
 
   /**
+   * 退还一次已消耗的访问额度。
+   *
+   * **必须与作废会话成对执行**：会话落库即代表「该访客已消费」，
+   * 后续同指纹请求会命中 idempotent 免扣。若只退计数不删会话，
+   * 攻击者可用一次必然失败的请求骗取退款，随后在会话有效期（5 分钟）内
+   * 零计数无限下载——maxAccessCount 限制彻底失效。
+   *
+   * 顺序为先删会话、后退计数：这样任何并发请求看到的都是
+   * 「要么会话在且已计费，要么会话不在且需重新计费」，不存在免费窗口。
+   */
+  private async refundConsumedAccess(
+    link: ShareLink,
+    fileId: string,
+    visitorHash?: string,
+  ): Promise<void> {
+    if (visitorHash) {
+      await this.previewSessionService.discardSession(link.id, fileId, visitorHash);
+    }
+    await this.refundShareAccess(link.id);
+  }
+
+  /**
    * 退还一次下载额度（取流失败补偿）。
    *
    * 用条件自减保证不会减到负数，也不会把并发写入的其他计数覆盖掉——
    * 绝不能改回整实体 save()，那正是并发丢失更新的来源。
+   *
+   * 注意：直接调用它只会退计数。走会话去重的路径必须改用
+   * `refundConsumedAccess`，否则会留下「退款但会话仍标记已消费」的绕过口子。
    */
   async refundShareAccess(shareLinkId: string): Promise<void> {
     await this.shareLinkRepo

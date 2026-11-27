@@ -2379,9 +2379,14 @@ export class FileService implements OnModuleInit {
   /**
    * 物理清理到期的软删文件夹与统一命名空间名称行。
    *
-   * 按「子 → 父」顺序：`deleteScheduledAt` 是整批写入的同一时刻，
-   * 因此同批内必须先删深度大的节点，否则先删父目录会让子目录变成孤立行
-   * （parentId 指向已不存在的行），前端回收站里也再看不到它们。
+   * **只删「空」目录**。`folders.parentId` 是 `ON DELETE CASCADE`、`files.folderId`
+   * 是 `ON DELETE SET NULL`，因此数据库层删一个父目录会连带删掉它下面**所有**子目录
+   * （含未到期、甚至未删除的），并把其中未到期的文件静默移到根目录。
+   * 这意味着清扫必须自己保证「该目录下没有任何其他行」：
+   * - 任何子目录（无论是否到期）存在 → 跳过，交给子目录各自到期后先删；
+   * - 任何文件（无论是否到期）仍挂在该目录 → 跳过，否则会把它变成根目录孤儿。
+   *
+   * 判定与删除在同一事务内完成（行锁 + 事务内复查），避免检查后被并发新建/移入。
    */
   private async sweepDeletedFolders(now: Date): Promise<number> {
     const repo = this.folderRepository;
@@ -2418,23 +2423,30 @@ export class FileService implements OnModuleInit {
     for (const { folder } of ranked) {
       const folderId = folder.id;
       try {
-        // 仍有未到期或未删除的子项时跳过：父目录先删会让子项成为孤儿
-        const hasLiveChildren = await repo.count({
-          where: { parentId: folderId, isDeleted: false },
-        });
-        if (hasLiveChildren > 0) continue;
-
-        await repo.manager.transaction(async (manager) => {
-          const locked = await manager.getRepository(Folder).findOne({
+        const removed = await repo.manager.transaction(async (manager) => {
+          const folders = manager.getRepository(Folder);
+          const locked = await folders.findOne({
             where: { id: folderId },
             ...databasePessimisticWriteLock(),
           });
-          if (!locked || !locked.isDeleted || !locked.deleteScheduledAt) return;
-          if (locked.deleteScheduledAt > now) return;
+          if (!locked || !locked.isDeleted || !locked.deleteScheduledAt) return false;
+          if (locked.deleteScheduledAt > now) return false;
+
+          // 子目录：不论是否到期、是否已删除，只要还有就直接跳过。
+          // 数据库的 CASCADE 会连带删除它们，包括尚未到期的。
+          const childFolders = await folders.count({ where: { parentId: folderId } });
+          if (childFolders > 0) return false;
+
+          // 文件：files.folderId 是 SET NULL，删目录会把未到期文件静默移到根目录。
+          const childFiles = await manager.getRepository(File).count({ where: { folderId } });
+          if (childFiles > 0) return false;
+
           await this.namespaceService.remove(manager, { entityType: 'folder', entityId: folderId });
-          await manager.getRepository(Folder).remove(locked);
-          deleted++;
+          await folders.remove(locked);
+          return true;
         });
+        if (!removed) continue;
+        deleted++;
         await this.auditService.logAwait({
           action: 'folder_delete' as never,
           userId: folder.ownerId,

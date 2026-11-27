@@ -92,7 +92,10 @@ describe('ShareService（L6/N2）', () => {
       issueAccessJwt: jest.fn(async () => 'signed-access-jwt'),
       verifyAccessJwt: jest.fn(async () => true),
     };
-    previewSessionService = { consumePreviewAccess: jest.fn(async () => 'consumed') };
+    previewSessionService = {
+      consumePreviewAccess: jest.fn(async () => 'consumed'),
+      discardSession: jest.fn(async () => undefined),
+    };
     folderBrowse = {
       getFolderInfoForShare: jest.fn(async () => ({ requiresPassword: false, targetType: 'folder', items: [] })),
       assertFileInShare: jest.fn(async () => undefined),
@@ -325,6 +328,45 @@ describe('ShareService（L6/N2）', () => {
       expect(previewSessionService.consumePreviewAccess).toHaveBeenCalledWith(
         expect.objectContaining({ id: expect.any(String) }), fileId, 'vh-1',
       );
+    });
+
+    it('取流失败退款时必须连带作废会话（否则可零计数无限下载）', async () => {
+      shareLinkRepo.findOne.mockResolvedValue(makeLink({ maxAccessCount: 1, currentAccessCount: 0 }));
+      fileService.getShareDownloadStreamWithRange.mockRejectedValue(
+        new RangeNotSatisfiableException(1234),
+      );
+      const sessionSpy = previewSessionService.discardSession as jest.Mock;
+      sessionSpy.mockClear();
+
+      await expect(
+        service.getShareDownloadStream('tok123456789', fileId, undefined, null, 'bytes=999999-', undefined, 'vh-1'),
+      ).rejects.toThrow();
+
+      // 只退计数不删会话 = 攻击者用一次必然失败的请求骗取退款，
+      // 之后整个窗口内同指纹请求全部命中 idempotent 免费下载。
+      expect(sessionSpy).toHaveBeenCalledWith(
+        expect.any(String), fileId, 'vh-1',
+      );
+      // 会话作废必须先于计数退还：任何并发请求都不会看到「会话在但未计费」
+      const discardOrder = sessionSpy.mock.invocationCallOrder[0];
+      const refundOrder = (shareLinkRepo.createQueryBuilder as jest.Mock).mock.invocationCallOrder.at(-1)!;
+      expect(discardOrder).toBeLessThan(refundOrder);
+    });
+
+    it('会话幂等命中时不作废会话也不退款（本次没有新扣次）', async () => {
+      shareLinkRepo.findOne.mockResolvedValue(makeLink({ maxAccessCount: 3, currentAccessCount: 1 }));
+      previewSessionService.consumePreviewAccess.mockResolvedValue('idempotent');
+      fileService.getShareDownloadStreamWithRange.mockRejectedValue(new Error('上游失败'));
+      const sessionSpy = previewSessionService.discardSession as jest.Mock;
+      sessionSpy.mockClear();
+      (shareLinkRepo.createQueryBuilder as jest.Mock).mockClear();
+
+      await expect(
+        service.getShareDownloadStream('tok123456789', fileId, undefined, null, 'bytes=0-9', undefined, 'vh-3'),
+      ).rejects.toThrow('上游失败');
+
+      expect(sessionSpy).not.toHaveBeenCalled();
+      expect((shareLinkRepo.createQueryBuilder as jest.Mock).mock.calls.length).toBe(0);
     });
 
     it('会话报告耗尽时抛 404 且不打开流', async () => {

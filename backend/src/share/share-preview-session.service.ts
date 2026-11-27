@@ -109,6 +109,24 @@ export class SharePreviewSessionService {
   }
 
   /**
+   * 作废一条预览会话，使下一次访问重新计费。
+   *
+   * 为什么退款必须连带删会话：会话一旦落库就代表「该访客已消费过」，
+   * 后续同指纹的请求会直接命中 idempotent 分支免扣。只把计数减一而不删会话，
+   * 等于「退钱但保留已消费凭证」——攻击者先用一次必然失败的请求触发退款，
+   * 之后整个窗口内可零计数无限下载，maxAccessCount=1 的分享形同虚设。
+   *
+   * 幂等：会话不存在时静默返回（例如并发退款或已过期被清理）。
+   */
+  async discardSession(shareLinkId: string, fileId: string, visitorHash: string): Promise<void> {
+    await this.sessionRepo.delete({ shareLinkId, fileId, visitorHash }).catch((error: unknown) => {
+      this.logger.warn(
+        `作废预览会话失败（忽略，计数已退还）: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    });
+  }
+
+  /**
    * 分批清理过期会话（按 expiresAt 索引，上限 PRUNE_BATCH_LIMIT）。
    * 供请求路径低频触发与运维脚本共用；不做全表扫描。
    */
