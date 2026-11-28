@@ -79,13 +79,22 @@ export class SharePasswordService {
   }
 
   /**
+   * 限流键一律用分享 token 的 SHA-256 摘要，与 Bot 直链侧 safeTokenKey 同口径。
+   * 明文 token 落进 rate_limits 表意味着：任何能读该表的人（DB 只读账号、备份泄漏、
+   * 管理端导出误含）都能恢复全部活跃分享凭证并无密码重放。
+   */
+  private safeTokenKey(token: string): string {
+    return crypto.createHash('sha256').update(token || '').digest('hex');
+  }
+
+  /**
    * 在昂贵的 bcrypt 前按 IP 与分享 token 双维度限流。
    * 任一维度达到阈值即拒绝；数据库 UPSERT 保证多实例和并发下不能绕过。
    *
    */
   async checkPasswordAttemptAllowed(ip: string | null, shareToken: string): Promise<boolean> {
-    if (await this.rateLimitService.isLocked('share-password:token-lock:' + shareToken)) return false;
-    const keys = [`share-password:token:${shareToken}`];
+    if (await this.rateLimitService.isLocked(`share-password:token-lock:${this.safeTokenKey(shareToken)}`)) return false;
+    const keys = [`share-password:token:${this.safeTokenKey(shareToken)}`];
     if (ip) keys.push(`share-password:ip:${ip}`);
     const results = await Promise.all(keys.map((key) => this.rateLimitService.checkAndIncrement(
       key,
@@ -104,14 +113,14 @@ export class SharePasswordService {
    * 使爆破成本从「换 IP 无限续」提升到「同一 token 最多 30 次/阶段」。
    */
   async recordTokenFailedAttempt(shareToken: string): Promise<void> {
-    const failKey = `share-password:token-fail:${shareToken}`;
+    const failKey = `share-password:token-fail:${this.safeTokenKey(shareToken)}`;
     const counter = await this.rateLimitService.incrementCounter(
       failKey, 'share_password_token_fail', 1, this.TOKEN_FAIL_WINDOW,
     );
     if (counter.count >= this.TOKEN_FAIL_LOCK_THRESHOLD) {
       // 触发 24h 锁定（maxAttempts=1 保证本次调用即锁定）
       await this.rateLimitService.checkAndIncrement(
-        `share-password:token-lock:${shareToken}`,
+        `share-password:token-lock:${this.safeTokenKey(shareToken)}`,
         'share_password_token_lock',
         1,
         this.TOKEN_FAIL_LOCK_DURATION_MS,

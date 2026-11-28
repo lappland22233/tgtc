@@ -1307,7 +1307,7 @@ export class FileService implements OnModuleInit {
   async isFileTypeAllowed(
     filename: string,
     buffer?: Buffer,
-  ): Promise<{ allowed: boolean; reason?: string }> {
+  ): Promise<{ allowed: boolean; reason?: string; detectedExt?: string | null }> {
     return this.uploadConfig.isFileTypeAllowed(filename, buffer);
   }
 
@@ -1335,7 +1335,7 @@ export class FileService implements OnModuleInit {
     skipTypeCheck?: boolean,
     folderId?: string | null,
     overwriteFileId?: string,
-    options?: { deferCachePrewarm?: boolean },
+    options?: { deferCachePrewarm?: boolean; detectedExtension?: string | null },
   ): Promise<File> {
     if (file.size > this.uploadConfig.maxFileSizeBytes) {
       throw new BadRequestException(`文件大小不能超过 ${this.uploadConfig.maxFileSizeBytes / 1024 / 1024}MB`);
@@ -1345,12 +1345,16 @@ export class FileService implements OnModuleInit {
 
     await this.assertUploadFolder(folderId, user.id);
 
+    // 分片路径已自行做过 magic bytes 检查（skipTypeCheck），探测结果由调用方传入，
+    // 否则 detectedExtension 恒为 null，公开直链的 MIME 一致性校验对分片上传形同虚设。
+    let detectedExtension: string | null = options?.detectedExtension ?? null;
     if (!skipTypeCheck) {
       const fileSample = this.uploadConfig.getFileSample(file);
       const typeCheck = await this.uploadConfig.isFileTypeAllowed(fileName, fileSample);
       if (!typeCheck.allowed) {
         throw new BadRequestException(typeCheck.reason || '不允许上传此类型的文件');
       }
+      detectedExtension = typeCheck.detectedExt ?? null;
     }
 
     const tempId = randomUUID();
@@ -1410,6 +1414,22 @@ export class FileService implements OnModuleInit {
               gdriveCacheAccountId: locked.gdriveCacheAccountId ?? null,
               gdriveCacheObjectRef: locked.gdriveCacheObjectRef ?? null,
             };
+            // 覆盖前快照：新内容上传失败时据此恢复原引用，否则原文件永久失联（B-02）。
+            // 不含 gdriveCache*：旧缓存对象在事务外即被清理，回滚后由双写状态机重建。
+            locked.overwriteSnapshot = JSON.stringify({
+              filename: locked.filename,
+              telegramFileId: locked.telegramFileId,
+              telegramFilePath: locked.telegramFilePath,
+              storageBackend: locked.storageBackend,
+              storageAccountId: locked.storageAccountId,
+              storageObjectRef: locked.storageObjectRef,
+              size: locked.size,
+              mimeType: locked.mimeType,
+              originalName: locked.originalName,
+              thumbnailPath: locked.thumbnailPath,
+              status: locked.status,
+              uploadStage: locked.uploadStage,
+            });
             // tempId 占位语义与新记录一致，由 FileUploadProcessor 按 fileId 更新为真实远端引用。
             // 覆盖分支保持原存储后端不变（storageBackend 不改写）：异步覆盖的新内容
             // 仍落原后端，避免旧引用后端类型丢失导致提交后无法清理旧对象；
@@ -1421,6 +1441,7 @@ export class FileService implements OnModuleInit {
             locked.originalName = fileName;
             locked.size = file.size;
             locked.mimeType = file.mimetype || 'application/octet-stream';
+            locked.detectedExtension = detectedExtension;
             locked.filename = tempId;
             locked.telegramFileId = tempId;
             locked.telegramFilePath = '';
@@ -1460,6 +1481,7 @@ export class FileService implements OnModuleInit {
         filename: tempId,
         originalName: fileName,
         mimeType: file.mimetype || 'application/octet-stream',
+        detectedExtension,
         size: file.size,
         telegramFileId: tempId,
         telegramFilePath: '',
@@ -1570,6 +1592,8 @@ export class FileService implements OnModuleInit {
   }
 
   async softDeleteProcessingFile(id: string, uploadVersion: number): Promise<void> {
+    // 覆盖上传失败不得软删用户原文件：先尝试回滚旧内容引用（B-02）。
+    if (await this.rollbackOverwriteIfSnapshot(id, uploadVersion)) return;
     await this.fileRepository.manager.transaction(async (manager) => {
       const result = await manager.getRepository(File).update(
         { id, uploadVersion, status: 'processing' },
@@ -1585,6 +1609,8 @@ export class FileService implements OnModuleInit {
 
   /** 覆盖上传失败时保留原记录 id 和审计轨迹，只结束 processing 状态，不软删除用户原文件记录。 */
   async markProcessingFileFailed(id: string, uploadVersion: number): Promise<void> {
+    // 有覆盖快照说明这是覆盖上传：恢复原内容引用，而不是把原文件标成 error（B-02）。
+    if (await this.rollbackOverwriteIfSnapshot(id, uploadVersion)) return;
     await this.fileRepository.update(
       { id, uploadVersion, status: 'processing' },
       {
@@ -1593,6 +1619,60 @@ export class FileService implements OnModuleInit {
         uploadFailureReason: '上传已取消或未能入队，请重新上传',
       } as Partial<File>,
     );
+  }
+
+  /**
+   * 覆盖上传失败时回滚到覆盖前的内容引用（B-02）。
+   *
+   * 覆盖事务先把 telegramFileId/filename 置为 tempId 占位；若新内容上传失败/取消/重试耗尽
+   * 而不回滚，原文件就永久不可下载（旧远端对象成孤儿，只有审计日志留有旧引用）。
+   *
+   * 守卫 `status='processing'`：一旦置 ready 就不再回滚，避免成功后的迟到失败路径
+   * 把已提交的新内容误回滚成旧内容。uploadVersion 保持递增后的值（缓存键随之变化，
+   * 强制重新回源，不会命中旧版本缓存）。
+   *
+   * @returns 是否确实执行了回滚
+   */
+  async rollbackOverwriteIfSnapshot(id: string, uploadVersion: number): Promise<boolean> {
+    return this.fileRepository.manager.transaction(async (manager) => {
+      const repo = manager.getRepository(File);
+      const row = await repo.findOne({
+        where: { id, uploadVersion, status: 'processing' },
+        ...databasePessimisticWriteLock(),
+      });
+      if (!row?.overwriteSnapshot) return false;
+      let prev: Partial<File>;
+      try {
+        prev = JSON.parse(row.overwriteSnapshot) as Partial<File>;
+      } catch {
+        this.logger.warn(`覆盖快照解析失败，跳过回滚 fileId=${id} v=${uploadVersion}`);
+        return false;
+      }
+      const result = await repo.update(
+        { id, uploadVersion, status: 'processing' },
+        {
+          filename: prev.filename,
+          telegramFileId: prev.telegramFileId,
+          telegramFilePath: prev.telegramFilePath,
+          storageBackend: prev.storageBackend,
+          storageAccountId: prev.storageAccountId,
+          storageObjectRef: prev.storageObjectRef,
+          size: prev.size,
+          mimeType: prev.mimeType,
+          originalName: prev.originalName,
+          thumbnailPath: prev.thumbnailPath,
+          status: prev.status,
+          uploadStage: prev.uploadStage,
+          uploadFailureReason: null,
+          overwriteSnapshot: null,
+        } as Partial<File>,
+      );
+      if (!result.affected) return false;
+      this.logger.warn(
+        `覆盖上传失败，已回滚原内容引用 fileId=${id} v=${uploadVersion} status=${prev.status}`,
+      );
+      return true;
+    });
   }
 
   async upload(file: Express.Multer.File, user: User, tagIds?: string[]): Promise<File> {
@@ -1628,6 +1708,7 @@ export class FileService implements OnModuleInit {
       filename: isNonTelegram ? originalName : telegramFile.file_id,
       originalName: originalName,
       mimeType: file.mimetype,
+      detectedExtension: typeCheck.detectedExt ?? null,
       size: file.size,
       telegramFileId: telegramFile.file_id,
       telegramFilePath: telegramFile.file_path || '',
@@ -1804,7 +1885,7 @@ export class FileService implements OnModuleInit {
       // 普通 B-tree 索引无法命中；文件名基数受限、搜索为低频操作，无前索引可接受。
       // 如数据量增长需改 trigram/GIN，仓库已有 `1798100000000-AddFileNameTrigramIndex` 迁移
       // （pg_trgm + GIN (LOWER("originalName") gin_trgm_ops)）可参考。
-      qb.andWhere('LOWER(file.originalName) LIKE :keyword', { keyword: `%${escapeLike(keyword.toLowerCase())}%` });
+      qb.andWhere('LOWER(file.originalName) LIKE :keyword ESCAPE \'\\\'', { keyword: `%${escapeLike(keyword.toLowerCase())}%` });
     }
 
     // 标签筛选：AND 逻辑 —— 文件必须同时拥有所有指定标签
@@ -1867,7 +1948,7 @@ export class FileService implements OnModuleInit {
       const tagWheres: string[] = [`ft."tagId" IN (${tagPlaceholders})`];
       if (userId) { tagWheres.push(`file."uploaderId" = $${tagIdx++}`); tagParams.push(userId); }
       if (!includeDeleted) { tagWheres.push('file."isDeleted" = false'); }
-      if (keyword) { tagWheres.push(`LOWER(file."originalName") LIKE $${tagIdx++}`); tagParams.push(`%${escapeLike(keyword.toLowerCase())}%`); }
+      if (keyword) { tagWheres.push(`LOWER(file."originalName") LIKE $${tagIdx++} ESCAPE '\\'`); tagParams.push(`%${escapeLike(keyword.toLowerCase())}%`); }
       // G2-09：标签计数 SQL 与主查询共用 folderId 条件，避免筛选计数与列表不一致
       if (folderId === 'root') {
         tagWheres.push('file."folderId" IS NULL');
@@ -1901,7 +1982,7 @@ export class FileService implements OnModuleInit {
     } else {
       const countQb = this.fileRepository.createQueryBuilder('file').where(where);
       if (keyword) {
-        countQb.andWhere('LOWER(file.originalName) LIKE :keyword', { keyword: `%${escapeLike(keyword.toLowerCase())}%` });
+        countQb.andWhere('LOWER(file.originalName) LIKE :keyword ESCAPE \'\\\'', { keyword: `%${escapeLike(keyword.toLowerCase())}%` });
       }
       total = await countQb.getCount();
     }
@@ -2448,7 +2529,7 @@ export class FileService implements OnModuleInit {
         if (!removed) continue;
         deleted++;
         await this.auditService.logAwait({
-          action: 'folder_delete' as never,
+          action: 'folder_delete',
           userId: folder.ownerId,
           resourceType: 'folder',
           resourceId: folderId,
@@ -3564,7 +3645,7 @@ export class FileService implements OnModuleInit {
     // C-01 修复：公开 /media 直链只允许白名单内的安全位图与受支持音视频。
     // SVG、XML、HTML、脚本型内容及任何 MIME/魔数不一致的类型一律拒绝 inline，
     // 杜绝同源持久型 XSS 面。此阻断不可通过功能开关关闭。
-    if (!isSafePublicInlineContentType(file.mimeType || '')) {
+    if (!isSafePublicInlineContentType(file.mimeType || '', file.detectedExtension)) {
       throw new BadRequestException('该类型不支持媒体直链');
     }
     // G5-12：访问次数限制语义统一为 maxAccessCount > 0 表示「有限制」。
@@ -3695,7 +3776,7 @@ export class FileService implements OnModuleInit {
     const cleanup = () => {};
 
     // 后台处理：不阻塞响应
-    this.processAsyncUpload(job.jobId, file, user, originalName, abortController.signal, cleanup, tagIds, folderId, overwriteFileId);
+    this.processAsyncUpload(job.jobId, file, user, originalName, abortController.signal, cleanup, tagIds, folderId, overwriteFileId, typeCheck.detectedExt ?? null);
     return { jobId: job.jobId, warning: '任务在内存中处理，进程重启会丢失' };
   }
 
@@ -3746,6 +3827,7 @@ export class FileService implements OnModuleInit {
           // M2/N1：tagIds 与文件行写入同事务，标签失败即整体回滚，不再产生幽灵失败。
           const uploadedFile = await this.uploadToTelegram(
             file, user, originalName, abortController.signal, null, undefined, tagIds,
+            typeCheck.detectedExt ?? null,
           );
           success.push(uploadedFile);
         } catch (error: unknown) {
@@ -3799,6 +3881,7 @@ export class FileService implements OnModuleInit {
     tagIds?: string[],
     folderId?: string | null,
     overwriteFileId?: string,
+    detectedExtension?: string | null,
   ): Promise<void> {
     try {
       this.uploadJobService.updateJob(jobId, { status: 'uploading' });
@@ -3811,6 +3894,7 @@ export class FileService implements OnModuleInit {
       // M2/N1：tagIds 直接传入 uploadToTelegram，与文件行写入同事务，杜绝幽灵失败。
       const savedFile = await this.uploadToTelegram(
         file, user, originalName, abortSignal, folderId, overwriteFileId, tagIds,
+        detectedExtension,
       );
 
       // 完成前再次检查，避免连接断开后仍写入成功结果
@@ -3850,6 +3934,7 @@ export class FileService implements OnModuleInit {
     folderId?: string | null,
     overwriteFileId?: string,
     tagIds?: string[],
+    detectedExtension?: string | null,
   ): Promise<File> {
     // GIF 文件加 .bin 后缀防止 Telegram 转码为 MP4（仅 TG 后端需要；非 TG 用 displayName 保留原名）
     const uploadName = file.mimetype === 'image/gif' ? originalName + '.bin' : originalName;
@@ -3919,6 +4004,7 @@ export class FileService implements OnModuleInit {
       filename: isNonTelegram ? originalName : telegramFile.file_id,
       originalName: originalName,
       mimeType: file.mimetype,
+      detectedExtension: detectedExtension ?? null,
       size: file.size,
       telegramFileId: telegramFile.file_id,
       telegramFilePath: telegramFile.file_path || '',

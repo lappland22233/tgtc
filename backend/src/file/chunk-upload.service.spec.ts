@@ -56,6 +56,67 @@ describe('ChunkUploadService session quota', () => {
 
   const init = () => service.init('file.bin', MB, 'application/octet-stream', 1, MB, userId);
 
+  describe('discardHandoffSource 与 Worker 接管竞态（B-03 回归）', () => {
+    const makeSession = async () => {
+      const dir = await fsp.mkdtemp(path.join(tmpdir(), 'handoff-'));
+      const handoffPath = path.join(dir, 'file-id');
+      await fsp.writeFile(handoffPath, 'payload');
+      await fsp.writeFile(`${handoffPath}.telegram.json`, '{}');
+      return {
+        dir,
+        handoffPath,
+        session: {
+          savedFileId: 'file-id',
+          savedFileUploadVersion: 2,
+          handoffPath,
+          overwriteFileId: null,
+          mergeStatus: 'error',
+        },
+      };
+    };
+
+    it.each(['active', 'completed', 'failed', 'unknown'])(
+      'Worker 持有任务（%s）时不得删源与回执，也不得结束 processing 记录',
+      async (state) => {
+        const { dir, handoffPath, session } = await makeSession();
+        fileUploadQueue.getJob.mockResolvedValue({ getState: jest.fn().mockResolvedValue(state) });
+
+        await (service as any).discardHandoffSource(session);
+
+        expect(fs.existsSync(handoffPath)).toBe(true);
+        expect(fs.existsSync(`${handoffPath}.telegram.json`)).toBe(true);
+        expect(fileService.softDeleteProcessingFile).not.toHaveBeenCalled();
+        await fsp.rm(dir, { recursive: true, force: true });
+      },
+    );
+
+    it('任务不存在（入队失败）时清掉交接源与回执并结束 processing 记录', async () => {
+      const { dir, handoffPath, session } = await makeSession();
+      fileUploadQueue.getJob.mockResolvedValue(undefined);
+
+      await (service as any).discardHandoffSource(session);
+
+      expect(fs.existsSync(handoffPath)).toBe(false);
+      expect(fs.existsSync(`${handoffPath}.telegram.json`)).toBe(false);
+      expect(fileService.softDeleteProcessingFile).toHaveBeenCalledWith('file-id', 2);
+      await fsp.rm(dir, { recursive: true, force: true });
+    });
+
+    it('尚未开始的任务先移除再清源；移除失败则保留源交 Worker 收尾', async () => {
+      const { dir, handoffPath, session } = await makeSession();
+      fileUploadQueue.getJob.mockResolvedValue({
+        getState: jest.fn().mockResolvedValue('waiting'),
+        remove: jest.fn().mockRejectedValue(new Error('job became active')),
+      });
+
+      await (service as any).discardHandoffSource(session);
+
+      expect(fs.existsSync(handoffPath)).toBe(true);
+      expect(fileService.softDeleteProcessingFile).not.toHaveBeenCalled();
+      await fsp.rm(dir, { recursive: true, force: true });
+    });
+  });
+
   it('accepts a session whose declared chunk size is exactly the 16MiB maximum', async () => {
     const chunkSize = 16 * MB;
     const result = await service.init('large.bin', chunkSize, 'video/mp4', 1, chunkSize, userId);

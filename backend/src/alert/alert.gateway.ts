@@ -12,6 +12,7 @@ import { JwtService } from '@nestjs/jwt';
 import { User, UserRole } from '../common/entities/user.entity';
 import { JwtStrategy } from '../auth/jwt.strategy';
 import { RateLimitService } from '../common/services/rate-limit.service';
+import { getSocketClientIp, resolveTrustProxyHops } from '../common/utils/client-ip';
 
 @WebSocketGateway({
   namespace: '/alerts',
@@ -163,14 +164,19 @@ export class AlertGateway
     }
   }
 
-  /** G8-18：从握手信息提取客户端 IP（优先 x-forwarded-for 首项，回退 remoteAddress） */
+  /**
+   * 从握手信息提取客户端 IP。
+   *
+   * 与 HTTP 侧 getClientIp 同一信任模型：默认不信任任何代理，取 socket 对端地址；
+   * 仅当显式配置 TRUST_PROXY_HOPS>0 时才按可信层数解析 XFF。
+   * 旧实现直接取 XFF 首项，未认证握手即可伪造该值绕过握手限流、并发上限与无效 token 封禁。
+   */
   private extractIp(client: Socket): string | null {
-    const xff = client.handshake?.headers?.['x-forwarded-for'];
-    if (typeof xff === 'string' && xff.trim()) {
-      return xff.split(',')[0].trim() || null;
-    }
-    const addr = client.handshake?.address;
-    return typeof addr === 'string' && addr ? addr : null;
+    return getSocketClientIp(
+      client.conn?.remoteAddress,
+      client.handshake?.headers?.['x-forwarded-for'],
+      resolveTrustProxyHops(),
+    );
   }
 
   /** G8-18：无效 token 尝试对该 IP 短期封禁（禁止后续握手），防无限重试 */

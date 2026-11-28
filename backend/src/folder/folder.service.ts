@@ -203,34 +203,41 @@ export class FolderService {
     // 特殊保留名称拦截，与 createFolder 规则一致
     this.assertFolderNameAllowed(dto.name);
     const folder = await this.assertFolderOwned(id, ownerId);
-    const sibling = await this.folderRepo.findOne({
-      where: {
-        ownerId,
-        parentId: folder.parentId ?? IsNull(),
-        name: dto.name,
-        isDeleted: false,
-        id: Not(id),
-      },
-    });
-    if (sibling) {
-      // 与 createFolder 保持一致：重名是资源冲突（409），不是参数格式错误（400）
-      throw new ConflictException('同层级下已存在同名文件夹');
-    }
     const oldName = folder.name;
-    folder.name = dto.name;
     let saved: Folder;
     try {
       // v1.2.6：重命名与统一命名空间键更新同事务，跨表（文件）重名同样冲突
       saved = await this.folderRepo.manager.transaction(async (manager) => {
-        const renamed = await manager.getRepository(Folder).save(folder);
+        const repo = manager.getRepository(Folder);
+        // 事务内行锁重读 + 字段级 UPDATE：事务外读到的快照可能已被并发软删/移动改写，
+        // 整实体 save() 会把 isDeleted / deleteScheduledAt / parentId 一并回写，
+        // 表现为「已进回收站的目录被重命名复活」或「并发移动被回滚到旧父级」。
+        const locked = await repo.findOne({
+          where: { id, ownerId, isDeleted: false },
+          ...databasePessimisticWriteLock(),
+        });
+        if (!locked) throw new NotFoundException('文件夹不存在或已被删除');
+        const sibling = await repo.findOne({
+          where: {
+            ownerId,
+            parentId: locked.parentId ?? IsNull(),
+            name: dto.name,
+            isDeleted: false,
+            id: Not(id),
+          },
+        });
+        // 与 createFolder 保持一致：重名是资源冲突（409），不是参数格式错误（400）
+        if (sibling) throw new ConflictException('同层级下已存在同名文件夹');
+        await repo.update(id, { name: dto.name });
         await this.namespace.acquire(manager, {
           ownerId,
-          folderId: folder.parentId ?? null,
+          folderId: locked.parentId ?? null,
           name: dto.name,
           entityType: 'folder',
           entityId: id,
         });
-        return renamed;
+        locked.name = dto.name;
+        return locked;
       });
     } catch (error: unknown) {
       // G6-06：并发重命名撞同名，由唯一索引兜底转 409
@@ -560,6 +567,9 @@ export class FolderService {
    * 仅更新展示用名称，不改动底层存储的 filename / Telegram 引用。
    */
   async renameFile(ownerId: string, fileId: string, dto: RenameFileDto): Promise<File> {
+    // 与文件夹同一套保留名/设备名拦截：文件显示名会进入 Content-Disposition 与下载落盘，
+    // `..` / `CON.txt` 之类在 Windows 上不可用（项目白名单+保留字黑名单规范）。
+    this.assertFolderNameAllowed(dto.newOriginalName);
     const { saved, previous } = await this.fileRepo.manager.transaction(async (manager) => {
       const repo = manager.getRepository(File);
       const file = await repo.findOne({

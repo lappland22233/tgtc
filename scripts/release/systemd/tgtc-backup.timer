@@ -1,0 +1,12 @@
+[Unit]
+Description=每日触发 TGTc 数据库备份（默认保留 14 天）
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+RandomizedDelaySec=15min
+# 主机在计划时刻关机/休眠时，开机后补跑一次，避免 RPO 出现整天空洞。
+Persistent=true
+Unit=tgtc-backup.service
+
+[Install]
+WantedBy=timers.target

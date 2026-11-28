@@ -857,7 +857,7 @@ export class ChunkUploadService implements OnModuleInit {
         true,
         session.folderId,
         session.overwriteFileId ?? undefined,
-        { deferCachePrewarm: true },
+        { deferCachePrewarm: true, detectedExtension: typeCheck.detectedExt ?? null },
       );
       session.savedFileId = created.id;
       session.savedFileUploadVersion = created.uploadVersion;
@@ -1028,7 +1028,30 @@ export class ChunkUploadService implements OnModuleInit {
     const fileId = session.savedFileId;
     if (!fileId) return;
     const uploadVersion = session.savedFileUploadVersion ?? 1;
+    const jobId = `file-upload:${fileId}:${uploadVersion}`;
     try {
+      // 与 abort 路径同一口径：只有确认 Worker 尚未取得任务时才删源。
+      // 任务不存在＝入队失败，源无人使用，必须清掉否则永久残留；
+      // 任务 active/completed/failed＝源归 Worker 收尾，删了会让它 ENOENT、重启恢复无回执。
+      const job = await this.fileUploadQueue.getJob(jobId).catch(() => undefined);
+      if (job) {
+        const state = typeof job.getState === 'function'
+          ? await job.getState().catch(() => 'unknown')
+          : 'unknown';
+        if (state !== 'waiting' && state !== 'delayed' && state !== 'paused') {
+          this.logger.warn(
+            `[分片上传] 任务 ${jobId} 状态 ${state}，交接源归 Worker 收尾，保留源与处理中记录`,
+          );
+          return;
+        }
+        try {
+          await job.remove();
+        } catch {
+          // 移除失败＝可能刚被取走，交给 Worker 收尾，不得删源
+          this.logger.warn(`[分片上传] 任务 ${jobId} 移除失败，保留交接源交 Worker 收尾`);
+          return;
+        }
+      }
       if (session.handoffPath) {
         await fsp.rm(session.handoffPath, { force: true }).catch(() => {});
         await fsp.rm(`${session.handoffPath}.telegram.json`, { force: true }).catch(() => {});

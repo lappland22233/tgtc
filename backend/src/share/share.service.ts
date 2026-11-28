@@ -346,13 +346,9 @@ export class ShareService {
   /**
    * 退还一次已消耗的访问额度。
    *
-   * **必须与作废会话成对执行**：会话落库即代表「该访客已消费」，
-   * 后续同指纹请求会命中 idempotent 免扣。若只退计数不删会话，
-   * 攻击者可用一次必然失败的请求骗取退款，随后在会话有效期（5 分钟）内
-   * 零计数无限下载——maxAccessCount 限制彻底失效。
-   *
-   * 顺序为先删会话、后退计数：这样任何并发请求看到的都是
-   * 「要么会话在且已计费，要么会话不在且需重新计费」，不存在免费窗口。
+   * 带 visitorHash 时**必须**走 `refundConsumedSession`：删会话与条件退计数在会话服务内
+   * 单事务完成，并在会话已被幂等命中（follower 已凭它取流）或删除失败时放弃退款。
+   * 只退计数不删会话、或无视幂等命中照常退款，都会留下零计数无限下载的绕过口子。
    */
   private async refundConsumedAccess(
     link: ShareLink,
@@ -360,7 +356,8 @@ export class ShareService {
     visitorHash?: string,
   ): Promise<void> {
     if (visitorHash) {
-      await this.previewSessionService.discardSession(link.id, fileId, visitorHash);
+      await this.previewSessionService.refundConsumedSession(link.id, fileId, visitorHash);
+      return;
     }
     await this.refundShareAccess(link.id);
   }
@@ -443,16 +440,23 @@ export class ShareService {
 
     // C-03 修复：无论 Range 命中还是回退全量流，在输出任何文件字节前完成会话确认。
     // 首次返回字节前原子扣次；同会话后续 Range/重连幂等免扣。
-    await this.consumeSharePreviewAccess(link, fileId, visitorHash);
+    const consumed = await this.consumeSharePreviewAccess(link, fileId, visitorHash);
 
-    if (rangeHeader) {
-      const rangeResult = await this.fileService.getSharePreviewStreamWithRange(
-        fileId, rangeHeader, ip || undefined, ifRange,
-      );
-      if (rangeResult) return rangeResult;
-      // 仅在缓存组件明确无法提供流时才允许内部降级；非法 Range 已由 FileService 抛出 416。
+    try {
+      if (rangeHeader) {
+        const rangeResult = await this.fileService.getSharePreviewStreamWithRange(
+          fileId, rangeHeader, ip || undefined, ifRange,
+        );
+        if (rangeResult) return rangeResult;
+        // 仅在缓存组件明确无法提供流时才允许内部降级；非法 Range 已由 FileService 抛出 416。
+      }
+      return await this.fileService.getStreamForShareDownload(fileId, ip || undefined, link.token);
+    } catch (error) {
+      // 与下载路径同口径：取流失败即退次。否则冷回源持续失败时，
+      // 用户每次重试预览都白吃一次 maxAccessCount（会话幂等只在 5 分钟窗口内缓解）。
+      if (consumed) await this.refundConsumedAccess(link, fileId, visitorHash);
+      throw error;
     }
-    return this.fileService.getStreamForShareDownload(fileId, ip || undefined, link.token);
   }
 
   /**
@@ -658,10 +662,13 @@ export class ShareService {
   }
 
   async cancelShare(id: string, creatorId: string): Promise<void> {
-    const link = await this.getShareByIdRaw(id, creatorId);
-    link.isDeleted = true;
-    link.status = ShareLinkStatus.DISABLED;
-    await this.shareLinkRepo.save(link);
+    await this.getShareByIdRaw(id, creatorId);
+    // 字段级条件 UPDATE：整实体 save() 会用读快照覆盖并发下载自增的
+    // currentAccessCount 或并发改密的 password（与 updateShare 同一禁忌）。
+    await this.shareLinkRepo.update(
+      { id, creatorId, isDeleted: false },
+      { isDeleted: true, status: ShareLinkStatus.DISABLED },
+    );
     this.audit.log({
       action: 'share_link_delete' as AuditAction,
       userId: creatorId,
@@ -780,7 +787,7 @@ export class ShareService {
    *
    * 由 ShareController 在调用预览流前派生 visitorHash 并传入。
    */
-  async consumeSharePreviewAccess(link: ShareLink, fileId: string, visitorHash: string): Promise<void> {
+  async consumeSharePreviewAccess(link: ShareLink, fileId: string, visitorHash: string): Promise<boolean> {
     // 与下载路径一致：首次预览消费前原子启动有效期时钟，保证仅预览的分享也会过期。
     await this.startExpiryClock(link);
     const result = await this.previewSessionService.consumePreviewAccess(link, fileId, visitorHash);
@@ -788,6 +795,8 @@ export class ShareService {
       await this.shareLinkRepo.update(link.id, { status: ShareLinkStatus.EXHAUSTED }).catch(() => {});
       throw new NotFoundException('分享访问次数已耗尽');
     }
+    // 返回是否真的新扣次，供取流失败时精确退款（幂等命中不得退）
+    return result === 'consumed';
   }
 
   /**

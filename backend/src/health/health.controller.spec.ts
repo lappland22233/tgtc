@@ -8,14 +8,42 @@ import { join } from 'path';
 describe('HealthController', () => {
   const dataSource = { query: jest.fn() } as any;
   const versionService = { getCurrentVersion: jest.fn(() => 'unknown') } as unknown as VersionService;
-  const controller = new HealthController(dataSource, versionService);
+  const queue = { client: { ping: jest.fn() } } as any;
+  const controller = new HealthController(dataSource, versionService, queue);
 
   afterEach(() => jest.resetAllMocks());
 
   it('reports healthy only after the database probe succeeds', async () => {
     dataSource.query.mockResolvedValueOnce([{ '?column?': 1 }]);
-    await expect(controller.health()).resolves.toEqual({ status: 'ok', database: 'ok' });
+    queue.client.ping.mockResolvedValueOnce('PONG');
+    await expect(controller.health()).resolves.toEqual({ status: 'ok', database: 'ok', redis: 'ok' });
     expect(dataSource.query).toHaveBeenCalledWith('SELECT 1');
+  });
+
+  it('C-14 回归：Redis 不可用时探针必须非绿（Bull 任务已静默停摆）', async () => {
+    dataSource.query.mockResolvedValueOnce([{ '?column?': 1 }]);
+    queue.client.ping.mockRejectedValueOnce(new Error('ECONNREFUSED'));
+    await expect(controller.health()).rejects.toBeInstanceOf(ServiceUnavailableException);
+  });
+
+  it('C-14 回归：Redis 探活挂起时按超时判失败，不得无限等待', async () => {
+    jest.useFakeTimers();
+    try {
+      dataSource.query.mockResolvedValueOnce([{ '?column?': 1 }]);
+      queue.client.ping.mockReturnValueOnce(new Promise(() => {}));
+      const pending = controller.health();
+      const assertion = expect(pending).rejects.toBeInstanceOf(ServiceUnavailableException);
+      await jest.advanceTimersByTimeAsync(3000);
+      await assertion;
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('DB 不可用时不再探 Redis，直接判不可服务', async () => {
+    dataSource.query.mockRejectedValueOnce(new Error('db down'));
+    await expect(controller.health()).rejects.toBeInstanceOf(ServiceUnavailableException);
+    expect(queue.client.ping).not.toHaveBeenCalled();
   });
 
   it('does not expose database errors through the health endpoint', async () => {

@@ -84,7 +84,7 @@ describe('FileUploadConfigService（M6 拆分契约）', () => {
   it('黑名单为空时全部放行；白名单为空时全部拒绝', async () => {
     const blacklist = createService({ mode: 'blacklist', filter: '' });
     await blacklist.service.reload();
-    await expect(blacklist.service.isFileTypeAllowed('anything.unknown')).resolves.toEqual({ allowed: true });
+    await expect(blacklist.service.isFileTypeAllowed('anything.unknown')).resolves.toEqual({ allowed: true, detectedExt: null });
 
     const whitelist = createService({ mode: 'whitelist', filter: '' });
     await whitelist.service.reload();
@@ -101,7 +101,7 @@ describe('FileUploadConfigService（M6 拆分契约）', () => {
       allowed: false,
       reason: '文件类型 .exe 被拒绝：该类型在禁止列表中',
     });
-    await expect(service.isFileTypeAllowed('readme.txt')).resolves.toEqual({ allowed: true });
+    await expect(service.isFileTypeAllowed('readme.txt')).resolves.toEqual({ allowed: true, detectedExt: null });
   });
 
   it('白名单模式：无法识别类型直接拒绝（不给后缀回退机会）', async () => {
@@ -120,7 +120,7 @@ describe('FileUploadConfigService（M6 拆分契约）', () => {
     const buffer = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
 
     fileTypeFromBufferMock.mockResolvedValueOnce({ ext: 'png' });
-    await expect(service.isFileTypeAllowed('photo.png', buffer)).resolves.toEqual({ allowed: true });
+    await expect(service.isFileTypeAllowed('photo.png', buffer)).resolves.toEqual({ allowed: true, detectedExt: 'png' });
 
     fileTypeFromBufferMock.mockResolvedValueOnce({ ext: 'txt' });
     await expect(service.isFileTypeAllowed('notes.txt', buffer)).resolves.toEqual({

@@ -118,6 +118,14 @@ export class FileCacheService implements OnApplicationShutdown {
   /** 文件最近访问时间追踪 (fileId → lastAccessTimestamp)，用于 LRU 淘汰 */
   private readonly fileAccessMap = new Map<string, number>();
 
+  /**
+   * 缓存失效代际（fileId → epoch），invalidate 时递增。
+   * 异步预热在 rename 发布前复核代际：覆盖上传 v2 触发 invalidate 后，v1 的在途预热
+   * 不得再把旧内容落盘——否则 Range 会命中旧版本字节（invalidate 只中止 build/spool
+   * 会话，管不到已经在拷贝的预热）。
+   */
+  private readonly cacheEpoch = new Map<string, number>();
+
   /** 最近一次缓存目录占用扫描结果（启动、定时清理与手动查询时刷新） */
   private cacheUsage: CacheUsageSnapshot = {
     committedBytes: 0,
@@ -795,7 +803,7 @@ export class FileCacheService implements OnApplicationShutdown {
       return result.stream;
     }
 
-    const cachedPath = this.getCachedPath(fileId);
+    const cachedPath = this.getCachedPath(fileId, expectedSize);
     if (cachedPath) {
       this.fileAccessMap.set(fileId, Date.now());
       return this.withCachePin(fileId, createReadStream(cachedPath, { start, end }));
@@ -811,7 +819,7 @@ export class FileCacheService implements OnApplicationShutdown {
     return this.sessionCoordinator.withSessionLock(
       this.sessionCoordinator.sessionKeyFor(fileId, contentVersion),
       async (): Promise<Readable | null> => {
-        const cachedInLock = this.getCachedPath(fileId);
+        const cachedInLock = this.getCachedPath(fileId, expectedSize);
         if (cachedInLock) {
           this.fileAccessMap.set(fileId, Date.now());
           return this.withCachePin(fileId, createReadStream(cachedInLock, { start, end }));
@@ -1277,6 +1285,7 @@ export class FileCacheService implements OnApplicationShutdown {
   async cacheFileFromPath(fileId: string, sourcePath: string, expectedSize: number): Promise<void> {
     this.validateFileId(fileId);
     if (this.noCacheMode) return;
+    const epochAtStart = this.cacheEpoch.get(fileId) ?? 0;
 
     // 缓存总大小检查：超限时尝试 LRU 淘汰
     const totalSize = await this.getTotalCacheSize();
@@ -1320,6 +1329,11 @@ export class FileCacheService implements OnApplicationShutdown {
         this.logger.warn(`缓存文件大小不一致 ${fileId}: 期望 ${expectedSize}, 实际 ${stat.size}`);
         return;
       }
+      if ((this.cacheEpoch.get(fileId) ?? 0) !== epochAtStart) {
+        await fsp.unlink(tmpPath).catch(() => {});
+        this.logger.warn(`缓存预热期间文件已失效，放弃发布旧内容 ${fileId}`);
+        return;
+      }
       await fsp.rename(tmpPath, cachePath);
       this.diskManager.registerCache(fileId, expectedSize);
       reservation.consume(expectedSize);
@@ -1337,6 +1351,8 @@ export class FileCacheService implements OnApplicationShutdown {
    */
   async invalidate(fileId: string): Promise<void> {
     this.validateFileId(fileId);
+    // 代际递增必须先于失效栅栏：在途预热据此放弃发布旧内容
+    this.cacheEpoch.set(fileId, (this.cacheEpoch.get(fileId) ?? 0) + 1);
     await this.sessionCoordinator.withFileInvalidation(fileId, async () => {
       const session = this.buildSessions.get(fileId);
       if (session) {
@@ -1393,14 +1409,25 @@ export class FileCacheService implements OnApplicationShutdown {
   /**
    * 获取已缓存文件的磁盘路径
    * 文件存在且未过期时返回路径，否则返回 null。
+   *
+   * 传入 expectedSize 时额外校验长度一致：覆盖上传竞态或外部截断会让缓存长度与
+   * 文件记录不符，Range 命中后会返回短于 Content-Length 的 206 正文（表现为下载/播放损坏）。
+   * 全量读取路径 getCachedReadStream 一直有该校验，Range 路径此前缺失（历史 M-01）。
    */
-  getCachedPath(fileId: string): string | null {
+  getCachedPath(fileId: string, expectedSize?: number): string | null {
     this.validateFileId(fileId);
     if (this.noCacheMode) return null;
     const cachePath = this.getCachePath(fileId);
     try {
       const stat = require('fs').statSync(cachePath);
       if (stat.size <= 0) return null;
+      if (expectedSize !== undefined && stat.size !== expectedSize) {
+        this.logger.debug(`缓存大小不匹配: ${fileId} (期望 ${expectedSize}, 实际 ${stat.size})`);
+        // 删除的同时扣减内存计数，避免缓存总量漂移
+        this.diskManager.unregisterCache(fileId, stat.size);
+        void fsp.unlink(cachePath).catch(() => {});
+        return null;
+      }
       // 检查 TTL 是否过期（过期即删除并扣减计数，避免总量漂移）
       if (Date.now() - stat.mtimeMs > this.cacheTtlMs) {
         this.diskManager.unregisterCache(fileId, stat.size);

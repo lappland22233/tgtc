@@ -100,6 +100,12 @@ describe('真实 SQLite 数据源关键业务与并发 QA', () => {
       'SqliteAddGDriveCacheRetryColumns1804800000000',
       // 单账号每日额度覆盖
       'SqliteCreateTelegramBotUserQuotas1804900000000',
+      // B-01：分享预览会话幂等命中计数（退款不得抹掉 follower 已消费的额度）
+      'SqliteAddSharePreviewSessionHitCount1805000000000',
+      // B-02：覆盖上传前内容引用快照（失败路径回滚，避免原文件永久失联）
+      'SqliteAddFileOverwriteSnapshot1805100000000',
+      // C-04：magic bytes 探测结果落库，公开直链内联白名单做 MIME 一致性校验
+      'SqliteAddFileDetectedExtension1805200000000',
     ]);
 
     await dataSource.undoLastMigration();

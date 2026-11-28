@@ -15,6 +15,24 @@
 import { promises as fsp } from 'fs';
 import * as path from 'path';
 
+/**
+ * 目录所在卷的可用字节数；无法探测时返回 null。
+ *
+ * 用 bavail（无特权进程实际可用的块数）而非 bfree（物理剩余块数）：
+ * bfree 会把为 root/保留块计作可用，导致「看起来有空间实则写入 ENOSPC」。
+ * 供磁盘余量告警与缓存容量判断共用同一口径。
+ */
+export function freeDiskBytes(dir: string): number | null {
+  try {
+    const { statfsSync } = require('fs');
+    const stats = statfsSync(dir);
+    const availBlocks = stats.bavail > 0 ? stats.bavail : 0;
+    return stats.bsize * availBlocks;
+  } catch {
+    return null;
+  }
+}
+
 export class CacheDiskManager {
   /**
    * 内存维护的缓存总大小（G4-03）。
@@ -89,20 +107,14 @@ export class CacheDiskManager {
 
   /** 检查磁盘空间是否充足 */
   hasEnoughDiskSpace(minFreeDiskBytes: number): boolean {
-    try {
-      const { statfsSync } = require('fs');
-      const stats = statfsSync(this.cacheDir);
-      // 用 bavail（无特权进程实际可用的块数）而非 bfree（物理剩余块数）：
-      // bfree 会把为 root/保留块计作可用，导致"看起来有空间实则写入 ENOSPC"。
-      const availBlocks = stats.bavail > 0 ? stats.bavail : 0;
-      const freeBytes = stats.bsize * availBlocks;
-      return freeBytes >= minFreeDiskBytes;
-    } catch {
+    const freeBytes = freeDiskBytes(this.cacheDir);
+    if (freeBytes === null) {
       // 无法获取磁盘信息时保守判定为空间不足（走 spool/直通），
       // 避免在磁盘不可用时乐观放行导致写入失败（G4-07）。
       this.warnOnStatfsFailure();
       return false;
     }
+    return freeBytes >= minFreeDiskBytes;
   }
 
   /** 告警抑制：避免 statfs 持续失败时每次调用都刷一条 warn */

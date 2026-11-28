@@ -79,7 +79,11 @@ export class SharePreviewSessionService {
       const sessions = manager.getRepository(SharePreviewSession);
       const identity = { shareLinkId: link.id, fileId, visitorHash };
       const existing = await sessions.findOne({ where: identity });
-      if (existing?.consumed && existing.expiresAt.getTime() > now) return 'idempotent' as const;
+      if (existing?.consumed && existing.expiresAt.getTime() > now) {
+        // 命中即登记：leader 取流失败退款时据此放弃退款，否则会抹掉本次已消费的额度。
+        await sessions.increment(identity, 'hitCount', 1);
+        return 'idempotent' as const;
+      }
 
       const updated = await links.createQueryBuilder()
         .update(ShareLink)
@@ -95,35 +99,69 @@ export class SharePreviewSessionService {
       return 'consumed' as const;
     });
     if (this.dataSource.options.type !== 'better-sqlite3') return consume();
+    return this.serialized(consume);
+  }
 
-    // sqlite3 共用单连接，禁止本服务并发开启嵌套事务；跨进程仍由 SQLite 写锁保护。
+  /** sqlite3 共用单连接，禁止本服务并发开启嵌套事务；跨进程仍由 SQLite 写锁保护。 */
+  private async serialized<T>(fn: () => Promise<T>): Promise<T> {
     const previous = this.sqliteChain;
     let release!: () => void;
     this.sqliteChain = new Promise<void>((resolve) => { release = resolve; });
     await previous;
     try {
-      return await consume();
+      return await fn();
     } finally {
       release();
     }
   }
 
   /**
-   * 作废一条预览会话，使下一次访问重新计费。
+   * 取流失败时退还一次额度：**删会话与退计数同事务**，且只在会话未被幂等命中时执行。
    *
-   * 为什么退款必须连带删会话：会话一旦落库就代表「该访客已消费过」，
-   * 后续同指纹的请求会直接命中 idempotent 分支免扣。只把计数减一而不删会话，
-   * 等于「退钱但保留已消费凭证」——攻击者先用一次必然失败的请求触发退款，
-   * 之后整个窗口内可零计数无限下载，maxAccessCount=1 的分享形同虚设。
+   * 两条不变量：
+   * - 会话落库即代表「该访客已消费过」，后续同指纹请求命中 idempotent 免扣。只退计数不删会话
+   *   ＝「退钱但保留已消费凭证」，攻击者用一次必然失败的请求骗退款，之后整个窗口零计数无限下载。
+   * - leader 扣次后会话即已提交，并发 follower 可能已凭该会话取流成功；此时退款会抹掉 follower
+   *   已消费的额度（hitCount > 0），同样构成零计数绕过。
    *
-   * 幂等：会话不存在时静默返回（例如并发退款或已过期被清理）。
+   * 会话删除失败时整个事务回滚，**绝不退计数**。会话不存在（并发退款/已过期清理）时不退，
+   * 避免重复退款。两种情况都宁可少退，不可多退。
+   *
+   * @returns 是否真的退还了一次额度
    */
-  async discardSession(shareLinkId: string, fileId: string, visitorHash: string): Promise<void> {
-    await this.sessionRepo.delete({ shareLinkId, fileId, visitorHash }).catch((error: unknown) => {
-      this.logger.warn(
-        `作废预览会话失败（忽略，计数已退还）: ${error instanceof Error ? error.message : String(error)}`,
-      );
+  async refundConsumedSession(
+    shareLinkId: string,
+    fileId: string,
+    visitorHash: string,
+  ): Promise<boolean> {
+    const refund = () => this.dataSource.transaction(async (manager) => {
+      const links = manager.getRepository(ShareLink);
+      // 与 consumePreviewAccess 同一把分享行锁：退款与幂等命中串行化，不存在免费窗口。
+      const current = await links.findOne({
+        where: { id: shareLinkId },
+        ...(this.dataSource.options.type === 'postgres'
+          ? { lock: { mode: 'pessimistic_write' as const } } : {}),
+      });
+      if (!current) return false;
+
+      const sessions = manager.getRepository(SharePreviewSession);
+      const identity = { shareLinkId, fileId, visitorHash };
+      const existing = await sessions.findOne({ where: identity });
+      if (!existing || existing.hitCount > 0) return false;
+
+      const removed = await sessions.delete(identity);
+      if (!removed.affected) return false;
+
+      await links.createQueryBuilder()
+        .update(ShareLink)
+        .set({ currentAccessCount: () => '"currentAccessCount" - 1' })
+        .where('id = :id', { id: shareLinkId })
+        .andWhere('"currentAccessCount" > 0')
+        .execute();
+      return true;
     });
+    if (this.dataSource.options.type !== 'better-sqlite3') return refund();
+    return this.serialized(refund);
   }
 
   /**

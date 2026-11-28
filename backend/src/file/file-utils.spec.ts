@@ -1,3 +1,5 @@
+import { readFileSync } from 'fs';
+import { join } from 'path';
 import {
   RangeNotSatisfiableException,
   encodeCursor,
@@ -8,6 +10,23 @@ import {
   parseFileSize,
   parseAccessCount,
 } from './file-utils';
+
+describe('A-10：LIKE 转义必须携带 ESCAPE 子句', () => {
+  it('escapeLike 转义 % _ \\ 三个字符', () => {
+    expect(escapeLike('a%b_c\\d')).toBe('a\\%b\\_c\\\\d');
+  });
+
+  it('file.service.ts 中所有基于 escapeLike 的 LIKE 子句都声明了 ESCAPE', () => {
+    // SQLite 的 LIKE 没有默认转义符：只转义不声明 ESCAPE '\' 时，
+    // 含 % _ \ 的关键词仍按通配匹配，与 PostgreSQL 结果不一致。
+    const source = readFileSync(join(__dirname, 'file.service.ts'), 'utf8');
+    const lines = source.split('\n').filter((l) => l.includes('escapeLike(') && l.includes('LIKE'));
+    expect(lines.length).toBeGreaterThan(0);
+    for (const line of lines) {
+      expect(line).toContain('ESCAPE');
+    }
+  });
+});
 
 describe('file-utils', () => {
   describe('RangeNotSatisfiableException', () => {

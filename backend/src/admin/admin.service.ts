@@ -1285,7 +1285,7 @@ export class AdminService {
     if (query.excludePaths) {
       const patterns = query.excludePaths.split(',').map((p) => p.trim());
       patterns.forEach((pattern, i) => {
-        qb.andWhere(`log.path NOT LIKE :exclude${i}`, { [`exclude${i}`]: `%${pattern.replace(/[%_]/g, '\\$&')}%` });
+        qb.andWhere(`log.path NOT LIKE :exclude${i} ESCAPE '\\'`, { [`exclude${i}`]: `%${pattern.replace(/[\\%_]/g, '\\$&')}%` });
       });
     }
 

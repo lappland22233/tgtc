@@ -75,6 +75,7 @@ function makeProcessor(
       registerPrimaryTelegramSource: jest.fn(),
       triggerMirrorForFile: jest.fn(),
       mirrorGDriveCache: jest.fn().mockResolvedValue(undefined),
+      rollbackOverwriteIfSnapshot: jest.fn().mockResolvedValue(false),
     } as any,
     undefined,
     accountUpload,
@@ -88,6 +89,7 @@ function makeFileService() {
     registerPrimaryTelegramSource: jest.fn(),
     triggerMirrorForFile: jest.fn(),
     mirrorGDriveCache: jest.fn().mockResolvedValue(undefined),
+    rollbackOverwriteIfSnapshot: jest.fn().mockResolvedValue(false),
   };
 }
 
@@ -96,6 +98,23 @@ describe('FileUploadProcessor failure persistence', () => {
     jest.clearAllMocks();
     mockedCreateReadStream.mockReturnValue({} as any);
     mockedReadFile.mockRejectedValue(new Error('ENOENT')); // loadReceipt 无回执
+  });
+
+  it('B-02：覆盖上传失败先回滚原内容引用，回滚成功则不再标 error', async () => {
+    mockedExistsSync.mockReturnValue(false);
+    const repo = makeRepo();
+    repo.findOne.mockResolvedValue(makeFile());
+    const fileService = makeFileService();
+    fileService.rollbackOverwriteIfSnapshot.mockResolvedValue(true);
+    const processor = makeProcessor(repo, { uploadFile: jest.fn() }, fileService);
+
+    await processor.uploadToTelegram(makeJob(2));
+
+    expect(fileService.rollbackOverwriteIfSnapshot).toHaveBeenCalledWith(fileId, uploadVersion);
+    expect(repo.update).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ status: 'error' }),
+    );
   });
 
   it('marks a missing temp file as failed with a fixed, path-free reason', async () => {
@@ -212,7 +231,7 @@ describe('FileUploadProcessor failure persistence', () => {
     );
     // ready 原生 SQL 再次清空，覆盖任务恢复/旧数据边界；status IN 允许覆盖僵尸任务误标的 error
     expect(repo.query).toHaveBeenCalledWith(
-      'UPDATE files SET status = $1, "uploadFailureReason" = NULL WHERE id = $2 AND status IN ($3, $4) AND "uploadVersion" = $5 RETURNING id',
+      'UPDATE files SET status = $1, "uploadFailureReason" = NULL, "overwriteSnapshot" = NULL WHERE id = $2 AND status IN ($3, $4) AND "uploadVersion" = $5 RETURNING id',
       ['ready', fileId, 'processing', 'error', uploadVersion],
     );
   });
@@ -228,7 +247,7 @@ describe('FileUploadProcessor failure persistence', () => {
     await processor.uploadToTelegram(makeJob(0));
 
     expect(repo.query).toHaveBeenCalledWith(
-      'UPDATE files SET status = $1, "uploadFailureReason" = NULL WHERE id = $2 AND status IN ($3, $4) AND "uploadVersion" = $5 RETURNING id',
+      'UPDATE files SET status = $1, "uploadFailureReason" = NULL, "overwriteSnapshot" = NULL WHERE id = $2 AND status IN ($3, $4) AND "uploadVersion" = $5 RETURNING id',
       ['ready', fileId, 'processing', 'error', uploadVersion],
     );
   });
@@ -244,6 +263,7 @@ describe('FileUploadProcessor failure persistence', () => {
       registerPrimaryTelegramSource: jest.fn(),
       triggerMirrorForFile: jest.fn(),
       mirrorGDriveCache: jest.fn().mockResolvedValue(undefined),
+      rollbackOverwriteIfSnapshot: jest.fn().mockResolvedValue(false),
     };
     repo.findOne.mockResolvedValue(makeFile({ uploadStage: 'remote_committed', telegramFileId: 'tg-id' }));
     repo.findOneOrFail.mockResolvedValue(makeFile({ uploadStage: 'remote_committed', telegramFileId: 'tg-id' }));
@@ -284,7 +304,7 @@ describe('FileUploadProcessor failure persistence', () => {
 
     // 置 ready 条件 SQL 必须执行且命中（query 返回 1 行）
     expect(repo.query).toHaveBeenCalledWith(
-      'UPDATE files SET status = $1, "uploadFailureReason" = NULL WHERE id = $2 AND status IN ($3, $4) AND "uploadVersion" = $5 RETURNING id',
+      'UPDATE files SET status = $1, "uploadFailureReason" = NULL, "overwriteSnapshot" = NULL WHERE id = $2 AND status IN ($3, $4) AND "uploadVersion" = $5 RETURNING id',
       ['ready', fileId, 'processing', 'error', uploadVersion],
     );
     // 预热不再置状态后，这里是唯一置 ready 入口：命中后来源登记与镜像触发必然执行

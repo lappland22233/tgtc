@@ -49,6 +49,16 @@ export class SharePreviewSession {
   @Column({ default: true })
   consumed: boolean;
 
+  /**
+   * 幂等命中次数：同会话后续 Range / 重连每次 +1。
+   *
+   * 退款必须只在 hitCount=0 时执行：leader 扣次后会话即已提交，并发 follower 会命中
+   * idempotent 免扣并凭该会话取流；此时 leader 取流失败若照常退款，就把 follower
+   * 已消费的额度抹掉，maxAccessCount=1 的分享可被零计数反复下载。
+   */
+  @Column({ default: 0 })
+  hitCount: number;
+
   /** 会话创建时间 */
   @CreateDateColumn()
   createdAt: Date;

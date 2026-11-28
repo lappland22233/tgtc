@@ -97,12 +97,12 @@ export class ApiKeyService {
     );
 
     this.auditService.log({
-      action: 'api_key_create' as never,
+      action: 'api_key_create',
       userId: user.id,
       resourceType: 'api_key',
       resourceId: entity.id,
       metadata: { prefix: entity.prefix, name: entity.name, revealable: !!keyCipher },
-    } as never);
+    });
 
     return {
       id: entity.id,
@@ -152,12 +152,12 @@ export class ApiKeyService {
     }
 
     this.auditService.log({
-      action: 'api_key_reveal' as never,
+      action: 'api_key_reveal',
       userId: user.id,
       resourceType: 'api_key',
       resourceId: key.id,
       metadata: { prefix: key.prefix },
-    } as never);
+    });
 
     return { key: plaintext };
   }
@@ -173,12 +173,12 @@ export class ApiKeyService {
 
     await this.apiKeyRepository.update(id, { revokedAt: new Date() });
     this.auditService.log({
-      action: 'api_key_revoke' as never,
+      action: 'api_key_revoke',
       userId: user.id,
       resourceType: 'api_key',
       resourceId: key.id,
       metadata: { prefix: key.prefix },
-    } as never);
+    });
   }
 
   /**
@@ -288,12 +288,12 @@ export class ApiKeyService {
     });
 
     this.auditService.log({
-      action: 'api_key_allowlist_update' as never,
+      action: 'api_key_allowlist_update',
       userId: user.id,
       resourceType: 'api_key',
       resourceId: id,
       metadata: { ruleCount: normalized.length },
-    } as never);
+    });
 
     return { rules: normalized };
   }

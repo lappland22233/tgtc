@@ -25,7 +25,7 @@ describe('FileUploadConfigService file type validation', () => {
     sample.set([0x50, 0x4b, 0x03, 0x04], 0);
     sample.writeUInt32LE(10 * 1024 * 1024, 18);
 
-    await expect(service.isFileTypeAllowed('archive.zip', sample)).resolves.toEqual({ allowed: true });
+    await expect(service.isFileTypeAllowed('archive.zip', sample)).resolves.toEqual({ allowed: true, detectedExt: 'zip' });
   });
 
   it('rejects a ZIP by the configured blacklist without parsing its entries', async () => {

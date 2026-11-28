@@ -15,7 +15,7 @@ systemctl is-active --quiet "$SERVICE" || fail "systemd 服务未运行：$SERVI
 if systemctl cat "$BOT_SERVICE" >/dev/null 2>&1; then systemctl is-active --quiet "$BOT_SERVICE" || fail "Telegram Bot API 服务未运行：$BOT_SERVICE"; fi
 
 health=$(api_get health 2>/dev/null || true)
-[[ "$health" == *'"status":"ok"'* && "$health" == *'"database":"ok"'* ]] || fail '后端 /api/health 未返回就绪状态'
+[[ "$health" == *'"status":"ok"'* && "$health" == *'"database":"ok"'* && "$health" == *'"redis":"ok"'* ]] || fail '后端 /api/health 未返回就绪状态（DB/Redis 任一不可用即失败）'
 version=$(api_get version 2>/dev/null || true)
 [[ "$version" == *"\"version\":\"$EXPECTED_VERSION\""* ]] || fail "后端版本不匹配（期望 $EXPECTED_VERSION）"
 # Do not accept an SPA fallback: a frontend check must retrieve actual index markup.
