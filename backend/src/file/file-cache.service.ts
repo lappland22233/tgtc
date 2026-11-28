@@ -2,8 +2,9 @@ import { HttpStatus, Injectable, Logger, OnApplicationShutdown, ServiceUnavailab
 import { Cron } from '@nestjs/schedule';
 import { OnEvent } from '@nestjs/event-emitter';
 import { Readable } from 'stream';
-import { createReadStream, constants as fsConstants } from 'fs';
+import { createReadStream, createWriteStream, statSync, constants as fsConstants } from 'fs';
 import { promises as fsp } from 'fs';
+import { pipeline } from 'stream/promises';
 import * as path from 'path';
 import { ConfigCacheService } from '../common/services/config-cache.service';
 import { CacheDiskManager } from './cache-disk-manager';
@@ -230,7 +231,7 @@ export class FileCacheService implements OnApplicationShutdown {
     private readonly configCache: ConfigCacheService,
     resources?: DownloadResourceCoordinatorService,
   ) {
-    this.cacheDir = (require('path') as typeof import('path')).resolve(process.cwd(), 'tmp', 'Cache');
+    this.cacheDir = path.resolve(process.cwd(), 'tmp', 'Cache');
     // G4-04 增强：启动异步探测缓存目录可写性。mkdir 失败或目录不可写时给出明确告警
     // （运行时 prepareCacheCapacity 遇磁盘满会自动走 spool/直通降级，但启动期应尽早暴露问题）。
     fsp.mkdir(this.cacheDir, { recursive: true })
@@ -520,7 +521,7 @@ export class FileCacheService implements OnApplicationShutdown {
     const cachePath = this.getCachePath(fileId);
 
     try {
-      const stat = require('fs').statSync(cachePath);
+      const stat = statSync(cachePath);
       if (stat.size !== expectedSize || stat.size <= 0) {
         this.logger.debug(`缓存大小不匹配: ${fileId} (期望 ${expectedSize}, 实际 ${stat.size})`);
         // 删除的同时扣减内存计数，避免缓存总量漂移（plan 3.9）
@@ -1229,8 +1230,6 @@ export class FileCacheService implements OnApplicationShutdown {
 
     const cachePath = this.getCachePath(fileId);
     const tmpPath = cachePath + '.tmp';
-    const { createReadStream, createWriteStream } = require('fs');
-    const { pipeline } = require('stream/promises');
 
     try {
       await pipeline(
@@ -1311,7 +1310,7 @@ export class FileCacheService implements OnApplicationShutdown {
     if (this.noCacheMode) return null;
     const cachePath = this.getCachePath(fileId);
     try {
-      const stat = require('fs').statSync(cachePath);
+      const stat = statSync(cachePath);
       if (stat.size <= 0) return null;
       if (expectedSize !== undefined && stat.size !== expectedSize) {
         this.logger.debug(`缓存大小不匹配: ${fileId} (期望 ${expectedSize}, 实际 ${stat.size})`);
