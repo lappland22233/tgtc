@@ -18,6 +18,18 @@
 import { Logger, ServiceUnavailableException } from '@nestjs/common';
 import { Readable } from 'stream';
 import { createWriteStream } from 'fs';
+
+/**
+ * A-14：传输循环所需的最小会话结构。build 与 spool 会话都满足它，
+ * 使内容完整性与预约核销只有一份实现。
+ */
+interface TransferSession {
+  expectedSize: number;
+  bytesWritten: number;
+  error?: Error;
+  output?: ReturnType<typeof createWriteStream>;
+  events: { emit: (event: string, ...args: any[]) => boolean };
+}
 import { promises as fsp } from 'fs';
 import { FileHandle } from 'fs/promises';
 import { EventEmitter } from 'events';
@@ -692,6 +704,72 @@ export class CacheSessionCoordinator {
     this.logger.warn(`已中止 ${count} 个进行中的缓存构建会话`);
   }
 
+  /**
+   * A-14：build 与 spool 共用的传输循环——内容完整性与预约核销的**唯一实现**。
+   *
+   * 此前两条路径各写一份近乎逐行相同的循环（三层超时竞速、wx 建文件、尺寸校验、
+   * write + reservation.consume、stat 复核、catch 清理）。这类「错一次就静默损坏」
+   * 的不变量分散在多处时，修一处即产生分叉。
+   *
+   * 只收敛逐字相同的部分：路径、超时文案、成功后的发布动作（build 需 rename +
+   * registerCache，spool 不需要）与失败清理仍由各自调用方负责。
+   */
+  private async transferToFile(
+    session: TransferSession,
+    stream: Readable,
+    outputPath: string,
+    lease: SessionResourceLease,
+    timers: { resetIdle: () => void; stopIdle: () => void },
+    sizeMismatchLabel: string,
+  ): Promise<void> {
+    const output = createWriteStream(outputPath, { flags: 'r+' });
+    session.output = output;
+    let outputError: Error | undefined;
+    // 必须在首次 write 前监听；destroy() 期间的异步写回调可能晚于 error 事件。
+    output.on('error', error => {
+      outputError = error;
+    });
+    try {
+      for await (const rawChunk of stream) {
+        timers.resetIdle();
+        if (session.error) throw session.error;
+        if (outputError) throw outputError;
+        const chunk = Buffer.isBuffer(rawChunk) ? rawChunk : Buffer.from(rawChunk);
+        if (session.bytesWritten + chunk.length > session.expectedSize) {
+          throw new Error('上游流超过预期文件大小');
+        }
+        await new Promise<void>((resolve, reject) => {
+          output.write(chunk, error => {
+            if (error || outputError) reject(error ?? outputError);
+            else resolve();
+          });
+        });
+        if (outputError) throw outputError;
+        session.bytesWritten += chunk.length;
+        // 已写入字节由 statfs 反映，同步核销逻辑预约（避免物理/逻辑双重扣减）
+        lease.reservation.consume(chunk.length);
+        session.events.emit('progress');
+        timers.resetIdle();
+      }
+      timers.stopIdle();
+      if (outputError) throw outputError;
+      await new Promise<void>((resolve, reject) => {
+        output.once('error', reject);
+        output.end(() => outputError ? reject(outputError) : resolve());
+      });
+    } catch (error) {
+      stream.destroy();
+      output.destroy();
+      throw error;
+    }
+
+    if (session.error) throw session.error;
+    const stat = await fsp.stat(outputPath);
+    if (session.bytesWritten !== session.expectedSize || stat.size !== session.expectedSize) {
+      throw new Error(`${sizeMismatchLabel}: 期望 ${session.expectedSize}, 实际 ${stat.size}`);
+    }
+  }
+
   private async runBuildSession(
     session: CacheBuildSession,
     fetchFn: () => Promise<{ stream: Readable; info: { file_size: number } }>,
@@ -749,52 +827,11 @@ export class CacheSessionCoordinator {
         throw new Error(`上游文件大小不一致: 期望 ${session.expectedSize}, 实际 ${info.file_size}`);
       }
 
-      const output = createWriteStream(session.tmpPath, { flags: 'r+' });
-      session.output = output;
-      let outputError: Error | undefined;
-      // 必须在首次 write 前监听；destroy() 期间的异步写回调可能晚于 error 事件。
-      output.on('error', error => {
-        outputError = error;
-      });
-      try {
-        for await (const rawChunk of stream) {
-          resetIdleDeadline();
-          if (session.error) throw session.error;
-          if (outputError) throw outputError;
-          const chunk = Buffer.isBuffer(rawChunk) ? rawChunk : Buffer.from(rawChunk);
-          if (session.bytesWritten + chunk.length > session.expectedSize) {
-            throw new Error('上游流超过预期文件大小');
-          }
-          await new Promise<void>((resolve, reject) => {
-            output.write(chunk, error => {
-              if (error || outputError) reject(error ?? outputError);
-              else resolve();
-            });
-          });
-          if (outputError) throw outputError;
-          session.bytesWritten += chunk.length;
-          // 已写入字节由 statfs 反映，同步核销逻辑预约（避免物理/逻辑双重扣减）
-          lease.reservation.consume(chunk.length);
-          session.events.emit('progress');
-          resetIdleDeadline();
-        }
-        if (idleTimer) clearTimeout(idleTimer);
-        if (outputError) throw outputError;
-        await new Promise<void>((resolve, reject) => {
-          output.once('error', reject);
-          output.end(() => outputError ? reject(outputError) : resolve());
-        });
-      } catch (error) {
-        stream.destroy();
-        output.destroy();
-        throw error;
-      }
-
-      if (session.error) throw session.error;
-      const stat = await fsp.stat(session.tmpPath);
-      if (session.bytesWritten !== session.expectedSize || stat.size !== session.expectedSize) {
-        throw new Error(`缓存文件大小不一致: 期望 ${session.expectedSize}, 实际 ${stat.size}`);
-      }
+      await this.transferToFile(
+        session, stream, session.tmpPath, lease,
+        { resetIdle: resetIdleDeadline, stopIdle: () => { if (idleTimer) clearTimeout(idleTimer); } },
+        '缓存文件大小不一致',
+      );
       // G4-06：Windows 下 follower 的读句柄可能仍短暂占用临时文件，
       // rename 会抛 EPERM/EBUSY；做有限退避重试，避免整次回源失败。
       await this.renameWithRetry(session.tmpPath, cachePath);
@@ -997,52 +1034,11 @@ export class CacheSessionCoordinator {
         throw new Error(`上游文件大小不一致: 期望 ${session.expectedSize}, 实际 ${info.file_size}`);
       }
 
-      const output = createWriteStream(session.spoolPath, { flags: 'r+' });
-      session.output = output;
-      let outputError: Error | undefined;
-      // 必须在首次 write 前监听；destroy() 期间的异步写回调可能晚于 error 事件。
-      output.on('error', error => {
-        outputError = error;
-      });
-      try {
-        for await (const rawChunk of stream) {
-          resetIdleDeadline();
-          if (session.error) throw session.error;
-          if (outputError) throw outputError;
-          const chunk = Buffer.isBuffer(rawChunk) ? rawChunk : Buffer.from(rawChunk);
-          if (session.bytesWritten + chunk.length > session.expectedSize) {
-            throw new Error('上游流超过预期文件大小');
-          }
-          await new Promise<void>((resolve, reject) => {
-            output.write(chunk, error => {
-              if (error || outputError) reject(error ?? outputError);
-              else resolve();
-            });
-          });
-          if (outputError) throw outputError;
-          session.bytesWritten += chunk.length;
-          // 已写入字节由 statfs 反映，同步核销逻辑预约
-          lease.reservation.consume(chunk.length);
-          session.events.emit('progress');
-          resetIdleDeadline();
-        }
-        if (idleTimer) clearTimeout(idleTimer);
-        if (outputError) throw outputError;
-        await new Promise<void>((resolve, reject) => {
-          output.once('error', reject);
-          output.end(() => outputError ? reject(outputError) : resolve());
-        });
-      } catch (error) {
-        stream.destroy();
-        output.destroy();
-        throw error;
-      }
-
-      if (session.error) throw session.error;
-      const stat = await fsp.stat(session.spoolPath);
-      if (session.bytesWritten !== session.expectedSize || stat.size !== session.expectedSize) {
-        throw new Error(`spool 文件大小不一致: 期望 ${session.expectedSize}, 实际 ${stat.size}`);
-      }
+      await this.transferToFile(
+        session, stream, session.spoolPath, lease,
+        { resetIdle: resetIdleDeadline, stopIdle: () => { if (idleTimer) clearTimeout(idleTimer); } },
+        'spool 文件大小不一致',
+      );
       session.completed = true;
       session.events.emit('progress');
       session.events.emit('complete');
