@@ -22,8 +22,10 @@ const toneClass = computed(() => {
 
 <style scoped>
 .form-field-hint {
+  flex: 1 0 100%;
+  inline-size: 100%;
   font-size: 12px;
   line-height: 1.5;
-  margin-top: 4px;
+  margin-top: 6px;
 }
 </style>

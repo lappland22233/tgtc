@@ -165,6 +165,16 @@ function run() {
     if (rel !== 'src/utils/file-icon-type.ts' && /\bgetFileEmoji\b/.test(text)) {
       violations.push(`[DEAD_SYMBOL] ${rel} 引用了已移除的 getFileEmoji`);
     }
+
+    // 8. Guard against <t-form layout="vertical"> or missing label-align="top" causing label/control overlap
+    if (rel.endsWith('.vue')) {
+      for (const m of text.matchAll(/<t-form(?=\s|>)([^>]*)>/g)) {
+        const attrs = m[1];
+        if (!/label-align\s*=\s*["']top["']/.test(attrs) && (/layout\s*=\s*["']vertical["']/.test(attrs) || /label-width\s*=\s*["']0(?:px)?["']/.test(attrs) || !/label-width/.test(attrs))) {
+          violations.push(`[TFORM_LABEL] ${rel} 的 <t-form> 须使用 label-align="top"（TDesign 中 layout="vertical" 仍按固定 100px 左浮动对齐会导致标签与控件重叠）`);
+        }
+      }
+    }
   }
 
   if (violations.length > 0) {

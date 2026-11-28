@@ -297,7 +297,7 @@
     :on-confirm="handleBanSubmit"
     width="460px"
   >
-    <t-form label-width="80px">
+    <t-form label-align="top">
       <t-form-item label="IP 地址">
         <t-input v-model="banForm.ip" placeholder="输入要封禁的 IP 地址" autocomplete="off" name="ban-ip" />
       </t-form-item>
@@ -311,14 +311,16 @@
         </t-radio-group>
       </t-form-item>
       <t-form-item v-if="!banForm.isPermanent" label="封禁时长">
-        <div class="ban-duration-wrap">
-          <t-input-number
-            v-model="banForm.durationHours"
-            :min="1"
-            :max="720"
-          />
+        <div class="flex items-center gap-2">
+          <div class="ban-duration-wrap">
+            <t-input-number
+              v-model="banForm.durationHours"
+              :min="1"
+              :max="720"
+            />
+          </div>
+          <span class="ban-duration-unit">小时</span>
         </div>
-        <span class="ban-duration-unit">小时</span>
       </t-form-item>
     </t-form>
   </t-dialog>

@@ -2,29 +2,29 @@
   <!-- 文件缓存配置 -->
   <section id="config-cache" class="card mt-5">
     <h3 class="card-title">文件缓存</h3>
-    <t-form layout="vertical">
+    <t-form label-align="top">
       <t-form-item label="缓存总大小上限 (GB)">
-        <div class="flex flex-wrap items-center gap-2">
+        <div class="cfg-control-row">
           <t-input-number v-model="cacheConfig.maxSizeGB" :min="1" :max="1000" :step="1" />
-          <span class="text-xs text-ink-muted">超过此值先按最近最少使用淘汰旧缓存，仍不足则改走临时中转</span>
+          <span class="cfg-control-hint">超过此值先按最近最少使用淘汰旧缓存，仍不足则改走临时中转</span>
         </div>
       </t-form-item>
       <t-form-item label="磁盘最低剩余空间 (GB)">
-        <div class="flex flex-wrap items-center gap-2">
+        <div class="cfg-control-row">
           <t-input-number v-model="cacheConfig.minFreeDiskGB" :min="0.5" :max="100" :step="0.5" />
-          <span class="text-xs text-ink-muted">缓存与下载临时占用的最低保留空间，低于此值不再新建缓存或完整中转</span>
+          <span class="cfg-control-hint">缓存与下载临时占用的最低保留空间，低于此值不再新建缓存或完整中转</span>
         </div>
       </t-form-item>
       <t-form-item label="缓存有效期 (天)">
-        <div class="flex flex-wrap items-center gap-2">
+        <div class="cfg-control-row">
           <t-input-number v-model="cacheConfig.ttlDays" :min="1" :max="365" :step="1" />
-          <span class="text-xs text-ink-muted">超过此时间的缓存文件自动清理（正在下载中的文件会跳过本轮清理）</span>
+          <span class="cfg-control-hint">超过此时间的缓存文件自动清理（正在下载中的文件会跳过本轮清理）</span>
         </div>
       </t-form-item>
       <t-form-item label="无缓存模式">
-        <div class="flex flex-wrap items-center gap-2">
+        <div class="cfg-control-row">
           <t-switch :value="cacheConfig.noCacheMode" @change="(val: boolean) => emit('toggle-no-cache', val)" />
-          <span class="text-xs text-ink-muted">开启后不发布正式缓存，下载仍会写入临时中转文件（可重放给同一文件的并发下载）；Range 请求保持 206，但冷文件仍会完整回源，上游带宽压力增大</span>
+          <span class="cfg-control-hint">开启后不发布正式缓存，下载仍会写入临时中转文件（可重放给同一文件的并发下载）；Range 请求保持 206，但冷文件仍会完整回源，上游带宽压力增大</span>
         </div>
       </t-form-item>
       <t-form-item>
@@ -46,93 +46,93 @@
       下载按「预测占用 → 预约 → 排队」调度：已获得资源的下裁任务不会被新任务抢占，
       空间紧张时新任务排队等待。任何已上传文件都可以下载，完整暂存不可行时会自动改用受限缓冲直通。
     </p>
-    <t-form layout="vertical">
+    <t-form label-align="top">
       <t-form-item label="总预约上限 (GB)">
-        <div class="flex flex-wrap items-center gap-2">
+        <div class="cfg-control-row">
           <t-input-number v-model="downloadConfig.maxReservedGB" :min="0" :max="10000" :step="1" />
-          <span class="text-xs text-ink-muted">所有在途任务未写入预约之和的上限，0 表示只受物理空间约束</span>
+          <span class="cfg-control-hint">所有在途任务未写入预约之和的上限，0 表示只受物理空间约束</span>
         </div>
       </t-form-item>
       <t-form-item label="上游权重预算">
-        <div class="flex flex-wrap items-center gap-2">
+        <div class="cfg-control-row">
           <t-input-number v-model="downloadConfig.maxConcurrentUpstreams" :min="1" :max="128" :step="1" />
-          <span class="text-xs text-ink-muted">
+          <span class="cfg-control-hint">
             冷回源的全局「权重预算」：大文件占 8、中等文件占 2、小文件占 1；自动扩缩容开启时按有效 Bot 数映射 min(128, max(8, n×16))（1 个 → 16，2 个 → 32，4 个 → 64，8 个 → 128，上限 128）
           </span>
         </div>
       </t-form-item>
       <t-form-item label="队列等待策略">
-        <div class="flex flex-wrap items-center gap-2">
+        <div class="cfg-control-row">
           <div class="cfg-policy-select">
             <t-select v-model="downloadConfig.upstreamQueuePolicy" :options="queuePolicyOptions" />
           </div>
-          <span class="text-xs text-ink-muted">
+          <span class="cfg-control-hint">
             适配优先：队首大文件暂时放不下时，仅在前 8 个等待项内放过可适配的任务，避免小文件被 4GB 队首阻塞到超时
           </span>
         </div>
       </t-form-item>
       <t-form-item label="预算自动扩缩容">
-        <div class="flex flex-wrap items-center gap-2">
+        <div class="cfg-control-row">
           <t-switch v-model="downloadConfig.autoCapacityEnabled" />
-          <span class="text-xs text-ink-muted">
+          <span class="cfg-control-hint">
             按「有效 Bot 数」（已启用 + 存储 Chat + 健康 + 已有 ready 副本）自动调整权重预算；关闭后只保留人工设置
           </span>
         </div>
       </t-form-item>
       <t-form-item label="优先用户账号回源">
-        <div class="flex flex-wrap items-center gap-2">
+        <div class="cfg-control-row">
           <t-switch v-model="downloadConfig.preferUserAccount" />
-          <span class="text-xs text-ink-muted">
+          <span class="cfg-control-hint">
             开启后下载优先用 Premium 用户账号（MTProto）回源，命中失败自动回退 Bot 链路；关闭即回到纯 Bot 行为（临时能力，约 30 天后关闭回退）
           </span>
         </div>
       </t-form-item>
       <t-form-item label="用户账号并发上限">
-        <div class="flex flex-wrap items-center gap-2">
+        <div class="cfg-control-row">
           <t-input-number v-model="downloadConfig.userStreamMaxConcurrency" :min="1" :max="32" :step="1" />
-          <span class="text-xs text-ink-muted">
+          <span class="cfg-control-hint">
             单个 user 账号同时开出的 MTProto 回源流数（1-32）；过高更容易触发 Telegram 限流，过低会让并发下载提前回退 Bot
           </span>
         </div>
       </t-form-item>
       <t-form-item label="用户账号失败冷却 (秒)">
-        <div class="flex flex-wrap items-center gap-2">
+        <div class="cfg-control-row">
           <t-input-number v-model="downloadConfig.userFailureCooldownSeconds" :min="1" :max="600" :step="5" />
-          <span class="text-xs text-ink-muted">
+          <span class="cfg-control-hint">
             仅用于 network / other 类瞬时失败；限流仍按 Telegram 的 retry_after 冷却，认证类 30 分钟、权限类 10 分钟不变
           </span>
         </div>
       </t-form-item>
       <t-form-item label="排队上限 (个)">
-        <div class="flex flex-wrap items-center gap-2">
+        <div class="cfg-control-row">
           <t-input-number v-model="downloadConfig.queueCapacity" :min="1" :max="10000" :step="1" />
-          <span class="text-xs text-ink-muted">等待磁盘或上游的名额上限，超过后下载请求直接返回「服务器繁忙」</span>
+          <span class="cfg-control-hint">等待磁盘或上游的名额上限，超过后下载请求直接返回「服务器繁忙」</span>
         </div>
       </t-form-item>
       <t-form-item label="排队等待上限 (秒)">
-        <div class="flex flex-wrap items-center gap-2">
+        <div class="cfg-control-row">
           <t-input-number v-model="downloadConfig.queueTimeoutSeconds" :min="5" :max="86400" :step="30" />
-          <span class="text-xs text-ink-muted">单个任务最长排队时间，超时返回可重试状态并释放名额</span>
+          <span class="cfg-control-hint">单个任务最长排队时间，超时返回可重试状态并释放名额</span>
         </div>
       </t-form-item>
       <t-form-item label="临时中转宽限 (秒)">
-        <div class="flex flex-wrap items-center gap-2">
+        <div class="cfg-control-row">
           <t-input-number v-model="downloadConfig.spoolGraceSeconds" :min="0" :max="3600" :step="10" />
-          <span class="text-xs text-ink-muted">最后一个下载者断开后临时文件的保留时间，便于断点续传复用</span>
+          <span class="cfg-control-hint">最后一个下载者断开后临时文件的保留时间，便于断点续传复用</span>
         </div>
       </t-form-item>
       <t-form-item label="直通缓冲窗口 (MB)">
-        <div class="flex flex-wrap items-center gap-2">
+        <div class="cfg-control-row">
           <t-input-number v-model="downloadConfig.directWindowMB" :min="1" :max="4" :step="1" />
-          <span class="text-xs text-ink-muted">
+          <span class="cfg-control-hint">
             完整暂存不可行时的直通缓冲上限（1-4MB，推荐 1MB）：窗口即单请求的预读内存上限，与文件总大小无关
           </span>
         </div>
       </t-form-item>
       <t-form-item label="下载任务保留 (秒)">
-        <div class="flex flex-wrap items-center gap-2">
+        <div class="cfg-control-row">
           <t-input-number v-model="downloadConfig.taskRetentionSeconds" :min="60" :max="86400" :step="60" />
-          <span class="text-xs text-ink-muted">下载任务状态（排队/可下载）的保留时间</span>
+          <span class="cfg-control-hint">下载任务状态（排队/可下载）的保留时间</span>
         </div>
       </t-form-item>
       <t-form-item>
@@ -253,8 +253,34 @@ const emit = defineEmits<{
 </script>
 
 <style scoped>
+.cfg-control-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  width: 100%;
+}
+
+.cfg-control-row :deep(.t-input-number),
+.cfg-control-row :deep(.t-switch) {
+  flex-shrink: 0;
+}
+
+.cfg-control-hint {
+  flex: 1 1 240px;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.cfg-policy-select {
+  flex-shrink: 0;
+  width: min(100%, 220px);
+}
+
 .cfg-policy-select :deep(.t-select) {
-  width: 220px;
+  width: 100%;
 }
 
 .download-runtime {

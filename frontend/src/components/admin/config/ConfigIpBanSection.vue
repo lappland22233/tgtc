@@ -22,7 +22,7 @@
     </t-table>
 
     <t-dialog v-model:visible="showBanDialog" header="封禁IP" @confirm="emit('ban')">
-      <t-form layout="vertical">
+      <t-form label-align="top">
         <t-form-item label="IP地址" name="ip">
           <t-input v-model="banForm.ip" placeholder="请输入要封禁的IP地址" autocomplete="off" name="config-ban-ip" />
         </t-form-item>

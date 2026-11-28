@@ -20,7 +20,7 @@
       <h3 class="card-title">
         修改密码
       </h3>
-      <t-form ref="passwordFormRef" :data="passwordForm" :rules="passwordRules" @submit="handlePasswordChange" layout="vertical">
+      <t-form ref="passwordFormRef" :data="passwordForm" :rules="passwordRules" @submit="handlePasswordChange" label-align="top">
         <t-form-item label="原密码" name="oldPassword">
           <t-input v-model="passwordForm.oldPassword" type="password" placeholder="请输入原密码..." autocomplete="current-password" name="settings-old-pass" />
         </t-form-item>

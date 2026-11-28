@@ -6,7 +6,7 @@
       </svg>
       文件上传配置
     </h3>
-    <t-form layout="vertical">
+    <t-form label-align="top">
       <t-form-item label="最大文件大小 (MB)">
         <t-input-number v-model="uploadConfig.maxFileSizeMB" :min="1" :max="1024" />
       </t-form-item>

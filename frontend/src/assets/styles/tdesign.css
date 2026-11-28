@@ -348,6 +348,34 @@ html .t-form__item {
   margin-bottom: 18px;
 }
 
+html .t-form__label:not(.t-form__label--top) {
+  white-space: normal;
+  overflow-wrap: break-word;
+  line-height: 1.4;
+  padding-block: 6px;
+}
+
+html .t-form__label--top {
+  display: block;
+  float: none;
+  width: auto;
+  padding-right: 0;
+  padding-bottom: 6px;
+  line-height: 1.4;
+  white-space: normal;
+  font-weight: 500;
+}
+
+html .t-form__controls-content {
+  flex-wrap: wrap;
+  min-inline-size: 0;
+}
+
+html .t-switch,
+html .t-input-number {
+  flex-shrink: 0;
+}
+
 html .t-descriptions {
   border-radius: var(--radius-md);
   overflow: hidden;

@@ -7,7 +7,7 @@
     </p>
 
     <h4 class="bot-group-title">基础配置</h4>
-    <t-form layout="vertical">
+    <t-form label-align="top">
       <t-form-item label="直链有效期（小时）">
         <t-input-number v-model="botConfig.linkTtlHours" :min="1" :max="720" :step="1" />
         <FormFieldHint>1–720 小时</FormFieldHint>
@@ -34,7 +34,7 @@
           尚未配置 Telegram 存储群组（<code>TELEGRAM_CHAT_ID</code> 或账号池存储群）。可选用纯 Google 存储模式，直接转存 Bot 收到的文件。
         </template>
       </t-alert>
-      <t-form layout="vertical">
+      <t-form label-align="top">
         <t-form-item label="Bot 文件存储模式">
           <div class="bot-storage-mode__field">
             <t-radio-group
@@ -62,7 +62,7 @@
     </section>
 
     <h4 class="bot-group-title">站点链接设置</h4>
-    <t-form layout="vertical">
+    <t-form label-align="top">
       <t-form-item label="域名模式">
         <t-radio-group v-model="botConfig.linkDomainMode">
           <t-radio value="auto">自动获取</t-radio>

@@ -34,6 +34,8 @@ src/assets/styles/
 
 > [!IMPORTANT]
 > **Tailwind v4 与 TDesign 级联隔离规则**：`@layer utilities` 位于末位，可覆盖 `@layer base/components`，但无法直接覆盖未分层的 `tdesign-vue-next` `.t-*` 规则。因此 **禁止将控制宽度/边距的工具类直接挂在 `<t-select>`、`<t-input>`、`<t-input-number>`、`<t-button>` 上**，应使用外层容器 `<div class="...">` 包裹或写入 `<style scoped>` 的 `:deep(.t-*)`。
+>
+> **表单标签约定**：`<t-form>` 一律使用 `label-align="top"`。TDesign 的 `layout="vertical"` 仍默认左浮动 `100px` `label-width` 且 `white-space: nowrap`，长标签（或 `label-width="0"`）会直接与右侧控件按钮重叠。
 
 ---
 
@@ -129,6 +131,7 @@ src/assets/styles/
 5. 未添加 `scoped` / `module` 的 `<style>` 块
 6. `@media (max-width: ...)` 或未对齐历史断点（`360/500/680/700/720/960px`）
 7. 重新引入已清理的废弃文件/符号（`Upload.vue`、`FileCard.vue`、`FolderCard.vue`、`getFileEmoji` 等）
+8. 未使用 `label-align="top"` 的 `<t-form layout="vertical">` / `label-width="0"`（防止表单标签与按钮/开关重叠）
 
 ---
 

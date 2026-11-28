@@ -1,7 +1,7 @@
 <template>
   <section id="config-site" class="card mb-5">
     <h3 class="card-title">网站标题</h3>
-    <t-form layout="vertical">
+    <t-form label-align="top">
       <t-form-item label="浏览器标题">
         <t-input
           v-model="siteConfig.title"

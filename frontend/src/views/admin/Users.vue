@@ -135,7 +135,7 @@
     </div>
 
     <t-dialog v-model:visible="showCreateDialog" header="创建用户" :on-confirm="createUser">
-      <t-form :data="createForm" :rules="createFormRules" layout="vertical" label-width="0">
+      <t-form :data="createForm" :rules="createFormRules" label-align="top">
         <t-form-item label="邮箱" name="email">
           <t-input v-model="createForm.email" placeholder="请输入邮箱" autocomplete="off" name="admin-create-email" />
         </t-form-item>

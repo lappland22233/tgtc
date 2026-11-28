@@ -8,7 +8,7 @@
     :confirm-btn="result ? '完成' : '生成链接'"
     width="480px"
   >
-    <t-form :data="form" label-width="96px">
+    <t-form :data="form" label-align="top">
       <t-form-item label="文件">
         <div class="target-info">
           <span class="target-name" :title="fileName">{{ fileName }}</span>
@@ -28,30 +28,34 @@
       </t-form-item>
 
       <t-form-item v-if="form.mode === 'timed'" label="有效时长">
-        <div class="dl-num-field">
-          <t-input-number
-            v-model="form.durationHours"
-            :min="1"
-            :max="720"
-            :step="1"
-            theme="column"
-          />
+        <div class="dl-num-row">
+          <div class="dl-num-field">
+            <t-input-number
+              v-model="form.durationHours"
+              :min="1"
+              :max="720"
+              :step="1"
+              theme="column"
+            />
+          </div>
+          <span class="unit">小时</span>
         </div>
-        <span class="unit">小时</span>
         <div class="form-hint">1-720 小时（30 天）；从访客首次访问时开始计时。</div>
       </t-form-item>
 
       <t-form-item v-if="form.mode === 'count_limited'" label="访问次数">
-        <div class="dl-num-field">
-          <t-input-number
-            v-model="form.maxAccessCount"
-            :min="1"
-            :max="1000000"
-            :step="1"
-            theme="column"
-          />
+        <div class="dl-num-row">
+          <div class="dl-num-field">
+            <t-input-number
+              v-model="form.maxAccessCount"
+              :min="1"
+              :max="1000000"
+              :step="1"
+              theme="column"
+            />
+          </div>
+          <span class="unit">次</span>
         </div>
-        <span class="unit">次</span>
         <div class="form-hint">1-1000000 次；达到上限后链接自动失效。</div>
       </t-form-item>
     </t-form>
@@ -187,6 +191,12 @@ function handleClose() {
 </script>
 
 <style scoped>
+.dl-num-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .dl-num-field :deep(.t-input-number) {
   width: 160px;
 }
@@ -209,12 +219,12 @@ function handleClose() {
 }
 
 .unit {
-  margin-left: 8px;
   font-size: 13px;
   color: var(--text-secondary);
 }
 
 .form-hint {
+  flex: 1 0 100%;
   font-size: 12px;
   color: var(--text-tertiary);
   margin-top: 4px;

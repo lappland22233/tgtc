@@ -7,7 +7,7 @@
     :confirm-loading="loading"
     width="480px"
   >
-    <t-form :data="form" :rules="rules" ref="formRef" label-width="100px">
+    <t-form :data="form" :rules="rules" ref="formRef" label-align="top">
       <t-form-item label="分享目标">
         <div class="target-info">
           <span class="target-icon">
@@ -223,6 +223,7 @@ function handleClose() {
   display: flex;
   align-items: center;
   gap: 8px;
+  width: 100%;
   padding: 8px 12px;
   background: var(--color-bg-elevated);
   border-radius: var(--radius-md);
@@ -242,6 +243,8 @@ function handleClose() {
 }
 
 .form-hint {
+  flex: 1 0 100%;
+  width: 100%;
   font-size: 12px;
   color: var(--text-tertiary);
   margin-top: 4px;

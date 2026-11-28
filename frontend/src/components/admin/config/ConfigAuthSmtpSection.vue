@@ -3,7 +3,7 @@
     <!-- 认证配置 -->
     <section class="card mb-0">
       <h3 class="card-title">认证配置</h3>
-      <t-form layout="vertical">
+      <t-form label-align="top">
         <t-form-item label="允许新用户注册">
           <t-switch v-model="authConfig.registrationEnabled" />
           <FormFieldHint>
@@ -71,7 +71,7 @@
     <!-- SMTP配置 -->
     <section id="config-smtp" class="card mb-0">
       <h3 class="card-title">SMTP 邮箱配置</h3>
-      <t-form layout="vertical">
+      <t-form label-align="top">
         <t-form-item label="SMTP服务器">
           <t-input v-model="smtpConfig.host" placeholder="smtp.example.com" autocomplete="off" name="smtp-host" />
         </t-form-item>
