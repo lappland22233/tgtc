@@ -3006,19 +3006,13 @@ export class FileService implements OnModuleInit {
 
     await this.assertFileReadable(file, user);
 
-    // 原子递增访问计数（先扣次数，再拉取文件，避免拉取成功但计数失败）
-    const updateResult = await this.fileRepository
-      .createQueryBuilder()
-      .update(File)
-      .set({ currentAccessCount: () => 'currentAccessCount + 1' })
-      .where('id = :id', { id })
-      .andWhere('(maxAccessCount <= 0 OR currentAccessCount < maxAccessCount)')
-      .andWhere('isDeleted = false')
-      .execute();
-
-    if (updateResult.affected === 0) {
-      throw new ForbiddenException('访问次数已用尽或文件不存在');
+    // A-01：配额执行以 ShareLink 为唯一权威，File.currentAccessCount 降级为统计镜像。
+    // 先扣次数再拉取文件，避免拉取成功但计数失败。
+    const access = await this.accessControl.enforceAccessConstraints(file);
+    if (!access.allowed) {
+      throw new ForbiddenException(access.reason || '访问次数已用尽或文件不存在');
     }
+    await this.accessControl.bumpAccessStats(id);
 
     const { stream } = await this.getDownloadStream(file, opts);
 
@@ -3147,21 +3141,14 @@ export class FileService implements OnModuleInit {
     const lastDedup = this.rangeQuotaDedup.get(dedupKey);
     const shouldConsume = !lastDedup || now - lastDedup >= FileService.RANGE_QUOTA_DEDUP_MS;
     if (shouldConsume) {
-      // 原子访问计数：与完整下载路径一致，强制 maxAccessCount 上限并校验 affected，
-      // 防止受限文件被无限次范围下载绕过。
-      const updateResult = await this.fileRepository
-        .createQueryBuilder()
-        .update(File)
-        .set({ currentAccessCount: () => '"currentAccessCount" + 1' })
-        .where('id = :id', { id })
-        .andWhere('("maxAccessCount" <= 0 OR "currentAccessCount" < "maxAccessCount")')
-        .andWhere('"isDeleted" = false')
-        .execute();
-
-      if (updateResult.affected === 0) {
+      // A-01：与全量下载同一权威（ShareLink）。File 侧只递增统计镜像，
+      // 不再参与上限判定，防止受限文件被无限次范围下载绕过。
+      const access = await this.accessControl.enforceAccessConstraints(file);
+      if (!access.allowed) {
         readStream.destroy();
-        throw new ForbiddenException('访问次数已用尽或文件不存在');
+        throw new ForbiddenException(access.reason || '访问次数已用尽或文件不存在');
       }
+      await this.accessControl.bumpAccessStats(id);
       // 记录本次扣次时间；Map 有界，超出容量即整体清空（低频操作，可接受）
       if (this.rangeQuotaDedup.size > 10_000) this.rangeQuotaDedup.clear();
       this.rangeQuotaDedup.set(dedupKey, now);

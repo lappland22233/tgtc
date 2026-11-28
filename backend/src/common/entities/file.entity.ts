@@ -139,31 +139,31 @@ export class File {
   accessType: FileAccessType;
 
   /**
-   * @deprecated Phase 2 起由 ShareLink.maxAccessCount 管理。此字段保留用于数据迁移兼容，将在下一个 major 版本删除。
+   * @deprecated A-01 起 ShareLink.maxAccessCount 是唯一权威，本列仅为兼容镜像（setter 同步写入）。执行判定一律读 ShareLink。删列留到下一个 major。
    */
   @Column({ default: -1 })
   maxAccessCount: number;
 
   /**
-   * @deprecated Phase 2 起由 ShareLink.expiresIn 管理。此字段保留用于数据迁移兼容，将在下一个 major 版本删除。
+   * @deprecated A-01 起 ShareLink.expiresIn 是唯一权威，本列仅为兼容镜像。执行判定一律读 ShareLink。删列留到下一个 major。
    */
   @Column({ nullable: true, type: 'int' })
   expiresIn: number | null;
 
   /**
-   * @deprecated Phase 2 起由 ShareLink.expiresStartAt 管理。此字段保留用于数据迁移兼容，将在下一个 major 版本删除。
+   * @deprecated A-01 起 ShareLink.expiresStartAt 是唯一权威，本列仅为兼容镜像。执行判定一律读 ShareLink。删列留到下一个 major。
    */
   @Column({ nullable: true, type: databaseColumnType('timestamp') as 'timestamp' })
   expiresStartAt: Date | null;
 
   /**
-   * @deprecated Phase 2 起由 ShareLink.currentAccessCount 管理。此字段保留用于数据迁移兼容，将在下一个 major 版本删除。
+   * @deprecated A-01 起配额执行以 ShareLink.currentAccessCount 为准；本列降级为**统计镜像**（不限次文件也计数，供管理端分析），不参与任何上限判定。删列留到下一个 major。
    */
   @Column({ default: 0 })
   currentAccessCount: number;
 
   /**
-   * @deprecated Phase 2 起由 ShareLink.password 管理。此字段保留用于数据迁移兼容，将在下一个 major 版本删除。
+   * @deprecated A-01 起 ShareLink.password 是唯一权威，本列仅为兼容镜像（setPassword 同步写入）。删列留到下一个 major。
    */
   @Column({ nullable: true, type: 'varchar' })
   password: string | null;

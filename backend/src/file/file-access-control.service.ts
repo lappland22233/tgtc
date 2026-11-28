@@ -7,7 +7,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import * as bcrypt from 'bcryptjs';
 import { File, FileAccessType } from '../common/entities/file.entity';
-import { ShareLink, ShareTargetType } from '../common/entities/share-link.entity';
+import { ShareLink, ShareTargetType, ShareLinkStatus } from '../common/entities/share-link.entity';
 import { User } from '../common/entities/user.entity';
 import { BannedIP } from '../common/entities/banned-ip.entity';
 import { ConfigCacheService } from '../common/services/config-cache.service';
@@ -51,6 +51,60 @@ export class FileAccessControlService {
   ) {}
 
   // ---------- 访问策略变更 ----------
+
+  /**
+   * A-01：ShareLink 是访问约束的唯一权威，File 上的 5 个 @deprecated 约束列
+   * 降级为兼容镜像（本轮不删列，删列留到下一个 major）。
+   *
+   * 此前两侧都是活写入权威：File 侧扣次与 ShareLink 侧扣次各算各的，
+   * 任一侧改约束都可能被另一侧静默绕过或误拦；`createDownloadLink('permanent')`
+   * 甚至必须显式清空 File 侧约束才能让公开链接可用——重复已是承重结构。
+   *
+   * 收敛口径：所有 setter 写入 File 镜像后同步到 legacy ShareLink；
+   * 所有执行点（扣次/时效/密码）只读 ShareLink。
+   */
+  private legacyShareRepo() {
+    return this.fileRepository.manager.getRepository(ShareLink);
+  }
+
+  /**
+   * 取得（必要时一次性迁移创建）该文件的 legacy ShareLink（token = 文件 ID）。
+   * 仅在文件确实带约束时调用，避免为无约束文件凭空物化分享行。
+   */
+  private async ensureLegacyShare(file: File): Promise<ShareLink> {
+    const repo = this.legacyShareRepo();
+    const existing = await repo.findOne({ where: { token: file.id, isDeleted: false } });
+    if (existing) return existing;
+
+    const created = repo.create({
+      token: file.id,
+      targetType: ShareTargetType.FILE,
+      targetId: file.id,
+      creatorId: file.uploaderId,
+      password: file.password ?? null,
+      maxAccessCount: file.maxAccessCount ?? -1,
+      currentAccessCount: file.currentAccessCount ?? 0,
+      expiresIn: file.expiresIn ?? null,
+      expiresStartAt: file.expiresStartAt ?? null,
+      status: ShareLinkStatus.ACTIVE,
+    });
+    try {
+      return await repo.save(created);
+    } catch {
+      // 并发创建撞唯一约束：另一个请求已建好，直接取回
+      const raced = await repo.findOne({ where: { token: file.id, isDeleted: false } });
+      if (!raced) throw new NotFoundException('文件访问约束初始化失败');
+      return raced;
+    }
+  }
+
+  /** 把约束变更同步到权威侧；legacy 行不存在时按当前 File 镜像一次性创建 */
+  private async mirrorConstraints(id: string, patch: Partial<ShareLink>): Promise<void> {
+    const file = await this.fileRepository.findOne({ where: { id, isDeleted: false } });
+    if (!file) return;
+    const share = await this.ensureLegacyShare(file);
+    await this.legacyShareRepo().update({ id: share.id }, patch);
+  }
 
   async updateAccessType(id: string, accessType: FileAccessType, user: User): Promise<void> {
     const file = await this.fileRepository.findOne({
@@ -128,6 +182,7 @@ export class FileAccessControlService {
     }
 
     await this.fileRepository.update(id, { maxAccessCount });
+    await this.mirrorConstraints(id, { maxAccessCount });
 
     // 审计日志：访问次数限制变更
     this.auditService.log({
@@ -152,6 +207,7 @@ export class FileAccessControlService {
 
     const hashedPassword = password ? await bcrypt.hash(password, BCRYPT_ROUNDS) : null;
     await this.fileRepository.update(id, { password: hashedPassword });
+    await this.mirrorConstraints(id, { password: hashedPassword });
 
     // 审计日志：文件密码设置/移除
     this.auditService.log({
@@ -173,7 +229,9 @@ export class FileAccessControlService {
 
     assertFileWritable(file, user);
 
-    await this.fileRepository.update(id, { expiresIn, expiresStartAt: expiresIn !== null ? new Date() : null });
+    const expiresStartAt = expiresIn !== null ? new Date() : null;
+    await this.fileRepository.update(id, { expiresIn, expiresStartAt });
+    await this.mirrorConstraints(id, { expiresIn, expiresStartAt });
 
     // 审计日志：文件有效期设置
     this.auditService.log({
@@ -200,31 +258,48 @@ export class FileAccessControlService {
   }
 
   /**
-   * 检查文件访问约束并递增计数器，返回是否允许访问
+   * 检查文件访问约束并递增计数器，返回是否允许访问。
+   *
+   * A-01：约束一律以 legacy ShareLink 为权威。无约束的文件直接放行，
+   * 不为其物化分享行；带约束的文件先一次性迁移 File 镜像到 ShareLink，
+   * 再在 ShareLink 上做原子扣次，杜绝两侧各算各的导致的绕过或误拦。
    */
   async checkAndIncrementAccess(id: string): Promise<{ allowed: boolean; reason?: string }> {
-    const file = await this.fileRepository.findOne({
-      where: { id, isDeleted: false },
-      select: { maxAccessCount: true, currentAccessCount: true, expiresIn: true, expiresStartAt: true },
-    });
-
+    const file = await this.fileRepository.findOne({ where: { id, isDeleted: false } });
     if (!file) return { allowed: false, reason: '文件不存在' };
+    return this.enforceAccessConstraints(file);
+  }
 
-    // 检查时效限制（用设置时间 expiresStartAt 计算过期）
-    if (file.expiresIn !== null && file.expiresIn !== undefined && file.expiresStartAt) {
-      const expiresAt = new Date(file.expiresStartAt.getTime() + file.expiresIn * 3600 * 1000);
+  /**
+   * 配额与时效的**执行**口径：只读 ShareLink（A-01）。
+   *
+   * 与统计计数分离：`File.currentAccessCount` 保留为统计镜像（不限次文件也要计数，
+   * 供管理端分析用），但**不再参与任何上限判定**。调用方在通过本方法后自行递增镜像。
+   * 这样既关闭了「两侧各算各的」的绕过/误拦，又不必为每个无约束文件物化分享行。
+   */
+  async enforceAccessConstraints(file: File): Promise<{ allowed: boolean; reason?: string }> {
+    const hasConstraints = (file.maxAccessCount ?? -1) > 0
+      || (file.expiresIn !== null && file.expiresIn !== undefined)
+      || !!file.password;
+    if (!hasConstraints) return { allowed: true };
+
+    const share = await this.ensureLegacyShare(file);
+
+    // 时效限制（用设置时间 expiresStartAt 计算过期）
+    if (share.expiresIn !== null && share.expiresIn !== undefined && share.expiresStartAt) {
+      const expiresAt = new Date(share.expiresStartAt.getTime() + share.expiresIn * 3600 * 1000);
       if (new Date() > expiresAt) {
         return { allowed: false, reason: '文件分享已过期' };
       }
     }
 
-    // 检查访问次数（原子 UPDATE，防止并发超发）
-    if (file.maxAccessCount > 0) {
-      const result = await this.fileRepository
+    // 访问次数（原子 UPDATE，防止并发超发）
+    if ((share.maxAccessCount ?? -1) > 0) {
+      const result = await this.legacyShareRepo()
         .createQueryBuilder()
-        .update(File)
+        .update(ShareLink)
         .set({ currentAccessCount: () => '"currentAccessCount" + 1' })
-        .where('id = :id', { id })
+        .where('id = :id', { id: share.id })
         .andWhere('"currentAccessCount" < "maxAccessCount"')
         .andWhere('"isDeleted" = false')
         .execute();
@@ -235,6 +310,17 @@ export class FileAccessControlService {
     }
 
     return { allowed: true };
+  }
+
+  /** 统计镜像递增：不限次文件也计数，仅供分析，不参与上限判定（A-01） */
+  async bumpAccessStats(id: string): Promise<void> {
+    await this.fileRepository
+      .createQueryBuilder()
+      .update(File)
+      .set({ currentAccessCount: () => '"currentAccessCount" + 1' })
+      .where('id = :id', { id })
+      .andWhere('"isDeleted" = false')
+      .execute();
   }
 
   async hasPassword(id: string): Promise<boolean> {
