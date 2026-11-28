@@ -830,7 +830,7 @@ export class FileCacheService implements OnApplicationShutdown {
         }
         if (!(await this.prepareCacheCapacity(expectedSize))) {
           // 无法建立正式缓存时仍保持 Range 语义：使用可重放 spool / 有界直通，而不是回退 200。
-          const result = await this.getDegradableSpooledStream(fileId, expectedSize, fetchFn, start, end, contentVersion);
+          const result = await this.getDegradableSpooledStream(fileId, expectedSize, fetchFn, start, end, contentVersion, waitTimeoutMs);
           return result.stream;
         }
         // 容量准备期间模式可能翻转；无缓存模式由协调器提供 spool/直通 Range。
@@ -857,7 +857,7 @@ export class FileCacheService implements OnApplicationShutdown {
         } catch (error) {
           if (isInsufficientStorage(error)) {
             this.logger.warn(`文件 ${fileId}（Range）超过缓存容量上限，降级为 spool/直通`);
-            const result = await this.getDegradableSpooledStream(fileId, expectedSize, fetchFn, start, end, contentVersion);
+            const result = await this.getDegradableSpooledStream(fileId, expectedSize, fetchFn, start, end, contentVersion, waitTimeoutMs);
             return result.stream;
           }
           throw error;

@@ -159,6 +159,15 @@ export const useUploadStore = defineStore('upload', () => {
   const pendingQueue: QueueEntry[] = [];
   let pendingCursor = 0;
   let activeWorkers = 0;
+  /**
+   * B-11：会话代际。reset() 递增，旧 worker 与旧条目据此识别自己已过期。
+   *
+   * 登出→换账号登录→立即再上传时，旧 worker 仍在跑：若它照常 activeWorkers--
+   * 会把新会话计数减成负数，ensurePump 的 spawn 随之超额；旧条目的终态回调还会
+   * 污染新会话的成功/取消计数。
+   */
+  let generation = 0;
+  const entryGeneration = new WeakMap<QueueEntry, number>();
   let speedTimer: ReturnType<typeof setInterval> | null = null;
   let progressTimer: ReturnType<typeof setTimeout> | null = null;
   let foregroundChunkConcurrency = uploadScheduler.getConcurrency();
@@ -207,6 +216,8 @@ export const useUploadStore = defineStore('upload', () => {
   }
 
   function changeStatus(entry: QueueEntry, next: QueueStatus) {
+    // 过期会话的条目不得再改新会话计数（reset 后旧上传仍可能异步收尾）
+    if ((entryGeneration.get(entry) ?? generation) !== generation) return;
     const previous = entry.status;
     if (previous === next) return;
     if (previous === 'pending') queuedCount.value--;
@@ -408,14 +419,18 @@ export const useUploadStore = defineStore('upload', () => {
   }
 
   async function worker() {
+    const myGeneration = generation;
     try {
       for (;;) {
+        if (generation !== myGeneration) return;
         const entry = takePending();
         if (!entry) return;
         changeStatus(entry, 'processing');
         await processEntry(entry);
       }
     } finally {
+      // 过期 worker 不得触碰新会话的计数与泵状态
+      if (generation !== myGeneration) return;
       activeWorkers--;
       if (queuedCount.value > 0) ensurePump();
       else if (activeWorkers === 0) {
@@ -439,7 +454,7 @@ export const useUploadStore = defineStore('upload', () => {
   }
 
   function createEntry(file: File, folderId: string | null, tagIds: string[]): QueueEntry {
-    return shallowReactive({
+    const entry = shallowReactive({
       uid: genUid(),
       file: markRaw(file),
       fileName: file.name,
@@ -459,6 +474,8 @@ export const useUploadStore = defineStore('upload', () => {
       retryCount: 0,
       waitingForSlot: false,
     });
+    entryGeneration.set(entry, generation);
+    return entry;
   }
 
   /**
@@ -580,6 +597,8 @@ export const useUploadStore = defineStore('upload', () => {
     pendingProgress.clear();
     pendingQueue.length = 0;
     pendingCursor = 0;
+    // 递增代际：在途旧 worker 与旧条目据此停止改动新会话计数（B-11）
+    generation++;
     activeWorkers = 0;
     entries.value = [];
     isPumping.value = false;
