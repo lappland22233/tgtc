@@ -9,6 +9,7 @@ import { getClientIp } from '../common/utils/client-ip';
 import { JwtService } from '@nestjs/jwt';
 import { RateLimitService } from '../common/services/rate-limit.service';
 import { generateXsrfToken, getXsrfCookieOptions, XSRF_COOKIE_NAME } from '../common/utils/xsrf';
+import { jwtExpiryMs } from '../common/utils/jwt-expiry';
 
 /**
  * M1：会话建立时同时下发非 httpOnly 的 XSRF-TOKEN Cookie（CSRF 双重提交）。
@@ -26,7 +27,8 @@ const getCookieOptions = (req: Request) => ({
   // lax: 兼容邮件验证链接等顶级导航跨站场景，安全性仍高于 none
   // （strict 会阻止邮件链接跨站跳转时携带 Cookie，导致用户需重新登录）
   sameSite: 'lax' as const,
-  maxAge: 7 * 24 * 3600 * 1000, // 7 days
+  // C-07：与 JWT_EXPIRES_IN 对齐，避免 Cookie 先于令牌失效（或令牌过期后 Cookie 仍在）
+  maxAge: jwtExpiryMs(),
   path: '/',
 });
 

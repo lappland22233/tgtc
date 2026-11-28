@@ -56,7 +56,7 @@ SQLite 备份前应停止应用或使用 SQLite 在线备份能力取得一致�
 | `FRONTEND_URL` | - | CORS 单一来源回退值 |
 | `CORS_ORIGINS` | - | 逗号分隔的允许来源，优先于 `FRONTEND_URL` |
 | `JWT_SECRET` | - | 至少 32 字符，启动必检 |
-| `JWT_EXPIRES_IN` | `7d` | JWT 有效期 |
+| `JWT_EXPIRES_IN` | `7d` | JWT 有效期。**同时决定 `access_token` 与 `XSRF-TOKEN` 两个 Cookie 的 maxAge**（`common/utils/jwt-expiry.ts`），三者始终对齐。支持 `7d`/`1h`/`30m`/`60s`/`500ms`/`2w`/`1y` 与纯秒数；非法值回退 7 天。缩短有效期可降低令牌泄漏后的可用窗口，但当前无刷新/轮换机制，过期即需重新登录 |
 | `SECURE_COOKIE` | `false` | HTTPS 生产环境必须显式设为 `true` |
 | `TOKEN_EXTRACTION_MODE` | `both` | `both` 或 `cookie_only` |
 | `TRUST_PROXY_HOPS` | 未设置 | Express 信任的反向代理跳数；位于反代之后必须设置（如 `1`）。**同时决定 WebSocket 告警网关的握手 IP 解析**（`common/utils/client-ip.ts` 的 `getSocketClientIp`）：未设置时取 socket 对端地址，完全不信任 `X-Forwarded-For` |
