@@ -372,6 +372,7 @@ Redis 承载 8 个 Bull 队列：`metrics-aggregation`、`attack-detection`、`a
 | 环境变量 | 说明 |
 | --- | --- |
 | `STORAGE_ENCRYPTION_KEY` | 存储账号凭据加密根密钥（32 字节 base64 或 64 位 hex）。**必填才允许新增/轮换存储账号**；缺失时创建被拒绝（绝不以明文落库）。与 TG 账号的 `TELEGRAM_ACCOUNT_ENCRYPTION_KEY` 相互独立 |
+| `STORAGE_ALLOW_PRIVATE_ENDPOINT` | 默认 `false`。设为 `true` 才允许把 S3 endpoint / WebDAV url 指向环回或私网地址（内网 MinIO、局域网 WebDAV 是合法部署形态）。**链路本地与云元数据地址始终拒绝**，不受本开关影响：`169.254.0.0/16`、`fe80::/10`、`metadata.google.internal` / `metadata` / `instance-data`。局限：仅判定字面量 IP 与已知元数据主机名，指向内网 IP 的域名需异步 DNS 解析才能识别，DNS rebinding 属残留风险 |
 
 **账号管理**（后台「存储后端」页，仅超级管理员）：
 
