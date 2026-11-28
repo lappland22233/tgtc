@@ -1,4 +1,4 @@
-import { IsString, MaxLength, IsOptional, IsUUID, IsBoolean, IsNotEmpty, Matches } from 'class-validator';
+import { IsString, MaxLength, IsOptional, IsUUID, IsBoolean, IsNotEmpty, Matches, IsInt, Min, Max } from 'class-validator';
 import { Transform as ClassTransform } from 'class-transformer';
 
 /**
@@ -83,4 +83,22 @@ export class ListContentsQueryDto {
   @ClassTransform(({ value }) => value === true || value === 'true')
   @IsBoolean()
   includeDeleted?: boolean;
+
+  /**
+   * C-09：文件分页。省略时保持历史行为（返回该目录全部文件），
+   * 传 page/limit 时只取一页并附带 total，供大目录按需加载。
+   * 子文件夹数量天然有限，始终全量返回。
+   */
+  @IsOptional()
+  @ClassTransform(({ value }) => (value === undefined || value === '' ? undefined : Number(value)))
+  @IsInt()
+  @Min(1)
+  page?: number;
+
+  @IsOptional()
+  @ClassTransform(({ value }) => (value === undefined || value === '' ? undefined : Number(value)))
+  @IsInt()
+  @Min(1)
+  @Max(200)
+  limit?: number;
 }

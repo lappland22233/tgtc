@@ -64,6 +64,8 @@ export class FolderController {
     const parentId = query.parentId && query.parentId !== 'null' ? query.parentId : null;
     const contents = await this.folderService.listContents(user.id, parentId, {
       includeDeleted: query.includeDeleted,
+      page: query.page,
+      limit: query.limit,
     });
     return contents;
   }

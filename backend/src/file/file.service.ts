@@ -3772,6 +3772,9 @@ export class FileService implements OnModuleInit {
 
     // 文件已由 Multer 完整接收后，后台任务与原 HTTP 连接解耦；
     // 正常响应结束也会触发 request close，不能据此取消仍在进行的 Telegram 上传。
+    // 因此该 controller **刻意永不 abort**：signal 只是预留的显式取消通道，
+    // 下游的 signal.aborted 分支在当前接线方式下不可达。彻底移除这套惰性管线
+    // 属于 FileService 拆分（A-04）的范围，不在本次修复内。
     const abortController = new AbortController();
     const cleanup = () => {};
 
@@ -3786,8 +3789,10 @@ export class FileService implements OnModuleInit {
    * @warning 任务存于内存（UploadJobService Map），进程崩溃或重启会丢失进行中的任务。
    *          如需持久化请迁移至 Bull 队列（项目已集成 @nestjs/bull）。
    *
-   * @param req Express Request，用于监听客户端连接关闭事件，
-   *            客户端断开后 30 秒未恢复则放弃 Telegram 上传任务
+   * @param _req 保留入参以兼容控制器调用位置。**不用于取消任务**：文件已由 Multer
+   *             完整接收，后台上传与 HTTP 连接解耦；正常响应结束同样会触发 request
+   *             close，据此取消会误杀合法上传。历史上此处曾承诺「客户端断开 30 秒
+   *             未恢复则放弃上传」，该行为从未实现，已删除该描述。
    */
   async uploadMultipleAsync(
     files: Express.Multer.File[],
@@ -3799,6 +3804,9 @@ export class FileService implements OnModuleInit {
 
     // 文件已由 Multer 完整接收后，后台任务与原 HTTP 连接解耦；
     // 正常响应结束也会触发 request close，不能据此取消仍在进行的 Telegram 上传。
+    // 因此该 controller **刻意永不 abort**：signal 只是预留的显式取消通道，
+    // 下游的 signal.aborted 分支在当前接线方式下不可达。彻底移除这套惰性管线
+    // 属于 FileService 拆分（A-04）的范围，不在本次修复内。
     const abortController = new AbortController();
     const cleanup = () => {};
 
@@ -3869,7 +3877,8 @@ export class FileService implements OnModuleInit {
    * 后台处理单个文件上传到 Telegram
    *
    * @param abortSignal 客户端连接断开 30 秒后触发 abort，中止上传
-   * @param cleanup 任务完成/失败时调用，清理 req 监听器和 timer
+   * @param cleanup 任务完成/失败时调用的收尾钩子。当前两个调用方都传入空实现
+   *                （没有 req 监听器或 timer 需要清理），保留形参供未来显式取消通道使用。
    */
   private async processAsyncUpload(
     jobId: string,

@@ -101,7 +101,11 @@ export class FolderService {
    * 列出指定文件夹下的内容（子文件夹 + 文件），用于网盘主区域。
    * 这是网盘用户最常调用的接口，需保证性能。
    */
-  async listContents(ownerId: string, folderId: string | null, options: { includeDeleted?: boolean } = {}) {
+  async listContents(
+    ownerId: string,
+    folderId: string | null,
+    options: { includeDeleted?: boolean; page?: number; limit?: number } = {},
+  ) {
     if (folderId) {
       await this.assertFolderOwned(folderId, ownerId);
     }
@@ -112,17 +116,32 @@ export class FolderService {
     if (!options.includeDeleted) {
       fileWhere.isDeleted = false;
     }
-    const [subfolders, files] = await Promise.all([
+    // C-09：本接口是网盘最常调用的端点。此前无条件 find 全量加载目录内所有文件，
+    // 万级文件目录每次浏览/刷新都要全表段加载 + 全量 JSON 序列化，内存与响应时间线性膨胀。
+    // 显式传 page/limit 时改为分页；省略时保持历史全量行为，不破坏既有调用方。
+    const paginated = options.page !== undefined && options.limit !== undefined;
+    const [subfolders, filesResult] = await Promise.all([
       this.folderRepo.find({
         where: { ownerId, parentId: folderId ?? IsNull(), isDeleted: false },
         order: { name: 'ASC' },
       }),
-      this.fileRepo.find({
-        where: fileWhere,
-        order: { originalName: 'ASC' },
-      }),
+      paginated
+        ? this.fileRepo.findAndCount({
+          where: fileWhere,
+          order: { originalName: 'ASC' },
+          skip: (options.page! - 1) * options.limit!,
+          take: options.limit!,
+        })
+        : this.fileRepo.find({
+          where: fileWhere,
+          order: { originalName: 'ASC' },
+        }),
     ]);
-    return { subfolders, files };
+    if (paginated) {
+      const [files, total] = filesResult as [File[], number];
+      return { subfolders, files, total, page: options.page, limit: options.limit };
+    }
+    return { subfolders, files: filesResult as File[] };
   }
 
   // ---------- 写操作 ----------
