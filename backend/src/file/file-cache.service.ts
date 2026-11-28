@@ -607,50 +607,47 @@ export class FileCacheService implements OnApplicationShutdown {
     return explicit ?? this.directWaitMs;
   }
 
-  /** 锁内执行：复查会话/缓存 → 容量准备 → 申请资源 → 创建或合流会话 */
-  private async startOrJoinBuildSession(
+  /**
+   * A-15：冷 Range 与全量下载共用的领导者选举核心。
+   *
+   * 此前两条路径各写一遍「锁内复查缓存/会话 → prepareCacheCapacity →
+   * noCacheMode 复查 → acquireSessionResources → INSUFFICIENT_STORAGE 降级」，
+   * 降级策略改动极易只改一侧。
+   *
+   * 差异通过 view 回调保留，**不强行统一**：
+   * - 缓存命中探针与 Range 区间开流方式不同；
+   * - 全量路径合流前会 waitForSessionReadable，Range 路径不等（首块即可 seek）；
+   * - 降级时全量走 0..size-1，Range 走 start..end 以保持 206 语义。
+   */
+  private async leadOrJoin(
     fileId: string,
     expectedSize: number,
     fetchFn: () => Promise<{ stream: Readable; info: { file_size: number } }>,
-    contentVersion?: string | number,
-    waitTimeoutMs?: number,
-  ): Promise<{ stream: Readable; fromCache: boolean }> {
+    contentVersion: string | number | undefined,
+    waitTimeoutMs: number,
+    view: {
+      probeCache: () => Readable | null;
+      joinExisting: (session: CacheBuildSession) => Promise<Readable> | Readable;
+      degrade: (reason: 'capacity' | 'oversize') => Promise<Readable>;
+      noCache: () => Promise<Readable>;
+      joinNew: (session: CacheBuildSession) => Promise<Readable> | Readable;
+    },
+  ): Promise<Readable> {
     // 锁内复查：等待期间可能已有 leader 建好会话，或缓存已被其他请求发布
-    const cachedInLock = this.getCachedReadStream(fileId, expectedSize);
-    if (cachedInLock) return { stream: cachedInLock, fromCache: true };
+    const cached = view.probeCache();
+    if (cached) return cached;
 
     const existing = this.buildSessions.get(fileId);
     if (existing && sameContentVersion(existing.contentVersion, contentVersion)) {
-      await this.sessionCoordinator.waitForSessionReadable(existing);
-      return { stream: this.sessionCoordinator.createFollowerStream(existing), fromCache: false };
+      return await view.joinExisting(existing);
     }
 
     if (!(await this.prepareCacheCapacity(expectedSize))) {
-      // 容量/磁盘不足：改用可重放 spool（C-04 修复），迟到消费者从 offset 0 完整重放
-      this.logger.warn(`缓存容量或磁盘余量不足，文件 ${fileId} 走可重放 spool`);
-      return this.getDegradableSpooledStream(
-        fileId,
-        expectedSize,
-        fetchFn,
-        0,
-        expectedSize - 1,
-        contentVersion,
-        this.resolveWaitTimeout(waitTimeoutMs),
-      );
+      return view.degrade('capacity');
     }
 
     // 容量准备期间模式可能已翻转，复查避免在无缓存模式下新建构建会话
-    if (this.noCacheMode) {
-      // 与入口同一口径：模式翻转后同样要保留「结构性不足 → 受限直通」的降级能力，
-      // 否则翻转瞬间的请求会绕过降级直接失败（与入口行为不一致、难以复现）
-      return this.getDegradableNoCacheStream(
-        fileId,
-        expectedSize,
-        fetchFn,
-        contentVersion,
-        this.resolveWaitTimeout(waitTimeoutMs),
-      );
-    }
+    if (this.noCacheMode) return view.noCache();
 
     let lease: SessionResourceLease;
     try {
@@ -658,21 +655,12 @@ export class FileCacheService implements OnApplicationShutdown {
       lease = await this.sessionCoordinator.acquireSessionResources(fileId, expectedSize, {
         countsTowardCache: true,
         contentVersion,
-        waitTimeoutMs: this.resolveWaitTimeout(waitTimeoutMs),
+        waitTimeoutMs,
       });
     } catch (error) {
       if (isInsufficientStorage(error)) {
-        // 单文件超过缓存容量上限：降级 spool/直通，绝不因此拒绝下载（网盘文件必须可下载）
-        this.logger.warn(`文件 ${fileId} 超过缓存容量上限，降级为 spool/直通`);
-        return this.getDegradableSpooledStream(
-          fileId,
-          expectedSize,
-          fetchFn,
-          0,
-          expectedSize - 1,
-          contentVersion,
-          this.resolveWaitTimeout(waitTimeoutMs),
-        );
+        // 单文件超过缓存容量上限：降级 spool/直通，绝不因此拒绝下载
+        return view.degrade('oversize');
       }
       throw error;
     }
@@ -684,8 +672,52 @@ export class FileCacheService implements OnApplicationShutdown {
       lease,
       contentVersion,
     );
-    await this.sessionCoordinator.waitForSessionReadable(session);
-    return { stream: this.sessionCoordinator.createFollowerStream(session), fromCache: false };
+    return await view.joinNew(session);
+  }
+
+  /** 锁内执行：复查会话/缓存 → 容量准备 → 申请资源 → 创建或合流会话 */
+  private async startOrJoinBuildSession(
+    fileId: string,
+    expectedSize: number,
+    fetchFn: () => Promise<{ stream: Readable; info: { file_size: number } }>,
+    contentVersion?: string | number,
+    waitTimeoutMs?: number,
+  ): Promise<{ stream: Readable; fromCache: boolean }> {
+    const resolvedWait = this.resolveWaitTimeout(waitTimeoutMs);
+    let fromCache = false;
+    const stream = await this.leadOrJoin(fileId, expectedSize, fetchFn, contentVersion, resolvedWait, {
+      probeCache: () => {
+        const cached = this.getCachedReadStream(fileId, expectedSize);
+        if (cached) fromCache = true;
+        return cached;
+      },
+      joinExisting: async (session) => {
+        await this.sessionCoordinator.waitForSessionReadable(session);
+        return this.sessionCoordinator.createFollowerStream(session);
+      },
+      degrade: async (reason) => {
+        this.logger.warn(
+          reason === 'capacity'
+            ? `缓存容量或磁盘余量不足，文件 ${fileId} 走可重放 spool`
+            : `文件 ${fileId} 超过缓存容量上限，降级为 spool/直通`,
+        );
+        const result = await this.getDegradableSpooledStream(
+          fileId, expectedSize, fetchFn, 0, expectedSize - 1, contentVersion, resolvedWait,
+        );
+        return result.stream;
+      },
+      noCache: async () => {
+        const result = await this.getDegradableNoCacheStream(
+          fileId, expectedSize, fetchFn, contentVersion, resolvedWait,
+        );
+        return result.stream;
+      },
+      joinNew: async (session) => {
+        await this.sessionCoordinator.waitForSessionReadable(session);
+        return this.sessionCoordinator.createFollowerStream(session);
+      },
+    });
+    return { stream, fromCache };
   }
 
   /**
@@ -819,60 +851,36 @@ export class FileCacheService implements OnApplicationShutdown {
     // 避免两个冷请求各自申请完整磁盘预约（Range 冷回源仍需完整回源与完整写盘）
     return this.sessionCoordinator.withSessionLock(
       this.sessionCoordinator.sessionKeyFor(fileId, contentVersion),
-      async (): Promise<Readable | null> => {
-        const cachedInLock = this.getCachedPath(fileId, expectedSize);
-        if (cachedInLock) {
-          this.fileAccessMap.set(fileId, Date.now());
-          return this.withCachePin(fileId, createReadStream(cachedInLock, { start, end }));
-        }
-        const existingInLock = this.buildSessions.get(fileId);
-        if (existingInLock && sameContentVersion(existingInLock.contentVersion, contentVersion)) {
-          return this.sessionCoordinator.createFollowerStream(existingInLock, start, end);
-        }
-        if (!(await this.prepareCacheCapacity(expectedSize))) {
-          // 无法建立正式缓存时仍保持 Range 语义：使用可重放 spool / 有界直通，而不是回退 200。
-          const result = await this.getDegradableSpooledStream(fileId, expectedSize, fetchFn, start, end, contentVersion, waitTimeoutMs);
-          return result.stream;
-        }
-        // 容量准备期间模式可能翻转；无缓存模式由协调器提供 spool/直通 Range。
-        if (this.noCacheMode) {
-          const result = await this.sessionCoordinator.getNoCacheStream(
-            fileId,
-            expectedSize,
-            fetchFn,
-            start,
-            end,
-            contentVersion,
-            { waitTimeoutMs },
-          );
-          return result.stream;
-        }
-
-        let lease: SessionResourceLease;
-        try {
-          lease = await this.sessionCoordinator.acquireSessionResources(fileId, expectedSize, {
-            countsTowardCache: true,
-            contentVersion,
-            waitTimeoutMs,
-          });
-        } catch (error) {
-          if (isInsufficientStorage(error)) {
-            this.logger.warn(`文件 ${fileId}（Range）超过缓存容量上限，降级为 spool/直通`);
-            const result = await this.getDegradableSpooledStream(fileId, expectedSize, fetchFn, start, end, contentVersion, waitTimeoutMs);
+      async (): Promise<Readable | null> => this.leadOrJoin(
+        fileId, expectedSize, fetchFn, contentVersion, waitTimeoutMs,
+        {
+          probeCache: () => {
+            const cachedPath = this.getCachedPath(fileId, expectedSize);
+            if (!cachedPath) return null;
+            this.fileAccessMap.set(fileId, Date.now());
+            return this.withCachePin(fileId, createReadStream(cachedPath, { start, end }));
+          },
+          // Range 不等 waitForSessionReadable：已写入区间即可 seek
+          joinExisting: (session) => this.sessionCoordinator.createFollowerStream(session, start, end),
+          degrade: async (reason) => {
+            if (reason === 'oversize') {
+              this.logger.warn(`文件 ${fileId}（Range）超过缓存容量上限，降级为 spool/直通`);
+            }
+            // 无法建立正式缓存时仍保持 Range 语义：可重放 spool / 有界直通，而不是回退 200
+            const result = await this.getDegradableSpooledStream(
+              fileId, expectedSize, fetchFn, start, end, contentVersion, waitTimeoutMs,
+            );
             return result.stream;
-          }
-          throw error;
-        }
-
-        const session = this.sessionCoordinator.getOrCreateBuildSession(
-          fileId,
-          expectedSize,
-          fetchFn,
-          lease,
-          contentVersion,
-        );
-        return this.sessionCoordinator.createFollowerStream(session, start, end);
-      },
+          },
+          noCache: async () => {
+            const result = await this.sessionCoordinator.getNoCacheStream(
+              fileId, expectedSize, fetchFn, start, end, contentVersion, { waitTimeoutMs },
+            );
+            return result.stream;
+          },
+          joinNew: (session) => this.sessionCoordinator.createFollowerStream(session, start, end),
+        },
+      ),
     );
   }
 
