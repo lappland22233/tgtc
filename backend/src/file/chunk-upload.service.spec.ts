@@ -102,6 +102,22 @@ describe('ChunkUploadService session quota', () => {
       await fsp.rm(dir, { recursive: true, force: true });
     });
 
+    it('B-20：mergeRecoverable 经 getStatus 透出，供前端区分可恢复与确定性失败', async () => {
+      const { uploadId } = await init();
+      const session = (service as any).sessions.get(uploadId);
+      session.mergeStatus = 'error';
+      session.mergeError = 'Redis 入队失败';
+      session.mergeRecoverable = true;
+
+      const recoverable = await service.getStatus(uploadId, userId);
+      expect(recoverable.mergeStatus).toBe('error');
+      expect(recoverable.mergeRecoverable).toBe(true);
+
+      // 未标记时必须是 false，前端不得把任意 error 当作可恢复
+      session.mergeRecoverable = false;
+      expect((await service.getStatus(uploadId, userId)).mergeRecoverable).toBe(false);
+    });
+
     it('尚未开始的任务先移除再清源；移除失败则保留源交 Worker 收尾', async () => {
       const { dir, handoffPath, session } = await makeSession();
       fileUploadQueue.getJob.mockResolvedValue({

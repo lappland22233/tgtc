@@ -523,6 +523,8 @@ async function pollMergeResult(
   const maxAttempts = 360; // 最多轮询 30 分钟 (5s * 360)，适配特大文件 Telegram 上传
   let consecutiveFailures = 0;
   const maxConsecutiveFailures = 3;
+  /** B-20：可恢复 error 只重发一次 complete，避免无限循环 */
+  let recoverableRetried = false;
 
   for (let i = 0; i < maxAttempts; i++) {
     if (signal?.aborted) throw new Error('上传已取消');
@@ -531,7 +533,7 @@ async function pollMergeResult(
     let businessError: Error | null = null;
     try {
       const res = await api.get(`/files/chunk/${uploadId}/status`, { signal });
-      const { mergeStatus, mergeResult, mergeError } = res.data.data;
+      const { mergeStatus, mergeResult, mergeError, mergeRecoverable } = res.data.data;
 
       // 成功获取状态，重置故障计数器
       consecutiveFailures = 0;
@@ -540,6 +542,18 @@ async function pollMergeResult(
         return mergeResult;
       }
       if (mergeStatus === 'error') {
+        // B-20：入队失败但交接源与 processing 记录都还在时，后端支持重发 complete
+        // 只重试入队（不重建分片）。此前任何 error 一律当终态放弃，
+        // 后端的恢复链路对官方客户端是死代码。
+        if (mergeRecoverable && !recoverableRetried) {
+          recoverableRetried = true;
+          try {
+            await api.post(`/files/chunk/${uploadId}/complete`, {}, { signal, timeout: 0 });
+            continue;
+          } catch {
+            // 重发本身失败：按确定性失败结束，不再循环
+          }
+        }
         // 后端明确合并失败：打上业务标记，防止任意 mergeError 文案被队列误判为可重试
         businessError = createMergeBusinessError(mergeError || '合并失败');
       } else {

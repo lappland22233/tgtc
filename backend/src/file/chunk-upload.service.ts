@@ -52,6 +52,13 @@ interface ChunkSession {
   mergeResult?: { id: string; originalName: string };
   /** 合并错误信息 */
   mergeError?: string;
+  /**
+   * B-20：本次 error 是否可通过再次 complete 恢复。
+   * 仅在「已原子交接到 pending、但入队失败」时为 true——此时 handoffPath 与
+   * processing 记录都还在，重发 complete 只会重试入队，不会重建分片。
+   * 前端据此区分「确定性失败」与「可恢复失败」，否则后端恢复链路对官方客户端是死代码。
+   */
+  mergeRecoverable?: boolean;
   /** 合并态长期未收敛的一次性告警标记，避免每轮回收重复刷日志 */
   mergeStuckWarned?: boolean;
   /** 已安排/已执行延迟清理：可恢复错误重试前必须取消，否则会在重试中途删掉会话 */
@@ -492,6 +499,7 @@ export class ChunkUploadService implements OnModuleInit {
     mergeStatus: string;
     mergeResult: { id: string; originalName: string } | null;
     mergeError: string | null;
+    mergeRecoverable: boolean;
   }> {
     const session = this.getSession(uploadId, userId);
     session.lastActivityAt = new Date();
@@ -520,6 +528,7 @@ export class ChunkUploadService implements OnModuleInit {
       mergeStatus: session.mergeStatus,
       mergeResult: session.mergeResult || null,
       mergeError: session.mergeError || null,
+      mergeRecoverable: session.mergeRecoverable === true,
     };
   }
 
@@ -561,6 +570,7 @@ export class ChunkUploadService implements OnModuleInit {
     session.lastActivityAt = new Date();
     session.mergeStatus = 'merging';
     session.mergeError = undefined;
+    session.mergeRecoverable = false;
     // 重新进入合并即重置滞留告警，避免一次卡死后永久静音。
     session.mergeStuckWarned = false;
     session.mergeAbortController = new AbortController();
@@ -921,6 +931,8 @@ export class ChunkUploadService implements OnModuleInit {
       // 入队失败时保留已交接的唯一源并把租约还给会话。分片目录可能已释放；下次
       // complete 通过 handoffPath 仅重试入队，绝不能吞掉回迁失败后再尝试重建分片。
       this.uploadDiskBudget?.transferJobToSession(session.uploadId, savedFile.id, savedFile.uploadVersion);
+      // 标记可恢复：源与记录都在，重发 complete 只重试入队（B-20）
+      session.mergeRecoverable = true;
       throw err;
     }
 
