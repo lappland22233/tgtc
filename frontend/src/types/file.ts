@@ -55,6 +55,13 @@ export interface FileItem {
 export interface BatchUploadFailedItem {
   name: string;
   reason: string;
+  /**
+   * 是否可安全重试（与后端 BatchUploadFailedItem 对齐）：
+   * 类型/大小/同名冲突等确定性失败为 false，网络/数据库瞬时故障为 true。
+   * A-20：此前前端手工镜像的类型缺该字段，后端「确定性失败不误导重试」的语义
+   * 在 UI 侧完全不可用。可选字段，缺省时按可重试处理以保持既有行为。
+   */
+  retryable?: boolean;
 }
 
 /** 批量上传成功项（仅需 id 和 originalName 用于前端展示） */

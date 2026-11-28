@@ -23,6 +23,7 @@ vi.mock('../views/layout/Layout.vue', () => ({ default: { template: '<div />' } 
 vi.mock('../views/admin/Dashboard.vue', () => ({ default: { template: '<div />' } }));
 vi.mock('../views/admin/Config.vue', () => ({ default: { template: '<div />' } }));
 vi.mock('../views/admin/Users.vue', () => ({ default: { template: '<div />' } }));
+vi.mock('../views/NotFound.vue', () => ({ default: { template: '<div />' } }));
 
 vi.mock('../stores/mediaPlayback', () => ({
   useMediaPlaybackStore: () => ({ session: null, requestStop: vi.fn() }),
@@ -57,6 +58,17 @@ describe('router 守卫', () => {
     authStore.user = null;
     authStore.initialized = false;
     fetchUser.mockClear();
+  });
+
+  it('A-27：未定义路径命中 404 兜底而不是渲染空白页', () => {
+    const resolved = router.resolve('/definitely-not-a-real-page');
+    expect(resolved.name).toBe('NotFound');
+    // 公开路由：守卫不得把 404 页重定向到登录页
+    expect(resolved.meta.public).toBe(true);
+  });
+
+  it('A-27：深层未定义路径同样命中兜底', () => {
+    expect(router.resolve('/admin/update2/deep/unknown').name).toBe('NotFound');
   });
 
   it('已废弃的更新页面将管理员送回管理首页', async () => {

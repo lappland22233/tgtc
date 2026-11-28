@@ -172,6 +172,14 @@ const routes: RouteRecordRaw[] = [
       },
     ],
   },
+  // A-27：兜底路由。此前无 pathMatch 兜底，访问未定义路径（旧书签、误拼地址）
+  // 时 vue-router 无匹配 → 渲染空白页，既无 404 提示也无回首页入口。
+  {
+    path: '/:pathMatch(.*)*',
+    name: 'NotFound',
+    component: () => import('../views/NotFound.vue'),
+    meta: { public: true },
+  },
 ];
 
 const router = createRouter({
