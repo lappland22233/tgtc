@@ -171,6 +171,7 @@
 import { ref, onMounted, watch } from 'vue';
 import MessagePlugin from '@/utils/message';
 import { getErrorMessage } from '@/utils/error';
+import { formatDate } from '@/utils/format';
 import {
   listApiKeys,
   createApiKey,
@@ -395,10 +396,6 @@ function closeUsage() {
   usageItems.value = [];
   usageTotal.value = 0;
   usagePage.value = 1;
-}
-
-function formatDate(date: string) {
-  return date ? new Date(date).toLocaleDateString('zh-CN') : '-';
 }
 
 function formatDateTime(date: string | null) {

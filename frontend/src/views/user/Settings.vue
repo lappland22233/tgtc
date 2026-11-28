@@ -68,6 +68,7 @@ import MessagePlugin from '@/utils/message';
 import { useAuthStore } from '../../stores/auth';
 import { api } from '../../stores/auth';
 import { getErrorMessage } from '../../utils/error';
+import { formatDate } from '../../utils/format';
 import { useMobile } from '../../composables/useMobile';
 import type { UserRole } from '../../types/user';
 import ApiKeyManager from '../../components/settings/ApiKeyManager.vue';
@@ -126,10 +127,6 @@ const roleTheme = computed(() => {
   const map: Record<UserRole, string> = { super_admin: 'warning', admin: 'primary', user: 'default' };
   return map[authStore.user?.role ?? 'user'] || 'default';
 });
-
-function formatDate(date: string) {
-  return date ? new Date(date).toLocaleDateString('zh-CN') : '-';
-}
 
 async function handlePasswordChange() {
   if (submitting.value) return;

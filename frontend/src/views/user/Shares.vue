@@ -83,7 +83,7 @@
                 {{ share.expiresIn }}h 有效
               </span>
               <span v-else class="meta-tag">永久</span>
-              <span class="meta-date">创建于 {{ formatDate(share.createdAt) }}</span>
+              <span class="meta-date">创建于 {{ formatDateTime(share.createdAt, true) }}</span>
             </div>
             <div class="share-url">
               <code>{{ getShareUrl(share) }}</code>
@@ -128,6 +128,7 @@ import { ref, onMounted } from 'vue';
 import { DialogPlugin } from 'tdesign-vue-next/es/dialog';
 import { MessagePlugin } from 'tdesign-vue-next/es/message';
 import { api } from '../../stores/auth';
+import { formatDateTime } from '../../utils/format';
 import { useFileStore } from '../../stores/files';
 import { useFolderStore, type Folder } from '../../stores/folders';
 
@@ -230,17 +231,6 @@ function getStatusLabel(share: ShareItem): string {
     case 'expired': return '已过期';
     case 'exhausted': return '次数耗尽';
     default: return share.status;
-  }
-}
-
-function formatDate(dateStr: string): string {
-  try {
-    return new Date(dateStr).toLocaleString('zh-CN', {
-      year: 'numeric', month: '2-digit', day: '2-digit',
-      hour: '2-digit', minute: '2-digit',
-    });
-  } catch {
-    return dateStr;
   }
 }
 
