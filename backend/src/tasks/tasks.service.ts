@@ -1,3 +1,4 @@
+import { fileUploadJobId } from '../jobs/file-upload-job';
 import { pendingUploadDirectory, pendingUploadName } from '../file/pending-upload';
 import { Injectable, Inject, Logger, Optional } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -412,7 +413,7 @@ export class TasksService {
   }
 
   private async recoverUpload(file: File): Promise<boolean> {
-    const originalId = `file-upload:${file.id}:${file.uploadVersion}`;
+    const originalId = fileUploadJobId(file.id, file.uploadVersion);
     let jobId = originalId;
     let job = await this.fileUploadQueue.getJob(jobId);
     const originalData = job?.data;

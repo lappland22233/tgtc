@@ -1,3 +1,4 @@
+import { fileUploadJobId, FILE_UPLOAD_JOB_OPTIONS } from '../jobs/file-upload-job';
 import { parsePendingUploadName, pendingUploadDirectory, pendingUploadName } from './pending-upload';
 import { Injectable, BadRequestException, NotFoundException, ForbiddenException, ConflictException, HttpException, HttpStatus, Logger, OnModuleInit } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
@@ -895,7 +896,7 @@ export class ChunkUploadService implements OnModuleInit {
     }
 
     this.throwIfAborted(signal);
-    const jobId = `file-upload:${savedFile.id}:${savedFile.uploadVersion}`;
+    const jobId = fileUploadJobId(savedFile.id, savedFile.uploadVersion);
     const leaseTransferred = session.strictDiskLease
       ? this.uploadDiskBudget!.transferSessionToJob(session.uploadId, savedFile.id, savedFile.uploadVersion)
       : true;
@@ -913,10 +914,7 @@ export class ChunkUploadService implements OnModuleInit {
         },
         {
           jobId,
-          attempts: 3,
-          backoff: { type: 'exponential', delay: 10000 },
-          removeOnComplete: 100,
-          removeOnFail: 50,
+          ...FILE_UPLOAD_JOB_OPTIONS,
         },
       );
     } catch (err) {
@@ -1028,7 +1026,7 @@ export class ChunkUploadService implements OnModuleInit {
     const fileId = session.savedFileId;
     if (!fileId) return;
     const uploadVersion = session.savedFileUploadVersion ?? 1;
-    const jobId = `file-upload:${fileId}:${uploadVersion}`;
+    const jobId = fileUploadJobId(fileId, uploadVersion);
     try {
       // 与 abort 路径同一口径：只有确认 Worker 尚未取得任务时才删源。
       // 任务不存在＝入队失败，源无人使用，必须清掉否则永久残留；
@@ -1105,7 +1103,7 @@ export class ChunkUploadService implements OnModuleInit {
   private async cleanupUploadingSideEffects(session: ChunkSession): Promise<boolean> {
     const fileId = session.savedFileId!;
     const uploadVersion = session.savedFileUploadVersion ?? 1;
-    const jobId = `file-upload:${fileId}:${uploadVersion}`;
+    const jobId = fileUploadJobId(fileId, uploadVersion);
     let safelyRemovedBeforeStart = false;
     try {
       const queuedJob = await this.fileUploadQueue.getJob(jobId).catch(() => undefined);

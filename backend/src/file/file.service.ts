@@ -1,3 +1,4 @@
+import { fileUploadJobId, FILE_UPLOAD_JOB_OPTIONS } from '../jobs/file-upload-job';
 import { pendingUploadDirectory, pendingUploadName } from './pending-upload';
 import { Injectable, NotFoundException, ForbiddenException, BadRequestException, ConflictException, GoneException, HttpException, HttpStatus, OnModuleInit, Logger, Optional, Inject } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -1818,11 +1819,8 @@ export class FileService implements OnModuleInit {
         await this.fileUploadQueue.add('upload',
           { fileId: savedFile.id, filePath: pendingPath, uploadVersion: savedFile.uploadVersion },
           {
-            jobId: `file-upload:${savedFile.id}:${savedFile.uploadVersion}`,
-            attempts: 3,
-            backoff: { type: 'exponential', delay: 10000 },
-            removeOnComplete: 100,
-            removeOnFail: 50,
+            jobId: fileUploadJobId(savedFile.id, savedFile.uploadVersion),
+            ...FILE_UPLOAD_JOB_OPTIONS,
           },
         );
         success.push(savedFile);

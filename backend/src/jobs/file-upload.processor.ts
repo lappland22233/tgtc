@@ -1,3 +1,4 @@
+import { fileUploadAdmissionJobId } from './file-upload-job';
 import { Injectable, Logger, Optional, Inject } from '@nestjs/common';
 import { Process, Processor } from '@nestjs/bull';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -250,7 +251,7 @@ export class FileUploadProcessor {
       { updatedAt: new Date() },
     );
     await job.queue.add('upload', { ...job.data, admissionAttempt }, {
-      jobId: `file-upload:${file.id}:${job.data.uploadVersion}:admission:${admissionAttempt}`,
+      jobId: fileUploadAdmissionJobId(file.id, job.data.uploadVersion, admissionAttempt),
       delay: Math.min(60_000, Math.max(1000, retryAfterMs)),
       attempts: Math.max(1, (job.opts?.attempts ?? 3) - job.attemptsMade),
       backoff: { type: 'exponential', delay: 10000 },
