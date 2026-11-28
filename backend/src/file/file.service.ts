@@ -2810,6 +2810,32 @@ export class FileService implements OnModuleInit {
   }
 
   /**
+   * A-16：Range 入口共用的「取文件 + 版本 ETag + If-Range 判定」。
+   *
+   * 返回 null 表示 If-Range 不匹配，调用方应回退全量 200。
+   * **刻意不含授权与 processing 判定**：各入口的授权顺序与 processing 语义不同
+   * （公开媒体允许「processing 但已有热缓存」），把它们塞进公共 helper 会改变
+   * 416/403/400 的优先级与可服务集合。此处只收敛逐字重复的机械部分。
+   */
+  private async loadRangeTarget(
+    id: string,
+    ifRange?: string,
+  ): Promise<{ file: File; etag: string } | null> {
+    const file = await this.fileRepository.findOne({ where: { id, isDeleted: false } });
+    if (!file) throw new NotFoundException('文件不存在');
+    const etag = buildFileVersionETag(file);
+    if (ifRange && !matchesIfRange(ifRange, etag)) return null;
+    return { file, etag };
+  }
+
+  /** A-16：Range 解析共用出口——非法/越界统一 416，不静默回退 200 */
+  private parseRangeOr416(rangeHeader: string, total: number): { start: number; end: number } {
+    const parsed = parseByteRange(rangeHeader, total);
+    if (!parsed.ok) throw new RangeNotSatisfiableException(total);
+    return parsed.range;
+  }
+
+  /**
    * R4：恢复成功且路径确实变化时，用并发守卫条件更新 telegramFilePath。
    * - 仅在 info.file_path 非空且与当前值不同时触发数据库写入（普通读取不写库）；
    * - 条件更新 WHERE id=? AND status='ready' AND uploadVersion=?，防止覆盖并发上传结果；
@@ -3102,13 +3128,10 @@ export class FileService implements OnModuleInit {
     accessLogId?: string;
     etag?: string;
   } | null> {
-    const file = await this.fileRepository.findOne({
-      where: { id, isDeleted: false },
-    });
-    if (!file) throw new NotFoundException('文件不存在');
+    const target = await this.loadRangeTarget(id, opts?.ifRange);
+    if (!target) return null;
+    const { file } = target;
 
-    const etag = buildFileVersionETag(file);
-    if (opts?.ifRange && !matchesIfRange(opts.ifRange, etag)) return null;
     await this.assertFileReadable(file, user);
 
     this.assertFileUsable(file);
@@ -3120,12 +3143,7 @@ export class FileService implements OnModuleInit {
     const total = Number(file.size);
     // 严格单 Range 解析：closed/open-ended/suffix；非法/越界统一 416，
     // 不再静默回退 200，避免垃圾 Range 与错误 Content-Length 组合的解析问题。
-    const parsed = parseByteRange(rangeHeader, total);
-    if (!parsed.ok) {
-      throw new RangeNotSatisfiableException(total);
-    }
-    const start = parsed.range.start;
-    const actualEnd = parsed.range.end;
+    const { start, end: actualEnd } = this.parseRangeOr416(rangeHeader, total);
 
     // 缓存命中走本地文件；冷资源/无缓存走 spool/build，均保持 Range。
     const chunkSize = actualEnd - start + 1;
@@ -4270,15 +4288,12 @@ export class FileService implements OnModuleInit {
     accessLogId?: string;
     etag: string;
   } | null> {
-    const file = await this.fileRepository.findOne({ where: { id, isDeleted: false } });
-    if (!file) throw new NotFoundException('文件不存在');
-    const etag = buildFileVersionETag(file);
-    if (ifRange && !matchesIfRange(ifRange, etag)) return null;
+    const target = await this.loadRangeTarget(id, ifRange);
+    if (!target) return null;
+    const { file, etag } = target;
     this.assertFileUsable(file);
     const total = Number(file.size);
-    const parsed = parseByteRange(rangeHeader, total);
-    if (!parsed.ok) throw new RangeNotSatisfiableException(total);
-    const { start, end } = parsed.range;
+    const { start, end } = this.parseRangeOr416(rangeHeader, total);
     const stream = await this.getRangeDownloadStream(file, start, end, true);
     if (!stream) throw new BadRequestException('文件暂不可提供范围下载');
     let accessLogId: string | undefined;
