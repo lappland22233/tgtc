@@ -1169,92 +1169,6 @@ export class FileCacheService implements OnApplicationShutdown {
   }
 
   /**
-   * 异步获取缓存流（Promise 版本）
-   * @deprecated Use getCachedReadStream for sync access
-   */
-  async getCachedStream(
-    fileId: string,
-    expectedSize: number,
-    fetchFn: () => Promise<{ stream: Readable; info: { file_id: string; file_path: string; file_size: number } }>,
-  ): Promise<{ stream: Readable; fromCache: boolean }> {
-    this.validateFileId(fileId);
-    const cachePath = this.getCachePath(fileId);
-
-    // 缓存命中校验
-    try {
-      const stat = await fsp.stat(cachePath);
-      if (stat.size === expectedSize && stat.size > 0) {
-        this.logger.debug(`缓存命中: ${fileId} (${stat.size} bytes)`);
-        return { stream: createReadStream(cachePath), fromCache: true };
-      }
-      // 大小不一致 = 缓存失效
-      this.logger.debug(`缓存失效: ${fileId} (期望 ${expectedSize}, 实际 ${stat.size})`);
-    } catch {
-      // 缓存不存在，正常回源
-    }
-
-    // 回源获取
-    const { stream, info } = await fetchFn();
-    this.logger.debug(`缓存回源: ${fileId} (${info.file_size} bytes)`);
-
-    return { stream, fromCache: false };
-  }
-
-  /**
-   * 缓存文件到本地
-   * @param fileId 文件 UUID
-   * @param buffer 文件内容
-   */
-  async cacheFile(fileId: string, buffer: Buffer): Promise<void> {
-    this.validateFileId(fileId);
-    if (this.noCacheMode) return;
-
-    // 缓存总大小检查：超限时尝试 LRU 淘汰
-    const totalSize = await this.getTotalCacheSize();
-    if (totalSize + buffer.length > this.maxCacheSizeBytes) {
-      const needFree = totalSize + buffer.length - this.maxCacheSizeBytes;
-      this.logger.warn(`缓存总量超限，尝试 LRU 淘汰 (需释放 ${(needFree / 1024 / 1024).toFixed(0)}MB)`);
-      await this.evictLRU(needFree);
-      // 淘汰后再次检查
-      const newTotal = await this.getTotalCacheSize();
-      if (newTotal + buffer.length > this.maxCacheSizeBytes) {
-        this.logger.warn(`LRU 淘汰后仍超限，跳过缓存 ${fileId}`);
-        return;
-      }
-    }
-
-    // 磁盘空间检查：不足时尝试 LRU 淘汰
-    if (!this.diskManager.hasEnoughDiskSpace(this.minFreeDiskBytes)) {
-      this.logger.warn(`磁盘空间不足，尝试 LRU 淘汰`);
-      await this.evictLRU(this.minFreeDiskBytes);
-      if (!this.diskManager.hasEnoughDiskSpace(this.minFreeDiskBytes)) {
-        this.logger.warn(`磁盘剩余空间仍不足，跳过缓存 ${fileId}`);
-        return;
-      }
-    }
-
-    const reservation = await this.tryReserveForWarmup(fileId, buffer.length);
-    if (!reservation) return;
-
-    const cachePath = this.getCachePath(fileId);
-
-    // 原子写入：临时文件 + rename
-    const tmpPath = cachePath + '.tmp';
-    try {
-      await fsp.writeFile(tmpPath, buffer);
-      await fsp.rename(tmpPath, cachePath);
-      this.diskManager.registerCache(fileId, buffer.length);
-      reservation.consume(buffer.length);
-    } catch (err) {
-      // 清理临时文件
-      await fsp.unlink(tmpPath).catch(() => {});
-      throw err;
-    } finally {
-      reservation.release();
-    }
-  }
-
-  /**
    * 预热/非关键路径的预约尝试：取不到预约（空间不足/队列满/服务关闭）直接跳过缓存写入，
    * 绝不与正在进行的下载任务争抢磁盘预算。
    */
@@ -1377,28 +1291,6 @@ export class FileCacheService implements OnApplicationShutdown {
       this.fileAccessMap.delete(fileId);
       this.logger.debug(`缓存失效: ${fileId}${hasActiveSession ? '（存在活动会话，跳过 unlink）' : ''}`);
     });
-  }
-
-  /**
-   * 批量使缓存失效
-   */
-  async invalidateMany(fileIds: string[]): Promise<void> {
-    for (const id of fileIds) {
-      await this.invalidate(id);
-    }
-  }
-
-  /**
-   * 获取缓存文件大小（用于统计），不存在返回 0
-   */
-  async getCacheSize(fileId: string): Promise<number> {
-    this.validateFileId(fileId);
-    try {
-      const stat = await fsp.stat(this.getCachePath(fileId));
-      return stat.size;
-    } catch {
-      return 0;
-    }
   }
 
   /** UUID 格式 + 路径穿越双重校验（委托磁盘管理器） */
