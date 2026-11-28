@@ -124,7 +124,7 @@ const emit = defineEmits<{
 <style scoped>
 .fl-addressbar {
   min-width: 0;
-  margin-bottom: 18px;
+  margin-bottom: 14px;
 }
 
 :deep(:is(.fl-path-row, .fl-path, .fl-addressbar-actions)) {
@@ -134,7 +134,12 @@ const emit = defineEmits<{
   min-width: 0;
 }
 
+.fl-path-row {
+  flex-wrap: wrap;
+}
+
 .fl-path {
+  flex-basis: 100%;
   flex-wrap: wrap;
   color: var(--workspace-muted);
   font-size: 12px;
@@ -152,8 +157,8 @@ const emit = defineEmits<{
 }
 
 .fl-path-item {
-  max-width: min(220px, 100%);
-  min-height: 28px;
+  max-width: min(150px, 100%);
+  min-height: 44px;
   padding: 4px 6px;
   border-radius: 6px;
   overflow: hidden;
@@ -197,7 +202,7 @@ const emit = defineEmits<{
 }
 
 .fl-folder-title {
-  flex: 1 1 12rem;
+  flex: 1 1 8rem;
   min-width: 0;
 }
 
@@ -222,13 +227,13 @@ const emit = defineEmits<{
 }
 
 .fl-addressbar-actions > button {
-  min-height: 36px;
+  min-height: 44px;
   border-radius: 8px;
   font-weight: 560;
 }
 
 .fl-addressbar-actions .fl-new-folder {
-  width: 36px;
+  width: 44px;
   padding: 0;
   border-color: var(--workspace-border);
   background: var(--workspace-surface);
@@ -250,7 +255,7 @@ const emit = defineEmits<{
 }
 
 .fl-path-row > :where(.fl-directory-toggle, .fl-mobile-back) {
-  min-height: 36px;
+  min-height: 44px;
   padding: 4px 8px;
   border-radius: 8px;
   flex: none;
@@ -268,35 +273,44 @@ const emit = defineEmits<{
   color: var(--workspace-accent);
 }
 
-@media (max-width: 768px) {
+@media (min-width: 769px) {
   .fl-addressbar {
-    margin-bottom: 14px;
+    margin-bottom: 18px;
   }
 
   .fl-path-row {
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
   }
 
   .fl-path {
-    flex-basis: 100%;
+    flex-basis: auto;
   }
 
   .fl-folder-title {
-    flex-basis: 8rem;
+    flex-basis: 12rem;
   }
 
   .fl-path-item {
-    max-width: min(150px, 100%);
-    min-height: 44px;
+    max-width: min(220px, 100%);
+    min-height: 28px;
   }
 
   .fl-path-row > button,
-  .fl-addressbar-actions > button {
-    min-height: 44px;
+  .fl-addressbar-actions > button,
+  .fl-path-row > :where(.fl-directory-toggle, .fl-mobile-back) {
+    min-height: 36px;
   }
 
   .fl-addressbar-actions .fl-new-folder {
-    width: 44px;
+    width: 36px;
+  }
+}
+
+@media (pointer: coarse) {
+  .fl-path-item,
+  .fl-path-row > button,
+  .fl-addressbar-actions > button {
+    min-height: 44px;
   }
 }
 </style>

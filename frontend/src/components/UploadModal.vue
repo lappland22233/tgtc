@@ -7,52 +7,54 @@
     @close="handleClose"
     destroy-on-close
   >
-    <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
-      <span style="font-size: 14px; color: var(--text-secondary);">同时上传文件数：</span>
-      <t-select
-        :value="uploadStore.fileConcurrency"
-        :options="concurrencyOptions"
-        :disabled="uploadStore.strictSerialUpload"
-        style="width: 80px;"
-        size="small"
-        @change="handleConcurrencyChange"
-      />
-      <span v-if="uploadStore.strictSerialUpload" style="font-size: 12px; color: var(--text-secondary);">严格小盘模式：单文件串行上传</span>
+    <div class="flex items-center justify-between mb-3">
+      <span class="text-sm text-ink-muted">同时上传文件数：</span>
+      <div class="w-20">
+        <t-select
+          :value="uploadStore.fileConcurrency"
+          :options="concurrencyOptions"
+          :disabled="uploadStore.strictSerialUpload"
+          size="small"
+          @change="handleConcurrencyChange"
+        />
+      </div>
+      <span v-if="uploadStore.strictSerialUpload" class="text-xs text-ink-muted">严格小盘模式：单文件串行上传</span>
     </div>
 
     <!-- 标签选择 -->
-    <div style="margin-bottom: 12px;">
-      <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 4px;">
-        <span style="font-size: 12px; color: var(--text-secondary);">上传时添加标签：</span>
+    <div class="mb-3">
+      <div class="flex items-center gap-2 mb-1">
+        <span class="text-xs text-ink-muted">上传时添加标签：</span>
         <t-button size="small" variant="text" @click="showTagSelector = !showTagSelector">
           {{ selectedTagIds.length > 0 ? `已选 ${selectedTagIds.length} 个标签` : (tagStore.tags?.length ? '选择标签' : '新建标签') }}
         </t-button>
       </div>
-      <div v-if="showTagSelector" style="padding: 8px; background: var(--bg-secondary); border-radius: 6px; border: 1px solid var(--border-color);">
+      <div v-if="showTagSelector" class="p-2 bg-elevated rounded-md border border-line">
         <!-- 已有标签选择 -->
-        <div v-if="tagStore.tags && tagStore.tags.length > 0" style="display: flex; gap: 6px; flex-wrap: wrap;">
+        <div v-if="tagStore.tags && tagStore.tags.length > 0" class="flex gap-1.5 flex-wrap">
           <t-tag
             v-for="tag in tagStore.tags"
             :key="tag.id"
             :theme="selectedTagIds.includes(tag.id) ? 'primary' : 'default'"
             :variant="selectedTagIds.includes(tag.id) ? 'dark' : 'outline'"
-            style="cursor: pointer;"
+            class="cursor-pointer"
             @click="toggleTag(tag.id)"
           >
-            <span :style="{ display: 'inline-block', width: '8px', height: '8px', borderRadius: '50%', background: tag.color, marginRight: '4px' }" />
+            <span class="inline-block w-2 h-2 rounded-full mr-1" :style="{ background: tag.color }" />
             {{ tag.name }}
           </t-tag>
         </div>
         <!-- 在已有标签下方/独立区域：新建标签 -->
-        <div style="display: flex; gap: 6px; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border-color);">
-          <t-input
-            v-model="newTagName"
-            placeholder="新建标签名称"
-            size="small"
-            style="flex: 1; min-width: 0;"
-            autocomplete="off"
-            name="upload-tag-name"
-          />
+        <div class="flex gap-1.5 mt-2 pt-2 border-t border-line">
+          <div class="flex-1 min-w-0">
+            <t-input
+              v-model="newTagName"
+              placeholder="新建标签名称"
+              size="small"
+              autocomplete="off"
+              name="upload-tag-name"
+            />
+          </div>
           <t-button size="small" theme="primary" :disabled="!newTagName.trim()" @click="handleCreateTag">
             新建
           </t-button>
@@ -73,7 +75,7 @@
         multiple
         :accept="acceptTypes"
         @change="handleFileSelect"
-        style="display: none;"
+        class="hidden"
       />
       <!-- 隐藏文件夹选择器（webkitdirectory 为非标准属性，主流桌面浏览器均支持） -->
       <input
@@ -82,19 +84,19 @@
         multiple
         webkitdirectory
         @change="handleFolderSelect"
-        style="display: none;"
+        class="hidden"
       />
-      <div style="margin-bottom: 16px;">
+      <div class="mb-4 inline-flex justify-center text-brand">
         <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <path d="M12 16V4M8 8l4-4 4 4" />
           <path d="M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2" />
         </svg>
       </div>
       <h3>拖拽文件或文件夹到此处，或点击选择</h3>
-      <p style="color: var(--text-secondary); margin-top: 8px;">
+      <p class="text-ink-muted mt-2">
         单文件最大 {{ maxFileSizeMB }}MB，支持图片、PDF、ZIP 等格式；上传进行中可继续追加文件或文件夹
       </p>
-      <div style="display: flex; gap: 8px; justify-content: center; margin-top: 12px;">
+      <div class="flex gap-2 justify-center mt-3">
         <t-button size="small" variant="outline" theme="primary" @click.stop="triggerInput">
           选择文件
         </t-button>
@@ -102,28 +104,28 @@
           选择文件夹
         </t-button>
       </div>
-      <div v-if="preparingMsg" style="margin-top: 8px; font-size: 12px; color: var(--text-secondary);">
+      <div v-if="preparingMsg" class="mt-2 text-xs text-ink-muted">
         {{ preparingMsg }}
       </div>
-      <div v-else-if="pendingConfigFiles" style="margin-top: 12px; padding: 10px 12px; background: var(--bg-secondary); border: 1px solid var(--color-warning); border-radius: 8px; display: flex; align-items: center; justify-content: space-between; gap: 12px;">
-        <span style="font-size: 12px; color: var(--color-warning);">上传规则暂时无法读取，文件已保留</span>
+      <div v-else-if="pendingConfigFiles" class="mt-3 px-3 py-2.5 bg-elevated border border-warn rounded-md flex items-center justify-between gap-3">
+        <span class="text-xs text-warn">上传规则暂时无法读取，文件已保留</span>
         <t-button size="small" variant="outline" :loading="configPreparing" @click.stop="retryPendingConfigFiles">重试</t-button>
       </div>
       <!-- G11-20：目录预创建失败时保留批次，提供重试入口 -->
       <div
         v-else-if="pendingParsedError"
-        style="margin-top: 12px; padding: 10px 12px; background: var(--bg-secondary); border: 1px solid var(--color-error); border-radius: 8px; display: flex; align-items: center; justify-content: space-between; gap: 12px;"
+        class="mt-3 px-3 py-2.5 bg-elevated border border-err rounded-md flex items-center justify-between gap-3"
       >
-        <span style="font-size: 12px; color: var(--color-error);">目录准备失败：{{ pendingParsedError }}</span>
+        <span class="text-xs text-err">目录准备失败：{{ pendingParsedError }}</span>
         <!-- R10：阻止冒泡，避免重试点击穿透到上传区触发系统文件选择器 -->
         <t-button size="small" variant="outline" :disabled="preparing" @click.stop="retryParsedBatch">重试</t-button>
       </div>
     </div>
 
     <!-- 上传队列（读取全局 upload store，关闭弹窗后上传继续在后台进行） -->
-    <div v-if="uploadStore.entries.length > 0" style="margin-top: 16px;">
-      <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
-        <div style="font-size: 12px; color: var(--text-secondary);">
+    <div v-if="uploadStore.entries.length > 0" class="mt-4">
+      <div class="flex items-center justify-between mb-2">
+        <div class="text-xs text-ink-muted">
           总进度 {{ uploadStore.overallProgress }}%
           <template v-if="hasActiveUploads"> · {{ uploadStore.overallSpeed }}</template>
           <template v-if="uploadStore.activeCount > 0"> · 进行中 {{ uploadStore.activeCount }}</template>
@@ -133,7 +135,9 @@
           清除已完成
         </t-button>
       </div>
-      <t-progress :percentage="uploadStore.overallProgress" size="small" style="margin-bottom: 12px;" />
+      <div class="mb-3">
+        <t-progress :percentage="uploadStore.overallProgress" size="small" />
+      </div>
 
       <UploadQueueList
         v-if="isPageVisible"
@@ -147,7 +151,7 @@
     </div>
 
     <!-- 全部终态后的汇总提示（等价于原 batchResult 展示） -->
-    <div v-if="allFinished" style="margin-top: 16px;">
+    <div v-if="allFinished" class="mt-4">
       <t-tag v-if="failedEntries.length === 0" theme="success">
         全部 {{ successCount }} 个文件已接收，正在后台处理中...
       </t-tag>
@@ -155,21 +159,21 @@
         {{ successCount }} 个成功，{{ failedEntries.length }} 个失败<template v-if="cancelledCount > 0">，{{ cancelledCount }} 个已取消</template>
       </t-tag>
 
-      <div v-if="failedEntries.length > 0" style="margin-top: 12px;">
+      <div v-if="failedEntries.length > 0" class="mt-3">
         <div v-for="item in failedEntries" :key="'fail-' + item.uid"
-          style="padding: 8px 12px; background: var(--bg-secondary); border-radius: 8px; margin-bottom: 8px; border: 1px solid var(--border-color);">
-          <span style="color: var(--error); display: inline-flex;">
+          class="px-3 py-2 bg-elevated rounded-md mb-2 border border-line flex items-center gap-2">
+          <span class="text-err inline-flex">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <circle cx="12" cy="12" r="10" />
               <path d="M15 9l-6 6M9 9l6 6" />
             </svg>
           </span>
-          <span style="margin-left: 8px; font-weight: 500;">{{ item.fileName }}</span>
-          <span style="margin-left: 8px; color: var(--text-secondary);">{{ item.errorReason }}</span>
+          <span class="font-medium">{{ item.fileName }}</span>
+          <span class="text-ink-muted">{{ item.errorReason }}</span>
         </div>
       </div>
 
-      <div style="margin-top: 16px; display: flex; gap: 8px; justify-content: flex-end;">
+      <div class="mt-4 flex gap-2 justify-end">
         <t-button variant="outline" @click="uploadStore.clearFinished()">
           清除已完成
         </t-button>
@@ -663,19 +667,28 @@ watch(() => props.visible, async (isVisible) => {
 <style scoped>
 .background-upload-hint {
   padding: 16px;
-  border: 1px dashed var(--border-color);
-  border-radius: 8px;
+  border: 1px dashed var(--border-default);
+  border-radius: var(--radius-md);
   color: var(--text-secondary);
   font-size: 12px;
   text-align: center;
 }
 
-@media (max-width: 768px) {
+:deep(.t-dialog) {
+  margin: 16px;
+}
+
+:deep(.t-dialog__body) {
+  padding: 12px;
+}
+
+@media (min-width: 769px) {
   :deep(.t-dialog) {
-    margin: 16px;
+    margin: auto;
   }
+
   :deep(.t-dialog__body) {
-    padding: 12px;
+    padding: 24px;
   }
 }
 </style>

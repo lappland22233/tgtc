@@ -102,6 +102,6 @@ function handleClose() {
 .parent-hint {
   margin-top: 8px;
   font-size: 13px;
-  color: var(--td-text-color-secondary);
+  color: var(--text-secondary);
 }
 </style>

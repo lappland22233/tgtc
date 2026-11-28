@@ -79,9 +79,11 @@
       <div class="secret-meta">
         名称：{{ createdKey?.name }} · 前缀：{{ createdKey?.prefix }}
       </div>
-      <t-button block variant="outline" style="margin-top: 16px" @click="closeSecretDialog">
-        我已保存，关闭
-      </t-button>
+      <div class="mt-4">
+        <t-button block variant="outline" @click="closeSecretDialog">
+          我已保存，关闭
+        </t-button>
+      </div>
     </t-dialog>
 
     <!-- 重显密钥（仅所有者；新密钥可用） -->
@@ -97,7 +99,9 @@
         <t-button theme="primary" @click="copyRevealed">复制</t-button>
       </div>
       <div class="secret-meta">请勿将密钥写入日志或公开仓库。</div>
-      <t-button block variant="outline" style="margin-top: 16px" @click="closeRevealDialog">关闭</t-button>
+      <div class="mt-4">
+        <t-button block variant="outline" @click="closeRevealDialog">关闭</t-button>
+      </div>
     </t-dialog>
 
     <!-- 每把密钥独立 IP 白名单 -->

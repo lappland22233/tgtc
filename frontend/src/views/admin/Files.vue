@@ -6,14 +6,18 @@
     </div>
 
     <div class="card">
-      <div style="display: flex; justify-content: space-between; margin-bottom: 16px; flex-wrap: wrap; gap: 12px;">
+      <div class="admin-toolbar">
         <div class="file-admin-filters">
-          <t-input v-model="searchFile" placeholder="搜索文件名..." style="width: min(100%, 250px);" @enter="loadInitialFiles" autocomplete="off" name="admin-search-file" />
-          <t-select v-model="filterUploader" placeholder="筛选上传者" clearable style="width: min(100%, 200px);" @change="loadInitialFiles">
-            <t-option v-for="u in uploaders" :key="u.id" :value="u.id" :label="u.email" />
-          </t-select>
+          <div class="filter-search">
+            <t-input v-model="searchFile" placeholder="搜索文件名..." @enter="loadInitialFiles" autocomplete="off" name="admin-search-file" />
+          </div>
+          <div class="filter-uploader">
+            <t-select v-model="filterUploader" placeholder="筛选上传者" clearable @change="loadInitialFiles">
+              <t-option v-for="u in uploaders" :key="u.id" :value="u.id" :label="u.email" />
+            </t-select>
+          </div>
         </div>
-        <div style="display: flex; gap: 12px; flex-wrap: wrap;">
+        <div class="admin-toolbar-actions">
           <t-button v-if="!isMobile" theme="primary" variant="outline" @click="batchDelete">批量删除（冷静期）</t-button>
           <!-- 移动端批量操作（G14-18）：进入多选模式后卡片显示勾选框，可批量删除 -->
           <t-button v-if="isMobile" theme="primary" variant="outline" @click="toggleMobileSelect">
@@ -48,14 +52,14 @@
         @page-change="onPageChange"
       >
         <template #uploader="{ row }">
-          <span style="font-size: 13px;">{{ row.uploader?.email || '未知' }}</span>
+          <span class="uploader-email">{{ row.uploader?.email || '未知' }}</span>
         </template>
         <template #filename="{ row }">
-          <div style="display: flex; align-items: center; gap: 12px;">
+          <div class="filename-cell">
             <ThumbnailImg :file-id="row.id" :mime-type="row.mimeType" :size="36" :file-name="row.originalName" />
             <div>
               <div :class="{ 'deleted-name': row.isDeleted }">{{ row.originalName }}</div>
-              <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
+              <div class="filename-tags">
                 <t-tag v-if="row.isDeleted && row.deletedByAdmin" theme="danger" size="small">管理员已删除</t-tag>
                 <t-tag v-else-if="row.isDeleted" theme="warning" size="small">用户删除中</t-tag>
               </div>
@@ -67,12 +71,12 @@
           <t-tag v-if="!row.isDeleted" :theme="row.accessType === 'public' ? 'success' : 'warning'" size="small">
             {{ row.accessType === 'public' ? '公开' : '私有' }}
           </t-tag>
-          <span v-else style="color: var(--text-disabled); font-size: 12px;">不可访问</span>
+          <span v-else class="inaccessible-label">不可访问</span>
         </template>
         <template #createdAt="{ row }">
           <div>
             <div>{{ formatDate(row.createdAt) }}</div>
-            <div v-if="row.isDeleted && row.deleteRequestedAt" style="font-size: 11px; color: var(--color-warning); margin-top: 2px;">
+            <div v-if="row.isDeleted && row.deleteRequestedAt" class="deleted-at-hint">
               删除于 {{ formatDate(row.deleteRequestedAt) }}
             </div>
           </div>
@@ -106,23 +110,23 @@
           :class="{ 'mobile-card-selected': mobileSelectMode && isSelected(file.id) }"
           @click="mobileSelectMode && toggleRowSelect(file.id)"
         >
-          <div style="display: flex; align-items: flex-start; gap: 12px;">
+          <div class="mobile-card-main">
             <t-checkbox
               v-if="mobileSelectMode"
               :checked="isSelected(file.id)"
-              style="margin-top: 10px;"
+              class="mobile-select-checkbox"
               @click.stop
               @change="() => toggleRowSelect(file.id)"
             />
             <ThumbnailImg :file-id="file.id" :mime-type="file.mimeType" :size="40" :file-name="file.originalName" />
-            <div style="flex: 1; min-width: 0;">
-              <div :class="{ 'deleted-name': file.isDeleted }" style="font-weight: 500; word-break: break-all; font-size: 14px;">
+            <div class="mobile-file-info">
+              <div class="mobile-file-title" :class="{ 'deleted-name': file.isDeleted }">
                 {{ file.originalName }}
               </div>
-              <div style="font-size: 12px; color: var(--text-secondary); margin-top: 2px;">
+              <div class="mobile-file-meta">
                 {{ formatSize(file.size) }} · 上传者: {{ file.uploader?.email || '未知' }}
               </div>
-              <div style="display: flex; gap: 4px; margin-top: 4px; flex-wrap: wrap;">
+              <div class="mobile-file-tags">
                 <t-tag v-if="file.isDeleted && file.deletedByAdmin" theme="danger" size="small">管理员已删除</t-tag>
                 <t-tag v-else-if="file.isDeleted" theme="warning" size="small">用户删除中</t-tag>
                 <t-tag v-else-if="file.accessType === 'public'" theme="success" size="small">公开</t-tag>
@@ -130,7 +134,7 @@
               </div>
             </div>
           </div>
-          <div style="display: flex; gap: 4px; margin-top: 8px; flex-wrap: wrap; border-top: 1px solid var(--workspace-border); padding-top: 8px;">
+          <div class="mobile-file-actions">
             <template v-if="file.isDeleted">
               <t-button size="small" theme="success" variant="outline" @click="restoreFile(file.id)">恢复</t-button>
               <t-button size="small" theme="danger" variant="outline" @click="forceDeleteFile(file)">强制删除</t-button>
@@ -140,7 +144,7 @@
             </template>
           </div>
         </div>
-        <div v-if="files.length > 0" style="margin-top: 12px; display: flex; justify-content: center;">
+        <div v-if="files.length > 0" class="mobile-pagination">
           <t-pagination
             :current="pagination.current"
             :total="pagination.total"
@@ -162,12 +166,19 @@
       cancel-btn="关闭"
       @close="verifyDialogVisible = false"
     >
-      <div style="display: flex; flex-direction: column; gap: 12px; color: var(--text-secondary); font-size: 14px;">
+      <div class="dialog-body-stack">
         <div>体检将校验 ready 文件的 Telegram file_id 是否仍然有效（默认仅检查路径为空的历史文件）。</div>
-        <div style="color: var(--color-warning); font-weight: 500;">⚠ apply 模式会修改数据：确认失效的文件标记为"上传失败"，有效的文件回填路径。</div>
-        <div style="display: flex; gap: 8px; margin-top: 8px;">
-          <t-button theme="primary" variant="outline" style="flex: 1;" :loading="verifyRunning" @click="runVerify('dry-run')">仅预览统计（dry-run）</t-button>
-          <t-button theme="danger" variant="outline" style="flex: 1;" :loading="verifyRunning" @click="runVerify('apply')">执行修复（apply）</t-button>
+        <div class="dialog-warn-text">
+          <svg class="dialog-warn-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z" />
+            <line x1="12" y1="9" x2="12" y2="13" />
+            <line x1="12" y1="17" x2="12.01" y2="17" />
+          </svg>
+          <span>apply 模式会修改数据：确认失效的文件标记为"上传失败"，有效的文件回填路径。</span>
+        </div>
+        <div class="dialog-action-row">
+          <t-button theme="primary" variant="outline" :loading="verifyRunning" @click="runVerify('dry-run')">仅预览统计（dry-run）</t-button>
+          <t-button theme="danger" variant="outline" :loading="verifyRunning" @click="runVerify('apply')">执行修复（apply）</t-button>
         </div>
       </div>
     </t-dialog>
@@ -182,7 +193,7 @@
       @confirm="closeVerifyResult"
       @close="verifyResultVisible = false"
     >
-      <div style="display: flex; flex-direction: column; gap: 8px; font-size: 14px;">
+      <div class="dialog-result-list">
         <div v-for="line in verifyResultLines" :key="line">{{ line }}</div>
       </div>
     </t-dialog>
@@ -198,16 +209,16 @@
       :close-on-overlay-click="false"
       :close-btn="false"
     >
-      <div style="display: flex; flex-direction: column; gap: 16px; font-size: 14px;">
-        <div style="display: flex; justify-content: space-between; align-items: center;">
-          <span style="font-weight: 500;">状态：{{ verifyStatusText }}</span>
-          <span style="color: var(--text-secondary);">{{ verifyProgress }}%</span>
+      <div class="progress-body-stack">
+        <div class="progress-header">
+          <span class="progress-status">状态：{{ verifyStatusText }}</span>
+          <span class="progress-muted">{{ verifyProgress }}%</span>
         </div>
         <t-progress :percentage="verifyProgress" :label="false" />
-        <div style="color: var(--text-secondary);">
+        <div class="progress-muted">
           已处理：{{ verifyProcessedText }}
         </div>
-        <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; color: var(--text-secondary);">
+        <div class="progress-stats-grid">
           <div>有效：{{ verifyTask?.valid ?? 0 }}</div>
           <div>永久失效：{{ verifyTask?.invalid ?? 0 }}</div>
           <div>缺少 file_id：{{ verifyTask?.emptyFileId ?? 0 }}</div>
@@ -230,12 +241,19 @@
       cancel-btn="关闭"
       @close="cleanupDialogVisible = false"
     >
-      <div style="display: flex; flex-direction: column; gap: 12px; color: var(--text-secondary); font-size: 14px;">
-        <div>将清空数据库中以 <code style="background: var(--workspace-canvas); padding: 1px 4px; border-radius: 4px;">/data/cb/tgtc-beta/</code> 开头的旧 telegramFilePath（仅清空路径，不下载、不删除文件、不影响 <code style="background: var(--workspace-canvas); padding: 1px 4px; border-radius: 4px;">/root/cb</code> 路径）。</div>
-        <div style="color: var(--color-warning); font-weight: 500;">⚠ apply 模式会清空匹配记录的路径字段，操作前请先预览统计。</div>
-        <div style="display: flex; gap: 8px; margin-top: 8px;">
-          <t-button theme="primary" variant="outline" style="flex: 1;" :loading="cleanupRunning" @click="runCleanup('dry-run')">仅预览统计（dry-run）</t-button>
-          <t-button theme="danger" variant="outline" style="flex: 1;" :loading="cleanupRunning" @click="runCleanup('apply')">清空路径（apply）</t-button>
+      <div class="dialog-body-stack">
+        <div>将清空数据库中以 <code class="inline-path-code">/data/cb/tgtc-beta/</code> 开头的旧 telegramFilePath（仅清空路径，不下载、不删除文件、不影响 <code class="inline-path-code">/root/cb</code> 路径）。</div>
+        <div class="dialog-warn-text">
+          <svg class="dialog-warn-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z" />
+            <line x1="12" y1="9" x2="12" y2="13" />
+            <line x1="12" y1="17" x2="12.01" y2="17" />
+          </svg>
+          <span>apply 模式会清空匹配记录的路径字段，操作前请先预览统计。</span>
+        </div>
+        <div class="dialog-action-row">
+          <t-button theme="primary" variant="outline" :loading="cleanupRunning" @click="runCleanup('dry-run')">仅预览统计（dry-run）</t-button>
+          <t-button theme="danger" variant="outline" :loading="cleanupRunning" @click="runCleanup('apply')">清空路径（apply）</t-button>
         </div>
       </div>
     </t-dialog>
@@ -250,7 +268,7 @@
       @confirm="closeCleanupResult"
       @close="cleanupResultVisible = false"
     >
-      <div style="display: flex; flex-direction: column; gap: 8px; font-size: 14px;">
+      <div class="dialog-result-list">
         <div v-for="line in cleanupResultLines" :key="line">{{ line }}</div>
       </div>
     </t-dialog>
@@ -787,12 +805,62 @@ function closeCleanupResult() {
 </script>
 
 <style scoped>
+.admin-toolbar {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.admin-toolbar-actions {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
 .file-admin-filters {
   display: flex;
   flex-wrap: wrap;
   gap: 12px;
   min-inline-size: 0;
   max-inline-size: 100%;
+}
+
+.filter-search {
+  width: min(100%, 250px);
+}
+
+.filter-uploader {
+  width: min(100%, 200px);
+}
+
+.uploader-email {
+  font-size: 13px;
+}
+
+.filename-cell {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.filename-tags {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.inaccessible-label {
+  color: var(--text-disabled);
+  font-size: 12px;
+}
+
+.deleted-at-hint {
+  font-size: 11px;
+  color: var(--color-warning);
+  margin-top: 2px;
 }
 
 .deleted-name {
@@ -805,19 +873,139 @@ function closeCleanupResult() {
   opacity: 0.85;
 }
 
-@media (max-width: 768px) {
-  .mobile-file-admin-card {
-    background: var(--workspace-canvas);
-    border: 1px solid var(--workspace-border);
-    border-radius: 8px;
-    padding: 12px;
-    margin-bottom: 10px;
-    overflow-wrap: anywhere;
-  }
-  /* 多选模式下选中态高亮（G14-18） */
-  .mobile-file-admin-card.mobile-card-selected {
-    border-color: var(--workspace-accent);
-    background: var(--workspace-selected);
-  }
+.mobile-file-admin-card {
+  background: var(--workspace-canvas);
+  border: 1px solid var(--workspace-border);
+  border-radius: var(--radius-md);
+  padding: 12px;
+  margin-bottom: 10px;
+  overflow-wrap: anywhere;
+}
+
+/* 多选模式下选中态高亮（G14-18） */
+.mobile-file-admin-card.mobile-card-selected {
+  border-color: var(--workspace-accent);
+  background: var(--workspace-selected);
+}
+
+.mobile-card-main {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.mobile-select-checkbox {
+  margin-top: 10px;
+}
+
+.mobile-file-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.mobile-file-title {
+  font-weight: 500;
+  word-break: break-all;
+  font-size: 14px;
+}
+
+.mobile-file-meta {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-top: 2px;
+}
+
+.mobile-file-tags {
+  display: flex;
+  gap: 4px;
+  margin-top: 4px;
+  flex-wrap: wrap;
+}
+
+.mobile-file-actions {
+  display: flex;
+  gap: 4px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+  border-top: 1px solid var(--workspace-border);
+  padding-top: 8px;
+}
+
+.mobile-pagination {
+  margin-top: 12px;
+  display: flex;
+  justify-content: center;
+}
+
+.dialog-body-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+.dialog-warn-text {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  color: var(--color-warning);
+  font-weight: 500;
+}
+
+.dialog-warn-icon {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.dialog-action-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.dialog-action-row :deep(.t-button) {
+  flex: 1;
+}
+
+.dialog-result-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 14px;
+}
+
+.progress-body-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  font-size: 14px;
+}
+
+.progress-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.progress-status {
+  font-weight: 500;
+}
+
+.progress-muted {
+  color: var(--text-secondary);
+}
+
+.progress-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 6px;
+  color: var(--text-secondary);
+}
+
+.inline-path-code {
+  background: var(--workspace-canvas);
+  padding: 1px 4px;
+  border-radius: var(--radius-sm);
 }
 </style>

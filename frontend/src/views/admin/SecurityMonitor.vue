@@ -38,8 +38,8 @@
       </div>
 
       <div class="card">
-        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px">
-          <h3 class="card-title" style="margin: 0">近期封禁记录</h3>
+        <div class="card-header-bar">
+          <h3 class="card-title mb-0">近期封禁记录</h3>
           <t-button theme="danger" size="small" @click="openBanDialog()">
             手动封禁 IP
           </t-button>
@@ -95,8 +95,8 @@
       </div>
 
       <!-- 封禁历史 -->
-      <div class="card" style="margin-top: 16px">
-        <h3 class="card-title" style="margin: 0 0 16px">封禁历史（已解封/已过期）</h3>
+      <div class="card card-mt">
+        <h3 class="card-title card-title-mb">封禁历史（已解封/已过期）</h3>
         <t-loading :loading="bansLoading" size="small">
           <div v-if="!isMobile && banHistory.length > 0">
             <t-table
@@ -143,16 +143,17 @@
     <!-- Tab 3: 异常 IP 监控 -->
     <div v-if="activeTab === 'abnormal'" class="tab-content">
       <div class="toolbar">
-        <t-select
-          v-model="abnormalSort"
-          placeholder="排序方式"
-          style="width: 160px"
-          @change="fetchAbnormalIps"
-        >
-          <t-option value="requestCount" label="按请求数" />
-          <t-option value="errorRate" label="按错误率" />
-          <t-option value="bandwidth" label="按带宽" />
-        </t-select>
+        <div class="abnormal-sort-wrap">
+          <t-select
+            v-model="abnormalSort"
+            placeholder="排序方式"
+            @change="fetchAbnormalIps"
+          >
+            <t-option value="requestCount" label="按请求数" />
+            <t-option value="errorRate" label="按错误率" />
+            <t-option value="bandwidth" label="按带宽" />
+          </t-select>
+        </div>
       </div>
 
       <div class="card">
@@ -225,19 +226,19 @@
 
     <!-- Tab 5: 安全配置（仅超级管理员） -->
     <div v-if="activeTab === 'config'" class="tab-content">
-      <div class="card" style="margin-bottom: 16px">
-        <h3 class="card-title" style="margin: 0 0 4px">安全规则配置</h3>
-        <p style="margin: 0; color: var(--text-secondary); font-size: 13px">
+      <div class="card card-mb">
+        <h3 class="card-title card-title-tight">安全规则配置</h3>
+        <p class="card-subtitle">
           调整攻击检测阈值和自动封禁时长。修改后立即生效，无需重启服务。
         </p>
       </div>
 
       <t-loading :loading="configLoading" size="small">
-        <div v-for="category in configCategories" :key="category" style="margin-bottom: 24px">
-          <h4 style="margin: 0 0 12px; font-size: 15px; font-weight: 500; color: var(--text-primary)">
+        <div v-for="category in configCategories" :key="category" class="config-category">
+          <h4 class="config-category-title">
             {{ category }}
           </h4>
-          <div class="security-config-grid" :class="{ 'mobile-single-col': isMobile }">
+          <div class="security-config-grid">
             <div
               v-for="item in configItemsByCategory(category)"
               :key="item.key"
@@ -253,7 +254,7 @@
                 :max="item.max"
                 :step="item.step || 1"
                 :decimal-places="item.step && item.step < 1 ? 2 : 0"
-                style="width: 100%"
+                class="w-full"
                 size="small"
               />
               <div class="config-item-hint" :title="item.description">
@@ -266,7 +267,7 @@
         <div v-if="configLoadError" class="config-load-error" role="alert">
           {{ configLoadError }}
         </div>
-        <div v-if="configItems.length > 0" style="margin-top: 24px; display: flex; gap: 12px">
+        <div v-if="configItems.length > 0" class="config-actions">
           <t-button theme="primary" :loading="configSaving" :disabled="!configLoaded" @click="saveSecurityConfig">
             保存配置
           </t-button>
@@ -310,13 +311,14 @@
         </t-radio-group>
       </t-form-item>
       <t-form-item v-if="!banForm.isPermanent" label="封禁时长">
-        <t-input-number
-          v-model="banForm.durationHours"
-          :min="1"
-          :max="720"
-          style="width: 120px"
-        />
-        <span style="margin-left: 8px; color: var(--text-secondary); font-size: 13px">小时</span>
+        <div class="ban-duration-wrap">
+          <t-input-number
+            v-model="banForm.durationHours"
+            :min="1"
+            :max="720"
+          />
+        </div>
+        <span class="ban-duration-unit">小时</span>
       </t-form-item>
     </t-form>
   </t-dialog>
@@ -781,33 +783,69 @@ onMounted(() => {
   padding-top: 20px;
 }
 
-/* Metrics grid */
-.metrics-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: 16px;
-  margin-bottom: 20px;
-}
-
-.metric-card {
-  background: var(--color-bg-surface);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-md);
-  padding: 20px;
-}
-
-.metric-label {
-  font-size: 13px;
-  color: var(--text-secondary);
-  margin-bottom: 8px;
-}
-
-.metric-value {
+.security-page .metric-value {
   font-family: var(--font-mono);
-  font-size: 28px;
-  font-weight: 700;
-  color: var(--text-primary);
   font-variant-numeric: tabular-nums;
+}
+
+.card-header-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.card-mt {
+  margin-top: 16px;
+}
+
+.card-mb {
+  margin-bottom: 16px;
+}
+
+.card-title-mb {
+  margin: 0 0 16px;
+}
+
+.card-title-tight {
+  margin: 0 0 4px;
+}
+
+.card-subtitle {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.abnormal-sort-wrap {
+  width: 160px;
+}
+
+.config-category {
+  margin-bottom: 24px;
+}
+
+.config-category-title {
+  margin: 0 0 12px;
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.config-actions {
+  margin-top: 24px;
+  display: flex;
+  gap: 12px;
+}
+
+.ban-duration-wrap {
+  width: 120px;
+}
+
+.ban-duration-unit {
+  margin-left: 8px;
+  color: var(--text-secondary);
+  font-size: 13px;
 }
 
 /* Toolbar */
@@ -839,35 +877,10 @@ onMounted(() => {
   margin: 0;
 }
 
-/* Empty hint */
-.empty-hint {
-  text-align: center;
-  padding: 24px 0;
-  color: var(--text-secondary);
-  font-size: 13px;
-}
-
-@media (max-width: 768px) {
-  .metrics-grid {
-    grid-template-columns: repeat(2, 1fr);
-    gap: 10px;
-  }
-
-  .metric-value {
-    font-size: 22px;
-  }
-}
-
-@media (max-width: 480px) {
-  .metrics-grid {
-    grid-template-columns: 1fr;
-  }
-}
-
 /* Security config grid */
 .security-config-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  grid-template-columns: 1fr;
   gap: 16px;
 }
 
@@ -896,7 +909,7 @@ onMounted(() => {
   color: var(--text-secondary);
   background: var(--color-bg-elevated);
   padding: 2px 8px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
 }
 
 .config-load-error {
@@ -919,42 +932,9 @@ onMounted(() => {
   text-overflow: ellipsis;
 }
 
-@media (max-width: 768px) {
-  .mobile-card {
-    background: var(--workspace-canvas);
-    border: 1px solid var(--workspace-border);
-    border-radius: 8px;
-    padding: 12px;
-    margin-bottom: 10px;
-  }
-
-  .mobile-card-row {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 6px;
-  }
-
-  .mobile-card-body {
-    font-size: 13px;
-    color: var(--text-secondary);
-    margin-bottom: 8px;
-    line-height: 1.5;
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-  }
-
-  .mobile-card-meta {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    font-size: 12px;
-    color: var(--text-secondary);
-  }
-
-  .mobile-single-col {
-    grid-template-columns: 1fr !important;
+@media (min-width: 769px) {
+  .security-config-grid {
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
   }
 }
 </style>

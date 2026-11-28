@@ -4,9 +4,19 @@ html {
 }
 
 @media (prefers-color-scheme: dark) {
-  html { background-color: #1b211e; }
+  html:not([data-theme="light"]) {
+    background-color: #1b211e;
+  }
 }
 
-html[data-theme="light"] { background-color: #f6f5ef; }
-html[data-theme="dark"] { background-color: #1b211e; }
-body { margin: 0; }
+html[data-theme="light"] {
+  background-color: #f6f5ef;
+}
+
+html[data-theme="dark"] {
+  background-color: #1b211e;
+}
+
+body {
+  margin: 0;
+}

@@ -147,63 +147,11 @@ onMounted(() => {
   margin-bottom: 20px;
 }
 
-/* Metrics grid */
-.metrics-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: 16px;
-  margin-bottom: 20px;
-}
-
-.metric-card {
-  background: var(--color-bg-surface);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-md);
-  padding: 20px;
-}
-
-.metric-label {
-  font-size: 13px;
-  color: var(--text-secondary);
-  margin-bottom: 8px;
-}
-
-.metric-value {
-  font-size: 28px;
-  font-weight: 700;
-  color: var(--text-primary);
-}
-
-/* Card */
-.card {
-  background: var(--color-bg-surface);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-lg);
-  padding: 24px;
-}
-
-.card h3 {
-  font-size: 16px;
-  font-weight: 600;
-  font-family: var(--font-display);
-  margin: 0 0 16px;
-}
-
-/* Truncated cell */
 .truncated-cell {
   font-size: 12px;
   color: var(--text-secondary);
 }
 
-/* Empty hint */
-.empty-hint {
-  text-align: center;
-  padding: 24px 0;
-  color: var(--text-secondary);
-  font-size: 13px;
-}
-
-/* Error state */
 .error-state {
   text-align: center;
   padding: 32px 0;
@@ -214,54 +162,8 @@ onMounted(() => {
   align-items: center;
   gap: 12px;
 }
+
 .error-state p {
   margin: 0;
-}
-
-@media (max-width: 768px) {
-  .metrics-grid {
-    grid-template-columns: repeat(2, 1fr);
-    gap: 10px;
-  }
-
-  .metric-value {
-    font-size: 22px;
-  }
-
-  .mobile-card {
-    background: var(--color-bg-surface);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-md);
-    padding: 12px;
-    margin-bottom: 10px;
-  }
-
-  .mobile-card-row {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 6px;
-  }
-
-  .mobile-card-body {
-    font-size: 13px;
-    color: var(--text-secondary);
-    margin-bottom: 8px;
-    line-height: 1.5;
-  }
-
-  .mobile-card-meta {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    font-size: 12px;
-    color: var(--text-secondary);
-  }
-}
-
-@media (max-width: 480px) {
-  .metrics-grid {
-    grid-template-columns: 1fr;
-  }
 }
 </style>

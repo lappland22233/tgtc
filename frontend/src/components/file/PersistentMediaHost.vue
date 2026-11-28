@@ -32,16 +32,18 @@ watch(() => authStore.user, (user) => {
 </script>
 
 <style scoped>
-/* 非打断式提示：桌面右下、窄屏顶部居中，避开迷你播放器与上传浮层 */
+/* 非打断式提示：窄屏顶部全宽，桌面端右下角，避开迷你播放器与上传浮层 */
 .mp-toast {
   position: fixed;
-  right: var(--space-4);
-  bottom: calc(var(--space-4) + env(safe-area-inset-bottom, 0px));
+  right: var(--space-3);
+  left: var(--space-3);
+  top: max(var(--space-3), env(safe-area-inset-top, 0px));
+  bottom: auto;
   z-index: 2700;
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  max-width: min(360px, calc(100vw - var(--space-8)));
+  max-width: none;
   padding: var(--space-2) var(--space-4);
   background: var(--color-bg-surface);
   border: 1px solid var(--border-accent);
@@ -57,13 +59,13 @@ watch(() => authStore.user, (user) => {
   flex-shrink: 0;
 }
 
-@media (max-width: 720px) {
+@media (min-width: 769px) {
   .mp-toast {
-    right: var(--space-3);
-    left: var(--space-3);
-    bottom: auto;
-    top: max(var(--space-3), env(safe-area-inset-top, 0px));
-    max-width: none;
+    left: auto;
+    top: auto;
+    right: var(--space-4);
+    bottom: calc(var(--space-4) + env(safe-area-inset-bottom, 0px));
+    max-width: min(360px, calc(100vw - var(--space-8)));
   }
 }
 </style>

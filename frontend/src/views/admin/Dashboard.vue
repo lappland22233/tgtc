@@ -12,11 +12,11 @@
       </div>
       <div class="stat-card">
         <h3>活跃用户</h3>
-        <div class="value" style="color: var(--color-success);">{{ stats.activeUsers }}</div>
+        <div class="value text-ok">{{ stats.activeUsers }}</div>
       </div>
       <div class="stat-card">
         <h3>已封禁用户</h3>
-        <div class="value" style="color: var(--color-danger);">{{ stats.bannedUsers }}</div>
+        <div class="value text-err">{{ stats.bannedUsers }}</div>
       </div>
       <div class="stat-card">
         <h3>总文件数</h3>
@@ -28,7 +28,7 @@
       </div>
       <div class="stat-card">
         <h3>全站总访问</h3>
-        <div class="value" style="color: var(--workspace-accent);">{{ stats.totalAccessCount }}</div>
+        <div class="value text-brand">{{ stats.totalAccessCount }}</div>
       </div>
     </div>
 
@@ -48,7 +48,7 @@
           </div>
           <div class="stat-card">
             <h3>我的访问次数</h3>
-            <div class="value" style="color: var(--workspace-accent);">{{ myFiles.totalAccessCount }}</div>
+            <div class="value text-brand">{{ myFiles.totalAccessCount }}</div>
           </div>
         </div>
       </div>
@@ -149,36 +149,49 @@ onUnmounted(() => {
 <style scoped>
 .dashboard-split-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: 1fr;
   gap: 20px;
 }
 
-/* 嵌套统计网格：桌面 3 列，移动端塌缩为 1 列（替代原 inline style，解决小屏挤压） */
+/* 嵌套统计网格：移动端 1 列，桌面端 3 列（替代原 inline style，解决小屏挤压） */
 .nested-stats {
   margin-bottom: 0;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
 }
 
-@media (max-width: 768px) {
-  .dashboard-split-grid {
-    grid-template-columns: 1fr;
-  }
-  .nested-stats {
-    grid-template-columns: minmax(0, 1fr);
-  }
+.monthly-chart {
+  overflow-x: auto;
 }
 
-@media (max-width: 480px) {
+.chart-bars {
+  justify-content: flex-start;
+}
+
+.chart-bar-wrapper {
+  flex: 1 0 32px;
+}
+
+@media (min-width: 481px) {
   .monthly-chart {
-    overflow-x: auto;
+    overflow-x: visible;
   }
 
   .chart-bars {
-    justify-content: flex-start;
+    justify-content: space-around;
   }
 
   .chart-bar-wrapper {
-    flex: 1 0 32px;
+    flex: 1;
+  }
+}
+
+@media (min-width: 769px) {
+  .dashboard-split-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .nested-stats {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
 </style>

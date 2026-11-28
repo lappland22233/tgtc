@@ -52,7 +52,7 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
-.upload-queue-row { box-sizing: border-box; height: 104px; padding: 10px 12px; background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 8px; overflow: hidden; }
+.upload-queue-row { box-sizing: border-box; height: 104px; padding: 10px 12px; background: var(--color-bg-elevated); border: 1px solid var(--border-default); border-radius: var(--radius-md); overflow: hidden; }
 .upload-queue-row__main { display: flex; align-items: center; gap: 12px; }
 .upload-queue-row__preview { width: 32px; height: 32px; object-fit: cover; border-radius: 4px; flex-shrink: 0; }
 .upload-queue-row__info { flex: 1; min-width: 0; }
@@ -64,5 +64,5 @@ onBeforeUnmount(() => {
 /* 等待行与进度行共用同一行高槽位（行盒高度固定，内容溢出会被裁切），
    故行高与进度行一致取 1.5，不能比它更高 */
 .upload-queue-row__waiting { margin-top: 6px; font-size: 11px; line-height: 1.5; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.upload-queue-row__error { margin-top: 5px; font-size: 12px; color: var(--error); }
+.upload-queue-row__error { margin-top: 5px; font-size: 12px; color: var(--color-danger); }
 </style>

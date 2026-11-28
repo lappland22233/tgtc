@@ -210,13 +210,13 @@ onUnmounted(() => {
   align-items: center;
   justify-content: space-between;
   padding: 12px 16px 8px;
-  border-bottom: 1px solid var(--td-border-level-1-color);
+  border-bottom: 1px solid var(--border-default);
 }
 
 .tree-title {
   font-size: 14px;
   font-weight: 500;
-  color: var(--td-text-color-primary);
+  color: var(--text-primary);
 }
 
 .folder-tree-container :deep(.t-tree) {
@@ -230,22 +230,22 @@ onUnmounted(() => {
   align-items: center;
   gap: 6px;
   padding: 4px 8px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
   font-size: 13px;
 }
 
 .tree-node-label:hover {
-  background: var(--td-bg-color-container-hover);
+  background: var(--color-bg-hover);
 }
 
 .tree-node-label.active {
-  background: var(--td-brand-color-focus);
-  color: var(--td-brand-color);
+  background: var(--color-accent-soft);
+  color: var(--seed-primary);
 }
 
 .folder-icon {
-  color: var(--td-warning-color);
+  color: var(--color-warning);
   flex-shrink: 0;
 }
 
@@ -260,10 +260,10 @@ onUnmounted(() => {
 .ctx-menu {
   position: fixed;
   z-index: 9999;
-  background: var(--td-bg-color-container);
-  border: 1px solid var(--td-border-level-2-color);
-  border-radius: 6px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  background: var(--color-bg-overlay);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
   padding: 4px 0;
   min-width: 120px;
 }
@@ -272,14 +272,14 @@ onUnmounted(() => {
   padding: 8px 16px;
   cursor: pointer;
   font-size: 13px;
-  color: var(--td-text-color-primary);
+  color: var(--text-primary);
 }
 
 .ctx-item:hover {
-  background: var(--td-bg-color-container-hover);
+  background: var(--color-bg-hover);
 }
 
 .ctx-item.danger {
-  color: var(--td-error-color);
+  color: var(--color-danger);
 }
 </style>

@@ -34,7 +34,7 @@ watchPostEffect(() => {
 });
 </script>
 
-<style>
+<style scoped>
 .workspace-drawer {
   position: fixed;
   inset: auto 0 0;

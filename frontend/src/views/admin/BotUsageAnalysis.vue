@@ -252,6 +252,7 @@ import * as echarts from '@/utils/echarts';
 import client from '../../api/client';
 import { formatSize } from '@/utils/format';
 import { useMobile } from '../../composables/useMobile';
+import { useTheme } from '../../composables/useTheme';
 import { useChartResize } from '../../composables/useChartResize';
 import {
   CHART_COLORS,
@@ -308,6 +309,12 @@ const bandwidthChartRef = ref<HTMLDivElement | null>(null);
 let volumeChart: echarts.ECharts | null = null;
 let bandwidthChart: echarts.ECharts | null = null;
 const isMobile = useMobile();
+const { resolvedTheme, isDark } = useTheme();
+
+function themePaletteColor(token: string, fallback: string): string {
+  if (typeof document === 'undefined' || typeof getComputedStyle !== 'function') return fallback;
+  return getComputedStyle(document.documentElement).getPropertyValue(token).trim() || fallback;
+}
 
 const detailColumns = [
   { colKey: 'bucket', title: '时间', width: 180 },
@@ -427,6 +434,10 @@ watch(isMobile, () => {
   nextTick(() => setTimeout(() => { void renderCharts(); }, 100));
 });
 
+watch(resolvedTheme, () => {
+  void renderCharts();
+});
+
 /** 两张图共用的网格与坐标轴基线，保证上下时间轴严格对齐（小倍数图） */
 const CHART_GRID = { left: 60, right: 20 };
 
@@ -475,6 +486,9 @@ async function renderCharts() {
   const tooltip = { trigger: 'axis' as const, ...tooltipBase, formatter: axisTooltipFormatter };
   // 柱体过密时限制单柱宽度，保证相邻柱之间有可辨识的间隙
   const barStyle = { barMaxWidth: 16, barGap: '18%', barCategoryGap: '38%' };
+  const successColor = isDark.value ? themePaletteColor('--color-success', CHART_COLORS.success) : CHART_COLORS.success;
+  const primaryColor = isDark.value ? themePaletteColor('--seed-primary', CHART_COLORS.primary) : CHART_COLORS.primary;
+  const tealColor = isDark.value ? themePaletteColor('--workspace-accent', CHART_COLORS.teal) : CHART_COLORS.teal;
 
   // 容器在 tab 切换/重建后归属可能变化，统一 dispose 后重建，避免写入已移除节点
   if (volumeChartRef.value) {
@@ -498,14 +512,14 @@ async function renderCharts() {
           type: 'bar',
           ...barStyle,
           data: rows.map((row) => row.files),
-          itemStyle: { color: CHART_COLORS.success, borderRadius: [2, 2, 0, 0] },
+          itemStyle: { color: successColor, borderRadius: [2, 2, 0, 0] },
         },
         {
           name: '下载次数',
           type: 'bar',
           ...barStyle,
           data: rows.map((row) => row.downloads),
-          itemStyle: { color: CHART_COLORS.primary, borderRadius: [2, 2, 0, 0] },
+          itemStyle: { color: primaryColor, borderRadius: [2, 2, 0, 0] },
         },
       ],
     }, true);
@@ -532,8 +546,8 @@ async function renderCharts() {
           data: rows.map((row) => Number(row.bytes)),
           smooth: true,
           symbol: 'none',
-          lineStyle: { color: CHART_COLORS.teal, width: 2 },
-          areaStyle: { color: areaGradient(CHART_COLORS.teal) },
+          lineStyle: { color: tealColor, width: 2 },
+          areaStyle: { color: areaGradient(tealColor) },
         },
       ],
     }, true);
@@ -717,7 +731,7 @@ onUnmounted(() => {
 
 .metric-value {
   font-family: var(--font-mono);
-  font-size: 26px;
+  font-size: 22px;
   font-weight: 700;
   color: var(--text-primary);
   font-variant-numeric: tabular-nums;
@@ -774,11 +788,11 @@ onUnmounted(() => {
 }
 
 .filter-input {
-  width: 260px;
+  width: 100%;
 }
 
 .filter-select {
-  width: 150px;
+  width: 100%;
 }
 
 .user-id-cell {
@@ -858,11 +872,11 @@ onUnmounted(() => {
 /* 上：收到文件 / 下载次数（隐藏 x 轴标签）；下：带宽（承载 x 轴标签）。
    两图 grid 左右留白一致，上下对齐形成小倍数图，共读同一条时间轴。 */
 .chart-container--volume {
-  height: 220px;
+  height: 180px;
 }
 
 .chart-container--bandwidth {
-  height: 150px;
+  height: 130px;
 }
 
 .empty-hint {
@@ -899,22 +913,25 @@ onUnmounted(() => {
   color: var(--text-secondary);
 }
 
-@media (max-width: 768px) {
+@media (min-width: 769px) {
   .metric-value {
-    font-size: 22px;
+    font-size: 26px;
   }
 
   .chart-container--volume {
-    height: 180px;
+    height: 220px;
   }
 
   .chart-container--bandwidth {
-    height: 130px;
+    height: 150px;
   }
 
-  .filter-input,
+  .filter-input {
+    width: 260px;
+  }
+
   .filter-select {
-    width: 100%;
+    width: 150px;
   }
 }
 </style>

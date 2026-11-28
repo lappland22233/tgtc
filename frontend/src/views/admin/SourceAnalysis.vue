@@ -210,11 +210,19 @@ import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue';
 import * as echarts from '@/utils/echarts';
 import { api } from '@/stores/auth';
 import { useMobile } from '../../composables/useMobile';
+import { useTheme } from '../../composables/useTheme';
 import { useChartResize } from '../../composables/useChartResize';
-import { CHART_COLORS, tooltipBase, legendBase, ensureCyberTheme } from '../../utils/echarts-theme';
+import {
+  CHART_COLORS,
+  CHART_COLORS_DARK,
+  getThemeChartColors,
+  getTooltipBase,
+  getLegendBase,
+  ensureCyberTheme,
+  refreshChartTheme,
+} from '../../utils/echarts-theme';
 
-// Theme-aware chart colors
-const isDark = () => document.documentElement.getAttribute('data-theme') === 'dark';
+const { resolvedTheme, isDark } = useTheme();
 
 // --- Types ---
 
@@ -325,27 +333,27 @@ let deviceChart: echarts.ECharts | null = null;
 
 // --- Colors ---
 
-const CATEGORY_COLORS: Record<string, string> = {
-  '引擎搜索': CHART_COLORS.blue,
-  '社交媒体': CHART_COLORS.success,
-  '直接访问': CHART_COLORS.warning,
-  '本站内链': CHART_COLORS.danger,
-  '外部网站': CHART_COLORS.cyan,
-};
-
-const deviceColorMap: Record<string, string> = {
-  desktop: CHART_COLORS.teal,
-  mobile: CHART_COLORS.blue,
-  tablet: CHART_COLORS.amber,
-  bot: CHART_COLORS.violet,
-};
-
 function getCategoryColor(name: string): string {
-  return CATEGORY_COLORS[name] || CHART_COLORS.slate;
+  const p = isDark.value ? CHART_COLORS_DARK : CHART_COLORS;
+  const map: Record<string, string> = {
+    '引擎搜索': p.blue,
+    '社交媒体': p.success,
+    '直接访问': p.warning,
+    '本站内链': p.danger,
+    '外部网站': p.cyan,
+  };
+  return map[name] || p.slate;
 }
 
 function getDeviceColor(type: string): string {
-  return deviceColorMap[type] || CHART_COLORS.slate;
+  const p = isDark.value ? CHART_COLORS_DARK : CHART_COLORS;
+  const map: Record<string, string> = {
+    desktop: p.teal,
+    mobile: p.blue,
+    tablet: p.amber,
+    bot: p.violet,
+  };
+  return map[type] || p.slate;
 }
 
 function getDeviceLabel(type: string): string {
@@ -370,17 +378,18 @@ async function updatePieChart(
   await ensureCyberTheme();
   chart?.dispose();
   const c = echarts.init(el, 'cyber');
+  const { emptySlice, emphasisShadow } = getThemeChartColors();
   c.setOption({
     tooltip: {
       trigger: 'item',
-      ...tooltipBase,
+      ...getTooltipBase(),
       formatter: (p: any) => `${p.name}: ${p.value} (${p.percent}%)`,
     },
     legend: {
       orient: 'vertical',
       right: 10,
       top: 'center',
-      ...legendBase,
+      ...getLegendBase(),
     },
     series: [
       {
@@ -394,9 +403,9 @@ async function updatePieChart(
                 value: d.value,
                 itemStyle: { color: d.color },
               }))
-            : [{ name: '无数据', value: 1, itemStyle: { color: isDark() ? 'rgba(255,255,255,0.08)' : 'rgba(22,25,31,0.08)' } }],
+            : [{ name: '无数据', value: 1, itemStyle: { color: emptySlice } }],
         label: { show: false },
-        emphasis: { label: { show: true, fontSize: 14, fontWeight: 'bold' }, itemStyle: { shadowBlur: 20, shadowColor: isDark() ? 'rgba(0,0,0,0.4)' : 'rgba(0,0,0,0.15)' } },
+        emphasis: { label: { show: true, fontSize: 14, fontWeight: 'bold' }, itemStyle: { shadowBlur: 20, shadowColor: emphasisShadow } },
       },
     ],
   });
@@ -511,6 +520,12 @@ watch(isMobile, () => {
   nextTick(() => setTimeout(handleResize, 100));
 });
 
+watch(resolvedTheme, () => {
+  refreshChartTheme();
+  void renderCategoryChart();
+  void renderDeviceChart();
+});
+
 // PERF-F-106：帧级节流 + 卸载解绑（原为裸 addEventListener，拖拽窗口时每像素重排）
 useChartResize(handleResize);
 
@@ -539,22 +554,6 @@ defineExpose({ resizeAllCharts });
   padding-top: 16px;
 }
 
-/* Card */
-.card {
-  background: var(--color-bg-surface);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-lg);
-  padding: 24px;
-}
-
-.card h3 {
-  font-size: 16px;
-  font-weight: 600;
-  font-family: var(--font-display);
-  margin: 0 0 16px;
-}
-
-/* Section card */
 .section-card {
   margin-bottom: 20px;
 }
@@ -565,58 +564,15 @@ defineExpose({ resizeAllCharts });
   margin-bottom: 16px;
 }
 
-/* Category section: pie chart + cards side by side */
-.category-section {
-  display: flex;
-  gap: 24px;
-  align-items: flex-start;
-}
-
-.category-cards {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  min-width: 200px;
-}
-
-.category-card-item {
-  background: var(--color-bg-hover);
-  border-left: 4px solid;
-  border-radius: 4px;
-  padding: 12px 16px;
-  display: flex;
-  align-items: center;
-  gap: 16px;
-}
-
-.category-card-name {
-  flex: 1;
-  font-size: 14px;
-  color: var(--text-primary);
-  font-weight: 500;
-}
-
-.category-card-count {
-  font-size: 20px;
-  font-weight: 700;
-  color: var(--text-primary);
-}
-
-.category-card-pct {
-  font-size: 13px;
-  color: var(--text-secondary);
-  min-width: 50px;
-  text-align: right;
-}
-
-/* Device section */
+.category-section,
 .device-section {
   display: flex;
+  flex-direction: column;
   gap: 24px;
-  align-items: flex-start;
+  align-items: stretch;
 }
 
+.category-cards,
 .device-cards {
   flex: 1;
   display: flex;
@@ -625,16 +581,18 @@ defineExpose({ resizeAllCharts });
   min-width: 180px;
 }
 
+.category-card-item,
 .device-card-item {
   background: var(--color-bg-hover);
   border-left: 4px solid;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   padding: 12px 16px;
   display: flex;
   align-items: center;
   gap: 16px;
 }
 
+.category-card-name,
 .device-card-name {
   flex: 1;
   font-size: 14px;
@@ -642,22 +600,19 @@ defineExpose({ resizeAllCharts });
   font-weight: 500;
 }
 
+.category-card-count,
 .device-card-count {
   font-size: 20px;
   font-weight: 700;
   color: var(--text-primary);
 }
 
+.category-card-pct,
 .device-card-pct {
   font-size: 13px;
   color: var(--text-secondary);
   min-width: 50px;
   text-align: right;
-}
-
-/* Charts */
-.charts-row {
-  margin-bottom: 16px;
 }
 
 .chart-container {
@@ -667,18 +622,9 @@ defineExpose({ resizeAllCharts });
 
 .chart-pie {
   width: 100%;
-  max-width: 450px;
+  max-width: 100%;
 }
 
-/* Empty hint */
-.empty-hint {
-  text-align: center;
-  padding: 24px 0;
-  color: var(--text-secondary);
-  font-size: 13px;
-}
-
-/* Truncated URL */
 .truncated-url {
   display: block;
   overflow: hidden;
@@ -690,49 +636,15 @@ defineExpose({ resizeAllCharts });
   cursor: default;
 }
 
-/* Responsive */
-@media (max-width: 768px) {
+@media (min-width: 769px) {
   .category-section,
   .device-section {
-    flex-direction: column;
+    flex-direction: row;
+    align-items: flex-start;
   }
 
   .chart-pie {
-    max-width: 100%;
-  }
-
-  .mobile-card {
-    background: var(--workspace-canvas);
-    border: 1px solid var(--workspace-border);
-    border-radius: 8px;
-    padding: 12px;
-    margin-bottom: 10px;
-  }
-
-  .mobile-card-row {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 6px;
-  }
-
-  .mobile-card-body {
-    font-size: 13px;
-    color: var(--text-secondary);
-    margin-bottom: 8px;
-    line-height: 1.5;
-  }
-
-  .mobile-card-meta {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    font-size: 12px;
-    color: var(--text-secondary);
-  }
-
-  .mobile-single-col {
-    grid-template-columns: 1fr !important;
+    max-width: 450px;
   }
 }
 </style>

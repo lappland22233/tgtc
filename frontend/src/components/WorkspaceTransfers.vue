@@ -129,7 +129,7 @@ onUnmounted(() => document.removeEventListener('pointerdown', handleOutsidePress
   align-items: center;
   justify-content: center;
   gap: 7px;
-  min-height: 36px;
+  min-height: 44px;
   padding: 0 10px;
   border: 0;
   border-radius: 8px;
@@ -165,17 +165,17 @@ onUnmounted(() => document.removeEventListener('pointerdown', handleOutsidePress
 }
 
 .transfer-popover {
-  position: absolute;
+  position: fixed;
   z-index: 2;
-  inset-block-start: calc(100% + 10px);
-  inset-inline-end: 0;
-  width: 360px;
-  max-height: min(65vh, 560px);
+  inset: auto 0 calc(var(--workspace-mobile-nav-height) + env(safe-area-inset-bottom, 0px));
+  width: 100%;
+  max-height: 60vh;
+  max-height: min(60dvh, calc(100dvh - var(--workspace-header-height) - var(--workspace-mobile-nav-height) - env(safe-area-inset-bottom, 0px)));
   overflow: auto;
   overscroll-behavior: contain;
   border: 1px solid var(--workspace-border);
-  border-radius: 12px;
-  box-shadow: 0 9px 24px color-mix(in srgb, var(--workspace-text) 16%, transparent);
+  border-radius: 12px 12px 0 0;
+  box-shadow: 0 -9px 24px color-mix(in srgb, var(--workspace-text) 16%, transparent);
 }
 
 .transfer-header {
@@ -193,7 +193,7 @@ onUnmounted(() => document.removeEventListener('pointerdown', handleOutsidePress
 }
 
 .transfer-close {
-  width: 36px;
+  width: 44px;
   padding: 0;
   color: var(--workspace-muted);
 }
@@ -209,19 +209,28 @@ onUnmounted(() => document.removeEventListener('pointerdown', handleOutsidePress
   font-size: 13px;
 }
 
-@media (max-width: 768px) {
+@media (min-width: 769px) {
+  :is(.transfer-button, .transfer-close) {
+    min-height: 36px;
+  }
+
+  .transfer-close {
+    width: 36px;
+  }
+
   .transfer-popover {
-    position: fixed;
-    inset: auto 0 calc(var(--workspace-mobile-nav-height) + env(safe-area-inset-bottom, 0px));
-    width: 100%;
-    max-height: 60vh;
-    max-height: min(60dvh, calc(100dvh - var(--workspace-header-height) - var(--workspace-mobile-nav-height) - env(safe-area-inset-bottom, 0px)));
-    border-radius: 12px 12px 0 0;
-    box-shadow: 0 -9px 24px color-mix(in srgb, var(--workspace-text) 16%, transparent);
+    position: absolute;
+    inset: unset;
+    inset-block-start: calc(100% + 10px);
+    inset-inline-end: 0;
+    width: 360px;
+    max-height: min(65vh, 560px);
+    border-radius: 12px;
+    box-shadow: 0 9px 24px color-mix(in srgb, var(--workspace-text) 16%, transparent);
   }
 }
 
-@media (max-width: 768px), (pointer: coarse) {
+@media (pointer: coarse) {
   :is(.transfer-button, .transfer-close) {
     min-height: 44px;
   }

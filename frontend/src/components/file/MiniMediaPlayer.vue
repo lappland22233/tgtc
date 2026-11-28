@@ -22,6 +22,8 @@
           :mime-type="session.item.mimeType"
           :file-name="session.item.name"
           :size="160"
+          :fill="true"
+          rounded="none"
           :src="thumbnailSrc"
           :context="mediaContextKey"
           :version="session.item.contentVersion"
@@ -205,15 +207,23 @@ function onProgressClick(e: MouseEvent) {
 /* ─── 浮层容器：沿用 FileCloud/Cloudscape 表面、边框与阴影 ─── */
 .mmp {
   position: fixed;
-  right: var(--space-4);
-  bottom: calc(var(--space-4) + env(safe-area-inset-bottom, 0px));
+  right: 0;
+  left: 0;
+  bottom: 0;
   z-index: 2600;
-  width: min(380px, calc(100vw - var(--space-8)));
-  padding: var(--space-2) var(--space-3) var(--space-2);
+  width: 100%;
+  padding:
+    var(--space-2)
+    max(var(--space-3), env(safe-area-inset-right, 0px))
+    max(var(--space-2), env(safe-area-inset-bottom, 0px))
+    max(var(--space-3), env(safe-area-inset-left, 0px));
   background: var(--color-bg-surface);
   border: 1px solid var(--border-default);
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-md);
+  border-left: none;
+  border-right: none;
+  border-bottom: none;
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
+  box-shadow: 0 -8px 24px color-mix(in srgb, var(--seed-fg) 14%, transparent);
   display: flex;
   flex-direction: column;
   gap: var(--space-1);
@@ -223,10 +233,18 @@ function onProgressClick(e: MouseEvent) {
               transform var(--duration-normal) var(--ease-out-expo);
 }
 
-/* 上传浮层可见 → 避让到左下角 */
+:global(body:has(.workspace-layout) .mmp) {
+  bottom: calc(var(--workspace-mobile-nav-height) + env(safe-area-inset-bottom, 0px));
+}
+
+:global(body:has(.workspace-layout .has-batch-selection) .mmp) {
+  bottom: calc(var(--workspace-mobile-nav-height) + env(safe-area-inset-bottom, 0px) + 60px);
+}
+
+/* 上传浮层可见 → 桌面端避让到左下角 */
 .mmp--left {
-  right: auto;
-  left: var(--space-4);
+  right: 0;
+  left: 0;
 }
 
 /* ─── 视频小窗口：关闭完整预览后内嵌展示 ─── */
@@ -239,17 +257,9 @@ function onProgressClick(e: MouseEvent) {
   border: none;
   border-radius: var(--radius-md);
   overflow: hidden;
-  background: #000;
+  background: var(--media-stage-bg);
   cursor: pointer;
   touch-action: manipulation;
-}
-
-.mmp__video :deep(> div),
-.mmp__video :deep(img) {
-  width: 100% !important;
-  height: 100% !important;
-  border-radius: 0 !important;
-  object-fit: cover;
 }
 
 .mmp__video-play {
@@ -258,14 +268,14 @@ function onProgressClick(e: MouseEvent) {
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #fff;
-  background: rgba(0, 0, 0, 0.28);
+  color: var(--media-text);
+  background: var(--media-scrim-soft);
   transition: background var(--duration-fast) ease;
 }
 
 .mmp__video:hover .mmp__video-play,
 .mmp__video:focus-visible .mmp__video-play {
-  background: rgba(0, 0, 0, 0.45);
+  background: var(--media-scrim-mid);
 }
 
 /* ─── 顶部：媒体识别 + 时间 + 展开/停止 ─── */
@@ -425,44 +435,44 @@ function onProgressClick(e: MouseEvent) {
   border-radius: 999px;
 }
 
-@media (max-width: 768px) {
-  :global(body:has(.workspace-layout) .mmp) {
-    bottom: calc(var(--workspace-mobile-nav-height) + env(safe-area-inset-bottom, 0px));
-  }
-
-  :global(body:has(.workspace-layout .has-batch-selection) .mmp) {
-    bottom: calc(var(--workspace-mobile-nav-height) + env(safe-area-inset-bottom, 0px) + 60px);
-  }
-}
-
-/* ─── 窄屏：底部横向控制条 ─── */
-@media (max-width: 720px) {
+/* ─── 桌面端（>=769px）：恢复右下角浮卡（避让上传面板） ─── */
+@media (min-width: 769px) {
   .mmp,
-  .mmp--left {
-    right: 0;
-    left: 0;
-    bottom: 0;
-    width: 100%;
-    border-radius: var(--radius-md) var(--radius-md) 0 0;
-    border-left: none;
-    border-right: none;
-    border-bottom: none;
-    padding:
-      var(--space-2)
-      max(var(--space-3), env(safe-area-inset-right, 0px))
-      max(var(--space-2), env(safe-area-inset-bottom, 0px))
-      max(var(--space-3), env(safe-area-inset-left, 0px));
-    box-shadow: 0 -8px 24px color-mix(in srgb, var(--seed-fg) 14%, transparent);
+  :global(body:has(.workspace-layout) .mmp),
+  :global(body:has(.workspace-layout .has-batch-selection) .mmp) {
+    left: auto;
+    right: var(--space-4);
+    bottom: calc(var(--space-4) + env(safe-area-inset-bottom, 0px));
+    width: min(380px, calc(100vw - var(--space-8)));
+    padding: var(--space-2) var(--space-3) var(--space-2);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-md);
   }
 
-  .mmp__identity {
-    padding: var(--space-1);
+  .mmp--left,
+  :global(body:has(.workspace-layout) .mmp.mmp--left),
+  :global(body:has(.workspace-layout .has-batch-selection) .mmp.mmp--left) {
+    right: auto;
+    left: var(--space-4);
   }
 
   .mmp__meta {
-    display: none;
+    display: block;
   }
 
+  .mmp__btn {
+    width: 36px;
+    height: 36px;
+  }
+
+  .mmp__btn--play {
+    width: 40px;
+    height: 40px;
+  }
+}
+
+@media (pointer: coarse) {
   .mmp__btn {
     width: 44px;
     height: 44px;

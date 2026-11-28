@@ -165,6 +165,7 @@ import { formatSize } from '@/utils/format';
 import { getErrorMessage } from '@/utils/error';
 import { useMobile } from '@/composables/useMobile';
 import { useChartResize } from '@/composables/useChartResize';
+import { useTheme } from '@/composables/useTheme';
 import * as echarts from '@/utils/echarts';
 import { CHART_COLORS, CHART_COLORS_DARK, ensureCyberTheme, legendBase } from '@/utils/echarts-theme';
 import BotOperationsUser from './BotOperationsUser.vue';
@@ -397,21 +398,25 @@ let trendChart: echarts.ECharts | null = null;
 let statusChart: echarts.ECharts | null = null;
 let grantChart: echarts.ECharts | null = null;
 let botsChart: echarts.ECharts | null = null;
-let themeObserver: MutationObserver | null = null;
 let renderToken = 0;
 
-const isDark = () => document.documentElement.getAttribute('data-theme') === 'dark';
-const mutedText = () => isDark() ? '#B2BEB7' : '#59645E';
+const { isDark } = useTheme();
+
+function readCssToken(token: string): string {
+  if (typeof getComputedStyle !== 'function') return '';
+  return getComputedStyle(document.documentElement).getPropertyValue(token).trim();
+}
+
+const mutedText = () => readCssToken('--workspace-muted');
 
 /** canvas 不解析 CSS 变量，这里读取令牌的实际值后再交给 ECharts。 */
 function tooltipStyle() {
-  const style = getComputedStyle(document.documentElement);
   return {
-    backgroundColor: style.getPropertyValue('--workspace-surface').trim() || (isDark() ? '#242927' : '#FFFEFA'),
-    borderColor: style.getPropertyValue('--workspace-border').trim() || (isDark() ? '#3A463E' : '#E3E6DF'),
+    backgroundColor: readCssToken('--workspace-surface'),
+    borderColor: readCssToken('--workspace-border'),
     borderWidth: 1,
-    textStyle: { color: isDark() ? '#EDF2EE' : '#202923', fontSize: 12 },
-    extraCssText: 'border-radius: 4px; box-shadow: 0 4px 16px rgba(0,0,0,0.15);',
+    textStyle: { color: readCssToken('--workspace-text'), fontSize: 12 },
+    extraCssText: 'border-radius: 4px; box-shadow: var(--shadow-md);',
   };
 }
 
@@ -558,7 +563,7 @@ async function renderCharts() {
   if (!overview.value) return;
   await ensureCyberTheme();
   if (token !== renderToken || tab.value !== 'overview' || disposed) return;
-  const palette = isDark() ? CHART_COLORS_DARK : CHART_COLORS;
+  const palette = isDark.value ? CHART_COLORS_DARK : CHART_COLORS;
   renderTrend(palette);
   renderStatus(palette);
   renderGrants(palette);
@@ -576,6 +581,10 @@ watch(isMobile, () => {
   nextTick(() => { if (tab.value === 'overview') void renderCharts(); });
 });
 
+watch(isDark, () => {
+  if (tab.value === 'overview') void renderCharts();
+});
+
 watch(tab, async next => {
   if (next !== 'overview') { disposeCharts(); return; }
   await nextTick();
@@ -583,19 +592,551 @@ watch(tab, async next => {
 });
 
 onMounted(() => {
-  themeObserver = new MutationObserver(() => {
-    if (tab.value === 'overview') void renderCharts();
-  });
-  themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
   if (tab.value === 'overview') void loadOverview();
 });
 
 onBeforeUnmount(() => {
   disposed = true;
   overviewRequest?.abort();
-  themeObserver?.disconnect();
   disposeCharts();
 });
 </script>
 
-<style src="./bot-operations.css"></style>
+<style scoped>
+.bot-operations {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+  color: var(--text-primary);
+}
+
+.bot-operations :deep(:is(.ops-user, .ops-list)) {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+
+.bot-operations :deep(:is(h1, h2, h3, p, dl, dd)) {
+  margin: 0;
+}
+
+.bot-operations :deep(h2) {
+  font-size: 18px;
+}
+
+.bot-operations :deep(h3) {
+  font-size: 16px;
+  overflow-wrap: anywhere;
+}
+
+/* ---------- 页头与工具区 ---------- */
+.bot-operations :deep(.ops-hero) {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 0;
+}
+
+.bot-operations :deep(.ops-hero-copy) {
+  min-width: 0;
+}
+
+.bot-operations :deep(.ops-hero-tools) {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+  width: 100%;
+}
+
+.bot-operations :deep(.ops-range) {
+  flex: 1 1 160px;
+  width: auto;
+}
+
+/* ---------- 通用控件 ---------- */
+.bot-operations :deep(:is(.ops-tabs, .ops-actions, .ops-list-head, .ops-pages, .ops-row header)) {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.bot-operations :deep(:is(.ops-list-head, .ops-pages, .ops-row header)) {
+  justify-content: space-between;
+}
+
+.bot-operations :deep(:is(.ops-btn, .ops-tabs a, .ops-tabs button)) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  padding: 6px 12px;
+  font: inherit;
+  color: var(--text-primary);
+  background: var(--color-bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.bot-operations :deep(:is(.ops-tabs [aria-current="page"], .ops-tabs [aria-pressed="true"], .ops-btn.primary)) {
+  color: var(--workspace-accent);
+  border-color: var(--border-accent);
+  background: var(--color-bg-selected);
+}
+
+.bot-operations :deep(:is(.ops-btn.danger, .ops-error)) {
+  color: var(--color-danger);
+}
+
+.bot-operations :deep(button:disabled) {
+  color: var(--text-disabled);
+  cursor: default;
+}
+
+.bot-operations :deep(:is(.ops-form, .ops-row, .ops-confirm, .ops-summary)) {
+  background: var(--color-bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  padding: 16px;
+  min-width: 0;
+}
+
+.bot-operations :deep(.ops-form) {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 150px), 1fr));
+  gap: 12px;
+  align-items: end;
+}
+
+.bot-operations :deep(label) {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  color: var(--text-secondary);
+}
+
+.bot-operations :deep(:is(input, select, textarea)) {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  min-height: 44px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg);
+  color: var(--text-primary);
+  font: inherit;
+  padding: 6px 8px;
+}
+
+.bot-operations :deep(:is(.ops-row, .ops-confirm, .ops-quota)) {
+  display: grid;
+  gap: 12px;
+  overflow-wrap: anywhere;
+}
+
+.bot-operations :deep(.ops-quota) {
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  padding: 12px 14px;
+}
+
+.bot-operations :deep(.ops-quota__title) {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.bot-operations :deep(.ops-quota label) {
+  display: grid;
+  gap: 6px;
+}
+
+.bot-operations :deep(.ops-quota input) {
+  max-width: 220px;
+}
+
+.bot-operations :deep(:is(.ops-details, .ops-summary)) {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 160px), 1fr));
+  gap: 8px 16px;
+}
+
+.bot-operations :deep(:is(.ops-details div, .ops-summary div)) {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.bot-operations :deep(:is(dt, .ops-empty, .ops-pages)) {
+  color: var(--text-secondary);
+}
+
+.bot-operations :deep(dd) {
+  margin-top: 3px;
+}
+
+.bot-operations :deep(dd a) {
+  color: var(--workspace-accent);
+  text-decoration: underline;
+}
+
+.bot-operations :deep(.ops-status) {
+  padding: 3px 8px;
+  color: var(--color-success);
+  background: var(--color-success-soft);
+  border-radius: var(--radius-sm);
+}
+
+.bot-operations :deep(.ops-status.muted) {
+  color: var(--text-secondary);
+  background: var(--color-bg-elevated);
+}
+
+/* ---------- 用户分类列表与用户详情 ---------- */
+.bot-operations :deep(.ops-groups) {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+
+.bot-operations :deep(.ops-group-heading) {
+  min-width: 0;
+}
+
+.bot-operations :deep(.ops-group-hint) {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.bot-operations :deep(.ops-group-row) {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+  min-width: 0;
+  padding: 14px 16px;
+  color: inherit;
+  text-decoration: none;
+  background: var(--color-bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+}
+
+.bot-operations :deep(.ops-group-row:hover) {
+  border-color: var(--border-strong);
+  background: var(--color-bg-hover);
+}
+
+.bot-operations :deep(.ops-group-row:focus-visible) {
+  outline: 2px solid var(--border-accent);
+  outline-offset: 2px;
+}
+
+.bot-operations :deep(.ops-group-avatar) {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: var(--color-accent-soft);
+  color: var(--text-accent);
+  font-family: var(--font-mono);
+  font-weight: 600;
+}
+
+.bot-operations :deep(.ops-group-main) {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.bot-operations :deep(.ops-group-head) {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.bot-operations :deep(.ops-group-id) {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.bot-operations :deep(.ops-group-name) {
+  font-size: 12px;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.bot-operations :deep(.ops-group-name.muted) {
+  color: var(--text-tertiary);
+}
+
+.bot-operations :deep(.ops-group-chips) {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.bot-operations :deep(.ops-chip) {
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: var(--color-bg-elevated);
+}
+
+.bot-operations :deep(.ops-chip.success) {
+  color: var(--color-success);
+  background: var(--color-success-soft);
+}
+
+.bot-operations :deep(.ops-chip.danger) {
+  color: var(--color-danger);
+  background: var(--color-danger-soft);
+}
+
+.bot-operations :deep(.ops-chip.warning) {
+  color: var(--color-warning);
+  background: var(--color-warning-soft);
+}
+
+.bot-operations :deep(.ops-chip.accent) {
+  color: var(--text-accent);
+  background: var(--color-accent-soft);
+}
+
+.bot-operations :deep(.ops-group-side) {
+  grid-column: 2;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  justify-items: start;
+  min-width: 0;
+  text-align: left;
+}
+
+.bot-operations :deep(.ops-group-metric) {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+
+.bot-operations :deep(:is(.ops-group-size, .ops-group-time)) {
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.bot-operations :deep(.ops-group-cta) {
+  font-size: 12px;
+  color: var(--workspace-accent);
+  white-space: nowrap;
+}
+
+.bot-operations :deep(.ops-detail-bar) {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.bot-operations :deep(.ops-detail-bar .ops-btn) {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.bot-operations :deep(.ops-detail-bar svg) {
+  width: 18px;
+  height: 18px;
+}
+
+.bot-operations :deep(.ops-detail-hint) {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+/* ---------- 概览：KPI ---------- */
+.bot-operations :deep(.ops-dashboard) {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+
+.bot-operations :deep(.ops-kpis) {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
+  gap: 12px;
+}
+
+.bot-operations :deep(.ops-kpi) {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 16px;
+  min-width: 0;
+  background: var(--color-bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+}
+
+.bot-operations :deep(.ops-kpi-icon) {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-md);
+  background: var(--color-accent-soft);
+  color: var(--text-accent);
+}
+
+.bot-operations :deep(.ops-kpi-icon svg) {
+  width: 22px;
+  height: 22px;
+}
+
+.bot-operations :deep(.ops-kpi--warning .ops-kpi-icon) {
+  background: var(--color-warning-soft);
+  color: var(--color-warning);
+}
+
+.bot-operations :deep(.ops-kpi--success .ops-kpi-icon) {
+  background: var(--color-success-soft);
+  color: var(--color-success);
+}
+
+.bot-operations :deep(.ops-kpi-body) {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.bot-operations :deep(.ops-kpi-label) {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.bot-operations :deep(.ops-kpi-value) {
+  font-family: var(--font-mono);
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 1.2;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.bot-operations :deep(.ops-kpi-sub) {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  overflow-wrap: anywhere;
+}
+
+/* ---------- 概览：图表 ---------- */
+.bot-operations :deep(.ops-charts) {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 16px;
+}
+
+.bot-operations :deep(.ops-card) {
+  display: grid;
+  gap: 8px;
+  align-content: start;
+  min-width: 0;
+  padding: 16px;
+  background: var(--color-bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+}
+
+.bot-operations :deep(.ops-chart-head) {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.bot-operations :deep(.ops-chart-head h2) {
+  font-size: 16px;
+}
+
+.bot-operations :deep(.ops-chart-hint) {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.bot-operations :deep(.ops-chart-canvas),
+.bot-operations :deep(.ops-chart-canvas--trend) {
+  width: 100%;
+  height: 220px;
+  min-width: 0;
+}
+
+.bot-operations :deep(.ops-chart-summary) {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.bot-operations :deep(.ops-chart-empty) {
+  padding: 28px 0;
+  text-align: center;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+@media (min-width: 769px) {
+  .bot-operations :deep(.ops-hero-tools) {
+    width: auto;
+  }
+
+  .bot-operations :deep(.ops-range) {
+    flex: none;
+    width: 160px;
+  }
+
+  .bot-operations :deep(.ops-group-row) {
+    grid-template-columns: 40px minmax(0, 1fr) auto;
+  }
+
+  .bot-operations :deep(.ops-group-side) {
+    grid-column: auto;
+    display: grid;
+    justify-items: end;
+    gap: 2px;
+    text-align: right;
+  }
+
+  .bot-operations :deep(.ops-charts) {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .bot-operations :deep(.ops-chart--wide) {
+    grid-column: 1 / -1;
+  }
+
+  .bot-operations :deep(.ops-chart-canvas) {
+    height: 238px;
+  }
+
+  .bot-operations :deep(.ops-chart-canvas--trend) {
+    height: 260px;
+  }
+
+  .bot-operations :deep(.ops-kpi-value) {
+    font-size: 24px;
+  }
+}
+</style>

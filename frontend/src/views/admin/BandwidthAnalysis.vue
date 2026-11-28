@@ -6,7 +6,7 @@
     </div>
 
     <!-- Time Range Selector -->
-    <div class="toolbar" :class="{ 'toolbar-row': isMobile }">
+    <div class="toolbar">
       <t-radio-group v-model="timeRange" variant="default-filled" @change="fetchData">
         <t-radio-button value="1h">1小时</t-radio-button>
         <t-radio-button value="24h">24小时</t-radio-button>
@@ -46,7 +46,7 @@
                 </t-tag>
               </template>
               <template #fileName="{ row }">
-                <span style="display: inline-flex; align-items: center; gap: 6px;"><FileTypeIcon :mimeType="row.mimeType" :fileName="row.fileName" :size="16" /> {{ row.fileName }}</span>
+                <span class="inline-flex items-center gap-1.5"><FileTypeIcon :mimeType="row.mimeType" :fileName="row.fileName" :size="16" /> {{ row.fileName }}</span>
               </template>
               <template #totalBandwidth="{ row }">
                 {{ formatSize(Number(row.totalBandwidth)) }}
@@ -64,7 +64,7 @@
                 >
                   #{{ idx + 1 }}
                 </t-tag>
-                <span class="mobile-file-name" style="display: inline-flex; align-items: center; gap: 6px;"><FileTypeIcon :mimeType="row.mimeType" :fileName="row.fileName" :size="16" /> {{ row.fileName }}</span>
+                <span class="mobile-file-name inline-flex items-center gap-1.5"><FileTypeIcon :mimeType="row.mimeType" :fileName="row.fileName" :size="16" /> {{ row.fileName }}</span>
               </div>
               <div class="mobile-card-meta">
                 <span>{{ row.mimeType }}</span>
@@ -119,14 +119,17 @@ import { api } from '@/stores/auth';
 import { formatSize } from '@/utils/format';
 import FileTypeIcon from '@/components/FileTypeIcon.vue';
 import { useMobile } from '../../composables/useMobile';
+import { useTheme } from '../../composables/useTheme';
 import { useChartResize } from '../../composables/useChartResize';
-import { CHART_COLORS, tooltipBase, areaGradient, ensureCyberTheme } from '../../utils/echarts-theme';
+import {
+  getThemeChartColors,
+  getTooltipBase,
+  areaGradient,
+  ensureCyberTheme,
+  refreshChartTheme,
+} from '../../utils/echarts-theme';
 
-// Theme-aware chart colors
-const isDark = () => document.documentElement.getAttribute('data-theme') === 'dark';
-const axisLabelColor = () => isDark() ? '#8895A7' : '#5F6B7A';
-const axisLineColor = () => isDark() ? 'rgba(232,237,245,0.12)' : 'rgba(22,25,31,0.12)';
-const splitLineColor = () => isDark() ? 'rgba(232,237,245,0.06)' : 'rgba(22,25,31,0.06)';
+const { resolvedTheme } = useTheme();
 
 interface BandwidthResponse {
   topFiles: { fileId: string; fileName: string; mimeType: string; totalBandwidth: string; accessCount: number }[];
@@ -173,6 +176,7 @@ async function renderChart() {
   chart?.dispose();
   chart = echarts.init(chartRef.value, 'cyber');
 
+  const { palette, axisLabel, axisLine, splitLine } = getThemeChartColors();
   const trend = data.value?.trend || [];
   const times = trend.map((t) => t.time);
   const values = trend.map((t) => Number(t.bandwidth));
@@ -180,7 +184,7 @@ async function renderChart() {
   chart.setOption({
     tooltip: {
       trigger: 'axis',
-      ...tooltipBase,
+      ...getTooltipBase(),
       formatter: (params: unknown) => {
         const p = (params as { name: string; value: number; seriesName: string }[])?.[0];
         if (!p) return '';
@@ -198,22 +202,22 @@ async function renderChart() {
       type: 'category',
       data: times,
       boundaryGap: false,
-      axisLine: { lineStyle: { color: axisLineColor() } },
+      axisLine: { lineStyle: { color: axisLine } },
       axisLabel: {
-        color: axisLabelColor(),
+        color: axisLabel,
         fontSize: 11,
         formatter: (val: string) => val.length > 16 ? val.substring(5) : val,
       },
     },
     yAxis: {
       type: 'value',
-      axisLine: { lineStyle: { color: axisLineColor() } },
+      axisLine: { lineStyle: { color: axisLine } },
       axisLabel: {
-        color: axisLabelColor(),
+        color: axisLabel,
         fontSize: 11,
         formatter: (val: number) => formatSize(val),
       },
-      splitLine: { lineStyle: { color: splitLineColor(), type: 'dashed' } },
+      splitLine: { lineStyle: { color: splitLine, type: 'dashed' } },
     },
     series: [
       {
@@ -222,12 +226,17 @@ async function renderChart() {
         data: values,
         smooth: true,
         symbol: 'none',
-        lineStyle: { color: CHART_COLORS.primary, width: 2 },
-        areaStyle: { color: areaGradient(CHART_COLORS.primary) },
+        lineStyle: { color: palette.primary, width: 2 },
+        areaStyle: { color: areaGradient(palette.primary) },
       },
     ],
   });
 }
+
+watch(resolvedTheme, () => {
+  refreshChartTheme();
+  void renderChart();
+});
 
 async function fetchData() {
   loading.value = true;
@@ -266,74 +275,30 @@ defineExpose({ refreshChart });
   padding: 0;
 }
 
+.bandwidth-page .card {
+  margin-bottom: 20px;
+}
+
 .toolbar {
   margin-bottom: 20px;
 }
 
-/* Card */
-.card {
-  background: var(--color-bg-surface);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-lg);
-  padding: 24px;
-  margin-bottom: 20px;
-}
-
-.card h3 {
-  font-size: 16px;
-  font-weight: 600;
-  font-family: var(--font-display);
-  margin: 0 0 16px;
-}
-
-/* Chart */
 .chart-container {
   width: 100%;
   height: 320px;
 }
 
-/* Empty hint */
-.empty-hint {
-  text-align: center;
-  padding: 24px 0;
-  color: var(--text-secondary);
-  font-size: 13px;
+.mobile-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  font-size: 14px;
 }
 
-@media (max-width: 768px) {
-  .toolbar-row {
-    flex-direction: column;
-    gap: 8px;
-  }
-
-  .mobile-card {
-    background: var(--color-bg-surface);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-md);
-    padding: 12px;
-    margin-bottom: 10px;
-  }
-
-  .mobile-card-header {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-bottom: 8px;
-    font-size: 14px;
-  }
-
-  .mobile-file-name {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .mobile-card-meta {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    font-size: 12px;
-    color: var(--text-secondary);
-  }
+.mobile-file-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 </style>

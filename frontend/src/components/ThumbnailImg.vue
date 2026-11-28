@@ -1,10 +1,15 @@
 <template>
-  <div ref="containerRef" :style="{ width: size + 'px', height: size + 'px', flexShrink: '0' }">
+  <div
+    ref="containerRef"
+    :class="fill ? 'w-full h-full shrink-0' : 'shrink-0'"
+    :style="fill ? undefined : { width: size + 'px', height: size + 'px' }"
+  >
     <img
       v-if="signed && url"
       :src="url"
       alt=""
-      :style="{ width: size + 'px', height: size + 'px', objectFit: fit, borderRadius: 'var(--radius-sm, 4px)' }"
+      :class="[fill ? 'w-full h-full block' : '', rounded === 'none' ? 'rounded-none' : 'rounded-sm']"
+      :style="fill ? { objectFit: fit } : { width: size + 'px', height: size + 'px', objectFit: fit }"
       @load="onLoad"
       @error="onError"
     />
@@ -30,6 +35,8 @@ const props = withDefaults(defineProps<{
   fileName?: string;
   size?: number;
   fit?: 'cover' | 'contain';
+  fill?: boolean;
+  rounded?: 'sm' | 'none';
   src?: string;
   /**
    * 访问上下文标识（登录 `u:<userId>` / 分享 `s:<token>`）。
@@ -38,14 +45,13 @@ const props = withDefaults(defineProps<{
   context?: string;
   /** 内容版本（覆盖上传时递增），覆盖后使旧 Blob 缓存失效 */
   version?: string | number;
-  /** @deprecated emoji prop is no longer used; kept for backward compat */
-  emoji?: string;
 }>(), {
   mimeType: '',
   fileName: '',
   size: 36,
   fit: 'cover',
-  emoji: '',
+  fill: false,
+  rounded: 'sm',
   src: '',
   context: '',
 });

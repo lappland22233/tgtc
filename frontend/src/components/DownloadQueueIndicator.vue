@@ -75,10 +75,11 @@ const headerHint = computed(() => {
 <style scoped>
 .download-queue:not(.queue-embedded) {
   position: fixed;
-  right: var(--space-4);
-  bottom: var(--space-4);
+  right: var(--space-2);
+  bottom: var(--space-2);
+  left: var(--space-2);
   z-index: 1000;
-  width: 320px;
+  width: auto;
   max-width: calc(100vw - var(--space-8));
   padding: var(--space-3) var(--space-4);
   border: 1px solid var(--border-default);
@@ -206,7 +207,8 @@ const headerHint = computed(() => {
 
 .download-queue__cancel {
   flex: none;
-  min-height: 24px;
+  min-height: 44px;
+  min-width: 64px;
   padding: 0 var(--space-2);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-sm);
@@ -227,16 +229,21 @@ const headerHint = computed(() => {
   outline-offset: 2px;
 }
 
-@media (max-width: 768px) {
+@media (min-width: 769px) {
   .download-queue:not(.queue-embedded) {
-    right: var(--space-2);
-    bottom: var(--space-2);
-    left: var(--space-2);
-    width: auto;
+    left: auto;
+    right: var(--space-4);
+    bottom: var(--space-4);
+    width: 320px;
+  }
+
+  .download-queue__cancel {
+    min-height: 24px;
+    min-width: unset;
   }
 }
 
-@media (max-width: 768px), (pointer: coarse) {
+@media (pointer: coarse) {
   .download-queue__cancel {
     min-height: 44px;
     min-width: 64px;

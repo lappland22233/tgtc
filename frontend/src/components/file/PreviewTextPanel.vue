@@ -124,7 +124,7 @@ const emit = defineEmits<{
   align-items: center;
   gap: 2px;
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 10px;
   font-variant-numeric: tabular-nums;
   color: var(--text-tertiary);
   white-space: nowrap;
@@ -139,9 +139,9 @@ const emit = defineEmits<{
   margin: 0;
   overflow: auto;
   overscroll-behavior: contain;
-  padding: 14px 16px;
+  padding: 12px;
   font-family: var(--font-mono);
-  font-size: 12.5px;
+  font-size: 12px;
   line-height: 1.7;
   color: var(--text-primary);
   tab-size: 4;
@@ -156,9 +156,14 @@ const emit = defineEmits<{
 .fpv-text::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 4px; }
 .fpv-text::-webkit-scrollbar-thumb:hover { background: var(--text-tertiary); }
 
-@media (max-width: 720px) {
+@media (min-width: 769px) {
   .fpv-text-toolbar-meta {
-    font-size: 10px;
+    font-size: 11px;
+  }
+
+  .fpv-text {
+    padding: 14px 16px;
+    font-size: 12.5px;
   }
 }
 </style>

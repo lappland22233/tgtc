@@ -867,21 +867,22 @@ defineExpose({
   position: relative;
   width: 100%;
   height: 100%;
-  background: #000;
-  border-radius: var(--radius-sm, 6px);
+  background: var(--media-stage-bg);
+  border-radius: var(--radius-sm);
   overflow: hidden;
   user-select: none;
   -webkit-user-select: none;
   cursor: default;
 }
 
-.cvp--fullscreen {
-  position: fixed !important;
-  inset: 0 !important;
-  z-index: 99999 !important;
+.cvp.cvp--fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 99999;
   border-radius: 0;
-  width: 100vw !important;
-  height: 100vh !important;
+  width: 100vw;
+  height: 100vh;
+  height: 100dvh;
 }
 
 /* ─── 视频 ─── */
@@ -902,22 +903,22 @@ defineExpose({
   width: 64px;
   height: 64px;
   border-radius: 50%;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  background: rgba(0, 0, 0, 0.55);
+  border: 1px solid var(--media-border);
+  background: var(--media-surface);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
-  color: rgba(255, 255, 255, 0.92);
+  color: var(--media-text-primary);
   display: flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
   z-index: 15;
-  transition: transform 0.2s var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1)),
+  transition: transform 0.2s var(--ease-out-expo),
               background 0.15s ease;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+  box-shadow: var(--media-shadow);
 }
 .cvp__center-play:hover {
-  background: rgba(0, 0, 0, 0.65);
+  background: var(--media-surface-hover);
   transform: translate(-50%, -50%) scale(1.06);
 }
 .cvp__center-play:active {
@@ -940,8 +941,8 @@ defineExpose({
 .cvp__spinner {
   width: 32px;
   height: 32px;
-  border: 2.5px solid rgba(255, 255, 255, 0.15);
-  border-top-color: rgba(255, 255, 255, 0.85);
+  border: 2.5px solid var(--media-track);
+  border-top-color: var(--media-text-primary);
   border-radius: 50%;
   animation: cvp-spin 0.75s linear infinite;
 }
@@ -949,7 +950,7 @@ defineExpose({
 .cvp__buffer-text {
   font-size: 12px;
   font-weight: 500;
-  color: rgba(255, 255, 255, 0.7);
+  color: var(--media-text-secondary);
   letter-spacing: 0.01em;
 }
 
@@ -960,14 +961,14 @@ defineExpose({
   left: 50%;
   transform: translate(-50%, -50%);
   padding: 8px 20px;
-  border-radius: var(--radius-lg, 12px);
-  background: rgba(0, 0, 0, 0.6);
+  border-radius: var(--radius-lg);
+  background: var(--media-surface-hover);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  border: 1px solid var(--media-border);
   font-size: 24px;
   font-weight: 600;
-  color: var(--seed-primary, #0972D3);
+  color: var(--seed-primary);
   letter-spacing: -0.02em;
   z-index: 18;
   pointer-events: none;
@@ -979,14 +980,14 @@ defineExpose({
   top: 50%;
   transform: translateY(-50%);
   padding: 6px 14px;
-  border-radius: var(--radius-md, 8px);
-  background: rgba(0, 0, 0, 0.55);
+  border-radius: var(--radius-md);
+  background: var(--media-surface);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--media-border-subtle);
   font-size: 14px;
   font-weight: 500;
-  color: rgba(255, 255, 255, 0.9);
+  color: var(--media-text-primary);
   z-index: 18;
   pointer-events: none;
 }
@@ -1002,15 +1003,15 @@ defineExpose({
   padding: 0 14px 12px;
   background: linear-gradient(
     to top,
-    rgba(0, 0, 0, 0.72) 0%,
-    rgba(0, 0, 0, 0.35) 60%,
+    var(--media-scrim) 0%,
+    var(--media-scrim-mid) 60%,
     transparent 100%
   );
   z-index: 20;
   opacity: 0;
   transform: translateY(4px);
-  transition: opacity 0.25s cubic-bezier(0.16, 1, 0.3, 1),
-              transform 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  transition: opacity 0.25s var(--ease-out-expo),
+              transform 0.25s var(--ease-out-expo);
   pointer-events: none;
 }
 .cvp--controls-visible .cvp__controls {
@@ -1037,7 +1038,7 @@ defineExpose({
 .cvp__progress-track {
   position: absolute;
   inset: 0;
-  background: rgba(255, 255, 255, 0.15);
+  background: var(--media-track);
   border-radius: 999px;
   overflow: hidden;
 }
@@ -1046,7 +1047,7 @@ defineExpose({
   top: 0;
   left: 0;
   bottom: 0;
-  background: rgba(255, 255, 255, 0.25);
+  background: var(--media-buffered);
   border-radius: 999px;
   transition: width 0.3s linear;
 }
@@ -1055,7 +1056,7 @@ defineExpose({
   top: 0;
   left: 0;
   bottom: 0;
-  background: var(--seed-primary, #0972D3);
+  background: var(--seed-primary);
   border-radius: 999px;
 }
 .cvp__progress-thumb {
@@ -1064,10 +1065,10 @@ defineExpose({
   width: 14px;
   height: 14px;
   border-radius: 50%;
-  background: var(--seed-primary, #0972D3);
-  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.2), 0 2px 6px rgba(0, 0, 0, 0.35);
+  background: var(--seed-primary);
+  box-shadow: 0 0 0 3px var(--media-thumb-ring), var(--media-thumb-shadow);
   transform: translate(-50%, -50%) scale(0);
-  transition: transform 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+  transition: transform 0.15s var(--ease-out-expo);
   z-index: 2;
 }
 .cvp__progress:hover .cvp__progress-thumb,
@@ -1079,15 +1080,15 @@ defineExpose({
   bottom: calc(100% + 8px);
   transform: translateX(-50%);
   padding: 3px 7px;
-  border-radius: var(--radius-sm, 4px);
-  background: rgba(0, 0, 0, 0.75);
+  border-radius: var(--radius-sm);
+  background: var(--media-surface-tooltip);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  font-family: ui-monospace, SF Mono, Menlo, monospace;
+  border: 1px solid var(--media-border);
+  font-family: var(--font-mono);
   font-size: 12px;
   font-weight: 500;
-  color: rgba(255, 255, 255, 0.9);
+  color: var(--media-text-primary);
   white-space: nowrap;
   pointer-events: none;
   z-index: 5;
@@ -1100,12 +1101,12 @@ defineExpose({
   gap: 2px;
 }
 .cvp__btn {
-  width: 36px;
-  height: 36px;
+  width: 32px;
+  height: 32px;
   border: none;
-  border-radius: var(--radius-md, 8px);
+  border-radius: var(--radius-md);
   background: transparent;
-  color: rgba(255, 255, 255, 0.85);
+  color: var(--media-text-primary);
   cursor: pointer;
   display: flex;
   align-items: center;
@@ -1115,15 +1116,15 @@ defineExpose({
   padding: 0;
 }
 .cvp__btn:hover {
-  background: rgba(255, 255, 255, 0.1);
-  color: #fff;
+  background: var(--media-hover);
+  color: var(--media-text);
 }
 .cvp__btn:active {
   transform: scale(0.9);
 }
 .cvp__btn--play {
-  width: 40px;
-  height: 40px;
+  width: 36px;
+  height: 36px;
 }
 .cvp__btn--speed,
 .cvp__btn--end-behavior {
@@ -1133,32 +1134,36 @@ defineExpose({
   font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.02em;
-  color: rgba(255, 255, 255, 0.7);
+  color: var(--media-text-secondary);
 }
 .cvp__btn--end-behavior {
   gap: 4px;
-  min-width: 62px;
+  min-width: 36px;
+  padding: 0;
+}
+.cvp__btn--end-behavior span {
+  display: none;
 }
 .cvp__btn--speed:hover,
 .cvp__btn--end-behavior:hover {
-  color: #fff;
+  color: var(--media-text);
 }
 
 /* ─── 时间 ─── */
 .cvp__time {
-  font-family: ui-monospace, SF Mono, Menlo, monospace;
-  font-size: 12px;
+  font-family: var(--font-mono);
+  font-size: 11px;
   font-weight: 500;
-  color: rgba(255, 255, 255, 0.6);
+  color: var(--media-text-muted);
   white-space: nowrap;
   padding: 0 4px;
-  min-width: 88px;
+  min-width: 76px;
 }
 .cvp__time-current {
-  color: rgba(255, 255, 255, 0.9);
+  color: var(--media-text-primary);
 }
 .cvp__time-sep {
-  color: rgba(255, 255, 255, 0.3);
+  color: var(--media-text-faint);
 }
 .cvp__spacer { flex: 1; }
 
@@ -1169,9 +1174,10 @@ defineExpose({
   position: relative;
 }
 .cvp__volume-slider-wrap {
+  display: none;
   width: 0;
   overflow: hidden;
-  transition: width 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  transition: width 0.2s var(--ease-out-expo);
 }
 .cvp__volume:hover .cvp__volume-slider-wrap {
   width: 72px;
@@ -1182,7 +1188,7 @@ defineExpose({
   width: 64px;
   height: 4px;
   border-radius: 2px;
-  background: rgba(255, 255, 255, 0.15);
+  background: var(--media-track);
   outline: none;
   margin: 0 4px;
   cursor: pointer;
@@ -1192,15 +1198,15 @@ defineExpose({
   width: 12px;
   height: 12px;
   border-radius: 50%;
-  background: #fff;
+  background: var(--media-text);
   cursor: pointer;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+  box-shadow: var(--media-thumb-shadow);
 }
 .cvp__volume-slider::-moz-range-thumb {
   width: 12px;
   height: 12px;
   border-radius: 50%;
-  background: #fff;
+  background: var(--media-text);
   border: none;
   cursor: pointer;
 }
@@ -1217,12 +1223,12 @@ defineExpose({
   right: 0;
   min-width: 96px;
   padding: 4px 0;
-  background: rgba(20, 22, 28, 0.88);
+  background: var(--media-surface-elevated);
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: var(--radius-md, 8px);
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  border: 1px solid var(--media-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--media-shadow);
   z-index: 30;
   transform-origin: bottom right;
 }
@@ -1241,7 +1247,7 @@ defineExpose({
   font-family: inherit;
   font-size: 13px;
   font-weight: 500;
-  color: rgba(255, 255, 255, 0.65);
+  color: var(--media-text-secondary);
   cursor: pointer;
   transition: background 0.1s ease, color 0.1s ease;
   text-align: center;
@@ -1253,23 +1259,23 @@ defineExpose({
 }
 .cvp__speed-item:hover,
 .cvp__end-behavior-item:hover {
-  background: rgba(255, 255, 255, 0.08);
-  color: rgba(255, 255, 255, 0.95);
+  background: var(--media-hover);
+  color: var(--media-text);
 }
 .cvp__speed-item--active,
 .cvp__end-behavior-item--active {
-  color: var(--seed-primary, #0972D3);
+  color: var(--seed-primary);
   font-weight: 600;
 }
 
-/* ─── 窄屏适配 ─── */
-@media (max-width: 480px) {
-  .cvp__btn--end-behavior { min-width: 36px; padding: 0; }
-  .cvp__btn--end-behavior span { display: none; }
-  .cvp__time { min-width: 76px; font-size: 11px; }
-  .cvp__btn { width: 32px; height: 32px; }
-  .cvp__btn--play { width: 36px; height: 36px; }
-  .cvp__volume-slider-wrap { display: none; }
+/* ─── 宽屏控件展开 ─── */
+@media (min-width: 481px) {
+  .cvp__btn { width: 36px; height: 36px; }
+  .cvp__btn--play { width: 40px; height: 40px; }
+  .cvp__btn--end-behavior { min-width: 62px; padding: 0 8px; }
+  .cvp__btn--end-behavior span { display: inline; }
+  .cvp__time { min-width: 88px; font-size: 12px; }
+  .cvp__volume-slider-wrap { display: block; }
 }
 
 /* ─── 过渡 ─── */

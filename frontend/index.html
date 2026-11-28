@@ -2,7 +2,7 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📦</text></svg>" />
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><rect width='24' height='24' rx='6' fill='%23006b5b'/><path d='M12 4.5L18.5 8.2v7.6L12 19.5l-6.5-3.7V8.2L12 4.5zM12 12l6.5-3.8M12 12v7.5M12 12L5.5 8.2' fill='none' stroke='%23ffffff' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/></svg>" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#F6F5EF" />
     <meta name="color-scheme" content="light dark" />
@@ -25,8 +25,9 @@
       content="default-src 'self'; script-src 'self' https://challenges.cloudflare.com https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: blob:; connect-src 'self' https://challenges.cloudflare.com https://cloudflareinsights.com https://*.cloudflareinsights.com; frame-src 'self' https://challenges.cloudflare.com; media-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'"
     />
 
-    <!-- 首屏使用工作台主题底色；静态样式随系统偏好选择亮色或深色。 -->
+    <!-- 首屏使用工作台主题底色；同源脚本在渲染前读取存储偏好防止闪烁。 -->
     <link rel="stylesheet" href="/critical.css" />
+    <script src="/theme-init.js"></script>
   </head>
   <body>
     <div id="app"></div>

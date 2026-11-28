@@ -6,8 +6,10 @@
     </div>
 
     <div class="card">
-      <div style="display: flex; justify-content: space-between; margin-bottom: 16px; flex-wrap: wrap; gap: 12px;">
-        <t-input v-model="searchEmail" placeholder="搜索用户邮箱..." style="width: min(100%, 300px);" @enter="searchUsers" autocomplete="off" name="admin-search-email" />
+      <div class="users-toolbar">
+        <div class="users-search-wrap">
+          <t-input v-model="searchEmail" placeholder="搜索用户邮箱..." @enter="searchUsers" autocomplete="off" name="admin-search-email" />
+        </div>
         <t-button theme="primary" @click="showCreateDialog = true">+ 创建用户</t-button>
       </div>
 
@@ -70,18 +72,18 @@
         <div v-for="user in users" :key="user.id" class="mobile-user-card">
           <div>
             <strong>{{ user.email }}</strong>
-            <div style="display: flex; gap: 6px; margin-top: 4px;">
+            <div class="user-tag-row">
               <t-tag :theme="getRoleTheme(user.role)" size="small">{{ getRoleText(user.role) }}</t-tag>
               <t-tag :theme="user.isBanned ? 'danger' : 'success'" size="small">{{ user.isBanned ? '已封禁' : '正常' }}</t-tag>
             </div>
-            <div style="font-size: 12px; color: var(--text-secondary); margin-top: 4px;">
+            <div class="user-meta-line user-meta-line--spaced">
               最后登录: {{ user.lastLoginAt ? formatDate(user.lastLoginAt) : '从未登录' }}
             </div>
-            <div style="font-size: 12px; color: var(--text-secondary);">
+            <div class="user-meta-line">
               注册时间: {{ formatDate(user.createdAt) }}
             </div>
           </div>
-          <div style="display: flex; gap: 4px; margin-top: 8px; flex-wrap: wrap;">
+          <div class="user-actions-row">
             <t-button
               v-if="user.role !== 'super_admin' && !isSelf(user.id)"
               size="small"
@@ -122,7 +124,7 @@
         </div>
       </div>
 
-      <div style="margin-top: 16px; display: flex; justify-content: center;">
+      <div class="pagination-center">
         <t-pagination
           v-model="page"
           :total="total"
@@ -421,14 +423,52 @@ onMounted(fetchUsers);
 </script>
 
 <style scoped>
-@media (max-width: 768px) {
-  .mobile-user-card {
-    background: var(--workspace-canvas);
-    border: 1px solid var(--workspace-border);
-    border-radius: 8px;
-    padding: 12px;
-    margin-bottom: 10px;
-    overflow-wrap: anywhere;
-  }
+.users-toolbar {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.users-search-wrap {
+  width: min(100%, 300px);
+}
+
+.user-tag-row {
+  display: flex;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.user-meta-line {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.user-meta-line--spaced {
+  margin-top: 4px;
+}
+
+.user-actions-row {
+  display: flex;
+  gap: 4px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+
+.pagination-center {
+  margin-top: 16px;
+  display: flex;
+  justify-content: center;
+}
+
+.mobile-user-card {
+  background: var(--workspace-canvas);
+  border: 1px solid var(--workspace-border);
+  border-radius: var(--radius-md);
+  padding: 12px;
+  margin-bottom: 10px;
+  overflow-wrap: anywhere;
 }
 </style>

@@ -40,7 +40,7 @@ function navigate(event: Event) {
 }
 </script>
 
-<style>
+<style scoped>
 .workspace-admin-rail {
   min-width: 0;
   padding: 10px 16px;
@@ -64,7 +64,7 @@ function navigate(event: Event) {
 
 .workspace-admin-rail :is(a,select):focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: 2px; }
 
-@media (min-width: 960px) {
+@media (min-width: 1024px) {
   .workspace-admin-rail {
     position: sticky;
     top: var(--workspace-header-height);

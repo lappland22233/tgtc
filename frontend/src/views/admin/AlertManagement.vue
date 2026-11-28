@@ -6,12 +6,13 @@
     </div>
 
     <!-- 统计卡片与操作 -->
-    <div style="display: flex; gap: 16px; align-items: center; margin-bottom: 16px; flex-wrap: wrap;">
-      <t-card style="flex: 0 0 auto; min-width: min(100%, 200px);">
-        <div style="text-align: center;">
-          <div style="font-size: 14px; color: var(--text-secondary); margin-bottom: 8px;">未确认告警</div>
+    <div class="alert-summary-bar">
+      <t-card class="alert-summary-card">
+        <div class="text-center">
+          <div class="alert-summary-label">未确认告警</div>
           <div
-            :style="{ fontSize: '28px', fontWeight: '700', color: unacknowledgedCount > 5 ? 'var(--color-danger)' : 'var(--color-warning)' }"
+            class="alert-summary-value"
+            :class="unacknowledgedCount > 5 ? 'text-err' : 'text-warn'"
           >
             {{ unacknowledgedCount }}
           </div>
@@ -23,18 +24,22 @@
     </div>
 
     <!-- 过滤器 -->
-    <div style="display: flex; gap: 12px; align-items: center; margin-bottom: 16px; flex-wrap: wrap;">
-      <t-select v-model="filterLevel" clearable placeholder="告警级别" style="width: 140px;" @change="fetchList(1)">
-        <t-option value="info" label="信息" />
-        <t-option value="warning" label="警告" />
-        <t-option value="critical" label="严重" />
-      </t-select>
-      <t-select v-model="filterAcknowledged" placeholder="确认状态" style="width: 140px;" @change="fetchList(1)">
-        <t-option :value="false" label="未确认" />
-        <t-option :value="true" label="已确认" />
-        <t-option :value="''" label="全部" />
-      </t-select>
-      <span style="font-size: 12px; color: var(--text-secondary);">共 {{ total }} 条</span>
+    <div class="table-filters">
+      <div class="alert-select-wrap">
+        <t-select v-model="filterLevel" clearable placeholder="告警级别" @change="fetchList(1)">
+          <t-option value="info" label="信息" />
+          <t-option value="warning" label="警告" />
+          <t-option value="critical" label="严重" />
+        </t-select>
+      </div>
+      <div class="alert-select-wrap">
+        <t-select v-model="filterAcknowledged" placeholder="确认状态" @change="fetchList(1)">
+          <t-option :value="false" label="未确认" />
+          <t-option :value="true" label="已确认" />
+          <t-option :value="''" label="全部" />
+        </t-select>
+      </div>
+      <span class="alert-total">共 {{ total }} 条</span>
     </div>
 
     <!-- Desktop table -->
@@ -68,14 +73,14 @@
         <t-popconfirm v-if="!row.acknowledgedAt" content="确认该告警？" @confirm="handleAcknowledge(row.id)">
           <t-button size="small" variant="outline" theme="primary">确认</t-button>
         </t-popconfirm>
-        <span v-else style="color: var(--text-secondary);">已确认</span>
+        <span v-else class="text-muted">已确认</span>
       </template>
     </t-table>
 
     <!-- Mobile cards -->
     <div v-if="isMobile" class="mobile-card-list">
       <t-loading :loading="loading" size="small">
-        <div v-if="list.length === 0 && !loading" style="text-align: center; padding: 24px 0; color: var(--text-secondary);">暂无告警</div>
+        <div v-if="list.length === 0 && !loading" class="empty-hint">暂无告警</div>
         <div v-for="item in list" :key="item.id" class="mobile-alert-card">
           <div class="mobile-alert-header">
             <t-tag
@@ -94,10 +99,10 @@
             <t-popconfirm v-if="!item.acknowledgedAt" content="确认该告警？" @confirm="handleAcknowledge(item.id)">
               <t-button size="small" variant="outline" theme="primary">确认</t-button>
             </t-popconfirm>
-            <span v-else style="color: var(--text-secondary); font-size: 12px;">已确认</span>
+            <span v-else class="mobile-alert-acked">已确认</span>
           </div>
         </div>
-        <div v-if="list.length > 0" style="margin-top: 12px; display: flex; justify-content: center;">
+        <div v-if="list.length > 0" class="mobile-pagination">
           <t-pagination
             v-model="currentPage"
             :total="total"
@@ -111,7 +116,7 @@
     </div>
 
     <!-- 分页 -->
-    <div v-if="!isMobile" style="margin-top: 16px; display: flex; justify-content: flex-end;">
+    <div v-if="!isMobile" class="desktop-pagination">
       <t-pagination
         v-model="currentPage"
         :total="total"
@@ -258,14 +263,57 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-@media (max-width: 768px) {
-  .mobile-alert-card {
-    background: var(--workspace-canvas);
-    border: 1px solid var(--workspace-border);
-    border-radius: 8px;
-    padding: 12px;
-    margin-bottom: 10px;
-  }
+.alert-summary-bar {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+
+.alert-summary-card {
+  flex: 0 0 auto;
+  min-width: min(100%, 200px);
+}
+
+.alert-summary-label {
+  font-size: 14px;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+}
+
+.alert-summary-value {
+  font-size: 28px;
+  font-weight: 700;
+}
+
+.text-err {
+  color: var(--color-danger);
+}
+
+.text-warn {
+  color: var(--color-warning);
+}
+
+.text-muted {
+  color: var(--text-secondary);
+}
+
+.alert-select-wrap {
+  width: 140px;
+}
+
+.alert-total {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.mobile-alert-card {
+  background: var(--workspace-canvas);
+  border: 1px solid var(--workspace-border);
+  border-radius: var(--radius-md);
+  padding: 12px;
+  margin-bottom: 10px;
 }
 
 .mobile-alert-header {
@@ -300,8 +348,25 @@ onUnmounted(() => {
   align-items: center;
 }
 
+.mobile-alert-time,
+.mobile-alert-acked {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
 .mobile-alert-time {
   font-size: 11px;
-  color: var(--text-secondary);
+}
+
+.mobile-pagination {
+  margin-top: 12px;
+  display: flex;
+  justify-content: center;
+}
+
+.desktop-pagination {
+  margin-top: 16px;
+  display: flex;
+  justify-content: flex-end;
 }
 </style>

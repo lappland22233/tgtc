@@ -1,7 +1,7 @@
 <template>
   <div
     v-if="unacknowledgedCount > 0"
-    style="cursor: pointer"
+    class="cursor-pointer"
     aria-live="polite"
     role="alert"
     @click="router.push('/admin/security?tab=alerts')"

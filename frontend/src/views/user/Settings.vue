@@ -6,7 +6,18 @@
     </div>
 
     <div class="card">
-      <h3 style="margin-bottom: 24px; font-family: var(--font-display); font-size: 16px; font-weight: 600;">
+      <h3 class="card-title">外观与主题</h3>
+      <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <div class="text-sm font-medium text-ink">界面配色模式</div>
+          <div class="text-xs text-ink-muted mt-0.5">支持浅色、深色以及跟随系统自动切换</div>
+        </div>
+        <ThemeToggle variant="segmented" />
+      </div>
+    </div>
+
+    <div class="card mt-5">
+      <h3 class="card-title">
         修改密码
       </h3>
       <t-form ref="passwordFormRef" :data="passwordForm" :rules="passwordRules" @submit="handlePasswordChange" layout="vertical">
@@ -25,11 +36,11 @@
       </t-form>
     </div>
 
-    <div class="card" style="margin-top: 20px;">
-      <h3 style="margin-bottom: 24px; font-family: var(--font-display); font-size: 16px; font-weight: 600;">
+    <div class="card mt-5">
+      <h3 class="card-title">
         账号信息
       </h3>
-      <t-descriptions :column="2" border>
+      <t-descriptions :column="isMobile ? 1 : 2" border>
         <t-descriptions-item label="邮箱">{{ authStore.user?.email }}</t-descriptions-item>
         <t-descriptions-item label="角色">
           <t-tag :theme="roleTheme" variant="light">{{ roleText }}</t-tag>
@@ -45,7 +56,7 @@
       </t-descriptions>
     </div>
 
-    <div class="card" style="margin-top: 20px;">
+    <div class="card mt-5">
       <ApiKeyManager />
     </div>
   </div>
@@ -57,10 +68,13 @@ import MessagePlugin from '@/utils/message';
 import { useAuthStore } from '../../stores/auth';
 import { api } from '../../stores/auth';
 import { getErrorMessage } from '../../utils/error';
+import { useMobile } from '../../composables/useMobile';
 import type { UserRole } from '../../types/user';
 import ApiKeyManager from '../../components/settings/ApiKeyManager.vue';
+import ThemeToggle from '../../components/ThemeToggle.vue';
 
 const authStore = useAuthStore();
+const isMobile = useMobile();
 
 const passwordFormRef = ref();
 

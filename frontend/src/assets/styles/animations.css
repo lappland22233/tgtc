@@ -1,0 +1,48 @@
+/* ============================================================
+   Route Transitions & Shared Keyframes
+   ============================================================ */
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity var(--duration-normal) var(--ease-out-expo);
+}
+
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
+}
+
+.route-view-container {
+  position: relative;
+}
+
+.slide-up-enter-active {
+  transition:
+    opacity var(--duration-normal) var(--ease-out-expo),
+    transform var(--duration-normal) var(--ease-out-expo);
+}
+
+.slide-up-leave-active {
+  transition:
+    opacity var(--duration-fast) var(--ease-out-expo),
+    transform var(--duration-fast) var(--ease-out-expo);
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+}
+
+.slide-up-enter-from {
+  opacity: 0;
+  transform: translateY(8px);
+}
+
+.slide-up-leave-to {
+  opacity: 0;
+  transform: translateY(-6px);
+}
+
+@keyframes tg-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

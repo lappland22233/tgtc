@@ -116,13 +116,14 @@ const emit = defineEmits<{
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 12px 16px;
+  min-height: 48px;
+  padding: 8px 10px;
   border-bottom: 1px solid var(--border-default);
   flex-shrink: 0;
 }
 
 .fpv-name {
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 500;
   color: var(--text-primary);
   overflow: hidden;
@@ -134,12 +135,12 @@ const emit = defineEmits<{
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
-  height: 28px;
+  width: 36px;
+  height: 36px;
   flex-shrink: 0;
   background: transparent;
   border: none;
-  border-radius: var(--radius-sm, 6px);
+  border-radius: var(--radius-sm);
   color: var(--text-secondary);
   font-size: 16px;
   cursor: pointer;
@@ -159,6 +160,7 @@ const emit = defineEmits<{
 }
 
 .fpv-playlist-indicator {
+  display: none;
   font-size: 12px;
   font-weight: 500;
   color: var(--text-tertiary);
@@ -171,11 +173,11 @@ const emit = defineEmits<{
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
-  height: 28px;
+  width: 36px;
+  height: 36px;
   background: transparent;
   border: none;
-  border-radius: var(--radius-sm, 6px);
+  border-radius: var(--radius-sm);
   color: var(--text-secondary);
   font-size: 16px;
   cursor: pointer;
@@ -186,7 +188,7 @@ const emit = defineEmits<{
   color: var(--text-accent);
 }
 .fpv-nav-btn:disabled {
-  color: var(--text-quaternary, #999);
+  color: var(--text-quaternary);
   cursor: default;
   opacity: 0.5;
 }
@@ -195,24 +197,24 @@ const emit = defineEmits<{
   background: var(--color-accent-soft);
 }
 
-@media (max-width: 720px) {
+@media (min-width: 769px) {
   .fpv-header {
-    min-height: 48px;
-    padding: 8px 10px;
+    min-height: unset;
+    padding: 12px 16px;
   }
 
   .fpv-name {
-    font-size: 13px;
+    font-size: 14px;
   }
 
   .fpv-playlist-indicator {
-    display: none;
+    display: inline-block;
   }
 
   .fpv-nav-btn,
   .fpv-close {
-    width: 36px;
-    height: 36px;
+    width: 28px;
+    height: 28px;
   }
 }
 

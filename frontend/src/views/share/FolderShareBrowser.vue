@@ -621,11 +621,27 @@ function formatRelativeDate(dateStr: string): string {
 .share-table-head,
 .share-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 84px 112px 120px;
+  grid-template-columns: minmax(0, 1fr) max-content;
   gap: 8px;
   align-items: center;
   padding: 6px var(--share-gutter);
   border-top: 1px solid var(--workspace-border);
+}
+
+.col-date,
+.share-table-head .col-size,
+.folder-row .col-size {
+  display: none;
+}
+
+.file-row { row-gap: 2px; }
+.file-row .col-size {
+  grid-area: 2 / 1;
+  padding-inline-start: 48px;
+  font-size: 12px;
+}
+.file-row .col-ops {
+  grid-area: 1 / 2 / 3;
 }
 
 .share-table-head {
@@ -658,7 +674,7 @@ function formatRelativeDate(dateStr: string): string {
 .col-size,
 .col-date,
 .load-more-hint { color: var(--workspace-muted); font-size: 13px; }
-.col-ops { justify-content: flex-end; }
+.col-ops { justify-content: flex-end; gap: 4px; }
 .op-link { justify-content: center; padding-inline: 6px; font-size: 13px; white-space: nowrap; }
 .download-action { background: var(--workspace-selected); font-weight: 600; }
 .download-action:hover:not(:disabled) { box-shadow: inset 0 0 0 1px var(--workspace-accent); }
@@ -681,38 +697,40 @@ function formatRelativeDate(dateStr: string): string {
 
 .empty-icon svg { width: 28px; height: 28px; }
 
-@media (max-width: 680px) {
+@media (min-width: 481px) {
   .share-table-head,
-  .share-row { grid-template-columns: minmax(0, 1fr) 70px 112px; }
-  .col-date { display: none; }
-}
-
-@media (max-width: 480px) {
-  .share-table-head,
-  .share-row { grid-template-columns: minmax(0, 1fr) max-content; }
+  .share-row { grid-template-columns: minmax(0, 1fr) 76px 112px; }
   .share-table-head .col-size,
-  .folder-row .col-size { display: none; }
-  .file-row { row-gap: 2px; }
+  .folder-row .col-size { display: block; }
+  .file-row { row-gap: 8px; }
   .file-row .col-size {
-    grid-area: 2 / 1;
-    padding-inline-start: 48px;
-    font-size: 12px;
+    grid-area: auto;
+    padding-inline-start: 0;
+    font-size: 13px;
   }
-  .file-row .col-ops { grid-area: 1 / 2 / 3; }
-  .col-ops { gap: 4px; }
+  .file-row .col-ops { grid-area: auto; }
+  .col-ops { gap: 8px; }
 }
 
-@media (max-width: 360px) {
-  .file-row .col-name { grid-column: 1 / -1; }
-  .file-row .col-ops { grid-area: 2 / 2; }
+@media (min-width: 769px) {
+  .share-table-head,
+  .share-row { grid-template-columns: minmax(0, 1fr) 84px 112px 120px; }
+  .col-date { display: block; }
 }
 
-@media (max-width: 768px), (pointer: coarse) {
+.breadcrumb-item,
+.op-link,
+.load-more-row :deep(.t-button),
+.back-to-parent :deep(.t-button) { min-height: 44px; }
+.breadcrumb-item,
+.op-link { min-width: 44px; }
+
+@media (min-width: 769px) and (pointer: fine) {
   .breadcrumb-item,
   .op-link,
   .load-more-row :deep(.t-button),
-  .back-to-parent :deep(.t-button) { min-height: 44px; }
+  .back-to-parent :deep(.t-button) { min-height: auto; }
   .breadcrumb-item,
-  .op-link { min-width: 44px; }
+  .op-link { min-width: auto; }
 }
 </style>

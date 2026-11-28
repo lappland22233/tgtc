@@ -1,6 +1,7 @@
 import { loadEnv } from 'vite';
 import { defineConfig } from 'vitest/config';
 import vue from '@vitejs/plugin-vue';
+import tailwindcss from '@tailwindcss/vite';
 import Components from 'unplugin-vue-components/vite';
 import { TDesignResolver } from 'unplugin-vue-components/resolvers';
 import { resolve } from 'path';
@@ -39,6 +40,7 @@ export default defineConfig(({ mode }) => {
     },
     plugins: [
       vue(),
+      tailwindcss(),
       Components({
         dts: mode !== 'test',
         resolvers: [

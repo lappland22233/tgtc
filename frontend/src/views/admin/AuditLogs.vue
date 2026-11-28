@@ -31,60 +31,65 @@
 
     <!-- 筛选栏 -->
     <div class="table-filters">
-      <t-select
-        v-model="filterStatus"
-        placeholder="结果状态"
-        clearable
-        style="width: 120px;"
-        @change="onFilterChange"
-      >
-        <t-option value="success" label="成功" />
-        <t-option value="failure" label="失败" />
-      </t-select>
-      <t-select
-        v-model="filterAction"
-        placeholder="操作类型"
-        clearable
-        style="width: 200px;"
-        @change="onFilterChange"
-      >
-        <t-option
-          v-for="opt in actionOptions"
-          :key="opt.value || 'all'"
-          :value="opt.value"
-          :label="opt.label"
+      <div class="filter-control filter-control--sm">
+        <t-select
+          v-model="filterStatus"
+          placeholder="结果状态"
+          clearable
+          @change="onFilterChange"
+        >
+          <t-option value="success" label="成功" />
+          <t-option value="failure" label="失败" />
+        </t-select>
+      </div>
+      <div class="filter-control filter-control--lg">
+        <t-select
+          v-model="filterAction"
+          placeholder="操作类型"
+          clearable
+          @change="onFilterChange"
+        >
+          <t-option
+            v-for="opt in actionOptions"
+            :key="opt.value || 'all'"
+            :value="opt.value"
+            :label="opt.label"
+          />
+        </t-select>
+      </div>
+      <div class="filter-control filter-control--md">
+        <t-input
+          v-model="filterUser"
+          placeholder="搜索用户..."
+          clearable
+          autocomplete="off"
+          name="audit-filter-user"
+          @enter="onFilterChange"
+          @clear="onFilterChange"
         />
-      </t-select>
-      <t-input
-        v-model="filterUser"
-        placeholder="搜索用户..."
-        clearable
-        style="width: 160px;"
-        autocomplete="off"
-        name="audit-filter-user"
-        @enter="onFilterChange"
-        @clear="onFilterChange"
-      />
-      <t-input
-        v-model="filterIp"
-        placeholder="搜索 IP..."
-        clearable
-        style="width: 160px;"
-        autocomplete="off"
-        name="audit-filter-ip"
-        @enter="onFilterChange"
-        @clear="onFilterChange"
-      />
-      <t-input
-        v-model="filterKeyword"
-        placeholder="关键词（操作/资源/详情）..."
-        clearable
-        style="width: 200px;"
-        autocomplete="off"
-        name="audit-filter-keyword"
-        @enter="onFilterChange"
-        @clear="onFilterChange"
-      />
+      </div>
+      <div class="filter-control filter-control--md">
+        <t-input
+          v-model="filterIp"
+          placeholder="搜索 IP..."
+          clearable
+          autocomplete="off"
+          name="audit-filter-ip"
+          @enter="onFilterChange"
+          @clear="onFilterChange"
+        />
+      </div>
+      <div class="filter-control filter-control--lg">
+        <t-input
+          v-model="filterKeyword"
+          placeholder="关键词（操作/资源/详情）..."
+          clearable
+          autocomplete="off"
+          name="audit-filter-keyword"
+          @enter="onFilterChange"
+          @clear="onFilterChange"
+        />
+      </div>
       <t-button variant="outline" @click="onRefresh">刷新</t-button>
     </div>
 
@@ -112,18 +117,18 @@
         </template>
         <template #resourceType="{ row }">
           <span v-if="row.resourceType">{{ resourceTypeLabel(row.resourceType) }}</span>
-          <span v-else style="color: var(--text-secondary)">-</span>
+          <span v-else class="text-muted">-</span>
         </template>
         <template #metadata="{ row }">
-          <span v-if="row.metadata" style="font-size: 12px; color: var(--text-secondary); max-width: 200px; display: inline-block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+          <span v-if="row.metadata" class="metadata-cell">
             {{ formatMetadata(row.metadata) }}
           </span>
           <span v-else>-</span>
         </template>
         <template #username="{ row }">
-          <span v-if="row.username" style="color: var(--text-primary);">{{ row.username }}</span>
-          <span v-else-if="row.userId" :title="row.userId" style="font-size: 11px; color: var(--text-secondary); font-family: monospace;">{{ truncateId(row.userId) }}</span>
-          <span v-else style="color: var(--text-secondary)">匿名</span>
+          <span v-if="row.username" class="audit-username">{{ row.username }}</span>
+          <span v-else-if="row.userId" :title="row.userId" class="mobile-audit-user-id">{{ truncateId(row.userId) }}</span>
+          <span v-else class="text-muted">匿名</span>
         </template>
         <template #createdAt="{ row }">
           {{ formatTime(row.createdAt) }}
@@ -133,7 +138,7 @@
       <!-- Mobile cards -->
       <div v-if="isMobile" class="mobile-card-list">
         <t-loading :loading="loading" size="small">
-          <div v-if="logs.length === 0 && !loading" style="text-align: center; padding: 24px 0; color: var(--text-secondary);">暂无数据</div>
+          <div v-if="logs.length === 0 && !loading" class="empty-hint">暂无数据</div>
           <div v-for="item in logs" :key="item.id" class="mobile-audit-card">
             <div class="mobile-audit-header">
               <t-tag :theme="actionTheme(item.action)" variant="light" size="small">{{ actionLabel(item.action) }}</t-tag>
@@ -143,13 +148,13 @@
               <span>
                 <span v-if="item.username" class="mobile-audit-user">{{ item.username }}</span>
                 <span v-else-if="item.userId" class="mobile-audit-user-id">{{ truncateId(item.userId) }}</span>
-                <span v-else style="color: var(--text-secondary);">匿名</span>
+                <span v-else class="text-muted">匿名</span>
               </span>
               <span class="mobile-audit-ip">{{ item.ip || '-' }}</span>
             </div>
             <div class="mobile-audit-time">{{ formatTime(item.createdAt) }}</div>
           </div>
-          <div v-if="logs.length > 0" style="margin-top: 12px; display: flex; justify-content: center;">
+          <div v-if="logs.length > 0" class="mobile-pagination">
             <t-pagination
               :current="pagination.current"
               :total="pagination.total"
@@ -464,37 +469,78 @@ onMounted(() => {
 
 .table-filters {
   display: flex;
+  flex-direction: column;
   gap: 12px;
   margin-bottom: 16px;
-  flex-wrap: wrap;
 }
 
-/* .card 容器使用全局定义，见 assets/styles.css */
+.filter-control {
+  width: 100%;
+}
+
+.text-muted {
+  color: var(--text-secondary);
+}
+
+.metadata-cell {
+  font-size: 12px;
+  color: var(--text-secondary);
+  max-width: 200px;
+  display: inline-block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.audit-username {
+  color: var(--text-primary);
+}
+
+.mobile-pagination {
+  margin-top: 12px;
+  display: flex;
+  justify-content: center;
+}
+
+/* .card 容器使用全局定义 */
 .email-stats-card {
   background: var(--workspace-canvas);
   border: 1px solid var(--workspace-border);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   padding: 14px 16px;
   margin-bottom: 16px;
 }
 .email-stats-title { font-weight: 600; margin-bottom: 10px; }
-.email-stats-grid { display: grid; grid-template-columns: repeat(4, minmax(100px, 1fr)); gap: 16px; }
+.email-stats-grid { display: grid; grid-template-columns: repeat(2, minmax(100px, 1fr)); gap: 16px; }
 .email-stats-grid div { display: flex; flex-direction: column; gap: 4px; color: var(--text-secondary); font-size: 12px; }
 .email-stats-grid strong { color: var(--text-primary); font-size: 20px; }
-.success-text { color: var(--color-success) !important; }
-.failure-text { color: var(--color-error) !important; }
+.email-stats-grid strong.success-text { color: var(--color-success); }
+.email-stats-grid strong.failure-text { color: var(--color-danger); }
 .email-stats-result { margin-top: 12px; font-size: 12px; }
-.result-failure, .result-mixed { color: var(--color-error); }
+.result-failure, .result-mixed { color: var(--color-danger); }
 .result-success { color: var(--color-success); }
 
-@media (max-width: 768px) {
-  .email-stats-grid { grid-template-columns: repeat(2, minmax(100px, 1fr)); }
+@media (min-width: 769px) {
+  .email-stats-grid {
+    grid-template-columns: repeat(4, minmax(100px, 1fr));
+  }
 
   .table-filters {
-    flex-direction: column;
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
   }
-  .table-filters > * {
-    width: 100% !important;
+
+  .filter-control--sm {
+    width: 120px;
+  }
+
+  .filter-control--md {
+    width: 160px;
+  }
+
+  .filter-control--lg {
+    width: 200px;
   }
 }
 

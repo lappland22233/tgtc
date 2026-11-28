@@ -2,6 +2,7 @@
   <div class="share-view">
     <header class="share-topbar">
       <WorkspaceBrand />
+      <ThemeToggle variant="icon" />
     </header>
 
     <main class="share-container" :class="{ 'share-container--wide': state.kind === 'folder' }">
@@ -89,6 +90,7 @@
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
 import { useRoute } from 'vue-router';
 import WorkspaceBrand from '@/components/WorkspaceBrand.vue';
+import ThemeToggle from '@/components/ThemeToggle.vue';
 import { useMediaPlaybackStore } from '../../stores/mediaPlayback';
 import { withXsrfHeader } from '../../utils/xsrf';
 import PasswordPrompt from './PasswordPrompt.vue';
@@ -353,6 +355,8 @@ watch(token, async (newToken, oldToken) => {
 .share-topbar {
   display: flex;
   align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
   min-height: var(--workspace-header-height);
   padding-inline: clamp(12px, 4vw, 32px);
   border-bottom: 1px solid var(--workspace-border);

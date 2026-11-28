@@ -1,17 +1,19 @@
 <template>
   <t-dialog v-model:visible="dialogVisible" header="标签管理" width="480px" @close="handleClose">
     <!-- 创建标签 -->
-    <div style="margin-bottom: 16px;">
-      <t-input v-model="newTagName" placeholder="输入标签名称（最多50字）" :maxlength="50" style="margin-bottom: 8px;" autocomplete="off" name="tag-name" @enter="handleCreate" />
-      <div style="display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px;">
-        <div
+    <div class="mb-4">
+      <div class="mb-2">
+        <t-input v-model="newTagName" placeholder="输入标签名称（最多50字）" :maxlength="50" autocomplete="off" name="tag-name" @enter="handleCreate" />
+      </div>
+      <div class="flex gap-1.5 flex-wrap mb-2">
+        <button
           v-for="c in presetColors"
           :key="c"
-          :style="{
-            width: '24px', height: '24px', borderRadius: '50%', background: c,
-            border: newTagColor === c ? '3px solid #fff' : '2px solid transparent',
-            cursor: 'pointer', boxSizing: 'border-box'
-          }"
+          type="button"
+          class="w-6 h-6 rounded-full cursor-pointer border-2 transition-transform"
+          :class="newTagColor === c ? 'border-surface ring-2 ring-brand scale-105' : 'border-transparent'"
+          :style="{ background: c }"
+          :aria-label="`选择颜色 ${c}`"
           @click="newTagColor = c"
         />
       </div>
@@ -19,28 +21,29 @@
     </div>
 
     <!-- 搜索标签 -->
-    <div v-if="tagStore.tags && tagStore.tags.length > 0" style="margin-bottom: 12px;">
+    <div v-if="tagStore.tags && tagStore.tags.length > 0" class="mb-3">
       <t-input v-model="tagSearch" placeholder="搜索标签名称..." clearable size="small" autocomplete="off" name="tag-search" />
     </div>
 
     <!-- 标签列表 -->
-    <div v-if="(!filteredTags || filteredTags.length === 0) && !tagStore.loading" style="text-align: center; padding: 24px; color: var(--text-secondary);">
+    <div v-if="(!filteredTags || filteredTags.length === 0) && !tagStore.loading" class="text-center p-6 text-ink-muted">
       {{ tagSearch ? '没有匹配的标签' : '暂无标签，输入名称创建第一个标签' }}
     </div>
-    <div v-else style="max-height: 300px; overflow-y: auto;">
+    <div v-else class="max-h-75 overflow-y-auto">
       <div
         v-for="tag in filteredTags"
         :key="tag.id"
-        style="display: flex; align-items: center; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--border-color); cursor: pointer;"
-        :style="{ background: selectedTagIds.includes(tag.id) ? 'var(--color-primary-light, rgba(0,82,217,0.08))' : 'transparent' }"
+        class="flex items-center justify-between py-2 border-b border-line cursor-pointer"
+        :class="selectedTagIds.includes(tag.id) ? 'bg-brand-soft' : 'bg-transparent'"
         @click="toggleTagFilter(tag.id)"
       >
-        <div style="display: flex; align-items: center; gap: 8px;">
+        <div class="flex items-center gap-2">
           <div
-            :style="{ width: '14px', height: '14px', borderRadius: '50%', background: tag.color, flexShrink: 0 }"
+            class="w-3.5 h-3.5 rounded-full shrink-0"
+            :style="{ background: tag.color }"
           />
-          <span :style="{ color: 'var(--text-primary)' }">{{ tag.name }}</span>
-          <span style="color: var(--text-secondary); font-size: 12px;">（{{ tag.fileCount || 0 }} 个文件）</span>
+          <span class="text-ink">{{ tag.name }}</span>
+          <span class="text-ink-muted text-xs">（{{ tag.fileCount || 0 }} 个文件）</span>
         </div>
         <t-button
           v-if="tag.userId === currentUserId"
@@ -80,14 +83,14 @@ const emit = defineEmits<{
 
 const dialogVisible = ref(false);
 const newTagName = ref('');
-const newTagColor = ref('#0052d9');
+const newTagColor = ref('#006b5b');
 const tagSearch = ref('');
 const tagStore = useTagStore();
 const authStore = useAuthStore();
 const currentUserId = ref('');
 
 const presetColors = [
-  '#0052d9', '#0594fa', '#00a870', '#ebb105', '#e37318',
+  '#006b5b', '#0594fa', '#00a870', '#ebb105', '#e37318',
   '#e34d59', '#ed49b4', '#834ec2', '#b2b2b2',
 ];
 
@@ -108,7 +111,7 @@ watch(() => props.visible, async (val) => {
     currentUserId.value = authStore.user?.id || '';
     await tagStore.fetchTags();
     newTagName.value = '';
-    newTagColor.value = '#0052d9';
+    newTagColor.value = '#006b5b';
     tagSearch.value = '';
   }
 });
@@ -123,7 +126,7 @@ async function handleCreate() {
   try {
     await tagStore.createTag(name, newTagColor.value);
     newTagName.value = '';
-    newTagColor.value = '#0052d9';
+    newTagColor.value = '#006b5b';
   } catch (err) {
     MessagePlugin.error(getErrorMessage(err) || '创建标签失败');
   }

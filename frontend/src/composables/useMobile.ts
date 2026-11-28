@@ -7,7 +7,7 @@ import { ref, onMounted, onUnmounted, computed } from 'vue';
 
 export type Breakpoint = 'xs' | 'sm' | 'md' | 'lg' | 'xl';
 
-const BREAKPOINTS = {
+export const BREAKPOINTS = {
   xs: 480,
   sm: 768,
   md: 1024,
@@ -36,6 +36,7 @@ const isMobile = computed(() => currentBreakpoint.value === 'xs' || currentBreak
 const isTablet = computed(() => currentBreakpoint.value === 'md');
 const isPhone = computed(() => currentBreakpoint.value === 'xs');
 const isDesktop = computed(() => currentBreakpoint.value === 'lg' || currentBreakpoint.value === 'xl');
+const isRailInline = computed(() => windowWidth.value >= BREAKPOINTS.md);
 
 let listenerCount = 0;
 let resizeHandler: (() => void) | null = null;
@@ -95,5 +96,6 @@ export function useBreakpoint() {
     isTablet,
     isPhone,
     isDesktop,
+    isRailInline,
   };
 }

@@ -53,14 +53,14 @@
         <t-button theme="primary" @click="copyLink">复制链接</t-button>
       </div>
       <div class="result-hint">
-        <span v-if="form.password" style="display: inline-flex; align-items: center; gap: 3px;">
+        <span v-if="form.password" class="inline-flex items-center gap-[3px]">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <rect x="3" y="11" width="18" height="11" rx="2" />
             <path d="M7 11V7a5 5 0 0110 0v4" />
           </svg>
           加密分享
         </span>
-        <span v-else style="display: inline-flex; align-items: center; gap: 3px;">
+        <span v-else class="inline-flex items-center gap-[3px]">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <circle cx="12" cy="12" r="10" />
             <path d="M2 12h20" />
@@ -224,8 +224,8 @@ function handleClose() {
   align-items: center;
   gap: 8px;
   padding: 8px 12px;
-  background: var(--td-bg-color-secondarycontainer);
-  border-radius: 6px;
+  background: var(--color-bg-elevated);
+  border-radius: var(--radius-md);
   font-size: 14px;
 }
 
@@ -243,22 +243,22 @@ function handleClose() {
 
 .form-hint {
   font-size: 12px;
-  color: var(--td-text-color-placeholder);
+  color: var(--text-tertiary);
   margin-top: 4px;
 }
 
 .share-result {
   margin-top: 20px;
   padding: 16px;
-  background: var(--td-success-color-1);
-  border: 1px solid var(--td-success-color-3);
-  border-radius: 8px;
+  background: var(--color-success-soft);
+  border: 1px solid color-mix(in srgb, var(--color-success) 35%, transparent);
+  border-radius: var(--radius-md);
 }
 
 .result-label {
   font-size: 13px;
   font-weight: 500;
-  color: var(--td-success-color);
+  color: var(--color-success);
   margin-bottom: 8px;
 }
 
@@ -279,7 +279,7 @@ function handleClose() {
 
 .result-hint {
   font-size: 12px;
-  color: var(--td-text-color-secondary);
+  color: var(--text-secondary);
   display: flex;
   gap: 8px;
 }

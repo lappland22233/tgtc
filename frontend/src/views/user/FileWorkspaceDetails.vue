@@ -87,7 +87,7 @@ const fileTypeLabel = computed(() => {
 });
 </script>
 
-<style>
+<style scoped>
 .workspace-details { min-width: 0; padding: 16px; color: var(--workspace-text); }
 
 .details-heading {
@@ -186,9 +186,14 @@ button.details-preview:hover { border-color: var(--workspace-accent); }
 .details-close:hover, .details-actions button:hover { color: var(--workspace-accent); background: var(--workspace-selected); }
 .workspace-details button:focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: 2px; }
 
-@media (min-width: 375px) and (max-width: 768px) {
-  .details-body { display: grid; grid-template-columns: minmax(128px, 40%) minmax(0, 1fr); gap: 12px; align-items: start; }
+@media (min-width: 481px) {
+  .details-body { display: grid; grid-template-columns: minmax(112px, 38%) minmax(0, 1fr); gap: 12px; align-items: start; }
   .details-info h3 { margin-top: 0; }
+}
+
+@media (min-width: 769px) {
+  .details-body { display: block; }
+  .details-info h3 { margin-top: 12px; }
 }
 
 @media (pointer: coarse) {
