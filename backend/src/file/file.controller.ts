@@ -603,7 +603,7 @@ export class FileController {
   async thumbnail(
     @Param('id') id: string,
     @CurrentUser() user: User,
-    @Req() _req: Request,
+    @Req() req: Request,
     @Res() res: Response,
   ) {
     try {
@@ -624,11 +624,9 @@ export class FileController {
       });
       await pipe(result.stream, res);
     } catch (error) {
-      const message = error instanceof Error ? error.message : '预览失败';
-      const status = (error as { status?: number }).status || 500;
-      if (!res.headersSent) {
-        res.status(status).json({ code: status, message, data: null });
-      }
+      // A-13：必须走统一脱敏出口。手写 catch 会把 5xx 的 error.message 直接回显，
+      // 绕过 StreamResponderService 的「5xx 一律用安全通用文案 + requestId」规则。
+      this.streamResponder.handleError(res, error, '预览失败', req);
     }
   }
 
@@ -643,7 +641,7 @@ export class FileController {
   async thumbnailHd(
     @Param('id') id: string,
     @CurrentUser() user: User,
-    @Req() _req: Request,
+    @Req() req: Request,
     @Res() res: Response,
   ) {
     try {
@@ -661,11 +659,9 @@ export class FileController {
       });
       await pipe(result.stream, res);
     } catch (error) {
-      const message = error instanceof Error ? error.message : '预览失败';
-      const status = (error as { status?: number }).status || 500;
-      if (!res.headersSent) {
-        res.status(status).json({ code: status, message, data: null });
-      }
+      // A-13：必须走统一脱敏出口。手写 catch 会把 5xx 的 error.message 直接回显，
+      // 绕过 StreamResponderService 的「5xx 一律用安全通用文案 + requestId」规则。
+      this.streamResponder.handleError(res, error, '预览失败', req);
     }
   }
 
@@ -1008,11 +1004,8 @@ export class FileController {
     try {
       await this.fileService.ensureLegacyPublicShare(id);
     } catch (error) {
-      const status = (error as { status?: number }).status || 500;
-      const message = (error as Error).message || '文件不存在';
-      if (!res.headersSent) {
-        res.status(status).json({ code: status, message, data: null });
-      }
+      // A-13：统一脱敏出口，避免 5xx 回显内部 error.message
+      this.streamResponder.handleError(res, error, '文件不存在', req);
       return;
     }
 
