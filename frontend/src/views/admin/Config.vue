@@ -106,6 +106,7 @@ import { api } from '../../stores/auth';
 import { usePublicConfigStore } from '../../stores/public-config';
 import { useUploadConfigStore } from '../../stores/upload-config';
 import { getErrorMessage } from '../../utils/error';
+import { formatDate } from '../../utils/format';
 import { isValidIP } from '../../utils/ip';
 // 副本有效目标（只读观测）：与「Telegram 账号池」页共用同一份解析结果
 import { fetchReplicationAudit } from '../../api/telegram-accounts';
@@ -313,10 +314,6 @@ const ipColumns = [
   { colKey: 'expiresAt', title: '到期时间', width: '150' },
   { colKey: 'operations', title: '操作', width: '100' },
 ];
-
-function formatDate(date: string) {
-  return new Date(date).toLocaleDateString('zh-CN');
-}
 
 async function fetchSiteConfig(): Promise<boolean> {
   // 经共享 store 读取（与启动初始化合并并发请求）；失败时 store 保留最后成功值，

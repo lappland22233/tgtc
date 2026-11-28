@@ -49,6 +49,7 @@ import { computed, ref } from 'vue';
 import MessagePlugin from '@/utils/message';
 import { triggerBrowserDownload, LARGE_FILE_DOWNLOAD_TIP, isLargeFile } from '@/utils/download';
 import { getPreviewKind, buildSharePreviewUrl, buildShareThumbnailUrl } from '@/utils/preview';
+import { formatSizeCompact as formatSize } from '@/utils/format';
 import ThumbnailImg from '@/components/ThumbnailImg.vue';
 import { useMediaPlaybackStore } from '../../stores/mediaPlayback';
 
@@ -93,15 +94,6 @@ function openPreview() {
 }
 
 const downloadUrl = computed(() => `/api/s/${encodeURIComponent(props.token)}/download/${encodeURIComponent(props.info.id)}`);
-
-function formatSize(bytes: number): string {
-  if (bytes <= 0) return '0 B';
-  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-  let i = 0;
-  let size = bytes;
-  while (size >= 1024 && i < units.length - 1) { size /= 1024; i++; }
-  return `${size.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
-}
 
 function formatDateTime(dateStr: string): string {
   try {
