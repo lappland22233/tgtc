@@ -12,7 +12,8 @@ describe('RateLimitService', () => {
 
   it('allows a non-locked upsert result', async () => {
     query.mockResolvedValue([{ attemptCount: 1, lockedUntil: null }]);
-    await expect(service.checkAndIncrement('k', 't', 3, 1000, 1000)).resolves.toEqual({ allowed: true });
+    // attemptCount 随结果返回：登录失败审计需要记录「实际失败次数」而非配置上限
+    await expect(service.checkAndIncrement('k', 't', 3, 1000, 1000)).resolves.toEqual({ allowed: true, attemptCount: 1 });
     expect(query).toHaveBeenCalledWith(expect.stringContaining('ON CONFLICT'), expect.arrayContaining(['k', 't']));
   });
 

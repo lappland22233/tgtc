@@ -1,19 +1,19 @@
 <template>
   <t-dialog v-model:visible="dialogVisible" header="编辑标签" width="400px" @close="handleClose" :confirm-btn="null">
-    <div v-if="tagStore.tags && tagStore.tags.length > 0" style="display: flex; gap: 6px; flex-wrap: wrap;">
+    <div v-if="tagStore.tags && tagStore.tags.length > 0" class="flex gap-1.5 flex-wrap">
       <t-tag
         v-for="tag in tagStore.tags"
         :key="tag.id"
         :theme="selectedIds.has(tag.id) ? 'primary' : 'default'"
         :variant="selectedIds.has(tag.id) ? 'dark' : 'outline'"
-        style="cursor: pointer;"
+        class="cursor-pointer"
         @click="toggle(tag.id)"
       >
-        <span :style="{ display: 'inline-block', width: '8px', height: '8px', borderRadius: '50%', background: tag.color, marginRight: '4px' }" />
+        <span class="inline-block w-2 h-2 rounded-full mr-1" :style="{ background: tag.color }" />
         {{ tag.name }}
       </t-tag>
     </div>
-    <div v-else style="text-align: center; padding: 16px; color: var(--text-secondary);">
+    <div v-else class="text-center p-4 text-ink-muted">
       暂无标签，请先在标签管理中创建
     </div>
     <template #footer>

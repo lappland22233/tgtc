@@ -122,8 +122,9 @@ export class TagService {
     try {
       await this.tagRepository.update(id, dto);
     } catch (error) {
-      // TOCTOU：并发重命名可能命中唯一约束（23505），转为 409
-      if ((error as { code?: string })?.code === '23505') {
+      // TOCTOU：并发重命名可能命中唯一约束，转为 409。
+      // 必须用跨方言判定：只认 PG 的 23505 会让 SQLite 部署下的并发重名抛 500。
+      if (isDatabaseUniqueViolation(error)) {
         throw new ConflictException('标签名称已存在');
       }
       throw error;

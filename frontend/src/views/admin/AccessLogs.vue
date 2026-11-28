@@ -14,7 +14,7 @@
 
     <!-- 时间范围选择器和自动刷新 -->
     <div class="toolbar">
-      <div style="display: flex; gap: 12px; align-items: center; flex-wrap: wrap;">
+      <div class="toolbar-inner">
         <t-radio-group v-model="timeRange" variant="default-filled" @change="onTimeRangeChange">
           <t-radio-button value="1h">1小时</t-radio-button>
           <t-radio-button value="24h">24小时</t-radio-button>
@@ -22,18 +22,19 @@
           <t-radio-button value="30d">30天</t-radio-button>
         </t-radio-group>
         <div class="refresh-controls">
-          <label style="font-size: 12px; color: var(--text-secondary); white-space: nowrap;">自动刷新：</label>
-          <t-select
-            v-model="autoRefreshInterval"
-            style="width: 100px;"
-            :popup-props="{ overlayStyle: { minWidth: '100px' } }"
-            @change="updateAutoRefresh"
-          >
-            <t-option :value="0" label="关闭" />
-            <t-option :value="30000" label="30秒" />
-            <t-option :value="60000" label="1分钟" />
-            <t-option :value="300000" label="5分钟" />
-          </t-select>
+          <label class="refresh-label">自动刷新：</label>
+          <div class="refresh-select-wrap">
+            <t-select
+              v-model="autoRefreshInterval"
+              :popup-props="{ overlayStyle: { minWidth: '100px' } }"
+              @change="updateAutoRefresh"
+            >
+              <t-option :value="0" label="关闭" />
+              <t-option :value="30000" label="30秒" />
+              <t-option :value="60000" label="1分钟" />
+              <t-option :value="300000" label="5分钟" />
+            </t-select>
+          </div>
           <span v-if="lastRefreshTime" class="refresh-timestamp">
             最后更新：{{ lastRefreshTime }}
           </span>
@@ -73,7 +74,7 @@
       </div>
       <div class="metric-card error-card" v-if="stats.errorRate > 0">
         <div class="metric-label">错误率</div>
-        <div class="metric-value" style="color: var(--color-danger);">{{ stats.errorRate }}%</div>
+        <div class="metric-value metric-value--danger">{{ stats.errorRate }}%</div>
         <div class="metric-sub">4xx/5xx 占比</div>
       </div>
     </div>
@@ -130,7 +131,7 @@
 
     <!-- 路径访问排行 -->
     <div class="card section-card">
-      <h3 style="margin: 0 0 16px 0;">路径访问排行</h3>
+      <h3 class="section-heading">路径访问排行</h3>
       <t-loading :loading="topPathsLoading" size="small">
         <t-table
           :data="topPaths"
@@ -162,7 +163,7 @@
 
     <!-- 异常 IP 监控 -->
     <div class="card section-card">
-      <h3 style="margin: 0 0 16px 0;">异常 IP 监控</h3>
+      <h3 class="section-heading">异常 IP 监控</h3>
       <t-loading :loading="abnormalIpsLoading" size="small">
         <t-table
           :data="abnormalIps"
@@ -208,26 +209,27 @@
 
     <!-- 访问记录表格 -->
     <div class="card">
-      <h3 style="margin-bottom: 16px;">访问记录</h3>
+      <h3 class="section-heading">访问记录</h3>
 
       <div class="table-filters">
-        <t-input
-          v-model="filterPath"
-          placeholder="搜索请求路径..."
-          clearable
-          style="width: 260px;"
-          @enter="onFilterChange"
-          @clear="onFilterChange"
-          autocomplete="off"
-          name="access-filter-path"
-        />
-        <t-select
-          v-model="filterStatus"
-          placeholder="状态码"
-          clearable
-          style="width: 140px;"
-          @change="onFilterChange"
-        >
+        <div class="filter-control filter-control--path">
+          <t-input
+            v-model="filterPath"
+            placeholder="搜索请求路径..."
+            clearable
+            @enter="onFilterChange"
+            @clear="onFilterChange"
+            autocomplete="off"
+            name="access-filter-path"
+          />
+        </div>
+        <div class="filter-control filter-control--status">
+          <t-select
+            v-model="filterStatus"
+            placeholder="状态码"
+            clearable
+            @change="onFilterChange"
+          >
           <t-option :value="undefined" label="全部" />
           <t-option value="200" label="200 OK" />
           <t-option value="301" label="301 Moved" />
@@ -238,7 +240,8 @@
           <t-option value="403" label="403 Forbidden" />
           <t-option value="404" label="404 Not Found" />
           <t-option value="500" label="500 Server Error" />
-        </t-select>
+          </t-select>
+        </div>
         <t-button variant="outline" @click="onRefresh">刷新</t-button>
       </div>
 
@@ -258,9 +261,15 @@
             <span class="path-text">{{ truncatePath(row.path, 60) }}</span>
             <t-tooltip v-if="row.path.length > 60" theme="light" placement="top">
               <template #content>
-                <div style="max-width: 400px; word-break: break-all;">{{ row.path }}</div>
+                <div class="path-tooltip-content">{{ row.path }}</div>
               </template>
-              <span class="path-info-icon">&#9432;</span>
+              <span class="path-info-icon" aria-label="完整路径">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <circle cx="12" cy="12" r="10" />
+                  <line x1="12" y1="16" x2="12" y2="12" />
+                  <line x1="12" y1="8" x2="12.01" y2="8" />
+                </svg>
+              </span>
             </t-tooltip>
           </div>
         </template>
@@ -292,7 +301,7 @@
           <div v-for="item in logs" :key="item.id" class="mobile-access-card">
             <div class="mobile-access-header">
               <code class="mobile-access-ip">{{ item.ip }}</code>
-              <div style="display: flex; gap: 6px; align-items: center;">
+              <div class="mobile-access-tags">
                 <t-tag :theme="methodTheme(item.method)" variant="outline" size="small">{{ item.method }}</t-tag>
                 <t-tag :theme="statusTheme(item.statusCode)" variant="light" size="small">{{ item.statusCode }}</t-tag>
               </div>
@@ -301,10 +310,10 @@
             <div class="mobile-access-meta">
               <span>{{ item.duration }}ms</span>
               <span>{{ formatSizeUtil(item.responseSize) }}</span>
-              <span style="color: var(--text-secondary); font-size: 11px;">{{ formatTime(item.createdAt) }}</span>
+              <span class="mobile-access-time">{{ formatTime(item.createdAt) }}</span>
             </div>
           </div>
-          <div v-if="logs.length > 0" style="margin-top: 12px; display: flex; justify-content: center;">
+          <div v-if="logs.length > 0" class="mobile-pagination">
             <t-pagination
               :current="pagination.current"
               :total="pagination.total"
@@ -320,22 +329,22 @@
 
       <t-tab-panel value="source" label="来源分析">
         <SourceAnalysis v-if="isTabMounted('source')" ref="sourceAnalysisRef" />
-        <div v-else class="analysis-placeholder" :style="ANALYSIS_PLACEHOLDER_STYLE" />
+        <div v-else class="analysis-placeholder" />
       </t-tab-panel>
 
       <t-tab-panel value="bandwidth" label="带宽分析">
         <BandwidthAnalysis v-if="isTabMounted('bandwidth')" ref="bandwidthRef" />
-        <div v-else class="analysis-placeholder" :style="ANALYSIS_PLACEHOLDER_STYLE" />
+        <div v-else class="analysis-placeholder" />
       </t-tab-panel>
 
       <t-tab-panel value="filetypes" label="文件类型">
         <FileTypeAnalysis v-if="isTabMounted('filetypes')" ref="fileTypeRef" />
-        <div v-else class="analysis-placeholder" :style="ANALYSIS_PLACEHOLDER_STYLE" />
+        <div v-else class="analysis-placeholder" />
       </t-tab-panel>
 
       <t-tab-panel value="bot" label="Bot 使用">
         <BotUsageAnalysis v-if="isTabMounted('bot')" ref="botUsageRef" />
-        <div v-else class="analysis-placeholder" :style="ANALYSIS_PLACEHOLDER_STYLE" />
+        <div v-else class="analysis-placeholder" />
       </t-tab-panel>
     </t-tabs>
 
@@ -347,7 +356,7 @@
       :on-confirm="handleBanSubmit"
       width="460px"
     >
-      <t-form label-width="80px">
+      <t-form label-align="top">
         <t-form-item label="IP 地址">
           <t-input :value="banForm.ip" disabled />
         </t-form-item>
@@ -361,13 +370,16 @@
           </t-radio-group>
         </t-form-item>
         <t-form-item v-if="!banForm.isPermanent" label="封禁时长">
-          <t-input-number
-            v-model="banForm.durationHours"
-            :min="1"
-            :max="720"
-            style="width: 120px"
-          />
-          <span style="margin-left: 8px; color: var(--text-secondary); font-size: 13px">小时</span>
+          <div class="flex items-center gap-2">
+            <div class="ban-duration-wrap">
+              <t-input-number
+                v-model="banForm.durationHours"
+                :min="1"
+                :max="720"
+              />
+            </div>
+            <span class="ban-duration-unit">小时</span>
+          </div>
         </t-form-item>
       </t-form>
     </t-dialog>
@@ -382,8 +394,18 @@ import client from '../../api/client';
 import { formatSize as formatSizeUtil } from '@/utils/format';
 import FileTypeIcon from '@/components/FileTypeIcon.vue';
 import { useMobile } from '../../composables/useMobile';
+import { useTheme } from '../../composables/useTheme';
 import { useChartResize } from '../../composables/useChartResize';
-import { CHART_COLORS, STATUS_COLORS, tooltipBase, legendBase, areaGradient, ensureCyberTheme } from '../../utils/echarts-theme';
+import {
+  getThemeChartColors,
+  getTooltipBase,
+  getLegendBase,
+  areaGradient,
+  ensureCyberTheme,
+  refreshChartTheme,
+} from '../../utils/echarts-theme';
+
+const { resolvedTheme } = useTheme();
 
 // PERF-F-105：4 个分析组件合计约 2300 行且各自持有 echarts 实例，
 // 静态导入会让「访问日志」页首屏就为不可见的 tab 付出全部代码与图表库体积。
@@ -392,9 +414,6 @@ const SourceAnalysis = defineAsyncComponent(() => import('./SourceAnalysis.vue')
 const BandwidthAnalysis = defineAsyncComponent(() => import('./BandwidthAnalysis.vue'));
 const FileTypeAnalysis = defineAsyncComponent(() => import('./FileTypeAnalysis.vue'));
 const BotUsageAnalysis = defineAsyncComponent(() => import('./BotUsageAnalysis.vue'));
-
-// 懒加载期间的分析面板占位：高度贴近真实图表容器，避免切 tab 时布局跳动。
-const ANALYSIS_PLACEHOLDER_STYLE = { minHeight: '320px' };
 
 // 4 个懒加载分析 tab 的取值集合（与 t-tab-panel 的 value 一一对应）。
 const ANALYSIS_TABS = new Set(['source', 'bandwidth', 'filetypes', 'bot']);
@@ -409,12 +428,6 @@ const visitedTabs = reactive(new Set<string>());
 function isTabMounted(tab: string): boolean {
   return visitedTabs.has(tab);
 }
-
-// Theme-aware chart colors
-const isDark = () => document.documentElement.getAttribute('data-theme') === 'dark';
-const axisLabelColor = () => isDark() ? '#8895A7' : '#5F6B7A';
-const axisLineColor = () => isDark() ? 'rgba(232,237,245,0.12)' : 'rgba(22,25,31,0.12)';
-const splitLineColor = () => isDark() ? 'rgba(232,237,245,0.06)' : 'rgba(22,25,31,0.06)';
 
 // Top-level tab state
 const accessTab = ref('overview');
@@ -880,36 +893,37 @@ async function updateTrendChart(trendData: TrendItem[]) {
       : d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
   });
 
+  const { palette, axisLabel, axisLine, splitLine } = getThemeChartColors();
   trendChart.setOption({
     tooltip: {
       trigger: 'axis',
-      ...tooltipBase,
+      ...getTooltipBase(),
     },
     legend: {
       data: ['请求数', '带宽'],
-      ...legendBase,
+      ...getLegendBase(),
       top: 0,
     },
     grid: { left: 50, right: 60, top: 30, bottom: 30 },
     xAxis: {
       type: 'category',
       data: times,
-      axisLabel: { color: axisLabelColor(), fontSize: 11, rotate: trendData.length > 24 ? 45 : 0 },
-      axisLine: { lineStyle: { color: axisLineColor() } },
+      axisLabel: { color: axisLabel, fontSize: 11, rotate: trendData.length > 24 ? 45 : 0 },
+      axisLine: { lineStyle: { color: axisLine } },
     },
     yAxis: [
       {
         type: 'value',
         name: '请求数',
-        nameTextStyle: { color: axisLabelColor(), fontSize: 11 },
-        axisLabel: { color: axisLabelColor(), fontSize: 11 },
-        splitLine: { lineStyle: { color: splitLineColor(), type: 'dashed' } },
+        nameTextStyle: { color: axisLabel, fontSize: 11 },
+        axisLabel: { color: axisLabel, fontSize: 11 },
+        splitLine: { lineStyle: { color: splitLine, type: 'dashed' } },
       },
       {
         type: 'value',
         name: '带宽',
-        nameTextStyle: { color: axisLabelColor(), fontSize: 11 },
-        axisLabel: { color: axisLabelColor(), fontSize: 11, formatter: (v: number) => formatSizeUtil(v) },
+        nameTextStyle: { color: axisLabel, fontSize: 11 },
+        axisLabel: { color: axisLabel, fontSize: 11, formatter: (v: number) => formatSizeUtil(v) },
         splitLine: { show: false },
       },
     ],
@@ -920,8 +934,8 @@ async function updateTrendChart(trendData: TrendItem[]) {
         data: trendData.map((t) => t.requests),
         smooth: true,
         symbol: 'none',
-        lineStyle: { color: CHART_COLORS.primary, width: 2 },
-        areaStyle: { color: areaGradient(CHART_COLORS.primary) },
+        lineStyle: { color: palette.primary, width: 2 },
+        areaStyle: { color: areaGradient(palette.primary) },
       },
       {
         name: '带宽',
@@ -930,7 +944,7 @@ async function updateTrendChart(trendData: TrendItem[]) {
         data: trendData.map((t) => t.bandwidth),
         smooth: true,
         symbol: 'none',
-        lineStyle: { color: CHART_COLORS.teal, width: 2 },
+        lineStyle: { color: palette.teal, width: 2 },
       },
     ],
   }, true);
@@ -948,35 +962,36 @@ async function updatePieChart() {
     pieChart = echarts.init(pieChartRef.value, 'cyber');
   }
 
+  const { palette, emptySlice, emphasisShadow } = getThemeChartColors();
   const dist = stats.statusDistribution || [];
   const pieData = dist.map((s) => ({
     name: s.statusCode.toString(),
     value: s.count,
     itemStyle: {
-      color: s.statusCode < 300 ? STATUS_COLORS['2xx'] : s.statusCode < 400 ? STATUS_COLORS['3xx'] : s.statusCode < 500 ? STATUS_COLORS['4xx'] : STATUS_COLORS['5xx'],
+      color: s.statusCode < 300 ? palette.success : s.statusCode < 400 ? palette.primary : s.statusCode < 500 ? palette.warning : palette.danger,
     },
   }));
 
   pieChart.setOption({
     tooltip: {
       trigger: 'item',
-      ...tooltipBase,
+      ...getTooltipBase(),
       formatter: (p: any) => `${p.name}: ${p.value} (${p.percent}%)`,
     },
     legend: {
       orient: 'vertical',
       right: 10,
       top: 'center',
-      ...legendBase,
+      ...getLegendBase(),
     },
     series: [
       {
         type: 'pie',
         radius: ['45%', '75%'],
         center: ['40%', '50%'],
-        data: pieData.length > 0 ? pieData : [{ name: '无数据', value: 1, itemStyle: { color: isDark() ? 'rgba(255,255,255,0.08)' : 'rgba(22,25,31,0.08)' } }],
+        data: pieData.length > 0 ? pieData : [{ name: '无数据', value: 1, itemStyle: { color: emptySlice } }],
         label: { show: false },
-        emphasis: { label: { show: true, fontSize: 14, fontWeight: 'bold' }, itemStyle: { shadowBlur: 20, shadowColor: isDark() ? 'rgba(0,0,0,0.4)' : 'rgba(0,0,0,0.15)' } },
+        emphasis: { label: { show: true, fontSize: 14, fontWeight: 'bold' }, itemStyle: { shadowBlur: 20, shadowColor: emphasisShadow } },
       },
     ],
   }, true);
@@ -1061,6 +1076,14 @@ watch(accessTab, (tab, prev) => {
   });
 });
 
+watch(resolvedTheme, () => {
+  refreshChartTheme();
+  if (accessTab.value === 'overview') {
+    if (trendData.value.length) void updateTrendChart(trendData.value);
+    void updatePieChart();
+  }
+});
+
 // Lifecycle
 onMounted(() => {
   refreshAll();
@@ -1088,12 +1111,29 @@ useChartResize(handleResize);
   margin-bottom: 20px;
 }
 
+.toolbar-inner {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
 .refresh-controls {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
-  margin-inline-start: auto;
+  margin-inline-start: 0;
+}
+
+.refresh-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.refresh-select-wrap {
+  width: 100px;
 }
 
 .refresh-timestamp {
@@ -1101,33 +1141,13 @@ useChartResize(handleResize);
   font-size: 12px;
 }
 
-/* Metrics grid */
-.metrics-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: 16px;
-  margin-bottom: 20px;
-}
-
-.metric-card {
-  background: var(--color-bg-surface);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-md);
-  padding: 20px;
-}
-
-.metric-label {
-  font-size: 13px;
-  color: var(--text-secondary);
-  margin-bottom: 8px;
-}
-
-.metric-value {
+.access-logs-page .metric-value {
   font-family: var(--font-mono);
-  font-size: 28px;
-  font-weight: 700;
-  color: var(--text-primary);
   font-variant-numeric: tabular-nums;
+}
+
+.access-logs-page .metric-value--danger {
+  color: var(--color-danger);
 }
 
 .metric-sub {
@@ -1139,22 +1159,23 @@ useChartResize(handleResize);
 /* Charts grid */
 .charts-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: 1fr;
   gap: 20px;
   margin-bottom: 20px;
 }
 
 .chart-card {
-  min-height: 360px;
+  min-height: 280px;
 }
 
-.chart-card h3 {
-  margin: 0 0 12px;
+.chart-card h3,
+.section-heading {
+  margin: 0 0 16px;
 }
 
 .chart-container {
   width: 100%;
-  height: 320px;
+  height: 240px;
 }
 
 /* 卡片标题（.card 容器使用全局定义） */
@@ -1164,15 +1185,16 @@ useChartResize(handleResize);
   font-weight: 600;
 }
 
-/* Section card (new sections) */
 .section-card {
   margin-bottom: 20px;
 }
 
 .section-header {
   display: flex;
+  flex-direction: column;
   justify-content: space-between;
-  align-items: center;
+  align-items: flex-start;
+  gap: 12px;
   margin-bottom: 16px;
 }
 
@@ -1183,9 +1205,13 @@ useChartResize(handleResize);
 /* Table filters */
 .table-filters {
   display: flex;
+  flex-direction: column;
   gap: 12px;
   margin-bottom: 16px;
-  flex-wrap: wrap;
+}
+
+.filter-control {
+  width: 100%;
 }
 
 /* Path cell styles */
@@ -1206,16 +1232,32 @@ useChartResize(handleResize);
   color: var(--text-primary);
 }
 
+.path-tooltip-content {
+  max-width: 400px;
+  word-break: break-all;
+}
+
 .path-info-icon {
+  display: inline-flex;
+  align-items: center;
   flex-shrink: 0;
   cursor: help;
-  font-size: 13px;
   opacity: 0.6;
   transition: opacity 0.2s;
 }
 
 .path-info-icon:hover {
   opacity: 1;
+}
+
+.ban-duration-wrap {
+  width: 120px;
+}
+
+.ban-duration-unit {
+  margin-left: 8px;
+  color: var(--text-secondary);
+  font-size: 13px;
 }
 
 /* Path truncation for new sections */
@@ -1233,7 +1275,7 @@ useChartResize(handleResize);
   justify-content: center;
   width: 24px;
   height: 24px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   font-size: 12px;
   font-weight: 600;
   color: var(--text-secondary);
@@ -1250,11 +1292,6 @@ useChartResize(handleResize);
   display: flex;
   align-items: center;
   gap: 6px;
-}
-
-.file-emoji {
-  font-size: 14px;
-  flex-shrink: 0;
 }
 
 /* IP code style */
@@ -1281,70 +1318,18 @@ useChartResize(handleResize);
   font-weight: 600;
 }
 
-/* Empty hint */
-.empty-hint {
-  text-align: center;
-  padding: 24px 0;
-  color: var(--text-secondary);
-  font-size: 13px;
-}
-
-/* PERF-F-105：分析 tab 懒加载期间的占位块。
-   高度由内联 min-height 提供（贴近真实图表容器），此处只做居中提示，
-   避免切换 tab 时出现空白闪烁与布局跳动。 */
+/* PERF-F-105：分析 tab 懒加载期间的占位块，避免切换 tab 时出现空白闪烁与布局跳动。 */
 .analysis-placeholder {
   display: flex;
   align-items: center;
   justify-content: center;
+  min-height: 320px;
   color: var(--text-secondary);
   font-size: 13px;
 }
+
 .analysis-placeholder::after {
   content: '加载中...';
-}
-
-/* Responsive */
-@media (max-width: 768px) {
-  .charts-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .metrics-grid {
-    grid-template-columns: repeat(2, 1fr);
-    gap: 10px;
-  }
-
-  .metric-value {
-    font-size: 22px;
-  }
-
-  .chart-container {
-    height: 240px;
-  }
-
-  .table-filters {
-    flex-direction: column;
-  }
-
-  .table-filters > * {
-    width: 100% !important;
-  }
-
-  .refresh-controls {
-    margin-inline-start: 0;
-  }
-
-  .section-header {
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 12px;
-  }
-}
-
-@media (max-width: 480px) {
-  .metrics-grid {
-    grid-template-columns: 1fr;
-  }
 }
 
 /* Mobile access card */
@@ -1355,7 +1340,7 @@ useChartResize(handleResize);
 .mobile-access-card {
   background: var(--workspace-canvas);
   border: 1px solid var(--workspace-border);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   padding: 12px;
   margin-bottom: 10px;
 }
@@ -1365,6 +1350,12 @@ useChartResize(handleResize);
   justify-content: space-between;
   align-items: center;
   margin-bottom: 8px;
+}
+
+.mobile-access-tags {
+  display: flex;
+  gap: 6px;
+  align-items: center;
 }
 
 .mobile-access-ip {
@@ -1390,5 +1381,53 @@ useChartResize(handleResize);
   gap: 16px;
   font-size: 12px;
   color: var(--text-primary);
+}
+
+.mobile-access-time {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.mobile-pagination {
+  margin-top: 12px;
+  display: flex;
+  justify-content: center;
+}
+
+@media (min-width: 769px) {
+  .refresh-controls {
+    margin-inline-start: auto;
+  }
+
+  .charts-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .chart-card {
+    min-height: 360px;
+  }
+
+  .chart-container {
+    height: 320px;
+  }
+
+  .section-header {
+    flex-direction: row;
+    align-items: center;
+  }
+
+  .table-filters {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+
+  .filter-control--path {
+    width: 260px;
+  }
+
+  .filter-control--status {
+    width: 140px;
+  }
 }
 </style>

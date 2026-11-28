@@ -1,0 +1,29 @@
+[Unit]
+Description=TGTc 数据库定时备份（backup.sh：完整性校验 + 保留期清理）
+Documentation=https://github.com/lappland/tgtc
+After=network-online.target postgresql.service
+Wants=network-online.target
+# 刻意不 Requires/After tgtc.service：SQLite 分支由脚本自行停服并在退出时恢复，
+# 绑定服务依赖会让 systemd 在备份窗口内把服务重新拉起，破坏一致性备份。
+
+[Service]
+Type=oneshot
+# 需要 systemctl 停/启服务（SQLite 分支）并读取 .env 中的 DB 凭据，故以 root 运行。
+User=root
+# 按实际部署填写：TGTC_INSTALL_ROOT / TGTC_BACKEND_WORKDIR / TGTC_ENV_FILE /
+# TGTC_BACKUP_DIR / TGTC_BACKUP_KEEP_DAYS / TGTC_SERVICE。缺失时用脚本内默认值。
+EnvironmentFile=-/etc/tgtc/backup.env
+# 改成实际源码根目录下的脚本路径（checkout 部署与 /opt 布局不同）。
+ExecStart=/usr/bin/bash /opt/tgtc/scripts/release/backup.sh
+# 备份含完整数据库内容：产物与临时目录权限收紧到仅属主可读写。
+UMask=0077
+TimeoutStartSec=30min
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+# 脚本用 flock -n 拒绝并发运维操作：与手工升级窗口撞车时会以 EXIT_OPERATION=5 退出。
+# 这是预期退让，但必须可见——通过 journalctl -u tgtc-backup.service 与
+# $TGTC_INSTALL_ROOT/.tgtc-ops/history.log 核对每次运行结果，失败需人工介入。
+
+[Install]
+WantedBy=multi-user.target

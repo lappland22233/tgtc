@@ -5,6 +5,7 @@ import { useFileStore } from './files';
 import { useChunkedUpload } from '../composables/useChunkedUpload';
 import { isPageVisible } from '../composables/usePageVisibility';
 import { getErrorMessage } from '../utils/error';
+import MessagePlugin from '../utils/message';
 import { uploadScheduler } from '../utils/upload-scheduler';
 import { MAX_ENTRY_RETRIES, getRetryDelay, abortableBackoff, classifyUploadError } from '../utils/upload-retry';
 
@@ -33,6 +34,13 @@ export interface QueueEntry {
   retryCount?: number;
   /** 严格小盘模式：服务器正为另一份大文件保留上传名额，本文件排队等待中 */
   waitingForSlot?: boolean;
+  /** B-19：文件已上传成功但标签应用失败，UI 据此提示并提供重试入口 */
+  tagsFailed?: boolean;
+  /**
+   * A-20：终态失败是否值得重传。false 表示类型/大小/同名冲突等确定性失败，
+   * 原样重传必然再次失败；true 表示网络/服务端瞬时故障。缺省按可重试处理。
+   */
+  retryable?: boolean;
 }
 
 interface ProgressSnapshot {
@@ -159,6 +167,15 @@ export const useUploadStore = defineStore('upload', () => {
   const pendingQueue: QueueEntry[] = [];
   let pendingCursor = 0;
   let activeWorkers = 0;
+  /**
+   * B-11：会话代际。reset() 递增，旧 worker 与旧条目据此识别自己已过期。
+   *
+   * 登出→换账号登录→立即再上传时，旧 worker 仍在跑：若它照常 activeWorkers--
+   * 会把新会话计数减成负数，ensurePump 的 spawn 随之超额；旧条目的终态回调还会
+   * 污染新会话的成功/取消计数。
+   */
+  let generation = 0;
+  const entryGeneration = new WeakMap<QueueEntry, number>();
   let speedTimer: ReturnType<typeof setInterval> | null = null;
   let progressTimer: ReturnType<typeof setTimeout> | null = null;
   let foregroundChunkConcurrency = uploadScheduler.getConcurrency();
@@ -207,6 +224,8 @@ export const useUploadStore = defineStore('upload', () => {
   }
 
   function changeStatus(entry: QueueEntry, next: QueueStatus) {
+    // 过期会话的条目不得再改新会话计数（reset 后旧上传仍可能异步收尾）
+    if ((entryGeneration.get(entry) ?? generation) !== generation) return;
     const previous = entry.status;
     if (previous === next) return;
     if (previous === 'pending') queuedCount.value--;
@@ -282,7 +301,15 @@ export const useUploadStore = defineStore('upload', () => {
 
   async function attachTags(entry: QueueEntry, fileId: string) {
     if (entry.tagIds.length === 0) return;
-    await api.put(`/files/${fileId}/tags`, { tagIds: entry.tagIds }).catch(() => {});
+    try {
+      await api.put(`/files/${fileId}/tags`, { tagIds: entry.tagIds });
+      entry.tagsFailed = false;
+    } catch (error) {
+      // B-19：此前 .catch(() => {}) 静默吞掉失败，文件已上传但标签丢失且无任何提示，
+      // 用户以为标签已打上。标签失败不回滚上传（文件本身已成功），但必须可见。
+      entry.tagsFailed = true;
+      MessagePlugin.warning(`「${entry.fileName}」已上传，但标签应用失败：${getErrorMessage(error)}`);
+    }
   }
 
   async function uploadChunked(entry: QueueEntry, file: File, controller: AbortController) {
@@ -340,6 +367,7 @@ export const useUploadStore = defineStore('upload', () => {
     if (!file) {
       changeStatus(entry, 'error');
       entry.errorReason = '文件引用丢失';
+      entry.retryable = false;
       return;
     }
     try {
@@ -366,6 +394,7 @@ export const useUploadStore = defineStore('upload', () => {
             entry.speed = '-';
             entry.eta = '-';
             entry.errorReason = undefined;
+            entry.retryable = undefined;
             // 条目级重试会重新 init，等待态由新一轮上传自行上报，先清干净避免残留
             entry.waitingForSlot = false;
             try {
@@ -380,11 +409,13 @@ export const useUploadStore = defineStore('upload', () => {
             recordTransientFirstAttemptFailure();
             changeStatus(entry, 'error');
             entry.errorReason = '网络异常，自动重试已暂停，请检查网络后重新上传';
+            entry.retryable = true;
             return;
           }
           if (classification.retryable && currentRetries === 0) recordTransientFirstAttemptFailure();
           changeStatus(entry, 'error');
           entry.errorReason = getErrorMessage(error);
+          entry.retryable = classification.retryable;
           return;
         }
       }
@@ -408,14 +439,18 @@ export const useUploadStore = defineStore('upload', () => {
   }
 
   async function worker() {
+    const myGeneration = generation;
     try {
       for (;;) {
+        if (generation !== myGeneration) return;
         const entry = takePending();
         if (!entry) return;
         changeStatus(entry, 'processing');
         await processEntry(entry);
       }
     } finally {
+      // 过期 worker 不得触碰新会话的计数与泵状态
+      if (generation !== myGeneration) return;
       activeWorkers--;
       if (queuedCount.value > 0) ensurePump();
       else if (activeWorkers === 0) {
@@ -439,7 +474,7 @@ export const useUploadStore = defineStore('upload', () => {
   }
 
   function createEntry(file: File, folderId: string | null, tagIds: string[]): QueueEntry {
-    return shallowReactive({
+    const entry = shallowReactive({
       uid: genUid(),
       file: markRaw(file),
       fileName: file.name,
@@ -459,6 +494,8 @@ export const useUploadStore = defineStore('upload', () => {
       retryCount: 0,
       waitingForSlot: false,
     });
+    entryGeneration.set(entry, generation);
+    return entry;
   }
 
   /**
@@ -503,10 +540,15 @@ export const useUploadStore = defineStore('upload', () => {
   ) {
     const newEntries: QueueEntry[] = [];
     const seenInBatch = new Set<string>();
+    const skippedDuplicates: string[] = [];
     for (const item of items) {
       if (!item.file || hasActiveFile(item.file)) continue;
       const batchKey = `${item.folderId ?? 'root'}:${item.file.name}`;
-      if (seenInBatch.has(batchKey)) continue;
+      if (seenInBatch.has(batchKey)) {
+        // B-23：此前静默 continue，用户以为整个文件夹都上传成功了
+        skippedDuplicates.push(item.relativePath || item.file.name);
+        continue;
+      }
       seenInBatch.add(batchKey);
       knownFiles.add(item.file);
       const entry = createEntry(item.file, item.folderId, tagIds);
@@ -516,6 +558,13 @@ export const useUploadStore = defineStore('upload', () => {
       newEntries.push(entry);
     }
     appendEntries(newEntries);
+    if (skippedDuplicates.length > 0) {
+      const sample = skippedDuplicates.slice(0, 3).join('、');
+      const suffix = skippedDuplicates.length > 3 ? ' 等' : '';
+      MessagePlugin.warning(
+        `文件夹上传中有 ${skippedDuplicates.length} 个同目录同名重复项已跳过：${sample}${suffix}`,
+      );
+    }
   }
 
   function cancelOne(uid: string) {
@@ -580,6 +629,8 @@ export const useUploadStore = defineStore('upload', () => {
     pendingProgress.clear();
     pendingQueue.length = 0;
     pendingCursor = 0;
+    // 递增代际：在途旧 worker 与旧条目据此停止改动新会话计数（B-11）
+    generation++;
     activeWorkers = 0;
     entries.value = [];
     isPumping.value = false;

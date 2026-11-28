@@ -4939,9 +4939,8 @@ void ChatManager::on_load_channel_from_database(ChannelId channel_id, string val
         }
 
         if (temp_c.linked_community_id != c->linked_community_id) {
-          td_->messages_manager_->on_update_dialog_linked_community_id(DialogId(channel_id),
-                                                                       temp_c.linked_community_id);
-          CHECK(!c->is_being_saved);
+          send_closure_later(G()->messages_manager(), &MessagesManager::on_update_dialog_linked_community_id,
+                             DialogId(channel_id), temp_c.linked_community_id, c->linked_community_id);
         }
       } else {
         is_new = true;
@@ -5332,11 +5331,9 @@ void ChatManager::update_chat(Chat *c, ChatId chat_id, bool from_binlog, bool fr
 
       if (c->is_update_basic_group_sent) {
         // reload the chat to repair its status if it is changed back after receiving of outdated data
-        create_actor<SleepActor>(
-            "ReloadChatSleepActor", 1.0, PromiseCreator::lambda([actor_id = actor_id(this), chat_id](Unit) {
-              send_closure(actor_id, &ChatManager::reload_chat, chat_id, Promise<Unit>(), "ReloadChatSleepActor");
-            }))
-            .release();
+        create_actor<SleepActor>("ReloadChatSleepActor", 1.0, [actor_id = actor_id(this), chat_id] {
+          send_closure(actor_id, &ChatManager::reload_chat, chat_id, Promise<Unit>(), "ReloadChatSleepActor");
+        }).release();
       }
     }
     td_->messages_manager_->on_dialog_access_updated(DialogId(chat_id));
@@ -5463,12 +5460,9 @@ void ChatManager::update_channel(Channel *c, ChannelId channel_id, bool from_bin
     }
     if (!from_database && c->is_update_supergroup_sent) {
       // reload the channel to repair its status if it is changed back after receiving of outdated data
-      create_actor<SleepActor>("ReloadChannelSleepActor", 1.0,
-                               PromiseCreator::lambda([actor_id = actor_id(this), channel_id](Unit) {
-                                 send_closure(actor_id, &ChatManager::reload_channel, channel_id, Promise<Unit>(),
-                                              "ReloadChannelSleepActor");
-                               }))
-          .release();
+      create_actor<SleepActor>("ReloadChannelSleepActor", 1.0, [actor_id = actor_id(this), channel_id] {
+        send_closure(actor_id, &ChatManager::reload_channel, channel_id, Promise<Unit>(), "ReloadChannelSleepActor");
+      }).release();
     }
     td_->messages_manager_->on_dialog_access_updated(DialogId(channel_id));
     c->is_status_changed = false;
@@ -8224,7 +8218,8 @@ void ChatManager::on_update_channel_linked_community_id(Channel *c, ChannelId ch
     if (c->is_update_supergroup_sent &&
         (!G()->use_chat_info_database() || loaded_from_database_channels_.count(channel_id) != 0)) {
       // otherwise, the change is applied in on_load_channel_from_database
-      td_->messages_manager_->on_update_dialog_linked_community_id(DialogId(channel_id), old_linked_community_id);
+      send_closure_later(G()->messages_manager(), &MessagesManager::on_update_dialog_linked_community_id,
+                         DialogId(channel_id), old_linked_community_id, linked_community_id);
     }
   }
 }
@@ -8578,11 +8573,11 @@ void ChatManager::send_get_chat_full_query(ChatId chat_id, Promise<Unit> &&promi
   if (!chat_id.is_valid()) {
     return promise.set_error(500, "Invalid chat_id");
   }
-  auto send_query = PromiseCreator::lambda([td = td_, chat_id](Result<Promise<Unit>> &&promise) {
-    if (promise.is_ok() && !G()->close_flag()) {
-      td->create_handler<GetFullChatQuery>(promise.move_as_ok())->send(chat_id);
+  auto send_query = [td = td_, chat_id](Promise<Unit> &&promise) {
+    if (!G()->close_flag()) {
+      td->create_handler<GetFullChatQuery>(std::move(promise))->send(chat_id);
     }
-  });
+  };
 
   get_chat_full_queries_.add_query(DialogId(chat_id).get(), std::move(send_query), std::move(promise));
 }
@@ -9096,12 +9091,11 @@ void ChatManager::send_get_channel_full_query(ChannelFull *channel_full, Channel
   }
 
   LOG(INFO) << "Get full " << channel_id << " from " << source;
-  auto send_query = PromiseCreator::lambda(
-      [td = td_, channel_id, input_channel = std::move(input_channel)](Result<Promise<Unit>> &&promise) mutable {
-        if (promise.is_ok() && !G()->close_flag()) {
-          td->create_handler<GetFullChannelQuery>(promise.move_as_ok())->send(channel_id, std::move(input_channel));
-        }
-      });
+  auto send_query = [td = td_, channel_id, input_channel = std::move(input_channel)](Promise<Unit> &&promise) mutable {
+    if (!G()->close_flag()) {
+      td->create_handler<GetFullChannelQuery>(std::move(promise))->send(channel_id, std::move(input_channel));
+    }
+  };
   get_chat_full_queries_.add_query(DialogId(channel_id).get(), std::move(send_query), std::move(promise));
 }
 

@@ -108,13 +108,16 @@ defineExpose({ panelEl });
 /* 播放列表面板 */
 .fpv-playlist-panel {
   position: absolute;
-  top: 0;
+  top: auto;
   right: 0;
   bottom: 0;
-  width: 280px;
-  max-width: 80%;
+  width: 100%;
+  max-width: none;
+  max-height: min(62%, 520px);
   background: var(--color-bg-overlay);
-  border-left: 1px solid var(--border-default);
+  border-top: 1px solid var(--border-default);
+  border-left: 0;
+  box-shadow: var(--shadow-lg);
   display: flex;
   flex-direction: column;
   z-index: 10;
@@ -210,8 +213,8 @@ defineExpose({ panelEl });
   height: 48px;
   flex: 0 0 48px;
   object-fit: cover;
-  border-radius: var(--radius-sm, 6px);
-  background: var(--color-bg-secondary);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-elevated);
   border: 1px solid var(--border-default);
 }
 
@@ -223,7 +226,7 @@ defineExpose({ panelEl });
   width: 20px;
   font-size: 11px;
   font-weight: 500;
-  color: var(--text-quaternary, #999);
+  color: var(--text-quaternary);
   text-align: center;
   flex-shrink: 0;
   font-family: var(--font-mono);
@@ -265,28 +268,28 @@ defineExpose({ panelEl });
 /* 播放列表滑入动画 */
 .fpv-slide-enter-active,
 .fpv-slide-leave-active {
-  transition: transform var(--duration-fast, 0.15s) ease, opacity var(--duration-fast, 0.15s) ease;
+  transition: transform var(--duration-fast) ease, opacity var(--duration-fast) ease;
 }
 .fpv-slide-enter-from,
 .fpv-slide-leave-to {
-  transform: translateX(100%);
+  transform: translateY(100%);
   opacity: 0;
 }
 
-@media (max-width: 720px) {
+@media (min-width: 769px) {
   .fpv-playlist-panel {
-    top: auto;
-    width: 100%;
-    max-width: none;
-    max-height: min(62%, 520px);
-    border-top: 1px solid var(--border-default);
-    border-left: 0;
-    box-shadow: 0 -12px 32px rgba(0, 0, 0, 0.28);
+    top: 0;
+    width: 280px;
+    max-width: 80%;
+    max-height: none;
+    border-top: 0;
+    border-left: 1px solid var(--border-default);
+    box-shadow: none;
   }
 
   .fpv-slide-enter-from,
   .fpv-slide-leave-to {
-    transform: translateY(100%);
+    transform: translateX(100%);
   }
 }
 

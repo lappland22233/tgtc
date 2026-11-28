@@ -101,7 +101,11 @@ export class FolderService {
    * 列出指定文件夹下的内容（子文件夹 + 文件），用于网盘主区域。
    * 这是网盘用户最常调用的接口，需保证性能。
    */
-  async listContents(ownerId: string, folderId: string | null, options: { includeDeleted?: boolean } = {}) {
+  async listContents(
+    ownerId: string,
+    folderId: string | null,
+    options: { includeDeleted?: boolean; page?: number; limit?: number } = {},
+  ) {
     if (folderId) {
       await this.assertFolderOwned(folderId, ownerId);
     }
@@ -112,17 +116,32 @@ export class FolderService {
     if (!options.includeDeleted) {
       fileWhere.isDeleted = false;
     }
-    const [subfolders, files] = await Promise.all([
+    // C-09：本接口是网盘最常调用的端点。此前无条件 find 全量加载目录内所有文件，
+    // 万级文件目录每次浏览/刷新都要全表段加载 + 全量 JSON 序列化，内存与响应时间线性膨胀。
+    // 显式传 page/limit 时改为分页；省略时保持历史全量行为，不破坏既有调用方。
+    const paginated = options.page !== undefined && options.limit !== undefined;
+    const [subfolders, filesResult] = await Promise.all([
       this.folderRepo.find({
         where: { ownerId, parentId: folderId ?? IsNull(), isDeleted: false },
         order: { name: 'ASC' },
       }),
-      this.fileRepo.find({
-        where: fileWhere,
-        order: { originalName: 'ASC' },
-      }),
+      paginated
+        ? this.fileRepo.findAndCount({
+          where: fileWhere,
+          order: { originalName: 'ASC' },
+          skip: (options.page! - 1) * options.limit!,
+          take: options.limit!,
+        })
+        : this.fileRepo.find({
+          where: fileWhere,
+          order: { originalName: 'ASC' },
+        }),
     ]);
-    return { subfolders, files };
+    if (paginated) {
+      const [files, total] = filesResult as [File[], number];
+      return { subfolders, files, total, page: options.page, limit: options.limit };
+    }
+    return { subfolders, files: filesResult as File[] };
   }
 
   // ---------- 写操作 ----------
@@ -203,33 +222,41 @@ export class FolderService {
     // 特殊保留名称拦截，与 createFolder 规则一致
     this.assertFolderNameAllowed(dto.name);
     const folder = await this.assertFolderOwned(id, ownerId);
-    const sibling = await this.folderRepo.findOne({
-      where: {
-        ownerId,
-        parentId: folder.parentId ?? IsNull(),
-        name: dto.name,
-        isDeleted: false,
-        id: Not(id),
-      },
-    });
-    if (sibling) {
-      throw new BadRequestException('同层级下已存在同名文件夹');
-    }
     const oldName = folder.name;
-    folder.name = dto.name;
     let saved: Folder;
     try {
       // v1.2.6：重命名与统一命名空间键更新同事务，跨表（文件）重名同样冲突
       saved = await this.folderRepo.manager.transaction(async (manager) => {
-        const renamed = await manager.getRepository(Folder).save(folder);
+        const repo = manager.getRepository(Folder);
+        // 事务内行锁重读 + 字段级 UPDATE：事务外读到的快照可能已被并发软删/移动改写，
+        // 整实体 save() 会把 isDeleted / deleteScheduledAt / parentId 一并回写，
+        // 表现为「已进回收站的目录被重命名复活」或「并发移动被回滚到旧父级」。
+        const locked = await repo.findOne({
+          where: { id, ownerId, isDeleted: false },
+          ...databasePessimisticWriteLock(),
+        });
+        if (!locked) throw new NotFoundException('文件夹不存在或已被删除');
+        const sibling = await repo.findOne({
+          where: {
+            ownerId,
+            parentId: locked.parentId ?? IsNull(),
+            name: dto.name,
+            isDeleted: false,
+            id: Not(id),
+          },
+        });
+        // 与 createFolder 保持一致：重名是资源冲突（409），不是参数格式错误（400）
+        if (sibling) throw new ConflictException('同层级下已存在同名文件夹');
+        await repo.update(id, { name: dto.name });
         await this.namespace.acquire(manager, {
           ownerId,
-          folderId: folder.parentId ?? null,
+          folderId: locked.parentId ?? null,
           name: dto.name,
           entityType: 'folder',
           entityId: id,
         });
-        return renamed;
+        locked.name = dto.name;
+        return locked;
       });
     } catch (error: unknown) {
       // G6-06：并发重命名撞同名，由唯一索引兜底转 409
@@ -254,12 +281,22 @@ export class FolderService {
     // 防止两个并发 move 交换父子关系后形成 parentId 互指环。
     const { saved, oldParentId } = await this.folderRepo.manager.transaction(async (manager) => {
       const dbType = getDatabaseType();
-      // 1. 锁定被移动节点（含软删/越权过滤），FOR UPDATE 保证本事务内视图一致
-      const lockedRows = await databaseQuery<Folder[]>(manager, `SELECT * FROM folders WHERE id = $1 AND "ownerId" = $2 AND "isDeleted" = false${databaseForUpdate(dbType)}`, [id, ownerId], dbType);
-      if (lockedRows.length === 0) {
+      // 1. 一次性按 **ID 升序** 锁定涉及的节点。
+      //
+      // 为什么必须排序：并发执行「移 A 入 B」与「移 B 入 A」时，若各自先锁自己再锁对方，
+      // 两个事务会以相反顺序持有行锁 → PostgreSQL 死锁（40P01）。
+      // 统一的升序加锁顺序让后到的事务在第一个锁上排队，而不是互相等待。
+      const idsToLock = Array.from(new Set([id, ...(newParentId ? [newParentId] : [])])).sort();
+      const lockedRows = await databaseQuery<Folder[]>(
+        manager,
+        `SELECT * FROM folders WHERE id IN (${idsToLock.map((_, i) => `$${i + 1}`).join(', ')}) AND "ownerId" = $${idsToLock.length + 1} AND "isDeleted" = false ORDER BY id ASC${databaseForUpdate(dbType)}`,
+        [...idsToLock, ownerId],
+        dbType,
+      );
+      const locked = lockedRows.find(row => row.id === id);
+      if (!locked) {
         throw new NotFoundException('文件夹不存在或无权访问');
       }
-      const locked: Folder = lockedRows[0];
       // 先记录原父级，避免修改 parentId 后审计 from/to 恒为新值
       const oldParentId = locked.parentId;
 
@@ -269,9 +306,8 @@ export class FolderService {
 
       let newParentIdFinal: string | null = null;
       if (newParentId) {
-        // 2. 校验并锁定新父级（存在/未删/归属）
-        const parentRows = await databaseQuery<Folder[]>(manager, `SELECT * FROM folders WHERE id = $1 AND "ownerId" = $2 AND "isDeleted" = false${databaseForUpdate(dbType)}`, [newParentId, ownerId], dbType);
-        if (parentRows.length === 0) {
+        // 2. 新父级已在同一批加锁中取回并校验（存在/未删/归属）
+        if (!lockedRows.some(row => row.id === newParentId)) {
           throw new NotFoundException('文件夹不存在或无权访问');
         }
         // 3. 循环检测：新父级不能是当前文件夹的后代（沿 parentId 上溯，不依赖闭包表）
@@ -298,7 +334,8 @@ export class FolderService {
         },
       });
       if (sibling) {
-        throw new BadRequestException('目标层级下已存在同名文件夹');
+        // 与 createFolder 保持一致：重名是资源冲突（409），不是参数格式错误（400）
+        throw new ConflictException('目标层级下已存在同名文件夹');
       }
 
       // 6. 更新 parentId（走 SQL，保证闭包表与父链一致由 TypeORM save 语义处理）
@@ -347,11 +384,13 @@ export class FolderService {
     const now = new Date();
     const scheduledAt = new Date(now.getTime() + SOFT_DELETE_GRACE_DAYS * 24 * 3600 * 1000);
 
-    // 拿到子树所有 folder id（含自身），沿 parentId 递归 CTE，不依赖闭包表
-    const folderIds = await this.collectSubtreeIds(id);
-
     // 事务内原子执行：软删子文件夹 + 软删内含文件 + 释放统一命名空间名称
+    //
+    // 子树收集必须在事务内：事务外收集后并发新建/移入的子目录不会被软删，
+    // 留下「活跃子目录挂在已删父目录下」的脏数据。
+    let folderIds: string[] = [id];
     await this.folderRepo.manager.transaction(async (manager) => {
+      folderIds = await this.collectSubtreeIdsInManager(manager, id);
       await manager.update(
         Folder,
         { id: In(folderIds), isDeleted: false },
@@ -401,6 +440,9 @@ export class FolderService {
       throw new NotFoundException('文件夹不存在或未被删除');
     }
 
+    // 祖先链校验先于过期校验：只有「父级仍在回收站」这类可操作的情况才需要
+    // 用户先处理父级；已过期的目录无论祖先状态如何都不可恢复。
+    //
     // G6-05：恢复前校验祖先链。若存在被删（软删）的祖先，直接恢复会形成
     // 「父级仍被删、子级已恢复」的幻影根，破坏树结构一致性。此时拒绝恢复，
     // 提示先恢复顶层祖先；由上层递归逐级恢复保证整条链完整。
@@ -413,23 +455,37 @@ export class FolderService {
       ancestor = await this.folderRepo.findOne({ where: { id: ancestor.parentId } });
     }
 
+    // 过期校验：超过 deleteScheduledAt 表示其内含文件已被定时任务物理删除，
+    // 此时恢复只会得到空壳目录。明确拒绝比给出一个「恢复了但里面什么都没有」的假象更好。
+    if (folder.deleteScheduledAt && new Date() >= folder.deleteScheduledAt) {
+      throw new BadRequestException('该文件夹已超过可恢复期限，无法恢复');
+    }
+
     // 还原子树中所有 folder——但只恢复与本文件夹同批删除的，
     // 避免恢复在文件夹删除之前已独立删除的子文件夹。
-    // 沿 parentId 递归 CTE 收集子树，不依赖闭包表。
-    const folderIds = await this.collectSubtreeIds(id);
 
     // 以本批次的计划删除时间作为同批标记（softDeleteFolder 对整批写入同一 deleteScheduledAt），
     // 比精确 deleteRequestedAt 更稳定；deleteScheduledAt 为空时回退到 deleteRequestedAt。
+    //
+    // 两个时间戳都可能为空（升级前遗留的软删数据）：此时必须用 IsNull()，
+    // 直接传 `{ deleteRequestedAt: null }` 在 TypeORM 里是「忽略该条件」而不是
+    // 「IS NULL」，会让 update 命中整个 owner 的所有软删除行，或反过来一行都命不中。
     const batchScheduledAt = folder.deleteScheduledAt;
     const batchRequestedAt = folder.deleteRequestedAt;
     const batchCriteria: Record<string, unknown> = batchScheduledAt
       ? { deleteScheduledAt: batchScheduledAt }
-      : { deleteRequestedAt: batchRequestedAt };
+      : batchRequestedAt
+        ? { deleteRequestedAt: batchRequestedAt }
+        : { deleteScheduledAt: IsNull() };
 
     // 事务内原子还原子文件夹与内含文件，并重新占用统一命名空间名称；
     // 与其他活跃名称（文件或文件夹）冲突时整体回滚并给出明确提示。
+    //
+    // 子树收集同样移入事务：事务外收集时并发新建/移入的子目录不在集合内，
+    // 恢复后它仍处于删除态却挂在活跃父目录下。
     try {
       await this.folderRepo.manager.transaction(async (manager) => {
+        const folderIds = await this.collectSubtreeIdsInManager(manager, id);
         await manager.update(
           Folder,
           { id: In(folderIds), ...batchCriteria } as any,
@@ -473,8 +529,11 @@ export class FolderService {
         }
       });
     } catch (error: unknown) {
-      if (isDatabaseUniqueViolation(error)) {
-        throw new BadRequestException('恢复失败：目标位置已存在同名文件或文件夹，请先处理重名后重试');
+      // DirectoryNamespaceService.acquire 已把数据库唯一约束转成 ConflictException，
+      // 外层再判 isDatabaseUniqueViolation 永远不成立（不可达）。这里改判 ConflictException，
+      // 并保留原始 409 语义与更具体的恢复提示。
+      if (error instanceof ConflictException) {
+        throw new ConflictException('恢复失败：目标位置已存在同名文件或文件夹，请先处理重名后重试');
       }
       throw error;
     }
@@ -527,6 +586,9 @@ export class FolderService {
    * 仅更新展示用名称，不改动底层存储的 filename / Telegram 引用。
    */
   async renameFile(ownerId: string, fileId: string, dto: RenameFileDto): Promise<File> {
+    // 与文件夹同一套保留名/设备名拦截：文件显示名会进入 Content-Disposition 与下载落盘，
+    // `..` / `CON.txt` 之类在 Windows 上不可用（项目白名单+保留字黑名单规范）。
+    this.assertFolderNameAllowed(dto.newOriginalName);
     const { saved, previous } = await this.fileRepo.manager.transaction(async (manager) => {
       const repo = manager.getRepository(File);
       const file = await repo.findOne({
@@ -711,8 +773,17 @@ export class FolderService {
    * 不依赖闭包表（folder_closure 行可能缺失，历史配置错误）。
    * 结果含自身，供级联软删 / 恢复复用。
    */
-  private async collectSubtreeIds(rootId: string): Promise<string[]> {
-    const rows = await databaseRawQuery(this.folderRepo.manager,
+  /**
+   * 事务内版本：沿 parentId 递归收集子树。
+   *
+   * 必须在事务内执行：事务外收集后，并发新建/移入的子目录不会出现在 id 集合里，
+   * 于是「活跃子目录挂在已删父目录下」——前端看不到它，却仍占用命名空间。
+   */
+  private async collectSubtreeIdsInManager(
+    manager: import('typeorm').EntityManager,
+    rootId: string,
+  ): Promise<string[]> {
+    const rows = await databaseRawQuery(manager,
       `WITH RECURSIVE subtree AS (
          SELECT id FROM folders WHERE id = $1
          UNION ALL

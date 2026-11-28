@@ -17,6 +17,7 @@ function makeService(
   };
   const quotaService = {} as never;
   const configServiceForDomain = { resolveSiteOriginAsync: jest.fn(async () => 'https://example.com') };
+  const tokenCrypto = { isAvailable: () => true } as never;
   const service = new TelegramBotAdminService(
     configService as never,
     auditService as never,
@@ -24,6 +25,7 @@ function makeService(
     quotaService,
     configServiceForDomain as never,
     dataSource as never,
+    tokenCrypto,
   );
   return { service, auditService, grantService, configServiceForDomain };
 }

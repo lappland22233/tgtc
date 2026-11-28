@@ -8,7 +8,7 @@
     :confirm-btn="result ? '完成' : '生成链接'"
     width="480px"
   >
-    <t-form :data="form" label-width="96px">
+    <t-form :data="form" label-align="top">
       <t-form-item label="文件">
         <div class="target-info">
           <span class="target-name" :title="fileName">{{ fileName }}</span>
@@ -28,28 +28,34 @@
       </t-form-item>
 
       <t-form-item v-if="form.mode === 'timed'" label="有效时长">
-        <t-input-number
-          v-model="form.durationHours"
-          :min="1"
-          :max="720"
-          :step="1"
-          theme="column"
-          style="width: 160px"
-        />
-        <span class="unit">小时</span>
+        <div class="dl-num-row">
+          <div class="dl-num-field">
+            <t-input-number
+              v-model="form.durationHours"
+              :min="1"
+              :max="720"
+              :step="1"
+              theme="column"
+            />
+          </div>
+          <span class="unit">小时</span>
+        </div>
         <div class="form-hint">1-720 小时（30 天）；从访客首次访问时开始计时。</div>
       </t-form-item>
 
       <t-form-item v-if="form.mode === 'count_limited'" label="访问次数">
-        <t-input-number
-          v-model="form.maxAccessCount"
-          :min="1"
-          :max="1000000"
-          :step="1"
-          theme="column"
-          style="width: 160px"
-        />
-        <span class="unit">次</span>
+        <div class="dl-num-row">
+          <div class="dl-num-field">
+            <t-input-number
+              v-model="form.maxAccessCount"
+              :min="1"
+              :max="1000000"
+              :step="1"
+              theme="column"
+            />
+          </div>
+          <span class="unit">次</span>
+        </div>
         <div class="form-hint">1-1000000 次；达到上限后链接自动失效。</div>
       </t-form-item>
     </t-form>
@@ -185,12 +191,22 @@ function handleClose() {
 </script>
 
 <style scoped>
+.dl-num-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.dl-num-field :deep(.t-input-number) {
+  width: 160px;
+}
+
 .target-info {
   display: flex;
   align-items: center;
   padding: 8px 12px;
-  background: var(--td-bg-color-secondarycontainer);
-  border-radius: 6px;
+  background: var(--color-bg-elevated);
+  border-radius: var(--radius-md);
   font-size: 14px;
   width: 100%;
 }
@@ -203,14 +219,14 @@ function handleClose() {
 }
 
 .unit {
-  margin-left: 8px;
   font-size: 13px;
-  color: var(--td-text-color-secondary);
+  color: var(--text-secondary);
 }
 
 .form-hint {
+  flex: 1 0 100%;
   font-size: 12px;
-  color: var(--td-text-color-placeholder);
+  color: var(--text-tertiary);
   margin-top: 4px;
   width: 100%;
 }
@@ -218,15 +234,15 @@ function handleClose() {
 .link-result {
   margin-top: 20px;
   padding: 16px;
-  background: var(--td-success-color-1);
-  border: 1px solid var(--td-success-color-3);
-  border-radius: 8px;
+  background: var(--color-success-soft);
+  border: 1px solid color-mix(in srgb, var(--color-success) 35%, transparent);
+  border-radius: var(--radius-md);
 }
 
 .result-label {
   font-size: 13px;
   font-weight: 500;
-  color: var(--td-success-color);
+  color: var(--color-success);
   margin-bottom: 8px;
 }
 
@@ -247,6 +263,6 @@ function handleClose() {
 
 .result-hint {
   font-size: 12px;
-  color: var(--td-text-color-secondary);
+  color: var(--text-secondary);
 }
 </style>

@@ -200,6 +200,13 @@ export class DownloadTaskService implements OnApplicationShutdown, OnModuleInit 
         record.reservation = granted;
         this.issueTicket(record);
         record.message = '已为该任务预留磁盘空间，正在开始下载';
+      } else {
+        // 探测与授予之间存在竞态（并发抢占/磁盘刚被占满）：不能把任务留在 streamable——
+        // 那样它既没有预约也没有票据，正文请求会拿不到资源且没有任何重试路径。
+        record.status = 'queued';
+        record.queueReason = 'server_load';
+        record.message = '正在排队等待磁盘资源，请稍候';
+        void this.acquireReservation(record);
       }
     } else if (record.status === 'queued') {
       // 需要等待：以真实队列等待预约（等待期间仍可由用户取消）
@@ -426,8 +433,16 @@ export class DownloadTaskService implements OnApplicationShutdown, OnModuleInit 
       && Date.now() > record.ticketExpiresAt
     ) {
       this.releaseResources(record, '票据超时未使用');
+      // releaseResources 会 abort 共享的 AbortController；若不重建，
+      // 后续 acquireReservation 拿到的是已 abort 的 signal，会立刻放弃排队，
+      // 任务将永远停在 queued 直到过期。
+      record.abortController = new AbortController();
       record.status = 'queued';
       record.message = '下载准备已超时，正在重新准备';
+      // 直接重新排队并返回：不能继续往下走到 probe 分支，
+      // 否则 probe.admitted 会把任务置为 streamable —— 既无预约也无票据。
+      void this.acquireReservation(record);
+      return;
     }
 
     // 已持有预约或已交接给正文请求：资源确定可用，保持 streamable
@@ -550,7 +565,10 @@ export class DownloadTaskService implements OnApplicationShutdown, OnModuleInit 
     const retentionMs = this.fileCacheService.downloadTaskRetentionMs;
     let removed = 0;
     for (const [id, record] of this.tasks) {
-      if (now > record.expiresAt && (record.reservation || record.ticket)) {
+      // 无条件回收：仍在 reserveDownload 队列里等待的任务没有 reservation/ticket，
+      // 只按 `reservation || ticket` 判断会让它继续占住协调器 FIFO 队列并推高他人的 queuePosition。
+      // releaseResources 会 abort 该任务自己的 signal，等待中的排队项随之取消（幂等）。
+      if (now > record.expiresAt && record.status !== 'cancelled') {
         this.releaseResources(record, '任务过期回收');
       }
       if (now > record.expiresAt + retentionMs) {

@@ -1,3 +1,4 @@
+import { fileUploadJobId, FILE_UPLOAD_JOB_OPTIONS } from '../jobs/file-upload-job';
 import { pendingUploadDirectory, pendingUploadName } from './pending-upload';
 import { Injectable, NotFoundException, ForbiddenException, BadRequestException, ConflictException, GoneException, HttpException, HttpStatus, OnModuleInit, Logger, Optional, Inject } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -39,7 +40,7 @@ import { ShareAudit } from '../common/entities/share-audit.entity';
 
 import { AuditService } from '../common/services/audit.service';
 import { DirectoryNamespaceService } from '../common/services/directory-namespace.service';
-import { UploadJobService, UploadJob } from './upload-job.service';
+import { UploadJobService } from './upload-job.service';
 import { FileCacheService } from './file-cache.service';
 import { ThumbnailService } from './thumbnail.service';
 import { FileAccessControlService } from './file-access-control.service';
@@ -210,6 +211,12 @@ export class FileService implements OnModuleInit {
 
   /**
    * 统一的存储回源分发器（可插拔存储改造）。
+   *
+   * **租约契约**：当本方法作为 `fetchFn` 交给 `FileCacheService` / `CacheSessionCoordinator`
+   * 调用时，调用方**已经持有**同权重的上行租约（build / spool / direct 三条路径都在
+   * 取到 `lease` 之后才调用 fetchFn）。因此这些调用点必须传 `upstreamLeaseHeld: true`，
+   * 否则 user 账号路径会再申请一次同权重租约：一次 4GiB 传输占 16 权重（而非 8），
+   * 且多余的申请在预算耗尽后会空等到超时，把唯一 user 账号冷却掉。
    *
    * 非 TG 文件（s3/webdav/gdrive）经存储路由取流：对象引用与账号强绑定，
    * 账号不可用时 fail-closed 返回可诊断 503（绝不跨账号猜测）；
@@ -1301,7 +1308,7 @@ export class FileService implements OnModuleInit {
   async isFileTypeAllowed(
     filename: string,
     buffer?: Buffer,
-  ): Promise<{ allowed: boolean; reason?: string }> {
+  ): Promise<{ allowed: boolean; reason?: string; detectedExt?: string | null }> {
     return this.uploadConfig.isFileTypeAllowed(filename, buffer);
   }
 
@@ -1329,7 +1336,7 @@ export class FileService implements OnModuleInit {
     skipTypeCheck?: boolean,
     folderId?: string | null,
     overwriteFileId?: string,
-    options?: { deferCachePrewarm?: boolean },
+    options?: { deferCachePrewarm?: boolean; detectedExtension?: string | null },
   ): Promise<File> {
     if (file.size > this.uploadConfig.maxFileSizeBytes) {
       throw new BadRequestException(`文件大小不能超过 ${this.uploadConfig.maxFileSizeBytes / 1024 / 1024}MB`);
@@ -1339,12 +1346,16 @@ export class FileService implements OnModuleInit {
 
     await this.assertUploadFolder(folderId, user.id);
 
+    // 分片路径已自行做过 magic bytes 检查（skipTypeCheck），探测结果由调用方传入，
+    // 否则 detectedExtension 恒为 null，公开直链的 MIME 一致性校验对分片上传形同虚设。
+    let detectedExtension: string | null = options?.detectedExtension ?? null;
     if (!skipTypeCheck) {
       const fileSample = this.uploadConfig.getFileSample(file);
       const typeCheck = await this.uploadConfig.isFileTypeAllowed(fileName, fileSample);
       if (!typeCheck.allowed) {
         throw new BadRequestException(typeCheck.reason || '不允许上传此类型的文件');
       }
+      detectedExtension = typeCheck.detectedExt ?? null;
     }
 
     const tempId = randomUUID();
@@ -1404,6 +1415,22 @@ export class FileService implements OnModuleInit {
               gdriveCacheAccountId: locked.gdriveCacheAccountId ?? null,
               gdriveCacheObjectRef: locked.gdriveCacheObjectRef ?? null,
             };
+            // 覆盖前快照：新内容上传失败时据此恢复原引用，否则原文件永久失联（B-02）。
+            // 不含 gdriveCache*：旧缓存对象在事务外即被清理，回滚后由双写状态机重建。
+            locked.overwriteSnapshot = JSON.stringify({
+              filename: locked.filename,
+              telegramFileId: locked.telegramFileId,
+              telegramFilePath: locked.telegramFilePath,
+              storageBackend: locked.storageBackend,
+              storageAccountId: locked.storageAccountId,
+              storageObjectRef: locked.storageObjectRef,
+              size: locked.size,
+              mimeType: locked.mimeType,
+              originalName: locked.originalName,
+              thumbnailPath: locked.thumbnailPath,
+              status: locked.status,
+              uploadStage: locked.uploadStage,
+            });
             // tempId 占位语义与新记录一致，由 FileUploadProcessor 按 fileId 更新为真实远端引用。
             // 覆盖分支保持原存储后端不变（storageBackend 不改写）：异步覆盖的新内容
             // 仍落原后端，避免旧引用后端类型丢失导致提交后无法清理旧对象；
@@ -1415,6 +1442,7 @@ export class FileService implements OnModuleInit {
             locked.originalName = fileName;
             locked.size = file.size;
             locked.mimeType = file.mimetype || 'application/octet-stream';
+            locked.detectedExtension = detectedExtension;
             locked.filename = tempId;
             locked.telegramFileId = tempId;
             locked.telegramFilePath = '';
@@ -1454,6 +1482,7 @@ export class FileService implements OnModuleInit {
         filename: tempId,
         originalName: fileName,
         mimeType: file.mimetype || 'application/octet-stream',
+        detectedExtension,
         size: file.size,
         telegramFileId: tempId,
         telegramFilePath: '',
@@ -1564,6 +1593,8 @@ export class FileService implements OnModuleInit {
   }
 
   async softDeleteProcessingFile(id: string, uploadVersion: number): Promise<void> {
+    // 覆盖上传失败不得软删用户原文件：先尝试回滚旧内容引用（B-02）。
+    if (await this.rollbackOverwriteIfSnapshot(id, uploadVersion)) return;
     await this.fileRepository.manager.transaction(async (manager) => {
       const result = await manager.getRepository(File).update(
         { id, uploadVersion, status: 'processing' },
@@ -1579,6 +1610,8 @@ export class FileService implements OnModuleInit {
 
   /** 覆盖上传失败时保留原记录 id 和审计轨迹，只结束 processing 状态，不软删除用户原文件记录。 */
   async markProcessingFileFailed(id: string, uploadVersion: number): Promise<void> {
+    // 有覆盖快照说明这是覆盖上传：恢复原内容引用，而不是把原文件标成 error（B-02）。
+    if (await this.rollbackOverwriteIfSnapshot(id, uploadVersion)) return;
     await this.fileRepository.update(
       { id, uploadVersion, status: 'processing' },
       {
@@ -1587,6 +1620,60 @@ export class FileService implements OnModuleInit {
         uploadFailureReason: '上传已取消或未能入队，请重新上传',
       } as Partial<File>,
     );
+  }
+
+  /**
+   * 覆盖上传失败时回滚到覆盖前的内容引用（B-02）。
+   *
+   * 覆盖事务先把 telegramFileId/filename 置为 tempId 占位；若新内容上传失败/取消/重试耗尽
+   * 而不回滚，原文件就永久不可下载（旧远端对象成孤儿，只有审计日志留有旧引用）。
+   *
+   * 守卫 `status='processing'`：一旦置 ready 就不再回滚，避免成功后的迟到失败路径
+   * 把已提交的新内容误回滚成旧内容。uploadVersion 保持递增后的值（缓存键随之变化，
+   * 强制重新回源，不会命中旧版本缓存）。
+   *
+   * @returns 是否确实执行了回滚
+   */
+  async rollbackOverwriteIfSnapshot(id: string, uploadVersion: number): Promise<boolean> {
+    return this.fileRepository.manager.transaction(async (manager) => {
+      const repo = manager.getRepository(File);
+      const row = await repo.findOne({
+        where: { id, uploadVersion, status: 'processing' },
+        ...databasePessimisticWriteLock(),
+      });
+      if (!row?.overwriteSnapshot) return false;
+      let prev: Partial<File>;
+      try {
+        prev = JSON.parse(row.overwriteSnapshot) as Partial<File>;
+      } catch {
+        this.logger.warn(`覆盖快照解析失败，跳过回滚 fileId=${id} v=${uploadVersion}`);
+        return false;
+      }
+      const result = await repo.update(
+        { id, uploadVersion, status: 'processing' },
+        {
+          filename: prev.filename,
+          telegramFileId: prev.telegramFileId,
+          telegramFilePath: prev.telegramFilePath,
+          storageBackend: prev.storageBackend,
+          storageAccountId: prev.storageAccountId,
+          storageObjectRef: prev.storageObjectRef,
+          size: prev.size,
+          mimeType: prev.mimeType,
+          originalName: prev.originalName,
+          thumbnailPath: prev.thumbnailPath,
+          status: prev.status,
+          uploadStage: prev.uploadStage,
+          uploadFailureReason: null,
+          overwriteSnapshot: null,
+        } as Partial<File>,
+      );
+      if (!result.affected) return false;
+      this.logger.warn(
+        `覆盖上传失败，已回滚原内容引用 fileId=${id} v=${uploadVersion} status=${prev.status}`,
+      );
+      return true;
+    });
   }
 
   async upload(file: Express.Multer.File, user: User, tagIds?: string[]): Promise<File> {
@@ -1622,6 +1709,7 @@ export class FileService implements OnModuleInit {
       filename: isNonTelegram ? originalName : telegramFile.file_id,
       originalName: originalName,
       mimeType: file.mimetype,
+      detectedExtension: typeCheck.detectedExt ?? null,
       size: file.size,
       telegramFileId: telegramFile.file_id,
       telegramFilePath: telegramFile.file_path || '',
@@ -1731,11 +1819,8 @@ export class FileService implements OnModuleInit {
         await this.fileUploadQueue.add('upload',
           { fileId: savedFile.id, filePath: pendingPath, uploadVersion: savedFile.uploadVersion },
           {
-            jobId: `file-upload:${savedFile.id}:${savedFile.uploadVersion}`,
-            attempts: 3,
-            backoff: { type: 'exponential', delay: 10000 },
-            removeOnComplete: 100,
-            removeOnFail: 50,
+            jobId: fileUploadJobId(savedFile.id, savedFile.uploadVersion),
+            ...FILE_UPLOAD_JOB_OPTIONS,
           },
         );
         success.push(savedFile);
@@ -1798,7 +1883,7 @@ export class FileService implements OnModuleInit {
       // 普通 B-tree 索引无法命中；文件名基数受限、搜索为低频操作，无前索引可接受。
       // 如数据量增长需改 trigram/GIN，仓库已有 `1798100000000-AddFileNameTrigramIndex` 迁移
       // （pg_trgm + GIN (LOWER("originalName") gin_trgm_ops)）可参考。
-      qb.andWhere('LOWER(file.originalName) LIKE :keyword', { keyword: `%${escapeLike(keyword.toLowerCase())}%` });
+      qb.andWhere('LOWER(file.originalName) LIKE :keyword ESCAPE \'\\\'', { keyword: `%${escapeLike(keyword.toLowerCase())}%` });
     }
 
     // 标签筛选：AND 逻辑 —— 文件必须同时拥有所有指定标签
@@ -1861,7 +1946,7 @@ export class FileService implements OnModuleInit {
       const tagWheres: string[] = [`ft."tagId" IN (${tagPlaceholders})`];
       if (userId) { tagWheres.push(`file."uploaderId" = $${tagIdx++}`); tagParams.push(userId); }
       if (!includeDeleted) { tagWheres.push('file."isDeleted" = false'); }
-      if (keyword) { tagWheres.push(`LOWER(file."originalName") LIKE $${tagIdx++}`); tagParams.push(`%${escapeLike(keyword.toLowerCase())}%`); }
+      if (keyword) { tagWheres.push(`LOWER(file."originalName") LIKE $${tagIdx++} ESCAPE '\\'`); tagParams.push(`%${escapeLike(keyword.toLowerCase())}%`); }
       // G2-09：标签计数 SQL 与主查询共用 folderId 条件，避免筛选计数与列表不一致
       if (folderId === 'root') {
         tagWheres.push('file."folderId" IS NULL');
@@ -1895,7 +1980,7 @@ export class FileService implements OnModuleInit {
     } else {
       const countQb = this.fileRepository.createQueryBuilder('file').where(where);
       if (keyword) {
-        countQb.andWhere('LOWER(file.originalName) LIKE :keyword', { keyword: `%${escapeLike(keyword.toLowerCase())}%` });
+        countQb.andWhere('LOWER(file.originalName) LIKE :keyword ESCAPE \'\\\'', { keyword: `%${escapeLike(keyword.toLowerCase())}%` });
       }
       total = await countQb.getCount();
     }
@@ -2040,16 +2125,34 @@ export class FileService implements OnModuleInit {
     }
 
     // 标记删除状态（用户自主删除，非管理员操作）
-    file.isDeleted = true;
-    file.deletedByAdmin = false;
-    file.deleteRequestedAt = now;
-    file.deleteScheduledAt = new Date(now.getTime() + FILE_DELETE_GRACE_MS);
-    file.deleteCooldownUntil = new Date(now.getTime() + FILE_DELETE_COOLDOWN_MS);
+    const deleteRequestedAt = now;
+    const deleteScheduledAt = new Date(now.getTime() + FILE_DELETE_GRACE_MS);
+    const deleteCooldownUntil = new Date(now.getTime() + FILE_DELETE_COOLDOWN_MS);
     // v1.2.6：软删除与统一命名空间名称释放同事务（进入回收站即释放名称）
-    await this.fileRepository.manager.transaction(async (manager) => {
-      await manager.getRepository(File).save(file);
+    //
+    // 写回用**条件 update** 而不是 save(file)：file 是事务外读到的快照，
+    // 若在此期间异步上传刚提交了新引用（storageBackend/fileId 等），
+    // 整实体 save 会用旧字段把它覆盖掉。条件 `isDeleted=false` 同时保证幂等。
+    const changed = await this.fileRepository.manager.transaction(async (manager) => {
+      const result = await manager.getRepository(File).update(
+        { id, isDeleted: false },
+        {
+          isDeleted: true,
+          deletedByAdmin: false,
+          deleteRequestedAt,
+          deleteScheduledAt,
+          deleteCooldownUntil,
+        },
+      );
+      if (!result.affected) return false;
       await this.namespaceService.release(manager, { entityType: 'file', entityId: id });
+      return true;
     });
+    if (!changed) {
+      // 并发删除已经先行完成：返回当前状态而不是伪装成功
+      const current = await this.fileRepository.findOne({ where: { id } });
+      return { status: 'already_deleted', scheduledAt: current?.deleteScheduledAt || undefined };
+    }
 
     // 审计日志：文件请求删除
     this.auditService.log({
@@ -2057,10 +2160,10 @@ export class FileService implements OnModuleInit {
       userId: user.id,
       resourceType: 'file',
       resourceId: id,
-      metadata: { filename: file.originalName, scheduledAt: file.deleteScheduledAt.toISOString() },
+      metadata: { filename: file.originalName, scheduledAt: deleteScheduledAt.toISOString() },
     });
 
-    return { status: 'pending', scheduledAt: file.deleteScheduledAt };
+    return { status: 'pending', scheduledAt: deleteScheduledAt };
   }
 
   /**
@@ -2090,6 +2193,21 @@ export class FileService implements OnModuleInit {
     // 如果已过 scheduledAt，文件已被永久删除
     if (file.deleteScheduledAt && now >= file.deleteScheduledAt) {
       throw new BadRequestException('删除等待期已过，文件已永久删除');
+    }
+
+    // 祖先链校验：父目录仍在回收站时直接恢复文件会得到「活跃文件挂在已删目录下」，
+    // 目录树里看不到它却仍占用命名空间。与 folder.service.ts 的恢复前校验保持一致。
+    if (file.folderId) {
+      let ancestorId: string | null = file.folderId;
+      // 深度护栏：正常树深度受文件夹服务限制，这里只防脏数据造成的环
+      for (let depth = 0; ancestorId && depth < 64; depth++) {
+        const ancestor: Folder | null = await this.folderRepository.findOne({ where: { id: ancestorId } });
+        if (!ancestor) break;
+        if (ancestor.isDeleted) {
+          throw new BadRequestException('该文件所在的目录仍处于回收站中，请先恢复上级目录');
+        }
+        ancestorId = ancestor.parentId ?? null;
+      }
     }
 
     // G2-08：恢复与清扫（sweepPendingDeletions）存在竞态 —— 清扫可能在 restore 的
@@ -2133,8 +2251,10 @@ export class FileService implements OnModuleInit {
         });
       });
     } catch (error: unknown) {
-      if (isDatabaseUniqueViolation(error)) {
-        throw new BadRequestException('恢复失败：当前目录已存在同名文件或文件夹，请先处理重名');
+      // namespaceService.acquire 内部已把唯一约束转成 ConflictException，
+      // 外层判原始数据库错误码永远不成立（不可达）。
+      if (error instanceof ConflictException) {
+        throw new ConflictException('恢复失败：当前目录已存在同名文件或文件夹，请先处理重名');
       }
       throw error;
     }
@@ -2199,8 +2319,10 @@ export class FileService implements OnModuleInit {
     });
 
     // 数据库删除成功后再清理可重建的本地衍生数据。
-    this.deleteLocalThumbnail(file);
-    this.fileCacheService.invalidate(id);
+    // invalidate 必须 await（与 1192 行的覆盖路径一致）：fire-and-forget 会让
+    // 在途 build/spool 会话在行已删除后仍写出旧内容，抛出未捕获的 rejection。
+    await this.thumbnailService.deleteLocalThumbnail(file);
+    await this.fileCacheService.invalidate(id);
 
     // 非 TG 后端：DB 删除成功后经共享引用检查 best-effort 清理远端对象（TG 维持不删现状）
     void this.cleanupNonTelegramObject(file);
@@ -2295,8 +2417,8 @@ export class FileService implements OnModuleInit {
             this.logger.warn(`跳过事务复核后不再到期的文件: ${file.originalName} (${fileId})`);
             continue;
           }
-          this.deleteLocalThumbnail(file);
-          this.fileCacheService.invalidate(fileId);
+          await this.thumbnailService.deleteLocalThumbnail(file);
+          await this.fileCacheService.invalidate(fileId);
           // 非 TG 后端：经共享引用检查 best-effort 清理远端对象（失败只告警，不影响删除结论）
           void this.cleanupNonTelegramObject(file);
           void this.cleanupGDriveCacheObject(file);
@@ -2326,7 +2448,112 @@ export class FileService implements OnModuleInit {
       if (batch.length < batchSize) break; // 已是最后一批
     }
 
+    // 文件清理完成后回收**文件夹**：此前只有 files 表有清扫任务，
+    // 软删目录及其 directory_names 行永远留在库里，7 天后用户还能恢复出一个空壳目录。
+    // 顺序：先清文件（上面已完成，子项先于父项消失），再按扫描时间出的深度倒序清目录。
+    deletedCount += await this.sweepDeletedFolders(now);
     return deletedCount;
+  }
+
+  /**
+   * 物理清理到期的软删文件夹与统一命名空间名称行。
+   *
+   * **只删「空」目录**。`folders.parentId` 是 `ON DELETE CASCADE`、`files.folderId`
+   * 是 `ON DELETE SET NULL`，因此数据库层删一个父目录会连带删掉它下面**所有**子目录
+   * （含未到期、甚至未删除的），并把其中未到期的文件静默移到根目录。
+   * 这意味着清扫必须自己保证「该目录下没有任何其他行」：
+   * - 任何子目录（无论是否到期）存在 → 跳过，交给子目录各自到期后先删；
+   * - 任何文件（无论是否到期）仍挂在该目录 → 跳过，否则会把它变成根目录孤儿。
+   *
+   * 判定与删除在同一事务内完成（行锁 + 事务内复查），避免检查后被并发新建/移入。
+   */
+  private async sweepDeletedFolders(now: Date): Promise<number> {
+    const repo = this.folderRepository;
+    const batchSize = 100;
+    const pageSize = batchSize * 10;
+    // B-21：此前单轮只取 1000 条且无游标续扫，批量删除 >1000 个目录后
+    // 物理清理要等下一次小时级调度，积压时延迟线性放大。
+    // 游标按 id 前进（被跳过的非空目录不会挡住后续页），并设轮次护栏避免无限占用调度。
+    const MAX_ROUNDS = 20;
+    let deleted = 0;
+    let cursor: string | null = null;
+
+    for (let round = 0; round < MAX_ROUNDS; round++) {
+      const query = repo.createQueryBuilder('folder')
+        .where('folder.isDeleted = true')
+        .andWhere('folder.deleteScheduledAt IS NOT NULL')
+        .andWhere('folder.deleteScheduledAt <= :now', { now })
+        .orderBy('folder.id', 'ASC')
+        .take(pageSize);
+      if (cursor) query.andWhere('folder.id > :cursor', { cursor });
+      const pending = await query.getMany();
+      if (pending.length === 0) break;
+      cursor = pending[pending.length - 1].id;
+
+      // 计算深度：沿 parentId 上溯，只用本批数据 + 逐条查询兜底
+      const depthOf = async (folder: Folder): Promise<number> => {
+        let depth = 0;
+        let parentId = folder.parentId;
+        const guard = new Set<string>();
+        while (parentId && depth < 64 && !guard.has(parentId)) {
+          guard.add(parentId);
+          const parent = await repo.findOne({ where: { id: parentId }, select: { id: true, parentId: true } });
+          if (!parent) break;
+          parentId = parent.parentId;
+          depth++;
+        }
+        return depth;
+      };
+
+      const ranked: Array<{ folder: Folder; depth: number }> = [];
+      for (const folder of pending) ranked.push({ folder, depth: await depthOf(folder) });
+      ranked.sort((a, b) => b.depth - a.depth);
+
+      for (const { folder } of ranked) {
+        const folderId = folder.id;
+        try {
+          const removed = await repo.manager.transaction(async (manager) => {
+            const folders = manager.getRepository(Folder);
+            const locked = await folders.findOne({
+              where: { id: folderId },
+              ...databasePessimisticWriteLock(),
+            });
+            if (!locked || !locked.isDeleted || !locked.deleteScheduledAt) return false;
+            if (locked.deleteScheduledAt > now) return false;
+
+            // 子目录：不论是否到期、是否已删除，只要还有就直接跳过。
+            // 数据库的 CASCADE 会连带删除它们，包括尚未到期的。
+            const childFolders = await folders.count({ where: { parentId: folderId } });
+            if (childFolders > 0) return false;
+
+            // 文件：files.folderId 是 SET NULL，删目录会把未到期文件静默移到根目录。
+            const childFiles = await manager.getRepository(File).count({ where: { folderId } });
+            if (childFiles > 0) return false;
+
+            await this.namespaceService.remove(manager, { entityType: 'folder', entityId: folderId });
+            await folders.remove(locked);
+            return true;
+          });
+          if (!removed) continue;
+          deleted++;
+          await this.auditService.logAwait({
+            action: 'folder_delete',
+            userId: folder.ownerId,
+            resourceType: 'folder',
+            resourceId: folderId,
+            metadata: { name: folder.name, source: 'scheduled_sweep', scheduledAt: folder.deleteScheduledAt?.toISOString() },
+          }).catch(() => undefined);
+          this.logger.log(`已永久删除文件夹数据库记录: ${folder.name} (${folderId})`);
+        } catch (error: unknown) {
+          this.logger.warn(
+            `清除文件夹记录失败，保留记录待下次重试: ${folder.name} (${folderId}), 错误: ${(error as Error).message}`,
+          );
+        }
+      }
+
+      if (pending.length < pageSize) break;
+    }
+    return deleted;
   }
 
   // ---------- 访问策略变更（M6 拆分：实现见 FileAccessControlService） ----------
@@ -2541,13 +2768,6 @@ export class FileService implements OnModuleInit {
   }
 
   /**
-   * 生成高清视频封面（委托 ThumbnailService，保持公开 API 不变）。
-   */
-  async generateAndSaveHdVideoCover(file: File): Promise<void> {
-    return this.thumbnailService.generateAndSaveHdVideoCover(file);
-  }
-
-  /**
    * 生成图片缩略图（委托 ThumbnailService，保持公开 API 不变）。
    */
   async generateAndSaveThumbnail(
@@ -2558,21 +2778,6 @@ export class FileService implements OnModuleInit {
   }
 
   /**
-   * 启动扫描补齐缺失缩略图（委托 ThumbnailService，保持公开 API 不变）。
-   */
-  async syncMissingThumbnails(): Promise<void> {
-    return this.thumbnailService.syncMissingThumbnails();
-  }
-
-  /**
-   * 删除本地缩略图文件（委托 ThumbnailService，保持公开 API 不变）。
-   */
-  deleteLocalThumbnail(file: File): void {
-    this.thumbnailService.deleteLocalThumbnail(file);
-  }
-
-
-  /**
    * R5：已 error 文件在所有读取入口统一抛 410，避免各自复制错误文本与状态判定。
    * 判定点必须在提交响应头之前（各流式入口在组装响应前调用）。
    */
@@ -2580,6 +2785,32 @@ export class FileService implements OnModuleInit {
     if (file.status === 'error') {
       throw new GoneException('文件已不可用');
     }
+  }
+
+  /**
+   * A-16：Range 入口共用的「取文件 + 版本 ETag + If-Range 判定」。
+   *
+   * 返回 null 表示 If-Range 不匹配，调用方应回退全量 200。
+   * **刻意不含授权与 processing 判定**：各入口的授权顺序与 processing 语义不同
+   * （公开媒体允许「processing 但已有热缓存」），把它们塞进公共 helper 会改变
+   * 416/403/400 的优先级与可服务集合。此处只收敛逐字重复的机械部分。
+   */
+  private async loadRangeTarget(
+    id: string,
+    ifRange?: string,
+  ): Promise<{ file: File; etag: string } | null> {
+    const file = await this.fileRepository.findOne({ where: { id, isDeleted: false } });
+    if (!file) throw new NotFoundException('文件不存在');
+    const etag = buildFileVersionETag(file);
+    if (ifRange && !matchesIfRange(ifRange, etag)) return null;
+    return { file, etag };
+  }
+
+  /** A-16：Range 解析共用出口——非法/越界统一 416，不静默回退 200 */
+  private parseRangeOr416(rangeHeader: string, total: number): { start: number; end: number } {
+    const parsed = parseByteRange(rangeHeader, total);
+    if (!parsed.ok) throw new RangeNotSatisfiableException(total);
+    return parsed.range;
   }
 
   /**
@@ -2655,6 +2886,8 @@ export class FileService implements OnModuleInit {
       const fetch = async () => {
         const result = await this.openSourceStream(file, expectedSize, {
           noCache: this.fileCacheService.isNoCacheMode() || forceNoCache,
+          // 协调器已持有同权重租约：禁止 user 路径重复申请（见 openSourceStream 的租约契约）
+          upstreamLeaseHeld: true,
         });
         recoveredInfo = result.info;
         return result;
@@ -2777,19 +3010,13 @@ export class FileService implements OnModuleInit {
 
     await this.assertFileReadable(file, user);
 
-    // 原子递增访问计数（先扣次数，再拉取文件，避免拉取成功但计数失败）
-    const updateResult = await this.fileRepository
-      .createQueryBuilder()
-      .update(File)
-      .set({ currentAccessCount: () => 'currentAccessCount + 1' })
-      .where('id = :id', { id })
-      .andWhere('(maxAccessCount <= 0 OR currentAccessCount < maxAccessCount)')
-      .andWhere('isDeleted = false')
-      .execute();
-
-    if (updateResult.affected === 0) {
-      throw new ForbiddenException('访问次数已用尽或文件不存在');
+    // A-01：配额执行以 ShareLink 为唯一权威，File.currentAccessCount 降级为统计镜像。
+    // 先扣次数再拉取文件，避免拉取成功但计数失败。
+    const access = await this.accessControl.enforceAccessConstraints(file);
+    if (!access.allowed) {
+      throw new ForbiddenException(access.reason || '访问次数已用尽或文件不存在');
     }
+    await this.accessControl.bumpAccessStats(id);
 
     const { stream } = await this.getDownloadStream(file, opts);
 
@@ -2851,6 +3078,8 @@ export class FileService implements OnModuleInit {
     const forceNoCache = noCache && !this.fileCacheService.isNoCacheMode();
     const fetchFn = async () => this.openSourceStream(file, expectedSize, {
       noCache: this.fileCacheService.isNoCacheMode() || forceNoCache,
+      // 协调器已持有同权重租约：禁止 user 路径重复申请（见 openSourceStream 的租约契约）
+      upstreamLeaseHeld: true,
     });
     const stream = await this.fileCacheService.getOrCacheRangeStream(
       file.id, expectedSize, start, end, fetchFn,
@@ -2877,13 +3106,10 @@ export class FileService implements OnModuleInit {
     accessLogId?: string;
     etag?: string;
   } | null> {
-    const file = await this.fileRepository.findOne({
-      where: { id, isDeleted: false },
-    });
-    if (!file) throw new NotFoundException('文件不存在');
+    const target = await this.loadRangeTarget(id, opts?.ifRange);
+    if (!target) return null;
+    const { file } = target;
 
-    const etag = buildFileVersionETag(file);
-    if (opts?.ifRange && !matchesIfRange(opts.ifRange, etag)) return null;
     await this.assertFileReadable(file, user);
 
     this.assertFileUsable(file);
@@ -2895,12 +3121,7 @@ export class FileService implements OnModuleInit {
     const total = Number(file.size);
     // 严格单 Range 解析：closed/open-ended/suffix；非法/越界统一 416，
     // 不再静默回退 200，避免垃圾 Range 与错误 Content-Length 组合的解析问题。
-    const parsed = parseByteRange(rangeHeader, total);
-    if (!parsed.ok) {
-      throw new RangeNotSatisfiableException(total);
-    }
-    const start = parsed.range.start;
-    const actualEnd = parsed.range.end;
+    const { start, end: actualEnd } = this.parseRangeOr416(rangeHeader, total);
 
     // 缓存命中走本地文件；冷资源/无缓存走 spool/build，均保持 Range。
     const chunkSize = actualEnd - start + 1;
@@ -2916,21 +3137,14 @@ export class FileService implements OnModuleInit {
     const lastDedup = this.rangeQuotaDedup.get(dedupKey);
     const shouldConsume = !lastDedup || now - lastDedup >= FileService.RANGE_QUOTA_DEDUP_MS;
     if (shouldConsume) {
-      // 原子访问计数：与完整下载路径一致，强制 maxAccessCount 上限并校验 affected，
-      // 防止受限文件被无限次范围下载绕过。
-      const updateResult = await this.fileRepository
-        .createQueryBuilder()
-        .update(File)
-        .set({ currentAccessCount: () => '"currentAccessCount" + 1' })
-        .where('id = :id', { id })
-        .andWhere('("maxAccessCount" <= 0 OR "currentAccessCount" < "maxAccessCount")')
-        .andWhere('"isDeleted" = false')
-        .execute();
-
-      if (updateResult.affected === 0) {
+      // A-01：与全量下载同一权威（ShareLink）。File 侧只递增统计镜像，
+      // 不再参与上限判定，防止受限文件被无限次范围下载绕过。
+      const access = await this.accessControl.enforceAccessConstraints(file);
+      if (!access.allowed) {
         readStream.destroy();
-        throw new ForbiddenException('访问次数已用尽或文件不存在');
+        throw new ForbiddenException(access.reason || '访问次数已用尽或文件不存在');
       }
+      await this.accessControl.bumpAccessStats(id);
       // 记录本次扣次时间；Map 有界，超出容量即整体清空（低频操作，可接受）
       if (this.rangeQuotaDedup.size > 10_000) this.rangeQuotaDedup.clear();
       this.rangeQuotaDedup.set(dedupKey, now);
@@ -3382,6 +3596,8 @@ export class FileService implements OnModuleInit {
     const expectedSize = Number(file.size);
     const fetchFn = () => this.openSourceStream(file, expectedSize, {
       noCache: this.fileCacheService.isNoCacheMode(),
+      // 协调器已持有同权重租约：禁止 user 路径重复申请（见 openSourceStream 的租约契约）
+      upstreamLeaseHeld: true,
     });
     const stream = await this.fileCacheService.getOrCacheRangeStream(file.id, expectedSize, start, end, fetchFn, {
       contentVersion: file.uploadVersion,
@@ -3423,7 +3639,7 @@ export class FileService implements OnModuleInit {
     // C-01 修复：公开 /media 直链只允许白名单内的安全位图与受支持音视频。
     // SVG、XML、HTML、脚本型内容及任何 MIME/魔数不一致的类型一律拒绝 inline，
     // 杜绝同源持久型 XSS 面。此阻断不可通过功能开关关闭。
-    if (!isSafePublicInlineContentType(file.mimeType || '')) {
+    if (!isSafePublicInlineContentType(file.mimeType || '', file.detectedExtension)) {
       throw new BadRequestException('该类型不支持媒体直链');
     }
     // G5-12：访问次数限制语义统一为 maxAccessCount > 0 表示「有限制」。
@@ -3550,11 +3766,14 @@ export class FileService implements OnModuleInit {
 
     // 文件已由 Multer 完整接收后，后台任务与原 HTTP 连接解耦；
     // 正常响应结束也会触发 request close，不能据此取消仍在进行的 Telegram 上传。
+    // 因此该 controller **刻意永不 abort**：signal 只是预留的显式取消通道，
+    // 下游的 signal.aborted 分支在当前接线方式下不可达。彻底移除这套惰性管线
+    // 属于 FileService 拆分（A-04）的范围，不在本次修复内。
     const abortController = new AbortController();
     const cleanup = () => {};
 
     // 后台处理：不阻塞响应
-    this.processAsyncUpload(job.jobId, file, user, originalName, abortController.signal, cleanup, tagIds, folderId, overwriteFileId);
+    this.processAsyncUpload(job.jobId, file, user, originalName, abortController.signal, cleanup, tagIds, folderId, overwriteFileId, typeCheck.detectedExt ?? null);
     return { jobId: job.jobId, warning: '任务在内存中处理，进程重启会丢失' };
   }
 
@@ -3564,8 +3783,10 @@ export class FileService implements OnModuleInit {
    * @warning 任务存于内存（UploadJobService Map），进程崩溃或重启会丢失进行中的任务。
    *          如需持久化请迁移至 Bull 队列（项目已集成 @nestjs/bull）。
    *
-   * @param req Express Request，用于监听客户端连接关闭事件，
-   *            客户端断开后 30 秒未恢复则放弃 Telegram 上传任务
+   * @param _req 保留入参以兼容控制器调用位置。**不用于取消任务**：文件已由 Multer
+   *             完整接收，后台上传与 HTTP 连接解耦；正常响应结束同样会触发 request
+   *             close，据此取消会误杀合法上传。历史上此处曾承诺「客户端断开 30 秒
+   *             未恢复则放弃上传」，该行为从未实现，已删除该描述。
    */
   async uploadMultipleAsync(
     files: Express.Multer.File[],
@@ -3577,6 +3798,9 @@ export class FileService implements OnModuleInit {
 
     // 文件已由 Multer 完整接收后，后台任务与原 HTTP 连接解耦；
     // 正常响应结束也会触发 request close，不能据此取消仍在进行的 Telegram 上传。
+    // 因此该 controller **刻意永不 abort**：signal 只是预留的显式取消通道，
+    // 下游的 signal.aborted 分支在当前接线方式下不可达。彻底移除这套惰性管线
+    // 属于 FileService 拆分（A-04）的范围，不在本次修复内。
     const abortController = new AbortController();
     const cleanup = () => {};
 
@@ -3605,6 +3829,7 @@ export class FileService implements OnModuleInit {
           // M2/N1：tagIds 与文件行写入同事务，标签失败即整体回滚，不再产生幽灵失败。
           const uploadedFile = await this.uploadToTelegram(
             file, user, originalName, abortController.signal, null, undefined, tagIds,
+            typeCheck.detectedExt ?? null,
           );
           success.push(uploadedFile);
         } catch (error: unknown) {
@@ -3638,15 +3863,12 @@ export class FileService implements OnModuleInit {
     return { jobId: job.jobId, total: files.length, warning: '任务在内存中处理，进程重启会丢失' };
   }
 
-  getUploadJob(jobId: string): UploadJob | undefined {
-    return this.uploadJobService.getJob(jobId);
-  }
-
   /**
    * 后台处理单个文件上传到 Telegram
    *
    * @param abortSignal 客户端连接断开 30 秒后触发 abort，中止上传
-   * @param cleanup 任务完成/失败时调用，清理 req 监听器和 timer
+   * @param cleanup 任务完成/失败时调用的收尾钩子。当前两个调用方都传入空实现
+   *                （没有 req 监听器或 timer 需要清理），保留形参供未来显式取消通道使用。
    */
   private async processAsyncUpload(
     jobId: string,
@@ -3658,6 +3880,7 @@ export class FileService implements OnModuleInit {
     tagIds?: string[],
     folderId?: string | null,
     overwriteFileId?: string,
+    detectedExtension?: string | null,
   ): Promise<void> {
     try {
       this.uploadJobService.updateJob(jobId, { status: 'uploading' });
@@ -3670,6 +3893,7 @@ export class FileService implements OnModuleInit {
       // M2/N1：tagIds 直接传入 uploadToTelegram，与文件行写入同事务，杜绝幽灵失败。
       const savedFile = await this.uploadToTelegram(
         file, user, originalName, abortSignal, folderId, overwriteFileId, tagIds,
+        detectedExtension,
       );
 
       // 完成前再次检查，避免连接断开后仍写入成功结果
@@ -3709,6 +3933,7 @@ export class FileService implements OnModuleInit {
     folderId?: string | null,
     overwriteFileId?: string,
     tagIds?: string[],
+    detectedExtension?: string | null,
   ): Promise<File> {
     // GIF 文件加 .bin 后缀防止 Telegram 转码为 MP4（仅 TG 后端需要；非 TG 用 displayName 保留原名）
     const uploadName = file.mimetype === 'image/gif' ? originalName + '.bin' : originalName;
@@ -3778,6 +4003,7 @@ export class FileService implements OnModuleInit {
       filename: isNonTelegram ? originalName : telegramFile.file_id,
       originalName: originalName,
       mimeType: file.mimetype,
+      detectedExtension: detectedExtension ?? null,
       size: file.size,
       telegramFileId: telegramFile.file_id,
       telegramFilePath: telegramFile.file_path || '',
@@ -4036,15 +4262,12 @@ export class FileService implements OnModuleInit {
     accessLogId?: string;
     etag: string;
   } | null> {
-    const file = await this.fileRepository.findOne({ where: { id, isDeleted: false } });
-    if (!file) throw new NotFoundException('文件不存在');
-    const etag = buildFileVersionETag(file);
-    if (ifRange && !matchesIfRange(ifRange, etag)) return null;
+    const target = await this.loadRangeTarget(id, ifRange);
+    if (!target) return null;
+    const { file, etag } = target;
     this.assertFileUsable(file);
     const total = Number(file.size);
-    const parsed = parseByteRange(rangeHeader, total);
-    if (!parsed.ok) throw new RangeNotSatisfiableException(total);
-    const { start, end } = parsed.range;
+    const { start, end } = this.parseRangeOr416(rangeHeader, total);
     const stream = await this.getRangeDownloadStream(file, start, end, true);
     if (!stream) throw new BadRequestException('文件暂不可提供范围下载');
     let accessLogId: string | undefined;
@@ -4182,6 +4405,8 @@ export class FileService implements OnModuleInit {
     // 前端在冷资源阶段钳制 seek，拖动进度条不再触发新的动态分段回源。
     const fetchFn = () => this.openSourceStream(file, total, {
       noCache: this.fileCacheService.isNoCacheMode(),
+      // 协调器已持有同权重租约：禁止 user 路径重复申请（见 openSourceStream 的租约契约）
+      upstreamLeaseHeld: true,
     });
     const readStream = await this.fileCacheService.getOrCacheRangeStream(file.id, total, start, actualEnd, fetchFn, {
       contentVersion: file.uploadVersion,
@@ -4263,6 +4488,8 @@ export class FileService implements OnModuleInit {
 
     const fetchFn = () => this.openSourceStream(file, total, {
       noCache: this.fileCacheService.isNoCacheMode(),
+      // 协调器已持有同权重租约：禁止 user 路径重复申请（见 openSourceStream 的租约契约）
+      upstreamLeaseHeld: true,
     });
     const stream = await this.fileCacheService.getOrCacheRangeStream(file.id, total, start, end, fetchFn, {
       contentVersion: file.uploadVersion,

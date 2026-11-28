@@ -1,0 +1,222 @@
+/* ============================================================
+   TGTC Design Tokens — Single Source of Truth
+   青绿工作台（Light / Dark）+ 语义色 + 媒体舞台色 + 文件类型色 + @theme 映射
+   ============================================================ */
+
+/* --- Tailwind v4 @theme mapping (generates utility tokens without cycles) --- */
+@theme {
+  /* Breakpoints: align 1:1 with useMobile() & useBreakpoint() */
+  --breakpoint-sm: 481px;
+  --breakpoint-md: 769px;
+  --breakpoint-lg: 1024px;
+  --breakpoint-xl: 1441px;
+  --breakpoint-2xl: initial;
+
+  /* Typography */
+  --font-display: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-body: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Menlo, monospace;
+
+  /* Radii (4px baseline) */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+
+  /* Semantic Color Utilities (reactive to [data-theme="dark"]) */
+  --color-canvas: var(--workspace-canvas);
+  --color-surface: var(--workspace-surface);
+  --color-elevated: var(--color-bg-elevated);
+  --color-overlay: var(--color-bg-overlay);
+  --color-hover: var(--color-bg-hover);
+  --color-selected: var(--workspace-selected);
+
+  --color-brand: var(--workspace-accent);
+  --color-brand-hover: var(--seed-accent);
+  --color-on-brand: var(--workspace-on-accent);
+  --color-brand-soft: var(--color-accent-soft);
+
+  --color-ink: var(--text-primary);
+  --color-ink-muted: var(--text-secondary);
+  --color-ink-subtle: var(--text-tertiary);
+  --color-ink-disabled: var(--text-disabled);
+
+  --color-line: var(--border-default);
+  --color-line-strong: var(--border-strong);
+  --color-line-brand: var(--border-accent);
+
+  --color-ok: var(--color-success);
+  --color-ok-soft: var(--color-success-soft);
+  --color-warn: var(--color-warning);
+  --color-warn-soft: var(--color-warning-soft);
+  --color-err: var(--color-danger);
+  --color-err-soft: var(--color-danger-soft);
+  --color-info-tone: var(--color-info);
+  --color-info-soft: var(--color-info-soft);
+}
+
+/* ============================================================
+   1. LIGHT THEME SEED & SEMANTIC TOKENS
+   ============================================================ */
+:root {
+  /* --- Seed Palette (Workspace Core) --- */
+  --workspace-surface: #fffefa;
+  --workspace-canvas: #f6f5ef;
+  --workspace-text: #202923;
+  --workspace-muted: #59645e;
+  --workspace-border: #e3e6df;
+  --workspace-accent: #006b5b;
+  --workspace-on-accent: #ffffff;
+  --workspace-selected: #e6f2eb;
+  --workspace-archive: #123e33;
+  --workspace-on-archive: #f9f0dc;
+  --workspace-archive-line: #bbd5a9;
+  --workspace-archive-mark: #e4c382;
+  --workspace-header-height: 62px;
+  --workspace-mobile-nav-height: 56px;
+
+  /* --- Seed Aliases --- */
+  --seed-bg: var(--workspace-canvas);
+  --seed-fg: var(--workspace-text);
+  --seed-primary: var(--workspace-accent);
+  --seed-accent: color-mix(in srgb, var(--workspace-accent) 82%, var(--workspace-text));
+  --seed-surface: var(--workspace-surface);
+  --seed-radius: 4px;
+
+  /* --- Derived: Backgrounds --- */
+  --color-bg: var(--seed-bg);
+  --color-bg-elevated: color-mix(in srgb, var(--seed-bg) 60%, var(--seed-surface));
+  --color-bg-surface: var(--seed-surface);
+  --color-bg-overlay: color-mix(in srgb, var(--seed-surface) 96%, var(--seed-fg));
+  --color-bg-hover: color-mix(in srgb, var(--seed-primary) 6%, var(--seed-surface));
+  --color-bg-selected: var(--workspace-selected);
+
+  /* --- Derived: Accent --- */
+  --color-accent: var(--seed-primary);
+  --color-accent-soft: color-mix(in srgb, var(--seed-primary) 10%, transparent);
+  --color-accent-glow: color-mix(in srgb, var(--seed-primary) 18%, transparent);
+
+  /* --- Derived: Semantic --- */
+  --color-success: #037f0c;
+  --color-success-soft: color-mix(in srgb, #037f0c 8%, var(--seed-surface));
+  --color-warning: #8c6a00;
+  --color-warning-soft: color-mix(in srgb, #8c6a00 8%, var(--seed-surface));
+  --color-danger: #d13212;
+  --color-danger-soft: color-mix(in srgb, #d13212 8%, var(--seed-surface));
+  --color-info: #0e7490;
+  --color-info-soft: color-mix(in srgb, #0e7490 8%, var(--seed-surface));
+
+  /* --- Derived: Text --- */
+  --text-primary: var(--seed-fg);
+  --text-secondary: var(--workspace-muted);
+  --text-tertiary: color-mix(in srgb, var(--workspace-muted) 90%, var(--workspace-canvas));
+  --text-quaternary: color-mix(in srgb, var(--workspace-muted) 65%, var(--workspace-canvas));
+  --text-accent: var(--seed-primary);
+  --text-disabled: color-mix(in srgb, var(--seed-fg) 30%, var(--seed-bg));
+  --text-placeholder: var(--text-secondary);
+  --text-on-status: var(--workspace-on-accent);
+
+  /* --- Derived: Borders --- */
+  --border-default: var(--workspace-border);
+  --border-strong: color-mix(in srgb, var(--seed-fg) 22%, var(--seed-bg));
+  --border-accent: color-mix(in srgb, var(--seed-primary) 35%, transparent);
+
+  /* --- Derived: Shadows --- */
+  --shadow-sm: 0 1px 2px color-mix(in srgb, var(--seed-fg) 6%, transparent);
+  --shadow-md: 0 2px 8px color-mix(in srgb, var(--seed-fg) 10%, transparent);
+  --shadow-lg: 0 8px 24px color-mix(in srgb, var(--seed-fg) 14%, transparent);
+  --shadow-glow: none;
+
+  /* --- Transitions --- */
+  --ease-out-expo: cubic-bezier(0.2, 0, 0, 1);
+  --ease-out-back: cubic-bezier(0.2, 0, 0, 1);
+  --duration-fast: 120ms;
+  --duration-normal: 200ms;
+  --duration-slow: 320ms;
+
+  /* --- Spacing (8px baseline) --- */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+
+  /* --- Media Stage Tokens (Cinema dark controls across both themes) --- */
+  --media-backdrop: #0b0d12;
+  --media-stage-bg: #000000;
+  --media-surface: rgba(0, 0, 0, 0.55);
+  --media-surface-hover: rgba(0, 0, 0, 0.68);
+  --media-surface-elevated: rgba(20, 22, 28, 0.88);
+  --media-surface-tooltip: rgba(0, 0, 0, 0.78);
+  --media-scrim: rgba(0, 0, 0, 0.72);
+  --media-scrim-mid: rgba(0, 0, 0, 0.35);
+  --media-scrim-soft: rgba(0, 0, 0, 0.28);
+  --media-text: #ffffff;
+  --media-text-primary: rgba(255, 255, 255, 0.92);
+  --media-text-secondary: rgba(255, 255, 255, 0.7);
+  --media-text-muted: rgba(255, 255, 255, 0.6);
+  --media-text-faint: rgba(255, 255, 255, 0.3);
+  --media-border: rgba(255, 255, 255, 0.12);
+  --media-border-subtle: rgba(255, 255, 255, 0.08);
+  --media-track: rgba(255, 255, 255, 0.15);
+  --media-buffered: rgba(255, 255, 255, 0.25);
+  --media-hover: rgba(255, 255, 255, 0.1);
+  --media-shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
+  --media-thumb-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+  --media-thumb-ring: rgba(255, 255, 255, 0.2);
+
+  /* --- File Type Icon Palette (aligned with echarts-theme) --- */
+  --file-color-image: #7b2d8b;
+  --file-color-video: #d36609;
+  --file-color-audio: #0e7490;
+  --file-color-pdf: #d13212;
+  --file-color-word: #0972d3;
+  --file-color-excel: #037f0c;
+  --file-color-ppt: #d36609;
+  --file-color-archive: #92400e;
+  --file-color-code: #1d4ed8;
+  --file-color-folder: #b45309;
+}
+
+/* ============================================================
+   2. DARK THEME OVERRIDES
+   ============================================================ */
+[data-theme="dark"] {
+  --workspace-surface: #242927;
+  --workspace-canvas: #1b211e;
+  --workspace-text: #edf2ee;
+  --workspace-muted: #b2beb7;
+  --workspace-border: #3a463e;
+  --workspace-accent: #65dcc5;
+  --workspace-on-accent: #102c25;
+  --workspace-selected: #223d35;
+
+  --color-success: #53d769;
+  --color-success-soft: color-mix(in srgb, #53d769 12%, var(--seed-surface));
+  --color-warning: #c7a830;
+  --color-warning-soft: color-mix(in srgb, #c7a830 12%, var(--seed-surface));
+  --color-danger: #e8604c;
+  --color-danger-soft: color-mix(in srgb, #e8604c 12%, var(--seed-surface));
+  --color-info: #22d3ee;
+  --color-info-soft: color-mix(in srgb, #22d3ee 12%, var(--seed-surface));
+  --text-on-status: var(--workspace-canvas);
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.5);
+  --shadow-glow: none;
+
+  --file-color-image: #c084fc;
+  --file-color-video: #fb923c;
+  --file-color-audio: #22d3ee;
+  --file-color-pdf: #e8604c;
+  --file-color-word: #539fe5;
+  --file-color-excel: #53d769;
+  --file-color-ppt: #fb923c;
+  --file-color-archive: #fbbf24;
+  --file-color-code: #60a5fa;
+  --file-color-folder: #fbbf24;
+}

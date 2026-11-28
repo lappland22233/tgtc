@@ -198,12 +198,16 @@ export class UploadJobService implements OnModuleInit, OnModuleDestroy {
         ),
       )
       .then(() => undefined);
-    // 链空闲时清理引用，避免 Map 泄漏
-    void next.finally(() => {
+    // 链空闲时清理引用，避免 Map 泄漏。
+    // 必须用 then(onFulfilled, onRejected) 而非 finally：finally 会派生一个同样拒绝的
+    // promise，无人处理即成 unhandled rejection（Node 可能据此终止进程），
+    // 与「持久化失败只告警、不阻断上传主流程」的设计相悖。
+    const releaseChain = () => {
       if (this.writeChains.get(job.jobId) === next) {
         this.writeChains.delete(job.jobId);
       }
-    });
+    };
+    void next.then(releaseChain, releaseChain);
     this.writeChains.set(job.jobId, next);
     return next;
   }

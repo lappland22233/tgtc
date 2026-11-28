@@ -126,6 +126,10 @@ describe('G2-15: Range 配额扣次 30s 幂等去重', () => {
       andWhere: jest.fn().mockReturnThis(),
       execute: update,
     };
+    // A-01：配额执行走 accessControl（ShareLink 权威），File 侧只递增统计镜像。
+    // 去重必须同时 gate 两者，否则一次播放的多个 Range 会重复扣权威侧配额。
+    const bumpAccessStats = jest.fn().mockResolvedValue(undefined);
+    const enforceAccessConstraints = jest.fn().mockResolvedValue({ allowed: true });
     const service = createService({
       fileRepository: {
         findOne: jest.fn().mockResolvedValue(readyFile),
@@ -137,13 +141,14 @@ describe('G2-15: Range 配额扣次 30s 幂等去重', () => {
         getOrCacheRangeStream: jest.fn().mockResolvedValue(new Readable()),
       },
       accessLogRepository: { save: jest.fn().mockResolvedValue({ id: 'log-1' }) },
+      accessControl: { enforceAccessConstraints, bumpAccessStats },
     });
-    return { service, update };
+    return { service, update: bumpAccessStats, enforceAccessConstraints };
   }
 
   it('同文件同（用户+IP）30s 窗口内多次 Range 只扣一次配额', async () => {
     (fs.createReadStream as unknown as jest.Mock).mockReturnValue(new Readable() as any);
-    const { service, update } = wireRange();
+    const { service, update, enforceAccessConstraints } = wireRange();
     const fixedNow = 1700000000000;
     jest.spyOn(Date, 'now').mockReturnValue(fixedNow);
 
@@ -153,6 +158,7 @@ describe('G2-15: Range 配额扣次 30s 幂等去重', () => {
     await (service as any).getFileContentStreamWithRange('f-1', user, 'bytes=20-29', opts);
 
     expect(update).toHaveBeenCalledTimes(1);
+    expect(enforceAccessConstraints).toHaveBeenCalledTimes(1);
     (Date.now as any).mockRestore();
   });
 

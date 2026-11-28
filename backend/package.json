@@ -1,6 +1,6 @@
 {
   "name": "file-distribution-system-backend",
-  "version": "2.0.1",
+  "version": "2.1.0",
   "engines": {
     "node": ">=26.13.1 <27",
     "npm": ">=12.2.3 <13"

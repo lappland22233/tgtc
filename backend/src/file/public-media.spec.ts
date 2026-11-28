@@ -86,6 +86,18 @@ describe('FileService public media validation', () => {
     expect(isSafePublicInlineContentType('image/gif', 'svg')).toBe(false);
   });
 
+  it('C-04 回归：声明 image/png 但魔数探测为 html 时不得内联（探测结果必须真正参与判定）', async () => {
+    // 修复前 getPublicMediaFile 只传 mimeType，detectedExtension 参数全仓无人传值，
+    // 这条「MIME/魔数不一致一律拒绝」的防线是死的。
+    const service = createService({ ...publicImage, mimeType: 'image/png', detectedExtension: 'html' });
+    await expect((service as any).getPublicMediaFile(publicImage.id)).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('C-04：探测结果与 MIME 家族一致时正常内联', async () => {
+    const service = createService({ ...publicImage, mimeType: 'image/png', detectedExtension: 'png' });
+    await expect((service as any).getPublicMediaFile(publicImage.id)).resolves.toBeDefined();
+  });
+
   it('rejects private or constrained media files', async () => {
     const privateService = createService({ ...publicImage, accessType: FileAccessType.PRIVATE });
     await expect((privateService as any).getPublicMediaFile(publicImage.id)).rejects.toBeInstanceOf(ForbiddenException);

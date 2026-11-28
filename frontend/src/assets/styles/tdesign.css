@@ -1,0 +1,387 @@
+/* ============================================================
+   TDesign Theme Integration (unlayered so html .t-* specificity
+   beats TDesign's unlayered component CSS without !important)
+   ============================================================ */
+:root,
+:root[theme-mode="dark"] {
+  --td-bg-color-container: var(--color-bg-surface);
+  --td-bg-color-container-hover: var(--color-bg-hover);
+  --td-bg-color-component: var(--color-bg-elevated);
+  --td-bg-color-page: var(--color-bg);
+  --td-bg-color-secondarycontainer: var(--color-bg-elevated);
+  --td-text-color-primary: var(--text-primary);
+  --td-text-color-secondary: var(--text-secondary);
+  --td-text-color-placeholder: var(--text-placeholder);
+  --td-text-color-disabled: var(--text-disabled);
+  --td-border-level-1-color: var(--border-default);
+  --td-border-level-2-color: var(--border-strong);
+  --td-component-border: var(--border-strong);
+  --td-brand-color: var(--seed-primary);
+  --td-brand-color-hover: color-mix(in srgb, var(--seed-primary) 80%, var(--seed-accent));
+  --td-brand-color-active: var(--seed-accent);
+  --td-brand-color-focus: var(--workspace-selected);
+  --td-brand-color-light: var(--color-bg-hover);
+  --td-brand-color-light-hover: var(--td-brand-color-focus);
+  --td-error-color: var(--color-danger);
+  --td-error-color-hover: color-mix(in srgb, var(--color-danger) 85%, var(--text-primary));
+  --td-success-color: var(--color-success);
+  --td-success-color-hover: color-mix(in srgb, var(--color-success) 85%, var(--text-primary));
+  --td-warning-color: var(--color-warning);
+  --td-warning-color-hover: color-mix(in srgb, var(--color-warning) 85%, var(--text-primary));
+  --td-radius-default: var(--radius-sm);
+  --td-radius-medium: var(--radius-md);
+  --td-font-family: var(--font-body);
+}
+
+html .t-table,
+html .t-table__content,
+html .t-input,
+html .t-select-input,
+html .t-textarea__inner,
+html .t-pagination,
+html .t-form {
+  background-color: var(--color-bg-surface);
+}
+
+html .t-table th {
+  background-color: var(--color-bg-elevated);
+}
+
+html select {
+  background-color: var(--color-bg-elevated);
+  color: var(--text-primary);
+  border: 1px solid var(--border-default);
+}
+
+.t-drawer {
+  overscroll-behavior: contain;
+}
+
+/* --- Buttons --- */
+html .t-button--theme-primary.t-button--variant-base {
+  background: var(--seed-primary);
+  color: var(--workspace-on-accent);
+  border: none;
+  border-radius: var(--radius-sm);
+  box-shadow: none;
+  font-weight: 500;
+  transition: background var(--duration-fast) var(--ease-out-expo);
+}
+
+html .t-button--theme-primary.t-button--variant-base:hover {
+  background: var(--seed-accent);
+}
+
+html .t-button--theme-primary.t-button--variant-base:active {
+  background: color-mix(in srgb, var(--seed-accent) 85%, var(--workspace-text));
+}
+
+html .t-button--theme-primary.t-button--variant-outline {
+  border-color: var(--seed-primary);
+  color: var(--seed-primary);
+  border-radius: var(--radius-sm);
+  background: transparent;
+}
+
+html .t-button--theme-primary.t-button--variant-outline:hover {
+  background: var(--color-bg-selected);
+}
+
+html .t-button--theme-primary.t-button--variant-text {
+  color: var(--seed-primary);
+  font-weight: 500;
+}
+
+html .t-button--theme-primary.t-button--variant-text:hover {
+  background: var(--color-bg-hover);
+}
+
+html .t-button--theme-default.t-button--variant-base {
+  background: var(--color-bg-surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+}
+
+html .t-button--theme-default.t-button--variant-base:hover {
+  border-color: var(--text-tertiary);
+  background: var(--color-bg-hover);
+}
+
+html .t-button--theme-default.t-button--variant-outline {
+  border-color: var(--border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+}
+
+html .t-button--theme-default.t-button--variant-outline:hover {
+  border-color: var(--text-tertiary);
+  color: var(--text-primary);
+}
+
+html .t-button--theme-default.t-button--variant-text {
+  color: var(--text-secondary);
+}
+
+html .t-button--theme-default.t-button--variant-text:hover {
+  color: var(--text-primary);
+  background: var(--color-bg-hover);
+}
+
+html .t-button--theme-danger.t-button--variant-base {
+  background: var(--color-danger);
+  border: none;
+  border-radius: var(--radius-sm);
+  box-shadow: none;
+  font-weight: 500;
+}
+
+html .t-button--theme-danger.t-button--variant-outline,
+html .t-button--theme-danger.t-button--variant-text {
+  color: var(--color-danger);
+}
+
+html .t-button--theme-success.t-button--variant-base {
+  background: var(--color-success);
+  border: none;
+  border-radius: var(--radius-sm);
+  box-shadow: none;
+  font-weight: 500;
+}
+
+html .t-button--theme-warning.t-button--variant-base {
+  background: var(--color-warning);
+  border: none;
+  border-radius: var(--radius-sm);
+  box-shadow: none;
+  font-weight: 500;
+}
+
+html .t-button--variant-base:is(.t-button--theme-danger, .t-button--theme-warning, .t-button--theme-success),
+html .t-tag--dark:is(.t-tag--danger, .t-tag--warning, .t-tag--success) {
+  color: var(--text-on-status);
+}
+
+html .t-button--variant-base.t-is-loading:is(.t-button--theme-primary, .t-button--theme-danger, .t-button--theme-warning, .t-button--theme-success) {
+  background: var(--color-bg-elevated);
+  color: var(--text-secondary);
+}
+
+html .t-button--size-small,
+html .t-button--size-large {
+  border-radius: var(--radius-sm);
+}
+
+html .t-button.t-is-disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+html .t-button {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex-shrink: 0;
+  max-width: 100%;
+}
+
+/* --- Table --- */
+html .t-table {
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  border: 1px solid var(--border-default);
+}
+
+html .t-table thead th {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border-strong);
+  background-color: var(--color-bg-elevated);
+}
+
+html .t-table tbody td {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-default);
+  font-size: 14px;
+  vertical-align: middle;
+}
+
+html .t-table tbody tr {
+  transition: background-color var(--duration-fast);
+}
+
+html .t-table tbody tr:hover {
+  background-color: var(--color-bg-hover);
+}
+
+html .t-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+/* --- Pagination --- */
+html .t-pagination {
+  margin-top: 16px;
+}
+
+html .t-pagination .t-pagination__btn {
+  border-radius: var(--radius-sm);
+}
+
+html .t-pagination .t-is-current {
+  background: var(--seed-primary);
+  border-color: var(--seed-primary);
+  border-radius: var(--radius-sm);
+  color: var(--workspace-on-accent);
+}
+
+html .t-tag--primary.t-tag--dark,
+html .t-pagination__number:active {
+  color: var(--workspace-on-accent);
+}
+
+[data-theme="dark"] .t-tag--danger:is(.t-tag--light, .t-tag--light-outline) {
+  color: color-mix(in srgb, var(--color-danger) 75%, var(--text-primary));
+}
+
+html .t-pagination .t-pagination__number.t-is-current.t-is-disabled {
+  color: var(--text-secondary);
+}
+
+/* --- Selection controls on the solid accent --- */
+html .t-switch.t-is-checked:not(.t-is-loading, .t-is-disabled) .t-switch__content {
+  color: var(--workspace-on-accent);
+}
+
+html .t-switch.t-is-checked:not(.t-is-loading, .t-is-disabled) .t-switch__handle::before,
+html .t-checkbox.t-is-indeterminate:not(.t-is-disabled) .t-checkbox__input::after {
+  background-color: var(--workspace-on-accent);
+}
+
+html .t-checkbox.t-is-checked:not(.t-is-disabled) .t-checkbox__input::after {
+  border-color: var(--workspace-on-accent);
+}
+
+/* --- Tags --- */
+html .t-tag {
+  border-radius: var(--radius-sm);
+  font-weight: 500;
+}
+
+/* --- Input & Select --- */
+html .t-input {
+  border-radius: var(--radius-sm);
+  transition: border-color var(--duration-fast), box-shadow var(--duration-fast);
+}
+
+html .t-input:hover {
+  border-color: var(--border-strong);
+}
+
+html .t-input.t-is-focused {
+  border-color: var(--seed-primary);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--seed-primary) 18%, transparent);
+}
+
+html .t-select .t-input,
+html .t-select-input .t-input {
+  border-radius: var(--radius-sm);
+}
+
+/* --- Dialog --- */
+html .t-dialog {
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  border: 1px solid var(--border-default);
+  overflow: hidden;
+  background-color: var(--color-bg-surface);
+}
+
+html .t-dialog .t-input,
+html .t-dialog .t-select-input,
+html .t-dialog .t-textarea__inner {
+  background-color: var(--color-bg-overlay);
+}
+
+html .t-dialog:not(.t-dialog__fullscreen) {
+  max-inline-size: calc(100vw - 24px);
+}
+
+html .t-dialog__header {
+  font-family: var(--font-display);
+  font-size: 16px;
+  font-weight: 600;
+  padding: 20px 12px 0;
+  border-bottom: none;
+}
+
+html .t-dialog__body {
+  padding: 16px 12px;
+}
+
+html .t-dialog__footer {
+  padding: 0 12px 20px;
+  border-top: none;
+}
+
+@media (min-width: 769px) {
+  html .t-dialog:not(.t-dialog__fullscreen) {
+    max-inline-size: none;
+  }
+
+  html .t-dialog__header {
+    padding: 20px 24px 0;
+  }
+
+  html .t-dialog__body {
+    padding: 16px 24px;
+  }
+
+  html .t-dialog__footer {
+    padding: 0 24px 20px;
+  }
+}
+
+/* --- Form & Descriptions --- */
+html .t-form__item {
+  margin-bottom: 18px;
+}
+
+html .t-form__label:not(.t-form__label--top) {
+  white-space: normal;
+  overflow-wrap: break-word;
+  line-height: 1.4;
+  padding-block: 6px;
+}
+
+html .t-form__label--top {
+  display: block;
+  float: none;
+  width: auto;
+  padding-right: 0;
+  padding-bottom: 6px;
+  line-height: 1.4;
+  white-space: normal;
+  font-weight: 500;
+}
+
+html .t-form__controls-content {
+  flex-wrap: wrap;
+  min-inline-size: 0;
+}
+
+html .t-switch,
+html .t-input-number {
+  flex-shrink: 0;
+}
+
+html .t-descriptions {
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+html .t-descriptions .t-descriptions__label {
+  font-weight: 500;
+  color: var(--text-secondary);
+}

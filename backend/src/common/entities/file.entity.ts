@@ -35,6 +35,16 @@ export class File {
   mimeType: string;
 
   /**
+   * 上传时 magic bytes 探测出的扩展名（不含点，如 png/mp4/zip）；未识别时为 null。
+   *
+   * mimeType 来自客户端 multipart 声明，可被任意伪造。公开 /media 直链的内联白名单
+   * 必须用本字段做 MIME 家族一致性校验，否则「声明 image/png 实际是 HTML/JS」的内容
+   * 会被当作图片内联（isSafePublicInlineContentType 的 detectedExtension 参数）。
+   */
+  @Column({ type: 'varchar', length: 16, nullable: true })
+  detectedExtension: string | null;
+
+  /**
    * 文件大小（字节）。
    * PostgreSQL 列类型为 bigint，TypeScript 类型为 number。
    * 项目支持的最大文件为 600MB，远小于 Number.MAX_SAFE_INTEGER (2^53 ≈ 9PB)，
@@ -129,31 +139,31 @@ export class File {
   accessType: FileAccessType;
 
   /**
-   * @deprecated Phase 2 起由 ShareLink.maxAccessCount 管理。此字段保留用于数据迁移兼容，将在下一个 major 版本删除。
+   * @deprecated A-01 起 ShareLink.maxAccessCount 是唯一权威，本列仅为兼容镜像（setter 同步写入）。执行判定一律读 ShareLink。删列留到下一个 major。
    */
   @Column({ default: -1 })
   maxAccessCount: number;
 
   /**
-   * @deprecated Phase 2 起由 ShareLink.expiresIn 管理。此字段保留用于数据迁移兼容，将在下一个 major 版本删除。
+   * @deprecated A-01 起 ShareLink.expiresIn 是唯一权威，本列仅为兼容镜像。执行判定一律读 ShareLink。删列留到下一个 major。
    */
   @Column({ nullable: true, type: 'int' })
   expiresIn: number | null;
 
   /**
-   * @deprecated Phase 2 起由 ShareLink.expiresStartAt 管理。此字段保留用于数据迁移兼容，将在下一个 major 版本删除。
+   * @deprecated A-01 起 ShareLink.expiresStartAt 是唯一权威，本列仅为兼容镜像。执行判定一律读 ShareLink。删列留到下一个 major。
    */
   @Column({ nullable: true, type: databaseColumnType('timestamp') as 'timestamp' })
   expiresStartAt: Date | null;
 
   /**
-   * @deprecated Phase 2 起由 ShareLink.currentAccessCount 管理。此字段保留用于数据迁移兼容，将在下一个 major 版本删除。
+   * @deprecated A-01 起配额执行以 ShareLink.currentAccessCount 为准；本列降级为**统计镜像**（不限次文件也计数，供管理端分析），不参与任何上限判定。删列留到下一个 major。
    */
   @Column({ default: 0 })
   currentAccessCount: number;
 
   /**
-   * @deprecated Phase 2 起由 ShareLink.password 管理。此字段保留用于数据迁移兼容，将在下一个 major 版本删除。
+   * @deprecated A-01 起 ShareLink.password 是唯一权威，本列仅为兼容镜像（setPassword 同步写入）。删列留到下一个 major。
    */
   @Column({ nullable: true, type: 'varchar' })
   password: string | null;
@@ -201,6 +211,14 @@ export class File {
    */
   @Column({ type: 'varchar', length: 1000, nullable: true, select: false })
   uploadFailureReason: string | null;
+
+  /**
+   * 覆盖上传前的内容引用快照（JSON）。覆盖会先把 telegramFileId/filename 置为 tempId 占位，
+   * 若新内容上传失败又不回滚，原文件将永久失联（旧远端对象成孤儿）。
+   * 失败路径据此恢复原引用；置 ready 时清空。
+   */
+  @Column({ type: 'text', nullable: true })
+  overwriteSnapshot: string | null;
 
   @CreateDateColumn()
   createdAt: Date;

@@ -337,6 +337,8 @@ onUnmounted(() => {
 
 .turnstile-widget {
   min-height: 65px;
+  max-width: 100%;
+  overflow-x: auto;
 }
 
 .turnstile-status,
@@ -369,11 +371,5 @@ onUnmounted(() => {
 
 .registration-closed .gate-submit {
   margin-top: 20px;
-}
-
-@media (max-width: 357px) {
-  .turnstile-widget {
-    zoom: 0.86;
-  }
 }
 </style>

@@ -83,7 +83,7 @@
                 {{ share.expiresIn }}h 有效
               </span>
               <span v-else class="meta-tag">永久</span>
-              <span class="meta-date">创建于 {{ formatDate(share.createdAt) }}</span>
+              <span class="meta-date">创建于 {{ formatDateTime(share.createdAt, true) }}</span>
             </div>
             <div class="share-url">
               <code>{{ getShareUrl(share) }}</code>
@@ -128,6 +128,7 @@ import { ref, onMounted } from 'vue';
 import { DialogPlugin } from 'tdesign-vue-next/es/dialog';
 import { MessagePlugin } from 'tdesign-vue-next/es/message';
 import { api } from '../../stores/auth';
+import { formatDateTime } from '../../utils/format';
 import { useFileStore } from '../../stores/files';
 import { useFolderStore, type Folder } from '../../stores/folders';
 
@@ -233,17 +234,6 @@ function getStatusLabel(share: ShareItem): string {
   }
 }
 
-function formatDate(dateStr: string): string {
-  try {
-    return new Date(dateStr).toLocaleString('zh-CN', {
-      year: 'numeric', month: '2-digit', day: '2-digit',
-      hour: '2-digit', minute: '2-digit',
-    });
-  } catch {
-    return dateStr;
-  }
-}
-
 async function copyShareLink(share: ShareItem) {
   try {
     await navigator.clipboard.writeText(getShareUrl(share));
@@ -319,7 +309,7 @@ onMounted(fetchShares);
 
 .share-item {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr);
   align-items: start;
   gap: 8px 12px;
   padding: 12px var(--share-gutter);
@@ -356,7 +346,7 @@ onMounted(fetchShares);
 }
 
 .share-url code { font-family: var(--font-mono); }
-.share-actions { justify-content: flex-end; }
+.share-actions { grid-column: 2; justify-content: flex-start; }
 .share-actions :deep(.copy-action:hover) { background: var(--workspace-selected); }
 
 .share-feedback {
@@ -374,41 +364,96 @@ onMounted(fetchShares);
   border-top: 1px solid var(--workspace-border);
 }
 
-.pagination :deep(.t-pagination) { margin: 0; }
+.pagination :deep(.t-pagination) {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 6px;
+  margin: 0;
+}
 
-@media (max-width: 700px) {
-  .share-item { grid-template-columns: auto minmax(0, 1fr); }
-  .share-actions { grid-column: 2; justify-content: flex-start; }
-  .pagination :deep(.t-pagination) {
-    display: grid;
+.pagination :deep(.t-pagination__total) { grid-area: 1 / 1 / 2 / 3; }
+.pagination :deep(.t-pagination__select) { grid-area: 1 / 3; margin: 0; }
+.pagination :deep(.t-pagination__btn-prev) { grid-area: 2 / 1; margin: 0; }
+.pagination :deep(.t-pagination__btn-next) { grid-area: 2 / 3; margin: 0; }
+.pagination :deep(.t-pagination__pager) {
+  grid-area: 2 / 2;
+  justify-content: center;
+  flex-wrap: wrap;
+  row-gap: 4px;
+}
+
+.filter-bar :deep(.t-radio-group.t-size-m .t-radio-button) {
+  padding-inline: 10px;
+}
+
+.shares-content :deep(.t-button),
+.filter-bar :deep(.t-radio-button),
+.pagination :deep(.t-pagination__select),
+.pagination :deep(.t-pagination__select .t-input) {
+  min-height: 44px;
+}
+
+.pagination :deep(:is(.t-pagination__btn, .t-pagination__number)) {
+  min-width: 44px;
+  min-height: 44px;
+}
+
+.pagination :deep(.t-pagination__number) {
+  line-height: 42px;
+}
+
+@media (min-width: 481px) {
+  .filter-bar :deep(.t-radio-group.t-size-m .t-radio-button) {
+    padding-inline: 16px;
+  }
+}
+
+@media (min-width: 769px) {
+  .share-item {
     grid-template-columns: auto minmax(0, 1fr) auto;
-    gap: 6px;
   }
-  .pagination :deep(.t-pagination__total) { grid-area: 1 / 1 / 2 / 3; }
-  .pagination :deep(.t-pagination__select) { grid-area: 1 / 3; margin: 0; }
-  .pagination :deep(.t-pagination__btn-prev) { grid-area: 2 / 1; margin: 0; }
-  .pagination :deep(.t-pagination__btn-next) { grid-area: 2 / 3; margin: 0; }
-  .pagination :deep(.t-pagination__pager) {
-    grid-area: 2 / 2;
-    justify-content: center;
-    flex-wrap: wrap;
-    row-gap: 4px;
+
+  .share-actions {
+    grid-column: auto;
+    justify-content: flex-end;
   }
-}
 
-@media (max-width: 360px) {
-  .filter-bar :deep(.t-radio-group.t-size-m .t-radio-button) { padding-inline: 10px; }
-}
+  .pagination :deep(.t-pagination) {
+    display: flex;
+  }
 
-@media (max-width: 768px), (pointer: coarse) {
   .shares-content :deep(.t-button),
   .filter-bar :deep(.t-radio-button),
   .pagination :deep(.t-pagination__select),
-  .pagination :deep(.t-pagination__select .t-input) { min-height: 44px; }
+  .pagination :deep(.t-pagination__select .t-input) {
+    min-height: unset;
+  }
+
+  .pagination :deep(:is(.t-pagination__btn, .t-pagination__number)) {
+    min-width: unset;
+    min-height: unset;
+  }
+
+  .pagination :deep(.t-pagination__number) {
+    line-height: normal;
+  }
+}
+
+@media (pointer: coarse) {
+  .shares-content :deep(.t-button),
+  .filter-bar :deep(.t-radio-button),
+  .pagination :deep(.t-pagination__select),
+  .pagination :deep(.t-pagination__select .t-input) {
+    min-height: 44px;
+  }
+
   .pagination :deep(:is(.t-pagination__btn, .t-pagination__number)) {
     min-width: 44px;
     min-height: 44px;
   }
-  .pagination :deep(.t-pagination__number) { line-height: 42px; }
+
+  .pagination :deep(.t-pagination__number) {
+    line-height: 42px;
+  }
 }
 </style>

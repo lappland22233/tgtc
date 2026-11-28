@@ -1,15 +1,5 @@
-import {
-  DOWNLOAD_CONFIG_KEYS,
-  DOWNLOAD_ERROR_CODES,
-  DOWNLOAD_RESOURCE_DEFAULTS,
-  DownloadResourceCoordinatorService,
-  normalizeBooleanFlag,
-  normalizeDownloadConfigNumber,
-  normalizeUpstreamQueuePolicy,
-  upstreamWeightForSize,
-  type DownloadReservation,
-  type DownloadUpstreamLease,
-} from './download-resource-coordinator.service';
+import { DOWNLOAD_ERROR_CODES, DOWNLOAD_RESOURCE_DEFAULTS, DownloadResourceCoordinatorService, upstreamWeightForSize, type DownloadReservation, type DownloadUpstreamLease } from './download-resource-coordinator.service';
+import { DOWNLOAD_CONFIG_KEYS, normalizeBooleanFlag, normalizeDownloadConfigNumber, normalizeUpstreamQueuePolicy } from '../common/constants/download-config';
 
 // 生产代码通过 require('fs').statfsSync 读取，Jest 中与 import 指向同一 module 对象，
 // 因此用 require('fs') 来 spy。
@@ -953,8 +943,8 @@ describe('DownloadResourceCoordinatorService', () => {
       expect(normalizeDownloadConfigNumber(DOWNLOAD_CONFIG_KEYS.TASK_RETENTION_SECONDS, '')).toBe(900);
     });
 
-    it('越界值裁剪到统一区间（权重预算 1-64、直通窗口 1-4 MiB）', () => {
-      expect(normalizeDownloadConfigNumber(DOWNLOAD_CONFIG_KEYS.MAX_CONCURRENT_UPSTREAMS, '999')).toBe(64);
+    it('越界值裁剪到统一区间（权重预算 1-128、直通窗口 1-4 MiB）', () => {
+      expect(normalizeDownloadConfigNumber(DOWNLOAD_CONFIG_KEYS.MAX_CONCURRENT_UPSTREAMS, '999')).toBe(128);
       expect(normalizeDownloadConfigNumber(DOWNLOAD_CONFIG_KEYS.MAX_CONCURRENT_UPSTREAMS, '0')).toBe(1);
       expect(normalizeDownloadConfigNumber(DOWNLOAD_CONFIG_KEYS.DIRECT_WINDOW_MB, '1024')).toBe(4);
       expect(normalizeDownloadConfigNumber(DOWNLOAD_CONFIG_KEYS.DIRECT_WINDOW_MB, '0')).toBe(1);

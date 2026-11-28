@@ -7,7 +7,7 @@ import { promises as fs } from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { TelegramService } from './telegram.service';
-import { TelegramFileNotFoundError, TelegramStreamPathError } from './telegram.errors';
+import { TelegramFileNotFoundError, TelegramRequestRejectedError, TelegramStreamPathError, isPermanentRejection } from './telegram.errors';
 
 jest.mock('axios');
 const mockedAxios = axios as jest.Mocked<typeof axios>;
@@ -244,6 +244,83 @@ describe('TelegramService realtime stream', () => {
       await expect(createService().uploadFile(Buffer.from('test'), 'unknown.bin'))
         .rejects.toThrow('响应缺少可识别的媒体 file_id');
       expect(mockedAxios.get).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('消息发送端点路由', () => {
+    /**
+     * 服务端把两种载荷拆成两个方法：
+     * - `process_send_message_query` 只读 `text`，空则 400 "Message text is empty"；
+     * - `process_send_rich_message_query`（/sendRichMessage）只读 `rich_message`。
+     * 发错端点不会降级也不会报错文案命中，而是直接静默丢消息，因此必须锁定 URL。
+     */
+    it('富文本走 /sendRichMessage，且不发送 text 字段', async () => {
+      mockedAxios.post.mockResolvedValueOnce({ data: { ok: true, result: { message_id: 9, chat: { id: 1 } } } } as any);
+
+      await createService().sendMessage('7001', '不应下发的纯文本', {
+        richMessage: { blocks: [{ type: 'paragraph', text: 'hi' }] },
+        replyToMessageId: 42,
+      });
+
+      const [url, payload] = mockedAxios.post.mock.calls.at(-1)!;
+      expect(String(url)).toBe('http://127.0.0.1:8081/bot123:secret-token/sendRichMessage');
+      expect((payload as Record<string, unknown>).rich_message).toBe('{"blocks":[{"type":"paragraph","text":"hi"}]}');
+      expect((payload as Record<string, unknown>).text).toBeUndefined();
+      expect((payload as Record<string, unknown>).reply_to_message_id).toBe(42);
+    });
+
+    it('纯文本仍走 /sendMessage，并携带 text 与 parse_mode', async () => {
+      mockedAxios.post.mockResolvedValueOnce({ data: { ok: true, result: { message_id: 9, chat: { id: 1 } } } } as any);
+
+      await createService().sendMessage('7001', '<b>hi</b>', { parseMode: 'HTML' });
+
+      const [url, payload] = mockedAxios.post.mock.calls.at(-1)!;
+      expect(String(url)).toBe('http://127.0.0.1:8081/bot123:secret-token/sendMessage');
+      expect((payload as Record<string, unknown>).text).toBe('<b>hi</b>');
+      expect((payload as Record<string, unknown>).parse_mode).toBe('HTML');
+      expect((payload as Record<string, unknown>).rich_message).toBeUndefined();
+    });
+
+    it('编辑消息的富文本走 /editMessageText 的 rich_message 参数（服务端本就支持）', async () => {
+      mockedAxios.post.mockResolvedValueOnce({ data: { ok: true, result: {} } } as any);
+
+      await createService().editMessageText('7001', 5, 'ignored', {
+        richMessage: { blocks: [{ type: 'paragraph', text: 'x' }] },
+      });
+
+      const [url, payload] = mockedAxios.post.mock.calls.at(-1)!;
+      expect(String(url)).toBe('http://127.0.0.1:8081/bot123:secret-token/editMessageText');
+      expect((payload as Record<string, unknown>).rich_message).toBeDefined();
+    });
+
+    it('400 被拒时抛出可识别的类型化错误，供降级判定使用', async () => {
+      mockedAxios.post.mockRejectedValueOnce({
+        response: { status: 400, data: { ok: false, description: 'Bad Request: Message text is empty' } },
+      } as any);
+
+      const promise = createService().sendMessage('7001', '', { richMessage: { blocks: [] } });
+      await expect(promise).rejects.toBeInstanceOf(TelegramRequestRejectedError);
+      // 归因信息决定调用方能剥哪一层
+      await expect(promise).rejects.toMatchObject({ degradableFields: expect.arrayContaining(['rich']) });
+    });
+
+    it('与载荷无关的 400 不标记为可降级', async () => {
+      mockedAxios.post.mockRejectedValueOnce({
+        response: { status: 400, data: { ok: false, description: 'Forbidden: bot was blocked by the user' } },
+      } as any);
+
+      await expect(createService().sendMessage('7001', 'hi', {}))
+        .rejects.toMatchObject({ degradableFields: [] });
+      expect(isPermanentRejection('Forbidden: bot was blocked by the user')).toBe(true);
+    });
+
+    it('reply markup 超长归因到 reply_markup 维度', async () => {
+      mockedAxios.post.mockRejectedValueOnce({
+        response: { status: 400, data: { ok: false, description: 'Bad Request: reply markup is too long' } },
+      } as any);
+
+      await expect(createService().sendMessage('7001', 'hi', {}))
+        .rejects.toMatchObject({ degradableFields: ['reply_markup'] });
     });
   });
 

@@ -7,60 +7,60 @@
     destroy-on-close
     @close="handleCancel"
   >
-    <div style="font-size: 13px; color: var(--text-secondary); margin-bottom: 12px;">
+    <div class="text-[13px] text-ink-muted mb-3">
       发现 {{ conflicts.length }} 个文件与目标目录中的既有文件同名，请逐项选择覆盖或跳过。
     </div>
 
     <!-- 快捷操作 -->
-    <div style="display: flex; gap: 8px; margin-bottom: 12px;">
+    <div class="flex gap-2 mb-3">
       <t-button size="small" variant="outline" @click="applyAll('overwrite')">
         全部覆盖
       </t-button>
       <t-button size="small" variant="outline" @click="applyAll('skip')">
         全部跳过
       </t-button>
-      <span v-if="pendingCount > 0" style="margin-left: auto; font-size: 12px; color: var(--text-tertiary); align-self: center;">
+      <span v-if="pendingCount > 0" class="ml-auto text-xs text-ink-subtle self-center">
         待选择 {{ pendingCount }} 项
       </span>
     </div>
 
     <!-- 冲突列表（可滚动） -->
-    <div style="max-height: 320px; overflow-y: auto;">
+    <div class="max-h-80 overflow-y-auto">
       <div
         v-for="(conflict, idx) in conflicts"
         :key="idx"
-        style="padding: 10px 12px; background: var(--bg-secondary, var(--color-bg-surface)); border-radius: 8px; margin-bottom: 8px; border: 1px solid var(--border-color, var(--border-default));"
+        class="px-3 py-2.5 bg-elevated rounded-md mb-2 border border-line"
       >
-        <div style="font-weight: 500; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
+        <div class="font-medium text-sm truncate">
           {{ conflict.item.file.name }}
         </div>
         <div
           v-if="conflict.item.relativePath"
-          style="font-size: 12px; color: var(--text-tertiary); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"
+          class="text-xs text-ink-subtle mt-0.5 truncate"
         >
           {{ conflict.item.relativePath }}
         </div>
-        <div style="font-size: 12px; color: var(--text-secondary); margin-top: 4px;">
+        <div class="text-xs text-ink-muted mt-1">
           {{ formatSize(conflict.existingSize) }} → {{ formatSize(conflict.item.file.size) }}
         </div>
-        <div v-if="conflict.overwriteBlocked" style="font-size: 12px; color: var(--color-warning); margin-top: 4px;">
+        <div v-if="conflict.overwriteBlocked" class="text-xs text-warn mt-1">
           既有文件处理中，本次按新文件上传
         </div>
-        <t-radio-group
-          v-if="!conflict.overwriteBlocked"
-          :value="decisions[idx] ?? undefined"
-          size="small"
-          style="margin-top: 8px;"
-          @change="(val: unknown) => setDecision(idx, val)"
-        >
-          <t-radio value="overwrite">覆盖</t-radio>
-          <t-radio value="skip">跳过</t-radio>
-        </t-radio-group>
+        <div v-if="!conflict.overwriteBlocked" class="mt-2">
+          <t-radio-group
+            :value="decisions[idx] ?? undefined"
+            size="small"
+            @change="(val: unknown) => setDecision(idx, val)"
+          >
+            <t-radio value="overwrite">覆盖</t-radio>
+            <t-radio value="skip">跳过</t-radio>
+          </t-radio-group>
+        </div>
       </div>
     </div>
 
     <!-- 底部按钮 -->
-    <div style="margin-top: 16px; display: flex; gap: 8px; justify-content: flex-end;">
+    <div class="mt-4 flex gap-2 justify-end">
       <t-button variant="outline" @click="handleCancel">
         取消
       </t-button>

@@ -48,3 +48,47 @@ function isValidIp(ip: string): boolean {
   const cleanIp = ip.replace(/^::ffff:/, '');
   return isIP(cleanIp) !== 0;
 }
+
+/** 解析 TRUST_PROXY_HOPS（与 main.ts 的 trust proxy 同一语义：未配置/非法＝0＝不信任任何代理）。 */
+export function resolveTrustProxyHops(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.TRUST_PROXY_HOPS;
+  if (raw === undefined || raw === '') return 0;
+  const hops = Number(raw);
+  return Number.isFinite(hops) && hops >= 0 ? hops : 0;
+}
+
+/**
+ * socket.io 握手的真实客户端 IP，与 HTTP 侧 getClientIp 同一信任模型。
+ *
+ * WS 升级请求不经过 Express，req.ips/req.ip 不存在，必须自行按 trust proxy 语义解析。
+ * **绝不取 X-Forwarded-For 首项**：那是客户端可任意伪造的值，未认证握手即可借此
+ * 绕过握手限流、每 IP 并发上限与无效 token 封禁。
+ *
+ * hops=0（安全默认）时直接取 socket 对端地址，伪造头完全不生效。
+ * hops>0 时取 XFF 链中 index = len - hops 的那一项——等价于 Express 数值型
+ * trust proxy 产出的 req.ip（从 socket 往回数 hops 层即信任边界）。
+ */
+export function getSocketClientIp(
+  remoteAddress: string | undefined,
+  xff: string | string[] | undefined,
+  hops: number,
+): string | null {
+  const direct = normalizeIp(remoteAddress);
+  if (hops <= 0) return direct;
+  const chain = (Array.isArray(xff) ? xff.join(',') : xff || '')
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  const index = chain.length - hops;
+  if (index >= 0 && index < chain.length) {
+    const candidate = normalizeIp(chain[index]);
+    if (candidate) return candidate;
+  }
+  return direct;
+}
+
+function normalizeIp(ip: string | undefined): string | null {
+  if (!ip) return null;
+  const clean = ip.replace(/^::ffff:/, '');
+  return isIP(clean) !== 0 ? clean : null;
+}

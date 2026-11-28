@@ -7,7 +7,7 @@
     :confirm-loading="loading"
     width="400px"
   >
-    <t-form :data="form" :rules="rules" ref="formRef" @submit="handleConfirm">
+    <t-form :data="form" :rules="rules" ref="formRef" label-align="top" @submit="handleConfirm">
       <t-form-item label="文件夹名称" name="name">
         <t-input
           v-model="form.name"
@@ -102,6 +102,6 @@ function handleClose() {
 .parent-hint {
   margin-top: 8px;
   font-size: 13px;
-  color: var(--td-text-color-secondary);
+  color: var(--text-secondary);
 }
 </style>

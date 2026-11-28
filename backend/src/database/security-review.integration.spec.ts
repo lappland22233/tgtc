@@ -190,11 +190,15 @@ describe.each(dialects)('security review regressions / %s', (dialect) => {
     const { accessJwt } = await shares.verifyPassword(token, password, '127.0.0.1');
     expect(jwt.verify(accessJwt).sid).toBe(link.id);
     const rates = db.getRepository(models.RateLimit);
-    expect(await rates.countBy({ key: `share-password:token-lock:${token}` })).toBe(0);
+    // C-01：限流键用 token 的 SHA-256 摘要，明文 token 不得落进 rate_limits 表
+    const tokenKey = require('crypto').createHash('sha256').update(token).digest('hex');
+    expect(await rates.countBy({ key: `share-password:token-lock:${tokenKey}` })).toBe(0);
     await new services.RateLimitService(rates).checkAndIncrement(
-      `share-password:token-lock:${token}`, 'share_password_token_lock', 1, 60000, 60000,
+      `share-password:token-lock:${tokenKey}`, 'share_password_token_lock', 1, 60000, 60000,
     );
     await expect(shares.verifyPassword(token, password, null)).rejects.toThrow();
+    const allKeys = (await rates.find() as Array<{ key: string }>).map((row) => row.key);
+    expect(allKeys.some((key: string) => key.includes(token))).toBe(false);
   });
 
   it('completes quiet alert windows and evaluates a busy window when its aggregate arrives', async () => {
@@ -247,7 +251,7 @@ describe.each(dialects)('security review regressions / %s', (dialect) => {
       deleteScheduledAt: new Date(Date.now() + 3600000), gdriveCacheObjectRef: 'cached' });
     const files = Object.assign(Object.create(services.FileService.prototype), {
       fileRepository: repo, namespaceService: new services.DirectoryNamespaceService(db), auditService: audit,
-      fileCacheService: { invalidate: jest.fn() }, deleteLocalThumbnail: jest.fn(),
+      fileCacheService: { invalidate: jest.fn() }, thumbnailService: { deleteLocalThumbnail: jest.fn() },
       cleanupGDriveCacheObject: jest.fn(), cleanupNonTelegramObject: jest.fn(),
     });
     const transaction = repo.manager.transaction.bind(repo.manager);
@@ -340,6 +344,42 @@ describe.each(dialects)('security review regressions / %s', (dialect) => {
     await expect(sessions.consumePreviewAccess(link, file.id, 'visitor')).rejects.toThrow('session write failed');
     expect(await count(link)).toBe(0);
     expect(await db.getRepository(models.SharePreviewSession).countBy({ shareLinkId: link.id })).toBe(0);
+  });
+
+  it('B-01 回归：leader 退款不得抹掉幂等 follower 已消费的额度', async () => {
+    const link = await makeLink(1);
+    expect(await sessions.consumePreviewAccess(link, file.id, 'vh')).toBe('consumed');
+    // follower 命中幂等，并将凭该会话成功取流
+    expect(await sessions.consumePreviewAccess(link, file.id, 'vh')).toBe('idempotent');
+    // leader 取流失败触发退款：hitCount>0 必须放弃退款，否则净计数归零可无限下载
+    expect(await sessions.refundConsumedSession(link.id, file.id, 'vh')).toBe(false);
+    expect(await count(link)).toBe(1);
+    expect(await db.getRepository(models.SharePreviewSession).countBy({ shareLinkId: link.id })).toBe(1);
+    expect(await sessions.consumePreviewAccess(link, file.id, 'other')).toBe('exhausted');
+  });
+
+  it('无幂等命中时退款照常生效并作废会话', async () => {
+    const link = await makeLink(1);
+    await sessions.consumePreviewAccess(link, file.id, 'vh');
+    expect(await sessions.refundConsumedSession(link.id, file.id, 'vh')).toBe(true);
+    expect(await count(link)).toBe(0);
+    expect(await db.getRepository(models.SharePreviewSession).countBy({ shareLinkId: link.id })).toBe(0);
+    expect(await sessions.consumePreviewAccess(link, file.id, 'vh')).toBe('consumed');
+  });
+
+  it('B-05 回归：会话删除失败时不得退计数（否则留下免费窗口）', async () => {
+    const link = await makeLink(1);
+    await sessions.consumePreviewAccess(link, file.id, 'vh');
+    const repoPrototype = Object.getPrototypeOf(db.getRepository(models.SharePreviewSession));
+    const originalDelete = repoPrototype.delete;
+    jest.spyOn(repoPrototype, 'delete').mockImplementation(function (this: any, ...args: any[]) {
+      if (this.metadata.name === 'SharePreviewSession') throw new Error('session delete failed');
+      return originalDelete.apply(this, args);
+    });
+    await expect(sessions.refundConsumedSession(link.id, file.id, 'vh'))
+      .rejects.toThrow('session delete failed');
+    expect(await count(link)).toBe(1);
+    expect(await db.getRepository(models.SharePreviewSession).countBy({ shareLinkId: link.id })).toBe(1);
   });
 
   it.each(['register', 'reset_password'])('locked %s verification rejects even a correct code without consuming it', async (type) => {

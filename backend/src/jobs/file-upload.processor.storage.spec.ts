@@ -68,6 +68,7 @@ function makeFileService() {
     triggerMirrorForFile: jest.fn(),
     cleanupNonTelegramObject: jest.fn().mockResolvedValue(undefined),
     mirrorGDriveCache: jest.fn().mockResolvedValue(undefined),
+    rollbackOverwriteIfSnapshot: jest.fn().mockResolvedValue(false),
   };
 }
 

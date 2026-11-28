@@ -3,7 +3,7 @@ import { BadRequestException, ForbiddenException, NotFoundException } from '@nes
 import * as bcrypt from 'bcryptjs';
 import { FileAccessControlService } from './file-access-control.service';
 import { FileAccessType } from '../common/entities/file.entity';
-import { ShareTargetType } from '../common/entities/share-link.entity';
+import { ShareLink, ShareTargetType } from '../common/entities/share-link.entity';
 // UserRole 是枚举（非字符串联合），必须引用枚举成员
 import { UserRole, type User } from '../common/entities/user.entity';
 
@@ -35,6 +35,7 @@ describe('FileAccessControlService（M6 拆分契约）', () => {
   let audit: { log: jest.Mock };
   let configCache: { get: jest.Mock };
   let rateLimit: { incrementCounter: jest.Mock; reset: jest.Mock };
+  let shareRepo: any;
 
   beforeEach(() => {
     fileRepo = {
@@ -46,6 +47,15 @@ describe('FileAccessControlService（M6 拆分契约）', () => {
           cb({ getRepository: () => fileRepo })),
       },
     };
+    // A-01：约束权威在 ShareLink，harness 必须按实体分派仓库
+    shareRepo = {
+      findOne: jest.fn().mockResolvedValue(null),
+      create: jest.fn((x: any) => ({ id: 'share-1', ...x })),
+      save: jest.fn(async (x: any) => ({ id: 'share-1', ...x })),
+      update: jest.fn().mockResolvedValue({ affected: 1 }),
+      createQueryBuilder: jest.fn(),
+    };
+    fileRepo.manager.getRepository = (entity: any) => (entity === ShareLink ? shareRepo : fileRepo);
     bannedRepo = { createQueryBuilder: jest.fn(), upsert: jest.fn().mockResolvedValue(undefined) };
     audit = { log: jest.fn() };
     configCache = { get: jest.fn(async (_key: string, fallback: string) => fallback) };
@@ -185,18 +195,84 @@ describe('FileAccessControlService（M6 拆分契约）', () => {
       fileRepo.findOne.mockResolvedValueOnce(null);
       await expect(service.checkAndIncrementAccess('f')).resolves.toEqual({ allowed: false, reason: '文件不存在' });
 
+      // 过期：权威侧 ShareLink 的 expiresIn/expiresStartAt 决定结论
       fileRepo.findOne.mockResolvedValueOnce({
-        expiresIn: 1, expiresStartAt: new Date(Date.now() - 7_200_000), maxAccessCount: -1,
+        id: 'f', uploaderId: ownerId, expiresIn: 1, expiresStartAt: new Date(Date.now() - 7_200_000), maxAccessCount: -1,
+      });
+      shareRepo.findOne.mockResolvedValueOnce({
+        id: 'share-1', expiresIn: 1, expiresStartAt: new Date(Date.now() - 7_200_000), maxAccessCount: -1,
       });
       await expect(service.checkAndIncrementAccess('f')).resolves.toEqual({ allowed: false, reason: '文件分享已过期' });
 
-      fileRepo.findOne.mockResolvedValueOnce({ maxAccessCount: 3, expiresIn: null });
-      fileRepo.createQueryBuilder.mockReturnValueOnce(queryBuilder({ affected: 1 }));
+      fileRepo.findOne.mockResolvedValueOnce({ id: 'f', uploaderId: ownerId, maxAccessCount: 3, expiresIn: null });
+      shareRepo.findOne.mockResolvedValueOnce({ id: 'share-1', maxAccessCount: 3, expiresIn: null });
+      shareRepo.createQueryBuilder.mockReturnValueOnce(queryBuilder({ affected: 1 }));
       await expect(service.checkAndIncrementAccess('f')).resolves.toEqual({ allowed: true });
 
-      fileRepo.findOne.mockResolvedValueOnce({ maxAccessCount: 3, expiresIn: null });
-      fileRepo.createQueryBuilder.mockReturnValueOnce(queryBuilder({ affected: 0 }));
+      fileRepo.findOne.mockResolvedValueOnce({ id: 'f', uploaderId: ownerId, maxAccessCount: 3, expiresIn: null });
+      shareRepo.findOne.mockResolvedValueOnce({ id: 'share-1', maxAccessCount: 3, expiresIn: null });
+      shareRepo.createQueryBuilder.mockReturnValueOnce(queryBuilder({ affected: 0 }));
       await expect(service.checkAndIncrementAccess('f')).resolves.toEqual({ allowed: false, reason: '文件访问次数已用尽' });
+    });
+
+    it('A-01：无约束文件直接放行，不查询也不物化 ShareLink', async () => {
+      fileRepo.findOne.mockResolvedValueOnce({
+        id: 'f', uploaderId: ownerId, maxAccessCount: -1, expiresIn: null, password: null,
+      });
+      await expect(service.checkAndIncrementAccess('f')).resolves.toEqual({ allowed: true });
+      expect(shareRepo.findOne).not.toHaveBeenCalled();
+      expect(shareRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('A-01：File 镜像与权威侧不一致时以 ShareLink 为准（关闭双事实源绕过）', async () => {
+      // File 镜像显示还有额度，但权威侧已耗尽 → 必须拒绝
+      fileRepo.findOne.mockResolvedValueOnce({
+        id: 'f', uploaderId: ownerId, maxAccessCount: 100, currentAccessCount: 0, expiresIn: null,
+      });
+      shareRepo.findOne.mockResolvedValueOnce({ id: 'share-1', maxAccessCount: 1, expiresIn: null });
+      shareRepo.createQueryBuilder.mockReturnValueOnce(queryBuilder({ affected: 0 }));
+
+      await expect(service.checkAndIncrementAccess('f'))
+        .resolves.toEqual({ allowed: false, reason: '文件访问次数已用尽' });
+    });
+
+    it('A-01：legacy ShareLink 缺失时按 File 镜像一次性迁移创建', async () => {
+      fileRepo.findOne.mockResolvedValueOnce({
+        id: 'f', uploaderId: ownerId, maxAccessCount: 5, currentAccessCount: 2,
+        expiresIn: null, expiresStartAt: null, password: null,
+      });
+      shareRepo.findOne.mockResolvedValueOnce(null);
+      shareRepo.createQueryBuilder.mockReturnValueOnce(queryBuilder({ affected: 1 }));
+
+      await expect(service.checkAndIncrementAccess('f')).resolves.toEqual({ allowed: true });
+
+      expect(shareRepo.create).toHaveBeenCalledWith(expect.objectContaining({
+        token: 'f',
+        targetType: ShareTargetType.FILE,
+        targetId: 'f',
+        maxAccessCount: 5,
+        currentAccessCount: 2,
+      }));
+    });
+
+    it('A-01：三个 setter 都把约束同步到权威侧', async () => {
+      const file = { id: 'f', uploaderId: ownerId, isDeleted: false, maxAccessCount: -1, expiresIn: null, password: null };
+      fileRepo.findOne.mockResolvedValue(file);
+      shareRepo.findOne.mockResolvedValue({ id: 'share-1' });
+
+      await service.updateAccessCount('f', 7, makeUser(ownerId), 100);
+      expect(shareRepo.update).toHaveBeenCalledWith({ id: 'share-1' }, { maxAccessCount: 7 });
+
+      await service.updateExpires('f', 24, makeUser(ownerId));
+      expect(shareRepo.update).toHaveBeenCalledWith(
+        { id: 'share-1' },
+        expect.objectContaining({ expiresIn: 24, expiresStartAt: expect.any(Date) }),
+      );
+
+      await service.setPassword('f', 'secret', makeUser(ownerId));
+      const passwordPatch = shareRepo.update.mock.calls.at(-1)![1];
+      expect(passwordPatch.password).toEqual(expect.any(String));
+      expect(passwordPatch.password).not.toBe('secret');
     });
 
     it('hasPassword / isPrivateFile 依据查询结果判定', async () => {

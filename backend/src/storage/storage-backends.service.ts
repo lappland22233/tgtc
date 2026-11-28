@@ -75,6 +75,50 @@ export interface StorageBackendView {
 }
 
 /** 按后端类型校验非敏感配置（入口 400，绝不把非法配置落库） */
+/**
+ * C-06：存储端点 SSRF 纵深防御。
+ *
+ * 端点仅 SUPER_ADMIN 可配，但管理员会话被劫持后可借「连通性测试」探测云元数据
+ * （169.254.169.254）或内网服务。此前只校验 http(s) 协议，地址完全不设限。
+ *
+ * 分级处理，避免误伤合法部署：
+ * - 链路本地 / 云元数据地址**始终拒绝**（没有任何合法存储后端在这些地址上）；
+ * - 环回 / 私网 / 唯一本地地址默认拒绝，但内网 MinIO、局域网 WebDAV 是真实部署形态，
+ *   显式设置 STORAGE_ALLOW_PRIVATE_ENDPOINT=true 后放行。
+ *
+ * 局限：这里只做字面量 IP 与已知元数据主机名判定。指向内网 IP 的**域名**需要异步
+ * DNS 解析才能识别，而本函数是同步校验；DNS rebinding 属残留风险，需在发起请求处
+ * 另行固定解析结果才能彻底关闭。
+ */
+export function assertEndpointNotInternal(rawUrl: string, label: string): void {
+  let host: string;
+  try {
+    host = new URL(rawUrl).hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  } catch {
+    throw new BadRequestException(`${label} 不是合法 URL`);
+  }
+  const metadataHosts = new Set(['metadata.google.internal', 'metadata', 'instance-data']);
+  if (metadataHosts.has(host)) {
+    throw new BadRequestException(`${label} 不得指向云元数据服务`);
+  }
+  const isLinkLocal = /^169\.254\./.test(host) || /^fe80:/i.test(host);
+  if (isLinkLocal) {
+    throw new BadRequestException(`${label} 不得指向链路本地/云元数据地址（169.254.0.0/16、fe80::/10）`);
+  }
+  if (process.env.STORAGE_ALLOW_PRIVATE_ENDPOINT === 'true') return;
+  const isLoopback = host === 'localhost' || /^127\./.test(host) || host === '::1';
+  const isPrivate = /^10\./.test(host)
+    || /^192\.168\./.test(host)
+    || /^172\.(1[6-9]|2\d|3[01])\./.test(host)
+    || /^f[cd][0-9a-f]{2}:/i.test(host);
+  if (isLoopback || isPrivate) {
+    throw new BadRequestException(
+      `${label} 指向环回/私网地址。内网 MinIO 或局域网 WebDAV 属合法部署，`
+      + '请显式设置 STORAGE_ALLOW_PRIVATE_ENDPOINT=true 后重试',
+    );
+  }
+}
+
 export function validateBackendConfig(type: RemoteStorageBackendType, config: unknown): StorageBackendConfigPayload {
   if (!config || typeof config !== 'object') throw new BadRequestException('config 不能为空');
   const obj = config as Record<string, unknown>;
@@ -85,6 +129,7 @@ export function validateBackendConfig(type: RemoteStorageBackendType, config: un
     if (!region) throw new BadRequestException('S3 配置缺少 region');
     const endpoint = obj.endpoint === undefined || obj.endpoint === null ? '' : String(obj.endpoint).trim();
     if (endpoint && !/^https?:\/\//i.test(endpoint)) throw new BadRequestException('S3 endpoint 必须以 http(s):// 开头');
+    if (endpoint) assertEndpointNotInternal(endpoint, 'S3 endpoint');
     const result: S3BackendConfig = { bucket, region };
     if (endpoint) result.endpoint = endpoint;
     if (obj.forcePathStyle !== undefined) result.forcePathStyle = Boolean(obj.forcePathStyle);
@@ -96,6 +141,7 @@ export function validateBackendConfig(type: RemoteStorageBackendType, config: un
   if (type === 'webdav') {
     const url = String(obj.url ?? '').trim();
     if (!/^https?:\/\//i.test(url)) throw new BadRequestException('WebDAV url 必须以 http(s):// 开头');
+    assertEndpointNotInternal(url, 'WebDAV url');
     const result: WebDavBackendConfig = { url: url.replace(/\/+$/, '') };
     if (obj.rootPath !== undefined && obj.rootPath !== null) {
       result.rootPath = String(obj.rootPath).replace(/^\/+|\/+$/g, '');

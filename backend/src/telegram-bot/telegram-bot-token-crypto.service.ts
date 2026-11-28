@@ -31,12 +31,12 @@ export class TelegramBotTokenCryptoService {
     if (!this.available) {
       this.logger.warn(
         '未配置 TELEGRAM_BOT_ENCRYPTION_KEY（32 字节 base64/hex）：Bot 直链 Token 将以不可回放模式保存，'
-        + '/link_query 仅能返回前缀',
+        + '/links 仅能返回前缀',
       );
     }
   }
 
-  /** 当前是否可加密保存（决定 /link_query 是否可回放完整链接） */
+  /** 当前是否可加密保存（决定 /links 是否可回放完整链接） */
   isAvailable(): boolean {
     return this.available;
   }

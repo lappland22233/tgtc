@@ -41,6 +41,6 @@ function openFolder(folderId: string | null) {
 }
 
 .folder-breadcrumb :deep(.t-breadcrumb__item:hover) {
-  color: var(--td-brand-color);
+  color: var(--seed-primary);
 }
 </style>

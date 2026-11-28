@@ -371,7 +371,7 @@ describe('AdminService 下载调度配置（与运行时共用同一套规范化
     expect(cfg.autoCapacityEnabled).toBe(true);
   });
 
-  it('越界配置按统一区间裁剪后展示（直通窗口 <= 4MiB、权重预算 <= 64）', async () => {
+  it('越界配置按统一区间裁剪后展示（直通窗口 <= 4MiB、权重预算 <= 128）', async () => {
     const { service, configCacheService } = buildAdminService();
     configCacheService.get.mockImplementation(async (key: string, fallback: string) => {
       if (key === 'FILE_DOWNLOAD_DIRECT_WINDOW_MB') return '1024';
@@ -380,15 +380,15 @@ describe('AdminService 下载调度配置（与运行时共用同一套规范化
     });
     const cfg = await service.getDownloadConfig();
     expect(cfg.directWindowMB).toBe(4);
-    expect(cfg.maxConcurrentUpstreams).toBe(64);
+    expect(cfg.maxConcurrentUpstreams).toBe(128);
   });
 
   it('写入校验使用与运行时相同的区间，越界值一律拒绝', async () => {
     const { service, configCacheService } = buildAdminService();
     await expect(service.updateDownloadConfig(user, { directWindowMB: 5 }))
       .rejects.toThrow('直通缓冲窗口（MB）应在 1-4 之间');
-    await expect(service.updateDownloadConfig(user, { maxConcurrentUpstreams: 65 }))
-      .rejects.toThrow('上游权重预算应在 1-64 之间');
+    await expect(service.updateDownloadConfig(user, { maxConcurrentUpstreams: 129 }))
+      .rejects.toThrow('上游权重预算应在 1-128 之间');
     await expect(service.updateDownloadConfig(user, { upstreamQueuePolicy: 'fast' as any }))
       .rejects.toThrow('上游队列策略');
     expect(configCacheService.set).not.toHaveBeenCalled();

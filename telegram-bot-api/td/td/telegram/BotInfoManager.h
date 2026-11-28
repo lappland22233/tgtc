@@ -60,6 +60,11 @@ class BotInfoManager final : public Actor {
 
   void allow_bot_to_send_messages(UserId bot_user_id, Promise<Unit> &&promise);
 
+  void invite_users_to_bot(UserId bot_user_id, const vector<UserId> &user_ids, Promise<Unit> &&promise);
+
+  void set_bot_settings(UserId bot_user_id, vector<td_api::object_ptr<td_api::BotSetting>> &&settings,
+                        Promise<Unit> &&promise);
+
   FileSourceId get_bot_media_preview_file_source_id(UserId bot_user_id);
 
   FileSourceId get_bot_media_preview_info_file_source_id(UserId bot_user_id, const string &language_code);

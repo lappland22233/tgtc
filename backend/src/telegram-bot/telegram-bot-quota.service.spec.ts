@@ -50,14 +50,17 @@ function createPgShapedContext() {
     }),
   };
   const whitelistRepository = { findOne: jest.fn(async () => null) };
+  // 单账号额度覆盖：默认无覆盖（走全局额度），个别用例可注入返回值
+  const userQuotaRepository = { findOne: jest.fn(async () => null) };
 
   const service = new TelegramBotQuotaService(
     usageRepository as never,
     whitelistRepository as never,
+    userQuotaRepository as never,
     { query } as never,
   );
 
-  return { service, query, usage };
+  return { service, query, usage, userQuotaRepository, whitelistRepository };
 }
 
 describe('TelegramBotQuotaService（PostgreSQL 返回形状）', () => {
@@ -121,5 +124,51 @@ describe('TelegramBotQuotaService（PostgreSQL 返回形状）', () => {
     await service.consume(telegramUserId, '2026-09-15', 1);
     await expect(service.consume(telegramUserId, '2026-09-15', 1)).resolves.toMatchObject({ allowed: false });
     await expect(service.consume(telegramUserId, '2026-09-16', 1)).resolves.toEqual({ allowed: true, used: 1 });
+  });
+
+  it('resolveQuota 优先级：白名单（不限）> 单账号覆盖 > 通用额度', async () => {
+    const ctx = createPgShapedContext();
+    const telegramUserId = '900000128';
+    const usageDate = '2026-09-15';
+
+    // 1) 无覆盖、非白名单 → 通用额度
+    await expect(ctx.service.resolveQuota(telegramUserId, 5, usageDate)).resolves.toMatchObject({
+      whitelisted: false, limit: 5, source: 'global', used: 0, remaining: 5,
+    });
+
+    // 2) 有覆盖 → 覆盖额度
+    (ctx.userQuotaRepository.findOne as jest.Mock).mockResolvedValue({ telegramUserId, dailyLimit: 20 });
+    await expect(ctx.service.resolveQuota(telegramUserId, 5, usageDate)).resolves.toMatchObject({
+      whitelisted: false, limit: 20, source: 'user', remaining: 20,
+    });
+
+    // 3) 白名单优先于覆盖，且额度为不限
+    (ctx.whitelistRepository.findOne as jest.Mock).mockResolvedValue({ telegramUserId, enabled: true });
+    await expect(ctx.service.resolveQuota(telegramUserId, 5, usageDate)).resolves.toMatchObject({
+      whitelisted: true, limit: null, source: 'whitelist', used: 0, remaining: null,
+    });
+  });
+
+  it('resolveQuota 反映当日已用量并夹紧剩余额度', async () => {
+    const ctx = createPgShapedContext();
+    const telegramUserId = '900000129';
+    const usageDate = '2026-09-15';
+    (ctx.userQuotaRepository.findOne as jest.Mock).mockResolvedValue({ telegramUserId, dailyLimit: 3 });
+
+    await ctx.service.consume(telegramUserId, usageDate, 3);
+    await ctx.service.consume(telegramUserId, usageDate, 3);
+
+    await expect(ctx.service.resolveQuota(telegramUserId, 99, usageDate)).resolves.toMatchObject({
+      limit: 3, source: 'user', used: 2, remaining: 1,
+    });
+  });
+
+  it('禁用的白名单记录不生效（enabled=false 视为非白名单）', async () => {
+    const ctx = createPgShapedContext();
+    (ctx.whitelistRepository.findOne as jest.Mock).mockResolvedValue({ telegramUserId: '900000130', enabled: false });
+
+    await expect(ctx.service.resolveQuota('900000130', 5, '2026-09-15')).resolves.toMatchObject({
+      whitelisted: false, source: 'global', limit: 5,
+    });
   });
 });

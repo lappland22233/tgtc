@@ -18,7 +18,7 @@
 
 流式下载和导出端点直接返回文件内容，不使用 JSON 包装。
 
-媒体直链格式为 `https://your-domain.example/media/<file-id>`，可用于 Markdown、`<img>`、`<audio>` 和 `<video>`。直链仅对公开、未删除、无密码、无访问次数限制、无有效期限制的图片/音频/视频生效；响应使用原始 MIME、`Content-Disposition: inline` 和一小时公共缓存。视频/音频在本地缓存命中后支持 Range，冷文件首次请求回退为完整响应并建立缓存。
+媒体直链格式为 `https://your-domain.example/media/<file-id>`，可用于 Markdown、`<img>`、`<audio>` 和 `<video>`。直链仅对公开、未删除、无密码、无访问次数限制、无有效期限制的图片/音频/视频生效；响应使用原始 MIME、`Content-Disposition: inline`，并带 `X-Content-Type-Options: nosniff`。**缓存头是 `Cache-Control: no-store`**（不是公共缓存）：直链内容随覆盖上传变化，且授权条件可能在任意时刻失效，禁止浏览器与共享缓存留存。视频/音频在本地缓存命中后支持 Range，冷文件首次请求回退为完整响应并建立缓存。
 
 ### 公开接口
 
@@ -65,8 +65,8 @@
 | `GET` | `/api/files/:id/download` | 登录用户下载 |
 | `GET` | `/api/files/:id/preview` | 页内在线预览（Range 命中 206，冷文件回退全量） |
 | `GET` | `/api/files/:id/cache-status` | 缓存状态（`cached`/`cold`），前端据此决定单连接策略 |
-| `GET` | `/api/files/:id/thumbnail?t=` | 加密令牌缩略图 |
-| `GET` | `/api/files/:id/thumbnail-hd?t=` | 加密令牌高清视频封面 |
+| `GET` | `/api/files/:id/thumbnail` | 缩略图（JWT / API Key 鉴权 + 文件级授权；`Cache-Control: private, no-cache`） |
+| `GET` | `/api/files/:id/thumbnail-hd` | 高清视频封面（同上鉴权） |
 | `PATCH` | `/api/files/:id/rename` | 重命名显示名 |
 | `PATCH` | `/api/files/:id/move` | 移动文件 |
 | `POST` | `/api/files/:id/copy` | 轻量复制文件 |
@@ -142,6 +142,8 @@
 | `GET` | `/api/admin/bot-config/detected-domain` | 探测可信站点域名候选值（仅 `super_admin`） |
 | `GET` | `/api/admin/bot-usage` | Bot 使用情况汇总（收到文件/下载次数/去重用户/带宽/趋势，仅 `super_admin`） |
 | `GET` | `/api/admin/bot-usage/users` | Bot 用户明细（TG 用户 ID + @用户名，支持关键字/时间筛选与分页，仅 `super_admin`） |
+| `GET` | `/api/admin/bot-operations/users/:telegramUserId` | 单用户详情：配额来源（`whitelist`/`user`/`global`）、单账号覆盖值、全局额度 |
+| `PUT` | `/api/admin/bot-operations/users/:telegramUserId/quota` | 设置单账号每日额度；`{"dailyLimit": null}` 清除覆盖并回落全局（与 Bot 命令 `/quota_set <ID> default` 同语义） |
 | `GET` | `/api/admin/export` | CSV/JSON 数据导出 |
 
 多数分析、审计、缓存和安全配置接口仅允许 `super_admin`；管理员接口一律只接受 JWT 会话（不接受 API Key）。

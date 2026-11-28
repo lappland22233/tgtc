@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, IsNull, LessThan, LessThanOrEqual, MoreThan, Repository } from 'typeorm';
+import { databasePessimisticWriteLock, getDatabaseType } from '../database/database-types';
 import type { TelegramCopyOwnerType } from '../common/entities/telegram-file-copy.entity';
 import {
   ReplicationAttemptStatus,
@@ -373,6 +374,10 @@ export class ReplicationAttemptService {
   private degradedAtMs = 0;
   private writeFailures = 0;
   private lastDegradedLogAtMs = 0;
+  /** SQLite 单连接事务串行链（见 serialized） */
+  private sqliteChain: Promise<void> = Promise.resolve();
+  /** 开轮 scope 互斥链（见 withScopeLock），键为 ownerType:ownerId:targetChatId */
+  private readonly scopeChains = new Map<string, Promise<unknown>>();
 
   constructor(
     @InjectRepository(TelegramReplicationAttempt)
@@ -420,6 +425,12 @@ export class ReplicationAttemptService {
    * 4. 否则新建行；可重试失败链在继承窗口内继承 `retryCount`（保证退避上限可达）。
    */
   async beginRound(input: BeginRoundInput): Promise<BeginRoundResult> {
+    // 同一 owner + 目标群的开轮必须串行，否则并发触发会各自新建活跃轮次（B-10）
+    const scopeKey = `${input.ownerType}:${input.ownerId}:${input.targetChatId ?? ''}`;
+    return this.withScopeLock(scopeKey, () => this.beginRoundLocked(input));
+  }
+
+  private async beginRoundLocked(input: BeginRoundInput): Promise<BeginRoundResult> {
     const now = Date.now();
     try {
       // 轮次归属必须收敛到「owner + 目标群」：多镜像群各有一条活跃轮次，
@@ -673,30 +684,78 @@ export class ReplicationAttemptService {
     if (!account) return;
     const targetChatId = (options.targetChatId ?? '').trim();
     try {
-      const active = targetChatId
-        // 精确到群；兼容历史行（无目标群归属）
-        ? (await this.repo.findOne({
-          where: { ownerType, ownerId, targetChatId, status: In(ATTEMPT_ACTIVE_STATUSES) },
-          order: { createdAt: 'DESC' },
-        })) ?? (await this.repo.findOne({
-          where: { ownerType, ownerId, targetChatId: IsNull(), status: In(ATTEMPT_ACTIVE_STATUSES) },
-          order: { createdAt: 'DESC' },
-        }))
-        : await this.repo.findOne({
-          where: { ownerType, ownerId, status: In(ATTEMPT_ACTIVE_STATUSES) },
-          order: { createdAt: 'DESC' },
+      // B-09：claimedAccountIds 是读-改-写，两个 Bot 并发认领时后写会覆盖先写，
+      // 导致 settleClaims 少计新增、误判 claim_timeout 并触发多余重试轮次。
+      // 必须在事务 + 行锁内重读合并；SQLite 共用单连接，另行串行化避免嵌套事务。
+      const claim = () => this.repo.manager.transaction(async (manager) => {
+        const repo = manager.getRepository(TelegramReplicationAttempt);
+        const lock = databasePessimisticWriteLock();
+        const active = targetChatId
+          // 精确到群；兼容历史行（无目标群归属）
+          ? (await repo.findOne({
+            where: { ownerType, ownerId, targetChatId, status: In(ATTEMPT_ACTIVE_STATUSES) },
+            order: { createdAt: 'DESC' },
+            ...lock,
+          })) ?? (await repo.findOne({
+            where: { ownerType, ownerId, targetChatId: IsNull(), status: In(ATTEMPT_ACTIVE_STATUSES) },
+            order: { createdAt: 'DESC' },
+            ...lock,
+          }))
+          : await repo.findOne({
+            where: { ownerType, ownerId, status: In(ATTEMPT_ACTIVE_STATUSES) },
+            order: { createdAt: 'DESC' },
+            ...lock,
+          });
+        if (!active) return;
+        const claimed = new Set(active.claimedAccountIds ?? []);
+        if (claimed.has(account)) return;
+        claimed.add(account);
+        await repo.update({ id: active.id }, {
+          claimedAccountIds: Array.from(claimed),
+          updatedAt: new Date(),
         });
-      if (!active) return;
-      const claimed = new Set(active.claimedAccountIds ?? []);
-      if (claimed.has(account)) return;
-      claimed.add(account);
-      await this.repo.update({ id: active.id }, {
-        claimedAccountIds: Array.from(claimed),
-        updatedAt: new Date(),
       });
+      if (getDatabaseType() === 'sqlite') await this.serialized(claim);
+      else await claim();
       this.clearDegraded();
     } catch (error) {
       this.markDegraded('记录认领事件', error);
+    }
+  }
+
+  /** SQLite 共用单连接，禁止本服务并发开启嵌套事务；跨进程仍由 SQLite 写锁保护。 */
+  private async serialized<T>(fn: () => Promise<T>): Promise<T> {
+    const previous = this.sqliteChain;
+    let release!: () => void;
+    this.sqliteChain = new Promise<void>((resolve) => { release = resolve; });
+    await previous;
+    try {
+      return await fn();
+    } finally {
+      release();
+    }
+  }
+
+  /**
+   * B-10：按「owner + 目标群」串行化开轮。
+   *
+   * beginRound 是「查最近轮次 → 无活跃则新建」，并发触发（懒触发 + 定时 + 手动）会同时
+   * 通过检查各自建行，产生两条活跃轮次，认领/退避/结算全部串味。
+   *
+   * 这里用进程内 keyed 互斥而非部分唯一索引：部署预检强制单实例
+   * （DEPLOYMENT_MODE=multi 直接拒绝启动），进程内串行即足以关闭竞态；
+   * 而新增唯一索引会在存量已有重复行时让迁移失败、阻断升级。
+   */
+  private async withScopeLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+    const previous = this.scopeChains.get(key) ?? Promise.resolve();
+    const current = previous.then(fn, fn);
+    const guarded = current.catch(() => undefined);
+    this.scopeChains.set(key, guarded);
+    try {
+      return await current;
+    } finally {
+      // 仅当自己仍是链尾时清理，避免删掉后继的排队位
+      if (this.scopeChains.get(key) === guarded) this.scopeChains.delete(key);
     }
   }
 

@@ -325,6 +325,31 @@ export async function createAlertRules(configCache: ConfigCacheService): Promise
       cooldownMinutes: 30,
       evaluate: async () => null,
     },
+
+    // ===== 运维基础设施告警（由 OpsObservationService 进程内定时触发） =====
+    // 刻意不挂在 Bull 上：Redis 挂掉时队列任务全部停摆，若观测本身也在队列里
+    // 就永远看不到故障。这三条是 dead-man switch，必须由进程内定时器驱动。
+    {
+      id: 'OPS_DISK_LOW',
+      name: '缓存/上传盘余量不足',
+      level: AlertLevel.CRITICAL,
+      cooldownMinutes: 30,
+      evaluate: async () => null,
+    },
+    {
+      id: 'OPS_UPLOAD_QUEUE_BACKLOG',
+      name: '上传/校验队列积压',
+      level: AlertLevel.WARNING,
+      cooldownMinutes: 30,
+      evaluate: async () => null,
+    },
+    {
+      id: 'OPS_SCHEDULER_STALLED',
+      name: '任务调度停摆（Redis 不可用或消费者不前进）',
+      level: AlertLevel.CRITICAL,
+      cooldownMinutes: 15,
+      evaluate: async () => null,
+    },
   ];
 }
 
@@ -361,5 +386,8 @@ export function getAlertRuleMetadata() {
     { id: 'MIRROR_NO_ENABLED_RULES', name: '镜像已开启但没有启用中的规则', level: AlertLevel.CRITICAL },
     { id: 'STORAGE_CAPACITY_EXHAUSTED', name: '存储池容量耗尽', level: AlertLevel.CRITICAL },
     { id: 'GDRIVE_CACHE_BACKLOG', name: 'Google 双写积压', level: AlertLevel.WARNING },
+    { id: 'OPS_DISK_LOW', name: '缓存/上传盘余量不足', level: AlertLevel.CRITICAL },
+    { id: 'OPS_UPLOAD_QUEUE_BACKLOG', name: '上传/校验队列积压', level: AlertLevel.WARNING },
+    { id: 'OPS_SCHEDULER_STALLED', name: '任务调度停摆（Redis 不可用或消费者不前进）', level: AlertLevel.CRITICAL },
   ];
 }

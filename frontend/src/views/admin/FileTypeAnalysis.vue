@@ -6,7 +6,7 @@
     </div>
 
     <!-- Time Range Selector -->
-    <div class="toolbar" :class="{ 'toolbar-row': isMobile }">
+    <div class="toolbar">
       <t-radio-group v-model="timeRange" variant="default-filled" @change="fetchData">
         <t-radio-button value="1h">1小时</t-radio-button>
         <t-radio-button value="24h">24小时</t-radio-button>
@@ -87,27 +87,36 @@ import * as echarts from '@/utils/echarts';
 import { api } from '@/stores/auth';
 import { formatSize } from '@/utils/format';
 import { useMobile } from '../../composables/useMobile';
+import { useTheme } from '../../composables/useTheme';
 import { useChartResize } from '../../composables/useChartResize';
-import { CHART_COLORS, FILETYPE_COLORS, tooltipBase, legendBase, ensureCyberTheme } from '../../utils/echarts-theme';
+import {
+  CHART_COLORS,
+  CHART_COLORS_DARK,
+  FILETYPE_COLORS,
+  getThemeChartColors,
+  getTooltipBase,
+  getLegendBase,
+  ensureCyberTheme,
+  refreshChartTheme,
+} from '../../utils/echarts-theme';
 
-// Theme-aware chart colors
-const isDark = () => document.documentElement.getAttribute('data-theme') === 'dark';
+const { resolvedTheme, isDark } = useTheme();
 
 interface FileTypeResponse {
   categories: { name: string; fileCount: number; totalSize: string; percentage: number }[];
 }
 
-const CATEGORY_COLORS: Record<string, string> = {
-  '图片':   FILETYPE_COLORS['图片']   || CHART_COLORS.blue,
-  '视频':   FILETYPE_COLORS['视频']   || CHART_COLORS.danger,
-  '音频':   FILETYPE_COLORS['音频']   || CHART_COLORS.violet,
-  '文档':   FILETYPE_COLORS['文档']   || CHART_COLORS.success,
-  '压缩包': FILETYPE_COLORS['压缩包'] || CHART_COLORS.amber,
-  '其他':   FILETYPE_COLORS['其他']   || CHART_COLORS.slate,
-};
-
 function getColor(name: string): string {
-  return CATEGORY_COLORS[name] || CHART_COLORS.slate;
+  const palette = isDark.value ? CHART_COLORS_DARK : CHART_COLORS;
+  const map: Record<string, string> = {
+    '图片':   isDark.value ? palette.purple : FILETYPE_COLORS['图片'],
+    '视频':   isDark.value ? palette.orange : FILETYPE_COLORS['视频'],
+    '音频':   isDark.value ? palette.info : FILETYPE_COLORS['音频'],
+    '文档':   isDark.value ? palette.primary : FILETYPE_COLORS['文档'],
+    '压缩包': isDark.value ? palette.amber : FILETYPE_COLORS['压缩包'],
+    '其他':   palette.slate,
+  };
+  return map[name] || palette.slate;
 }
 
 function getLabel(name: string): string {
@@ -146,6 +155,7 @@ async function renderChart() {
   chart?.dispose();
   chart = echarts.init(chartRef.value, 'cyber');
 
+  const { emptySlice } = getThemeChartColors();
   const categories = data.value?.categories || [];
   const pieData = categories.length > 0
     ? categories.map((c) => ({
@@ -153,12 +163,12 @@ async function renderChart() {
         value: c.fileCount,
         itemStyle: { color: getColor(c.name) },
       }))
-    : [{ name: '无数据', value: 1, itemStyle: { color: isDark() ? 'rgba(255,255,255,0.08)' : 'rgba(22,25,31,0.08)' } }];
+    : [{ name: '无数据', value: 1, itemStyle: { color: emptySlice } }];
 
   chart.setOption({
     tooltip: {
       trigger: 'item',
-      ...tooltipBase,
+      ...getTooltipBase(),
       formatter: (params: unknown) => {
         const p = params as { name: string; value: number; percent: string };
         return `${p.name}: ${p.value} 个文件 (${p.percent}%)`;
@@ -168,7 +178,7 @@ async function renderChart() {
       orient: 'vertical',
       right: 10,
       top: 'center',
-      ...legendBase,
+      ...getLegendBase(),
     },
     series: [
       {
@@ -199,6 +209,11 @@ async function fetchData() {
   }
 }
 
+watch(resolvedTheme, () => {
+  refreshChartTheme();
+  void renderChart();
+});
+
 onMounted(() => {
   fetchData();
 });
@@ -224,82 +239,39 @@ defineExpose({ refreshChart });
   margin-bottom: 20px;
 }
 
-/* Charts row */
 .charts-row {
   display: flex;
+  flex-direction: column;
   gap: 20px;
-  flex-wrap: wrap;
 }
 
-/* Card */
-.card {
-  flex: 1 1 340px;
+.charts-row > .card {
   min-inline-size: 0;
-  background: var(--color-bg-surface);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-lg);
-  padding: 24px;
   margin-bottom: 20px;
 }
 
-.card h3 {
-  font-size: 16px;
-  font-weight: 600;
-  font-family: var(--font-display);
-  margin: 0 0 16px;
-}
-
-/* Chart */
 .chart-container {
   width: 100%;
   height: 320px;
 }
 
-/* Empty hint */
-.empty-hint {
-  text-align: center;
-  padding: 24px 0;
-  color: var(--text-secondary);
-  font-size: 13px;
+.mobile-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+  font-size: 14px;
 }
 
-@media (max-width: 768px) {
+@media (min-width: 769px) {
   .charts-row {
-    flex-direction: column;
-  }
-
-  .toolbar-row {
-    flex-direction: column;
-    gap: 8px;
+    flex-direction: row;
+    flex-wrap: wrap;
   }
 
   .charts-row > .card {
-    flex-basis: auto;
-  }
-
-  .mobile-card {
-    background: var(--color-bg-surface);
-    border: 1px solid var(--border-default);
-    border-radius: var(--radius-md);
-    padding: 12px;
-    margin-bottom: 10px;
-  }
-
-  .mobile-card-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-    margin-bottom: 8px;
-    font-size: 14px;
-  }
-
-  .mobile-card-meta {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    font-size: 12px;
-    color: var(--text-secondary);
+    flex: 1 1 340px;
   }
 }
 </style>

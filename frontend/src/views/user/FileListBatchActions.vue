@@ -114,22 +114,40 @@ const emit = defineEmits<{
 <style scoped>
 /* ============ 批量操作栏 ============ */
 .fl-batchbar {
+  position: fixed;
+  inset-inline: 0;
+  inset-block-end: calc(var(--workspace-mobile-nav-height, 0px) + env(safe-area-inset-bottom));
+  z-index: 12;
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 8px;
-  padding: 8px;
-  margin-bottom: 10px;
+  min-height: 56px;
+  margin: 0;
+  padding: 4px max(12px, env(safe-area-inset-right)) 4px max(12px, env(safe-area-inset-left));
   background: var(--workspace-selected);
-  border: 1px solid var(--workspace-border);
-  border-radius: 8px;
+  border-top: 1px solid var(--workspace-border);
+  border-bottom: 1px solid var(--workspace-border);
+  border-inline: 0;
+  border-radius: 0;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+  scrollbar-width: thin;
 }
 
 .fl-batchbar-count {
+  flex: none;
   font-size: 13px;
   font-weight: 600;
   color: var(--workspace-accent);
   margin-inline: 4px;
+  white-space: nowrap;
+}
+
+.fl-batchbar :deep(button) {
+  flex: none;
+  min-height: 44px;
+  white-space: nowrap;
 }
 
 /* ============ 标签筛选 ============ */
@@ -176,29 +194,27 @@ const emit = defineEmits<{
   color: var(--workspace-accent);
 }
 
-@media (max-width: 768px) {
+@media (min-width: 769px) {
   .fl-batchbar {
-    position: fixed;
-    inset-inline: 0;
-    inset-block-end: calc(var(--workspace-mobile-nav-height, 0px) + env(safe-area-inset-bottom));
-    z-index: 12;
-    min-height: 56px;
-    margin: 0;
-    padding: 4px max(12px, env(safe-area-inset-right)) 4px max(12px, env(safe-area-inset-left));
-    border-inline: 0;
-    border-radius: 0;
-    flex-wrap: nowrap;
-    overflow-x: auto;
-    overscroll-behavior-inline: contain;
-    scrollbar-width: thin;
+    position: static;
+    inset-inline: auto;
+    inset-block-end: auto;
+    z-index: auto;
+    min-height: unset;
+    padding: 8px;
+    margin-bottom: 10px;
+    border: 1px solid var(--workspace-border);
+    border-radius: 8px;
+    flex-wrap: wrap;
+    overflow-x: visible;
   }
 
-  .fl-batchbar-count,
   .fl-batchbar :deep(button) {
-    flex: none;
-    white-space: nowrap;
+    min-height: unset;
   }
+}
 
+@media (pointer: coarse) {
   .fl-batchbar :deep(button) {
     min-height: 44px;
   }

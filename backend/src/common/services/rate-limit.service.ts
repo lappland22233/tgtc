@@ -8,6 +8,8 @@ import { databaseCurrentTimestamp, databaseQuery, getDatabaseType } from '../../
 export interface RateLimitResult {
   allowed: boolean;
   waitMinutes?: number;
+  /** 本次请求后的窗口内尝试次数（供审计记录实际失败次数；无法确定时不填） */
+  attemptCount?: number;
 }
 
 export interface RateLimitCounterResult {
@@ -128,7 +130,8 @@ export class RateLimitService {
     // 1 < maxAttempts（如 5），allowed = true 已是正确结果，无需额外宽限期逻辑。
     // 原宽限期代码会让窗口重置后短时间内无条件返回 allowed=true，
     // 可被攻击者利用窗口边界绕过限流阈值，已移除。
-    return { allowed: true };
+    const attemptCount = Number(row.attemptCount);
+    return { allowed: true, ...(Number.isFinite(attemptCount) ? { attemptCount } : {}) };
   }
 
   /**

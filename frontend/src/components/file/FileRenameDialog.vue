@@ -7,7 +7,7 @@
     :confirm-loading="loading"
     width="400px"
   >
-    <t-form :data="form" :rules="rules" ref="formRef">
+    <t-form :data="form" :rules="rules" ref="formRef" label-align="top">
       <t-form-item label="文件名称" name="name">
         <t-input
           v-model="form.name"

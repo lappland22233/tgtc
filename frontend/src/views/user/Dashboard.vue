@@ -16,36 +16,48 @@
       </div>
       <div class="stat-card">
         <h3>今日上传</h3>
-        <div class="value" style="color: var(--color-success);">{{ todayUploads }}</div>
+        <div class="value text-ok">{{ todayUploads }}</div>
       </div>
       <div class="stat-card">
         <h3>总访问次数</h3>
-        <div class="value" style="color: var(--color-cyan);">{{ stats.totalAccessCount }}</div>
+        <div class="value text-brand">{{ stats.totalAccessCount }}</div>
       </div>
       <div class="stat-card">
         <h3>账户类型</h3>
-        <div class="value" style="font-size: 18px; font-family: var(--font-display);">{{ roleText }}</div>
+        <div class="value dashboard-role-value">{{ roleText }}</div>
       </div>
     </div>
 
     <div class="card">
-      <h3 style="margin-bottom: 20px; font-family: var(--font-display); font-size: 16px; font-weight: 600;">
+      <h3 class="card-title">
         最近上传
       </h3>
       <t-loading v-if="loading" />
       <!-- G11-15：加载失败态 + 重试，避免 allSettled 静默吞失败 -->
       <div v-else-if="loadError" class="empty-state">
-        <div class="empty-icon">!</div>
+        <div class="empty-icon" aria-hidden="true">
+          <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="9" />
+            <path d="M12 8v5M12 16h.01" />
+          </svg>
+        </div>
         <p>{{ loadError }}</p>
         <span class="empty-hint">数据加载失败，请检查网络后重试</span>
-        <t-button size="small" variant="outline" style="margin-top: 12px;" @click="loadDashboardData">重试</t-button>
+        <div class="mt-3">
+          <t-button size="small" variant="outline" @click="loadDashboardData">重试</t-button>
+        </div>
       </div>
       <div v-else-if="recentFiles.length === 0" class="empty-state">
-        <div class="empty-icon">⊟</div>
+        <div class="empty-icon" aria-hidden="true">
+          <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="22 12 16 12 14 15 10 15 8 12 2 12" />
+            <path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z" />
+          </svg>
+        </div>
         <p>暂无文件上传记录</p>
         <span class="empty-hint">上传文件后，最近的文件将显示在这里</span>
       </div>
-      <div v-else class="file-list" style="margin-top: 0;">
+      <div v-else class="file-list mt-0">
         <div v-for="file in recentFiles" :key="file.id" class="file-item">
           <div class="file-icon" :class="getFileIcon(file.mimeType)">
             <FileTypeIcon :mimeType="file.mimeType" :fileName="file.originalName" :size="18" />
@@ -168,25 +180,8 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-.empty-state {
-  text-align: center;
-  padding: 40px 0;
-}
-
-.empty-icon {
-  font-size: 40px;
-  color: var(--text-tertiary);
-  margin-bottom: 12px;
-}
-
-.empty-state p {
-  color: var(--text-secondary);
-  font-size: 15px;
-  margin-bottom: 4px;
-}
-
-.empty-hint {
-  color: var(--text-tertiary);
-  font-size: 13px;
+.dashboard-role-value {
+  font-size: 18px;
+  font-family: var(--font-display);
 }
 </style>

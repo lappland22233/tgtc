@@ -182,6 +182,18 @@ client.interceptors.response.use(
     const hasStructuredCode = (typeof structuredCode === 'string' && structuredCode.length > 0)
       || !!error.response?.headers?.['x-tgtc-error-code'];
 
+    // 401 处理：防抖跳转登录页
+    //
+    // 必须排在 CDN 非 JSON 分支之前：反向代理/网关有时会返回 HTML 的 401
+    // （登录态失效被 WAF 拦截是最常见的场景）。若让它先被归类为「CDN 代理层错误」，
+    // 下面这段登录重定向就永远走不到，用户会卡在一个无法恢复的报错上。
+    if (status === 401) {
+      if (!isAuthPage() && !isRedirecting) {
+        startRedirect();
+      }
+      return Promise.reject(error);
+    }
+
     // Cloudflare 代理层错误（413 请求体过大 / 502 网关不可用 / 5xx 源站错误）
     // 检测非 JSON 响应（Cloudflare HTML 错误页）
     if (status && status >= 400 && error.response?.data && !hasStructuredCode) {
@@ -198,14 +210,6 @@ client.interceptors.response.use(
               : `CDN 代理层错误 (${status})，请稍后重试`;
         return Promise.reject(Object.assign(new Error(cloudflareMsg), { cause: error }));
       }
-    }
-
-    // 401 处理：防抖跳转登录页
-    if (status === 401) {
-      if (!isAuthPage() && !isRedirecting) {
-        startRedirect();
-      }
-      return Promise.reject(error);
     }
 
     // 403 处理

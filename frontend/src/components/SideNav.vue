@@ -17,6 +17,7 @@
 
     <div class="workspace-app-actions">
       <slot />
+      <ThemeToggle variant="icon" />
       <button
         ref="accountTrigger"
         class="workspace-account-trigger"
@@ -54,6 +55,11 @@
           <p class="workspace-account-role">{{ roleText }}</p>
         </div>
       </div>
+      <div class="workspace-account-theme">
+        <span class="workspace-account-theme-label">界面主题</span>
+        <ThemeToggle variant="segmented" />
+      </div>
+
       <router-link to="/settings" class="workspace-account-item" @click="closeAccount">个人设置</router-link>
 
       <nav v-if="visibleAdminNav.length" class="workspace-admin-nav" aria-labelledby="workspace-admin-heading">
@@ -82,6 +88,7 @@ import { useRoute } from 'vue-router';
 import type { UserRole } from '../types/user';
 import { getAdminNavGroups } from '@/utils/admin-navigation';
 import WorkspaceBrand from './WorkspaceBrand.vue';
+import ThemeToggle from './ThemeToggle.vue';
 
 const props = defineProps<{
   role: UserRole;
@@ -130,16 +137,16 @@ function logout() {
 watch(() => route.path, closeAccount);
 </script>
 
-<style>
+<style scoped>
 .workspace-appbar {
   position: sticky;
   z-index: 20;
   top: 0;
   display: flex;
   align-items: center;
-  gap: clamp(16px, 2.3vw, 26px);
+  gap: 8px;
   min-height: var(--workspace-header-height);
-  padding-inline: 20px;
+  padding-inline: 12px;
   border-bottom: 1px solid var(--workspace-border);
   background: var(--workspace-surface);
 }
@@ -151,22 +158,32 @@ watch(() => route.path, closeAccount);
   min-width: 0;
 }
 
-.workspace-appbar .workspace-brand {
+.workspace-appbar :deep(.workspace-brand) {
   min-height: 44px;
-  max-width: min(28vw, 236px);
+  max-width: 48vw;
 }
 
 .workspace-tabs {
-  align-self: stretch;
-  align-items: stretch;
-  gap: 22px;
+  position: fixed;
+  inset: auto 0 0;
+  justify-content: space-evenly;
+  min-height: calc(var(--workspace-mobile-nav-height) + env(safe-area-inset-bottom, 0px));
+  padding: 0 8px env(safe-area-inset-bottom, 0px);
+  gap: 0;
+  border-top: 1px solid var(--workspace-border);
+  background: var(--workspace-surface);
 }
 
 .workspace-tab {
   display: flex;
+  flex: 1;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
+  min-height: 44px;
+  gap: 3px;
   color: var(--workspace-muted);
+  font-size: 12px;
   text-decoration: none;
   white-space: nowrap;
 }
@@ -177,17 +194,17 @@ watch(() => route.path, closeAccount);
 }
 
 .workspace-tab--active {
-  box-shadow: inset 0 -2px var(--workspace-accent);
+  box-shadow: inset 0 2px var(--workspace-accent);
   font-weight: 650;
 }
 
 .workspace-tab-icon {
-  display: none;
+  display: inline-flex;
 }
 
 .workspace-app-actions {
   flex: 0 0 auto;
-  gap: 10px;
+  gap: 4px;
   margin-inline-start: auto;
 }
 
@@ -199,7 +216,7 @@ watch(() => route.path, closeAccount);
   height: 44px;
   padding: 0;
   border: 0;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: transparent;
   color: var(--workspace-text);
   cursor: pointer;
@@ -224,15 +241,16 @@ watch(() => route.path, closeAccount);
 
 .workspace-account {
   position: fixed;
-  inset: var(--workspace-header-height) 20px auto auto;
-  width: min(320px, calc(100vw - 40px));
-  max-height: calc(100dvh - var(--workspace-header-height) - 20px);
+  inset: auto 0 0;
+  width: 100%;
+  max-width: none;
+  max-height: min(80dvh, 620px);
   margin: 0;
   padding: 0;
   overflow: auto;
   overscroll-behavior: contain;
   border: 1px solid var(--workspace-border);
-  border-radius: 12px;
+  border-radius: var(--radius-xl) var(--radius-xl) 0 0;
   background: var(--workspace-surface);
   color: var(--workspace-text);
   box-shadow: var(--shadow-lg);
@@ -243,7 +261,7 @@ watch(() => route.path, closeAccount);
 }
 
 .workspace-account-content {
-  padding: 12px;
+  padding: 12px 12px calc(12px + env(safe-area-inset-bottom, 0px));
 }
 
 .workspace-account-header,
@@ -279,9 +297,22 @@ watch(() => route.path, closeAccount);
 }
 
 .workspace-account-role,
-.workspace-admin-nav h3 {
+.workspace-admin-nav h3,
+.workspace-account-theme-label {
   color: var(--workspace-muted);
   font-size: 12px;
+}
+
+.workspace-account-theme {
+  display: grid;
+  gap: 6px;
+  padding: 6px 8px 10px;
+  margin-bottom: 6px;
+  border-bottom: 1px solid var(--workspace-border);
+}
+
+.workspace-account-theme-label {
+  font-weight: 600;
 }
 
 .workspace-admin-nav {
@@ -302,7 +333,7 @@ watch(() => route.path, closeAccount);
   min-height: 44px;
   padding-inline: 8px;
   border: 0;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: transparent;
   color: var(--workspace-text);
   font: inherit;
@@ -333,57 +364,57 @@ watch(() => route.path, closeAccount);
   outline-offset: 2px;
 }
 
-@media (max-width: 768px) {
+@media (min-width: 769px) {
   .workspace-appbar {
-    gap: 8px;
-    padding-inline: 12px;
+    gap: clamp(16px, 2.3vw, 26px);
+    padding-inline: 20px;
   }
 
-  .workspace-appbar .workspace-brand {
-    max-width: 48vw;
-  }
-
-  .workspace-app-actions {
-    gap: 4px;
+  .workspace-appbar :deep(.workspace-brand) {
+    max-width: min(28vw, 236px);
   }
 
   .workspace-tabs {
-    position: fixed;
-    inset: auto 0 0;
-    justify-content: space-evenly;
-    min-height: calc(var(--workspace-mobile-nav-height) + env(safe-area-inset-bottom, 0px));
-    padding: 0 8px env(safe-area-inset-bottom, 0px);
-    gap: 0;
-    border-top: 1px solid var(--workspace-border);
-    background: var(--workspace-surface);
+    position: static;
+    align-self: stretch;
+    align-items: stretch;
+    justify-content: flex-start;
+    min-height: 0;
+    padding: 0;
+    gap: 22px;
+    border-top: 0;
+    background: transparent;
   }
 
   .workspace-tab {
-    flex: 1;
-    flex-direction: column;
-    min-height: 44px;
-    gap: 3px;
-    font-size: 12px;
+    flex: initial;
+    flex-direction: row;
+    min-height: 0;
+    gap: 0;
+    font-size: 14px;
   }
 
   .workspace-tab--active {
-    box-shadow: inset 0 2px var(--workspace-accent);
+    box-shadow: inset 0 -2px var(--workspace-accent);
   }
 
   .workspace-tab-icon {
-    display: inline-flex;
+    display: none;
+  }
+
+  .workspace-app-actions {
+    gap: 10px;
   }
 
   .workspace-account {
-    inset: auto 0 0;
-    width: 100%;
-    max-width: none;
-    max-height: min(80dvh, 620px);
-    border-radius: 16px 16px 0 0;
+    inset: var(--workspace-header-height) 20px auto auto;
+    width: min(320px, calc(100vw - 40px));
+    max-height: calc(100dvh - var(--workspace-header-height) - 20px);
+    border-radius: var(--radius-lg);
   }
 
   .workspace-account-content {
-    padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+    padding: 12px;
   }
 }
 </style>

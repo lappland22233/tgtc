@@ -151,10 +151,11 @@ void FileStreamConnection::on_file_progress(td::int64 reported_total_size, td::s
 void FileStreamConnection::drop_stale_download_state() {
   download_completed_ = false;
   local_file_.close();
-  if (cursor_.next_offset == 0) {
-    // Nothing has been read yet, so the whole file is read again once TDLib restores it.
-    cursor_.contiguous_end = 0;
-  }
+  // 无条件把「连续可用前缀」收缩到已发送位置：
+  // 之前只在 next_offset == 0 时归零，但流已经发出部分字节（next_offset > 0）时，
+  // contiguous_end 会保留旧的 total_size，try_read() 便会继续从已失效的本地文件读，
+  // 把空/错内容当成正文送出。收缩到 next_offset 后，后续读取会等待重新下载覆盖。
+  cursor_.contiguous_end = cursor_.next_offset;
   // Give TDLib a fresh window to restore the file; if it never becomes available the stream-level
   // first-byte timeout ends the request with a 504 instead of leaving it hanging forever.
   set_timeout_in(config_.first_byte_timeout);

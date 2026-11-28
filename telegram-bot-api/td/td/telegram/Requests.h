@@ -370,6 +370,8 @@ class Requests {
 
   void on_request(uint64 id, const td_api::getSpeechRecognitionLanguages &request);
 
+  void on_request(uint64 id, const td_api::getSpeechRecognitionModels &request);
+
   void on_request(uint64 id, const td_api::getFile &request);
 
   void on_request(uint64 id, td_api::getRemoteFile &request);
@@ -613,6 +615,8 @@ class Requests {
   void on_request(uint64 id, const td_api::getChatSparseMessagePositions &request);
 
   void on_request(uint64 id, const td_api::getChatMessageCount &request);
+
+  void on_request(uint64 id, const td_api::getChatMessageCounts &request);
 
   void on_request(uint64 id, const td_api::getChatMessagePosition &request);
 
@@ -882,6 +886,8 @@ class Requests {
 
   void on_request(uint64 id, td_api::getForumTopics &request);
 
+  void on_request(uint64 id, const td_api::getForumTopicPopularIcons &request);
+
   void on_request(uint64 id, const td_api::toggleForumTopicIsClosed &request);
 
   void on_request(uint64 id, const td_api::toggleGeneralForumTopicIsHidden &request);
@@ -1139,6 +1145,8 @@ class Requests {
   void on_request(uint64 id, td_api::setChatTheme &request);
 
   void on_request(uint64 id, td_api::setChatDraftMessage &request);
+
+  void on_request(uint64 id, td_api::setChatTextCompositionParameters &request);
 
   void on_request(uint64 id, const td_api::toggleChatHasProtectedContent &request);
 
@@ -1468,6 +1476,10 @@ class Requests {
 
   void on_request(uint64 id, td_api::setManagedBotAccessSettings &request);
 
+  void on_request(uint64 id, const td_api::inviteUsersToBot &request);
+
+  void on_request(uint64 id, td_api::setBotSettings &request);
+
   void on_request(uint64 id, td_api::setBotName &request);
 
   void on_request(uint64 id, const td_api::getBotName &request);
@@ -1774,6 +1786,8 @@ class Requests {
 
   void on_request(uint64 id, td_api::sendTonWalletTransfer &request);
 
+  void on_request(uint64 id, const td_api::sendTonWalletTransaction &request);
+
   void on_request(uint64 id, td_api::deleteTonWallet &request);
 
   void on_request(uint64 id, td_api::replaceTonWallet &request);
@@ -1831,6 +1845,8 @@ class Requests {
   void on_request(uint64 id, const td_api::getGramRevenueStatistics &request);
 
   void on_request(uint64 id, td_api::getGramWithdrawalUrl &request);
+
+  void on_request(uint64 id, const td_api::withdrawGrams &request);
 
   void on_request(uint64 id, const td_api::getMessageStatistics &request);
 
@@ -2012,6 +2028,20 @@ class Requests {
 
   void on_request(uint64 id, const td_api::processGiftPurchaseOffer &request);
 
+  void on_request(uint64 id, td_api::sendGiftOnChainPurchaseOffer &request);
+
+  void on_request(uint64 id, const td_api::cancelGiftOnChainPurchaseOffer &request);
+
+  void on_request(uint64 id, const td_api::acceptGiftOnChainPurchaseOffer &request);
+
+  void on_request(uint64 id, const td_api::declineGiftOnChainPurchaseOffer &request);
+
+  void on_request(uint64 id, td_api::getGiftOnChainPurchaseTransaction &request);
+
+  void on_request(uint64 id, td_api::getGiftOnChainListingTransaction &request);
+
+  void on_request(uint64 id, td_api::getGiftOnChainDelistingTransaction &request);
+
   void on_request(uint64 id, td_api::getReceivedGifts &request);
 
   void on_request(uint64 id, const td_api::getReceivedGift &request);
@@ -2022,9 +2052,9 @@ class Requests {
 
   void on_request(uint64 id, td_api::getUpgradedGiftValueInfo &request);
 
-  void on_request(uint64 id, const td_api::getUpgradedGiftWithdrawalUrl &request);
+  void on_request(uint64 id, const td_api::getGiftMintingUrl &request);
 
-  void on_request(uint64 id, const td_api::withdrawUpgradedGift &request);
+  void on_request(uint64 id, const td_api::mintGift &request);
 
   void on_request(uint64 id, td_api::getUpgradedGiftDepositInfo &request);
 

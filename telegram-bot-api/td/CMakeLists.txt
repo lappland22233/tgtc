@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.10 FATAL_ERROR)
 
-project(TDLib VERSION 1.8.70 LANGUAGES CXX C)
+project(TDLib VERSION 1.8.71 LANGUAGES CXX C)
 
 if (NOT DEFINED CMAKE_MODULE_PATH)
   set(CMAKE_MODULE_PATH "")
@@ -140,8 +140,11 @@ if (CLANG OR GCC)
   endif()
 endif()
 
-include(GetGitRevisionDescription)
-get_git_head_revision(TD_GIT_REFSPEC TD_GIT_COMMIT_HASH)
+set(TD_GIT_COMMIT_HASH "" CACHE STRING "If set and not empty, override Git commit hash with the provided string.")
+if (NOT TD_GIT_COMMIT_HASH)
+  include(GetGitRevisionDescription)
+  get_git_head_revision(TD_GIT_REFSPEC TD_GIT_COMMIT_HASH)
+endif()
 message(STATUS "Git state: ${TD_GIT_COMMIT_HASH}")
 
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/td/telegram/GitCommitHash.cpp.in" "${CMAKE_CURRENT_BINARY_DIR}/td/telegram/GitCommitHash.cpp" @ONLY)
@@ -345,6 +348,7 @@ set(TDLIB_SOURCE_PART1
   td/telegram/ActiveStoryState.cpp
   td/telegram/AffiliateType.cpp
   td/telegram/AgeVerificationParameters.cpp
+  td/telegram/AiComposeStyle.cpp
   td/telegram/AiComposeTone.cpp
   td/telegram/AiComposeToneExample.cpp
   td/telegram/AlarmManager.cpp
@@ -730,6 +734,7 @@ set(TDLIB_SOURCE_PART2
   td/telegram/AffectedHistory.h
   td/telegram/AffiliateType.h
   td/telegram/AgeVerificationParameters.h
+  td/telegram/AiComposeStyle.h
   td/telegram/AiComposeTone.h
   td/telegram/AiComposeToneExample.h
   td/telegram/AlarmManager.h
@@ -1188,6 +1193,7 @@ set(TDLIB_SOURCE_PART2
   td/telegram/WidgetManager.h
 
   td/telegram/AgeVerificationParameters.hpp
+  td/telegram/AiComposeStyle.hpp
   td/telegram/AiComposeTone.hpp
   td/telegram/AiComposeToneExample.hpp
   td/telegram/AnimationsManager.hpp

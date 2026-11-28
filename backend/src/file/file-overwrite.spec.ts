@@ -538,6 +538,23 @@ describe('FileService - access policy branches', () => {
       },
     };
     bannedRepo = { createQueryBuilder: jest.fn(), upsert: jest.fn() };
+    // A-01：约束权威已迁到 ShareLink。harness 按实体分派仓库，并让权威行复用
+    // 最近一次 File 查询结果（包装而非二次调用，避免重复消费 mockResolvedValueOnce 序列），
+    // 使本节原有断言继续覆盖真实实现而非桩。
+    const rawFindOne = fileRepo.findOne;
+    let lastFileRow: any = null;
+    fileRepo.findOne = jest.fn(async (...args: any[]) => {
+      lastFileRow = await rawFindOne(...args);
+      return lastFileRow;
+    });
+    const shareRepo = {
+      findOne: jest.fn(async () => (lastFileRow ? { id: 'share-1', ...lastFileRow } : null)),
+      create: jest.fn((x: any) => ({ id: 'share-1', ...x })),
+      save: jest.fn(async (x: any) => ({ id: 'share-1', ...x })),
+      update: jest.fn().mockResolvedValue({ affected: 1 }),
+      createQueryBuilder: jest.fn(() => fileRepo.createQueryBuilder()),
+    };
+    fileRepo.manager.getRepository = (entity: any) => (entity === ShareLink ? shareRepo : fileRepo);
     rateLimit = { incrementCounter: jest.fn(), reset: jest.fn() };
     audit = { log: jest.fn() };
     const configCache = { get: jest.fn(async (_key: string, fallback: string) => fallback) };

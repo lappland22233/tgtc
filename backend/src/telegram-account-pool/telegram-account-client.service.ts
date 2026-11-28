@@ -4,7 +4,8 @@ import axios, { AxiosError } from 'axios';
 import FormData from 'form-data';
 import { Readable, Transform } from 'stream';
 import { AccountAttemptSample, AccountFailureKind } from './telegram-account-pool.types';
-import { readTelegramRetryAfter } from '../telegram/telegram.errors';
+import { classifyDegradableFields, readTelegramRetryAfter } from '../telegram/telegram.errors';
+import type { TelegramTextSendOptions } from '../telegram/telegram.types';
 
 /**
  * 账号级 Telegram 调用错误：携带可供账号池决策的分类信息。
@@ -171,7 +172,7 @@ export class TelegramAccountClientService {
   ): Promise<Array<Record<string, unknown>>> {
     try {
       const response = await axios.get(`${this.apiBase}${token}/getUpdates`, {
-        params: { offset, timeout: timeoutSeconds, allowed_updates: JSON.stringify(['message', 'channel_post']) },
+        params: { offset, timeout: timeoutSeconds, allowed_updates: JSON.stringify(['message', 'channel_post', 'callback_query']) },
         timeout: (timeoutSeconds + 15) * 1000,
       });
       if (response.data?.ok !== true) {
@@ -223,19 +224,23 @@ export class TelegramAccountClientService {
     token: string,
     chatId: string,
     text: string,
-    options?: { replyToMessageId?: number; disableNotification?: boolean },
+    options?: TelegramTextSendOptions,
   ): Promise<{ messageId?: number }> {
     try {
-      const payload: Record<string, unknown> = {
-        chat_id: String(chatId),
-        text,
-        disable_web_page_preview: false,
-      };
-      if (options?.replyToMessageId) payload.reply_to_message_id = options.replyToMessageId;
-      if (options?.disableNotification) payload.disable_notification = true;
-      const response = await axios.post(`${this.apiBase}${token}/sendMessage`, payload, { timeout: 20_000 });
+      const payload: Record<string, unknown> = { chat_id: String(chatId) };
+      const rich = options?.richMessage;
+      if (rich) {
+        payload.rich_message = JSON.stringify(rich);
+      } else {
+        payload.text = text;
+        if (options?.parseMode) payload.parse_mode = options.parseMode;
+      }
+      this.applyTextSendOptions(payload, options);
+      // 富文本必须走独立端点：/sendMessage 只解析 text，rich_message 会被忽略并因空 text 被拒
+      const method = rich ? 'sendRichMessage' : 'sendMessage';
+      const response = await axios.post(`${this.apiBase}${token}/${method}`, payload, { timeout: 20_000 });
       if (response.data?.ok !== true) {
-        throw new TelegramAccountError('sendMessage 返回 ok!=true', accountId, 'other');
+        throw new TelegramAccountError(`${method} 返回 ok!=true`, accountId, 'other');
       }
       return { messageId: response.data.result?.message_id };
     } catch (error) {
@@ -252,15 +257,74 @@ export class TelegramAccountClientService {
     chatId: string,
     messageId: number,
     text: string,
+    options?: TelegramTextSendOptions,
   ): Promise<boolean> {
     try {
       const payload: Record<string, unknown> = {
         chat_id: String(chatId),
         message_id: messageId,
-        text,
-        disable_web_page_preview: false,
       };
+      const rich = options?.richMessage;
+      if (rich) {
+        payload.rich_message = JSON.stringify(rich);
+      } else {
+        payload.text = text;
+        if (options?.parseMode) payload.parse_mode = options.parseMode;
+      }
+      this.applyTextSendOptions(payload, options);
       const response = await axios.post(`${this.apiBase}${token}/editMessageText`, payload, { timeout: 20_000 });
+      return response.data?.ok === true;
+    } catch (error) {
+      throw this.toAccountError(error, token, accountId);
+    }
+  }
+
+  /** 文本类发送的公共可选参数（与 TelegramService.applyTextSendOptions 保持同构） */
+  private applyTextSendOptions(payload: Record<string, unknown>, options?: TelegramTextSendOptions): void {
+    if (options?.replyToMessageId) payload.reply_to_message_id = options.replyToMessageId;
+    if (options?.disableNotification) payload.disable_notification = true;
+    if (options?.replyMarkup) payload.reply_markup = options.replyMarkup;
+    if (options?.messageEffectId) payload.message_effect_id = options.messageEffectId;
+    // 仅在显式配置时下发，避免改变既有请求体
+    if (options?.linkPreviewOptions) payload.link_preview_options = options.linkPreviewOptions;
+  }
+
+  /**
+   * 回应内联按钮回调（answerCallbackQuery）。
+   * 未回应会导致客户端按钮一直转圈。
+   */
+  async answerCallbackQuery(
+    accountId: string,
+    token: string,
+    callbackQueryId: string,
+    options?: { text?: string; showAlert?: boolean },
+  ): Promise<boolean> {
+    try {
+      const payload: Record<string, unknown> = { callback_query_id: callbackQueryId };
+      if (options?.text) payload.text = options.text;
+      if (options?.showAlert) payload.show_alert = true;
+      const response = await axios.post(`${this.apiBase}${token}/answerCallbackQuery`, payload, { timeout: 15_000 });
+      return response.data?.ok === true;
+    } catch (error) {
+      throw this.toAccountError(error, token, accountId);
+    }
+  }
+
+  /**
+   * 设置该账号的命令菜单（池化模式下每个 Bot 各有一份菜单）。
+   *
+   * 不重试：管理员未启动过该 Bot 时的 chat not found 属于预期，由调用方忽略。
+   */
+  async setMyCommands(
+    accountId: string,
+    token: string,
+    commands: Array<{ command: string; description: string }>,
+    scope?: Record<string, unknown>,
+  ): Promise<boolean> {
+    try {
+      const payload: Record<string, unknown> = { commands: JSON.stringify(commands) };
+      if (scope) payload.scope = JSON.stringify(scope);
+      const response = await axios.post(`${this.apiBase}${token}/setMyCommands`, payload, { timeout: 10_000 });
       return response.data?.ok === true;
     } catch (error) {
       throw this.toAccountError(error, token, accountId);
@@ -271,8 +335,7 @@ export class TelegramAccountClientService {
    * 查询 chat 元信息：用于启动期校验每个账号的存储 Chat 是否存在、是否可被该账号访问
    * （bot 未被加入群 / chatId 写错时，上传副本会整批失败）。
    */
-  async getChat(
-    accountId: string,
+  async getChat(    accountId: string,
     token: string,
     chatId: string,
   ): Promise<{ id: string; type: string; title?: string }> {
@@ -475,6 +538,14 @@ export class TelegramAccountClientService {
     );
   }
 
+  /**
+   * 是否为「载荷/格式不被接受」类 400（换格式重发即可恢复，与账号健康无关）。
+   * 判定逻辑与单账号链路共用，避免两处标记表漂移（后者曾漏掉 `reply_markup` 与 rich 结构错误）。
+   */
+  private isPayloadRejection(lowerDescription: string): boolean {
+    return classifyDegradableFields(lowerDescription).length > 0;
+  }
+
   private parseRetryAfter(description: string): number | undefined {
     const match = /retry after (\d+)/i.exec(description) || /FLOOD_WAIT_(\d+)/i.exec(description);
     if (!match) return undefined;
@@ -487,6 +558,11 @@ export class TelegramAccountClientService {
     const lower = description.toLowerCase();
     if (status === 429 || lower.includes('too many requests') || lower.includes('flood_wait')) {
       return 'flood';
+    }
+    // 载荷被拒（400）不代表账号不健康：换格式重发即可，不应让账号进入长冷却。
+    // 放在 unavailable 判定之前，避免格式错误被当成文件/账号不可用。
+    if (status === 400 && this.isPayloadRejection(lower)) {
+      return 'other';
     }
     if (
       lower.includes('exact file size is unavailable')

@@ -1,3 +1,4 @@
+import { fileUploadJobId } from '../jobs/file-upload-job';
 import { pendingUploadDirectory, pendingUploadName } from '../file/pending-upload';
 import { Injectable, Inject, Logger, Optional } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -412,7 +413,7 @@ export class TasksService {
   }
 
   private async recoverUpload(file: File): Promise<boolean> {
-    const originalId = `file-upload:${file.id}:${file.uploadVersion}`;
+    const originalId = fileUploadJobId(file.id, file.uploadVersion);
     let jobId = originalId;
     let job = await this.fileUploadQueue.getJob(jobId);
     const originalData = job?.data;
@@ -458,20 +459,17 @@ export class TasksService {
       where: { status: 'processing' as const, uploadStage: 'committed' as any },
       take: 200,
     });
-    let markedReady = 0;
+    let requeuedCommitted = 0;
     let requeued = 0;
     for (const file of batch) {
-      if (hasValidRemoteRef(file)) {
-        const result = await this.fileRepository
-          .createQueryBuilder()
-          .update(File)
-          .set({ status: 'ready' as const, uploadFailureReason: null })
-          .where('id = :id', { id: file.id })
-          .andWhere('status = :status', { status: 'processing' })
-          .andWhere('uploadStage = :stage', { stage: 'committed' })
-          .andWhere('uploadVersion = :version', { version: file.uploadVersion })
-          .execute();
-        markedReady += result.affected ?? 0;
+      if (!hasValidRemoteRef(file)) continue;
+      try {
+        // 不直接置 ready：那会绕过 processor 收尾的主副本定位登记、镜像触发与 GDrive 双写，
+        // 文件将永远没有主副本行与镜像任务（双写重试扫描只扫 pending/failed，两条恢复路径都不再尝试）。
+        // 以确定性 jobId 重新入队，processor 读到 committed 提交点后幂等收尾，绝不重传原文件。
+        if (await this.recoverUpload(file)) requeuedCommitted++;
+      } catch (error: unknown) {
+        this.logger.warn(`恢复 committed 文件入队失败 fileId=${file.id}: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
     const remoteBatch = await this.fileRepository.find({
@@ -486,8 +484,8 @@ export class TasksService {
         this.logger.warn(`恢复 remote_committed 文件入队失败 fileId=${file.id}: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
-    if (markedReady || requeued) {
-      this.logger.log(`已恢复远端提交文件：${markedReady} 条置 ready，${requeued} 条 remote_committed 重新入队`);
+    if (requeuedCommitted || requeued) {
+      this.logger.log(`已恢复远端提交文件：${requeuedCommitted} 条 committed 重新入队收尾，${requeued} 条 remote_committed 重新入队`);
     }
   }
 

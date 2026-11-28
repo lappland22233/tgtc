@@ -10,7 +10,7 @@ import type { TelegramBotGrantService } from './telegram-bot-grant.service';
 import type { TelegramBotConfigService } from './telegram-bot-config.service';
 import {
   BanTelegramUserDto, BotGrantsQuery, BotOperationsPage, BotOperationsUserParams,
-  BotOverviewQuery, BotQueueQuery, BotUserGroupsQuery,
+  BotOverviewQuery, BotQueueQuery, BotUserGroupsQuery, SetUserQuotaDto,
 } from './telegram-bot-operations.dto';
 
 const dialects = ['sqlite', ...(process.env.PG_API_KEY_IT === '1' ? ['postgres'] : [])];
@@ -48,7 +48,12 @@ describe.each(dialects)('Telegram Bot 管理与审计 / %s', dialect => {
     const { TelegramBotGrantService: Grants } = require('./telegram-bot-grant.service') as typeof import('./telegram-bot-grant.service');
     const { TelegramBotTokenCryptoService: Crypto } = require('./telegram-bot-token-crypto.service') as typeof import('./telegram-bot-token-crypto.service');
     const { TelegramBotOperationsService: Operations } = require('./telegram-bot-operations.service') as typeof import('./telegram-bot-operations.service');
-    const quota = new Quota(db.getRepository('TelegramBotDailyUsage'), db.getRepository('TelegramBotWhitelist'), db);
+    const quota = new Quota(
+      db.getRepository('TelegramBotDailyUsage'),
+      db.getRepository('TelegramBotWhitelist'),
+      db.getRepository('TelegramBotUserQuota'),
+      db,
+    );
     quotaDate = quota.getBusinessDate('UTC');
     queue = new Queue(db);
     grants = new Grants(db.getRepository('TelegramBotFileGrant'), new Crypto(new ConfigService({ TELEGRAM_BOT_ENCRYPTION_KEY: '12'.repeat(32) })));
@@ -329,6 +334,51 @@ describe.each(dialects)('Telegram Bot 管理与审计 / %s', dialect => {
     expect(overview.grants.activeNow).toBeGreaterThanOrEqual(1);
     expect(overview.grants.downloads).toBeGreaterThanOrEqual(0);
   });
+
+  it('面板设置单账号额度：userDetails 立即反映来源，清除后回落全局额度', async () => {
+    const target = '970';
+    // 初始：无覆盖 → 全局额度
+    await expect(ops.userDetails(target)).resolves.toMatchObject({
+      quota: { limitSource: 'global', override: null, globalLimit: 10, limit: 10 },
+    });
+
+    // 设置覆盖后：来源变 user，limit 用覆盖值
+    await expect(ops.setUserQuota(target, 3, operator)).resolves.toMatchObject({ changed: true, override: 3 });
+    await expect(ops.userDetails(target)).resolves.toMatchObject({
+      quota: { limitSource: 'user', override: 3, limit: 3 },
+    });
+
+    // 写入审计（与 Bot 命令同一 action，前端标签无需分叉）
+    const auditRows = await db.getRepository('AuditLog').find({ where: { action: 'telegram_bot_quota_override_set' } });
+    expect(auditRows.some(row => (row.metadata as Record<string, unknown> | null)?.targetTelegramUserId === target)).toBe(true);
+
+    // 清除覆盖：回落全局
+    await expect(ops.setUserQuota(target, null, operator)).resolves.toMatchObject({ changed: true, override: null });
+    await expect(ops.userDetails(target)).resolves.toMatchObject({
+      quota: { limitSource: 'global', override: null, limit: 10 },
+    });
+
+    // 幂等：再次清除返回 changed=false
+    await expect(ops.setUserQuota(target, null, operator)).resolves.toMatchObject({ changed: false });
+  });
+
+  it('白名单优先于单账号覆盖，且覆盖值在移出白名单后恢复', async () => {
+    const target = '971';
+    await ops.setUserQuota(target, 2, operator);
+    // quota 实例是 beforeAll 局部变量：白名单直接经仓储写入，语义等同 addToWhitelist
+    const whitelistRepo = db.getRepository('TelegramBotWhitelist');
+    await whitelistRepo.insert({ telegramUserId: target, enabled: true, source: 'admin', createdBy: operator });
+
+    await expect(ops.userDetails(target)).resolves.toMatchObject({
+      quota: { whitelisted: true, limitSource: 'whitelist', limit: null, remaining: null, override: 2 },
+    });
+
+    // 移出白名单后覆盖值仍然生效（加白名单不删覆盖行）
+    await whitelistRepo.update({ telegramUserId: target }, { enabled: false });
+    await expect(ops.userDetails(target)).resolves.toMatchObject({
+      quota: { whitelisted: false, limitSource: 'user', limit: 2, override: 2 },
+    });
+  });
 });
 
 describe('Bot 运维输入校验', () => {
@@ -342,5 +392,18 @@ describe('Bot 运维输入校验', () => {
       [{ reason: 'x'.repeat(501) }, BanTelegramUserDto],
     ] as const) await expect(pipe.transform(input, { type: 'query', metatype: type })).rejects.toMatchObject({ status: 400 });
     expect(await pipe.transform({ reason: '  incident  ' }, { type: 'body', metatype: BanTelegramUserDto })).toMatchObject({ reason: 'incident' });
+  });
+
+  it('单账号额度 DTO 接受 1–100000 与 null，拒绝越界/has 小数/缺失', async () => {
+    // 合法：正数（字符串也会被 transform 成数字）与 null（清除覆盖）
+    await expect(pipe.transform({ dailyLimit: '20' }, { type: 'body', metatype: SetUserQuotaDto }))
+      .resolves.toMatchObject({ dailyLimit: 20 });
+    await expect(pipe.transform({ dailyLimit: null }, { type: 'body', metatype: SetUserQuotaDto }))
+      .resolves.toMatchObject({ dailyLimit: null });
+
+    for (const input of [{ dailyLimit: 0 }, { dailyLimit: 100001 }, { dailyLimit: 1.5 }, { dailyLimit: 'abc' }, {}]) {
+      await expect(pipe.transform(input, { type: 'body', metatype: SetUserQuotaDto }))
+        .rejects.toMatchObject({ status: 400 });
+    }
   });
 });

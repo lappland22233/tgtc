@@ -131,36 +131,60 @@ const ariaLabel = computed(() => {
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  color: var(--text-secondary, #5F6B7A);
+  color: var(--text-secondary);
 }
 
 .file-type-icon--with-bg {
   border-radius: 50%;
 }
 
-/* Type-specific colors (only applied with --with-bg) */
-.file-type-icon--with-bg.file-type-icon--image { background: color-mix(in srgb, #7B2D8B 10%, var(--color-bg-surface, #fff)); color: #7B2D8B; }
-.file-type-icon--with-bg.file-type-icon--video { background: color-mix(in srgb, #D36609 10%, var(--color-bg-surface, #fff)); color: #D36609; }
-.file-type-icon--with-bg.file-type-icon--audio { background: color-mix(in srgb, #0E7490 10%, var(--color-bg-surface, #fff)); color: #0E7490; }
-.file-type-icon--with-bg.file-type-icon--pdf { background: color-mix(in srgb, #D13212 10%, var(--color-bg-surface, #fff)); color: #D13212; }
-.file-type-icon--with-bg.file-type-icon--word { background: color-mix(in srgb, #0972D3 10%, var(--color-bg-surface, #fff)); color: #0972D3; }
-.file-type-icon--with-bg.file-type-icon--excel { background: color-mix(in srgb, #037F0C 10%, var(--color-bg-surface, #fff)); color: #037F0C; }
-.file-type-icon--with-bg.file-type-icon--ppt { background: color-mix(in srgb, #D36609 10%, var(--color-bg-surface, #fff)); color: #D36609; }
-.file-type-icon--with-bg.file-type-icon--archive { background: color-mix(in srgb, #92400E 10%, var(--color-bg-surface, #fff)); color: #92400E; }
-.file-type-icon--with-bg.file-type-icon--code { background: color-mix(in srgb, #1D4ED8 10%, var(--color-bg-surface, #fff)); color: #1D4ED8; }
-.file-type-icon--with-bg.file-type-icon--text { background: color-mix(in srgb, var(--seed-fg, #16191F) 8%, var(--color-bg-surface, #fff)); color: var(--text-secondary, #5F6B7A); }
-.file-type-icon--with-bg.file-type-icon--folder { background: color-mix(in srgb, #B45309 10%, var(--color-bg-surface, #fff)); color: #B45309; }
-.file-type-icon--with-bg.file-type-icon--generic { background: color-mix(in srgb, var(--seed-fg, #16191F) 6%, var(--color-bg-surface, #fff)); color: var(--text-tertiary, #5A6778); }
-
-/* Dark theme adjustments */
-[data-theme="dark"] .file-type-icon--with-bg.file-type-icon--image { color: #C084FC; }
-[data-theme="dark"] .file-type-icon--with-bg.file-type-icon--video { color: #FB923C; }
-[data-theme="dark"] .file-type-icon--with-bg.file-type-icon--audio { color: #22D3EE; }
-[data-theme="dark"] .file-type-icon--with-bg.file-type-icon--pdf { color: #E8604C; }
-[data-theme="dark"] .file-type-icon--with-bg.file-type-icon--word { color: #539FE5; }
-[data-theme="dark"] .file-type-icon--with-bg.file-type-icon--excel { color: #53D769; }
-[data-theme="dark"] .file-type-icon--with-bg.file-type-icon--ppt { color: #FB923C; }
-[data-theme="dark"] .file-type-icon--with-bg.file-type-icon--archive { color: #FBBF24; }
-[data-theme="dark"] .file-type-icon--with-bg.file-type-icon--code { color: #60A5FA; }
-[data-theme="dark"] .file-type-icon--with-bg.file-type-icon--folder { color: #FBBF24; }
+/* Type-specific colors (light & dark handled via --file-color-* tokens) */
+.file-type-icon--with-bg.file-type-icon--image {
+  background: color-mix(in srgb, var(--file-color-image) 10%, var(--color-bg-surface));
+  color: var(--file-color-image);
+}
+.file-type-icon--with-bg.file-type-icon--video {
+  background: color-mix(in srgb, var(--file-color-video) 10%, var(--color-bg-surface));
+  color: var(--file-color-video);
+}
+.file-type-icon--with-bg.file-type-icon--audio {
+  background: color-mix(in srgb, var(--file-color-audio) 10%, var(--color-bg-surface));
+  color: var(--file-color-audio);
+}
+.file-type-icon--with-bg.file-type-icon--pdf {
+  background: color-mix(in srgb, var(--file-color-pdf) 10%, var(--color-bg-surface));
+  color: var(--file-color-pdf);
+}
+.file-type-icon--with-bg.file-type-icon--word {
+  background: color-mix(in srgb, var(--file-color-word) 10%, var(--color-bg-surface));
+  color: var(--file-color-word);
+}
+.file-type-icon--with-bg.file-type-icon--excel {
+  background: color-mix(in srgb, var(--file-color-excel) 10%, var(--color-bg-surface));
+  color: var(--file-color-excel);
+}
+.file-type-icon--with-bg.file-type-icon--ppt {
+  background: color-mix(in srgb, var(--file-color-ppt) 10%, var(--color-bg-surface));
+  color: var(--file-color-ppt);
+}
+.file-type-icon--with-bg.file-type-icon--archive {
+  background: color-mix(in srgb, var(--file-color-archive) 10%, var(--color-bg-surface));
+  color: var(--file-color-archive);
+}
+.file-type-icon--with-bg.file-type-icon--code {
+  background: color-mix(in srgb, var(--file-color-code) 10%, var(--color-bg-surface));
+  color: var(--file-color-code);
+}
+.file-type-icon--with-bg.file-type-icon--text {
+  background: color-mix(in srgb, var(--seed-fg) 8%, var(--color-bg-surface));
+  color: var(--text-secondary);
+}
+.file-type-icon--with-bg.file-type-icon--folder {
+  background: color-mix(in srgb, var(--file-color-folder) 10%, var(--color-bg-surface));
+  color: var(--file-color-folder);
+}
+.file-type-icon--with-bg.file-type-icon--generic {
+  background: color-mix(in srgb, var(--seed-fg) 6%, var(--color-bg-surface));
+  color: var(--text-tertiary);
+}
 </style>

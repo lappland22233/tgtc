@@ -143,14 +143,14 @@ describe('DownloadCapacityPolicyService Nest DI token', () => {
 });
 
 describe('targetUpstreamBudget（容量映射）', () => {
-  it('min(64, max(8, n×16))：1 个 → 16，2 个 → 32，4 个及以上封顶 64', () => {
+  it('min(128, max(8, n×16))：1 个 → 16，2 个 → 32，4 个 → 64，8 个及以上封顶 128', () => {
     expect(targetUpstreamBudget(0)).toBe(8);
     expect(targetUpstreamBudget(1)).toBe(16);
     expect(targetUpstreamBudget(2)).toBe(32);
     expect(targetUpstreamBudget(3)).toBe(48);
     expect(targetUpstreamBudget(4)).toBe(64);
-    expect(targetUpstreamBudget(8)).toBe(64);
-    expect(targetUpstreamBudget(20)).toBe(64);
+    expect(targetUpstreamBudget(8)).toBe(128);
+    expect(targetUpstreamBudget(20)).toBe(128);
   });
 });
 

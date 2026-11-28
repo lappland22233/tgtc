@@ -9,7 +9,7 @@
         <div class="upload-queue-row__meta">
           {{ formatSize(entry.totalBytes) }}
           <t-tag v-if="entry.status === 'success'" theme="success" size="small" variant="light">成功</t-tag>
-          <t-tag v-else-if="entry.status === 'error'" theme="danger" size="small" variant="light">失败</t-tag>
+          <t-tag v-else-if="entry.status === 'error'" theme="danger" size="small" variant="light">{{ failureLabel }}</t-tag>
           <t-tag v-else-if="entry.status === 'cancelled'" theme="default" size="small" variant="light">已取消</t-tag>
           <t-tag v-else-if="entry.status === 'processing' && entry.waitingForSlot" theme="primary" size="small" variant="light">等待服务器空闲</t-tag>
           <t-tag v-else-if="entry.status === 'processing' && (entry.retryCount ?? 0) > 0" theme="warning" size="small" variant="light">重试 {{ entry.retryCount }}/2</t-tag>
@@ -28,18 +28,26 @@
       <t-progress :percentage="entry.progress" size="small" />
       <span>{{ entry.speed }} · 剩余 {{ entry.eta }}</span>
     </div>
-    <div v-if="entry.status === 'error' && entry.errorReason" class="upload-queue-row__error" :title="entry.errorReason">{{ entry.errorReason }}</div>
+    <div v-if="entry.status === 'error' && entry.errorReason" class="upload-queue-row__error" :title="errorText">{{ errorText }}</div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { onBeforeUnmount, ref } from 'vue';
+import { computed, onBeforeUnmount, ref } from 'vue';
 import FileTypeIcon from '@/components/FileTypeIcon.vue';
 import type { QueueEntry } from '@/stores/upload';
 import { formatSize } from '@/utils/format';
 
 const props = defineProps<{ entry: QueueEntry; allowPreview: boolean }>();
 defineEmits<{ cancel: [uid: string] }>();
+
+// A-20：确定性失败（类型/大小/同名冲突）原样重传必然再失败，必须与瞬时故障区分
+const deterministic = computed(() => props.entry.retryable === false);
+const failureLabel = computed(() => (deterministic.value ? '不可重传' : '失败'));
+const errorText = computed(() => {
+  const reason = props.entry.errorReason ?? '';
+  return deterministic.value ? `${reason}（需调整后重新上传）` : reason;
+});
 
 const previewUrl = ref('');
 if (props.allowPreview && props.entry.file && props.entry.mimeType.startsWith('image/')) {
@@ -52,7 +60,7 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
-.upload-queue-row { box-sizing: border-box; height: 104px; padding: 10px 12px; background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 8px; overflow: hidden; }
+.upload-queue-row { box-sizing: border-box; height: 104px; padding: 10px 12px; background: var(--color-bg-elevated); border: 1px solid var(--border-default); border-radius: var(--radius-md); overflow: hidden; }
 .upload-queue-row__main { display: flex; align-items: center; gap: 12px; }
 .upload-queue-row__preview { width: 32px; height: 32px; object-fit: cover; border-radius: 4px; flex-shrink: 0; }
 .upload-queue-row__info { flex: 1; min-width: 0; }
@@ -64,5 +72,5 @@ onBeforeUnmount(() => {
 /* 等待行与进度行共用同一行高槽位（行盒高度固定，内容溢出会被裁切），
    故行高与进度行一致取 1.5，不能比它更高 */
 .upload-queue-row__waiting { margin-top: 6px; font-size: 11px; line-height: 1.5; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.upload-queue-row__error { margin-top: 5px; font-size: 12px; color: var(--error); }
+.upload-queue-row__error { margin-top: 5px; font-size: 12px; color: var(--color-danger); }
 </style>

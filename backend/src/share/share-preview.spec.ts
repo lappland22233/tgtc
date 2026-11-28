@@ -124,6 +124,41 @@ describe('ShareService 预览访问计数（持久化预览会话）', () => {
     );
   });
 
+  it('B-16 回归：预览取流失败必须退次（与下载路径同口径）', async () => {
+    const service = makeService();
+    (service as any).shareLinkRepo.findOne.mockResolvedValue(makeLink());
+    (service as any).assertShareUsable = jest.fn().mockResolvedValue(undefined);
+    (service as any).previewSessionService.consumePreviewAccess.mockResolvedValue('consumed');
+    const refundSpy = jest.fn().mockResolvedValue(true);
+    (service as any).previewSessionService.refundConsumedSession = refundSpy;
+    (service as any).fileService.getSharePreviewStreamWithRange.mockResolvedValue(null);
+    (service as any).fileService.getStreamForShareDownload.mockRejectedValue(new Error('冷回源失败'));
+
+    await expect(
+      service.getSharePreviewStream('tok123', 'file-id-1', undefined, null, undefined, 'visitor-a'),
+    ).rejects.toThrow('冷回源失败');
+
+    // 旧实现预览路径先扣次后取流且失败不退，冷回源持续失败时每次重试都白吃额度
+    expect(refundSpy).toHaveBeenCalledWith('share-id-1', 'file-id-1', 'visitor-a');
+  });
+
+  it('B-16：幂等命中（未新扣次）时预览失败不得退款', async () => {
+    const service = makeService();
+    (service as any).shareLinkRepo.findOne.mockResolvedValue(makeLink());
+    (service as any).assertShareUsable = jest.fn().mockResolvedValue(undefined);
+    (service as any).previewSessionService.consumePreviewAccess.mockResolvedValue('idempotent');
+    const refundSpy = jest.fn().mockResolvedValue(true);
+    (service as any).previewSessionService.refundConsumedSession = refundSpy;
+    (service as any).fileService.getSharePreviewStreamWithRange.mockResolvedValue(null);
+    (service as any).fileService.getStreamForShareDownload.mockRejectedValue(new Error('冷回源失败'));
+
+    await expect(
+      service.getSharePreviewStream('tok123', 'file-id-1', undefined, null, undefined, 'visitor-a'),
+    ).rejects.toThrow('冷回源失败');
+
+    expect(refundSpy).not.toHaveBeenCalled();
+  });
+
   it('不同访客（visitorHash）各自独立计数', async () => {
     const service = makeService();
     (service as any).shareLinkRepo.findOne.mockResolvedValue(makeLink());

@@ -1,333 +1,160 @@
 ﻿# FileCloud 前端样式开发规范
 
-> TGTC 青绿工作台 · 浅色与深色主题
+> TGTC 青绿工作台 · 浅色 / 深色 / 跟随系统三态主题 + Tailwind v4 分层架构
 > 适用于本项目所有前端页面的新增与修改
 
 ---
 
 ## 1. 核心原则
 
-1. **禁止硬编码颜色** — 所有颜色必须通过 CSS 变量引用，不允许在 scoped style 或内联样式中出现 `#xxx`、`rgb()`、`rgba()` 字面量（图表主题辅助函数除外，见第 6 节）。
-2. **禁止 Emoji 充当图标** — 所有图标使用 `FileTypeIcon` 组件或内联 SVG（1.5px 描边、`currentColor`、`viewBox="0 0 24 24"`）。
-3. **禁止 `!important`** — 通过 `html .t-*` 选择器提升优先级覆盖 TDesign，新增样式不得引入 `!important`。
-4. **移动优先** — 样式默认服务窄屏，通过 `min-width` 媒体查询逐级增强。
-5. **双主题兼容** — 任何新增样式必须在 Light 和 Dark 下都正常显示，通过切换 `data-theme` 验证。
+1. **禁止硬编码颜色** — 所有颜色必须通过 CSS 变量或 Tailwind 语义工具类引用，不允许在 SFC 或样式中出现 `#xxx`、`rgb()`、`rgba()` 字面量（`tokens.css` / `critical.css` / `echarts-theme.ts` / `TagManager.vue` 预设色板 / `useTheme.ts` 兜底值除外）。
+2. **禁止静态内联 `style="..."`** — 静态样式一律迁移到组件 `<style scoped>`、全局 `primitives.css` 或 Tailwind 工具类；仅允许动态数据驱动的 `:style="{ ... }"`（如标签色 `--file-tag-color`、树层级 `--directory-depth`）。
+3. **禁止 Emoji 充当图标** — 所有图标使用 `FileTypeIcon` 组件或内联 SVG（`stroke-width="1.5"`、`currentColor`、`viewBox="0 0 24 24"`）。
+4. **禁止 `!important`** — 通过 `html .t-*` 未分层规则或组合选择器提升优先级覆盖 TDesign；唯一例外是 `base.css` 中的 `@media (prefers-reduced-motion: reduce)`。
+5. **移动优先（Mobile-first）** — 基础样式默认服务 ≤480px 窄屏，统一通过 `@media (min-width: ...)` 逐级增强；禁止 `@media (max-width: ...)`。
+6. **强制组件级样式隔离** — `.vue` 文件统一使用 `<style scoped>`，禁止新增未加 `scoped` 的 `<style>` 块。
+7. **门禁即规范** — 提交前运行 `npm run check:style` 校验上述约束。
 
 ---
 
-## 2. Seed Token 体系
+## 2. CSS 分层与文件架构
 
-### 2.1 工作台令牌与基础别名
+全局样式模块化拆分在 `src/assets/styles/`，由 `src/assets/styles/index.css` 按精确层叠顺序引入：
 
-配色定义在 `src/assets/workspace.css`。工作台、分享、认证和管理后台共用这些令牌。`styles.css` 将基础别名和 TDesign 变量映射到同一套主题。
-
-| 令牌 | 浅色 | 深色 | 用途 |
-|------|-------|------|------|
-| `--workspace-canvas` / `--seed-bg` | `#F6F5EF` | `#1B211E` | 页面背景 |
-| `--workspace-text` / `--seed-fg` | `#202923` | `#EDF2EE` | 主文本 |
-| `--workspace-accent` / `--seed-primary` | `#006B5B` | `#65DCC5` | 主操作色 |
-| `--workspace-on-accent` | `#FFFFFF` | `#102C25` | 实色主按钮文字 |
-| `--workspace-surface` / `--seed-surface` | `#FFFEFA` | `#242927` | 容器表面 |
-| `--workspace-selected` | `#E6F2EB` | `#223D35` | 选中背景 |
-
-### 2.2 语义令牌（组件中直接使用的层）
-
-```css
-/* 背景 */
-var(--color-bg)              /* 页面底色 */
-var(--color-bg-elevated)     /* 抬升区域（侧边栏、表头） */
-var(--color-bg-surface)      /* 卡片/容器表面 */
-var(--color-bg-overlay)      /* 弹窗内输入框底色 */
-var(--color-bg-hover)        /* 悬停背景 */
-var(--color-bg-selected)     /* 选中/激活背景 */
-
-/* 文本 */
-var(--text-primary)          /* 主文本 */
-var(--text-secondary)        /* 次要文本（62% 混合） */
-var(--text-tertiary)         /* 辅助文本（42% 混合） */
-var(--text-disabled)         /* 禁用文本 */
-
-/* 边框 */
-var(--border-default)        /* 常规边框（12% 混合） */
-var(--border-strong)         /* 强调边框（22% 混合） */
-var(--border-accent)         /* 主色边框（35% 主色） */
-
-/* 语义色 */
-var(--color-success)  var(--color-success-soft)
-var(--color-warning)  var(--color-warning-soft)
-var(--color-danger)   var(--color-danger-soft)
-
-/* 阴影 */
-var(--shadow-sm)  var(--shadow-md)  var(--shadow-lg)
+```
+src/assets/styles/
+├── index.css        # 唯一全局入口（按层叠顺序导入以下模块）
+├── tokens.css       # @theme 断点/字体/圆角/语义色映射 + Light(:root) / Dark([data-theme="dark"]) 令牌
+├── base.css         # @layer base 全局 reset、滚动条、focus-visible 与 reduced-motion 保护
+├── tdesign.css      # 未分层 html .t-* 覆写（自然高于 @layer base/components，无需 !important）
+├── primitives.css   # @layer components 移动优先通用原语（.card、.metrics-grid、.mobile-card* 等）
+├── animations.css   # 关键帧动画与过渡工具类
+└── critical.css     # 首屏防闪烁关键样式
 ```
 
-### 2.3 间距与圆角
-
-间距基于 **8px 基线**，允许 4px 用于密集内部对齐：
-
-```css
-var(--space-1)  /* 4px */    var(--space-2)  /* 8px */
-var(--space-3)  /* 12px */   var(--space-4)  /* 16px */
-var(--space-5)  /* 20px */   var(--space-6)  /* 24px */
-var(--space-8)  /* 32px */
-```
-
-圆角从 `--seed-radius` 派生。
-
-```css
-var(--radius-sm)  /* 4px — 按钮/输入框/标签 */
-var(--radius-md)  /* 8px — 卡片 */
-var(--radius-lg)  /* 12px — 弹窗/大容器 */
-var(--radius-xl)  /* 16px — 认证卡片 */
-```
-
-### 2.4 字体
-
-系统字体栈优先，**禁止引入外部字体文件**（LCP 考量）：
-
-```css
-var(--font-body)     /* -apple-system, ..., "Noto Sans SC", "Microsoft YaHei" */
-var(--font-display)  /* 同 body，标题使用 */
-var(--font-mono)     /* ui-monospace, "Cascadia Code", ... */
-```
-
-实际字体加载须遵循 `frontend/index.html` 与样式入口一致的策略：当前仅使用系统字体栈，不允许从 Google Fonts 等外站请求字体资源。
-
-字号规范：正文 14px，辅助 12px，标签 11px（大写标签需 `letter-spacing: 0.06em` 以上），标题 18-22px（`letter-spacing: -0.01em ~ -0.02em`）。
+> [!IMPORTANT]
+> **Tailwind v4 与 TDesign 级联隔离规则**：`@layer utilities` 位于末位，可覆盖 `@layer base/components`，但无法直接覆盖未分层的 `tdesign-vue-next` `.t-*` 规则。因此 **禁止将控制宽度/边距的工具类直接挂在 `<t-select>`、`<t-input>`、`<t-input-number>`、`<t-button>` 上**，应使用外层容器 `<div class="...">` 包裹或写入 `<style scoped>` 的 `:deep(.t-*)`。
+>
+> **表单标签约定**：`<t-form>` 一律使用 `label-align="top"`。TDesign 的 `layout="vertical"` 仍默认左浮动 `100px` `label-width` 且 `white-space: nowrap`，长标签（或 `label-width="0"`）会直接与右侧控件按钮重叠。
 
 ---
 
-## 内容安全策略与开发 HMR
+## 3. 设计令牌体系（`src/assets/styles/tokens.css`）
 
-- 生产 HTML/CSP 不允许任意 `ws:`/`wss:` 连接；只允许同源与明确列出的第三方端点。
-- Vite 开发 HMR 的 localhost WebSocket 仅通过开发服务器 response header 配置，不得写进生产 CSP。
-- CSP 端点变更应同时验证开发环境 HMR 与生产构建/响应头，不得因单一服务临时故障而放开通配来源。
+### 3.1 工作台核心与语义令牌
 
-## 3. 主题切换规则
+| 令牌 | 浅色 (`:root`) | 深色 (`[data-theme="dark"]`) | 用途 | Tailwind 语义类示例 |
+|------|----------------|------------------------------|------|---------------------|
+| `--workspace-canvas` / `--seed-bg` | `#F6F5EF` | `#1B211E` | 页面画布底色 | `bg-canvas` |
+| `--workspace-surface` / `--seed-surface` | `#FFFEFA` | `#242927` | 卡片/面板表面 | `bg-surface` |
+| `--color-bg-elevated` | `color-mix(...)` | `color-mix(...)` | 抬升表面/表头/次级区 | `bg-elevated` |
+| `--color-bg-overlay` | `color-mix(...)` | `color-mix(...)` | 弹窗输入框/浮层表面 | `bg-overlay` |
+| `--workspace-selected` | `#E6F2EB` | `#223D35` | 选中与高亮底色 | `bg-selected` |
+| `--workspace-accent` / `--seed-primary` | `#006B5B` | `#65DCC5` | 主品牌操作色 | `text-brand` / `bg-brand` |
+| `--workspace-on-accent` | `#FFFFFF` | `#102C25` | 实色主按钮文字 | `text-on-brand` |
+| `--text-primary` / `--workspace-text` | `#202923` | `#EDF2EE` | 主文本 | `text-ink` |
+| `--text-secondary` / `--workspace-muted` | `#59645E` | `#B2BEB7` | 次要文本 | `text-ink-muted` |
+| `--text-tertiary` / `--text-quaternary` | `color-mix(...)` | `color-mix(...)` | 辅助/弱提示文本 | `text-ink-subtle` |
+| `--border-default` / `--border-strong` | `#E3E6DF` / `22%` | `#3A463E` / `22%` | 常规/强调边框 | `border-line` |
+| `--color-success` / `--color-warning` / `--color-danger` / `--color-info` | `#037F0C` 等 | `#53D769` 等 | 状态语义色与 `-soft` 浅底 | `text-ok` / `text-warn` / `text-err` |
 
-### 3.1 工作原理
+### 3.2 媒体舞台令牌（Media Stage Tokens）
 
-- `main.ts` 初始化时设置 `document.documentElement[data-theme]`（优先级：localStorage `filecloud-theme` > 系统偏好 > light）
-- 暗色主题从 `workspace.css` 读取基础配色，成功、警告和错误色在全局样式中定义
-- TDesign 通过 `theme-mode="dark"` 属性同步（App.vue MutationObserver 自动维护）
+播放器与媒体预览浮层（`CustomVideoPlayer`、`MiniMediaPlayer`、`FilePreviewDialog`、`PreviewHeader`）统一消费 `--media-*` 影院深色令牌，保证浅色与深色主题下控制栏、进度条与海报遮罩均有稳定对比度：
 
-### 3.2 新增组件时的主题检查清单
+- 画布与表面：`--media-backdrop`、`--media-stage-bg`、`--media-surface`、`--media-surface-hover`、`--media-surface-elevated`、`--media-surface-tooltip`
+- 遮罩层：`--media-scrim`、`--media-scrim-mid`、`--media-scrim-soft`
+- 文本与控件：`--media-text`、`--media-text-primary`、`--media-text-secondary`、`--media-text-muted`、`--media-text-faint`
+- 轨道与边框：`--media-track`、`--media-buffered`、`--media-hover`、`--media-border`、`--media-border-subtle`、`--media-shadow`、`--media-thumb-*`
 
-- [ ] 所有颜色引用 `var(--*)` 令牌
-- [ ] 在 Light 和 Dark 下分别截图验证对比度
-- [ ] 文本对比度满足 WCAG AA（正文 ≥ 4.5:1，大文本 ≥ 3:1）
-- [ ] 状态表达不依赖单一颜色（配合图标/文字/形状）
-- [ ] 需要手动切换主题时调用 `window.__setFileCloudTheme('light' | 'dark')`
+### 3.3 文件类型色、圆角与间距
 
-### 3.3 暗色主题注意事项
-
-- 不使用纯黑 `#000` 或纯白 `#fff` 作为大面积背景/文本
-- 暗色下阴影使用 `rgba(0,0,0,x)` 而非 `color-mix`（已在 styles.css 处理）
-- 图表配色使用 `CHART_COLORS_DARK` 亮色变体
-
----
-
-## 4. 响应式断点
-
-| 断点 | 范围 | 布局策略 |
-|------|------|----------|
-| `xs` | ≤ 480px | 单列流式，KPI 单列，按钮全宽 |
-| `sm` | 481–768px | 单/双列自适应，表格→卡片列表，侧边栏→抽屉 |
-| `md` | 769–1024px | 双列网格，表格保留，侧边栏可折叠 |
-| `lg` | 1025–1440px | 标准网格，侧边栏固定 240px |
-| `xl` | > 1440px | 内容区限宽 1200px 居中 |
-
-### 4.1 使用方式
-
-```ts
-// 简单场景：isMobile = ≤768px（向后兼容）
-import { useMobile } from '@/composables/useMobile';
-const isMobile = useMobile();
-
-// 精细场景：五级断点
-import { useBreakpoint } from '@/composables/useMobile';
-const { breakpoint, isPhone, isTablet, isDesktop } = useBreakpoint();
-```
-
-### 4.2 强制规则
-
-- 表格在 ≤768px 必须提供卡片列表替代方案
-- 触控设备（`hover: none`）最小点击区域 **44px**
-- 禁止横向滚动（除有意为之的数据表格）
-- 文本自然换行，禁止用 `font-size` 跟随视口缩放
+- **文件类型色**：`--file-color-image`、`--file-color-video`、`--file-color-audio`、`--file-color-pdf`、`--file-color-word`、`--file-color-excel`、`--file-color-ppt`、`--file-color-archive`、`--file-color-code`、`--file-color-folder`（Light/Dark 自动切换）。
+- **圆角**：`--radius-sm` (4px)、`--radius-md` (8px)、`--radius-lg` (12px)、`--radius-xl` (16px)。
+- **间距与字体**：`--space-1` ~ `--space-8`（4px/8px 节律）；`--font-display`、`--font-body`、`--font-mono`（系统字体栈优先，禁止引入外站字体）。
 
 ---
 
-## 5. 组件使用规范
+## 4. 三态主题切换体系（`useTheme` & `ThemeToggle`）
 
-### 5.1 文件类型图标
-
-```vue
-<script setup lang="ts">
-import FileTypeIcon from '@/components/FileTypeIcon.vue';
-</script>
-
-<template>
-  <!-- 基础用法 -->
-  <FileTypeIcon :mimeType="file.mimeType" :fileName="file.name" :size="20" />
-  <!-- 带彩色背景圆（列表/卡片场景） -->
-  <FileTypeIcon :mimeType="file.mimeType" :fileName="file.name" :size="40" with-bg />
-</template>
-```
-
-类型判断逻辑在 `src/utils/file-icon-type.ts`，支持 MIME + 扩展名双重检测。
-
-### 5.2 TDesign 覆盖方式
-
-全局覆盖写在 `styles.css` 第 15 节，使用 `html .t-*` 前缀：
-
-```css
-/* 正确 ✓ */
-html .t-button--theme-primary.t-button--variant-base {
-  background: var(--seed-primary);
-}
-
-/* 错误 ✗ */
-.t-button--theme-primary { background: #0972D3 !important; }
-```
-
-页面级 TDesign 微调写在 scoped style 中，同样只允许引用令牌。
-
-### 5.3 弹窗规范
-
-- 结构三区：header（标题 + 关闭）/ body（表单）/ footer（右对齐按钮：次要在前，主要在后）
-- 圆角 `var(--radius-lg)`，阴影 `var(--shadow-lg)`
-- 弹窗内输入框背景用 `var(--color-bg-overlay)`
-- 破坏性操作（删除）使用 danger 按钮，且必须有确认步骤
-
-### 5.4 状态展示
-
-每个数据区域必须覆盖以下状态：
-
-| 状态 | 实现 |
-|------|------|
-| 加载中 | 骨架屏（`skeleton` 动画）或 `t-loading` |
-| 空数据 | 居中图标 + 说明文字 + 引导操作按钮 |
-| 错误 | 错误图标 + 原因 + 重试按钮 |
-| 进度 | `progress-track` + 百分比/速度/剩余时间 |
+- 核心逻辑在 [`src/composables/useTheme.ts`](src/composables/useTheme.ts)：
+  - 偏好状态 `ThemePreference = 'light' | 'dark' | 'system'`，`localStorage` 键名固定为 `filecloud-theme`（`'system'` 时清除键，实时监听 `(prefers-color-scheme: dark)`）。
+  - 同时维护 `html[data-theme="light" | "dark"]` 与 `html[theme-mode="dark"]`（同步 TDesign 暗色模式）、`<meta name="theme-color">`，并自动调用 `refreshChartTheme()`。
+- UI 组件 [`src/components/ThemeToggle.vue`](src/components/ThemeToggle.vue)：
+  - `variant="icon"`：头部快捷图标按钮（`cycleTheme`）。
+  - `variant="segmented"`：用户设置页三态分段控制器（浅色 / 深色 / 跟随系统）。
 
 ---
 
-## 6. ECharts 图表规范
+## 5. 移动优先响应式断点
 
-### 6.1 主题注册
+`tokens.css`（`@theme`）、`primitives.css` 与 `src/composables/useMobile.ts` 使用完全对齐的 5 级断点：
 
-```ts
-import { ensureCyberTheme } from '@/utils/echarts-theme';
-import echarts from '@/utils/echarts';
+| 断点名 | CSS 媒体查询（移动优先） | JS (`useBreakpoint()`) | 布局策略 |
+|--------|--------------------------|------------------------|----------|
+| `xs`（基线） | 默认样式（0–480px） | `<= 480px` (`isPhone`) | 单列流式、表格转 `.mobile-card`、紧凑按钮 |
+| `sm` | `@media (min-width: 481px)` | `481–768px` (`isTablet`) | 双列统计卡、中等控件展开 |
+| `md` | `@media (min-width: 769px)` | `> 768px` (`!isMobile`) | 切换桌面表格、多栏筛选栏与网格布局 |
+| `lg` | `@media (min-width: 1024px)` | `>= 1024px` (`isRailInline`) | 侧边目录树/详情侧栏内联常驻显示 |
+| `xl` | `@media (min-width: 1441px)` | `> 1440px` | 宽屏阅读限宽优化 |
 
-// init 前必须调用（幂等，自动检测当前主题）
-ensureCyberTheme();
-const chart = echarts.init(el, 'cloudscape'); // 'cyber' 为兼容别名
-```
-
-### 6.2 主题感知内联配色
-
-图表 option 中需要内联颜色时，使用主题判断函数：
-
-```ts
-const isDark = () => document.documentElement.getAttribute('data-theme') === 'dark';
-const axisLabelColor = () => isDark() ? '#8895A7' : '#5F6B7A';
-const splitLineColor = () => isDark() ? 'rgba(232,237,245,0.06)' : 'rgba(22,25,31,0.06)';
-```
-
-### 6.3 图表可读性规则
-
-- 坐标轴标签 11px，使用次要文本色
-- 网格线虚线、低对比度（6% 透明度）
-- 数据系列从 `CHART_COLORS` / `CHART_COLORS_DARK` 取色，禁止自定义 hex
-- 每个图表必须附带文字摘要或图例（无障碍要求）
-- tooltip 圆角 4px，跟随主题背景色
-- 主题切换后需调用 `refreshChartTheme()` 并重新 init 图表实例
+触控无障碍：使用 `@media (pointer: coarse)` 保证可点击控件最小命中区 `44px × 44px`；表格在 ≤768px 需提供卡片替代视图。
 
 ---
 
-## 7. 新增页面检查清单
+## 6. ECharts 图表规范（`src/utils/echarts-theme.ts`）
 
-### 结构
-
-- [ ] 语义化 HTML（`<aside>` / `<header>` / `<main>` / `<section>`）
-- [ ] 页面标题使用 `.page-header` 全局类
-- [ ] 卡片使用 `.card` 全局类，统计卡使用 `.stat-card`
-
-### 样式
-
-- [ ] 零硬编码颜色（grep 自检：`#[0-9a-fA-F]{3,6}` 和 `rgba?(`）
-- [ ] 间距使用 `--space-*` 令牌
-- [ ] 圆角使用 `--radius-*` 令牌
-- [ ] 过渡动画使用 `--duration-*` 和 `--ease-out-expo`
-
-### 交互
-
-- [ ] 所有可交互元素有 `:hover` / `:focus-visible` / `:disabled` 状态
-- [ ] 表单控件有可见 label 和错误提示
-- [ ] 破坏性操作有确认步骤
-- [ ] 加载/空/错误状态完整
-
-### 响应式
-
-- [ ] 320px 宽度下无溢出、无裁切
-- [ ] 768px 以下表格切换为卡片列表
-- [ ] 触控目标 ≥ 44px
-
-### 无障碍
-
-- [ ] 装饰性 SVG 添加 `aria-hidden="true"`
-- [ ] 图标按钮添加 `aria-label`
-- [ ] 状态不只用颜色表达
-- [ ] 遵循 `prefers-reduced-motion`（全局已处理）
+- 图表统一通过 `getThemeChartColors()`、`getTooltipBase()`、`getLegendBase()`、`ensureCyberTheme()`、`refreshChartTheme()` 读取当前主题配色（包含 `palette`、`surface`、`text`、`muted`、`border`、`axisLabel`、`axisLine`、`splitLine`、`emptySlice`、`emphasisShadow`）。
+- 必须在组件中监听 `useTheme().resolvedTheme`（或使用主题工具函数）在切换主题后调用 `refreshChartTheme()` 并重绘图表。
+- 禁止在业务视图中手动判断 `[data-theme="dark"]` 或编写 `#8895A7` / `rgba(...)` 硬编码轴线颜色。
 
 ---
 
-## 8. 禁止事项汇总
+## 7. 管理后台共用组件与模块化拆分
+
+- 共用管理原语（`src/components/admin/`）：
+  - `AdminMetricCard.vue`、`AdminFilterBar.vue`、`AdminChartCard.vue`、`AdminMobileCard.vue`、`FormFieldHint.vue`
+- 复杂页面按功能域拆分子组件：
+  - 系统配置：`src/components/admin/config/*`（`ConfigSiteSection`、`ConfigAuthSmtpSection`、`ConfigUploadSection`、`ConfigCacheDownloadSection`、`ConfigBotSection`、`ConfigIpBanSection`）
+  - Telegram 账号：`src/components/admin/telegram/*` 与 `src/utils/telegram-format.ts`
+
+---
+
+## 8. 样式质量门禁（`npm run check:style`）
+
+运行 `npm run check:style`（[`scripts/check-style-hygiene.mjs`](scripts/check-style-hygiene.mjs)）自动检查并阻断以下违规：
+
+1. 静态内联 `style="..."` 属性
+2. 白名单外的 `#hex` / `rgb()` / `rgba()` 硬编码颜色
+3. `tdesign.css` 之外直接使用 `--td-*` 变量，或引用未在 `tokens.css` / 组件内定义的 CSS 变量
+4. `base.css` `prefers-reduced-motion` 之外的 `!important`
+5. 未添加 `scoped` / `module` 的 `<style>` 块
+6. `@media (max-width: ...)` 或未对齐历史断点（`360/500/680/700/720/960px`）
+7. 重新引入已清理的废弃文件/符号（`Upload.vue`、`FileCard.vue`、`FolderCard.vue`、`getFileEmoji` 等）
+8. 未使用 `label-align="top"` 的 `<t-form layout="vertical">` / `label-width="0"`（防止表单标签与按钮/开关重叠）
+
+---
+
+## 9. 禁止事项汇总
 
 | 禁止 | 替代方案 |
 |------|----------|
-| 硬编码颜色值 | `var(--*)` 语义令牌 |
-| Emoji 图标 | `FileTypeIcon` / 内联 SVG |
-| `!important` | `html .t-*` 选择器优先级 |
-| 外部字体文件 | 系统字体栈 |
-| 渐变按钮/发光阴影 | 平面纯色 + 边框层次 |
-| 单一 768px 断点判断 | `useBreakpoint()` 五级断点 |
-| 图表自定义 hex 配色 | `CHART_COLORS` 调色板 |
-| 纯黑/纯白大面积使用 | 种子令牌灰阶 |
-| 虚构后端不存在的功能数据 | 对照 API 接口文档 |
+| 硬编码颜色值 | `tokens.css` 语义变量或 `@theme` 工具类 |
+| 静态 `style="..."` | Tailwind 工具类或 `<style scoped>` 类名 |
+| Emoji 图标 | `FileTypeIcon` / 内联 1.5px 描边 SVG |
+| `!important` | `html .t-*` 未分层覆盖或组合选择器 |
+| `@media (max-width: ...)` | `@media (min-width: 481px / 769px / 1024px / 1441px)` |
+| 直接消费 `--td-*` | 映射到 `--color-*` / `--text-*` / `--border-*` |
+| 图表内联 DOM 暗色检测 | `useTheme()` + `getThemeChartColors()` |
 
 ---
 
-## 9. 文件结构约定
+## 10. 新增/修改页面自检清单
 
-```
-src/
-├── assets/styles.css          # 全局设计系统（唯一全局样式文件）
-├── components/
-│   ├── FileTypeIcon.vue       # 文件类型 SVG 图标组件
-│   └── ...
-├── composables/useMobile.ts   # useMobile() + useBreakpoint()
-└── utils/
-    ├── file-icon-type.ts      # getFileIconType() 类型检测
-    ├── echarts-theme.ts       # 双主题图表注册
-    └── format.ts              # 格式化工具（getFileEmoji 已废弃）
-```
-
-新增全局样式模式（如新的通用组件类）统一追加到 `styles.css` 对应章节，禁止新建全局 CSS 文件。
-
----
-
-## 10. 设计参考
-
-完整设计系统 Showcase 位于 Canvas 工作区 `index.html`，包含所有组件的双主题高保真参考。关键决策以该文件为准：
-
-- 令牌定义 → 「Seed Token 体系」区块
-- 组件样式 → 「组件覆盖」「弹窗、表单与导航模式」区块
-- 页面模式 → 「页面交互模式」「分享与公开页面」「管理后台模式」「数据管理模式」区块
-- 图表配色 → 「图表主题」区块
-- 响应式 → 「响应式断点」区块
+- [ ] 通过 `npm run check:style` 与 `npm run typecheck`
+- [ ] Light / Dark / System 三态主题与 `--media-*` / 图表均随主题即时同步
+- [ ] 320px / 480px / 768px / 1024px / 1440px 断点无溢出、表格有移动端卡片替代
+- [ ] 触控控件在 `@media (pointer: coarse)` 下满足 `44px` 最小交互区，装饰 SVG 带 `aria-hidden="true"`
 
 ---
 

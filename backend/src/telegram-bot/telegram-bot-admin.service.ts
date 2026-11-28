@@ -14,6 +14,7 @@ import { TelegramBotFileGrant } from '../common/entities/telegram-bot-file-grant
 import { TelegramBotGrantService } from './telegram-bot-grant.service';
 import { TelegramBotQuotaService } from './telegram-bot-quota.service';
 import { TelegramBotConfigService } from './telegram-bot-config.service';
+import { TelegramBotTokenCryptoService } from './telegram-bot-token-crypto.service';
 import { TelegramBotIdentity } from './telegram-bot.types';
 
 export interface BotUsageTrendRow {
@@ -137,6 +138,7 @@ export class TelegramBotAdminService {
     private readonly quotaService: TelegramBotQuotaService,
     private readonly configServiceForDomain: TelegramBotConfigService,
     private readonly dataSource: DataSource,
+    private readonly tokenCrypto: TelegramBotTokenCryptoService,
   ) {}
 
   /** 管理员集合（env 固定超管；第一版不引入 DB 管理员表） */
@@ -307,6 +309,126 @@ export class TelegramBotAdminService {
       },
     });
     return { ok: true, grant };
+  }
+
+  /**
+   * 按 grant ID 撤销（面板按钮入口）。
+   *
+   * 为什么单独一条：面板按钮只携带 `grantId`（回调数据不能塞 URL/Token），
+   * 而 `revokeByToken` 只能从明文 Token 反查记录。两者共用同一套审计字段。
+   */
+  async revokeByGrantId(
+    operator: TelegramBotIdentity,
+    grantId: string,
+    via: 'panel' | 'command' = 'panel',
+  ): Promise<{ ok: boolean; reason?: 'not_found'; grant?: TelegramBotFileGrant }> {
+    const grant = await this.grantService.findById(grantId);
+    if (!grant) {
+      this.auditService.log({
+        action: 'telegram_bot_link_revoked',
+        resourceType: 'telegram_bot_grant',
+        status: AuditStatus.FAILURE,
+        metadata: {
+          operatorTelegramUserId: operator.telegramUserId,
+          grantId,
+          via,
+          reason: 'not_found',
+        },
+      });
+      return { ok: false, reason: 'not_found' };
+    }
+
+    const revoked = await this.grantService.revoke(grant, operator.telegramUserId);
+    this.auditService.log({
+      action: 'telegram_bot_link_revoked',
+      resourceType: 'telegram_bot_grant',
+      resourceId: grant.id,
+      metadata: {
+        operatorTelegramUserId: operator.telegramUserId,
+        operatorTelegramUsername: operator.username,
+        grantId: grant.id,
+        tokenPrefix: grant.tokenPrefix,
+        targetTelegramUserId: grant.telegramUserId,
+        alreadyRevoked: !revoked,
+        via,
+      },
+    });
+    return { ok: true, grant };
+  }
+
+  /** 是否可回放完整直链（取决于 TELEGRAM_BOT_ENCRYPTION_KEY 是否配置） */
+  isCryptoAvailable(): boolean {
+    return this.tokenCrypto.isAvailable();
+  }
+
+  /**
+   * 管理面板数据：一次取齐面板要展示的计数与生效配置。
+   *
+   * activeLinkCount 用 `listActiveByUser` 的反向口径（全库有效直链数），此处直接查库计数，
+   * 避免把全部 grant 行拉进内存。
+   */
+  async getPanelSnapshot(): Promise<{
+    whitelistCount: number;
+    overrideCount: number;
+    activeLinkCount: number;
+  }> {
+    const [whitelist, overrides, active] = await Promise.all([
+      this.quotaService.listWhitelist(),
+      this.quotaService.listOverrides(),
+      this.dataSource.getRepository(TelegramBotFileGrant).createQueryBuilder('grant')
+        .where('grant.revokedAt IS NULL')
+        .andWhere('grant.expiresAt > :now', { now: new Date() })
+        .getCount(),
+    ]);
+    return {
+      whitelistCount: whitelist.length,
+      overrideCount: overrides.length,
+      activeLinkCount: active,
+    };
+  }
+
+  /**
+   * 全库有效直链分页（面板「有效直链」页）。
+   *
+   * 与 `queryLinks(targetUserId)` 的区别：这里不按用户过滤、必须分页，
+   * 且**不回放 Token 明文**——列表只展示前缀，需要完整链接时仍走单用户视图。
+   * 这样翻页不会把大量密钥材料堆进聊天记录。
+   */
+  async listActiveLinksPage(page: number, pageSize: number): Promise<{
+    total: number;
+    rows: {
+      grantId: string;
+      fileName: string;
+      expiresAt: string;
+      url: null;
+      prefix: string;
+      telegramUserId: string;
+    }[];
+    cryptoAvailable: boolean;
+  }> {
+    const now = new Date();
+    const [grants, total] = await this.dataSource.getRepository(TelegramBotFileGrant)
+      .createQueryBuilder('grant')
+      .where('grant.revokedAt IS NULL')
+      .andWhere('grant.expiresAt > :now', { now })
+      .orderBy('grant.createdAt', 'DESC')
+      .addOrderBy('grant.id', 'DESC')
+      .skip((page - 1) * pageSize)
+      .take(pageSize)
+      .getManyAndCount();
+
+    return {
+      total,
+      rows: grants.map(grant => ({
+        grantId: grant.id,
+        fileName: grant.fileName || '(未命名)',
+        expiresAt: grant.expiresAt instanceof Date ? grant.expiresAt.toISOString() : String(grant.expiresAt),
+        url: null,
+        prefix: grant.tokenPrefix,
+        telegramUserId: grant.telegramUserId,
+      })),
+      cryptoAvailable: this.tokenCrypto.isAvailable(),
+    };
   }
 
   // ---------------- Bot 使用情况（D13） ----------------

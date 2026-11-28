@@ -3821,7 +3821,8 @@ void UserManager::on_update_user_linked_community_id(User *u, UserId user_id, Co
     u->need_save_to_database = true;
     if (u->is_update_user_sent && (!G()->use_chat_info_database() || loaded_from_database_users_.count(user_id) != 0)) {
       // otherwise, the change is applied in on_load_user_from_database
-      td_->messages_manager_->on_update_dialog_linked_community_id(DialogId(user_id), old_linked_community_id);
+      send_closure_later(G()->messages_manager(), &MessagesManager::on_update_dialog_linked_community_id,
+                         DialogId(user_id), old_linked_community_id, linked_community_id);
     }
   }
 }
@@ -5086,8 +5087,8 @@ void UserManager::on_load_user_from_database(UserId user_id, string value, bool 
     if (!value.empty() && u->is_bot) {
       User temp_u;
       if (log_event_parse(temp_u, value).is_ok() && temp_u.linked_community_id != u->linked_community_id) {
-        td_->messages_manager_->on_update_dialog_linked_community_id(DialogId(user_id), temp_u.linked_community_id);
-        CHECK(!u->is_being_saved);
+        send_closure_later(G()->messages_manager(), &MessagesManager::on_update_dialog_linked_community_id,
+                           DialogId(user_id), temp_u.linked_community_id, u->linked_community_id);
       }
     }
     auto new_value = get_user_database_value(u);
@@ -5999,7 +6000,7 @@ void UserManager::set_name(const string &first_name, const string &last_name, Pr
   const User *u = get_user(get_my_id());
   int32 flags = 0;
   // TODO we can already send request for changing first_name and last_name and wanting to set initial values
-  // TODO need to be rewritten using invoke after and cancelling previous request
+  // TODO need to be rewritten using invoke after and canceling previous request
   if (u == nullptr || u->first_name != new_first_name) {
     flags |= ACCOUNT_UPDATE_FIRST_NAME;
   }
@@ -6021,7 +6022,7 @@ void UserManager::set_bio(const string &bio, Promise<Unit> &&promise) {
   const UserFull *user_full = get_user_full(get_my_id());
   int32 flags = 0;
   // TODO we can already send request for changing bio and wanting to set initial values
-  // TODO need to be rewritten using invoke after and cancelling previous request
+  // TODO need to be rewritten using invoke after and canceling previous request
   if (user_full == nullptr || user_full->about != new_bio) {
     flags |= ACCOUNT_UPDATE_ABOUT;
   }
@@ -7280,7 +7281,7 @@ Result<telegram_api::object_ptr<telegram_api::inputDocument>> UserManager::check
     return Status::Error(400, "Invalid file identifier specified");
   }
   file_id = file_view.get_main_file_id();
-  if (td_->audios_manager_->get_audio_object(file_id) == nullptr) {
+  if (!td_->audios_manager_->have_audio(file_id)) {
     return Status::Error(400, "Invalid file identifier specified");
   }
 
@@ -8976,12 +8977,11 @@ void UserManager::send_get_user_full_query(UserId user_id,
   if (!user_id.is_valid()) {
     return promise.set_error(500, "Invalid user_id");
   }
-  auto send_query =
-      PromiseCreator::lambda([td = td_, input_user = std::move(input_user)](Result<Promise<Unit>> &&promise) mutable {
-        if (promise.is_ok() && !G()->close_flag()) {
-          td->create_handler<GetFullUserQuery>(promise.move_as_ok())->send(std::move(input_user));
-        }
-      });
+  auto send_query = [td = td_, input_user = std::move(input_user)](Promise<Unit> &&promise) mutable {
+    if (!G()->close_flag()) {
+      td->create_handler<GetFullUserQuery>(std::move(promise))->send(std::move(input_user));
+    }
+  };
   get_user_full_queries_.add_query(user_id.get(), std::move(send_query), std::move(promise));
 }
 

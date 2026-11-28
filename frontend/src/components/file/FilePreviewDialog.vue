@@ -1265,10 +1265,10 @@ async function handleDownload() {
   inset: 0;
   z-index: 9998;
   display: flex;
-  align-items: center;
+  align-items: stretch;
   justify-content: center;
-  padding: 24px;
-  background: color-mix(in srgb, var(--seed-bg, #0b0d12) 72%, transparent);
+  padding: max(8px, env(safe-area-inset-top)) max(8px, env(safe-area-inset-right)) max(8px, env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left));
+  background: color-mix(in srgb, var(--media-backdrop) 72%, transparent);
   backdrop-filter: blur(8px);
   transition: opacity var(--duration-normal) var(--ease-out-expo);
 }
@@ -1290,38 +1290,30 @@ async function handleDownload() {
   position: relative;
   display: flex;
   flex-direction: column;
-  width: min(960px, calc(100vw - 48px));
-  height: min(88dvh, 860px);
-  max-height: calc(100dvh - 48px);
+  width: min(100%, 640px);
+  height: auto;
+  max-height: calc(100dvh - 16px);
   background: var(--color-bg-overlay);
   border: 1px solid var(--border-strong);
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-lg), var(--shadow-glow);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-lg);
   backdrop-filter: blur(12px);
   overflow: hidden;
 }
 
 /* 不同媒体类型使用不同画布比例，减少小媒体留白并扩大文档可视区域 */
-.fpv-dialog--video {
-  width: min(1120px, calc(100vw - 48px));
-  height: min(86dvh, 760px);
-}
-
+.fpv-dialog--video,
 .fpv-dialog--image {
-  width: min(1040px, calc(100vw - 48px));
-  height: min(88dvh, 900px);
+  height: min(72dvh, 560px);
 }
 
 .fpv-dialog--pdf,
 .fpv-dialog--text {
-  width: min(1180px, calc(100vw - 48px));
-  height: min(92dvh, 960px);
+  height: min(82dvh, 680px);
 }
 
 .fpv-dialog--audio {
-  width: min(640px, calc(100vw - 48px));
-  height: auto;
-  max-height: calc(100dvh - 48px);
+  width: min(100%, 520px);
 }
 
 /* 头部（.fpv-header / .fpv-name / .fpv-close）样式已迁移至 PreviewHeader.vue（M6 拆分） */
@@ -1334,7 +1326,11 @@ async function handleDownload() {
   justify-content: center;
   overflow: auto;
   overscroll-behavior: contain;
-  padding: 16px;
+  padding: 8px;
+}
+
+.fpv-dialog--audio .fpv-body {
+  min-height: 160px;
 }
 
 /* ─── 图片查看器：舞台 + 变换 + 工具栏 ─── */
@@ -1349,8 +1345,8 @@ async function handleDownload() {
   overflow: hidden;
   background:
     radial-gradient(circle at 50% 40%, color-mix(in srgb, var(--seed-surface) 18%, transparent), transparent 70%),
-    var(--seed-bg, #0b0d12);
-  border-radius: var(--radius-sm, 6px);
+    var(--media-backdrop);
+  border-radius: var(--radius-sm);
   cursor: grab;
   touch-action: none;
   user-select: none;
@@ -1365,7 +1361,7 @@ async function handleDownload() {
   max-width: none;
   max-height: none;
   object-fit: contain;
-  border-radius: var(--radius-sm, 6px);
+  border-radius: var(--radius-sm);
   box-shadow: var(--shadow-md);
   will-change: transform;
   pointer-events: none;
@@ -1384,7 +1380,7 @@ async function handleDownload() {
   align-items: center;
   justify-content: center;
   z-index: 3;
-  background: color-mix(in srgb, var(--seed-bg, #0b0d12) 30%, transparent);
+  background: color-mix(in srgb, var(--media-backdrop) 30%, transparent);
 }
 
 /* 图片工具栏：深色悬浮条（与视频控制栏同语言） */
@@ -1397,9 +1393,9 @@ async function handleDownload() {
   align-items: center;
   gap: 2px;
   padding: 6px;
-  background: color-mix(in srgb, var(--seed-bg, #0b0d12) 82%, transparent);
+  background: var(--media-surface-elevated);
   backdrop-filter: blur(8px);
-  border: 1px solid var(--border-default);
+  border: 1px solid var(--media-border);
   border-radius: 999px;
   box-shadow: var(--shadow-md);
   z-index: 2;
@@ -1415,15 +1411,15 @@ async function handleDownload() {
   border: none;
   border-radius: 50%;
   background: transparent;
-  color: var(--text-secondary);
+  color: var(--media-text-secondary);
   cursor: pointer;
   touch-action: manipulation;
   transition: background var(--duration-fast) ease, color var(--duration-fast) ease, transform 0.1s ease;
 }
 
 .fpv-image-tool:hover:not(:disabled) {
-  background: var(--color-accent-soft);
-  color: var(--text-accent);
+  background: var(--media-hover);
+  color: var(--media-text);
 }
 
 .fpv-image-tool:active:not(:disabled) {
@@ -1441,7 +1437,7 @@ async function handleDownload() {
   font-family: var(--font-mono);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
-  color: var(--text-secondary);
+  color: var(--media-text-primary);
   cursor: default;
   user-select: none;
 }
@@ -1450,7 +1446,7 @@ async function handleDownload() {
   width: 1px;
   height: 18px;
   margin: 0 4px;
-  background: var(--border-default);
+  background: var(--media-border);
 }
 
 .fpv-video-wrap {
@@ -1461,8 +1457,8 @@ async function handleDownload() {
   display: grid;
   place-items: center;
   overflow: hidden;
-  background: #000;
-  border-radius: var(--radius-sm, 6px);
+  background: var(--media-stage-bg);
+  border-radius: var(--radius-sm);
 }
 
 /* CustomVideoPlayer 填满可用画布，内部 object-fit: contain 保持任意视频比例 */
@@ -1480,12 +1476,12 @@ async function handleDownload() {
   left: 50%;
   transform: translateX(-50%);
   padding: 6px 14px;
-  background: color-mix(in srgb, var(--seed-bg, #0b0d12) 72%, transparent);
-  border: 1px solid var(--border-default);
+  background: var(--media-surface-tooltip);
+  border: 1px solid var(--media-border);
   border-radius: var(--radius-md);
   pointer-events: none;
   font-size: 12px;
-  color: var(--text-secondary);
+  color: var(--media-text-primary);
   white-space: nowrap;
 }
 
@@ -1771,100 +1767,91 @@ async function handleDownload() {
 /* 头部右侧操作区与导航按钮样式已迁移至 PreviewHeader.vue（M6 拆分）；
    播放列表面板样式已迁移至 PreviewPlaylistPanel.vue。 */
 
-@media (max-width: 720px) {
+/* 移动端基准位于下方与基础规则对齐，桌面端（>=769px）恢复宽松弹窗与控件尺度 */
+@media (min-width: 769px) {
   .fpv-overlay {
-    align-items: stretch;
-    padding: max(8px, env(safe-area-inset-top)) max(8px, env(safe-area-inset-right)) max(8px, env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left));
+    align-items: center;
+    padding: 24px;
   }
 
-  .fpv-dialog,
-  .fpv-dialog--video,
-  .fpv-dialog--image,
-  .fpv-dialog--pdf,
-  .fpv-dialog--text,
-  .fpv-dialog--audio {
-    width: min(100%, 640px);
-    height: auto;
-    max-height: calc(100dvh - 16px);
-    border-radius: var(--radius-sm, 6px);
+  .fpv-dialog {
+    width: min(960px, calc(100vw - 48px));
+    height: min(88dvh, 860px);
+    max-height: calc(100dvh - 48px);
+    border-radius: var(--radius-md);
   }
 
-  .fpv-dialog--video,
+  .fpv-dialog--video {
+    width: min(1120px, calc(100vw - 48px));
+    height: min(86dvh, 760px);
+  }
+
   .fpv-dialog--image {
-    height: min(72dvh, 560px);
+    width: min(1040px, calc(100vw - 48px));
+    height: min(88dvh, 900px);
   }
 
   .fpv-dialog--pdf,
   .fpv-dialog--text {
-    height: min(82dvh, 680px);
+    width: min(1180px, calc(100vw - 48px));
+    height: min(92dvh, 960px);
   }
 
   .fpv-dialog--audio {
-    width: min(100%, 520px);
+    width: min(640px, calc(100vw - 48px));
+    height: auto;
+    max-height: calc(100dvh - 48px);
   }
 
   .fpv-body {
-    padding: 8px;
+    padding: 16px;
   }
 
   .fpv-dialog--audio .fpv-body {
-    min-height: 160px;
+    min-height: 0;
   }
 
   .fpv-audio-player {
-    padding: 16px 14px 14px;
-    gap: 12px;
+    padding: 24px 24px 20px;
+    gap: 18px;
   }
 
   .fpv-audio-icon {
-    width: 52px;
-    height: 52px;
-    font-size: 26px;
+    width: 64px;
+    height: 64px;
+    font-size: 30px;
   }
 
   .fpv-audio-name {
-    font-size: 14px;
+    font-size: 15px;
   }
 
   .fpv-audio-wave {
-    height: 28px;
-    gap: 2px;
+    height: 36px;
+    gap: 3px;
   }
 
   .fpv-audio-wave span {
-    width: 2px;
+    width: 3px;
   }
 
-  /* 移动端：隐藏音量滑块，保留静音按钮（避免窄屏误触） */
   .fpv-audio-volume {
-    display: none;
+    display: flex;
   }
 
   .fpv-audio-btn {
-    width: 40px;
-    height: 40px;
+    width: 36px;
+    height: 36px;
   }
 
   .fpv-audio-btn--play {
-    width: 46px;
-    height: 46px;
-  }
-
-  .fpv-text {
-    padding: 12px;
-    font-size: 12px;
-  }
-
-  .fpv-text-toolbar {
-    padding: 6px 10px;
-    flex-wrap: wrap;
+    width: 44px;
+    height: 44px;
   }
 
   .fpv-footer {
-    padding: 8px 10px;
+    padding: 12px 20px;
   }
-
-  /* 播放列表面板的窄屏覆盖已随组件迁移至 PreviewPlaylistPanel.vue */
 }
 
 @media (max-height: 560px) and (orientation: landscape) {

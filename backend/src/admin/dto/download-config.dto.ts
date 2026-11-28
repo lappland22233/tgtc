@@ -1,6 +1,6 @@
 import { IsBoolean, IsIn, IsInt, IsNumber, IsOptional, Max, Min } from 'class-validator';
 import { Type } from 'class-transformer';
-import { UPSTREAM_QUEUE_POLICIES, type UpstreamQueuePolicy } from '../../file/download-resource-coordinator.service';
+import { UPSTREAM_QUEUE_POLICIES, type UpstreamQueuePolicy } from '../../common/constants/download-config';
 
 /**
  * 下载资源调度配置（FILE_DOWNLOAD_*）。
@@ -15,12 +15,12 @@ export class DownloadConfigDto {
   @Max(10000)
   maxReservedGB?: number;
 
-  /** 上游冷回源的全局权重预算（1-64；按有效 Bot 数自动扩缩容） */
+  /** 上游冷回源的全局权重预算（1-128；按有效 Bot 数自动扩缩容） */
   @IsOptional()
   @Type(() => Number)
   @IsInt()
   @Min(1)
-  @Max(64)
+  @Max(128)
   maxConcurrentUpstreams?: number;
 
   /** 等待队列容量（磁盘与上游共用） */
@@ -93,4 +93,20 @@ export class DownloadConfigDto {
   @IsOptional()
   @IsBoolean()
   preferUserAccount?: boolean;
+
+  /** 单 user 账号同时开出的 MTProto 回源流上限（1-32） */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(32)
+  userStreamMaxConcurrency?: number;
+
+  /** user 账号瞬时失败（network / other）的冷却时长（秒，1-600） */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(600)
+  userFailureCooldownSeconds?: number;
 }

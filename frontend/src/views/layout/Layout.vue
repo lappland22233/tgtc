@@ -96,14 +96,13 @@ onMounted(() => {
 });
 </script>
 
-<style src="../admin/admin-content.css"></style>
-
 <style scoped>
 .workspace-layout {
   min-height: 100vh;
   min-height: 100dvh;
   background: var(--workspace-canvas);
   color: var(--workspace-text);
+  padding-bottom: calc(var(--workspace-mobile-nav-height) + env(safe-area-inset-bottom, 0px));
 }
 
 .workspace-main {
@@ -124,24 +123,26 @@ onMounted(() => {
   background: var(--workspace-surface);
 }
 
-@media (min-width: 960px) {
+@media (min-width: 769px) {
+  .workspace-layout {
+    padding-bottom: 0;
+  }
+}
+
+@media (min-width: 1024px) {
   .workspace-admin-layout {
     display: grid;
     grid-template-columns: clamp(152px, 16vw, 206px) minmax(0, 1fr);
   }
 
-  .workspace-admin-layout > .route-view-container { border-inline-start: 1px solid var(--workspace-border); }
+  .workspace-admin-layout > .route-view-container {
+    border-inline-start: 1px solid var(--workspace-border);
+  }
 }
 
 .workspace-skip-link {
   position: fixed;
   background: var(--workspace-accent);
   color: var(--workspace-on-accent);
-}
-
-@media (max-width: 768px) {
-  .workspace-layout {
-    padding-bottom: calc(var(--workspace-mobile-nav-height) + env(safe-area-inset-bottom, 0px));
-  }
 }
 </style>

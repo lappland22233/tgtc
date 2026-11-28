@@ -14,12 +14,13 @@
             <span class="status-switch-meta">仅影响新上传会话；在途任务按创建时冻结的后端继续</span>
           </div>
           <div class="default-backend-picker">
-            <t-select
-              v-model="defaultBackendDraft"
-              :options="backendOptions"
-              size="small"
-              style="width: 180px"
-            />
+            <div class="picker-select-wrap picker-select-wrap--lg">
+              <t-select
+                v-model="defaultBackendDraft"
+                :options="backendOptions"
+                size="small"
+              />
+            </div>
             <t-button size="small" :loading="defaultSaving" @click="saveDefaultBackend">保存</t-button>
           </div>
         </div>
@@ -58,12 +59,13 @@
             </span>
           </div>
           <div class="chunk-size-picker">
-            <t-select
-              v-model="gdriveChunkSizeDraft"
-              :options="chunkSizeOptions"
-              size="small"
-              style="width: 170px"
-            />
+            <div class="picker-select-wrap picker-select-wrap--md">
+              <t-select
+                v-model="gdriveChunkSizeDraft"
+                :options="chunkSizeOptions"
+                size="small"
+              />
+            </div>
             <t-button size="small" :loading="chunkSizeSaving" @click="saveGDriveChunkSize">保存</t-button>
           </div>
         </div>
@@ -110,14 +112,15 @@
       <div class="section-header">
         <h3>存储账号</h3>
         <div class="section-actions">
-          <t-select
-            v-model="typeFilter"
-            :options="typeFilterOptions"
-            size="small"
-            style="width: 140px"
-            placeholder="全部类型"
-            clearable
-          />
+          <div class="picker-select-wrap picker-select-wrap--sm">
+            <t-select
+              v-model="typeFilter"
+              :options="typeFilterOptions"
+              size="small"
+              placeholder="全部类型"
+              clearable
+            />
+          </div>
           <t-checkbox v-model="showRevoked">显示已撤销账号（{{ revokedAccountCount }}）</t-checkbox>
           <t-button variant="outline" size="small" :loading="loading" @click="loadOverview">刷新</t-button>
           <t-button size="small" @click="openCreate">添加账号</t-button>
@@ -347,8 +350,12 @@
             </div>
 
             <div class="wizard-row">
-              <t-input v-model="gdrive.clientId" placeholder="Client ID" style="flex: 1" />
-              <t-input v-model="gdrive.clientSecret" placeholder="Client Secret" type="password" style="flex: 1" />
+              <div class="wizard-flex-input">
+                <t-input v-model="gdrive.clientId" placeholder="Client ID" />
+              </div>
+              <div class="wizard-flex-input">
+                <t-input v-model="gdrive.clientSecret" placeholder="Client Secret" type="password" />
+              </div>
               <t-button size="small" :loading="gdriveSaving" @click="saveOAuthClient">保存配置</t-button>
             </div>
           </div>
@@ -366,12 +373,12 @@
           <div class="wizard-card-body">
             <div class="name-row">
               <label class="form-label">账号名称</label>
-              <t-input
-                v-if="!gdrive.accountId"
-                v-model="gdrive.name"
-                placeholder="留空自动使用 Google 账号邮箱命名"
-                style="flex: 1"
-              />
+              <div v-if="!gdrive.accountId" class="wizard-flex-input">
+                <t-input
+                  v-model="gdrive.name"
+                  placeholder="留空自动使用 Google 账号邮箱命名"
+                />
+              </div>
               <span v-else class="existing-name">{{ gdrive.name }}</span>
             </div>
 
@@ -409,32 +416,51 @@
             <!-- 手动模式备用折叠入口 -->
             <div class="fallback-accordion">
               <div class="fallback-toggle" @click="showManualMode = !showManualMode">
-                <span>{{ showManualMode ? '▼ 收起手动备用模式' : '▶ 遇到问题？使用手动粘贴授权码' }}</span>
+                <svg
+                  class="fallback-chevron"
+                  :class="{ 'is-open': showManualMode }"
+                  width="14"
+                  height="14"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.5"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  aria-hidden="true"
+                >
+                  <polyline points="9 18 15 12 9 6" />
+                </svg>
+                <span>{{ showManualMode ? '收起手动备用模式' : '遇到问题？使用手动粘贴授权码' }}</span>
               </div>
 
               <div v-show="showManualMode" class="fallback-body">
                 <div class="wizard-row">
-                  <t-input
-                    v-model="gdrive.redirectUri"
-                    placeholder="回调地址（默认自动填充当前站点回调）"
-                    style="flex: 1"
-                    size="small"
-                  />
+                  <div class="wizard-flex-input">
+                    <t-input
+                      v-model="gdrive.redirectUri"
+                      placeholder="回调地址（默认自动填充当前站点回调）"
+                      size="small"
+                    />
+                  </div>
                   <t-button size="small" variant="outline" :loading="gdriveSaving" @click="buildManualAuthUrl">
                     生成链接
                   </t-button>
                 </div>
                 <div v-if="gdrive.authUrl" class="wizard-row">
-                  <t-input :value="gdrive.authUrl" readonly size="small" style="flex: 1" />
+                  <div class="wizard-flex-input">
+                    <t-input :value="gdrive.authUrl" readonly size="small" />
+                  </div>
                   <t-button size="small" variant="outline" @click="openAuthUrl">打开授权页</t-button>
                 </div>
                 <div class="wizard-row">
-                  <t-input
-                    v-model="gdrive.code"
-                    placeholder="粘贴授权码（code）或重定向后的完整地址"
-                    style="flex: 1"
-                    @change="onManualCodeChange"
-                  />
+                  <div class="wizard-flex-input">
+                    <t-input
+                      v-model="gdrive.code"
+                      placeholder="粘贴授权码（code）或重定向后的完整地址"
+                      @change="onManualCodeChange"
+                    />
+                  </div>
                   <t-button
                     size="small"
                     theme="primary"
@@ -466,7 +492,7 @@
         <t-alert
           theme="info"
           message="配置在 Google Cloud Console 创建的 OAuth 2.0 Web 应用程序客户端（Client ID 与 Client Secret）。此凭据用于为个人 Google Drive 账号签发离线访问令牌。"
-          style="margin-bottom: 16px;"
+          class="oauth-info-alert"
         />
 
         <div class="redirect-uri-box">
@@ -510,7 +536,7 @@
           >
             清空配置
           </t-button>
-          <div style="flex: 1;" />
+          <div class="dialog-footer-spacer" />
           <t-button variant="outline" @click="oauthClientModalVisible = false">取消</t-button>
           <t-button theme="primary" :loading="gdriveSaving" @click="saveOAuthClientFromDialog">
             保存配置
@@ -1332,87 +1358,100 @@ onMounted(loadOverview);
   flex-direction: column;
   gap: 16px;
 }
-.page-header h1 {
-  margin: 0 0 4px;
-  font-size: 22px;
-}
-.page-header p {
-  margin: 0;
-  color: var(--td-text-color-secondary);
-  font-size: 13px;
-}
-.card {
-  background: var(--td-bg-color-container);
-  border-radius: 8px;
-  padding: 16px;
-  border: 1px solid var(--td-border-level-1-color);
-}
+
 .status-switches {
   display: flex;
   flex-wrap: wrap;
-  gap: 24px;
+  gap: 16px;
   margin-bottom: 12px;
 }
+
 .status-switch {
   display: flex;
-  align-items: center;
-  gap: 12px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
 }
+
 .status-switch-text {
   display: flex;
   flex-direction: column;
 }
+
 .status-switch-label {
   font-weight: 600;
   font-size: 14px;
 }
+
 .status-switch-meta {
   font-size: 12px;
-  color: var(--td-text-color-secondary);
+  color: var(--text-secondary);
 }
+
 .default-backend-picker,
 .chunk-size-picker {
   display: flex;
   gap: 8px;
   align-items: center;
 }
+
+.picker-select-wrap--lg {
+  width: 180px;
+}
+
+.picker-select-wrap--md {
+  width: 170px;
+}
+
+.picker-select-wrap--sm {
+  width: 140px;
+}
+
 .status-switch-control {
   display: flex;
   align-items: center;
 }
+
 .overview-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
   gap: 12px;
 }
+
 .stat-card {
-  background: var(--td-bg-color-container);
-  border-radius: 8px;
+  background: var(--color-bg-surface);
+  border-radius: var(--radius-md);
   padding: 14px 16px;
-  border: 1px solid var(--td-border-level-1-color);
+  border: 1px solid var(--border-default);
 }
+
 .stat-card h3 {
   margin: 0 0 6px;
   font-size: 13px;
-  color: var(--td-text-color-secondary);
+  color: var(--text-secondary);
   font-weight: 500;
 }
+
 .stat-card .value {
   font-size: 24px;
   font-weight: 700;
 }
+
 .stat-card .error-value {
   font-size: 16px;
-  color: var(--td-error-color);
+  color: var(--color-danger);
 }
+
 .stat-sub {
   font-size: 12px;
-  color: var(--td-text-color-secondary);
+  color: var(--text-secondary);
   margin-top: 4px;
 }
+
 .error-summary {
-  color: var(--td-error-color);
+  color: var(--color-danger);
 }
+
 .section-header {
   display: flex;
   justify-content: space-between;
@@ -1421,70 +1460,85 @@ onMounted(loadOverview);
   flex-wrap: wrap;
   gap: 8px;
 }
+
 .section-header h3 {
   margin: 0;
   font-size: 16px;
 }
+
 .section-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
   align-items: center;
 }
+
 .quota-cell {
   display: flex;
   flex-direction: column;
   gap: 2px;
   min-width: 140px;
 }
+
 .quota-text {
   font-size: 12px;
-  color: var(--td-text-color-secondary);
+  color: var(--text-secondary);
 }
+
 .health-cell {
   display: flex;
   flex-direction: column;
   font-size: 12px;
   gap: 2px;
 }
+
 .row-actions {
   display: flex;
   flex-wrap: wrap;
 }
+
 .muted {
   color: var(--text-secondary);
 }
+
 .gdrive-wizard {
   display: flex;
   flex-direction: column;
   gap: 16px;
 }
+
 .wizard-card {
-  border: 1px solid var(--td-border-level-1-color);
-  border-radius: 8px;
-  background: var(--td-bg-color-container);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-surface);
   overflow: hidden;
   transition: all 0.2s ease;
 }
+
 .wizard-card.is-collapsed {
-  background: var(--td-bg-color-secondarycontainer);
+  background: var(--color-bg-elevated);
 }
+
 .wizard-card-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  flex-wrap: wrap;
   padding: 12px 16px;
-  background: var(--td-bg-color-secondarycontainer);
-  border-bottom: 1px solid var(--td-border-level-1-color);
+  background: var(--color-bg-elevated);
+  border-bottom: 1px solid var(--border-default);
 }
+
 .wizard-card.is-collapsed .wizard-card-header {
   border-bottom: none;
 }
+
 .wizard-card-title {
   display: flex;
   align-items: center;
   gap: 8px;
 }
+
 .step-num {
   display: inline-flex;
   align-items: center;
@@ -1492,134 +1546,175 @@ onMounted(loadOverview);
   width: 22px;
   height: 22px;
   border-radius: 50%;
-  background: var(--td-brand-color);
+  background: var(--seed-primary);
   color: var(--workspace-on-accent);
   font-size: 12px;
   font-weight: 600;
 }
+
 .step-title {
   font-size: 14px;
   font-weight: 600;
-  color: var(--td-text-color-primary);
+  color: var(--text-primary);
 }
+
 .wizard-card-body {
   padding: 16px;
 }
+
 .redirect-uri-box {
-  background: var(--td-bg-color-page);
+  background: var(--workspace-canvas);
   padding: 12px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   margin-bottom: 14px;
 }
+
 .redirect-uri-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
   margin-bottom: 6px;
 }
+
 .redirect-uri-label {
   font-size: 12px;
   font-weight: 500;
-  color: var(--td-text-color-secondary);
+  color: var(--text-secondary);
 }
+
 .name-row {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 12px;
   margin-bottom: 16px;
 }
+
 .form-label {
   font-size: 13px;
   font-weight: 500;
-  color: var(--td-text-color-primary);
+  color: var(--text-primary);
   white-space: nowrap;
 }
+
 .existing-name {
   font-size: 14px;
   font-weight: 600;
-  color: var(--td-brand-color);
+  color: var(--seed-primary);
 }
+
+.wizard-flex-input {
+  flex: 1;
+  min-width: 0;
+}
+
 .auth-action-area {
   margin-bottom: 16px;
 }
+
 .auth-status-box {
   display: flex;
   align-items: center;
   gap: 16px;
   padding: 16px;
-  background: var(--td-brand-color-light);
-  border-radius: 8px;
+  background: var(--workspace-selected);
+  border-radius: var(--radius-md);
   border: 1px solid var(--border-accent);
 }
+
 .auth-spinner {
   width: 32px;
   height: 32px;
-  border: 3px solid var(--td-brand-color-light);
-  border-top-color: var(--td-brand-color);
+  border: 3px solid var(--workspace-selected);
+  border-top-color: var(--seed-primary);
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
   flex-shrink: 0;
 }
+
 @keyframes spin {
   to {
     transform: rotate(360deg);
   }
 }
+
 .auth-status-info {
   display: flex;
   flex-direction: column;
   gap: 4px;
 }
+
 .auth-status-main {
   font-size: 14px;
   font-weight: 600;
-  color: var(--td-brand-color);
+  color: var(--seed-primary);
 }
+
 .auth-status-sub {
   font-size: 12px;
-  color: var(--td-text-color-secondary);
+  color: var(--text-secondary);
 }
+
 .link-btn {
-  color: var(--td-brand-color);
+  color: var(--seed-primary);
   text-decoration: underline;
   cursor: pointer;
 }
+
 .auth-btn-area {
   display: flex;
   flex-direction: column;
   gap: 6px;
 }
+
 .disabled-tip {
   font-size: 12px;
-  color: var(--td-error-color);
+  color: var(--color-danger);
   text-align: center;
 }
+
 .fallback-accordion {
   margin-top: 12px;
-  border-top: 1px dashed var(--td-border-level-1-color);
+  border-top: 1px dashed var(--border-default);
   padding-top: 12px;
 }
+
 .fallback-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   font-size: 12px;
-  color: var(--td-text-color-secondary);
+  color: var(--text-secondary);
   cursor: pointer;
   user-select: none;
   transition: color 0.2s;
 }
+
 .fallback-toggle:hover {
-  color: var(--td-brand-color);
+  color: var(--seed-primary);
 }
+
+.fallback-chevron {
+  transition: transform 0.2s var(--ease-out-expo);
+}
+
+.fallback-chevron.is-open {
+  transform: rotate(90deg);
+}
+
 .fallback-body {
   margin-top: 12px;
   padding: 12px;
-  background: var(--td-bg-color-page);
-  border-radius: 6px;
+  background: var(--workspace-canvas);
+  border-radius: var(--radius-sm);
 }
+
 .wizard-hint {
   margin: 4px 0 8px;
   font-size: 12px;
-  color: var(--td-text-color-secondary);
+  color: var(--text-secondary);
 }
+
 .wizard-row {
   display: flex;
   gap: 8px;
@@ -1627,57 +1722,66 @@ onMounted(loadOverview);
   margin-bottom: 8px;
   flex-wrap: wrap;
 }
+
 .status-switch-btns {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   align-items: center;
 }
+
 .name-cell {
   display: flex;
   flex-direction: column;
   gap: 4px;
 }
+
 .account-name {
   font-weight: 500;
 }
+
 .account-email {
   font-size: 11px;
-  color: var(--td-brand-color);
-  background: var(--td-brand-color-light);
+  color: var(--seed-primary);
+  background: var(--workspace-selected);
   padding: 1px 6px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   width: fit-content;
 }
+
 .oauth-client-dialog {
   display: flex;
   flex-direction: column;
   gap: 14px;
 }
+
+.oauth-info-alert {
+  margin-bottom: 4px;
+}
+
 .dialog-footer-actions {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
   margin-top: 16px;
   padding-top: 12px;
-  border-top: 1px solid var(--td-border-level-1-color);
+  border-top: 1px solid var(--border-default);
 }
 
-@media (max-width: 768px) {
+.dialog-footer-spacer {
+  flex: 1;
+}
+
+@media (min-width: 769px) {
   .status-switches {
-    gap: 16px;
+    gap: 24px;
   }
 
   .status-switch {
-    align-items: flex-start;
-    flex-direction: column;
-    gap: 8px;
-  }
-
-  .status-switch-btns,
-  .dialog-footer-actions,
-  .wizard-card-header,
-  .name-row {
-    flex-wrap: wrap;
+    flex-direction: row;
+    align-items: center;
+    gap: 12px;
   }
 }
 </style>

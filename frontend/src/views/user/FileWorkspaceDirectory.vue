@@ -121,7 +121,7 @@ function openContextMenu(event: MouseEvent, folder: Folder) {
 }
 </script>
 
-<style>
+<style scoped>
 .workspace-directory {
   min-width: 0;
   padding: 18px 10px;

@@ -1,5 +1,6 @@
 import { randomBytes, timingSafeEqual } from 'crypto';
 import type { Request } from 'express';
+import { jwtExpiryMs } from './jwt-expiry';
 
 /**
  * CSRF 双重提交（double-submit cookie）令牌工具（2026-09-10 审查修复 M1）。
@@ -35,7 +36,8 @@ export function getXsrfCookieOptions(req: Request): {
       || req.secure
       || req.headers['x-forwarded-proto'] === 'https',
     sameSite: 'lax',
-    maxAge: 7 * 24 * 3600 * 1000,
+    // C-07：与 access_token 及 JWT_EXPIRES_IN 对齐，避免两个 Cookie 生命周期不一致
+    maxAge: jwtExpiryMs(),
     path: '/',
   };
 }

@@ -1,3 +1,4 @@
+import { fileUploadAdmissionJobId } from './file-upload-job';
 import { Injectable, Logger, Optional, Inject } from '@nestjs/common';
 import { Process, Processor } from '@nestjs/bull';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -242,8 +243,15 @@ export class FileUploadProcessor {
     if (!current || current.uploadVersion !== job.data.uploadVersion || current.isDeleted) return;
     const admissionAttempt = (job.data.admissionAttempt ?? 0) + 1;
     if (admissionAttempt > 120) throw new Error('存储账号容量持续不足，已达到等待上限');
+    // 准入排队最长 120 次 × 60s ≈ 2 小时，而僵尸恢复按 updatedAt 超过 60 分钟判死。
+    // 每次延后都刷新 updatedAt，否则排队中的文件会被误标「上传失败」，
+    // 用户重传产生重复文件，而原任务随后又可能自愈置 ready。
+    await this.fileRepository.update(
+      { id: file.id, uploadVersion: job.data.uploadVersion, status: 'processing' },
+      { updatedAt: new Date() },
+    );
     await job.queue.add('upload', { ...job.data, admissionAttempt }, {
-      jobId: `file-upload:${file.id}:${job.data.uploadVersion}:admission:${admissionAttempt}`,
+      jobId: fileUploadAdmissionJobId(file.id, job.data.uploadVersion, admissionAttempt),
       delay: Math.min(60_000, Math.max(1000, retryAfterMs)),
       attempts: Math.max(1, (job.opts?.attempts ?? 3) - job.attemptsMade),
       backoff: { type: 'exponential', delay: 10000 },
@@ -320,17 +328,21 @@ export class FileUploadProcessor {
     if (!this.isCommitted(file)) {
       if (!savedReceipt && !existsSync(filePath)) {
         if (attempt < (job.opts?.attempts ?? 3)) throw new Error(`临时文件暂不可用: ${filePath}`);
-        await this.fileRepository.update(
-          { id: fileId, uploadVersion },
-          {
-            status: 'error',
-            uploadStage: 'failed',
-            // 固定原因，不包含本地路径，避免泄露服务器目录结构
-            uploadFailureReason: '临时文件缺失，上传已放弃',
-          } as Partial<File>,
-        );
+        // 覆盖上传失败先回滚原内容引用，避免原文件永久失联（B-02）
+        const restoredMissing = await this.fileService.rollbackOverwriteIfSnapshot(fileId, uploadVersion);
+        if (!restoredMissing) {
+          await this.fileRepository.update(
+            { id: fileId, uploadVersion },
+            {
+              status: 'error',
+              uploadStage: 'failed',
+              // 固定原因，不包含本地路径，避免泄露服务器目录结构
+              uploadFailureReason: '临时文件缺失，上传已放弃',
+            } as Partial<File>,
+          );
+        }
         this.logger.warn(
-          `文件上传最终失败并标记 error: fileId=${fileId} uploadVersion=${uploadVersion} 原因=临时文件缺失 (第 ${attempt} 次尝试后放弃)`,
+          `文件上传最终失败${restoredMissing ? '并回滚原内容引用' : '并标记 error'}: fileId=${fileId} uploadVersion=${uploadVersion} 原因=临时文件缺失 (第 ${attempt} 次尝试后放弃)`,
         );
         // 文件已不存在，不再占用严格模式的上传源预算。
         this.uploadDiskBudget?.releaseJob(fileId, uploadVersion);
@@ -349,7 +361,13 @@ export class FileUploadProcessor {
       }
       file = await this.fileRepository.findOneOrFail({ where: { id: fileId } });
 
-      if (file.uploadVersion !== uploadVersion || file.isDeleted) return;
+      if (file.uploadVersion !== uploadVersion) return;
+      if (file.isDeleted) {
+        // 软删发生在处理途中：不再提交内容，但**必须**清掉临时文件与严格磁盘租约，
+        // 否则 pending 目录与 uploadDiskBudget 会在严格模式下永久卡住后续上传（持续 429）。
+        await this.removeUploadArtifacts(filePath, fileId, uploadVersion);
+        return;
+      }
       try {
         // 提交前捕获旧存储引用（异步覆盖场景仍指向旧对象），提交成功后共享安全清理
         const oldStorageRef = {
@@ -428,6 +446,12 @@ export class FileUploadProcessor {
             telegramChatId: result.chat_id ?? null,
             telegramMessageId: result.message_id ?? null,
             telegramFileUniqueId: result.file_unique_id ?? null,
+            // 跨后端覆盖（S3/WebDAV/GDrive → Telegram）：必须把存储判别字段切回 telegram
+            // 并清空旧远端引用，否则下载链路仍会按旧后端去取一个已被本次覆盖作废的对象。
+            // 非 TG 分支已对称清空 telegram* 字段，这里补齐反方向。
+            storageBackend: 'telegram',
+            storageAccountId: null,
+            storageObjectRef: null,
             uploadStage: 'remote_committed',
             uploadFailureReason: null,
           }) as Partial<File>,
@@ -445,20 +469,34 @@ export class FileUploadProcessor {
         ) {
           void this.fileService.cleanupNonTelegramObject(oldStorageRef);
         }
+        // TG 覆盖：旧引用若是非 TG 后端（S3/WebDAV/GDrive），同样要清掉那个远端对象，
+        // 否则切换后端后旧对象永久残留（用户已改用 Telegram，不会再有路径去清理它）。
+        if (
+          !isNonTelegram
+          && oldStorageRef.storageBackend
+          && oldStorageRef.storageBackend !== 'telegram'
+          && oldStorageRef.storageObjectRef
+        ) {
+          void this.fileService.cleanupNonTelegramObject(oldStorageRef);
+        }
       } catch (error) {
         this.logger.warn(`文件远端上传或提交失败 (fileId=${fileId}, 第 ${attempt} 次): ${(error as Error).message}`);
         const remoteReceipt = await this.loadReceipt(filePath, uploadVersion);
         if (attempt >= (job.opts?.attempts ?? 3) && !remoteReceipt) {
-          await this.fileRepository.update(
-            { id: fileId, uploadVersion },
-            {
-              status: 'error',
-              uploadStage: 'failed',
-              uploadFailureReason: this.safeFailureReason((error as Error).message || '远端上传/提交失败', filePath),
-            } as Partial<File>,
-          );
+          // 覆盖上传失败先回滚原内容引用，避免原文件永久失联（B-02）
+          const restoredExhausted = await this.fileService.rollbackOverwriteIfSnapshot(fileId, uploadVersion);
+          if (!restoredExhausted) {
+            await this.fileRepository.update(
+              { id: fileId, uploadVersion },
+              {
+                status: 'error',
+                uploadStage: 'failed',
+                uploadFailureReason: this.safeFailureReason((error as Error).message || '远端上传/提交失败', filePath),
+              } as Partial<File>,
+            );
+          }
           this.logger.warn(
-            `文件上传最终失败并标记 error: fileId=${fileId} uploadVersion=${uploadVersion} 原因=远端上传/提交重试耗尽，无远端回执`,
+            `文件上传最终失败${restoredExhausted ? '并回滚原内容引用' : '并标记 error'}: fileId=${fileId} uploadVersion=${uploadVersion} 原因=远端上传/提交重试耗尽，无远端回执`,
           );
           await this.removeUploadArtifacts(filePath, fileId, uploadVersion);
         } else if (attempt >= (job.opts?.attempts ?? 3) && remoteReceipt) {
@@ -492,18 +530,22 @@ export class FileUploadProcessor {
       ? file.storageObjectRef?.trim?.()
       : file.telegramFileId?.trim?.();
     if (!remoteFileId) {
-      await this.fileRepository.update(
-        { id: fileId, uploadVersion },
-        {
-          status: 'error',
-          uploadStage: 'failed',
-          uploadFailureReason: isNonTelegram
-            ? '存储远端提交缺少有效对象引用，已标记上传失败'
-            : 'Telegram 远端提交缺少有效 file_id，已标记上传失败',
-        } as Partial<File>,
-      );
+      // 新内容无有效远端引用＝不可用；覆盖场景回滚原内容而不是把原文件标 error（B-02）
+      const restoredNoRef = await this.fileService.rollbackOverwriteIfSnapshot(fileId, uploadVersion);
+      if (!restoredNoRef) {
+        await this.fileRepository.update(
+          { id: fileId, uploadVersion },
+          {
+            status: 'error',
+            uploadStage: 'failed',
+            uploadFailureReason: isNonTelegram
+              ? '存储远端提交缺少有效对象引用，已标记上传失败'
+              : 'Telegram 远端提交缺少有效 file_id，已标记上传失败',
+          } as Partial<File>,
+        );
+      }
       this.logger.warn(
-        `文件 ${fileId} 置 ready 前缺少有效远端引用（backend=${file.storageBackend}），已标记 error（禁止假成功）`,
+        `文件 ${fileId} 置 ready 前缺少有效远端引用（backend=${file.storageBackend}），${restoredNoRef ? '已回滚原内容引用' : '已标记 error（禁止假成功）'}`,
       );
       await this.removeUploadArtifacts(filePath, fileId, uploadVersion);
       return;
@@ -565,12 +607,22 @@ export class FileUploadProcessor {
 
     const readyRows = await databaseQuery<Array<{ id: string }>>(
       this.fileRepository.manager,
-      'UPDATE files SET status = $1, "uploadFailureReason" = NULL WHERE id = $2 AND status IN ($3, $4) AND "uploadVersion" = $5 RETURNING id',
+      'UPDATE files SET status = $1, "uploadFailureReason" = NULL, "overwriteSnapshot" = NULL WHERE id = $2 AND status IN ($3, $4) AND "uploadVersion" = $5 RETURNING id',
       ['ready', fileId, 'processing', 'error', uploadVersion],
       getDatabaseType(),
     );
     if (!Array.isArray(readyRows) || readyRows.length === 0) {
+      // 条件未命中分两种：版本已变（本轮内容作废，交给新版本任务）与**同版本已 ready**
+      // （上一轮在置 ready 之后、清理产物之前崩溃）。后者必须做幂等收尾——
+      // 否则 pending 临时文件与严格磁盘租约将永久不释放，后续上传持续 429。
+      const current = await this.fileRepository.findOne({ where: { id: fileId } });
+      if (current && current.uploadVersion === uploadVersion && current.status === 'ready') {
+        this.logger.warn(`文件 ${fileId} 已是同版本 ready 态（上次收尾中断），执行幂等收尾`);
+        await this.removeUploadArtifacts(filePath, fileId, uploadVersion);
+        return;
+      }
       this.logger.warn(`文件 ${fileId} 置 ready 条件未命中（状态或版本已变化），跳过本轮收尾`);
+      await this.removeUploadArtifacts(filePath, fileId, uploadVersion);
       return;
     }
 

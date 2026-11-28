@@ -1,5 +1,6 @@
 import { Readable } from 'stream';
 import { UserPreferredDownloadService } from './user-preferred-download.service';
+import { DOWNLOAD_ERROR_CODES, DownloadResourceException } from './download-resource-coordinator.service';
 import { TelegramUserClientError } from '../telegram-user/telegram-user-client.service';
 
 /**
@@ -14,6 +15,12 @@ function setup(options: {
   anchor?: { chatId: string; messageId: string } | null;
   openImpl?: () => Promise<{ stream: Readable; size: number | null }>;
   slotRejects?: boolean;
+  /** 让占租约抛出指定异常（用于验证容量异常不冷却账号） */
+  slotError?: unknown;
+  /** 单账号并发上限（默认 4，与 DOWNLOAD_CONFIG_DEFAULTS 一致） */
+  maxStreams?: number;
+  /** 瞬时失败冷却（毫秒，默认 10000） */
+  failureCooldownMs?: number;
 } = {}) {
   const accounts = options.accounts ?? [{
     id: 'user-1',
@@ -37,7 +44,13 @@ function setup(options: {
   const cacheConfig = { isPreferUserAccount: jest.fn(() => options.enabled ?? true) };
   const release = jest.fn();
   const resources = {
+    getConfig: jest.fn(() => ({
+      directWaitMs: 60_000,
+      userStreamMaxConcurrency: options.maxStreams ?? 4,
+      userFailureCooldownMs: options.failureCooldownMs ?? 10_000,
+    })),
     acquireUpstreamSlot: jest.fn(async () => {
+      if (options.slotError !== undefined) throw options.slotError;
       if (options.slotRejects) throw new Error('upstream busy');
       return { release };
     }),
@@ -107,14 +120,72 @@ describe('UserPreferredDownloadService', () => {
     expect(ctx.release).toHaveBeenCalledTimes(1);
   });
 
-  it('上行预算不足：直接回退，不开流', async () => {
+  it('上行预算不足：直接回退，不开流，账号槽位归还', async () => {
     const ctx = setup({
       anchor: { chatId: '-100main', messageId: '777' },
       slotRejects: true,
+      maxStreams: 1,
     });
 
     await expect(ctx.service.tryOpen({ ownerType: 'file', ownerId: 'f1' })).resolves.toBeNull();
     expect(ctx.userClient.openUserStream).not.toHaveBeenCalled();
+
+    // 账号槽位必须归还：上限 1 时，租约恢复后下一次调用仍应占到名额
+    ctx.resources.acquireUpstreamSlot.mockImplementation(async () => ({ release: ctx.release }));
+    expect(await ctx.service.tryOpen({ ownerType: 'file', ownerId: 'f1' })).not.toBeNull();
+  });
+
+  it('容量等待超时（SERVER_BUSY）不冷却账号：租约恢复后同账号仍可开流', async () => {
+    // 事故回归：等 slot 15s 超时曾被当成账号失败，把唯一 user 账号冷却 60s，
+    // 随后所有下载全部回退 Bot。容量拒绝必须只回退本次请求。
+    const ctx = setup({
+      anchor: { chatId: '-100main', messageId: '777' },
+      slotError: new DownloadResourceException({
+        status: 503,
+        errorCode: DOWNLOAD_ERROR_CODES.SERVER_BUSY,
+        message: '下载连接等待超时，请稍后重试',
+        scope: 'upstream',
+      }),
+    });
+
+    await expect(ctx.service.tryOpen({ ownerType: 'file', ownerId: 'f1' })).resolves.toBeNull();
+    expect(ctx.userClient.openUserStream).not.toHaveBeenCalled();
+
+    // 租约恢复（容量问题消失）：同一账号必须仍被视为可用
+    ctx.resources.acquireUpstreamSlot.mockImplementation(async () => ({ release: ctx.release }));
+    const retried = await ctx.service.tryOpen({ ownerType: 'file', ownerId: 'f1' });
+
+    expect(retried).not.toBeNull();
+    expect(ctx.userClient.openUserStream).toHaveBeenCalledTimes(1);
+  });
+
+  it('并发上限读取配置：maxStreams=1 时第二个并发下载直接回退 Bot', async () => {
+    const { PassThrough } = require('stream') as typeof import('stream');
+    const ctx = setup({
+      anchor: { chatId: '-100main', messageId: '777' },
+      maxStreams: 1,
+      openImpl: async () => ({ stream: new PassThrough(), size: 4 }),
+    });
+
+    expect(await ctx.service.tryOpen({ ownerType: 'file', ownerId: 'f1' })).not.toBeNull();
+    expect(await ctx.service.tryOpen({ ownerType: 'file', ownerId: 'f2' })).toBeNull();
+    expect(ctx.userClient.openUserStream).toHaveBeenCalledTimes(1);
+  });
+
+  it('瞬时失败冷却时长可配：日志按配置的秒数冷却', async () => {
+    const ctx = setup({
+      anchor: { chatId: '-100main', messageId: '777' },
+      failureCooldownMs: 5_000,
+      openImpl: async () => { throw new TelegramUserClientError('stream reset', 'other'); },
+    });
+    const warn = jest.spyOn(
+      (ctx.service as unknown as { logger: { warn(...args: unknown[]): void } }).logger,
+      'warn',
+    );
+
+    await ctx.service.tryOpen({ ownerType: 'file', ownerId: 'f1' });
+
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('冷却 5s'));
   });
 
   it('限流后进入冷却：冷却期内不再尝试开流', async () => {
@@ -138,6 +209,8 @@ describe('UserPreferredDownloadService', () => {
     let streamInstance!: InstanceType<typeof PassThrough>;
     const ctx = setup({
       anchor: { chatId: '-100main', messageId: '777' },
+      // 把上限压到 2 便于构造「占满」：上限本身来自配置，见 currentMaxStreams
+      maxStreams: 2,
       openImpl: async () => {
         streamInstance = new PassThrough();
         return { stream: streamInstance, size: 4 };
@@ -192,6 +265,7 @@ describe('UserPreferredDownloadService', () => {
     const ctx = setup({
       accounts,
       anchor: { chatId: '-100main', messageId: '777' },
+      maxStreams: 2,
       openImpl: async () => ({ stream: new PassThrough(), size: 4 }),
     });
 
@@ -216,6 +290,7 @@ describe('UserPreferredDownloadService', () => {
     const { PassThrough } = require('stream') as typeof import('stream');
     const ctx = setup({
       anchor: { chatId: '-100main', messageId: '777' },
+      maxStreams: 2,
       openImpl: async () => ({ stream: new PassThrough(), size: 4 }),
     });
 

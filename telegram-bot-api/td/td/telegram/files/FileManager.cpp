@@ -2888,28 +2888,27 @@ void FileManager::read_file_part(FileId file_id, int64 offset, int64 count, int 
     is_partial = true;
   }
 
-  auto read_file_part_promise =
-      PromiseCreator::lambda([actor_id = actor_id(this), file_id, offset, count, left_tries, is_partial,
-                              promise = std::move(promise)](Result<string> r_bytes) mutable {
-        if (r_bytes.is_error()) {
-          LOG(INFO) << "Failed to read file bytes: " << r_bytes.error();
-          if (left_tries == 1 || !is_partial) {
-            return promise.set_error(400, "Failed to read the file");
-          }
+  auto read_file_part_promise = PromiseCreator::lambda([actor_id = actor_id(this), file_id, offset, count, left_tries,
+                                                        is_partial,
+                                                        promise = std::move(promise)](Result<string> r_bytes) mutable {
+    if (r_bytes.is_error()) {
+      LOG(INFO) << "Failed to read file bytes: " << r_bytes.error();
+      if (left_tries == 1 || !is_partial) {
+        return promise.set_error(400, "Failed to read the file");
+      }
 
-          // the temporary file could be moved from temp to persistent directory
-          // we need to wait for the corresponding update and repeat the reading
-          create_actor<SleepActor>("RepeatReadFilePartActor", 0.01,
-                                   PromiseCreator::lambda([actor_id, file_id, offset, count, left_tries,
-                                                           promise = std::move(promise)](Unit) mutable {
-                                     send_closure(actor_id, &FileManager::read_file_part, file_id, offset, count,
-                                                  left_tries - 1, std::move(promise));
-                                   }))
-              .release();
-        } else {
-          promise.set_value(r_bytes.move_as_ok());
-        }
-      });
+      // the temporary file could be moved from temp to persistent directory
+      // we need to wait for the corresponding update and repeat the reading
+      create_actor<SleepActor>("RepeatReadFilePartActor", 0.01,
+                               [actor_id, file_id, offset, count, left_tries, promise = std::move(promise)]() mutable {
+                                 send_closure(actor_id, &FileManager::read_file_part, file_id, offset, count,
+                                              left_tries - 1, std::move(promise));
+                               })
+          .release();
+    } else {
+      promise.set_value(r_bytes.move_as_ok());
+    }
+  });
   send_closure(file_load_manager_, &FileLoadManager::read_file_part, *path, offset, count,
                std::move(read_file_part_promise));
 }
@@ -3045,29 +3044,49 @@ void FileManager::download(FileId file_id, int64 internal_download_id, std::shar
     callback->on_download_error(file_id, error.clone());
     return promise.set_error(std::move(error));
   }
+  if (internal_download_id != 0) {
+    pending_internal_download_generations_.erase(internal_download_id);
+  }
   if (node->local_.type() == LocalFileLocation::Type::Empty) {
     return download_impl(file_id, internal_download_id, std::move(callback), new_priority, offset, limit, Status::OK(),
-                         std::move(promise));
+                         0, std::move(promise));
+  }
+
+  uint64 download_generation = 0;
+  if (internal_download_id != 0) {
+    download_generation = ++current_internal_download_generation_;
+    pending_internal_download_generations_[internal_download_id] = download_generation;
   }
 
   LOG(INFO) << "Asynchronously check location of file " << file_id << " before downloading";
-  auto check_promise =
-      PromiseCreator::lambda([actor_id = actor_id(this), file_id, internal_download_id, callback = std::move(callback),
-                              new_priority, offset, limit, promise = std::move(promise)](Result<Unit> result) mutable {
+  auto check_promise = PromiseCreator::lambda(
+      [actor_id = actor_id(this), file_id, internal_download_id, callback = std::move(callback), new_priority, offset,
+       limit, download_generation, promise = std::move(promise)](Result<Unit> result) mutable {
         Status check_status;
         if (result.is_error()) {
           check_status = result.move_as_error();
         }
         send_closure(actor_id, &FileManager::download_impl, file_id, internal_download_id, std::move(callback),
-                     new_priority, offset, limit, std::move(check_status), std::move(promise));
+                     new_priority, offset, limit, std::move(check_status), download_generation, std::move(promise));
       });
   check_local_location_async(node, true, std::move(check_promise));
 }
 
 void FileManager::download_impl(FileId file_id, int64 internal_download_id, std::shared_ptr<DownloadCallback> callback,
                                 int32 new_priority, int64 offset, int64 limit, Status check_status,
-                                Promise<td_api::object_ptr<td_api::file>> promise) {
+                                uint64 download_generation, Promise<td_api::object_ptr<td_api::file>> promise) {
   TRY_STATUS_PROMISE(promise, G()->close_status());
+
+  if (download_generation != 0) {
+    auto it = pending_internal_download_generations_.find(internal_download_id);
+    if (it == pending_internal_download_generations_.end() || it->second != download_generation) {
+      LOG(INFO) << "Skip canceled download of file " << file_id << " with internal identifier " << internal_download_id;
+      auto error = Status::Error(200, "Canceled");
+      callback->on_download_error(file_id, error.clone());
+      return promise.set_error(std::move(error));
+    }
+    pending_internal_download_generations_.erase(it);
+  }
 
   LOG(INFO) << "Download file " << file_id << " with priority " << new_priority << " and internal identifier "
             << internal_download_id;
@@ -3171,6 +3190,10 @@ void FileManager::finish_downloads(FileId file_id, const Status &status) {
 void FileManager::cancel_download(FileId file_id, int64 internal_download_id, bool only_if_pending) {
   if (G()->close_flag()) {
     return;
+  }
+
+  if (internal_download_id != 0) {
+    pending_internal_download_generations_.erase(internal_download_id);
   }
 
   auto node = get_sync_file_node(file_id);

@@ -1,4 +1,4 @@
-import { readdirSync } from 'fs';
+import { readdirSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { getMigrationPatterns } from './database.config';
 
@@ -50,6 +50,22 @@ describe('TypeORM 迁移加载边界（排除测试文件）', () => {
     expect(matched.length).toBeGreaterThan(0);
     expect(matched.every((file) => file.includes('-Sqlite'))).toBe(true);
     expect(new Set(matched)).toEqual(new Set(files.filter((file) => /-Sqlite.*\.ts$/.test(file))));
+  });
+
+  it('A-24：每个 *-Sqlite* 迁移都必须带方言早退守卫（PG glob 会匹配到它们）', () => {
+    // PG 侧 glob 是 [0-9]*{.ts,.js}，会匹配全部 SQLite 迁移文件。唯一防线是每个文件
+    // up/down 首部的 `options.type !== 'better-sqlite3'` 早退。该守卫此前只是口头约定：
+    // 新增 SQLite 迁移漏写守卫，就会在 PostgreSQL 上执行 SQLite 方言 SQL 并中断升级链。
+    const sqliteMigrations = files.filter(
+      (file) => /-Sqlite.*\.ts$/.test(file) && !/\.spec\.|\.test\./.test(file),
+    );
+    expect(sqliteMigrations.length).toBeGreaterThan(0);
+
+    const missingGuard = sqliteMigrations.filter((file) => {
+      const source = readFileSync(join(MIGRATIONS_DIR, file), 'utf8');
+      return !/options\.type\s*!==\s*'better-sqlite3'/.test(source);
+    });
+    expect(missingGuard).toEqual([]);
   });
 
   it('任何 *.spec.* / *.test.* 测试文件都不会进入 CLI 迁移集合', () => {

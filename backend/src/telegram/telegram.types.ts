@@ -47,10 +47,58 @@ export interface TelegramUpdate {
   message?: TelegramMessage;
   edited_message?: TelegramMessage;
   channel_post?: TelegramMessage;
+  callback_query?: TelegramCallbackQuery;
+}
+
+/** 内联按钮回调查询（仅声明本项目消费的字段） */
+export interface TelegramCallbackQuery {
+  id: string;
+  from: TelegramUser;
+  /** 按钮携带的回调数据（服务端仍需重新鉴权，不可信） */
+  data?: string;
+  message?: TelegramMessage;
 }
 
 /** 发送消息结果（仅取需要的字段） */
 export interface TelegramSendMessageResult {
   message_id: number;
   chat: { id: number };
+}
+
+/** 富文本消息载体（自建 Bot API 的 rich_message 载荷，blocks 来源） */
+export interface TelegramRichMessage {
+  blocks: Array<Record<string, unknown> & { type: string }>;
+}
+
+/** 链接预览控制（替代已废弃的 disable_web_page_preview） */
+export interface TelegramLinkPreviewOptions {
+  is_disabled?: boolean;
+  url?: string;
+  prefer_small_media?: boolean;
+  prefer_large_media?: boolean;
+  show_above_text?: boolean;
+}
+
+/** 内联键盘按钮 */
+export interface TelegramInlineButton {
+  text: string;
+  url?: string;
+  callback_data?: string;
+}
+
+export interface TelegramReplyMarkup {
+  inline_keyboard: TelegramInlineButton[][];
+}
+
+/** 文本类发送选项（sendMessage / editMessageText / sendRichMessage 共用） */
+export interface TelegramTextSendOptions {
+  replyToMessageId?: number;
+  disableNotification?: boolean;
+  deferRateLimit?: boolean;
+  /** 经典标注模式；与 richMessage 互斥 */
+  parseMode?: 'HTML';
+  richMessage?: TelegramRichMessage;
+  replyMarkup?: TelegramReplyMarkup;
+  linkPreviewOptions?: TelegramLinkPreviewOptions;
+  messageEffectId?: string;
 }

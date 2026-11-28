@@ -48,6 +48,15 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+      # B-12：S3 真实端点 e2e 此前因 CI 无 MinIO 且未注入 S3_E2E_* 而永远 skip，
+      # multipart / Range 字节一致性 / 覆盖 / 删除幂等只有 mock 单测保护。
+      minio:
+        image: minio/minio:latest
+        env:
+          MINIO_ROOT_USER: minioadmin
+          MINIO_ROOT_PASSWORD: minioadmin
+        ports:
+          - 9000:9000
     defaults:
       run:
         working-directory: backend
@@ -96,8 +105,43 @@ jobs:
           npm run build:data-migrator
           test -z "$(git status --porcelain -- dist-migrator)"
 
+      - name: Prepare MinIO bucket for S3 real-endpoint e2e
+        shell: bash
+        run: |
+          for _ in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:9000/minio/health/live >/dev/null; then break; fi
+            sleep 2
+          done
+          curl -sf http://127.0.0.1:9000/minio/health/live >/dev/null
+          node -e "
+            const { S3Client, CreateBucketCommand } = require('@aws-sdk/client-s3');
+            const client = new S3Client({
+              endpoint: 'http://127.0.0.1:9000', region: 'us-east-1', forcePathStyle: true,
+              credentials: { accessKeyId: 'minioadmin', secretAccessKey: 'minioadmin' },
+            });
+            client.send(new CreateBucketCommand({ Bucket: 'tgtc-e2e' }))
+              .then(() => console.log('MinIO bucket ready'))
+              .catch((err) => {
+                if (err.name === 'BucketAlreadyOwnedByYou' || err.name === 'BucketAlreadyExists') {
+                  return console.log('MinIO bucket already exists');
+                }
+                throw err;
+              });
+          "
+
       - name: Run shared backend quality gate
         run: npm run check:ci
+
+      # S3_E2E_REQUIRED=1 让套件在缺少端点配置时直接失败而不是静默 skip，
+      # 否则「CI 绿」会再次掩盖 S3 驱动回归。
+      - name: Run S3 real-endpoint e2e against MinIO (must not silently skip)
+        env:
+          S3_E2E_ENDPOINT: http://127.0.0.1:9000
+          S3_E2E_BUCKET: tgtc-e2e
+          S3_E2E_ACCESS_KEY_ID: minioadmin
+          S3_E2E_SECRET_ACCESS_KEY: minioadmin
+          S3_E2E_REQUIRED: "1"
+        run: npm test -- --runInBand test/s3-storage.e2e-spec.ts
 
       - name: Smoke-test the complete forward migration chain on an empty database
         run: npm run migration:run

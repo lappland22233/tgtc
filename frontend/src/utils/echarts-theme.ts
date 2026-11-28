@@ -84,15 +84,58 @@ export const PERF_COLORS: Record<string, string> = {
 };
 
 /* ---- Shared style presets ---- */
+export function getThemeChartColors() {
+  const dark = isDarkMode();
+  const style = typeof getComputedStyle === 'function' ? getComputedStyle(document.documentElement) : null;
+  const color = (token: string, fallback: string) => style?.getPropertyValue(token).trim() || fallback;
+  return {
+    dark,
+    palette: dark ? CHART_COLORS_DARK : CHART_COLORS,
+    surface: color('--workspace-surface', dark ? '#242927' : '#FFFEFA'),
+    text: color('--workspace-text', dark ? '#EDF2EE' : '#202923'),
+    muted: color('--workspace-muted', dark ? '#B2BEB7' : '#59645E'),
+    border: color('--workspace-border', dark ? '#3A463E' : '#E3E6DF'),
+    axisLabel: color('--workspace-muted', dark ? '#8895A7' : '#5F6B7A'),
+    axisLine: dark ? 'rgba(232,237,245,0.12)' : 'rgba(22,25,31,0.12)',
+    splitLine: dark ? 'rgba(232,237,245,0.06)' : 'rgba(22,25,31,0.06)',
+    emptySlice: dark ? 'rgba(255,255,255,0.08)' : 'rgba(22,25,31,0.08)',
+    emphasisShadow: dark ? 'rgba(0,0,0,0.4)' : 'rgba(0,0,0,0.15)',
+  };
+}
+
+export function getTooltipBase() {
+  const { surface, border, text } = getThemeChartColors();
+  return {
+    backgroundColor: surface,
+    borderColor: border,
+    borderWidth: 1,
+    textStyle: { color: text, fontSize: 12 },
+    extraCssText: 'border-radius: 4px; box-shadow: var(--shadow-md);',
+  };
+}
+
+export function getLegendBase() {
+  const { muted } = getThemeChartColors();
+  return {
+    textStyle: { color: muted, fontSize: 11 },
+    icon: 'roundRect' as const,
+    itemWidth: 10,
+    itemHeight: 4,
+    itemGap: 16,
+  };
+}
+
 export const tooltipBase = {
   backgroundColor: 'var(--workspace-surface, #FFFEFA)',
   borderColor: 'var(--workspace-border, #E3E6DF)',
   textStyle: { color: 'var(--workspace-text, #202923)', fontSize: 12 },
-  extraCssText: 'border-radius: 4px; box-shadow: 0 2px 8px rgba(0,0,0,0.12);',
+  extraCssText: 'border-radius: 4px; box-shadow: var(--shadow-md);',
 };
 
 export const legendBase = {
-  textStyle: { color: 'var(--workspace-muted, #59645E)', fontSize: 11 },
+  get textStyle() {
+    return { color: getThemeChartColors().muted, fontSize: 11 };
+  },
   icon: 'roundRect' as const,
   itemWidth: 10,
   itemHeight: 4,

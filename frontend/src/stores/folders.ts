@@ -15,10 +15,13 @@ export interface Folder {
   children?: Folder[];
 }
 
-/** 文件夹内容（子文件夹 + 文件） */
+/** 文件夹内容（子文件夹 + 文件）。传分页参数时额外带 total/page/limit */
 export interface FolderContents {
   subfolders: Folder[];
   files: FileItem[];
+  total?: number;
+  page?: number;
+  limit?: number;
 }
 
 /**
@@ -172,9 +175,23 @@ export const useFolderStore = defineStore('folders', () => {
     await fetchTree();
   }
 
-  /** 列出指定文件夹的内容（子文件夹 + 文件） */
-  async function listContents(folderId: string | null = currentFolderId.value): Promise<FolderContents> {
-    const params = folderId ? { parentId: folderId } : {};
+  /**
+   * 列出指定文件夹的内容（子文件夹 + 文件）。
+   *
+   * C-09：省略 pagination 时保持历史全量行为；传入 { page, limit } 时服务端只返回一页
+   * 并附带 total，供大目录按需加载（万级文件目录全量加载会让内存与响应时间线性膨胀）。
+   * 子文件夹始终全量返回。
+   */
+  async function listContents(
+    folderId: string | null = currentFolderId.value,
+    pagination?: { page: number; limit: number },
+  ): Promise<FolderContents> {
+    const params: Record<string, unknown> = {};
+    if (folderId) params.parentId = folderId;
+    if (pagination) {
+      params.page = pagination.page;
+      params.limit = pagination.limit;
+    }
     const res = await api.get('/folders/contents', { params });
     return res.data.data as FolderContents;
   }

@@ -76,9 +76,12 @@ class ForumTopicManager final : public Actor {
   void get_forum_topic_link(DialogId dialog_id, ForumTopicId forum_topic_id,
                             Promise<td_api::object_ptr<td_api::messageLink>> &&promise);
 
-  void get_forum_topics(DialogId dialog_id, string query, int32 offset_date, MessageId offset_message_id,
+  void get_forum_topics(DialogId dialog_id, string query, CustomEmojiId icon_custom_emoji_id, bool exclude_open,
+                        bool exclude_closed, int32 offset_date, MessageId offset_message_id,
                         ForumTopicId offset_forum_topic_id, int32 limit,
                         Promise<td_api::object_ptr<td_api::forumTopics>> promise);
+
+  void get_forum_topic_popular_icons(DialogId dialog_id, Promise<td_api::object_ptr<td_api::stickers>> &&promise);
 
   void toggle_forum_topic_is_closed(DialogId dialog_id, ForumTopicId forum_topic_id, bool is_closed,
                                     Promise<Unit> &&promise);

@@ -59,7 +59,7 @@ const emit = defineEmits<{
 
 .fl-search-form {
   display: flex;
-  flex: 1 1 150px;
+  flex: 1 1 100%;
   min-width: 0;
   align-items: center;
   margin: 0;
@@ -80,13 +80,14 @@ const emit = defineEmits<{
 
 .fl-search-form :deep(.t-input) {
   border: 0;
-  min-height: 34px;
+  min-height: 42px;
   background: transparent;
   box-shadow: none;
 }
 
 .fl-search-form :deep(.t-input__inner) {
   color: var(--workspace-text);
+  font-size: 16px;
 }
 
 .fl-search-form :deep(.t-input__inner::placeholder),
@@ -96,14 +97,13 @@ const emit = defineEmits<{
 
 .fl-search-form .fl-search-submit,
 .fl-toolbar-right .fl-tag-button {
-  min-height: 36px;
+  min-height: 44px;
   border-radius: 8px;
   color: var(--workspace-text);
 }
 
 .fl-search-form .fl-search-submit {
   margin-inline-end: 2px;
-  min-height: 32px;
   color: var(--workspace-muted);
 }
 
@@ -118,23 +118,35 @@ const emit = defineEmits<{
   color: var(--workspace-accent);
 }
 
-@media (max-width: 768px) {
+@media (min-width: 481px) {
+  .fl-search-form {
+    flex: 1 1 150px;
+  }
+}
+
+@media (min-width: 769px) {
   .fl-search-form :deep(.t-input) {
-    min-height: 42px;
+    min-height: 34px;
   }
 
   .fl-search-form :deep(.t-input__inner) {
-    font-size: 16px;
+    font-size: 14px;
   }
 
   .fl-search-form .fl-search-submit,
   .fl-toolbar-right .fl-tag-button {
-    min-height: 44px;
+    min-height: 36px;
+  }
+
+  .fl-search-form .fl-search-submit {
+    min-height: 32px;
   }
 }
-@media (max-width: 360px) {
-  .fl-search-form {
-    flex-basis: 100%;
+
+@media (pointer: coarse) {
+  .fl-search-form .fl-search-submit,
+  .fl-toolbar-right .fl-tag-button {
+    min-height: 44px;
   }
 }
 </style>

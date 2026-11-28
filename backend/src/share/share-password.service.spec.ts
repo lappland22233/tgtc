@@ -1,4 +1,5 @@
 import { ConfigService } from '@nestjs/config';
+import { createHash } from 'crypto';
 import { JwtService } from '@nestjs/jwt';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { Test } from '@nestjs/testing';
@@ -6,6 +7,9 @@ import { BannedIP } from '../common/entities/banned-ip.entity';
 import { ConfigCacheService } from '../common/services/config-cache.service';
 import { RateLimitService } from '../common/services/rate-limit.service';
 import { SharePasswordService } from './share-password.service';
+
+/** C-01：限流键必须是 token 的 SHA-256 摘要，明文 token 不得落进 rate_limits 表 */
+const tokenKey = (token: string) => createHash('sha256').update(token).digest('hex');
 
 describe('SharePasswordService', () => {
   const bannedRepo = { upsert: jest.fn(), createQueryBuilder: jest.fn() };
@@ -38,12 +42,12 @@ describe('SharePasswordService', () => {
     // G5-08：新增 token-lock 键作为 24h 累计失败锁定探针，共 3 个维度
     expect(rateLimit.checkAndIncrement).toHaveBeenCalledTimes(2);
     expect(rateLimit.checkAndIncrement).toHaveBeenCalledWith(
-      'share-password:token:share-token', 'share_password_precheck', 10, 60000, 60000,
+      `share-password:token:${tokenKey('share-token')}`, 'share_password_precheck', 10, 60000, 60000,
     );
     expect(rateLimit.checkAndIncrement).toHaveBeenCalledWith(
       'share-password:ip:127.0.0.1', 'share_password_precheck', 10, 60000, 60000,
     );
-    expect(rateLimit.isLocked).toHaveBeenCalledWith('share-password:token-lock:share-token');
+    expect(rateLimit.isLocked).toHaveBeenCalledWith(`share-password:token-lock:${tokenKey('share-token')}`);
   });
 
   it('任一维度锁定时拒绝昂贵密码验证', async () => {
@@ -64,14 +68,14 @@ describe('SharePasswordService', () => {
     rateLimit.checkAndIncrement.mockResolvedValue({ allowed: false, waitMinutes: 1440 });
     await service.recordTokenFailedAttempt('share-token');
     expect(rateLimit.incrementCounter).toHaveBeenCalledWith(
-      'share-password:token-fail:share-token', 'share_password_token_fail', 1, 3600000,
+      `share-password:token-fail:${tokenKey('share-token')}`, 'share_password_token_fail', 1, 3600000,
     );
     // 24h 锁定触发
     expect(rateLimit.checkAndIncrement).toHaveBeenCalledWith(
-      'share-password:token-lock:share-token', 'share_password_token_lock', 1, 24 * 3600 * 1000, 3600000,
+      `share-password:token-lock:${tokenKey('share-token')}`, 'share_password_token_lock', 1, 24 * 3600 * 1000, 3600000,
     );
     // 重置累计失败计数，便于下一轮
-    expect(rateLimit.reset).toHaveBeenCalledWith('share-password:token-fail:share-token');
+    expect(rateLimit.reset).toHaveBeenCalledWith(`share-password:token-fail:${tokenKey('share-token')}`);
   });
 
   it('使用明确计数 API 触发临时封禁且不传零锁定时长', async () => {

@@ -38,6 +38,36 @@ function makeQueue() {
   return { add: jest.fn() };
 }
 
+describe('B-17：committed 恢复必须走 processor 幂等收尾', () => {
+  it('有有效远端引用的 committed 文件重新入队，而不是直接置 ready', async () => {
+    const committed = {
+      id: 'f-1', uploadVersion: 2, status: 'processing', uploadStage: 'committed',
+      telegramFileId: 'tg-1', storageBackend: 'telegram', updatedAt: new Date(),
+    };
+    const find = jest.fn()
+      .mockResolvedValueOnce([committed])
+      .mockResolvedValueOnce([]);
+    const updateChain: any = {
+      update: jest.fn(() => updateChain), set: jest.fn(() => updateChain),
+      where: jest.fn(() => updateChain), andWhere: jest.fn(() => updateChain),
+      execute: jest.fn().mockResolvedValue({ affected: 1 }),
+    };
+    const fileRepo = { find, createQueryBuilder: jest.fn(() => updateChain), update: jest.fn() };
+    const queue = { getJob: jest.fn().mockResolvedValue(undefined), add: jest.fn().mockResolvedValue({}) };
+    const svc = new TasksService(repo(), repo(), repo(), repo(), repo(), fileRepo as any, queue as any);
+
+    await (svc as any).recoverCommittedFiles();
+
+    // 直接置 ready 会绕过主副本登记、镜像触发与 GDrive 双写，文件永远没有副本行与镜像任务
+    expect(queue.add).toHaveBeenCalledWith(
+      'upload',
+      expect.objectContaining({ fileId: 'f-1', uploadVersion: 2 }),
+      expect.objectContaining({ jobId: 'file-upload:f-1:2' }),
+    );
+    expect(updateChain.set).not.toHaveBeenCalledWith(expect.objectContaining({ status: 'ready' }));
+  });
+});
+
 describe('TasksService', () => {
   const banned=repo(), share=repo(), rate=repo(), audit=repo(), revoked=repo(), files=makeFileRepo([], 0);
   const service=new TasksService(banned,share,rate,audit,revoked,files as any, makeQueue() as any);

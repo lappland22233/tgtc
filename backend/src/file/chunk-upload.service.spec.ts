@@ -8,6 +8,7 @@ import * as path from 'path';
 jest.mock('./file.service', () => ({ FileService: class FileService {} }));
 
 import { ChunkUploadService } from './chunk-upload.service';
+import { pendingUploadDirectory, pendingUploadName } from './pending-upload';
 import { UploadDiskBudgetService } from './upload-disk-budget.service';
 
 const MB = 1024 * 1024;
@@ -54,6 +55,83 @@ describe('ChunkUploadService session quota', () => {
   });
 
   const init = () => service.init('file.bin', MB, 'application/octet-stream', 1, MB, userId);
+
+  describe('discardHandoffSource 与 Worker 接管竞态（B-03 回归）', () => {
+    const makeSession = async () => {
+      const dir = await fsp.mkdtemp(path.join(tmpdir(), 'handoff-'));
+      const handoffPath = path.join(dir, 'file-id');
+      await fsp.writeFile(handoffPath, 'payload');
+      await fsp.writeFile(`${handoffPath}.telegram.json`, '{}');
+      return {
+        dir,
+        handoffPath,
+        session: {
+          savedFileId: 'file-id',
+          savedFileUploadVersion: 2,
+          handoffPath,
+          overwriteFileId: null,
+          mergeStatus: 'error',
+        },
+      };
+    };
+
+    it.each(['active', 'completed', 'failed', 'unknown'])(
+      'Worker 持有任务（%s）时不得删源与回执，也不得结束 processing 记录',
+      async (state) => {
+        const { dir, handoffPath, session } = await makeSession();
+        fileUploadQueue.getJob.mockResolvedValue({ getState: jest.fn().mockResolvedValue(state) });
+
+        await (service as any).discardHandoffSource(session);
+
+        expect(fs.existsSync(handoffPath)).toBe(true);
+        expect(fs.existsSync(`${handoffPath}.telegram.json`)).toBe(true);
+        expect(fileService.softDeleteProcessingFile).not.toHaveBeenCalled();
+        await fsp.rm(dir, { recursive: true, force: true });
+      },
+    );
+
+    it('任务不存在（入队失败）时清掉交接源与回执并结束 processing 记录', async () => {
+      const { dir, handoffPath, session } = await makeSession();
+      fileUploadQueue.getJob.mockResolvedValue(undefined);
+
+      await (service as any).discardHandoffSource(session);
+
+      expect(fs.existsSync(handoffPath)).toBe(false);
+      expect(fs.existsSync(`${handoffPath}.telegram.json`)).toBe(false);
+      expect(fileService.softDeleteProcessingFile).toHaveBeenCalledWith('file-id', 2);
+      await fsp.rm(dir, { recursive: true, force: true });
+    });
+
+    it('B-20：mergeRecoverable 经 getStatus 透出，供前端区分可恢复与确定性失败', async () => {
+      const { uploadId } = await init();
+      const session = (service as any).sessions.get(uploadId);
+      session.mergeStatus = 'error';
+      session.mergeError = 'Redis 入队失败';
+      session.mergeRecoverable = true;
+
+      const recoverable = await service.getStatus(uploadId, userId);
+      expect(recoverable.mergeStatus).toBe('error');
+      expect(recoverable.mergeRecoverable).toBe(true);
+
+      // 未标记时必须是 false，前端不得把任意 error 当作可恢复
+      session.mergeRecoverable = false;
+      expect((await service.getStatus(uploadId, userId)).mergeRecoverable).toBe(false);
+    });
+
+    it('尚未开始的任务先移除再清源；移除失败则保留源交 Worker 收尾', async () => {
+      const { dir, handoffPath, session } = await makeSession();
+      fileUploadQueue.getJob.mockResolvedValue({
+        getState: jest.fn().mockResolvedValue('waiting'),
+        remove: jest.fn().mockRejectedValue(new Error('job became active')),
+      });
+
+      await (service as any).discardHandoffSource(session);
+
+      expect(fs.existsSync(handoffPath)).toBe(true);
+      expect(fileService.softDeleteProcessingFile).not.toHaveBeenCalled();
+      await fsp.rm(dir, { recursive: true, force: true });
+    });
+  });
 
   it('accepts a session whose declared chunk size is exactly the 16MiB maximum', async () => {
     const chunkSize = 16 * MB;
@@ -121,6 +199,60 @@ describe('ChunkUploadService session quota', () => {
     service.triggerMerge(uploadId, userId, upload);
     expect(session.mergeStatus).toBe('error');
     expect(upload).not.toHaveBeenCalled();
+  });
+
+  it('失败但持有已交接的上传源时允许重试合并（否则恢复链路是死代码）', async () => {
+    const { uploadId } = await init();
+    const session = (service as any).sessions.get(uploadId);
+    // 模拟「文件已落库、已交接 pending 源，但入队失败」：这正是可恢复的 error
+    session.mergeStatus = 'error';
+    session.mergeError = 'Redis 入队失败';
+    session.savedFileId = 'file-1';
+    session.savedFileUploadVersion = 1;
+    session.handoffPath = path.join(pendingUploadDirectory(), pendingUploadName('file-1', 1));
+
+    service.triggerMerge(uploadId, userId, jest.fn());
+
+    // 关键断言：会话被重新接纳进入 merging，而不是停在 error 被清理掉
+    expect(session.mergeStatus).toBe('merging');
+    expect(session.mergeError).toBeUndefined();
+    await session.mergePromise;
+    // 交接源缺失时最终仍会落 error（可继续重试），但绝不能从未进入重试
+    expect(session.mergeStatus).toBe('error');
+    expect(session.mergeError).toContain('已交接的上传源缺失');
+  });
+
+  it('重试合并前取消已排期的清理，避免重试途中会话被删', async () => {
+    const { uploadId } = await init();
+    const session = (service as any).sessions.get(uploadId);
+    session.mergeStatus = 'error';
+    session.savedFileId = 'file-2';
+    session.savedFileUploadVersion = 1;
+    session.handoffPath = path.join(pendingUploadDirectory(), pendingUploadName('file-2', 1));
+
+    const clearSpy = jest.spyOn(global, 'clearTimeout');
+    const timer = setTimeout(() => undefined, 60_000);
+    session.cleanupTimer = timer;
+
+    service.triggerMerge(uploadId, userId, jest.fn().mockResolvedValue({ id: 'file-2', originalName: 'x' }));
+
+    expect(clearSpy).toHaveBeenCalledWith(timer);
+    expect(session.cleanupTimer).toBeUndefined();
+    clearSpy.mockRestore();
+    await session.mergePromise;
+  });
+
+  it('失败会话的无交接源（尚未落库）不重试合并，避免重复扣减磁盘', async () => {
+    const { uploadId } = await init();
+    const session = (service as any).sessions.get(uploadId);
+    session.mergeStatus = 'error';
+    session.mergeError = '合并校验失败';
+    const upload = jest.fn();
+
+    service.triggerMerge(uploadId, userId, upload);
+
+    expect(upload).not.toHaveBeenCalled();
+    expect(session.mergeStatus).toBe('error');
   });
 
   it.each(['done', 'error'] as const)('does not count %s sessions against the active quota', async (status) => {

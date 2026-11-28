@@ -13,6 +13,7 @@ import { ConfigCacheService } from '../common/services/config-cache.service';
 import { AuditService } from '../common/services/audit.service';
 import { AuditStatus } from '../common/entities/audit-log.entity';
 import { RegisterDto, LoginDto, VerifyEmailDto, SendCodeDto, ResetPasswordDto } from './auth.dto';
+import { isDatabaseUniqueViolation } from '../database/database-types';
 import { RateLimitService } from '../common/services/rate-limit.service';
 import { BCRYPT_ROUNDS } from '../common/constants/bcrypt';
 import { TurnstileService } from '../common/services/turnstile.service';
@@ -184,9 +185,9 @@ export class AuthService {
       if (queryRunner.isTransactionActive) {
         await queryRunner.rollbackTransaction();
       }
-      // 处理唯一约束冲突（含邮箱唯一和 super_admin 角色唯一索引）
-      const code = (error as { code?: string }).code;
-      if (error instanceof Error && code === '23505') {
+      // 处理唯一约束冲突（含邮箱唯一和 super_admin 角色唯一索引）。
+      // 必须用跨方言判定：只看 '23505' 会把 SQLite 的并发注册透传成 500。
+      if (isDatabaseUniqueViolation(error)) {
         throw new BadRequestException('该邮箱已被注册');
       }
       throw error;
@@ -199,6 +200,15 @@ export class AuthService {
 
   async login(loginDto: LoginDto, ip: string): Promise<{ accessToken: string; user: Partial<User> }> {
     const now = new Date();
+    const normalizedEmail = loginDto.email.toLowerCase().trim();
+
+    // 预检必须**先于**封禁查询与 dummy bcrypt：被封禁的 IP 走 dummy compare 分支时
+    // 同样要执行纯 JS 的 bcrypt（~250ms 主线程 CPU），若仍排在预检之前，
+    // 高频请求就能绕过短窗口预算持续打满事件循环，使封禁本身成为 DoS 入口。
+    const preflight = await this.rateLimitService.checkLoginPreflight(ip, normalizedEmail);
+    if (!preflight.allowed) {
+      throw new UnauthorizedException(`登录请求过于频繁，请 ${preflight.waitMinutes ?? 1} 分钟后重试`);
+    }
 
     // 检查 IP 维度的封禁（G1-01：追加 unbannedAt IS NULL，软解封后不再判封禁）
     const bannedIP = await this.bannedIPRepository
@@ -226,14 +236,6 @@ export class AuthService {
         status: AuditStatus.FAILURE,
       });
       throw new UnauthorizedException('邮箱或密码错误');
-    }
-
-    // 在查用户及执行 bcrypt 前先施加数据库共享的 IP 与 IP+email 短窗口预算，
-    // 防止轮换邮箱绕过细粒度失败锁时仍可无限消耗纯 JS bcrypt CPU。
-    const normalizedEmail = loginDto.email.toLowerCase().trim();
-    const preflight = await this.rateLimitService.checkLoginPreflight(ip, normalizedEmail);
-    if (!preflight.allowed) {
-      throw new UnauthorizedException(`登录请求过于频繁，请 ${preflight.waitMinutes ?? 1} 分钟后重试`);
     }
 
     // 登录失败锁使用 IP + email 维度；成功登录时只重置此失败锁，预校验窗口自然过期。
@@ -307,12 +309,17 @@ export class AuthService {
         loginLimitKey, 'login_failure',
         loginMaxFailures2, loginLockDuration2, loginLockDuration2,
       );
-      // 审计日志：登录失败（密码错误）
+      // 审计日志：登录失败（密码错误）。attempts 必须是**实际**失败次数，
+      // 写配置上限会让审计无法区分「首次失败」与「即将被锁」。
       this.auditService.log({
         action: 'login_failed',
         userId: user.id,
         ip,
-        metadata: { reason: '密码错误', attempts: loginMaxFailures2 },
+        metadata: {
+          reason: '密码错误',
+          attempts: result.attemptCount ?? undefined,
+          maxAttempts: loginMaxFailures2,
+        },
         status: AuditStatus.FAILURE,
       });
       if (!result.allowed) {

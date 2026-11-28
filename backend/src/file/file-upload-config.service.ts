@@ -137,7 +137,7 @@ export class FileUploadConfigService implements OnModuleInit {
   async isFileTypeAllowed(
     filename: string,
     buffer?: Buffer,
-  ): Promise<{ allowed: boolean; reason?: string }> {
+  ): Promise<{ allowed: boolean; reason?: string; detectedExt?: string | null }> {
     // === 阶段 1: Magic bytes 检测 ===
     let detectedExt: string | null = null;
 
@@ -206,7 +206,7 @@ export class FileUploadConfigService implements OnModuleInit {
 
     // === 阶段 3: 特殊规则 ===
     if (this.fileTypeMode === 'blacklist' && this.fileTypeFilter.length === 0) {
-      return { allowed: true };
+      return { allowed: true, detectedExt };
     }
     if (this.fileTypeMode === 'whitelist' && this.fileTypeFilter.length === 0) {
       return {
@@ -228,6 +228,6 @@ export class FileUploadConfigService implements OnModuleInit {
       }
     }
 
-    return { allowed: true };
+    return { allowed: true, detectedExt };
   }
 }

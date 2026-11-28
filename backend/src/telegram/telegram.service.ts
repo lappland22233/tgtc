@@ -7,8 +7,8 @@ import { constants, promises as fs } from 'fs';
 import type { FileHandle } from 'fs/promises';
 import * as path from 'path';
 import FormData from 'form-data';
-import { readTelegramRetryAfter, TelegramFileNotFoundError, TelegramRateLimitError, TelegramStreamPathError } from './telegram.errors';
-import type { TelegramSendMessageResult, TelegramUpdate } from './telegram.types';
+import { readTelegramRetryAfter, TelegramFileNotFoundError, TelegramRateLimitError, TelegramRequestRejectedError, TelegramStreamPathError, classifyDegradableFields } from './telegram.errors';
+import type { TelegramSendMessageResult, TelegramTextSendOptions, TelegramUpdate } from './telegram.types';
 
 interface TelegramMedia {
   file_id?: string;
@@ -152,6 +152,13 @@ export class TelegramService {
    * 安全化 Telegram 400 错误描述：脱敏 Bot Token、清理控制字符、
    * 规范化空白并限制长度，避免敏感信息或冗长响应进入日志与持久化字段。
    */
+  /**
+   * 把 400 的 description 归因到「可剥离的可选项」。
+   *
+   * 返回空数组表示无法精确归因。注意这里**不**用于判定"是否该降级"——永久性错误
+   * （拉黑、无写权限）由 {@link isPermanentRejection} 单独识别，因为它们的特征是
+   * "换什么格式都会失败"，而不是"归因不到具体字段"。
+   */
   private safeTelegramDescription(description: string): string {
     const cleaned = this.redactToken(description)
       .replace(/[\u0000-\u001F\u007F]/g, ' ')
@@ -282,8 +289,13 @@ export class TelegramService {
             if (description.includes('chat not found') || description.includes('PEER_ID_INVALID')) {
               throw new Error('Telegram 群组未找到，请检查 TELEGRAM_CHAT_ID 配置或确认 Bot 已加入群组');
             }
-            // 保留 Telegram 原始 description（安全化后），不再统一归因为 chat_id 配置错误
-            throw new Error(this.safeTelegramDescription(description));
+            // 保留 Telegram 原始 description（安全化后），不再统一归因为 chat_id 配置错误。
+            // 只把**可归因于载荷格式或可选项**的 400 标记为可降级：拉黑、无写权限这类
+            // 与格式无关的永久错误，换个格式重发只会再失败一次，还多打一次接口。
+            throw new TelegramRequestRejectedError(
+              this.safeTelegramDescription(description),
+              classifyDegradableFields(description),
+            );
           }
           if (status === 404) {
             if (this.isTelegramFileNotFoundError(description)) {
@@ -963,42 +975,50 @@ export class TelegramService {
    * 发送文本消息（Bot 入站功能的回复通道）。
    *
    * - 复用 telegramRequest 的 429 重试与 Token 脱敏；
-   * - 默认不解析 HTML/Markdown（对用户可控内容不设置 parse_mode，避免注入）；
-   * - URL 会被 Telegram 自动识别为可点击链接。
+   * - `parseMode` 只由调用方显式传入（渲染层已对用户可控内容做转义），默认仍不解析；
+   * - `richMessage` 走**独立的 `/sendRichMessage` 端点**（见下），与 `parseMode` 互斥；
+   * - URL 会被 Telegram 自动识别为可点击链接，预览由 `linkPreviewOptions` 控制。
+   *
+   * 为什么富文本必须换端点：服务端 `process_send_message_query` 无条件走
+   * `get_input_message_text`，只读 `text` 字段，为空即 400 "Message text is empty"；
+   * `rich_message` 只由独立的 `process_send_rich_message_query`（`/sendRichMessage`）解析。
+   * 把 rich_message 发给 `/sendMessage`（或反之塞 text）都会被拒。
    */
   async sendMessage(
     chatId: string | number,
     text: string,
-    options?: { replyToMessageId?: number; disableNotification?: boolean; deferRateLimit?: boolean },
+    options?: TelegramTextSendOptions,
   ): Promise<TelegramSendMessageResult> {
     if (!this.botToken) {
       throw new Error('TELEGRAM_BOT_TOKEN 未配置，无法发送消息');
     }
+    const rich = options?.richMessage;
     const payload: Record<string, unknown> = {
       chat_id: String(chatId),
-      text,
-      disable_web_page_preview: false,
     };
-    if (options?.replyToMessageId) {
-      payload.reply_to_message_id = options.replyToMessageId;
+    if (rich) {
+      // /sendRichMessage 不接受 text，只解析 rich_message
+      payload.rich_message = JSON.stringify(rich);
+    } else {
+      payload.text = text;
+      if (options?.parseMode) payload.parse_mode = options.parseMode;
     }
-    if (options?.disableNotification) {
-      payload.disable_notification = true;
-    }
+    this.applyTextSendOptions(payload, options);
 
+    const method = rich ? 'sendRichMessage' : 'sendMessage';
     const response = await this.telegramRequest(
       () => axios.post<{ ok: boolean; result: TelegramSendMessageResult; description?: string }>(
-        `${this.getBaseUrl()}/sendMessage`,
+        `${this.getBaseUrl()}/${method}`,
         payload,
         { timeout: 30 * 1000 },
       ),
-      'sendMessage',
+      method,
       3,
       { deferRateLimit: options?.deferRateLimit },
     );
 
     if (!response.data?.ok || !response.data.result) {
-      throw new Error(`Telegram sendMessage 返回异常: ${this.safeTelegramDescription(response.data?.description || 'unknown')}`);
+      throw new Error(`Telegram ${method} 返回异常: ${this.safeTelegramDescription(response.data?.description || 'unknown')}`);
     }
     return response.data.result;
   }
@@ -1011,17 +1031,23 @@ export class TelegramService {
     chatId: string | number,
     messageId: number,
     text: string,
-    options?: { deferRateLimit?: boolean },
+    options?: TelegramTextSendOptions,
   ): Promise<boolean> {
     if (!this.botToken) {
       throw new Error('TELEGRAM_BOT_TOKEN 未配置，无法编辑消息');
     }
-    const payload = {
+    const rich = options?.richMessage;
+    const payload: Record<string, unknown> = {
       chat_id: String(chatId),
       message_id: messageId,
-      text,
-      disable_web_page_preview: false,
     };
+    if (rich) {
+      payload.rich_message = JSON.stringify(rich);
+    } else {
+      payload.text = text;
+      if (options?.parseMode) payload.parse_mode = options.parseMode;
+    }
+    this.applyTextSendOptions(payload, options);
 
     const response = await this.telegramRequest(
       () => axios.post<{ ok: boolean; result?: unknown; description?: string }>(
@@ -1032,6 +1058,93 @@ export class TelegramService {
       'editMessageText',
       3,
       { deferRateLimit: options?.deferRateLimit },
+    );
+
+    return Boolean(response.data?.ok);
+  }
+
+  /**
+   * 文本类发送的公共可选参数（sendMessage / editMessageText / answerCallbackQuery 之外的富文本共用）。
+   *
+   * 用 `link_preview_options` 取代已废弃的 `disable_web_page_preview`：
+   * 前者在官方 Bot API 已废弃后者，且自建 10.x 服务端只认新字段。
+   */
+  private applyTextSendOptions(payload: Record<string, unknown>, options?: TelegramTextSendOptions): void {
+    if (options?.replyToMessageId) {
+      payload.reply_to_message_id = options.replyToMessageId;
+    }
+    if (options?.disableNotification) {
+      payload.disable_notification = true;
+    }
+    if (options?.replyMarkup) {
+      payload.reply_markup = options.replyMarkup;
+    }
+    if (options?.messageEffectId) {
+      payload.message_effect_id = options.messageEffectId;
+    }
+    // 仅在显式配置时下发，避免改变既有请求体（链接预览默认行为保持不变）
+    if (options?.linkPreviewOptions) {
+      payload.link_preview_options = options.linkPreviewOptions;
+    }
+  }
+
+  /**
+   * 回应内联按钮回调（answerCallbackQuery）。
+   *
+   * 必须在收到 callback_query 后调用，否则客户端会一直显示加载态。
+   */
+  async answerCallbackQuery(
+    callbackQueryId: string,
+    options?: { text?: string; showAlert?: boolean; cacheTimeSeconds?: number },
+  ): Promise<boolean> {
+    if (!this.botToken) {
+      throw new Error('TELEGRAM_BOT_TOKEN 未配置，无法回应回调');
+    }
+    const payload: Record<string, unknown> = { callback_query_id: callbackQueryId };
+    if (options?.text) payload.text = options.text;
+    if (options?.showAlert) payload.show_alert = true;
+    if (options?.cacheTimeSeconds !== undefined) payload.cache_time = options.cacheTimeSeconds;
+
+    const response = await this.telegramRequest(
+      () => axios.post<{ ok: boolean; description?: string }>(
+        `${this.getBaseUrl()}/answerCallbackQuery`,
+        payload,
+        { timeout: 15 * 1000 },
+      ),
+      'answerCallbackQuery',
+      2,
+    );
+
+    return Boolean(response.data?.ok);
+  }
+
+  /**
+   * 设置命令菜单（setMyCommands）。
+   *
+   * `scope` 为 Telegram 的 scope 对象（`{ type: 'default' }` / `{ type: 'chat', chat_id }` 等）。
+   * 本地 Bot API fork 已实现该方法（默认 scope 与按 chat 定制均支持）。
+   *
+   * 该方法**不重试**：管理员从未启动过 Bot 时服务端返回 chat not found，属于预期情况，
+   * 由调用方决定忽略；真正的 400（方法不支持）也应由调用方置为永久禁用，而不是反复触发。
+   */
+  async setMyCommands(
+    commands: Array<{ command: string; description: string }>,
+    scope?: Record<string, unknown>,
+  ): Promise<boolean> {
+    if (!this.botToken) {
+      throw new Error('TELEGRAM_BOT_TOKEN 未配置，无法设置命令菜单');
+    }
+    const payload: Record<string, unknown> = { commands: JSON.stringify(commands) };
+    if (scope) payload.scope = JSON.stringify(scope);
+
+    const response = await this.telegramRequest(
+      () => axios.post<{ ok: boolean; description?: string }>(
+        `${this.getBaseUrl()}/setMyCommands`,
+        payload,
+        { timeout: 10 * 1000 },
+      ),
+      'setMyCommands',
+      1,
     );
 
     return Boolean(response.data?.ok);
@@ -1065,7 +1178,7 @@ export class TelegramService {
             offset,
             timeout: timeoutSeconds,
             limit,
-            allowed_updates: JSON.stringify(['message']),
+            allowed_updates: JSON.stringify(['message', 'callback_query']),
           },
         },
       ),

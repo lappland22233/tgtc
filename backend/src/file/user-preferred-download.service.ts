@@ -1,16 +1,41 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Readable } from 'stream';
 import { TelegramCopyOwnerType } from '../common/entities/telegram-file-copy.entity';
-import { DownloadResourceCoordinatorService } from './download-resource-coordinator.service';
+import {
+  DOWNLOAD_ERROR_CODES,
+  DownloadResourceCoordinatorService,
+  DownloadResourceException,
+} from './download-resource-coordinator.service';
 import { FileCacheService } from './file-cache.service';
 import { TelegramMainChatAnchorService } from '../telegram-mirror/telegram-main-chat-anchor.service';
 import { UserAccountDirectoryService, RelayUserAccount } from '../telegram-account-pool/user-account-directory.service';
 import { TelegramUserClientError, TelegramUserClientService } from '../telegram-user/telegram-user-client.service';
 
-/** 用户账号级冷却的默认时长（无 retry_after 时的保守值） */
-const DEFAULT_COOLDOWN_MS = 60_000;
-/** 单账号并发上限：MTProto 单 session 并发过高会被限流，这里保守取 2 */
-const MAX_CONCURRENT_STREAMS = 2;
+/** 限流冷却的下限：即使没有 retry_after，也至少冷却这么久，避免立刻重试加剧 flood */
+const FLOOD_MIN_COOLDOWN_MS = 60_000;
+/**
+ * 容量类拒绝的业务码：等待上行预算超时 / 队列满 / 请求取消 / 服务关闭。
+ *
+ * 这些是**调度容量**信号，与「账号本身能不能用」无关。历史缺陷：`tryOpen` 的
+ * 单个 catch 把它们也交给了 `recordFailure`，于是一次等 slot 超时就把唯一的
+ * user 账号冷却 60s，随后所有下载全部回退 Bot。
+ */
+const CAPACITY_ERROR_CODES: ReadonlySet<string> = new Set([
+  DOWNLOAD_ERROR_CODES.SERVER_BUSY,
+  DOWNLOAD_ERROR_CODES.QUEUE_TIMEOUT,
+  DOWNLOAD_ERROR_CODES.QUEUE_FULL,
+  DOWNLOAD_ERROR_CODES.QUEUE_CANCELLED,
+  DOWNLOAD_ERROR_CODES.SHUTTING_DOWN,
+]);
+
+/** 容量类拒绝判定（只有调度器抛出的结构化异常才可能是容量问题） */
+function isCapacityError(error: unknown): boolean {
+  return error instanceof DownloadResourceException && CAPACITY_ERROR_CODES.has(error.errorCode);
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
 
 /**
  * 下载时「优先使用 Premium 用户账号（MTProto）回源」。
@@ -101,23 +126,35 @@ export class UserPreferredDownloadService {
     // 选号与占位在同一个同步段完成（见 acquireAccount），并发下载不会抢到同一名额。
     const picked = await this.acquireAccount();
     if (!picked) {
-      this.logger.debug(`无空闲 user 账号（全部冷却或已达并发上限 ${MAX_CONCURRENT_STREAMS}），回退 Bot 链路`);
+      this.logger.debug(
+        `无空闲 user 账号（全部冷却或已达并发上限 ${this.currentMaxStreams()}），回退 Bot 链路`,
+      );
       return null;
     }
     const { account, release: releaseSlot } = picked;
 
     let lease: Awaited<ReturnType<DownloadResourceCoordinatorService['acquireUpstreamSlot']>> | null = null;
-    try {
-      // 与前台下载共用全局上行预算：按真实体量申请权重。
-      // 调用方已持租约时直接复用，避免嵌套申请互相等待。
-      lease = !params.upstreamLeaseHeld
-        ? await this.resources.acquireUpstreamSlot({
+    if (!params.upstreamLeaseHeld) {
+      // 预算等待与开流**必须分段处理**：等 slot 超时/队满/取消是容量信号，
+      // 不得归咎账号（否则一次等待超时就会冷却唯一 user 账号，随后全部回退 Bot）。
+      try {
+        lease = await this.resources.acquireUpstreamSlot({
           bytes: params.expectedSize,
-          waitTimeoutMs: 15_000,
+          // 未持租约的调用方（如 Bot 直链）与直接下载端点共用同一有限等待上限，
+          // 不再硬编码 15s：超时后本方法回退 Bot，对用户等价，只是不冷却账号。
+          waitTimeoutMs: this.resources.getConfig().directWaitMs,
           signal: params.signal,
-        })
-        : null;
+        });
+      } catch (error) {
+        releaseSlot();
+        this.logger.debug(
+          `user 上行预算等待失败（容量问题，不冷却账号），回退 Bot 链路：${errorMessage(error)}`,
+        );
+        return null;
+      }
+    }
 
+    try {
       const opened = await this.userClient.openUserStream(
         { apiId: account.apiId, apiHash: account.apiHash, session: account.session },
         {
@@ -152,6 +189,13 @@ export class UserPreferredDownloadService {
       lease?.release();
       lease = null;
       releaseSlot();
+      // 客户端取消 / 容量类拒绝都不归咎账号，只回退 Bot。
+      if (params.signal?.aborted || isCapacityError(error)) {
+        this.logger.debug(
+          `user 回源中止（客户端取消或容量问题，不冷却账号），回退 Bot 链路：${errorMessage(error)}`,
+        );
+        return null;
+      }
       this.recordFailure(account, error);
       return null;
     }
@@ -172,12 +216,13 @@ export class UserPreferredDownloadService {
     if (accounts.length === 0) return null;
 
     const now = Date.now();
+    const maxStreams = this.currentMaxStreams();
     const available = accounts
       .filter((item) => {
         if (!item.session) return false;
         const until = this.cooldownUntil.get(item.id) ?? 0;
         if (until > now) return false;
-        return (this.inflight.get(item.id) ?? 0) < MAX_CONCURRENT_STREAMS;
+        return (this.inflight.get(item.id) ?? 0) < maxStreams;
       })
       .sort((a, b) => (b.weight ?? 1) - (a.weight ?? 1));
 
@@ -200,20 +245,33 @@ export class UserPreferredDownloadService {
   }
 
   /**
-   * 记录一次失败：限流按 `retry_after` 进冷却，其余按保守默认值。
+   * 单账号并发上限（SystemConfig 热更新即生效）。
+   * 异常值（非正/非有限）回退 4：宁可保守，也不要让坏配置把并发变成 0 或无穷。
+   */
+  private currentMaxStreams(): number {
+    const value = Math.floor(this.resources.getConfig().userStreamMaxConcurrency);
+    return Number.isFinite(value) && value > 0 ? value : 4;
+  }
+
+  /**
+   * 记录一次失败：限流按 `retry_after` 进冷却，其余按分类时长。
    * 认证类失败冷却更久（需要人工重新授权，反复重试没有意义）。
+   * **容量类拒绝不得到达这里**（见 tryOpen 的分段 catch）。
    */
   private recordFailure(account: RelayUserAccount, error: unknown): void {
     const failure = error instanceof TelegramUserClientError
       ? error
       : new TelegramUserClientError(error instanceof Error ? error.message : String(error), 'other');
+    const transientCooldownMs = this.resources.getConfig().userFailureCooldownMs;
     const cooldownMs = failure.kind === 'flood'
-      ? Math.max(DEFAULT_COOLDOWN_MS, (failure.retryAfterSeconds ?? 0) * 1000)
+      ? Math.max(FLOOD_MIN_COOLDOWN_MS, (failure.retryAfterSeconds ?? 0) * 1000)
       : failure.kind === 'auth'
         ? 30 * 60_000
         : failure.kind === 'permission' || failure.kind === 'not_found'
           ? 10 * 60_000
-          : DEFAULT_COOLDOWN_MS;
+          : Number.isFinite(transientCooldownMs) && transientCooldownMs > 0
+            ? transientCooldownMs
+            : 10_000;
     this.cooldownUntil.set(account.id, Date.now() + cooldownMs);
     this.logger.warn(
       `user 账号 ${account.id} 回源失败（${failure.kind}），冷却 ${Math.round(cooldownMs / 1000)}s 后重试：`

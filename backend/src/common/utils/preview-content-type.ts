@@ -44,14 +44,34 @@ const SAFE_PUBLIC_AUDIO_TYPES = new Set([
 /**
  * 受保护预览（登录/分享）：将可能执行脚本的标记类型强制降级为 text/plain。
  * 先剥离 MIME 参数（如 charset/version）再比较，防止 "text/html; charset=utf-8" 等带参声明绕过降级。
+ *
+ * 脚本型 MIME 同样必须降级：客户端可在 multipart 里声明 text/javascript 上传 HTML/JS 内容，
+ * 只降级 html/svg/xml 会漏掉这一类（当前另有 nosniff + CSP sandbox 兜底，但不应依赖单层）。
  */
 export function sanitizePreviewContentType(contentType: string): string {
   const type = (contentType || '').split(';')[0].trim().toLowerCase();
   if (type === 'text/html' || type === 'image/svg+xml' || type.includes('xml')) {
     return 'text/plain';
   }
+  if (SCRIPT_MIME_TYPES.has(type) || type.endsWith('+javascript') || type.endsWith('+ecmascript')) {
+    return 'text/plain';
+  }
   return contentType;
 }
+
+/** 可执行脚本 MIME（含 application/x-javascript 等历史别名） */
+const SCRIPT_MIME_TYPES = new Set([
+  'text/javascript',
+  'application/javascript',
+  'application/x-javascript',
+  'text/ecmascript',
+  'application/ecmascript',
+  'text/jscript',
+  'text/livescript',
+  'text/vbscript',
+  'application/x-sh',
+  'application/x-csh',
+]);
 
 /**
  * 公开媒体直链（/media/:id）是否允许以 inline 返回。

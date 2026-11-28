@@ -2,6 +2,7 @@ import { Readable } from 'stream';
 import { existsSync } from 'fs';
 import { TelegramBotDispatchService } from './telegram-bot-dispatch.service';
 import type { TelegramUpdate } from '../telegram/telegram.types';
+import { TelegramRequestRejectedError } from '../telegram/telegram.errors';
 import type { TelegramBotInboundTask } from '../common/entities/telegram-bot-inbound-task.entity';
 import type { EnqueueInboundTask, InboundNotice, TelegramBotInboundQueueService } from './telegram-bot-inbound-queue.service';
 import type { IssuedGrant } from './telegram-bot-grant.service';
@@ -145,6 +146,8 @@ function makeService(options: {
   /** `findByFileUniqueId` 的命中结果（grant 命名空间归因用） */
   grantMatches?: Array<{ id: string }>;
   botConfig?: Record<string, unknown>;
+  /** 生效额度解析替身（默认按通用额度返回） */
+  resolveQuotaMock?: jest.Mock;
   storageRouter?: {
     availableBackendTypes: jest.Mock;
     upload: jest.Mock;
@@ -191,6 +194,7 @@ function makeService(options: {
   const telegramService = {
     sendMessage: jest.fn(async () => ({ message_id: 1, chat: { id: 7001 } })),
     editMessageText: jest.fn(async () => true),
+    answerCallbackQuery: jest.fn(async () => true),
     getRealtimeFileStream: jest.fn(async () => ({
       stream: Readable.from([Buffer.from('hello world test data')]),
       info: { file_id: 'FILE-1', file_path: '/tmp/f', file_size: 21 },
@@ -207,6 +211,17 @@ function makeService(options: {
       ...options.botConfig,
     })),
     resolveSiteOriginAsync: jest.fn(async () => 'https://files.example.com'),
+    // 面板/命令的配置写入：返回合并后的配置，模拟真实服务的契约
+    updateConfig: jest.fn(async (patch: Record<string, unknown>) => ({
+      linkTtlHours: 4,
+      dailyLimit: 5,
+      quotaTimezone: 'Asia/Shanghai',
+      linkDomainMode: 'manual',
+      linkDomain: 'https://files.example.com',
+      storageMode: 'telegram',
+      ...options.botConfig,
+      ...patch,
+    })),
   };
   const quotaService = {
     isWhitelisted: jest.fn(async () => false),
@@ -214,6 +229,19 @@ function makeService(options: {
     getUsed: jest.fn(async () => 1),
     consume: jest.fn(async () => ({ allowed: true, used: 1 })),
     refund: jest.fn(async () => undefined),
+    // 生效额度解析：默认通用额度；用例可用 resolveQuotaMock 覆盖
+    resolveQuota: options.resolveQuotaMock ?? jest.fn(async (_userId: string, globalLimit: number) => ({
+      whitelisted: false,
+      limit: globalLimit,
+      source: 'global' as const,
+      used: 1,
+      remaining: Math.max(0, globalLimit - 1),
+      usageDate: '2026-09-21',
+    })),
+    getOverride: jest.fn(async () => null),
+    setOverride: jest.fn(async () => ({ created: true, before: null })),
+    clearOverride: jest.fn(async () => false),
+    listOverrides: jest.fn(async () => []),
   };
   const issueMock = options.issueMock ?? jest.fn(async (input: { sourceAccountId?: string | null; fileUniqueId?: string | null }) => ({
     grant: {
@@ -247,6 +275,10 @@ function makeService(options: {
     listWhitelist: jest.fn(async () => []),
     queryLinks: jest.fn(async () => []),
     revokeByToken: jest.fn(async () => ({ ok: true })),
+    revokeByGrantId: jest.fn(async () => ({ ok: true })),
+    getPanelSnapshot: jest.fn(async () => ({ whitelistCount: 0, overrideCount: 0, activeLinkCount: 0 })),
+    listActiveLinksPage: jest.fn(async () => ({ total: 0, rows: [], cryptoAvailable: true })),
+    isCryptoAvailable: jest.fn(() => true),
   };
   const auditService = { log: jest.fn(), logInTransaction: jest.fn(async () => undefined) };
   const configService = {
@@ -327,6 +359,14 @@ function makeService(options: {
       Object.assign(row, { noticeStatus: task.status, noticePosition: position, waitingMsgId: messageId });
     }),
     deferNotice: jest.fn(async () => {}),
+    findById: jest.fn(async (id: string) => tasks.find(entry => entry.id === id) ?? null),
+    cancelOne: jest.fn(async (id: string) => {
+      const row = tasks.find(entry => entry.id === id);
+      if (!row) return null;
+      const changed = row.status === 'queued' || row.status === 'running';
+      if (changed) Object.assign(row, { status: 'cancelled' });
+      return { task: row, changed };
+    }),
   };
   Object.assign(grantService, {
     findById: jest.fn(async (id: string) => queuedGrants.get(id)?.grant ?? null),
@@ -395,7 +435,7 @@ describe('TelegramBotDispatchService（多 Bot 身份链路）', () => {
       '1234567:SECRET',
       '7001',
       expect.stringContaining('/help'),
-      { replyToMessageId: 100 },
+      expect.objectContaining({ replyToMessageId: 100 }),
     );
     expect(ctx.telegramService.sendMessage).not.toHaveBeenCalled();
   });
@@ -436,7 +476,7 @@ describe('TelegramBotDispatchService（多 Bot 身份链路）', () => {
     expect(ctx.telegramService.sendMessage).toHaveBeenCalledWith(
       '7001',
       expect.any(String),
-      { replyToMessageId: 100 },
+      expect.objectContaining({ replyToMessageId: 100 }),
     );
   });
 
@@ -731,7 +771,7 @@ describe('TelegramBotDispatchService（多 Bot 身份链路）', () => {
       '1234567:SECRET',
       '7001',
       expect.stringContaining('域名'),
-      { replyToMessageId: 100 },
+      expect.objectContaining({ replyToMessageId: 100 }),
     );
   });
 
@@ -1036,7 +1076,7 @@ describe('TelegramBotDispatchService（纯 Google 存储模式）', () => {
       '1234567:SECRET',
       '7001',
       expect.stringContaining('已加入队列，当前排第 1 位'),
-      { replyToMessageId: 100 },
+      expect.objectContaining({ replyToMessageId: 100 }),
     );
 
     // 2. 等待后台转存完成
@@ -1071,6 +1111,7 @@ describe('TelegramBotDispatchService（纯 Google 存储模式）', () => {
       '7001',
       888,
       expect.stringContaining('文件已就绪！'),
+      expect.objectContaining({ richMessage: expect.anything() }),
     );
     const finalContent = (accountClient.editMessageText.mock.calls as any).at(-1)[4] as string;
     expect(finalContent).toContain('下载直链（有效期至');
@@ -1109,7 +1150,7 @@ describe('TelegramBotDispatchService（纯 Google 存储模式）', () => {
     expect(ctx.telegramService.sendMessage).toHaveBeenLastCalledWith(
       '7001',
       expect.stringContaining('文件已就绪！'),
-      { replyToMessageId: 100, deferRateLimit: true },
+      expect.objectContaining({ replyToMessageId: 100, deferRateLimit: true }),
     );
   });
 
@@ -1146,6 +1187,7 @@ describe('TelegramBotDispatchService（纯 Google 存储模式）', () => {
       '7001',
       999,
       '创建下载链接失败，请稍后重试。',
+      expect.objectContaining({ richMessage: expect.anything() }),
     );
   });
 
@@ -1284,6 +1326,7 @@ describe('TelegramBotDispatchService（纯 Google 存储模式）', () => {
       '7001',
       999,
       '服务器临时磁盘空间不足，无法转存文件，请稍后重试。',
+      expect.objectContaining({ richMessage: expect.anything() }),
     );
     expect(ctx.quotaService.refund).toHaveBeenCalledWith('7001', '2026-09-21');
   });
@@ -1325,6 +1368,7 @@ describe('TelegramBotDispatchService（纯 Google 存储模式）', () => {
       '7001',
       999,
       '创建下载链接失败，请稍后重试。',
+      expect.objectContaining({ richMessage: expect.anything() }),
     );
     expect(ctx.quotaService.refund).toHaveBeenCalledWith('7001', '2026-09-21');
   });
@@ -1508,7 +1552,7 @@ describe('TelegramBotDispatchService（纯 Google 存储模式）', () => {
     expect(ctx.telegramService.sendMessage).toHaveBeenCalledWith(
       '7001',
       expect.stringContaining('已加入队列，当前排第 1 位'),
-      { replyToMessageId: 301, deferRateLimit: true },
+      expect.objectContaining({ replyToMessageId: 301, deferRateLimit: true }),
     );
 
     // 同一消息因重试/长轮询重复到达：静默去重，绝不重复发送消息轰炸用户
@@ -1572,7 +1616,7 @@ describe('TelegramBotDispatchService（纯 Google 存储模式）', () => {
     expect(ctx.telegramService.sendMessage).toHaveBeenCalledWith(
       '7001',
       expect.stringContaining('今日已使用'),
-      { replyToMessageId: 405 },
+      expect.objectContaining({ replyToMessageId: 405 }),
     );
 
     // 完成转存
@@ -1585,7 +1629,7 @@ describe('TelegramBotDispatchService（纯 Google 存储模式）', () => {
     expect(ctx.telegramService.sendMessage).toHaveBeenCalledWith(
       '7001',
       expect.stringContaining('可用命令：'),
-      { replyToMessageId: 406 },
+      expect.objectContaining({ replyToMessageId: 406 }),
     );
   });
 
@@ -1904,6 +1948,235 @@ describe('PR #63 等待提示', () => {
 
 });
 
+describe('命令权限分层与额度覆盖', () => {
+  const makeCommand = (text: string, userId = 7001) => ({
+    update_id: 10,
+    message: {
+      message_id: 300,
+      chat: { id: 7001, type: 'private' },
+      from: { id: userId, first_name: 'U' },
+      text,
+    },
+  }) as unknown as TelegramUpdate;
+
+  it('普通用户输入管理命令得到统一拒绝，且不泄露用法', async () => {
+    const ctx = makeService({});
+    (ctx.adminService.isAdmin as jest.Mock).mockReturnValue(false);
+
+    await ctx.service.handleUpdate(makeCommand('/admin'));
+
+    const [, payload] = (ctx.telegramService.sendMessage as jest.Mock).mock.calls[0];
+    expect(payload).toBe('该命令仅限管理员使用。');
+    // 用法提示不得出现（否则等于告诉用户这个命令存在且需要什么参数）
+    expect(payload).not.toContain('/quota_set');
+    expect(ctx.adminService.auditCommandDenied).toHaveBeenCalledWith(
+      expect.objectContaining({ telegramUserId: '7001' }), '/admin', 'private',
+    );
+  });
+
+  it('普通用户的未知命令提示不提管理员命令', async () => {
+    const ctx = makeService({});
+    (ctx.adminService.isAdmin as jest.Mock).mockReturnValue(false);
+
+    await ctx.service.handleUpdate(makeCommand('/nonexistent'));
+
+    const [, payload] = (ctx.telegramService.sendMessage as jest.Mock).mock.calls[0];
+    expect(payload).toContain('/help');
+    expect(payload).not.toContain('/admin');
+  });
+
+  it('管理员的未知命令提示指向面板', async () => {
+    const ctx = makeService({});
+    await ctx.service.handleUpdate(makeCommand('/nonexistent'));
+
+    const [, payload] = (ctx.telegramService.sendMessage as jest.Mock).mock.calls[0];
+    expect(payload).toContain('/admin');
+  });
+
+  it('普通用户帮助中不含任何管理命令', async () => {
+    const ctx = makeService({});
+    (ctx.adminService.isAdmin as jest.Mock).mockReturnValue(false);
+
+    await ctx.service.handleUpdate(makeCommand('/help'));
+
+    const [, payload] = (ctx.telegramService.sendMessage as jest.Mock).mock.calls[0] as [string, string];
+    expect(payload).toContain('可用命令：');
+    for (const forbidden of ['/admin', '/ttl', '/limit', '/quota_set', '/wl', '/links', '/revoke']) {
+      expect(payload).not.toContain(forbidden);
+    }
+  });
+
+  it('旧命令名整体下线，不再被识别', async () => {
+    const ctx = makeService({});
+    for (const legacy of ['/wl_add 123', '/link_query 123', '/link_revoke abc']) {
+      (ctx.telegramService.sendMessage as jest.Mock).mockClear();
+      await ctx.service.handleUpdate(makeCommand(legacy));
+      const [, payload] = (ctx.telegramService.sendMessage as jest.Mock).mock.calls[0] as [string, string];
+      expect(payload).toContain('未知命令');
+    }
+    expect(ctx.adminService.addWhitelist).not.toHaveBeenCalled();
+    expect(ctx.adminService.queryLinks).not.toHaveBeenCalled();
+    expect(ctx.adminService.revokeByToken).not.toHaveBeenCalled();
+  });
+
+  it('/quota 使用解析后的额度并标注来源', async () => {
+    const ctx = makeService({
+      resolveQuotaMock: jest.fn(async () => ({
+        whitelisted: false, limit: 20, source: 'user' as const, used: 3, remaining: 17, usageDate: '2026-09-21',
+      })),
+    });
+
+    await ctx.service.handleUpdate(makeCommand('/quota'));
+
+    const [, payload] = (ctx.telegramService.sendMessage as jest.Mock).mock.calls[0] as [string, string];
+    expect(payload).toContain('今日已使用 3 / 20，剩余 17 次。');
+  });
+
+  it('/quota_set 写入单账号额度并审计（含前后值）', async () => {
+    const ctx = makeService({});
+    (ctx.quotaService.setOverride as jest.Mock).mockResolvedValue({ created: false, before: 5 });
+
+    await ctx.service.handleUpdate(makeCommand('/quota_set 900000123 20'));
+
+    expect(ctx.quotaService.setOverride).toHaveBeenCalledWith('900000123', 20, '7001');
+    expect(ctx.auditService.log).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'telegram_bot_quota_override_set',
+      metadata: expect.objectContaining({ targetTelegramUserId: '900000123', before: 5, after: 20 }),
+    }));
+  });
+
+  it('/quota_set default 清除覆盖并回落通用额度', async () => {
+    const ctx = makeService({});
+    (ctx.quotaService.clearOverride as jest.Mock).mockResolvedValue(true);
+
+    await ctx.service.handleUpdate(makeCommand('/quota_set 900000123 default'));
+
+    expect(ctx.quotaService.clearOverride).toHaveBeenCalledWith('900000123');
+    const [, payload] = (ctx.telegramService.sendMessage as jest.Mock).mock.calls[0] as [string, string];
+    expect(payload).toContain('默认额度');
+  });
+
+  it('/quota_set 参数非法时只回用法，不写库', async () => {
+    const ctx = makeService({});
+    await ctx.service.handleUpdate(makeCommand('/quota_set 900000123'));
+
+    expect(ctx.quotaService.setOverride).not.toHaveBeenCalled();
+    const [, payload] = (ctx.telegramService.sendMessage as jest.Mock).mock.calls[0] as [string, string];
+    expect(payload).toContain('/quota_set <TG用户ID> <数量|default>');
+  });
+
+  it('/ttl 越界值被拒，合法值写入并审计', async () => {
+    const ctx = makeService({});
+    await ctx.service.handleUpdate(makeCommand('/ttl 9999'));
+    expect(ctx.telegramService.sendMessage).toHaveBeenCalledWith(
+      expect.anything(), '用法：/ttl <1-720>', expect.anything(),
+    );
+
+    (ctx.telegramService.sendMessage as jest.Mock).mockClear();
+    await ctx.service.handleUpdate(makeCommand('/ttl 6'));
+    const [, payload] = (ctx.telegramService.sendMessage as jest.Mock).mock.calls[0] as [string, string];
+    expect(payload).toContain('现值：6 小时');
+  });
+
+  it('/wl 子命令：add 与 list 均走统一入口', async () => {
+    const ctx = makeService({});
+    await ctx.service.handleUpdate(makeCommand('/wl add 900000123'));
+    expect(ctx.adminService.addWhitelist).toHaveBeenCalledWith(
+      expect.objectContaining({ telegramUserId: '7001' }), '900000123',
+    );
+
+    await ctx.service.handleUpdate(makeCommand('/wl list'));
+    expect(ctx.adminService.listWhitelist).toHaveBeenCalled();
+  });
+
+  it('/wl 缺少子命令时回完整用法', async () => {
+    const ctx = makeService({});
+    await ctx.service.handleUpdate(makeCommand('/wl bogus'));
+    const [, payload] = (ctx.telegramService.sendMessage as jest.Mock).mock.calls[0] as [string, string];
+    expect(payload).toContain('/wl add <TG用户ID>');
+  });
+
+  it('/links 无参数时浏览全库有效直链（分页）', async () => {
+    const ctx = makeService({});
+    (ctx.adminService.listActiveLinksPage as jest.Mock).mockResolvedValue({
+      total: 1,
+      cryptoAvailable: true,
+      rows: [{
+        grantId: 'g-1', fileName: 'a.zip', expiresAt: '2026-01-01T00:00:00.000Z',
+        url: null, prefix: 'tgl_abcd1234', telegramUserId: '900000123',
+      }],
+    });
+
+    await ctx.service.handleUpdate(makeCommand('/links'));
+
+    expect(ctx.adminService.listActiveLinksPage).toHaveBeenCalledWith(1, 5);
+    const [, payload] = (ctx.telegramService.sendMessage as jest.Mock).mock.calls[0] as [string, string];
+    expect(payload).toContain('直链（全部用户）');
+    expect(payload).toContain('a.zip');
+  });
+
+  it('/links 带用户 ID 时按用户过滤并保留审计', async () => {
+    const ctx = makeService({});
+    await ctx.service.handleUpdate(makeCommand('/links 900000123 2'));
+
+    expect(ctx.adminService.queryLinks).toHaveBeenCalledWith(
+      expect.objectContaining({ telegramUserId: '7001' }), '900000123',
+    );
+    const [, payload] = (ctx.telegramService.sendMessage as jest.Mock).mock.calls[0] as [string, string];
+    expect(payload).toContain('第 2/');
+  });
+
+  it('/links 单个短数字按页码处理（TG 用户 ID 实际是 6 位以上）', async () => {
+    const ctx = makeService({});
+    await ctx.service.handleUpdate(makeCommand('/links 2'));
+
+    // 不应被误判成「查询 TG 用户 2 的直链」
+    expect(ctx.adminService.queryLinks).not.toHaveBeenCalled();
+    expect(ctx.adminService.listActiveLinksPage).toHaveBeenCalledWith(2, 5);
+  });
+
+  it('入站签发使用单账号覆盖额度而非通用额度', async () => {
+    const ctx = makeService({
+      resolveQuotaMock: jest.fn(async () => ({
+        whitelisted: false, limit: 20, source: 'user' as const, used: 0, remaining: 20, usageDate: '2026-09-21',
+      })),
+    });
+
+    await ctx.service.handleUpdate({
+      update_id: 11,
+      message: {
+        message_id: 400,
+        chat: { id: 7001, type: 'private' },
+        from: { id: 7001, first_name: 'U' },
+        document: { file_id: 'F1', file_unique_id: 'U1', file_name: 'a.zip', mime_type: 'application/zip', file_size: 10 },
+      },
+    } as unknown as TelegramUpdate);
+
+    // 关键：传给原子扣减的是覆盖额度（20），不是通用额度（5）
+    expect(ctx.quotaService.consume).toHaveBeenCalledWith('7001', '2026-09-21', 20);
+  });
+
+  it('白名单用户即使有覆盖额度也不扣减（白名单优先）', async () => {
+    const ctx = makeService({
+      resolveQuotaMock: jest.fn(async () => ({
+        whitelisted: true, limit: null, source: 'whitelist' as const, used: 0, remaining: null, usageDate: '2026-09-21',
+      })),
+    });
+
+    await ctx.service.handleUpdate({
+      update_id: 12,
+      message: {
+        message_id: 401,
+        chat: { id: 7001, type: 'private' },
+        from: { id: 7001, first_name: 'U' },
+        document: { file_id: 'F2', file_unique_id: 'U2', file_name: 'b.zip', mime_type: 'application/zip', file_size: 10 },
+      },
+    } as unknown as TelegramUpdate);
+
+    expect(ctx.quotaService.consume).not.toHaveBeenCalled();
+  });
+});
+
 describe('Bot 磁盘预算与停机补偿', () => {
   it.each(['gdrive', 'telegram'])('未知长度 %s 转存无法扩容时在落盘前失败并清理', async (storageMode) => {
     const releaseLease = jest.fn();
@@ -1990,7 +2263,7 @@ describe('Bot 磁盘预算与停机补偿', () => {
       expect(ctx.inboundQueue.tasks.map((task) => task.status)).toEqual(['running', 'queued']);
       await waitFor(() => ctx.inboundQueue.tasks[1].noticePosition === 2);
       expect(ctx.telegramService.sendMessage).toHaveBeenCalledWith(
-        '7001', expect.stringContaining('当前排第 2 位'), { replyToMessageId: 101, deferRateLimit: true },
+        '7001', expect.stringContaining('当前排第 2 位'), expect.objectContaining({ replyToMessageId: 101, deferRateLimit: true }),
       );
       firstUpload.open();
       await waitFor(() => ctx.inboundQueue.tasks.every((task) => task.status === 'completed'));
@@ -2154,6 +2427,366 @@ describe('Bot 磁盘预算与停机补偿', () => {
 
       // 锁由 mirrorGrantToGDriveCache 自己持有，扫描侧不能再预先占用
       expect(storageRouter.upload).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('富文本降级与按钮回调', () => {
+    it('富文本被拒时降级重发，消息不丢失', async () => {
+      const ctx = makeService({});
+      const send = ctx.telegramService.sendMessage as jest.Mock;
+      send.mockReset();
+      send
+        .mockRejectedValueOnce(new TelegramRequestRejectedError("Bad Request: Can't parse rich message JSON object"))
+        .mockResolvedValue({ message_id: 77, chat: { id: 7001 } });
+
+      await (ctx.service as any).reply('7001', {
+        text: '文件已收到：a.zip',
+        rich: { blocks: [{ type: 'paragraph', text: 'a.zip' }] },
+      });
+
+      // 第一次带 richMessage，第二次不带（降级为纯文本选项）
+      expect(send).toHaveBeenCalledTimes(2);
+      expect(send.mock.calls[0][2].richMessage).toBeDefined();
+      expect(send.mock.calls[1][2].richMessage).toBeUndefined();
+      expect(send.mock.calls[1][1]).toBe('文件已收到：a.zip');
+    });
+
+    it('未列入关键词的 400（如空 text）同样触发降级，不静默丢消息', async () => {
+      const ctx = makeService({});
+      const send = ctx.telegramService.sendMessage as jest.Mock;
+      send.mockReset();
+      send
+        .mockRejectedValueOnce(new TelegramRequestRejectedError('Bad Request: Message text is empty', ['rich', 'parse_mode']))
+        .mockResolvedValue({ message_id: 78, chat: { id: 7001 } });
+
+      await (ctx.service as any).reply('7001', { text: '兜底文本', rich: { blocks: [{ type: 'paragraph', text: 'x' }] } });
+
+      expect(send).toHaveBeenCalledTimes(2);
+      expect(send.mock.calls[1][1]).toBe('兜底文本');
+    });
+
+    it('与格式无关的 400（拉黑/无写权限）不降级，只尝试一次', async () => {
+      const ctx = makeService({});
+      const send = ctx.telegramService.sendMessage as jest.Mock;
+      send.mockReset();
+      send.mockRejectedValue(new TelegramRequestRejectedError('Forbidden: bot was blocked by the user'));
+
+      await (ctx.service as any).reply('7001', {
+        text: 'x',
+        rich: { blocks: [{ type: 'paragraph', text: 'x' }] },
+        replyMarkup: { inline_keyboard: [[{ text: '打开', url: 'https://x/y' }]] },
+      });
+
+      // 永久性拒收 → 换格式重发必然同样失败，不该空转
+      expect(send).toHaveBeenCalledTimes(1);
+    });
+
+    describe('降级门禁（只有 400 才允许重发）', () => {
+      const richMessage = { blocks: [{ type: 'paragraph' as const, text: 'x' }] };
+      const networkErrors = [
+        'timeout of 30000ms exceeded',
+        'read ECONNRESET',
+        'Request failed with status code 502',
+        'socket hang up',
+        'Request failed with status code 500',
+        'connect ETIMEDOUT',
+      ];
+
+      it.each(networkErrors)('网络/5xx 错误（%s）不降级重发，避免重复投递', async (msg) => {
+        const ctx = makeService({});
+        const send = ctx.telegramService.sendMessage as jest.Mock;
+        send.mockReset();
+        send.mockRejectedValue(new Error(msg));
+
+        await (ctx.service as any).reply('7001', { text: 'x', rich: richMessage });
+
+        expect(send).toHaveBeenCalledTimes(1);
+      });
+
+      it('带 status=400 的池化错误才进入降级', async () => {
+        const ctx = makeService({});
+        const send = ctx.telegramService.sendMessage as jest.Mock;
+        send.mockReset();
+        send
+          .mockRejectedValueOnce(Object.assign(new Error('Bad Request: can\'t parse entities'), { status: 400 }))
+          .mockResolvedValue({ message_id: 1, chat: { id: 7001 } });
+
+        await (ctx.service as any).reply('7001', { text: 'x', rich: richMessage });
+
+        expect(send).toHaveBeenCalledTimes(2);
+      });
+
+      it.each([
+        'Bad Request: message is not modified',
+        'Bad Request: message to edit not found',
+        "Bad Request: message can't be edited",
+      ])('语义性 400（%s）不降级，交由 edit 路径兜底', async (msg) => {
+        const ctx = makeService({});
+        const send = ctx.telegramService.sendMessage as jest.Mock;
+        send.mockReset();
+        send.mockRejectedValue(new TelegramRequestRejectedError(msg));
+
+        await (ctx.service as any).reply('7001', { text: 'x', rich: richMessage });
+
+        expect(send).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    it('归因到 reply_markup 时直接跳到无按钮档，不带着致败按钮重发', async () => {
+      const ctx = makeService({});
+      const send = ctx.telegramService.sendMessage as jest.Mock;
+      send.mockReset();
+      const seen: any[] = [];
+      send.mockImplementation(async (_chat: string, _text: string, options: any) => {
+        seen.push(options);
+        if (options?.replyMarkup) {
+          throw new TelegramRequestRejectedError('Bad Request: reply markup is too long', ['reply_markup']);
+        }
+        return { message_id: 55, chat: { id: 7001 } };
+      });
+
+      await (ctx.service as any).reply('7001', {
+        text: 'a.zip',
+        rich: { blocks: [{ type: 'paragraph', text: 'a.zip' }] },
+        rich_fallback_html: 'a.zip',
+        parseMode: 'HTML',
+        messageEffectId: '99',
+        replyMarkup: { inline_keyboard: [[{ text: '打开链接', url: 'https://x/y' }]] },
+      });
+
+      // 第一档带按钮被拒 → 归因 reply_markup → 直接跳到无按钮档（而非先试去特效档）
+      expect(seen.length).toBe(2);
+      expect(seen[0].replyMarkup).toBeDefined();
+      expect(seen[1].replyMarkup).toBeUndefined();
+    });
+
+    it('HTML 档在 renderLinkReady 上真实可用（不再因缺 parseMode 变死代码）', async () => {
+      const ctx = makeService({});
+      const send = ctx.telegramService.sendMessage as jest.Mock;
+      send.mockReset();
+      const seen: any[] = [];
+      send.mockImplementation(async (_chat: string, _text: string, options: any) => {
+        seen.push(options);
+        if (options?.richMessage) {
+          throw new TelegramRequestRejectedError("Bad Request: Can't parse rich message JSON object", ['rich']);
+        }
+        return { message_id: 66, chat: { id: 7001 } };
+      });
+
+      // 用真实渲染层产出，验证 parseMode 被设置
+      const { renderLinkReady } = require('./telegram-bot.message-renderer');
+      const rendered = renderLinkReady({
+        fileName: 'a.zip', url: 'https://x/y', expiresAt: '2026-01-01T00:00:00.000Z', ttlHours: 4,
+      });
+      expect(rendered.parseMode).toBe('HTML');
+
+      await (ctx.service as any).reply('7001', rendered);
+
+      // rich 被拒 → 应走 HTML 档（带 parseMode 且保留按钮），而不是直接掉到纯文本
+      expect(seen[1].parseMode).toBe('HTML');
+      expect(seen[1].replyMarkup).toBeDefined();
+    });
+
+    it('无任何可剥离维度时不做重复请求（纯文本只发一次）', async () => {
+      const ctx = makeService({});
+      const send = ctx.telegramService.sendMessage as jest.Mock;
+      send.mockReset();
+      send.mockRejectedValue(new TelegramRequestRejectedError('Bad Request: something odd'));
+
+      await (ctx.service as any).reply('7001', { text: '纯文本' });
+
+      // 只有一档载荷，重发完全相同的内容没有意义
+      expect(send).toHaveBeenCalledTimes(1);
+    });
+
+    it('reply_markup 超长时剥离按钮后重发成功（降级必须剥可选项）', async () => {
+      const ctx = makeService({});
+      const send = ctx.telegramService.sendMessage as jest.Mock;
+      send.mockReset();
+      send.mockImplementation(async (_chat: string, _text: string, options: any) => {
+        // 只要带按钮就拒收：模拟服务端 REPLY_MARKUP_TOO_LONG
+        if (options?.replyMarkup) {
+          throw new TelegramRequestRejectedError('Bad Request: reply markup is too long', ['reply_markup']);
+        }
+        return { message_id: 99, chat: { id: 7001 } };
+      });
+
+      const sentId = await (ctx.service as any).reply('7001', {
+        text: '文件已收到：a.zip',
+        rich: { blocks: [{ type: 'paragraph', text: 'a.zip' }] },
+        replyMarkup: { inline_keyboard: [[{ text: '打开链接', url: 'https://files.example.com/x' }]] },
+      });
+
+      expect(sentId).toBe(99);
+      const lastOptions = send.mock.calls.at(-1)![2];
+      expect(lastOptions.replyMarkup).toBeUndefined();
+      // 正文仍应送达
+      expect(send.mock.calls.at(-1)![1]).toContain('a.zip');
+    });
+
+    it('限流错误不触发降级（避免重复投递），直接失败且不重发', async () => {
+      const ctx = makeService({});
+      const send = ctx.telegramService.sendMessage as jest.Mock;
+      send.mockReset();
+      send.mockRejectedValue(new Error('429 Too Many Requests: retry after 3'));
+
+      await (ctx.service as any).reply('7001', {
+        text: 'x',
+        rich: { blocks: [{ type: 'paragraph', text: 'x' }] },
+      });
+
+      expect(send).toHaveBeenCalledTimes(1);
+    });
+
+    it('超长文本在源文本上截断，不会切坏富文本结构', async () => {
+      const ctx = makeService({});
+      const send = ctx.telegramService.sendMessage as jest.Mock;
+      send.mockReset();
+      send.mockResolvedValue({ message_id: 1, chat: { id: 7001 } });
+
+      await (ctx.service as any).reply('7001', { text: 'a'.repeat(5000) });
+
+      const sentText = send.mock.calls[0][1] as string;
+      expect(sentText.length).toBeLessThanOrEqual(3801);
+      expect(sentText.endsWith('…')).toBe(true);
+    });
+
+    describe('取消按钮回调', () => {
+      const makeCallback = (fromId: number, data: string) => ({
+        update_id: 9,
+        callback_query: {
+          id: 'cb-1',
+          from: { id: fromId, first_name: 'U' },
+          data,
+          message: { message_id: 500, chat: { id: 7001, type: 'private' } },
+        },
+      }) as unknown as TelegramUpdate;
+
+      const seedTask = (ctx: ReturnType<typeof makeService>) => {
+        (ctx.inboundQueue as any).tasks.push({
+          id: 'task-1', telegramUserId: '7001', receiverBotId: '1234567', status: 'queued',
+          chatId: '7001', messageId: 100, fileName: 'a.zip',
+        });
+      };
+
+      it('本人可取消自己的任务，并得到确认', async () => {
+        const ctx = makeService({});
+        seedTask(ctx);
+        await ctx.service.handleUpdate(makeCallback(7001, 'bot_cancel:task-1'));
+
+        expect((ctx.inboundQueue as any).cancelOne).toHaveBeenCalledWith('task-1');
+        expect((ctx.inboundQueue as any).tasks[0].status).toBe('cancelled');
+        expect(ctx.telegramService.answerCallbackQuery).toHaveBeenCalledWith('cb-1', { text: '已取消该文件的处理。', showAlert: false });
+      });
+
+      it('他人无法取消（越权防护），任务保持原状', async () => {
+        const ctx = makeService({});
+        seedTask(ctx);
+        await ctx.service.handleUpdate(makeCallback(9999, 'bot_cancel:task-1'));
+
+        expect((ctx.inboundQueue as any).cancelOne).not.toHaveBeenCalled();
+        expect((ctx.inboundQueue as any).tasks[0].status).toBe('queued');
+        expect(ctx.telegramService.answerCallbackQuery).toHaveBeenCalledWith('cb-1', { text: '无权取消该任务。', showAlert: true });
+      });
+
+      it('未知动作与不存在的任务都被拒绝', async () => {
+        const ctx = makeService({});
+        await ctx.service.handleUpdate(makeCallback(7001, 'bot_cancel:missing'));
+        expect(ctx.telegramService.answerCallbackQuery).toHaveBeenCalledWith('cb-1', { text: '任务不存在或已被清理。', showAlert: false });
+
+        await ctx.service.handleUpdate(makeCallback(7001, 'other_action:task-1'));
+        expect(ctx.telegramService.answerCallbackQuery).toHaveBeenCalledWith('cb-1', { text: '该操作已失效。', showAlert: false });
+      });
+    });
+
+    describe('管理面板回调（ba:*）', () => {
+      const makeCallback = (fromId: number, data: string, chatType = 'private') => ({
+        update_id: 9,
+        callback_query: {
+          id: 'cb-admin',
+          from: { id: fromId, first_name: 'U' },
+          data,
+          message: { message_id: 600, chat: { id: 7001, type: chatType } },
+        },
+      }) as unknown as TelegramUpdate;
+
+      it('非管理员点击管理按钮被拒绝，并写入越权审计', async () => {
+        const ctx = makeService({});
+        ctx.adminService.isAdmin.mockReturnValue(false);
+
+        await ctx.service.handleUpdate(makeCallback(7001, 'ba:root'));
+
+        expect(ctx.adminService.auditCommandDenied).toHaveBeenCalledWith(
+          expect.objectContaining({ telegramUserId: '7001' }),
+          expect.stringContaining('callback:'),
+          'private',
+        );
+        expect(ctx.telegramService.answerCallbackQuery).toHaveBeenCalledWith(
+          'cb-admin', { text: '该操作仅限管理员使用。', showAlert: true },
+        );
+        expect(ctx.telegramService.editMessageText).not.toHaveBeenCalled();
+      });
+
+      it('管理员点击预设档位：原地编辑而非新发消息', async () => {
+        const ctx = makeService({});
+        await ctx.service.handleUpdate(makeCallback(7001, 'ba:ttl:12'));
+
+        expect(ctx.telegramService.editMessageText).toHaveBeenCalled();
+        expect(ctx.adminService.getPanelSnapshot).toHaveBeenCalled();
+        const payload = (ctx.telegramService.editMessageText as jest.Mock).mock.calls[0][2] as string;
+        expect(payload).toContain('直链有效期：4 小时');
+      });
+
+      it('message is not modified 视为成功，不重复发新消息', async () => {
+        const ctx = makeService({});
+        (ctx.telegramService.editMessageText as jest.Mock).mockRejectedValue(
+          new Error("Bad Request: message is not modified"),
+        );
+
+        await ctx.service.handleUpdate(makeCallback(7001, 'ba:root'));
+
+        expect(ctx.telegramService.sendMessage).not.toHaveBeenCalled();
+      });
+
+      it('面板消息已被删除时改发新消息', async () => {
+        const ctx = makeService({});
+        (ctx.telegramService.editMessageText as jest.Mock).mockRejectedValue(
+          new Error("Bad Request: message to edit not found"),
+        );
+
+        await ctx.service.handleUpdate(makeCallback(7001, 'ba:root'));
+
+        expect(ctx.telegramService.sendMessage).toHaveBeenCalled();
+      });
+
+      it('群聊中的管理面板回调被拒绝（面板只支持私聊）', async () => {
+        const ctx = makeService({});
+        await ctx.service.handleUpdate(makeCallback(7001, 'ba:root', 'supergroup'));
+
+        expect(ctx.telegramService.answerCallbackQuery).toHaveBeenCalledWith(
+          'cb-admin', { text: '管理面板仅支持私聊。', showAlert: false },
+        );
+        expect(ctx.telegramService.editMessageText).not.toHaveBeenCalled();
+      });
+
+      it('格式非法的回调数据一律回「该操作已失效」', async () => {
+        const ctx = makeService({});
+        await ctx.service.handleUpdate(makeCallback(7001, 'ba:ttl:abc'));
+        expect(ctx.telegramService.answerCallbackQuery).toHaveBeenCalledWith(
+          'cb-admin', { text: '该操作已失效。', showAlert: false },
+        );
+        expect(ctx.telegramService.editMessageText).not.toHaveBeenCalled();
+      });
+
+      it('撤销按钮携带 grantId 时走按 ID 撤销并回到列表', async () => {
+        const ctx = makeService({});
+        const grantId = '11111111-2222-3333-4444-555555555555';
+        await ctx.service.handleUpdate(makeCallback(7001, `ba:rvy:${grantId}`));
+
+        expect(ctx.adminService.revokeByGrantId).toHaveBeenCalledWith(
+          expect.objectContaining({ telegramUserId: '7001' }), grantId, 'panel',
+        );
+      });
     });
   });
 

@@ -16,7 +16,6 @@
 #include "td/utils/port/config.h"
 #include "td/utils/port/detail/PollableFd.h"
 #include "td/utils/port/PollFlags.h"
-#include "td/utils/Promise.h"
 #include "td/utils/Slice.h"
 #include "td/utils/Time.h"
 
@@ -108,7 +107,7 @@ ActorOwn<ActorT> Scheduler::register_actor_impl(Slice name, ActorT *actor_ptr, A
   VLOG(actor) << "Create actor " << *actor_info << " (actor_count = " << actor_count_ << ')';
 
   ActorId<ActorT> actor_id = weak_info->actor_id(actor_ptr);
-  if (sched_id != sched_id_) {
+  if (sched_id != sched_id_ && !close_flag_) {
     send_later(actor_id, Event::start());
     do_migrate_actor(actor_info, sched_id);
   } else {
@@ -153,26 +152,26 @@ inline void Scheduler::send_to_scheduler(int32 sched_id, const ActorId<Actor> &a
 template <class T>
 void Scheduler::destroy_on_scheduler(int32 sched_id, T &value) {
   if (!value.empty()) {
-    destroy_on_scheduler_impl(sched_id, PromiseCreator::lambda([value = std::move(value)](Unit) {
-                                // destroy value
-                              }));
+    destroy_on_scheduler_impl(sched_id, [value = std::move(value)] {
+      // destroy value
+    });
   }
 }
 
 template <class T>
 void Scheduler::destroy_on_scheduler_unique_ptr(int32 sched_id, T &value) {
   if (value != nullptr) {
-    destroy_on_scheduler_impl(sched_id, PromiseCreator::lambda([value = std::move(value)](Unit) {
-                                // destroy value
-                              }));
+    destroy_on_scheduler_impl(sched_id, [value = std::move(value)] {
+      // destroy value
+    });
   }
 }
 
 template <class... ArgsT>
 void Scheduler::destroy_on_scheduler(int32 sched_id, ArgsT &...values) {
-  destroy_on_scheduler_impl(sched_id, PromiseCreator::lambda([values = std::make_tuple(std::move(values)...)](Unit) {
-                              // destroy values
-                            }));
+  destroy_on_scheduler_impl(sched_id, [values = std::make_tuple(std::move(values)...)] {
+    // destroy values
+  });
 }
 
 inline void Scheduler::before_tail_send(const ActorId<> &actor_id) {

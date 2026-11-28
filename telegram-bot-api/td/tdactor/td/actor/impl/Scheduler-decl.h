@@ -10,6 +10,7 @@
 #include "td/actor/impl/ActorId-decl.h"
 #include "td/actor/impl/EventFull-decl.h"
 
+#include "td/utils/Action.h"
 #include "td/utils/Closure.h"
 #include "td/utils/common.h"
 #include "td/utils/FlatHashMap.h"
@@ -23,12 +24,10 @@
 #include "td/utils/port/Poll.h"
 #include "td/utils/port/PollFlags.h"
 #include "td/utils/port/thread_local.h"
-#include "td/utils/Promise.h"
 #include "td/utils/Slice.h"
 #include "td/utils/Time.h"
 #include "td/utils/type_traits.h"
 
-#include <functional>
 #include <memory>
 #include <type_traits>
 #include <utility>
@@ -67,7 +66,7 @@ class Scheduler {
     Callback &operator=(const Callback &) = delete;
     virtual ~Callback() = default;
     virtual void on_finish() = 0;
-    virtual void register_at_finish(std::function<void()>) = 0;
+    virtual void register_at_finish(SimpleAction) = 0;
   };
   Scheduler() = default;
   Scheduler(const Scheduler &) = delete;
@@ -96,7 +95,7 @@ class Scheduler {
   void send_to_scheduler(int32 sched_id, const ActorId<> &actor_id, Event &&event);
   void send_to_other_scheduler(int32 sched_id, const ActorId<> &actor_id, Event &&event);
 
-  void run_on_scheduler(int32 sched_id, Promise<Unit> action);  // TODO Action
+  void run_on_scheduler(int32 sched_id, SimpleAction action);
 
   template <class T>
   void destroy_on_scheduler(int32 sched_id, T &value);
@@ -162,7 +161,7 @@ class Scheduler {
  private:
   static void set_scheduler(Scheduler *scheduler);
 
-  void destroy_on_scheduler_impl(int32 sched_id, Promise<Unit> action);
+  void destroy_on_scheduler_impl(int32 sched_id, SimpleAction action);
 
   class ServiceActor final : public Actor {
    public:

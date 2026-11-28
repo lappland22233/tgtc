@@ -101,6 +101,54 @@ describe('FileCacheService realtime build session', () => {
     expect(fetchFn).toHaveBeenCalledTimes(1);
   });
 
+  it('M-01 回归：getCachedPath 必须校验 expectedSize，长度不符即判未命中并清理', async () => {
+    const upstream = new PassThrough();
+    const resultPromise = service.getOrCacheStream(fileId, 6, async () => ({
+      stream: upstream,
+      info: { file_size: 6 },
+    }));
+    upstream.end(Buffer.from('abcdef'));
+    const { stream } = await resultPromise;
+    await readStream(stream);
+
+    const cachePath = path.join(cwd, 'tmp', 'Cache', fileId);
+    const deadline = Date.now() + 2000;
+    for (;;) {
+      try {
+        await readFile(cachePath);
+        break;
+      } catch {
+        if (Date.now() > deadline) throw new Error(`缓存文件未在 2s 内发布: ${cachePath}`);
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+    }
+
+    expect(service.getCachedPath(fileId, 6)).toBe(cachePath);
+    // 覆盖上传竞态 / 外部截断会让缓存长度与文件记录不符；Range 命中后
+    // 会返回短于 Content-Length 的 206 正文（下载/播放损坏）。全量路径一直有该校验。
+    expect(service.getCachedPath(fileId, 999)).toBeNull();
+  });
+
+  it('M-01 回归：预热期间发生 invalidate 时不得发布旧内容（覆盖上传 v1 预热 × v2 失效）', async () => {
+    const sourceDir = path.join(cwd, 'src');
+    await mkdir(sourceDir, { recursive: true });
+    const sourcePath = path.join(sourceDir, 'old.bin');
+    await writeFile(sourcePath, Buffer.from('abcdef'));
+    const cachePath = path.join(cwd, 'tmp', 'Cache', fileId);
+
+    // 正向对照：证明本 harness 下预热确实会发布缓存（否则下面的断言是假阳性）
+    await service.cacheFileFromPath(fileId, sourcePath, 6);
+    expect(service.getCachedPath(fileId, 6)).toBe(cachePath);
+
+    // 拷贝期间触发失效：epoch 递增是 invalidate 的第一步，必然早于预热的 rename
+    const warmup = service.cacheFileFromPath(fileId, sourcePath, 6);
+    await service.invalidate(fileId);
+    await warmup;
+
+    // 旧内容不得落盘成为正式缓存，否则 Range 会命中 v1 字节
+    expect(service.getCachedPath(fileId, 6)).toBeNull();
+  });
+
   it('removes a partial cache when the upstream fails', async () => {
     const upstream = new PassThrough();
     const resultPromise = service.getOrCacheStream(fileId, 6, async () => ({
@@ -1127,7 +1175,7 @@ describe('FileCacheService 下载调度配置规范化', () => {
     expect(cfg.queueCapacity).toBe(128);
   });
 
-  it('越界值在运行时被裁剪：直通窗口上限 4MiB、权重预算上限 64', async () => {
+  it('越界值在运行时被裁剪：直通窗口上限 4MiB、权重预算上限 128', async () => {
     const svc = await buildService({
       FILE_DOWNLOAD_DIRECT_WINDOW_MB: '16',
       FILE_DOWNLOAD_MAX_CONCURRENT_UPSTREAMS: '999',
@@ -1135,7 +1183,7 @@ describe('FileCacheService 下载调度配置规范化', () => {
     });
     const cfg = svc.resources.getConfig();
     expect(cfg.directWindowBytes).toBe(4 * 1024 * 1024);
-    expect(cfg.maxConcurrentUpstreams).toBe(64);
+    expect(cfg.maxConcurrentUpstreams).toBe(128);
     expect(cfg.upstreamQueuePolicy).toBe('bounded_fit');
   });
 

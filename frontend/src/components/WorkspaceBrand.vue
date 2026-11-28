@@ -16,7 +16,7 @@ defineProps<{ link?: string }>();
 const config = usePublicConfigStore();
 </script>
 
-<style>
+<style scoped>
 .workspace-brand {
   display: flex;
   align-items: center;

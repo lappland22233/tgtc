@@ -3,6 +3,7 @@ import { createPinia } from 'pinia';
 import App from './App.vue';
 import router from './router';
 import { setupRoutePrefetch } from './composables/useRoutePrefetch';
+import { initThemeSystem } from './composables/useTheme';
 import { usePublicConfigStore } from './stores/public-config';
 import TIcon from './components/TIcon.vue';
 // PERF-F-101：TDesign 样式改为按需。
@@ -15,50 +16,10 @@ import TIcon from './components/TIcon.vue';
 //   无需额外处理。
 // 不再引入 dist/tdesign.css（518 KB 全量），首屏只承担实际用到的组件样式。
 import 'tdesign-vue-next/es/style/css.mjs';
-import './assets/styles.css';
-import './assets/workspace.css';
+import './assets/styles/index.css';
 
-// ---- Theme initialization (Light/Dark dual theme) ----
-// Priority: localStorage > system preference > default light
-function initTheme(): string {
-  const stored = localStorage.getItem('filecloud-theme');
-  if (stored === 'dark' || stored === 'light') return stored;
-  if (window.matchMedia('(prefers-color-scheme: dark)').matches) return 'dark';
-  return 'light';
-}
-
-function applyTheme(theme: string) {
-  const el = document.documentElement;
-  el.setAttribute('data-theme', theme);
-  const canvasColor = getComputedStyle(el).getPropertyValue('--workspace-canvas').trim();
-  if (canvasColor) document.querySelector('meta[name="theme-color"]')?.setAttribute('content', canvasColor);
-  // TDesign dark mode compat
-  if (theme === 'dark') {
-    el.setAttribute('theme-mode', 'dark');
-  } else {
-    el.removeAttribute('theme-mode');
-  }
-}
-
-const currentTheme = initTheme();
-applyTheme(currentTheme);
-
-// Listen for system theme changes (only when user hasn't explicitly chosen)
-if (!localStorage.getItem('filecloud-theme')) {
-  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', (e) => {
-    const next = e.matches ? 'dark' : 'light';
-    applyTheme(next);
-    // Refresh echarts theme on switch
-    import('./utils/echarts-theme').then(({ refreshChartTheme }) => refreshChartTheme());
-  });
-}
-
-// Expose theme setter for use in settings page / theme toggle components
-(window as any).__setFileCloudTheme = (theme: 'light' | 'dark') => {
-  localStorage.setItem('filecloud-theme', theme);
-  applyTheme(theme);
-  import('./utils/echarts-theme').then(({ refreshChartTheme }) => refreshChartTheme());
-};
+// ---- Theme initialization (Light/Dark/System) ----
+initThemeSystem();
 
 async function bootstrapFrontend() {
   const app = createApp(App);

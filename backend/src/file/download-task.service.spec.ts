@@ -217,7 +217,7 @@ describe('DownloadTaskService', () => {
     expect(service.consumeTicket(created.ticket!, baseInput.ownerKey, baseInput.fileId)).toBe(false);
   });
 
-  it('票据超时未使用：释放预约并作废票据（避免 4GiB 预约滞留到任务保留期）', () => {
+  it('票据超时未使用：释放预约并作废票据，任务回到排队重新申请资源', () => {
     const { service, reservations } = makeService({ cached: false });
     const created = service.create(baseInput);
     expect(service.heldReservationCount).toBe(1);
@@ -231,9 +231,49 @@ describe('DownloadTaskService', () => {
     const refreshed = service.refresh(created.taskId, baseInput.ownerKey);
     expect(reservations[0].release).toHaveBeenCalledTimes(1);
     expect(service.heldReservationCount).toBe(0);
-    expect(refreshed.status).toBe('streamable');
+    // 必须是 queued 而非 streamable：此时既无预约也无票据，
+    // 若直接可下载会让正文请求拿不到资源且没有重试路径。
+    expect(refreshed.status).toBe('queued');
     // 票据已作废：过期后不得再被消费
     expect(service.consumeTicket(created.ticket!, baseInput.ownerKey, baseInput.fileId)).toBe(false);
+  });
+
+  it('票据超时后重新排队使用新的 AbortController（旧信号已被 abort）', () => {
+    const { service } = makeService({ cached: false });
+    const created = service.create(baseInput);
+    const internals = service as unknown as {
+      tasks: Map<string, { ticketExpiresAt?: number; abortController?: AbortController }>;
+    };
+    const record = internals.tasks.get(created.taskId)!;
+    const before = record.abortController!;
+    record.ticketExpiresAt = Date.now() - 1;
+
+    service.refresh(created.taskId, baseInput.ownerKey);
+
+    // releaseResources 会 abort 旧控制器；不重建的话后续排队会立刻被取消
+    expect(before.signal.aborted).toBe(true);
+    expect(record.abortController).toBeDefined();
+    expect(record.abortController).not.toBe(before);
+    expect(record.abortController!.signal.aborted).toBe(false);
+  });
+
+  it('过期任务即使没有预约/票据也会被回收（不占住协调器队列）', () => {
+    const { service } = makeService({ cached: false });
+    const created = service.create(baseInput);
+    const internals = service as unknown as {
+      tasks: Map<string, { status: string; reservation?: unknown; ticket?: string; abortController?: AbortController }>;
+      sweep(): void;
+      heldReservationCount: number;
+    };
+    const record = internals.tasks.get(created.taskId)!;
+    // 模拟「在 reserveDownload 队列中等待」：无 reservation、无 ticket
+    record.reservation = undefined;
+    record.ticket = undefined;
+    (record as unknown as { expiresAt: number }).expiresAt = Date.now() - 1;
+
+    internals.sweep();
+
+    expect(record.abortController!.signal.aborted).toBe(true);
   });
 
   it('等待预约的任务在取得资源后变为 streamable 并签发票据', async () => {

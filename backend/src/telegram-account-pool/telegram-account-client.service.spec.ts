@@ -37,7 +37,7 @@ describe('Telegram account transfer streams', () => {
       expect.stringContaining('/getUpdates'),
       expect.objectContaining({
         params: expect.objectContaining({
-          allowed_updates: JSON.stringify(['message', 'channel_post']),
+          allowed_updates: JSON.stringify(['message', 'channel_post', 'callback_query']),
         }),
       }),
     );

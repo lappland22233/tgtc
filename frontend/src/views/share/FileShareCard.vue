@@ -49,6 +49,7 @@ import { computed, ref } from 'vue';
 import MessagePlugin from '@/utils/message';
 import { triggerBrowserDownload, LARGE_FILE_DOWNLOAD_TIP, isLargeFile } from '@/utils/download';
 import { getPreviewKind, buildSharePreviewUrl, buildShareThumbnailUrl } from '@/utils/preview';
+import { formatSizeCompact as formatSize } from '@/utils/format';
 import ThumbnailImg from '@/components/ThumbnailImg.vue';
 import { useMediaPlaybackStore } from '../../stores/mediaPlayback';
 
@@ -94,15 +95,6 @@ function openPreview() {
 
 const downloadUrl = computed(() => `/api/s/${encodeURIComponent(props.token)}/download/${encodeURIComponent(props.info.id)}`);
 
-function formatSize(bytes: number): string {
-  if (bytes <= 0) return '0 B';
-  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-  let i = 0;
-  let size = bytes;
-  while (size >= 1024 && i < units.length - 1) { size /= 1024; i++; }
-  return `${size.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
-}
-
 function formatDateTime(dateStr: string): string {
   try {
     return new Date(dateStr).toLocaleString('zh-CN', {
@@ -138,11 +130,11 @@ function handleDownload() {
 <style scoped>
 .file-share-card {
   display: grid;
-  grid-template-columns: minmax(144px, 31%) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 16px 20px;
   padding: clamp(12px, 4vw, 24px);
   border: 1px solid var(--workspace-border);
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   background: var(--workspace-surface);
 }
 
@@ -207,11 +199,12 @@ function handleDownload() {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  flex: 1 1 auto;
   gap: 6px;
   min-height: 44px;
   padding-inline: 12px;
   border: 1px solid var(--workspace-border);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--workspace-surface);
   color: var(--workspace-accent);
   font: inherit;
@@ -233,8 +226,8 @@ function handleDownload() {
 .download-btn:disabled { cursor: not-allowed; opacity: .72; }
 .file-share-actions button:focus-visible { outline-color: var(--workspace-accent); }
 
-@media (max-width: 500px) {
-  .file-share-card { grid-template-columns: minmax(0, 1fr); }
-  .file-share-actions button { flex: 1; }
+@media (min-width: 481px) {
+  .file-share-card { grid-template-columns: minmax(144px, 31%) minmax(0, 1fr); }
+  .file-share-actions button { flex: 0 0 auto; }
 }
 </style>

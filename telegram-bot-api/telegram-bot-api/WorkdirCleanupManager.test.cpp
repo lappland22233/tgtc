@@ -66,7 +66,7 @@ TEST(WorkdirCleanup, RetriesDeletionThreeTimesThenSucceeds) {
   ASSERT_EQ(4, attempts);
 }
 
-TEST(WorkdirCleanup, StopsRoundAfterFourFailedAttempts) {
+TEST(WorkdirCleanup, ContinuesRoundAfterFailedDeletion) {
   TempWorkdir dir;
   dir.file("a", "aaaa");
   dir.file("b", "bbbb");
@@ -76,8 +76,10 @@ TEST(WorkdirCleanup, StopsRoundAfterFourFailedAttempts) {
         attempts++;
         return false;
       });
-  ASSERT_EQ(4, attempts);
-  ASSERT_EQ(1, result.failed_files);
+  // 每个候选各自重试 max_retries+1 = 4 次，且单个失败**不中断整轮**：
+  // 否则最老的那个文件删不掉时，后面所有候选都不会被清理，磁盘持续增长。
+  ASSERT_EQ(8, attempts);
+  ASSERT_EQ(2, result.failed_files);
   ASSERT_EQ(0, result.deleted_files);
 }
 

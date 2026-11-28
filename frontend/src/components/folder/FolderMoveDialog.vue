@@ -145,15 +145,15 @@ function handleClose() {
 
 .batch-hint {
   padding: 8px 12px;
-  background: var(--td-brand-color-focus);
-  color: var(--td-brand-color);
-  border-radius: 4px;
+  background: var(--color-accent-soft);
+  color: var(--seed-primary);
+  border-radius: var(--radius-sm);
   font-size: 13px;
 }
 
 .target-picker {
-  border: 1px solid var(--td-border-level-2-color);
-  border-radius: 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
   overflow: hidden;
 }
 
@@ -164,20 +164,20 @@ function handleClose() {
   padding: 10px 12px;
   cursor: pointer;
   font-size: 14px;
-  border-bottom: 1px solid var(--td-border-level-1-color);
+  border-bottom: 1px solid var(--border-default);
 }
 
 .target-item:hover {
-  background: var(--td-bg-color-container-hover);
+  background: var(--color-bg-hover);
 }
 
 .target-item.active {
-  background: var(--td-brand-color-focus);
-  color: var(--td-brand-color);
+  background: var(--color-accent-soft);
+  color: var(--seed-primary);
 }
 
 .folder-icon {
-  color: var(--td-warning-color);
+  color: var(--color-warning);
 }
 
 .tree-scroll {
@@ -188,9 +188,9 @@ function handleClose() {
 
 .error-msg {
   padding: 8px 12px;
-  background: var(--td-error-color-1);
-  color: var(--td-error-color);
-  border-radius: 4px;
+  background: var(--color-danger-soft);
+  color: var(--color-danger);
+  border-radius: var(--radius-sm);
   font-size: 13px;
 }
 </style>

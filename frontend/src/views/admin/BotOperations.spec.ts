@@ -10,6 +10,7 @@ interface Options { params?: Record<string, unknown>; signal?: AbortSignal }
 const http = vi.hoisted(() => ({
   get: vi.fn<(path: string, options?: Options) => Promise<unknown>>(),
   post: vi.fn<(path: string, body?: unknown) => Promise<unknown>>(),
+  put: vi.fn<(path: string, body?: unknown) => Promise<unknown>>(),
 }));
 vi.mock('@/api/client', () => ({ default: http }));
 const charts = vi.hoisted(() => ({ options: [] as unknown[] }));
@@ -246,6 +247,43 @@ describe('Bot 收件管理', () => {
     await flushPromises();
     expect(http.post).toHaveBeenCalledExactlyOnceWith(base + '/grants/grant-a/revoke');
     expect(wrapper.text()).toContain('没有符合条件的记录');
+  });
+
+  it('sets and clears a per-user daily quota from the user detail', async () => {
+    await visit('?tab=user');
+    await wrapper.get('.ops-group-row').trigger('click');
+    await flushPromises();
+
+    // 当前为白名单（不限），额度输入框应为空
+    const quotaBox = wrapper.get('.ops-quota');
+    expect(quotaBox.text()).toContain('白名单，不限额度');
+    expect((quotaBox.get('input').element as HTMLInputElement).value).toBe('');
+
+    // 输入并保存 → PUT 到 quota 端点，载荷是正整数
+    http.put = vi.fn(async () => response({ changed: true, override: 20 }));
+    await quotaBox.get('input').setValue('20');
+    const saveBtn = quotaBox.findAll('button').find(b => b.text() === '保存额度')!;
+    expect(saveBtn.attributes('disabled')).toBeUndefined();
+    await saveBtn.trigger('click');
+    await flushPromises();
+    expect(http.put).toHaveBeenCalledExactlyOnceWith(base + '/users/' + id + '/quota', { dailyLimit: 20 });
+    expect(wrapper.text()).toContain('每日额度设为 20 个/天');
+  });
+
+  it('rejects a non-positive quota locally instead of calling the API', async () => {
+    await visit('?tab=user');
+    await wrapper.get('.ops-group-row').trigger('click');
+    await flushPromises();
+    http.put = vi.fn(async () => response({ changed: true }));
+
+    const quotaBox = wrapper.get('.ops-quota');
+    await quotaBox.get('input').setValue('0');
+    const saveBtn = quotaBox.findAll('button').find(b => b.text() === '保存额度')!;
+    await saveBtn.trigger('click');
+    await flushPromises();
+
+    expect(http.put).not.toHaveBeenCalled();
+    expect(wrapper.text()).toContain('额度需为 1–100000 的整数');
   });
 
   it('groups audit records by user and bans with a reason inside the user detail', async () => {

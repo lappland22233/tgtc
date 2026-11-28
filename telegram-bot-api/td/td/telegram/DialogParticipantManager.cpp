@@ -2800,7 +2800,7 @@ void DialogParticipantManager::set_channel_participant_status(
   }
   if (participant_dialog_id.get_type() != DialogType::User) {
     if (new_status.is_administrator() || new_status.is_member() || new_status.is_restricted()) {
-      return promise.set_error(400, "Other chats can be only banned or unbanned");
+      return promise.set_error(400, "Other chats can only be banned or unbanned");
     }
     // always pretend that old_status is different
     return restrict_channel_participant(
@@ -2997,7 +2997,7 @@ void DialogParticipantManager::restrict_channel_participant(ChannelId channel_id
       break;
     case DialogType::Channel:
       if (new_status.is_administrator() || new_status.is_member() || new_status.is_restricted()) {
-        return promise.set_error(400, "Other chats can be only banned or unbanned");
+        return promise.set_error(400, "Other chats can only be banned or unbanned");
       }
       break;
     default:
@@ -3024,14 +3024,13 @@ void DialogParticipantManager::restrict_channel_participant(ChannelId channel_id
         return promise.set_error(result.move_as_error());
       }
 
-      create_actor<SleepActor>(
-          "RestrictChannelParticipantSleepActor", 1.0,
-          PromiseCreator::lambda([actor_id, channel_id, participant_dialog_id, new_status = std::move(new_status),
-                                  promise = std::move(promise)](Unit) mutable {
-            send_closure(actor_id, &DialogParticipantManager::restrict_channel_participant, channel_id,
-                         participant_dialog_id, std::move(new_status), DialogParticipantStatus::Banned(0, string()),
-                         false, std::move(promise));
-          }))
+      create_actor<SleepActor>("RestrictChannelParticipantSleepActor", 1.0,
+                               [actor_id, channel_id, participant_dialog_id, new_status = std::move(new_status),
+                                promise = std::move(promise)]() mutable {
+                                 send_closure(actor_id, &DialogParticipantManager::restrict_channel_participant,
+                                              channel_id, participant_dialog_id, std::move(new_status),
+                                              DialogParticipantStatus::Banned(0, string()), false, std::move(promise));
+                               })
           .release();
     });
 
@@ -3051,14 +3050,13 @@ void DialogParticipantManager::restrict_channel_participant(ChannelId channel_id
             return promise.set_error(result.move_as_error());
           }
 
-          create_actor<SleepActor>(
-              "AddChannelParticipantSleepActor", 1.0,
-              PromiseCreator::lambda([actor_id, channel_id, participant_dialog_id, old_status = std::move(old_status),
-                                      promise = std::move(promise)](Unit) mutable {
-                send_closure(actor_id, &DialogParticipantManager::add_channel_participant, channel_id,
-                             participant_dialog_id.get_user_id(), old_status,
-                             wrap_failed_to_add_members_promise(std::move(promise)));
-              }))
+          create_actor<SleepActor>("AddChannelParticipantSleepActor", 1.0,
+                                   [actor_id, channel_id, participant_dialog_id, old_status = std::move(old_status),
+                                    promise = std::move(promise)]() mutable {
+                                     send_closure(actor_id, &DialogParticipantManager::add_channel_participant,
+                                                  channel_id, participant_dialog_id.get_user_id(), old_status,
+                                                  wrap_failed_to_add_members_promise(std::move(promise)));
+                                   })
               .release();
         });
 

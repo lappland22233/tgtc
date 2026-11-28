@@ -257,13 +257,17 @@
 
     <!-- 访问次数限制弹窗 -->
     <t-dialog v-model:visible="accessCountDialog.visible" header="设置访问次数限制" width="400px" @confirm="saveAccessCount" @close="accessCountDialog.visible = false">
-      <t-input-number v-model="accessCountDialog.value" :min="-1" theme="normal" style="width: 100%" />
+      <div class="fl-dialog-field">
+        <t-input-number v-model="accessCountDialog.value" :min="-1" theme="normal" />
+      </div>
       <div class="fl-dialog-hint">-1 表示不限制访问次数；超过上限后文件将无法再被访问</div>
     </t-dialog>
 
     <!-- 限时访问弹窗 -->
     <t-dialog v-model:visible="expiresDialog.visible" header="设置限时访问" width="400px" @confirm="saveExpires" @close="expiresDialog.visible = false">
-      <t-select v-model="expiresDialog.value" :options="expiresOptions" style="width: 100%" />
+      <div class="fl-dialog-field">
+        <t-select v-model="expiresDialog.value" :options="expiresOptions" />
+      </div>
       <div class="fl-dialog-hint">选择「永久」表示不限时；限时到期后文件将无法再被访问</div>
     </t-dialog>
 
@@ -411,7 +415,7 @@ const router = useRouter();
 const route = useRoute();
 const { isPageVisible } = usePageVisibility();
 const { width, isMobile } = useBreakpoint();
-const inlinePanels = computed(() => width.value >= 960);
+const inlinePanels = computed(() => width.value >= 1024);
 const directoryOpen = ref(false);
 const directoryLoadError = ref(false);
 const inspectedFileId = ref<string | null>(null);
@@ -1662,18 +1666,30 @@ onUnmounted(() => {
   position: relative;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  min-height: calc(100vh - var(--workspace-header-height));
-  min-height: calc(100dvh - var(--workspace-header-height));
+  min-height: calc(100vh - var(--workspace-header-height) - var(--workspace-mobile-nav-height) - env(safe-area-inset-bottom, 0px));
+  min-height: calc(100dvh - var(--workspace-header-height) - var(--workspace-mobile-nav-height) - env(safe-area-inset-bottom, 0px));
   background: var(--workspace-surface);
   color: var(--workspace-text);
 }
 
 .workspace-files { min-width: 0; padding: 16px clamp(12px, 2.5vw, 32px) 20px; }
+.has-batch-selection .workspace-files { padding-bottom: 80px; }
 .workspace-directory-rail, .workspace-details-rail { min-width: 0; background: var(--workspace-canvas); }
 .workspace-directory-rail { border-inline-end: 1px solid var(--workspace-border); }
 .workspace-details-rail { border-inline-start: 1px solid var(--workspace-border); }
 
-@media (min-width: 960px) {
+@media (min-width: 769px) {
+  .filelist-page {
+    min-height: calc(100vh - var(--workspace-header-height));
+    min-height: calc(100dvh - var(--workspace-header-height));
+  }
+
+  .has-batch-selection .workspace-files {
+    padding-bottom: 20px;
+  }
+}
+
+@media (min-width: 1024px) {
   .filelist-page {
     --directory-width: clamp(160px, 16vw, 216px);
     grid-template-columns: var(--directory-width) minmax(0, 1fr);
@@ -1685,21 +1701,13 @@ onUnmounted(() => {
 
   .workspace-files { padding-top: 24px; }
 
-  .workspace-directory-rail > .workspace-directory,
-  .workspace-details-rail > .workspace-details {
+  .workspace-directory-rail > :deep(.workspace-directory),
+  .workspace-details-rail > :deep(.workspace-details) {
     position: sticky;
     top: var(--workspace-header-height);
     max-height: calc(100dvh - var(--workspace-header-height));
     overflow-y: auto;
   }
-}
-
-@media (max-width: 768px) {
-  .filelist-page {
-    min-height: calc(100dvh - var(--workspace-header-height) - var(--workspace-mobile-nav-height) - env(safe-area-inset-bottom, 0px));
-  }
-
-  .has-batch-selection .workspace-files { padding-bottom: 80px; }
 }
 
 /* ============ 空状态 ============ */
@@ -1803,6 +1811,11 @@ onUnmounted(() => {
 }
 
 /* ============ 弹窗内辅助样式 ============ */
+.fl-dialog-field :deep(.t-input-number),
+.fl-dialog-field :deep(.t-select) {
+  width: 100%;
+}
+
 .fl-dialog-hint {
   margin-top: 8px;
   color: var(--text-secondary);

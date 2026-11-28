@@ -47,6 +47,44 @@ describe('ReplicationAttemptService（SQLite 内存库）', () => {
     return { service, repo, baseInput, ATTEMPT_MERGE_WINDOW_MS, RETRY_MAX_ATTEMPTS };
   }
 
+  it('B-10 回归：同一 owner+目标群并发开轮只产生一条活跃轮次', async () => {
+    const { service, repo, baseInput } = await setup();
+    const input = { ...baseInput, targetChatId: '-1001' };
+
+    const results = await Promise.all(Array.from({ length: 6 }, () => service.beginRound(input)));
+
+    // 修复前「查最近轮次 → 无活跃则新建」无串行化，6 个并发触发会各自建行，
+    // 认领/退避/结算全部串味
+    expect(await repo.count()).toBe(1);
+    expect(results.filter((r) => !r.merged && !r.skipped)).toHaveLength(1);
+    expect(results.filter((r) => r.merged)).toHaveLength(5);
+  });
+
+  it('B-10：不同目标群各自独立开轮，互不串味', async () => {
+    const { service, repo, baseInput } = await setup();
+
+    await Promise.all([
+      service.beginRound({ ...baseInput, targetChatId: '-1001' }),
+      service.beginRound({ ...baseInput, targetChatId: '-1002' }),
+    ]);
+
+    expect(await repo.count()).toBe(2);
+  });
+
+  it('B-09 回归：并发认领不丢账号（读-改-写必须在锁内合并）', async () => {
+    const { service, repo, baseInput } = await setup();
+    const begin = await service.beginRound({ ...baseInput, targetChatId: '-1001' });
+    const attemptId = begin.attempt!.id;
+
+    await Promise.all(['bot-a', 'bot-b', 'bot-c', 'bot-d'].map((account) =>
+      service.recordClaim('file', 'file-1', account, { targetChatId: '-1001' }),
+    ));
+
+    const row = await repo.findOneByOrFail({ id: attemptId });
+    // 修复后写覆盖先写会丢认领 → settleClaims 少计新增、误判 claim_timeout
+    expect(new Set(row.claimedAccountIds ?? [])).toEqual(new Set(['bot-a', 'bot-b', 'bot-c', 'bot-d']));
+  });
+
   it('开启轮次：新建行并为后续状态迁移保留可重建时间线', async () => {
     const { service, repo, baseInput } = await setup();
 

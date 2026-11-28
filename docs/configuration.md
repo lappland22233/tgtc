@@ -56,10 +56,16 @@ SQLite 备份前应停止应用或使用 SQLite 在线备份能力取得一致�
 | `FRONTEND_URL` | - | CORS 单一来源回退值 |
 | `CORS_ORIGINS` | - | 逗号分隔的允许来源，优先于 `FRONTEND_URL` |
 | `JWT_SECRET` | - | 至少 32 字符，启动必检 |
-| `JWT_EXPIRES_IN` | `7d` | JWT 有效期 |
+| `JWT_EXPIRES_IN` | `7d` | JWT 有效期。**同时决定 `access_token` 与 `XSRF-TOKEN` 两个 Cookie 的 maxAge**（`common/utils/jwt-expiry.ts`），三者始终对齐。支持 `7d`/`1h`/`30m`/`60s`/`500ms`/`2w`/`1y` 与纯秒数；非法值回退 7 天。缩短有效期可降低令牌泄漏后的可用窗口，但当前无刷新/轮换机制，过期即需重新登录 |
 | `SECURE_COOKIE` | `false` | HTTPS 生产环境必须显式设为 `true` |
 | `TOKEN_EXTRACTION_MODE` | `both` | `both` 或 `cookie_only` |
-| `TRUST_PROXY_HOPS` | 未设置 | Express 信任的反向代理跳数；位于反代之后必须设置（如 `1`） |
+| `TRUST_PROXY_HOPS` | 未设置 | Express 信任的反向代理跳数；位于反代之后必须设置（如 `1`）。**同时决定 WebSocket 告警网关的握手 IP 解析**（`common/utils/client-ip.ts` 的 `getSocketClientIp`）：未设置时取 socket 对端地址，完全不信任 `X-Forwarded-For` |
+| `CODE_HMAC_SECRET` | 回退 `JWT_SECRET` | 邮箱验证码 HMAC 密钥，至少 32 字符（`auth/auth.service.ts`）。建议与 JWT 签名密钥分离，避免一处泄漏同时影响登录令牌与验证码 |
+| `API_KEY_ENCRYPTION_KEY` | 未设置 | API 密钥可重显明文的根密钥：**32 字节，base64 或 hex**（`api-key/api-key-crypto.service.ts`）。生成：`openssl rand -base64 32`。未配置时新建密钥无法在界面重显明文，仅保留前缀识别 |
+| `MEDIA_TICKET_SECRET` | 回退 `JWT_SECRET` | 分享媒体票据签名密钥（`common/services/media-ticket.service.ts`）。票据供 Android 系统媒体栈后续不携带 Cookie 的 Range 请求使用，建议独立密钥 |
+| `TURNSTILE_SECRET_KEY` | 空 | Cloudflare Turnstile Secret Key。**权威来源是管理后台 SystemConfig（加密存储）**，仅当 DB 无记录时回退读取本环境变量 |
+| `TURNSTILE_HOSTNAMES` | 空 | Turnstile 可信 Hostname 列表（逗号分隔）。同上：DB 配置优先，env 仅兜底 |
+| `CACHE_TTL_MS` | `30000` | SystemConfig 内存缓存 TTL（毫秒），`common/services/config-cache.service.ts`。调小可让后台配置改动更快生效，代价是查库频率上升 |
 
 启用 Cookie 凭据时禁止将 `CORS_ORIGINS` 配置为 `*`。多层代理部署必须根据真实拓扑设置 `TRUST_PROXY_HOPS`，并确保上游正确维护 `X-Forwarded-For`。
 
@@ -72,9 +78,11 @@ SQLite 备份前应停止应用或使用 SQLite 在线备份能力取得一致�
 
 | 变量 | 默认值 | 说明 |
 |---|---:|---|
-| `MAX_FILE_SIZE` | `83886080`（80 MB） | 单文件上限（字节）；保留 Cloudflare 代理层安全余量，实际业务上限以本变量或管理后台动态配置为准 |
+| `MAX_FILE_SIZE` | 示例值 `83886080`（80 MB）；**代码兜底 `20971520`（20 MB）** | 单文件上限（字节）。优先取管理后台「上传配置」的 SystemConfig 值，其次本环境变量；两者都缺失或非法时回退 **20 MB**（`file/file-utils.ts` 的 `parseFileSize`）。80 MB 只是 `.env.example` 的推荐值（为 Cloudflare 代理层留安全余量），不是代码默认值——未设该变量时实际上限是 20 MB，排障时勿按 80 MB 预期 |
 | `FILE_TYPE_MODE` | `blacklist` | 类型过滤模式：`blacklist`（黑名单）或 `whitelist`（白名单） |
 | `FILE_TYPE_FILTER` | 空 | 逗号分隔的扩展名列表（如 `.zip,.exe,.sh`），空值 = 不限制 |
+| `THUMBNAIL_DIR` | `<cwd>/tmp/thumbnails` | 缩略图目录（`file/thumbnail.service.ts`），与下载缓存目录独立 |
+| `FFMPEG_PATH` | `ffmpeg`（从 PATH 查找） | ffmpeg 可执行文件路径，用于视频封面抽帧。未安装或路径错误时视频封面生成失败，不影响原文件上传与下载 |
 | `CHUNK_UPLOAD_USER_CONCURRENCY` | `3` | 分片上传：单用户同时接收的分片会话数 |
 | `CHUNK_UPLOAD_GLOBAL_CONCURRENCY` | `24` | 分片上传：全局同时接收的分片会话数 |
 | `CHUNK_UPLOAD_INFLIGHT_BYTES` | `268435456`（256 MiB） | 分片上传：全局在途字节预算 |
@@ -91,6 +99,7 @@ SQLite 备份前应停止应用或使用 SQLite 在线备份能力取得一致�
 | `LOG_ROTATION_INTERVAL` | `daily` | 分片粒度：`daily`（按天）或 `hourly`（按小时） |
 | `LOG_MAX_FILE_SIZE` | `20971520`（20 MB） | 单个日志文件上限，超出后归档为 `app-YYYY-MM-DD.log.1` / `.2` … |
 | `LOG_RETENTION_DAYS` | `7` | 日志文件保留天数，超期按修改时间自动清理 |
+| `AUDIT_DEGRADED_DIR` | `<cwd>/tmp/degraded-audit` | 审计写库失败时的降级落盘目录（`common/services/audit.service.ts`）。**必须监控该目录**：出现文件即说明审计正在丢失数据库写入，需人工回补 |
 
 
 ## SMTP
@@ -136,7 +145,9 @@ Redis 承载 8 个 Bull 队列：`metrics-aggregation`、`attack-detection`、`a
 | `FILE_CACHE_BUILD_IDLE_TIMEOUT_MS` | `150000` | 缓存构建**无进展**超时（毫秒），每收到数据即刷新 |
 | `FILE_CACHE_BUILD_TOTAL_TIMEOUT_MS` | `0` | 单次缓存构建**总时限**（毫秒）；`0` = 禁用（默认），固定总时限会误杀长传输 |
 | `FILE_DOWNLOAD_MAX_RESERVED_GB` | `0` | 在途下载任务「未写入预约」总上限（GB），0 表示仅受物理空间约束（SystemConfig 热更新） |
-| `FILE_DOWNLOAD_MAX_CONCURRENT_UPSTREAMS` | `8` | 上游冷回源**权重预算**（非连接数）：`>1GiB` 权重 8、`256MiB–1GiB` 权重 2、其余 1；自动扩缩容开启时按有效 Bot 数映射 `min(64, max(8, n×16))`（1→16、2→32、4→64），范围 1-64（SystemConfig 热更新） |
+| `FILE_DOWNLOAD_MAX_CONCURRENT_UPSTREAMS` | `8` | 上游冷回源**权重预算**（非连接数）：`>1GiB` 权重 8、`256MiB–1GiB` 权重 2、其余 1；自动扩缩容开启时按有效 Bot 数映射 `min(128, max(8, n×16))`（1→16、2→32、4→64、8→128），范围 1-128（SystemConfig 热更新） |
+| `FILE_DOWNLOAD_USER_STREAM_MAX_CONCURRENCY` | `4` | 单个 user 账号（MTProto）同时开出的回源流上限，范围 1-32；过高更容易触发 Telegram 限流，过低会让并发下载提前回退 Bot（SystemConfig 热更新） |
+| `FILE_DOWNLOAD_USER_FAILURE_COOLDOWN_SECONDS` | `10` | user 账号**瞬时失败**（network / other）的冷却时长（秒），范围 1-600；限流仍按 `retry_after` 冷却，认证类 30 分钟、权限/不存在类 10 分钟不受该值影响。容量等待超时（等 slot / 队满）**不冷却账号**（SystemConfig 热更新） |
 | `FILE_DOWNLOAD_UPSTREAM_QUEUE_POLICY` | `strict_fifo` | 上游等待项选择策略：`strict_fifo`（严格 FIFO，回退模式）/ `bounded_fit`（前 8 个等待项内适配优先，队首最多被绕过 8 次或等待 10 秒后进入队首保留）（SystemConfig 热更新） |
 | `FILE_DOWNLOAD_AUTO_CAPACITY_ENABLED` | `true` | 全局权重预算是否按有效 Bot 数自动扩缩容（关闭后只保留人工设置）（SystemConfig 热更新） |
 | `FILE_DOWNLOAD_QUEUE_CAPACITY` | `128` | 磁盘/上游等待队列容量，超过后直接返回「服务器繁忙」（`429`）（SystemConfig 热更新） |
@@ -173,7 +184,7 @@ Redis 承载 8 个 Bull 队列：`metrics-aggregation`、`attack-detection`、`a
 | `TELEGRAM_BOT_ADMIN_IDS` | - | 初始管理员 TG 用户 ID，逗号分隔；开启入站时必填 |
 | `TELEGRAM_BOT_POLL_TIMEOUT_SECONDS` | `30` | 长轮询超时（1–120 秒） |
 | `TELEGRAM_BOT_INBOUND_SELF_CHECK_SECONDS` | `20` | 入站启动自检延迟（1–300 秒，显式 `0` 关闭）；发现「已启用入站但启动后没有任何一次成功 `getUpdates`」时输出 error 级日志与只读诊断结论，用于发现循环空转类静默失效 |
-| `TELEGRAM_BOT_ENCRYPTION_KEY` | - | 直链 Token 可逆加密根密钥（32 字节 base64/64 位 hex）；缺失时 `/link_query` 只能返回前缀 |
+| `TELEGRAM_BOT_ENCRYPTION_KEY` | - | 直链 Token 可逆加密根密钥（32 字节 base64/64 位 hex）；缺失时 `/links` 只能返回前缀 |
 | `TELEGRAM_BOT_DAILY_LIMIT` | `5` | 非白名单用户每日直链额度（env 兜底，面板可调） |
 | `TELEGRAM_BOT_LINK_TTL_HOURS` | `4` | 直链有效期（小时，env 兜底，面板可调） |
 | `TELEGRAM_BOT_QUOTA_TIMEZONE` | `Asia/Shanghai` | 每日额度切日时区（env 兜底，面板可调） |
@@ -192,11 +203,17 @@ Redis 承载 8 个 Bull 队列：`metrics-aggregation`、`attack-detection`、`a
 | `/help`、`/start` | 所有用户 | 用法说明 |
 | `/id` | 所有用户 | 返回自己的 TG 用户 ID |
 | `/quota` | 所有用户 | 查询今日剩余额度（白名单提示不限额） |
-| `/wl_add <TG用户ID>` | 管理员 | 永久加入白名单 |
-| `/wl_remove <TG用户ID>` | 管理员 | 移出白名单 |
-| `/wl_list` | 管理员 | 列出白名单（截断） |
-| `/link_query <TG用户ID>` | 管理员 | 按 TG 用户 ID 查询完整有效直链（每次调用全审计） |
-| `/link_revoke <直链URL或Token>` | 管理员 | 按直链撤销，立即失效 |
+| `/admin` | 管理员 | 管理面板：生效配置、预设档位按钮、有效直链与白名单分页 |
+| `/ttl <1-720>` | 管理员 | 设置直链有效期（小时） |
+| `/limit <数量\|default>` | 管理员 | 设置通用每日额度 |
+| `/quota_set <TG用户ID> <数量\|default>` | 管理员 | 设置/清除单账号每日额度 |
+| `/wl add\|remove <TG用户ID>` | 管理员 | 加入/移出白名单 |
+| `/wl list` | 管理员 | 列出白名单（分页） |
+| `/links [TG用户ID] [页码]` | 管理员 | 浏览有效直链（分页、每行可撤销，每次查询全审计） |
+| `/revoke <直链URL或Token>` | 管理员 | 按直链撤销，立即失效 |
+
+额度优先级：**白名单（不限）> 单账号覆盖（`/quota_set`）> 通用额度（`TELEGRAM_BOT_DAILY_LIMIT`）**。
+单账号覆盖存放于 `telegram_bot_user_quotas` 表（一用户一行），加入白名单不会清除该行。
 
 管理员身份仅依据**数字 TG 用户 ID**（`TELEGRAM_BOT_ADMIN_IDS`）；`@username` 属于用户可控字段，仅用于审计展示，绝不参与权限判定。审计记录 TG 用户 ID 与用户名（如有），且**从不记录完整 Token**。
 
@@ -205,7 +222,7 @@ Redis 承载 8 个 Bull 队列：`metrics-aggregation`、`attack-detection`、`a
 1. 在 `.env` 配置 `TELEGRAM_BOT_ADMIN_IDS` 与 `TELEGRAM_BOT_ENCRYPTION_KEY`（并确认 `APP_URL` 为对外真实地址）；
 2. 运行迁移（`npm run migration:run`），确认 `telegram_bot_*` 三张表与 `access_logs` 新列已创建；
 3. 设置 `TELEGRAM_BOT_UPDATES_ENABLED=true` 并重启后端；
-4. 以初始管理员身份私聊 Bot，先执行 `/help` 与 `/wl_add`，再发送一个文件验证直链可用；
+4. 以初始管理员身份私聊 Bot，先执行 `/help` 与 `/admin` 确认面板数据正确，再发送一个文件验证直链可用；
 5. 在后台「Telegram Bot 设置」确认「当前生效域名」正确后再放开给普通用户。
 
 
@@ -355,6 +372,7 @@ Redis 承载 8 个 Bull 队列：`metrics-aggregation`、`attack-detection`、`a
 | 环境变量 | 说明 |
 | --- | --- |
 | `STORAGE_ENCRYPTION_KEY` | 存储账号凭据加密根密钥（32 字节 base64 或 64 位 hex）。**必填才允许新增/轮换存储账号**；缺失时创建被拒绝（绝不以明文落库）。与 TG 账号的 `TELEGRAM_ACCOUNT_ENCRYPTION_KEY` 相互独立 |
+| `STORAGE_ALLOW_PRIVATE_ENDPOINT` | 默认 `false`。设为 `true` 才允许把 S3 endpoint / WebDAV url 指向环回或私网地址（内网 MinIO、局域网 WebDAV 是合法部署形态）。**链路本地与云元数据地址始终拒绝**，不受本开关影响：`169.254.0.0/16`、`fe80::/10`、`metadata.google.internal` / `metadata` / `instance-data`。局限：仅判定字面量 IP 与已知元数据主机名，指向内网 IP 的域名需异步 DNS 解析才能识别，DNS rebinding 属残留风险 |
 
 **账号管理**（后台「存储后端」页，仅超级管理员）：
 

@@ -2,12 +2,7 @@ import { Injectable, Logger, OnApplicationShutdown } from '@nestjs/common';
 import { OnEvent } from '@nestjs/event-emitter';
 import { AuditService } from '../common/services/audit.service';
 import { ConfigCacheService } from '../common/services/config-cache.service';
-import {
-  DOWNLOAD_CONFIG_DEFAULTS,
-  DOWNLOAD_CONFIG_KEYS,
-  normalizeBooleanFlag,
-  normalizeDownloadConfigNumber,
-} from '../file/download-resource-coordinator.service';
+import { DOWNLOAD_CONFIG_DEFAULTS, DOWNLOAD_CONFIG_KEYS, normalizeBooleanFlag, normalizeDownloadConfigNumber } from '../common/constants/download-config';
 import { FileCopyService } from './file-copy.service';
 import { ReplicaTargetResolver } from './replica-target.resolver';
 import {
@@ -25,8 +20,14 @@ export const CAPACITY_DOWN_STABLE_CYCLES = 10;
 export const CAPACITY_STEP_MAX = 8;
 /** 权重预算映射下限（有效 Bot 数为 1 时的目标值） */
 export const CAPACITY_MIN_BUDGET = 8;
-/** 权重预算映射上限（与 `DOWNLOAD_CONFIG_RANGES` 的 1-64 一致） */
-export const CAPACITY_MAX_BUDGET = 64;
+/**
+ * 权重预算映射上限（与 `DOWNLOAD_CONFIG_RANGES` 的 1-128 一致）。
+ *
+ * 为什么是 128 而不是 64：`SMALL_FILE_UPSTREAM_BUDGET_PER_ACCOUNT=16` 意味着
+ * 8 个有效 Bot 才配得到 128 权重；64 的上限会让 5 个及以上 Bot 的部署永远
+ * 拿不到与账号规模匹配的容量。升档仍受稳定周期、失败冻结与大文件副本闸门保护。
+ */
+export const CAPACITY_MAX_BUDGET = 128;
 /** 一个评估周期内新增上游失败达到该值时冻结升档 */
 export const CAPACITY_FAILURE_FREEZE_THRESHOLD = 3;
 /**
@@ -42,8 +43,8 @@ export const CAPACITY_LARGE_FILE_MIN_ACCOUNTS = 2;
 /**
  * 「有效 Bot 数 → 全局上游权重预算」的容量映射。
  *
- * `min(64, max(8, activeBotCount × SMALL_FILE_UPSTREAM_BUDGET_PER_ACCOUNT))`：
- * 每个有效 Bot 贡献 16 权重，4 个 → 64，上限 64。
+ * `min(128, max(8, activeBotCount × SMALL_FILE_UPSTREAM_BUDGET_PER_ACCOUNT))`：
+ * 每个有效 Bot 贡献 16 权重，4 个 → 64，8 个 → 128，上限 128。
  * 这只是容量映射，不改变选号算法，也不把账号 `maxInflight` 合并成全局预算。
  * 升档仍受稳定周期、失败冻结和大文件副本闸门保护。
  */

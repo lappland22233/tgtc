@@ -62,10 +62,13 @@ const grantFields = [
 const auditActions = [
   'telegram_bot_task_cancelled', 'telegram_bot_user_banned', 'telegram_bot_link_revoked',
   'telegram_bot_link_queried', 'telegram_bot_whitelist_add', 'telegram_bot_whitelist_remove',
+  'telegram_bot_setting_changed', 'telegram_bot_quota_override_set', 'telegram_bot_quota_override_cleared',
+  'telegram_bot_admin_panel_opened',
 ] as const satisfies readonly AuditAction[];
 const auditDetailFields = [
   'targetTelegramUserId', 'grantId', 'taskId', 'receiverBotId', 'reason', 'cancelledTasks',
   'revokedGrants', 'alreadyBanned', 'replayable', 'operatorTelegramUserId', 'tokenPrefix',
+  'quotaSource', 'quotaLimit', 'before', 'after', 'via', 'page',
 ];
 
 function dateFilter(query: BotOperationsTimePage, db: DataSource) {
@@ -244,7 +247,7 @@ export class TelegramBotOperationsService {
     const config = await this.config.getConfig();
     const usageDate = this.quota.getBusinessDate(config.quotaTimezone);
     const grantRepo = this.db.getRepository(TelegramBotFileGrant);
-    const [ban, uploadCounts, issued, active, transfers, used, whitelisted] = await Promise.all([
+    const [ban, uploadCounts, issued, active, transfers, used, whitelisted, override] = await Promise.all([
       this.db.getRepository(TelegramBotUserBan).findOneBy({ telegramUserId }),
       this.db.getRepository(TelegramBotInboundTask).createQueryBuilder('task')
         .select('task.status', 'status').addSelect('COUNT(*)', 'count')
@@ -257,20 +260,68 @@ export class TelegramBotOperationsService {
         .where('log.botTelegramUserId = :telegramUserId AND log.botGrantId IS NOT NULL', { telegramUserId })
         .getRawOne<{ requests: string | number; bytes: string }>(),
       this.quota.getUsed(telegramUserId, usageDate), this.quota.isWhitelisted(telegramUserId),
+      this.quota.getOverride(telegramUserId),
     ]);
     const byStatus: Record<InboundTaskStatus, number> = { queued: 0, running: 0, completed: 0, failed: 0, cancelled: 0 };
     for (const row of uploadCounts) byStatus[row.status] = Number(row.count);
     const total = Object.values(byStatus).reduce((sum, count) => sum + count, 0);
+    // 生效额度与 Bot 侧 /quota 同口径：白名单 > 单账号覆盖 > 全局
+    const limitSource: 'whitelist' | 'user' | 'global' = whitelisted ? 'whitelist' : override ? 'user' : 'global';
+    const limit = limitSource === 'whitelist' ? null : (override?.dailyLimit ?? config.dailyLimit);
     return {
       telegramUserId, ban, uploads: { total, byStatus }, grants: { total: issued, active },
       downloads: { requests: Number(transfers?.requests ?? 0), bytes: transfers?.bytes ?? '0' },
-      quota: { used, limit: whitelisted ? null : config.dailyLimit,
-        remaining: whitelisted ? null : Math.max(0, config.dailyLimit - used), usageDate, whitelisted },
+      quota: {
+        used, limit,
+        remaining: limit === null ? null : Math.max(0, limit - used),
+        usageDate, whitelisted,
+        limitSource,
+        override: override?.dailyLimit ?? null,
+        globalLimit: config.dailyLimit,
+      },
     };
   }
 
-  async userAudit(telegramUserId: string, page: BotOperationsTimePage) {
-    const user = this.db.options.type === 'postgres'
+  /**
+   * 设置或清除单账号每日额度（面板入口，与 Bot 侧 `/quota_set` 语义一致）。
+   *
+   * 与 Bot 命令共用同一张 `telegram_bot_user_quotas` 表与同一套优先级
+   * （白名单 > 单账号覆盖 > 全局），因此面板与命令改的是同一份数据。
+   * 加白名单**不会**清掉覆盖值，移出后自动恢复。
+   */
+  async setUserQuota(telegramUserId: string, dailyLimit: number | null, operator: string) {
+    if (dailyLimit === null) {
+      const cleared = await this.quota.clearOverride(telegramUserId);
+      await this.recordQuotaAudit('telegram_bot_quota_override_cleared', telegramUserId, operator, {
+        targetTelegramUserId: telegramUserId,
+        cleared,
+      });
+      return { changed: cleared, override: null };
+    }
+
+    const { created, before } = await this.quota.setOverride(telegramUserId, dailyLimit, operator);
+    await this.recordQuotaAudit('telegram_bot_quota_override_set', telegramUserId, operator, {
+      targetTelegramUserId: telegramUserId,
+      created,
+      before,
+      after: dailyLimit,
+    });
+    return { changed: true, override: dailyLimit, before };
+  }
+
+  /** 额度覆盖变更审计（与 Bot 命令写入同一批 action，前端标签无需分叉） */
+  private async recordQuotaAudit(
+    action: AuditAction,
+    telegramUserId: string,
+    operator: string,
+    metadata: Record<string, unknown>,
+  ) {
+    await this.db.transaction(async manager => {
+      await record(manager, action, operator, 'telegram_bot_user_quota', telegramUserId, telegramUserId, metadata);
+    });
+  }
+
+  async userAudit(telegramUserId: string, page: BotOperationsTimePage) {    const user = this.db.options.type === 'postgres'
       ? "log.metadata ->> 'targetTelegramUserId'" : "json_extract(log.metadata, '$.targetTelegramUserId')";
     const [logs, total] = await this.db.getRepository(AuditLog).createQueryBuilder('log')
       .setFindOptions({ where: dateFilter(page, this.db), ...pageOptions(page) })

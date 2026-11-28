@@ -1,7 +1,10 @@
 <template>
   <div class="auth-gate">
     <header class="auth-gate-header">
-      <div class="auth-gate-brand"><WorkspaceBrand /></div>
+      <div class="auth-gate-brand">
+        <WorkspaceBrand />
+        <ThemeToggle variant="icon" />
+      </div>
     </header>
     <main class="auth-gate-content" aria-labelledby="auth-gate-title">
       <section class="auth-gate-panel">
@@ -17,17 +20,15 @@
 
 <script setup lang="ts">
 import WorkspaceBrand from '@/components/WorkspaceBrand.vue';
+import ThemeToggle from '@/components/ThemeToggle.vue';
 
 defineProps<{ title: string }>();
 </script>
 
 <style scoped>
 .auth-gate {
-  --auth-control-radius: 8px;
+  --auth-control-radius: var(--radius-md);
   --td-border-level-2-color: color-mix(in srgb, var(--workspace-muted) 65%, var(--workspace-border));
-  --color-bg-surface: var(--workspace-surface);
-  --seed-primary: var(--workspace-accent);
-  --seed-accent: color-mix(in srgb, var(--workspace-accent) 85%, var(--workspace-text));
   display: flex;
   flex-direction: column;
   min-height: 100vh;
@@ -44,6 +45,8 @@ defineProps<{ title: string }>();
 .auth-gate-brand {
   display: flex;
   align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
   width: min(100% - 32px, 1120px);
   min-height: var(--workspace-header-height);
   margin-inline: auto;
@@ -52,16 +55,17 @@ defineProps<{ title: string }>();
 .auth-gate-content {
   display: grid;
   flex: 1;
-  place-items: center;
+  align-items: start;
+  justify-items: center;
   padding: clamp(24px, 6vh, 64px) 12px;
 }
 
 .auth-gate-panel {
   width: min(100%, 430px);
   min-width: 0;
-  padding: 32px;
+  padding: 24px 16px;
   border: 1px solid var(--workspace-border);
-  border-radius: 15px;
+  border-radius: var(--radius-xl);
   background: var(--workspace-surface);
 }
 
@@ -92,6 +96,7 @@ defineProps<{ title: string }>();
 
 .auth-gate-panel :deep(.t-input__inner) {
   color: var(--workspace-text);
+  font-size: 16px;
 }
 
 .auth-gate-panel :deep(.t-input__inner::placeholder) {
@@ -129,17 +134,17 @@ defineProps<{ title: string }>();
   text-underline-offset: 3px;
 }
 
-@media (max-width: 600px) {
+@media (min-width: 481px) {
   .auth-gate-content {
-    align-items: start;
+    align-items: center;
   }
 
   .auth-gate-panel {
-    padding: 24px 16px;
+    padding: 32px;
   }
 
   .auth-gate-panel :deep(.t-input__inner) {
-    font-size: 16px;
+    font-size: 14px;
   }
 }
 </style>
