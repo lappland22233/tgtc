@@ -133,9 +133,59 @@ DOTENV_CONFIG_PATH="$APP_ENV" "$NODE" -r "$SOURCE/backend/node_modules/dotenv/co
 
 用系统服务启动 `$NODE $SOURCE/backend/dist/main.js`。服务的 `WorkingDirectory` 和 `EnvironmentFile` 应与迁移使用的实际路径相同。进程默认在 127.0.0.1 监听，并通过同源站点提供前端和 `/api`。systemd 部署可运行 `bash "$SOURCE/scripts/release/health-check.sh"` 检查服务、数据库、前端和版本。非默认监听地址请设置 `TGTC_API_URL` 和 `TGTC_FRONTEND_URL`。
 
+`/api/health` 同时探活数据库与 Redis：Redis 不可用时 Bull 的上传、镜像、指标与告警任务会全部静默停摆，因此探针返回 503 而不是「数据库正常即绿」。`health-check.sh` 会一并断言 `database` 与 `redis` 两个字段。
+
+### 定时备份（必须启用）
+
+只在升级窗口手工备份会让两次升级之间的 RPO 不可控：期间发生数据库损坏或误删将没有近期恢复点。仓库提供 systemd 单元样例，安装后每日自动备份并保留 14 天。
+
+```bash
+# 1) 按实际部署修改单元中的 ExecStart 脚本路径（checkout 与 /opt 布局不同）
+sudo install -m 0644 "$SOURCE/scripts/release/systemd/tgtc-backup.service" /etc/systemd/system/
+sudo install -m 0644 "$SOURCE/scripts/release/systemd/tgtc-backup.timer" /etc/systemd/system/
+sudo systemctl edit tgtc-backup.service   # 或直接改 ExecStart 指向实际 $SOURCE
+
+# 2) 配置部署相关变量（缺失时用脚本内默认值）
+sudo install -d -m 0700 /etc/tgtc
+sudo tee /etc/tgtc/backup.env >/dev/null <<'EOF'
+TGTC_INSTALL_ROOT=/opt/tgtc
+TGTC_BACKEND_WORKDIR=/opt/tgtc/runtime/backend
+TGTC_ENV_FILE=/opt/tgtc/runtime/backend/.env
+TGTC_BACKUP_KEEP_DAYS=14
+EOF
+sudo chmod 0600 /etc/tgtc/backup.env
+
+# 3) 启用并立即验证一次
+sudo systemctl daemon-reload
+sudo systemctl enable --now tgtc-backup.timer
+sudo systemctl start tgtc-backup.service
+systemctl list-timers tgtc-backup.timer
+journalctl -u tgtc-backup.service -n 50 --no-pager
+```
+
+注意事项：
+
+- **PostgreSQL** 分支在线备份（`pg_dump --format=custom` + `pg_restore --list` 校验），不停服。
+- **SQLite** 分支需要一致性快照，脚本会自行 `systemctl stop` 目标服务并在退出时恢复；因此单元刻意不绑定 `Requires=tgtc.service`。请把 `OnCalendar` 安排在业务低峰。
+- 脚本用 `flock -n` 拒绝并发运维操作，与手工升级窗口撞车时以退出码 5 退让。这是预期行为，但**必须有人看结果**：核对 `systemctl list-timers` 的 LAST/NEXT、`journalctl -u tgtc-backup.service`，以及 `$TGTC_INSTALL_ROOT/.tgtc-ops/history.log` 中的 `backup ok` 记录。
+- 备份产物含完整数据库内容，单元以 `UMask=0077` 收紧权限；备份根目录必须位于持久安装根内且不得为符号链接（脚本会校验）。
+- **定期做恢复演练**：PostgreSQL 在空库上 `pg_restore --exit-on-error --single-transaction -d 恢复库 database.pg.dump`；SQLite 用备份文件作新库并跑 `PRAGMA integrity_check`，再核对关键表行数。只有演练通过才算备份可用。
+
 ### 从 1.x 手工升级
 
 1. 在维护窗口前完成新源码构建。记录现有 `systemctl cat tgtc.service`、Node 路径、旧提交和 `VERSION`。源码原地 checkout 常以旧仓库的 `backend/` 为工作目录，先把新提交构建到旁边的目录，避免尚在运行的进程与 `npm ci` 或重编译共用依赖。旧预编译部署通常从 `/opt/tgtc/current/bin/tgtc` 启动，可用 `readlink -f /opt/tgtc/current` 和 `cat /opt/tgtc/current/VERSION` 确认旧版本。
+
+   **核对发行产物完整性**（自动更新与验签脚本已退役，手工升级必须自行校验，否则完整性只依赖 git 传输安全）：
+
+   ```bash
+   git -C "$SOURCE" fetch --tags origin
+   git -C "$SOURCE" verify-tag "v$(cat "$SOURCE/VERSION")"   # 签名标签；无签名时改用下一行
+   git -C "$SOURCE" rev-parse HEAD                            # 与发布记录/CI 产物指纹逐字核对
+   git -C "$SOURCE" status --porcelain                        # 必须为空：部署树不得有本地改动
+   (cd "$SOURCE/backend" && npm ci && npm run build)           # 依赖按 package-lock 精确安装
+   ```
+
+   若发布方提供 `SHA256SUMS`，先 `sha256sum -c SHA256SUMS` 再构建。核对不通过时停止升级，不要继续迁移。
 2. 核对并保留原工作目录、`.env`、上传暂存、缓存、Redis 持久化和 Telegram Bot API 的 `--dir`、`--temp-dir`。历史 `file_id` 依赖原 Bot 工作目录及凭据。先关闭旧更新入口，确认没有进行中的运维任务，再停后端以及其他会写该数据库的进程。
 3. 后端停写后运行备份并验证。以下示例针对旧 `/opt` 布局；原地 checkout 请将 `TGTC_BACKEND_WORKDIR` 改为实际旧工作目录，`TGTC_VERSION_FILE` 改为旧源码的 `VERSION`。备份根目录应位于持久安装根内。脚本会输出本次备份的确切路径。
 

@@ -18,7 +18,7 @@
 
 流式下载和导出端点直接返回文件内容，不使用 JSON 包装。
 
-媒体直链格式为 `https://your-domain.example/media/<file-id>`，可用于 Markdown、`<img>`、`<audio>` 和 `<video>`。直链仅对公开、未删除、无密码、无访问次数限制、无有效期限制的图片/音频/视频生效；响应使用原始 MIME、`Content-Disposition: inline` 和一小时公共缓存。视频/音频在本地缓存命中后支持 Range，冷文件首次请求回退为完整响应并建立缓存。
+媒体直链格式为 `https://your-domain.example/media/<file-id>`，可用于 Markdown、`<img>`、`<audio>` 和 `<video>`。直链仅对公开、未删除、无密码、无访问次数限制、无有效期限制的图片/音频/视频生效；响应使用原始 MIME、`Content-Disposition: inline`，并带 `X-Content-Type-Options: nosniff`。**缓存头是 `Cache-Control: no-store`**（不是公共缓存）：直链内容随覆盖上传变化，且授权条件可能在任意时刻失效，禁止浏览器与共享缓存留存。视频/音频在本地缓存命中后支持 Range，冷文件首次请求回退为完整响应并建立缓存。
 
 ### 公开接口
 
@@ -65,8 +65,8 @@
 | `GET` | `/api/files/:id/download` | 登录用户下载 |
 | `GET` | `/api/files/:id/preview` | 页内在线预览（Range 命中 206，冷文件回退全量） |
 | `GET` | `/api/files/:id/cache-status` | 缓存状态（`cached`/`cold`），前端据此决定单连接策略 |
-| `GET` | `/api/files/:id/thumbnail?t=` | 加密令牌缩略图 |
-| `GET` | `/api/files/:id/thumbnail-hd?t=` | 加密令牌高清视频封面 |
+| `GET` | `/api/files/:id/thumbnail` | 缩略图（JWT / API Key 鉴权 + 文件级授权；`Cache-Control: private, no-cache`） |
+| `GET` | `/api/files/:id/thumbnail-hd` | 高清视频封面（同上鉴权） |
 | `PATCH` | `/api/files/:id/rename` | 重命名显示名 |
 | `PATCH` | `/api/files/:id/move` | 移动文件 |
 | `POST` | `/api/files/:id/copy` | 轻量复制文件 |

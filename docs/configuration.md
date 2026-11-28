@@ -59,7 +59,13 @@ SQLite 备份前应停止应用或使用 SQLite 在线备份能力取得一致�
 | `JWT_EXPIRES_IN` | `7d` | JWT 有效期 |
 | `SECURE_COOKIE` | `false` | HTTPS 生产环境必须显式设为 `true` |
 | `TOKEN_EXTRACTION_MODE` | `both` | `both` 或 `cookie_only` |
-| `TRUST_PROXY_HOPS` | 未设置 | Express 信任的反向代理跳数；位于反代之后必须设置（如 `1`） |
+| `TRUST_PROXY_HOPS` | 未设置 | Express 信任的反向代理跳数；位于反代之后必须设置（如 `1`）。**同时决定 WebSocket 告警网关的握手 IP 解析**（`common/utils/client-ip.ts` 的 `getSocketClientIp`）：未设置时取 socket 对端地址，完全不信任 `X-Forwarded-For` |
+| `CODE_HMAC_SECRET` | 回退 `JWT_SECRET` | 邮箱验证码 HMAC 密钥，至少 32 字符（`auth/auth.service.ts`）。建议与 JWT 签名密钥分离，避免一处泄漏同时影响登录令牌与验证码 |
+| `API_KEY_ENCRYPTION_KEY` | 未设置 | API 密钥可重显明文的根密钥：**32 字节，base64 或 hex**（`api-key/api-key-crypto.service.ts`）。生成：`openssl rand -base64 32`。未配置时新建密钥无法在界面重显明文，仅保留前缀识别 |
+| `MEDIA_TICKET_SECRET` | 回退 `JWT_SECRET` | 分享媒体票据签名密钥（`common/services/media-ticket.service.ts`）。票据供 Android 系统媒体栈后续不携带 Cookie 的 Range 请求使用，建议独立密钥 |
+| `TURNSTILE_SECRET_KEY` | 空 | Cloudflare Turnstile Secret Key。**权威来源是管理后台 SystemConfig（加密存储）**，仅当 DB 无记录时回退读取本环境变量 |
+| `TURNSTILE_HOSTNAMES` | 空 | Turnstile 可信 Hostname 列表（逗号分隔）。同上：DB 配置优先，env 仅兜底 |
+| `CACHE_TTL_MS` | `30000` | SystemConfig 内存缓存 TTL（毫秒），`common/services/config-cache.service.ts`。调小可让后台配置改动更快生效，代价是查库频率上升 |
 
 启用 Cookie 凭据时禁止将 `CORS_ORIGINS` 配置为 `*`。多层代理部署必须根据真实拓扑设置 `TRUST_PROXY_HOPS`，并确保上游正确维护 `X-Forwarded-For`。
 
@@ -72,9 +78,11 @@ SQLite 备份前应停止应用或使用 SQLite 在线备份能力取得一致�
 
 | 变量 | 默认值 | 说明 |
 |---|---:|---|
-| `MAX_FILE_SIZE` | `83886080`（80 MB） | 单文件上限（字节）；保留 Cloudflare 代理层安全余量，实际业务上限以本变量或管理后台动态配置为准 |
+| `MAX_FILE_SIZE` | 示例值 `83886080`（80 MB）；**代码兜底 `20971520`（20 MB）** | 单文件上限（字节）。优先取管理后台「上传配置」的 SystemConfig 值，其次本环境变量；两者都缺失或非法时回退 **20 MB**（`file/file-utils.ts` 的 `parseFileSize`）。80 MB 只是 `.env.example` 的推荐值（为 Cloudflare 代理层留安全余量），不是代码默认值——未设该变量时实际上限是 20 MB，排障时勿按 80 MB 预期 |
 | `FILE_TYPE_MODE` | `blacklist` | 类型过滤模式：`blacklist`（黑名单）或 `whitelist`（白名单） |
 | `FILE_TYPE_FILTER` | 空 | 逗号分隔的扩展名列表（如 `.zip,.exe,.sh`），空值 = 不限制 |
+| `THUMBNAIL_DIR` | `<cwd>/tmp/thumbnails` | 缩略图目录（`file/thumbnail.service.ts`），与下载缓存目录独立 |
+| `FFMPEG_PATH` | `ffmpeg`（从 PATH 查找） | ffmpeg 可执行文件路径，用于视频封面抽帧。未安装或路径错误时视频封面生成失败，不影响原文件上传与下载 |
 | `CHUNK_UPLOAD_USER_CONCURRENCY` | `3` | 分片上传：单用户同时接收的分片会话数 |
 | `CHUNK_UPLOAD_GLOBAL_CONCURRENCY` | `24` | 分片上传：全局同时接收的分片会话数 |
 | `CHUNK_UPLOAD_INFLIGHT_BYTES` | `268435456`（256 MiB） | 分片上传：全局在途字节预算 |
@@ -91,6 +99,7 @@ SQLite 备份前应停止应用或使用 SQLite 在线备份能力取得一致�
 | `LOG_ROTATION_INTERVAL` | `daily` | 分片粒度：`daily`（按天）或 `hourly`（按小时） |
 | `LOG_MAX_FILE_SIZE` | `20971520`（20 MB） | 单个日志文件上限，超出后归档为 `app-YYYY-MM-DD.log.1` / `.2` … |
 | `LOG_RETENTION_DAYS` | `7` | 日志文件保留天数，超期按修改时间自动清理 |
+| `AUDIT_DEGRADED_DIR` | `<cwd>/tmp/degraded-audit` | 审计写库失败时的降级落盘目录（`common/services/audit.service.ts`）。**必须监控该目录**：出现文件即说明审计正在丢失数据库写入，需人工回补 |
 
 
 ## SMTP
