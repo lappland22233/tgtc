@@ -36,6 +36,11 @@ export interface QueueEntry {
   waitingForSlot?: boolean;
   /** B-19：文件已上传成功但标签应用失败，UI 据此提示并提供重试入口 */
   tagsFailed?: boolean;
+  /**
+   * A-20：终态失败是否值得重传。false 表示类型/大小/同名冲突等确定性失败，
+   * 原样重传必然再次失败；true 表示网络/服务端瞬时故障。缺省按可重试处理。
+   */
+  retryable?: boolean;
 }
 
 interface ProgressSnapshot {
@@ -362,6 +367,7 @@ export const useUploadStore = defineStore('upload', () => {
     if (!file) {
       changeStatus(entry, 'error');
       entry.errorReason = '文件引用丢失';
+      entry.retryable = false;
       return;
     }
     try {
@@ -388,6 +394,7 @@ export const useUploadStore = defineStore('upload', () => {
             entry.speed = '-';
             entry.eta = '-';
             entry.errorReason = undefined;
+            entry.retryable = undefined;
             // 条目级重试会重新 init，等待态由新一轮上传自行上报，先清干净避免残留
             entry.waitingForSlot = false;
             try {
@@ -402,11 +409,13 @@ export const useUploadStore = defineStore('upload', () => {
             recordTransientFirstAttemptFailure();
             changeStatus(entry, 'error');
             entry.errorReason = '网络异常，自动重试已暂停，请检查网络后重新上传';
+            entry.retryable = true;
             return;
           }
           if (classification.retryable && currentRetries === 0) recordTransientFirstAttemptFailure();
           changeStatus(entry, 'error');
           entry.errorReason = getErrorMessage(error);
+          entry.retryable = classification.retryable;
           return;
         }
       }

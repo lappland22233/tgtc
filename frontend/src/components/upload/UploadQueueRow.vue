@@ -9,7 +9,7 @@
         <div class="upload-queue-row__meta">
           {{ formatSize(entry.totalBytes) }}
           <t-tag v-if="entry.status === 'success'" theme="success" size="small" variant="light">成功</t-tag>
-          <t-tag v-else-if="entry.status === 'error'" theme="danger" size="small" variant="light">失败</t-tag>
+          <t-tag v-else-if="entry.status === 'error'" theme="danger" size="small" variant="light">{{ failureLabel }}</t-tag>
           <t-tag v-else-if="entry.status === 'cancelled'" theme="default" size="small" variant="light">已取消</t-tag>
           <t-tag v-else-if="entry.status === 'processing' && entry.waitingForSlot" theme="primary" size="small" variant="light">等待服务器空闲</t-tag>
           <t-tag v-else-if="entry.status === 'processing' && (entry.retryCount ?? 0) > 0" theme="warning" size="small" variant="light">重试 {{ entry.retryCount }}/2</t-tag>
@@ -28,18 +28,26 @@
       <t-progress :percentage="entry.progress" size="small" />
       <span>{{ entry.speed }} · 剩余 {{ entry.eta }}</span>
     </div>
-    <div v-if="entry.status === 'error' && entry.errorReason" class="upload-queue-row__error" :title="entry.errorReason">{{ entry.errorReason }}</div>
+    <div v-if="entry.status === 'error' && entry.errorReason" class="upload-queue-row__error" :title="errorText">{{ errorText }}</div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { onBeforeUnmount, ref } from 'vue';
+import { computed, onBeforeUnmount, ref } from 'vue';
 import FileTypeIcon from '@/components/FileTypeIcon.vue';
 import type { QueueEntry } from '@/stores/upload';
 import { formatSize } from '@/utils/format';
 
 const props = defineProps<{ entry: QueueEntry; allowPreview: boolean }>();
 defineEmits<{ cancel: [uid: string] }>();
+
+// A-20：确定性失败（类型/大小/同名冲突）原样重传必然再失败，必须与瞬时故障区分
+const deterministic = computed(() => props.entry.retryable === false);
+const failureLabel = computed(() => (deterministic.value ? '不可重传' : '失败'));
+const errorText = computed(() => {
+  const reason = props.entry.errorReason ?? '';
+  return deterministic.value ? `${reason}（需调整后重新上传）` : reason;
+});
 
 const previewUrl = ref('');
 if (props.allowPreview && props.entry.file && props.entry.mimeType.startsWith('image/')) {
