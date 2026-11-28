@@ -5,6 +5,7 @@ import { useFileStore } from './files';
 import { useChunkedUpload } from '../composables/useChunkedUpload';
 import { isPageVisible } from '../composables/usePageVisibility';
 import { getErrorMessage } from '../utils/error';
+import MessagePlugin from '../utils/message';
 import { uploadScheduler } from '../utils/upload-scheduler';
 import { MAX_ENTRY_RETRIES, getRetryDelay, abortableBackoff, classifyUploadError } from '../utils/upload-retry';
 
@@ -33,6 +34,8 @@ export interface QueueEntry {
   retryCount?: number;
   /** 严格小盘模式：服务器正为另一份大文件保留上传名额，本文件排队等待中 */
   waitingForSlot?: boolean;
+  /** B-19：文件已上传成功但标签应用失败，UI 据此提示并提供重试入口 */
+  tagsFailed?: boolean;
 }
 
 interface ProgressSnapshot {
@@ -293,7 +296,15 @@ export const useUploadStore = defineStore('upload', () => {
 
   async function attachTags(entry: QueueEntry, fileId: string) {
     if (entry.tagIds.length === 0) return;
-    await api.put(`/files/${fileId}/tags`, { tagIds: entry.tagIds }).catch(() => {});
+    try {
+      await api.put(`/files/${fileId}/tags`, { tagIds: entry.tagIds });
+      entry.tagsFailed = false;
+    } catch (error) {
+      // B-19：此前 .catch(() => {}) 静默吞掉失败，文件已上传但标签丢失且无任何提示，
+      // 用户以为标签已打上。标签失败不回滚上传（文件本身已成功），但必须可见。
+      entry.tagsFailed = true;
+      MessagePlugin.warning(`「${entry.fileName}」已上传，但标签应用失败：${getErrorMessage(error)}`);
+    }
   }
 
   async function uploadChunked(entry: QueueEntry, file: File, controller: AbortController) {
@@ -520,10 +531,15 @@ export const useUploadStore = defineStore('upload', () => {
   ) {
     const newEntries: QueueEntry[] = [];
     const seenInBatch = new Set<string>();
+    const skippedDuplicates: string[] = [];
     for (const item of items) {
       if (!item.file || hasActiveFile(item.file)) continue;
       const batchKey = `${item.folderId ?? 'root'}:${item.file.name}`;
-      if (seenInBatch.has(batchKey)) continue;
+      if (seenInBatch.has(batchKey)) {
+        // B-23：此前静默 continue，用户以为整个文件夹都上传成功了
+        skippedDuplicates.push(item.relativePath || item.file.name);
+        continue;
+      }
       seenInBatch.add(batchKey);
       knownFiles.add(item.file);
       const entry = createEntry(item.file, item.folderId, tagIds);
@@ -533,6 +549,13 @@ export const useUploadStore = defineStore('upload', () => {
       newEntries.push(entry);
     }
     appendEntries(newEntries);
+    if (skippedDuplicates.length > 0) {
+      const sample = skippedDuplicates.slice(0, 3).join('、');
+      const suffix = skippedDuplicates.length > 3 ? ' 等' : '';
+      MessagePlugin.warning(
+        `文件夹上传中有 ${skippedDuplicates.length} 个同目录同名重复项已跳过：${sample}${suffix}`,
+      );
+    }
   }
 
   function cancelOne(uid: string) {

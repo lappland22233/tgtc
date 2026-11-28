@@ -279,9 +279,12 @@ async function onPasswordSubmit(pwd: string) {
   const verifyId = ++verifyGeneration;
   passwordError.value = '';
   verifying.value = true;
+  // B-22：验证请求必须用独立 controller。复用 activeRequest.signal 时，验证期间
+  // 若 fetchInfo 被重新触发（凭据过期 / 重试）会 abort 掉正在进行的验证请求。
+  const verifyController = new AbortController();
   try {
     const res = await fetch(`/api/s/${encodeURIComponent(token.value)}/verify`, {
-      signal: activeRequest?.signal,
+      signal: verifyController.signal,
       method: 'POST',
       // CSRF 双重提交：已登录访客（浏览器持有 access_token Cookie）必须携带
       // 与 XSRF-TOKEN Cookie 一致的 X-XSRF-TOKEN 头，否则被全局 CsrfGuard 拒绝（403）。
@@ -312,7 +315,9 @@ async function onPasswordSubmit(pwd: string) {
     if (generation !== requestGeneration || verifyId !== verifyGeneration) return;
     passwordError.value = err instanceof Error ? err.message : '网络错误';
   } finally {
-    if (generation === requestGeneration && verifyId === verifyGeneration) verifying.value = false;
+    // 只按 verifyId 守卫复位：requestGeneration 变化（fetchInfo 重跑）不得让
+    // 提交按钮永久停在 loading 态。
+    if (verifyId === verifyGeneration) verifying.value = false;
   }
 }
 

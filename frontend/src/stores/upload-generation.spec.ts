@@ -44,6 +44,42 @@ async function flush(times = 8) {
   }
 }
 
+describe('文件夹上传重复项可见性（B-23）', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    deferred.length = 0;
+    vi.clearAllMocks();
+  });
+
+  it('同目录同名重复项被跳过时必须给出提示，不得静默丢弃', async () => {
+    const store = useUploadStore();
+    const message = (await import('../utils/message')).default as any;
+
+    store.enqueueFolderFiles([
+      { file: makeFile('a.txt'), folderId: null, relativePath: 'docs/a.txt' },
+      { file: makeFile('a.txt'), folderId: null, relativePath: 'other/a.txt' },
+      { file: makeFile('b.txt'), folderId: null, relativePath: 'docs/b.txt' },
+    ], []);
+
+    // 两个 a.txt 落到同一目标目录 → 只入队一个，但必须告知用户
+    expect(store.entries.filter((e) => e.fileName === 'a.txt')).toHaveLength(1);
+    expect(store.entries.filter((e) => e.fileName === 'b.txt')).toHaveLength(1);
+    expect(message.warning).toHaveBeenCalledWith(expect.stringContaining('1 个同目录同名重复项已跳过'));
+  });
+
+  it('无重复项时不产生提示', async () => {
+    const store = useUploadStore();
+    const message = (await import('../utils/message')).default as any;
+
+    store.enqueueFolderFiles([
+      { file: makeFile('a.txt'), folderId: null },
+      { file: makeFile('b.txt'), folderId: null },
+    ], []);
+
+    expect(message.warning).not.toHaveBeenCalled();
+  });
+});
+
 describe('上传队列会话代际（B-11）', () => {
   beforeEach(() => {
     setActivePinia(createPinia());
