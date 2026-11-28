@@ -40,7 +40,7 @@ import { ShareAudit } from '../common/entities/share-audit.entity';
 
 import { AuditService } from '../common/services/audit.service';
 import { DirectoryNamespaceService } from '../common/services/directory-namespace.service';
-import { UploadJobService, UploadJob } from './upload-job.service';
+import { UploadJobService } from './upload-job.service';
 import { FileCacheService } from './file-cache.service';
 import { ThumbnailService } from './thumbnail.service';
 import { FileAccessControlService } from './file-access-control.service';
@@ -2321,7 +2321,7 @@ export class FileService implements OnModuleInit {
     // 数据库删除成功后再清理可重建的本地衍生数据。
     // invalidate 必须 await（与 1192 行的覆盖路径一致）：fire-and-forget 会让
     // 在途 build/spool 会话在行已删除后仍写出旧内容，抛出未捕获的 rejection。
-    await this.deleteLocalThumbnail(file);
+    await this.thumbnailService.deleteLocalThumbnail(file);
     await this.fileCacheService.invalidate(id);
 
     // 非 TG 后端：DB 删除成功后经共享引用检查 best-effort 清理远端对象（TG 维持不删现状）
@@ -2417,7 +2417,7 @@ export class FileService implements OnModuleInit {
             this.logger.warn(`跳过事务复核后不再到期的文件: ${file.originalName} (${fileId})`);
             continue;
           }
-          await this.deleteLocalThumbnail(file);
+          await this.thumbnailService.deleteLocalThumbnail(file);
           await this.fileCacheService.invalidate(fileId);
           // 非 TG 后端：经共享引用检查 best-effort 清理远端对象（失败只告警，不影响删除结论）
           void this.cleanupNonTelegramObject(file);
@@ -2768,13 +2768,6 @@ export class FileService implements OnModuleInit {
   }
 
   /**
-   * 生成高清视频封面（委托 ThumbnailService，保持公开 API 不变）。
-   */
-  async generateAndSaveHdVideoCover(file: File): Promise<void> {
-    return this.thumbnailService.generateAndSaveHdVideoCover(file);
-  }
-
-  /**
    * 生成图片缩略图（委托 ThumbnailService，保持公开 API 不变）。
    */
   async generateAndSaveThumbnail(
@@ -2783,21 +2776,6 @@ export class FileService implements OnModuleInit {
   ): Promise<void> {
     return this.thumbnailService.generateAndSaveThumbnail(file, options);
   }
-
-  /**
-   * 启动扫描补齐缺失缩略图（委托 ThumbnailService，保持公开 API 不变）。
-   */
-  async syncMissingThumbnails(): Promise<void> {
-    return this.thumbnailService.syncMissingThumbnails();
-  }
-
-  /**
-   * 删除本地缩略图文件（委托 ThumbnailService，保持公开 API 不变）。
-   */
-  deleteLocalThumbnail(file: File): Promise<void> {
-    return this.thumbnailService.deleteLocalThumbnail(file);
-  }
-
 
   /**
    * R5：已 error 文件在所有读取入口统一抛 410，避免各自复制错误文本与状态判定。
@@ -3883,10 +3861,6 @@ export class FileService implements OnModuleInit {
     });
 
     return { jobId: job.jobId, total: files.length, warning: '任务在内存中处理，进程重启会丢失' };
-  }
-
-  getUploadJob(jobId: string): UploadJob | undefined {
-    return this.uploadJobService.getJob(jobId);
   }
 
   /**

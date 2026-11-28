@@ -51,6 +51,7 @@ import { TagService } from '../tag/tag.service';
 import { MediaTicketService } from '../common/services/media-ticket.service';
 import { DownloadTaskService } from './download-task.service';
 import { FileCacheService } from './file-cache.service';
+import { UploadJobService } from './upload-job.service';
 import { CreateDownloadTaskDto } from './dto/create-download-task.dto';
 import { PublicMediaAdmissionService } from '../common/services/public-media-admission.service';
 
@@ -100,6 +101,7 @@ export class FileController {
     private downloadTasks: DownloadTaskService,
     private fileCacheService: FileCacheService,
     private readonly publicMediaAdmission: PublicMediaAdmissionService,
+    private readonly uploadJobService: UploadJobService,
   ) {}
 
   /**
@@ -240,7 +242,7 @@ export class FileController {
   @Get('upload-status/:jobId')
   @UseGuards(JwtOrApiKeyAuthGuard)
   async getUploadStatus(@Param('jobId') jobId: string, @CurrentUser() user: User) {
-    const job = this.fileService.getUploadJob(jobId);
+    const job = this.uploadJobService.getJob(jobId);
     if (!job) {
       throw new BadRequestException('任务不存在或已过期');
     }

@@ -251,7 +251,7 @@ describe.each(dialects)('security review regressions / %s', (dialect) => {
       deleteScheduledAt: new Date(Date.now() + 3600000), gdriveCacheObjectRef: 'cached' });
     const files = Object.assign(Object.create(services.FileService.prototype), {
       fileRepository: repo, namespaceService: new services.DirectoryNamespaceService(db), auditService: audit,
-      fileCacheService: { invalidate: jest.fn() }, deleteLocalThumbnail: jest.fn(),
+      fileCacheService: { invalidate: jest.fn() }, thumbnailService: { deleteLocalThumbnail: jest.fn() },
       cleanupGDriveCacheObject: jest.fn(), cleanupNonTelegramObject: jest.fn(),
     });
     const transaction = repo.manager.transaction.bind(repo.manager);
