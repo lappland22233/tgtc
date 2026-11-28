@@ -41,6 +41,7 @@ function makeHarness(fixture: {
       builder.where = jest.fn(() => builder);
       builder.andWhere = jest.fn(() => builder);
       builder.take = jest.fn(() => builder);
+      builder.orderBy = jest.fn(() => builder);
       builder.getMany = jest.fn(async () => pending);
       return builder;
     }),

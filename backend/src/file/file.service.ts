@@ -2472,75 +2472,88 @@ export class FileService implements OnModuleInit {
   private async sweepDeletedFolders(now: Date): Promise<number> {
     const repo = this.folderRepository;
     const batchSize = 100;
+    const pageSize = batchSize * 10;
+    // B-21：此前单轮只取 1000 条且无游标续扫，批量删除 >1000 个目录后
+    // 物理清理要等下一次小时级调度，积压时延迟线性放大。
+    // 游标按 id 前进（被跳过的非空目录不会挡住后续页），并设轮次护栏避免无限占用调度。
+    const MAX_ROUNDS = 20;
     let deleted = 0;
+    let cursor: string | null = null;
 
-    const pending = await repo.createQueryBuilder('folder')
-      .where('folder.isDeleted = true')
-      .andWhere('folder.deleteScheduledAt IS NOT NULL')
-      .andWhere('folder.deleteScheduledAt <= :now', { now })
-      .take(batchSize * 10)
-      .getMany();
-    if (pending.length === 0) return 0;
+    for (let round = 0; round < MAX_ROUNDS; round++) {
+      const query = repo.createQueryBuilder('folder')
+        .where('folder.isDeleted = true')
+        .andWhere('folder.deleteScheduledAt IS NOT NULL')
+        .andWhere('folder.deleteScheduledAt <= :now', { now })
+        .orderBy('folder.id', 'ASC')
+        .take(pageSize);
+      if (cursor) query.andWhere('folder.id > :cursor', { cursor });
+      const pending = await query.getMany();
+      if (pending.length === 0) break;
+      cursor = pending[pending.length - 1].id;
 
-    // 计算深度：沿 parentId 上溯，只用本批数据 + 逐条查询兜底
-    const depthOf = async (folder: Folder): Promise<number> => {
-      let depth = 0;
-      let parentId = folder.parentId;
-      const guard = new Set<string>();
-      while (parentId && depth < 64 && !guard.has(parentId)) {
-        guard.add(parentId);
-        const parent = await repo.findOne({ where: { id: parentId }, select: { id: true, parentId: true } });
-        if (!parent) break;
-        parentId = parent.parentId;
-        depth++;
-      }
-      return depth;
-    };
+      // 计算深度：沿 parentId 上溯，只用本批数据 + 逐条查询兜底
+      const depthOf = async (folder: Folder): Promise<number> => {
+        let depth = 0;
+        let parentId = folder.parentId;
+        const guard = new Set<string>();
+        while (parentId && depth < 64 && !guard.has(parentId)) {
+          guard.add(parentId);
+          const parent = await repo.findOne({ where: { id: parentId }, select: { id: true, parentId: true } });
+          if (!parent) break;
+          parentId = parent.parentId;
+          depth++;
+        }
+        return depth;
+      };
 
-    const ranked: Array<{ folder: Folder; depth: number }> = [];
-    for (const folder of pending) ranked.push({ folder, depth: await depthOf(folder) });
-    ranked.sort((a, b) => b.depth - a.depth);
+      const ranked: Array<{ folder: Folder; depth: number }> = [];
+      for (const folder of pending) ranked.push({ folder, depth: await depthOf(folder) });
+      ranked.sort((a, b) => b.depth - a.depth);
 
-    for (const { folder } of ranked) {
-      const folderId = folder.id;
-      try {
-        const removed = await repo.manager.transaction(async (manager) => {
-          const folders = manager.getRepository(Folder);
-          const locked = await folders.findOne({
-            where: { id: folderId },
-            ...databasePessimisticWriteLock(),
+      for (const { folder } of ranked) {
+        const folderId = folder.id;
+        try {
+          const removed = await repo.manager.transaction(async (manager) => {
+            const folders = manager.getRepository(Folder);
+            const locked = await folders.findOne({
+              where: { id: folderId },
+              ...databasePessimisticWriteLock(),
+            });
+            if (!locked || !locked.isDeleted || !locked.deleteScheduledAt) return false;
+            if (locked.deleteScheduledAt > now) return false;
+
+            // 子目录：不论是否到期、是否已删除，只要还有就直接跳过。
+            // 数据库的 CASCADE 会连带删除它们，包括尚未到期的。
+            const childFolders = await folders.count({ where: { parentId: folderId } });
+            if (childFolders > 0) return false;
+
+            // 文件：files.folderId 是 SET NULL，删目录会把未到期文件静默移到根目录。
+            const childFiles = await manager.getRepository(File).count({ where: { folderId } });
+            if (childFiles > 0) return false;
+
+            await this.namespaceService.remove(manager, { entityType: 'folder', entityId: folderId });
+            await folders.remove(locked);
+            return true;
           });
-          if (!locked || !locked.isDeleted || !locked.deleteScheduledAt) return false;
-          if (locked.deleteScheduledAt > now) return false;
-
-          // 子目录：不论是否到期、是否已删除，只要还有就直接跳过。
-          // 数据库的 CASCADE 会连带删除它们，包括尚未到期的。
-          const childFolders = await folders.count({ where: { parentId: folderId } });
-          if (childFolders > 0) return false;
-
-          // 文件：files.folderId 是 SET NULL，删目录会把未到期文件静默移到根目录。
-          const childFiles = await manager.getRepository(File).count({ where: { folderId } });
-          if (childFiles > 0) return false;
-
-          await this.namespaceService.remove(manager, { entityType: 'folder', entityId: folderId });
-          await folders.remove(locked);
-          return true;
-        });
-        if (!removed) continue;
-        deleted++;
-        await this.auditService.logAwait({
-          action: 'folder_delete',
-          userId: folder.ownerId,
-          resourceType: 'folder',
-          resourceId: folderId,
-          metadata: { name: folder.name, source: 'scheduled_sweep', scheduledAt: folder.deleteScheduledAt?.toISOString() },
-        }).catch(() => undefined);
-        this.logger.log(`已永久删除文件夹数据库记录: ${folder.name} (${folderId})`);
-      } catch (error: unknown) {
-        this.logger.warn(
-          `清除文件夹记录失败，保留记录待下次重试: ${folder.name} (${folderId}), 错误: ${(error as Error).message}`,
-        );
+          if (!removed) continue;
+          deleted++;
+          await this.auditService.logAwait({
+            action: 'folder_delete',
+            userId: folder.ownerId,
+            resourceType: 'folder',
+            resourceId: folderId,
+            metadata: { name: folder.name, source: 'scheduled_sweep', scheduledAt: folder.deleteScheduledAt?.toISOString() },
+          }).catch(() => undefined);
+          this.logger.log(`已永久删除文件夹数据库记录: ${folder.name} (${folderId})`);
+        } catch (error: unknown) {
+          this.logger.warn(
+            `清除文件夹记录失败，保留记录待下次重试: ${folder.name} (${folderId}), 错误: ${(error as Error).message}`,
+          );
+        }
       }
+
+      if (pending.length < pageSize) break;
     }
     return deleted;
   }
