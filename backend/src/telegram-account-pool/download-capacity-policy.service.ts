@@ -2,12 +2,7 @@ import { Injectable, Logger, OnApplicationShutdown } from '@nestjs/common';
 import { OnEvent } from '@nestjs/event-emitter';
 import { AuditService } from '../common/services/audit.service';
 import { ConfigCacheService } from '../common/services/config-cache.service';
-import {
-  DOWNLOAD_CONFIG_DEFAULTS,
-  DOWNLOAD_CONFIG_KEYS,
-  normalizeBooleanFlag,
-  normalizeDownloadConfigNumber,
-} from '../file/download-resource-coordinator.service';
+import { DOWNLOAD_CONFIG_DEFAULTS, DOWNLOAD_CONFIG_KEYS, normalizeBooleanFlag, normalizeDownloadConfigNumber } from '../common/constants/download-config';
 import { FileCopyService } from './file-copy.service';
 import { ReplicaTargetResolver } from './replica-target.resolver';
 import {

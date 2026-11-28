@@ -1,15 +1,5 @@
-import {
-  DOWNLOAD_CONFIG_KEYS,
-  DOWNLOAD_ERROR_CODES,
-  DOWNLOAD_RESOURCE_DEFAULTS,
-  DownloadResourceCoordinatorService,
-  normalizeBooleanFlag,
-  normalizeDownloadConfigNumber,
-  normalizeUpstreamQueuePolicy,
-  upstreamWeightForSize,
-  type DownloadReservation,
-  type DownloadUpstreamLease,
-} from './download-resource-coordinator.service';
+import { DOWNLOAD_ERROR_CODES, DOWNLOAD_RESOURCE_DEFAULTS, DownloadResourceCoordinatorService, upstreamWeightForSize, type DownloadReservation, type DownloadUpstreamLease } from './download-resource-coordinator.service';
+import { DOWNLOAD_CONFIG_KEYS, normalizeBooleanFlag, normalizeDownloadConfigNumber, normalizeUpstreamQueuePolicy } from '../common/constants/download-config';
 
 // 生产代码通过 require('fs').statfsSync 读取，Jest 中与 import 指向同一 module 对象，
 // 因此用 require('fs') 来 spy。

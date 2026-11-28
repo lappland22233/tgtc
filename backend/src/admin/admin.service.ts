@@ -12,16 +12,7 @@ import { AccessLog } from '../common/entities/access-log.entity';
 import { AuditLog } from '../common/entities/audit-log.entity';
 import { FileService } from '../file/file.service';
 import { FileCacheService } from '../file/file-cache.service';
-import {
-  DOWNLOAD_CONFIG_DEFAULTS,
-  DOWNLOAD_CONFIG_KEYS,
-  DOWNLOAD_CONFIG_RANGES,
-  normalizeBooleanFlag,
-  normalizeDownloadConfigNumber,
-  normalizeUpstreamQueuePolicy,
-  UPSTREAM_QUEUE_POLICIES,
-  type UpstreamQueuePolicy,
-} from '../file/download-resource-coordinator.service';
+import { DOWNLOAD_CONFIG_DEFAULTS, DOWNLOAD_CONFIG_KEYS, DOWNLOAD_CONFIG_RANGES, normalizeBooleanFlag, normalizeDownloadConfigNumber, normalizeUpstreamQueuePolicy, UPSTREAM_QUEUE_POLICIES, type UpstreamQueuePolicy } from '../common/constants/download-config';
 import { MailerService } from '../mailer/mailer.service';
 import { ConfigCacheService } from '../common/services/config-cache.service';
 import { AuditService } from '../common/services/audit.service';

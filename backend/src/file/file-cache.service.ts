@@ -9,19 +9,8 @@ import * as path from 'path';
 import { ConfigCacheService } from '../common/services/config-cache.service';
 import { CacheDiskManager } from './cache-disk-manager';
 import { CacheSessionCoordinator, type CacheBuildSession, type SessionResourceLease, type SpoolSession } from './cache-session-coordinator';
-import {
-  DOWNLOAD_CONFIG_DEFAULTS,
-  DOWNLOAD_CONFIG_KEYS,
-  DOWNLOAD_ERROR_CODES,
-  DOWNLOAD_RESOURCE_DEFAULTS,
-  DownloadResourceCoordinatorService,
-  DownloadResourceException,
-  normalizeDownloadConfigNumber,
-  normalizeUpstreamQueuePolicy,
-  type DownloadReservation,
-  type DownloadResourceSnapshot,
-  type UpstreamQueuePolicy,
-} from './download-resource-coordinator.service';
+import { DOWNLOAD_ERROR_CODES, DOWNLOAD_RESOURCE_DEFAULTS, DownloadResourceCoordinatorService, DownloadResourceException, type DownloadReservation, type DownloadResourceSnapshot } from './download-resource-coordinator.service';
+import { DOWNLOAD_CONFIG_DEFAULTS, DOWNLOAD_CONFIG_KEYS, normalizeDownloadConfigNumber, normalizeUpstreamQueuePolicy, type UpstreamQueuePolicy } from '../common/constants/download-config';
 
 export const CACHE_CONFIG_KEYS = {
   MAX_SIZE_GB: 'FILE_CACHE_MAX_SIZE_GB',

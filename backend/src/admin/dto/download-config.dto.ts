@@ -1,6 +1,6 @@
 import { IsBoolean, IsIn, IsInt, IsNumber, IsOptional, Max, Min } from 'class-validator';
 import { Type } from 'class-transformer';
-import { UPSTREAM_QUEUE_POLICIES, type UpstreamQueuePolicy } from '../../file/download-resource-coordinator.service';
+import { UPSTREAM_QUEUE_POLICIES, type UpstreamQueuePolicy } from '../../common/constants/download-config';
 
 /**
  * 下载资源调度配置（FILE_DOWNLOAD_*）。
