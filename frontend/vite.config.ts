@@ -32,10 +32,14 @@ export default defineConfig(({ mode }) => {
         include: ['src/**/*.{js,jsx,ts,tsx,mjs,mts,cjs,cts,vue}', 'scripts/**/*.mjs', 'public/**/*.js'],
         exclude: ['**/*.{spec,test}.*', '**/*.d.ts'],
         reporter: ['text', 'lcov', 'json-summary'],
-        // Vitest 5 AST coverage of the 418 tests at 1e17ac1, across all 127 source files.
-        // Reference counts: 5,118/13,084 statements, 3,438/9,398 branches,
-        // 1,127/3,376 functions and 4,770/11,440 lines.
-        thresholds: { statements: 40, branches: 36.58, functions: 33.38, lines: 41.69 },
+        // B-15：整数棘轮，取代钉死在历史 commit 1e17ac1 的小数水位。
+        // 基线实测（2026-11-28，npx vitest run --coverage，52 文件 / 449 用例）：
+        //   全局 statements 45.31 / branches 42.32 / functions 39.69 / lines 47.99
+        //   src/api 68.99 / 63.23 / 63.82 / 68.25
+        //   src/composables 60.13 / 46.56 / 61.41 / 64.43
+        //   src/stores 57.30 / 46.02 / 60.53 / 61.30
+        // 阈值取略低于实测的整数，补测后按同一口径上调；不要凭感觉钉数字。
+        thresholds: { statements: 44, branches: 41, functions: 38, lines: 46 },
       },
     },
     plugins: [

@@ -24,6 +24,15 @@ const accessKeyId = process.env.S3_E2E_ACCESS_KEY_ID;
 const secretAccessKey = process.env.S3_E2E_SECRET_ACCESS_KEY;
 const enabled = Boolean(endpoint && bucket && accessKeyId && secretAccessKey);
 
+// B-12：CI 显式要求本套件必须真跑。缺少端点配置时直接失败而不是静默 skip，
+// 否则「CI 绿」会掩盖 S3 驱动回归（历史上本套件在 CI 中永远 skip）。
+if (!enabled && process.env.S3_E2E_REQUIRED === '1') {
+  throw new Error(
+    'S3_E2E_REQUIRED=1 但 S3_E2E_ENDPOINT/BUCKET/ACCESS_KEY_ID/SECRET_ACCESS_KEY 未全部配置：'
+    + '拒绝静默跳过真实端点 e2e',
+  );
+}
+
 const describeE2E = enabled ? describe : describe.skip;
 if (!enabled) {
   // eslint-disable-next-line no-console
